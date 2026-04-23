@@ -107,13 +107,41 @@ func TestServeAddrOverride(t *testing.T) {
 	}
 }
 
-func TestPairStubReturns1(t *testing.T) {
-	_, stderr, code := runCapture(t, "pair", "--name", "test")
-	if code != 1 {
-		t.Errorf("pair stub exit code = %d, want 1", code)
+func TestPairMintsTokenAndReturns0(t *testing.T) {
+	cfgPath := writeValidConfig(t)
+	stdout, stderr, code := runCapture(t, "pair", "--config", cfgPath, "--name", "iPhone 15 Pro")
+	if code != 0 {
+		t.Fatalf("pair exit code = %d, stderr=%q", code, stderr)
 	}
-	if !strings.Contains(stderr, "not yet implemented") {
-		t.Errorf("pair stub stderr missing marker: %q", stderr)
+	if !strings.Contains(stdout, "Paired successfully.") {
+		t.Errorf("pair stdout missing success marker: %q", stdout)
+	}
+	if !strings.Contains(stdout, "iPhone 15 Pro") {
+		t.Errorf("pair stdout missing device name: %q", stdout)
+	}
+	if !strings.Contains(stdout, "Bearer token") {
+		t.Errorf("pair stdout missing token label: %q", stdout)
+	}
+}
+
+func TestPairRejectsMissingName(t *testing.T) {
+	cfgPath := writeValidConfig(t)
+	_, stderr, code := runCapture(t, "pair", "--config", cfgPath)
+	if code != 2 {
+		t.Errorf("pair --name missing exit code = %d, want 2", code)
+	}
+	if !strings.Contains(stderr, "--name is required") {
+		t.Errorf("stderr = %q", stderr)
+	}
+}
+
+func TestPairMissingConfigReturns2(t *testing.T) {
+	_, stderr, code := runCapture(t, "pair", "--name", "foo", "--config", "/nonexistent/bridge.yaml")
+	if code != 2 {
+		t.Errorf("pair bad-config exit code = %d, want 2", code)
+	}
+	if !strings.Contains(stderr, "config load failed") {
+		t.Errorf("stderr = %q", stderr)
 	}
 }
 

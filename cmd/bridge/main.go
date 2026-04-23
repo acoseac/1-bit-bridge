@@ -13,7 +13,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
+	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 )
 
@@ -95,12 +97,36 @@ func serveCmd(args []string, stdout, stderr io.Writer) int {
 func pairCmd(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("pair", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	configPath := fs.String("config", "bridge.yaml", "path to config file")
 	name := fs.String("name", "", "client name (e.g. \"iPhone 15 Pro\")")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	fmt.Fprintf(stderr, "pair: not yet implemented (name=%s)\n", *name)
-	return 1
+	if *name == "" {
+		fmt.Fprintln(stderr, "pair: --name is required")
+		return 2
+	}
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "config load failed: %v\n", err)
+		return 2
+	}
+	store, err := auth.OpenStore(filepath.Join(cfg.DataDir, "tokens.json"))
+	if err != nil {
+		fmt.Fprintf(stderr, "open token store: %v\n", err)
+		return 1
+	}
+	raw, tok, err := store.Mint(*name)
+	if err != nil {
+		fmt.Fprintf(stderr, "mint token: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(stdout, "Paired successfully.")
+	fmt.Fprintf(stdout, "  Device: %s\n", tok.Name)
+	fmt.Fprintf(stdout, "  ID:     %s\n", tok.ID)
+	fmt.Fprintf(stdout, "\nBearer token (copy this into the 1-bit iOS app; it won't be shown again):\n")
+	fmt.Fprintf(stdout, "  %s\n", raw)
+	return 0
 }
 
 func scanCmd(args []string, stdout, stderr io.Writer) int {
