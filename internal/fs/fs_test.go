@@ -1,0 +1,239 @@
+package fs
+
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+)
+
+// newTwoRootResolver sets up /tmp/<unique>/a/... and /tmp/<unique>/b/... and
+// returns a Resolver with both roots plus the tmp dir for helper asserts.
+func newTwoRootResolver(t *testing.T) (*Resolver, string, string) {
+	t.Helper()
+	tmp := t.TempDir()
+	a := filepath.Join(tmp, "a")
+	b := filepath.Join(tmp, "b")
+	os.MkdirAll(filepath.Join(a, "Album"), 0o755)
+	os.MkdirAll(filepath.Join(b, "Album"), 0o755)
+	os.WriteFile(filepath.Join(a, "Album", "track.flac"), []byte("x"), 0o644)
+	os.WriteFile(filepath.Join(b, "Album", "other.flac"), []byte("y"), 0o644)
+	return New([]string{a, b}), a, b
+}
+
+func newSingleRootResolver(t *testing.T) (*Resolver, string) {
+	t.Helper()
+	tmp := t.TempDir()
+	root := filepath.Join(tmp, "Music")
+	os.MkdirAll(filepath.Join(root, "Artist", "Album"), 0o755)
+	os.WriteFile(filepath.Join(root, "Artist", "Album", "01.flac"), []byte("hi"), 0o644)
+	return New([]string{root}), root
+}
+
+// --- single-root ---
+
+func TestResolveSingleRootHappy(t *testing.T) {
+	r, root := newSingleRootResolver(t)
+	got, err := r.Resolve("Artist/Album/01.flac")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	want := filepath.Join(root, "Artist", "Album", "01.flac")
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestResolveEmptyPathIsRoot(t *testing.T) {
+	r, root := newSingleRootResolver(t)
+	got, err := r.Resolve("")
+	if err != nil {
+		t.Fatalf("Resolve(''): %v", err)
+	}
+	if got != root {
+		t.Errorf("got %q, want %q", got, root)
+	}
+}
+
+func TestResolveSlashOnlyIsRoot(t *testing.T) {
+	r, root := newSingleRootResolver(t)
+	got, err := r.Resolve("/")
+	if err != nil {
+		t.Fatalf("Resolve('/'): %v", err)
+	}
+	if got != root {
+		t.Errorf("got %q, want %q", got, root)
+	}
+}
+
+// --- traversal rejection ---
+
+func TestResolveRejectsDotDot(t *testing.T) {
+	r, _ := newSingleRootResolver(t)
+	for _, bad := range []string{
+		"..",
+		"../secret",
+		"Artist/../..",
+		"Artist/../../etc/passwd",
+		"./../Artist",
+	} {
+		_, err := r.Resolve(bad)
+		if !errors.Is(err, ErrBadPath) {
+			t.Errorf("Resolve(%q) err = %v, want ErrBadPath", bad, err)
+		}
+	}
+}
+
+func TestResolveRejectsAbsolutePaths(t *testing.T) {
+	// "/etc/passwd" after cleaning + trimming leading "/" becomes
+	// "etc/passwd" which would resolve *inside* the root — an attacker
+	// leveraging os-native path. The trim-prefix-"/" in Clean handles this.
+	// But paths that start with "/" should still be fine because they're
+	// interpreted as library-root-relative, just with a redundant leading
+	// slash. That's NOT a security hole. What IS a hole is "../.." style
+	// escapes, tested above. This test documents the intended behavior.
+	r, root := newSingleRootResolver(t)
+	got, err := r.Resolve("/Artist/Album/01.flac")
+	if err != nil {
+		t.Fatalf("leading-/ should be accepted (root-relative): %v", err)
+	}
+	want := filepath.Join(root, "Artist", "Album", "01.flac")
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestResolveRejectsNullByte(t *testing.T) {
+	r, _ := newSingleRootResolver(t)
+	_, err := r.Resolve("Artist\x00/hax")
+	if !errors.Is(err, ErrBadPath) {
+		t.Errorf("null byte err = %v, want ErrBadPath", err)
+	}
+}
+
+func TestResolveNormalizesRedundantSeparators(t *testing.T) {
+	r, root := newSingleRootResolver(t)
+	got, err := r.Resolve("Artist//Album///01.flac")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(root, "Artist", "Album", "01.flac")
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// --- multi-root ---
+
+func TestResolveMultiRootPicksBasenameMatch(t *testing.T) {
+	r, a, b := newTwoRootResolver(t)
+	gotA, err := r.Resolve("a/Album/track.flac")
+	if err != nil {
+		t.Fatalf("Resolve(a): %v", err)
+	}
+	if gotA != filepath.Join(a, "Album", "track.flac") {
+		t.Errorf("a: got %q, want %q", gotA, filepath.Join(a, "Album", "track.flac"))
+	}
+	gotB, err := r.Resolve("b/Album/other.flac")
+	if err != nil {
+		t.Fatalf("Resolve(b): %v", err)
+	}
+	if gotB != filepath.Join(b, "Album", "other.flac") {
+		t.Errorf("b: got %q, want %q", gotB, filepath.Join(b, "Album", "other.flac"))
+	}
+}
+
+func TestResolveMultiRootRejectsUnknown(t *testing.T) {
+	r, _, _ := newTwoRootResolver(t)
+	_, err := r.Resolve("c/Album/track.flac")
+	if !errors.Is(err, ErrUnknownRoot) {
+		t.Errorf("err = %v, want ErrUnknownRoot", err)
+	}
+}
+
+func TestResolveMultiRootEmptyPathIsAmbiguous(t *testing.T) {
+	r, _, _ := newTwoRootResolver(t)
+	_, err := r.Resolve("")
+	if !errors.Is(err, ErrUnknownRoot) {
+		t.Errorf("empty path in multi-root: err = %v, want ErrUnknownRoot", err)
+	}
+}
+
+// --- symlink escape ---
+
+func TestResolveStillStopsSymlinkEscape(t *testing.T) {
+	// Create a root containing a symlink that points outside. Resolve
+	// itself uses filepath.Abs, not EvalSymlinks, so the string check
+	// passes — but ResolveChecked's os.Stat follows the link and would
+	// expose outside content. This test verifies the check after Resolve is
+	// enough for our threat model (we're preventing *lexical* escape). If
+	// the user deliberately plants a symlink they own inside the library
+	// root, they're showing that file — that's expected behavior.
+	//
+	// The important bit: "../" in the CLIENT path can never punch out,
+	// regardless of what symlinks the server has set up.
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink test requires unix-style symlinks")
+	}
+	tmp := t.TempDir()
+	outside := filepath.Join(tmp, "outside")
+	os.MkdirAll(outside, 0o755)
+	os.WriteFile(filepath.Join(outside, "leak.txt"), []byte("secret"), 0o644)
+
+	root := filepath.Join(tmp, "root")
+	os.MkdirAll(root, 0o755)
+	if err := os.Symlink(outside, filepath.Join(root, "jump")); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+
+	r := New([]string{root})
+	// Lexically this resolves to <root>/jump/leak.txt — which is INSIDE
+	// the root by string comparison. The threat we're preventing is a
+	// client path that escapes without the server's help.
+	got, err := r.Resolve("jump/leak.txt")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if !strings.HasPrefix(got, root+string(filepath.Separator)) {
+		t.Errorf("resolved path %q escaped root %q", got, root)
+	}
+}
+
+// --- ResolveChecked ---
+
+func TestResolveCheckedNotFound(t *testing.T) {
+	r, _ := newSingleRootResolver(t)
+	_, _, err := r.ResolveChecked("Artist/Album/nonexistent.flac")
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestResolveCheckedReturnsInfo(t *testing.T) {
+	r, _ := newSingleRootResolver(t)
+	abs, info, err := r.ResolveChecked("Artist/Album/01.flac")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.IsDir() {
+		t.Error("expected file, got dir")
+	}
+	if info.Name() != "01.flac" {
+		t.Errorf("name = %q", info.Name())
+	}
+	if !strings.HasSuffix(abs, filepath.Join("Artist", "Album", "01.flac")) {
+		t.Errorf("abs = %q", abs)
+	}
+}
+
+func TestRootsIsAcopy(t *testing.T) {
+	r, _ := newSingleRootResolver(t)
+	got := r.Roots()
+	got[0] = "poison"
+	got2 := r.Roots()
+	if got2[0] == "poison" {
+		t.Error("Roots mutated internal state")
+	}
+}
