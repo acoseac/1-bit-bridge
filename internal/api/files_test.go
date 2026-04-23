@@ -230,8 +230,8 @@ func TestReadRequiresRangeHeader(t *testing.T) {
 	hs, tok, _ := fileFixture(t)
 	resp := authGetRange(t, hs, "/v1/read?path=Artist/Album/01%20Track.flac", tok, "")
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusRequestedRangeNotSatisfiable {
-		t.Errorf("status = %d, want 416", resp.StatusCode)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
 	}
 	var er ErrorResponse
 	json.NewDecoder(resp.Body).Decode(&er)
