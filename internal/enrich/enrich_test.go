@@ -44,6 +44,52 @@ func TestMusicBrainzSearchReleaseHappyPath(t *testing.T) {
 	}
 }
 
+// TestMusicBrainzDecodeRealResponseShape locks in the wire shape the
+// public MB API actually sends — specifically, `release-group` is an
+// OBJECT ({id, title, primary-type}), not a bare string. The initial
+// implementation had `ReleaseGroupID string` which silently failed
+// every search against prod. This fixture is a trimmed version of a
+// real live search response; if MB changes the shape in a
+// backward-incompatible way, this test fails loudly instead of
+// silently breaking every enrichment in the field.
+func TestMusicBrainzDecodeRealResponseShape(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{
+			"created": "2024-01-01T00:00:00.000Z",
+			"count": 1,
+			"offset": 0,
+			"releases": [
+				{
+					"id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+					"score": 100,
+					"title": "Blue Train",
+					"status": "Official",
+					"artist-credit": [
+						{"name": "John Coltrane", "artist": {"id": "bbbb", "name": "John Coltrane"}}
+					],
+					"release-group": {
+						"id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+						"title": "Blue Train",
+						"primary-type": "Album"
+					},
+					"country": "US",
+					"date": "1958",
+					"track-count": 5
+				}
+			]
+		}`)
+	}))
+	defer srv.Close()
+	c := NewMusicBrainzClient(srv.URL, "test", nil)
+	res, err := c.SearchRelease(context.Background(), "John Coltrane", "Blue Train")
+	if err != nil {
+		t.Fatalf("decode real MB response: %v", err)
+	}
+	if res == nil || res.MBID != "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" {
+		t.Errorf("got %+v", res)
+	}
+}
+
 func TestMusicBrainzSearchReleaseNoMatch(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `{"releases": []}`)
