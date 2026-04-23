@@ -115,6 +115,14 @@ func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		return 2
 	}
 	if *addrOverride != "" {
+		// Validate the override the same way config.Validate validates
+		// ListenAddress — otherwise an invalid value like "notaport"
+		// slips through and only surfaces much later as a net.Listen
+		// failure with an opaque error.
+		if _, _, err := net.SplitHostPort(*addrOverride); err != nil {
+			fmt.Fprintf(stderr, "invalid --addr %q: %v\n", *addrOverride, err)
+			return 2
+		}
 		cfg.ListenAddress = *addrOverride
 	}
 
@@ -136,6 +144,13 @@ func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		fmt.Fprintf(stderr, "open token store: %v\n", err)
 		return 1
 	}
+	defer func() {
+		// Flush any LastUsedAt updates debounced by Validate so a
+		// just-before-exit hit doesn't lose its timestamp.
+		if err := store.FlushLastUsed(); err != nil {
+			fmt.Fprintf(stderr, "auth: flush LastUsedAt on shutdown: %v\n", err)
+		}
+	}()
 
 	manifestStore, err := manifest.OpenStore(manifest.DefaultDBPath(cfg.DataDir))
 	if err != nil {
