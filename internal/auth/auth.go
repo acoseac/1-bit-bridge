@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -63,6 +64,10 @@ type Store struct {
 // not an error — the first Mint will create it.
 func OpenStore(path string) (*Store, error) {
 	s := &Store{path: path}
+	// reload requires s.mu per its contract; take it even though we are
+	// pre-publication so the locking discipline is consistent.
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err := s.reload(); err != nil {
 		return nil, err
 	}
@@ -123,7 +128,9 @@ func (s *Store) reloadIfStale() error {
 // persist writes the current tokens to disk atomically (tmp + rename).
 // Caller must hold mu.
 func (s *Store) persist() error {
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
+	// 0o700 on the parent dir matches the 0o600 file mode — keeps the
+	// whole token store inaccessible on multi-user hosts.
+	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
 		return fmt.Errorf("mkdir token store: %w", err)
 	}
 	data, err := json.MarshalIndent(s.tokens, "", "  ")
@@ -131,6 +138,8 @@ func (s *Store) persist() error {
 		return err
 	}
 	data = append(data, '\n')
+	// os.CreateTemp creates the file with mode 0o600 — no explicit Chmod
+	// is needed and a redundant one would just add a syscall.
 	tmp, err := os.CreateTemp(filepath.Dir(s.path), ".tokens-*.json")
 	if err != nil {
 		return fmt.Errorf("temp file: %w", err)
@@ -144,10 +153,6 @@ func (s *Store) persist() error {
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		return fmt.Errorf("write tmp: %w", err)
-	}
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return fmt.Errorf("chmod tmp: %w", err)
 	}
 	if err := tmp.Sync(); err != nil {
 		tmp.Close()
@@ -208,9 +213,10 @@ func (s *Store) Mint(name string) (rawToken string, tok Token, err error) {
 // and true on a hit, a zero Token and false on miss. Uses constant-time hash
 // comparison.
 //
-// On a hit the caller may want to record usage — Validate updates
-// LastUsedAt in memory and persists lazily (best-effort; a persist failure
-// here is logged-only because the primary work, validation, succeeded).
+// On a hit Validate updates LastUsedAt in memory and persists via the same
+// atomic tmp+rename path as Mint. A persist failure is logged and ignored
+// because the primary work — validation — already succeeded; log visibility
+// is the fallback so silent disk issues don't go unnoticed.
 func (s *Store) Validate(rawToken string) (Token, bool) {
 	if rawToken == "" {
 		return Token{}, false
@@ -224,7 +230,9 @@ func (s *Store) Validate(rawToken string) (Token, bool) {
 	for i := range s.tokens {
 		if subtle.ConstantTimeCompare([]byte(s.tokens[i].Hash), []byte(hashHex)) == 1 {
 			s.tokens[i].LastUsedAt = time.Now().UTC()
-			_ = s.persist() // best-effort
+			if err := s.persist(); err != nil {
+				log.Printf("auth: persist LastUsedAt: %v", err)
+			}
 			return s.tokens[i], true
 		}
 	}

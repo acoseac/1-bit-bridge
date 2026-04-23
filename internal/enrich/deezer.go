@@ -24,6 +24,11 @@ type DeezerClient struct {
 	base      string
 	userAgent string
 	http      *http.Client
+	// allowedImageHosts suffix-matches on the Deezer image URL host.
+	// Production values (".dzcdn.net", ".deezer.com") are set by
+	// NewDeezerClient; tests may append their httptest host via
+	// SetAllowedImageHostsForTest.
+	allowedImageHosts []string
 }
 
 // NewDeezerClient constructs a client.
@@ -34,7 +39,19 @@ func NewDeezerClient(base, userAgent string, httpClient *http.Client) *DeezerCli
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 10 * time.Second}
 	}
-	return &DeezerClient{base: base, userAgent: userAgent, http: httpClient}
+	return &DeezerClient{
+		base:              base,
+		userAgent:         userAgent,
+		http:              httpClient,
+		allowedImageHosts: append([]string(nil), deezerAllowedHosts...),
+	}
+}
+
+// SetAllowedImageHostsForTest replaces the client's image-host allowlist.
+// Production code should never call this — it exists so httptest-backed
+// tests can let FetchImage reach 127.0.0.1.
+func (c *DeezerClient) SetAllowedImageHostsForTest(hosts []string) {
+	c.allowedImageHosts = append([]string(nil), hosts...)
 }
 
 // DeezerArtist is the subset of Deezer's artist shape we consume.
@@ -89,11 +106,28 @@ func (c *DeezerClient) SearchArtist(ctx context.Context, name string) (string, e
 	return match.PictureBig, nil
 }
 
+// maxDeezerImageBytes caps image downloads so a compromised CDN can't
+// exhaust memory. 20 MB comfortably holds a 1000x1000 JPEG.
+const maxDeezerImageBytes = 20 * 1024 * 1024
+
+// deezerAllowedHosts is the SSRF allowlist for FetchImage. The public
+// search API returns picture URLs under these suffixes (verified against
+// live /search/artist responses 2026-04); reject anything else to prevent
+// a crafted response pointing at cloud-metadata (169.254.169.254) or RFC1918.
+var deezerAllowedHosts = []string{".dzcdn.net", ".deezer.com"}
+
 // FetchImage downloads the JPEG at url (which must be a Deezer-hosted
-// picture URL returned by SearchArtist). Cap at 20 MB.
+// picture URL returned by SearchArtist). Cap at maxDeezerImageBytes.
 func (c *DeezerClient) FetchImage(ctx context.Context, u string) ([]byte, error) {
 	if u == "" {
 		return nil, errors.New("deezer: empty image URL")
+	}
+	parsed, err := url.Parse(u)
+	if err != nil {
+		return nil, fmt.Errorf("deezer: parse image URL: %w", err)
+	}
+	if !hostAllowed(parsed.Hostname(), c.allowedImageHosts) {
+		return nil, fmt.Errorf("deezer: refusing non-Deezer image host %q", parsed.Hostname())
 	}
 	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {
@@ -111,7 +145,28 @@ func (c *DeezerClient) FetchImage(ctx context.Context, u string) ([]byte, error)
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("deezer: image HTTP %d", resp.StatusCode)
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, 20*1024*1024))
+	// Read one byte past the cap so an over-sized body surfaces as an
+	// explicit error rather than silently truncating mid-JPEG.
+	buf, err := io.ReadAll(io.LimitReader(resp.Body, maxDeezerImageBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(buf) > maxDeezerImageBytes {
+		return nil, fmt.Errorf("deezer: image exceeds %d-byte limit", maxDeezerImageBytes)
+	}
+	return buf, nil
+}
+
+func hostAllowed(host string, allowed []string) bool {
+	host = strings.ToLower(host)
+	for _, suf := range allowed {
+		// Suffix entries beginning with "." match subdomains; a bare
+		// host also matches itself so tests can whitelist "127.0.0.1".
+		if strings.HasSuffix(host, suf) || host == strings.TrimPrefix(suf, ".") || host == suf {
+			return true
+		}
+	}
+	return false
 }
 
 // pickDeezerArtist chooses the best candidate. Exact-name match wins;

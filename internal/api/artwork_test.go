@@ -196,8 +196,8 @@ func TestArtistImageRejectsBadMBID(t *testing.T) {
 	hs, tok, _ := artistImageFixture(t, true)
 	resp := authedGET(t, hs.URL+"/v1/artist-image/not-a-uuid", tok)
 	defer resp.Body.Close()
-	if resp.StatusCode != 400 && resp.StatusCode != 404 {
-		t.Errorf("status = %d, want 400 or 404", resp.StatusCode)
+	if resp.StatusCode != 400 {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
 	}
 }
 

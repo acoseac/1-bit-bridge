@@ -222,17 +222,22 @@ func shouldSkipDir(name string) bool {
 }
 
 // RunPeriodic runs an initial scan, then rescans every interval until ctx
-// is done. Logs errors but never exits early on a scan failure.
+// is done. Logs errors but never exits early on a scan failure. Waits for
+// the initial scan goroutine before returning, so callers can safely Close
+// the Store after ctx cancellation without racing in-flight SQL.
 func (s *Scanner) RunPeriodic(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
 		interval = time.Hour
 	}
-	// Initial scan on startup.
+	var initial sync.WaitGroup
+	initial.Add(1)
 	go func() {
+		defer initial.Done()
 		if _, err := s.Scan(ctx); err != nil && ctx.Err() == nil {
 			log.Printf("scanner: initial scan: %v", err)
 		}
 	}()
+	defer initial.Wait()
 	// Periodic rescans.
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
