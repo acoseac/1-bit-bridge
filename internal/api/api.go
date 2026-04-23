@@ -14,9 +14,9 @@ package api
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -173,15 +173,16 @@ func libraryRootBasenames(roots []string) []string {
 // parsing the body.
 func protocolHeader(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Bridge-Protocol", fmt.Sprintf("%d", version.ProtocolVersion))
+		w.Header().Set("X-Bridge-Protocol", strconv.Itoa(version.ProtocolVersion))
 		next.ServeHTTP(w, r)
 	})
 }
 
 // authed wraps a handler so it only runs if the request carries a valid
-// bearer token. Unauthenticated requests return a 401 JSON error. The
-// matched Token is passed to the wrapped handler via the request context
-// so downstream handlers can log which client they're serving.
+// bearer token. Unauthenticated requests return a 401 JSON error. Matched
+// tokens are validated but not propagated to the wrapped handler — if a
+// future endpoint needs to know which client it's serving, thread the
+// Token through the request context here at that point.
 func (s *Server) authed(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		raw := extractBearer(r)

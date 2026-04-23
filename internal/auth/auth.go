@@ -49,15 +49,22 @@ type Token struct {
 	LastUsedAt time.Time `json:"lastUsedAt,omitempty"`
 }
 
+// lastUsedFlushInterval is the shortest interval between persist() calls
+// driven by LastUsedAt updates. A busy /v1/manifest poll loop otherwise
+// rewrites tokens.json on every request, which is gratuitous disk I/O
+// proportional to request rate.
+const lastUsedFlushInterval = 30 * time.Second
+
 // Store is an in-memory view over a JSON-backed token file. Safe for
 // concurrent use by readers (Validate) and writers (Mint / Revoke).
 type Store struct {
 	path string
 
-	mu      sync.Mutex
-	tokens  []Token
-	loaded  time.Time // mtime of tokens file when we last loaded
-	isEmpty bool      // tokens file didn't exist when we last looked
+	mu            sync.Mutex
+	tokens        []Token
+	loaded        time.Time // mtime of tokens file when we last loaded
+	isEmpty       bool      // tokens file didn't exist when we last looked
+	lastUsedFlush time.Time // last persist() driven by a LastUsedAt update
 }
 
 // OpenStore opens (or initializes an empty) store at path. Missing file is
@@ -213,10 +220,11 @@ func (s *Store) Mint(name string) (rawToken string, tok Token, err error) {
 // and true on a hit, a zero Token and false on miss. Uses constant-time hash
 // comparison.
 //
-// On a hit Validate updates LastUsedAt in memory and persists via the same
-// atomic tmp+rename path as Mint. A persist failure is logged and ignored
-// because the primary work — validation — already succeeded; log visibility
-// is the fallback so silent disk issues don't go unnoticed.
+// On a hit Validate updates LastUsedAt in memory and persists lazily —
+// at most once per lastUsedFlushInterval — so a busy request path
+// doesn't rewrite tokens.json on every hit. A persist failure is logged
+// and ignored because the primary work (validation) already succeeded;
+// log visibility ensures silent disk issues don't go unnoticed.
 func (s *Store) Validate(rawToken string) (Token, bool) {
 	if rawToken == "" {
 		return Token{}, false
@@ -229,14 +237,32 @@ func (s *Store) Validate(rawToken string) (Token, bool) {
 	_ = s.reloadIfStale() // best-effort
 	for i := range s.tokens {
 		if subtle.ConstantTimeCompare([]byte(s.tokens[i].Hash), []byte(hashHex)) == 1 {
-			s.tokens[i].LastUsedAt = time.Now().UTC()
-			if err := s.persist(); err != nil {
-				log.Printf("auth: persist LastUsedAt: %v", err)
+			now := time.Now().UTC()
+			s.tokens[i].LastUsedAt = now
+			if now.Sub(s.lastUsedFlush) >= lastUsedFlushInterval {
+				if err := s.persist(); err != nil {
+					log.Printf("auth: persist LastUsedAt: %v", err)
+				} else {
+					s.lastUsedFlush = now
+				}
 			}
 			return s.tokens[i], true
 		}
 	}
 	return Token{}, false
+}
+
+// FlushLastUsed forces a persist of any in-memory LastUsedAt updates
+// that the debounce in Validate has not yet written. Call on clean
+// shutdown so a just-before-exit validate doesn't lose its timestamp.
+func (s *Store) FlushLastUsed() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	err := s.persist()
+	if err == nil {
+		s.lastUsedFlush = time.Now().UTC()
+	}
+	return err
 }
 
 // List returns a copy of the stored tokens (hashes only — raw tokens cannot

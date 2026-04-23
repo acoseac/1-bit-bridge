@@ -299,6 +299,14 @@ func TestHealthOverTLSWithPinnedCert(t *testing.T) {
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: true,
 			VerifyConnection: func(state tls.ConnectionState) error {
+				// Defensive bounds check — matches the guarded access
+				// in cmd/bridge/main_test.go. A server-side TLS handshake
+				// always populates PeerCertificates, but keeping the two
+				// call sites symmetric avoids a latent panic if the
+				// handshake behavior ever changes.
+				if len(state.PeerCertificates) == 0 {
+					return nil
+				}
 				peerFP = servertls.FingerprintFromDER(state.PeerCertificates[0].Raw)
 				return nil
 			},

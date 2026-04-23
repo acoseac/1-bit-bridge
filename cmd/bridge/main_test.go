@@ -218,6 +218,17 @@ func TestServeMissingConfigReturns2(t *testing.T) {
 	}
 }
 
+func TestServeBadAddrOverrideReturns2(t *testing.T) {
+	cfgPath := writeValidConfig(t)
+	_, stderr, code := runCapture(t, "serve", "--config", cfgPath, "--addr", "notaport")
+	if code != 2 {
+		t.Errorf("serve bad --addr exit code = %d, want 2", code)
+	}
+	if !strings.Contains(stderr, "invalid --addr") {
+		t.Errorf("serve bad --addr stderr: %q", stderr)
+	}
+}
+
 func TestPairMintsTokenAndReturns0(t *testing.T) {
 	cfgPath := writeValidConfig(t)
 	stdout, stderr, code := runCapture(t, "pair", "--config", cfgPath, "--name", "iPhone 15 Pro")

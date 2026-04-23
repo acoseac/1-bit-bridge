@@ -186,7 +186,10 @@ func pickBestRelease(candidates []releaseCandidate, album, artist string) *relea
 	var out []scored
 	for i := range candidates {
 		c := &candidates[i]
-		if c.Score < 70 {
+		// Matches the >=80 contract in the SearchRelease docstring.
+		// Lower scores tend to be artist-collision false positives
+		// (e.g. a Dire Straits album mis-attributed to a tribute band).
+		if c.Score < 80 {
 			continue
 		}
 		if !caseInsensitiveMatch(c.Title, album) {

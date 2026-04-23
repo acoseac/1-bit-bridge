@@ -114,6 +114,52 @@ func TestValidateUpdatesLastUsedAt(t *testing.T) {
 	}
 }
 
+func TestValidateDebouncesLastUsedPersist(t *testing.T) {
+	// Rapid Validate hits after the first one must NOT rewrite
+	// tokens.json — the debounce window is lastUsedFlushInterval.
+	// A subsequent FlushLastUsed persists the pending timestamp on
+	// clean shutdown.
+	s, path := newTmpStore(t)
+	raw, _, _ := s.Mint("Mac")
+
+	// Prime the debounce with a first Validate — this one persists
+	// because lastUsedFlush is the zero value.
+	if _, ok := s.Validate(raw); !ok {
+		t.Fatal("first validate miss")
+	}
+	mtAfterFirst := mustMtime(t, path)
+
+	// Rapid follow-up validates must NOT re-persist.
+	for i := 0; i < 5; i++ {
+		time.Sleep(2 * time.Millisecond)
+		if _, ok := s.Validate(raw); !ok {
+			t.Fatal("follow-up validate miss")
+		}
+	}
+	if mt := mustMtime(t, path); mt.After(mtAfterFirst) {
+		t.Errorf("debounce broken: rapid validates rewrote tokens.json (%v → %v)", mtAfterFirst, mt)
+	}
+
+	// FlushLastUsed on shutdown must persist pending updates even
+	// though the debounce hasn't elapsed.
+	time.Sleep(5 * time.Millisecond)
+	if err := s.FlushLastUsed(); err != nil {
+		t.Fatalf("FlushLastUsed: %v", err)
+	}
+	if mt := mustMtime(t, path); !mt.After(mtAfterFirst) {
+		t.Errorf("FlushLastUsed did not persist: %v (want > %v)", mt, mtAfterFirst)
+	}
+}
+
+func mustMtime(t *testing.T, path string) time.Time {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info.ModTime()
+}
+
 func TestPersistenceRoundTrip(t *testing.T) {
 	s, path := newTmpStore(t)
 	raw, tok, _ := s.Mint("iPhone")

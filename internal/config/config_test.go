@@ -100,7 +100,9 @@ func TestLoadResolvesRelativePathsAgainstConfigDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	configPath := filepath.Join(dir, "bridge.yaml")
-	os.WriteFile(configPath, []byte("libraryRoots:\n  - "+libRel+"\n"), 0o644)
+	if err := os.WriteFile(configPath, []byte("libraryRoots:\n  - "+libRel+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	cfg, err := Load(configPath)
 	if err != nil {
@@ -124,7 +126,9 @@ func TestLoadMissingFile(t *testing.T) {
 func TestLoadMalformedYAML(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "bad.yaml")
-	os.WriteFile(p, []byte("::: not yaml :::"), 0o644)
+	if err := os.WriteFile(p, []byte("::: not yaml :::"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	_, err := Load(p)
 	if err == nil || !strings.Contains(err.Error(), "parse config") {
 		t.Errorf("expected parse error, got %v", err)
@@ -162,7 +166,9 @@ func TestValidateNonexistentLibraryRoot(t *testing.T) {
 func TestValidateLibraryRootIsAFile(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "notadir.txt")
-	os.WriteFile(file, []byte("hi"), 0o644)
+	if err := os.WriteFile(file, []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	cfg := &Config{LibraryRoots: []string{file}, ListenAddress: ":7788", ScanIntervalSec: 3600}
 	err := cfg.Validate()
 	if err == nil || !strings.Contains(err.Error(), "not a directory") {
