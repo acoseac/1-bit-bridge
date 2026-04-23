@@ -20,10 +20,27 @@ Every iOS-repo PR that lands a new `protocolVersion` MUST tick the PR template c
 
 This rule is enforced by review convention, not CI. If you find yourself wanting to skip it "just this once", write it up in the PR body so the next reader can see why.
 
+## Pre-push checklist (CI is not wired up — you are the CI)
+
+Every PR author MUST run these commands locally before pushing and paste the
+result into the PR body:
+
+```sh
+make fmt
+make vet
+make test          # race-enabled; runs on cmd/bridge and any package with _test.go
+make build-all     # cross-compile sanity check for darwin/linux/windows × amd64/arm64
+```
+
+If any step fails, fix it on the branch before requesting review. A green
+paste-in is the substitute for CI until the repo moves off private (or the
+Actions budget is raised).
+
 ## Go style
 
-- Run `make fmt vet test` before pushing.
 - Prefer stdlib. Dependencies are admitted one at a time, each justified in the PR that adds them.
+- Every new package starts with a `doc.go` containing a one-paragraph package doc.
+- Every new exported function / type gets a godoc comment.
 
 ## Golden fixtures
 
