@@ -79,6 +79,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/download", s.authed(s.download))
 	mux.HandleFunc("GET /v1/manifest", s.authed(s.manifestHandler))
 	mux.HandleFunc("GET /v1/artwork/{mbid}", s.authed(s.artwork))
+	mux.HandleFunc("GET /v1/artist-image/{mbid}", s.authed(s.artistImage))
 	return protocolHeader(mux)
 }
 

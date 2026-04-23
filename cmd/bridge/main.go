@@ -156,8 +156,9 @@ func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	)
 	mbClient := enrich.NewMusicBrainzClient("", userAgent, nil)
 	caaClient := enrich.NewCoverArtClient("", userAgent, nil)
+	deezerClient := enrich.NewDeezerClient("", userAgent, nil)
 	artworkDir := filepath.Join(cfg.DataDir, "artwork")
-	enricher := enrich.NewEnricher(manifestStore, mbClient, caaClient, artworkDir)
+	enricher := enrich.NewEnricher(manifestStore, mbClient, caaClient, deezerClient, artworkDir)
 	go enricher.Run(scanCtx)
 
 	apiSrv := api.New(cfg, store, provider, fingerprint).

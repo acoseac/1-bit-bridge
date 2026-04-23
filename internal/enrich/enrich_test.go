@@ -211,6 +211,7 @@ func TestEnricherProcessesTracksEndToEnd(t *testing.T) {
 		store,
 		NewMusicBrainzClient(mbSrv.URL, "test", nil),
 		NewCoverArtClient(caaSrv.URL, "test", nil),
+		nil, // no Deezer in this test — artist-image fallback path tested separately
 		filepath.Join(dir, "artwork"),
 	)
 	e.MBMinInterval = 0 // no pacing in tests
@@ -254,12 +255,19 @@ func TestEnricherProcessesTracksEndToEnd(t *testing.T) {
 }
 
 func TestEnricherDeduplicatesAlbumLookups(t *testing.T) {
-	// Two tracks on the same album should result in exactly one MB
-	// search — the enricher's in-memory cache kicks in for the second.
-	var mbCalls int
+	// Three tracks on the same album should result in exactly one MB
+	// release search — the enricher's (artist, album) cache kicks in
+	// for the second and third. We count only /release/ hits so the
+	// artist-resolution path doesn't muddy the signal.
+	var mbReleaseCalls int
 	mbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mbCalls++
-		io.WriteString(w, `{"releases":[{"id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","score":100,"title":"Album","artist-credit":[{"name":"Artist"}]}]}`)
+		switch {
+		case strings.Contains(r.URL.Path, "/release/"):
+			mbReleaseCalls++
+			io.WriteString(w, `{"releases":[{"id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","score":100,"title":"Album","artist-credit":[{"name":"Artist"}]}]}`)
+		case strings.Contains(r.URL.Path, "/artist/"):
+			io.WriteString(w, `{"artists":[]}`)
+		}
 	}))
 	defer mbSrv.Close()
 	caaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -278,7 +286,7 @@ func TestEnricherDeduplicatesAlbumLookups(t *testing.T) {
 	}
 
 	e := NewEnricher(store, NewMusicBrainzClient(mbSrv.URL, "t", nil),
-		NewCoverArtClient(caaSrv.URL, "t", nil), filepath.Join(dir, "artwork"))
+		NewCoverArtClient(caaSrv.URL, "t", nil), nil, filepath.Join(dir, "artwork"))
 	e.MBMinInterval = 0
 	e.CAAMinInterval = 0
 	e.PollInterval = 5 * time.Millisecond
@@ -293,8 +301,8 @@ func TestEnricherDeduplicatesAlbumLookups(t *testing.T) {
 	if e.Done() < 3 {
 		t.Fatalf("only enriched %d of 3", e.Done())
 	}
-	if mbCalls != 1 {
-		t.Errorf("MB called %d times, want 1 (sibling-track dedup broken)", mbCalls)
+	if mbReleaseCalls != 1 {
+		t.Errorf("MB /release/ called %d times, want 1 (sibling-track dedup broken)", mbReleaseCalls)
 	}
 }
 
@@ -315,7 +323,7 @@ func TestEnricherSkipsUnsearchableTracks(t *testing.T) {
 	store.UpsertTrack(&manifest.Track{Path: "orphan.flac", Size: 1, ModTime: time.Now()})
 
 	e := NewEnricher(store, NewMusicBrainzClient(mbSrv.URL, "t", nil),
-		NewCoverArtClient(caaSrv.URL, "t", nil), filepath.Join(dir, "artwork"))
+		NewCoverArtClient(caaSrv.URL, "t", nil), nil, filepath.Join(dir, "artwork"))
 	e.MBMinInterval = 0
 	e.PollInterval = 5 * time.Millisecond
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -361,7 +369,7 @@ func TestEnricherSkipsNetworkCallIfCoverAlreadyCached(t *testing.T) {
 	store.UpsertTrack(&manifest.Track{Path: "x.flac", Size: 1, ModTime: time.Now(), Artist: "Artist", Album: "Album"})
 
 	e := NewEnricher(store, NewMusicBrainzClient(mbSrv.URL, "t", nil),
-		NewCoverArtClient(caaSrv.URL, "t", nil), artDir)
+		NewCoverArtClient(caaSrv.URL, "t", nil), nil, artDir)
 	e.MBMinInterval = 0
 	e.CAAMinInterval = 0
 	e.PollInterval = 5 * time.Millisecond

@@ -14,15 +14,17 @@ import (
 )
 
 // Enricher is a long-running worker that pulls un-enriched tracks from
-// the manifest store, looks them up against MusicBrainz, caches front
-// covers from Cover Art Archive, and writes the enriched data back.
+// the manifest store, looks them up against MusicBrainz / Deezer, caches
+// artwork locally, and writes the enriched data back.
 type Enricher struct {
-	store *manifest.Store
-	mb    *MusicBrainzClient
-	caa   *CoverArtClient
+	store  *manifest.Store
+	mb     *MusicBrainzClient
+	caa    *CoverArtClient
+	deezer *DeezerClient
 
-	// CacheDir is the root where the artwork byte cache lives, one file
-	// per (mbid, size) tuple. Created on demand.
+	// CacheDir is the root where the cached JPEGs live. Album covers go
+	// in <CacheDir>/<mbid>-<size>.jpg (see ArtworkCachePath); artist
+	// images go in <CacheDir>/artist-<mbid>.jpg (see ArtistImagePath).
 	CacheDir string
 
 	// MBMinInterval is the minimum gap between MusicBrainz requests. MB's
@@ -31,6 +33,9 @@ type Enricher struct {
 	// CAAMinInterval is the minimum gap between Cover Art Archive
 	// requests. CAA is more forgiving but we stay polite.
 	CAAMinInterval time.Duration
+	// DeezerMinInterval is the minimum gap between Deezer requests.
+	// Deezer's unauth limit is ~50 req / 5s; 120ms is well under that.
+	DeezerMinInterval time.Duration
 
 	// BatchLimit is the maximum number of un-enriched tracks processed
 	// per wakeup. Keeps the worker responsive to cancellation.
@@ -44,23 +49,31 @@ type Enricher struct {
 	// as the Enricher.
 	albumCache sync.Map
 
+	// artistCache memoizes artist-name → ArtistMBID so sibling tracks by
+	// the same artist share the lookup + image-fetch.
+	artistCache sync.Map
+
 	// progress counters exposed via ScanState.
 	done    atomic.Int64
 	skipped atomic.Int64
 }
 
-// NewEnricher wires a store + MB/CAA clients + cache dir into a worker.
-// Sensible defaults applied if the numeric fields are zero.
-func NewEnricher(store *manifest.Store, mb *MusicBrainzClient, caa *CoverArtClient, cacheDir string) *Enricher {
+// NewEnricher wires a store + MB/CAA/Deezer clients + cache dir into a
+// worker. Sensible defaults applied if the numeric fields are zero.
+// Deezer can be nil — artist-image lookup is simply skipped in that
+// case.
+func NewEnricher(store *manifest.Store, mb *MusicBrainzClient, caa *CoverArtClient, deezer *DeezerClient, cacheDir string) *Enricher {
 	e := &Enricher{
-		store:          store,
-		mb:             mb,
-		caa:            caa,
-		CacheDir:       cacheDir,
-		MBMinInterval:  1100 * time.Millisecond,
-		CAAMinInterval: 500 * time.Millisecond,
-		BatchLimit:     100,
-		PollInterval:   15 * time.Second,
+		store:             store,
+		mb:                mb,
+		caa:               caa,
+		deezer:            deezer,
+		CacheDir:          cacheDir,
+		MBMinInterval:     1100 * time.Millisecond,
+		CAAMinInterval:    500 * time.Millisecond,
+		DeezerMinInterval: 120 * time.Millisecond,
+		BatchLimit:        100,
+		PollInterval:      15 * time.Second,
 	}
 	return e
 }
@@ -151,11 +164,84 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 		t.ArtworkMBID = albumMBID
 	}
 
+	// Resolve artist MBID + fetch artist image (Deezer fallback).
+	e.resolveArtist(ctx, t)
+
 	if err := e.store.MarkEnriched(t); err != nil {
 		log.Printf("enricher: mark enriched %q: %v", t.Path, err)
 		return
 	}
 	e.done.Add(1)
+}
+
+// resolveArtist fills in t.ArtistMBID and ensures the artist image is
+// cached locally. Best-effort: missing Deezer or missing MBID is not a
+// failure. Sibling tracks by the same artist share one round-trip each.
+func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) {
+	if t.Artist == "" {
+		return
+	}
+	key := "artist\x00" + t.Artist
+	var artistMBID string
+	if cached, ok := e.artistCache.Load(key); ok {
+		artistMBID = cached.(string)
+	} else {
+		time.Sleep(e.MBMinInterval)
+		res, err := e.mb.SearchArtist(ctx, t.Artist)
+		if err == nil && res != nil {
+			artistMBID = res.MBID
+		}
+		e.artistCache.Store(key, artistMBID)
+	}
+	if artistMBID != "" {
+		t.ArtistMBID = artistMBID
+	}
+	// Fetch Deezer image (the only source in v1 for artist portraits).
+	// Cache file is keyed by artist MBID if we have one, else by a hash
+	// of the artist name. iOS always has the name, so a name-keyed path
+	// remains accessible via /v1/artist-image?name=... (future work).
+	if e.deezer == nil || artistMBID == "" {
+		return
+	}
+	if _, err := e.ensureArtistImageCached(ctx, artistMBID, t.Artist); err != nil {
+		log.Printf("enricher: artist image %q (%s): %v", t.Artist, artistMBID, err)
+	}
+}
+
+// ensureArtistImageCached downloads and caches the artist's Deezer
+// portrait at <CacheDir>/artist-<mbid>.jpg. Returns (true, nil) if a file
+// exists on disk after the call. Pre-cached files are a no-op hit.
+func (e *Enricher) ensureArtistImageCached(ctx context.Context, mbid, artistName string) (bool, error) {
+	path := ArtistImagePath(e.CacheDir, mbid)
+	if _, err := os.Stat(path); err == nil {
+		return true, nil
+	}
+	time.Sleep(e.DeezerMinInterval)
+	imgURL, err := e.deezer.SearchArtist(ctx, artistName)
+	if err != nil {
+		return false, err
+	}
+	if imgURL == "" {
+		return false, nil
+	}
+	// Deezer image URLs are on their own CDN; second GET happens after
+	// a second DeezerMinInterval pause.
+	time.Sleep(e.DeezerMinInterval)
+	data, err := e.deezer.FetchImage(ctx, imgURL)
+	if err != nil {
+		return false, err
+	}
+	if err := writeArtworkAtomic(path, data); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// ArtistImagePath returns the on-disk cache path for an artist's image,
+// keyed by artist MBID. Exposed so the /v1/artist-image handler reads
+// from the same location the enricher writes.
+func ArtistImagePath(cacheDir, mbid string) string {
+	return filepath.Join(cacheDir, fmt.Sprintf("artist-%s.jpg", mbid))
 }
 
 // markSkipped stamps enriched_at so the worker doesn't retry the same
