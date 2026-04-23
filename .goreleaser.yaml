@@ -1,0 +1,75 @@
+# goreleaser config for 1-bit-bridge.
+#
+# `goreleaser release --snapshot --clean` for a local dry-run;
+# `git tag vX.Y.Z && git push --tags` triggers the GitHub Actions release
+# workflow (.github/workflows/release.yml) which calls goreleaser with
+# the real credentials.
+#
+# Invariants we rely on:
+# - Pure-Go builds — no cgo — so cross-compilation to arm64 / amd64 for
+#   darwin and linux is a single matrix with no toolchain juggling.
+# - go:embed pulls the admin console's templates + static assets into
+#   the binary at build time. No runtime file-system dependencies; the
+#   tarball is a single binary plus LICENSE / README.
+
+version: 2
+
+project_name: 1-bit-bridge
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: bridge
+    main: ./cmd/bridge
+    binary: bridge
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/acoseac/1-bit-bridge/internal/version.ServerVersion={{.Version}}
+    flags:
+      - -trimpath
+
+archives:
+  - id: tarball
+    ids:
+      - bridge
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_
+      {{- if eq .Os "darwin" }}macos{{ else }}{{ .Os }}{{ end }}_
+      {{- .Arch }}
+    formats: [tar.gz]
+    files:
+      - README.md
+      - LICENSE
+      - PROTOCOL.md
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^chore:"
+      - "Merge pull request"
+      - "Merge branch"
+
+release:
+  # Draft so a human can edit the release notes before publishing. Tag
+  # push starts the build; the operator hits "Publish" when ready.
+  draft: true
+  prerelease: auto
+  name_template: "v{{.Version}}"

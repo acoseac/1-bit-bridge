@@ -2,6 +2,7 @@
 //
 // Subcommands:
 //
+//	bridge init    first-time setup: config, TLS cert, launchd/systemd unit
 //	bridge serve   run the HTTPS server (default port 7788)
 //	bridge pair    mint a new bearer token for an iOS client
 //	bridge scan    force a full library rescan
@@ -63,6 +64,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	switch args[0] {
+	case "init":
+		return initCmd(args[1:], os.Stdin, stdout, stderr)
 	case "serve":
 		return serveCmd(ctx, args[1:], stdout, stderr)
 	case "pair":
@@ -89,12 +92,17 @@ Usage:
   bridge <subcommand> [flags]
 
 Subcommands:
+  init     First-time setup: writes config, mints TLS cert, installs service.
   serve    Run the HTTPS server.
   pair     Generate a new bearer token for an iOS client.
   scan     Force a full library rescan.
   version  Print version and protocol version.
 
 Run "bridge <subcommand> -h" for subcommand-specific flags.
+
+First-time install:
+  bridge init                    # writes config + installs launchd/systemd unit
+                                 # prints admin console URL at http://127.0.0.1:7789/
 `)
 }
 

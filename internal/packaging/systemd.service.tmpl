@@ -1,0 +1,16 @@
+[Unit]
+Description=1-bit-bridge — companion server for the 1-bit iOS app
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart={{.BinaryPath}} serve --config {{.ConfigPath}}
+WorkingDirectory={{.WorkingDir}}
+Restart=always
+RestartSec=2
+StandardOutput=append:{{.LogPath}}
+StandardError=append:{{.LogPath}}
+
+[Install]
+WantedBy=default.target
