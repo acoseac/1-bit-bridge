@@ -26,10 +26,17 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/api"
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/enrich"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
+
+// artworkDirBridge lets cmd/bridge expose the enricher's cache dir to
+// internal/api without importing internal/enrich from there.
+type artworkDirBridge string
+
+func (a artworkDirBridge) ArtworkCacheDir() string { return string(a) }
 
 // shutdownGrace is how long we wait for in-flight requests to drain before
 // forcing the listener closed.
@@ -139,7 +146,22 @@ func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	defer scanCancel()
 	go scanner.RunPeriodic(scanCtx, cfg.ScanInterval())
 
-	apiSrv := api.New(cfg, store, provider, fingerprint)
+	// Fire up the MusicBrainz/CoverArt enricher in the background. It
+	// pulls un-enriched tracks from the store and fills in
+	// MusicBrainzAlbumID / ArtworkMBID, caching cover images under
+	// <dataDir>/artwork/.
+	userAgent := fmt.Sprintf(
+		"%s/%s (+https://github.com/acoseac/1-bit-bridge)",
+		"1-bit-bridge", version.ServerVersion,
+	)
+	mbClient := enrich.NewMusicBrainzClient("", userAgent, nil)
+	caaClient := enrich.NewCoverArtClient("", userAgent, nil)
+	artworkDir := filepath.Join(cfg.DataDir, "artwork")
+	enricher := enrich.NewEnricher(manifestStore, mbClient, caaClient, artworkDir)
+	go enricher.Run(scanCtx)
+
+	apiSrv := api.New(cfg, store, provider, fingerprint).
+		WithArtworkDirs(artworkDirBridge(artworkDir))
 	httpSrv := &http.Server{
 		Addr:      cfg.ListenAddress,
 		Handler:   apiSrv.Handler(),

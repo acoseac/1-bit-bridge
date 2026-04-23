@@ -52,13 +52,15 @@ func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) migrate() error {
 	schema := `
 	CREATE TABLE IF NOT EXISTS tracks (
-		path       TEXT PRIMARY KEY,
-		size       INTEGER NOT NULL,
-		mtime_ns   INTEGER NOT NULL,
-		tags_json  BLOB    NOT NULL,
-		indexed_at INTEGER NOT NULL
+		path        TEXT PRIMARY KEY,
+		size        INTEGER NOT NULL,
+		mtime_ns    INTEGER NOT NULL,
+		tags_json   BLOB    NOT NULL,
+		indexed_at  INTEGER NOT NULL,
+		enriched_at INTEGER NOT NULL DEFAULT 0
 	);
 	CREATE INDEX IF NOT EXISTS idx_tracks_mtime ON tracks(mtime_ns);
+	CREATE INDEX IF NOT EXISTS idx_tracks_enriched ON tracks(enriched_at);
 
 	CREATE TABLE IF NOT EXISTS folders (
 		path     TEXT PRIMARY KEY,
@@ -70,7 +72,58 @@ func (s *Store) migrate() error {
 		v TEXT NOT NULL
 	);
 	`
-	_, err := s.db.Exec(schema)
+	if _, err := s.db.Exec(schema); err != nil {
+		return err
+	}
+	// Idempotent fallback for DBs created before enriched_at existed.
+	// "duplicate column" is expected and ignored.
+	_, _ = s.db.Exec(`ALTER TABLE tracks ADD COLUMN enriched_at INTEGER NOT NULL DEFAULT 0`)
+	return nil
+}
+
+// UnenrichedTracks returns up to limit tracks that haven't been through the
+// MusicBrainz/CoverArt pass. Used by internal/enrich.
+func (s *Store) UnenrichedTracks(limit int) ([]Track, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.Query(`
+		SELECT tags_json FROM tracks
+		WHERE enriched_at = 0
+		ORDER BY path ASC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Track
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		var t Track
+		if err := json.Unmarshal(raw, &t); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// MarkEnriched updates a Track's stored tags (with enricher additions) and
+// stamps enriched_at so the worker won't re-process it.
+func (s *Store) MarkEnriched(t *Track) error {
+	raw, err := json.Marshal(t)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`
+		UPDATE tracks
+		SET tags_json = ?, enriched_at = ?
+		WHERE path = ?
+	`, raw, time.Now().UnixNano(), t.Path)
 	return err
 }
 
@@ -87,10 +140,11 @@ func (s *Store) UpsertTrack(t *Track) error {
 		INSERT INTO tracks(path, size, mtime_ns, tags_json, indexed_at)
 		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(path) DO UPDATE SET
-			size       = excluded.size,
-			mtime_ns   = excluded.mtime_ns,
-			tags_json  = excluded.tags_json,
-			indexed_at = excluded.indexed_at
+			size        = excluded.size,
+			mtime_ns    = excluded.mtime_ns,
+			tags_json   = excluded.tags_json,
+			indexed_at  = excluded.indexed_at,
+			enriched_at = 0
 	`, t.Path, t.Size, t.ModTime.UnixNano(), raw, time.Now().UnixNano())
 	return err
 }
