@@ -1,0 +1,26 @@
+# 1-bit-bridge sample config. Copy to bridge.yaml and edit for your machine.
+#
+# libraryRoots:    absolute paths the server will expose. All client paths are
+#                  resolved relative to one of these; traversal (..) is rejected.
+# listenAddress:   host:port to bind the HTTPS server on. Default :7788.
+# tlsCertPath,
+# tlsKeyPath:      optional. If unset, the server mints a self-signed cert on
+#                  first run and stores it next to bridge.db.
+# dataDir:         where bridge.db, TLS material, and token hashes live.
+# scanIntervalSec: full rewalk interval; fsnotify handles incremental updates
+#                  between rewalks. Default 3600 (1 hour).
+# libraryName:     human-readable name shown in the iOS pairing UI + mDNS TXT.
+
+libraryRoots:
+  - /Users/me/Music
+
+listenAddress: ":7788"
+
+dataDir: "./data"
+
+# tlsCertPath: "./data/server.crt"
+# tlsKeyPath:  "./data/server.key"
+
+scanIntervalSec: 3600
+
+libraryName: "My Music Library"
