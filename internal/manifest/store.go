@@ -217,6 +217,68 @@ func (s *Store) CountTracks() (int, error) {
 	return n, err
 }
 
+// CountTracksByPrefix returns the number of track rows whose path begins
+// with prefix. In multi-root mode the admin console passes
+// "<rootBasename>/" to get a per-root count. prefix is matched literally —
+// "_" and "%" are escaped via the ESCAPE clause so a root named "foo_bar"
+// isn't treated as a LIKE wildcard.
+func (s *Store) CountTracksByPrefix(prefix string) (int, error) {
+	escaped := likeEscape(prefix)
+	var n int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM tracks WHERE path LIKE ? ESCAPE '\'`,
+		escaped+"%",
+	).Scan(&n)
+	return n, err
+}
+
+// DeleteTracksByPrefix removes all track rows whose path begins with
+// prefix. Returns the number of rows deleted. Used by the admin console
+// after removing a library root so /v1/manifest stops returning tracks
+// that will never resolve. See CountTracksByPrefix for the escaping note.
+func (s *Store) DeleteTracksByPrefix(prefix string) (int64, error) {
+	escaped := likeEscape(prefix)
+	res, err := s.db.Exec(
+		`DELETE FROM tracks WHERE path LIKE ? ESCAPE '\'`,
+		escaped+"%",
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// WipeAllTracks drops every track and folder row. Used by the admin
+// console on a single-root ↔ multi-root transition, where stored paths
+// change form (bare "Artist/…" vs "RootBasename/Artist/…") and the cheap
+// fix is to let the next scan re-populate from zero.
+func (s *Store) WipeAllTracks() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.db.Exec(`DELETE FROM tracks`); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`DELETE FROM folders`); err != nil {
+		return err
+	}
+	return nil
+}
+
+// likeEscape prepares a literal string for LIKE pattern matching. Escapes
+// "%", "_", and "\" with a leading backslash. Caller must use
+// `ESCAPE '\'` in the SQL.
+func likeEscape(s string) string {
+	out := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '%', '_', '\\':
+			out = append(out, '\\')
+		}
+		out = append(out, s[i])
+	}
+	return string(out)
+}
+
 // TrackPaths returns every known track path (sorted). Used by the scanner's
 // "remove tracks deleted from disk" pass.
 func (s *Store) TrackPaths() ([]string, error) {

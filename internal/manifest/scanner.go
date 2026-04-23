@@ -22,8 +22,13 @@ import (
 // the server OS, matching the wire shape. On Windows that means the
 // scanner translates native separators → "/" for storage and back for
 // native filesystem access. On Unix it's a no-op.
+//
+// Roots are hot-swappable via SetRoots so the admin console can add or
+// remove a library root without restarting the server. Each Scan() takes a
+// snapshot of the roots at entry so a mid-flight edit doesn't re-enter the
+// walk with a different set — the new roots apply on the next scan.
 type Scanner struct {
-	roots []string
+	roots atomic.Pointer[[]string]
 	store *Store
 
 	mu       sync.Mutex
@@ -34,7 +39,28 @@ type Scanner struct {
 
 // NewScanner constructs a Scanner. Caller owns the Store's lifecycle.
 func NewScanner(roots []string, store *Store) *Scanner {
-	return &Scanner{roots: append([]string(nil), roots...), store: store}
+	s := &Scanner{store: store}
+	rc := append([]string(nil), roots...)
+	s.roots.Store(&rc)
+	return s
+}
+
+// SetRoots atomically replaces the scanner's library roots. The change takes
+// effect on the next Scan — an in-flight walk continues with its original
+// snapshot. Caller should trigger a scan (or wait for the periodic tick) for
+// the new roots to land in the manifest.
+func (s *Scanner) SetRoots(roots []string) {
+	rc := append([]string(nil), roots...)
+	s.roots.Store(&rc)
+}
+
+// Roots returns a snapshot of the currently configured library roots.
+func (s *Scanner) Roots() []string {
+	p := s.roots.Load()
+	if p == nil {
+		return nil
+	}
+	return append([]string(nil), (*p)...)
 }
 
 // IsScanning reports whether a scan is currently running.
@@ -79,8 +105,17 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	seen := make(map[string]struct{}, len(before))
 	count := 0
 
-	for _, root := range s.roots {
-		if err := s.walkRoot(ctx, root, seen, &count); err != nil {
+	// Snapshot roots once per scan so a mid-flight SetRoots doesn't re-enter
+	// the walk with a different set. multiRoot is derived from the same
+	// snapshot — passing it explicitly to walkRoot avoids a second Load.
+	rootsPtr := s.roots.Load()
+	var roots []string
+	if rootsPtr != nil {
+		roots = *rootsPtr
+	}
+	multiRoot := len(roots) > 1
+	for _, root := range roots {
+		if err := s.walkRoot(ctx, root, multiRoot, seen, &count); err != nil {
 			return count, err
 		}
 	}
@@ -100,7 +135,7 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	return count, nil
 }
 
-func (s *Scanner) walkRoot(ctx context.Context, root string, seen map[string]struct{}, count *int) error {
+func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, seen map[string]struct{}, count *int) error {
 	return filepath.WalkDir(root, func(abs string, d fs.DirEntry, err error) error {
 		if err != nil {
 			// Permission error on one dir shouldn't kill the whole scan.
@@ -119,7 +154,7 @@ func (s *Scanner) walkRoot(ctx context.Context, root string, seen map[string]str
 			}
 			// Record folder mtimes for the manifest / future skip logic.
 			if info, err := d.Info(); err == nil {
-				rel := relPath(root, abs, s.multiRoot())
+				rel := relPath(root, abs, multiRoot)
 				_ = s.store.UpsertFolder(&Folder{Path: rel, ModTime: info.ModTime().UTC()})
 			}
 			return nil
@@ -139,7 +174,7 @@ func (s *Scanner) walkRoot(ctx context.Context, root string, seen map[string]str
 			return nil
 		}
 
-		rel := relPath(root, abs, s.multiRoot())
+		rel := relPath(root, abs, multiRoot)
 		seen[rel] = struct{}{}
 
 		existing, _ := s.store.GetTrack(rel)
@@ -165,11 +200,6 @@ func (s *Scanner) walkRoot(ctx context.Context, root string, seen map[string]str
 		return nil
 	})
 }
-
-// multiRoot reports whether the scanner was configured with more than one
-// library root. Storage paths change form between the two modes (see
-// relPath).
-func (s *Scanner) multiRoot() bool { return len(s.roots) > 1 }
 
 // relPath converts an absolute on-disk path to the library-relative,
 // forward-slash form used in storage. In multi-root mode the first segment

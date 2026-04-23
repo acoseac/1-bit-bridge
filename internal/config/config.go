@@ -21,9 +21,10 @@ import (
 type Config struct {
 	LibraryRoots    []string `yaml:"libraryRoots"`
 	ListenAddress   string   `yaml:"listenAddress"`
+	AdminAddress    string   `yaml:"adminAddress,omitempty"`
 	DataDir         string   `yaml:"dataDir"`
-	TLSCertPath     string   `yaml:"tlsCertPath"`
-	TLSKeyPath      string   `yaml:"tlsKeyPath"`
+	TLSCertPath     string   `yaml:"tlsCertPath,omitempty"`
+	TLSKeyPath      string   `yaml:"tlsKeyPath,omitempty"`
 	ScanIntervalSec int      `yaml:"scanIntervalSec"`
 	LibraryName     string   `yaml:"libraryName"`
 }
@@ -31,6 +32,7 @@ type Config struct {
 // Defaults applied when a field is absent or zero-valued.
 const (
 	DefaultListenAddress   = ":7788"
+	DefaultAdminAddress    = "127.0.0.1:7789"
 	DefaultDataDir         = "./data"
 	DefaultScanIntervalSec = 3600
 	DefaultLibraryName     = "1-bit Bridge"
@@ -65,6 +67,9 @@ func Load(path string) (*Config, error) {
 func (c *Config) applyDefaults() {
 	if c.ListenAddress == "" {
 		c.ListenAddress = DefaultListenAddress
+	}
+	if c.AdminAddress == "" {
+		c.AdminAddress = DefaultAdminAddress
 	}
 	if c.DataDir == "" {
 		c.DataDir = DefaultDataDir
@@ -121,10 +126,77 @@ func (c *Config) Validate() error {
 	if _, _, err := net.SplitHostPort(c.ListenAddress); err != nil {
 		return fmt.Errorf("listenAddress %q: %w", c.ListenAddress, err)
 	}
+	if err := validateLoopbackAddress(c.AdminAddress); err != nil {
+		return fmt.Errorf("adminAddress %q: %w", c.AdminAddress, err)
+	}
+	return nil
+}
+
+// validateLoopbackAddress enforces that the admin listener binds only to a
+// loopback interface. Accepts "127.0.0.1:N", "[::1]:N", and "localhost:N" —
+// an empty host (":N" = all interfaces) or any non-loopback IP is rejected.
+// The admin console has no auth layer; loopback binding is the trust boundary.
+func validateLoopbackAddress(addr string) error {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return err
+	}
+	if port == "" {
+		return errors.New("port must not be empty")
+	}
+	if host == "" {
+		return errors.New("host must be a loopback address (127.0.0.1, ::1, or localhost); an empty host binds all interfaces")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if !ip.IsLoopback() {
+			return fmt.Errorf("host %q is not a loopback address", host)
+		}
+		return nil
+	}
+	if host != "localhost" {
+		return fmt.Errorf("host %q must be a loopback address (127.0.0.1, ::1, or localhost)", host)
+	}
 	return nil
 }
 
 // ScanInterval returns scanIntervalSec as a time.Duration.
 func (c *Config) ScanInterval() time.Duration {
 	return time.Duration(c.ScanIntervalSec) * time.Second
+}
+
+// Save atomically writes c as YAML to path (temp file + rename). Parent
+// directory must exist. Comments and fields unknown to this schema are not
+// preserved — callers that want to keep hand-authored comments should not
+// use Save. `bridge init` and admin-console edits are the intended callers.
+func (c *Config) Save(path string) error {
+	data, err := yaml.Marshal(c)
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".bridge-*.yaml")
+	if err != nil {
+		return fmt.Errorf("temp file: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		if tmpName != "" {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("write tmp: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("sync tmp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close tmp: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("rename: %w", err)
+	}
+	tmpName = "" // suppress defer cleanup
+	return nil
 }

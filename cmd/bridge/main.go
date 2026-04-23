@@ -159,7 +159,7 @@ func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	}
 	defer manifestStore.Close()
 	scanner := manifest.NewScanner(cfg.LibraryRoots, manifestStore)
-	provider := manifest.NewProvider(cfg.LibraryRoots, manifestStore, scanner)
+	provider := manifest.NewProvider(manifestStore, scanner)
 
 	// Fire up the periodic scanner in the background. It runs an initial
 	// scan on startup, then rescans every cfg.ScanInterval().

@@ -392,6 +392,120 @@ func TestBuildManifestSinceFilter(t *testing.T) {
 	}
 }
 
+// --- hot-reloadable roots ---
+
+func TestScannerSetRootsAppliesToNextScan(t *testing.T) {
+	a, _ := tempLibrary(t)
+	b := filepath.Join(t.TempDir(), "Extra")
+	if err := os.MkdirAll(filepath.Join(b, "Artist C", "Album 3"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeMinimalFLAC(t,
+		filepath.Join(b, "Artist C", "Album 3", "only.flac"),
+		44100, 16,
+		map[string]string{"TITLE": "Extra", "ARTIST": "Artist C", "ALBUM": "Album 3"},
+	)
+
+	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	defer s.Close()
+
+	// Start with only root A.
+	sc := NewScanner([]string{a}, s)
+	if _, err := sc.Scan(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	total, _ := s.CountTracks()
+	if total != 3 {
+		t.Fatalf("root A count = %d, want 3", total)
+	}
+
+	// Transition to multi-root. A 1→N transition changes storage form
+	// (tracks get a "<basename>/" prefix), so the admin flow wipes first.
+	if err := s.WipeAllTracks(); err != nil {
+		t.Fatalf("Wipe: %v", err)
+	}
+	sc.SetRoots([]string{a, b})
+	if _, err := sc.Scan(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	total, _ = s.CountTracks()
+	if total != 4 {
+		t.Errorf("A+B count = %d, want 4", total)
+	}
+
+	// Per-root counts should match the multi-root storage form.
+	nA, _ := s.CountTracksByPrefix(filepath.Base(a) + "/")
+	nB, _ := s.CountTracksByPrefix(filepath.Base(b) + "/")
+	if nA != 3 || nB != 1 {
+		t.Errorf("per-root counts A=%d B=%d, want 3,1", nA, nB)
+	}
+
+	// Roots snapshot reflects the update.
+	got := sc.Roots()
+	if len(got) != 2 || got[0] != a || got[1] != b {
+		t.Errorf("Roots() = %v, want [%q, %q]", got, a, b)
+	}
+}
+
+func TestProviderBuildManifestReflectsSetRoots(t *testing.T) {
+	a, _ := tempLibrary(t)
+	b := filepath.Join(t.TempDir(), "Other")
+	if err := os.MkdirAll(b, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	defer s.Close()
+	sc := NewScanner([]string{a}, s)
+	p := NewProvider(s, sc)
+
+	mfAny, err := p.BuildManifest(time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mf := mfAny.(*Manifest)
+	if len(mf.LibraryRoots) != 1 || mf.LibraryRoots[0] != filepath.Base(a) {
+		t.Errorf("pre-swap manifest roots = %v", mf.LibraryRoots)
+	}
+
+	sc.SetRoots([]string{a, b})
+	mfAny, _ = p.BuildManifest(time.Time{})
+	mf = mfAny.(*Manifest)
+	if len(mf.LibraryRoots) != 2 {
+		t.Errorf("post-swap manifest roots = %v, want 2 entries", mf.LibraryRoots)
+	}
+}
+
+func TestStoreDeleteTracksByPrefix(t *testing.T) {
+	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	defer s.Close()
+	for _, p := range []string{
+		"A/1.flac", "A/2.flac", "B/1.flac",
+		// Tracks whose path contains SQL LIKE wildcards — the ESCAPE clause
+		// must treat these literally rather than as wildcards.
+		"A%magic/1.flac", "A_magic/1.flac",
+	} {
+		if err := s.UpsertTrack(&Track{Path: p, Size: 1, ModTime: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	nA, _ := s.CountTracksByPrefix("A/")
+	if nA != 2 {
+		t.Errorf("prefix A/ count = %d, want 2 (the %%/_ variants must not match)", nA)
+	}
+	removed, err := s.DeleteTracksByPrefix("A/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 2 {
+		t.Errorf("DeleteTracksByPrefix removed %d, want 2", removed)
+	}
+	total, _ := s.CountTracks()
+	if total != 3 {
+		t.Errorf("remaining = %d, want 3 (B + two escaped)", total)
+	}
+}
+
 // --- helpers ---
 
 func mustPaths(t *testing.T, s *Store) []string {

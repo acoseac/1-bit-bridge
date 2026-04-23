@@ -251,3 +251,125 @@ func TestScanIntervalConversion(t *testing.T) {
 		t.Errorf("ScanInterval = %v", c.ScanInterval())
 	}
 }
+
+func TestLoadAppliesAdminAddressDefault(t *testing.T) {
+	configPath, _ := writeConfig(t, `
+libraryRoots:
+  - {{LIBRARY_ROOT}}
+`)
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AdminAddress != DefaultAdminAddress {
+		t.Errorf("AdminAddress = %q, want default %q", cfg.AdminAddress, DefaultAdminAddress)
+	}
+}
+
+func TestValidateAdminAddressLoopbackOK(t *testing.T) {
+	dir := t.TempDir()
+	for _, addr := range []string{"127.0.0.1:7789", "[::1]:7789", "localhost:7789"} {
+		cfg := &Config{
+			LibraryRoots:    []string{dir},
+			ListenAddress:   ":7788",
+			AdminAddress:    addr,
+			ScanIntervalSec: 3600,
+		}
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("Validate(%q): unexpected error %v", addr, err)
+		}
+	}
+}
+
+func TestValidateAdminAddressRejectsNonLoopback(t *testing.T) {
+	dir := t.TempDir()
+	for _, tc := range []struct {
+		addr, wantSubstr string
+	}{
+		{":7789", "empty host"},
+		{"0.0.0.0:7789", "not a loopback"},
+		{"192.168.1.5:7789", "not a loopback"},
+		{"example.com:7789", "loopback"},
+		{"127.0.0.1", "missing port"}, // net.SplitHostPort's own error
+	} {
+		cfg := &Config{
+			LibraryRoots:    []string{dir},
+			ListenAddress:   ":7788",
+			AdminAddress:    tc.addr,
+			ScanIntervalSec: 3600,
+		}
+		err := cfg.Validate()
+		if err == nil {
+			t.Errorf("Validate(%q): expected error, got nil", tc.addr)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.wantSubstr) {
+			t.Errorf("Validate(%q): error %q missing substring %q", tc.addr, err.Error(), tc.wantSubstr)
+		}
+	}
+}
+
+func TestSaveRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	libRoot := filepath.Join(dir, "Music")
+	if err := os.MkdirAll(libRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, "bridge.yaml")
+	orig := &Config{
+		LibraryRoots:    []string{libRoot},
+		ListenAddress:   "127.0.0.1:7788",
+		AdminAddress:    "127.0.0.1:7789",
+		DataDir:         filepath.Join(dir, "data"),
+		ScanIntervalSec: 1800,
+		LibraryName:     "Home",
+	}
+	if err := orig.Save(p); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	loaded, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load after Save: %v", err)
+	}
+	if loaded.LibraryName != orig.LibraryName ||
+		loaded.ListenAddress != orig.ListenAddress ||
+		loaded.AdminAddress != orig.AdminAddress ||
+		loaded.ScanIntervalSec != orig.ScanIntervalSec ||
+		len(loaded.LibraryRoots) != 1 ||
+		loaded.LibraryRoots[0] != libRoot {
+		t.Errorf("round-trip mismatch:\n  orig:   %+v\n  loaded: %+v", orig, loaded)
+	}
+}
+
+func TestSaveAtomicRename(t *testing.T) {
+	dir := t.TempDir()
+	libRoot := filepath.Join(dir, "Music")
+	if err := os.MkdirAll(libRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, "bridge.yaml")
+	if err := os.WriteFile(p, []byte("placeholder"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &Config{
+		LibraryRoots:    []string{libRoot},
+		ListenAddress:   ":7788",
+		AdminAddress:    "127.0.0.1:7789",
+		DataDir:         filepath.Join(dir, "data"),
+		ScanIntervalSec: 3600,
+		LibraryName:     "H",
+	}
+	if err := cfg.Save(p); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	// No .bridge-*.yaml leftovers in the parent dir.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".bridge-") {
+			t.Errorf("temp file leaked: %q", e.Name())
+		}
+	}
+}

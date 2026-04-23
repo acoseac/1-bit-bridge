@@ -16,6 +16,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // ErrBadPath is returned when a client-supplied path fails a safety check
@@ -30,8 +31,11 @@ var ErrNotFound = errors.New("path not found")
 var ErrUnknownRoot = errors.New("unknown library root")
 
 // Resolver maps a client path to an absolute on-disk path, enforcing
-// root-scoping.
+// root-scoping. Safe for concurrent use; roots can be hot-swapped at runtime
+// via SetRoots so the admin console can add or remove a library root without
+// a server restart.
 type Resolver struct {
+	mu sync.RWMutex
 	// roots is the list of configured library roots, absolute paths. Order
 	// matches config; single-entry is the common case.
 	roots []string
@@ -47,14 +51,32 @@ type Resolver struct {
 // when two roots share a basename, New keeps the last one (the older
 // behavior) to avoid panicking deep inside api.New.
 func New(roots []string) *Resolver {
-	r := &Resolver{roots: append([]string(nil), roots...)}
+	r := &Resolver{}
+	r.setRootsLocked(roots)
+	return r
+}
+
+// SetRoots atomically replaces the Resolver's root list. In-flight Resolve
+// calls complete against their original snapshot; calls that start after
+// SetRoots returns see the new list. The admin console calls this after
+// adding or removing a library root.
+func (r *Resolver) SetRoots(roots []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.setRootsLocked(roots)
+}
+
+// setRootsLocked rebuilds the roots slice and basename index. Caller must
+// hold r.mu (write) or be in New before publication.
+func (r *Resolver) setRootsLocked(roots []string) {
+	r.roots = append([]string(nil), roots...)
+	r.basenameIndex = nil
 	if len(roots) > 1 {
 		r.basenameIndex = make(map[string]string, len(roots))
 		for _, root := range roots {
 			r.basenameIndex[filepath.Base(root)] = root
 		}
 	}
-	return r
 }
 
 // ValidateRoots returns a descriptive error if two library roots share a
@@ -106,22 +128,28 @@ func (r *Resolver) Resolve(clientPath string) (string, error) {
 		clean = ""
 	}
 
-	// Pick a root.
+	// Pick a root. Snapshot under the read lock so a concurrent SetRoots
+	// can't swap roots mid-pick.
+	r.mu.RLock()
+	roots := r.roots
+	basenameIndex := r.basenameIndex
+	r.mu.RUnlock()
+
 	var (
 		root     string
 		suffix   string
 		segments = strings.SplitN(clean, "/", 2)
 	)
 	switch {
-	case len(r.roots) == 1:
-		root = r.roots[0]
+	case len(roots) == 1:
+		root = roots[0]
 		suffix = clean
 	case clean == "":
 		// Multi-root with an empty path — ambiguous. Refuse.
 		return "", ErrUnknownRoot
 	default:
 		head := segments[0]
-		full, ok := r.basenameIndex[head]
+		full, ok := basenameIndex[head]
 		if !ok {
 			return "", ErrUnknownRoot
 		}
@@ -170,6 +198,8 @@ func (r *Resolver) ResolveChecked(clientPath string) (string, os.FileInfo, error
 // Roots returns the configured roots (copy). Exposed for the /v1/list
 // handler to enumerate the synthetic top-level in multi-root mode.
 func (r *Resolver) Roots() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	out := make([]string, len(r.roots))
 	copy(out, r.roots)
 	return out
