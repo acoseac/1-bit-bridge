@@ -1,0 +1,56 @@
+{{define "content"}}
+<section class="page dashboard">
+  <h1>Dashboard</h1>
+
+  <div class="cards">
+    <div class="card">
+      <div class="card-label">Tracks indexed</div>
+      <div class="card-value" id="tracks-indexed">{{.Data.TracksIndexed}}</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Paired devices</div>
+      <div class="card-value" id="device-count">{{.Data.DeviceCount}}</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Uptime</div>
+      <div class="card-value">{{uptimeHuman .Data.Uptime}}</div>
+      <div class="card-foot">since {{formatTime .Data.StartedAt}}</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Library size on disk</div>
+      <div class="card-value">{{bytesHuman .Data.DBBytes}}</div>
+      <div class="card-foot">bridge.db</div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Scanner</h2>
+      <button id="scan-now" class="btn">Scan now</button>
+    </div>
+    <dl>
+      <dt>Status</dt>
+      <dd id="scan-status">
+        {{if .Data.IsScanning}}
+          <span class="badge running">scanning</span>
+          <span>· {{.Data.ScanProgress}} tracks so far</span>
+        {{else}}
+          <span class="badge idle">idle</span>
+        {{end}}
+      </dd>
+      <dt>Last full scan</dt>
+      <dd>{{timeAgo .Data.LastFullScan}}</dd>
+      <dt>Roots</dt>
+      <dd>
+        {{range .Data.Roots}}<code>{{.}}</code>{{else}}<em>none configured</em>{{end}}
+      </dd>
+    </dl>
+  </div>
+
+  <div class="panel">
+    <h2>TLS fingerprint</h2>
+    <p>iOS clients pin this value during pairing. Don't rotate without re-pairing.</p>
+    <code class="fingerprint">{{.Fingerprint}}</code>
+  </div>
+</section>
+{{end}}

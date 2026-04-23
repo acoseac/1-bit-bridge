@@ -23,6 +23,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/admin"
 	"github.com/acoseac/1-bit-bridge/internal/api"
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
@@ -190,6 +191,37 @@ func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		TLSConfig: &tls.Config{Certificates: []tls.Certificate{*cert}, MinVersion: tls.VersionTLS12},
 	}
 
+	// Admin console: plain HTTP on a loopback address (default
+	// 127.0.0.1:7789). Shares the api server's Resolver so hot-add/remove
+	// of library roots lands on both sides in lockstep.
+	//
+	// We resolve the config file path to absolute here so admin.Cfg.Save
+	// writes to the right file even if the operator changes cwd post-boot
+	// (shouldn't happen, but let's not trip them up).
+	absCfgPath, _ := filepath.Abs(*configPath)
+	adminSrv, err := admin.New(admin.Deps{
+		Cfg:         cfg,
+		CfgPath:     absCfgPath,
+		Auth:        store,
+		Manifest:    manifestStore,
+		Scanner:     scanner,
+		Resolver:    apiSrv.Resolver(),
+		Fingerprint: fingerprint,
+		StartedAt:   time.Now().UTC(),
+		ScanCtx:     scanCtx,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "admin: %v\n", err)
+		return 1
+	}
+	adminCtx, adminCancel := context.WithCancel(context.Background())
+	defer adminCancel()
+	go func() {
+		if err := adminSrv.Serve(adminCtx); err != nil {
+			fmt.Fprintf(stderr, "admin server: %v\n", err)
+		}
+	}()
+
 	// Listen first so we can report the actual bound address (useful when
 	// cfg.ListenAddress is ":0" — which test code uses).
 	lis, err := net.Listen("tcp", cfg.ListenAddress)
@@ -202,6 +234,7 @@ func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		version.ServerVersion, version.ProtocolVersion, lis.Addr())
 	fmt.Fprintf(stdout, "Library: %q (roots: %v)\n", cfg.LibraryName, cfg.LibraryRoots)
 	fmt.Fprintf(stdout, "TLS fingerprint (pin this on the iOS side):\n  %s\n", fingerprint)
+	fmt.Fprintf(stdout, "Admin console: http://%s/ — add library folders, pair devices, view stats\n", cfg.AdminAddress)
 
 	// Advertise on mDNS so iOS clients on the same LAN auto-discover
 	// this server. Failures are non-fatal — mDNS is a nice-to-have,

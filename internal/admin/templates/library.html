@@ -1,0 +1,44 @@
+{{define "content"}}
+<section class="page library">
+  <h1>Library roots</h1>
+  <p class="lede">
+    Folders the bridge exposes to paired iOS devices. Adding a root triggers
+    a scan; removing one drops the tracks under it from the manifest.
+  </p>
+
+  <div class="panel">
+    <h2>Configured roots</h2>
+    <table class="rows">
+      <thead>
+        <tr><th>Path</th><th class="num">Tracks</th><th></th></tr>
+      </thead>
+      <tbody id="roots-body">
+        {{range .Data}}
+        <tr data-path="{{.Path}}">
+          <td><code>{{.Path}}</code></td>
+          <td class="num">{{.Tracks}}</td>
+          <td><button class="btn danger remove-root">Remove</button></td>
+        </tr>
+        {{else}}
+        <tr><td colspan="3"><em>No roots configured.</em></td></tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="panel">
+    <h2>Add a root</h2>
+    <form id="add-root-form">
+      <label>
+        Absolute path on this machine
+        <input type="text" name="path" placeholder="/Users/me/Music" required>
+      </label>
+      <button type="submit" class="btn primary">Add</button>
+    </form>
+    <p class="hint">
+      The bridge must have read access. A scan kicks off automatically once
+      the root is added.
+    </p>
+  </div>
+</section>
+{{end}}

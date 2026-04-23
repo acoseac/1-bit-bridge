@@ -68,6 +68,13 @@ func (s *Server) WithArtworkDirs(ad ArtworkDirProvider) *Server {
 	return s
 }
 
+// Resolver returns the internal path Resolver so the admin console can
+// call SetRoots when adding or removing a library root at runtime. The
+// api handlers and admin handlers deliberately share the same Resolver
+// instance — otherwise a hot add/remove would update one without the
+// other and /v1/list would serve stale top-level entries.
+func (s *Server) Resolver() *bridgefs.Resolver { return s.resolver }
+
 // Handler returns the root http.Handler, pre-wrapped with the
 // X-Bridge-Protocol middleware.
 func (s *Server) Handler() http.Handler {
