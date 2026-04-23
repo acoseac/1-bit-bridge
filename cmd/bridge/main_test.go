@@ -256,14 +256,21 @@ func TestPairMissingConfigReturns2(t *testing.T) {
 	}
 }
 
-func TestScanStubLoadsConfigAndReturns1(t *testing.T) {
+func TestScanRunsAndReports0(t *testing.T) {
 	cfgPath := writeValidConfig(t)
-	_, stderr, code := runCapture(t, "scan", "--config", cfgPath)
-	if code != 1 {
-		t.Errorf("scan stub exit code = %d, want 1; stderr=%q", code, stderr)
+	stdout, stderr, code := runCapture(t, "scan", "--config", cfgPath)
+	if code != 0 {
+		t.Errorf("scan exit code = %d, want 0; stderr=%q", code, stderr)
 	}
-	if !strings.Contains(stderr, "not yet implemented") {
-		t.Errorf("scan stub stderr missing marker: %q", stderr)
+	if !strings.Contains(stdout, "Scan complete") {
+		t.Errorf("scan stdout missing completion line: %q", stdout)
+	}
+	if !strings.Contains(stdout, "0 tracks indexed") {
+		// Empty library → 0 tracks — but phrasing might change; accept
+		// any "N tracks indexed" match as long as the count is present.
+		if !strings.Contains(stdout, "tracks indexed") {
+			t.Errorf("scan stdout missing track count: %q", stdout)
+		}
 	}
 }
 

@@ -11,12 +11,30 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
+
+// fakeManifestProvider is a tiny ManifestProvider stand-in for tests that
+// want to exercise /v1/manifest without spinning up the real scanner.
+type fakeManifestProvider struct {
+	body          any
+	err           error
+	isScanning    bool
+	lastFullScan  time.Time
+	tracksIndexed int
+}
+
+func (f *fakeManifestProvider) BuildManifest(since time.Time) (any, error) {
+	return f.body, f.err
+}
+func (f *fakeManifestProvider) IsScanning() bool        { return f.isScanning }
+func (f *fakeManifestProvider) LastFullScan() time.Time { return f.lastFullScan }
+func (f *fakeManifestProvider) TracksIndexed() int      { return f.tracksIndexed }
 
 // newTestServer spins up an httptest.Server with the api handler and a
 // populated auth store. Returns the server plus one valid raw token for
@@ -39,7 +57,7 @@ func newTestServer(t *testing.T) (*httptest.Server, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := New(cfg, store, "AB:CD:EF:01:02:03:...:FF")
+	srv := New(cfg, store, nil, "AB:CD:EF:01:02:03:...:FF")
 	hs := httptest.NewServer(srv.Handler())
 	t.Cleanup(hs.Close)
 	return hs, raw
@@ -157,7 +175,7 @@ func newTestServerWithProbe(t *testing.T) (*httptest.Server, *Server, string) {
 		t.Fatal(err)
 	}
 	raw, _, _ := store.Mint("test")
-	s := New(cfg, store, "fp")
+	s := New(cfg, store, nil, "fp")
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", s.health)
@@ -270,7 +288,7 @@ func TestHealthOverTLSWithPinnedCert(t *testing.T) {
 	cfg := &config.Config{LibraryRoots: []string{lib}, ListenAddress: ":7788", LibraryName: "TLS"}
 	store, _ := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
 
-	s := New(cfg, store, fingerprint)
+	s := New(cfg, store, nil, fingerprint)
 	hs := httptest.NewUnstartedServer(s.Handler())
 	hs.TLS = &tls.Config{Certificates: []tls.Certificate{*cert}}
 	hs.StartTLS()

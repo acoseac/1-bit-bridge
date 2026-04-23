@@ -26,6 +26,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/api"
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
@@ -123,7 +124,22 @@ func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		return 1
 	}
 
-	apiSrv := api.New(cfg, store, fingerprint)
+	manifestStore, err := manifest.OpenStore(manifest.DefaultDBPath(cfg.DataDir))
+	if err != nil {
+		fmt.Fprintf(stderr, "open manifest store: %v\n", err)
+		return 1
+	}
+	defer manifestStore.Close()
+	scanner := manifest.NewScanner(cfg.LibraryRoots, manifestStore)
+	provider := manifest.NewProvider(cfg.LibraryRoots, manifestStore, scanner)
+
+	// Fire up the periodic scanner in the background. It runs an initial
+	// scan on startup, then rescans every cfg.ScanInterval().
+	scanCtx, scanCancel := context.WithCancel(context.Background())
+	defer scanCancel()
+	go scanner.RunPeriodic(scanCtx, cfg.ScanInterval())
+
+	apiSrv := api.New(cfg, store, provider, fingerprint)
 	httpSrv := &http.Server{
 		Addr:      cfg.ListenAddress,
 		Handler:   apiSrv.Handler(),
@@ -214,7 +230,21 @@ func scanCmd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "config load failed: %v\n", err)
 		return 2
 	}
-	fmt.Fprintf(stdout, "config loaded: libraryName=%q roots=%v\n", cfg.LibraryName, cfg.LibraryRoots)
-	fmt.Fprintln(stderr, "scan: not yet implemented (manifest scanner lands in a later PR)")
-	return 1
+	store, err := manifest.OpenStore(manifest.DefaultDBPath(cfg.DataDir))
+	if err != nil {
+		fmt.Fprintf(stderr, "open manifest store: %v\n", err)
+		return 1
+	}
+	defer store.Close()
+	scanner := manifest.NewScanner(cfg.LibraryRoots, store)
+
+	fmt.Fprintf(stdout, "Scanning %v ...\n", cfg.LibraryRoots)
+	start := time.Now()
+	n, err := scanner.Scan(context.Background())
+	if err != nil {
+		fmt.Fprintf(stderr, "scan error: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "Scan complete: %d tracks indexed in %s\n", n, time.Since(start).Round(time.Millisecond))
+	return 0
 }
