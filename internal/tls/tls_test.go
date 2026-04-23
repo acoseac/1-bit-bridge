@@ -82,7 +82,7 @@ func TestGenerateOrphanCertCleanupOnKeyFailure(t *testing.T) {
 	// created (a file at the parent). This makes writePEM(keyPath) fail
 	// after cert write succeeds.
 	blocker := filepath.Join(dir, "blocker")
-	if err := os.WriteFile(blocker, []byte("not a dir"), 0o644); err != nil {
+	if err := os.WriteFile(blocker, []byte("not a dir"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	keyPath := filepath.Join(blocker, "subdir", "key.pem")

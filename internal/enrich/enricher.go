@@ -216,10 +216,16 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) {
 			}
 			return
 		}
-		if res != nil {
+		// Only positively cache non-empty MBIDs. Storing the empty string
+		// for a "no match" result would session-cache the miss and block
+		// sibling-track retries after metadata changes or upstream mismatches
+		// — the exact stale behaviour PR #13's review flagged. Transient
+		// errors are already handled by the early-return above (no cache
+		// write), so this branch is strictly about positive hits.
+		if res != nil && res.MBID != "" {
 			artistMBID = res.MBID
+			e.artistCache.Store(key, artistMBID)
 		}
-		e.artistCache.Store(key, artistMBID)
 	}
 	if artistMBID != "" {
 		t.ArtistMBID = artistMBID

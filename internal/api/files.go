@@ -41,22 +41,23 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 	if len(roots) > 1 && (clientPath == "" || clientPath == "/") {
 		entries := make([]Entry, 0, len(roots))
 		for _, root := range roots {
+			base := filepath.Base(root)
 			info, err := os.Stat(root)
 			if err != nil {
 				// A root that's currently unreachable stays visible as a
 				// directory entry so iOS can render it (and surface a
 				// meaningful error if the user tries to descend).
 				entries = append(entries, Entry{
-					Name:    filepath.Base(root),
-					Path:    filepath.Base(root),
+					Name:    base,
+					Path:    base,
 					IsDir:   true,
 					ModTime: time.Time{},
 				})
 				continue
 			}
 			entries = append(entries, Entry{
-				Name:    filepath.Base(root),
-				Path:    filepath.Base(root),
+				Name:    base,
+				Path:    base,
 				IsDir:   true,
 				Size:    0,
 				ModTime: info.ModTime().UTC(),
