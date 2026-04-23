@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
@@ -31,9 +32,42 @@ type StatResponse struct {
 
 // list handles GET /v1/list?path=<rel>. Returns the entries of the resolved
 // directory. Entries are sorted by name (case-insensitive) for stable client
-// rendering.
+// rendering. In multi-root mode an empty path returns synthetic top-level
+// entries — one per configured root, keyed by basename — so iOS can
+// enumerate roots the same way SMB enumerates shares.
 func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 	clientPath := r.URL.Query().Get("path")
+	roots := s.resolver.Roots()
+	if len(roots) > 1 && (clientPath == "" || clientPath == "/") {
+		entries := make([]Entry, 0, len(roots))
+		for _, root := range roots {
+			info, err := os.Stat(root)
+			if err != nil {
+				// A root that's currently unreachable stays visible as a
+				// directory entry so iOS can render it (and surface a
+				// meaningful error if the user tries to descend).
+				entries = append(entries, Entry{
+					Name:    filepath.Base(root),
+					Path:    filepath.Base(root),
+					IsDir:   true,
+					ModTime: time.Time{},
+				})
+				continue
+			}
+			entries = append(entries, Entry{
+				Name:    filepath.Base(root),
+				Path:    filepath.Base(root),
+				IsDir:   true,
+				Size:    0,
+				ModTime: info.ModTime().UTC(),
+			})
+		}
+		sort.Slice(entries, func(i, j int) bool {
+			return lessCaseFold(entries[i].Name, entries[j].Name)
+		})
+		writeJSON(w, http.StatusOK, entries)
+		return
+	}
 	abs, info, err := s.resolver.ResolveChecked(clientPath)
 	if ok := writeResolveError(w, err); ok {
 		return
@@ -175,23 +209,12 @@ func writeResolveError(w http.ResponseWriter, err error) bool {
 	return true
 }
 
-// lessCaseFold compares two strings case-insensitively. Matches the
-// alphabetical-but-CI ordering iOS users expect in a file browser.
+// lessCaseFold compares two strings case-insensitively across the full
+// Unicode range. Matches the alphabetical-but-CI ordering iOS users
+// expect in a file browser — "Ébène" sorts near "e", not after "z" as
+// the older ASCII-only byte fold produced.
 func lessCaseFold(a, b string) bool {
-	for i := 0; i < len(a) && i < len(b); i++ {
-		ca, cb := foldByte(a[i]), foldByte(b[i])
-		if ca != cb {
-			return ca < cb
-		}
-	}
-	return len(a) < len(b)
-}
-
-func foldByte(b byte) byte {
-	if b >= 'A' && b <= 'Z' {
-		return b + ('a' - 'A')
-	}
-	return b
+	return strings.ToLower(a) < strings.ToLower(b)
 }
 
 // Copy is exposed for test shims; wraps io.Copy so tests can swap it out.

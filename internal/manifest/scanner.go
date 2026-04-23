@@ -111,13 +111,16 @@ func (s *Scanner) walkRoot(ctx context.Context, root string, seen map[string]str
 			return ctx.Err()
 		}
 		if d.IsDir() {
+			// Check skip *before* upserting — otherwise .Trash,
+			// .Spotlight-V100, $RECYCLE.BIN, etc. land in the folders
+			// table and the iOS client sees them in the manifest.
+			if shouldSkipDir(d.Name()) {
+				return filepath.SkipDir
+			}
 			// Record folder mtimes for the manifest / future skip logic.
 			if info, err := d.Info(); err == nil {
 				rel := relPath(root, abs, s.multiRoot())
 				_ = s.store.UpsertFolder(&Folder{Path: rel, ModTime: info.ModTime().UTC()})
-			}
-			if skip := shouldSkipDir(d.Name()); skip {
-				return filepath.SkipDir
 			}
 			return nil
 		}

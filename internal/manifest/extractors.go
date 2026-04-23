@@ -63,7 +63,7 @@ func extractViaDhowden(absPath string, t *Track) error {
 	}
 	defer f.Close()
 	m, err := tag.ReadFrom(f)
-	if errors.Is(err, tag.ErrNoTagsFound) || err == tag.ErrNoTagsFound {
+	if errors.Is(err, tag.ErrNoTagsFound) {
 		return nil
 	}
 	if err != nil {

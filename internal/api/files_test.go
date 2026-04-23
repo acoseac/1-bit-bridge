@@ -186,6 +186,76 @@ func TestListRequiresAuth(t *testing.T) {
 	}
 }
 
+func TestListMultiRootEmptyPathReturnsRoots(t *testing.T) {
+	tmp := t.TempDir()
+	a := filepath.Join(tmp, "Music")
+	b := filepath.Join(tmp, "Audiobooks")
+	for _, d := range []string{a, b} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := &config.Config{
+		LibraryRoots:  []string{a, b},
+		ListenAddress: ":7788",
+		LibraryName:   "Multi",
+	}
+	store, _ := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
+	raw, _, _ := store.Mint("test")
+	hs := httptest.NewServer(New(cfg, store, nil, "fp").Handler())
+	defer hs.Close()
+
+	resp := authGet(t, hs, "/v1/list?path=", raw)
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	var entries []Entry
+	if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("got %d entries, want 2: %+v", len(entries), entries)
+	}
+	// Sorted CI: Audiobooks before Music.
+	if entries[0].Name != "Audiobooks" || entries[1].Name != "Music" {
+		t.Errorf("unexpected order / names: %+v", entries)
+	}
+	if !entries[0].IsDir || !entries[1].IsDir {
+		t.Error("root entries must be directories")
+	}
+}
+
+func TestLessCaseFoldUnicode(t *testing.T) {
+	// strings.ToLower-based compare case-folds non-ASCII letters
+	// (É → é, Ü → ü, etc.). It does NOT give locale-aware collation —
+	// byte-order on UTF-8 still places accented letters after ASCII
+	// z — but it fixes the specific bug the old foldByte had: "É"
+	// used to compare as raw bytes and totally miss case equivalence
+	// with "é". Asserting the case-fold property keeps that regression
+	// from returning without committing us to a collation library.
+	cases := []struct{ a, b string }{
+		{"éclair", "Éclair"}, // identical after fold — expect !less in either direction
+		{"APPLE", "apple"},
+	}
+	for _, c := range cases {
+		if lessCaseFold(c.a, c.b) || lessCaseFold(c.b, c.a) {
+			t.Errorf("%q and %q should compare equal after case-fold", c.a, c.b)
+		}
+	}
+	// Regression: "Ébène" used to sort after "zoo" because the old
+	// ASCII fold left the first byte as 0xC3. With ToLower-based
+	// compare, "Ébène" (first rune fold-equal to "ébène") still sorts
+	// after "zoo" in UTF-8 byte order — but "Apple" no longer sorts
+	// before "Zebra" via the old uppercase-vs-lowercase-byte quirk.
+	if !lessCaseFold("Apple", "banana") {
+		t.Error("CI: Apple < banana failed")
+	}
+	if !lessCaseFold("apple", "Banana") {
+		t.Error("CI: apple < Banana failed")
+	}
+}
+
 // --- /v1/stat ---
 
 func TestStatFile(t *testing.T) {

@@ -31,11 +31,12 @@ func (p *Provider) IsScanning() bool { return p.scanner.IsScanning() }
 func (p *Provider) LastFullScan() time.Time { return p.scanner.LastFullScan() }
 
 // TracksIndexed reports the total number of tracks currently in the
-// manifest store (not the count for a single scan).
+// manifest store (not the count for a single scan). Backed by a
+// `SELECT COUNT(*)` so /v1/health doesn't allocate O(n) strings per poll.
 func (p *Provider) TracksIndexed() int {
-	paths, err := p.store.TrackPaths()
+	n, err := p.store.CountTracks()
 	if err != nil {
 		return 0
 	}
-	return len(paths)
+	return n
 }
