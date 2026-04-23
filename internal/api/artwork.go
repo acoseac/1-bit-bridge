@@ -1,10 +1,10 @@
 package api
 
 import (
+	"log"
 	"net/http"
 	"os"
 	"regexp"
-	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/enrich"
 )
@@ -46,13 +46,15 @@ func (s *Server) artistImage(w http.ResponseWriter, r *http.Request) {
 				"artist image not cached yet")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		log.Printf("artwork: open artist image %q: %v", mbid, err)
+		writeError(w, http.StatusInternalServerError, "internal", "internal error")
 		return
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		log.Printf("artwork: stat artist image %q: %v", mbid, err)
+		writeError(w, http.StatusInternalServerError, "internal", "internal error")
 		return
 	}
 	w.Header().Set("Content-Type", "image/jpeg")
@@ -91,17 +93,18 @@ func (s *Server) artwork(w http.ResponseWriter, r *http.Request) {
 				"artwork not cached (enricher may not have reached this album yet)")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		log.Printf("artwork: open release artwork %q (size=%d): %v", mbid, size, err)
+		writeError(w, http.StatusInternalServerError, "internal", "internal error")
 		return
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		log.Printf("artwork: stat release artwork %q (size=%d): %v", mbid, size, err)
+		writeError(w, http.StatusInternalServerError, "internal", "internal error")
 		return
 	}
 	w.Header().Set("Content-Type", "image/jpeg")
 	w.Header().Set("Cache-Control", "public, max-age=86400")
 	http.ServeContent(w, r, info.Name(), info.ModTime(), f)
-	_ = time.Duration(0) // silence unused-import in future edits
 }

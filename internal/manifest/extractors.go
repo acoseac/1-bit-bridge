@@ -215,7 +215,10 @@ func extractDSF(absPath string, t *Track) error {
 	}
 	sampleRate := le32(fmtChunk[28:32])
 	bitsPerSample := le32(fmtChunk[32:36]) // 1 for DSD
-	sampleCount := le64(fmtChunk[40:48])
+	// DSF v1.5 fmt chunk layout: sampleCount is bytes [36:44] and
+	// blockSizePerChannel is [44:48]. Reading [40:48] straddles both
+	// and yields garbage on every real-encoder (Korg/Sony/dCS) DSF.
+	sampleCount := le64(fmtChunk[36:44])
 
 	sr := float64(sampleRate)
 	bps := int(bitsPerSample)

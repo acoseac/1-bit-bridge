@@ -2,6 +2,7 @@ package enrich
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -70,6 +71,7 @@ func TestDeezerFetchImageReturnsBytes(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := NewDeezerClient(srv.URL, "test", nil)
+	c.SetAllowedImageHostsForTest([]string{"127.0.0.1"})
 	got, err := c.FetchImage(context.Background(), srv.URL+"/picture.jpg")
 	if err != nil {
 		t.Fatal(err)
@@ -117,17 +119,20 @@ func artistFixture(t *testing.T) (*httptest.Server, *httptest.Server, *httptest.
 	}))
 
 	var deezerCalls int32
+	var deezerBase string
 	deezerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&deezerCalls, 1)
 		switch {
 		case strings.Contains(r.URL.Path, "/search/artist"):
-			io.WriteString(w, `{"data":[{"id":1,"name":"Artist","picture_xl":"__IMAGE__/picture.jpg","picture_big":""}]}`)
+			fmt.Fprintf(w, `{"data":[{"id":1,"name":"Artist","picture_xl":%q,"picture_big":""}]}`,
+				deezerBase+"/picture.jpg")
 		default:
 			// Picture fetch — serve a JPEG.
 			w.Header().Set("Content-Type", "image/jpeg")
 			w.Write([]byte{0xFF, 0xD8, 0xFF, 0xE1, 0xDE, 0xAD})
 		}
 	}))
+	deezerBase = deezerSrv.URL
 
 	return mbSrv, caaSrv, deezerSrv, &deezerCalls
 }
@@ -152,6 +157,7 @@ func TestEnricherFetchesAndCachesArtistImage(t *testing.T) {
 	// fixture-build time.
 	httpClient := &http.Client{Transport: rewritingTransport{base: deezerSrv.URL, tr: http.DefaultTransport}}
 	deezerClient := NewDeezerClient(deezerSrv.URL, "t", httpClient)
+	deezerClient.SetAllowedImageHostsForTest([]string{"127.0.0.1"})
 
 	e := NewEnricher(store,
 		NewMusicBrainzClient(mbSrv.URL, "t", nil),
@@ -188,6 +194,50 @@ func TestEnricherFetchesAndCachesArtistImage(t *testing.T) {
 	}
 }
 
+func TestFetchImageRejectsNonDeezerHost(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("should not reach"))
+	}))
+	defer srv.Close()
+	c := NewDeezerClient(DefaultDeezerBase, "test", nil)
+	// Default production allowlist (no SetAllowedImageHostsForTest): the
+	// httptest host is NOT deezer/dzcdn, so the call must refuse before
+	// sending any bytes.
+	_, err := c.FetchImage(context.Background(), srv.URL+"/picture.jpg")
+	if err == nil {
+		t.Fatal("expected SSRF rejection, got nil")
+	}
+	if !strings.Contains(err.Error(), "refusing non-Deezer") {
+		t.Errorf("wrong error: %v", err)
+	}
+}
+
+func TestFetchImageRejectsOversizeBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg")
+		// Write maxDeezerImageBytes + 1 bytes.
+		buf := make([]byte, 4096)
+		written := 0
+		for written <= maxDeezerImageBytes {
+			n, _ := w.Write(buf)
+			if n == 0 {
+				return
+			}
+			written += n
+		}
+	}))
+	defer srv.Close()
+	c := NewDeezerClient(DefaultDeezerBase, "test", nil)
+	c.SetAllowedImageHostsForTest([]string{"127.0.0.1"})
+	_, err := c.FetchImage(context.Background(), srv.URL+"/huge.jpg")
+	if err == nil {
+		t.Fatal("expected oversize rejection, got nil")
+	}
+	if !strings.Contains(err.Error(), "exceeds") {
+		t.Errorf("wrong error: %v", err)
+	}
+}
+
 func TestEnricherDeduplicatesArtistLookups(t *testing.T) {
 	var mbArtistCalls int32
 	mbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -205,12 +255,17 @@ func TestEnricherDeduplicatesArtistLookups(t *testing.T) {
 	}))
 	defer caaSrv.Close()
 	var deezerSearchCalls int32
+	var deezerBase string
 	deezerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/search/artist") {
 			atomic.AddInt32(&deezerSearchCalls, 1)
+			fmt.Fprintf(w, `{"data":[{"id":1,"name":"Artist","picture_xl":%q}]}`, deezerBase+"/pic.jpg")
+			return
 		}
-		io.WriteString(w, `{"data":[{"id":1,"name":"Artist","picture_xl":"__IMAGE__/pic.jpg"}]}`)
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Write([]byte{0xFF, 0xD8, 0xFF})
 	}))
+	deezerBase = deezerSrv.URL
 	defer deezerSrv.Close()
 
 	dir := t.TempDir()
@@ -225,6 +280,7 @@ func TestEnricherDeduplicatesArtistLookups(t *testing.T) {
 
 	deezerClient := NewDeezerClient(deezerSrv.URL, "t", nil)
 	deezerClient.http.Transport = rewritingTransport{base: deezerSrv.URL, tr: http.DefaultTransport}
+	deezerClient.SetAllowedImageHostsForTest([]string{"127.0.0.1"})
 	e := NewEnricher(store,
 		NewMusicBrainzClient(mbSrv.URL, "t", nil),
 		NewCoverArtClient(caaSrv.URL, "t", nil),

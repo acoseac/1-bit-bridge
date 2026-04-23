@@ -87,7 +87,10 @@ func fileExists(path string) bool {
 
 func generate(certPath, keyPath, hostname string) error {
 	if err := os.MkdirAll(filepath.Dir(certPath), 0o755); err != nil {
-		return fmt.Errorf("mkdir: %w", err)
+		return fmt.Errorf("mkdir (cert): %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(keyPath), 0o755); err != nil {
+		return fmt.Errorf("mkdir (key): %w", err)
 	}
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -103,12 +106,15 @@ func generate(certPath, keyPath, hostname string) error {
 			CommonName:   "1-bit Bridge",
 			Organization: []string{"acoseac"},
 		},
-		NotBefore:             time.Now().Add(-time.Hour), // allow tiny clock skew
-		NotAfter:              time.Now().Add(certDuration),
-		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		NotBefore: time.Now().Add(-time.Hour), // allow tiny clock skew
+		NotAfter:  time.Now().Add(certDuration),
+		// ECDSA leaf server cert: only DigitalSignature is meaningful.
+		// KeyEncipherment is RSA-specific (RFC 5480 §3) and IsCA must be
+		// false for a non-signing end-entity cert.
+		KeyUsage:              x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
-		IsCA:                  true,
+		IsCA:                  false,
 		DNSNames:              dnsNames(hostname),
 		IPAddresses:           defaultIPs(),
 	}
@@ -121,9 +127,11 @@ func generate(certPath, keyPath, hostname string) error {
 	}
 	keyDER, err := x509.MarshalECPrivateKey(priv)
 	if err != nil {
+		_ = os.Remove(certPath) // best-effort: avoid orphan cert without matching key
 		return fmt.Errorf("marshal key: %w", err)
 	}
 	if err := writePEM(keyPath, "EC PRIVATE KEY", keyDER, 0o600); err != nil {
+		_ = os.Remove(certPath) // best-effort: avoid orphan cert without matching key
 		return fmt.Errorf("write key: %w", err)
 	}
 	return nil

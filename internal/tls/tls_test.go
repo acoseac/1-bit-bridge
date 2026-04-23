@@ -60,6 +60,40 @@ func TestGenerateFirstRun(t *testing.T) {
 	if parsed.NotAfter.Before(time.Now().Add(9 * 365 * 24 * time.Hour)) {
 		t.Errorf("NotAfter %v is sooner than expected", parsed.NotAfter)
 	}
+
+	// RFC 5480 §3: KeyEncipherment MUST NOT be set on an EC-keyed cert;
+	// leaf server certs must not carry IsCA.
+	if parsed.KeyUsage != x509.KeyUsageDigitalSignature {
+		t.Errorf("KeyUsage = %b, want only DigitalSignature (%b)",
+			parsed.KeyUsage, x509.KeyUsageDigitalSignature)
+	}
+	if parsed.IsCA {
+		t.Error("IsCA = true on a leaf server cert")
+	}
+}
+
+func TestGenerateOrphanCertCleanupOnKeyFailure(t *testing.T) {
+	// If the key write fails after the cert write succeeded, the cert
+	// must be removed so the next LoadOrGenerate mints a fresh pair
+	// rather than tripping the "inconsistent TLS material" error.
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "cert.pem")
+	// Point keyPath at a directory that doesn't exist AND can't be
+	// created (a file at the parent). This makes writePEM(keyPath) fail
+	// after cert write succeeds.
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, []byte("not a dir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(blocker, "subdir", "key.pem")
+
+	err := generate(certPath, keyPath, "")
+	if err == nil {
+		t.Fatal("expected error when key path is unwritable")
+	}
+	if fileExists(certPath) {
+		t.Error("cert left on disk after key-write failure — orphan state")
+	}
 }
 
 func TestReloadsWithoutRegenerating(t *testing.T) {

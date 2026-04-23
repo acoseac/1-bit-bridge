@@ -53,6 +53,10 @@ type Enricher struct {
 	// the same artist share the lookup + image-fetch.
 	artistCache sync.Map
 
+	// deezerNegCache remembers "Deezer had no portrait" per artist MBID
+	// so sibling tracks don't each re-query. Populated with struct{}{}.
+	deezerNegCache sync.Map
+
 	// progress counters exposed via ScanState.
 	done    atomic.Int64
 	skipped atomic.Int64
@@ -134,6 +138,12 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 			time.Sleep(e.MBMinInterval) // pace
 			res, err := e.mb.SearchRelease(ctx, t.Artist, t.Album)
 			if err != nil {
+				// Shutdown cancellation looks like an MB error; don't
+				// poison the skipped-cache or mark the track so a
+				// future run can retry it normally.
+				if ctx.Err() != nil {
+					return
+				}
 				log.Printf("enricher: MB search %q / %q: %v", t.Artist, t.Album, err)
 				// Cache the failure as an empty MBID so sibling tracks
 				// on the same album don't re-hammer MB with the same
@@ -197,7 +207,16 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) {
 	} else {
 		time.Sleep(e.MBMinInterval)
 		res, err := e.mb.SearchArtist(ctx, t.Artist)
-		if err == nil && res != nil {
+		if err != nil {
+			// Don't cache transient errors session-wide — a network
+			// blip would otherwise block sibling-track retries until
+			// process restart. Matches the album-path behavior.
+			if ctx.Err() == nil {
+				log.Printf("enricher: MB artist search %q: %v", t.Artist, err)
+			}
+			return
+		}
+		if res != nil {
 			artistMBID = res.MBID
 		}
 		e.artistCache.Store(key, artistMBID)
@@ -206,14 +225,23 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) {
 		t.ArtistMBID = artistMBID
 	}
 	// Fetch Deezer image (the only source in v1 for artist portraits).
-	// Cache file is keyed by artist MBID if we have one, else by a hash
-	// of the artist name. iOS always has the name, so a name-keyed path
-	// remains accessible via /v1/artist-image?name=... (future work).
+	// Cache file is keyed by artist MBID; name-keyed caching is not
+	// implemented today — see /v1/artist-image for the MBID-only API.
 	if e.deezer == nil || artistMBID == "" {
 		return
 	}
-	if _, err := e.ensureArtistImageCached(ctx, artistMBID, t.Artist); err != nil {
+	// Negative-cache Deezer misses so sibling tracks by the same artist
+	// don't each re-query Deezer for a portrait the API doesn't have.
+	if _, miss := e.deezerNegCache.Load(artistMBID); miss {
+		return
+	}
+	found, err := e.ensureArtistImageCached(ctx, artistMBID, t.Artist)
+	if err != nil {
 		log.Printf("enricher: artist image %q (%s): %v", t.Artist, artistMBID, err)
+		return
+	}
+	if !found {
+		e.deezerNegCache.Store(artistMBID, struct{}{})
 	}
 }
 

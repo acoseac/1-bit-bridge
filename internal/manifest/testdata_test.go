@@ -139,7 +139,9 @@ func writeMinimalDSF(t *testing.T, path string, sampleRate uint32, frames map[st
 	binary.LittleEndian.PutUint32(fmtChunk[28:32], sampleRate)
 	binary.LittleEndian.PutUint32(fmtChunk[32:36], 1) // bits/sample = 1 for DSD
 	sampleCount := uint64(sampleRate * 5)             // ~5 seconds
-	binary.LittleEndian.PutUint64(fmtChunk[40:48], sampleCount)
+	binary.LittleEndian.PutUint64(fmtChunk[36:44], sampleCount)
+	// blockSizePerChannel lives at [44:48]; a common value is 4096.
+	binary.LittleEndian.PutUint32(fmtChunk[44:48], 4096)
 
 	var dataHeader [12]byte
 	copy(dataHeader[0:4], []byte("data"))
