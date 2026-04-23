@@ -60,6 +60,7 @@ func (s *Store) migrate() error {
 		enriched_at INTEGER NOT NULL DEFAULT 0
 	);
 	CREATE INDEX IF NOT EXISTS idx_tracks_mtime ON tracks(mtime_ns);
+	CREATE INDEX IF NOT EXISTS idx_tracks_indexed ON tracks(indexed_at);
 	CREATE INDEX IF NOT EXISTS idx_tracks_enriched ON tracks(enriched_at);
 
 	CREATE TABLE IF NOT EXISTS folders (
@@ -172,13 +173,18 @@ func (s *Store) GetTrack(path string) (*Track, error) {
 	return &t, nil
 }
 
-// ListTracks returns all tracks, or (if since != nil) only tracks with
-// mtime strictly greater than since.
+// ListTracks returns all tracks, or (if since != nil) only tracks that
+// were written/updated in the index after since. Filtered by
+// indexed_at (when we last wrote the row) rather than mtime_ns (the
+// on-disk file time) so that files copied into the library with an
+// old mtime still surface in incremental deltas — otherwise the iOS
+// client has to do a full sync to see ripped-years-ago albums that
+// were just added.
 func (s *Store) ListTracks(since *time.Time) ([]Track, error) {
 	q := `SELECT tags_json FROM tracks`
 	args := []any{}
 	if since != nil {
-		q += ` WHERE mtime_ns > ?`
+		q += ` WHERE indexed_at > ?`
 		args = append(args, since.UnixNano())
 	}
 	q += ` ORDER BY path ASC`
@@ -200,6 +206,15 @@ func (s *Store) ListTracks(since *time.Time) ([]Track, error) {
 		out = append(out, t)
 	}
 	return out, rows.Err()
+}
+
+// CountTracks returns the total number of track rows. /v1/health polls
+// this frequently, so it's backed by a SELECT COUNT(*) instead of a
+// full path-materialization + len().
+func (s *Store) CountTracks() (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM tracks`).Scan(&n)
+	return n, err
 }
 
 // TrackPaths returns every known track path (sorted). Used by the scanner's

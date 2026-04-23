@@ -11,6 +11,7 @@ package fs
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path"
 	"path/filepath"
@@ -41,7 +42,10 @@ type Resolver struct {
 }
 
 // New returns a Resolver for the given library roots. The roots must be
-// absolute paths (config.Load enforces this).
+// absolute paths (config.Load enforces this). Callers that want to
+// reject duplicate basenames early should call ValidateRoots first;
+// when two roots share a basename, New keeps the last one (the older
+// behavior) to avoid panicking deep inside api.New.
 func New(roots []string) *Resolver {
 	r := &Resolver{roots: append([]string(nil), roots...)}
 	if len(roots) > 1 {
@@ -51,6 +55,27 @@ func New(roots []string) *Resolver {
 		}
 	}
 	return r
+}
+
+// ValidateRoots returns a descriptive error if two library roots share a
+// basename. The multi-root listing protocol keys each top-level entry by
+// basename (e.g. /data/Music and /archive/Music both present as "Music"),
+// so a collision makes one root unreachable. cmd/bridge calls this after
+// config.Load so misconfiguration surfaces at startup rather than as a
+// silent 404 from /v1/list.
+func ValidateRoots(roots []string) error {
+	if len(roots) < 2 {
+		return nil
+	}
+	seen := make(map[string]string, len(roots))
+	for _, root := range roots {
+		b := filepath.Base(root)
+		if prior, ok := seen[b]; ok {
+			return fmt.Errorf("duplicate library-root basename %q (%s vs %s) — multi-root listing requires unique basenames", b, prior, root)
+		}
+		seen[b] = root
+	}
+	return nil
 }
 
 // Resolve maps a client-supplied relative path to an absolute server path.

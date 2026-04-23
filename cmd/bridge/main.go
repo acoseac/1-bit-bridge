@@ -27,6 +27,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/enrich"
+	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	bridgemdns "github.com/acoseac/1-bit-bridge/internal/mdns"
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
@@ -107,6 +108,10 @@ func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "config load failed: %v\n", err)
+		return 2
+	}
+	if err := bridgefs.ValidateRoots(cfg.LibraryRoots); err != nil {
+		fmt.Fprintf(stderr, "config: %v\n", err)
 		return 2
 	}
 	if *addrOverride != "" {

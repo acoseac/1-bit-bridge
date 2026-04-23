@@ -174,25 +174,42 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 }
 
-func TestStoreSinceFilter(t *testing.T) {
+func TestStoreSinceFilterIndexedAt(t *testing.T) {
+	// ListTracks's `since` is indexed_at, not mtime_ns, so a track with
+	// an old file-mtime still surfaces in a delta if it was newly
+	// indexed. This covers the "rip from years ago, copy into library
+	// today" scenario that the mtime-based filter couldn't see.
 	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
 	defer s.Close()
-	t0 := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
-	t1 := t0.Add(30 * time.Minute)
-	t2 := t0.Add(45 * time.Minute)
-	s.UpsertTrack(&Track{Path: "old.flac", Size: 1, ModTime: t0})
-	s.UpsertTrack(&Track{Path: "mid.flac", Size: 1, ModTime: t1})
-	s.UpsertTrack(&Track{Path: "new.flac", Size: 1, ModTime: t2})
 
-	// Query everything: 3.
+	oldMtime := time.Now().Add(-10 * 365 * 24 * time.Hour).UTC().Truncate(time.Second)
+	s.UpsertTrack(&Track{Path: "old.flac", Size: 1, ModTime: oldMtime})
+	// Sleep spans a couple of Go-time ticks so the cursor lands
+	// strictly between the two UpsertTrack calls' indexed_at values.
+	time.Sleep(10 * time.Millisecond)
+	cursor := time.Now().UTC()
+	time.Sleep(10 * time.Millisecond)
+	s.UpsertTrack(&Track{Path: "mid.flac", Size: 1, ModTime: oldMtime})
+	s.UpsertTrack(&Track{Path: "new.flac", Size: 1, ModTime: time.Now()})
+
 	all, _ := s.ListTracks(nil)
 	if len(all) != 3 {
 		t.Errorf("all: %d", len(all))
 	}
-	// Query since t1 (strict >): only new.
-	newer, _ := s.ListTracks(&t1)
-	if len(newer) != 1 || newer[0].Path != "new.flac" {
-		t.Errorf("newer than t1: %+v", newer)
+	newer, _ := s.ListTracks(&cursor)
+	if len(newer) != 2 {
+		t.Fatalf("newer than cursor: want 2 (mid+new), got %d", len(newer))
+	}
+	// mid.flac has an ancient file-mtime but a fresh indexed_at — it
+	// MUST surface. An mtime-based filter would silently drop it.
+	foundMid := false
+	for _, tr := range newer {
+		if tr.Path == "mid.flac" {
+			foundMid = true
+		}
+	}
+	if !foundMid {
+		t.Error("mid.flac (ancient mtime, fresh indexed_at) missing from delta")
 	}
 }
 

@@ -237,3 +237,31 @@ func TestRootsIsAcopy(t *testing.T) {
 		t.Error("Roots mutated internal state")
 	}
 }
+
+func TestValidateRootsRejectsDuplicateBasename(t *testing.T) {
+	tmp := t.TempDir()
+	a := filepath.Join(tmp, "a", "Music")
+	b := filepath.Join(tmp, "b", "Music")
+	for _, d := range []string{a, b} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := ValidateRoots([]string{a, b}); err == nil {
+		t.Fatal("expected collision error, got nil")
+	} else if !strings.Contains(err.Error(), "Music") {
+		t.Errorf("err doesn't name the colliding basename: %v", err)
+	}
+}
+
+func TestValidateRootsSingleRootIsOK(t *testing.T) {
+	if err := ValidateRoots([]string{"/a/Music"}); err != nil {
+		t.Errorf("single root should not error: %v", err)
+	}
+}
+
+func TestValidateRootsUniqueBasenames(t *testing.T) {
+	if err := ValidateRoots([]string{"/a/Music", "/b/Audiobooks"}); err != nil {
+		t.Errorf("unique basenames should not error: %v", err)
+	}
+}

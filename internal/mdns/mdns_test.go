@@ -88,12 +88,11 @@ func TestAdvertiseClosingNilAdvertiserIsSafe(t *testing.T) {
 func TestIpsForAdvertiseExcludesLoopback(t *testing.T) {
 	// On any reasonable dev machine this returns at least one address;
 	// on a locked-down CI machine it may be empty. Either is valid.
+	// Link-local addresses are intentionally allowed — mDNS/Bonjour
+	// discovery on link-local is the primary use case.
 	for _, ip := range ipsForAdvertise() {
 		if ip.IsLoopback() {
 			t.Errorf("loopback IP leaked into advertised set: %v", ip)
-		}
-		if ip.IsLinkLocalUnicast() {
-			t.Errorf("link-local IP leaked: %v", ip)
 		}
 	}
 }
