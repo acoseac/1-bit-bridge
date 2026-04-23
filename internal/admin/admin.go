@@ -159,7 +159,6 @@ func (s *Server) scanCtx() context.Context {
 	return context.Background()
 }
 
-
 // Serve binds to deps.Cfg.AdminAddress and blocks until ctx is done.
 // Returns on listener error or after graceful shutdown. Intended for
 // serveCmd; tests should use Handler + httptest.
