@@ -22,6 +22,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
 
@@ -29,6 +30,7 @@ import (
 type Server struct {
 	cfg         *config.Config
 	store       *auth.Store
+	resolver    *bridgefs.Resolver
 	fingerprint string
 	startedAt   time.Time
 }
@@ -39,6 +41,7 @@ func New(cfg *config.Config, store *auth.Store, fingerprint string) *Server {
 	return &Server{
 		cfg:         cfg,
 		store:       store,
+		resolver:    bridgefs.New(cfg.LibraryRoots),
 		fingerprint: fingerprint,
 		startedAt:   time.Now().UTC(),
 	}
@@ -49,6 +52,10 @@ func New(cfg *config.Config, store *auth.Store, fingerprint string) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", s.health)
+	mux.HandleFunc("GET /v1/list", s.authed(s.list))
+	mux.HandleFunc("GET /v1/stat", s.authed(s.stat))
+	mux.HandleFunc("GET /v1/read", s.authed(s.read))
+	mux.HandleFunc("GET /v1/download", s.authed(s.download))
 	return protocolHeader(mux)
 }
 

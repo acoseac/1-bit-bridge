@@ -1,0 +1,402 @@
+package api
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/acoseac/1-bit-bridge/internal/auth"
+	"github.com/acoseac/1-bit-bridge/internal/config"
+)
+
+// fileFixture lays down a small library tree and returns an httptest server
+// plus a valid bearer token.
+//
+//	root/
+//	  Artist/
+//	    Album/
+//	      01 Track.flac    (1024 bytes of 0xAA)
+//	      02 Other.flac    (512 bytes of 0xBB)
+//	    Single.flac        (256 bytes of 0xCC)
+//	  .DS_Store            (hidden, should not appear in list)
+func fileFixture(t *testing.T) (*httptest.Server, string, string) {
+	t.Helper()
+	tmp := t.TempDir()
+	root := filepath.Join(tmp, "Music")
+	for _, p := range []string{
+		"Artist/Album",
+	} {
+		if err := os.MkdirAll(filepath.Join(root, p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write := func(rel string, b byte, n int) {
+		data := bytes.Repeat([]byte{b}, n)
+		p := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.WriteFile(p, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("Artist/Album/01 Track.flac", 0xAA, 1024)
+	write("Artist/Album/02 Other.flac", 0xBB, 512)
+	write("Artist/Single.flac", 0xCC, 256)
+	os.WriteFile(filepath.Join(root, ".DS_Store"), []byte("hidden"), 0o644)
+
+	cfg := &config.Config{
+		LibraryRoots:  []string{root},
+		ListenAddress: ":7788",
+		LibraryName:   "Test",
+	}
+	store, _ := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
+	raw, _, _ := store.Mint("test")
+
+	srv := New(cfg, store, "fp")
+	hs := httptest.NewServer(srv.Handler())
+	t.Cleanup(hs.Close)
+	return hs, raw, root
+}
+
+func authGet(t *testing.T, hs *httptest.Server, path, token string) *http.Response {
+	t.Helper()
+	req, _ := http.NewRequest("GET", hs.URL+path, nil)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+func authGetRange(t *testing.T, hs *httptest.Server, path, token, rng string) *http.Response {
+	t.Helper()
+	req, _ := http.NewRequest("GET", hs.URL+path, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	if rng != "" {
+		req.Header.Set("Range", rng)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+// --- /v1/list ---
+
+func TestListReturnsSortedNonHiddenEntries(t *testing.T) {
+	hs, tok, _ := fileFixture(t)
+	resp := authGet(t, hs, "/v1/list?path=Artist/Album", tok)
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	var entries []Entry
+	if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("got %d entries, want 2: %+v", len(entries), entries)
+	}
+	if entries[0].Name != "01 Track.flac" || entries[1].Name != "02 Other.flac" {
+		t.Errorf("order wrong: %v", entries)
+	}
+	if entries[0].Path != "Artist/Album/01 Track.flac" {
+		t.Errorf("Path = %q", entries[0].Path)
+	}
+	if entries[0].Size != 1024 {
+		t.Errorf("size = %d", entries[0].Size)
+	}
+	if entries[0].IsDir {
+		t.Error("expected file, got dir")
+	}
+}
+
+func TestListRootListsTopLevel(t *testing.T) {
+	hs, tok, _ := fileFixture(t)
+	resp := authGet(t, hs, "/v1/list?path=", tok)
+	defer resp.Body.Close()
+	var entries []Entry
+	json.NewDecoder(resp.Body).Decode(&entries)
+	if len(entries) != 1 || entries[0].Name != "Artist" {
+		t.Errorf("root list = %v, want [Artist]", entries)
+	}
+	if !entries[0].IsDir {
+		t.Error("Artist should be a directory")
+	}
+}
+
+func TestListExcludesDotFiles(t *testing.T) {
+	hs, tok, _ := fileFixture(t)
+	resp := authGet(t, hs, "/v1/list?path=", tok)
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if strings.Contains(string(body), ".DS_Store") {
+		t.Errorf("list leaked .DS_Store: %s", body)
+	}
+}
+
+func TestListFileReturns400(t *testing.T) {
+	hs, tok, _ := fileFixture(t)
+	resp := authGet(t, hs, "/v1/list?path=Artist/Album/01%20Track.flac", tok)
+	defer resp.Body.Close()
+	if resp.StatusCode != 400 {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestListNotFoundReturns404(t *testing.T) {
+	hs, tok, _ := fileFixture(t)
+	resp := authGet(t, hs, "/v1/list?path=Nonexistent", tok)
+	defer resp.Body.Close()
+	if resp.StatusCode != 404 {
+		t.Errorf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestListTraversalReturns400(t *testing.T) {
+	hs, tok, _ := fileFixture(t)
+	resp := authGet(t, hs, "/v1/list?path="+url.QueryEscape("../outside"), tok)
+	defer resp.Body.Close()
+	if resp.StatusCode != 400 {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+	var er ErrorResponse
+	json.NewDecoder(resp.Body).Decode(&er)
+	if er.Error != "bad_request" {
+		t.Errorf("error code = %q", er.Error)
+	}
+}
+
+func TestListRequiresAuth(t *testing.T) {
+	hs, _, _ := fileFixture(t)
+	resp := authGet(t, hs, "/v1/list?path=", "")
+	defer resp.Body.Close()
+	if resp.StatusCode != 401 {
+		t.Errorf("status = %d, want 401", resp.StatusCode)
+	}
+}
+
+// --- /v1/stat ---
+
+func TestStatFile(t *testing.T) {
+	hs, tok, _ := fileFixture(t)
+	resp := authGet(t, hs, "/v1/stat?path=Artist/Album/01%20Track.flac", tok)
+	defer resp.Body.Close()
+	var st StatResponse
+	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
+		t.Fatal(err)
+	}
+	if st.IsDir {
+		t.Error("expected file")
+	}
+	if st.Size != 1024 {
+		t.Errorf("size = %d", st.Size)
+	}
+}
+
+func TestStatDir(t *testing.T) {
+	hs, tok, _ := fileFixture(t)
+	resp := authGet(t, hs, "/v1/stat?path=Artist/Album", tok)
+	defer resp.Body.Close()
+	var st StatResponse
+	json.NewDecoder(resp.Body).Decode(&st)
+	if !st.IsDir {
+		t.Error("expected dir")
+	}
+}
+
+func TestStatNotFound(t *testing.T) {
+	hs, tok, _ := fileFixture(t)
+	resp := authGet(t, hs, "/v1/stat?path=nope/nope", tok)
+	defer resp.Body.Close()
+	if resp.StatusCode != 404 {
+		t.Errorf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
+// --- /v1/read ---
+
+func TestReadRequiresRangeHeader(t *testing.T) {
+	hs, tok, _ := fileFixture(t)
+	resp := authGetRange(t, hs, "/v1/read?path=Artist/Album/01%20Track.flac", tok, "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestedRangeNotSatisfiable {
+		t.Errorf("status = %d, want 416", resp.StatusCode)
+	}
+	var er ErrorResponse
+	json.NewDecoder(resp.Body).Decode(&er)
+	if er.Error != "range_required" {
+		t.Errorf("error code = %q", er.Error)
+	}
+}
+
+func TestReadReturnsExactBytes(t *testing.T) {
+	hs, tok, _ := fileFixture(t)
+	// Bytes 0-9: first 10 bytes of the 0xAA-filled file.
+	resp := authGetRange(t, hs, "/v1/read?path=Artist/Album/01%20Track.flac", tok, "bytes=0-9")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusPartialContent {
+		t.Errorf("status = %d, want 206", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if len(body) != 10 {
+		t.Errorf("len = %d, want 10", len(body))
+	}
+	for i, b := range body {
+		if b != 0xAA {
+			t.Errorf("byte %d = 0x%02x, want 0xAA", i, b)
+		}
+	}
+}
+
+func TestReadEndRangeReturnsCorrectBytes(t *testing.T) {
+	hs, tok, _ := fileFixture(t)
+	// Tail range: last 16 bytes.
+	resp := authGetRange(t, hs, "/v1/read?path=Artist/Album/02%20Other.flac", tok, "bytes=-16")
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if len(body) != 16 {
+		t.Errorf("len = %d, want 16", len(body))
+	}
+	for _, b := range body {
+		if b != 0xBB {
+			t.Errorf("byte = 0x%02x, want 0xBB", b)
+			break
+		}
+	}
+}
+
+func TestReadOnDirectoryReturns400(t *testing.T) {
+	hs, tok, _ := fileFixture(t)
+	resp := authGetRange(t, hs, "/v1/read?path=Artist", tok, "bytes=0-10")
+	defer resp.Body.Close()
+	if resp.StatusCode != 400 {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+// --- /v1/download ---
+
+func TestDownloadReturnsFullFileUnranged(t *testing.T) {
+	hs, tok, _ := fileFixture(t)
+	resp := authGet(t, hs, "/v1/download?path=Artist/Album/01%20Track.flac", tok)
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Errorf("status = %d", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/octet-stream" {
+		t.Errorf("content-type = %q", ct)
+	}
+	if ar := resp.Header.Get("Accept-Ranges"); ar != "bytes" {
+		t.Errorf("accept-ranges = %q", ar)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if len(body) != 1024 {
+		t.Errorf("len = %d, want 1024", len(body))
+	}
+}
+
+func TestDownloadSupportsRange(t *testing.T) {
+	hs, tok, _ := fileFixture(t)
+	resp := authGetRange(t, hs, "/v1/download?path=Artist/Album/01%20Track.flac", tok, "bytes=100-199")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusPartialContent {
+		t.Errorf("status = %d, want 206", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if len(body) != 100 {
+		t.Errorf("len = %d, want 100", len(body))
+	}
+}
+
+func TestDownloadNotFound(t *testing.T) {
+	hs, tok, _ := fileFixture(t)
+	resp := authGet(t, hs, "/v1/download?path=nope/nope.flac", tok)
+	defer resp.Body.Close()
+	if resp.StatusCode != 404 {
+		t.Errorf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestDownloadTraversalRejected(t *testing.T) {
+	hs, tok, _ := fileFixture(t)
+	resp := authGet(t, hs, "/v1/download?path="+url.QueryEscape("../../etc/passwd"), tok)
+	defer resp.Body.Close()
+	if resp.StatusCode != 400 {
+		t.Errorf("status = %d, want 400 for traversal", resp.StatusCode)
+	}
+}
+
+// --- large file smoke test — ensure we don't buffer the whole thing ---
+
+func TestDownloadLargeFileStreams(t *testing.T) {
+	hs, tok, root := fileFixture(t)
+	// Write a 4 MB file of a repeating pattern.
+	big := filepath.Join(root, "Artist", "big.flac")
+	data := make([]byte, 4*1024*1024)
+	for i := range data {
+		data[i] = byte(i & 0xFF)
+	}
+	os.WriteFile(big, data, 0o644)
+
+	resp := authGet(t, hs, "/v1/download?path=Artist/big.flac", tok)
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if len(body) != len(data) {
+		t.Fatalf("body len = %d, want %d", len(body), len(data))
+	}
+	// Spot-check a few offsets instead of byte-by-byte comparing 4 MB.
+	for _, i := range []int{0, 1024, 1024 * 1024, len(data) - 1} {
+		if body[i] != data[i] {
+			t.Errorf("byte %d = 0x%02x, want 0x%02x", i, body[i], data[i])
+		}
+	}
+}
+
+// --- Range-and-auth: full matrix of "requires auth" for file endpoints ---
+
+func TestFileEndpointsRequireAuth(t *testing.T) {
+	hs, _, _ := fileFixture(t)
+	for _, path := range []string{
+		"/v1/list?path=",
+		"/v1/stat?path=Artist",
+		"/v1/read?path=Artist/Single.flac",
+		"/v1/download?path=Artist/Single.flac",
+	} {
+		resp := authGet(t, hs, path, "")
+		resp.Body.Close()
+		if resp.StatusCode != 401 {
+			t.Errorf("%s without token: status = %d, want 401", path, resp.StatusCode)
+		}
+	}
+}
+
+// --- childPath helper ---
+
+func TestChildPathBuilding(t *testing.T) {
+	cases := []struct{ parent, name, want string }{
+		{"", "A", "A"},
+		{"/", "A", "A"},
+		{"A", "b", "A/b"},
+		{"A/B", "c.flac", "A/B/c.flac"},
+	}
+	for _, c := range cases {
+		got := childPath(c.parent, c.name)
+		if got != c.want {
+			t.Errorf("childPath(%q,%q) = %q, want %q", c.parent, c.name, got, c.want)
+		}
+	}
+}
+
+// quiet unused-import warning — keeps fmt alive for future assertion helpers.
+var _ = fmt.Sprintf
