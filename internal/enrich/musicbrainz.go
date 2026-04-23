@@ -144,11 +144,22 @@ type releaseSearchResponse struct {
 }
 
 type releaseCandidate struct {
-	ID             string         `json:"id"`
-	Score          int            `json:"score"`
-	Title          string         `json:"title"`
-	ArtistCredit   []artistCredit `json:"artist-credit"`
-	ReleaseGroupID string         `json:"release-group,omitempty"`
+	ID           string         `json:"id"`
+	Score        int            `json:"score"`
+	Title        string         `json:"title"`
+	ArtistCredit []artistCredit `json:"artist-credit"`
+	// MusicBrainz returns release-group as an object
+	// ({id, title, primary-type}) when present, not a bare string. The
+	// previous `string` type silently blew up every enrichment against
+	// the public API. Keeping it typed so we can reach `.ID` for the
+	// future release-group artwork fallback.
+	ReleaseGroup *releaseGroup `json:"release-group,omitempty"`
+}
+
+type releaseGroup struct {
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	PrimaryType string `json:"primary-type"`
 }
 
 type artistCredit struct {

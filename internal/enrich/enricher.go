@@ -135,6 +135,15 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 			res, err := e.mb.SearchRelease(ctx, t.Artist, t.Album)
 			if err != nil {
 				log.Printf("enricher: MB search %q / %q: %v", t.Artist, t.Album, err)
+				// Cache the failure as an empty MBID so sibling tracks
+				// on the same album don't re-hammer MB with the same
+				// query and hit the same error. This matters for
+				// persistent decode errors (e.g. schema drift) where
+				// every retry is guaranteed to fail — without the
+				// cache, the worker loops forever on an N-track album.
+				// Successful searches populate the same cache entry
+				// with a real MBID the next pass over.
+				e.albumCache.Store(key, "")
 				e.markSkipped(t, fmt.Sprintf("MB error: %v", err))
 				return
 			}
