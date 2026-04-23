@@ -3,9 +3,27 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// writeValidConfig drops a minimal-but-valid bridge.yaml next to a real
+// library root. Returns the config path.
+func writeValidConfig(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	lib := filepath.Join(dir, "Music")
+	if err := os.MkdirAll(lib, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, "bridge.yaml")
+	if err := os.WriteFile(cfgPath, []byte("libraryRoots:\n  - "+lib+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return cfgPath
+}
 
 func runCapture(t *testing.T, args ...string) (stdout, stderr string, code int) {
 	t.Helper()
@@ -57,13 +75,35 @@ func TestUnknownSubcommandReturns2(t *testing.T) {
 	}
 }
 
-func TestServeStubReturns1(t *testing.T) {
-	_, stderr, code := runCapture(t, "serve", "--addr", ":0", "--config", "does-not-exist.yaml")
+func TestServeStubLoadsConfigAndReturns1(t *testing.T) {
+	cfgPath := writeValidConfig(t)
+	stdout, stderr, code := runCapture(t, "serve", "--config", cfgPath)
 	if code != 1 {
-		t.Errorf("serve stub exit code = %d, want 1", code)
+		t.Errorf("serve stub exit code = %d, want 1; stderr=%q", code, stderr)
+	}
+	if !strings.Contains(stdout, "config loaded") {
+		t.Errorf("serve stdout missing config summary: %q", stdout)
 	}
 	if !strings.Contains(stderr, "not yet implemented") {
-		t.Errorf("serve stub stderr missing marker: %q", stderr)
+		t.Errorf("serve stderr missing marker: %q", stderr)
+	}
+}
+
+func TestServeMissingConfigReturns2(t *testing.T) {
+	_, stderr, code := runCapture(t, "serve", "--config", "/nonexistent/bridge.yaml")
+	if code != 2 {
+		t.Errorf("serve missing-config exit code = %d, want 2", code)
+	}
+	if !strings.Contains(stderr, "config load failed") {
+		t.Errorf("serve missing-config stderr: %q", stderr)
+	}
+}
+
+func TestServeAddrOverride(t *testing.T) {
+	cfgPath := writeValidConfig(t)
+	stdout, _, _ := runCapture(t, "serve", "--config", cfgPath, "--addr", "127.0.0.1:1234")
+	if !strings.Contains(stdout, "listen=127.0.0.1:1234") {
+		t.Errorf("serve --addr override not honored: %q", stdout)
 	}
 }
 
@@ -77,13 +117,24 @@ func TestPairStubReturns1(t *testing.T) {
 	}
 }
 
-func TestScanStubReturns1(t *testing.T) {
-	_, stderr, code := runCapture(t, "scan")
+func TestScanStubLoadsConfigAndReturns1(t *testing.T) {
+	cfgPath := writeValidConfig(t)
+	_, stderr, code := runCapture(t, "scan", "--config", cfgPath)
 	if code != 1 {
-		t.Errorf("scan stub exit code = %d, want 1", code)
+		t.Errorf("scan stub exit code = %d, want 1; stderr=%q", code, stderr)
 	}
 	if !strings.Contains(stderr, "not yet implemented") {
 		t.Errorf("scan stub stderr missing marker: %q", stderr)
+	}
+}
+
+func TestScanMissingConfigReturns2(t *testing.T) {
+	_, stderr, code := runCapture(t, "scan", "--config", "/nonexistent/bridge.yaml")
+	if code != 2 {
+		t.Errorf("scan missing-config exit code = %d, want 2", code)
+	}
+	if !strings.Contains(stderr, "config load failed") {
+		t.Errorf("scan missing-config stderr: %q", stderr)
 	}
 }
 

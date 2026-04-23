@@ -13,6 +13,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/acoseac/1-bit-bridge/internal/config"
 )
 
 const (
@@ -72,11 +74,21 @@ func serveCmd(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	configPath := fs.String("config", "bridge.yaml", "path to config file")
-	addr := fs.String("addr", ":7788", "listen address (host:port)")
+	addrOverride := fs.String("addr", "", "override listenAddress from config (host:port)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	fmt.Fprintf(stderr, "serve: not yet implemented (config=%s addr=%s)\n", *configPath, *addr)
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "config load failed: %v\n", err)
+		return 2
+	}
+	if *addrOverride != "" {
+		cfg.ListenAddress = *addrOverride
+	}
+	fmt.Fprintf(stdout, "config loaded: libraryName=%q roots=%v listen=%s scanInterval=%s\n",
+		cfg.LibraryName, cfg.LibraryRoots, cfg.ListenAddress, cfg.ScanInterval())
+	fmt.Fprintln(stderr, "serve: not yet implemented (HTTPS server lands in a later PR)")
 	return 1
 }
 
@@ -98,6 +110,12 @@ func scanCmd(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	fmt.Fprintf(stderr, "scan: not yet implemented (config=%s)\n", *configPath)
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "config load failed: %v\n", err)
+		return 2
+	}
+	fmt.Fprintf(stdout, "config loaded: libraryName=%q roots=%v\n", cfg.LibraryName, cfg.LibraryRoots)
+	fmt.Fprintln(stderr, "scan: not yet implemented (manifest scanner lands in a later PR)")
 	return 1
 }
