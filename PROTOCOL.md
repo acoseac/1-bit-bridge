@@ -46,6 +46,8 @@ Pairing probe and liveness check. No auth token required for this endpoint (so t
   "serverVersion": "0.0.1",
   "libraryName": "My Music Library",
   "libraryRoots": ["Music"],
+  "certFingerprint": "SHA256:AbCdEf0123...",
+  "startedAt": "2026-04-23T10:15:04Z",
   "scanState": {
     "lastFullScan": "2026-04-23T11:41:01Z",
     "tracksIndexed": 24518,
@@ -77,7 +79,7 @@ Single-entry stat. Replaces `SMBConnectionPool.stat`. Used by the iOS scanner's 
 
 ### `GET /v1/read?path=<rel>`
 
-Ranged byte read. The request MUST carry a `Range: bytes=<start>-<end>` header. Unranged requests are rejected with `400 Bad Request` carrying `{"error":"range_required"}` — use `/v1/download` for whole-file reads. (RFC 7233 reserves `416 Range Not Satisfiable` for ranges outside the resource; a missing header is a request-shape error, not an out-of-range one.)
+Ranged byte read. The request MUST carry a `Range: bytes=<start>-<end>` header. Unranged requests are rejected with `400 Bad Request` carrying `{"error":"range_required","message":"use /v1/download for unranged reads; /v1/read requires a Range header"}` — use `/v1/download` for whole-file reads. (RFC 7233 reserves `416 Range Not Satisfiable` for ranges outside the resource; a missing header is a request-shape error, not an out-of-range one.)
 
 **Response** (`206 Partial Content`, binary) with `Content-Range` and `Content-Length` set.
 

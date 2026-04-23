@@ -160,10 +160,26 @@ func (c *DeezerClient) FetchImage(ctx context.Context, u string) ([]byte, error)
 func hostAllowed(host string, allowed []string) bool {
 	host = strings.ToLower(host)
 	for _, suf := range allowed {
-		// Suffix entries beginning with "." match subdomains; a bare
-		// host also matches itself so tests can whitelist "127.0.0.1".
-		if strings.HasSuffix(host, suf) || host == strings.TrimPrefix(suf, ".") || host == suf {
+		suf = strings.ToLower(suf)
+		// Exact-match path covers dot-less allowlist entries like
+		// "127.0.0.1" or explicit apex domains.
+		if host == suf {
 			return true
+		}
+		// Leading-dot entries match the apex (".deezer.com" → "deezer.com")
+		// and any proper subdomain (".deezer.com" → "cdn.deezer.com"). The
+		// bare-HasSuffix path this replaces was SSRF-fragile: without the
+		// leading-dot gate an allowlist entry like "deezer.com" would
+		// have matched "attackerdeezer.com", and "127.0.0.1" would have
+		// matched "evil.127.0.0.1" — both let a compromised/ misconfigured
+		// allowlist exfiltrate through a look-alike hostname. Require the
+		// suffix to start with "." so the match is anchored at a label
+		// boundary.
+		if strings.HasPrefix(suf, ".") {
+			apex := strings.TrimPrefix(suf, ".")
+			if host == apex || strings.HasSuffix(host, suf) {
+				return true
+			}
 		}
 	}
 	return false

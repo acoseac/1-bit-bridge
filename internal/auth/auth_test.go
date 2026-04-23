@@ -115,15 +115,18 @@ func TestValidateUpdatesLastUsedAt(t *testing.T) {
 }
 
 func TestValidateDebouncesLastUsedPersist(t *testing.T) {
-	// Rapid Validate hits after the first one must NOT rewrite
-	// tokens.json — the debounce window is lastUsedFlushInterval.
-	// A subsequent FlushLastUsed persists the pending timestamp on
-	// clean shutdown.
+	// Rapid Validate hits within the debounce window must NOT rewrite
+	// tokens.json — the window is lastUsedFlushInterval. A subsequent
+	// FlushLastUsed persists the pending timestamp on clean shutdown.
 	s, path := newTmpStore(t)
 	raw, _, _ := s.Mint("Mac")
 
-	// Prime the debounce with a first Validate — this one persists
-	// because lastUsedFlush is the zero value.
+	// Mint already stamped `lastUsedFlush` via its own persist(), so a
+	// subsequent Validate lands inside the debounce window and must NOT
+	// re-persist. (The old behaviour stamped `lastUsedFlush` only from
+	// within Validate's success branch; centralising the stamp in
+	// persist() means Mint/Revoke paths also debounce subsequent hits,
+	// which is the invariant this assertion pins.)
 	if _, ok := s.Validate(raw); !ok {
 		t.Fatal("first validate miss")
 	}
@@ -215,6 +218,65 @@ func TestRevokeUnknownReturnsErrNotFound(t *testing.T) {
 	err := s.Revoke("deadbeefcafe")
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("Revoke(unknown) = %v, want ErrNotFound", err)
+	}
+}
+
+func TestReloadPreservesNewerInMemoryLastUsed(t *testing.T) {
+	// Regression guard: an out-of-process write to tokens.json (e.g.
+	// `bridge pair` appending a new token) must not clobber in-memory
+	// LastUsedAt bumps that the 30 s debounce in Validate has not yet
+	// persisted. Under the pre-fix reload() the in-memory slice was
+	// replaced wholesale with disk contents, wiping the pending bump —
+	// exactly the regression PR #16's Gemini review flagged.
+	s, path := newTmpStore(t)
+	raw, tok, _ := s.Mint("iPhone")
+
+	// Bump LastUsedAt in memory via Validate. The debounce stamped by
+	// Mint's persist() means this Validate does NOT re-persist, so the
+	// bump is strictly in-memory.
+	time.Sleep(5 * time.Millisecond)
+	if _, ok := s.Validate(raw); !ok {
+		t.Fatal("validate miss")
+	}
+	inMemory := s.List()[0].LastUsedAt
+	if inMemory.IsZero() {
+		t.Fatal("in-memory LastUsedAt was never bumped")
+	}
+
+	// Simulate an external writer (bridge pair) rewriting tokens.json
+	// with an older LastUsedAt — zero-valued, since the external writer
+	// doesn't see the in-memory bump. We reuse the raw file path and a
+	// fresh store to generate a consistent on-disk payload, then bump
+	// mtime so reloadIfStale triggers.
+	s2, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, _ = s2.Mint("external") // persists both tokens, no LastUsedAt on iPhone
+	// Force the mtime forward so s's next Validate triggers reloadIfStale.
+	newMtime := time.Now().Add(time.Second)
+	if err := os.Chtimes(path, newMtime, newMtime); err != nil {
+		t.Fatal(err)
+	}
+
+	// Validate on the original store — this calls reloadIfStale, which
+	// overwrites s.tokens with the disk contents. The merge in reload()
+	// must preserve the newer in-memory LastUsedAt for the iPhone token.
+	if _, ok := s.Validate(raw); !ok {
+		t.Fatal("post-reload validate miss")
+	}
+	var iPhoneAfter time.Time
+	for _, tt := range s.List() {
+		if tt.ID == tok.ID {
+			iPhoneAfter = tt.LastUsedAt
+			break
+		}
+	}
+	if iPhoneAfter.IsZero() {
+		t.Fatalf("iPhone token disappeared after reload: %v", s.List())
+	}
+	if iPhoneAfter.Before(inMemory) {
+		t.Errorf("reload regressed LastUsedAt: %v < %v", iPhoneAfter, inMemory)
 	}
 }
 

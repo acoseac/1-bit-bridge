@@ -104,6 +104,25 @@ func (s *Store) reload() error {
 			return fmt.Errorf("parse token store: %w", err)
 		}
 	}
+	// Preserve in-memory LastUsedAt bumps that the 30 s debounce in
+	// Validate hasn't written to disk yet. Without this, an out-of-process
+	// write (e.g. a concurrent `bridge pair` appending a new token) fires
+	// reloadIfStale, which overwrites our token slice with disk contents
+	// whose LastUsedAt timestamps predate the in-memory bumps — wiping the
+	// debounce's in-flight work. The invariant is "in-memory LastUsedAt
+	// never regresses across reload"; enforce it here by keeping whichever
+	// timestamp is later per token ID.
+	if len(s.tokens) > 0 {
+		prior := make(map[string]time.Time, len(s.tokens))
+		for _, old := range s.tokens {
+			prior[old.ID] = old.LastUsedAt
+		}
+		for i := range tokens {
+			if p, ok := prior[tokens[i].ID]; ok && p.After(tokens[i].LastUsedAt) {
+				tokens[i].LastUsedAt = p
+			}
+		}
+	}
 	s.tokens = tokens
 	s.isEmpty = false
 	s.loaded = info.ModTime()
@@ -176,6 +195,11 @@ func (s *Store) persist() error {
 		s.loaded = info.ModTime()
 		s.isEmpty = false
 	}
+	// Every successful persist resets the LastUsedAt debounce clock —
+	// whether the persist was driven by Validate, Mint, Revoke, or
+	// FlushLastUsed — so callers don't have to remember to stamp it
+	// themselves and Mint/Revoke also get the debounce benefit for free.
+	s.lastUsedFlush = time.Now()
 	return nil
 }
 
@@ -237,14 +261,16 @@ func (s *Store) Validate(rawToken string) (Token, bool) {
 	_ = s.reloadIfStale() // best-effort
 	for i := range s.tokens {
 		if subtle.ConstantTimeCompare([]byte(s.tokens[i].Hash), []byte(hashHex)) == 1 {
-			now := time.Now().UTC()
-			s.tokens[i].LastUsedAt = now
-			if now.Sub(s.lastUsedFlush) >= lastUsedFlushInterval {
+			// The token struct wants a wall-clock UTC value so the JSON
+			// round-trip is readable; the debounce gate uses `time.Since`
+			// which reads the monotonic clock and so survives NTP jumps.
+			s.tokens[i].LastUsedAt = time.Now().UTC()
+			if time.Since(s.lastUsedFlush) >= lastUsedFlushInterval {
 				if err := s.persist(); err != nil {
 					log.Printf("auth: persist LastUsedAt: %v", err)
-				} else {
-					s.lastUsedFlush = now
 				}
+				// persist() stamps `lastUsedFlush` on success; nothing to
+				// do here on either branch.
 			}
 			return s.tokens[i], true
 		}
@@ -255,14 +281,11 @@ func (s *Store) Validate(rawToken string) (Token, bool) {
 // FlushLastUsed forces a persist of any in-memory LastUsedAt updates
 // that the debounce in Validate has not yet written. Call on clean
 // shutdown so a just-before-exit validate doesn't lose its timestamp.
+// persist() itself updates `lastUsedFlush`, so nothing else to do here.
 func (s *Store) FlushLastUsed() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	err := s.persist()
-	if err == nil {
-		s.lastUsedFlush = time.Now().UTC()
-	}
-	return err
+	return s.persist()
 }
 
 // List returns a copy of the stored tokens (hashes only — raw tokens cannot
