@@ -92,30 +92,29 @@ func (s *Server) stat(w http.ResponseWriter, r *http.Request) {
 }
 
 // read handles GET /v1/read?path=<rel>. Range header is REQUIRED per
-// PROTOCOL.md — unranged reads are rejected with 416. This endpoint is
-// intended for tag-header windows (64–128 KB) and similar sub-file queries
-// from the iOS scanner fast-path fallback. Whole-file reads should use
-// /v1/download.
+// PROTOCOL.md — unranged reads are rejected with 400 (RFC 7233 reserves
+// 416 for satisfiable-range errors, not missing-header ones). This
+// endpoint is intended for tag-header windows (64–128 KB) and similar
+// sub-file queries from the iOS scanner fast-path fallback. Whole-file
+// reads should use /v1/download.
 func (s *Server) read(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("Range") == "" {
-		writeError(w, http.StatusRequestedRangeNotSatisfiable,
+		writeError(w, http.StatusBadRequest,
 			"range_required",
 			"use /v1/download for unranged reads; /v1/read requires a Range header")
 		return
 	}
-	s.serveFile(w, r, true)
+	s.serveFile(w, r)
 }
 
 // download handles GET /v1/download?path=<rel>. Supports Range; returns the
 // whole file when unranged.
 func (s *Server) download(w http.ResponseWriter, r *http.Request) {
-	s.serveFile(w, r, false)
+	s.serveFile(w, r)
 }
 
-// serveFile is the shared file-body path for /v1/read and /v1/download. The
-// rangeRequired flag is decorative here — /v1/read pre-checks and bails
-// before calling in — but kept for documentation.
-func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, rangeRequired bool) {
+// serveFile is the shared file-body path for /v1/read and /v1/download.
+func (s *Server) serveFile(w http.ResponseWriter, r *http.Request) {
 	clientPath := r.URL.Query().Get("path")
 	abs, info, err := s.resolver.ResolveChecked(clientPath)
 	if ok := writeResolveError(w, err); ok {
@@ -144,7 +143,6 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, rangeRequired
 	// partial-content bookkeeping for us. It also skips the body on HEAD
 	// requests automatically.
 	http.ServeContent(w, r, info.Name(), info.ModTime(), f)
-	_ = rangeRequired // silence unused-arg linter
 }
 
 // childPath returns the library-relative path of a child given its parent's

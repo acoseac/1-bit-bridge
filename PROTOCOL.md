@@ -18,7 +18,7 @@ This is the **source of truth** for the wire contract between the `1-bit-bridge`
 
 ## Authentication
 
-- Every request must carry `Authorization: Bearer <token>`.
+- Every request **except `GET /v1/health`** must carry `Authorization: Bearer <token>`. `/v1/health` is unauthenticated so the iOS "Add Bridge" sheet can surface a useful error before the user has pasted a token.
 - Tokens are minted by `bridge pair` and stored server-side as a salted hash.
 - An unauthenticated request is answered with `401 Unauthorized` and a JSON body:
   ```json
@@ -43,7 +43,7 @@ Pairing probe and liveness check. No auth token required for this endpoint (so t
 ```json
 {
   "protocolVersion": 1,
-  "serverVersion": "0.1.0",
+  "serverVersion": "0.0.1",
   "libraryName": "My Music Library",
   "libraryRoots": ["Music"],
   "scanState": {
@@ -77,7 +77,7 @@ Single-entry stat. Replaces `SMBConnectionPool.stat`. Used by the iOS scanner's 
 
 ### `GET /v1/read?path=<rel>`
 
-Ranged byte read. The request MUST carry a `Range: bytes=<start>-<end>` header. Unranged requests are rejected with `416 Range Not Satisfiable` — use `/v1/download` for whole-file reads.
+Ranged byte read. The request MUST carry a `Range: bytes=<start>-<end>` header. Unranged requests are rejected with `400 Bad Request` carrying `{"error":"range_required"}` — use `/v1/download` for whole-file reads. (RFC 7233 reserves `416 Range Not Satisfiable` for ranges outside the resource; a missing header is a request-shape error, not an out-of-range one.)
 
 **Response** (`206 Partial Content`, binary) with `Content-Range` and `Content-Length` set.
 
@@ -150,10 +150,10 @@ All errors are JSON:
 | Status | `error` code         | When                                              |
 |-------:|----------------------|---------------------------------------------------|
 |    400 | `bad_request`        | Malformed path, missing required query param     |
+|    400 | `range_required`     | `/v1/read` called without a `Range` header        |
 |    401 | `unauthorized`       | Missing / invalid bearer token                    |
 |    403 | `forbidden`          | Valid token, insufficient scope (reserved)        |
 |    404 | `not_found`          | Path does not exist in any library root           |
-|    416 | `range_required`     | `/v1/read` called without a `Range` header        |
 |    500 | `internal`           | Server-side failure                               |
 |    503 | `scan_in_progress`   | Manifest requested while an initial scan is busy  |
 
