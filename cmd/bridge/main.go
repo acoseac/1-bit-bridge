@@ -9,42 +9,57 @@
 package main
 
 import (
+	"context"
+	"crypto/tls"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
+	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/api"
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
+	"github.com/acoseac/1-bit-bridge/internal/version"
 )
 
-const (
-	ServerVersion   = "0.0.1"
-	ProtocolVersion = 1
-)
+// shutdownGrace is how long we wait for in-flight requests to drain before
+// forcing the listener closed.
+const shutdownGrace = 5 * time.Second
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	os.Exit(run(ctx, os.Args[1:], os.Stdout, os.Stderr))
 }
 
 // run parses argv (without the program name) and dispatches to a subcommand.
 // It is extracted from main so tests can drive it without spawning a process.
 // Exit codes: 0 success, 1 subcommand failure, 2 usage error.
-func run(args []string, stdout, stderr io.Writer) int {
+//
+// ctx is used by serveCmd to trigger graceful shutdown (signal from main or
+// cancellation from a test).
+func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
 		usage(stderr)
 		return 2
 	}
 	switch args[0] {
 	case "serve":
-		return serveCmd(args[1:], stdout, stderr)
+		return serveCmd(ctx, args[1:], stdout, stderr)
 	case "pair":
 		return pairCmd(args[1:], stdout, stderr)
 	case "scan":
 		return scanCmd(args[1:], stdout, stderr)
 	case "version":
-		fmt.Fprintf(stdout, "1-bit-bridge %s (protocol v%d)\n", ServerVersion, ProtocolVersion)
+		fmt.Fprintf(stdout, "1-bit-bridge %s (protocol v%d)\n", version.ServerVersion, version.ProtocolVersion)
 		return 0
 	case "-h", "--help", "help":
 		usage(stdout)
@@ -72,7 +87,7 @@ Run "bridge <subcommand> -h" for subcommand-specific flags.
 `)
 }
 
-func serveCmd(args []string, stdout, stderr io.Writer) int {
+func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	configPath := fs.String("config", "bridge.yaml", "path to config file")
@@ -88,10 +103,68 @@ func serveCmd(args []string, stdout, stderr io.Writer) int {
 	if *addrOverride != "" {
 		cfg.ListenAddress = *addrOverride
 	}
-	fmt.Fprintf(stdout, "config loaded: libraryName=%q roots=%v listen=%s scanInterval=%s\n",
-		cfg.LibraryName, cfg.LibraryRoots, cfg.ListenAddress, cfg.ScanInterval())
-	fmt.Fprintln(stderr, "serve: not yet implemented (HTTPS server lands in a later PR)")
-	return 1
+
+	// Resolve TLS material (default: dataDir/server.{crt,key}; overridable
+	// via cfg.TLSCertPath / cfg.TLSKeyPath).
+	certPath, keyPath := cfg.TLSCertPath, cfg.TLSKeyPath
+	if certPath == "" || keyPath == "" {
+		certPath, keyPath = servertls.DefaultPaths(cfg.DataDir)
+	}
+	hostname, _ := os.Hostname()
+	cert, fingerprint, err := servertls.LoadOrGenerate(certPath, keyPath, hostname)
+	if err != nil {
+		fmt.Fprintf(stderr, "TLS material: %v\n", err)
+		return 1
+	}
+
+	store, err := auth.OpenStore(filepath.Join(cfg.DataDir, "tokens.json"))
+	if err != nil {
+		fmt.Fprintf(stderr, "open token store: %v\n", err)
+		return 1
+	}
+
+	apiSrv := api.New(cfg, store, fingerprint)
+	httpSrv := &http.Server{
+		Addr:      cfg.ListenAddress,
+		Handler:   apiSrv.Handler(),
+		TLSConfig: &tls.Config{Certificates: []tls.Certificate{*cert}, MinVersion: tls.VersionTLS12},
+	}
+
+	// Listen first so we can report the actual bound address (useful when
+	// cfg.ListenAddress is ":0" — which test code uses).
+	lis, err := net.Listen("tcp", cfg.ListenAddress)
+	if err != nil {
+		fmt.Fprintf(stderr, "listen %s: %v\n", cfg.ListenAddress, err)
+		return 1
+	}
+
+	fmt.Fprintf(stdout, "1-bit-bridge v%s (protocol v%d) — listening on https://%s\n",
+		version.ServerVersion, version.ProtocolVersion, lis.Addr())
+	fmt.Fprintf(stdout, "Library: %q (roots: %v)\n", cfg.LibraryName, cfg.LibraryRoots)
+	fmt.Fprintf(stdout, "TLS fingerprint (pin this on the iOS side):\n  %s\n", fingerprint)
+	fmt.Fprintln(stdout, "Press Ctrl-C to shut down.")
+
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- httpSrv.ServeTLS(lis, "", "")
+	}()
+
+	select {
+	case err := <-serveErr:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			fmt.Fprintf(stderr, "server error: %v\n", err)
+			return 1
+		}
+	case <-ctx.Done():
+		fmt.Fprintln(stdout, "\nShutting down...")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+		defer cancel()
+		if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+			fmt.Fprintf(stderr, "shutdown: %v\n", err)
+			return 1
+		}
+	}
+	return 0
 }
 
 func pairCmd(args []string, stdout, stderr io.Writer) int {
