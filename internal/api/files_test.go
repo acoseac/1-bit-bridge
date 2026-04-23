@@ -58,7 +58,7 @@ func fileFixture(t *testing.T) (*httptest.Server, string, string) {
 	store, _ := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
 	raw, _, _ := store.Mint("test")
 
-	srv := New(cfg, store, "fp")
+	srv := New(cfg, store, nil, "fp")
 	hs := httptest.NewServer(srv.Handler())
 	t.Cleanup(hs.Close)
 	return hs, raw, root

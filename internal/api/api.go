@@ -31,17 +31,30 @@ type Server struct {
 	cfg         *config.Config
 	store       *auth.Store
 	resolver    *bridgefs.Resolver
+	manifest    ManifestProvider
 	fingerprint string
 	startedAt   time.Time
 }
 
+// ManifestProvider is the interface /v1/manifest and /v1/health use to
+// read the indexed library state. internal/manifest implements it via
+// the Scanner + Store pair; tests can pass a small stub.
+type ManifestProvider interface {
+	BuildManifest(since time.Time) (any, error)
+	IsScanning() bool
+	LastFullScan() time.Time
+	TracksIndexed() int
+}
+
 // New constructs a Server. fingerprint is the SHA-256 of the TLS cert, used
-// for display in /v1/health (iOS pins by this value).
-func New(cfg *config.Config, store *auth.Store, fingerprint string) *Server {
+// for display in /v1/health (iOS pins by this value). mp can be nil during
+// early boot / tests — /v1/manifest will return 503 until it's populated.
+func New(cfg *config.Config, store *auth.Store, mp ManifestProvider, fingerprint string) *Server {
 	return &Server{
 		cfg:         cfg,
 		store:       store,
 		resolver:    bridgefs.New(cfg.LibraryRoots),
+		manifest:    mp,
 		fingerprint: fingerprint,
 		startedAt:   time.Now().UTC(),
 	}
@@ -56,6 +69,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/stat", s.authed(s.stat))
 	mux.HandleFunc("GET /v1/read", s.authed(s.read))
 	mux.HandleFunc("GET /v1/download", s.authed(s.download))
+	mux.HandleFunc("GET /v1/manifest", s.authed(s.manifestHandler))
 	return protocolHeader(mux)
 }
 
@@ -88,6 +102,12 @@ type ErrorResponse struct {
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
+	scanState := ScanState{}
+	if s.manifest != nil {
+		scanState.IsScanning = s.manifest.IsScanning()
+		scanState.LastFullScan = s.manifest.LastFullScan()
+		scanState.TracksIndexed = s.manifest.TracksIndexed()
+	}
 	resp := HealthResponse{
 		ProtocolVersion: version.ProtocolVersion,
 		ServerVersion:   version.ServerVersion,
@@ -95,12 +115,35 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		LibraryRoots:    libraryRootBasenames(s.cfg.LibraryRoots),
 		CertFingerprint: s.fingerprint,
 		StartedAt:       s.startedAt,
-		ScanState: ScanState{
-			IsScanning:    false,
-			TracksIndexed: 0,
-		},
+		ScanState:       scanState,
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// manifestHandler serves GET /v1/manifest?since=<rfc3339> with the current
+// library index (or a since-filtered delta). Returns 503 if no manifest
+// provider is wired up yet (early boot / test harness).
+func (s *Server) manifestHandler(w http.ResponseWriter, r *http.Request) {
+	if s.manifest == nil {
+		writeError(w, http.StatusServiceUnavailable, "scan_in_progress", "manifest not ready")
+		return
+	}
+	var since time.Time
+	if v := r.URL.Query().Get("since"); v != "" {
+		parsed, err := time.Parse(time.RFC3339Nano, v)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request",
+				"since must be an RFC3339 timestamp, got "+v)
+			return
+		}
+		since = parsed
+	}
+	body, err := s.manifest.BuildManifest(since)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 // libraryRootBasenames returns just the last path component for each
