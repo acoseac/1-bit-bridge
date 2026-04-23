@@ -32,6 +32,7 @@ type Server struct {
 	store       *auth.Store
 	resolver    *bridgefs.Resolver
 	manifest    ManifestProvider
+	artworkDirs ArtworkDirProvider
 	fingerprint string
 	startedAt   time.Time
 }
@@ -60,6 +61,13 @@ func New(cfg *config.Config, store *auth.Store, mp ManifestProvider, fingerprint
 	}
 }
 
+// WithArtworkDirs attaches an artwork cache dir provider. Separate from
+// New to avoid churning every call site when optional features are added.
+func (s *Server) WithArtworkDirs(ad ArtworkDirProvider) *Server {
+	s.artworkDirs = ad
+	return s
+}
+
 // Handler returns the root http.Handler, pre-wrapped with the
 // X-Bridge-Protocol middleware.
 func (s *Server) Handler() http.Handler {
@@ -70,6 +78,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/read", s.authed(s.read))
 	mux.HandleFunc("GET /v1/download", s.authed(s.download))
 	mux.HandleFunc("GET /v1/manifest", s.authed(s.manifestHandler))
+	mux.HandleFunc("GET /v1/artwork/{mbid}", s.authed(s.artwork))
 	return protocolHeader(mux)
 }
 

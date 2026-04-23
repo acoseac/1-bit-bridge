@@ -31,6 +31,13 @@ type Track struct {
 	ReplayGainAlbumDB  *float64  `json:"replayGainAlbumDB,omitempty"`
 	MusicBrainzTrackID string    `json:"musicBrainzTrackID,omitempty"`
 	MusicBrainzAlbumID string    `json:"musicBrainzAlbumID,omitempty"`
+	// ArtworkMBID is set by the enricher (PR #8) when a front-cover image
+	// was retrievable from Cover Art Archive for this track's album. iOS
+	// derives the artwork URL from this as /v1/artwork/{ArtworkMBID}.
+	ArtworkMBID string `json:"artworkMBID,omitempty"`
+	// ArtistMBID is set by the enricher when a matching MusicBrainz artist
+	// was found. Used for artist-image endpoints (PR #9).
+	ArtistMBID string `json:"artistMBID,omitempty"`
 }
 
 // Folder is a lightweight folder record used by the scanner's skip logic
