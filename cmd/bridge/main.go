@@ -28,6 +28,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/enrich"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
+	bridgemdns "github.com/acoseac/1-bit-bridge/internal/mdns"
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
@@ -181,6 +182,30 @@ func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		version.ServerVersion, version.ProtocolVersion, lis.Addr())
 	fmt.Fprintf(stdout, "Library: %q (roots: %v)\n", cfg.LibraryName, cfg.LibraryRoots)
 	fmt.Fprintf(stdout, "TLS fingerprint (pin this on the iOS side):\n  %s\n", fingerprint)
+
+	// Advertise on mDNS so iOS clients on the same LAN auto-discover
+	// this server. Failures are non-fatal — mDNS is a nice-to-have,
+	// and the server runs fine without it (users connect by IP).
+	boundAddr, _ := lis.Addr().(*net.TCPAddr)
+	var advertiser *bridgemdns.Advertiser
+	if boundAddr != nil {
+		a, err := bridgemdns.Advertise(bridgemdns.Config{
+			InstanceName:    cfg.LibraryName,
+			Port:            boundAddr.Port,
+			ProtocolVersion: version.ProtocolVersion,
+			LibraryName:     cfg.LibraryName,
+		})
+		if err != nil {
+			fmt.Fprintf(stderr, "mDNS advertise failed (non-fatal): %v\n", err)
+		} else {
+			advertiser = a
+			fmt.Fprintf(stdout, "mDNS: advertising as %q on %s\n", cfg.LibraryName, bridgemdns.Service)
+		}
+	}
+	if advertiser != nil {
+		defer advertiser.Close()
+	}
+
 	fmt.Fprintln(stdout, "Press Ctrl-C to shut down.")
 
 	serveErr := make(chan error, 1)
