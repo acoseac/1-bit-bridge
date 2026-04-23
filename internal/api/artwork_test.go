@@ -145,3 +145,70 @@ func min(a, b int) int {
 	}
 	return b
 }
+
+// ---- /v1/artist-image/{mbid} ----
+
+func artistImageFixture(t *testing.T, present bool) (*httptest.Server, string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	artDir := filepath.Join(dir, "artwork")
+	mbid := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	if present {
+		os.MkdirAll(artDir, 0o755)
+		os.WriteFile(filepath.Join(artDir, "artist-"+mbid+".jpg"),
+			[]byte{0xFF, 0xD8, 0xFF, 0xE1}, 0o644)
+	}
+	cfg := &config.Config{LibraryRoots: []string{dir}, ListenAddress: ":7788", LibraryName: "T"}
+	store, _ := auth.OpenStore(filepath.Join(dir, "tokens.json"))
+	raw, _, _ := store.Mint("probe")
+	srv := New(cfg, store, nil, "fp").WithArtworkDirs(fakeArtworkDirs{dir: artDir})
+	hs := httptest.NewServer(srv.Handler())
+	t.Cleanup(hs.Close)
+	return hs, raw, mbid
+}
+
+func TestArtistImageReturnsCachedJPEG(t *testing.T) {
+	hs, tok, mbid := artistImageFixture(t, true)
+	resp := authedGET(t, hs.URL+"/v1/artist-image/"+mbid, tok)
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "image/jpeg" {
+		t.Errorf("content-type = %q", ct)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if len(body) == 0 || body[0] != 0xFF {
+		t.Errorf("body wrong: %x", body[:min(len(body), 8)])
+	}
+}
+
+func TestArtistImage404IfNotCached(t *testing.T) {
+	hs, tok, mbid := artistImageFixture(t, false)
+	resp := authedGET(t, hs.URL+"/v1/artist-image/"+mbid, tok)
+	defer resp.Body.Close()
+	if resp.StatusCode != 404 {
+		t.Errorf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestArtistImageRejectsBadMBID(t *testing.T) {
+	hs, tok, _ := artistImageFixture(t, true)
+	resp := authedGET(t, hs.URL+"/v1/artist-image/not-a-uuid", tok)
+	defer resp.Body.Close()
+	if resp.StatusCode != 400 && resp.StatusCode != 404 {
+		t.Errorf("status = %d, want 400 or 404", resp.StatusCode)
+	}
+}
+
+func TestArtistImageRequiresAuth(t *testing.T) {
+	hs, _, mbid := artistImageFixture(t, true)
+	resp, err := http.Get(hs.URL + "/v1/artist-image/" + mbid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 401 {
+		t.Errorf("status = %d, want 401", resp.StatusCode)
+	}
+}

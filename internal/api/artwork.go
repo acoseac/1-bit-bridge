@@ -21,6 +21,45 @@ type ArtworkDirProvider interface {
 // parameter.
 var mbidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
+// artistImage handles GET /v1/artist-image/{mbid}.
+//
+// Serves the Deezer-sourced artist portrait the enricher cached under
+// <artworkCacheDir>/artist-<mbid>.jpg. Same MBID validation + 404 / 400
+// semantics as /v1/artwork.
+func (s *Server) artistImage(w http.ResponseWriter, r *http.Request) {
+	if s.artworkDirs == nil {
+		writeError(w, http.StatusServiceUnavailable, "scan_in_progress",
+			"artist-image service not ready")
+		return
+	}
+	mbid := r.PathValue("mbid")
+	if !mbidPattern.MatchString(mbid) {
+		writeError(w, http.StatusBadRequest, "bad_request",
+			"mbid must be a MusicBrainz UUID")
+		return
+	}
+	path := enrich.ArtistImagePath(s.artworkDirs.ArtworkCacheDir(), mbid)
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			writeError(w, http.StatusNotFound, "not_found",
+				"artist image not cached yet")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "image/jpeg")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	http.ServeContent(w, r, info.Name(), info.ModTime(), f)
+}
+
 // artwork handles GET /v1/artwork/{mbid}?size=500.
 //
 // Serves the pre-cached JPEG the enricher fetched from Cover Art Archive.
