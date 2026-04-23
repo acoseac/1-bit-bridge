@@ -1,0 +1,263 @@
+// Package auth manages bearer tokens: generation, hashed storage, and
+// request-time validation.
+//
+// Tokens are 256-bit random values, base64url-encoded without padding (43
+// chars). The store persists only SHA-256 hashes — a stolen tokens.json
+// cannot be used to construct a working token. Token IDs are the first 12
+// hex chars of the hash, stable and unique enough for a household-sized
+// device set.
+//
+// The store is concurrent-safe within a single process, and survives out-of-
+// process writes (e.g. `bridge pair` running while `bridge serve` is up): on
+// each Validate, Store stats the tokens file and reloads if the mtime has
+// advanced. Writes use atomic rename so a reader never sees a torn file.
+package auth
+
+import (
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
+)
+
+const (
+	// rawTokenBytes is the number of random bytes per minted token.
+	// 32 bytes → 256 bits → 43 base64url chars (no padding).
+	rawTokenBytes = 32
+
+	// tokenIDLen is the number of hex chars used as a human-visible token
+	// ID. 12 chars = 48 bits, plenty of uniqueness for a household device
+	// set while still fitting comfortably in a status display.
+	tokenIDLen = 12
+)
+
+// Token is the stored, hash-only record for a paired client.
+type Token struct {
+	ID         string    `json:"id"`
+	Name       string    `json:"name"`
+	Hash       string    `json:"hash"` // SHA-256 hex of the raw token bytes
+	CreatedAt  time.Time `json:"createdAt"`
+	LastUsedAt time.Time `json:"lastUsedAt,omitempty"`
+}
+
+// Store is an in-memory view over a JSON-backed token file. Safe for
+// concurrent use by readers (Validate) and writers (Mint / Revoke).
+type Store struct {
+	path string
+
+	mu      sync.Mutex
+	tokens  []Token
+	loaded  time.Time // mtime of tokens file when we last loaded
+	isEmpty bool      // tokens file didn't exist when we last looked
+}
+
+// OpenStore opens (or initializes an empty) store at path. Missing file is
+// not an error — the first Mint will create it.
+func OpenStore(path string) (*Store, error) {
+	s := &Store{path: path}
+	if err := s.reload(); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// reload refreshes the in-memory view from disk unconditionally. Caller must
+// hold s.mu.
+func (s *Store) reload() error {
+	info, err := os.Stat(s.path)
+	if errors.Is(err, os.ErrNotExist) {
+		s.tokens = nil
+		s.isEmpty = true
+		s.loaded = time.Time{}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("stat token store: %w", err)
+	}
+	raw, err := os.ReadFile(s.path)
+	if err != nil {
+		return fmt.Errorf("read token store: %w", err)
+	}
+	var tokens []Token
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &tokens); err != nil {
+			return fmt.Errorf("parse token store: %w", err)
+		}
+	}
+	s.tokens = tokens
+	s.isEmpty = false
+	s.loaded = info.ModTime()
+	return nil
+}
+
+// reloadIfStale compares the current file mtime to what we loaded and reloads
+// if it's newer. Called from Validate so a `bridge pair` run picks up
+// automatically in a concurrently-running `bridge serve`. Caller must hold mu.
+func (s *Store) reloadIfStale() error {
+	info, err := os.Stat(s.path)
+	if errors.Is(err, os.ErrNotExist) {
+		if !s.isEmpty {
+			s.tokens = nil
+			s.isEmpty = true
+			s.loaded = time.Time{}
+		}
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.ModTime().After(s.loaded) {
+		return s.reload()
+	}
+	return nil
+}
+
+// persist writes the current tokens to disk atomically (tmp + rename).
+// Caller must hold mu.
+func (s *Store) persist() error {
+	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
+		return fmt.Errorf("mkdir token store: %w", err)
+	}
+	data, err := json.MarshalIndent(s.tokens, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	tmp, err := os.CreateTemp(filepath.Dir(s.path), ".tokens-*.json")
+	if err != nil {
+		return fmt.Errorf("temp file: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		if tmpName != "" {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("write tmp: %w", err)
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return fmt.Errorf("chmod tmp: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("sync tmp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close tmp: %w", err)
+	}
+	if err := os.Rename(tmpName, s.path); err != nil {
+		return fmt.Errorf("rename: %w", err)
+	}
+	tmpName = "" // suppress defer cleanup
+	if info, err := os.Stat(s.path); err == nil {
+		s.loaded = info.ModTime()
+		s.isEmpty = false
+	}
+	return nil
+}
+
+// Mint creates a new token with the given human-readable name (e.g. "iPhone
+// 15 Pro"), persists the hash, and returns both the raw token (show once,
+// to the user) and the stored record. Names need not be unique.
+func (s *Store) Mint(name string) (rawToken string, tok Token, err error) {
+	if name == "" {
+		return "", Token{}, errors.New("name must not be empty")
+	}
+	var buf [rawTokenBytes]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", Token{}, fmt.Errorf("random: %w", err)
+	}
+	rawToken = base64.RawURLEncoding.EncodeToString(buf[:])
+	hashBytes := sha256.Sum256([]byte(rawToken))
+	hashHex := hex.EncodeToString(hashBytes[:])
+
+	tok = Token{
+		ID:        hashHex[:tokenIDLen],
+		Name:      name,
+		Hash:      hashHex,
+		CreatedAt: time.Now().UTC(),
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.reload(); err != nil {
+		return "", Token{}, err
+	}
+	s.tokens = append(s.tokens, tok)
+	if err := s.persist(); err != nil {
+		// Roll back in-memory state so a failed write doesn't leave us
+		// inconsistent with disk.
+		s.tokens = s.tokens[:len(s.tokens)-1]
+		return "", Token{}, err
+	}
+	return rawToken, tok, nil
+}
+
+// Validate checks a raw token against the store. Returns the matching Token
+// and true on a hit, a zero Token and false on miss. Uses constant-time hash
+// comparison.
+//
+// On a hit the caller may want to record usage — Validate updates
+// LastUsedAt in memory and persists lazily (best-effort; a persist failure
+// here is logged-only because the primary work, validation, succeeded).
+func (s *Store) Validate(rawToken string) (Token, bool) {
+	if rawToken == "" {
+		return Token{}, false
+	}
+	hashBytes := sha256.Sum256([]byte(rawToken))
+	hashHex := hex.EncodeToString(hashBytes[:])
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_ = s.reloadIfStale() // best-effort
+	for i := range s.tokens {
+		if subtle.ConstantTimeCompare([]byte(s.tokens[i].Hash), []byte(hashHex)) == 1 {
+			s.tokens[i].LastUsedAt = time.Now().UTC()
+			_ = s.persist() // best-effort
+			return s.tokens[i], true
+		}
+	}
+	return Token{}, false
+}
+
+// List returns a copy of the stored tokens (hashes only — raw tokens cannot
+// be recovered from the store).
+func (s *Store) List() []Token {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_ = s.reloadIfStale()
+	out := make([]Token, len(s.tokens))
+	copy(out, s.tokens)
+	return out
+}
+
+// Revoke removes the token with the given ID. Returns ErrNotFound if no such
+// token exists.
+func (s *Store) Revoke(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.reload(); err != nil {
+		return err
+	}
+	for i, tok := range s.tokens {
+		if tok.ID == id {
+			s.tokens = append(s.tokens[:i], s.tokens[i+1:]...)
+			return s.persist()
+		}
+	}
+	return ErrNotFound
+}
+
+// ErrNotFound is returned by Revoke when the given ID is unknown.
+var ErrNotFound = errors.New("token not found")
