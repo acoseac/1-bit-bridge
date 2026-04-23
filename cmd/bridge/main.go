@@ -11,6 +11,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 )
 
@@ -20,30 +21,39 @@ const (
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+// run parses argv (without the program name) and dispatches to a subcommand.
+// It is extracted from main so tests can drive it without spawning a process.
+// Exit codes: 0 success, 1 subcommand failure, 2 usage error.
+func run(args []string, stdout, stderr io.Writer) int {
+	if len(args) < 1 {
+		usage(stderr)
+		return 2
 	}
-	switch os.Args[1] {
+	switch args[0] {
 	case "serve":
-		serveCmd(os.Args[2:])
+		return serveCmd(args[1:], stdout, stderr)
 	case "pair":
-		pairCmd(os.Args[2:])
+		return pairCmd(args[1:], stdout, stderr)
 	case "scan":
-		scanCmd(os.Args[2:])
+		return scanCmd(args[1:], stdout, stderr)
 	case "version":
-		fmt.Printf("1-bit-bridge %s (protocol v%d)\n", ServerVersion, ProtocolVersion)
+		fmt.Fprintf(stdout, "1-bit-bridge %s (protocol v%d)\n", ServerVersion, ProtocolVersion)
+		return 0
 	case "-h", "--help", "help":
-		usage()
+		usage(stdout)
+		return 0
 	default:
-		fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n\n", os.Args[1])
-		usage()
-		os.Exit(2)
+		fmt.Fprintf(stderr, "unknown subcommand: %s\n\n", args[0])
+		usage(stderr)
+		return 2
 	}
 }
 
-func usage() {
-	fmt.Fprint(os.Stderr, `1-bit-bridge — companion server for the 1-bit iOS app.
+func usage(w io.Writer) {
+	fmt.Fprint(w, `1-bit-bridge — companion server for the 1-bit iOS app.
 
 Usage:
   bridge <subcommand> [flags]
@@ -58,27 +68,36 @@ Run "bridge <subcommand> -h" for subcommand-specific flags.
 `)
 }
 
-func serveCmd(args []string) {
-	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+func serveCmd(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	fs.SetOutput(stderr)
 	configPath := fs.String("config", "bridge.yaml", "path to config file")
 	addr := fs.String("addr", ":7788", "listen address (host:port)")
-	_ = fs.Parse(args)
-	fmt.Fprintf(os.Stderr, "serve: not yet implemented (config=%s addr=%s)\n", *configPath, *addr)
-	os.Exit(1)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	fmt.Fprintf(stderr, "serve: not yet implemented (config=%s addr=%s)\n", *configPath, *addr)
+	return 1
 }
 
-func pairCmd(args []string) {
-	fs := flag.NewFlagSet("pair", flag.ExitOnError)
+func pairCmd(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("pair", flag.ContinueOnError)
+	fs.SetOutput(stderr)
 	name := fs.String("name", "", "client name (e.g. \"iPhone 15 Pro\")")
-	_ = fs.Parse(args)
-	fmt.Fprintf(os.Stderr, "pair: not yet implemented (name=%s)\n", *name)
-	os.Exit(1)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	fmt.Fprintf(stderr, "pair: not yet implemented (name=%s)\n", *name)
+	return 1
 }
 
-func scanCmd(args []string) {
-	fs := flag.NewFlagSet("scan", flag.ExitOnError)
+func scanCmd(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("scan", flag.ContinueOnError)
+	fs.SetOutput(stderr)
 	configPath := fs.String("config", "bridge.yaml", "path to config file")
-	_ = fs.Parse(args)
-	fmt.Fprintf(os.Stderr, "scan: not yet implemented (config=%s)\n", *configPath)
-	os.Exit(1)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	fmt.Fprintf(stderr, "scan: not yet implemented (config=%s)\n", *configPath)
+	return 1
 }
