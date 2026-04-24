@@ -1,6 +1,13 @@
 # 1-bit-bridge
 
-Companion server for the [1-bit](https://apps.apple.com/us/app/1-bit/id6762529497) iOS music player. Runs on your home server (Windows / Linux / macOS / NAS) and exposes your music library over HTTPS + bearer-token auth, with a pre-built manifest endpoint so the iOS app can sync its whole library in a single request instead of walking a slow SMB tree.
+[![Latest release](https://img.shields.io/github/v/release/acoseac/1-bit-bridge?sort=semver&display_name=tag&label=release)](https://github.com/acoseac/1-bit-bridge/releases/latest)
+[![License: MIT](https://img.shields.io/github/license/acoseac/1-bit-bridge)](LICENSE)
+[![Go version](https://img.shields.io/github/go-mod/go-version/acoseac/1-bit-bridge)](go.mod)
+[![iOS app on App Store](https://img.shields.io/badge/iOS%20app-1--bit%20on%20App%20Store-0A84FF?logo=apple&logoColor=white)](https://apps.apple.com/us/app/1-bit/id6762529497)
+
+Companion server for the **[1-bit iOS music player](https://apps.apple.com/us/app/1-bit/id6762529497)** — bit-exact playback of your own music library, including DSD, from anywhere. The bridge runs on a home server (Windows / Linux / macOS / NAS) and exposes your library over HTTPS + bearer-token auth with a pre-built manifest endpoint, so the iOS app syncs its whole library in a single request instead of walking a slow SMB tree.
+
+👉 **[acoseac.github.io/1-bit-bridge](https://acoseac.github.io/1-bit-bridge/)** for the landing page with install walk-through.
 
 ## Why
 
@@ -12,7 +19,7 @@ Companion server for the [1-bit](https://apps.apple.com/us/app/1-bit/id676252949
 
 ## Status
 
-v0.0.x — wire protocol frozen at [`PROTOCOL.md`](PROTOCOL.md) v1. Admin console + one-command install landed; see [CHANGELOG](https://github.com/acoseac/1-bit-bridge/releases) for per-release notes.
+**v0.1.0** — wire protocol frozen at [`PROTOCOL.md`](PROTOCOL.md) v1. macOS binaries are Developer-ID-signed and Apple-notarized; Windows binaries are unsigned for now (Authenticode signing via SignPath Foundation pending). See the [releases page](https://github.com/acoseac/1-bit-bridge/releases) for per-release notes.
 
 ## Install
 
