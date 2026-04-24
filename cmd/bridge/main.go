@@ -72,6 +72,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return pairCmd(args[1:], stdout, stderr)
 	case "scan":
 		return scanCmd(args[1:], stdout, stderr)
+	case "doctor":
+		return doctorCmd(args[1:], stdout, stderr)
 	case "version":
 		fmt.Fprintf(stdout, "1-bit-bridge %s (protocol v%d)\n", version.ServerVersion, version.ProtocolVersion)
 		return 0
@@ -96,6 +98,7 @@ Subcommands:
   serve    Run the HTTPS server.
   pair     Generate a new bearer token for an iOS client.
   scan     Force a full library rescan.
+  doctor   Preflight: check ports, directories, service manager before init.
   version  Print version and protocol version.
 
 Run "bridge <subcommand> -h" for subcommand-specific flags.

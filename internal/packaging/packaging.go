@@ -47,6 +47,11 @@ func Install(p Params) (unitPath string, err error) {
 		return installLaunchd(p)
 	case "linux":
 		return installSystemd(p)
+	case "windows":
+		// PR-1: Startup-folder shortcut. Survives reboot while the user
+		// is logged in; does NOT survive logout. PR-2 will add a proper
+		// Windows Service via SCM for users who need logout-survival.
+		return installWindowsStartup(p)
 	default:
 		return "", nil
 	}
@@ -61,6 +66,8 @@ func Uninstall() (string, error) {
 		return uninstallLaunchd()
 	case "linux":
 		return uninstallSystemd()
+	case "windows":
+		return uninstallWindowsStartup()
 	default:
 		return "", nil
 	}
@@ -206,6 +213,23 @@ func render(name string, p Params) ([]byte, error) {
 			)
 			return r.Replace(s)
 		},
+		"cmdEscape": func(s string) string {
+			// Windows cmd.exe inside a double-quoted argument: the only
+			// thing that can tear it is a literal `"` embedded in the
+			// path. cmd.exe's escape for a quote inside quotes is `""`
+			// — NOT backslash-anything. Backslashes are fine inside
+			// quoted arguments; they're literal path separators.
+			// CR / LF would end the line, which would break the script.
+			// NUL can't appear in a Windows path, but stripping it is
+			// cheap insurance.
+			r := strings.NewReplacer(
+				`"`, `""`,
+				"\n", " ",
+				"\r", "",
+				"\x00", "",
+			)
+			return r.Replace(s)
+		},
 	}
 	t, err := template.New(name).Funcs(funcs).ParseFS(tmplFS, name)
 	if err != nil {
@@ -220,14 +244,22 @@ func render(name string, p Params) ([]byte, error) {
 
 // DefaultConfigDir returns the standard config location for the current
 // OS. macOS uses ~/Library/Application Support/1-bit-bridge so it's
-// backed up by Time Machine and survives reinstalls; Linux follows XDG.
+// backed up by Time Machine and survives reinstalls; Linux follows XDG;
+// Windows uses %LOCALAPPDATA%\1-bit-bridge (roaming is overkill for a
+// per-machine SQLite DB + TLS cert).
 func DefaultConfigDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	if runtime.GOOS == "darwin" {
+	switch runtime.GOOS {
+	case "darwin":
 		return filepath.Join(home, "Library", "Application Support", "1-bit-bridge"), nil
+	case "windows":
+		if x := os.Getenv("LOCALAPPDATA"); x != "" {
+			return filepath.Join(x, "1-bit-bridge"), nil
+		}
+		return filepath.Join(home, "AppData", "Local", "1-bit-bridge"), nil
 	}
 	// XDG default when XDG_CONFIG_HOME is unset.
 	if x := os.Getenv("XDG_CONFIG_HOME"); x != "" {
@@ -242,8 +274,18 @@ func DefaultLogPath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if runtime.GOOS == "darwin" {
+	switch runtime.GOOS {
+	case "darwin":
 		return filepath.Join(home, "Library", "Logs", "1-bit-bridge.log"), nil
+	case "windows":
+		// Co-locate the log with the data/config dir — keeps the whole
+		// install self-contained under one folder and avoids sprinkling
+		// writes under %APPDATA% (which roams) vs %LOCALAPPDATA% (which
+		// doesn't).
+		if x := os.Getenv("LOCALAPPDATA"); x != "" {
+			return filepath.Join(x, "1-bit-bridge", "bridge.log"), nil
+		}
+		return filepath.Join(home, "AppData", "Local", "1-bit-bridge", "bridge.log"), nil
 	}
 	// On Linux, keep logs alongside the config under XDG_STATE_HOME.
 	if x := os.Getenv("XDG_STATE_HOME"); x != "" {

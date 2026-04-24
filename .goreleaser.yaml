@@ -29,6 +29,7 @@ builds:
     goos:
       - darwin
       - linux
+      - windows
     goarch:
       - amd64
       - arm64
@@ -46,6 +47,13 @@ archives:
       {{ .ProjectName }}_{{ .Version }}_
       {{- if eq .Os "darwin" }}macos{{ else }}{{ .Os }}{{ end }}_
       {{- .Arch }}
+    # Default to tar.gz for unix; Windows gets a .zip since most
+    # Windows users don't have a tar that understands gzip by default
+    # (tar.exe in modern builds does, but Explorer's "Extract All"
+    # does not).
+    format_overrides:
+      - goos: windows
+        formats: [zip]
     formats: [tar.gz]
     files:
       - README.md
