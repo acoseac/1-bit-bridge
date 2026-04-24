@@ -365,6 +365,16 @@ func TestRootsRemoveSaveFailureRollsBackInMemory(t *testing.T) {
 		t.Errorf("Cfg.LibraryRoots not rolled back on Save failure: got %v, want %v",
 			srv.deps.Cfg.LibraryRoots, rootsBefore)
 	}
+	// Mirror on-disk assertion — same rationale as the Add Save-failure
+	// test. A failed Save must leave no observable state change.
+	reloaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("reload cfg: %v", err)
+	}
+	if !stringSlicesEqual(reloaded.LibraryRoots, rootsBefore) {
+		t.Errorf("persisted LibraryRoots mutated on Save failure: got %v, want %v",
+			reloaded.LibraryRoots, rootsBefore)
+	}
 }
 
 // TestRootsAddSaveFailureRollsBackInMemory mirrors the Remove test:
@@ -403,6 +413,19 @@ func TestRootsAddSaveFailureRollsBackInMemory(t *testing.T) {
 	if !stringSlicesEqual(srv.deps.Cfg.LibraryRoots, rootsBefore) {
 		t.Errorf("Cfg.LibraryRoots not rolled back on Save failure: got %v, want %v",
 			srv.deps.Cfg.LibraryRoots, rootsBefore)
+	}
+	// On-disk config must also match — the in-memory slice could be
+	// rolled back while a half-written file still lived on disk.
+	// `Cfg.Save`'s atomic write-then-rename makes this unlikely, but
+	// the assertion nails down the contract: a failed Save leaves
+	// zero observable state change, both in memory and on disk.
+	reloaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("reload cfg: %v", err)
+	}
+	if !stringSlicesEqual(reloaded.LibraryRoots, rootsBefore) {
+		t.Errorf("persisted LibraryRoots mutated on Save failure: got %v, want %v",
+			reloaded.LibraryRoots, rootsBefore)
 	}
 }
 

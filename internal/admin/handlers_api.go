@@ -207,6 +207,19 @@ func (s *Server) apiRootsAdd(w http.ResponseWriter, r *http.Request) {
 	s.deps.Cfg.LibraryRoots = newList
 	if err := s.deps.Cfg.Save(s.deps.CfgPath); err != nil {
 		s.deps.Cfg.LibraryRoots = prevRoots
+		// Compensating scan: if we reached here via the transition
+		// branch, WipeAllTracks has already emptied the manifest but
+		// the config was never persisted — /v1/manifest will serve
+		// zero tracks until the next scheduled/manual scan. Kick off
+		// a best-effort scan against the RESTORED (previous) roots
+		// so the outage is bounded by one scan-duration rather than
+		// one scan-interval. Errors here are swallowed: the user
+		// already sees the 500 for the real failure (Save), and a
+		// compensating-scan failure is strictly an additional
+		// recovery attempt, not a new user-visible event.
+		if willTransition {
+			go func() { _, _ = s.deps.Scanner.Scan(s.scanCtx()) }()
+		}
 		writeError(w, http.StatusInternalServerError, "save-config", err.Error())
 		return
 	}
@@ -280,6 +293,14 @@ func (s *Server) apiRootsRemove(w http.ResponseWriter, r *http.Request) {
 	s.deps.Cfg.LibraryRoots = newList
 	if err := s.deps.Cfg.Save(s.deps.CfgPath); err != nil {
 		s.deps.Cfg.LibraryRoots = prevRoots
+		// Compensating scan — same rationale as the Add path: the
+		// manifest op above already mutated /v1/manifest (wipe or
+		// prefix-delete), and without a rescan the manifest sits in
+		// a post-mutation state until the next scheduled scan.
+		// Rescan against the restored (previous) roots to bound
+		// the outage by one scan-duration. Errors swallowed — the
+		// 500 the user sees is the real Save failure.
+		go func() { _, _ = s.deps.Scanner.Scan(s.scanCtx()) }()
 		writeError(w, http.StatusInternalServerError, "save-config", err.Error())
 		return
 	}
