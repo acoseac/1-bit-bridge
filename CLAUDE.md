@@ -7,7 +7,7 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
 - `make build` — builds `./bin/bridge` for the host OS.
 - `make build-all` — cross-compiles to `dist/bridge-<os>-<arch>{.exe}`.
 - `make test` — pure-Go race-enabled suite; ~150 tests across 10 packages.
-- `make fmt vet test build-all` is the pre-push gate (CI is disabled while the private-repo Actions budget is blocked; see `CONTRIBUTING.md`).
+- `make fmt vet test build-all` is the pre-push gate — there's no PR-check workflow today, so local-green is load-bearing. See `CONTRIBUTING.md`.
 - Pure-Go stack: `modernc.org/sqlite` (no cgo), `github.com/mewkiz/flac`, `github.com/dhowden/tag`, `github.com/hashicorp/mdns`. One static binary, no runtime deps.
 
 ## Architecture at a glance
@@ -50,7 +50,7 @@ The iOS app **1-bit** lives at `github.com/acoseac/1-bit` with a local clone at 
 
 ## Local test fixture
 
-A small audio library lives at **`/Users/arsenie/medialibtest/`** — 5 artists (Abdullah Ibrahim, Amestoy Trio, Angie Stone, Anthony Hamilton, Dire Straits), ~48 tracks across FLAC / M4A / MP3. Good coverage for tag extraction, enrichment, and playback paths without a NAS.
+Point `--library` at any folder with a handful of tagged audio files and you've got a working test setup — FLAC / DSF / MP3 / M4A all work. A few dozen tracks across 4–5 artists covers the tag-extraction, enrichment, and playback paths without needing a NAS.
 
 Short path (no service install, doesn't touch launchd):
 
@@ -58,8 +58,8 @@ Short path (no service install, doesn't touch launchd):
 make build >/dev/null
 ./bin/bridge init --yes --no-service \
   --dir /tmp/bridge-live \
-  --library /Users/arsenie/medialibtest \
-  --name "Media Test Library"
+  --library ~/Music/test-library \
+  --name "Test Library"
 ./bin/bridge serve --config /tmp/bridge-live/bridge.yaml &
 # Admin console: http://127.0.0.1:7789/ — pair from there, or keep using `bridge pair` for scripts.
 ```
@@ -87,6 +87,6 @@ Pre-push:
 make fmt vet test build-all
 ```
 
-No CI for regular PRs (private repo + Actions-budget block); local checklist is the gate. Paste the clean output into the PR body. When public / budget lifted, re-add `.github/workflows/ci.yml`.
+No PR-check CI workflow today — local `make fmt vet test build-all` is the gate. Paste the clean output into the PR body. If a CI workflow is ever re-added, the expectation is that it matches the local gate (same four commands) rather than drift.
 
-Releases *are* wired up: `.github/workflows/release.yml` runs goreleaser on tag push (`git tag v0.0.2 && git push --tags`), producing darwin/linux × amd64/arm64 tarballs as a draft GitHub Release. Edit the auto-generated release notes, publish, then the `README.md` install recipe (`tar -xzf … && ./bridge init`) works for end users.
+Releases *are* wired up: `.github/workflows/release.yml` runs goreleaser on tag push (`git tag v0.1.0 && git push --tags`), producing signed+notarized darwin archives and unsigned linux / windows archives as a draft GitHub Release. Windows Authenticode signing is pending — tracked against the next release once SignPath Foundation approval lands. Edit the auto-generated release notes and publish; the `README.md` install recipe works for end users from that point.
