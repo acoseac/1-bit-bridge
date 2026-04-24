@@ -20,10 +20,9 @@ Every iOS-repo PR that lands a new `protocolVersion` MUST tick the PR template c
 
 This rule is enforced by review convention, not CI. If you find yourself wanting to skip it "just this once", write it up in the PR body so the next reader can see why.
 
-## Pre-push checklist (CI is not wired up — you are the CI)
+## Pre-push checklist
 
-Every PR author MUST run these commands locally before pushing and paste the
-result into the PR body:
+There is no PR-check workflow today — local-green is the gate. Every PR author runs these commands locally before pushing and pastes the result into the PR body:
 
 ```sh
 make fmt
@@ -32,9 +31,7 @@ make test          # race-enabled; runs on cmd/bridge and any package with _test
 make build-all     # cross-compile sanity check for darwin/linux/windows × amd64/arm64
 ```
 
-If any step fails, fix it on the branch before requesting review. A green
-paste-in is the substitute for CI until the repo moves off private (or the
-Actions budget is raised).
+If any step fails, fix it on the branch before requesting review. A green paste-in substitutes for CI.
 
 ## Go style
 

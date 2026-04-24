@@ -1,0 +1,39 @@
+name: Feature request
+description: Suggest a capability or improvement.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Feature requests are welcome. Note the project's constraints before writing yours up — they filter out requests that won't land regardless of how well-motivated they are:
+
+        - **No server-side transcoding.** 1-bit's whole premise is bit-exact delivery. Requests to on-the-fly re-encode DSF → PCM, re-sample, or re-container will be declined.
+        - **No auth on the admin console.** It's loopback-only by design. Anyone on the host already owns the token store and the SQLite DB; an auth layer on top would be theatre. For remote admin, SSH-tunnel the port.
+        - **No public mDNS advertisement off-LAN.** The bridge advertises `_onebit-bridge._tcp` on the local link only. WAN discovery is out of scope.
+
+        If your request lives in one of those categories, please propose an architectural alternative instead of the feature verbatim.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do that the bridge doesn't support yet? What's the user-visible outcome?
+      placeholder: "When pairing a second iPhone I can't tell the two paired tokens apart — Devices page shows them both as 'iPhone 15'."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: "Optional: your sketch of the solution. A concrete API shape / UI change helps — but if you just have the problem and not the fix, leave this blank."
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: "Optional: workarounds you've tried or other designs you've thought about. Helps reviewers see why you landed where you did."
+    validations:
+      required: false

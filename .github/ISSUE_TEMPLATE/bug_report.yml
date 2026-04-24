@@ -1,0 +1,91 @@
+name: Bug report
+description: Something isn't working right.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this. Please fill in as much as you can — the more context you share, the faster we can reproduce and fix.
+
+        **Security issues don't go here.** If you think this could be exploited by a hostile LAN peer, by a paired iOS device, or by a crafted `bridge.yaml`, please use the private advisory flow documented in [SECURITY.md](https://github.com/acoseac/1-bit-bridge/blob/main/SECURITY.md) instead.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `bridge version`, or the release tag / commit you're on.
+      placeholder: "1-bit-bridge 0.1.0 (protocol v1)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS (Intel)
+        - macOS (Apple Silicon)
+        - Linux (amd64)
+        - Linux (arm64)
+        - Windows (amd64)
+        - Windows (arm64)
+        - Other / building from source
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: Install path
+      options:
+        - "bridge init (service install: launchd / systemd)"
+        - "bridge init --no-service"
+        - "bridge init --service (Windows SCM)"
+        - "Manual: built from source, running bridge serve myself"
+        - "Other"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you expect to happen, and what actually happened?
+      placeholder: |
+        Expected: iOS app syncs the library in one request and shows tracks within a minute.
+        Actual: iOS spins on "Syncing…" and the bridge logs show `manifest: disk full` at the moment it should have served /v1/manifest.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproducer
+    attributes:
+      label: Reproducer
+      description: Minimum steps to reproduce. Paste commands, config snippets, or a small request sequence — whatever's smallest-useful.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`bridge doctor` output"
+      description: Paste the output of `bridge doctor` if you can run it against the affected install.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: |
+        macOS: `~/Library/Logs/1-bit-bridge.log`.
+        Linux: `~/.local/state/1-bit-bridge/bridge.log` (or wherever journald routed it).
+        Windows Startup-folder install: `%LOCALAPPDATA%\1-bit-bridge\bridge.log`.
+        Windows Service install: `%PROGRAMDATA%\1-bit-bridge\bridge.log`.
+
+        A few dozen lines around the failure is usually enough. Please scrub any tokens or bridge URLs before pasting.
+      render: shell
+    validations:
+      required: false

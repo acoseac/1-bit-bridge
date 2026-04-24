@@ -69,11 +69,19 @@ Requires Go 1.25+.
 
 ```sh
 make build          # builds ./bin/bridge for the host OS
-make build-all      # cross-compiles darwin/linux × amd64/arm64 into dist/
+make build-all      # cross-compiles darwin/linux/windows × amd64/arm64 into dist/
 make test           # unit tests
 ```
 
 For a local release dry-run: `goreleaser release --snapshot --clean`.
+
+## Contributing
+
+PRs welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the branch / PR conventions, the pre-push checklist, and the **mirror-PR rule** that applies whenever a change touches the wire protocol shared with the [1-bit iOS app](https://github.com/acoseac/1-bit).
+
+## Security
+
+Found a vulnerability? Please report privately via GitHub's [Security Advisories](https://github.com/acoseac/1-bit-bridge/security/advisories/new) — see [`SECURITY.md`](SECURITY.md) for scope, response SLA, and what to include in your report.
 
 ## Manual run (without `bridge init`)
 

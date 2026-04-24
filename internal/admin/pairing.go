@@ -43,9 +43,10 @@ func defaultBridgeURL(listenAddress string) string {
 	if err != nil || host == "" {
 		host = "localhost"
 	}
-	// macOS hostnames are like "arsenies-macbook.local"; Linux hostnames
-	// usually aren't. Always tacking on .local would be wrong for non-mDNS
-	// networks. Only append if the hostname doesn't already contain a dot.
+	// macOS hostnames already carry the `.local` suffix (e.g.
+	// `mac-mini.local`); Linux hostnames usually don't. Always tacking
+	// on `.local` would be wrong for non-mDNS networks, so only append
+	// if the hostname doesn't already contain a dot.
 	return fmt.Sprintf("https://%s:%s", ensureMDNSHost(host), port)
 }
 

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/acoseac/1-bit-bridge/security/advisories/new
+    about: Report privately via GitHub's Security Advisories. Do not file a public issue for security bugs.
+  - name: iOS app (1-bit)
+    url: https://github.com/acoseac/1-bit/issues
+    about: If the bug is in the iOS app rather than the bridge (playback glitches, UI, scan UI), file it on the 1-bit repo.
