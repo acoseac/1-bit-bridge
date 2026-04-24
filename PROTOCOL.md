@@ -46,7 +46,7 @@ Pairing probe and liveness check. No auth token required for this endpoint (so t
   "serverVersion": "0.0.1",
   "libraryName": "My Music Library",
   "libraryRoots": ["Music"],
-  "certFingerprint": "SHA256:AbCdEf0123...",
+  "certFingerprint": "AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89",
   "startedAt": "2026-04-23T10:15:04Z",
   "scanState": {
     "lastFullScan": "2026-04-23T11:41:01Z",
@@ -163,7 +163,7 @@ All errors are JSON:
 
 Out-of-band setup path: the admin console emits a custom-scheme URL that carries everything the iOS app needs to add a bridge share in one tap (QR scan or deep link), so the operator never has to paste three separate fields by hand.
 
-```
+```text
 bridge://pair?url=<https bridge URL>&token=<base64url bearer>&fingerprint=<AB:CD:…:EF>&name=<library display name>
 ```
 

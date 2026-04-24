@@ -1,0 +1,67 @@
+name: ci
+
+# Runs on every PR to main and every push to a branch so contributors
+# see fmt / vet / test / build failures before review, not after. Release
+# builds live in .github/workflows/release.yml and only fire on tag push.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: fmt vet test build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # gofmt drift is a hard fail — keeps diffs noise-free and surfaces
+      # unformatted commits before they reach main.
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "::error::gofmt drift in:"
+            echo "$out"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      # -race catches the concurrency regressions we've paid for in the
+      # past (scanner / auth store reloads); don't drop it here without
+      # a replacement signal.
+      - name: go test -race
+        run: go test -race -count=1 ./...
+
+      # build-all covers every shipping platform matrix: if a platform
+      # breaks we want to see it on the PR, not the release.
+      - name: build-all
+        run: make build-all
+
+  goreleaser-check:
+    name: goreleaser config check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: check

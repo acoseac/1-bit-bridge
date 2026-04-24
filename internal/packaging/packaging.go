@@ -8,11 +8,13 @@ package packaging
 import (
 	"bytes"
 	"embed"
+	"encoding/xml"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"text/template"
 )
 
@@ -169,7 +171,36 @@ func uninstallSystemd() (string, error) {
 // --- template rendering ---
 
 func render(name string, p Params) ([]byte, error) {
-	t, err := template.ParseFS(tmplFS, name)
+	// The launchd plist is XML; the systemd unit is INI-like. Each template
+	// picks the right escape func for its own fields — both escapes are
+	// registered here so the templates can name them without per-file
+	// plumbing. Using text/template (not html/template) because neither
+	// target is HTML and we want precise, mechanical escaping of literal
+	// path characters, not context-aware HTML sanitization.
+	funcs := template.FuncMap{
+		"xmlEscape": func(s string) string {
+			// xml.EscapeText is the canonical path for Go's XML stdlib.
+			// It handles <, >, &, ' and " in a way that survives inside
+			// any plist <string> element, including paths with ampersands
+			// or apostrophes ("Bob's Music", "A & B Records/album.flac").
+			var b bytes.Buffer
+			if err := xml.EscapeText(&b, []byte(s)); err != nil {
+				return s
+			}
+			return b.String()
+		},
+		"systemdEscape": func(s string) string {
+			// systemd unit values end at the first unescaped newline or
+			// unmatched quote. Escape CR/LF/NUL; leave everything else
+			// alone so paths like /Users/x/Music stay readable. Full
+			// "systemd-escape" semantics aren't needed — we only write
+			// ExecStart, WorkingDirectory, and StandardOutput=append:...
+			// where these three bytes would break parsing.
+			r := strings.NewReplacer("\n", `\n`, "\r", `\r`, "\x00", "")
+			return r.Replace(s)
+		},
+	}
+	t, err := template.New(name).Funcs(funcs).ParseFS(tmplFS, name)
 	if err != nil {
 		return nil, fmt.Errorf("parse %s: %w", name, err)
 	}
