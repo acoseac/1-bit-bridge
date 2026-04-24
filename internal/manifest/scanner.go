@@ -315,6 +315,55 @@ func BuildManifest(store *Store, roots []string, since time.Time) (*Manifest, er
 	}, nil
 }
 
+// BuildManifestPage returns one page of a paginated full-manifest
+// iteration. The caller walks the whole library by calling with
+// `cursor=""` on the first page and feeding each response's
+// `NextCursor` back in until it comes back nil.
+//
+// Every page carries `Folders`, `LibraryRoots`, `GeneratedAt`, and
+// `Total` so the iOS client can wire up its scan-state UI from the
+// first page without waiting for the last one. `Total` comes from a
+// `COUNT(*)` query — stable across a pagination run since we don't
+// intermix pagination with since-delta.
+//
+// When fewer rows come back than `limit` requested, we're on the
+// last page and `NextCursor` stays nil. A zero-row first page
+// (empty library) also lands on nil.
+func BuildManifestPage(store *Store, roots []string, cursor string, limit int) (*Manifest, error) {
+	if limit <= 0 {
+		limit = 1000
+	}
+	tracks, err := store.ListTracksPage(cursor, limit)
+	if err != nil {
+		return nil, err
+	}
+	folders, err := store.ListFolders()
+	if err != nil {
+		return nil, err
+	}
+	total, err := store.CountTracks()
+	if err != nil {
+		return nil, err
+	}
+	basenames := make([]string, len(roots))
+	for i, r := range roots {
+		basenames[i] = filepath.Base(r)
+	}
+	m := &Manifest{
+		Version:      1,
+		GeneratedAt:  time.Now().UTC(),
+		LibraryRoots: basenames,
+		Folders:      folders,
+		Tracks:       tracks,
+		Total:        total,
+	}
+	if len(tracks) == limit && len(tracks) > 0 {
+		last := tracks[len(tracks)-1].Path
+		m.NextCursor = &last
+	}
+	return m, nil
+}
+
 // DefaultDBPath returns the SQLite path used when the user doesn't
 // override. Lives under dataDir so the same config logic applies.
 func DefaultDBPath(dataDir string) string { return filepath.Join(dataDir, "bridge.db") }

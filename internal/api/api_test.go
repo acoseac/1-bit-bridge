@@ -27,9 +27,28 @@ type fakeManifestProvider struct {
 	isScanning    bool
 	lastFullScan  time.Time
 	tracksIndexed int
+	// pageBody / pageErr drive BuildManifestPage independently so
+	// pagination tests can assert against a different response than
+	// the legacy BuildManifest path without clobbering full-manifest
+	// coverage. nil pageBody falls back to `body` so tests that only
+	// care about the legacy path don't have to set both.
+	pageBody any
+	pageErr  error
+	// lastPageCursor / lastPageLimit let pagination tests verify the
+	// handler forwards query params correctly.
+	lastPageCursor string
+	lastPageLimit  int
 }
 
 func (f *fakeManifestProvider) BuildManifest(since time.Time) (any, error) {
+	return f.body, f.err
+}
+func (f *fakeManifestProvider) BuildManifestPage(cursor string, limit int) (any, error) {
+	f.lastPageCursor = cursor
+	f.lastPageLimit = limit
+	if f.pageBody != nil || f.pageErr != nil {
+		return f.pageBody, f.pageErr
+	}
 	return f.body, f.err
 }
 func (f *fakeManifestProvider) IsScanning() bool        { return f.isScanning }

@@ -2,6 +2,7 @@ package manifest
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -218,6 +219,137 @@ func TestStoreHasTrackWithArtistMBID(t *testing.T) {
 	}
 	if s.HasTrackWithArtistMBID("not-a-uuid") {
 		t.Errorf("unknown artist MBID should report false")
+	}
+}
+
+// --- Pagination (v1.1 §8) ---
+
+// TestStoreListTracksPageWalksAllRowsExactlyOnce is the core
+// correctness guarantee: iterating with `afterPath=""` and feeding
+// each page's last path back in must cover every track exactly once,
+// in ascending path order, even when the page size doesn't divide
+// the track count evenly.
+func TestStoreListTracksPageWalksAllRowsExactlyOnce(t *testing.T) {
+	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	defer s.Close()
+
+	// 7 tracks, page size 3 → pages of 3, 3, 1. Non-divisible on
+	// purpose.
+	for i := 1; i <= 7; i++ {
+		s.UpsertTrack(&Track{
+			Path:    fmt.Sprintf("Music/Artist/%02d.flac", i),
+			Size:    int64(i),
+			ModTime: time.Now(),
+		})
+	}
+
+	var seen []string
+	cursor := ""
+	pages := 0
+	for {
+		page, err := s.ListTracksPage(cursor, 3)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pages++
+		if len(page) == 0 {
+			break
+		}
+		for _, tr := range page {
+			seen = append(seen, tr.Path)
+		}
+		if len(page) < 3 {
+			break
+		}
+		cursor = page[len(page)-1].Path
+	}
+
+	if len(seen) != 7 {
+		t.Errorf("seen %d tracks across %d pages, want 7", len(seen), pages)
+	}
+	// Sorted + unique.
+	for i := 1; i < len(seen); i++ {
+		if seen[i] <= seen[i-1] {
+			t.Errorf("out-of-order or duplicate at %d: %q then %q", i, seen[i-1], seen[i])
+		}
+	}
+}
+
+// TestStoreListTracksPageEmptyStoreReturnsEmpty covers the zero-row
+// edge — the pagination loop must terminate immediately, not spin.
+func TestStoreListTracksPageEmptyStoreReturnsEmpty(t *testing.T) {
+	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	defer s.Close()
+
+	page, err := s.ListTracksPage("", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page) != 0 {
+		t.Errorf("empty store should return empty page, got %d", len(page))
+	}
+}
+
+// TestStoreListTracksPageZeroLimitDefaults locks in the "no foot-gun"
+// contract: a caller passing limit=0 or negative gets a sensible
+// default rather than a zero-row page that stalls their loop.
+func TestStoreListTracksPageZeroLimitDefaults(t *testing.T) {
+	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	defer s.Close()
+	for i := 1; i <= 5; i++ {
+		s.UpsertTrack(&Track{
+			Path:    fmt.Sprintf("Music/%02d.flac", i),
+			Size:    int64(i),
+			ModTime: time.Now(),
+		})
+	}
+	page, err := s.ListTracksPage("", 0) // 0 → default 1000
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page) != 5 {
+		t.Errorf("limit=0 should fall back to default and return all 5 tracks, got %d", len(page))
+	}
+}
+
+// TestBuildManifestPageSetsNextCursorAndTotal checks the envelope-
+// building contract: Total always present, NextCursor set iff there's
+// another page.
+func TestBuildManifestPageSetsNextCursorAndTotal(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := OpenStore(filepath.Join(dir, "bridge.db"))
+	defer s.Close()
+	for i := 1; i <= 5; i++ {
+		s.UpsertTrack(&Track{
+			Path:    fmt.Sprintf("Music/%02d.flac", i),
+			Size:    int64(i),
+			ModTime: time.Now(),
+		})
+	}
+
+	// Page size 2 → first page is full, NextCursor non-nil.
+	m, err := BuildManifestPage(s, []string{filepath.Join(dir, "Music")}, "", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Total != 5 {
+		t.Errorf("Total = %d, want 5", m.Total)
+	}
+	if m.NextCursor == nil || *m.NextCursor != "Music/02.flac" {
+		t.Errorf("NextCursor = %v, want pointer to Music/02.flac", m.NextCursor)
+	}
+
+	// Last page (paging from cursor "Music/04.flac" → only
+	// Music/05.flac) → short read, NextCursor nil.
+	m, err = BuildManifestPage(s, []string{filepath.Join(dir, "Music")}, "Music/04.flac", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.NextCursor != nil {
+		t.Errorf("NextCursor should be nil on last page, got %v", *m.NextCursor)
+	}
+	if len(m.Tracks) != 1 {
+		t.Errorf("last page tracks = %d, want 1", len(m.Tracks))
 	}
 }
 

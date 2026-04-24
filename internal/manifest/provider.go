@@ -27,6 +27,13 @@ func (p *Provider) BuildManifest(since time.Time) (any, error) {
 	return BuildManifest(p.store, p.scanner.Roots(), since)
 }
 
+// BuildManifestPage satisfies api.ManifestProvider for the paginated
+// full-manifest path introduced in v1.1. See `BuildManifestPage` in
+// scanner.go for the cursor semantics.
+func (p *Provider) BuildManifestPage(cursor string, limit int) (any, error) {
+	return BuildManifestPage(p.store, p.scanner.Roots(), cursor, limit)
+}
+
 // IsScanning satisfies api.ManifestProvider.
 func (p *Provider) IsScanning() bool { return p.scanner.IsScanning() }
 

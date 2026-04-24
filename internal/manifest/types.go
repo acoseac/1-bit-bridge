@@ -49,10 +49,33 @@ type Folder struct {
 }
 
 // Manifest is the top-level JSON returned by GET /v1/manifest.
+//
+// Two consumption modes:
+//
+//  1. Full manifest (default, v1.0): caller omits `?limit=` and
+//     `?cursor=`. Server ships every track in a single response.
+//     `NextCursor` and `Total` are absent.
+//  2. Paginated (v1.1, full-manifest only): caller sets `?limit=N`
+//     and iterates, passing the prior page's `NextCursor` back as
+//     `?cursor=` until the server returns a null cursor.
+//     `Folders` + `LibraryRoots` + `GeneratedAt` are included on
+//     every page so iOS can wire them into its scan state without
+//     waiting for the last page. `Total` is the full track count
+//     across all pages (stable across a pagination run), not the
+//     page length. `Since`-delta mode is never paginated: by
+//     definition deltas are small.
 type Manifest struct {
 	Version      int       `json:"version"`
 	GeneratedAt  time.Time `json:"generatedAt"`
 	LibraryRoots []string  `json:"libraryRoots"`
 	Folders      []Folder  `json:"folders"`
 	Tracks       []Track   `json:"tracks"`
+	// NextCursor carries an opaque token the client sends back as
+	// `?cursor=` on the next page request. Null means "this is the
+	// last page". Always absent on a full (non-paginated) response.
+	NextCursor *string `json:"nextCursor,omitempty"`
+	// Total is the full track count across all pages of the current
+	// pagination run. Absent on full (non-paginated) responses —
+	// callers can use `len(tracks)` instead.
+	Total int `json:"total,omitempty"`
 }
