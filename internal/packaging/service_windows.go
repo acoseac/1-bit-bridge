@@ -44,7 +44,16 @@ func InstallWindowsService(p Params) (string, error) {
 	// asked it to). The Control(svc.Stop) + poll-for-stopped fixes it.
 	if s, err := m.OpenService(ServiceLabel); err == nil {
 		_, _ = s.Control(svc.Stop)
-		waitForServiceStopped(s, 10*time.Second)
+		if werr := waitForServiceStopped(s, 10*time.Second); werr != nil {
+			// Can't proceed to Delete without a clean stop — the
+			// service would stay in "marked for delete" limbo until
+			// reboot, and CreateService below would fail with
+			// ERROR_SERVICE_MARKED_FOR_DELETE. Better to surface
+			// the actual failure than silently fall through into
+			// that failure mode.
+			s.Close()
+			return "", fmt.Errorf("stop existing service %q: %w", ServiceLabel, werr)
+		}
 		_ = s.Delete()
 		s.Close()
 		waitForServiceGone(m, ServiceLabel, 3*time.Second)
@@ -113,7 +122,14 @@ func UninstallWindowsService() error {
 	// doesn't handle it — Delete then deferred, uninstall effectively
 	// silently no-oped until the next reboot.
 	_, _ = s.Control(svc.Stop)
-	waitForServiceStopped(s, 10*time.Second)
+	if werr := waitForServiceStopped(s, 10*time.Second); werr != nil {
+		// Same rationale as install: Delete waits for Stopped, so a
+		// failed-to-stop service will reproduce the marked-for-delete
+		// bug. Bubble the error so the operator sees why and can
+		// intervene (kill the process, reboot) rather than the
+		// uninstall silently completing + the service coming back.
+		return fmt.Errorf("stop service %q: %w", ServiceLabel, werr)
+	}
 	return s.Delete()
 }
 
@@ -138,18 +154,24 @@ func waitForServiceGone(m *mgr.Mgr, name string, timeout time.Duration) {
 // the caller can proceed with its next step (either recreate in the
 // install path, or return to the user in the uninstall path).
 //
-// Any Query() error breaks the loop — the service likely vanished
-// underneath us, which is the state we want anyway.
-func waitForServiceStopped(s *mgr.Service, timeout time.Duration) {
+// Returns nil on clean stop. A Query error is returned as-is (the
+// service may have vanished — caller's choice whether that's an OK
+// outcome). A deadline exceed is surfaced as a wrapped error; the
+// prior behaviour of returning silently on timeout was what caused
+// install/uninstall to fall through into Delete on a still-running
+// service, reproducing the ERROR_SERVICE_MARKED_FOR_DELETE case PR #30
+// set out to fix.
+func waitForServiceStopped(s *mgr.Service, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		status, err := s.Query()
 		if err != nil {
-			return
+			return fmt.Errorf("query service status: %w", err)
 		}
 		if status.State == svc.Stopped {
-			return
+			return nil
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+	return fmt.Errorf("timeout waiting for service to stop after %s", timeout)
 }

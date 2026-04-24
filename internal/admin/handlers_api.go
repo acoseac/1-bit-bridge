@@ -177,21 +177,41 @@ func (s *Server) apiRootsAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Apply: persist config, swap scanner/resolver roots, then let the
-	// rescan re-populate the manifest. A single↔multi transition changes
-	// the stored path form (bare "Artist/…" vs "<basename>/Artist/…") so
-	// we wipe first and let the scan start from zero.
+	// Apply: a single↔multi transition changes the stored path form
+	// (bare "Artist/…" vs "<basename>/Artist/…"), so the manifest has
+	// to be wiped and re-populated from a fresh scan.
+	//
+	// Commit order matches apiRootsRemove: run the destructive
+	// manifest op FIRST, persist the root list only after it succeeds.
+	// The reverse (save config → wipe tracks) can leave disk in a
+	// state where the config advertises the new root but the manifest
+	// still serves the previous form's tracks — the next restart
+	// would serve phantom paths. With this order, a wipe failure
+	// means the config file is untouched; a `Cfg.Save` failure after
+	// a successful wipe means the next scan simply re-populates —
+	// every failure window lands in a state the scanner can heal.
 	willTransition := len(current) == 1 // 1 → N: storage form flips
+	if willTransition {
+		if err := s.deps.Manifest.WipeAllTracks(); err != nil {
+			writeError(w, http.StatusInternalServerError, "wipe-tracks", err.Error())
+			return
+		}
+	}
+	// Snapshot prev roots before mutating so we can roll back on a
+	// failed Save. Mirrors the apiRootsRemove path: without the
+	// rollback, a failed Save leaves in-memory holding the new list
+	// while disk has the old — and any later successful Save from an
+	// unrelated edit (library-name change, bind-address change, etc.)
+	// silently commits the addition the operator had seen fail.
+	prevRoots := append([]string(nil), s.deps.Cfg.LibraryRoots...)
 	s.deps.Cfg.LibraryRoots = newList
 	if err := s.deps.Cfg.Save(s.deps.CfgPath); err != nil {
+		s.deps.Cfg.LibraryRoots = prevRoots
 		writeError(w, http.StatusInternalServerError, "save-config", err.Error())
 		return
 	}
 	s.deps.Scanner.SetRoots(newList)
 	s.deps.Resolver.SetRoots(newList)
-	if willTransition {
-		_ = s.deps.Manifest.WipeAllTracks()
-	}
 	go func() { _, _ = s.deps.Scanner.Scan(s.scanCtx()) }()
 	writeJSON(w, http.StatusCreated, rootRow{Path: abs, Tracks: 0})
 }

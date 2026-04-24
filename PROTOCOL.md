@@ -62,7 +62,18 @@ Pairing probe and liveness check. No auth token required for this endpoint (so t
 }
 ```
 
-`endpoints` (additive since v1, optional, may be absent or empty) is the full list of URLs the server is currently reachable at — LAN IPv4/IPv6 (global unicast only; link-local is filtered because it's not reachable across devices), the `<hostname>.local` mDNS form, and any Tailscale interface (CGNAT `100.64/10` for v4, `fd7a:115c:a1e0::/48` ULA for v6). Clients use this to learn new alternates at heartbeat time so they can roam between LAN and Tailscale without re-pairing. Ordering reflects the server's recommendation: LAN before Tailscale before mDNS, IPv4 before IPv6 within each class.
+`endpoints` (additive since v1, optional, may be absent or empty) is the full list of URLs the server is currently reachable at — LAN IPv4/IPv6 (global unicast only; link-local is filtered because it's not reachable across devices), the `<hostname>.local` mDNS form, and any Tailscale interface (CGNAT `100.64/10` for v4, `fd7a:115c:a1e0::/48` ULA for v6). Clients use this to learn new alternates at heartbeat time so they can roam between LAN and Tailscale without re-pairing.
+
+**Ordering** (reflects the server's recommendation — clients pick the first URL they can reach):
+
+1. LAN IPv4 (private-unicast on a non-loopback, non-Tailscale interface)
+2. LAN IPv6 (global-unicast counterpart to LAN IPv4)
+3. mDNS `<hostname>.local`
+4. Tailscale IPv4 (CGNAT `100.64/10`)
+5. Tailscale IPv6 (ULA `fd7a:115c:a1e0::/48`)
+6. Public (any remaining globally-routable address)
+
+The mDNS entry sits between LAN and Tailscale because it's a hostname alias for the same LAN path — on a LAN where resolution works it's a `.local` round-trip to the IPv4 we already listed, and on a LAN where mDNS is blocked (some captive portals, VLAN-segmented networks) the Tailscale CGNAT entry below it is the correct next step without waiting on a failing `.local` lookup.
 
 ### `GET /v1/list?path=<rel>`
 
