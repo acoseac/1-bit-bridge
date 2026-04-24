@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"os"
 	"path/filepath"
@@ -121,6 +122,63 @@ func TestInitRespectsTildeExpansion(t *testing.T) {
 	}
 	if got := expandHome("/abs/path"); got != "/abs/path" {
 		t.Errorf("expandHome(/abs/path) = %q", got)
+	}
+}
+
+// TestPromptLaunchModeChoices exercises the Windows-only launch-mode
+// picker. The function is platform-agnostic (no runtime guards inside),
+// so we can drive it directly from any build and assert that each
+// selected digit maps to the right launchChoice shape.
+func TestPromptLaunchModeChoices(t *testing.T) {
+	cases := []struct {
+		name   string
+		stdin  string
+		expect launchChoice
+	}{
+		{"default-enter", "\n", launchChoice{spawnNow: true}},
+		{"one", "1\n", launchChoice{spawnNow: true}},
+		{"two-service", "2\n", launchChoice{useService: true}},
+		{"three-manual", "3\n", launchChoice{skipService: true}},
+		{"invalid-then-two", "x\n2\n", launchChoice{useService: true}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			in := bufio.NewReader(strings.NewReader(c.stdin))
+			var w bytes.Buffer
+			got := promptLaunchMode(in, &w)
+			if got != c.expect {
+				t.Errorf("promptLaunchMode(%q) = %+v, want %+v", c.stdin, got, c.expect)
+			}
+		})
+	}
+}
+
+// TestResolveLaunchChoiceRespectsFlags makes sure a user who explicitly
+// passed `--no-service` or `--service` doesn't get re-prompted, even on
+// Windows + interactive. The prompt is an onboarding aid, not a
+// clobber of explicit intent.
+func TestResolveLaunchChoiceRespectsFlags(t *testing.T) {
+	in := bufio.NewReader(strings.NewReader(""))
+	var w bytes.Buffer
+	// --no-service wins: skipService=true, nothing else touched.
+	got := resolveLaunchChoice(in, &w, false, true, false, false)
+	if got != (launchChoice{skipService: true}) {
+		t.Errorf("--no-service: got %+v", got)
+	}
+	// --service wins: useService=true.
+	got = resolveLaunchChoice(in, &w, false, false, true, false)
+	if got != (launchChoice{useService: true}) {
+		t.Errorf("--service: got %+v", got)
+	}
+	// --yes non-interactive with neither flag but --start-now=true.
+	got = resolveLaunchChoice(in, &w, true, false, false, true)
+	if got != (launchChoice{spawnNow: true}) {
+		t.Errorf("--yes --start-now: got %+v", got)
+	}
+	// --yes with no flags at all: today's default (nothing set).
+	got = resolveLaunchChoice(in, &w, true, false, false, false)
+	if got != (launchChoice{}) {
+		t.Errorf("--yes plain: got %+v", got)
 	}
 }
 

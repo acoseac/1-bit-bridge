@@ -213,23 +213,7 @@ func render(name string, p Params) ([]byte, error) {
 			)
 			return r.Replace(s)
 		},
-		"cmdEscape": func(s string) string {
-			// Windows cmd.exe inside a double-quoted argument: the only
-			// thing that can tear it is a literal `"` embedded in the
-			// path. cmd.exe's escape for a quote inside quotes is `""`
-			// — NOT backslash-anything. Backslashes are fine inside
-			// quoted arguments; they're literal path separators.
-			// CR / LF would end the line, which would break the script.
-			// NUL can't appear in a Windows path, but stripping it is
-			// cheap insurance.
-			r := strings.NewReplacer(
-				`"`, `""`,
-				"\n", " ",
-				"\r", "",
-				"\x00", "",
-			)
-			return r.Replace(s)
-		},
+		"cmdEscape": func(s string) string { return CmdEscape(s) },
 	}
 	t, err := template.New(name).Funcs(funcs).ParseFS(tmplFS, name)
 	if err != nil {
@@ -240,6 +224,26 @@ func render(name string, p Params) ([]byte, error) {
 		return nil, fmt.Errorf("render %s: %w", name, err)
 	}
 	return buf.Bytes(), nil
+}
+
+// CmdEscape prepares a string for use inside a double-quoted argument on
+// a Windows `cmd.exe` command line. The only thing that can tear a
+// double-quoted argument is a literal `"` — cmd.exe's escape for a quote
+// inside quotes is `""`, NOT backslash-anything. Backslashes are fine
+// inside quoted arguments; they're literal path separators. CR / LF
+// would end the line, which would break the script. NUL can't appear in
+// a Windows path, but stripping it is cheap insurance.
+//
+// Shared by the `cmdEscape` template func (startup.cmd.tmpl) and the
+// runtime `SpawnDetached` helper so the init-time spawn and the
+// logon-time Startup launcher produce byte-identical command lines.
+func CmdEscape(s string) string {
+	return strings.NewReplacer(
+		`"`, `""`,
+		"\n", " ",
+		"\r", "",
+		"\x00", "",
+	).Replace(s)
 }
 
 // DefaultConfigDir returns the standard config location for the current
