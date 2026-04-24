@@ -14,14 +14,16 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
 
 | Package | Role |
 |---|---|
-| `cmd/bridge` | CLI: `serve` / `pair` / `scan` / `version` |
-| `internal/config` | YAML loader with defaults + path-relative resolution |
+| `cmd/bridge` | CLI: `init` / `serve` / `pair` / `scan` / `version` |
+| `internal/config` | YAML loader with defaults + path-relative resolution + `Save()` for admin edits |
 | `internal/tls` | Self-signed ECDSA P-256 cert minter, SHA-256 fingerprint for iOS pinning |
 | `internal/auth` | Bearer-token store (hashed, atomic persist, cross-process pickup) |
-| `internal/fs` | Path-safe resolver (traversal-rejection, multi-root routing) |
-| `internal/manifest` | SQLite library index + tag extractors (FLAC / DSF / MP3 / M4A) + JSON serializer |
+| `internal/fs` | Path-safe resolver (traversal-rejection, multi-root routing, hot-reload via SetRoots) |
+| `internal/manifest` | SQLite library index + tag extractors (FLAC / DSF / MP3 / M4A) + JSON serializer; Scanner roots are hot-reloadable |
 | `internal/enrich` | MusicBrainz + Cover Art Archive + Deezer clients, rate-limited (1.1s / 500ms / 120ms) |
 | `internal/api` | HTTP/2 handlers: `/v1/{health,list,stat,read,download,manifest,artwork/{mbid},artist-image/{mbid}}` |
+| `internal/admin` | Local web console on 127.0.0.1:7789 — library/devices/stats/settings pages + JSON API + bridge:// QR pair URL. Loopback-only, no auth. |
+| `internal/packaging` | launchd plist + systemd unit templates + install/uninstall helpers, used by `bridge init` |
 | `internal/mdns` | Bonjour `_onebit-bridge._tcp` advertisement |
 | `internal/version` | `ServerVersion` + `ProtocolVersion` constants (source of truth for `PROTOCOL.md`) |
 
@@ -41,6 +43,8 @@ The iOS app **1-bit** lives at `github.com/acoseac/1-bit` with a local clone at 
 - **Rate limits respect the services.** MB anon is 1 req/s (we pace at 1.1s); CAA is IA-infrastructure and polite at 500ms; Deezer is ~50 req/5s (we pace at 120ms). User-Agent identifies the app + GitHub URL per MB's TOS.
 - **TLS fingerprint is captured once.** The iOS pin is set during pairing via first-contact; rotating the server cert requires re-pairing. Don't mint a new cert on every `serve` run — `LoadOrGenerate` is sticky by design.
 - **`enriched_at` monotonicity.** Upsert resets to 0 on track change so the enricher re-runs; the enricher marks it to `time.Now().UnixNano()` on completion (success or skipped). Never touch it outside those two paths — the query `WHERE enriched_at = 0` drives the worker.
+- **Admin console is loopback-only, no auth.** `config.validateLoopbackAddress` + `admin.loopbackOnly` middleware both enforce this. Don't add an auth layer that bypasses the loopback constraint; don't expose admin behind Tailscale / reverse-proxy. Anyone on the host already owns the token store and the SQLite DB — auth on top would be theatre. For remote admin, SSH-tunnel the port.
+- **Single ↔ multi-root storage form flips.** When the admin adds a second root or removes back down to one, track paths change from `Artist/Album/…` to `<basename>/Artist/Album/…`. The admin handler calls `store.WipeAllTracks()` before the new scan so no stale rows survive. Don't try to migrate in place — the rescan is cheap, enrichment is cached by MBID.
 
 **Working the bridge**: `feat/<topic>` branches, PR to `main`, pre-push `make fmt vet test build-all`. **Working the iOS side**: same convention at `~/Desktop/com.acoseac.dsdplayer/`. Never push direct to `main` on either repo.
 
@@ -48,22 +52,19 @@ The iOS app **1-bit** lives at `github.com/acoseac/1-bit` with a local clone at 
 
 A small audio library lives at **`/Users/arsenie/medialibtest/`** — 5 artists (Abdullah Ibrahim, Amestoy Trio, Angie Stone, Anthony Hamilton, Dire Straits), ~48 tracks across FLAC / M4A / MP3. Good coverage for tag extraction, enrichment, and playback paths without a NAS.
 
-Restartable recipe (`/tmp/` is wiped on reboot — just re-run):
+Short path (no service install, doesn't touch launchd):
 
 ```sh
-mkdir -p /tmp/bridge-live
-cat > /tmp/bridge-live/bridge.yaml <<'EOF'
-libraryRoots:
-  - /Users/arsenie/medialibtest
-libraryName: "Media Test Library"
-listenAddress: ":7788"
-dataDir: /tmp/bridge-live/data
-scanIntervalSec: 3600
-EOF
 make build >/dev/null
+./bin/bridge init --yes --no-service \
+  --dir /tmp/bridge-live \
+  --library /Users/arsenie/medialibtest \
+  --name "Media Test Library"
 ./bin/bridge serve --config /tmp/bridge-live/bridge.yaml &
-./bin/bridge pair --config /tmp/bridge-live/bridge.yaml --name simulator
+# Admin console: http://127.0.0.1:7789/ — pair from there, or keep using `bridge pair` for scripts.
 ```
+
+The old hand-authored `bridge.yaml` recipe still works; keeping the init form because it also mints the TLS cert up-front and catches config typos before `serve` is up.
 
 Force re-enrichment if the DB is already populated from a prior run:
 
@@ -86,4 +87,6 @@ Pre-push:
 make fmt vet test build-all
 ```
 
-No CI (private repo + Actions-budget block); local checklist is the gate. Paste the clean output into the PR body. When public / budget lifted, re-add `.github/workflows/ci.yml`.
+No CI for regular PRs (private repo + Actions-budget block); local checklist is the gate. Paste the clean output into the PR body. When public / budget lifted, re-add `.github/workflows/ci.yml`.
+
+Releases *are* wired up: `.github/workflows/release.yml` runs goreleaser on tag push (`git tag v0.0.2 && git push --tags`), producing darwin/linux × amd64/arm64 tarballs as a draft GitHub Release. Edit the auto-generated release notes, publish, then the `README.md` install recipe (`tar -xzf … && ./bridge init`) works for end users.

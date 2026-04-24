@@ -1,0 +1,31 @@
+{{define "layout"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.LibraryName}} — 1-bit bridge</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body data-active="{{.ActiveTab}}">
+<header>
+  <div class="brand">
+    <span class="mark">1-bit</span>
+    <span class="name">{{.LibraryName}}</span>
+  </div>
+  <nav>
+    <a href="/" data-tab="dashboard">Dashboard</a>
+    <a href="/library" data-tab="library">Library</a>
+    <a href="/devices" data-tab="devices">Devices</a>
+    <a href="/settings" data-tab="settings">Settings</a>
+  </nav>
+  <div class="meta">
+    bridge {{.ServerVersion}} · protocol v{{.ProtocolVersion}}
+  </div>
+</header>
+<main>
+{{template "content" .}}
+</main>
+<script src="/static/app.js" defer></script>
+</body>
+</html>
+{{end}}

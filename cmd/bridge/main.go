@@ -2,6 +2,7 @@
 //
 // Subcommands:
 //
+//	bridge init    first-time setup: config, TLS cert, launchd/systemd unit
 //	bridge serve   run the HTTPS server (default port 7788)
 //	bridge pair    mint a new bearer token for an iOS client
 //	bridge scan    force a full library rescan
@@ -23,6 +24,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/admin"
 	"github.com/acoseac/1-bit-bridge/internal/api"
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
@@ -62,6 +64,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	switch args[0] {
+	case "init":
+		return initCmd(args[1:], os.Stdin, stdout, stderr)
 	case "serve":
 		return serveCmd(ctx, args[1:], stdout, stderr)
 	case "pair":
@@ -88,12 +92,17 @@ Usage:
   bridge <subcommand> [flags]
 
 Subcommands:
+  init     First-time setup: writes config, mints TLS cert, installs service.
   serve    Run the HTTPS server.
   pair     Generate a new bearer token for an iOS client.
   scan     Force a full library rescan.
   version  Print version and protocol version.
 
 Run "bridge <subcommand> -h" for subcommand-specific flags.
+
+First-time install:
+  bridge init                    # writes config + installs launchd/systemd unit
+                                 # prints admin console URL at http://127.0.0.1:7789/
 `)
 }
 
@@ -159,7 +168,7 @@ func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	}
 	defer manifestStore.Close()
 	scanner := manifest.NewScanner(cfg.LibraryRoots, manifestStore)
-	provider := manifest.NewProvider(cfg.LibraryRoots, manifestStore, scanner)
+	provider := manifest.NewProvider(manifestStore, scanner)
 
 	// Fire up the periodic scanner in the background. It runs an initial
 	// scan on startup, then rescans every cfg.ScanInterval().
@@ -190,6 +199,37 @@ func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		TLSConfig: &tls.Config{Certificates: []tls.Certificate{*cert}, MinVersion: tls.VersionTLS12},
 	}
 
+	// Admin console: plain HTTP on a loopback address (default
+	// 127.0.0.1:7789). Shares the api server's Resolver so hot-add/remove
+	// of library roots lands on both sides in lockstep.
+	//
+	// We resolve the config file path to absolute here so admin.Cfg.Save
+	// writes to the right file even if the operator changes cwd post-boot
+	// (shouldn't happen, but let's not trip them up).
+	absCfgPath, _ := filepath.Abs(*configPath)
+	adminSrv, err := admin.New(admin.Deps{
+		Cfg:         cfg,
+		CfgPath:     absCfgPath,
+		Auth:        store,
+		Manifest:    manifestStore,
+		Scanner:     scanner,
+		Resolver:    apiSrv.Resolver(),
+		Fingerprint: fingerprint,
+		StartedAt:   time.Now().UTC(),
+		ScanCtx:     scanCtx,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "admin: %v\n", err)
+		return 1
+	}
+	adminCtx, adminCancel := context.WithCancel(context.Background())
+	defer adminCancel()
+	go func() {
+		if err := adminSrv.Serve(adminCtx); err != nil {
+			fmt.Fprintf(stderr, "admin server: %v\n", err)
+		}
+	}()
+
 	// Listen first so we can report the actual bound address (useful when
 	// cfg.ListenAddress is ":0" — which test code uses).
 	lis, err := net.Listen("tcp", cfg.ListenAddress)
@@ -202,6 +242,7 @@ func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		version.ServerVersion, version.ProtocolVersion, lis.Addr())
 	fmt.Fprintf(stdout, "Library: %q (roots: %v)\n", cfg.LibraryName, cfg.LibraryRoots)
 	fmt.Fprintf(stdout, "TLS fingerprint (pin this on the iOS side):\n  %s\n", fingerprint)
+	fmt.Fprintf(stdout, "Admin console: http://%s/ — add library folders, pair devices, view stats\n", cfg.AdminAddress)
 
 	// Advertise on mDNS so iOS clients on the same LAN auto-discover
 	// this server. Failures are non-fatal — mDNS is a nice-to-have,

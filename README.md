@@ -12,36 +12,49 @@ Companion server for the [1-bit](https://apps.apple.com/us/app/1-bit/id676252949
 
 ## Status
 
-v0 — scaffolding only. See [issues](https://github.com/acoseac/1-bit-bridge/issues) for tracking. The wire protocol is frozen at [`PROTOCOL.md`](PROTOCOL.md) v1.
+v0.0.x — wire protocol frozen at [`PROTOCOL.md`](PROTOCOL.md) v1. Admin console + one-command install landed; see [CHANGELOG](https://github.com/acoseac/1-bit-bridge/releases) for per-release notes.
 
-## Build
+## Install
 
-Requires Go 1.23+.
+**Download + init** — the short path on macOS / Linux:
+
+```sh
+# Download the tarball for your OS/arch from the releases page:
+#   https://github.com/acoseac/1-bit-bridge/releases
+tar -xzf 1-bit-bridge_*_macos_arm64.tar.gz
+./bridge init
+```
+
+`bridge init` prompts for a library folder, writes the config + TLS cert under `~/Library/Application Support/1-bit-bridge/` (or `$XDG_CONFIG_HOME/1-bit-bridge/` on Linux), registers a launchd user agent (or systemd user unit), starts the server, and opens the admin console in your browser.
+
+**Admin console** — [http://127.0.0.1:7789/](http://127.0.0.1:7789/). Add/remove library folders, pair iOS devices (QR + copy-buttons), revoke tokens, view scan state + stats. Loopback-only, no auth — anyone on the machine already has filesystem access to the token store.
+
+**Pairing an iOS device**: on the Devices page, click _Pair new device_, give it a name, optionally edit the bridge URL (defaults to `https://<hostname>.local:7788`), then generate the token. The modal shows a QR encoding a `bridge://pair?...` URL — scan it in the 1-bit app, or copy the URL/token/fingerprint fields manually.
+
+## Build from source
+
+Requires Go 1.25+.
 
 ```sh
 make build          # builds ./bin/bridge for the host OS
-make build-all      # builds dist/bridge-<os>-<arch>{.exe} for win/linux/darwin × amd64/arm64
+make build-all      # cross-compiles darwin/linux × amd64/arm64 into dist/
 make test           # unit tests
 ```
 
-## Run
+For a local release dry-run: `goreleaser release --snapshot --clean`.
+
+## Manual run (without `bridge init`)
+
+Users on Windows, or anyone who wants to skip the service install:
 
 ```sh
-cp config/bridge.yaml.example bridge.yaml
-# edit bridge.yaml to point libraryRoots at your music folder
-./bin/bridge serve --config bridge.yaml
-```
-
-Then pair an iOS client:
-
-```sh
-./bin/bridge pair --name "iPhone 15 Pro"
-# prints a bearer token + QR code; paste or scan into the 1-bit app.
+./bridge init --no-service --yes --library /path/to/music --dir ./bridge-data
+./bridge serve --config ./bridge-data/bridge.yaml
 ```
 
 ## Protocol
 
-See [`PROTOCOL.md`](PROTOCOL.md). Every endpoint is prefixed `/v1/`.
+See [`PROTOCOL.md`](PROTOCOL.md). Every client endpoint is prefixed `/v1/`. The admin console (`/`, `/api/*`, `/static/*`) lives on a separate loopback listener and is **not** part of the wire protocol — iOS never talks to it.
 
 ## License
 

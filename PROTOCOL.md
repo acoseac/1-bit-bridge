@@ -159,6 +159,29 @@ All errors are JSON:
 |    500 | `internal`           | Server-side failure                               |
 |    503 | `scan_in_progress`   | Manifest requested while an initial scan is busy  |
 
+## Pairing URL scheme
+
+Out-of-band setup path: the admin console emits a custom-scheme URL that carries everything the iOS app needs to add a bridge share in one tap (QR scan or deep link), so the operator never has to paste three separate fields by hand.
+
+```
+bridge://pair?url=<https bridge URL>&token=<base64url bearer>&fingerprint=<AB:CD:…:EF>&name=<library display name>
+```
+
+**Query parameters** — all required (iOS MUST reject URLs missing any of these):
+
+| Name          | Value                                                                 |
+|---------------|-----------------------------------------------------------------------|
+| `url`         | The HTTPS URL iOS should dial, including `https://` scheme and port.  |
+| `token`       | Raw bearer token (the same 43-char base64url string `bridge pair` prints). |
+| `fingerprint` | Server TLS cert SHA-256 in colon-delimited uppercase hex. Used for pinning. |
+| `name`        | Human-readable library name (shown in the iOS UI). |
+
+Unknown query parameters MUST be ignored — future additive fields (e.g. a display hint for the pairing modal) stay at the same protocol version.
+
+**iOS behaviour**: after parsing, the client runs the same `/v1/health` probe + authed `/v1/manifest?since=<future>` verify steps it uses for manual pairing, then persists the share on success. A malformed URL (missing fields, token/fingerprint fail regex sanity) is rejected before any network call.
+
+The scheme is **additive** — bridges that don't ship the admin console (pre-0.0.x builds, bespoke integrations) still work fine with the three-field manual paste path.
+
 ## Golden fixtures
 
 See `testdata/fixtures/` in this repo for canonical manifest payloads used as decode-test goldens on the iOS side (`com.acoseac.dsdplayer/Tests/com_acoseac_dsdplayerTests/Fixtures/Bridge/`). A schema change must regenerate the fixtures in both places in the same PR pair.

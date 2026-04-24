@@ -7,21 +7,24 @@ import (
 // Provider adapts the Scanner + Store pair to the api.ManifestProvider
 // interface. Owned by cmd/bridge's serveCmd; api.Server holds a pointer to
 // it.
+//
+// The root list is sourced from the scanner (which holds the hot-reloadable
+// authoritative copy) so a runtime SetRoots lands in the next manifest
+// without a separate wire-up here.
 type Provider struct {
-	roots   []string
 	store   *Store
 	scanner *Scanner
 }
 
 // NewProvider ties together the store and scanner so the api package can
 // fetch manifests without importing either directly.
-func NewProvider(roots []string, store *Store, scanner *Scanner) *Provider {
-	return &Provider{roots: roots, store: store, scanner: scanner}
+func NewProvider(store *Store, scanner *Scanner) *Provider {
+	return &Provider{store: store, scanner: scanner}
 }
 
 // BuildManifest satisfies api.ManifestProvider.
 func (p *Provider) BuildManifest(since time.Time) (any, error) {
-	return BuildManifest(p.store, p.roots, since)
+	return BuildManifest(p.store, p.scanner.Roots(), since)
 }
 
 // IsScanning satisfies api.ManifestProvider.

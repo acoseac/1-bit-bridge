@@ -1,0 +1,94 @@
+{{define "content"}}
+<section class="page devices">
+  <h1>Paired devices</h1>
+  <p class="lede">
+    Each row is a live bearer token — deleting it revokes the paired device
+    immediately. <code>Last used</code> updates within ~30s of a request.
+  </p>
+
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Devices</h2>
+      <button id="pair-open" class="btn primary">Pair new device</button>
+    </div>
+    <table class="rows">
+      <thead>
+        <tr>
+          <th>Name</th><th>ID</th><th>Created</th><th>Last used</th><th></th>
+        </tr>
+      </thead>
+      <tbody id="tokens-body">
+        {{range .Data.Tokens}}
+        <tr data-id="{{.ID}}">
+          <td>{{.Name}}</td>
+          <td><code>{{.ID}}</code></td>
+          <td>{{timeAgo .CreatedAt}}</td>
+          <td>{{timeAgo .LastUsedAt}}</td>
+          <td><button class="btn danger revoke-token">Revoke</button></td>
+        </tr>
+        {{else}}
+        <tr><td colspan="5"><em>No devices paired yet.</em></td></tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<dialog id="pair-modal">
+  <section id="pair-step-form">
+    <h2>Pair a new device</h2>
+    <form id="pair-form">
+      <label>
+        Device name
+        <input name="name" type="text" placeholder="iPhone 15 Pro" required>
+      </label>
+      <label>
+        Bridge URL iOS will dial
+        <input name="url" type="url" value="{{.Data.DefaultURL}}" required>
+        <small class="hint">
+          Default is <code>&lt;hostname&gt;.local</code> — override with a LAN IP if mDNS is flaky.
+        </small>
+      </label>
+      <div class="actions">
+        <button type="button" class="btn" data-close>Cancel</button>
+        <button type="submit" class="btn primary">Generate token</button>
+      </div>
+    </form>
+  </section>
+
+  <section id="pair-step-result" hidden>
+    <h2>Scan, then paste</h2>
+    <p class="lede">
+      Open <strong>1-bit</strong> on the iOS device and scan this QR, or copy
+      the three fields below and paste them in manually.
+    </p>
+    <div class="pair-qr"><img id="pair-qr-img" alt="pairing QR"></div>
+    <div class="pair-fields">
+      <div class="kv">
+        <div class="kv-label">Bridge URL</div>
+        <div class="kv-row">
+          <code id="pair-url"></code>
+          <button class="btn" data-copy="pair-url">Copy</button>
+        </div>
+      </div>
+      <div class="kv">
+        <div class="kv-label">Token (shown once)</div>
+        <div class="kv-row">
+          <code id="pair-token"></code>
+          <button class="btn" data-copy="pair-token">Copy</button>
+        </div>
+      </div>
+      <div class="kv">
+        <div class="kv-label">TLS fingerprint</div>
+        <div class="kv-row">
+          <code id="pair-fp"></code>
+          <button class="btn" data-copy="pair-fp">Copy</button>
+        </div>
+      </div>
+    </div>
+    <div class="actions">
+      <button type="button" class="btn primary" data-close>Done</button>
+    </div>
+  </section>
+</dialog>
+{{end}}

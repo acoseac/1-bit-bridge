@@ -265,3 +265,105 @@ func TestValidateRootsUniqueBasenames(t *testing.T) {
 		t.Errorf("unique basenames should not error: %v", err)
 	}
 }
+
+// --- hot-reload ---
+
+func TestSetRootsSwapsBasenameIndex(t *testing.T) {
+	tmp := t.TempDir()
+	a := filepath.Join(tmp, "a")
+	b := filepath.Join(tmp, "b")
+	c := filepath.Join(tmp, "c")
+	for _, d := range []string{a, b, c} {
+		os.MkdirAll(filepath.Join(d, "Album"), 0o755)
+	}
+	os.WriteFile(filepath.Join(c, "Album", "only.flac"), []byte("z"), 0o644)
+
+	r := New([]string{a, b})
+
+	// Before swap: "c/..." is unknown.
+	if _, err := r.Resolve("c/Album/only.flac"); !errors.Is(err, ErrUnknownRoot) {
+		t.Errorf("pre-swap: want ErrUnknownRoot, got %v", err)
+	}
+
+	// After swap: "a/..." is unknown (removed) and "c/..." resolves.
+	r.SetRoots([]string{b, c})
+
+	if _, err := r.Resolve("a/Album/track.flac"); !errors.Is(err, ErrUnknownRoot) {
+		t.Errorf("post-swap: want ErrUnknownRoot for removed root, got %v", err)
+	}
+	got, err := r.Resolve("c/Album/only.flac")
+	if err != nil {
+		t.Fatalf("post-swap resolve new root: %v", err)
+	}
+	want := filepath.Join(c, "Album", "only.flac")
+	if got != want {
+		t.Errorf("post-swap resolve = %q, want %q", got, want)
+	}
+
+	roots := r.Roots()
+	if len(roots) != 2 || roots[0] != b || roots[1] != c {
+		t.Errorf("Roots() = %v, want [%q, %q]", roots, b, c)
+	}
+}
+
+func TestSetRootsSingleToMultiTransition(t *testing.T) {
+	tmp := t.TempDir()
+	a := filepath.Join(tmp, "Music")
+	b := filepath.Join(tmp, "Audiobooks")
+	for _, d := range []string{a, b} {
+		os.MkdirAll(filepath.Join(d, "Album"), 0o755)
+	}
+	os.WriteFile(filepath.Join(a, "Album", "x.flac"), []byte("x"), 0o644)
+	os.WriteFile(filepath.Join(b, "Album", "y.flac"), []byte("y"), 0o644)
+
+	r := New([]string{a})
+	// Single-root form: client path has no basename prefix.
+	if _, err := r.Resolve("Album/x.flac"); err != nil {
+		t.Fatalf("single-root resolve: %v", err)
+	}
+
+	r.SetRoots([]string{a, b})
+	// Multi-root form: client path now routes by basename.
+	got, err := r.Resolve("Music/Album/x.flac")
+	if err != nil {
+		t.Fatalf("multi-root resolve a: %v", err)
+	}
+	if got != filepath.Join(a, "Album", "x.flac") {
+		t.Errorf("multi-root resolve = %q", got)
+	}
+	if _, err := r.Resolve("Audiobooks/Album/y.flac"); err != nil {
+		t.Fatalf("multi-root resolve b: %v", err)
+	}
+}
+
+func TestSetRootsConcurrentResolve(t *testing.T) {
+	tmp := t.TempDir()
+	a := filepath.Join(tmp, "a")
+	b := filepath.Join(tmp, "b")
+	for _, d := range []string{a, b} {
+		os.MkdirAll(filepath.Join(d, "Album"), 0o755)
+	}
+	os.WriteFile(filepath.Join(a, "Album", "x.flac"), []byte("x"), 0o644)
+	os.WriteFile(filepath.Join(b, "Album", "y.flac"), []byte("y"), 0o644)
+
+	r := New([]string{a})
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			// The resolve call may or may not succeed depending on whether
+			// the swap has landed — we only care that it doesn't race.
+			_, _ = r.Resolve("Album/x.flac")
+			_, _ = r.Resolve("a/Album/x.flac")
+		}
+	}()
+	for i := 0; i < 200; i++ {
+		if i%2 == 0 {
+			r.SetRoots([]string{a})
+		} else {
+			r.SetRoots([]string{a, b})
+		}
+	}
+	<-done
+}

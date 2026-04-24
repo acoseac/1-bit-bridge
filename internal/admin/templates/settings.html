@@ -1,0 +1,57 @@
+{{define "content"}}
+<section class="page settings">
+  <h1>Settings</h1>
+  <p class="lede">
+    Fields marked <span class="badge warn">restart</span> require the server
+    to restart before the change takes effect. If you&rsquo;re running under
+    launchd or systemd, hit <em>Restart now</em> after saving — the service
+    manager will relaunch.
+  </p>
+
+  <form id="settings-form" class="panel">
+    <div class="field">
+      <label>Library name
+        <input name="libraryName" type="text" value="{{.Data.LibraryName}}">
+      </label>
+      <small class="hint">Shown in the iOS pairing UI and mDNS TXT records.</small>
+    </div>
+
+    <div class="field">
+      <label>Scan interval (seconds)
+        <input name="scanIntervalSec" type="number" min="1" value="{{.Data.ScanIntervalSec}}">
+      </label>
+      <small class="hint">How often the full walk runs. Defaults to 3600 (1 h).</small>
+    </div>
+
+    <div class="field">
+      <label>Listen address <span class="badge warn">restart</span>
+        <input name="listenAddress" type="text" value="{{.Data.ListenAddress}}">
+      </label>
+      <small class="hint">What iOS clients dial, e.g. <code>:7788</code>.</small>
+    </div>
+
+    <div class="field">
+      <label>Admin address <span class="badge warn">restart</span>
+        <input name="adminAddress" type="text" value="{{.Data.AdminAddress}}">
+      </label>
+      <small class="hint">
+        Must be a loopback address (127.0.0.1, ::1, or localhost). Non-loopback
+        values are rejected — the admin console has no auth.
+      </small>
+    </div>
+
+    <div class="field read-only">
+      <label>Data directory
+        <input type="text" value="{{.Data.DataDir}}" disabled>
+      </label>
+      <small class="hint">Set at <code>bridge init</code> time; not editable here.</small>
+    </div>
+
+    <div class="actions">
+      <button type="submit" class="btn primary">Save</button>
+      <button type="button" id="restart-btn" class="btn" hidden>Restart now</button>
+    </div>
+    <p id="settings-msg" class="status" hidden></p>
+  </form>
+</section>
+{{end}}
