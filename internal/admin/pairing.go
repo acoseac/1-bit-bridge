@@ -7,7 +7,10 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"strconv"
+	"strings"
 
+	"github.com/acoseac/1-bit-bridge/internal/advertise"
 	qrcode "github.com/skip2/go-qrcode"
 )
 
@@ -16,17 +19,64 @@ import (
 // additive so the iOS side can tolerate future fields by ignoring them.
 //
 //	bridge://pair
-//	  ?url=<https URL to the bridge>
+//	  ?url=<https URL to the bridge — primary/most-likely>
+//	  &urls=<newline-joined alternates including the primary>
 //	  &token=<base64url bearer token>
 //	  &fingerprint=<AB:CD:...:EF>
 //	  &name=<library display name>
-func buildPairURL(bridgeURL, rawToken, fingerprint, libraryName string) string {
+//
+// `urls` is the v1-additive extension that lets iOS learn every address
+// the bridge self-reports at pairing time, so a phone paired on Wi-Fi
+// still has a Tailscale fallback recorded and can roam without a
+// re-pair. Older iOS builds ignore unknown query params and keep using
+// `url` alone.
+func buildPairURL(bridgeURL, rawToken, fingerprint, libraryName string, alternates []string) string {
 	q := url.Values{}
 	q.Set("url", bridgeURL)
+	// Only emit `urls` when there are actual alternates to ship. An
+	// `urls` with just the primary URL is noise. `strings.Join` on a
+	// newline matches what the iOS parser expects (one URL per line,
+	// percent-decoded at the URLComponents layer).
+	if len(alternates) > 1 ||
+		(len(alternates) == 1 && alternates[0] != bridgeURL) {
+		q.Set("urls", strings.Join(alternates, "\n"))
+	}
 	q.Set("token", rawToken)
 	q.Set("fingerprint", fingerprint)
 	q.Set("name", libraryName)
 	return "bridge://pair?" + q.Encode()
+}
+
+// pairAlternates returns every URL the admin console should bake into
+// the QR — bridge's self-advertised `/v1/health` endpoint list, with
+// the operator's explicit `primary` URL moved to the front so older
+// iOS builds (which only read `url`) pick the same default the
+// operator saw in the admin modal.
+func pairAlternates(primary, listenAddress string) []string {
+	_, portStr, err := net.SplitHostPort(listenAddress)
+	if err != nil {
+		return []string{primary}
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port <= 0 {
+		return []string{primary}
+	}
+	eps := advertise.URLs(advertise.Params{Port: port})
+	if len(eps) == 0 {
+		return []string{primary}
+	}
+
+	// Move `primary` to the head if already present; else prepend.
+	out := make([]string, 0, len(eps)+1)
+	out = append(out, primary)
+	seen := map[string]bool{primary: true}
+	for _, u := range eps {
+		if !seen[u] {
+			seen[u] = true
+			out = append(out, u)
+		}
+	}
+	return out
 }
 
 // defaultBridgeURL is the best-guess URL the admin UI pre-fills in the
