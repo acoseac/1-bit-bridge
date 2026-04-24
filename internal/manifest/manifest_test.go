@@ -174,6 +174,53 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 }
 
+// TestStoreHasTrackWithArtworkMBID pins the SQL contract the
+// /v1/artwork 202-vs-404 handler depends on. A track tagged with a
+// given ArtworkMBID reports true; an arbitrary MBID that no track
+// references reports false. Empty MBID always returns false
+// (short-circuit). Parallel coverage for ArtistMBID.
+func TestStoreHasTrackWithArtworkMBID(t *testing.T) {
+	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	defer s.Close()
+
+	known := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	unknown := "99999999-9999-4999-8999-999999999999"
+
+	s.UpsertTrack(&Track{
+		Path: "a/b.flac", Size: 1, ModTime: time.Now(),
+		Artist: "A", Album: "B", ArtworkMBID: known,
+	})
+
+	if !s.HasTrackWithArtworkMBID(known) {
+		t.Errorf("known MBID should report true")
+	}
+	if s.HasTrackWithArtworkMBID(unknown) {
+		t.Errorf("unknown MBID should report false")
+	}
+	if s.HasTrackWithArtworkMBID("") {
+		t.Errorf("empty MBID should short-circuit to false")
+	}
+}
+
+func TestStoreHasTrackWithArtistMBID(t *testing.T) {
+	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	defer s.Close()
+
+	known := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+
+	s.UpsertTrack(&Track{
+		Path: "a/b.flac", Size: 1, ModTime: time.Now(),
+		Artist: "A", Album: "B", ArtistMBID: known,
+	})
+
+	if !s.HasTrackWithArtistMBID(known) {
+		t.Errorf("known artist MBID should report true")
+	}
+	if s.HasTrackWithArtistMBID("not-a-uuid") {
+		t.Errorf("unknown artist MBID should report false")
+	}
+}
+
 func TestStoreSinceFilterIndexedAt(t *testing.T) {
 	// ListTracks's `since` is indexed_at, not mtime_ns, so a track with
 	// an old file-mtime still surfaces in a delta if it was newly

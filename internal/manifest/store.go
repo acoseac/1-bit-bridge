@@ -177,6 +177,43 @@ func (s *Store) GetTrack(path string) (*Track, error) {
 // were written/updated in the index after since. Filtered by
 // indexed_at (when we last wrote the row) rather than mtime_ns (the
 // on-disk file time) so that files copied into the library with an
+// HasTrackWithArtworkMBID reports whether at least one indexed track
+// carries the given value in its `artworkMBID` tag. Used by the
+// `/v1/artwork/{mbid}` handler to tell a genuinely-unknown MBID
+// (return 404) apart from one the server's seen but hasn't cached yet
+// (return 202 + Retry-After so iOS retries with backoff instead of
+// treating the miss as terminal).
+//
+// SQL uses `json_extract` on the BLOB `tags_json` column. A
+// `SELECT EXISTS(...) LIMIT 1` is the cheapest form — SQLite short-
+// circuits as soon as it finds a hit. Return value of zero means "no
+// such MBID in any track"; iOS should get the 404 fallthrough.
+func (s *Store) HasTrackWithArtworkMBID(mbid string) bool {
+	if mbid == "" {
+		return false
+	}
+	return s.hasTrackWithJSONField("artworkMBID", mbid)
+}
+
+// HasTrackWithArtistMBID mirrors HasTrackWithArtworkMBID for the
+// `/v1/artist-image/{mbid}` handler. Same 202-vs-404 distinction.
+func (s *Store) HasTrackWithArtistMBID(mbid string) bool {
+	if mbid == "" {
+		return false
+	}
+	return s.hasTrackWithJSONField("artistMBID", mbid)
+}
+
+func (s *Store) hasTrackWithJSONField(field, value string) bool {
+	// `json_extract` on a BLOB JSON works in SQLite 3.38+; modernc's
+	// pure-Go driver ships a recent build. We LIMIT 1 so a library with
+	// thousands of tracks sharing an MBID doesn't pay per-row I/O.
+	var found int
+	q := `SELECT 1 FROM tracks WHERE json_extract(tags_json, '$.` + field + `') = ? LIMIT 1`
+	_ = s.db.QueryRow(q, value).Scan(&found)
+	return found == 1
+}
+
 // old mtime still surface in incremental deltas — otherwise the iOS
 // client has to do a full sync to see ripped-years-ago albums that
 // were just added.

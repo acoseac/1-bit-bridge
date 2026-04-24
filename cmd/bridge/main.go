@@ -230,7 +230,8 @@ func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	go enricher.Run(scanCtx)
 
 	apiSrv := api.New(cfg, store, provider, fingerprint).
-		WithArtworkDirs(artworkDirBridge(artworkDir))
+		WithArtworkDirs(artworkDirBridge(artworkDir)).
+		WithMBIDProbe(provider)
 	httpSrv := &http.Server{
 		Addr:      cfg.ListenAddress,
 		Handler:   apiSrv.Handler(),

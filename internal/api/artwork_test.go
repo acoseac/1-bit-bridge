@@ -212,3 +212,115 @@ func TestArtistImageRequiresAuth(t *testing.T) {
 		t.Errorf("status = %d, want 401", resp.StatusCode)
 	}
 }
+
+// --- 202 + Retry-After semantics (v1.1 §7) ---
+
+// fakeMBIDProbe stubs the optional MBIDProbe interface so the handler
+// can pretend a given MBID is known (or unknown) without wiring a
+// real manifest store. `known` is a closed set — anything not in it
+// returns false so the 404 branch stays exercised.
+type fakeMBIDProbe struct{ known map[string]bool }
+
+func (f fakeMBIDProbe) HasTrackWithArtworkMBID(m string) bool { return f.known[m] }
+func (f fakeMBIDProbe) HasTrackWithArtistMBID(m string) bool  { return f.known[m] }
+
+// artworkFixtureWithProbe layers an MBIDProbe onto the base artwork
+// fixture. `present` is still about whether the cache file exists on
+// disk; `probeKnown` is about whether the MBIDProbe says the server
+// has seen the MBID in a track.
+func artworkFixtureWithProbe(t *testing.T, present, probeKnown bool) (*httptest.Server, string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	artDir := filepath.Join(dir, "artwork")
+	mbid := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	if present {
+		os.MkdirAll(artDir, 0o755)
+		os.WriteFile(filepath.Join(artDir, mbid+"-500.jpg"), []byte{0xFF, 0xD8, 0xFF, 0xE0}, 0o644)
+	}
+	cfg := &config.Config{LibraryRoots: []string{dir}, ListenAddress: ":7788", LibraryName: "T"}
+	store, _ := auth.OpenStore(filepath.Join(dir, "tokens.json"))
+	raw, _, _ := store.Mint("probe")
+
+	probe := fakeMBIDProbe{known: map[string]bool{}}
+	if probeKnown {
+		probe.known[mbid] = true
+	}
+
+	srv := New(cfg, store, nil, "fp").
+		WithArtworkDirs(fakeArtworkDirs{dir: artDir}).
+		WithMBIDProbe(probe)
+	hs := httptest.NewServer(srv.Handler())
+	t.Cleanup(hs.Close)
+	return hs, raw, mbid
+}
+
+// Cache miss + probe says "known": 202 + Retry-After. iOS uses this
+// to drive its backoff retry loop instead of giving up on first call.
+func TestArtworkReturns202WhenProbeKnowsMBID(t *testing.T) {
+	hs, tok, mbid := artworkFixtureWithProbe(t, false, true)
+	resp := authedGET(t, hs.URL+"/v1/artwork/"+mbid, tok)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202", resp.StatusCode)
+	}
+	if ra := resp.Header.Get("Retry-After"); ra == "" {
+		t.Errorf("Retry-After header missing")
+	}
+}
+
+// Cache miss + probe says "unknown": 404. Preserves v1.0 behaviour
+// for MBIDs nobody's ever referenced — iOS can stop asking.
+func TestArtworkReturns404WhenProbeDoesNotKnow(t *testing.T) {
+	hs, tok, mbid := artworkFixtureWithProbe(t, false, false)
+	resp := authedGET(t, hs.URL+"/v1/artwork/"+mbid, tok)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
+// No probe wired at all → legacy 404-on-miss. Keeps tests that use
+// the classic fixture passing without a probe.
+func TestArtworkReturns404WhenNoProbeAttached(t *testing.T) {
+	hs, tok, mbid, _ := artworkFixture(t, false)
+	resp := authedGET(t, hs.URL+"/v1/artwork/"+mbid, tok)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
+// Cache hit wins regardless of probe state — fast path is not touched.
+func TestArtworkCacheHitIgnoresProbe(t *testing.T) {
+	hs, tok, mbid := artworkFixtureWithProbe(t, true, true)
+	resp := authedGET(t, hs.URL+"/v1/artwork/"+mbid, tok)
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Errorf("status = %d, want 200 (cache hit should not be 202)", resp.StatusCode)
+	}
+}
+
+// Mirror of the above for /v1/artist-image — same 202/404 contract.
+func TestArtistImageReturns202WhenProbeKnows(t *testing.T) {
+	dir := t.TempDir()
+	artDir := filepath.Join(dir, "artwork")
+	mbid := "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	cfg := &config.Config{LibraryRoots: []string{dir}, ListenAddress: ":7788", LibraryName: "T"}
+	store, _ := auth.OpenStore(filepath.Join(dir, "tokens.json"))
+	raw, _, _ := store.Mint("probe")
+	probe := fakeMBIDProbe{known: map[string]bool{mbid: true}}
+	srv := New(cfg, store, nil, "fp").
+		WithArtworkDirs(fakeArtworkDirs{dir: artDir}).
+		WithMBIDProbe(probe)
+	hs := httptest.NewServer(srv.Handler())
+	defer hs.Close()
+
+	resp := authedGET(t, hs.URL+"/v1/artist-image/"+mbid, raw)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Errorf("status = %d, want 202", resp.StatusCode)
+	}
+	if ra := resp.Header.Get("Retry-After"); ra == "" {
+		t.Errorf("Retry-After header missing on artist-image 202")
+	}
+}

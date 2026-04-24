@@ -43,3 +43,15 @@ func (p *Provider) TracksIndexed() int {
 	}
 	return n
 }
+
+// HasTrackWithArtworkMBID satisfies api.MBIDProbe. Delegates straight
+// to the Store so the api package doesn't need a direct dependency on
+// internal/manifest.
+func (p *Provider) HasTrackWithArtworkMBID(mbid string) bool {
+	return p.store.HasTrackWithArtworkMBID(mbid)
+}
+
+// HasTrackWithArtistMBID satisfies api.MBIDProbe.
+func (p *Provider) HasTrackWithArtistMBID(mbid string) bool {
+	return p.store.HasTrackWithArtistMBID(mbid)
+}
