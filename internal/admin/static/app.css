@@ -1,39 +1,73 @@
-/* 1-bit bridge admin console — minimal, dense, functional. No framework. */
+/* 1-bit bridge admin console — synthwave restyle.
+ *
+ * Neon-on-indigo in dark mode, daylight-synthwave pastel in light mode.
+ * Every class name and DOM shape from pre-restyle is preserved so the
+ * JS in app.js (which reads no tokens, does no style) works unchanged,
+ * and templates/*.html need no edits — the brand-mark "CRT bracket"
+ * decoration is drawn purely via ::before / ::after on .brand .mark.
+ *
+ * Colours are tokenised via the same CSS custom properties as before
+ * (--bg, --accent, etc.) so the rest of the stylesheet reads through
+ * to the new palette without per-rule edits.
+ */
 
 :root {
-  --bg: #0e0f12;
-  --bg-panel: #16181d;
-  --bg-elev: #1e2026;
-  --fg: #e4e6eb;
-  --fg-muted: #8a8e97;
-  --accent: #ffb64a;            /* amber — matches app icon */
-  --accent-soft: rgba(255, 182, 74, 0.15);
-  --danger: #ff6969;
-  --ok: #58d68d;
+  /* Night-city palette — deep indigo base, neon primaries. */
+  --bg: #0a0a1a;
+  --bg-panel: #12122a;
+  --bg-elev: #1a1a3a;
+  --fg: #e8f4ff;
+  --fg-muted: #8095b8;
+  --accent: #00f0ff;                /* neon cyan — primary */
+  --accent-hot: #ff3ec8;             /* magenta — gradient partner, danger accent */
+  --accent-warm: #ffb64a;            /* amber — warnings (preserves pre-restyle vibe) */
+  --accent-soft: rgba(0, 240, 255, 0.16);
+  --danger: #ff4d6d;
+  --ok: #39ff88;
   --warn: #ffb64a;
-  --border: #272a31;
+  --border: #2a2a55;
   --radius: 6px;
   --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", Segoe UI, Roboto, system-ui, sans-serif;
+  /* Display stack used for titles and the brand mark. System-only —
+   * no web-font fetch on an offline admin console. Bahnschrift ships
+   * on Windows 10+; Avenir Next Condensed on macOS/iOS; Oswald on
+   * many Linux distros; Futura/Impact round out the fallback chain. */
+  --display: "Bahnschrift", "Avenir Next Condensed", "Oswald", "Futura", Impact, var(--sans);
+  --glow: 0 0 12px color-mix(in srgb, var(--accent) 40%, transparent);
+  --glow-hot: 0 0 12px color-mix(in srgb, var(--accent-hot) 40%, transparent);
+  --scanline-color: rgba(0, 240, 255, 0.035);
 }
 
 @media (prefers-color-scheme: light) {
   :root {
-    --bg: #fafbfc;
+    /* Daylight-synthwave palette — pastel base, saturated accents
+     * that still pass WCAG AA on a white panel. */
+    --bg: #fdf4ff;
     --bg-panel: #ffffff;
-    --bg-elev: #f2f3f5;
-    --fg: #1b1d23;
-    --fg-muted: #5c6068;
-    --accent: #c06a00;
-    --accent-soft: rgba(192, 106, 0, 0.1);
+    --bg-elev: #f5ecfe;
+    --fg: #1a1036;
+    --fg-muted: #5c4d80;
+    --accent: #008b9c;              /* saturated teal — readable on white */
+    --accent-hot: #c2185b;
+    --accent-warm: #c06a00;
+    --accent-soft: rgba(0, 139, 156, 0.12);
     --danger: #c1292e;
     --ok: #2f8a56;
-    --border: #e4e6ea;
+    --warn: #c06a00;
+    --border: #e4dcf1;
+    --glow: 0 0 10px color-mix(in srgb, var(--accent) 30%, transparent);
+    --glow-hot: 0 0 10px color-mix(in srgb, var(--accent-hot) 30%, transparent);
+    --scanline-color: rgba(0, 139, 156, 0.035);
   }
 }
 
 * { box-sizing: border-box; }
 
+/* Scanline grid. Fixed-position pseudo-element under everything, with
+ * two crossed linear-gradients at ~40px intervals. Opacity comes from
+ * the --scanline-color token so light and dark modes each get the
+ * right tint without a second rule. */
 body {
   margin: 0;
   font-family: var(--sans);
@@ -41,6 +75,19 @@ body {
   background: var(--bg);
   font-size: 14px;
   line-height: 1.5;
+  min-height: 100vh;
+  position: relative;
+}
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: -1;
+  background-image:
+    linear-gradient(to bottom, var(--scanline-color) 1px, transparent 1px),
+    linear-gradient(to right, var(--scanline-color) 1px, transparent 1px);
+  background-size: 40px 40px;
 }
 
 code {
@@ -61,6 +108,8 @@ header {
   padding: 14px 24px;
   background: var(--bg-panel);
   border-bottom: 1px solid var(--border);
+  /* Subtle neon underline so the header reads as a chassis edge. */
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--accent) 40%, transparent);
 }
 
 .brand {
@@ -69,14 +118,36 @@ header {
   gap: 10px;
 }
 .brand .mark {
-  font-family: var(--mono);
+  font-family: var(--display);
   color: var(--accent);
-  letter-spacing: -0.02em;
-  font-weight: 600;
+  letter-spacing: 0.04em;
+  font-weight: 700;
+  text-transform: uppercase;
+  /* CRT-bracket decoration via padding + pseudo-elements in
+   * layout.html's markup. The spans live on either side of .mark and
+   * pick up the accent colour + a faint glow. */
+  position: relative;
+  padding: 0 6px;
+  text-shadow: var(--glow);
 }
+.brand .mark::before,
+.brand .mark::after {
+  content: "";
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 6px;
+  border: 1.5px solid var(--accent);
+  opacity: 0.7;
+}
+.brand .mark::before { left: 0; border-right: none; }
+.brand .mark::after { right: 0; border-left: none; }
 .brand .name {
   font-weight: 500;
   color: var(--fg);
+  font-family: var(--display);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 header nav {
@@ -88,27 +159,65 @@ header nav a {
   text-decoration: none;
   padding: 6px 12px;
   border-radius: var(--radius);
-  font-weight: 500;
+  font-weight: 600;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  position: relative;
+  transition: color 0.12s;
 }
-header nav a:hover { color: var(--fg); background: var(--bg-elev); }
+header nav a:hover { color: var(--fg); }
+/* Active-tab indicator is a 2px gradient bar under the link instead
+ * of a plain background, so the nav reads as a set of tuning-panel
+ * tabs rather than a row of buttons. */
 body[data-active="dashboard"] nav a[data-tab="dashboard"],
 body[data-active="library"] nav a[data-tab="library"],
 body[data-active="devices"] nav a[data-tab="devices"],
 body[data-active="settings"] nav a[data-tab="settings"] {
   color: var(--accent);
-  background: var(--accent-soft);
+}
+body[data-active="dashboard"] nav a[data-tab="dashboard"]::after,
+body[data-active="library"] nav a[data-tab="library"]::after,
+body[data-active="devices"] nav a[data-tab="devices"]::after,
+body[data-active="settings"] nav a[data-tab="settings"]::after {
+  content: "";
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 0;
+  height: 2px;
+  background: linear-gradient(to right, var(--accent), var(--accent-hot));
+  box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 50%, transparent);
+  border-radius: 2px;
 }
 
 .meta {
   color: var(--fg-muted);
-  font-size: 12px;
+  font-size: 11px;
   font-family: var(--mono);
+  letter-spacing: 0.02em;
 }
 
 main { padding: 24px; max-width: 1100px; margin: 0 auto; }
 
-h1 { font-size: 22px; font-weight: 600; margin: 0 0 4px; }
-h2 { font-size: 15px; font-weight: 600; margin: 0 0 12px; letter-spacing: 0.01em; }
+h1 {
+  font-family: var(--display);
+  font-size: 26px;
+  font-weight: 700;
+  margin: 0 0 4px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg);
+}
+h2 {
+  font-family: var(--display);
+  font-size: 15px;
+  font-weight: 700;
+  margin: 0 0 12px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+}
 
 .lede { color: var(--fg-muted); margin: 0 0 20px; max-width: 72ch; }
 .hint { color: var(--fg-muted); font-size: 12px; margin-top: 4px; display: block; }
@@ -119,6 +228,9 @@ h2 { font-size: 15px; font-weight: 600; margin: 0 0 12px; letter-spacing: 0.01em
   border-radius: var(--radius);
   padding: 20px;
   margin-bottom: 20px;
+  /* A faint inner border highlights the panel edge without the heavy
+   * "card on a desk" shadow look. */
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 8%, transparent);
 }
 .panel-head {
   display: flex;
@@ -139,9 +251,41 @@ h2 { font-size: 15px; font-weight: 600; margin: 0 0 12px; letter-spacing: 0.01em
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 14px 16px;
+  position: relative;
+  overflow: hidden;
+  transition: border-color 0.15s, box-shadow 0.15s;
 }
-.card-label { color: var(--fg-muted); font-size: 12px; margin-bottom: 4px; }
-.card-value { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.card::before {
+  /* Corner accent — a single-pixel gradient along the top edge so the
+   * stat cards read as a row of gauges without borrowing attention
+   * from the numbers. */
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 2px;
+  background: linear-gradient(to right, var(--accent), var(--accent-hot));
+  opacity: 0.6;
+}
+.card:hover {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  box-shadow: var(--glow);
+}
+.card-label {
+  color: var(--fg-muted);
+  font-size: 11px;
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+}
+.card-value {
+  font-size: 26px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  font-family: var(--display);
+  letter-spacing: 0.02em;
+  color: var(--fg);
+}
 .card-foot { color: var(--fg-muted); font-size: 11px; margin-top: 4px; }
 
 dl { display: grid; grid-template-columns: 150px 1fr; gap: 6px 16px; margin: 0; }
@@ -154,13 +298,28 @@ dd code { display: inline-block; margin-right: 6px; margin-bottom: 4px; }
   padding: 2px 8px;
   border-radius: 12px;
   font-size: 11px;
-  font-weight: 500;
+  font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.08em;
+  border: 1px solid transparent;
 }
-.badge.running { background: var(--accent-soft); color: var(--accent); }
-.badge.idle { background: var(--bg-elev); color: var(--fg-muted); }
-.badge.warn { background: var(--accent-soft); color: var(--accent); }
+.badge.running {
+  background: color-mix(in srgb, var(--ok) 16%, transparent);
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 40%, transparent);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--ok) 30%, transparent);
+}
+.badge.idle {
+  background: var(--bg-elev);
+  color: var(--fg-muted);
+  border-color: var(--border);
+}
+.badge.warn {
+  background: color-mix(in srgb, var(--accent-warm) 18%, transparent);
+  color: var(--accent-warm);
+  border-color: color-mix(in srgb, var(--accent-warm) 40%, transparent);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--accent-warm) 25%, transparent);
+}
 
 .fingerprint {
   display: block;
@@ -169,6 +328,11 @@ dd code { display: inline-block; margin-right: 6px; margin-bottom: 4px; }
   letter-spacing: 0.05em;
   white-space: pre-wrap;
   word-break: break-all;
+  /* Fingerprint is a "read-only receipt" — give it the same inner-ring
+   * treatment as the panels so it looks like a terminal readout, not
+   * an input. */
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+  box-shadow: inset 0 0 10px color-mix(in srgb, var(--accent) 10%, transparent);
 }
 
 table.rows {
@@ -182,13 +346,15 @@ table.rows th, table.rows td {
 }
 table.rows th {
   color: var(--fg-muted);
-  font-weight: 500;
-  font-size: 12px;
+  font-weight: 600;
+  font-size: 11px;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.08em;
+  font-family: var(--display);
 }
 table.rows td.num, table.rows th.num { text-align: right; font-variant-numeric: tabular-nums; }
 table.rows tbody tr:last-child td { border-bottom: none; }
+table.rows tbody tr:hover td { background: color-mix(in srgb, var(--accent) 4%, transparent); }
 
 .btn {
   appearance: none;
@@ -196,23 +362,44 @@ table.rows tbody tr:last-child td { border-bottom: none; }
   background: var(--bg-elev);
   color: var(--fg);
   font-family: inherit;
-  font-size: 13px;
-  font-weight: 500;
-  padding: 7px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 8px 16px;
   border-radius: var(--radius);
   cursor: pointer;
-  transition: background 0.1s;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  transition: background 0.12s, border-color 0.12s, box-shadow 0.12s, transform 0.05s;
 }
-.btn:hover { background: var(--bg-panel); }
-.btn.primary { background: var(--accent); color: #000; border-color: var(--accent); }
-.btn.primary:hover { filter: brightness(1.05); }
-.btn.danger { color: var(--danger); }
-.btn.danger:hover { background: rgba(255, 105, 105, 0.1); }
+.btn:hover {
+  background: var(--bg-panel);
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+}
+.btn:active { transform: translateY(1px); }
+.btn.primary {
+  background: transparent;
+  color: var(--accent);
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 20%, transparent);
+}
+.btn.primary:hover {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  box-shadow: 0 0 0 1px var(--accent), var(--glow);
+}
+.btn.danger {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
+}
+.btn.danger:hover {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--danger) 30%, transparent);
+}
 .btn:disabled { opacity: 0.5; cursor: default; }
+.btn:disabled:hover { background: var(--bg-elev); border-color: var(--border); box-shadow: none; }
 
 input[type=text], input[type=url], input[type=number] {
   width: 100%;
-  padding: 8px 10px;
+  padding: 9px 12px;
   font-family: var(--mono);
   font-size: 13px;
   color: var(--fg);
@@ -220,17 +407,22 @@ input[type=text], input[type=url], input[type=number] {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   margin-top: 4px;
+  transition: border-color 0.12s, box-shadow 0.12s;
 }
-input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+input[type=text]:focus, input[type=url]:focus, input[type=number]:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--glow);
+}
 
 form label {
   display: block;
   margin-bottom: 14px;
   color: var(--fg-muted);
-  font-size: 12px;
+  font-size: 11px;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
-  font-weight: 500;
+  letter-spacing: 0.1em;
+  font-weight: 600;
 }
 
 form .field { margin-bottom: 18px; }
@@ -241,24 +433,44 @@ form .actions { margin-top: 18px; display: flex; gap: 10px; }
   border-radius: var(--radius);
   margin-top: 12px;
   font-size: 13px;
+  border: 1px solid transparent;
 }
-.status.ok { background: rgba(88, 214, 141, 0.12); color: var(--ok); border: 1px solid rgba(88, 214, 141, 0.3); }
-.status.err { background: rgba(255, 105, 105, 0.12); color: var(--danger); border: 1px solid rgba(255, 105, 105, 0.3); }
-.status.warn { background: var(--accent-soft); color: var(--accent); border: 1px solid var(--accent); }
+.status.ok {
+  background: color-mix(in srgb, var(--ok) 10%, transparent);
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 40%, transparent);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--ok) 20%, transparent);
+}
+.status.err {
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--danger) 20%, transparent);
+}
+.status.warn {
+  background: color-mix(in srgb, var(--accent-warm) 12%, transparent);
+  color: var(--accent-warm);
+  border-color: color-mix(in srgb, var(--accent-warm) 40%, transparent);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--accent-warm) 20%, transparent);
+}
 
 dialog {
   background: var(--bg-panel);
-  border: 1px solid var(--border);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
   border-radius: 10px;
   padding: 0;
   color: var(--fg);
   max-width: 520px;
   width: 92%;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+  /* A soft neon halo so the modal feels lit from the inside, not
+   * pasted on top. */
+  box-shadow:
+    0 20px 60px rgba(0, 0, 0, 0.6),
+    0 0 40px color-mix(in srgb, var(--accent) 20%, transparent);
 }
 dialog::backdrop { background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(3px); }
 dialog section { padding: 24px; }
-dialog h2 { font-size: 18px; }
+dialog h2 { font-size: 18px; color: var(--accent); }
 
 .pair-qr {
   display: flex;
@@ -270,14 +482,20 @@ dialog h2 { font-size: 18px; }
   border-radius: var(--radius);
   background: #fff;
   padding: 10px;
+  /* Subtle neon frame around the QR so it reads as an artifact in the
+   * UI, not a foreign PNG. */
+  box-shadow:
+    0 0 0 1px var(--accent),
+    0 0 16px color-mix(in srgb, var(--accent) 30%, transparent);
 }
 .pair-fields { display: grid; gap: 12px; }
 .kv-label {
   color: var(--fg-muted);
   font-size: 11px;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.08em;
   margin-bottom: 4px;
+  font-weight: 600;
 }
 .kv-row {
   display: flex;
@@ -288,4 +506,11 @@ dialog h2 { font-size: 18px; }
   flex: 1;
   padding: 8px 10px;
   font-size: 12px;
+}
+
+/* Reduced motion: the scanline grid is static so there's nothing to
+ * disable, but a reader that opts out should see the grid dimmed
+ * further so it fully recedes. */
+@media (prefers-reduced-motion: reduce) {
+  body::before { opacity: 0.5; }
 }
