@@ -224,10 +224,9 @@ func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	}
 	adminCtx, adminCancel := context.WithCancel(context.Background())
 	defer adminCancel()
+	adminErr := make(chan error, 1)
 	go func() {
-		if err := adminSrv.Serve(adminCtx); err != nil {
-			fmt.Fprintf(stderr, "admin server: %v\n", err)
-		}
+		adminErr <- adminSrv.Serve(adminCtx)
 	}()
 
 	// Listen first so we can report the actual bound address (useful when
@@ -278,6 +277,17 @@ func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	case err := <-serveErr:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			fmt.Fprintf(stderr, "server error: %v\n", err)
+			return 1
+		}
+	case err := <-adminErr:
+		// The admin console's bind can fail after main's first listen
+		// succeeds (e.g. another process already owns :7789). Previously
+		// this was swallowed via a fire-and-forget goroutine, leaving the
+		// operator with a silently-broken admin URL — this case surfaces
+		// it at startup, matches the signal the serveErr branch gives for
+		// the main API listener.
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			fmt.Fprintf(stderr, "admin server: %v\n", err)
 			return 1
 		}
 	case <-ctx.Done():

@@ -29,6 +29,7 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	cfgDirFlag := fs.String("dir", "", "config directory (default per-OS standard)")
 	nonInteractive := fs.Bool("yes", false, "accept all defaults without prompting")
+	force := fs.Bool("force", false, "with --yes: overwrite an existing config (by default, --yes refuses to clobber)")
 	libraryRoot := fs.String("library", "", "library root path (required with --yes)")
 	libraryName := fs.String("name", "", "library display name (default: hostname)")
 	skipService := fs.Bool("no-service", false, "skip launchd/systemd install; run `bridge serve` yourself")
@@ -44,6 +45,18 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return 1
 		}
 		cfgDir = d
+	}
+	// Always canonicalize to an absolute path — relative or ~-prefixed
+	// inputs land verbatim in config.DataDir and the service templates,
+	// where launchd / systemd have no cwd / no shell expansion, so the
+	// service fails at start with a silent "no such file" from the
+	// daemon's log. Resolving here keeps the rest of init trust-but-
+	// verify-free.
+	if absDir, err := filepath.Abs(expandHome(cfgDir)); err == nil {
+		cfgDir = absDir
+	} else {
+		fmt.Fprintf(stderr, "resolve --dir path: %v\n", err)
+		return 1
 	}
 	cfgPath := filepath.Join(cfgDir, "bridge.yaml")
 	dataDir := filepath.Join(cfgDir, "data")
@@ -104,10 +117,24 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// Write or refresh the config file. Preserve the existing file if the
 	// operator says no at the prompt — common when they're re-running
 	// init to reinstall the service against an already-tuned config.
-	if _, err := os.Stat(cfgPath); err == nil && !*nonInteractive {
-		if !confirm(in, stdout, "Config file exists. Overwrite?", false) {
-			fmt.Fprintf(stdout, "keeping existing config\n")
-			return finishInit(stdout, stderr, cfgPath, dataDir, *skipService)
+	//
+	// Non-interactive (`--yes`) is the automation path, so we refuse to
+	// silently clobber an existing config: the operator must pass `--force`
+	// to acknowledge they mean to overwrite. Without the gate, a CI job or
+	// packaging script that reruns `bridge init --yes` would silently wipe
+	// an already-tuned installation.
+	if _, err := os.Stat(cfgPath); err == nil {
+		if *nonInteractive {
+			if !*force {
+				fmt.Fprintf(stdout, "config file already exists at %s; keeping it\n", cfgPath)
+				fmt.Fprintf(stdout, "pass --force to overwrite non-interactively\n")
+				return finishInit(stdout, stderr, cfgPath, dataDir, *skipService)
+			}
+		} else {
+			if !confirm(in, stdout, "Config file exists. Overwrite?", false) {
+				fmt.Fprintf(stdout, "keeping existing config\n")
+				return finishInit(stdout, stderr, cfgPath, dataDir, *skipService)
+			}
 		}
 	}
 
@@ -156,10 +183,29 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 // and prints the admin console URL. Separated from the main init path so
 // the "keep existing config" branch can reach it without rebuilding the
 // Config struct.
+//
+// The admin URL + browser open always runs at the end, even on the
+// "skip service" and "unsupported OS" paths — a successful init is
+// useless to the operator if they don't know where to point their
+// browser. The browser-open is best-effort (no stderr on headless
+// machines), so the cost of always attempting it is zero.
 func finishInit(stdout, stderr io.Writer, cfgPath, dataDir string, skipService bool) int {
+	printAdmin := func() {
+		cfg, err := config.Load(cfgPath)
+		if err != nil {
+			fmt.Fprintf(stdout, "\nDone. Start the bridge with: bridge serve --config %s\n", cfgPath)
+			return
+		}
+		url := "http://" + cfg.AdminAddress + "/"
+		fmt.Fprintf(stdout, "\nAdmin console: %s\n", url)
+		openInBrowser(url)
+		fmt.Fprintf(stdout, "\nDone. Open the admin console to add library folders and pair iOS devices.\n")
+	}
+
 	if skipService || (runtime.GOOS != "darwin" && runtime.GOOS != "linux") {
 		fmt.Fprintf(stdout, "\nSkipping service install. Start the bridge with:\n")
-		fmt.Fprintf(stdout, "  bridge serve --config %s\n\n", cfgPath)
+		fmt.Fprintf(stdout, "  bridge serve --config %s\n", cfgPath)
+		printAdmin()
 		return 0
 	}
 
@@ -192,15 +238,7 @@ func finishInit(stdout, stderr io.Writer, cfgPath, dataDir string, skipService b
 	fmt.Fprintf(stdout, "Service installed at:\n  %s\n", unitPath)
 	fmt.Fprintf(stdout, "Logs:\n  %s\n", logPath)
 
-	// Load the config back so we can print the admin URL the user just
-	// configured (respects any custom AdminAddress override).
-	cfg, err := config.Load(cfgPath)
-	if err == nil {
-		url := "http://" + cfg.AdminAddress + "/"
-		fmt.Fprintf(stdout, "\nAdmin console: %s\n", url)
-		openInBrowser(url)
-	}
-	fmt.Fprintf(stdout, "\nDone. Open the admin console to add library folders and pair iOS devices.\n")
+	printAdmin()
 	return 0
 }
 

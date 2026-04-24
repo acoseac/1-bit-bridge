@@ -9,7 +9,7 @@
   <div class="panel">
     <div class="panel-head">
       <h2>Devices</h2>
-      <button id="pair-open" class="btn primary">Pair new device</button>
+      <button type="button" id="pair-open" class="btn primary">Pair new device</button>
     </div>
     <table class="rows">
       <thead>
@@ -24,7 +24,7 @@
           <td><code>{{.ID}}</code></td>
           <td>{{timeAgo .CreatedAt}}</td>
           <td>{{timeAgo .LastUsedAt}}</td>
-          <td><button class="btn danger revoke-token">Revoke</button></td>
+          <td><button type="button" class="btn danger revoke-token">Revoke</button></td>
         </tr>
         {{else}}
         <tr><td colspan="5"><em>No devices paired yet.</em></td></tr>
@@ -68,21 +68,21 @@
         <div class="kv-label">Bridge URL</div>
         <div class="kv-row">
           <code id="pair-url"></code>
-          <button class="btn" data-copy="pair-url">Copy</button>
+          <button type="button" class="btn" data-copy="pair-url">Copy</button>
         </div>
       </div>
       <div class="kv">
         <div class="kv-label">Token (shown once)</div>
         <div class="kv-row">
           <code id="pair-token"></code>
-          <button class="btn" data-copy="pair-token">Copy</button>
+          <button type="button" class="btn" data-copy="pair-token">Copy</button>
         </div>
       </div>
       <div class="kv">
         <div class="kv-label">TLS fingerprint</div>
         <div class="kv-row">
           <code id="pair-fp"></code>
-          <button class="btn" data-copy="pair-fp">Copy</button>
+          <button type="button" class="btn" data-copy="pair-fp">Copy</button>
         </div>
       </div>
     </div>

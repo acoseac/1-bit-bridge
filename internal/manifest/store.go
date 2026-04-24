@@ -236,32 +236,59 @@ func (s *Store) CountTracksByPrefix(prefix string) (int, error) {
 // prefix. Returns the number of rows deleted. Used by the admin console
 // after removing a library root so /v1/manifest stops returning tracks
 // that will never resolve. See CountTracksByPrefix for the escaping note.
+//
+// Wrapped in a transaction for consistency with WipeAllTracks — a single
+// DELETE is already atomic in SQLite, but this keeps the store's mutation
+// surface uniformly transactional and lets a follow-up add a companion
+// folders-cleanup without churn in the commit boundary.
 func (s *Store) DeleteTracksByPrefix(prefix string) (int64, error) {
 	escaped := likeEscape(prefix)
-	res, err := s.db.Exec(
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(
 		`DELETE FROM tracks WHERE path LIKE ? ESCAPE '\'`,
 		escaped+"%",
 	)
 	if err != nil {
 		return 0, err
 	}
-	return res.RowsAffected()
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 // WipeAllTracks drops every track and folder row. Used by the admin
 // console on a single-root ↔ multi-root transition, where stored paths
 // change form (bare "Artist/…" vs "RootBasename/Artist/…") and the cheap
 // fix is to let the next scan re-populate from zero.
+//
+// Wrapped in a transaction so a failure between the two DELETEs can't
+// leave the DB with folders that outlive their tracks (or the reverse)
+// — next startup would see half-cleared state that the scanner has no
+// logic to reconcile cleanly.
 func (s *Store) WipeAllTracks() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, err := s.db.Exec(`DELETE FROM tracks`); err != nil {
+	tx, err := s.db.Begin()
+	if err != nil {
 		return err
 	}
-	if _, err := s.db.Exec(`DELETE FROM folders`); err != nil {
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM tracks`); err != nil {
 		return err
 	}
-	return nil
+	if _, err := tx.Exec(`DELETE FROM folders`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // likeEscape prepares a literal string for LIKE pattern matching. Escapes

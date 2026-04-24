@@ -3,18 +3,18 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>{{.Label}}</string>
+    <string>{{.Label | xmlEscape}}</string>
 
     <key>ProgramArguments</key>
     <array>
-        <string>{{.BinaryPath}}</string>
+        <string>{{.BinaryPath | xmlEscape}}</string>
         <string>serve</string>
         <string>--config</string>
-        <string>{{.ConfigPath}}</string>
+        <string>{{.ConfigPath | xmlEscape}}</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>{{.WorkingDir}}</string>
+    <string>{{.WorkingDir | xmlEscape}}</string>
 
     <key>RunAtLoad</key>
     <true/>
@@ -26,10 +26,10 @@
     </dict>
 
     <key>StandardOutPath</key>
-    <string>{{.LogPath}}</string>
+    <string>{{.LogPath | xmlEscape}}</string>
 
     <key>StandardErrorPath</key>
-    <string>{{.LogPath}}</string>
+    <string>{{.LogPath | xmlEscape}}</string>
 
     <key>ProcessType</key>
     <string>Background</string>

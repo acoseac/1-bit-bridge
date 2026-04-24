@@ -5,12 +5,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart={{.BinaryPath}} serve --config {{.ConfigPath}}
-WorkingDirectory={{.WorkingDir}}
+ExecStart={{.BinaryPath | systemdEscape}} serve --config {{.ConfigPath | systemdEscape}}
+WorkingDirectory={{.WorkingDir | systemdEscape}}
 Restart=always
 RestartSec=2
-StandardOutput=append:{{.LogPath}}
-StandardError=append:{{.LogPath}}
+StandardOutput=append:{{.LogPath | systemdEscape}}
+StandardError=append:{{.LogPath | systemdEscape}}
 
 [Install]
 WantedBy=default.target
