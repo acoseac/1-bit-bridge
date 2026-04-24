@@ -1,13 +1,22 @@
 package enrich
 
-import "testing"
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+)
 
 // TestHostAllowed_AnchorsAtLabelBoundary pins the SSRF-hardening contract:
-// a leading-dot allowlist entry matches the apex and any proper subdomain,
-// but not look-alike hosts that share a suffix without a label boundary.
-// The bare-HasSuffix path the function used before PR #13 review caught
-// "attackerdeezer.com" against ".deezer.com" because ".deezer.com" was
-// itself a suffix — the apex-only match is the fix.
+// a leading-dot allowlist entry behaves as a label-boundary-anchored
+// suffix match — it matches the apex (".deezer.com" → "deezer.com") and
+// any proper subdomain ("cdn.deezer.com", "foo.bar.deezer.com"), but
+// never a look-alike that shares a suffix without a DNS label boundary
+// ("attackerdeezer.com"). Dot-less entries require an exact match; this
+// protects allowlists that name an IP literal like "127.0.0.1" from
+// admitting look-alikes ("evil.127.0.0.1", "127.0.0.100").
 func TestHostAllowed_AnchorsAtLabelBoundary(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -42,12 +51,76 @@ func TestHostAllowed_AnchorsAtLabelBoundary(t *testing.T) {
 		{"empty allowlist", "deezer.com", nil, false},
 	}
 	for _, c := range cases {
-		c := c
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			if got := hostAllowed(c.host, c.allowed); got != c.want {
 				t.Errorf("hostAllowed(%q, %v) = %v, want %v", c.host, c.allowed, got, c.want)
 			}
 		})
+	}
+}
+
+// TestFetchImage_RefusesRedirectToDisallowedHost pins the redirect-guard
+// half of the SSRF contract. The initial hostAllowed check only covers the
+// first URL; without a CheckRedirect gate a compromised/misconfigured CDN
+// could 30x-redirect to 169.254.169.254 or an RFC1918 address and we'd
+// follow. The guard has to reject every hop whose host is outside the
+// allowlist — not the first one only.
+func TestFetchImage_RefusesRedirectToDisallowedHost(t *testing.T) {
+	t.Parallel()
+	// Attacker-controlled server: responds 302 → 169.254.169.254, a canonical
+	// cloud-metadata target. We never want the client to actually dial that.
+	attacker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://169.254.169.254/latest/meta-data/", http.StatusFound)
+	}))
+	defer attacker.Close()
+
+	c := NewDeezerClient("", "test-agent", &http.Client{Timeout: 2 * time.Second})
+	// httptest servers live on 127.0.0.1:<ephemeral>; the allowlist is
+	// matched against Hostname() which strips the port, so the bare IP
+	// literal is what we whitelist for first-hop to reach httptest.
+	c.SetAllowedImageHostsForTest([]string{"127.0.0.1"})
+
+	_, err := c.FetchImage(context.Background(), attacker.URL+"/picture.jpg")
+	if err == nil {
+		t.Fatalf("FetchImage followed redirect to disallowed host — expected error")
+	}
+	// The redirect target is 169.254.169.254 — not in the allowlist —
+	// so the CheckRedirect gate must fire. The http.Client wraps
+	// CheckRedirect errors in url.Error, so the substring is what we
+	// can portably assert on.
+	if !strings.Contains(err.Error(), "refusing redirect") {
+		t.Fatalf("unexpected error %q; want 'refusing redirect' substring", err.Error())
+	}
+}
+
+// TestFetchImage_FollowsRedirectWithinAllowlist confirms the guard still
+// lets legitimate redirects through — a common Deezer pattern is 302 from
+// the search-returned URL to a geo-routed CDN host under the same apex.
+func TestFetchImage_FollowsRedirectWithinAllowlist(t *testing.T) {
+	t.Parallel()
+	// Final server returns a tiny payload.
+	final := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer final.Close()
+	// Hop server 302s to `final`.
+	hop := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, final.URL+"/img.jpg", http.StatusFound)
+	}))
+	defer hop.Close()
+
+	c := NewDeezerClient("", "test-agent", &http.Client{Timeout: 2 * time.Second})
+	// Both httptest servers bind 127.0.0.1 with different ephemeral
+	// ports; Hostname() strips the port, so a single IP allowlist entry
+	// covers the full hop chain.
+	c.SetAllowedImageHostsForTest([]string{"127.0.0.1"})
+
+	buf, err := c.FetchImage(context.Background(), hop.URL+"/picture.jpg")
+	if err != nil {
+		t.Fatalf("FetchImage: %v", err)
+	}
+	if string(buf) != "ok" {
+		t.Fatalf("unexpected body %q", string(buf))
 	}
 }

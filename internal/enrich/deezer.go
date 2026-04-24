@@ -32,6 +32,14 @@ type DeezerClient struct {
 }
 
 // NewDeezerClient constructs a client.
+//
+// The returned client re-validates every HTTP redirect target against the
+// image allowlist. Without this gate, the initial `hostAllowed` check in
+// FetchImage/SearchArtist would only cover the *first* URL — a malicious
+// or misconfigured CDN could 30x-redirect to 169.254.169.254 (cloud
+// metadata) or an RFC1918 address and we'd happily fetch it. The check
+// fires for every hop, keeping the allowlist authoritative for the whole
+// redirect chain.
 func NewDeezerClient(base, userAgent string, httpClient *http.Client) *DeezerClient {
 	if base == "" {
 		base = DefaultDeezerBase
@@ -39,12 +47,14 @@ func NewDeezerClient(base, userAgent string, httpClient *http.Client) *DeezerCli
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 10 * time.Second}
 	}
-	return &DeezerClient{
+	c := &DeezerClient{
 		base:              base,
 		userAgent:         userAgent,
 		http:              httpClient,
 		allowedImageHosts: append([]string(nil), deezerAllowedHosts...),
 	}
+	c.installRedirectGuard()
+	return c
 }
 
 // SetAllowedImageHostsForTest replaces the client's image-host allowlist.
@@ -52,6 +62,27 @@ func NewDeezerClient(base, userAgent string, httpClient *http.Client) *DeezerCli
 // tests can let FetchImage reach 127.0.0.1.
 func (c *DeezerClient) SetAllowedImageHostsForTest(hosts []string) {
 	c.allowedImageHosts = append([]string(nil), hosts...)
+}
+
+// installRedirectGuard wires CheckRedirect on c.http so every hop's host
+// is re-validated against the current allowlist. Returning a non-nil
+// error here causes http.Client to abort the redirect *and* return the
+// error — no silent follow-through.
+func (c *DeezerClient) installRedirectGuard() {
+	prev := c.http.CheckRedirect
+	c.http.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return errors.New("deezer: stopped after 10 redirects")
+		}
+		host := req.URL.Hostname()
+		if !hostAllowed(host, c.allowedImageHosts) {
+			return fmt.Errorf("deezer: refusing redirect to non-allowlisted host %q", host)
+		}
+		if prev != nil {
+			return prev(req, via)
+		}
+		return nil
+	}
 }
 
 // DeezerArtist is the subset of Deezer's artist shape we consume.

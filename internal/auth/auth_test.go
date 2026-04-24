@@ -259,24 +259,33 @@ func TestReloadPreservesNewerInMemoryLastUsed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Validate on the original store — this calls reloadIfStale, which
-	// overwrites s.tokens with the disk contents. The merge in reload()
-	// must preserve the newer in-memory LastUsedAt for the iPhone token.
-	if _, ok := s.Validate(raw); !ok {
-		t.Fatal("post-reload validate miss")
-	}
-	var iPhoneAfter time.Time
+	// List() on the original store — this calls reloadIfStale, which
+	// overwrites s.tokens with the disk contents. Crucially, List does
+	// NOT bump LastUsedAt (unlike Validate), so whatever we observe here
+	// is strictly the merge's output. The merge must preserve the newer
+	// in-memory LastUsedAt for the iPhone token: a post-reload assertion
+	// that runs through Validate first would be indistinguishable from a
+	// broken merge, because Validate stamps LastUsedAt = time.Now() and
+	// the non-zero/>=inMemory invariants would pass trivially.
+	var iPhoneAfterReload time.Time
 	for _, tt := range s.List() {
 		if tt.ID == tok.ID {
-			iPhoneAfter = tt.LastUsedAt
+			iPhoneAfterReload = tt.LastUsedAt
 			break
 		}
 	}
-	if iPhoneAfter.IsZero() {
-		t.Fatalf("iPhone token disappeared after reload: %v", s.List())
+	if iPhoneAfterReload.IsZero() {
+		t.Fatalf("iPhone token LastUsedAt reset to zero after reload — merge clobbered in-memory bump: %v", s.List())
 	}
-	if iPhoneAfter.Before(inMemory) {
-		t.Errorf("reload regressed LastUsedAt: %v < %v", iPhoneAfter, inMemory)
+	if iPhoneAfterReload.Before(inMemory) {
+		t.Errorf("reload regressed LastUsedAt: %v < %v", iPhoneAfterReload, inMemory)
+	}
+
+	// Belt-and-braces: Validate still succeeds post-reload. This is now
+	// pure follow-on coverage — the merge has already been verified above
+	// independently of any Validate-side bump.
+	if _, ok := s.Validate(raw); !ok {
+		t.Fatal("post-reload validate miss")
 	}
 }
 
