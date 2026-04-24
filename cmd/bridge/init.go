@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/doctor"
 	"github.com/acoseac/1-bit-bridge/internal/packaging"
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
 )
@@ -33,6 +34,7 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	libraryRoot := fs.String("library", "", "library root path (required with --yes)")
 	libraryName := fs.String("name", "", "library display name (default: hostname)")
 	skipService := fs.Bool("no-service", false, "skip launchd/systemd install; run `bridge serve` yourself")
+	skipDoctor := fs.Bool("skip-doctor", false, "don't run `bridge doctor` preflight before init (not recommended)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -94,6 +96,26 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if !info.IsDir() {
 		fmt.Fprintf(stderr, "%q is not a directory\n", abs)
 		return 1
+	}
+
+	// Preflight. Run after library-path resolution so doctor sees the
+	// real path the user chose, not a default. --skip-doctor bypasses
+	// for the rare case where the operator knows better than the check
+	// (say: doctor fails on port 7789 bound by an existing bridge and
+	// you're re-running init on purpose to rewrite config).
+	if !*skipDoctor {
+		d := doctor.Deps{
+			ConfigDir:    cfgDir,
+			DataDir:      dataDir,
+			LibraryRoots: []string{abs},
+			APIPort:      7788,
+			AdminPort:    7789,
+		}
+		if code := ensureDoctorClean(stdout, d); code != 0 {
+			fmt.Fprintln(stdout)
+			fmt.Fprintln(stdout, "fix the fail(s) above, or re-run with --skip-doctor to bypass.")
+			return 1
+		}
 	}
 
 	// Library name — prompt on interactive, hostname fallback otherwise.
@@ -202,7 +224,7 @@ func finishInit(stdout, stderr io.Writer, cfgPath, dataDir string, skipService b
 		fmt.Fprintf(stdout, "\nDone. Open the admin console to add library folders and pair iOS devices.\n")
 	}
 
-	if skipService || (runtime.GOOS != "darwin" && runtime.GOOS != "linux") {
+	if skipService || (runtime.GOOS != "darwin" && runtime.GOOS != "linux" && runtime.GOOS != "windows") {
 		fmt.Fprintf(stdout, "\nSkipping service install. Start the bridge with:\n")
 		fmt.Fprintf(stdout, "  bridge serve --config %s\n", cfgPath)
 		printAdmin()

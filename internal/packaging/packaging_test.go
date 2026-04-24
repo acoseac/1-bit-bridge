@@ -102,6 +102,47 @@ func TestRenderSystemdTemplate_EscapesBadChars(t *testing.T) {
 	}
 }
 
+func TestRenderStartupCmd_Windows(t *testing.T) {
+	body, err := render("startup.cmd.tmpl", Params{
+		BinaryPath: `C:\Program Files\1-bit-bridge\bridge.exe`,
+		ConfigPath: `C:\Users\me\AppData\Local\1-bit-bridge\bridge.yaml`,
+		LogPath:    `C:\Users\me\AppData\Local\1-bit-bridge\bridge.log`,
+	})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	s := string(body)
+	for _, want := range []string{
+		`@echo off`,
+		`start "1-bit-bridge" /min`,
+		`"C:\Program Files\1-bit-bridge\bridge.exe"`,
+		`"C:\Users\me\AppData\Local\1-bit-bridge\bridge.yaml"`,
+		`1>>"C:\Users\me\AppData\Local\1-bit-bridge\bridge.log"`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("rendered startup.cmd missing %q\n--\n%s", want, s)
+		}
+	}
+}
+
+func TestRenderStartupCmd_EscapesEmbeddedQuote(t *testing.T) {
+	// Pathological path — unlikely but cheap to guard. cmd.exe's in-
+	// quote escape for `"` is `""` (not backslash), so an embedded
+	// quote must appear as `""` in the rendered launcher.
+	body, err := render("startup.cmd.tmpl", Params{
+		BinaryPath: `C:\weird\br"idge.exe`,
+		ConfigPath: `C:\config\bridge.yaml`,
+		LogPath:    `C:\log\bridge.log`,
+	})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	s := string(body)
+	if !strings.Contains(s, `br""idge.exe`) {
+		t.Errorf("expected doubled-quote escape, got:\n%s", s)
+	}
+}
+
 func TestDefaultConfigDirNotEmpty(t *testing.T) {
 	d, err := DefaultConfigDir()
 	if err != nil {

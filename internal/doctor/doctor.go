@@ -1,0 +1,398 @@
+// Package doctor runs environment preflight checks for `bridge init`
+// and `bridge doctor`. Each check is a pure function with a stable name
+// and a one-line hint on failure — enough for an operator to know what
+// to fix without reading the source.
+//
+// The contract is deliberately small so the same function powers the
+// CLI ("bridge doctor") and an eventual admin-console panel.
+package doctor
+
+import (
+	"errors"
+	"fmt"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
+
+	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
+)
+
+// Status is the outcome of a single check.
+type Status string
+
+const (
+	OK   Status = "ok"
+	Warn Status = "warn"
+	Fail Status = "fail"
+)
+
+// Check is one line of the doctor report.
+type Check struct {
+	// Name is a stable slug (kebab-case, no spaces). Consumers use it as
+	// a key for test assertions, admin-UI mapping, or CI dashboards.
+	Name string
+	// Status is ok / warn / fail.
+	Status Status
+	// Summary is a short human-readable description of what was tested.
+	Summary string
+	// Hint (fail/warn only) tells the operator how to fix it.
+	Hint string
+}
+
+// Deps bundles the inputs doctor needs. All fields are required; an
+// empty ConfigDir is treated as "use the per-OS default", an empty
+// DataDir likewise. LibraryRoots may be empty (first-run, no config
+// yet), in which case the library-roots check is skipped.
+type Deps struct {
+	ConfigDir    string
+	DataDir      string
+	LibraryRoots []string
+	// APIPort is the main HTTPS port the server binds, typically 7788.
+	APIPort int
+	// AdminPort is the loopback admin console port, typically 7789.
+	AdminPort int
+	// OwnPIDFile, when set, points at the file `bridge serve` writes
+	// when it's running. A port bound by this PID is treated as OK
+	// (doctor must be idempotent while the server is running). Empty
+	// skips the own-PID check — any bind is fail.
+	OwnPIDFile string
+}
+
+// Report is the collection of checks from a single doctor run.
+type Report struct {
+	Checks []Check
+}
+
+// OKCount / WarnCount / FailCount are the tallies printed in the CLI
+// footer.
+func (r *Report) OKCount() int   { return r.count(OK) }
+func (r *Report) WarnCount() int { return r.count(Warn) }
+func (r *Report) FailCount() int { return r.count(Fail) }
+
+func (r *Report) count(s Status) int {
+	n := 0
+	for _, c := range r.Checks {
+		if c.Status == s {
+			n++
+		}
+	}
+	return n
+}
+
+// HasFail returns true if any check failed. init() uses this to bail
+// before touching the config file.
+func (r *Report) HasFail() bool { return r.FailCount() > 0 }
+
+// Run executes every check against d and returns the report.
+func Run(d Deps) Report {
+	checks := []func(Deps) Check{
+		checkPlatform,
+		checkConfigDir,
+		checkTLSCert,
+		checkAPIPort,
+		checkAdminPort,
+		checkLibraryRoots,
+		checkServiceManager,
+		checkBrowserOpener,
+	}
+	out := make([]Check, 0, len(checks))
+	for _, fn := range checks {
+		out = append(out, fn(d))
+	}
+	return Report{Checks: out}
+}
+
+// --- individual checks ---
+
+func checkPlatform(d Deps) Check {
+	// Everything we ship a binary for.
+	supportedOS := map[string]bool{"darwin": true, "linux": true, "windows": true}
+	supportedArch := map[string]bool{"amd64": true, "arm64": true}
+	if supportedOS[runtime.GOOS] && supportedArch[runtime.GOARCH] {
+		return ok("platform", fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH))
+	}
+	return fail("platform",
+		fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH),
+		"bridge ships binaries for darwin/linux/windows on amd64 or arm64; other combos must build from source")
+}
+
+func checkConfigDir(d Deps) Check {
+	dir := d.ConfigDir
+	if dir == "" {
+		return warn("config-dir", "no config dir set", "pass Deps.ConfigDir so doctor can verify write access")
+	}
+	// Ensure it exists (create if missing — init() does this anyway,
+	// but doctor running standalone should report the same outcome
+	// whether or not init has been attempted).
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fail("config-dir", dir, "can't create: "+err.Error())
+	}
+	// Touch a temp file to verify write access — MkdirAll's success
+	// isn't proof (the dir could exist read-only).
+	probe := filepath.Join(dir, ".doctor-probe")
+	if err := os.WriteFile(probe, []byte("probe"), 0o600); err != nil {
+		return fail("config-dir", dir, "not writable: "+err.Error())
+	}
+	_ = os.Remove(probe)
+	return ok("config-dir", dir)
+}
+
+func checkTLSCert(d Deps) Check {
+	if d.DataDir == "" {
+		return warn("tls-cert", "no data dir set",
+			"pass Deps.DataDir so doctor can inspect cert state")
+	}
+	certPath, keyPath := servertls.DefaultPaths(d.DataDir)
+	certExists := fileExists(certPath)
+	keyExists := fileExists(keyPath)
+	switch {
+	case certExists && keyExists:
+		return ok("tls-cert", "present")
+	case !certExists && !keyExists:
+		// Fresh install — init() will mint on first serve.
+		return ok("tls-cert", "absent (init will mint)")
+	default:
+		// One file without the other is an error no automatic recovery
+		// handles safely — deleting the survivor would break existing
+		// client pins.
+		return fail("tls-cert", "partial state",
+			fmt.Sprintf("found %q but not its pair; remove the orphan and re-run init",
+				firstPresent(certPath, keyPath, certExists, keyExists)))
+	}
+}
+
+func checkAPIPort(d Deps) Check {
+	return checkPort("port-api", d.APIPort, d.OwnPIDFile)
+}
+
+func checkAdminPort(d Deps) Check {
+	return checkPort("port-admin", d.AdminPort, d.OwnPIDFile)
+}
+
+// checkPort probes a single port on 127.0.0.1 and on the machine's
+// default IPv4 bind. If a bind succeeds the port is free. If it fails
+// with "address already in use" and the holding PID matches our
+// OwnPIDFile, we report ok — doctor is idempotent while the server is
+// running. Any other binder is a fail.
+func checkPort(name string, port int, ownPIDFile string) Check {
+	if port == 0 {
+		return warn(name, "no port set", "pass Deps."+name+"Port")
+	}
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	lis, err := net.Listen("tcp", addr)
+	if err == nil {
+		_ = lis.Close()
+		return ok(name, fmt.Sprintf("free (:%d)", port))
+	}
+	// Port is bound. Is it us?
+	if ownPIDFile != "" {
+		if ownPID, readErr := readPID(ownPIDFile); readErr == nil && ownPID > 0 {
+			if pidListening(port) == ownPID {
+				return ok(name, fmt.Sprintf("bound by our own bridge (pid %d)", ownPID))
+			}
+		}
+	}
+	return fail(name, fmt.Sprintf(":%d in use", port),
+		"another process owns this port; stop it or pick a different address in bridge.yaml")
+}
+
+func checkLibraryRoots(d Deps) Check {
+	if len(d.LibraryRoots) == 0 {
+		return ok("library-roots", "none configured (init will prompt)")
+	}
+	missing := []string{}
+	unreadable := []string{}
+	empty := []string{}
+	for _, r := range d.LibraryRoots {
+		info, err := os.Stat(r)
+		if err != nil {
+			missing = append(missing, r)
+			continue
+		}
+		if !info.IsDir() {
+			unreadable = append(unreadable, r+" (not a directory)")
+			continue
+		}
+		entries, err := os.ReadDir(r)
+		if err != nil {
+			unreadable = append(unreadable, r+" ("+err.Error()+")")
+			continue
+		}
+		if len(entries) == 0 {
+			empty = append(empty, r)
+		}
+	}
+	if len(missing)+len(unreadable) > 0 {
+		problems := append(append([]string{}, missing...), unreadable...)
+		return fail("library-roots", fmt.Sprintf("%d problem(s)", len(problems)),
+			"fix or remove: "+strings.Join(problems, "; "))
+	}
+	if len(empty) > 0 {
+		return warn("library-roots", fmt.Sprintf("%d empty root(s)", len(empty)),
+			"empty root (scan will find 0 tracks): "+strings.Join(empty, "; "))
+	}
+	return ok("library-roots", fmt.Sprintf("%d root(s) reachable", len(d.LibraryRoots)))
+}
+
+func checkServiceManager(d Deps) Check {
+	switch runtime.GOOS {
+	case "darwin":
+		if _, err := exec.LookPath("launchctl"); err != nil {
+			return fail("service-manager", "launchctl missing",
+				"`launchctl` is part of macOS; missing implies a broken install — use `bridge init --no-service` to skip")
+		}
+		return ok("service-manager", "launchctl available")
+	case "linux":
+		// A user-level systemd install needs a DBus session. Detect by
+		// running `systemctl --user show-environment`; it prints
+		// something only if the user-bus is reachable.
+		cmd := exec.Command("systemctl", "--user", "show-environment")
+		if err := cmd.Run(); err != nil {
+			return warn("service-manager", "no user systemd session",
+				"headless session? use `bridge init --no-service` and run `bridge serve` yourself")
+		}
+		return ok("service-manager", "systemctl --user reachable")
+	case "windows":
+		dir := windowsStartupDir()
+		if dir == "" {
+			return warn("service-manager", "can't resolve Startup folder",
+				"set %APPDATA% and re-run — doctor needs it to place the login shortcut")
+		}
+		if err := probeWritable(dir); err != nil {
+			return fail("service-manager", "Startup folder not writable",
+				dir+": "+err.Error())
+		}
+		return ok("service-manager", "Startup folder writable: "+dir)
+	default:
+		return warn("service-manager", runtime.GOOS+" unsupported",
+			"no service-install path for this OS; run `bridge serve` manually")
+	}
+}
+
+func checkBrowserOpener(d Deps) Check {
+	var candidates []string
+	switch runtime.GOOS {
+	case "darwin":
+		candidates = []string{"open"}
+	case "linux":
+		candidates = []string{"xdg-open"}
+	case "windows":
+		candidates = []string{"cmd.exe", "cmd"}
+	}
+	for _, c := range candidates {
+		if _, err := exec.LookPath(c); err == nil {
+			return ok("browser-opener", c)
+		}
+	}
+	return warn("browser-opener", "no opener found",
+		"install missing; bridge will still print the admin URL for you to paste manually")
+}
+
+// --- helpers ---
+
+func ok(name, summary string) Check {
+	return Check{Name: name, Status: OK, Summary: summary}
+}
+
+func warn(name, summary, hint string) Check {
+	return Check{Name: name, Status: Warn, Summary: summary, Hint: hint}
+}
+
+func fail(name, summary, hint string) Check {
+	return Check{Name: name, Status: Fail, Summary: summary, Hint: hint}
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func firstPresent(certPath, keyPath string, certExists, keyExists bool) string {
+	if certExists {
+		return certPath
+	}
+	if keyExists {
+		return keyPath
+	}
+	return ""
+}
+
+// readPID reads a bare-integer pidfile. Returns (0, err) on missing or
+// malformed file — caller treats either as "no own-pid info".
+func readPID(path string) (int, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// probeWritable creates and removes a probe file to verify write access.
+// Callers use it when os.Stat + mode bits isn't reliable (Windows
+// permission model differs from unix).
+func probeWritable(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	probe := filepath.Join(dir, ".doctor-probe")
+	f, err := os.OpenFile(probe, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	_ = f.Close()
+	_ = os.Remove(probe)
+	return nil
+}
+
+// windowsStartupDir resolves the per-user Startup folder. Returns ""
+// when the relevant env vars are unset. The path is:
+//
+//	%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup
+//
+// which every supported Windows version uses.
+func windowsStartupDir() string {
+	appdata := os.Getenv("APPDATA")
+	if appdata == "" {
+		return ""
+	}
+	return filepath.Join(appdata, "Microsoft", "Windows", "Start Menu", "Programs", "Startup")
+}
+
+// pidListening returns the PID of the process bound to the given local
+// port, or -1 if it can't tell (permission denied, platform doesn't
+// support the probe, etc). This is a best-effort helper for the "is it
+// us?" branch of checkPort — a wrong answer here degrades to a fail,
+// which is the safe direction.
+func pidListening(port int) int {
+	// Use `lsof -nP -iTCP:<port> -sTCP:LISTEN -t` on unix. Windows uses
+	// a different probe (netstat); for now, return -1 there and let the
+	// caller take the fail branch. PR-2 will wire Windows via WMI.
+	if runtime.GOOS == "windows" {
+		return -1
+	}
+	out, err := exec.Command("lsof", "-nP", "-iTCP:"+strconv.Itoa(port), "-sTCP:LISTEN", "-t").Output()
+	if err != nil {
+		return -1
+	}
+	// lsof -t prints one pid per line. Take the first.
+	fields := strings.Fields(string(out))
+	if len(fields) == 0 {
+		return -1
+	}
+	n, err := strconv.Atoi(fields[0])
+	if err != nil {
+		return -1
+	}
+	return n
+}
+
+// ErrHasFail is returned by Run when the caller passes StopOnFail.
+var ErrHasFail = errors.New("doctor reports one or more failing checks")

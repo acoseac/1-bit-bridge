@@ -16,16 +16,45 @@ v0.0.x — wire protocol frozen at [`PROTOCOL.md`](PROTOCOL.md) v1. Admin consol
 
 ## Install
 
-**Download + init** — the short path on macOS / Linux:
+Grab a pre-built binary from the [releases page](https://github.com/acoseac/1-bit-bridge/releases) — no Go toolchain required. Pick your OS + arch, then run `bridge init`.
+
+**macOS / Linux:**
 
 ```sh
-# Download the tarball for your OS/arch from the releases page:
-#   https://github.com/acoseac/1-bit-bridge/releases
-tar -xzf 1-bit-bridge_*_macos_arm64.tar.gz
+tar -xzf 1-bit-bridge_*_macos_arm64.tar.gz   # or linux_amd64 / linux_arm64 / macos_amd64
 ./bridge init
 ```
 
-`bridge init` prompts for a library folder, writes the config + TLS cert under `~/Library/Application Support/1-bit-bridge/` (or `$XDG_CONFIG_HOME/1-bit-bridge/` on Linux), registers a launchd user agent (or systemd user unit), starts the server, and opens the admin console in your browser.
+Writes config + TLS cert under `~/Library/Application Support/1-bit-bridge/` (macOS) or `$XDG_CONFIG_HOME/1-bit-bridge/` (Linux), registers a launchd user agent / systemd user unit, opens the admin console.
+
+**Windows** (PowerShell or File Explorer):
+
+```powershell
+# Unzip 1-bit-bridge_*_windows_amd64.zip (or _arm64)
+bridge.exe init
+```
+
+On Windows the bridge installs as a **Startup-folder launcher** — it starts at logon and keeps running while you're logged in. Close-on-logout; a full Windows Service install (survives logout, runs at boot) is tracked as a follow-up.
+
+Config lands under `%LOCALAPPDATA%\1-bit-bridge\`; the launcher lives at `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\com.acoseac.1-bit-bridge.cmd`.
+
+### Preflight: `bridge doctor`
+
+Before (or any time after) running `bridge init`, `bridge doctor` prints a punch list of what's wrong in your environment:
+
+```
+[ok]   platform            darwin/arm64
+[ok]   config-dir          /Users/me/Library/Application Support/1-bit-bridge
+[ok]   tls-cert            present
+[FAIL] port-api            :7788 in use
+  ↳ another process owns this port; stop it or pick a different address in bridge.yaml
+[ok]   port-admin          free (:7789)
+[ok]   library-roots       1 root(s) reachable
+[ok]   service-manager     launchctl available
+[ok]   browser-opener      open
+```
+
+`bridge init` runs doctor automatically and bails on `fail` (use `--skip-doctor` to override — not recommended).
 
 **Admin console** — [http://127.0.0.1:7789/](http://127.0.0.1:7789/). Add/remove library folders, pair iOS devices (QR + copy-buttons), revoke tokens, view scan state + stats. Loopback-only, no auth — anyone on the machine already has filesystem access to the token store.
 
@@ -45,7 +74,7 @@ For a local release dry-run: `goreleaser release --snapshot --clean`.
 
 ## Manual run (without `bridge init`)
 
-Users on Windows, or anyone who wants to skip the service install:
+For anyone who wants to skip the service install or run the bridge out of an arbitrary directory:
 
 ```sh
 ./bridge init --no-service --yes --library /path/to/music --dir ./bridge-data

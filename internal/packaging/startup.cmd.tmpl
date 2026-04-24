@@ -1,0 +1,6 @@
+@echo off
+rem 1-bit-bridge startup launcher — drop-in for %APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\.
+rem Managed by `bridge init` on Windows; `bridge init` with --no-service
+rem skips writing this file. Re-run `bridge init` to refresh the launcher
+rem after moving the binary.
+start "1-bit-bridge" /min "{{.BinaryPath | cmdEscape}}" serve --config "{{.ConfigPath | cmdEscape}}" 1>>"{{.LogPath | cmdEscape}}" 2>&1
