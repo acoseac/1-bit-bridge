@@ -322,7 +322,7 @@ func (e *Enricher) ensureArtistImageCached(ctx context.Context, mbid, artistName
 		// artist name (or a prior session). Link and return without a
 		// Deezer fetch.
 		if err := linkOrCopy(namePath, mbidPath); err != nil {
-			return false, fmt.Errorf("link mbid path %q → %q: %w", mbidPath, namePath, err)
+			return false, fmt.Errorf("link canonical %q → mbid %q: %w", namePath, mbidPath, err)
 		}
 		return true, nil
 	}
@@ -384,23 +384,13 @@ func linkOrCopy(src, dst string) error {
 	if err := os.Link(src, dst); err == nil {
 		return nil
 	}
-	// Fallback — copy the bytes. Atomic rename so a concurrent reader
-	// never sees a partial file.
-	srcFile, err := os.Open(src)
+	// Fallback — copy the bytes via os.ReadFile + atomic rename.
+	// Artist portraits are small (< 1 MB typical) so reading into
+	// memory is fine; the atomic-write pattern via writeArtworkAtomic
+	// keeps concurrent readers from seeing a torn file.
+	data, err := os.ReadFile(src)
 	if err != nil {
 		return err
-	}
-	defer srcFile.Close()
-	data := make([]byte, 0, 1024*1024) // images are small (< 1 MB)
-	buf := make([]byte, 64*1024)
-	for {
-		n, err := srcFile.Read(buf)
-		if n > 0 {
-			data = append(data, buf[:n]...)
-		}
-		if err != nil {
-			break
-		}
 	}
 	return writeArtworkAtomic(dst, data)
 }
