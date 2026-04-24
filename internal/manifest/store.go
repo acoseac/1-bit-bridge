@@ -219,6 +219,51 @@ func (s *Store) ListTracks(since *time.Time) ([]Track, error) {
 	return out, rows.Err()
 }
 
+// ListTracksPage returns up to `limit` tracks with `path > afterPath`,
+// ordered by path ASC. The path ordering is stable (it's the primary
+// key) so a paginated iteration — start with `afterPath=""` and keep
+// passing the last returned path back in — walks every track exactly
+// once without duplication or gaps, even across arbitrary reorders
+// of the underlying data.
+//
+// `limit <= 0` falls back to a sensible default (1000) so an errant
+// caller can't wedge the server on a 0-row response forever.
+//
+// Intentionally does NOT accept a `since` parameter — since-delta
+// responses are small by construction and the iOS side pulls them
+// in a single request. Mixing pagination + since would require a
+// composite cursor (timestamp + path) for consistent ordering,
+// which isn't worth the complexity for a code path that already
+// returns bounded output.
+func (s *Store) ListTracksPage(afterPath string, limit int) ([]Track, error) {
+	if limit <= 0 {
+		limit = 1000
+	}
+	rows, err := s.db.Query(`
+		SELECT tags_json FROM tracks
+		WHERE path > ?
+		ORDER BY path ASC
+		LIMIT ?
+	`, afterPath, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Track{}
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		var t Track
+		if err := json.Unmarshal(raw, &t); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
 // HasTrackWithArtworkMBID reports whether at least one indexed track
 // carries the given value in its `artworkMBID` tag. Used by the
 // `/v1/artwork/{mbid}` handler to tell a genuinely-unknown MBID

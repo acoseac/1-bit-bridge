@@ -315,6 +315,73 @@ func BuildManifest(store *Store, roots []string, since time.Time) (*Manifest, er
 	}, nil
 }
 
+// BuildManifestPage returns one page of a paginated full-manifest
+// iteration. The caller walks the whole library by calling with
+// `cursor=""` on the first page and feeding each response's
+// `NextCursor` back in until it comes back nil.
+//
+// **First-page-only fields.** `Folders` and `Total` are populated
+// only when `cursor == ""`. For a 50k-track library with 5k folders,
+// repeating them on every page would add ~250k rows of redundant
+// JSON across a pagination run. iOS snapshots them from the first
+// page and ignores later pages' values (they're absent on the wire
+// via omitempty).
+//
+// **limit+1 query trick.** We ask the store for `limit+1` rows.
+// When we get back exactly `limit+1`, we know for certain there's
+// another page and set `NextCursor` to the last in-page row. When
+// we get back ≤ `limit`, we've hit the tail and `NextCursor` stays
+// nil. Old behaviour ("request limit; if exactly limit, assume more")
+// caused an extra round-trip that returned zero rows whenever the
+// track count was an exact multiple of limit.
+func BuildManifestPage(store *Store, roots []string, cursor string, limit int) (*Manifest, error) {
+	if limit <= 0 {
+		limit = 1000
+	}
+	// Over-fetch by one so the last row of the current query tells us
+	// "is there another page" definitively.
+	tracks, err := store.ListTracksPage(cursor, limit+1)
+	if err != nil {
+		return nil, err
+	}
+	basenames := make([]string, len(roots))
+	for i, r := range roots {
+		basenames[i] = filepath.Base(r)
+	}
+	m := &Manifest{
+		Version:      1,
+		GeneratedAt:  time.Now().UTC(),
+		LibraryRoots: basenames,
+	}
+	// Only the first page pays the folders + total lookups. A
+	// `COUNT(*)` on a 50k-track sqlite table is cheap but not free;
+	// ListFolders walks the folders table fully. Skipping both on
+	// subsequent pages is a meaningful latency win for large libs.
+	if cursor == "" {
+		folders, ferr := store.ListFolders()
+		if ferr != nil {
+			return nil, ferr
+		}
+		total, terr := store.CountTracks()
+		if terr != nil {
+			return nil, terr
+		}
+		m.Folders = folders
+		m.Total = &total
+	}
+	if len(tracks) > limit {
+		// Trim the over-fetched row — it becomes the cursor for the
+		// next page. The remaining `limit` rows are what we ship.
+		last := tracks[limit-1].Path
+		m.NextCursor = &last
+		m.Tracks = tracks[:limit]
+	} else {
+		// Short read — this is the last page. `NextCursor` stays nil.
+		m.Tracks = tracks
+	}
+	return m, nil
+}
+
 // DefaultDBPath returns the SQLite path used when the user doesn't
 // override. Lives under dataDir so the same config logic applies.
 func DefaultDBPath(dataDir string) string { return filepath.Join(dataDir, "bridge.db") }

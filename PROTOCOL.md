@@ -118,6 +118,16 @@ Pre-built library manifest. Replaces the iOS scanner's Phase 1 (folder walk) and
 
 Query parameters:
 - `since` (optional): if set, only tracks with `mtime > since` and folders whose `mtime > since` are included. If unset, the full manifest is returned.
+- `limit` (optional, **v1.1+**): positive integer. Server returns up to `limit` tracks in a single paginated page. Must NOT be combined with `since` (returns 400 — since-deltas are small by construction).
+- `cursor` (optional, **v1.1+**): opaque token from the previous page's `nextCursor`. On the first page, omit. Iterate until `nextCursor` is null in the response.
+
+Pagination semantics:
+- Pages are ordered by track `path` ASC; the cursor is the last path of the previous page.
+- **First-page-only fields.** `folders` and `total` are sent only on the first page (request has no `cursor`). Subsequent pages omit them to avoid ~250k rows of redundant JSON on a 50k-track library with 5k folders. `libraryRoots` and `generatedAt` are cheap scalars and ship on every page.
+- A short read (fewer rows than `limit`) or empty page means the iteration is done; `nextCursor` is absent.
+- Server enforces an upper bound (5000 today) on `limit` silently — a client requesting more gets capped but not rejected.
+- Clients that don't send `limit` get the v1.0 single-shot response; no compatibility break.
+- Clients MUST treat `folders` and `total` as "absent on mid-run pages" — binding scan-state UI off the first page and ignoring these keys on later pages is the safe pattern (v1.1 iOS does exactly this).
 
 **Response** (`200 OK`, JSON, potentially large — server SHOULD set `Content-Encoding: gzip` when the client's `Accept-Encoding` allows):
 ```json
@@ -150,9 +160,13 @@ Query parameters:
       "musicBrainzTrackID": "...",
       "musicBrainzAlbumID": "..."
     }
-  ]
+  ],
+  "nextCursor": "Music/Artist/Album/last-track.flac",
+  "total": 4823
 }
 ```
+
+`nextCursor` and `total` are omitted on non-paginated responses (back-compat).
 
 Field-for-field, this is a serialization of the iOS `Track` / folder rows in [`LibraryModels.swift`](https://github.com/acoseac/1-bit/blob/main/com.acoseac.dsdplayer/LibraryModels.swift); additive server fields not understood by the iOS decoder MUST be ignored rather than rejected.
 

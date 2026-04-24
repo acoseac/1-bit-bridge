@@ -49,10 +49,42 @@ type Folder struct {
 }
 
 // Manifest is the top-level JSON returned by GET /v1/manifest.
+//
+// Two consumption modes:
+//
+//  1. Full manifest (default, v1.0): caller omits `?limit=` and
+//     `?cursor=`. Server ships every track in a single response.
+//     `NextCursor` and `Total` are absent; `Folders` is always
+//     present.
+//  2. Paginated (v1.1, full-manifest only): caller sets `?limit=N`
+//     and iterates, passing the prior page's `NextCursor` back as
+//     `?cursor=` until the server returns a null cursor.
+//     `Folders` + `Total` are sent **only on the first page**
+//     (`cursor==""`) — for a 50k-track library with 5k folders,
+//     repeating them on every page would balloon the response by
+//     ~250k rows of redundant JSON. iOS binds its scan-state UI
+//     from the first page and ignores the fields on subsequent
+//     pages. `Since`-delta mode is never paginated — deltas are
+//     bounded by construction.
 type Manifest struct {
 	Version      int       `json:"version"`
 	GeneratedAt  time.Time `json:"generatedAt"`
 	LibraryRoots []string  `json:"libraryRoots"`
-	Folders      []Folder  `json:"folders"`
-	Tracks       []Track   `json:"tracks"`
+	// Folders carries the directory list. Present on non-paginated
+	// responses AND on the first page of a pagination run; absent
+	// (via omitempty) on subsequent pages. Clients MUST tolerate
+	// a missing key on later pages — the first-page snapshot is
+	// authoritative for the pagination run.
+	Folders []Folder `json:"folders,omitempty"`
+	Tracks  []Track  `json:"tracks"`
+	// NextCursor carries an opaque token the client sends back as
+	// `?cursor=` on the next page request. Null means "this is the
+	// last page". Always absent on a full (non-paginated) response.
+	NextCursor *string `json:"nextCursor,omitempty"`
+	// Total is the full track count across all pages of the current
+	// pagination run. Pointer type so `0` distinguishes "paginated
+	// empty library" (Total = 0, present on the wire) from
+	// "non-paginated response" (Total absent). Only set on the first
+	// page of a pagination run.
+	Total *int `json:"total,omitempty"`
 }

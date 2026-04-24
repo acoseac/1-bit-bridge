@@ -45,6 +45,13 @@ type Server struct {
 // the Scanner + Store pair; tests can pass a small stub.
 type ManifestProvider interface {
 	BuildManifest(since time.Time) (any, error)
+	// BuildManifestPage is the v1.1 paginated-manifest variant used
+	// when the client asks for `?limit=`. `cursor=""` requests the
+	// first page. Callers iterate until the returned page's
+	// `NextCursor` is nil. Implementations return the same envelope
+	// shape as BuildManifest so the JSON-serialization paths can be
+	// shared in the handler.
+	BuildManifestPage(cursor string, limit int) (any, error)
 	IsScanning() bool
 	LastFullScan() time.Time
 	TracksIndexed() int
@@ -191,19 +198,69 @@ func (s *Server) reachableEndpoints() []string {
 }
 
 // manifestHandler serves GET /v1/manifest?since=<rfc3339> with the current
-// library index (or a since-filtered delta). Returns 503 if no manifest
-// provider is wired up yet (early boot / test harness).
+// library index (or a since-filtered delta), OR — if `?limit=` is set —
+// one page of a paginated full-manifest walk driven by `?cursor=`.
+// Returns 503 if no manifest provider is wired up yet (early boot /
+// test harness).
+//
+// Query parameter combinations:
+//   - no params               → full manifest, v1.0 behaviour
+//   - ?since=<rfc3339>        → since-delta (never paginated, by
+//     construction small)
+//   - ?limit=N[&cursor=<opq>] → paginated full manifest (v1.1). Empty
+//     cursor requests the first page; the
+//     caller iterates until NextCursor is nil.
+//
+// `?limit=` + `?since=` together returns 400 — mixing the two would
+// need a composite (timestamp, path) cursor for ordering stability,
+// and since-deltas are bounded anyway.
 func (s *Server) manifestHandler(w http.ResponseWriter, r *http.Request) {
 	if s.manifest == nil {
 		writeError(w, http.StatusServiceUnavailable, "scan_in_progress", "manifest not ready")
 		return
 	}
+	q := r.URL.Query()
+	sinceRaw := q.Get("since")
+	limitRaw := q.Get("limit")
+
+	if sinceRaw != "" && limitRaw != "" {
+		writeError(w, http.StatusBadRequest, "bad_request",
+			"`since` and `limit` are mutually exclusive; pagination applies to full-manifest requests only")
+		return
+	}
+
+	// Paginated path.
+	if limitRaw != "" {
+		limit, err := strconv.Atoi(limitRaw)
+		if err != nil || limit <= 0 {
+			writeError(w, http.StatusBadRequest, "bad_request",
+				"limit must be a positive integer, got "+limitRaw)
+			return
+		}
+		// Cap the page size at a reasonable ceiling so a client
+		// requesting `limit=10000000` can't allocate a huge response
+		// that DoSes the server or the iOS side's JSON decoder.
+		const maxPageLimit = 5000
+		if limit > maxPageLimit {
+			limit = maxPageLimit
+		}
+		cursor := q.Get("cursor")
+		body, err := s.manifest.BuildManifestPage(cursor, limit)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, body)
+		return
+	}
+
+	// Legacy single-shot path (full manifest or since-delta).
 	var since time.Time
-	if v := r.URL.Query().Get("since"); v != "" {
-		parsed, err := time.Parse(time.RFC3339Nano, v)
+	if sinceRaw != "" {
+		parsed, err := time.Parse(time.RFC3339Nano, sinceRaw)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "bad_request",
-				"since must be an RFC3339 timestamp, got "+v)
+				"since must be an RFC3339 timestamp, got "+sinceRaw)
 			return
 		}
 		since = parsed
