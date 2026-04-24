@@ -213,19 +213,19 @@ func (s *Server) apiRootsAdd(w http.ResponseWriter, r *http.Request) {
 		// zero tracks until the next scheduled/manual scan. Kick off
 		// a best-effort scan against the RESTORED (previous) roots
 		// so the outage is bounded by one scan-duration rather than
-		// one scan-interval. Errors here are swallowed: the user
-		// already sees the 500 for the real failure (Save), and a
-		// compensating-scan failure is strictly an additional
-		// recovery attempt, not a new user-visible event.
+		// one scan-interval. The 500 the user sees is the real
+		// failure (Save); a compensating-scan failure is an
+		// additional recovery attempt, so we log (not return) any
+		// error it produces for server-side observability.
 		if willTransition {
-			go func() { _, _ = s.deps.Scanner.Scan(s.scanCtx()) }()
+			s.spawnBackgroundScan("compensating-scan (add)")
 		}
 		writeError(w, http.StatusInternalServerError, "save-config", err.Error())
 		return
 	}
 	s.deps.Scanner.SetRoots(newList)
 	s.deps.Resolver.SetRoots(newList)
-	go func() { _, _ = s.deps.Scanner.Scan(s.scanCtx()) }()
+	s.spawnBackgroundScan("post-add scan")
 	writeJSON(w, http.StatusCreated, rootRow{Path: abs, Tracks: 0})
 }
 
@@ -298,15 +298,17 @@ func (s *Server) apiRootsRemove(w http.ResponseWriter, r *http.Request) {
 		// prefix-delete), and without a rescan the manifest sits in
 		// a post-mutation state until the next scheduled scan.
 		// Rescan against the restored (previous) roots to bound
-		// the outage by one scan-duration. Errors swallowed — the
-		// 500 the user sees is the real Save failure.
-		go func() { _, _ = s.deps.Scanner.Scan(s.scanCtx()) }()
+		// the outage by one scan-duration. Errors logged (not
+		// returned) — the 500 the user sees is the real Save
+		// failure; a compensating-scan error is additional recovery
+		// and only matters for operator observability.
+		s.spawnBackgroundScan("compensating-scan (remove)")
 		writeError(w, http.StatusInternalServerError, "save-config", err.Error())
 		return
 	}
 	s.deps.Scanner.SetRoots(newList)
 	s.deps.Resolver.SetRoots(newList)
-	go func() { _, _ = s.deps.Scanner.Scan(s.scanCtx()) }()
+	s.spawnBackgroundScan("post-remove scan")
 	w.WriteHeader(http.StatusNoContent)
 }
 

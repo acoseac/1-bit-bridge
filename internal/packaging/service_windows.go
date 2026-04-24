@@ -158,7 +158,7 @@ func waitForServiceGone(m *mgr.Mgr, name string, timeout time.Duration) {
 // and returned (`query service status: %w`) — callers use
 // `errors.Is` / `errors.As` against the inner error to probe for
 // "the service vanished mid-poll" vs. a real SCM fault. A deadline
-// exceed is surfaced as a wrapped error; the prior behaviour of
+// exceeded is surfaced as a wrapped error; the prior behaviour of
 // returning silently on timeout was what caused install/uninstall
 // to fall through into Delete on a still-running service,
 // reproducing the ERROR_SERVICE_MARKED_FOR_DELETE case PR #30 set
