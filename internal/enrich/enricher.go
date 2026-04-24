@@ -2,13 +2,18 @@ package enrich
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/text/unicode/norm"
 
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
@@ -44,10 +49,19 @@ type Enricher struct {
 	// PollInterval is how long to wait between empty-batch checks.
 	PollInterval time.Duration
 
-	// albumCache memoizes (artist, album) → ArtworkMBID so tracks on the
-	// same album share a single MB round-trip. In-memory, lives as long
-	// as the Enricher.
+	// albumCache memoizes (artist, album) → albumResolution so tracks on
+	// the same album share a single MB round-trip. In-memory, lives as
+	// long as the Enricher. Stores both the release MBID and — when MB
+	// returned one — the release-group MBID so the CAA release-group
+	// fallback doesn't need a second MB lookup.
 	albumCache sync.Map
+
+	// releaseGroupCache memoizes releaseMBID → releaseGroupMBID for the
+	// embedded-MBID path where no SearchRelease happened. Keyed on the
+	// release MBID alone; negative results cache as the empty string so
+	// sibling tracks don't re-query a release that genuinely has no
+	// release-group association.
+	releaseGroupCache sync.Map
 
 	// artistCache memoizes artist-name → ArtistMBID so sibling tracks by
 	// the same artist share the lookup + image-fetch.
@@ -60,6 +74,19 @@ type Enricher struct {
 	// progress counters exposed via ScanState.
 	done    atomic.Int64
 	skipped atomic.Int64
+
+	// caaFallbackHits counts how often the release-group fallback salvaged
+	// an artwork fetch that the release-level lookup missed. Exposed as a
+	// plain counter today; may surface on the admin stats page in v1.2.
+	caaFallbackHits atomic.Int64
+}
+
+// albumResolution bundles the release + release-group MBIDs that
+// SearchRelease returns. Stored in albumCache so sibling tracks share
+// both values.
+type albumResolution struct {
+	ReleaseMBID      string
+	ReleaseGroupMBID string
 }
 
 // NewEnricher wires a store + MB/CAA/Deezer clients + cache dir into a
@@ -126,14 +153,20 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 	}
 
 	// If the file already carried an MBID, we don't need to search — just
-	// try to grab artwork for it.
+	// try to grab artwork for it. The release-group MBID for the CAA
+	// fallback gets resolved lazily in `ensureArtworkCached` only if the
+	// release-level fetch misses, so files that hit on the first try
+	// don't pay the extra MB round-trip.
 	albumMBID := t.MusicBrainzAlbumID
+	var rgMBID string
 	if albumMBID == "" {
 		// Cache by (artist, album) so sibling tracks on the same album
 		// share one MB call.
 		key := cacheKey(t.Artist, t.Album)
 		if cached, ok := e.albumCache.Load(key); ok {
-			albumMBID = cached.(string)
+			res := cached.(albumResolution)
+			albumMBID = res.ReleaseMBID
+			rgMBID = res.ReleaseGroupMBID
 		} else {
 			time.Sleep(e.MBMinInterval) // pace
 			res, err := e.mb.SearchRelease(ctx, t.Artist, t.Album)
@@ -145,22 +178,26 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 					return
 				}
 				log.Printf("enricher: MB search %q / %q: %v", t.Artist, t.Album, err)
-				// Cache the failure as an empty MBID so sibling tracks
-				// on the same album don't re-hammer MB with the same
-				// query and hit the same error. This matters for
+				// Cache the failure as an empty resolution so sibling
+				// tracks on the same album don't re-hammer MB with the
+				// same query and hit the same error. This matters for
 				// persistent decode errors (e.g. schema drift) where
 				// every retry is guaranteed to fail — without the
 				// cache, the worker loops forever on an N-track album.
 				// Successful searches populate the same cache entry
-				// with a real MBID the next pass over.
-				e.albumCache.Store(key, "")
+				// with real MBIDs the next pass over.
+				e.albumCache.Store(key, albumResolution{})
 				e.markSkipped(t, fmt.Sprintf("MB error: %v", err))
 				return
 			}
+			resolution := albumResolution{}
 			if res != nil {
-				albumMBID = res.MBID
+				resolution.ReleaseMBID = res.MBID
+				resolution.ReleaseGroupMBID = res.ReleaseGroupMBID
 			}
-			e.albumCache.Store(key, albumMBID)
+			albumMBID = resolution.ReleaseMBID
+			rgMBID = resolution.ReleaseGroupMBID
+			e.albumCache.Store(key, resolution)
 		}
 		// Propagate to the track whether we hit cache or searched fresh.
 		if albumMBID != "" {
@@ -174,8 +211,10 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 	}
 
 	// Fetch and cache 500px front cover. If the file already exists, we
-	// skip the network round-trip entirely.
-	if cached, err := e.ensureArtworkCached(ctx, albumMBID, 500); err != nil {
+	// skip the network round-trip entirely. On a release-level CAA miss,
+	// `ensureArtworkCached` will lazily resolve + try the release-group
+	// fallback.
+	if cached, err := e.ensureArtworkCached(ctx, albumMBID, rgMBID, 500); err != nil {
 		log.Printf("enricher: artwork %s: %v", albumMBID, err)
 		// Artwork miss isn't fatal — mark enriched so we don't retry
 		// every 15 seconds. A future background pass can re-try.
@@ -252,11 +291,39 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) {
 }
 
 // ensureArtistImageCached downloads and caches the artist's Deezer
-// portrait at <CacheDir>/artist-<mbid>.jpg. Returns (true, nil) if a file
-// exists on disk after the call. Pre-cached files are a no-op hit.
+// portrait. Returns (true, nil) if a file exists on disk after the
+// call at the MBID-keyed path (which the /v1/artist-image handler
+// reads). Pre-cached files are a no-op hit.
+//
+// Dedup strategy (v1.1, see plan §3): the canonical image is stored at
+// a name-hashed path (`artist-name-<sha256>.jpg`), and the MBID-keyed
+// path the handler reads is a hardlink into the canonical file. Two
+// MBIDs pointing to the same artist name collapse into one Deezer
+// fetch and one image payload on disk — the second MBID just creates
+// another hardlink. Avoids the "alternate-entity twin cache" that
+// would otherwise grow with MB's alternate-name MBIDs for popular
+// artists (e.g. Nirvana UK vs Nirvana US).
+//
+// Hardlink fallback: on filesystems without hardlink support (should
+// be none for our target deployments — macOS, Linux, NTFS on Windows —
+// but doctored ZFS datasets with `xattr=sa` and similar edge cases can
+// refuse `os.Link`), we fall back to a file copy. The dedup on network
+// (no second Deezer call) is preserved either way.
 func (e *Enricher) ensureArtistImageCached(ctx context.Context, mbid, artistName string) (bool, error) {
-	path := ArtistImagePath(e.CacheDir, mbid)
-	if _, err := os.Stat(path); err == nil {
+	mbidPath := ArtistImagePath(e.CacheDir, mbid)
+	if _, err := os.Stat(mbidPath); err == nil {
+		return true, nil
+	}
+	// Name-hashed canonical path — populated once per unique artist
+	// name regardless of how many MBIDs we see for them.
+	namePath := ArtistImagePathByName(e.CacheDir, artistName)
+	if _, err := os.Stat(namePath); err == nil {
+		// Canonical already exists from a prior MBID for the same
+		// artist name (or a prior session). Link and return without a
+		// Deezer fetch.
+		if err := linkOrCopy(namePath, mbidPath); err != nil {
+			return false, fmt.Errorf("link canonical %q → mbid %q: %w", namePath, mbidPath, err)
+		}
 		return true, nil
 	}
 	time.Sleep(e.DeezerMinInterval)
@@ -274,17 +341,58 @@ func (e *Enricher) ensureArtistImageCached(ctx context.Context, mbid, artistName
 	if err != nil {
 		return false, err
 	}
-	if err := writeArtworkAtomic(path, data); err != nil {
+	if err := writeArtworkAtomic(namePath, data); err != nil {
 		return false, err
+	}
+	if err := linkOrCopy(namePath, mbidPath); err != nil {
+		return false, fmt.Errorf("link mbid path %q → %q: %w", mbidPath, namePath, err)
 	}
 	return true, nil
 }
 
 // ArtistImagePath returns the on-disk cache path for an artist's image,
 // keyed by artist MBID. Exposed so the /v1/artist-image handler reads
-// from the same location the enricher writes.
+// from the same location the enricher writes. Under the v1.1 dedup
+// strategy this path is a hardlink into the name-hashed canonical
+// file (see ArtistImagePathByName); serving behaviour is unchanged.
 func ArtistImagePath(cacheDir, mbid string) string {
 	return filepath.Join(cacheDir, fmt.Sprintf("artist-%s.jpg", mbid))
+}
+
+// ArtistImagePathByName returns the canonical on-disk cache path for
+// an artist's image, keyed by a SHA-256 of the NFC-normalized,
+// whitespace-trimmed, lowercased artist name. Matches iOS's
+// `MetadataNormalizer.artistID` semantics so both sides key the same
+// canonical bytes for the same human-readable artist name.
+//
+// Collisions: two distinct artists with the same display name ("Nirvana"
+// UK vs Nirvana US) collapse to the same file. iOS already collapses
+// them in its library model via the same normalization rules, so the
+// UX is consistent end-to-end.
+func ArtistImagePathByName(cacheDir, artistName string) string {
+	normalized := norm.NFC.String(strings.ToLower(strings.TrimSpace(artistName)))
+	sum := sha256.Sum256([]byte(normalized))
+	return filepath.Join(cacheDir, fmt.Sprintf("artist-name-%s.jpg", hex.EncodeToString(sum[:])))
+}
+
+// linkOrCopy creates a hardlink from src to dst; falls back to a file
+// copy if the filesystem refuses the link. The dedup goal only
+// requires one Deezer fetch per artist name; the on-disk dedup is a
+// bonus that collapses to "same bytes duplicated" on non-link-capable
+// storage.
+func linkOrCopy(src, dst string) error {
+	if err := os.Link(src, dst); err == nil {
+		return nil
+	}
+	// Fallback — copy the bytes via os.ReadFile + atomic rename.
+	// Artist portraits are small (< 1 MB typical) so reading into
+	// memory is fine; the atomic-write pattern via writeArtworkAtomic
+	// keeps concurrent readers from seeing a torn file.
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	return writeArtworkAtomic(dst, data)
 }
 
 // markSkipped stamps enriched_at so the worker doesn't retry the same
@@ -299,22 +407,85 @@ func (e *Enricher) markSkipped(t *manifest.Track, reason string) {
 
 // ensureArtworkCached fetches (mbid, size) cover bytes from CAA and
 // writes them to disk. Returns (true, nil) on hit, (false, errNotFound)
-// if CAA has no cover, (false, err) for other errors. A file already
-// present on disk is a hit without a network call.
-func (e *Enricher) ensureArtworkCached(ctx context.Context, mbid string, size int) (bool, error) {
+// if neither the release nor the release-group has a front cover,
+// (false, err) for other errors. A file already present on disk is a
+// hit without a network call.
+//
+// On a release-level CAA 404, falls back to the release-group front
+// cover if a release-group MBID is available (passed in from the
+// SearchRelease result, or lazily resolved via ReleaseGroupMBID for
+// the embedded-MBID path). The fallback artwork is written to the same
+// on-disk path keyed by the RELEASE MBID, so iOS's existing
+// `/v1/artwork/{releaseMBID}` request flow serves it transparently —
+// no protocol change required.
+func (e *Enricher) ensureArtworkCached(ctx context.Context, mbid, rgMBID string, size int) (bool, error) {
 	path := ArtworkCachePath(e.CacheDir, mbid, size)
 	if _, err := os.Stat(path); err == nil {
 		return true, nil
 	}
 	time.Sleep(e.CAAMinInterval) // pace
 	data, err := e.caa.FetchReleaseFront(ctx, mbid, size)
-	if err != nil {
+	if err == nil {
+		if werr := writeArtworkAtomic(path, data); werr != nil {
+			return false, werr
+		}
+		return true, nil
+	}
+	// Release-level miss — try release-group fallback. Other errors
+	// (network, rate-limit) bubble up unchanged.
+	if !IsNotFound(err) {
 		return false, err
 	}
-	if err := writeArtworkAtomic(path, data); err != nil {
+	rgMBID, rgErr := e.resolveReleaseGroupMBID(ctx, mbid, rgMBID)
+	if rgErr != nil {
+		// Logging the resolve error but returning the original
+		// release-level not-found so callers stamp the "no artwork"
+		// state consistently with pre-fallback behaviour.
+		log.Printf("enricher: release-group lookup for %s: %v", mbid, rgErr)
 		return false, err
 	}
+	if rgMBID == "" {
+		return false, err // no release-group to try
+	}
+	time.Sleep(e.CAAMinInterval) // pace the second CAA call
+	rgData, rgFetchErr := e.caa.FetchReleaseGroupFront(ctx, rgMBID, size)
+	if rgFetchErr != nil {
+		// Release-group also has no cover (or fetch failed). Preserve
+		// the original errNotFound shape so call-site stays unchanged.
+		if IsNotFound(rgFetchErr) {
+			return false, err
+		}
+		return false, rgFetchErr
+	}
+	if werr := writeArtworkAtomic(path, rgData); werr != nil {
+		return false, werr
+	}
+	e.caaFallbackHits.Add(1)
 	return true, nil
+}
+
+// resolveReleaseGroupMBID returns the release-group MBID for a release,
+// checking the hinted value first (from SearchRelease) and falling back
+// to a targeted MB lookup only when none was provided. Caches the
+// lookup result so sibling tracks on the same release share it.
+// Negative results (release with no release-group) cache as "" so we
+// don't re-query.
+func (e *Enricher) resolveReleaseGroupMBID(ctx context.Context, releaseMBID, hint string) (string, error) {
+	if hint != "" {
+		return hint, nil
+	}
+	if cached, ok := e.releaseGroupCache.Load(releaseMBID); ok {
+		return cached.(string), nil
+	}
+	time.Sleep(e.MBMinInterval) // pace
+	rg, err := e.mb.ReleaseGroupMBID(ctx, releaseMBID)
+	if err != nil {
+		// Do not negative-cache on error — transient network failures
+		// should retry on the next enrichment pass.
+		return "", err
+	}
+	e.releaseGroupCache.Store(releaseMBID, rg)
+	return rg, nil
 }
 
 // ArtworkCachePath returns the canonical on-disk path for an (mbid, size)

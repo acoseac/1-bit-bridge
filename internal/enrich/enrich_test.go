@@ -451,3 +451,49 @@ func TestArtworkCachePathFormat(t *testing.T) {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
+
+// TestArtistImagePathByNameNormalizes locks in the normalization
+// contract that dedup depends on: lower + trim + NFC. Two distinct
+// capitalizations / whitespace variants / NFC-vs-NFD forms of the
+// same artist name MUST collapse to the same on-disk path.
+func TestArtistImagePathByNameNormalizes(t *testing.T) {
+	cases := []struct {
+		name string
+		a, b string
+	}{
+		{"case difference", "John Coltrane", "JOHN COLTRANE"},
+		{"trailing whitespace", "John Coltrane", "  John Coltrane  "},
+		// NFC "é" (U+00E9) vs NFD "é" (U+0065 U+0301) — macOS HFS+ and
+		// some tag writers produce different forms for the same name.
+		// Normalization must collapse them.
+		{"NFC vs NFD", "Beyonc\u00e9", "Beyonce\u0301"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pa := ArtistImagePathByName("/x", tc.a)
+			pb := ArtistImagePathByName("/x", tc.b)
+			if pa != pb {
+				t.Errorf("%q and %q mapped to different paths:\n  %s\n  %s", tc.a, tc.b, pa, pb)
+			}
+		})
+	}
+}
+
+// TestMusicBrainzReleaseGroupMBIDLookup verifies the targeted
+// `/release/{mbid}?inc=release-groups` query path used by the CAA
+// release-group fallback when a track carried an embedded release MBID
+// (so no SearchRelease ran to populate the association).
+func TestMusicBrainzReleaseGroupMBIDLookup(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"id":"rel","release-group":{"id":"rg-xyz","title":"Whatever","primary-type":"Album"}}`)
+	}))
+	defer srv.Close()
+	c := NewMusicBrainzClient(srv.URL, "test", nil)
+	got, err := c.ReleaseGroupMBID(context.Background(), "11111111-1111-4111-8111-111111111111")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "rg-xyz" {
+		t.Errorf("got %q, want rg-xyz", got)
+	}
+}

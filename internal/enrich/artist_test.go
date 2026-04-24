@@ -326,3 +326,147 @@ func (r rewritingTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	}
 	return r.tr.RoundTrip(req)
 }
+
+// TestArtistImageDedupSkipsSecondDeezerFetch verifies the v1.1 dedup
+// behaviour at the ensureArtistImageCached boundary: a SECOND call
+// with a different MBID but the SAME artist name must NOT hit Deezer
+// a second time. This matters across enricher session restarts when
+// MB's release-search returns a different canonical MBID for the
+// same artist name (non-deterministic for alternate-name entities).
+// Within a single session, artistCache already dedupes by name; the
+// name-hashed canonical file is what lets the dedup survive restarts
+// without orphaning the prior artist image.
+//
+// We drive the dedup helper directly (not through Run) so the
+// single-session artistCache is not the thing under test — this
+// exercises the on-disk canonical + hardlink path.
+func TestArtistImageDedupSkipsSecondDeezerFetch(t *testing.T) {
+	mbSrv, caaSrv, deezerSrv, deezerCalls := artistFixture(t)
+	defer mbSrv.Close()
+	defer caaSrv.Close()
+	defer deezerSrv.Close()
+
+	dir := t.TempDir()
+	artworkDir := filepath.Join(dir, "artwork")
+	if err := os.MkdirAll(artworkDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	httpClient := &http.Client{Transport: rewritingTransport{base: deezerSrv.URL, tr: http.DefaultTransport}}
+	deezerClient := NewDeezerClient(deezerSrv.URL, "t", httpClient)
+	deezerClient.SetAllowedImageHostsForTest([]string{"127.0.0.1"})
+
+	e := NewEnricher(nil,
+		NewMusicBrainzClient(mbSrv.URL, "t", nil),
+		NewCoverArtClient(caaSrv.URL, "t", nil),
+		deezerClient,
+		artworkDir)
+	e.DeezerMinInterval = 0
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	// First call — cold cache, should hit Deezer (search + image).
+	ok, err := e.ensureArtistImageCached(ctx, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "Artist")
+	if err != nil || !ok {
+		t.Fatalf("first call failed: ok=%v err=%v", ok, err)
+	}
+	firstCallCount := atomic.LoadInt32(deezerCalls)
+	if firstCallCount == 0 {
+		t.Fatal("first call never reached Deezer — fixture misconfigured")
+	}
+
+	// Second call with a DIFFERENT MBID for the SAME artist name.
+	// Must NOT make any new Deezer request — the name-hashed canonical
+	// already exists; just hardlink the new MBID-keyed path.
+	ok, err = e.ensureArtistImageCached(ctx, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "Artist")
+	if err != nil || !ok {
+		t.Fatalf("second call failed: ok=%v err=%v", ok, err)
+	}
+	if got := atomic.LoadInt32(deezerCalls); got != firstCallCount {
+		t.Errorf("deezer called %d times on dedup path; expected 0 new calls (was %d before)", got-firstCallCount, firstCallCount)
+	}
+
+	// Both MBID-keyed paths must exist so the /v1/artist-image handler
+	// can serve either MBID without a cache miss.
+	for _, mbid := range []string{
+		"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+	} {
+		p := ArtistImagePath(artworkDir, mbid)
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("MBID-keyed path missing: %s", p)
+		}
+	}
+
+	// Canonical name-hashed file must exist as the source of the hardlinks.
+	namePath := ArtistImagePathByName(artworkDir, "Artist")
+	if _, err := os.Stat(namePath); err != nil {
+		t.Errorf("canonical name-hashed path missing: %s", namePath)
+	}
+}
+
+// TestCAAReleaseGroupFallbackSalvagesArtwork verifies that when the
+// release-level CAA lookup 404s but the release-group has a front
+// cover, the enricher writes the release-group bytes to the RELEASE-
+// keyed cache path (so iOS's existing `/v1/artwork/{releaseMBID}`
+// request serves it transparently).
+func TestCAAReleaseGroupFallbackSalvagesArtwork(t *testing.T) {
+	wantBytes := []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x52, 0x47} // JPEG-like with RG marker
+
+	mbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"releases":[{"id":"rel-mbid","score":100,"title":"Album","artist-credit":[{"name":"Artist"}],"release-group":{"id":"rg-mbid","title":"Album","primary-type":"Album"}}]}`)
+	}))
+	defer mbSrv.Close()
+
+	caaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/release-group/rg-mbid/"):
+			w.Header().Set("Content-Type", "image/jpeg")
+			w.Write(wantBytes)
+		case strings.HasPrefix(r.URL.Path, "/release/rel-mbid/"):
+			http.NotFound(w, r) // release has no CAA cover
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer caaSrv.Close()
+
+	dir := t.TempDir()
+	store, _ := manifest.OpenStore(filepath.Join(dir, "bridge.db"))
+	defer store.Close()
+	store.UpsertTrack(&manifest.Track{
+		Path: "Artist/Album/01.flac", Size: 1, ModTime: time.Now(),
+		Artist: "Artist", Album: "Album",
+	})
+
+	e := NewEnricher(store,
+		NewMusicBrainzClient(mbSrv.URL, "t", nil),
+		NewCoverArtClient(caaSrv.URL, "t", nil),
+		nil, // no Deezer — artist-image path not exercised here
+		filepath.Join(dir, "artwork"))
+	e.MBMinInterval = 0
+	e.CAAMinInterval = 0
+	e.PollInterval = 5 * time.Millisecond
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	go e.Run(ctx)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && e.Done() == 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if e.Done() == 0 {
+		t.Fatal("track never enriched")
+	}
+
+	// The release-MBID-keyed path must contain the bytes the
+	// release-group endpoint served (transparent to iOS).
+	got, err := os.ReadFile(ArtworkCachePath(filepath.Join(dir, "artwork"), "rel-mbid", 500))
+	if err != nil {
+		t.Fatalf("release-keyed artwork missing: %v", err)
+	}
+	if string(got) != string(wantBytes) {
+		t.Errorf("artwork bytes mismatch; got %x, want %x", got, wantBytes)
+	}
+}

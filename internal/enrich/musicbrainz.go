@@ -58,6 +58,13 @@ type SearchResult struct {
 	MBID  string
 	Score int
 	Title string // release: album title; artist: artist name
+	// ReleaseGroupMBID is populated for release searches when the MB
+	// response carries a release-group reference. Enables the CAA
+	// release-group fallback for releases without a front cover at
+	// the specific release level but where the release-group has
+	// cover art from a sibling pressing. Empty for artist searches
+	// and for releases without a release-group association.
+	ReleaseGroupMBID string
 }
 
 // SearchRelease queries MusicBrainz for the best release matching
@@ -85,7 +92,35 @@ func (c *MusicBrainzClient) SearchRelease(ctx context.Context, artist, album str
 	if best == nil {
 		return nil, nil
 	}
-	return &SearchResult{MBID: best.ID, Score: best.Score, Title: best.Title}, nil
+	result := &SearchResult{MBID: best.ID, Score: best.Score, Title: best.Title}
+	if best.ReleaseGroup != nil {
+		result.ReleaseGroupMBID = best.ReleaseGroup.ID
+	}
+	return result, nil
+}
+
+// ReleaseGroupMBID fetches the release-group MBID for a given release
+// MBID. Used by the CAA release-group fallback when a track had an
+// embedded release MBID (no prior SearchRelease call that would have
+// populated the association during enrichment).
+//
+// Returns ("", nil) if the release has no release-group association
+// (rare — most MB releases do). Returns errNotFound wrapped when the
+// release MBID is unknown to MB (handle with IsNotFound).
+func (c *MusicBrainzClient) ReleaseGroupMBID(ctx context.Context, releaseMBID string) (string, error) {
+	releaseMBID = strings.TrimSpace(releaseMBID)
+	if releaseMBID == "" {
+		return "", fmt.Errorf("musicbrainz: empty release mbid")
+	}
+	u := fmt.Sprintf("%s/release/%s?fmt=json&inc=release-groups", c.base, url.PathEscape(releaseMBID))
+	var body releaseLookupResponse
+	if err := c.get(ctx, u, &body); err != nil {
+		return "", err
+	}
+	if body.ReleaseGroup == nil {
+		return "", nil
+	}
+	return body.ReleaseGroup.ID, nil
 }
 
 // SearchArtist returns the best-matching artist MBID for the given
@@ -141,6 +176,13 @@ func IsNotFound(err error) bool { return errors.Is(err, errNotFound) }
 
 type releaseSearchResponse struct {
 	Releases []releaseCandidate `json:"releases"`
+}
+
+// releaseLookupResponse decodes a `GET /release/{mbid}?inc=release-groups`
+// single-release response. Only the release-group ID is consumed today;
+// the rest of the release document is ignored.
+type releaseLookupResponse struct {
+	ReleaseGroup *releaseGroup `json:"release-group,omitempty"`
 }
 
 type releaseCandidate struct {

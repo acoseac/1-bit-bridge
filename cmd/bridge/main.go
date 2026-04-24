@@ -235,6 +235,16 @@ func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		Addr:      cfg.ListenAddress,
 		Handler:   apiSrv.Handler(),
 		TLSConfig: &tls.Config{Certificates: []tls.Certificate{*cert}, MinVersion: tls.VersionTLS12},
+		// Defence-in-depth against slow-loris / half-open sockets.
+		// WriteTimeout is deliberately left UNSET (zero) because
+		// `/v1/download` streams multi-GB DSD files to iOS (and needs
+		// many minutes under slow Wi-Fi / Tailscale relays); setting
+		// WriteTimeout would cut the response mid-flight and crash
+		// Hugo 2's DoP lock. ReadHeaderTimeout + ReadTimeout guard the
+		// request side only; IdleTimeout drains kept-alive connections.
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	// Admin console: plain HTTP on a loopback address (default
