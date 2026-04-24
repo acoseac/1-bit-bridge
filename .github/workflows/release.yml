@@ -22,6 +22,21 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # rcodesign is the pure-Rust Apple-codesign tool GoReleaser's
+      # notarize feature shells out to. Installing it on the Linux runner
+      # means the whole signing + notarization pipeline can run without a
+      # macOS runner (macOS-latest minutes cost ~10x Ubuntu). Pinned to a
+      # known-good release; bump deliberately after reviewing changelog.
+      - name: Install rcodesign
+        run: |
+          set -eu
+          VER=0.29.0
+          URL="https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F${VER}/apple-codesign-${VER}-x86_64-unknown-linux-musl.tar.gz"
+          curl -sSL -o /tmp/rcodesign.tar.gz "$URL"
+          tar -xzf /tmp/rcodesign.tar.gz -C /tmp
+          sudo mv /tmp/apple-codesign-*/rcodesign /usr/local/bin/
+          rcodesign --version
+
       - uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
@@ -29,3 +44,14 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # macOS signing + notarization. All four are set from repo
+          # secrets — if any are missing, the notarize block's
+          # `enabled: isEnvSet` gate short-circuits and the release
+          # proceeds unsigned (PR forks, first-time setup, etc). The
+          # .p12 and .p8 are base64-encoded before being stored so the
+          # secret round-trip preserves their binary contents.
+          MACOS_SIGN_P12: ${{ secrets.MACOS_SIGN_P12 }}
+          MACOS_SIGN_PASSWORD: ${{ secrets.MACOS_SIGN_PASSWORD }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_KEY_ID: ${{ secrets.APPLE_KEY_ID }}
+          APPLE_ISSUER_ID: ${{ secrets.APPLE_ISSUER_ID }}

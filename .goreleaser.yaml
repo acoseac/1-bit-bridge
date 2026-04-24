@@ -81,3 +81,38 @@ release:
   draft: true
   prerelease: auto
   name_template: "v{{.Version}}"
+
+# macOS signing + Apple notarization. `enabled` is gated on env presence
+# so the workflow still produces unsigned builds when the signing
+# secrets aren't configured (PR-check runs, forks, local snapshot
+# builds without secrets).
+#
+# certificate: base64(Developer-ID-Application.p12) — single cert,
+#   single private key inside. Expected to be the "Developer ID
+#   Application" cert so gatekeeper accepts direct-download
+#   distribution (the App Store Connect cert would also sign, but
+#   gatekeeper would reject it outside the App Store).
+#
+# key: base64(AuthKey_XXXX.p8) — the ASC API private key. Paired with
+#   APPLE_KEY_ID + APPLE_ISSUER_ID to authenticate against the
+#   notary service. The Developer role is enough; don't use an Admin
+#   key here — lower blast radius if the secret leaks.
+#
+# wait: true means the release step blocks on notarization (~2-5 min).
+#   If Apple's notary service is slow this can push release time up,
+#   but without it we'd publish artifacts that won't pass Gatekeeper
+#   on first run — worse UX than waiting.
+notarize:
+  macos:
+    - enabled: '{{ isEnvSet "MACOS_SIGN_P12" }}'
+      ids:
+        - bridge
+      sign:
+        certificate: '{{ .Env.MACOS_SIGN_P12 }}'
+        password: '{{ .Env.MACOS_SIGN_PASSWORD }}'
+      notarize:
+        issuer_id: '{{ .Env.APPLE_ISSUER_ID }}'
+        key_id: '{{ .Env.APPLE_KEY_ID }}'
+        key: '{{ .Env.APPLE_API_KEY }}'
+        wait: true
+        timeout: 20m
