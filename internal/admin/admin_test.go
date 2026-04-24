@@ -264,6 +264,69 @@ func TestRootsRemoveLastRejected(t *testing.T) {
 	}
 }
 
+// TestRootsRemoveManifestFailureDoesNotCommitRoots pins the PR #22 review
+// finding: the handler must attempt the destructive manifest op BEFORE
+// persisting the new root list, so a failure on the manifest side doesn't
+// leave bridge.yaml with the root gone while /v1/manifest keeps advertising
+// its tracks. We induce a failure by closing the underlying store mid-test;
+// DeleteTracksByPrefix then returns a "database is closed" error.
+func TestRootsRemoveManifestFailureDoesNotCommitRoots(t *testing.T) {
+	srv, cfg, cfgPath := newTestServer(t)
+	h := srv.Handler()
+
+	// Add a second root so the handler takes the non-collapse branch
+	// (DeleteTracksByPrefix, not WipeAllTracks). Both branches share the
+	// same order invariant, but the non-collapse branch is the hotter
+	// one.
+	extra := filepath.Join(filepath.Dir(cfg.DataDir), "Extra")
+	if err := os.MkdirAll(extra, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if code := doJSON(t, h, "POST", "/api/roots", map[string]string{"path": extra}, nil); code != http.StatusCreated {
+		t.Fatalf("add root: %d", code)
+	}
+	rootsBefore := append([]string(nil), srv.deps.Cfg.LibraryRoots...)
+
+	// Force DeleteTracksByPrefix to fail by closing the sqlite handle.
+	if err := srv.deps.Manifest.Close(); err != nil {
+		t.Fatalf("close manifest: %v", err)
+	}
+
+	// Attempt to remove the Extra root. The handler should see the
+	// manifest error, return 500, and leave Cfg.LibraryRoots untouched.
+	code := doJSON(t, h, "DELETE", "/api/roots", map[string]string{"path": extra}, nil)
+	if code != http.StatusInternalServerError {
+		t.Fatalf("manifest failure: got %d, want 500", code)
+	}
+
+	// In-memory config still holds the pre-request roots.
+	if !stringSlicesEqual(srv.deps.Cfg.LibraryRoots, rootsBefore) {
+		t.Errorf("Cfg.LibraryRoots mutated on manifest failure: got %v, want %v",
+			srv.deps.Cfg.LibraryRoots, rootsBefore)
+	}
+	// On-disk config matches too — no phantom-state window.
+	reloaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("reload cfg: %v", err)
+	}
+	if !stringSlicesEqual(reloaded.LibraryRoots, rootsBefore) {
+		t.Errorf("persisted LibraryRoots mutated: got %v, want %v",
+			reloaded.LibraryRoots, rootsBefore)
+	}
+}
+
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestSettingsPatchRestartRequired(t *testing.T) {
 	srv, _, cfgPath := newTestServer(t)
 	h := srv.Handler()

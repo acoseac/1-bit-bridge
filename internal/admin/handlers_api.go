@@ -230,18 +230,15 @@ func (s *Server) apiRootsRemove(w http.ResponseWriter, r *http.Request) {
 	willCollapse := len(newList) == 1
 	removedBasename := filepath.Base(current[idx])
 
-	s.deps.Cfg.LibraryRoots = newList
-	if err := s.deps.Cfg.Save(s.deps.CfgPath); err != nil {
-		writeError(w, http.StatusInternalServerError, "save-config", err.Error())
-		return
-	}
-	s.deps.Scanner.SetRoots(newList)
-	s.deps.Resolver.SetRoots(newList)
-	// Propagate store errors so the admin UI shows the actual failure
-	// instead of silently returning 204 while /v1/manifest keeps
-	// advertising a phantom root. The store wraps both deletes in
-	// transactions now, so a non-nil return means the on-disk state
-	// really didn't change — surface it.
+	// Commit order matters: run the destructive manifest op FIRST, and
+	// only persist the root list + broadcast SetRoots after it succeeds.
+	// The reverse (save config → wipe tracks) can leave disk in a state
+	// where the root is gone from `bridge.yaml` but `/v1/manifest` still
+	// advertises its tracks — the next restart would then serve phantom
+	// paths with no hope of resolving. With this order, a manifest failure
+	// means the config file is untouched; a `Cfg.Save` failure after a
+	// successful wipe means the next scan simply re-populates — every
+	// failure window lands in a state the scanner can heal.
 	if willCollapse {
 		if err := s.deps.Manifest.WipeAllTracks(); err != nil {
 			writeError(w, http.StatusInternalServerError, "wipe-tracks", err.Error())
@@ -253,6 +250,13 @@ func (s *Server) apiRootsRemove(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	s.deps.Cfg.LibraryRoots = newList
+	if err := s.deps.Cfg.Save(s.deps.CfgPath); err != nil {
+		writeError(w, http.StatusInternalServerError, "save-config", err.Error())
+		return
+	}
+	s.deps.Scanner.SetRoots(newList)
+	s.deps.Resolver.SetRoots(newList)
 	go func() { _, _ = s.deps.Scanner.Scan(s.scanCtx()) }()
 	w.WriteHeader(http.StatusNoContent)
 }
