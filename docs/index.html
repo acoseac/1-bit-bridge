@@ -151,19 +151,19 @@
     <div class="install-row">
       <div>
         <h3>macOS</h3>
-        <pre><code>tar -xzf 1-bit-bridge_0.1.0_macos_arm64.tar.gz
+        <pre><code>tar -xzf 1-bit-bridge_*_macos_arm64.tar.gz
 ./bridge init</code></pre>
         <p style="font-size: 0.88rem; color: var(--fg-muted);">Signed + notarized. Gatekeeper-accepted on first launch.</p>
       </div>
       <div>
         <h3>Linux</h3>
-        <pre><code>tar -xzf 1-bit-bridge_0.1.0_linux_amd64.tar.gz
+        <pre><code>tar -xzf 1-bit-bridge_*_linux_amd64.tar.gz
 ./bridge init</code></pre>
         <p style="font-size: 0.88rem; color: var(--fg-muted);">Installs a systemd user unit.</p>
       </div>
       <div>
         <h3>Windows</h3>
-        <pre><code>Expand-Archive 1-bit-bridge_0.1.0_windows_amd64.zip
+        <pre><code>Expand-Archive -Path 1-bit-bridge_*_windows_amd64.zip -DestinationPath .
 .\bridge.exe init</code></pre>
         <p style="font-size: 0.88rem; color: var(--fg-muted);">Startup-folder launcher; use <code>--service</code> from an admin shell for a real Windows Service.</p>
       </div>
