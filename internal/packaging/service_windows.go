@@ -154,13 +154,15 @@ func waitForServiceGone(m *mgr.Mgr, name string, timeout time.Duration) {
 // the caller can proceed with its next step (either recreate in the
 // install path, or return to the user in the uninstall path).
 //
-// Returns nil on clean stop. A Query error is returned as-is (the
-// service may have vanished — caller's choice whether that's an OK
-// outcome). A deadline exceed is surfaced as a wrapped error; the
-// prior behaviour of returning silently on timeout was what caused
-// install/uninstall to fall through into Delete on a still-running
-// service, reproducing the ERROR_SERVICE_MARKED_FOR_DELETE case PR #30
-// set out to fix.
+// Returns nil on clean stop. A Query error is wrapped with context
+// and returned (`query service status: %w`) — callers use
+// `errors.Is` / `errors.As` against the inner error to probe for
+// "the service vanished mid-poll" vs. a real SCM fault. A deadline
+// exceeded is surfaced as a wrapped error; the prior behaviour of
+// returning silently on timeout was what caused install/uninstall
+// to fall through into Delete on a still-running service,
+// reproducing the ERROR_SERVICE_MARKED_FOR_DELETE case PR #30 set
+// out to fix.
 func waitForServiceStopped(s *mgr.Service, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {

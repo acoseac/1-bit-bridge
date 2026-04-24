@@ -20,6 +20,7 @@ package admin
 import (
 	"context"
 	"embed"
+	"errors"
 	"fmt"
 	"html/template"
 	"log"
@@ -157,6 +158,30 @@ func (s *Server) scanCtx() context.Context {
 		return s.deps.ScanCtx
 	}
 	return context.Background()
+}
+
+// spawnBackgroundScan fires a scanner goroutine that survives the
+// handler's request lifecycle. Used by `apiRootsAdd` / `apiRootsRemove`
+// for both happy-path rescans and Save-failure compensating scans.
+//
+// The `contextcheck` linter requires the context to be captured
+// outside the goroutine (not via a method call inside the closure),
+// so we resolve `scanCtx()` up front and pass it through. Errors are
+// logged (not returned) because the caller has already written the
+// HTTP response; any failure here is operator-facing only, and cancels
+// from a shutting-down `ScanCtx` are suppressed to keep logs quiet
+// during normal teardown. Labelled so the log line identifies which
+// handler path produced the error.
+//
+// Mirrors the pattern in `apiScan` — keep them in sync if either
+// changes.
+func (s *Server) spawnBackgroundScan(label string) {
+	ctx := s.scanCtx()
+	go func() {
+		if _, err := s.deps.Scanner.Scan(ctx); err != nil && !errors.Is(err, ctx.Err()) {
+			fmt.Fprintf(os.Stderr, "admin: %s: %v\n", label, err)
+		}
+	}()
 }
 
 // Serve binds to deps.Cfg.AdminAddress and blocks until ctx is done.

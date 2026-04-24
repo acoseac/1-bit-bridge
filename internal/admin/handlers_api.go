@@ -207,12 +207,25 @@ func (s *Server) apiRootsAdd(w http.ResponseWriter, r *http.Request) {
 	s.deps.Cfg.LibraryRoots = newList
 	if err := s.deps.Cfg.Save(s.deps.CfgPath); err != nil {
 		s.deps.Cfg.LibraryRoots = prevRoots
+		// Compensating scan: if we reached here via the transition
+		// branch, WipeAllTracks has already emptied the manifest but
+		// the config was never persisted — /v1/manifest will serve
+		// zero tracks until the next scheduled/manual scan. Kick off
+		// a best-effort scan against the RESTORED (previous) roots
+		// so the outage is bounded by one scan-duration rather than
+		// one scan-interval. The 500 the user sees is the real
+		// failure (Save); a compensating-scan failure is an
+		// additional recovery attempt, so we log (not return) any
+		// error it produces for server-side observability.
+		if willTransition {
+			s.spawnBackgroundScan("compensating-scan (add)")
+		}
 		writeError(w, http.StatusInternalServerError, "save-config", err.Error())
 		return
 	}
 	s.deps.Scanner.SetRoots(newList)
 	s.deps.Resolver.SetRoots(newList)
-	go func() { _, _ = s.deps.Scanner.Scan(s.scanCtx()) }()
+	s.spawnBackgroundScan("post-add scan")
 	writeJSON(w, http.StatusCreated, rootRow{Path: abs, Tracks: 0})
 }
 
@@ -280,12 +293,22 @@ func (s *Server) apiRootsRemove(w http.ResponseWriter, r *http.Request) {
 	s.deps.Cfg.LibraryRoots = newList
 	if err := s.deps.Cfg.Save(s.deps.CfgPath); err != nil {
 		s.deps.Cfg.LibraryRoots = prevRoots
+		// Compensating scan — same rationale as the Add path: the
+		// manifest op above already mutated /v1/manifest (wipe or
+		// prefix-delete), and without a rescan the manifest sits in
+		// a post-mutation state until the next scheduled scan.
+		// Rescan against the restored (previous) roots to bound
+		// the outage by one scan-duration. Errors logged (not
+		// returned) — the 500 the user sees is the real Save
+		// failure; a compensating-scan error is additional recovery
+		// and only matters for operator observability.
+		s.spawnBackgroundScan("compensating-scan (remove)")
 		writeError(w, http.StatusInternalServerError, "save-config", err.Error())
 		return
 	}
 	s.deps.Scanner.SetRoots(newList)
 	s.deps.Resolver.SetRoots(newList)
-	go func() { _, _ = s.deps.Scanner.Scan(s.scanCtx()) }()
+	s.spawnBackgroundScan("post-remove scan")
 	w.WriteHeader(http.StatusNoContent)
 }
 
