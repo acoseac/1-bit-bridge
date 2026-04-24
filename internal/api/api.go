@@ -35,6 +35,7 @@ type Server struct {
 	resolver    *bridgefs.Resolver
 	manifest    ManifestProvider
 	artworkDirs ArtworkDirProvider
+	mbidProbe   MBIDProbe
 	fingerprint string
 	startedAt   time.Time
 }
@@ -47,6 +48,19 @@ type ManifestProvider interface {
 	IsScanning() bool
 	LastFullScan() time.Time
 	TracksIndexed() int
+}
+
+// MBIDProbe is an optional interface the artwork + artist-image
+// handlers use to distinguish "MBID known to the server but not
+// cached yet" (return 202 + Retry-After so iOS retries) from
+// "genuinely unknown MBID" (return 404 so iOS treats as terminal).
+//
+// Nil-safe — when `s.mbidProbe` is nil the handlers fall back to the
+// pre-v1.1 behaviour of 404-on-miss. `internal/manifest.Provider`
+// satisfies this interface in production.
+type MBIDProbe interface {
+	HasTrackWithArtworkMBID(mbid string) bool
+	HasTrackWithArtistMBID(mbid string) bool
 }
 
 // New constructs a Server. fingerprint is the SHA-256 of the TLS cert, used
@@ -67,6 +81,16 @@ func New(cfg *config.Config, store *auth.Store, mp ManifestProvider, fingerprint
 // New to avoid churning every call site when optional features are added.
 func (s *Server) WithArtworkDirs(ad ArtworkDirProvider) *Server {
 	s.artworkDirs = ad
+	return s
+}
+
+// WithMBIDProbe attaches an MBIDProbe so the artwork / artist-image
+// handlers can return 202 + Retry-After for known-but-uncached MBIDs
+// instead of a flat 404. Optional — omitting it preserves v1.0
+// behaviour (404 on every cache miss). `internal/manifest.Provider`
+// satisfies the interface in production.
+func (s *Server) WithMBIDProbe(p MBIDProbe) *Server {
+	s.mbidProbe = p
 	return s
 }
 

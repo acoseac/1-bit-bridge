@@ -161,6 +161,20 @@ Field-for-field, this is a serialization of the iOS `Track` / folder rows in [`L
 - `isDSD: true` tracks MUST set `sampleRate` to the DSD rate in Hz (e.g. `2822400` for DSD64, `5644800` for DSD128) and `bitsPerSample: 1`.
 - `duration` is in seconds, regardless of format.
 
+### `GET /v1/artwork/{mbid}?size=<int>` and `GET /v1/artist-image/{mbid}`
+
+Serve cached album / artist artwork keyed by MusicBrainz release (or artist) MBID. `size` defaults to 500 px for album artwork.
+
+**Response** (`200 OK`): JPEG body, `Content-Type: image/jpeg`, `Cache-Control: public, max-age=86400`.
+
+**Response** (`202 Accepted`): the server has seen the MBID in a track but hasn't cached the image yet — enrichment is pending (cold cache on first scan, background re-fetch in progress, or cache file was trimmed). Carries `Retry-After: <seconds>` (30 s today); clients SHOULD retry with jittered backoff up to a small cap (iOS uses 5 attempts). Body is the standard JSON error shape with `error: "pending"`.
+
+**Response** (`404 Not Found`): the MBID is unknown — no track in the manifest references it. Clients SHOULD treat as terminal and render a placeholder rather than retrying.
+
+**Response** (`400 Bad Request`): MBID is not a valid UUID, or `size` parameter is out of range.
+
+Backwards compatibility: the 202 branch is a v1.1 addition. Servers that don't have an MBID probe wired (e.g. tests, legacy) fall back to 404 on any cache miss, matching the v1.0 behavior. No protocol version bump is required — iOS clients that ignore 202 still work (they just see a transient-looking failure).
+
 ## Error responses
 
 All errors are JSON:
@@ -170,6 +184,7 @@ All errors are JSON:
 
 | Status | `error` code         | When                                              |
 |-------:|----------------------|---------------------------------------------------|
+|    202 | `pending`            | Artwork / artist-image enrichment not yet cached  |
 |    400 | `bad_request`        | Malformed path, missing required query param     |
 |    400 | `range_required`     | `/v1/read` called without a `Range` header        |
 |    401 | `unauthorized`       | Missing / invalid bearer token                    |

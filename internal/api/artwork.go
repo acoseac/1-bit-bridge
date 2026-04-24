@@ -5,9 +5,18 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strconv"
 
 	"github.com/acoseac/1-bit-bridge/internal/enrich"
 )
+
+// artworkPendingRetryAfterSeconds is the value the handlers set on
+// `Retry-After` when an MBID is known to the server but the cache
+// file isn't on disk yet (202 response). 30s matches iOS's default
+// base backoff; a longer value would starve the retry loop, a shorter
+// one would hammer an enricher that's already rate-limited by MB /
+// CAA / Deezer.
+const artworkPendingRetryAfterSeconds = 30
 
 // ArtworkDirProvider is the minimal interface api needs to serve cached
 // artwork. Implemented by cmd/bridge's serveCmd (via the Enricher's
@@ -42,8 +51,21 @@ func (s *Server) artistImage(w http.ResponseWriter, r *http.Request) {
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			// Distinguish "known MBID, not cached yet" from
+			// "genuinely unknown MBID" so iOS can tell pending-
+			// enrichment (retry with backoff) apart from a permanent
+			// miss (render placeholder, stop asking). Pre-v1.1 both
+			// collapsed into 404 and iOS treated it as terminal,
+			// orphaning artwork that would have been cached a few
+			// seconds later on a cold-cache first scan.
+			if s.mbidProbe != nil && s.mbidProbe.HasTrackWithArtistMBID(mbid) {
+				w.Header().Set("Retry-After", strconv.Itoa(artworkPendingRetryAfterSeconds))
+				writeError(w, http.StatusAccepted, "pending",
+					"artist image enrichment pending; retry after the Retry-After window")
+				return
+			}
 			writeError(w, http.StatusNotFound, "not_found",
-				"artist image not cached yet")
+				"artist image not cached (unknown MBID)")
 			return
 		}
 		log.Printf("artwork: open artist image %q: %v", mbid, err)
@@ -89,8 +111,17 @@ func (s *Server) artwork(w http.ResponseWriter, r *http.Request) {
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			// See artistImage handler for the full rationale — 202 +
+			// Retry-After signals "enrichment pending, try later"
+			// while 404 is "we've never heard of this MBID".
+			if s.mbidProbe != nil && s.mbidProbe.HasTrackWithArtworkMBID(mbid) {
+				w.Header().Set("Retry-After", strconv.Itoa(artworkPendingRetryAfterSeconds))
+				writeError(w, http.StatusAccepted, "pending",
+					"artwork enrichment pending; retry after the Retry-After window")
+				return
+			}
 			writeError(w, http.StatusNotFound, "not_found",
-				"artwork not cached (enricher may not have reached this album yet)")
+				"artwork not cached (unknown MBID)")
 			return
 		}
 		log.Printf("artwork: open release artwork %q (size=%d): %v", mbid, size, err)
