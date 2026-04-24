@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 )
 
@@ -30,16 +31,22 @@ func InstallWindowsService(p Params) (string, error) {
 	}
 	defer m.Disconnect()
 
-	// If an existing service with this name is registered, delete it
-	// first so install is idempotent. `bridge init --service` re-runs
-	// should upgrade the binary path without requiring a separate
-	// uninstall step.
+	// If an existing service with this name is registered, stop and
+	// delete it first so install is idempotent. `bridge init --service`
+	// re-runs should upgrade the binary path without requiring a
+	// separate uninstall step.
+	//
+	// Windows' Delete is deferred until every handle to the service
+	// is closed AND the service is in the STOPPED state. Skipping the
+	// Stop step leaves a running service in "marked for delete" limbo:
+	// CreateService below fails with ERROR_SERVICE_MARKED_FOR_DELETE
+	// until the service finally stops (which it won't, because nothing
+	// asked it to). The Control(svc.Stop) + poll-for-stopped fixes it.
 	if s, err := m.OpenService(ServiceLabel); err == nil {
+		_, _ = s.Control(svc.Stop)
+		waitForServiceStopped(s, 10*time.Second)
 		_ = s.Delete()
 		s.Close()
-		// Give SCM a moment to finish the delete before the Create. The
-		// docs say Delete is asynchronous; in practice 200ms is enough,
-		// but we wait up to 3s to be safe.
 		waitForServiceGone(m, ServiceLabel, 3*time.Second)
 	}
 
@@ -99,7 +106,14 @@ func UninstallWindowsService() error {
 	// Stop first so the Delete call doesn't leave a zombie process.
 	// Ignore stop errors — the service might already be stopped, or
 	// be in a stopping state.
-	_, _ = s.Control(6) // SERVICE_CONTROL_STOP = 6
+	//
+	// Note: svc.Stop is the Go-side constant for SERVICE_CONTROL_STOP
+	// (= 1). The earlier `s.Control(6)` here sent SERVICE_CONTROL_
+	// PARAMCHANGE instead, which is a no-op for a service that
+	// doesn't handle it — Delete then deferred, uninstall effectively
+	// silently no-oped until the next reboot.
+	_, _ = s.Control(svc.Stop)
+	waitForServiceStopped(s, 10*time.Second)
 	return s.Delete()
 }
 
@@ -114,6 +128,28 @@ func waitForServiceGone(m *mgr.Mgr, name string, timeout time.Duration) {
 			return
 		}
 		s.Close()
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// waitForServiceStopped polls the service's Query() state until it
+// reports svc.Stopped or the timeout expires. SCM only finalises a
+// Delete once the service is actually stopped, so we block here so
+// the caller can proceed with its next step (either recreate in the
+// install path, or return to the user in the uninstall path).
+//
+// Any Query() error breaks the loop — the service likely vanished
+// underneath us, which is the state we want anyway.
+func waitForServiceStopped(s *mgr.Service, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		status, err := s.Query()
+		if err != nil {
+			return
+		}
+		if status.State == svc.Stopped {
+			return
+		}
 		time.Sleep(100 * time.Millisecond)
 	}
 }

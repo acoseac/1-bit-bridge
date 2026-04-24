@@ -3,6 +3,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 )
@@ -33,11 +34,20 @@ func redirectServiceIO() {
 	}
 	logDir := filepath.Join(programData, "1-bit-bridge")
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		return // best-effort: if we can't create the dir, leave stdio as-is
+		// If we can't create the log dir we're stuck with whatever
+		// handles the SCM gave us. At least write the failure to
+		// stderr before giving up — even if the SCM drops that
+		// output, a test harness running under `bridge serve` won't.
+		// Previously this was a silent `return`, and any follow-on
+		// failure (bad config, missing TLS cert, port in use) would
+		// disappear with no trace.
+		fmt.Fprintf(os.Stderr, "service: cannot prepare log dir %q: %v\n", logDir, err)
+		return
 	}
 	logPath := filepath.Join(logDir, "bridge.log")
 	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "service: cannot open log file %q: %v\n", logPath, err)
 		return
 	}
 	os.Stdout = f
