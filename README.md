@@ -34,9 +34,12 @@ Writes config + TLS cert under `~/Library/Application Support/1-bit-bridge/` (ma
 bridge.exe init
 ```
 
-On Windows the bridge installs as a **Startup-folder launcher** — it starts at logon and keeps running while you're logged in. Close-on-logout; a full Windows Service install (survives logout, runs at boot) is tracked as a follow-up.
+Two install paths on Windows:
 
-Config lands under `%LOCALAPPDATA%\1-bit-bridge\`; the launcher lives at `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\com.acoseac.1-bit-bridge.cmd`.
+- **Startup-folder launcher (default)** — `bridge init`. Per-user, runs at logon, stops on logout. No admin required. Launcher lives at `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\com.acoseac.1-bit-bridge.cmd`; config under `%LOCALAPPDATA%\1-bit-bridge\`.
+- **Windows Service (survives logout)** — `bridge init --service`, run from an **elevated PowerShell**. Installs an SCM service that starts at boot, runs as LocalSystem, logs to `%PROGRAMDATA%\1-bit-bridge\bridge.log`. Because the service runs as LocalSystem, point `--library` at a machine-wide path (e.g. `C:\Music`) rather than `%USERPROFILE%\Music`.
+
+Uninstall: run `bridge init` again and answer "no" to overwrite (Startup launcher), or `sc.exe delete 1-bit-bridge` from an admin shell (Windows Service).
 
 ### Preflight: `bridge doctor`
 
