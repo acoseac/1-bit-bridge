@@ -313,8 +313,10 @@ func TestStoreListTracksPageZeroLimitDefaults(t *testing.T) {
 }
 
 // TestBuildManifestPageSetsNextCursorAndTotal checks the envelope-
-// building contract: Total always present, NextCursor set iff there's
-// another page.
+// building contract:
+//   - First page (cursor=="") carries Folders + Total.
+//   - Subsequent pages carry neither (reduces bandwidth on large libs).
+//   - NextCursor set iff there's another page.
 func TestBuildManifestPageSetsNextCursorAndTotal(t *testing.T) {
 	dir := t.TempDir()
 	s, _ := OpenStore(filepath.Join(dir, "bridge.db"))
@@ -327,20 +329,39 @@ func TestBuildManifestPageSetsNextCursorAndTotal(t *testing.T) {
 		})
 	}
 
-	// Page size 2 → first page is full, NextCursor non-nil.
+	// Page size 2 → first page is full, NextCursor non-nil, Total set.
 	m, err := BuildManifestPage(s, []string{filepath.Join(dir, "Music")}, "", 2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.Total != 5 {
-		t.Errorf("Total = %d, want 5", m.Total)
+	if m.Total == nil || *m.Total != 5 {
+		t.Errorf("Total = %v, want pointer to 5", m.Total)
 	}
 	if m.NextCursor == nil || *m.NextCursor != "Music/02.flac" {
 		t.Errorf("NextCursor = %v, want pointer to Music/02.flac", m.NextCursor)
 	}
+	if len(m.Tracks) != 2 {
+		t.Errorf("first page tracks = %d, want 2", len(m.Tracks))
+	}
 
-	// Last page (paging from cursor "Music/04.flac" → only
-	// Music/05.flac) → short read, NextCursor nil.
+	// Second page (cursor=="Music/02.flac") — still mid-run, so
+	// NextCursor non-nil, but Folders + Total absent.
+	m, err = BuildManifestPage(s, []string{filepath.Join(dir, "Music")}, "Music/02.flac", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Total != nil {
+		t.Errorf("mid-run Total should be nil, got %v", *m.Total)
+	}
+	if m.Folders != nil {
+		t.Errorf("mid-run Folders should be nil, got %v", m.Folders)
+	}
+	if m.NextCursor == nil {
+		t.Errorf("second page should still have NextCursor")
+	}
+
+	// Last page (cursor=="Music/04.flac" → only Music/05.flac left).
+	// Short read, NextCursor nil.
 	m, err = BuildManifestPage(s, []string{filepath.Join(dir, "Music")}, "Music/04.flac", 2)
 	if err != nil {
 		t.Fatal(err)
@@ -350,6 +371,43 @@ func TestBuildManifestPageSetsNextCursorAndTotal(t *testing.T) {
 	}
 	if len(m.Tracks) != 1 {
 		t.Errorf("last page tracks = %d, want 1", len(m.Tracks))
+	}
+}
+
+// TestBuildManifestPageExactMultipleOfLimitStopsAtCorrectPage locks
+// in the limit+1 query trick: when the track count is an exact
+// multiple of the page limit, the iteration must terminate on the
+// last full page (NextCursor nil) rather than requiring an extra
+// round-trip that returns zero rows.
+func TestBuildManifestPageExactMultipleOfLimitStopsAtCorrectPage(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := OpenStore(filepath.Join(dir, "bridge.db"))
+	defer s.Close()
+	// 4 tracks, page size 2 — exactly two full pages.
+	for i := 1; i <= 4; i++ {
+		s.UpsertTrack(&Track{
+			Path:    fmt.Sprintf("Music/%02d.flac", i),
+			Size:    int64(i),
+			ModTime: time.Now(),
+		})
+	}
+
+	// Page 1: 2 tracks, NextCursor set to Music/02.flac.
+	p1, _ := BuildManifestPage(s, []string{filepath.Join(dir, "Music")}, "", 2)
+	if p1.NextCursor == nil {
+		t.Fatalf("page 1 should have NextCursor")
+	}
+
+	// Page 2: 2 tracks, NextCursor MUST be nil — we've reached the
+	// end. Pre-fix this would have set NextCursor to Music/04.flac
+	// and forced a third empty round-trip.
+	p2, _ := BuildManifestPage(s, []string{filepath.Join(dir, "Music")}, *p1.NextCursor, 2)
+	if len(p2.Tracks) != 2 {
+		t.Errorf("page 2 tracks = %d, want 2", len(p2.Tracks))
+	}
+	if p2.NextCursor != nil {
+		t.Errorf("page 2 NextCursor should be nil (exact-multiple termination), got %v",
+			*p2.NextCursor)
 	}
 }
 

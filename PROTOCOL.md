@@ -123,10 +123,11 @@ Query parameters:
 
 Pagination semantics:
 - Pages are ordered by track `path` ASC; the cursor is the last path of the previous page.
-- Every page carries `folders`, `libraryRoots`, `generatedAt`, and `total` (full track count across all pages). iOS can bind scan-state UI from the first page.
+- **First-page-only fields.** `folders` and `total` are sent only on the first page (request has no `cursor`). Subsequent pages omit them to avoid ~250k rows of redundant JSON on a 50k-track library with 5k folders. `libraryRoots` and `generatedAt` are cheap scalars and ship on every page.
 - A short read (fewer rows than `limit`) or empty page means the iteration is done; `nextCursor` is absent.
 - Server enforces an upper bound (5000 today) on `limit` silently — a client requesting more gets capped but not rejected.
 - Clients that don't send `limit` get the v1.0 single-shot response; no compatibility break.
+- Clients MUST treat `folders` and `total` as "absent on mid-run pages" — binding scan-state UI off the first page and ignoring these keys on later pages is the safe pattern (v1.1 iOS does exactly this).
 
 **Response** (`200 OK`, JSON, potentially large — server SHOULD set `Content-Encoding: gzip` when the client's `Accept-Encoding` allows):
 ```json

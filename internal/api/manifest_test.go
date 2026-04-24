@@ -203,8 +203,8 @@ func TestManifestPaginatedCapsHugeLimit(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Errorf("status = %d, want 200", resp.StatusCode)
 	}
-	if mp.lastPageLimit > 5000 {
-		t.Errorf("limit cap not applied: %d", mp.lastPageLimit)
+	if mp.lastPageLimit != 5000 {
+		t.Errorf("limit cap not applied: got %d, want exactly 5000", mp.lastPageLimit)
 	}
 }
 
