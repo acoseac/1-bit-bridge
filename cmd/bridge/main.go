@@ -57,7 +57,14 @@ func main() {
 	// so this branch is a no-op off Windows.
 	if isWindowsService() {
 		redirectServiceIO() // stdout/stderr → %PROGRAMDATA%\1-bit-bridge\bridge.log
-		_ = runAsWindowsService(
+		// Surface service-dispatch errors to whatever stdio we have so
+		// operators see them in the log. Previously this was
+		// `_ = runAsWindowsService(...)`, which meant a service that
+		// failed on boot (e.g. svc.Run couldn't register with the SCM,
+		// or the subcommand exited non-zero) became a clean exit 0 —
+		// SCM would just retry silently per its restart policy, leaving
+		// no trace of what actually broke.
+		if err := runAsWindowsService(
 			context.Background(),
 			"1-bit-bridge",
 			func(ctx context.Context) error {
@@ -68,7 +75,10 @@ func main() {
 				return nil
 			},
 			os.Stderr,
-		)
+		); err != nil {
+			fmt.Fprintf(os.Stderr, "service dispatch: %v\n", err)
+			os.Exit(1)
+		}
 		return
 	}
 

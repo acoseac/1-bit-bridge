@@ -250,8 +250,16 @@ func (s *Server) apiRootsRemove(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Capture prev roots before mutating so we can roll back on a
+	// Save failure. Without this, a failed Save leaves the in-memory
+	// Cfg holding the new list while disk still has the old — any
+	// later Save call from an unrelated path (library-name edit,
+	// bind-address change, etc.) would silently commit a removal the
+	// operator had already seen fail.
+	prevRoots := append([]string(nil), s.deps.Cfg.LibraryRoots...)
 	s.deps.Cfg.LibraryRoots = newList
 	if err := s.deps.Cfg.Save(s.deps.CfgPath); err != nil {
+		s.deps.Cfg.LibraryRoots = prevRoots
 		writeError(w, http.StatusInternalServerError, "save-config", err.Error())
 		return
 	}

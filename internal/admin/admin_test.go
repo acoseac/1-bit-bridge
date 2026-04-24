@@ -315,6 +315,58 @@ func TestRootsRemoveManifestFailureDoesNotCommitRoots(t *testing.T) {
 	}
 }
 
+// TestRootsRemoveSaveFailureRollsBackInMemory pins the PR #25 review
+// finding: when Cfg.Save fails, the handler must roll back the
+// in-memory LibraryRoots mutation it just performed, otherwise the
+// next *successful* Save (from an unrelated edit like a library-name
+// change) would silently commit a removal the operator had seen fail.
+//
+// We induce the Save failure by chmod'ing the config file read-only
+// after the initial write. This exercises the true code path
+// (Cfg.Save actually tries and fails) rather than a mock.
+func TestRootsRemoveSaveFailureRollsBackInMemory(t *testing.T) {
+	if os.Getuid() == 0 {
+		// Root ignores file-mode writability; the chmod trick we use
+		// below wouldn't produce a failing Save.
+		t.Skip("chmod-based permission test doesn't apply under root")
+	}
+	srv, cfg, cfgPath := newTestServer(t)
+	h := srv.Handler()
+
+	// Add a second root so the non-collapse branch runs (the branch
+	// that reached the reviewer's finding).
+	extra := filepath.Join(filepath.Dir(cfg.DataDir), "Extra")
+	if err := os.MkdirAll(extra, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if code := doJSON(t, h, "POST", "/api/roots", map[string]string{"path": extra}, nil); code != http.StatusCreated {
+		t.Fatalf("add root: %d", code)
+	}
+	rootsBefore := append([]string(nil), srv.deps.Cfg.LibraryRoots...)
+
+	// Make the config directory read-only so Cfg.Save's atomic-
+	// write-then-rename pattern can't land the new file. Reverted in
+	// cleanup so t.TempDir's teardown can still run.
+	dir := filepath.Dir(cfgPath)
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	// Attempt to remove the Extra root — the manifest delete succeeds,
+	// so we reach Cfg.Save, which now fails. Handler should 500 AND
+	// restore the in-memory slice.
+	code := doJSON(t, h, "DELETE", "/api/roots", map[string]string{"path": extra}, nil)
+	if code != http.StatusInternalServerError {
+		t.Fatalf("save failure: got %d, want 500", code)
+	}
+
+	if !stringSlicesEqual(srv.deps.Cfg.LibraryRoots, rootsBefore) {
+		t.Errorf("Cfg.LibraryRoots not rolled back on Save failure: got %v, want %v",
+			srv.deps.Cfg.LibraryRoots, rootsBefore)
+	}
+}
+
 func stringSlicesEqual(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
