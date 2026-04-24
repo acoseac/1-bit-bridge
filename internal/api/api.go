@@ -14,12 +14,14 @@ package api
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/advertise"
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
@@ -92,6 +94,13 @@ func (s *Server) Handler() http.Handler {
 
 // HealthResponse is the /v1/health JSON body. Field ordering must stay
 // stable because the iOS side golden-decodes this shape (see PROTOCOL.md).
+//
+// `Endpoints` is the additive v1 extension that lets iOS self-discover
+// LAN ↔ Tailscale alternates without re-pairing. Empty when the bridge
+// can't enumerate interfaces (e.g. test harness) — iOS falls back to
+// the URL it was paired on. Adding fields here is backwards-compatible:
+// the iOS decoder uses Codable with default values for anything it
+// doesn't know about.
 type HealthResponse struct {
 	ProtocolVersion int       `json:"protocolVersion"`
 	ServerVersion   string    `json:"serverVersion"`
@@ -100,6 +109,7 @@ type HealthResponse struct {
 	CertFingerprint string    `json:"certFingerprint"`
 	StartedAt       time.Time `json:"startedAt"`
 	ScanState       ScanState `json:"scanState"`
+	Endpoints       []string  `json:"endpoints,omitempty"`
 }
 
 // ScanState reports the scanner's current status. Real fields populate once
@@ -133,8 +143,27 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		CertFingerprint: s.fingerprint,
 		StartedAt:       s.startedAt,
 		ScanState:       scanState,
+		Endpoints:       s.reachableEndpoints(),
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// reachableEndpoints enumerates LAN + mDNS + Tailscale URLs for the
+// bridge on every /v1/health call. Fresh on each call so adding /
+// removing a network interface (Tailscale up, Wi-Fi down) takes effect
+// on the next heartbeat without requiring a restart. Cost is a
+// `net.Interfaces()` + `.Addrs()` walk — cheap enough to not warrant
+// caching.
+func (s *Server) reachableEndpoints() []string {
+	_, portStr, err := net.SplitHostPort(s.cfg.ListenAddress)
+	if err != nil {
+		return nil
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port <= 0 {
+		return nil
+	}
+	return advertise.URLs(advertise.Params{Port: port})
 }
 
 // manifestHandler serves GET /v1/manifest?since=<rfc3339> with the current

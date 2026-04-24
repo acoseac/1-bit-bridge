@@ -52,9 +52,17 @@ Pairing probe and liveness check. No auth token required for this endpoint (so t
     "lastFullScan": "2026-04-23T11:41:01Z",
     "tracksIndexed": 24518,
     "isScanning": false
-  }
+  },
+  "endpoints": [
+    "https://192.168.1.10:7788",
+    "https://homepc.local:7788",
+    "https://100.64.5.9:7788",
+    "https://[fd7a:115c:a1e0::f536:e41f]:7788"
+  ]
 }
 ```
+
+`endpoints` (additive since v1, optional, may be absent or empty) is the full list of URLs the server is currently reachable at — LAN IPv4/IPv6 (global unicast only; link-local is filtered because it's not reachable across devices), the `<hostname>.local` mDNS form, and any Tailscale interface (CGNAT `100.64/10` for v4, `fd7a:115c:a1e0::/48` ULA for v6). Clients use this to learn new alternates at heartbeat time so they can roam between LAN and Tailscale without re-pairing. Ordering reflects the server's recommendation: LAN before Tailscale before mDNS, IPv4 before IPv6 within each class.
 
 ### `GET /v1/list?path=<rel>`
 

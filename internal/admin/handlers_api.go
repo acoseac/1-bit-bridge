@@ -314,7 +314,13 @@ func (s *Server) apiTokensMint(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "mint", err.Error())
 		return
 	}
-	pairURL := buildPairURL(req.URL, rawToken, s.deps.Fingerprint, s.deps.Cfg.LibraryName)
+	// alternates baked into the pairing QR so iOS learns every
+	// reachable endpoint (LAN IPv4/IPv6, `.local`, Tailscale) at the
+	// moment of pairing. Empty slice if enumeration fails — the
+	// operator-supplied primary URL is always the first entry, so the
+	// QR always pairs even on an interface-less environment.
+	alternates := pairAlternates(req.URL, s.deps.Cfg.ListenAddress)
+	pairURL := buildPairURL(req.URL, rawToken, s.deps.Fingerprint, s.deps.Cfg.LibraryName, alternates)
 	qrData, err := qrDataURL(pairURL)
 	if err != nil {
 		// QR render failures don't block the pairing — the user can still
