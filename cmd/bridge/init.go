@@ -35,6 +35,7 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	libraryName := fs.String("name", "", "library display name (default: hostname)")
 	skipService := fs.Bool("no-service", false, "skip launchd/systemd install; run `bridge serve` yourself")
 	skipDoctor := fs.Bool("skip-doctor", false, "don't run `bridge doctor` preflight before init (not recommended)")
+	windowsService := fs.Bool("service", false, "Windows only: install as a Windows Service (requires admin); default is a Startup-folder launcher")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -150,12 +151,12 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			if !*force {
 				fmt.Fprintf(stdout, "config file already exists at %s; keeping it\n", cfgPath)
 				fmt.Fprintf(stdout, "pass --force to overwrite non-interactively\n")
-				return finishInit(stdout, stderr, cfgPath, dataDir, *skipService)
+				return finishInit(stdout, stderr, cfgPath, dataDir, *skipService, *windowsService)
 			}
 		} else {
 			if !confirm(in, stdout, "Config file exists. Overwrite?", false) {
 				fmt.Fprintf(stdout, "keeping existing config\n")
-				return finishInit(stdout, stderr, cfgPath, dataDir, *skipService)
+				return finishInit(stdout, stderr, cfgPath, dataDir, *skipService, *windowsService)
 			}
 		}
 	}
@@ -198,7 +199,7 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "\nTLS fingerprint (stable across restarts):\n  %s\n", fp)
 	}
 
-	return finishInit(stdout, stderr, cfgPath, dataDir, *skipService)
+	return finishInit(stdout, stderr, cfgPath, dataDir, *skipService, *windowsService)
 }
 
 // finishInit installs the service (or tells the user how to run manually)
@@ -211,7 +212,7 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 // useless to the operator if they don't know where to point their
 // browser. The browser-open is best-effort (no stderr on headless
 // machines), so the cost of always attempting it is zero.
-func finishInit(stdout, stderr io.Writer, cfgPath, dataDir string, skipService bool) int {
+func finishInit(stdout, stderr io.Writer, cfgPath, dataDir string, skipService, windowsService bool) int {
 	printAdmin := func() {
 		cfg, err := config.Load(cfgPath)
 		if err != nil {
@@ -231,6 +232,14 @@ func finishInit(stdout, stderr io.Writer, cfgPath, dataDir string, skipService b
 		return 0
 	}
 
+	// --service on non-Windows is a usage error; the flag only makes
+	// sense with SCM. Call it out loudly so the user doesn't think
+	// they got a Windows-Service-equivalent on their Mac.
+	if windowsService && runtime.GOOS != "windows" {
+		fmt.Fprintf(stderr, "--service is a Windows-only flag; ignored on %s\n", runtime.GOOS)
+		windowsService = false
+	}
+
 	binary, err := os.Executable()
 	if err != nil {
 		fmt.Fprintf(stderr, "locate current binary: %v\n", err)
@@ -246,18 +255,33 @@ func finishInit(stdout, stderr io.Writer, cfgPath, dataDir string, skipService b
 		fmt.Fprintf(stderr, "mkdir log dir: %v\n", err)
 		return 1
 	}
-	unitPath, err := packaging.Install(packaging.Params{
+	params := packaging.Params{
 		BinaryPath: binary,
 		ConfigPath: cfgPath,
 		WorkingDir: dataDir,
 		LogPath:    logPath,
-	})
-	if err != nil {
-		fmt.Fprintf(stderr, "service install: %v\n", err)
-		fmt.Fprintf(stderr, "You can still run the bridge manually:\n  %s serve --config %s\n", binary, cfgPath)
-		return 1
 	}
-	fmt.Fprintf(stdout, "Service installed at:\n  %s\n", unitPath)
+	var unitPath string
+	if windowsService {
+		// SCM install. Requires admin; fails otherwise with a clear
+		// "access denied" from the SCM layer.
+		unitPath, err = packaging.InstallWindowsService(params)
+		if err != nil {
+			fmt.Fprintf(stderr, "Windows Service install: %v\n", err)
+			fmt.Fprintf(stderr, "If the error mentions \"access\" or \"denied\", re-run init from an elevated PowerShell.\n")
+			fmt.Fprintf(stderr, "Otherwise fall back to the Startup-folder install: bridge init (no --service flag).\n")
+			return 1
+		}
+		fmt.Fprintf(stdout, "Windows Service installed: %s\n", unitPath)
+	} else {
+		unitPath, err = packaging.Install(params)
+		if err != nil {
+			fmt.Fprintf(stderr, "service install: %v\n", err)
+			fmt.Fprintf(stderr, "You can still run the bridge manually:\n  %s serve --config %s\n", binary, cfgPath)
+			return 1
+		}
+		fmt.Fprintf(stdout, "Service installed at:\n  %s\n", unitPath)
+	}
 	fmt.Fprintf(stdout, "Logs:\n  %s\n", logPath)
 
 	printAdmin()

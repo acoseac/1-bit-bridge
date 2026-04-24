@@ -47,6 +47,31 @@ func (a artworkDirBridge) ArtworkCacheDir() string { return string(a) }
 const shutdownGrace = 5 * time.Second
 
 func main() {
+	// Windows-service dispatch. When SCM launches bridge.exe, os.Args
+	// is the service binary's configured ImagePath (`bridge.exe serve
+	// --config <path>`), and stdout/stderr aren't attached to a console.
+	// runAsWindowsService translates SCM Stop into ctx cancel, so the
+	// existing graceful-shutdown path in serveCmd runs unchanged.
+	//
+	// The stub in service_other.go always returns false on non-Windows,
+	// so this branch is a no-op off Windows.
+	if isWindowsService() {
+		redirectServiceIO() // stdout/stderr → %PROGRAMDATA%\1-bit-bridge\bridge.log
+		_ = runAsWindowsService(
+			context.Background(),
+			"1-bit-bridge",
+			func(ctx context.Context) error {
+				code := run(ctx, os.Args[1:], os.Stdout, os.Stderr)
+				if code != 0 {
+					return fmt.Errorf("subcommand exited with code %d", code)
+				}
+				return nil
+			},
+			os.Stderr,
+		)
+		return
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	os.Exit(run(ctx, os.Args[1:], os.Stdout, os.Stderr))
