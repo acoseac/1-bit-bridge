@@ -367,6 +367,45 @@ func TestRootsRemoveSaveFailureRollsBackInMemory(t *testing.T) {
 	}
 }
 
+// TestRootsAddSaveFailureRollsBackInMemory mirrors the Remove test:
+// apiRootsAdd was missing the same rollback, so a failed Save left
+// in-memory holding the new root while disk had the old. Any later
+// successful Save (name edit, bind change) would silently commit the
+// addition the operator had seen fail.
+func TestRootsAddSaveFailureRollsBackInMemory(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("chmod-based permission test doesn't apply under root")
+	}
+	srv, cfg, cfgPath := newTestServer(t)
+	h := srv.Handler()
+
+	rootsBefore := append([]string(nil), srv.deps.Cfg.LibraryRoots...)
+
+	// New root we're about to try to add.
+	extra := filepath.Join(filepath.Dir(cfg.DataDir), "ExtraAdd")
+	if err := os.MkdirAll(extra, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Make the config directory read-only so Cfg.Save's atomic-
+	// write-then-rename pattern can't land the new file.
+	dir := filepath.Dir(cfgPath)
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	code := doJSON(t, h, "POST", "/api/roots", map[string]string{"path": extra}, nil)
+	if code != http.StatusInternalServerError {
+		t.Fatalf("save failure: got %d, want 500", code)
+	}
+
+	if !stringSlicesEqual(srv.deps.Cfg.LibraryRoots, rootsBefore) {
+		t.Errorf("Cfg.LibraryRoots not rolled back on Save failure: got %v, want %v",
+			srv.deps.Cfg.LibraryRoots, rootsBefore)
+	}
+}
+
 func stringSlicesEqual(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

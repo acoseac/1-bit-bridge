@@ -182,8 +182,16 @@ func (s *Server) apiRootsAdd(w http.ResponseWriter, r *http.Request) {
 	// the stored path form (bare "Artist/…" vs "<basename>/Artist/…") so
 	// we wipe first and let the scan start from zero.
 	willTransition := len(current) == 1 // 1 → N: storage form flips
+	// Snapshot prev roots before mutating so we can roll back on a
+	// failed Save. Mirrors the apiRootsRemove path: without the
+	// rollback, a failed Save leaves in-memory holding the new list
+	// while disk has the old — and any later successful Save from an
+	// unrelated edit (library-name change, bind-address change, etc.)
+	// silently commits the addition the operator had seen fail.
+	prevRoots := append([]string(nil), s.deps.Cfg.LibraryRoots...)
 	s.deps.Cfg.LibraryRoots = newList
 	if err := s.deps.Cfg.Save(s.deps.CfgPath); err != nil {
+		s.deps.Cfg.LibraryRoots = prevRoots
 		writeError(w, http.StatusInternalServerError, "save-config", err.Error())
 		return
 	}

@@ -285,20 +285,27 @@ func promptLaunchMode(in *bufio.Reader, stdout io.Writer) launchChoice {
 // browser. The browser-open is best-effort (no stderr on headless
 // machines), so the cost of always attempting it is zero.
 func finishInit(stdout, stderr io.Writer, cfgPath, dataDir string, choice launchChoice) int {
+	// Load the config once up-front so the admin-address probe (Windows
+	// auto-start path) and the browser-open at the end both use the
+	// operator-configured bind address, not the hard-coded default.
+	// `spawnNowOrWarn` previously probed `config.DefaultAdminAddress`
+	// directly — on a non-default admin_address, the "already running"
+	// check always missed, the second process tried to bind the
+	// configured port, and the log filled with port-bind errors.
+	adminAddr := config.DefaultAdminAddress
+	if cfg, err := config.Load(cfgPath); err == nil && cfg.AdminAddress != "" {
+		adminAddr = cfg.AdminAddress
+	}
+
 	// `printAdmin` is called once per mode with per-mode copy. On
 	// Windows we also pass whether the server is expected to be live
 	// right now — if it is, we poll briefly before opening the browser
 	// so the user doesn't hit "site can't be reached" on a fast machine
 	// that outran the cmd.exe handoff.
 	printAdmin := func(serverIsLive bool) {
-		cfg, err := config.Load(cfgPath)
-		if err != nil {
-			fmt.Fprintf(stdout, "\nDone. Start the bridge with: bridge serve --config %s\n", cfgPath)
-			return
-		}
-		url := "http://" + cfg.AdminAddress + "/"
+		url := "http://" + adminAddr + "/"
 		if serverIsLive {
-			if host, port, ok := splitHostPort(cfg.AdminAddress); ok {
+			if host, port, ok := splitHostPort(adminAddr); ok {
 				_ = packaging.WaitForListen(host, port, 2*time.Second)
 			}
 		}
@@ -382,7 +389,7 @@ func finishInit(stdout, stderr io.Writer, cfgPath, dataDir string, choice launch
 			serverIsLive = true
 		case "windows":
 			if choice.spawnNow {
-				serverIsLive = spawnNowOrWarn(stdout, stderr, binary, cfgPath, logPath)
+				serverIsLive = spawnNowOrWarn(stdout, stderr, binary, cfgPath, logPath, adminAddr)
 			}
 		}
 	}
@@ -401,13 +408,11 @@ func finishInit(stdout, stderr io.Writer, cfgPath, dataDir string, choice launch
 // Skips the spawn if something is already listening on the admin port
 // — re-running init while the SCM service (or a previous detached
 // launcher) is up shouldn't produce a port-bind error buried in the
-// log.
-func spawnNowOrWarn(stdout, stderr io.Writer, binary, cfgPath, logPath string) bool {
-	// Probe the admin-address port before spawning; if something's
-	// already bound (e.g. re-run of init against a live SCM service),
-	// skip the spawn so we don't produce a port-bind error buried in
-	// the log. `DefaultAdminAddress` is always of the form host:port.
-	host, port, ok := splitHostPort(config.DefaultAdminAddress)
+// log. `adminAddr` comes from the loaded config (caller passes
+// `cfg.AdminAddress`); falls back to 127.0.0.1:7789 only if the addr
+// isn't host:port parseable.
+func spawnNowOrWarn(stdout, stderr io.Writer, binary, cfgPath, logPath, adminAddr string) bool {
+	host, port, ok := splitHostPort(adminAddr)
 	if !ok {
 		host, port = "127.0.0.1", 7789
 	}
@@ -437,7 +442,7 @@ func printFutureLaunchHint(stdout io.Writer, choice launchChoice, binary, cfgPat
 			fmt.Fprintln(stdout, "How it'll start in the future:")
 			fmt.Fprintln(stdout, "  • Automatically at boot (Windows Service, delayed-start)")
 			fmt.Fprintln(stdout, "  • Survives logout — always on")
-			fmt.Fprintf(stdout, "  • To stop: `sc stop %s` from an elevated shell\n", "com.acoseac.1-bit-bridge")
+			fmt.Fprintf(stdout, "  • To stop: `sc stop %s` from an elevated shell\n", packaging.ServiceLabel)
 		case choice.spawnNow:
 			fmt.Fprintln(stdout, "How it'll start in the future:")
 			fmt.Fprintln(stdout, "  • Automatically when you log in (Startup-folder launcher)")
@@ -451,14 +456,13 @@ func printFutureLaunchHint(stdout io.Writer, choice launchChoice, binary, cfgPat
 	case "darwin":
 		fmt.Fprintln(stdout, "How it'll start in the future:")
 		fmt.Fprintln(stdout, "  • Automatically at login (launchd user agent, already running)")
-		fmt.Fprintln(stdout, "  • To stop: `launchctl bootout gui/$UID ~/Library/LaunchAgents/com.acoseac.1-bit-bridge.plist`")
+		fmt.Fprintf(stdout, "  • To stop: `launchctl bootout gui/$UID ~/Library/LaunchAgents/%s.plist`\n", packaging.ServiceLabel)
 	case "linux":
 		fmt.Fprintln(stdout, "How it'll start in the future:")
 		fmt.Fprintln(stdout, "  • Automatically at login (systemd user unit, already running)")
-		fmt.Fprintln(stdout, "  • To stop: `systemctl --user stop com.acoseac.1-bit-bridge.service`")
+		fmt.Fprintf(stdout, "  • To stop: `systemctl --user stop %s.service`\n", packaging.ServiceLabel)
 	}
 }
-
 
 // --- helpers ---
 
