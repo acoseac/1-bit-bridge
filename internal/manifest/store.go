@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -62,6 +63,16 @@ func (s *Store) migrate() error {
 	CREATE INDEX IF NOT EXISTS idx_tracks_mtime ON tracks(mtime_ns);
 	CREATE INDEX IF NOT EXISTS idx_tracks_indexed ON tracks(indexed_at);
 	CREATE INDEX IF NOT EXISTS idx_tracks_enriched ON tracks(enriched_at);
+	-- Functional indexes on the JSON-extracted MBID fields drive the
+	-- 202-vs-404 probe on /v1/artwork + /v1/artist-image. Without
+	-- these, every cache miss triggers a full tags_json scan -- O(n)
+	-- on a 50k-track library. The expression here must match the
+	-- hasTrackWithJSONField query exactly (same json_extract path,
+	-- same BLOB column) for SQLite to use the index.
+	CREATE INDEX IF NOT EXISTS idx_tracks_artwork_mbid
+		ON tracks(json_extract(tags_json, '$.artworkMBID'));
+	CREATE INDEX IF NOT EXISTS idx_tracks_artist_mbid
+		ON tracks(json_extract(tags_json, '$.artistMBID'));
 
 	CREATE TABLE IF NOT EXISTS folders (
 		path     TEXT PRIMARY KEY,
@@ -177,43 +188,6 @@ func (s *Store) GetTrack(path string) (*Track, error) {
 // were written/updated in the index after since. Filtered by
 // indexed_at (when we last wrote the row) rather than mtime_ns (the
 // on-disk file time) so that files copied into the library with an
-// HasTrackWithArtworkMBID reports whether at least one indexed track
-// carries the given value in its `artworkMBID` tag. Used by the
-// `/v1/artwork/{mbid}` handler to tell a genuinely-unknown MBID
-// (return 404) apart from one the server's seen but hasn't cached yet
-// (return 202 + Retry-After so iOS retries with backoff instead of
-// treating the miss as terminal).
-//
-// SQL uses `json_extract` on the BLOB `tags_json` column. A
-// `SELECT EXISTS(...) LIMIT 1` is the cheapest form — SQLite short-
-// circuits as soon as it finds a hit. Return value of zero means "no
-// such MBID in any track"; iOS should get the 404 fallthrough.
-func (s *Store) HasTrackWithArtworkMBID(mbid string) bool {
-	if mbid == "" {
-		return false
-	}
-	return s.hasTrackWithJSONField("artworkMBID", mbid)
-}
-
-// HasTrackWithArtistMBID mirrors HasTrackWithArtworkMBID for the
-// `/v1/artist-image/{mbid}` handler. Same 202-vs-404 distinction.
-func (s *Store) HasTrackWithArtistMBID(mbid string) bool {
-	if mbid == "" {
-		return false
-	}
-	return s.hasTrackWithJSONField("artistMBID", mbid)
-}
-
-func (s *Store) hasTrackWithJSONField(field, value string) bool {
-	// `json_extract` on a BLOB JSON works in SQLite 3.38+; modernc's
-	// pure-Go driver ships a recent build. We LIMIT 1 so a library with
-	// thousands of tracks sharing an MBID doesn't pay per-row I/O.
-	var found int
-	q := `SELECT 1 FROM tracks WHERE json_extract(tags_json, '$.` + field + `') = ? LIMIT 1`
-	_ = s.db.QueryRow(q, value).Scan(&found)
-	return found == 1
-}
-
 // old mtime still surface in incremental deltas — otherwise the iOS
 // client has to do a full sync to see ripped-years-ago albums that
 // were just added.
@@ -243,6 +217,73 @@ func (s *Store) ListTracks(since *time.Time) ([]Track, error) {
 		out = append(out, t)
 	}
 	return out, rows.Err()
+}
+
+// HasTrackWithArtworkMBID reports whether at least one indexed track
+// carries the given value in its `artworkMBID` tag. Used by the
+// `/v1/artwork/{mbid}` handler to tell a genuinely-unknown MBID
+// (return 404) apart from one the server's seen but hasn't cached yet
+// (return 202 + Retry-After so iOS retries with backoff instead of
+// treating the miss as terminal).
+//
+// Backed by a functional index on `json_extract(tags_json,
+// '$.artworkMBID')` (added in `migrate`) so the lookup is O(log n)
+// instead of a full table scan on a 50k-track library. The `LIMIT 1`
+// lets SQLite stop at first match.
+func (s *Store) HasTrackWithArtworkMBID(mbid string) bool {
+	if mbid == "" {
+		return false
+	}
+	return s.hasTrackWithJSONField(artworkMBIDField, mbid)
+}
+
+// HasTrackWithArtistMBID mirrors HasTrackWithArtworkMBID for the
+// `/v1/artist-image/{mbid}` handler. Same 202-vs-404 distinction.
+// Also indexed (see `migrate`).
+func (s *Store) HasTrackWithArtistMBID(mbid string) bool {
+	if mbid == "" {
+		return false
+	}
+	return s.hasTrackWithJSONField(artistMBIDField, mbid)
+}
+
+// Field names for the JSON-extract lookup. Declared as constants
+// (not parameters passed by callers) so `hasTrackWithJSONField` can
+// enforce a whitelist — the function used to take an arbitrary
+// string and splice it into the SQL, which is fine today (both call
+// sites are in-package) but a fragile pattern to leave for future
+// extensions. The whitelist switch inside keeps each supported
+// field's query as a pre-built string literal, eliminating any
+// path where user input could influence the SQL.
+type jsonField string
+
+const (
+	artworkMBIDField jsonField = "artworkMBID"
+	artistMBIDField  jsonField = "artistMBID"
+)
+
+func (s *Store) hasTrackWithJSONField(field jsonField, value string) bool {
+	var q string
+	switch field {
+	case artworkMBIDField:
+		q = `SELECT 1 FROM tracks WHERE json_extract(tags_json, '$.artworkMBID') = ? LIMIT 1`
+	case artistMBIDField:
+		q = `SELECT 1 FROM tracks WHERE json_extract(tags_json, '$.artistMBID') = ? LIMIT 1`
+	default:
+		// Unknown field — by construction unreachable, but refusing
+		// quietly is safer than compiling a bogus query.
+		return false
+	}
+	var found int
+	err := s.db.QueryRow(q, value).Scan(&found)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		// Genuine database errors (disk I/O, connection closed,
+		// migration mid-flight) get logged. `sql.ErrNoRows` is the
+		// expected "no such MBID" outcome and stays quiet.
+		log.Printf("store: hasTrackWithJSONField %s: %v", field, err)
+		return false
+	}
+	return found == 1
 }
 
 // CountTracks returns the total number of track rows. /v1/health polls

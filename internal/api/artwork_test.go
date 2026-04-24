@@ -324,3 +324,27 @@ func TestArtistImageReturns202WhenProbeKnows(t *testing.T) {
 		t.Errorf("Retry-After header missing on artist-image 202")
 	}
 }
+
+// Cache miss + probe says "unknown" on /v1/artist-image → 404.
+// Mirrors TestArtworkReturns404WhenProbeDoesNotKnow so both handlers'
+// 404 branches are explicitly exercised when a probe IS attached.
+func TestArtistImageReturns404WhenProbeDoesNotKnow(t *testing.T) {
+	dir := t.TempDir()
+	artDir := filepath.Join(dir, "artwork")
+	mbid := "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+	cfg := &config.Config{LibraryRoots: []string{dir}, ListenAddress: ":7788", LibraryName: "T"}
+	store, _ := auth.OpenStore(filepath.Join(dir, "tokens.json"))
+	raw, _, _ := store.Mint("probe")
+	probe := fakeMBIDProbe{known: map[string]bool{}} // empty — nothing known
+	srv := New(cfg, store, nil, "fp").
+		WithArtworkDirs(fakeArtworkDirs{dir: artDir}).
+		WithMBIDProbe(probe)
+	hs := httptest.NewServer(srv.Handler())
+	defer hs.Close()
+
+	resp := authedGET(t, hs.URL+"/v1/artist-image/"+mbid, raw)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", resp.StatusCode)
+	}
+}

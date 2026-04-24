@@ -65,7 +65,7 @@ func (s *Server) artistImage(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			writeError(w, http.StatusNotFound, "not_found",
-				"artist image not cached yet")
+				"artist image not cached (unknown MBID)")
 			return
 		}
 		log.Printf("artwork: open artist image %q: %v", mbid, err)
