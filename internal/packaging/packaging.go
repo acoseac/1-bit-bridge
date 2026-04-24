@@ -190,13 +190,20 @@ func render(name string, p Params) ([]byte, error) {
 			return b.String()
 		},
 		"systemdEscape": func(s string) string {
-			// systemd unit values end at the first unescaped newline or
-			// unmatched quote. Escape CR/LF/NUL; leave everything else
-			// alone so paths like /Users/x/Music stay readable. Full
-			// "systemd-escape" semantics aren't needed — we only write
-			// ExecStart, WorkingDirectory, and StandardOutput=append:...
-			// where these three bytes would break parsing.
-			r := strings.NewReplacer("\n", `\n`, "\r", `\r`, "\x00", "")
+			// systemd unit values are parsed as shell-like quoted strings
+			// when wrapped in double quotes (which the template does).
+			// Inside those quotes, `\\` and `\"` are the escape sequences
+			// the parser expects, and CR/LF/NUL would terminate the value
+			// early. Backslash goes first so it doesn't double-escape the
+			// replacements for `"` and CR/LF that follow. A path like
+			// `/Users/Bob's "Music"` or `C:\Users\bob` round-trips intact.
+			r := strings.NewReplacer(
+				`\`, `\\`,
+				`"`, `\"`,
+				"\n", `\n`,
+				"\r", `\r`,
+				"\x00", "",
+			)
 			return r.Replace(s)
 		},
 	}

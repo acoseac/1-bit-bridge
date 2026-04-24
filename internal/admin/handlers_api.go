@@ -237,10 +237,21 @@ func (s *Server) apiRootsRemove(w http.ResponseWriter, r *http.Request) {
 	}
 	s.deps.Scanner.SetRoots(newList)
 	s.deps.Resolver.SetRoots(newList)
+	// Propagate store errors so the admin UI shows the actual failure
+	// instead of silently returning 204 while /v1/manifest keeps
+	// advertising a phantom root. The store wraps both deletes in
+	// transactions now, so a non-nil return means the on-disk state
+	// really didn't change — surface it.
 	if willCollapse {
-		_ = s.deps.Manifest.WipeAllTracks()
+		if err := s.deps.Manifest.WipeAllTracks(); err != nil {
+			writeError(w, http.StatusInternalServerError, "wipe-tracks", err.Error())
+			return
+		}
 	} else {
-		_, _ = s.deps.Manifest.DeleteTracksByPrefix(removedBasename + "/")
+		if _, err := s.deps.Manifest.DeleteTracksByPrefix(removedBasename + "/"); err != nil {
+			writeError(w, http.StatusInternalServerError, "delete-tracks", err.Error())
+			return
+		}
 	}
 	go func() { _, _ = s.deps.Scanner.Scan(s.scanCtx()) }()
 	w.WriteHeader(http.StatusNoContent)

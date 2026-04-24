@@ -288,6 +288,14 @@ func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		// the main API listener.
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			fmt.Fprintf(stderr, "admin server: %v\n", err)
+			// Tear down the main API listener cleanly before exit so
+			// in-flight iOS requests get `http.ErrServerClosed` rather
+			// than a socket RST mid-stream. Without this, a 404 on
+			// :7789 binds → process-exit on 1 leaves the :7788 server
+			// to be killed by the runtime's ungraceful goroutine halt.
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+			defer cancel()
+			_ = httpSrv.Shutdown(shutdownCtx)
 			return 1
 		}
 	case <-ctx.Done():
