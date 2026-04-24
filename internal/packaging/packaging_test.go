@@ -47,11 +47,57 @@ func TestRenderSystemdTemplate(t *testing.T) {
 	for _, want := range []string{
 		"[Unit]", "[Service]", "[Install]",
 		"Restart=always",
-		"ExecStart=/usr/local/bin/bridge serve --config /home/me/.config/1-bit-bridge/bridge.yaml",
+		// Quoted form pins the escaping contract: backslashes, CR/LF,
+		// and embedded quotes go through systemdEscape before landing
+		// between the quotes, so systemd can parse the unquoted value
+		// unambiguously. Plain ASCII paths like this one pass through
+		// verbatim.
+		`ExecStart="/usr/local/bin/bridge" serve --config "/home/me/.config/1-bit-bridge/bridge.yaml"`,
+		`WorkingDirectory="/home/me/.config/1-bit-bridge/data"`,
+		`StandardOutput=append:"/home/me/.local/state/1-bit-bridge/bridge.log"`,
 		"WantedBy=default.target",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("rendered systemd missing %q\n--\n%s", want, s)
+		}
+	}
+}
+
+// TestRenderSystemdTemplate_EscapesBadChars pins the escape contract
+// for values that would otherwise break the unit-file parser: a path
+// containing a double quote, a backslash, and a newline. Each must be
+// translated to the systemd `\x` escape rather than surviving raw.
+func TestRenderSystemdTemplate_EscapesBadChars(t *testing.T) {
+	body, err := render("systemd.service.tmpl", Params{
+		BinaryPath: `/usr/local/bin/br"idge`,
+		ConfigPath: `/weird\path/bridge.yaml`,
+		WorkingDir: "/home/bad\npath",
+		LogPath:    "/var/log/bridge.log",
+	})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	s := string(body)
+	// Literal raw characters must NOT leak through. "bad\npath" with a
+	// real LF is the escape-leakage signature we care about; the check
+	// is intentionally specific so the template's own newlines between
+	// directives don't trip it.
+	for _, forbidden := range []string{
+		`/usr/local/bin/br"idge`, // quote unescaped would terminate the value
+		"bad\npath",              // raw LF inside the value = escape leaked
+	} {
+		if strings.Contains(s, forbidden) {
+			t.Errorf("rendered systemd still contains unescaped %q\n--\n%s", forbidden, s)
+		}
+	}
+	// Escaped forms must appear.
+	for _, want := range []string{
+		`br\"idge`,
+		`/weird\\path`,
+		`bad\npath`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("rendered systemd missing escape %q\n--\n%s", want, s)
 		}
 	}
 }
