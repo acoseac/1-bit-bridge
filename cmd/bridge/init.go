@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/doctor"
@@ -36,6 +37,15 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	skipService := fs.Bool("no-service", false, "skip launchd/systemd install; run `bridge serve` yourself")
 	skipDoctor := fs.Bool("skip-doctor", false, "don't run `bridge doctor` preflight before init (not recommended)")
 	windowsService := fs.Bool("service", false, "Windows only: install as a Windows Service (requires admin); default is a Startup-folder launcher")
+	// Windows-only: when init installs the Startup-folder launcher, the
+	// .cmd only fires on *next* logon. Default behaviour with an
+	// interactive prompt is to also spawn the server right now so the
+	// operator can open the admin console without a logout. For
+	// non-interactive runs (--yes) we keep the old "install but don't
+	// spawn" default unless --start-now is set, so CI scripts that
+	// rebuild a tempdir with `bridge init --yes` don't leave an orphan
+	// server behind.
+	startNow := fs.Bool("start-now", false, "Windows only: after install, spawn `bridge serve` detached so the admin console is reachable without a logout")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -151,12 +161,14 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			if !*force {
 				fmt.Fprintf(stdout, "config file already exists at %s; keeping it\n", cfgPath)
 				fmt.Fprintf(stdout, "pass --force to overwrite non-interactively\n")
-				return finishInit(stdout, stderr, cfgPath, dataDir, *skipService, *windowsService)
+				keepChoice := resolveLaunchChoice(in, stdout, *nonInteractive, *skipService, *windowsService, *startNow)
+				return finishInit(stdout, stderr, cfgPath, dataDir, keepChoice)
 			}
 		} else {
 			if !confirm(in, stdout, "Config file exists. Overwrite?", false) {
 				fmt.Fprintf(stdout, "keeping existing config\n")
-				return finishInit(stdout, stderr, cfgPath, dataDir, *skipService, *windowsService)
+				keepChoice := resolveLaunchChoice(in, stdout, *nonInteractive, *skipService, *windowsService, *startNow)
+				return finishInit(stdout, stderr, cfgPath, dataDir, keepChoice)
 			}
 		}
 	}
@@ -199,7 +211,67 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "\nTLS fingerprint (stable across restarts):\n  %s\n", fp)
 	}
 
-	return finishInit(stdout, stderr, cfgPath, dataDir, *skipService, *windowsService)
+	choice := resolveLaunchChoice(in, stdout, *nonInteractive, *skipService, *windowsService, *startNow)
+	return finishInit(stdout, stderr, cfgPath, dataDir, choice)
+}
+
+// launchChoice bundles the three orthogonal knobs that control how
+// init leaves the bridge behind: whether to skip the
+// launchd/systemd/Startup install entirely (manual mode), whether to
+// install the Windows Service via SCM instead of the Startup-folder
+// .cmd, and whether to spawn `bridge serve` detached right now so the
+// admin console is reachable without a logout. Only the last one is
+// new on Windows — macOS launchd / Linux systemd already start the
+// unit during install.
+type launchChoice struct {
+	skipService bool
+	useService  bool
+	spawnNow    bool
+}
+
+// resolveLaunchChoice merges flag-driven and prompt-driven input into a
+// single choice. On Windows, when the user is interactive and didn't
+// pre-pick via a flag, we show a 3-option picker so they don't end up
+// with the old "init exits, server isn't running, admin URL 404s"
+// experience. Non-interactive runs (--yes) keep today's flag semantics
+// so scripts that call `bridge init --yes --no-service` don't get a
+// surprise detached server.
+func resolveLaunchChoice(in *bufio.Reader, stdout io.Writer, nonInteractive, skipService, useService, startNow bool) launchChoice {
+	flagSet := skipService || useService
+	if runtime.GOOS == "windows" && !nonInteractive && !flagSet {
+		return promptLaunchMode(in, stdout)
+	}
+	return launchChoice{
+		skipService: skipService,
+		useService:  useService,
+		spawnNow:    startNow,
+	}
+}
+
+// promptLaunchMode is the Windows-only 3-option picker. Mode 1 (the
+// recommended default) installs the Startup-folder launcher AND spawns
+// the server right now so init doesn't leave the admin console dark.
+// Mode 2 installs the SCM service (which starts itself). Mode 3 is
+// "I'll run `bridge serve` myself" — used by operators who want zero
+// residue.
+func promptLaunchMode(in *bufio.Reader, stdout io.Writer) launchChoice {
+	fmt.Fprintln(stdout)
+	fmt.Fprintln(stdout, "How should the bridge start up on this machine?")
+	fmt.Fprintln(stdout, "  [1] Launch when I log in  (recommended — Startup-folder launcher)")
+	fmt.Fprintln(stdout, "  [2] Always-on Windows Service  (requires admin; survives logout)")
+	fmt.Fprintln(stdout, "  [3] Only when I start it manually  (I'll run `bridge serve` myself)")
+	for {
+		choice := ask(in, stdout, "Choose [1]", "1")
+		switch strings.TrimSpace(choice) {
+		case "1", "":
+			return launchChoice{spawnNow: true}
+		case "2":
+			return launchChoice{useService: true}
+		case "3":
+			return launchChoice{skipService: true}
+		}
+		fmt.Fprintln(stdout, "  (enter 1, 2, or 3)")
+	}
 }
 
 // finishInit installs the service (or tells the user how to run manually)
@@ -212,32 +284,44 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 // useless to the operator if they don't know where to point their
 // browser. The browser-open is best-effort (no stderr on headless
 // machines), so the cost of always attempting it is zero.
-func finishInit(stdout, stderr io.Writer, cfgPath, dataDir string, skipService, windowsService bool) int {
-	printAdmin := func() {
+func finishInit(stdout, stderr io.Writer, cfgPath, dataDir string, choice launchChoice) int {
+	// `printAdmin` is called once per mode with per-mode copy. On
+	// Windows we also pass whether the server is expected to be live
+	// right now — if it is, we poll briefly before opening the browser
+	// so the user doesn't hit "site can't be reached" on a fast machine
+	// that outran the cmd.exe handoff.
+	printAdmin := func(serverIsLive bool) {
 		cfg, err := config.Load(cfgPath)
 		if err != nil {
 			fmt.Fprintf(stdout, "\nDone. Start the bridge with: bridge serve --config %s\n", cfgPath)
 			return
 		}
 		url := "http://" + cfg.AdminAddress + "/"
+		if serverIsLive {
+			if host, port, ok := splitHostPort(cfg.AdminAddress); ok {
+				_ = packaging.WaitForListen(host, port, 2*time.Second)
+			}
+		}
 		fmt.Fprintf(stdout, "\nAdmin console: %s\n", url)
-		openInBrowser(url)
+		if serverIsLive {
+			openInBrowser(url)
+		}
 		fmt.Fprintf(stdout, "\nDone. Open the admin console to add library folders and pair iOS devices.\n")
 	}
 
-	if skipService || (runtime.GOOS != "darwin" && runtime.GOOS != "linux" && runtime.GOOS != "windows") {
+	if choice.skipService || (runtime.GOOS != "darwin" && runtime.GOOS != "linux" && runtime.GOOS != "windows") {
 		fmt.Fprintf(stdout, "\nSkipping service install. Start the bridge with:\n")
 		fmt.Fprintf(stdout, "  bridge serve --config %s\n", cfgPath)
-		printAdmin()
+		printAdmin(false)
 		return 0
 	}
 
 	// --service on non-Windows is a usage error; the flag only makes
 	// sense with SCM. Call it out loudly so the user doesn't think
 	// they got a Windows-Service-equivalent on their Mac.
-	if windowsService && runtime.GOOS != "windows" {
+	if choice.useService && runtime.GOOS != "windows" {
 		fmt.Fprintf(stderr, "--service is a Windows-only flag; ignored on %s\n", runtime.GOOS)
-		windowsService = false
+		choice.useService = false
 	}
 
 	binary, err := os.Executable()
@@ -261,8 +345,15 @@ func finishInit(stdout, stderr io.Writer, cfgPath, dataDir string, skipService, 
 		WorkingDir: dataDir,
 		LogPath:    logPath,
 	}
+	// serverIsLive tracks whether the final printAdmin should open a
+	// browser: true if SCM started the service or we just spawned it
+	// detached; false if only the Startup-folder launcher landed and it
+	// won't fire until next logon (which today can't happen — spawnNow
+	// is the default — but is the compatibility path for
+	// `--yes` callers).
+	var serverIsLive bool
 	var unitPath string
-	if windowsService {
+	if choice.useService {
 		// SCM install. Requires admin; fails otherwise with a clear
 		// "access denied" from the SCM layer.
 		unitPath, err = packaging.InstallWindowsService(params)
@@ -273,6 +364,7 @@ func finishInit(stdout, stderr io.Writer, cfgPath, dataDir string, skipService, 
 			return 1
 		}
 		fmt.Fprintf(stdout, "Windows Service installed: %s\n", unitPath)
+		serverIsLive = true // SCM's Start() fired during Install.
 	} else {
 		unitPath, err = packaging.Install(params)
 		if err != nil {
@@ -281,12 +373,92 @@ func finishInit(stdout, stderr io.Writer, cfgPath, dataDir string, skipService, 
 			return 1
 		}
 		fmt.Fprintf(stdout, "Service installed at:\n  %s\n", unitPath)
+		// macOS launchd `bootstrap` / Linux systemctl `enable --now`
+		// started the daemon as part of install. On Windows the Startup
+		// .cmd only runs at next logon, so we spawn a detached child
+		// here if the user asked for Mode 1.
+		switch runtime.GOOS {
+		case "darwin", "linux":
+			serverIsLive = true
+		case "windows":
+			if choice.spawnNow {
+				serverIsLive = spawnNowOrWarn(stdout, stderr, binary, cfgPath, logPath)
+			}
+		}
 	}
 	fmt.Fprintf(stdout, "Logs:\n  %s\n", logPath)
 
-	printAdmin()
+	printFutureLaunchHint(stdout, choice, binary, cfgPath)
+	printAdmin(serverIsLive)
 	return 0
 }
+
+// spawnNowOrWarn tries to fire up a detached `bridge serve` right now.
+// Returns true on success. On failure, warns the operator and falls
+// back to the "next logon" path — init still exits cleanly because the
+// launcher .cmd is already on disk.
+//
+// Skips the spawn if something is already listening on the admin port
+// — re-running init while the SCM service (or a previous detached
+// launcher) is up shouldn't produce a port-bind error buried in the
+// log.
+func spawnNowOrWarn(stdout, stderr io.Writer, binary, cfgPath, logPath string) bool {
+	// Probe the admin-address port before spawning; if something's
+	// already bound (e.g. re-run of init against a live SCM service),
+	// skip the spawn so we don't produce a port-bind error buried in
+	// the log. `DefaultAdminAddress` is always of the form host:port.
+	host, port, ok := splitHostPort(config.DefaultAdminAddress)
+	if !ok {
+		host, port = "127.0.0.1", 7789
+	}
+	if packaging.IsListening(host, port) {
+		fmt.Fprintf(stdout, "A bridge is already running on %s:%d; skipping auto-start.\n", host, port)
+		return true
+	}
+	if err := packaging.SpawnDetached(binary, cfgPath, logPath); err != nil {
+		fmt.Fprintf(stderr, "auto-start failed: %v\n", err)
+		fmt.Fprintf(stderr, "Launcher is installed — the bridge will start at next logon. Or run:\n  %s serve --config %s\n", binary, cfgPath)
+		return false
+	}
+	return true
+}
+
+// printFutureLaunchHint tells the operator how the bridge is going to
+// come up next time — the asymmetry we're fixing is that Windows init
+// used to leave them with a dead port and no explanation. Per-mode
+// copy; macOS / Linux get a shorter note since their service managers
+// make this self-evident.
+func printFutureLaunchHint(stdout io.Writer, choice launchChoice, binary, cfgPath string) {
+	fmt.Fprintln(stdout)
+	switch runtime.GOOS {
+	case "windows":
+		switch {
+		case choice.useService:
+			fmt.Fprintln(stdout, "How it'll start in the future:")
+			fmt.Fprintln(stdout, "  • Automatically at boot (Windows Service, delayed-start)")
+			fmt.Fprintln(stdout, "  • Survives logout — always on")
+			fmt.Fprintf(stdout, "  • To stop: `sc stop %s` from an elevated shell\n", "com.acoseac.1-bit-bridge")
+		case choice.spawnNow:
+			fmt.Fprintln(stdout, "How it'll start in the future:")
+			fmt.Fprintln(stdout, "  • Automatically when you log in (Startup-folder launcher)")
+			fmt.Fprintf(stdout, "  • To stop now: close the minimized \"1-bit-bridge\" window, or End Task in Task Manager\n")
+			fmt.Fprintf(stdout, "  • To start manually any time: %s serve --config %s\n", binary, cfgPath)
+		default:
+			fmt.Fprintln(stdout, "How it'll start in the future:")
+			fmt.Fprintln(stdout, "  • Automatically when you next log in (Startup-folder launcher)")
+			fmt.Fprintf(stdout, "  • To start right now: %s serve --config %s\n", binary, cfgPath)
+		}
+	case "darwin":
+		fmt.Fprintln(stdout, "How it'll start in the future:")
+		fmt.Fprintln(stdout, "  • Automatically at login (launchd user agent, already running)")
+		fmt.Fprintln(stdout, "  • To stop: `launchctl bootout gui/$UID ~/Library/LaunchAgents/com.acoseac.1-bit-bridge.plist`")
+	case "linux":
+		fmt.Fprintln(stdout, "How it'll start in the future:")
+		fmt.Fprintln(stdout, "  • Automatically at login (systemd user unit, already running)")
+		fmt.Fprintln(stdout, "  • To stop: `systemctl --user stop com.acoseac.1-bit-bridge.service`")
+	}
+}
+
 
 // --- helpers ---
 
@@ -346,6 +518,12 @@ func expandHome(p string) string {
 // openInBrowser tries to pop the admin URL in the operator's browser.
 // Best-effort — ignore errors so headless machines don't surface a
 // confusing failure on a successful init.
+//
+// Windows uses `cmd /c start "" <url>`: the empty first quoted
+// argument is the window title that `start` expects when its first
+// positional is itself a quoted string (a URL counts, on paths with
+// spaces). Without the empty title, `start` treats the URL as the
+// title and silently does nothing.
 func openInBrowser(url string) {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
@@ -353,6 +531,8 @@ func openInBrowser(url string) {
 		cmd = exec.Command("open", url)
 	case "linux":
 		cmd = exec.Command("xdg-open", url)
+	case "windows":
+		cmd = exec.Command("cmd.exe", "/c", "start", "", url)
 	default:
 		return
 	}
