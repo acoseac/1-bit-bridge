@@ -67,8 +67,21 @@ func (s *Server) pageDashboard(w http.ResponseWriter, r *http.Request) {
 		"DBBytes":       dbBytes,
 		"DeviceCount":   len(s.deps.Auth.List()),
 		"Roots":         s.deps.Scanner.Roots(),
+		"Update":        s.dashboardUpdateStatus(),
 	}
 	s.renderPage(w, "dashboard", data)
+}
+
+// dashboardUpdateStatus returns the UpdateStatus the dashboard tile
+// should render at first paint. Subsequent updates come from the JS
+// tick hitting /api/updates. Nil-safe — returns a placeholder
+// "not-configured" status when no updater is wired so the template
+// doesn't have to branch on nil.
+func (s *Server) dashboardUpdateStatus() UpdateStatus {
+	if s.deps.Updater == nil {
+		return UpdateStatus{CurrentVersion: version.ServerVersion, Channel: "not-configured"}
+	}
+	return s.deps.Updater.Status()
 }
 
 func (s *Server) pageLibrary(w http.ResponseWriter, r *http.Request) {

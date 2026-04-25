@@ -124,6 +124,120 @@ func TestHealthReturns200WithExpectedShape(t *testing.T) {
 	}
 }
 
+// fakeUpdater stands in for internal/updater.Updater in tests so we can
+// drive UpdateInfo into /v1/health without spinning up a real poller.
+type fakeUpdater struct{ info UpdateInfo }
+
+func (f fakeUpdater) UpdateInfo() UpdateInfo { return f.info }
+
+func TestHealthOmitsUpdateFieldsWhenNoUpdaterAttached(t *testing.T) {
+	// Pre-Phase-A wire shape: when WithUpdater hasn't been called, all
+	// four update-related JSON keys must be absent from the response.
+	// iOS clients without the new decoder fields would still be fine
+	// either way (Codable ignores unknown keys), but absent vs. zero
+	// is the iOS test harness's contract for "not advertised".
+	hs, _ := newTestServer(t)
+	resp, err := http.Get(hs.URL + "/v1/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	for _, key := range []string{"latestServerVersion", "updateAvailable", "updateReleaseNotesURL", "minClientVersion"} {
+		if strings.Contains(string(body), `"`+key+`":`) {
+			t.Errorf("body advertises %q without an updater attached: %s", key, body)
+		}
+	}
+}
+
+func TestHealthIncludesUpdateFieldsWhenUpdaterAttached(t *testing.T) {
+	dir := t.TempDir()
+	lib := filepath.Join(dir, "Music")
+	os.MkdirAll(lib, 0o755)
+	cfg := &config.Config{LibraryRoots: []string{lib}, ListenAddress: ":7788", LibraryName: "T"}
+	store, err := auth.OpenStore(filepath.Join(dir, "tokens.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := New(cfg, store, nil, "fp").WithUpdater(fakeUpdater{
+		info: UpdateInfo{
+			LatestVersion:    "9.9.9",
+			UpdateAvailable:  true,
+			ReleaseNotesURL:  "https://example.test/release",
+			MinClientVersion: "1.2.0",
+		},
+	})
+	hs := httptest.NewServer(srv.Handler())
+	t.Cleanup(hs.Close)
+
+	resp, err := http.Get(hs.URL + "/v1/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var got HealthResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.LatestServerVersion != "9.9.9" {
+		t.Errorf("LatestServerVersion = %q, want 9.9.9", got.LatestServerVersion)
+	}
+	if !got.UpdateAvailable {
+		t.Error("UpdateAvailable = false, want true")
+	}
+	if got.UpdateReleaseNotesURL != "https://example.test/release" {
+		t.Errorf("UpdateReleaseNotesURL = %q", got.UpdateReleaseNotesURL)
+	}
+	if got.MinClientVersion != "1.2.0" {
+		t.Errorf("MinClientVersion = %q, want 1.2.0", got.MinClientVersion)
+	}
+}
+
+func TestAuthedRecordsClientVersion(t *testing.T) {
+	hs, srv, raw := newTestServerWithProbe(t)
+	req, _ := http.NewRequest(http.MethodGet, hs.URL+"/v1/probe", nil)
+	req.Header.Set("Authorization", "Bearer "+raw)
+	req.Header.Set("X-Client-Version", "1.2.3-build42")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("probe status = %d, want 200", resp.StatusCode)
+	}
+	tokens := srv.store.List()
+	if len(tokens) != 1 {
+		t.Fatalf("List = %d, want 1", len(tokens))
+	}
+	if tokens[0].LastClientVersion != "1.2.3-build42" {
+		t.Errorf("LastClientVersion = %q, want 1.2.3-build42", tokens[0].LastClientVersion)
+	}
+	if tokens[0].LastClientVersionAt.IsZero() {
+		t.Error("LastClientVersionAt not stamped")
+	}
+}
+
+func TestAuthedHandlesMissingClientVersionHeader(t *testing.T) {
+	// Older iOS builds don't send X-Client-Version. Authed requests
+	// from them must still succeed and must not stamp empty fields.
+	hs, srv, raw := newTestServerWithProbe(t)
+	req, _ := http.NewRequest(http.MethodGet, hs.URL+"/v1/probe", nil)
+	req.Header.Set("Authorization", "Bearer "+raw)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("probe status = %d, want 200", resp.StatusCode)
+	}
+	tokens := srv.store.List()
+	if tokens[0].LastClientVersion != "" {
+		t.Errorf("LastClientVersion = %q, want empty (header absent)", tokens[0].LastClientVersion)
+	}
+}
+
 func TestHealthNoAuthRequired(t *testing.T) {
 	hs, _ := newTestServer(t)
 	// No Authorization header — must still return 200.

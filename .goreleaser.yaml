@@ -36,6 +36,16 @@ builds:
     ldflags:
       - -s -w
       - -X github.com/acoseac/1-bit-bridge/internal/version.ServerVersion={{.Version}}
+      # MinClientVersion declares the iOS app version floor THIS bridge
+      # release needs from its paired clients. iOS sends X-Client-Version
+      # on every authed request; the bridge persists per-token and a
+      # future opt-in auto-install (Phase C) refuses installs that would
+      # orphan a paired client below this floor. Driven by env var so
+      # the maintainer sets the floor per release without a source-tree
+      # edit. `envOrDefault` falls back to the source default ("no
+      # floor") when MIN_CLIENT_VERSION isn't set — fine for snapshot /
+      # PR-check builds that aren't shipping a real release.
+      - -X github.com/acoseac/1-bit-bridge/internal/version.MinClientVersion={{ envOrDefault "MIN_CLIENT_VERSION" "0.0.0" }}
     flags:
       - -trimpath
 

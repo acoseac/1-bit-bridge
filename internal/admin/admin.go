@@ -71,6 +71,35 @@ type Deps struct {
 	// one. Nil defaults to context.Background() — only acceptable for
 	// tests that don't care about goroutine cleanup.
 	ScanCtx context.Context
+
+	// Updater is the optional read-side of the update poller. Wired via
+	// an adapter in cmd/bridge/main.go so this package doesn't import
+	// internal/updater. Nil-safe — when absent, the dashboard's update
+	// tile shows "not configured" and the /api/updates endpoint
+	// returns the same fallback shape.
+	Updater UpdateProvider
+}
+
+// UpdateProvider is the read-side of the updater used by the admin
+// console. Implemented by the adapter in cmd/bridge/main.go around
+// internal/updater.Updater. CheckNow takes a context so a slow GitHub
+// response can be cancelled if the operator's browser disconnects.
+type UpdateProvider interface {
+	Status() UpdateStatus
+	CheckNow(ctx context.Context) UpdateStatus
+}
+
+// UpdateStatus is the wire shape /api/updates returns. Decoupled from
+// internal/updater so the admin package compiles without importing it.
+type UpdateStatus struct {
+	CurrentVersion   string    `json:"currentVersion"`
+	LatestVersion    string    `json:"latestVersion,omitempty"`
+	UpdateAvailable  bool      `json:"updateAvailable"`
+	ReleaseNotesURL  string    `json:"releaseNotesURL,omitempty"`
+	Channel          string    `json:"channel"`
+	LastCheck        time.Time `json:"lastCheck,omitempty"`
+	LastError        string    `json:"lastError,omitempty"`
+	MinClientVersion string    `json:"minClientVersion,omitempty"`
 }
 
 // Server owns the admin listener + mux. One per process.
@@ -133,6 +162,8 @@ func (s *Server) Handler() http.Handler {
 
 	// JSON API.
 	mux.HandleFunc("GET /api/stats", s.apiStats)
+	mux.HandleFunc("GET /api/updates", s.apiUpdatesGet)
+	mux.HandleFunc("POST /api/updates/check", s.apiUpdatesCheck)
 	mux.HandleFunc("POST /api/scan", s.apiScan)
 	mux.HandleFunc("GET /api/roots", s.apiRootsList)
 	mux.HandleFunc("POST /api/roots", s.apiRootsAdd)

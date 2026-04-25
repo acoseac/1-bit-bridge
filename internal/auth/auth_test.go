@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -366,6 +367,70 @@ func TestConcurrentMints(t *testing.T) {
 		if _, ok := s.Validate(raw); !ok {
 			t.Errorf("post-race: token %s…%s did not validate", raw[:6], raw[len(raw)-6:])
 		}
+	}
+}
+
+func TestRecordClientVersionPersistsOnChange(t *testing.T) {
+	s, path := newTmpStore(t)
+	_, tok, _ := s.Mint("iPhone 15")
+	mtBefore := mustMtime(t, path)
+
+	// Sleep so a write produces a strictly-later mtime.
+	time.Sleep(10 * time.Millisecond)
+	s.RecordClientVersion(tok.ID, "1.2.3")
+	mtAfter := mustMtime(t, path)
+	if !mtAfter.After(mtBefore) {
+		t.Errorf("first RecordClientVersion did not persist (mtime %v == %v)", mtAfter, mtBefore)
+	}
+	if got := s.List()[0]; got.LastClientVersion != "1.2.3" {
+		t.Errorf("LastClientVersion = %q, want 1.2.3", got.LastClientVersion)
+	}
+}
+
+func TestRecordClientVersionSkipsDiskOnRepeat(t *testing.T) {
+	// The hot path is "same client, same version, request after request".
+	// RecordClientVersion must not rewrite tokens.json on every call —
+	// otherwise a busy /v1/manifest poll loop turns into proportional
+	// disk I/O.
+	s, path := newTmpStore(t)
+	_, tok, _ := s.Mint("iPhone 15")
+	s.RecordClientVersion(tok.ID, "1.2.3") // first call persists
+	mtAfterFirst := mustMtime(t, path)
+
+	for i := 0; i < 5; i++ {
+		time.Sleep(2 * time.Millisecond)
+		s.RecordClientVersion(tok.ID, "1.2.3") // same value, should no-op
+	}
+	if mt := mustMtime(t, path); mt.After(mtAfterFirst) {
+		t.Errorf("repeat RecordClientVersion(same value) re-persisted (mtime %v > %v)", mt, mtAfterFirst)
+	}
+}
+
+func TestRecordClientVersionIgnoresEmptyAndUnknown(t *testing.T) {
+	s, _ := newTmpStore(t)
+	_, tok, _ := s.Mint("iPhone")
+	// Empty version string: no-op.
+	s.RecordClientVersion(tok.ID, "")
+	if v := s.List()[0].LastClientVersion; v != "" {
+		t.Errorf("LastClientVersion = %q, want empty after no-op call", v)
+	}
+	// Empty ID: no-op (no panic).
+	s.RecordClientVersion("", "1.2.3")
+	// Unknown ID: silently skipped.
+	s.RecordClientVersion("deadbeefcafe", "1.2.3")
+	if v := s.List()[0].LastClientVersion; v != "" {
+		t.Errorf("RecordClientVersion(unknown id) wrote to wrong token: got %q", v)
+	}
+}
+
+func TestRecordClientVersionTruncatesOverlongInput(t *testing.T) {
+	s, _ := newTmpStore(t)
+	_, tok, _ := s.Mint("iPhone")
+	junk := strings.Repeat("X", 500)
+	s.RecordClientVersion(tok.ID, junk)
+	got := s.List()[0].LastClientVersion
+	if len(got) != maxClientVersionLen {
+		t.Errorf("LastClientVersion length = %d, want %d (clamped)", len(got), maxClientVersionLen)
 	}
 }
 

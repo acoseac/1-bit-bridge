@@ -36,6 +36,7 @@ type Server struct {
 	manifest    ManifestProvider
 	artworkDirs ArtworkDirProvider
 	mbidProbe   MBIDProbe
+	updater     UpdaterStatus
 	fingerprint string
 	startedAt   time.Time
 }
@@ -70,6 +71,32 @@ type MBIDProbe interface {
 	HasTrackWithArtistMBID(mbid string) bool
 }
 
+// UpdaterStatus is the optional interface the /v1/health handler uses
+// to populate the additive `latestServerVersion` / `updateAvailable` /
+// `updateReleaseNotesURL` / `minClientVersion` fields. Nil-safe — when
+// `s.updater` is nil those fields stay omitempty-empty and the wire
+// shape matches the pre-Phase-A response exactly.
+//
+// `internal/updater.Updater` satisfies this interface in production.
+// The `MinClientVersion` returned here is read from
+// `version.MinClientVersion` so it advertises the floor THIS bridge
+// needs from its iOS clients (not the floor a candidate update would
+// require — that's a Phase B / C concern).
+type UpdaterStatus interface {
+	UpdateInfo() UpdateInfo
+}
+
+// UpdateInfo is the wire shape /v1/health embeds. Lives in this
+// package (not internal/updater) so the iOS-facing fields don't import
+// the updater type machinery and tests can hand-craft an UpdaterStatus
+// stub.
+type UpdateInfo struct {
+	LatestVersion    string
+	UpdateAvailable  bool
+	ReleaseNotesURL  string
+	MinClientVersion string
+}
+
 // New constructs a Server. fingerprint is the SHA-256 of the TLS cert, used
 // for display in /v1/health (iOS pins by this value). mp can be nil during
 // early boot / tests — /v1/manifest will return 503 until it's populated.
@@ -98,6 +125,15 @@ func (s *Server) WithArtworkDirs(ad ArtworkDirProvider) *Server {
 // satisfies the interface in production.
 func (s *Server) WithMBIDProbe(p MBIDProbe) *Server {
 	s.mbidProbe = p
+	return s
+}
+
+// WithUpdater attaches an UpdaterStatus so /v1/health can advertise
+// the latest available bridge release to iOS clients. Optional —
+// omitting it preserves the pre-Phase-A wire shape (the four new
+// `omitempty` fields stay absent from the JSON response).
+func (s *Server) WithUpdater(u UpdaterStatus) *Server {
+	s.updater = u
 	return s
 }
 
@@ -132,15 +168,28 @@ func (s *Server) Handler() http.Handler {
 // the URL it was paired on. Adding fields here is backwards-compatible:
 // the iOS decoder uses Codable with default values for anything it
 // doesn't know about.
+//
+// The four `*Update*` / `MinClientVersion` fields are the Phase A
+// additive extension (see PROTOCOL.md "Updates" section). They are
+// only populated when an UpdaterStatus has been wired via WithUpdater
+// AND the updater has at least one successful poll cached; absent
+// otherwise so the wire shape stays identical to the pre-update
+// response on a bridge that doesn't yet have an updater. iOS treats
+// all four as optional and falls back to "no update info" rather
+// than a hard error if any are missing.
 type HealthResponse struct {
-	ProtocolVersion int       `json:"protocolVersion"`
-	ServerVersion   string    `json:"serverVersion"`
-	LibraryName     string    `json:"libraryName"`
-	LibraryRoots    []string  `json:"libraryRoots"`
-	CertFingerprint string    `json:"certFingerprint"`
-	StartedAt       time.Time `json:"startedAt"`
-	ScanState       ScanState `json:"scanState"`
-	Endpoints       []string  `json:"endpoints,omitempty"`
+	ProtocolVersion       int       `json:"protocolVersion"`
+	ServerVersion         string    `json:"serverVersion"`
+	LibraryName           string    `json:"libraryName"`
+	LibraryRoots          []string  `json:"libraryRoots"`
+	CertFingerprint       string    `json:"certFingerprint"`
+	StartedAt             time.Time `json:"startedAt"`
+	ScanState             ScanState `json:"scanState"`
+	Endpoints             []string  `json:"endpoints,omitempty"`
+	LatestServerVersion   string    `json:"latestServerVersion,omitempty"`
+	UpdateAvailable       bool      `json:"updateAvailable,omitempty"`
+	UpdateReleaseNotesURL string    `json:"updateReleaseNotesURL,omitempty"`
+	MinClientVersion      string    `json:"minClientVersion,omitempty"`
 }
 
 // ScanState reports the scanner's current status. Real fields populate once
@@ -175,6 +224,13 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		StartedAt:       s.startedAt,
 		ScanState:       scanState,
 		Endpoints:       s.reachableEndpoints(),
+	}
+	if s.updater != nil {
+		info := s.updater.UpdateInfo()
+		resp.LatestServerVersion = info.LatestVersion
+		resp.UpdateAvailable = info.UpdateAvailable
+		resp.UpdateReleaseNotesURL = info.ReleaseNotesURL
+		resp.MinClientVersion = info.MinClientVersion
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -296,10 +352,18 @@ func protocolHeader(next http.Handler) http.Handler {
 }
 
 // authed wraps a handler so it only runs if the request carries a valid
-// bearer token. Unauthenticated requests return a 401 JSON error. Matched
-// tokens are validated but not propagated to the wrapped handler — if a
-// future endpoint needs to know which client it's serving, thread the
-// Token through the request context here at that point.
+// bearer token. Unauthenticated requests return a 401 JSON error.
+//
+// On a successful Validate, the matched token's ID is fed into
+// auth.Store.RecordClientVersion alongside the request's
+// X-Client-Version header so the updater can later refuse auto-installs
+// that would orphan an old iOS client. RecordClientVersion is no-op
+// when the header is absent (older iOS builds), so the request path
+// stays cheap on the common case.
+//
+// The matched Token is otherwise not propagated to the wrapped handler
+// — if a future endpoint needs to know which client it's serving,
+// thread it through the request context here at that point.
 func (s *Server) authed(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		raw := extractBearer(r)
@@ -307,9 +371,13 @@ func (s *Server) authed(next http.HandlerFunc) http.HandlerFunc {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "missing bearer token")
 			return
 		}
-		if _, ok := s.store.Validate(raw); !ok {
+		tok, ok := s.store.Validate(raw)
+		if !ok {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "invalid bearer token")
 			return
+		}
+		if cv := r.Header.Get("X-Client-Version"); cv != "" {
+			s.store.RecordClientVersion(tok.ID, cv)
 		}
 		next(w, r)
 	}

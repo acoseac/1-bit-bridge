@@ -25,6 +25,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -41,12 +42,21 @@ const (
 )
 
 // Token is the stored, hash-only record for a paired client.
+//
+// LastClientVersion / LastClientVersionAt record the iOS app version
+// the client most recently identified itself as via the
+// X-Client-Version request header (additive in protocol v1; absent on
+// older clients). Used by the updater to refuse auto-installing a
+// candidate whose MinClientVersion would orphan a still-active iOS
+// build that hasn't shipped through the App Store yet.
 type Token struct {
-	ID         string    `json:"id"`
-	Name       string    `json:"name"`
-	Hash       string    `json:"hash"` // SHA-256 hex of the raw token bytes
-	CreatedAt  time.Time `json:"createdAt"`
-	LastUsedAt time.Time `json:"lastUsedAt,omitempty"`
+	ID                  string    `json:"id"`
+	Name                string    `json:"name"`
+	Hash                string    `json:"hash"` // SHA-256 hex of the raw token bytes
+	CreatedAt           time.Time `json:"createdAt"`
+	LastUsedAt          time.Time `json:"lastUsedAt,omitempty"`
+	LastClientVersion   string    `json:"lastClientVersion,omitempty"`
+	LastClientVersionAt time.Time `json:"lastClientVersionAt,omitempty"`
 }
 
 // lastUsedFlushInterval is the shortest interval between persist() calls
@@ -287,6 +297,62 @@ func (s *Store) FlushLastUsed() error {
 	defer s.mu.Unlock()
 	return s.persist()
 }
+
+// RecordClientVersion stores the iOS app version a client identified
+// itself as via the X-Client-Version request header. Called from the
+// authed() middleware on every authenticated request.
+//
+// To avoid churning tokens.json on every request, the write piggybacks
+// on the existing 30-second LastUsedAt debounce: we update the
+// in-memory fields unconditionally (cheap), but only persist if the
+// version actually changed since last persist OR if the debounce
+// window has elapsed. A version that hasn't changed is the common
+// case (same app, same build, request after request) and skips disk
+// I/O entirely.
+//
+// id is the token ID returned by Validate. version is the raw header
+// value; whitespace is trimmed and over-long values are truncated to
+// 64 chars (defence against a misbehaving client filling the header
+// with junk and ballooning tokens.json).
+//
+// No-op when id or version is empty (e.g. an old iOS client that
+// doesn't send the header).
+func (s *Store) RecordClientVersion(id, ver string) {
+	ver = strings.TrimSpace(ver)
+	if id == "" || ver == "" {
+		return
+	}
+	if len(ver) > maxClientVersionLen {
+		ver = ver[:maxClientVersionLen]
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.tokens {
+		if s.tokens[i].ID != id {
+			continue
+		}
+		// Common case: same version, no need to touch fields or disk.
+		if s.tokens[i].LastClientVersion == ver {
+			return
+		}
+		s.tokens[i].LastClientVersion = ver
+		s.tokens[i].LastClientVersionAt = time.Now().UTC()
+		// A version *change* is rare (App Store update, dev build) and
+		// worth persisting promptly so the updater's compat gate sees
+		// the fresh data on the next poll. Skip the LastUsedAt
+		// debounce on this branch.
+		if err := s.persist(); err != nil {
+			log.Printf("auth: persist client-version: %v", err)
+		}
+		return
+	}
+}
+
+// maxClientVersionLen is the upper bound on the X-Client-Version value
+// we store. iOS CFBundleShortVersionString is dotted ints (e.g. "1.2.3"
+// or "1.2.3-build42"), well under this cap; anything larger is junk
+// from a misbehaving client.
+const maxClientVersionLen = 64
 
 // List returns a copy of the stored tokens (hashes only — raw tokens cannot
 // be recovered from the store).
