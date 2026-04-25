@@ -447,7 +447,12 @@ func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	// fine without update awareness; the admin UI shows "couldn't
 	// reach GitHub" in the LastError field.
 	updOpts := updater.Options{
-		AutoInstall: cfg.Update.AutoInstall,
+		// AutoInstall is gated on platform support at construction
+		// time. On Windows the swap path is unimplemented, and a
+		// true AutoInstall flag would log a "wiring incomplete"
+		// warning at every poll cycle; clamping here keeps the log
+		// quiet and matches Phase B's CanInstall=false behaviour.
+		AutoInstall: cfg.Update.AutoInstall && runtime.GOOS != "windows",
 	}
 	if cfg.Update.CheckIntervalHours > 0 {
 		updOpts.CheckInterval = time.Duration(cfg.Update.CheckIntervalHours) * time.Hour

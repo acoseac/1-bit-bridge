@@ -30,6 +30,12 @@ func TestParseQuietHoursRejects(t *testing.T) {
 		"00:60-01:00",    // minute out of range
 		"abc-def",        // garbage
 		"00:00-01:00:00", // too many colons in second half
+		// PR #43 review (Gemini): the original fmt.Sscanf parser
+		// silently accepted trailing junk on either side of HH:MM.
+		// strconv.Atoi rejects it; pin the strict-parse contract.
+		"12abc:00-01:00",
+		"12:00abc-01:00",
+		"12:00-01:00xyz",
 	}
 	for _, in := range bad {
 		if _, _, err := ParseQuietHours(in); err == nil {

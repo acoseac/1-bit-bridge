@@ -46,10 +46,13 @@ const DefaultRepo = "acoseac/1-bit-bridge"
 const DefaultCheckInterval = 6 * time.Hour
 
 // minCheckInterval is the floor enforced on operator-supplied poll
-// cadences — lower values would be wasteful and could push the
-// unauthed-IP budget into rate-limit territory if many bridges share
-// one egress IP.
-const minCheckInterval = 5 * time.Minute
+// cadences — lower values would push the unauthenticated GitHub API
+// budget (60/hr per source IP) into rate-limit territory, especially
+// when several bridges share one egress IP. PR #43 review (Gemini)
+// flagged the 5 min original as a DoS vector + a doc/impl mismatch
+// (PROTOCOL.md and the admin UI both advertise a 1 h floor); raising
+// to 1 h aligns the contract end-to-end.
+const minCheckInterval = 1 * time.Hour
 
 // Status is a snapshot of the updater's current view of the world.
 // All times are UTC. Returned by Status() as a value so callers don't

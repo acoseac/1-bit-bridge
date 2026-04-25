@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -200,18 +201,21 @@ func ParseQuietHours(s string) (startMin, endMin int, err error) {
 func parseHHMM(s string) (int, error) {
 	// strings.Split (no limit) so an extra colon in the input
 	// produces 3+ parts and fails — strings.SplitN(..., 2) would
-	// silently accept "01:00:00" as ["01", "00:00"] and Sscanf
-	// would parse "00" out of the second part, leaving the trailing
-	// ":00" unverified.
+	// silently accept "01:00:00" as ["01", "00:00"].
 	parts := strings.Split(s, ":")
 	if len(parts) != 2 {
 		return 0, fmt.Errorf("%q: expected HH:MM", s)
 	}
-	var h, m int
-	if _, err := fmt.Sscanf(parts[0], "%d", &h); err != nil || h < 0 || h > 23 {
+	// strconv.Atoi (not fmt.Sscanf) so trailing non-numeric input
+	// is rejected — "12abc" parses cleanly with Sscanf as 12 but
+	// errors with Atoi. PR #43 review caught the laxer Sscanf
+	// behaviour as a quiet-hours validation gap.
+	h, err := strconv.Atoi(parts[0])
+	if err != nil || h < 0 || h > 23 {
 		return 0, fmt.Errorf("%q: hour must be 00-23", s)
 	}
-	if _, err := fmt.Sscanf(parts[1], "%d", &m); err != nil || m < 0 || m > 59 {
+	m, err := strconv.Atoi(parts[1])
+	if err != nil || m < 0 || m > 59 {
 		return 0, fmt.Errorf("%q: minute must be 00-59", s)
 	}
 	return h*60 + m, nil
