@@ -50,7 +50,12 @@
   <div class="panel">
     <div class="panel-head">
       <h2>Updates</h2>
-      <button type="button" id="update-check" class="btn">Check now</button>
+      <span class="panel-actions">
+        {{if .Data.Update.UpdateAvailable}}
+          <button type="button" id="update-install" class="btn btn-primary">Install &amp; restart</button>
+        {{end}}
+        <button type="button" id="update-check" class="btn">Check now</button>
+      </span>
     </div>
     <dl>
       <dt>Current version</dt>
@@ -87,7 +92,7 @@
       <dd id="update-last-error" hidden></dd>
       {{end}}
     </dl>
-    <p class="panel-note">Phase A: notification only. The "Install" path lands in a follow-up release.</p>
+    <p class="panel-note">Install downloads the release archive, verifies the SHA-256 from <code>checksums.txt</code>, swaps the binary, and arms a rollback marker. The bridge restarts to load the new version. Active downloads block install (use the override only when nothing critical is in flight).</p>
   </div>
 
   <div class="panel">

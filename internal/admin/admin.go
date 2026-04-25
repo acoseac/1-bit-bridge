@@ -84,9 +84,18 @@ type Deps struct {
 // console. Implemented by the adapter in cmd/bridge/main.go around
 // internal/updater.Updater. CheckNow takes a context so a slow GitHub
 // response can be cancelled if the operator's browser disconnects.
+//
+// Install and Rollback return (action: human-readable success
+// summary, err) so the admin UI can show "Installed 0.2.0 — restart
+// to apply" without needing access to the raw Status struct. The
+// admin handler converts the typed errors from internal/updater
+// (ErrNoUpdate / ErrActiveSessions / ErrInstallNotSupported /
+// ErrPathNotWritable) into the appropriate HTTP status code.
 type UpdateProvider interface {
 	Status() UpdateStatus
 	CheckNow(ctx context.Context) UpdateStatus
+	Install(ctx context.Context, force bool) (UpdateStatus, error)
+	Rollback(force bool) error
 }
 
 // UpdateStatus is the wire shape /api/updates returns. Decoupled from
@@ -164,6 +173,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/stats", s.apiStats)
 	mux.HandleFunc("GET /api/updates", s.apiUpdatesGet)
 	mux.HandleFunc("POST /api/updates/check", s.apiUpdatesCheck)
+	mux.HandleFunc("POST /api/updates/install", s.apiUpdatesInstall)
+	mux.HandleFunc("POST /api/updates/rollback", s.apiUpdatesRollback)
 	mux.HandleFunc("POST /api/scan", s.apiScan)
 	mux.HandleFunc("GET /api/roots", s.apiRootsList)
 	mux.HandleFunc("POST /api/roots", s.apiRootsAdd)

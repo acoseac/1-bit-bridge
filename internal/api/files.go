@@ -149,7 +149,19 @@ func (s *Server) download(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveFile is the shared file-body path for /v1/read and /v1/download.
+//
+// Wraps the entire response in the SessionTracker's Begin/End so the
+// updater's install path can refuse to swap-and-restart while a
+// download is in flight (Hugo 2 / XMOS DAC DoP-lock loss is the
+// invariant we're protecting — see internal/updater/sessions.go for
+// the rationale). Tracker is nil-safe; pre-Phase-B bridges that
+// don't wire one continue to work unchanged.
 func (s *Server) serveFile(w http.ResponseWriter, r *http.Request) {
+	if s.sessions != nil {
+		s.sessions.Begin()
+		defer s.sessions.End()
+	}
+
 	clientPath := r.URL.Query().Get("path")
 	abs, info, err := s.resolver.ResolveChecked(clientPath)
 	if ok := writeResolveError(w, err); ok {

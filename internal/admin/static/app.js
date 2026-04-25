@@ -86,6 +86,22 @@ function initDashboard() {
     });
   }
 
+  // "Install & restart" downloads, verifies, swaps the binary, then
+  // hits the existing /api/restart endpoint. The two are kept
+  // sequential rather than fused into one server-side handler so the
+  // user sees distinct success / failure surfaces for each step.
+  // The 409 active-sessions branch surfaces an "Install anyway" prompt
+  // backed by ?force=1.
+  const updateInstallBtn = document.getElementById("update-install");
+  if (updateInstallBtn) {
+    updateInstallBtn.addEventListener("click", async () => {
+      if (!confirm("Install the new bridge release and restart?\n\nActive iOS downloads will be interrupted and will need to be retried.")) {
+        return;
+      }
+      await runInstall(updateInstallBtn, false);
+    });
+  }
+
   // Live-refresh the top-line numbers every 3 s.
   const tick = async () => {
     try {
@@ -114,6 +130,41 @@ function initDashboard() {
     }
   };
   const handle = setInterval(tick, 3000);
+}
+
+// runInstall hits POST /api/updates/install (with ?force=1 if the
+// user opted past the active-downloads guard) and then POSTs
+// /api/restart. The two requests are kept distinct so the install
+// vs. restart failure modes stay distinguishable in the UI; the
+// server-side handlers are also separate (see admin.go routing) so
+// the `force` semantics only affect install, not restart. Recursive
+// retry-with-force keeps the call site clean.
+async function runInstall(btn, force) {
+  const oldText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Installing…";
+  try {
+    const path = force ? "/api/updates/install?force=1" : "/api/updates/install";
+    await API.post(path);
+    btn.textContent = "Restarting…";
+    // Fire restart and don't await — the server tears the listener
+    // down before we can read the response body anyway. The page
+    // reload below races the restart's port-rebind; 2.5 s is the
+    // empirical sweet-spot for launchd respawn on macOS.
+    fetch("/api/restart", { method: "POST" }).catch(() => {});
+    setTimeout(() => window.location.reload(), 2500);
+  } catch (err) {
+    if (/409/.test(err.message) || /active-sessions/.test(err.message) || /active downloads/i.test(err.message)) {
+      const proceed = confirm("Active downloads are in flight — installing now will interrupt them and could glitch any iOS device currently playing a track.\n\nInstall anyway?");
+      if (proceed) {
+        return runInstall(btn, true);
+      }
+    } else {
+      alert("Install failed: " + err.message);
+    }
+    btn.textContent = oldText;
+    btn.disabled = false;
+  }
 }
 
 // renderUpdateTile mutates the dashboard's Updates panel from a Status
