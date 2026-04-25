@@ -229,8 +229,15 @@ func (u *Updater) Run(ctx context.Context) {
 	// Initial check on startup so the admin UI has something to show
 	// before the first interval elapses. Best-effort; errors are
 	// captured in Status.LastError.
-	u.checkOnce(ctx)
-	u.maybeAutoInstall(ctx)
+	//
+	// maybeAutoInstall ONLY runs after a successful checkOnce — a
+	// failed poll (GitHub down, rate-limited, transient network
+	// blip) leaves the previous poll's cached UpdateAvailable=true
+	// untouched, so an unconditional call would fire auto-install
+	// off stale state. Caught in PR #43 review (CodeRabbit).
+	if u.checkOnce(ctx) {
+		u.maybeAutoInstall(ctx)
+	}
 
 	t := time.NewTicker(u.interval)
 	defer t.Stop()
@@ -239,8 +246,9 @@ func (u *Updater) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			u.checkOnce(ctx)
-			u.maybeAutoInstall(ctx)
+			if u.checkOnce(ctx) {
+				u.maybeAutoInstall(ctx)
+			}
 		}
 	}
 }
@@ -326,9 +334,11 @@ func inWindow(startMin, endMin, now int) bool {
 
 // CheckNow forces a poll outside the regular schedule. Used by the
 // admin "Check now" button. Returns the post-check status — same as
-// the next Status() call would return.
+// the next Status() call would return. Discards the success bool
+// because the admin UI reads success/failure from the returned
+// Status.LastError field.
 func (u *Updater) CheckNow(ctx context.Context) Status {
-	u.checkOnce(ctx)
+	_ = u.checkOnce(ctx)
 	return u.Status()
 }
 
@@ -343,7 +353,12 @@ func (u *Updater) Status() Status {
 // checkOnce hits the GitHub Releases API and updates the cached
 // status. Splits into a separate method so Run / CheckNow share one
 // definition of "what does a poll do".
-func (u *Updater) checkOnce(ctx context.Context) {
+//
+// Returns true on a successful poll, false otherwise. Run uses the
+// bool to gate maybeAutoInstall — a failed poll leaves the cached
+// UpdateAvailable from a prior successful poll untouched, and we
+// must not auto-install off that stale state.
+func (u *Updater) checkOnce(ctx context.Context) bool {
 	rel, err := u.client.LatestRelease(ctx)
 	now := time.Now().UTC()
 
@@ -356,7 +371,7 @@ func (u *Updater) checkOnce(ctx context.Context) {
 		// admin UI claim "haven't checked in days". Operators reading
 		// the UI care about the last *successful* poll.
 		log.Printf("updater: poll %s: %v", u.repo, err)
-		return
+		return false
 	}
 
 	latest := normalizeTag(rel.TagName)
@@ -368,6 +383,7 @@ func (u *Updater) checkOnce(ctx context.Context) {
 	u.status.ReleaseNotesURL = rel.HTMLURL
 	u.status.LastCheck = now
 	u.status.LastError = ""
+	return true
 }
 
 // normalizeTag strips a leading "v" from a release tag so semver

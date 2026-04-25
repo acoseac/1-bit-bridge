@@ -4,6 +4,8 @@ package updater
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -115,6 +117,50 @@ func TestInWindow(t *testing.T) {
 			t.Errorf("inWindow(%d,%d,%d) = %v, want %v",
 				c.start, c.end, c.now, got, c.want)
 		}
+	}
+}
+
+func TestRunSkipsAutoInstallOnFailedPoll(t *testing.T) {
+	// Regression guard for PR #43 review (CodeRabbit): a stale
+	// UpdateAvailable=true from a prior successful poll must NOT
+	// drive auto-install on a poll cycle that itself failed —
+	// we'd be installing off out-of-date information about what
+	// GitHub actually has right now. The fix gates
+	// maybeAutoInstall on checkOnce returning true.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Always 500: every poll fails.
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	restartCalls := &atomic.Int32{}
+	upd := New(Options{
+		RepoOverride:       "fake/repo",
+		Client:             NewClient("fake/repo", time.Second).WithBaseURL(srv.URL),
+		AutoInstall:        true,
+		AutoInstallOpts:    &InstallOptions{DataDir: t.TempDir(), BinaryPath: "/nonexistent", Force: true, Verifier: noopVerifier},
+		AutoInstallRestart: func() { restartCalls.Add(1) },
+	})
+	// Pre-seed the cache with "an update is available" — simulates
+	// a prior successful poll. Then the FAKE poll fails; if the
+	// gate isn't honoured the auto-installer would consult this
+	// stale state and proceed.
+	upd.mu.Lock()
+	upd.status.LatestVersion = "9.9.9"
+	upd.status.UpdateAvailable = true
+	upd.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { upd.Run(ctx); close(done) }()
+	// Let the on-entry checkOnce + (skipped) maybeAutoInstall fire.
+	time.Sleep(150 * time.Millisecond)
+	cancel()
+	<-done
+
+	if restartCalls.Load() != 0 {
+		t.Errorf("restart fired %d times after a FAILED poll (cached UpdateAvailable was stale)", restartCalls.Load())
 	}
 }
 
