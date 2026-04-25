@@ -300,15 +300,19 @@ func (s *Store) FlushLastUsed() error {
 
 // RecordClientVersion stores the iOS app version a client identified
 // itself as via the X-Client-Version request header. Called from the
-// authed() middleware on every authenticated request.
+// authed() middleware on every authenticated request whose
+// X-Client-Version is non-empty AND differs from the value the
+// middleware's token-copy already shows (the cheap pre-check happens
+// in api.authed; this method always re-checks under the mutex).
 //
-// To avoid churning tokens.json on every request, the write piggybacks
-// on the existing 30-second LastUsedAt debounce: we update the
-// in-memory fields unconditionally (cheap), but only persist if the
-// version actually changed since last persist OR if the debounce
-// window has elapsed. A version that hasn't changed is the common
-// case (same app, same build, request after request) and skips disk
-// I/O entirely.
+// Persistence honours the same 30-second `lastUsedFlush` debounce as
+// LastUsedAt updates. Without that gate, a misbehaving or malicious
+// client could rotate its X-Client-Version on every request and force
+// synchronous tokens.json rewrites under the global lock — a DoS
+// vector against every other authenticated request. Bounded to one
+// persist per 30 s, the in-memory state still tracks the latest
+// value (so the updater's compat gate sees fresh data) and the
+// shutdown FlushLastUsed call lands any deferred update on disk.
 //
 // id is the token ID returned by Validate. version is the raw header
 // value; whitespace is trimmed and over-long values are truncated to
@@ -332,17 +336,20 @@ func (s *Store) RecordClientVersion(id, ver string) {
 			continue
 		}
 		// Common case: same version, no need to touch fields or disk.
+		// (api.authed already does this check against its token-copy
+		// to avoid the lock entirely; we re-check under the mutex
+		// because that copy may have been stale.)
 		if s.tokens[i].LastClientVersion == ver {
 			return
 		}
 		s.tokens[i].LastClientVersion = ver
 		s.tokens[i].LastClientVersionAt = time.Now().UTC()
-		// A version *change* is rare (App Store update, dev build) and
-		// worth persisting promptly so the updater's compat gate sees
-		// the fresh data on the next poll. Skip the LastUsedAt
-		// debounce on this branch.
-		if err := s.persist(); err != nil {
-			log.Printf("auth: persist client-version: %v", err)
+		// Same 30-second debounce as LastUsedAt — see method-level
+		// doc. FlushLastUsed on shutdown lands any deferred update.
+		if time.Since(s.lastUsedFlush) >= lastUsedFlushInterval {
+			if err := s.persist(); err != nil {
+				log.Printf("auth: persist client-version: %v", err)
+			}
 		}
 		return
 	}

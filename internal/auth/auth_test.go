@@ -3,6 +3,7 @@ package auth
 import (
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -370,31 +371,61 @@ func TestConcurrentMints(t *testing.T) {
 	}
 }
 
-func TestRecordClientVersionPersistsOnChange(t *testing.T) {
+func TestRecordClientVersionUpdatesInMemoryAndFlushPersists(t *testing.T) {
+	// RecordClientVersion honours the same 30 s lastUsedFlush debounce
+	// as LastUsedAt, so a call inside the debounce window touches
+	// in-memory state but does NOT rewrite tokens.json. Asserting the
+	// in-memory bump + the FlushLastUsed-driven persist together is
+	// what pins the post-PR-#41-review behaviour: fast in-memory,
+	// debounced disk, no DoS surface from version flip-flopping.
 	s, path := newTmpStore(t)
 	_, tok, _ := s.Mint("iPhone 15")
 	mtBefore := mustMtime(t, path)
 
-	// Sleep so a write produces a strictly-later mtime.
 	time.Sleep(10 * time.Millisecond)
 	s.RecordClientVersion(tok.ID, "1.2.3")
-	mtAfter := mustMtime(t, path)
-	if !mtAfter.After(mtBefore) {
-		t.Errorf("first RecordClientVersion did not persist (mtime %v == %v)", mtAfter, mtBefore)
-	}
+	// In-memory must be live for the updater's compat gate.
 	if got := s.List()[0]; got.LastClientVersion != "1.2.3" {
-		t.Errorf("LastClientVersion = %q, want 1.2.3", got.LastClientVersion)
+		t.Errorf("LastClientVersion = %q, want 1.2.3 (in-memory)", got.LastClientVersion)
+	}
+	// Debounced: no fresh disk write within the 30 s window after Mint.
+	if mt := mustMtime(t, path); mt.After(mtBefore) {
+		t.Errorf("RecordClientVersion within debounce window persisted (mtime %v > %v)", mt, mtBefore)
+	}
+	// FlushLastUsed forces the deferred update to land — same path the
+	// shutdown defer in cmd/bridge/main.go uses.
+	if err := s.FlushLastUsed(); err != nil {
+		t.Fatalf("FlushLastUsed: %v", err)
+	}
+	if mt := mustMtime(t, path); !mt.After(mtBefore) {
+		t.Errorf("FlushLastUsed did not persist deferred client-version update (mtime %v == %v)", mt, mtBefore)
+	}
+}
+
+func TestRecordClientVersionDebouncesUnderRapidChanges(t *testing.T) {
+	// DoS-protection regression guard (PR #41 review): a buggy or
+	// malicious client could rotate X-Client-Version on every request
+	// and force tokens.json rewrites under the global lock. The
+	// debounce caps that at one persist per lastUsedFlushInterval.
+	s, path := newTmpStore(t)
+	_, tok, _ := s.Mint("iPhone 15")
+	mtAfterMint := mustMtime(t, path)
+
+	for i := 0; i < 50; i++ {
+		s.RecordClientVersion(tok.ID, fmt.Sprintf("1.%d.%d", i/10, i%10))
+		time.Sleep(time.Millisecond)
+	}
+	if mt := mustMtime(t, path); mt.After(mtAfterMint) {
+		t.Errorf("flood of distinct versions broke the debounce (mtime %v > %v)", mt, mtAfterMint)
 	}
 }
 
 func TestRecordClientVersionSkipsDiskOnRepeat(t *testing.T) {
-	// The hot path is "same client, same version, request after request".
-	// RecordClientVersion must not rewrite tokens.json on every call —
-	// otherwise a busy /v1/manifest poll loop turns into proportional
-	// disk I/O.
+	// Hot-path coverage: same value, request after request, no
+	// in-memory or on-disk churn.
 	s, path := newTmpStore(t)
 	_, tok, _ := s.Mint("iPhone 15")
-	s.RecordClientVersion(tok.ID, "1.2.3") // first call persists
+	s.RecordClientVersion(tok.ID, "1.2.3")
 	mtAfterFirst := mustMtime(t, path)
 
 	for i := 0; i < 5; i++ {

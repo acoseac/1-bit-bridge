@@ -357,9 +357,11 @@ func protocolHeader(next http.Handler) http.Handler {
 // On a successful Validate, the matched token's ID is fed into
 // auth.Store.RecordClientVersion alongside the request's
 // X-Client-Version header so the updater can later refuse auto-installs
-// that would orphan an old iOS client. RecordClientVersion is no-op
-// when the header is absent (older iOS builds), so the request path
-// stays cheap on the common case.
+// that would orphan an old iOS client. The pre-check against
+// `tok.LastClientVersion` (cheap — `Validate` returns a copy under
+// the same mutex it took for LastUsedAt) skips the whole lock-+
+// linear-scan in the common case where the version hasn't changed
+// since last request.
 //
 // The matched Token is otherwise not propagated to the wrapped handler
 // — if a future endpoint needs to know which client it's serving,
@@ -376,7 +378,7 @@ func (s *Server) authed(next http.HandlerFunc) http.HandlerFunc {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "invalid bearer token")
 			return
 		}
-		if cv := r.Header.Get("X-Client-Version"); cv != "" {
+		if cv := r.Header.Get("X-Client-Version"); cv != "" && cv != tok.LastClientVersion {
 			s.store.RecordClientVersion(tok.ID, cv)
 		}
 		next(w, r)
