@@ -46,10 +46,13 @@ const DefaultRepo = "acoseac/1-bit-bridge"
 const DefaultCheckInterval = 6 * time.Hour
 
 // minCheckInterval is the floor enforced on operator-supplied poll
-// cadences — lower values would be wasteful and could push the
-// unauthed-IP budget into rate-limit territory if many bridges share
-// one egress IP.
-const minCheckInterval = 5 * time.Minute
+// cadences — lower values would push the unauthenticated GitHub API
+// budget (60/hr per source IP) into rate-limit territory, especially
+// when several bridges share one egress IP. PR #43 review (Gemini)
+// flagged the 5 min original as a DoS vector + a doc/impl mismatch
+// (PROTOCOL.md and the admin UI both advertise a 1 h floor); raising
+// to 1 h aligns the contract end-to-end.
+const minCheckInterval = 1 * time.Hour
 
 // Status is a snapshot of the updater's current view of the world.
 // All times are UTC. Returned by Status() as a value so callers don't
@@ -102,6 +105,41 @@ type Options struct {
 	// Client overrides the github.Client. Tests inject one pointed at a
 	// httptest.Server. Nil picks a default with a 10 s timeout.
 	Client *Client
+
+	// AutoInstall enables the poll-loop's automatic install attempt
+	// after every successful check. Off by default — production
+	// callers wire this from cfg.Update.AutoInstall, which is also
+	// off by default. Even when on, the auto-installer honours
+	// QuietHoursWindow and the Sessions tracker (active downloads
+	// block the install).
+	AutoInstall bool
+
+	// QuietHoursWindow restricts auto-install to a daily window in
+	// minutes-of-day (server-local time). Zero start AND zero end
+	// means "any time" (no restriction). Wrap-around windows (start
+	// > end) are supported for overnight schedules. Validate the raw
+	// "HH:MM-HH:MM" string at config-load time via
+	// config.ParseQuietHours.
+	QuietHoursStart int
+	QuietHoursEnd   int
+
+	// AutoInstallOpts is the pre-built InstallOptions the auto-
+	// installer hands to Install on each cycle. Nil disables the
+	// auto-install path entirely (regardless of AutoInstall — a
+	// guard so the server can't auto-install if it doesn't know
+	// where its own binary is).
+	AutoInstallOpts *InstallOptions
+
+	// AutoInstallRestart is invoked after a successful auto-install
+	// to trigger the process restart that loads the new binary.
+	// Nil disables the auto-install path. cmd/bridge/main.go wires
+	// this to os.Exit(0) — same restart contract as the admin
+	// console's Restart endpoint.
+	AutoInstallRestart func()
+
+	// Now overrides time.Now for the quiet-hours check. Tests
+	// inject a fixed clock. Nil = real clock.
+	Now func() time.Time
 }
 
 // Updater owns the cached status and the polling goroutine.
@@ -110,6 +148,13 @@ type Updater struct {
 	interval time.Duration
 	channel  string
 	client   *Client
+
+	autoInstall        bool
+	quietHoursStart    int
+	quietHoursEnd      int
+	autoInstallOpts    *InstallOptions
+	autoInstallRestart func()
+	now                func() time.Time
 
 	mu     sync.RWMutex
 	status Status
@@ -141,11 +186,21 @@ func New(opts Options) *Updater {
 		// the override so RepoOverride alone is enough to redirect.
 		client.repo = repo
 	}
+	now := opts.Now
+	if now == nil {
+		now = time.Now
+	}
 	return &Updater{
-		repo:     repo,
-		interval: interval,
-		channel:  channel,
-		client:   client,
+		repo:               repo,
+		interval:           interval,
+		channel:            channel,
+		client:             client,
+		autoInstall:        opts.AutoInstall,
+		quietHoursStart:    opts.QuietHoursStart,
+		quietHoursEnd:      opts.QuietHoursEnd,
+		autoInstallOpts:    opts.AutoInstallOpts,
+		autoInstallRestart: opts.AutoInstallRestart,
+		now:                now,
 		status: Status{
 			CurrentVersion: version.ServerVersion,
 			Channel:        channel,
@@ -158,6 +213,15 @@ func New(opts Options) *Updater {
 // info level (not stderr-fatal — a transient GitHub outage shouldn't
 // noise the operator's terminal).
 //
+// When auto-install is configured (AutoInstall=true + InstallOptions
+// + RestartCallback all wired in Options), every successful poll
+// that surfaces an update is followed by `maybeAutoInstall`, which
+// honours the quiet-hours window and the sessions tracker. A
+// successful auto-install ends with the restart callback firing,
+// which terminates the process; service-manager respawn loads the
+// new binary. The Phase B `maybeRollbackOnBoot` housekeeping then
+// confirms (or rolls back) on the next start.
+//
 // Designed to be invoked as `go updater.Run(scanCtx)` from serveCmd
 // alongside the periodic scanner — same lifetime, same cancellation
 // semantics.
@@ -165,7 +229,15 @@ func (u *Updater) Run(ctx context.Context) {
 	// Initial check on startup so the admin UI has something to show
 	// before the first interval elapses. Best-effort; errors are
 	// captured in Status.LastError.
-	u.checkOnce(ctx)
+	//
+	// maybeAutoInstall ONLY runs after a successful checkOnce — a
+	// failed poll (GitHub down, rate-limited, transient network
+	// blip) leaves the previous poll's cached UpdateAvailable=true
+	// untouched, so an unconditional call would fire auto-install
+	// off stale state. Caught in PR #43 review (CodeRabbit).
+	if u.checkOnce(ctx) {
+		u.maybeAutoInstall(ctx)
+	}
 
 	t := time.NewTicker(u.interval)
 	defer t.Stop()
@@ -174,16 +246,99 @@ func (u *Updater) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			u.checkOnce(ctx)
+			if u.checkOnce(ctx) {
+				u.maybeAutoInstall(ctx)
+			}
 		}
 	}
 }
 
+// maybeAutoInstall is the auto-install entry point. Returns
+// silently when auto-install is disabled, no update is available,
+// quiet-hours forbids it, sessions are inflight, or the
+// install/restart wiring is missing. On success the restart
+// callback is invoked — the process exits and service-manager
+// respawns into the new binary.
+//
+// All conditional gates log at info level (so the operator can
+// audit "why didn't auto-install fire") but never escalate to
+// stderr; a deferred install is a normal state.
+func (u *Updater) maybeAutoInstall(ctx context.Context) {
+	if !u.autoInstall {
+		return
+	}
+	if u.autoInstallOpts == nil || u.autoInstallRestart == nil {
+		// Defensive: the configuration says auto-install is on but
+		// the wiring is incomplete. Likely a programming error in
+		// cmd/bridge — log loudly so it's visible.
+		log.Printf("updater: autoInstall=true but install opts/restart callback are missing; skipping")
+		return
+	}
+	st := u.Status()
+	if !st.UpdateAvailable || st.LatestVersion == "" {
+		return
+	}
+	if !u.inAllowedWindow(u.now()) {
+		log.Printf("updater: auto-install deferred — outside quiet-hours window")
+		return
+	}
+	// Sessions inflight gate: refuse cleanly. The next poll cycle
+	// will try again.
+	if u.autoInstallOpts.Sessions != nil && u.autoInstallOpts.Sessions.Inflight() > 0 {
+		log.Printf("updater: auto-install deferred — %d active download(s)",
+			u.autoInstallOpts.Sessions.Inflight())
+		return
+	}
+
+	log.Printf("updater: auto-installing %s → %s", st.CurrentVersion, st.LatestVersion)
+	if _, err := u.Install(ctx, *u.autoInstallOpts); err != nil {
+		log.Printf("updater: auto-install failed: %v", err)
+		return
+	}
+	log.Printf("updater: auto-install complete; restarting to load new binary")
+	u.autoInstallRestart()
+}
+
+// inAllowedWindow returns true when the auto-installer is allowed
+// to fire at wall-clock `t`. The "quiet hours" config field names
+// the period the bridge is *quiet enough* to absorb a restart —
+// auto-install runs INSIDE the window, defers OUTSIDE.
+//
+// Default (start == end) means "any time" — no window restriction.
+// Under that semantics, an unset config implicitly allows the
+// auto-installer at every poll cycle, matching the principle that
+// a missing config field shouldn't surprise-disable behaviour the
+// operator explicitly opted into via AutoInstall=true.
+func (u *Updater) inAllowedWindow(t time.Time) bool {
+	if u.quietHoursStart == 0 && u.quietHoursEnd == 0 {
+		return true
+	}
+	mod := t.Hour()*60 + t.Minute()
+	return inWindow(u.quietHoursStart, u.quietHoursEnd, mod)
+}
+
+// inWindow mirrors config.IsInQuietHours but lives here so the
+// updater package doesn't import the config package (one-way
+// dependency: cmd/bridge wires config → updater Options, never the
+// other direction). The two functions are tested against each
+// other to stay in lockstep.
+func inWindow(startMin, endMin, now int) bool {
+	if startMin == endMin {
+		return false
+	}
+	if startMin < endMin {
+		return now >= startMin && now <= endMin
+	}
+	return now >= startMin || now <= endMin
+}
+
 // CheckNow forces a poll outside the regular schedule. Used by the
 // admin "Check now" button. Returns the post-check status — same as
-// the next Status() call would return.
+// the next Status() call would return. Discards the success bool
+// because the admin UI reads success/failure from the returned
+// Status.LastError field.
 func (u *Updater) CheckNow(ctx context.Context) Status {
-	u.checkOnce(ctx)
+	_ = u.checkOnce(ctx)
 	return u.Status()
 }
 
@@ -198,7 +353,12 @@ func (u *Updater) Status() Status {
 // checkOnce hits the GitHub Releases API and updates the cached
 // status. Splits into a separate method so Run / CheckNow share one
 // definition of "what does a poll do".
-func (u *Updater) checkOnce(ctx context.Context) {
+//
+// Returns true on a successful poll, false otherwise. Run uses the
+// bool to gate maybeAutoInstall — a failed poll leaves the cached
+// UpdateAvailable from a prior successful poll untouched, and we
+// must not auto-install off that stale state.
+func (u *Updater) checkOnce(ctx context.Context) bool {
 	rel, err := u.client.LatestRelease(ctx)
 	now := time.Now().UTC()
 
@@ -211,7 +371,7 @@ func (u *Updater) checkOnce(ctx context.Context) {
 		// admin UI claim "haven't checked in days". Operators reading
 		// the UI care about the last *successful* poll.
 		log.Printf("updater: poll %s: %v", u.repo, err)
-		return
+		return false
 	}
 
 	latest := normalizeTag(rel.TagName)
@@ -223,6 +383,7 @@ func (u *Updater) checkOnce(ctx context.Context) {
 	u.status.ReleaseNotesURL = rel.HTMLURL
 	u.status.LastCheck = now
 	u.status.LastError = ""
+	return true
 }
 
 // normalizeTag strips a leading "v" from a release tag so semver

@@ -408,19 +408,13 @@ func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	enricher := enrich.NewEnricher(manifestStore, mbClient, caaClient, deezerClient, artworkDir)
 	go enricher.Run(scanCtx)
 
-	// Background updater: polls GitHub Releases on a 6 h cadence
-	// (Phase A) and exposes operator-triggered Install via the admin
-	// console (Phase B). Lives off scanCtx so a SIGINT cancels it
-	// cleanly alongside the scanner. Poll failures are non-fatal —
-	// the bridge serves fine without update awareness; the admin UI
-	// shows "couldn't reach GitHub" in the LastError field.
-	upd := updater.New(updater.Options{})
-	go upd.Run(scanCtx)
-
 	// Sessions tracker counts inflight /v1/read + /v1/download
 	// requests. The Install path consults Inflight() before
 	// swapping the binary so Hugo 2 / XMOS DAC DoP-lock loss can't
 	// happen via a mid-stream restart.
+	//
+	// Constructed BEFORE the updater so the Phase C auto-installer's
+	// InstallOptions can reference it.
 	sessions := updater.NewTracker()
 
 	// Resolve the running binary path once at startup. Install
@@ -441,6 +435,56 @@ func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	// failed to come up cleanly. Failures are logged but
 	// non-fatal — operator can still recover by hand.
 	maybeRollbackOnBoot(stderr, cfg.DataDir, binaryPath)
+
+	// Background updater: polls GitHub Releases on a configurable
+	// cadence (Phase A), exposes operator-triggered Install via the
+	// admin console + CLI (Phase B), and optionally auto-installs
+	// inside a quiet-hours window with the same safeties as Phase
+	// B's manual path (Phase C).
+	//
+	// Lives off scanCtx so a SIGINT cancels it cleanly alongside
+	// the scanner. Poll failures are non-fatal — the bridge serves
+	// fine without update awareness; the admin UI shows "couldn't
+	// reach GitHub" in the LastError field.
+	updOpts := updater.Options{
+		// AutoInstall is gated on platform support at construction
+		// time. On Windows the swap path is unimplemented, and a
+		// true AutoInstall flag would log a "wiring incomplete"
+		// warning at every poll cycle; clamping here keeps the log
+		// quiet and matches Phase B's CanInstall=false behaviour.
+		AutoInstall: cfg.Update.AutoInstall && runtime.GOOS != "windows",
+	}
+	if cfg.Update.CheckIntervalHours > 0 {
+		updOpts.CheckInterval = time.Duration(cfg.Update.CheckIntervalHours) * time.Hour
+	}
+	if cfg.Update.QuietHours != "" {
+		// Validate already passed; this can't fail.
+		start, end, _ := config.ParseQuietHours(cfg.Update.QuietHours)
+		updOpts.QuietHoursStart = start
+		updOpts.QuietHoursEnd = end
+	}
+	if cfg.Update.AutoInstall && runtime.GOOS != "windows" {
+		// Auto-install only wires the install opts when (a) the
+		// operator opted in via config and (b) the platform
+		// supports the swap. On Windows the toggle is a no-op
+		// (consistent with Phase B's CanInstall=false on Windows).
+		updOpts.AutoInstallOpts = &updater.InstallOptions{
+			DataDir:    cfg.DataDir,
+			BinaryPath: binaryPath,
+			Sessions:   sessions,
+			Force:      false,
+		}
+		// On successful auto-install we exit; service-manager
+		// (launchd / systemd) respawns into the new binary. The
+		// Phase B maybeRollbackOnBoot then verifies version-match
+		// and either confirms or rolls back.
+		updOpts.AutoInstallRestart = func() {
+			fmt.Fprintln(stdout, "Restarting after auto-install (service manager will respawn).")
+			scanCancel()
+			os.Exit(0)
+		}
+	}
+	upd := updater.New(updOpts)
 
 	updAdapter := updateInfoAdapter{
 		u:          upd,

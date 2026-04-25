@@ -253,7 +253,22 @@ The CLI mirrors the admin-console flow: `bridge update --check` polls, `bridge u
 
 Boot-time rollback: install records `<dataDir>/update-state.json` with the target version BEFORE swapping the binary. On the next boot, the new binary checks the marker and either confirms the install (transitions to `installed`, retains `bridge.bak` for one more boot) or restores `bridge.bak` over the live binary (when the running version doesn't match the target — the new binary either failed to start or behaves wrong). The previous binary is kept as `bridge.bak` for one extra boot after a successful install so a manual rollback via `POST /api/updates/rollback` is still possible without re-downloading.
 
-A future revision (Phase C) adds opt-in auto-install with quiet-hours and a `MinClientVersion` compatibility gate (refuse to install a release whose floor would orphan a paired iOS client below it). The wire shape does not change for Phase C.
+**Auto-install (Phase C)** is opt-in via three new `bridge.yaml` keys under `update:`:
+
+| Key                   | Default | Meaning                                                                                  |
+|-----------------------|---------|------------------------------------------------------------------------------------------|
+| `autoInstall`         | `false` | When `true`, every successful poll that surfaces an update triggers install + restart    |
+| `quietHours`          | `""`    | Daily window in `HH:MM-HH:MM` form (server-local time). Empty = any time. Wraps midnight |
+| `checkIntervalHours`  | `0`     | Override the default 6 h poll cadence. `0` = use the default. Clamped to a 1 h floor      |
+
+Auto-install runs the same install path as the admin button (download → SHA-256 → codesign on macOS → atomic swap → arm rollback marker → restart). It defers to the next poll cycle when:
+
+- `autoInstall = false`
+- The wall-clock minute is outside `quietHours`
+- The sessions tracker reports inflight `/v1/download` or `/v1/read` requests
+- The platform is Windows (auto-install honours the same `CanInstall=false` as the manual path)
+
+**Known follow-up**: a `MinClientVersion` compat gate that consults each paired token's last-seen `X-Client-Version` against the candidate release's floor and refuses auto-install when it would orphan an active client. Implementing this requires a `release-meta.json` asset alongside the archive (the candidate's `MinClientVersion` lives inside its own binary today, which we can't introspect without installing it first). Operator-triggered installs are not affected — the operator made the call explicitly.
 
 **Trust boundary:** the install endpoint is admin-loopback only (same trust model as every other admin route — see `internal/admin/admin.go` doc comment). There is intentionally no remote-trigger install from iOS. Operators install at the bridge host. The iOS app's role is awareness.
 

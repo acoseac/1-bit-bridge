@@ -12,6 +12,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -19,14 +21,46 @@ import (
 
 // Config mirrors the on-disk bridge.yaml shape. See config/bridge.yaml.example.
 type Config struct {
-	LibraryRoots    []string `yaml:"libraryRoots"`
-	ListenAddress   string   `yaml:"listenAddress"`
-	AdminAddress    string   `yaml:"adminAddress,omitempty"`
-	DataDir         string   `yaml:"dataDir"`
-	TLSCertPath     string   `yaml:"tlsCertPath,omitempty"`
-	TLSKeyPath      string   `yaml:"tlsKeyPath,omitempty"`
-	ScanIntervalSec int      `yaml:"scanIntervalSec"`
-	LibraryName     string   `yaml:"libraryName"`
+	LibraryRoots    []string     `yaml:"libraryRoots"`
+	ListenAddress   string       `yaml:"listenAddress"`
+	AdminAddress    string       `yaml:"adminAddress,omitempty"`
+	DataDir         string       `yaml:"dataDir"`
+	TLSCertPath     string       `yaml:"tlsCertPath,omitempty"`
+	TLSKeyPath      string       `yaml:"tlsKeyPath,omitempty"`
+	ScanIntervalSec int          `yaml:"scanIntervalSec"`
+	LibraryName     string       `yaml:"libraryName"`
+	Update          UpdateConfig `yaml:"update,omitempty"`
+}
+
+// UpdateConfig configures the Phase C opt-in auto-installer. The
+// safeties from Phase B (stream-active gate, signature verification,
+// rollback marker) ALWAYS apply — these toggles only decide whether
+// auto-install is attempted at all and within what time window.
+//
+// Default state: AutoInstall=false (operator-triggered only). The
+// admin Settings UI exposes these for hand-edit; YAML-direct edits
+// are also supported.
+type UpdateConfig struct {
+	// AutoInstall enables the poll-loop's automatic install attempt.
+	// Off by default — the operator must opt in. Even when on, the
+	// stream-active gate refuses if any /v1/download is in flight,
+	// and quiet-hours (when set) restrict to the configured window.
+	AutoInstall bool `yaml:"autoInstall,omitempty"`
+
+	// QuietHours restricts auto-install to a daily window in
+	// "HH:MM-HH:MM" form using the server's local time. Empty means
+	// "any time". The window may wrap midnight (e.g.
+	// "23:00-06:00") — see config_test.go for the wrap-around test
+	// matrix. Any-clock format that fails to parse rejects at
+	// Validate time so a bad config doesn't silently disable the
+	// auto-installer.
+	QuietHours string `yaml:"quietHours,omitempty"`
+
+	// CheckIntervalHours overrides the default poll cadence (6 h).
+	// Operator-tunable for installations on metered or rate-limited
+	// uplinks. Values below 1h are clamped at runtime by the updater.
+	// Zero = use the package default.
+	CheckIntervalHours int `yaml:"checkIntervalHours,omitempty"`
 }
 
 // Defaults applied when a field is absent or zero-valued.
@@ -129,7 +163,80 @@ func (c *Config) Validate() error {
 	if err := validateLoopbackAddress(c.AdminAddress); err != nil {
 		return fmt.Errorf("adminAddress %q: %w", c.AdminAddress, err)
 	}
+	if c.Update.QuietHours != "" {
+		if _, _, err := ParseQuietHours(c.Update.QuietHours); err != nil {
+			return fmt.Errorf("update.quietHours %q: %w", c.Update.QuietHours, err)
+		}
+	}
+	if c.Update.CheckIntervalHours < 0 {
+		return fmt.Errorf("update.checkIntervalHours: must be >= 0, got %d", c.Update.CheckIntervalHours)
+	}
 	return nil
+}
+
+// ParseQuietHours parses a "HH:MM-HH:MM" window into start and end
+// minute-of-day values (0-1439 each). Returns an error for malformed
+// input. The window may wrap midnight (start > end means "from
+// start until midnight, then midnight until end").
+//
+// Used by Validate to catch bad config at load time, and by the
+// updater's auto-install scheduler to decide whether the current
+// wall-clock minute is inside the window.
+func ParseQuietHours(s string) (startMin, endMin int, err error) {
+	parts := strings.SplitN(s, "-", 2)
+	if len(parts) != 2 {
+		return 0, 0, fmt.Errorf("expected HH:MM-HH:MM")
+	}
+	startMin, err = parseHHMM(parts[0])
+	if err != nil {
+		return 0, 0, fmt.Errorf("start: %w", err)
+	}
+	endMin, err = parseHHMM(parts[1])
+	if err != nil {
+		return 0, 0, fmt.Errorf("end: %w", err)
+	}
+	return startMin, endMin, nil
+}
+
+func parseHHMM(s string) (int, error) {
+	// strings.Split (no limit) so an extra colon in the input
+	// produces 3+ parts and fails — strings.SplitN(..., 2) would
+	// silently accept "01:00:00" as ["01", "00:00"].
+	parts := strings.Split(s, ":")
+	if len(parts) != 2 {
+		return 0, fmt.Errorf("%q: expected HH:MM", s)
+	}
+	// strconv.Atoi (not fmt.Sscanf) so trailing non-numeric input
+	// is rejected — "12abc" parses cleanly with Sscanf as 12 but
+	// errors with Atoi. PR #43 review caught the laxer Sscanf
+	// behaviour as a quiet-hours validation gap.
+	h, err := strconv.Atoi(parts[0])
+	if err != nil || h < 0 || h > 23 {
+		return 0, fmt.Errorf("%q: hour must be 00-23", s)
+	}
+	m, err := strconv.Atoi(parts[1])
+	if err != nil || m < 0 || m > 59 {
+		return 0, fmt.Errorf("%q: minute must be 00-59", s)
+	}
+	return h*60 + m, nil
+}
+
+// IsInQuietHours returns true when minute-of-day `now` falls inside
+// [startMin, endMin]. Handles midnight-wrap windows (start > end =
+// the window crosses midnight, so the "inside" is [start, 1440) ∪
+// [0, end]).
+func IsInQuietHours(startMin, endMin, now int) bool {
+	if startMin == endMin {
+		// Degenerate: zero-length window matches only the exact
+		// boundary minute. Treat as "always outside" to avoid
+		// accidentally restricting to a single minute.
+		return false
+	}
+	if startMin < endMin {
+		return now >= startMin && now <= endMin
+	}
+	// Wraps midnight.
+	return now >= startMin || now <= endMin
 }
 
 // validateLoopbackAddress enforces that the admin listener binds only to a
