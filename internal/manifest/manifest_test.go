@@ -32,7 +32,8 @@ func TestExtractFLACTagsAndFormat(t *testing.T) {
 	if tr.Title != "Song" || tr.Artist != "An Artist" || tr.Album != "An Album" {
 		t.Errorf("tags: %+v", tr)
 	}
-	if tr.TrackNumber != 3 || tr.Year != 2024 || tr.Genre != "Jazz" {
+	if tr.TrackNumber == nil || *tr.TrackNumber != 3 ||
+		tr.Year == nil || *tr.Year != 2024 || tr.Genre != "Jazz" {
 		t.Errorf("tags: %+v", tr)
 	}
 	if tr.MusicBrainzAlbumID != "album-mbid-1" {
@@ -50,7 +51,7 @@ func TestExtractFLACTagsAndFormat(t *testing.T) {
 	if tr.Duration == nil || *tr.Duration < 4.9 || *tr.Duration > 5.1 {
 		t.Errorf("duration: %v (want ~5)", tr.Duration)
 	}
-	if tr.IsDSD {
+	if tr.IsDSD != nil && *tr.IsDSD {
 		t.Error("FLAC flagged as DSD")
 	}
 }
@@ -78,10 +79,10 @@ func TestExtractDSFTagsAndFormat(t *testing.T) {
 	if tr.Album != "DSF Album" {
 		t.Errorf("album = %q", tr.Album)
 	}
-	if tr.TrackNumber != 5 {
-		t.Errorf("track = %d", tr.TrackNumber)
+	if tr.TrackNumber == nil || *tr.TrackNumber != 5 {
+		t.Errorf("track = %v", tr.TrackNumber)
 	}
-	if !tr.IsDSD {
+	if tr.IsDSD == nil || !*tr.IsDSD {
 		t.Error("DSF should have IsDSD = true")
 	}
 	if tr.SampleRate == nil || *tr.SampleRate != 2822400 {

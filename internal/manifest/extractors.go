@@ -93,13 +93,13 @@ func populateFromTagMetadata(m tag.Metadata, t *Track) {
 		t.Genre = v
 	}
 	if y := m.Year(); y != 0 {
-		t.Year = y
+		t.Year = &y
 	}
 	if tn, _ := m.Track(); tn != 0 {
-		t.TrackNumber = tn
+		t.TrackNumber = &tn
 	}
 	if d, _ := m.Disc(); d != 0 {
-		t.DiscNumber = d
+		t.DiscNumber = &d
 	}
 	// MusicBrainz IDs — many tagged libraries carry these.
 	if raw := m.Raw(); raw != nil {
@@ -224,7 +224,8 @@ func extractDSF(absPath string, t *Track) error {
 	bps := int(bitsPerSample)
 	t.SampleRate = &sr
 	t.BitsPerSample = &bps
-	t.IsDSD = bitsPerSample == 1
+	isDSD := bitsPerSample == 1
+	t.IsDSD = &isDSD
 	if sampleRate > 0 && sampleCount > 0 {
 		d := float64(sampleCount) / float64(sampleRate)
 		t.Duration = &d

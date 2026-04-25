@@ -11,6 +11,13 @@ import "time"
 // what the iOS Track model decodes. Optional fields use pointer types so
 // JSON null is preserved (the iOS decoder uses Swift's `?` optionals for
 // the same reason — a missing year is different from year == 0).
+//
+// `IsDSD`, `TrackNumber`, `DiscNumber`, `Year` are pointer types for the
+// same reason: with a non-pointer + `omitempty`, the encoder silently
+// drops `false` / `0` from the wire, leaving the iOS decoder unable to
+// distinguish "the extractor saw an explicit zero" from "the extractor
+// found no tag". Pointers preserve the `null` vs `0` vs `1` distinction
+// every other optional field already gets.
 type Track struct {
 	Path               string    `json:"path"`
 	Size               int64     `json:"size"`
@@ -19,14 +26,14 @@ type Track struct {
 	Artist             string    `json:"artist,omitempty"`
 	AlbumArtist        string    `json:"albumArtist,omitempty"`
 	Album              string    `json:"album,omitempty"`
-	TrackNumber        int       `json:"trackNumber,omitempty"`
-	DiscNumber         int       `json:"discNumber,omitempty"`
-	Year               int       `json:"year,omitempty"`
+	TrackNumber        *int      `json:"trackNumber,omitempty"`
+	DiscNumber         *int      `json:"discNumber,omitempty"`
+	Year               *int      `json:"year,omitempty"`
 	Genre              string    `json:"genre,omitempty"`
 	Duration           *float64  `json:"duration,omitempty"`      // seconds
 	SampleRate         *float64  `json:"sampleRate,omitempty"`    // Hz (e.g. 96000, 2822400)
 	BitsPerSample      *int      `json:"bitsPerSample,omitempty"` // 1 for DSD, 16/24/32 for PCM
-	IsDSD              bool      `json:"isDSD,omitempty"`
+	IsDSD              *bool     `json:"isDSD,omitempty"`
 	ReplayGainTrackDB  *float64  `json:"replayGainTrackDB,omitempty"`
 	ReplayGainAlbumDB  *float64  `json:"replayGainAlbumDB,omitempty"`
 	MusicBrainzTrackID string    `json:"musicBrainzTrackID,omitempty"`
