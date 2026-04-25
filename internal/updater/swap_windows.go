@@ -107,11 +107,14 @@ func swapBinary(dst, newBinary, backupExt string) error {
 
 	// Durability hint via the parent directory. Windows doesn't have
 	// a direct "fsync this directory" API; FlushFileBuffers on the
-	// dir handle has system-dependent semantics but is the closest
-	// equivalent. Best-effort; failures here don't fail the install.
+	// dir handle is the closest equivalent. **Requires GENERIC_WRITE**
+	// — without it, FlushFileBuffers fails with ERROR_ACCESS_DENIED
+	// and the durability hint is silently a no-op (Gemini flagged on
+	// PR #48). Best-effort overall; even a failed flush isn't fatal,
+	// the new binary is on disk via os.Rename's own buffering.
 	if h, err := windows.CreateFile(
 		windows.StringToUTF16Ptr(filepath.Dir(dst)),
-		windows.GENERIC_READ,
+		windows.GENERIC_READ|windows.GENERIC_WRITE,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
 		nil,
 		windows.OPEN_EXISTING,
@@ -169,22 +172,36 @@ func stopServiceIfRunning() (*scmStopHandle, error) {
 		m.Disconnect()
 		return nil, fmt.Errorf("query service: %w", err)
 	}
-	if state.State == svc.Stopped {
+	switch state.State {
+	case svc.Stopped:
 		s.Close()
 		m.Disconnect()
 		return nil, nil // nothing to do
+	case svc.StopPending:
+		// Service is already stopping (operator hit Stop manually,
+		// or a prior Control(Stop) is still settling). Sending
+		// another Stop here returns ERROR_SERVICE_CANNOT_ACCEPT_CTRL
+		// — skip it, just wait for the existing stop to finish
+		// (Gemini flagged on PR #48).
+		if werr := waitServiceStopped(s, scmStopWait); werr != nil {
+			s.Close()
+			m.Disconnect()
+			return nil, werr
+		}
+		return &scmStopHandle{scm: m, svc: s}, nil
+	default:
+		if _, err := s.Control(svc.Stop); err != nil {
+			s.Close()
+			m.Disconnect()
+			return nil, fmt.Errorf("send stop: %w", err)
+		}
+		if werr := waitServiceStopped(s, scmStopWait); werr != nil {
+			s.Close()
+			m.Disconnect()
+			return nil, werr
+		}
+		return &scmStopHandle{scm: m, svc: s}, nil
 	}
-	if _, err := s.Control(svc.Stop); err != nil {
-		s.Close()
-		m.Disconnect()
-		return nil, fmt.Errorf("send stop: %w", err)
-	}
-	if werr := waitServiceStopped(s, scmStopWait); werr != nil {
-		s.Close()
-		m.Disconnect()
-		return nil, werr
-	}
-	return &scmStopHandle{scm: m, svc: s}, nil
 }
 
 // waitServiceStopped polls Service.Query until the state reaches

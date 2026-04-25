@@ -3,11 +3,13 @@
 package packaging
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"time"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 )
@@ -188,19 +190,20 @@ func waitForServiceStopped(s *mgr.Service, timeout time.Duration) error {
 //   - ("", err) for any genuine SCM failure (service exists but
 //     can't be replaced, CreateService failed, etc.).
 //
-// `mgr.Connect()` is the elevation probe: it returns "Access is
-// denied" when the calling process isn't running as administrator,
-// matching what `bridge init` running under a normal user shell
-// gets. The error string isn't structured, so we look for the
-// well-known Windows error text rather than the typed
-// ERROR_ACCESS_DENIED constant — the latter would require
-// `golang.org/x/sys/windows` direct, and the string check has
-// matched on every Windows release we've tested against.
+// `mgr.Connect()` returns `windows.ERROR_ACCESS_DENIED` when the
+// calling process isn't running as administrator — the elevation
+// probe. We classify with `errors.Is` against the typed sentinel
+// (Gemini flagged the prior "swallow every connect error" path on
+// PR #48 as too permissive). Other Connect errors (RPC down,
+// SCM service stopped) are real failures and bubble up.
 func tryInstallWindowsService(p Params) (string, error) {
 	m, err := mgr.Connect()
 	if err != nil {
-		// Non-elevated: fall through to startup folder.
-		return "", nil
+		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+			// Non-elevated: fall through to startup folder.
+			return "", nil
+		}
+		return "", fmt.Errorf("connect SCM: %w", err)
 	}
 	m.Disconnect()
 	// We're elevated — proceed with the real install. Any error
@@ -210,13 +213,16 @@ func tryInstallWindowsService(p Params) (string, error) {
 
 // tryUninstallWindowsService mirrors `tryInstallWindowsService` for
 // the uninstall path. SCM access denied → return nil (no service
-// to remove from a non-elevated context); other errors bubble up.
-// Idempotent: a not-registered service is also nil.
+// to remove from a non-elevated context); other Connect errors
+// bubble up so a genuine SCM-down state is visible. Idempotent:
+// a not-registered service is also nil.
 func tryUninstallWindowsService() error {
 	m, err := mgr.Connect()
 	if err != nil {
-		// Non-elevated; nothing we can do via SCM.
-		return nil
+		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+			return nil
+		}
+		return fmt.Errorf("connect SCM: %w", err)
 	}
 	m.Disconnect()
 	return UninstallWindowsService()
