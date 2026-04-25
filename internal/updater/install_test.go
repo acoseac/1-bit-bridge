@@ -20,6 +20,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/auth"
 )
 
 // installFixture stands up a fake GitHub releases server serving:
@@ -359,5 +361,186 @@ func TestArchiveAndChecksumForRequiresMatchingPlatformAsset(t *testing.T) {
 	}
 	if _, _, err := archiveAndChecksumFor(rel); err == nil {
 		t.Error("expected ErrNoMatchingAsset for unrelated platform asset")
+	}
+}
+
+// Phase C compat-gate end-to-end: when the fixture's release-meta
+// .json declares a MinClientVersion floor and the operator-supplied
+// TokenSnapshot includes a token at a lower version, Install must
+// refuse with ErrCompatGateRefused. The gate runs BEFORE download
+// + extract, so the fixture's archive isn't even fetched —
+// mux-counter not strictly necessary, the error type is the proof.
+func TestInstall_CompatGateRefusesOrphanRelease(t *testing.T) {
+	fix := newInstallFixture(t, "0.2.0")
+
+	// Augment the fixture: serve release-meta.json under /asset/,
+	// and re-publish the release JSON with the new asset attached.
+	metaBody := []byte(`{"version":"0.2.0","minClientVersion":"1.5.0","protocolVersion":1}`)
+	fix.server.Config.Handler.(*http.ServeMux).HandleFunc(
+		"/asset/release-meta.json",
+		func(w http.ResponseWriter, r *http.Request) { w.Write(metaBody) },
+	)
+	rel := Release{
+		TagName: "v" + fix.latestVersion,
+		HTMLURL: fix.server.URL + "/release/v" + fix.latestVersion,
+		Assets: []ReleaseAsset{
+			{Name: fix.archiveName, BrowserDownloadURL: fix.server.URL + "/asset/" + fix.archiveName},
+			{Name: "checksums.txt", BrowserDownloadURL: fix.server.URL + "/asset/checksums.txt"},
+			{Name: ReleaseMetaAssetName, BrowserDownloadURL: fix.server.URL + "/asset/release-meta.json"},
+		},
+	}
+	releaseJSON, err := json.Marshal(rel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fix.releaseJSON = releaseJSON
+
+	dir := t.TempDir()
+	livePath := filepath.Join(dir, "bridge")
+	if err := os.WriteFile(livePath, []byte("bridge-binary-0.1.0"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// TokenSnapshot returns an old token at 1.0.0 — below the
+	// fixture's 1.5.0 floor.
+	upd := New(Options{
+		RepoOverride: "fake/repo",
+		Client:       NewClient("fake/repo", time.Second).WithBaseURL(fix.server.URL),
+		TokenSnapshot: func() []auth.Token {
+			return []auth.Token{
+				{ID: "ABCDEF", Name: "iPhone Old", LastClientVersion: "1.0.0"},
+			}
+		},
+	})
+	upd.mu.Lock()
+	upd.status.CurrentVersion = "0.1.0"
+	upd.status.LatestVersion = fix.latestVersion
+	upd.status.UpdateAvailable = true
+	upd.status.LastCheck = time.Now().UTC()
+	upd.mu.Unlock()
+
+	_, err = upd.Install(context.Background(), InstallOptions{
+		DataDir:    dir,
+		BinaryPath: livePath,
+		Force:      true,
+		Verifier:   noopVerifier,
+	})
+	if !errors.Is(err, ErrCompatGateRefused) {
+		t.Fatalf("Install: err = %v, want ErrCompatGateRefused", err)
+	}
+
+	// Live binary unchanged (gate blocked download/swap).
+	got, _ := os.ReadFile(livePath)
+	if string(got) != "bridge-binary-0.1.0" {
+		t.Errorf("live binary changed despite refused install: %q", string(got))
+	}
+
+	// Status surfaces the deferred reason.
+	st := upd.Status()
+	if st.DeferredReason == "" {
+		t.Errorf("Status.DeferredReason should explain the gate refusal")
+	}
+}
+
+// OverrideCompatGate must let the install proceed despite the
+// orphan-risking floor. Operator-only path; the auto-installer
+// never sets this flag.
+func TestInstall_CompatGateOverrideAllowsOrphanRelease(t *testing.T) {
+	fix := newInstallFixture(t, "0.2.0")
+	metaBody := []byte(`{"version":"0.2.0","minClientVersion":"1.5.0","protocolVersion":1}`)
+	fix.server.Config.Handler.(*http.ServeMux).HandleFunc(
+		"/asset/release-meta.json",
+		func(w http.ResponseWriter, r *http.Request) { w.Write(metaBody) },
+	)
+	rel := Release{
+		TagName: "v" + fix.latestVersion,
+		HTMLURL: fix.server.URL + "/release/v" + fix.latestVersion,
+		Assets: []ReleaseAsset{
+			{Name: fix.archiveName, BrowserDownloadURL: fix.server.URL + "/asset/" + fix.archiveName},
+			{Name: "checksums.txt", BrowserDownloadURL: fix.server.URL + "/asset/checksums.txt"},
+			{Name: ReleaseMetaAssetName, BrowserDownloadURL: fix.server.URL + "/asset/release-meta.json"},
+		},
+	}
+	releaseJSON, _ := json.Marshal(rel)
+	fix.releaseJSON = releaseJSON
+
+	dir := t.TempDir()
+	livePath := filepath.Join(dir, "bridge")
+	if err := os.WriteFile(livePath, []byte("bridge-binary-0.1.0"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	upd := New(Options{
+		RepoOverride: "fake/repo",
+		Client:       NewClient("fake/repo", time.Second).WithBaseURL(fix.server.URL),
+		TokenSnapshot: func() []auth.Token {
+			return []auth.Token{
+				{ID: "ABCDEF", Name: "iPhone Old", LastClientVersion: "1.0.0"},
+			}
+		},
+	})
+	upd.mu.Lock()
+	upd.status.CurrentVersion = "0.1.0"
+	upd.status.LatestVersion = fix.latestVersion
+	upd.status.UpdateAvailable = true
+	upd.status.LastCheck = time.Now().UTC()
+	upd.mu.Unlock()
+
+	_, err := upd.Install(context.Background(), InstallOptions{
+		DataDir:            dir,
+		BinaryPath:         livePath,
+		Force:              true,
+		Verifier:           noopVerifier,
+		OverrideCompatGate: true, // operator override
+	})
+	if err != nil {
+		t.Fatalf("Install with override should succeed: %v", err)
+	}
+
+	// Live binary swapped to the new version despite orphan risk.
+	got, _ := os.ReadFile(livePath)
+	if string(got) != "bridge-binary-0.2.0" {
+		t.Errorf("override didn't swap binary: live = %q", string(got))
+	}
+}
+
+// Backwards compat: a release that doesn't ship release-meta.json
+// (any pre-Phase-C build) must NOT trip the gate. The fetcher
+// returns ErrReleaseMetaMissing and Install treats it as no floor.
+func TestInstall_NoReleaseMetaIsNoFloor(t *testing.T) {
+	fix := newInstallFixture(t, "0.2.0")
+
+	upd := New(Options{
+		RepoOverride: "fake/repo",
+		Client:       NewClient("fake/repo", time.Second).WithBaseURL(fix.server.URL),
+		// Even with an old token in the snapshot, the absent meta
+		// means "no floor" so the gate stays permissive.
+		TokenSnapshot: func() []auth.Token {
+			return []auth.Token{
+				{ID: "ABCDEF", Name: "iPhone Old", LastClientVersion: "0.1.0"},
+			}
+		},
+	})
+
+	dir := t.TempDir()
+	livePath := filepath.Join(dir, "bridge")
+	if err := os.WriteFile(livePath, []byte("bridge-binary-0.1.0"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	upd.mu.Lock()
+	upd.status.CurrentVersion = "0.1.0"
+	upd.status.LatestVersion = fix.latestVersion
+	upd.status.UpdateAvailable = true
+	upd.status.LastCheck = time.Now().UTC()
+	upd.mu.Unlock()
+
+	_, err := upd.Install(context.Background(), InstallOptions{
+		DataDir:    dir,
+		BinaryPath: livePath,
+		Force:      true,
+		Verifier:   noopVerifier,
+	})
+	if err != nil {
+		t.Fatalf("Install (no release-meta) should succeed: %v", err)
 	}
 }

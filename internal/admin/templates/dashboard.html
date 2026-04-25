@@ -91,6 +91,13 @@
       <dt hidden>Last error</dt>
       <dd id="update-last-error" hidden></dd>
       {{end}}
+      {{if .Data.Update.DeferredReason}}
+      <dt>Held update</dt>
+      <dd id="update-deferred"><span class="badge running">deferred</span> {{.Data.Update.DeferredReason}}</dd>
+      {{else}}
+      <dt hidden>Held update</dt>
+      <dd id="update-deferred" hidden></dd>
+      {{end}}
     </dl>
     <p class="panel-note">Install downloads the release archive, verifies the SHA-256 from <code>checksums.txt</code>, swaps the binary, and arms a rollback marker. The bridge restarts to load the new version. Active downloads block install (use the override only when nothing critical is in flight).</p>
   </div>

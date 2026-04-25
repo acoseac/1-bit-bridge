@@ -326,6 +326,25 @@ function renderUpdateTile(u) {
     latest.textContent = u.latestVersion;
     latest.hidden = false;
   }
+
+  // DeferredReason: the auto-installer's gate refused this cycle
+  // (currently MinClientVersion compat). Surface as a yellow
+  // "deferred" badge so the operator can see why an available
+  // update isn't installing automatically.
+  const deferred = document.getElementById("update-deferred");
+  if (deferred) {
+    if (u && u.deferredReason) {
+      deferred.innerHTML = `<span class="badge running">deferred</span> ${escapeHTML(u.deferredReason)}`;
+      deferred.hidden = false;
+      const dt = deferred.previousElementSibling;
+      if (dt) dt.hidden = false;
+    } else {
+      deferred.hidden = true;
+      deferred.innerHTML = "";
+      const dt = deferred.previousElementSibling;
+      if (dt) dt.hidden = true;
+    }
+  }
 }
 
 function escapeHTML(s) {

@@ -40,6 +40,15 @@ type InstallOptions struct {
 	// SHA-256-only path. Tests inject a no-op verifier because the
 	// fake archive's binary isn't Apple-signed.
 	Verifier func(ctx context.Context, newBinary string) error
+
+	// OverrideCompatGate, when true, lets Install proceed past the
+	// MinClientVersion compat gate (i.e. install a release whose
+	// floor would orphan one or more paired clients). Wired only
+	// to the manual `bridge update --override-client-floor` CLI
+	// path; the auto-installer never sets this flag. Operators
+	// who flip it accept the orphan-on-purpose UX (older devices
+	// must update before they reconnect).
+	OverrideCompatGate bool
 }
 
 // Install downloads, verifies, swaps, and arms the rollback marker
@@ -96,6 +105,26 @@ func (u *Updater) Install(ctx context.Context, opts InstallOptions) (Status, err
 	archive, checksums, err := archiveAndChecksumFor(rel)
 	if err != nil {
 		return status, err
+	}
+
+	// MinClientVersion compat gate. Refuses installs whose floor
+	// would orphan a still-paired older iOS client. The auto-
+	// installer always honours the gate; the manual CLI / admin
+	// path can override via OverrideCompatGate. Pre-Phase-C
+	// releases that don't ship release-meta.json are treated as
+	// "no floor" — the gate is permissive when the asset is
+	// absent so we don't block legitimate older releases.
+	if !opts.OverrideCompatGate && u.tokenSnapshot != nil {
+		meta, err := releaseMetaFor(ctx, u.client.http, rel)
+		if err != nil && !errors.Is(err, ErrReleaseMetaMissing) {
+			return status, fmt.Errorf("fetch release-meta.json: %w", err)
+		}
+		if err == nil {
+			if reason := compatGateReason(meta.MinClientVersion, u.tokenSnapshot()); reason != "" {
+				u.recordDeferredReason(reason)
+				return status, fmt.Errorf("%w: %s", ErrCompatGateRefused, reason)
+			}
+		}
 	}
 
 	// Scratch dir under dataDir keeps temp files inside the
@@ -173,6 +202,7 @@ var (
 	ErrActiveSessions      = errors.New("active downloads — refuse to restart")
 	ErrPathNotWritable     = errors.New("binary path not writable by this user (try sudo bridge update)")
 	ErrInstallNotSupported = errors.New("self-install not yet supported on this platform; download manually and replace the binary (see PROTOCOL.md → Updates)")
+	ErrCompatGateRefused   = errors.New("install would orphan a paired iOS client below the candidate's MinClientVersion floor")
 )
 
 // Rollback restores bridge.bak over the live binary. Used by the

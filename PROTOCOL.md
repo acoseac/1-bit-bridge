@@ -268,7 +268,11 @@ Auto-install runs the same install path as the admin button (download → SHA-25
 - The sessions tracker reports inflight `/v1/download` or `/v1/read` requests
 - The platform is Windows (auto-install honours the same `CanInstall=false` as the manual path)
 
-**Known follow-up**: a `MinClientVersion` compat gate that consults each paired token's last-seen `X-Client-Version` against the candidate release's floor and refuses auto-install when it would orphan an active client. Implementing this requires a `release-meta.json` asset alongside the archive (the candidate's `MinClientVersion` lives inside its own binary today, which we can't introspect without installing it first). Operator-triggered installs are not affected — the operator made the call explicitly.
+**MinClientVersion compat gate** (implemented): on each install attempt, the bridge fetches a `release-meta.json` sidecar published alongside the GitHub Release archive — `{"version": "...", "minClientVersion": "...", "protocolVersion": ...}`. If any paired token's last-seen `X-Client-Version` is strictly below the candidate's `minClientVersion`, the auto-installer refuses with `ErrCompatGateRefused` and surfaces the reason in `/api/updates.deferredReason` (rendered as a yellow "deferred" line on the dashboard). Tokens that never sent `X-Client-Version` (older iOS builds) are skipped — refusing every install on their behalf would mean the gate never opens until they update.
+
+Releases that don't ship `release-meta.json` (any pre-Phase-C build) are treated as "no floor" — the gate stays permissive so legacy releases keep installing.
+
+The manual `bridge update --override-client-floor` flag bypasses the gate; the auto-installer never sets it.
 
 **Trust boundary:** the install endpoint is admin-loopback only (same trust model as every other admin route — see `internal/admin/admin.go` doc comment). There is intentionally no remote-trigger install from iOS. Operators install at the bridge host. The iOS app's role is awareness.
 
@@ -282,7 +286,7 @@ X-Client-Version: <CFBundleShortVersionString>
 
 Example: `X-Client-Version: 1.2`. The bridge persists the most recent value per token (`auth.Token.LastClientVersion` in `<dataDir>/tokens.json`) so the updater can later refuse an auto-install whose `MinClientVersion` would orphan a still-active iOS build that hasn't shipped through the App Store yet.
 
-The header is optional — older iOS clients that don't send it continue to authenticate normally. Bridges record nothing for those tokens, and the updater treats them as "version unknown" → blocks `MinClientVersion`-gated auto-installs unless the operator overrides.
+The header is optional — older iOS clients that don't send it continue to authenticate normally. Bridges record nothing for those tokens, and the compat gate skips "version unknown" tokens rather than blocking on their behalf (see the **MinClientVersion compat gate** subsection above).
 
 ## Operator: TLS cert rotation
 
