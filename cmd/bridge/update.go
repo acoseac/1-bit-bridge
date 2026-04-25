@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
+	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/updater"
 	"github.com/acoseac/1-bit-bridge/internal/version"
@@ -41,6 +43,9 @@ func updateCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 	configPath := fs.String("config", "bridge.yaml", "path to config file")
 	check := fs.Bool("check", false, "poll for an update and print the result; don't install")
 	yes := fs.Bool("yes", false, "non-interactive: skip the confirmation prompt before install")
+	overrideClientFloor := fs.Bool("override-client-floor", false,
+		"install even if the candidate's MinClientVersion would orphan a still-paired older device. "+
+			"Operator-only; the auto-installer never bypasses the gate.")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -51,7 +56,21 @@ func updateCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 		return 2
 	}
 
-	upd := updater.New(updater.Options{})
+	// Open the token store so the compat gate has a snapshot to
+	// consult on install. A failure here is non-fatal — without
+	// the snapshot, the gate stays permissive (matches the
+	// pre-Phase-C behaviour); the operator just won't get the
+	// MinClientVersion-would-orphan refusal.
+	var tokenSnapshot func() []auth.Token
+	if store, err := auth.OpenStore(filepath.Join(cfg.DataDir, "tokens.json")); err == nil {
+		tokenSnapshot = store.List
+	} else {
+		fmt.Fprintf(stderr, "warning: token store unavailable (%v) — compat gate will be permissive\n", err)
+	}
+
+	upd := updater.New(updater.Options{
+		TokenSnapshot: tokenSnapshot,
+	})
 	st := upd.CheckNow(ctx)
 
 	fmt.Fprintf(stdout, "Current: %s (channel %s)\n", st.CurrentVersion, st.Channel)
@@ -96,15 +115,23 @@ func updateCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 	// in this process) and Force=true (no inflight downloads to gate
 	// on by construction).
 	st, err = upd.Install(ctx, updater.InstallOptions{
-		DataDir:    cfg.DataDir,
-		BinaryPath: binaryPath,
-		Sessions:   nil,
-		Force:      true,
+		DataDir:            cfg.DataDir,
+		BinaryPath:         binaryPath,
+		Sessions:           nil,
+		Force:              true,
+		OverrideCompatGate: *overrideClientFloor,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "Install failed: %v\n", err)
 		if errors.Is(err, updater.ErrInstallNotSupported) {
 			fmt.Fprintln(stderr, "On Windows, stop the bridge service, replace bridge.exe, and start it back up.")
+		}
+		if errors.Is(err, updater.ErrCompatGateRefused) {
+			fmt.Fprintln(stderr, "")
+			fmt.Fprintln(stderr, "The candidate release would orphan a still-paired older iOS device.")
+			fmt.Fprintln(stderr, "Either update the device to a supported version, or rerun with")
+			fmt.Fprintln(stderr, "  bridge update --yes --override-client-floor")
+			fmt.Fprintln(stderr, "to install anyway. Older devices will refuse to authenticate after the swap.")
 		}
 		return 1
 	}

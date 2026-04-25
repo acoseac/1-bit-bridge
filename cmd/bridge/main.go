@@ -78,6 +78,7 @@ func (a updateInfoAdapter) Status() admin.UpdateStatus {
 		LastError:        s.LastError,
 		MinClientVersion: version.MinClientVersion,
 		CanInstall:       a.canInstall,
+		DeferredReason:   s.DeferredReason,
 	}
 }
 
@@ -480,6 +481,10 @@ func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		// warning at every poll cycle; clamping here keeps the log
 		// quiet and matches Phase B's CanInstall=false behaviour.
 		AutoInstall: cfg.Update.AutoInstall && runtime.GOOS != "windows",
+		// Compat-gate token snapshot. The updater calls this on each
+		// install attempt to decide whether the candidate's
+		// MinClientVersion would orphan a still-paired older client.
+		TokenSnapshot: store.List,
 	}
 	if cfg.Update.CheckIntervalHours > 0 {
 		updOpts.CheckInterval = time.Duration(cfg.Update.CheckIntervalHours) * time.Hour

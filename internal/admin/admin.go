@@ -146,6 +146,14 @@ type UpdateStatus struct {
 	LastError        string    `json:"lastError,omitempty"`
 	MinClientVersion string    `json:"minClientVersion,omitempty"`
 	CanInstall       bool      `json:"canInstall"`
+	// DeferredReason is the most-recent gate-refusal explanation
+	// from the auto-installer. Empty when the previous cycle
+	// either installed the candidate, found no candidate, or
+	// hadn't yet polled. Currently the only populated reason is
+	// the MinClientVersion compat gate ("would orphan device(s):
+	// X"); future gates can extend the same field. Surfaced in
+	// the dashboard as a yellow "held update" card.
+	DeferredReason string `json:"deferredReason,omitempty"`
 }
 
 // Server owns the admin listener + mux. One per process.

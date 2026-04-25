@@ -24,6 +24,8 @@ package updater
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -31,6 +33,7 @@ import (
 
 	"golang.org/x/mod/semver"
 
+	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
 
@@ -85,6 +88,19 @@ type Status struct {
 	// for surfacing "we tried, here's why nothing happened" in the admin
 	// UI without spamming the operator's logs.
 	LastError string
+
+	// DeferredReason describes why an auto-install attempt was held
+	// off when the gate refused. Empty when the most recent gate
+	// decision was either "install proceeded" or "no candidate".
+	// Currently the only deferred-with-reason code path is the
+	// MinClientVersion compat gate ("would orphan device(s): X");
+	// future gates can extend the same field.
+	//
+	// Surfaced to the admin dashboard as a yellow "held update"
+	// card so the operator can see why a release didn't auto-
+	// install. Reset to "" on each gate cycle so a one-shot
+	// failure doesn't linger after the underlying state changes.
+	DeferredReason string
 }
 
 // Options configures a new Updater. Zero values pick sane defaults so
@@ -137,6 +153,14 @@ type Options struct {
 	// console's Restart endpoint.
 	AutoInstallRestart func()
 
+	// TokenSnapshot returns the live token list. Used by the
+	// MinClientVersion compat gate to decide whether a candidate
+	// release would orphan a still-paired older client. nil
+	// disables the gate (tests, or pre-Phase-C bridges where
+	// auto-install ran without compat checks). Production wires
+	// this to `(*auth.Store).List`.
+	TokenSnapshot func() []auth.Token
+
 	// Now overrides time.Now for the quiet-hours check. Tests
 	// inject a fixed clock. Nil = real clock.
 	Now func() time.Time
@@ -154,6 +178,7 @@ type Updater struct {
 	quietHoursEnd      int
 	autoInstallOpts    *InstallOptions
 	autoInstallRestart func()
+	tokenSnapshot      func() []auth.Token
 	now                func() time.Time
 
 	mu     sync.RWMutex
@@ -200,6 +225,7 @@ func New(opts Options) *Updater {
 		quietHoursEnd:      opts.QuietHoursEnd,
 		autoInstallOpts:    opts.AutoInstallOpts,
 		autoInstallRestart: opts.AutoInstallRestart,
+		tokenSnapshot:      opts.TokenSnapshot,
 		now:                now,
 		status: Status{
 			CurrentVersion: version.ServerVersion,
@@ -267,6 +293,11 @@ func (u *Updater) maybeAutoInstall(ctx context.Context) {
 	if !u.autoInstall {
 		return
 	}
+	// Reset DeferredReason at the start of each cycle so a stale
+	// "would orphan device X" from the previous attempt doesn't
+	// linger after X updates or disconnects. The Install path
+	// re-sets it on this cycle's gate decision if applicable.
+	u.clearDeferredReason()
 	if u.autoInstallOpts == nil || u.autoInstallRestart == nil {
 		// Defensive: the configuration says auto-install is on but
 		// the wiring is incomplete. Likely a programming error in
@@ -292,11 +323,98 @@ func (u *Updater) maybeAutoInstall(ctx context.Context) {
 
 	log.Printf("updater: auto-installing %s → %s", st.CurrentVersion, st.LatestVersion)
 	if _, err := u.Install(ctx, *u.autoInstallOpts); err != nil {
-		log.Printf("updater: auto-install failed: %v", err)
+		// Compat-gate refusals are a normal deferred state; the
+		// Install path has already populated DeferredReason. Other
+		// failures (download, verify, swap) are operator-actionable
+		// and stay in the log without polluting the dashboard's
+		// held-update card.
+		if errors.Is(err, ErrCompatGateRefused) {
+			log.Printf("updater: auto-install deferred — %v", err)
+		} else {
+			log.Printf("updater: auto-install failed: %v", err)
+		}
 		return
 	}
 	log.Printf("updater: auto-install complete; restarting to load new binary")
 	u.autoInstallRestart()
+}
+
+// recordDeferredReason persists a single-line explanation of why
+// the most-recent install attempt didn't proceed. Surfaced to the
+// admin dashboard via Status.DeferredReason. Reset on every gate
+// cycle (clearDeferredReason) so a stale "would orphan iPhone X"
+// doesn't linger after the device updates.
+func (u *Updater) recordDeferredReason(reason string) {
+	u.mu.Lock()
+	u.status.DeferredReason = reason
+	u.mu.Unlock()
+}
+
+// clearDeferredReason wipes any prior deferred-install reason.
+// Called when the gate decision changes (install succeeds, no
+// candidate, etc.) so the dashboard stops showing stale state.
+func (u *Updater) clearDeferredReason() {
+	u.mu.Lock()
+	u.status.DeferredReason = ""
+	u.mu.Unlock()
+}
+
+// compatGateReason returns a non-empty string when at least one
+// paired token's `LastClientVersion` is strictly below
+// `minRequired`. The string is the user-visible "would orphan"
+// explanation suitable for admin display + log line. Tokens with
+// an empty `LastClientVersion` (older iOS builds that don't send
+// X-Client-Version) are skipped — we have no signal to compare
+// against, and refusing every install on their behalf would mean
+// the gate never opens until they update.
+//
+// Empty `minRequired` (or "0.0.0") short-circuits with no reason —
+// no floor means no orphaning is possible.
+//
+// Exported for tests; production callers go through Install.
+func compatGateReason(minRequired string, tokens []auth.Token) string {
+	clean := strings.TrimSpace(minRequired)
+	if clean == "" || clean == "0.0.0" {
+		return ""
+	}
+	required := normalizeForSemver(clean)
+	if !semver.IsValid(required) {
+		// Treat malformed floors as "no floor" rather than
+		// blocking every install — the operator can spot the
+		// release-meta.json bug from the bridge log without
+		// users noticing.
+		log.Printf("updater: compat-gate: ignoring malformed MinClientVersion %q", clean)
+		return ""
+	}
+	var orphans []string
+	for _, t := range tokens {
+		raw := strings.TrimSpace(t.LastClientVersion)
+		if raw == "" {
+			continue
+		}
+		live := normalizeForSemver(raw)
+		if !semver.IsValid(live) {
+			continue
+		}
+		if semver.Compare(live, required) < 0 {
+			orphans = append(orphans, fmt.Sprintf("%q on %s", t.Name, raw))
+		}
+	}
+	if len(orphans) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("would orphan device(s): %s (requires %s+)",
+		strings.Join(orphans, ", "), clean)
+}
+
+// normalizeForSemver makes "1.2.3" parseable by golang.org/x/mod/
+// semver, which expects a leading "v". Tolerates an existing
+// leading "v" so callers don't need to decide.
+func normalizeForSemver(v string) string {
+	if strings.HasPrefix(v, "v") || strings.HasPrefix(v, "V") {
+		return v
+	}
+	return "v" + v
 }
 
 // inAllowedWindow returns true when the auto-installer is allowed

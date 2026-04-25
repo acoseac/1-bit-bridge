@@ -27,6 +27,15 @@ before:
     # well-signed but wrong-org binary would slip past. PR #42 review
     # (CodeRabbit, Major) flagged the silent degradation.
     - sh -c 'if [ -n "${MACOS_SIGN_P12:-}" ] && [ -z "${APPLE_TEAM_ID:-}" ]; then echo "APPLE_TEAM_ID must be set when MACOS_SIGN_P12 is configured"; exit 1; fi'
+    # Generate release-meta.json so paired bridges' auto-installer can
+    # honour the candidate's MinClientVersion floor before installing
+    # (Phase C compat gate). The asset attaches as `release-meta.json`
+    # at the GitHub Release level — see `release.extra_files` below.
+    # Older releases that didn't ship this file are treated as
+    # "no floor" by the fetcher (ErrReleaseMetaMissing path), so this
+    # is purely additive and doesn't break installs of pre-Phase-C
+    # builds.
+    - sh -c 'mkdir -p dist && printf "{\"version\":\"%s\",\"minClientVersion\":\"%s\",\"protocolVersion\":1}\n" "$(git describe --tags --abbrev=0 2>/dev/null | sed "s/^v//")" "${MIN_CLIENT_VERSION:-0.0.0}" > dist/release-meta.json'
 
 builds:
   - id: bridge
@@ -108,6 +117,14 @@ release:
   draft: true
   prerelease: auto
   name_template: "v{{.Version}}"
+  # Attach release-meta.json (generated in `before.hooks`) to the
+  # GitHub Release so the Phase C auto-installer compat gate can
+  # fetch it alongside the archives. extra_files attaches at the
+  # release level, NOT the per-archive level — the file is a single
+  # sidecar regardless of how many platform archives the release
+  # ships.
+  extra_files:
+    - glob: dist/release-meta.json
 
 # macOS signing + Apple notarization. `enabled` is gated on env presence
 # so the workflow still produces unsigned builds when the signing
