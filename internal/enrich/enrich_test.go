@@ -283,6 +283,161 @@ func TestMusicBrainzSearchArtistPrefersExactMatch(t *testing.T) {
 	}
 }
 
+// --- iTunes Search client ---
+
+func TestITunesSearchAlbumHappyPath(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("entity") != "album" {
+			http.NotFound(w, r)
+			return
+		}
+		io.WriteString(w, `{
+			"resultCount": 1,
+			"results": [
+				{
+					"wrapperType": "collection",
+					"collectionId": 1234567890,
+					"collectionName": "Blue Train",
+					"artistName": "John Coltrane",
+					"artworkUrl100": "https://is1-ssl.mzstatic.com/image/.../100x100bb.jpg"
+				}
+			]
+		}`)
+	}))
+	defer srv.Close()
+	c := NewITunesClient(srv.URL, "test", nil)
+	hit, err := c.SearchAlbum(context.Background(), "John Coltrane", "Blue Train")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hit == nil {
+		t.Fatal("no hit")
+	}
+	if hit.CollectionID != 1234567890 {
+		t.Errorf("CollectionID = %d", hit.CollectionID)
+	}
+	if !strings.Contains(hit.ArtworkURL100, "100x100bb") {
+		t.Errorf("artwork URL didn't carry the 100x100 marker: %q", hit.ArtworkURL100)
+	}
+}
+
+func TestITunesSearchAlbumZeroResultsIsNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"resultCount": 0, "results": []}`)
+	}))
+	defer srv.Close()
+	c := NewITunesClient(srv.URL, "test", nil)
+	hit, err := c.SearchAlbum(context.Background(), "Nobody", "Nothing")
+	if !IsNotFound(err) {
+		t.Errorf("expected IsNotFound, got hit=%v err=%v", hit, err)
+	}
+}
+
+func TestITunesSearchAlbumRejectsObviousMisses(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{
+			"resultCount": 1,
+			"results": [
+				{
+					"wrapperType": "collection",
+					"collectionId": 99,
+					"collectionName": "Black Diamond",
+					"artistName": "John Coltrane",
+					"artworkUrl100": "https://is1-ssl.mzstatic.com/image/.../100x100bb.jpg"
+				}
+			]
+		}`)
+	}))
+	defer srv.Close()
+	c := NewITunesClient(srv.URL, "test", nil)
+	hit, _ := c.SearchAlbum(context.Background(), "John Coltrane", "Blue Train")
+	if hit != nil {
+		t.Errorf("hard mismatch leaked through: %+v", hit)
+	}
+}
+
+func TestITunesSearchAlbumAcceptsDeluxeSuffix(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{
+			"resultCount": 1,
+			"results": [
+				{
+					"wrapperType": "collection",
+					"collectionId": 1234567890,
+					"collectionName": "Blue Train (Deluxe Edition)",
+					"artistName": "John Coltrane",
+					"artworkUrl100": "https://is1-ssl.mzstatic.com/image/.../100x100bb.jpg"
+				}
+			]
+		}`)
+	}))
+	defer srv.Close()
+	c := NewITunesClient(srv.URL, "test", nil)
+	hit, err := c.SearchAlbum(context.Background(), "John Coltrane", "Blue Train")
+	if err != nil || hit == nil {
+		t.Fatalf("deluxe-suffix should still match: %v / %v", hit, err)
+	}
+}
+
+func TestITunesFetchArtworkUpscalesURL(t *testing.T) {
+	var requestedPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestedPath = r.URL.Path
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Write([]byte{0xFF, 0xD8, 0xFF})
+	}))
+	defer srv.Close()
+	c := NewITunesClient("unused", "test", nil)
+	a := &ITunesAlbum{
+		CollectionID:  1,
+		ArtworkURL100: srv.URL + "/path/to/100x100bb.jpg",
+	}
+	data, err := c.FetchArtwork(context.Background(), a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(requestedPath, "/600x600bb.") {
+		t.Errorf("upscale missing — requested %q", requestedPath)
+	}
+	if string(data) != string([]byte{0xFF, 0xD8, 0xFF}) {
+		t.Errorf("payload = %x", data)
+	}
+}
+
+func TestITunesFetchArtwork404ReturnsNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	c := NewITunesClient("unused", "test", nil)
+	_, err := c.FetchArtwork(context.Background(), &ITunesAlbum{
+		CollectionID:  1,
+		ArtworkURL100: srv.URL + "/100x100bb.jpg",
+	})
+	if !IsNotFound(err) {
+		t.Errorf("want IsNotFound, got %v", err)
+	}
+}
+
+func TestITunesHonorsRetryAfter(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "1")
+		w.WriteHeader(http.StatusTooManyRequests)
+		io.WriteString(w, `{"error":"rate limited"}`)
+	}))
+	defer srv.Close()
+	c := NewITunesClient(srv.URL, "test", nil)
+	start := time.Now()
+	_, err := c.SearchAlbum(context.Background(), "John Coltrane", "Blue Train")
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected error on 429")
+	}
+	if elapsed < 950*time.Millisecond {
+		t.Errorf("Retry-After not honored: returned in %v", elapsed)
+	}
+}
+
 // --- Cover Art client ---
 
 func TestCoverArtFetchFrontReturnsBytes(t *testing.T) {
