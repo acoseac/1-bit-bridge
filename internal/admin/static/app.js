@@ -434,6 +434,97 @@ function initDevices() {
       }
     });
   });
+
+  // Rotate: replace the raw bytes of an existing token. Reuses the
+  // pair-result modal layout so the operator gets a fresh QR + raw
+  // shown ONCE — same UX as Mint, just keyed off `id` instead of a
+  // new row. The previous raw stops validating immediately.
+  document.querySelectorAll(".rotate-token").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const tr = btn.closest("tr");
+      const id = tr.dataset.id;
+      const name = tr.dataset.name || tr.querySelector("td").textContent;
+      if (!confirm(`Rotate the token for ${name}?\n\nThe device will need to scan a fresh QR (or paste the new raw token) before it can reach the bridge again. The previous raw token stops working immediately.`)) return;
+      try {
+        const r = await API.post(`/api/tokens/${id}/rotate`, {});
+        document.getElementById("pair-qr-img").src = r.qrDataURL;
+        document.getElementById("pair-url").textContent = r.url;
+        document.getElementById("pair-token").textContent = r.rawToken;
+        document.getElementById("pair-fp").textContent = r.fingerprint;
+        // Tweak the result-section heading so the operator knows
+        // they're looking at a rotation, not a fresh pair.
+        const heading = stepResult.querySelector("h2");
+        if (heading) heading.textContent = "Token rotated — re-scan on the device";
+        stepForm.hidden = true;
+        stepResult.hidden = false;
+        modal.showModal();
+      } catch (err) {
+        alert("Rotate failed: " + err.message);
+      }
+    });
+  });
+
+  // Set / clear expiry. The PATCH endpoint accepts an explicit JSON
+  // null to clear, or an RFC3339 timestamp to set. The prompt uses
+  // a duration shorthand (`24h`, `30d`, etc.) for ergonomics; empty
+  // input is treated as "clear".
+  document.querySelectorAll(".set-expiry-token").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const tr = btn.closest("tr");
+      const id = tr.dataset.id;
+      const name = tr.dataset.name || tr.querySelector("td").textContent;
+      const ans = prompt(
+        `Expiry for ${name} — duration from now (e.g. "24h", "30d", "1y") or blank to clear.\n\nLeave blank to remove an existing expiry.`,
+        ""
+      );
+      if (ans === null) return; // user pressed Cancel
+      const trimmed = ans.trim();
+      let body;
+      if (trimmed === "") {
+        body = { expiresAt: null };
+      } else {
+        const ms = parseDurationShorthand(trimmed);
+        if (ms === null) {
+          alert(`Couldn't parse "${trimmed}" — use 24h, 30d, 1y, etc.`);
+          return;
+        }
+        const when = new Date(Date.now() + ms);
+        body = { expiresAt: when.toISOString() };
+      }
+      try {
+        const r = await API.patch(`/api/tokens/${id}`, body);
+        const cell = tr.querySelector(".expires-cell");
+        if (cell) {
+          cell.textContent = r.expiresAt
+            ? new Date(r.expiresAt).toLocaleString()
+            : "never";
+        }
+      } catch (err) {
+        alert("Set expiry failed: " + err.message);
+      }
+    });
+  });
+}
+
+// parseDurationShorthand handles the prompt's free-text input —
+// "24h", "30d", "1y" — and converts to milliseconds. Returns null
+// for anything it can't parse. Deliberately small/forgiving; the
+// PATCH endpoint accepts a full RFC3339 if the operator wants more
+// precision than this helper offers.
+function parseDurationShorthand(s) {
+  const m = /^(\d+)\s*([hdwmy])$/i.exec(s);
+  if (!m) return null;
+  const n = parseInt(m[1], 10);
+  const unit = m[2].toLowerCase();
+  const hour = 3600 * 1000;
+  switch (unit) {
+    case "h": return n * hour;
+    case "d": return n * 24 * hour;
+    case "w": return n * 7 * 24 * hour;
+    case "m": return n * 30 * 24 * hour; // approximate; calendar-aware would need a date library
+    case "y": return n * 365 * 24 * hour;
+  }
+  return null;
 }
 
 // --- settings ---

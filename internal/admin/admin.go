@@ -219,6 +219,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/tokens", s.apiTokensList)
 	mux.HandleFunc("POST /api/tokens", s.apiTokensMint)
 	mux.HandleFunc("DELETE /api/tokens/{id}", s.apiTokensRevoke)
+	mux.HandleFunc("POST /api/tokens/{id}/rotate", s.apiTokensRotate)
+	mux.HandleFunc("PATCH /api/tokens/{id}", s.apiTokensSetLifecycle)
 	mux.HandleFunc("GET /api/settings", s.apiSettingsGet)
 	mux.HandleFunc("PATCH /api/settings", s.apiSettingsPatch)
 	mux.HandleFunc("POST /api/restart", s.apiRestart)

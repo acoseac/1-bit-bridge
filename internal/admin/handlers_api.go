@@ -42,10 +42,12 @@ type rootRow struct {
 }
 
 type tokenRow struct {
-	ID         string    `json:"id"`
-	Name       string    `json:"name"`
-	CreatedAt  time.Time `json:"createdAt"`
-	LastUsedAt time.Time `json:"lastUsedAt,omitempty"`
+	ID         string     `json:"id"`
+	Name       string     `json:"name"`
+	CreatedAt  time.Time  `json:"createdAt"`
+	LastUsedAt time.Time  `json:"lastUsedAt,omitempty"`
+	RotatedAt  time.Time  `json:"rotatedAt,omitempty"`
+	ExpiresAt  *time.Time `json:"expiresAt,omitempty"`
 }
 
 type pairResult struct {
@@ -328,6 +330,8 @@ func (s *Server) apiTokensList(w http.ResponseWriter, r *http.Request) {
 			Name:       t.Name,
 			CreatedAt:  t.CreatedAt,
 			LastUsedAt: t.LastUsedAt,
+			RotatedAt:  t.RotatedAt,
+			ExpiresAt:  t.ExpiresAt,
 		})
 	}
 	writeJSON(w, http.StatusOK, out)

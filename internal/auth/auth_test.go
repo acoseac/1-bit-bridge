@@ -483,3 +483,131 @@ func TestConstantTimeCompareDoesNotLeakLength(t *testing.T) {
 		t.Error("token with shared prefix but different suffix unexpectedly validated")
 	}
 }
+
+// Rotate: the new raw token must validate; the old one must not.
+// ID/Name/CreatedAt are preserved; Hash and RotatedAt change.
+func TestRotateRotatesRawAndPreservesIdentity(t *testing.T) {
+	s, _ := newTmpStore(t)
+	rawOld, tok, err := s.Mint("iPhone")
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+	// Sanity: old raw validates initially.
+	if _, ok := s.Validate(rawOld); !ok {
+		t.Fatalf("pre-rotate: old raw must validate")
+	}
+
+	rawNew, rotated, err := s.Rotate(tok.ID)
+	if err != nil {
+		t.Fatalf("Rotate: %v", err)
+	}
+	if rawNew == rawOld {
+		t.Errorf("rotation produced the same raw token — random source broken?")
+	}
+	if rotated.ID != tok.ID {
+		t.Errorf("rotation changed ID (%q → %q); ID must stay stable", tok.ID, rotated.ID)
+	}
+	if rotated.Name != tok.Name {
+		t.Errorf("rotation changed Name (%q → %q)", tok.Name, rotated.Name)
+	}
+	if !rotated.CreatedAt.Equal(tok.CreatedAt) {
+		t.Errorf("rotation changed CreatedAt (%v → %v)", tok.CreatedAt, rotated.CreatedAt)
+	}
+	if rotated.RotatedAt.IsZero() {
+		t.Errorf("rotation must stamp RotatedAt")
+	}
+	if rotated.Hash == tok.Hash {
+		t.Errorf("rotation did not change Hash")
+	}
+
+	// Old raw must now fail.
+	if _, ok := s.Validate(rawOld); ok {
+		t.Errorf("post-rotate: old raw must NOT validate")
+	}
+	// New raw must succeed.
+	if _, ok := s.Validate(rawNew); !ok {
+		t.Errorf("post-rotate: new raw must validate")
+	}
+}
+
+func TestRotateUnknownIDReturnsErrNotFound(t *testing.T) {
+	s, _ := newTmpStore(t)
+	if _, _, err := s.Rotate("ffffffffffff"); err != ErrNotFound {
+		t.Errorf("Rotate(unknown): err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestSetExpiryFutureLeavesTokenValid(t *testing.T) {
+	s, _ := newTmpStore(t)
+	raw, tok, _ := s.Mint("iPhone")
+	exp := time.Now().Add(1 * time.Hour)
+	if _, err := s.SetExpiry(tok.ID, &exp); err != nil {
+		t.Fatalf("SetExpiry: %v", err)
+	}
+	if _, ok := s.Validate(raw); !ok {
+		t.Errorf("future-expiry token must still validate")
+	}
+}
+
+func TestSetExpiryPastInvalidatesImmediately(t *testing.T) {
+	s, _ := newTmpStore(t)
+	raw, tok, _ := s.Mint("iPhone")
+	exp := time.Now().Add(-1 * time.Hour)
+	if _, err := s.SetExpiry(tok.ID, &exp); err != nil {
+		t.Fatalf("SetExpiry: %v", err)
+	}
+	if _, ok := s.Validate(raw); ok {
+		t.Errorf("past-expiry token must NOT validate")
+	}
+}
+
+func TestSetExpiryNilClearsExpiry(t *testing.T) {
+	s, _ := newTmpStore(t)
+	raw, tok, _ := s.Mint("iPhone")
+	exp := time.Now().Add(-1 * time.Hour)
+	_, _ = s.SetExpiry(tok.ID, &exp)
+	// Confirm expired state
+	if _, ok := s.Validate(raw); ok {
+		t.Fatalf("setup: expired token should not validate")
+	}
+	// Clear expiry — token should validate again.
+	if _, err := s.SetExpiry(tok.ID, nil); err != nil {
+		t.Fatalf("SetExpiry(nil): %v", err)
+	}
+	if _, ok := s.Validate(raw); !ok {
+		t.Errorf("after clearing expiry, token must validate again")
+	}
+}
+
+func TestSetExpiryUnknownIDReturnsErrNotFound(t *testing.T) {
+	s, _ := newTmpStore(t)
+	exp := time.Now().Add(1 * time.Hour)
+	if _, err := s.SetExpiry("ffffffffffff", &exp); err != ErrNotFound {
+		t.Errorf("SetExpiry(unknown): err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestGetReturnsCopy(t *testing.T) {
+	s, _ := newTmpStore(t)
+	_, tok, _ := s.Mint("iPhone")
+	got, err := s.Get(tok.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.ID != tok.ID || got.Name != tok.Name {
+		t.Errorf("Get returned wrong row: %+v vs %+v", got, tok)
+	}
+	// Mutating the returned struct must not affect the store.
+	got.Name = "MUTATED"
+	again, _ := s.Get(tok.ID)
+	if again.Name == "MUTATED" {
+		t.Errorf("Get must return a copy; mutation leaked into store")
+	}
+}
+
+func TestGetUnknownReturnsErrNotFound(t *testing.T) {
+	s, _ := newTmpStore(t)
+	if _, err := s.Get("ffffffffffff"); err != ErrNotFound {
+		t.Errorf("Get(unknown): err = %v, want ErrNotFound", err)
+	}
+}

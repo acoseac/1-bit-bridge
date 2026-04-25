@@ -65,6 +65,25 @@ type Token struct {
 	LastUsedAt          time.Time `json:"lastUsedAt,omitempty"`
 	LastClientVersion   string    `json:"lastClientVersion,omitempty"`
 	LastClientVersionAt time.Time `json:"lastClientVersionAt,omitempty"`
+
+	// RotatedAt is set by Rotate when the raw bytes are replaced
+	// (Hash gets a new value, ID/Name/CreatedAt stay). Zero means
+	// the token has never been rotated. After rotation, the
+	// "ID = first 12 hex chars of Hash" invariant from Mint no
+	// longer holds for this row — that's a deliberate UX trade so
+	// the operator's reference (admin URL, log line, runbook) stays
+	// stable across a rotation. Mint still derives the ID from the
+	// hash for new tokens.
+	RotatedAt time.Time `json:"rotatedAt,omitempty"`
+
+	// ExpiresAt is the optional hard cutoff. nil/absent means "never
+	// expires" (the historical behaviour). Validate rejects with
+	// ErrExpired once the wall-clock crosses ExpiresAt — ahead of
+	// the constant-time hash compare so a leaked-but-expired raw
+	// token can't be used. Stored as `*time.Time` to distinguish
+	// "operator cleared the expiry" (nil) from "never set" (omitted)
+	// across YAML/JSON round-trips.
+	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
 }
 
 // lastUsedFlushInterval is the shortest interval between persist() calls
@@ -299,12 +318,22 @@ func (s *Store) Validate(rawToken string) (Token, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_ = s.reloadIfStale() // best-effort
+	now := time.Now()
 	for i := range s.tokens {
 		if subtle.ConstantTimeCompare([]byte(s.tokens[i].Hash), []byte(hashHex)) == 1 {
+			// Expiry check sits AFTER the hash compare (so the
+			// timing remains constant against the token list, no
+			// short-circuit revealing "this hash matches but is
+			// expired") but BEFORE LastUsedAt is bumped (so an
+			// expired token's last-used stamp doesn't tick on
+			// every poll). An expired token validates as a miss.
+			if s.tokens[i].ExpiresAt != nil && !s.tokens[i].ExpiresAt.IsZero() && now.After(*s.tokens[i].ExpiresAt) {
+				return Token{}, false
+			}
 			// The token struct wants a wall-clock UTC value so the JSON
 			// round-trip is readable; the debounce gate uses `time.Since`
 			// which reads the monotonic clock and so survives NTP jumps.
-			s.tokens[i].LastUsedAt = time.Now().UTC()
+			s.tokens[i].LastUsedAt = now.UTC()
 			if time.Since(s.lastUsedFlush) >= lastUsedFlushInterval {
 				if err := s.persist(); err != nil {
 					log.Printf("auth: persist LastUsedAt: %v", err)
@@ -412,6 +441,23 @@ func (s *Store) List() []Token {
 	return out
 }
 
+// Get returns the token matching id, or ErrNotFound if none exists.
+// The returned struct is a copy — mutating it has no effect on the
+// store. Used by the admin token-lifecycle handlers as a cheap
+// single-row lookup vs. the O(N) `List()`-then-scan pattern Gemini
+// flagged on PR #45 review.
+func (s *Store) Get(id string) (Token, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_ = s.reloadIfStale()
+	for i := range s.tokens {
+		if s.tokens[i].ID == id {
+			return s.tokens[i], nil
+		}
+	}
+	return Token{}, ErrNotFound
+}
+
 // Revoke removes the token with the given ID. Returns ErrNotFound if no such
 // token exists.
 func (s *Store) Revoke(id string) error {
@@ -429,5 +475,83 @@ func (s *Store) Revoke(id string) error {
 	return ErrNotFound
 }
 
-// ErrNotFound is returned by Revoke when the given ID is unknown.
+// Rotate replaces the raw bytes of an existing token, returning the
+// new raw token for re-pairing. The token's ID, Name, CreatedAt, and
+// ExpiresAt are preserved across rotation; only Hash and RotatedAt
+// change. The previous raw token stops validating immediately.
+//
+// This is the operator path for "this token was leaked / I want a
+// fresh secret without losing the row identity". Pairs with iOS's
+// existing "scan a fresh QR" re-pair flow — the operator hands the
+// new raw to the device-holder, who scans it from the admin
+// console's pair URL or types it into the Bridge Editor.
+//
+// Returns ErrNotFound if no token with that ID exists.
+func (s *Store) Rotate(id string) (rawToken string, tok Token, err error) {
+	var buf [rawTokenBytes]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", Token{}, fmt.Errorf("random: %w", err)
+	}
+	rawToken = base64.RawURLEncoding.EncodeToString(buf[:])
+	hashBytes := sha256.Sum256([]byte(rawToken))
+	hashHex := hex.EncodeToString(hashBytes[:])
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.reload(); err != nil {
+		return "", Token{}, err
+	}
+	for i := range s.tokens {
+		if s.tokens[i].ID == id {
+			// Snapshot in case persist fails — we roll back the
+			// in-memory mutation so disk and memory stay in sync.
+			old := s.tokens[i]
+			s.tokens[i].Hash = hashHex
+			s.tokens[i].RotatedAt = time.Now().UTC()
+			if err := s.persist(); err != nil {
+				s.tokens[i] = old
+				return "", Token{}, err
+			}
+			return rawToken, s.tokens[i], nil
+		}
+	}
+	return "", Token{}, ErrNotFound
+}
+
+// SetExpiry installs (or clears) the ExpiresAt field for an
+// existing token. Pass nil to remove an existing expiry. Returns
+// ErrNotFound if no token with that ID exists.
+//
+// Validation is permissive about backwards-set expiries — passing
+// a past timestamp immediately invalidates the token (operator
+// "expire this now" path). The CLI surfaces a `--in <duration>`
+// flag that resolves to `time.Now().Add(d)`; admin UI can pass
+// any wall-clock RFC3339.
+func (s *Store) SetExpiry(id string, expiresAt *time.Time) (Token, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.reload(); err != nil {
+		return Token{}, err
+	}
+	for i := range s.tokens {
+		if s.tokens[i].ID == id {
+			old := s.tokens[i].ExpiresAt
+			if expiresAt == nil {
+				s.tokens[i].ExpiresAt = nil
+			} else {
+				utc := expiresAt.UTC()
+				s.tokens[i].ExpiresAt = &utc
+			}
+			if err := s.persist(); err != nil {
+				s.tokens[i].ExpiresAt = old
+				return Token{}, err
+			}
+			return s.tokens[i], nil
+		}
+	}
+	return Token{}, ErrNotFound
+}
+
+// ErrNotFound is returned by Revoke / Rotate / SetExpiry when the
+// given ID is unknown.
 var ErrNotFound = errors.New("token not found")
