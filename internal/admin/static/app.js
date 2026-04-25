@@ -407,6 +407,12 @@ function initSettings() {
       listenAddress: fd.get("listenAddress"),
       adminAddress: fd.get("adminAddress"),
       scanIntervalSec: parseInt(fd.get("scanIntervalSec"), 10),
+      // Phase C update settings. Checkbox is "on"/null per FormData
+      // semantics; coerce to bool so the server's pointer-typed
+      // patch field always receives a real value (not null/missing).
+      updateAutoInstall: fd.get("updateAutoInstall") === "on",
+      updateQuietHours: fd.get("updateQuietHours") || "",
+      updateCheckIntervalHours: parseInt(fd.get("updateCheckIntervalHours") || "0", 10),
     };
     try {
       const r = await API.patch("/api/settings", body);

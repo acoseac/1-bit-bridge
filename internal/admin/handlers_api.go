@@ -66,6 +66,11 @@ type settingsResponse struct {
 	ScanIntervalSec int    `json:"scanIntervalSec"`
 	TLSCertPath     string `json:"tlsCertPath,omitempty"`
 	TLSKeyPath      string `json:"tlsKeyPath,omitempty"`
+	// Phase C update settings — auto-install opt-in + cadence +
+	// quiet-hours window. All optional in the YAML and on the wire.
+	UpdateAutoInstall        bool   `json:"updateAutoInstall"`
+	UpdateQuietHours         string `json:"updateQuietHours,omitempty"`
+	UpdateCheckIntervalHours int    `json:"updateCheckIntervalHours,omitempty"`
 }
 
 // --- GET /api/stats ---
@@ -402,13 +407,16 @@ func (s *Server) apiTokensRevoke(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) apiSettingsGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, settingsResponse{
-		LibraryName:     s.deps.Cfg.LibraryName,
-		ListenAddress:   s.deps.Cfg.ListenAddress,
-		AdminAddress:    s.deps.Cfg.AdminAddress,
-		DataDir:         s.deps.Cfg.DataDir,
-		ScanIntervalSec: s.deps.Cfg.ScanIntervalSec,
-		TLSCertPath:     s.deps.Cfg.TLSCertPath,
-		TLSKeyPath:      s.deps.Cfg.TLSKeyPath,
+		LibraryName:              s.deps.Cfg.LibraryName,
+		ListenAddress:            s.deps.Cfg.ListenAddress,
+		AdminAddress:             s.deps.Cfg.AdminAddress,
+		DataDir:                  s.deps.Cfg.DataDir,
+		ScanIntervalSec:          s.deps.Cfg.ScanIntervalSec,
+		TLSCertPath:              s.deps.Cfg.TLSCertPath,
+		TLSKeyPath:               s.deps.Cfg.TLSKeyPath,
+		UpdateAutoInstall:        s.deps.Cfg.Update.AutoInstall,
+		UpdateQuietHours:         s.deps.Cfg.Update.QuietHours,
+		UpdateCheckIntervalHours: s.deps.Cfg.Update.CheckIntervalHours,
 	})
 }
 
@@ -418,10 +426,13 @@ func (s *Server) apiSettingsGet(w http.ResponseWriter, r *http.Request) {
 // supplied" from "supplied as empty/zero" so the operator can't
 // accidentally clear a field by omitting it.
 type settingsPatch struct {
-	LibraryName     *string `json:"libraryName,omitempty"`
-	ListenAddress   *string `json:"listenAddress,omitempty"`
-	AdminAddress    *string `json:"adminAddress,omitempty"`
-	ScanIntervalSec *int    `json:"scanIntervalSec,omitempty"`
+	LibraryName              *string `json:"libraryName,omitempty"`
+	ListenAddress            *string `json:"listenAddress,omitempty"`
+	AdminAddress             *string `json:"adminAddress,omitempty"`
+	ScanIntervalSec          *int    `json:"scanIntervalSec,omitempty"`
+	UpdateAutoInstall        *bool   `json:"updateAutoInstall,omitempty"`
+	UpdateQuietHours         *string `json:"updateQuietHours,omitempty"`
+	UpdateCheckIntervalHours *int    `json:"updateCheckIntervalHours,omitempty"`
 }
 
 type settingsPatchResponse struct {
@@ -464,6 +475,28 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		// Periodic ticker picks up the new interval on the next tick; if
 		// users want it immediately they can hit "Scan now". Not worth a
 		// restart banner.
+	}
+	if p.UpdateAutoInstall != nil {
+		if *p.UpdateAutoInstall != s.deps.Cfg.Update.AutoInstall {
+			s.deps.Cfg.Update.AutoInstall = *p.UpdateAutoInstall
+			// AutoInstall is wired into the updater at constructor
+			// time (cmd/bridge/main.go reads cfg.Update.AutoInstall
+			// once when building updater.Options). Toggling it at
+			// runtime requires a restart for the change to bind.
+			restart = true
+		}
+	}
+	if p.UpdateQuietHours != nil {
+		if *p.UpdateQuietHours != s.deps.Cfg.Update.QuietHours {
+			s.deps.Cfg.Update.QuietHours = *p.UpdateQuietHours
+			restart = true
+		}
+	}
+	if p.UpdateCheckIntervalHours != nil {
+		if *p.UpdateCheckIntervalHours != s.deps.Cfg.Update.CheckIntervalHours {
+			s.deps.Cfg.Update.CheckIntervalHours = *p.UpdateCheckIntervalHours
+			restart = true
+		}
 	}
 
 	if err := s.deps.Cfg.Validate(); err != nil {

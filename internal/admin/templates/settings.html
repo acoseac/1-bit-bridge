@@ -47,6 +47,49 @@
       <small class="hint">Set at <code>bridge init</code> time; not editable here.</small>
     </div>
 
+    <h2>Updates</h2>
+    <p class="lede">
+      The bridge polls the GitHub Releases API for new versions. Operator-triggered
+      install is always available on the dashboard; auto-install is opt-in.
+    </p>
+
+    <div class="field">
+      <label class="checkbox">
+        <input name="updateAutoInstall" type="checkbox" {{if .Data.UpdateAutoInstall}}checked{{end}}>
+        Auto-install new releases <span class="badge warn">restart</span>
+      </label>
+      <small class="hint">
+        When enabled, every successful poll that surfaces an update triggers
+        download → verify → atomic swap → restart, subject to the same
+        active-stream gate as the manual Install button. <strong>Default off</strong>
+        — opt-in is recommended even on stable channels.
+      </small>
+    </div>
+
+    <div class="field">
+      <label>Quiet hours <span class="badge warn">restart</span>
+        <input name="updateQuietHours" type="text" placeholder="HH:MM-HH:MM (optional)"
+               value="{{.Data.UpdateQuietHours}}" pattern="^[0-9]{2}:[0-9]{2}-[0-9]{2}:[0-9]{2}$">
+      </label>
+      <small class="hint">
+        Restricts auto-install to a daily window in server-local time.
+        Leave empty to permit any time. Wraps midnight (e.g.
+        <code>23:00-06:00</code>) for overnight schedules.
+      </small>
+    </div>
+
+    <div class="field">
+      <label>Check interval (hours) <span class="badge warn">restart</span>
+        <input name="updateCheckIntervalHours" type="number" min="0" placeholder="6"
+               value="{{if gt .Data.UpdateCheckIntervalHours 0}}{{.Data.UpdateCheckIntervalHours}}{{end}}">
+      </label>
+      <small class="hint">
+        How often to poll the GitHub Releases API. Defaults to 6 (4 polls/day,
+        well under the 60/hr unauthenticated rate limit). Lower values are
+        clamped to a 1 h floor at runtime.
+      </small>
+    </div>
+
     <div class="actions">
       <button type="submit" class="btn primary">Save</button>
       <button type="button" id="restart-btn" class="btn" hidden>Restart now</button>
