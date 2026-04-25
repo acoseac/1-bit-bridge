@@ -96,6 +96,22 @@
   </div>
 
   <div class="panel">
+    <div class="panel-head">
+      <h2>Backups</h2>
+      <span class="panel-actions">
+        <button type="button" id="backup-now" class="btn">Snapshot now</button>
+      </span>
+    </div>
+    <dl>
+      <dt>Snapshots on disk</dt>
+      <dd id="backup-count">…</dd>
+      <dt>Most recent</dt>
+      <dd id="backup-latest">…</dd>
+    </dl>
+    <p class="panel-note">Snapshots capture <code>bridge.db</code>, <code>tokens.json</code>, the TLS cert + key, and <code>bridge.yaml</code> into <code id="backup-root">…</code>. The periodic ticker runs every {{.Data.BackupIntervalHours}} h, retaining {{.Data.BackupKeep}}. <strong>Backups contain the TLS private key and token hashes</strong> — store them with the same care as the live state. Restore from CLI: stop the bridge, then <code>bridge restore &lt;snapshot-dir&gt;</code>.</p>
+  </div>
+
+  <div class="panel">
     <h2>TLS fingerprint</h2>
     <p>iOS clients pin this value during pairing. Don't rotate without re-pairing.</p>
     <code class="fingerprint">{{.Fingerprint}}</code>

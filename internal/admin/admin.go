@@ -211,6 +211,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PATCH /api/settings", s.apiSettingsPatch)
 	mux.HandleFunc("POST /api/restart", s.apiRestart)
 	mux.HandleFunc("GET /api/pair-qr", s.apiPairQR)
+	mux.HandleFunc("GET /api/backups", s.apiBackupsList)
+	mux.HandleFunc("POST /api/backups", s.apiBackupsCreate)
 
 	// Static. The embed keeps files at "static/app.css", not "app.css",
 	// so we serve the fs directly — the request path already matches.

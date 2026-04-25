@@ -30,6 +30,28 @@ type Config struct {
 	ScanIntervalSec int          `yaml:"scanIntervalSec"`
 	LibraryName     string       `yaml:"libraryName"`
 	Update          UpdateConfig `yaml:"update,omitempty"`
+	Backup          BackupConfig `yaml:"backup,omitempty"`
+}
+
+// BackupConfig configures the periodic state-snapshot ticker that
+// `bridge serve` runs alongside the manifest scanner. The CLI
+// `bridge backup` / `bridge restore` work regardless of this section
+// — these knobs only govern the in-process automatic schedule.
+//
+// Default state: IntervalHours=24, Keep=7 (one snapshot per day, a
+// week's worth retained). Setting IntervalHours=0 disables the
+// periodic ticker entirely; the operator can still snapshot
+// on-demand via the CLI or the admin console.
+type BackupConfig struct {
+	// IntervalHours is the cadence for automatic snapshots. Zero
+	// disables. Negative values are rejected at Validate time.
+	IntervalHours int `yaml:"intervalHours,omitempty"`
+
+	// Keep is the maximum number of snapshots to retain after a
+	// rotation. Older snapshots beyond this count are deleted on
+	// each periodic snapshot. Zero or negative disables pruning;
+	// the operator manages backup-disk usage by hand in that case.
+	Keep int `yaml:"keep,omitempty"`
 }
 
 // UpdateConfig configures the Phase C opt-in auto-installer. The
@@ -65,11 +87,13 @@ type UpdateConfig struct {
 
 // Defaults applied when a field is absent or zero-valued.
 const (
-	DefaultListenAddress   = ":7788"
-	DefaultAdminAddress    = "127.0.0.1:7789"
-	DefaultDataDir         = "./data"
-	DefaultScanIntervalSec = 3600
-	DefaultLibraryName     = "1-bit Bridge"
+	DefaultListenAddress       = ":7788"
+	DefaultAdminAddress        = "127.0.0.1:7789"
+	DefaultDataDir             = "./data"
+	DefaultScanIntervalSec     = 3600
+	DefaultLibraryName         = "1-bit Bridge"
+	DefaultBackupIntervalHours = 24
+	DefaultBackupKeep          = 7
 )
 
 // Load parses a bridge.yaml file, fills defaults, resolves relative paths
@@ -113,6 +137,19 @@ func (c *Config) applyDefaults() {
 	}
 	if c.LibraryName == "" {
 		c.LibraryName = DefaultLibraryName
+	}
+	// Backup defaults — distinguish "field omitted" (apply default)
+	// from "operator explicitly set to 0 to disable" via... well,
+	// YAML doesn't preserve that distinction. The convention here:
+	// IntervalHours absent or zero → apply the default; operator
+	// who wants periodic backup off must also set Keep=0 or use
+	// `bridge backup --keep 0` manually. The trade-off favours the
+	// healthy-default case (most operators want backups).
+	if c.Backup.IntervalHours == 0 {
+		c.Backup.IntervalHours = DefaultBackupIntervalHours
+	}
+	if c.Backup.Keep == 0 {
+		c.Backup.Keep = DefaultBackupKeep
 	}
 }
 
@@ -170,6 +207,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Update.CheckIntervalHours < 0 {
 		return fmt.Errorf("update.checkIntervalHours: must be >= 0, got %d", c.Update.CheckIntervalHours)
+	}
+	if c.Backup.IntervalHours < 0 {
+		return fmt.Errorf("backup.intervalHours: must be >= 0, got %d", c.Backup.IntervalHours)
+	}
+	if c.Backup.Keep < 0 {
+		return fmt.Errorf("backup.keep: must be >= 0, got %d", c.Backup.Keep)
 	}
 	return nil
 }

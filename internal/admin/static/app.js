@@ -98,6 +98,31 @@ function initDashboard() {
   // helper is shared so both entry paths run the same flow.
   bindInstallButton(document.getElementById("update-install"));
 
+  // Backups panel — list current snapshots + "Snapshot now" button.
+  // The list is read on first tick; the button is opt-in for an
+  // on-demand snapshot. The download/export button is intentionally
+  // missing — backups contain the TLS private key and token hashes,
+  // and a one-click web download would be a credential extraction
+  // surface. Operators move snapshots offsite with scp/rsync.
+  const backupBtn = document.getElementById("backup-now");
+  if (backupBtn) {
+    backupBtn.addEventListener("click", async () => {
+      const oldText = backupBtn.textContent;
+      backupBtn.disabled = true;
+      backupBtn.textContent = "Snapshotting…";
+      try {
+        await API.post("/api/backups");
+        await refreshBackups();
+      } catch (err) {
+        alert("Snapshot failed: " + err.message);
+      } finally {
+        backupBtn.textContent = oldText;
+        backupBtn.disabled = false;
+      }
+    });
+  }
+  refreshBackups();
+
   // Live-refresh the top-line numbers every 3 s.
   const tick = async () => {
     try {
@@ -126,6 +151,26 @@ function initDashboard() {
     }
   };
   const handle = setInterval(tick, 3000);
+}
+
+// refreshBackups fetches /api/backups and renders the latest count +
+// most-recent timestamp into the dashboard's Backups panel. Errors
+// degrade gracefully — the panel just shows the placeholder dashes.
+async function refreshBackups() {
+  try {
+    const data = await API.get("/api/backups");
+    const list = data.backups || [];
+    setText("backup-count", String(list.length));
+    setText("backup-root", data.backupsRoot || "—");
+    if (list.length > 0) {
+      const latest = list[0]; // newest-first
+      setText("backup-latest", `${latest.dirName} · ${latest.bridgeVersion}`);
+    } else {
+      setText("backup-latest", "no snapshots yet");
+    }
+  } catch (e) {
+    // Quietly leave the placeholders alone.
+  }
 }
 
 // bindInstallButton attaches the click handler to the Install &
