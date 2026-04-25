@@ -51,7 +51,7 @@
     <div class="panel-head">
       <h2>Updates</h2>
       <span class="panel-actions">
-        {{if .Data.Update.UpdateAvailable}}
+        {{if and .Data.Update.UpdateAvailable .Data.Update.CanInstall}}
           <button type="button" id="update-install" class="btn btn-primary">Install &amp; restart</button>
         {{end}}
         <button type="button" id="update-check" class="btn">Check now</button>

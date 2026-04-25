@@ -117,6 +117,13 @@ var (
 
 // UpdateStatus is the wire shape /api/updates returns. Decoupled from
 // internal/updater so the admin package compiles without importing it.
+//
+// CanInstall is the platform-capability flag the dashboard template
+// uses to gate the "Install & restart" button. False on Windows
+// (and any future platform where the swap path is unimplemented) so
+// the operator never sees a button that returns 501. The adapter
+// in cmd/bridge/main.go fills this from runtime.GOOS at construction
+// time — capability is fixed for the lifetime of the process.
 type UpdateStatus struct {
 	CurrentVersion   string    `json:"currentVersion"`
 	LatestVersion    string    `json:"latestVersion,omitempty"`
@@ -126,6 +133,7 @@ type UpdateStatus struct {
 	LastCheck        time.Time `json:"lastCheck,omitempty"`
 	LastError        string    `json:"lastError,omitempty"`
 	MinClientVersion string    `json:"minClientVersion,omitempty"`
+	CanInstall       bool      `json:"canInstall"`
 }
 
 // Server owns the admin listener + mux. One per process.

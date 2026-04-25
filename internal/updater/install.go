@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"os"
 	"path/filepath"
 	"time"
@@ -230,11 +229,3 @@ func isWindows() bool {
 //
 // Yes this is the same answer runtime.GOOS gives you; the build-
 // tagged variable form makes the test-only override trivial.
-
-// httpClient returns the underlying http.Client used by the github
-// releases client — install reuses it so TLS pooling / proxies /
-// timeouts are consistent with the poll path.
-//
-// Defined here (not in github.go) so tests in this package can build
-// a Client manually and still drive Install through it.
-func (c *Client) httpClient() *http.Client { return c.http }

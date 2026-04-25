@@ -7,23 +7,23 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/updater"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
 
-// updateCmd implements `bridge update [--check] [--yes] [--force]`.
+// updateCmd implements `bridge update [--check] [--yes]`.
 //
 // `--check` polls GitHub once and prints the result without
-// installing. `--yes` skips the interactive confirmation.
-// `--force` lets the install proceed even when the running bridge's
-// session tracker reports active downloads (note: the CLI runs in
-// its own short-lived process, so the tracker check below queries
-// nothing — the active-stream gate only meaningfully applies when
-// the install is triggered through the admin console of a running
-// bridge. The CLI flag exists for symmetry).
+// installing. `--yes` skips the interactive confirmation. The CLI
+// has no `--force`: the active-stream gate only applies to installs
+// triggered through the admin console of a running bridge, and a
+// CLI invocation runs in its own short-lived process — there's no
+// session tracker to consult, so the install always proceeds
+// regardless of whether some other bridge instance is serving
+// downloads. The admin-console "Install anyway" affordance is the
+// surface for that workflow.
 //
 // Subcommand exits:
 //
@@ -35,13 +35,12 @@ import (
 // successful install the operator is told what to run; this keeps
 // the install + restart steps decoupled in the operator's mental
 // model, matching the admin-console workflow.
-func updateCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+func updateCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("update", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	configPath := fs.String("config", "bridge.yaml", "path to config file")
 	check := fs.Bool("check", false, "poll for an update and print the result; don't install")
 	yes := fs.Bool("yes", false, "non-interactive: skip the confirmation prompt before install")
-	force := fs.Bool("force", false, "ignore the active-stream gate (admin-console workflow only — has no effect from CLI)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -80,7 +79,7 @@ func updateCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	if !*yes {
 		fmt.Fprint(stdout, "Install update? [y/N] ")
 		var resp string
-		fmt.Fscanln(os.Stdin, &resp)
+		fmt.Fscanln(stdin, &resp)
 		if resp != "y" && resp != "Y" && resp != "yes" {
 			fmt.Fprintln(stdout, "Aborted.")
 			return 0
@@ -93,16 +92,14 @@ func updateCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		return 1
 	}
 
-	// CLI install: pass nil sessions tracker — there's no running
-	// bridge HTTP server in this process whose downloads we'd be
-	// disturbing. Force is therefore a no-op here, but the flag
-	// stays for symmetry with the admin console contract.
-	_ = *force
+	// CLI install: pass nil sessions tracker (no running HTTP server
+	// in this process) and Force=true (no inflight downloads to gate
+	// on by construction).
 	st, err = upd.Install(ctx, updater.InstallOptions{
 		DataDir:    cfg.DataDir,
 		BinaryPath: binaryPath,
 		Sessions:   nil,
-		Force:      true, // CLI is never gated by the running-server tracker
+		Force:      true,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "Install failed: %v\n", err)
@@ -116,19 +113,8 @@ func updateCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	fmt.Fprintln(stdout, "  - launchd:  launchctl kickstart -k gui/$UID/com.acoseac.1-bit-bridge")
 	fmt.Fprintln(stdout, "  - systemd:  systemctl --user restart com.acoseac.1-bit-bridge")
 	fmt.Fprintln(stdout, "  - or hit \"Restart\" in the admin console.")
-	// Tiny friendly note about rollback.
 	fmt.Fprintf(stdout, "\nA backup of the previous binary is at %s.bak — startup housekeeping will roll back automatically if the new bridge fails to come up at version %s within %s of restart.\n",
-		binaryPath, st.LatestVersion, recencyHint())
+		binaryPath, st.LatestVersion, updater.RecencyWindow())
 	_ = version.ServerVersion // silence unused-import warning if version isn't referenced elsewhere
 	return 0
-}
-
-// recencyHint formats updater.recencyWindow into a short human form
-// for the help line. Avoids exposing the package internal as the
-// hint changes with the constant.
-func recencyHint() string {
-	// 6 h is the recency window in internal/updater/state.go; mirror
-	// here in human form. Kept hand-coded so a future rebalance of
-	// that constant is a one-line CLI doc update too.
-	return (6 * time.Hour).String()
 }

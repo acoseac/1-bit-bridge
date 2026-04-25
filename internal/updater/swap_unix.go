@@ -18,6 +18,15 @@ import (
 // doesn't end up with an inconsistent on-disk state (rename done in
 // dentry but not in journal).
 //
+// Cross-device caveat: os.Rename fails with EXDEV if newBinary lives
+// on a different filesystem from dst. We avoid this by extracting
+// the new binary into <DataDir>/updates/, which is on the same
+// filesystem as the bridge install (both under the operator's data
+// dir) in every supported deployment. If a future install layout
+// puts dataDir on a separate volume from the binary, the right fix
+// is a copy+remove fallback for EXDEV at this seam — not adding an
+// in-process executable copier upstream.
+//
 // Layout after success:
 //
 //	<dir>/bridge       -> new binary

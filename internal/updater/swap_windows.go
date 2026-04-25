@@ -2,11 +2,7 @@
 
 package updater
 
-import (
-	"fmt"
-	"io"
-	"os"
-)
+import "os"
 
 // Phase B does not yet ship Windows self-install. The rename-trick
 // (rename current bridge.exe → bridge.exe.bak first, then write new
@@ -42,9 +38,3 @@ func RemoveBackup(dst, backupExt string) error {
 	}
 	return err
 }
-
-// io / fmt may not be used by all build paths but are kept here so a
-// future Windows swap implementation can drop them in without
-// rearranging the import set.
-var _ = io.EOF
-var _ = fmt.Errorf

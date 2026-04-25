@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -44,12 +45,15 @@ import (
 //
 // dataDir + binaryPath are needed for the install path so the
 // adapter can construct InstallOptions on each call without making
-// the admin package aware of either.
+// the admin package aware of either. canInstall is captured at
+// construction time from runtime.GOOS so the dashboard can gate the
+// Install button on platform support.
 type updateInfoAdapter struct {
 	u          *updater.Updater
 	sessions   *updater.Tracker
 	dataDir    string
 	binaryPath string
+	canInstall bool
 }
 
 func (a updateInfoAdapter) UpdateInfo() api.UpdateInfo {
@@ -73,6 +77,7 @@ func (a updateInfoAdapter) Status() admin.UpdateStatus {
 		LastCheck:        s.LastCheck,
 		LastError:        s.LastError,
 		MinClientVersion: version.MinClientVersion,
+		CanInstall:       a.canInstall,
 	}
 }
 
@@ -97,6 +102,7 @@ func (a updateInfoAdapter) Install(ctx context.Context, force bool) (admin.Updat
 		LastCheck:        st.LastCheck,
 		LastError:        st.LastError,
 		MinClientVersion: version.MinClientVersion,
+		CanInstall:       a.canInstall,
 	}, mapUpdaterError(err)
 }
 
@@ -271,7 +277,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	case "doctor":
 		return doctorCmd(args[1:], stdout, stderr)
 	case "update":
-		return updateCmd(ctx, args[1:], stdout, stderr)
+		return updateCmd(ctx, args[1:], os.Stdin, stdout, stderr)
 	case "version":
 		fmt.Fprintf(stdout, "1-bit-bridge %s (protocol v%d)\n", version.ServerVersion, version.ProtocolVersion)
 		return 0
@@ -441,6 +447,11 @@ func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		sessions:   sessions,
 		dataDir:    cfg.DataDir,
 		binaryPath: binaryPath,
+		// Phase B implements the swap path on darwin + linux only.
+		// Surfaced as a capability flag so the dashboard hides the
+		// Install button on Windows rather than letting the operator
+		// click through to a 501.
+		canInstall: runtime.GOOS != "windows",
 	}
 
 	apiSrv := api.New(cfg, store, provider, fingerprint).

@@ -103,7 +103,11 @@ func newInstallFixture(t *testing.T, latestVersion string) *installFixture {
 			{Name: "checksums.txt", BrowserDownloadURL: srv.URL + "/asset/checksums.txt"},
 		},
 	}
-	fix.releaseJSON, _ = json.Marshal(rel)
+	releaseJSON, err := json.Marshal(rel)
+	if err != nil {
+		t.Fatalf("marshal release: %v", err)
+	}
+	fix.releaseJSON = releaseJSON
 	return fix
 }
 
@@ -305,7 +309,11 @@ func TestInstallRejectsCorruptArchive(t *testing.T) {
 			{Name: "checksums.txt", BrowserDownloadURL: tampered.URL + "/asset/checksums.txt"},
 		},
 	}
-	fix.releaseJSON, _ = json.Marshal(rel)
+	releaseJSON, err := json.Marshal(rel)
+	if err != nil {
+		t.Fatalf("marshal tampered release: %v", err)
+	}
+	fix.releaseJSON = releaseJSON
 
 	upd := New(Options{
 		RepoOverride: "fake/repo",
@@ -316,10 +324,11 @@ func TestInstallRejectsCorruptArchive(t *testing.T) {
 	upd.status.UpdateAvailable = true
 	upd.mu.Unlock()
 
-	_, err := upd.Install(context.Background(), InstallOptions{
+	_, err = upd.Install(context.Background(), InstallOptions{
 		DataDir:    dir,
 		BinaryPath: livePath,
 		Force:      true,
+		Verifier:   noopVerifier,
 	})
 	if err == nil {
 		t.Fatal("Install with bad checksum should fail")

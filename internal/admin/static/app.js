@@ -92,15 +92,11 @@ function initDashboard() {
   // user sees distinct success / failure surfaces for each step.
   // The 409 active-sessions branch surfaces an "Install anyway" prompt
   // backed by ?force=1.
-  const updateInstallBtn = document.getElementById("update-install");
-  if (updateInstallBtn) {
-    updateInstallBtn.addEventListener("click", async () => {
-      if (!confirm("Install the new bridge release and restart?\n\nActive iOS downloads will be interrupted and will need to be retried.")) {
-        return;
-      }
-      await runInstall(updateInstallBtn, false);
-    });
-  }
+  //
+  // Also wired in renderUpdateTile when the button is added mid-tick
+  // (e.g. server-rendered first paint had no update available). The
+  // helper is shared so both entry paths run the same flow.
+  bindInstallButton(document.getElementById("update-install"));
 
   // Live-refresh the top-line numbers every 3 s.
   const tick = async () => {
@@ -130,6 +126,19 @@ function initDashboard() {
     }
   };
   const handle = setInterval(tick, 3000);
+}
+
+// bindInstallButton attaches the click handler to the Install &
+// restart button. No-op when btn is null (server didn't render the
+// button at first paint, e.g. the platform doesn't support install
+// or no update was known). The renderUpdateTile path uses the same
+// helper when it dynamically materialises the button mid-session.
+function bindInstallButton(btn) {
+  if (!btn) return;
+  btn.addEventListener("click", async () => {
+    if (!confirm("Install the new bridge release and restart?\n\nActive iOS downloads will be interrupted and will need to be retried.")) return;
+    await runInstall(btn, false);
+  });
 }
 
 // runInstall hits POST /api/updates/install (with ?force=1 if the
@@ -184,6 +193,28 @@ function renderUpdateTile(u) {
   const lastError = document.getElementById("update-last-error");
   const latest = document.getElementById("update-latest");
   if (!status) return;
+
+  // Add or remove the "Install & restart" button to match the
+  // server-rendered first-paint logic. The button only exists when
+  // the platform supports self-install AND an update is available.
+  // Without this, a "checking…" → "update available" transition
+  // mid-session would leave a paired client without a button.
+  const actions = document.querySelector(".panel-head .panel-actions");
+  let installBtn = document.getElementById("update-install");
+  if (actions) {
+    const should = u && u.updateAvailable && u.canInstall;
+    if (should && !installBtn) {
+      installBtn = document.createElement("button");
+      installBtn.type = "button";
+      installBtn.id = "update-install";
+      installBtn.className = "btn btn-primary";
+      installBtn.textContent = "Install & restart";
+      bindInstallButton(installBtn);
+      actions.insertBefore(installBtn, actions.firstChild);
+    } else if (!should && installBtn) {
+      installBtn.remove();
+    }
+  }
 
   if (u && u.updateAvailable && u.latestVersion) {
     status.innerHTML = `<span class="badge running">update available</span><span>· <code>${escapeHTML(u.latestVersion)}</code></span>`;

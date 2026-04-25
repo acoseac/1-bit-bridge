@@ -19,6 +19,14 @@ project_name: 1-bit-bridge
 before:
   hooks:
     - go mod tidy
+    # Hard-fail when macOS signing is enabled but APPLE_TEAM_ID is unset.
+    # Without this, the .goreleaser.yaml ldflags below silently inject an
+    # empty AppleTeamID, which disables the Team-ID equality check in the
+    # darwin self-installer (verify_darwin.go) — the binary still gets
+    # signed + notarized, but a hijacked release-asset URL serving a
+    # well-signed but wrong-org binary would slip past. PR #42 review
+    # (CodeRabbit, Major) flagged the silent degradation.
+    - sh -c 'if [ -n "${MACOS_SIGN_P12:-}" ] && [ -z "${APPLE_TEAM_ID:-}" ]; then echo "APPLE_TEAM_ID must be set when MACOS_SIGN_P12 is configured"; exit 1; fi'
 
 builds:
   - id: bridge

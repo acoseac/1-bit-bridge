@@ -80,6 +80,13 @@ const stateFileName = "update-state.json"
 // could be hours.
 const recencyWindow = 6 * time.Hour
 
+// RecencyWindow is the exported view of `recencyWindow` for callers
+// that need to surface the value in operator-facing copy (e.g. the
+// CLI's post-install hint about when boot-time rollback would
+// still fire). Returning a Duration keeps the formatting decision
+// at the caller.
+func RecencyWindow() time.Duration { return recencyWindow }
+
 // StatePath returns the on-disk location of update-state.json
 // inside the bridge's dataDir.
 func StatePath(dataDir string) string {
