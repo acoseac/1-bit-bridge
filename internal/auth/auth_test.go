@@ -586,3 +586,28 @@ func TestSetExpiryUnknownIDReturnsErrNotFound(t *testing.T) {
 		t.Errorf("SetExpiry(unknown): err = %v, want ErrNotFound", err)
 	}
 }
+
+func TestGetReturnsCopy(t *testing.T) {
+	s, _ := newTmpStore(t)
+	_, tok, _ := s.Mint("iPhone")
+	got, err := s.Get(tok.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.ID != tok.ID || got.Name != tok.Name {
+		t.Errorf("Get returned wrong row: %+v vs %+v", got, tok)
+	}
+	// Mutating the returned struct must not affect the store.
+	got.Name = "MUTATED"
+	again, _ := s.Get(tok.ID)
+	if again.Name == "MUTATED" {
+		t.Errorf("Get must return a copy; mutation leaked into store")
+	}
+}
+
+func TestGetUnknownReturnsErrNotFound(t *testing.T) {
+	s, _ := newTmpStore(t)
+	if _, err := s.Get("ffffffffffff"); err != ErrNotFound {
+		t.Errorf("Get(unknown): err = %v, want ErrNotFound", err)
+	}
+}

@@ -533,3 +533,93 @@ func truncForLog(s string) string {
 	}
 	return s[:60] + "..."
 }
+
+// PR #45 review (Gemini): the rotate + lifecycle handlers gated body
+// decode on `r.ContentLength > 0`, which incorrectly skipped the
+// decode for chunked transfer encodings (Content-Length 0 or -1
+// even when a body is genuinely present). Fix swapped to a
+// `decodeOptionalJSONBody` helper that decodes unconditionally and
+// tolerates io.EOF for empty bodies. These tests lock in the
+// regression: empty body = no error + no fields applied; chunked
+// body with content = decode succeeds and fields apply.
+func TestRotateAcceptsEmptyBody(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	h := srv.Handler()
+
+	// Mint a token to rotate.
+	var mint pairResult
+	doJSON(t, h, "POST", "/api/tokens",
+		map[string]string{"name": "x", "url": "https://127.0.0.1:7788"}, &mint)
+
+	// Empty body — Gemini's reported failure mode previously
+	// skipped the decode entirely on `Content-Length: 0`. The
+	// fixed handler treats an empty body as "no fields supplied"
+	// and falls back to the default URL.
+	req := httptest.NewRequest("POST", "/api/tokens/"+mint.ID+"/rotate", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	rw := httptest.NewRecorder()
+	h.ServeHTTP(rw, req)
+	if rw.Code != http.StatusOK {
+		t.Errorf("rotate (empty body): got %d, want 200; resp: %s", rw.Code, rw.Body.String())
+	}
+}
+
+func TestSetLifecycleAcceptsEmptyBody(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	h := srv.Handler()
+
+	var mint pairResult
+	doJSON(t, h, "POST", "/api/tokens",
+		map[string]string{"name": "x", "url": "https://127.0.0.1:7788"}, &mint)
+
+	// Empty body — handler returns the unchanged row.
+	req := httptest.NewRequest("PATCH", "/api/tokens/"+mint.ID, nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	rw := httptest.NewRecorder()
+	h.ServeHTTP(rw, req)
+	if rw.Code != http.StatusOK {
+		t.Errorf("PATCH (empty body): got %d, want 200; resp: %s", rw.Code, rw.Body.String())
+	}
+	var row tokenRow
+	if err := json.NewDecoder(rw.Body).Decode(&row); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if row.ID != mint.ID {
+		t.Errorf("PATCH (empty body) returned wrong row: got %s, want %s", row.ID, mint.ID)
+	}
+	if row.ExpiresAt != nil {
+		t.Errorf("PATCH (empty body) shouldn't have set expiry, got %v", row.ExpiresAt)
+	}
+}
+
+func TestSetLifecycleSetsAndClearsExpiry(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	h := srv.Handler()
+
+	var mint pairResult
+	doJSON(t, h, "POST", "/api/tokens",
+		map[string]string{"name": "x", "url": "https://127.0.0.1:7788"}, &mint)
+
+	// Set expiry to a future RFC3339.
+	future := "2030-01-01T00:00:00Z"
+	var set tokenRow
+	code := doJSON(t, h, "PATCH", "/api/tokens/"+mint.ID,
+		map[string]any{"expiresAt": future}, &set)
+	if code != http.StatusOK {
+		t.Fatalf("PATCH set expiry: %d", code)
+	}
+	if set.ExpiresAt == nil || set.ExpiresAt.IsZero() {
+		t.Errorf("PATCH set expiry: ExpiresAt missing on response")
+	}
+
+	// Clear via explicit JSON null.
+	var cleared tokenRow
+	code = doJSON(t, h, "PATCH", "/api/tokens/"+mint.ID,
+		map[string]any{"expiresAt": nil}, &cleared)
+	if code != http.StatusOK {
+		t.Fatalf("PATCH clear expiry: %d", code)
+	}
+	if cleared.ExpiresAt != nil {
+		t.Errorf("PATCH clear: ExpiresAt should be nil, got %v", cleared.ExpiresAt)
+	}
+}

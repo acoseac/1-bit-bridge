@@ -3,11 +3,31 @@ package admin
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 )
+
+// decodeOptionalJSONBody decodes a JSON body into `dst` when one
+// is present, treats an empty body as "no fields supplied", and
+// surfaces a typed BadRequest on malformed JSON. Replaces the
+// `r.ContentLength > 0` guard Gemini flagged on PR #45 — chunked
+// requests and transports without a Content-Length header report
+// 0 or -1 even when a body is genuinely present, so the old guard
+// could silently drop intended fields.
+func decodeOptionalJSONBody(w http.ResponseWriter, r *http.Request, dst any) (ok bool) {
+	if r.Body == nil {
+		return true
+	}
+	err := json.NewDecoder(r.Body).Decode(dst)
+	if err == nil || errors.Is(err, io.EOF) {
+		return true
+	}
+	writeError(w, http.StatusBadRequest, "bad-json", err.Error())
+	return false
+}
 
 // --- POST /api/tokens/{id}/rotate ---
 //
@@ -29,11 +49,8 @@ func (s *Server) apiTokensRotate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		URL string `json:"url"`
 	}
-	if r.ContentLength > 0 {
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, "bad-json", err.Error())
-			return
-		}
+	if !decodeOptionalJSONBody(w, r, &req) {
+		return
 	}
 	if req.URL == "" {
 		req.URL = defaultBridgeURL(s.deps.Cfg.ListenAddress)
@@ -96,11 +113,8 @@ func (s *Server) apiTokensSetLifecycle(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ExpiresAt json.RawMessage `json:"expiresAt"`
 	}
-	if r.ContentLength > 0 {
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, "bad-json", err.Error())
-			return
-		}
+	if !decodeOptionalJSONBody(w, r, &req) {
+		return
 	}
 
 	s.mu.Lock()
@@ -137,19 +151,24 @@ func (s *Server) apiTokensSetLifecycle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// No recognized fields — no-op, return current state.
-	for _, t := range s.deps.Auth.List() {
-		if t.ID == id {
-			writeJSON(w, http.StatusOK, tokenRow{
-				ID:         t.ID,
-				Name:       t.Name,
-				CreatedAt:  t.CreatedAt,
-				LastUsedAt: t.LastUsedAt,
-				RotatedAt:  t.RotatedAt,
-				ExpiresAt:  t.ExpiresAt,
-			})
+	// No recognized fields — no-op; return current row state.
+	// `Get` is an O(N) lookup like `List`+filter, but doesn't
+	// allocate the slice copy for every other token in the store.
+	t, err := s.deps.Auth.Get(id)
+	if err != nil {
+		if errors.Is(err, auth.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "unknown-token", id)
 			return
 		}
+		writeError(w, http.StatusInternalServerError, "lookup", err.Error())
+		return
 	}
-	writeError(w, http.StatusNotFound, "unknown-token", id)
+	writeJSON(w, http.StatusOK, tokenRow{
+		ID:         t.ID,
+		Name:       t.Name,
+		CreatedAt:  t.CreatedAt,
+		LastUsedAt: t.LastUsedAt,
+		RotatedAt:  t.RotatedAt,
+		ExpiresAt:  t.ExpiresAt,
+	})
 }

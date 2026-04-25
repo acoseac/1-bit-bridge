@@ -441,6 +441,23 @@ func (s *Store) List() []Token {
 	return out
 }
 
+// Get returns the token matching id, or ErrNotFound if none exists.
+// The returned struct is a copy — mutating it has no effect on the
+// store. Used by the admin token-lifecycle handlers as a cheap
+// single-row lookup vs. the O(N) `List()`-then-scan pattern Gemini
+// flagged on PR #45 review.
+func (s *Store) Get(id string) (Token, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_ = s.reloadIfStale()
+	for i := range s.tokens {
+		if s.tokens[i].ID == id {
+			return s.tokens[i], nil
+		}
+	}
+	return Token{}, ErrNotFound
+}
+
 // Revoke removes the token with the given ID. Returns ErrNotFound if no such
 // token exists.
 func (s *Store) Revoke(id string) error {
