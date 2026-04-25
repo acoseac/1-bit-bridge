@@ -21,7 +21,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"syscall"
 	"time"
 
@@ -475,12 +474,12 @@ func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	// fine without update awareness; the admin UI shows "couldn't
 	// reach GitHub" in the LastError field.
 	updOpts := updater.Options{
-		// AutoInstall is gated on platform support at construction
-		// time. On Windows the swap path is unimplemented, and a
-		// true AutoInstall flag would log a "wiring incomplete"
-		// warning at every poll cycle; clamping here keeps the log
-		// quiet and matches Phase B's CanInstall=false behaviour.
-		AutoInstall: cfg.Update.AutoInstall && runtime.GOOS != "windows",
+		// AutoInstall is on every platform now that Phase B-Windows
+		// (PR #48) wired the rename-trick swap with SCM-stop
+		// coordination. The auto-installer still gates on the
+		// session tracker, quiet-hours, and the Phase C compat
+		// gate identically across platforms.
+		AutoInstall: cfg.Update.AutoInstall,
 		// Compat-gate token snapshot. The updater calls this on each
 		// install attempt to decide whether the candidate's
 		// MinClientVersion would orphan a still-paired older client.
@@ -495,11 +494,12 @@ func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		updOpts.QuietHoursStart = start
 		updOpts.QuietHoursEnd = end
 	}
-	if cfg.Update.AutoInstall && runtime.GOOS != "windows" {
-		// Auto-install only wires the install opts when (a) the
-		// operator opted in via config and (b) the platform
-		// supports the swap. On Windows the toggle is a no-op
-		// (consistent with Phase B's CanInstall=false on Windows).
+	if cfg.Update.AutoInstall {
+		// Auto-install wires the install opts when the operator
+		// opted in via config. Phase B-Windows (PR #48) added the
+		// SCM-coordinated rename-trick swap, so Windows is now a
+		// supported auto-install platform — same gate sequence as
+		// darwin/linux.
 		updOpts.AutoInstallOpts = &updater.InstallOptions{
 			DataDir:    cfg.DataDir,
 			BinaryPath: binaryPath,
@@ -507,9 +507,9 @@ func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 			Force:      false,
 		}
 		// On successful auto-install we exit; service-manager
-		// (launchd / systemd) respawns into the new binary. The
-		// Phase B maybeRollbackOnBoot then verifies version-match
-		// and either confirms or rolls back.
+		// (launchd / systemd / SCM) respawns into the new binary.
+		// The Phase B `maybeRollbackOnBoot` housekeeping then
+		// verifies version-match and either confirms or rolls back.
 		updOpts.AutoInstallRestart = func() {
 			fmt.Fprintln(stdout, "Restarting after auto-install (service manager will respawn).")
 			scanCancel()
@@ -523,11 +523,10 @@ func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		sessions:   sessions,
 		dataDir:    cfg.DataDir,
 		binaryPath: binaryPath,
-		// Phase B implements the swap path on darwin + linux only.
-		// Surfaced as a capability flag so the dashboard hides the
-		// Install button on Windows rather than letting the operator
-		// click through to a 501.
-		canInstall: runtime.GOOS != "windows",
+		// Phase B-Windows (PR #48) wired the swap path on Windows
+		// alongside darwin/linux. CanInstall is true everywhere
+		// the binary builds.
+		canInstall: true,
 	}
 
 	apiSrv := api.New(cfg, store, provider, fingerprint).

@@ -48,9 +48,26 @@ func Install(p Params) (unitPath string, err error) {
 	case "linux":
 		return installSystemd(p)
 	case "windows":
-		// PR-1: Startup-folder shortcut. Survives reboot while the user
-		// is logged in; does NOT survive logout. PR-2 will add a proper
-		// Windows Service via SCM for users who need logout-survival.
+		// Two-tier Windows install:
+		//
+		// 1. Elevated processes (UAC admin) get a proper SCM Windows
+		//    Service. Survives logout, auto-starts on boot, integrates
+		//    with the auto-installer's swap-binary path so updates
+		//    don't strand the operator at the SCM "stop service"
+		//    step.
+		// 2. Non-elevated falls back to a Startup-folder shortcut.
+		//    Survives reboot while the user is logged in; does NOT
+		//    survive logout. The auto-installer's rename-trick still
+		//    works under this layout (no SCM file lock to dodge).
+		//
+		// `tryInstallWindowsService` returns "" + nil when SCM access
+		// is denied, signalling "fall through to startup folder".
+		// Other errors are real failures and bubble up.
+		if unitPath, err := tryInstallWindowsService(p); err != nil {
+			return unitPath, err
+		} else if unitPath != "" {
+			return unitPath, nil
+		}
 		return installWindowsStartup(p)
 	default:
 		return "", nil
@@ -67,6 +84,16 @@ func Uninstall() (string, error) {
 	case "linux":
 		return uninstallSystemd()
 	case "windows":
+		// Windows install can land in either of two places (SCM or
+		// startup folder) depending on elevation at install time.
+		// Uninstall tries both — each is idempotent for the
+		// not-installed case, so a fresh-init bridge or a SCM-only
+		// install both clean up correctly. SCM uninstall first
+		// because if the service is registered, removing it before
+		// the Startup shortcut avoids a brief window where the
+		// service tries to start a binary the operator is still
+		// removing.
+		_ = tryUninstallWindowsService()
 		return uninstallWindowsStartup()
 	default:
 		return "", nil

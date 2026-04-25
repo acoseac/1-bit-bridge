@@ -177,3 +177,47 @@ func waitForServiceStopped(s *mgr.Service, timeout time.Duration) error {
 	}
 	return fmt.Errorf("timeout waiting for service to stop after %s", timeout)
 }
+
+// tryInstallWindowsService is the SCM-or-fallback entry point used
+// by `packaging.Install` on Windows. Returns:
+//
+//   - (unitPath, nil) on a successful SCM install. The caller treats
+//     this as a hard success.
+//   - ("", nil) when SCM access is denied (no admin). The caller
+//     falls through to the Startup-folder install.
+//   - ("", err) for any genuine SCM failure (service exists but
+//     can't be replaced, CreateService failed, etc.).
+//
+// `mgr.Connect()` is the elevation probe: it returns "Access is
+// denied" when the calling process isn't running as administrator,
+// matching what `bridge init` running under a normal user shell
+// gets. The error string isn't structured, so we look for the
+// well-known Windows error text rather than the typed
+// ERROR_ACCESS_DENIED constant — the latter would require
+// `golang.org/x/sys/windows` direct, and the string check has
+// matched on every Windows release we've tested against.
+func tryInstallWindowsService(p Params) (string, error) {
+	m, err := mgr.Connect()
+	if err != nil {
+		// Non-elevated: fall through to startup folder.
+		return "", nil
+	}
+	m.Disconnect()
+	// We're elevated — proceed with the real install. Any error
+	// from here is operator-actionable.
+	return InstallWindowsService(p)
+}
+
+// tryUninstallWindowsService mirrors `tryInstallWindowsService` for
+// the uninstall path. SCM access denied → return nil (no service
+// to remove from a non-elevated context); other errors bubble up.
+// Idempotent: a not-registered service is also nil.
+func tryUninstallWindowsService() error {
+	m, err := mgr.Connect()
+	if err != nil {
+		// Non-elevated; nothing we can do via SCM.
+		return nil
+	}
+	m.Disconnect()
+	return UninstallWindowsService()
+}

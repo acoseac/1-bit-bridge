@@ -2,35 +2,245 @@
 
 package updater
 
-import "os"
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
 
-// Phase B does not yet ship Windows self-install. The rename-trick
-// (rename current bridge.exe → bridge.exe.bak first, then write new
-// bytes into bridge.exe) works on Windows but interacts subtly with
-// SCM-managed services (the file may be locked depending on how the
-// service was installed) and with administrative-permission
-// requirements for installs under Program Files. We'd rather defer
-// that complexity to a follow-up than ship a half-tested swap path
-// that bricks operator installs.
+	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/svc"
+	"golang.org/x/sys/windows/svc/mgr"
+
+	"github.com/acoseac/1-bit-bridge/internal/packaging"
+)
+
+// scmStopWait is how long we wait for the SCM service to reach the
+// Stopped state after we send svc.Stop. Long enough for an in-flight
+// `/v1/download` to flush (the active-sessions gate above us already
+// refused if any are in flight, but transient TCP teardown can still
+// take a beat); short enough that an operator running `bridge update`
+// gets feedback within a typical patience window.
+const scmStopWait = 15 * time.Second
+
+// swapBinary atomically replaces the running bridge.exe on Windows.
 //
-// On Windows the install path returns ErrInstallNotSupported
-// straight from the Updater; the admin UI hides the Install button.
-// Operators on Windows still upgrade by stopping the service,
-// replacing bridge.exe manually, and starting it back up — exactly
-// the pre-Phase-B workflow.
-
+// **Why this works at all**: Windows allows `MoveFile` (which is what
+// `os.Rename` calls under the hood with MOVEFILE_REPLACE_EXISTING)
+// against a running executable. The running process holds the file
+// open via the image loader's section object, but the directory entry
+// is what `MoveFile` updates — the inode equivalent (file kernel
+// object) is preserved across the rename, the running process keeps
+// reading from the old bytes, and the next exec loads the new ones.
+//
+// **SCM coordination**: when bridge.exe was installed via
+// `bridge init` as a Windows Service, the SCM holds a handle to the
+// path that prevents the rename in some configurations
+// (specifically: ImagePathName is canonicalised at service start, so
+// a swap-then-restart works, but if the service is currently running
+// we want to stop it first to flush any in-flight HTTP responses
+// cleanly). When SCM access is available AND the service is in the
+// Running state, we stop it before the rename and restart after.
+//
+// **Without admin rights**: `mgr.Connect` fails with "access is
+// denied" — we treat that as "service-management isn't available
+// here" and fall through to the rename-only path. That path still
+// works for non-service installs (Startup-folder shortcut from
+// `installWindowsStartup`, which doesn't take an SCM file lock) and
+// for any future user-mode install layouts.
 func swapBinary(dst, newBinary, backupExt string) error {
-	return ErrInstallNotSupported
+	bak := dst + backupExt
+
+	// SCM coordination: try to stop the service first. If we can't
+	// reach SCM (no admin), or no service registered, or service
+	// already stopped — those are all "skip the stop step" cases,
+	// not failures. The post-rename restart symmetry only fires
+	// when we successfully stopped, so a fall-through path doesn't
+	// leave a service flapping.
+	stoppedHandle, stoppedErr := stopServiceIfRunning()
+	if stoppedHandle != nil {
+		defer func() {
+			// Re-start the service after the swap. The service is
+			// configured StartAutomatic by InstallWindowsService, so
+			// the next boot would start it anyway — but operators
+			// running `bridge update` expect to come back to a live
+			// bridge without rebooting.
+			if err := stoppedHandle.svc.Start(); err != nil {
+				// Log; don't escalate. The rename succeeded and SCM
+				// auto-start will pick the new binary up on next
+				// boot. Better to surface a clear "Install completed
+				// but service didn't restart cleanly" hint than fail
+				// the whole install on a transient SCM hiccup.
+				fmt.Fprintf(os.Stderr,
+					"updater: SCM service started fine on next boot, but immediate restart failed: %v\n",
+					err)
+			}
+			stoppedHandle.svc.Close()
+			stoppedHandle.scm.Disconnect()
+		}()
+	} else if stoppedErr != nil && !errors.Is(stoppedErr, errSCMUnavailable) && !errors.Is(stoppedErr, errServiceNotRegistered) {
+		// Genuine SCM error (service registered + running but stop
+		// failed). The rename below would go through but leave a
+		// running old service holding the file open in some edge
+		// cases. Surface as a clear error rather than letting the
+		// swap proceed against a likely-locked file.
+		return fmt.Errorf("stop SCM service: %w", stoppedErr)
+	}
+
+	// Rename trick. os.Rename on Windows uses MoveFileEx with
+	// MOVEFILE_REPLACE_EXISTING, so a stale .bak is silently
+	// overwritten. Wrap each step's error so the operator can tell
+	// which side of the swap failed.
+	if err := os.Rename(dst, bak); err != nil {
+		return fmt.Errorf("rename %s -> %s: %w", dst, bak, err)
+	}
+	if err := os.Rename(newBinary, dst); err != nil {
+		// Restore .bak so we don't leave the operator with no
+		// executable.
+		if rerr := os.Rename(bak, dst); rerr != nil {
+			return fmt.Errorf("install %s -> %s failed (%v); rollback also failed (%v); manual recovery needed",
+				newBinary, dst, err, rerr)
+		}
+		return fmt.Errorf("install %s -> %s: %w (rolled back)", newBinary, dst, err)
+	}
+
+	// Durability hint via the parent directory. Windows doesn't have
+	// a direct "fsync this directory" API; FlushFileBuffers on the
+	// dir handle has system-dependent semantics but is the closest
+	// equivalent. Best-effort; failures here don't fail the install.
+	if h, err := windows.CreateFile(
+		windows.StringToUTF16Ptr(filepath.Dir(dst)),
+		windows.GENERIC_READ,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS, // required for directory handles
+		0,
+	); err == nil {
+		_ = windows.FlushFileBuffers(h)
+		_ = windows.CloseHandle(h)
+	}
+
+	return nil
 }
 
+// scmStopHandle bundles the SCM connection + service handle the
+// caller needs to keep alive across the rename + restart pair.
+// The defer in swapBinary closes both — operators don't see this
+// type.
+type scmStopHandle struct {
+	scm *mgr.Mgr
+	svc *mgr.Service
+}
+
+var (
+	errSCMUnavailable      = errors.New("SCM access denied (need admin)")
+	errServiceNotRegistered = errors.New("bridge service not registered with SCM")
+)
+
+// stopServiceIfRunning attempts to stop the bridge SCM service so
+// the swap doesn't race a running process. Returns:
+//
+//   - (handle, nil) when the service was running and is now stopped.
+//     Caller MUST close the handle (via the deferred path) and is
+//     responsible for restarting after the swap.
+//   - (nil, errSCMUnavailable) when SCM access is denied (no admin).
+//     Caller treats as "skip stop, proceed with rename".
+//   - (nil, errServiceNotRegistered) when no service exists. Same
+//     treatment.
+//   - (nil, otherErr) on any other SCM-side failure.
+//
+// Already-stopped services return (nil, nil) — no handle needed,
+// no restart action needed.
+func stopServiceIfRunning() (*scmStopHandle, error) {
+	m, err := mgr.Connect()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", errSCMUnavailable, err)
+	}
+	s, err := m.OpenService(packaging.ServiceLabel)
+	if err != nil {
+		m.Disconnect()
+		return nil, fmt.Errorf("%w: %v", errServiceNotRegistered, err)
+	}
+	state, err := s.Query()
+	if err != nil {
+		s.Close()
+		m.Disconnect()
+		return nil, fmt.Errorf("query service: %w", err)
+	}
+	if state.State == svc.Stopped {
+		s.Close()
+		m.Disconnect()
+		return nil, nil // nothing to do
+	}
+	if _, err := s.Control(svc.Stop); err != nil {
+		s.Close()
+		m.Disconnect()
+		return nil, fmt.Errorf("send stop: %w", err)
+	}
+	if werr := waitServiceStopped(s, scmStopWait); werr != nil {
+		s.Close()
+		m.Disconnect()
+		return nil, werr
+	}
+	return &scmStopHandle{scm: m, svc: s}, nil
+}
+
+// waitServiceStopped polls Service.Query until the state reaches
+// Stopped or the timeout expires. Mirror of the helper in
+// internal/packaging/service_windows.go — duplicated here rather
+// than imported so the updater's swap path doesn't pull in the
+// packaging package's full surface.
+func waitServiceStopped(s *mgr.Service, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		st, err := s.Query()
+		if err != nil {
+			return fmt.Errorf("query service: %w", err)
+		}
+		if st.State == svc.Stopped {
+			return nil
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return fmt.Errorf("service did not stop within %s", timeout)
+}
+
+// RollbackBinary restores dst.bak → dst. Mirror of swap_unix.go's
+// implementation, with the same SCM-stop coordination as
+// swapBinary.
 func RollbackBinary(dst, backupExt string) error {
-	return ErrInstallNotSupported
+	bak := dst + backupExt
+	if _, err := os.Stat(bak); err != nil {
+		return fmt.Errorf("backup %s missing: %w", bak, err)
+	}
+
+	stoppedHandle, stoppedErr := stopServiceIfRunning()
+	if stoppedHandle != nil {
+		defer func() {
+			if err := stoppedHandle.svc.Start(); err != nil {
+				fmt.Fprintf(os.Stderr,
+					"updater: post-rollback service restart failed (will start on next boot): %v\n",
+					err)
+			}
+			stoppedHandle.svc.Close()
+			stoppedHandle.scm.Disconnect()
+		}()
+	} else if stoppedErr != nil && !errors.Is(stoppedErr, errSCMUnavailable) && !errors.Is(stoppedErr, errServiceNotRegistered) {
+		return fmt.Errorf("stop SCM service: %w", stoppedErr)
+	}
+
+	if err := os.Rename(bak, dst); err != nil {
+		return fmt.Errorf("rollback rename %s -> %s: %w", bak, dst, err)
+	}
+	return nil
 }
 
+// RemoveBackup deletes dst.bak. Same semantics as the Unix
+// implementation: missing file is not an error, post-successful-
+// install housekeeping calls this on the next boot.
 func RemoveBackup(dst, backupExt string) error {
-	// Even on Windows, removing a stale .bak is harmless and worth
-	// supporting so a future Phase-B-Windows can leave the cleanup
-	// invariants the same.
 	bak := dst + backupExt
 	err := os.Remove(bak)
 	if os.IsNotExist(err) {
