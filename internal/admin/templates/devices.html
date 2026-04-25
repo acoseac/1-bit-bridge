@@ -14,20 +14,27 @@
     <table class="rows">
       <thead>
         <tr>
-          <th>Name</th><th>ID</th><th>Created</th><th>Last used</th><th></th>
+          <th>Name</th><th>ID</th><th>Created</th><th>Last used</th><th>Expires</th><th></th>
         </tr>
       </thead>
       <tbody id="tokens-body">
         {{range .Data.Tokens}}
-        <tr data-id="{{.ID}}">
+        <tr data-id="{{.ID}}" data-name="{{.Name}}">
           <td>{{.Name}}</td>
           <td><code>{{.ID}}</code></td>
           <td>{{timeAgo .CreatedAt}}</td>
           <td>{{timeAgo .LastUsedAt}}</td>
-          <td><button type="button" class="btn danger revoke-token">Revoke</button></td>
+          <td class="expires-cell">
+            {{if .ExpiresAt}}{{timeAgo .ExpiresAt}}{{else}}<em>never</em>{{end}}
+          </td>
+          <td class="row-actions">
+            <button type="button" class="btn rotate-token" title="Generate fresh raw bytes for this token (preserves ID + name; the device must re-scan a new pair QR)">Rotate</button>
+            <button type="button" class="btn set-expiry-token" title="Set or clear an expiry time for this token">Expiry…</button>
+            <button type="button" class="btn danger revoke-token" title="Permanently delete this token">Revoke</button>
+          </td>
         </tr>
         {{else}}
-        <tr><td colspan="5"><em>No devices paired yet.</em></td></tr>
+        <tr><td colspan="6"><em>No devices paired yet.</em></td></tr>
         {{end}}
       </tbody>
     </table>

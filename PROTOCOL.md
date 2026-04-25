@@ -284,6 +284,22 @@ Example: `X-Client-Version: 1.2`. The bridge persists the most recent value per 
 
 The header is optional — older iOS clients that don't send it continue to authenticate normally. Bridges record nothing for those tokens, and the updater treats them as "version unknown" → blocks `MinClientVersion`-gated auto-installs unless the operator overrides.
 
+## Operator: Token lifecycle
+
+`bridge pair --name <device>` mints a fresh 256-bit bearer token. Beyond that, the token surface supports rotation, expiry, and revocation:
+
+- **List**: `bridge token list` — prints every paired token with ID, name, created/last-used timestamps, rotation marker, and expiry.
+- **Rotate**: `bridge token rotate <id>` — replaces the raw bytes; ID, name, and CreatedAt are preserved; the previous raw token stops validating immediately. The device must scan a fresh pair URL (or paste the new raw token) to reconnect. The admin console's "Rotate" button does the same and emits a QR + pair URL inline.
+- **Expire**: `bridge token expire <id> --in <duration>` (e.g. `24h`, `2160h` ≈ 90 days) sets a hard cutoff. `--clear` removes an existing expiry. The admin console's "Expiry…" button accepts the same shorthand. Validate rejects expired tokens; the iOS device gets a 401 and is expected to re-pair.
+- **Revoke**: `bridge token revoke <id>` (or admin "Revoke" button) permanently deletes the row. Re-paring needs a fresh `bridge pair`.
+
+The corresponding admin endpoints are:
+
+- `POST /api/tokens/{id}/rotate` — emits the same `pairResult` shape as `POST /api/tokens` (raw, ID, fingerprint, pair URL, QR data URL).
+- `PATCH /api/tokens/{id}` — body `{"expiresAt": "<RFC3339>"}` to set, `{"expiresAt": null}` to clear. Other fields ignored (reserved for future lifecycle work).
+
+ProtocolVersion is unchanged for this surface — it's purely server-side + admin-UI work, no on-the-wire client contract to bump.
+
 ## Operator: Backup & restore
 
 A snapshot bundles every file an operator would otherwise have to re-pair / re-scan to recover from corruption: the manifest SQLite database (`bridge.db`), the token store (`tokens.json`), the TLS material (`server.crt` + `server.key`), and the live config (`bridge.yaml`). Snapshots land in `<dataDir>/backups/<timestamp>/` (UTC, Windows-friendly format `2006-01-02T15-04-05Z`). The bundle is permissioned 0700/0600.
