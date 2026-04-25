@@ -69,15 +69,26 @@ func TestCompatGate_TokensWithoutVersionAreSkipped(t *testing.T) {
 }
 
 func TestCompatGate_LeadingV_TolerantOnBothSides(t *testing.T) {
-	// semver.IsValid wants a leading "v"; normalizeForSemver adds
-	// one. Both with and without leading-v should work end-to-end.
-	tokens := []auth.Token{{ID: "a", Name: "x", LastClientVersion: "v1.0.0"}}
-	if got := compatGateReason("v1.5.0", tokens); got == "" {
-		t.Errorf("'v'-prefixed floor must work: got empty (token below)")
+	// semver.IsValid wants a leading lowercase "v"; normalizeForSemver
+	// adds it AND down-cases an upper-case prefix. Both with and
+	// without leading-v should work end-to-end. The uppercase-V case
+	// is the regression Gemini flagged on PR #47 — without the
+	// case-insensitive normalise, "V1.0.0" was rejected as malformed
+	// and the token was silently skipped.
+	cases := []struct {
+		floor, tokenVer string
+	}{
+		{"v1.5.0", "v1.0.0"},
+		{"1.5.0", "1.0.0"},
+		{"V1.5.0", "V1.0.0"},
+		{"v1.5.0", "V1.0.0"}, // mismatched prefix style still resolves
+		{"V1.5.0", "1.0.0"},
 	}
-	tokens = []auth.Token{{ID: "a", Name: "x", LastClientVersion: "1.0.0"}}
-	if got := compatGateReason("1.5.0", tokens); got == "" {
-		t.Errorf("bare floor must work: got empty (token below)")
+	for _, tc := range cases {
+		tokens := []auth.Token{{ID: "a", Name: "x", LastClientVersion: tc.tokenVer}}
+		if got := compatGateReason(tc.floor, tokens); got == "" {
+			t.Errorf("floor=%q tokenVer=%q: got empty, want refusal (token below)", tc.floor, tc.tokenVer)
+		}
 	}
 }
 

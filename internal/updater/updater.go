@@ -408,11 +408,14 @@ func compatGateReason(minRequired string, tokens []auth.Token) string {
 }
 
 // normalizeForSemver makes "1.2.3" parseable by golang.org/x/mod/
-// semver, which expects a leading "v". Tolerates an existing
-// leading "v" so callers don't need to decide.
+// semver, which expects a leading lowercase "v". Tolerates an
+// existing leading "v" / "V" by normalizing — `semver.IsValid` is
+// case-sensitive on the prefix, so "V1.0.0" would otherwise be
+// rejected as malformed and the gate would silently skip the
+// token (Gemini flagged on PR #47).
 func normalizeForSemver(v string) string {
-	if strings.HasPrefix(v, "v") || strings.HasPrefix(v, "V") {
-		return v
+	if len(v) > 0 && (v[0] == 'v' || v[0] == 'V') {
+		return "v" + v[1:]
 	}
 	return "v" + v
 }
