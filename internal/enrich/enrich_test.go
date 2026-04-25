@@ -143,6 +143,112 @@ func TestMusicBrainzSendsUserAgent(t *testing.T) {
 	}
 }
 
+func TestParseRetryAfterDeltaSeconds(t *testing.T) {
+	now := time.Date(2026, 4, 25, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		header string
+		want   time.Duration
+	}{
+		{"0", 0},
+		{"1", 1 * time.Second},
+		{"30", 30 * time.Second},
+		{"  120  ", 2 * time.Minute},
+	}
+	for _, c := range cases {
+		got := parseRetryAfter(c.header, now)
+		if got != c.want {
+			t.Errorf("parseRetryAfter(%q) = %v, want %v", c.header, got, c.want)
+		}
+	}
+}
+
+func TestParseRetryAfterHTTPDate(t *testing.T) {
+	now := time.Date(2026, 4, 25, 12, 0, 0, 0, time.UTC)
+	// RFC 7231 IMF-fixdate, 90s in the future.
+	header := "Sat, 25 Apr 2026 12:01:30 GMT"
+	got := parseRetryAfter(header, now)
+	if got < 89*time.Second || got > 91*time.Second {
+		t.Errorf("parseRetryAfter(HTTP-date) = %v, want ~90s", got)
+	}
+}
+
+func TestParseRetryAfterPastDateReturnsZero(t *testing.T) {
+	// Past HTTP-date → don't wait at all.
+	now := time.Date(2026, 4, 25, 12, 0, 0, 0, time.UTC)
+	got := parseRetryAfter("Sat, 25 Apr 2026 11:00:00 GMT", now)
+	if got != 0 {
+		t.Errorf("past Retry-After should be 0, got %v", got)
+	}
+}
+
+func TestParseRetryAfterMalformedReturnsZero(t *testing.T) {
+	now := time.Date(2026, 4, 25, 12, 0, 0, 0, time.UTC)
+	for _, h := range []string{"", "garbage", "-5", "2.5", "soon"} {
+		if got := parseRetryAfter(h, now); got != 0 {
+			t.Errorf("parseRetryAfter(%q) = %v, want 0", h, got)
+		}
+	}
+}
+
+func TestParseRetryAfterCappedAtOneHour(t *testing.T) {
+	// A hostile or misconfigured upstream telling us to wait a day
+	// shouldn't park the enricher for a day.
+	now := time.Date(2026, 4, 25, 12, 0, 0, 0, time.UTC)
+	got := parseRetryAfter("86400", now) // 24h
+	if got != time.Hour {
+		t.Errorf("parseRetryAfter(86400s) = %v, want capped at 1h", got)
+	}
+}
+
+func TestMusicBrainz429HonorsRetryAfter(t *testing.T) {
+	// Server returns 429 with Retry-After: 1 (second). Client should
+	// sleep ~1s and then return an error. We verify both: (a) the
+	// error returns, (b) the call took at least the advised duration.
+	const advisedSeconds = "1"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", advisedSeconds)
+		w.WriteHeader(http.StatusTooManyRequests)
+		io.WriteString(w, `{"error":"too many requests"}`)
+	}))
+	defer srv.Close()
+	c := NewMusicBrainzClient(srv.URL, "test", nil)
+	start := time.Now()
+	_, err := c.SearchRelease(context.Background(), "John Coltrane", "Blue Train")
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected error on 429, got nil")
+	}
+	// Must have waited at least the advised duration before returning.
+	if elapsed < 950*time.Millisecond {
+		t.Errorf("did not honor Retry-After: returned in %v (want >=1s)", elapsed)
+	}
+}
+
+func TestMusicBrainz429RespectsContextCancellation(t *testing.T) {
+	// Server advises a long wait; client should bail when ctx is cancelled
+	// rather than parking the goroutine for the full duration.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "60") // 1 minute
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+	c := NewMusicBrainzClient(srv.URL, "test", nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+	start := time.Now()
+	_, err := c.SearchRelease(ctx, "X", "Y")
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected error after ctx cancel, got nil")
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("did not honor ctx cancel during Retry-After wait: returned in %v", elapsed)
+	}
+}
+
 func TestMusicBrainzSearchArtistPrefersExactMatch(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `{"artists":[
