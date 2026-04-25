@@ -19,3 +19,15 @@ func InstallWindowsService(_ Params) (string, error) {
 // UninstallWindowsService is a non-Windows stub. Always returns nil so
 // a best-effort uninstall doesn't fail across platforms.
 func UninstallWindowsService() error { return nil }
+
+// tryInstallWindowsService is the elevation-aware wrapper used by
+// `Install` on Windows. The non-Windows stub returns ("", nil) so
+// the dispatch in packaging.go falls through to the unix-side
+// install paths (which are what actually runs on darwin/linux —
+// the call site is gated on `runtime.GOOS == "windows"`, this stub
+// only exists to keep the symbol resolvable at compile time).
+func tryInstallWindowsService(_ Params) (string, error) { return "", nil }
+
+// tryUninstallWindowsService mirrors tryInstallWindowsService for
+// the uninstall path. Always nil on non-Windows.
+func tryUninstallWindowsService() error { return nil }

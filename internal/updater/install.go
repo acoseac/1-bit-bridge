@@ -210,9 +210,10 @@ var (
 // version is broken AFTER a successful install (the boot-time
 // rollback only fires on truly unbootable builds).
 func (u *Updater) Rollback(opts InstallOptions) error {
-	if isWindows() {
-		return ErrInstallNotSupported
-	}
+	// Phase B-Windows (PR #48) implements the rollback rename
+	// alongside darwin/linux — no platform guard needed here. The
+	// Windows-side `RollbackBinary` handles the SCM-stop dance
+	// transparently.
 	if !opts.Force && opts.Sessions != nil && opts.Sessions.Inflight() > 0 {
 		return fmt.Errorf("%w: %d inflight download(s)",
 			ErrActiveSessions, opts.Sessions.Inflight())
