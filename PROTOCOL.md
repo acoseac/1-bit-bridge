@@ -58,9 +58,17 @@ Pairing probe and liveness check. No auth token required for this endpoint (so t
     "https://homepc.local:7788",
     "https://100.64.5.9:7788",
     "https://[fd7a:115c:a1e0::f536:e41f]:7788"
-  ]
+  ],
+  "latestServerVersion": "0.1.0",
+  "updateAvailable": true,
+  "updateReleaseNotesURL": "https://github.com/acoseac/1-bit-bridge/releases/tag/v0.1.0",
+  "minClientVersion": "1.0.0"
 }
 ```
+
+The four `latestServerVersion` / `updateAvailable` / `updateReleaseNotesURL` / `minClientVersion` fields are an additive extension landed in bridge 0.1.0; they are populated only when the bridge has an updater configured (it polls the GitHub Releases API in the background) and at least one successful poll has cached a result. All four are `omitempty` on the wire — older bridges ship the response without them, and iOS clients MUST tolerate their absence.
+
+`minClientVersion` advertises the iOS app version *this bridge* needs from its clients (build-time-injected via `-ldflags -X .../version.MinClientVersion=…`). iOS uses it to surface "your app may be too old for this bridge" hints. It is NOT the floor a *candidate update* would require — that's a Phase B install-side concern and is delivered through admin-console / CLI surfaces, not `/v1/health`.
 
 `endpoints` (additive since v1, optional, may be absent or empty) is the full list of URLs the server is currently reachable at — LAN IPv4/IPv6 (global unicast only; link-local is filtered because it's not reachable across devices), the `<hostname>.local` mDNS form, and any Tailscale interface (CGNAT `100.64/10` for v4, `fd7a:115c:a1e0::/48` ULA for v6). Clients use this to learn new alternates at heartbeat time so they can roam between LAN and Tailscale without re-pairing.
 
@@ -234,10 +242,39 @@ The scheme is **additive** — bridges that don't ship the admin console (pre-0.
 
 See `testdata/fixtures/` in this repo for canonical manifest payloads used as decode-test goldens on the iOS side (`com.acoseac.dsdplayer/Tests/com_acoseac_dsdplayerTests/Fixtures/Bridge/`). A schema change must regenerate the fixtures in both places in the same PR pair.
 
+## Updates
+
+Phase A (this revision) ships **version awareness** only. The bridge polls the GitHub Releases API on a background goroutine (`internal/updater`, 6 h cadence by default), caches the latest release tag, and exposes it to two surfaces:
+
+1. **Admin console** — the dashboard's "Updates" tile shows current/available versions, last check time, and (when applicable) "update available" with a link to release notes. A "Check now" button forces an out-of-schedule poll. Phase A has no install button — operators still upgrade by downloading the binary from GitHub Releases manually.
+2. **`/v1/health`** — the four optional response fields documented above. iOS reads these and surfaces "Bridge update available" / "Bridge is older than recommended" hints in the Bridge Editor.
+
+A future revision (Phase B) will wire an operator-triggered install path with checksum verification, codesign Team-ID match (macOS), an active-stream gate (no restart while a `/v1/download` is in flight to protect Hugo 2's DoP lock), and rollback via a kept `bridge.bak`. Phase C adds opt-in auto-install with quiet-hours and the `MinClientVersion` compatibility gate. The wire shape does not change for Phase B / C — they're admin-surface and binary-swap concerns only.
+
+### Client version reporting
+
+The iOS app sends an additive request header on every authenticated request:
+
+```http
+X-Client-Version: <CFBundleShortVersionString>
+```
+
+Example: `X-Client-Version: 1.2`. The bridge persists the most recent value per token (`auth.Token.LastClientVersion` in `<dataDir>/tokens.json`) so the updater can later refuse an auto-install whose `MinClientVersion` would orphan a still-active iOS build that hasn't shipped through the App Store yet.
+
+The header is optional — older iOS clients that don't send it continue to authenticate normally. Bridges record nothing for those tokens, and the updater treats them as "version unknown" → blocks `MinClientVersion`-gated auto-installs unless the operator overrides.
+
 ## Compatibility matrix
 
-| Bridge protocol | iOS app version       |
-|-----------------|-----------------------|
-| `1`             | `>= 1.1.0` (unreleased) |
+The matrix below states what each side needs from the other. The hard `protocolVersion` integer (line 8 above) is the breaking-change boundary; this is the additive-feature recommendation.
 
-Pairings outside this matrix are refused at `/v1/health`-check time.
+| Bridge version | Min iOS app version | Notes                                                  |
+|----------------|---------------------|--------------------------------------------------------|
+| `0.0.x`        | `1.0.0`             | Pre-Phase-A. No version-awareness UI.                  |
+| `0.1.x`        | `1.0.0`             | Phase A. iOS 1.2+ surfaces update hints; older clients still work. |
+
+| iOS app version | Min bridge version  | Notes                                                  |
+|-----------------|---------------------|--------------------------------------------------------|
+| `1.0.x` – `1.1.x` | `0.0.1`           | Pre-Phase-A. No update-aware UI.                       |
+| `1.2.0+`        | `0.0.1`             | Phase A. Will surface "bridge update recommended" when paired bridge is below `0.1.0`. |
+
+Pairings whose `protocolVersion` integers don't match are refused at `/v1/health`-check time. The compat-matrix rows above are advisory: operators see hints in the iOS app + admin console but the connection still works.

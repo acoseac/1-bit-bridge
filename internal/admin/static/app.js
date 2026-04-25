@@ -66,6 +66,26 @@ function initDashboard() {
     });
   }
 
+  // Updates panel: "Check now" forces a fresh GitHub poll. The handler
+  // returns the post-check status so the tile refreshes in one trip.
+  const updateCheckBtn = document.getElementById("update-check");
+  if (updateCheckBtn) {
+    updateCheckBtn.addEventListener("click", async () => {
+      const oldText = updateCheckBtn.textContent;
+      updateCheckBtn.disabled = true;
+      updateCheckBtn.textContent = "Checking…";
+      try {
+        const u = await API.post("/api/updates/check");
+        renderUpdateTile(u);
+      } catch (err) {
+        renderUpdateTile({ lastError: err.message });
+      } finally {
+        updateCheckBtn.textContent = oldText;
+        updateCheckBtn.disabled = false;
+      }
+    });
+  }
+
   // Live-refresh the top-line numbers every 3 s.
   const tick = async () => {
     try {
@@ -78,12 +98,96 @@ function initDashboard() {
           ? `<span class="badge running">scanning</span><span>· ${s.scanProgress} tracks so far</span>`
           : `<span class="badge idle">idle</span>`;
       }
+      // Refresh the update tile from the cached status — cheap, no
+      // GitHub call. The "Check now" button is the only path that
+      // forces a fresh poll.
+      try {
+        const u = await API.get("/api/updates");
+        renderUpdateTile(u);
+      } catch {
+        // Updater not configured (older bridge, test harness): leave
+        // the tile at its server-rendered first-paint state.
+      }
     } catch (e) {
       // Admin listener went away — stop polling.
       clearInterval(handle);
     }
   };
   const handle = setInterval(tick, 3000);
+}
+
+// renderUpdateTile mutates the dashboard's Updates panel from a Status
+// payload. Tolerates partial input (Check-now error path passes only
+// {lastError}). Mirrors the server-rendered first paint in
+// templates/dashboard.html.
+//
+// The release-notes anchor is created fresh on each render rather than
+// preserved from the prior tree — `status.innerHTML = ...` wipes the
+// node, so caching a reference to it is a use-after-detach bug (PR #41
+// CodeRabbit review): once the tile transitions through "up to date"
+// or "check failed", a subsequent "update available" response could no
+// longer surface the link.
+function renderUpdateTile(u) {
+  const status = document.getElementById("update-status");
+  const lastCheck = document.getElementById("update-last-check");
+  const lastError = document.getElementById("update-last-error");
+  const latest = document.getElementById("update-latest");
+  if (!status) return;
+
+  if (u && u.updateAvailable && u.latestVersion) {
+    status.innerHTML = `<span class="badge running">update available</span><span>· <code>${escapeHTML(u.latestVersion)}</code></span>`;
+    if (u.releaseNotesURL) {
+      const notes = document.createElement("a");
+      notes.id = "update-notes";
+      notes.href = u.releaseNotesURL;
+      notes.target = "_blank";
+      notes.rel = "noopener";
+      notes.textContent = "release notes";
+      status.appendChild(document.createTextNode(" "));
+      status.appendChild(notes);
+    }
+  } else if (u && u.latestVersion) {
+    status.innerHTML = `<span class="badge idle">up to date</span><span>· latest <code>${escapeHTML(u.latestVersion)}</code></span>`;
+  } else if (u && u.lastError) {
+    status.innerHTML = `<span class="badge idle">check failed</span>`;
+  } else {
+    status.innerHTML = `<span class="badge idle">checking…</span>`;
+  }
+
+  if (lastCheck && u && u.lastCheck) {
+    lastCheck.textContent = formatTimeAgo(new Date(u.lastCheck));
+  }
+  if (lastError) {
+    if (u && u.lastError) {
+      lastError.innerHTML = `<code>${escapeHTML(u.lastError)}</code>`;
+      lastError.hidden = false;
+      const dt = lastError.previousElementSibling;
+      if (dt) dt.hidden = false;
+    } else {
+      lastError.hidden = true;
+      lastError.innerHTML = "";
+      const dt = lastError.previousElementSibling;
+      if (dt) dt.hidden = true;
+    }
+  }
+  if (latest && u && u.latestVersion) {
+    latest.textContent = u.latestVersion;
+    latest.hidden = false;
+  }
+}
+
+function escapeHTML(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
+function formatTimeAgo(d) {
+  const sec = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000));
+  if (sec < 60) return `${sec}s ago`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
+  return `${Math.floor(sec / 86400)}d ago`;
 }
 
 function setText(id, v) {

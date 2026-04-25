@@ -479,6 +479,44 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, settingsPatchResponse{RestartRequired: restart})
 }
 
+// --- GET /api/updates ---
+//
+// Returns the cached updater Status. Cheap (mutex-protected snapshot).
+// Used by the dashboard tile to refresh "Update available" without
+// re-polling GitHub on every browser tick.
+//
+// When no Updater is wired (test harnesses, future opt-out flag) the
+// response is a stub showing the bridge's own version and a
+// "not-configured" Channel — the dashboard JS treats this the same as
+// "no update info" and hides the tile's action button.
+func (s *Server) apiUpdatesGet(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Updater == nil {
+		writeJSON(w, http.StatusOK, UpdateStatus{
+			CurrentVersion: version.ServerVersion,
+			Channel:        "not-configured",
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.deps.Updater.Status())
+}
+
+// --- POST /api/updates/check ---
+//
+// Forces an out-of-schedule poll. Used by the dashboard's "Check now"
+// button. The handler waits for the poll to return so the JSON
+// response carries the post-check status — operator gets a single
+// round-trip, no second fetch needed.
+//
+// Uses r.Context() so a browser disconnect cancels the (potentially
+// slow) GitHub call rather than letting it run uselessly to completion.
+func (s *Server) apiUpdatesCheck(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Updater == nil {
+		writeError(w, http.StatusServiceUnavailable, "no-updater", "updater is not configured")
+		return
+	}
+	writeJSON(w, http.StatusOK, s.deps.Updater.CheckNow(r.Context()))
+}
+
 // --- POST /api/restart ---
 
 func (s *Server) apiRestart(w http.ResponseWriter, r *http.Request) {

@@ -33,8 +33,44 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	bridgemdns "github.com/acoseac/1-bit-bridge/internal/mdns"
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
+	"github.com/acoseac/1-bit-bridge/internal/updater"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
+
+// updateInfoAdapter bridges *updater.Updater to api.UpdaterStatus +
+// admin's read-side without coupling those packages to the updater
+// type. Trivial; lives here at the wiring point so the api / admin
+// packages stay agnostic of where their update info comes from.
+type updateInfoAdapter struct{ u *updater.Updater }
+
+func (a updateInfoAdapter) UpdateInfo() api.UpdateInfo {
+	s := a.u.Status()
+	return api.UpdateInfo{
+		LatestVersion:    s.LatestVersion,
+		UpdateAvailable:  s.UpdateAvailable,
+		ReleaseNotesURL:  s.ReleaseNotesURL,
+		MinClientVersion: version.MinClientVersion,
+	}
+}
+
+func (a updateInfoAdapter) Status() admin.UpdateStatus {
+	s := a.u.Status()
+	return admin.UpdateStatus{
+		CurrentVersion:   s.CurrentVersion,
+		LatestVersion:    s.LatestVersion,
+		UpdateAvailable:  s.UpdateAvailable,
+		ReleaseNotesURL:  s.ReleaseNotesURL,
+		Channel:          s.Channel,
+		LastCheck:        s.LastCheck,
+		LastError:        s.LastError,
+		MinClientVersion: version.MinClientVersion,
+	}
+}
+
+func (a updateInfoAdapter) CheckNow(ctx context.Context) admin.UpdateStatus {
+	a.u.CheckNow(ctx)
+	return a.Status()
+}
 
 // artworkDirBridge lets cmd/bridge expose the enricher's cache dir to
 // internal/api without importing internal/enrich from there.
@@ -210,7 +246,16 @@ func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 
 	// Fire up the periodic scanner in the background. It runs an initial
 	// scan on startup, then rescans every cfg.ScanInterval().
-	scanCtx, scanCancel := context.WithCancel(context.Background())
+	//
+	// scanCtx derives from serveCmd's parent ctx so a SIGINT (or
+	// any other parent cancel) propagates straight to the scanner,
+	// enricher, and updater goroutines that share this context. The
+	// previous version derived from context.Background() and relied
+	// on the deferred scanCancel() to fire — which works in steady
+	// state but trips the contextcheck linter and means the
+	// background workers can't observe cancellation until serveCmd's
+	// shutdown path runs.
+	scanCtx, scanCancel := context.WithCancel(ctx)
 	defer scanCancel()
 	go scanner.RunPeriodic(scanCtx, cfg.ScanInterval())
 
@@ -229,9 +274,19 @@ func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	enricher := enrich.NewEnricher(manifestStore, mbClient, caaClient, deezerClient, artworkDir)
 	go enricher.Run(scanCtx)
 
+	// Background updater: poll-only in Phase A (notify, no install).
+	// Lives off scanCtx so a SIGINT cancels it cleanly alongside the
+	// scanner. Failures are non-fatal — the bridge serves fine without
+	// update awareness; the admin UI just shows "couldn't reach
+	// GitHub" in the LastError field.
+	upd := updater.New(updater.Options{})
+	go upd.Run(scanCtx)
+	updAdapter := updateInfoAdapter{u: upd}
+
 	apiSrv := api.New(cfg, store, provider, fingerprint).
 		WithArtworkDirs(artworkDirBridge(artworkDir)).
-		WithMBIDProbe(provider)
+		WithMBIDProbe(provider).
+		WithUpdater(updAdapter)
 	httpSrv := &http.Server{
 		Addr:      cfg.ListenAddress,
 		Handler:   apiSrv.Handler(),
@@ -266,6 +321,7 @@ func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		Fingerprint: fingerprint,
 		StartedAt:   time.Now().UTC(),
 		ScanCtx:     scanCtx,
+		Updater:     updAdapter,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "admin: %v\n", err)

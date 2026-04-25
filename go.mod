@@ -7,6 +7,7 @@ require (
 	github.com/hashicorp/mdns v1.0.6
 	github.com/mewkiz/flac v1.0.13
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
+	golang.org/x/mod v0.33.0
 	golang.org/x/sys v0.43.0
 	golang.org/x/text v0.34.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -23,7 +24,6 @@ require (
 	github.com/miekg/dns v1.1.55 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	golang.org/x/mod v0.33.0 // indirect
 	golang.org/x/net v0.50.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/tools v0.42.0 // indirect

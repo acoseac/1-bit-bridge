@@ -3,9 +3,11 @@ package auth
 import (
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -366,6 +368,100 @@ func TestConcurrentMints(t *testing.T) {
 		if _, ok := s.Validate(raw); !ok {
 			t.Errorf("post-race: token %s…%s did not validate", raw[:6], raw[len(raw)-6:])
 		}
+	}
+}
+
+func TestRecordClientVersionUpdatesInMemoryAndFlushPersists(t *testing.T) {
+	// RecordClientVersion honours the same 30 s lastUsedFlush debounce
+	// as LastUsedAt, so a call inside the debounce window touches
+	// in-memory state but does NOT rewrite tokens.json. Asserting the
+	// in-memory bump + the FlushLastUsed-driven persist together is
+	// what pins the post-PR-#41-review behaviour: fast in-memory,
+	// debounced disk, no DoS surface from version flip-flopping.
+	s, path := newTmpStore(t)
+	_, tok, _ := s.Mint("iPhone 15")
+	mtBefore := mustMtime(t, path)
+
+	time.Sleep(10 * time.Millisecond)
+	s.RecordClientVersion(tok.ID, "1.2.3")
+	// In-memory must be live for the updater's compat gate.
+	if got := s.List()[0]; got.LastClientVersion != "1.2.3" {
+		t.Errorf("LastClientVersion = %q, want 1.2.3 (in-memory)", got.LastClientVersion)
+	}
+	// Debounced: no fresh disk write within the 30 s window after Mint.
+	if mt := mustMtime(t, path); mt.After(mtBefore) {
+		t.Errorf("RecordClientVersion within debounce window persisted (mtime %v > %v)", mt, mtBefore)
+	}
+	// FlushLastUsed forces the deferred update to land — same path the
+	// shutdown defer in cmd/bridge/main.go uses.
+	if err := s.FlushLastUsed(); err != nil {
+		t.Fatalf("FlushLastUsed: %v", err)
+	}
+	if mt := mustMtime(t, path); !mt.After(mtBefore) {
+		t.Errorf("FlushLastUsed did not persist deferred client-version update (mtime %v == %v)", mt, mtBefore)
+	}
+}
+
+func TestRecordClientVersionDebouncesUnderRapidChanges(t *testing.T) {
+	// DoS-protection regression guard (PR #41 review): a buggy or
+	// malicious client could rotate X-Client-Version on every request
+	// and force tokens.json rewrites under the global lock. The
+	// debounce caps that at one persist per lastUsedFlushInterval.
+	s, path := newTmpStore(t)
+	_, tok, _ := s.Mint("iPhone 15")
+	mtAfterMint := mustMtime(t, path)
+
+	for i := 0; i < 50; i++ {
+		s.RecordClientVersion(tok.ID, fmt.Sprintf("1.%d.%d", i/10, i%10))
+		time.Sleep(time.Millisecond)
+	}
+	if mt := mustMtime(t, path); mt.After(mtAfterMint) {
+		t.Errorf("flood of distinct versions broke the debounce (mtime %v > %v)", mt, mtAfterMint)
+	}
+}
+
+func TestRecordClientVersionSkipsDiskOnRepeat(t *testing.T) {
+	// Hot-path coverage: same value, request after request, no
+	// in-memory or on-disk churn.
+	s, path := newTmpStore(t)
+	_, tok, _ := s.Mint("iPhone 15")
+	s.RecordClientVersion(tok.ID, "1.2.3")
+	mtAfterFirst := mustMtime(t, path)
+
+	for i := 0; i < 5; i++ {
+		time.Sleep(2 * time.Millisecond)
+		s.RecordClientVersion(tok.ID, "1.2.3") // same value, should no-op
+	}
+	if mt := mustMtime(t, path); mt.After(mtAfterFirst) {
+		t.Errorf("repeat RecordClientVersion(same value) re-persisted (mtime %v > %v)", mt, mtAfterFirst)
+	}
+}
+
+func TestRecordClientVersionIgnoresEmptyAndUnknown(t *testing.T) {
+	s, _ := newTmpStore(t)
+	_, tok, _ := s.Mint("iPhone")
+	// Empty version string: no-op.
+	s.RecordClientVersion(tok.ID, "")
+	if v := s.List()[0].LastClientVersion; v != "" {
+		t.Errorf("LastClientVersion = %q, want empty after no-op call", v)
+	}
+	// Empty ID: no-op (no panic).
+	s.RecordClientVersion("", "1.2.3")
+	// Unknown ID: silently skipped.
+	s.RecordClientVersion("deadbeefcafe", "1.2.3")
+	if v := s.List()[0].LastClientVersion; v != "" {
+		t.Errorf("RecordClientVersion(unknown id) wrote to wrong token: got %q", v)
+	}
+}
+
+func TestRecordClientVersionTruncatesOverlongInput(t *testing.T) {
+	s, _ := newTmpStore(t)
+	_, tok, _ := s.Mint("iPhone")
+	junk := strings.Repeat("X", 500)
+	s.RecordClientVersion(tok.ID, junk)
+	got := s.List()[0].LastClientVersion
+	if len(got) != maxClientVersionLen {
+		t.Errorf("LastClientVersion length = %d, want %d (clamped)", len(got), maxClientVersionLen)
 	}
 }
 
