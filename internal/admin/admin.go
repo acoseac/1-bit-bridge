@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/auth"
+	"github.com/acoseac/1-bit-bridge/internal/backup"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
@@ -78,6 +79,17 @@ type Deps struct {
 	// tile shows "not configured" and the /api/updates endpoint
 	// returns the same fallback shape.
 	Updater UpdateProvider
+
+	// BackupSources is the resolved set of state-file paths the
+	// admin's "Snapshot now" button hands to `backup.Snapshot`.
+	// Injected from `cmd/bridge/main.go` via the same
+	// `buildBackupSources` helper the CLI uses, so paths can't drift
+	// between the two surfaces (CodeRabbit + Gemini both flagged the
+	// prior local helper as a divergence risk on PR #44). Zero-value
+	// is treated as "feature not wired" and the API endpoints return
+	// 503 — fine for tests that don't construct the admin server
+	// with backup wiring.
+	BackupSources backup.Sources
 }
 
 // UpdateProvider is the read-side of the updater used by the admin
@@ -211,6 +223,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PATCH /api/settings", s.apiSettingsPatch)
 	mux.HandleFunc("POST /api/restart", s.apiRestart)
 	mux.HandleFunc("GET /api/pair-qr", s.apiPairQR)
+	mux.HandleFunc("GET /api/backups", s.apiBackupsList)
+	mux.HandleFunc("POST /api/backups", s.apiBackupsCreate)
 
 	// Static. The embed keeps files at "static/app.css", not "app.css",
 	// so we serve the fs directly — the request path already matches.

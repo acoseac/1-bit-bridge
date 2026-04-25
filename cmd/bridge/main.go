@@ -278,6 +278,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return doctorCmd(args[1:], stdout, stderr)
 	case "update":
 		return updateCmd(ctx, args[1:], os.Stdin, stdout, stderr)
+	case "backup":
+		return backupCmd(args[1:], stdout, stderr)
+	case "restore":
+		return restoreCmd(args[1:], os.Stdin, stdout, stderr)
 	case "version":
 		fmt.Fprintf(stdout, "1-bit-bridge %s (protocol v%d)\n", version.ServerVersion, version.ProtocolVersion)
 		return 0
@@ -304,6 +308,8 @@ Subcommands:
   scan     Force a full library rescan.
   doctor   Preflight: check ports, directories, service manager before init.
   update   Check for / install a new bridge release from GitHub.
+  backup   Snapshot bridge state into <dataDir>/backups/<timestamp>/.
+  restore  Restore bridge state from a snapshot directory.
   version  Print version and protocol version.
 
 Run "bridge <subcommand> -h" for subcommand-specific flags.
@@ -407,6 +413,21 @@ func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	artworkDir := filepath.Join(cfg.DataDir, "artwork")
 	enricher := enrich.NewEnricher(manifestStore, mbClient, caaClient, deezerClient, artworkDir)
 	go enricher.Run(scanCtx)
+
+	// Periodic state-snapshot ticker. Captures bridge.db / tokens.json /
+	// cert / key / config into <dataDir>/backups/<timestamp>/ at the
+	// configured cadence (default 24h). Uses the same scanCtx as the
+	// other periodic workers so a SIGINT cancels it cleanly. Snapshots
+	// are best-effort — failures are logged but never crash serve.
+	//
+	// `EffectiveIntervalHours` returns 0 when the operator has explicitly
+	// disabled the ticker (`intervalHours: 0`); we skip the goroutine in
+	// that case. The on-demand CLI path stays available regardless.
+	backupSources := buildBackupSources(cfg, *configPath)
+	if hrs := cfg.Backup.EffectiveIntervalHours(); hrs > 0 {
+		backupInterval := time.Duration(hrs) * time.Hour
+		go runBackupTicker(scanCtx, backupSources, cfg.Backup.EffectiveKeep(), backupInterval, stdout, stderr)
+	}
 
 	// Sessions tracker counts inflight /v1/read + /v1/download
 	// requests. The Install path consults Inflight() before
@@ -528,16 +549,17 @@ func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	// (shouldn't happen, but let's not trip them up).
 	absCfgPath, _ := filepath.Abs(*configPath)
 	adminSrv, err := admin.New(admin.Deps{
-		Cfg:         cfg,
-		CfgPath:     absCfgPath,
-		Auth:        store,
-		Manifest:    manifestStore,
-		Scanner:     scanner,
-		Resolver:    apiSrv.Resolver(),
-		Fingerprint: fingerprint,
-		StartedAt:   time.Now().UTC(),
-		ScanCtx:     scanCtx,
-		Updater:     updAdapter,
+		Cfg:           cfg,
+		CfgPath:       absCfgPath,
+		Auth:          store,
+		Manifest:      manifestStore,
+		Scanner:       scanner,
+		Resolver:      apiSrv.Resolver(),
+		Fingerprint:   fingerprint,
+		StartedAt:     time.Now().UTC(),
+		ScanCtx:       scanCtx,
+		Updater:       updAdapter,
+		BackupSources: backupSources,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "admin: %v\n", err)
