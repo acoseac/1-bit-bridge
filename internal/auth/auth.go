@@ -43,12 +43,20 @@ const (
 
 // Token is the stored, hash-only record for a paired client.
 //
-// LastClientVersion / LastClientVersionAt record the iOS app version
-// the client most recently identified itself as via the
-// X-Client-Version request header (additive in protocol v1; absent on
-// older clients). Used by the updater to refuse auto-installing a
-// candidate whose MinClientVersion would orphan a still-active iOS
-// build that hasn't shipped through the App Store yet.
+// LastClientVersion records the most recent X-Client-Version header
+// value this token presented (additive in protocol v1; absent on
+// older clients). LastClientVersionAt is the "last *changed*"
+// timestamp — when the value first transitioned to whatever
+// LastClientVersion currently holds — NOT a per-request "last seen"
+// marker. That keeps RecordClientVersion's hot path lock-free under
+// steady-state traffic (same value, no field write needed). Use
+// LastUsedAt for "when did this token last present credentials" and
+// LastClientVersionAt for "when did its self-reported version most
+// recently change".
+//
+// The auto-installer's compat gate (Phase C) reads LastClientVersion
+// to decide whether a candidate update would orphan a still-active
+// iOS build.
 type Token struct {
 	ID                  string    `json:"id"`
 	Name                string    `json:"name"`
@@ -114,22 +122,44 @@ func (s *Store) reload() error {
 			return fmt.Errorf("parse token store: %w", err)
 		}
 	}
-	// Preserve in-memory LastUsedAt bumps that the 30 s debounce in
-	// Validate hasn't written to disk yet. Without this, an out-of-process
-	// write (e.g. a concurrent `bridge pair` appending a new token) fires
-	// reloadIfStale, which overwrites our token slice with disk contents
-	// whose LastUsedAt timestamps predate the in-memory bumps — wiping the
-	// debounce's in-flight work. The invariant is "in-memory LastUsedAt
-	// never regresses across reload"; enforce it here by keeping whichever
-	// timestamp is later per token ID.
+	// Preserve in-memory LastUsedAt + LastClientVersion bumps that the
+	// 30 s debounce in Validate / RecordClientVersion hasn't written
+	// to disk yet. Without this, an out-of-process write (e.g. a
+	// concurrent `bridge pair` appending a new token) fires
+	// reloadIfStale, which overwrites our token slice with disk
+	// contents whose timestamps predate the in-memory bumps — wiping
+	// the debounce's in-flight work. The invariant is "in-memory
+	// observation state never regresses across reload"; enforce it
+	// here per token ID.
 	if len(s.tokens) > 0 {
-		prior := make(map[string]time.Time, len(s.tokens))
+		type priorState struct {
+			lastUsedAt          time.Time
+			lastClientVersion   string
+			lastClientVersionAt time.Time
+		}
+		prior := make(map[string]priorState, len(s.tokens))
 		for _, old := range s.tokens {
-			prior[old.ID] = old.LastUsedAt
+			prior[old.ID] = priorState{
+				lastUsedAt:          old.LastUsedAt,
+				lastClientVersion:   old.LastClientVersion,
+				lastClientVersionAt: old.LastClientVersionAt,
+			}
 		}
 		for i := range tokens {
-			if p, ok := prior[tokens[i].ID]; ok && p.After(tokens[i].LastUsedAt) {
-				tokens[i].LastUsedAt = p
+			p, ok := prior[tokens[i].ID]
+			if !ok {
+				continue
+			}
+			if p.lastUsedAt.After(tokens[i].LastUsedAt) {
+				tokens[i].LastUsedAt = p.lastUsedAt
+			}
+			// Newer in-memory client-version observation wins over a
+			// stale disk-side one. We use LastClientVersionAt as the
+			// "is this fresher" marker because LastClientVersion is a
+			// string (no temporal ordering of its own).
+			if p.lastClientVersionAt.After(tokens[i].LastClientVersionAt) {
+				tokens[i].LastClientVersion = p.lastClientVersion
+				tokens[i].LastClientVersionAt = p.lastClientVersionAt
 			}
 		}
 	}
@@ -347,6 +377,16 @@ func (s *Store) RecordClientVersion(id, ver string) {
 		// Same 30-second debounce as LastUsedAt — see method-level
 		// doc. FlushLastUsed on shutdown lands any deferred update.
 		if time.Since(s.lastUsedFlush) >= lastUsedFlushInterval {
+			// Cross-process safety: a concurrent `bridge pair` /
+			// `bridge revoke` may have written tokens.json since
+			// the in-memory snapshot was last loaded. Without this
+			// reloadIfStale, persist() would write back our slice
+			// and either resurrect a revoked token or drop a
+			// freshly-paired one. The reload's per-token merge
+			// (above) preserves our in-memory LastClientVersion
+			// bump, so a successful reload still ends up writing
+			// the new value.
+			_ = s.reloadIfStale()
 			if err := s.persist(); err != nil {
 				log.Printf("auth: persist client-version: %v", err)
 			}

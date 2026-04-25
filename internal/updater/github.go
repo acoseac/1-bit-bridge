@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -151,20 +150,4 @@ func (c *Client) LatestRelease(ctx context.Context) (*Release, error) {
 func readShortBody(r io.Reader) string {
 	b, _ := io.ReadAll(io.LimitReader(r, 1024))
 	return string(b)
-}
-
-// rateLimitWindow returns the time at which the unauthenticated rate
-// limit window resets, parsed from the X-RateLimit-Reset header. Zero
-// time if the header is missing or malformed. Currently unused — kept
-// here so Phase B's UI can surface "next check possible at HH:MM".
-func rateLimitWindow(h http.Header) time.Time {
-	raw := h.Get("X-RateLimit-Reset")
-	if raw == "" {
-		return time.Time{}
-	}
-	sec, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil {
-		return time.Time{}
-	}
-	return time.Unix(sec, 0).UTC()
 }

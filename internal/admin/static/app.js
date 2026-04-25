@@ -120,20 +120,29 @@ function initDashboard() {
 // payload. Tolerates partial input (Check-now error path passes only
 // {lastError}). Mirrors the server-rendered first paint in
 // templates/dashboard.html.
+//
+// The release-notes anchor is created fresh on each render rather than
+// preserved from the prior tree — `status.innerHTML = ...` wipes the
+// node, so caching a reference to it is a use-after-detach bug (PR #41
+// CodeRabbit review): once the tile transitions through "up to date"
+// or "check failed", a subsequent "update available" response could no
+// longer surface the link.
 function renderUpdateTile(u) {
   const status = document.getElementById("update-status");
   const lastCheck = document.getElementById("update-last-check");
   const lastError = document.getElementById("update-last-error");
-  const notes = document.getElementById("update-notes");
   const latest = document.getElementById("update-latest");
   if (!status) return;
 
   if (u && u.updateAvailable && u.latestVersion) {
     status.innerHTML = `<span class="badge running">update available</span><span>· <code>${escapeHTML(u.latestVersion)}</code></span>`;
-    if (notes && u.releaseNotesURL) {
+    if (u.releaseNotesURL) {
+      const notes = document.createElement("a");
+      notes.id = "update-notes";
       notes.href = u.releaseNotesURL;
+      notes.target = "_blank";
+      notes.rel = "noopener";
       notes.textContent = "release notes";
-      notes.hidden = false;
       status.appendChild(document.createTextNode(" "));
       status.appendChild(notes);
     }

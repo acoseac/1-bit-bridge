@@ -24,7 +24,6 @@ package updater
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -245,17 +244,4 @@ func semverGreater(latest, current string) bool {
 		return false
 	}
 	return semver.Compare(lv, cv) > 0
-}
-
-// describeStatusForLog returns a short human-readable form of the
-// current status for log lines. Not used by Status() callers.
-func (u *Updater) describeStatusForLog() string {
-	s := u.Status()
-	if s.LatestVersion == "" {
-		return fmt.Sprintf("repo=%s no-data", u.repo)
-	}
-	if s.UpdateAvailable {
-		return fmt.Sprintf("repo=%s current=%s latest=%s update-available", u.repo, s.CurrentVersion, s.LatestVersion)
-	}
-	return fmt.Sprintf("repo=%s current=%s latest=%s up-to-date", u.repo, s.CurrentVersion, s.LatestVersion)
 }

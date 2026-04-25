@@ -246,7 +246,16 @@ func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 
 	// Fire up the periodic scanner in the background. It runs an initial
 	// scan on startup, then rescans every cfg.ScanInterval().
-	scanCtx, scanCancel := context.WithCancel(context.Background())
+	//
+	// scanCtx derives from serveCmd's parent ctx so a SIGINT (or
+	// any other parent cancel) propagates straight to the scanner,
+	// enricher, and updater goroutines that share this context. The
+	// previous version derived from context.Background() and relied
+	// on the deferred scanCancel() to fire — which works in steady
+	// state but trips the contextcheck linter and means the
+	// background workers can't observe cancellation until serveCmd's
+	// shutdown path runs.
+	scanCtx, scanCancel := context.WithCancel(ctx)
 	defer scanCancel()
 	go scanner.RunPeriodic(scanCtx, cfg.ScanInterval())
 
