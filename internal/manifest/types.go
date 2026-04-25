@@ -11,6 +11,22 @@ import "time"
 // what the iOS Track model decodes. Optional fields use pointer types so
 // JSON null is preserved (the iOS decoder uses Swift's `?` optionals for
 // the same reason — a missing year is different from year == 0).
+//
+// `IsDSD` is a pointer specifically to enable the bridge to emit
+// `isDSD: false` when the extractor positively knows the file is PCM
+// (FLAC's STREAMINFO, ALAC/M4A audio, MP3) — distinguishing "definitely
+// PCM" from "format unknown". `extractFLACFormat` and `extractDSF` set
+// the explicit value; the dhowden-tag fallback path leaves it nil.
+//
+// `TrackNumber`, `DiscNumber`, `Year` are pointers to align the shape
+// with the rest of the optional fields. The `dhowden/tag` API returns
+// 0 for both "tag absent" and "tag value is 0", so
+// `populateFromTagMetadata` propagates the raw value as a non-nil
+// pointer regardless — a tag legitimately set to 0 round-trips as
+// `Some(0)` rather than getting silently dropped. iOS treats 0 as the
+// same sentinel as nil for these fields (no track number, no disc
+// number, no year), so user-visible behaviour is unchanged; the wire
+// shape just stops lying about which case the extractor saw.
 type Track struct {
 	Path               string    `json:"path"`
 	Size               int64     `json:"size"`
@@ -19,14 +35,14 @@ type Track struct {
 	Artist             string    `json:"artist,omitempty"`
 	AlbumArtist        string    `json:"albumArtist,omitempty"`
 	Album              string    `json:"album,omitempty"`
-	TrackNumber        int       `json:"trackNumber,omitempty"`
-	DiscNumber         int       `json:"discNumber,omitempty"`
-	Year               int       `json:"year,omitempty"`
+	TrackNumber        *int      `json:"trackNumber,omitempty"`
+	DiscNumber         *int      `json:"discNumber,omitempty"`
+	Year               *int      `json:"year,omitempty"`
 	Genre              string    `json:"genre,omitempty"`
 	Duration           *float64  `json:"duration,omitempty"`      // seconds
 	SampleRate         *float64  `json:"sampleRate,omitempty"`    // Hz (e.g. 96000, 2822400)
 	BitsPerSample      *int      `json:"bitsPerSample,omitempty"` // 1 for DSD, 16/24/32 for PCM
-	IsDSD              bool      `json:"isDSD,omitempty"`
+	IsDSD              *bool     `json:"isDSD,omitempty"`
 	ReplayGainTrackDB  *float64  `json:"replayGainTrackDB,omitempty"`
 	ReplayGainAlbumDB  *float64  `json:"replayGainAlbumDB,omitempty"`
 	MusicBrainzTrackID string    `json:"musicBrainzTrackID,omitempty"`
