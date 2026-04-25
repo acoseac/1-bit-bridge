@@ -178,6 +178,12 @@ func extractFLACFormat(absPath string, t *Track) error {
 	bps := int(si.BitsPerSample)
 	t.SampleRate = &sr
 	t.BitsPerSample = &bps
+	// FLAC is always PCM by spec — set the explicit false so the
+	// iOS decoder can trust `isDSD: false` to mean "definitely PCM"
+	// rather than "format unknown". Mirrors the explicit `true` set
+	// in `extractDSF` below.
+	isDSD := false
+	t.IsDSD = &isDSD
 	if si.SampleRate > 0 && si.NSamples > 0 {
 		d := float64(si.NSamples) / float64(si.SampleRate)
 		t.Duration = &d

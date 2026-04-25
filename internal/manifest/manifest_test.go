@@ -51,8 +51,8 @@ func TestExtractFLACTagsAndFormat(t *testing.T) {
 	if tr.Duration == nil || *tr.Duration < 4.9 || *tr.Duration > 5.1 {
 		t.Errorf("duration: %v (want ~5)", tr.Duration)
 	}
-	if tr.IsDSD != nil && *tr.IsDSD {
-		t.Error("FLAC flagged as DSD")
+	if tr.IsDSD == nil || *tr.IsDSD {
+		t.Errorf("FLAC IsDSD = %v, want pointer to false (extractFLACFormat must set the explicit PCM flag so iOS can trust isDSD:false)", tr.IsDSD)
 	}
 }
 
