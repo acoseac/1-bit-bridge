@@ -7,7 +7,7 @@ import (
 )
 
 func TestBuildTXTRecordsIncludesProtocolAndLibrary(t *testing.T) {
-	got := buildTXTRecords(Config{ProtocolVersion: 1, LibraryName: "My Music"})
+	got := buildTXTRecords(Config{ProtocolVersion: 1, Port: 7788, LibraryName: "My Music"})
 	joined := strings.Join(got, "|")
 	if !strings.Contains(joined, "pv=1") {
 		t.Errorf("missing pv: %v", got)
@@ -18,12 +18,50 @@ func TestBuildTXTRecordsIncludesProtocolAndLibrary(t *testing.T) {
 }
 
 func TestBuildTXTRecordsOmitsEmptyLibrary(t *testing.T) {
-	got := buildTXTRecords(Config{ProtocolVersion: 1})
+	got := buildTXTRecords(Config{ProtocolVersion: 1, Port: 7788})
 	for _, r := range got {
 		if strings.HasPrefix(r, "library=") {
 			t.Errorf("library should not be present when empty: %q", r)
 		}
 	}
+}
+
+// TestBuildTXTRecordsIncludesHostAndPort pins the host/port keys iOS
+// reads to construct `https://<host>:<port>` directly from the TXT
+// record. Without these, iOS would have to NWConnection-resolve the
+// Bonjour service, which on iOS 26.4 doesn't reliably surface the
+// resolved hostport via `currentPath?.remoteEndpoint`.
+func TestBuildTXTRecordsIncludesHostAndPort(t *testing.T) {
+	got := buildTXTRecords(Config{
+		ProtocolVersion: 1,
+		Port:            7788,
+		Hostname:        "test-mac",
+	})
+	joined := strings.Join(got, "|")
+	if !strings.Contains(joined, "host=test-mac.local") {
+		t.Errorf("missing or wrong host TXT: %v", got)
+	}
+	if !strings.Contains(joined, "port=7788") {
+		t.Errorf("missing or wrong port TXT: %v", got)
+	}
+}
+
+// TestBuildTXTRecordsHostFromOSWhenBlank ensures the TXT host follows
+// the same first-label + ".local" derivation Advertise uses for the
+// SRV record, so iOS lands on a name the bridge actually serves. The
+// derived host comes through `os.Hostname` here; the only check we
+// can make portably is that the record has the `.local` suffix.
+func TestBuildTXTRecordsHostFromOSWhenBlank(t *testing.T) {
+	got := buildTXTRecords(Config{ProtocolVersion: 1, Port: 7788})
+	for _, r := range got {
+		if strings.HasPrefix(r, "host=") {
+			if !strings.HasSuffix(r, ".local") {
+				t.Errorf("host TXT should end with .local: %q", r)
+			}
+			return
+		}
+	}
+	t.Error("no host= record in TXT")
 }
 
 func TestSanitizeInstanceStripsDotsAndControlChars(t *testing.T) {
