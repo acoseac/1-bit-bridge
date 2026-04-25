@@ -115,6 +115,11 @@
     <h2>TLS fingerprint</h2>
     <p>iOS clients pin this value during pairing. Don't rotate without re-pairing.</p>
     <code class="fingerprint">{{.Fingerprint}}</code>
+    <dl>
+      <dt>Expires</dt>
+      <dd id="cert-expiry">…</dd>
+    </dl>
+    <p class="panel-note">Rotation is CLI-only: <code>bridge cert rotate</code>. After rotation, every paired device must re-pair from a fresh QR.</p>
   </div>
 </section>
 {{end}}
