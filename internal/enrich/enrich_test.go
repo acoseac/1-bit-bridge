@@ -200,6 +200,25 @@ func TestParseRetryAfterCappedAtOneHour(t *testing.T) {
 	}
 }
 
+func TestParseRetryAfterOverflowSafe(t *testing.T) {
+	// `time.Duration(secs) * time.Second` overflows int64 nanoseconds
+	// for `secs` near 2^33 — the cap MUST apply in the seconds domain
+	// before the multiplication, otherwise a hostile upstream sending
+	// a huge value silently bypasses the 1h ceiling.
+	now := time.Date(2026, 4, 25, 12, 0, 0, 0, time.UTC)
+	cases := []string{
+		"9999999999",          // 10 digits, well past 2^31
+		"99999999999",         // 11 digits, past 2^33
+		"9223372036854775807", // int64 max
+	}
+	for _, h := range cases {
+		got := parseRetryAfter(h, now)
+		if got != time.Hour {
+			t.Errorf("parseRetryAfter(%q) = %v, want capped at 1h (no overflow)", h, got)
+		}
+	}
+}
+
 func TestMusicBrainz429HonorsRetryAfter(t *testing.T) {
 	// Server returns 429 with Retry-After: 1 (second). Client should
 	// sleep ~1s and then return an error. We verify both: (a) the

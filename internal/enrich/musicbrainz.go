@@ -184,6 +184,12 @@ func (c *MusicBrainzClient) get(ctx context.Context, u string, out any) error {
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
+// maxRetryAfter caps the wait to protect against a hostile or
+// misconfigured upstream parking the enricher for arbitrary durations.
+// MB has never asked for more than a few minutes in practice; 1h is
+// the comfortable upper bound.
+const maxRetryAfter = time.Hour
+
 // parseRetryAfter returns the duration to wait per RFC 9110 §10.2.3
 // (HTTP semantics) — a delta-seconds non-negative integer OR an
 // HTTP-date. Returns zero if the header is absent or unparseable; the
@@ -197,24 +203,24 @@ func parseRetryAfter(header string, now time.Time) time.Duration {
 	if header == "" {
 		return 0
 	}
-	if secs, err := strconv.Atoi(header); err == nil && secs >= 0 {
-		// Cap at 1h to avoid a hostile / misconfigured upstream parking
-		// the enricher for its full advised duration. MB has never asked
-		// for more than ~5 minutes in practice; 1h is the comfortable
-		// upper bound.
-		const maxRetryAfter = time.Hour
-		d := time.Duration(secs) * time.Second
-		if d > maxRetryAfter {
-			d = maxRetryAfter
+	// Apply the cap in the *seconds* domain before multiplying by
+	// time.Second — a Retry-After of e.g. 2^33 would otherwise overflow
+	// time.Duration (int64 nanoseconds) during the multiplication and
+	// silently bypass the cap. Use ParseInt(64) so platforms where
+	// `int` is 32-bit don't lose values in the [2^31, 2^63) range
+	// either; clamp before the conversion either way.
+	if secs, err := strconv.ParseInt(header, 10, 64); err == nil && secs >= 0 {
+		maxSecs := int64(maxRetryAfter / time.Second)
+		if secs > maxSecs {
+			secs = maxSecs
 		}
-		return d
+		return time.Duration(secs) * time.Second
 	}
 	if t, err := http.ParseTime(header); err == nil {
 		d := t.Sub(now)
 		if d <= 0 {
 			return 0
 		}
-		const maxRetryAfter = time.Hour
 		if d > maxRetryAfter {
 			d = maxRetryAfter
 		}
