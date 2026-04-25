@@ -92,15 +92,21 @@ func populateFromTagMetadata(m tag.Metadata, t *Track) {
 	if v := m.Genre(); v != "" {
 		t.Genre = v
 	}
-	if y := m.Year(); y != 0 {
-		t.Year = &y
-	}
-	if tn, _ := m.Track(); tn != 0 {
-		t.TrackNumber = &tn
-	}
-	if d, _ := m.Disc(); d != 0 {
-		t.DiscNumber = &d
-	}
+	// `dhowden/tag` returns 0 for both "tag absent" and "tag value is 0"
+	// — there's no way to distinguish at this layer. We propagate the
+	// raw value as a non-nil pointer regardless, so a track legitimately
+	// tagged with year 0 / track 0 round-trips as `Some(0)` to the
+	// iOS decoder rather than getting silently dropped. iOS treats 0
+	// as the same sentinel as nil for these fields (no track number,
+	// no disc number, no year), so the user-visible behaviour is
+	// unchanged; the wire shape just stops lying about which case the
+	// extractor saw.
+	y := m.Year()
+	t.Year = &y
+	tn, _ := m.Track()
+	t.TrackNumber = &tn
+	d, _ := m.Disc()
+	t.DiscNumber = &d
 	// MusicBrainz IDs — many tagged libraries carry these.
 	if raw := m.Raw(); raw != nil {
 		if v, ok := stringOf(raw, "MUSICBRAINZ_TRACKID", "MUSICBRAINZ TRACK ID", "musicbrainz_trackid"); ok {

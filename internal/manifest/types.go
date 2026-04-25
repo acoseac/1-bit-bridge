@@ -19,15 +19,14 @@ import "time"
 // the explicit value; the dhowden-tag fallback path leaves it nil.
 //
 // `TrackNumber`, `DiscNumber`, `Year` are pointers to align the shape
-// with the rest of the optional fields (every `null` on the wire decodes
-// to `nil` on the iOS side, every concrete value to `Some(n)`). Note
-// that the underlying `dhowden/tag` library returns 0 for both "tag
-// absent" and "tag value is 0" with no way to distinguish the two —
-// `populateFromTagMetadata` keeps a `!= 0` guard for these three so a
-// real "missing" tag round-trips as `null` rather than an unintended
-// `0`. Format-specific extractors that DO know the difference (e.g. a
-// future FLAC reader that consumed the Vorbis comment directly rather
-// than via dhowden) can override.
+// with the rest of the optional fields. The `dhowden/tag` API returns
+// 0 for both "tag absent" and "tag value is 0", so
+// `populateFromTagMetadata` propagates the raw value as a non-nil
+// pointer regardless — a tag legitimately set to 0 round-trips as
+// `Some(0)` rather than getting silently dropped. iOS treats 0 as the
+// same sentinel as nil for these fields (no track number, no disc
+// number, no year), so user-visible behaviour is unchanged; the wire
+// shape just stops lying about which case the extractor saw.
 type Track struct {
 	Path               string    `json:"path"`
 	Size               int64     `json:"size"`
