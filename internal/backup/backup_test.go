@@ -19,7 +19,7 @@ func TestSnapshotCapturesAllProvidedFiles(t *testing.T) {
 	dataDir := t.TempDir()
 	src := primeLiveState(t, dataDir)
 
-	dst, err := backup.Snapshot(src)
+	dst, err := backup.Snapshot(t.Context(), src)
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestSnapshotPreservesManifestDBContents(t *testing.T) {
 	}
 	live.Close()
 
-	dst, err := backup.Snapshot(src)
+	dst, err := backup.Snapshot(t.Context(), src)
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestRestoreRoundTripsSimpleFiles(t *testing.T) {
 	originalTokens := readBytes(t, src.TokensJSON)
 	originalCert := readBytes(t, src.ServerCert)
 
-	dst, err := backup.Snapshot(src)
+	dst, err := backup.Snapshot(t.Context(), src)
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
@@ -144,15 +144,13 @@ func TestRestoreRoundTripsSimpleFiles(t *testing.T) {
 func TestRestoreRefusesSchemaMismatch(t *testing.T) {
 	dataDir := t.TempDir()
 	src := primeLiveState(t, dataDir)
-	dst, err := backup.Snapshot(src)
+	dst, err := backup.Snapshot(t.Context(), src)
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
 	// Hand-corrupt the schema version in the manifest.
 	mPath := filepath.Join(dst, backup.ManifestFile)
 	raw := readBytes(t, mPath)
-	corrupted := []byte(`{"schemaVersion":999,"bridgeVersion":"x","protocolVersion":1,"createdAt":"2026-04-25T00:00:00Z","files":["tokens.json"]}`)
-	_ = corrupted
 	if err := os.WriteFile(mPath, []byte(`{"schemaVersion":999,"files":["tokens.json"]}`), 0o600); err != nil {
 		t.Fatalf("rewrite manifest: %v", err)
 	}
@@ -175,7 +173,7 @@ func TestPruneKeepsMostRecent(t *testing.T) {
 	// don't collide.
 	dirs := make([]string, 0, 5)
 	for i := 0; i < 5; i++ {
-		dst, err := backup.Snapshot(src)
+		dst, err := backup.Snapshot(t.Context(), src)
 		if err != nil {
 			t.Fatalf("Snapshot %d: %v", i, err)
 		}
@@ -221,7 +219,7 @@ func TestPruneNonPositiveKeepIsNoOp(t *testing.T) {
 	src := primeLiveState(t, dataDir)
 	backupsRoot := filepath.Join(dataDir, backup.BackupsDirName)
 
-	if _, err := backup.Snapshot(src); err != nil {
+	if _, err := backup.Snapshot(t.Context(), src); err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
 	for _, keep := range []int{0, -1, -100} {
@@ -257,7 +255,7 @@ func TestSnapshotSkipsMissingOptionalFiles(t *testing.T) {
 		t.Fatalf("remove tokens.json: %v", err)
 	}
 
-	dst, err := backup.Snapshot(src)
+	dst, err := backup.Snapshot(t.Context(), src)
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
@@ -275,7 +273,7 @@ func TestSnapshotSkipsMissingOptionalFiles(t *testing.T) {
 func TestLooksLikeSnapshotDir(t *testing.T) {
 	dataDir := t.TempDir()
 	src := primeLiveState(t, dataDir)
-	dst, err := backup.Snapshot(src)
+	dst, err := backup.Snapshot(t.Context(), src)
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}

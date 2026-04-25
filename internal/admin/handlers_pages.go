@@ -68,8 +68,8 @@ func (s *Server) pageDashboard(w http.ResponseWriter, r *http.Request) {
 		"DeviceCount":          len(s.deps.Auth.List()),
 		"Roots":                s.deps.Scanner.Roots(),
 		"Update":               s.dashboardUpdateStatus(),
-		"BackupIntervalHours":  s.deps.Cfg.Backup.IntervalHours,
-		"BackupKeep":           s.deps.Cfg.Backup.Keep,
+		"BackupIntervalHours":  s.deps.Cfg.Backup.EffectiveIntervalHours(),
+		"BackupKeep":           s.deps.Cfg.Backup.EffectiveKeep(),
 	}
 	s.renderPage(w, "dashboard", data)
 }

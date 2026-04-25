@@ -419,10 +419,14 @@ func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	// configured cadence (default 24h). Uses the same scanCtx as the
 	// other periodic workers so a SIGINT cancels it cleanly. Snapshots
 	// are best-effort — failures are logged but never crash serve.
-	if cfg.Backup.IntervalHours > 0 {
-		backupSrc := buildBackupSources(cfg, *configPath)
-		backupInterval := time.Duration(cfg.Backup.IntervalHours) * time.Hour
-		go runBackupTicker(scanCtx, backupSrc, cfg.Backup.Keep, backupInterval, stdout, stderr)
+	//
+	// `EffectiveIntervalHours` returns 0 when the operator has explicitly
+	// disabled the ticker (`intervalHours: 0`); we skip the goroutine in
+	// that case. The on-demand CLI path stays available regardless.
+	backupSources := buildBackupSources(cfg, *configPath)
+	if hrs := cfg.Backup.EffectiveIntervalHours(); hrs > 0 {
+		backupInterval := time.Duration(hrs) * time.Hour
+		go runBackupTicker(scanCtx, backupSources, cfg.Backup.EffectiveKeep(), backupInterval, stdout, stderr)
 	}
 
 	// Sessions tracker counts inflight /v1/read + /v1/download
@@ -545,16 +549,17 @@ func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	// (shouldn't happen, but let's not trip them up).
 	absCfgPath, _ := filepath.Abs(*configPath)
 	adminSrv, err := admin.New(admin.Deps{
-		Cfg:         cfg,
-		CfgPath:     absCfgPath,
-		Auth:        store,
-		Manifest:    manifestStore,
-		Scanner:     scanner,
-		Resolver:    apiSrv.Resolver(),
-		Fingerprint: fingerprint,
-		StartedAt:   time.Now().UTC(),
-		ScanCtx:     scanCtx,
-		Updater:     updAdapter,
+		Cfg:           cfg,
+		CfgPath:       absCfgPath,
+		Auth:          store,
+		Manifest:      manifestStore,
+		Scanner:       scanner,
+		Resolver:      apiSrv.Resolver(),
+		Fingerprint:   fingerprint,
+		StartedAt:     time.Now().UTC(),
+		ScanCtx:       scanCtx,
+		Updater:       updAdapter,
+		BackupSources: backupSources,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "admin: %v\n", err)

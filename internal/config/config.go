@@ -38,20 +38,49 @@ type Config struct {
 // `bridge backup` / `bridge restore` work regardless of this section
 // — these knobs only govern the in-process automatic schedule.
 //
-// Default state: IntervalHours=24, Keep=7 (one snapshot per day, a
-// week's worth retained). Setting IntervalHours=0 disables the
-// periodic ticker entirely; the operator can still snapshot
-// on-demand via the CLI or the admin console.
+// Default state (section absent): IntervalHours=24, Keep=7 (one
+// snapshot per day, a week retained). Setting `intervalHours: 0`
+// explicitly disables the periodic ticker; the operator can still
+// snapshot on-demand via the CLI or the admin console. To preserve
+// the "omitted vs explicit-zero" distinction across YAML round-trips,
+// `IntervalHours` is a `*int` — nil means "absent, use default", a
+// pointer to 0 means "explicitly disabled".
 type BackupConfig struct {
-	// IntervalHours is the cadence for automatic snapshots. Zero
-	// disables. Negative values are rejected at Validate time.
-	IntervalHours int `yaml:"intervalHours,omitempty"`
+	// IntervalHours is the cadence for automatic snapshots.
+	// nil/omitted → DefaultBackupIntervalHours.
+	// 0 → disabled.
+	// >0 → cadence in hours (negative values rejected at Validate).
+	IntervalHours *int `yaml:"intervalHours,omitempty"`
 
 	// Keep is the maximum number of snapshots to retain after a
 	// rotation. Older snapshots beyond this count are deleted on
 	// each periodic snapshot. Zero or negative disables pruning;
 	// the operator manages backup-disk usage by hand in that case.
+	// Defaults to DefaultBackupKeep when the entire backup section
+	// is omitted; an operator who wants no pruning sets `keep: -1`
+	// (a negative value won't trip Validate).
 	Keep int `yaml:"keep,omitempty"`
+}
+
+// EffectiveIntervalHours resolves the runtime cadence from the
+// pointer-typed config field. Caller code uses this rather than
+// dereferencing IntervalHours directly so the nil-vs-zero contract
+// stays in one place.
+func (b BackupConfig) EffectiveIntervalHours() int {
+	if b.IntervalHours == nil {
+		return DefaultBackupIntervalHours
+	}
+	return *b.IntervalHours
+}
+
+// EffectiveKeep returns the rotation count to apply on each
+// periodic snapshot. Mirrors EffectiveIntervalHours so call sites
+// have one helper per field.
+func (b BackupConfig) EffectiveKeep() int {
+	if b.Keep == 0 {
+		return DefaultBackupKeep
+	}
+	return b.Keep
 }
 
 // UpdateConfig configures the Phase C opt-in auto-installer. The
@@ -138,19 +167,13 @@ func (c *Config) applyDefaults() {
 	if c.LibraryName == "" {
 		c.LibraryName = DefaultLibraryName
 	}
-	// Backup defaults — distinguish "field omitted" (apply default)
-	// from "operator explicitly set to 0 to disable" via... well,
-	// YAML doesn't preserve that distinction. The convention here:
-	// IntervalHours absent or zero → apply the default; operator
-	// who wants periodic backup off must also set Keep=0 or use
-	// `bridge backup --keep 0` manually. The trade-off favours the
-	// healthy-default case (most operators want backups).
-	if c.Backup.IntervalHours == 0 {
-		c.Backup.IntervalHours = DefaultBackupIntervalHours
-	}
-	if c.Backup.Keep == 0 {
-		c.Backup.Keep = DefaultBackupKeep
-	}
+	// Backup section: pointer-typed IntervalHours preserves the
+	// "omitted vs explicit-zero" distinction at YAML-round-trip
+	// time, so an operator who writes `intervalHours: 0` genuinely
+	// disables the ticker (matches the PROTOCOL.md spec). Defaults
+	// are returned by the EffectiveIntervalHours / EffectiveKeep
+	// helpers — applyDefaults intentionally leaves the raw fields
+	// untouched so a Save+Load round-trip preserves operator intent.
 }
 
 func (c *Config) resolvePaths(baseDir string) {
@@ -208,12 +231,13 @@ func (c *Config) Validate() error {
 	if c.Update.CheckIntervalHours < 0 {
 		return fmt.Errorf("update.checkIntervalHours: must be >= 0, got %d", c.Update.CheckIntervalHours)
 	}
-	if c.Backup.IntervalHours < 0 {
-		return fmt.Errorf("backup.intervalHours: must be >= 0, got %d", c.Backup.IntervalHours)
+	if c.Backup.IntervalHours != nil && *c.Backup.IntervalHours < 0 {
+		return fmt.Errorf("backup.intervalHours: must be >= 0 (0 disables, omit for default), got %d", *c.Backup.IntervalHours)
 	}
-	if c.Backup.Keep < 0 {
-		return fmt.Errorf("backup.keep: must be >= 0, got %d", c.Backup.Keep)
-	}
+	// backup.Keep: any non-positive value disables pruning. No
+	// upper-bound check — an operator who wants 1000 retained
+	// snapshots is making a disk-space choice we don't second-
+	// guess.
 	return nil
 }
 

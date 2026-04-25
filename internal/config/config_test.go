@@ -373,3 +373,80 @@ func TestSaveAtomicRename(t *testing.T) {
 		}
 	}
 }
+
+// PROTOCOL.md says "intervalHours: 0 disables the periodic ticker".
+// Pre-fixup, applyDefaults clobbered an explicit 0 with the default,
+// so the operator couldn't disable from YAML — they had to remove
+// the section, and any future Save() round-trip would re-add it.
+// The pointer-typed IntervalHours preserves the distinction; this
+// test locks it in so a future "simplify config" refactor can't
+// silently re-introduce the bug.
+func TestBackupIntervalHoursOmittedAppliesDefault(t *testing.T) {
+	libRoot := t.TempDir()
+	cfgPath := filepath.Join(t.TempDir(), "bridge.yaml")
+	if err := os.WriteFile(cfgPath,
+		[]byte("libraryRoots:\n  - "+libRoot+"\nlistenAddress: ':7788'\nadminAddress: 127.0.0.1:7789\n"),
+		0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := c.Backup.EffectiveIntervalHours(); got != DefaultBackupIntervalHours {
+		t.Errorf("absent intervalHours: EffectiveIntervalHours=%d, want %d", got, DefaultBackupIntervalHours)
+	}
+	if got := c.Backup.EffectiveKeep(); got != DefaultBackupKeep {
+		t.Errorf("absent keep: EffectiveKeep=%d, want %d", got, DefaultBackupKeep)
+	}
+}
+
+func TestBackupIntervalHoursExplicitZeroDisables(t *testing.T) {
+	libRoot := t.TempDir()
+	cfgPath := filepath.Join(t.TempDir(), "bridge.yaml")
+	if err := os.WriteFile(cfgPath,
+		[]byte("libraryRoots:\n  - "+libRoot+"\nlistenAddress: ':7788'\nadminAddress: 127.0.0.1:7789\nbackup:\n  intervalHours: 0\n  keep: 5\n"),
+		0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := c.Backup.EffectiveIntervalHours(); got != 0 {
+		t.Errorf("explicit intervalHours=0: EffectiveIntervalHours=%d, want 0 (disabled)", got)
+	}
+	if got := c.Backup.EffectiveKeep(); got != 5 {
+		t.Errorf("explicit keep=5: EffectiveKeep=%d, want 5", got)
+	}
+}
+
+func TestBackupIntervalHoursPositiveOverrides(t *testing.T) {
+	libRoot := t.TempDir()
+	cfgPath := filepath.Join(t.TempDir(), "bridge.yaml")
+	if err := os.WriteFile(cfgPath,
+		[]byte("libraryRoots:\n  - "+libRoot+"\nlistenAddress: ':7788'\nadminAddress: 127.0.0.1:7789\nbackup:\n  intervalHours: 6\n"),
+		0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := c.Backup.EffectiveIntervalHours(); got != 6 {
+		t.Errorf("explicit intervalHours=6: EffectiveIntervalHours=%d, want 6", got)
+	}
+}
+
+func TestBackupIntervalHoursNegativeRejected(t *testing.T) {
+	libRoot := t.TempDir()
+	cfgPath := filepath.Join(t.TempDir(), "bridge.yaml")
+	if err := os.WriteFile(cfgPath,
+		[]byte("libraryRoots:\n  - "+libRoot+"\nlistenAddress: ':7788'\nadminAddress: 127.0.0.1:7789\nbackup:\n  intervalHours: -3\n"),
+		0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(cfgPath); err == nil {
+		t.Errorf("Load(intervalHours=-3) should fail validation, got nil")
+	}
+}

@@ -23,6 +23,7 @@
 package backup
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -97,7 +98,11 @@ type Targets struct {
 // Snapshot captures every present file in `src` into a fresh
 // timestamped directory under `<src.DataDir>/backups/`. Returns the
 // absolute path of the created directory.
-func Snapshot(src Sources) (string, error) {
+//
+// `ctx` is forwarded to the SQLite VACUUM INTO step so the periodic
+// ticker can cancel an in-flight snapshot on bridge shutdown. Pass
+// `context.Background()` if you don't have a richer scope.
+func Snapshot(ctx context.Context, src Sources) (string, error) {
 	if src.DataDir == "" {
 		return "", errors.New("backup: DataDir is required")
 	}
@@ -105,13 +110,8 @@ func Snapshot(src Sources) (string, error) {
 	if err := os.MkdirAll(backupsRoot, 0o700); err != nil {
 		return "", fmt.Errorf("create backups root: %w", err)
 	}
-	stamp := time.Now().UTC().Format(timestampLayout)
-	dst := filepath.Join(backupsRoot, stamp)
-	// Collision-handling: if a previous snapshot in the same second
-	// already exists (rare but possible if Snapshot is called
-	// rapid-fire from a test), suffix a numeric counter.
-	dst = uniqueDir(dst)
-	if err := os.MkdirAll(dst, 0o700); err != nil {
+	dst, err := createUniqueSnapshotDir(backupsRoot, time.Now().UTC())
+	if err != nil {
 		return "", fmt.Errorf("create snapshot dir: %w", err)
 	}
 
@@ -119,7 +119,7 @@ func Snapshot(src Sources) (string, error) {
 
 	if src.ManifestDB != "" {
 		if _, err := os.Stat(src.ManifestDB); err == nil {
-			if err := vacuumInto(src.ManifestDB, filepath.Join(dst, "bridge.db")); err != nil {
+			if err := vacuumInto(ctx, src.ManifestDB, filepath.Join(dst, "bridge.db")); err != nil {
 				return "", fmt.Errorf("vacuum manifest db: %w", err)
 			}
 			captured = append(captured, "bridge.db")
@@ -205,10 +205,13 @@ func Restore(snapshotDir string, dst Targets) error {
 		if _, err := os.Stat(srcPath); errors.Is(err, os.ErrNotExist) {
 			continue
 		}
+		// Restore at 0o600 across the board — the snapshot bundle was
+		// stored that way, and bridge.yaml may carry sensitive data
+		// (paths, future secrets). Maintaining 0o600 on the live file
+		// matches what `Snapshot` writes back into the bundle and what
+		// `config.Save` would land if the operator hand-edited via
+		// the admin console.
 		var mode os.FileMode = 0o600
-		if name == "bridge.yaml" {
-			mode = 0o644
-		}
 		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 			return fmt.Errorf("create dir for %s: %w", name, err)
 		}
@@ -290,22 +293,23 @@ func List(backupsRoot string) ([]snapshotEntry, error) {
 
 // vacuumInto runs SQLite's VACUUM INTO to make a clean atomic copy
 // of a WAL-mode database. Read-only connection so it can't disturb
-// a running writer.
-func vacuumInto(srcDB, dstDB string) error {
+// a running writer. Context-aware so a periodic snapshot can be
+// cancelled on bridge shutdown.
+func vacuumInto(ctx context.Context, srcDB, dstDB string) error {
 	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(5000)", srcDB)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return err
 	}
 	defer db.Close()
-	if err := db.Ping(); err != nil {
+	if err := db.PingContext(ctx); err != nil {
 		return err
 	}
 	// VACUUM INTO refuses if the destination already exists; clear
 	// it so re-running a snapshot in the same second (collision-
 	// suffix paths) doesn't bail. The parent dir is already 0700.
 	_ = os.Remove(dstDB)
-	if _, err := db.Exec("VACUUM INTO ?", dstDB); err != nil {
+	if _, err := db.ExecContext(ctx, "VACUUM INTO ?", dstDB); err != nil {
 		return err
 	}
 	// VACUUM INTO writes the destination at the umask-default mode
@@ -382,22 +386,26 @@ func readManifest(path string) (Manifest, error) {
 	return m, nil
 }
 
-// uniqueDir resolves directory-name collisions in the rare case
-// that two snapshots land in the same second. Adds "-1", "-2"
-// suffixes until a free name is found.
-func uniqueDir(base string) string {
-	if _, err := os.Stat(base); errors.Is(err, os.ErrNotExist) {
-		return base
-	}
+// createUniqueSnapshotDir is the atomic alternative to a stat-then-
+// mkdir uniqueness check. Two snapshots that hit the same second
+// (rare but possible from a tight test loop) would otherwise race
+// the existence check; this loop relies on `os.Mkdir` returning
+// `os.ErrExist` on collision (kernel-atomic) and tries successive
+// "-1", "-2" suffixes until one succeeds.
+func createUniqueSnapshotDir(backupsRoot string, t time.Time) (string, error) {
+	base := filepath.Join(backupsRoot, t.UTC().Format(timestampLayout))
+	candidates := []string{base}
 	for i := 1; i < 100; i++ {
-		candidate := fmt.Sprintf("%s-%d", base, i)
-		if _, err := os.Stat(candidate); errors.Is(err, os.ErrNotExist) {
-			return candidate
+		candidates = append(candidates, fmt.Sprintf("%s-%d", base, i))
+	}
+	for _, c := range candidates {
+		if err := os.Mkdir(c, 0o700); err == nil {
+			return c, nil
+		} else if !errors.Is(err, os.ErrExist) {
+			return "", err
 		}
 	}
-	// Highly unlikely to reach here; just return the base and let
-	// the subsequent Mkdir fail loudly.
-	return base
+	return "", fmt.Errorf("backup: 100 snapshot dirs already exist for %s", base)
 }
 
 // EnsureFreshDataDirSibling helps tests construct a writable scratch
@@ -427,16 +435,19 @@ func EnsureBackupsDir(dataDir string) error {
 // all show the same wording.
 const SensitivityNotice = "WARNING: backups contain the TLS private key and token hashes. Treat as secret-grade material — store with the same care as the live bridge state."
 
-// LooksLikeSnapshotDir returns true when `path` contains a readable
-// `manifest.json` of this schema version. Used by Restore CLI's
-// argument validation to surface a clear error message before
-// touching the live state.
+// LooksLikeSnapshotDir returns true when `path` contains a readable,
+// well-formed `manifest.json` (any positive schema version). Used by
+// the Restore CLI's pre-flight validation to surface a clear "this
+// isn't a snapshot directory" error before loading config — the
+// schema-version compatibility check happens later in Restore so
+// that a future-version snapshot produces a precise mismatch error
+// rather than a generic "not recognized" rejection.
 func LooksLikeSnapshotDir(path string) bool {
 	m, err := readManifest(filepath.Join(path, ManifestFile))
 	if err != nil {
 		return false
 	}
-	return m.SchemaVersion == SchemaVersion
+	return m.SchemaVersion > 0
 }
 
 // trimTrailingSlash makes "<path>/" and "<path>" equivalent for the

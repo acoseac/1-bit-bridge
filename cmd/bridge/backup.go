@@ -41,7 +41,11 @@ func backupCmd(args []string, stdout, stderr io.Writer) int {
 	}
 
 	src := buildBackupSources(cfg, *configPath)
-	dst, err := backup.Snapshot(src)
+	// CLI runs to completion in a short-lived process; a non-context
+	// signal handler isn't wired here. context.Background() lets the
+	// underlying SQLite VACUUM run unconstrained — typical bundle
+	// build is well under a second.
+	dst, err := backup.Snapshot(context.Background(), src)
 	if err != nil {
 		fmt.Fprintf(stderr, "snapshot: %v\n", err)
 		return 1
@@ -145,7 +149,7 @@ func buildBackupSources(cfg *config.Config, configPath string) backup.Sources {
 // running bridge.
 func runBackupTicker(ctx context.Context, src backup.Sources, keep int, interval time.Duration, stdout, stderr io.Writer) {
 	doSnapshot := func(triggered string) {
-		dst, err := backup.Snapshot(src)
+		dst, err := backup.Snapshot(ctx, src)
 		if err != nil {
 			fmt.Fprintf(stderr, "backup (%s): snapshot failed: %v\n", triggered, err)
 			return
