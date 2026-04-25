@@ -93,8 +93,8 @@ func (s *Server) apiTokensRotate(w http.ResponseWriter, r *http.Request) {
 // Updates lifecycle fields on a token without invalidating its raw
 // bytes. Currently the only mutable field is `expiresAt`:
 //
-//   { "expiresAt": "2026-12-31T23:59:00Z" }   // set
-//   { "expiresAt": null }                      // clear
+//	{ "expiresAt": "2026-12-31T23:59:00Z" }   // set
+//	{ "expiresAt": null }                      // clear
 //
 // Other fields are reserved for future lifecycle work (e.g. a
 // human-editable Name). A request with no recognized field is a

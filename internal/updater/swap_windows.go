@@ -138,7 +138,7 @@ type scmStopHandle struct {
 }
 
 var (
-	errSCMUnavailable      = errors.New("SCM access denied (need admin)")
+	errSCMUnavailable       = errors.New("SCM access denied (need admin)")
 	errServiceNotRegistered = errors.New("bridge service not registered with SCM")
 )
 

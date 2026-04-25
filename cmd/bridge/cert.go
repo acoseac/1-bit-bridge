@@ -175,4 +175,3 @@ func resolveCertPaths(cfg *config.Config) (certPath, keyPath string) {
 	}
 	return certPath, keyPath
 }
-
