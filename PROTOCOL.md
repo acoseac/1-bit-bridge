@@ -244,12 +244,18 @@ See `testdata/fixtures/` in this repo for canonical manifest payloads used as de
 
 ## Updates
 
-Phase A (this revision) ships **version awareness** only. The bridge polls the GitHub Releases API on a background goroutine (`internal/updater`, 6 h cadence by default), caches the latest release tag, and exposes it to two surfaces:
+The bridge polls the GitHub Releases API on a background goroutine (`internal/updater`, 6 h cadence by default), caches the latest release tag, and exposes it to two surfaces:
 
-1. **Admin console** — the dashboard's "Updates" tile shows current/available versions, last check time, and (when applicable) "update available" with a link to release notes. A "Check now" button forces an out-of-schedule poll. Phase A has no install button — operators still upgrade by downloading the binary from GitHub Releases manually.
+1. **Admin console** — the dashboard's "Updates" tile shows current/available versions, last check time, and (when an update is available) an **Install & restart** button that downloads the archive, verifies SHA-256 from `checksums.txt` (and on macOS, codesign + notarization + Team-ID equality), atomically swaps the binary, arms a rollback marker, and triggers restart. Active downloads (`/v1/read` + `/v1/download` requests in flight) block install with a 409; an "Install anyway" affordance is available with explicit confirmation copy. **Windows install is not yet supported** — the operator-triggered flow is darwin/linux only in Phase B; Windows operators still upgrade by stopping the service, replacing `bridge.exe`, and starting it back up.
 2. **`/v1/health`** — the four optional response fields documented above. iOS reads these and surfaces "Bridge update available" / "Bridge is older than recommended" hints in the Bridge Editor.
 
-A future revision (Phase B) will wire an operator-triggered install path with checksum verification, codesign Team-ID match (macOS), an active-stream gate (no restart while a `/v1/download` is in flight to protect Hugo 2's DoP lock), and rollback via a kept `bridge.bak`. Phase C adds opt-in auto-install with quiet-hours and the `MinClientVersion` compatibility gate. The wire shape does not change for Phase B / C — they're admin-surface and binary-swap concerns only.
+The CLI mirrors the admin-console flow: `bridge update --check` polls, `bridge update --yes` polls + installs (no admin console required for SSH-only operators).
+
+Boot-time rollback: install records `<dataDir>/update-state.json` with the target version BEFORE swapping the binary. On the next boot, the new binary checks the marker and either confirms the install (transitions to `installed`, retains `bridge.bak` for one more boot) or restores `bridge.bak` over the live binary (when the running version doesn't match the target — the new binary either failed to start or behaves wrong). The previous binary is kept as `bridge.bak` for one extra boot after a successful install so a manual rollback via `POST /api/updates/rollback` is still possible without re-downloading.
+
+A future revision (Phase C) adds opt-in auto-install with quiet-hours and a `MinClientVersion` compatibility gate (refuse to install a release whose floor would orphan a paired iOS client below it). The wire shape does not change for Phase C.
+
+**Trust boundary:** the install endpoint is admin-loopback only (same trust model as every other admin route — see `internal/admin/admin.go` doc comment). There is intentionally no remote-trigger install from iOS. Operators install at the bridge host. The iOS app's role is awareness.
 
 ### Client version reporting
 

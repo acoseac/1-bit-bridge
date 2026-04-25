@@ -19,6 +19,14 @@ project_name: 1-bit-bridge
 before:
   hooks:
     - go mod tidy
+    # Hard-fail when macOS signing is enabled but APPLE_TEAM_ID is unset.
+    # Without this, the .goreleaser.yaml ldflags below silently inject an
+    # empty AppleTeamID, which disables the Team-ID equality check in the
+    # darwin self-installer (verify_darwin.go) — the binary still gets
+    # signed + notarized, but a hijacked release-asset URL serving a
+    # well-signed but wrong-org binary would slip past. PR #42 review
+    # (CodeRabbit, Major) flagged the silent degradation.
+    - sh -c 'if [ -n "${MACOS_SIGN_P12:-}" ] && [ -z "${APPLE_TEAM_ID:-}" ]; then echo "APPLE_TEAM_ID must be set when MACOS_SIGN_P12 is configured"; exit 1; fi'
 
 builds:
   - id: bridge
@@ -46,6 +54,15 @@ builds:
       # floor") when MIN_CLIENT_VERSION isn't set — fine for snapshot /
       # PR-check builds that aren't shipping a real release.
       - -X github.com/acoseac/1-bit-bridge/internal/version.MinClientVersion={{ envOrDefault "MIN_CLIENT_VERSION" "0.0.0" }}
+      # AppleTeamID pins the macOS-side install verifier to the Team ID
+      # this release was signed with. When self-installing a future
+      # release, the updater (internal/updater/verify_darwin.go) calls
+      # codesign --display and refuses if the Team ID doesn't match —
+      # blocks "well-signed but wrong-org" tampering on top of the
+      # SHA-256 + notarization checks. Empty by default so dev / PR /
+      # snapshot builds skip the equality check (codesign + notarization
+      # alone are still required when the binary is signed).
+      - -X github.com/acoseac/1-bit-bridge/internal/updater.appleTeamIDOverride={{ envOrDefault "APPLE_TEAM_ID" "" }}
     flags:
       - -trimpath
 

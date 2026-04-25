@@ -37,8 +37,21 @@ type Server struct {
 	artworkDirs ArtworkDirProvider
 	mbidProbe   MBIDProbe
 	updater     UpdaterStatus
+	sessions    SessionTracker
 	fingerprint string
 	startedAt   time.Time
+}
+
+// SessionTracker is the optional interface serveFile uses to record
+// active file-serving requests so the updater can refuse to swap-
+// and-restart while a download is in flight. Nil-safe — when
+// `s.sessions` is nil serveFile skips the bookkeeping (test
+// harnesses, pre-Phase-B bridges).
+//
+// `internal/updater.Tracker` satisfies this interface in production.
+type SessionTracker interface {
+	Begin()
+	End()
 }
 
 // ManifestProvider is the interface /v1/manifest and /v1/health use to
@@ -134,6 +147,16 @@ func (s *Server) WithMBIDProbe(p MBIDProbe) *Server {
 // `omitempty` fields stay absent from the JSON response).
 func (s *Server) WithUpdater(u UpdaterStatus) *Server {
 	s.updater = u
+	return s
+}
+
+// WithSessionTracker attaches the inflight-download counter the
+// updater consults before swapping the binary and restarting.
+// Optional — omitting it disables the gate entirely (tests). The
+// counter is incremented around `serveFile` so /v1/read and
+// /v1/download both count.
+func (s *Server) WithSessionTracker(t SessionTracker) *Server {
+	s.sessions = t
 	return s
 }
 

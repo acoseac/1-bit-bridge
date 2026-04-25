@@ -84,13 +84,46 @@ type Deps struct {
 // console. Implemented by the adapter in cmd/bridge/main.go around
 // internal/updater.Updater. CheckNow takes a context so a slow GitHub
 // response can be cancelled if the operator's browser disconnects.
+//
+// Install and Rollback return errors the admin handler classifies
+// via errors.Is against the package-level sentinels below
+// (ErrNoUpdate / ErrActiveSessions / ErrInstallNotSupported /
+// ErrPathNotWritable). The adapter is responsible for mapping
+// internal/updater's typed errors onto these admin-facing sentinels
+// so this package stays decoupled from internal/updater's API.
 type UpdateProvider interface {
 	Status() UpdateStatus
 	CheckNow(ctx context.Context) UpdateStatus
+	Install(ctx context.Context, force bool) (UpdateStatus, error)
+	Rollback(force bool) error
 }
+
+// Sentinel errors for the install / rollback paths. Defined in
+// admin/ rather than re-exported from internal/updater so the wire
+// shape lives entirely in this package — handlers_api.go classifies
+// via errors.Is, not string-substring (which was the original
+// implementation; PR #42 review flagged the fragility).
+//
+// The adapter in cmd/bridge/main.go translates internal/updater's
+// equivalent errors to these via fmt.Errorf("%w: %s", ErrXxx, ...)
+// so the admin handler can switch on errors.Is without reaching
+// into the updater package.
+var (
+	ErrUpdateNoUpdate        = errors.New("no update available")
+	ErrUpdateActiveSessions  = errors.New("active downloads in flight")
+	ErrUpdateNotSupported    = errors.New("self-install not supported on this platform")
+	ErrUpdatePathNotWritable = errors.New("binary path not writable")
+)
 
 // UpdateStatus is the wire shape /api/updates returns. Decoupled from
 // internal/updater so the admin package compiles without importing it.
+//
+// CanInstall is the platform-capability flag the dashboard template
+// uses to gate the "Install & restart" button. False on Windows
+// (and any future platform where the swap path is unimplemented) so
+// the operator never sees a button that returns 501. The adapter
+// in cmd/bridge/main.go fills this from runtime.GOOS at construction
+// time — capability is fixed for the lifetime of the process.
 type UpdateStatus struct {
 	CurrentVersion   string    `json:"currentVersion"`
 	LatestVersion    string    `json:"latestVersion,omitempty"`
@@ -100,6 +133,7 @@ type UpdateStatus struct {
 	LastCheck        time.Time `json:"lastCheck,omitempty"`
 	LastError        string    `json:"lastError,omitempty"`
 	MinClientVersion string    `json:"minClientVersion,omitempty"`
+	CanInstall       bool      `json:"canInstall"`
 }
 
 // Server owns the admin listener + mux. One per process.
@@ -164,6 +198,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/stats", s.apiStats)
 	mux.HandleFunc("GET /api/updates", s.apiUpdatesGet)
 	mux.HandleFunc("POST /api/updates/check", s.apiUpdatesCheck)
+	mux.HandleFunc("POST /api/updates/install", s.apiUpdatesInstall)
+	mux.HandleFunc("POST /api/updates/rollback", s.apiUpdatesRollback)
 	mux.HandleFunc("POST /api/scan", s.apiScan)
 	mux.HandleFunc("GET /api/roots", s.apiRootsList)
 	mux.HandleFunc("POST /api/roots", s.apiRootsAdd)

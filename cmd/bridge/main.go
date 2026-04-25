@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -41,7 +42,19 @@ import (
 // admin's read-side without coupling those packages to the updater
 // type. Trivial; lives here at the wiring point so the api / admin
 // packages stay agnostic of where their update info comes from.
-type updateInfoAdapter struct{ u *updater.Updater }
+//
+// dataDir + binaryPath are needed for the install path so the
+// adapter can construct InstallOptions on each call without making
+// the admin package aware of either. canInstall is captured at
+// construction time from runtime.GOOS so the dashboard can gate the
+// Install button on platform support.
+type updateInfoAdapter struct {
+	u          *updater.Updater
+	sessions   *updater.Tracker
+	dataDir    string
+	binaryPath string
+	canInstall bool
+}
 
 func (a updateInfoAdapter) UpdateInfo() api.UpdateInfo {
 	s := a.u.Status()
@@ -64,12 +77,68 @@ func (a updateInfoAdapter) Status() admin.UpdateStatus {
 		LastCheck:        s.LastCheck,
 		LastError:        s.LastError,
 		MinClientVersion: version.MinClientVersion,
+		CanInstall:       a.canInstall,
 	}
 }
 
 func (a updateInfoAdapter) CheckNow(ctx context.Context) admin.UpdateStatus {
 	a.u.CheckNow(ctx)
 	return a.Status()
+}
+
+func (a updateInfoAdapter) Install(ctx context.Context, force bool) (admin.UpdateStatus, error) {
+	st, err := a.u.Install(ctx, updater.InstallOptions{
+		DataDir:    a.dataDir,
+		BinaryPath: a.binaryPath,
+		Force:      force,
+		Sessions:   a.sessions,
+	})
+	return admin.UpdateStatus{
+		CurrentVersion:   st.CurrentVersion,
+		LatestVersion:    st.LatestVersion,
+		UpdateAvailable:  st.UpdateAvailable,
+		ReleaseNotesURL:  st.ReleaseNotesURL,
+		Channel:          st.Channel,
+		LastCheck:        st.LastCheck,
+		LastError:        st.LastError,
+		MinClientVersion: version.MinClientVersion,
+		CanInstall:       a.canInstall,
+	}, mapUpdaterError(err)
+}
+
+func (a updateInfoAdapter) Rollback(force bool) error {
+	return mapUpdaterError(a.u.Rollback(updater.InstallOptions{
+		DataDir:    a.dataDir,
+		BinaryPath: a.binaryPath,
+		Force:      force,
+		Sessions:   a.sessions,
+	}))
+}
+
+// mapUpdaterError translates internal/updater's typed sentinel
+// errors to the admin-package equivalents so handlers_api.go's
+// classifyUpdateError can switch on errors.Is without importing
+// internal/updater. The original error message is preserved as the
+// %w child so the operator-facing detail still threads through.
+//
+// New sentinel pairings land here as the Phase C / future work
+// expands the install error surface.
+func mapUpdaterError(err error) error {
+	if err == nil {
+		return nil
+	}
+	switch {
+	case errors.Is(err, updater.ErrNoUpdate):
+		return fmt.Errorf("%w: %s", admin.ErrUpdateNoUpdate, err.Error())
+	case errors.Is(err, updater.ErrActiveSessions):
+		return fmt.Errorf("%w: %s", admin.ErrUpdateActiveSessions, err.Error())
+	case errors.Is(err, updater.ErrInstallNotSupported):
+		return fmt.Errorf("%w: %s", admin.ErrUpdateNotSupported, err.Error())
+	case errors.Is(err, updater.ErrPathNotWritable):
+		return fmt.Errorf("%w: %s", admin.ErrUpdatePathNotWritable, err.Error())
+	default:
+		return err
+	}
 }
 
 // artworkDirBridge lets cmd/bridge expose the enricher's cache dir to
@@ -81,6 +150,68 @@ func (a artworkDirBridge) ArtworkCacheDir() string { return string(a) }
 // shutdownGrace is how long we wait for in-flight requests to drain before
 // forcing the listener closed.
 const shutdownGrace = 5 * time.Second
+
+// maybeRollbackOnBoot consults <dataDir>/update-state.json and acts
+// on whatever the previous install attempt's outcome was:
+//
+//   - first boot after a successful install: stamp installedAt and
+//     retain bridge.bak for one more boot.
+//   - boot after that: delete bridge.bak.
+//   - first boot after a FAILED install (we're not at TargetVersion):
+//     restore bridge.bak and clear the marker. Service manager will
+//     then respawn into the restored old binary on next exit.
+//   - everything else: no-op.
+//
+// Failures here are logged but non-fatal — a botched rollback still
+// lets the server start up; the operator can recover manually.
+func maybeRollbackOnBoot(stderr io.Writer, dataDir, binaryPath string) {
+	st, err := updater.LoadState(dataDir)
+	if err != nil {
+		fmt.Fprintf(stderr, "updater: load state: %v\n", err)
+		return
+	}
+	action := updater.DecideBootAction(st, version.ServerVersion, time.Now().UTC())
+	switch action {
+	case updater.BootNoop:
+		return
+	case updater.BootInstallSucceeded:
+		// New binary booted; record installedAt so the NEXT boot
+		// knows it can clean up the .bak.
+		st.Status = "installed"
+		st.InstalledAt = time.Now().UTC()
+		if err := updater.SaveState(dataDir, st); err != nil {
+			fmt.Fprintf(stderr, "updater: mark installed: %v\n", err)
+		}
+	case updater.BootCleanupBak:
+		// Second boot after a successful install: clean up.
+		if err := updater.RemoveBackup(binaryPath, ".bak"); err != nil {
+			fmt.Fprintf(stderr, "updater: remove .bak: %v\n", err)
+		}
+		if err := updater.ClearState(dataDir); err != nil {
+			fmt.Fprintf(stderr, "updater: clear state: %v\n", err)
+		}
+	case updater.BootInstallFailed:
+		// New binary didn't come up at the expected version.
+		// Restore the previous binary and clear the marker so the
+		// next exit (planned or via service-manager respawn) lands
+		// us back on the old version.
+		fmt.Fprintf(stderr, "updater: install of %s did not reach the expected version (running %s); rolling back to .bak\n",
+			st.TargetVersion, version.ServerVersion)
+		if err := updater.RollbackBinary(binaryPath, ".bak"); err != nil {
+			fmt.Fprintf(stderr, "updater: rollback failed: %v (manual recovery needed at %s)\n",
+				err, binaryPath)
+		}
+		if err := updater.ClearState(dataDir); err != nil {
+			fmt.Fprintf(stderr, "updater: clear state: %v\n", err)
+		}
+	case updater.BootClearAbandoned:
+		// Marker is older than the recency window — nothing
+		// actionable, just clean up.
+		if err := updater.ClearState(dataDir); err != nil {
+			fmt.Fprintf(stderr, "updater: clear abandoned state: %v\n", err)
+		}
+	}
+}
 
 func main() {
 	// Windows-service dispatch. When SCM launches bridge.exe, os.Args
@@ -145,6 +276,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return scanCmd(args[1:], stdout, stderr)
 	case "doctor":
 		return doctorCmd(args[1:], stdout, stderr)
+	case "update":
+		return updateCmd(ctx, args[1:], os.Stdin, stdout, stderr)
 	case "version":
 		fmt.Fprintf(stdout, "1-bit-bridge %s (protocol v%d)\n", version.ServerVersion, version.ProtocolVersion)
 		return 0
@@ -170,6 +303,7 @@ Subcommands:
   pair     Generate a new bearer token for an iOS client.
   scan     Force a full library rescan.
   doctor   Preflight: check ports, directories, service manager before init.
+  update   Check for / install a new bridge release from GitHub.
   version  Print version and protocol version.
 
 Run "bridge <subcommand> -h" for subcommand-specific flags.
@@ -274,19 +408,57 @@ func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	enricher := enrich.NewEnricher(manifestStore, mbClient, caaClient, deezerClient, artworkDir)
 	go enricher.Run(scanCtx)
 
-	// Background updater: poll-only in Phase A (notify, no install).
-	// Lives off scanCtx so a SIGINT cancels it cleanly alongside the
-	// scanner. Failures are non-fatal — the bridge serves fine without
-	// update awareness; the admin UI just shows "couldn't reach
-	// GitHub" in the LastError field.
+	// Background updater: polls GitHub Releases on a 6 h cadence
+	// (Phase A) and exposes operator-triggered Install via the admin
+	// console (Phase B). Lives off scanCtx so a SIGINT cancels it
+	// cleanly alongside the scanner. Poll failures are non-fatal —
+	// the bridge serves fine without update awareness; the admin UI
+	// shows "couldn't reach GitHub" in the LastError field.
 	upd := updater.New(updater.Options{})
 	go upd.Run(scanCtx)
-	updAdapter := updateInfoAdapter{u: upd}
+
+	// Sessions tracker counts inflight /v1/read + /v1/download
+	// requests. The Install path consults Inflight() before
+	// swapping the binary so Hugo 2 / XMOS DAC DoP-lock loss can't
+	// happen via a mid-stream restart.
+	sessions := updater.NewTracker()
+
+	// Resolve the running binary path once at startup. Install
+	// swaps the file at this exact path. os.Executable() may
+	// return an error in unusual environments (deleted binary
+	// running, embedded test); fall back to argv[0] so the
+	// failure surfaces later in Install's preflight rather than
+	// blocking the whole server boot.
+	binaryPath, exeErr := os.Executable()
+	if exeErr != nil {
+		fmt.Fprintf(stderr, "updater: os.Executable failed (install path may not work): %v\n", exeErr)
+		binaryPath = os.Args[0]
+	}
+
+	// Boot-time rollback housekeeping: read update-state.json and
+	// either confirm the install succeeded (mark installed, retain
+	// .bak for one boot) or restore .bak when the new version
+	// failed to come up cleanly. Failures are logged but
+	// non-fatal — operator can still recover by hand.
+	maybeRollbackOnBoot(stderr, cfg.DataDir, binaryPath)
+
+	updAdapter := updateInfoAdapter{
+		u:          upd,
+		sessions:   sessions,
+		dataDir:    cfg.DataDir,
+		binaryPath: binaryPath,
+		// Phase B implements the swap path on darwin + linux only.
+		// Surfaced as a capability flag so the dashboard hides the
+		// Install button on Windows rather than letting the operator
+		// click through to a 501.
+		canInstall: runtime.GOOS != "windows",
+	}
 
 	apiSrv := api.New(cfg, store, provider, fingerprint).
 		WithArtworkDirs(artworkDirBridge(artworkDir)).
 		WithMBIDProbe(provider).
-		WithUpdater(updAdapter)
+		WithUpdater(updAdapter).
+		WithSessionTracker(sessions)
 	httpSrv := &http.Server{
 		Addr:      cfg.ListenAddress,
 		Handler:   apiSrv.Handler(),

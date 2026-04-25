@@ -517,6 +517,91 @@ func (s *Server) apiUpdatesCheck(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.deps.Updater.CheckNow(r.Context()))
 }
 
+// --- POST /api/updates/install[?force=1] ---
+//
+// Downloads, verifies, swaps the binary, and arms the rollback
+// marker for the most recent release the updater has cached. Does
+// NOT trigger restart itself — operator hits the existing
+// /api/restart endpoint to actually load the new binary, OR the
+// admin UI's "Install & restart" button calls install then restart
+// in sequence. Splitting the two keeps the failure modes
+// distinguishable in the UI ("install OK but restart hung" vs
+// "install failed").
+//
+// Returns:
+//   - 200 with the post-install Status on success
+//   - 400 when no update is available
+//   - 409 when downloads are inflight (use ?force=1 to override)
+//   - 501 on Windows (Phase B is darwin/linux; Windows is a follow-up)
+//   - 403 when the binary path isn't writable (system install needs sudo)
+//   - 502 on download / verify / swap failures
+func (s *Server) apiUpdatesInstall(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Updater == nil {
+		writeError(w, http.StatusServiceUnavailable, "no-updater", "updater is not configured")
+		return
+	}
+	force := r.URL.Query().Get("force") == "1"
+	st, err := s.deps.Updater.Install(r.Context(), force)
+	if err != nil {
+		code, short := classifyUpdateError(err)
+		writeError(w, code, short, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
+}
+
+// --- POST /api/updates/rollback[?force=1] ---
+//
+// Restores bridge.bak over the live binary. Used when the operator
+// has installed an update but wants to revert before the boot-time
+// rollback path would fire (i.e. the new version starts up but
+// behaves badly). Requires a recent install attempt — otherwise
+// .bak is missing and the rollback fails with a clear message.
+//
+// Returns:
+//   - 204 on success (no body — operator clicks Restart next)
+//   - 409 when downloads are inflight (use ?force=1)
+//   - 501 on Windows
+//   - 502 on rollback I/O failure (.bak missing, etc.)
+func (s *Server) apiUpdatesRollback(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Updater == nil {
+		writeError(w, http.StatusServiceUnavailable, "no-updater", "updater is not configured")
+		return
+	}
+	force := r.URL.Query().Get("force") == "1"
+	if err := s.deps.Updater.Rollback(force); err != nil {
+		code, short := classifyUpdateError(err)
+		writeError(w, code, short, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// classifyUpdateError maps the typed sentinel errors the
+// UpdateProvider adapter wraps onto sensible HTTP status codes +
+// short error codes. The adapter (cmd/bridge/main.go) is
+// responsible for wrapping internal/updater's own typed errors with
+// the admin-side sentinels (admin.ErrUpdateXxx) via fmt.Errorf
+// "%w: …", so this classification stays robust under refactoring of
+// the underlying error messages.
+//
+// PR #42 review (Gemini) flagged the original string-contains
+// implementation as fragile — fixed.
+func classifyUpdateError(err error) (status int, short string) {
+	switch {
+	case errors.Is(err, ErrUpdateNoUpdate):
+		return http.StatusBadRequest, "no-update"
+	case errors.Is(err, ErrUpdateActiveSessions):
+		return http.StatusConflict, "active-sessions"
+	case errors.Is(err, ErrUpdateNotSupported):
+		return http.StatusNotImplemented, "platform-unsupported"
+	case errors.Is(err, ErrUpdatePathNotWritable):
+		return http.StatusForbidden, "path-not-writable"
+	default:
+		return http.StatusBadGateway, "install-failed"
+	}
+}
+
 // --- POST /api/restart ---
 
 func (s *Server) apiRestart(w http.ResponseWriter, r *http.Request) {

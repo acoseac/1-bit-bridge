@@ -86,6 +86,18 @@ function initDashboard() {
     });
   }
 
+  // "Install & restart" downloads, verifies, swaps the binary, then
+  // hits the existing /api/restart endpoint. The two are kept
+  // sequential rather than fused into one server-side handler so the
+  // user sees distinct success / failure surfaces for each step.
+  // The 409 active-sessions branch surfaces an "Install anyway" prompt
+  // backed by ?force=1.
+  //
+  // Also wired in renderUpdateTile when the button is added mid-tick
+  // (e.g. server-rendered first paint had no update available). The
+  // helper is shared so both entry paths run the same flow.
+  bindInstallButton(document.getElementById("update-install"));
+
   // Live-refresh the top-line numbers every 3 s.
   const tick = async () => {
     try {
@@ -116,6 +128,54 @@ function initDashboard() {
   const handle = setInterval(tick, 3000);
 }
 
+// bindInstallButton attaches the click handler to the Install &
+// restart button. No-op when btn is null (server didn't render the
+// button at first paint, e.g. the platform doesn't support install
+// or no update was known). The renderUpdateTile path uses the same
+// helper when it dynamically materialises the button mid-session.
+function bindInstallButton(btn) {
+  if (!btn) return;
+  btn.addEventListener("click", async () => {
+    if (!confirm("Install the new bridge release and restart?\n\nActive iOS downloads will be interrupted and will need to be retried.")) return;
+    await runInstall(btn, false);
+  });
+}
+
+// runInstall hits POST /api/updates/install (with ?force=1 if the
+// user opted past the active-downloads guard) and then POSTs
+// /api/restart. The two requests are kept distinct so the install
+// vs. restart failure modes stay distinguishable in the UI; the
+// server-side handlers are also separate (see admin.go routing) so
+// the `force` semantics only affect install, not restart. Recursive
+// retry-with-force keeps the call site clean.
+async function runInstall(btn, force) {
+  const oldText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Installing…";
+  try {
+    const path = force ? "/api/updates/install?force=1" : "/api/updates/install";
+    await API.post(path);
+    btn.textContent = "Restarting…";
+    // Fire restart and don't await — the server tears the listener
+    // down before we can read the response body anyway. The page
+    // reload below races the restart's port-rebind; 2.5 s is the
+    // empirical sweet-spot for launchd respawn on macOS.
+    fetch("/api/restart", { method: "POST" }).catch(() => {});
+    setTimeout(() => window.location.reload(), 2500);
+  } catch (err) {
+    if (/409/.test(err.message) || /active-sessions/.test(err.message) || /active downloads/i.test(err.message)) {
+      const proceed = confirm("Active downloads are in flight — installing now will interrupt them and could glitch any iOS device currently playing a track.\n\nInstall anyway?");
+      if (proceed) {
+        return runInstall(btn, true);
+      }
+    } else {
+      alert("Install failed: " + err.message);
+    }
+    btn.textContent = oldText;
+    btn.disabled = false;
+  }
+}
+
 // renderUpdateTile mutates the dashboard's Updates panel from a Status
 // payload. Tolerates partial input (Check-now error path passes only
 // {lastError}). Mirrors the server-rendered first paint in
@@ -133,6 +193,28 @@ function renderUpdateTile(u) {
   const lastError = document.getElementById("update-last-error");
   const latest = document.getElementById("update-latest");
   if (!status) return;
+
+  // Add or remove the "Install & restart" button to match the
+  // server-rendered first-paint logic. The button only exists when
+  // the platform supports self-install AND an update is available.
+  // Without this, a "checking…" → "update available" transition
+  // mid-session would leave a paired client without a button.
+  const actions = document.querySelector(".panel-head .panel-actions");
+  let installBtn = document.getElementById("update-install");
+  if (actions) {
+    const should = u && u.updateAvailable && u.canInstall;
+    if (should && !installBtn) {
+      installBtn = document.createElement("button");
+      installBtn.type = "button";
+      installBtn.id = "update-install";
+      installBtn.className = "btn btn-primary";
+      installBtn.textContent = "Install & restart";
+      bindInstallButton(installBtn);
+      actions.insertBefore(installBtn, actions.firstChild);
+    } else if (!should && installBtn) {
+      installBtn.remove();
+    }
+  }
 
   if (u && u.updateAvailable && u.latestVersion) {
     status.innerHTML = `<span class="badge running">update available</span><span>· <code>${escapeHTML(u.latestVersion)}</code></span>`;
