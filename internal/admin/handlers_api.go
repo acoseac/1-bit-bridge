@@ -577,30 +577,25 @@ func (s *Server) apiUpdatesRollback(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// classifyUpdateError maps the typed errors from internal/updater
-// onto sensible HTTP status codes + short error codes. Defined here
-// in admin/ rather than at the call sites so the iOS / CLI surfaces
-// can adopt the same mapping if they grow remote install in the
-// future. Lives in this file (not admin.go) to keep update-handler
-// concerns colocated.
+// classifyUpdateError maps the typed sentinel errors the
+// UpdateProvider adapter wraps onto sensible HTTP status codes +
+// short error codes. The adapter (cmd/bridge/main.go) is
+// responsible for wrapping internal/updater's own typed errors with
+// the admin-side sentinels (admin.ErrUpdateXxx) via fmt.Errorf
+// "%w: …", so this classification stays robust under refactoring of
+// the underlying error messages.
 //
-// Cross-package error matching uses string contains rather than
-// errors.Is because the admin package deliberately doesn't import
-// internal/updater (the wire shape lives in admin.UpdateStatus).
-// This is fragile — a follow-up could thread the typed errors
-// through the UpdateProvider interface — but the strings are
-// stable sentinels (`errors.New(...)` in install.go) and matching
-// substring keeps the coupling out.
+// PR #42 review (Gemini) flagged the original string-contains
+// implementation as fragile — fixed.
 func classifyUpdateError(err error) (status int, short string) {
-	msg := err.Error()
 	switch {
-	case strings.Contains(msg, "no update available"):
+	case errors.Is(err, ErrUpdateNoUpdate):
 		return http.StatusBadRequest, "no-update"
-	case strings.Contains(msg, "active downloads"):
+	case errors.Is(err, ErrUpdateActiveSessions):
 		return http.StatusConflict, "active-sessions"
-	case strings.Contains(msg, "self-install not yet supported"):
+	case errors.Is(err, ErrUpdateNotSupported):
 		return http.StatusNotImplemented, "platform-unsupported"
-	case strings.Contains(msg, "binary path not writable"):
+	case errors.Is(err, ErrUpdatePathNotWritable):
 		return http.StatusForbidden, "path-not-writable"
 	default:
 		return http.StatusBadGateway, "install-failed"

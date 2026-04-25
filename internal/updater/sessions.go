@@ -52,8 +52,19 @@ func (t *Tracker) Begin() {
 // End marks the exit of a file-serving request. Clamps to zero on
 // underflow (defensive — should never happen, but a leak the wrong
 // direction here lets Install run during a download).
+//
+// The clamp uses CompareAndSwap rather than Store because a
+// concurrent Begin() between our Add(-1) and the reset would
+// otherwise be silently lost: Begin's Add(+1) takes us from -1 to
+// 0 (or beyond), and a naive Store(0) clobbers that legitimate
+// increment, leaving Inflight()==0 while a download is genuinely
+// active. With CAS, the reset only fires if the counter is still
+// at the underflow value; otherwise some other goroutine has
+// already mutated it (Begin or another End) and we leave the
+// counter alone. Caught in PR #42 review (Gemini).
 func (t *Tracker) End() {
 	if n := t.count.Add(-1); n < 0 {
+		t.count.CompareAndSwap(n, 0)
 		t.mu.Lock()
 		first := !t.loggedUnderflow
 		t.loggedUnderflow = true
@@ -61,7 +72,6 @@ func (t *Tracker) End() {
 		if first {
 			log.Printf("updater: sessions tracker underflow — Begin/End mismatch (clamping to 0)")
 		}
-		t.count.Store(0)
 	}
 }
 

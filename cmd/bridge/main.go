@@ -97,16 +97,42 @@ func (a updateInfoAdapter) Install(ctx context.Context, force bool) (admin.Updat
 		LastCheck:        st.LastCheck,
 		LastError:        st.LastError,
 		MinClientVersion: version.MinClientVersion,
-	}, err
+	}, mapUpdaterError(err)
 }
 
 func (a updateInfoAdapter) Rollback(force bool) error {
-	return a.u.Rollback(updater.InstallOptions{
+	return mapUpdaterError(a.u.Rollback(updater.InstallOptions{
 		DataDir:    a.dataDir,
 		BinaryPath: a.binaryPath,
 		Force:      force,
 		Sessions:   a.sessions,
-	})
+	}))
+}
+
+// mapUpdaterError translates internal/updater's typed sentinel
+// errors to the admin-package equivalents so handlers_api.go's
+// classifyUpdateError can switch on errors.Is without importing
+// internal/updater. The original error message is preserved as the
+// %w child so the operator-facing detail still threads through.
+//
+// New sentinel pairings land here as the Phase C / future work
+// expands the install error surface.
+func mapUpdaterError(err error) error {
+	if err == nil {
+		return nil
+	}
+	switch {
+	case errors.Is(err, updater.ErrNoUpdate):
+		return fmt.Errorf("%w: %s", admin.ErrUpdateNoUpdate, err.Error())
+	case errors.Is(err, updater.ErrActiveSessions):
+		return fmt.Errorf("%w: %s", admin.ErrUpdateActiveSessions, err.Error())
+	case errors.Is(err, updater.ErrInstallNotSupported):
+		return fmt.Errorf("%w: %s", admin.ErrUpdateNotSupported, err.Error())
+	case errors.Is(err, updater.ErrPathNotWritable):
+		return fmt.Errorf("%w: %s", admin.ErrUpdatePathNotWritable, err.Error())
+	default:
+		return err
+	}
 }
 
 // artworkDirBridge lets cmd/bridge expose the enricher's cache dir to

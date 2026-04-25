@@ -85,18 +85,35 @@ type Deps struct {
 // internal/updater.Updater. CheckNow takes a context so a slow GitHub
 // response can be cancelled if the operator's browser disconnects.
 //
-// Install and Rollback return (action: human-readable success
-// summary, err) so the admin UI can show "Installed 0.2.0 — restart
-// to apply" without needing access to the raw Status struct. The
-// admin handler converts the typed errors from internal/updater
+// Install and Rollback return errors the admin handler classifies
+// via errors.Is against the package-level sentinels below
 // (ErrNoUpdate / ErrActiveSessions / ErrInstallNotSupported /
-// ErrPathNotWritable) into the appropriate HTTP status code.
+// ErrPathNotWritable). The adapter is responsible for mapping
+// internal/updater's typed errors onto these admin-facing sentinels
+// so this package stays decoupled from internal/updater's API.
 type UpdateProvider interface {
 	Status() UpdateStatus
 	CheckNow(ctx context.Context) UpdateStatus
 	Install(ctx context.Context, force bool) (UpdateStatus, error)
 	Rollback(force bool) error
 }
+
+// Sentinel errors for the install / rollback paths. Defined in
+// admin/ rather than re-exported from internal/updater so the wire
+// shape lives entirely in this package — handlers_api.go classifies
+// via errors.Is, not string-substring (which was the original
+// implementation; PR #42 review flagged the fragility).
+//
+// The adapter in cmd/bridge/main.go translates internal/updater's
+// equivalent errors to these via fmt.Errorf("%w: %s", ErrXxx, ...)
+// so the admin handler can switch on errors.Is without reaching
+// into the updater package.
+var (
+	ErrUpdateNoUpdate        = errors.New("no update available")
+	ErrUpdateActiveSessions  = errors.New("active downloads in flight")
+	ErrUpdateNotSupported    = errors.New("self-install not supported on this platform")
+	ErrUpdatePathNotWritable = errors.New("binary path not writable")
+)
 
 // UpdateStatus is the wire shape /api/updates returns. Decoupled from
 // internal/updater so the admin package compiles without importing it.
