@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -159,11 +160,73 @@ func (c *MusicBrainzClient) get(ctx context.Context, u string, out any) error {
 	if resp.StatusCode == http.StatusNotFound {
 		return errNotFound
 	}
+	// MB asks anonymous clients to back off when it's overloaded. Honor
+	// `Retry-After` (delta-seconds OR HTTP-date) by sleeping here before
+	// returning the error — the enricher's batch loop is single-threaded
+	// through this method (one MB call at a time per Run goroutine) so a
+	// process-wide pause isn't needed; pacing the next call from the
+	// same client is sufficient. Without this, a sustained 429 plus the
+	// 15s `PollInterval` had us re-hit MB at ~4 calls/min through the
+	// advisory window — well-meaning but rude.
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+		if delay := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()); delay > 0 {
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return fmt.Errorf("musicbrainz: HTTP %d: %s", resp.StatusCode, string(b))
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+// maxRetryAfter caps the wait to protect against a hostile or
+// misconfigured upstream parking the enricher for arbitrary durations.
+// MB has never asked for more than a few minutes in practice; 1h is
+// the comfortable upper bound.
+const maxRetryAfter = time.Hour
+
+// parseRetryAfter returns the duration to wait per RFC 9110 §10.2.3
+// (HTTP semantics) — a delta-seconds non-negative integer OR an
+// HTTP-date. Returns zero if the header is absent or unparseable; the
+// caller must treat zero as "no advice given" and fall through to its
+// default behavior (don't sleep on a missing/malformed header).
+//
+// The `now` parameter is injected for testability; production callers
+// pass `time.Now()`.
+func parseRetryAfter(header string, now time.Time) time.Duration {
+	header = strings.TrimSpace(header)
+	if header == "" {
+		return 0
+	}
+	// Apply the cap in the *seconds* domain before multiplying by
+	// time.Second — a Retry-After of e.g. 2^33 would otherwise overflow
+	// time.Duration (int64 nanoseconds) during the multiplication and
+	// silently bypass the cap. Use ParseInt(64) so platforms where
+	// `int` is 32-bit don't lose values in the [2^31, 2^63) range
+	// either; clamp before the conversion either way.
+	if secs, err := strconv.ParseInt(header, 10, 64); err == nil && secs >= 0 {
+		maxSecs := int64(maxRetryAfter / time.Second)
+		if secs > maxSecs {
+			secs = maxSecs
+		}
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(header); err == nil {
+		d := t.Sub(now)
+		if d <= 0 {
+			return 0
+		}
+		if d > maxRetryAfter {
+			d = maxRetryAfter
+		}
+		return d
+	}
+	return 0
 }
 
 // errNotFound is used internally; callers don't need to distinguish.
