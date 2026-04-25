@@ -284,6 +284,20 @@ Example: `X-Client-Version: 1.2`. The bridge persists the most recent value per 
 
 The header is optional — older iOS clients that don't send it continue to authenticate normally. Bridges record nothing for those tokens, and the updater treats them as "version unknown" → blocks `MinClientVersion`-gated auto-installs unless the operator overrides.
 
+## Operator: TLS cert rotation
+
+The bridge mints a self-signed ECDSA P-256 cert on first run with a 10-year validity window. Rotation is a rare operator event — key compromise, hostname change, or routine hygiene — but the path matters when one is forced.
+
+- **Inspect**: `bridge cert info` prints subject, fingerprint, not-before / not-after, and days-until-expiry. The admin dashboard shows the same fields under the "TLS fingerprint" panel and surfaces a yellow / red badge at ≤30 / ≤7 days respectively.
+- **Rotate**: `bridge cert rotate [--yes]` regenerates both the cert and the key, prints the new fingerprint, and points the operator at the re-pair flow. Rotation is gated on a `--yes` confirmation prompt because **every paired device must re-pair**: iOS pins the cert fingerprint, and the new cert has a different fingerprint even if the key were preserved (the cert binary differs by serial number + NotBefore / NotAfter alone).
+
+After `bridge cert rotate`, the operator must:
+
+1. Restart the bridge service (`bridge serve` rereads cert + key from disk on startup; the running process keeps using its in-memory cert until it exits).
+2. Re-pair every device. The admin console's existing "Pair new device" and per-token "Rotate" flows both emit fresh QR codes carrying the new fingerprint — no separate "fresh URL for everyone" button is needed because every URL is built from the live cert.
+
+The CLI also surfaces `GET /api/cert` to the admin console (subject, fingerprint, NotBefore / NotAfter, daysUntilExpiry). Cert rotation itself stays CLI-only by design — exposing it via the admin console would mean a one-click action that strands every paired device, and the operator-restart step has no good web equivalent.
+
 ## Operator: Token lifecycle
 
 `bridge pair --name <device>` mints a fresh 256-bit bearer token. Beyond that, the token surface supports rotation, expiry, and revocation:

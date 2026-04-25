@@ -122,6 +122,7 @@ function initDashboard() {
     });
   }
   refreshBackups();
+  refreshCertInfo();
 
   // Live-refresh the top-line numbers every 3 s.
   const tick = async () => {
@@ -170,6 +171,30 @@ async function refreshBackups() {
     }
   } catch (e) {
     // Quietly leave the placeholders alone.
+  }
+}
+
+// refreshCertInfo populates the dashboard's "Expires" line under the
+// TLS fingerprint panel with the live cert's expiry. ≤7 days is
+// rendered red, ≤30 days yellow, otherwise the plain count. Errors
+// degrade silently — the panel just shows the placeholder dashes.
+async function refreshCertInfo() {
+  const cell = document.getElementById("cert-expiry");
+  if (!cell) return;
+  try {
+    const info = await API.get("/api/cert");
+    if (!info || !info.notAfter) {
+      cell.textContent = "—";
+      return;
+    }
+    const when = new Date(info.notAfter);
+    const days = info.daysUntilExpiry;
+    let badge = "";
+    if (days <= 7) badge = '<span class="badge danger">expiring soon</span> ';
+    else if (days <= 30) badge = '<span class="badge running">expiring</span> ';
+    cell.innerHTML = `${badge}${when.toLocaleDateString()} (${days} days)`;
+  } catch {
+    cell.textContent = "—";
   }
 }
 

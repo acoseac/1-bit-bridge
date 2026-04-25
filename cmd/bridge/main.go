@@ -284,6 +284,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return restoreCmd(args[1:], os.Stdin, stdout, stderr)
 	case "token":
 		return tokenCmd(args[1:], stdout, stderr)
+	case "cert":
+		return certCmd(args[1:], os.Stdin, stdout, stderr)
 	case "version":
 		fmt.Fprintf(stdout, "1-bit-bridge %s (protocol v%d)\n", version.ServerVersion, version.ProtocolVersion)
 		return 0
@@ -313,6 +315,7 @@ Subcommands:
   backup   Snapshot bridge state into <dataDir>/backups/<timestamp>/.
   restore  Restore bridge state from a snapshot directory.
   token    Manage paired tokens (list / rotate / expire / revoke).
+  cert     Inspect or rotate the TLS cert (info / rotate).
   version  Print version and protocol version.
 
 Run "bridge <subcommand> -h" for subcommand-specific flags.

@@ -87,7 +87,7 @@ func TestGenerateOrphanCertCleanupOnKeyFailure(t *testing.T) {
 	}
 	keyPath := filepath.Join(blocker, "subdir", "key.pem")
 
-	err := generate(certPath, keyPath, "")
+	err := Generate(certPath, keyPath, "")
 	if err == nil {
 		t.Fatal("expected error when key path is unwritable")
 	}

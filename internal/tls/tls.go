@@ -60,7 +60,7 @@ func LoadOrGenerate(certPath, keyPath, hostname string) (*cryptotls.Certificate,
 	case certExists && keyExists:
 		// fall through to load
 	case !certExists && !keyExists:
-		if err := generate(certPath, keyPath, hostname); err != nil {
+		if err := Generate(certPath, keyPath, hostname); err != nil {
 			return nil, "", fmt.Errorf("generate TLS material: %w", err)
 		}
 	default:
@@ -80,12 +80,25 @@ func LoadOrGenerate(certPath, keyPath, hostname string) (*cryptotls.Certificate,
 	return &cert, fp, nil
 }
 
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
-}
-
-func generate(certPath, keyPath, hostname string) error {
+// Generate (re-)mints the cert + key at the given paths. Used by
+// `bridge cert rotate` for an operator-driven rotation, and
+// internally by `LoadOrGenerate` for first-run minting.
+//
+// **Performs an unconditional write** — `writePEM` opens with
+// `O_TRUNC`, so any pre-existing files at `certPath` / `keyPath`
+// are overwritten. The first-run path in `LoadOrGenerate` already
+// gates on file-existence before calling Generate; the CLI rotate
+// path explicitly removes the existing files first to make the
+// failure-mode-on-perm-error clearer. Callers that don't want to
+// blow away an existing cert must check themselves before calling.
+//
+// **A rotated cert always has a new SHA-256 fingerprint** —
+// even if the public key is unchanged, the cert binary differs
+// (NotBefore / NotAfter / serial number) and iOS pins the cert,
+// not the key. Operators must re-pair every device after a
+// rotation; the admin console's per-token "Rotate" button or a
+// fresh `bridge://pair?...` deep link is the supported path.
+func Generate(certPath, keyPath, hostname string) error {
 	if err := os.MkdirAll(filepath.Dir(certPath), 0o755); err != nil {
 		return fmt.Errorf("mkdir (cert): %w", err)
 	}
@@ -135,6 +148,63 @@ func generate(certPath, keyPath, hostname string) error {
 		return fmt.Errorf("write key: %w", err)
 	}
 	return nil
+}
+
+// CertInfo describes the on-disk certificate. Returned by Inspect
+// and surfaced by the admin `GET /api/cert` endpoint + the
+// `bridge cert info` CLI. Fingerprint is in the canonical
+// colon-separated uppercase-hex form.
+type CertInfo struct {
+	NotBefore       time.Time `json:"notBefore"`
+	NotAfter        time.Time `json:"notAfter"`
+	Fingerprint     string    `json:"fingerprint"`
+	DaysUntilExpiry int       `json:"daysUntilExpiry"`
+	Subject         string    `json:"subject"`
+}
+
+// Inspect parses the PEM cert at `certPath` and returns its
+// metadata. Used by the admin's cert-tile endpoint and the CLI
+// `bridge cert info` command. No live validation is performed
+// (the operator's view of the on-disk cert is what we report);
+// expired certs are surfaced via DaysUntilExpiry being zero or
+// negative, not by erroring out.
+func Inspect(certPath string) (CertInfo, error) {
+	raw, err := os.ReadFile(certPath)
+	if err != nil {
+		return CertInfo{}, err
+	}
+	block, _ := pem.Decode(raw)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return CertInfo{}, errors.New("no CERTIFICATE block in PEM")
+	}
+	parsed, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return CertInfo{}, fmt.Errorf("parse: %w", err)
+	}
+	now := time.Now()
+	days := int(parsed.NotAfter.Sub(now).Hours() / 24)
+	// Integer truncation rounds toward zero, so a cert that
+	// expired 23 hours ago and one that expires in 23 hours both
+	// land at `days == 0`. Force a negative sentinel when the
+	// cert is actually past its NotAfter so the CLI / dashboard
+	// can distinguish "expiring within 24h" from "already
+	// expired" without re-checking the timestamp themselves
+	// (Gemini flagged on PR #46).
+	if now.After(parsed.NotAfter) && days >= 0 {
+		days = -1
+	}
+	return CertInfo{
+		NotBefore:       parsed.NotBefore,
+		NotAfter:        parsed.NotAfter,
+		Fingerprint:     FingerprintFromDER(block.Bytes),
+		DaysUntilExpiry: days,
+		Subject:         parsed.Subject.String(),
+	}, nil
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func dnsNames(hostname string) []string {
