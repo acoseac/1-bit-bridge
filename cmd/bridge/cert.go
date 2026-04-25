@@ -74,11 +74,19 @@ func certInfoCmd(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "Not before:  %s\n", info.NotBefore.UTC().Format(time.RFC3339))
 	fmt.Fprintf(stdout, "Not after:   %s\n", info.NotAfter.UTC().Format(time.RFC3339))
 	fmt.Fprintf(stdout, "Days until expiry: %d\n", info.DaysUntilExpiry)
-	if info.DaysUntilExpiry <= 30 && info.DaysUntilExpiry > 0 {
-		fmt.Fprintln(stdout, "WARNING: cert is expiring soon. Plan a rotation; every paired device will need to re-pair.")
-	}
-	if info.DaysUntilExpiry <= 0 {
+	// Use NotAfter directly for the expired-vs-still-valid split
+	// rather than relying on DaysUntilExpiry's sign — `days = 0`
+	// covers both "expires in 23h" (still valid, near-expiry
+	// warning applies) and "expired 23h ago" (already expired,
+	// hard warning applies). Integer truncation makes the two
+	// indistinguishable on that field alone (Gemini flagged on
+	// PR #46).
+	now := time.Now()
+	switch {
+	case now.After(info.NotAfter):
 		fmt.Fprintln(stdout, "WARNING: cert has expired. iOS clients will reject the connection.")
+	case info.DaysUntilExpiry <= 30:
+		fmt.Fprintln(stdout, "WARNING: cert is expiring soon. Plan a rotation; every paired device will need to re-pair.")
 	}
 	return 0
 }
