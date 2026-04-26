@@ -7,7 +7,7 @@ import (
 )
 
 func TestBuildTXTRecordsIncludesProtocolAndLibrary(t *testing.T) {
-	got := buildTXTRecords(Config{ProtocolVersion: 1, LibraryName: "My Music"})
+	got := buildTXTRecords(Config{ProtocolVersion: 1, Port: 7788, LibraryName: "My Music"})
 	joined := strings.Join(got, "|")
 	if !strings.Contains(joined, "pv=1") {
 		t.Errorf("missing pv: %v", got)
@@ -18,12 +18,50 @@ func TestBuildTXTRecordsIncludesProtocolAndLibrary(t *testing.T) {
 }
 
 func TestBuildTXTRecordsOmitsEmptyLibrary(t *testing.T) {
-	got := buildTXTRecords(Config{ProtocolVersion: 1})
+	got := buildTXTRecords(Config{ProtocolVersion: 1, Port: 7788})
 	for _, r := range got {
 		if strings.HasPrefix(r, "library=") {
 			t.Errorf("library should not be present when empty: %q", r)
 		}
 	}
+}
+
+// TestBuildTXTRecordsIncludesHostAndPort pins the host/port keys iOS
+// reads to construct `https://<host>:<port>` directly from the TXT
+// record. Without these, iOS would have to NWConnection-resolve the
+// Bonjour service, which on iOS 26.4 doesn't reliably surface the
+// resolved hostport via `currentPath?.remoteEndpoint`.
+func TestBuildTXTRecordsIncludesHostAndPort(t *testing.T) {
+	got := buildTXTRecords(Config{
+		ProtocolVersion: 1,
+		Port:            7788,
+		Hostname:        "test-mac",
+	})
+	joined := strings.Join(got, "|")
+	if !strings.Contains(joined, "host=test-mac.local") {
+		t.Errorf("missing or wrong host TXT: %v", got)
+	}
+	if !strings.Contains(joined, "port=7788") {
+		t.Errorf("missing or wrong port TXT: %v", got)
+	}
+}
+
+// TestBuildTXTRecordsHostFromOSWhenBlank ensures the TXT host follows
+// the same first-label + ".local" derivation Advertise uses for the
+// SRV record, so iOS lands on a name the bridge actually serves. The
+// derived host comes through `os.Hostname` here; the only check we
+// can make portably is that the record has the `.local` suffix.
+func TestBuildTXTRecordsHostFromOSWhenBlank(t *testing.T) {
+	got := buildTXTRecords(Config{ProtocolVersion: 1, Port: 7788})
+	for _, r := range got {
+		if strings.HasPrefix(r, "host=") {
+			if !strings.HasSuffix(r, ".local") {
+				t.Errorf("host TXT should end with .local: %q", r)
+			}
+			return
+		}
+	}
+	t.Error("no host= record in TXT")
 }
 
 func TestSanitizeInstanceStripsDotsAndControlChars(t *testing.T) {
@@ -45,6 +83,42 @@ func TestAdvertiseRejectsZeroPort(t *testing.T) {
 	_, err := Advertise(Config{Port: 0})
 	if err == nil {
 		t.Error("expected error for Port=0")
+	}
+}
+
+func TestAdvertiseRejectsOutOfRangePort(t *testing.T) {
+	// `Port` is `int`, so values above 65535 are representable. The
+	// TXT record publishes the value to clients verbatim, so accepting
+	// invalid ports would have iOS construct unusable URLs.
+	for _, p := range []int{-1, 65536, 70000, 1 << 20} {
+		_, err := Advertise(Config{Port: p})
+		if err == nil {
+			t.Errorf("expected error for Port=%d", p)
+		}
+	}
+}
+
+func TestAdvertisedHostNeverBareLocal(t *testing.T) {
+	// `os.Hostname` returning ("", nil) on a minimally-configured
+	// container would have produced just ".local" before the
+	// fallback-to-localhost guard. Hard to simulate without forking
+	// the test, but we can check that the empty-Hostname path always
+	// produces a non-bare result and that the FQDN trimming still
+	// fires.
+	got := Config{Hostname: ""}.advertisedHost()
+	if got == ".local" {
+		t.Errorf("advertisedHost() returned bare .local, would build invalid URLs")
+	}
+	if !strings.HasSuffix(got, ".local") {
+		t.Errorf("advertisedHost() should always end in .local, got %q", got)
+	}
+	// FQDN reduces to first label.
+	if got := (Config{Hostname: "mac.corp.example.com"}).advertisedHost(); got != "mac.local" {
+		t.Errorf("advertisedHost(mac.corp.example.com) = %q, want mac.local", got)
+	}
+	// Trailing dot stripped.
+	if got := (Config{Hostname: "host."}).advertisedHost(); got != "host.local" {
+		t.Errorf("advertisedHost(host.) = %q, want host.local", got)
 	}
 }
 

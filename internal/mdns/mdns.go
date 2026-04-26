@@ -61,31 +61,21 @@ type Config struct {
 // an error if the underlying UDP sockets can't be opened (typically a
 // permissions issue on Linux without cap_net_bind).
 func Advertise(cfg Config) (*Advertiser, error) {
-	if cfg.Port <= 0 {
-		return nil, errors.New("mdns: Port must be > 0")
+	if cfg.Port <= 0 || cfg.Port > 65535 {
+		// Reject out-of-TCP-range ports up-front. The TXT record now
+		// publishes `port=<int>` to clients, so an invalid value would
+		// land in the Bonjour announcement and have iOS construct
+		// unusable URLs from it.
+		return nil, errors.New("mdns: Port must be in 1-65535")
 	}
 	instance := sanitizeInstance(cfg.InstanceName)
 	if instance == "" {
 		instance = "1-bit Bridge"
 	}
-	host := cfg.Hostname
-	if host == "" {
-		if h, err := os.Hostname(); err == nil {
-			host = h
-		} else {
-			host = "localhost"
-		}
-	}
-	host = strings.TrimSuffix(host, ".")
-	// Take only the first label of the OS hostname before appending
-	// ".local.". On Linux/corp-managed macOS boxes os.Hostname() can
-	// return an FQDN (e.g. mymachine.corp.example.com); without this
-	// step the SRV target would be "mymachine.corp.example.com.local.",
-	// which is not a valid mDNS hostname.
-	if i := strings.IndexByte(host, '.'); i > 0 {
-		host = host[:i]
-	}
-	host += ".local."
+	// SRV target needs the trailing dot — `cfg.advertisedHost()` returns
+	// the bare ".local" form (matching what iOS reads from the TXT
+	// record), so we re-append it here.
+	host := cfg.advertisedHost() + "."
 
 	if cfg.ProtocolVersion <= 0 {
 		cfg.ProtocolVersion = 1
@@ -126,14 +116,56 @@ func (a *Advertiser) Close() error {
 // Each entry is "key=value". iOS parses pv (protocol version) first —
 // if it doesn't match a supported range, the picker greys the service
 // out before any TLS handshake.
+//
+// `host` and `port` are advertised explicitly so iOS can build the
+// `https://<host>:<port>` URL directly from the TXT record without
+// having to NWConnection-resolve the Bonjour service to its hostport
+// form. iOS 26.4's `currentPath?.remoteEndpoint` doesn't reliably
+// surface the resolved IP for Bonjour-bound connections (it stays in
+// `.service(...)` form even at state `.ready` time on some
+// configurations), which left the Add Bridge sheet's URL field
+// blank. Putting `host` and `port` directly in TXT sidesteps the
+// problem — DNS-SD has already resolved the SRV record to host+port
+// by the time the browser hands us a result, so we're just exposing
+// what's already known.
 func buildTXTRecords(cfg Config) []string {
+	hostBare := strings.TrimSuffix(cfg.advertisedHost(), ".")
 	out := []string{
 		fmt.Sprintf("pv=%d", cfg.ProtocolVersion),
+		fmt.Sprintf("host=%s", hostBare),
+		fmt.Sprintf("port=%d", cfg.Port),
 	}
 	if cfg.LibraryName != "" {
 		out = append(out, "library="+cfg.LibraryName)
 	}
 	return out
+}
+
+// advertisedHost returns the hostname that the SRV record will use,
+// re-deriving it from `cfg.Hostname` (or os.Hostname when blank) and
+// applying the same first-label + ".local." normalization Advertise
+// uses internally. Kept as a method on Config so the TXT-record
+// builder doesn't have to duplicate the logic.
+//
+// Always returns a non-empty hostname. Falls back to "localhost" when
+// every other source is blank — `os.Hostname()` returning ("", nil) is
+// rare but documented as possible on minimally-configured Linux
+// containers, and a bare ".local" target would have made clients
+// build URLs like `https://.local:7788` which are invalid.
+func (cfg Config) advertisedHost() string {
+	host := strings.TrimSuffix(cfg.Hostname, ".")
+	if host == "" {
+		if h, err := os.Hostname(); err == nil {
+			host = strings.TrimSuffix(h, ".")
+		}
+	}
+	if host == "" {
+		host = "localhost"
+	}
+	if i := strings.IndexByte(host, '.'); i > 0 {
+		host = host[:i]
+	}
+	return host + ".local"
 }
 
 // sanitizeInstance strips characters Bonjour can't handle in the
