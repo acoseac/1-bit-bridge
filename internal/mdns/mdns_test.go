@@ -86,6 +86,42 @@ func TestAdvertiseRejectsZeroPort(t *testing.T) {
 	}
 }
 
+func TestAdvertiseRejectsOutOfRangePort(t *testing.T) {
+	// `Port` is `int`, so values above 65535 are representable. The
+	// TXT record publishes the value to clients verbatim, so accepting
+	// invalid ports would have iOS construct unusable URLs.
+	for _, p := range []int{-1, 65536, 70000, 1 << 20} {
+		_, err := Advertise(Config{Port: p})
+		if err == nil {
+			t.Errorf("expected error for Port=%d", p)
+		}
+	}
+}
+
+func TestAdvertisedHostNeverBareLocal(t *testing.T) {
+	// `os.Hostname` returning ("", nil) on a minimally-configured
+	// container would have produced just ".local" before the
+	// fallback-to-localhost guard. Hard to simulate without forking
+	// the test, but we can check that the empty-Hostname path always
+	// produces a non-bare result and that the FQDN trimming still
+	// fires.
+	got := Config{Hostname: ""}.advertisedHost()
+	if got == ".local" {
+		t.Errorf("advertisedHost() returned bare .local, would build invalid URLs")
+	}
+	if !strings.HasSuffix(got, ".local") {
+		t.Errorf("advertisedHost() should always end in .local, got %q", got)
+	}
+	// FQDN reduces to first label.
+	if got := (Config{Hostname: "mac.corp.example.com"}).advertisedHost(); got != "mac.local" {
+		t.Errorf("advertisedHost(mac.corp.example.com) = %q, want mac.local", got)
+	}
+	// Trailing dot stripped.
+	if got := (Config{Hostname: "host."}).advertisedHost(); got != "host.local" {
+		t.Errorf("advertisedHost(host.) = %q, want host.local", got)
+	}
+}
+
 // TestAdvertiseStartsAndStops spins up a real mDNS server on a high
 // port and immediately shuts it down. On CI runners without multicast
 // access this might error — in that case we skip rather than flake.

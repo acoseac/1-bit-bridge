@@ -61,8 +61,12 @@ type Config struct {
 // an error if the underlying UDP sockets can't be opened (typically a
 // permissions issue on Linux without cap_net_bind).
 func Advertise(cfg Config) (*Advertiser, error) {
-	if cfg.Port <= 0 {
-		return nil, errors.New("mdns: Port must be > 0")
+	if cfg.Port <= 0 || cfg.Port > 65535 {
+		// Reject out-of-TCP-range ports up-front. The TXT record now
+		// publishes `port=<int>` to clients, so an invalid value would
+		// land in the Bonjour announcement and have iOS construct
+		// unusable URLs from it.
+		return nil, errors.New("mdns: Port must be in 1-65535")
 	}
 	instance := sanitizeInstance(cfg.InstanceName)
 	if instance == "" {
@@ -142,16 +146,22 @@ func buildTXTRecords(cfg Config) []string {
 // applying the same first-label + ".local." normalization Advertise
 // uses internally. Kept as a method on Config so the TXT-record
 // builder doesn't have to duplicate the logic.
+//
+// Always returns a non-empty hostname. Falls back to "localhost" when
+// every other source is blank — `os.Hostname()` returning ("", nil) is
+// rare but documented as possible on minimally-configured Linux
+// containers, and a bare ".local" target would have made clients
+// build URLs like `https://.local:7788` which are invalid.
 func (cfg Config) advertisedHost() string {
-	host := cfg.Hostname
+	host := strings.TrimSuffix(cfg.Hostname, ".")
 	if host == "" {
 		if h, err := os.Hostname(); err == nil {
-			host = h
-		} else {
-			host = "localhost"
+			host = strings.TrimSuffix(h, ".")
 		}
 	}
-	host = strings.TrimSuffix(host, ".")
+	if host == "" {
+		host = "localhost"
+	}
 	if i := strings.IndexByte(host, '.'); i > 0 {
 		host = host[:i]
 	}
