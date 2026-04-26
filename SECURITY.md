@@ -6,7 +6,7 @@ If you believe you've found a security vulnerability in 1-bit-bridge, **please d
 
 Instead, report it privately via GitHub's [Security Advisories](https://github.com/acoseac/1-bit-bridge/security/advisories/new) (the *Report a vulnerability* button in the repo's **Security** tab). That flow is encrypted and only visible to the maintainers.
 
-If GitHub's flow doesn't work for you, email `security@coseac.be` with the word `[1-bit-bridge]` in the subject.
+If GitHub's flow doesn't work for you, email `support@ars.md` with the word `[1-bit-bridge-security]` in the subject.
 
 ## What to include
 
