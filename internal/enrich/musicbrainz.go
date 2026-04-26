@@ -209,12 +209,25 @@ func parseRetryAfter(header string, now time.Time) time.Duration {
 	// silently bypass the cap. Use ParseInt(64) so platforms where
 	// `int` is 32-bit don't lose values in the [2^31, 2^63) range
 	// either; clamp before the conversion either way.
-	if secs, err := strconv.ParseInt(header, 10, 64); err == nil && secs >= 0 {
+	//
+	// Numeric values that exceed int64 (>2^63 − 1) make ParseInt return
+	// `*NumError{Err: ErrRange}`. Treat those as "absurdly large
+	// advisory" → clamp to maxRetryAfter rather than falling through to
+	// 0, which would defeat the cap entirely for hostile or
+	// misconfigured upstreams. Negative-overflow ("-9999...") still
+	// falls through to 0 like other malformed inputs.
+	secs, err := strconv.ParseInt(header, 10, 64)
+	if err == nil && secs >= 0 {
 		maxSecs := int64(maxRetryAfter / time.Second)
 		if secs > maxSecs {
 			secs = maxSecs
 		}
 		return time.Duration(secs) * time.Second
+	}
+	if numErr, ok := err.(*strconv.NumError); ok &&
+		errors.Is(numErr.Err, strconv.ErrRange) &&
+		!strings.HasPrefix(header, "-") {
+		return maxRetryAfter
 	}
 	if t, err := http.ParseTime(header); err == nil {
 		d := t.Sub(now)

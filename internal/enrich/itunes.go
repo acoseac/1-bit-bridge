@@ -1,13 +1,26 @@
 // iTunes Search API client. Fetches album artwork by (artist, album)
-// in a single round-trip. Used by the enricher as the primary source
-// before falling back to MusicBrainz → Cover Art Archive.
+// in a single round-trip. Used by the enricher as a **last-resort
+// fallback** after both MusicBrainz → CAA paths return errNotFound:
+// `enrichOne → ensureArtworkCached → CAA-release → CAA-release-group
+// → iTunes`. The bytes still cache under the MB-derived release MBID
+// (`<MBID>-<size>.jpg`) so iOS's `/v1/artwork/{mbid}` endpoint serves
+// them transparently — no `mbidPattern` regex relaxation, no wire-
+// shape change.
 //
-// Why iTunes first: a `/search?term=...&entity=album` call typically
-// returns in 100-300 ms with the artwork URL embedded; MB → CAA needs
-// two paced round-trips (1.1 s + 0.5 s minimums) and frequent CAA
-// slowness from Internet Archive infrastructure adds another second
-// or more. iTunes covers most mainstream releases; the MB → CAA
-// fallback handles long-tail cases (small labels, rarities, unreleased).
+// Why fallback rather than primary: skipping MB entirely when iTunes
+// hits would require either a synthetic-MBID cache key or a
+// `mbidPattern` relaxation. Both were considered out-of-scope for
+// the introductory PR (#52). The current placement still raises the
+// artwork hit rate for major-label releases that CAA misses, which
+// is the practical motivation.
+//
+// Latency on a hit: a `/search?term=...&entity=album` call typically
+// returns in 100-300 ms with the artwork URL embedded; the follow-up
+// CDN fetch is another ~500 ms. The total cost is paid only when
+// both CAA paths have already missed, so the worst case is "MB +
+// CAA-release + CAA-release-group + iTunes" — measured rather than
+// theoretical because the real CAA-miss albums are exactly the
+// iTunes-hit candidates.
 //
 // API docs: https://developer.apple.com/library/archive/documentation/AudioVideo/Conceptual/iTuneSearchAPI/Searching.html
 //
@@ -72,10 +85,19 @@ type ITunesAlbum struct {
 }
 
 // SearchAlbum queries iTunes for the best-matching album by (artist, album)
-// and returns the top result, or (nil, nil) if no plausible match was
-// found. Returns errNotFound (compatible with `IsNotFound`) when the
-// API returns zero results — same shape as MB / CAA, so the enricher
-// can treat all sources interchangeably in the fallback chain.
+// and returns the top result.
+//
+// Return semantics:
+//   - `(nil, nil)` when the input artist / album is blank after
+//     trim — the caller has nothing to query for, no error to surface.
+//   - `(nil, errNotFound)` when iTunes returned zero results OR every
+//     result failed the substring-match heuristic. Compatible with
+//     the project's `IsNotFound` check, so the enricher can treat
+//     all sources (MB / CAA / iTunes) interchangeably in the fallback
+//     chain.
+//   - `(*ITunesAlbum, nil)` on a hit — `CollectionID`,
+//     `CollectionName`, and `ArtworkURL100` are populated.
+//   - `(nil, err)` on transport / decode / HTTP-status errors.
 //
 // Match heuristic: iTunes's relevance ranking is generally good; we
 // take the top result whose `collectionName` substring-matches the
@@ -149,6 +171,19 @@ func (c *ITunesClient) FetchArtwork(ctx context.Context, a *ITunesAlbum) ([]byte
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, errNotFound
+	}
+	// Honor Retry-After on the artwork CDN the same way the search
+	// path does. Apple rarely 429s on the image CDN per-IP but
+	// throttles do happen during incidents; matching the rest of our
+	// HTTP paths keeps the bridge well-behaved.
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+		if delay := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()); delay > 0 {
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("itunes: artwork HTTP %d", resp.StatusCode)

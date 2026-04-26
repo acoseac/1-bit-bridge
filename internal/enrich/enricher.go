@@ -520,7 +520,13 @@ func (e *Enricher) ensureArtworkCached(ctx context.Context, mbid, rgMBID, artist
 // Returns errNotFound (compatible with `IsNotFound`) when iTunes had
 // nothing for (artist, album). All other errors bubble up unchanged.
 func (e *Enricher) fetchITunesArtwork(ctx context.Context, artist, album string) ([]byte, error) {
-	time.Sleep(e.ITunesMinInterval)
+	// Use the ctx-aware `sleepCtx` helper rather than `time.Sleep` so
+	// shutdown / cancellation isn't blocked by up to ~2× ITunesMinInterval
+	// (default 6s) per in-flight iTunes call. Matches the pacing pattern
+	// used in `Run` for the empty-batch poll.
+	if !sleepCtx(ctx, e.ITunesMinInterval) {
+		return nil, ctx.Err()
+	}
 	hit, err := e.itunes.SearchAlbum(ctx, artist, album)
 	if err != nil {
 		return nil, err
@@ -528,7 +534,9 @@ func (e *Enricher) fetchITunesArtwork(ctx context.Context, artist, album string)
 	if hit == nil {
 		return nil, errNotFound
 	}
-	time.Sleep(e.ITunesMinInterval)
+	if !sleepCtx(ctx, e.ITunesMinInterval) {
+		return nil, ctx.Err()
+	}
 	return e.itunes.FetchArtwork(ctx, hit)
 }
 
