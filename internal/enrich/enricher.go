@@ -25,6 +25,7 @@ type Enricher struct {
 	store  *manifest.Store
 	mb     *MusicBrainzClient
 	caa    *CoverArtClient
+	itunes *ITunesClient // optional; nil disables the iTunes fallback
 	deezer *DeezerClient
 
 	// CacheDir is the root where the cached JPEGs live. Album covers go
@@ -38,6 +39,11 @@ type Enricher struct {
 	// CAAMinInterval is the minimum gap between Cover Art Archive
 	// requests. CAA is more forgiving but we stay polite.
 	CAAMinInterval time.Duration
+	// ITunesMinInterval is the minimum gap between iTunes Search API
+	// requests. Apple's unwritten convention is ~20 req/min; 3s sits
+	// well under that. Only consulted when CAA misses and an iTunes
+	// client was passed to NewEnricher.
+	ITunesMinInterval time.Duration
 	// DeezerMinInterval is the minimum gap between Deezer requests.
 	// Deezer's unauth limit is ~50 req / 5s; 120ms is well under that.
 	DeezerMinInterval time.Duration
@@ -79,6 +85,11 @@ type Enricher struct {
 	// an artwork fetch that the release-level lookup missed. Exposed as a
 	// plain counter today; may surface on the admin stats page in v1.2.
 	caaFallbackHits atomic.Int64
+
+	// itunesFallbackHits counts how often the iTunes Search fallback
+	// salvaged an artwork fetch that both CAA paths (release + release-
+	// group) missed. Same exposure plan as caaFallbackHits.
+	itunesFallbackHits atomic.Int64
 }
 
 // albumResolution bundles the release + release-group MBIDs that
@@ -102,10 +113,23 @@ func NewEnricher(store *manifest.Store, mb *MusicBrainzClient, caa *CoverArtClie
 		CacheDir:          cacheDir,
 		MBMinInterval:     1100 * time.Millisecond,
 		CAAMinInterval:    500 * time.Millisecond,
+		ITunesMinInterval: 3 * time.Second,
 		DeezerMinInterval: 120 * time.Millisecond,
 		BatchLimit:        100,
 		PollInterval:      15 * time.Second,
 	}
+	return e
+}
+
+// WithITunes attaches an iTunes Search client to the enricher. Used as
+// a fallback artwork source when CAA returns 404 — most mainstream
+// releases that CAA misses are present in iTunes, so this raises the
+// artwork hit rate without changing the wire shape (the fetched bytes
+// still cache under the MB-derived release MBID, and `/v1/artwork/{mbid}`
+// continues to serve them transparently). Returns the receiver for
+// fluent setup: `NewEnricher(...).WithITunes(itc)`.
+func (e *Enricher) WithITunes(itc *ITunesClient) *Enricher {
+	e.itunes = itc
 	return e
 }
 
@@ -213,8 +237,8 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 	// Fetch and cache 500px front cover. If the file already exists, we
 	// skip the network round-trip entirely. On a release-level CAA miss,
 	// `ensureArtworkCached` will lazily resolve + try the release-group
-	// fallback.
-	if cached, err := e.ensureArtworkCached(ctx, albumMBID, rgMBID, 500); err != nil {
+	// fallback, then iTunes (if configured) as a last resort.
+	if cached, err := e.ensureArtworkCached(ctx, albumMBID, rgMBID, t.Artist, t.Album, 500); err != nil {
 		log.Printf("enricher: artwork %s: %v", albumMBID, err)
 		// Artwork miss isn't fatal — mark enriched so we don't retry
 		// every 15 seconds. A future background pass can re-try.
@@ -418,7 +442,7 @@ func (e *Enricher) markSkipped(t *manifest.Track, reason string) {
 // on-disk path keyed by the RELEASE MBID, so iOS's existing
 // `/v1/artwork/{releaseMBID}` request flow serves it transparently —
 // no protocol change required.
-func (e *Enricher) ensureArtworkCached(ctx context.Context, mbid, rgMBID string, size int) (bool, error) {
+func (e *Enricher) ensureArtworkCached(ctx context.Context, mbid, rgMBID, artist, album string, size int) (bool, error) {
 	path := ArtworkCachePath(e.CacheDir, mbid, size)
 	if _, err := os.Stat(path); err == nil {
 		return true, nil
@@ -442,26 +466,78 @@ func (e *Enricher) ensureArtworkCached(ctx context.Context, mbid, rgMBID string,
 		// release-level not-found so callers stamp the "no artwork"
 		// state consistently with pre-fallback behaviour.
 		log.Printf("enricher: release-group lookup for %s: %v", mbid, rgErr)
-		return false, err
-	}
-	if rgMBID == "" {
-		return false, err // no release-group to try
-	}
-	time.Sleep(e.CAAMinInterval) // pace the second CAA call
-	rgData, rgFetchErr := e.caa.FetchReleaseGroupFront(ctx, rgMBID, size)
-	if rgFetchErr != nil {
-		// Release-group also has no cover (or fetch failed). Preserve
-		// the original errNotFound shape so call-site stays unchanged.
-		if IsNotFound(rgFetchErr) {
-			return false, err
+		// Don't bail yet — iTunes may still have the album by name,
+		// and a transient MB lookup error shouldn't block the iTunes
+		// fallback below.
+	} else if rgMBID != "" {
+		time.Sleep(e.CAAMinInterval) // pace the second CAA call
+		rgData, rgFetchErr := e.caa.FetchReleaseGroupFront(ctx, rgMBID, size)
+		if rgFetchErr == nil {
+			if werr := writeArtworkAtomic(path, rgData); werr != nil {
+				return false, werr
+			}
+			e.caaFallbackHits.Add(1)
+			return true, nil
 		}
-		return false, rgFetchErr
+		if !IsNotFound(rgFetchErr) {
+			// Real error from CAA — bubble up rather than masking
+			// behind iTunes. Original release-level errNotFound
+			// shape is gone here, but a non-404 from CAA is itself
+			// signal worth surfacing.
+			return false, rgFetchErr
+		}
+		// rgFetchErr is errNotFound — fall through to iTunes.
 	}
-	if werr := writeArtworkAtomic(path, rgData); werr != nil {
-		return false, werr
+	// iTunes last-resort fallback. Only meaningful when we have a
+	// human-readable (artist, album) pair to query — the bridge falls
+	// back to MB-derived names if the local tags were empty, but on
+	// rare untagged-everything releases there's nothing to ask iTunes
+	// for. Caches under the same MBID-keyed path so iOS's existing
+	// /v1/artwork/{mbid} URL serves it transparently.
+	if e.itunes != nil && artist != "" && album != "" {
+		if itData, itErr := e.fetchITunesArtwork(ctx, artist, album); itErr == nil && len(itData) > 0 {
+			if werr := writeArtworkAtomic(path, itData); werr != nil {
+				return false, werr
+			}
+			e.itunesFallbackHits.Add(1)
+			return true, nil
+		} else if itErr != nil && !IsNotFound(itErr) {
+			// Log iTunes errors but don't fail the whole call —
+			// the original release-level errNotFound is the more
+			// useful signal for the caller.
+			log.Printf("enricher: iTunes fallback for %q / %q: %v", artist, album, itErr)
+		}
 	}
-	e.caaFallbackHits.Add(1)
-	return true, nil
+	return false, err
+}
+
+// fetchITunesArtwork is the rate-paced iTunes search + artwork
+// download helper. Sleeps `ITunesMinInterval` between the two
+// network round-trips — search returns metadata in ~300 ms; the
+// 600x600 image fetch is on Apple's CDN with no public rate limit
+// but the second sleep keeps us courteous.
+//
+// Returns errNotFound (compatible with `IsNotFound`) when iTunes had
+// nothing for (artist, album). All other errors bubble up unchanged.
+func (e *Enricher) fetchITunesArtwork(ctx context.Context, artist, album string) ([]byte, error) {
+	// Use the ctx-aware `sleepCtx` helper rather than `time.Sleep` so
+	// shutdown / cancellation isn't blocked by up to ~2× ITunesMinInterval
+	// (default 6s) per in-flight iTunes call. Matches the pacing pattern
+	// used in `Run` for the empty-batch poll.
+	if !sleepCtx(ctx, e.ITunesMinInterval) {
+		return nil, ctx.Err()
+	}
+	hit, err := e.itunes.SearchAlbum(ctx, artist, album)
+	if err != nil {
+		return nil, err
+	}
+	if hit == nil {
+		return nil, errNotFound
+	}
+	if !sleepCtx(ctx, e.ITunesMinInterval) {
+		return nil, ctx.Err()
+	}
+	return e.itunes.FetchArtwork(ctx, hit)
 }
 
 // resolveReleaseGroupMBID returns the release-group MBID for a release,
