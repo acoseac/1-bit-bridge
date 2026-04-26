@@ -1,0 +1,37 @@
+name: Greptile Code Review (Large PRs only)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  check-size-and-review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get number of changed files
+        id: pr-size
+        run: |
+          FILES=$(curl -s \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files?per_page=100" \
+            | jq '. | length')
+          echo "changed_files=$FILES" >> $GITHUB_OUTPUT
+          echo "PR has $FILES changed files"
+
+      - name: Skip small PRs
+        if: ${{ fromJSON(steps.pr-size.outputs.changed_files) < 10 }}
+        run: |
+          echo "PR has fewer than 10 changed files — skipping Greptile review to save credits."
+
+      - name: Trigger Greptile Review
+        if: ${{ fromJSON(steps.pr-size.outputs.changed_files) >= 10 }}
+        run: |
+          echo "PR has ${{ steps.pr-size.outputs.changed_files }} changed files — triggering Greptile review."
+          curl -s -X POST "https://api.greptile.com/v2/review" \
+            -H "Authorization: Bearer ${{ secrets.GREPTILE_API_KEY }}" \
+            -H "X-Github-Token: ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "prUrl": "${{ github.event.pull_request.html_url }}"
+            }'
