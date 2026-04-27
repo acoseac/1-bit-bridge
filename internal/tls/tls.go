@@ -99,10 +99,15 @@ func LoadOrGenerate(certPath, keyPath, hostname string) (*cryptotls.Certificate,
 // rotation; the admin console's per-token "Rotate" button or a
 // fresh `bridge://pair?...` deep link is the supported path.
 func Generate(certPath, keyPath, hostname string) error {
-	if err := os.MkdirAll(filepath.Dir(certPath), 0o755); err != nil {
+	// 0o700: the dir holds the matching private key (written 0o600
+	// at line ~146). The cert.pem itself is conventionally world-
+	// readable (0o644) — public material — but the directory is the
+	// outer barrier, so keep it tight on POSIX. Windows ignores the
+	// mode and relies on per-user-profile ACLs at %LOCALAPPDATA%.
+	if err := os.MkdirAll(filepath.Dir(certPath), 0o700); err != nil {
 		return fmt.Errorf("mkdir (cert): %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(keyPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(keyPath), 0o700); err != nil {
 		return fmt.Errorf("mkdir (key): %w", err)
 	}
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)

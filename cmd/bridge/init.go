@@ -173,11 +173,18 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 	}
 
-	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+	// 0o700 because both dirs hold private material: bridge.yaml
+	// (TLS fingerprint, library paths), data/cert.key (TLS private
+	// key), data/tokens.json (bearer-token hashes), data/bridge.db.
+	// On POSIX this prevents cross-user reads on shared hosts; on
+	// Windows the Go file mode is advisory only — protection there
+	// relies on per-user-profile NTFS ACLs at %LOCALAPPDATA%, which
+	// already block other standard users.
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
 		fmt.Fprintf(stderr, "mkdir config dir: %v\n", err)
 		return 1
 	}
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		fmt.Fprintf(stderr, "mkdir data dir: %v\n", err)
 		return 1
 	}
