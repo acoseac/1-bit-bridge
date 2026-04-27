@@ -400,12 +400,59 @@ function initLibrary() {
 
 // --- devices ---
 
+// renderEndpoints fetches /api/endpoints and paints the
+// "Reachable endpoints" panel on the devices page. The bridge
+// recomputes the list per-call from net.Interfaces() so a Tailscale
+// tunnel coming up mid-session reflects on the next refresh; we
+// poll every 30s to catch interface changes without forcing the
+// operator to reload the page.
+async function renderEndpoints() {
+  const list = document.getElementById("endpoints-list");
+  if (!list) return;
+  let entries;
+  try {
+    entries = await API.get("/api/endpoints");
+  } catch (e) {
+    list.innerHTML = `<li class="endpoints-empty"><em>Couldn't load endpoints: ${escapeHTML(e.message)}</em></li>`;
+    return;
+  }
+  if (!Array.isArray(entries) || entries.length === 0) {
+    // Real-world: only happens when the bridge is binding to a
+    // loopback-only address. The /v1/health endpoints array would
+    // also be empty in that case — paired devices treat the listen
+    // address directly as the only known URL.
+    list.innerHTML = `<li class="endpoints-empty"><em>No external addresses detected. Devices will use the address you provided when pairing.</em></li>`;
+    return;
+  }
+  list.innerHTML = entries
+    .map((e) => {
+      const cls = String(e.class || "");
+      const url = String(e.url || "");
+      // Group LAN/Tailscale/mDNS/Public via a class-tag. CSS in
+      // app.css colors each group distinctly so the operator can
+      // skim by interface type.
+      const tagClass = "endpoint-tag " + cls.toLowerCase().replace(/\s+/g, "-");
+      return `
+        <li class="endpoint-row">
+          <span class="${tagClass}">${escapeHTML(cls)}</span>
+          <code class="endpoint-url">${escapeHTML(url)}</code>
+        </li>`;
+    })
+    .join("");
+}
+
 function initDevices() {
   const modal = document.getElementById("pair-modal");
   const openBtn = document.getElementById("pair-open");
   const form = document.getElementById("pair-form");
   const stepForm = document.getElementById("pair-step-form");
   const stepResult = document.getElementById("pair-step-result");
+
+  // Endpoints panel — first paint + 30s poll. The interval handle
+  // is intentionally not stored; the page lifecycle is tied to a
+  // full reload on navigation, so the interval dies with the page.
+  renderEndpoints();
+  setInterval(renderEndpoints, 30_000);
 
   if (openBtn) {
     openBtn.addEventListener("click", () => {

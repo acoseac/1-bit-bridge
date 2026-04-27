@@ -142,6 +142,55 @@ func TestStatsEndpoint(t *testing.T) {
 	}
 }
 
+// TestEndpointsHandler verifies /api/endpoints returns a JSON array
+// of { url, class } entries. We can't assert specific URLs (the
+// test runner's interface set varies) but we can assert: the
+// response is well-formed JSON, every entry has a non-empty URL
+// matching `https://...`, and every entry has one of the documented
+// class strings.
+//
+// PR #69 — admin-side companion to iOS PR #150's per-endpoint
+// visibility work.
+func TestEndpointsHandler(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	var entries []map[string]string
+	code := doJSON(t, srv.Handler(), "GET", "/api/endpoints", nil, &entries)
+	if code != 200 {
+		t.Fatalf("endpoints: %d", code)
+	}
+	// Empty is acceptable on a runner with no advertisable
+	// interfaces (rare CI sandboxes); we don't gate on length.
+	validClasses := map[string]bool{
+		"LAN": true, "mDNS": true, "Tailscale": true, "Public": true,
+	}
+	for i, e := range entries {
+		if !strings.HasPrefix(e["url"], "https://") {
+			t.Errorf("entry[%d].url = %q, want https:// prefix", i, e["url"])
+		}
+		if !validClasses[e["class"]] {
+			t.Errorf("entry[%d].class = %q, want one of LAN/mDNS/Tailscale/Public", i, e["class"])
+		}
+	}
+}
+
+// Regression for Qodo PR #69 review: when the operator binds with
+// `:0` (OS-pick-a-port mode used in tests / dev), the admin
+// endpoint must NOT 500 — the devices-page polls every 30s and a
+// 500 storm would mask the real "no external addresses" condition.
+// Empty array is the honest answer.
+func TestEndpointsHandlerHandlesPortZero(t *testing.T) {
+	srv, cfg, _ := newTestServer(t)
+	cfg.ListenAddress = ":0"
+	var entries []map[string]string
+	code := doJSON(t, srv.Handler(), "GET", "/api/endpoints", nil, &entries)
+	if code != 200 {
+		t.Fatalf("port-zero endpoints: got %d, want 200", code)
+	}
+	if len(entries) != 0 {
+		t.Errorf("port-zero endpoints: got %v, want empty", entries)
+	}
+}
+
 func TestTokensMintListRevokeFlow(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	h := srv.Handler()

@@ -58,6 +58,30 @@ const (
 	ClassPublic
 )
 
+// String returns a stable user-facing label for the class. Used by
+// the admin console's "Reachable endpoints" panel to tag each
+// advertised URL ("LAN", "Tailscale", "mDNS", "Public"). Kept short
+// because the admin UI renders these as inline tags next to the URL.
+//
+// Stable strings are part of the API for the `/admin/api/endpoints`
+// JSON response — changing them is a wire-protocol-adjacent change
+// (admin-only, not /v1/*). Bump the JS rendering at the same time
+// if these ever change.
+func (c Class) String() string {
+	switch c {
+	case ClassLANv4, ClassLANv6:
+		return "LAN"
+	case ClassMDNSHost:
+		return "mDNS"
+	case ClassTailscaleV4, ClassTailscaleV6:
+		return "Tailscale"
+	case ClassPublic:
+		return "Public"
+	default:
+		return "Unknown"
+	}
+}
+
 // Params bundles the two inputs we need: the port the bridge is
 // listening on (from cfg.ListenAddress) and a hostname override
 // (optional, falls back to os.Hostname). Tests pass these explicitly

@@ -508,6 +508,56 @@ dialog h2 { font-size: 18px; color: var(--accent); }
   font-size: 12px;
 }
 
+/* "Reachable endpoints" panel on the devices page (PR #69 — paired
+ * with iOS PR #150's per-endpoint visibility work). Each row is a
+ * coloured class tag + the URL in monospace; the operator can skim
+ * by tag color to confirm Tailscale / LAN / mDNS are advertised as
+ * expected. */
+.endpoints-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.endpoints-empty { color: var(--fg-muted); font-size: 13px; }
+.endpoint-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.endpoint-tag {
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  /* Default tone for unknown classes — overridden per class below.
+   * Using `currentColor` for the border keeps it tinted with the
+   * tag's text color so a future class string just needs a single
+   * `color:` rule. */
+  color: var(--fg-muted);
+  background: transparent;
+}
+.endpoint-tag.lan { color: #5e9bff; }
+.endpoint-tag.tailscale { color: #d96aff; }
+.endpoint-tag.mdns { color: #4ed1c4; }
+.endpoint-tag.public { color: #ff9b50; }
+.endpoint-url {
+  flex: 1;
+  font-family: var(--mono, monospace);
+  font-size: 12px;
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+
 /* Reduced motion: the scanline grid is static so there's nothing to
  * disable, but a reader that opts out should see the grid dimmed
  * further so it fully recedes. */
