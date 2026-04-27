@@ -306,13 +306,25 @@ func BuildManifest(store *Store, roots []string, since time.Time) (*Manifest, er
 	for i, r := range roots {
 		basenames[i] = filepath.Base(r)
 	}
-	return &Manifest{
+	m := &Manifest{
 		Version:      1,
 		GeneratedAt:  time.Now().UTC(),
 		LibraryRoots: basenames,
 		Folders:      folders,
 		Tracks:       tracks,
-	}, nil
+	}
+	// Library-wide enrichment counters land on every non-paginated
+	// response. `EnrichmentProgress` query failure is non-fatal —
+	// the manifest stays useful even if the counter rollup hits a
+	// transient error; older clients ignore the field anyway.
+	if total, enriched, lastEnrichedAt, perr := store.EnrichmentProgress(); perr == nil {
+		m.EnrichmentProgress = &EnrichmentProgress{
+			TracksTotal:    total,
+			TracksEnriched: enriched,
+			LastEnrichedAt: lastEnrichedAt,
+		}
+	}
+	return m, nil
 }
 
 // BuildManifestPage returns one page of a paginated full-manifest
@@ -353,10 +365,15 @@ func BuildManifestPage(store *Store, roots []string, cursor string, limit int) (
 		GeneratedAt:  time.Now().UTC(),
 		LibraryRoots: basenames,
 	}
-	// Only the first page pays the folders + total lookups. A
-	// `COUNT(*)` on a 50k-track sqlite table is cheap but not free;
-	// ListFolders walks the folders table fully. Skipping both on
-	// subsequent pages is a meaningful latency win for large libs.
+	// Only the first page pays the folders + total + enrichment-progress
+	// lookups. A `COUNT(*)` on a 50k-track sqlite table is cheap but not
+	// free; ListFolders walks the folders table fully; EnrichmentProgress
+	// runs an aggregate over enriched_at. iOS snapshots all three from
+	// the first page and ignores them on subsequent pages, so paying the
+	// queries once per pagination run instead of once per page is the
+	// meaningful win for large libs. EnrichmentProgress failure is
+	// non-fatal for the same reason as in BuildManifest — older clients
+	// ignore the field, newer clients fall back to "no progress hint".
 	if cursor == "" {
 		folders, ferr := store.ListFolders()
 		if ferr != nil {
@@ -368,6 +385,13 @@ func BuildManifestPage(store *Store, roots []string, cursor string, limit int) (
 		}
 		m.Folders = folders
 		m.Total = &total
+		if pTotal, pEnriched, pLast, perr := store.EnrichmentProgress(); perr == nil {
+			m.EnrichmentProgress = &EnrichmentProgress{
+				TracksTotal:    pTotal,
+				TracksEnriched: pEnriched,
+				LastEnrichedAt: pLast,
+			}
+		}
 	}
 	if len(tracks) > limit {
 		// Trim the over-fetched row — it becomes the cursor for the

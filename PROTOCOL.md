@@ -166,17 +166,45 @@ Pagination semantics:
       "replayGainTrackDB":  -7.2,
       "replayGainAlbumDB":  -7.0,
       "musicBrainzTrackID": "...",
-      "musicBrainzAlbumID": "..."
+      "musicBrainzAlbumID": "...",
+      "artworkMBID": "...",
+      "artistMBID": "...",
+      "enriched": true
     }
   ],
   "nextCursor": "Music/Artist/Album/last-track.flac",
-  "total": 4823
+  "total": 4823,
+  "enrichmentProgress": {
+    "tracksTotal":    4823,
+    "tracksEnriched": 4810,
+    "lastEnrichedAt": "2026-04-23T11:40:55Z"
+  }
 }
 ```
 
 `nextCursor` and `total` are omitted on non-paginated responses (back-compat).
 
 Field-for-field, this is a serialization of the iOS `Track` / folder rows in [`LibraryModels.swift`](https://github.com/acoseac/1-bit/blob/main/com.acoseac.dsdplayer/LibraryModels.swift); additive server fields not understood by the iOS decoder MUST be ignored rather than rejected.
+
+#### Per-track `enriched` (additive, since v1.1)
+
+`enriched` is set on every track to `true` once the bridge's enrichment loop has processed the row (regardless of whether MusicBrainz / Cover Art Archive / Deezer returned matches — empty lookups still flip the bit, see `markSkipped` in `internal/enrich/enricher.go`). `false` means the row is still queued for the enricher.
+
+Pre-v1.1 servers omit the field. Clients MUST treat absence as "fully enriched" — the conservative back-compat assumption (matches the pre-flag behaviour where the iOS scanner unconditionally treated bridge tracks as parsed). Newer clients use `enriched: false` to suppress the permanent Deezer-miss stamp on artists whose MBID hasn't landed yet, so the eventual sync's bridge-cached image still wins over a premature negative cache.
+
+#### Manifest-level `enrichmentProgress` (additive, since v1.1)
+
+`enrichmentProgress` is a snapshot of library-wide enrichment status at manifest-build time:
+
+- `tracksTotal` — total track count in the store. Same number as the top-level `total` in paginated mode; included redundantly here for convenience on non-paginated full-manifest responses (where `total` is absent).
+- `tracksEnriched` — number of tracks past the enrich pass (`enriched_at != 0`).
+- `lastEnrichedAt` — UTC wall-clock of the most recent successful `MarkEnriched` call across the whole library. Absent (omitempty) when no track has ever been enriched.
+
+iOS uses this to render an "Enrichment in progress (X / Y)…" footer and gates the suppression-of-negative-cache behaviour on a 24h freshness check on `lastEnrichedAt` — a bridge that went idle a week ago shouldn't make the iOS UI claim enrichment is "still happening".
+
+**Pagination behaviour.** `enrichmentProgress` is populated only on the **first page** of a paginated full-manifest response (request has no `cursor`) and on every non-paginated response. Same first-page-only convention as `folders` / `total` — the values are stable across a pagination run, so iOS snapshots them off the first page and ignores any later pages.
+
+Both fields are additive — `ProtocolVersion` stays at `1`. Pre-v1.1 servers omit them; pre-v1.1 clients ignore them.
 
 #### DSD specifics
 

@@ -54,6 +54,20 @@ type Track struct {
 	// ArtistMBID is set by the enricher when a matching MusicBrainz artist
 	// was found. Used for artist-image endpoints (PR #9).
 	ArtistMBID string `json:"artistMBID,omitempty"`
+
+	// Enriched reports whether the bridge's enrichment loop has finished
+	// processing this track (regardless of outcome — empty MBID lookups
+	// still flip the bit, see `markSkipped` in internal/enrich/enricher.go).
+	// Pointer type so older clients can distinguish "field absent" (bridge
+	// pre-dates the field, treat as fully enriched for back-compat) from
+	// `false` (bridge supports the field, this track is genuinely pending).
+	// Set during Track deserialization in `Store.ListTracks` /
+	// `Store.ListTracksPage` from the `enriched_at != 0` column — the
+	// JSON-encoded `tags_json` blob doesn't carry it, so we splice it in
+	// from the row's column at read time. Mirrors the pointer convention
+	// `IsDSD`, `TrackNumber`, `Year` use for the same "absent vs explicit"
+	// disambiguation.
+	Enriched *bool `json:"enriched,omitempty"`
 }
 
 // Folder is a lightweight folder record used by the scanner's skip logic
@@ -103,4 +117,38 @@ type Manifest struct {
 	// "non-paginated response" (Total absent). Only set on the first
 	// page of a pagination run.
 	Total *int `json:"total,omitempty"`
+	// EnrichmentProgress reports library-wide enrichment status as a
+	// snapshot at manifest build time. Lets iOS distinguish "missing
+	// MBID because the bridge hasn't enriched this track yet" (don't
+	// treat as a permanent Deezer-miss; wait for the next sync) from
+	// "MBID is genuinely absent" (track was enriched, MB returned no
+	// match). Pointer type so older clients (decoders without the
+	// field) parse manifests from this server without churning, and
+	// older servers' manifests parse fine in newer iOS clients (the
+	// decoder leaves it nil and falls back to the conservative "all
+	// tracks fully enriched" assumption).
+	//
+	// Populated only on the **first page** of a paginated full-manifest
+	// response (`cursor == ""`) and on every non-paginated response.
+	// Same pattern as `Folders` / `Total` — the values are stable for
+	// the duration of a pagination run, so iOS snapshots them off the
+	// first page and ignores subsequent pages.
+	EnrichmentProgress *EnrichmentProgress `json:"enrichmentProgress,omitempty"`
+}
+
+// EnrichmentProgress is the per-manifest snapshot of how far the bridge's
+// enrichment loop has gotten. iOS uses these counters to render an
+// "Enrichment in progress (X / Y)…" UI hint and to suppress permanent
+// negative-cache stamping on artists whose MBID hasn't landed yet.
+//
+// `LastEnrichedAt` is wall-clock UTC of the most recent successful
+// `MarkEnriched` call across the whole library, or the zero time if no
+// track has ever been enriched. iOS gates its "still in progress"
+// assumption on a 24h freshness check on this value — a bridge that
+// went idle a week ago shouldn't make the iOS UI claim enrichment is
+// "still happening".
+type EnrichmentProgress struct {
+	TracksTotal    int       `json:"tracksTotal"`
+	TracksEnriched int       `json:"tracksEnriched"`
+	LastEnrichedAt time.Time `json:"lastEnrichedAt,omitempty"`
 }

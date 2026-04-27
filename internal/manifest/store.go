@@ -191,8 +191,15 @@ func (s *Store) GetTrack(path string) (*Track, error) {
 // old mtime still surface in incremental deltas — otherwise the iOS
 // client has to do a full sync to see ripped-years-ago albums that
 // were just added.
+//
+// `Track.Enriched` is spliced in from the row's `enriched_at` column
+// (true iff != 0). The JSON-encoded `tags_json` blob doesn't carry
+// the enriched bit because enrichment status is column-tracked
+// separately from tag content — embedding it in `tags_json` would
+// require re-marshalling every track on each `MarkEnriched` write
+// just to flip a bool, which is what the column is for.
 func (s *Store) ListTracks(since *time.Time) ([]Track, error) {
-	q := `SELECT tags_json FROM tracks`
+	q := `SELECT tags_json, enriched_at FROM tracks`
 	args := []any{}
 	if since != nil {
 		q += ` WHERE indexed_at > ?`
@@ -207,13 +214,16 @@ func (s *Store) ListTracks(since *time.Time) ([]Track, error) {
 	out := []Track{}
 	for rows.Next() {
 		var raw []byte
-		if err := rows.Scan(&raw); err != nil {
+		var enrichedAt int64
+		if err := rows.Scan(&raw, &enrichedAt); err != nil {
 			return nil, err
 		}
 		var t Track
 		if err := json.Unmarshal(raw, &t); err != nil {
 			return nil, err
 		}
+		enriched := enrichedAt != 0
+		t.Enriched = &enriched
 		out = append(out, t)
 	}
 	return out, rows.Err()
@@ -240,7 +250,7 @@ func (s *Store) ListTracksPage(afterPath string, limit int) ([]Track, error) {
 		limit = 1000
 	}
 	rows, err := s.db.Query(`
-		SELECT tags_json FROM tracks
+		SELECT tags_json, enriched_at FROM tracks
 		WHERE path > ?
 		ORDER BY path ASC
 		LIMIT ?
@@ -252,13 +262,18 @@ func (s *Store) ListTracksPage(afterPath string, limit int) ([]Track, error) {
 	out := []Track{}
 	for rows.Next() {
 		var raw []byte
-		if err := rows.Scan(&raw); err != nil {
+		var enrichedAt int64
+		if err := rows.Scan(&raw, &enrichedAt); err != nil {
 			return nil, err
 		}
 		var t Track
 		if err := json.Unmarshal(raw, &t); err != nil {
 			return nil, err
 		}
+		// Same enriched-from-column splice as `ListTracks` — see
+		// the comment there for the "why a column, not the JSON" detail.
+		enriched := enrichedAt != 0
+		t.Enriched = &enriched
 		out = append(out, t)
 	}
 	return out, rows.Err()
@@ -338,6 +353,34 @@ func (s *Store) CountTracks() (int, error) {
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM tracks`).Scan(&n)
 	return n, err
+}
+
+// EnrichmentProgress returns the library-wide enrichment counters used
+// by the manifest's `enrichmentProgress` block: total track count,
+// number of tracks past the enrich pass (`enriched_at != 0`), and the
+// wall-clock of the most recent successful enrichment (zero time when
+// no track has ever been enriched). Single SQL trip via aggregate
+// expressions so a 50k-track library doesn't allocate per-row.
+//
+// Backed implicitly by `idx_tracks_enriched` (already present from
+// `migrate`) — the `enriched_at != 0` and `MAX(enriched_at)` clauses
+// are both index-friendly.
+func (s *Store) EnrichmentProgress() (total int, enriched int, lastEnrichedAt time.Time, err error) {
+	var lastNs sql.NullInt64
+	err = s.db.QueryRow(`
+		SELECT
+			COUNT(*),
+			COALESCE(SUM(CASE WHEN enriched_at != 0 THEN 1 ELSE 0 END), 0),
+			MAX(enriched_at)
+		FROM tracks
+	`).Scan(&total, &enriched, &lastNs)
+	if err != nil {
+		return 0, 0, time.Time{}, err
+	}
+	if lastNs.Valid && lastNs.Int64 != 0 {
+		lastEnrichedAt = time.Unix(0, lastNs.Int64).UTC()
+	}
+	return total, enriched, lastEnrichedAt, nil
 }
 
 // CountTracksByPrefix returns the number of track rows whose path begins
