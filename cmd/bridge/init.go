@@ -2,14 +2,17 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
@@ -162,13 +165,13 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 				fmt.Fprintf(stdout, "config file already exists at %s; keeping it\n", cfgPath)
 				fmt.Fprintf(stdout, "pass --force to overwrite non-interactively\n")
 				keepChoice := resolveLaunchChoice(in, stdout, *nonInteractive, *skipService, *windowsService, *startNow)
-				return finishInit(stdout, stderr, cfgPath, dataDir, keepChoice)
+				return finishInit(in, *nonInteractive, stdout, stderr, cfgPath, dataDir, keepChoice)
 			}
 		} else {
 			if !confirm(in, stdout, "Config file exists. Overwrite?", false) {
 				fmt.Fprintf(stdout, "keeping existing config\n")
 				keepChoice := resolveLaunchChoice(in, stdout, *nonInteractive, *skipService, *windowsService, *startNow)
-				return finishInit(stdout, stderr, cfgPath, dataDir, keepChoice)
+				return finishInit(in, *nonInteractive, stdout, stderr, cfgPath, dataDir, keepChoice)
 			}
 		}
 	}
@@ -228,11 +231,20 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "TLS cert: %v\n", err)
 		return 1
 	} else {
-		fmt.Fprintf(stdout, "\nTLS fingerprint (stable across restarts):\n  %s\n", fp)
+		// Box the fingerprint so it stands out from the surrounding
+		// init narration. Operators have to copy this exact string
+		// to the iOS side at pairing time; framing it makes the
+		// "this is the bit you need" beat unmissable.
+		fmt.Fprint(stdout, "\n")
+		fmt.Fprint(stdout, box("TLS fingerprint", []string{
+			"Pin this on the iOS side. Stable across restarts:",
+			"",
+			"  " + truncateMid(fp, frameWidth-6),
+		}))
 	}
 
 	choice := resolveLaunchChoice(in, stdout, *nonInteractive, *skipService, *windowsService, *startNow)
-	return finishInit(stdout, stderr, cfgPath, dataDir, choice)
+	return finishInit(in, *nonInteractive, stdout, stderr, cfgPath, dataDir, choice)
 }
 
 // launchChoice bundles the three orthogonal knobs that control how
@@ -281,7 +293,10 @@ func promptLaunchMode(in *bufio.Reader, stdout io.Writer) launchChoice {
 	fmt.Fprintln(stdout, "  [2] Always-on Windows Service  (requires admin; survives logout)")
 	fmt.Fprintln(stdout, "  [3] Only when I start it manually  (I'll run `bridge serve` myself)")
 	for {
-		choice := ask(in, stdout, "Choose [1]", "1")
+		// `ask` itself appends `[def]:` to the prompt, so the prompt
+		// must NOT already contain `[1]` — otherwise the rendered
+		// line is `Choose [1] [1]:` (the original transcript bug).
+		choice := ask(in, stdout, "Choose", "1")
 		switch strings.TrimSpace(choice) {
 		case "1", "":
 			return launchChoice{spawnNow: true}
@@ -304,7 +319,7 @@ func promptLaunchMode(in *bufio.Reader, stdout io.Writer) launchChoice {
 // useless to the operator if they don't know where to point their
 // browser. The browser-open is best-effort (no stderr on headless
 // machines), so the cost of always attempting it is zero.
-func finishInit(stdout, stderr io.Writer, cfgPath, dataDir string, choice launchChoice) int {
+func finishInit(in *bufio.Reader, nonInteractive bool, stdout, stderr io.Writer, cfgPath, dataDir string, choice launchChoice) int {
 	// Load the config once up-front so the admin-address probe (Windows
 	// auto-start path) and the browser-open at the end both use the
 	// operator-configured bind address, not the hard-coded default.
@@ -337,8 +352,34 @@ func finishInit(stdout, stderr io.Writer, cfgPath, dataDir string, choice launch
 	}
 
 	if choice.skipService || (runtime.GOOS != "darwin" && runtime.GOOS != "linux" && runtime.GOOS != "windows") {
-		fmt.Fprintf(stdout, "\nSkipping service install. Start the bridge with:\n")
-		fmt.Fprintf(stdout, "  bridge serve --config %s\n", cfgPath)
+		// Interactive operators get a "Start it now in this terminal?"
+		// prompt so they don't have to copy-paste a path-laden command
+		// (the original PowerShell footgun: PS doesn't search CWD,
+		// `bridge serve` returns CommandNotFound). Non-interactive
+		// (--yes / piped stdin) gets the shell-aware handoff text
+		// only — no prompt, preserves automation behavior.
+		binary, _ := os.Executable()
+		if binary == "" {
+			binary = os.Args[0]
+		}
+		if binary != "" {
+			if resolved, err := filepath.EvalSymlinks(binary); err == nil {
+				binary = resolved
+			}
+		}
+		fmt.Fprintln(stdout)
+		if !nonInteractive && in != nil && confirm(in, stdout, "Start the bridge now in this terminal?", true) {
+			// Per-invocation signal scope: Ctrl+C cancels just this
+			// serve session, returns control to init's caller. We
+			// derive from context.Background() because init wasn't
+			// passed a parent ctx; future PRs that thread one in can
+			// wire it here without breaking this contract.
+			serveCtx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer cancel()
+			fmt.Fprint(stdout, paint(cBrightCyan, "\nStarting the bridge — Ctrl+C to stop.\n\n"))
+			return runServe(serveCtx, serveOpts{configPath: cfgPath}, stdout, stderr)
+		}
+		fmt.Fprint(stdout, shellHandoff(binary, cfgPath))
 		printAdmin(false)
 		return 0
 	}
@@ -396,7 +437,8 @@ func finishInit(stdout, stderr io.Writer, cfgPath, dataDir string, choice launch
 		unitPath, err = packaging.Install(params)
 		if err != nil {
 			fmt.Fprintf(stderr, "service install: %v\n", err)
-			fmt.Fprintf(stderr, "You can still run the bridge manually:\n  %s serve --config %s\n", binary, cfgPath)
+			fmt.Fprintln(stderr, "You can still run the bridge manually:")
+			fmt.Fprint(stderr, shellHandoff(binary, cfgPath))
 			return 1
 		}
 		fmt.Fprintf(stdout, "Service installed at:\n  %s\n", unitPath)
@@ -442,7 +484,8 @@ func spawnNowOrWarn(stdout, stderr io.Writer, binary, cfgPath, logPath, adminAdd
 	}
 	if err := packaging.SpawnDetached(binary, cfgPath, logPath); err != nil {
 		fmt.Fprintf(stderr, "auto-start failed: %v\n", err)
-		fmt.Fprintf(stderr, "Launcher is installed — the bridge will start at next logon. Or run:\n  %s serve --config %s\n", binary, cfgPath)
+		fmt.Fprintln(stderr, "Launcher is installed — the bridge will start at next logon. Or run:")
+		fmt.Fprint(stderr, shellHandoff(binary, cfgPath))
 		return false
 	}
 	return true
@@ -467,11 +510,13 @@ func printFutureLaunchHint(stdout io.Writer, choice launchChoice, binary, cfgPat
 			fmt.Fprintln(stdout, "How it'll start in the future:")
 			fmt.Fprintln(stdout, "  • Automatically when you log in (Startup-folder launcher)")
 			fmt.Fprintf(stdout, "  • To stop now: close the minimized \"1-bit-bridge\" window, or End Task in Task Manager\n")
-			fmt.Fprintf(stdout, "  • To start manually any time: %s serve --config %s\n", binary, cfgPath)
+			fmt.Fprintln(stdout, "  • To start manually any time:")
+			fmt.Fprint(stdout, shellHandoff(binary, cfgPath))
 		default:
 			fmt.Fprintln(stdout, "How it'll start in the future:")
 			fmt.Fprintln(stdout, "  • Automatically when you next log in (Startup-folder launcher)")
-			fmt.Fprintf(stdout, "  • To start right now: %s serve --config %s\n", binary, cfgPath)
+			fmt.Fprintln(stdout, "  • To start right now:")
+			fmt.Fprint(stdout, shellHandoff(binary, cfgPath))
 		}
 	case "darwin":
 		fmt.Fprintln(stdout, "How it'll start in the future:")

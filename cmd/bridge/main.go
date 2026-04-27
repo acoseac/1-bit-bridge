@@ -326,6 +326,18 @@ First-time install:
 `)
 }
 
+// serveOpts bundles the inputs runServe needs. Lifted out of serveCmd's
+// flag parsing so PR 2's interactive "Start now" picker (and PR 3's
+// menu launcher) can drive a serve session in-process without
+// re-parsing flags. Each call gets a fresh, signal-wired ctx from the
+// caller — never share a parent ctx across multiple runServe
+// invocations or the second call sees a canceled parent and shuts
+// down instantly (Go contexts can't be un-canceled).
+type serveOpts struct {
+	configPath   string
+	addrOverride string
+}
+
 func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -334,6 +346,16 @@ func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	return runServe(ctx, serveOpts{configPath: *configPath, addrOverride: *addrOverride}, stdout, stderr)
+}
+
+// runServe is the library-callable serve loop. Identical behavior to
+// the flag-driven serveCmd path — same TLS material, same admin
+// listener, same SIGINT graceful-shutdown — just with the inputs
+// pre-parsed. Returns the exit code the CLI would.
+func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int {
+	configPath := &opts.configPath
+	addrOverride := &opts.addrOverride
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "config load failed: %v\n", err)
