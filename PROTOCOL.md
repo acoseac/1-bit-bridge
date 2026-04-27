@@ -317,7 +317,7 @@ The header is optional — older iOS clients that don't send it continue to auth
 
 ## Operator: TLS cert rotation
 
-The bridge mints a self-signed ECDSA P-256 cert on first run with a 10-year validity window. Rotation is a rare operator event — key compromise, hostname change, or routine hygiene — but the path matters when one is forced.
+The bridge mints a self-signed ECDSA P-256 cert on first run with a **397-day validity window** (capped under Apple ATS's 398-day enforcement; an older cert is rejected at the iOS TLS handshake before fingerprint pinning can override it). Rotation is therefore an annual event — operators see a startup log warning at ≤30 days and the admin console / `bridge cert info` surface a yellow / red badge well before the cliff.
 
 - **Inspect**: `bridge cert info` prints subject, fingerprint, not-before / not-after, and days-until-expiry. The admin dashboard shows the same fields under the "TLS fingerprint" panel and surfaces a yellow / red badge at ≤30 / ≤7 days respectively.
 - **Rotate**: `bridge cert rotate [--yes]` regenerates both the cert and the key, prints the new fingerprint, and points the operator at the re-pair flow. Rotation is gated on a `--yes` confirmation prompt because **every paired device must re-pair**: iOS pins the cert fingerprint, and the new cert has a different fingerprint even if the key were preserved (the cert binary differs by serial number + NotBefore / NotAfter alone).

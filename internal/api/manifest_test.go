@@ -88,11 +88,8 @@ func TestManifestRejectsBadSince(t *testing.T) {
 }
 
 func TestManifestAcceptsRFC3339Since(t *testing.T) {
-	var seenSince time.Time
-	mp := &fakeManifestProvider{body: map[string]any{}}
-	mp.body = map[string]any{"echo": "ok"}
-	// Wrap BuildManifest to capture what we pass in.
-	hs, tok := withManifest(t, captureMP{inner: mp, seen: &seenSince})
+	mp := &fakeManifestProvider{body: map[string]any{"echo": "ok"}}
+	hs, tok := withManifest(t, mp)
 	u := hs.URL + "/v1/manifest?since=2026-01-02T03:04:05Z"
 	req, _ := http.NewRequest("GET", u, nil)
 	req.Header.Set("Authorization", "Bearer "+tok)
@@ -102,11 +99,11 @@ func TestManifestAcceptsRFC3339Since(t *testing.T) {
 	}
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
-	if seenSince.IsZero() {
+	if mp.lastSince.IsZero() {
 		t.Error("since not propagated")
 	}
-	if seenSince.UTC().Year() != 2026 {
-		t.Errorf("since year = %d", seenSince.UTC().Year())
+	if mp.lastSince.UTC().Year() != 2026 {
+		t.Errorf("since year = %d", mp.lastSince.UTC().Year())
 	}
 }
 
@@ -272,21 +269,3 @@ func TestManifestLegacyPathUntouched(t *testing.T) {
 		t.Errorf("paginated builder was called (limit=%d)", mp.lastPageLimit)
 	}
 }
-
-// captureMP wraps a ManifestProvider and records the since arg passed to
-// BuildManifest.
-type captureMP struct {
-	inner ManifestProvider
-	seen  *time.Time
-}
-
-func (c captureMP) BuildManifest(since time.Time) (any, error) {
-	*c.seen = since
-	return c.inner.BuildManifest(since)
-}
-func (c captureMP) BuildManifestPage(cursor string, limit int) (any, error) {
-	return c.inner.BuildManifestPage(cursor, limit)
-}
-func (c captureMP) IsScanning() bool        { return c.inner.IsScanning() }
-func (c captureMP) LastFullScan() time.Time { return c.inner.LastFullScan() }
-func (c captureMP) TracksIndexed() int      { return c.inner.TracksIndexed() }

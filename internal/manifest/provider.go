@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"io"
 	"time"
 )
 
@@ -22,9 +23,14 @@ func NewProvider(store *Store, scanner *Scanner) *Provider {
 	return &Provider{store: store, scanner: scanner}
 }
 
-// BuildManifest satisfies api.ManifestProvider.
-func (p *Provider) BuildManifest(since time.Time) (any, error) {
-	return BuildManifest(p.store, p.scanner.Roots(), since)
+// WriteManifest satisfies api.ManifestProvider for the legacy
+// non-paginated /v1/manifest endpoint. Streams JSON straight to w
+// instead of materialising a full []Track in memory — the previous
+// shape OOM-killed Pi-class hosts on a 50k-track library because the
+// in-memory []Track materialisation alone could push past 200 MB.
+// See WriteManifest in scanner.go for the streaming format details.
+func (p *Provider) WriteManifest(w io.Writer, since time.Time) error {
+	return WriteManifest(w, p.store, p.scanner.Roots(), since)
 }
 
 // BuildManifestPage satisfies api.ManifestProvider for the paginated

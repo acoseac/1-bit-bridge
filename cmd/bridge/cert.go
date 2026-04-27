@@ -13,11 +13,12 @@ import (
 )
 
 // certCmd dispatches the `bridge cert <subcommand>` family. Cert
-// rotation is rare (default cert lifetime is 10 years) but the
-// operator path matters when one is forced — key compromise,
-// hostname change, or certificate-pinning hygiene. Living under one
-// CLI verb keeps the surface compact and discoverable next to the
-// existing `bridge token` namespace.
+// rotation is annual (default cert lifetime is 397 days, capped under
+// Apple ATS's 398-day enforcement) and the operator path also matters
+// for forced rotations — key compromise, hostname change, or
+// certificate-pinning hygiene. Living under one CLI verb keeps the
+// surface compact and discoverable next to the existing `bridge token`
+// namespace.
 func certCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
 		certUsage(stderr)
@@ -120,7 +121,7 @@ func certRotateCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 	if !*autoYes {
 		fmt.Fprintln(stdout, "")
 		fmt.Fprintln(stdout, "Rotating the TLS cert will:")
-		fmt.Fprintln(stdout, "  • Generate a fresh ECDSA P-256 key + 10-year self-signed cert.")
+		fmt.Fprintln(stdout, "  • Generate a fresh ECDSA P-256 key + 397-day self-signed cert (Apple ATS cap).")
 		fmt.Fprintln(stdout, "  • Invalidate every paired device's pinned fingerprint.")
 		fmt.Fprintln(stdout, "  • Every iOS device must re-pair (admin console QR or bridge:// link).")
 		fmt.Fprintln(stdout, "  • Restart the bridge to load the new cert.")

@@ -29,7 +29,7 @@ type fakeManifestProvider struct {
 	tracksIndexed int
 	// pageBody / pageErr drive BuildManifestPage independently so
 	// pagination tests can assert against a different response than
-	// the legacy BuildManifest path without clobbering full-manifest
+	// the legacy WriteManifest path without clobbering full-manifest
 	// coverage. nil pageBody falls back to `body` so tests that only
 	// care about the legacy path don't have to set both.
 	pageBody any
@@ -38,10 +38,17 @@ type fakeManifestProvider struct {
 	// handler forwards query params correctly.
 	lastPageCursor string
 	lastPageLimit  int
+	// lastSince captures the since arg passed to WriteManifest so tests
+	// can assert the handler forwards `?since=` correctly.
+	lastSince time.Time
 }
 
-func (f *fakeManifestProvider) BuildManifest(since time.Time) (any, error) {
-	return f.body, f.err
+func (f *fakeManifestProvider) WriteManifest(w io.Writer, since time.Time) error {
+	f.lastSince = since
+	if f.err != nil {
+		return f.err
+	}
+	return json.NewEncoder(w).Encode(f.body)
 }
 func (f *fakeManifestProvider) BuildManifestPage(cursor string, limit int) (any, error) {
 	f.lastPageCursor = cursor

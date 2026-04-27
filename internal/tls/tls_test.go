@@ -53,12 +53,17 @@ func TestGenerateFirstRun(t *testing.T) {
 		t.Errorf("IPAddresses missing 127.0.0.1: %v", parsed.IPAddresses)
 	}
 
+	// Cap is 397 days to stay under Apple ATS's 398-day enforcement
+	// (see package doc). Allow a one-day slop on each side for clock /
+	// rounding (NotBefore is now-1h, NotAfter is now+397d).
 	validity := parsed.NotAfter.Sub(parsed.NotBefore)
-	if validity < 9*365*24*time.Hour {
-		t.Errorf("validity too short: %v", validity)
+	const wantValidity = 397 * 24 * time.Hour
+	if validity < wantValidity-2*24*time.Hour || validity > wantValidity+2*24*time.Hour {
+		t.Errorf("validity = %v, want ~%v (±2d)", validity, wantValidity)
 	}
-	if parsed.NotAfter.Before(time.Now().Add(9 * 365 * 24 * time.Hour)) {
-		t.Errorf("NotAfter %v is sooner than expected", parsed.NotAfter)
+	atsCap := 398 * 24 * time.Hour
+	if remaining := time.Until(parsed.NotAfter); remaining > atsCap {
+		t.Errorf("NotAfter exceeds ATS cap of 398 days: remaining=%v", remaining)
 	}
 
 	// RFC 5480 §3: KeyEncipherment MUST NOT be set on an EC-keyed cert;

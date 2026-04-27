@@ -14,6 +14,8 @@ package api
 
 import (
 	"encoding/json"
+	"io"
+	"log"
 	"net"
 	"net/http"
 	"path/filepath"
@@ -58,13 +60,19 @@ type SessionTracker interface {
 // read the indexed library state. internal/manifest implements it via
 // the Scanner + Store pair; tests can pass a small stub.
 type ManifestProvider interface {
-	BuildManifest(since time.Time) (any, error)
+	// WriteManifest streams the legacy non-paginated manifest as JSON
+	// straight to w. Bounding peak memory is mandatory: the prior
+	// in-memory builder OOM-killed Pi-class hosts on 50k-track
+	// libraries. Mid-stream errors are returned but unrecoverable on
+	// the wire (headers and prefix already sent); the handler logs and
+	// the truncated body fails iOS-side decode, which retries.
+	WriteManifest(w io.Writer, since time.Time) error
 	// BuildManifestPage is the v1.1 paginated-manifest variant used
 	// when the client asks for `?limit=`. `cursor=""` requests the
 	// first page. Callers iterate until the returned page's
-	// `NextCursor` is nil. Implementations return the same envelope
-	// shape as BuildManifest so the JSON-serialization paths can be
-	// shared in the handler.
+	// `NextCursor` is nil. Returns a fully-materialised value because
+	// per-page output is bounded by the page-size cap (5000) and the
+	// JSON writer can buffer the whole page without OOM risk.
 	BuildManifestPage(cursor string, limit int) (any, error)
 	IsScanning() bool
 	LastFullScan() time.Time
@@ -333,7 +341,11 @@ func (s *Server) manifestHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Legacy single-shot path (full manifest or since-delta).
+	// Legacy single-shot path (full manifest or since-delta). Streamed
+	// to bound peak memory on Pi-class hosts with 50k-track libraries —
+	// the prior in-memory builder allocated >200 MB during a single
+	// request and OOM-killed the process. Headers go out before the
+	// first track row; mid-stream errors can only be logged.
 	var since time.Time
 	if sinceRaw != "" {
 		parsed, err := time.Parse(time.RFC3339Nano, sinceRaw)
@@ -344,12 +356,11 @@ func (s *Server) manifestHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		since = parsed
 	}
-	body, err := s.manifest.BuildManifest(since)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
-		return
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	if err := s.manifest.WriteManifest(w, since); err != nil {
+		log.Printf("api: manifest stream: %v", err)
 	}
-	writeJSON(w, http.StatusOK, body)
 }
 
 // libraryRootBasenames returns just the last path component for each
