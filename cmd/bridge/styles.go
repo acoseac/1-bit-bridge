@@ -47,14 +47,22 @@ var colorState struct {
 	on   bool
 }
 
-// colorEnabled reports whether the current stdout supports ANSI color
-// output. Honors NO_COLOR (no-color.org), TERM=dumb, and non-TTY
-// stdout. On Windows, also runs `initTerminal()` (build-tagged) which
-// flips ENABLE_VIRTUAL_TERMINAL_PROCESSING via stdlib syscall —
-// without that flip, pre-Win10-Anniversary conhost (and some legacy
-// configs on newer Windows) prints raw `\e[95m` as literal garbage.
+// colorEnabled reports whether the bridge's box / frame helpers can
+// safely emit ANSI escape sequences. Conservative — returns true ONLY
+// when:
+//   - NO_COLOR is unset (https://no-color.org)
+//   - TERM is not "dumb" (and not empty on POSIX)
+//   - BOTH os.Stdout AND os.Stderr are TTYs. Frames go to stderr at
+//     two error sites in init.go (service-install fail, spawn fail);
+//     a stdout-only check would leak raw escapes into a redirected
+//     stderr log.
+//   - On Windows, ENABLE_VIRTUAL_TERMINAL_PROCESSING is now active
+//     for stdout (initTerminal returned true). A SetConsoleMode
+//     failure on legacy conhost would otherwise leave us emitting
+//     raw `\e[95m` text the console can't parse.
 //
-// Cached: subsequent calls return the cached boolean.
+// Cached via sync.Once — none of the inputs change at runtime, so a
+// re-probe on every paint() call would just waste cycles.
 func colorEnabled() bool {
 	colorState.once.Do(func() {
 		if os.Getenv("NO_COLOR") != "" {
@@ -72,14 +80,20 @@ func colorEnabled() bool {
 			colorState.on = false
 			return
 		}
-		if !isatty.IsTerminal(os.Stdout.Fd()) {
+		// Both streams must be TTYs. Frames are written to stderr
+		// at two sites (install-fail / spawn-fail) and we can't
+		// branch the boolean per-stream without threading the
+		// writer through every call site — conservative AND keeps
+		// the API tiny.
+		if !isatty.IsTerminal(os.Stdout.Fd()) || !isatty.IsTerminal(os.Stderr.Fd()) {
 			colorState.on = false
 			return
 		}
-		// Initialise the platform's terminal mode if needed.
-		// initTerminal() is in tty_{windows,posix}.go.
-		initTerminal()
-		colorState.on = true
+		// Windows VT mode flip MUST succeed before we commit to
+		// color. initTerminal returns false if SetConsoleMode
+		// failed (legacy conhost / minimal env / no console).
+		// POSIX impl always returns true.
+		colorState.on = initTerminal()
 	})
 	return colorState.on
 }
@@ -243,43 +257,92 @@ func frame(title string, lines []string) string {
 	return b.String()
 }
 
-// shellHandoff renders a frame that shows the user how to start the
-// bridge in their current shell. We detect $SHELL / $ComSpec /
-// $PSModulePath to single out one of three forms (PowerShell,
-// cmd.exe, bash/zsh). When detection is ambiguous (e.g. SSH with no
-// $SHELL set), we print all three so the user picks the right one.
+// quotePS escapes a string for use inside a PowerShell double-quoted
+// argument. PS treats `"` as the quote character and uses backtick (`)
+// as its escape; literal backticks must be doubled. `$` is also
+// expanded inside double quotes — escape it. Newlines / carriage
+// returns are stripped (paths can't contain them on any reasonable
+// filesystem; defensive).
+func quotePS(s string) string {
+	r := strings.NewReplacer(
+		"`", "``",
+		`"`, "`\"",
+		"$", "`$",
+		"\n", "",
+		"\r", "",
+	)
+	return `"` + r.Replace(s) + `"`
+}
+
+// quoteCmd escapes a string for use inside a cmd.exe double-quoted
+// argument. cmd's only escape inside `"..."` is `""` for a literal
+// quote — backslash is NOT special, paths like `C:\Users\...`
+// round-trip intact. CR/LF would terminate the line, NUL is invalid
+// in any path; both stripped. Mirrors the same shape as
+// `internal/packaging.CmdEscape` but used for command-line printing
+// rather than .cmd-file generation, so backslashes are left alone.
+func quoteCmd(s string) string {
+	r := strings.NewReplacer(
+		`"`, `""`,
+		"\n", "",
+		"\r", "",
+		"\x00", "",
+	)
+	return `"` + r.Replace(s) + `"`
+}
+
+// quotePosix wraps a string in single quotes for bash / zsh / sh,
+// using the standard `'\”` trick to embed a literal single quote
+// inside a single-quoted string. Single quotes disable all shell
+// expansion in POSIX shells, which is exactly what we want for an
+// arbitrary path that may contain `$` / `~` / spaces / newlines.
+func quotePosix(s string) string {
+	return `'` + strings.ReplaceAll(s, `'`, `'\''`) + `'`
+}
+
+// shellHandoff renders a frame showing the user how to start the
+// bridge in their current shell. On Windows we ALWAYS print both
+// PowerShell and cmd.exe variants because PSModulePath is set in
+// both shell environments — guessing wrong with a single-shell
+// print would just bring the original transcript bug back. On
+// POSIX we print the bash/zsh variant. SSH connections with $SHELL
+// unset get all three so a remote operator can pick.
 //
-// PowerShell uses `&` invocation so a bare path resolves regardless
-// of CWD — exactly the bug the original transcript hit.
-// bash / zsh single-quote the path to survive spaces.
-// cmd.exe assumes `bridge.exe` is on PATH (warns via output if not).
+// All paths are shell-quoted: PS backtick-escapes, cmd doubles
+// embedded quotes, posix uses single-quote-with-`'\”` escape.
+// Spaces in paths (common on Windows: "C:\Program Files\bridge.exe")
+// no longer break the printed command.
 func shellHandoff(binPath, cfgPath string) string {
-	pickPS := strings.Contains(strings.ToLower(os.Getenv("PSModulePath")), "windowspowershell") ||
-		strings.Contains(strings.ToLower(os.Getenv("PSModulePath")), "powershell")
-	pickCmd := os.Getenv("ComSpec") != "" && !pickPS && runtime.GOOS == "windows"
-	pickPosix := !pickPS && !pickCmd && runtime.GOOS != "windows"
-	// Detection failed → print all three.
-	all := !(pickPS || pickCmd || pickPosix)
 	var lines []string
 	lines = append(lines, "")
-	if pickPS || all {
+	if runtime.GOOS == "windows" {
 		lines = append(lines, paint(cBrightYellow, "PowerShell:"))
-		lines = append(lines, "  & \""+binPath+"\" `")
-		lines = append(lines, "    serve --config \""+cfgPath+"\"")
+		// `& <path>` invocation works regardless of CWD — the
+		// PowerShell rule that bit the original transcript user.
+		lines = append(lines, "  & "+quotePS(binPath)+" `")
+		lines = append(lines, "    serve --config "+quotePS(cfgPath))
 		lines = append(lines, "")
-	}
-	if pickCmd || all {
 		lines = append(lines, paint(cBrightYellow, "cmd.exe:"))
-		// cmd has no escape for " inside "..." other than ""; paths
-		// with literal quotes are pathological and we don't try to
-		// support them here — a real % would be the user's problem.
-		lines = append(lines, "  bridge.exe serve --config \""+cfgPath+"\"")
+		// cmd needs the .exe name (PATH-resolved if installed) or
+		// a quoted full path. We print the full quoted path for
+		// determinism — works whether the binary is on PATH or not.
+		lines = append(lines, "  "+quoteCmd(binPath)+" serve --config "+quoteCmd(cfgPath))
 		lines = append(lines, "")
-	}
-	if pickPosix || all {
+	} else {
 		lines = append(lines, paint(cBrightYellow, "bash / zsh:"))
-		lines = append(lines, "  bridge serve --config '"+cfgPath+"'")
+		lines = append(lines, "  "+quotePosix(binPath)+" serve --config "+quotePosix(cfgPath))
 		lines = append(lines, "")
+		// SSH-from-Windows or other ambiguous environments get the
+		// PS / cmd alternatives appended so a remote operator can
+		// still copy the right one. Detection: $PSModulePath set
+		// while GOOS=linux/darwin means we're inside an SSH session
+		// that originated from Windows (rare but real).
+		if os.Getenv("PSModulePath") != "" {
+			lines = append(lines, paint(cBrightYellow, "PowerShell (if reachable):"))
+			lines = append(lines, "  & "+quotePS(binPath)+" `")
+			lines = append(lines, "    serve --config "+quotePS(cfgPath))
+			lines = append(lines, "")
+		}
 	}
 	return frame("to start the bridge later, run:", lines)
 }

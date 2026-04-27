@@ -221,3 +221,35 @@ func TestInitInteractiveSkipOnExistingConfig(t *testing.T) {
 		t.Errorf("config changed: %s", got)
 	}
 }
+
+// TestSplitFingerprintIsLossless pins the no-data-loss invariant —
+// concatenating the two halves yields the input verbatim. A
+// regression here would silently break iOS pairing for every paired
+// client, since the operator copy-pastes the displayed fingerprint
+// byte-for-byte into the pin field.
+func TestSplitFingerprintIsLossless(t *testing.T) {
+	cases := []string{
+		"56:AE:1F:FA:05:4B:29:E4:48:85:93:4A:28:00:47:E5:62:45:1A:71:1B:3F:86:32:23:1E:48:CA:A4:12:EE:E1",
+		"AB:CD",                          // 5-char short
+		"ABCDEF",                         // no colons (pathological)
+		"",                               // empty
+		strings.Repeat("AA:", 31) + "AA", // 95-char standard
+		strings.Repeat("FF:", 16) + strings.Repeat("00:", 15) + "FF", // 95-char alternating
+	}
+	for _, fp := range cases {
+		first, second := splitFingerprint(fp)
+		if first+second != fp {
+			t.Errorf("splitFingerprint(%q) = (%q, %q); concat %q != input", fp, first, second, first+second)
+		}
+		// Each half should fit in the frame inner width (53 cols
+		// minus the 2-col indent). 95-char fingerprints split near
+		// midpoint = ~47 chars per half + 2 indent = ~49 cols, well
+		// under the 53-col budget. Test asserts no half exceeds 51.
+		if len(first) > 51 {
+			t.Errorf("first half too long for frame: %d chars (%q)", len(first), first)
+		}
+		if len(second) > 51 {
+			t.Errorf("second half too long for frame: %d chars (%q)", len(second), second)
+		}
+	}
+}

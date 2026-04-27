@@ -117,3 +117,70 @@ func TestShellHandoffContainsAllForms(t *testing.T) {
 		t.Errorf("shellHandoff output missing all shell labels: %q", out)
 	}
 }
+
+// TestQuoteHelpersHandleHostilePaths pins the path-escaping contract
+// the original transcript was missing — paths with spaces / quotes /
+// shell-meaningful characters must round-trip through the per-shell
+// quote helper into a token a copy-paste produces verbatim. A
+// regression here brings back the "command line breaks on weird
+// path" failure mode the PR is meant to fix.
+func TestQuoteHelpersHandleHostilePaths(t *testing.T) {
+	cases := []struct {
+		name  string
+		raw   string
+		ps    []string // substrings the PS form must contain
+		cmd   []string // substrings the cmd.exe form must contain
+		posix []string // substrings the bash/zsh form must contain
+	}{
+		{
+			name:  "windows-with-spaces",
+			raw:   `C:\Program Files\1-bit-bridge\bridge.exe`,
+			ps:    []string{`"C:\Program Files\1-bit-bridge\bridge.exe"`},
+			cmd:   []string{`"C:\Program Files\1-bit-bridge\bridge.exe"`},
+			posix: []string{`'C:\Program Files\1-bit-bridge\bridge.exe'`},
+		},
+		{
+			name:  "embedded-quote",
+			raw:   `weird"name`,
+			ps:    []string{"`\""}, // PS backtick-escapes the quote
+			cmd:   []string{`""`},  // cmd doubles the quote
+			posix: []string{`'weird"name'`},
+		},
+		{
+			name:  "single-quote",
+			raw:   `Bob's Music`,
+			ps:    []string{`Bob's Music`}, // single quote is literal in PS double-quoted
+			cmd:   []string{`Bob's Music`},
+			posix: []string{`'Bob'\''s Music'`}, // posix `'\''` trick
+		},
+		{
+			name:  "dollar-expansion",
+			raw:   `$HOME/bridge.yaml`,
+			ps:    []string{"`$"},                  // backtick-escape $ in PS
+			cmd:   []string{`$HOME/bridge.yaml`},   // cmd doesn't expand $
+			posix: []string{`'$HOME/bridge.yaml'`}, // single quotes disable expansion
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ps := quotePS(c.raw)
+			for _, sub := range c.ps {
+				if !strings.Contains(ps, sub) {
+					t.Errorf("quotePS(%q) = %q; want substring %q", c.raw, ps, sub)
+				}
+			}
+			cmd := quoteCmd(c.raw)
+			for _, sub := range c.cmd {
+				if !strings.Contains(cmd, sub) {
+					t.Errorf("quoteCmd(%q) = %q; want substring %q", c.raw, cmd, sub)
+				}
+			}
+			pos := quotePosix(c.raw)
+			for _, sub := range c.posix {
+				if !strings.Contains(pos, sub) {
+					t.Errorf("quotePosix(%q) = %q; want substring %q", c.raw, pos, sub)
+				}
+			}
+		})
+	}
+}

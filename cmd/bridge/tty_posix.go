@@ -6,5 +6,6 @@ package main
 // gnome-terminal, xterm, ssh dumb terminals all parse ANSI natively
 // (or, in the dumb-terminal case, are already excluded by
 // colorEnabled's TERM=dumb check). The Windows build of this file
-// (`tty_windows.go`) does the SetConsoleMode dance.
-func initTerminal() {}
+// (`tty_windows.go`) does the SetConsoleMode dance. Returns true
+// always: caller's color state stays on so SGR sequences emit.
+func initTerminal() bool { return true }
