@@ -41,6 +41,14 @@ type Params struct {
 // manager to load it. Returns the path of the unit file that was written.
 // Non-darwin / non-linux: returns an empty path and (nil) error — the
 // caller should advise the user to run `bridge serve` manually.
+//
+// **Windows two-tier semantics**: tries the SCM service first; falls
+// through to the Startup-folder launcher when SCM access is denied.
+// Callers that need to *force* the Startup-folder path (because the
+// operator explicitly chose option 1 in the wizard, even though they
+// might be running elevated) MUST use `InstallStartup` instead —
+// otherwise an Administrator-shell wizard run silently auto-elevates
+// to SCM regardless of the operator's pick.
 func Install(p Params) (unitPath string, err error) {
 	switch runtime.GOOS {
 	case "darwin":
@@ -72,6 +80,24 @@ func Install(p Params) (unitPath string, err error) {
 	default:
 		return "", nil
 	}
+}
+
+// InstallStartup installs the Startup-folder launcher only on
+// Windows; never touches SCM. Used by the wizard when the operator
+// explicitly picks "Launch when I log in" (option 1) — without this
+// strict path, `Install`'s SCM-first auto-elevation would silently
+// install as a Windows Service when the wizard was run from an
+// Administrator shell, and the post-install status / restart
+// behaviour would mismatch the operator's stated choice.
+//
+// On non-Windows: returns ("", nil). The launchd / systemd paths
+// have only one mode each, so the operator never sees this distinction
+// outside Windows.
+func InstallStartup(p Params) (unitPath string, err error) {
+	if runtime.GOOS != "windows" {
+		return "", nil
+	}
+	return installWindowsStartup(p)
 }
 
 // Uninstall reverses Install: stops the service and removes the unit

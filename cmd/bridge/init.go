@@ -449,7 +449,20 @@ func finishInit(in *bufio.Reader, nonInteractive bool, stdout, stderr io.Writer,
 		fmt.Fprintf(stdout, "Windows Service installed: %s\n", unitPath)
 		serverIsLive = true // SCM's Start() fired during Install.
 	} else {
-		unitPath, err = packaging.Install(params)
+		// On Windows, choice.spawnNow == option 1 ("Launch when I log
+		// in / Startup-folder launcher"). The operator made a deliberate
+		// pick — `Install`'s SCM-first auto-elevation would silently
+		// turn that into a Windows Service when the wizard runs from
+		// an Administrator shell, and the resulting status line
+		// ("background service (SCM)") wouldn't match what the operator
+		// chose. `InstallStartup` is the strict-Startup-folder path
+		// that bypasses the SCM tier. On macOS/Linux it returns ("", nil)
+		// and we fall back to `Install` (launchd / systemd user unit).
+		if runtime.GOOS == "windows" && choice.spawnNow {
+			unitPath, err = packaging.InstallStartup(params)
+		} else {
+			unitPath, err = packaging.Install(params)
+		}
 		if err != nil {
 			fmt.Fprintf(stderr, "service install: %v\n", err)
 			fmt.Fprintln(stderr, "You can still run the bridge manually:")
