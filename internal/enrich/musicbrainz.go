@@ -21,11 +21,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -247,6 +249,62 @@ var errNotFound = errors.New("not found")
 
 // IsNotFound reports whether err indicates the lookup returned 404.
 func IsNotFound(err error) bool { return errors.Is(err, errNotFound) }
+
+// IsTransient reports whether err is a transient infrastructure
+// failure (network blip, timeout, server overload) that the
+// enricher should NOT permanently mark a track as skipped for.
+// Pre-fix (PR #N), the enricher called `markSkipped` on every
+// SearchRelease error — a 30-second MusicBrainz outage permanently
+// poisoned every track currently being enriched, with no retry path
+// short of bumping `enriched_at` back to 0 in SQL.
+//
+// Transient signals:
+//   - HTTP 5xx (server-side overload / restart)
+//   - HTTP 429 (rate limit; we already honor Retry-After but the
+//     batch-level skip stamp must not fire)
+//   - net.Error.Timeout() (connect timeout, read timeout)
+//   - context.DeadlineExceeded (per-request deadline; distinct from
+//     ctx.Err() cancellation which is handled separately)
+//   - syscall.ECONNRESET / ECONNABORTED / EPIPE (TCP-level resets)
+//
+// Persistent (NOT transient):
+//   - errNotFound (HTTP 404 — the album genuinely isn't on MB)
+//   - JSON decode errors (schema drift; will fail every retry)
+//   - HTTP 4xx other than 429 (bad request shape, auth, etc.)
+func IsTransient(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Don't double-classify a pure cancel as transient.
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	// net.Error covers most timeout / DNS / connect-refused shapes.
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return true
+	}
+	// TCP-level resets surface as wrapped syscall errnos.
+	if errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.ECONNABORTED) ||
+		errors.Is(err, syscall.EPIPE) ||
+		errors.Is(err, syscall.ETIMEDOUT) {
+		return true
+	}
+	// HTTP status is encoded in the error string by `Do`'s formatter.
+	// Match on the canonical "musicbrainz: HTTP NNN" prefix; keeping
+	// the substring narrow avoids false positives on bodies that
+	// happen to mention "HTTP 503" in their text.
+	msg := err.Error()
+	if strings.Contains(msg, "musicbrainz: HTTP 5") ||
+		strings.Contains(msg, "musicbrainz: HTTP 429") {
+		return true
+	}
+	return false
+}
 
 // --- JSON shapes (only the fields we actually consume) ---
 

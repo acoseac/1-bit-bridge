@@ -150,6 +150,21 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	// walk"); the walker decides on visibility, not the worker.
 	seen := make(map[string]struct{}, len(before))
 
+	// Subtrees where the walker hit a transient I/O error (NAS drop,
+	// antivirus lock, permission flap). The deletion pass below MUST
+	// NOT delete tracks under these subtrees — pre-fix, a 200ms
+	// network blip during a NAS scan caused every track in the
+	// affected subtree to drop out of `seen` and get DeleteTrack'd
+	// from the manifest. Files on disk were untouched but the
+	// bridge served an empty/partial library until the next clean
+	// scan repopulated. PR #N closes this hole.
+	//
+	// Keys are absolute directory paths (matching the form WalkDir
+	// passes to the err callback); the deletion-pass guard checks
+	// each candidate path against every entry as a hierarchical
+	// prefix.
+	errorSubtrees := make(map[string]struct{})
+
 	// Snapshot roots once per scan so a mid-flight SetRoots doesn't re-enter
 	// the walk with a different set.
 	rootsPtr := s.roots.Load()
@@ -183,7 +198,7 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	// track-upsert path (which holds s.mu).
 	var walkErr error
 	for _, root := range roots {
-		if err := s.walkRoot(ctx, root, multiRoot, seen, paths); err != nil {
+		if err := s.walkRoot(ctx, root, multiRoot, seen, errorSubtrees, paths); err != nil {
 			walkErr = err
 			break
 		}
@@ -204,13 +219,30 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	}
 
 	// Deletion pass: anything in the "before" snapshot that we didn't see
-	// in this walk is gone from disk.
+	// in this walk is gone from disk — UNLESS the path lives under an
+	// errored subtree, in which case we spare it. A transient WalkDir
+	// error (NAS drop, antivirus lock) leaves the affected paths
+	// outside `seen` even though the underlying files are still on
+	// disk; deleting them from the manifest in that case wipes the
+	// bridge's view of the library. PR #N introduced the spare;
+	// before, a single network blip during a 50k-track NAS scan was
+	// the most likely cause of "the bridge lost my library" reports.
+	spared := 0
 	for p := range beforeSet {
-		if _, ok := seen[p]; !ok {
-			if err := s.store.DeleteTrack(p); err != nil {
-				log.Printf("scanner: delete track %q: %v", p, err)
-			}
+		if _, ok := seen[p]; ok {
+			continue
 		}
+		if isUnderErroredSubtree(p, errorSubtrees) {
+			spared++
+			continue
+		}
+		if err := s.store.DeleteTrack(p); err != nil {
+			log.Printf("scanner: delete track %q: %v", p, err)
+		}
+	}
+	if spared > 0 {
+		log.Printf("scanner: spared %d tracks from deletion (parent walk error this pass; affected subtrees: %d)",
+			spared, len(errorSubtrees))
 	}
 
 	s.lastFull.Store(time.Now().UTC().UnixNano())
@@ -306,12 +338,28 @@ func (s *Scanner) runScanWriter(ctx context.Context, writes <-chan *Track, commi
 // pool via `paths`. The deletion-pass `seen` map is written here so
 // workers don't need a mutex around it — visibility-during-walk is a
 // walker-domain concern, independent of whether the worker actually
-// re-extracts (early-skip case) or persists.
-func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, seen map[string]struct{}, paths chan<- pathInfo) error {
+// re-extracts (early-skip case) or persists. `errorSubtrees` is also
+// written here when the WalkDir err callback fires — the deletion
+// pass uses it to spare tracks under transiently-unreachable
+// subtrees from being wiped from the manifest (PR #N).
+func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, seen, errorSubtrees map[string]struct{}, paths chan<- pathInfo) error {
 	return filepath.WalkDir(root, func(abs string, d fs.DirEntry, err error) error {
 		if err != nil {
 			// Permission error on one dir shouldn't kill the whole scan.
 			log.Printf("scanner: walk %q: %v", abs, err)
+			// Record the affected subtree so the deletion pass
+			// won't wipe its tracks. If `d` is non-nil and a
+			// directory, key on `abs` itself; otherwise key on
+			// the parent (the closest known directory at the
+			// error point). The walker will not descend into
+			// the failed dir, so any tracks in `beforeSet`
+			// under this prefix won't reach `seen` this pass.
+			key := abs
+			if d != nil && !d.IsDir() {
+				key = filepath.Dir(abs)
+			}
+			rel := relPath(root, key, multiRoot)
+			errorSubtrees[rel] = struct{}{}
 			return nil
 		}
 		if ctx.Err() != nil {
@@ -343,6 +391,13 @@ func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, see
 		info, err := d.Info()
 		if err != nil {
 			log.Printf("scanner: stat %q: %v", abs, err)
+			// Stat failure on a known audio extension — record the
+			// parent so the file isn't wiped from the manifest.
+			// Same containment rationale as the err-callback branch
+			// above: a transient I/O hiccup shouldn't trigger a
+			// delete.
+			rel := relPath(root, filepath.Dir(abs), multiRoot)
+			errorSubtrees[rel] = struct{}{}
 			return nil
 		}
 
@@ -356,6 +411,34 @@ func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, see
 		}
 		return nil
 	})
+}
+
+// isUnderErroredSubtree reports whether `path` is at or under any of
+// the directory paths the walker recorded in `errorSubtrees`. Used
+// by the deletion pass to spare tracks whose parent dir hit a
+// transient I/O error this pass — without this guard a single
+// network blip during a NAS scan wipes the affected subtree from
+// the manifest. Both `path` and the keys are in the
+// library-relative forward-slash form `relPath` produces.
+func isUnderErroredSubtree(path string, errorSubtrees map[string]struct{}) bool {
+	if len(errorSubtrees) == 0 {
+		return false
+	}
+	for sub := range errorSubtrees {
+		if path == sub {
+			return true
+		}
+		// Append a trailing slash so a sibling like "foo-other" can't
+		// match "foo" — only paths actually under `sub/` qualify.
+		prefix := sub
+		if !strings.HasSuffix(prefix, "/") {
+			prefix += "/"
+		}
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // relPath converts an absolute on-disk path to the library-relative,

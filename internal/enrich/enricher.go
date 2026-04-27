@@ -204,13 +204,23 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 				log.Printf("enricher: MB search %q / %q: %v", t.Artist, t.Album, err)
 				// Cache the failure as an empty resolution so sibling
 				// tracks on the same album don't re-hammer MB with the
-				// same query and hit the same error. This matters for
-				// persistent decode errors (e.g. schema drift) where
-				// every retry is guaranteed to fail — without the
-				// cache, the worker loops forever on an N-track album.
-				// Successful searches populate the same cache entry
-				// with real MBIDs the next pass over.
+				// same query and hit the same error. The cache is
+				// process-local (resets on restart), so a transient
+				// outage will retry on the next bridge run.
 				e.albumCache.Store(key, albumResolution{})
+				if IsTransient(err) {
+					// Network blip, 5xx, 429, or timeout — leave
+					// `enriched_at` at 0 so the next pass picks
+					// this track up again. PR #N: pre-fix, a 30-
+					// second MusicBrainz outage permanently
+					// poisoned every track currently being enriched
+					// because every error went straight to
+					// `markSkipped`. Persistent failures (404, JSON
+					// decode, schema drift) still skip — those are
+					// guaranteed to fail every retry and would loop
+					// the worker indefinitely.
+					return
+				}
 				e.markSkipped(t, fmt.Sprintf("MB error: %v", err))
 				return
 			}
