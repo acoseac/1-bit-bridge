@@ -290,8 +290,29 @@ func (s *Server) Serve(ctx context.Context) error {
 		return fmt.Errorf("admin listen %s: %w", addr, err)
 	}
 	srv := &http.Server{
-		Handler:           s.Handler(),
+		Handler: s.Handler(),
+		// Slowloris-class defense. The admin console binds loopback
+		// only by config validation, but a misbehaving local client
+		// (or a buggy admin script) trickling bytes 1/sec could
+		// otherwise tie up an FD indefinitely. Pre-fix only
+		// `ReadHeaderTimeout` was set; adding `ReadTimeout` and
+		// `IdleTimeout` closes the request-side gap (PR #75).
+		//
+		// `WriteTimeout` is deliberately left UNSET (zero) — the
+		// admin handler exposes long-running synchronous endpoints
+		// like `/api/updates/install` (binary download + swap) and
+		// `/api/backups` (tarball snapshot) that legitimately take
+		// minutes on large libraries. A 60s WriteTimeout would
+		// tear the response connection mid-flight and leave the
+		// operator's UI stuck on "loading" while the server-side
+		// operation continues in the background. qodo bot review
+		// on PR #75 caught this. The Slowloris-class write
+		// trickle is not a meaningful threat on a loopback admin
+		// listener — IdleTimeout reaps the kept-alive socket pool
+		// which is the realistic FD-exhaustion vector.
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(lis) }()

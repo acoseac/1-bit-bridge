@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func newTmpStore(t *testing.T) (*Store, string) {
@@ -609,5 +610,79 @@ func TestGetUnknownReturnsErrNotFound(t *testing.T) {
 	s, _ := newTmpStore(t)
 	if _, err := s.Get("ffffffffffff"); err != ErrNotFound {
 		t.Errorf("Get(unknown): err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestRecordClientVersion_TruncatesAtUTF8Boundary pins the contract
+// added by PR #N: when the X-Client-Version header exceeds
+// `maxClientVersionLen` and the byte at that index lands mid-rune,
+// we trim back to the last valid UTF-8 boundary so we never persist
+// a half-rune to tokens.json. Pre-fix, a 65-byte string with a
+// multi-byte rune at byte 64 was sliced to 64 bytes producing
+// malformed UTF-8.
+func TestRecordClientVersion_TruncatesAtUTF8Boundary(t *testing.T) {
+	s, _ := newTmpStore(t)
+	_, tok, err := s.Mint("test")
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+
+	// Build a 65-byte string ending in a 3-byte rune ('好' = E5 A5 BD).
+	// First 62 bytes are ASCII, then the 3-byte rune fills bytes
+	// 62..64. The byte-slice at maxClientVersionLen=64 lands mid-
+	// rune — pre-fix that produced "...好"-with-truncated-tail
+	// (byte 64 is the second byte of '好', byte 65 is dropped).
+	long := strings.Repeat("a", 62) + "好"
+	if len(long) != 65 {
+		t.Fatalf("setup error: built len(long)=%d, want 65", len(long))
+	}
+	if !strings.HasSuffix(long, "好") {
+		t.Fatalf("setup error: long doesn't end in 好")
+	}
+
+	s.RecordClientVersion(tok.ID, long)
+
+	got, err := s.Get(tok.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+
+	// The stored version must be valid UTF-8.
+	if !utf8.ValidString(got.LastClientVersion) {
+		t.Errorf("stored version is not valid UTF-8: %q (bytes: % x)",
+			got.LastClientVersion, []byte(got.LastClientVersion))
+	}
+	// And it must be the prefix that ends BEFORE the offending
+	// rune (62 'a's, no 好) — the trim back to a valid boundary
+	// drops the partial rune entirely.
+	want := strings.Repeat("a", 62)
+	if got.LastClientVersion != want {
+		t.Errorf("trim landed wrong:\n  got  %q (len=%d)\n  want %q (len=%d)",
+			got.LastClientVersion, len(got.LastClientVersion),
+			want, len(want))
+	}
+}
+
+// TestRecordClientVersion_ASCIIBoundaryUnchanged is the partner test:
+// when the byte at `maxClientVersionLen` is at an ASCII boundary,
+// truncation behaves exactly like the pre-fix byte-slice (drops to
+// 64 bytes, no extra trim). Guards against the UTF-8-safe path
+// over-truncating a perfectly valid input.
+func TestRecordClientVersion_ASCIIBoundaryUnchanged(t *testing.T) {
+	s, _ := newTmpStore(t)
+	_, tok, err := s.Mint("test")
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+
+	long := strings.Repeat("a", 100) // pure ASCII, length 100
+	s.RecordClientVersion(tok.ID, long)
+
+	got, _ := s.Get(tok.ID)
+	want := strings.Repeat("a", 64)
+	if got.LastClientVersion != want {
+		t.Errorf("ASCII-boundary trim landed wrong:\n  got  %q (len=%d)\n  want %q (len=%d)",
+			got.LastClientVersion, len(got.LastClientVersion),
+			want, len(want))
 	}
 }

@@ -116,10 +116,19 @@ type UpdateConfig struct {
 
 // Defaults applied when a field is absent or zero-valued.
 const (
-	DefaultListenAddress       = ":7788"
-	DefaultAdminAddress        = "127.0.0.1:7789"
-	DefaultDataDir             = "./data"
-	DefaultScanIntervalSec     = 3600
+	DefaultListenAddress = ":7788"
+	DefaultAdminAddress  = "127.0.0.1:7789"
+	DefaultDataDir       = "./data"
+	// DefaultScanIntervalSec is 6h, not 1h. A 50k-track library on
+	// mechanical NAS with the prior 1h cadence spun the disks every
+	// hour preventing idle spindown — operator-facing wear hazard.
+	// Operators with quiet libraries should set this higher; admin
+	// console exposes on-demand triggers for ad-hoc rescans.
+	// fsnotify integration would let us drop this further but has
+	// cross-platform pitfalls (Windows path semantics, recursive
+	// watch fan-out on large libraries) and deserves its own design
+	// pass (PR #N).
+	DefaultScanIntervalSec     = 21600
 	DefaultLibraryName         = "1-bit Bridge"
 	DefaultBackupIntervalHours = 24
 	DefaultBackupKeep          = 7
