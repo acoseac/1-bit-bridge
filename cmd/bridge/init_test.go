@@ -27,15 +27,24 @@ func TestInitNonInteractiveHappyPath(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
+	// `--skip-doctor` is non-negotiable here: doctor's preflight checks
+	// the default API + admin ports (7788 / 7789) for availability, and
+	// any process already bound to either — a launchd-installed bridge,
+	// a `/tmp/bridge-live` dev fixture, a leftover `bridge serve` —
+	// makes the check fail and init exits 1 with the doctor narration
+	// going to stdout (so stderr ends up empty, hiding the cause). This
+	// test is about config + TLS material setup; port-availability has
+	// its own coverage in `internal/doctor`.
 	code := initCmd([]string{
 		"--yes",
 		"--no-service",
+		"--skip-doctor",
 		"--dir", cfgDir,
 		"--library", lib,
 		"--name", "Test Home",
 	}, strings.NewReader(""), &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("initCmd: code=%d stderr=%s", code, stderr.String())
+		t.Fatalf("initCmd: code=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
 	}
 
 	// Config file exists and round-trips through Load.
@@ -199,17 +208,19 @@ func TestInitInteractiveSkipOnExistingConfig(t *testing.T) {
 
 	// Interactive (no --yes): answer "n" to overwrite prompt; the name
 	// and library flags still need to be supplied since we don't answer
-	// those prompts in this stdin script.
+	// those prompts in this stdin script. `--skip-doctor` for the same
+	// port-availability reason as TestInitNonInteractiveHappyPath.
 	stdin := strings.NewReader("n\n")
 	var stdout, stderr bytes.Buffer
 	code := initCmd([]string{
 		"--no-service",
+		"--skip-doctor",
 		"--dir", cfgDir,
 		"--library", lib,
 		"--name", "ignored",
 	}, stdin, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("initCmd: code=%d stderr=%s", code, stderr.String())
+		t.Fatalf("initCmd: code=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
 	}
 
 	// Config file is unchanged (still the exact bytes we wrote).

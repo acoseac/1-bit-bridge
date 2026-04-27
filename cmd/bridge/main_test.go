@@ -41,6 +41,21 @@ func (s *safeBuffer) String() string {
 
 // writeValidConfig drops a minimal-but-valid bridge.yaml next to a real
 // library root. Returns the config path.
+//
+// `adminAddress: 127.0.0.1:0` is the load-bearing line: without it, the
+// admin server inside `serveCmd` defaults to `127.0.0.1:7789` (per
+// `config.DefaultAdminAddress`). On a developer machine where another
+// bridge instance is already running — a launchd-installed service, a
+// `/tmp/bridge-live` dev fixture, even a leftover `bridge serve` from
+// an earlier shell — that port is taken and the admin `Listen` returns
+// `bind: address already in use`. The serve goroutine then exits with
+// code 1 and the test fails with a "connection refused" on the API
+// port, which masquerades as a broader server-startup bug.
+//
+// Using port 0 picks an ephemeral admin port per test, which is the
+// same pattern `--addr 127.0.0.1:0` uses for the API server — both
+// services pick free ports independently of any other process on the
+// host.
 func writeValidConfig(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -49,7 +64,8 @@ func writeValidConfig(t *testing.T) string {
 		t.Fatal(err)
 	}
 	cfgPath := filepath.Join(dir, "bridge.yaml")
-	if err := os.WriteFile(cfgPath, []byte("libraryRoots:\n  - "+lib+"\n"), 0o644); err != nil {
+	body := "libraryRoots:\n  - " + lib + "\nadminAddress: 127.0.0.1:0\n"
+	if err := os.WriteFile(cfgPath, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return cfgPath

@@ -124,10 +124,33 @@ func (s *Store) UnenrichedTracks(limit int) ([]Track, error) {
 	return out, rows.Err()
 }
 
+// marshalForStorage encodes a Track into the JSON blob written to
+// `tags_json`. **Strips `Enriched` before marshalling** so the field
+// is never persisted in the blob — the column-truth invariant is that
+// `Track.Enriched` is column-derived (`enriched_at != 0`) at read
+// time and must not exist in `tags_json`.
+//
+// Without this, a caller that takes a `Track` from `ListTracks` /
+// `ListTracksPage` (which DO splice `Enriched` from the column) and
+// passes it back into `UpsertTrack` or `MarkEnriched` would persist
+// the spliced value into `tags_json`. Then `GetTrack` /
+// `UnenrichedTracks` (which read only the JSON, not the column)
+// would deserialize a stale `Enriched` flag — and an `UpsertTrack`
+// that resets `enriched_at = 0` would leave the column saying "not
+// enriched" while the JSON says "enriched: true". CodeRabbit caught
+// the latent risk on PR #68 even though no caller exercises it
+// today; this defensive shim makes the invariant structural rather
+// than relying on every future caller to remember.
+func marshalForStorage(t *Track) ([]byte, error) {
+	clone := *t
+	clone.Enriched = nil
+	return json.Marshal(&clone)
+}
+
 // MarkEnriched updates a Track's stored tags (with enricher additions) and
 // stamps enriched_at so the worker won't re-process it.
 func (s *Store) MarkEnriched(t *Track) error {
-	raw, err := json.Marshal(t)
+	raw, err := marshalForStorage(t)
 	if err != nil {
 		return err
 	}
@@ -144,7 +167,7 @@ func (s *Store) MarkEnriched(t *Track) error {
 // UpsertTrack writes or replaces the row for t.Path. The tags are encoded
 // as JSON so the schema can evolve without column migrations during v0.
 func (s *Store) UpsertTrack(t *Track) error {
-	raw, err := json.Marshal(t)
+	raw, err := marshalForStorage(t)
 	if err != nil {
 		return err
 	}
@@ -184,6 +207,24 @@ func (s *Store) GetTrack(path string) (*Track, error) {
 	return &t, nil
 }
 
+// Shared sentinels for `Track.Enriched`'s pointer assignments. The
+// field is `*bool` for wire-shape reasons (nil distinguishes
+// "pre-v1.1 server, field absent" from explicit `false`), but the
+// server-side scan only ever needs two values. Without these,
+// `t.Enriched = &enriched` where `enriched` is a loop-local would
+// force one heap allocation per track — Qodo flagged this on a
+// 50k-track library as a real GC-pressure issue. Two package-level
+// vars let every row share the same two pointers and the loop
+// allocates nothing extra.
+//
+// Safe to share: the value at `*enrichedTrue` / `*enrichedFalse` is
+// never mutated (the `Track.Enriched` consumers only ever read,
+// and the JSON encoder only reads as well).
+var (
+	enrichedTrue  = true
+	enrichedFalse = false
+)
+
 // ListTracks returns all tracks, or (if since != nil) only tracks that
 // were written/updated in the index after since. Filtered by
 // indexed_at (when we last wrote the row) rather than mtime_ns (the
@@ -191,8 +232,15 @@ func (s *Store) GetTrack(path string) (*Track, error) {
 // old mtime still surface in incremental deltas — otherwise the iOS
 // client has to do a full sync to see ripped-years-ago albums that
 // were just added.
+//
+// `Track.Enriched` is spliced in from the row's `enriched_at` column
+// (true iff != 0). The JSON-encoded `tags_json` blob doesn't carry
+// the enriched bit because enrichment status is column-tracked
+// separately from tag content — embedding it in `tags_json` would
+// require re-marshalling every track on each `MarkEnriched` write
+// just to flip a bool, which is what the column is for.
 func (s *Store) ListTracks(since *time.Time) ([]Track, error) {
-	q := `SELECT tags_json FROM tracks`
+	q := `SELECT tags_json, enriched_at FROM tracks`
 	args := []any{}
 	if since != nil {
 		q += ` WHERE indexed_at > ?`
@@ -207,12 +255,20 @@ func (s *Store) ListTracks(since *time.Time) ([]Track, error) {
 	out := []Track{}
 	for rows.Next() {
 		var raw []byte
-		if err := rows.Scan(&raw); err != nil {
+		var enrichedAt int64
+		if err := rows.Scan(&raw, &enrichedAt); err != nil {
 			return nil, err
 		}
 		var t Track
 		if err := json.Unmarshal(raw, &t); err != nil {
 			return nil, err
+		}
+		// Share package-level pointers — see the `enrichedTrue` /
+		// `enrichedFalse` declaration above for the rationale.
+		if enrichedAt != 0 {
+			t.Enriched = &enrichedTrue
+		} else {
+			t.Enriched = &enrichedFalse
 		}
 		out = append(out, t)
 	}
@@ -240,7 +296,7 @@ func (s *Store) ListTracksPage(afterPath string, limit int) ([]Track, error) {
 		limit = 1000
 	}
 	rows, err := s.db.Query(`
-		SELECT tags_json FROM tracks
+		SELECT tags_json, enriched_at FROM tracks
 		WHERE path > ?
 		ORDER BY path ASC
 		LIMIT ?
@@ -252,12 +308,22 @@ func (s *Store) ListTracksPage(afterPath string, limit int) ([]Track, error) {
 	out := []Track{}
 	for rows.Next() {
 		var raw []byte
-		if err := rows.Scan(&raw); err != nil {
+		var enrichedAt int64
+		if err := rows.Scan(&raw, &enrichedAt); err != nil {
 			return nil, err
 		}
 		var t Track
 		if err := json.Unmarshal(raw, &t); err != nil {
 			return nil, err
+		}
+		// Same enriched-from-column splice as `ListTracks` — see
+		// the comment there for the "why a column, not the JSON" detail
+		// and the `enrichedTrue` / `enrichedFalse` declaration for the
+		// pointer-sharing rationale.
+		if enrichedAt != 0 {
+			t.Enriched = &enrichedTrue
+		} else {
+			t.Enriched = &enrichedFalse
 		}
 		out = append(out, t)
 	}
@@ -338,6 +404,51 @@ func (s *Store) CountTracks() (int, error) {
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM tracks`).Scan(&n)
 	return n, err
+}
+
+// EnrichmentCounts returns the library-wide enrichment counters used
+// by the manifest's `enrichmentProgress` block: number of tracks past
+// the enrich pass (`enriched_at != 0`) and the wall-clock of the most
+// recent successful enrichment. Single SQL trip via aggregate
+// expressions so a 50k-track library doesn't allocate per-row.
+//
+// **Deliberately does NOT return total** — Qodo flagged the original
+// signature: combining `total` here with the `CountTracks()` call in
+// `BuildManifestPage`'s first-page branch produced two separate
+// COUNT(*) queries against `tracks`, and a concurrent
+// `UpsertTrack`/`DeleteTrack` between the two could let
+// `manifest.total` and `enrichmentProgress.tracksTotal` disagree
+// inside the same response — directly contradicting the protocol's
+// guarantee that they match. Callers now compute total once via
+// `CountTracks()` and reuse it for both fields, eliminating both the
+// divergence window and the redundant query.
+//
+// **Pointer return on `lastEnrichedAt`** so the JSON serialization
+// path can drop the field cleanly when no track has ever been
+// enriched. A zero `time.Time` value would slip past `omitempty` (Go's
+// `encoding/json` doesn't treat the time-struct's IsZero as "empty"),
+// emit `"0001-01-01T00:00:00Z"` on the wire, and the iOS decoder would
+// parse that as a real date — breaking the 24 h freshness gate.
+//
+// Backed implicitly by `idx_tracks_enriched` (already present from
+// `migrate`) — the `enriched_at != 0` and `MAX(enriched_at)` clauses
+// are both index-friendly.
+func (s *Store) EnrichmentCounts() (enriched int, lastEnrichedAt *time.Time, err error) {
+	var lastNs sql.NullInt64
+	err = s.db.QueryRow(`
+		SELECT
+			COALESCE(SUM(CASE WHEN enriched_at != 0 THEN 1 ELSE 0 END), 0),
+			MAX(enriched_at)
+		FROM tracks
+	`).Scan(&enriched, &lastNs)
+	if err != nil {
+		return 0, nil, err
+	}
+	if lastNs.Valid && lastNs.Int64 != 0 {
+		t := time.Unix(0, lastNs.Int64).UTC()
+		lastEnrichedAt = &t
+	}
+	return enriched, lastEnrichedAt, nil
 }
 
 // CountTracksByPrefix returns the number of track rows whose path begins
