@@ -156,6 +156,40 @@ func TestClassifyPublicForRoutableV4(t *testing.T) {
 	}
 }
 
+// --- Class.String() unit tests ---
+
+// TestClassStringStableLabels pins the user-facing class labels —
+// the admin console's "Reachable endpoints" panel renders these as
+// inline tags, and the JS in `app.js` lower-cases them to derive a
+// CSS class. Changing one of these strings is an admin-side wire-
+// shape change; bump the JS rendering at the same time. (PR #69 —
+// paired with iOS PR #150.)
+func TestClassStringStableLabels(t *testing.T) {
+	cases := map[Class]string{
+		ClassLANv4:       "LAN",
+		ClassLANv6:       "LAN",
+		ClassMDNSHost:    "mDNS",
+		ClassTailscaleV4: "Tailscale",
+		ClassTailscaleV6: "Tailscale",
+		ClassPublic:      "Public",
+	}
+	for c, want := range cases {
+		if got := c.String(); got != want {
+			t.Errorf("Class(%d).String() = %q, want %q", c, got, want)
+		}
+	}
+}
+
+func TestClassStringUnknownFallback(t *testing.T) {
+	// A future Class value beyond the const block should NOT crash
+	// or return "" — return "Unknown" so the admin UI renders
+	// SOMETHING and the operator can file a bug.
+	c := Class(99)
+	if got := c.String(); got != "Unknown" {
+		t.Errorf("Class(99).String() = %q, want %q", got, "Unknown")
+	}
+}
+
 // --- ipHostForURL() unit tests ---
 
 func TestIPHostForURLBracketsV6(t *testing.T) {

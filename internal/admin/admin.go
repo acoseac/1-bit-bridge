@@ -216,6 +216,7 @@ func (s *Server) Handler() http.Handler {
 
 	// JSON API.
 	mux.HandleFunc("GET /api/stats", s.apiStats)
+	mux.HandleFunc("GET /api/endpoints", s.apiEndpoints)
 	mux.HandleFunc("GET /api/updates", s.apiUpdatesGet)
 	mux.HandleFunc("POST /api/updates/check", s.apiUpdatesCheck)
 	mux.HandleFunc("POST /api/updates/install", s.apiUpdatesInstall)

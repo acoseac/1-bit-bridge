@@ -4,13 +4,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/advertise"
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
@@ -98,6 +101,54 @@ func (s *Server) apiStats(w http.ResponseWriter, r *http.Request) {
 		ListenAddress:   s.deps.Cfg.ListenAddress,
 		AdminAddress:    s.deps.Cfg.AdminAddress,
 	})
+}
+
+// --- GET /api/endpoints ---
+
+// adminEndpointEntry is the JSON shape for the admin console's
+// "Reachable endpoints" panel. Mirrors the per-URL shape iOS sees
+// in `/v1/health.endpoints`, plus a class label so the operator
+// can tell at a glance which interface is which (LAN / Tailscale
+// / mDNS / Public).
+//
+// The Class string is stable per `advertise.Class.String()` —
+// admin-side wire shape, not the device-facing `/v1/*` protocol.
+type adminEndpointEntry struct {
+	URL   string `json:"url"`
+	Class string `json:"class"`
+}
+
+// apiEndpoints returns the live set of advertised endpoints —
+// computed fresh on each call from `net.Interfaces()` so a
+// just-connected Tailscale interface (or a just-dropped LAN one)
+// is reflected immediately. Mirrors the per-call enumeration in
+// `s.reachableEndpoints()` over in `internal/api`, but admin-
+// scoped so the iOS-facing handler stays untouched.
+//
+// No reachability indicator from the bridge side — only the iOS
+// client knows reachability from its network position. Operators
+// see the list of addresses; iOS sees per-URL reachability via
+// the unified probe (paired iOS PR #150).
+func (s *Server) apiEndpoints(w http.ResponseWriter, r *http.Request) {
+	_, portStr, err := net.SplitHostPort(s.deps.Cfg.ListenAddress)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "bad_listen", "could not parse listen address")
+		return
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port <= 0 {
+		writeError(w, http.StatusInternalServerError, "bad_port", "invalid listen port")
+		return
+	}
+	eps := advertise.Endpoints(advertise.Params{Port: port})
+	out := make([]adminEndpointEntry, 0, len(eps))
+	for _, e := range eps {
+		out = append(out, adminEndpointEntry{
+			URL:   e.URL,
+			Class: e.Class.String(),
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // --- POST /api/scan ---
