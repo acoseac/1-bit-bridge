@@ -90,20 +90,21 @@ func TestManifestRejectsBadSince(t *testing.T) {
 func TestManifestAcceptsRFC3339Since(t *testing.T) {
 	mp := &fakeManifestProvider{body: map[string]any{"echo": "ok"}}
 	hs, tok := withManifest(t, mp)
-	u := hs.URL + "/v1/manifest?since=2026-01-02T03:04:05Z"
+	wantSince := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	u := hs.URL + "/v1/manifest?since=" + wantSince.Format(time.RFC3339Nano)
 	req, _ := http.NewRequest("GET", u, nil)
 	req.Header.Set("Authorization", "Bearer "+tok)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
-	if mp.lastSince.IsZero() {
-		t.Error("since not propagated")
-	}
-	if mp.lastSince.UTC().Year() != 2026 {
-		t.Errorf("since year = %d", mp.lastSince.UTC().Year())
+	if !mp.lastSince.Equal(wantSince) {
+		t.Errorf("since forwarded = %v, want %v", mp.lastSince, wantSince)
 	}
 }
 
