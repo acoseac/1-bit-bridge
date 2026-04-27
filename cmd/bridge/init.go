@@ -449,16 +449,23 @@ func finishInit(in *bufio.Reader, nonInteractive bool, stdout, stderr io.Writer,
 		fmt.Fprintf(stdout, "Windows Service installed: %s\n", unitPath)
 		serverIsLive = true // SCM's Start() fired during Install.
 	} else {
-		// On Windows, choice.spawnNow == option 1 ("Launch when I log
-		// in / Startup-folder launcher"). The operator made a deliberate
-		// pick — `Install`'s SCM-first auto-elevation would silently
-		// turn that into a Windows Service when the wizard runs from
-		// an Administrator shell, and the resulting status line
-		// ("background service (SCM)") wouldn't match what the operator
-		// chose. `InstallStartup` is the strict-Startup-folder path
-		// that bypasses the SCM tier. On macOS/Linux it returns ("", nil)
-		// and we fall back to `Install` (launchd / systemd user unit).
-		if runtime.GOOS == "windows" && choice.spawnNow {
+		// We're in the non-service branch — `choice.useService` is
+		// false (option 2 is handled in the if-branch above), and
+		// `choice.skipService` already returned at line 378. On
+		// Windows that means "Startup-folder launcher" regardless of
+		// `spawnNow`: both interactive option-1 (`spawnNow == true`)
+		// AND non-interactive `bridge init --yes` (no `--service`
+		// flag, `spawnNow == false`) are operator-explicit "no SCM"
+		// requests. `Install`'s SCM-first auto-elevation would
+		// silently install as a Windows Service when running elevated
+		// — the resulting status line ("background service (SCM)")
+		// wouldn't match the operator's choice. `InstallStartup`
+		// bypasses the SCM tier. On macOS/Linux it returns ("", nil)
+		// and we fall back to `Install` (launchd / systemd user unit)
+		// — those platforms have only one install mode anyway.
+		// (CodeRabbit / Gemini on PR #73 — first cut tied this to
+		// `choice.spawnNow` and missed the non-interactive default.)
+		if runtime.GOOS == "windows" {
 			unitPath, err = packaging.InstallStartup(params)
 		} else {
 			unitPath, err = packaging.Install(params)
