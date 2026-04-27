@@ -117,7 +117,7 @@ func logIfExpiringSoon(certPath string) {
 	switch {
 	case remaining <= 0:
 		log.Printf("tls: cert at %s expired %d days ago — every paired iOS client will fail at TLS handshake until you rotate (`bridge cert rotate` or admin console) and re-pair", certPath, -info.DaysUntilExpiry)
-	case remaining < expiryWarningWindow:
+	case remaining <= expiryWarningWindow:
 		log.Printf("tls: cert at %s expires in %d days — schedule a `bridge cert rotate` and re-pair every paired iOS client before then (Apple ATS rejects expired certs at the handshake layer)", certPath, info.DaysUntilExpiry)
 	}
 }

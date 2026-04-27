@@ -372,7 +372,7 @@ func BuildManifest(store *Store, roots []string, since time.Time) (*Manifest, er
 //
 // since, if non-zero, filters tracks by indexed_at (matches the
 // BuildManifest semantics).
-func WriteManifest(w io.Writer, store *Store, roots []string, since time.Time) error {
+func WriteManifest(w io.Writer, store *Store, roots []string, since time.Time) (err error) {
 	folders, err := store.ListFolders()
 	if err != nil {
 		return fmt.Errorf("list folders: %w", err)
@@ -405,6 +405,18 @@ func WriteManifest(w io.Writer, store *Store, roots []string, since time.Time) e
 	// a syscall — large libraries would otherwise pay one write(2) per
 	// row, dominating the streaming win.
 	bw := bufio.NewWriter(w)
+	// Flush via defer so an early return on stream error still ships
+	// the bytes already buffered (CodeRabbit on PR #70). Without this,
+	// a mid-stream failure could leave the client with no body at all
+	// — the deferred status writer in the handler still emits 200 once
+	// the first byte lands, so an unflushed prefix produces a
+	// 200-with-empty-body. The first error wins (named return shadows
+	// the flush error if streaming already failed).
+	defer func() {
+		if flushErr := bw.Flush(); err == nil && flushErr != nil {
+			err = flushErr
+		}
+	}()
 
 	writeField := func(prefix string, v any) error {
 		if _, err := bw.WriteString(prefix); err != nil {
@@ -470,7 +482,9 @@ func WriteManifest(w io.Writer, store *Store, roots []string, since time.Time) e
 	if _, err := bw.WriteString(`}`); err != nil {
 		return err
 	}
-	return bw.Flush()
+	// Final flush handled by the deferred call above so error paths
+	// also get one.
+	return nil
 }
 
 // BuildManifestPage returns one page of a paginated full-manifest

@@ -65,6 +65,14 @@ func TestGenerateFirstRun(t *testing.T) {
 	if remaining := time.Until(parsed.NotAfter); remaining > atsCap {
 		t.Errorf("NotAfter exceeds ATS cap of 398 days: remaining=%v", remaining)
 	}
+	// Belt-and-braces — the duration check above could pass for a cert
+	// that's already expired (right span, wrong absolute time). Confirm
+	// the freshly-minted cert is actually usable right now.
+	now := time.Now()
+	if parsed.NotBefore.After(now) || parsed.NotAfter.Before(now) {
+		t.Errorf("generated cert not valid at time of mint: notBefore=%s notAfter=%s now=%s",
+			parsed.NotBefore, parsed.NotAfter, now)
+	}
 
 	// RFC 5480 §3: KeyEncipherment MUST NOT be set on an EC-keyed cert;
 	// leaf server certs must not carry IsCA.

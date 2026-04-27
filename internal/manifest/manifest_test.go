@@ -655,6 +655,24 @@ func TestWriteManifestParityWithBuildManifest(t *testing.T) {
 	if len(got.Folders) != len(want.Folders) {
 		t.Errorf("folders: got %d, want %d", len(got.Folders), len(want.Folders))
 	}
+	// EnrichmentProgress is the field most likely to drift between the
+	// builder and the streaming writer (separate query path, separate
+	// envelope-emission code). CodeRabbit on PR #70 — the parity test
+	// has to cover it explicitly or a totals regression slips through.
+	if (got.EnrichmentProgress == nil) != (want.EnrichmentProgress == nil) {
+		t.Errorf("enrichmentProgress presence: got %v, want %v",
+			got.EnrichmentProgress, want.EnrichmentProgress)
+	}
+	if got.EnrichmentProgress != nil && want.EnrichmentProgress != nil {
+		if got.EnrichmentProgress.TracksTotal != want.EnrichmentProgress.TracksTotal {
+			t.Errorf("tracksTotal: got %d, want %d",
+				got.EnrichmentProgress.TracksTotal, want.EnrichmentProgress.TracksTotal)
+		}
+		if got.EnrichmentProgress.TracksEnriched != want.EnrichmentProgress.TracksEnriched {
+			t.Errorf("tracksEnriched: got %d, want %d",
+				got.EnrichmentProgress.TracksEnriched, want.EnrichmentProgress.TracksEnriched)
+		}
+	}
 }
 
 // TestWriteManifestStreamsLargeLibraryWithoutOOM exercises the legacy
