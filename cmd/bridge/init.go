@@ -449,7 +449,27 @@ func finishInit(in *bufio.Reader, nonInteractive bool, stdout, stderr io.Writer,
 		fmt.Fprintf(stdout, "Windows Service installed: %s\n", unitPath)
 		serverIsLive = true // SCM's Start() fired during Install.
 	} else {
-		unitPath, err = packaging.Install(params)
+		// We're in the non-service branch — `choice.useService` is
+		// false (option 2 is handled in the if-branch above), and
+		// `choice.skipService` already returned at line 378. On
+		// Windows that means "Startup-folder launcher" regardless of
+		// `spawnNow`: both interactive option-1 (`spawnNow == true`)
+		// AND non-interactive `bridge init --yes` (no `--service`
+		// flag, `spawnNow == false`) are operator-explicit "no SCM"
+		// requests. `Install`'s SCM-first auto-elevation would
+		// silently install as a Windows Service when running elevated
+		// — the resulting status line ("background service (SCM)")
+		// wouldn't match the operator's choice. `InstallStartup`
+		// bypasses the SCM tier. On macOS/Linux it returns ("", nil)
+		// and we fall back to `Install` (launchd / systemd user unit)
+		// — those platforms have only one install mode anyway.
+		// (CodeRabbit / Gemini on PR #73 — first cut tied this to
+		// `choice.spawnNow` and missed the non-interactive default.)
+		if runtime.GOOS == "windows" {
+			unitPath, err = packaging.InstallStartup(params)
+		} else {
+			unitPath, err = packaging.Install(params)
+		}
 		if err != nil {
 			fmt.Fprintf(stderr, "service install: %v\n", err)
 			fmt.Fprintln(stderr, "You can still run the bridge manually:")

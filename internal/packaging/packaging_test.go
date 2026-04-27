@@ -1,6 +1,7 @@
 package packaging
 
 import (
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -163,5 +164,30 @@ func TestDefaultLogPathNotEmpty(t *testing.T) {
 	}
 	if p == "" || !strings.Contains(p, "1-bit-bridge") {
 		t.Errorf("DefaultLogPath = %q", p)
+	}
+}
+
+// TestInstallStartupOnNonWindowsIsNoOp pins the cross-platform
+// contract: on non-Windows, InstallStartup returns ("", nil) so the
+// wizard's unified call site doesn't need a runtime.GOOS branch
+// at every site that wants strict-Startup-folder semantics. The
+// macOS / Linux paths each have a single install mode, so the
+// "Startup folder" distinction has no analogue there.
+func TestInstallStartupOnNonWindowsIsNoOp(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("non-Windows-only contract")
+	}
+	path, err := InstallStartup(Params{
+		Label:      ServiceLabel,
+		BinaryPath: "/tmp/bridge",
+		ConfigPath: "/tmp/bridge.yaml",
+		WorkingDir: "/tmp",
+		LogPath:    "/tmp/bridge.log",
+	})
+	if err != nil {
+		t.Errorf("InstallStartup error on %s: %v", runtime.GOOS, err)
+	}
+	if path != "" {
+		t.Errorf("InstallStartup path on %s = %q, want empty", runtime.GOOS, path)
 	}
 }
