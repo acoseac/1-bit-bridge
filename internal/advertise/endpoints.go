@@ -113,6 +113,15 @@ func Endpoints(p Params) []Endpoint {
 			if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
 				continue
 			}
+			if isVirtualSwitchInterface(iface.Name) {
+				// Windows Hyper-V / WSL / VirtualBox / VMware host
+				// virtual switches enumerate as up interfaces with
+				// 192.168.x.1 host-only IPs. iOS can't route to them,
+				// and shipping them in /v1/health just produces red
+				// "request timed out" rows in the device's endpoint
+				// list. Drop at the source.
+				continue
+			}
 			addrs, err := iface.Addrs()
 			if err != nil {
 				continue
@@ -250,6 +259,59 @@ var cgnatV4 = &net.IPNet{
 var tsULAv6 = &net.IPNet{
 	IP:   net.ParseIP("fd7a:115c:a1e0::"),
 	Mask: net.CIDRMask(48, 128),
+}
+
+// virtualSwitchPrefixes are Windows interface-name prefixes for host
+// host-only virtual switches (Hyper-V default + WSL, VirtualBox,
+// VMware host-only, Docker, Npcap loopback, Bluetooth PAN). These
+// are always up but their 192.168.x.1 / 172.x.x.1 IPs aren't routable
+// from off-host — iOS sees them as "request timed out" rows in the
+// bridge endpoint list. Match is case-insensitive prefix.
+//
+// **Hyper-V external switches are deliberately NOT filtered.** On
+// Windows hosts that bridge their LAN through an external Hyper-V
+// switch, the only physical-LAN-carrying adapter is named
+// `vEthernet (External Switch)` (or similar) — a blanket `vethernet`
+// prefix would drop the host's real LAN IP. We only filter the
+// canonical host-only variants by their parenthesised type label
+// (CodeRabbit on PR #72).
+//
+// References for the canonical names:
+//   - "vEthernet (Default Switch)" — Hyper-V default host-only switch
+//   - "vEthernet (WSL)" / "WSL" — Windows Subsystem for Linux vNIC
+//   - "vEthernet (Internal)" / "vEthernet (Private)" — non-external switches
+//   - "VirtualBox Host-Only Network" — VirtualBox
+//   - "VMware Network Adapter VMnet*" — VMware Workstation
+//   - "Docker ..." — Docker for Windows
+//   - "Bluetooth Network Connection" — Bluetooth PAN
+//   - "Npcap Loopback Adapter" — Wireshark
+var virtualSwitchPrefixes = []string{
+	"vethernet (default switch", // Hyper-V default switch
+	"vethernet (wsl",            // WSL vNIC
+	"vethernet (internal",       // Hyper-V internal switch
+	"vethernet (private",        // Hyper-V private switch
+	"vethernet (nat",            // Docker Desktop / Podman vSwitch
+	"wsl",                       // WSL2 standalone vNIC
+	"virtualbox",                // VirtualBox host-only
+	"vmware",                    // VMware Workstation/Player
+	"vbox",                      // VirtualBox alt naming
+	"docker",                    // Docker for Windows
+	"npcap loopback",            // Wireshark Npcap loopback adapter
+	"bluetooth",                 // Bluetooth PAN connection
+}
+
+// isVirtualSwitchInterface reports whether name looks like a Windows
+// host-only virtual-switch adapter that iOS will never route to. The
+// match is case-insensitive prefix, lenient on purpose to catch the
+// common shapes without enumerating every install variant.
+func isVirtualSwitchInterface(name string) bool {
+	lower := strings.ToLower(name)
+	for _, p := range virtualSwitchPrefixes {
+		if strings.HasPrefix(lower, p) {
+			return true
+		}
+	}
+	return false
 }
 
 func isTailscale(iface net.Interface, ip net.IP) bool {

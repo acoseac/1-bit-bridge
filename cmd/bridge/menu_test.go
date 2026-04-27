@@ -5,10 +5,12 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"net"
 	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/packaging"
 )
@@ -233,5 +235,43 @@ func TestMenuRendersStableSnapshot(t *testing.T) {
 	if !strings.Contains(out, "/Users/me/cfg/bridge.yaml") &&
 		!strings.Contains(out, "...") {
 		t.Errorf("status missing cfg path (or its truncation): %q", out)
+	}
+}
+
+// TestWaitForListenAcceptsListeningAddress confirms the post-restart
+// health probe returns true once a real listener is bound. Spins up
+// a throwaway net.Listen target on a random port — same shape as the
+// admin server the real bridge process binds.
+func TestWaitForListenAcceptsListeningAddress(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	if !waitForListen(ln.Addr().String(), 2*time.Second) {
+		t.Errorf("waitForListen returned false on a real listener")
+	}
+}
+
+// TestWaitForListenTimesOutOnUnboundPort pins the negative-path
+// behaviour. Without a fast deadline-respecting return, the menu
+// would block the user-facing prompt for an indeterminate time when
+// the restarted bridge crashes during startup.
+func TestWaitForListenTimesOutOnUnboundPort(t *testing.T) {
+	// Bind+immediately-close gives us an address that's almost
+	// certainly free for the duration of the test.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+
+	start := time.Now()
+	if waitForListen(addr, 600*time.Millisecond) {
+		t.Errorf("waitForListen returned true for an unbound port")
+	}
+	if elapsed := time.Since(start); elapsed > 1500*time.Millisecond {
+		t.Errorf("waitForListen ran %v, expected to honour ~600ms deadline", elapsed)
 	}
 }
