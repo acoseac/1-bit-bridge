@@ -15,10 +15,12 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
 
+	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/packaging"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
@@ -124,6 +126,18 @@ func installAsServiceLabel(s menuState) string {
 // Ctrl+C cancels just the action's serve session and returns to the
 // menu — Go contexts can't be un-canceled, so a single shared
 // signal ctx would lock out all subsequent invocations.
+//
+// Termination signals at the menu's input prompt (SIGINT / SIGTERM
+// while the loop is blocked in `in.ReadBytes('\n')`) are handled by
+// Go's default signal disposition — both default to "terminate the
+// process," which is the right UX at a synchronous prompt. We don't
+// wire ctx.Done() into the read loop because cooked-mode bufio reads
+// don't observe ctx anyway; the reader can't unblock until the user
+// presses Enter. PR #65 reviewer flagged the "ctx unused" pattern as
+// a possible disconnect from main's signal-wired ctx — the actions
+// that DO need cancellation (actStartNow) build their own scope, and
+// idle-prompt cancellation is delegated to the runtime's default
+// handler intentionally.
 func menuLoop(ctx context.Context, in *bufio.Reader, stdout, stderr io.Writer) int {
 	for {
 		state := detectState()
@@ -248,8 +262,17 @@ func actQuit(_ context.Context, _ *bufio.Reader, stdout, _ io.Writer, _ menuStat
 // wizard prompts for everything; non-interactive flags (--yes etc.)
 // are not exposed via the menu — automation should keep using the
 // flag-driven path.
-func actSetup(_ context.Context, _ *bufio.Reader, stdout, stderr io.Writer, _ menuState) int {
-	_ = initCmd(nil, os.Stdin, stdout, stderr)
+//
+// CRITICAL: pass the menu's shared *bufio.Reader through to initCmd,
+// not bare os.Stdin. Two bufio.Readers wrapping the same underlying
+// fd each maintain their own buffer; if the menu read partially
+// buffered the next chunk before dispatching here, the inner
+// initCmd reader would miss those bytes and prompt-input would
+// desync. initCmd's own `bufio.NewReader(stdin)` over our existing
+// bufio.Reader works correctly — the inner reader satisfies its
+// reads from the outer's buffer + downstream fd transparently.
+func actSetup(_ context.Context, in *bufio.Reader, stdout, stderr io.Writer, _ menuState) int {
+	_ = initCmd(nil, in, stdout, stderr)
 	return -1
 }
 
@@ -320,10 +343,35 @@ func actInstallService(_ context.Context, in *bufio.Reader, stdout, stderr io.Wr
 	if err != nil || binary == "" {
 		binary = os.Args[0]
 	}
-	logPath, _ := packaging.DefaultLogPath()
+	if resolved, lerr := filepath.EvalSymlinks(binary); lerr == nil {
+		binary = resolved
+	}
+	// Match init.go's install pattern exactly: WorkingDir is the
+	// resolved data dir (launchd / systemd templates embed it as
+	// WorkingDirectory), DefaultLogPath errors are surfaced (not
+	// swallowed), and the log dir is mkdir'd before Install.
+	// Skipping any of these produces a service unit with empty
+	// WorkingDirectory or an unwritable log path — symptoms include
+	// "service installed" success followed by a daemon that never
+	// listens (qodo PR #65 catch).
+	logPath, err := packaging.DefaultLogPath()
+	if err != nil {
+		fmt.Fprintf(stderr, "  resolve log path: %v\n", err)
+		return -1
+	}
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		fmt.Fprintf(stderr, "  mkdir log dir: %v\n", err)
+		return -1
+	}
+	// dataDir = sibling of cfgPath: <cfgDir>/data per init.go's
+	// resolution. Re-deriving here rather than loading the full
+	// config keeps the menu lightweight; the resolved path matches
+	// what init.go set as cfg.DataDir at write time.
+	dataDir := filepath.Join(filepath.Dir(s.cfgPath), "data")
 	params := packaging.Params{
 		BinaryPath: binary,
 		ConfigPath: s.cfgPath,
+		WorkingDir: dataDir,
 		LogPath:    logPath,
 	}
 	unitPath, err := packaging.Install(params)
@@ -408,10 +456,19 @@ func actRestart(_ context.Context, _ *bufio.Reader, stdout, stderr io.Writer, _ 
 }
 
 // actOpenAdmin opens the local admin console URL in the user's
-// browser. Best-effort — on a headless host the open command will
-// fail and we just print the URL instead.
-func actOpenAdmin(_ context.Context, _ *bufio.Reader, stdout, _ io.Writer, _ menuState) int {
+// browser. Loads cfg.AdminAddress from bridge.yaml so a customised
+// admin port reaches the right URL — runServe binds and advertises
+// from the same field, and a hardcoded :7789 would 404 whenever the
+// operator changed it (PR #65 reviewer catch). Falls back to the
+// default if cfg load fails. Best-effort — on a headless host the
+// browser-open command fails silently and we just print the URL.
+func actOpenAdmin(_ context.Context, _ *bufio.Reader, stdout, _ io.Writer, s menuState) int {
 	url := "http://127.0.0.1:7789/"
+	if s.cfgPath != "" {
+		if cfg, err := config.Load(s.cfgPath); err == nil && cfg.AdminAddress != "" {
+			url = "http://" + cfg.AdminAddress + "/"
+		}
+	}
 	fmt.Fprintf(stdout, "  Admin console: %s\n", url)
 	switch runtime.GOOS {
 	case "darwin":
