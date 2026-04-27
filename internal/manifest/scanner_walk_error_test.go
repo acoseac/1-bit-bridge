@@ -129,14 +129,16 @@ func TestScannerStillDeletesTracksUnderHealthySubtree(t *testing.T) {
 }
 
 // TestIsUnderErroredSubtree pins the prefix-matching contract for the
-// helper, including the trailing-slash guard that prevents
-// "foo-other" from matching "foo".
+// helper: the trailing-slash guard preventing "foo-other" from
+// matching "foo", AND the root-level normalization where relPath
+// returns "." for the root itself (qodo + gemini bot review on
+// PR #N).
 func TestIsUnderErroredSubtree(t *testing.T) {
 	cases := []struct {
-		name    string
-		path    string
-		subs    []string
-		want    bool
+		name string
+		path string
+		subs []string
+		want bool
 	}{
 		{"empty subtree set", "albums/song.flac", nil, false},
 		{"exact match", "albums", []string{"albums"}, true},
@@ -146,6 +148,19 @@ func TestIsUnderErroredSubtree(t *testing.T) {
 		{"unrelated", "music/song.flac", []string{"albums"}, false},
 		{"multi-subtree, hit", "flaky/song.flac", []string{"healthy", "flaky"}, true},
 		{"multi-subtree, miss", "other/song.flac", []string{"healthy", "flaky"}, false},
+
+		// Root-level error normalization. `relPath(root, root, false)`
+		// returns "." which without normalization wouldn't prefix-
+		// match any track path. A whole-library outage (root
+		// unreachable) MUST spare every track.
+		{"root-level dot spares single-segment path", "song.flac", []string{"."}, true},
+		{"root-level dot spares deep path", "albums/2024/song.flac", []string{"."}, true},
+		{"empty-string subtree spares everything", "song.flac", []string{""}, true},
+		// Coexistence: a root-level dot plus a specific subtree
+		// still spares paths outside the specific subtree (the
+		// dot's blanket clause wins). Sentinel for "if any root
+		// errored, no deletions this pass."
+		{"dot plus specific spares unrelated path", "elsewhere/song.flac", []string{".", "albums"}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

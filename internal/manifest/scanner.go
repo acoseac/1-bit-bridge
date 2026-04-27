@@ -420,11 +420,26 @@ func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, see
 // network blip during a NAS scan wipes the affected subtree from
 // the manifest. Both `path` and the keys are in the
 // library-relative forward-slash form `relPath` produces.
+//
+// **Root-level error special case** (qodo + gemini bot review on
+// PR #N): `relPath(root, root, false)` returns `"."` and the
+// multi-root form returns `"<rootBase>"` (no trailing dot).
+// `strings.HasPrefix("song.flac", "./")` is false, so a whole-
+// library outage would otherwise spare zero tracks — defeating
+// the entire containment guarantee for the worst-case scenario
+// the PR was designed to handle. We normalize `"."` and the
+// empty string to "spare every track" since a root-level error
+// means every path under that root is unreachable this pass.
 func isUnderErroredSubtree(path string, errorSubtrees map[string]struct{}) bool {
 	if len(errorSubtrees) == 0 {
 		return false
 	}
 	for sub := range errorSubtrees {
+		if sub == "." || sub == "" {
+			// Whole-root outage — every track under this root
+			// counts as under the errored subtree by definition.
+			return true
+		}
 		if path == sub {
 			return true
 		}
