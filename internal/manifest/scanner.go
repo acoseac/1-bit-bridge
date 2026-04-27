@@ -421,24 +421,39 @@ func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, see
 // the manifest. Both `path` and the keys are in the
 // library-relative forward-slash form `relPath` produces.
 //
-// **Root-level error special case** (qodo + gemini bot review on
-// PR #N): `relPath(root, root, false)` returns `"."` and the
-// multi-root form returns `"<rootBase>"` (no trailing dot).
-// `strings.HasPrefix("song.flac", "./")` is false, so a whole-
-// library outage would otherwise spare zero tracks — defeating
-// the entire containment guarantee for the worst-case scenario
-// the PR was designed to handle. We normalize `"."` and the
-// empty string to "spare every track" since a root-level error
-// means every path under that root is unreachable this pass.
+// **Root-level error sentinels** (qodo + gemini bot review on
+// PR #74, plus coderabbit follow-up CRITICAL): the walker keys an
+// errored root via `relPath(root, root, multiRoot)`, which produces:
+//   - single-root mode: "."
+//   - multi-root mode:  "<rootBase>/." (because relPath in multi-
+//     root mode prepends the root's basename + "/" then appends the
+//     `filepath.Rel(root, root)` result, which is ".")
+//
+// Without normalising both forms, a whole-library outage in either
+// mode would spare zero tracks. We treat "." / "" as "every track"
+// (single-root) AND any path ending in "/." as "everything under
+// that root prefix" (multi-root). The latter handles the multi-
+// root case exactly without false-positive matching.
 func isUnderErroredSubtree(path string, errorSubtrees map[string]struct{}) bool {
 	if len(errorSubtrees) == 0 {
 		return false
 	}
 	for sub := range errorSubtrees {
 		if sub == "." || sub == "" {
-			// Whole-root outage — every track under this root
-			// counts as under the errored subtree by definition.
+			// Whole-root outage in single-root mode — every track
+			// under this root counts as under the errored subtree
+			// by definition.
 			return true
+		}
+		if strings.HasSuffix(sub, "/.") {
+			// Multi-root whole-root sentinel of the form
+			// "<rootBase>/." — every path under "<rootBase>/" is
+			// unreachable this pass.
+			rootPrefix := strings.TrimSuffix(sub, ".")
+			if strings.HasPrefix(path, rootPrefix) {
+				return true
+			}
+			continue
 		}
 		if path == sub {
 			return true

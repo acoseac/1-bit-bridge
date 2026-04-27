@@ -294,14 +294,31 @@ func IsTransient(err error) bool {
 		errors.Is(err, syscall.ETIMEDOUT) {
 		return true
 	}
-	// HTTP status is encoded in the error string by `Do`'s formatter.
-	// Match on the canonical "musicbrainz: HTTP NNN" prefix; keeping
-	// the substring narrow avoids false positives on bodies that
-	// happen to mention "HTTP 503" in their text.
+	// HTTP status is encoded in the error string by `Do`'s formatter
+	// as "musicbrainz: HTTP NNN: <body>". Parse the actual status
+	// token instead of substring-matching anywhere in the message —
+	// coderabbit bot review on PR #74 caught that a persistent 4xx
+	// whose body contains "HTTP 503" or "HTTP 429" (e.g., an HTML
+	// error page that mentions a status code somewhere) would
+	// otherwise be misclassified as transient and the worker would
+	// retry a guaranteed-fail track forever.
+	const httpPrefix = "musicbrainz: HTTP "
 	msg := err.Error()
-	if strings.Contains(msg, "musicbrainz: HTTP 5") ||
-		strings.Contains(msg, "musicbrainz: HTTP 429") {
-		return true
+	if strings.HasPrefix(msg, httpPrefix) {
+		rest := msg[len(httpPrefix):]
+		// Read the leading digits. Status codes are always 3 digits
+		// in HTTP/1.1; this loop tolerates any width.
+		end := 0
+		for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
+			end++
+		}
+		if end > 0 {
+			if code, parseErr := strconv.Atoi(rest[:end]); parseErr == nil {
+				if code >= 500 || code == 429 {
+					return true
+				}
+			}
+		}
 	}
 	return false
 }

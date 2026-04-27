@@ -21,11 +21,6 @@ import (
 // currently being enriched. The classifier in `IsTransient`
 // reverses that for the genuine-transient subset only.
 func TestIsTransient_PinsClassification(t *testing.T) {
-	type netTimeoutErr struct{}
-	// netTimeoutErr satisfies net.Error with Timeout() == true,
-	// modelling a connect-timeout / read-timeout from the http
-	// transport.
-
 	cases := []struct {
 		name string
 		err  error
@@ -87,11 +82,29 @@ func TestIsTransient_PinsClassification(t *testing.T) {
 		{"JSON decode error", errors.New("invalid character ',' looking for beginning of value"), false},
 		{"unrelated text", errors.New("some other thing went wrong"), false},
 
-		// Bodies that mention "HTTP 503" without the prefix do
-		// NOT match — the prefix is narrow on purpose so an
+		// Bodies that mention "HTTP 503" without the canonical
+		// prefix do NOT match — the parser only reads the
+		// status code right after "musicbrainz: HTTP ", so an
 		// upstream's HTML error page mentioning a status code
-		// somewhere doesn't false-positive.
+		// elsewhere can't false-positive.
 		{"body containing HTTP 503 but no prefix", errors.New("page says: HTTP 503 was returned"), false},
+		// Persistent 4xx WHOSE BODY CONTAINS "HTTP 503" must
+		// NOT be classified as transient — coderabbit MAJOR
+		// catch on PR #74 follow-up. Pre-fix substring match
+		// would treat this as transient and the worker would
+		// retry a guaranteed-fail track forever.
+		{"persistent 400 with body mentioning HTTP 503",
+			fmt.Errorf("musicbrainz: HTTP 400: server says HTTP 503 was returned earlier"),
+			false},
+		{"persistent 401 with body mentioning HTTP 429",
+			fmt.Errorf("musicbrainz: HTTP 401: too many requests (HTTP 429) on prior call"),
+			false},
+		// And the structured parser correctly handles the
+		// canonical transient cases even when the body is
+		// noisy.
+		{"transient 503 with messy body",
+			fmt.Errorf("musicbrainz: HTTP 503: <html>random text mentioning HTTP 200</html>"),
+			true},
 	}
 
 	for _, tc := range cases {

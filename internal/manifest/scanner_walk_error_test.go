@@ -161,6 +161,19 @@ func TestIsUnderErroredSubtree(t *testing.T) {
 		// dot's blanket clause wins). Sentinel for "if any root
 		// errored, no deletions this pass."
 		{"dot plus specific spares unrelated path", "elsewhere/song.flac", []string{".", "albums"}, true},
+
+		// Multi-root whole-root sentinel. `relPath(root, root, true)`
+		// produces "<rootBase>/." which the helper must treat as
+		// "spare everything under <rootBase>/". coderabbit CRITICAL
+		// bug catch on PR #74 follow-up — without this, multi-root
+		// configs with a downed root still wiped the manifest for
+		// that root.
+		{"multi-root sentinel spares path under same root", "music-nas/song.flac", []string{"music-nas/."}, true},
+		{"multi-root sentinel spares deep path under same root", "music-nas/Artist/Album/song.flac", []string{"music-nas/."}, true},
+		// And does NOT spare paths under a sibling root that didn't
+		// error — the dotted-suffix prefix is scoped to the right
+		// rootBase.
+		{"multi-root sentinel does not spare sibling root", "other-nas/song.flac", []string{"music-nas/."}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
