@@ -10,6 +10,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -23,6 +24,8 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"github.com/mattn/go-isatty"
 
 	"github.com/acoseac/1-bit-bridge/internal/admin"
 	"github.com/acoseac/1-bit-bridge/internal/api"
@@ -262,6 +265,18 @@ func main() {
 // cancellation from a test).
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
+		// Bare `bridge` on a real TTY drops into the launcher menu.
+		// Pipes / non-TTY (CI scripts, `bridge | cat`, automation)
+		// fall through to the existing usage + exit 2 — automation
+		// MUST keep seeing the original behavior.
+		//
+		// menuLoop owns its own ctx (context.Background) and creates
+		// per-action signal scopes inside dispatch — see the comment
+		// on menuLoop. The serve subcommand path keeps using ctx as
+		// before.
+		if isatty.IsTerminal(os.Stdin.Fd()) && isatty.IsTerminal(os.Stdout.Fd()) {
+			return menuLoop(context.Background(), bufio.NewReader(os.Stdin), stdout, stderr)
+		}
 		usage(stderr)
 		return 2
 	}

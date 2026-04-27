@@ -353,3 +353,23 @@ func shellHandoff(binPath, cfgPath string) string {
 func fprintBox(w io.Writer, s string) {
 	_, _ = fmt.Fprint(w, s)
 }
+
+// logo renders the menu's top banner — title + subtitle inside a
+// double-line box at frameWidth. Kept deliberately simple (no
+// multi-line ASCII art letters) so it fits the 55-col budget on
+// every supported terminal. The version string is pulled from the
+// bridge's `version` package; subtitle is the protocol number.
+//
+// Caller is expected to write the result to a real TTY; on
+// NO_COLOR / dumb terminals, the ASCII fallback box-drawing chars
+// (+/-/|/=) take over automatically via boxStyle.
+func logo(serverVersion string, protocol int) string {
+	title := fmt.Sprintf("1-bit-bridge  v%s", serverVersion)
+	subtitle := fmt.Sprintf("companion server · protocol v%d", protocol)
+	return box("", []string{
+		"",
+		"  " + paint(cBoldMagenta, title),
+		"  " + paint(cBrightCyan, subtitle),
+		"",
+	})
+}
