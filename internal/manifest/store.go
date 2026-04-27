@@ -124,10 +124,33 @@ func (s *Store) UnenrichedTracks(limit int) ([]Track, error) {
 	return out, rows.Err()
 }
 
+// marshalForStorage encodes a Track into the JSON blob written to
+// `tags_json`. **Strips `Enriched` before marshalling** so the field
+// is never persisted in the blob — the column-truth invariant is that
+// `Track.Enriched` is column-derived (`enriched_at != 0`) at read
+// time and must not exist in `tags_json`.
+//
+// Without this, a caller that takes a `Track` from `ListTracks` /
+// `ListTracksPage` (which DO splice `Enriched` from the column) and
+// passes it back into `UpsertTrack` or `MarkEnriched` would persist
+// the spliced value into `tags_json`. Then `GetTrack` /
+// `UnenrichedTracks` (which read only the JSON, not the column)
+// would deserialize a stale `Enriched` flag — and an `UpsertTrack`
+// that resets `enriched_at = 0` would leave the column saying "not
+// enriched" while the JSON says "enriched: true". CodeRabbit caught
+// the latent risk on PR #68 even though no caller exercises it
+// today; this defensive shim makes the invariant structural rather
+// than relying on every future caller to remember.
+func marshalForStorage(t *Track) ([]byte, error) {
+	clone := *t
+	clone.Enriched = nil
+	return json.Marshal(&clone)
+}
+
 // MarkEnriched updates a Track's stored tags (with enricher additions) and
 // stamps enriched_at so the worker won't re-process it.
 func (s *Store) MarkEnriched(t *Track) error {
-	raw, err := json.Marshal(t)
+	raw, err := marshalForStorage(t)
 	if err != nil {
 		return err
 	}
@@ -144,7 +167,7 @@ func (s *Store) MarkEnriched(t *Track) error {
 // UpsertTrack writes or replaces the row for t.Path. The tags are encoded
 // as JSON so the schema can evolve without column migrations during v0.
 func (s *Store) UpsertTrack(t *Track) error {
-	raw, err := json.Marshal(t)
+	raw, err := marshalForStorage(t)
 	if err != nil {
 		return err
 	}

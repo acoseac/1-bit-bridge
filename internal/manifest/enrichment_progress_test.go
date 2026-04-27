@@ -7,6 +7,22 @@ import (
 	"time"
 )
 
+// openTestStore is a small helper that calls `OpenStore` with a
+// temp-dir-backed path AND properly fails the test on open error.
+// Without this, a `s, _ := OpenStore(...)` followed by the usual
+// `defer s.Close()` would panic on a nil receiver if open ever failed
+// — masking the real migration / open error with a confusing
+// nil-pointer panic. CodeRabbit flagged the broader pattern on PR
+// #68; routing every test through this helper closes the gap once.
+func openTestStore(t *testing.T) *Store {
+	t.Helper()
+	s, err := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
 // TestStoreEnrichmentCountsEmpty pins the zero-state contract:
 // no tracks → enriched is zero, lastEnrichedAt is nil. iOS gates its
 // "enrichment in progress" UI on `tracksEnriched < tracksTotal`,
@@ -15,7 +31,7 @@ import (
 // Qodo's review (avoids divergence with the manifest's top-level
 // `total`).
 func TestStoreEnrichmentCountsEmpty(t *testing.T) {
-	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	s := openTestStore(t)
 	defer s.Close()
 	enriched, last, err := s.EnrichmentCounts()
 	if err != nil {
@@ -31,7 +47,7 @@ func TestStoreEnrichmentCountsEmpty(t *testing.T) {
 // tracks enriched, some still queued. Counters must report the
 // split correctly so iOS can drive its progress UI off the values.
 func TestStoreEnrichmentCountsMixed(t *testing.T) {
-	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	s := openTestStore(t)
 	defer s.Close()
 	now := time.Now().UTC().Truncate(time.Second)
 	for i := 0; i < 10; i++ {
@@ -69,7 +85,7 @@ func TestStoreEnrichmentCountsMixed(t *testing.T) {
 // writes. Refactoring `EnrichmentCounts()` to NOT return total + having
 // the builder feed both fields from one count call closes that gap.
 func TestEnrichmentProgressTotalMatchesManifestTotal(t *testing.T) {
-	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	s := openTestStore(t)
 	defer s.Close()
 	now := time.Now().UTC().Truncate(time.Second)
 	for i := 0; i < 7; i++ {
@@ -100,7 +116,7 @@ func TestEnrichmentProgressTotalMatchesManifestTotal(t *testing.T) {
 // Pointer type is the disambiguation: nil means "field absent on the
 // wire" (older bridges); non-nil with value gives the explicit answer.
 func TestListTracksPopulatesEnriched(t *testing.T) {
-	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	s := openTestStore(t)
 	defer s.Close()
 	now := time.Now().UTC().Truncate(time.Second)
 	s.UpsertTrack(&Track{Path: "a.flac", Size: 1, ModTime: now})
@@ -138,7 +154,7 @@ func TestListTracksPopulatesEnriched(t *testing.T) {
 // contract — every row carries an explicit Enriched pointer regardless
 // of the page index.
 func TestListTracksPagePopulatesEnriched(t *testing.T) {
-	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	s := openTestStore(t)
 	defer s.Close()
 	now := time.Now().UTC().Truncate(time.Second)
 	for i := 0; i < 5; i++ {
@@ -160,7 +176,7 @@ func TestListTracksPagePopulatesEnriched(t *testing.T) {
 // block on every response — counters reflect the store snapshot at
 // build time.
 func TestBuildManifestSetsEnrichmentProgress(t *testing.T) {
-	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	s := openTestStore(t)
 	defer s.Close()
 	now := time.Now().UTC().Truncate(time.Second)
 	for i := 0; i < 4; i++ {
@@ -191,7 +207,7 @@ func TestBuildManifestSetsEnrichmentProgress(t *testing.T) {
 // pagination run pays the EnrichmentProgress aggregate query exactly
 // once instead of 50 times.
 func TestBuildManifestPageEnrichmentProgressOnFirstPageOnly(t *testing.T) {
-	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	s := openTestStore(t)
 	defer s.Close()
 	now := time.Now().UTC().Truncate(time.Second)
 	for i := 1; i <= 5; i++ {
@@ -294,6 +310,70 @@ func TestManifestOmitsEnrichmentProgressWhenNil(t *testing.T) {
 	}
 }
 
+// TestUpsertTrackDoesNotPersistEnrichedField is the regression test
+// for CodeRabbit's column-only-invariant concern (PR #68 follow-up).
+// `Track.Enriched` is column-derived at READ time (`ListTracks` /
+// `ListTracksPage` splice it from `enriched_at`); it MUST NOT be
+// persisted into `tags_json` because the JSON-only readers
+// (`GetTrack` / `UnenrichedTracks`) don't overwrite it from the column,
+// so a stale value would silently drift from the column truth.
+//
+// Concretely: feed a Track with `Enriched: &true` through `UpsertTrack`
+// (which resets `enriched_at = 0`), then `GetTrack` reads back ONLY the
+// JSON. The column says "not enriched"; the JSON should NOT carry an
+// `enriched: true` that contradicts it. `marshalForStorage` strips the
+// field defensively so this stays true regardless of caller hygiene.
+func TestUpsertTrackDoesNotPersistEnrichedField(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// Construct a Track that already has Enriched=true (the realistic
+	// "caller fed a row from ListTracks back into UpsertTrack" path).
+	yes := true
+	tr := &Track{Path: "x.flac", Size: 1, ModTime: now, Enriched: &yes}
+	if err := s.UpsertTrack(tr); err != nil {
+		t.Fatal(err)
+	}
+
+	// GetTrack reads only `tags_json`. If the JSON contains
+	// `"enriched": true`, the returned Track will surface
+	// `Enriched != nil` — that's the bug.
+	got, err := s.GetTrack("x.flac")
+	if err != nil || got == nil {
+		t.Fatalf("GetTrack: %v / %v", err, got)
+	}
+	if got.Enriched != nil {
+		t.Errorf("UpsertTrack must not persist Enriched into tags_json, got Enriched=%v", *got.Enriched)
+	}
+}
+
+// TestMarkEnrichedDoesNotPersistEnrichedField mirrors the above for the
+// `MarkEnriched` write path. Same column-only-invariant rationale.
+func TestMarkEnrichedDoesNotPersistEnrichedField(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	if err := s.UpsertTrack(&Track{Path: "y.flac", Size: 1, ModTime: now}); err != nil {
+		t.Fatal(err)
+	}
+
+	yes := true
+	tr := &Track{Path: "y.flac", Size: 1, ModTime: now, Enriched: &yes}
+	if err := s.MarkEnriched(tr); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.GetTrack("y.flac")
+	if err != nil || got == nil {
+		t.Fatalf("GetTrack: %v / %v", err, got)
+	}
+	if got.Enriched != nil {
+		t.Errorf("MarkEnriched must not persist Enriched into tags_json, got Enriched=%v", *got.Enriched)
+	}
+}
+
 // TestEnrichmentProgressOmitsLastEnrichedAtWhenNeverEnriched is the
 // regression test for the bug Gemini caught on PR review: a non-pointer
 // `LastEnrichedAt time.Time` slips past `omitempty` because Go's
@@ -308,7 +388,7 @@ func TestManifestOmitsEnrichmentProgressWhenNil(t *testing.T) {
 // contract so a future "let's simplify away the pointer" refactor
 // reintroduces the bug visibly instead of silently.
 func TestEnrichmentProgressOmitsLastEnrichedAtWhenNeverEnriched(t *testing.T) {
-	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	s := openTestStore(t)
 	defer s.Close()
 	now := time.Now().UTC().Truncate(time.Second)
 	// A track that's been upserted but NOT enriched — the realistic
