@@ -10,11 +10,34 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 )
+
+// scanBatchSize is the per-transaction track-upsert batch size used by
+// the scanner's writer goroutine. SQLite's per-transaction fsync
+// dominated initial-scan time on large libraries — a 50k-track library
+// at one row per implicit-tx hit the disk 50k times. Batching to 500
+// rows per BEGIN/COMMIT collapses that to ~100 transactions.
+const scanBatchSize = 500
+
+// scanChannelBuffer sizes both the path → worker and worker → writer
+// channels. Large enough that the walker / extractors don't stall on
+// transient slow stretches (worker doing a slow Extract on one file,
+// writer mid-fsync); small enough that backpressure still applies and
+// memory stays bounded under unusually slow downstream stages.
+const scanChannelBuffer = 256
+
+// pathInfo carries one walker-discovered file from the WalkDir
+// callback to the worker pool. Fields are immutable post-send.
+type pathInfo struct {
+	abs  string
+	rel  string
+	info fs.FileInfo
+}
 
 // Scanner walks the library roots, calls Extract on every audio file it
 // finds, and persists the result in a Store. It is safe to call Scan
@@ -83,9 +106,25 @@ func (s *Scanner) LastFullScan() time.Time {
 // scan (resets at the start of each Scan).
 func (s *Scanner) ScanProgress() int64 { return s.progress.Load() }
 
-// Scan runs a full walk of the library roots. It's safe to cancel via ctx;
-// the partial work is committed (each UpsertTrack is its own transaction).
-// Returns the count of tracks upserted.
+// Scan runs a full walk of the library roots. Safe to cancel via ctx;
+// any tracks whose batch flushed before cancellation are committed.
+// Returns the count of tracks upserted (= committed by the writer).
+//
+// Pipeline: one walker goroutine drives `filepath.WalkDir`, fanning
+// audio paths into a NumCPU-sized worker pool that does the CPU-bound
+// tag extraction. Workers feed completed Tracks into a single writer
+// goroutine that batches via `Store.UpsertTrackBatch` (one BEGIN/COMMIT
+// per `scanBatchSize` rows). Folder upserts stay inline on the walker
+// — they're 10× less common than tracks and serialising them avoids a
+// second pipeline. The previous shape was fully serial: a 50k-track
+// library left multi-core extraction unused AND paid a per-row SQLite
+// fsync (50k transactions). The new shape is bound by walker+writer
+// throughput, not single-core extract.
+//
+// **Progress semantics**: `s.progress` reflects rows committed (i.e.
+// post-`UpsertTrackBatch`-flush), not rows extracted-but-pending. iOS
+// reads this for its "scanning · X tracks" hint, and the older meaning
+// would briefly over-report on a crash mid-batch.
 func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -105,22 +144,63 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 		beforeSet[p] = struct{}{}
 	}
 
+	// Walker writes `seen` from a single goroutine — workers don't
+	// touch it. Whether a worker actually persists a row is independent
+	// of the deletion-pass invariant ("we saw it on disk during this
+	// walk"); the walker decides on visibility, not the worker.
 	seen := make(map[string]struct{}, len(before))
-	count := 0
 
 	// Snapshot roots once per scan so a mid-flight SetRoots doesn't re-enter
-	// the walk with a different set. multiRoot is derived from the same
-	// snapshot — passing it explicitly to walkRoot avoids a second Load.
+	// the walk with a different set.
 	rootsPtr := s.roots.Load()
 	var roots []string
 	if rootsPtr != nil {
 		roots = *rootsPtr
 	}
 	multiRoot := len(roots) > 1
+
+	// Worker → writer pipeline. Both channels are buffered so a slow
+	// stage doesn't stall the others over short blips, but bounded so
+	// memory stays predictable under sustained slow downstream.
+	paths := make(chan pathInfo, scanChannelBuffer)
+	writes := make(chan *Track, scanChannelBuffer)
+
+	nWorkers := runtime.NumCPU()
+	var workersWG sync.WaitGroup
+	for i := 0; i < nWorkers; i++ {
+		workersWG.Add(1)
+		go s.runScanWorker(ctx, paths, writes, &workersWG)
+	}
+
+	committed := new(atomic.Int64)
+	var writerWG sync.WaitGroup
+	writerWG.Add(1)
+	go s.runScanWriter(ctx, writes, committed, &writerWG)
+
+	// Walker drives `filepath.WalkDir` for each configured root,
+	// enqueuing audio files for the workers. Folder upserts stay inline
+	// — single-goroutine writes, no contention with the batched
+	// track-upsert path (which holds s.mu).
+	var walkErr error
 	for _, root := range roots {
-		if err := s.walkRoot(ctx, root, multiRoot, seen, &count); err != nil {
-			return count, err
+		if err := s.walkRoot(ctx, root, multiRoot, seen, paths); err != nil {
+			walkErr = err
+			break
 		}
+	}
+
+	// Drain order matters: close `paths` first so workers can exit
+	// their range loop; wait for all workers; close `writes` so the
+	// writer can exit its range loop; wait for the writer to flush its
+	// final batch.
+	close(paths)
+	workersWG.Wait()
+	close(writes)
+	writerWG.Wait()
+
+	count := int(committed.Load())
+	if walkErr != nil {
+		return count, walkErr
 	}
 
 	// Deletion pass: anything in the "before" snapshot that we didn't see
@@ -138,7 +218,96 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	return count, nil
 }
 
-func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, seen map[string]struct{}, count *int) error {
+// runScanWorker is one of NumCPU workers reading walker-supplied paths
+// off `paths`, doing the early-skip GetTrack check + the CPU-bound
+// Extract, and feeding completed Tracks into the writer's `writes`
+// channel. Errors from GetTrack/Extract are logged-and-skipped (matches
+// the legacy walker's "log + continue" semantics — a single corrupt
+// FLAC must not abort the whole scan).
+func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writes chan<- *Track, wg *sync.WaitGroup) {
+	defer wg.Done()
+	for pi := range paths {
+		if ctx.Err() != nil {
+			// Drain remaining paths without doing work so the walker
+			// can close the channel and we exit cleanly.
+			continue
+		}
+		// Early-skip on unchanged-since-last-scan: matches the legacy
+		// walker. Concurrent reads from N workers against the same
+		// SQLite handle are fine (modernc.org/sqlite WAL mode allows
+		// concurrent readers).
+		existing, _ := s.store.GetTrack(pi.rel)
+		if existing != nil && existing.Size == pi.info.Size() && !existing.ModTime.Before(pi.info.ModTime()) {
+			continue
+		}
+		t := &Track{
+			Path:    pi.rel,
+			Size:    pi.info.Size(),
+			ModTime: pi.info.ModTime().UTC(),
+		}
+		fillFromPath(t, pi.rel) // last-resort heuristics for files with no tags
+		if err := Extract(pi.abs, t); err != nil {
+			log.Printf("scanner: extract %q: %v", pi.abs, err)
+		}
+		select {
+		case writes <- t:
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// runScanWriter is the single writer goroutine that consumes Tracks
+// from `writes`, batches them into `scanBatchSize`-row chunks, and
+// flushes via `Store.UpsertTrackBatch` (one BEGIN/COMMIT per chunk).
+// `committed` is incremented post-flush so `ScanProgress()` always
+// reflects rows actually persisted to disk.
+//
+// On a flush error we log and clear the batch — partial rows are lost
+// but the scan continues. The legacy walker had the same behaviour
+// (bare `log.Printf` on UpsertTrack failure); per-batch failure is
+// rarer because a single transaction wraps many rows.
+func (s *Scanner) runScanWriter(ctx context.Context, writes <-chan *Track, committed *atomic.Int64, wg *sync.WaitGroup) {
+	defer wg.Done()
+	batch := make([]*Track, 0, scanBatchSize)
+	flush := func() {
+		if len(batch) == 0 {
+			return
+		}
+		if err := s.store.UpsertTrackBatch(batch); err != nil {
+			log.Printf("scanner: upsert batch (%d rows): %v", len(batch), err)
+		} else {
+			n := committed.Add(int64(len(batch)))
+			s.progress.Store(n)
+		}
+		batch = batch[:0]
+	}
+	for t := range writes {
+		batch = append(batch, t)
+		if len(batch) >= scanBatchSize {
+			flush()
+			if ctx.Err() != nil {
+				// Honour cancellation between batches. The current
+				// batch was just flushed; anything still inbound is
+				// drained without flushing so workers can exit and
+				// the writer can return promptly.
+				for range writes {
+				}
+				return
+			}
+		}
+	}
+	flush()
+}
+
+// walkRoot drives `filepath.WalkDir` for one root, recording folder
+// mtimes inline (single-writer; no contention with the workers'
+// track-upsert pipeline) and handing off audio files to the worker
+// pool via `paths`. The deletion-pass `seen` map is written here so
+// workers don't need a mutex around it — visibility-during-walk is a
+// walker-domain concern, independent of whether the worker actually
+// re-extracts (early-skip case) or persists.
+func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, seen map[string]struct{}, paths chan<- pathInfo) error {
 	return filepath.WalkDir(root, func(abs string, d fs.DirEntry, err error) error {
 		if err != nil {
 			// Permission error on one dir shouldn't kill the whole scan.
@@ -180,26 +349,11 @@ func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, see
 		rel := relPath(root, abs, multiRoot)
 		seen[rel] = struct{}{}
 
-		existing, _ := s.store.GetTrack(rel)
-		if existing != nil && existing.Size == info.Size() && !existing.ModTime.Before(info.ModTime()) {
-			// Unchanged since last index — skip re-extracting tags.
-			return nil
+		select {
+		case paths <- pathInfo{abs: abs, rel: rel, info: info}:
+		case <-ctx.Done():
+			return ctx.Err()
 		}
-
-		t := &Track{
-			Path:    rel,
-			Size:    info.Size(),
-			ModTime: info.ModTime().UTC(),
-		}
-		fillFromPath(t, rel) // last-resort heuristics for files with no tags
-		if err := Extract(abs, t); err != nil {
-			log.Printf("scanner: extract %q: %v", abs, err)
-		}
-		if err := s.store.UpsertTrack(t); err != nil {
-			log.Printf("scanner: upsert %q: %v", rel, err)
-		}
-		*count++
-		s.progress.Store(int64(*count))
 		return nil
 	})
 }

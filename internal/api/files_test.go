@@ -470,3 +470,89 @@ func TestChildPathBuilding(t *testing.T) {
 
 // quiet unused-import warning — keeps fmt alive for future assertion helpers.
 var _ = fmt.Sprintf
+
+// TestSortEntriesByNameMatchesLessCaseFold pins that the new
+// decorate-sort-undecorate helper produces the same ordering as the
+// previous per-comparison `sort.Slice + lessCaseFold` shape — same
+// UX assumptions ("Apple" before "banana", "Ébène" still sorts after
+// "zoo" because the byte-fold quirk persists post-ToLower) — across
+// the refactor.
+func TestSortEntriesByNameMatchesLessCaseFold(t *testing.T) {
+	input := []Entry{
+		{Name: "banana"},
+		{Name: "Apple"},
+		{Name: "éclair"},
+		{Name: "zoo"},
+		{Name: "Ébène"},
+	}
+
+	gotEntries := append([]Entry(nil), input...)
+	sortEntriesByName(gotEntries)
+
+	wantEntries := append([]Entry(nil), input...)
+	// Reference: the legacy per-call comparator (still defined as
+	// lessCaseFold). If the new helper diverges from this on any
+	// input, the test fails.
+	for i := 0; i < len(wantEntries); i++ {
+		for j := i + 1; j < len(wantEntries); j++ {
+			if lessCaseFold(wantEntries[j].Name, wantEntries[i].Name) {
+				wantEntries[i], wantEntries[j] = wantEntries[j], wantEntries[i]
+			}
+		}
+	}
+
+	for i := range gotEntries {
+		if gotEntries[i].Name != wantEntries[i].Name {
+			t.Errorf("position %d: got %q, want %q (full got=%v want=%v)",
+				i, gotEntries[i].Name, wantEntries[i].Name, gotEntries, wantEntries)
+		}
+	}
+}
+
+// TestSortEntriesByNameDeterministicForFoldEqual locks the
+// tie-breaker that prevents fold-equal names ("Apple" / "apple")
+// from permuting arbitrarily under sort.Sort. Without it, two
+// successive /v1/list calls against the same directory could return
+// different orders — causing iOS list flicker. Run repeatedly with
+// shuffled input to catch the non-determinism (CodeRabbit on PR #71).
+func TestSortEntriesByNameDeterministicForFoldEqual(t *testing.T) {
+	cases := []string{"Apple", "apple", "APPLE"}
+	// Try each starting permutation and assert a single stable
+	// outcome. With the byte-order tie-break, capital letters sort
+	// before lowercase ('A' < 'a') so the deterministic order is
+	// APPLE → Apple → apple.
+	want := []string{"APPLE", "Apple", "apple"}
+	for _, perm := range [][3]int{{0, 1, 2}, {2, 1, 0}, {1, 0, 2}, {0, 2, 1}} {
+		entries := []Entry{
+			{Name: cases[perm[0]]},
+			{Name: cases[perm[1]]},
+			{Name: cases[perm[2]]},
+		}
+		sortEntriesByName(entries)
+		for i, w := range want {
+			if entries[i].Name != w {
+				t.Errorf("perm=%v: position %d = %q, want %q", perm, i, entries[i].Name, w)
+			}
+		}
+	}
+}
+
+// BenchmarkSortEntriesByName1000 measures the alloc savings of the
+// decorate-sort-undecorate refactor against a typical large directory
+// listing. The previous shape allocated ~2 strings per comparison ×
+// O(N log N) comparisons; the new shape allocates one parallel
+// []string of length N. Run with -benchmem to see the delta.
+func BenchmarkSortEntriesByName1000(b *testing.B) {
+	src := make([]Entry, 1000)
+	for i := range src {
+		// Mix of cases + accents so ToLower has actual work to do.
+		src[i] = Entry{Name: fmt.Sprintf("Artist %04d — Tâg", (i*7919)%1000)}
+	}
+	work := make([]Entry, len(src))
+	b.ResetTimer()
+	b.ReportAllocs()
+	for n := 0; n < b.N; n++ {
+		copy(work, src)
+		sortEntriesByName(work)
+	}
+}

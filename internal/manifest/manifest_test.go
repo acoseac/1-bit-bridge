@@ -178,6 +178,89 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 }
 
+// TestUpsertTrackBatchHappyPath covers the BEGIN/COMMIT-wrapped
+// multi-row insert path used by the scanner's writer goroutine.
+// All rows must land in one transaction (verified via post-commit row
+// count + per-path GetTrack), and a follow-up batch with overlapping
+// paths must update in place (ON CONFLICT semantics match UpsertTrack).
+func TestUpsertTrackBatchHappyPath(t *testing.T) {
+	s, err := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	now := time.Now().UTC().Truncate(time.Second)
+	first := []*Track{
+		{Path: "A/1.flac", Size: 10, ModTime: now, Title: "one"},
+		{Path: "A/2.flac", Size: 20, ModTime: now, Title: "two"},
+		{Path: "B/3.flac", Size: 30, ModTime: now, Title: "three"},
+	}
+	if err := s.UpsertTrackBatch(first); err != nil {
+		t.Fatalf("first batch: %v", err)
+	}
+	got, _ := s.CountTracks()
+	if got != 3 {
+		t.Errorf("post-batch count = %d, want 3", got)
+	}
+	one, _ := s.GetTrack("A/1.flac")
+	if one == nil || one.Title != "one" {
+		t.Errorf("first batch didn't persist A/1.flac: %+v", one)
+	}
+
+	// Overlap + new: A/1 updates in place, B/3 unchanged, C/4 new.
+	second := []*Track{
+		{Path: "A/1.flac", Size: 99, ModTime: now, Title: "one-updated"},
+		{Path: "C/4.flac", Size: 40, ModTime: now, Title: "four"},
+	}
+	if err := s.UpsertTrackBatch(second); err != nil {
+		t.Fatalf("second batch: %v", err)
+	}
+	got, _ = s.CountTracks()
+	if got != 4 {
+		t.Errorf("post-overlap-batch count = %d, want 4", got)
+	}
+	updated, _ := s.GetTrack("A/1.flac")
+	if updated == nil || updated.Title != "one-updated" || updated.Size != 99 {
+		t.Errorf("overlap row not updated: %+v", updated)
+	}
+}
+
+// TestUpsertTrackBatchEmptyIsNoOp confirms that the scanner's writer
+// can flush a zero-row batch without erroring out — happens at
+// scan-end when the final batch boundary aligns with the last row.
+func TestUpsertTrackBatchEmptyIsNoOp(t *testing.T) {
+	s, err := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.UpsertTrackBatch(nil); err != nil {
+		t.Errorf("nil batch: %v", err)
+	}
+	if err := s.UpsertTrackBatch([]*Track{}); err != nil {
+		t.Errorf("empty batch: %v", err)
+	}
+	got, _ := s.CountTracks()
+	if got != 0 {
+		t.Errorf("empty batch wrote rows: count = %d", got)
+	}
+}
+
+// TestStreamTracksRejectsNilCallback locks the defensive guard added
+// after PR #70 review — calling StreamTracks with a nil fn must error
+// out cleanly instead of nil-derefing inside the row loop.
+func TestStreamTracksRejectsNilCallback(t *testing.T) {
+	s, err := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.StreamTracks(nil, nil); err == nil {
+		t.Error("StreamTracks(nil, nil) returned nil error, want explicit failure")
+	}
+}
+
 // TestStoreHasTrackWithArtworkMBID pins the SQL contract the
 // /v1/artwork 202-vs-404 handler depends on. A track tagged with a
 // given ArtworkMBID reports true; an arbitrary MBID that no track
@@ -571,6 +654,85 @@ func TestScannerSkipsUnchangedFiles(t *testing.T) {
 	}
 }
 
+// TestScannerWorkerPoolCommitsAllTracks confirms the new worker-pool +
+// batched-writer pipeline persists every walked file. Synthesises a
+// flat directory of N audio-extension files (Extract fails on each but
+// the row is still upserted via fillFromPath, matching legacy behaviour),
+// then asserts the post-scan row count and the progress counter both
+// reach N.
+func TestScannerWorkerPoolCommitsAllTracks(t *testing.T) {
+	const n = 1200 // > 2 batches at scanBatchSize=500
+	root := t.TempDir()
+	for i := 0; i < n; i++ {
+		p := filepath.Join(root, fmt.Sprintf("track-%05d.flac", i))
+		if err := os.WriteFile(p, []byte("not-a-real-flac"), 0o644); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+	}
+	s, err := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	sc := NewScanner([]string{root}, s)
+
+	count, err := sc.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if count != n {
+		t.Errorf("Scan returned count = %d, want %d", count, n)
+	}
+	if got := sc.ScanProgress(); got != int64(n) {
+		t.Errorf("ScanProgress = %d, want %d", got, n)
+	}
+	got, err := s.CountTracks()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != n {
+		t.Errorf("CountTracks = %d, want %d (some rows lost in batching pipeline)", got, n)
+	}
+}
+
+// TestScannerCancellationLeavesCommittedBatchesIntact verifies that
+// cancelling a scan mid-walk doesn't corrupt the DB. The walker honours
+// ctx.Done, the writer flushes its in-flight batch, and the row count
+// is whatever-was-committed-so-far (≤ N). This is the safety contract
+// for "user backgrounded the app during a fresh scan".
+func TestScannerCancellationLeavesCommittedBatchesIntact(t *testing.T) {
+	const n = 2000
+	root := t.TempDir()
+	for i := 0; i < n; i++ {
+		p := filepath.Join(root, fmt.Sprintf("track-%05d.flac", i))
+		if err := os.WriteFile(p, []byte("nope"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s, err := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	sc := NewScanner([]string{root}, s)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel before Scan starts
+
+	// Cancelling the parent ctx still lets Scan complete its setup;
+	// it propagates cancellation through the walker. The exact row
+	// count is racy but must be in [0, n] and must equal CountTracks
+	// (no leaked partial-batch state).
+	count, _ := sc.Scan(ctx)
+	if count < 0 || count > n {
+		t.Errorf("count = %d, want 0..%d", count, n)
+	}
+	got, _ := s.CountTracks()
+	if got != count {
+		t.Errorf("CountTracks (%d) != Scan count (%d) — partial batch leaked", got, count)
+	}
+}
+
 func TestScannerIsScanningFlag(t *testing.T) {
 	root, _ := tempLibrary(t)
 	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
@@ -649,8 +811,16 @@ func TestWriteManifestParityWithBuildManifest(t *testing.T) {
 	if len(got.Tracks) != expected {
 		t.Errorf("streamed tracks = %d, want %d", len(got.Tracks), expected)
 	}
-	if len(got.LibraryRoots) != len(want.LibraryRoots) || got.LibraryRoots[0] != want.LibraryRoots[0] {
-		t.Errorf("libraryRoots: got %v, want %v", got.LibraryRoots, want.LibraryRoots)
+	if len(got.LibraryRoots) != len(want.LibraryRoots) {
+		t.Errorf("libraryRoots length: got %d, want %d",
+			len(got.LibraryRoots), len(want.LibraryRoots))
+	} else {
+		for i := range want.LibraryRoots {
+			if got.LibraryRoots[i] != want.LibraryRoots[i] {
+				t.Errorf("libraryRoots[%d]: got %q, want %q",
+					i, got.LibraryRoots[i], want.LibraryRoots[i])
+			}
+		}
 	}
 	if len(got.Folders) != len(want.Folders) {
 		t.Errorf("folders: got %d, want %d", len(got.Folders), len(want.Folders))
