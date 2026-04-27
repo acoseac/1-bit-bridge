@@ -314,15 +314,33 @@ func BuildManifest(store *Store, roots []string, since time.Time) (*Manifest, er
 		Tracks:       tracks,
 	}
 	// Library-wide enrichment counters land on every non-paginated
-	// response. `EnrichmentProgress` query failure is non-fatal —
-	// the manifest stays useful even if the counter rollup hits a
-	// transient error; older clients ignore the field anyway.
-	if total, enriched, lastEnrichedAt, perr := store.EnrichmentProgress(); perr == nil {
+	// response. `EnrichmentCounts` query failure is non-fatal — the
+	// manifest stays useful even if the counter rollup hits a
+	// transient error; older clients ignore the field anyway. We DO
+	// log on failure (Qodo #3) so an operational issue doesn't slip by
+	// silently — the same functions return hard errors on
+	// `ListTracks` / `ListFolders`, so a quiet failure here is an
+	// observability gap specific to this code path.
+	//
+	// `tracksTotal` is sourced from a single `CountTracks()` (Qodo #2)
+	// to guarantee the protocol invariant that the manifest's top-
+	// level `total` and `EnrichmentProgress.TracksTotal` cannot
+	// diverge in the same response under concurrent writes. For the
+	// non-paginated `BuildManifest` path the manifest doesn't carry a
+	// top-level `total`, so we still need this count — but we now do
+	// it once, here, instead of letting both the manifest builder and
+	// EnrichmentCounts each issue their own `COUNT(*)`.
+	total, terr := store.CountTracks()
+	if terr != nil {
+		log.Printf("manifest: CountTracks for enrichment-progress: %v", terr)
+	} else if enriched, lastEnrichedAt, perr := store.EnrichmentCounts(); perr == nil {
 		m.EnrichmentProgress = &EnrichmentProgress{
 			TracksTotal:    total,
 			TracksEnriched: enriched,
 			LastEnrichedAt: lastEnrichedAt,
 		}
+	} else {
+		log.Printf("manifest: EnrichmentCounts: %v", perr)
 	}
 	return m, nil
 }
@@ -365,15 +383,24 @@ func BuildManifestPage(store *Store, roots []string, cursor string, limit int) (
 		GeneratedAt:  time.Now().UTC(),
 		LibraryRoots: basenames,
 	}
-	// Only the first page pays the folders + total + enrichment-progress
+	// Only the first page pays the folders + total + enrichment-counts
 	// lookups. A `COUNT(*)` on a 50k-track sqlite table is cheap but not
-	// free; ListFolders walks the folders table fully; EnrichmentProgress
-	// runs an aggregate over enriched_at. iOS snapshots all three from
-	// the first page and ignores them on subsequent pages, so paying the
-	// queries once per pagination run instead of once per page is the
-	// meaningful win for large libs. EnrichmentProgress failure is
-	// non-fatal for the same reason as in BuildManifest — older clients
-	// ignore the field, newer clients fall back to "no progress hint".
+	// free; ListFolders walks the folders table fully; EnrichmentCounts
+	// runs a CASE/SUM aggregate over enriched_at. iOS snapshots all three
+	// from the first page and ignores them on subsequent pages, so paying
+	// the queries once per pagination run instead of once per page is the
+	// meaningful win for large libs.
+	//
+	// `tracksTotal` reuses the local `total` from CountTracks above (Qodo
+	// #2) — the protocol guarantees `manifest.total` and
+	// `EnrichmentProgress.TracksTotal` match in paginated mode, and that
+	// invariant only holds if both fields read from the same query. The
+	// previous shape called `EnrichmentProgress()` separately and could
+	// disagree under concurrent `UpsertTrack` / `DeleteTrack`.
+	//
+	// EnrichmentCounts failure is non-fatal — older clients ignore the
+	// field, newer clients fall back to "no progress hint" — but we
+	// log so the failure isn't invisible (Qodo #3).
 	if cursor == "" {
 		folders, ferr := store.ListFolders()
 		if ferr != nil {
@@ -385,12 +412,14 @@ func BuildManifestPage(store *Store, roots []string, cursor string, limit int) (
 		}
 		m.Folders = folders
 		m.Total = &total
-		if pTotal, pEnriched, pLast, perr := store.EnrichmentProgress(); perr == nil {
+		if enriched, lastEnrichedAt, perr := store.EnrichmentCounts(); perr == nil {
 			m.EnrichmentProgress = &EnrichmentProgress{
-				TracksTotal:    pTotal,
-				TracksEnriched: pEnriched,
-				LastEnrichedAt: pLast,
+				TracksTotal:    total,
+				TracksEnriched: enriched,
+				LastEnrichedAt: lastEnrichedAt,
 			}
+		} else {
+			log.Printf("manifest: EnrichmentCounts (paginated): %v", perr)
 		}
 	}
 	if len(tracks) > limit {

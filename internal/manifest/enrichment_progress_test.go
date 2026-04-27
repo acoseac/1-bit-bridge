@@ -7,28 +7,30 @@ import (
 	"time"
 )
 
-// TestStoreEnrichmentProgressEmpty pins the zero-state contract:
-// no tracks → all counters zero, lastEnrichedAt is the zero time.
-// iOS gates its "enrichment in progress" UI on
-// `tracksEnriched < tracksTotal`, so a fresh store reporting
-// `0 < 0 == false` correctly suppresses the footer.
-func TestStoreEnrichmentProgressEmpty(t *testing.T) {
+// TestStoreEnrichmentCountsEmpty pins the zero-state contract:
+// no tracks → enriched is zero, lastEnrichedAt is nil. iOS gates its
+// "enrichment in progress" UI on `tracksEnriched < tracksTotal`,
+// so a fresh store reporting `0 < 0 == false` correctly suppresses
+// the footer. Total is sourced separately from `CountTracks` per
+// Qodo's review (avoids divergence with the manifest's top-level
+// `total`).
+func TestStoreEnrichmentCountsEmpty(t *testing.T) {
 	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
 	defer s.Close()
-	total, enriched, last, err := s.EnrichmentProgress()
+	enriched, last, err := s.EnrichmentCounts()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if total != 0 || enriched != 0 || last != nil {
-		t.Errorf("empty store: got total=%d enriched=%d last=%v, want all zero/nil",
-			total, enriched, last)
+	if enriched != 0 || last != nil {
+		t.Errorf("empty store: got enriched=%d last=%v, want zero/nil",
+			enriched, last)
 	}
 }
 
-// TestStoreEnrichmentProgressMixed exercises the common case: some
+// TestStoreEnrichmentCountsMixed exercises the common case: some
 // tracks enriched, some still queued. Counters must report the
 // split correctly so iOS can drive its progress UI off the values.
-func TestStoreEnrichmentProgressMixed(t *testing.T) {
+func TestStoreEnrichmentCountsMixed(t *testing.T) {
 	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
 	defer s.Close()
 	now := time.Now().UTC().Truncate(time.Second)
@@ -46,18 +48,49 @@ func TestStoreEnrichmentProgressMixed(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	total, enriched, last, err := s.EnrichmentProgress()
+	enriched, last, err := s.EnrichmentCounts()
 	if err != nil {
 		t.Fatal(err)
-	}
-	if total != 10 {
-		t.Errorf("total = %d, want 10", total)
 	}
 	if enriched != 3 {
 		t.Errorf("enriched = %d, want 3", enriched)
 	}
 	if last == nil {
 		t.Errorf("lastEnrichedAt should be set after MarkEnriched calls, got nil")
+	}
+}
+
+// TestEnrichmentProgressTotalMatchesManifestTotal is the regression
+// test for Qodo's #2 concern: `manifest.total` and
+// `enrichmentProgress.tracksTotal` MUST be the same value in a single
+// paginated response. Previously a separate `COUNT(*)` query inside
+// the old `EnrichmentProgress()` could disagree with the
+// `CountTracks()` call in the manifest builder under concurrent
+// writes. Refactoring `EnrichmentCounts()` to NOT return total + having
+// the builder feed both fields from one count call closes that gap.
+func TestEnrichmentProgressTotalMatchesManifestTotal(t *testing.T) {
+	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	defer s.Close()
+	now := time.Now().UTC().Truncate(time.Second)
+	for i := 0; i < 7; i++ {
+		s.UpsertTrack(&Track{
+			Path: "Music/" + string(rune('0'+i)) + ".flac",
+			Size: 1, ModTime: now,
+		})
+	}
+	m, err := BuildManifestPage(s, []string{"/tmp/nope/Music"}, "", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Total == nil {
+		t.Fatal("manifest.total must be set on first page")
+	}
+	if m.EnrichmentProgress == nil {
+		t.Fatal("EnrichmentProgress must be set on first page")
+	}
+	if *m.Total != m.EnrichmentProgress.TracksTotal {
+		t.Errorf("manifest.total (%d) and EnrichmentProgress.TracksTotal (%d) must agree",
+			*m.Total, m.EnrichmentProgress.TracksTotal)
 	}
 }
 
