@@ -281,9 +281,11 @@ func (s *Store) ListTracks(since *time.Time) ([]Track, error) {
 // materialising a 50k-row []Track in memory — a Pi-class host with a
 // large library would OOM otherwise (review item).
 //
-// fn receives a stack-allocated *Track that must NOT be retained
-// across calls — the underlying value is reused on the next iteration
-// to keep allocations down. Callers that need to hold on must copy.
+// fn receives a *Track that is REUSED across iterations — the same
+// allocation is reset and re-populated each row. fn MUST NOT retain
+// the pointer past return; callers that need to hold on must copy
+// the Track value. The reuse cuts ~50k struct allocs out of a
+// large-library scan compared to a per-row var.
 //
 // Iteration stops on the first non-nil error fn returns; that error
 // is propagated. rows.Err() (post-iteration) is also returned if fn
@@ -301,13 +303,18 @@ func (s *Store) StreamTracks(sp *time.Time, fn func(*Track) error) error {
 		return err
 	}
 	defer rows.Close()
+	// Hoisted outside the loop: the same Track is reused each
+	// iteration to honour the contract documented above. `t = Track{}`
+	// resets every field (including the spliced Enriched pointer) so
+	// stale data from row N never leaks into row N+1.
+	var t Track
 	for rows.Next() {
 		var raw []byte
 		var enrichedAt int64
 		if err := rows.Scan(&raw, &enrichedAt); err != nil {
 			return err
 		}
-		var t Track
+		t = Track{}
 		if err := json.Unmarshal(raw, &t); err != nil {
 			return err
 		}

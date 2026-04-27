@@ -356,11 +356,40 @@ func (s *Server) manifestHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		since = parsed
 	}
+	// Defer WriteHeader until the streamer writes its first byte, so
+	// failures inside WriteManifest's pre-stream DB reads (ListFolders,
+	// CountTracks, EnrichmentCounts) can still surface as a structured
+	// 5xx instead of a 200-with-truncated-body that breaks iOS-side
+	// JSON decode (Qodo #1 on PR #70). Once any byte has gone out we
+	// can only log the error — headers are committed.
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	if err := s.manifest.WriteManifest(w, since); err != nil {
+	dw := &deferredStatusWriter{w: w, status: http.StatusOK}
+	if err := s.manifest.WriteManifest(dw, since); err != nil {
+		if !dw.written {
+			writeError(w, http.StatusInternalServerError, "internal", err.Error())
+			return
+		}
 		log.Printf("api: manifest stream: %v", err)
 	}
+}
+
+// deferredStatusWriter holds back WriteHeader until the wrapped writer
+// is first written to. Used by the streaming-manifest path so a DB
+// failure before the first body byte can still produce a structured
+// HTTP error response. After the first Write, behaviour is identical
+// to the underlying ResponseWriter.
+type deferredStatusWriter struct {
+	w       http.ResponseWriter
+	status  int
+	written bool
+}
+
+func (d *deferredStatusWriter) Write(b []byte) (int, error) {
+	if !d.written {
+		d.w.WriteHeader(d.status)
+		d.written = true
+	}
+	return d.w.Write(b)
 }
 
 // libraryRootBasenames returns just the last path component for each

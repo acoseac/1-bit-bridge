@@ -244,6 +244,34 @@ func TestManifestRejectsLimitPlusSince(t *testing.T) {
 	}
 }
 
+// TestManifestStreamFailureBeforeFirstByteReturns500 pins the
+// `deferredStatusWriter` contract: when WriteManifest fails before
+// writing any body bytes (e.g. a DB read error inside ListFolders /
+// CountTracks), the handler must respond with a structured 5xx, not
+// a `200 OK` with a truncated body that would make iOS-side decode
+// fail opaquely.
+func TestManifestStreamFailureBeforeFirstByteReturns500(t *testing.T) {
+	mp := &fakeManifestProvider{err: io.ErrUnexpectedEOF}
+	hs, tok := withManifest(t, mp)
+	req, _ := http.NewRequest("GET", hs.URL+"/v1/manifest", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 500 {
+		t.Errorf("status = %d, want 500", resp.StatusCode)
+	}
+	var er ErrorResponse
+	if derr := json.NewDecoder(resp.Body).Decode(&er); derr != nil {
+		t.Fatalf("decode error body: %v", derr)
+	}
+	if er.Error != "internal" {
+		t.Errorf("error code = %q, want internal", er.Error)
+	}
+}
+
 // TestManifestLegacyPathUntouched verifies the no-params path still
 // hits BuildManifest (not BuildManifestPage). Back-compat guard for
 // v1.0 iOS clients.
