@@ -233,7 +233,10 @@ func TestManifestJSONShape(t *testing.T) {
 		ModTime:  time.Now().UTC(),
 		Enriched: &enriched,
 	}
-	raw, _ := json.Marshal(tr)
+	raw, err := json.Marshal(tr)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var got map[string]any
 	json.Unmarshal(raw, &got)
 	v, ok := got["enriched"]
@@ -251,7 +254,10 @@ func TestManifestJSONShape(t *testing.T) {
 			LastEnrichedAt: &last,
 		},
 	}
-	raw2, _ := json.Marshal(m)
+	raw2, err2 := json.Marshal(m)
+	if err2 != nil {
+		t.Fatal(err2)
+	}
 	var gotM map[string]any
 	json.Unmarshal(raw2, &gotM)
 	ep, ok := gotM["enrichmentProgress"].(map[string]any)
@@ -275,9 +281,14 @@ func TestManifestJSONShape(t *testing.T) {
 // about the key see a manifest indistinguishable from a v1.0 one.
 func TestManifestOmitsEnrichmentProgressWhenNil(t *testing.T) {
 	m := Manifest{Version: 1}
-	raw, _ := json.Marshal(m)
+	raw, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var got map[string]any
-	json.Unmarshal(raw, &got)
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
 	if _, ok := got["enrichmentProgress"]; ok {
 		t.Errorf("nil EnrichmentProgress should be omitted from JSON, got %v", got)
 	}
@@ -309,7 +320,10 @@ func TestEnrichmentProgressOmitsLastEnrichedAtWhenNeverEnriched(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, _ := json.Marshal(m)
+	raw, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var got map[string]any
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatal(err)
