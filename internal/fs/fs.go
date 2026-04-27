@@ -172,7 +172,13 @@ func (r *Resolver) Resolve(clientPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if absAbs != rootAbs && !strings.HasPrefix(absAbs, rootAbs+string(filepath.Separator)) {
+	// TrimSuffix handles the filesystem-root case (rootAbs == "/" on Unix or
+	// "C:\" on Windows). Without the trim, the prefix check builds "//" or
+	// "C:\\" — which never matches a real absolute path, so every request
+	// against a root-mounted library would 400. Operators with Docker mounts
+	// directly to / hit this.
+	prefix := strings.TrimSuffix(rootAbs, string(filepath.Separator)) + string(filepath.Separator)
+	if absAbs != rootAbs && !strings.HasPrefix(absAbs, prefix) {
 		return "", ErrBadPath
 	}
 	return absAbs, nil

@@ -88,25 +88,23 @@ func TestManifestRejectsBadSince(t *testing.T) {
 }
 
 func TestManifestAcceptsRFC3339Since(t *testing.T) {
-	var seenSince time.Time
-	mp := &fakeManifestProvider{body: map[string]any{}}
-	mp.body = map[string]any{"echo": "ok"}
-	// Wrap BuildManifest to capture what we pass in.
-	hs, tok := withManifest(t, captureMP{inner: mp, seen: &seenSince})
-	u := hs.URL + "/v1/manifest?since=2026-01-02T03:04:05Z"
+	mp := &fakeManifestProvider{body: map[string]any{"echo": "ok"}}
+	hs, tok := withManifest(t, mp)
+	wantSince := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	u := hs.URL + "/v1/manifest?since=" + wantSince.Format(time.RFC3339Nano)
 	req, _ := http.NewRequest("GET", u, nil)
 	req.Header.Set("Authorization", "Bearer "+tok)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
-	if seenSince.IsZero() {
-		t.Error("since not propagated")
-	}
-	if seenSince.UTC().Year() != 2026 {
-		t.Errorf("since year = %d", seenSince.UTC().Year())
+	if !mp.lastSince.Equal(wantSince) {
+		t.Errorf("since forwarded = %v, want %v", mp.lastSince, wantSince)
 	}
 }
 
@@ -247,6 +245,34 @@ func TestManifestRejectsLimitPlusSince(t *testing.T) {
 	}
 }
 
+// TestManifestStreamFailureBeforeFirstByteReturns500 pins the
+// `deferredStatusWriter` contract: when WriteManifest fails before
+// writing any body bytes (e.g. a DB read error inside ListFolders /
+// CountTracks), the handler must respond with a structured 5xx, not
+// a `200 OK` with a truncated body that would make iOS-side decode
+// fail opaquely.
+func TestManifestStreamFailureBeforeFirstByteReturns500(t *testing.T) {
+	mp := &fakeManifestProvider{err: io.ErrUnexpectedEOF}
+	hs, tok := withManifest(t, mp)
+	req, _ := http.NewRequest("GET", hs.URL+"/v1/manifest", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 500 {
+		t.Errorf("status = %d, want 500", resp.StatusCode)
+	}
+	var er ErrorResponse
+	if derr := json.NewDecoder(resp.Body).Decode(&er); derr != nil {
+		t.Fatalf("decode error body: %v", derr)
+	}
+	if er.Error != "internal" {
+		t.Errorf("error code = %q, want internal", er.Error)
+	}
+}
+
 // TestManifestLegacyPathUntouched verifies the no-params path still
 // hits BuildManifest (not BuildManifestPage). Back-compat guard for
 // v1.0 iOS clients.
@@ -272,21 +298,3 @@ func TestManifestLegacyPathUntouched(t *testing.T) {
 		t.Errorf("paginated builder was called (limit=%d)", mp.lastPageLimit)
 	}
 }
-
-// captureMP wraps a ManifestProvider and records the since arg passed to
-// BuildManifest.
-type captureMP struct {
-	inner ManifestProvider
-	seen  *time.Time
-}
-
-func (c captureMP) BuildManifest(since time.Time) (any, error) {
-	*c.seen = since
-	return c.inner.BuildManifest(since)
-}
-func (c captureMP) BuildManifestPage(cursor string, limit int) (any, error) {
-	return c.inner.BuildManifestPage(cursor, limit)
-}
-func (c captureMP) IsScanning() bool        { return c.inner.IsScanning() }
-func (c captureMP) LastFullScan() time.Time { return c.inner.LastFullScan() }
-func (c captureMP) TracksIndexed() int      { return c.inner.TracksIndexed() }

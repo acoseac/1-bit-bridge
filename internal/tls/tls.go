@@ -1,17 +1,29 @@
 // Package tls mints a self-signed certificate on first run and loads existing
 // cert/key material on subsequent runs.
 //
-// The generated certificate is ECDSA P-256, valid for 10 years, with SANs
+// The generated certificate is ECDSA P-256, valid for 397 days, with SANs
 // covering localhost, 127.0.0.1, ::1, 0.0.0.0, and the provided hostname (if
 // any). iOS clients pin by the SHA-256 fingerprint captured during pairing,
 // so the SANs are mostly a convenience for browser-based debugging — the pin
 // is what actually secures the session.
 //
-// The long validity window is deliberate: a pinned cert can't silently rotate
-// (every iOS client would have to re-pair), so renewal is a user event, not a
-// background one. 10 years puts the rotation cost off for as long as plausible
-// without hitting CA/Browser-Forum limits (which don't apply to self-signed
-// anyway).
+// **Why 397 days, not 10 years.** Apple ATS (and the underlying iOS
+// SecureTransport stack) enforces a 398-day maximum validity for server
+// certificates issued after 2020-09-01. A longer cert is rejected at the
+// TLS-handshake layer *before* `URLSessionDelegate` is ever consulted —
+// fingerprint pinning can't override the platform's baseline check. The
+// previous 10-year duration shipped fine because ATS was relaxed via
+// `NSAllowsLocalNetworking`, but iOS 26.4's lower-layer (Network.framework)
+// path applies the 398-day rule independently. Capping at 397 keeps a small
+// safety margin under that ceiling.
+//
+// **Operator UX.** Yearly rotation is now expected. Surfaced via:
+//   - Startup log at `.notice` when the cert is within 30 days of expiry
+//     (operator gets a heads-up before iOS clients start failing to handshake).
+//   - `bridge cert info` CLI + admin-console cert tile (DaysUntilExpiry).
+//   - `bridge cert rotate` CLI + admin "Rotate" button — minting a new cert
+//     forces every paired iOS client to re-pair via `bridge://pair?...`
+//     deep-link or admin-console QR.
 package tls
 
 import (
@@ -26,6 +38,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"log"
 	"math/big"
 	"net"
 	"os"
@@ -37,7 +50,15 @@ import (
 const (
 	CertFileName = "server.crt"
 	KeyFileName  = "server.key"
-	certDuration = 10 * 365 * 24 * time.Hour
+	// certDuration is capped under Apple ATS's 398-day enforcement
+	// (see package doc). 397 days leaves a small safety margin; raising
+	// this past 398 will break iOS clients at the TLS handshake layer
+	// before pinning is consulted.
+	certDuration = 397 * 24 * time.Hour
+	// expiryWarningWindow controls when LoadOrGenerate logs an
+	// approaching-expiry warning. 30 days covers a typical
+	// notice-to-operator → re-pair-every-device cycle.
+	expiryWarningWindow = 30 * 24 * time.Hour
 )
 
 // DefaultPaths returns the cert and key paths used when the user hasn't
@@ -77,7 +98,28 @@ func LoadOrGenerate(certPath, keyPath, hostname string) (*cryptotls.Certificate,
 	if err != nil {
 		return nil, "", fmt.Errorf("fingerprint: %w", err)
 	}
+	logIfExpiringSoon(certPath)
 	return &cert, fp, nil
+}
+
+// logIfExpiringSoon parses the on-disk cert and logs a warning when its
+// remaining validity is below expiryWarningWindow. Runs once per process
+// start (called from LoadOrGenerate) — operators see the warning in the
+// startup log alongside the usual listen-address line. Best-effort: a
+// parse failure here is silent (Inspect already covers the operator-facing
+// surface and would surface a parse error there).
+func logIfExpiringSoon(certPath string) {
+	info, err := Inspect(certPath)
+	if err != nil {
+		return
+	}
+	remaining := time.Until(info.NotAfter)
+	switch {
+	case remaining <= 0:
+		log.Printf("tls: cert at %s expired %d days ago — every paired iOS client will fail at TLS handshake until you rotate (`bridge cert rotate` or admin console) and re-pair", certPath, -info.DaysUntilExpiry)
+	case remaining <= expiryWarningWindow:
+		log.Printf("tls: cert at %s expires in %d days — schedule a `bridge cert rotate` and re-pair every paired iOS client before then (Apple ATS rejects expired certs at the handshake layer)", certPath, info.DaysUntilExpiry)
+	}
 }
 
 // Generate (re-)mints the cert + key at the given paths. Used by

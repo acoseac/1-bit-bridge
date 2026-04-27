@@ -223,13 +223,22 @@ func (s *Store) persist() error {
 		return err
 	}
 	data = append(data, '\n')
-	// os.CreateTemp creates the file with mode 0o600 — no explicit Chmod
-	// is needed and a redundant one would just add a syscall.
+	// os.CreateTemp creates with mode 0o600 modulo umask — and umask
+	// only *removes* permission bits, so the resulting file is at most
+	// 0o600. The explicit Chmod here is belt-and-braces against unusual
+	// filesystems whose ACLs widen perms on close (some network mounts)
+	// and against future Go behaviour drift on the temp-file mode. Cost
+	// is one syscall; correctness benefit is structural.
 	tmp, err := os.CreateTemp(filepath.Dir(s.path), ".tokens-*.json")
 	if err != nil {
 		return fmt.Errorf("temp file: %w", err)
 	}
 	tmpName := tmp.Name()
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("chmod tmp: %w", err)
+	}
 	defer func() {
 		if tmpName != "" {
 			_ = os.Remove(tmpName)

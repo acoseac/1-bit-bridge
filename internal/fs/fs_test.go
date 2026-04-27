@@ -336,6 +336,55 @@ func TestSetRootsSingleToMultiTransition(t *testing.T) {
 	}
 }
 
+// --- filesystem-root configuration ---
+
+func TestResolveAcceptsFilesystemRootUnix(t *testing.T) {
+	// Operators using Docker may mount the library directly at "/", or run
+	// the bridge on a dedicated VM where the entire FS is the library. The
+	// prefix-check used to build "//" and reject every path; this pins the
+	// trim-suffix fix.
+	if runtime.GOOS == "windows" {
+		t.Skip("filesystem-root test for unix-style paths")
+	}
+	r := New([]string{"/"})
+	got, err := r.Resolve("etc/hostname")
+	if err != nil {
+		t.Fatalf("Resolve under root /: %v", err)
+	}
+	want := filepath.Join("/", "etc", "hostname")
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestResolveAcceptsFilesystemRootWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("windows drive-root semantics")
+	}
+	// On Windows, filepath.Abs("C:\\") returns "C:\\". The prefix-check used
+	// to build "C:\\\\" and reject every path under the drive root.
+	r := New([]string{`C:\`})
+	got, err := r.Resolve("Windows/System32/drivers/etc/hosts")
+	if err != nil {
+		t.Fatalf("Resolve under root C:\\: %v", err)
+	}
+	if !strings.HasPrefix(got, `C:\`) {
+		t.Errorf("got %q, expected prefix C:\\", got)
+	}
+}
+
+func TestResolveFilesystemRootStillRejectsTraversal(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("filesystem-root test for unix-style paths")
+	}
+	r := New([]string{"/"})
+	for _, bad := range []string{"..", "../etc", "etc/../.."} {
+		if _, err := r.Resolve(bad); !errors.Is(err, ErrBadPath) {
+			t.Errorf("Resolve(%q) under root /: err = %v, want ErrBadPath", bad, err)
+		}
+	}
+}
+
 func TestSetRootsConcurrentResolve(t *testing.T) {
 	tmp := t.TempDir()
 	a := filepath.Join(tmp, "a")

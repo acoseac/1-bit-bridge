@@ -1,8 +1,11 @@
 package manifest
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"os"
@@ -343,6 +346,145 @@ func BuildManifest(store *Store, roots []string, since time.Time) (*Manifest, er
 		log.Printf("manifest: EnrichmentCounts: %v", perr)
 	}
 	return m, nil
+}
+
+// WriteManifest streams the legacy non-paginated manifest as JSON
+// directly to w, bounding peak memory regardless of library size.
+//
+// The original BuildManifest materialised the full []Track in RAM via
+// ListTracks + per-row json.Unmarshal — a 50k-track library at ~3-5 KB
+// per row pushes well over 200 MB during a single legacy /v1/manifest
+// request, which OOM-kills Pi-class hosts (review item). This streams
+// each track straight from rows.Next() into the writer so peak alloc
+// stays bounded by the envelope (folders + counts) plus one Track at
+// a time.
+//
+// **Wire shape parity with BuildManifest** is enforced by emitting the
+// same JSON keys in the same order, with the same omitempty rules:
+// version → generatedAt → libraryRoots → folders (omit when empty) →
+// tracks (always emitted as `[]` for empty libraries) →
+// enrichmentProgress (omit on counter failure).
+//
+// **Mid-stream errors are unrecoverable** — the headers and prefix are
+// already on the wire, so we can't switch to a 5xx. The error is
+// returned for the caller to log; the truncated JSON will fail to parse
+// on iOS, surfacing as a sync error which iOS handles by retrying.
+//
+// since, if non-zero, filters tracks by indexed_at (matches the
+// BuildManifest semantics).
+func WriteManifest(w io.Writer, store *Store, roots []string, since time.Time) (err error) {
+	folders, err := store.ListFolders()
+	if err != nil {
+		return fmt.Errorf("list folders: %w", err)
+	}
+
+	// EnrichmentProgress block: same best-effort behaviour as
+	// BuildManifest — counter failures log but don't fail the request.
+	// `tracksTotal` and the iOS-side enrichment hint cohabit a single
+	// CountTracks() call so the protocol invariant `manifest.total ==
+	// EnrichmentProgress.TracksTotal` holds (Qodo #2 carry-over).
+	var ep *EnrichmentProgress
+	if total, terr := store.CountTracks(); terr != nil {
+		log.Printf("manifest: CountTracks for enrichment-progress: %v", terr)
+	} else if enriched, lastEnrichedAt, perr := store.EnrichmentCounts(); perr == nil {
+		ep = &EnrichmentProgress{
+			TracksTotal:    total,
+			TracksEnriched: enriched,
+			LastEnrichedAt: lastEnrichedAt,
+		}
+	} else {
+		log.Printf("manifest: EnrichmentCounts: %v", perr)
+	}
+
+	basenames := make([]string, len(roots))
+	for i, r := range roots {
+		basenames[i] = filepath.Base(r)
+	}
+
+	// bufio.Writer keeps the per-track Write calls from each becoming
+	// a syscall — large libraries would otherwise pay one write(2) per
+	// row, dominating the streaming win.
+	bw := bufio.NewWriter(w)
+	// Flush via defer so an early return on stream error still ships
+	// the bytes already buffered (CodeRabbit on PR #70). Without this,
+	// a mid-stream failure could leave the client with no body at all
+	// — the deferred status writer in the handler still emits 200 once
+	// the first byte lands, so an unflushed prefix produces a
+	// 200-with-empty-body. The first error wins (named return shadows
+	// the flush error if streaming already failed).
+	defer func() {
+		if flushErr := bw.Flush(); err == nil && flushErr != nil {
+			err = flushErr
+		}
+	}()
+
+	writeField := func(prefix string, v any) error {
+		if _, err := bw.WriteString(prefix); err != nil {
+			return err
+		}
+		b, err := json.Marshal(v)
+		if err != nil {
+			return err
+		}
+		_, err = bw.Write(b)
+		return err
+	}
+
+	if _, err := bw.WriteString(`{"version":1`); err != nil {
+		return err
+	}
+	if err := writeField(`,"generatedAt":`, time.Now().UTC()); err != nil {
+		return err
+	}
+	if err := writeField(`,"libraryRoots":`, basenames); err != nil {
+		return err
+	}
+	// Match Manifest's `omitempty` on Folders — empty slice → no key.
+	if len(folders) > 0 {
+		if err := writeField(`,"folders":`, folders); err != nil {
+			return err
+		}
+	}
+	if _, err := bw.WriteString(`,"tracks":[`); err != nil {
+		return err
+	}
+
+	var sp *time.Time
+	if !since.IsZero() {
+		sp = &since
+	}
+	first := true
+	streamErr := store.StreamTracks(sp, func(t *Track) error {
+		if !first {
+			if err := bw.WriteByte(','); err != nil {
+				return err
+			}
+		}
+		first = false
+		b, err := json.Marshal(t)
+		if err != nil {
+			return err
+		}
+		_, err = bw.Write(b)
+		return err
+	})
+	if streamErr != nil {
+		return fmt.Errorf("stream tracks: %w", streamErr)
+	}
+	if _, err := bw.WriteString(`]`); err != nil {
+		return err
+	}
+	if ep != nil {
+		if err := writeField(`,"enrichmentProgress":`, ep); err != nil {
+			return err
+		}
+	}
+	if _, err := bw.WriteString(`}`); err != nil {
+		return err
+	}
+	// Final flush handled by the deferred call above so error paths
+	// also get one.
+	return nil
 }
 
 // BuildManifestPage returns one page of a paginated full-manifest

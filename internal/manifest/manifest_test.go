@@ -1,7 +1,9 @@
 package manifest
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -616,6 +618,103 @@ func TestBuildManifestShape(t *testing.T) {
 	}
 }
 
+// TestWriteManifestParityWithBuildManifest pins the streaming legacy
+// path's wire shape against the in-memory builder. Both must agree on
+// version, track set, library roots, folders, and the enrichment
+// progress block — the streaming path is a shape-preserving rewrite.
+func TestWriteManifestParityWithBuildManifest(t *testing.T) {
+	root, expected := tempLibrary(t)
+	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	defer s.Close()
+	sc := NewScanner([]string{root}, s)
+	sc.Scan(context.Background())
+
+	want, err := BuildManifest(s, []string{root}, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	if err := WriteManifest(&buf, s, []string{root}, time.Time{}); err != nil {
+		t.Fatalf("WriteManifest: %v", err)
+	}
+	var got Manifest
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("decode streamed manifest: %v\nbody=%s", err, buf.String())
+	}
+
+	if got.Version != want.Version {
+		t.Errorf("version = %d, want %d", got.Version, want.Version)
+	}
+	if len(got.Tracks) != expected {
+		t.Errorf("streamed tracks = %d, want %d", len(got.Tracks), expected)
+	}
+	if len(got.LibraryRoots) != len(want.LibraryRoots) || got.LibraryRoots[0] != want.LibraryRoots[0] {
+		t.Errorf("libraryRoots: got %v, want %v", got.LibraryRoots, want.LibraryRoots)
+	}
+	if len(got.Folders) != len(want.Folders) {
+		t.Errorf("folders: got %d, want %d", len(got.Folders), len(want.Folders))
+	}
+	// EnrichmentProgress is the field most likely to drift between the
+	// builder and the streaming writer (separate query path, separate
+	// envelope-emission code). CodeRabbit on PR #70 — the parity test
+	// has to cover it explicitly or a totals regression slips through.
+	if (got.EnrichmentProgress == nil) != (want.EnrichmentProgress == nil) {
+		t.Errorf("enrichmentProgress presence: got %v, want %v",
+			got.EnrichmentProgress, want.EnrichmentProgress)
+	}
+	if got.EnrichmentProgress != nil && want.EnrichmentProgress != nil {
+		if got.EnrichmentProgress.TracksTotal != want.EnrichmentProgress.TracksTotal {
+			t.Errorf("tracksTotal: got %d, want %d",
+				got.EnrichmentProgress.TracksTotal, want.EnrichmentProgress.TracksTotal)
+		}
+		if got.EnrichmentProgress.TracksEnriched != want.EnrichmentProgress.TracksEnriched {
+			t.Errorf("tracksEnriched: got %d, want %d",
+				got.EnrichmentProgress.TracksEnriched, want.EnrichmentProgress.TracksEnriched)
+		}
+	}
+}
+
+// TestWriteManifestStreamsLargeLibraryWithoutOOM exercises the legacy
+// path with enough synthetic tracks that the prior in-memory builder
+// would noticeably allocate. Verifies the streamed JSON parses and
+// contains every row — that's the whole behavioural contract; the
+// memory bound is structural (the implementation never collects a
+// []Track).
+func TestWriteManifestStreamsLargeLibraryWithoutOOM(t *testing.T) {
+	const n = 5000
+	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	defer s.Close()
+
+	for i := 0; i < n; i++ {
+		if err := s.UpsertTrack(&Track{
+			Path:    fmt.Sprintf("Artist/Album/%05d.flac", i),
+			Size:    1234,
+			ModTime: time.Now(),
+			Title:   fmt.Sprintf("Track %d", i),
+		}); err != nil {
+			t.Fatalf("upsert %d: %v", i, err)
+		}
+	}
+
+	var buf bytes.Buffer
+	if err := WriteManifest(&buf, s, []string{"/tmp/nope/Music"}, time.Time{}); err != nil {
+		t.Fatalf("WriteManifest: %v", err)
+	}
+	var mf Manifest
+	if err := json.Unmarshal(buf.Bytes(), &mf); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(mf.Tracks) != n {
+		t.Errorf("tracks streamed = %d, want %d", len(mf.Tracks), n)
+	}
+	if mf.EnrichmentProgress == nil {
+		t.Error("enrichmentProgress missing")
+	} else if mf.EnrichmentProgress.TracksTotal != n {
+		t.Errorf("tracksTotal = %d, want %d", mf.EnrichmentProgress.TracksTotal, n)
+	}
+}
+
 func TestBuildManifestSinceFilter(t *testing.T) {
 	root, _ := tempLibrary(t)
 	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
@@ -685,7 +784,7 @@ func TestScannerSetRootsAppliesToNextScan(t *testing.T) {
 	}
 }
 
-func TestProviderBuildManifestReflectsSetRoots(t *testing.T) {
+func TestProviderWriteManifestReflectsSetRoots(t *testing.T) {
 	a, _ := tempLibrary(t)
 	b := filepath.Join(t.TempDir(), "Other")
 	if err := os.MkdirAll(b, 0o755); err != nil {
@@ -697,18 +796,30 @@ func TestProviderBuildManifestReflectsSetRoots(t *testing.T) {
 	sc := NewScanner([]string{a}, s)
 	p := NewProvider(s, sc)
 
-	mfAny, err := p.BuildManifest(time.Time{})
-	if err != nil {
+	decode := func(buf *bytes.Buffer) *Manifest {
+		t.Helper()
+		var mf Manifest
+		if err := json.Unmarshal(buf.Bytes(), &mf); err != nil {
+			t.Fatalf("unmarshal manifest: %v\nbody=%s", err, buf.String())
+		}
+		return &mf
+	}
+
+	var pre bytes.Buffer
+	if err := p.WriteManifest(&pre, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
-	mf := mfAny.(*Manifest)
+	mf := decode(&pre)
 	if len(mf.LibraryRoots) != 1 || mf.LibraryRoots[0] != filepath.Base(a) {
 		t.Errorf("pre-swap manifest roots = %v", mf.LibraryRoots)
 	}
 
 	sc.SetRoots([]string{a, b})
-	mfAny, _ = p.BuildManifest(time.Time{})
-	mf = mfAny.(*Manifest)
+	var post bytes.Buffer
+	if err := p.WriteManifest(&post, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	mf = decode(&post)
 	if len(mf.LibraryRoots) != 2 {
 		t.Errorf("post-swap manifest roots = %v, want 2 entries", mf.LibraryRoots)
 	}
