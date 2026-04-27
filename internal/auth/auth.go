@@ -28,6 +28,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -396,6 +397,14 @@ func (s *Store) RecordClientVersion(id, ver string) {
 	}
 	if len(ver) > maxClientVersionLen {
 		ver = ver[:maxClientVersionLen]
+		// Byte-slicing can land in the middle of a multi-byte UTF-8
+		// rune. Trim back to the last valid boundary so we never
+		// persist a half-rune to tokens.json — encoding/json would
+		// substitute a replacement character on the next read but
+		// the on-disk shape is still malformed (PR #N).
+		for !utf8.ValidString(ver) && len(ver) > 0 {
+			ver = ver[:len(ver)-1]
+		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

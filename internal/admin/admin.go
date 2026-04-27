@@ -290,8 +290,19 @@ func (s *Server) Serve(ctx context.Context) error {
 		return fmt.Errorf("admin listen %s: %w", addr, err)
 	}
 	srv := &http.Server{
-		Handler:           s.Handler(),
+		Handler: s.Handler(),
+		// Slowloris-class defense. The admin console binds loopback
+		// only by config validation, but a misbehaving local client
+		// (or a buggy admin script) trickling bytes 1/sec could
+		// otherwise tie up an FD indefinitely. Pre-fix only
+		// `ReadHeaderTimeout` was set; without `ReadTimeout` /
+		// `WriteTimeout` / `IdleTimeout`, headers parsed quickly
+		// but a slow body or response held the connection open
+		// (PR #N).
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(lis) }()

@@ -408,6 +408,20 @@ func actPair(_ context.Context, in *bufio.Reader, stdout, stderr io.Writer, s me
 // actUninstall removes the service-manager artifact AND offers to
 // wipe the config dir. Two confirms: one for the service uninstall
 // (no-op when no service installed), one for the destructive wipe.
+//
+// The wipe prompt requires the operator to type the literal string
+// "WIPE" before any deletion happens — a plain `[y/N]` prefix-match
+// on "y" was a fat-finger hazard (PR #N). Mirrors the
+// `INSTALL-AS-ROOT` typed-phrase pattern from `actInstallService`.
+//
+// **Library files are NEVER touched by this command** — the wipe
+// is `os.RemoveAll(cfgDir)` where `cfgDir` is the platform config
+// dir (`~/Library/Application Support/1-bit-bridge` on macOS, etc.)
+// containing only `bridge.yaml` + the `data/` subdirectory. The
+// user-supplied `--library` path lives outside that tree and is
+// referenced by yaml text, not joined into any bridge-owned
+// filesystem location. The reassurance is printed to the operator
+// here because at least one user reached out asking exactly this.
 func actUninstall(_ context.Context, in *bufio.Reader, stdout, stderr io.Writer, s menuState) int {
 	fmt.Fprintln(stdout)
 	if s.kind != packaging.KindNone {
@@ -422,10 +436,21 @@ func actUninstall(_ context.Context, in *bufio.Reader, stdout, stderr io.Writer,
 		}
 	}
 	if s.cfgPath != "" {
-		fmt.Fprint(stdout, "  Also wipe local config + data dirs? [y/N] ")
+		cfgDir, _ := packaging.DefaultConfigDir()
+		fmt.Fprintln(stdout)
+		fmt.Fprintln(stdout, "  Wipe local config + data dirs?")
+		fmt.Fprintln(stdout, "    Will delete:")
+		if cfgDir != "" {
+			fmt.Fprintf(stdout, "      • %s/ (config, data, certs, tokens)\n", cfgDir)
+		} else {
+			fmt.Fprintln(stdout, "      • the bridge's platform config dir")
+		}
+		fmt.Fprintln(stdout, "    Will NOT touch:")
+		fmt.Fprintln(stdout, "      • your music library — bridge has no code path that")
+		fmt.Fprintln(stdout, "        can delete --library files (read-only by design)")
+		fmt.Fprint(stdout, "  Type WIPE to confirm: ")
 		line, _ := in.ReadString('\n')
-		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(line)), "y") {
-			cfgDir, _ := packaging.DefaultConfigDir()
+		if strings.TrimSpace(line) == "WIPE" {
 			if cfgDir != "" {
 				if err := os.RemoveAll(cfgDir); err != nil {
 					fmt.Fprintf(stderr, "  wipe failed: %v\n", err)
@@ -433,6 +458,8 @@ func actUninstall(_ context.Context, in *bufio.Reader, stdout, stderr io.Writer,
 					fmt.Fprintln(stdout, "  config + data dirs removed.")
 				}
 			}
+		} else {
+			fmt.Fprintln(stdout, "  cancelled (need exact typed phrase WIPE).")
 		}
 	}
 	return -1
