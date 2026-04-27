@@ -436,27 +436,31 @@ func actUninstall(_ context.Context, in *bufio.Reader, stdout, stderr io.Writer,
 		}
 	}
 	if s.cfgPath != "" {
-		cfgDir, _ := packaging.DefaultConfigDir()
+		// Derive the config dir from `s.cfgPath`'s parent rather
+		// than `packaging.DefaultConfigDir()`. The two would diverge
+		// when the bridge was initialized via a non-default
+		// `--config` path (operator with `bridge serve --config
+		// /custom/path/bridge.yaml`); `DefaultConfigDir()` would
+		// then point at an unused platform default and the wipe
+		// would either no-op or hit the wrong directory. gemini bot
+		// review on PR #75 caught the inconsistency — `actSetup`
+		// already uses `filepath.Dir(s.cfgPath)` for the data dir
+		// (see line ~372).
+		cfgDir := filepath.Dir(s.cfgPath)
 		fmt.Fprintln(stdout)
 		fmt.Fprintln(stdout, "  Wipe local config + data dirs?")
 		fmt.Fprintln(stdout, "    Will delete:")
-		if cfgDir != "" {
-			fmt.Fprintf(stdout, "      • %s/ (config, data, certs, tokens)\n", cfgDir)
-		} else {
-			fmt.Fprintln(stdout, "      • the bridge's platform config dir")
-		}
+		fmt.Fprintf(stdout, "      • %s/ (config, data, certs, tokens)\n", cfgDir)
 		fmt.Fprintln(stdout, "    Will NOT touch:")
 		fmt.Fprintln(stdout, "      • your music library — bridge has no code path that")
 		fmt.Fprintln(stdout, "        can delete --library files (read-only by design)")
 		fmt.Fprint(stdout, "  Type WIPE to confirm: ")
 		line, _ := in.ReadString('\n')
 		if strings.TrimSpace(line) == "WIPE" {
-			if cfgDir != "" {
-				if err := os.RemoveAll(cfgDir); err != nil {
-					fmt.Fprintf(stderr, "  wipe failed: %v\n", err)
-				} else {
-					fmt.Fprintln(stdout, "  config + data dirs removed.")
-				}
+			if err := os.RemoveAll(cfgDir); err != nil {
+				fmt.Fprintf(stderr, "  wipe failed: %v\n", err)
+			} else {
+				fmt.Fprintln(stdout, "  config + data dirs removed.")
 			}
 		} else {
 			fmt.Fprintln(stdout, "  cancelled (need exact typed phrase WIPE).")
