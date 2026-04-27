@@ -344,39 +344,68 @@ func quotePosix(s string) string {
 // embedded quotes, posix uses single-quote-with-`'\”` escape.
 // Spaces in paths (common on Windows: "C:\Program Files\bridge.exe")
 // no longer break the printed command.
+// The command is broken across multiple lines using shell-appropriate
+// continuation chars (`` ` `` for PowerShell, `^` for cmd, `\` for
+// bash/zsh) AND printed flush-left OUTSIDE the cinematic 55-col
+// frame. Production install paths (e.g.
+// `~/Library/Application Support/1-bit-bridge/bridge.yaml` =
+// ~70 chars) overflow the frame's inner width — the previous
+// frame-only approach truncated through `serve --config`, leaving
+// the user with an uncopyable garbled string. The frame stays as a
+// visual header; the commands themselves are printed without width
+// constraint so they're copy-paste-correct regardless of path
+// length. PR #65 smoke run caught this.
 func shellHandoff(binPath, cfgPath string) string {
-	var lines []string
-	lines = append(lines, "")
+	var b strings.Builder
+	// Frame header: just the label, no command lines inside.
+	b.WriteString(frame("to start the bridge later, run:", []string{""}))
 	if runtime.GOOS == "windows" {
-		lines = append(lines, paint(cBrightYellow, "PowerShell:"))
-		// `& <path>` invocation works regardless of CWD — the
-		// PowerShell rule that bit the original transcript user.
-		lines = append(lines, "  & "+quotePS(binPath)+" `")
-		lines = append(lines, "    serve --config "+quotePS(cfgPath))
-		lines = append(lines, "")
-		lines = append(lines, paint(cBrightYellow, "cmd.exe:"))
-		// cmd needs the .exe name (PATH-resolved if installed) or
-		// a quoted full path. We print the full quoted path for
-		// determinism — works whether the binary is on PATH or not.
-		lines = append(lines, "  "+quoteCmd(binPath)+" serve --config "+quoteCmd(cfgPath))
-		lines = append(lines, "")
+		writeShellPS(&b, binPath, cfgPath)
+		writeShellCmd(&b, binPath, cfgPath)
 	} else {
-		lines = append(lines, paint(cBrightYellow, "bash / zsh:"))
-		lines = append(lines, "  "+quotePosix(binPath)+" serve --config "+quotePosix(cfgPath))
-		lines = append(lines, "")
+		writeShellPosix(&b, binPath, cfgPath)
 		// SSH-from-Windows or other ambiguous environments get the
-		// PS / cmd alternatives appended so a remote operator can
-		// still copy the right one. Detection: $PSModulePath set
-		// while GOOS=linux/darwin means we're inside an SSH session
-		// that originated from Windows (rare but real).
+		// PS variant appended so a remote operator can still copy
+		// the right one. Detection: $PSModulePath set while
+		// GOOS=linux/darwin means we're inside an SSH session that
+		// originated from Windows (rare but real).
 		if os.Getenv("PSModulePath") != "" {
-			lines = append(lines, paint(cBrightYellow, "PowerShell (if reachable):"))
-			lines = append(lines, "  & "+quotePS(binPath)+" `")
-			lines = append(lines, "    serve --config "+quotePS(cfgPath))
-			lines = append(lines, "")
+			writeShellPS(&b, binPath, cfgPath)
 		}
 	}
-	return frame("to start the bridge later, run:", lines)
+	return b.String()
+}
+
+// writeShellPS emits the PowerShell variant flush-left with backtick
+// line-continuations. `& <path>` invocation works regardless of CWD —
+// the PowerShell rule that bit the original transcript user.
+func writeShellPS(b *strings.Builder, binPath, cfgPath string) {
+	fmt.Fprintf(b, "  %s\n", paint(cBrightYellow, "PowerShell:"))
+	fmt.Fprintf(b, "    & %s `\n", quotePS(binPath))
+	fmt.Fprintf(b, "      serve `\n")
+	fmt.Fprintf(b, "      --config %s\n", quotePS(cfgPath))
+	fmt.Fprintln(b)
+}
+
+// writeShellCmd emits the cmd.exe variant. `^` is cmd's continuation
+// char. We print a fully-quoted binary path for determinism so the
+// command works whether the binary is on PATH or not.
+func writeShellCmd(b *strings.Builder, binPath, cfgPath string) {
+	fmt.Fprintf(b, "  %s\n", paint(cBrightYellow, "cmd.exe:"))
+	fmt.Fprintf(b, "    %s ^\n", quoteCmd(binPath))
+	fmt.Fprintf(b, "      serve --config %s\n", quoteCmd(cfgPath))
+	fmt.Fprintln(b)
+}
+
+// writeShellPosix emits the bash/zsh variant. Backslash-newline is
+// the POSIX continuation char. Path is single-quoted to disable all
+// shell expansion so `$` / `~` / spaces survive intact.
+func writeShellPosix(b *strings.Builder, binPath, cfgPath string) {
+	fmt.Fprintf(b, "  %s\n", paint(cBrightYellow, "bash / zsh:"))
+	fmt.Fprintf(b, "    %s \\\n", quotePosix(binPath))
+	fmt.Fprintf(b, "      serve \\\n")
+	fmt.Fprintf(b, "      --config %s\n", quotePosix(cfgPath))
+	fmt.Fprintln(b)
 }
 
 // fprintBox is a convenience for the common "render box, write to w"

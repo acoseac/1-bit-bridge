@@ -118,6 +118,36 @@ func TestShellHandoffContainsAllForms(t *testing.T) {
 	}
 }
 
+// TestShellHandoffPreservesLongPaths pins the no-truncation contract:
+// commands are rendered FLUSH-LEFT (outside the 55-col frame) so a
+// production install path like
+// `~/Library/Application Support/1-bit-bridge/bridge.yaml` never gets
+// truncated through `serve --config`. PR #65 smoke run caught the
+// frame-only approach mangling commands like
+// `'/Users/arsenie/Deskto...t-bridge/bridge.yaml'` which would be
+// uncopyable. This test asserts both paths appear VERBATIM in the
+// output, no `...` ellipsis injected mid-path.
+func TestShellHandoffPreservesLongPaths(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	resetColorState(t)
+	binPath := "/usr/local/bin/bridge"
+	cfgPath := "/Users/arsenie/Library/Application Support/1-bit-bridge/bridge.yaml"
+	out := shellHandoff(binPath, cfgPath)
+	if !strings.Contains(out, binPath) {
+		t.Errorf("shellHandoff truncated binary path %q in output:\n%s", binPath, out)
+	}
+	if !strings.Contains(out, cfgPath) {
+		t.Errorf("shellHandoff truncated config path %q in output:\n%s", cfgPath, out)
+	}
+	// Be explicit: a `...` middle-truncation would produce
+	// `bridge.ya...l` or similar; assert no ellipsis appears in
+	// proximity to the path bytes (it'd indicate the frame was
+	// still mangling the command).
+	if strings.Contains(out, "...") {
+		t.Errorf("shellHandoff output contains `...` ellipsis (truncation regressed):\n%s", out)
+	}
+}
+
 // TestQuoteHelpersHandleHostilePaths pins the path-escaping contract
 // the original transcript was missing — paths with spaces / quotes /
 // shell-meaningful characters must round-trip through the per-shell
