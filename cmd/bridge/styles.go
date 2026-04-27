@@ -127,10 +127,39 @@ func truncateMid(s string, max int) string {
 	return head + "..." + tail
 }
 
-// runeWidth returns the rune count, used for frame budgeting. A
-// dedicated function (vs. inlining utf8.RuneCountInString) so future
-// support for wide-char East-Asian glyphs has a single hook.
-func runeWidth(s string) int { return utf8.RuneCountInString(s) }
+// stripANSI returns s with all CSI / SGR escape sequences removed.
+// Box / frame width budgeting must measure visible runes only —
+// without this, a `\x1b[95m` SGR byte cluster counts as 5 runes
+// against frameWidth and the right border drifts left on every
+// colored body line. Handles the standard `\x1b[ ... <final-byte>`
+// shape (final byte in 0x40-0x7E) which covers SGR, cursor moves,
+// and the rest of the CSI alphabet.
+func stripANSI(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		if s[i] == '\x1b' && i+1 < len(s) && s[i+1] == '[' {
+			// Skip until a final byte (0x40-0x7E) closes the CSI.
+			j := i + 2
+			for j < len(s) && (s[j] < 0x40 || s[j] > 0x7E) {
+				j++
+			}
+			if j < len(s) {
+				j++ // include the final byte
+			}
+			i = j
+			continue
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}
+
+// runeWidth returns the visible-rune count of s, ignoring any ANSI
+// escape sequences. This is the right measure for frame budgeting:
+// a `\x1b[95mhello\x1b[0m` should render as 5 columns wide, not 13.
+func runeWidth(s string) int { return utf8.RuneCountInString(stripANSI(s)) }
 
 // boxRunes selects the border glyphs based on color state. Unicode
 // double-line / single-line on color-capable terminals, ASCII fallback
@@ -188,9 +217,12 @@ func box(title string, lines []string) string {
 	// Body lines, padded.
 	for _, ln := range lines {
 		// Trim/truncate to fit inner-2 (leave 1 col padding each side).
+		// If the line is too long we strip ANSI before truncating so the
+		// slice never lands inside an escape sequence (which would emit
+		// half a `\e[95m` and corrupt the rest of the terminal).
 		body := ln
 		if runeWidth(body) > inner-2 {
-			body = truncateMid(body, inner-2)
+			body = truncateMid(stripANSI(body), inner-2)
 		}
 		pad := inner - 2 - runeWidth(body)
 		b.WriteString(paint(cBrightCyan, r.v))
@@ -352,4 +384,24 @@ func shellHandoff(binPath, cfgPath string) string {
 // don't have to discard the (n int, err error) return.
 func fprintBox(w io.Writer, s string) {
 	_, _ = fmt.Fprint(w, s)
+}
+
+// logo renders the menu's top banner — title + subtitle inside a
+// double-line box at frameWidth. Kept deliberately simple (no
+// multi-line ASCII art letters) so it fits the 55-col budget on
+// every supported terminal. The version string is pulled from the
+// bridge's `version` package; subtitle is the protocol number.
+//
+// Caller is expected to write the result to a real TTY; on
+// NO_COLOR / dumb terminals, the ASCII fallback box-drawing chars
+// (+/-/|/=) take over automatically via boxStyle.
+func logo(serverVersion string, protocol int) string {
+	title := fmt.Sprintf("1-bit-bridge  v%s", serverVersion)
+	subtitle := fmt.Sprintf("companion server · protocol v%d", protocol)
+	return box("", []string{
+		"",
+		"  " + paint(cBoldMagenta, title),
+		"  " + paint(cBrightCyan, subtitle),
+		"",
+	})
 }
