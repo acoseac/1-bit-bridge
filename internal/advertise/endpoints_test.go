@@ -190,6 +190,56 @@ func TestClassStringUnknownFallback(t *testing.T) {
 	}
 }
 
+// --- isVirtualSwitchInterface() unit tests ---
+
+// TestIsVirtualSwitchInterfaceMatchesKnownNames pins the canonical
+// Windows virtual-switch interface names that should be excluded
+// from /v1/health advertisement. Without this filter, iOS sees
+// `192.168.x.1` host-only IPs as "request timed out" entries — see
+// the PR3 review case study (Hyper-V vEthernet (Default Switch)
+// + WSL vNIC both showed up red in the iOS endpoint list).
+func TestIsVirtualSwitchInterfaceMatchesKnownNames(t *testing.T) {
+	matches := []string{
+		"vEthernet (Default Switch)",
+		"vEthernet (WSL)",
+		"vEthernet (External)",
+		"WSL",
+		"VirtualBox Host-Only Network",
+		"VirtualBox Host-Only Network #2",
+		"VBoxNet0",
+		"VMware Network Adapter VMnet1",
+		"VMware Network Adapter VMnet8",
+		"Docker Networking",
+		"Npcap Loopback Adapter",
+	}
+	for _, n := range matches {
+		if !isVirtualSwitchInterface(n) {
+			t.Errorf("expected %q to match as virtual switch", n)
+		}
+	}
+}
+
+// TestIsVirtualSwitchInterfaceLeavesPhysicalAlone confirms common
+// physical interface names DON'T match — accidental over-matching
+// would silently drop the LAN endpoint and break /v1/health
+// discoverability entirely.
+func TestIsVirtualSwitchInterfaceLeavesPhysicalAlone(t *testing.T) {
+	notMatches := []string{
+		"Ethernet",
+		"Wi-Fi",
+		"en0",
+		"eth0",
+		"wlan0",
+		"tailscale0",
+		"utun0",
+	}
+	for _, n := range notMatches {
+		if isVirtualSwitchInterface(n) {
+			t.Errorf("did not expect %q to match", n)
+		}
+	}
+}
+
 // --- ipHostForURL() unit tests ---
 
 func TestIPHostForURLBracketsV6(t *testing.T) {

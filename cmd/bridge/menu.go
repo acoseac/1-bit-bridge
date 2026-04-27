@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -19,6 +20,7 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/packaging"
@@ -446,13 +448,63 @@ func actStop(_ context.Context, _ *bufio.Reader, stdout, stderr io.Writer, _ men
 	return -1
 }
 
-func actRestart(_ context.Context, _ *bufio.Reader, stdout, stderr io.Writer, _ menuState) int {
+func actRestart(_ context.Context, _ *bufio.Reader, stdout, stderr io.Writer, s menuState) int {
 	if err := packaging.Restart(); err != nil {
 		fmt.Fprintf(stderr, "  restart failed: %v\n", err)
 		return -1
 	}
-	fmt.Fprintln(stdout, "  service restarted.")
+	// Verify the restarted process actually came back up. The previous
+	// shape printed "service restarted." unconditionally; on Windows
+	// Startup-folder installs `Restart` is "kill + spawn detached", so
+	// the new process hasn't bound its admin socket yet at this point —
+	// users hit "127.0.0.1:7789 refused to connect" immediately after
+	// the success message. Probe the admin port and surface the truth.
+	addr := adminAddrFromCfg(s.cfgPath)
+	if addr != "" && waitForListen(addr, 5*time.Second) {
+		fmt.Fprintln(stdout, "  service restarted.")
+	} else if addr != "" {
+		fmt.Fprintf(stdout, "  service restart issued, but admin port %s didn't respond within 5s — check the bridge log.\n", addr)
+	} else {
+		// Couldn't resolve admin address (no config). Fall back to
+		// the optimistic message since we have nothing to probe.
+		fmt.Fprintln(stdout, "  service restarted.")
+	}
 	return -1
+}
+
+// adminAddrFromCfg loads bridge.yaml at cfgPath and returns the
+// host:port the admin server listens on. Empty string when the config
+// can't be loaded — caller should fall back to the optimistic path.
+func adminAddrFromCfg(cfgPath string) string {
+	if cfgPath == "" {
+		return ""
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return ""
+	}
+	if cfg.AdminAddress != "" {
+		return cfg.AdminAddress
+	}
+	return config.DefaultAdminAddress
+}
+
+// waitForListen polls a TCP address until it accepts a connection or
+// the deadline expires. Used by actRestart to confirm the restarted
+// bridge process bound its admin socket. 200ms poll keeps the user-
+// visible delay tight when the service is healthy; 5s deadline covers
+// the slow-cold-start case (Windows SCM service, bg-service restart).
+func waitForListen(addr string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return true
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return false
 }
 
 // actOpenAdmin opens the local admin console URL in the user's

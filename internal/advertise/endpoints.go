@@ -113,6 +113,15 @@ func Endpoints(p Params) []Endpoint {
 			if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
 				continue
 			}
+			if isVirtualSwitchInterface(iface.Name) {
+				// Windows Hyper-V / WSL / VirtualBox / VMware host
+				// virtual switches enumerate as up interfaces with
+				// 192.168.x.1 host-only IPs. iOS can't route to them,
+				// and shipping them in /v1/health just produces red
+				// "request timed out" rows in the device's endpoint
+				// list. Drop at the source.
+				continue
+			}
 			addrs, err := iface.Addrs()
 			if err != nil {
 				continue
@@ -250,6 +259,43 @@ var cgnatV4 = &net.IPNet{
 var tsULAv6 = &net.IPNet{
 	IP:   net.ParseIP("fd7a:115c:a1e0::"),
 	Mask: net.CIDRMask(48, 128),
+}
+
+// virtualSwitchPrefixes are Windows interface-name prefixes for host
+// virtual switches (Hyper-V, WSL, VirtualBox, VMware). These are
+// always up but their 192.168.x.1 IPs are host-only — iOS sees them
+// as "request timed out" entries in the bridge endpoint list. Match
+// is case-insensitive and prefix-based; conservative on purpose so a
+// physical adapter named "vEth0" by an operator isn't filtered out.
+//
+// References for the canonical names:
+//   - "vEthernet (...)" — Hyper-V external/internal/private switches
+//   - "WSL" / "vEthernet (WSL)" — Windows Subsystem for Linux
+//   - "VirtualBox Host-Only Network" — VirtualBox
+//   - "VMware Network Adapter VMnet*" — VMware Workstation
+//   - "Bluetooth Network Connection" — sometimes up with a 169.254 IP
+var virtualSwitchPrefixes = []string{
+	"vethernet",     // Hyper-V (vEthernet (...))
+	"wsl",           // WSL2 vNIC
+	"virtualbox",    // VirtualBox host-only
+	"vmware",        // VMware Workstation/Player
+	"vbox",          // VirtualBox alt
+	"docker",        // Docker for Windows
+	"npcap loopback", // Wireshark Npcap loopback adapter
+}
+
+// isVirtualSwitchInterface reports whether name looks like a Windows
+// host-only virtual-switch adapter that iOS will never route to. The
+// match is case-insensitive prefix, lenient on purpose to catch the
+// common shapes without enumerating every install variant.
+func isVirtualSwitchInterface(name string) bool {
+	lower := strings.ToLower(name)
+	for _, p := range virtualSwitchPrefixes {
+		if strings.HasPrefix(lower, p) {
+			return true
+		}
+	}
+	return false
 }
 
 func isTailscale(iface net.Interface, ip net.IP) bool {
