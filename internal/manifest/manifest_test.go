@@ -184,7 +184,10 @@ func TestStoreRoundTrip(t *testing.T) {
 // count + per-path GetTrack), and a follow-up batch with overlapping
 // paths must update in place (ON CONFLICT semantics match UpsertTrack).
 func TestUpsertTrackBatchHappyPath(t *testing.T) {
-	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	s, err := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer s.Close()
 
 	now := time.Now().UTC().Truncate(time.Second)
@@ -227,7 +230,10 @@ func TestUpsertTrackBatchHappyPath(t *testing.T) {
 // can flush a zero-row batch without erroring out — happens at
 // scan-end when the final batch boundary aligns with the last row.
 func TestUpsertTrackBatchEmptyIsNoOp(t *testing.T) {
-	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	s, err := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer s.Close()
 	if err := s.UpsertTrackBatch(nil); err != nil {
 		t.Errorf("nil batch: %v", err)
@@ -245,7 +251,10 @@ func TestUpsertTrackBatchEmptyIsNoOp(t *testing.T) {
 // after PR #70 review — calling StreamTracks with a nil fn must error
 // out cleanly instead of nil-derefing inside the row loop.
 func TestStreamTracksRejectsNilCallback(t *testing.T) {
-	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	s, err := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer s.Close()
 	if err := s.StreamTracks(nil, nil); err == nil {
 		t.Error("StreamTracks(nil, nil) returned nil error, want explicit failure")
@@ -660,7 +669,10 @@ func TestScannerWorkerPoolCommitsAllTracks(t *testing.T) {
 			t.Fatalf("write %d: %v", i, err)
 		}
 	}
-	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	s, err := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer s.Close()
 	sc := NewScanner([]string{root}, s)
 
@@ -697,7 +709,10 @@ func TestScannerCancellationLeavesCommittedBatchesIntact(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	s, err := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer s.Close()
 	sc := NewScanner([]string{root}, s)
 

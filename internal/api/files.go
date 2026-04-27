@@ -227,8 +227,8 @@ func writeResolveError(w http.ResponseWriter, err error) bool {
 // `sort.Slice` — `strings.ToLower` allocates two strings per call,
 // and `sort.Slice` calls the comparator O(N log N) times. The
 // dedicated sort helper computes each lowercased key once. lessCaseFold
-// stays exported as the canonical case-fold predicate for one-shot
-// comparisons and to keep `TestLessCaseFoldUnicode` honest.
+// stays as the canonical case-fold predicate (package-internal) for
+// one-shot comparisons and to keep `TestLessCaseFoldUnicode` honest.
 func lessCaseFold(a, b string) bool {
 	return strings.ToLower(a) < strings.ToLower(b)
 }
@@ -250,13 +250,23 @@ func sortEntriesByName(entries []Entry) {
 // entriesByCaseFold is the sort.Interface implementation paired with
 // sortEntriesByName. Swap moves both the entry and its precomputed key
 // so subsequent comparisons keep referencing the right key.
+//
+// Less uses the original Name as a tie-break when folded keys match
+// — without it, fold-equal entries ("Apple"/"apple") permute
+// arbitrarily under sort.Sort and any UI that depends on a stable
+// listing across requests sees flicker (CodeRabbit on PR #71).
 type entriesByCaseFold struct {
 	entries []Entry
 	keys    []string
 }
 
-func (s entriesByCaseFold) Len() int           { return len(s.entries) }
-func (s entriesByCaseFold) Less(i, j int) bool { return s.keys[i] < s.keys[j] }
+func (s entriesByCaseFold) Len() int { return len(s.entries) }
+func (s entriesByCaseFold) Less(i, j int) bool {
+	if s.keys[i] != s.keys[j] {
+		return s.keys[i] < s.keys[j]
+	}
+	return s.entries[i].Name < s.entries[j].Name
+}
 func (s entriesByCaseFold) Swap(i, j int) {
 	s.entries[i], s.entries[j] = s.entries[j], s.entries[i]
 	s.keys[i], s.keys[j] = s.keys[j], s.keys[i]

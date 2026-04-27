@@ -476,10 +476,7 @@ var _ = fmt.Sprintf
 // previous per-comparison `sort.Slice + lessCaseFold` shape — same
 // UX assumptions ("Apple" before "banana", "Ébène" still sorts after
 // "zoo" because the byte-fold quirk persists post-ToLower) — across
-// the refactor. Inputs are deliberately fold-distinct because both
-// the prior `sort.Slice` and the new `sort.Sort` are non-stable, so
-// fold-equal items have implementation-defined relative order in
-// either version.
+// the refactor.
 func TestSortEntriesByNameMatchesLessCaseFold(t *testing.T) {
 	input := []Entry{
 		{Name: "banana"},
@@ -508,6 +505,34 @@ func TestSortEntriesByNameMatchesLessCaseFold(t *testing.T) {
 		if gotEntries[i].Name != wantEntries[i].Name {
 			t.Errorf("position %d: got %q, want %q (full got=%v want=%v)",
 				i, gotEntries[i].Name, wantEntries[i].Name, gotEntries, wantEntries)
+		}
+	}
+}
+
+// TestSortEntriesByNameDeterministicForFoldEqual locks the
+// tie-breaker that prevents fold-equal names ("Apple" / "apple")
+// from permuting arbitrarily under sort.Sort. Without it, two
+// successive /v1/list calls against the same directory could return
+// different orders — causing iOS list flicker. Run repeatedly with
+// shuffled input to catch the non-determinism (CodeRabbit on PR #71).
+func TestSortEntriesByNameDeterministicForFoldEqual(t *testing.T) {
+	cases := []string{"Apple", "apple", "APPLE"}
+	// Try each starting permutation and assert a single stable
+	// outcome. With the byte-order tie-break, capital letters sort
+	// before lowercase ('A' < 'a') so the deterministic order is
+	// APPLE → Apple → apple.
+	want := []string{"APPLE", "Apple", "apple"}
+	for _, perm := range [][3]int{{0, 1, 2}, {2, 1, 0}, {1, 0, 2}, {0, 2, 1}} {
+		entries := []Entry{
+			{Name: cases[perm[0]]},
+			{Name: cases[perm[1]]},
+			{Name: cases[perm[2]]},
+		}
+		sortEntriesByName(entries)
+		for i, w := range want {
+			if entries[i].Name != w {
+				t.Errorf("perm=%v: position %d = %q, want %q", perm, i, entries[i].Name, w)
+			}
 		}
 	}
 }

@@ -287,9 +287,10 @@ func (s *Scanner) runScanWriter(ctx context.Context, writes <-chan *Track, commi
 		if len(batch) >= scanBatchSize {
 			flush()
 			if ctx.Err() != nil {
-				// Honour cancellation between batches; don't drop
-				// the un-flushed remainder (next iteration handles).
-				// Drain remaining channel to let workers exit.
+				// Honour cancellation between batches. The current
+				// batch was just flushed; anything still inbound is
+				// drained without flushing so workers can exit and
+				// the writer can return promptly.
 				for range writes {
 				}
 				return

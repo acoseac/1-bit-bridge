@@ -203,6 +203,32 @@ func (s *Store) UpsertTrackBatch(ts []*Track) error {
 	if len(ts) == 0 {
 		return nil
 	}
+	// Pre-marshal every row OUTSIDE the lock so the critical section
+	// only covers the actual SQLite writes. JSON marshalling 500 rows
+	// can dwarf the BEGIN/COMMIT cost; keeping it out of the locked
+	// region lets concurrent enrichment / wipe paths progress (Gemini
+	// on PR #71). marshalForStorage failures abort the whole batch
+	// before any SQL touches the DB.
+	type row struct {
+		path    string
+		size    int64
+		mtime   int64
+		tagsRaw []byte
+	}
+	rows := make([]row, len(ts))
+	for i, t := range ts {
+		raw, err := marshalForStorage(t)
+		if err != nil {
+			return err
+		}
+		rows[i] = row{
+			path:    t.Path,
+			size:    t.Size,
+			mtime:   t.ModTime.UnixNano(),
+			tagsRaw: raw,
+		}
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tx, err := s.db.Begin()
@@ -225,12 +251,8 @@ func (s *Store) UpsertTrackBatch(ts []*Track) error {
 	}
 	defer stmt.Close()
 	now := time.Now().UnixNano()
-	for _, t := range ts {
-		raw, err := marshalForStorage(t)
-		if err != nil {
-			return err
-		}
-		if _, err := stmt.Exec(t.Path, t.Size, t.ModTime.UnixNano(), raw, now); err != nil {
+	for _, r := range rows {
+		if _, err := stmt.Exec(r.path, r.size, r.mtime, r.tagsRaw, now); err != nil {
 			return err
 		}
 	}
