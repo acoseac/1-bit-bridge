@@ -142,13 +142,19 @@ type Manifest struct {
 // negative-cache stamping on artists whose MBID hasn't landed yet.
 //
 // `LastEnrichedAt` is wall-clock UTC of the most recent successful
-// `MarkEnriched` call across the whole library, or the zero time if no
-// track has ever been enriched. iOS gates its "still in progress"
-// assumption on a 24h freshness check on this value — a bridge that
-// went idle a week ago shouldn't make the iOS UI claim enrichment is
-// "still happening".
+// `MarkEnriched` call across the whole library. **Pointer type**:
+// Go's `omitempty` does NOT drop a zero `time.Time` (`time.Time` is a
+// struct, not a value type that satisfies the `IsZero` check `omitempty`
+// uses), so a non-pointer field would emit `"0001-01-01T00:00:00Z"` on
+// the wire when no track has been enriched yet. The iOS decoder would
+// then parse that as a real, very-old date, breaking the freshness gate
+// (24 h check on this value) and the "never enriched" sentinel.
+// Pointer + `omitempty` correctly omits the field on the absent case.
+// iOS gates its "still in progress" assumption on a 24 h freshness
+// check on this value — a bridge that went idle a week ago shouldn't
+// make the iOS UI claim enrichment is "still happening".
 type EnrichmentProgress struct {
-	TracksTotal    int       `json:"tracksTotal"`
-	TracksEnriched int       `json:"tracksEnriched"`
-	LastEnrichedAt time.Time `json:"lastEnrichedAt,omitempty"`
+	TracksTotal    int        `json:"tracksTotal"`
+	TracksEnriched int        `json:"tracksEnriched"`
+	LastEnrichedAt *time.Time `json:"lastEnrichedAt,omitempty"`
 }

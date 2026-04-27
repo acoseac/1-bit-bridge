@@ -358,14 +358,24 @@ func (s *Store) CountTracks() (int, error) {
 // EnrichmentProgress returns the library-wide enrichment counters used
 // by the manifest's `enrichmentProgress` block: total track count,
 // number of tracks past the enrich pass (`enriched_at != 0`), and the
-// wall-clock of the most recent successful enrichment (zero time when
-// no track has ever been enriched). Single SQL trip via aggregate
-// expressions so a 50k-track library doesn't allocate per-row.
+// wall-clock of the most recent successful enrichment. Single SQL trip
+// via aggregate expressions so a 50k-track library doesn't allocate
+// per-row.
+//
+// **Pointer return on `lastEnrichedAt`** so the JSON serialization
+// path can drop the field cleanly when no track has ever been
+// enriched. A zero `time.Time` value would slip past `omitempty` (Go's
+// `encoding/json` doesn't treat the time-struct's IsZero as "empty"),
+// emit `"0001-01-01T00:00:00Z"` on the wire, and the iOS decoder would
+// parse that as a real date — breaking the 24 h freshness gate. nil
+// here propagates straight through to a `nil *time.Time` in
+// `EnrichmentProgress.LastEnrichedAt`, which `omitempty` does
+// correctly drop.
 //
 // Backed implicitly by `idx_tracks_enriched` (already present from
 // `migrate`) — the `enriched_at != 0` and `MAX(enriched_at)` clauses
 // are both index-friendly.
-func (s *Store) EnrichmentProgress() (total int, enriched int, lastEnrichedAt time.Time, err error) {
+func (s *Store) EnrichmentProgress() (total int, enriched int, lastEnrichedAt *time.Time, err error) {
 	var lastNs sql.NullInt64
 	err = s.db.QueryRow(`
 		SELECT
@@ -375,10 +385,11 @@ func (s *Store) EnrichmentProgress() (total int, enriched int, lastEnrichedAt ti
 		FROM tracks
 	`).Scan(&total, &enriched, &lastNs)
 	if err != nil {
-		return 0, 0, time.Time{}, err
+		return 0, 0, nil, err
 	}
 	if lastNs.Valid && lastNs.Int64 != 0 {
-		lastEnrichedAt = time.Unix(0, lastNs.Int64).UTC()
+		t := time.Unix(0, lastNs.Int64).UTC()
+		lastEnrichedAt = &t
 	}
 	return total, enriched, lastEnrichedAt, nil
 }

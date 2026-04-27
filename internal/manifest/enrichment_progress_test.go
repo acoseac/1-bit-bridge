@@ -19,8 +19,8 @@ func TestStoreEnrichmentProgressEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if total != 0 || enriched != 0 || !last.IsZero() {
-		t.Errorf("empty store: got total=%d enriched=%d last=%v, want all zero",
+	if total != 0 || enriched != 0 || last != nil {
+		t.Errorf("empty store: got total=%d enriched=%d last=%v, want all zero/nil",
 			total, enriched, last)
 	}
 }
@@ -56,8 +56,8 @@ func TestStoreEnrichmentProgressMixed(t *testing.T) {
 	if enriched != 3 {
 		t.Errorf("enriched = %d, want 3", enriched)
 	}
-	if last.IsZero() {
-		t.Errorf("lastEnrichedAt should be set after MarkEnriched calls, got zero")
+	if last == nil {
+		t.Errorf("lastEnrichedAt should be set after MarkEnriched calls, got nil")
 	}
 }
 
@@ -209,12 +209,13 @@ func TestManifestJSONShape(t *testing.T) {
 	}
 
 	// Marshal a Manifest with EnrichmentProgress populated.
+	last := time.Date(2026, 4, 23, 11, 41, 1, 0, time.UTC)
 	m := Manifest{
 		Version: 1,
 		EnrichmentProgress: &EnrichmentProgress{
 			TracksTotal:    100,
 			TracksEnriched: 75,
-			LastEnrichedAt: time.Date(2026, 4, 23, 11, 41, 1, 0, time.UTC),
+			LastEnrichedAt: &last,
 		},
 	}
 	raw2, _ := json.Marshal(m)
@@ -246,5 +247,46 @@ func TestManifestOmitsEnrichmentProgressWhenNil(t *testing.T) {
 	json.Unmarshal(raw, &got)
 	if _, ok := got["enrichmentProgress"]; ok {
 		t.Errorf("nil EnrichmentProgress should be omitted from JSON, got %v", got)
+	}
+}
+
+// TestEnrichmentProgressOmitsLastEnrichedAtWhenNeverEnriched is the
+// regression test for the bug Gemini caught on PR review: a non-pointer
+// `LastEnrichedAt time.Time` slips past `omitempty` because Go's
+// `encoding/json` doesn't treat a zero `time.Time` as "empty", so the
+// wire shape would emit `"0001-01-01T00:00:00Z"` and the iOS decoder
+// would parse that as a real, very-old date — breaking both the
+// "never enriched" sentinel AND the 24 h freshness gate the iOS UI
+// uses to decide whether to show the "Enrichment in progress" footer.
+//
+// The pointer change in `EnrichmentProgress.LastEnrichedAt` lets
+// `omitempty` correctly drop the field. This test pins the wire-shape
+// contract so a future "let's simplify away the pointer" refactor
+// reintroduces the bug visibly instead of silently.
+func TestEnrichmentProgressOmitsLastEnrichedAtWhenNeverEnriched(t *testing.T) {
+	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	defer s.Close()
+	now := time.Now().UTC().Truncate(time.Second)
+	// A track that's been upserted but NOT enriched — the realistic
+	// "fresh-pair, scan ran but enricher hasn't finished a single
+	// row yet" state.
+	s.UpsertTrack(&Track{Path: "a.flac", Size: 1, ModTime: now})
+
+	m, err := BuildManifest(s, []string{"/tmp/nope/Music"}, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(m)
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	ep, ok := got["enrichmentProgress"].(map[string]any)
+	if !ok {
+		t.Fatalf("manifest missing enrichmentProgress: %v", got)
+	}
+	if _, present := ep["lastEnrichedAt"]; present {
+		t.Errorf("lastEnrichedAt must be ABSENT when no track has ever been enriched, got %v",
+			ep["lastEnrichedAt"])
 	}
 }
