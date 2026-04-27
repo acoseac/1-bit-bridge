@@ -202,7 +202,9 @@ func TestIsVirtualSwitchInterfaceMatchesKnownNames(t *testing.T) {
 	matches := []string{
 		"vEthernet (Default Switch)",
 		"vEthernet (WSL)",
-		"vEthernet (External)",
+		"vEthernet (Internal Switch)",
+		"vEthernet (Private 01)",
+		"vEthernet (nat)",
 		"WSL",
 		"VirtualBox Host-Only Network",
 		"VirtualBox Host-Only Network #2",
@@ -211,6 +213,7 @@ func TestIsVirtualSwitchInterfaceMatchesKnownNames(t *testing.T) {
 		"VMware Network Adapter VMnet8",
 		"Docker Networking",
 		"Npcap Loopback Adapter",
+		"Bluetooth Network Connection",
 	}
 	for _, n := range matches {
 		if !isVirtualSwitchInterface(n) {
@@ -222,7 +225,10 @@ func TestIsVirtualSwitchInterfaceMatchesKnownNames(t *testing.T) {
 // TestIsVirtualSwitchInterfaceLeavesPhysicalAlone confirms common
 // physical interface names DON'T match — accidental over-matching
 // would silently drop the LAN endpoint and break /v1/health
-// discoverability entirely.
+// discoverability entirely. The Hyper-V "External Switch" case is
+// load-bearing (CodeRabbit on PR #72): on hosts that bridge their
+// LAN via an external switch, that adapter carries the host's only
+// real LAN IP, and a blanket `vEthernet` filter would drop it.
 func TestIsVirtualSwitchInterfaceLeavesPhysicalAlone(t *testing.T) {
 	notMatches := []string{
 		"Ethernet",
@@ -232,6 +238,9 @@ func TestIsVirtualSwitchInterfaceLeavesPhysicalAlone(t *testing.T) {
 		"wlan0",
 		"tailscale0",
 		"utun0",
+		"vEthernet (External Switch)",  // Hyper-V external — carries real LAN IP
+		"vEthernet (External)",         // Hyper-V external (alt name)
+		"vEthernet (Realtek PCIe GbE)", // bridged-to-physical name shape
 	}
 	for _, n := range notMatches {
 		if isVirtualSwitchInterface(n) {

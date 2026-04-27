@@ -262,26 +262,42 @@ var tsULAv6 = &net.IPNet{
 }
 
 // virtualSwitchPrefixes are Windows interface-name prefixes for host
-// virtual switches (Hyper-V, WSL, VirtualBox, VMware). These are
-// always up but their 192.168.x.1 IPs are host-only — iOS sees them
-// as "request timed out" entries in the bridge endpoint list. Match
-// is case-insensitive and prefix-based; conservative on purpose so a
-// physical adapter named "vEth0" by an operator isn't filtered out.
+// host-only virtual switches (Hyper-V default + WSL, VirtualBox,
+// VMware host-only, Docker, Npcap loopback, Bluetooth PAN). These
+// are always up but their 192.168.x.1 / 172.x.x.1 IPs aren't routable
+// from off-host — iOS sees them as "request timed out" rows in the
+// bridge endpoint list. Match is case-insensitive prefix.
+//
+// **Hyper-V external switches are deliberately NOT filtered.** On
+// Windows hosts that bridge their LAN through an external Hyper-V
+// switch, the only physical-LAN-carrying adapter is named
+// `vEthernet (External Switch)` (or similar) — a blanket `vethernet`
+// prefix would drop the host's real LAN IP. We only filter the
+// canonical host-only variants by their parenthesised type label
+// (CodeRabbit on PR #72).
 //
 // References for the canonical names:
-//   - "vEthernet (...)" — Hyper-V external/internal/private switches
-//   - "WSL" / "vEthernet (WSL)" — Windows Subsystem for Linux
+//   - "vEthernet (Default Switch)" — Hyper-V default host-only switch
+//   - "vEthernet (WSL)" / "WSL" — Windows Subsystem for Linux vNIC
+//   - "vEthernet (Internal)" / "vEthernet (Private)" — non-external switches
 //   - "VirtualBox Host-Only Network" — VirtualBox
 //   - "VMware Network Adapter VMnet*" — VMware Workstation
-//   - "Bluetooth Network Connection" — sometimes up with a 169.254 IP
+//   - "Docker ..." — Docker for Windows
+//   - "Bluetooth Network Connection" — Bluetooth PAN
+//   - "Npcap Loopback Adapter" — Wireshark
 var virtualSwitchPrefixes = []string{
-	"vethernet",     // Hyper-V (vEthernet (...))
-	"wsl",           // WSL2 vNIC
-	"virtualbox",    // VirtualBox host-only
-	"vmware",        // VMware Workstation/Player
-	"vbox",          // VirtualBox alt
-	"docker",        // Docker for Windows
-	"npcap loopback", // Wireshark Npcap loopback adapter
+	"vethernet (default switch", // Hyper-V default switch
+	"vethernet (wsl",            // WSL vNIC
+	"vethernet (internal",       // Hyper-V internal switch
+	"vethernet (private",        // Hyper-V private switch
+	"vethernet (nat",            // Docker Desktop / Podman vSwitch
+	"wsl",                       // WSL2 standalone vNIC
+	"virtualbox",                // VirtualBox host-only
+	"vmware",                    // VMware Workstation/Player
+	"vbox",                      // VirtualBox alt naming
+	"docker",                    // Docker for Windows
+	"npcap loopback",            // Wireshark Npcap loopback adapter
+	"bluetooth",                 // Bluetooth PAN connection
 }
 
 // isVirtualSwitchInterface reports whether name looks like a Windows
