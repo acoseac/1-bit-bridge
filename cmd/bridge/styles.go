@@ -360,7 +360,7 @@ func shellHandoff(binPath, cfgPath string) string {
 	// Frame header: just the label, no command lines inside.
 	b.WriteString(frame("to start the bridge later, run:", []string{""}))
 	if runtime.GOOS == "windows" {
-		writeShellPS(&b, binPath, cfgPath)
+		writeShellPS(&b, "PowerShell:", binPath, cfgPath)
 		writeShellCmd(&b, binPath, cfgPath)
 	} else {
 		writeShellPosix(&b, binPath, cfgPath)
@@ -368,9 +368,11 @@ func shellHandoff(binPath, cfgPath string) string {
 		// PS variant appended so a remote operator can still copy
 		// the right one. Detection: $PSModulePath set while
 		// GOOS=linux/darwin means we're inside an SSH session that
-		// originated from Windows (rare but real).
+		// originated from Windows (rare but real). Label says
+		// "(if reachable)" because we can't actually verify whether
+		// a PowerShell instance is on the remote side.
 		if os.Getenv("PSModulePath") != "" {
-			writeShellPS(&b, binPath, cfgPath)
+			writeShellPS(&b, "PowerShell (if reachable):", binPath, cfgPath)
 		}
 	}
 	return b.String()
@@ -378,9 +380,11 @@ func shellHandoff(binPath, cfgPath string) string {
 
 // writeShellPS emits the PowerShell variant flush-left with backtick
 // line-continuations. `& <path>` invocation works regardless of CWD —
-// the PowerShell rule that bit the original transcript user.
-func writeShellPS(b *strings.Builder, binPath, cfgPath string) {
-	fmt.Fprintf(b, "  %s\n", paint(cBrightYellow, "PowerShell:"))
+// the PowerShell rule that bit the original transcript user. Label is
+// caller-controlled so the SSH-from-Windows path can render the
+// "PowerShell (if reachable):" qualifier without a separate helper.
+func writeShellPS(b *strings.Builder, label, binPath, cfgPath string) {
+	fmt.Fprintf(b, "  %s\n", paint(cBrightYellow, label))
 	fmt.Fprintf(b, "    & %s `\n", quotePS(binPath))
 	fmt.Fprintf(b, "      serve `\n")
 	fmt.Fprintf(b, "      --config %s\n", quotePS(cfgPath))
@@ -388,12 +392,16 @@ func writeShellPS(b *strings.Builder, binPath, cfgPath string) {
 }
 
 // writeShellCmd emits the cmd.exe variant. `^` is cmd's continuation
-// char. We print a fully-quoted binary path for determinism so the
-// command works whether the binary is on PATH or not.
+// char. `serve` and `--config` are split across continuation lines
+// for visual consistency with the PS / bash variants — every shell
+// renders as four lines (binary + serve + --config + spacer).
+// We print a fully-quoted binary path for determinism so the command
+// works whether the binary is on PATH or not.
 func writeShellCmd(b *strings.Builder, binPath, cfgPath string) {
 	fmt.Fprintf(b, "  %s\n", paint(cBrightYellow, "cmd.exe:"))
 	fmt.Fprintf(b, "    %s ^\n", quoteCmd(binPath))
-	fmt.Fprintf(b, "      serve --config %s\n", quoteCmd(cfgPath))
+	fmt.Fprintf(b, "      serve ^\n")
+	fmt.Fprintf(b, "      --config %s\n", quoteCmd(cfgPath))
 	fmt.Fprintln(b)
 }
 
