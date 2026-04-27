@@ -173,6 +173,24 @@ func TestEndpointsHandler(t *testing.T) {
 	}
 }
 
+// Regression for Qodo PR #69 review: when the operator binds with
+// `:0` (OS-pick-a-port mode used in tests / dev), the admin
+// endpoint must NOT 500 — the devices-page polls every 30s and a
+// 500 storm would mask the real "no external addresses" condition.
+// Empty array is the honest answer.
+func TestEndpointsHandlerHandlesPortZero(t *testing.T) {
+	srv, cfg, _ := newTestServer(t)
+	cfg.ListenAddress = ":0"
+	var entries []map[string]string
+	code := doJSON(t, srv.Handler(), "GET", "/api/endpoints", nil, &entries)
+	if code != 200 {
+		t.Fatalf("port-zero endpoints: got %d, want 200", code)
+	}
+	if len(entries) != 0 {
+		t.Errorf("port-zero endpoints: got %v, want empty", entries)
+	}
+}
+
 func TestTokensMintListRevokeFlow(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	h := srv.Handler()

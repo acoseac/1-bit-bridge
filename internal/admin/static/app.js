@@ -441,15 +441,6 @@ async function renderEndpoints() {
     .join("");
 }
 
-function escapeHTML(s) {
-  return String(s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
 function initDevices() {
   const modal = document.getElementById("pair-modal");
   const openBtn = document.getElementById("pair-open");

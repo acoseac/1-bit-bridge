@@ -136,8 +136,29 @@ func (s *Server) apiEndpoints(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	port, err := strconv.Atoi(portStr)
-	if err != nil || port <= 0 {
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "bad_port", "invalid listen port")
+		return
+	}
+	// Reject out-of-range ports up-front rather than letting them
+	// reach `advertise.Endpoints` and produce overflowed values in
+	// the URL strings. Ports must be 1..65535 by RFC 6335.
+	if port < 0 || port > 65535 {
+		writeError(w, http.StatusInternalServerError, "bad_port",
+			"listen port out of range (must be 1..65535)")
+		return
+	}
+	// Listen address ":0" is the OS-pick-a-port mode the codebase
+	// supports for testing — `cmd/bridge` binds first then logs the
+	// actual port. The configured address still reads `:0`, so the
+	// admin handler can't synthesise a useful URL here. Return an
+	// empty list instead of HTTP 500 so the devices-page panel
+	// renders "No external addresses detected" honestly. (Qodo
+	// flagged on PR #69 review — without this, the panel poll
+	// 500's every 30s and the operator can't tell whether the
+	// bridge is misconfigured or simply in port-zero mode.)
+	if port == 0 {
+		writeJSON(w, http.StatusOK, []adminEndpointEntry{})
 		return
 	}
 	eps := advertise.Endpoints(advertise.Params{Port: port})
