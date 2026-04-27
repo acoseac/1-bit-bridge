@@ -63,9 +63,7 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 				ModTime: info.ModTime().UTC(),
 			})
 		}
-		sort.Slice(entries, func(i, j int) bool {
-			return lessCaseFold(entries[i].Name, entries[j].Name)
-		})
+		sortEntriesByName(entries)
 		writeJSON(w, http.StatusOK, entries)
 		return
 	}
@@ -105,9 +103,7 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 			ModTime: ri.ModTime().UTC(),
 		})
 	}
-	sort.Slice(entries, func(i, j int) bool {
-		return lessCaseFold(entries[i].Name, entries[j].Name)
-	})
+	sortEntriesByName(entries)
 	writeJSON(w, http.StatusOK, entries)
 }
 
@@ -226,8 +222,44 @@ func writeResolveError(w http.ResponseWriter, err error) bool {
 // Unicode range. Matches the alphabetical-but-CI ordering iOS users
 // expect in a file browser — "Ébène" sorts near "e", not after "z" as
 // the older ASCII-only byte fold produced.
+//
+// **Use sortEntriesByName for sorting**, not this directly inside
+// `sort.Slice` — `strings.ToLower` allocates two strings per call,
+// and `sort.Slice` calls the comparator O(N log N) times. The
+// dedicated sort helper computes each lowercased key once. lessCaseFold
+// stays exported as the canonical case-fold predicate for one-shot
+// comparisons and to keep `TestLessCaseFoldUnicode` honest.
 func lessCaseFold(a, b string) bool {
 	return strings.ToLower(a) < strings.ToLower(b)
+}
+
+// sortEntriesByName sorts entries in-place by case-folded Name. Each
+// element's lowercased key is computed once into a parallel slice and
+// reused by the comparator — vs. the previous `sort.Slice` +
+// `strings.ToLower` per comparison, which allocated 2 × O(N log N)
+// strings per request. For a 2000-file directory the prior shape did
+// ~44 000 string allocations per /v1/list call (review item).
+func sortEntriesByName(entries []Entry) {
+	keys := make([]string, len(entries))
+	for i := range entries {
+		keys[i] = strings.ToLower(entries[i].Name)
+	}
+	sort.Sort(entriesByCaseFold{entries: entries, keys: keys})
+}
+
+// entriesByCaseFold is the sort.Interface implementation paired with
+// sortEntriesByName. Swap moves both the entry and its precomputed key
+// so subsequent comparisons keep referencing the right key.
+type entriesByCaseFold struct {
+	entries []Entry
+	keys    []string
+}
+
+func (s entriesByCaseFold) Len() int           { return len(s.entries) }
+func (s entriesByCaseFold) Less(i, j int) bool { return s.keys[i] < s.keys[j] }
+func (s entriesByCaseFold) Swap(i, j int) {
+	s.entries[i], s.entries[j] = s.entries[j], s.entries[i]
+	s.keys[i], s.keys[j] = s.keys[j], s.keys[i]
 }
 
 // Copy is exposed for test shims; wraps io.Copy so tests can swap it out.

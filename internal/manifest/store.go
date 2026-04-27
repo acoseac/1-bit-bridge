@@ -184,6 +184,59 @@ func (s *Store) UpsertTrack(t *Track) error {
 	return err
 }
 
+// UpsertTrackBatch writes (or replaces) many tracks inside a single
+// transaction with one prepared statement reused across rows. The
+// scanner's writer goroutine calls this with up-to-`scanBatchSize`
+// rows per flush — collapsing the N×fsync of per-row autocommit (50k
+// transactions on a 50k-track library) into ~N/500 transactions.
+//
+// Empty input is a no-op. On any per-row error the transaction rolls
+// back via the deferred Rollback (Commit-after-Rollback is harmless),
+// so partial-batch writes never leak. The returned error is the first
+// failure; callers should log and continue (the scanner's writer does).
+//
+// Holds `s.mu` for the duration of the transaction so concurrent
+// `MarkEnriched` / `WipeAllTracks` / `DeleteTracksByPrefix` don't
+// interleave their multi-statement sections with our writes — matches
+// the existing convention from those callers.
+func (s *Store) UpsertTrackBatch(ts []*Track) error {
+	if len(ts) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	stmt, err := tx.Prepare(`
+		INSERT INTO tracks(path, size, mtime_ns, tags_json, indexed_at)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(path) DO UPDATE SET
+			size        = excluded.size,
+			mtime_ns    = excluded.mtime_ns,
+			tags_json   = excluded.tags_json,
+			indexed_at  = excluded.indexed_at,
+			enriched_at = 0
+	`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	now := time.Now().UnixNano()
+	for _, t := range ts {
+		raw, err := marshalForStorage(t)
+		if err != nil {
+			return err
+		}
+		if _, err := stmt.Exec(t.Path, t.Size, t.ModTime.UnixNano(), raw, now); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // DeleteTrack removes a track by path. Missing rows are not an error.
 func (s *Store) DeleteTrack(path string) error {
 	_, err := s.db.Exec(`DELETE FROM tracks WHERE path = ?`, path)
@@ -291,6 +344,13 @@ func (s *Store) ListTracks(since *time.Time) ([]Track, error) {
 // is propagated. rows.Err() (post-iteration) is also returned if fn
 // finished cleanly.
 func (s *Store) StreamTracks(sp *time.Time, fn func(*Track) error) error {
+	if fn == nil {
+		// Defensive guard: invoking the callback later would panic with
+		// a nil-deref. CodeRabbit on PR #70 — surface a clear error
+		// before doing any DB work so misuse is obvious instead of a
+		// production crash deep in the streaming-manifest path.
+		return errors.New("StreamTracks: nil callback")
+	}
 	q := `SELECT tags_json, enriched_at FROM tracks`
 	args := []any{}
 	if sp != nil {
