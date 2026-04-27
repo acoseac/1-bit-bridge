@@ -180,13 +180,26 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// Windows the Go file mode is advisory only — protection there
 	// relies on per-user-profile NTFS ACLs at %LOCALAPPDATA%, which
 	// already block other standard users.
+	//
+	// MkdirAll preserves existing-dir mode, so re-runs over a 0o755
+	// install would otherwise leave the broader perms in place. The
+	// follow-up Chmod is what actually hardens upgrades. Chmod errors
+	// are non-fatal: if perms can't be tightened (e.g. the dir is on
+	// a filesystem that ignores POSIX modes, or Windows ACLs differ)
+	// we still want init to succeed — surface a warning.
 	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
 		fmt.Fprintf(stderr, "mkdir config dir: %v\n", err)
 		return 1
 	}
+	if err := os.Chmod(cfgDir, 0o700); err != nil {
+		fmt.Fprintf(stderr, "warning: chmod config dir: %v\n", err)
+	}
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		fmt.Fprintf(stderr, "mkdir data dir: %v\n", err)
 		return 1
+	}
+	if err := os.Chmod(dataDir, 0o700); err != nil {
+		fmt.Fprintf(stderr, "warning: chmod data dir: %v\n", err)
 	}
 
 	cfg := &config.Config{

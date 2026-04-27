@@ -104,12 +104,21 @@ func Generate(certPath, keyPath, hostname string) error {
 	// readable (0o644) — public material — but the directory is the
 	// outer barrier, so keep it tight on POSIX. Windows ignores the
 	// mode and relies on per-user-profile ACLs at %LOCALAPPDATA%.
-	if err := os.MkdirAll(filepath.Dir(certPath), 0o700); err != nil {
+	//
+	// MkdirAll leaves existing-dir mode untouched; the follow-up
+	// Chmod is what hardens upgrades from a previous 0o755 install.
+	// Chmod failures are non-fatal — caller still gets a working
+	// cert/key pair, just on a less-restricted parent.
+	certDir := filepath.Dir(certPath)
+	if err := os.MkdirAll(certDir, 0o700); err != nil {
 		return fmt.Errorf("mkdir (cert): %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(keyPath), 0o700); err != nil {
+	_ = os.Chmod(certDir, 0o700)
+	keyDir := filepath.Dir(keyPath)
+	if err := os.MkdirAll(keyDir, 0o700); err != nil {
 		return fmt.Errorf("mkdir (key): %w", err)
 	}
+	_ = os.Chmod(keyDir, 0o700)
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return fmt.Errorf("generate key: %w", err)

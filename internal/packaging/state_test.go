@@ -80,3 +80,22 @@ func TestIsAdminAndIsRootAreStable(t *testing.T) {
 	_ = IsAdmin()
 	_ = IsRoot()
 }
+
+// TestErrSystemInstallNeedsRootIsExported pins the sentinel that
+// callers are expected to compare against via errors.Is when Stop /
+// Restart return the system-install gate. A rename or accidental
+// re-declaration would silently break the menu's friendly elevation
+// hint, so the test asserts the sentinel exists and carries a
+// non-empty message that mentions root.
+func TestErrSystemInstallNeedsRootIsExported(t *testing.T) {
+	if ErrSystemInstallNeedsRoot == nil {
+		t.Fatal("ErrSystemInstallNeedsRoot must be a non-nil sentinel")
+	}
+	msg := ErrSystemInstallNeedsRoot.Error()
+	if msg == "" {
+		t.Fatal("ErrSystemInstallNeedsRoot.Error() empty")
+	}
+	if !strings.Contains(msg, "root") {
+		t.Errorf("ErrSystemInstallNeedsRoot message %q should mention root so the user knows what action to take", msg)
+	}
+}
