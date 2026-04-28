@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -109,7 +108,7 @@ func LoadState(dataDir string) (State, error) {
 		// A malformed marker is treated as "no marker" — we'd rather
 		// recover by ignoring it than block boot on a bad file. The
 		// log line is what tells the operator something's off.
-		log.Printf("updater: malformed update-state.json (treating as absent): %v", err)
+		logger.Warn("malformed update-state.json (treating as absent)", "err", err)
 		return State{}, nil
 	}
 	return st, nil
@@ -220,7 +219,7 @@ func DecideBootAction(st State, currentServerVersion string, now time.Time) Boot
 		// — treat as noop so we don't accidentally trash the .bak.
 		return BootNoop
 	default:
-		log.Printf("updater: unknown state.Status %q (treating as noop)", st.Status)
+		logger.Warn("unknown state.Status (treating as noop)", "status", st.Status)
 		return BootNoop
 	}
 }

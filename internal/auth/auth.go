@@ -22,14 +22,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/acoseac/1-bit-bridge/internal/logging"
 )
+
+var logger = logging.Component("auth")
 
 const (
 	// rawTokenBytes is the number of random bytes per minted token.
@@ -346,7 +349,7 @@ func (s *Store) Validate(rawToken string) (Token, bool) {
 			s.tokens[i].LastUsedAt = now.UTC()
 			if time.Since(s.lastUsedFlush) >= lastUsedFlushInterval {
 				if err := s.persist(); err != nil {
-					log.Printf("auth: persist LastUsedAt: %v", err)
+					logger.Error("persist LastUsedAt", "err", err)
 				}
 				// persist() stamps `lastUsedFlush` on success; nothing to
 				// do here on either branch.
@@ -435,7 +438,7 @@ func (s *Store) RecordClientVersion(id, ver string) {
 			// the new value.
 			_ = s.reloadIfStale()
 			if err := s.persist(); err != nil {
-				log.Printf("auth: persist client-version: %v", err)
+				logger.Error("persist client-version", "err", err)
 			}
 		}
 		return

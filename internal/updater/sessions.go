@@ -1,7 +1,6 @@
 package updater
 
 import (
-	"log"
 	"sync"
 	"sync/atomic"
 )
@@ -70,7 +69,7 @@ func (t *Tracker) End() {
 		t.loggedUnderflow = true
 		t.mu.Unlock()
 		if first {
-			log.Printf("updater: sessions tracker underflow — Begin/End mismatch (clamping to 0)")
+			logger.Warn("sessions tracker underflow — Begin/End mismatch (clamping to 0)")
 		}
 	}
 }
