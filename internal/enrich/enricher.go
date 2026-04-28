@@ -9,12 +9,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
 	"golang.org/x/text/unicode/norm"
 
+	"github.com/acoseac/1-bit-bridge/internal/lrucache"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
@@ -55,27 +55,35 @@ type Enricher struct {
 	// PollInterval is how long to wait between empty-batch checks.
 	PollInterval time.Duration
 
-	// albumCache memoizes (artist, album) → albumResolution so tracks on
-	// the same album share a single MB round-trip. In-memory, lives as
-	// long as the Enricher. Stores both the release MBID and — when MB
-	// returned one — the release-group MBID so the CAA release-group
-	// fallback doesn't need a second MB lookup.
-	albumCache sync.Map
+	// albumCache memoizes (artist, album) → albumResolution so tracks
+	// on the same album share a single MB round-trip. Bounded LRU
+	// (capacity albumCacheCap) so a long-running enricher on a
+	// multi-decade library can't grow the working set indefinitely.
+	// Stores both the release MBID and — when MB returned one — the
+	// release-group MBID so the CAA release-group fallback doesn't
+	// need a second MB lookup.
+	albumCache *lrucache.Cache[string, albumResolution]
 
-	// releaseGroupCache memoizes releaseMBID → releaseGroupMBID for the
-	// embedded-MBID path where no SearchRelease happened. Keyed on the
-	// release MBID alone; negative results cache as the empty string so
-	// sibling tracks don't re-query a release that genuinely has no
-	// release-group association.
-	releaseGroupCache sync.Map
+	// releaseGroupCache memoizes releaseMBID → releaseGroupMBID for
+	// the embedded-MBID path where no SearchRelease happened. Keyed
+	// on the release MBID alone; negative results cache as the empty
+	// string so sibling tracks don't re-query a release that
+	// genuinely has no release-group association. Bounded at
+	// releaseGroupCacheCap.
+	releaseGroupCache *lrucache.Cache[string, string]
 
-	// artistCache memoizes artist-name → ArtistMBID so sibling tracks by
-	// the same artist share the lookup + image-fetch.
-	artistCache sync.Map
+	// artistCache memoizes artist-name → ArtistMBID so sibling tracks
+	// by the same artist share the lookup + image-fetch. Bounded at
+	// artistCacheCap.
+	artistCache *lrucache.Cache[string, string]
 
-	// deezerNegCache remembers "Deezer had no portrait" per artist MBID
-	// so sibling tracks don't each re-query. Populated with struct{}{}.
-	deezerNegCache sync.Map
+	// deezerNegCache remembers "Deezer had no portrait" per artist
+	// MBID so sibling tracks don't each re-query. Lookup is
+	// presence-only via `Has` (a sibling-track read doesn't promote
+	// the negative entry to MRU and outlive a positive Deezer
+	// re-fetch). Bounded at deezerNegCacheCap — highest-fanout of
+	// the four because every artist Deezer doesn't have ends up here.
+	deezerNegCache *lrucache.Cache[string, struct{}]
 
 	// progress counters exposed via ScanState.
 	done    atomic.Int64
@@ -100,6 +108,20 @@ type albumResolution struct {
 	ReleaseGroupMBID string
 }
 
+// Cache size ceilings for the four enricher memoization caches.
+// Sized to comfortably cover a 50k-track library on a Pi-class host:
+// at ~200 B per entry the worst case is ~10 MB per cache (~40 MB
+// aggregate), well below process headroom and finite for the
+// long-running enricher loop. Pre-allocated map capacity at
+// construction so the bulk-ingestion phase of a 50k-track scan
+// doesn't trigger Go map bucket resizing mid-flight.
+const (
+	albumCacheCap        = 50_000
+	releaseGroupCacheCap = 50_000
+	artistCacheCap       = 50_000
+	deezerNegCacheCap    = 100_000
+)
+
 // NewEnricher wires a store + MB/CAA/Deezer clients + cache dir into a
 // worker. Sensible defaults applied if the numeric fields are zero.
 // Deezer can be nil — artist-image lookup is simply skipped in that
@@ -117,6 +139,10 @@ func NewEnricher(store *manifest.Store, mb *MusicBrainzClient, caa *CoverArtClie
 		DeezerMinInterval: 120 * time.Millisecond,
 		BatchLimit:        100,
 		PollInterval:      15 * time.Second,
+		albumCache:        lrucache.New[string, albumResolution](albumCacheCap),
+		releaseGroupCache: lrucache.New[string, string](releaseGroupCacheCap),
+		artistCache:       lrucache.New[string, string](artistCacheCap),
+		deezerNegCache:    lrucache.New[string, struct{}](deezerNegCacheCap),
 	}
 	return e
 }
@@ -187,8 +213,7 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 		// Cache by (artist, album) so sibling tracks on the same album
 		// share one MB call.
 		key := cacheKey(t.Artist, t.Album)
-		if cached, ok := e.albumCache.Load(key); ok {
-			res := cached.(albumResolution)
+		if res, ok := e.albumCache.Get(key); ok {
 			albumMBID = res.ReleaseMBID
 			rgMBID = res.ReleaseGroupMBID
 		} else {
@@ -234,7 +259,7 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 				// MB with the same guaranteed-fail query (e.g.
 				// schema drift, decode error). The cache is
 				// process-local; restart clears it.
-				e.albumCache.Store(key, albumResolution{})
+				e.albumCache.Set(key, albumResolution{})
 				e.markSkipped(t, fmt.Sprintf("MB error: %v", err))
 				return
 			}
@@ -245,7 +270,7 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 			}
 			albumMBID = resolution.ReleaseMBID
 			rgMBID = resolution.ReleaseGroupMBID
-			e.albumCache.Store(key, resolution)
+			e.albumCache.Set(key, resolution)
 		}
 		// Propagate to the track whether we hit cache or searched fresh.
 		if albumMBID != "" {
@@ -289,8 +314,8 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) {
 	}
 	key := "artist\x00" + t.Artist
 	var artistMBID string
-	if cached, ok := e.artistCache.Load(key); ok {
-		artistMBID = cached.(string)
+	if cached, ok := e.artistCache.Get(key); ok {
+		artistMBID = cached
 	} else {
 		time.Sleep(e.MBMinInterval)
 		res, err := e.mb.SearchArtist(ctx, t.Artist)
@@ -311,7 +336,7 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) {
 		// write), so this branch is strictly about positive hits.
 		if res != nil && res.MBID != "" {
 			artistMBID = res.MBID
-			e.artistCache.Store(key, artistMBID)
+			e.artistCache.Set(key, artistMBID)
 		}
 	}
 	if artistMBID != "" {
@@ -325,7 +350,7 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) {
 	}
 	// Negative-cache Deezer misses so sibling tracks by the same artist
 	// don't each re-query Deezer for a portrait the API doesn't have.
-	if _, miss := e.deezerNegCache.Load(artistMBID); miss {
+	if e.deezerNegCache.Has(artistMBID) {
 		return
 	}
 	found, err := e.ensureArtistImageCached(ctx, artistMBID, t.Artist)
@@ -334,7 +359,7 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) {
 		return
 	}
 	if !found {
-		e.deezerNegCache.Store(artistMBID, struct{}{})
+		e.deezerNegCache.Set(artistMBID, struct{}{})
 	}
 }
 
@@ -574,8 +599,8 @@ func (e *Enricher) resolveReleaseGroupMBID(ctx context.Context, releaseMBID, hin
 	if hint != "" {
 		return hint, nil
 	}
-	if cached, ok := e.releaseGroupCache.Load(releaseMBID); ok {
-		return cached.(string), nil
+	if cached, ok := e.releaseGroupCache.Get(releaseMBID); ok {
+		return cached, nil
 	}
 	time.Sleep(e.MBMinInterval) // pace
 	rg, err := e.mb.ReleaseGroupMBID(ctx, releaseMBID)
@@ -584,7 +609,7 @@ func (e *Enricher) resolveReleaseGroupMBID(ctx context.Context, releaseMBID, hin
 		// should retry on the next enrichment pass.
 		return "", err
 	}
-	e.releaseGroupCache.Store(releaseMBID, rg)
+	e.releaseGroupCache.Set(releaseMBID, rg)
 	return rg, nil
 }
 

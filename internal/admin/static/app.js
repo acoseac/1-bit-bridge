@@ -230,7 +230,10 @@ async function runInstall(btn, force) {
     // down before we can read the response body anyway. The page
     // reload below races the restart's port-rebind; 2.5 s is the
     // empirical sweet-spot for launchd respawn on macOS.
-    fetch("/api/restart", { method: "POST" }).catch(() => {});
+    fetch("/api/restart", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+    }).catch(() => {});
     setTimeout(() => window.location.reload(), 2500);
   } catch (err) {
     if (/409/.test(err.message) || /active-sessions/.test(err.message) || /active downloads/i.test(err.message)) {
