@@ -1,8 +1,14 @@
 // Package updater polls the GitHub Releases API for newer 1-bit-bridge
-// builds and exposes the result to the api + admin packages. Phase A
-// is poll-only: it advertises "X.Y.Z is available" but does not download
-// or install anything. Phase B will wire the actual swap-and-restart path
-// onto this same Updater type.
+// builds and drives the full self-update lifecycle: poll → download →
+// SHA-256 verify (always) → platform signature verify (macOS Apple
+// codesign + Team-ID; Linux/Windows currently TLS-of-checksums.txt only,
+// see verify_other.go for the seam where Sigstore / minisign / SignPath
+// would land) → swap (atomic rename on Unix; live rename + caller-driven
+// restart on Windows, see swap_windows.go — note this is NOT the
+// MoveFileEx/MOVEFILE_DELAY_UNTIL_REBOOT "pending rename" mechanism)
+// → arm rollback marker. The caller (admin
+// REST endpoint or `bridge update` CLI) is responsible for triggering the
+// process restart so a CLI run can print a final status line first.
 //
 // Concurrency: the poll goroutine is the only writer to the cached Status;
 // readers (Status()) take the same mutex. Callers should not block in
