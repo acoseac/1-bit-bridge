@@ -36,6 +36,7 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	cfgDirFlag := fs.String("dir", "", "config directory (default per-OS standard)")
 	nonInteractive := fs.Bool("yes", false, "accept all defaults without prompting")
+	fs.BoolVar(nonInteractive, "y", *nonInteractive, "alias for --yes")
 	force := fs.Bool("force", false, "with --yes: overwrite an existing config (by default, --yes refuses to clobber)")
 	libraryRoot := fs.String("library", "", "library root path (required with --yes)")
 	libraryName := fs.String("name", "", "library display name (default: hostname)")

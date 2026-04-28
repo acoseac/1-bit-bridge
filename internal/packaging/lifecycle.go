@@ -47,3 +47,23 @@ func Restart() error {
 	}
 	return restartForOS(kind)
 }
+
+// Start asks the service manager to boot the installed bridge
+// service if it isn't already running. No-op when nothing is
+// installed (returns nil so menu / CLI callers don't have to gate
+// on `IsInstalled()` first). Same system-install + admin gates as
+// Stop / Restart.
+//
+// Distinct from Restart in semantics: Start is idempotent
+// "service should be up". Restart unconditionally bounces. The
+// CLI surface added in this PR exposes both to operators.
+func Start() error {
+	kind, _ := InstalledKind()
+	if kind == KindNone {
+		return nil
+	}
+	if kind == KindLaunchdSystem || kind == KindSystemdSystem {
+		return ErrSystemInstallNeedsRoot
+	}
+	return startForOS(kind)
+}
