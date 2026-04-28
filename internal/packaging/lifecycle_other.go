@@ -44,6 +44,33 @@ func stopForOS(kind ServiceKind) error {
 	return nil
 }
 
+// startForOS asks the service manager to boot the installed bridge.
+// `launchctl bootstrap` on darwin (idempotent — a not-already-loaded
+// agent loads, an already-loaded one returns "service already
+// loaded" which we swallow). `systemctl --user start` on linux,
+// idempotent against an already-running unit.
+func startForOS(kind ServiceKind) error {
+	switch kind {
+	case KindLaunchdUser:
+		path, err := launchdPlistPath()
+		if err != nil {
+			return fmt.Errorf("resolve plist path: %w", err)
+		}
+		out, err := exec.Command("launchctl", "bootstrap", "gui/"+uidString(), path).CombinedOutput()
+		if err != nil && !bytes.Contains(out, []byte("service already loaded")) && !bytes.Contains(out, []byte("Bootstrap failed: 17: File exists")) {
+			return fmt.Errorf("launchctl bootstrap: %v: %s", err, string(out))
+		}
+		return nil
+	case KindSystemdUser:
+		out, err := exec.Command("systemctl", "--user", "start", ServiceLabel+".service").CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("systemctl --user start: %v: %s", err, string(out))
+		}
+		return nil
+	}
+	return nil
+}
+
 // restartForOS bootstraps a freshly-stopped agent (darwin) or asks
 // systemd to bounce the unit (linux). Only handles user-context kinds;
 // system kinds short-circuit upstream in Restart.

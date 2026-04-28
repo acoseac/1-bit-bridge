@@ -81,6 +81,7 @@ func restoreCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	configPath := fs.String("config", "bridge.yaml", "path to config file")
 	autoYes := fs.Bool("yes", false, "skip the interactive confirmation prompt")
+	fs.BoolVar(autoYes, "y", *autoYes, "alias for --yes")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
