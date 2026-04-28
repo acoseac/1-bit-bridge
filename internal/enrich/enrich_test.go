@@ -231,9 +231,9 @@ func TestParseRetryAfterBeyondInt64ClampsToCap(t *testing.T) {
 		header string
 		want   time.Duration
 	}{
-		{"99999999999999999999999", time.Hour},      // 23 digits, way past int64
-		{"9223372036854775808", time.Hour},          // exactly int64 max + 1
-		{"-99999999999999999999999", 0},             // negative, malformed
+		{"99999999999999999999999", time.Hour}, // 23 digits, way past int64
+		{"9223372036854775808", time.Hour},     // exactly int64 max + 1
+		{"-99999999999999999999999", 0},        // negative, malformed
 	}
 	for _, c := range cases {
 		got := parseRetryAfter(c.header, now)

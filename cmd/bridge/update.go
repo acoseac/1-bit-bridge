@@ -162,7 +162,14 @@ func updateCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 	if hasService && (*yes || stdinIsTTY) {
 		shouldRestart := *yes
 		if !shouldRestart {
-			fmt.Fprint(stdout, "\nRestart the service now to apply? [Y/n] ")
+			// Write the prompt to STDERR, not stdout. `bridge
+			// update >file` from a terminal would otherwise hide
+			// the question in the redirected stream and block
+			// for input with no visible cue (CodeRabbit Major
+			// post-merge on PR #82). Same convention as
+			// `cert rotate` and `restore` — confirmation prompts
+			// always go to stderr.
+			fmt.Fprint(stderr, "\nRestart the service now to apply? [Y/n] ")
 			var resp string
 			fmt.Fscanln(stdin, &resp)
 			r := strings.ToLower(strings.TrimSpace(resp))
@@ -171,7 +178,7 @@ func updateCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 		if shouldRestart {
 			if err := packaging.Restart(); err != nil {
 				fmt.Fprintf(stderr, "restart: %v\n", err)
-				printManualRestartHint(stdout)
+				printManualRestartHint(stderr, kind)
 				return 1
 			}
 			fmt.Fprintln(stdout, "bridge: service restart requested.")
@@ -181,18 +188,40 @@ func updateCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 	}
 
 	fmt.Fprintln(stdout, "\nRestart the bridge to load the new binary:")
-	printManualRestartHint(stdout)
+	printManualRestartHint(stdout, kind)
 	_ = version.ServerVersion // silence unused-import warning if version isn't referenced elsewhere
 	return 0
 }
 
-// printManualRestartHint emits the per-OS service-restart commands.
-// Used on the install-succeeded-but-restart-skipped path AND as a
-// fallback when the auto-restart attempt fails (service-manager
-// glitch, permission flap).
-func printManualRestartHint(w io.Writer) {
-	fmt.Fprintln(w, "  - launchd:  launchctl kickstart -k gui/$UID/com.acoseac.1-bit-bridge")
-	fmt.Fprintln(w, "  - systemd:  systemctl --user restart com.acoseac.1-bit-bridge")
+// printManualRestartHint emits the service-restart commands
+// appropriate for the installed unit kind. Used on the install-
+// succeeded-but-restart-skipped path AND as a fallback when the
+// auto-restart attempt fails (service-manager glitch, permission
+// flap).
+//
+// Per-platform output (CodeRabbit Major post-merge on PR #82):
+// pre-fix the function emitted launchd + systemd guidance
+// regardless of platform, so Windows SCM operators were told to
+// run launchctl. Now we branch on kind and only emit the line
+// for the actually-installed unit type.
+func printManualRestartHint(w io.Writer, kind packaging.ServiceKind) {
+	switch kind {
+	case packaging.KindLaunchdUser, packaging.KindLaunchdSystem:
+		fmt.Fprintln(w, "  - launchctl kickstart -k gui/$UID/com.acoseac.1-bit-bridge")
+	case packaging.KindSystemdUser:
+		fmt.Fprintln(w, "  - systemctl --user restart com.acoseac.1-bit-bridge")
+	case packaging.KindSystemdSystem:
+		fmt.Fprintln(w, "  - sudo systemctl restart com.acoseac.1-bit-bridge")
+	case packaging.KindWindowsSCM:
+		fmt.Fprintln(w, "  - net stop 1-bit-bridge && net start 1-bit-bridge")
+		fmt.Fprintln(w, "    (or use Services.msc → 1-bit-bridge → Restart)")
+	case packaging.KindWindowsStartup:
+		fmt.Fprintln(w, "  - end the current bridge.exe in Task Manager;")
+		fmt.Fprintln(w, "    the Startup-folder launcher will spawn a fresh one on next logon")
+		fmt.Fprintln(w, "    (or run `bridge serve` from a terminal now to come up immediately)")
+	default:
+		fmt.Fprintln(w, "  - no service unit installed; run `bridge serve` to start in the foreground")
+	}
 	fmt.Fprintln(w, "  - or hit \"Restart\" in the admin console.")
 }
 

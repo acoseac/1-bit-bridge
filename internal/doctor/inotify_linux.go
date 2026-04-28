@@ -71,13 +71,22 @@ func readInotifyLimit() (int, error) {
 // countDirs walks every configured root and counts directories,
 // honouring filepath.SkipDir on dotfiles and well-known noise
 // folders so the count matches what the watcher will actually
-// register. Errors are non-fatal at the per-dir level — a perm
-// flap shouldn't kill the check.
+// register. Per-subdir errors are non-fatal (a permission flap
+// shouldn't kill the check), but a root-level failure (the root
+// itself can't be opened) propagates so the doctor check warns
+// rather than reporting a false OK with zero count (CodeRabbit
+// Major post-merge on PR #83).
 func countDirs(roots []string) (int, error) {
 	total := 0
 	for _, root := range roots {
 		if err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
+				if path == root {
+					// Root unreadable — bubble up so checkInotifyLimit's
+					// caller produces a Warn instead of a misleading OK.
+					return err
+				}
+				// Sub-tree perm/IO flap — keep counting siblings.
 				return nil
 			}
 			if !d.IsDir() {

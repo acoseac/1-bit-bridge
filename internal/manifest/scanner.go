@@ -473,7 +473,16 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	close(writes)
 	writerWG.Wait()
 
-	if walkErr != nil && ctx.Err() == nil {
+	// Surface cancellation so a partial subtree update doesn't
+	// look like a clean completion (CodeRabbit Major post-merge
+	// on PR #83). `Scan` does the same; converting ctx.Err() to
+	// nil here would let the watcher's debounce loop log a
+	// success line for a scan that actually only committed a
+	// prefix of the work.
+	if ctx.Err() != nil {
+		return int(committed.Load()), ctx.Err()
+	}
+	if walkErr != nil {
 		return int(committed.Load()), walkErr
 	}
 	return int(committed.Load()), nil

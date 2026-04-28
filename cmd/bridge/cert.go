@@ -75,13 +75,13 @@ func certInfoCmd(args []string, stdout, stderr io.Writer) int {
 		expired := time.Now().After(info.NotAfter)
 		expiringSoon := !expired && info.DaysUntilExpiry <= 30
 		envelope := map[string]any{
-			"subject":          info.Subject,
-			"fingerprint":      info.Fingerprint,
-			"notBefore":        info.NotBefore.UTC().Format(time.RFC3339),
-			"notAfter":         info.NotAfter.UTC().Format(time.RFC3339),
-			"daysUntilExpiry":  info.DaysUntilExpiry,
-			"expired":          expired,
-			"expiringSoon":     expiringSoon,
+			"subject":         info.Subject,
+			"fingerprint":     info.Fingerprint,
+			"notBefore":       info.NotBefore.UTC().Format(time.RFC3339),
+			"notAfter":        info.NotAfter.UTC().Format(time.RFC3339),
+			"daysUntilExpiry": info.DaysUntilExpiry,
+			"expired":         expired,
+			"expiringSoon":    expiringSoon,
 		}
 		return writeJSONIndent(stdout, envelope)
 	}

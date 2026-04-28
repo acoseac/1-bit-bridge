@@ -117,10 +117,28 @@ func (wt *Watcher) Run(ctx context.Context) error {
 // first ENOSPC ("watch limit reached") to avoid spamming the log
 // once per directory — the operator gets one clear signal that
 // the kernel limit needs raising.
+//
+// **Root-level walk failure surfaces** (CodeRabbit Major post-merge
+// on PR #83): a permission/missing/IO error AT the root path
+// itself produces an err callback with `path == root`. Pre-fix,
+// the per-callsite `return nil` swallowed it and the caller
+// reported success with zero watches registered — an entire
+// library could lose instant-update coverage with no signal.
+// Now we surface it as an error, and the caller in `Run()` logs
+// "initial watch add failed (partial coverage)" so the operator
+// at least knows.
 func (wt *Watcher) addTree(root string) error {
 	limitHit := false
 	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
+			if path == root {
+				// Failure to even open the root — surface so the
+				// caller can log a clear warning. Returning the
+				// error stops the walk, which is what we want
+				// (no point trying subdirs of an unreachable
+				// root).
+				return err
+			}
 			// Permission flaps on individual subdirs are non-fatal;
 			// the periodic full scan would surface them anyway.
 			return nil

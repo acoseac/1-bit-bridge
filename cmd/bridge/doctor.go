@@ -56,7 +56,18 @@ func doctorCmd(args []string, stdout, stderr io.Writer) int {
 	}
 
 	if *jsonOut {
-		return writeJSONIndent(stdout, jsonReportEnvelope(report))
+		if code := writeJSONIndent(stdout, jsonReportEnvelope(report)); code != 0 {
+			return code
+		}
+		// Honour the "exit 1 if any fail" rule even on the JSON
+		// path so automation can rely on the exit code without
+		// having to jq the report (Qodo Bug post-merge on PR #82).
+		// Pre-fix the JSON branch returned 0 unconditionally,
+		// silently treating failures as success.
+		if report.HasFail() {
+			return 1
+		}
+		return 0
 	}
 	printReport(stdout, report)
 	if report.HasFail() {
@@ -124,12 +135,22 @@ func runFixes(w io.Writer, r *doctor.Report, d doctor.Deps) {
 			// (TLS fingerprint, library paths) plus the data
 			// subtree (TLS private key, tokens.json, manifest DB).
 			// 0o755 would let other host users read the
-			// fingerprint and library layout (Qodo + Gemini
-			// Security on PR #78). Windows ignores the mode and
-			// relies on per-user-profile NTFS ACLs at
-			// %LOCALAPPDATA%.
+			// fingerprint and library layout. Windows ignores
+			// the mode and relies on per-user-profile NTFS ACLs
+			// at %LOCALAPPDATA%.
 			if err := os.MkdirAll(d.ConfigDir, 0o700); err != nil {
 				fmt.Fprintf(w, "  ✗ %s: mkdir %s: %v\n", c.Name, d.ConfigDir, err)
+				continue
+			}
+			// MkdirAll alone doesn't guarantee the effective mode
+			// is 0o700: umask narrows fresh creates and existing-
+			// directory mode is preserved. Follow up with an
+			// explicit Chmod so the operator-facing "created
+			// (0700)" line isn't a lie (CodeRabbit Major
+			// post-merge on PR #82). Chmod failure is non-fatal
+			// — surface it but keep the ✓ since the dir exists.
+			if err := os.Chmod(d.ConfigDir, 0o700); err != nil {
+				fmt.Fprintf(w, "  ⚠ %s: created %s but chmod 0700 failed: %v\n", c.Name, d.ConfigDir, err)
 				continue
 			}
 			fmt.Fprintf(w, "  ✓ %s: created %s (0700)\n", c.Name, d.ConfigDir)
