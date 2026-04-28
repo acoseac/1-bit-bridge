@@ -26,7 +26,9 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -168,6 +170,16 @@ type Server struct {
 	// layout.html + the page's own .html file so rendering is a single
 	// ExecuteTemplate("layout", …) call.
 	pageTmpls map[string]*template.Template
+
+	// bgScans tracks every spawnBackgroundScan goroutine in flight so
+	// graceful shutdown waits for an admin-triggered scan to finish
+	// (or its context to cancel) instead of letting the process exit
+	// mid-write to the SQLite store. The ScanCtx is what each scan
+	// observes for cancellation; this WG is the coordination point
+	// for "have all spawned scans drained their post-scan cleanup
+	// before we return from Serve". Capped by the same 5s shutdown
+	// grace as the HTTP listener.
+	bgScans sync.WaitGroup
 }
 
 // pages maps the URL-friendly page name to its template filename.
@@ -242,7 +254,13 @@ func (s *Server) Handler() http.Handler {
 	// so we serve the fs directly — the request path already matches.
 	mux.Handle("GET /static/", http.FileServerFS(staticFS))
 
-	return loopbackOnly(mux)
+	// Layer order: outer = loopbackOnly (drops non-loopback peers
+	// before we evaluate anything else); inner = csrfGuard (rejects
+	// drive-by browser cross-origin POSTs that the loopback bind
+	// can't catch on its own — a malicious page in the user's
+	// browser is on the same loopback as the user). The two layers
+	// defend different threats.
+	return loopbackOnly(s.csrfGuard(mux))
 }
 
 // scanCtx returns the parent context for admin-triggered scans.
@@ -270,7 +288,9 @@ func (s *Server) scanCtx() context.Context {
 // changes.
 func (s *Server) spawnBackgroundScan(label string) {
 	ctx := s.scanCtx()
+	s.bgScans.Add(1)
 	go func() {
+		defer s.bgScans.Done()
 		if _, err := s.deps.Scanner.Scan(ctx); err != nil && !errors.Is(err, ctx.Err()) {
 			fmt.Fprintf(os.Stderr, "admin: %s: %v\n", label, err)
 		}
@@ -321,13 +341,189 @@ func (s *Server) Serve(ctx context.Context) error {
 	case <-ctx.Done():
 		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		return srv.Shutdown(shutCtx)
+		shutErr := srv.Shutdown(shutCtx)
+		// Wait for any spawnBackgroundScan goroutine to finish before
+		// returning — capped at the same 5s grace via shutCtx so a
+		// stuck scanner can't wedge process exit indefinitely.
+		// `s.deps.ScanCtx` is the scanner's cancellation source; the
+		// outer process already cancels it during shutdown, so a
+		// healthy scan honours the cancel and drains promptly.
+		drained := make(chan struct{})
+		go func() {
+			s.bgScans.Wait()
+			close(drained)
+		}()
+		select {
+		case <-drained:
+		case <-shutCtx.Done():
+		}
+		return shutErr
 	case err := <-errCh:
 		if err != nil && err != http.ErrServerClosed {
 			return err
 		}
 		return nil
 	}
+}
+
+// csrfGuard rejects drive-by cross-origin POSTs from a page running
+// in the user's browser. Loopback binding alone doesn't defend
+// against this threat — a malicious page at attacker.com runs in
+// the same user-agent that has loopback access, so the OS-level
+// allow-list is irrelevant.
+//
+// Two layered checks:
+//
+//  1. **Strict Content-Type on body-bearing mutations** (primary
+//     defense). For POST/PATCH/PUT/DELETE with a body, Content-Type
+//     must start with `application/json`. text/plain,
+//     application/x-www-form-urlencoded, and multipart/form-data are
+//     rejected with 415. Browsers MUST do a CORS preflight OPTIONS
+//     for cross-origin application/json — and the admin mux doesn't
+//     register OPTIONS handlers for /api/*, so the preflight fails
+//     and the real request never fires. Bodyless mutating POSTs
+//     (e.g. /api/scan, /api/restart) pass without a Content-Type
+//     check because there's no JSON body to abuse — handlers that
+//     DO read a body return 400 on empty input via the JSON
+//     decoder's natural error path.
+//
+//  2. **Origin allowlist (reject-if-mismatched, not reject-if-
+//     missing)**. When the Origin header is present, it must match
+//     the configured AdminAddress host:port. When absent, allow —
+//     Firefox/Safari sometimes omit Origin entirely for loopback
+//     navigations or send "null", and failing closed locks
+//     legitimate operators out. Referer is intentionally not
+//     consulted (same flakiness, no marginal benefit beyond a
+//     strict Content-Type).
+//
+// GET / HEAD pass through unconditionally — no body to parse, no
+// state mutation. OPTIONS (which we don't handle) returns 405 from
+// the mux as today.
+func (s *Server) csrfGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions:
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Body-bearing mutating request? Require application/json.
+		// Empty-body requests pass without Content-Type since there's
+		// no decode surface to attack. net/http strips the
+		// Transfer-Encoding header during request parsing and surfaces
+		// chunked transfers via `r.TransferEncoding` and ContentLength
+		// = -1, so a header-based "is the body chunked" check would be
+		// dead code (CodeRabbit Major on PR #76). ContentLength != 0
+		// catches both the known-length (>0) and chunked (-1) cases;
+		// only ContentLength == 0 is the no-body case we want to
+		// allow through.
+		hasBody := r.ContentLength != 0 || len(r.TransferEncoding) > 0
+		if hasBody {
+			ct := r.Header.Get("Content-Type")
+			// Strip parameters: "application/json; charset=utf-8"
+			// → "application/json". Compare case-insensitively per
+			// RFC 7231 §3.1.1.1 — "Application/JSON" is valid.
+			if i := strings.Index(ct, ";"); i >= 0 {
+				ct = ct[:i]
+			}
+			ct = strings.TrimSpace(strings.ToLower(ct))
+			if ct != "application/json" {
+				http.Error(w, "admin refused: Content-Type must be application/json", http.StatusUnsupportedMediaType)
+				return
+			}
+		}
+
+		// Origin header check, when present. The admin server binds
+		// to deps.Cfg.AdminAddress — a same-origin request from the
+		// admin UI carries Origin: http://127.0.0.1:7789 (or
+		// whatever the configured host:port resolves to in the
+		// browser). A cross-origin POST from attacker.com would
+		// carry Origin: https://attacker.com.
+		if origin := r.Header.Get("Origin"); origin != "" {
+			if !s.originMatchesAdmin(origin) {
+				http.Error(w, "admin refused: cross-origin request", http.StatusForbidden)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// originMatchesAdmin compares an Origin header against the admin
+// listener's host:port. Tolerant of the listener binding 127.0.0.1
+// while the browser navigates via http://localhost — both resolve
+// to the same listener and `loopbackOnly` already enforces the IP
+// is loopback, so the only thing the Origin check adds is "did this
+// request originate from a page served by us, or from elsewhere".
+//
+// Empty AdminAddress (test wiring) means "any same-loopback Origin
+// is fine" — the loopbackOnly outer layer is the actual gate.
+func (s *Server) originMatchesAdmin(origin string) bool {
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		// Malformed or "null" Origin — refuse rather than guess.
+		return false
+	}
+	// Use url.URL.Hostname() / Port() instead of net.SplitHostPort on
+	// u.Host: those methods strip IPv6 brackets and handle the
+	// no-port case in one step. SplitHostPort would surface IPv6
+	// addresses like `[::1]:7789` as host="" + error on the no-port
+	// variant, breaking origin like `http://[::1]:7789` (Gemini Major
+	// on PR #76).
+	originHost := u.Hostname()
+	originPort := u.Port()
+	if originPort == "" {
+		// Default-port inference for origin scheme (port-elided
+		// origin → "http://localhost"). Only http/https are
+		// reasonable for a loopback admin console.
+		switch strings.ToLower(u.Scheme) {
+		case "https":
+			originPort = "443"
+		case "http":
+			originPort = "80"
+		default:
+			return false
+		}
+	}
+	adminAddr := s.deps.Cfg.AdminAddress
+	if adminAddr == "" {
+		adminAddr = config.DefaultAdminAddress
+	}
+	adminHost, adminPort, err := net.SplitHostPort(adminAddr)
+	if err != nil {
+		// Misconfigured listener — treat as block to surface the
+		// regression rather than silently accept.
+		return false
+	}
+	if originPort != adminPort {
+		return false
+	}
+	// Treat 127.0.0.1, ::1, and localhost as equivalent — they all
+	// resolve to the same loopback listener. `loopbackOnly` has
+	// already enforced the underlying IP is loopback, so this is
+	// just user-agent normalization.
+	return loopbackHostname(originHost) && loopbackHostname(adminHost)
+}
+
+// loopbackHostname returns true if h is one of the conventional
+// loopback names/literals. Used by the Origin allowlist so a
+// browser that resolved http://localhost:7789 doesn't get rejected
+// against an AdminAddress of 127.0.0.1:7789.
+func loopbackHostname(h string) bool {
+	h = strings.ToLower(h)
+	if h == "localhost" {
+		return true
+	}
+	// Accept either a bare IP literal or a bracketed IPv6 form
+	// ("[::1]"). url.URL.Hostname() already strips brackets, but
+	// callers in tests / older callers may pass a raw host string
+	// from net.SplitHostPort. Trimming both bracket bytes is safe
+	// — they're not valid IP-literal characters (Gemini Minor on
+	// PR #76).
+	if ip := net.ParseIP(strings.Trim(h, "[]")); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 // loopbackOnly is a belt-and-braces middleware that refuses non-loopback

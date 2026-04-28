@@ -16,10 +16,20 @@ import (
 
 // Store persists Tracks and Folders in a single SQLite file.
 // The store is safe for concurrent Open/Close/Read/Write within one
-// process; SQLite's own locking serializes writes across goroutines.
+// process. WAL mode lets readers proceed concurrently with at most one
+// active writer; the Go-side `mu` enforces "at most one writer" so
+// SQLite's `busy_timeout` retry is never reached under our workload.
+//
+// **Writer contract**: every method that issues `INSERT` / `UPDATE` /
+// `DELETE` SQL MUST hold `s.mu` (UpsertTrack, UpsertTrackBatch,
+// DeleteTrack, DeleteTracksByPrefix, MarkEnriched, WipeAllTracks,
+// PutScanState, etc.). Readers DO NOT hold `s.mu` so concurrent
+// `/v1/manifest` streaming and `ListTracks` queries can fan out
+// during a long scan or enrichment pass — this is the whole point
+// of running WAL.
 type Store struct {
 	db *sql.DB
-	mu sync.Mutex // serializes multi-statement transactions
+	mu sync.Mutex // serializes ALL writers (see contract above)
 }
 
 // OpenStore opens (or creates) a SQLite DB at path and applies the schema.
@@ -50,46 +60,108 @@ func OpenStore(path string) (*Store, error) {
 // Close releases the underlying DB handle.
 func (s *Store) Close() error { return s.db.Close() }
 
+// migration is one step in the schema ladder. `sql` is executed as a
+// single multi-statement Exec; `post` runs afterwards for cases where
+// a later refactor needs a Go-side fixup (e.g. the swallowed
+// ALTER-TABLE for back-compat with pre-v1.1 DBs that lack a column
+// the baseline `CREATE TABLE` now declares).
+//
+// Always make `sql` idempotent (`IF NOT EXISTS`, `OR REPLACE`, etc.).
+// A crash mid-migration and restart should re-run cleanly.
+type migration struct {
+	version int
+	name    string
+	sql     string
+	post    func(*sql.DB) error
+}
+
+// migrations defines the schema ladder. New entries append to this
+// slice; never reorder or rewrite existing entries (they may have
+// already run on deployed DBs at the bumped `user_version`).
+var migrations = []migration{
+	{
+		version: 1,
+		name:    "baseline (v1.0 → v1.1 schema)",
+		sql: `
+		CREATE TABLE IF NOT EXISTS tracks (
+			path        TEXT PRIMARY KEY,
+			size        INTEGER NOT NULL,
+			mtime_ns    INTEGER NOT NULL,
+			tags_json   BLOB    NOT NULL,
+			indexed_at  INTEGER NOT NULL,
+			enriched_at INTEGER NOT NULL DEFAULT 0
+		);
+		CREATE INDEX IF NOT EXISTS idx_tracks_mtime ON tracks(mtime_ns);
+		CREATE INDEX IF NOT EXISTS idx_tracks_indexed ON tracks(indexed_at);
+		CREATE INDEX IF NOT EXISTS idx_tracks_enriched ON tracks(enriched_at);
+		-- Functional indexes on the JSON-extracted MBID fields drive the
+		-- 202-vs-404 probe on /v1/artwork + /v1/artist-image. Without
+		-- these, every cache miss triggers a full tags_json scan -- O(n)
+		-- on a 50k-track library. The expression here must match the
+		-- hasTrackWithJSONField query exactly (same json_extract path,
+		-- same BLOB column) for SQLite to use the index.
+		CREATE INDEX IF NOT EXISTS idx_tracks_artwork_mbid
+			ON tracks(json_extract(tags_json, '$.artworkMBID'));
+		CREATE INDEX IF NOT EXISTS idx_tracks_artist_mbid
+			ON tracks(json_extract(tags_json, '$.artistMBID'));
+
+		CREATE TABLE IF NOT EXISTS folders (
+			path     TEXT PRIMARY KEY,
+			mtime_ns INTEGER NOT NULL
+		);
+
+		CREATE TABLE IF NOT EXISTS scan_state (
+			k TEXT PRIMARY KEY,
+			v TEXT NOT NULL
+		);
+		`,
+		post: func(db *sql.DB) error {
+			// Idempotent fallback for DBs created before enriched_at
+			// existed. "duplicate column" is expected and ignored —
+			// CREATE TABLE above already declares the column for fresh
+			// DBs; this path covers v1.0 → v1.1 in-place upgrades that
+			// were running before the column was introduced.
+			_, _ = db.Exec(`ALTER TABLE tracks ADD COLUMN enriched_at INTEGER NOT NULL DEFAULT 0`)
+			return nil
+		},
+	},
+}
+
+// migrate walks the migration ladder, applying any whose `version`
+// exceeds the database's current `PRAGMA user_version`. After each
+// step succeeds the version is bumped so a partial-batch rerun
+// continues where it left off.
+//
+// **Pre-ladder DBs** (created before this PR) carry `user_version = 0`
+// AND have the v1.1 schema applied via the legacy implicit path.
+// Migration 1 is idempotent (`IF NOT EXISTS` everywhere + swallowed
+// ALTER), so re-running it on those DBs is a no-op that just bumps
+// the version stamp.
 func (s *Store) migrate() error {
-	schema := `
-	CREATE TABLE IF NOT EXISTS tracks (
-		path        TEXT PRIMARY KEY,
-		size        INTEGER NOT NULL,
-		mtime_ns    INTEGER NOT NULL,
-		tags_json   BLOB    NOT NULL,
-		indexed_at  INTEGER NOT NULL,
-		enriched_at INTEGER NOT NULL DEFAULT 0
-	);
-	CREATE INDEX IF NOT EXISTS idx_tracks_mtime ON tracks(mtime_ns);
-	CREATE INDEX IF NOT EXISTS idx_tracks_indexed ON tracks(indexed_at);
-	CREATE INDEX IF NOT EXISTS idx_tracks_enriched ON tracks(enriched_at);
-	-- Functional indexes on the JSON-extracted MBID fields drive the
-	-- 202-vs-404 probe on /v1/artwork + /v1/artist-image. Without
-	-- these, every cache miss triggers a full tags_json scan -- O(n)
-	-- on a 50k-track library. The expression here must match the
-	-- hasTrackWithJSONField query exactly (same json_extract path,
-	-- same BLOB column) for SQLite to use the index.
-	CREATE INDEX IF NOT EXISTS idx_tracks_artwork_mbid
-		ON tracks(json_extract(tags_json, '$.artworkMBID'));
-	CREATE INDEX IF NOT EXISTS idx_tracks_artist_mbid
-		ON tracks(json_extract(tags_json, '$.artistMBID'));
-
-	CREATE TABLE IF NOT EXISTS folders (
-		path     TEXT PRIMARY KEY,
-		mtime_ns INTEGER NOT NULL
-	);
-
-	CREATE TABLE IF NOT EXISTS scan_state (
-		k TEXT PRIMARY KEY,
-		v TEXT NOT NULL
-	);
-	`
-	if _, err := s.db.Exec(schema); err != nil {
-		return err
+	var current int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&current); err != nil {
+		return fmt.Errorf("read user_version: %w", err)
 	}
-	// Idempotent fallback for DBs created before enriched_at existed.
-	// "duplicate column" is expected and ignored.
-	_, _ = s.db.Exec(`ALTER TABLE tracks ADD COLUMN enriched_at INTEGER NOT NULL DEFAULT 0`)
+	for _, m := range migrations {
+		if m.version <= current {
+			continue
+		}
+		if _, err := s.db.Exec(m.sql); err != nil {
+			return fmt.Errorf("migration %d (%s): %w", m.version, m.name, err)
+		}
+		if m.post != nil {
+			if err := m.post(s.db); err != nil {
+				return fmt.Errorf("migration %d (%s) post-DDL: %w", m.version, m.name, err)
+			}
+		}
+		// PRAGMA user_version doesn't accept parameter binding (it's a
+		// directive, not DML), so format the int into the literal SQL.
+		// The version comes from a hardcoded slice — never user input —
+		// so SQL-injection risk is zero.
+		if _, err := s.db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, m.version)); err != nil {
+			return fmt.Errorf("set user_version to %d: %w", m.version, err)
+		}
+	}
 	return nil
 }
 
@@ -149,11 +221,19 @@ func marshalForStorage(t *Track) ([]byte, error) {
 
 // MarkEnriched updates a Track's stored tags (with enricher additions) and
 // stamps enriched_at so the worker won't re-process it.
+//
+// Holds `s.mu` for the SQL exec so an in-flight enrichment update never
+// races a `UpsertTrackBatch` from the scanner — both are writers and
+// the contract documented on the Store type forbids them from
+// overlapping in SQLite. JSON marshalling stays outside the lock so
+// the critical section is one statement long.
 func (s *Store) MarkEnriched(t *Track) error {
 	raw, err := marshalForStorage(t)
 	if err != nil {
 		return err
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	_, err = s.db.Exec(`
 		UPDATE tracks
 		SET tags_json = ?, enriched_at = ?
@@ -166,11 +246,15 @@ func (s *Store) MarkEnriched(t *Track) error {
 
 // UpsertTrack writes or replaces the row for t.Path. The tags are encoded
 // as JSON so the schema can evolve without column migrations during v0.
+//
+// Holds `s.mu` per the writer contract on Store.
 func (s *Store) UpsertTrack(t *Track) error {
 	raw, err := marshalForStorage(t)
 	if err != nil {
 		return err
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	_, err = s.db.Exec(`
 		INSERT INTO tracks(path, size, mtime_ns, tags_json, indexed_at)
 		VALUES (?, ?, ?, ?, ?)
@@ -260,7 +344,14 @@ func (s *Store) UpsertTrackBatch(ts []*Track) error {
 }
 
 // DeleteTrack removes a track by path. Missing rows are not an error.
+//
+// Holds `s.mu` per the writer contract on Store. Called from the
+// scanner's deletion-pass at end of scan; could otherwise race
+// concurrent enricher MarkEnriched and surface as
+// `database is locked` after the SQLite busy_timeout.
 func (s *Store) DeleteTrack(path string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	_, err := s.db.Exec(`DELETE FROM tracks WHERE path = ?`, path)
 	return err
 }
@@ -612,7 +703,15 @@ func (s *Store) CountTracksByPrefix(prefix string) (int, error) {
 // DELETE is already atomic in SQLite, but this keeps the store's mutation
 // surface uniformly transactional and lets a follow-up add a companion
 // folders-cleanup without churn in the commit boundary.
+//
+// Holds `s.mu` per the writer contract on Store so an admin "remove
+// library root" never interleaves with a concurrent scanner
+// `UpsertTrackBatch` — pre-fix the two writers could collide in
+// SQLite and surface as `database is locked` after `busy_timeout`.
+// Now they queue in Go.
 func (s *Store) DeleteTracksByPrefix(prefix string) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	escaped := likeEscape(prefix)
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -700,7 +799,11 @@ func (s *Store) TrackPaths() ([]string, error) {
 
 // UpsertFolder records a folder's mtime so the scanner can skip unchanged
 // subtrees.
+//
+// Holds `s.mu` per the writer contract on Store.
 func (s *Store) UpsertFolder(f *Folder) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	_, err := s.db.Exec(`
 		INSERT INTO folders(path, mtime_ns) VALUES (?, ?)
 		ON CONFLICT(path) DO UPDATE SET mtime_ns = excluded.mtime_ns
@@ -744,7 +847,11 @@ func (s *Store) ListFolders() ([]Folder, error) {
 // ----- scan_state -----
 
 // SetScanState writes a key/value pair to the scan_state table.
+//
+// Holds `s.mu` per the writer contract on Store.
 func (s *Store) SetScanState(key, value string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	_, err := s.db.Exec(`
 		INSERT INTO scan_state(k, v) VALUES(?, ?)
 		ON CONFLICT(k) DO UPDATE SET v = excluded.v
