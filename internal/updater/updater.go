@@ -3,8 +3,10 @@
 // SHA-256 verify (always) → platform signature verify (macOS Apple
 // codesign + Team-ID; Linux/Windows currently TLS-of-checksums.txt only,
 // see verify_other.go for the seam where Sigstore / minisign / SignPath
-// would land) → swap (atomic rename on Unix; pending-rename + restart on
-// Windows, see swap_windows.go) → arm rollback marker. The caller (admin
+// would land) → swap (atomic rename on Unix; live rename + caller-driven
+// restart on Windows, see swap_windows.go — note this is NOT the
+// MoveFileEx/MOVEFILE_DELAY_UNTIL_REBOOT "pending rename" mechanism)
+// → arm rollback marker. The caller (admin
 // REST endpoint or `bridge update` CLI) is responsible for triggering the
 // process restart so a CLI run can print a final status line first.
 //

@@ -65,11 +65,24 @@ type InstallOptions struct {
 //     the check is symmetric defence).
 //   - ErrActiveSessions when Force is false and Sessions.Inflight()
 //     is nonzero.
-//   - ErrInstallNotSupported only on platforms without a swap_*.go
-//     implementation (currently: every GOOS except darwin/linux/windows
-//     hits this; darwin and linux use swap_unix.go's atomic rename,
-//     windows uses swap_windows.go's pending-rename + restart).
-//   - Any download / verify / swap error returned verbatim.
+//   - ErrCompatGateRefused when the candidate's MinClientVersion floor
+//     would orphan a still-paired older iOS client and OverrideCompatGate
+//     is false.
+//   - ErrNoMatchingAsset when the release's published assets don't
+//     include one for the running GOOS/GOARCH (returned via the download
+//     path's archiveAndChecksumFor).
+//   - ErrPathNotWritable when the running binary's parent directory
+//     isn't writable by the bridge process (returned by preflightWritable
+//     before any irreversible work begins).
+//   - Any download / verify / swap / state-save error returned verbatim
+//     with a wrapped context prefix.
+//
+// Swap implementations are wired for every supported GOOS — Unix (incl.
+// darwin / linux / BSDs) via swap_unix.go's atomic rename, Windows via
+// swap_windows.go's live rename of the running executable. Windows
+// requires a process restart (handled by the caller / SCM) for the new
+// bytes to take effect; ErrInstallNotSupported is reserved as a public
+// sentinel for hypothetical future platforms but not produced today.
 //
 // The marker is written BEFORE the swap so a process crash between
 // swap and marker would leave the operator running the new binary
