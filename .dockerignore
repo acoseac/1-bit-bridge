@@ -1,0 +1,24 @@
+# Container-build context exclusions. Keeps the layer-1 COPY from
+# pulling local build artefacts and committed-but-irrelevant
+# tooling into the image, both of which would invalidate the
+# `go mod download` cache layer on every code change.
+
+bin/
+dist/
+testdata/
+
+# Dev-time scratch directories that shouldn't ship in any image.
+.idea/
+.vscode/
+.DS_Store
+*.local.yaml
+
+# Service install artefacts from a host-side `bridge init`. These
+# would never be useful inside a container and could leak host
+# paths into a multi-stage build context if accidentally COPY'd.
+*.plist
+*.service
+
+# Misc.
+coverage.out
+*.test
