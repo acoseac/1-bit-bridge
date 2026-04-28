@@ -46,7 +46,15 @@ before:
     # still `release-meta.json` (matches ReleaseMetaAssetName in
     # internal/updater/release_meta.go — the iOS-side fetcher pins
     # by asset name, not URL path).
-    - sh -c 'printf "{\"version\":\"%s\",\"minClientVersion\":\"%s\",\"protocolVersion\":1}\n" "$(git describe --tags --abbrev=0 2>/dev/null | sed "s/^v//")" "${MIN_CLIENT_VERSION:-0.0.0}" > release-meta.json'
+    #
+    # Version derived from `{{.Version}}` template var (qodo bot
+    # review on PR #88) — goreleaser populates it from the tag for
+    # real releases and from the snapshot template for `--snapshot`
+    # runs, so it's never empty. The earlier `git describe | sed`
+    # pipeline could silently produce `"version":""` on a fresh
+    # clone without tags, contradicting the release_meta.go contract
+    # that version equals the release tag sans leading `v`.
+    - sh -c 'printf "{\"version\":\"{{ .Version }}\",\"minClientVersion\":\"%s\",\"protocolVersion\":1}\n" "${MIN_CLIENT_VERSION:-0.0.0}" > release-meta.json'
 
 builds:
   - id: bridge
