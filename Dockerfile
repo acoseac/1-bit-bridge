@@ -13,17 +13,17 @@
 #     -v 1-bit-bridge-state:/data \
 #     -e BRIDGE_LIBRARY_ROOTS=/library \
 #     -e BRIDGE_LISTEN_ADDRESS=:7788 \
-#     -e BRIDGE_ADMIN_ADDRESS=:7789 \
 #     -e BRIDGE_DATA_DIR=/data \
 #     1-bit-bridge:dev
 #
-# The admin console binds loopback inside the container, so to reach
-# it from the host you'd need to either exec into the container
-# (`docker exec -it ... wget -O- http://127.0.0.1:7789/`) or change
-# BRIDGE_ADMIN_ADDRESS to a port that's mapped (security trade-off:
-# anyone on the host can hit the unauthenticated admin API). Most
-# users only need /api accessible to iOS — keep admin loopback-
-# only and use `docker exec`.
+# `BRIDGE_ADMIN_ADDRESS` is intentionally omitted from the example —
+# config validation requires the admin address to bind loopback
+# (default `127.0.0.1:7789`) since the admin API has no auth.
+# An empty-host form like `:7789` fails Validate. To reach the
+# admin console from the host, `docker exec` into the container
+# (`docker exec -it 1-bit-bridge wget -O- http://127.0.0.1:7789/`).
+# See `docs/docker.md` for a reverse-proxy-with-auth pattern when
+# browser access is genuinely needed.
 #
 # See `docs/docker.md` for a docker-compose example with a
 # multi-root layout and TLS-cert volume placement.
@@ -82,7 +82,8 @@ RUN apk add --no-cache ca-certificates tzdata && \
     addgroup -S bridge && \
     adduser -S -G bridge bridge && \
     mkdir -p /data && \
-    chown bridge:bridge /data
+    chown bridge:bridge /data && \
+    chmod 0700 /data
 
 COPY --from=builder /out/bridge /usr/local/bin/bridge
 

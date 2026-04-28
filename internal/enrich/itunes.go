@@ -233,7 +233,7 @@ var _ = errors.Is // satisfy linters — errNotFound already wraps via package-l
 // --- JSON shapes ---
 
 type iTunesSearchResponse struct {
-	ResultCount int             `json:"resultCount"`
+	ResultCount int            `json:"resultCount"`
 	Results     []iTunesResult `json:"results"`
 }
 

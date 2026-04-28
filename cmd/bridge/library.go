@@ -215,16 +215,31 @@ func tryLibraryViaAdmin(ctx context.Context, cfg *config.Config, method, path st
 	resp, err := probeClient.Do(probeReq)
 	if err != nil {
 		// Connection refused = service not running → caller falls
-		// through to offline path. Other errors also fall through;
-		// they'd resurface in the offline path's clearer error
-		// surfaces.
-		return false, 0
+		// through to offline path. Distinguish from "admin is up
+		// but unhappy" cases below so we don't trample a live
+		// bridge's state.
+		if isConnRefused(err) {
+			return false, 0
+		}
+		// Other transport errors (timeout, TLS) — admin is
+		// possibly listening but we can't tell. Refuse rather
+		// than silently fall through to the offline path which
+		// would mutate bridge.yaml + the manifest store while a
+		// live process holds it (CodeRabbit Major post-merge on
+		// PR #82). Operator gets a clear error and can stop the
+		// service explicitly before retrying.
+		fmt.Fprintf(stderr, "library: admin probe %s: %v\n", addr, err)
+		fmt.Fprintln(stderr, "  refusing offline mutation against a possibly-live bridge.")
+		fmt.Fprintln(stderr, "  stop the service first, or use the admin console.")
+		return true, 1
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		// Admin is up but not happy — fall through. The offline
-		// path will surface a clearer error if config is bad.
-		return false, 0
+		// Admin is bound and answering, just unhappy — same race
+		// hazard as above. Refuse rather than fall through.
+		fmt.Fprintf(stderr, "library: admin probe returned HTTP %d on /api/stats\n", resp.StatusCode)
+		fmt.Fprintln(stderr, "  refusing offline mutation; investigate the live bridge first.")
+		return true, 1
 	}
 
 	// Service is up. Forward the mutation.

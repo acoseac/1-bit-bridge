@@ -354,7 +354,7 @@ func quotePosix(s string) string {
 // Spaces in paths (common on Windows: "C:\Program Files\bridge.exe")
 // no longer break the printed command.
 // The command is broken across multiple lines using shell-appropriate
-// continuation chars (`` ` `` for PowerShell, `^` for cmd, `\` for
+// continuation chars (“ ` “ for PowerShell, `^` for cmd, `\` for
 // bash/zsh) AND printed flush-left OUTSIDE the cinematic 55-col
 // frame. Production install paths (e.g.
 // `~/Library/Application Support/1-bit-bridge/bridge.yaml` =

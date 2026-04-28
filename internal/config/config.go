@@ -220,7 +220,10 @@ func Load(path string) (*Config, error) {
 //	BRIDGE_ADMIN_ADDRESS   — overrides AdminAddress
 //	BRIDGE_DATA_DIR        — overrides DataDir
 //	BRIDGE_LIBRARY_NAME    — overrides LibraryName
-//	BRIDGE_LIBRARY_ROOTS   — colon-separated; overrides LibraryRoots
+//	BRIDGE_LIBRARY_ROOTS   — OS-native-PATH-separated; overrides
+//	                         LibraryRoots. POSIX uses `:`,
+//	                         Windows uses `;` so drive-letter
+//	                         paths (`C:\Music`) aren't corrupted.
 //
 // Path-typed values (DataDir, LibraryRoots) still go through
 // `resolvePaths` afterwards so a relative path inherits the same
@@ -239,13 +242,17 @@ func (c *Config) applyEnvOverrides() {
 		c.LibraryName = v
 	}
 	if v := os.Getenv("BRIDGE_LIBRARY_ROOTS"); v != "" {
-		// `os.PathListSeparator` would be the platform-aware choice
-		// (`:` on POSIX, `;` on Windows), but the only realistic
-		// container deployments are linux/amd64 + linux/arm64. We
-		// accept ":" universally so a docker-compose env block
-		// authored on a Windows workstation still produces a
-		// linux-server-friendly value.
-		raw := strings.Split(v, ":")
+		// Use the OS-native PATH-style separator: `:` on POSIX,
+		// `;` on Windows. Pre-fix we hard-coded `:` everywhere,
+		// which corrupted Windows drive-letter paths
+		// (`C:\Music` parsed as `["C", "\Music"]`) and made the
+		// follow-up filepath.Abs / Validate trip with a
+		// confusing error (Qodo Bug post-merge on PR #84).
+		// Container deployments are linux/amd64 + linux/arm64
+		// where `os.PathListSeparator` evaluates to `:`, so
+		// docker-compose / k8s manifests using colons keep
+		// working unchanged.
+		raw := strings.Split(v, string(os.PathListSeparator))
 		out := make([]string, 0, len(raw))
 		for _, p := range raw {
 			p = strings.TrimSpace(p)
