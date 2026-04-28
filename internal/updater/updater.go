@@ -26,7 +26,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"strings"
 	"sync"
 	"time"
@@ -34,8 +33,11 @@ import (
 	"golang.org/x/mod/semver"
 
 	"github.com/acoseac/1-bit-bridge/internal/auth"
+	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
+
+var logger = logging.Component("updater")
 
 // DefaultRepo is the GitHub repo the updater polls for new releases.
 // Tests inject an alternate via Options.RepoOverride so a fake server
@@ -302,7 +304,7 @@ func (u *Updater) maybeAutoInstall(ctx context.Context) {
 		// Defensive: the configuration says auto-install is on but
 		// the wiring is incomplete. Likely a programming error in
 		// cmd/bridge — log loudly so it's visible.
-		log.Printf("updater: autoInstall=true but install opts/restart callback are missing; skipping")
+		logger.Warn("autoInstall=true but install opts/restart callback are missing; skipping")
 		return
 	}
 	st := u.Status()
@@ -310,18 +312,17 @@ func (u *Updater) maybeAutoInstall(ctx context.Context) {
 		return
 	}
 	if !u.inAllowedWindow(u.now()) {
-		log.Printf("updater: auto-install deferred — outside quiet-hours window")
+		logger.Info("auto-install deferred", "reason", "outside quiet-hours window")
 		return
 	}
 	// Sessions inflight gate: refuse cleanly. The next poll cycle
 	// will try again.
 	if u.autoInstallOpts.Sessions != nil && u.autoInstallOpts.Sessions.Inflight() > 0 {
-		log.Printf("updater: auto-install deferred — %d active download(s)",
-			u.autoInstallOpts.Sessions.Inflight())
+		logger.Info("auto-install deferred", "reason", "active downloads", "inflight", u.autoInstallOpts.Sessions.Inflight())
 		return
 	}
 
-	log.Printf("updater: auto-installing %s → %s", st.CurrentVersion, st.LatestVersion)
+	logger.Info("auto-installing", "from", st.CurrentVersion, "to", st.LatestVersion)
 	if _, err := u.Install(ctx, *u.autoInstallOpts); err != nil {
 		// Compat-gate refusals are a normal deferred state; the
 		// Install path has already populated DeferredReason. Other
@@ -329,13 +330,13 @@ func (u *Updater) maybeAutoInstall(ctx context.Context) {
 		// and stay in the log without polluting the dashboard's
 		// held-update card.
 		if errors.Is(err, ErrCompatGateRefused) {
-			log.Printf("updater: auto-install deferred — %v", err)
+			logger.Info("auto-install deferred", "err", err)
 		} else {
-			log.Printf("updater: auto-install failed: %v", err)
+			logger.Error("auto-install failed", "err", err)
 		}
 		return
 	}
-	log.Printf("updater: auto-install complete; restarting to load new binary")
+	logger.Info("auto-install complete; restarting to load new binary")
 	u.autoInstallRestart()
 }
 
@@ -383,7 +384,7 @@ func compatGateReason(minRequired string, tokens []auth.Token) string {
 		// blocking every install — the operator can spot the
 		// release-meta.json bug from the bridge log without
 		// users noticing.
-		log.Printf("updater: compat-gate: ignoring malformed MinClientVersion %q", clean)
+		logger.Warn("compat-gate ignoring malformed MinClientVersion", "value", clean)
 		return ""
 	}
 	var orphans []string
@@ -491,7 +492,7 @@ func (u *Updater) checkOnce(ctx context.Context) bool {
 		// Don't reset LastCheck — a transient failure shouldn't make the
 		// admin UI claim "haven't checked in days". Operators reading
 		// the UI care about the last *successful* poll.
-		log.Printf("updater: poll %s: %v", u.repo, err)
+		logger.Error("poll", "repo", u.repo, "err", err)
 		return false
 	}
 

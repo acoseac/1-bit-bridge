@@ -1,7 +1,6 @@
 package api
 
 import (
-	"log"
 	"net/http"
 	"os"
 	"regexp"
@@ -68,14 +67,14 @@ func (s *Server) artistImage(w http.ResponseWriter, r *http.Request) {
 				"artist image not cached (unknown MBID)")
 			return
 		}
-		log.Printf("artwork: open artist image %q: %v", mbid, err)
+		logger.Error("open artist image", "mbid", mbid, "err", err)
 		writeError(w, http.StatusInternalServerError, "internal", "internal error")
 		return
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil {
-		log.Printf("artwork: stat artist image %q: %v", mbid, err)
+		logger.Error("stat artist image", "mbid", mbid, "err", err)
 		writeError(w, http.StatusInternalServerError, "internal", "internal error")
 		return
 	}
@@ -124,14 +123,14 @@ func (s *Server) artwork(w http.ResponseWriter, r *http.Request) {
 				"artwork not cached (unknown MBID)")
 			return
 		}
-		log.Printf("artwork: open release artwork %q (size=%d): %v", mbid, size, err)
+		logger.Error("open release artwork", "mbid", mbid, "size", size, "err", err)
 		writeError(w, http.StatusInternalServerError, "internal", "internal error")
 		return
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil {
-		log.Printf("artwork: stat release artwork %q (size=%d): %v", mbid, size, err)
+		logger.Error("stat release artwork", "mbid", mbid, "size", size, "err", err)
 		writeError(w, http.StatusInternalServerError, "internal", "internal error")
 		return
 	}

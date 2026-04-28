@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,9 +13,12 @@ import (
 
 	"golang.org/x/text/unicode/norm"
 
+	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/lrucache"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
+
+var logger = logging.Component("enricher")
 
 // Enricher is a long-running worker that pulls un-enriched tracks from
 // the manifest store, looks them up against MusicBrainz / Deezer, caches
@@ -169,7 +171,7 @@ func (e *Enricher) Run(ctx context.Context) {
 		}
 		batch, err := e.store.UnenrichedTracks(e.BatchLimit)
 		if err != nil {
-			log.Printf("enricher: list unenriched: %v", err)
+			logger.Error("list unenriched", "err", err)
 			if !sleepCtx(ctx, e.PollInterval) {
 				return
 			}
@@ -226,7 +228,7 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 				if ctx.Err() != nil {
 					return
 				}
-				log.Printf("enricher: MB search %q / %q: %v", t.Artist, t.Album, err)
+				logger.Error("MB search", "artist", t.Artist, "album", t.Album, "err", err)
 				if IsTransient(err) {
 					// Network blip, 5xx, 429, or timeout — leave
 					// `enriched_at` at 0 so the next pass picks
@@ -288,7 +290,7 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 	// `ensureArtworkCached` will lazily resolve + try the release-group
 	// fallback, then iTunes (if configured) as a last resort.
 	if cached, err := e.ensureArtworkCached(ctx, albumMBID, rgMBID, t.Artist, t.Album, 500); err != nil {
-		log.Printf("enricher: artwork %s: %v", albumMBID, err)
+		logger.Error("artwork", "mbid", albumMBID, "err", err)
 		// Artwork miss isn't fatal — mark enriched so we don't retry
 		// every 15 seconds. A future background pass can re-try.
 	} else if cached {
@@ -299,7 +301,7 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 	e.resolveArtist(ctx, t)
 
 	if err := e.store.MarkEnriched(t); err != nil {
-		log.Printf("enricher: mark enriched %q: %v", t.Path, err)
+		logger.Error("mark enriched", "path", t.Path, "err", err)
 		return
 	}
 	e.done.Add(1)
@@ -324,7 +326,7 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) {
 			// blip would otherwise block sibling-track retries until
 			// process restart. Matches the album-path behavior.
 			if ctx.Err() == nil {
-				log.Printf("enricher: MB artist search %q: %v", t.Artist, err)
+				logger.Error("MB artist search", "artist", t.Artist, "err", err)
 			}
 			return
 		}
@@ -355,7 +357,7 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) {
 	}
 	found, err := e.ensureArtistImageCached(ctx, artistMBID, t.Artist)
 	if err != nil {
-		log.Printf("enricher: artist image %q (%s): %v", t.Artist, artistMBID, err)
+		logger.Error("artist image", "artist", t.Artist, "mbid", artistMBID, "err", err)
 		return
 	}
 	if !found {
@@ -473,7 +475,7 @@ func linkOrCopy(src, dst string) error {
 func (e *Enricher) markSkipped(t *manifest.Track, reason string) {
 	_ = reason // kept for future logging/observability
 	if err := e.store.MarkEnriched(t); err != nil {
-		log.Printf("enricher: mark skipped %q: %v", t.Path, err)
+		logger.Error("mark skipped", "path", t.Path, "err", err)
 	}
 	e.skipped.Add(1)
 }
@@ -514,7 +516,7 @@ func (e *Enricher) ensureArtworkCached(ctx context.Context, mbid, rgMBID, artist
 		// Logging the resolve error but returning the original
 		// release-level not-found so callers stamp the "no artwork"
 		// state consistently with pre-fallback behaviour.
-		log.Printf("enricher: release-group lookup for %s: %v", mbid, rgErr)
+		logger.Error("release-group lookup", "mbid", mbid, "err", rgErr)
 		// Don't bail yet — iTunes may still have the album by name,
 		// and a transient MB lookup error shouldn't block the iTunes
 		// fallback below.
@@ -554,7 +556,7 @@ func (e *Enricher) ensureArtworkCached(ctx context.Context, mbid, rgMBID, artist
 			// Log iTunes errors but don't fail the whole call —
 			// the original release-level errNotFound is the more
 			// useful signal for the caller.
-			log.Printf("enricher: iTunes fallback for %q / %q: %v", artist, album, itErr)
+			logger.Error("iTunes fallback", "artist", artist, "album", album, "err", itErr)
 		}
 	}
 	return false, err

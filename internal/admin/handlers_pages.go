@@ -2,7 +2,6 @@ package admin
 
 import (
 	"html/template"
-	"log"
 	"net/http"
 	"path/filepath"
 	"time"
@@ -50,7 +49,7 @@ func (s *Server) renderPage(w http.ResponseWriter, active string, data any) {
 		Data:            data,
 	}
 	if err := t.ExecuteTemplate(w, "layout", envelope); err != nil {
-		log.Printf("admin: render %s: %v", active, err)
+		logger.Error("render", "page", active, "err", err)
 	}
 }
 

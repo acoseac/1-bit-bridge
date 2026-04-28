@@ -38,14 +38,17 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"log"
 	"math/big"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/logging"
 )
+
+var logger = logging.Component("tls")
 
 const (
 	CertFileName = "server.crt"
@@ -116,9 +119,11 @@ func logIfExpiringSoon(certPath string) {
 	remaining := time.Until(info.NotAfter)
 	switch {
 	case remaining <= 0:
-		log.Printf("tls: cert at %s expired %d days ago — every paired iOS client will fail at TLS handshake until you rotate (`bridge cert rotate` or admin console) and re-pair", certPath, -info.DaysUntilExpiry)
+		logger.Error("cert expired — every paired iOS client will fail at TLS handshake until you rotate (`bridge cert rotate` or admin console) and re-pair",
+			"path", certPath, "expired_days_ago", -info.DaysUntilExpiry)
 	case remaining <= expiryWarningWindow:
-		log.Printf("tls: cert at %s expires in %d days — schedule a `bridge cert rotate` and re-pair every paired iOS client before then (Apple ATS rejects expired certs at the handshake layer)", certPath, info.DaysUntilExpiry)
+		logger.Warn("cert expires soon — schedule a `bridge cert rotate` and re-pair every paired iOS client before then (Apple ATS rejects expired certs at the handshake layer)",
+			"path", certPath, "days_remaining", info.DaysUntilExpiry)
 	}
 }
 

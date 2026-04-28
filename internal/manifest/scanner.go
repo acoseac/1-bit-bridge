@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -15,7 +14,16 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/logging"
 )
+
+// scanLogger is the scanner-specific component logger. The store
+// half of internal/manifest uses the package-level `logger` declared
+// in store.go (component=manifest); scanner uses its own
+// component=scanner so high-volume scan output filters cleanly from
+// store/manifest reads.
+var scanLogger = logging.Component("scanner")
 
 // scanBatchSize is the per-transaction track-upsert batch size used by
 // the scanner's writer goroutine. SQLite's per-transaction fsync
@@ -237,12 +245,12 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 			continue
 		}
 		if err := s.store.DeleteTrack(p); err != nil {
-			log.Printf("scanner: delete track %q: %v", p, err)
+			scanLogger.Error("delete track", "path", p, "err", err)
 		}
 	}
 	if spared > 0 {
-		log.Printf("scanner: spared %d tracks from deletion (parent walk error this pass; affected subtrees: %d)",
-			spared, len(errorSubtrees))
+		scanLogger.Warn("spared tracks from deletion (parent walk error this pass)",
+			"spared", spared, "subtrees", len(errorSubtrees))
 	}
 
 	s.lastFull.Store(time.Now().UTC().UnixNano())
@@ -279,7 +287,7 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 		}
 		fillFromPath(t, pi.rel) // last-resort heuristics for files with no tags
 		if err := Extract(pi.abs, t); err != nil {
-			log.Printf("scanner: extract %q: %v", pi.abs, err)
+			scanLogger.Error("extract", "path", pi.abs, "err", err)
 		}
 		select {
 		case writes <- t:
@@ -307,7 +315,7 @@ func (s *Scanner) runScanWriter(ctx context.Context, writes <-chan *Track, commi
 			return
 		}
 		if err := s.store.UpsertTrackBatch(batch); err != nil {
-			log.Printf("scanner: upsert batch (%d rows): %v", len(batch), err)
+			scanLogger.Error("upsert batch", "rows", len(batch), "err", err)
 		} else {
 			n := committed.Add(int64(len(batch)))
 			s.progress.Store(n)
@@ -346,7 +354,7 @@ func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, see
 	return filepath.WalkDir(root, func(abs string, d fs.DirEntry, err error) error {
 		if err != nil {
 			// Permission error on one dir shouldn't kill the whole scan.
-			log.Printf("scanner: walk %q: %v", abs, err)
+			scanLogger.Warn("walk", "path", abs, "err", err)
 			// Record the affected subtree so the deletion pass
 			// won't wipe its tracks. If `d` is non-nil and a
 			// directory, key on `abs` itself; otherwise key on
@@ -390,7 +398,7 @@ func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, see
 
 		info, err := d.Info()
 		if err != nil {
-			log.Printf("scanner: stat %q: %v", abs, err)
+			scanLogger.Warn("stat", "path", abs, "err", err)
 			// Stat failure on a known audio extension — record the
 			// parent so the file isn't wiped from the manifest.
 			// Same containment rationale as the err-callback branch
@@ -537,7 +545,7 @@ func (s *Scanner) RunPeriodic(ctx context.Context, interval time.Duration) {
 	go func() {
 		defer initial.Done()
 		if _, err := s.Scan(ctx); err != nil && ctx.Err() == nil {
-			log.Printf("scanner: initial scan: %v", err)
+			scanLogger.Error("initial scan", "err", err)
 		}
 	}()
 	defer initial.Wait()
@@ -550,7 +558,7 @@ func (s *Scanner) RunPeriodic(ctx context.Context, interval time.Duration) {
 			return
 		case <-ticker.C:
 			if _, err := s.Scan(ctx); err != nil && ctx.Err() == nil {
-				log.Printf("scanner: periodic scan: %v", err)
+				scanLogger.Error("periodic scan", "err", err)
 			}
 		}
 	}
@@ -602,7 +610,7 @@ func BuildManifest(store *Store, roots []string, since time.Time) (*Manifest, er
 	// EnrichmentCounts each issue their own `COUNT(*)`.
 	total, terr := store.CountTracks()
 	if terr != nil {
-		log.Printf("manifest: CountTracks for enrichment-progress: %v", terr)
+		logger.Error("CountTracks for enrichment-progress", "err", terr)
 	} else if enriched, lastEnrichedAt, perr := store.EnrichmentCounts(); perr == nil {
 		m.EnrichmentProgress = &EnrichmentProgress{
 			TracksTotal:    total,
@@ -610,7 +618,7 @@ func BuildManifest(store *Store, roots []string, since time.Time) (*Manifest, er
 			LastEnrichedAt: lastEnrichedAt,
 		}
 	} else {
-		log.Printf("manifest: EnrichmentCounts: %v", perr)
+		logger.Error("EnrichmentCounts", "err", perr)
 	}
 	return m, nil
 }
@@ -652,7 +660,7 @@ func WriteManifest(w io.Writer, store *Store, roots []string, since time.Time) (
 	// EnrichmentProgress.TracksTotal` holds (Qodo #2 carry-over).
 	var ep *EnrichmentProgress
 	if total, terr := store.CountTracks(); terr != nil {
-		log.Printf("manifest: CountTracks for enrichment-progress: %v", terr)
+		logger.Error("CountTracks for enrichment-progress", "err", terr)
 	} else if enriched, lastEnrichedAt, perr := store.EnrichmentCounts(); perr == nil {
 		ep = &EnrichmentProgress{
 			TracksTotal:    total,
@@ -660,7 +668,7 @@ func WriteManifest(w io.Writer, store *Store, roots []string, since time.Time) (
 			LastEnrichedAt: lastEnrichedAt,
 		}
 	} else {
-		log.Printf("manifest: EnrichmentCounts: %v", perr)
+		logger.Error("EnrichmentCounts", "err", perr)
 	}
 
 	basenames := make([]string, len(roots))
@@ -828,7 +836,7 @@ func BuildManifestPage(store *Store, roots []string, cursor string, limit int) (
 				LastEnrichedAt: lastEnrichedAt,
 			}
 		} else {
-			log.Printf("manifest: EnrichmentCounts (paginated): %v", perr)
+			logger.Error("EnrichmentCounts (paginated)", "err", perr)
 		}
 	}
 	if len(tracks) > limit {
