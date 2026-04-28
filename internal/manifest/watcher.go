@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -237,21 +238,7 @@ func isWatchLimitError(err error) bool {
 		"too many open files",
 		"watch limit reached",
 	} {
-		if containsMarker(s, marker) {
-			return true
-		}
-	}
-	return false
-}
-
-// containsMarker is a substring helper so we don't pull in
-// strings.Contains noise just for two call sites.
-func containsMarker(haystack, needle string) bool {
-	if len(needle) == 0 || len(haystack) < len(needle) {
-		return false
-	}
-	for i := 0; i+len(needle) <= len(haystack); i++ {
-		if haystack[i:i+len(needle)] == needle {
+		if strings.Contains(s, marker) {
 			return true
 		}
 	}

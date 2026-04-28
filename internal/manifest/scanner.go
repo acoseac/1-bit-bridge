@@ -387,13 +387,23 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 		if err != nil {
 			continue
 		}
-		// Honour the case-insensitive filesystem on macOS / Windows
-		// — strings.HasPrefix is exact here, but the absolute paths
-		// already round-trip through filepath.Abs which preserves
-		// the canonical form. A dir that's exactly the root passes;
-		// a dir under it requires the path-separator boundary so
-		// "/Music" doesn't accept "/MusicShare".
-		if absDir == absRoot || strings.HasPrefix(absDir, absRoot+string(filepath.Separator)) {
+		// `filepath.Rel(absRoot, absDir)` returns a relative path
+		// from absRoot to absDir (e.g. "Genre/Artist/Album" or
+		// "."). A path starting with ".." means absDir climbs out
+		// of absRoot — i.e. NOT under it. This is the idiomatic
+		// cross-platform containment check — pre-fix
+		// strings.HasPrefix was byte-exact, which broke on
+		// case-insensitive filesystems where an event for
+		// `/Music/Album/track.flac` could surface against a
+		// configured root path `/music` and false-negative
+		// (Gemini High on PR #79). filepath.Rel routes through
+		// the OS path APIs so platform-native casing semantics
+		// are preserved.
+		rel, err := filepath.Rel(absRoot, absDir)
+		if err != nil {
+			continue
+		}
+		if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			owningRoot = absRoot
 			break
 		}
