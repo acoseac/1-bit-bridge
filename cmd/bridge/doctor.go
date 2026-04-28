@@ -42,8 +42,15 @@ func doctorCmd(args []string, stdout, stderr io.Writer) int {
 		// mode is "directory missing"); destructive or
 		// security-relevant fixes (port reassignment, service
 		// re-install, cert rotation) are NEVER attempted from --fix.
-		// Caller sees per-check fix outcomes and a re-run report.
-		runFixes(stdout, &report, d)
+		// Per-check fix outcomes go to STDERR when --json is set so
+		// the human-readable progress lines don't contaminate the
+		// JSON envelope on stdout (Qodo Bug on PR #78 — without this
+		// `bridge doctor --json --fix` emits invalid JSON).
+		fixOut := stdout
+		if *jsonOut {
+			fixOut = stderr
+		}
+		runFixes(fixOut, &report, d)
 		// Re-run the checks so the displayed status matches reality.
 		report = doctor.Run(d)
 	}
@@ -113,11 +120,19 @@ func runFixes(w io.Writer, r *doctor.Report, d doctor.Deps) {
 			if d.ConfigDir == "" {
 				continue
 			}
-			if err := os.MkdirAll(d.ConfigDir, 0o755); err != nil {
+			// 0o700 to match init.go — the dir holds bridge.yaml
+			// (TLS fingerprint, library paths) plus the data
+			// subtree (TLS private key, tokens.json, manifest DB).
+			// 0o755 would let other host users read the
+			// fingerprint and library layout (Qodo + Gemini
+			// Security on PR #78). Windows ignores the mode and
+			// relies on per-user-profile NTFS ACLs at
+			// %LOCALAPPDATA%.
+			if err := os.MkdirAll(d.ConfigDir, 0o700); err != nil {
 				fmt.Fprintf(w, "  ✗ %s: mkdir %s: %v\n", c.Name, d.ConfigDir, err)
 				continue
 			}
-			fmt.Fprintf(w, "  ✓ %s: created %s\n", c.Name, d.ConfigDir)
+			fmt.Fprintf(w, "  ✓ %s: created %s (0700)\n", c.Name, d.ConfigDir)
 		default:
 			// No safe auto-fix declared for this check. Skip silently
 			// to keep the operator's eye on the fixes we DID attempt.

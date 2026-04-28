@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
@@ -47,8 +49,8 @@ func statusCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	stats, statsRaw, err := fetchAdminJSON(probeCtx, addr, "/api/stats")
-	if err != nil {
+	var stats map[string]any
+	if err := fetchAdminJSON(probeCtx, addr, "/api/stats", &stats); err != nil {
 		if isConnRefused(err) {
 			fmt.Fprintln(stderr, "bridge: not running on", addr)
 			fmt.Fprintln(stderr, "  start it with `bridge start` (if installed) or `bridge serve` to run in the foreground.")
@@ -57,14 +59,18 @@ func statusCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		fmt.Fprintf(stderr, "status: probe %s: %v\n", addr, err)
 		return 1
 	}
-	endpoints, endpointsRaw, err := fetchAdminJSON(probeCtx, addr, "/api/endpoints")
-	if err != nil {
+	// /api/endpoints returns a JSON ARRAY (`[]adminEndpointEntry`),
+	// not an object — decoding into map[string]any leaves the value
+	// nil and the human-readable output never paints the endpoints
+	// section. Decode into []any to match the wire shape (Qodo Bug
+	// on PR #78).
+	var endpoints []any
+	if err := fetchAdminJSON(probeCtx, addr, "/api/endpoints", &endpoints); err != nil {
 		// Non-fatal — stats already succeeded. Surface to stderr but
 		// keep going with empty endpoints in human output, omit field
 		// in JSON output.
 		fmt.Fprintf(stderr, "status: endpoints probe failed: %v\n", err)
 		endpoints = nil
-		endpointsRaw = nil
 	}
 
 	if *jsonOut {
@@ -72,49 +78,48 @@ func statusCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int
 			"stats":     stats,
 			"endpoints": endpoints,
 		}
-		_ = statsRaw     // kept for future re-use; envelope is the operator-facing surface
-		_ = endpointsRaw // ditto
 		return writeJSONIndent(stdout, envelope)
 	}
 	return writeStatusHuman(stdout, stats, endpoints)
 }
 
 // fetchAdminJSON does a GET against the loopback admin API and
-// decodes the response into a generic map. Returns both the parsed
-// map and the raw bytes so a future caller (e.g. `--json` envelope)
-// could ship the wire shape verbatim without re-marshalling.
-func fetchAdminJSON(ctx context.Context, adminAddr, path string) (map[string]any, []byte, error) {
+// decodes the response into the caller-supplied destination. Caller
+// passes &someMap or &someSlice depending on the endpoint's wire
+// shape — /api/stats is an object, /api/endpoints is an array.
+func fetchAdminJSON(ctx context.Context, adminAddr, path string, dst any) error {
 	url := "http://" + adminAddr + path
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, nil, err
+		return err
 	}
 	req.Header.Set("Accept", "application/json")
 	c := &http.Client{Timeout: 5 * time.Second}
 	resp, err := c.Do(req)
 	if err != nil {
-		return nil, nil, err
+		return err
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, nil, err
+		return err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
 	}
-	var out map[string]any
-	if err := json.Unmarshal(body, &out); err != nil {
-		return nil, nil, fmt.Errorf("decode %s: %w", path, err)
+	if err := json.Unmarshal(body, dst); err != nil {
+		return fmt.Errorf("decode %s: %w", path, err)
 	}
-	return out, body, nil
+	return nil
 }
 
 // writeStatusHuman renders the probed admin payload as a
 // scannable two-column block. Keys not present in the response are
 // silently skipped so an older bridge serving fewer fields still
-// produces useful output.
-func writeStatusHuman(w io.Writer, stats, endpoints map[string]any) int {
+// produces useful output. `endpoints` is the JSON-decoded
+// `[]adminEndpointEntry` from /api/endpoints — each element is a
+// map with `url` + `class` keys.
+func writeStatusHuman(w io.Writer, stats map[string]any, endpoints []any) int {
 	rows := [][2]string{
 		{"Library", asString(stats["libraryName"])},
 		{"Server version", fmt.Sprintf("%s (protocol v%v)", asString(stats["serverVersion"]), stats["protocolVersion"])},
@@ -131,24 +136,22 @@ func writeStatusHuman(w io.Writer, stats, endpoints map[string]any) int {
 		}
 		fmt.Fprintf(w, "%-18s %s\n", r[0]+":", r[1])
 	}
-	if endpoints != nil {
-		if list, ok := endpoints["endpoints"].([]any); ok && len(list) > 0 {
-			fmt.Fprintln(w, "Endpoints:")
-			for _, e := range list {
-				m, ok := e.(map[string]any)
-				if !ok {
-					continue
-				}
-				url := asString(m["url"])
-				kind := asString(m["kind"])
-				if url == "" {
-					continue
-				}
-				if kind != "" {
-					fmt.Fprintf(w, "  - %s (%s)\n", url, kind)
-				} else {
-					fmt.Fprintf(w, "  - %s\n", url)
-				}
+	if len(endpoints) > 0 {
+		fmt.Fprintln(w, "Endpoints:")
+		for _, e := range endpoints {
+			m, ok := e.(map[string]any)
+			if !ok {
+				continue
+			}
+			url := asString(m["url"])
+			class := asString(m["class"])
+			if url == "" {
+				continue
+			}
+			if class != "" {
+				fmt.Fprintf(w, "  - %s (%s)\n", url, class)
+			} else {
+				fmt.Fprintf(w, "  - %s\n", url)
 			}
 		}
 	}
@@ -217,32 +220,30 @@ func scanStateLabel(stats map[string]any) string {
 }
 
 // isConnRefused recognises the "service not running" case across
-// platforms. We can't import syscall.ECONNREFUSED on Windows in a
-// portable way, so the check is a substring match on the error
-// message — same approach the rest of the cmd/bridge code uses
-// for cross-platform error classification.
+// platforms. Prefer the typed `syscall.ECONNREFUSED` wrapped by
+// the net stack — `errors.Is` on it works cross-platform (the
+// Windows ECONNREFUSED is the same constant value as POSIX), so
+// the substring fallback is only there to catch wrapping that
+// strips the syscall.Errno (rare; some intermediaries wrap with
+// fmt.Errorf("%v")). Gemini Medium on PR #78 flagged the prior
+// implementation as fragile; this is the more robust shape.
 func isConnRefused(err error) bool {
 	if err == nil {
 		return false
 	}
-	if _, ok := err.(*net.OpError); ok {
-		s := err.Error()
-		if containsAny(s, "connection refused", "No connection could be made", "actively refused") {
-			return true
-		}
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		return true
 	}
+	// Substring fallback for stripped-errno cases. Conservative
+	// list — only the canonical strings the net stack uses.
 	s := err.Error()
-	return containsAny(s, "connection refused", "No connection could be made", "actively refused")
-}
-
-func containsAny(haystack string, needles ...string) bool {
-	for _, n := range needles {
-		if n != "" && len(haystack) >= len(n) {
-			for i := 0; i+len(n) <= len(haystack); i++ {
-				if haystack[i:i+len(n)] == n {
-					return true
-				}
-			}
+	for _, marker := range []string{
+		"connection refused",
+		"No connection could be made",
+		"actively refused",
+	} {
+		if strings.Contains(s, marker) {
+			return true
 		}
 	}
 	return false

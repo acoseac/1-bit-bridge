@@ -159,7 +159,24 @@ func libraryRemoveCmd(ctx context.Context, args []string, stdout, stderr io.Writ
 			return 1
 		}
 	} else {
+		// Multi-root → multi-root: the manifest stores rows under
+		// "<basename>/Artist/Album/Track". `bridgefs.ValidateRoots`
+		// (which the admin API runs at add-time) refuses two roots
+		// with the same basename, so once the user gets here every
+		// surviving root has a unique basename. Defensive guard
+		// anyway: if a hand-edited yaml violated the invariant
+		// (e.g. operator bypassed the CLI/admin and edited
+		// libraryRoots: directly), pruning by basename would wipe
+		// the surviving root's tracks too. Refuse rather than
+		// silently corrupt (Gemini High on PR #78).
 		basename := filepath.Base(target)
+		for _, surviving := range newList {
+			if filepath.Base(surviving) == basename {
+				fmt.Fprintf(stderr, "library remove: refusing — another configured root (%q) shares the basename %q\n", surviving, basename)
+				fmt.Fprintln(stderr, "  rename the colliding root first; the manifest path namespace can't disambiguate.")
+				return 1
+			}
+		}
 		if _, err := store.DeleteTracksByPrefix(basename + "/"); err != nil {
 			fmt.Fprintf(stderr, "library remove: prune tracks: %v\n", err)
 			return 1
@@ -194,8 +211,8 @@ func tryLibraryViaAdmin(ctx context.Context, cfg *config.Config, method, path st
 	if err != nil {
 		return false, 0
 	}
-	c := &http.Client{Timeout: 200 * time.Millisecond}
-	resp, err := c.Do(probeReq)
+	probeClient := &http.Client{Timeout: 200 * time.Millisecond}
+	resp, err := probeClient.Do(probeReq)
 	if err != nil {
 		// Connection refused = service not running → caller falls
 		// through to offline path. Other errors also fall through;
@@ -220,7 +237,14 @@ func tryLibraryViaAdmin(ctx context.Context, cfg *config.Config, method, path st
 		return true, 1
 	}
 	req.Header.Set("Content-Type", "application/json")
-	mutResp, err := c.Do(req)
+	// Separate client with the longer timeout — pre-fix the same
+	// 200 ms probe client serviced the mutation, so an add/remove
+	// against a running bridge would fail at 200 ms regardless of
+	// the 30 s context (Qodo Bug on PR #78). http.Client.Timeout
+	// caps the entire request duration independent of the request
+	// context.
+	mutateClient := &http.Client{Timeout: 30 * time.Second}
+	mutResp, err := mutateClient.Do(req)
 	if err != nil {
 		fmt.Fprintf(stderr, "library: admin mutation: %v\n", err)
 		return true, 1

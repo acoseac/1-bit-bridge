@@ -82,6 +82,13 @@ const (
 // returns the file offset at which it stopped reading (= file
 // size). Implementation reads backwards in 8 KiB chunks so a
 // multi-GB log file doesn't materialise in memory.
+//
+// Chunks accumulate into a `[][]byte` and are joined ONCE at the
+// end (Gemini Medium on PR #78). Pre-fix, each iteration did
+// `buf = append(piece, buf...)` which is O(N²) — every prepend
+// reallocates and copies the entire buffer. For a typical 200-line
+// tail spanning a few KiB this is academic; for an operator who
+// passed `-n 100000` against a long-running log it matters.
 func tailFile(f *os.File, lines int, w io.Writer) (int64, error) {
 	stat, err := f.Stat()
 	if err != nil {
@@ -93,7 +100,9 @@ func tailFile(f *os.File, lines int, w io.Writer) (int64, error) {
 	}
 	const chunk = int64(8192)
 	var (
-		buf      []byte
+		// chunks collects piece slices in REVERSE order (most-
+		// recent first); we reverse them once at the end.
+		chunks   [][]byte
 		newlines int
 		pos      = size
 	)
@@ -107,9 +116,15 @@ func tailFile(f *os.File, lines int, w io.Writer) (int64, error) {
 		if _, err := f.ReadAt(piece, pos); err != nil && !errors.Is(err, io.EOF) {
 			return 0, err
 		}
-		buf = append(piece, buf...)
-		newlines = bytes.Count(buf, []byte{'\n'})
+		newlines += bytes.Count(piece, []byte{'\n'})
+		chunks = append(chunks, piece)
 	}
+	// Reverse chunks (we accumulated tail-first) and join in one
+	// pass.
+	for i, j := 0, len(chunks)-1; i < j; i, j = i+1, j-1 {
+		chunks[i], chunks[j] = chunks[j], chunks[i]
+	}
+	buf := bytes.Join(chunks, nil)
 	// Trim to last `lines` lines.
 	idx := bytes.Count(buf, []byte{'\n'}) - lines
 	if idx > 0 {
@@ -130,15 +145,34 @@ func tailFile(f *os.File, lines int, w io.Writer) (int64, error) {
 
 // followLog polls the open file for appended bytes, printing each
 // new chunk to w. Honours file rotation / truncation: if the file's
-// size shrinks below the last known position, we reopen and read
-// from the start.
+// size shrinks below the last known position, we close the old fd
+// and reopen from the start.
+//
+// **FD leak fix (Gemini High on PR #78)**: pre-fix, logsCmd's outer
+// `defer f.Close()` captured the original *os.File but followLog
+// reassigned `f = nf` after a rotation, leaking the new fd when
+// the loop exited (e.g. via ctx-cancel). The defer here closes the
+// CURRENT fd (whichever has been swapped in by the latest rotation
+// handling) before returning.
+//
+// Uses time.Ticker instead of time.After in a loop (Gemini Medium):
+// time.After allocates a new timer per iteration; Ticker re-uses
+// one. At 1 Hz the difference is academic but the idiom matches
+// the rest of the codebase.
 func followLog(ctx context.Context, f *os.File, pos int64, stdout, stderr io.Writer) int {
+	defer func() {
+		if f != nil {
+			_ = f.Close()
+		}
+	}()
 	logPath := f.Name()
+	tick := time.NewTicker(followPollInterval)
+	defer tick.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return 0
-		case <-time.After(followPollInterval):
+		case <-tick.C:
 		}
 		stat, err := f.Stat()
 		if err != nil {
@@ -147,11 +181,13 @@ func followLog(ctx context.Context, f *os.File, pos int64, stdout, stderr io.Wri
 		}
 		size := stat.Size()
 		if size < pos {
-			// Truncated / rotated. Reopen and start from the new
-			// beginning.
-			f.Close()
+			// Truncated / rotated. Close the old fd FIRST so a
+			// long-running follow against a frequently-rotated
+			// log doesn't leak handles per rotation event.
+			_ = f.Close()
 			nf, err := os.Open(logPath)
 			if err != nil {
+				f = nil // ensure deferred close doesn't re-close
 				fmt.Fprintf(stderr, "logs: reopen after rotation: %v\n", err)
 				return 1
 			}
