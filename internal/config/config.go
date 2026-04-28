@@ -188,6 +188,7 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config %q: %w", path, err)
 	}
 	cfg.applyDefaults()
+	cfg.applyEnvOverrides()
 	absPath, err := filepath.Abs(path)
 	if err != nil {
 		return nil, fmt.Errorf("abs config path %q: %w", path, err)
@@ -197,6 +198,65 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+// applyEnvOverrides lets a deployment override the YAML for the
+// fields a Docker / Kubernetes / homelab operator typically wants
+// to inject at runtime without rewriting the config file. Env
+// wins over yaml; unset env = no change. Documented precedence:
+// env > yaml > defaults.
+//
+// Why this exists: a `bridge serve` running inside a container
+// has the binary baked in but `bridge.yaml` is the moving piece
+// — bind addresses depend on the host's port-forward layout, the
+// data dir is the persistent volume, and library roots are the
+// bind-mounted music shares. Patching a YAML inside an image at
+// runtime is doable but ugly; env overrides are the idiomatic
+// container-config knob.
+//
+// Recognised variables (all optional):
+//
+//	BRIDGE_LISTEN_ADDRESS  — overrides ListenAddress
+//	BRIDGE_ADMIN_ADDRESS   — overrides AdminAddress
+//	BRIDGE_DATA_DIR        — overrides DataDir
+//	BRIDGE_LIBRARY_NAME    — overrides LibraryName
+//	BRIDGE_LIBRARY_ROOTS   — colon-separated; overrides LibraryRoots
+//
+// Path-typed values (DataDir, LibraryRoots) still go through
+// `resolvePaths` afterwards so a relative path inherits the same
+// "relative-to-config-dir" semantics as a YAML field.
+func (c *Config) applyEnvOverrides() {
+	if v := os.Getenv("BRIDGE_LISTEN_ADDRESS"); v != "" {
+		c.ListenAddress = v
+	}
+	if v := os.Getenv("BRIDGE_ADMIN_ADDRESS"); v != "" {
+		c.AdminAddress = v
+	}
+	if v := os.Getenv("BRIDGE_DATA_DIR"); v != "" {
+		c.DataDir = v
+	}
+	if v := os.Getenv("BRIDGE_LIBRARY_NAME"); v != "" {
+		c.LibraryName = v
+	}
+	if v := os.Getenv("BRIDGE_LIBRARY_ROOTS"); v != "" {
+		// `os.PathListSeparator` would be the platform-aware choice
+		// (`:` on POSIX, `;` on Windows), but the only realistic
+		// container deployments are linux/amd64 + linux/arm64. We
+		// accept ":" universally so a docker-compose env block
+		// authored on a Windows workstation still produces a
+		// linux-server-friendly value.
+		raw := strings.Split(v, ":")
+		out := make([]string, 0, len(raw))
+		for _, p := range raw {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				out = append(out, p)
+			}
+		}
+		if len(out) > 0 {
+			c.LibraryRoots = out
+		}
+	}
 }
 
 func (c *Config) applyDefaults() {
