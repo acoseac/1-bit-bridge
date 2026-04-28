@@ -56,6 +56,7 @@ func certInfoCmd(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("cert info", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	configPath := fs.String("config", "bridge.yaml", "path to config file")
+	jsonOut := fs.Bool("json", false, "emit cert info as JSON instead of the human-readable layout")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -69,6 +70,20 @@ func certInfoCmd(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "inspect cert: %v\n", err)
 		return 1
+	}
+	if *jsonOut {
+		expired := time.Now().After(info.NotAfter)
+		expiringSoon := !expired && info.DaysUntilExpiry <= 30
+		envelope := map[string]any{
+			"subject":          info.Subject,
+			"fingerprint":      info.Fingerprint,
+			"notBefore":        info.NotBefore.UTC().Format(time.RFC3339),
+			"notAfter":         info.NotAfter.UTC().Format(time.RFC3339),
+			"daysUntilExpiry":  info.DaysUntilExpiry,
+			"expired":          expired,
+			"expiringSoon":     expiringSoon,
+		}
+		return writeJSONIndent(stdout, envelope)
 	}
 	fmt.Fprintf(stdout, "Subject:     %s\n", info.Subject)
 	fmt.Fprintf(stdout, "Fingerprint: %s\n", info.Fingerprint)
@@ -97,6 +112,7 @@ func certRotateCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 	fs.SetOutput(stderr)
 	configPath := fs.String("config", "bridge.yaml", "path to config file")
 	autoYes := fs.Bool("yes", false, "skip the interactive confirmation prompt")
+	fs.BoolVar(autoYes, "y", *autoYes, "alias for --yes")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}

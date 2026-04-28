@@ -312,6 +312,18 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return tokenCmd(args[1:], stdout, stderr)
 	case "cert":
 		return certCmd(args[1:], os.Stdin, stdout, stderr)
+	case "status":
+		return statusCmd(ctx, args[1:], stdout, stderr)
+	case "logs":
+		return logsCmd(ctx, args[1:], stdout, stderr)
+	case "library":
+		return libraryCmd(ctx, args[1:], stdout, stderr)
+	case "start":
+		return startCmd(args[1:], stdout, stderr)
+	case "stop":
+		return stopCmd(args[1:], stdout, stderr)
+	case "restart":
+		return restartCmd(args[1:], stdout, stderr)
 	case "version":
 		fmt.Fprintf(stdout, "1-bit-bridge %s (protocol v%d)\n", version.ServerVersion, version.ProtocolVersion)
 		return 0
@@ -334,6 +346,12 @@ Usage:
 Subcommands:
   init     First-time setup: writes config, mints TLS cert, installs service.
   serve    Run the HTTPS server.
+  start    Boot the installed service (launchd / systemd / SCM).
+  stop     Stop the installed service.
+  restart  Bounce the installed service.
+  status   Probe the running bridge — track count, endpoints, uptime.
+  logs     Tail the per-OS bridge log file. -f to follow.
+  library  Manage library roots: bridge library add|remove <path>.
   pair     Generate a new bearer token for an iOS client.
   scan     Force a full library rescan.
   doctor   Preflight: check ports, directories, service manager before init.

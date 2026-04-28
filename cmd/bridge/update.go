@@ -8,9 +8,13 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
+
+	"github.com/mattn/go-isatty"
 
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/packaging"
 	"github.com/acoseac/1-bit-bridge/internal/updater"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
@@ -42,7 +46,8 @@ func updateCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 	fs.SetOutput(stderr)
 	configPath := fs.String("config", "bridge.yaml", "path to config file")
 	check := fs.Bool("check", false, "poll for an update and print the result; don't install")
-	yes := fs.Bool("yes", false, "non-interactive: skip the confirmation prompt before install")
+	yes := fs.Bool("yes", false, "non-interactive: skip the install + post-install restart prompts")
+	fs.BoolVar(yes, "y", *yes, "alias for --yes")
 	overrideClientFloor := fs.Bool("override-client-floor", false,
 		"install even if the candidate's MinClientVersion would orphan a still-paired older device. "+
 			"Operator-only; the auto-installer never bypasses the gate.")
@@ -136,12 +141,70 @@ func updateCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 		return 1
 	}
 
-	fmt.Fprintf(stdout, "Installed %s. Restart the bridge to load the new binary:\n", st.LatestVersion)
-	fmt.Fprintln(stdout, "  - launchd:  launchctl kickstart -k gui/$UID/com.acoseac.1-bit-bridge")
-	fmt.Fprintln(stdout, "  - systemd:  systemctl --user restart com.acoseac.1-bit-bridge")
-	fmt.Fprintln(stdout, "  - or hit \"Restart\" in the admin console.")
-	fmt.Fprintf(stdout, "\nA backup of the previous binary is at %s.bak — startup housekeeping will roll back automatically if the new bridge fails to come up at version %s within %s of restart.\n",
+	fmt.Fprintf(stdout, "Installed %s.\n", st.LatestVersion)
+	fmt.Fprintf(stdout, "A backup of the previous binary is at %s.bak — startup housekeeping will roll back automatically if the new bridge fails to come up at version %s within %s of restart.\n",
 		binaryPath, st.LatestVersion, updater.RecencyWindow())
+
+	// Post-install restart hand-off. Three branches:
+	//   --yes / non-interactive (CI / scripts / piped stdin):
+	//       restart immediately if a service unit is installed,
+	//       otherwise print the manual hint and exit. Non-zero
+	//       interactivity rules out the prompt.
+	//   interactive on a TTY with a service unit installed:
+	//       prompt "Restart now? [Y/n]" — Enter or 'y' restarts.
+	//   no service unit installed:
+	//       can't restart from here (operator is running serve in
+	//       a terminal); print the manual hint as before.
+	kind, _ := packaging.InstalledKind()
+	hasService := kind != packaging.KindNone
+	stdinIsTTY := isStdinTTY(stdin)
+
+	if hasService && (*yes || stdinIsTTY) {
+		shouldRestart := *yes
+		if !shouldRestart {
+			fmt.Fprint(stdout, "\nRestart the service now to apply? [Y/n] ")
+			var resp string
+			fmt.Fscanln(stdin, &resp)
+			r := strings.ToLower(strings.TrimSpace(resp))
+			shouldRestart = r == "" || r == "y" || r == "yes"
+		}
+		if shouldRestart {
+			if err := packaging.Restart(); err != nil {
+				fmt.Fprintf(stderr, "restart: %v\n", err)
+				printManualRestartHint(stdout)
+				return 1
+			}
+			fmt.Fprintln(stdout, "bridge: service restart requested.")
+			_ = version.ServerVersion
+			return 0
+		}
+	}
+
+	fmt.Fprintln(stdout, "\nRestart the bridge to load the new binary:")
+	printManualRestartHint(stdout)
 	_ = version.ServerVersion // silence unused-import warning if version isn't referenced elsewhere
 	return 0
+}
+
+// printManualRestartHint emits the per-OS service-restart commands.
+// Used on the install-succeeded-but-restart-skipped path AND as a
+// fallback when the auto-restart attempt fails (service-manager
+// glitch, permission flap).
+func printManualRestartHint(w io.Writer) {
+	fmt.Fprintln(w, "  - launchd:  launchctl kickstart -k gui/$UID/com.acoseac.1-bit-bridge")
+	fmt.Fprintln(w, "  - systemd:  systemctl --user restart com.acoseac.1-bit-bridge")
+	fmt.Fprintln(w, "  - or hit \"Restart\" in the admin console.")
+}
+
+// isStdinTTY classifies the passed reader as interactive only when
+// it's actually os.Stdin AND that file descriptor refers to a
+// terminal. Pipes / redirects / tests fall through to non-
+// interactive (matches the convention init / restore use to gate
+// their own prompts).
+func isStdinTTY(stdin io.Reader) bool {
+	f, ok := stdin.(*os.File)
+	if !ok {
+		return false
+	}
+	return isatty.IsTerminal(f.Fd())
 }

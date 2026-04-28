@@ -119,3 +119,36 @@ func restartForOS(_ ServiceKind) error {
 	}
 	return nil
 }
+
+// startForOS asks the SCM to start the installed bridge service.
+// Idempotent against an already-running service (returns nil if
+// `s.Start()` reports ERROR_SERVICE_ALREADY_RUNNING). Same admin
+// gate semantics as stopForOS / restartForOS.
+func startForOS(_ ServiceKind) error {
+	m, err := mgr.Connect()
+	if err != nil {
+		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+			return fmt.Errorf("connect SCM (need admin?): %w", err)
+		}
+		return fmt.Errorf("connect SCM: %w", err)
+	}
+	defer m.Disconnect()
+	s, err := m.OpenService(ServiceLabel)
+	if err != nil {
+		if isServiceMissing(err) {
+			return nil
+		}
+		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+			return fmt.Errorf("open service (need admin?): %w", err)
+		}
+		return fmt.Errorf("open service: %w", err)
+	}
+	defer s.Close()
+	if err := s.Start(); err != nil {
+		if errors.Is(err, windows.ERROR_SERVICE_ALREADY_RUNNING) {
+			return nil
+		}
+		return fmt.Errorf("start service: %w", err)
+	}
+	return nil
+}

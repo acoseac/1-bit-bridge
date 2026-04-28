@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -26,6 +27,8 @@ func doctorCmd(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	cfgPath := fs.String("config", "", "path to bridge.yaml (default: try the OS-standard location)")
+	jsonOut := fs.Bool("json", false, "emit the report as JSON instead of the human-readable table")
+	doFix := fs.Bool("fix", false, "best-effort remediation for warn/fail checks that have a known safe fix")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -33,8 +36,29 @@ func doctorCmd(args []string, stdout, stderr io.Writer) int {
 	d := buildDoctorDeps(*cfgPath)
 	report := doctor.Run(d)
 
-	printReport(stdout, report)
+	if *doFix {
+		// Best-effort remediation. The set of safely auto-fixable
+		// checks is small (mkdir-class items where the only failure
+		// mode is "directory missing"); destructive or
+		// security-relevant fixes (port reassignment, service
+		// re-install, cert rotation) are NEVER attempted from --fix.
+		// Per-check fix outcomes go to STDERR when --json is set so
+		// the human-readable progress lines don't contaminate the
+		// JSON envelope on stdout (Qodo Bug on PR #78 — without this
+		// `bridge doctor --json --fix` emits invalid JSON).
+		fixOut := stdout
+		if *jsonOut {
+			fixOut = stderr
+		}
+		runFixes(fixOut, &report, d)
+		// Re-run the checks so the displayed status matches reality.
+		report = doctor.Run(d)
+	}
 
+	if *jsonOut {
+		return writeJSONIndent(stdout, jsonReportEnvelope(report))
+	}
+	printReport(stdout, report)
 	if report.HasFail() {
 		fmt.Fprintln(stdout, "\nfix the fail(s) above and re-run `bridge doctor`, or `bridge init --skip-doctor` to bypass (not recommended).")
 		return 1
@@ -42,6 +66,83 @@ func doctorCmd(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintln(stdout, "\nall clear.")
 	return 0
 }
+
+// jsonDoctorReport is the wire shape of `bridge doctor --json`. The
+// envelope is intentionally simple — flat list of checks plus
+// summary counts — so jq-style scripting is one filter away. The
+// per-check fields mirror doctor.Check exactly so a future
+// admin-API surface can re-use the same shape without translation.
+type jsonDoctorCheck struct {
+	Name    string `json:"name"`
+	Status  string `json:"status"`
+	Summary string `json:"summary"`
+	Hint    string `json:"hint,omitempty"`
+}
+
+type jsonDoctorReport struct {
+	Checks []jsonDoctorCheck `json:"checks"`
+	OK     int               `json:"ok"`
+	Warn   int               `json:"warn"`
+	Fail   int               `json:"fail"`
+}
+
+func jsonReportEnvelope(r doctor.Report) jsonDoctorReport {
+	out := jsonDoctorReport{
+		Checks: make([]jsonDoctorCheck, 0, len(r.Checks)),
+		OK:     r.OKCount(),
+		Warn:   r.WarnCount(),
+		Fail:   r.FailCount(),
+	}
+	for _, c := range r.Checks {
+		out.Checks = append(out.Checks, jsonDoctorCheck{
+			Name:    c.Name,
+			Status:  string(c.Status),
+			Summary: c.Summary,
+			Hint:    c.Hint,
+		})
+	}
+	return out
+}
+
+// runFixes attempts safe auto-remediation for the subset of checks
+// where we know the fix is mkdir-class (directory missing → create
+// it). Anything destructive or security-relevant is OUT of scope;
+// the operator stays in the loop for those. Each attempt is reported
+// to the operator regardless of outcome.
+func runFixes(w io.Writer, r *doctor.Report, d doctor.Deps) {
+	fmt.Fprintln(w, "doctor --fix: attempting safe remediations…")
+	for _, c := range r.Checks {
+		if c.Status == doctor.OK {
+			continue
+		}
+		switch c.Name {
+		case "config-dir":
+			if d.ConfigDir == "" {
+				continue
+			}
+			// 0o700 to match init.go — the dir holds bridge.yaml
+			// (TLS fingerprint, library paths) plus the data
+			// subtree (TLS private key, tokens.json, manifest DB).
+			// 0o755 would let other host users read the
+			// fingerprint and library layout (Qodo + Gemini
+			// Security on PR #78). Windows ignores the mode and
+			// relies on per-user-profile NTFS ACLs at
+			// %LOCALAPPDATA%.
+			if err := os.MkdirAll(d.ConfigDir, 0o700); err != nil {
+				fmt.Fprintf(w, "  ✗ %s: mkdir %s: %v\n", c.Name, d.ConfigDir, err)
+				continue
+			}
+			fmt.Fprintf(w, "  ✓ %s: created %s (0700)\n", c.Name, d.ConfigDir)
+		default:
+			// No safe auto-fix declared for this check. Skip silently
+			// to keep the operator's eye on the fixes we DID attempt.
+		}
+	}
+}
+
+// We need the JSON helper from status.go's writeJSONIndent — declared
+// there.
+var _ = json.Marshal // keep encoding/json import used (helper lives in status.go)
 
 // buildDoctorDeps resolves the doctor.Deps from the environment:
 // config (if readable) plus per-OS default dirs. A best-effort
@@ -122,13 +223,32 @@ func printReport(w io.Writer, r doctor.Report) {
 }
 
 func badgeForStatus(s doctor.Status) string {
+	// On a colour-capable TTY use a glyph + ANSI colour; everywhere
+	// else (NO_COLOR, piped, dumb terminal) keep the original
+	// fixed-width plaintext badges so existing CI / log scrapers
+	// keep parsing. The width matters for column alignment in the
+	// printReport %-18s formatter — `colorEnabled() == true` keeps
+	// the same visual width by emitting the ANSI escape around a
+	// fixed-width plaintext payload.
+	if !colorEnabled() {
+		switch s {
+		case doctor.OK:
+			return "[ok]  "
+		case doctor.Warn:
+			return "[warn]"
+		case doctor.Fail:
+			return "[FAIL]"
+		default:
+			return "[?]   "
+		}
+	}
 	switch s {
 	case doctor.OK:
-		return "[ok]  "
+		return paint(ansiGreen, "[ok]  ")
 	case doctor.Warn:
-		return "[warn]"
+		return paint(ansiYellow, "[warn]")
 	case doctor.Fail:
-		return "[FAIL]"
+		return paint(ansiRed, "[FAIL]")
 	default:
 		return "[?]   "
 	}

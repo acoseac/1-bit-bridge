@@ -36,6 +36,15 @@ const (
 	cBrightYellow = "\x1b[93m"
 	cBoldMagenta  = "\x1b[1;95m"
 	cDim          = "\x1b[90m"
+
+	// Doctor-status palette. Used by `bridge doctor`'s badge
+	// formatter and any future CLI surface that wants to map a
+	// pass/warn/fail axis onto colour. Values picked to match the
+	// muted-but-distinct convention the rest of the CLI uses
+	// (bold-bright primaries are reserved for headers / titles).
+	ansiGreen  = "\x1b[32m"
+	ansiYellow = "\x1b[33m"
+	ansiRed    = "\x1b[31m"
 )
 
 // colorState caches the result of TTY+NO_COLOR+TERM detection. The
