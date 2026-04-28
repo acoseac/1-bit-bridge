@@ -15,7 +15,6 @@ package api
 import (
 	"encoding/json"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"path/filepath"
@@ -27,8 +26,11 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
+	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
+
+var logger = logging.Component("api")
 
 // Server owns the http.Handler and the per-request state it needs.
 type Server struct {
@@ -369,7 +371,7 @@ func (s *Server) manifestHandler(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "internal", err.Error())
 			return
 		}
-		log.Printf("api: manifest stream: %v", err)
+		logger.Error("manifest stream", "err", err)
 	}
 }
 

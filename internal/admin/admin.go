@@ -23,7 +23,6 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -36,8 +35,11 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/backup"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
+	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
+
+var logger = logging.Component("admin")
 
 //go:embed templates/*.html
 var templateFS embed.FS
@@ -336,7 +338,7 @@ func (s *Server) Serve(ctx context.Context) error {
 	}
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(lis) }()
-	log.Printf("admin: console listening on http://%s/", lis.Addr())
+	logger.Info("console listening", "url", fmt.Sprintf("http://%s/", lis.Addr()))
 	select {
 	case <-ctx.Done():
 		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

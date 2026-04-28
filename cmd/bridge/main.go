@@ -33,6 +33,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/enrich"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
+	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	bridgemdns "github.com/acoseac/1-bit-bridge/internal/mdns"
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
@@ -227,6 +228,10 @@ func main() {
 	// so this branch is a no-op off Windows.
 	if isWindowsService() {
 		redirectServiceIO() // stdout/stderr → %PROGRAMDATA%\1-bit-bridge\bridge.log
+		// Init slog AFTER the service IO redirect — the redirected
+		// os.Stderr is what we want telemetry to land in (the
+		// service log file).
+		logging.Init(os.Stderr)
 		// Surface service-dispatch errors to whatever stdio we have so
 		// operators see them in the log. Previously this was
 		// `_ = runAsWindowsService(...)`, which meant a service that
@@ -252,6 +257,12 @@ func main() {
 		return
 	}
 
+	// Init slog telemetry. CLI commands keep their `fmt.Fprintf`
+	// stdout/stderr surfaces — slog is for backend telemetry only
+	// (scanner / enricher / admin / etc.) and lands on stderr by
+	// default, matching the service log destination on Windows
+	// (post-redirect) and stderr on macOS / Linux.
+	logging.Init(os.Stderr)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	os.Exit(run(ctx, os.Args[1:], os.Stdout, os.Stderr))

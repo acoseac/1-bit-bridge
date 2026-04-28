@@ -5,14 +5,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/logging"
 	_ "modernc.org/sqlite" // register "sqlite" driver (pure-Go, no cgo)
 )
+
+var logger = logging.Component("manifest")
 
 // Store persists Tracks and Folders in a single SQLite file.
 // The store is safe for concurrent Open/Close/Read/Write within one
@@ -619,7 +621,7 @@ func (s *Store) hasTrackWithJSONField(field jsonField, value string) bool {
 		// Genuine database errors (disk I/O, connection closed,
 		// migration mid-flight) get logged. `sql.ErrNoRows` is the
 		// expected "no such MBID" outcome and stays quiet.
-		log.Printf("store: hasTrackWithJSONField %s: %v", field, err)
+		logger.Error("hasTrackWithJSONField", "field", field, "err", err)
 		return false
 	}
 	return found == 1
