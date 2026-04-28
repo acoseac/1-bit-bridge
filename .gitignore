@@ -5,6 +5,11 @@
 *.test
 *.out
 
+# Release artifact: written to repo root by goreleaser's before-hook
+# so it doesn't trip the dist-must-be-empty check; uploaded as a
+# Release asset via release.extra_files.
+/release-meta.json
+
 # Runtime state (local dev)
 /bridge.db
 /bridge.db-*

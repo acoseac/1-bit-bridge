@@ -35,7 +35,18 @@ before:
     # "no floor" by the fetcher (ErrReleaseMetaMissing path), so this
     # is purely additive and doesn't break installs of pre-Phase-C
     # builds.
-    - sh -c 'mkdir -p dist && printf "{\"version\":\"%s\",\"minClientVersion\":\"%s\",\"protocolVersion\":1}\n" "$(git describe --tags --abbrev=0 2>/dev/null | sed "s/^v//")" "${MIN_CLIENT_VERSION:-0.0.0}" > dist/release-meta.json'
+    #
+    # Written to the repo root (not dist/) because goreleaser's
+    # `--clean` runs BEFORE the before-hooks, then the "ensuring
+    # distribution directory" step refuses to proceed if dist/ is
+    # non-empty — a hook seeding dist/release-meta.json trips that
+    # check (v0.1.1's first release attempt failed exactly this way).
+    # The repo-root location is .gitignore'd; extra_files glob picks
+    # it up by basename so the asset name on the GitHub Release is
+    # still `release-meta.json` (matches ReleaseMetaAssetName in
+    # internal/updater/release_meta.go — the iOS-side fetcher pins
+    # by asset name, not URL path).
+    - sh -c 'printf "{\"version\":\"%s\",\"minClientVersion\":\"%s\",\"protocolVersion\":1}\n" "$(git describe --tags --abbrev=0 2>/dev/null | sed "s/^v//")" "${MIN_CLIENT_VERSION:-0.0.0}" > release-meta.json'
 
 builds:
   - id: bridge
@@ -122,9 +133,10 @@ release:
   # fetch it alongside the archives. extra_files attaches at the
   # release level, NOT the per-archive level — the file is a single
   # sidecar regardless of how many platform archives the release
-  # ships.
+  # ships. Glob is repo-relative (the hook above writes to repo root,
+  # not dist/, to dodge the "ensuring distribution directory" check).
   extra_files:
-    - glob: dist/release-meta.json
+    - glob: release-meta.json
 
 # macOS signing + Apple notarization. `enabled` is gated on env presence
 # so the workflow still produces unsigned builds when the signing
