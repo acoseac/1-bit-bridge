@@ -58,3 +58,11 @@ jobs:
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_KEY_ID: ${{ secrets.APPLE_KEY_ID }}
           APPLE_ISSUER_ID: ${{ secrets.APPLE_ISSUER_ID }}
+          # APPLE_TEAM_ID is required by the .goreleaser.yaml hard-fail
+          # hook (PR #42) when MACOS_SIGN_P12 is set, AND is injected
+          # at link-time into appleTeamIDOverride so the macOS updater
+          # verifier can reject swap candidates signed by a different
+          # Team ID. Wiring was missed in PR #26's initial signing
+          # bring-up — v0.1.0 silently shipped unsigned macOS binaries
+          # because the hook didn't exist yet; v0.1.1 trips the hook.
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
