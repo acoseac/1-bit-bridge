@@ -206,8 +206,17 @@ func updateCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 // for the actually-installed unit type.
 func printManualRestartHint(w io.Writer, kind packaging.ServiceKind) {
 	switch kind {
-	case packaging.KindLaunchdUser, packaging.KindLaunchdSystem:
+	case packaging.KindLaunchdUser:
+		// User-domain LaunchAgent — kickstart against the
+		// per-uid `gui/$UID` domain. No sudo.
 		fmt.Fprintln(w, "  - launchctl kickstart -k gui/$UID/com.acoseac.1-bit-bridge")
+	case packaging.KindLaunchdSystem:
+		// System-domain LaunchDaemon — different launchctl
+		// domain (`system/`), and root privilege required.
+		// CodeRabbit Major post-merge on PR #85 flagged the
+		// previous shared `gui/$UID` line as wrong for
+		// system-installed bridges.
+		fmt.Fprintln(w, "  - sudo launchctl kickstart -k system/com.acoseac.1-bit-bridge")
 	case packaging.KindSystemdUser:
 		fmt.Fprintln(w, "  - systemctl --user restart com.acoseac.1-bit-bridge")
 	case packaging.KindSystemdSystem:

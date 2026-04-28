@@ -38,7 +38,15 @@ func TestEnvOverrides(t *testing.T) {
 	t.Setenv("BRIDGE_ADMIN_ADDRESS", "127.0.0.1:9091")
 	t.Setenv("BRIDGE_DATA_DIR", filepath.Join(dir, "env-data"))
 	t.Setenv("BRIDGE_LIBRARY_NAME", "env name")
-	t.Setenv("BRIDGE_LIBRARY_ROOTS", filepath.Join(dir, "lib1")+":"+filepath.Join(dir, "lib2")+"::")
+	// Use os.PathListSeparator (`:` on POSIX, `;` on Windows) to
+	// match the production code's split behaviour. Pre-fix the
+	// test hard-coded `:` which passed on POSIX but would fail on
+	// Windows where drive-letter paths can't be colon-split (Qodo
+	// Bug post-merge on PR #85). Also exercises the trailing-
+	// empty-fragment trim by appending a doubled separator.
+	sep := string(os.PathListSeparator)
+	t.Setenv("BRIDGE_LIBRARY_ROOTS",
+		filepath.Join(dir, "lib1")+sep+filepath.Join(dir, "lib2")+sep+sep)
 
 	cfg, err := Load(cfgPath)
 	if err != nil {
