@@ -409,8 +409,15 @@ func (s *Server) csrfGuard(next http.Handler) http.Handler {
 
 		// Body-bearing mutating request? Require application/json.
 		// Empty-body requests pass without Content-Type since there's
-		// no decode surface to attack.
-		hasBody := r.ContentLength > 0 || r.Header.Get("Transfer-Encoding") != ""
+		// no decode surface to attack. net/http strips the
+		// Transfer-Encoding header during request parsing and surfaces
+		// chunked transfers via `r.TransferEncoding` and ContentLength
+		// = -1, so a header-based "is the body chunked" check would be
+		// dead code (CodeRabbit Major on PR #76). ContentLength != 0
+		// catches both the known-length (>0) and chunked (-1) cases;
+		// only ContentLength == 0 is the no-body case we want to
+		// allow through.
+		hasBody := r.ContentLength != 0 || len(r.TransferEncoding) > 0
 		if hasBody {
 			ct := r.Header.Get("Content-Type")
 			// Strip parameters: "application/json; charset=utf-8"
@@ -457,11 +464,18 @@ func (s *Server) originMatchesAdmin(origin string) bool {
 		// Malformed or "null" Origin — refuse rather than guess.
 		return false
 	}
-	originHost, originPort, err := net.SplitHostPort(u.Host)
-	if err != nil {
-		// No port in the Origin — split returns an error; treat the
-		// whole Host as the hostname and infer port from scheme.
-		originHost = u.Host
+	// Use url.URL.Hostname() / Port() instead of net.SplitHostPort on
+	// u.Host: those methods strip IPv6 brackets and handle the
+	// no-port case in one step. SplitHostPort would surface IPv6
+	// addresses like `[::1]:7789` as host="" + error on the no-port
+	// variant, breaking origin like `http://[::1]:7789` (Gemini Major
+	// on PR #76).
+	originHost := u.Hostname()
+	originPort := u.Port()
+	if originPort == "" {
+		// Default-port inference for origin scheme (port-elided
+		// origin → "http://localhost"). Only http/https are
+		// reasonable for a loopback admin console.
 		switch strings.ToLower(u.Scheme) {
 		case "https":
 			originPort = "443"
@@ -500,7 +514,13 @@ func loopbackHostname(h string) bool {
 	if h == "localhost" {
 		return true
 	}
-	if ip := net.ParseIP(h); ip != nil {
+	// Accept either a bare IP literal or a bracketed IPv6 form
+	// ("[::1]"). url.URL.Hostname() already strips brackets, but
+	// callers in tests / older callers may pass a raw host string
+	// from net.SplitHostPort. Trimming both bracket bytes is safe
+	// — they're not valid IP-literal characters (Gemini Minor on
+	// PR #76).
+	if ip := net.ParseIP(strings.Trim(h, "[]")); ip != nil {
 		return ip.IsLoopback()
 	}
 	return false

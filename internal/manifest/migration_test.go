@@ -76,8 +76,9 @@ func TestMigrationLadderPreLadderUpgrade(t *testing.T) {
 	}
 	defer s.Close()
 	v := readUserVersion(t, s.db)
-	if v != 1 {
-		t.Errorf("user_version = %d, want 1 after upgrade", v)
+	want := migrations[len(migrations)-1].version
+	if v != want {
+		t.Errorf("user_version = %d, want %d (current head)", v, want)
 	}
 }
 

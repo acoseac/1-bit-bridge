@@ -70,6 +70,8 @@ func TestCSRFOriginAllowlist(t *testing.T) {
 		{"loopback wrong-port rejected", "http://127.0.0.1:7777", http.StatusForbidden},
 		{"non-loopback IP rejected", "http://192.168.1.5:7789", http.StatusForbidden},
 		{"null Origin rejected (file:// drive-by)", "null", http.StatusForbidden},
+		{"IPv6 [::1] same port allowed", "http://[::1]:7789", -1},
+		{"IPv6 [::1] wrong port rejected", "http://[::1]:7777", http.StatusForbidden},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
