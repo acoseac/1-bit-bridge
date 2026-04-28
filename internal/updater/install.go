@@ -65,8 +65,10 @@ type InstallOptions struct {
 //     the check is symmetric defence).
 //   - ErrActiveSessions when Force is false and Sessions.Inflight()
 //     is nonzero.
-//   - ErrInstallNotSupported on Windows (Phase B; Windows install
-//     is a follow-up).
+//   - ErrInstallNotSupported only on platforms without a swap_*.go
+//     implementation (currently: every GOOS except darwin/linux/windows
+//     hits this; darwin and linux use swap_unix.go's atomic rename,
+//     windows uses swap_windows.go's pending-rename + restart).
 //   - Any download / verify / swap error returned verbatim.
 //
 // The marker is written BEFORE the swap so a process crash between

@@ -1,11 +1,20 @@
 // Package api implements the HTTP/2 handlers for the v1 wire protocol (see
 // PROTOCOL.md at the repo root).
 //
-// v1 endpoints in this package so far:
+// v1 endpoints exposed by this package:
 //
-//	GET /v1/health     — no auth, liveness / pairing probe
+//	GET /v1/health              — no auth, liveness / pairing probe
+//	GET /v1/list                — directory listing (authed)
+//	GET /v1/stat                — file metadata (authed)
+//	GET /v1/read                — byte-range read; Range header required (authed)
+//	GET /v1/download            — full-file streaming download (authed)
+//	GET /v1/manifest            — library track manifest (authed)
+//	GET /v1/artwork/{mbid}      — album artwork blob (authed)
+//	GET /v1/artist-image/{mbid} — artist portrait by MusicBrainz ID (authed)
 //
-// Upcoming: /v1/list, /v1/stat, /v1/read, /v1/download, /v1/manifest.
+// Pairing itself is handled by the admin console (see internal/admin),
+// not by a /v1 endpoint — the iOS client posts the bearer token and
+// pinned fingerprint to the admin host once, then talks to /v1 only.
 //
 // Every response carries the X-Bridge-Protocol header. Authenticated
 // endpoints run through the authed() middleware, which requires
