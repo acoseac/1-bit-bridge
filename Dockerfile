@@ -47,13 +47,18 @@ COPY . .
 
 # Static binary, stripped, no cgo. modernc.org/sqlite is pure-Go so
 # CGO=0 is safe across our SQLite path.
+#
+# `--build-arg VERSION=v1.2.0` injects into version.ServerVersion so
+# `bridge version` and the X-Server-Version response header report the
+# build identity rather than the placeholder constant (Gemini Medium
+# on PR #80).
 ARG VERSION=docker
 ENV CGO_ENABLED=0 \
     GOOS=linux
 
 RUN go build \
     -trimpath \
-    -ldflags="-s -w" \
+    -ldflags="-s -w -X github.com/acoseac/1-bit-bridge/internal/version.ServerVersion=${VERSION}" \
     -o /out/bridge \
     ./cmd/bridge
 
@@ -64,15 +69,27 @@ FROM alpine:${ALPINE_VERSION}
 # and the enricher (musicbrainz.org / coverartarchive.org).
 # tzdata: lets the quiet-hours window in the auto-installer
 # evaluate against the operator's local TZ via TZ env.
+#
+# `mkdir /data && chown bridge:bridge /data` BEFORE the USER switch
+# is load-bearing (Gemini High + Qodo Bug on PR #80): WORKDIR / VOLUME
+# create the directory with root:root ownership by default, so the
+# subsequent USER bridge would have a non-writable /data and the
+# first-run TLS-mint + manifest-DB-create would fail with permission
+# errors. Operators bind-mounting their own pre-owned volume override
+# this — but the in-image baseline must be writable for fresh
+# `docker run -v 1-bit-bridge-state:/data` deployments to work.
 RUN apk add --no-cache ca-certificates tzdata && \
     addgroup -S bridge && \
-    adduser -S -G bridge bridge
+    adduser -S -G bridge bridge && \
+    mkdir -p /data && \
+    chown bridge:bridge /data
 
 COPY --from=builder /out/bridge /usr/local/bin/bridge
 
 # /data is the canonical persistent volume — bridge.yaml, the
 # SQLite manifest DB, the TLS material, and the artwork cache
-# all live under here.
+# all live under here. Pre-created above with bridge:bridge
+# ownership so the USER-switched runtime can write.
 VOLUME /data
 WORKDIR /data
 
