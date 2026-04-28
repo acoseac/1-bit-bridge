@@ -179,6 +179,7 @@ func TestRun_FullReportShape(t *testing.T) {
 		"platform", "config-dir", "tls-cert",
 		"port-api", "port-admin",
 		"library-roots", "service-manager", "browser-opener",
+		"inotify-watch-limit",
 	}
 	if len(r.Checks) != len(wantNames) {
 		t.Fatalf("check count: got %d, want %d", len(r.Checks), len(wantNames))
