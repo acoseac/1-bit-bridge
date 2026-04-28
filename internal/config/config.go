@@ -21,16 +21,49 @@ import (
 
 // Config mirrors the on-disk bridge.yaml shape. See config/bridge.yaml.example.
 type Config struct {
-	LibraryRoots    []string     `yaml:"libraryRoots"`
-	ListenAddress   string       `yaml:"listenAddress"`
-	AdminAddress    string       `yaml:"adminAddress,omitempty"`
-	DataDir         string       `yaml:"dataDir"`
-	TLSCertPath     string       `yaml:"tlsCertPath,omitempty"`
-	TLSKeyPath      string       `yaml:"tlsKeyPath,omitempty"`
-	ScanIntervalSec int          `yaml:"scanIntervalSec"`
-	LibraryName     string       `yaml:"libraryName"`
-	Update          UpdateConfig `yaml:"update,omitempty"`
-	Backup          BackupConfig `yaml:"backup,omitempty"`
+	LibraryRoots    []string           `yaml:"libraryRoots"`
+	ListenAddress   string             `yaml:"listenAddress"`
+	AdminAddress    string             `yaml:"adminAddress,omitempty"`
+	DataDir         string             `yaml:"dataDir"`
+	TLSCertPath     string             `yaml:"tlsCertPath,omitempty"`
+	TLSKeyPath      string             `yaml:"tlsKeyPath,omitempty"`
+	ScanIntervalSec int                `yaml:"scanIntervalSec"`
+	LibraryName     string             `yaml:"libraryName"`
+	Update          UpdateConfig       `yaml:"update,omitempty"`
+	Backup          BackupConfig       `yaml:"backup,omitempty"`
+	LibraryWatch    LibraryWatchConfig `yaml:"libraryWatch,omitempty"`
+}
+
+// LibraryWatchConfig governs the optional fsnotify-based
+// instant-update watcher. Off by default — the periodic scan
+// (ScanIntervalSec) remains the safety net in either case. Power
+// users with local-disk libraries flip this on to get
+// Roon/Plex-style "drop a file in, it appears" responsiveness;
+// NAS / spinning-disk users keep the periodic-only path so a
+// flapping server can't trigger a thrash of incremental scans.
+//
+// Linux deployments with very large libraries should also raise
+// `fs.inotify.max_user_watches` — `bridge doctor` warns when the
+// kernel limit looks too low for the configured roots.
+type LibraryWatchConfig struct {
+	// Enabled is the master toggle. Default false.
+	Enabled bool `yaml:"enabled,omitempty"`
+	// DebounceSeconds is the per-directory event coalesce window.
+	// 10 seconds is the documented default — long enough that a
+	// large-folder copy doesn't trigger a scan-per-file storm,
+	// short enough that the perceived "instant" feel survives.
+	// Zero or omitted → DefaultLibraryWatchDebounceSeconds.
+	DebounceSeconds int `yaml:"debounceSeconds,omitempty"`
+}
+
+// EffectiveDebounceSeconds resolves the runtime debounce window
+// from the YAML field. Centralised so the watcher and the
+// doctor check can't disagree.
+func (l LibraryWatchConfig) EffectiveDebounceSeconds() int {
+	if l.DebounceSeconds <= 0 {
+		return DefaultLibraryWatchDebounceSeconds
+	}
+	return l.DebounceSeconds
 }
 
 // BackupConfig configures the periodic state-snapshot ticker that
@@ -132,6 +165,12 @@ const (
 	DefaultLibraryName         = "1-bit Bridge"
 	DefaultBackupIntervalHours = 24
 	DefaultBackupKeep          = 7
+	// DefaultLibraryWatchDebounceSeconds is the per-directory
+	// event coalesce window when fsnotify-based watching is on.
+	// 10 seconds matches the documented default and is long
+	// enough that a large-folder copy doesn't trigger a scan-
+	// per-file storm.
+	DefaultLibraryWatchDebounceSeconds = 10
 )
 
 // Load parses a bridge.yaml file, fills defaults, resolves relative paths

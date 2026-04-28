@@ -60,6 +60,12 @@ type Deps struct {
 	// (doctor must be idempotent while the server is running). Empty
 	// skips the own-PID check — any bind is fail.
 	OwnPIDFile string
+	// LibraryWatchEnabled mirrors cfg.LibraryWatch.Enabled. When
+	// true on Linux, the doctor's inotify watch-limit check
+	// activates — the operator gets a warning if their kernel
+	// budget would be exhausted by the configured roots before
+	// the bridge tries to register watches at runtime.
+	LibraryWatchEnabled bool
 }
 
 // Report is the collection of checks from a single doctor run.
@@ -98,6 +104,7 @@ func Run(d Deps) Report {
 		checkLibraryRoots,
 		checkServiceManager,
 		checkBrowserOpener,
+		checkInotifyLimit,
 	}
 	out := make([]Check, 0, len(checks))
 	for _, fn := range checks {

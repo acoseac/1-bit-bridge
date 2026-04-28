@@ -471,6 +471,27 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	defer scanCancel()
 	go scanner.RunPeriodic(scanCtx, cfg.ScanInterval())
 
+	// Optional fsnotify-based instant-update watcher. Off by default
+	// (cfg.LibraryWatch.Enabled). When on, the periodic full scan
+	// remains the safety net — the watcher just shortens the
+	// time-to-visibility for newly-dropped files in the common case.
+	// Failure to construct the watcher (e.g. older kernel without
+	// inotify support) is non-fatal — log a Warn and continue
+	// periodic-only.
+	if cfg.LibraryWatch.Enabled {
+		debounce := time.Duration(cfg.LibraryWatch.EffectiveDebounceSeconds()) * time.Second
+		watcher, werr := manifest.NewWatcher(scanner, debounce)
+		if werr != nil {
+			fmt.Fprintf(stderr, "library watcher: %v (periodic scan still active)\n", werr)
+		} else {
+			go func() {
+				if err := watcher.Run(scanCtx); err != nil {
+					fmt.Fprintf(stderr, "library watcher exited: %v\n", err)
+				}
+			}()
+		}
+	}
+
 	// Fire up the MusicBrainz/CoverArt enricher in the background. It
 	// pulls un-enriched tracks from the store and fills in
 	// MusicBrainzAlbumID / ArtworkMBID, caching cover images under

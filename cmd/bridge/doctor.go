@@ -169,6 +169,7 @@ func buildDoctorDeps(cfgPath string) doctor.Deps {
 		if cfg, err := config.Load(candidatePath); err == nil {
 			d.DataDir = cfg.DataDir
 			d.LibraryRoots = cfg.LibraryRoots
+			d.LibraryWatchEnabled = cfg.LibraryWatch.Enabled
 			if host, port, ok := splitHostPort(cfg.ListenAddress); ok {
 				_ = host
 				d.APIPort = port

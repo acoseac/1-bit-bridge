@@ -340,6 +340,135 @@ func (s *Scanner) runScanWriter(ctx context.Context, writes <-chan *Track, commi
 	flush()
 }
 
+// ScanSubtree walks just `dir` (which must be at or under one of
+// the configured library roots) and feeds its audio files into the
+// same worker → writer pipeline as `Scan`. Used by the fsnotify
+// watcher (PR-4) for incremental updates after a debounced
+// directory event — a 50k-track library doesn't need to walk every
+// root just because one folder gained a file.
+//
+// **Deliberately skips the deletion pass.** A subtree scan can't
+// safely decide whether tracks no longer present under `dir` are
+// "deleted" or "moved to a sibling root we didn't walk" — full
+// scans handle deletes via the `before` snapshot + `seen` set;
+// subtree scans only ADD or UPDATE. Stale rows for files
+// physically removed under `dir` are reconciled on the next
+// periodic full scan (default cadence ScanIntervalSec).
+//
+// Cancelable via ctx. Returns the count of rows committed by the
+// writer goroutine. A subtree scan that resolves to no audio
+// files is a fast no-op.
+func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	rootsPtr := s.roots.Load()
+	var roots []string
+	if rootsPtr != nil {
+		roots = *rootsPtr
+	}
+	if len(roots) == 0 {
+		return 0, fmt.Errorf("no library roots configured")
+	}
+	multiRoot := len(roots) > 1
+
+	// Resolve `dir` to its parent root so relPath produces the
+	// same library-relative form the full scan uses. Refuse when
+	// the dir doesn't live under any configured root — silently
+	// scanning unrelated paths would let an arbitrary fsnotify
+	// event poison the manifest with garbage paths.
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return 0, fmt.Errorf("resolve %q: %w", dir, err)
+	}
+	var owningRoot string
+	for _, root := range roots {
+		absRoot, err := filepath.Abs(root)
+		if err != nil {
+			continue
+		}
+		// Honour the case-insensitive filesystem on macOS / Windows
+		// — strings.HasPrefix is exact here, but the absolute paths
+		// already round-trip through filepath.Abs which preserves
+		// the canonical form. A dir that's exactly the root passes;
+		// a dir under it requires the path-separator boundary so
+		// "/Music" doesn't accept "/MusicShare".
+		if absDir == absRoot || strings.HasPrefix(absDir, absRoot+string(filepath.Separator)) {
+			owningRoot = absRoot
+			break
+		}
+	}
+	if owningRoot == "" {
+		return 0, fmt.Errorf("dir %q is not under any configured library root", dir)
+	}
+
+	paths := make(chan pathInfo, scanChannelBuffer)
+	writes := make(chan *Track, scanChannelBuffer)
+
+	nWorkers := runtime.NumCPU()
+	var workersWG sync.WaitGroup
+	for i := 0; i < nWorkers; i++ {
+		workersWG.Add(1)
+		go s.runScanWorker(ctx, paths, writes, &workersWG)
+	}
+
+	committed := new(atomic.Int64)
+	var writerWG sync.WaitGroup
+	writerWG.Add(1)
+	go s.runScanWriter(ctx, writes, committed, &writerWG)
+
+	// Subtree walker: same shape as walkRoot but no `seen` /
+	// `errorSubtrees` tracking — we don't run a deletion pass.
+	walkErr := filepath.WalkDir(absDir, func(abs string, d fs.DirEntry, err error) error {
+		if err != nil {
+			scanLogger.Warn("subtree walk", "path", abs, "err", err)
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if d.IsDir() {
+			if shouldSkipDir(d.Name()) {
+				return filepath.SkipDir
+			}
+			if info, err := d.Info(); err == nil {
+				rel := relPath(owningRoot, abs, multiRoot)
+				_ = s.store.UpsertFolder(&Folder{Path: rel, ModTime: info.ModTime().UTC()})
+			}
+			return nil
+		}
+		if strings.HasPrefix(d.Name(), ".") {
+			return nil
+		}
+		ext := strings.ToLower(filepath.Ext(abs))
+		if !Ext[ext] {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			scanLogger.Warn("subtree stat", "path", abs, "err", err)
+			return nil
+		}
+		rel := relPath(owningRoot, abs, multiRoot)
+		select {
+		case paths <- pathInfo{abs: abs, rel: rel, info: info}:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		return nil
+	})
+
+	close(paths)
+	workersWG.Wait()
+	close(writes)
+	writerWG.Wait()
+
+	if walkErr != nil && ctx.Err() == nil {
+		return int(committed.Load()), walkErr
+	}
+	return int(committed.Load()), nil
+}
+
 // walkRoot drives `filepath.WalkDir` for one root, recording folder
 // mtimes inline (single-writer; no contention with the workers'
 // track-upsert pipeline) and handing off audio files to the worker
