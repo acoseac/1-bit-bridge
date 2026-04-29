@@ -162,8 +162,12 @@ func (c *Client) LatestRelease(ctx context.Context) (*Release, error) {
 	if rel.Draft || rel.Prerelease {
 		// Latest endpoint shouldn't return either, but if GitHub
 		// changes that or the response was somehow forwarded, reject
-		// rather than treat the prerelease as stable.
-		return &Release{}, nil
+		// rather than treat the prerelease as stable. Surface as the
+		// same sentinel as a 404 — the dashboard's "check failed"
+		// branch fires correctly instead of the permanent "checking…"
+		// badge that the prior empty-Release short-circuit produced
+		// (Gemini bot review on PR #89: same root cause as 404).
+		return nil, ErrNoReleasesPublished
 	}
 	return &rel, nil
 }

@@ -197,6 +197,98 @@ func TestUpdaterSurfaces404AsLastError(t *testing.T) {
 	}
 }
 
+// TestUpdaterClearsCachedAvailabilityOn404 pins the regression Qodo
+// flagged in PR #89 review: a successful poll that surfaces an update
+// followed by a poll that 404s must clear the cached
+// LatestVersion/UpdateAvailable/ReleaseNotesURL fields. Otherwise the
+// dashboard's `UpdateAvailable` / `LatestVersion` template branches
+// outrank the `LastError` branch and operators see a stale "update
+// available" badge with no way to know the check is broken.
+func TestUpdaterClearsCachedAvailabilityOn404(t *testing.T) {
+	// First poll: real release surfaces an update.
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"tag_name":"v9.9.9","html_url":"https://x"}`))
+	}))
+	u := New(Options{
+		RepoOverride: "fake/repo",
+		Client:       NewClient("fake/repo", time.Second).WithBaseURL(first.URL),
+	})
+	got := u.CheckNow(context.Background())
+	if !got.UpdateAvailable || got.LatestVersion != "9.9.9" {
+		t.Fatalf("first poll should surface update; got %+v", got)
+	}
+	first.Close()
+
+	// Second poll: 404 (repo went private OR releases removed).
+	second, _ := fakeReleasesServer(t, 404, nil)
+	u.client = NewClient("fake/repo", time.Second).WithBaseURL(second.URL)
+	got = u.CheckNow(context.Background())
+	if got.LastError != ErrNoReleasesPublished.Error() {
+		t.Errorf("LastError = %q, want sentinel", got.LastError)
+	}
+	if got.UpdateAvailable {
+		t.Error("UpdateAvailable should be cleared on definitive-no-candidate sentinel")
+	}
+	if got.LatestVersion != "" {
+		t.Errorf("LatestVersion = %q, want cleared", got.LatestVersion)
+	}
+	if got.ReleaseNotesURL != "" {
+		t.Errorf("ReleaseNotesURL = %q, want cleared", got.ReleaseNotesURL)
+	}
+}
+
+// TestSemverGreater_TreatsInvalidCurrentAsZero pins the Qodo bot fix:
+// non-semver `current` (a bare git SHA from `make build` on a tagless
+// clone, the "dev" fallback) must NOT permanently suppress
+// UpdateAvailable. semverGreater treats invalid current as v0.0.0 so
+// any valid release surfaces as an upgrade.
+func TestSemverGreater_TreatsInvalidCurrentAsZero(t *testing.T) {
+	cases := []struct {
+		name            string
+		latest, current string
+		wantGreater     bool
+	}{
+		{"valid > valid", "1.0.0", "0.9.0", true},
+		{"valid == valid", "1.0.0", "1.0.0", false},
+		{"valid < valid", "0.9.0", "1.0.0", false},
+		{"valid latest, dev current", "1.0.0", "dev", true},
+		{"valid latest, sha current", "0.1.2", "abc1234", true},
+		{"valid latest, dirty desc current", "0.1.2", "0.1.1-4-gabcdef-dirty", true},
+		{"invalid latest is rejected", "not-a-version", "0.0.0", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := semverGreater(c.latest, c.current); got != c.wantGreater {
+				t.Errorf("semverGreater(%q, %q) = %v, want %v",
+					c.latest, c.current, got, c.wantGreater)
+			}
+		})
+	}
+}
+
+// TestUpdaterSurfacesPrereleaseAsLastError pins the Gemini bot fix:
+// the prerelease/draft branch of LatestRelease used to return an
+// empty Release with no error — same dashboard "checking…"-stuck
+// symptom as the 404 path. Now both share `ErrNoReleasesPublished`.
+func TestUpdaterSurfacesPrereleaseAsLastError(t *testing.T) {
+	srv, _ := fakeReleasesServer(t, 200, &Release{
+		TagName:    "v9.9.9-rc1",
+		Prerelease: true,
+	})
+	u := New(Options{
+		RepoOverride: "fake/repo",
+		Client:       NewClient("fake/repo", time.Second).WithBaseURL(srv.URL),
+	})
+	got := u.CheckNow(context.Background())
+	if got.LastError != ErrNoReleasesPublished.Error() {
+		t.Errorf("LastError = %q, want sentinel for prerelease", got.LastError)
+	}
+	if got.LatestVersion != "" {
+		t.Errorf("LatestVersion = %q, want empty for prerelease", got.LatestVersion)
+	}
+}
+
 func TestUpdaterRunHonoursContextCancel(t *testing.T) {
 	srv, hits := fakeReleasesServer(t, 200, &Release{TagName: "v9.9.9"})
 	u := New(Options{
