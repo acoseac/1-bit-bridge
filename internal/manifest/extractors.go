@@ -594,23 +594,37 @@ func writeArtworkAtomicScan(path string, data []byte) error {
 	}
 	if err := renameWithRetry(tmpName, path); err != nil {
 		// Race / AV scan window may have produced a valid destination
-		// already. The destination filename embeds the SHA-256 of the
-		// bytes we wanted to write, so any file at that path with the
-		// expected length is byte-equivalent by construction. Size
-		// guard ties the success branch to the exact bytes we tried
-		// to land — a future code change putting different content at
-		// the same path won't silently mask a real failure.
-		if info, statErr := os.Stat(path); statErr == nil && info.Size() == int64(len(data)) {
-			tmpName = ""
+		// already. Verify byte-equivalence by reading the existing
+		// file and comparing — size alone isn't proof, and a stricter
+		// check costs one read of <= maxArtworkBytes on a rare-fallback
+		// path (CodeRabbit on PR #100). The scanner-side filename
+		// embeds the SHA-256 of the bytes we tried to write so size
+		// match + filename match would be sufficient evidence in
+		// practice, but the byte-comparison is symmetric with the
+		// enricher's mbid-keyed path (where the filename does NOT
+		// embed a content hash) and removes the need to reason about
+		// caller invariants.
+		//
+		// Don't clear tmpName here — the rename failed, so the tmp
+		// file is still on disk; the defer at line 570 must remove it
+		// (otherwise we leak a `.scan-NNN.jpg.tmp` per race/AV-window
+		// hit, accumulating over a long uptime).
+		if existing, readErr := os.ReadFile(path); readErr == nil && bytes.Equal(existing, data) {
 			return nil
 		}
 		return err
 	}
-	tmpName = ""
+	tmpName = "" // rename succeeded — suppress the deferred os.Remove
 	return nil
 }
 
-// renameWithRetry retries os.Rename a few times to absorb the
+// renameFunc is the rename implementation called by renameWithRetry.
+// Wrapped in a var so tests can inject a deterministic failure
+// without waiting out the full retry backoff budget. Production
+// code MUST NOT mutate this.
+var renameFunc = os.Rename
+
+// renameWithRetry retries renameFunc a few times to absorb the
 // transient "Access is denied" / sharing-violation that Windows
 // produces on the tmp-file-then-rename pattern: Defender / Search
 // Indexer scan-on-close briefly hold a handle on freshly-written
@@ -631,7 +645,7 @@ func renameWithRetry(src, dst string) error {
 		if d > 0 {
 			time.Sleep(d)
 		}
-		err = os.Rename(src, dst)
+		err = renameFunc(src, dst)
 		if err == nil {
 			return nil
 		}

@@ -1,6 +1,7 @@
 package enrich
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -684,20 +685,31 @@ func writeArtworkAtomic(path string, data []byte) error {
 	}
 	if err := renameWithRetry(tmpName, path); err != nil {
 		// Race / AV scan window may have produced a valid destination
-		// already. The destination filename embeds the SHA-256 of the
-		// bytes we wanted to write, so any file at that path with the
-		// expected length is byte-equivalent by construction. Size
-		// guard ties the success branch to the exact bytes we tried
-		// to land.
-		if info, statErr := os.Stat(path); statErr == nil && info.Size() == int64(len(data)) {
-			tmpName = ""
+		// already. Verify byte-equivalence by reading the existing
+		// file and comparing — size alone isn't proof here because
+		// the enricher's path is `<mbid>-<size>.jpg`; the filename
+		// doesn't embed a content hash, so a future MusicBrainz
+		// re-fetch with the same mbid but different bytes would
+		// match on size by coincidence (CodeRabbit on PR #100).
+		// Cost: one read of <= maxArtworkBytes on a rare-fallback
+		// path. Acceptable.
+		//
+		// Don't clear tmpName here — the rename failed, so the tmp
+		// file is still on disk; let the outer defer remove it.
+		if existing, readErr := os.ReadFile(path); readErr == nil && bytes.Equal(existing, data) {
 			return nil
 		}
 		return err
 	}
-	tmpName = ""
+	tmpName = "" // rename succeeded — suppress the deferred os.Remove
 	return nil
 }
+
+// renameFunc is the rename implementation called by renameWithRetry.
+// Wrapped in a var so tests can inject a deterministic failure
+// without waiting out the full retry backoff budget. Production
+// code MUST NOT mutate this. Mirror of the manifest-package var.
+var renameFunc = os.Rename
 
 // renameWithRetry mirrors the helper in internal/manifest/extractors.go.
 // Duplicated rather than imported to avoid pulling enrich → manifest
@@ -710,7 +722,7 @@ func renameWithRetry(src, dst string) error {
 		if d > 0 {
 			time.Sleep(d)
 		}
-		err = os.Rename(src, dst)
+		err = renameFunc(src, dst)
 		if err == nil {
 			return nil
 		}
