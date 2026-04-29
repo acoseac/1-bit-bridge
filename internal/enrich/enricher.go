@@ -1,6 +1,7 @@
 package enrich
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -682,11 +683,51 @@ func writeArtworkAtomic(path string, data []byte) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmpName, path); err != nil {
+	if err := renameWithRetry(tmpName, path); err != nil {
+		// Race / AV scan window may have produced a valid destination
+		// already. Verify byte-equivalence by reading the existing
+		// file and comparing — size alone isn't proof here because
+		// the enricher's path is `<mbid>-<size>.jpg`; the filename
+		// doesn't embed a content hash, so a future MusicBrainz
+		// re-fetch with the same mbid but different bytes would
+		// match on size by coincidence (CodeRabbit on PR #100).
+		// Cost: one read of <= maxArtworkBytes on a rare-fallback
+		// path. Acceptable.
+		//
+		// Don't clear tmpName here — the rename failed, so the tmp
+		// file is still on disk; let the outer defer remove it.
+		if existing, readErr := os.ReadFile(path); readErr == nil && bytes.Equal(existing, data) {
+			return nil
+		}
 		return err
 	}
-	tmpName = ""
+	tmpName = "" // rename succeeded — suppress the deferred os.Remove
 	return nil
+}
+
+// renameFunc is the rename implementation called by renameWithRetry.
+// Wrapped in a var so tests can inject a deterministic failure
+// without waiting out the full retry backoff budget. Production
+// code MUST NOT mutate this. Mirror of the manifest-package var.
+var renameFunc = os.Rename
+
+// renameWithRetry mirrors the helper in internal/manifest/extractors.go.
+// Duplicated rather than imported to avoid pulling enrich → manifest
+// for a 20-line helper; matches the same convention writeArtworkAtomic
+// uses against its scanner-side twin.
+func renameWithRetry(src, dst string) error {
+	backoffs := []time.Duration{0, 50 * time.Millisecond, 100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond}
+	var err error
+	for _, d := range backoffs {
+		if d > 0 {
+			time.Sleep(d)
+		}
+		err = renameFunc(src, dst)
+		if err == nil {
+			return nil
+		}
+	}
+	return err
 }
 
 func cacheKey(artist, album string) string { return artist + "\x00" + album }

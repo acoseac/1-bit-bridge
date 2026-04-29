@@ -530,6 +530,93 @@ func TestExtractLocalArtwork_StatBeforeWriteIdempotent(t *testing.T) {
 	}
 }
 
+func TestWriteArtworkAtomicScan_RaceWinnerCleansTmp(t *testing.T) {
+	// Regression for the stat-and-accept fallback's tmp-leak bug
+	// (gemini-code-assist on PR #100): when renameWithRetry exhausts
+	// its budget but a concurrent writer / prior pass has already
+	// published a byte-equivalent destination, writeArtworkAtomicScan
+	// returns nil — but the source tmp file is still on disk and the
+	// deferred os.Remove(tmpName) MUST run. Pre-fix, an early
+	// `tmpName = ""` in the fallback branch suppressed the cleanup
+	// and leaked one `.scan-NNN.jpg.tmp` per race-window hit, which
+	// over a long uptime would accumulate to the point of disk
+	// pressure on the cache partition.
+	cacheDir := t.TempDir()
+	data := []byte("payload-bytes-for-race-winner-test")
+	sum := sha256.Sum256(data)
+	mbid := "local-" + hex.EncodeToString(sum[:])
+	dst := filepath.Join(cacheDir, mbid+"-500.jpg")
+
+	// Pre-stage destination as if a parallel writer (or prior pass)
+	// has already published the file with byte-equivalent content.
+	if err := os.WriteFile(dst, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Inject rename failure so the stat-and-accept branch fires
+	// without burning the full ~750 ms retry backoff budget.
+	orig := renameFunc
+	renameFunc = func(src, dst string) error { return os.ErrPermission }
+	t.Cleanup(func() { renameFunc = orig })
+
+	if err := writeArtworkAtomicScan(dst, data); err != nil {
+		t.Fatalf("writeArtworkAtomicScan: %v (expected nil — race winner with matching size)", err)
+	}
+
+	// Pre-staged destination must be intact (not clobbered).
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Errorf("destination clobbered after stat-and-accept: got %q want %q", got, data)
+	}
+
+	// And no `.scan-NNN.jpg.tmp` leftover from the failed rename.
+	entries, _ := os.ReadDir(cacheDir)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".scan-") {
+			t.Errorf("leaked tmp file (deferred cleanup did not run): %s", e.Name())
+		}
+	}
+}
+
+func TestWriteArtworkAtomicScan_RaceLoserDoesNotAcceptOnSizeCollision(t *testing.T) {
+	// Same-size-different-content negative case (CodeRabbit on
+	// PR #100): if the existing destination matches `len(data)` but
+	// the bytes differ, the stat-and-accept fallback MUST NOT
+	// silently swallow the rename failure. Reproducer is contrived
+	// (in production the filename embeds the SHA-256 of `data` so
+	// any concurrent winner with the same destination is byte-equivalent
+	// by construction), but the test pins the byte-equivalence
+	// contract so a future caller that doesn't honour the hash-in-
+	// filename convention can't regress this silently.
+	cacheDir := t.TempDir()
+	want := []byte("expected-bytes-the-caller-tried-to-write")
+	collision := make([]byte, len(want))
+	copy(collision, want)
+	collision[0] ^= 0xFF // same length, different content
+	dst := filepath.Join(cacheDir, "local-decoy-500.jpg")
+	if err := os.WriteFile(dst, collision, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := renameFunc
+	renameFunc = func(src, dst string) error { return os.ErrPermission }
+	t.Cleanup(func() { renameFunc = orig })
+
+	if err := writeArtworkAtomicScan(dst, want); err == nil {
+		t.Fatal("writeArtworkAtomicScan returned nil; expected the rename error to propagate when destination is size-equal but byte-different")
+	}
+	// Tmp file from this run must still be cleaned up by the defer.
+	entries, _ := os.ReadDir(cacheDir)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".scan-") {
+			t.Errorf("leaked tmp on size-collision path: %s", e.Name())
+		}
+	}
+}
+
 func TestExtractLocalArtwork_FolderMissingNoEffect(t *testing.T) {
 	// Empty directory + audio with no embedded art → ArtworkMBID
 	// stays empty, no spurious cache writes, no error.

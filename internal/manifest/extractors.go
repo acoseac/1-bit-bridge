@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	flac "github.com/mewkiz/flac"
 
@@ -19,13 +20,18 @@ import (
 )
 
 // maxArtworkBytes caps the per-image bytes the local-artwork extractor
-// will hash + cache. Embedded ID3 APIC pictures larger than ~5 MB are
-// nearly always misuse (lossless TIFFs in tags); 10 MB is a generous
-// upper bound that protects RAM under the parallel-worker model
-// (`runtime.NumCPU()` workers each hold at most one buffer this size).
-// Overrun is logged + skipped; the track still gets indexed without an
-// ArtworkMBID (the enricher's MusicBrainz path remains as fallback).
-const maxArtworkBytes = 10 * 1024 * 1024 // 10 MiB
+// will hash + cache. Modern audiophile rips routinely embed 10–20 MiB
+// digital-booklet scans (the previous 10 MiB cap silently rejected
+// near-boundary cases by ~30 KiB and lost the entire album's
+// `ArtworkMBID` to the enricher's MusicBrainz fallback). 25 MiB
+// accommodates ~99% of those cases while still rejecting genuine
+// misuse like lossless TIFFs in tags or a misnamed 4K wallpaper saved
+// as `cover.jpg`. RAM headroom under the parallel-worker model
+// (`runtime.NumCPU()` workers each hold at most one buffer this size):
+// 8–16 cores × 25 MiB ≈ 200–400 MiB peak — comfortable on any machine
+// running the bridge (PC/Mac, not iOS). Overrun is logged + skipped;
+// the track still gets indexed without an ArtworkMBID.
+const maxArtworkBytes = 25 * 1024 * 1024 // 25 MiB
 
 // ExtractContext carries the side channels Extract needs to perform
 // local-artwork extraction (write cached JPEGs, dedupe per-directory
@@ -586,11 +592,65 @@ func writeArtworkAtomicScan(path string, data []byte) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmpName, path); err != nil {
+	if err := renameWithRetry(tmpName, path); err != nil {
+		// Race / AV scan window may have produced a valid destination
+		// already. Verify byte-equivalence by reading the existing
+		// file and comparing — size alone isn't proof, and a stricter
+		// check costs one read of <= maxArtworkBytes on a rare-fallback
+		// path (CodeRabbit on PR #100). The scanner-side filename
+		// embeds the SHA-256 of the bytes we tried to write so size
+		// match + filename match would be sufficient evidence in
+		// practice, but the byte-comparison is symmetric with the
+		// enricher's mbid-keyed path (where the filename does NOT
+		// embed a content hash) and removes the need to reason about
+		// caller invariants.
+		//
+		// Don't clear tmpName here — the rename failed, so the tmp
+		// file is still on disk; the defer at line 570 must remove it
+		// (otherwise we leak a `.scan-NNN.jpg.tmp` per race/AV-window
+		// hit, accumulating over a long uptime).
+		if existing, readErr := os.ReadFile(path); readErr == nil && bytes.Equal(existing, data) {
+			return nil
+		}
 		return err
 	}
-	tmpName = ""
+	tmpName = "" // rename succeeded — suppress the deferred os.Remove
 	return nil
+}
+
+// renameFunc is the rename implementation called by renameWithRetry.
+// Wrapped in a var so tests can inject a deterministic failure
+// without waiting out the full retry backoff budget. Production
+// code MUST NOT mutate this.
+var renameFunc = os.Rename
+
+// renameWithRetry retries renameFunc a few times to absorb the
+// transient "Access is denied" / sharing-violation that Windows
+// produces on the tmp-file-then-rename pattern: Defender / Search
+// Indexer scan-on-close briefly hold a handle on freshly-written
+// files, and concurrent scanner workers writing the same content
+// hash race on the same destination. Caller is responsible for
+// post-failure semantics (see writeArtworkAtomicScan's stat-and-
+// accept). On Unix the first attempt always succeeds, so the loop
+// is a no-op on non-Windows platforms — keeping a single code path
+// is simpler than a `_windows.go` build-tagged helper.
+//
+// Backoff schedule sums to 750 ms; that's the time budget a non-
+// transient permission error on the parent directory will burn
+// before failing — acceptable for a per-album-once code path.
+func renameWithRetry(src, dst string) error {
+	backoffs := []time.Duration{0, 50 * time.Millisecond, 100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond}
+	var err error
+	for _, d := range backoffs {
+		if d > 0 {
+			time.Sleep(d)
+		}
+		err = renameFunc(src, dst)
+		if err == nil {
+			return nil
+		}
+	}
+	return err
 }
 
 func le32(b []byte) uint32 {
