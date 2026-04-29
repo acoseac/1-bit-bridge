@@ -161,14 +161,18 @@ func TestEndpointsHandler(t *testing.T) {
 	// Empty is acceptable on a runner with no advertisable
 	// interfaces (rare CI sandboxes); we don't gate on length.
 	validClasses := map[string]bool{
-		"LAN": true, "mDNS": true, "Tailscale": true, "Public": true,
+		"LAN":           true,
+		"mDNS":          true,
+		"Tailscale DNS": true, // ClassTailscaleDNS — magic-DNS, ATS-compatible
+		"Tailscale":     true, // CGNAT IP-based
+		"Public":        true,
 	}
 	for i, e := range entries {
 		if !strings.HasPrefix(e["url"], "https://") {
 			t.Errorf("entry[%d].url = %q, want https:// prefix", i, e["url"])
 		}
 		if !validClasses[e["class"]] {
-			t.Errorf("entry[%d].class = %q, want one of LAN/mDNS/Tailscale/Public", i, e["class"])
+			t.Errorf("entry[%d].class = %q, want one of LAN/mDNS/Tailscale DNS/Tailscale/Public", i, e["class"])
 		}
 	}
 }
