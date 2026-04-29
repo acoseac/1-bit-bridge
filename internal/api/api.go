@@ -292,7 +292,10 @@ func (s *Server) reachableEndpoints() []string {
 	if err != nil || port <= 0 {
 		return nil
 	}
-	return advertise.URLs(advertise.Params{Port: port})
+	return advertise.URLs(advertise.Params{
+		Port:            port,
+		CustomEndpoints: s.cfg.CustomEndpoints,
+	})
 }
 
 // manifestHandler serves GET /v1/manifest?since=<rfc3339> with the current

@@ -67,6 +67,13 @@ const (
 	// Tailscale — an actual routable IP. Rare on a home machine; we
 	// include it for completeness.
 	ClassPublic
+	// ClassCustom is an operator-supplied URL from cfg.CustomEndpoints
+	// — reverse proxies, port-forwarded WAN URLs, or non-default
+	// Tailscale MagicDNS names that the auto-detector didn't pick up.
+	// Ranked LAST so the auto-discovered classes (which are usually
+	// faster and don't depend on operator config staying in sync with
+	// reality) get tried first; custom URLs are fallbacks.
+	ClassCustom
 )
 
 // String returns a stable user-facing label for the class. Used by
@@ -90,18 +97,22 @@ func (c Class) String() string {
 		return "Tailscale"
 	case ClassPublic:
 		return "Public"
+	case ClassCustom:
+		return "Custom"
 	default:
 		return "Unknown"
 	}
 }
 
-// Params bundles the two inputs we need: the port the bridge is
-// listening on (from cfg.ListenAddress) and a hostname override
-// (optional, falls back to os.Hostname). Tests pass these explicitly
-// so the function is pure.
+// Params bundles the inputs the advertiser needs: the port the bridge
+// is listening on (from cfg.ListenAddress), an optional hostname
+// override (falls back to os.Hostname when ""), and the optional
+// operator-configured CustomEndpoints list (each element is a complete
+// URL string). Tests pass all three explicitly so the function is pure.
 type Params struct {
-	Port         int
-	HostOverride string // pass "" to use os.Hostname()
+	Port            int
+	HostOverride    string   // pass "" to use os.Hostname()
+	CustomEndpoints []string // pass nil/empty to skip
 }
 
 // Endpoints returns every reachable `https://<host>:<port>` URL for
@@ -192,6 +203,23 @@ func Endpoints(p Params) []Endpoint {
 		out = append(out, Endpoint{
 			URL:   fmt.Sprintf("https://%s:%d", magic, port),
 			Class: ClassTailscaleDNS,
+		})
+	}
+
+	// Custom operator-supplied endpoints — already validated by
+	// cfg.Validate (HTTPS-only, parseable). We append in input order;
+	// the dedupe pass below keeps the first occurrence so a custom
+	// URL that happens to match an auto-discovered one (rare) keeps
+	// the auto-class label. Custom URLs are last in the Class
+	// ranking — they're fallbacks, not primaries.
+	for _, raw := range p.CustomEndpoints {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		out = append(out, Endpoint{
+			URL:   raw,
+			Class: ClassCustom,
 		})
 	}
 

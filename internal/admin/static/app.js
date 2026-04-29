@@ -643,6 +643,12 @@ function initSettings() {
       updateAutoInstall: fd.get("updateAutoInstall") === "on",
       updateQuietHours: fd.get("updateQuietHours") || "",
       updateCheckIntervalHours: parseInt(fd.get("updateCheckIntervalHours") || "0", 10),
+      // Custom endpoints come in as a single textarea string ("URL\n
+      // URL\n…"). Send the textarea form — the server splits on
+      // newlines or commas and validates each entry. Sending the
+      // explicit string (not the parsed array) lets the server be
+      // the single source of truth on splitting/validation.
+      customEndpointsText: fd.get("customEndpoints") || "",
     };
     try {
       const r = await API.patch("/api/settings", body);

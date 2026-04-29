@@ -1,6 +1,7 @@
 package advertise
 
 import (
+	"errors"
 	"net"
 	"strings"
 	"testing"
@@ -166,12 +167,14 @@ func TestClassifyPublicForRoutableV4(t *testing.T) {
 // paired with iOS PR #150.)
 func TestClassStringStableLabels(t *testing.T) {
 	cases := map[Class]string{
-		ClassLANv4:       "LAN",
-		ClassLANv6:       "LAN",
-		ClassMDNSHost:    "mDNS",
-		ClassTailscaleV4: "Tailscale",
-		ClassTailscaleV6: "Tailscale",
-		ClassPublic:      "Public",
+		ClassLANv4:        "LAN",
+		ClassLANv6:        "LAN",
+		ClassMDNSHost:     "mDNS",
+		ClassTailscaleDNS: "Tailscale DNS",
+		ClassTailscaleV4:  "Tailscale",
+		ClassTailscaleV6:  "Tailscale",
+		ClassPublic:       "Public",
+		ClassCustom:       "Custom",
 	}
 	for c, want := range cases {
 		if got := c.String(); got != want {
@@ -297,5 +300,79 @@ func TestIPHostForURLBracketsV6(t *testing.T) {
 	}
 	if got := ipHostForURL(net.ParseIP("192.168.1.5")); got != "192.168.1.5" {
 		t.Errorf("v4 should be bare, got %q", got)
+	}
+}
+
+// TestEndpoints_AppendsCustom pins that operator-supplied URLs from
+// cfg.CustomEndpoints land in the advertised list with ClassCustom,
+// AFTER the auto-discovered classes (LAN, mDNS, Tailscale*, Public).
+func TestEndpoints_AppendsCustom(t *testing.T) {
+	withStubTailscaleStatus(t, tailscaleStatus{}, errors.New("no tailscale"))
+	eps := Endpoints(Params{
+		Port:         7788,
+		HostOverride: "test",
+		CustomEndpoints: []string{
+			"https://reverse-proxy.example.com:443",
+			"https://192.168.50.100:7788",
+		},
+	})
+
+	custom := make([]Endpoint, 0)
+	for _, e := range eps {
+		if e.Class == ClassCustom {
+			custom = append(custom, e)
+		}
+	}
+	if len(custom) != 2 {
+		t.Fatalf("want 2 ClassCustom entries, got %d: %v", len(custom), custom)
+	}
+	// Stable sort by Class means custom rows trail every auto-discovered
+	// class. Find the highest-index non-custom entry; assert all custom
+	// rows are after it.
+	lastNonCustom := -1
+	firstCustom := -1
+	for i, e := range eps {
+		if e.Class == ClassCustom && firstCustom == -1 {
+			firstCustom = i
+		}
+		if e.Class != ClassCustom {
+			lastNonCustom = i
+		}
+	}
+	if firstCustom != -1 && lastNonCustom != -1 && firstCustom < lastNonCustom {
+		t.Errorf("custom entries should come AFTER auto-discovered ones; firstCustom=%d, lastNonCustom=%d, eps=%v",
+			firstCustom, lastNonCustom, eps)
+	}
+
+	// Class.String() returns "Custom" for the new bucket.
+	if got := ClassCustom.String(); got != "Custom" {
+		t.Errorf("ClassCustom.String() = %q, want %q", got, "Custom")
+	}
+}
+
+// TestEndpoints_CustomDeduplicatesAgainstAuto verifies that a custom
+// entry duplicating an auto-discovered URL is silently squashed (the
+// dedupe pass keeps the first occurrence, which is the auto entry —
+// preserves the LAN/mDNS class label rather than re-classifying as
+// Custom).
+func TestEndpoints_CustomDeduplicatesAgainstAuto(t *testing.T) {
+	withStubTailscaleStatus(t, tailscaleStatus{}, errors.New("none"))
+	hostMagic := "https://test.local:7788"
+	eps := Endpoints(Params{
+		Port:            7788,
+		HostOverride:    "test",
+		CustomEndpoints: []string{hostMagic}, // dups the mDNS entry
+	})
+	count := 0
+	for _, e := range eps {
+		if e.URL == hostMagic {
+			count++
+			if e.Class != ClassMDNSHost {
+				t.Errorf("dedupe should keep first (mDNS) class, got %v", e.Class)
+			}
+		}
+	}
+	if count != 1 {
+		t.Errorf("URL %q deduped count = %d, want 1", hostMagic, count)
 	}
 }
