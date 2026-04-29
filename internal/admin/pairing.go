@@ -88,17 +88,18 @@ func pairAlternates(primary, listenAddress string) []string {
 
 // ensurePrimaryFirst is the response-boundary defence-in-depth that
 // guarantees the JSON contract `pairResult.alternates[0] ==
-// pairResult.url`. `pairAlternates` already prepends the primary
-// today, but a future refactor that breaks the head-position
-// invariant would silently regress older iOS clients that read just
-// `alternates[0]` (CodeRabbit on PR #101). Cheap to apply at every
-// emission site; expensive to debug if it ever drifts. Do not inline
-// at consumers — keep the single helper so the contract has one
-// definition.
+// pairResult.url` AND that `primary` appears exactly once. The helper
+// always rebuilds the slice — pre-fix an early-return on
+// `alternates[0] == primary` let `[primary, other, primary]` pass
+// through with the duplicate intact (CodeRabbit on PR #101 round 2).
+// Non-primary duplicates are NOT deduped here; that would expand the
+// helper's responsibility past the head-position contract and into
+// territory `pairAlternates` itself owns.
+//
+// Cheap to apply at every emission site; expensive to debug if the
+// invariant ever drifts. Do not inline at consumers — keep the single
+// helper so the contract has one definition.
 func ensurePrimaryFirst(primary string, alternates []string) []string {
-	if len(alternates) > 0 && alternates[0] == primary {
-		return alternates
-	}
 	out := make([]string, 0, len(alternates)+1)
 	out = append(out, primary)
 	for _, u := range alternates {

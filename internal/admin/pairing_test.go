@@ -94,6 +94,34 @@ func TestEnsurePrimaryFirstHappyPathPassthrough(t *testing.T) {
 	}
 }
 
+func TestEnsurePrimaryFirstDedupsPrimaryEvenWhenAlreadyAtHead(t *testing.T) {
+	// CodeRabbit round 2 on PR #101: a duplicate primary anywhere in
+	// the input must collapse to a single primary at the head. The
+	// pre-fix early-return on `alternates[0] == primary` let the
+	// duplicate slip through unchanged.
+	primary := "https://primary:7788"
+	in := []string{primary, "https://b:7788", primary}
+	got := ensurePrimaryFirst(primary, in)
+	want := []string{primary, "https://b:7788"}
+	if len(got) != len(want) {
+		t.Fatalf("len = %d, want %d (got=%v)", len(got), len(want), got)
+	}
+	for i, u := range want {
+		if got[i] != u {
+			t.Errorf("got[%d] = %q, want %q (full got=%v)", i, got[i], u, got)
+		}
+	}
+	count := 0
+	for _, u := range got {
+		if u == primary {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("primary appeared %d times after dedup; want exactly once (got=%v)", count, got)
+	}
+}
+
 func TestEnsurePrimaryFirstReordersWhenPrimaryNotHead(t *testing.T) {
 	// CodeRabbit defence-in-depth: if a future helper change ever
 	// returns the primary in a non-head position, the response-
