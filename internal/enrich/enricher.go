@@ -682,11 +682,40 @@ func writeArtworkAtomic(path string, data []byte) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmpName, path); err != nil {
+	if err := renameWithRetry(tmpName, path); err != nil {
+		// Race / AV scan window may have produced a valid destination
+		// already. The destination filename embeds the SHA-256 of the
+		// bytes we wanted to write, so any file at that path with the
+		// expected length is byte-equivalent by construction. Size
+		// guard ties the success branch to the exact bytes we tried
+		// to land.
+		if info, statErr := os.Stat(path); statErr == nil && info.Size() == int64(len(data)) {
+			tmpName = ""
+			return nil
+		}
 		return err
 	}
 	tmpName = ""
 	return nil
+}
+
+// renameWithRetry mirrors the helper in internal/manifest/extractors.go.
+// Duplicated rather than imported to avoid pulling enrich → manifest
+// for a 20-line helper; matches the same convention writeArtworkAtomic
+// uses against its scanner-side twin.
+func renameWithRetry(src, dst string) error {
+	backoffs := []time.Duration{0, 50 * time.Millisecond, 100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond}
+	var err error
+	for _, d := range backoffs {
+		if d > 0 {
+			time.Sleep(d)
+		}
+		err = os.Rename(src, dst)
+		if err == nil {
+			return nil
+		}
+	}
+	return err
 }
 
 func cacheKey(artist, album string) string { return artist + "\x00" + album }

@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	flac "github.com/mewkiz/flac"
 
@@ -19,13 +20,18 @@ import (
 )
 
 // maxArtworkBytes caps the per-image bytes the local-artwork extractor
-// will hash + cache. Embedded ID3 APIC pictures larger than ~5 MB are
-// nearly always misuse (lossless TIFFs in tags); 10 MB is a generous
-// upper bound that protects RAM under the parallel-worker model
-// (`runtime.NumCPU()` workers each hold at most one buffer this size).
-// Overrun is logged + skipped; the track still gets indexed without an
-// ArtworkMBID (the enricher's MusicBrainz path remains as fallback).
-const maxArtworkBytes = 10 * 1024 * 1024 // 10 MiB
+// will hash + cache. Modern audiophile rips routinely embed 10–20 MiB
+// digital-booklet scans (the previous 10 MiB cap silently rejected
+// near-boundary cases by ~30 KiB and lost the entire album's
+// `ArtworkMBID` to the enricher's MusicBrainz fallback). 25 MiB
+// accommodates ~99% of those cases while still rejecting genuine
+// misuse like lossless TIFFs in tags or a misnamed 4K wallpaper saved
+// as `cover.jpg`. RAM headroom under the parallel-worker model
+// (`runtime.NumCPU()` workers each hold at most one buffer this size):
+// 8–16 cores × 25 MiB ≈ 200–400 MiB peak — comfortable on any machine
+// running the bridge (PC/Mac, not iOS). Overrun is logged + skipped;
+// the track still gets indexed without an ArtworkMBID.
+const maxArtworkBytes = 25 * 1024 * 1024 // 25 MiB
 
 // ExtractContext carries the side channels Extract needs to perform
 // local-artwork extraction (write cached JPEGs, dedupe per-directory
@@ -586,11 +592,51 @@ func writeArtworkAtomicScan(path string, data []byte) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmpName, path); err != nil {
+	if err := renameWithRetry(tmpName, path); err != nil {
+		// Race / AV scan window may have produced a valid destination
+		// already. The destination filename embeds the SHA-256 of the
+		// bytes we wanted to write, so any file at that path with the
+		// expected length is byte-equivalent by construction. Size
+		// guard ties the success branch to the exact bytes we tried
+		// to land — a future code change putting different content at
+		// the same path won't silently mask a real failure.
+		if info, statErr := os.Stat(path); statErr == nil && info.Size() == int64(len(data)) {
+			tmpName = ""
+			return nil
+		}
 		return err
 	}
 	tmpName = ""
 	return nil
+}
+
+// renameWithRetry retries os.Rename a few times to absorb the
+// transient "Access is denied" / sharing-violation that Windows
+// produces on the tmp-file-then-rename pattern: Defender / Search
+// Indexer scan-on-close briefly hold a handle on freshly-written
+// files, and concurrent scanner workers writing the same content
+// hash race on the same destination. Caller is responsible for
+// post-failure semantics (see writeArtworkAtomicScan's stat-and-
+// accept). On Unix the first attempt always succeeds, so the loop
+// is a no-op on non-Windows platforms — keeping a single code path
+// is simpler than a `_windows.go` build-tagged helper.
+//
+// Backoff schedule sums to 750 ms; that's the time budget a non-
+// transient permission error on the parent directory will burn
+// before failing — acceptable for a per-album-once code path.
+func renameWithRetry(src, dst string) error {
+	backoffs := []time.Duration{0, 50 * time.Millisecond, 100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond}
+	var err error
+	for _, d := range backoffs {
+		if d > 0 {
+			time.Sleep(d)
+		}
+		err = os.Rename(src, dst)
+		if err == nil {
+			return nil
+		}
+	}
+	return err
 }
 
 func le32(b []byte) uint32 {
