@@ -395,10 +395,24 @@ func (s *Scanner) needsLocalArtworkRecovery(t *Track) bool {
 		return false
 	}
 	cachePath := filepath.Join(s.artDir, t.ArtworkMBID+"-500.jpg")
-	if _, err := os.Stat(cachePath); err == nil {
+	_, err := os.Stat(cachePath)
+	if err == nil {
 		return false
 	}
-	return true
+	if os.IsNotExist(err) {
+		return true
+	}
+	// Transient I/O error (NAS drop, permission flap, antivirus
+	// lock). Recovery would force an audio-file reopen + tag re-
+	// parse for every affected track on every flaky scan — much
+	// worse than the alternative of leaving the existing local-
+	// MBID in place until the underlying I/O issue resolves.
+	// Pre-fix this branch fell through to `return true` and wasted
+	// scan time on every NAS hiccup; CodeRabbit Major review on
+	// the PR #98 fix-up commit caught it.
+	scanLogger.Warn("local-art recovery probe failed",
+		"path", cachePath, "err", err)
+	return false
 }
 
 // runScanWriter is the single writer goroutine that consumes Tracks

@@ -75,11 +75,17 @@ func Extract(absPath string, t *Track) error {
 // ExtractWithContext is the context-aware variant of Extract. When ec
 // is non-nil and ec.ArtworkCacheDir is non-empty, after tag extraction
 // the local-artwork pipeline runs: an embedded ID3 APIC picture (or a
-// directory-level cover.jpg / folder.jpg / cover.png / folder.png) is
-// hashed (SHA-256), atomic-written to
-// <ec.ArtworkCacheDir>/local-<hash>-500.jpg, and t.ArtworkMBID is
-// stamped with `local-<hash>`. The /v1/artwork handler serves the file
-// transparently via its relaxed MBID regex.
+// directory-level cover.jpg / folder.jpg) is hashed (SHA-256), atomic-
+// written to <ec.ArtworkCacheDir>/local-<hash>-500.jpg, and
+// t.ArtworkMBID is stamped with `local-<hash>`. The /v1/artwork
+// handler serves the file transparently via its relaxed MBID regex.
+//
+// JPEG-only by design. Embedded APIC frames must declare
+// `image/jpeg` MIME (or the `image/jpg` variant) AND start with the
+// JPEG SOI marker; folder-level fallback only matches `cover.jpg`
+// and `folder.jpg` (case-insensitive). PNG support would require
+// path-scheme + Content-Type changes done together; that's a follow-
+// up, not V1 scope. See folderArtCandidates and looksLikeJPEG.
 func ExtractWithContext(absPath string, t *Track, ec *ExtractContext) error {
 	ext := strings.ToLower(filepath.Ext(absPath))
 	switch ext {
@@ -345,8 +351,8 @@ func extractDSFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 
 // extractLocalArtwork stamps t.ArtworkMBID with `local-<sha256>` when
 // embedded artwork (preferred) or folder-level art (cover.jpg /
-// folder.jpg / cover.png / folder.png, case-insensitive) is found.
-// Caller must guarantee ec != nil and ec.ArtworkCacheDir != "".
+// folder.jpg, case-insensitive — JPEG-only) is found. Caller must
+// guarantee ec != nil and ec.ArtworkCacheDir != "".
 //
 // The embedded branch wins on a per-track basis — two tracks in the
 // same album with different embedded APIC images each get their own

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -784,8 +785,12 @@ func TestEnricherSkipsNetworkCallIfCoverAlreadyCached(t *testing.T) {
 func TestEnricherSkipsArtworkFetchForLocalMBID(t *testing.T) {
 	const localMBID = "local-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
-	var caaCalls int
-	var itunesCalls int
+	// Counters live across goroutines (HTTP handler vs. main test) —
+	// atomic.Int32 keeps `go test -race` clean. Pre-fix the int
+	// variant tripped the race detector on the read path even when
+	// no writes happened (CodeRabbit Minor on c506922).
+	var caaCalls atomic.Int32
+	var itunesCalls atomic.Int32
 	mbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Return an MB hit so albumMBID resolution succeeds — the
 		// bailout we added to enrichOne handles albumMBID == "" with a
@@ -795,12 +800,12 @@ func TestEnricherSkipsArtworkFetchForLocalMBID(t *testing.T) {
 	}))
 	defer mbSrv.Close()
 	caaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		caaCalls++
+		caaCalls.Add(1)
 		w.Write([]byte{0xFF, 0xD8, 0xFF})
 	}))
 	defer caaSrv.Close()
 	itunesSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		itunesCalls++
+		itunesCalls.Add(1)
 		// Reply with an empty hit set — the assertion is purely on
 		// the call-count, but a sane response keeps logs quiet.
 		io.WriteString(w, `{"resultCount":0,"results":[]}`)
@@ -853,11 +858,11 @@ func TestEnricherSkipsArtworkFetchForLocalMBID(t *testing.T) {
 	if e.Done() == 0 {
 		t.Fatal("track never enriched (the bypass should still mark it done)")
 	}
-	if caaCalls != 0 {
-		t.Errorf("CAA called %d times for local-prefix track; want 0", caaCalls)
+	if got := caaCalls.Load(); got != 0 {
+		t.Errorf("CAA called %d times for local-prefix track; want 0", got)
 	}
-	if itunesCalls != 0 {
-		t.Errorf("iTunes called %d times for local-prefix track; want 0", itunesCalls)
+	if got := itunesCalls.Load(); got != 0 {
+		t.Errorf("iTunes called %d times for local-prefix track; want 0", got)
 	}
 
 	// Round-trip the track from storage to confirm ArtworkMBID
@@ -886,14 +891,16 @@ func TestEnricherSkipsArtworkFetchForLocalMBID(t *testing.T) {
 func TestEnricherFallthroughForLocalPrefixWithoutMBMatch(t *testing.T) {
 	const localMBID = "local-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
-	var caaCalls int
+	// atomic.Int32 — see sibling TestEnricherSkipsArtworkFetchForLocalMBID
+	// for the race-detector rationale.
+	var caaCalls atomic.Int32
 	mbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Empty MB result — this is the obscure-album case.
 		io.WriteString(w, `{"releases":[]}`)
 	}))
 	defer mbSrv.Close()
 	caaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		caaCalls++
+		caaCalls.Add(1)
 		w.WriteHeader(404)
 	}))
 	defer caaSrv.Close()
@@ -931,8 +938,8 @@ func TestEnricherFallthroughForLocalPrefixWithoutMBMatch(t *testing.T) {
 	if e.Done() == 0 {
 		t.Fatal("local-prefix track without MB match was never enriched (bailout regression)")
 	}
-	if caaCalls != 0 {
-		t.Errorf("CAA called %d times despite albumMBID==\"\" + local prefix; want 0", caaCalls)
+	if got := caaCalls.Load(); got != 0 {
+		t.Errorf("CAA called %d times despite albumMBID==\"\" + local prefix; want 0", got)
 	}
 	got, _ := store.GetTrack("y.flac")
 	if got == nil || got.ArtworkMBID != localMBID {
