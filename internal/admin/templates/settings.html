@@ -47,6 +47,22 @@
       <small class="hint">Set at <code>bridge init</code> time; not editable here.</small>
     </div>
 
+    <div class="field">
+      <label>Custom endpoints
+        <textarea name="customEndpoints" rows="3"
+                  placeholder="https://bridge.example.com:7788">{{.Data.CustomEndpointsText}}</textarea>
+      </label>
+      <small class="hint">
+        One <code>https://</code> URL per line. Use this for reverse proxies,
+        port-forwarded WAN URLs, or Tailscale MagicDNS names the auto-detector
+        didn&rsquo;t pick up. Each line must be a complete URL including port.
+        Non-HTTPS or malformed entries are silently dropped on save.
+        <strong>For iOS clients to actually reach a custom URL, the TLS
+        certificate&rsquo;s SAN list must cover the URL&rsquo;s hostname or IP</strong>
+        — change the list, then rotate the cert and re-pair iOS devices.
+      </small>
+    </div>
+
     <h2>Updates</h2>
     <p class="lede">
       The bridge polls the GitHub Releases API for new versions. Operator-triggered

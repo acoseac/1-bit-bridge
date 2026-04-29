@@ -4,6 +4,7 @@ import (
 	"html/template"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/version"
@@ -119,13 +120,15 @@ func (s *Server) pageDevices(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) pageSettings(w http.ResponseWriter, r *http.Request) {
 	data := settingsResponse{
-		LibraryName:     s.deps.Cfg.LibraryName,
-		ListenAddress:   s.deps.Cfg.ListenAddress,
-		AdminAddress:    s.deps.Cfg.AdminAddress,
-		DataDir:         s.deps.Cfg.DataDir,
-		ScanIntervalSec: s.deps.Cfg.ScanIntervalSec,
-		TLSCertPath:     s.deps.Cfg.TLSCertPath,
-		TLSKeyPath:      s.deps.Cfg.TLSKeyPath,
+		LibraryName:         s.deps.Cfg.LibraryName,
+		ListenAddress:       s.deps.Cfg.ListenAddress,
+		AdminAddress:        s.deps.Cfg.AdminAddress,
+		DataDir:             s.deps.Cfg.DataDir,
+		ScanIntervalSec:     s.deps.Cfg.ScanIntervalSec,
+		TLSCertPath:         s.deps.Cfg.TLSCertPath,
+		TLSKeyPath:          s.deps.Cfg.TLSKeyPath,
+		CustomEndpoints:     s.deps.Cfg.CustomEndpoints,
+		CustomEndpointsText: strings.Join(s.deps.Cfg.CustomEndpoints, "\n"),
 	}
 	s.renderPage(w, "settings", data)
 }

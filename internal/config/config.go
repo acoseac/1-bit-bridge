@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -17,18 +18,42 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/acoseac/1-bit-bridge/internal/logging"
 )
+
+// validateLogger surfaces non-fatal config-validation warnings to the
+// operator. Used today by `Validate()` to emit one entry per dropped
+// CustomEndpoints item so silent prune-and-warn is observable.
+var validateLogger = logging.Component("config")
 
 // Config mirrors the on-disk bridge.yaml shape. See config/bridge.yaml.example.
 type Config struct {
-	LibraryRoots    []string           `yaml:"libraryRoots"`
-	ListenAddress   string             `yaml:"listenAddress"`
-	AdminAddress    string             `yaml:"adminAddress,omitempty"`
-	DataDir         string             `yaml:"dataDir"`
-	TLSCertPath     string             `yaml:"tlsCertPath,omitempty"`
-	TLSKeyPath      string             `yaml:"tlsKeyPath,omitempty"`
-	ScanIntervalSec int                `yaml:"scanIntervalSec"`
-	LibraryName     string             `yaml:"libraryName"`
+	LibraryRoots    []string `yaml:"libraryRoots"`
+	ListenAddress   string   `yaml:"listenAddress"`
+	AdminAddress    string   `yaml:"adminAddress,omitempty"`
+	DataDir         string   `yaml:"dataDir"`
+	TLSCertPath     string   `yaml:"tlsCertPath,omitempty"`
+	TLSKeyPath      string   `yaml:"tlsKeyPath,omitempty"`
+	ScanIntervalSec int      `yaml:"scanIntervalSec"`
+	LibraryName     string   `yaml:"libraryName"`
+	// CustomEndpoints lets operators advertise URLs that aren't
+	// discoverable from the host's interface table — e.g. a reverse
+	// proxy, a port-forwarded WAN URL, or a non-default Tailscale
+	// MagicDNS that the auto-detector didn't pick up. Each entry is
+	// a complete URL ("https://my-bridge.example.com:7788") and is
+	// surfaced to iOS via /v1/health and the admin endpoints panel.
+	//
+	// Validation: each entry must parse as an absolute URL with
+	// scheme="https" — entries failing validation are dropped at
+	// load with a `.warn` log and don't fail the whole config.
+	//
+	// Operators add entries via the admin console's Settings page;
+	// hand-edits to bridge.yaml work too. Used as input to the cert
+	// SAN gather (PR feat/tls-broader-sans) so that adding a new
+	// custom DNS hostname here, then rotating the cert, makes that
+	// URL TLS-handshake-compatible from iOS.
+	CustomEndpoints []string           `yaml:"customEndpoints,omitempty"`
 	Update          UpdateConfig       `yaml:"update,omitempty"`
 	Backup          BackupConfig       `yaml:"backup,omitempty"`
 	LibraryWatch    LibraryWatchConfig `yaml:"libraryWatch,omitempty"`
@@ -353,7 +378,73 @@ func (c *Config) Validate() error {
 	// upper-bound check — an operator who wants 1000 retained
 	// snapshots is making a disk-space choice we don't second-
 	// guess.
+
+	// CustomEndpoints: prune-and-warn. Accept HTTPS URLs only. We
+	// silently drop malformed / non-HTTPS entries because cert SAN
+	// generation downstream (PR feat/tls-broader-sans) treats every
+	// kept entry as authoritative — a typo in one entry shouldn't
+	// fail the whole `Save` and lock the operator out of the admin
+	// console. Validate() never errors on CustomEndpoints; it
+	// rewrites the slice in-place with the kept entries only.
+	//
+	// Per-entry warnings used to be discarded silently (Qodo bot
+	// review on PR #92 — without observability, a bad entry just
+	// disappeared). We now log each warning at `.warn` so the
+	// operator sees the breadcrumb in the bridge logs even though
+	// the patch / load doesn't fail.
+	kept, warns := ValidateCustomEndpoints(c.CustomEndpoints)
+	c.CustomEndpoints = kept
+	for _, w := range warns {
+		validateLogger.Warn("dropped invalid custom endpoint", "err", w)
+	}
 	return nil
+}
+
+// ValidateCustomEndpoints filters the input to entries that parse as
+// absolute HTTPS URLs with a non-empty host. Returns (kept, warnings)
+// where `warnings` is one error per dropped entry. Used by Validate()
+// to scrub the persisted list and by the admin patch handler to
+// surface per-entry errors back to the operator.
+//
+// Why HTTPS-only: iOS clients won't speak plain-HTTP to the bridge
+// (ATS rejects it before our pinning runs even on a local-network
+// allowlisted host), and the bridge itself only listens TLS. Allowing
+// HTTP entries would just produce a confusing "advertised but
+// unreachable" row in the Devices panel.
+func ValidateCustomEndpoints(in []string) (kept []string, warnings []error) {
+	kept = make([]string, 0, len(in))
+	seen := make(map[string]bool, len(in))
+	for _, raw := range in {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		u, err := url.Parse(raw)
+		if err != nil {
+			warnings = append(warnings, fmt.Errorf("customEndpoints[%q]: %w", raw, err))
+			continue
+		}
+		if u.Scheme != "https" {
+			warnings = append(warnings, fmt.Errorf("customEndpoints[%q]: scheme must be https, got %q", raw, u.Scheme))
+			continue
+		}
+		if u.Host == "" {
+			warnings = append(warnings, fmt.Errorf("customEndpoints[%q]: missing host", raw))
+			continue
+		}
+		// Dedupe on the canonical URL string so two paste-friendly
+		// equivalents (with vs without trailing slash) don't double
+		// up the advertised list. URL.String() canonicalises a few
+		// shapes for us; we preserve the operator's input form for
+		// anything else (no path-normalisation, no port-normalisation).
+		canonical := u.String()
+		if seen[canonical] {
+			continue
+		}
+		seen[canonical] = true
+		kept = append(kept, raw)
+	}
+	return kept, warnings
 }
 
 // ParseQuietHours parses a "HH:MM-HH:MM" window into start and end

@@ -61,6 +61,13 @@ func pairAlternates(primary, listenAddress string) []string {
 	if err != nil || port <= 0 {
 		return []string{primary}
 	}
+	// pairAlternates is called from the admin pairing flow only — it
+	// has no direct config handle (the deep-link/QR baker doesn't
+	// take a *Config), so the CustomEndpoints aren't seeded here.
+	// /v1/health and /admin/api/endpoints both pick them up via the
+	// Server-scoped accessors below; pair URLs include the auto-
+	// discovered entries only. Operators that need a custom URL in
+	// the QR can pass it as `primary` from the calling layer.
 	eps := advertise.URLs(advertise.Params{Port: port})
 	if len(eps) == 0 {
 		return []string{primary}
