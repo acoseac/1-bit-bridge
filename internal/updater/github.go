@@ -73,6 +73,27 @@ type ReleaseAsset struct {
 // internally because retrying inside the same poll cycle wouldn't help.
 var ErrRateLimited = errors.New("github rate limit exceeded")
 
+// ErrNoReleasesPublished is returned when GitHub responds with 404 to
+// the `/releases/latest` lookup. Two distinct realities collapse into
+// this single sentinel because GitHub deliberately conflates them on
+// the unauthenticated API to avoid leaking private-repo existence:
+//
+//  1. The repo is public but has zero published releases yet.
+//  2. The repo is private (or doesn't exist), so the unauthenticated
+//     caller can't see any releases.
+//
+// From the operator's POV the remediation is the same — either the
+// maintainer hasn't shipped a release yet, or repo visibility was
+// changed without realising the auto-updater would break. We surface
+// a single human-readable message and let the operator investigate.
+//
+// Replaces the prior behaviour of returning `&Release{}, nil` on 404,
+// which left the dashboard's Updates card stuck on "checking…"
+// forever (LastError empty AND LatestVersion empty triggered the
+// "checking…" branch in dashboard.html).
+var ErrNoReleasesPublished = errors.New(
+	"no releases published yet, or repository is private")
+
 // LatestRelease returns the most recent non-draft, non-prerelease
 // release on the configured repo. Drafts are never visible to the
 // unauthenticated REST endpoint anyway, but we double-check so a
@@ -117,11 +138,14 @@ func (c *Client) LatestRelease(ctx context.Context) (*Release, error) {
 		return nil, fmt.Errorf("github 403: %s", strings.TrimSpace(readShortBody(resp.Body)))
 	}
 	if resp.StatusCode == http.StatusNotFound {
-		// Empty repo or no releases yet. Treat as a non-error from the
-		// updater's POV: we just don't have a candidate. Return a
-		// sentinel-ish empty release so checkOnce records "no update
-		// available" rather than a flapping LastError.
-		return &Release{}, nil
+		// 404 means either (a) repo has no published releases yet, or
+		// (b) the repo is private/missing — GitHub conflates both on
+		// the unauthenticated REST endpoint. Surface as a typed sentinel
+		// so checkOnce records LastError with a friendly explanation;
+		// the dashboard's "check failed" branch then replaces the
+		// permanent "checking…" badge that the prior empty-Release
+		// short-circuit produced.
+		return nil, ErrNoReleasesPublished
 	}
 	if resp.StatusCode/100 != 2 {
 		return nil, fmt.Errorf("github status %d: %s", resp.StatusCode, strings.TrimSpace(readShortBody(resp.Body)))
@@ -138,8 +162,12 @@ func (c *Client) LatestRelease(ctx context.Context) (*Release, error) {
 	if rel.Draft || rel.Prerelease {
 		// Latest endpoint shouldn't return either, but if GitHub
 		// changes that or the response was somehow forwarded, reject
-		// rather than treat the prerelease as stable.
-		return &Release{}, nil
+		// rather than treat the prerelease as stable. Surface as the
+		// same sentinel as a 404 — the dashboard's "check failed"
+		// branch fires correctly instead of the permanent "checking…"
+		// badge that the prior empty-Release short-circuit produced
+		// (Gemini bot review on PR #89: same root cause as 404).
+		return nil, ErrNoReleasesPublished
 	}
 	return &rel, nil
 }

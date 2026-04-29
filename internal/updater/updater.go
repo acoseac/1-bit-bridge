@@ -498,6 +498,21 @@ func (u *Updater) checkOnce(ctx context.Context) bool {
 		// Don't reset LastCheck — a transient failure shouldn't make the
 		// admin UI claim "haven't checked in days". Operators reading
 		// the UI care about the last *successful* poll.
+		//
+		// "Definitely no candidate" sentinels (`ErrNoReleasesPublished`)
+		// must also CLEAR the cached version-availability fields. The
+		// dashboard template branches on `UpdateAvailable` first, then
+		// `LatestVersion`, then `LastError` — a stale "update available"
+		// state from a previous successful poll would mask the
+		// "check failed" badge once the repo is wiped or made private.
+		// Transient errors (rate limit, network blip) leave the cached
+		// state alone so the operator still sees the last good answer
+		// while the bridge retries (Qodo bot review on PR #89).
+		if errors.Is(err, ErrNoReleasesPublished) {
+			u.status.LatestVersion = ""
+			u.status.UpdateAvailable = false
+			u.status.ReleaseNotesURL = ""
+		}
 		logger.Error("poll", "repo", u.repo, "err", err)
 		return false
 	}
@@ -523,14 +538,28 @@ func normalizeTag(s string) string {
 
 // semverGreater returns true if latest > current under semver ordering.
 // Both inputs are bare (no "v" prefix); we re-add the "v" because
-// golang.org/x/mod/semver insists on it. Invalid input on either side
-// returns false — we'd rather miss an upgrade prompt than show a wrong
-// one (operator can hit "Check now" and the next valid response wins).
+// golang.org/x/mod/semver insists on it. Invalid `latest` returns false
+// — a malformed remote tag isn't comparable.
+//
+// **Invalid `current` is treated as the floor (`v0.0.0`)** so that
+// non-semver dev/CI builds — `make build` artefacts stamped with a
+// bare git short-SHA on a tagless or shallow clone, or the `dev`
+// fallback — still surface a real release as an available update. The
+// previous "any invalid → false" rule meant operators running such a
+// build couldn't see updates at all (Qodo bot review on PR #89).
 func semverGreater(latest, current string) bool {
 	lv := "v" + latest
-	cv := "v" + current
-	if !semver.IsValid(lv) || !semver.IsValid(cv) {
+	if !semver.IsValid(lv) {
 		return false
+	}
+	cv := "v" + current
+	if !semver.IsValid(cv) {
+		// Treat a non-semver current as the lowest possible version so
+		// any valid release is reported as an upgrade candidate. The
+		// admin UI then renders "update available" with the real
+		// `latest` tag — operators see a route forward without having
+		// to first rebuild against a tagged ref.
+		cv = "v0.0.0"
 	}
 	return semver.Compare(lv, cv) > 0
 }

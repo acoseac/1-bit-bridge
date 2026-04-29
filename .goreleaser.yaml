@@ -71,6 +71,11 @@ builds:
       - arm64
     ldflags:
       - -s -w
+      # ServerVersion injection. **The Makefile must mirror this clause**
+      # — `make build` artefacts (CI runs, dev loops, locally-built
+      # snapshots an operator might run on a host) skip goreleaser
+      # entirely, and without -X the binary reports the source default
+      # forever. See Makefile's `VERSION ?= …` line.
       - -X github.com/acoseac/1-bit-bridge/internal/version.ServerVersion={{.Version}}
       # MinClientVersion declares the iOS app version floor THIS bridge
       # release needs from its paired clients. iOS sends X-Client-Version
