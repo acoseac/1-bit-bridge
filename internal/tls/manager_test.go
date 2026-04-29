@@ -2,20 +2,27 @@ package tls
 
 import (
 	cryptotls "crypto/tls"
-	"crypto/x509"
-	"encoding/pem"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
 
-// mintTestCert produces a tls.Certificate with the leaf parsed
-// (NotAfter populated) so manager tests can assert on expiry without
-// reaching into x509 plumbing. Uses the existing GenerateOptions
-// path so test certs are byte-shape-compatible with what the bridge
-// serves in production.
-func mintTestCert(t *testing.T, dnsNames []string, lifetime time.Duration) *cryptotls.Certificate {
+// mintTestCert produces a `tls.Certificate` with `Leaf` populated
+// for the manager tests. Uses the production `GenerateWithOptions`
+// path (397-day validity) so test certs are byte-shape-compatible
+// with what the bridge serves.
+//
+// **No lifetime override**: every consumer in this file uses the
+// default 397-day window. Pre-fix this helper accepted a
+// `lifetime` arg with a no-op `mintCustomLifetime` fallback that
+// returned the original disk-loaded cert (CodeRabbit on PR #102).
+// The expiry-based SNI-switcher branches (the freshness check)
+// are covered by the on-disk cert-mutation tests in
+// internal/tailscale/, not by an in-memory mutate that crypto/tls
+// wouldn't actually honour at handshake time. Keeping this
+// signature lifetime-free prevents future callers from adding a
+// silent regression by passing a non-zero value.
+func mintTestCert(t *testing.T, dnsNames []string) *cryptotls.Certificate {
 	t.Helper()
 	dir := t.TempDir()
 	certPath := filepath.Join(dir, "leaf.crt")
@@ -27,15 +34,6 @@ func mintTestCert(t *testing.T, dnsNames []string, lifetime time.Duration) *cryp
 	if err := GenerateWithOptions(certPath, keyPath, opts); err != nil {
 		t.Fatal(err)
 	}
-	// `lifetime` override: re-issue a custom-validity cert if needed.
-	// GenerateWithOptions hardcodes 397d, so for short-lifetime tests
-	// we mint manually via the package-internal helpers — too much
-	// rope for a unit test. Instead, post-process: if the caller
-	// asked for a lifetime != 0, we rebuild a fresh self-signed cert
-	// directly via crypto/x509 (cheap; no disk).
-	if lifetime > 0 {
-		return mintCustomLifetime(t, dnsNames, lifetime)
-	}
 	cert, err := LoadTailscaleCertFromDisk(certPath, keyPath)
 	if err != nil {
 		t.Fatal(err)
@@ -43,60 +41,9 @@ func mintTestCert(t *testing.T, dnsNames []string, lifetime time.Duration) *cryp
 	return cert
 }
 
-// mintCustomLifetime builds an in-memory ECDSA self-signed cert with a
-// caller-controlled NotAfter so freshness-threshold tests can simulate
-// "expires in 5 days" or "already expired" scenarios.
-func mintCustomLifetime(t *testing.T, dnsNames []string, lifetime time.Duration) *cryptotls.Certificate {
-	t.Helper()
-	// Re-use the production Generate function's signing path by
-	// calling it with a temp file then over-writing NotAfter. That's
-	// not practical without exposing internal knobs — simpler to
-	// hand-roll the cert here. Avoids the abstraction cost.
-	dir := t.TempDir()
-	certPath := filepath.Join(dir, "custom.crt")
-	keyPath := filepath.Join(dir, "custom.key")
-	opts := GenerateOptions{Hostname: "host.local"}
-	for _, n := range dnsNames {
-		opts.ExtraDNSNames = append(opts.ExtraDNSNames, n)
-	}
-	if err := GenerateWithOptions(certPath, keyPath, opts); err != nil {
-		t.Fatal(err)
-	}
-	// Load + re-encode with adjusted NotAfter. ECDSA + the original
-	// SAN list pass through unchanged; only the leaf's validity
-	// window changes. Cheap: parse, mutate, write.
-	pemBytes, err := os.ReadFile(certPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	block, _ := pem.Decode(pemBytes)
-	leaf, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		t.Fatal(err)
-	}
-	leaf.NotBefore = time.Now().Add(-time.Hour)
-	leaf.NotAfter = time.Now().Add(lifetime)
-	// Re-sign in place is too involved for a test; the leaf-mutate
-	// approach above only changes Go-side state, not the underlying
-	// DER. For the SNI/freshness tests we only need the helper that
-	// READS NotAfter, so we wrap the original cert + override Leaf
-	// directly. The SNI switcher reads via CertNotAfter which goes
-	// through `cert.Certificate[0]` x509-parse — meaning the on-disk
-	// DER's NotAfter is what matters, not Leaf's. So we have to
-	// generate the cert via a path that controls NotAfter at sign
-	// time, not after.
-	c, err := LoadTailscaleCertFromDisk(certPath, keyPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Leaf stays in sync (LoadTailscaleCertFromDisk parsed it).
-	// The NotAfter we assert against in tests below uses production
-	// 397d duration; the "expired" / "stale" branches of the SNI
-	// switcher are covered by the on-disk-mutation paths in the
-	// integration tests rather than by mutating an in-memory cert.
-	_ = leaf // referenced above for the algorithm-rationale comment
-	return c
-}
+// silence unused-import warning; time is referenced in tests below
+// even after the lifetime helper was removed.
+var _ = time.Hour
 
 // --- CertNotAfter ---
 
@@ -106,7 +53,7 @@ func TestCertNotAfter_ParsedFromLeafSafely(t *testing.T) {
 	// the DER itself rather than read `cert.Leaf.NotAfter` directly.
 	// This test forces the nil-Leaf shape and asserts the helper
 	// still returns a valid time.
-	cert := mintTestCert(t, []string{"host.local"}, 0)
+	cert := mintTestCert(t, []string{"host.local"})
 	cert.Leaf = nil // simulate fresh LoadX509KeyPair output
 
 	when, err := CertNotAfter(cert)
@@ -165,10 +112,10 @@ func TestManager_GetReturnsSelfSignedWhenNoSNI(t *testing.T) {
 	// but legal per RFC 6066. The manager falls through to self-signed
 	// rather than guessing — the LE cert is for explicit magic-DNS
 	// hostnames only.
-	self := mintTestCert(t, []string{"host.local"}, 0)
+	self := mintTestCert(t, []string{"host.local"})
 	mgr := NewManager(self)
 	mgr.SetMagicDNSSuffix("sable-eagle.ts.net")
-	mgr.SetTailscaleCert(mintTestCert(t, []string{"home-pc.sable-eagle.ts.net"}, 0))
+	mgr.SetTailscaleCert(mintTestCert(t, []string{"home-pc.sable-eagle.ts.net"}))
 
 	got, err := mgr.Get(&cryptotls.ClientHelloInfo{ServerName: ""})
 	if err != nil {
@@ -180,8 +127,8 @@ func TestManager_GetReturnsSelfSignedWhenNoSNI(t *testing.T) {
 }
 
 func TestManager_GetReturnsLECertOnMagicDNSSNI(t *testing.T) {
-	self := mintTestCert(t, []string{"host.local"}, 0)
-	le := mintTestCert(t, []string{"home-pc.sable-eagle.ts.net"}, 0)
+	self := mintTestCert(t, []string{"host.local"})
+	le := mintTestCert(t, []string{"home-pc.sable-eagle.ts.net"})
 	mgr := NewManager(self)
 	mgr.SetMagicDNSSuffix("sable-eagle.ts.net")
 	mgr.SetTailscaleCert(le)
@@ -200,7 +147,7 @@ func TestManager_GetFallsThroughToSelfSignedWhenLECertMissing(t *testing.T) {
 	// failed). Manager must fall through to self-signed for the
 	// magic-DNS SNI — ATS will reject on the iOS side, exactly the
 	// same as today's no-LE-cert state. Honest fallback, no surprise.
-	self := mintTestCert(t, []string{"host.local"}, 0)
+	self := mintTestCert(t, []string{"host.local"})
 	mgr := NewManager(self)
 	mgr.SetMagicDNSSuffix("sable-eagle.ts.net")
 	// Deliberately no SetTailscaleCert.
@@ -218,8 +165,8 @@ func TestManager_GetReturnsSelfSignedForLANSNI(t *testing.T) {
 	// LAN / mDNS / IP-literal SNI must always route to self-signed
 	// — these are the connections iOS pins by fingerprint, and
 	// serving the LE cert on those would break every existing pin.
-	self := mintTestCert(t, []string{"host.local"}, 0)
-	le := mintTestCert(t, []string{"home-pc.sable-eagle.ts.net"}, 0)
+	self := mintTestCert(t, []string{"host.local"})
+	le := mintTestCert(t, []string{"home-pc.sable-eagle.ts.net"})
 	mgr := NewManager(self)
 	mgr.SetMagicDNSSuffix("sable-eagle.ts.net")
 	mgr.SetTailscaleCert(le)
@@ -243,8 +190,8 @@ func TestManager_GetReturnsSelfSignedForLANSNI(t *testing.T) {
 
 func TestManager_GetCaseInsensitiveSNI(t *testing.T) {
 	// SNI hostnames are case-insensitive per RFC 6066.
-	self := mintTestCert(t, []string{"host.local"}, 0)
-	le := mintTestCert(t, []string{"home-pc.sable-eagle.ts.net"}, 0)
+	self := mintTestCert(t, []string{"host.local"})
+	le := mintTestCert(t, []string{"home-pc.sable-eagle.ts.net"})
 	mgr := NewManager(self)
 	mgr.SetMagicDNSSuffix("sable-eagle.ts.net")
 	mgr.SetTailscaleCert(le)
@@ -262,8 +209,8 @@ func TestManager_GetEmptySuffixDisablesLERouting(t *testing.T) {
 	// Tailscale not detected (or MagicDNS not enabled) → empty
 	// suffix → every SNI routes to self-signed regardless of LE
 	// cert presence.
-	self := mintTestCert(t, []string{"host.local"}, 0)
-	le := mintTestCert(t, []string{"home-pc.sable-eagle.ts.net"}, 0)
+	self := mintTestCert(t, []string{"host.local"})
+	le := mintTestCert(t, []string{"home-pc.sable-eagle.ts.net"})
 	mgr := NewManager(self)
 	// SetMagicDNSSuffix("") — explicitly empty.
 	mgr.SetMagicDNSSuffix("")

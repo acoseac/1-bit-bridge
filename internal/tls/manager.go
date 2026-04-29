@@ -128,11 +128,21 @@ func (m *Manager) Get(hello *cryptotls.ClientHelloInfo) (*cryptotls.Certificate,
 // a nil-pointer panic waiting to happen (gotcha #1 from the plan
 // review). This helper is the single approved way to read the
 // expiry; every consumer (renewer, admin tile, SNI Get) MUST route
-// through it. Cheap (parses ~100 bytes of DER), so caching the
-// result isn't worth the cache-invalidation complexity.
+// through it.
+//
+// **Hot-path optimisation**: `Manager.Get` calls this on every TLS
+// handshake to gate LE-cert use on freshness. When the caller
+// loaded the cert via `LoadTailscaleCertFromDisk`, `Leaf` is
+// already populated — short-circuit on that field to avoid a per-
+// handshake `x509.ParseCertificate` (DER parse + allocation). The
+// fall-through path keeps the helper safe for raw
+// `tls.LoadX509KeyPair` callers (Gemini on PR #102).
 func CertNotAfter(cert *cryptotls.Certificate) (time.Time, error) {
 	if cert == nil {
 		return time.Time{}, errors.New("tls: CertNotAfter on nil cert")
+	}
+	if cert.Leaf != nil {
+		return cert.Leaf.NotAfter, nil
 	}
 	if len(cert.Certificate) == 0 {
 		return time.Time{}, errors.New("tls: cert has no DER blocks")

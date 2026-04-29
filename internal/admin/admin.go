@@ -128,16 +128,28 @@ type TailscaleProvider interface {
 // TailscaleStatus is the JSON shape /api/tailscale/status returns.
 // Mirrors `cmd/bridge/tailscaleStatus` but lives here so the admin
 // package compiles without importing cmd/bridge.
+//
+// Optional time fields are pointers (Qodo on PR #102): a non-pointer
+// `time.Time` with `json:",omitempty"` still serialises the zero
+// value `"0001-01-01T00:00:00Z"` because `omitempty` doesn't recognise
+// time-zero. Pointer form honours `omitempty` correctly. Matches the
+// `tokenRow.ExpiresAt *time.Time` precedent.
+//
+// `MagicDNSURL` is the operator-facing bridge URL on the magic-DNS
+// endpoint, including the configured listen port (NOT a hard-coded
+// `:7788` — operators using non-default `cfg.ListenAddress` need the
+// right URL surfaced for manual recovery, CodeRabbit on PR #102).
 type TailscaleStatus struct {
-	CLIAvailable      bool      `json:"cliAvailable"`
-	NodeName          string    `json:"nodeName,omitempty"`
-	MagicDNSName      string    `json:"magicDNSName,omitempty"`
-	HTTPSCertsEnabled bool      `json:"httpsCertsEnabled"`
-	CertPresent       bool      `json:"certPresent"`
-	CertNotAfter      time.Time `json:"certNotAfter,omitempty"`
-	CertPath          string    `json:"certPath,omitempty"`
-	LastError         string    `json:"lastError,omitempty"`
-	LastChecked       time.Time `json:"lastChecked,omitempty"`
+	CLIAvailable      bool       `json:"cliAvailable"`
+	NodeName          string     `json:"nodeName,omitempty"`
+	MagicDNSName      string     `json:"magicDNSName,omitempty"`
+	HTTPSCertsEnabled bool       `json:"httpsCertsEnabled"`
+	CertPresent       bool       `json:"certPresent"`
+	CertNotAfter      *time.Time `json:"certNotAfter,omitempty"`
+	CertPath          string     `json:"certPath,omitempty"`
+	MagicDNSURL       string     `json:"magicDNSURL,omitempty"`
+	LastError         string     `json:"lastError,omitempty"`
+	LastChecked       *time.Time `json:"lastChecked,omitempty"`
 }
 
 // UpdateProvider is the read-side of the updater used by the admin

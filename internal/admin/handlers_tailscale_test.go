@@ -44,6 +44,8 @@ func TestApiTailscaleStatus_NotConfiguredReturnsZero(t *testing.T) {
 
 func TestApiTailscaleStatus_HappyPathReturnsSnapshot(t *testing.T) {
 	srv, _, _ := newTestServer(t)
+	expiry := time.Now().Add(60 * 24 * time.Hour)
+	checked := time.Now()
 	stub := &fakeTailscale{
 		status: TailscaleStatus{
 			CLIAvailable:      true,
@@ -51,9 +53,9 @@ func TestApiTailscaleStatus_HappyPathReturnsSnapshot(t *testing.T) {
 			MagicDNSName:      "home-pc.sable-eagle.ts.net",
 			HTTPSCertsEnabled: true,
 			CertPresent:       true,
-			CertNotAfter:      time.Now().Add(60 * 24 * time.Hour),
+			CertNotAfter:      &expiry,
 			CertPath:          "/data/tls/tailscale.crt",
-			LastChecked:       time.Now(),
+			LastChecked:       &checked,
 		},
 	}
 	srv.deps.Tailscale = stub
@@ -89,12 +91,13 @@ func TestApiTailscaleRefresh_NotConfiguredReturns503(t *testing.T) {
 
 func TestApiTailscaleRefresh_RoutesThroughProvider(t *testing.T) {
 	srv, _, _ := newTestServer(t)
+	expiry := time.Now().Add(89 * 24 * time.Hour)
 	stub := &fakeTailscale{
 		refreshResult: TailscaleStatus{
 			CLIAvailable: true,
 			MagicDNSName: "home-pc.sable-eagle.ts.net",
 			CertPresent:  true,
-			CertNotAfter: time.Now().Add(89 * 24 * time.Hour),
+			CertNotAfter: &expiry,
 		},
 	}
 	srv.deps.Tailscale = stub

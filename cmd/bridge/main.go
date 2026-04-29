@@ -514,7 +514,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// every 24 h and re-mints inside the 14-day pre-expiry window.
 	// All errors logged but never fatal — bridge runs identically
 	// to today on hosts without Tailscale installed.
-	tailscaleAuto := newTailscaleAutoPilot(cfg.DataDir, certManager, stderr)
+	tailscaleAuto := newTailscaleAutoPilot(cfg.DataDir, cfg.ListenAddress, certManager, stderr)
 	tailscaleAuto.Start(scanCtx)
 
 	// Optional fsnotify-based instant-update watcher. Off by default

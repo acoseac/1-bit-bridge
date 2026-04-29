@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -22,16 +23,29 @@ import (
 //
 // All fields are copies; the snapshot is immutable once returned.
 // Refresh is via `autoPilot.Snapshot()` on every admin GET.
+//
+// Optional time fields are pointers (Qodo on PR #102): a non-pointer
+// `time.Time` with `json:",omitempty"` still serialises the zero
+// value `"0001-01-01T00:00:00Z"` because `omitempty` doesn't recognise
+// time-zero. Pointers honour `omitempty` correctly. Matches the
+// `tokenRow.ExpiresAt *time.Time` precedent in [internal/admin].
 type tailscaleStatus struct {
-	CLIAvailable      bool      `json:"cliAvailable"`
-	NodeName          string    `json:"nodeName,omitempty"`
-	MagicDNSName      string    `json:"magicDNSName,omitempty"`
-	HTTPSCertsEnabled bool      `json:"httpsCertsEnabled"`
-	CertPresent       bool      `json:"certPresent"`
-	CertNotAfter      time.Time `json:"certNotAfter,omitempty"`
-	CertPath          string    `json:"certPath,omitempty"`
-	LastError         string    `json:"lastError,omitempty"`
-	LastChecked       time.Time `json:"lastChecked,omitempty"`
+	CLIAvailable      bool       `json:"cliAvailable"`
+	NodeName          string     `json:"nodeName,omitempty"`
+	MagicDNSName      string     `json:"magicDNSName,omitempty"`
+	HTTPSCertsEnabled bool       `json:"httpsCertsEnabled"`
+	CertPresent       bool       `json:"certPresent"`
+	CertNotAfter      *time.Time `json:"certNotAfter,omitempty"`
+	CertPath          string     `json:"certPath,omitempty"`
+	// MagicDNSURL is the operator-facing bridge URL on the magic-DNS
+	// endpoint, including the configured listen port (NOT hard-coded
+	// :7788 — operators using `cfg.ListenAddress: :8443` need the
+	// right URL for manual recovery flows, CodeRabbit on PR #102).
+	// Empty when MagicDNSName is empty or the listen port can't be
+	// resolved.
+	MagicDNSURL string     `json:"magicDNSURL,omitempty"`
+	LastError   string     `json:"lastError,omitempty"`
+	LastChecked *time.Time `json:"lastChecked,omitempty"`
 }
 
 // tailscaleAutoPilot owns the auto-mint + auto-renew lifecycle and
@@ -41,6 +55,7 @@ type tailscaleStatus struct {
 // Snapshot.
 type tailscaleAutoPilot struct {
 	dataDir     string
+	listenAddr  string
 	certManager *servertls.Manager
 	stderr      io.Writer
 
@@ -58,13 +73,34 @@ type tailscaleAutoPilot struct {
 // newTailscaleAutoPilot wires the auto-pilot against an existing
 // cert manager. Caller is responsible for kicking the goroutines
 // (Start). Construction is free — actual work happens on Start.
-func newTailscaleAutoPilot(dataDir string, mgr *servertls.Manager, stderr io.Writer) *tailscaleAutoPilot {
+//
+// `listenAddr` is `cfg.ListenAddress` ("[host]:port" form). Used
+// to compose the operator-facing magic-DNS URL with the right port
+// for the admin tile's "iOS clients reach the bridge over Tailscale
+// at <url>" hint.
+func newTailscaleAutoPilot(dataDir, listenAddr string, mgr *servertls.Manager, stderr io.Writer) *tailscaleAutoPilot {
 	return &tailscaleAutoPilot{
 		dataDir:         dataDir,
+		listenAddr:      listenAddr,
 		certManager:     mgr,
 		stderr:          stderr,
 		minMintInterval: 30 * time.Second,
 	}
+}
+
+// magicDNSURL composes the operator-facing bridge URL on the
+// configured listen port for the given magic-DNS hostname. Returns
+// "" when the listen address can't be parsed (test paths with
+// `:0` mode fall through; the admin tile renders "—" then).
+func (a *tailscaleAutoPilot) magicDNSURL(magicDNS string) string {
+	if magicDNS == "" {
+		return ""
+	}
+	_, port, err := net.SplitHostPort(a.listenAddr)
+	if err != nil || port == "" || port == "0" {
+		return ""
+	}
+	return "https://" + magicDNS + ":" + port
 }
 
 // Start kicks the initial detect+mint goroutine and the renewer
@@ -108,25 +144,47 @@ func (a *tailscaleAutoPilot) runRenewer(ctx context.Context) {
 // Returns the resulting snapshot so the admin Re-mint handler can
 // reply with the post-action state synchronously.
 func (a *tailscaleAutoPilot) detectAndMint(ctx context.Context, trigger string) tailscaleStatus {
-	snap := tailscaleStatus{LastChecked: time.Now().UTC()}
+	now := time.Now().UTC()
+	snap := tailscaleStatus{LastChecked: &now}
 
 	info, err := servertailscale.Detect(ctx)
 	if err != nil {
 		snap.CLIAvailable = info.CLIAvailable
 		snap.LastError = info.LastError
 		fmt.Fprintf(a.stderr, "tailscale (%s): detect failed: %v\n", trigger, err)
+		// Detect-side failure is "we don't know what state we're in" —
+		// safer to clear cached LE state than to keep serving a
+		// possibly-stale LE cert under a since-rotated SNI suffix.
+		a.certManager.SetMagicDNSSuffix("")
+		a.certManager.SetTailscaleCert(nil)
 		a.publish(snap)
 		return snap
 	}
 	snap.CLIAvailable = info.CLIAvailable
 	snap.NodeName = info.NodeName
 	snap.MagicDNSName = info.MagicDNSName
+	snap.MagicDNSURL = a.magicDNSURL(info.MagicDNSName)
 	if !info.CLIAvailable {
+		// Tailscale uninstalled / removed from PATH between bridge
+		// startup and this tick. Without clearing, the SNI switcher
+		// would keep serving a previously-installed LE cert against
+		// a now-orphaned suffix (CodeRabbit on PR #102).
+		a.certManager.SetMagicDNSSuffix("")
+		a.certManager.SetTailscaleCert(nil)
 		snap.LastError = info.LastError
 		a.publish(snap)
 		return snap
 	}
-	if info.MagicDNSName == "" {
+	// Treat empty TailnetSuffix as the canonical "MagicDNS off" state
+	// regardless of whether MagicDNSName happens to be set (Qodo on
+	// PR #102 — defensive synthesis in Detect could in theory leave
+	// a name without a suffix; the SNI switcher needs the suffix to
+	// classify connections, so an empty suffix means "fall through to
+	// self-signed for everything"). Equivalent to the
+	// !info.CLIAvailable branch from a routing-state perspective.
+	if info.TailnetSuffix == "" || info.MagicDNSName == "" {
+		a.certManager.SetMagicDNSSuffix("")
+		a.certManager.SetTailscaleCert(nil)
 		snap.LastError = info.LastError
 		if snap.LastError == "" {
 			snap.LastError = "no MagicDNS name detected"
@@ -150,13 +208,24 @@ func (a *tailscaleAutoPilot) detectAndMint(ctx context.Context, trigger string) 
 		return snap
 	}
 
-	// Decide whether the on-disk cert is fresh enough to skip minting.
-	if existing, err := servertls.LoadTailscaleCertFromDisk(certPath, keyPath); err == nil {
-		if existing.Leaf != nil && time.Until(existing.Leaf.NotAfter) > servertailscale.FreshnessThreshold {
-			a.certManager.SetTailscaleCert(existing)
-			snap.CertPresent = true
-			snap.CertNotAfter = existing.Leaf.NotAfter
-			snap.HTTPSCertsEnabled = true
+	// Install the on-disk cert FIRST regardless of expiry (Qodo on
+	// PR #102 reliability concern). Pre-fix: if the cert was within
+	// the renewal window AND a subsequent mint failed, the manager
+	// was left with no LE cert at all — magic-DNS handshakes fell
+	// through to self-signed, breaking ATS for iOS clients even
+	// though we had a still-unexpired cert on disk. Now: install
+	// what we have so connections keep working, then attempt re-mint
+	// to refresh; if mint succeeds we swap to the new cert below,
+	// otherwise the existing one keeps serving until next renewer
+	// tick. Skip-mint short-circuit only kicks in when the cert is
+	// outside the renewal window.
+	if existing, err := servertls.LoadTailscaleCertFromDisk(certPath, keyPath); err == nil && existing.Leaf != nil {
+		a.certManager.SetTailscaleCert(existing)
+		snap.CertPresent = true
+		expiry := existing.Leaf.NotAfter
+		snap.CertNotAfter = &expiry
+		snap.HTTPSCertsEnabled = true
+		if time.Until(existing.Leaf.NotAfter) > servertailscale.FreshnessThreshold {
 			a.publish(snap)
 			return snap
 		}
@@ -203,11 +272,14 @@ func (a *tailscaleAutoPilot) detectAndMint(ctx context.Context, trigger string) 
 	a.certManager.SetTailscaleCert(loaded)
 	snap.CertPresent = true
 	snap.HTTPSCertsEnabled = true
+	expiryStr := "unknown"
 	if loaded.Leaf != nil {
-		snap.CertNotAfter = loaded.Leaf.NotAfter
+		expiry := loaded.Leaf.NotAfter
+		snap.CertNotAfter = &expiry
+		expiryStr = expiry.Format("2006-01-02")
 	}
 	fmt.Fprintf(os.Stdout, "tailscale (%s): minted LE cert for %s, expires %s\n",
-		trigger, info.MagicDNSName, snap.CertNotAfter.Format("2006-01-02"))
+		trigger, info.MagicDNSName, expiryStr)
 	a.publish(snap)
 	return snap
 }
@@ -266,6 +338,7 @@ func toAdminStatus(s tailscaleStatus) admin.TailscaleStatus {
 		CertPresent:       s.CertPresent,
 		CertNotAfter:      s.CertNotAfter,
 		CertPath:          s.CertPath,
+		MagicDNSURL:       s.MagicDNSURL,
 		LastError:         s.LastError,
 		LastChecked:       s.LastChecked,
 	}

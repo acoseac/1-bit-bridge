@@ -82,11 +82,33 @@ func TestClassifyMintError_HTTPSCertsDisabled(t *testing.T) {
 	}
 }
 
-func TestClassifyMintError_PermissionDenied(t *testing.T) {
+func TestClassifyMintError_PermissionDeniedOnDaemonSocket(t *testing.T) {
+	// Real `tailscale cert` stderr when the running user can't talk
+	// to the local tailscaled socket. The permission-denied keyword
+	// alone is NOT enough — must co-occur with daemon-socket phrasing
+	// so generic fs write errors don't get misclassified.
 	stderr := "failed to dial tailscaled: dial unix /var/run/tailscale/tailscaled.sock: connect: permission denied\n"
 	got := classifyMintError(errors.New("exit status 1"), stderr)
 	if !errors.Is(got, ErrPermission) {
-		t.Errorf("classifyMintError(...) = %v, want ErrPermission", got)
+		t.Errorf("classifyMintError(daemon-socket permission denied) = %v, want ErrPermission", got)
+	}
+}
+
+func TestClassifyMintError_FilesystemPermissionFallsThrough(t *testing.T) {
+	// CodeRabbit caught this on PR #102 round 1: a blanket
+	// "permission denied" match would map fs write errors (dataDir
+	// not writable, --cert-file path not writable) to ErrPermission,
+	// causing the admin tile to wrongly tell the operator to join
+	// the tailscale group. Narrowed match → fs errors fall through
+	// to the verbatim-stderr path so the operator sees the real
+	// problem (and the actual broken path).
+	stderr := "open /etc/bridge/tls/tailscale.crt: permission denied\n"
+	got := classifyMintError(errors.New("exit status 1"), stderr)
+	if errors.Is(got, ErrPermission) {
+		t.Errorf("classifyMintError(fs-write permission denied) = %v, want unmatched generic (NOT ErrPermission)", got)
+	}
+	if !strings.Contains(got.Error(), "tailscale.crt") {
+		t.Errorf("classifyMintError(...) error = %q, want verbatim stderr fragment to surface", got.Error())
 	}
 }
 

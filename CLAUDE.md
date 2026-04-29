@@ -202,7 +202,7 @@ Two scan-time failures from a fresh Windows scan, fixed in one bridge-only PR.
 - **`renameFunc` test seam** ([extractors.go](internal/manifest/extractors.go), [enricher.go](internal/enrich/enricher.go)). Package-private `var renameFunc = os.Rename`; `renameWithRetry` calls `renameFunc(src, dst)`. Tests inject a deterministic failure to exercise the fallback path without burning the full 750 ms backoff budget. **Production code MUST NOT mutate this**; only test packages override + restore via `t.Cleanup`. Same convention as the `friendlyErrorMessage` / `_seedQueueForTest` test affordances on the iOS side.
 - **`maxArtworkBytes` raised 10 MiB → 25 MiB** (already updated inline at line 177 in the same PR, recapped here for the v0.1.5 rollup). Modern audiophile rips routinely embed 10–20 MiB digital-booklet scans; the original 10 MiB cap silently rejected near-boundary cases (e.g., a 10.04 MiB cover lost the entire album's `ArtworkMBID` to MusicBrainz fallback). Worker-RAM math: `runtime.NumCPU()` × 25 MiB ≈ 200–400 MiB peak — comfortable on any machine running the bridge while still rejecting genuine misuse (lossless TIFFs, misnamed 4K wallpapers).
 
-### v0.1.7 — Tailscale HTTPS auto-pilot (PR #N)
+### v0.1.7 — Tailscale HTTPS auto-pilot (PR #102)
 
 Bridge now mints + serves a real Let's Encrypt cert on Tailscale magic-DNS connections, while keeping the existing self-signed cert for LAN/mDNS/IP-literal connections (and the existing iOS pin contract on those paths). Eliminates the magic-DNS pairing dead-end that surfaced from a real user report — `.ts.net` is publicly-routable DNS, so `NSAllowsLocalNetworking` doesn't exempt it from ATS, so iOS rejected the self-signed cert before fingerprint pinning could override.
 

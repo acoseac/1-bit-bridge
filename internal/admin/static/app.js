@@ -298,7 +298,13 @@ function renderTailscaleTile(s) {
   }
 
   if (noteEl) {
-    noteEl.textContent = s.magicDNSName ? `https://${s.magicDNSName}:7788` : "—";
+    // Use the backend-composed MagicDNSURL so the link reflects the
+    // actual `cfg.ListenAddress` port, not a hard-coded :7788
+    // (CodeRabbit on PR #102 — operators on non-default listen ports
+    // would otherwise see the wrong URL during a manual pair recovery).
+    // Fall back to the bare hostname if the backend couldn't compose
+    // the URL (e.g. listen port is `:0` in test mode).
+    noteEl.textContent = s.magicDNSURL || s.magicDNSName || "—";
   }
 }
 

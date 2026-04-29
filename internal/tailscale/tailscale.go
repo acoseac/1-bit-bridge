@@ -38,6 +38,12 @@ var commandContext = exec.CommandContext
 // LookPath miss isn't the same as "not installed" on macOS.
 const macAppStoreBinary = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
 
+// windowsTailscaleEnvs are the env vars the Windows GUI installer
+// drops `tailscale.exe` under. Like macOS the binary doesn't end up
+// on $PATH for non-admin shells, so a LookPath miss isn't terminal
+// (matches the pattern in [internal/advertise/tailscale.go]).
+var windowsTailscaleEnvs = []string{"ProgramFiles", "ProgramFiles(x86)"}
+
 // NodeInfo describes the local Tailscale node, populated by Detect.
 //
 // The zero value (CLIAvailable=false) is the "Tailscale not installed"
@@ -89,7 +95,12 @@ func Detect(ctx context.Context) (NodeInfo, error) {
 	}
 	info := NodeInfo{CLIAvailable: true, BinaryPath: binary}
 
-	cmd := commandContext(ctx, binary, "status", "--json")
+	// `--peers=false` is the existing CLAUDE.md invariant for every
+	// `tailscale status --json` invocation in this repo (introduced
+	// PR #95): we only need `Self` + `MagicDNSSuffix`, and on a
+	// large tailnet the full peer set adds avoidable latency + JSON
+	// volume to startup and every operator-triggered refresh.
+	cmd := commandContext(ctx, binary, "status", "--json", "--peers=false")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -132,16 +143,39 @@ func Detect(ctx context.Context) (NodeInfo, error) {
 	return info, nil
 }
 
-// resolveBinary locates the tailscale CLI binary, preferring $PATH but
-// falling back to the macOS App Store install location which doesn't
-// register itself with $PATH (gotcha #2 from the plan review).
+// resolveBinary locates the tailscale CLI binary, preferring $PATH
+// but falling back to the OS-specific GUI-installer paths.
+//
+// **`exec.LookPath` results MUST be absolute** (existing CLAUDE.md
+// invariant from PR #95, restated by CodeRabbit on PR #102). A
+// relative PATH entry can resolve to a `./tailscale` that's
+// cwd-dependent — caching that in `NodeInfo.BinaryPath` would let a
+// process that later changes cwd execute the wrong binary, which
+// undermines the TOCTOU protection of the cached path. Modern Go
+// (1.19+) returns `errors.Is(err, exec.ErrDot)` in this case, but
+// the explicit `filepath.IsAbs` guard is defence-in-depth in case
+// the runtime ever relaxes that or the bridge runs under
+// `GODEBUG=execerrdot=0`.
+//
+// macOS App Store + Windows GUI installers don't register the
+// binary with $PATH, so a LookPath miss isn't terminal.
 func resolveBinary() (string, bool) {
-	if path, err := exec.LookPath("tailscale"); err == nil {
+	if path, err := exec.LookPath("tailscale"); err == nil && filepath.IsAbs(path) {
 		return path, true
 	}
-	if runtime.GOOS == "darwin" {
+	switch runtime.GOOS {
+	case "darwin":
 		if _, err := os.Stat(macAppStoreBinary); err == nil {
 			return macAppStoreBinary, true
+		}
+	case "windows":
+		for _, env := range windowsTailscaleEnvs {
+			if dir := os.Getenv(env); dir != "" {
+				path := filepath.Join(dir, "Tailscale", "tailscale.exe")
+				if _, err := os.Stat(path); err == nil {
+					return path, true
+				}
+			}
 		}
 	}
 	return "", false
@@ -202,6 +236,16 @@ var ErrPermission = errors.New("tailscale: permission denied talking to local da
 // as typed errors. Strings come from observed `tailscale cert` output;
 // any unmatched failure falls through to a wrapped generic error so the
 // admin tile still surfaces the verbatim message.
+//
+// **Permission-denied detection MUST be daemon-socket-specific**
+// (CodeRabbit on PR #102). A blanket "permission denied" match would
+// also catch filesystem write failures from `--cert-file` /
+// `--key-file` (e.g. dataDir is owned by a different user, or
+// `<dataDir>/tls/` is missing -w bits), and the admin tile would tell
+// the operator to join the `tailscale` group when the actual fix is
+// to repair dataDir permissions. Narrow phrases match what the
+// tailscaled daemon emits when the local socket refuses connections
+// from the running user; everything else falls through to verbatim.
 func classifyMintError(runErr error, stderr string) error {
 	low := strings.ToLower(stderr)
 	switch {
@@ -209,9 +253,19 @@ func classifyMintError(runErr error, stderr string) error {
 		strings.Contains(low, "https certificates are not enabled"),
 		strings.Contains(low, "enable https in the dns page"):
 		return ErrHTTPSCertsDisabled
-	case strings.Contains(low, "permission denied"),
-		strings.Contains(low, "operation not permitted"):
-		return ErrPermission
+	case strings.Contains(low, "tailscaled.sock"),
+		strings.Contains(low, "tailscaled: dial unix"),
+		strings.Contains(low, "failed to connect to tailscaled"),
+		strings.Contains(low, "tailscale daemon"):
+		// Only treat the permission-denied-ish phrasing as the
+		// typed group-membership error when stderr also names the
+		// tailscaled daemon socket. Generic permission errors fall
+		// through to the verbatim path so operators see the actual
+		// stderr (which usually has the exact path that's broken).
+		if strings.Contains(low, "permission denied") || strings.Contains(low, "operation not permitted") {
+			return ErrPermission
+		}
+		return fmt.Errorf("tailscale cert: %w (%s)", runErr, trimErr(stderr, runErr))
 	default:
 		return fmt.Errorf("tailscale cert: %w (%s)", runErr, trimErr(stderr, runErr))
 	}
@@ -249,12 +303,25 @@ func LECertPaths(dataDir string) (certPath, keyPath string) {
 	return filepath.Join(dir, "tailscale.crt"), filepath.Join(dir, "tailscale.key")
 }
 
-// EnsureCertDir creates the <dataDir>/tls/ directory at 0o700. Idempotent.
-// Caller invokes this once before MintCert so the cert/key write target
-// directory exists. Mirrors the convention internal/backup uses for
-// ensuring its <dataDir>/backups/ root.
+// EnsureCertDir creates the <dataDir>/tls/ directory at 0o700.
+// Idempotent. Caller invokes this once before MintCert so the
+// cert/key write target directory exists. Mirrors the convention
+// internal/backup uses for ensuring its <dataDir>/backups/ root.
+//
+// **Follow-up `os.Chmod` is load-bearing** (Qodo on PR #102):
+// `MkdirAll` only sets the mode at directory-create time. If the
+// directory was created earlier (manually, by a prior bridge build
+// at a more permissive mode, or by a test fixture) `MkdirAll`
+// returns nil without modifying the existing mode. The Chmod
+// follow-up forces 0o700 regardless of pre-existing mode — these
+// files include the Tailscale private key and must stay
+// owner-only.
 func EnsureCertDir(dataDir string) error {
-	return os.MkdirAll(filepath.Join(dataDir, "tls"), 0o700)
+	dir := filepath.Join(dataDir, "tls")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	return os.Chmod(dir, 0o700)
 }
 
 // silence unused-import warning if `logger` ends up being reorg'd later.
