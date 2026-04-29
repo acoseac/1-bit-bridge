@@ -142,13 +142,25 @@ func buildBackupSources(cfg *config.Config, configPath string) backup.Sources {
 	}
 }
 
+// startupBackupSkipThreshold is the minimum age of the most-recent
+// existing snapshot before a `bridge serve` cold-start writes a fresh
+// startup snapshot. An operator restarting the bridge 10x/day for
+// debugging or config tweaks shouldn't pay a 10-snapshot/day cost; the
+// scheduled-tick + manual `bridge backup` paths still cover the
+// "haven't booted in a week" case. Tied to the default scheduled
+// interval (24h) so a startup that lands inside a freshly-completed
+// scheduled snapshot's window is treated as a no-op.
+const startupBackupSkipThreshold = 24 * time.Hour
+
 // runBackupTicker is the periodic snapshot loop wired into serveCmd.
-// Runs an immediate snapshot on startup (so an operator who just
-// finished `bridge init` has a baseline before any pairings) and
-// then on the configured interval. All errors are logged to stderr
-// — never fatal, since a failed backup must never take down the
-// running bridge.
+// Runs an immediate snapshot on startup unless a recent one already
+// exists (so an operator who just finished `bridge init` has a
+// baseline before any pairings, but a debugging restart loop doesn't
+// cost one snapshot per boot), and then on the configured interval.
+// All errors are logged to stderr — never fatal, since a failed
+// backup must never take down the running bridge.
 func runBackupTicker(ctx context.Context, src backup.Sources, keep int, interval time.Duration, stdout, stderr io.Writer) {
+	backupsRoot := filepath.Join(src.DataDir, backup.BackupsDirName)
 	doSnapshot := func(triggered string) {
 		dst, err := backup.Snapshot(ctx, src)
 		if err != nil {
@@ -157,7 +169,6 @@ func runBackupTicker(ctx context.Context, src backup.Sources, keep int, interval
 		}
 		fmt.Fprintf(stdout, "backup (%s): wrote %s\n", triggered, dst)
 		if keep > 0 {
-			backupsRoot := filepath.Join(src.DataDir, backup.BackupsDirName)
 			deleted, err := backup.Prune(backupsRoot, keep)
 			if err != nil {
 				fmt.Fprintf(stderr, "backup (%s): prune failed: %v\n", triggered, err)
@@ -169,7 +180,21 @@ func runBackupTicker(ctx context.Context, src backup.Sources, keep int, interval
 		}
 	}
 
-	doSnapshot("startup")
+	// Throttle: if a snapshot exists within the skip threshold, the
+	// startup snapshot is redundant — skip it. List errors are
+	// non-fatal (rare; surfaces a misconfig or disk problem the user
+	// should see) and fall through to writing the snapshot anyway.
+	skip, latest, err := startupSnapshotShouldSkip(backupsRoot, time.Now().UTC(), startupBackupSkipThreshold)
+	switch {
+	case err != nil:
+		fmt.Fprintf(stderr, "backup (startup): list existing snapshots: %v (writing anyway)\n", err)
+		doSnapshot("startup")
+	case skip:
+		fmt.Fprintf(stdout, "backup (startup): recent snapshot at %s — skipping (threshold %s)\n",
+			latest.Format(time.RFC3339), startupBackupSkipThreshold)
+	default:
+		doSnapshot("startup")
+	}
 
 	t := time.NewTicker(interval)
 	defer t.Stop()
@@ -181,6 +206,28 @@ func runBackupTicker(ctx context.Context, src backup.Sources, keep int, interval
 			doSnapshot("scheduled")
 		}
 	}
+}
+
+// startupSnapshotShouldSkip reports whether the most-recent existing
+// snapshot under backupsRoot is younger than threshold (i.e. recent
+// enough that a startup snapshot would be redundant). Returns the
+// most-recent CreatedAt timestamp on hit so the caller can log it.
+// Returns (false, zero, err) on a List failure — caller should fall
+// back to writing the snapshot.
+func startupSnapshotShouldSkip(backupsRoot string, now time.Time, threshold time.Duration) (bool, time.Time, error) {
+	entries, err := backup.List(backupsRoot)
+	if err != nil {
+		return false, time.Time{}, err
+	}
+	if len(entries) == 0 {
+		return false, time.Time{}, nil
+	}
+	// backup.List sorts newest-first, so entries[0] is the most recent.
+	latest := entries[0].CreatedAt
+	if latest.IsZero() {
+		return false, time.Time{}, nil
+	}
+	return now.Sub(latest) < threshold, latest, nil
 }
 
 // buildRestoreTargets is the inverse of buildBackupSources — points

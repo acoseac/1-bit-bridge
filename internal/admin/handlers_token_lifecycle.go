@@ -84,6 +84,7 @@ func (s *Server) apiTokensRotate(w http.ResponseWriter, r *http.Request) {
 		Fingerprint: s.deps.Fingerprint,
 		URL:         req.URL,
 		PairURL:     pairURL,
+		Alternates:  alternates,
 		QRDataURL:   qrData,
 	})
 }

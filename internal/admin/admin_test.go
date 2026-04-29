@@ -224,6 +224,17 @@ func TestTokensMintListRevokeFlow(t *testing.T) {
 	if !strings.HasPrefix(mint.QRDataURL, "data:image/png;base64,") {
 		t.Errorf("QRDataURL missing or malformed: %q", truncForLog(mint.QRDataURL))
 	}
+	// Alternates surfaces the full URL list the QR baked in via the
+	// `urls=` field — the admin pair modal renders this as "Other URLs
+	// the device will try" so the operator sees what the iOS app will
+	// actually roam across, not just the operator-supplied primary.
+	// First entry MUST be the primary URL so older clients reading
+	// only `alternates[0]` see the same URL the operator typed.
+	if len(mint.Alternates) == 0 {
+		t.Errorf("Alternates is empty; expected at least the primary URL")
+	} else if mint.Alternates[0] != mint.URL {
+		t.Errorf("Alternates[0] = %q, want primary URL %q", mint.Alternates[0], mint.URL)
+	}
 
 	// List now has 1.
 	doJSON(t, h, "GET", "/api/tokens", nil, &list)
