@@ -647,8 +647,15 @@ func ArtworkCachePath(cacheDir, mbid string, size int) string {
 
 // writeArtworkAtomic writes bytes to path via tmp-file + rename so a
 // concurrent reader never sees a torn file.
+//
+// Cache directory perms are 0o700 (owner-only) — application-owned
+// caches shouldn't be world-readable on POSIX. Mirrors the
+// scanner-side `writeArtworkAtomicScan` so whichever writer touches
+// the dir first creates it at the same mode. Upgrades from prior
+// 0o755 deployments are accepted: existing dirs keep their mode
+// until a clean install / rmdir; new dirs land at 0o700.
 func writeArtworkAtomic(path string, data []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".caa-*.jpg.tmp")

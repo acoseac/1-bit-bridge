@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -355,22 +356,38 @@ func extractDSFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 // 15-track album with no embedded art does ReadDir + read + hash +
 // write exactly once total.
 func extractLocalArtwork(absPath string, t *Track, m tag.Metadata, ec *ExtractContext) {
-	// 1) Embedded picture, when the dhowden Metadata is available and
-	//    carries one. dhowden's Picture() returns nil for ID3v1 (no
-	//    image support) and for any other format whose parser didn't
-	//    surface a picture frame — both safe to skip.
+	// 1) Embedded picture, when the dhowden Metadata is available
+	//    and carries one. dhowden's Picture() returns nil for ID3v1
+	//    (no image support) and for any other format whose parser
+	//    didn't surface a picture frame — both safe to skip.
+	//
+	//    JPEG-only by design (PR #98 follow-up): MIME `image/jpeg`
+	//    or `image/jpg` (some taggers emit the variant), AND the
+	//    bytes must start with the JPEG SOI marker so an APIC frame
+	//    that misdeclares its MIME doesn't smuggle PNG/GIF bytes
+	//    into a `*-500.jpg` cache file. See folderArtCandidates and
+	//    looksLikeJPEG for the matching contract on the folder-level
+	//    branch.
 	if m != nil {
-		if pic := m.Picture(); pic != nil &&
-			len(pic.Data) > 0 &&
-			len(pic.Data) <= maxArtworkBytes &&
-			strings.HasPrefix(pic.MIMEType, "image/") {
-			if mbid, ok := stampLocalArtwork(pic.Data, ec.ArtworkCacheDir); ok {
-				t.ArtworkMBID = mbid
-				return
+		if pic := m.Picture(); pic != nil {
+			switch {
+			case len(pic.Data) > maxArtworkBytes:
+				scanLogger.Warn("embedded artwork too large; skipping",
+					"path", absPath, "bytes", len(pic.Data), "cap", maxArtworkBytes)
+			case len(pic.Data) == 0:
+				// nothing to stamp
+			case pic.MIMEType != "image/jpeg" && pic.MIMEType != "image/jpg":
+				scanLogger.Debug("embedded artwork non-JPEG MIME; skipping",
+					"path", absPath, "mime", pic.MIMEType)
+			case !looksLikeJPEG(pic.Data):
+				scanLogger.Warn("embedded artwork MIME claimed JPEG but bytes are not; skipping",
+					"path", absPath, "mime", pic.MIMEType)
+			default:
+				if mbid, ok := stampLocalArtwork(pic.Data, ec.ArtworkCacheDir); ok {
+					t.ArtworkMBID = mbid
+					return
+				}
 			}
-		} else if pic != nil && len(pic.Data) > maxArtworkBytes {
-			scanLogger.Warn("embedded artwork too large; skipping",
-				"path", absPath, "bytes", len(pic.Data), "cap", maxArtworkBytes)
 		}
 	}
 
@@ -394,11 +411,36 @@ func extractLocalArtwork(absPath string, t *Track, m tag.Metadata, ec *ExtractCo
 }
 
 // folderArtCandidates is the set of filenames the folder-level
-// fallback recognises. Compared case-insensitively (Linux filesystems
-// are case-sensitive — Windows-tagger output `Cover.JPG`,
-// `FOLDER.PNG`, etc. would silently miss a hardcoded lowercase
-// os.Stat).
-var folderArtCandidates = []string{"cover.jpg", "cover.png", "folder.jpg", "folder.png"}
+// fallback recognises. Compared case-insensitively (Linux
+// filesystems are case-sensitive — Windows-tagger output
+// `Cover.JPG`, `FOLDER.JPG`, etc. would silently miss a hardcoded
+// lowercase os.Stat).
+//
+// JPEG-only by design (PR #98 follow-up): the cache file path is
+// `<dir>/local-<hash>-500.jpg` and the API serves it with
+// `Content-Type: image/jpeg`. Mixing PNG bytes into that scheme
+// would force either a rename of the path convention OR a
+// per-request content-type sniff in the API handler — both
+// out-of-scope for V1. Operators with PNG-only artwork can
+// re-save as JPEG; PNG support is a follow-up that needs the
+// path-scheme + handler changes done together.
+var folderArtCandidates = []string{"cover.jpg", "folder.jpg"}
+
+// jpegSOI is the 3-byte JPEG Start-Of-Image marker (FF D8 FF). All
+// real JPEGs begin with these three bytes regardless of the APP0 /
+// APP1 / EXIF marker that follows; PNG begins with `89 50 4E 47`,
+// GIF with `47 49 46 38`. Sniffing the magic guards against ID3
+// APIC frames that lie about their MIME type AND folder-level files
+// misnamed `cover.jpg` while actually carrying PNG/GIF bytes.
+var jpegSOI = []byte{0xFF, 0xD8, 0xFF}
+
+// looksLikeJPEG reports whether data starts with the JPEG SOI
+// marker. Used as a defense-in-depth check before stampLocalArtwork
+// commits bytes to a `*-500.jpg` cache file — see folderArtCandidates
+// for why JPEG-only is the V1 contract.
+func looksLikeJPEG(data []byte) bool {
+	return len(data) >= len(jpegSOI) && bytes.HasPrefix(data, jpegSOI)
+}
 
 // scanFolderArtwork does a single os.ReadDir(dir) and matches entries
 // against folderArtCandidates via strings.EqualFold. On hit, reads
@@ -445,6 +487,17 @@ func scanFolderArtwork(dir, cacheDir string) folderArtResult {
 			scanLogger.Warn("folder-art read", "path", full, "err", err)
 			continue
 		}
+		// Magic-byte sniff: V1 cache scheme is JPEG-only. A user can
+		// name a PNG `cover.jpg` and the file will pass extension
+		// match — but committing those bytes to a `*-500.jpg` path
+		// served as `Content-Type: image/jpeg` would produce a
+		// misdeclared response. Skip + warn so the operator can
+		// re-save as JPEG.
+		if !looksLikeJPEG(data) {
+			scanLogger.Warn("folder-art bytes not JPEG; skipping",
+				"path", full, "first", fmt.Sprintf("%x", data[:min4(len(data))]))
+			continue
+		}
 		if mbid, ok := stampLocalArtwork(data, cacheDir); ok {
 			return folderArtResult{found: true, mbid: mbid}
 		}
@@ -452,6 +505,15 @@ func scanFolderArtwork(dir, cacheDir string) folderArtResult {
 		// in case the directory has another candidate (rare).
 	}
 	return folderArtResult{}
+}
+
+// min4 clamps to 4 to keep the warn-log preview short and avoid an
+// out-of-range slice on the rare 0-3-byte garbage file.
+func min4(n int) int {
+	if n < 4 {
+		return n
+	}
+	return 4
 }
 
 // stampLocalArtwork hashes data, computes the local-<hash> sentinel,
@@ -483,8 +545,15 @@ func stampLocalArtwork(data []byte, cacheDir string) (string, bool) {
 // path for a 30-line helper that's only called from two sites. Tmp
 // prefix is `.scan-*.jpg.tmp` so a stale temp tells you scanner-side
 // (not enricher-side) was the writer.
+//
+// Cache directory perms are 0o700 (owner-only) — application-owned
+// caches shouldn't be world-readable on POSIX. The enricher's mirror
+// helper at internal/enrich/enricher.go:writeArtworkAtomic uses the
+// same constant; whichever writer creates the dir first wins, and
+// upgrades from prior 0o755 deployments are accepted (existing dirs
+// stay at their previous mode until a clean install / rmdir).
 func writeArtworkAtomicScan(path string, data []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".scan-*.jpg.tmp")

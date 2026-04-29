@@ -338,9 +338,24 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 		// walker. Concurrent reads from N workers against the same
 		// SQLite handle are fine (modernc.org/sqlite WAL mode allows
 		// concurrent readers).
+		//
+		// Recovery exception (PR #98 follow-up): if the existing row
+		// carries a `local-<hash>` ArtworkMBID but the matching cache
+		// file is missing on disk (operator wiped <dataDir>/artwork
+		// after a scan, or copied the data dir without the artwork
+		// subdir), fall through to re-extract so the cache is
+		// rebuilt. Without this, the API serves 202+Retry-After
+		// indefinitely for the missing local- mbid because the
+		// enricher won't refetch a local- value. Pure UUID-bearing
+		// rows AND empty-ArtworkMBID rows still take the fast skip —
+		// the recovery cost is one os.Stat per `local-` track per
+		// scan, scoped narrowly to the one case the cache might
+		// genuinely need rebuilding.
 		existing, _ := s.store.GetTrack(pi.rel)
 		if existing != nil && existing.Size == pi.info.Size() && !existing.ModTime.Before(pi.info.ModTime()) {
-			continue
+			if !s.needsLocalArtworkRecovery(existing) {
+				continue
+			}
 		}
 		t := &Track{
 			Path:    pi.rel,
@@ -357,6 +372,33 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 			return
 		}
 	}
+}
+
+// needsLocalArtworkRecovery reports whether an unchanged-eligible
+// track must still be re-extracted because its locally-curated
+// artwork cache file went missing. Returns true only when the row
+// carries a `local-<hash>` ArtworkMBID AND the matching
+// `<artDir>/<mbid>-500.jpg` is absent. Pure UUID-bearing or empty-
+// MBID rows always return false — those don't have a scanner-side
+// cache to rebuild. Empty `s.artDir` also returns false (no local-
+// artwork pipeline configured).
+//
+// The os.Stat cost is paid only on tracks with the `local-` prefix,
+// not on the whole library — for a typical install this is 0% of
+// rows on first scan and at most a fraction once local-artwork
+// extraction has run.
+func (s *Scanner) needsLocalArtworkRecovery(t *Track) bool {
+	if s.artDir == "" {
+		return false
+	}
+	if !strings.HasPrefix(t.ArtworkMBID, "local-") {
+		return false
+	}
+	cachePath := filepath.Join(s.artDir, t.ArtworkMBID+"-500.jpg")
+	if _, err := os.Stat(cachePath); err == nil {
+		return false
+	}
+	return true
 }
 
 // runScanWriter is the single writer goroutine that consumes Tracks
