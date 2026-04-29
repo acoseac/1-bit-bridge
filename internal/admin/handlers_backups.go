@@ -1,7 +1,6 @@
 package admin
 
 import (
-	"encoding/json"
 	"net/http"
 	"path/filepath"
 
@@ -81,11 +80,15 @@ func (s *Server) apiBackupsCreate(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Keep *int `json:"keep,omitempty"`
 	}
-	if r.ContentLength > 0 {
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, adminMaxBodyBytes)).Decode(&body); err != nil {
-			writeError(w, http.StatusBadRequest, "bad-json", err.Error())
-			return
-		}
+	// Use the shared optional-body helper rather than gating on
+	// r.ContentLength — chunked uploads commonly arrive with
+	// ContentLength == -1 even when a real body is present, and the
+	// gate would silently drop the `keep` override (CodeRabbit on PR
+	// #99). The helper internally treats io.EOF as "no body" and is
+	// already wrapped with the 1 MiB MaxBytesReader cap from the
+	// admin-wide PR-#99 hardening pass.
+	if !decodeOptionalJSONBody(w, r, &body) {
+		return
 	}
 
 	// Snapshot uses the request context so a slow VACUUM doesn't
