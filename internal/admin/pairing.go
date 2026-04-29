@@ -86,6 +86,30 @@ func pairAlternates(primary, listenAddress string) []string {
 	return out
 }
 
+// ensurePrimaryFirst is the response-boundary defence-in-depth that
+// guarantees the JSON contract `pairResult.alternates[0] ==
+// pairResult.url` AND that `primary` appears exactly once. The helper
+// always rebuilds the slice — pre-fix an early-return on
+// `alternates[0] == primary` let `[primary, other, primary]` pass
+// through with the duplicate intact (CodeRabbit on PR #101 round 2).
+// Non-primary duplicates are NOT deduped here; that would expand the
+// helper's responsibility past the head-position contract and into
+// territory `pairAlternates` itself owns.
+//
+// Cheap to apply at every emission site; expensive to debug if the
+// invariant ever drifts. Do not inline at consumers — keep the single
+// helper so the contract has one definition.
+func ensurePrimaryFirst(primary string, alternates []string) []string {
+	out := make([]string, 0, len(alternates)+1)
+	out = append(out, primary)
+	for _, u := range alternates {
+		if u != primary {
+			out = append(out, u)
+		}
+	}
+	return out
+}
+
 // defaultBridgeURL is the best-guess URL the admin UI pre-fills in the
 // pairing modal — `https://<hostname>.local:<port>`. Users on networks
 // where mDNS is flaky can override in the modal input to use a LAN IP

@@ -224,6 +224,32 @@ func TestTokensMintListRevokeFlow(t *testing.T) {
 	if !strings.HasPrefix(mint.QRDataURL, "data:image/png;base64,") {
 		t.Errorf("QRDataURL missing or malformed: %q", truncForLog(mint.QRDataURL))
 	}
+	// Alternates surfaces the full URL list the QR baked in via the
+	// `urls=` field — the admin pair modal renders this as "Other URLs
+	// the device will try" so the operator sees what the iOS app will
+	// actually roam across, not just the operator-supplied primary.
+	// First entry MUST be the primary URL so older clients reading
+	// only `alternates[0]` see the same URL the operator typed.
+	if len(mint.Alternates) == 0 {
+		t.Errorf("Alternates is empty; expected at least the primary URL")
+	} else if mint.Alternates[0] != mint.URL {
+		t.Errorf("Alternates[0] = %q, want primary URL %q", mint.Alternates[0], mint.URL)
+	}
+
+	// Rotate must preserve the same alternates contract (CodeRabbit
+	// on PR #101) — the rotate response is the same shape and
+	// flows through the same `ensurePrimaryFirst` defence-in-depth.
+	var rotated pairResult
+	rotateCode := doJSON(t, h, "POST", "/api/tokens/"+mint.ID+"/rotate",
+		map[string]string{"url": mint.URL}, &rotated)
+	if rotateCode != http.StatusOK {
+		t.Fatalf("rotate: %d", rotateCode)
+	}
+	if len(rotated.Alternates) == 0 {
+		t.Errorf("rotate Alternates is empty; expected at least the primary URL")
+	} else if rotated.Alternates[0] != rotated.URL {
+		t.Errorf("rotate Alternates[0] = %q, want primary URL %q", rotated.Alternates[0], rotated.URL)
+	}
 
 	// List now has 1.
 	doJSON(t, h, "GET", "/api/tokens", nil, &list)

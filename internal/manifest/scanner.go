@@ -119,10 +119,31 @@ type folderArtPromise struct {
 // (the rest of the pipeline still works — tracks just don't get a
 // scanner-side `local-` ArtworkMBID and fall through to the enricher's
 // MusicBrainz / iTunes path).
+//
+// Reads the on-disk `last_full_scan` scan-state key into `s.lastFull`
+// so a fresh process keeps showing the most-recent successful scan
+// timestamp on the dashboard rather than "never" until the next scan
+// completes (which on a 50k-track library can be a long minute or
+// two). Read failures and parse failures fall through silently —
+// `LastFullScan()` returns the zero time and the dashboard shows
+// "never", same as a fresh install.
+//
+// `OpenStore` already created the `scan_state` table (CREATE TABLE
+// IF NOT EXISTS) before any caller can construct a Scanner against
+// the returned `*Store`, so this lookup is safe at init time. A
+// nil store is treated as "no persisted state" — the test harness
+// occasionally constructs a Scanner without a store backing it.
 func NewScanner(roots []string, store *Store, artworkCacheDir string) *Scanner {
 	s := &Scanner{store: store, artDir: artworkCacheDir}
 	rc := append([]string(nil), roots...)
 	s.roots.Store(&rc)
+	if store != nil {
+		if v, err := store.GetScanState("last_full_scan"); err == nil && v != "" {
+			if t, perr := time.Parse(time.RFC3339Nano, v); perr == nil && !t.IsZero() {
+				s.lastFull.Store(t.UTC().UnixNano())
+			}
+		}
+	}
 	return s
 }
 

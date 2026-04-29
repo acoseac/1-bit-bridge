@@ -39,7 +39,7 @@
         {{end}}
       </dd>
       <dt>Last full scan</dt>
-      <dd>{{timeAgo .Data.LastFullScan}}</dd>
+      <dd id="last-full-scan">{{timeAgo .Data.LastFullScan}}</dd>
       <dt>Roots</dt>
       <dd>
         {{range .Data.Roots}}<code>{{.}}</code>{{else}}<em>none configured</em>{{end}}

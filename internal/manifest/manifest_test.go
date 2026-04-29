@@ -750,6 +750,56 @@ func TestScannerIsScanningFlag(t *testing.T) {
 	}
 }
 
+func TestNewScannerSeedsLastFullScanFromStore(t *testing.T) {
+	// Pre-fix `LastFullScan()` only read the in-memory `s.lastFull`;
+	// the matching SQLite write at `last_full_scan` was a dead-code
+	// orphan with no reader. After a fresh process, the dashboard
+	// showed "never" until the next scan completed — even if the
+	// previous run had a successful scan minutes earlier. Now
+	// NewScanner seeds the in-memory atomic from the SQLite key so
+	// the timestamp survives restarts.
+	dbPath := filepath.Join(t.TempDir(), "bridge.db")
+	s, err := OpenStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Second)
+	if err := s.SetScanState("last_full_scan", want.Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("SetScanState: %v", err)
+	}
+	s.Close()
+
+	// Re-open as if a fresh process started.
+	s2, err := OpenStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	sc := NewScanner([]string{t.TempDir()}, s2, "")
+	got := sc.LastFullScan()
+	if got.IsZero() {
+		t.Fatalf("LastFullScan is zero after fresh-process construction; expected the SQLite-seeded value (%s)", want.Format(time.RFC3339))
+	}
+	if !got.Equal(want) {
+		t.Errorf("LastFullScan = %s, want %s", got.Format(time.RFC3339Nano), want.Format(time.RFC3339Nano))
+	}
+}
+
+func TestNewScannerLastFullScanZeroOnFreshDB(t *testing.T) {
+	// Cold install: nothing in scan_state. Seed must NOT panic and
+	// MUST leave LastFullScan as the zero time so the dashboard
+	// renders "never" — same as before the seeding code existed.
+	s, err := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	sc := NewScanner([]string{t.TempDir()}, s, "")
+	if !sc.LastFullScan().IsZero() {
+		t.Errorf("LastFullScan = %v, want zero on a fresh database", sc.LastFullScan())
+	}
+}
+
 // --- manifest ---
 
 func TestBuildManifestShape(t *testing.T) {

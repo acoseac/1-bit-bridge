@@ -507,6 +507,25 @@ dialog h2 { font-size: 18px; color: var(--accent); }
   padding: 8px 10px;
   font-size: 12px;
 }
+.kv-note {
+  color: var(--fg-muted);
+  font-size: 12px;
+  margin: 6px 0 0;
+}
+.pair-alternates {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.pair-alternates li code {
+  display: block;
+  padding: 6px 10px;
+  font-size: 12px;
+  background: var(--bg-elev, #f4f4f5);
+  border-radius: 4px;
+}
 
 /* "Reachable endpoints" panel on the devices page (PR #69 — paired
  * with iOS PR #150's per-endpoint visibility work). Each row is a

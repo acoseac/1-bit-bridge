@@ -84,3 +84,81 @@ func TestPairAlternatesPrependsPrimary(t *testing.T) {
 		t.Errorf("primary appeared %d times; want exactly once", count)
 	}
 }
+
+func TestEnsurePrimaryFirstHappyPathPassthrough(t *testing.T) {
+	primary := "https://primary:7788"
+	in := []string{primary, "https://b:7788", "https://c:7788"}
+	got := ensurePrimaryFirst(primary, in)
+	if len(got) != len(in) || got[0] != primary {
+		t.Errorf("ensurePrimaryFirst pass-through changed slice: in=%v out=%v", in, got)
+	}
+}
+
+func TestEnsurePrimaryFirstDedupsPrimaryEvenWhenAlreadyAtHead(t *testing.T) {
+	// CodeRabbit round 2 on PR #101: a duplicate primary anywhere in
+	// the input must collapse to a single primary at the head. The
+	// pre-fix early-return on `alternates[0] == primary` let the
+	// duplicate slip through unchanged.
+	primary := "https://primary:7788"
+	in := []string{primary, "https://b:7788", primary}
+	got := ensurePrimaryFirst(primary, in)
+	want := []string{primary, "https://b:7788"}
+	if len(got) != len(want) {
+		t.Fatalf("len = %d, want %d (got=%v)", len(got), len(want), got)
+	}
+	for i, u := range want {
+		if got[i] != u {
+			t.Errorf("got[%d] = %q, want %q (full got=%v)", i, got[i], u, got)
+		}
+	}
+	count := 0
+	for _, u := range got {
+		if u == primary {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("primary appeared %d times after dedup; want exactly once (got=%v)", count, got)
+	}
+}
+
+func TestEnsurePrimaryFirstReordersWhenPrimaryNotHead(t *testing.T) {
+	// CodeRabbit defence-in-depth: if a future helper change ever
+	// returns the primary in a non-head position, the response-
+	// boundary helper restores the contract.
+	primary := "https://primary:7788"
+	in := []string{"https://b:7788", primary, "https://c:7788"}
+	got := ensurePrimaryFirst(primary, in)
+	if got[0] != primary {
+		t.Errorf("ensurePrimaryFirst did not move primary to head: %v", got)
+	}
+	count := 0
+	for _, u := range got {
+		if u == primary {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("primary appeared %d times after normalization; want exactly once", count)
+	}
+}
+
+func TestEnsurePrimaryFirstPrependsWhenPrimaryMissing(t *testing.T) {
+	primary := "https://primary:7788"
+	in := []string{"https://b:7788", "https://c:7788"}
+	got := ensurePrimaryFirst(primary, in)
+	if got[0] != primary {
+		t.Errorf("ensurePrimaryFirst did not prepend missing primary: %v", got)
+	}
+	if len(got) != len(in)+1 {
+		t.Errorf("len = %d, want %d (one more than input)", len(got), len(in)+1)
+	}
+}
+
+func TestEnsurePrimaryFirstEmptyInputYieldsPrimaryOnly(t *testing.T) {
+	primary := "https://primary:7788"
+	got := ensurePrimaryFirst(primary, nil)
+	if len(got) != 1 || got[0] != primary {
+		t.Errorf("ensurePrimaryFirst on nil input = %v, want [%q]", got, primary)
+	}
+}

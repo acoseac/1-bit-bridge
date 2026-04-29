@@ -124,17 +124,33 @@ function initDashboard() {
   refreshBackups();
   refreshCertInfo();
 
+  // Cache DOM lookups outside the tick — these elements are
+  // first-paint-stable, so re-querying them every 3 s is wasted work
+  // (Gemini on PR #101). Same convention initLibrary follows for
+  // its tick targets.
+  const scanStatus = document.getElementById("scan-status");
+  const lastFull = document.getElementById("last-full-scan");
+
   // Live-refresh the top-line numbers every 3 s.
   const tick = async () => {
     try {
       const s = await API.get("/api/stats");
       setText("tracks-indexed", s.tracksIndexed);
       setText("device-count", s.deviceCount);
-      const scanStatus = document.getElementById("scan-status");
       if (scanStatus) {
         scanStatus.innerHTML = s.isScanning
           ? `<span class="badge running">scanning</span><span>· ${s.scanProgress} tracks so far</span>`
           : `<span class="badge idle">idle</span>`;
+      }
+      // "Last full scan" tile: pre-fix this was server-rendered once
+      // at page load and never repainted, so a scan that completed
+      // mid-session left the tile showing "never" until manual refresh.
+      // /api/stats already carries lastFullScan; just route it through
+      // here so the value tracks the in-memory truth at 3 s cadence.
+      if (lastFull) {
+        lastFull.textContent = s.lastFullScan
+          ? formatTimeAgo(new Date(s.lastFullScan))
+          : "never";
       }
       // Refresh the update tile from the cached status — cheap, no
       // GitHub call. The "Check now" button is the only path that
@@ -487,6 +503,7 @@ function initDevices() {
       document.getElementById("pair-url").textContent = r.url;
       document.getElementById("pair-token").textContent = r.rawToken;
       document.getElementById("pair-fp").textContent = r.fingerprint;
+      renderPairAlternates(r.alternates || [], r.url);
       stepForm.hidden = true;
       stepResult.hidden = false;
     } catch (err) {
@@ -545,6 +562,7 @@ function initDevices() {
         document.getElementById("pair-url").textContent = r.url;
         document.getElementById("pair-token").textContent = r.rawToken;
         document.getElementById("pair-fp").textContent = r.fingerprint;
+        renderPairAlternates(r.alternates || [], r.url);
         // Tweak the result-section heading so the operator knows
         // they're looking at a rotation, not a fresh pair.
         const heading = stepResult.querySelector("h2");
@@ -598,6 +616,35 @@ function initDevices() {
       }
     });
   });
+}
+
+// renderPairAlternates populates the Pair-modal "Other URLs the
+// device will try" list. The QR's bridge://pair?...&urls=... payload
+// already carries every alternate; the displayed list mirrors that
+// so the operator sees what they actually shared with the device
+// (pre-fix the modal showed only the primary URL, which mislead an
+// operator into thinking only one URL had been shared and the iOS
+// app couldn't roam). The primary URL appears first in the alternates
+// slice and is rendered separately as `pair-url`, so it's filtered
+// out here.
+function renderPairAlternates(alternates, primary) {
+  const block = document.getElementById("pair-alternates-block");
+  const list = document.getElementById("pair-alternates");
+  if (!block || !list) return;
+  list.replaceChildren();
+  const others = (alternates || []).filter((u) => u !== primary);
+  if (others.length === 0) {
+    block.hidden = true;
+    return;
+  }
+  for (const u of others) {
+    const li = document.createElement("li");
+    const code = document.createElement("code");
+    code.textContent = u;
+    li.appendChild(code);
+    list.appendChild(li);
+  }
+  block.hidden = false;
 }
 
 // parseDurationShorthand handles the prompt's free-text input —

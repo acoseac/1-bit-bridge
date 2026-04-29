@@ -58,9 +58,18 @@ type pairResult struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
 	Fingerprint string `json:"fingerprint"`
-	URL         string `json:"url"`       // operator-supplied bridge URL for iOS
-	PairURL     string `json:"pairURL"`   // bridge://pair?... for QR
-	QRDataURL   string `json:"qrDataURL"` // data:image/png;base64,... rendered QR
+	URL         string `json:"url"`     // operator-supplied bridge URL (head of Alternates)
+	PairURL     string `json:"pairURL"` // bridge://pair?... for QR
+	// Alternates is the full ordered URL list baked into the
+	// QR's `urls=` field — operator-supplied URL first, then every
+	// other reachable endpoint the bridge self-discovered (LAN IPv4/
+	// IPv6, .local mDNS, Tailscale magicdns). Surfaced to the admin
+	// pair modal so the operator sees what the iOS app will roam
+	// across, not just the single primary URL (a missing alternates
+	// list misled an operator into thinking only one URL had been
+	// shared with the device).
+	Alternates []string `json:"alternates,omitempty"`
+	QRDataURL  string   `json:"qrDataURL"` // data:image/png;base64,... rendered QR
 }
 
 type settingsResponse struct {
@@ -460,7 +469,7 @@ func (s *Server) apiTokensMint(w http.ResponseWriter, r *http.Request) {
 	// moment of pairing. Empty slice if enumeration fails — the
 	// operator-supplied primary URL is always the first entry, so the
 	// QR always pairs even on an interface-less environment.
-	alternates := pairAlternates(req.URL, s.deps.Cfg.ListenAddress)
+	alternates := ensurePrimaryFirst(req.URL, pairAlternates(req.URL, s.deps.Cfg.ListenAddress))
 	pairURL := buildPairURL(req.URL, rawToken, s.deps.Fingerprint, s.deps.Cfg.LibraryName, alternates)
 	qrData, err := qrDataURL(pairURL)
 	if err != nil {
@@ -475,6 +484,7 @@ func (s *Server) apiTokensMint(w http.ResponseWriter, r *http.Request) {
 		Fingerprint: s.deps.Fingerprint,
 		URL:         req.URL,
 		PairURL:     pairURL,
+		Alternates:  alternates,
 		QRDataURL:   qrData,
 	})
 }
