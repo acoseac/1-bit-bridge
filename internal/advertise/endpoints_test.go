@@ -240,6 +240,13 @@ func TestIsVirtualSwitchInterfaceMatchesKnownNames(t *testing.T) {
 		"tap-windows",
 		"tap-bridge0",
 		"Tunnelblick",
+		// Linux virtualisation/Docker variants (Gemini on PR #90 round 1)
+		"vmnet1",        // VMware Linux host-only
+		"vmnet8",        // VMware Linux NAT
+		"vboxnet0",      // VirtualBox Linux host-only
+		"virbr0",        // libvirt / KVM default bridge
+		"virbr0-nic",    // libvirt sub-iface
+		"br-1a2b3c4d5e", // Docker user-defined bridge
 	}
 	for _, n := range matches {
 		if !isVirtualSwitchInterface(n) {
