@@ -305,3 +305,119 @@ func containsIP(ips []net.IP, want string) bool {
 	}
 	return false
 }
+
+func TestParseHostFromURL_StripsSchemeAndPort(t *testing.T) {
+	cases := []struct {
+		in       string
+		wantHost string
+		wantIP   bool
+	}{
+		{"https://foo.example.com:7788", "foo.example.com", false},
+		{"https://192.168.1.10:7788", "192.168.1.10", true},
+		{"https://[fe80::1]:7788", "fe80::1", true},
+		{"https://bare.example.com", "bare.example.com", false},
+		{"not-a-url", "", false},
+		{"https://", "", false},
+	}
+	for _, c := range cases {
+		gotHost, gotIP := ParseHostFromURL(c.in)
+		if gotHost != c.wantHost || gotIP != c.wantIP {
+			t.Errorf("ParseHostFromURL(%q) = (%q, %v), want (%q, %v)",
+				c.in, gotHost, gotIP, c.wantHost, c.wantIP)
+		}
+	}
+}
+
+func TestGenerateWithOptions_IncludesExtraSANs(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "server.crt")
+	keyPath := filepath.Join(dir, "server.key")
+	opts := GenerateOptions{
+		Hostname:      "host.example.com",
+		ExtraDNSNames: []string{"magic.tailfoo.ts.net", "my-bridge.example.com"},
+		ExtraIPs: []net.IP{
+			net.ParseIP("100.91.73.88"),
+			net.ParseIP("192.168.1.10"),
+		},
+	}
+	if err := GenerateWithOptions(certPath, keyPath, opts); err != nil {
+		t.Fatalf("GenerateWithOptions: %v", err)
+	}
+	// Parse the cert and inspect SAN slots.
+	raw, err := os.ReadFile(certPath)
+	if err != nil {
+		t.Fatalf("read cert: %v", err)
+	}
+	block, _ := pem.Decode(raw)
+	if block == nil {
+		t.Fatalf("no PEM block")
+	}
+	parsed, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("parse cert: %v", err)
+	}
+
+	// DNSNames must include localhost (default), the hostname, and
+	// the operator extras.
+	wantDNS := []string{"localhost", "host.example.com", "magic.tailfoo.ts.net", "my-bridge.example.com"}
+	for _, want := range wantDNS {
+		found := false
+		for _, n := range parsed.DNSNames {
+			if strings.EqualFold(n, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("DNSNames missing %q; got %v", want, parsed.DNSNames)
+		}
+	}
+
+	// IPAddresses must include the loopback defaults plus the operator extras.
+	wantIPs := []net.IP{
+		net.IPv4(127, 0, 0, 1),
+		net.IPv6loopback,
+		net.IPv4zero,
+		net.ParseIP("100.91.73.88"),
+		net.ParseIP("192.168.1.10"),
+	}
+	for _, want := range wantIPs {
+		found := false
+		for _, ip := range parsed.IPAddresses {
+			if ip.Equal(want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("IPAddresses missing %v; got %v", want, parsed.IPAddresses)
+		}
+	}
+}
+
+func TestMergeDNSNames_DedupesCaseInsensitively(t *testing.T) {
+	got := mergeDNSNames("Host.Example.Com", []string{
+		"host.example.com",    // dup of hostname (case-fold)
+		"localhost",           // dup of default
+		"new.example.com",     // kept
+		"  new.example.com  ", // dup with whitespace
+		"",                    // dropped
+	})
+	// Expect: localhost, Host.Example.Com, new.example.com (3 entries).
+	if len(got) != 3 {
+		t.Errorf("merged DNSNames = %v, want 3 deduped entries", got)
+	}
+}
+
+func TestMergeIPs_DedupesByCanonicalForm(t *testing.T) {
+	got := mergeIPs([]net.IP{
+		net.ParseIP("127.0.0.1"), // dup of default
+		net.ParseIP("::1"),       // dup of default
+		net.ParseIP("10.0.0.5"),  // kept
+		net.ParseIP("10.0.0.5"),  // dup
+		nil,                      // dropped
+	})
+	if len(got) != 4 { // 127.0.0.1, ::1, 0.0.0.0, 10.0.0.5
+		t.Errorf("merged IPs = %v, want 4 deduped entries", got)
+	}
+}

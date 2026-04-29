@@ -28,6 +28,7 @@ import (
 	"github.com/mattn/go-isatty"
 
 	"github.com/acoseac/1-bit-bridge/internal/admin"
+	"github.com/acoseac/1-bit-bridge/internal/advertise"
 	"github.com/acoseac/1-bit-bridge/internal/api"
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
@@ -428,7 +429,20 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		certPath, keyPath = servertls.DefaultPaths(cfg.DataDir)
 	}
 	hostname, _ := os.Hostname()
-	cert, fingerprint, err := servertls.LoadOrGenerate(certPath, keyPath, hostname)
+	// Serve loads the existing cert if any; the SAN-stale check
+	// inside LoadOrGenerateWithOptions warns at startup when the
+	// on-disk cert's SANs don't cover the currently-advertised
+	// endpoints (Tailscale IPs/DNS, custom URLs). We pass the broader
+	// option set so that warning fires correctly — first-mint inside
+	// `bridge serve` also picks up the broader set on a fresh data
+	// dir without a prior `bridge init`.
+	sanCfg := advertise.CertSANConfig{CustomEndpoints: cfg.CustomEndpoints}
+	tlsOpts := servertls.GenerateOptions{
+		Hostname:      hostname,
+		ExtraDNSNames: advertise.GatherCertSANDNS(sanCfg),
+		ExtraIPs:      advertise.GatherCertSANIPs(sanCfg),
+	}
+	cert, fingerprint, err := servertls.LoadOrGenerateWithOptions(certPath, keyPath, tlsOpts)
 	if err != nil {
 		fmt.Fprintf(stderr, "TLS material: %v\n", err)
 		return 1

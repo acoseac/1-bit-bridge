@@ -17,6 +17,7 @@ import (
 
 	"github.com/mattn/go-isatty"
 
+	"github.com/acoseac/1-bit-bridge/internal/advertise"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/doctor"
 	"github.com/acoseac/1-bit-bridge/internal/packaging"
@@ -230,7 +231,18 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// LoadOrGenerate preserves it.
 	certPath, keyPath := servertls.DefaultPaths(dataDir)
 	host, _ := os.Hostname()
-	if _, fp, err := servertls.LoadOrGenerate(certPath, keyPath, host); err != nil {
+	// First-mint at `bridge init` time picks up the broader SAN set
+	// so the cert covers every URL the bridge will advertise from
+	// the very first serve. Re-init against an existing cert leaves
+	// the on-disk cert untouched (LoadOrGenerate path) and emits the
+	// SAN-stale warning if the operator's CustomEndpoints changed.
+	sanCfg := advertise.CertSANConfig{CustomEndpoints: cfg.CustomEndpoints}
+	opts := servertls.GenerateOptions{
+		Hostname:      host,
+		ExtraDNSNames: advertise.GatherCertSANDNS(sanCfg),
+		ExtraIPs:      advertise.GatherCertSANIPs(sanCfg),
+	}
+	if _, fp, err := servertls.LoadOrGenerateWithOptions(certPath, keyPath, opts); err != nil {
 		fmt.Fprintf(stderr, "TLS cert: %v\n", err)
 		return 1
 	} else {
