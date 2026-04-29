@@ -136,6 +136,9 @@ func SaveState(dataDir string, st State) error {
 			_ = os.Remove(tmpName)
 		}
 	}()
+	// Panic-safety FD close (LIFO order — runs before Remove). See
+	// internal/auth/auth.go for the rationale; pattern repeats here.
+	defer func() { _ = tmp.Close() }()
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		return fmt.Errorf("write tmp: %w", err)

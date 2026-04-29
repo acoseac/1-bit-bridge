@@ -572,6 +572,9 @@ func writeArtworkAtomicScan(path string, data []byte) error {
 			_ = os.Remove(tmpName)
 		}
 	}()
+	// Panic-safety FD close (LIFO order — runs before Remove). See
+	// internal/auth/auth.go for the rationale.
+	defer func() { _ = tmp.Close() }()
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		return err

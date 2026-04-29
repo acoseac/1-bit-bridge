@@ -21,7 +21,7 @@ func decodeOptionalJSONBody(w http.ResponseWriter, r *http.Request, dst any) (ok
 	if r.Body == nil {
 		return true
 	}
-	err := json.NewDecoder(r.Body).Decode(dst)
+	err := json.NewDecoder(http.MaxBytesReader(w, r.Body, adminMaxBodyBytes)).Decode(dst)
 	if err == nil || errors.Is(err, io.EOF) {
 		return true
 	}

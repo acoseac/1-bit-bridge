@@ -344,6 +344,9 @@ func copyFile(srcPath, dstPath string, mode os.FileMode) error {
 			_ = os.Remove(tmpName)
 		}
 	}()
+	// Panic-safety FD close (LIFO order — runs before Remove). See
+	// internal/auth/auth.go for the rationale.
+	defer func() { _ = tmp.Close() }()
 
 	if _, err := io.Copy(tmp, in); err != nil {
 		_ = tmp.Close()

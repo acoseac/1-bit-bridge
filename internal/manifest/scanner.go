@@ -997,6 +997,16 @@ func WriteManifest(w io.Writer, store *Store, roots []string, since time.Time) (
 	if !since.IsZero() {
 		sp = &since
 	}
+	// Per-track encoder reuses bw's buffer directly — no intermediate
+	// []byte allocation per track. For a 50k-track library the prior
+	// `json.Marshal(t) + bw.Write(b)` pattern allocated 50k separate
+	// byte slices and made the streaming path GC-bound rather than
+	// I/O-bound. `Encoder.Encode` appends `\n` after each value;
+	// JSON spec treats `\n` as ignorable whitespace inside an array,
+	// so the wire shape `{...}\n,{...}\n,{...}\n` stays valid for
+	// any spec-compliant parser (iOS JSONDecoder included). Trailing
+	// `]` lands after the last track's `\n` — also valid whitespace.
+	enc := json.NewEncoder(bw)
 	first := true
 	streamErr := store.StreamTracks(sp, func(t *Track) error {
 		if !first {
@@ -1005,12 +1015,7 @@ func WriteManifest(w io.Writer, store *Store, roots []string, since time.Time) (
 			}
 		}
 		first = false
-		b, err := json.Marshal(t)
-		if err != nil {
-			return err
-		}
-		_, err = bw.Write(b)
-		return err
+		return enc.Encode(t)
 	})
 	if streamErr != nil {
 		return fmt.Errorf("stream tracks: %w", streamErr)

@@ -248,6 +248,16 @@ func (s *Store) persist() error {
 			_ = os.Remove(tmpName)
 		}
 	}()
+	// Panic-safety net: every error path below explicitly Close()s
+	// before returning, but a panic between CreateTemp and the
+	// explicit Close (e.g. inside an http.Handler that net/http will
+	// recover from) would otherwise leak the file descriptor. The
+	// explicit Close on the success path runs first; this defer's
+	// second Close returns fs.ErrClosed and is ignored. Ordering is
+	// load-bearing — registered AFTER the Remove defer so it runs
+	// FIRST (LIFO), freeing the FD before Remove tries to unlink
+	// (Windows holds an open file from being removed).
+	defer func() { _ = tmp.Close() }()
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		return fmt.Errorf("write tmp: %w", err)
