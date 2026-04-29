@@ -448,6 +448,15 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		return 1
 	}
 
+	// SNI cert switcher. Routes incoming TLS handshakes to the
+	// self-signed cert (LAN/mDNS/IP-literal SNI — iOS pins this
+	// fingerprint at first contact) or to a Tailscale-issued LE cert
+	// when the SNI ends in the local node's MagicDNS suffix. The LE
+	// cert is loaded asynchronously by the auto-mint goroutine below;
+	// until that completes the manager falls through to self-signed
+	// for every connection (= today's behaviour).
+	certManager := servertls.NewManager(cert)
+
 	store, err := auth.OpenStore(filepath.Join(cfg.DataDir, "tokens.json"))
 	if err != nil {
 		fmt.Fprintf(stderr, "open token store: %v\n", err)
@@ -492,6 +501,21 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	scanCtx, scanCancel := context.WithCancel(ctx)
 	defer scanCancel()
 	go scanner.RunPeriodic(scanCtx, cfg.ScanInterval())
+
+	// Tailscale HTTPS auto-pilot: detect the local node's MagicDNS
+	// name + mint a Let's Encrypt cert via `tailscale cert` if the
+	// tailnet has HTTPS Certificates enabled. The cert is fed into
+	// `certManager`'s SNI switcher so connections to
+	// `<node>.<tailnet>.ts.net:7788` get the LE cert (ATS-trusted,
+	// no pinning needed) while LAN/mDNS/IP-literal connections keep
+	// getting the self-signed cert (iOS pins fingerprint at first
+	// contact). Detection + mint runs in a goroutine so a slow
+	// Tailscale CLI doesn't block the listen step. A renewer ticks
+	// every 24 h and re-mints inside the 14-day pre-expiry window.
+	// All errors logged but never fatal — bridge runs identically
+	// to today on hosts without Tailscale installed.
+	tailscaleAuto := newTailscaleAutoPilot(cfg.DataDir, certManager, stderr)
+	tailscaleAuto.Start(scanCtx)
 
 	// Optional fsnotify-based instant-update watcher. Off by default
 	// (cfg.LibraryWatch.Enabled). When on, the periodic full scan
@@ -646,9 +670,12 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		WithUpdater(updAdapter).
 		WithSessionTracker(sessions)
 	httpSrv := &http.Server{
-		Addr:      cfg.ListenAddress,
-		Handler:   apiSrv.Handler(),
-		TLSConfig: &tls.Config{Certificates: []tls.Certificate{*cert}, MinVersion: tls.VersionTLS12},
+		Addr:    cfg.ListenAddress,
+		Handler: apiSrv.Handler(),
+		TLSConfig: &tls.Config{
+			GetCertificate: certManager.Get,
+			MinVersion:     tls.VersionTLS12,
+		},
 		// Defence-in-depth against slow-loris / half-open sockets.
 		// WriteTimeout is deliberately left UNSET (zero) because
 		// `/v1/download` streams multi-GB DSD files to iOS (and needs
@@ -681,6 +708,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		ScanCtx:       scanCtx,
 		Updater:       updAdapter,
 		BackupSources: backupSources,
+		Tailscale:     tailscaleAdminAdapter{auto: tailscaleAuto},
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "admin: %v\n", err)
