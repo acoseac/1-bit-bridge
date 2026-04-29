@@ -548,6 +548,7 @@ dialog h2 { font-size: 18px; color: var(--accent); }
 }
 .endpoint-tag.lan { color: #5e9bff; }
 .endpoint-tag.tailscale { color: #d96aff; }
+.endpoint-tag.tailscale-dns { color: #b96aff; } /* slightly cooler purple — distinct from CGNAT IP */
 .endpoint-tag.mdns { color: #4ed1c4; }
 .endpoint-tag.public { color: #ff9b50; }
 .endpoint-url {

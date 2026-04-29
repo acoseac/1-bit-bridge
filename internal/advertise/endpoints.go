@@ -46,6 +46,17 @@ const (
 	// ClassMDNSHost is the `<shortHostname>.local:<port>` form. Useful
 	// on same-LAN Bonjour clients but otherwise unreachable.
 	ClassMDNSHost
+	// ClassTailscaleDNS is the host's Tailscale MagicDNS name (e.g.
+	// `home-pc.tailfoo.ts.net`). Ranked BEFORE the IP-based Tailscale
+	// classes because iOS 26.4+ Apple Transport Security (lower-layer
+	// `Network.framework` path) rejects the bridge's self-signed cert
+	// when accessed via a CGNAT IP literal — even with
+	// `NSAllowsLocalNetworking=true` — but accepts `*.ts.net` magic-DNS
+	// hostnames cleanly. See iOS-side `BridgeEndpointSkipReason
+	// .tailscaleATS` and the bridge's TLS-SAN broadening
+	// (PR feat/tls-broader-sans). Tailscale-IP entries remain in the
+	// list as fallback for older iOS / non-ATS clients.
+	ClassTailscaleDNS
 	// ClassTailscaleV4 is a Tailscale CGNAT (100.64.0.0/10) IPv4. Only
 	// reachable when both ends are on the same tailnet.
 	ClassTailscaleV4
@@ -73,6 +84,8 @@ func (c Class) String() string {
 		return "LAN"
 	case ClassMDNSHost:
 		return "mDNS"
+	case ClassTailscaleDNS:
+		return "Tailscale DNS"
 	case ClassTailscaleV4, ClassTailscaleV6:
 		return "Tailscale"
 	case ClassPublic:
@@ -165,6 +178,20 @@ func Endpoints(p Params) []Endpoint {
 		out = append(out, Endpoint{
 			URL:   fmt.Sprintf("https://%s.local:%d", host, port),
 			Class: ClassMDNSHost,
+		})
+	}
+
+	// Tailscale MagicDNS — append a `https://<host>.<tailnet>.ts.net`
+	// entry when the local Tailscale CLI surfaces one. Best-effort:
+	// `GetTailscaleDNSName` returns "" on every error path (Tailscale
+	// not installed, not running, JSON parse failure, CLI timeout).
+	// The resulting URL passes Apple ATS without re-pairing because
+	// iOS allowlists `*.ts.net`; the IP-based Tailscale entries stay
+	// in the list as fallback for non-ATS clients.
+	if magic := GetTailscaleDNSName(); magic != "" {
+		out = append(out, Endpoint{
+			URL:   fmt.Sprintf("https://%s:%d", magic, port),
+			Class: ClassTailscaleDNS,
 		})
 	}
 
