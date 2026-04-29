@@ -96,6 +96,87 @@ func TestWithAttrsAndGroup(t *testing.T) {
 	}
 }
 
+// TestDynamicHandlerCachesResolvedChain pins the perf optimization:
+// repeated log calls on the same logger should reuse the resolved
+// handler chain rather than rebuilding (and deep-cloning) it per
+// line. Pre-fix every Handle() called WithGroup/WithAttrs on the
+// base handler unconditionally, allocating 1-2 throwaway handler
+// clones per log line. We assert the cache pointer survives across
+// calls and the resolved chain object is `==` between calls — same
+// pointer means no rebuild fired.
+func TestDynamicHandlerCachesResolvedChain(t *testing.T) {
+	resetOnce()
+	var buf bytes.Buffer
+	Init(&buf)
+
+	base := Component("scanner") // 1 attr (component=scanner) under the hood
+
+	// First log call seeds the cache.
+	base.Info("first")
+	dh1 := base.Handler().(*dynamicHandler)
+	c1 := dh1.cache.Load()
+	if c1 == nil {
+		t.Fatal("cache empty after first log call")
+	}
+
+	// Second log call must hit the cache — same resolved pointer.
+	base.Info("second")
+	c2 := dh1.cache.Load()
+	if c2 == nil {
+		t.Fatal("cache cleared after second log call")
+	}
+	if c1.resolved != c2.resolved {
+		t.Errorf("cache MISS on steady-state log call: resolved chain rebuilt (c1=%p c2=%p)", c1.resolved, c2.resolved)
+	}
+	if c1.base != c2.base {
+		t.Errorf("base changed without slog.SetDefault: c1=%p c2=%p", c1.base, c2.base)
+	}
+}
+
+// TestDynamicHandlerCacheInvalidatesOnSetDefault pins the inverse
+// contract: when slog.SetDefault swaps the underlying handler, the
+// next Handle() call must rebuild against the new base. Without
+// this, post-Init / post-redirect logs would route to the old
+// handler indefinitely.
+func TestDynamicHandlerCacheInvalidatesOnSetDefault(t *testing.T) {
+	resetOnce()
+	var buf1, buf2 bytes.Buffer
+	Init(&buf1) // base 1: writes to buf1
+
+	logger := Component("scanner")
+	logger.Info("to-buf1")
+
+	dh := logger.Handler().(*dynamicHandler)
+	c1 := dh.cache.Load()
+	if c1 == nil {
+		t.Fatal("cache empty after first log call")
+	}
+
+	// Swap the default to a handler writing to buf2.
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf2, &slog.HandlerOptions{Level: slog.LevelInfo})))
+
+	// Next log should detect the base change, rebuild, and route to buf2.
+	logger.Info("to-buf2")
+
+	if !strings.Contains(buf2.String(), "to-buf2") {
+		t.Errorf("post-SetDefault log didn't reach the new handler; buf2=%q", buf2.String())
+	}
+	if strings.Contains(buf2.String(), "to-buf1") {
+		t.Errorf("first log leaked into new buffer: buf2=%q", buf2.String())
+	}
+
+	c2 := dh.cache.Load()
+	if c2 == nil {
+		t.Fatal("cache cleared on rebuild — should have been replaced, not cleared")
+	}
+	if c1.base == c2.base {
+		t.Errorf("base reference unchanged across SetDefault — cache invalidation didn't fire")
+	}
+	if c1.resolved == c2.resolved {
+		t.Errorf("resolved chain unchanged across SetDefault — cache rebuild didn't happen")
+	}
+}
+
 // resetOnce zeroes the package-level sync.Once so a subsequent
 // Init() reconfigures the handler. Test-only — production calls
 // Init exactly once at startup. We also reset slog.Default() so

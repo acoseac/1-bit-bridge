@@ -82,7 +82,7 @@ func (s *Server) apiBackupsCreate(w http.ResponseWriter, r *http.Request) {
 		Keep *int `json:"keep,omitempty"`
 	}
 	if r.ContentLength > 0 {
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, adminMaxBodyBytes)).Decode(&body); err != nil {
 			writeError(w, http.StatusBadRequest, "bad-json", err.Error())
 			return
 		}

@@ -563,6 +563,11 @@ func (c *Config) Save(path string) error {
 			_ = os.Remove(tmpName)
 		}
 	}()
+	// Panic-safety FD close. Registered AFTER the Remove defer so it
+	// runs first (LIFO) — Windows requires the FD closed before
+	// Remove can unlink. See internal/auth/auth.go for the rationale
+	// in detail; pattern repeats across every atomic-write helper.
+	defer func() { _ = tmp.Close() }()
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		return fmt.Errorf("write tmp: %w", err)

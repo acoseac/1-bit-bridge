@@ -233,7 +233,7 @@ func (s *Server) apiRootsAdd(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Path string `json:"path"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, adminMaxBodyBytes)).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "bad-json", err.Error())
 		return
 	}
@@ -331,7 +331,7 @@ func (s *Server) apiRootsRemove(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Path string `json:"path"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, adminMaxBodyBytes)).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "bad-json", err.Error())
 		return
 	}
@@ -433,7 +433,7 @@ func (s *Server) apiTokensMint(w http.ResponseWriter, r *http.Request) {
 		Name string `json:"name"`
 		URL  string `json:"url"` // bridge URL iOS will dial (e.g. https://host.local:7788)
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, adminMaxBodyBytes)).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "bad-json", err.Error())
 		return
 	}
@@ -541,7 +541,7 @@ type settingsPatchResponse struct {
 
 func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 	var p settingsPatch
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, adminMaxBodyBytes)).Decode(&p); err != nil {
 		writeError(w, http.StatusBadRequest, "bad-json", err.Error())
 		return
 	}

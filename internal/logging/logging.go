@@ -43,6 +43,7 @@ import (
 	"log/slog"
 	"os"
 	"sync"
+	"sync/atomic"
 )
 
 var (
@@ -94,14 +95,44 @@ func Component(name string) *slog.Logger {
 // indirection — at Handle time we re-apply the saved
 // groups+attrs to the live default handler before forwarding.
 //
-// Cost: one extra map-deref per log call (slog.Default() reads an
-// atomic) plus a linear loop over saved groups/attrs. Both are
-// dwarfed by the actual log formatting and write, so this is fine
-// for the bridge's log volume (a few records per second under
-// load).
+// **Resolution caching**: the WithGroup/WithAttrs replay is the
+// expensive part — each step deep-clones the handler tree. Pre-fix,
+// every log line produced 1-2 throwaway handler clones for a
+// `Component(name)` logger (1 attr from `.With("component", name)`).
+// The `cache` field memoizes the fully-resolved chain keyed on the
+// base handler pointer; on the steady-state path (slog.SetDefault
+// rare, log calls common) we hit the cache and bypass the clone.
+// Cache invalidation is implicit: when slog.SetDefault changes the
+// default, the next Handle() observes a different base and rebuilds.
+//
+// Concurrency: cache is `atomic.Pointer[cachedResolution]` so reads
+// are lock-free. Two goroutines racing on a cold cache may both
+// rebuild and Store; both produce identical chains (pure function of
+// h.groups + h.attrs + base) so the loser's wasted work is one
+// extra clone — same cost as the pre-fix per-call allocation,
+// applied just once instead of every line.
+//
+// **Enabled() stays uncached** — slog.Handler.Enabled is short-
+// circuit cheap on the level filter and doesn't deep-clone. Caching
+// it would burn complexity for no gain.
 type dynamicHandler struct {
 	groups []string    // ordered list of WithGroup names
 	attrs  []slog.Attr // accumulated WithAttrs additions
+
+	// cache stores the resolved handler chain keyed on the base
+	// `slog.Default().Handler()` we built it for. Lock-free
+	// reads; cache miss falls through to a rebuild + Store.
+	cache atomic.Pointer[cachedResolution]
+}
+
+// cachedResolution pairs a resolved handler chain with the base
+// handler value it was derived from. `base == slog.Default().Handler()`
+// is the cache validity check; a slog.SetDefault landing between two
+// Handle() calls makes the next call's `base` differ and forces a
+// rebuild.
+type cachedResolution struct {
+	base     slog.Handler
+	resolved slog.Handler
 }
 
 func (h *dynamicHandler) Enabled(ctx context.Context, level slog.Level) bool {
@@ -109,14 +140,22 @@ func (h *dynamicHandler) Enabled(ctx context.Context, level slog.Level) bool {
 }
 
 func (h *dynamicHandler) Handle(ctx context.Context, r slog.Record) error {
-	handler := slog.Default().Handler()
+	base := slog.Default().Handler()
+	if c := h.cache.Load(); c != nil && c.base == base {
+		return c.resolved.Handle(ctx, r)
+	}
+	resolved := base
 	for _, g := range h.groups {
-		handler = handler.WithGroup(g)
+		resolved = resolved.WithGroup(g)
 	}
 	if len(h.attrs) > 0 {
-		handler = handler.WithAttrs(h.attrs)
+		resolved = resolved.WithAttrs(h.attrs)
 	}
-	return handler.Handle(ctx, r)
+	// Store a fresh resolution. Concurrent rebuilds race on Store;
+	// last-writer-wins is fine because every winner produces the
+	// same (h.groups + h.attrs + base)-determined chain.
+	h.cache.Store(&cachedResolution{base: base, resolved: resolved})
+	return resolved.Handle(ctx, r)
 }
 
 func (h *dynamicHandler) WithAttrs(attrs []slog.Attr) slog.Handler {

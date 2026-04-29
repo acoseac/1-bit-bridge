@@ -41,6 +41,16 @@ import (
 
 var logger = logging.Component("admin")
 
+// adminMaxBodyBytes caps the JSON request body size every admin
+// handler accepts. 1 MiB is generous for any current admin operation
+// (token mint, settings patch, library-root edit, backup restore
+// confirmation) but rejects multi-gigabyte payloads before the JSON
+// decoder allocates. The admin listener binds loopback by default so
+// the practical attack surface is thin, but defense-in-depth is
+// cheap — a misbehaving local tool or future remote-admin bridge
+// shouldn't be able to OOM the server with a large request body.
+const adminMaxBodyBytes = 1 << 20
+
 //go:embed templates/*.html
 var templateFS embed.FS
 
