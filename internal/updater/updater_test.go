@@ -170,18 +170,30 @@ func TestUpdaterRecordsRateLimit(t *testing.T) {
 	}
 }
 
-func TestUpdaterTreats404AsNoData(t *testing.T) {
+// TestUpdaterSurfaces404AsLastError pins the contract that a 404 from
+// /releases/latest produces a non-empty LastError, so the dashboard's
+// "check failed" branch fires (LastError != "") instead of the
+// permanent "checking…" branch (LastError == "" && LatestVersion == "").
+//
+// 404 is GitHub's response to either (a) a public repo with no releases
+// yet, or (b) a private/missing repo on the unauthenticated API path —
+// the same sentinel covers both.
+func TestUpdaterSurfaces404AsLastError(t *testing.T) {
 	srv, _ := fakeReleasesServer(t, 404, nil)
 	u := New(Options{
 		RepoOverride: "fake/repo",
 		Client:       NewClient("fake/repo", time.Second).WithBaseURL(srv.URL),
 	})
 	got := u.CheckNow(context.Background())
-	if got.LastError != "" {
-		t.Errorf("LastError = %q, want empty for 404 (no releases yet)", got.LastError)
+	if got.LastError != ErrNoReleasesPublished.Error() {
+		t.Errorf("LastError = %q, want %q",
+			got.LastError, ErrNoReleasesPublished.Error())
 	}
 	if got.UpdateAvailable {
 		t.Error("UpdateAvailable = true on 404 (no candidate)")
+	}
+	if got.LatestVersion != "" {
+		t.Errorf("LatestVersion = %q, want empty on 404", got.LatestVersion)
 	}
 }
 

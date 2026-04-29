@@ -3,7 +3,21 @@
 BINARY      := bridge
 PKG         := ./cmd/bridge
 DIST        := dist
-LDFLAGS     := -s -w
+
+# VERSION is injected into internal/version.ServerVersion so that
+# `make build` artefacts report something meaningful in the admin
+# console and update-poll User-Agent. Auto-derives from `git describe`
+# on a working tree (yields e.g. "v0.1.1-4-gabcdef-dirty"); falls back
+# to "dev" on a fresh clone with no tags or on an extracted source
+# tarball (no .git). Explicit override wins: `make build VERSION=0.1.2`.
+#
+# Goreleaser sets ServerVersion via its own ldflags clause in
+# .goreleaser.yaml — release builds don't go through this Makefile.
+# But CI / dev builds / local `make build` artefacts must mirror that
+# injection or the binary reports the source default "0.0.1" forever.
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+LDFLAGS := -s -w \
+	-X github.com/acoseac/1-bit-bridge/internal/version.ServerVersion=$(VERSION)
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY) $(PKG)
