@@ -279,8 +279,12 @@ var tsULAv6 = &net.IPNet{
 // References for the canonical names:
 //   - "WSL" — Windows Subsystem for Linux standalone vNIC (WSL1 era)
 //   - "VirtualBox Host-Only Network" — VirtualBox
-//   - "VMware Network Adapter VMnet*" — VMware Workstation
+//   - "VMware Network Adapter VMnet*" — VMware Workstation (Windows)
+//   - "vmnet1" / "vmnet8" — VMware Workstation/Fusion on Linux/macOS
+//   - "vboxnet0" — VirtualBox host-only (Linux)
+//   - "virbr0" / "virbr0-nic" — libvirt / KVM bridge (Linux)
 //   - "Docker ..." — Docker for Windows
+//   - "br-<hash>" — Docker user-defined bridge networks (Linux)
 //   - "Bluetooth Network Connection" — Bluetooth PAN
 //   - "Npcap Loopback Adapter" — Wireshark
 //   - "TeamViewer VPN" — TeamViewer's VPN adapter
@@ -297,9 +301,13 @@ var tsULAv6 = &net.IPNet{
 var virtualSwitchPrefixes = []string{
 	"wsl",            // WSL2 standalone vNIC (matches "WSL" and "WSL2")
 	"virtualbox",     // VirtualBox host-only
-	"vmware",         // VMware Workstation/Player
+	"vmware",         // VMware Workstation/Player (Windows)
+	"vmnet",          // VMware Linux host-only/NAT: vmnet1, vmnet8 (Gemini on PR #90)
 	"vbox",           // VirtualBox alt naming
-	"docker",         // Docker for Windows
+	"vboxnet",        // VirtualBox Linux host-only: vboxnet0, vboxnet1, …
+	"virbr",          // libvirt / KVM bridges: virbr0, virbr0-nic (Gemini on PR #90)
+	"docker",         // Docker for Windows / Docker bridge
+	"br-",            // Docker user-defined bridge networks (Linux): br-<hash>
 	"npcap loopback", // Wireshark Npcap loopback adapter
 	"bluetooth",      // Bluetooth PAN connection
 	"teamviewer",     // TeamViewer VPN
