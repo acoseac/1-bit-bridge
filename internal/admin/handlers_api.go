@@ -71,6 +71,20 @@ type settingsResponse struct {
 	ScanIntervalSec int    `json:"scanIntervalSec"`
 	TLSCertPath     string `json:"tlsCertPath,omitempty"`
 	TLSKeyPath      string `json:"tlsKeyPath,omitempty"`
+	// CustomEndpoints is the operator-supplied URL list. JSON shape
+	// is the raw []string for programmatic clients (curl-driven
+	// config). The settings template renders via the sibling
+	// CustomEndpointsText field (joined with "\n") so the textarea
+	// input round-trips cleanly through form-encoding.
+	CustomEndpoints []string `json:"customEndpoints,omitempty"`
+	// CustomEndpointsText is the newline-joined form of
+	// CustomEndpoints, populated server-side for template
+	// consumption. Not part of the public JSON contract — emitted
+	// with `omitempty` so curl callers don't see a redundant field
+	// when the slice is empty. Template-only sibling; programmatic
+	// PATCH consumers send `customEndpoints` (array form) which
+	// the patch handler accepts directly.
+	CustomEndpointsText string `json:"customEndpointsText,omitempty"`
 	// Phase C update settings — auto-install opt-in + cadence +
 	// quiet-hours window. All optional in the YAML and on the wire.
 	UpdateAutoInstall        bool   `json:"updateAutoInstall"`
@@ -161,7 +175,10 @@ func (s *Server) apiEndpoints(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, []adminEndpointEntry{})
 		return
 	}
-	eps := advertise.Endpoints(advertise.Params{Port: port})
+	eps := advertise.Endpoints(advertise.Params{
+		Port:            port,
+		CustomEndpoints: s.deps.Cfg.CustomEndpoints,
+	})
 	out := make([]adminEndpointEntry, 0, len(eps))
 	for _, e := range eps {
 		out = append(out, adminEndpointEntry{
@@ -509,6 +526,11 @@ type settingsPatch struct {
 	UpdateAutoInstall        *bool   `json:"updateAutoInstall,omitempty"`
 	UpdateQuietHours         *string `json:"updateQuietHours,omitempty"`
 	UpdateCheckIntervalHours *int    `json:"updateCheckIntervalHours,omitempty"`
+	// CustomEndpoints accepts the array form (programmatic clients)
+	// or the textarea form via CustomEndpointsText (web UI). Sending
+	// both is supported but redundant; the array form wins.
+	CustomEndpoints     *[]string `json:"customEndpoints,omitempty"`
+	CustomEndpointsText *string   `json:"customEndpointsText,omitempty"`
 }
 
 type settingsPatchResponse struct {
@@ -574,6 +596,20 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 			restart = true
 		}
 	}
+	// Custom endpoints: array form takes precedence; textarea form is
+	// split on newlines (also tolerates `,` so curl-driven flat
+	// strings work). Validate() runs at the end and prunes invalid
+	// entries — we don't reject the whole patch on per-entry typos.
+	// Live behaviour: handlers read `cfg.CustomEndpoints` per-request
+	// (Endpoints / /v1/health), so config-on-disk + in-memory cfg
+	// updates suffice — no restart_required for this field alone.
+	// Cert SAN coverage for new entries is operator-driven via the
+	// admin Cert tile (PR feat/tls-broader-sans).
+	if p.CustomEndpoints != nil {
+		s.deps.Cfg.CustomEndpoints = *p.CustomEndpoints
+	} else if p.CustomEndpointsText != nil {
+		s.deps.Cfg.CustomEndpoints = splitCustomEndpointsText(*p.CustomEndpointsText)
+	}
 
 	if err := s.deps.Cfg.Validate(); err != nil {
 		*s.deps.Cfg = backup
@@ -586,6 +622,29 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, settingsPatchResponse{RestartRequired: restart})
+}
+
+// splitCustomEndpointsText parses the textarea form of the custom-
+// endpoints field. Tolerates newline OR comma separators (paste-
+// friendly curl-from-spreadsheet input) and trims surrounding
+// whitespace per entry. Empty entries drop silently. Validation /
+// HTTPS-only filtering happens downstream in `cfg.Validate()`.
+func splitCustomEndpointsText(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	// Replace commas with newlines so the single Split below handles
+	// both delimiters. Two passes would be equivalent; one is faster.
+	normalised := strings.ReplaceAll(s, ",", "\n")
+	lines := strings.Split(normalised, "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			out = append(out, line)
+		}
+	}
+	return out
 }
 
 // --- GET /api/updates ---

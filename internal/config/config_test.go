@@ -450,3 +450,102 @@ func TestBackupIntervalHoursNegativeRejected(t *testing.T) {
 		t.Errorf("Load(intervalHours=-3) should fail validation, got nil")
 	}
 }
+
+func TestValidateCustomEndpoints_HappyPath(t *testing.T) {
+	in := []string{
+		"https://bridge.example.com:7788",
+		"https://192.168.1.10:7788",
+		"https://[fe80::1]:7788",
+	}
+	kept, warns := ValidateCustomEndpoints(in)
+	if len(kept) != 3 {
+		t.Errorf("expected 3 kept, got %d: %v", len(kept), kept)
+	}
+	if len(warns) != 0 {
+		t.Errorf("expected no warnings, got %v", warns)
+	}
+}
+
+func TestValidateCustomEndpoints_DropsHTTP(t *testing.T) {
+	in := []string{
+		"http://bridge.example.com:7788",  // wrong scheme
+		"https://bridge.example.com:7788", // ok
+	}
+	kept, warns := ValidateCustomEndpoints(in)
+	if len(kept) != 1 || kept[0] != "https://bridge.example.com:7788" {
+		t.Errorf("kept = %v, want one HTTPS entry", kept)
+	}
+	if len(warns) != 1 {
+		t.Errorf("expected 1 warning for http://, got %v", warns)
+	}
+}
+
+func TestValidateCustomEndpoints_DropsMalformed(t *testing.T) {
+	in := []string{
+		"not-a-url",                 // missing scheme
+		":://broken",                // gibberish
+		"https://",                  // missing host
+		"https://valid.example.com", // ok
+	}
+	kept, warns := ValidateCustomEndpoints(in)
+	if len(kept) != 1 || kept[0] != "https://valid.example.com" {
+		t.Errorf("kept = %v, want one valid entry", kept)
+	}
+	if len(warns) < 2 {
+		t.Errorf("expected >= 2 warnings, got %v", warns)
+	}
+}
+
+func TestValidateCustomEndpoints_TrimsAndSkipsBlanks(t *testing.T) {
+	in := []string{
+		"  https://a.example.com  ",
+		"",
+		"   ",
+		"https://b.example.com",
+	}
+	kept, _ := ValidateCustomEndpoints(in)
+	if len(kept) != 2 {
+		t.Errorf("kept = %v, want 2 trimmed entries", kept)
+	}
+	// Trim is observable: the kept entry must be the trimmed form.
+	if kept[0] != "https://a.example.com" {
+		t.Errorf("kept[0] = %q, want trimmed", kept[0])
+	}
+}
+
+func TestValidateCustomEndpoints_Dedupes(t *testing.T) {
+	in := []string{
+		"https://a.example.com:7788",
+		"https://a.example.com:7788", // duplicate
+		"https://b.example.com:7788",
+	}
+	kept, _ := ValidateCustomEndpoints(in)
+	if len(kept) != 2 {
+		t.Errorf("kept = %v, want 2 deduped entries", kept)
+	}
+}
+
+// TestConfigValidatePrunesCustomEndpoints verifies that Validate()
+// rewrites the slice in-place — invalid entries are dropped without
+// failing the whole config load.
+func TestConfigValidatePrunesCustomEndpoints(t *testing.T) {
+	libRoot := t.TempDir()
+	c := &Config{
+		LibraryRoots:    []string{libRoot},
+		ListenAddress:   ":7788",
+		AdminAddress:    "127.0.0.1:7789",
+		ScanIntervalSec: 600,
+		LibraryName:     "test",
+		CustomEndpoints: []string{
+			"https://valid.example.com",
+			"http://wrong-scheme.example.com",
+			"garbage",
+		},
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate should not fail on bad entries: %v", err)
+	}
+	if len(c.CustomEndpoints) != 1 {
+		t.Errorf("post-Validate CustomEndpoints = %v, want only the valid entry", c.CustomEndpoints)
+	}
+}
