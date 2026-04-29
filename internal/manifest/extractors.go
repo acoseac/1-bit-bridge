@@ -1,6 +1,8 @@
 package manifest
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -8,11 +10,36 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	flac "github.com/mewkiz/flac"
 
 	tag "github.com/dhowden/tag"
 )
+
+// maxArtworkBytes caps the per-image bytes the local-artwork extractor
+// will hash + cache. Embedded ID3 APIC pictures larger than ~5 MB are
+// nearly always misuse (lossless TIFFs in tags); 10 MB is a generous
+// upper bound that protects RAM under the parallel-worker model
+// (`runtime.NumCPU()` workers each hold at most one buffer this size).
+// Overrun is logged + skipped; the track still gets indexed without an
+// ArtworkMBID (the enricher's MusicBrainz path remains as fallback).
+const maxArtworkBytes = 10 * 1024 * 1024 // 10 MiB
+
+// ExtractContext carries the side channels Extract needs to perform
+// local-artwork extraction (write cached JPEGs, dedupe per-directory
+// folder.jpg lookups). nil → tag-only extraction (the original Extract
+// behaviour); non-nil with empty ArtworkCacheDir → same effect.
+//
+// Why a struct instead of two positional params: callers (the scanner's
+// runScanWorker) already build one per-worker and reuse it across every
+// track — passing two args at every call site would be ergonomic noise
+// and any future addition (e.g. a metrics counter) becomes a viral
+// signature change.
+type ExtractContext struct {
+	ArtworkCacheDir string    // <dataDir>/artwork; "" disables local-art
+	FolderArtCache  *sync.Map // dir-path string -> *folderArtPromise
+}
 
 // Ext enumerates the file extensions the scanner considers. Case-
 // insensitive; leading "." included for filepath.Ext matching.
@@ -36,19 +63,35 @@ var Ext = map[string]bool{
 // Missing or unparseable tags are NOT an error — a file with no metadata
 // still gets indexed (we fall back to path-derived heuristics later). Only
 // read/open errors propagate.
+//
+// Equivalent to ExtractWithContext(absPath, t, nil) — preserved for
+// callers (existing tests, anyone with a one-shot tag read) that don't
+// run the local-artwork extraction pipeline.
 func Extract(absPath string, t *Track) error {
+	return ExtractWithContext(absPath, t, nil)
+}
+
+// ExtractWithContext is the context-aware variant of Extract. When ec
+// is non-nil and ec.ArtworkCacheDir is non-empty, after tag extraction
+// the local-artwork pipeline runs: an embedded ID3 APIC picture (or a
+// directory-level cover.jpg / folder.jpg / cover.png / folder.png) is
+// hashed (SHA-256), atomic-written to
+// <ec.ArtworkCacheDir>/local-<hash>-500.jpg, and t.ArtworkMBID is
+// stamped with `local-<hash>`. The /v1/artwork handler serves the file
+// transparently via its relaxed MBID regex.
+func ExtractWithContext(absPath string, t *Track, ec *ExtractContext) error {
 	ext := strings.ToLower(filepath.Ext(absPath))
 	switch ext {
 	case ".dsf":
-		return extractDSF(absPath, t)
+		return extractDSFWithContext(absPath, t, ec)
 	case ".flac":
 		if err := extractFLACFormat(absPath, t); err != nil {
 			// Format parse failure is fine — tags may still work.
 			_ = err
 		}
-		return extractViaDhowden(absPath, t)
+		return extractViaDhowdenWithContext(absPath, t, ec)
 	default:
-		return extractViaDhowden(absPath, t)
+		return extractViaDhowdenWithContext(absPath, t, ec)
 	}
 }
 
@@ -57,6 +100,15 @@ func Extract(absPath string, t *Track) error {
 // and OGG. Unsupported extensions return nil without modifying t — a file
 // indexed only by name is still useful, and enrichment (PR #8) can fill in.
 func extractViaDhowden(absPath string, t *Track) error {
+	return extractViaDhowdenWithContext(absPath, t, nil)
+}
+
+// extractViaDhowdenWithContext is the variant called from
+// ExtractWithContext. After populating tag fields it hands the
+// dhowden Metadata (which holds the embedded APIC bytes via its
+// Picture() accessor) to extractLocalArtwork so embedded art and the
+// folder.jpg fallback both run from the same code path.
+func extractViaDhowdenWithContext(absPath string, t *Track, ec *ExtractContext) error {
 	f, err := os.Open(absPath)
 	if err != nil {
 		return err
@@ -64,13 +116,27 @@ func extractViaDhowden(absPath string, t *Track) error {
 	defer f.Close()
 	m, err := tag.ReadFrom(f)
 	if errors.Is(err, tag.ErrNoTagsFound) {
+		// No embedded tags — but a folder.jpg next to the file is
+		// still possible. Run extractLocalArtwork with m=nil so the
+		// embedded branch is skipped and only the folder-level
+		// fallback fires.
+		if ec != nil && ec.ArtworkCacheDir != "" {
+			extractLocalArtwork(absPath, t, nil, ec)
+		}
 		return nil
 	}
 	if err != nil {
 		// Corrupt/partial tag — skip but don't fail the whole scan.
+		// Folder fallback is still worth attempting.
+		if ec != nil && ec.ArtworkCacheDir != "" {
+			extractLocalArtwork(absPath, t, nil, ec)
+		}
 		return nil
 	}
 	populateFromTagMetadata(m, t)
+	if ec != nil && ec.ArtworkCacheDir != "" {
+		extractLocalArtwork(absPath, t, m, ec)
+	}
 	return nil
 }
 
@@ -203,6 +269,15 @@ func extractFLACFormat(absPath string, t *Track) error {
 // same walk; we mirror it so manifest data matches what the app would
 // extract locally.
 func extractDSF(absPath string, t *Track) error {
+	return extractDSFWithContext(absPath, t, nil)
+}
+
+// extractDSFWithContext is the variant called from ExtractWithContext.
+// Identical format-parse logic; after tag extraction it runs the
+// local-artwork hook so embedded APIC art inside DSF's ID3v2 chunk gets
+// cached the same way as MP3 / FLAC / M4A. Folder-level cover.jpg
+// fallback fires whether or not the DSF carried embedded tags.
+func extractDSFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 	f, err := os.Open(absPath)
 	if err != nil {
 		return err
@@ -244,15 +319,199 @@ func extractDSF(absPath string, t *Track) error {
 	}
 
 	// Tags: ID3v2 at metadataPointer (if non-zero).
+	var dsfMeta tag.Metadata
 	if metadataPointer > 0 {
 		if _, err := f.Seek(int64(metadataPointer), io.SeekStart); err != nil {
-			return nil // tags optional
+			// Tags optional — but the folder-level fallback is still
+			// worth attempting since the directory-level cache
+			// doesn't depend on tag-read success.
+			if ec != nil && ec.ArtworkCacheDir != "" {
+				extractLocalArtwork(absPath, t, nil, ec)
+			}
+			return nil
 		}
 		m, err := tag.ReadID3v2Tags(f)
 		if err == nil && m != nil {
 			populateFromTagMetadata(m, t)
+			dsfMeta = m
 		}
 	}
+	if ec != nil && ec.ArtworkCacheDir != "" {
+		extractLocalArtwork(absPath, t, dsfMeta, ec)
+	}
+	return nil
+}
+
+// extractLocalArtwork stamps t.ArtworkMBID with `local-<sha256>` when
+// embedded artwork (preferred) or folder-level art (cover.jpg /
+// folder.jpg / cover.png / folder.png, case-insensitive) is found.
+// Caller must guarantee ec != nil and ec.ArtworkCacheDir != "".
+//
+// The embedded branch wins on a per-track basis — two tracks in the
+// same album with different embedded APIC images each get their own
+// hash-keyed cache file. Two tracks with byte-identical embedded
+// artwork share one cache file via SHA-256 dedup (desired efficiency,
+// not a bug). The folder-level branch is single-flighted so a
+// 15-track album with no embedded art does ReadDir + read + hash +
+// write exactly once total.
+func extractLocalArtwork(absPath string, t *Track, m tag.Metadata, ec *ExtractContext) {
+	// 1) Embedded picture, when the dhowden Metadata is available and
+	//    carries one. dhowden's Picture() returns nil for ID3v1 (no
+	//    image support) and for any other format whose parser didn't
+	//    surface a picture frame — both safe to skip.
+	if m != nil {
+		if pic := m.Picture(); pic != nil &&
+			len(pic.Data) > 0 &&
+			len(pic.Data) <= maxArtworkBytes &&
+			strings.HasPrefix(pic.MIMEType, "image/") {
+			if mbid, ok := stampLocalArtwork(pic.Data, ec.ArtworkCacheDir); ok {
+				t.ArtworkMBID = mbid
+				return
+			}
+		} else if pic != nil && len(pic.Data) > maxArtworkBytes {
+			scanLogger.Warn("embedded artwork too large; skipping",
+				"path", absPath, "bytes", len(pic.Data), "cap", maxArtworkBytes)
+		}
+	}
+
+	// 2) Folder-level fallback, single-flighted per directory so a
+	//    15-track album doesn't ReadDir + hash 15 times.
+	dir := filepath.Dir(absPath)
+	if ec.FolderArtCache == nil {
+		// Defensive: caller should always pass a cache, but a nil
+		// cache means we'd race on every track. Skip rather than
+		// reintroduce the stampede.
+		return
+	}
+	promiseI, _ := ec.FolderArtCache.LoadOrStore(dir, &folderArtPromise{})
+	promise := promiseI.(*folderArtPromise)
+	promise.once.Do(func() {
+		promise.res = scanFolderArtwork(dir, ec.ArtworkCacheDir)
+	})
+	if promise.res.found {
+		t.ArtworkMBID = promise.res.mbid
+	}
+}
+
+// folderArtCandidates is the set of filenames the folder-level
+// fallback recognises. Compared case-insensitively (Linux filesystems
+// are case-sensitive — Windows-tagger output `Cover.JPG`,
+// `FOLDER.PNG`, etc. would silently miss a hardcoded lowercase
+// os.Stat).
+var folderArtCandidates = []string{"cover.jpg", "cover.png", "folder.jpg", "folder.png"}
+
+// scanFolderArtwork does a single os.ReadDir(dir) and matches entries
+// against folderArtCandidates via strings.EqualFold. On hit, reads
+// the file (capped at maxArtworkBytes), hashes the bytes, atomically
+// writes <cacheDir>/local-<hash>-500.jpg, and returns
+// folderArtResult{found: true, mbid: "local-<hash>"}. On miss or any
+// I/O error, returns folderArtResult{found: false}.
+func scanFolderArtwork(dir, cacheDir string) folderArtResult {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return folderArtResult{}
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		matched := false
+		for _, candidate := range folderArtCandidates {
+			if strings.EqualFold(name, candidate) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		full := filepath.Join(dir, name)
+		// Stat to enforce the size cap before we slurp the file —
+		// otherwise a misnamed huge image (someone called their
+		// 4K wallpaper cover.jpg) lands in RAM before we reject it.
+		info, err := entry.Info()
+		if err != nil {
+			scanLogger.Warn("folder-art stat", "path", full, "err", err)
+			continue
+		}
+		if info.Size() > maxArtworkBytes {
+			scanLogger.Warn("folder-art too large; skipping",
+				"path", full, "bytes", info.Size(), "cap", maxArtworkBytes)
+			continue
+		}
+		data, err := os.ReadFile(full)
+		if err != nil {
+			scanLogger.Warn("folder-art read", "path", full, "err", err)
+			continue
+		}
+		if mbid, ok := stampLocalArtwork(data, cacheDir); ok {
+			return folderArtResult{found: true, mbid: mbid}
+		}
+		// stampLocalArtwork already logged the failure; fall through
+		// in case the directory has another candidate (rare).
+	}
+	return folderArtResult{}
+}
+
+// stampLocalArtwork hashes data, computes the local-<hash> sentinel,
+// and writes <cacheDir>/local-<hash>-500.jpg atomically. If the file
+// already exists (idempotent across re-scans / cache-dir wipe
+// recovery on the next pass), the write is skipped. Returns
+// (mbid, true) on success, ("", false) on any I/O error (logged).
+func stampLocalArtwork(data []byte, cacheDir string) (string, bool) {
+	sum := sha256.Sum256(data)
+	mbid := "local-" + hex.EncodeToString(sum[:])
+	path := filepath.Join(cacheDir, mbid+"-500.jpg")
+	if _, err := os.Stat(path); err == nil {
+		// Already on disk — no-op write, return the mbid so the
+		// track gets stamped. Stat-before-write also recovers
+		// transparently from a wiped cache-dir on the next scan.
+		return mbid, true
+	}
+	if err := writeArtworkAtomicScan(path, data); err != nil {
+		scanLogger.Error("write local artwork", "path", path, "err", err)
+		return "", false
+	}
+	return mbid, true
+}
+
+// writeArtworkAtomicScan writes data to path via tmp file + rename so
+// a concurrent reader (the API handler) never sees a torn file.
+// Mirrors enrich.writeArtworkAtomic; the duplication is deliberate —
+// extracting to a shared package would add a third internal/* import
+// path for a 30-line helper that's only called from two sites. Tmp
+// prefix is `.scan-*.jpg.tmp` so a stale temp tells you scanner-side
+// (not enricher-side) was the writer.
+func writeArtworkAtomicScan(path string, data []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".scan-*.jpg.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		if tmpName != "" {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	tmpName = ""
 	return nil
 }
 

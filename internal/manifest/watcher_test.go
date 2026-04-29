@@ -28,7 +28,7 @@ func TestWatcherDebounce(t *testing.T) {
 	}
 	defer store.Close()
 
-	scanner := NewScanner([]string{libDir}, store)
+	scanner := NewScanner([]string{libDir}, store, "")
 	w, err := NewWatcher(scanner, 50*time.Millisecond)
 	if err != nil {
 		t.Fatalf("NewWatcher: %v", err)
@@ -76,7 +76,7 @@ func TestWatcherIgnoresDotfiles(t *testing.T) {
 	}
 	defer store.Close()
 
-	scanner := NewScanner([]string{libDir}, store)
+	scanner := NewScanner([]string{libDir}, store, "")
 	w, err := NewWatcher(scanner, 50*time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
