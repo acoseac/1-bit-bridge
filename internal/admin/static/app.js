@@ -124,13 +124,19 @@ function initDashboard() {
   refreshBackups();
   refreshCertInfo();
 
+  // Cache DOM lookups outside the tick — these elements are
+  // first-paint-stable, so re-querying them every 3 s is wasted work
+  // (Gemini on PR #101). Same convention initLibrary follows for
+  // its tick targets.
+  const scanStatus = document.getElementById("scan-status");
+  const lastFull = document.getElementById("last-full-scan");
+
   // Live-refresh the top-line numbers every 3 s.
   const tick = async () => {
     try {
       const s = await API.get("/api/stats");
       setText("tracks-indexed", s.tracksIndexed);
       setText("device-count", s.deviceCount);
-      const scanStatus = document.getElementById("scan-status");
       if (scanStatus) {
         scanStatus.innerHTML = s.isScanning
           ? `<span class="badge running">scanning</span><span>· ${s.scanProgress} tracks so far</span>`
@@ -141,7 +147,6 @@ function initDashboard() {
       // mid-session left the tile showing "never" until manual refresh.
       // /api/stats already carries lastFullScan; just route it through
       // here so the value tracks the in-memory truth at 3 s cadence.
-      const lastFull = document.getElementById("last-full-scan");
       if (lastFull) {
         lastFull.textContent = s.lastFullScan
           ? formatTimeAgo(new Date(s.lastFullScan))

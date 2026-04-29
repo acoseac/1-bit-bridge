@@ -469,7 +469,7 @@ func (s *Server) apiTokensMint(w http.ResponseWriter, r *http.Request) {
 	// moment of pairing. Empty slice if enumeration fails — the
 	// operator-supplied primary URL is always the first entry, so the
 	// QR always pairs even on an interface-less environment.
-	alternates := pairAlternates(req.URL, s.deps.Cfg.ListenAddress)
+	alternates := ensurePrimaryFirst(req.URL, pairAlternates(req.URL, s.deps.Cfg.ListenAddress))
 	pairURL := buildPairURL(req.URL, rawToken, s.deps.Fingerprint, s.deps.Cfg.LibraryName, alternates)
 	qrData, err := qrDataURL(pairURL)
 	if err != nil {

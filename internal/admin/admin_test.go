@@ -236,6 +236,21 @@ func TestTokensMintListRevokeFlow(t *testing.T) {
 		t.Errorf("Alternates[0] = %q, want primary URL %q", mint.Alternates[0], mint.URL)
 	}
 
+	// Rotate must preserve the same alternates contract (CodeRabbit
+	// on PR #101) — the rotate response is the same shape and
+	// flows through the same `ensurePrimaryFirst` defence-in-depth.
+	var rotated pairResult
+	rotateCode := doJSON(t, h, "POST", "/api/tokens/"+mint.ID+"/rotate",
+		map[string]string{"url": mint.URL}, &rotated)
+	if rotateCode != http.StatusOK {
+		t.Fatalf("rotate: %d", rotateCode)
+	}
+	if len(rotated.Alternates) == 0 {
+		t.Errorf("rotate Alternates is empty; expected at least the primary URL")
+	} else if rotated.Alternates[0] != rotated.URL {
+		t.Errorf("rotate Alternates[0] = %q, want primary URL %q", rotated.Alternates[0], rotated.URL)
+	}
+
 	// List now has 1.
 	doJSON(t, h, "GET", "/api/tokens", nil, &list)
 	if len(list) != 1 || list[0].Name != "iPhone Test" {

@@ -81,6 +81,27 @@ func TestStartupSnapshotShouldSkip_OldSnapshotPastThreshold(t *testing.T) {
 	}
 }
 
+func TestStartupSnapshotShouldSkip_SnapshotExactlyAtThresholdDoesNotSkip(t *testing.T) {
+	// Boundary case (CodeRabbit on PR #101): the helper uses a strict
+	// `<` comparison, so a snapshot whose age equals the threshold
+	// exactly should NOT be treated as recent. Pin the boundary
+	// behaviour here so a future drift to `<=` doesn't silently
+	// re-introduce the "we wrote a snapshot exactly 24h ago, no need
+	// to write another one ever again" failure mode under the perfect
+	// edge alignment a constant-cadence ticker would hit.
+	root := t.TempDir()
+	now := time.Now().UTC()
+	writeSnapshotDir(t, root, now.Add(-24*time.Hour))
+
+	skip, _, err := startupSnapshotShouldSkip(root, now, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if skip {
+		t.Errorf("skip = true, want false (exactly-at-threshold must not be treated as recent)")
+	}
+}
+
 func TestStartupSnapshotShouldSkip_PicksMostRecentNotOldest(t *testing.T) {
 	// backup.List sorts newest-first; the throttle must consult that
 	// ordering so a one-week-old snapshot doesn't shadow a two-hour-

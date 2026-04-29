@@ -127,6 +127,12 @@ type folderArtPromise struct {
 // two). Read failures and parse failures fall through silently —
 // `LastFullScan()` returns the zero time and the dashboard shows
 // "never", same as a fresh install.
+//
+// `OpenStore` already created the `scan_state` table (CREATE TABLE
+// IF NOT EXISTS) before any caller can construct a Scanner against
+// the returned `*Store`, so this lookup is safe at init time. A
+// nil store is treated as "no persisted state" — the test harness
+// occasionally constructs a Scanner without a store backing it.
 func NewScanner(roots []string, store *Store, artworkCacheDir string) *Scanner {
 	s := &Scanner{store: store, artDir: artworkCacheDir}
 	rc := append([]string(nil), roots...)
