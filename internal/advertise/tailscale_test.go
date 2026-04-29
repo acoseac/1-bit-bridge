@@ -3,7 +3,9 @@ package advertise
 import (
 	"errors"
 	"net"
+	"sync"
 	"testing"
+	"time"
 )
 
 // withStubTailscaleStatus swaps the package-level CLI invoker for the
@@ -11,10 +13,19 @@ import (
 // drive specific JSON shapes call this instead of dropping a real
 // shim binary on PATH (which is platform-fragile and racy under -race
 // + parallel tests).
+//
+// Also resets the TTL cache between cases so a previous test's success
+// state doesn't leak into the next test's stub. The cache lives at the
+// package level (per-process) so `t.Cleanup` is the only point where
+// we can reliably clear it.
 func withStubTailscaleStatus(t *testing.T, st tailscaleStatus, err error) {
 	t.Helper()
 	prev := tailscaleStatusJSONFunc
-	t.Cleanup(func() { tailscaleStatusJSONFunc = prev })
+	resetTailscaleStatusCache()
+	t.Cleanup(func() {
+		tailscaleStatusJSONFunc = prev
+		resetTailscaleStatusCache()
+	})
 	tailscaleStatusJSONFunc = func() (tailscaleStatus, error) {
 		return st, err
 	}
@@ -160,5 +171,109 @@ func TestEndpoints_NoMagicDNSWhenAbsent(t *testing.T) {
 		if e.Class == ClassTailscaleDNS {
 			t.Errorf("unexpected MagicDNS entry: %v", e)
 		}
+	}
+}
+
+// TestCachedTailscaleStatus_DedupesConcurrentCallers pins the
+// singleflight contract: N concurrent callers in the same TTL window
+// produce ONE underlying CLI invocation. /v1/health on a busy bridge
+// can fan out 10+ concurrent calls per second; without singleflight
+// each would spawn its own subprocess (Qodo bot review on PR #91).
+func TestCachedTailscaleStatus_DedupesConcurrentCallers(t *testing.T) {
+	resetTailscaleStatusCache()
+	prev := tailscaleStatusJSONFunc
+	t.Cleanup(func() { tailscaleStatusJSONFunc = prev })
+
+	var calls int
+	var callsMu sync.Mutex
+	tailscaleStatusJSONFunc = func() (tailscaleStatus, error) {
+		callsMu.Lock()
+		calls++
+		callsMu.Unlock()
+		// Simulate slow CLI so concurrent goroutines pile up at the
+		// singleflight gate while we're "in flight".
+		time.Sleep(50 * time.Millisecond)
+		return tailscaleStatus{
+			Self: struct {
+				DNSName      string   `json:"DNSName"`
+				TailscaleIPs []string `json:"TailscaleIPs"`
+			}{DNSName: "host.example.ts.net"},
+		}, nil
+	}
+
+	const N = 8
+	var wg sync.WaitGroup
+	wg.Add(N)
+	for i := 0; i < N; i++ {
+		go func() {
+			defer wg.Done()
+			if got := GetTailscaleDNSName(); got != "host.example.ts.net" {
+				t.Errorf("got %q", got)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if calls != 1 {
+		t.Errorf("singleflight broken: CLI invoked %d times, want 1", calls)
+	}
+}
+
+// TestCachedTailscaleStatus_TTLHitReturnsCached pins the cache window:
+// a second call within the TTL must NOT reinvoke the CLI.
+func TestCachedTailscaleStatus_TTLHitReturnsCached(t *testing.T) {
+	resetTailscaleStatusCache()
+	prev := tailscaleStatusJSONFunc
+	t.Cleanup(func() { tailscaleStatusJSONFunc = prev })
+
+	var calls int
+	tailscaleStatusJSONFunc = func() (tailscaleStatus, error) {
+		calls++
+		return tailscaleStatus{
+			Self: struct {
+				DNSName      string   `json:"DNSName"`
+				TailscaleIPs []string `json:"TailscaleIPs"`
+			}{DNSName: "host.example.ts.net"},
+		}, nil
+	}
+
+	_ = GetTailscaleDNSName()
+	_ = GetTailscaleDNSName()
+	_ = GetTailscaleDNSName()
+	if calls != 1 {
+		t.Errorf("TTL cache broken: CLI invoked %d times, want 1", calls)
+	}
+}
+
+// TestCachedTailscaleStatus_ErrorsAreNotCached verifies a transient
+// failure (Tailscale not yet up) doesn't lock the cache for the TTL
+// duration — the very next call retries.
+func TestCachedTailscaleStatus_ErrorsAreNotCached(t *testing.T) {
+	resetTailscaleStatusCache()
+	prev := tailscaleStatusJSONFunc
+	t.Cleanup(func() { tailscaleStatusJSONFunc = prev })
+
+	var calls int
+	tailscaleStatusJSONFunc = func() (tailscaleStatus, error) {
+		calls++
+		if calls == 1 {
+			return tailscaleStatus{}, errors.New("not running")
+		}
+		return tailscaleStatus{
+			Self: struct {
+				DNSName      string   `json:"DNSName"`
+				TailscaleIPs []string `json:"TailscaleIPs"`
+			}{DNSName: "host.example.ts.net"},
+		}, nil
+	}
+
+	if got := GetTailscaleDNSName(); got != "" {
+		t.Errorf("call 1 (error): got %q, want empty", got)
+	}
+	if got := GetTailscaleDNSName(); got != "host.example.ts.net" {
+		t.Errorf("call 2 (after error): got %q, want successful retry", got)
+	}
+	if calls != 2 {
+		t.Errorf("expected 2 CLI calls (error not cached), got %d", calls)
 	}
 }
