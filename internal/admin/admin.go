@@ -104,6 +104,52 @@ type Deps struct {
 	// 503 — fine for tests that don't construct the admin server
 	// with backup wiring.
 	BackupSources backup.Sources
+
+	// Tailscale is the read+refresh side of the Tailscale HTTPS
+	// auto-pilot. Nil-safe — when absent, the dashboard's Tailscale
+	// tile shows "not configured" and the /api/tailscale endpoints
+	// return the same fallback shape. Wired via an adapter in
+	// cmd/bridge/main.go so this package doesn't import
+	// internal/tailscale or the cmd/bridge auto-pilot type.
+	Tailscale TailscaleProvider
+}
+
+// TailscaleProvider is the read+refresh side of the Tailscale auto-pilot
+// the admin tile reads. The adapter in cmd/bridge/main.go wraps the
+// process-scoped autopilot so the wire shape lives entirely in this
+// package — keeps internal/admin decoupled from cmd/bridge's
+// implementation choices (background renewer cadence, mint trigger
+// strings, etc.).
+type TailscaleProvider interface {
+	Status() TailscaleStatus
+	RefreshNow(ctx context.Context) TailscaleStatus
+}
+
+// TailscaleStatus is the JSON shape /api/tailscale/status returns.
+// Mirrors `cmd/bridge/tailscaleStatus` but lives here so the admin
+// package compiles without importing cmd/bridge.
+//
+// Optional time fields are pointers (Qodo on PR #102): a non-pointer
+// `time.Time` with `json:",omitempty"` still serialises the zero
+// value `"0001-01-01T00:00:00Z"` because `omitempty` doesn't recognise
+// time-zero. Pointer form honours `omitempty` correctly. Matches the
+// `tokenRow.ExpiresAt *time.Time` precedent.
+//
+// `MagicDNSURL` is the operator-facing bridge URL on the magic-DNS
+// endpoint, including the configured listen port (NOT a hard-coded
+// `:7788` — operators using non-default `cfg.ListenAddress` need the
+// right URL surfaced for manual recovery, CodeRabbit on PR #102).
+type TailscaleStatus struct {
+	CLIAvailable      bool       `json:"cliAvailable"`
+	NodeName          string     `json:"nodeName,omitempty"`
+	MagicDNSName      string     `json:"magicDNSName,omitempty"`
+	HTTPSCertsEnabled bool       `json:"httpsCertsEnabled"`
+	CertPresent       bool       `json:"certPresent"`
+	CertNotAfter      *time.Time `json:"certNotAfter,omitempty"`
+	CertPath          string     `json:"certPath,omitempty"`
+	MagicDNSURL       string     `json:"magicDNSURL,omitempty"`
+	LastError         string     `json:"lastError,omitempty"`
+	LastChecked       *time.Time `json:"lastChecked,omitempty"`
 }
 
 // UpdateProvider is the read-side of the updater used by the admin
@@ -261,6 +307,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/backups", s.apiBackupsList)
 	mux.HandleFunc("POST /api/backups", s.apiBackupsCreate)
 	mux.HandleFunc("GET /api/cert", s.apiCertInfo)
+	mux.HandleFunc("GET /api/tailscale/status", s.apiTailscaleStatus)
+	mux.HandleFunc("POST /api/tailscale/refresh-cert", s.apiTailscaleRefreshCert)
 
 	// Static. The embed keeps files at "static/app.css", not "app.css",
 	// so we serve the fs directly — the request path already matches.

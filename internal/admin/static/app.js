@@ -123,6 +123,9 @@ function initDashboard() {
   }
   refreshBackups();
   refreshCertInfo();
+  refreshTailscale();
+  bindTailscaleRefreshButton();
+  setInterval(refreshTailscale, 30_000);
 
   // Cache DOM lookups outside the tick — these elements are
   // first-paint-stable, so re-querying them every 3 s is wasted work
@@ -212,6 +215,122 @@ async function refreshCertInfo() {
   } catch {
     cell.textContent = "—";
   }
+}
+
+// refreshTailscale fetches /api/tailscale/status and paints the
+// Tailscale HTTPS tile. The tile is hidden by default (server-rendered
+// `hidden`) and only un-hides when the bridge has positively detected
+// a Tailscale CLI — operators on hosts without Tailscale shouldn't see
+// a "not configured" pill cluttering their dashboard.
+async function refreshTailscale() {
+  const panel = document.getElementById("tailscale-panel");
+  if (!panel) return;
+  try {
+    const s = await API.get("/api/tailscale/status");
+    renderTailscaleTile(s);
+  } catch {
+    // Endpoint absent or admin listener went away — leave the tile
+    // hidden. A missing tile is the right "not configured" UX (matches
+    // the Update tile's degrade-silently convention).
+  }
+}
+
+// renderTailscaleTile updates the Status / Node / Cert dl rows and the
+// "iOS clients reach the bridge over Tailscale at <url>" hint. State
+// machine matches the plan's 5-cell breakdown:
+//
+//   • CLIAvailable=false                    → tile hidden (host has no Tailscale)
+//   • magic-DNS empty                        → "MagicDNS not enabled"
+//   • lastError set                          → "Cert error" + the LastError text
+//   • cert present + fresh                   → "✓ HTTPS certs enabled"
+//   • cert absent / expiry within 14 days    → "Detecting…" / "Minting"
+function renderTailscaleTile(s) {
+  const panel = document.getElementById("tailscale-panel");
+  if (!panel) return;
+  if (!s || !s.cliAvailable) {
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+
+  const statusEl = document.getElementById("tailscale-status");
+  const nodeEl = document.getElementById("tailscale-node");
+  const certEl = document.getElementById("tailscale-cert");
+  const noteEl = document.getElementById("tailscale-magicdns-url");
+
+  // Status badge — pick state machine first cell that matches.
+  let badgeClass = "idle", badgeText = "Detecting…", suffix = "";
+  if (s.lastError) {
+    badgeClass = "danger";
+    badgeText = "Error";
+    suffix = ` <span class="hint">${escapeHTML(s.lastError)}</span>`;
+  } else if (!s.magicDNSName) {
+    badgeClass = "running";
+    badgeText = "MagicDNS not enabled";
+  } else if (s.certPresent) {
+    badgeClass = "running";
+    badgeText = "HTTPS certs enabled";
+  } else {
+    badgeClass = "idle";
+    badgeText = "No cert yet";
+  }
+  if (statusEl) {
+    statusEl.innerHTML = `<span class="badge ${badgeClass}">${escapeHTML(badgeText)}</span>${suffix}`;
+  }
+
+  if (nodeEl) {
+    nodeEl.textContent = s.magicDNSName || s.nodeName || "—";
+  }
+
+  if (certEl) {
+    if (!s.certPresent) {
+      certEl.textContent = "—";
+    } else {
+      const when = new Date(s.certNotAfter);
+      const now = new Date();
+      const days = Math.max(0, Math.floor((when.getTime() - now.getTime()) / 86_400_000));
+      const tooltip = s.certPath ? ` title="${escapeHTML(s.certPath)}"` : "";
+      let badge = "";
+      if (days <= 7) badge = '<span class="badge danger">expiring soon</span> ';
+      else if (days <= 30) badge = '<span class="badge running">expiring</span> ';
+      certEl.innerHTML = `${badge}<span${tooltip}>expires in ${days} day${days === 1 ? "" : "s"} (${when.toLocaleDateString()})</span>`;
+    }
+  }
+
+  if (noteEl) {
+    // Use the backend-composed MagicDNSURL so the link reflects the
+    // actual `cfg.ListenAddress` port, not a hard-coded :7788
+    // (CodeRabbit on PR #102 — operators on non-default listen ports
+    // would otherwise see the wrong URL during a manual pair recovery).
+    // Fall back to the bare hostname if the backend couldn't compose
+    // the URL (e.g. listen port is `:0` in test mode).
+    noteEl.textContent = s.magicDNSURL || s.magicDNSName || "—";
+  }
+}
+
+// bindTailscaleRefreshButton wires the "Re-mint cert" button. Disables
+// the button + flips it to "Minting…" while the request is in flight
+// to absorb impatient double-clicks before they reach Let's Encrypt's
+// per-domain rate limits. The auto-pilot also rate-limits server-side
+// (30s window) — the disabled state is the UX layer of the same
+// defence.
+function bindTailscaleRefreshButton() {
+  const btn = document.getElementById("tailscale-refresh");
+  if (!btn) return;
+  btn.addEventListener("click", async () => {
+    const oldText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Minting…";
+    try {
+      const s = await API.post("/api/tailscale/refresh-cert");
+      renderTailscaleTile(s);
+    } catch (err) {
+      alert("Re-mint failed: " + (err && err.message ? err.message : "unknown error"));
+    } finally {
+      btn.textContent = oldText;
+      btn.disabled = false;
+    }
+  });
 }
 
 // bindInstallButton attaches the click handler to the Install &
