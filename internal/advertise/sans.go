@@ -85,11 +85,10 @@ func GatherCertSANIPs(cfg CertSANConfig) []net.IP {
 	}
 
 	for _, raw := range cfg.CustomEndpoints {
-		u, err := url.Parse(strings.TrimSpace(raw))
-		if err != nil || u == nil {
+		host, isIP := parseHostFromURL(raw)
+		if !isIP {
 			continue
 		}
-		host := u.Hostname()
 		if ip := net.ParseIP(host); ip != nil {
 			add(ip)
 		}
@@ -131,19 +130,34 @@ func GatherCertSANDNS(cfg CertSANConfig) []string {
 	}
 
 	for _, raw := range cfg.CustomEndpoints {
-		u, err := url.Parse(strings.TrimSpace(raw))
-		if err != nil || u == nil {
+		host, isIP := parseHostFromURL(raw)
+		if host == "" || isIP {
+			// IP literals route to GatherCertSANIPs instead.
 			continue
-		}
-		host := u.Hostname()
-		if host == "" {
-			continue
-		}
-		if ip := net.ParseIP(host); ip != nil {
-			continue // IP literal — handled by GatherCertSANIPs
 		}
 		add(host)
 	}
 
 	return out
+}
+
+// parseHostFromURL is the advertise-package twin of `tls.ParseHostFromURL`,
+// kept here so internal/advertise stays free of an internal/tls import.
+// Returns (bareHost, isIP) — IPv6 brackets and `:port` are stripped via
+// `url.Hostname()`. Either component is a valid empty signal: "" host
+// means the URL didn't parse or had no host; isIP=false on a non-empty
+// host means it's a DNS name.
+func parseHostFromURL(raw string) (host string, isIP bool) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u == nil {
+		return "", false
+	}
+	h := u.Hostname()
+	if h == "" {
+		return "", false
+	}
+	if ip := net.ParseIP(h); ip != nil {
+		return h, true
+	}
+	return h, false
 }

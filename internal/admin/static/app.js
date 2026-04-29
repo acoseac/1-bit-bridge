@@ -716,14 +716,21 @@ function showMsg(el, kind, text) {
 //   - Replace commas with newlines so a paste-friendly comma list and
 //     a one-per-line list produce identical normal forms.
 //   - Trim each line; drop blanks.
-//   - Sort so reorder-only edits don't fire the dialog.
+//
+// **Order is preserved** (Qodo bot review on PR #93). The server's
+// splitter and `advertise.Endpoints()` both keep input order, and the
+// position of each ClassCustom entry affects iOS connection-attempt
+// priority. Sorting in the diff would suppress the confirm dialog for
+// a reorder-only edit, but the change WOULD be persisted and shift
+// which custom URL iOS tries first — confusing for the operator.
+// Reorder-only edits now correctly fire the dialog so the operator
+// can confirm or cancel before saving.
 function normaliseCustomEndpointsText(s) {
   return String(s)
     .replace(/,/g, "\n")
     .split("\n")
     .map((l) => l.trim())
     .filter((l) => l !== "")
-    .sort()
     .join("\n");
 }
 
