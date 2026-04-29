@@ -18,7 +18,14 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/acoseac/1-bit-bridge/internal/logging"
 )
+
+// validateLogger surfaces non-fatal config-validation warnings to the
+// operator. Used today by `Validate()` to emit one entry per dropped
+// CustomEndpoints item so silent prune-and-warn is observable.
+var validateLogger = logging.Component("config")
 
 // Config mirrors the on-disk bridge.yaml shape. See config/bridge.yaml.example.
 type Config struct {
@@ -378,10 +385,18 @@ func (c *Config) Validate() error {
 	// kept entry as authoritative — a typo in one entry shouldn't
 	// fail the whole `Save` and lock the operator out of the admin
 	// console. Validate() never errors on CustomEndpoints; it
-	// rewrites the slice in-place with the kept entries only. The
-	// dropped entries surface via the returned warnings (caller's
-	// responsibility to log / display).
-	c.CustomEndpoints, _ = ValidateCustomEndpoints(c.CustomEndpoints)
+	// rewrites the slice in-place with the kept entries only.
+	//
+	// Per-entry warnings used to be discarded silently (Qodo bot
+	// review on PR #92 — without observability, a bad entry just
+	// disappeared). We now log each warning at `.warn` so the
+	// operator sees the breadcrumb in the bridge logs even though
+	// the patch / load doesn't fail.
+	kept, warns := ValidateCustomEndpoints(c.CustomEndpoints)
+	c.CustomEndpoints = kept
+	for _, w := range warns {
+		validateLogger.Warn("dropped invalid custom endpoint", "err", w)
+	}
 	return nil
 }
 

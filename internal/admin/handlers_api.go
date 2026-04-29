@@ -507,6 +507,8 @@ func (s *Server) apiSettingsGet(w http.ResponseWriter, r *http.Request) {
 		ScanIntervalSec:          s.deps.Cfg.ScanIntervalSec,
 		TLSCertPath:              s.deps.Cfg.TLSCertPath,
 		TLSKeyPath:               s.deps.Cfg.TLSKeyPath,
+		CustomEndpoints:          s.deps.Cfg.CustomEndpoints,
+		CustomEndpointsText:      strings.Join(s.deps.Cfg.CustomEndpoints, "\n"),
 		UpdateAutoInstall:        s.deps.Cfg.Update.AutoInstall,
 		UpdateQuietHours:         s.deps.Cfg.Update.QuietHours,
 		UpdateCheckIntervalHours: s.deps.Cfg.Update.CheckIntervalHours,
