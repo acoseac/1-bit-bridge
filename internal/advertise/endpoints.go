@@ -261,51 +261,120 @@ var tsULAv6 = &net.IPNet{
 	Mask: net.CIDRMask(48, 128),
 }
 
-// virtualSwitchPrefixes are Windows interface-name prefixes for host
-// host-only virtual switches (Hyper-V default + WSL, VirtualBox,
-// VMware host-only, Docker, Npcap loopback, Bluetooth PAN). These
-// are always up but their 192.168.x.1 / 172.x.x.1 IPs aren't routable
-// from off-host — iOS sees them as "request timed out" rows in the
-// bridge endpoint list. Match is case-insensitive prefix.
+// virtualSwitchPrefixes are Windows / Linux / macOS interface-name
+// prefixes for host-only or VPN-style virtual adapters that iOS will
+// never route to. Host-virtual switches expose `192.168.x.1` /
+// `172.x.x.1` IPs that aren't reachable from off-host; commercial VPN
+// vNICs (TeamViewer, ZeroTier, Hamachi) advertise IPs reachable only
+// through their own coordination layer, never via direct TCP. Both
+// surface as "request timed out" rows in the iOS endpoint list.
 //
-// **Hyper-V external switches are deliberately NOT filtered.** On
-// Windows hosts that bridge their LAN through an external Hyper-V
-// switch, the only physical-LAN-carrying adapter is named
-// `vEthernet (External Switch)` (or similar) — a blanket `vethernet`
-// prefix would drop the host's real LAN IP. We only filter the
-// canonical host-only variants by their parenthesised type label
-// (CodeRabbit on PR #72).
+// Hyper-V `vEthernet (...)` adapters are NOT in this list — they're
+// handled by a separate inverse heuristic in `isVirtualSwitchInterface`
+// because the External-switch variant DOES carry the host's real LAN IP.
+//
+// Match is case-insensitive prefix, lenient on purpose to catch the
+// common shapes without enumerating every install variant.
 //
 // References for the canonical names:
-//   - "vEthernet (Default Switch)" — Hyper-V default host-only switch
-//   - "vEthernet (WSL)" / "WSL" — Windows Subsystem for Linux vNIC
-//   - "vEthernet (Internal)" / "vEthernet (Private)" — non-external switches
+//   - "WSL" — Windows Subsystem for Linux standalone vNIC (WSL1 era)
 //   - "VirtualBox Host-Only Network" — VirtualBox
 //   - "VMware Network Adapter VMnet*" — VMware Workstation
 //   - "Docker ..." — Docker for Windows
 //   - "Bluetooth Network Connection" — Bluetooth PAN
 //   - "Npcap Loopback Adapter" — Wireshark
+//   - "TeamViewer VPN" — TeamViewer's VPN adapter
+//   - "ZeroTier One" — ZeroTier
+//   - "Hamachi" — LogMeIn Hamachi
+//   - "Radmin VPN" — Famatech Radmin
+//   - "tap-" — generic OpenVPN/WireGuard TAP (when not Tailscale-classified)
+//   - "Tunnelblick" — macOS OpenVPN GUI virtual adapter
+//
+// **Tailscale is intentionally absent** — Tailscale interfaces (`tailscale0`,
+// `ts0`, `utun*` carrying a 100.x IP) get classified by `isTailscale()`
+// as `ClassTailscale*`, NOT dropped. The bridge advertises Tailscale URLs
+// because they ARE reachable when both ends are on the same tailnet.
 var virtualSwitchPrefixes = []string{
-	"vethernet (default switch", // Hyper-V default switch
-	"vethernet (wsl",            // WSL vNIC
-	"vethernet (internal",       // Hyper-V internal switch
-	"vethernet (private",        // Hyper-V private switch
-	"vethernet (nat",            // Docker Desktop / Podman vSwitch
-	"wsl",                       // WSL2 standalone vNIC
-	"virtualbox",                // VirtualBox host-only
-	"vmware",                    // VMware Workstation/Player
-	"vbox",                      // VirtualBox alt naming
-	"docker",                    // Docker for Windows
-	"npcap loopback",            // Wireshark Npcap loopback adapter
-	"bluetooth",                 // Bluetooth PAN connection
+	"wsl",            // WSL2 standalone vNIC (matches "WSL" and "WSL2")
+	"virtualbox",     // VirtualBox host-only
+	"vmware",         // VMware Workstation/Player
+	"vbox",           // VirtualBox alt naming
+	"docker",         // Docker for Windows
+	"npcap loopback", // Wireshark Npcap loopback adapter
+	"bluetooth",      // Bluetooth PAN connection
+	"teamviewer",     // TeamViewer VPN
+	"zerotier",       // ZeroTier One
+	"hamachi",        // LogMeIn Hamachi
+	"radmin",         // Radmin VPN
+	"tap-",           // OpenVPN/WireGuard TAP (when not Tailscale-classified)
+	"tunnelblick",    // macOS OpenVPN GUI
 }
 
-// isVirtualSwitchInterface reports whether name looks like a Windows
-// host-only virtual-switch adapter that iOS will never route to. The
-// match is case-insensitive prefix, lenient on purpose to catch the
-// common shapes without enumerating every install variant.
+// vEthernetPhysicalCarveOuts are case-insensitive substrings that, when
+// present inside a `vEthernet (...)` interface label, indicate the
+// adapter wraps a physical NIC and therefore carries the host's real
+// LAN IP. Anything matched here is KEPT rather than dropped.
+//
+// Without this list, the inverse heuristic in `isVirtualSwitchInterface`
+// would over-filter: legitimate Hyper-V external switches auto-named
+// after the underlying chipset (e.g. "vEthernet (Realtek PCIe GbE)")
+// would lose their LAN IP from /v1/health and break iOS discoverability
+// on hosts that bridge their LAN through an external Hyper-V switch.
+//
+// "external" covers the canonical "External Switch" / "External (...)"
+// variants. The vendor tokens cover the auto-named-after-NIC variants
+// that some Windows builds ship with. The list is non-exhaustive on
+// purpose — adding more chipset brands as they're observed in the wild
+// is the maintenance pattern; over-broad tokens (single letters, common
+// English words) are the failure mode to avoid.
+var vEthernetPhysicalCarveOuts = []string{
+	"external",
+	"realtek",
+	"intel",
+	"broadcom",
+	"marvell",
+	"killer",
+	"qualcomm",
+	"atheros",
+	"mediatek",
+	"aquantia",
+	"mellanox",
+}
+
+// isVirtualSwitchInterface reports whether name looks like a host-only
+// virtual-switch / VPN-vNIC adapter that iOS will never route to.
+//
+// Two-stage match:
+//
+//  1. Hyper-V family: the inverse heuristic. Names starting with
+//     `vEthernet (` are host-only by default UNLESS the parenthesised
+//     label contains a token from `vEthernetPhysicalCarveOuts` (the
+//     external-switch variants). This catches every `vEthernet (X)`
+//     name Microsoft ships now or in the future without a per-name
+//     allowlist update — including indexed variants like
+//     `vEthernet (Default Switch) 2` on multi-NIC hosts. We use
+//     `strings.Contains` for the carve-out check so the carve-out
+//     tolerates trailing indices, parenthesised inner labels, and
+//     hyphenated extras.
+//
+//  2. Non-Hyper-V virtual NICs: prefix-allowlist via
+//     `virtualSwitchPrefixes` (TeamViewer, VMware, VirtualBox, …).
+//
+// Why two stages: Hyper-V's naming surface area is open-ended, but the
+// "External" / vendor-named variants are a small, stable carve-out;
+// inverse-with-carve-outs scales with Microsoft's ongoing renames.
+// The non-Hyper-V vendors have stable product names that prefix-match
+// cleanly without an inverse rule.
 func isVirtualSwitchInterface(name string) bool {
 	lower := strings.ToLower(name)
+	if strings.HasPrefix(lower, "vethernet (") {
+		for _, keep := range vEthernetPhysicalCarveOuts {
+			if strings.Contains(lower, keep) {
+				return false
+			}
+		}
+		return true
+	}
 	for _, p := range virtualSwitchPrefixes {
 		if strings.HasPrefix(lower, p) {
 			return true

@@ -193,18 +193,35 @@ func TestClassStringUnknownFallback(t *testing.T) {
 // --- isVirtualSwitchInterface() unit tests ---
 
 // TestIsVirtualSwitchInterfaceMatchesKnownNames pins the canonical
-// Windows virtual-switch interface names that should be excluded
-// from /v1/health advertisement. Without this filter, iOS sees
-// `192.168.x.1` host-only IPs as "request timed out" entries — see
-// the PR3 review case study (Hyper-V vEthernet (Default Switch)
+// Windows / cross-platform virtual-switch interface names that should
+// be excluded from /v1/health advertisement. Without this filter, iOS
+// sees `192.168.x.1` host-only IPs as "request timed out" entries —
+// see the PR3 review case study (Hyper-V vEthernet (Default Switch)
 // + WSL vNIC both showed up red in the iOS endpoint list).
+//
+// New entries added in the inverse-heuristic refactor (covers
+// Microsoft's renames + multi-NIC trailing-index variants without a
+// per-name allowlist update):
+//
+//   - "vEthernet (WSL (Hyper-V firewall))" — Win11 24H2 WSL rename
+//   - "vEthernet (NAT-Switch) 2" — multi-NIC trailing index
+//   - "vEthernet (Default Switch) 2" — same, on Default Switch
+//
+// Plus VPN-style adapters that historically slipped through:
+// TeamViewer, ZeroTier, Hamachi, Radmin, generic OpenVPN/Tunnelblick.
 func TestIsVirtualSwitchInterfaceMatchesKnownNames(t *testing.T) {
 	matches := []string{
+		// Hyper-V family — caught by inverse heuristic (no carve-out match)
 		"vEthernet (Default Switch)",
+		"vEthernet (Default Switch) 2", // Windows trailing-index variant
 		"vEthernet (WSL)",
+		"vEthernet (WSL (Hyper-V firewall))", // Win11 24H2 rename
 		"vEthernet (Internal Switch)",
 		"vEthernet (Private 01)",
 		"vEthernet (nat)",
+		"vEthernet (NAT-Switch)",
+		"vEthernet (NAT-Switch) 2",
+		// Standalone vendor prefixes
 		"WSL",
 		"VirtualBox Host-Only Network",
 		"VirtualBox Host-Only Network #2",
@@ -214,6 +231,15 @@ func TestIsVirtualSwitchInterfaceMatchesKnownNames(t *testing.T) {
 		"Docker Networking",
 		"Npcap Loopback Adapter",
 		"Bluetooth Network Connection",
+		// VPN-style vNICs added in the broaden pass
+		"TeamViewer VPN",
+		"TeamViewer VPN Adapter",
+		"ZeroTier One [abc123]",
+		"Hamachi",
+		"Radmin VPN",
+		"tap-windows",
+		"tap-bridge0",
+		"Tunnelblick",
 	}
 	for _, n := range matches {
 		if !isVirtualSwitchInterface(n) {
@@ -229,18 +255,32 @@ func TestIsVirtualSwitchInterfaceMatchesKnownNames(t *testing.T) {
 // load-bearing (CodeRabbit on PR #72): on hosts that bridge their
 // LAN via an external switch, that adapter carries the host's only
 // real LAN IP, and a blanket `vEthernet` filter would drop it.
+//
+// The vendor-token carve-outs (`realtek`, `intel`, `broadcom`, …)
+// are tested here — they cover auto-named-after-physical-NIC
+// variants that some Windows builds ship with.
 func TestIsVirtualSwitchInterfaceLeavesPhysicalAlone(t *testing.T) {
 	notMatches := []string{
 		"Ethernet",
+		"Ethernet 2",
 		"Wi-Fi",
 		"en0",
 		"eth0",
 		"wlan0",
+		// Tailscale stays — classified separately, not a virtual switch
 		"tailscale0",
 		"utun0",
-		"vEthernet (External Switch)",  // Hyper-V external — carries real LAN IP
-		"vEthernet (External)",         // Hyper-V external (alt name)
-		"vEthernet (Realtek PCIe GbE)", // bridged-to-physical name shape
+		// External-Switch variants (Hyper-V passthrough)
+		"vEthernet (External Switch)",
+		"vEthernet (External Switch) 3",  // multi-NIC trailing index
+		"vEthernet (External)",           // alt name
+		"vEthernet (External - Realtek)", // hyphenated extra
+		// Auto-named-after-physical-NIC variants
+		"vEthernet (Realtek PCIe GbE)",
+		"vEthernet (Intel I225-V)",
+		"vEthernet (Broadcom NetXtreme)",
+		"vEthernet (Killer E3100G)",
+		"vEthernet (Marvell AQtion)",
 	}
 	for _, n := range notMatches {
 		if isVirtualSwitchInterface(n) {
