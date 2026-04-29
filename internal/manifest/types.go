@@ -47,9 +47,21 @@ type Track struct {
 	ReplayGainAlbumDB  *float64  `json:"replayGainAlbumDB,omitempty"`
 	MusicBrainzTrackID string    `json:"musicBrainzTrackID,omitempty"`
 	MusicBrainzAlbumID string    `json:"musicBrainzAlbumID,omitempty"`
-	// ArtworkMBID is set by the enricher (PR #8) when a front-cover image
-	// was retrievable from Cover Art Archive for this track's album. iOS
-	// derives the artwork URL from this as /v1/artwork/{ArtworkMBID}.
+	// ArtworkMBID identifies cached front-cover artwork. Two value
+	// shapes share this field:
+	//   - <UUID>          : MusicBrainz release MBID, set by the
+	//                       enricher after a successful Cover Art
+	//                       Archive (or iTunes fallback) fetch.
+	//   - local-<sha256>  : SHA-256 hex of locally-extracted artwork
+	//                       bytes — embedded ID3 APIC, or a folder-
+	//                       level cover.jpg / folder.jpg adjacent to
+	//                       the audio file. Set by the scanner during
+	//                       Extract; the enricher leaves the value
+	//                       alone (skips both CAA and iTunes fetches).
+	// iOS derives the artwork URL as /v1/artwork/{ArtworkMBID} for
+	// both shapes — the API handler's regex accepts either. This is a
+	// deliberate sentinel hijack to keep the protocol additive (no
+	// ProtocolVersion bump and no iOS / wire change for v1.2).
 	ArtworkMBID string `json:"artworkMBID,omitempty"`
 	// ArtistMBID is set by the enricher when a matching MusicBrainz artist
 	// was found. Used for artist-image endpoints (PR #9).

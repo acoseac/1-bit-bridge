@@ -467,7 +467,15 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		return 1
 	}
 	defer manifestStore.Close()
-	scanner := manifest.NewScanner(cfg.LibraryRoots, manifestStore)
+	// Single source of truth for the artwork cache directory. The
+	// scanner writes scanner-side `local-<sha256>-500.jpg` here when
+	// it finds embedded ID3 APIC art or a folder-level cover.jpg /
+	// folder.jpg; the enricher writes MusicBrainz `<mbid>-500.jpg`
+	// here for its CAA / iTunes path; the API handler reads from the
+	// same directory and serves both transparently via the relaxed
+	// /v1/artwork mbid regex.
+	artworkDir := filepath.Join(cfg.DataDir, "artwork")
+	scanner := manifest.NewScanner(cfg.LibraryRoots, manifestStore, artworkDir)
 	provider := manifest.NewProvider(manifestStore, scanner)
 
 	// Fire up the periodic scanner in the background. It runs an initial
@@ -517,7 +525,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	mbClient := enrich.NewMusicBrainzClient("", userAgent, nil)
 	caaClient := enrich.NewCoverArtClient("", userAgent, nil)
 	deezerClient := enrich.NewDeezerClient("", userAgent, nil)
-	artworkDir := filepath.Join(cfg.DataDir, "artwork")
+	// artworkDir is defined above (single source of truth) and shared
+	// with the scanner so scanner-side `local-*` files and enricher-
+	// side `<mbid>-*` files cohabit one directory.
 	enricher := enrich.NewEnricher(manifestStore, mbClient, caaClient, deezerClient, artworkDir)
 	go enricher.Run(scanCtx)
 
@@ -817,7 +827,12 @@ func scanCmd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	defer store.Close()
-	scanner := manifest.NewScanner(cfg.LibraryRoots, store)
+	// Same artwork-cache directory the long-running serve mode uses.
+	// Standalone `bridge scan` runs a one-shot full pass and exits;
+	// without this, scanner-side local-artwork extraction would be a
+	// no-op for the CLI scan path.
+	artworkDir := filepath.Join(cfg.DataDir, "artwork")
+	scanner := manifest.NewScanner(cfg.LibraryRoots, store, artworkDir)
 
 	fmt.Fprintf(stdout, "Scanning %v ...\n", cfg.LibraryRoots)
 	start := time.Now()

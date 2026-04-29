@@ -85,10 +85,21 @@ func TestArtworkReturns404IfNotCached(t *testing.T) {
 
 func TestArtworkRejectsBadMBID(t *testing.T) {
 	hs, tok, _, _ := artworkFixture(t, true)
+	// 64-char lowercase hex, used as the "valid" baseline that the
+	// negative variants are derived from.
+	const validHex64 = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
 	for _, bad := range []string{
 		"not-a-uuid",
 		"../../etc/passwd",
 		"12345678-1234-1234-1234",
+		// local- branch negatives: the regex's local- arm requires
+		// exactly 64 lowercase hex chars, nothing more, nothing less.
+		"local-",                         // empty hash
+		"local-" + validHex64[:63],       // 63 chars (one short)
+		"local-" + validHex64 + "0",      // 65 chars (one too many)
+		"local-" + validHex64[:63] + "Z", // non-hex char in hash
+		"LOCAL-" + validHex64,            // uppercase prefix is rejected
+		"local-" + "ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789AB"[:64], // uppercase hex
 	} {
 		resp := authedGET(t, hs.URL+"/v1/artwork/"+url.PathEscape(bad), tok)
 		if resp.StatusCode != 400 && resp.StatusCode != 404 {
@@ -98,6 +109,43 @@ func TestArtworkRejectsBadMBID(t *testing.T) {
 			t.Errorf("bad mbid %q: status = %d, want 400 or 404", bad, resp.StatusCode)
 		}
 		resp.Body.Close()
+	}
+}
+
+// TestArtworkAcceptsLocalHashMBID verifies the relaxed regex accepts
+// the local-<sha256> sentinel and serves the corresponding cache file.
+// Pre-stages <artDir>/local-<hash>-500.jpg exactly the way the scanner
+// would have written it; asserts 200 + bytes round-trip + image/jpeg.
+func TestArtworkAcceptsLocalHashMBID(t *testing.T) {
+	dir := t.TempDir()
+	artDir := filepath.Join(dir, "artwork")
+	const hash = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	mbid := "local-" + hash
+	if err := os.MkdirAll(artDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	want := []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10}
+	if err := os.WriteFile(filepath.Join(artDir, mbid+"-500.jpg"), want, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{LibraryRoots: []string{dir}, ListenAddress: ":7788", LibraryName: "T"}
+	store, _ := auth.OpenStore(filepath.Join(dir, "tokens.json"))
+	raw, _, _ := store.Mint("probe")
+	srv := New(cfg, store, nil, "fp").WithArtworkDirs(fakeArtworkDirs{dir: artDir})
+	hs := httptest.NewServer(srv.Handler())
+	defer hs.Close()
+
+	resp := authedGET(t, hs.URL+"/v1/artwork/"+mbid, raw)
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "image/jpeg" {
+		t.Errorf("content-type = %q, want image/jpeg", ct)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	if string(got) != string(want) {
+		t.Errorf("body bytes mismatch: got %x, want %x", got, want)
 	}
 }
 

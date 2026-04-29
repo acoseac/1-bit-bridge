@@ -574,7 +574,7 @@ func TestScannerIndexesAllTracks(t *testing.T) {
 	root, expected := tempLibrary(t)
 	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
 	defer s.Close()
-	sc := NewScanner([]string{root}, s)
+	sc := NewScanner([]string{root}, s, "")
 
 	n, err := sc.Scan(context.Background())
 	if err != nil {
@@ -603,7 +603,7 @@ func TestScannerSkipsDotFilesAndNonAudio(t *testing.T) {
 	root, _ := tempLibrary(t)
 	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
 	defer s.Close()
-	sc := NewScanner([]string{root}, s)
+	sc := NewScanner([]string{root}, s, "")
 	sc.Scan(context.Background())
 	for _, p := range mustPaths(t, s) {
 		if strings.Contains(p, ".DS_Store") || strings.HasSuffix(p, ".txt") {
@@ -616,7 +616,7 @@ func TestScannerRemovesDeletedTracks(t *testing.T) {
 	root, _ := tempLibrary(t)
 	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
 	defer s.Close()
-	sc := NewScanner([]string{root}, s)
+	sc := NewScanner([]string{root}, s, "")
 	sc.Scan(context.Background())
 
 	// Delete one track from disk, rescan, verify its row is gone.
@@ -640,7 +640,7 @@ func TestScannerSkipsUnchangedFiles(t *testing.T) {
 	root, _ := tempLibrary(t)
 	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
 	defer s.Close()
-	sc := NewScanner([]string{root}, s)
+	sc := NewScanner([]string{root}, s, "")
 	sc.Scan(context.Background())
 
 	// Second scan should report the same count; since nothing changed, it
@@ -674,7 +674,7 @@ func TestScannerWorkerPoolCommitsAllTracks(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	sc := NewScanner([]string{root}, s)
+	sc := NewScanner([]string{root}, s, "")
 
 	count, err := sc.Scan(context.Background())
 	if err != nil {
@@ -714,7 +714,7 @@ func TestScannerCancellationLeavesCommittedBatchesIntact(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	sc := NewScanner([]string{root}, s)
+	sc := NewScanner([]string{root}, s, "")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel before Scan starts
@@ -737,7 +737,7 @@ func TestScannerIsScanningFlag(t *testing.T) {
 	root, _ := tempLibrary(t)
 	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
 	defer s.Close()
-	sc := NewScanner([]string{root}, s)
+	sc := NewScanner([]string{root}, s, "")
 	if sc.IsScanning() {
 		t.Error("fresh scanner reports scanning")
 	}
@@ -756,7 +756,7 @@ func TestBuildManifestShape(t *testing.T) {
 	root, expected := tempLibrary(t)
 	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
 	defer s.Close()
-	sc := NewScanner([]string{root}, s)
+	sc := NewScanner([]string{root}, s, "")
 	sc.Scan(context.Background())
 
 	mf, err := BuildManifest(s, []string{root}, time.Time{})
@@ -788,7 +788,7 @@ func TestWriteManifestParityWithBuildManifest(t *testing.T) {
 	root, expected := tempLibrary(t)
 	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
 	defer s.Close()
-	sc := NewScanner([]string{root}, s)
+	sc := NewScanner([]string{root}, s, "")
 	sc.Scan(context.Background())
 
 	want, err := BuildManifest(s, []string{root}, time.Time{})
@@ -889,7 +889,7 @@ func TestBuildManifestSinceFilter(t *testing.T) {
 	root, _ := tempLibrary(t)
 	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
 	defer s.Close()
-	sc := NewScanner([]string{root}, s)
+	sc := NewScanner([]string{root}, s, "")
 	sc.Scan(context.Background())
 
 	future := time.Now().Add(time.Hour)
@@ -917,7 +917,7 @@ func TestScannerSetRootsAppliesToNextScan(t *testing.T) {
 	defer s.Close()
 
 	// Start with only root A.
-	sc := NewScanner([]string{a}, s)
+	sc := NewScanner([]string{a}, s, "")
 	if _, err := sc.Scan(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -963,7 +963,7 @@ func TestProviderWriteManifestReflectsSetRoots(t *testing.T) {
 
 	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
 	defer s.Close()
-	sc := NewScanner([]string{a}, s)
+	sc := NewScanner([]string{a}, s, "")
 	p := NewProvider(s, sc)
 
 	decode := func(buf *bytes.Buffer) *Manifest {

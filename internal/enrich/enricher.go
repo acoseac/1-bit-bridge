@@ -280,7 +280,17 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 		}
 	}
 
-	if albumMBID == "" {
+	// Without a MusicBrainz match we'd normally markSkipped and bail
+	// — but the scanner may have already stamped t.ArtworkMBID with a
+	// `local-<sha256>` sentinel pulled from embedded ID3 APIC art or
+	// a folder-level cover.jpg. That's exactly the obscure-album case
+	// this fallback was designed to cover (no MB record but the user
+	// curated artwork locally). Falling through here lets
+	// resolveArtist below still fetch the artist image, and the
+	// MarkEnriched at the bottom stamps the track done so the worker
+	// doesn't loop on it. Without this relaxation, the local-artwork
+	// feature would silently fail to fix the very case it targets.
+	if albumMBID == "" && !strings.HasPrefix(t.ArtworkMBID, "local-") {
 		e.markSkipped(t, "no MB match")
 		return
 	}
@@ -289,12 +299,25 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 	// skip the network round-trip entirely. On a release-level CAA miss,
 	// `ensureArtworkCached` will lazily resolve + try the release-group
 	// fallback, then iTunes (if configured) as a last resort.
-	if cached, err := e.ensureArtworkCached(ctx, albumMBID, rgMBID, t.Artist, t.Album, 500); err != nil {
-		logger.Error("artwork", "mbid", albumMBID, "err", err)
-		// Artwork miss isn't fatal — mark enriched so we don't retry
-		// every 15 seconds. A future background pass can re-try.
-	} else if cached {
-		t.ArtworkMBID = albumMBID
+	//
+	// Local-artwork bypass: when the scanner has already stamped a
+	// `local-<sha256>` ArtworkMBID, the cache file is on disk under
+	// that sentinel and we skip BOTH the CAA round-trip AND iTunes
+	// fallback. Treating the locally-curated bytes as authoritative is
+	// the explicit V1 contract — embedded APIC + folder.jpg outrank
+	// any remote source. Note the doubled-up safety: ensureArtworkCached
+	// can only be reached when albumMBID != "" (see the bailout above)
+	// AND when ArtworkMBID lacks the `local-` prefix, so an
+	// `ensureArtworkCached("", ...)` call shape is structurally
+	// impossible from this site.
+	if !strings.HasPrefix(t.ArtworkMBID, "local-") {
+		if cached, err := e.ensureArtworkCached(ctx, albumMBID, rgMBID, t.Artist, t.Album, 500); err != nil {
+			logger.Error("artwork", "mbid", albumMBID, "err", err)
+			// Artwork miss isn't fatal — mark enriched so we don't retry
+			// every 15 seconds. A future background pass can re-try.
+		} else if cached {
+			t.ArtworkMBID = albumMBID
+		}
 	}
 
 	// Resolve artist MBID + fetch artist image (Deezer fallback).
@@ -624,8 +647,15 @@ func ArtworkCachePath(cacheDir, mbid string, size int) string {
 
 // writeArtworkAtomic writes bytes to path via tmp-file + rename so a
 // concurrent reader never sees a torn file.
+//
+// Cache directory perms are 0o700 (owner-only) — application-owned
+// caches shouldn't be world-readable on POSIX. Mirrors the
+// scanner-side `writeArtworkAtomicScan` so whichever writer touches
+// the dir first creates it at the same mode. Upgrades from prior
+// 0o755 deployments are accepted: existing dirs keep their mode
+// until a clean install / rmdir; new dirs land at 0o700.
 func writeArtworkAtomic(path string, data []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".caa-*.jpg.tmp")

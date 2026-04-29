@@ -51,7 +51,7 @@ func TestScannerSparesTracksUnderWalkErrorSubtree(t *testing.T) {
 	}
 	defer s.Close()
 
-	sc := NewScanner([]string{root}, s)
+	sc := NewScanner([]string{root}, s, "")
 
 	// First scan: both tracks land in the manifest.
 	if _, err := sc.Scan(context.Background()); err != nil {
@@ -105,7 +105,7 @@ func TestScannerStillDeletesTracksUnderHealthySubtree(t *testing.T) {
 	}
 	defer s.Close()
 
-	sc := NewScanner([]string{root}, s)
+	sc := NewScanner([]string{root}, s, "")
 
 	if _, err := sc.Scan(context.Background()); err != nil {
 		t.Fatal(err)

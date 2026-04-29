@@ -26,8 +26,19 @@ type ArtworkDirProvider interface {
 
 // mbidPattern validates that a path segment looks like a MusicBrainz
 // UUID. Prevents traversal and filesystem abuse through the {mbid}
-// parameter.
+// parameter. Used by the artist-image handler, which only accepts
+// MusicBrainz-derived MBIDs.
 var mbidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// artworkMBIDPattern validates the {mbid} segment for /v1/artwork/{mbid}.
+// Accepts either a MusicBrainz UUID (set by the enricher after a
+// successful Cover Art Archive fetch) OR a local-<sha256> sentinel set
+// by the scanner when it found embedded ID3 APIC art or a folder-level
+// cover.jpg / folder.jpg next to the audio file. The local- branch is
+// lowercase-only to match `hex.EncodeToString` output deterministically.
+// Same traversal protection as the strict UUID pattern: the alphabet
+// is bounded to [a-z0-9-] so no path-segment escape is possible.
+var artworkMBIDPattern = regexp.MustCompile(`^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|local-[0-9a-f]{64})$`)
 
 // artistImage handles GET /v1/artist-image/{mbid}.
 //
@@ -96,9 +107,9 @@ func (s *Server) artwork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	mbid := r.PathValue("mbid")
-	if !mbidPattern.MatchString(mbid) {
+	if !artworkMBIDPattern.MatchString(mbid) {
 		writeError(w, http.StatusBadRequest, "bad_request",
-			"mbid must be a MusicBrainz UUID")
+			"mbid must be a MusicBrainz UUID or local-<sha256> hash")
 		return
 	}
 	size, err := enrich.ParseSize(r.URL.Query().Get("size"))

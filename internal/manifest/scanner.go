@@ -65,15 +65,62 @@ type Scanner struct {
 	roots atomic.Pointer[[]string]
 	store *Store
 
+	// artDir is the on-disk artwork cache directory the scanner writes
+	// locally-extracted artwork (`local-<sha256>-500.jpg`) into. Empty
+	// disables local-artwork extraction entirely (back-compat for the
+	// 1-bit-bridge call sites that don't run the artwork pipeline). The
+	// /v1/artwork handler reads from the same directory the enricher
+	// writes to, so scanner-side files are served transparently.
+	artDir string
+
+	// folderArt single-flights `cover.jpg` / `folder.jpg` lookups on a
+	// per-directory basis: the first worker to touch a given directory
+	// installs a `*folderArtPromise`, runs the ReadDir + hash + atomic
+	// write inside `once.Do`, and every subsequent worker on the same
+	// directory parks inside Do until that work completes, then reads
+	// the cached result. Reset at the top of each Scan / ScanSubtree
+	// — cross-scan persistence would create stale "no folder.jpg" hits
+	// when a user adds cover.jpg between scans.
+	folderArt sync.Map // dir-path string -> *folderArtPromise
+
 	mu       sync.Mutex
 	scanning atomic.Bool
 	lastFull atomic.Int64 // UnixNano of last successful full scan
 	progress atomic.Int64 // tracks indexed so far during the current scan
 }
 
+// folderArtResult records the per-directory outcome of a folder-art
+// lookup. `found == true` means the directory had cover.jpg /
+// folder.jpg (or a case-insensitive variant) and `mbid` carries the
+// `local-<sha256>` sentinel ready to stamp on every track in that
+// directory; `found == false` is a known-absent answer cached so
+// sibling tracks short-circuit with no further filesystem work.
+type folderArtResult struct {
+	found bool
+	mbid  string
+}
+
+// folderArtPromise serializes per-directory ReadDir + read + hash +
+// atomic write so a 15-track album processed by 15 parallel workers
+// does the I/O exactly once instead of 15 times. The first worker to
+// LoadOrStore the pointer wins the once.Do; the rest retrieve the
+// same pointer and park inside Do until the first worker's
+// scanFolderArtwork returns. After Do unblocks every caller reads
+// `res` directly — by that point it's settled.
+type folderArtPromise struct {
+	once sync.Once
+	res  folderArtResult
+}
+
 // NewScanner constructs a Scanner. Caller owns the Store's lifecycle.
-func NewScanner(roots []string, store *Store) *Scanner {
-	s := &Scanner{store: store}
+// artworkCacheDir is the directory under which the scanner writes
+// `local-<sha256>-500.jpg` for embedded ID3 APIC art and folder-level
+// cover.jpg / folder.jpg. Pass "" to disable local-artwork extraction
+// (the rest of the pipeline still works — tracks just don't get a
+// scanner-side `local-` ArtworkMBID and fall through to the enricher's
+// MusicBrainz / iTunes path).
+func NewScanner(roots []string, store *Store, artworkCacheDir string) *Scanner {
+	s := &Scanner{store: store, artDir: artworkCacheDir}
 	rc := append([]string(nil), roots...)
 	s.roots.Store(&rc)
 	return s
@@ -138,6 +185,11 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	defer s.mu.Unlock()
 	s.scanning.Store(true)
 	s.progress.Store(0)
+	// Per-Scan reset of the folder-art single-flight cache. Cross-scan
+	// persistence would create stale "no folder.jpg" hits when a user
+	// adds cover.jpg between scans (the scanner re-extracts the track
+	// but the cache still says "absent").
+	s.folderArt = sync.Map{}
 	defer s.scanning.Store(false)
 
 	// Snapshot of paths we knew about BEFORE this scan. At the end we drop
@@ -266,6 +318,16 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 // FLAC must not abort the whole scan).
 func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writes chan<- *Track, wg *sync.WaitGroup) {
 	defer wg.Done()
+	// One ExtractContext per worker, reused across every track this
+	// worker pulls. The pointer to s.folderArt is stable for the
+	// lifetime of the Scan (we replaced the value at the top of Scan,
+	// and nothing else mutates the field during the scan), so all
+	// workers share the same single-flight map. Empty s.artDir
+	// disables local-artwork extraction inside ExtractWithContext.
+	ec := &ExtractContext{
+		ArtworkCacheDir: s.artDir,
+		FolderArtCache:  &s.folderArt,
+	}
 	for pi := range paths {
 		if ctx.Err() != nil {
 			// Drain remaining paths without doing work so the walker
@@ -276,9 +338,24 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 		// walker. Concurrent reads from N workers against the same
 		// SQLite handle are fine (modernc.org/sqlite WAL mode allows
 		// concurrent readers).
+		//
+		// Recovery exception (PR #98 follow-up): if the existing row
+		// carries a `local-<hash>` ArtworkMBID but the matching cache
+		// file is missing on disk (operator wiped <dataDir>/artwork
+		// after a scan, or copied the data dir without the artwork
+		// subdir), fall through to re-extract so the cache is
+		// rebuilt. Without this, the API serves 202+Retry-After
+		// indefinitely for the missing local- mbid because the
+		// enricher won't refetch a local- value. Pure UUID-bearing
+		// rows AND empty-ArtworkMBID rows still take the fast skip —
+		// the recovery cost is one os.Stat per `local-` track per
+		// scan, scoped narrowly to the one case the cache might
+		// genuinely need rebuilding.
 		existing, _ := s.store.GetTrack(pi.rel)
 		if existing != nil && existing.Size == pi.info.Size() && !existing.ModTime.Before(pi.info.ModTime()) {
-			continue
+			if !s.needsLocalArtworkRecovery(existing) {
+				continue
+			}
 		}
 		t := &Track{
 			Path:    pi.rel,
@@ -286,7 +363,7 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 			ModTime: pi.info.ModTime().UTC(),
 		}
 		fillFromPath(t, pi.rel) // last-resort heuristics for files with no tags
-		if err := Extract(pi.abs, t); err != nil {
+		if err := ExtractWithContext(pi.abs, t, ec); err != nil {
 			scanLogger.Error("extract", "path", pi.abs, "err", err)
 		}
 		select {
@@ -295,6 +372,47 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 			return
 		}
 	}
+}
+
+// needsLocalArtworkRecovery reports whether an unchanged-eligible
+// track must still be re-extracted because its locally-curated
+// artwork cache file went missing. Returns true only when the row
+// carries a `local-<hash>` ArtworkMBID AND the matching
+// `<artDir>/<mbid>-500.jpg` is absent. Pure UUID-bearing or empty-
+// MBID rows always return false — those don't have a scanner-side
+// cache to rebuild. Empty `s.artDir` also returns false (no local-
+// artwork pipeline configured).
+//
+// The os.Stat cost is paid only on tracks with the `local-` prefix,
+// not on the whole library — for a typical install this is 0% of
+// rows on first scan and at most a fraction once local-artwork
+// extraction has run.
+func (s *Scanner) needsLocalArtworkRecovery(t *Track) bool {
+	if s.artDir == "" {
+		return false
+	}
+	if !strings.HasPrefix(t.ArtworkMBID, "local-") {
+		return false
+	}
+	cachePath := filepath.Join(s.artDir, t.ArtworkMBID+"-500.jpg")
+	_, err := os.Stat(cachePath)
+	if err == nil {
+		return false
+	}
+	if os.IsNotExist(err) {
+		return true
+	}
+	// Transient I/O error (NAS drop, permission flap, antivirus
+	// lock). Recovery would force an audio-file reopen + tag re-
+	// parse for every affected track on every flaky scan — much
+	// worse than the alternative of leaving the existing local-
+	// MBID in place until the underlying I/O issue resolves.
+	// Pre-fix this branch fell through to `return true` and wasted
+	// scan time on every NAS hiccup; CodeRabbit Major review on
+	// the PR #98 fix-up commit caught it.
+	scanLogger.Warn("local-art recovery probe failed",
+		"path", cachePath, "err", err)
+	return false
 }
 
 // runScanWriter is the single writer goroutine that consumes Tracks
@@ -361,6 +479,9 @@ func (s *Scanner) runScanWriter(ctx context.Context, writes <-chan *Track, commi
 func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Same per-scan reset rationale as Scan(): each subtree scan starts
+	// with a fresh folder-art single-flight cache.
+	s.folderArt = sync.Map{}
 
 	rootsPtr := s.roots.Load()
 	var roots []string

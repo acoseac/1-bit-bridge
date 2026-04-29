@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -762,6 +763,187 @@ func TestEnricherSkipsNetworkCallIfCoverAlreadyCached(t *testing.T) {
 	}
 	if caaCalls != 0 {
 		t.Errorf("CAA called %d times despite pre-cached file", caaCalls)
+	}
+}
+
+// TestEnricherSkipsArtworkFetchForLocalMBID is the contract test for
+// the local-artwork bypass added in the v1.2 batch. When the scanner
+// has stamped t.ArtworkMBID with a `local-<sha256>` sentinel (because
+// it found embedded ID3 APIC art or a folder-level cover.jpg), the
+// enricher must:
+//
+//  1. NOT call Cover Art Archive (the local bytes are authoritative).
+//  2. NOT call iTunes (same reason — no remote source overrides
+//     user-curated artwork).
+//  3. Preserve the local- value through MarkEnriched (no overwrite).
+//  4. Still mark the track enriched so the worker doesn't loop on it.
+//
+// The MB album search is allowed to run — V1 scope is "skip
+// ensureArtworkCached only" per the plan; tightening that is a
+// follow-up. We don't assert the MB call count to keep the test
+// focused on the load-bearing invariants above.
+func TestEnricherSkipsArtworkFetchForLocalMBID(t *testing.T) {
+	const localMBID = "local-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	// Counters live across goroutines (HTTP handler vs. main test) —
+	// atomic.Int32 keeps `go test -race` clean. Pre-fix the int
+	// variant tripped the race detector on the read path even when
+	// no writes happened (CodeRabbit Minor on c506922).
+	var caaCalls atomic.Int32
+	var itunesCalls atomic.Int32
+	mbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Return an MB hit so albumMBID resolution succeeds — the
+		// bailout we added to enrichOne handles albumMBID == "" with a
+		// local-prefix anyway, but a passing MB makes this test
+		// independent of that secondary fallthrough.
+		io.WriteString(w, `{"releases":[{"id":"dddddddd-dddd-4ddd-8ddd-dddddddddddd","score":100,"title":"Album","artist-credit":[{"name":"Artist"}]}]}`)
+	}))
+	defer mbSrv.Close()
+	caaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		caaCalls.Add(1)
+		w.Write([]byte{0xFF, 0xD8, 0xFF})
+	}))
+	defer caaSrv.Close()
+	itunesSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		itunesCalls.Add(1)
+		// Reply with an empty hit set — the assertion is purely on
+		// the call-count, but a sane response keeps logs quiet.
+		io.WriteString(w, `{"resultCount":0,"results":[]}`)
+	}))
+	defer itunesSrv.Close()
+
+	dir := t.TempDir()
+	artDir := filepath.Join(dir, "artwork")
+	os.MkdirAll(artDir, 0o755)
+	// Pre-stage the local-<hash>-500.jpg the scanner would have
+	// written. The enricher MUST NOT touch this file — we don't
+	// assert mtime preservation here (the bypass guard simply skips
+	// ensureArtworkCached), but if the bypass regressed the existing
+	// stat-and-replace path inside ensureArtworkCached would leave
+	// the original on disk anyway. The CAA call-count assertion is
+	// the load-bearing check.
+	if err := os.WriteFile(filepath.Join(artDir, localMBID+"-500.jpg"),
+		[]byte("scanner-curated"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store, _ := manifest.OpenStore(filepath.Join(dir, "bridge.db"))
+	defer store.Close()
+	// Track arrives with ArtworkMBID already stamped — scanner side.
+	tr := &manifest.Track{
+		Path: "x.flac", Size: 1, ModTime: time.Now(),
+		Artist: "Artist", Album: "Album",
+		ArtworkMBID: localMBID,
+	}
+	if err := store.UpsertTrack(tr); err != nil {
+		t.Fatal(err)
+	}
+
+	e := NewEnricher(store,
+		NewMusicBrainzClient(mbSrv.URL, "t", nil),
+		NewCoverArtClient(caaSrv.URL, "t", nil),
+		nil, artDir,
+	).WithITunes(NewITunesClient(itunesSrv.URL, "t", nil))
+	e.MBMinInterval = 0
+	e.CAAMinInterval = 0
+	e.PollInterval = 5 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	go e.Run(ctx)
+
+	deadline := time.Now().Add(1500 * time.Millisecond)
+	for time.Now().Before(deadline) && e.Done() == 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if e.Done() == 0 {
+		t.Fatal("track never enriched (the bypass should still mark it done)")
+	}
+	if got := caaCalls.Load(); got != 0 {
+		t.Errorf("CAA called %d times for local-prefix track; want 0", got)
+	}
+	if got := itunesCalls.Load(); got != 0 {
+		t.Errorf("iTunes called %d times for local-prefix track; want 0", got)
+	}
+
+	// Round-trip the track from storage to confirm ArtworkMBID
+	// survived MarkEnriched without being overwritten by the
+	// enricher's UUID-stamping branch.
+	got, err := store.GetTrack("x.flac")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil {
+		t.Fatal("track missing from store after enrichment")
+	}
+	if got.ArtworkMBID != localMBID {
+		t.Errorf("ArtworkMBID = %q, want %q (local- value must survive)", got.ArtworkMBID, localMBID)
+	}
+}
+
+// TestEnricherFallthroughForLocalPrefixWithoutMBMatch covers the
+// obscure-album case the v1.2 bypass was designed for: track has
+// local-prefix ArtworkMBID, MusicBrainz returns no match. The
+// pre-fix enricher would early-return at the `albumMBID == ""`
+// bailout and skip resolveArtist entirely — silently breaking the
+// exact case the local-art feature targets. Post-fix, the bailout
+// allows the local-prefix to fall through; resolveArtist runs;
+// MarkEnriched stamps the track done.
+func TestEnricherFallthroughForLocalPrefixWithoutMBMatch(t *testing.T) {
+	const localMBID = "local-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+	// atomic.Int32 — see sibling TestEnricherSkipsArtworkFetchForLocalMBID
+	// for the race-detector rationale.
+	var caaCalls atomic.Int32
+	mbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Empty MB result — this is the obscure-album case.
+		io.WriteString(w, `{"releases":[]}`)
+	}))
+	defer mbSrv.Close()
+	caaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		caaCalls.Add(1)
+		w.WriteHeader(404)
+	}))
+	defer caaSrv.Close()
+
+	dir := t.TempDir()
+	artDir := filepath.Join(dir, "artwork")
+	os.MkdirAll(artDir, 0o755)
+	store, _ := manifest.OpenStore(filepath.Join(dir, "bridge.db"))
+	defer store.Close()
+	tr := &manifest.Track{
+		Path: "y.flac", Size: 1, ModTime: time.Now(),
+		Artist: "ObscureArtist", Album: "RareAlbum",
+		ArtworkMBID: localMBID,
+	}
+	if err := store.UpsertTrack(tr); err != nil {
+		t.Fatal(err)
+	}
+
+	e := NewEnricher(store,
+		NewMusicBrainzClient(mbSrv.URL, "t", nil),
+		NewCoverArtClient(caaSrv.URL, "t", nil),
+		nil, artDir,
+	)
+	e.MBMinInterval = 0
+	e.CAAMinInterval = 0
+	e.PollInterval = 5 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	go e.Run(ctx)
+
+	deadline := time.Now().Add(1500 * time.Millisecond)
+	for time.Now().Before(deadline) && e.Done() == 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if e.Done() == 0 {
+		t.Fatal("local-prefix track without MB match was never enriched (bailout regression)")
+	}
+	if got := caaCalls.Load(); got != 0 {
+		t.Errorf("CAA called %d times despite albumMBID==\"\" + local prefix; want 0", got)
+	}
+	got, _ := store.GetTrack("y.flac")
+	if got == nil || got.ArtworkMBID != localMBID {
+		t.Errorf("ArtworkMBID lost on local-prefix obscure-album path (got %v)", got)
 	}
 }
 

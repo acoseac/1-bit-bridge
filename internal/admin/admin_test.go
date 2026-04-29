@@ -53,7 +53,7 @@ func newTestServer(t *testing.T) (*Server, *config.Config, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	scanner := manifest.NewScanner(cfg.LibraryRoots, mstore)
+	scanner := manifest.NewScanner(cfg.LibraryRoots, mstore, "")
 	resolver := bridgefs.New(cfg.LibraryRoots)
 
 	// Cancel any admin-triggered scan goroutine when the test ends so it
