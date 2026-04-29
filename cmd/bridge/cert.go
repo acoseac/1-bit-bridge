@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/advertise"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
 )
@@ -158,7 +159,17 @@ func certRotateCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 	_ = os.Remove(keyPath)
 
 	hostname, _ := os.Hostname()
-	if err := servertls.Generate(certPath, keyPath, hostname); err != nil {
+	// Rotate is the operator-driven path that picks up Tailscale +
+	// custom-endpoint SAN changes since the last cert was minted. We
+	// gather the broader SAN set here so the rotated cert covers every
+	// URL the bridge currently advertises in /v1/health.
+	sanCfg := advertise.CertSANConfig{CustomEndpoints: cfg.CustomEndpoints}
+	opts := servertls.GenerateOptions{
+		Hostname:      hostname,
+		ExtraDNSNames: advertise.GatherCertSANDNS(sanCfg),
+		ExtraIPs:      advertise.GatherCertSANIPs(sanCfg),
+	}
+	if err := servertls.GenerateWithOptions(certPath, keyPath, opts); err != nil {
 		fmt.Fprintf(stderr, "rotate: %v\n", err)
 		return 1
 	}

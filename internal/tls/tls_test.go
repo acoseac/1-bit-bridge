@@ -305,3 +305,156 @@ func containsIP(ips []net.IP, want string) bool {
 	}
 	return false
 }
+
+func TestParseHostFromURL_StripsSchemeAndPort(t *testing.T) {
+	cases := []struct {
+		in       string
+		wantHost string
+		wantIP   bool
+	}{
+		{"https://foo.example.com:7788", "foo.example.com", false},
+		{"https://192.168.1.10:7788", "192.168.1.10", true},
+		{"https://[fe80::1]:7788", "fe80::1", true},
+		{"https://bare.example.com", "bare.example.com", false},
+		{"not-a-url", "", false},
+		{"https://", "", false},
+	}
+	for _, c := range cases {
+		gotHost, gotIP := ParseHostFromURL(c.in)
+		if gotHost != c.wantHost || gotIP != c.wantIP {
+			t.Errorf("ParseHostFromURL(%q) = (%q, %v), want (%q, %v)",
+				c.in, gotHost, gotIP, c.wantHost, c.wantIP)
+		}
+	}
+}
+
+func TestGenerateWithOptions_IncludesExtraSANs(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "server.crt")
+	keyPath := filepath.Join(dir, "server.key")
+	opts := GenerateOptions{
+		Hostname:      "host.example.com",
+		ExtraDNSNames: []string{"magic.tailfoo.ts.net", "my-bridge.example.com"},
+		ExtraIPs: []net.IP{
+			net.ParseIP("100.91.73.88"),
+			net.ParseIP("192.168.1.10"),
+		},
+	}
+	if err := GenerateWithOptions(certPath, keyPath, opts); err != nil {
+		t.Fatalf("GenerateWithOptions: %v", err)
+	}
+	// Parse the cert and inspect SAN slots.
+	raw, err := os.ReadFile(certPath)
+	if err != nil {
+		t.Fatalf("read cert: %v", err)
+	}
+	block, _ := pem.Decode(raw)
+	if block == nil {
+		t.Fatalf("no PEM block")
+	}
+	parsed, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("parse cert: %v", err)
+	}
+
+	// DNSNames must include localhost (default), the hostname, the
+	// auto-derived `<short>.local` (Qodo bot review on PR #93), and
+	// the operator extras.
+	wantDNS := []string{"localhost", "host.example.com", "host.local", "magic.tailfoo.ts.net", "my-bridge.example.com"}
+	for _, want := range wantDNS {
+		found := false
+		for _, n := range parsed.DNSNames {
+			if strings.EqualFold(n, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("DNSNames missing %q; got %v", want, parsed.DNSNames)
+		}
+	}
+
+	// IPAddresses must include the loopback defaults plus the operator extras.
+	wantIPs := []net.IP{
+		net.IPv4(127, 0, 0, 1),
+		net.IPv6loopback,
+		net.IPv4zero,
+		net.ParseIP("100.91.73.88"),
+		net.ParseIP("192.168.1.10"),
+	}
+	for _, want := range wantIPs {
+		found := false
+		for _, ip := range parsed.IPAddresses {
+			if ip.Equal(want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("IPAddresses missing %v; got %v", want, parsed.IPAddresses)
+		}
+	}
+}
+
+func TestMergeDNSNames_DedupesCaseInsensitively(t *testing.T) {
+	got := mergeDNSNames("Host.Example.Com", []string{
+		"host.example.com",    // dup of hostname (case-fold)
+		"localhost",           // dup of default
+		"new.example.com",     // kept
+		"  new.example.com  ", // dup with whitespace
+		"",                    // dropped
+	})
+	// Expect: localhost, Host.Example.Com, Host.local, new.example.com
+	// (4 entries — `<short>.local` is auto-added by dnsNames since
+	// PR #93 round 1).
+	if len(got) != 4 {
+		t.Errorf("merged DNSNames = %v, want 4 deduped entries", got)
+	}
+}
+
+func TestMergeIPs_DedupesByCanonicalForm(t *testing.T) {
+	got := mergeIPs([]net.IP{
+		net.ParseIP("127.0.0.1"), // dup of default
+		net.ParseIP("::1"),       // dup of default
+		net.ParseIP("10.0.0.5"),  // kept
+		net.ParseIP("10.0.0.5"),  // dup
+		nil,                      // dropped
+	})
+	if len(got) != 4 { // 127.0.0.1, ::1, 0.0.0.0, 10.0.0.5
+		t.Errorf("merged IPs = %v, want 4 deduped entries", got)
+	}
+}
+
+// TestDNSNames_AppendsDotLocal pins the SAN-mismatch fix from Qodo
+// PR #93 round 1: every hostname surfaces a `<shortLabel>.local`
+// twin so the cert covers the mDNS URL `advertise.Endpoints` emits.
+func TestDNSNames_AppendsDotLocal(t *testing.T) {
+	cases := []struct {
+		hostname string
+		want     []string
+	}{
+		// Bare short hostname → adds `host.local`.
+		{"box", []string{"localhost", "box", "box.local"}},
+		// FQDN → strip suffix, then add `<short>.local`.
+		{"box.example.com", []string{"localhost", "box.example.com", "box.local"}},
+		// Already `.local`-suffixed → no duplicate.
+		{"mac.local", []string{"localhost", "mac.local"}},
+		// Empty hostname → only localhost.
+		{"", []string{"localhost"}},
+		// "localhost" → only localhost.
+		{"localhost", []string{"localhost"}},
+	}
+	for _, c := range cases {
+		t.Run(c.hostname, func(t *testing.T) {
+			got := dnsNames(c.hostname)
+			if len(got) != len(c.want) {
+				t.Fatalf("len = %d, want %d: got %v", len(got), len(c.want), got)
+			}
+			for i, w := range c.want {
+				if got[i] != w {
+					t.Errorf("got[%d] = %q, want %q (full got=%v)", i, got[i], w, got)
+				}
+			}
+		})
+	}
+}

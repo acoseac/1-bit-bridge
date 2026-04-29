@@ -629,9 +629,38 @@ function initSettings() {
   const restartBtn = document.getElementById("restart-btn");
   if (!form) return;
 
+  // Snapshot the customEndpoints textarea at page-load so the submit
+  // handler can detect operator-driven changes and warn before
+  // submitting. The bridge doesn't auto-rotate the cert when this list
+  // changes (preserves iOS pinning until the operator explicitly
+  // rotates), but the cert STAYS stale relative to the new list until
+  // the operator hits Rotate — which loses every paired iOS device.
+  // Loud confirm preempts the "saved but doesn't work, why?"
+  // troubleshooting cycle.
+  const customEndpointsField = form.querySelector("[name=customEndpoints]");
+  const customEndpointsOriginal = customEndpointsField
+    ? normaliseCustomEndpointsText(customEndpointsField.value)
+    : "";
+
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const fd = new FormData(form);
+
+    // Custom-endpoints diff check. Only confirm when the normalised
+    // form differs — whitespace / blank-line edits don't trip the
+    // dialog, since the server normalises the same way.
+    const customNow = normaliseCustomEndpointsText(fd.get("customEndpoints") || "");
+    if (customNow !== customEndpointsOriginal) {
+      const ok = confirm(
+        "Saving will change the advertised endpoint list, but the TLS " +
+        "certificate's SAN coverage stays unchanged until you rotate it.\n\n" +
+        "iOS devices will only be able to connect to a custom endpoint " +
+        "AFTER you rotate the cert (Cert tile → Rotate) and re-pair every " +
+        "device.\n\nProceed with saving?"
+      );
+      if (!ok) return;
+    }
+
     const body = {
       libraryName: fd.get("libraryName"),
       listenAddress: fd.get("listenAddress"),
@@ -679,6 +708,30 @@ function showMsg(el, kind, text) {
   el.textContent = text;
   el.className = "status " + kind;
   el.hidden = false;
+}
+
+// normaliseCustomEndpointsText canonicalises a textarea value so the
+// "did the operator change anything?" diff doesn't trip on cosmetic
+// whitespace. Mirrors the server-side splitter:
+//   - Replace commas with newlines so a paste-friendly comma list and
+//     a one-per-line list produce identical normal forms.
+//   - Trim each line; drop blanks.
+//
+// **Order is preserved** (Qodo bot review on PR #93). The server's
+// splitter and `advertise.Endpoints()` both keep input order, and the
+// position of each ClassCustom entry affects iOS connection-attempt
+// priority. Sorting in the diff would suppress the confirm dialog for
+// a reorder-only edit, but the change WOULD be persisted and shift
+// which custom URL iOS tries first — confusing for the operator.
+// Reorder-only edits now correctly fire the dialog so the operator
+// can confirm or cancel before saving.
+function normaliseCustomEndpointsText(s) {
+  return String(s)
+    .replace(/,/g, "\n")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l !== "")
+    .join("\n");
 }
 
 // --- boot ---
