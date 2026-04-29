@@ -40,6 +40,7 @@ import (
 	"fmt"
 	"math/big"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -70,6 +71,32 @@ func DefaultPaths(dataDir string) (certPath, keyPath string) {
 	return filepath.Join(dataDir, CertFileName), filepath.Join(dataDir, KeyFileName)
 }
 
+// GenerateOptions bundles the SAN inputs to `Generate`. Empty / nil
+// fields fall back to the legacy hardcoded set (loopback + Hostname).
+//
+// ExtraDNSNames + ExtraIPs are unioned with the defaults; duplicates
+// across "default + extra" are silently deduped at cert-build time.
+type GenerateOptions struct {
+	// Hostname is the host's short or fully-qualified hostname, added
+	// to the SAN DNSNames as a convenience for browser-based access
+	// to the admin console. Empty / "localhost" is silently dropped
+	// (localhost is already in the defaults).
+	Hostname string
+
+	// ExtraDNSNames is the operator-relevant DNS list — Tailscale
+	// MagicDNS (`*.ts.net`), parsed hosts of `cfg.CustomEndpoints`,
+	// reverse-proxy front-doors. Each entry must be a bare hostname
+	// (no scheme, no port). Use `parseHostFromURL` to get the
+	// hostname out of a URL string.
+	ExtraDNSNames []string
+
+	// ExtraIPs is the operator-relevant IP list — every up,
+	// non-loopback, non-virtual-switch interface IP plus the
+	// Tailscale CGNAT addresses surfaced by `tailscale status`.
+	// loopback is always included regardless of this slice.
+	ExtraIPs []net.IP
+}
+
 // LoadOrGenerate loads the cert+key at the given paths, or mints a new
 // self-signed ECDSA P-256 pair if both files are absent. hostname (if non-
 // empty) is added to the cert's SANs alongside the default loopback entries.
@@ -77,14 +104,30 @@ func DefaultPaths(dataDir string) (certPath, keyPath string) {
 // Returns the loaded certificate and its SHA-256 fingerprint in the standard
 // colon-separated uppercase-hex form ("AB:CD:..."), ready to display in the
 // iOS pairing UI and to compare on the client side for pinning.
+//
+// Backwards-compat shim: callers that need the broader SAN options
+// (LAN / Tailscale / CustomEndpoints) call LoadOrGenerateWithOptions.
 func LoadOrGenerate(certPath, keyPath, hostname string) (*cryptotls.Certificate, string, error) {
+	return LoadOrGenerateWithOptions(certPath, keyPath, GenerateOptions{Hostname: hostname})
+}
+
+// LoadOrGenerateWithOptions is the SAN-aware path. New installs mint a
+// cert with the full SAN set (hostname + ExtraDNSNames + loopback IPs +
+// ExtraIPs); existing installs LOAD the on-disk cert without
+// regenerating, even if the cert's SANs no longer match `opts` — that
+// would silently break iOS pinning. A SAN mismatch is logged at
+// `.notice` so operators see the staleness signal in the startup log
+// and can drive a deliberate `bridge cert rotate` (every paired iOS
+// device must re-pair afterward; we don't pay that cost without
+// operator consent).
+func LoadOrGenerateWithOptions(certPath, keyPath string, opts GenerateOptions) (*cryptotls.Certificate, string, error) {
 	certExists := fileExists(certPath)
 	keyExists := fileExists(keyPath)
 	switch {
 	case certExists && keyExists:
 		// fall through to load
 	case !certExists && !keyExists:
-		if err := Generate(certPath, keyPath, hostname); err != nil {
+		if err := GenerateWithOptions(certPath, keyPath, opts); err != nil {
 			return nil, "", fmt.Errorf("generate TLS material: %w", err)
 		}
 	default:
@@ -102,6 +145,7 @@ func LoadOrGenerate(certPath, keyPath, hostname string) (*cryptotls.Certificate,
 		return nil, "", fmt.Errorf("fingerprint: %w", err)
 	}
 	logIfExpiringSoon(certPath)
+	logIfSANsStale(certPath, opts)
 	return &cert, fp, nil
 }
 
@@ -145,7 +189,21 @@ func logIfExpiringSoon(certPath string) {
 // not the key. Operators must re-pair every device after a
 // rotation; the admin console's per-token "Rotate" button or a
 // fresh `bridge://pair?...` deep link is the supported path.
+// Generate is the legacy 3-arg form. Equivalent to GenerateWithOptions
+// with `GenerateOptions{Hostname: hostname}`. Kept so non-PR-5 call
+// sites (CLI tests, future callers that don't need the broader SAN
+// list) don't have to reach for the options struct.
 func Generate(certPath, keyPath, hostname string) error {
+	return GenerateWithOptions(certPath, keyPath, GenerateOptions{Hostname: hostname})
+}
+
+// GenerateWithOptions (re-)mints the cert + key at the given paths.
+// Used by `bridge cert rotate` for an operator-driven rotation (where
+// the broader SAN list matters), and internally by
+// `LoadOrGenerateWithOptions` for first-run minting.
+//
+// See also `Generate` (legacy 3-arg shim).
+func GenerateWithOptions(certPath, keyPath string, opts GenerateOptions) error {
 	// 0o700: the dir holds the matching private key (written 0o600
 	// at line ~146). The cert.pem itself is conventionally world-
 	// readable (0o644) — public material — but the directory is the
@@ -189,8 +247,8 @@ func Generate(certPath, keyPath, hostname string) error {
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
 		IsCA:                  false,
-		DNSNames:              dnsNames(hostname),
-		IPAddresses:           defaultIPs(),
+		DNSNames:              mergeDNSNames(opts.Hostname, opts.ExtraDNSNames),
+		IPAddresses:           mergeIPs(opts.ExtraIPs),
 	}
 	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &priv.PublicKey, priv)
 	if err != nil {
@@ -277,12 +335,159 @@ func dnsNames(hostname string) []string {
 	return names
 }
 
+// mergeDNSNames builds the SAN DNSNames list: defaults (localhost +
+// hostname) plus operator-supplied extras, deduped case-insensitively.
+// Empty / "localhost" entries in extras are dropped silently — already
+// in the defaults.
+func mergeDNSNames(hostname string, extras []string) []string {
+	out := dnsNames(hostname)
+	seen := make(map[string]bool, len(out)+len(extras))
+	for _, n := range out {
+		seen[strings.ToLower(n)] = true
+	}
+	for _, e := range extras {
+		e = strings.TrimSpace(e)
+		if e == "" {
+			continue
+		}
+		key := strings.ToLower(e)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, e)
+	}
+	return out
+}
+
 func defaultIPs() []net.IP {
 	return []net.IP{
 		net.IPv4(127, 0, 0, 1),
 		net.IPv6loopback,
 		net.IPv4zero,
 	}
+}
+
+// mergeIPs builds the SAN IPAddresses list: defaults (loopback v4/v6 +
+// IPv4zero for `0.0.0.0` admin binds) plus operator-supplied extras,
+// deduped by canonical 16-byte form.
+func mergeIPs(extras []net.IP) []net.IP {
+	out := defaultIPs()
+	seen := make(map[string]bool, len(out)+len(extras))
+	for _, ip := range out {
+		seen[string(ip.To16())] = true
+	}
+	for _, ip := range extras {
+		if ip == nil {
+			continue
+		}
+		key := string(ip.To16())
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, ip)
+	}
+	return out
+}
+
+// ParseHostFromURL extracts the bare hostname from a URL string and
+// reports whether the host is an IP literal. Used by the SAN-gather
+// pipeline to route `cfg.CustomEndpoints` entries into either
+// `ExtraDNSNames` (DNS hostnames) or `ExtraIPs` (IP literals) — the
+// raw URL string can't go directly into a SAN slot, since x509 rejects
+// `https://host:port` shapes with an opaque error.
+//
+// Returns ("", false) for unparseable input or empty host.
+func ParseHostFromURL(raw string) (host string, isIP bool) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u == nil {
+		return "", false
+	}
+	h := u.Hostname() // strips :port; strips IPv6 brackets
+	if h == "" {
+		return "", false
+	}
+	if ip := net.ParseIP(h); ip != nil {
+		return h, true
+	}
+	return h, false
+}
+
+// logIfSANsStale parses the on-disk cert and warns if the operator-
+// supplied SAN options aren't fully covered. Best-effort: a parse
+// failure is silent; the operator surface (`Inspect` / admin Cert
+// tile) carries the user-facing diagnostic. Runs once at startup
+// from LoadOrGenerateWithOptions.
+//
+// Why this exists: cert auto-rotation on upgrade would silently
+// invalidate every paired iOS device's pinned fingerprint. Warning-
+// only preserves the pinning contract — the operator drives rotation
+// when they have an iOS device in hand to re-pair.
+func logIfSANsStale(certPath string, opts GenerateOptions) {
+	raw, err := os.ReadFile(certPath)
+	if err != nil {
+		return
+	}
+	block, _ := pem.Decode(raw)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return
+	}
+	parsed, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return
+	}
+	wantDNS := mergeDNSNames(opts.Hostname, opts.ExtraDNSNames)
+	wantIPs := mergeIPs(opts.ExtraIPs)
+	missingDNS := stringDiff(wantDNS, parsed.DNSNames)
+	missingIPs := ipDiff(wantIPs, parsed.IPAddresses)
+	if len(missingDNS) == 0 && len(missingIPs) == 0 {
+		return
+	}
+	logger.Warn(
+		"cert SANs are stale relative to advertised endpoints — Tailscale and custom-endpoint URLs will fail TLS until you rotate. Use `bridge cert rotate` or click Rotate in the admin Cert tile, then re-pair every iOS device.",
+		"missing_dns", missingDNS,
+		"missing_ips", ipsToStrings(missingIPs),
+	)
+}
+
+// stringDiff returns elements in `want` that aren't in `got`, case-
+// insensitively. Order preserves `want`. Used by logIfSANsStale to
+// list missing DNS SAN names.
+func stringDiff(want, got []string) []string {
+	have := make(map[string]bool, len(got))
+	for _, g := range got {
+		have[strings.ToLower(g)] = true
+	}
+	var miss []string
+	for _, w := range want {
+		if !have[strings.ToLower(w)] {
+			miss = append(miss, w)
+		}
+	}
+	return miss
+}
+
+func ipDiff(want, got []net.IP) []net.IP {
+	have := make(map[string]bool, len(got))
+	for _, g := range got {
+		have[string(g.To16())] = true
+	}
+	var miss []net.IP
+	for _, w := range want {
+		if !have[string(w.To16())] {
+			miss = append(miss, w)
+		}
+	}
+	return miss
+}
+
+func ipsToStrings(ips []net.IP) []string {
+	out := make([]string, 0, len(ips))
+	for _, ip := range ips {
+		out = append(out, ip.String())
+	}
+	return out
 }
 
 func writePEM(path, blockType string, der []byte, mode os.FileMode) error {
