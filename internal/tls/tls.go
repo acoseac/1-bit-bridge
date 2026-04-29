@@ -331,6 +331,24 @@ func dnsNames(hostname string) []string {
 	hostname = strings.TrimSpace(hostname)
 	if hostname != "" && hostname != "localhost" {
 		names = append(names, hostname)
+		// `<shortHostname>.local` is the canonical mDNS form the
+		// advertise package emits as `ClassMDNSHost`. Without it in
+		// the SAN list, iOS clients dialing the advertised mDNS URL
+		// fail TLS hostname verification even though pinning would
+		// otherwise accept (Qodo bot review on PR #93). The "short"
+		// form strips any FQDN suffix, matching the same trim
+		// `advertise.Endpoints()` does.
+		short := hostname
+		if i := strings.IndexByte(short, '.'); i > 0 {
+			short = short[:i]
+		}
+		dotLocal := short + ".local"
+		// Skip when the hostname is already `.local`-suffixed (macOS
+		// hostnames typically are, e.g. `mac.local`) so we don't
+		// duplicate.
+		if dotLocal != hostname && dotLocal != "localhost" {
+			names = append(names, dotLocal)
+		}
 	}
 	return names
 }

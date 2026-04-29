@@ -357,9 +357,10 @@ func TestGenerateWithOptions_IncludesExtraSANs(t *testing.T) {
 		t.Fatalf("parse cert: %v", err)
 	}
 
-	// DNSNames must include localhost (default), the hostname, and
+	// DNSNames must include localhost (default), the hostname, the
+	// auto-derived `<short>.local` (Qodo bot review on PR #93), and
 	// the operator extras.
-	wantDNS := []string{"localhost", "host.example.com", "magic.tailfoo.ts.net", "my-bridge.example.com"}
+	wantDNS := []string{"localhost", "host.example.com", "host.local", "magic.tailfoo.ts.net", "my-bridge.example.com"}
 	for _, want := range wantDNS {
 		found := false
 		for _, n := range parsed.DNSNames {
@@ -403,9 +404,11 @@ func TestMergeDNSNames_DedupesCaseInsensitively(t *testing.T) {
 		"  new.example.com  ", // dup with whitespace
 		"",                    // dropped
 	})
-	// Expect: localhost, Host.Example.Com, new.example.com (3 entries).
-	if len(got) != 3 {
-		t.Errorf("merged DNSNames = %v, want 3 deduped entries", got)
+	// Expect: localhost, Host.Example.Com, Host.local, new.example.com
+	// (4 entries — `<short>.local` is auto-added by dnsNames since
+	// PR #93 round 1).
+	if len(got) != 4 {
+		t.Errorf("merged DNSNames = %v, want 4 deduped entries", got)
 	}
 }
 
@@ -419,5 +422,39 @@ func TestMergeIPs_DedupesByCanonicalForm(t *testing.T) {
 	})
 	if len(got) != 4 { // 127.0.0.1, ::1, 0.0.0.0, 10.0.0.5
 		t.Errorf("merged IPs = %v, want 4 deduped entries", got)
+	}
+}
+
+// TestDNSNames_AppendsDotLocal pins the SAN-mismatch fix from Qodo
+// PR #93 round 1: every hostname surfaces a `<shortLabel>.local`
+// twin so the cert covers the mDNS URL `advertise.Endpoints` emits.
+func TestDNSNames_AppendsDotLocal(t *testing.T) {
+	cases := []struct {
+		hostname string
+		want     []string
+	}{
+		// Bare short hostname → adds `host.local`.
+		{"box", []string{"localhost", "box", "box.local"}},
+		// FQDN → strip suffix, then add `<short>.local`.
+		{"box.example.com", []string{"localhost", "box.example.com", "box.local"}},
+		// Already `.local`-suffixed → no duplicate.
+		{"mac.local", []string{"localhost", "mac.local"}},
+		// Empty hostname → only localhost.
+		{"", []string{"localhost"}},
+		// "localhost" → only localhost.
+		{"localhost", []string{"localhost"}},
+	}
+	for _, c := range cases {
+		t.Run(c.hostname, func(t *testing.T) {
+			got := dnsNames(c.hostname)
+			if len(got) != len(c.want) {
+				t.Fatalf("len = %d, want %d: got %v", len(got), len(c.want), got)
+			}
+			for i, w := range c.want {
+				if got[i] != w {
+					t.Errorf("got[%d] = %q, want %q (full got=%v)", i, got[i], w, got)
+				}
+			}
+		})
 	}
 }
