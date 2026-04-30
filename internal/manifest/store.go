@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -126,6 +127,61 @@ var migrations = []migration{
 			_, _ = db.Exec(`ALTER TABLE tracks ADD COLUMN enriched_at INTEGER NOT NULL DEFAULT 0`)
 			return nil
 		},
+	},
+	{
+		version: 2,
+		name:    "track_variants (v1.2 — PCM upscaling)",
+		// Why this table is created unconditionally even when
+		// upscale.enabled = false: predictable round-trip. An operator
+		// can enable → run `bridge upscale` → variants populate →
+		// disable (manifest stops advertising them) → re-enable
+		// (variants reappear without re-conversion). The runtime
+		// feature gate lives in `provider.go`'s manifest splice, not
+		// here.
+		//
+		// Schema notes:
+		//   - PRIMARY KEY (source_path, variant_id) lets multiple
+		//     variants of the same source coexist (different target
+		//     rates, future DSD synthesis). The `variant_id` is opaque
+		//     to the table; only the `bridge upscale` producer knows
+		//     the naming convention.
+		//   - sidecar_path stores the absolute on-disk path. We do
+		//     NOT recompute it from a hash + variant_id at read time
+		//     — operators may relocate `<dataDir>/transcoded/` and we
+		//     want the DB to be authoritative for "where this file
+		//     lives right now".
+		//   - source_mtime_ns + source_size belt-and-braces freshness
+		//     check. A sidecar whose source has drifted is considered
+		//     stale; the variant-resolve path returns 410 Gone so iOS
+		//     falls back to the original until `bridge upscale` re-
+		//     converts.
+		//   - sox_settings is opaque JSON — forensic record of the
+		//     resampler args used. Only consumed by ad-hoc operator
+		//     debugging.
+		//   - ON DELETE CASCADE removes the row when the parent
+		//     `tracks` row is deleted, but DOES NOT remove the
+		//     on-disk sidecar file. Store.DeleteTrack handles the
+		//     filesystem cleanup explicitly before issuing the
+		//     parent DELETE — see the function for the rationale.
+		sql: `
+		CREATE TABLE IF NOT EXISTS track_variants (
+			source_path     TEXT    NOT NULL,
+			variant_id      TEXT    NOT NULL,
+			sidecar_path    TEXT    NOT NULL,
+			format          TEXT    NOT NULL,
+			sample_rate     INTEGER NOT NULL,
+			bits_per_sample INTEGER NOT NULL,
+			size_bytes      INTEGER NOT NULL,
+			source_mtime_ns INTEGER NOT NULL,
+			source_size     INTEGER NOT NULL,
+			sox_settings    TEXT    NOT NULL,
+			created_at      INTEGER NOT NULL,
+			PRIMARY KEY (source_path, variant_id),
+			FOREIGN KEY (source_path) REFERENCES tracks(path) ON DELETE CASCADE
+		);
+		CREATE INDEX IF NOT EXISTS idx_track_variants_source_path
+			ON track_variants(source_path);
+		`,
 	},
 }
 
@@ -351,10 +407,56 @@ func (s *Store) UpsertTrackBatch(ts []*Track) error {
 // scanner's deletion-pass at end of scan; could otherwise race
 // concurrent enricher MarkEnriched and surface as
 // `database is locked` after the SQLite busy_timeout.
+//
+// Sidecar-cleanup contract (PR feat/upscale-phase1): the table
+// `track_variants` cascades on the parent track delete, but SQLite
+// CASCADE only removes the row — it does NOT remove the on-disk
+// `.flac` sidecar file. Without intervention a `--gc` would later
+// have no DB record to find the orphan by, so 100MB+ files would
+// leak per deleted source. Sequence here is:
+//  1. SELECT every sidecar_path for the track.
+//  2. os.Remove each one (log-and-continue on error — a missing or
+//     already-deleted sidecar shouldn't block the DB delete).
+//  3. DELETE FROM tracks (cascade fires after files are gone).
+//
+// `bridge upscale --gc` is the recovery path for sidecars that
+// escape this — interrupted DeleteTrack, manual SQL tampering,
+// restored-from-backup mismatch.
 func (s *Store) DeleteTrack(path string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.Exec(`DELETE FROM tracks WHERE path = ?`, path)
+	// Step 1: enumerate sidecars BEFORE the DB delete. Reading
+	// inside the writer lock is fine — modernc.org/sqlite serializes
+	// the read against pending writes via the same connection pool.
+	rows, err := s.db.Query(`SELECT sidecar_path FROM track_variants WHERE source_path = ?`, path)
+	if err == nil {
+		var sidecars []string
+		for rows.Next() {
+			var sp string
+			if scanErr := rows.Scan(&sp); scanErr != nil {
+				logger.Warn("delete-track: scan sidecar_path", "track", path, "err", scanErr)
+				continue
+			}
+			sidecars = append(sidecars, sp)
+		}
+		rows.Close()
+		// Step 2: best-effort filesystem cleanup. Log but never
+		// fail the DB delete on a per-file error; the scanner needs
+		// the row gone regardless of disk state.
+		for _, sp := range sidecars {
+			if rmErr := os.Remove(sp); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+				logger.Warn("delete-track: remove sidecar", "path", sp, "err", rmErr)
+			}
+		}
+	} else {
+		// Couldn't enumerate sidecars — log and proceed with the
+		// parent delete anyway. The orphan file becomes `--gc`'s
+		// problem on the next pass, NOT a reason to leave a stale
+		// row in the manifest.
+		logger.Warn("delete-track: list sidecars", "track", path, "err", err)
+	}
+	// Step 3: parent delete. CASCADE clears `track_variants` rows.
+	_, err = s.db.Exec(`DELETE FROM tracks WHERE path = ?`, path)
 	return err
 }
 
@@ -393,6 +495,97 @@ var (
 	enrichedFalse = false
 )
 
+// variantsAggSQL is the correlated subquery suffix appended to every
+// `SELECT ... FROM tracks` that wants the variants column. Returns
+// a JSON array string per row — `[]` (literal two chars) for tracks
+// with no variants, otherwise `[{...}, {...}]`. Single SQL round
+// trip per page regardless of variant cardinality (load-bearing
+// against N+1 on a 50k-track library).
+//
+// Constant string concatenation in the caller (not parameter
+// binding) is safe here: the subquery has no user input. Track
+// path lookups use the existing prepared-statement parameter on
+// the outer SELECT.
+const variantsAggSQL = `
+	(SELECT json_group_array(json_object(
+	            'id',            v.variant_id,
+	            'format',        v.format,
+	            'sampleRate',    v.sample_rate,
+	            'bitsPerSample', v.bits_per_sample,
+	            'sizeBytes',     v.size_bytes,
+	            'label',         v.variant_id))
+	 FROM track_variants v
+	 WHERE v.source_path = tracks.path) AS variants_json`
+
+// scanTrackVariants decodes the JSON aggregation column produced
+// by variantsAggSQL into Track.Variants. Empty / `null` / `[]`
+// payloads land as nil so `omitempty` drops the field on the
+// wire. Defensive against partially-corrupt JSON: malformed input
+// is logged and the variants slice stays nil — a track is still
+// playable from its source.
+func scanTrackVariants(t *Track, raw []byte) {
+	if len(raw) == 0 {
+		return
+	}
+	// Cheap fast-path: SQLite's json_group_array returns the
+	// literal two-byte string `[]` for tracks with no variants.
+	// Skip the unmarshal in the common case.
+	if len(raw) == 2 && raw[0] == '[' && raw[1] == ']' {
+		return
+	}
+	var vs []Variant
+	if err := json.Unmarshal(raw, &vs); err != nil {
+		logger.Warn("scan-track-variants: unmarshal", "err", err)
+		return
+	}
+	if len(vs) > 0 {
+		// Server-side label finalisation: the SQL aggregation
+		// emits `label = variant_id` as a placeholder so the
+		// label is non-null on the wire even if the producer
+		// didn't compute one. Replace with a human-friendly
+		// rendering here so iOS clients don't have to.
+		for i := range vs {
+			vs[i].Label = humanLabelForVariant(vs[i])
+		}
+		t.Variants = vs
+	}
+}
+
+// humanLabelForVariant renders an iOS-friendly description for
+// the picker UI. Today's only producer is `bridge upscale`, which
+// mints `upscaled-v1-<rate>-<bits>` IDs.
+func humanLabelForVariant(v Variant) string {
+	rateLabel := formatSampleRateLabel(v.SampleRate)
+	switch {
+	case v.Format == "flac":
+		return fmt.Sprintf("Upscaled FLAC %d/%s", v.BitsPerSample, rateLabel)
+	default:
+		return fmt.Sprintf("%s %d/%s", v.Format, v.BitsPerSample, rateLabel)
+	}
+}
+
+// formatSampleRateLabel mirrors iOS's TrackQualityChip rendering:
+// 44.1 family → "44.1", "88.2", "176.4", "352.8"; 48 family →
+// "48", "96", "192", "384". The integer-Hz wire form gets a more
+// compact display in either family.
+func formatSampleRateLabel(hz float64) string {
+	switch int(hz) {
+	case 44100:
+		return "44.1"
+	case 88200:
+		return "88.2"
+	case 176400:
+		return "176.4"
+	case 352800:
+		return "352.8"
+	case 48000, 96000, 192000, 384000:
+		return strconv.Itoa(int(hz / 1000))
+	default:
+		// Fallback: kHz with up to one decimal.
+		return strconv.FormatFloat(hz/1000, 'f', -1, 64)
+	}
+}
+
 // ListTracks returns all tracks, or (if since != nil) only tracks that
 // were written/updated in the index after since. Filtered by
 // indexed_at (when we last wrote the row) rather than mtime_ns (the
@@ -408,7 +601,7 @@ var (
 // require re-marshalling every track on each `MarkEnriched` write
 // just to flip a bool, which is what the column is for.
 func (s *Store) ListTracks(since *time.Time) ([]Track, error) {
-	q := `SELECT tags_json, enriched_at FROM tracks`
+	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + ` FROM tracks`
 	args := []any{}
 	if since != nil {
 		q += ` WHERE indexed_at > ?`
@@ -424,13 +617,15 @@ func (s *Store) ListTracks(since *time.Time) ([]Track, error) {
 	for rows.Next() {
 		var raw []byte
 		var enrichedAt int64
-		if err := rows.Scan(&raw, &enrichedAt); err != nil {
+		var variantsRaw []byte
+		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw); err != nil {
 			return nil, err
 		}
 		var t Track
 		if err := json.Unmarshal(raw, &t); err != nil {
 			return nil, err
 		}
+		scanTrackVariants(&t, variantsRaw)
 		// Share package-level pointers — see the `enrichedTrue` /
 		// `enrichedFalse` declaration above for the rationale.
 		if enrichedAt != 0 {
@@ -466,7 +661,7 @@ func (s *Store) StreamTracks(sp *time.Time, fn func(*Track) error) error {
 		// production crash deep in the streaming-manifest path.
 		return errors.New("StreamTracks: nil callback")
 	}
-	q := `SELECT tags_json, enriched_at FROM tracks`
+	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + ` FROM tracks`
 	args := []any{}
 	if sp != nil {
 		q += ` WHERE indexed_at > ?`
@@ -486,7 +681,8 @@ func (s *Store) StreamTracks(sp *time.Time, fn func(*Track) error) error {
 	for rows.Next() {
 		var raw []byte
 		var enrichedAt int64
-		if err := rows.Scan(&raw, &enrichedAt); err != nil {
+		var variantsRaw []byte
+		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw); err != nil {
 			return err
 		}
 		t = Track{}
@@ -498,6 +694,7 @@ func (s *Store) StreamTracks(sp *time.Time, fn func(*Track) error) error {
 		} else {
 			t.Enriched = &enrichedFalse
 		}
+		scanTrackVariants(&t, variantsRaw)
 		if err := fn(&t); err != nil {
 			return err
 		}
@@ -526,7 +723,7 @@ func (s *Store) ListTracksPage(afterPath string, limit int) ([]Track, error) {
 		limit = 1000
 	}
 	rows, err := s.db.Query(`
-		SELECT tags_json, enriched_at FROM tracks
+		SELECT tags_json, enriched_at, `+variantsAggSQL+` FROM tracks
 		WHERE path > ?
 		ORDER BY path ASC
 		LIMIT ?
@@ -539,13 +736,15 @@ func (s *Store) ListTracksPage(afterPath string, limit int) ([]Track, error) {
 	for rows.Next() {
 		var raw []byte
 		var enrichedAt int64
-		if err := rows.Scan(&raw, &enrichedAt); err != nil {
+		var variantsRaw []byte
+		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw); err != nil {
 			return nil, err
 		}
 		var t Track
 		if err := json.Unmarshal(raw, &t); err != nil {
 			return nil, err
 		}
+		scanTrackVariants(&t, variantsRaw)
 		// Same enriched-from-column splice as `ListTracks` — see
 		// the comment there for the "why a column, not the JSON" detail
 		// and the `enrichedTrue` / `enrichedFalse` declaration for the
@@ -869,4 +1068,115 @@ func (s *Store) GetScanState(key string) (string, error) {
 		return "", nil
 	}
 	return v, err
+}
+
+// VariantRow is the on-disk record for one cached transcoded
+// rendering of a track. Mirrors `track_variants` schema column-for-
+// column. Constructed by the transcode package when a sox run
+// completes, queried by the variant-resolve path on
+// `/v1/download?variant=`, and by `bridge upscale --gc`.
+type VariantRow struct {
+	SourcePath    string
+	VariantID     string
+	SidecarPath   string
+	Format        string
+	SampleRate    int
+	BitsPerSample int
+	SizeBytes     int64
+	SourceMTimeNS int64
+	SourceSize    int64
+	SoxSettings   string
+	CreatedAt     int64
+}
+
+// UpsertVariant writes (or replaces) one row in `track_variants`.
+// Holds `s.mu` per the writer contract. Replacement semantics
+// mirror UpsertTrack — re-running `bridge upscale --force` re-
+// converts and overwrites the prior row's metadata cleanly.
+func (s *Store) UpsertVariant(v VariantRow) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`
+		INSERT INTO track_variants
+			(source_path, variant_id, sidecar_path, format,
+			 sample_rate, bits_per_sample, size_bytes,
+			 source_mtime_ns, source_size, sox_settings, created_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?)
+		ON CONFLICT (source_path, variant_id) DO UPDATE SET
+			sidecar_path    = excluded.sidecar_path,
+			format          = excluded.format,
+			sample_rate     = excluded.sample_rate,
+			bits_per_sample = excluded.bits_per_sample,
+			size_bytes      = excluded.size_bytes,
+			source_mtime_ns = excluded.source_mtime_ns,
+			source_size     = excluded.source_size,
+			sox_settings    = excluded.sox_settings,
+			created_at      = excluded.created_at
+	`, v.SourcePath, v.VariantID, v.SidecarPath, v.Format,
+		v.SampleRate, v.BitsPerSample, v.SizeBytes,
+		v.SourceMTimeNS, v.SourceSize, v.SoxSettings, v.CreatedAt)
+	return err
+}
+
+// GetVariant fetches one row by (source_path, variant_id). Returns
+// (nil, nil) if absent — same convention as GetTrack.
+func (s *Store) GetVariant(sourcePath, variantID string) (*VariantRow, error) {
+	var v VariantRow
+	err := s.db.QueryRow(`
+		SELECT source_path, variant_id, sidecar_path, format,
+		       sample_rate, bits_per_sample, size_bytes,
+		       source_mtime_ns, source_size, sox_settings, created_at
+		FROM track_variants
+		WHERE source_path = ? AND variant_id = ?
+	`, sourcePath, variantID).Scan(
+		&v.SourcePath, &v.VariantID, &v.SidecarPath, &v.Format,
+		&v.SampleRate, &v.BitsPerSample, &v.SizeBytes,
+		&v.SourceMTimeNS, &v.SourceSize, &v.SoxSettings, &v.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &v, nil
+}
+
+// AllVariants returns every row in track_variants. Used by `bridge
+// upscale --gc` to drive the mark-and-sweep against the on-disk
+// `<dataDir>/transcoded/` directory.
+func (s *Store) AllVariants() ([]VariantRow, error) {
+	rows, err := s.db.Query(`
+		SELECT source_path, variant_id, sidecar_path, format,
+		       sample_rate, bits_per_sample, size_bytes,
+		       source_mtime_ns, source_size, sox_settings, created_at
+		FROM track_variants
+		ORDER BY source_path ASC, variant_id ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []VariantRow{}
+	for rows.Next() {
+		var v VariantRow
+		if err := rows.Scan(
+			&v.SourcePath, &v.VariantID, &v.SidecarPath, &v.Format,
+			&v.SampleRate, &v.BitsPerSample, &v.SizeBytes,
+			&v.SourceMTimeNS, &v.SourceSize, &v.SoxSettings, &v.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+// DeleteVariant removes one row by (source_path, variant_id). Holds
+// `s.mu`. Caller is responsible for removing the on-disk sidecar
+// file — same separation-of-concerns as DeleteTrack pre-cleanup.
+func (s *Store) DeleteVariant(sourcePath, variantID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`DELETE FROM track_variants WHERE source_path = ? AND variant_id = ?`, sourcePath, variantID)
+	return err
 }

@@ -152,6 +152,18 @@ func (s *Server) download(w http.ResponseWriter, r *http.Request) {
 // invariant we're protecting — see internal/updater/sessions.go for
 // the rationale). Tracker is nil-safe; pre-Phase-B bridges that
 // don't wire one continue to work unchanged.
+//
+// **Variant routing** (v1.2): if the request carries `?variant=<id>`
+// in addition to `?path=<rel>`, the resolver looks up the (path,
+// variantID) pair in the variant store and serves the on-disk
+// sidecar instead of the original. Path validation still runs on
+// the source path (so `..`-escapes can't sneak through via the
+// variant route). When the variant store is unwired (feature
+// disabled) OR the row is missing, we 404 — iOS's typed
+// BridgeError.http(404) maps to a clean fallback to the original
+// on the next playback. A row that exists but whose sidecar is
+// stale (source drift) yields 410 Gone, which iOS handles
+// identically to 404 modulo the error message.
 func (s *Server) serveFile(w http.ResponseWriter, r *http.Request) {
 	if s.sessions != nil {
 		s.sessions.Begin()
@@ -165,6 +177,16 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request) {
 	}
 	if info.IsDir() {
 		writeError(w, http.StatusBadRequest, "bad_request", "path is a directory")
+		return
+	}
+
+	// Variant branch: take over before the source-file open if the
+	// caller asked for a variant. The source-path resolve above is
+	// load-bearing — we run it first so a malformed `?path=` is
+	// rejected with the standard 400 family BEFORE any variant
+	// lookup happens.
+	if variantID := r.URL.Query().Get("variant"); variantID != "" {
+		s.serveVariant(w, r, clientPath, variantID)
 		return
 	}
 
@@ -185,6 +207,53 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request) {
 	// http.ServeContent handles Range, If-Modified-Since, and the 206
 	// partial-content bookkeeping for us. It also skips the body on HEAD
 	// requests automatically.
+	http.ServeContent(w, r, info.Name(), info.ModTime(), f)
+}
+
+// serveVariant resolves (clientPath, variantID) → on-disk sidecar
+// path and streams the bytes via http.ServeContent. Stays out of
+// the source-resolution path entirely: the resolver's library-root
+// constraint already validated `clientPath` upstream, and the
+// sidecar lives under the bridge's own data dir (which is not a
+// user-controlled location). Range requests, content-type, and
+// HEAD handling come for free via ServeContent — same shape as the
+// original-source branch.
+func (s *Server) serveVariant(w http.ResponseWriter, r *http.Request, sourcePath, variantID string) {
+	if s.variantStore == nil {
+		writeError(w, http.StatusNotFound, "variant_not_found", "upscaling is not enabled on this bridge")
+		return
+	}
+	sidecarPath, status, err := s.variantStore.ResolveVariant(sourcePath, variantID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	switch status {
+	case VariantStatusNotFound:
+		writeError(w, http.StatusNotFound, "variant_not_found", "no such variant")
+		return
+	case VariantStatusStale:
+		writeError(w, http.StatusGone, "variant_stale", "variant is out of date relative to source; falling back to original is recommended")
+		return
+	}
+	f, err := os.Open(sidecarPath)
+	if err != nil {
+		// The sidecar row pointed at a file that's gone (manual
+		// deletion under the bridge's feet). 410 Gone signals iOS
+		// to fall back to the original and not cache the variant
+		// URL aggressively. The DB row stays — `bridge upscale --gc`
+		// is the right place to reconcile.
+		writeError(w, http.StatusGone, "variant_missing_on_disk", "sidecar file missing")
+		return
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Accept-Ranges", "bytes")
 	http.ServeContent(w, r, info.Name(), info.ModTime(), f)
 }
 

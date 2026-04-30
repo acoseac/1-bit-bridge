@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -21,6 +22,11 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 )
+
+// numCPUMinusOne is the worker-pool size hint used by EffectiveWorkers.
+// Extracted as a function so tests can override behaviour without
+// touching the runtime package directly.
+func numCPUMinusOne() int { return runtime.NumCPU() - 1 }
 
 // validateLogger surfaces non-fatal config-validation warnings to the
 // operator. Used today by `Validate()` to emit one entry per dropped
@@ -57,6 +63,109 @@ type Config struct {
 	Update          UpdateConfig       `yaml:"update,omitempty"`
 	Backup          BackupConfig       `yaml:"backup,omitempty"`
 	LibraryWatch    LibraryWatchConfig `yaml:"libraryWatch,omitempty"`
+	Upscale         UpscaleConfig      `yaml:"upscale,omitempty"`
+}
+
+// UpscaleConfig governs the optional offline PCM-upscaling feature
+// introduced in v1.2. Disabled by default — operators must explicitly
+// opt in via `upscale.enabled: true`. When disabled:
+//   - the `bridge upscale` CLI exits with a friendly "feature is
+//     disabled" error.
+//   - the `POST /v1/upscale` endpoint returns 503 `upscale_disabled`.
+//   - the manifest provider does not splice `Variants` into Track
+//     responses even if `track_variants` rows exist on disk.
+//   - `/v1/health` reports `upscaleEnabled: false`.
+//
+// When enabled, additional safety: `bridge serve` runs an
+// `exec.LookPath("sox")` probe at startup. Missing `sox` logs an
+// error and overrides Enabled to false in-memory — feature
+// gracefully degrades, the rest of the server keeps running.
+//
+// `track_variants` table is created unconditionally (additive
+// schema, no harm in empty); only the read/write paths are gated.
+// This means a user can: enable → run `bridge upscale` → variants
+// populate → disable → variants disappear from manifest → re-enable
+// → variants reappear without re-conversion.
+type UpscaleConfig struct {
+	// Enabled is the master toggle. Default false.
+	Enabled bool `yaml:"enabled,omitempty"`
+
+	// Workers is the size of the long-lived transcode worker pool
+	// instantiated by `bridge serve` when Enabled. Zero (the default)
+	// resolves to min(NumCPU-1, 4) at startup. Operators with beefy
+	// hosts can raise; small-box deployments (Pi) should leave at
+	// the default to avoid starving downloads / pairing requests.
+	Workers int `yaml:"workers,omitempty"`
+
+	// QueueCap is the hard cap on the worker pool's pending-job
+	// channel. POST /v1/upscale enqueues are non-blocking and drop
+	// to a 503 `queue_full` response when the channel can't accept
+	// more — protects against a user spamming "Generate" on their
+	// 50k-track library exhausting memory or wedging the HTTP path.
+	// Zero (the default) resolves to DefaultUpscaleQueueCap.
+	QueueCap int `yaml:"queueCap,omitempty"`
+
+	// TargetRate selects the resampler output rate. "auto" (the
+	// default) picks 176400 Hz for 44.1-family sources and 192000
+	// Hz for 48-family sources. Explicit numeric values override
+	// the auto pick (e.g. "352800" for DSD-friendly DACs that
+	// prefer the next octave up). Sources at or above the chosen
+	// rate are skipped — never downsample.
+	TargetRate string `yaml:"targetRate,omitempty"`
+
+	// TargetBits is the output bit depth. 24 (the default) is the
+	// sweet spot for FLAC: lower ceiling than 32-bit float but
+	// 96 dB above the audible noise floor and well below any
+	// realistic dither quantisation noise. 32-bit-int output is
+	// supported for completeness but rarely a sonic improvement.
+	TargetBits int `yaml:"targetBits,omitempty"`
+}
+
+// EffectiveWorkers resolves the runtime worker count from the YAML
+// field, applying the min(NumCPU-1, 4) default at zero. Centralised
+// so the CLI and the serve-side pool can't disagree on the floor.
+func (u UpscaleConfig) EffectiveWorkers() int {
+	if u.Workers > 0 {
+		return u.Workers
+	}
+	n := numCPUMinusOne()
+	if n > 4 {
+		n = 4
+	}
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
+
+// EffectiveQueueCap resolves the pending-job channel cap, defaulting
+// to DefaultUpscaleQueueCap when the YAML field is zero.
+func (u UpscaleConfig) EffectiveQueueCap() int {
+	if u.QueueCap > 0 {
+		return u.QueueCap
+	}
+	return DefaultUpscaleQueueCap
+}
+
+// EffectiveTargetBits resolves the output bit depth. Defaults to 24.
+func (u UpscaleConfig) EffectiveTargetBits() int {
+	switch u.TargetBits {
+	case 16, 24, 32:
+		return u.TargetBits
+	default:
+		return 24
+	}
+}
+
+// EffectiveTargetRate returns the YAML field's literal value when
+// set, or "auto" (the default) when empty. Validation happens at
+// the call site in the transcode package, where the source rate
+// is in scope.
+func (u UpscaleConfig) EffectiveTargetRate() string {
+	if u.TargetRate == "" {
+		return "auto"
+	}
+	return u.TargetRate
 }
 
 // LibraryWatchConfig governs the optional fsnotify-based
@@ -196,6 +305,12 @@ const (
 	// enough that a large-folder copy doesn't trigger a scan-
 	// per-file storm.
 	DefaultLibraryWatchDebounceSeconds = 10
+	// DefaultUpscaleQueueCap bounds the pending-job channel of the
+	// long-lived transcode worker pool inside `bridge serve`. 5000
+	// covers 2-3 average user libraries; smaller deployments stay
+	// well under the cap, the user-spam-the-button case bounces
+	// against a clean 503 instead of exhausting memory.
+	DefaultUpscaleQueueCap = 5000
 )
 
 // Load parses a bridge.yaml file, fills defaults, resolves relative paths

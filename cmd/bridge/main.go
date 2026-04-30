@@ -39,9 +39,35 @@ import (
 	bridgemdns "github.com/acoseac/1-bit-bridge/internal/mdns"
 	"github.com/acoseac/1-bit-bridge/internal/pairing"
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
+	"github.com/acoseac/1-bit-bridge/internal/transcode"
 	"github.com/acoseac/1-bit-bridge/internal/updater"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
+
+// variantStoreAdapter implements api.VariantStore on top of a
+// manifest.Provider. Translates the manifest-package's
+// VariantResolutionStatus enum into api.VariantStatus value-for-
+// value — same semantic shape, separately defined to keep the api
+// package from importing the manifest package directly (mirrors
+// the MBIDProbe / ManifestProvider pattern).
+type variantStoreAdapter struct {
+	provider *manifest.Provider
+}
+
+func (a *variantStoreAdapter) ResolveVariant(sourcePath, variantID string) (string, api.VariantStatus, error) {
+	sidecar, status, err := a.provider.ResolveVariant(sourcePath, variantID)
+	if err != nil {
+		return "", api.VariantStatusOK, err
+	}
+	switch status {
+	case manifest.VariantNotFound:
+		return "", api.VariantStatusNotFound, nil
+	case manifest.VariantStale:
+		return "", api.VariantStatusStale, nil
+	default:
+		return sidecar, api.VariantStatusOK, nil
+	}
+}
 
 // updateInfoAdapter bridges *updater.Updater to api.UpdaterStatus +
 // admin's read-side without coupling those packages to the updater
@@ -302,6 +328,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return pairCmd(args[1:], stdout, stderr)
 	case "scan":
 		return scanCmd(args[1:], stdout, stderr)
+	case "upscale":
+		return upscaleCmd(ctx, args[1:], stdout, stderr)
 	case "doctor":
 		return doctorCmd(args[1:], stdout, stderr)
 	case "update":
@@ -356,6 +384,7 @@ Subcommands:
   library  Manage library roots: bridge library add|remove <path>.
   pair     Generate a new bearer token for an iOS client.
   scan     Force a full library rescan.
+  upscale  Generate high-rate FLAC sidecars from PCM sources (requires sox + opt-in flag).
   doctor   Preflight: check ports, directories, service manager before init.
   update   Check for / install a new bridge release from GitHub.
   backup   Snapshot bridge state into <dataDir>/backups/<timestamp>/.
@@ -676,12 +705,29 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	})
 	defer pairingStore.Close()
 
+	// Upscale feature gate: config flag + sox-on-PATH startup probe.
+	// `cfg.Upscale.Enabled == true` AND a working sox in PATH are
+	// the joint precondition for the feature. A missing sox with
+	// the flag on logs an error and degrades to "feature off"
+	// in-memory — the rest of the server keeps running unaffected.
+	// iOS sees `upscaleEnabled: false` on /v1/health in either
+	// disabled case.
+	upscaleActive := cfg.Upscale.Enabled
+	if upscaleActive {
+		if err := transcode.PrecheckSox(); err != nil {
+			fmt.Fprintf(stderr, "upscale: feature is enabled in bridge.yaml but sox is not available — disabling: %v\n", err)
+			upscaleActive = false
+		}
+	}
+	provider.SetUpscaleEnabled(upscaleActive)
+
 	apiSrv := api.New(cfg, store, provider, fingerprint).
 		WithArtworkDirs(artworkDirBridge(artworkDir)).
 		WithMBIDProbe(provider).
 		WithUpdater(updAdapter).
 		WithSessionTracker(sessions).
-		WithPairing(pairingStore)
+		WithPairing(pairingStore).
+		WithUpscale(upscaleActive, &variantStoreAdapter{provider: provider})
 	httpSrv := &http.Server{
 		Addr:    cfg.ListenAddress,
 		Handler: apiSrv.Handler(),

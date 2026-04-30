@@ -79,11 +79,14 @@ Pairing probe and liveness check. No auth token required for this endpoint (so t
   "latestServerVersion": "0.1.0",
   "updateAvailable": true,
   "updateReleaseNotesURL": "https://github.com/acoseac/1-bit-bridge/releases/tag/v0.1.0",
-  "minClientVersion": "1.0.0"
+  "minClientVersion": "1.0.0",
+  "upscaleEnabled": false
 }
 ```
 
 The four `latestServerVersion` / `updateAvailable` / `updateReleaseNotesURL` / `minClientVersion` fields are an additive extension landed in bridge 0.1.0; they are populated only when the bridge has an updater configured (it polls the GitHub Releases API in the background) and at least one successful poll has cached a result. All four are `omitempty` on the wire — older bridges ship the response without them, and iOS clients MUST tolerate their absence.
+
+`upscaleEnabled` (additive since v1.2, `*bool` with `omitempty`) reports whether the bridge has the offline PCM-upscaling feature enabled in `bridge.yaml` AND a working `sox` binary available on PATH (a misconfigured server with the flag on but no sox advertises `false` here — graceful degradation). iOS uses this single capability flag to gate every variant-related UI surface for that bridge: when `false` (or the field is absent on a pre-v1.2 bridge), the picker, glyph, and "Generate upscaled" context menu items are all hidden — bridge rows in the library look identical to SMB / local rows, so the user sees no functionality they can't use. Operator opt-in is in `bridge.yaml`'s `upscale.enabled: true`; default is off. See "Upscaling (offline PCM variants)" below for the wire shape on `/v1/manifest` and `/v1/download` when the flag is on.
 
 `minClientVersion` advertises the iOS app version *this bridge* needs from its clients (build-time-injected via `-ldflags -X .../version.MinClientVersion=…`). iOS uses it to surface "your app may be too old for this bridge" hints. It is NOT the floor a *candidate update* would require — that's a Phase B install-side concern and is delivered through admin-console / CLI surfaces, not `/v1/health`.
 
@@ -129,13 +132,20 @@ Ranged byte read. The request MUST carry a `Range: bytes=<start>-<end>` header. 
 
 Replaces `SMBConnectionPool.readRange`. Used for ID3v2 / Vorbis tag-header windows (typically 64–128 KB), though the iOS-side manifest fast path replaces most of these calls.
 
-### `GET /v1/download?path=<rel>`
+### `GET /v1/download?path=<rel>[&variant=<id>]`
 
 Whole-file stream. Supports `Range: bytes=<a>-<b>` for resumable downloads and for the iOS hybrid pre-cache waiter.
 
 **Response**: `200 OK` for unranged, `206 Partial Content` for ranged. `Accept-Ranges: bytes` is always set. `Content-Length` is always set.
 
 Replaces `SMBConnectionPool.download` and `SMBConnectionPool.downloadStreaming`.
+
+`variant` (additive since v1.2, optional): selects an alternate rendering of the source instead of the original. Value is one of the IDs the bridge advertised on the source's `Track.variants` array in `/v1/manifest`. Today's only producer is `bridge upscale`, which mints `upscaled-<schemaVersion>-<targetRate>-<targetBits>` IDs (e.g. `upscaled-v1-176400-24`). Path validation runs on `path` first — a malformed `path` is rejected with the standard 400 family before any variant lookup.
+
+**Variant-specific responses:**
+- `404 variant_not_found`: no row exists for that `(path, variant)` pair, OR the upscale feature is disabled on this bridge. iOS treats this as "fall back to the original on the next playback".
+- `410 Gone variant_stale`: a row exists but the source file's mtime/size has drifted since the sidecar was minted. iOS treats this identically to 404 modulo the error message ("variant expired"). The sidecar stays on disk; the operator's recovery is `bridge upscale --force <track>`.
+- `410 Gone variant_missing_on_disk`: the row points at a sidecar file that's been removed under the bridge's feet (manual cleanup). iOS falls back to the original; `bridge upscale --gc` reconciles.
 
 ### `GET /v1/manifest?since=<rfc3339-mtime>`
 
@@ -241,6 +251,50 @@ Serve cached album / artist artwork keyed by MusicBrainz release (or artist) MBI
 **Response** (`400 Bad Request`): MBID is not a valid UUID, or `size` parameter is out of range.
 
 Backwards compatibility: the 202 branch is a v1.1 addition. Servers that don't have an MBID probe wired (e.g. tests, legacy) fall back to 404 on any cache miss, matching the v1.0 behavior. No protocol version bump is required — iOS clients that ignore 202 still work (they just see a transient-looking failure).
+
+### Upscaling (offline PCM variants, additive since v1.2)
+
+The bridge supports an opt-in offline PCM-upscaling feature that pre-renders high-rate FLAC sidecars from CD-rate PCM sources via `sox(1)`. The feature is **disabled by default**; operators enable it via `upscale.enabled: true` in `bridge.yaml` and run `bridge upscale` to populate the sidecar cache. Conversion is always offline — the bridge never modulates bytes in flight, preserving the bit-exact mission.
+
+#### Wire shape
+
+When the feature is enabled AND the bridge has cached at least one variant for a track, that track's `Track` entry in `/v1/manifest` carries an additional `variants` array:
+
+```json
+{
+  "path": "Music/Album/01.flac",
+  "size": 12345678,
+  "mtime": "2026-04-20T12:00:00Z",
+  "title": "...",
+  "isDSD": false,
+  "sampleRate": 44100,
+  "bitsPerSample": 16,
+  "variants": [
+    {
+      "id": "upscaled-v1-176400-24",
+      "format": "flac",
+      "sampleRate": 176400,
+      "bitsPerSample": 24,
+      "sizeBytes": 87654321,
+      "label": "Upscaled FLAC 24/176.4"
+    }
+  ]
+}
+```
+
+`variants` is `omitempty` — pre-v1.2 bridges, disabled bridges, and tracks with no cached variants emit no field. iOS clients unaware of the field decode cleanly via the lenient default JSONDecoder (no protocol version bump).
+
+#### Variant identifier scheme
+
+`id` is opaque to clients but follows a stable convention: `<kind>-<schemaVersion>-<key>`. Today's only producer mints `upscaled-v1-<targetRate>-<targetBits>`. iOS slot-resolves variants by the leading `upscaled-` prefix to honour the share-level "prefer upscaled" toggle. Future variant kinds (PCM→DSD synthesis, alternate bit depths, alternate dither) get their own prefixes without disturbing legacy resolution.
+
+The schema version (`v1`) bumps only when the on-disk sidecar layout or the SoX command shape changes in a way that makes prior sidecars semantically different from a fresh run. Operators don't manage the schema version directly; `bridge upscale --force` re-converts to the current schema.
+
+#### Feature gate semantics
+
+- `upscale.enabled: false` (default): manifest emits no `variants` even if `track_variants` rows exist on disk (predictable round-trip — operator can re-enable to expose the cached sidecars without re-conversion). `/v1/health` reports `upscaleEnabled: false`. `/v1/download?variant=…` returns `404 variant_not_found`.
+- `upscale.enabled: true` AND `sox` on PATH: full feature operates as documented.
+- `upscale.enabled: true` AND `sox` MISSING from PATH: bridge logs `.error` at startup, in-memory disables the feature, advertises `upscaleEnabled: false`. The rest of the server keeps running.
 
 ### `POST /v1/pairing/requests` (additive, since v1.2)
 
