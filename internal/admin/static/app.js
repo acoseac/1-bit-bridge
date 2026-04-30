@@ -122,54 +122,41 @@ function initDashboard() {
     });
   }
   refreshBackups();
-  refreshTailscale();
   bindTailscaleRefreshButton();
-  setInterval(refreshTailscale, 30_000);
+  // Live updates for stats, updates, tailscale arrive over the SSE
+  // stream wired at the bottom of this file (`/api/events`). The
+  // dashboard's first paint is server-rendered from template data
+  // (TracksIndexed / DeviceCount / etc.); the SSE initial snapshot
+  // lands within milliseconds of `EventSource` connect and keeps
+  // every tile live without per-page setInterval polls.
+}
 
-  // Cache DOM lookups outside the tick — these elements are
-  // first-paint-stable, so re-querying them every 3 s is wasted work
-  // (Gemini on PR #101). Same convention initLibrary follows for
-  // its tick targets.
+// applyStats updates every dashboard tile that reflects /api/stats.
+// Called by the SSE `stats` event listener with the parsed payload.
+// Self-guards via per-element existence checks so calling it on a
+// page that doesn't render every tile (e.g. Devices, Settings) is
+// a no-op.
+function applyStats(s) {
+  if (!s) return;
+  setText("tracks-indexed", s.tracksIndexed);
+  setText("device-count", s.deviceCount);
   const scanStatus = document.getElementById("scan-status");
+  if (scanStatus) {
+    scanStatus.innerHTML = s.isScanning
+      ? `<span class="badge running">scanning</span><span>· ${s.scanProgress} tracks so far</span>`
+      : `<span class="badge idle">idle</span>`;
+  }
+  // "Last full scan" tile: pre-fix this was server-rendered once at
+  // page load and never repainted, so a scan that completed mid-
+  // session left the tile showing "never" until manual refresh.
+  // /api/stats carries lastFullScan; route it through so the value
+  // tracks the in-memory truth at SSE cadence.
   const lastFull = document.getElementById("last-full-scan");
-
-  // Live-refresh the top-line numbers every 3 s.
-  const tick = async () => {
-    try {
-      const s = await API.get("/api/stats");
-      setText("tracks-indexed", s.tracksIndexed);
-      setText("device-count", s.deviceCount);
-      if (scanStatus) {
-        scanStatus.innerHTML = s.isScanning
-          ? `<span class="badge running">scanning</span><span>· ${s.scanProgress} tracks so far</span>`
-          : `<span class="badge idle">idle</span>`;
-      }
-      // "Last full scan" tile: pre-fix this was server-rendered once
-      // at page load and never repainted, so a scan that completed
-      // mid-session left the tile showing "never" until manual refresh.
-      // /api/stats already carries lastFullScan; just route it through
-      // here so the value tracks the in-memory truth at 3 s cadence.
-      if (lastFull) {
-        lastFull.textContent = s.lastFullScan
-          ? formatTimeAgo(new Date(s.lastFullScan))
-          : "never";
-      }
-      // Refresh the update tile from the cached status — cheap, no
-      // GitHub call. The "Check now" button is the only path that
-      // forces a fresh poll.
-      try {
-        const u = await API.get("/api/updates");
-        renderUpdateTile(u);
-      } catch {
-        // Updater not configured (older bridge, test harness): leave
-        // the tile at its server-rendered first-paint state.
-      }
-    } catch (e) {
-      // Admin listener went away — stop polling.
-      clearInterval(handle);
-    }
-  };
-  const handle = setInterval(tick, 3000);
+  if (lastFull) {
+    lastFull.textContent = s.lastFullScan
+      ? formatTimeAgo(new Date(s.lastFullScan))
+      : "never";
+  }
 }
 
 // refreshBackups fetches /api/backups and renders the latest count +
@@ -215,24 +202,6 @@ async function refreshCertInfo() {
     cell.innerHTML = `${badge}${when.toLocaleDateString()} (${days} days)`;
   } catch {
     cell.textContent = "—";
-  }
-}
-
-// refreshTailscale fetches /api/tailscale/status and paints the
-// Tailscale HTTPS tile. The tile is hidden by default (server-rendered
-// `hidden`) and only un-hides when the bridge has positively detected
-// a Tailscale CLI — operators on hosts without Tailscale shouldn't see
-// a "not configured" pill cluttering their dashboard.
-async function refreshTailscale() {
-  const panel = document.getElementById("tailscale-panel");
-  if (!panel) return;
-  try {
-    const s = await API.get("/api/tailscale/status");
-    renderTailscaleTile(s);
-  } catch {
-    // Endpoint absent or admin listener went away — leave the tile
-    // hidden. A missing tile is the right "not configured" UX (matches
-    // the Update tile's degrade-silently convention).
   }
 }
 
@@ -539,24 +508,17 @@ function initLibrary() {
 
 // --- networking telemetry (Settings page) ---
 
-// renderEndpoints fetches /api/endpoints and paints the
-// "Reachable endpoints" panel on the Settings page (Networking
-// section). The bridge recomputes the list per-call from
-// net.Interfaces() so a Tailscale tunnel coming up mid-session
-// reflects on the next refresh; we poll every 30s (set up by
-// initSettings) to catch interface changes without forcing the
-// operator to reload the page. Self-guards via `if (!list) return`
-// so calling it from a page that doesn't render the panel is a no-op.
-async function renderEndpoints() {
+// applyEndpoints renders the "Reachable endpoints" panel on the
+// Settings page (Networking section) from a parsed endpoints array.
+// Called by the SSE `endpoints` event listener — the bridge recomputes
+// the list per-call from net.Interfaces() at the SSE handler's 5 s
+// medium-tier cadence, so a Tailscale tunnel coming up mid-session
+// reflects without operator intervention. Self-guards via
+// `if (!list) return` so calling it from a page that doesn't render
+// the panel is a no-op.
+function applyEndpoints(entries) {
   const list = document.getElementById("endpoints-list");
   if (!list) return;
-  let entries;
-  try {
-    entries = await API.get("/api/endpoints");
-  } catch (e) {
-    list.innerHTML = `<li class="endpoints-empty"><em>Couldn't load endpoints: ${escapeHTML(e.message)}</em></li>`;
-    return;
-  }
   if (!Array.isArray(entries) || entries.length === 0) {
     // Real-world: only happens when the bridge is binding to a
     // loopback-only address. The /v1/health endpoints array would
@@ -595,19 +557,23 @@ async function renderEndpoints() {
 // resurrect the prior "pending" badge while the server is still
 // computing the transition.
 const pendingActionLatch = new Map();
-async function renderPendingPairing() {
+
+// applyPairing renders the "Pending join requests" panel from a
+// parsed entries array. Called by the SSE `pairing` event listener
+// (initial snapshot + ~1 s cadence while a request is in flight,
+// because pendingPairingRow.SecondsUntilExpiry decrements every
+// second and naturally streams the countdown over the wire). Also
+// called directly by handlePairingAction after a tap so the
+// optimistic re-render lands without waiting for the next SSE frame.
+function applyPairing(entries) {
   const panel = document.getElementById("pending-pairing-panel");
   const list = document.getElementById("pending-pairing-list");
   if (!panel || !list) return;
-  let entries;
-  try {
-    entries = await API.get("/api/pairing");
-  } catch (e) {
-    panel.hidden = false;
-    list.innerHTML = `<p class="pairing-error"><em>Couldn't load pending requests: ${escapeHTML(e.message)}</em></p>`;
-    return;
-  }
   if (!Array.isArray(entries) || entries.length === 0) {
+    // Empty-snapshot teardown: the bridge was just restarted (in-
+    // memory pairing store cleared) or every request resolved or
+    // timed out. Drop the latch so a fresh request landing in the
+    // same `id` slot doesn't inherit stale optimistic state.
     pendingActionLatch.clear();
     panel.hidden = true;
     list.innerHTML = "";
@@ -630,6 +596,23 @@ async function renderPendingPairing() {
   list.querySelectorAll("[data-pairing-decline]").forEach((btn) => {
     btn.addEventListener("click", () => handlePairingAction(btn, "decline"));
   });
+}
+
+// renderPendingPairing fetches once and applies. Used by
+// handlePairingAction to flip the card immediately after Approve /
+// Decline rather than waiting for the next SSE frame (the typical
+// frame lands within ~500 ms, but the operator's tap deserves
+// instant visual feedback).
+async function renderPendingPairing() {
+  const panel = document.getElementById("pending-pairing-panel");
+  const list = document.getElementById("pending-pairing-list");
+  if (!panel || !list) return;
+  try {
+    applyPairing(await API.get("/api/pairing"));
+  } catch (e) {
+    panel.hidden = false;
+    list.innerHTML = `<p class="pairing-error"><em>Couldn't load pending requests: ${escapeHTML(e.message)}</em></p>`;
+  }
 }
 
 function renderPendingPairingCard(e) {
@@ -725,11 +708,12 @@ function initDevices() {
   const stepForm = document.getElementById("pair-step-form");
   const stepResult = document.getElementById("pair-step-result");
 
-  // Pending pairing requests — first paint + 3s poll, matches the
-  // existing dashboard cadence. iOS devices that tapped Join show up
-  // here as cards; admin clicks Approve / Decline.
-  renderPendingPairing();
-  setInterval(renderPendingPairing, 3_000);
+  // Pending pairing requests are hydrated by the SSE stream wired at
+  // the bottom of this file. The initial snapshot lands within ms of
+  // EventSource connect; thereafter, frames arrive on state change
+  // and on the per-second SecondsUntilExpiry countdown while requests
+  // are pending. handlePairingAction still calls renderPendingPairing
+  // for instant post-tap visual feedback.
 
   if (openBtn) {
     openBtn.addEventListener("click", () => {
@@ -929,20 +913,10 @@ function parseDurationShorthand(s) {
 // --- settings ---
 
 function initSettings() {
-  // Network telemetry panels (moved here from Devices + Dashboard in
-  // the branded-refresh refactor). Both helpers self-guard against
-  // missing target elements, so they're safe to call before the
-  // form-existence check below — and they should fire even if the
-  // form is ever conditionally absent.
+  // Cert info is a one-shot fetch — the cert doesn't change without
+  // a restart, so polling it is wasted work. The endpoints panel is
+  // hydrated by the SSE stream wired at the bottom of this file.
   refreshCertInfo();
-  renderEndpoints();
-  // Defensive clearInterval: today the bridge admin uses hard
-  // page-loads between routes so the interval would die with the
-  // document, but guarding against double-init hardens against any
-  // future client-side route swap or partial-view rerender that
-  // re-invokes initSettings().
-  if (window.__endpointsInterval) clearInterval(window.__endpointsInterval);
-  window.__endpointsInterval = setInterval(renderEndpoints, 30_000);
 
   const form = document.getElementById("settings-form");
   const msg = document.getElementById("settings-msg");
@@ -1054,6 +1028,71 @@ function normaliseCustomEndpointsText(s) {
     .join("\n");
 }
 
+// --- live updates over SSE ---
+//
+// Replaces the previous per-page setInterval polling against
+// /api/stats (3 s), /api/endpoints (30 s), /api/pairing (3 s),
+// /api/updates (3 s, inside the stats tick), and /api/tailscale/status
+// (30 s). The bridge multiplexes named events at three cadences over
+// a single connection (see internal/admin/handlers_events.go), and
+// diff-suppresses unchanged frames so an idle bridge produces zero
+// wire traffic between heartbeats.
+//
+// Each apply* / render* handler is page-aware: it self-guards on the
+// presence of its target DOM elements, so this single EventSource
+// works on every admin page (Dashboard / Devices / Settings /
+// Library) without per-page wiring. EventSource auto-reconnects on
+// transport error; the connection-status badge surfaces "reconnecting"
+// to the operator until onopen fires again.
+
+function applyConnState(state) {
+  // States: "connected" (steady, subtly green or hidden),
+  // "reconnecting" (amber pill — EventSource is between attempts),
+  // "disconnected" (red pill — used only for terminal close, which
+  // EventSource doesn't reach on its own; reserved for future use).
+  const el = document.getElementById("conn-status");
+  if (!el) return;
+  el.dataset.state = state;
+  el.textContent =
+    state === "connected" ? "Live" :
+    state === "reconnecting" ? "Reconnecting…" :
+    "Disconnected";
+}
+
+function startEventStream() {
+  // EventSource is a built-in browser API; no polyfill needed for
+  // any iOS / desktop browser the admin console targets.
+  const es = new EventSource("/api/events");
+
+  es.addEventListener("stats",     (e) => safeApply("stats",     e.data, applyStats));
+  es.addEventListener("endpoints", (e) => safeApply("endpoints", e.data, applyEndpoints));
+  es.addEventListener("pairing",   (e) => safeApply("pairing",   e.data, applyPairing));
+  es.addEventListener("updates",   (e) => safeApply("updates",   e.data, renderUpdateTile));
+  es.addEventListener("tailscale", (e) => safeApply("tailscale", e.data, renderTailscaleTile));
+
+  es.onopen = () => applyConnState("connected");
+  // EventSource fires onerror on every transport hiccup AND between
+  // reconnect attempts. Transient network blips → readyState === 0
+  // (CONNECTING) and the browser will retry on its own backoff.
+  // Terminal failures → readyState === 2 (CLOSED), at which point
+  // we surface "disconnected" instead of "reconnecting".
+  es.onerror = () => {
+    applyConnState(es.readyState === EventSource.CLOSED ? "disconnected" : "reconnecting");
+  };
+}
+
+function safeApply(name, raw, fn) {
+  try {
+    fn(JSON.parse(raw));
+  } catch (err) {
+    // Bad JSON is an admin-side bug, not an operator-actionable
+    // condition. Log to the console rather than alert() — the SSE
+    // stream may deliver dozens of events per minute under load and
+    // any popup loop would be hostile.
+    console.error(`SSE ${name}: parse/apply failed`, err);
+  }
+}
+
 // --- boot ---
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -1064,4 +1103,11 @@ document.addEventListener("DOMContentLoaded", () => {
     case "devices": initDevices(); break;
     case "settings": initSettings(); break;
   }
+  // Start the SSE stream after page-init so the initial snapshot
+  // can paint into a fully-bootstrapped DOM. The first snapshot
+  // typically lands within a few ms; until it arrives, dashboard
+  // tiles show their server-rendered first-paint values and the
+  // pairing / endpoints panels show their template-default empty
+  // state.
+  startEventStream();
 });
