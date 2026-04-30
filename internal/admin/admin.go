@@ -297,6 +297,7 @@ func (s *Server) Handler() http.Handler {
 	// JSON API.
 	mux.HandleFunc("GET /api/stats", s.apiStats)
 	mux.HandleFunc("GET /api/endpoints", s.apiEndpoints)
+	mux.HandleFunc("GET /api/events", s.apiEvents)
 	mux.HandleFunc("GET /api/updates", s.apiUpdatesGet)
 	mux.HandleFunc("POST /api/updates/check", s.apiUpdatesCheck)
 	mux.HandleFunc("POST /api/updates/install", s.apiUpdatesInstall)
@@ -384,6 +385,16 @@ func (s *Server) Serve(ctx context.Context) error {
 	}
 	srv := &http.Server{
 		Handler: s.Handler(),
+		// BaseContext derives every request's r.Context() from the
+		// parent shutdown context. Long-lived endpoints (the SSE
+		// stream at /api/events in particular) select on
+		// r.Context().Done() to bail at shutdown — without
+		// BaseContext, http.Server.Shutdown waits for the connection
+		// to idle out, which an SSE handler never does, blocking the
+		// 5 s grace window. Per-request handlers that already use
+		// r.Context() (e.g. apiUpdatesCheck's GitHub poll) inherit
+		// the same cancellation.
+		BaseContext: func(_ net.Listener) context.Context { return ctx },
 		// Slowloris-class defense. The admin console binds loopback
 		// only by config validation, but a misbehaving local client
 		// (or a buggy admin script) trickling bytes 1/sec could
@@ -402,7 +413,9 @@ func (s *Server) Serve(ctx context.Context) error {
 		// on PR #75 caught this. The Slowloris-class write
 		// trickle is not a meaningful threat on a loopback admin
 		// listener — IdleTimeout reaps the kept-alive socket pool
-		// which is the realistic FD-exhaustion vector.
+		// which is the realistic FD-exhaustion vector. SSE clients
+		// stay on a single long-lived request so neither ReadTimeout
+		// nor IdleTimeout applies mid-stream.
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		IdleTimeout:       120 * time.Second,

@@ -104,11 +104,18 @@ type settingsResponse struct {
 // --- GET /api/stats ---
 
 func (s *Server) apiStats(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.getStatsSnapshot())
+}
+
+// getStatsSnapshot is the shared builder for the dashboard stats
+// payload. Used by both the REST handler (apiStats) and the SSE
+// handler (apiEvents). Cheap reads only — no DB writes, no external
+// network. Suitable for sub-second polling.
+func (s *Server) getStatsSnapshot() statsResponse {
 	now := time.Now().UTC()
 	tracks, _ := s.deps.Manifest.CountTracks()
 	dbBytes := dbSize(filepath.Join(s.deps.Cfg.DataDir, "bridge.db"))
-
-	writeJSON(w, http.StatusOK, statsResponse{
+	return statsResponse{
 		LibraryName:     s.deps.Cfg.LibraryName,
 		ProtocolVersion: version.ProtocolVersion,
 		ServerVersion:   version.ServerVersion,
@@ -123,7 +130,21 @@ func (s *Server) apiStats(w http.ResponseWriter, r *http.Request) {
 		DeviceCount:     len(s.deps.Auth.List()),
 		ListenAddress:   s.deps.Cfg.ListenAddress,
 		AdminAddress:    s.deps.Cfg.AdminAddress,
-	})
+	}
+}
+
+// getStatsSSESnapshot returns the same payload as getStatsSnapshot
+// but with UptimeSec zeroed. The SSE handler diffs serialised JSON
+// frame-to-frame and only emits on change; UptimeSec increments
+// every second and would otherwise force a frame on every tick,
+// defeating the diff optimisation. The dashboard never renders
+// UptimeSec in its live tick (uptime is server-rendered from
+// StartedAt at first paint via the Go template), so zeroing it on
+// the wire breaks nothing on the frontend.
+func (s *Server) getStatsSSESnapshot() statsResponse {
+	snap := s.getStatsSnapshot()
+	snap.UptimeSec = 0
+	return snap
 }
 
 // --- GET /api/endpoints ---
@@ -153,23 +174,49 @@ type adminEndpointEntry struct {
 // see the list of addresses; iOS sees per-URL reachability via
 // the unified probe (paired iOS PR #150).
 func (s *Server) apiEndpoints(w http.ResponseWriter, r *http.Request) {
+	out, err := s.getEndpointsSnapshot()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.code, err.msg)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// endpointsErr is the typed error getEndpointsSnapshot returns so
+// the REST handler can map it to the existing HTTP status + short
+// code surface. The SSE handler only ever logs and skips — it
+// can't surface 5xx mid-stream.
+type endpointsErr struct {
+	code string
+	msg  string
+}
+
+func (e *endpointsErr) Error() string { return e.code + ": " + e.msg }
+
+// getEndpointsSnapshot enumerates the live set of advertised endpoints —
+// computed fresh on each call from `net.Interfaces()` so a just-
+// connected Tailscale interface (or a just-dropped LAN one) is
+// reflected immediately. Shared by apiEndpoints (REST) and
+// apiEvents (SSE).
+//
+// Returns (entries, nil) on success, ([], nil) for the deliberate
+// `:0` test-binding case, or (nil, *endpointsErr) on listen-address
+// parse failure. The error type is opaque to callers — REST maps
+// to 500 + short code; SSE just skips the publish.
+func (s *Server) getEndpointsSnapshot() ([]adminEndpointEntry, *endpointsErr) {
 	_, portStr, err := net.SplitHostPort(s.deps.Cfg.ListenAddress)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "bad_listen", "could not parse listen address")
-		return
+		return nil, &endpointsErr{code: "bad_listen", msg: "could not parse listen address"}
 	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "bad_port", "invalid listen port")
-		return
+		return nil, &endpointsErr{code: "bad_port", msg: "invalid listen port"}
 	}
 	// Reject out-of-range ports up-front rather than letting them
 	// reach `advertise.Endpoints` and produce overflowed values in
 	// the URL strings. Ports must be 1..65535 by RFC 6335.
 	if port < 0 || port > 65535 {
-		writeError(w, http.StatusInternalServerError, "bad_port",
-			"listen port out of range (must be 1..65535)")
-		return
+		return nil, &endpointsErr{code: "bad_port", msg: "listen port out of range (must be 1..65535)"}
 	}
 	// Listen address ":0" is the OS-pick-a-port mode the codebase
 	// supports for testing — `cmd/bridge` binds first then logs the
@@ -181,8 +228,7 @@ func (s *Server) apiEndpoints(w http.ResponseWriter, r *http.Request) {
 	// 500's every 30s and the operator can't tell whether the
 	// bridge is misconfigured or simply in port-zero mode.)
 	if port == 0 {
-		writeJSON(w, http.StatusOK, []adminEndpointEntry{})
-		return
+		return []adminEndpointEntry{}, nil
 	}
 	eps := advertise.Endpoints(advertise.Params{
 		Port:            port,
@@ -195,7 +241,7 @@ func (s *Server) apiEndpoints(w http.ResponseWriter, r *http.Request) {
 			Class: e.Class.String(),
 		})
 	}
-	writeJSON(w, http.StatusOK, out)
+	return out, nil
 }
 
 // --- POST /api/scan ---
@@ -670,14 +716,21 @@ func splitCustomEndpointsText(s string) []string {
 // "not-configured" Channel — the dashboard JS treats this the same as
 // "no update info" and hides the tile's action button.
 func (s *Server) apiUpdatesGet(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.getUpdatesSnapshot())
+}
+
+// getUpdatesSnapshot returns the cached updater status, or the
+// "not-configured" stub when no updater is wired (test harnesses,
+// future opt-out flag). Shared by apiUpdatesGet (REST) and
+// apiEvents (SSE).
+func (s *Server) getUpdatesSnapshot() UpdateStatus {
 	if s.deps.Updater == nil {
-		writeJSON(w, http.StatusOK, UpdateStatus{
+		return UpdateStatus{
 			CurrentVersion: version.ServerVersion,
 			Channel:        "not-configured",
-		})
-		return
+		}
 	}
-	writeJSON(w, http.StatusOK, s.deps.Updater.Status())
+	return s.deps.Updater.Status()
 }
 
 // --- POST /api/updates/check ---

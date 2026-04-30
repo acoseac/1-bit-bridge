@@ -40,9 +40,24 @@ type pendingPairingRow struct {
 // is an empty list — the JS-side renderer treats that as "no pending
 // requests", same as a wired-but-empty Store.
 func (s *Server) apiPairingList(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.getPairingSnapshot())
+}
+
+// getPairingSnapshot builds the pending-pairing payload for both
+// the REST handler and the SSE handler. Always returns a non-nil
+// slice (empty when no Store is wired or no requests are in flight)
+// so JSON marshals as `[]`, not `null` — the frontend's
+// `Array.isArray(entries) && entries.length === 0` teardown branch
+// depends on the array shape.
+//
+// SecondsUntilExpiry is computed from time.Now() and decrements every
+// second while a request is pending. The SSE diff therefore won't
+// suppress pairing frames during an in-flight request — by design,
+// so the server streams the countdown to the browser without any
+// client-side ticker.
+func (s *Server) getPairingSnapshot() []pendingPairingRow {
 	if s.deps.Pairing == nil {
-		writeJSON(w, http.StatusOK, []pendingPairingRow{})
-		return
+		return []pendingPairingRow{}
 	}
 	now := time.Now()
 	reqs := s.deps.Pairing.List()
@@ -70,7 +85,7 @@ func (s *Server) apiPairingList(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, row)
 	}
-	writeJSON(w, http.StatusOK, out)
+	return out
 }
 
 // apiPairingApprove transitions a Pending request to Approved by

@@ -17,11 +17,18 @@ import (
 // That's the same convention `apiUpdatesGet` follows for missing
 // updater wiring.
 func (s *Server) apiTailscaleStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.getTailscaleSnapshot())
+}
+
+// getTailscaleSnapshot returns the latest auto-pilot status, or the
+// empty-zero-value when no Tailscale provider is wired (test
+// deployments, builds without the auto-pilot). Shared by
+// apiTailscaleStatus (REST) and apiEvents (SSE).
+func (s *Server) getTailscaleSnapshot() TailscaleStatus {
 	if s.deps.Tailscale == nil {
-		writeJSON(w, http.StatusOK, TailscaleStatus{})
-		return
+		return TailscaleStatus{}
 	}
-	writeJSON(w, http.StatusOK, s.deps.Tailscale.Status())
+	return s.deps.Tailscale.Status()
 }
 
 // --- POST /api/tailscale/refresh-cert ---
