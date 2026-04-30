@@ -37,6 +37,7 @@ import (
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
+	"github.com/acoseac/1-bit-bridge/internal/pairing"
 )
 
 var logger = logging.Component("admin")
@@ -112,6 +113,15 @@ type Deps struct {
 	// cmd/bridge/main.go so this package doesn't import
 	// internal/tailscale or the cmd/bridge auto-pilot type.
 	Tailscale TailscaleProvider
+
+	// Pairing backs the admin-approval pairing flow. Optional — when
+	// nil, /api/pairing returns an empty list and the approve / decline
+	// handlers reply 503 (so a misconfigured deployment surfaces a
+	// distinct error rather than silently dropping operator clicks).
+	// The iOS-facing /v1/pairing/* endpoints are gated by the api
+	// package's own pairing wiring; both sides receive the same Store
+	// from cmd/bridge/main.go.
+	Pairing *pairing.Store
 }
 
 // TailscaleProvider is the read+refresh side of the Tailscale auto-pilot
@@ -309,6 +319,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/cert", s.apiCertInfo)
 	mux.HandleFunc("GET /api/tailscale/status", s.apiTailscaleStatus)
 	mux.HandleFunc("POST /api/tailscale/refresh-cert", s.apiTailscaleRefreshCert)
+	mux.HandleFunc("GET /api/pairing", s.apiPairingList)
+	mux.HandleFunc("POST /api/pairing/{id}/approve", s.apiPairingApprove)
+	mux.HandleFunc("POST /api/pairing/{id}/decline", s.apiPairingDecline)
 
 	// Static. The embed keeps files at "static/app.css", not "app.css",
 	// so we serve the fs directly — the request path already matches.

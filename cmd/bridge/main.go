@@ -722,6 +722,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		Updater:       updAdapter,
 		BackupSources: backupSources,
 		Tailscale:     tailscaleAdminAdapter{auto: tailscaleAuto},
+		Pairing:       pairingStore,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "admin: %v\n", err)

@@ -557,6 +557,10 @@ func (s *Store) TTLSeconds() int {
 	return n
 }
 
+// TTL returns the configured Pending TTL as a Duration. Used by the
+// admin handler to compute per-row countdowns.
+func (s *Store) TTL() time.Duration { return s.ttl }
+
 // Close stops every per-request timer. Call on clean shutdown so the
 // timer goroutines drain promptly. Safe to call multiple times.
 func (s *Store) Close() {
