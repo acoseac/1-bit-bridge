@@ -1,64 +1,74 @@
-/* 1-bit bridge admin console — synthwave restyle.
+/* 1-bit bridge admin console — branded refresh.
  *
- * Neon-on-indigo in dark mode, daylight-synthwave pastel in light mode.
- * Every class name and DOM shape from pre-restyle is preserved so the
- * JS in app.js (which reads no tokens, does no style) works unchanged,
- * and templates/*.html need no edits — the brand-mark "CRT bracket"
- * decoration is drawn purely via ::before / ::after on .brand .mark.
+ * Warm-gold-on-deep-teal in dark mode (matches the bridge brand artwork —
+ * flaming gold "B" with harp on deep teal/navy). Light mode uses warm
+ * parchment + bronze. Every class name and DOM shape from pre-refresh
+ * is preserved so the JS in app.js (which reads no tokens, does no
+ * style) works unchanged.
  *
- * Colours are tokenised via the same CSS custom properties as before
- * (--bg, --accent, etc.) so the rest of the stylesheet reads through
- * to the new palette without per-rule edits.
+ * Colours are tokenised via CSS custom properties (--bg, --accent, etc.)
+ * so the rest of the stylesheet reads through to the palette without
+ * per-rule edits. The brand mark is now an <img> on .brand-mark instead
+ * of CSS bracket pseudo-elements.
  */
 
 :root {
-  /* Night-city palette — deep indigo base, neon primaries. */
-  --bg: #0a0a1a;
-  --bg-panel: #12122a;
-  --bg-elev: #1a1a3a;
-  --fg: #e8f4ff;
-  --fg-muted: #8095b8;
-  --accent: #00f0ff;                /* neon cyan — primary */
-  --accent-hot: #ff3ec8;             /* magenta — gradient partner, danger accent */
-  --accent-warm: #ffb64a;            /* amber — warnings (preserves pre-restyle vibe) */
-  --accent-soft: rgba(0, 240, 255, 0.16);
-  --danger: #ff4d6d;
-  --ok: #39ff88;
+  /* Bridge palette — deep teal base, warm gold primary. */
+  --bg: #08141c;
+  --bg-panel: #0e1d28;
+  --bg-elev: #142a3a;
+  --fg: #f5e8d4;                    /* warm parchment */
+  --fg-muted: #a08a72;
+  --accent: #f4b740;                /* warm gold — primary */
+  --accent-hot: #ff7e3e;             /* ember orange — danger/destructive accent */
+  --accent-warm: #ffd47e;            /* paler gold — warnings (distinct from primary) */
+  --accent-soft: rgba(244, 183, 64, 0.16);
+  /* Precomputed alpha hex (≈45% opacity) used for .brand-mark glow.
+   * color-mix() only landed in baseline browsers in early 2023 — older
+   * Pi default browsers / enterprise ESR may lack it. Using a static
+   * hex token here guarantees the brand glow renders everywhere. The
+   * existing color-mix() usage on box-shadows / hover states elsewhere
+   * stays as-is — those degrading on old browsers was already the
+   * status quo before this refresh. */
+  --accent-glow-color: #f4b74073;
+  --danger: #e54b3a;
+  --ok: #6acf8a;
   --warn: #ffb64a;
-  --border: #2a2a55;
+  --border: #2a3f52;
   --radius: 6px;
   --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", Segoe UI, Roboto, system-ui, sans-serif;
-  /* Display stack used for titles and the brand mark. System-only —
-   * no web-font fetch on an offline admin console. Bahnschrift ships
-   * on Windows 10+; Avenir Next Condensed on macOS/iOS; Oswald on
-   * many Linux distros; Futura/Impact round out the fallback chain. */
+  /* Display stack used for titles. System-only — no web-font fetch on
+   * an offline admin console. Bahnschrift ships on Windows 10+; Avenir
+   * Next Condensed on macOS/iOS; Oswald on many Linux distros;
+   * Futura/Impact round out the fallback chain. */
   --display: "Bahnschrift", "Avenir Next Condensed", "Oswald", "Futura", Impact, var(--sans);
   --glow: 0 0 12px color-mix(in srgb, var(--accent) 40%, transparent);
   --glow-hot: 0 0 12px color-mix(in srgb, var(--accent-hot) 40%, transparent);
-  --scanline-color: rgba(0, 240, 255, 0.035);
+  --scanline-color: rgba(244, 183, 64, 0.025);
 }
 
 @media (prefers-color-scheme: light) {
   :root {
-    /* Daylight-synthwave palette — pastel base, saturated accents
-     * that still pass WCAG AA on a white panel. */
-    --bg: #fdf4ff;
+    /* Daylight-bridge palette — warm parchment base, saturated bronze
+     * accents that pass WCAG AA on a white panel. */
+    --bg: #f8f1e4;
     --bg-panel: #ffffff;
-    --bg-elev: #f5ecfe;
-    --fg: #1a1036;
-    --fg-muted: #5c4d80;
-    --accent: #008b9c;              /* saturated teal — readable on white */
-    --accent-hot: #c2185b;
-    --accent-warm: #c06a00;
-    --accent-soft: rgba(0, 139, 156, 0.12);
+    --bg-elev: #f0e6d2;
+    --fg: #2a1a0a;
+    --fg-muted: #6a5538;
+    --accent: #b87a1a;              /* saturated bronze — readable on white */
+    --accent-hot: #c14e1a;
+    --accent-warm: #d18a2a;
+    --accent-soft: rgba(184, 122, 26, 0.12);
+    --accent-glow-color: #b87a1a59;  /* ≈35% alpha — slightly weaker glow on light bg */
     --danger: #c1292e;
     --ok: #2f8a56;
     --warn: #c06a00;
-    --border: #e4dcf1;
+    --border: #e0d5b8;
     --glow: 0 0 10px color-mix(in srgb, var(--accent) 30%, transparent);
     --glow-hot: 0 0 10px color-mix(in srgb, var(--accent-hot) 30%, transparent);
-    --scanline-color: rgba(0, 139, 156, 0.035);
+    --scanline-color: rgba(184, 122, 26, 0.035);
   }
 }
 
@@ -114,34 +124,32 @@ header {
 
 .brand {
   display: flex;
-  align-items: baseline;
-  gap: 10px;
+  align-items: center;
+  gap: 12px;
 }
-.brand .mark {
-  font-family: var(--display);
-  color: var(--accent);
-  letter-spacing: 0.04em;
-  font-weight: 700;
-  text-transform: uppercase;
-  /* CRT-bracket decoration via padding + pseudo-elements in
-   * layout.html's markup. The spans live on either side of .mark and
-   * pick up the accent colour + a faint glow. */
-  position: relative;
-  padding: 0 6px;
-  text-shadow: var(--glow);
+.brand-mark {
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+  /* Precomputed alpha hex (--accent-glow-color) instead of color-mix()
+   * so the brand glow renders on older browsers without baseline-2023
+   * support. The image's own dark-teal background blends naturally
+   * with --bg-panel; no transparency removal needed. */
+  box-shadow: 0 0 14px var(--accent-glow-color);
+  flex-shrink: 0;
+  display: block;
 }
-.brand .mark::before,
-.brand .mark::after {
-  content: "";
-  position: absolute;
-  top: -2px;
-  bottom: -2px;
-  width: 6px;
-  border: 1.5px solid var(--accent);
-  opacity: 0.7;
+@media (prefers-color-scheme: light) {
+  /* On a white panel the artwork's dark-teal background can read as a
+   * heavy blob. Frame it intentionally with a matching panel-bg pad +
+   * border, so it looks like an icon-in-a-tile rather than a photo
+   * pasted on top. Avoids filter:brightness which would wash the gold. */
+  .brand-mark {
+    padding: 4px;
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+  }
 }
-.brand .mark::before { left: 0; border-right: none; }
-.brand .mark::after { right: 0; border-left: none; }
 .brand .name {
   font-weight: 500;
   color: var(--fg);
@@ -218,6 +226,23 @@ h2 {
   text-transform: uppercase;
   color: var(--fg-muted);
 }
+/* Subsection heading inside a long form (settings.html groups: General,
+ * Networking, Updates). Accent-colored so it reads as a divider, with
+ * extra top margin to space the groups visually. The first .section-head
+ * in a form gets margin-top: 0 to avoid a leading gap above the first
+ * group. */
+.section-head {
+  font-family: var(--display);
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin: 28px 0 12px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+.section-head:first-child { margin-top: 0; }
 
 .lede { color: var(--fg-muted); margin: 0 0 20px; max-width: 72ch; }
 .hint { color: var(--fg-muted); font-size: 12px; margin-top: 4px; display: block; }
@@ -565,11 +590,11 @@ dialog h2 { font-size: 18px; color: var(--accent); }
   color: var(--fg-muted);
   background: transparent;
 }
-.endpoint-tag.lan { color: #5e9bff; }
-.endpoint-tag.tailscale { color: #d96aff; }
-.endpoint-tag.tailscale-dns { color: #b96aff; } /* slightly cooler purple — distinct from CGNAT IP */
-.endpoint-tag.mdns { color: #4ed1c4; }
-.endpoint-tag.public { color: #ff9b50; }
+.endpoint-tag.lan { color: #c5a06a; }            /* warm tan */
+.endpoint-tag.tailscale { color: #d4945a; }       /* copper */
+.endpoint-tag.tailscale-dns { color: #c47a3a; }   /* deeper copper — distinct from CGNAT IP */
+.endpoint-tag.mdns { color: #6ab5a8; }            /* muted teal — keeps a cool note for hierarchy */
+.endpoint-tag.public { color: #e8b86a; }          /* bright gold — public addresses pop */
 .endpoint-url {
   flex: 1;
   font-family: var(--mono, monospace);

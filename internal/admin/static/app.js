@@ -122,7 +122,6 @@ function initDashboard() {
     });
   }
   refreshBackups();
-  refreshCertInfo();
   refreshTailscale();
   bindTailscaleRefreshButton();
   setInterval(refreshTailscale, 30_000);
@@ -722,12 +721,6 @@ function initDevices() {
   const stepForm = document.getElementById("pair-step-form");
   const stepResult = document.getElementById("pair-step-result");
 
-  // Endpoints panel — first paint + 30s poll. The interval handle
-  // is intentionally not stored; the page lifecycle is tied to a
-  // full reload on navigation, so the interval dies with the page.
-  renderEndpoints();
-  setInterval(renderEndpoints, 30_000);
-
   // Pending pairing requests — first paint + 3s poll, matches the
   // existing dashboard cadence. iOS devices that tapped Join show up
   // here as cards; admin clicks Approve / Decline.
@@ -932,6 +925,21 @@ function parseDurationShorthand(s) {
 // --- settings ---
 
 function initSettings() {
+  // Network telemetry panels (moved here from Devices + Dashboard in
+  // the branded-refresh refactor). Both helpers self-guard against
+  // missing target elements, so they're safe to call before the
+  // form-existence check below — and they should fire even if the
+  // form is ever conditionally absent.
+  refreshCertInfo();
+  renderEndpoints();
+  // Defensive clearInterval: today the bridge admin uses hard
+  // page-loads between routes so the interval would die with the
+  // document, but guarding against double-init hardens against any
+  // future client-side route swap or partial-view rerender that
+  // re-invokes initSettings().
+  if (window.__endpointsInterval) clearInterval(window.__endpointsInterval);
+  window.__endpointsInterval = setInterval(renderEndpoints, 30_000);
+
   const form = document.getElementById("settings-form");
   const msg = document.getElementById("settings-msg");
   const restartBtn = document.getElementById("restart-btn");

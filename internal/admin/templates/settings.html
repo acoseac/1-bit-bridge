@@ -9,6 +9,8 @@
   </p>
 
   <form id="settings-form" class="panel">
+    <h2 class="section-head">General</h2>
+
     <div class="field">
       <label>Library name
         <input name="libraryName" type="text" value="{{.Data.LibraryName}}">
@@ -22,6 +24,15 @@
       </label>
       <small class="hint">How often the full walk runs. Defaults to 3600 (1 h).</small>
     </div>
+
+    <div class="field read-only">
+      <label>Data directory
+        <input type="text" value="{{.Data.DataDir}}" disabled>
+      </label>
+      <small class="hint">Set at <code>bridge init</code> time; not editable here.</small>
+    </div>
+
+    <h2 class="section-head">Networking</h2>
 
     <div class="field">
       <label>Listen address <span class="badge warn">restart</span>
@@ -40,13 +51,6 @@
       </small>
     </div>
 
-    <div class="field read-only">
-      <label>Data directory
-        <input type="text" value="{{.Data.DataDir}}" disabled>
-      </label>
-      <small class="hint">Set at <code>bridge init</code> time; not editable here.</small>
-    </div>
-
     <div class="field">
       <label>Custom endpoints
         <textarea name="customEndpoints" rows="3"
@@ -63,7 +67,7 @@
       </small>
     </div>
 
-    <h2>Updates</h2>
+    <h2 class="section-head">Updates</h2>
     <p class="lede">
       The bridge polls the GitHub Releases API for new versions. Operator-triggered
       install is always available on the dashboard; auto-install is opt-in.
@@ -112,5 +116,31 @@
     </div>
     <p id="settings-msg" class="status" hidden></p>
   </form>
+
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Reachable endpoints</h2>
+    </div>
+    <p class="muted">
+      Addresses this bridge advertises to paired iOS devices.
+      Devices try them in order and stick to whichever connects.
+      The list is recomputed live from network interfaces — bring a Tailscale
+      tunnel up and refresh to see the new entry.
+    </p>
+    <ul id="endpoints-list" class="endpoints-list">
+      <li class="endpoints-empty"><em>Loading…</em></li>
+    </ul>
+  </div>
+
+  <div class="panel">
+    <h2>TLS fingerprint</h2>
+    <p>iOS clients pin this value during pairing. Don't rotate without re-pairing.</p>
+    <code class="fingerprint">{{.Fingerprint}}</code>
+    <dl>
+      <dt>Expires</dt>
+      <dd id="cert-expiry">…</dd>
+    </dl>
+    <p class="panel-note">Rotation is CLI-only: <code>bridge cert rotate</code>. After rotation, every paired device must re-pair from a fresh QR.</p>
+  </div>
 </section>
 {{end}}
