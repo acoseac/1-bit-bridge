@@ -18,13 +18,30 @@ This is the **source of truth** for the wire contract between the `1-bit-bridge`
 
 ## Authentication
 
-- Every request **except `GET /v1/health`** must carry `Authorization: Bearer <token>`. `/v1/health` is unauthenticated so the iOS "Add Bridge" sheet can surface a useful error before the user has pasted a token.
-- Tokens are minted by `bridge pair` and stored server-side as a salted hash.
+- The default rule: every request must carry `Authorization: Bearer <token>` where `<token>` is a minted bearer.
+- Three documented exceptions:
+  - **`GET /v1/health`** — no auth, so the iOS "Add Bridge" sheet can surface a useful error before the user has pasted a token.
+  - **`POST /v1/pairing/requests`** — no auth. The body's `pollSecretHash` (SHA-256 hex of the iOS-generated `pollSecret`) IS the binding: subsequent polls present the matching `pollSecret` raw, server hashes and constant-time-compares.
+  - **`GET /v1/pairing/{requestId}` and `DELETE /v1/pairing/{requestId}`** — `Authorization: Bearer <pollSecret>` where `<pollSecret>` is the request-creator's textual encoded form (see "pollSecret wire encoding" below). Server applies `SHA-256` to the bytes of the bearer string and constant-time-compares against the stored hash.
+- Tokens are minted by `bridge pair` (or by approving an admin-approval pairing request) and stored server-side as a salted hash.
 - An unauthenticated request is answered with `401 Unauthorized` and a JSON body:
   ```json
   { "error": "unauthorized" }
   ```
 - A valid token with insufficient scope (reserved for future use) returns `403`.
+
+### pollSecret wire encoding (additive, since v1.2)
+
+The `pollSecret` is a **32-byte cryptographic random value, encoded as `base64url` without padding** (RFC 4648 §5, `[A-Za-z0-9_-]`, no `=`). The 32-byte input produces a stable 43-character ASCII string — header-safe, copy-paste-safe, and identical to the encoding `bridge pair`-issued bearer tokens already use.
+
+The textual form is what flows on the wire AND what gets hashed:
+
+- Client generates 32 random bytes → encodes as `base64url` (no padding) → that 43-char string IS the `pollSecret`.
+- `pollSecretHash` field in `POST /v1/pairing/requests` is `lower(hex(sha256(pollSecret)))` — i.e. SHA-256 over the UTF-8 bytes of the 43-char encoded string, hex-encoded lowercase (64 chars total).
+- `Authorization: Bearer <pollSecret>` carries the same 43-char encoded string.
+- Server side: extract bearer → `sha256(bytes(bearer))` → constant-time-compare against the stored hash.
+
+Anchoring the hash to the encoded form (not the raw bytes) means client and server agree on a single canonical representation, eliminating any risk of a divergence where iOS hashes one value and the server hashes another.
 
 ## Path semantics
 
@@ -225,6 +242,75 @@ Serve cached album / artist artwork keyed by MusicBrainz release (or artist) MBI
 
 Backwards compatibility: the 202 branch is a v1.1 addition. Servers that don't have an MBID probe wired (e.g. tests, legacy) fall back to 404 on any cache miss, matching the v1.0 behavior. No protocol version bump is required — iOS clients that ignore 202 still work (they just see a transient-looking failure).
 
+### `POST /v1/pairing/requests` (additive, since v1.2)
+
+Submit a join request that surfaces in the bridge admin web console as a pending entry. The admin reads the verification code off the iOS device's waiting screen, then approves or declines. iOS polls `/v1/pairing/{requestId}` for the verdict.
+
+**Authentication**: none on this endpoint. iOS generates a 32-byte cryptographic random `pollSecret`, base64url-encodes it (no padding, 43 chars), and submits its SHA-256 hash here. See "pollSecret wire encoding" in the Authentication section above for the full canonical form.
+
+**Request body**:
+```json
+{
+  "deviceName": "Arseni's iPhone",
+  "clientVersion": "1.4.0",
+  "pollSecretHash": "<64-char lowercase hex SHA-256 of the base64url-encoded pollSecret>"
+}
+```
+
+**Response** (`201 Created`):
+```json
+{
+  "requestId": "<12-hex chars>",
+  "verificationCode": "412593",
+  "ttlSeconds": 300,
+  "bridgeStartedAt": 1735689600123
+}
+```
+
+`bridgeStartedAt` is Unix milliseconds of bridge process start. iOS observes it on this response and on every subsequent poll; a value change between calls means the bridge restarted mid-pairing and iOS surfaces a terminal "bridge restarted" state instead of blindly retrying.
+
+**Response** (`400 Bad Request`): `bad_request` — `deviceName` empty or `pollSecretHash` is not exactly 64 hex chars.
+
+**Response** (`503 Service Unavailable`): `queue_full` — bridge has hit the in-flight pending cap (16 by default). The admin sees the queue full of garbage and can mass-decline.
+
+**Response** (`404 Not Found`): `pairing_not_supported` — bridge build doesn't support tap-to-pair (older release, or the route is unregistered). iOS treats this as "fall back to manual entry."
+
+### `GET /v1/pairing/{requestId}` (additive, since v1.2)
+
+Poll for the verdict on a pairing request.
+
+**Authentication**: `Authorization: Bearer <pollSecret>` — the base64url-encoded textual form (43 chars, see "pollSecret wire encoding" above) submitted at request creation. The bridge applies SHA-256 to the bytes of the bearer string and constant-time-compares against the stored hash.
+
+**Response** (`200 OK`):
+```json
+{
+  "status": "pending" | "approved" | "declined" | "expired" | "cert_rotated",
+  "ttlSecondsRemaining": 240,
+  "bridgeStartedAt": 1735689600123,
+  "verificationCode": "412593",
+  "token": "<43-char base64url bearer>",
+  "tokenId": "<12-hex>"
+}
+```
+
+`token` and `tokenId` are populated only when `status == "approved"`. **The token is returned on every authorized poll while the request is approved** — NOT read-once. iOS may legitimately retry the same poll across a network blip, and the pollSecret bearer + cert pin gate re-reads. The token is discarded only when iOS sends `DELETE /v1/pairing/{requestId}` (acknowledgment after keychain persist) OR when TTL+grace elapses without acknowledgment, in which case the bridge revokes the minted token to prevent orphans.
+
+`status == "cert_rotated"` indicates the bridge cert fingerprint changed between request creation and admin approve. iOS treats this as terminal and prompts the user to request again on the new cert.
+
+**Response** (`401 Unauthorized`): missing or mismatched `pollSecret`.
+
+**Response** (`404 Not Found`): `unknown_request` — request ID never existed, was deleted, or expired beyond its grace window. iOS treats as terminal.
+
+### `DELETE /v1/pairing/{requestId}` (additive, since v1.2)
+
+Cancel a pending request OR acknowledge receipt of an approved token. Same `Authorization: Bearer <pollSecret>` auth as the poll endpoint.
+
+**Response** (`204 No Content`): success. The row is gone server-side.
+
+**Response** (`401 Unauthorized`): missing or mismatched `pollSecret`.
+
+The handler treats "already deleted" as success (returns 204), so a duplicate DELETE from a retrying iOS client is a no-op rather than a 404. This is the iOS-visible side of the read-many delivery contract.
+
 ## Error responses
 
 All errors are JSON:
@@ -232,16 +318,19 @@ All errors are JSON:
 { "error": "short-code", "message": "human-readable detail" }
 ```
 
-| Status | `error` code         | When                                              |
-|-------:|----------------------|---------------------------------------------------|
-|    202 | `pending`            | Artwork / artist-image enrichment not yet cached  |
-|    400 | `bad_request`        | Malformed path, missing required query param     |
-|    400 | `range_required`     | `/v1/read` called without a `Range` header        |
-|    401 | `unauthorized`       | Missing / invalid bearer token                    |
-|    403 | `forbidden`          | Valid token, insufficient scope (reserved)        |
-|    404 | `not_found`          | Path does not exist in any library root           |
-|    500 | `internal`           | Server-side failure                               |
-|    503 | `scan_in_progress`   | Manifest requested while an initial scan is busy  |
+| Status | `error` code             | When                                              |
+|-------:|--------------------------|---------------------------------------------------|
+|    202 | `pending`                | Artwork / artist-image enrichment not yet cached  |
+|    400 | `bad_request`            | Malformed path, missing required query param     |
+|    400 | `range_required`         | `/v1/read` called without a `Range` header        |
+|    401 | `unauthorized`           | Missing / invalid bearer token (or pollSecret)    |
+|    403 | `forbidden`              | Valid token, insufficient scope (reserved)        |
+|    404 | `not_found`              | Path does not exist in any library root           |
+|    404 | `unknown_request`        | Pairing request ID unknown / cleaned up           |
+|    404 | `pairing_not_supported`  | Bridge build doesn't expose tap-to-pair           |
+|    500 | `internal`               | Server-side failure                               |
+|    503 | `scan_in_progress`       | Manifest requested while an initial scan is busy  |
+|    503 | `queue_full`             | Pending pairing requests at the cap               |
 
 ## Pairing URL scheme
 
