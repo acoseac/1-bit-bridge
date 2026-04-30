@@ -121,6 +121,7 @@ func TestPairingCreatePollDelete(t *testing.T) {
 		"clientVersion":  "1.4.0",
 		"pollSecretHash": hashHex,
 	})
+	defer resp.Body.Close()
 	if resp.StatusCode != 201 {
 		body, _ := io.ReadAll(resp.Body)
 		t.Fatalf("POST status = %d, want 201; body=%s", resp.StatusCode, body)
@@ -141,6 +142,7 @@ func TestPairingCreatePollDelete(t *testing.T) {
 
 	// Poll while pending.
 	pollResp := getPairing(t, hs, created.RequestID, raw)
+	defer pollResp.Body.Close()
 	if pollResp.StatusCode != 200 {
 		t.Fatalf("Poll status = %d, want 200", pollResp.StatusCode)
 	}
@@ -157,10 +159,10 @@ func TestPairingCreatePollDelete(t *testing.T) {
 
 	// Cancel via DELETE.
 	delResp := deletePairing(t, hs, created.RequestID, raw)
+	defer delResp.Body.Close()
 	if delResp.StatusCode != http.StatusNoContent {
 		t.Errorf("DELETE status = %d, want 204", delResp.StatusCode)
 	}
-	delResp.Body.Close()
 }
 
 func TestPairingApprovedTokenDeliveryReadMany(t *testing.T) {
@@ -173,6 +175,7 @@ func TestPairingApprovedTokenDeliveryReadMany(t *testing.T) {
 		"deviceName":     "iPad",
 		"pollSecretHash": hashHex,
 	})
+	defer resp.Body.Close()
 	if resp.StatusCode != 201 {
 		t.Fatalf("POST: %d", resp.StatusCode)
 	}
@@ -195,6 +198,7 @@ func TestPairingApprovedTokenDeliveryReadMany(t *testing.T) {
 	var firstToken string
 	for i := 0; i < 2; i++ {
 		pollResp := getPairing(t, hs, created.RequestID, raw)
+		defer pollResp.Body.Close()
 		if pollResp.StatusCode != 200 {
 			t.Fatalf("Poll #%d status = %d", i, pollResp.StatusCode)
 		}
@@ -222,10 +226,10 @@ func TestPairingApprovedTokenDeliveryReadMany(t *testing.T) {
 
 	// iOS sends DELETE as receipt acknowledgment.
 	delResp := deletePairing(t, hs, created.RequestID, raw)
+	defer delResp.Body.Close()
 	if delResp.StatusCode != http.StatusNoContent {
 		t.Errorf("ACK DELETE: %d", delResp.StatusCode)
 	}
-	delResp.Body.Close()
 }
 
 // auth + error mapping -------------------------------------------------
@@ -237,29 +241,30 @@ func TestPairingPollUnauthorized(t *testing.T) {
 		"deviceName":     "iPhone",
 		"pollSecretHash": hashHex,
 	})
+	defer resp.Body.Close()
 	created := decodeJSON[pairingCreateResponse](t, resp)
 
 	// No bearer.
 	r1 := getPairing(t, hs, created.RequestID, "")
+	defer r1.Body.Close()
 	if r1.StatusCode != 401 {
 		t.Errorf("no bearer: status = %d, want 401", r1.StatusCode)
 	}
-	r1.Body.Close()
 	// Wrong bearer.
 	r2 := getPairing(t, hs, created.RequestID, "wrong-secret")
+	defer r2.Body.Close()
 	if r2.StatusCode != 401 {
 		t.Errorf("wrong bearer: status = %d, want 401", r2.StatusCode)
 	}
-	r2.Body.Close()
 }
 
 func TestPairingPollUnknownReturns404(t *testing.T) {
 	hs, _, _ := pairingTestSetup(t)
 	r := getPairing(t, hs, "deadbeefdead", "anysecret")
+	defer r.Body.Close()
 	if r.StatusCode != 404 {
 		t.Errorf("unknown id: status = %d, want 404", r.StatusCode)
 	}
-	r.Body.Close()
 }
 
 func TestPairingCreateBadHash(t *testing.T) {
@@ -278,10 +283,10 @@ func TestPairingCreateBadHash(t *testing.T) {
 				"deviceName":     "x",
 				"pollSecretHash": tc.hash,
 			})
+			defer r.Body.Close()
 			if r.StatusCode != 400 {
 				t.Errorf("status = %d, want 400", r.StatusCode)
 			}
-			r.Body.Close()
 		})
 	}
 }
@@ -292,10 +297,10 @@ func TestPairingCreateMissingDeviceName(t *testing.T) {
 	r := postPairing(t, hs, map[string]string{
 		"pollSecretHash": hashHex,
 	})
+	defer r.Body.Close()
 	if r.StatusCode != 400 {
 		t.Errorf("status = %d, want 400", r.StatusCode)
 	}
-	r.Body.Close()
 }
 
 func TestPairingCreateQueueFull(t *testing.T) {
@@ -306,20 +311,20 @@ func TestPairingCreateQueueFull(t *testing.T) {
 			"deviceName":     "x",
 			"pollSecretHash": hashHex,
 		})
+		defer r.Body.Close()
 		if r.StatusCode != 201 {
 			t.Fatalf("create #%d: status = %d", i, r.StatusCode)
 		}
-		r.Body.Close()
 	}
 	_, hashHex := makePollSecret(t, "overflow")
 	r := postPairing(t, hs, map[string]string{
 		"deviceName":     "x",
 		"pollSecretHash": hashHex,
 	})
+	defer r.Body.Close()
 	if r.StatusCode != http.StatusServiceUnavailable {
 		t.Errorf("overflow status = %d, want 503", r.StatusCode)
 	}
-	r.Body.Close()
 }
 
 func TestPairingDeleteIdempotent(t *testing.T) {
@@ -329,19 +334,20 @@ func TestPairingDeleteIdempotent(t *testing.T) {
 		"deviceName":     "x",
 		"pollSecretHash": hashHex,
 	})
+	defer r.Body.Close()
 	created := decodeJSON[pairingCreateResponse](t, r)
 
 	first := deletePairing(t, hs, created.RequestID, raw)
+	defer first.Body.Close()
 	if first.StatusCode != http.StatusNoContent {
 		t.Errorf("first DELETE: %d", first.StatusCode)
 	}
-	first.Body.Close()
 	// Second DELETE must succeed (idempotent ack).
 	second := deletePairing(t, hs, created.RequestID, raw)
+	defer second.Body.Close()
 	if second.StatusCode != http.StatusNoContent {
 		t.Errorf("second DELETE: %d, want 204 (idempotent)", second.StatusCode)
 	}
-	second.Body.Close()
 }
 
 func TestPairingDeleteUnauthorizedStaysAuthorized(t *testing.T) {
@@ -351,20 +357,21 @@ func TestPairingDeleteUnauthorizedStaysAuthorized(t *testing.T) {
 		"deviceName":     "x",
 		"pollSecretHash": hashHex,
 	})
+	defer r.Body.Close()
 	created := decodeJSON[pairingCreateResponse](t, r)
 
 	bad := deletePairing(t, hs, created.RequestID, "wrong")
+	defer bad.Body.Close()
 	if bad.StatusCode != 401 {
 		t.Errorf("wrong secret DELETE: %d, want 401", bad.StatusCode)
 	}
-	bad.Body.Close()
 
 	// Row should still exist — verify with a poll.
 	good := getPairing(t, hs, created.RequestID, raw)
+	defer good.Body.Close()
 	if good.StatusCode != 200 {
 		t.Errorf("row missing after bad-auth delete: poll status = %d", good.StatusCode)
 	}
-	good.Body.Close()
 }
 
 // no-store path --------------------------------------------------------
@@ -382,11 +389,11 @@ func TestPairingNotSupportedWhenStoreUnwired(t *testing.T) {
 		"deviceName":     "x",
 		"pollSecretHash": hashHex,
 	})
+	defer resp.Body.Close()
 	if resp.StatusCode != 404 {
 		t.Errorf("status = %d, want 404 (pairing_not_supported)", resp.StatusCode)
 	}
 	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
 	if !strings.Contains(string(body), "pairing_not_supported") {
 		t.Errorf("body should carry pairing_not_supported short-code, got: %s", body)
 	}
@@ -401,6 +408,7 @@ func TestPairingCertRotationSurfacesViaPoll(t *testing.T) {
 		"deviceName":     "iPhone",
 		"pollSecretHash": hashHex,
 	})
+	defer r.Body.Close()
 	created := decodeJSON[pairingCreateResponse](t, r)
 
 	// Admin attempts approve with a different fingerprint — Store
@@ -415,6 +423,7 @@ func TestPairingCertRotationSurfacesViaPoll(t *testing.T) {
 	}
 
 	pollResp := getPairing(t, hs, created.RequestID, raw)
+	defer pollResp.Body.Close()
 	if pollResp.StatusCode != 200 {
 		t.Fatalf("Poll: %d", pollResp.StatusCode)
 	}

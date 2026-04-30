@@ -18,13 +18,30 @@ This is the **source of truth** for the wire contract between the `1-bit-bridge`
 
 ## Authentication
 
-- Every request **except `GET /v1/health`** must carry `Authorization: Bearer <token>`. `/v1/health` is unauthenticated so the iOS "Add Bridge" sheet can surface a useful error before the user has pasted a token.
-- Tokens are minted by `bridge pair` and stored server-side as a salted hash.
+- The default rule: every request must carry `Authorization: Bearer <token>` where `<token>` is a minted bearer.
+- Three documented exceptions:
+  - **`GET /v1/health`** — no auth, so the iOS "Add Bridge" sheet can surface a useful error before the user has pasted a token.
+  - **`POST /v1/pairing/requests`** — no auth. The body's `pollSecretHash` (SHA-256 hex of the iOS-generated `pollSecret`) IS the binding: subsequent polls present the matching `pollSecret` raw, server hashes and constant-time-compares.
+  - **`GET /v1/pairing/{requestId}` and `DELETE /v1/pairing/{requestId}`** — `Authorization: Bearer <pollSecret>` where `<pollSecret>` is the request-creator's textual encoded form (see "pollSecret wire encoding" below). Server applies `SHA-256` to the bytes of the bearer string and constant-time-compares against the stored hash.
+- Tokens are minted by `bridge pair` (or by approving an admin-approval pairing request) and stored server-side as a salted hash.
 - An unauthenticated request is answered with `401 Unauthorized` and a JSON body:
   ```json
   { "error": "unauthorized" }
   ```
 - A valid token with insufficient scope (reserved for future use) returns `403`.
+
+### pollSecret wire encoding (additive, since v1.2)
+
+The `pollSecret` is a **32-byte cryptographic random value, encoded as `base64url` without padding** (RFC 4648 §5, `[A-Za-z0-9_-]`, no `=`). The 32-byte input produces a stable 43-character ASCII string — header-safe, copy-paste-safe, and identical to the encoding `bridge pair`-issued bearer tokens already use.
+
+The textual form is what flows on the wire AND what gets hashed:
+
+- Client generates 32 random bytes → encodes as `base64url` (no padding) → that 43-char string IS the `pollSecret`.
+- `pollSecretHash` field in `POST /v1/pairing/requests` is `lower(hex(sha256(pollSecret)))` — i.e. SHA-256 over the UTF-8 bytes of the 43-char encoded string, hex-encoded lowercase (64 chars total).
+- `Authorization: Bearer <pollSecret>` carries the same 43-char encoded string.
+- Server side: extract bearer → `sha256(bytes(bearer))` → constant-time-compare against the stored hash.
+
+Anchoring the hash to the encoded form (not the raw bytes) means client and server agree on a single canonical representation, eliminating any risk of a divergence where iOS hashes one value and the server hashes another.
 
 ## Path semantics
 
@@ -229,14 +246,14 @@ Backwards compatibility: the 202 branch is a v1.1 addition. Servers that don't h
 
 Submit a join request that surfaces in the bridge admin web console as a pending entry. The admin reads the verification code off the iOS device's waiting screen, then approves or declines. iOS polls `/v1/pairing/{requestId}` for the verdict.
 
-**Authentication**: none on this endpoint. iOS generates a 256-bit `pollSecret` locally and submits its SHA-256 hash; subsequent polls present the raw secret as the bearer.
+**Authentication**: none on this endpoint. iOS generates a 32-byte cryptographic random `pollSecret`, base64url-encodes it (no padding, 43 chars), and submits its SHA-256 hash here. See "pollSecret wire encoding" in the Authentication section above for the full canonical form.
 
 **Request body**:
 ```json
 {
   "deviceName": "Arseni's iPhone",
   "clientVersion": "1.4.0",
-  "pollSecretHash": "<64-char hex SHA-256 of the iOS-generated 32-byte secret>"
+  "pollSecretHash": "<64-char lowercase hex SHA-256 of the base64url-encoded pollSecret>"
 }
 ```
 
@@ -262,7 +279,7 @@ Submit a join request that surfaces in the bridge admin web console as a pending
 
 Poll for the verdict on a pairing request.
 
-**Authentication**: `Authorization: Bearer <pollSecret>` — the raw 32-byte secret whose SHA-256 was submitted in the POST. The bridge SHA-256s the presented secret and constant-time-compares against the stored hash.
+**Authentication**: `Authorization: Bearer <pollSecret>` — the base64url-encoded textual form (43 chars, see "pollSecret wire encoding" above) submitted at request creation. The bridge applies SHA-256 to the bytes of the bearer string and constant-time-compares against the stored hash.
 
 **Response** (`200 OK`):
 ```json

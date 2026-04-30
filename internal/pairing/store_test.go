@@ -435,6 +435,113 @@ func TestVerificationCodePreservesLeadingZeros(t *testing.T) {
 	}
 }
 
+func TestApproveRefusesPastWallClockTTL(t *testing.T) {
+	// Regression for the CodeRabbit finding on PR #103: even if onTimer
+	// hasn't grabbed the lock yet to flip Pending→Expired, the Approve
+	// path must refuse a request whose wall-clock TTL has elapsed —
+	// minting for an abandoned request burns a token slot.
+	mint := &stubMint{}
+	// Use an injected clock so we can advance past TTL deterministically
+	// without a real sleep (avoids racing with the AfterFunc sweeper).
+	now := time.Now()
+	clock := func() time.Time { return now }
+	s := NewStore(Options{
+		TTL:        50 * time.Millisecond,
+		Grace:      5 * time.Second,
+		MaxPending: 4,
+		Now:        clock,
+	})
+	t.Cleanup(s.Close)
+
+	_, hashHex := makePollPair(t, "wall")
+	req, err := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Advance the injected clock past TTL without giving the sweeper a
+	// chance to run on the wall clock — Approve should detect this on
+	// its own and transition the row to Expired.
+	now = now.Add(100 * time.Millisecond)
+
+	snap, err := s.Approve(req.ID, "FP", mint.fn)
+	if !errors.Is(err, ErrAlreadyDecided) {
+		t.Errorf("Approve past TTL: err = %v, want ErrAlreadyDecided", err)
+	}
+	if snap.State != StateExpired {
+		t.Errorf("post-Approve state = %v, want Expired", snap.State)
+	}
+	if mint.callCount() != 0 {
+		t.Errorf("mint called %d times for past-TTL request, want 0", mint.callCount())
+	}
+}
+
+func TestDeclineRefusesPastWallClockTTL(t *testing.T) {
+	now := time.Now()
+	clock := func() time.Time { return now }
+	s := NewStore(Options{
+		TTL:        50 * time.Millisecond,
+		Grace:      5 * time.Second,
+		MaxPending: 4,
+		Now:        clock,
+	})
+	t.Cleanup(s.Close)
+	_, hashHex := makePollPair(t, "wall-decline")
+	req, _ := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP")
+	now = now.Add(100 * time.Millisecond)
+	snap, err := s.Decline(req.ID)
+	if !errors.Is(err, ErrAlreadyDecided) {
+		t.Errorf("Decline past TTL: err = %v, want ErrAlreadyDecided", err)
+	}
+	if snap.State != StateExpired {
+		t.Errorf("post-Decline state = %v, want Expired", snap.State)
+	}
+}
+
+func TestStaleTimerCallbackIsNoOp(t *testing.T) {
+	// Regression for the qodo finding on PR #103: a Pending-phase timer
+	// callback that's already been queued by the runtime (Stop returned
+	// false because the callback is past the recall window) must not
+	// mutate the request after Approve has rescheduled.
+	//
+	// Direct unit test: simulate a stale callback by calling onTimer with
+	// an old generation value. The request was Approved between when the
+	// stale timer fired and when its callback grabbed the lock — a
+	// non-guarded onTimer would treat State==Approved as "TTL+grace
+	// elapsed without ack" and revoke + delete. With the gen guard, the
+	// stale callback no-ops.
+	revoke := &stubRevoke{}
+	mint := &stubMint{}
+	s := quickStore(t, time.Hour, time.Hour, revoke.fn)
+	_, hashHex := makePollPair(t, "stale")
+	req, err := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Approve(req.ID, "FP", mint.fn); err != nil {
+		t.Fatal(err)
+	}
+	// Capture the post-Approve generation so the stale callback uses
+	// generation 1 (the original Pending timer's gen, which Approve
+	// has since invalidated by incrementing).
+	staleGen := uint64(1)
+	s.onTimer(req.ID, staleGen)
+
+	// The Approved row must still be in the map with the token intact.
+	res, err := s.Poll(req.ID, "test-secret-stale")
+	if err != nil {
+		t.Fatalf("Poll after stale timer: %v (row should still exist)", err)
+	}
+	if res.State != StateApproved {
+		t.Errorf("State = %v after stale timer, want Approved", res.State)
+	}
+	if res.Token == "" {
+		t.Error("Token wiped by stale timer callback")
+	}
+	if calls := revoke.calls(); len(calls) != 0 {
+		t.Errorf("revoke fired %d times from stale timer, want 0", len(calls))
+	}
+}
+
 func TestSnapshotHasNoLiveTimer(t *testing.T) {
 	s := quickStore(t, time.Second, time.Second, nil)
 	_, hashHex := makePollPair(t, "a")

@@ -49,6 +49,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -149,6 +150,21 @@ type Request struct {
 	// from creation → revoke + delete; terminal states → fires at grace
 	// → delete. Always Stop()-ed before being replaced or row deletion.
 	expiryTimer *time.Timer
+
+	// timerGen is incremented every time scheduleTimer arms a fresh
+	// timer for this request. The AfterFunc closure captures the
+	// generation by value; onTimer compares the captured value against
+	// the live `timerGen` and no-ops on mismatch.
+	//
+	// Reason: `time.Timer.Stop()` returns false when the timer's
+	// callback is already in flight (queued on the timer goroutine,
+	// past the point where Stop can recall it). Without the
+	// generation guard, a stale Pending-phase callback can run AFTER
+	// Approve has rescheduled — onTimer would then see State ==
+	// Approved and incorrectly treat the post-grace deadline as
+	// reached, deleting the row + revoking the freshly minted token
+	// before iOS has a chance to consume it. (Qodo on PR #103.)
+	timerGen uint64
 }
 
 // Options configures a Store. Zero values fall through to package defaults.
@@ -280,8 +296,13 @@ func (s *Store) CreateRequest(deviceName, clientVersion, pollSecretHashHex, sour
 		State:            StatePending,
 		CreatedAt:        now,
 	}
+	// Stamp the initial timer with the same generation guard scheduleTimer
+	// uses on every reschedule. Generation 1 is the first armed timer
+	// (0 is the zero-value sentinel — no timer ever scheduled).
+	req.timerGen = 1
 	idCopy := id
-	req.expiryTimer = time.AfterFunc(s.ttl, func() { s.onTimer(idCopy) })
+	gen := req.timerGen
+	req.expiryTimer = time.AfterFunc(s.ttl, func() { s.onTimer(idCopy, gen) })
 	s.byID[id] = req
 
 	return snapshot(req), nil
@@ -365,8 +386,9 @@ func (s *Store) Delete(id, pollSecret string) error {
 }
 
 // List returns a snapshot of every request, for the admin Devices page.
-// Sorted by CreatedAt ascending so the oldest pending shows first
-// (admin tends to triage in arrival order).
+// Sorted by CreatedAt ascending so the oldest pending shows first —
+// admin tends to triage in arrival order, and the bounded list size
+// (MaxPending = 16) makes the sort cost negligible.
 func (s *Store) List() []Request {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -374,13 +396,9 @@ func (s *Store) List() []Request {
 	for _, req := range s.byID {
 		out = append(out, snapshot(req))
 	}
-	// Sort newest-first is more useful for an at-a-glance triage; the
-	// admin handler can re-sort if it disagrees.
-	for i := 1; i < len(out); i++ {
-		for j := i; j > 0 && out[j].CreatedAt.Before(out[j-1].CreatedAt); j-- {
-			out[j], out[j-1] = out[j-1], out[j]
-		}
-	}
+	slices.SortFunc(out, func(a, b Request) int {
+		return a.CreatedAt.Compare(b.CreatedAt)
+	})
 	return out
 }
 
@@ -408,6 +426,21 @@ func (s *Store) Approve(id, currentFingerprint string, mint MintFunc) (Request, 
 		return Request{}, ErrNotFound
 	}
 	if req.State != StatePending {
+		return snapshot(req), ErrAlreadyDecided
+	}
+	// Wall-clock TTL guard. The Pending sweeper timer is the primary
+	// expiry mechanism but is best-effort — Stop() returning false on
+	// a fired-but-unprocessed timer means the queued onTimer hasn't
+	// taken s.mu yet, OR the runtime hasn't dispatched it yet under
+	// load. Without this check, a late admin tap (after wall-clock
+	// CreatedAt+TTL but before onTimer takes the lock) would mint a
+	// token for a request the user has likely abandoned. Transition
+	// the row to Expired ourselves and surface ErrAlreadyDecided so
+	// the admin handler 409s. (CodeRabbit on PR #103.)
+	if !s.now().Before(req.CreatedAt.Add(s.ttl)) {
+		req.State = StateExpired
+		req.DecidedAt = s.now()
+		s.scheduleTimer(req, s.grace)
 		return snapshot(req), ErrAlreadyDecided
 	}
 	// Cert-rotation guard. Empty captured fingerprint disables the
@@ -455,6 +488,17 @@ func (s *Store) Decline(id string) (Request, error) {
 	if req.State != StatePending {
 		return snapshot(req), ErrAlreadyDecided
 	}
+	// Same wall-clock TTL guard as Approve — see the rationale there.
+	// A Decline after expiry is a no-op from the user's perspective
+	// (they've already given up); transitioning to Expired here
+	// preserves the "exactly one terminal transition per request"
+	// invariant.
+	if !s.now().Before(req.CreatedAt.Add(s.ttl)) {
+		req.State = StateExpired
+		req.DecidedAt = s.now()
+		s.scheduleTimer(req, s.grace)
+		return snapshot(req), ErrAlreadyDecided
+	}
 	req.State = StateDeclined
 	req.DecidedAt = s.now()
 	s.scheduleTimer(req, s.grace)
@@ -495,10 +539,17 @@ func (s *Store) Close() {
 //
 // Revoke runs OUTSIDE the pairing mutex — auth.Store has its own mutex
 // and we don't want a slow disk persist to block a concurrent CreateRequest.
-func (s *Store) onTimer(id string) {
+//
+// `gen` is the generation the timer was armed under (see Request.timerGen).
+// A stale callback (Stop returned false because the callback was already
+// queued past the recall window) reaches here AFTER the request has been
+// rescheduled by Approve / Decline / a sweeper-driven Pending→Expired step.
+// In that case `gen != req.timerGen` and we no-op — letting the live
+// timer's eventual firing be the only authoritative deadline.
+func (s *Store) onTimer(id string, gen uint64) {
 	s.mu.Lock()
 	var revokeID string
-	if req, ok := s.byID[id]; ok {
+	if req, ok := s.byID[id]; ok && req.timerGen == gen {
 		switch req.State {
 		case StatePending:
 			req.State = StateExpired
@@ -520,14 +571,21 @@ func (s *Store) onTimer(id string) {
 	}
 }
 
-// scheduleTimer Stops the request's prior timer (if any) and arms a new
-// one for d from now. Caller must hold s.mu.
+// scheduleTimer Stops the request's prior timer (if any), increments the
+// generation, and arms a new one for d from now. Caller must hold s.mu.
+//
+// Generation increment is the source-of-truth for the staleness check in
+// onTimer — Stop() can return false when the timer's callback is already
+// queued past the recall window, so we must guard against the stale
+// callback firing post-reschedule.
 func (s *Store) scheduleTimer(req *Request, d time.Duration) {
 	if req.expiryTimer != nil {
 		req.expiryTimer.Stop()
 	}
+	req.timerGen++
 	id := req.ID
-	req.expiryTimer = time.AfterFunc(d, func() { s.onTimer(id) })
+	gen := req.timerGen
+	req.expiryTimer = time.AfterFunc(d, func() { s.onTimer(id, gen) })
 }
 
 // snapshot returns a value copy of the request without the live timer
