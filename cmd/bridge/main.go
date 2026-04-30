@@ -98,6 +98,11 @@ func (a *upscaleEnqueuerAdapter) EnqueueOne(libraryRelativePath string) error {
 	}
 	track, err := a.store.GetTrack(libraryRelativePath)
 	if err != nil {
+		// Surface DB errors as a generic 5xx upstream rather
+		// than silently enqueuing — the resumability check
+		// below depends on the same store, so a sick DB would
+		// likely double-convert tracks (Gemini medium on
+		// PR #109).
 		return fmt.Errorf("get track row: %w", err)
 	}
 	if track == nil {
@@ -137,16 +142,32 @@ func (a *upscaleEnqueuerAdapter) EnqueueOne(libraryRelativePath string) error {
 		return api.ErrUpscaleSourceMissing
 	}
 	// Resumability: skip when a fresh sidecar already exists.
-	if existing, _ := a.store.GetVariant(libraryRelativePath, spec.VariantID()); existing != nil {
+	// Same handle-the-error policy as the parent track lookup —
+	// a sick DB shouldn't silently re-convert a track.
+	existing, getVErr := a.store.GetVariant(libraryRelativePath, spec.VariantID())
+	if getVErr != nil {
+		return fmt.Errorf("get variant row: %w", getVErr)
+	}
+	if existing != nil {
 		if existing.SourceMTimeNS == spec.SourceMTimeNS && existing.SourceSize == spec.SourceSize {
 			return api.ErrUpscaleIneligible
 		}
 	}
 	enqueueErr := a.pool.Enqueue(spec)
-	if errors.Is(enqueueErr, transcode.ErrQueueFull) {
+	switch {
+	case errors.Is(enqueueErr, transcode.ErrQueueFull):
 		return api.ErrUpscaleQueueFull
+	case errors.Is(enqueueErr, transcode.ErrPoolClosed):
+		// Should never reach here in production — Stop()
+		// only fires during graceful shutdown when no new
+		// HTTP requests are accepted. Surface as
+		// upscale-disabled so the iOS toast reads "feature
+		// unavailable" rather than a confusing transient
+		// error (CodeRabbit nit on PR #109).
+		return api.ErrUpscaleSourceMissing
+	default:
+		return enqueueErr
 	}
-	return enqueueErr
 }
 
 // updateInfoAdapter bridges *updater.Updater to api.UpdaterStatus +
@@ -801,11 +822,29 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	}
 	provider.SetUpscaleEnabled(upscaleActive)
 
+	apiSrv := api.New(cfg, store, provider, fingerprint).
+		WithArtworkDirs(artworkDirBridge(artworkDir)).
+		WithMBIDProbe(provider).
+		WithUpdater(updAdapter).
+		WithSessionTracker(sessions).
+		WithPairing(pairingStore).
+		WithUpscale(upscaleActive, &variantStoreAdapter{provider: provider})
+
 	// Phase 2.5: long-lived transcode worker pool inside `bridge
 	// serve`. Only instantiated when the feature is fully active
 	// — saves goroutines + a manifest store reference when the
 	// operator hasn't opted in, and matches the "off means
 	// completely off" guarantee the iOS gating relies on.
+	//
+	// Constructed AFTER apiSrv so the adapter can borrow the
+	// api server's Resolver instance via `apiSrv.Resolver()`
+	// instead of building a snapshot from cfg.LibraryRoots.
+	// Critical: the api Resolver hot-reloads via SetRoots when
+	// the admin removes/adds a library root at runtime; a
+	// snapshot resolver would silently keep routing to the old
+	// root set and the upscale endpoint would either resolve
+	// stale paths or 404 on freshly-added ones (Qodo bug 2 on
+	// PR #109).
 	//
 	// Pool lives for the rest of serveCmd's lifetime; deferred
 	// Stop() drains in-flight sox processes during graceful
@@ -814,27 +853,17 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// httpSrv.Shutdown completes, so accepting POST /v1/upscale
 	// can't race the pool teardown.
 	var upscalePool *transcode.Pool
-	var upscaleEnqueuer api.UpscaleEnqueuer
 	if upscaleActive {
 		upscalePool = transcode.NewPool(manifestStore, cfg.Upscale.EffectiveWorkers(), cfg.Upscale.EffectiveQueueCap())
 		defer upscalePool.Stop()
-		upscaleEnqueuer = &upscaleEnqueuerAdapter{
+		apiSrv.WithUpscaleEnqueuer(&upscaleEnqueuerAdapter{
 			pool:      upscalePool,
 			store:     manifestStore,
-			resolver:  bridgefs.New(cfg.LibraryRoots),
+			resolver:  apiSrv.Resolver(),
 			cfg:       cfg,
 			outputDir: filepath.Join(cfg.DataDir, "transcoded"),
-		}
+		})
 	}
-
-	apiSrv := api.New(cfg, store, provider, fingerprint).
-		WithArtworkDirs(artworkDirBridge(artworkDir)).
-		WithMBIDProbe(provider).
-		WithUpdater(updAdapter).
-		WithSessionTracker(sessions).
-		WithPairing(pairingStore).
-		WithUpscale(upscaleActive, &variantStoreAdapter{provider: provider}).
-		WithUpscaleEnqueuer(upscaleEnqueuer)
 	httpSrv := &http.Server{
 		Addr:    cfg.ListenAddress,
 		Handler: apiSrv.Handler(),

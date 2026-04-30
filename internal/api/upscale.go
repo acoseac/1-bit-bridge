@@ -109,7 +109,14 @@ func (s *Server) upscaleRequest(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "request body must be JSON: "+err.Error())
 		return
 	}
-	libraryRel := strings.TrimSpace(req.Path)
+	// Normalise to forward-slash form before any path math. The
+	// wire protocol explicitly requires forward slashes, but a
+	// Windows iOS client (none today, defensive) or a hand-
+	// crafted curl from a Windows admin could submit
+	// backslashes that would survive the resolver's tolerance
+	// only to land at `path.Join` below in unexpected shapes.
+	// Cheap defensive normalisation (Gemini medium on PR #109).
+	libraryRel := strings.ReplaceAll(strings.TrimSpace(req.Path), `\`, "/")
 	if libraryRel == "" {
 		writeError(w, http.StatusBadRequest, "bad_request", "path is required")
 		return

@@ -1,7 +1,10 @@
 package transcode
 
 import (
+	"errors"
 	"path/filepath"
+	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -56,11 +59,19 @@ func TestPoolEnqueueReturnsErrQueueFullAtCap(t *testing.T) {
 	store := openTempStoreForPool(t)
 	t.Cleanup(func() { _ = store.Close() })
 
-	// Queue cap of 2, zero workers (well, 1 minimum) — we want
-	// the queue to fill before any worker drains it. The block-
-	// sender JobSpec has a path that won't resolve, so workers
-	// fail fast and recycle, but we slip enqueues in faster
-	// than the worker can pull.
+	// Queue cap of 2, 1 worker. Concurrent enqueue fan-out
+	// drives the test instead of a serial loop: with N
+	// goroutines all racing for 2 channel slots + 1 in-flight
+	// at the worker, N-3 of them MUST hit ErrQueueFull by
+	// pure pigeonhole regardless of the worker's drain speed.
+	// Pre-fix the test used a serial loop and relied on the
+	// worker draining slower than the test enqueued; the
+	// `Stop()/Enqueue` mutex serialisation made that timing
+	// flaky on faster machines (the worker could finish
+	// `RunSox` failure-fast and `releaseDedup` between every
+	// pair of test-side enqueues, keeping the queue under
+	// cap). Concurrent fan-out replaces the timing assumption
+	// with a structural guarantee.
 	p := NewPool(store, 1, 2)
 	t.Cleanup(p.Stop)
 
@@ -69,7 +80,7 @@ func TestPoolEnqueueReturnsErrQueueFullAtCap(t *testing.T) {
 	// before ever reaching the channel-send.
 	mkSpec := func(i int) JobSpec {
 		return JobSpec{
-			SourceLibraryRel: filepath.Join("X", filepath.Base(t.Name())+"-"+filepath.Base(t.TempDir()), "track-"+itoa(i)+".flac"),
+			SourceLibraryRel: filepath.Join("X", filepath.Base(t.Name())+"-"+filepath.Base(t.TempDir()), "track-"+strconv.Itoa(i)+".flac"),
 			SourceAbsPath:    "/dev/null/missing",
 			TargetSampleRate: 176400,
 			TargetBits:       24,
@@ -78,17 +89,28 @@ func TestPoolEnqueueReturnsErrQueueFullAtCap(t *testing.T) {
 		}
 	}
 
-	// Submit a flurry — at least one MUST hit ErrQueueFull
-	// because the queue cap is 2 and the worker can't drain
-	// faster than we enqueue.
-	var queueFullSeen atomic.Bool
-	for i := 0; i < 20 && !queueFullSeen.Load(); i++ {
-		if err := p.Enqueue(mkSpec(i)); err == ErrQueueFull {
-			queueFullSeen.Store(true)
-		}
+	const goroutines = 50
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	var queueFullCount atomic.Uint32
+	for i := 0; i < goroutines; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			// errors.Is rather than `==` so any future
+			// wrapping inside Enqueue still passes the
+			// sentinel check (CodeRabbit minor on PR #109).
+			if errors.Is(p.Enqueue(mkSpec(idx)), ErrQueueFull) {
+				queueFullCount.Add(1)
+			}
+		}(i)
 	}
-	if !queueFullSeen.Load() {
-		t.Fatal("expected at least one Enqueue to return ErrQueueFull at queue cap")
+	wg.Wait()
+
+	// At least one must have bounced — pigeonhole guarantees
+	// it (50 goroutines, 2 queue slots + 1 worker slot = max
+	// 3 in-flight at any instant).
+	if queueFullCount.Load() == 0 {
+		t.Fatal("expected at least one concurrent Enqueue to return ErrQueueFull at queue cap")
 	}
 }
 
@@ -99,7 +121,7 @@ func TestPoolStopBlocksUntilWorkersDrain(t *testing.T) {
 	p := NewPool(store, 2, 8)
 	for i := 0; i < 4; i++ {
 		_ = p.Enqueue(JobSpec{
-			SourceLibraryRel: "Music/" + itoa(i) + ".flac",
+			SourceLibraryRel: "Music/" + strconv.Itoa(i) + ".flac",
 			SourceAbsPath:    "/dev/null/missing",
 			TargetSampleRate: 176400,
 			TargetBits:       24,
@@ -134,7 +156,7 @@ func TestPoolEnqueueAfterStopReturnsErrPoolClosed(t *testing.T) {
 		TargetSampleRate: 176400,
 		TargetBits:       24,
 	})
-	if err != ErrPoolClosed {
+	if !errors.Is(err, ErrPoolClosed) {
 		t.Errorf("Enqueue after Stop: got %v, want ErrPoolClosed", err)
 	}
 }
@@ -149,29 +171,4 @@ func openTempStoreForPool(t *testing.T) *manifest.Store {
 		t.Fatalf("OpenStore: %v", err)
 	}
 	return s
-}
-
-// itoa is a tiny stdlib-free integer→string helper so the test
-// imports stay short. The negative branch is unused (test calls
-// pass non-negative i only) but kept for safety.
-func itoa(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	neg := i < 0
-	if neg {
-		i = -i
-	}
-	var buf [20]byte
-	idx := len(buf)
-	for i > 0 {
-		idx--
-		buf[idx] = byte('0' + i%10)
-		i /= 10
-	}
-	if neg {
-		idx--
-		buf[idx] = '-'
-	}
-	return string(buf[idx:])
 }

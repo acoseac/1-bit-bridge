@@ -3,7 +3,6 @@ package transcode
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -109,14 +108,32 @@ func NewPool(store *manifest.Store, workers, queueCap int) *Pool {
 // the queue is full, returns ErrQueueFull immediately. Dedup is
 // silent — a duplicate (same source_path + variant_id) returns
 // nil without taking a slot. After Stop, returns ErrPoolClosed.
+//
+// **Race-safe vs Stop**: pre-fix, Stop() did `close(p.jobs)`
+// concurrently with an Enqueue holding `inflight[dedup]` but not
+// yet at the channel send — sending on a closed channel panics
+// (Gemini high + Qodo bug 1 + CodeRabbit echo on PR #109). Fix:
+// the channel-send branch runs INSIDE `p.mu` and Stop() takes
+// the same mutex before close. The mutex serialises the two
+// operations cheaply (the send is non-blocking via the select +
+// default, so the lock window stays in microseconds), and the
+// re-checked `closed` flag inside the lock catches a Stop that
+// won the race for the mutex but hadn't yet closed the channel.
 func (p *Pool) Enqueue(spec JobSpec) error {
 	if p.closed.Load() {
 		return ErrPoolClosed
 	}
 	dedup := spec.SourceLibraryRel + "|" + spec.VariantID()
 	p.mu.Lock()
+	defer p.mu.Unlock()
+	// Re-check under the lock — Stop() might have flipped
+	// `closed` between our pre-lock load above and acquiring
+	// the mutex. Without this re-check the channel send below
+	// could race a concurrent close().
+	if p.closed.Load() {
+		return ErrPoolClosed
+	}
 	if _, ok := p.inflight[dedup]; ok {
-		p.mu.Unlock()
 		return nil // already queued or running
 	}
 	// Optimistic insert: claim the slot before trying the channel
@@ -124,7 +141,6 @@ func (p *Pool) Enqueue(spec JobSpec) error {
 	// pass the dedup check. If the channel send fails, we roll
 	// back below.
 	p.inflight[dedup] = struct{}{}
-	p.mu.Unlock()
 	select {
 	case p.jobs <- poolJob{spec: spec, dedup: dedup}:
 		p.enqueuedCnt.Add(1)
@@ -132,9 +148,7 @@ func (p *Pool) Enqueue(spec JobSpec) error {
 	default:
 		// Roll back the optimistic claim — couldn't fit the job
 		// after all.
-		p.mu.Lock()
 		delete(p.inflight, dedup)
-		p.mu.Unlock()
 		return ErrQueueFull
 	}
 }
@@ -146,11 +160,20 @@ func (p *Pool) Enqueue(spec JobSpec) error {
 //
 // Idempotent: calling Stop twice is safe (the underlying CancelFunc
 // is itself idempotent).
+//
+// **Acquires `p.mu` before closing the channel** so any in-flight
+// Enqueue completes its channel send (or its dedup-rollback)
+// before close() lands. Without this, a concurrent Enqueue could
+// pass its `closed` re-check, attempt to send, and hit a
+// "send on closed channel" panic. See the comment on Enqueue
+// for the full race trace.
 func (p *Pool) Stop() {
 	if p.closed.Swap(true) {
 		return
 	}
+	p.mu.Lock()
 	close(p.jobs)
+	p.mu.Unlock()
 	p.stopCancel()
 	p.wg.Wait()
 }
@@ -248,11 +271,4 @@ func (p *Pool) releaseDedup(key string) {
 	p.mu.Lock()
 	delete(p.inflight, key)
 	p.mu.Unlock()
-}
-
-// formatDedupKey is the dedup-key shape Enqueue and the worker
-// loop must agree on. Exposed for test diagnostics; production
-// code inlines the same string concat.
-func formatDedupKey(sourcePath, variantID string) string {
-	return fmt.Sprintf("%s|%s", sourcePath, variantID)
 }
