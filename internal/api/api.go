@@ -36,6 +36,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
+	"github.com/acoseac/1-bit-bridge/internal/pairing"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
 
@@ -51,6 +52,7 @@ type Server struct {
 	mbidProbe   MBIDProbe
 	updater     UpdaterStatus
 	sessions    SessionTracker
+	pairing     *pairing.Store
 	fingerprint string
 	startedAt   time.Time
 }
@@ -179,6 +181,17 @@ func (s *Server) WithSessionTracker(t SessionTracker) *Server {
 	return s
 }
 
+// WithPairing attaches the in-memory pairing.Store that backs the
+// admin-approval pairing flow (POST /v1/pairing/requests, GET/DELETE
+// /v1/pairing/{id}). Optional — when nil the routes return 404
+// `pairing_not_supported` and iOS falls back to manual token entry.
+// Older bridges that don't ship this package keep the same wire
+// behaviour for free (404 from the unregistered route).
+func (s *Server) WithPairing(p *pairing.Store) *Server {
+	s.pairing = p
+	return s
+}
+
 // Resolver returns the internal path Resolver so the admin console can
 // call SetRoots when adding or removing a library root at runtime. The
 // api handlers and admin handlers deliberately share the same Resolver
@@ -198,6 +211,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/manifest", s.authed(s.manifestHandler))
 	mux.HandleFunc("GET /v1/artwork/{mbid}", s.authed(s.artwork))
 	mux.HandleFunc("GET /v1/artist-image/{mbid}", s.authed(s.artistImage))
+	// Pairing routes are unauthenticated by design — pollSecret is the
+	// auth where needed, the captured cert pin is the trust anchor for
+	// the rest. Always registered so a 404 from the unregistered route
+	// can't be confused with a successful "no such request" response;
+	// when no Store is wired the handlers themselves return
+	// `pairing_not_supported`.
+	mux.HandleFunc("POST /v1/pairing/requests", s.pairingRequest)
+	mux.HandleFunc("GET /v1/pairing/{requestID}", s.pairingPoll)
+	mux.HandleFunc("DELETE /v1/pairing/{requestID}", s.pairingDelete)
 	return protocolHeader(mux)
 }
 

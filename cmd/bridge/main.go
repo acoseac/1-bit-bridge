@@ -37,6 +37,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	bridgemdns "github.com/acoseac/1-bit-bridge/internal/mdns"
+	"github.com/acoseac/1-bit-bridge/internal/pairing"
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
 	"github.com/acoseac/1-bit-bridge/internal/updater"
 	"github.com/acoseac/1-bit-bridge/internal/version"
@@ -664,11 +665,23 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		canInstall: true,
 	}
 
+	// pairing.Store backs the admin-approval pairing flow (POST/GET/DELETE
+	// /v1/pairing/*). In-memory: pending requests are ephemeral by design,
+	// and a bridge restart is detected by iOS via the bridgeStartedAt echo.
+	// Approve mints a real bearer token via auth.Store.Mint; an undelivered
+	// approval (TTL+grace without iOS DELETE ack) revokes the minted token
+	// to prevent orphans after a network blip mid-handoff.
+	pairingStore := pairing.NewStore(pairing.Options{
+		RevokeToken: store.Revoke,
+	})
+	defer pairingStore.Close()
+
 	apiSrv := api.New(cfg, store, provider, fingerprint).
 		WithArtworkDirs(artworkDirBridge(artworkDir)).
 		WithMBIDProbe(provider).
 		WithUpdater(updAdapter).
-		WithSessionTracker(sessions)
+		WithSessionTracker(sessions).
+		WithPairing(pairingStore)
 	httpSrv := &http.Server{
 		Addr:    cfg.ListenAddress,
 		Handler: apiSrv.Handler(),
