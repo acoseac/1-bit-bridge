@@ -251,6 +251,12 @@ h2 {
 
 .lede { color: var(--fg-muted); margin: 0 0 20px; max-width: 72ch; }
 .hint { color: var(--fg-muted); font-size: 12px; margin-top: 4px; display: block; }
+/* In-panel explanatory text. Pre-existing classes (used in dashboard /
+ * devices / settings panels) that lacked rules; the templates were
+ * relying on browser default which rendered at full body contrast.
+ * Subdued via --fg-muted to match the .hint / .lede convention. */
+.muted { color: var(--fg-muted); }
+.panel-note { color: var(--fg-muted); font-size: 12px; margin-top: 12px; }
 
 .panel {
   background: var(--bg-panel);
