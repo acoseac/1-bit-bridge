@@ -21,10 +21,22 @@
     </ul>
   </div>
 
+  <div class="panel" id="pending-pairing-panel" hidden>
+    <div class="panel-head">
+      <h2>Pending join requests</h2>
+    </div>
+    <p class="muted">
+      iOS devices that tapped <strong>Join</strong> on a discovered bridge.
+      Read the verification code aloud (or compare on screen) before approving —
+      the device name is supplied by the client and is not proof of identity.
+    </p>
+    <div id="pending-pairing-list" class="pending-pairing-list"></div>
+  </div>
+
   <div class="panel">
     <div class="panel-head">
       <h2>Devices</h2>
-      <button type="button" id="pair-open" class="btn primary">Pair new device</button>
+      <button type="button" id="pair-open" class="btn primary">Pair manually (advanced)</button>
     </div>
     <table class="rows">
       <thead>
