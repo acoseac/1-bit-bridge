@@ -152,6 +152,18 @@ func (s *Server) download(w http.ResponseWriter, r *http.Request) {
 // invariant we're protecting — see internal/updater/sessions.go for
 // the rationale). Tracker is nil-safe; pre-Phase-B bridges that
 // don't wire one continue to work unchanged.
+//
+// **Variant routing** (v1.2): if the request carries `?variant=<id>`
+// in addition to `?path=<rel>`, the resolver looks up the (path,
+// variantID) pair in the variant store and serves the on-disk
+// sidecar instead of the original. Path validation still runs on
+// the source path (so `..`-escapes can't sneak through via the
+// variant route). When the variant store is unwired (feature
+// disabled) OR the row is missing, we 404 — iOS's typed
+// BridgeError.http(404) maps to a clean fallback to the original
+// on the next playback. A row that exists but whose sidecar is
+// stale (source drift) yields 410 Gone, which iOS handles
+// identically to 404 modulo the error message.
 func (s *Server) serveFile(w http.ResponseWriter, r *http.Request) {
 	if s.sessions != nil {
 		s.sessions.Begin()
@@ -165,6 +177,21 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request) {
 	}
 	if info.IsDir() {
 		writeError(w, http.StatusBadRequest, "bad_request", "path is a directory")
+		return
+	}
+
+	// Variant branch: take over before the source-file open if the
+	// caller asked for a variant. The source-path resolve above is
+	// load-bearing — we run it first so a malformed `?path=` is
+	// rejected with the standard 400 family BEFORE any variant
+	// lookup happens. We pass the validated `info` through so the
+	// freshness check uses the resolver's canonical stat instead
+	// of any string-concatenation re-resolution downstream
+	// (CodeQL alert: "uncontrolled data used in path expression"
+	// + Gemini single-root regression — both go away when the
+	// stat lives here, not in the manifest provider).
+	if variantID := r.URL.Query().Get("variant"); variantID != "" {
+		s.serveVariant(w, r, clientPath, info, variantID)
 		return
 	}
 
@@ -185,6 +212,68 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request) {
 	// http.ServeContent handles Range, If-Modified-Since, and the 206
 	// partial-content bookkeeping for us. It also skips the body on HEAD
 	// requests automatically.
+	http.ServeContent(w, r, info.Name(), info.ModTime(), f)
+}
+
+// serveVariant resolves (clientPath, variantID) → on-disk sidecar
+// path and streams the bytes via http.ServeContent. The
+// freshness check happens here (not in the variant store) so the
+// canonical `os.FileInfo` from the resolver is the source of
+// truth — no duplicate path resolution, no string-concatenation
+// stat. The sidecar lives under the bridge's own data dir (not
+// user-controlled).
+//
+// `sourceInfo` MUST come from `s.resolver.ResolveChecked` upstream
+// in serveFile — that's how the path-traversal guard composes
+// with the variant lookup. Don't call this with a user-supplied
+// FileInfo from somewhere else.
+func (s *Server) serveVariant(w http.ResponseWriter, r *http.Request, sourcePath string, sourceInfo os.FileInfo, variantID string) {
+	if s.variantStore == nil {
+		writeError(w, http.StatusNotFound, "variant_not_found", "upscaling is not enabled on this bridge")
+		return
+	}
+	rec, err := s.variantStore.LookupVariant(sourcePath, variantID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	if rec == nil {
+		writeError(w, http.StatusNotFound, "variant_not_found", "no such variant")
+		return
+	}
+	// Freshness gate. Mtime + size deltas indicate the source
+	// has drifted since the sidecar was minted — operator's call
+	// whether to re-convert (via `bridge upscale --force`) so we
+	// never auto-delete a stale row here. iOS sees 410 Gone and
+	// falls back to the original.
+	if rec.SourceMTimeNS != sourceInfo.ModTime().UnixNano() || rec.SourceSize != sourceInfo.Size() {
+		writeError(w, http.StatusGone, "variant_stale", "variant is out of date relative to source; falling back to original is recommended")
+		return
+	}
+	f, err := os.Open(rec.SidecarPath)
+	if err != nil {
+		// Distinguish the "file genuinely gone" case (410 Gone,
+		// iOS falls back to original, --gc reconciles) from
+		// permission errors / I/O faults (5xx, operator must
+		// see the real cause — silently mapping these to 410
+		// would hide a permissions misconfig as if the variant
+		// were permanently missing). CodeRabbit second-pass on
+		// PR #108.
+		if os.IsNotExist(err) {
+			writeError(w, http.StatusGone, "variant_missing_on_disk", "sidecar file missing")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal", "open sidecar: "+err.Error())
+		return
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Accept-Ranges", "bytes")
 	http.ServeContent(w, r, info.Name(), info.ModTime(), f)
 }
 

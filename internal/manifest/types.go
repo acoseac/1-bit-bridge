@@ -80,6 +80,47 @@ type Track struct {
 	// `IsDSD`, `TrackNumber`, `Year` use for the same "absent vs explicit"
 	// disambiguation.
 	Enriched *bool `json:"enriched,omitempty"`
+
+	// Variants reports any pre-computed alternate-format renderings of
+	// this track that the bridge has cached on disk (today: PCM
+	// upscaling via `bridge upscale` or `POST /v1/upscale`; future:
+	// PCM→DSD synthesis). Spliced in by the store at read time via a
+	// SQLite `json_group_array` correlated subquery against
+	// `track_variants` — never stored in `tags_json`. Pre-v1.2 servers
+	// omit the field entirely; iOS clients unaware of the field decode
+	// cleanly via the lenient default JSONDecoder.
+	//
+	// **Feature-flag gated**: the manifest provider clears this slice
+	// before serialization when `cfg.Upscale.Enabled == false`, so a
+	// disabled bridge advertises no variants even if the table has
+	// rows (preserves the operator's "off" intent without losing the
+	// cached sidecars on disk).
+	Variants []Variant `json:"variants,omitempty"`
+}
+
+// Variant is one cached alternate rendering of a Track's source. The
+// shape mirrors the iOS `BridgeVariant` struct field-for-field; new
+// fields here must land on iOS in the same Mirror-PR pair.
+//
+// `ID` is opaque to clients; today the only producer is `bridge
+// upscale`, which mints IDs of the form
+// `upscaled-v1-<targetRate>-<targetBits>` (e.g.
+// `upscaled-v1-176400-24`). The iOS variant resolver keys on the
+// `upscaled-` prefix to slot a variant into the share-level "prefer
+// upscaled" toggle; future variant kinds (e.g. `dsd-`) get their
+// own slots without touching legacy resolution.
+//
+// `Label` is a human-readable string the iOS picker renders directly
+// (e.g. "Upscaled FLAC 24/176.4"). Server-side construction so the
+// label can grow richer (target-rate-aware copy, source format hint)
+// without an iOS-side update.
+type Variant struct {
+	ID            string  `json:"id"`
+	Format        string  `json:"format"`
+	SampleRate    float64 `json:"sampleRate"`
+	BitsPerSample int     `json:"bitsPerSample"`
+	SizeBytes     int64   `json:"sizeBytes"`
+	Label         string  `json:"label"`
 }
 
 // Folder is a lightweight folder record used by the scanner's skip logic

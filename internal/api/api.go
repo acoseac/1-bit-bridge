@@ -44,17 +44,57 @@ var logger = logging.Component("api")
 
 // Server owns the http.Handler and the per-request state it needs.
 type Server struct {
-	cfg         *config.Config
-	store       *auth.Store
-	resolver    *bridgefs.Resolver
-	manifest    ManifestProvider
-	artworkDirs ArtworkDirProvider
-	mbidProbe   MBIDProbe
-	updater     UpdaterStatus
-	sessions    SessionTracker
-	pairing     *pairing.Store
-	fingerprint string
-	startedAt   time.Time
+	cfg            *config.Config
+	store          *auth.Store
+	resolver       *bridgefs.Resolver
+	manifest       ManifestProvider
+	artworkDirs    ArtworkDirProvider
+	mbidProbe      MBIDProbe
+	updater        UpdaterStatus
+	sessions       SessionTracker
+	pairing        *pairing.Store
+	variantStore   VariantStore // nil unless WithUpscale(true, vs) called
+	upscaleEnabled bool         // mirrors cfg.Upscale.Enabled (and sox-probe outcome)
+	fingerprint    string
+	startedAt      time.Time
+}
+
+// VariantStore is the optional interface the `?variant=<id>` branch
+// of /v1/download uses to look up a variant's cached metadata.
+// Nil-safe — when `s.variantStore` is nil the download handler
+// returns 404 `variant_not_found` for any request that carries the
+// parameter (matches the "feature unavailable" behaviour iOS
+// already handles for pre-v1.2 bridges).
+//
+// **Freshness check happens in the api**, not here. The api has
+// the canonical `bridgefs.Resolver` (path validation + traversal
+// guard already exercised on every other handler), and uses the
+// `os.FileInfo` it already stat'd for the source file in
+// serveFile. This avoids a duplicate path-resolution code path in
+// the manifest package — which Gemini bot review on PR #108
+// identified as broken in single-root mode (the manifest's
+// hand-rolled basename-stripping assumed multi-root layout) AND
+// flagged by CodeQL as "uncontrolled data used in path
+// expression". Both go away when the api owns the source-side
+// stat call and only asks the variant store for "do you have
+// this row, and what's its recorded provenance".
+//
+// `internal/manifest.Provider` satisfies this in production via
+// a thin LookupVariant wrapper around the SQLite row read.
+type VariantStore interface {
+	LookupVariant(sourcePath, variantID string) (*VariantRecord, error)
+}
+
+// VariantRecord is the minimum metadata the api needs to (a) decide
+// freshness and (b) serve the sidecar bytes. Mirrors the on-disk
+// columns the manifest package writes. Pointer return from
+// LookupVariant lets `nil` distinguish "no such row" from "row
+// exists but freshness fails" — caller can still surface a
+// targeted 404 vs 410 from the same return shape.
+type VariantRecord struct {
+	SidecarPath   string
+	SourceMTimeNS int64
+	SourceSize    int64
 }
 
 // SessionTracker is the optional interface serveFile uses to record
@@ -181,6 +221,29 @@ func (s *Server) WithSessionTracker(t SessionTracker) *Server {
 	return s
 }
 
+// WithUpscale wires the v1.2 PCM-upscaling feature into the
+// server. `enabled` mirrors `cfg.Upscale.Enabled` AND the result
+// of the cmd/bridge sox-on-PATH startup probe (a true config
+// setting whose probe failed lands here as false — graceful
+// degradation, the rest of the server keeps running). `vs` may
+// be nil when enabled=false; when enabled=true it MUST be the
+// VariantStore implementation that knows where the sidecars
+// live.
+//
+// Effect on the wire:
+//   - /v1/health reports `upscaleEnabled` matching `enabled`.
+//   - /v1/manifest emits per-Track `variants` slices iff
+//     `enabled` (cleared in the manifest provider otherwise).
+//   - /v1/download honors `?variant=<id>` iff `enabled` AND
+//     `vs != nil`; 404 `variant_not_found` otherwise.
+func (s *Server) WithUpscale(enabled bool, vs VariantStore) *Server {
+	s.upscaleEnabled = enabled
+	if enabled {
+		s.variantStore = vs
+	}
+	return s
+}
+
 // WithPairing attaches the in-memory pairing.Store that backs the
 // admin-approval pairing flow (POST /v1/pairing/requests, GET/DELETE
 // /v1/pairing/{id}). Optional — when nil the routes return 404
@@ -254,6 +317,18 @@ type HealthResponse struct {
 	UpdateAvailable       bool      `json:"updateAvailable,omitempty"`
 	UpdateReleaseNotesURL string    `json:"updateReleaseNotesURL,omitempty"`
 	MinClientVersion      string    `json:"minClientVersion,omitempty"`
+	// UpscaleEnabled mirrors the runtime config flag
+	// `cfg.Upscale.Enabled` AND the result of the sox-on-PATH
+	// startup probe (a true config setting whose probe failed
+	// reports false here — see cmd/bridge/main.go's serve-side
+	// degradation). iOS uses this to gate every variant-related
+	// UI surface for that bridge: when false, the picker / glyph
+	// / context menu items are all hidden so SMB and bridge rows
+	// look identical. Pre-v1.2 servers omit the field entirely;
+	// iOS treats absence as `false` (no variant chrome). Pointer
+	// type so a true `false` value distinguishes "feature
+	// supported but disabled" from "no field on the wire".
+	UpscaleEnabled *bool `json:"upscaleEnabled,omitempty"`
 }
 
 // ScanState reports the scanner's current status. Real fields populate once
@@ -296,6 +371,12 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		resp.UpdateReleaseNotesURL = info.ReleaseNotesURL
 		resp.MinClientVersion = info.MinClientVersion
 	}
+	// Capability flag — non-nil pointer so the wire shape says
+	// `false` explicitly (not omitted) when the server supports
+	// the feature but has it turned off. Older servers without
+	// the field surface as nil on iOS, which iOS treats as false.
+	upscaleEnabled := s.upscaleEnabled
+	resp.UpscaleEnabled = &upscaleEnabled
 	writeJSON(w, http.StatusOK, resp)
 }
 

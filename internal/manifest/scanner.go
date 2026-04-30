@@ -937,7 +937,17 @@ func BuildManifest(store *Store, roots []string, since time.Time) (*Manifest, er
 //
 // since, if non-zero, filters tracks by indexed_at (matches the
 // BuildManifest semantics).
-func WriteManifest(w io.Writer, store *Store, roots []string, since time.Time) (err error) {
+func WriteManifest(w io.Writer, store *Store, roots []string, since time.Time) error {
+	return writeManifestGated(w, store, roots, since, false)
+}
+
+// writeManifestGated is the gated worker behind the public
+// WriteManifest. `withVariants=false` (the test-friendly default)
+// strips Track.Variants before emitting each row; `true` (set by
+// the runtime Provider when `cfg.Upscale.Enabled`) lets variants
+// flow through unchanged. Existing tests continue to call the
+// public WriteManifest unchanged.
+func writeManifestGated(w io.Writer, store *Store, roots []string, since time.Time, withVariants bool) (err error) {
 	folders, err := store.ListFolders()
 	if err != nil {
 		return fmt.Errorf("list folders: %w", err)
@@ -1036,6 +1046,14 @@ func WriteManifest(w io.Writer, store *Store, roots []string, since time.Time) (
 			}
 		}
 		first = false
+		// Variant gate: the store always populates Variants from
+		// `track_variants` (cheap, one column per page). When the
+		// runtime feature flag is off, strip them here so the wire
+		// shape matches a pre-v1.2 bridge — operator can disable
+		// the feature without losing the cached sidecars on disk.
+		if !withVariants {
+			t.Variants = nil
+		}
 		return enc.Encode(t)
 	})
 	if streamErr != nil {
@@ -1077,6 +1095,13 @@ func WriteManifest(w io.Writer, store *Store, roots []string, since time.Time) (
 // caused an extra round-trip that returned zero rows whenever the
 // track count was an exact multiple of limit.
 func BuildManifestPage(store *Store, roots []string, cursor string, limit int) (*Manifest, error) {
+	return buildManifestPageGated(store, roots, cursor, limit, false)
+}
+
+// buildManifestPageGated is the gated worker behind the public
+// BuildManifestPage. Strips Track.Variants when the feature flag
+// is off — see writeManifestGated for the symmetrical contract.
+func buildManifestPageGated(store *Store, roots []string, cursor string, limit int, withVariants bool) (*Manifest, error) {
 	if limit <= 0 {
 		limit = 1000
 	}
@@ -1143,6 +1168,16 @@ func BuildManifestPage(store *Store, roots []string, cursor string, limit int) (
 	} else {
 		// Short read — this is the last page. `NextCursor` stays nil.
 		m.Tracks = tracks
+	}
+	// Variant gate (mirror of the streaming path in
+	// writeManifestGated). Strip Variants when the feature flag is
+	// off so a disabled bridge advertises the same shape as a pre-
+	// v1.2 server, preserving operator intent without losing the
+	// cached sidecars on disk.
+	if !withVariants {
+		for i := range m.Tracks {
+			m.Tracks[i].Variants = nil
+		}
 	}
 	return m, nil
 }
