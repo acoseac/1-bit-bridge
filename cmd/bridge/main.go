@@ -908,14 +908,24 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		UpscalePrecheck: transcode.PrecheckSox,
 		UpscaleStats: func() *admin.UpscalePoolStats {
 			// Snapshot the pool's live counters when the
-			// feature is active. When the operator
-			// toggled the flag off mid-session OR the
-			// sox-precheck demoted us at startup, the
-			// pool is nil; returning nil here lets the
-			// admin handler omit the `pool` field
+			// feature is active. Two off-paths return nil
+			// so the admin handler omits the `pool` field
 			// entirely instead of surfacing zero-padded
-			// clutter on the Settings page.
-			if upscalePool == nil {
+			// clutter on the Settings page:
+			//
+			//   1. upscalePool == nil — sox-precheck demoted
+			//      the feature at startup OR the operator
+			//      never enabled it.
+			//   2. cfg.Upscale.Enabled == false — operator
+			//      just PATCHed the flag off; the long-
+			//      lived Pool is still alive until restart,
+			//      but the contract is "feature is off
+			//      live", so don't surface live counters
+			//      (CodeRabbit minor on PR #110 — the iOS-
+			//      facing /v1/health.upscaleEnabled and the
+			//      admin tile's `enabled` field both gate
+			//      on this).
+			if upscalePool == nil || !cfg.Upscale.Enabled {
 				return nil
 			}
 			s := upscalePool.Stats()

@@ -793,19 +793,31 @@ type upscaleStatsResponse struct {
 // Returns a snapshot of the upscale feature's runtime + on-disk
 // state. Used by the Settings page tile that shows "12 cached
 // variants (4.2 GB) — 3 jobs in flight". Cheap (single SQL
-// COUNT + a mutex-protected pool snapshot); fires on dashboard
-// refresh.
+// COUNT + a mutex-protected pool snapshot + a TTL-cached sox
+// precheck); fires on dashboard refresh every 5 s.
+//
+// **`enabled` reports live runtime state**, NOT the persisted
+// config (CodeRabbit major on PR #110). The two diverge in two
+// real cases: (a) startup demoted the feature when sox-precheck
+// failed even though `cfg.Upscale.Enabled == true`, (b) the
+// operator just PATCHed `upscaleEnabled = false` but the
+// long-lived Pool is still alive until restart. Both surface as
+// `pool == nil` from the closure (which gates on the config
+// flag too — see cmd/bridge wiring); we report
+// `enabled = (pool != nil)` so the iOS-facing /v1/health
+// semantics and the admin tile agree about what "active"
+// means. The Settings PATCH form reads the persisted
+// `cfg.Upscale.Enabled` from `/api/settings.upscaleEnabled`
+// separately for the toggle's initial state.
 func (s *Server) apiUpscaleStats(w http.ResponseWriter, r *http.Request) {
-	resp := upscaleStatsResponse{
-		Enabled: s.deps.Cfg.Upscale.Enabled,
-	}
-	if s.deps.UpscalePrecheck != nil {
-		ok := s.deps.UpscalePrecheck() == nil
-		resp.SoxAvailable = &ok
+	var resp upscaleStatsResponse
+	if avail := s.cachedSoxAvailability(); avail != nil {
+		resp.SoxAvailable = avail
 	}
 	if s.deps.UpscaleStats != nil {
 		resp.Pool = s.deps.UpscaleStats()
 	}
+	resp.Enabled = (resp.Pool != nil)
 	if s.deps.Manifest != nil {
 		count, bytes, err := s.deps.Manifest.CountVariants()
 		if err != nil {
@@ -820,6 +832,36 @@ func (s *Server) apiUpscaleStats(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// soxAvailabilityCacheTTL bounds how long the cached precheck
+// result is reused before re-probing. 30 s feels right: an
+// operator installing sox sees the Settings UI reflect it
+// within at most 30 s without us spending up to 2 s on the
+// probe per 5 s stats poll (CodeRabbit major on PR #110 — the
+// previous per-call precheck shelled out 12×/min on every open
+// Settings tab).
+const soxAvailabilityCacheTTL = 30 * time.Second
+
+// cachedSoxAvailability returns the most recent precheck result
+// or runs a fresh probe when the cache is older than
+// soxAvailabilityCacheTTL. Returns nil when no precheck closure
+// is wired (test harnesses).
+func (s *Server) cachedSoxAvailability() *bool {
+	if s.deps.UpscalePrecheck == nil {
+		return nil
+	}
+	now := time.Now()
+	s.soxAvailabilityMu.Lock()
+	defer s.soxAvailabilityMu.Unlock()
+	if !s.soxAvailabilityAt.IsZero() && now.Sub(s.soxAvailabilityAt) < soxAvailabilityCacheTTL {
+		v := s.soxAvailability
+		return &v
+	}
+	v := s.deps.UpscalePrecheck() == nil
+	s.soxAvailability = v
+	s.soxAvailabilityAt = now
+	return &v
 }
 
 // splitCustomEndpointsText parses the textarea form of the custom-

@@ -671,7 +671,7 @@ func TestUpscaleStatsHandler(t *testing.T) {
 		t.Fatalf("stats wired: %d", code)
 	}
 	if !got.Enabled {
-		t.Error("Enabled should be true after cfg flip")
+		t.Error("Enabled should be true when Pool is populated")
 	}
 	if got.SoxAvailable == nil || !*got.SoxAvailable {
 		t.Error("SoxAvailable should be true when precheck reports nil")
@@ -681,6 +681,108 @@ func TestUpscaleStatsHandler(t *testing.T) {
 	}
 	if got.Pool.Workers != 4 || got.Pool.QueueLen != 12 || got.Pool.Done != 86 {
 		t.Errorf("Pool snapshot wrong: %+v", got.Pool)
+	}
+}
+
+// TestUpscaleStatsDisabledWithHistory pins the off-with-history
+// branch the Settings page UX depends on (CodeRabbit nit on PR
+// #110): when the feature is off but cached variants exist on
+// disk, the response MUST surface CachedVariants > 0 with
+// Pool == nil and Enabled == false. Without coverage here, a
+// regression that returns Pool zero-padded (instead of nil)
+// would mis-render the card with "0 inflight, 0 done"
+// instead of em-dashes for the live fields.
+func TestUpscaleStatsDisabledWithHistory(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	h := srv.Handler()
+
+	// Insert a parent track + a variant row so CountVariants
+	// reports a non-zero history. UpscaleStats stays nil
+	// (closure not wired) → simulates "feature off with
+	// historical converted files on disk".
+	if err := srv.deps.Manifest.UpsertTrack(&manifest.Track{
+		Path:    "Music/Album/01.flac",
+		Size:    100,
+		ModTime: time.Now(),
+	}); err != nil {
+		t.Fatalf("UpsertTrack: %v", err)
+	}
+	if err := srv.deps.Manifest.UpsertVariant(manifest.VariantRow{
+		SourcePath:    "Music/Album/01.flac",
+		VariantID:     "upscaled-v1-176400-24",
+		SidecarPath:   "/dev/null/sidecar.flac",
+		Format:        "flac",
+		SampleRate:    176400,
+		BitsPerSample: 24,
+		SizeBytes:     12_345_678,
+		SourceMTimeNS: 1, SourceSize: 1, SoxSettings: "{}", CreatedAt: 1,
+	}); err != nil {
+		t.Fatalf("UpsertVariant: %v", err)
+	}
+
+	var got upscaleStatsResponse
+	code := doJSON(t, h, "GET", "/api/upscale/stats", nil, &got)
+	if code != 200 {
+		t.Fatalf("stats: %d", code)
+	}
+	if got.Enabled {
+		t.Error("Enabled must be false when Pool is nil — the off-with-history contract")
+	}
+	if got.Pool != nil {
+		t.Errorf("Pool must be nil when feature is off; got %+v", got.Pool)
+	}
+	if got.CachedVariants != 1 {
+		t.Errorf("CachedVariants: got %d, want 1", got.CachedVariants)
+	}
+	if got.CachedBytes != 12_345_678 {
+		t.Errorf("CachedBytes: got %d, want 12345678", got.CachedBytes)
+	}
+}
+
+// TestUpscaleSoxAvailabilityCached pins the TTL cache (CodeRabbit
+// major on PR #110): the precheck closure shells out to sox and
+// can wait up to 2 s, so polling at 5 s would 12×/min spend that
+// time. The handler caches the result for soxAvailabilityCacheTTL
+// (30 s) and reuses across calls.
+func TestUpscaleSoxAvailabilityCached(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	h := srv.Handler()
+
+	var calls int
+	srv.deps.UpscalePrecheck = func() error {
+		calls++
+		return nil
+	}
+
+	// Three back-to-back calls within the TTL window MUST
+	// invoke the precheck closure exactly once.
+	for i := 0; i < 3; i++ {
+		var got upscaleStatsResponse
+		code := doJSON(t, h, "GET", "/api/upscale/stats", nil, &got)
+		if code != 200 {
+			t.Fatalf("stats[%d]: %d", i, code)
+		}
+		if got.SoxAvailable == nil || !*got.SoxAvailable {
+			t.Errorf("stats[%d]: SoxAvailable wrong", i)
+		}
+	}
+	if calls != 1 {
+		t.Errorf("PrecheckSox invoked %d times; should have been cached after the first call", calls)
+	}
+
+	// Forcing the cache to expire (zero out the timestamp)
+	// MUST trigger a fresh probe. Done via the test seam of
+	// taking the lock + clearing the timestamp directly —
+	// matches the project convention for `internal` test-
+	// only state mutation.
+	srv.soxAvailabilityMu.Lock()
+	srv.soxAvailabilityAt = time.Time{}
+	srv.soxAvailabilityMu.Unlock()
+
+	var got upscaleStatsResponse
+	doJSON(t, h, "GET", "/api/upscale/stats", nil, &got)
+	if calls != 2 {
+		t.Errorf("after expiry, PrecheckSox should have re-run; calls=%d", calls)
 	}
 }
 

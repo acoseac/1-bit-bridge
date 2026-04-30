@@ -283,6 +283,17 @@ type Server struct {
 	// before we return from Serve". Capped by the same 5s shutdown
 	// grace as the HTTP listener.
 	bgScans sync.WaitGroup
+
+	// soxAvailability cache. The /api/upscale/stats handler is
+	// polled every 5 s by the Settings page; per-call PrecheckSox
+	// would shell out 12×/min on every open Settings tab and pay
+	// up to 2 s per probe (CodeRabbit major on PR #110). The TTL
+	// is soxAvailabilityCacheTTL — short enough that an operator
+	// installing sox sees the UI reflect within ~30 s, long
+	// enough that Settings polling stays cheap.
+	soxAvailabilityMu sync.Mutex
+	soxAvailability   bool
+	soxAvailabilityAt time.Time
 }
 
 // pages maps the URL-friendly page name to its template filename.
