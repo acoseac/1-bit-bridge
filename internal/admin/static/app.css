@@ -578,6 +578,81 @@ dialog h2 { font-size: 18px; color: var(--accent); }
   overflow-wrap: anywhere;
 }
 
+/* Pending pairing requests panel (admin-approval flow). One card per
+ * iOS device that tapped Join on a discovered bridge. The 6-digit
+ * verification code is the load-bearing identity check — render it
+ * large enough for the operator to glance at across a desk and read
+ * it off the iOS screen.
+ */
+.badge.danger {
+  background: color-mix(in srgb, var(--danger) 16%, transparent);
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+}
+.pending-pairing-list {
+  display: grid;
+  gap: 12px;
+}
+.pairing-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  background: var(--bg-elev);
+  display: grid;
+  gap: 8px;
+}
+.pairing-card.pairing-pending {
+  border-color: color-mix(in srgb, var(--ok) 35%, var(--border));
+  box-shadow: 0 0 10px color-mix(in srgb, var(--ok) 12%, transparent);
+}
+.pairing-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.pairing-name {
+  font-weight: 600;
+  font-size: 15px;
+}
+.pairing-code {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+.pairing-code-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-muted);
+}
+.pairing-code-value {
+  font-family: var(--mono, monospace);
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: var(--accent, var(--fg));
+}
+.pairing-meta {
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.pairing-warn {
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg-muted);
+  font-style: italic;
+}
+.pairing-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.pairing-error {
+  color: var(--danger);
+  font-size: 13px;
+}
+
 /* Reduced motion: the scanline grid is static so there's nothing to
  * disable, but a reader that opts out should see the grid dimmed
  * further so it fully recedes. */

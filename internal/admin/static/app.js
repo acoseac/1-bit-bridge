@@ -579,6 +579,142 @@ async function renderEndpoints() {
     .join("");
 }
 
+// renderPendingPairing fetches /api/pairing and paints the
+// "Pending join requests" panel on the devices page. Optimistic UI:
+// when the operator taps Approve / Decline the JS flips the card to a
+// transient state immediately, then the next 3 s poll either confirms
+// (card transitions to "approved · awaiting device acknowledgment" or
+// to "declined") or the row disappears server-side and the card is
+// removed by this renderer. No manual refresh required.
+//
+// pendingActionLatch tracks rows the operator has just acted on so a
+// brief race between optimistic-flip and the next poll can't
+// resurrect the prior "pending" badge while the server is still
+// computing the transition.
+const pendingActionLatch = new Map();
+async function renderPendingPairing() {
+  const panel = document.getElementById("pending-pairing-panel");
+  const list = document.getElementById("pending-pairing-list");
+  if (!panel || !list) return;
+  let entries;
+  try {
+    entries = await API.get("/api/pairing");
+  } catch (e) {
+    panel.hidden = false;
+    list.innerHTML = `<p class="pairing-error"><em>Couldn't load pending requests: ${escapeHTML(e.message)}</em></p>`;
+    return;
+  }
+  if (!Array.isArray(entries) || entries.length === 0) {
+    pendingActionLatch.clear();
+    panel.hidden = true;
+    list.innerHTML = "";
+    return;
+  }
+  panel.hidden = false;
+  // Drop latch entries that the server no longer reports — once the
+  // row is gone the optimistic flip has served its purpose.
+  const live = new Set(entries.map((e) => e.id));
+  for (const id of pendingActionLatch.keys()) {
+    if (!live.has(id)) pendingActionLatch.delete(id);
+  }
+  list.innerHTML = entries.map((e) => renderPendingPairingCard(e)).join("");
+
+  // Wire approve / decline buttons every render — innerHTML wiped any
+  // prior listeners.
+  list.querySelectorAll("[data-pairing-approve]").forEach((btn) => {
+    btn.addEventListener("click", () => handlePairingAction(btn, "approve"));
+  });
+  list.querySelectorAll("[data-pairing-decline]").forEach((btn) => {
+    btn.addEventListener("click", () => handlePairingAction(btn, "decline"));
+  });
+}
+
+function renderPendingPairingCard(e) {
+  const status = String(e.status || "pending");
+  const latched = pendingActionLatch.get(e.id);
+  const effective = latched || status;
+  const code = String(e.verificationCode || "").replace(/(\d{3})(\d{3})/, "$1 $2");
+  const sourceLine = [
+    e.sourceIP ? `from <code>${escapeHTML(e.sourceIP)}</code>` : "",
+    e.clientVersion ? `client ${escapeHTML(e.clientVersion)}` : "",
+  ].filter(Boolean).join(" · ");
+  let badge = "";
+  let actions = "";
+  switch (effective) {
+    case "pending":
+      badge = `<span class="badge running">expires in ${formatPairingCountdown(e.secondsUntilExpiry)}</span>`;
+      actions = `
+        <div class="pairing-actions">
+          <button type="button" class="btn" data-pairing-decline data-id="${escapeHTML(e.id)}">Decline</button>
+          <button type="button" class="btn primary" data-pairing-approve data-id="${escapeHTML(e.id)}">Approve</button>
+        </div>`;
+      break;
+    case "approved":
+      badge = `<span class="badge idle">approved · awaiting device acknowledgment</span>`;
+      break;
+    case "declined":
+      badge = `<span class="badge danger">declined</span>`;
+      break;
+    case "expired":
+      badge = `<span class="badge danger">expired</span>`;
+      break;
+    case "cert_rotated":
+      badge = `<span class="badge danger">cert rotated · device must request again</span>`;
+      break;
+    default:
+      badge = `<span class="badge">${escapeHTML(effective)}</span>`;
+  }
+  return `
+    <div class="pairing-card pairing-${effective}">
+      <div class="pairing-card-head">
+        <div class="pairing-name">"${escapeHTML(e.deviceName || "(unnamed)")}"</div>
+        ${badge}
+      </div>
+      <div class="pairing-code">
+        <span class="pairing-code-label">Verification code</span>
+        <code class="pairing-code-value">${escapeHTML(code)}</code>
+      </div>
+      <div class="pairing-meta">
+        ${sourceLine || ""}
+        ${e.fingerprintSuffix ? ` · TLS fingerprint suffix <code>…${escapeHTML(e.fingerprintSuffix)}</code>` : ""}
+      </div>
+      <p class="pairing-warn">
+        Device name is supplied by the client — verify the code on the device screen before approving.
+      </p>
+      ${actions}
+    </div>`;
+}
+
+function formatPairingCountdown(sec) {
+  const n = Math.max(0, Number(sec) || 0);
+  const m = Math.floor(n / 60);
+  const s = n % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+async function handlePairingAction(btn, action) {
+  const id = btn.dataset.id;
+  if (!id) return;
+  // Disable both buttons in the card while the call is in flight to
+  // prevent double-tap submitting both actions.
+  const card = btn.closest(".pairing-card");
+  card?.querySelectorAll("button").forEach((b) => (b.disabled = true));
+  // Latch the optimistic state so the next render doesn't briefly
+  // flip back to "pending" before the server has processed.
+  pendingActionLatch.set(id, action === "approve" ? "approved" : "declined");
+  try {
+    await API.post(`/api/pairing/${encodeURIComponent(id)}/${action}`);
+  } catch (err) {
+    // Server rejected (cert rotated mid-tap, race lost to expire) —
+    // drop the latch so the next poll surfaces the actual state.
+    pendingActionLatch.delete(id);
+    alert(`${action} failed: ${err.message}`);
+  }
+  // Force an immediate re-render so the card flips without waiting
+  // for the next 3 s tick.
+  renderPendingPairing();
+}
+
 function initDevices() {
   const modal = document.getElementById("pair-modal");
   const openBtn = document.getElementById("pair-open");
@@ -591,6 +727,12 @@ function initDevices() {
   // full reload on navigation, so the interval dies with the page.
   renderEndpoints();
   setInterval(renderEndpoints, 30_000);
+
+  // Pending pairing requests — first paint + 3s poll, matches the
+  // existing dashboard cadence. iOS devices that tapped Join show up
+  // here as cards; admin clicks Approve / Decline.
+  renderPendingPairing();
+  setInterval(renderPendingPairing, 3_000);
 
   if (openBtn) {
     openBtn.addEventListener("click", () => {
