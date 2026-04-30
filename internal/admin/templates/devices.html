@@ -6,21 +6,6 @@
     immediately. <code>Last used</code> updates within ~30s of a request.
   </p>
 
-  <div class="panel">
-    <div class="panel-head">
-      <h2>Reachable endpoints</h2>
-    </div>
-    <p class="muted">
-      Addresses this bridge advertises to paired iOS devices.
-      Devices try them in order and stick to whichever connects.
-      The list is recomputed live from network interfaces — bring a Tailscale
-      tunnel up and refresh to see the new entry.
-    </p>
-    <ul id="endpoints-list" class="endpoints-list">
-      <li class="endpoints-empty"><em>Loading…</em></li>
-    </ul>
-  </div>
-
   <div class="panel" id="pending-pairing-panel" hidden>
     <div class="panel-head">
       <h2>Pending join requests</h2>

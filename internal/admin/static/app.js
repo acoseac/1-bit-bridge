@@ -122,7 +122,6 @@ function initDashboard() {
     });
   }
   refreshBackups();
-  refreshCertInfo();
   refreshTailscale();
   bindTailscaleRefreshButton();
   setInterval(refreshTailscale, 30_000);
@@ -193,10 +192,12 @@ async function refreshBackups() {
   }
 }
 
-// refreshCertInfo populates the dashboard's "Expires" line under the
-// TLS fingerprint panel with the live cert's expiry. ≤7 days is
-// rendered red, ≤30 days yellow, otherwise the plain count. Errors
-// degrade silently — the panel just shows the placeholder dashes.
+// refreshCertInfo populates the "Expires" line under the TLS
+// fingerprint panel (Settings → Networking) with the live cert's
+// expiry. ≤7 days is rendered red, ≤30 days yellow, otherwise the
+// plain count. Errors degrade silently — the panel just shows the
+// placeholder dashes. Self-guards via `if (!cell) return` so calling
+// it from a page that doesn't render the panel is a no-op.
 async function refreshCertInfo() {
   const cell = document.getElementById("cert-expiry");
   if (!cell) return;
@@ -536,14 +537,16 @@ function initLibrary() {
   });
 }
 
-// --- devices ---
+// --- networking telemetry (Settings page) ---
 
 // renderEndpoints fetches /api/endpoints and paints the
-// "Reachable endpoints" panel on the devices page. The bridge
-// recomputes the list per-call from net.Interfaces() so a Tailscale
-// tunnel coming up mid-session reflects on the next refresh; we
-// poll every 30s to catch interface changes without forcing the
-// operator to reload the page.
+// "Reachable endpoints" panel on the Settings page (Networking
+// section). The bridge recomputes the list per-call from
+// net.Interfaces() so a Tailscale tunnel coming up mid-session
+// reflects on the next refresh; we poll every 30s (set up by
+// initSettings) to catch interface changes without forcing the
+// operator to reload the page. Self-guards via `if (!list) return`
+// so calling it from a page that doesn't render the panel is a no-op.
 async function renderEndpoints() {
   const list = document.getElementById("endpoints-list");
   if (!list) return;
@@ -721,12 +724,6 @@ function initDevices() {
   const form = document.getElementById("pair-form");
   const stepForm = document.getElementById("pair-step-form");
   const stepResult = document.getElementById("pair-step-result");
-
-  // Endpoints panel — first paint + 30s poll. The interval handle
-  // is intentionally not stored; the page lifecycle is tied to a
-  // full reload on navigation, so the interval dies with the page.
-  renderEndpoints();
-  setInterval(renderEndpoints, 30_000);
 
   // Pending pairing requests — first paint + 3s poll, matches the
   // existing dashboard cadence. iOS devices that tapped Join show up
@@ -932,6 +929,21 @@ function parseDurationShorthand(s) {
 // --- settings ---
 
 function initSettings() {
+  // Network telemetry panels (moved here from Devices + Dashboard in
+  // the branded-refresh refactor). Both helpers self-guard against
+  // missing target elements, so they're safe to call before the
+  // form-existence check below — and they should fire even if the
+  // form is ever conditionally absent.
+  refreshCertInfo();
+  renderEndpoints();
+  // Defensive clearInterval: today the bridge admin uses hard
+  // page-loads between routes so the interval would die with the
+  // document, but guarding against double-init hardens against any
+  // future client-side route swap or partial-view rerender that
+  // re-invokes initSettings().
+  if (window.__endpointsInterval) clearInterval(window.__endpointsInterval);
+  window.__endpointsInterval = setInterval(renderEndpoints, 30_000);
+
   const form = document.getElementById("settings-form");
   const msg = document.getElementById("settings-msg");
   const restartBtn = document.getElementById("restart-btn");
