@@ -473,10 +473,20 @@ func (s *Store) Approve(id, currentFingerprint string, mint MintFunc) (Request, 
 		s.scheduleTimer(req, s.grace)
 		return snapshot(req), ErrAlreadyDecided
 	}
-	// Cert-rotation guard. Empty captured fingerprint disables the
-	// check (used by tests that don't wire a fingerprint); production
-	// always supplies one.
-	if req.CertFingerprint != "" && currentFingerprint != "" && req.CertFingerprint != currentFingerprint {
+	// Cert-rotation guard. Fails closed — once `req.CertFingerprint`
+	// was captured at CreateRequest time, ANY divergence at Approve
+	// time (different value AND empty value) flips the state to
+	// CertRotated and refuses the mint. The previous "skip when
+	// currentFingerprint == ''" carve-out turned a fingerprint-
+	// lookup failure or caller regression into a silent bypass of
+	// the pin check (CodeRabbit on PR #103 third pass).
+	//
+	// `req.CertFingerprint == ""` (left as the test-mode escape
+	// hatch) keeps the guard inert — production always populates it
+	// via `s.fingerprint` in the api Server, so the only paths that
+	// hit the empty-captured branch are tests that opt out of the
+	// guard explicitly.
+	if req.CertFingerprint != "" && req.CertFingerprint != currentFingerprint {
 		req.State = StateCertRotated
 		req.DecidedAt = s.now()
 		s.scheduleTimer(req, s.grace)

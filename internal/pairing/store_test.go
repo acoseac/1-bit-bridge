@@ -198,6 +198,29 @@ func TestApproveCertRotationGuard(t *testing.T) {
 	}
 }
 
+func TestApproveCertRotationGuardFailsClosedOnEmptyCurrent(t *testing.T) {
+	// Locks the CodeRabbit-third-pass invariant: once CreateRequest
+	// captured a fingerprint, an Approve called with empty
+	// currentFingerprint (caller regression / fingerprint lookup
+	// failure) must fail closed via ErrCertRotated rather than
+	// silently bypassing the pin check.
+	mint := &stubMint{}
+	s := quickStore(t, time.Second, time.Second, nil)
+	_, hashHex := makePollPair(t, "fail-closed")
+	req, _ := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "CAPTURED-FP")
+
+	snap, err := s.Approve(req.ID, "" /* missing/lookup-failed */, mint.fn)
+	if !errors.Is(err, ErrCertRotated) {
+		t.Errorf("Approve with empty current fingerprint: err = %v, want ErrCertRotated", err)
+	}
+	if snap.State != StateCertRotated {
+		t.Errorf("State after empty-current refusal = %v, want CertRotated", snap.State)
+	}
+	if mint.callCount() != 0 {
+		t.Errorf("mint called %d times under empty-current refusal, want 0", mint.callCount())
+	}
+}
+
 func TestDeclineTransitionsAndRevokesNothing(t *testing.T) {
 	revoke := &stubRevoke{}
 	s := quickStore(t, time.Second, 50*time.Millisecond, revoke.fn)
