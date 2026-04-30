@@ -129,8 +129,11 @@ func TestDownloadVariantServesSidecar(t *testing.T) {
 }
 
 // TestDownloadVariantNotFoundReturns404 — unknown variantID for a
-// known source path returns a clean 404 (NOT a server error). iOS
-// then falls back to the original on the next playback.
+// known source path returns a clean 404 (NOT a server error)
+// with the wire-stable `variant_not_found` code in the body. iOS
+// keys friendlyErrorMessage off the code, not the status alone,
+// so a regression to a generic `not_found` would silently break
+// the picker UX (CodeRabbit second-pass on PR #108).
 func TestDownloadVariantNotFoundReturns404(t *testing.T) {
 	hs, tok, _, _, _ := fileVariantFixture(t)
 	// vs.records is empty — every variantID misses.
@@ -139,6 +142,7 @@ func TestDownloadVariantNotFoundReturns404(t *testing.T) {
 	if resp.StatusCode != 404 {
 		t.Errorf("status: got %d, want 404", resp.StatusCode)
 	}
+	assertWireErrorCode(t, resp, "variant_not_found")
 }
 
 // TestDownloadVariantStaleOnMtimeMismatchReturns410 — record's
@@ -146,6 +150,10 @@ func TestDownloadVariantNotFoundReturns404(t *testing.T) {
 // stale state by stamping a wrong mtime in the record (instead
 // of touching the real source — that's brittle across
 // filesystems with coarse mtime granularity).
+//
+// Asserts the wire-stable `variant_stale` code so a swap with
+// `variant_missing_on_disk` doesn't pass silently (CodeRabbit
+// second-pass on PR #108).
 func TestDownloadVariantStaleOnMtimeMismatchReturns410(t *testing.T) {
 	hs, tok, root, vs, sidecar := fileVariantFixture(t)
 	srcInfo := statSourceOrFail(t, root, "Artist/Album/01.flac")
@@ -160,6 +168,7 @@ func TestDownloadVariantStaleOnMtimeMismatchReturns410(t *testing.T) {
 	if resp.StatusCode != 410 {
 		t.Errorf("status: got %d, want 410", resp.StatusCode)
 	}
+	assertWireErrorCode(t, resp, "variant_stale")
 }
 
 // TestDownloadVariantStaleOnSizeMismatchReturns410 — symmetric
@@ -179,6 +188,32 @@ func TestDownloadVariantStaleOnSizeMismatchReturns410(t *testing.T) {
 	if resp.StatusCode != 410 {
 		t.Errorf("status: got %d, want 410 (stale on size mismatch)", resp.StatusCode)
 	}
+	assertWireErrorCode(t, resp, "variant_stale")
+}
+
+// TestDownloadVariantMissingOnDiskReturns410 — record exists,
+// freshness matches, but the sidecar file is gone (manual rm).
+// 410 Gone with the distinct `variant_missing_on_disk` code so
+// `bridge upscale --gc` operators can reconcile.
+func TestDownloadVariantMissingOnDiskReturns410(t *testing.T) {
+	hs, tok, root, vs, sidecar := fileVariantFixture(t)
+	srcInfo := statSourceOrFail(t, root, "Artist/Album/01.flac")
+	// Delete the sidecar but keep the freshness-matching record.
+	if err := os.Remove(sidecar); err != nil {
+		t.Fatalf("rm sidecar: %v", err)
+	}
+	vs.records["Artist/Album/01.flac|upscaled-v1-176400-24"] = &VariantRecord{
+		SidecarPath:   sidecar,
+		SourceMTimeNS: srcInfo.ModTime().UnixNano(),
+		SourceSize:    srcInfo.Size(),
+	}
+
+	resp := authGet(t, hs, "/v1/download?path=Artist/Album/01.flac&variant=upscaled-v1-176400-24", tok)
+	defer resp.Body.Close()
+	if resp.StatusCode != 410 {
+		t.Errorf("status: got %d, want 410", resp.StatusCode)
+	}
+	assertWireErrorCode(t, resp, "variant_missing_on_disk")
 }
 
 // TestDownloadVariantWhenFeatureDisabledReturns404 — `WithUpscale(false, nil)`
@@ -278,4 +313,25 @@ func statSourceOrFail(t *testing.T, root, libraryRelative string) os.FileInfo {
 		t.Fatalf("stat source %q: %v", libraryRelative, err)
 	}
 	return info
+}
+
+// assertWireErrorCode decodes the response body as the standard
+// `{"error": "...", "message": "..."}` shape and asserts the
+// `error` field matches `wantCode`. Lets tests pin the wire-
+// stable error code separately from the HTTP status — a
+// regression to a generic short-code (e.g. variant_stale →
+// not_found) would still pass a status-only check.
+func assertWireErrorCode(t *testing.T, resp *http.Response, wantCode string) {
+	t.Helper()
+	var body ErrorResponse
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read error body: %v", err)
+	}
+	if err := json.Unmarshal(data, &body); err != nil {
+		t.Fatalf("decode error body: %v (raw: %s)", err, string(data))
+	}
+	if body.Error != wantCode {
+		t.Errorf("wire error code: got %q, want %q", body.Error, wantCode)
+	}
 }

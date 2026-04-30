@@ -425,12 +425,13 @@ func (s *Store) UpsertTrackBatch(ts []*Track) error {
 func (s *Store) DeleteTrack(path string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// Step 1: enumerate sidecars BEFORE the DB delete. Reading
-	// inside the writer lock is fine — modernc.org/sqlite serializes
-	// the read against pending writes via the same connection pool.
+	// Step 1: enumerate sidecars BEFORE the DB delete. Shared
+	// helper keeps the per-policy details (rows.Err handling,
+	// log-and-continue per-row) aligned with the bulk-delete
+	// paths.
 	rows, err := s.db.Query(`SELECT sidecar_path FROM track_variants WHERE source_path = ?`, path)
+	var sidecars []string
 	if err == nil {
-		var sidecars []string
 		for rows.Next() {
 			var sp string
 			if scanErr := rows.Scan(&sp); scanErr != nil {
@@ -439,33 +440,27 @@ func (s *Store) DeleteTrack(path string) error {
 			}
 			sidecars = append(sidecars, sp)
 		}
-		// rows.Err() catches a mid-iteration DB failure (driver
-		// surface, not per-row scan); without it a partial-list
-		// would silently leak the rest of the sidecars (Gemini
-		// bot review on PR #108). Log + proceed — same policy
-		// as the scan failure above.
 		if iterErr := rows.Err(); iterErr != nil {
 			logger.Warn("delete-track: iter sidecars", "track", path, "err", iterErr)
 		}
 		rows.Close()
-		// Step 2: best-effort filesystem cleanup. Log but never
-		// fail the DB delete on a per-file error; the scanner needs
-		// the row gone regardless of disk state.
-		for _, sp := range sidecars {
-			if rmErr := os.Remove(sp); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
-				logger.Warn("delete-track: remove sidecar", "path", sp, "err", rmErr)
-			}
-		}
 	} else {
-		// Couldn't enumerate sidecars — log and proceed with the
-		// parent delete anyway. The orphan file becomes `--gc`'s
-		// problem on the next pass, NOT a reason to leave a stale
-		// row in the manifest.
+		// Couldn't enumerate sidecars — log and proceed with
+		// the parent delete anyway. The orphan file becomes
+		// `--gc`'s problem on the next pass, NOT a reason to
+		// leave a stale row in the manifest.
 		logger.Warn("delete-track: list sidecars", "track", path, "err", err)
 	}
-	// Step 3: parent delete. CASCADE clears `track_variants` rows.
-	_, err = s.db.Exec(`DELETE FROM tracks WHERE path = ?`, path)
-	return err
+	// Step 2: parent delete. CASCADE clears `track_variants`
+	// rows; sidecar files we just enumerated will be unlinked
+	// next.
+	if _, err = s.db.Exec(`DELETE FROM tracks WHERE path = ?`, path); err != nil {
+		return err
+	}
+	// Step 3: best-effort filesystem cleanup, shared with the
+	// bulk-delete paths.
+	removeSidecarFiles(sidecars)
+	return nil
 }
 
 // GetTrack fetches a single track by path. Returns (nil, nil) if absent.
@@ -918,10 +913,24 @@ func (s *Store) CountTracksByPrefix(prefix string) (int, error) {
 // `UpsertTrackBatch` — pre-fix the two writers could collide in
 // SQLite and surface as `database is locked` after `busy_timeout`.
 // Now they queue in Go.
+//
+// Sidecar-cleanup: same orphan-prevention contract as
+// `DeleteTrack`. CASCADE drops the `track_variants` rows but
+// leaves on-disk `.flac` sidecars; without explicit cleanup
+// here, a "remove library root" admin action would leak every
+// sidecar belonging to that root with no DB row left for `--gc`
+// to find by source-path lookup. CodeRabbit second-pass on PR
+// #108. Single-track DeleteTrack and the wipe-all paths share
+// the same `removeSidecarsForPaths` helper so all three deletion
+// entry points stay aligned.
 func (s *Store) DeleteTracksByPrefix(prefix string) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	escaped := likeEscape(prefix)
+	// Step 1: enumerate doomed sidecars BEFORE the cascade drops
+	// the rows. Reuses the proactive-cleanup contract documented
+	// on DeleteTrack.
+	doomedSidecars, _ := s.listSidecarsByPathPrefix(escaped)
 	tx, err := s.db.Begin()
 	if err != nil {
 		return 0, err
@@ -941,7 +950,78 @@ func (s *Store) DeleteTracksByPrefix(prefix string) (int64, error) {
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
+	// Step 2: filesystem cleanup AFTER the commit. Best-effort —
+	// per-file errors logged but never propagated; the row delete
+	// already committed and the operator's intent ("get rid of
+	// this prefix") has been honored at the DB layer.
+	removeSidecarFiles(doomedSidecars)
 	return n, nil
+}
+
+// listSidecarsByPathPrefix returns every sidecar_path whose
+// source_path matches the LIKE-escaped prefix. Used by
+// DeleteTracksByPrefix's pre-cascade enumeration. Caller MUST
+// hold s.mu (writer-serialization contract).
+func (s *Store) listSidecarsByPathPrefix(escapedPrefix string) ([]string, error) {
+	rows, err := s.db.Query(
+		`SELECT sidecar_path FROM track_variants WHERE source_path LIKE ? ESCAPE '\'`,
+		escapedPrefix+"%",
+	)
+	if err != nil {
+		logger.Warn("list sidecars by prefix", "prefix", escapedPrefix, "err", err)
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var sp string
+		if scanErr := rows.Scan(&sp); scanErr != nil {
+			logger.Warn("scan sidecar by prefix", "err", scanErr)
+			continue
+		}
+		out = append(out, sp)
+	}
+	if iterErr := rows.Err(); iterErr != nil {
+		logger.Warn("iter sidecars by prefix", "err", iterErr)
+	}
+	return out, nil
+}
+
+// listAllSidecars returns every sidecar_path in the table. Used
+// by WipeAllTracks. Same writer-lock contract.
+func (s *Store) listAllSidecars() ([]string, error) {
+	rows, err := s.db.Query(`SELECT sidecar_path FROM track_variants`)
+	if err != nil {
+		logger.Warn("list all sidecars", "err", err)
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var sp string
+		if scanErr := rows.Scan(&sp); scanErr != nil {
+			logger.Warn("scan sidecar (wipe)", "err", scanErr)
+			continue
+		}
+		out = append(out, sp)
+	}
+	if iterErr := rows.Err(); iterErr != nil {
+		logger.Warn("iter all sidecars", "err", iterErr)
+	}
+	return out, nil
+}
+
+// removeSidecarFiles unlinks every path in the slice, logging
+// (but not propagating) per-file errors. Missing files are
+// silent — they're already in the desired state. Shared by all
+// three deletion entry points so the "log but don't block on
+// per-file failure" policy lives in one place.
+func removeSidecarFiles(paths []string) {
+	for _, sp := range paths {
+		if rmErr := os.Remove(sp); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+			logger.Warn("remove sidecar", "path", sp, "err", rmErr)
+		}
+	}
 }
 
 // WipeAllTracks drops every track and folder row. Used by the admin
@@ -953,9 +1033,14 @@ func (s *Store) DeleteTracksByPrefix(prefix string) (int64, error) {
 // leave the DB with folders that outlive their tracks (or the reverse)
 // — next startup would see half-cleared state that the scanner has no
 // logic to reconcile cleanly.
+//
+// Sidecar-cleanup: same orphan-prevention contract as
+// `DeleteTrack`/`DeleteTracksByPrefix`. CodeRabbit second-pass on
+// PR #108. CASCADE alone would leak every cached `.flac` sidecar.
 func (s *Store) WipeAllTracks() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	doomedSidecars, _ := s.listAllSidecars()
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -967,7 +1052,11 @@ func (s *Store) WipeAllTracks() error {
 	if _, err := tx.Exec(`DELETE FROM folders`); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	removeSidecarFiles(doomedSidecars)
+	return nil
 }
 
 // likeEscape prepares a literal string for LIKE pattern matching. Escapes

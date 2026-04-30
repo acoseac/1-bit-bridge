@@ -36,6 +36,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
 )
@@ -116,7 +117,17 @@ func upscaleCmd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		return runGC(stdout, stderr, store, outputDir)
 	}
 
-	return runUpscaleBatch(ctx, stdout, stderr, store, cfg, runUpscaleParams{
+	// Build a Resolver from the config roots. Same routing
+	// engine the api uses for /v1/list / /v1/download — handles
+	// single-root (rootless paths) AND multi-root (basename-
+	// prefixed paths) uniformly. Pre-fix, this CLI had its own
+	// hand-rolled basename-stripping helper that silently
+	// returned "" for every track in single-root layouts —
+	// nothing got converted (CodeRabbit second-pass on PR #108,
+	// continuation of the api-side fix).
+	resolver := bridgefs.New(cfg.LibraryRoots)
+
+	return runUpscaleBatch(ctx, stdout, stderr, store, cfg, resolver, runUpscaleParams{
 		targetRateFlag: *targetRate,
 		targetBits:     *targetBits,
 		quality:        q,
@@ -151,7 +162,7 @@ type runUpscaleParams struct {
 // via exec.CommandContext (Gemini bot review on PR #108). Without
 // it, Ctrl-C on a 50-track album would block until the largest
 // file's sox finished.
-func runUpscaleBatch(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store, cfg *config.Config, p runUpscaleParams) int {
+func runUpscaleBatch(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store, cfg *config.Config, resolver *bridgefs.Resolver, p runUpscaleParams) int {
 	allTracks, err := store.ListTracks(nil)
 	if err != nil {
 		fmt.Fprintf(stderr, "list tracks: %v\n", err)
@@ -197,10 +208,18 @@ func runUpscaleBatch(ctx context.Context, stdout, stderr io.Writer, store *manif
 			skippedAlreadyAtTarget++
 			continue
 		}
-		// Find the absolute path. The Track.Path is library-
-		// relative; we need the on-disk path for SoX.
-		absPath := absolutePathFor(cfg.LibraryRoots, t.Path)
-		if absPath == "" {
+		// Find the absolute path via the canonical resolver —
+		// handles single-root (rootless paths) and multi-root
+		// (basename-prefixed paths) uniformly. A resolution
+		// error here means the manifest row points at a path
+		// that's no longer routable (root removed at runtime,
+		// renamed off-disk, etc.); treat as missing-source.
+		absPath, resolveErr := resolver.Resolve(t.Path)
+		if resolveErr != nil {
+			skippedSourceMissing++
+			continue
+		}
+		if _, statErr := os.Stat(absPath); statErr != nil {
 			skippedSourceMissing++
 			continue
 		}
@@ -347,6 +366,15 @@ producerLoop:
 
 	done := atomic.LoadUint64(&doneCount)
 	failed := atomic.LoadUint64(&failCount)
+	// Cancellation surfaces with its own exit status so scripts
+	// can tell "interrupted" apart from "completed cleanly with
+	// no failures" — a partial run that returned 0 to the shell
+	// would silently look successful even when most candidates
+	// never ran (CodeRabbit second-pass on PR #108).
+	if ctx.Err() != nil {
+		fmt.Fprintf(stdout, "\nInterrupted after %s. Converted %d of %d, failed %d.\n", elapsed, done, toRun, failed)
+		return 130 // POSIX convention: 128 + SIGINT(2)
+	}
 	fmt.Fprintf(stdout, "\nDone in %s. Converted %d, failed %d.\n", elapsed, done, failed)
 	if failed > 0 {
 		return 1
@@ -415,24 +443,6 @@ func matchesFilter(path, filter string) bool {
 		return true
 	}
 	return strings.Contains(path, filter)
-}
-
-// absolutePathFor walks the configured library roots and returns
-// the absolute filesystem path corresponding to the manifest's
-// library-relative track path. Returns "" if the path doesn't
-// match any root or the candidate file isn't readable.
-func absolutePathFor(roots []string, libraryRelative string) string {
-	for _, root := range roots {
-		base := filepath.Base(root) + "/"
-		if strings.HasPrefix(libraryRelative, base) {
-			rel := libraryRelative[len(base):]
-			candidate := filepath.Join(root, rel)
-			if _, err := os.Stat(candidate); err == nil {
-				return candidate
-			}
-		}
-	}
-	return ""
 }
 
 func effectiveWorkerCount(flagValue int) int {

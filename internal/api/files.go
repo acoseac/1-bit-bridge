@@ -252,11 +252,18 @@ func (s *Server) serveVariant(w http.ResponseWriter, r *http.Request, sourcePath
 	}
 	f, err := os.Open(rec.SidecarPath)
 	if err != nil {
-		// The sidecar row pointed at a file that's gone (manual
-		// deletion under the bridge's feet). 410 Gone signals iOS
-		// to fall back to the original. `bridge upscale --gc` is
-		// the right place to reconcile the DB row with disk.
-		writeError(w, http.StatusGone, "variant_missing_on_disk", "sidecar file missing")
+		// Distinguish the "file genuinely gone" case (410 Gone,
+		// iOS falls back to original, --gc reconciles) from
+		// permission errors / I/O faults (5xx, operator must
+		// see the real cause — silently mapping these to 410
+		// would hide a permissions misconfig as if the variant
+		// were permanently missing). CodeRabbit second-pass on
+		// PR #108.
+		if os.IsNotExist(err) {
+			writeError(w, http.StatusGone, "variant_missing_on_disk", "sidecar file missing")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal", "open sidecar: "+err.Error())
 		return
 	}
 	defer f.Close()

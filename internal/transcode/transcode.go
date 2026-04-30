@@ -273,14 +273,26 @@ func RunSox(ctx context.Context, j JobSpec) (int64, error) {
 // if the binary can't be located, or a generic error if invocation
 // fails for any other reason. Called by both `bridge upscale` (CLI
 // entry point) and the `bridge serve` startup gate (Phase 2.5).
+//
+// **Bounded by a 2 s timeout** (CodeRabbit second-pass on PR
+// #108) so a wedge from a broken PATH wrapper or a hung sox
+// process can't deadlock startup. `bridge serve` runs this
+// before opening the listen socket; without the timeout, every
+// service-manager restart with a misbehaving sox installation
+// would block forever instead of degrading cleanly.
 func PrecheckSox() error {
 	path, err := exec.LookPath("sox")
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrSoxMissing, err)
 	}
-	cmd := exec.Command(path, "--version")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, path, "--version")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return fmt.Errorf("sox --version timed out after 2s; broken PATH wrapper or hung process")
+		}
 		return fmt.Errorf("sox --version failed: %w (output: %s)", err, strings.TrimSpace(string(out)))
 	}
 	return nil
