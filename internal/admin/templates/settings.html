@@ -146,6 +146,50 @@
       </small>
     </div>
 
+    <h2 class="section-head">Audio quality</h2>
+    <p class="lede">
+      Offline PCM upscaling renders high-rate FLAC sidecars from CD-rate sources via
+      <code>sox(1)</code>. Disabled by default — opt in below, then run
+      <code>bridge upscale</code> on the server to populate the cache (or trigger
+      from the iOS app's "Generate upscaled version" context menu).
+    </p>
+
+    <div class="field">
+      <label class="checkbox">
+        <input name="upscaleEnabled" type="checkbox" {{if .Data.UpscaleEnabled}}checked{{end}}>
+        Enable PCM upscaling <span class="badge warn">restart</span>
+      </label>
+      <small class="hint">
+        When enabled, the bridge runs a long-lived sox worker pool inside
+        <code>bridge serve</code>, advertises <code>upscaleEnabled: true</code> on
+        <code>/v1/health</code>, and accepts <code>POST /v1/upscale</code> requests
+        from iOS. Cached sidecars survive across toggles — disable to hide variants
+        from clients without losing converted files.
+      </small>
+      {{if .Data.UpscaleSoxMissing}}
+        <p class="warn-banner">
+          <strong>sox is not on PATH.</strong> Enabling here will write the flag,
+          but the bridge will degrade to feature-off at startup until sox is
+          installed on the bridge host:
+        </p>
+        <pre class="install-hint">{{.Data.UpscaleSoxInstallHint}}</pre>
+      {{end}}
+    </div>
+
+    <div id="upscale-stats" class="upscale-stats" hidden>
+      <h3>Upscale stats</h3>
+      <dl class="status-grid">
+        <dt>Cached variants</dt><dd id="upscale-cached-count">…</dd>
+        <dt>Cached on disk</dt><dd id="upscale-cached-bytes">…</dd>
+        <dt>Workers</dt><dd id="upscale-workers">…</dd>
+        <dt>Queue</dt><dd id="upscale-queue">…</dd>
+        <dt>In flight</dt><dd id="upscale-inflight">…</dd>
+        <dt>Lifetime done</dt><dd id="upscale-done">…</dd>
+        <dt>Lifetime failed</dt><dd id="upscale-failed">…</dd>
+      </dl>
+      <p class="panel-note">Refreshes every 5 s while this page is open. Lifetime counters reset on bridge restart; cached-variant count survives.</p>
+    </div>
+
     <div class="actions">
       <button type="submit" class="btn primary">Save</button>
       <button type="button" id="restart-btn" class="btn" hidden>Restart now</button>

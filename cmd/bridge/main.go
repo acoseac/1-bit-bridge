@@ -892,19 +892,43 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// (shouldn't happen, but let's not trip them up).
 	absCfgPath, _ := filepath.Abs(*configPath)
 	adminSrv, err := admin.New(admin.Deps{
-		Cfg:           cfg,
-		CfgPath:       absCfgPath,
-		Auth:          store,
-		Manifest:      manifestStore,
-		Scanner:       scanner,
-		Resolver:      apiSrv.Resolver(),
-		Fingerprint:   fingerprint,
-		StartedAt:     time.Now().UTC(),
-		ScanCtx:       scanCtx,
-		Updater:       updAdapter,
-		BackupSources: backupSources,
-		Tailscale:     tailscaleAdminAdapter{auto: tailscaleAuto},
-		Pairing:       pairingStore,
+		Cfg:             cfg,
+		CfgPath:         absCfgPath,
+		Auth:            store,
+		Manifest:        manifestStore,
+		Scanner:         scanner,
+		Resolver:        apiSrv.Resolver(),
+		Fingerprint:     fingerprint,
+		StartedAt:       time.Now().UTC(),
+		ScanCtx:         scanCtx,
+		Updater:         updAdapter,
+		BackupSources:   backupSources,
+		Tailscale:       tailscaleAdminAdapter{auto: tailscaleAuto},
+		Pairing:         pairingStore,
+		UpscalePrecheck: transcode.PrecheckSox,
+		UpscaleStats: func() *admin.UpscalePoolStats {
+			// Snapshot the pool's live counters when the
+			// feature is active. When the operator
+			// toggled the flag off mid-session OR the
+			// sox-precheck demoted us at startup, the
+			// pool is nil; returning nil here lets the
+			// admin handler omit the `pool` field
+			// entirely instead of surfacing zero-padded
+			// clutter on the Settings page.
+			if upscalePool == nil {
+				return nil
+			}
+			s := upscalePool.Stats()
+			return &admin.UpscalePoolStats{
+				Workers:  s.Workers,
+				QueueCap: s.QueueCap,
+				QueueLen: s.QueueLen,
+				Inflight: s.Inflight,
+				Enqueued: s.Enqueued,
+				Done:     s.Done,
+				Failed:   s.Failed,
+			}
+		},
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "admin: %v\n", err)
