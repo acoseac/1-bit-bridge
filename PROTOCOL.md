@@ -238,6 +238,53 @@ Both fields are additive — `ProtocolVersion` stays at `1`. Pre-v1.1 servers om
 - `isDSD: true` tracks MUST set `sampleRate` to the DSD rate in Hz (e.g. `2822400` for DSD64, `5644800` for DSD128) and `bitsPerSample: 1`.
 - `duration` is in seconds, regardless of format.
 
+### `POST /v1/upscale` (additive, since v1.2)
+
+Hands a track or folder to the long-lived transcode worker pool inside `bridge serve` for offline PCM upscaling. Companion to the CLI `bridge upscale` command — same engine, different lifetime.
+
+**Authentication**: standard `Authorization: Bearer <token>` (same rule as every other `/v1/*` endpoint except `/v1/health`).
+
+**Request body** (`application/json`):
+```json
+{ "path": "Artist/Album/01.flac" }
+```
+
+`path` is a library-relative path. May reference a single track file or a folder; the handler stat()s to decide. Folder requests recursively enqueue every regular file under the folder; the per-track eligibility gate (PCM, source rate < target rate, no fresh sidecar already cached) runs inside the enqueuer and silently rejects ineligible candidates.
+
+**Response** — happy path / partial-success (`202 Accepted`, JSON):
+```json
+{ "enqueued": 12, "rejected": 3, "eligible": 15, "queueFull": true }
+```
+
+| Field | Meaning |
+|---|---|
+| `enqueued` | Jobs the worker pool accepted onto its queue. |
+| `rejected` | Candidates the handler considered but didn't queue (queue full + ineligible + missing on disk). Omitted from the wire when zero. |
+| `eligible` | Total regular files the handler considered (folder walk surface, or 1 for a single-track request). Omitted when zero. |
+| `queueFull` | `true` iff at least one rejection was specifically due to queue capacity. iOS surfaces this in a toast so the user knows to retry; ineligibility / missing-source rejections don't flip the bit. Omitted when false. |
+
+**Response** — feature disabled (`503 Service Unavailable`, JSON):
+```json
+{ "error": "upscale_disabled", "message": "upscaling is not enabled on this bridge" }
+```
+Returned when:
+- `cfg.Upscale.Enabled == false` in `bridge.yaml`, OR
+- the sox-on-PATH probe failed at startup (graceful degradation — same wire code, operator privacy).
+
+**Response** — every candidate bounced queue-full (`503 Service Unavailable`, JSON):
+```json
+{ "error": "queue_full", "message": "transcode worker queue is full; wait for current conversions to finish" }
+```
+Distinct from `upscale_disabled`. The pool's queue cap is operator-tunable via `cfg.Upscale.QueueCap` (default 5000).
+
+**Other error codes**:
+- `400 bad_request` — body isn't valid JSON, `path` is empty, or path traversal (`..`) attempted.
+- `404 not_found` — path doesn't resolve under any library root.
+
+**Idempotency**: the worker pool dedups jobs on `(source_path, variant_id)`. A duplicate request while a job is queued or running is a silent no-op (still counted in `enqueued`); the iOS app can mash "Generate" without server-side duplicate work.
+
+**Asynchronous completion**: the response returns as soon as the jobs are queued. iOS discovers completed variants via the next `/v1/manifest` sync (which advertises the new `Track.variants` entries). There is no per-job status endpoint in v1.2; the manifest IS the authoritative completion signal.
+
 ### `GET /v1/artwork/{mbid}?size=<int>` and `GET /v1/artist-image/{mbid}`
 
 Serve cached album / artist artwork keyed by MusicBrainz release (or artist) MBID. `size` defaults to 500 px for album artwork.

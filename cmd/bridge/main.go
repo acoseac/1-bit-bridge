@@ -69,6 +69,107 @@ func (a *variantStoreAdapter) LookupVariant(sourcePath, variantID string) (*api.
 	}, nil
 }
 
+// upscaleEnqueuerAdapter implements api.UpscaleEnqueuer on top
+// of a transcode.Pool plus a manifest.Store + bridgefs.Resolver.
+// Per-call work:
+//  1. Resolve the library-relative path to abs via the canonical
+//     resolver (handles single-root + multi-root layouts).
+//  2. Fetch the Track row from the store to read source rate /
+//     isDSD for eligibility.
+//  3. Pick target rate via transcode.ResolveTargetRate; skip
+//     when the source is already at/above it (returns
+//     ErrUpscaleIneligible).
+//  4. Construct a JobSpec, capture freshness from disk, hand to
+//     the Pool. Translate transcode.ErrQueueFull → the api
+//     package's ErrUpscaleQueueFull sentinel so the handler can
+//     `errors.Is` cleanly without importing transcode.
+type upscaleEnqueuerAdapter struct {
+	pool      *transcode.Pool
+	store     *manifest.Store
+	resolver  *bridgefs.Resolver
+	cfg       *config.Config
+	outputDir string
+}
+
+func (a *upscaleEnqueuerAdapter) EnqueueOne(libraryRelativePath string) error {
+	abs, err := a.resolver.Resolve(libraryRelativePath)
+	if err != nil {
+		return api.ErrUpscaleSourceMissing
+	}
+	track, err := a.store.GetTrack(libraryRelativePath)
+	if err != nil {
+		// Surface DB errors as a generic 5xx upstream rather
+		// than silently enqueuing — the resumability check
+		// below depends on the same store, so a sick DB would
+		// likely double-convert tracks (Gemini medium on
+		// PR #109).
+		return fmt.Errorf("get track row: %w", err)
+	}
+	if track == nil {
+		// File exists on disk but no manifest row yet — scanner
+		// hasn't seen it. The HTTP handler treats this as an
+		// ineligible candidate (silent reject) rather than an
+		// error; the user has no remediation path beyond
+		// triggering a rescan.
+		return api.ErrUpscaleIneligible
+	}
+	// Eligibility gate: PCM only, source rate present, source
+	// rate strictly below target rate.
+	if track.IsDSD != nil && *track.IsDSD {
+		return api.ErrUpscaleIneligible
+	}
+	if track.SampleRate == nil {
+		return api.ErrUpscaleIneligible
+	}
+	sourceHz := int(*track.SampleRate)
+	target, err := transcode.ResolveTargetRate(a.cfg.Upscale.EffectiveTargetRate(), sourceHz)
+	if err != nil {
+		return fmt.Errorf("resolve target rate: %w", err)
+	}
+	if target == 0 {
+		return api.ErrUpscaleIneligible
+	}
+	spec := transcode.JobSpec{
+		SourceAbsPath:    abs,
+		SourceLibraryRel: libraryRelativePath,
+		SourceSampleRate: sourceHz,
+		TargetSampleRate: target,
+		TargetBits:       a.cfg.Upscale.EffectiveTargetBits(),
+		Quality:          transcode.QualityVeryHigh,
+		OutputDir:        a.outputDir,
+	}
+	if err := spec.FreshnessFromFile(); err != nil {
+		return api.ErrUpscaleSourceMissing
+	}
+	// Resumability: skip when a fresh sidecar already exists.
+	// Same handle-the-error policy as the parent track lookup —
+	// a sick DB shouldn't silently re-convert a track.
+	existing, getVErr := a.store.GetVariant(libraryRelativePath, spec.VariantID())
+	if getVErr != nil {
+		return fmt.Errorf("get variant row: %w", getVErr)
+	}
+	if existing != nil {
+		if existing.SourceMTimeNS == spec.SourceMTimeNS && existing.SourceSize == spec.SourceSize {
+			return api.ErrUpscaleIneligible
+		}
+	}
+	enqueueErr := a.pool.Enqueue(spec)
+	switch {
+	case errors.Is(enqueueErr, transcode.ErrQueueFull):
+		return api.ErrUpscaleQueueFull
+	case errors.Is(enqueueErr, transcode.ErrPoolClosed):
+		// Should never reach here in production — Stop()
+		// only fires during graceful shutdown when no new
+		// HTTP requests are accepted. Surface as
+		// upscale-disabled so the iOS toast reads "feature
+		// unavailable" rather than a confusing transient
+		// error (CodeRabbit nit on PR #109).
+		return api.ErrUpscaleSourceMissing
+	default:
+		return enqueueErr
+	}
+}
+
 // updateInfoAdapter bridges *updater.Updater to api.UpdaterStatus +
 // admin's read-side without coupling those packages to the updater
 // type. Trivial; lives here at the wiring point so the api / admin
@@ -728,6 +829,41 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		WithSessionTracker(sessions).
 		WithPairing(pairingStore).
 		WithUpscale(upscaleActive, &variantStoreAdapter{provider: provider})
+
+	// Phase 2.5: long-lived transcode worker pool inside `bridge
+	// serve`. Only instantiated when the feature is fully active
+	// — saves goroutines + a manifest store reference when the
+	// operator hasn't opted in, and matches the "off means
+	// completely off" guarantee the iOS gating relies on.
+	//
+	// Constructed AFTER apiSrv so the adapter can borrow the
+	// api server's Resolver instance via `apiSrv.Resolver()`
+	// instead of building a snapshot from cfg.LibraryRoots.
+	// Critical: the api Resolver hot-reloads via SetRoots when
+	// the admin removes/adds a library root at runtime; a
+	// snapshot resolver would silently keep routing to the old
+	// root set and the upscale endpoint would either resolve
+	// stale paths or 404 on freshly-added ones (Qodo bug 2 on
+	// PR #109).
+	//
+	// Pool lives for the rest of serveCmd's lifetime; deferred
+	// Stop() drains in-flight sox processes during graceful
+	// shutdown (SIGTERM from the service manager → cancellable
+	// via `transcode.Pool.stopCtx`). The defer fires AFTER
+	// httpSrv.Shutdown completes, so accepting POST /v1/upscale
+	// can't race the pool teardown.
+	var upscalePool *transcode.Pool
+	if upscaleActive {
+		upscalePool = transcode.NewPool(manifestStore, cfg.Upscale.EffectiveWorkers(), cfg.Upscale.EffectiveQueueCap())
+		defer upscalePool.Stop()
+		apiSrv.WithUpscaleEnqueuer(&upscaleEnqueuerAdapter{
+			pool:      upscalePool,
+			store:     manifestStore,
+			resolver:  apiSrv.Resolver(),
+			cfg:       cfg,
+			outputDir: filepath.Join(cfg.DataDir, "transcoded"),
+		})
+	}
 	httpSrv := &http.Server{
 		Addr:    cfg.ListenAddress,
 		Handler: apiSrv.Handler(),

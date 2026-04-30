@@ -23,6 +23,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -44,20 +45,31 @@ var logger = logging.Component("api")
 
 // Server owns the http.Handler and the per-request state it needs.
 type Server struct {
-	cfg            *config.Config
-	store          *auth.Store
-	resolver       *bridgefs.Resolver
-	manifest       ManifestProvider
-	artworkDirs    ArtworkDirProvider
-	mbidProbe      MBIDProbe
-	updater        UpdaterStatus
-	sessions       SessionTracker
-	pairing        *pairing.Store
-	variantStore   VariantStore // nil unless WithUpscale(true, vs) called
-	upscaleEnabled bool         // mirrors cfg.Upscale.Enabled (and sox-probe outcome)
-	fingerprint    string
-	startedAt      time.Time
+	cfg             *config.Config
+	store           *auth.Store
+	resolver        *bridgefs.Resolver
+	manifest        ManifestProvider
+	artworkDirs     ArtworkDirProvider
+	mbidProbe       MBIDProbe
+	updater         UpdaterStatus
+	sessions        SessionTracker
+	pairing         *pairing.Store
+	variantStore    VariantStore    // nil unless WithUpscale(true, vs) called
+	upscaleEnabled  bool            // mirrors cfg.Upscale.Enabled (and sox-probe outcome)
+	upscaleEnqueuer UpscaleEnqueuer // nil unless WithUpscaleEnqueuer wired (Phase 2.5)
+	fingerprint     string
+	startedAt       time.Time
 }
+
+// ErrUpscaleQueueFull is the typed sentinel UpscaleEnqueuer
+// returns when the underlying worker pool can't accept another
+// job. The HTTP handler maps it to a 503 `queue_full` response.
+// Defined in the api package so the handler can `errors.Is`
+// without importing internal/transcode (which would invert the
+// dependency direction — api defines abstractions, transcode is
+// an implementation detail consumed via the adapter at
+// cmd/bridge wiring).
+var ErrUpscaleQueueFull = errors.New("upscale queue is full")
 
 // VariantStore is the optional interface the `?variant=<id>` branch
 // of /v1/download uses to look up a variant's cached metadata.
@@ -244,6 +256,21 @@ func (s *Server) WithUpscale(enabled bool, vs VariantStore) *Server {
 	return s
 }
 
+// WithUpscaleEnqueuer attaches the long-lived transcode worker
+// pool's job-submit interface so the v1.2 `POST /v1/upscale`
+// endpoint can hand off track / folder requests. Optional —
+// when nil the endpoint returns `503 upscale_disabled`.
+//
+// Wired in cmd/bridge serve startup IFF `cfg.Upscale.Enabled &&
+// sox-on-PATH probe passed`. The adapter at the wiring point
+// translates `transcode.ErrQueueFull` into the api package's
+// `ErrUpscaleQueueFull` sentinel so the handler can map cleanly
+// to the wire response.
+func (s *Server) WithUpscaleEnqueuer(e UpscaleEnqueuer) *Server {
+	s.upscaleEnqueuer = e
+	return s
+}
+
 // WithPairing attaches the in-memory pairing.Store that backs the
 // admin-approval pairing flow (POST /v1/pairing/requests, GET/DELETE
 // /v1/pairing/{id}). Optional — when nil the routes return 404
@@ -280,6 +307,7 @@ func (s *Server) Handler() http.Handler {
 	// can't be confused with a successful "no such request" response;
 	// when no Store is wired the handlers themselves return
 	// `pairing_not_supported`.
+	mux.HandleFunc("POST /v1/upscale", s.authed(s.upscaleRequest))
 	mux.HandleFunc("POST /v1/pairing/requests", s.pairingRequest)
 	mux.HandleFunc("GET /v1/pairing/{requestID}", s.pairingPoll)
 	mux.HandleFunc("DELETE /v1/pairing/{requestID}", s.pairingDelete)
