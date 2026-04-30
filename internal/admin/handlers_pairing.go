@@ -104,8 +104,19 @@ func (s *Server) apiPairingApprove(w http.ResponseWriter, r *http.Request) {
 		return raw, tok.ID, nil
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// `pairing.Store` and `auth.Store` each have their own mutex; the
+	// admin `Server.mu` is for serializing config-rewrite paths
+	// (`apiRootsAdd` / `apiSettingsPatch` / etc.) and intentionally NOT
+	// taken on the pairing path. Holding it through `Mint`'s disk
+	// persist would block unrelated admin operations under spam
+	// (gemini on PR #104). The bridge's self-signed cert fingerprint
+	// captured at admin-server construction is stable for the
+	// cert-rotation guard's purpose: rotating the self-signed cert
+	// requires a process restart per the CLAUDE.md invariant
+	// "rotated server cert requires re-pairing". Tailscale's LE cert
+	// is swapped at runtime but is a SECONDARY cert served only on
+	// magic-DNS SNI; the pin contract is anchored to the self-signed
+	// cert.
 	snap, err := s.deps.Pairing.Approve(id, s.deps.Fingerprint, mint)
 	switch {
 	case errors.Is(err, pairing.ErrNotFound):
@@ -142,8 +153,7 @@ func (s *Server) apiPairingDecline(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "id_required", "pairing request ID is required")
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// Server.mu is not taken here — see the rationale on apiPairingApprove.
 	snap, err := s.deps.Pairing.Decline(id)
 	switch {
 	case errors.Is(err, pairing.ErrNotFound):
