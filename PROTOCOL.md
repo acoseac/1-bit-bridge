@@ -144,7 +144,7 @@ Replaces `SMBConnectionPool.download` and `SMBConnectionPool.downloadStreaming`.
 
 **Variant-specific responses:**
 - `404 variant_not_found`: no row exists for that `(path, variant)` pair, OR the upscale feature is disabled on this bridge. iOS treats this as "fall back to the original on the next playback".
-- `410 Gone variant_stale`: a row exists but the source file's mtime/size has drifted since the sidecar was minted. iOS treats this identically to 404 modulo the error message ("variant expired"). The sidecar stays on disk; the operator's recovery is `bridge upscale --force <track>`.
+- `410 Gone variant_stale`: a row exists but the source file's mtime/size has drifted since the sidecar was minted. iOS handles this the same way as a 404 (fall back to playing the original); the only difference is the error message surfaced in diagnostics ("variant expired" vs "variant not found"). The sidecar stays on disk; the operator's recovery is `bridge upscale --force <track>`.
 - `410 Gone variant_missing_on_disk`: the row points at a sidecar file that's been removed under the bridge's feet (manual cleanup). iOS falls back to the original; `bridge upscale --gc` reconciles.
 
 ### `GET /v1/manifest?since=<rfc3339-mtime>`
