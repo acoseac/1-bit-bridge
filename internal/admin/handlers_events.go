@@ -50,6 +50,23 @@ import (
 // If measurement ever shows hot reads bottlenecking, swap in a single
 // poller goroutine + per-client subscriber channels.
 func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
+	// Origin check: csrfGuard lets every GET through unconditionally
+	// (correct for the body-bearing-mutation threat model it was
+	// designed for), but /api/events is a long-lived endpoint that
+	// allocates per-connection tickers + snapshot work. A non-admin-
+	// origin browser context on the same loopback (a random tab the
+	// operator visited) could otherwise open and hold SSE connections
+	// indefinitely. Reuse the same origin allowlist csrfGuard applies
+	// to mutations: Origin-when-present must match AdminAddress; absent
+	// Origin is allowed (curl, fetch from the admin UI itself in some
+	// browsers). Qodo on PR #107.
+	if origin := r.Header.Get("Origin"); origin != "" {
+		if !s.originMatchesAdmin(origin) {
+			http.Error(w, "admin refused: cross-origin request", http.StatusForbidden)
+			return
+		}
+	}
+
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusNotImplemented, "no-sse",
@@ -89,25 +106,51 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 	// when the client has dropped — the ctx.Done() select will catch
 	// it on the next tick anyway, but bailing immediately on a
 	// short write avoids wasted snapshot work.
+	//
+	// SSE protocol detail: a `data:` line that contains a literal
+	// newline corrupts the stream — every line of the data block must
+	// be re-prefixed. `json.Marshal` (without indentation) emits
+	// single-line JSON with all newlines escaped as `\n`, so today's
+	// payloads never trigger this path; the per-line loop is cheap
+	// defense in depth against a future caller using `MarshalIndent`
+	// or embedding raw bytes (Gemini on PR #107).
 	publish := func(event string, data []byte) error {
-		if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, data); err != nil {
+		if _, err := fmt.Fprintf(w, "event: %s\n", event); err != nil {
+			return err
+		}
+		// bytes.Split on a non-newline payload returns a single-element
+		// slice — fast path, no allocation surprise.
+		for _, line := range bytes.Split(data, []byte{'\n'}) {
+			if _, err := fmt.Fprintf(w, "data: %s\n", line); err != nil {
+				return err
+			}
+		}
+		if _, err := io.WriteString(w, "\n"); err != nil {
 			return err
 		}
 		flusher.Flush()
 		return nil
 	}
 
-	publishStats := func() error {
-		snap := s.getStatsSSESnapshot()
+	// marshalAndPublish is the common diff-then-emit body shared by
+	// every per-event publish closure. Logs marshal failures (Gemini
+	// on PR #107 — silent skip masks regressions in response struct
+	// shape), then short-circuits on cache equality, then publishes.
+	marshalAndPublish := func(event string, snap any, last *[]byte) error {
 		b, err := json.Marshal(snap)
 		if err != nil {
-			return nil // skip rather than tear down the stream
-		}
-		if bytes.Equal(b, lastStats) {
+			logger.Error("sse marshal", "event", event, "err", err)
 			return nil
 		}
-		lastStats = b
-		return publish("stats", b)
+		if bytes.Equal(b, *last) {
+			return nil
+		}
+		*last = b
+		return publish(event, b)
+	}
+
+	publishStats := func() error {
+		return marshalAndPublish("stats", s.getStatsSSESnapshot(), &lastStats)
 	}
 
 	publishEndpoints := func() error {
@@ -119,54 +162,19 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 			logger.Error("sse endpoints snapshot", "code", eErr.code, "msg", eErr.msg)
 			return nil
 		}
-		b, err := json.Marshal(snap)
-		if err != nil {
-			return nil
-		}
-		if bytes.Equal(b, lastEndpoints) {
-			return nil
-		}
-		lastEndpoints = b
-		return publish("endpoints", b)
+		return marshalAndPublish("endpoints", snap, &lastEndpoints)
 	}
 
 	publishPairing := func() error {
-		snap := s.getPairingSnapshot()
-		b, err := json.Marshal(snap)
-		if err != nil {
-			return nil
-		}
-		if bytes.Equal(b, lastPairing) {
-			return nil
-		}
-		lastPairing = b
-		return publish("pairing", b)
+		return marshalAndPublish("pairing", s.getPairingSnapshot(), &lastPairing)
 	}
 
 	publishUpdates := func() error {
-		snap := s.getUpdatesSnapshot()
-		b, err := json.Marshal(snap)
-		if err != nil {
-			return nil
-		}
-		if bytes.Equal(b, lastUpdates) {
-			return nil
-		}
-		lastUpdates = b
-		return publish("updates", b)
+		return marshalAndPublish("updates", s.getUpdatesSnapshot(), &lastUpdates)
 	}
 
 	publishTailscale := func() error {
-		snap := s.getTailscaleSnapshot()
-		b, err := json.Marshal(snap)
-		if err != nil {
-			return nil
-		}
-		if bytes.Equal(b, lastTailscale) {
-			return nil
-		}
-		lastTailscale = b
-		return publish("tailscale", b)
+		return marshalAndPublish("tailscale", s.getTailscaleSnapshot(), &lastTailscale)
 	}
 
 	// Initial snapshot — fires synchronously after headers so the
@@ -192,18 +200,38 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 	heartbeatTk := time.NewTicker(15 * time.Second)
 	defer heartbeatTk.Stop()
 
+	// wasScanning latches the previous fast-tick scanning state so we
+	// fire one final stats publish after a scan completes (to flip the
+	// "scanning" badge to "idle" and emit the post-scan TracksIndexed
+	// without a 5 s lag). Outside that window, idle dashboards skip
+	// the fast-tick stats snapshot entirely — the medium ticker still
+	// catches non-scan changes (DeviceCount after a token mint, DBBytes
+	// growth, etc.) within 5 s. Qodo on PR #107 — `CountTracks()` is
+	// `SELECT COUNT(*)` and N open tabs would otherwise multiply DB
+	// reads at 2 Hz on idle. Pairing stays unconditional on the fast
+	// tick because pairing.List() is a cheap map iteration AND the
+	// SecondsUntilExpiry countdown depends on it during a join flow.
+	var wasScanning bool
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-fastTk.C:
-			if err := publishStats(); err != nil {
-				return
+			scanning := s.deps.Scanner.IsScanning()
+			if scanning || wasScanning {
+				if err := publishStats(); err != nil {
+					return
+				}
 			}
+			wasScanning = scanning
 			if err := publishPairing(); err != nil {
 				return
 			}
 		case <-medTk.C:
+			if err := publishStats(); err != nil {
+				return
+			}
 			if err := publishEndpoints(); err != nil {
 				return
 			}

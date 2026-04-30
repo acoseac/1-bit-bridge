@@ -150,6 +150,12 @@ func TestEventsStreamDiffSuppression(t *testing.T) {
 // TestEventsStreamWakesOnStateChange asserts the diff loop publishes
 // a fresh `stats` frame after a real change — minting a token bumps
 // DeviceCount, which is part of statsResponse.
+//
+// Cadence note: the fast (500 ms) ticker only does the stats snapshot
+// while a scan is in flight (Qodo on PR #107 — keep the SQLite
+// COUNT(*) cost off idle dashboards). DeviceCount is an off-scan
+// change, so the medium (5 s) ticker carries it. The test window is
+// sized for the medium tick (~6 s) plus a small jitter buffer.
 func TestEventsStreamWakesOnStateChange(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	ts := httptest.NewServer(srv.Handler())
@@ -175,9 +181,8 @@ func TestEventsStreamWakesOnStateChange(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Within ~1 s the next 500 ms fast tick should publish a fresh
-	// stats frame reflecting the new DeviceCount.
-	post := readFrames(t, resp.Body, 1, 2*time.Second)
+	// Wait up to ~6 s for the medium ticker to fire and publish.
+	post := readFrames(t, resp.Body, 1, 6*time.Second)
 	if len(post) == 0 {
 		t.Fatalf("no frames after state change")
 	}
@@ -261,6 +266,24 @@ func TestEventsHandlerNoFlusher(t *testing.T) {
 	srv.apiEvents(w, req)
 	if rec.Code != http.StatusNotImplemented {
 		t.Fatalf("status: got %d want 501", rec.Code)
+	}
+}
+
+// TestEventsRejectsCrossOriginGET asserts the SSE handler refuses
+// a GET that carries a non-matching Origin. csrfGuard lets all GETs
+// through (correct for body-bearing-mutation defense), but the SSE
+// endpoint is long-lived and would otherwise be openable from any
+// random tab on the same loopback. Apply the same Origin allowlist
+// csrfGuard uses for mutations. Qodo on PR #107.
+func TestEventsRejectsCrossOriginGET(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	req := httptest.NewRequest("GET", "/api/events", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("Origin", "http://attacker.example")
+	rw := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rw, req)
+	if rw.Code != http.StatusForbidden {
+		t.Fatalf("status: got %d want 403", rw.Code)
 	}
 }
 
