@@ -51,9 +51,14 @@ func newPairingTestServer(t *testing.T, fingerprint string) (*Server, http.Handl
 	scanner := manifest.NewScanner(cfg.LibraryRoots, mstore, "")
 	resolver := bridgefs.New(cfg.LibraryRoots)
 
+	// TTL/Grace bumped to 5s each (was 100ms/300ms): the handler tests
+	// don't wait on TTL expiration, so a tight TTL just exposes the
+	// suite to nondeterministic CI scheduling — a slow runner could
+	// expire the request between CreateRequest and the handler call,
+	// flipping a test from 200 to 404. (Qodo on PR #104.)
 	pstore := pairing.NewStore(pairing.Options{
-		TTL:         100 * time.Millisecond,
-		Grace:       300 * time.Millisecond,
+		TTL:         5 * time.Second,
+		Grace:       5 * time.Second,
 		MaxPending:  4,
 		RevokeToken: astore.Revoke,
 	})
