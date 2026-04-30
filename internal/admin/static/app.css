@@ -130,6 +130,11 @@ header {
 .brand-mark {
   width: 40px;
   height: 40px;
+  /* border-box so the light-mode 4px padding + 1px border (added in
+   * the @media block below) fit INSIDE the 40×40 box instead of growing
+   * the rendered footprint to 50×50. Keeps header height identical
+   * across light/dark schemes. */
+  box-sizing: border-box;
   border-radius: 8px;
   /* Precomputed alpha hex (--accent-glow-color) instead of color-mix()
    * so the brand glow renders on older browsers without baseline-2023
@@ -422,7 +427,7 @@ table.rows tbody tr:hover td { background: color-mix(in srgb, var(--accent) 4%, 
 .btn:disabled { opacity: 0.5; cursor: default; }
 .btn:disabled:hover { background: var(--bg-elev); border-color: var(--border); box-shadow: none; }
 
-input[type=text], input[type=url], input[type=number] {
+input[type=text], input[type=url], input[type=number], textarea {
   width: 100%;
   padding: 9px 12px;
   font-family: var(--mono);
@@ -433,8 +438,19 @@ input[type=text], input[type=url], input[type=number] {
   border-radius: var(--radius);
   margin-top: 4px;
   transition: border-color 0.12s, box-shadow 0.12s;
+  /* Pre-fix the textarea rendered at the browser default ~40 cols
+   * because the input rule above didn't cover it; including textarea
+   * here makes the Custom endpoints field match the row width of the
+   * other Networking inputs. */
+  box-sizing: border-box;
 }
-input[type=text]:focus, input[type=url]:focus, input[type=number]:focus {
+textarea {
+  /* Keep operator-driven height, only allow vertical resize so the
+   * row doesn't get dragged into a horizontal scrollbar. */
+  resize: vertical;
+  min-height: 84px;
+}
+input[type=text]:focus, input[type=url]:focus, input[type=number]:focus, textarea:focus {
   outline: none;
   border-color: var(--accent);
   box-shadow: var(--glow);
