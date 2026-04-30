@@ -83,7 +83,30 @@ const (
 	// brute-force ID enumeration over the TTL window — the polling
 	// endpoint authenticates by pollSecret (256-bit), not by ID.
 	requestIDBytes = 6
+
+	// maxRevokeAttempts caps the retry loop for Approved-but-undelivered
+	// token revocation. After this many consecutive failures the row is
+	// dropped and the operator must run `bridge token revoke <id>`
+	// manually — the alternative (unbounded retry) would let a
+	// permanently-failing auth.Store.Revoke pin the row in memory for
+	// the bridge's process lifetime.
+	maxRevokeAttempts = 3
 )
+
+// revokeRetryBackoff returns the delay before the next revocation
+// attempt for a row that's been around `attempts` times. Caps at
+// 60 s so a long-running outage doesn't push the next retry past a
+// reasonable operator-attention window.
+func revokeRetryBackoff(attempts int) time.Duration {
+	switch attempts {
+	case 1:
+		return 1 * time.Second
+	case 2:
+		return 10 * time.Second
+	default:
+		return 60 * time.Second
+	}
+}
 
 // State enumerates the lifecycle of a pairing request. Pending is the
 // only mutable state from outside the Store; everything else is set by
@@ -165,6 +188,13 @@ type Request struct {
 	// reached, deleting the row + revoking the freshly minted token
 	// before iOS has a chance to consume it. (Qodo on PR #103.)
 	timerGen uint64
+
+	// revokeAttempts counts how many times onTimer has tried (and
+	// failed) to call `s.revoke` for an Approved-but-undelivered
+	// request. Bounded by `maxRevokeAttempts` so a permanently-failing
+	// revoke can't pin the row in memory forever. (CodeRabbit on
+	// PR #103, second-pass.)
+	revokeAttempts int
 }
 
 // Options configures a Store. Zero values fall through to package defaults.
@@ -556,19 +586,60 @@ func (s *Store) onTimer(id string, gen uint64) {
 			req.DecidedAt = s.now()
 			s.scheduleTimer(req, s.grace)
 		case StateApproved:
+			// Capture the intent but DON'T delete the row yet. If
+			// `s.revoke` fails we need to retry, and a deleted row
+			// has lost the only handle the Store has on the
+			// to-be-revoked token. (CodeRabbit on PR #103 second
+			// pass.) Finalisation happens below, outside the lock.
 			revokeID = req.TokenID
-			delete(s.byID, id)
 		case StateDeclined, StateExpired, StateCertRotated:
 			delete(s.byID, id)
 		}
 	}
 	s.mu.Unlock()
 
-	if revokeID != "" && s.revoke != nil {
-		if err := s.revoke(revokeID); err != nil {
-			logger.Error("revoke undelivered token", "id", id, "tokenID", revokeID, "err", err)
-		}
+	if revokeID == "" {
+		return
 	}
+	// Revoke runs OUTSIDE the lock — auth.Store has its own mutex
+	// and we don't want a slow disk persist to block a concurrent
+	// CreateRequest. `s.revoke == nil` is the test-mode escape hatch
+	// (no auth wiring); just drop the row in that case.
+	if s.revoke == nil {
+		s.mu.Lock()
+		delete(s.byID, id)
+		s.mu.Unlock()
+		return
+	}
+	revokeErr := s.revoke(revokeID)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	req, ok := s.byID[id]
+	if !ok {
+		// Already cleaned up by Delete or a concurrent path —
+		// either iOS DELETEd the row OR a redundant timer fired
+		// and won the race. Either way the revoke result is moot.
+		return
+	}
+	if revokeErr == nil {
+		delete(s.byID, id)
+		return
+	}
+	// Revoke failed — back off and retry. Bounded so a permanently-
+	// failing auth.Store.Revoke can't pin the row in memory for the
+	// process lifetime; after maxRevokeAttempts we drop the row and
+	// log so the operator can recover via `bridge token revoke <id>`.
+	req.revokeAttempts++
+	logger.Error("revoke undelivered token (will retry)",
+		"id", id, "tokenID", revokeID, "attempt", req.revokeAttempts, "err", revokeErr)
+	if req.revokeAttempts >= maxRevokeAttempts {
+		logger.Error("revoke giving up after max attempts; row dropped (operator must revoke manually)",
+			"id", id, "tokenID", revokeID, "attempts", req.revokeAttempts)
+		delete(s.byID, id)
+		return
+	}
+	s.scheduleTimer(req, revokeRetryBackoff(req.revokeAttempts))
 }
 
 // scheduleTimer Stops the request's prior timer (if any), increments the
@@ -588,12 +659,29 @@ func (s *Store) scheduleTimer(req *Request, d time.Duration) {
 	req.expiryTimer = time.AfterFunc(d, func() { s.onTimer(id, gen) })
 }
 
-// snapshot returns a value copy of the request without the live timer
-// pointer, so callers can't mutate Store internals through the returned
-// Request.
+// snapshot returns a value copy of the request, scrubbed of internal-
+// only state and bearer secrets. Callers can't mutate Store internals
+// through the returned Request, AND a copy that lands in admin-side
+// templates / JSON / debug logs can't leak `RawToken` (live bearer)
+// or `PollHash` (the SHA-256 of the secret iOS pollSecret). Both are
+// only ever needed by the in-store Poll path, which reads them
+// directly from the live `*Request` and not via this helper.
+// (CodeRabbit on PR #103 second pass.)
+//
+// The cleared fields:
+//   - RawToken: would leak a live bearer through admin Devices page
+//     until the iOS DELETE ack lands.
+//   - PollHash: not strictly secret (it's a hash, not a credential),
+//     but admin-side rendering of opaque [32]byte values is noise at
+//     best and a signal to attackers about which slot holds the auth
+//     binding at worst.
+//   - expiryTimer: stripping the *time.Timer pointer prevents callers
+//     from accidentally Stopping the live row's timer.
 func snapshot(req *Request) Request {
 	cp := *req
 	cp.expiryTimer = nil
+	cp.RawToken = ""
+	cp.PollHash = [32]byte{}
 	return cp
 }
 

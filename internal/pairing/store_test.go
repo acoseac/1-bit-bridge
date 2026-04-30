@@ -551,6 +551,146 @@ func TestSnapshotHasNoLiveTimer(t *testing.T) {
 	}
 }
 
+func TestSnapshotRedactsSecretMaterial(t *testing.T) {
+	// Locks the CodeRabbit-second-pass invariant: snapshot copies that
+	// flow into admin-side rendering / List() / Approve()'s return must
+	// NOT carry RawToken (live bearer) or PollHash (auth-binding hash).
+	// Poll path reads from the live `*Request` directly so this redaction
+	// doesn't affect iOS-side token delivery.
+	mint := &stubMint{}
+	s := quickStore(t, time.Second, time.Second, nil)
+	raw, hashHex := makePollPair(t, "redact")
+	req, err := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Pending snapshot — PollHash must be zeroed even though no Approve has run.
+	if req.PollHash != ([32]byte{}) {
+		t.Error("CreateRequest snapshot leaked PollHash")
+	}
+	if req.RawToken != "" {
+		t.Error("CreateRequest snapshot leaked RawToken (should be empty anyway)")
+	}
+
+	approved, err := s.Approve(req.ID, "FP", mint.fn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if approved.RawToken != "" {
+		t.Error("Approve snapshot leaked RawToken bearer")
+	}
+	if approved.PollHash != ([32]byte{}) {
+		t.Error("Approve snapshot leaked PollHash")
+	}
+	if approved.TokenID == "" {
+		t.Error("Approve snapshot dropped TokenID — that should still surface")
+	}
+
+	// And the live row must STILL have the token so a subsequent
+	// authorized Poll can deliver it (read-many contract).
+	pollRes, err := s.Poll(req.ID, raw)
+	if err != nil {
+		t.Fatalf("Poll after snapshot redaction: %v", err)
+	}
+	if pollRes.Token == "" {
+		t.Error("Poll lost RawToken — snapshot redaction must not affect live row")
+	}
+
+	// List must also return redacted snapshots.
+	for _, r := range s.List() {
+		if r.RawToken != "" {
+			t.Errorf("List leaked RawToken on row %s", r.ID)
+		}
+		if r.PollHash != ([32]byte{}) {
+			t.Errorf("List leaked PollHash on row %s", r.ID)
+		}
+	}
+}
+
+func TestRevokeRetryOnFailure(t *testing.T) {
+	// Locks the CodeRabbit-second-pass invariant: an Approved-but-
+	// undelivered request whose first revoke fails must NOT be deleted
+	// from the map. Bounded retries (maxRevokeAttempts) so a permanent
+	// auth.Store outage doesn't pin the row forever.
+	var attempts int32
+	failingThenSucceeding := func(tokenID string) error {
+		n := atomic.AddInt32(&attempts, 1)
+		if n < 2 {
+			return errors.New("simulated revoke failure")
+		}
+		return nil
+	}
+	mint := &stubMint{}
+	// Short TTL+grace so the post-Approve timer fires quickly; revoke
+	// retry backoff (1s, 10s, 60s) means the test waits ~1.5s for the
+	// first retry to succeed.
+	s := NewStore(Options{
+		TTL:         50 * time.Millisecond,
+		Grace:       50 * time.Millisecond,
+		MaxPending:  4,
+		RevokeToken: failingThenSucceeding,
+	})
+	t.Cleanup(s.Close)
+	_, hashHex := makePollPair(t, "retry")
+	req, _ := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP")
+	if _, err := s.Approve(req.ID, "FP", mint.fn); err != nil {
+		t.Fatal(err)
+	}
+	// Wait for: TTL+grace (~1s floor inside Approve) + revoke first
+	// attempt + 1s retry backoff + revoke second attempt.
+	time.Sleep(2500 * time.Millisecond)
+
+	// Both attempts should have fired (first failed, second succeeded).
+	got := atomic.LoadInt32(&attempts)
+	if got < 2 {
+		t.Errorf("revoke attempts = %d, want >= 2 (retry never fired)", got)
+	}
+	// Row should be gone now that revoke finally succeeded.
+	if _, err := s.Poll(req.ID, "anysecret"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Poll after successful retry: err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestRevokeRetryGivesUpAfterMaxAttempts(t *testing.T) {
+	// Permanently-failing revoke must NOT pin the row; after
+	// maxRevokeAttempts the row is dropped and the operator gets a log.
+	var attempts int32
+	alwaysFails := func(tokenID string) error {
+		atomic.AddInt32(&attempts, 1)
+		return errors.New("permanent revoke failure")
+	}
+	mint := &stubMint{}
+	s := NewStore(Options{
+		TTL:         50 * time.Millisecond,
+		Grace:       50 * time.Millisecond,
+		MaxPending:  4,
+		RevokeToken: alwaysFails,
+	})
+	t.Cleanup(s.Close)
+	_, hashHex := makePollPair(t, "giveup")
+	req, _ := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP")
+	if _, err := s.Approve(req.ID, "FP", mint.fn); err != nil {
+		t.Fatal(err)
+	}
+	// TTL+grace (~1s floor) + 3 attempts at 1s/10s/... — but we only
+	// need to verify that the row eventually disappears AND the attempt
+	// count caps at maxRevokeAttempts. The 60s retry would make this
+	// test slow; instead verify the cap by waiting through the first
+	// two retry backoffs and asserting the row is still alive at that
+	// point with attempts == 2 (first try + first retry), then poll
+	// again much later for the final state.
+	time.Sleep(13 * time.Second)
+	// By now attempts should be 3 (initial + 1s retry + 10s retry) and
+	// the row should be gone (giving up at maxRevokeAttempts=3).
+	got := atomic.LoadInt32(&attempts)
+	if got != int32(maxRevokeAttempts) {
+		t.Errorf("revoke attempts = %d, want %d (cap)", got, maxRevokeAttempts)
+	}
+	if _, err := s.Poll(req.ID, "anysecret"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Poll after revoke give-up: err = %v, want ErrNotFound (row dropped)", err)
+	}
+}
+
 // makeHexLen returns a string of n hex digits — used to construct a
 // hash with the right length but invalid bytes for the bad-hash tests.
 func makeHexLen(n int) string {
