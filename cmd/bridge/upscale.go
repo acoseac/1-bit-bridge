@@ -45,7 +45,7 @@ import (
 // touches one constant.
 const transcodedDirName = "transcoded"
 
-func upscaleCmd(_ context.Context, args []string, stdout, stderr io.Writer) int {
+func upscaleCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("upscale", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	configPath := fs.String("config", "bridge.yaml", "path to config file")
@@ -116,7 +116,7 @@ func upscaleCmd(_ context.Context, args []string, stdout, stderr io.Writer) int 
 		return runGC(stdout, stderr, store, outputDir)
 	}
 
-	return runUpscaleBatch(stdout, stderr, store, cfg, runUpscaleParams{
+	return runUpscaleBatch(ctx, stdout, stderr, store, cfg, runUpscaleParams{
 		targetRateFlag: *targetRate,
 		targetBits:     *targetBits,
 		quality:        q,
@@ -145,7 +145,13 @@ type runUpscaleParams struct {
 // success / 1 on partial failure. Resumable: a job whose sidecar
 // already exists with matching freshness is silently skipped (unless
 // `--force`).
-func runUpscaleBatch(stdout, stderr io.Writer, store *manifest.Store, cfg *config.Config, p runUpscaleParams) int {
+//
+// `ctx` is honored for clean SIGINT shutdown — a cancellation
+// stops dispatching new jobs AND signals running sox processes
+// via exec.CommandContext (Gemini bot review on PR #108). Without
+// it, Ctrl-C on a 50-track album would block until the largest
+// file's sox finished.
+func runUpscaleBatch(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store, cfg *config.Config, p runUpscaleParams) int {
 	allTracks, err := store.ListTracks(nil)
 	if err != nil {
 		fmt.Fprintf(stderr, "list tracks: %v\n", err)
@@ -278,10 +284,22 @@ func runUpscaleBatch(stdout, stderr io.Writer, store *manifest.Store, cfg *confi
 				if !c.needsRun {
 					continue
 				}
-				size, err := transcode.RunSox(c.spec)
+				// Cooperative cancel check before spending sox CPU.
+				// exec.CommandContext below is the harder gate
+				// (kills an in-flight process), but checking here
+				// avoids spawning a sox we'll immediately kill.
+				if ctx.Err() != nil {
+					return
+				}
+				size, err := transcode.RunSox(ctx, c.spec)
 				if err != nil {
-					atomic.AddUint64(&failCount, 1)
-					fmt.Fprintf(stderr, "FAIL %s: %v\n", c.spec.SourceLibraryRel, err)
+					// Drop cancellation noise — operator-driven
+					// SIGINT shouldn't print one FAIL line per
+					// in-flight worker.
+					if ctx.Err() == nil {
+						atomic.AddUint64(&failCount, 1)
+						fmt.Fprintf(stderr, "FAIL %s: %v\n", c.spec.SourceLibraryRel, err)
+					}
 					continue
 				}
 				_, settings := c.spec.SoxArgs()
@@ -312,8 +330,16 @@ func runUpscaleBatch(stdout, stderr io.Writer, store *manifest.Store, cfg *confi
 	}
 
 	startedAt := time.Now()
+	// Producer must honor cancellation too — otherwise a SIGINT
+	// during dispatch (jobsCh full + workers slow) blocks here
+	// until a worker drains a job, defeating prompt shutdown.
+producerLoop:
 	for _, c := range candidates {
-		jobsCh <- c
+		select {
+		case jobsCh <- c:
+		case <-ctx.Done():
+			break producerLoop
+		}
 	}
 	close(jobsCh)
 	wg.Wait()
@@ -345,7 +371,10 @@ func runGC(stdout, stderr io.Writer, store *manifest.Store, outputDir string) in
 	}
 
 	var removed, kept, failed int
-	walkErr := filepath.Walk(outputDir, func(path string, info os.FileInfo, walkErr error) error {
+	// WalkDir over Walk: avoids the per-file os.Lstat — DirEntry
+	// already carries IsDir(), so a flat directory of N sidecars
+	// pays N fewer syscalls (Gemini bot review on PR #108).
+	walkErr := filepath.WalkDir(outputDir, func(path string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			// Output dir may not exist yet (no upscales ever
 			// run on this bridge). Treat as empty rather than
@@ -355,7 +384,7 @@ func runGC(stdout, stderr io.Writer, store *manifest.Store, outputDir string) in
 			}
 			return walkErr
 		}
-		if info.IsDir() {
+		if d.IsDir() {
 			return nil
 		}
 		if known[path] {

@@ -45,28 +45,28 @@ import (
 )
 
 // variantStoreAdapter implements api.VariantStore on top of a
-// manifest.Provider. Translates the manifest-package's
-// VariantResolutionStatus enum into api.VariantStatus value-for-
-// value — same semantic shape, separately defined to keep the api
-// package from importing the manifest package directly (mirrors
-// the MBIDProbe / ManifestProvider pattern).
+// manifest.Provider. Just translates between the two packages'
+// equivalent record shapes — the api package can't import the
+// manifest package directly (would create an upward cycle), so
+// this thin adapter lives at the wiring point. Same pattern as
+// MBIDProbe / ManifestProvider.
 type variantStoreAdapter struct {
 	provider *manifest.Provider
 }
 
-func (a *variantStoreAdapter) ResolveVariant(sourcePath, variantID string) (string, api.VariantStatus, error) {
-	sidecar, status, err := a.provider.ResolveVariant(sourcePath, variantID)
+func (a *variantStoreAdapter) LookupVariant(sourcePath, variantID string) (*api.VariantRecord, error) {
+	v, err := a.provider.LookupVariant(sourcePath, variantID)
 	if err != nil {
-		return "", api.VariantStatusOK, err
+		return nil, err
 	}
-	switch status {
-	case manifest.VariantNotFound:
-		return "", api.VariantStatusNotFound, nil
-	case manifest.VariantStale:
-		return "", api.VariantStatusStale, nil
-	default:
-		return sidecar, api.VariantStatusOK, nil
+	if v == nil {
+		return nil, nil
 	}
+	return &api.VariantRecord{
+		SidecarPath:   v.SidecarPath,
+		SourceMTimeNS: v.SourceMTimeNS,
+		SourceSize:    v.SourceSize,
+	}, nil
 }
 
 // updateInfoAdapter bridges *updater.Updater to api.UpdaterStatus +

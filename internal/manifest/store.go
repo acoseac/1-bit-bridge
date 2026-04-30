@@ -439,6 +439,14 @@ func (s *Store) DeleteTrack(path string) error {
 			}
 			sidecars = append(sidecars, sp)
 		}
+		// rows.Err() catches a mid-iteration DB failure (driver
+		// surface, not per-row scan); without it a partial-list
+		// would silently leak the rest of the sidecars (Gemini
+		// bot review on PR #108). Log + proceed — same policy
+		// as the scan failure above.
+		if iterErr := rows.Err(); iterErr != nil {
+			logger.Warn("delete-track: iter sidecars", "track", path, "err", iterErr)
+		}
 		rows.Close()
 		// Step 2: best-effort filesystem cleanup. Log but never
 		// fail the DB delete on a per-file error; the scanner needs

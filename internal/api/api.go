@@ -60,28 +60,42 @@ type Server struct {
 }
 
 // VariantStore is the optional interface the `?variant=<id>` branch
-// of /v1/download uses to resolve a variant ID into its on-disk
-// sidecar path. Nil-safe — when `s.variantStore` is nil the
-// download handler returns 404 `variant_not_found` for any request
-// that carries the parameter (matches the "feature unavailable"
-// behaviour iOS already handles for pre-v1.2 bridges).
+// of /v1/download uses to look up a variant's cached metadata.
+// Nil-safe — when `s.variantStore` is nil the download handler
+// returns 404 `variant_not_found` for any request that carries the
+// parameter (matches the "feature unavailable" behaviour iOS
+// already handles for pre-v1.2 bridges).
 //
-// `internal/manifest.Provider` satisfies this in production.
+// **Freshness check happens in the api**, not here. The api has
+// the canonical `bridgefs.Resolver` (path validation + traversal
+// guard already exercised on every other handler), and uses the
+// `os.FileInfo` it already stat'd for the source file in
+// serveFile. This avoids a duplicate path-resolution code path in
+// the manifest package — which Gemini bot review on PR #108
+// identified as broken in single-root mode (the manifest's
+// hand-rolled basename-stripping assumed multi-root layout) AND
+// flagged by CodeQL as "uncontrolled data used in path
+// expression". Both go away when the api owns the source-side
+// stat call and only asks the variant store for "do you have
+// this row, and what's its recorded provenance".
+//
+// `internal/manifest.Provider` satisfies this in production via
+// a thin LookupVariant wrapper around the SQLite row read.
 type VariantStore interface {
-	ResolveVariant(sourcePath, variantID string) (sidecarPath string, status VariantStatus, err error)
+	LookupVariant(sourcePath, variantID string) (*VariantRecord, error)
 }
 
-// VariantStatus is the resolution outcome enum returned by
-// VariantStore.ResolveVariant. Lets the resolver speak about
-// "missing vs stale" without importing api-package error sentinels
-// (which would create an import cycle from manifest → api).
-type VariantStatus int
-
-const (
-	VariantStatusOK       VariantStatus = iota // fresh sidecar, serve it
-	VariantStatusNotFound                      // no row for (source, variant) — 404
-	VariantStatusStale                         // row exists but source mtime/size drifted — 410 Gone
-)
+// VariantRecord is the minimum metadata the api needs to (a) decide
+// freshness and (b) serve the sidecar bytes. Mirrors the on-disk
+// columns the manifest package writes. Pointer return from
+// LookupVariant lets `nil` distinguish "no such row" from "row
+// exists but freshness fails" — caller can still surface a
+// targeted 404 vs 410 from the same return shape.
+type VariantRecord struct {
+	SidecarPath   string
+	SourceMTimeNS int64
+	SourceSize    int64
+}
 
 // SessionTracker is the optional interface serveFile uses to record
 // active file-serving requests so the updater can refuse to swap-

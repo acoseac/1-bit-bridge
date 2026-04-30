@@ -2,23 +2,31 @@ package manifest
 
 import (
 	"io"
-	"os"
 	"time"
 )
 
-// VariantResolutionStatus is the outcome enum returned by
-// Provider.ResolveVariant. Mirrors api.VariantStatus value-for-value
-// (we re-export here as a separate enum so the manifest package
-// doesn't import the api package — would create an upward cycle).
-// The api.VariantStore interface adapter (in cmd/bridge wiring)
-// translates between the two enums.
-type VariantResolutionStatus int
-
-const (
-	VariantOK VariantResolutionStatus = iota
-	VariantNotFound
-	VariantStale
-)
+// VariantLookup is the minimum metadata downstream needs to (a)
+// freshness-check a sidecar against its source on disk and (b)
+// open the cached file. The api package's VariantRecord mirrors
+// this shape (separately defined to keep the manifest package
+// from importing the api package — would create an upward cycle).
+// The cmd/bridge wiring translates between the two.
+//
+// **Freshness check belongs to the caller, not to this lookup.**
+// Pre-fix, Provider walked scanner.Roots() and re-resolved
+// `(library-relative path) → (abs path)` by stripping the root
+// basename, which (a) failed in single-root mode where the
+// scanner emits paths WITHOUT a root-basename prefix (Gemini bot
+// review on PR #108), and (b) tripped a CodeQL "uncontrolled
+// data used in path expression" alert. Both go away when this
+// method just returns the recorded provenance and the caller
+// (which already has a validated `os.FileInfo` from
+// `bridgefs.Resolver.ResolveChecked`) compares.
+type VariantLookup struct {
+	SidecarPath   string
+	SourceMTimeNS int64
+	SourceSize    int64
+}
 
 // Provider adapts the Scanner + Store pair to the api.ManifestProvider
 // interface. Owned by cmd/bridge's serveCmd; api.Server holds a pointer to
@@ -102,102 +110,25 @@ func (p *Provider) HasTrackWithArtistMBID(mbid string) bool {
 	return p.store.HasTrackWithArtistMBID(mbid)
 }
 
-// ResolveVariant looks up the (sourcePath, variantID) pair in
-// `track_variants`, then performs a freshness check against the
-// current source file on disk. Returns:
-//
-//   - sidecarPath, VariantOK, nil — variant exists, source mtime
-//     and size match what was captured at conversion time, sidecar
-//     is safe to serve.
-//   - "", VariantNotFound, nil — no row in the table for that
-//     (sourcePath, variantID) pair.
-//   - "", VariantStale, nil — row exists but the source has been
-//     modified since conversion. Caller should respond 410 Gone
-//     and surface the staleness to the user. The sidecar stays on
-//     disk; `bridge upscale --force` is the explicit re-conversion
-//     path. We don't auto-delete the stale sidecar here because
-//     the freshness drift could be transient (e.g. a touch(1) on
-//     the source) and re-conversion is the operator's call.
-//   - "", VariantOK, err — DB error during lookup. Caller should
-//     surface a 500.
+// LookupVariant returns the cached metadata for one (sourcePath,
+// variantID) pair, or `nil` if no such row exists. The api-side
+// caller does the freshness check against its already-validated
+// `os.FileInfo` from `bridgefs.Resolver.ResolveChecked`.
 //
 // The cmd/bridge serve wiring wraps this into the api.VariantStore
 // interface so the api package doesn't import the manifest package
 // directly (mirrors the MBIDProbe / ManifestProvider pattern).
-func (p *Provider) ResolveVariant(sourcePath, variantID string) (string, VariantResolutionStatus, error) {
+func (p *Provider) LookupVariant(sourcePath, variantID string) (*VariantLookup, error) {
 	v, err := p.store.GetVariant(sourcePath, variantID)
 	if err != nil {
-		return "", VariantOK, err
+		return nil, err
 	}
 	if v == nil {
-		return "", VariantNotFound, nil
+		return nil, nil
 	}
-	// Freshness probe: stat the source on disk and compare. The
-	// source path on the wire is library-relative; we need to
-	// resolve through the scanner's roots to get the absolute
-	// path. Operators with multi-root setups: the resolver is
-	// authoritative.
-	resolved := p.resolveSourceAbsolute(sourcePath)
-	if resolved == "" {
-		// Source path doesn't resolve under any current root. The
-		// most likely cause is a root being removed at runtime
-		// (admin Settings → remove root). Treat as stale: the
-		// sidecar's source no longer exists in the library
-		// surface.
-		return "", VariantStale, nil
-	}
-	info, err := os.Stat(resolved)
-	if err != nil {
-		// Source missing on disk — same logical state as a removed
-		// root. The DB row will be cleaned up when the scanner
-		// next runs DeleteTrack on the missing source.
-		if os.IsNotExist(err) {
-			return "", VariantStale, nil
-		}
-		return "", VariantOK, err
-	}
-	if info.ModTime().UnixNano() != v.SourceMTimeNS || info.Size() != v.SourceSize {
-		return "", VariantStale, nil
-	}
-	return v.SidecarPath, VariantOK, nil
-}
-
-// resolveSourceAbsolute maps a library-relative source path to its
-// current absolute filesystem location by checking each scanner
-// root in order. Returns "" if no root prefixes the path or the
-// candidate file is unreadable.
-//
-// Cheap to call repeatedly — scanner.Roots() returns a snapshot
-// that already lives in memory. No filesystem walk; just a few
-// path-prefix checks plus a final Stat.
-func (p *Provider) resolveSourceAbsolute(libraryRelative string) string {
-	for _, root := range p.scanner.Roots() {
-		// The library-relative form starts with the basename of
-		// the root (matches the manifest serialization in
-		// scanner.go via `filepath.Base(r)`). Strip the basename
-		// prefix and join with the root's absolute path to
-		// reconstruct.
-		base := basenameOf(root) + "/"
-		if len(libraryRelative) >= len(base) && libraryRelative[:len(base)] == base {
-			rel := libraryRelative[len(base):]
-			candidate := root + "/" + rel
-			if _, err := os.Stat(candidate); err == nil {
-				return candidate
-			}
-		}
-	}
-	return ""
-}
-
-// basenameOf is a tiny helper that mirrors filepath.Base for the
-// path-style strings the scanner emits — extracted so the call
-// site reads at the same level of abstraction as the prefix
-// stripping above.
-func basenameOf(p string) string {
-	for i := len(p) - 1; i >= 0; i-- {
-		if p[i] == '/' || p[i] == '\\' {
-			return p[i+1:]
-		}
-	}
-	return p
+	return &VariantLookup{
+		SidecarPath:   v.SidecarPath,
+		SourceMTimeNS: v.SourceMTimeNS,
+		SourceSize:    v.SourceSize,
+	}, nil
 }

@@ -16,30 +16,27 @@ import (
 
 // stubVariantStore is a tiny test double that the api files_test
 // fixture can wire as the VariantStore implementation. Backed by
-// in-memory maps so tests can shape the resolver's response per
+// in-memory maps so tests can shape the lookup's response per
 // case without touching the real manifest store.
+//
+// Records carry the source mtime/size that the api's freshness
+// check compares against the real `os.FileInfo` from the
+// resolver. To force the stale branch, set the record's mtime/
+// size to a value that won't match what's on disk.
 type stubVariantStore struct {
-	resolved map[string]string        // (sourcePath|variantID) → sidecarPath
-	statuses map[string]VariantStatus // optional override; default OK if path is in resolved
+	records map[string]*VariantRecord // (sourcePath|variantID) → record (nil = simulate "not found")
 }
 
 func newStubVariantStore() *stubVariantStore {
-	return &stubVariantStore{
-		resolved: map[string]string{},
-		statuses: map[string]VariantStatus{},
-	}
+	return &stubVariantStore{records: map[string]*VariantRecord{}}
 }
 
-func (s *stubVariantStore) ResolveVariant(sourcePath, variantID string) (string, VariantStatus, error) {
-	key := sourcePath + "|" + variantID
-	status, hasStatus := s.statuses[key]
-	if hasStatus {
-		return s.resolved[key], status, nil
+func (s *stubVariantStore) LookupVariant(sourcePath, variantID string) (*VariantRecord, error) {
+	rec, ok := s.records[sourcePath+"|"+variantID]
+	if !ok {
+		return nil, nil
 	}
-	if path, ok := s.resolved[key]; ok {
-		return path, VariantStatusOK, nil
-	}
-	return "", VariantStatusNotFound, nil
+	return rec, nil
 }
 
 // fileVariantFixture extends the file fixture with a real on-disk
@@ -104,11 +101,18 @@ func TestDownloadSourceServesOriginalWhenNoVariantParam(t *testing.T) {
 }
 
 // TestDownloadVariantServesSidecar — request with valid
-// `?variant=<id>` returns the sidecar bytes, NOT the source. This
-// is the load-bearing assertion for the variant-routing feature.
+// `?variant=<id>` returns the sidecar bytes, NOT the source. The
+// freshness check passes because the record's mtime/size match
+// the real source on disk. This is the load-bearing assertion
+// for the variant-routing feature.
 func TestDownloadVariantServesSidecar(t *testing.T) {
-	hs, tok, _, vs, sidecar := fileVariantFixture(t)
-	vs.resolved["Artist/Album/01.flac|upscaled-v1-176400-24"] = sidecar
+	hs, tok, root, vs, sidecar := fileVariantFixture(t)
+	srcInfo := statSourceOrFail(t, root, "Artist/Album/01.flac")
+	vs.records["Artist/Album/01.flac|upscaled-v1-176400-24"] = &VariantRecord{
+		SidecarPath:   sidecar,
+		SourceMTimeNS: srcInfo.ModTime().UnixNano(),
+		SourceSize:    srcInfo.Size(),
+	}
 
 	resp := authGet(t, hs, "/v1/download?path=Artist/Album/01.flac&variant=upscaled-v1-176400-24", tok)
 	defer resp.Body.Close()
@@ -129,7 +133,7 @@ func TestDownloadVariantServesSidecar(t *testing.T) {
 // then falls back to the original on the next playback.
 func TestDownloadVariantNotFoundReturns404(t *testing.T) {
 	hs, tok, _, _, _ := fileVariantFixture(t)
-	// vs.resolved is empty — every variantID misses.
+	// vs.records is empty — every variantID misses.
 	resp := authGet(t, hs, "/v1/download?path=Artist/Album/01.flac&variant=upscaled-v1-176400-24", tok)
 	defer resp.Body.Close()
 	if resp.StatusCode != 404 {
@@ -137,20 +141,43 @@ func TestDownloadVariantNotFoundReturns404(t *testing.T) {
 	}
 }
 
-// TestDownloadVariantStaleReturns410 — when the variant store
-// reports the sidecar is out of date relative to its source, we
-// surface 410 Gone so iOS treats it as semantically different from
-// "missing" and can communicate "variant expired" to the user.
-func TestDownloadVariantStaleReturns410(t *testing.T) {
-	hs, tok, _, vs, sidecar := fileVariantFixture(t)
-	key := "Artist/Album/01.flac|upscaled-v1-176400-24"
-	vs.resolved[key] = sidecar
-	vs.statuses[key] = VariantStatusStale
+// TestDownloadVariantStaleOnMtimeMismatchReturns410 — record's
+// recorded mtime ≠ live source mtime → 410 Gone. We force the
+// stale state by stamping a wrong mtime in the record (instead
+// of touching the real source — that's brittle across
+// filesystems with coarse mtime granularity).
+func TestDownloadVariantStaleOnMtimeMismatchReturns410(t *testing.T) {
+	hs, tok, root, vs, sidecar := fileVariantFixture(t)
+	srcInfo := statSourceOrFail(t, root, "Artist/Album/01.flac")
+	vs.records["Artist/Album/01.flac|upscaled-v1-176400-24"] = &VariantRecord{
+		SidecarPath:   sidecar,
+		SourceMTimeNS: srcInfo.ModTime().UnixNano() - 1_000_000_000,
+		SourceSize:    srcInfo.Size(),
+	}
 
 	resp := authGet(t, hs, "/v1/download?path=Artist/Album/01.flac&variant=upscaled-v1-176400-24", tok)
 	defer resp.Body.Close()
 	if resp.StatusCode != 410 {
 		t.Errorf("status: got %d, want 410", resp.StatusCode)
+	}
+}
+
+// TestDownloadVariantStaleOnSizeMismatchReturns410 — symmetric
+// to the mtime case: a size delta means the source has been
+// substantively modified (touch + edit, restore from backup).
+func TestDownloadVariantStaleOnSizeMismatchReturns410(t *testing.T) {
+	hs, tok, root, vs, sidecar := fileVariantFixture(t)
+	srcInfo := statSourceOrFail(t, root, "Artist/Album/01.flac")
+	vs.records["Artist/Album/01.flac|upscaled-v1-176400-24"] = &VariantRecord{
+		SidecarPath:   sidecar,
+		SourceMTimeNS: srcInfo.ModTime().UnixNano(),
+		SourceSize:    srcInfo.Size() + 1,
+	}
+
+	resp := authGet(t, hs, "/v1/download?path=Artist/Album/01.flac&variant=upscaled-v1-176400-24", tok)
+	defer resp.Body.Close()
+	if resp.StatusCode != 410 {
+		t.Errorf("status: got %d, want 410 (stale on size mismatch)", resp.StatusCode)
 	}
 }
 
@@ -239,3 +266,16 @@ func readAllOrFail(t *testing.T, resp *http.Response) []byte {
 // the test bodies don't need to reference encoding/json directly
 // for one call site.
 func jsonUnmarshalForTest(b []byte, v any) error { return json.Unmarshal(b, v) }
+
+// statSourceOrFail returns the os.FileInfo of a library-relative
+// path under root. Lets variant tests construct VariantRecords
+// whose mtime/size match (or deliberately don't match) the real
+// source on disk.
+func statSourceOrFail(t *testing.T, root, libraryRelative string) os.FileInfo {
+	t.Helper()
+	info, err := os.Stat(filepath.Join(root, filepath.FromSlash(libraryRelative)))
+	if err != nil {
+		t.Fatalf("stat source %q: %v", libraryRelative, err)
+	}
+	return info
+}

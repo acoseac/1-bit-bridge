@@ -184,9 +184,14 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request) {
 	// caller asked for a variant. The source-path resolve above is
 	// load-bearing — we run it first so a malformed `?path=` is
 	// rejected with the standard 400 family BEFORE any variant
-	// lookup happens.
+	// lookup happens. We pass the validated `info` through so the
+	// freshness check uses the resolver's canonical stat instead
+	// of any string-concatenation re-resolution downstream
+	// (CodeQL alert: "uncontrolled data used in path expression"
+	// + Gemini single-root regression — both go away when the
+	// stat lives here, not in the manifest provider).
 	if variantID := r.URL.Query().Get("variant"); variantID != "" {
-		s.serveVariant(w, r, clientPath, variantID)
+		s.serveVariant(w, r, clientPath, info, variantID)
 		return
 	}
 
@@ -211,38 +216,46 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveVariant resolves (clientPath, variantID) → on-disk sidecar
-// path and streams the bytes via http.ServeContent. Stays out of
-// the source-resolution path entirely: the resolver's library-root
-// constraint already validated `clientPath` upstream, and the
-// sidecar lives under the bridge's own data dir (which is not a
-// user-controlled location). Range requests, content-type, and
-// HEAD handling come for free via ServeContent — same shape as the
-// original-source branch.
-func (s *Server) serveVariant(w http.ResponseWriter, r *http.Request, sourcePath, variantID string) {
+// path and streams the bytes via http.ServeContent. The
+// freshness check happens here (not in the variant store) so the
+// canonical `os.FileInfo` from the resolver is the source of
+// truth — no duplicate path resolution, no string-concatenation
+// stat. The sidecar lives under the bridge's own data dir (not
+// user-controlled).
+//
+// `sourceInfo` MUST come from `s.resolver.ResolveChecked` upstream
+// in serveFile — that's how the path-traversal guard composes
+// with the variant lookup. Don't call this with a user-supplied
+// FileInfo from somewhere else.
+func (s *Server) serveVariant(w http.ResponseWriter, r *http.Request, sourcePath string, sourceInfo os.FileInfo, variantID string) {
 	if s.variantStore == nil {
 		writeError(w, http.StatusNotFound, "variant_not_found", "upscaling is not enabled on this bridge")
 		return
 	}
-	sidecarPath, status, err := s.variantStore.ResolveVariant(sourcePath, variantID)
+	rec, err := s.variantStore.LookupVariant(sourcePath, variantID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
-	switch status {
-	case VariantStatusNotFound:
+	if rec == nil {
 		writeError(w, http.StatusNotFound, "variant_not_found", "no such variant")
 		return
-	case VariantStatusStale:
+	}
+	// Freshness gate. Mtime + size deltas indicate the source
+	// has drifted since the sidecar was minted — operator's call
+	// whether to re-convert (via `bridge upscale --force`) so we
+	// never auto-delete a stale row here. iOS sees 410 Gone and
+	// falls back to the original.
+	if rec.SourceMTimeNS != sourceInfo.ModTime().UnixNano() || rec.SourceSize != sourceInfo.Size() {
 		writeError(w, http.StatusGone, "variant_stale", "variant is out of date relative to source; falling back to original is recommended")
 		return
 	}
-	f, err := os.Open(sidecarPath)
+	f, err := os.Open(rec.SidecarPath)
 	if err != nil {
 		// The sidecar row pointed at a file that's gone (manual
 		// deletion under the bridge's feet). 410 Gone signals iOS
-		// to fall back to the original and not cache the variant
-		// URL aggressively. The DB row stays — `bridge upscale --gc`
-		// is the right place to reconcile.
+		// to fall back to the original. `bridge upscale --gc` is
+		// the right place to reconcile the DB row with disk.
 		writeError(w, http.StatusGone, "variant_missing_on_disk", "sidecar file missing")
 		return
 	}

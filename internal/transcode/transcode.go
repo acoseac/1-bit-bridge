@@ -24,6 +24,7 @@
 package transcode
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -219,9 +220,16 @@ func ResolveTargetRate(flagValue string, sourceRate int) (int, error) {
 // here so a worker-pool body doesn't pay the LookPath cost per
 // iteration.
 //
+// **Cancellation**: ctx is plumbed via `exec.CommandContext`. A
+// SIGINT to the CLI / SIGTERM to `bridge serve` cancels the
+// outer context, exec.CommandContext SIGKILLs the in-flight sox
+// process, and we clean up the partial `.tmp`. Without this a
+// half-converted album could hang the operator's terminal until
+// the largest file finishes (Gemini bot review on PR #108).
+//
 // Output directory created if missing — `bridge upscale` only
 // guarantees DataDir exists, not the `transcoded` subdir.
-func RunSox(j JobSpec) (int64, error) {
+func RunSox(ctx context.Context, j JobSpec) (int64, error) {
 	if err := os.MkdirAll(j.OutputDir, 0o755); err != nil {
 		return 0, fmt.Errorf("mkdir output dir: %w", err)
 	}
@@ -232,7 +240,7 @@ func RunSox(j JobSpec) (int64, error) {
 	// run so SoX's open(O_CREAT) doesn't trip on prior crash debris.
 	_ = os.Remove(tmpPath)
 
-	cmd := exec.Command("sox", args...)
+	cmd := exec.CommandContext(ctx, "sox", args...)
 	// Capture combined stdout/stderr for the error path — sox
 	// writes its diagnostics to stderr and they're invaluable when
 	// debugging "this one file fails".
