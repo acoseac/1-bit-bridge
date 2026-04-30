@@ -1277,3 +1277,23 @@ func (s *Store) DeleteVariant(sourcePath, variantID string) error {
 	_, err := s.db.Exec(`DELETE FROM track_variants WHERE source_path = ? AND variant_id = ?`, sourcePath, variantID)
 	return err
 }
+
+// CountVariants returns (rowCount, totalSizeBytes) across the
+// whole `track_variants` table. Used by the admin console's
+// upscale stats card. Single SQL aggregate — cheap even on
+// large tables.
+//
+// Returns (0, 0, nil) when the table is empty (or the upscale
+// feature has never been used). Errors propagate; the admin
+// handler degrades to "stats unavailable" on failure.
+func (s *Store) CountVariants() (int, int64, error) {
+	var (
+		count int
+		bytes sql.NullInt64
+	)
+	row := s.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM track_variants`)
+	if err := row.Scan(&count, &bytes); err != nil {
+		return 0, 0, err
+	}
+	return count, bytes.Int64, nil
+}

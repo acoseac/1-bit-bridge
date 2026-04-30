@@ -972,6 +972,10 @@ function initSettings() {
       // explicit string (not the parsed array) lets the server be
       // the single source of truth on splitting/validation.
       customEndpointsText: fd.get("customEndpoints") || "",
+      // v1.2 Audio quality opt-in — same checkbox-coerce-to-bool
+      // pattern as updateAutoInstall above so the server's
+      // pointer-typed patch field always receives a real value.
+      upscaleEnabled: fd.get("upscaleEnabled") === "on",
     };
     try {
       const r = await API.patch("/api/settings", body);
@@ -995,6 +999,83 @@ function initSettings() {
       showMsg(msg, "warn", "Restart signalled (server went away).");
     }
   });
+
+  // v1.2 Audio quality stats poller. Refreshes the upscale tile
+  // every 5 s while the Settings page is the active tab. Cheap
+  // (single SQL COUNT + a mutex-protected pool snapshot in the
+  // handler); the visibility check (the tile is hidden when the
+  // feature is off) keeps the dashboard quiet for operators
+  // who never enabled upscaling.
+  startUpscaleStatsPoller();
+}
+
+const upscaleStatsPollMs = 5000;
+let upscaleStatsTimer = null;
+
+function startUpscaleStatsPoller() {
+  // Defensive: clear any prior timer when re-entering the
+  // Settings page (single-page navigation reuses initSettings).
+  if (upscaleStatsTimer) {
+    clearInterval(upscaleStatsTimer);
+    upscaleStatsTimer = null;
+  }
+  const tile = document.getElementById("upscale-stats");
+  if (!tile) return; // not on the settings page
+  refreshUpscaleStats(tile);
+  upscaleStatsTimer = setInterval(() => refreshUpscaleStats(tile), upscaleStatsPollMs);
+}
+
+async function refreshUpscaleStats(tile) {
+  try {
+    const r = await API.get("/api/upscale/stats");
+    // Hide the whole tile when the feature has never been used
+    // (no cached variants AND feature is currently off). A
+    // disabled feature with cached files keeps the tile up so
+    // the operator sees historical state and disk usage.
+    const hasHistory = r.cachedVariants > 0;
+    if (!r.enabled && !hasHistory) {
+      tile.hidden = true;
+      return;
+    }
+    tile.hidden = false;
+    setText("upscale-cached-count", r.cachedVariants ?? 0);
+    setText("upscale-cached-bytes", formatBytes(r.cachedBytes ?? 0));
+    if (r.pool) {
+      setText("upscale-workers", r.pool.workers);
+      setText("upscale-queue", r.pool.queueLen + " / " + r.pool.queueCap);
+      setText("upscale-inflight", r.pool.inflight);
+      setText("upscale-done", r.pool.done);
+      setText("upscale-failed", r.pool.failed);
+    } else {
+      // Feature is off but we have cached variants — show the
+      // historical fields, em-dash the live ones to communicate
+      // "no live pool right now".
+      setText("upscale-workers", "—");
+      setText("upscale-queue", "—");
+      setText("upscale-inflight", "—");
+      setText("upscale-done", "—");
+      setText("upscale-failed", "—");
+    }
+  } catch (err) {
+    // Stats endpoint failure isn't user-visible — log to
+    // console so a developer debugging on the page can see it,
+    // but don't disrupt the rest of the Settings UI.
+    console.warn("upscale stats fetch failed:", err);
+  }
+}
+
+function setText(id, value) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = String(value);
+}
+
+function formatBytes(n) {
+  if (!n) return "0 B";
+  const kb = 1024, mb = kb * 1024, gb = mb * 1024;
+  if (n >= gb) return (n / gb).toFixed(n >= 10 * gb ? 0 : 1) + " GB";
+  if (n >= mb) return (n / mb).toFixed(n >= 10 * mb ? 0 : 1) + " MB";
+  if (n >= kb) return (n / kb).toFixed(n >= 10 * kb ? 0 : 1) + " KB";
+  return n + " B";
 }
 
 function showMsg(el, kind, text) {

@@ -99,6 +99,38 @@ type settingsResponse struct {
 	UpdateAutoInstall        bool   `json:"updateAutoInstall"`
 	UpdateQuietHours         string `json:"updateQuietHours,omitempty"`
 	UpdateCheckIntervalHours int    `json:"updateCheckIntervalHours,omitempty"`
+	// v1.2 Upscale settings — operator opt-in flag for the
+	// offline PCM-upscaling feature. Disabled by default per
+	// the bridge.yaml schema; flipping this here writes the
+	// config back to disk and surfaces a "restart required"
+	// banner on the response so the operator knows to bounce
+	// `bridge serve` for the long-lived transcode.Pool to
+	// instantiate (or shut down).
+	UpscaleEnabled bool `json:"upscaleEnabled"`
+	// UpscaleSoxAvailable reports whether `sox` is on PATH so
+	// the Settings UI can warn the operator before they
+	// enable the feature against a host that can't actually
+	// run it. Computed at request time via PrecheckSox; nil
+	// when the precheck hasn't been wired into the admin
+	// dependencies (test harnesses).
+	UpscaleSoxAvailable *bool `json:"upscaleSoxAvailable,omitempty"`
+	// UpscaleSoxMissing is the template-only convenience
+	// boolean (true iff the precheck succeeded AND sox was
+	// reported unavailable). Lets the Settings template
+	// avoid a custom `deref` helper that html/template
+	// doesn't ship with. `json:"-"` keeps the JSON API
+	// surface clean — PATCH consumers care about the
+	// tri-state via UpscaleSoxAvailable.
+	UpscaleSoxMissing bool `json:"-"`
+	// UpscaleSoxInstallHint is the OS-appropriate package-
+	// manager one-liner for installing sox. Computed
+	// server-side via the bridge's runtime.GOOS so the
+	// operator viewing the admin UI from any browser sees
+	// the hint relevant to the BRIDGE host (where sox
+	// needs to be installed), not the browser host.
+	// Multi-line strings work via the template's `pre`
+	// rendering. Empty when sox is already available.
+	UpscaleSoxInstallHint string `json:"-"`
 }
 
 // --- GET /api/stats ---
@@ -555,7 +587,7 @@ func (s *Server) apiTokensRevoke(w http.ResponseWriter, r *http.Request) {
 // --- GET /api/settings ---
 
 func (s *Server) apiSettingsGet(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, settingsResponse{
+	resp := settingsResponse{
 		LibraryName:              s.deps.Cfg.LibraryName,
 		ListenAddress:            s.deps.Cfg.ListenAddress,
 		AdminAddress:             s.deps.Cfg.AdminAddress,
@@ -568,7 +600,20 @@ func (s *Server) apiSettingsGet(w http.ResponseWriter, r *http.Request) {
 		UpdateAutoInstall:        s.deps.Cfg.Update.AutoInstall,
 		UpdateQuietHours:         s.deps.Cfg.Update.QuietHours,
 		UpdateCheckIntervalHours: s.deps.Cfg.Update.CheckIntervalHours,
-	})
+		UpscaleEnabled:           s.deps.Cfg.Upscale.Enabled,
+	}
+	// Probe sox availability so the Settings UI can warn the
+	// operator before they enable the feature. Cheap (one
+	// exec.LookPath + a 2 s --version check inside
+	// PrecheckSox); fires on every settings page load, but
+	// the operator opens this page rarely. Logged-but-
+	// swallowed on failure so a temporarily slow PATH lookup
+	// doesn't break the whole settings tile.
+	if s.deps.UpscalePrecheck != nil {
+		ok := s.deps.UpscalePrecheck() == nil
+		resp.UpscaleSoxAvailable = &ok
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // --- PATCH /api/settings ---
@@ -589,6 +634,12 @@ type settingsPatch struct {
 	// both is supported but redundant; the array form wins.
 	CustomEndpoints     *[]string `json:"customEndpoints,omitempty"`
 	CustomEndpointsText *string   `json:"customEndpointsText,omitempty"`
+	// v1.2 Upscale opt-in. Toggling this writes the change
+	// to disk; the long-lived transcode.Pool inside `bridge
+	// serve` is wired at constructor time, so flipping the
+	// flag at runtime triggers a `RestartRequired: true`
+	// response.
+	UpscaleEnabled *bool `json:"upscaleEnabled,omitempty"`
 }
 
 type settingsPatchResponse struct {
@@ -663,6 +714,22 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 	// updates suffice — no restart_required for this field alone.
 	// Cert SAN coverage for new entries is operator-driven via the
 	// admin Cert tile (PR feat/tls-broader-sans).
+	if p.UpscaleEnabled != nil {
+		if *p.UpscaleEnabled != s.deps.Cfg.Upscale.Enabled {
+			s.deps.Cfg.Upscale.Enabled = *p.UpscaleEnabled
+			// Pool / sox-precheck / api wiring happens once at
+			// `bridge serve` startup. A live flip would have to
+			// instantiate (or shut down) the Pool, change the
+			// /v1/health response, AND reconfigure the variant-
+			// store hook — invasive enough that surfacing
+			// "restart required" is the right call for v1.2.
+			// A future iteration could hot-apply via a
+			// runtime hook, but the operator-friction gain
+			// isn't worth the rewiring complexity until a
+			// user requests it.
+			restart = true
+		}
+	}
 	if p.CustomEndpoints != nil {
 		s.deps.Cfg.CustomEndpoints = *p.CustomEndpoints
 	} else if p.CustomEndpointsText != nil {
@@ -680,6 +747,121 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, settingsPatchResponse{RestartRequired: restart})
+}
+
+// upscaleStatsResponse is the JSON shape /api/upscale/stats
+// returns. Three sources combined into one tile-friendly
+// payload:
+//
+//   - Live pool counters (workers / queue / inflight / lifetime
+//     totals) — present only when the feature is active. The
+//     Settings page renders "Feature off" when these are nil.
+//   - Cached-variants count + total bytes from `track_variants`.
+//     Survives across restarts and reflects the operator's
+//     historical conversion work — useful even when the feature
+//     is currently off.
+//   - Sox-availability probe — same closure as the Settings
+//     page consumes so the two surfaces agree about whether
+//     the host can run conversions.
+type upscaleStatsResponse struct {
+	// Enabled mirrors `cfg.Upscale.Enabled` AND the live
+	// presence of the pool — false when the feature was on
+	// at startup but the sox-precheck demoted it to off.
+	Enabled bool `json:"enabled"`
+	// SoxAvailable reports the live `transcode.PrecheckSox`
+	// result. Nil when the precheck closure isn't wired
+	// (test harnesses).
+	SoxAvailable *bool `json:"soxAvailable,omitempty"`
+	// Pool reports the live worker-pool snapshot. Nil when
+	// the feature is off (no pool to query).
+	Pool *UpscalePoolStats `json:"pool,omitempty"`
+	// CachedVariants is the number of rows in `track_variants`
+	// — represents historical conversion work that survives
+	// across restarts and a feature-flag round trip. May be
+	// non-zero even when `Enabled` is false (operator
+	// disabled the feature without running --gc).
+	CachedVariants int `json:"cachedVariants"`
+	// CachedBytes is the total size of all sidecar files,
+	// summed from `track_variants.size_bytes`. Helps the
+	// operator gauge disk usage before deciding to re-enable
+	// or `--gc`.
+	CachedBytes int64 `json:"cachedBytes"`
+}
+
+// apiUpscaleStats: GET /api/upscale/stats
+//
+// Returns a snapshot of the upscale feature's runtime + on-disk
+// state. Used by the Settings page tile that shows "12 cached
+// variants (4.2 GB) — 3 jobs in flight". Cheap (single SQL
+// COUNT + a mutex-protected pool snapshot + a TTL-cached sox
+// precheck); fires on dashboard refresh every 5 s.
+//
+// **`enabled` reports live runtime state**, NOT the persisted
+// config (CodeRabbit major on PR #110). The two diverge in two
+// real cases: (a) startup demoted the feature when sox-precheck
+// failed even though `cfg.Upscale.Enabled == true`, (b) the
+// operator just PATCHed `upscaleEnabled = false` but the
+// long-lived Pool is still alive until restart. Both surface as
+// `pool == nil` from the closure (which gates on the config
+// flag too — see cmd/bridge wiring); we report
+// `enabled = (pool != nil)` so the iOS-facing /v1/health
+// semantics and the admin tile agree about what "active"
+// means. The Settings PATCH form reads the persisted
+// `cfg.Upscale.Enabled` from `/api/settings.upscaleEnabled`
+// separately for the toggle's initial state.
+func (s *Server) apiUpscaleStats(w http.ResponseWriter, r *http.Request) {
+	var resp upscaleStatsResponse
+	if avail := s.cachedSoxAvailability(); avail != nil {
+		resp.SoxAvailable = avail
+	}
+	if s.deps.UpscaleStats != nil {
+		resp.Pool = s.deps.UpscaleStats()
+	}
+	resp.Enabled = (resp.Pool != nil)
+	if s.deps.Manifest != nil {
+		count, bytes, err := s.deps.Manifest.CountVariants()
+		if err != nil {
+			// Log + degrade: caller still gets the live
+			// fields. A SQL failure here is the kind of
+			// thing that should be visible in logs but not
+			// turn the whole tile into an error state.
+			logger.Warn("upscale stats: count variants", "err", err)
+		} else {
+			resp.CachedVariants = count
+			resp.CachedBytes = bytes
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// soxAvailabilityCacheTTL bounds how long the cached precheck
+// result is reused before re-probing. 30 s feels right: an
+// operator installing sox sees the Settings UI reflect it
+// within at most 30 s without us spending up to 2 s on the
+// probe per 5 s stats poll (CodeRabbit major on PR #110 — the
+// previous per-call precheck shelled out 12×/min on every open
+// Settings tab).
+const soxAvailabilityCacheTTL = 30 * time.Second
+
+// cachedSoxAvailability returns the most recent precheck result
+// or runs a fresh probe when the cache is older than
+// soxAvailabilityCacheTTL. Returns nil when no precheck closure
+// is wired (test harnesses).
+func (s *Server) cachedSoxAvailability() *bool {
+	if s.deps.UpscalePrecheck == nil {
+		return nil
+	}
+	now := time.Now()
+	s.soxAvailabilityMu.Lock()
+	defer s.soxAvailabilityMu.Unlock()
+	if !s.soxAvailabilityAt.IsZero() && now.Sub(s.soxAvailabilityAt) < soxAvailabilityCacheTTL {
+		v := s.soxAvailability
+		return &v
+	}
+	v := s.deps.UpscalePrecheck() == nil
+	s.soxAvailability = v
+	s.soxAvailabilityAt = now
+	return &v
 }
 
 // splitCustomEndpointsText parses the textarea form of the custom-

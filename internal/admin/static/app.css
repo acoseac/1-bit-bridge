@@ -741,3 +741,61 @@ dialog h2 { font-size: 18px; color: var(--accent); }
 @media (prefers-reduced-motion: reduce) {
   body::before { opacity: 0.5; }
 }
+
+/* v1.2 Audio quality (upscale) settings card. The warn-banner
+ * mirrors the dashboard's update-tile warning treatment so the
+ * "sox missing" hint reads as the same kind of operator-action
+ * call. .install-hint preserves the multi-line distro list
+ * formatting (server-rendered \n) without wrapping. */
+.warn-banner {
+  margin: 12px 0 8px;
+  padding: 10px 14px;
+  border-left: 3px solid var(--warn);
+  background: color-mix(in srgb, var(--warn) 10%, var(--bg-panel));
+  border-radius: 4px;
+  font-size: 13px;
+}
+.install-hint {
+  margin: 0 0 12px;
+  padding: 10px 14px;
+  background: color-mix(in srgb, var(--bg-panel) 80%, transparent);
+  border: 1px solid color-mix(in srgb, var(--fg-muted) 30%, transparent);
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  white-space: pre;
+  overflow-x: auto;
+}
+
+/* .upscale-stats: tile that surfaces live pool counters + cached
+ * variants. Hidden by JS when the feature has never been used
+ * (no cached variants AND feature off) — refreshUpscaleStats
+ * handles visibility on every poll. */
+.upscale-stats {
+  margin-top: 16px;
+  padding: 14px 16px;
+  background: var(--bg-panel);
+  border: 1px solid color-mix(in srgb, var(--fg-muted) 25%, transparent);
+  border-radius: 6px;
+}
+.upscale-stats h3 {
+  margin: 0 0 10px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.upscale-stats .status-grid {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 16px;
+  margin: 0 0 10px;
+  font-size: 13px;
+}
+.upscale-stats .status-grid dt {
+  color: var(--fg-muted);
+}
+.upscale-stats .status-grid dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg);
+}

@@ -4,6 +4,7 @@ import (
 	"html/template"
 	"net/http"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -120,17 +121,60 @@ func (s *Server) pageDevices(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) pageSettings(w http.ResponseWriter, r *http.Request) {
 	data := settingsResponse{
-		LibraryName:         s.deps.Cfg.LibraryName,
-		ListenAddress:       s.deps.Cfg.ListenAddress,
-		AdminAddress:        s.deps.Cfg.AdminAddress,
-		DataDir:             s.deps.Cfg.DataDir,
-		ScanIntervalSec:     s.deps.Cfg.ScanIntervalSec,
-		TLSCertPath:         s.deps.Cfg.TLSCertPath,
-		TLSKeyPath:          s.deps.Cfg.TLSKeyPath,
-		CustomEndpoints:     s.deps.Cfg.CustomEndpoints,
-		CustomEndpointsText: strings.Join(s.deps.Cfg.CustomEndpoints, "\n"),
+		LibraryName:              s.deps.Cfg.LibraryName,
+		ListenAddress:            s.deps.Cfg.ListenAddress,
+		AdminAddress:             s.deps.Cfg.AdminAddress,
+		DataDir:                  s.deps.Cfg.DataDir,
+		ScanIntervalSec:          s.deps.Cfg.ScanIntervalSec,
+		TLSCertPath:              s.deps.Cfg.TLSCertPath,
+		TLSKeyPath:               s.deps.Cfg.TLSKeyPath,
+		CustomEndpoints:          s.deps.Cfg.CustomEndpoints,
+		CustomEndpointsText:      strings.Join(s.deps.Cfg.CustomEndpoints, "\n"),
+		UpdateAutoInstall:        s.deps.Cfg.Update.AutoInstall,
+		UpdateQuietHours:         s.deps.Cfg.Update.QuietHours,
+		UpdateCheckIntervalHours: s.deps.Cfg.Update.CheckIntervalHours,
+		UpscaleEnabled:           s.deps.Cfg.Upscale.Enabled,
+	}
+	// v1.2 Audio quality section: pre-compute the boolean +
+	// install hint so the template doesn't need a `deref`
+	// helper or a runtime.GOOS switch. The hint is OS-aware
+	// for the BRIDGE host (`runtime.GOOS` here resolves on
+	// the server, not the browser viewing the admin UI) so
+	// an operator on Windows sees the choco hint, on Linux
+	// sees the apt/dnf/pacman variants, and on macOS sees
+	// the brew one. `printSoxInstallHint` in cmd/bridge
+	// keeps the same coverage for the CLI.
+	if s.deps.UpscalePrecheck != nil {
+		ok := s.deps.UpscalePrecheck() == nil
+		data.UpscaleSoxAvailable = &ok
+		data.UpscaleSoxMissing = !ok
+		if !ok {
+			data.UpscaleSoxInstallHint = soxInstallHintForCurrentOS()
+		}
 	}
 	s.renderPage(w, "settings", data)
+}
+
+// soxInstallHintForCurrentOS returns the package-manager one-
+// liner for installing sox on the bridge's host OS. Multi-line
+// for Linux because distro coverage is meaningful (apt /
+// dnf / pacman are mutually exclusive). Mirrors the CLI's
+// `printSoxInstallHint` in `cmd/bridge/upscale.go` — keep the
+// two in sync if a future package manager joins the table.
+func soxInstallHintForCurrentOS() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return "brew install sox"
+	case "linux":
+		return "Debian/Ubuntu:  sudo apt install sox\n" +
+			"Fedora:         sudo dnf install sox\n" +
+			"Arch:           sudo pacman -S sox"
+	case "windows":
+		return "choco install sox.portable\n" +
+			"(or download from https://sourceforge.net/projects/sox/)"
+	default:
+		return "Install sox via your platform's package manager, or see https://sox.sourceforge.net"
+	}
 }
 
 // --- tmpl helpers ---

@@ -122,6 +122,41 @@ type Deps struct {
 	// package's own pairing wiring; both sides receive the same Store
 	// from cmd/bridge/main.go.
 	Pairing *pairing.Store
+
+	// UpscalePrecheck probes whether the upscale feature can run on
+	// this host (sox on PATH, --version returns within 2 s). Wired
+	// to `transcode.PrecheckSox` via a closure in cmd/bridge/main.go
+	// so this package doesn't import internal/transcode (matches the
+	// MBIDProbe / UpdateProvider decoupling pattern). Nil-safe — when
+	// absent the Settings response omits the `upscaleSoxAvailable`
+	// field and the UI hides the warning banner.
+	UpscalePrecheck func() error
+
+	// UpscaleStats returns a snapshot of the long-lived
+	// transcode pool's counters (workers, queue length, in-
+	// flight jobs, lifetime totals). Wired via a closure in
+	// cmd/bridge/main.go so the admin package stays decoupled
+	// from internal/transcode. The closure returns nil when
+	// the feature is off (Pool isn't instantiated); the admin
+	// endpoint then omits the `pool` field instead of
+	// surfacing zero-padded clutter ("0/0 queue, 0 inflight"
+	// would suggest the pool exists but is idle, which is
+	// semantically wrong).
+	UpscaleStats func() *UpscalePoolStats
+}
+
+// UpscalePoolStats mirrors `transcode.PoolStats` field-for-
+// field but lives here so the admin package compiles without
+// importing internal/transcode. The wiring closure in
+// cmd/bridge/main.go translates between the two value types.
+type UpscalePoolStats struct {
+	Workers  int    `json:"workers"`
+	QueueCap int    `json:"queueCap"`
+	QueueLen int    `json:"queueLen"`
+	Inflight int    `json:"inflight"`
+	Enqueued uint64 `json:"enqueued"`
+	Done     uint64 `json:"done"`
+	Failed   uint64 `json:"failed"`
 }
 
 // TailscaleProvider is the read+refresh side of the Tailscale auto-pilot
@@ -248,6 +283,17 @@ type Server struct {
 	// before we return from Serve". Capped by the same 5s shutdown
 	// grace as the HTTP listener.
 	bgScans sync.WaitGroup
+
+	// soxAvailability cache. The /api/upscale/stats handler is
+	// polled every 5 s by the Settings page; per-call PrecheckSox
+	// would shell out 12×/min on every open Settings tab and pay
+	// up to 2 s per probe (CodeRabbit major on PR #110). The TTL
+	// is soxAvailabilityCacheTTL — short enough that an operator
+	// installing sox sees the UI reflect within ~30 s, long
+	// enough that Settings polling stays cheap.
+	soxAvailabilityMu sync.Mutex
+	soxAvailability   bool
+	soxAvailabilityAt time.Time
 }
 
 // pages maps the URL-friendly page name to its template filename.
@@ -313,6 +359,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PATCH /api/tokens/{id}", s.apiTokensSetLifecycle)
 	mux.HandleFunc("GET /api/settings", s.apiSettingsGet)
 	mux.HandleFunc("PATCH /api/settings", s.apiSettingsPatch)
+	mux.HandleFunc("GET /api/upscale/stats", s.apiUpscaleStats)
 	mux.HandleFunc("POST /api/restart", s.apiRestart)
 	mux.HandleFunc("GET /api/pair-qr", s.apiPairQR)
 	mux.HandleFunc("GET /api/backups", s.apiBackupsList)

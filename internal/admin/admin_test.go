@@ -568,6 +568,224 @@ func TestSettingsPatchValidationRollsBack(t *testing.T) {
 	}
 }
 
+// TestSettingsPatchUpscaleEnabled covers the v1.2 upscale toggle:
+// flipping the flag persists to bridge.yaml AND requires a restart
+// (the long-lived transcode.Pool is wired at constructor time).
+// Mirrors TestSettingsPatchRestartRequired's pattern.
+func TestSettingsPatchUpscaleEnabled(t *testing.T) {
+	srv, _, cfgPath := newTestServer(t)
+	h := srv.Handler()
+
+	// Flip on.
+	var resp settingsPatchResponse
+	code := doJSON(t, h, "PATCH", "/api/settings",
+		map[string]any{"upscaleEnabled": true}, &resp)
+	if code != 200 {
+		t.Fatalf("patch upscale on: %d", code)
+	}
+	if !resp.RestartRequired {
+		t.Error("upscaleEnabled change must mark restart required (Pool wired at constructor time)")
+	}
+	if !srv.deps.Cfg.Upscale.Enabled {
+		t.Error("in-memory cfg did not reflect upscale.enabled=true")
+	}
+
+	reloaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reloaded.Upscale.Enabled {
+		t.Error("upscale.enabled did not persist to disk")
+	}
+
+	// Flip off — also restart-required (Pool teardown / re-wire).
+	resp = settingsPatchResponse{}
+	code = doJSON(t, h, "PATCH", "/api/settings",
+		map[string]any{"upscaleEnabled": false}, &resp)
+	if code != 200 {
+		t.Fatalf("patch upscale off: %d", code)
+	}
+	if !resp.RestartRequired {
+		t.Error("upscaleEnabled flip-off must also require restart")
+	}
+
+	// Same value re-submission MUST NOT mark restart required —
+	// restart only fires on actual change. Without this, an
+	// operator clicking Save with the same value displayed would
+	// see a misleading restart banner.
+	resp = settingsPatchResponse{}
+	code = doJSON(t, h, "PATCH", "/api/settings",
+		map[string]any{"upscaleEnabled": false}, &resp)
+	if code != 200 {
+		t.Fatalf("patch idempotent: %d", code)
+	}
+	if resp.RestartRequired {
+		t.Error("idempotent upscaleEnabled patch must not require restart")
+	}
+}
+
+// TestUpscaleStatsHandler covers the GET /api/upscale/stats
+// shape across three states: feature off + no cached variants
+// (fields default-zero, no Pool); feature off + history (Pool
+// nil but cachedVariants populated); feature wired (Pool
+// snapshot).
+func TestUpscaleStatsHandler(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	h := srv.Handler()
+
+	// Default state: feature off, no manifest tracks → zero
+	// counts everywhere, no Pool.
+	var got upscaleStatsResponse
+	code := doJSON(t, h, "GET", "/api/upscale/stats", nil, &got)
+	if code != 200 {
+		t.Fatalf("stats: %d", code)
+	}
+	if got.Enabled {
+		t.Error("Enabled should mirror cfg.Upscale.Enabled (default false)")
+	}
+	if got.CachedVariants != 0 || got.CachedBytes != 0 {
+		t.Errorf("default cached counters non-zero: %+v", got)
+	}
+	if got.Pool != nil {
+		t.Errorf("Pool should be nil when feature is off; got %+v", got.Pool)
+	}
+	// SoxAvailable nil when no precheck wired (test harness).
+	if got.SoxAvailable != nil {
+		t.Errorf("SoxAvailable should be nil without UpscalePrecheck; got %v", *got.SoxAvailable)
+	}
+
+	// Wire a precheck closure that reports sox available, plus
+	// a Pool stats closure to simulate the feature-on state.
+	srv.deps.UpscalePrecheck = func() error { return nil }
+	srv.deps.UpscaleStats = func() *UpscalePoolStats {
+		return &UpscalePoolStats{
+			Workers: 4, QueueCap: 5000, QueueLen: 12, Inflight: 2,
+			Enqueued: 100, Done: 86, Failed: 1,
+		}
+	}
+	srv.deps.Cfg.Upscale.Enabled = true
+
+	got = upscaleStatsResponse{}
+	code = doJSON(t, h, "GET", "/api/upscale/stats", nil, &got)
+	if code != 200 {
+		t.Fatalf("stats wired: %d", code)
+	}
+	if !got.Enabled {
+		t.Error("Enabled should be true when Pool is populated")
+	}
+	if got.SoxAvailable == nil || !*got.SoxAvailable {
+		t.Error("SoxAvailable should be true when precheck reports nil")
+	}
+	if got.Pool == nil {
+		t.Fatal("Pool should be populated when feature is wired")
+	}
+	if got.Pool.Workers != 4 || got.Pool.QueueLen != 12 || got.Pool.Done != 86 {
+		t.Errorf("Pool snapshot wrong: %+v", got.Pool)
+	}
+}
+
+// TestUpscaleStatsDisabledWithHistory pins the off-with-history
+// branch the Settings page UX depends on (CodeRabbit nit on PR
+// #110): when the feature is off but cached variants exist on
+// disk, the response MUST surface CachedVariants > 0 with
+// Pool == nil and Enabled == false. Without coverage here, a
+// regression that returns Pool zero-padded (instead of nil)
+// would mis-render the card with "0 inflight, 0 done"
+// instead of em-dashes for the live fields.
+func TestUpscaleStatsDisabledWithHistory(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	h := srv.Handler()
+
+	// Insert a parent track + a variant row so CountVariants
+	// reports a non-zero history. UpscaleStats stays nil
+	// (closure not wired) → simulates "feature off with
+	// historical converted files on disk".
+	if err := srv.deps.Manifest.UpsertTrack(&manifest.Track{
+		Path:    "Music/Album/01.flac",
+		Size:    100,
+		ModTime: time.Now(),
+	}); err != nil {
+		t.Fatalf("UpsertTrack: %v", err)
+	}
+	if err := srv.deps.Manifest.UpsertVariant(manifest.VariantRow{
+		SourcePath:    "Music/Album/01.flac",
+		VariantID:     "upscaled-v1-176400-24",
+		SidecarPath:   "/dev/null/sidecar.flac",
+		Format:        "flac",
+		SampleRate:    176400,
+		BitsPerSample: 24,
+		SizeBytes:     12_345_678,
+		SourceMTimeNS: 1, SourceSize: 1, SoxSettings: "{}", CreatedAt: 1,
+	}); err != nil {
+		t.Fatalf("UpsertVariant: %v", err)
+	}
+
+	var got upscaleStatsResponse
+	code := doJSON(t, h, "GET", "/api/upscale/stats", nil, &got)
+	if code != 200 {
+		t.Fatalf("stats: %d", code)
+	}
+	if got.Enabled {
+		t.Error("Enabled must be false when Pool is nil — the off-with-history contract")
+	}
+	if got.Pool != nil {
+		t.Errorf("Pool must be nil when feature is off; got %+v", got.Pool)
+	}
+	if got.CachedVariants != 1 {
+		t.Errorf("CachedVariants: got %d, want 1", got.CachedVariants)
+	}
+	if got.CachedBytes != 12_345_678 {
+		t.Errorf("CachedBytes: got %d, want 12345678", got.CachedBytes)
+	}
+}
+
+// TestUpscaleSoxAvailabilityCached pins the TTL cache (CodeRabbit
+// major on PR #110): the precheck closure shells out to sox and
+// can wait up to 2 s, so polling at 5 s would 12×/min spend that
+// time. The handler caches the result for soxAvailabilityCacheTTL
+// (30 s) and reuses across calls.
+func TestUpscaleSoxAvailabilityCached(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	h := srv.Handler()
+
+	var calls int
+	srv.deps.UpscalePrecheck = func() error {
+		calls++
+		return nil
+	}
+
+	// Three back-to-back calls within the TTL window MUST
+	// invoke the precheck closure exactly once.
+	for i := 0; i < 3; i++ {
+		var got upscaleStatsResponse
+		code := doJSON(t, h, "GET", "/api/upscale/stats", nil, &got)
+		if code != 200 {
+			t.Fatalf("stats[%d]: %d", i, code)
+		}
+		if got.SoxAvailable == nil || !*got.SoxAvailable {
+			t.Errorf("stats[%d]: SoxAvailable wrong", i)
+		}
+	}
+	if calls != 1 {
+		t.Errorf("PrecheckSox invoked %d times; should have been cached after the first call", calls)
+	}
+
+	// Forcing the cache to expire (zero out the timestamp)
+	// MUST trigger a fresh probe. Done via the test seam of
+	// taking the lock + clearing the timestamp directly —
+	// matches the project convention for `internal` test-
+	// only state mutation.
+	srv.soxAvailabilityMu.Lock()
+	srv.soxAvailabilityAt = time.Time{}
+	srv.soxAvailabilityMu.Unlock()
+
+	var got upscaleStatsResponse
+	doJSON(t, h, "GET", "/api/upscale/stats", nil, &got)
+	if calls != 2 {
+		t.Errorf("after expiry, PrecheckSox should have re-run; calls=%d", calls)
+	}
+}
+
 func TestPagesRenderWithoutError(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	h := srv.Handler()
