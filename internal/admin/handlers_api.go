@@ -145,6 +145,12 @@ type settingsResponse struct {
 	// from "supervisor unknown" — false IS the supervisor-
 	// unknown answer.
 	IsSupervised bool `json:"isSupervised"`
+	// Backup tile data — moved from the dashboard envelope so the
+	// Settings page's new Backups tab can render the operator-facing
+	// retention copy without a second handler round trip. The
+	// dashboard no longer surfaces this section.
+	BackupIntervalHours int `json:"backupIntervalHours,omitempty"`
+	BackupKeep          int `json:"backupKeep,omitempty"`
 }
 
 // --- GET /api/stats ---

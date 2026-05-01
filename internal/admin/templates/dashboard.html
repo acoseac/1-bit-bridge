@@ -76,6 +76,15 @@
           <span class="badge idle">check failed</span>
           <code id="update-latest" hidden></code>
           <a id="update-notes" hidden></a>
+        {{else if .Data.Update.LastCheck.IsZero}}
+          {{/* No poll has fired yet (bridge just started, default
+               check interval is 6h). Distinguish from the
+               "in-flight check" case below — pre-fix the operator
+               saw "checking…" persist for hours, which mis-suggested
+               the check was hung. */}}
+          <span class="badge idle">scheduled</span>
+          <code id="update-latest" hidden></code>
+          <a id="update-notes" hidden></a>
         {{else}}
           <span class="badge idle">checking…</span>
           <code id="update-latest" hidden></code>
@@ -102,39 +111,13 @@
     <p class="panel-note">Install downloads the release archive, verifies the SHA-256 from <code>checksums.txt</code>, swaps the binary, and arms a rollback marker. {{if .Data.IsSupervised}}The bridge restarts automatically to load the new version.{{else}}The bridge stops after install — start it again manually to load the new version.{{end}} Active downloads block install (use the override only when nothing critical is in flight).</p>
   </div>
 
-  <div class="panel">
-    <div class="panel-head">
-      <h2>Backups</h2>
-      <span class="panel-actions">
-        <button type="button" id="backup-now" class="btn">Snapshot now</button>
-      </span>
-    </div>
-    <dl>
-      <dt>Snapshots on disk</dt>
-      <dd id="backup-count">…</dd>
-      <dt>Most recent</dt>
-      <dd id="backup-latest">…</dd>
-    </dl>
-    <p class="panel-note">Snapshots capture <code>bridge.db</code>, <code>tokens.json</code>, the TLS cert + key, and <code>bridge.yaml</code> into <code id="backup-root">…</code>. The periodic ticker runs every {{.Data.BackupIntervalHours}} h, retaining {{.Data.BackupKeep}}. <strong>Backups contain the TLS private key and token hashes</strong> — store them with the same care as the live state. Restore from CLI: stop the bridge, then <code>bridge restore &lt;snapshot-dir&gt;</code>.</p>
-  </div>
-
-  <div class="panel" id="tailscale-panel" hidden>
-    <div class="panel-head">
-      <h2>Tailscale HTTPS</h2>
-      <span class="panel-actions">
-        <button type="button" id="tailscale-refresh" class="btn">Re-mint cert</button>
-      </span>
-    </div>
-    <dl>
-      <dt>Status</dt>
-      <dd id="tailscale-status"><span class="badge idle">Detecting…</span></dd>
-      <dt>Node</dt>
-      <dd id="tailscale-node">—</dd>
-      <dt>Cert</dt>
-      <dd id="tailscale-cert">—</dd>
-    </dl>
-    <p class="panel-note" id="tailscale-note">Tailscale provisions a Let's Encrypt certificate for this bridge's MagicDNS hostname. iOS clients reach the bridge over Tailscale at <code id="tailscale-magicdns-url">—</code>.</p>
-  </div>
+  {{/*
+    Backups + Tailscale HTTPS panels live in Settings now (Backups
+    as its own tab; Tailscale HTTPS inline at the end of the
+    Networking tab). Moved out of the dashboard so the front page
+    is "what the bridge is doing right now" — scan / updates — and
+    operator configuration concerns stay in Settings. PR #129.
+  */}}
 
 </section>
 {{end}}

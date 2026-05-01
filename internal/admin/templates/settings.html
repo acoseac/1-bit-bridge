@@ -32,9 +32,13 @@
       <button type="button" class="tab-btn" role="tab"
               data-tab="networking" aria-selected="false">Networking</button>
       <button type="button" class="tab-btn" role="tab"
+              data-tab="endpoints" aria-selected="false">Server endpoints</button>
+      <button type="button" class="tab-btn" role="tab"
               data-tab="updates" aria-selected="false">Updates</button>
       <button type="button" class="tab-btn" role="tab"
               data-tab="audio" aria-selected="false">Audio quality</button>
+      <button type="button" class="tab-btn" role="tab"
+              data-tab="backups" aria-selected="false">Backups</button>
     </nav>
 
     <div class="tab-pane" data-tab="general" role="tabpanel">
@@ -99,9 +103,40 @@
       </div>
 
       {{/*
-        Read-only Networking telemetry panels live inside the Networking
-        tab. They live inside <form> for layout reasons but contain no
-        submit-capable controls — DO NOT add <button> here without
+        Tailscale HTTPS panel — moved from the dashboard. Hidden by
+        default; the SSE-driven `renderTailscaleTile` reveals it
+        when a tailscaled node is detected. Lives at the end of the
+        Networking tab because operator-side it's "another way iOS
+        clients reach this bridge", same conceptual bucket as
+        listen / admin / custom endpoints. (User feedback on PR
+        #129.)
+      */}}
+      <div class="panel telemetry-panel" id="tailscale-panel" hidden>
+        <div class="panel-head">
+          <h2>Tailscale HTTPS</h2>
+          <span class="panel-actions">
+            <button type="button" id="tailscale-refresh" class="btn">Re-mint cert</button>
+          </span>
+        </div>
+        <dl>
+          <dt>Status</dt>
+          <dd id="tailscale-status"><span class="badge idle">Detecting…</span></dd>
+          <dt>Node</dt>
+          <dd id="tailscale-node">—</dd>
+          <dt>Cert</dt>
+          <dd id="tailscale-cert">—</dd>
+        </dl>
+        <p class="panel-note" id="tailscale-note">Tailscale provisions a Let's Encrypt certificate for this bridge's MagicDNS hostname. iOS clients reach the bridge over Tailscale at <code id="tailscale-magicdns-url">—</code>.</p>
+      </div>
+    </div>
+
+    <div class="tab-pane" data-tab="endpoints" role="tabpanel" hidden>
+      <h2 class="section-head">Server endpoints</h2>
+      {{/*
+        Read-only telemetry panels — addresses iOS clients reach the
+        bridge on, plus the TLS fingerprint they pin against. Lives
+        inside <form> for layout reasons but contains no submit-
+        capable controls — DO NOT add <button> here without
         type="button" or the form will submit on click.
       */}}
       <div class="telemetry-group">
@@ -221,6 +256,34 @@
           <dt>Lifetime failed</dt><dd id="upscale-failed">…</dd>
         </dl>
         <p class="panel-note">Refreshes every 5 s while this page is open. Lifetime counters reset on bridge restart; cached-variant count survives.</p>
+      </div>
+    </div>
+
+    {{/*
+      Backups tab — moved from the dashboard. Snapshot button +
+      retention copy + count/most-recent telemetry. JS handlers
+      `refreshBackups()` and the `backup-now` click bind in
+      `initSettings()` now (were in `initDashboard()` pre-refresh).
+      Lives last in the tab order because operators visit it less
+      frequently than General / Networking / Updates / Audio. (User
+      feedback on PR #129.)
+    */}}
+    <div class="tab-pane" data-tab="backups" role="tabpanel" hidden>
+      <h2 class="section-head">Backups</h2>
+      <div class="panel telemetry-panel">
+        <div class="panel-head">
+          <h2>Snapshots</h2>
+          <span class="panel-actions">
+            <button type="button" id="backup-now" class="btn">Snapshot now</button>
+          </span>
+        </div>
+        <dl>
+          <dt>Snapshots on disk</dt>
+          <dd id="backup-count">…</dd>
+          <dt>Most recent</dt>
+          <dd id="backup-latest">…</dd>
+        </dl>
+        <p class="panel-note">Snapshots capture <code>bridge.db</code>, <code>tokens.json</code>, the TLS cert + key, and <code>bridge.yaml</code> into <code id="backup-root">…</code>. The periodic ticker runs every {{.Data.BackupIntervalHours}} h, retaining {{.Data.BackupKeep}}. <strong>Backups contain the TLS private key and token hashes</strong> — store them with the same care as the live state. Restore from CLI: stop the bridge, then <code>bridge restore &lt;snapshot-dir&gt;</code>.</p>
       </div>
     </div>
 
