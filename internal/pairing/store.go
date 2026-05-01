@@ -274,6 +274,12 @@ var (
 	ErrAlreadyDecided = errors.New("pairing: request already decided")
 	ErrCertRotated    = errors.New("pairing: cert fingerprint changed since request created")
 	ErrBadHash        = errors.New("pairing: malformed pollSecretHash (must be 64 hex chars)")
+	// ErrIDCollisionCap signals the request-ID collision retry budget
+	// was exhausted. Indicates a degenerate `crypto/rand` state
+	// (entropy exhaustion, kernel CSPRNG returning a fixed value);
+	// the handler should map it to 503 + retry-later. Branchable via
+	// errors.Is so the HTTP layer can route it without string matching.
+	ErrIDCollisionCap = errors.New("pairing: request ID collision retry limit exceeded")
 )
 
 // MintFunc is the Approve callback that creates the bearer token. The
@@ -323,8 +329,13 @@ func (s *Store) CreateRequest(deviceName, clientVersion, pollSecretHashHex, sour
 	collisionRetries := 0
 	for _, exists := s.byID[id]; exists; _, exists = s.byID[id] {
 		collisionRetries++
-		if collisionRetries > maxIDCollisionRetries {
-			return Request{}, fmt.Errorf("pairing: %d consecutive ID collisions — random source may be compromised", collisionRetries)
+		// Off-by-one fix from CodeRabbit: `>=` so the cap really is 10
+		// retries, not 11. With `>` the loop allowed `collisionRetries`
+		// to reach 11 before returning. Wrapped via `%w` against
+		// `ErrIDCollisionCap` so callers can branch via `errors.Is`
+		// instead of string-matching the message.
+		if collisionRetries >= maxIDCollisionRetries {
+			return Request{}, fmt.Errorf("%w: %d consecutive collisions — random source may be compromised", ErrIDCollisionCap, collisionRetries)
 		}
 		id, err = randomHex(requestIDBytes)
 		if err != nil {
