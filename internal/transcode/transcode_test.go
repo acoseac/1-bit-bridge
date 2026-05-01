@@ -116,6 +116,7 @@ func TestSoxArgsShape(t *testing.T) {
 	want := []string{
 		"/lib/Music/Album/01.flac",
 		"-b", "24",
+		"-t", "flac",
 		j.SidecarPath() + ".tmp",
 		"rate", "-v", "176400",
 		"dither", "-s",
@@ -135,6 +136,46 @@ func TestSoxArgsShape(t *testing.T) {
 		if !strings.Contains(settings, needle) {
 			t.Errorf("settings JSON missing %q (got: %s)", needle, settings)
 		}
+	}
+}
+
+// TestSoxArgsForcesFlacEncoder pins the `-t flac` flag immediately
+// before the output path. Sox normally picks the encoder from the
+// output filename's last extension; ours is `<sidecar>.flac.tmp`
+// and the trailing `.tmp` made sox bomb with
+// `sox FAIL formats: no handler for file extension 'tmp'`. The
+// `-t flac` preceding the output path tells sox to ignore the
+// filename's hint and write FLAC. Found post-merge of PR #126
+// (case-insensitive lookup) when enqueue worked but every sox
+// invocation failed during the worker pool's actual run — the
+// case fix unmasked this latent bug.
+func TestSoxArgsForcesFlacEncoder(t *testing.T) {
+	j := JobSpec{
+		SourceAbsPath:    "/lib/Music/Album/01.flac",
+		SourceLibraryRel: "Music/Album/01.flac",
+		TargetSampleRate: 176400,
+		TargetBits:       24,
+		Quality:          QualityVeryHigh,
+		OutputDir:        "/tmp/transcoded",
+	}
+	args, _ := j.SoxArgs()
+	// Find `-t flac` and assert it comes immediately before an
+	// argument that ends in `.tmp` (the output path).
+	tIdx := -1
+	for i, a := range args {
+		if a == "-t" && i+1 < len(args) && args[i+1] == "flac" {
+			tIdx = i
+			break
+		}
+	}
+	if tIdx < 0 {
+		t.Fatalf("-t flac flag missing from args: %v", args)
+	}
+	if tIdx+2 >= len(args) {
+		t.Fatalf("-t flac is the trailing flag with no output path after: %v", args)
+	}
+	if !strings.HasSuffix(args[tIdx+2], ".tmp") {
+		t.Errorf("-t flac must precede the .tmp output path; got args[%d]=%q", tIdx+2, args[tIdx+2])
 	}
 }
 

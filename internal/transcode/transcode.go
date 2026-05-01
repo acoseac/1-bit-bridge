@@ -139,9 +139,19 @@ func (j JobSpec) SoxArgs() ([]string, string) {
 	case QualityMedium:
 		rateFlag = "-m"
 	}
+	// Output goes to `<sidecar>.flac.tmp` so the rename(2) at the
+	// end of `RunSox` is atomic. Sox normally picks the encoder
+	// from the output filename's last extension — which here is
+	// `.tmp`, not `.flac`, and sox bombs with
+	//   `sox FAIL formats: no handler for file extension 'tmp'`.
+	// Force the format explicitly via `-t flac` on the output
+	// argument so sox ignores the filename and writes FLAC. (Bug
+	// found post-merge of PR #126: enqueue worked but every sox
+	// invocation failed during the worker pool's actual run.)
 	args := []string{
 		j.SourceAbsPath,
 		"-b", strconv.Itoa(j.TargetBits),
+		"-t", "flac",
 		j.SidecarPath() + ".tmp",
 		"rate", rateFlag, strconv.Itoa(j.TargetSampleRate),
 		"dither", "-s",
