@@ -629,16 +629,16 @@ func extractBearer(r *http.Request) string {
 	return strings.TrimSpace(h[len(prefix):])
 }
 
-// writeJSON serializes v and writes it with application/json + the given
-// status code. Call this for all success responses.
+// writeJSON serializes v as compact application/json with the given
+// status code. Call this for every public-API success response.
 //
-// Compact (no SetIndent). Pre-fix this added 2-space indent for every
-// 2xx body — including /v1/manifest pages (~10-20 MB on a 50k-track
-// library) and the polled /v1/upscale/stats endpoint. The clients are
-// machine consumers (iOS BridgeSourceClient + admin XHR), so the
-// pretty-print purely cost wire bytes (~15% inflation) and
-// json.Encoder CPU. Admin endpoints have their own writeJSON in
-// internal/admin/handlers_api.go (already compact).
+// Compact (no SetIndent) because clients are exclusively machine
+// consumers (iOS BridgeSourceClient, admin-tile XHR), and the largest
+// responses — /v1/manifest pages and the polled /v1/upscale/stats —
+// can run into tens of MB on big libraries where the indent overhead
+// is unjustifiable. Admin endpoints (/api/...) live in
+// internal/admin/handlers_api.go and run their own already-compact
+// writeJSON.
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
