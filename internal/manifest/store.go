@@ -612,16 +612,40 @@ func (s *Store) LookupTrack(path string) (*Track, error) {
 }
 
 func (s *Store) lookupTrackByLowerCase(cleaned string) (*Track, error) {
-	var raw []byte
-	err := s.db.QueryRow(
-		`SELECT tags_json FROM tracks WHERE LOWER(path) = LOWER(?) LIMIT 1`,
+	// Fail closed on ambiguity: fetch LIMIT 2, and if a second row
+	// exists, refuse to pick one. On case-sensitive filesystems
+	// (most Linux deployments) two distinct files can legitimately
+	// coexist whose paths differ only by case — the case-folded
+	// fallback would otherwise return whichever row SQLite happens
+	// to visit first, silently re-introducing the aliasing problem
+	// `GetTrack` was kept exact to avoid. (CodeRabbit on PR #126.)
+	//
+	// Conservative: nil is a slightly worse answer than "guess at
+	// random" for the rare both-rows-distinct case, but the caller
+	// already treats nil as "track not found" → the upscale
+	// eligibility gate returns ErrUpscaleIneligible. The exact-
+	// match fast paths in `LookupTrack` cover the common case where
+	// iOS sends a path that already matches one row's case, so
+	// this only reaches the fallback when the iOS-shape genuinely
+	// can't be distinguished.
+	rows, err := s.db.Query(
+		`SELECT tags_json FROM tracks WHERE LOWER(path) = LOWER(?) LIMIT 2`,
 		cleaned,
-	).Scan(&raw)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
+	)
 	if err != nil {
 		return nil, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return nil, nil
+	}
+	var raw []byte
+	if err := rows.Scan(&raw); err != nil {
+		return nil, err
+	}
+	if rows.Next() {
+		logger.Warn("LookupTrack: case-folded fallback is ambiguous, refusing to pick a row", "path", cleaned)
+		return nil, nil
 	}
 	var t Track
 	if err := json.Unmarshal(raw, &t); err != nil {
@@ -1425,23 +1449,39 @@ func (s *Store) LookupVariant(sourcePath, variantID string) (*VariantRow, error)
 }
 
 func (s *Store) lookupVariantByLowerCase(cleanedSourcePath, variantID string) (*VariantRow, error) {
-	var v VariantRow
-	err := s.db.QueryRow(`
+	// Same fail-closed-on-ambiguity contract as
+	// `lookupTrackByLowerCase` — see that function's comment for
+	// the case-collision rationale. Two distinct case-colliding
+	// `track_variants.source_path` rows under the same
+	// `variant_id` would otherwise let LIMIT 1 stream the wrong
+	// sidecar from /v1/download. (CodeRabbit on PR #126.)
+	rows, err := s.db.Query(`
 		SELECT source_path, variant_id, sidecar_path, format,
 		       sample_rate, bits_per_sample, size_bytes,
 		       source_mtime_ns, source_size, sox_settings, created_at
 		FROM track_variants
 		WHERE LOWER(source_path) = LOWER(?) AND variant_id = ?
-		LIMIT 1
-	`, cleanedSourcePath, variantID).Scan(
-		&v.SourcePath, &v.VariantID, &v.SidecarPath, &v.Format,
-		&v.SampleRate, &v.BitsPerSample, &v.SizeBytes,
-		&v.SourceMTimeNS, &v.SourceSize, &v.SoxSettings, &v.CreatedAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
+		LIMIT 2
+	`, cleanedSourcePath, variantID)
 	if err != nil {
 		return nil, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return nil, nil
+	}
+	var v VariantRow
+	if err := rows.Scan(
+		&v.SourcePath, &v.VariantID, &v.SidecarPath, &v.Format,
+		&v.SampleRate, &v.BitsPerSample, &v.SizeBytes,
+		&v.SourceMTimeNS, &v.SourceSize, &v.SoxSettings, &v.CreatedAt,
+	); err != nil {
+		return nil, err
+	}
+	if rows.Next() {
+		logger.Warn("LookupVariant: case-folded fallback is ambiguous, refusing to pick a row",
+			"sourcePath", cleanedSourcePath, "variantID", variantID)
+		return nil, nil
 	}
 	return &v, nil
 }

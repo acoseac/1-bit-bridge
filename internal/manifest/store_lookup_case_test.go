@@ -96,6 +96,59 @@ func TestLookupTrack_stillReturnsNilOnMiss(t *testing.T) {
 	}
 }
 
+// Pins the fail-closed-on-ambiguity contract for the case-folded
+// fallback. On case-sensitive filesystems (most Linux deployments)
+// two distinct files can legitimately coexist whose paths differ
+// only by case; the prior `LIMIT 1` fallback would have returned
+// whichever row SQLite happened to visit first, silently re-
+// introducing the aliasing problem we kept `GetTrack` exact to
+// avoid. (CodeRabbit on PR #126.)
+//
+// Conservative answer when the case-folded probe matches multiple
+// distinct rows: nil. Better to surface "not found" than to guess
+// at random — the upscale eligibility gate then returns
+// ErrUpscaleIneligible, which is the correct response when the
+// bridge can't unambiguously identify the track.
+func TestLookupTrack_ambiguousCaseFoldReturnsNil(t *testing.T) {
+	s, err := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer s.Close()
+
+	// Two distinct rows that fold to the same lowercase path.
+	if err := s.UpsertTrack(&Track{
+		Path: "Artist/Album/Track.flac", Size: 1, ModTime: time.Now(),
+	}); err != nil {
+		t.Fatalf("UpsertTrack 1: %v", err)
+	}
+	if err := s.UpsertTrack(&Track{
+		Path: "ARTIST/ALBUM/TRACK.flac", Size: 2, ModTime: time.Now(),
+	}); err != nil {
+		t.Fatalf("UpsertTrack 2: %v", err)
+	}
+
+	// iOS-shape that matches BOTH after lowercasing.
+	tr, err := s.LookupTrack("/artist/album/track.flac")
+	if err != nil {
+		t.Fatalf("LookupTrack: %v", err)
+	}
+	if tr != nil {
+		t.Errorf("LookupTrack on ambiguous case-fold returned %v; want nil — fail-closed contract broken",
+			tr.Path)
+	}
+
+	// An exact case match must still win — only the fallback path
+	// is ambiguous.
+	exact, err := s.LookupTrack("Artist/Album/Track.flac")
+	if err != nil {
+		t.Fatalf("LookupTrack exact: %v", err)
+	}
+	if exact == nil || exact.Path != "Artist/Album/Track.flac" {
+		t.Errorf("exact LookupTrack lost its row to the ambiguity guard; got %v", exact)
+	}
+}
+
 // Pins the case-sensitive contract that internal callers (the
 // scanner's unchanged-file fast-path in particular) rely on:
 // `GetTrack` does an EXACT match. Two distinct case-colliding
