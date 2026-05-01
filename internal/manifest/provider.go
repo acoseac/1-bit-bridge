@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"context"
 	"io"
 	"time"
 )
@@ -70,8 +71,12 @@ func (p *Provider) SetUpscaleEnabled(v bool) { p.upscaleEnabled = v }
 // shape OOM-killed Pi-class hosts on a 50k-track library because the
 // in-memory []Track materialisation alone could push past 200 MB.
 // See WriteManifest in scanner.go for the streaming format details.
-func (p *Provider) WriteManifest(w io.Writer, since time.Time) error {
-	return writeManifestGated(w, p.store, p.scanner.Roots(), since, p.upscaleEnabled)
+//
+// `ctx` is checked inside the per-row stream loop so a client
+// disconnect mid-response (slow network, iOS app backgrounded mid-sync,
+// slow-read DOS) terminates the SQLite scan instead of running to EOF.
+func (p *Provider) WriteManifest(ctx context.Context, w io.Writer, since time.Time) error {
+	return writeManifestGated(ctx, w, p.store, p.scanner.Roots(), since, p.upscaleEnabled)
 }
 
 // BuildManifestPage satisfies api.ManifestProvider for the paginated
