@@ -59,18 +59,16 @@ func (s *Server) pageDashboard(w http.ResponseWriter, r *http.Request) {
 	tracks, _ := s.deps.Manifest.CountTracks()
 	dbBytes := dbSize(filepath.Join(s.deps.Cfg.DataDir, "bridge.db"))
 	data := map[string]any{
-		"Uptime":              time.Since(s.deps.StartedAt),
-		"StartedAt":           s.deps.StartedAt,
-		"TracksIndexed":       tracks,
-		"IsScanning":          s.deps.Scanner.IsScanning(),
-		"ScanProgress":        s.deps.Scanner.ScanProgress(),
-		"LastFullScan":        s.deps.Scanner.LastFullScan(),
-		"DBBytes":             dbBytes,
-		"DeviceCount":         len(s.deps.Auth.List()),
-		"Roots":               s.deps.Scanner.Roots(),
-		"Update":              s.dashboardUpdateStatus(),
-		"BackupIntervalHours": s.deps.Cfg.Backup.EffectiveIntervalHours(),
-		"BackupKeep":          s.deps.Cfg.Backup.EffectiveKeep(),
+		"Uptime":        time.Since(s.deps.StartedAt),
+		"StartedAt":     s.deps.StartedAt,
+		"TracksIndexed": tracks,
+		"IsScanning":    s.deps.Scanner.IsScanning(),
+		"ScanProgress":  s.deps.Scanner.ScanProgress(),
+		"LastFullScan":  s.deps.Scanner.LastFullScan(),
+		"DBBytes":       dbBytes,
+		"DeviceCount":   len(s.deps.Auth.List()),
+		"Roots":         s.deps.Scanner.Roots(),
+		"Update":        s.dashboardUpdateStatus(),
 		// The Update tile's "Install & restart" button POSTs
 		// /api/restart after install, then auto-reloads the page
 		// after 2.5 s assuming the service manager will respawn.
@@ -143,6 +141,8 @@ func (s *Server) pageSettings(w http.ResponseWriter, r *http.Request) {
 		UpdateCheckIntervalHours: s.deps.Cfg.Update.CheckIntervalHours,
 		UpscaleEnabled:           s.deps.Cfg.Upscale.Enabled,
 		IsSupervised:             s.deps.IsSupervised,
+		BackupIntervalHours:      s.deps.Cfg.Backup.EffectiveIntervalHours(),
+		BackupKeep:               s.deps.Cfg.Backup.EffectiveKeep(),
 	}
 	// v1.2 Audio quality section: pre-compute the boolean +
 	// install hint so the template doesn't need a `deref`

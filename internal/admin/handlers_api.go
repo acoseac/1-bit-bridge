@@ -145,6 +145,12 @@ type settingsResponse struct {
 	// from "supervisor unknown" — false IS the supervisor-
 	// unknown answer.
 	IsSupervised bool `json:"isSupervised"`
+	// Backup tile data — moved from the dashboard envelope so the
+	// Settings page's new Backups tab can render the operator-facing
+	// retention copy without a second handler round trip. The
+	// dashboard no longer surfaces this section.
+	BackupIntervalHours int `json:"backupIntervalHours,omitempty"`
+	BackupKeep          int `json:"backupKeep,omitempty"`
 }
 
 // --- GET /api/stats ---
@@ -616,6 +622,14 @@ func (s *Server) apiSettingsGet(w http.ResponseWriter, r *http.Request) {
 		UpdateCheckIntervalHours: s.deps.Cfg.Update.CheckIntervalHours,
 		UpscaleEnabled:           s.deps.Cfg.Upscale.Enabled,
 		IsSupervised:             s.deps.IsSupervised,
+		// Same backup fields the page-template handler emits
+		// (`pageSettings`). Without these the JSON API drops them
+		// via `omitempty` and any programmatic GET /api/settings
+		// caller (curl, future iOS / external tooling) sees a
+		// payload missing the retention policy values. Keep the
+		// two handlers in lockstep. (CodeRabbit on PR #129.)
+		BackupIntervalHours: s.deps.Cfg.Backup.EffectiveIntervalHours(),
+		BackupKeep:          s.deps.Cfg.Backup.EffectiveKeep(),
 	}
 	// Probe sox availability so the Settings UI can warn the
 	// operator before they enable the feature. Cheap (one

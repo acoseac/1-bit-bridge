@@ -42,6 +42,26 @@ const API = {
   },
 };
 
+// Returns true when the update payload's `lastCheck` field reflects
+// a Go `time.Time{}` zero value rather than a real timestamp. The
+// server marshals zero time as the literal RFC-3339 `0001-01-01T00:00:00Z`
+// (the field carries `omitempty` but that flag doesn't drop zero
+// `time.Time` structs — only zero pointers / strings / numerics). The
+// dashboard's Updates tile uses this to distinguish "no poll has
+// fired yet" from "poll just landed", surfacing the former as
+// `scheduled` + `Last check never` instead of `checking… 739736d ago`.
+// (User feedback on PR #129.)
+//
+// Defensive: missing field, empty string, year-prefix `0001` all
+// count as the zero value. Anything else is a real timestamp.
+function isUpdateLastCheckZero(u) {
+  if (!u) return true;
+  const v = u.lastCheck;
+  if (!v) return true;
+  if (typeof v !== "string") return false;
+  return v.startsWith("0001-01-01");
+}
+
 async function errorFromResponse(r) {
   try {
     const j = await r.json();
@@ -117,31 +137,12 @@ function initDashboard() {
   // helper is shared so both entry paths run the same flow.
   bindInstallButton(document.getElementById("update-install"));
 
-  // Backups panel — list current snapshots + "Snapshot now" button.
-  // The list is read on first tick; the button is opt-in for an
-  // on-demand snapshot. The download/export button is intentionally
-  // missing — backups contain the TLS private key and token hashes,
-  // and a one-click web download would be a credential extraction
-  // surface. Operators move snapshots offsite with scp/rsync.
-  const backupBtn = document.getElementById("backup-now");
-  if (backupBtn) {
-    backupBtn.addEventListener("click", async () => {
-      const oldText = backupBtn.textContent;
-      backupBtn.disabled = true;
-      backupBtn.textContent = "Snapshotting…";
-      try {
-        await API.post("/api/backups");
-        await refreshBackups();
-      } catch (err) {
-        alert("Snapshot failed: " + err.message);
-      } finally {
-        backupBtn.textContent = oldText;
-        backupBtn.disabled = false;
-      }
-    });
-  }
-  refreshBackups();
-  bindTailscaleRefreshButton();
+  // Backups + Tailscale wiring moved to initSettings (PR #129)
+  // — the panels themselves moved from this dashboard page to the
+  // Settings tabs. The SSE-driven `renderTailscaleTile` /
+  // backup count refresh paths are page-agnostic (they look up
+  // their target elements by id and no-op when missing), so
+  // streaming updates on Settings still work without a re-arm.
   // Live updates for stats, updates, tailscale arrive over the SSE
   // stream wired at the bottom of this file (`/api/events`). The
   // dashboard's first paint is server-rendered from template data
@@ -456,12 +457,27 @@ function renderUpdateTile(u) {
     status.innerHTML = `<span class="badge idle">up to date</span><span>· latest <code>${escapeHTML(u.latestVersion)}</code></span>`;
   } else if (u && u.lastError) {
     status.innerHTML = `<span class="badge idle">check failed</span>`;
+  } else if (u && isUpdateLastCheckZero(u)) {
+    // Distinguish "no check has fired yet" from "check is in
+    // flight". Pre-fix the operator saw "checking…" for hours
+    // because the default poll interval is 6h and no first check
+    // had run after a fresh bridge start. (User feedback on PR
+    // #129.)
+    status.innerHTML = `<span class="badge idle">scheduled</span>`;
   } else {
     status.innerHTML = `<span class="badge idle">checking…</span>`;
   }
 
-  if (lastCheck && u && u.lastCheck) {
-    lastCheck.textContent = formatTimeAgo(new Date(u.lastCheck));
+  if (lastCheck && u) {
+    if (isUpdateLastCheckZero(u)) {
+      // Server marshals Go's `time.Time{}` zero value as
+      // `0001-01-01T00:00:00Z` over the wire. The prior
+      // truthy-string check missed it and `formatTimeAgo` cheerfully
+      // rendered "739736d ago". Render "never" instead.
+      lastCheck.textContent = "never";
+    } else if (u.lastCheck) {
+      lastCheck.textContent = formatTimeAgo(new Date(u.lastCheck));
+    }
   }
   if (lastError) {
     if (u && u.lastError) {
@@ -958,11 +974,113 @@ function parseDurationShorthand(s) {
 
 // --- settings ---
 
+// Tabbed Settings sections (PR feat/admin-shell-tabs-and-theme).
+// The Settings page used to scroll forever — General / Networking /
+// Updates / Audio quality each as a section header on one long form.
+// Tabs flatten to one section visible at a time. Single shared form
+// is preserved so the bottom Save button still commits every pending
+// edit at once; switching tabs doesn't lose work.
+//
+// Active tab is persisted in sessionStorage so a save+restart bounce
+// returns the operator where they were. Validates the persisted id
+// against the live tab set so a future template that drops a tab
+// can't trap the user on a hidden pane.
+function initSettingsTabs() {
+  const tabs = document.querySelectorAll(".tab-btn[data-tab]");
+  const panes = document.querySelectorAll(".tab-pane[data-tab]");
+  if (tabs.length === 0 || panes.length === 0) return;
+  // Mark the page as tabs-enabled BEFORE applying hidden — without
+  // this, the template renders every pane visible (no-JS fallback)
+  // and the CSS rule that visually hides the in-pane <h2> is gated
+  // on this class so headings still appear in the fallback. (Qodo
+  // on PR #129: don't lock operators out of Settings if JS fails
+  // or is skipped by a future refactor.)
+  const page = document.querySelector(".page.settings");
+  if (page) page.classList.add("tabs-enabled");
+  const STORAGE_KEY = "settings.activeTab";
+  const validIds = new Set();
+  tabs.forEach(t => validIds.add(t.dataset.tab));
+  function activate(id) {
+    if (!validIds.has(id)) return;
+    tabs.forEach(t => {
+      const on = t.dataset.tab === id;
+      t.classList.toggle("active", on);
+      t.setAttribute("aria-selected", on ? "true" : "false");
+      // tabindex makes only the active tab keyboard-tabbable; arrow
+      // keys move within the role=tablist group per WAI-ARIA.
+      t.tabIndex = on ? 0 : -1;
+    });
+    panes.forEach(p => {
+      p.hidden = p.dataset.tab !== id;
+    });
+    try { sessionStorage.setItem(STORAGE_KEY, id); } catch { /* private mode */ }
+  }
+  tabs.forEach(t => {
+    t.addEventListener("click", () => activate(t.dataset.tab));
+  });
+  // Arrow-key navigation across the tab strip — standard WAI-ARIA
+  // tablist convention. Operators who navigate by keyboard expect
+  // Left/Right (and Home/End) on a focused tab to move within the
+  // group rather than jump out into the form.
+  const tabsArr = Array.from(tabs);
+  tabsArr.forEach((t, i) => {
+    t.addEventListener("keydown", (e) => {
+      let nextIdx = -1;
+      if (e.key === "ArrowRight") nextIdx = (i + 1) % tabsArr.length;
+      else if (e.key === "ArrowLeft") nextIdx = (i - 1 + tabsArr.length) % tabsArr.length;
+      else if (e.key === "Home") nextIdx = 0;
+      else if (e.key === "End") nextIdx = tabsArr.length - 1;
+      if (nextIdx >= 0) {
+        e.preventDefault();
+        const target = tabsArr[nextIdx];
+        activate(target.dataset.tab);
+        target.focus();
+      }
+    });
+  });
+  let saved = null;
+  try { saved = sessionStorage.getItem(STORAGE_KEY); } catch { /* private mode */ }
+  activate(saved && validIds.has(saved) ? saved : tabsArr[0].dataset.tab);
+}
+
 function initSettings() {
+  initSettingsTabs();
   // Cert info is a one-shot fetch — the cert doesn't change without
   // a restart, so polling it is wasted work. The endpoints panel is
   // hydrated by the SSE stream wired at the bottom of this file.
   refreshCertInfo();
+
+  // Backups panel (moved from dashboard in PR #129) — refresh
+  // count/most-recent on settings page load + wire the snapshot-now
+  // button. The download/export button is intentionally missing —
+  // backups contain the TLS private key and token hashes, and a
+  // one-click web download would be a credential extraction surface.
+  // Operators move snapshots offsite with scp/rsync.
+  const backupBtn = document.getElementById("backup-now");
+  if (backupBtn) {
+    backupBtn.addEventListener("click", async () => {
+      const oldText = backupBtn.textContent;
+      backupBtn.disabled = true;
+      backupBtn.textContent = "Snapshotting…";
+      try {
+        await API.post("/api/backups");
+        await refreshBackups();
+      } catch (err) {
+        alert("Snapshot failed: " + err.message);
+      } finally {
+        backupBtn.textContent = oldText;
+        backupBtn.disabled = false;
+      }
+    });
+  }
+  refreshBackups();
+
+  // Tailscale HTTPS panel (moved from dashboard in PR #129) — bind
+  // the Re-mint cert button. The panel itself stays hidden until
+  // the SSE-driven `renderTailscaleTile` reveals it on a tailscaled
+  // node detection event; that handler is page-agnostic and finds
+  // the element by id regardless of which page hosts it.
+  bindTailscaleRefreshButton();
 
   const form = document.getElementById("settings-form");
   const msg = document.getElementById("settings-msg");
