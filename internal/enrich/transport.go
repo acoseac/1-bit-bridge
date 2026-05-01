@@ -26,6 +26,14 @@ import (
 // host with N tracks * <few endpoints>, so a small pool keeps
 // connections warm without exploding the FD budget on small hosts.
 //
+// MaxIdleConns: 64 (global pool cap). Per-host is 8; the enricher
+// rotates through MusicBrainz, iTunes, Deezer, CoverArt, the
+// Internet Archive (CAA redirect target), Apple's image CDN, and
+// occasional Deezer dzcdn hosts — easily 6+ active hosts during a
+// fresh-library pass. 64 lets each of those hold its
+// MaxIdleConnsPerHost=8 quota without forced eviction (gemini
+// medium review on PR #118).
+//
 // IdleConnTimeout: 60 s. The enricher batches in 100-track windows
 // with brief pauses between; 60 s spans the natural between-batch
 // idle without aggressively closing.
@@ -45,7 +53,7 @@ var sharedHTTPTransport = &http.Transport{
 		KeepAlive: 30 * time.Second,
 	}).DialContext,
 	ForceAttemptHTTP2:     true,
-	MaxIdleConns:          32,
+	MaxIdleConns:          64,
 	MaxIdleConnsPerHost:   8,
 	IdleConnTimeout:       60 * time.Second,
 	TLSHandshakeTimeout:   10 * time.Second,
