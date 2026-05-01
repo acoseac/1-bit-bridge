@@ -33,7 +33,8 @@ func NewCoverArtClient(base, userAgent string, httpClient *http.Client) *CoverAr
 	if httpClient == nil {
 		// CAA redirects to Internet Archive; these can occasionally be
 		// slow, so give ourselves more headroom than the MB client.
-		httpClient = &http.Client{Timeout: 30 * time.Second}
+		// sharedHTTPTransport tunes the pool size — see transport.go.
+		httpClient = &http.Client{Timeout: 30 * time.Second, Transport: sharedHTTPTransport}
 	}
 	return &CoverArtClient{base: base, userAgent: userAgent, http: httpClient}
 }
