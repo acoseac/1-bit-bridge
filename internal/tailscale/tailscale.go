@@ -214,6 +214,17 @@ func MintCert(ctx context.Context, binary, magicDNS, certPath, keyPath string) e
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		// Check ctx.Err() BEFORE classifyMintError. On graceful
+		// shutdown the parent context cancels, cmd.Run() returns
+		// with empty stderr, and classifyMintError falls through to
+		// the `default:` "tailscale cert: <err>" branch — surfacing
+		// a fake cert failure for what was a deliberate shutdown
+		// signal. Returning ctx.Err() here lets callers
+		// (errors.Is(err, context.Canceled)) distinguish the two
+		// cases.
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
+		}
 		return classifyMintError(err, stderr.String())
 	}
 	return nil
