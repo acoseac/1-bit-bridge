@@ -878,7 +878,11 @@ dialog h2 { font-size: 18px; color: var(--accent); }
   padding: 0;
   margin: -1px;
   overflow: hidden;
-  clip: rect(0, 0, 0, 0);
+  /* `clip-path: inset(50%)` is the modern replacement for the
+   * deprecated `clip: rect(...)` rule — same visually-hidden
+   * effect, baseline-2023 browser support. (CodeRabbit on PR
+   * #129.) */
+  clip-path: inset(50%);
   white-space: nowrap;
   border: 0;
 }
