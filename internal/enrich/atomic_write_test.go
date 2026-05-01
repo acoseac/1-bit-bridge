@@ -180,4 +180,51 @@ func TestWriteArtworkAtomicStream_PropagatesReadError(t *testing.T) {
 	if _, err := os.Stat(dst); !os.IsNotExist(err) {
 		t.Errorf("destination should not exist after read error; stat err = %v", err)
 	}
+	// CodeRabbit nit on PR #123: assert no tmp leak on the read-error
+	// cleanup path. The deferred os.Remove must run.
+	entries, _ := os.ReadDir(cacheDir)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".caa-") {
+			t.Errorf("leaked tmp file on read error: %s", e.Name())
+		}
+	}
+}
+
+func TestWriteArtworkAtomicStream_RenameFailRejectsDifferentBytesOfSameSize(t *testing.T) {
+	// Qodo correctness regression on PR #123: pre-fix the streaming
+	// helper accepted on size-match alone, which would silently keep a
+	// corrupt-but-correct-sized destination over the streamed write.
+	// Post-fix: SHA-256 hash compare. Different bytes of the same
+	// length must NOT be accepted; the rename error propagates.
+	cacheDir := t.TempDir()
+	dst := filepath.Join(cacheDir, "stream-mbid-collision.jpg")
+	want := bytes.Repeat([]byte("X"), 4096)
+	collision := bytes.Repeat([]byte("Y"), 4096) // same size, different bytes
+	if err := os.WriteFile(dst, collision, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := renameFunc
+	renameFunc = func(src, dst string) error { return os.ErrPermission }
+	t.Cleanup(func() { renameFunc = orig })
+
+	if err := writeArtworkAtomicStream(dst, bytes.NewReader(want), int64(len(want)+1)); err == nil {
+		t.Fatal("writeArtworkAtomicStream returned nil; expected the rename error to propagate when destination is size-equal but byte-different")
+	}
+	// Cache file must NOT have been overwritten (the rename failed and
+	// the streaming helper neither overwrote nor accepted the wrong
+	// bytes).
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, collision) {
+		t.Error("destination was clobbered despite rename failure")
+	}
+	entries, _ := os.ReadDir(cacheDir)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".caa-") {
+			t.Errorf("leaked tmp on collision-reject path: %s", e.Name())
+		}
+	}
 }

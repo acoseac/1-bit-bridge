@@ -664,19 +664,37 @@ func ArtworkCachePath(cacheDir, mbid string, size int) string {
 // writeArtworkAtomic's []byte which holds the entire body in RAM.
 //
 // On rename collision (race against a sibling enricher / scanner) the
-// existing file is trusted iff its size matches the streamed write.
-// The enricher's URL-to-content mapping is deterministic per
-// (mbid, size) so a size match indicates the existing file is correct;
-// the byte-equivalence verification writeArtworkAtomic does is unique
-// to the scanner-side path which can have two producers writing
-// different artwork to the same MBID-keyed file.
+// existing file is verified for byte-equivalence by SHA-256 hash
+// compare. A SHA-256 of the streamed bytes is computed inline (via
+// io.MultiWriter) so the streaming property is preserved — neither
+// the streamed content nor the on-disk file is buffered in full
+// memory. Pre-fix accepted on size-match alone; that contradicted
+// the existing writeArtworkAtomic rationale (size-only is insufficient
+// because two different images can share a byte length, and a partial
+// write from a prior crash on the destination could leave correct-
+// sized but corrupt content) (qodo correctness review on PR #123).
 //
 // Caller is responsible for closing src when it's an io.ReadCloser
 // (HTTP body); the helper signature is io.Reader so a buffered byte
 // slice can also be tested via bytes.NewReader without a fake closer.
-func writeArtworkAtomicStream(path string, src io.Reader, max int64) error {
+//
+// `maxBytes` parameter (not `max`) so it doesn't shadow Go 1.21's
+// builtin `max` (CodeRabbit nit on PR #123).
+func writeArtworkAtomicStream(path string, src io.Reader, maxBytes int64) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
+	}
+	// Belt-and-braces chmod: MkdirAll is umask-affected. 0o700 has no
+	// group/other bits to mask, so on every Unix `os.MkdirAll` lands
+	// at exactly 0o700 regardless of umask, but the explicit Chmod
+	// future-proofs against either a refactor that loosens the
+	// requested mode OR the historical behavior on non-Unix.
+	// Mirror of the auth/config setup pattern (qodo on PR #123).
+	if err := os.Chmod(filepath.Dir(path), 0o700); err != nil && !os.IsNotExist(err) {
+		// Don't fail on a chmod error for a cache directory — the
+		// directory creation itself succeeded; this is a best-effort
+		// hardening pass.
+		logger.Debug("artwork cache chmod hardening", "dir", filepath.Dir(path), "err", err)
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".caa-*.jpg.tmp")
 	if err != nil {
@@ -691,12 +709,18 @@ func writeArtworkAtomicStream(path string, src io.Reader, max int64) error {
 	}()
 	defer func() { _ = tmp.Close() }()
 
-	n, err := io.Copy(tmp, io.LimitReader(src, max+1))
+	// io.MultiWriter tees every byte to disk AND a SHA-256 hash sink
+	// in a single pass. The hash is consumed only on rename-collision
+	// for byte-equivalence verification — fast path pays one hash
+	// (~1 GB/s on Apple Silicon) for a multi-MB image, well below
+	// network fetch latency.
+	hasher := sha256.New()
+	n, err := io.Copy(io.MultiWriter(tmp, hasher), io.LimitReader(src, maxBytes+1))
 	if err != nil {
 		return err
 	}
-	if n > max {
-		return fmt.Errorf("artwork exceeds %d-byte limit", max)
+	if n > maxBytes {
+		return fmt.Errorf("artwork exceeds %d-byte limit", maxBytes)
 	}
 	if err := tmp.Sync(); err != nil {
 		return err
@@ -704,18 +728,46 @@ func writeArtworkAtomicStream(path string, src io.Reader, max int64) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
+	streamedHash := hasher.Sum(nil)
 
 	if err := renameWithRetry(tmpName, path); err != nil {
-		// Race window: existing file present. Trust if size matches.
-		// See doc-comment for why this is safer in the enricher than
-		// in the scanner-side writeArtworkAtomicScan.
-		if info, statErr := os.Stat(path); statErr == nil && info.Size() == n {
-			return nil
+		// Race / locking window: existing destination present. Verify
+		// byte-equivalence via streaming SHA-256 over the existing file
+		// — neither side is buffered in full memory. Size mismatch
+		// short-circuits before the read.
+		info, statErr := os.Stat(path)
+		if statErr != nil || info.Size() != n {
+			return err
 		}
-		return err
+		existingHash, hashErr := hashFile(path)
+		if hashErr != nil || !bytes.Equal(existingHash, streamedHash) {
+			return err
+		}
+		// Existing file is byte-equivalent — accept the rename failure
+		// and let the deferred tmp cleanup remove our orphan. Caller
+		// gets a successful result, same as a normal rename.
+		return nil
 	}
 	cleanup = false
 	return nil
+}
+
+// hashFile streams the file at path through SHA-256 and returns the
+// digest. Used by writeArtworkAtomicStream's rename-collision path
+// to verify an existing destination is byte-equivalent to the
+// streamed write — the streaming property of the helper depends on
+// neither side ever loading the full content into memory.
+func hashFile(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return nil, err
+	}
+	return h.Sum(nil), nil
 }
 
 // writeArtworkAtomic writes bytes to path via tmp-file + rename so a
