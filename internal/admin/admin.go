@@ -143,6 +143,18 @@ type Deps struct {
 	// would suggest the pool exists but is idle, which is
 	// semantically wrong).
 	UpscaleStats func() *UpscalePoolStats
+
+	// IsSupervised reports whether the current process is running
+	// under launchd / systemd / Windows SCM — i.e. whether
+	// `os.Exit(0)` will trigger an automatic relaunch. Threaded
+	// through to `settingsResponse.IsSupervised` so the admin UI
+	// can show "Restart now" (auto-relaunch promised) versus
+	// "Stop now (manual restart required)" (operator must run the
+	// service back up themselves). Wired in `cmd/bridge/main.go`
+	// from `supervision.IsSupervised()`. Defaults to false in
+	// test harnesses, which yields the conservative — never-
+	// promise-relaunch — UI wording, never the lying one.
+	IsSupervised bool
 }
 
 // UpscalePoolStats mirrors `transcode.PoolStats` field-for-

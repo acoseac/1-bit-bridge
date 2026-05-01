@@ -989,14 +989,32 @@ function initSettings() {
     }
   });
 
+  // The dataset attribute is rendered by the settings template from
+  // `settingsResponse.IsSupervised`, which the server populates from
+  // `supervision.IsSupervised()`. When false, the bridge isn't under
+  // launchd / systemd / SCM and `os.Exit(0)` won't be relaunched —
+  // pre-fix this confirm dialog claimed otherwise ("until the
+  // service manager relaunches it") and the operator was left
+  // staring at a dead admin page wondering why nothing came back.
+  // Branch on the live flag so the dialog tells the truth.
   restartBtn?.addEventListener("click", async () => {
-    if (!confirm("Restart the bridge now? The page will become unreachable until the service manager relaunches it.")) return;
+    const supervised = restartBtn.dataset.supervised === "true";
+    const prompt = supervised
+      ? "Restart the bridge now? The page will become unreachable until the service manager relaunches it (~1–2 s)."
+      : "Stop the bridge now? This bridge isn't running under a service manager, so the page will go down and you'll need to start it again manually.";
+    if (!confirm(prompt)) return;
     try {
       await API.post("/api/restart");
-      showMsg(msg, "warn", "Restart signalled. Reload the page in a few seconds.");
+      const post = supervised
+        ? "Restart signalled. Reload the page in a few seconds."
+        : "Stop signalled. Start the bridge again manually, then reload.";
+      showMsg(msg, "warn", post);
     } catch (err) {
       // After the server exits, fetch rejects — that's expected.
-      showMsg(msg, "warn", "Restart signalled (server went away).");
+      const post = supervised
+        ? "Restart signalled (server went away)."
+        : "Stop signalled (server went away). Start it again manually.";
+      showMsg(msg, "warn", post);
     }
   });
 

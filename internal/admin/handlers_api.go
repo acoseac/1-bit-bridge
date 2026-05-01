@@ -131,6 +131,20 @@ type settingsResponse struct {
 	// Multi-line strings work via the template's `pre`
 	// rendering. Empty when sox is already available.
 	UpscaleSoxInstallHint string `json:"-"`
+	// IsSupervised reports whether the current bridge process is
+	// running under launchd / systemd / Windows SCM — i.e.
+	// whether `os.Exit(0)` will trigger an automatic relaunch.
+	// The Settings page's "Restart now" button reads this to
+	// pick honest button text and confirm wording: an
+	// unsupervised bridge is told it's a STOP, not a restart.
+	// Pre-fix the confirm dialog claimed the page would become
+	// unreachable "until the service manager relaunches it"
+	// even when there was no service manager — the lie this
+	// field exists to retire. Always emitted (no `omitempty`)
+	// so the JS doesn't have to disambiguate "field absent"
+	// from "supervisor unknown" — false IS the supervisor-
+	// unknown answer.
+	IsSupervised bool `json:"isSupervised"`
 }
 
 // --- GET /api/stats ---
@@ -601,6 +615,7 @@ func (s *Server) apiSettingsGet(w http.ResponseWriter, r *http.Request) {
 		UpdateQuietHours:         s.deps.Cfg.Update.QuietHours,
 		UpdateCheckIntervalHours: s.deps.Cfg.Update.CheckIntervalHours,
 		UpscaleEnabled:           s.deps.Cfg.Upscale.Enabled,
+		IsSupervised:             s.deps.IsSupervised,
 	}
 	// Probe sox availability so the Settings UI can warn the
 	// operator before they enable the feature. Cheap (one

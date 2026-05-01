@@ -39,6 +39,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	bridgemdns "github.com/acoseac/1-bit-bridge/internal/mdns"
 	"github.com/acoseac/1-bit-bridge/internal/pairing"
+	"github.com/acoseac/1-bit-bridge/internal/supervision"
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
 	"github.com/acoseac/1-bit-bridge/internal/updater"
@@ -1034,6 +1035,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		BackupSources:   backupSources,
 		Tailscale:       tailscaleAdminAdapter{auto: tailscaleAuto},
 		Pairing:         pairingStore,
+		IsSupervised:    supervision.IsSupervised(),
 		UpscalePrecheck: transcode.PrecheckSox,
 		UpscaleStats: func() *admin.UpscalePoolStats {
 			// Snapshot the pool's live counters when the

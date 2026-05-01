@@ -134,6 +134,7 @@ func (s *Server) pageSettings(w http.ResponseWriter, r *http.Request) {
 		UpdateQuietHours:         s.deps.Cfg.Update.QuietHours,
 		UpdateCheckIntervalHours: s.deps.Cfg.Update.CheckIntervalHours,
 		UpscaleEnabled:           s.deps.Cfg.Upscale.Enabled,
+		IsSupervised:             s.deps.IsSupervised,
 	}
 	// v1.2 Audio quality section: pre-compute the boolean +
 	// install hint so the template doesn't need a `deref`
