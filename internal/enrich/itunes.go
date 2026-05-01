@@ -62,7 +62,12 @@ func NewITunesClient(base, userAgent string, httpClient *http.Client) *ITunesCli
 		base = DefaultITunesBase
 	}
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 10 * time.Second}
+		// sharedHTTPTransport tunes the pool size + keep-alive
+		// behaviour for the metadata API hosts; default
+		// http.Client falls back to http.DefaultTransport which
+		// caps MaxIdleConnsPerHost at 2 and causes connection
+		// churn during enrichment passes.
+		httpClient = &http.Client{Timeout: 10 * time.Second, Transport: sharedHTTPTransport}
 	}
 	return &ITunesClient{base: base, userAgent: userAgent, http: httpClient}
 }

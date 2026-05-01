@@ -45,7 +45,9 @@ func NewDeezerClient(base, userAgent string, httpClient *http.Client) *DeezerCli
 		base = DefaultDeezerBase
 	}
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 10 * time.Second}
+		// sharedHTTPTransport tunes the pool size for metadata
+		// API hosts — see transport.go for the rationale.
+		httpClient = &http.Client{Timeout: 10 * time.Second, Transport: sharedHTTPTransport}
 	}
 	c := &DeezerClient{
 		base:              base,
