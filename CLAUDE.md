@@ -286,6 +286,28 @@ Admin Settings page gets an "Audio quality" section with a toggle for `upscale.e
 - **Settings page PATCH `upscaleEnabled` flips marked `RestartRequired: true`** but only on actual change — idempotent same-value submissions skip the banner (no spurious "restart required" when the operator clicks Save with the displayed value unchanged). Test in `TestSettingsPatchUpscaleEnabled` pins the contract.
 - **Stats card visibility** ([static/app.js](internal/admin/static/app.js) `refreshUpscaleStats`): hidden when `enabled == false && cachedVariants == 0` (fresh install never sees clutter); shown with em-dashed live fields when `enabled == false && cachedVariants > 0` (historical state visible during a feature-off window); shown with full live snapshot when `enabled == true`. **Don't reintroduce the always-visible card** — operators who never enabled the feature should see zero upscale chrome.
 
+### v1.2 — public `GET /v1/upscale/stats` endpoint (PR #111)
+
+Authenticated read-only mirror of the admin tile, exposed on the public protocol so paired iOS clients can render an "Upscaling" management section without surfacing the admin console.
+
+- **Wire shape is field-for-field identical to admin's `upscaleStatsResponse`** — same `enabled` / `soxAvailable` / `pool` / `cachedVariants` / `cachedBytes` semantics. Documented in PROTOCOL.md. `internal/version.ProtocolVersion` stays at 1 (additive endpoint, not a breaking change). Pre-v1.2 bridges return 404 from the unregistered route — iOS treats identically to `{enabled: false}`, so the two paths are intentionally indistinguishable to clients.
+- **`api.UpscaleStatsProvider` is the abstraction** ([upscale_stats.go](internal/api/upscale_stats.go)) — `cmd/bridge.upscaleStatsAdapter` wires it with the same closures the admin tile already consumes, so the operator's Settings page and a paired iOS client always see the same numbers (no drift between the two surfaces).
+- **Sox precheck cached on the adapter at 30 s TTL** (mirrors `admin.Server.cachedSoxAvailability`). iOS polls `/v1/upscale/stats` at 5 s while the management page is foregrounded; without the cache, the per-poll fork-exec to `sox --version` would burn ~12 fork-execs/min for no good reason (gemini-code-assist on PR #111). Adapter holds its own cache rather than reaching into admin internals — same TTL means both surfaces stay aligned on what the host reports.
+- **Authenticated, NOT a pairing probe** — same bearer-token gate as `POST /v1/upscale` and every other `/v1/*` except `/v1/health` and the pairing routes. Don't expose it unauthed; queue depth + failure counts are operator-visibility-only.
+- **Known limitation — `cfg.Upscale.Enabled` is read without synchronization**. Same data race that existed in the admin tile's closure ([cmd/bridge/main.go:909](cmd/bridge/main.go)) when admin's PATCH writer mutates the same field under `admin.Server.mu`. Adapter doc-comment documents the worst case (one 5 s poll snapshot may report `enabled` inconsistently with a freshly-PATCHed state; the next poll converges). The proper fix is an `atomic.Bool` on `*config.Config` touching admin's writer too — out-of-scope for this endpoint addition.
+
+### v1.2 — mDNS rebind on interface set change (PR #113)
+
+User-reported regression: long-running bridge (5 days uptime) logs "advertising" but `dns-sd -B _onebit-bridge._tcp` returns nothing. Verified via fresh restart — discovery immediately resurfaces.
+
+- **Root cause**: `hashicorp/mdns` snapshots IPs at `NewServer()` and never re-binds. After any network transition (Wi-Fi roam, Ethernet plug, dock, sleep/wake) the cached UDP sockets are tied to interfaces that no longer carry the right IP.
+- **Fix**: `Advertise()` spawns a 60 s rebind goroutine that diffs `ipsForAdvertise()` against the cached set and rebuilds the underlying `hcmdns` server when they drift. Cheap when nothing changes (single `net.Interfaces()` + sorted-string compare); the rebuild path runs only on the rare transition tick.
+- **`Advertiser.cachedIPs` + `closed` flag are guarded by `rebindMu`** so the background goroutine and `Close()` don't race the server pointer. The `closed` flag is the belt-and-braces backstop for a stray tick that lands after `Close` has already fired (the `done` channel is the primary stop signal). `Close` drains the goroutine first, then shuts down the current server.
+- **Test seam: `advertiseInternal(cfg, ipSource, interval, spawnLoop)`**. Tests inject a controllable `ipSource` and pass `spawnLoop=false` so they drive `maybeRebind()` directly. The race detector caught the alternative pattern (writing `Advertiser.ipSource` after `Advertise`); a lock-on-every-read fix would have added cost to the production 60 s hot path. Mirror of the seam pattern several iOS-side `_*ForTest` helpers use.
+- **`ipSetEqual` is order-invariant** — `net.Interfaces()` may return addresses in different orders across calls (interface renames, hot-plug, kernel scheduler). Sorted-string compare since both sides are typically <10 entries on a dev machine; no need for a per-entry hash map.
+- **Failure log uses the same `ips` key + `ipsForLog(...)` shaping as the success log** (Qodo on PR #112). Stable attribute keys per the logging convention — log-greppers correlate rebind sequences across success/failure ticks without learning a per-callsite vocabulary.
+- **Pairs with iOS PR #193's Bonjour Refresh button** — either side's recovery is enough on its own; both together cover the full "discovery stopped working" matrix.
+
 ## Repo clean-up
 
 Pre-push:
