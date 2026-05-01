@@ -523,25 +523,96 @@ func (s *Store) DeleteTrack(path string) error {
 	return nil
 }
 
-// GetTrack fetches a single track by path. Returns (nil, nil) if absent.
+// GetTrack fetches a single track by EXACT path match. Returns
+// (nil, nil) if absent.
 //
-// The lookup is case-insensitive AND tolerates a leading slash on
-// the input — iOS's `share.normalize(path:)` lowercases bridge paths
-// and prepends "/" before storing them in SwiftData, then sends
-// THAT shape on POST /v1/upscale and friends. The manifest stores
-// the FS-canonical (case-preserved, no-leading-slash) form, so an
-// exact compare missed every iOS-shaped lookup and every track
-// flowed through the upscale handler as `track == nil` →
-// `ErrUpscaleIneligible`. Reproducer: long-press a FLAC, "Generate
-// upscaled version", bridge log shows `enqueued=0 queueFull=false`.
+// Case-sensitive by design: `tracks.path` is the SQL PRIMARY KEY
+// and on case-sensitive filesystems (most Linux deployments) two
+// files can legitimately coexist whose paths differ only by case.
+// `Scanner.runScanWorker`'s unchanged-file fast-path calls this
+// with the exact path it just walked; any case-folding here would
+// risk returning an arbitrary sibling and silently skipping the
+// real file from indexing.
 //
-// The migration-3 functional index `idx_tracks_path_lower` makes
-// this O(1) instead of a full-table scan. SQLite's LOWER is
-// ASCII-only — the comment in the v3 migration documents the
-// Unicode follow-up.
+// External callers that hand in iOS-shaped paths (lowercase +
+// leading slash from `share.normalize(path:)`) should call
+// `LookupTrack` instead — that path tolerates the iOS normalisation
+// at the cost of a slower index scan, which is fine for the
+// once-per-request /v1/upscale eligibility gate but wrong for the
+// scanner's hot inner loop. (Qodo on PR #126.)
 func (s *Store) GetTrack(path string) (*Track, error) {
 	var raw []byte
+	err := s.db.QueryRow(`SELECT tags_json FROM tracks WHERE path = ?`, path).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var t Track
+	if err := json.Unmarshal(raw, &t); err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
+// LookupTrack fetches a single track by an iOS-shaped path —
+// lowercase + leading slash from `share.normalize(path:)` — and
+// resolves it against the manifest's case-preserved canonical
+// PRIMARY KEY. Returns (nil, nil) if absent.
+//
+// Two-stage lookup:
+//
+//  1. Exact match (back-compat fast path; covers the case where
+//     iOS sends a path that already matches the canonical case,
+//     e.g. on case-sensitive filesystems where paths weren't
+//     normalised to lowercase).
+//  2. Case-insensitive fallback via `LOWER(path) = LOWER(?)`. The
+//     v3 migration's `idx_tracks_path_lower` functional index
+//     makes this O(1).
+//
+// Use this for any caller that takes a path from iOS — the upscale
+// eligibility gate is the canonical example. The two-stage shape
+// preserves correctness on case-sensitive filesystems where two
+// distinct files may legitimately differ only by case: the exact
+// match wins first, and only when no exact match exists does the
+// fallback reach. Multiple distinct case-colliding rows can still
+// be sources of ambiguity in the fallback (`LIMIT 1` returns one
+// arbitrarily) — that's a manifest-data anomaly, not a lookup
+// concern, and the SAME-CASE upsert path keeps it impossible
+// under normal scanner operation. (Qodo on PR #126: scanner
+// hot-loop callers must NOT use this — they need GetTrack's
+// exact-match contract for correctness.)
+//
+// Limitation: SQLite's built-in LOWER is ASCII-only. Libraries
+// with accented characters will see iOS's full-Unicode
+// `String.lowercased()` produce a different byte sequence than
+// SQLite's LOWER, and lookups will still miss. Documented in the
+// v3 migration; future fix is a Go-side-precomputed
+// `path_lower` column populated from `golang.org/x/text/cases`.
+func (s *Store) LookupTrack(path string) (*Track, error) {
+	if t, err := s.GetTrack(path); err != nil || t != nil {
+		return t, err
+	}
 	cleaned := normalizePathForLookup(path)
+	if cleaned == path {
+		// Exact already missed and the cleaned form is identical
+		// — no further fallback to attempt that wouldn't repeat
+		// the same query.
+		return s.lookupTrackByLowerCase(cleaned)
+	}
+	// Try the leading-slash-stripped form as a back-compat
+	// exact match before falling through to the case-folded
+	// scan; some iOS code paths only strip the slash without
+	// lowercasing, and that exact form should land cheaply.
+	if t, err := s.GetTrack(cleaned); err != nil || t != nil {
+		return t, err
+	}
+	return s.lookupTrackByLowerCase(cleaned)
+}
+
+func (s *Store) lookupTrackByLowerCase(cleaned string) (*Track, error) {
+	var raw []byte
 	err := s.db.QueryRow(
 		`SELECT tags_json FROM tracks WHERE LOWER(path) = LOWER(?) LIMIT 1`,
 		cleaned,
@@ -1298,13 +1369,63 @@ func (s *Store) UpsertVariant(v VariantRow) error {
 // (nil, nil) if absent — same convention as GetTrack.
 func (s *Store) GetVariant(sourcePath, variantID string) (*VariantRow, error) {
 	var v VariantRow
-	// Same case-insensitive + leading-slash tolerance as GetTrack —
-	// the upscale eligibility gate calls GetVariant immediately
-	// after GetTrack with the same iOS-shaped path. Without this,
-	// a fresh sidecar ("variant exists, refuse to re-convert")
-	// check missed on case mismatch and the bridge would silently
-	// re-enqueue a job whose output already lived on disk.
+	// Exact match by design — `track_variants.source_path` is part
+	// of the SQL PRIMARY KEY and case-insensitive lookups would risk
+	// returning an arbitrary case-colliding row's sidecar path on
+	// case-sensitive filesystems. Use `LookupVariant` for callers
+	// that hand in iOS-shaped paths from `share.normalize`. (Qodo
+	// on PR #126: variant lookup non-determinism could stream the
+	// wrong sidecar from /v1/download.)
+	err := s.db.QueryRow(`
+		SELECT source_path, variant_id, sidecar_path, format,
+		       sample_rate, bits_per_sample, size_bytes,
+		       source_mtime_ns, source_size, sox_settings, created_at
+		FROM track_variants
+		WHERE source_path = ? AND variant_id = ?
+	`, sourcePath, variantID).Scan(
+		&v.SourcePath, &v.VariantID, &v.SidecarPath, &v.Format,
+		&v.SampleRate, &v.BitsPerSample, &v.SizeBytes,
+		&v.SourceMTimeNS, &v.SourceSize, &v.SoxSettings, &v.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &v, nil
+}
+
+// LookupVariant fetches a variant by an iOS-shaped sourcePath
+// (lowercase + leading slash from `share.normalize(path:)`) and
+// resolves it against the manifest's case-preserved
+// `track_variants.source_path`. Returns (nil, nil) if absent.
+//
+// Same two-stage lookup as `LookupTrack`: exact first
+// (cheap + correct on case-sensitive filesystems where two
+// case-colliding distinct rows could otherwise alias), then
+// `LOWER(source_path) = LOWER(?)` falling back via the v3
+// migration's `idx_track_variants_source_path_lower` functional
+// index. Use this when the caller hands in iOS-shaped paths;
+// internal callers that walk the canonical PRIMARY KEY should
+// stay on `GetVariant`. (Qodo on PR #126: the upscale freshness
+// check is the canonical caller — it follows a `LookupTrack` and
+// must agree with it on which row is being inspected.)
+func (s *Store) LookupVariant(sourcePath, variantID string) (*VariantRow, error) {
+	if v, err := s.GetVariant(sourcePath, variantID); err != nil || v != nil {
+		return v, err
+	}
 	cleaned := normalizePathForLookup(sourcePath)
+	if cleaned == sourcePath {
+		return s.lookupVariantByLowerCase(cleaned, variantID)
+	}
+	if v, err := s.GetVariant(cleaned, variantID); err != nil || v != nil {
+		return v, err
+	}
+	return s.lookupVariantByLowerCase(cleaned, variantID)
+}
+
+func (s *Store) lookupVariantByLowerCase(cleanedSourcePath, variantID string) (*VariantRow, error) {
+	var v VariantRow
 	err := s.db.QueryRow(`
 		SELECT source_path, variant_id, sidecar_path, format,
 		       sample_rate, bits_per_sample, size_bytes,
@@ -1312,7 +1433,7 @@ func (s *Store) GetVariant(sourcePath, variantID string) (*VariantRow, error) {
 		FROM track_variants
 		WHERE LOWER(source_path) = LOWER(?) AND variant_id = ?
 		LIMIT 1
-	`, cleaned, variantID).Scan(
+	`, cleanedSourcePath, variantID).Scan(
 		&v.SourcePath, &v.VariantID, &v.SidecarPath, &v.Format,
 		&v.SampleRate, &v.BitsPerSample, &v.SizeBytes,
 		&v.SourceMTimeNS, &v.SourceSize, &v.SoxSettings, &v.CreatedAt)

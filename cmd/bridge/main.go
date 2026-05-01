@@ -105,7 +105,15 @@ func (a *upscaleEnqueuerAdapter) EnqueueOne(libraryRelativePath string) error {
 	if err != nil {
 		return api.ErrUpscaleSourceMissing
 	}
-	track, err := a.store.GetTrack(libraryRelativePath)
+	// Use Lookup (not Get) here because iOS hands in a path that's
+	// been through `share.normalize(path:)` — lowercase + leading
+	// slash — while the manifest stores the FS-canonical case.
+	// LookupTrack does an exact-match fast path first (handles
+	// case-sensitive filesystems correctly) then falls back to a
+	// LOWER() compare via the v3 functional index. The scanner's
+	// hot loop deliberately stays on GetTrack so two distinct
+	// case-colliding rows can't alias each other (Qodo on PR #126).
+	track, err := a.store.LookupTrack(libraryRelativePath)
 	if err != nil {
 		// Surface DB errors as a generic 5xx upstream rather
 		// than silently enqueuing — the resumability check
@@ -153,7 +161,7 @@ func (a *upscaleEnqueuerAdapter) EnqueueOne(libraryRelativePath string) error {
 	// Resumability: skip when a fresh sidecar already exists.
 	// Same handle-the-error policy as the parent track lookup —
 	// a sick DB shouldn't silently re-convert a track.
-	existing, getVErr := a.store.GetVariant(libraryRelativePath, spec.VariantID())
+	existing, getVErr := a.store.LookupVariant(libraryRelativePath, spec.VariantID())
 	if getVErr != nil {
 		return fmt.Errorf("get variant row: %w", getVErr)
 	}
