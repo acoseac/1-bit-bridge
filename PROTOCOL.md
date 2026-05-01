@@ -292,6 +292,7 @@ Snapshot of the upscale feature's runtime + on-disk state. Designed for the iOS 
 **Authentication**: standard `Authorization: Bearer <token>` (same rule as every other `/v1/*` endpoint except `/v1/health` and the pairing routes).
 
 **Response** (`200 OK`, JSON):
+
 ```json
 {
   "enabled": true,
@@ -309,6 +310,7 @@ Snapshot of the upscale feature's runtime + on-disk state. Designed for the iOS 
   "cachedBytes": 4823917568
 }
 ```
+
 
 | Field | Meaning |
 |---|---|

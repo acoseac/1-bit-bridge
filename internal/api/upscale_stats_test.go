@@ -124,7 +124,11 @@ func TestUpscaleStatsHappyPathWireShape(t *testing.T) {
 // disabled, the `pool` and `soxAvailable` fields are documented as
 // `omitempty`. Verify the wire JSON actually drops the keys (not
 // just emits null) so the iOS decoder's lenient default path
-// stays correct.
+// stays correct, AND the numeric `cachedVariants` field comes
+// through with the EXACT value the snapshot supplied (no
+// substring sniffing — CodeRabbit on PR #111 caught the prior
+// `Contains(bs, "5")` form as too loose; any "5" anywhere in the
+// body would have falsely passed).
 func TestUpscaleStatsDisabledPoolOmitted(t *testing.T) {
 	url, tok := upscaleStatsFixture(t, true, UpscaleStats{Enabled: false, CachedVariants: 5, CachedBytes: 1024})
 	req, _ := http.NewRequest("GET", url+"/v1/upscale/stats", nil)
@@ -142,14 +146,17 @@ func TestUpscaleStatsDisabledPoolOmitted(t *testing.T) {
 	if strings.Contains(bs, `"soxAvailable"`) {
 		t.Errorf("soxAvailable field should be omitted when nil; got body: %s", bs)
 	}
-	// The numeric fields are NOT omitempty (they always appear) —
-	// document that contract by asserting they're present even
-	// when zero would otherwise be omitted. writeJSON pretty-
-	// prints with `: ` separators, so match the field name and
-	// the value via `Contains` on each side rather than asserting
-	// the literal `"cachedVariants":5` form.
-	if !strings.Contains(bs, `"cachedVariants"`) || !strings.Contains(bs, `5`) {
-		t.Errorf("cachedVariants must always be present; got body: %s", bs)
+	// Parse the body as a plain map so the numeric assertions are
+	// exact and don't depend on writeJSON's whitespace formatting.
+	var parsed map[string]any
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		t.Fatalf("decode body: %v (raw: %s)", err, bs)
+	}
+	if got, ok := parsed["cachedVariants"].(float64); !ok || got != 5 {
+		t.Errorf("cachedVariants: got %v, want 5 (raw: %s)", parsed["cachedVariants"], bs)
+	}
+	if got, ok := parsed["cachedBytes"].(float64); !ok || got != 1024 {
+		t.Errorf("cachedBytes: got %v, want 1024 (raw: %s)", parsed["cachedBytes"], bs)
 	}
 }
 

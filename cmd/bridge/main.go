@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -189,11 +190,32 @@ func (a *upscaleEnqueuerAdapter) EnqueueOne(libraryRelativePath string) error {
 // Pool. The closures evaluate both conditions at snapshot time so
 // `enabled` and the `pool` payload move together — same gating the
 // admin `UpscaleStats` closure already uses.
+//
+// **Known limitation**: `cfg.Upscale.Enabled` is read here without
+// synchronization while the admin PATCH handler writes the same
+// field under `admin.Server.mu`. This data race already existed in
+// the admin tile's closure (cmd/bridge/main.go:909) and is out-of-
+// scope for this endpoint addition; the proper fix is an `atomic.Bool`
+// on `*config.Config` (touching admin's writer too). Worst case
+// today: a single 5 s poll snapshot reads a racing flag value and
+// reports `enabled` inconsistently with the freshly-PATCHed state;
+// the next poll converges.
+//
+// Sox precheck is TTL-cached (mirrors `admin.Server.cachedSoxAvailability`,
+// also 30 s) so the per-5-s poll doesn't shell out 12×/min — the
+// precheck forks `sox --version`, which is cheap but not free, and
+// gemini-code-assist reasonably flagged the per-call cost on PR #111.
 type upscaleStatsAdapter struct {
 	pool    func() *transcode.Pool
 	enabled func() bool
 	store   *manifest.Store
+
+	soxMu sync.Mutex
+	soxAt time.Time
+	soxOK bool
 }
+
+const upscaleStatsSoxTTL = 30 * time.Second
 
 func (a *upscaleStatsAdapter) UpscaleStatsSnapshot() api.UpscaleStats {
 	var snap api.UpscaleStats
@@ -212,13 +234,8 @@ func (a *upscaleStatsAdapter) UpscaleStatsSnapshot() api.UpscaleStats {
 		}
 	}
 	snap.Enabled = (snap.Pool != nil)
-	if err := transcode.PrecheckSox(); err == nil {
-		t := true
-		snap.SoxAvailable = &t
-	} else {
-		f := false
-		snap.SoxAvailable = &f
-	}
+	soxOK := a.cachedSoxOK()
+	snap.SoxAvailable = &soxOK
 	if a.store != nil {
 		count, bytes, err := a.store.CountVariants()
 		if err != nil {
@@ -234,6 +251,22 @@ func (a *upscaleStatsAdapter) UpscaleStatsSnapshot() api.UpscaleStats {
 		}
 	}
 	return snap
+}
+
+// cachedSoxOK returns the most recent `transcode.PrecheckSox` result
+// or runs a fresh probe when the cache is older than
+// `upscaleStatsSoxTTL`. Mirrors `admin.Server.cachedSoxAvailability`'s
+// 30 s TTL so the operator's Settings tile and the iOS-facing
+// endpoint stay aligned on what the host reports.
+func (a *upscaleStatsAdapter) cachedSoxOK() bool {
+	a.soxMu.Lock()
+	defer a.soxMu.Unlock()
+	if !a.soxAt.IsZero() && time.Since(a.soxAt) < upscaleStatsSoxTTL {
+		return a.soxOK
+	}
+	a.soxOK = (transcode.PrecheckSox() == nil)
+	a.soxAt = time.Now()
+	return a.soxOK
 }
 
 // updateInfoAdapter bridges *updater.Updater to api.UpdaterStatus +
