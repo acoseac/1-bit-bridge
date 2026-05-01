@@ -39,10 +39,21 @@ func NewCoverArtClient(base, userAgent string, httpClient *http.Client) *CoverAr
 	return &CoverArtClient{base: base, userAgent: userAgent, http: httpClient}
 }
 
+// MaxCoverArtBytes caps individual cover-art body reads. 20 MB is
+// generous — the largest 1200×1200 JPEG observed in the wild is
+// ~3 MB, so the cap exists to protect against a hostile/runaway
+// redirect serving a multi-GB body, not to bound a real-world image.
+const MaxCoverArtBytes = 20 * 1024 * 1024
+
 // FetchReleaseFront returns the JPEG bytes for a release's front cover at
 // the given size. Returns errNotFound if CAA has no front cover for this
 // release (falling back to the release-group level is the caller's
 // choice).
+//
+// **Buffered API** — kept for callers that genuinely need bytes in
+// hand (existing tests, byte-equivalence collision checks). Production
+// enrichment uses `FetchReleaseFrontStream` to avoid loading multi-MB
+// images into RAM on Pi-class hosts.
 func (c *CoverArtClient) FetchReleaseFront(ctx context.Context, mbid string, size int) ([]byte, error) {
 	if mbid == "" {
 		return nil, fmt.Errorf("coverart: empty mbid")
@@ -68,7 +79,50 @@ func (c *CoverArtClient) FetchReleaseGroupFront(ctx context.Context, rgMBID stri
 	return c.fetch(ctx, u)
 }
 
+// FetchReleaseFrontStream returns an io.ReadCloser carrying the JPEG
+// body. Caller MUST close it. Returns errNotFound on 404. The caller
+// (typically `writeArtworkAtomicStream`) is expected to wrap the body
+// in `io.LimitReader(body, MaxCoverArtBytes+1)` before reading; this
+// method does NOT pre-bound the body so the caller can apply the cap
+// uniformly with the destination size guard.
+func (c *CoverArtClient) FetchReleaseFrontStream(ctx context.Context, mbid string, size int) (io.ReadCloser, error) {
+	if mbid == "" {
+		return nil, fmt.Errorf("coverart: empty mbid")
+	}
+	if !validSize(size) {
+		return nil, fmt.Errorf("coverart: unsupported size %d, want one of %v", size, SupportedCoverSizes)
+	}
+	u := fmt.Sprintf("%s/release/%s/front-%d", c.base, mbid, size)
+	return c.fetchStream(ctx, u)
+}
+
+// FetchReleaseGroupFrontStream is the streaming counterpart to
+// FetchReleaseGroupFront. Same semantics as FetchReleaseFrontStream.
+func (c *CoverArtClient) FetchReleaseGroupFrontStream(ctx context.Context, rgMBID string, size int) (io.ReadCloser, error) {
+	if rgMBID == "" {
+		return nil, fmt.Errorf("coverart: empty release-group mbid")
+	}
+	if !validSize(size) {
+		return nil, fmt.Errorf("coverart: unsupported size %d", size)
+	}
+	u := fmt.Sprintf("%s/release-group/%s/front-%d", c.base, rgMBID, size)
+	return c.fetchStream(ctx, u)
+}
+
 func (c *CoverArtClient) fetch(ctx context.Context, u string) ([]byte, error) {
+	body, err := c.fetchStream(ctx, u)
+	if err != nil {
+		return nil, err
+	}
+	defer body.Close()
+	return io.ReadAll(io.LimitReader(body, MaxCoverArtBytes))
+}
+
+// fetchStream is the shared HTTP path. Returns the raw body so the
+// caller can stream straight to disk or buffer as needed. Status-code
+// classification (404 → errNotFound) lives here so both Fetch and
+// FetchStream paths surface the same error semantics.
+func (c *CoverArtClient) fetchStream(ctx context.Context, u string) (io.ReadCloser, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {
 		return nil, err
@@ -78,15 +132,15 @@ func (c *CoverArtClient) fetch(ctx context.Context, u string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
+		resp.Body.Close()
 		return nil, errNotFound
 	}
 	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
 		return nil, fmt.Errorf("coverart: HTTP %d", resp.StatusCode)
 	}
-	// Cap at a generous 20 MB so a runaway redirect can't exhaust memory.
-	return io.ReadAll(io.LimitReader(resp.Body, 20*1024*1024))
+	return resp.Body, nil
 }
 
 func validSize(size int) bool {
