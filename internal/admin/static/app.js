@@ -51,6 +51,25 @@ async function errorFromResponse(r) {
   }
 }
 
+// Returns true when an error thrown by `API.post("/api/restart")` is
+// the expected post-exit shape rather than a real HTTP failure. The
+// bridge's restart handler writes 202 then `os.Exit(0)` 100 ms
+// later, so we typically catch one of:
+//
+//   * `TypeError` — fetch's connection-drop signal when the server
+//     tears the listener down mid-read.
+//   * `SyntaxError` — `r.json()` failing on an empty body when the
+//     202 reaches the browser before the exit. The handler does
+//     not write a JSON body for the 202.
+//
+// Anything else (notably a plain `Error` from `errorFromResponse`,
+// which wraps real 4xx/5xx) is a genuine failure and the caller
+// should surface it instead of claiming the restart was signalled.
+// (CodeRabbit on PR #124.)
+function isExpectedRestartDisconnect(err) {
+  return err instanceof TypeError || err instanceof SyntaxError;
+}
+
 // --- dashboard ---
 
 function initDashboard() {
@@ -311,7 +330,11 @@ function bindTailscaleRefreshButton() {
 function bindInstallButton(btn) {
   if (!btn) return;
   btn.addEventListener("click", async () => {
-    if (!confirm("Install the new bridge release and restart?\n\nActive iOS downloads will be interrupted and will need to be retried.")) return;
+    const supervised = btn.dataset.supervised === "true";
+    const prompt = supervised
+      ? "Install the new bridge release and restart?\n\nActive iOS downloads will be interrupted and will need to be retried."
+      : "Install the new bridge release and stop the bridge?\n\nThis bridge isn't running under a service manager, so it won't auto-restart — you'll need to start it manually after the install. Active iOS downloads will be interrupted and will need to be retried.";
+    if (!confirm(prompt)) return;
     await runInstall(btn, false);
   });
 }
@@ -324,22 +347,34 @@ function bindInstallButton(btn) {
 // the `force` semantics only affect install, not restart. Recursive
 // retry-with-force keeps the call site clean.
 async function runInstall(btn, force) {
+  const supervised = btn.dataset.supervised === "true";
   const oldText = btn.textContent;
   btn.disabled = true;
   btn.textContent = "Installing…";
   try {
     const path = force ? "/api/updates/install?force=1" : "/api/updates/install";
     await API.post(path);
-    btn.textContent = "Restarting…";
+    btn.textContent = supervised ? "Restarting…" : "Stopping…";
     // Fire restart and don't await — the server tears the listener
-    // down before we can read the response body anyway. The page
-    // reload below races the restart's port-rebind; 2.5 s is the
-    // empirical sweet-spot for launchd respawn on macOS.
+    // down before we can read the response body anyway. The 2.5 s
+    // auto-reload below is the empirical sweet-spot for launchd /
+    // systemd / SCM respawn; under those it lands the operator
+    // back on a working admin page. (Qodo on PR #124.) For
+    // unsupervised processes there's no respawn, so the reload
+    // would race a listener that's never coming back — replace
+    // it with an in-place message instructing manual restart.
     fetch("/api/restart", {
       method: "POST",
       headers: { "content-type": "application/json" },
     }).catch(() => {});
-    setTimeout(() => window.location.reload(), 2500);
+    if (supervised) {
+      setTimeout(() => window.location.reload(), 2500);
+    } else {
+      btn.textContent = "Stopped — start manually";
+      // Bail before the finally-style cleanup; the bridge is on
+      // its way out and the operator now needs to restart it
+      // from a shell.
+    }
   } catch (err) {
     if (/409/.test(err.message) || /active-sessions/.test(err.message) || /active downloads/i.test(err.message)) {
       const proceed = confirm("Active downloads are in flight — installing now will interrupt them and could glitch any iOS device currently playing a track.\n\nInstall anyway?");
@@ -382,11 +417,22 @@ function renderUpdateTile(u) {
   if (actions) {
     const should = u && u.updateAvailable && u.canInstall;
     if (should && !installBtn) {
+      // Mirror the supervision-aware label + dataset attribute the
+      // server-rendered first-paint path emits — without this the
+      // dynamic-create branch would always render "Install &
+      // restart" + supervised=undefined, defeating the supervision
+      // gate when the operator was on the dashboard during a
+      // mid-session "checking…" → "update available" transition.
+      // The parent `.panel-actions` carries the flag at first
+      // paint so we can read it here without re-fetching from
+      // /api/settings. (Qodo on PR #124.)
+      const supervised = actions.dataset.supervised === "true";
       installBtn = document.createElement("button");
       installBtn.type = "button";
       installBtn.id = "update-install";
       installBtn.className = "btn btn-primary";
-      installBtn.textContent = "Install & restart";
+      installBtn.dataset.supervised = supervised ? "true" : "false";
+      installBtn.textContent = supervised ? "Install & restart" : "Install & stop";
       bindInstallButton(installBtn);
       actions.insertBefore(installBtn, actions.firstChild);
     } else if (!should && installBtn) {
@@ -1010,11 +1056,25 @@ function initSettings() {
         : "Stop signalled. Start the bridge again manually, then reload.";
       showMsg(msg, "warn", post);
     } catch (err) {
-      // After the server exits, fetch rejects — that's expected.
-      const post = supervised
-        ? "Restart signalled (server went away)."
-        : "Stop signalled (server went away). Start it again manually.";
-      showMsg(msg, "warn", post);
+      if (isExpectedRestartDisconnect(err)) {
+        // The bridge writes 202 then `os.Exit(0)` after a 100 ms
+        // grace window — we may catch the response (`TypeError`
+        // when the connection drops mid-read, or `SyntaxError`
+        // when the empty body fails JSON.parse). Both mean
+        // "request was honoured, server is on its way out."
+        const post = supervised
+          ? "Restart signalled (server went away)."
+          : "Stop signalled (server went away). Start it again manually.";
+        showMsg(msg, "warn", post);
+      } else {
+        // A real HTTP error (4xx/5xx) is wrapped by `errorFrom-
+        // Response` as a plain `Error` whose message starts with
+        // the status code. Don't claim "signalled" — the request
+        // never landed. CodeRabbit on PR #124 caught the prior
+        // catch path conflating these two branches.
+        const verb = supervised ? "Restart" : "Stop";
+        showMsg(msg, "err", `${verb} request failed: ${err.message}`);
+      }
     }
   });
 

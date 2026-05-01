@@ -50,9 +50,9 @@
   <div class="panel">
     <div class="panel-head">
       <h2>Updates</h2>
-      <span class="panel-actions">
+      <span class="panel-actions" data-supervised="{{if .Data.IsSupervised}}true{{else}}false{{end}}">
         {{if and .Data.Update.UpdateAvailable .Data.Update.CanInstall}}
-          <button type="button" id="update-install" class="btn btn-primary">Install &amp; restart</button>
+          <button type="button" id="update-install" class="btn btn-primary" data-supervised="{{if .Data.IsSupervised}}true{{else}}false{{end}}">Install &amp; {{if .Data.IsSupervised}}restart{{else}}stop{{end}}</button>
         {{end}}
         <button type="button" id="update-check" class="btn">Check now</button>
       </span>
