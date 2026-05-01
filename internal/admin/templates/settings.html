@@ -26,22 +26,47 @@
       the bottom commits all pending edits at once — switching
       tabs doesn't lose work.
     */}}
+    {{/*
+      ARIA wiring (CodeRabbit on PR #129): each tab carries an
+      `aria-controls` pointing at its panel's id, and each panel
+      carries an `aria-labelledby` pointing back at the tab's id.
+      Screen readers expose the relationship to assistive tech;
+      keyboard nav relies on the role=tab/tablist/tabpanel
+      pattern the JS already implements.
+
+      Panes are NOT marked `hidden` in the template (Qodo on PR
+      #129). `initSettingsTabs()` adds a `.tabs-enabled` class to
+      the page on init AND applies the `hidden` attribute to
+      non-active panes. Without JS or before init, every section
+      stays visible — operators can't be locked out of Settings
+      by a JS regression. The CSS rule that visually hides the
+      in-pane <h2 class="section-head"> when tabs are active is
+      also gated on `.tabs-enabled` so the no-JS fallback shows
+      every heading too.
+    */}}
     <nav class="tab-nav" role="tablist" aria-label="Settings sections">
-      <button type="button" class="tab-btn active" role="tab"
-              data-tab="general" aria-selected="true">General</button>
-      <button type="button" class="tab-btn" role="tab"
-              data-tab="networking" aria-selected="false">Networking</button>
-      <button type="button" class="tab-btn" role="tab"
-              data-tab="endpoints" aria-selected="false">Server endpoints</button>
-      <button type="button" class="tab-btn" role="tab"
-              data-tab="updates" aria-selected="false">Updates</button>
-      <button type="button" class="tab-btn" role="tab"
-              data-tab="audio" aria-selected="false">Audio quality</button>
-      <button type="button" class="tab-btn" role="tab"
-              data-tab="backups" aria-selected="false">Backups</button>
+      <button id="settings-tab-general" type="button" class="tab-btn active" role="tab"
+              data-tab="general" aria-controls="settings-panel-general"
+              aria-selected="true">General</button>
+      <button id="settings-tab-networking" type="button" class="tab-btn" role="tab"
+              data-tab="networking" aria-controls="settings-panel-networking"
+              aria-selected="false">Networking</button>
+      <button id="settings-tab-endpoints" type="button" class="tab-btn" role="tab"
+              data-tab="endpoints" aria-controls="settings-panel-endpoints"
+              aria-selected="false">Server endpoints</button>
+      <button id="settings-tab-updates" type="button" class="tab-btn" role="tab"
+              data-tab="updates" aria-controls="settings-panel-updates"
+              aria-selected="false">Updates</button>
+      <button id="settings-tab-audio" type="button" class="tab-btn" role="tab"
+              data-tab="audio" aria-controls="settings-panel-audio"
+              aria-selected="false">Audio quality</button>
+      <button id="settings-tab-backups" type="button" class="tab-btn" role="tab"
+              data-tab="backups" aria-controls="settings-panel-backups"
+              aria-selected="false">Backups</button>
     </nav>
 
-    <div class="tab-pane" data-tab="general" role="tabpanel">
+    <div id="settings-panel-general" class="tab-pane" data-tab="general"
+         role="tabpanel" aria-labelledby="settings-tab-general">
       <h2 class="section-head">General</h2>
 
       <div class="field">
@@ -66,7 +91,8 @@
       </div>
     </div>
 
-    <div class="tab-pane" data-tab="networking" role="tabpanel" hidden>
+    <div id="settings-panel-networking" class="tab-pane" data-tab="networking"
+         role="tabpanel" aria-labelledby="settings-tab-networking">
       <h2 class="section-head">Networking</h2>
 
       <div class="field">
@@ -130,7 +156,8 @@
       </div>
     </div>
 
-    <div class="tab-pane" data-tab="endpoints" role="tabpanel" hidden>
+    <div id="settings-panel-endpoints" class="tab-pane" data-tab="endpoints"
+         role="tabpanel" aria-labelledby="settings-tab-endpoints">
       <h2 class="section-head">Server endpoints</h2>
       {{/*
         Read-only telemetry panels — addresses iOS clients reach the
@@ -168,7 +195,8 @@
       </div>
     </div>
 
-    <div class="tab-pane" data-tab="updates" role="tabpanel" hidden>
+    <div id="settings-panel-updates" class="tab-pane" data-tab="updates"
+         role="tabpanel" aria-labelledby="settings-tab-updates">
       <h2 class="section-head">Updates</h2>
       <p class="lede">
         The bridge polls the GitHub Releases API for new versions. Operator-triggered
@@ -213,7 +241,8 @@
       </div>
     </div>
 
-    <div class="tab-pane" data-tab="audio" role="tabpanel" hidden>
+    <div id="settings-panel-audio" class="tab-pane" data-tab="audio"
+         role="tabpanel" aria-labelledby="settings-tab-audio">
       <h2 class="section-head">Audio quality</h2>
       <p class="lede">
         Offline PCM upscaling renders high-rate FLAC sidecars from CD-rate sources via
@@ -268,7 +297,8 @@
       frequently than General / Networking / Updates / Audio. (User
       feedback on PR #129.)
     */}}
-    <div class="tab-pane" data-tab="backups" role="tabpanel" hidden>
+    <div id="settings-panel-backups" class="tab-pane" data-tab="backups"
+         role="tabpanel" aria-labelledby="settings-tab-backups">
       <h2 class="section-head">Backups</h2>
       <div class="panel telemetry-panel">
         <div class="panel-head">

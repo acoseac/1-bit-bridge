@@ -861,11 +861,17 @@ dialog h2 { font-size: 18px; color: var(--accent); }
 }
 
 /* Hide the in-pane h2 section-head when tabs are active — the tab
- * label already names the section. Keeping the h2 in the markup for
- * accessibility (screen readers still announce it as a landmark) and
- * for a future "single-page mode" toggle if anyone wants the long
- * scroll back. The .tab-nav presence is the gate. */
-.settings .tab-nav ~ .tab-pane > .section-head {
+ * label already names the section. Keeping the h2 in the markup
+ * for accessibility (screen readers still announce it as a landmark)
+ * and for the no-JS fallback below.
+ *
+ * The `.tabs-enabled` class is added by `initSettingsTabs()` AFTER
+ * confirming the tab nav + panes exist. Without JS (or before the
+ * init runs), the template renders every pane visible AND every
+ * `<h2 class="section-head">` visible — the long-scroll fallback
+ * Qodo on PR #129 asked for, so a JS regression can't lock
+ * operators out of any Settings section. */
+.settings.tabs-enabled .tab-nav ~ .tab-pane > .section-head {
   position: absolute;
   width: 1px;
   height: 1px;

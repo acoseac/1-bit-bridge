@@ -989,6 +989,14 @@ function initSettingsTabs() {
   const tabs = document.querySelectorAll(".tab-btn[data-tab]");
   const panes = document.querySelectorAll(".tab-pane[data-tab]");
   if (tabs.length === 0 || panes.length === 0) return;
+  // Mark the page as tabs-enabled BEFORE applying hidden — without
+  // this, the template renders every pane visible (no-JS fallback)
+  // and the CSS rule that visually hides the in-pane <h2> is gated
+  // on this class so headings still appear in the fallback. (Qodo
+  // on PR #129: don't lock operators out of Settings if JS fails
+  // or is skipped by a future refactor.)
+  const page = document.querySelector(".page.settings");
+  if (page) page.classList.add("tabs-enabled");
   const STORAGE_KEY = "settings.activeTab";
   const validIds = new Set();
   tabs.forEach(t => validIds.add(t.dataset.tab));
