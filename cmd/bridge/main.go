@@ -146,9 +146,19 @@ func (a *upscaleEnqueuerAdapter) EnqueueOne(libraryRelativePath string) error {
 	if target == 0 {
 		return api.ErrUpscaleIneligible
 	}
+	// Use the manifest's canonical-case path — NOT the iOS-shaped
+	// input — for `SourceLibraryRel`. The variant insert hits a
+	// `FOREIGN KEY (source_path) REFERENCES tracks(path)` constraint
+	// on the case-sensitive PRIMARY KEY; passing the lowercase iOS
+	// shape through to UpsertVariant makes the FK fail at write
+	// time with `constraint failed: FOREIGN KEY constraint failed`,
+	// after sox has already done the work. PR #126 introduced this
+	// regression: LookupTrack finds the row via case-folded fallback
+	// but the spec then carried the unmatched input forward.
+	// `track.Path` is the authoritative form the manifest stores.
 	spec := transcode.JobSpec{
 		SourceAbsPath:    abs,
-		SourceLibraryRel: libraryRelativePath,
+		SourceLibraryRel: track.Path,
 		SourceSampleRate: sourceHz,
 		TargetSampleRate: target,
 		TargetBits:       a.cfg.Upscale.EffectiveTargetBits(),
@@ -161,7 +171,11 @@ func (a *upscaleEnqueuerAdapter) EnqueueOne(libraryRelativePath string) error {
 	// Resumability: skip when a fresh sidecar already exists.
 	// Same handle-the-error policy as the parent track lookup —
 	// a sick DB shouldn't silently re-convert a track.
-	existing, getVErr := a.store.LookupVariant(libraryRelativePath, spec.VariantID())
+	// Use track.Path (canonical) — same rationale as the spec
+	// construction above. Either path would work here (LookupVariant
+	// case-folds), but the canonical form keeps every downstream
+	// store call consistent.
+	existing, getVErr := a.store.LookupVariant(track.Path, spec.VariantID())
 	if getVErr != nil {
 		return fmt.Errorf("get variant row: %w", getVErr)
 	}
