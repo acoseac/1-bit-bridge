@@ -843,7 +843,15 @@ dialog h2 { font-size: 18px; color: var(--accent); }
 }
 
 .tab-btn:focus-visible {
-  outline: none;
+  /* Keep both an outline AND the soft glow box-shadow. The
+   * box-shadow alone disappears in forced-colors / high-contrast
+   * environments (Windows High Contrast, OS-level accessibility
+   * settings), leaving keyboard focus invisible — a real
+   * accessibility blocker for tab navigation. The 2 px solid
+   * outline survives forced-colors per the CSS spec. (CodeRabbit
+   * on PR #129.) */
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
   box-shadow: var(--glow);
 }
 
