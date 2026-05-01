@@ -50,9 +50,9 @@
   <div class="panel">
     <div class="panel-head">
       <h2>Updates</h2>
-      <span class="panel-actions">
+      <span class="panel-actions" data-supervised="{{if .Data.IsSupervised}}true{{else}}false{{end}}">
         {{if and .Data.Update.UpdateAvailable .Data.Update.CanInstall}}
-          <button type="button" id="update-install" class="btn btn-primary">Install &amp; restart</button>
+          <button type="button" id="update-install" class="btn btn-primary" data-supervised="{{if .Data.IsSupervised}}true{{else}}false{{end}}">Install &amp; {{if .Data.IsSupervised}}restart{{else}}stop{{end}}</button>
         {{end}}
         <button type="button" id="update-check" class="btn">Check now</button>
       </span>
@@ -99,7 +99,7 @@
       <dd id="update-deferred" hidden></dd>
       {{end}}
     </dl>
-    <p class="panel-note">Install downloads the release archive, verifies the SHA-256 from <code>checksums.txt</code>, swaps the binary, and arms a rollback marker. The bridge restarts to load the new version. Active downloads block install (use the override only when nothing critical is in flight).</p>
+    <p class="panel-note">Install downloads the release archive, verifies the SHA-256 from <code>checksums.txt</code>, swaps the binary, and arms a rollback marker. {{if .Data.IsSupervised}}The bridge restarts automatically to load the new version.{{else}}The bridge stops after install — start it again manually to load the new version.{{end}} Active downloads block install (use the override only when nothing critical is in flight).</p>
   </div>
 
   <div class="panel">

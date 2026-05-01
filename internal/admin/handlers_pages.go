@@ -71,6 +71,14 @@ func (s *Server) pageDashboard(w http.ResponseWriter, r *http.Request) {
 		"Update":              s.dashboardUpdateStatus(),
 		"BackupIntervalHours": s.deps.Cfg.Backup.EffectiveIntervalHours(),
 		"BackupKeep":          s.deps.Cfg.Backup.EffectiveKeep(),
+		// The Update tile's "Install & restart" button POSTs
+		// /api/restart after install, then auto-reloads the page
+		// after 2.5 s assuming the service manager will respawn.
+		// On an unsupervised process the auto-reload races a
+		// listener that's never coming back. Thread the flag
+		// through so the JS can drop the auto-reload + tell the
+		// operator to restart manually. (Qodo on PR #124.)
+		"IsSupervised": s.deps.IsSupervised,
 	}
 	s.renderPage(w, "dashboard", data)
 }
@@ -134,6 +142,7 @@ func (s *Server) pageSettings(w http.ResponseWriter, r *http.Request) {
 		UpdateQuietHours:         s.deps.Cfg.Update.QuietHours,
 		UpdateCheckIntervalHours: s.deps.Cfg.Update.CheckIntervalHours,
 		UpscaleEnabled:           s.deps.Cfg.Upscale.Enabled,
+		IsSupervised:             s.deps.IsSupervised,
 	}
 	// v1.2 Audio quality section: pre-compute the boolean +
 	// install hint so the template doesn't need a `deref`

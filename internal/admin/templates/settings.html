@@ -3,9 +3,15 @@
   <h1>Settings</h1>
   <p class="lede">
     Fields marked <span class="badge warn">restart</span> require the server
-    to restart before the change takes effect. If you&rsquo;re running under
-    launchd or systemd, hit <em>Restart now</em> after saving — the service
-    manager will relaunch.
+    to restart before the change takes effect.
+    {{if .Data.IsSupervised}}
+      Hit <em>Restart now</em> after saving — the service manager
+      (launchd / systemd / SCM) will relaunch the bridge automatically.
+    {{else}}
+      This bridge isn&rsquo;t running under a service manager, so
+      <em>Stop now</em> exits the process without auto-relaunch — start
+      it again manually after the exit.
+    {{end}}
   </p>
 
   <form id="settings-form" class="panel">
@@ -192,7 +198,7 @@
 
     <div class="actions">
       <button type="submit" class="btn primary">Save</button>
-      <button type="button" id="restart-btn" class="btn" hidden>Restart now</button>
+      <button type="button" id="restart-btn" class="btn" hidden data-supervised="{{if .Data.IsSupervised}}true{{else}}false{{end}}">{{if .Data.IsSupervised}}Restart now{{else}}Stop now{{end}}</button>
     </div>
     <p id="settings-msg" class="status" hidden></p>
   </form>
