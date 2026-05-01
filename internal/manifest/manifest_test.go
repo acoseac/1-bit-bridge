@@ -847,7 +847,7 @@ func TestWriteManifestParityWithBuildManifest(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := WriteManifest(&buf, s, []string{root}, time.Time{}); err != nil {
+	if err := WriteManifest(context.Background(), &buf, s, []string{root}, time.Time{}); err != nil {
 		t.Fatalf("WriteManifest: %v", err)
 	}
 	var got Manifest
@@ -918,7 +918,7 @@ func TestWriteManifestStreamsLargeLibraryWithoutOOM(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := WriteManifest(&buf, s, []string{"/tmp/nope/Music"}, time.Time{}); err != nil {
+	if err := WriteManifest(context.Background(), &buf, s, []string{"/tmp/nope/Music"}, time.Time{}); err != nil {
 		t.Fatalf("WriteManifest: %v", err)
 	}
 	var mf Manifest
@@ -1026,7 +1026,7 @@ func TestProviderWriteManifestReflectsSetRoots(t *testing.T) {
 	}
 
 	var pre bytes.Buffer
-	if err := p.WriteManifest(&pre, time.Time{}); err != nil {
+	if err := p.WriteManifest(context.Background(), &pre, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	mf := decode(&pre)
@@ -1036,7 +1036,7 @@ func TestProviderWriteManifestReflectsSetRoots(t *testing.T) {
 
 	sc.SetRoots([]string{a, b})
 	var post bytes.Buffer
-	if err := p.WriteManifest(&post, time.Time{}); err != nil {
+	if err := p.WriteManifest(context.Background(), &post, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	mf = decode(&post)

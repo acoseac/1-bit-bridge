@@ -937,8 +937,8 @@ func BuildManifest(store *Store, roots []string, since time.Time) (*Manifest, er
 //
 // since, if non-zero, filters tracks by indexed_at (matches the
 // BuildManifest semantics).
-func WriteManifest(w io.Writer, store *Store, roots []string, since time.Time) error {
-	return writeManifestGated(w, store, roots, since, false)
+func WriteManifest(ctx context.Context, w io.Writer, store *Store, roots []string, since time.Time) error {
+	return writeManifestGated(ctx, w, store, roots, since, false)
 }
 
 // writeManifestGated is the gated worker behind the public
@@ -947,7 +947,12 @@ func WriteManifest(w io.Writer, store *Store, roots []string, since time.Time) e
 // the runtime Provider when `cfg.Upscale.Enabled`) lets variants
 // flow through unchanged. Existing tests continue to call the
 // public WriteManifest unchanged.
-func writeManifestGated(w io.Writer, store *Store, roots []string, since time.Time, withVariants bool) (err error) {
+//
+// `ctx` is checked inside the per-row callback so a client disconnect
+// mid-stream terminates the scan within at most one row instead of
+// running to EOF. The check returns ctx.Err() which propagates up
+// through `streamErr` and surfaces in the caller's log line.
+func writeManifestGated(ctx context.Context, w io.Writer, store *Store, roots []string, since time.Time, withVariants bool) (err error) {
 	folders, err := store.ListFolders()
 	if err != nil {
 		return fmt.Errorf("list folders: %w", err)
@@ -1040,6 +1045,14 @@ func writeManifestGated(w io.Writer, store *Store, roots []string, since time.Ti
 	enc := json.NewEncoder(bw)
 	first := true
 	streamErr := store.StreamTracks(sp, func(t *Track) error {
+		// Cheap per-row cancel check. SQLite's row iteration is
+		// synchronous so this is the natural pulse to honour the
+		// client's deadline / disconnect. Returning the ctx error
+		// terminates the scan; the caller's log line surfaces it
+		// (CancellationError vs DeadlineExceeded is preserved).
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		if !first {
 			if err := bw.WriteByte(','); err != nil {
 				return err

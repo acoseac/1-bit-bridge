@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"io"
@@ -43,10 +44,13 @@ type fakeManifestProvider struct {
 	lastSince time.Time
 }
 
-func (f *fakeManifestProvider) WriteManifest(w io.Writer, since time.Time) error {
+func (f *fakeManifestProvider) WriteManifest(ctx context.Context, w io.Writer, since time.Time) error {
 	f.lastSince = since
 	if f.err != nil {
 		return f.err
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
 	}
 	return json.NewEncoder(w).Encode(f.body)
 }
