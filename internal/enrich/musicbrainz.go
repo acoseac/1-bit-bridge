@@ -51,7 +51,9 @@ func NewMusicBrainzClient(base, userAgent string, httpClient *http.Client) *Musi
 		base = DefaultMusicBrainzBase
 	}
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 10 * time.Second}
+		// sharedHTTPTransport tunes the pool size for metadata
+		// API hosts — see transport.go for the rationale.
+		httpClient = &http.Client{Timeout: 10 * time.Second, Transport: sharedHTTPTransport}
 	}
 	return &MusicBrainzClient{base: base, userAgent: userAgent, http: httpClient}
 }
