@@ -1,9 +1,12 @@
 package mdns
 
 import (
+	"net"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestBuildTXTRecordsIncludesProtocolAndLibrary(t *testing.T) {
@@ -168,5 +171,162 @@ func TestIpsForAdvertiseExcludesLoopback(t *testing.T) {
 		if ip.IsLoopback() {
 			t.Errorf("loopback IP leaked into advertised set: %v", ip)
 		}
+	}
+}
+
+// TestIpSetEqualOrderInvariant — the rebind detector compares IP
+// snapshots from net.Interfaces() across ticks. The OS may return
+// addresses in different orders between calls (interface renames,
+// hot-plug, kernel scheduler), so the equality must be order-
+// invariant. False positives here would trigger spurious rebuilds
+// every 60 s and tear down working hashicorp/mdns sockets for no
+// reason.
+func TestIpSetEqualOrderInvariant(t *testing.T) {
+	a := []net.IP{net.ParseIP("192.168.1.10"), net.ParseIP("fe80::1"), net.ParseIP("10.0.0.5")}
+	b := []net.IP{net.ParseIP("10.0.0.5"), net.ParseIP("192.168.1.10"), net.ParseIP("fe80::1")}
+	if !ipSetEqual(a, b) {
+		t.Errorf("equal sets in different order should compare equal")
+	}
+}
+
+func TestIpSetEqualDetectsAdditionAndRemoval(t *testing.T) {
+	a := []net.IP{net.ParseIP("192.168.1.10")}
+	b := []net.IP{net.ParseIP("192.168.1.10"), net.ParseIP("10.0.0.5")}
+	if ipSetEqual(a, b) {
+		t.Errorf("set with extra element should NOT compare equal")
+	}
+	c := []net.IP{net.ParseIP("192.168.1.11")}
+	if ipSetEqual(a, c) {
+		t.Errorf("set with replaced element should NOT compare equal")
+	}
+}
+
+// TestRebindFiresOnIPChange — drives the loop with an injected
+// ipSource that flips between two IP sets. Verifies that the
+// underlying mDNS server is rebuilt (new pointer) when the IP
+// set changes. Uses advertiseInternal(spawnLoop: false) so the
+// test drives maybeRebind() directly rather than racing a real
+// background goroutine — the race detector caught the
+// alternative (write `a.ipSource` after Advertise) and a lock-
+// per-read fix would add cost to the production hot path.
+func TestRebindFiresOnIPChange(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mdns live test skipped on windows")
+	}
+	// Two IP sets the injected source flips between. Use only the
+	// loopback range so the underlying hashicorp/mdns server can
+	// successfully bind even on locked-down CI runners.
+	setA := []net.IP{net.ParseIP("127.0.0.1")}
+	setB := []net.IP{net.ParseIP("127.0.0.2")}
+	var phase atomic.Int32 // 0 → setA, 1 → setB
+
+	a, err := advertiseInternal(Config{
+		InstanceName:    "rebind-test",
+		Port:            62998,
+		ProtocolVersion: 1,
+		LibraryName:     "Rebind Test",
+	}, func() []net.IP {
+		if phase.Load() == 0 {
+			return setA
+		}
+		return setB
+	}, time.Hour /* loop never fires; we drive manually */, false /* don't spawn the goroutine */)
+	if err != nil {
+		t.Skipf("mdns unavailable in this env: %v", err)
+	}
+	defer a.Close()
+
+	a.rebindMu.Lock()
+	firstSrv := a.server
+	a.rebindMu.Unlock()
+	if firstSrv == nil {
+		t.Fatal("initial server is nil")
+	}
+	phase.Store(1)
+	a.maybeRebind()
+
+	a.rebindMu.Lock()
+	defer a.rebindMu.Unlock()
+	if a.server == nil {
+		t.Fatal("server is nil after rebind")
+	}
+	if a.server == firstSrv {
+		t.Errorf("expected server pointer to change after IP set flip; still %p", firstSrv)
+	}
+	if !ipSetEqual(a.cachedIPs, setB) {
+		t.Errorf("cachedIPs not updated after rebind: got %v, want %v", a.cachedIPs, setB)
+	}
+}
+
+// TestNoRebindOnUnchangedIPSet — back-to-back ticks with the same
+// IP set must NOT rebuild. Otherwise the loop would tear down
+// working sockets every 60 s for no reason.
+func TestNoRebindOnUnchangedIPSet(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mdns live test skipped on windows")
+	}
+	stable := []net.IP{net.ParseIP("127.0.0.1")}
+	a, err := advertiseInternal(Config{
+		InstanceName:    "stable-test",
+		Port:            62997,
+		ProtocolVersion: 1,
+		LibraryName:     "Stable Test",
+	}, func() []net.IP { return stable }, time.Hour, false)
+	if err != nil {
+		t.Skipf("mdns unavailable in this env: %v", err)
+	}
+	defer a.Close()
+
+	a.rebindMu.Lock()
+	firstSrv := a.server
+	a.rebindMu.Unlock()
+
+	a.maybeRebind()
+	a.maybeRebind()
+
+	a.rebindMu.Lock()
+	defer a.rebindMu.Unlock()
+	if a.server != firstSrv {
+		t.Errorf("server pointer changed without IP set change: was %p, now %p", firstSrv, a.server)
+	}
+}
+
+// TestRebindAfterCloseIsNoop — once Close() has fired, a stray
+// goroutine reaching maybeRebind must NOT touch the (now-nil)
+// server. Belt-and-braces: the goroutine is told to stop via
+// `done`, but if the close-channel signal races a tick the
+// safety net is the `closed` flag check inside maybeRebind.
+func TestRebindAfterCloseIsNoop(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mdns live test skipped on windows")
+	}
+	stable := []net.IP{net.ParseIP("127.0.0.1")}
+	flipped := []net.IP{net.ParseIP("127.0.0.2")}
+	var phase atomic.Int32
+
+	a, err := advertiseInternal(Config{
+		InstanceName:    "close-test",
+		Port:            62996,
+		ProtocolVersion: 1,
+		LibraryName:     "Close Test",
+	}, func() []net.IP {
+		if phase.Load() == 0 {
+			return stable
+		}
+		return flipped
+	}, time.Hour, false)
+	if err != nil {
+		t.Skipf("mdns unavailable in this env: %v", err)
+	}
+	if err := a.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	phase.Store(1)
+	// Should be a silent no-op — closed flag short-circuits.
+	a.maybeRebind()
+	a.rebindMu.Lock()
+	defer a.rebindMu.Unlock()
+	if a.server != nil {
+		t.Errorf("server should be nil after Close; got %p", a.server)
 	}
 }
