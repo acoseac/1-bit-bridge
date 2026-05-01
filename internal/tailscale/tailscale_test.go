@@ -125,6 +125,49 @@ func TestClassifyMintError_GenericPassesThrough(t *testing.T) {
 	}
 }
 
+// --- MintCert: context cancellation ---
+
+// Pre-fix MintCert passed cmd.Run()'s error straight to classifyMintError
+// which fell through to the `default:` "tailscale cert: <err>" branch
+// when stderr was empty — surfacing a fake cert failure for a
+// deliberate shutdown signal. The fix checks ctx.Err() first so callers
+// can `errors.Is(err, context.Canceled)` to distinguish the two.
+func TestMintCert_ContextCancellationReturnsTypedError(t *testing.T) {
+	skipOnNoSh(t)
+
+	// Stub binary that sleeps long enough for the context to cancel.
+	// `tailscale cert` doesn't honour signals identically across
+	// platforms, but Run() returns when the process exits regardless,
+	// and our test only needs cmd.Run() to come back with a
+	// context-aware error.
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "tailscale")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\nsleep 10\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Cancel the context before MintCert is called so cmd.Run() returns
+	// promptly. exec.CommandContext kills the process when the context
+	// cancels; the resulting error wraps signal.Killed (or similar).
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	certPath := filepath.Join(dir, "cert.pem")
+	keyPath := filepath.Join(dir, "key.pem")
+	err := MintCert(ctx, stub, "magic.example.ts.net", certPath, keyPath)
+	if err == nil {
+		t.Fatal("MintCert: expected error from cancelled context, got nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("MintCert: error = %v, want errors.Is(err, context.Canceled) — pre-fix the cancel masquerades as a generic cert failure", err)
+	}
+	// Belt-and-braces: the typed sentinels must NOT match — a cancel
+	// is not a permission / HTTPS-disabled error.
+	if errors.Is(err, ErrHTTPSCertsDisabled) || errors.Is(err, ErrPermission) {
+		t.Errorf("MintCert: error = %v, must not match typed cert-failure sentinels", err)
+	}
+}
+
 // --- Detect ---
 
 func TestDetect_ParsesMagicDNSAndSuffix(t *testing.T) {
