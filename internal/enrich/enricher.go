@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -523,9 +524,17 @@ func (e *Enricher) ensureArtworkCached(ctx context.Context, mbid, rgMBID, artist
 		return true, nil
 	}
 	time.Sleep(e.CAAMinInterval) // pace
-	data, err := e.caa.FetchReleaseFront(ctx, mbid, size)
+	body, err := e.caa.FetchReleaseFrontStream(ctx, mbid, size)
 	if err == nil {
-		if werr := writeArtworkAtomic(path, data); werr != nil {
+		// Stream straight to disk so the JPEG body never lands in RAM.
+		// Memory bound is ~32 KB (io.Copy default buffer) regardless
+		// of image size — was up to 20 MB per concurrent fetch under
+		// the buffered Fetch path. Pi-class hosts running fresh-library
+		// enrichment now stay bounded under a few MB peak even with
+		// multiple in-flight fetches.
+		werr := writeArtworkAtomicStream(path, body, MaxCoverArtBytes)
+		body.Close()
+		if werr != nil {
 			return false, werr
 		}
 		return true, nil
@@ -546,9 +555,11 @@ func (e *Enricher) ensureArtworkCached(ctx context.Context, mbid, rgMBID, artist
 		// fallback below.
 	} else if rgMBID != "" {
 		time.Sleep(e.CAAMinInterval) // pace the second CAA call
-		rgData, rgFetchErr := e.caa.FetchReleaseGroupFront(ctx, rgMBID, size)
+		rgBody, rgFetchErr := e.caa.FetchReleaseGroupFrontStream(ctx, rgMBID, size)
 		if rgFetchErr == nil {
-			if werr := writeArtworkAtomic(path, rgData); werr != nil {
+			werr := writeArtworkAtomicStream(path, rgBody, MaxCoverArtBytes)
+			rgBody.Close()
+			if werr != nil {
 				return false, werr
 			}
 			e.caaFallbackHits.Add(1)
@@ -646,6 +657,67 @@ func ArtworkCachePath(cacheDir, mbid string, size int) string {
 	return filepath.Join(cacheDir, fmt.Sprintf("%s-%d.jpg", mbid, size))
 }
 
+// writeArtworkAtomicStream streams bytes from src to path via tmp-file
+// + rename, capping the read at max+1 bytes to detect oversized inputs
+// without buffering the whole stream. Memory bound is ~32 KB
+// (io.Copy's default buffer) regardless of input size, vs.
+// writeArtworkAtomic's []byte which holds the entire body in RAM.
+//
+// On rename collision (race against a sibling enricher / scanner) the
+// existing file is trusted iff its size matches the streamed write.
+// The enricher's URL-to-content mapping is deterministic per
+// (mbid, size) so a size match indicates the existing file is correct;
+// the byte-equivalence verification writeArtworkAtomic does is unique
+// to the scanner-side path which can have two producers writing
+// different artwork to the same MBID-keyed file.
+//
+// Caller is responsible for closing src when it's an io.ReadCloser
+// (HTTP body); the helper signature is io.Reader so a buffered byte
+// slice can also be tested via bytes.NewReader without a fake closer.
+func writeArtworkAtomicStream(path string, src io.Reader, max int64) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".caa-*.jpg.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup && tmpName != "" {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	defer func() { _ = tmp.Close() }()
+
+	n, err := io.Copy(tmp, io.LimitReader(src, max+1))
+	if err != nil {
+		return err
+	}
+	if n > max {
+		return fmt.Errorf("artwork exceeds %d-byte limit", max)
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+
+	if err := renameWithRetry(tmpName, path); err != nil {
+		// Race window: existing file present. Trust if size matches.
+		// See doc-comment for why this is safer in the enricher than
+		// in the scanner-side writeArtworkAtomicScan.
+		if info, statErr := os.Stat(path); statErr == nil && info.Size() == n {
+			return nil
+		}
+		return err
+	}
+	cleanup = false
+	return nil
+}
+
 // writeArtworkAtomic writes bytes to path via tmp-file + rename so a
 // concurrent reader never sees a torn file.
 //
@@ -655,6 +727,10 @@ func ArtworkCachePath(cacheDir, mbid string, size int) string {
 // the dir first creates it at the same mode. Upgrades from prior
 // 0o755 deployments are accepted: existing dirs keep their mode
 // until a clean install / rmdir; new dirs land at 0o700.
+//
+// **Prefer `writeArtworkAtomicStream` for new code.** The buffered
+// shape exists for the byte-equivalence collision check on the
+// scanner-side path; the enricher should stream straight from HTTP.
 func writeArtworkAtomic(path string, data []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err

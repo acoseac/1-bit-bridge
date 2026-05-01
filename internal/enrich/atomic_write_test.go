@@ -2,6 +2,7 @@ package enrich
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -85,5 +86,98 @@ func TestWriteArtworkAtomic_RaceLoserDoesNotAcceptOnSizeCollision(t *testing.T) 
 		if strings.HasPrefix(e.Name(), ".caa-") {
 			t.Errorf("leaked tmp on size-collision path: %s", e.Name())
 		}
+	}
+}
+
+func TestWriteArtworkAtomicStream_HappyPath(t *testing.T) {
+	// Streaming variant writes the body straight from an io.Reader
+	// to disk — single allocation, never holds the whole image in
+	// memory. Verifies the round-trip plus the size-cap reject path.
+	cacheDir := t.TempDir()
+	dst := filepath.Join(cacheDir, "stream-mbid-500.jpg")
+	payload := bytes.Repeat([]byte("X"), 4096)
+	if err := writeArtworkAtomicStream(dst, bytes.NewReader(payload), int64(len(payload)+1)); err != nil {
+		t.Fatalf("writeArtworkAtomicStream: %v", err)
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Errorf("destination bytes mismatch: got %d, want %d", len(got), len(payload))
+	}
+	// No leaked tmp file.
+	entries, _ := os.ReadDir(cacheDir)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".caa-") {
+			t.Errorf("leaked tmp file: %s", e.Name())
+		}
+	}
+}
+
+func TestWriteArtworkAtomicStream_OversizedRejected(t *testing.T) {
+	// Stream more than max+1 bytes — must reject without leaking
+	// the tmp file. io.LimitReader caps at max+1 so the helper
+	// can detect "would have read more" without unbounded memory.
+	cacheDir := t.TempDir()
+	dst := filepath.Join(cacheDir, "stream-mbid-oversized.jpg")
+	payload := bytes.Repeat([]byte("X"), 1024)
+	if err := writeArtworkAtomicStream(dst, bytes.NewReader(payload), 100); err == nil {
+		t.Fatal("expected oversized error")
+	}
+	if _, err := os.Stat(dst); !os.IsNotExist(err) {
+		t.Errorf("destination should not exist after oversized reject; stat err = %v", err)
+	}
+	entries, _ := os.ReadDir(cacheDir)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".caa-") {
+			t.Errorf("leaked tmp file on oversized reject: %s", e.Name())
+		}
+	}
+}
+
+func TestWriteArtworkAtomicStream_RaceWinnerSizeMatch(t *testing.T) {
+	// Streaming counterpart to TestWriteArtworkAtomic_RaceWinnerCleansTmp:
+	// when rename fails but the destination already exists with the
+	// same size, the streaming helper trusts the existing file and
+	// returns nil. The buffered helper does a full bytes.Equal
+	// comparison; the streaming helper trusts size because the
+	// enricher's URL-to-content mapping is deterministic per
+	// (mbid, size).
+	cacheDir := t.TempDir()
+	dst := filepath.Join(cacheDir, "stream-mbid-race.jpg")
+	payload := bytes.Repeat([]byte("X"), 4096)
+	if err := os.WriteFile(dst, payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	orig := renameFunc
+	renameFunc = func(src, dst string) error { return os.ErrPermission }
+	t.Cleanup(func() { renameFunc = orig })
+
+	if err := writeArtworkAtomicStream(dst, bytes.NewReader(payload), int64(len(payload)+1)); err != nil {
+		t.Fatalf("writeArtworkAtomicStream: %v (expected nil — race winner with matching size)", err)
+	}
+	entries, _ := os.ReadDir(cacheDir)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".caa-") {
+			t.Errorf("leaked tmp on race-winner path: %s", e.Name())
+		}
+	}
+}
+
+// errReader returns the same error on every Read. Used to verify the
+// streaming helper propagates io errors without partial-write fallout.
+type errReader struct{ err error }
+
+func (r errReader) Read(p []byte) (int, error) { return 0, r.err }
+
+func TestWriteArtworkAtomicStream_PropagatesReadError(t *testing.T) {
+	cacheDir := t.TempDir()
+	dst := filepath.Join(cacheDir, "stream-mbid-readerr.jpg")
+	if err := writeArtworkAtomicStream(dst, errReader{err: io.ErrUnexpectedEOF}, 1024); err == nil {
+		t.Fatal("expected error from failing reader")
+	}
+	if _, err := os.Stat(dst); !os.IsNotExist(err) {
+		t.Errorf("destination should not exist after read error; stat err = %v", err)
 	}
 }
