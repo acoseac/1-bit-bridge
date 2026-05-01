@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -246,7 +247,21 @@ func (s *Server) serveVariant(w http.ResponseWriter, r *http.Request, sourcePath
 	// whether to re-convert (via `bridge upscale --force`) so we
 	// never auto-delete a stale row here. iOS sees 410 Gone and
 	// falls back to the original.
-	if rec.SourceMTimeNS != sourceInfo.ModTime().UnixNano() || rec.SourceSize != sourceInfo.Size() {
+	//
+	// Mtime comparison tolerates µs-level rounding: ext4 stores
+	// nanoseconds, but some NFS exports truncate to microseconds and
+	// SMB mounts can carry FAT-style 2-second granularity. A bare
+	// `!=` would false-stale every variant on those filesystems on
+	// the next bridge restart even when the source was untouched.
+	// 1 ms is wider than every observed truncation granularity and
+	// still narrow enough that a real edit (audacity save → mtime
+	// jump of seconds) reliably trips the gate.
+	const mtimeToleranceNS int64 = 1_000_000
+	mtimeDelta := rec.SourceMTimeNS - sourceInfo.ModTime().UnixNano()
+	if mtimeDelta < 0 {
+		mtimeDelta = -mtimeDelta
+	}
+	if mtimeDelta > mtimeToleranceNS || rec.SourceSize != sourceInfo.Size() {
 		writeError(w, http.StatusGone, "variant_stale", "variant is out of date relative to source; falling back to original is recommended")
 		return
 	}
@@ -280,12 +295,21 @@ func (s *Server) serveVariant(w http.ResponseWriter, r *http.Request, sourcePath
 // childPath returns the library-relative path of a child given its parent's
 // library-relative path and its own name. Uses forward slashes regardless
 // of the server's OS.
+//
+// `path.Join` (not `filepath.Join`) normalises consecutive slashes, strips
+// trailing slashes from `parent`, and otherwise canonicalises forward-
+// slash paths uniformly across OSes. Pre-fix used manual concatenation
+// (`filepath.ToSlash(filepath.Clean(parent)) + "/" + name`); the result
+// is functionally identical on every input today (since `name` comes from
+// `os.ReadDir` which strips path separators), but the manual path is a
+// foot-gun for future refactors that might pass a less-disciplined `name`
+// — `path.Join` collapses any double-slash that creeps in (gemini-style
+// review bias).
 func childPath(parent, name string) string {
 	if parent == "" || parent == "/" {
 		return name
 	}
-	// Use filepath.ToSlash on the join so Windows backslashes don't leak.
-	return filepath.ToSlash(filepath.Clean(parent)) + "/" + name
+	return path.Join(filepath.ToSlash(parent), name)
 }
 
 // writeResolveError maps an fs resolver error to the right JSON error

@@ -122,11 +122,21 @@ func (r *Resolver) Resolve(clientPath string) (string, error) {
 	// Canonicalize: collapse ".", empty segments, and leading slashes.
 	// Leading "/" is treated as root-relative (a redundant prefix, not an
 	// absolute path) and stripped.
-	clean := path.Clean("/" + clientPath)
-	clean = strings.TrimPrefix(clean, "/")
+	//
+	// Pre-fix used `path.Clean("/" + clientPath)` then `TrimPrefix("/")`,
+	// paying two string allocations per call. The path-traversal safety
+	// (".." rejection) lives in the segment walk above this — by the
+	// time path.Clean runs, the input is known safe — so this is purely
+	// canonicalisation, not a security check. Direct `path.Clean` is
+	// equivalent: the "/foo" leading-slash case still trims via
+	// TrimPrefix; the "" empty-string case maps `path.Clean("")` ==
+	// "." to "". Verified equivalent across the three input shapes
+	// (empty / leading-slash / bare relative).
+	clean := path.Clean(clientPath)
 	if clean == "." {
 		clean = ""
 	}
+	clean = strings.TrimPrefix(clean, "/")
 
 	// Pick a root. Snapshot under the read lock so a concurrent SetRoots
 	// can't swap roots mid-pick.

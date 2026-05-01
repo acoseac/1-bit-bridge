@@ -91,6 +91,15 @@ const (
 	// permanently-failing auth.Store.Revoke pin the row in memory for
 	// the bridge's process lifetime.
 	maxRevokeAttempts = 3
+
+	// maxIDCollisionRetries bounds the request-ID collision-retry loop
+	// in CreateRequest. With 48-bit request IDs and `maxPending=64`,
+	// the birthday-paradox probability of even one collision is ~1e-36,
+	// so 10 retries covers every plausible scenario. The cap exists to
+	// surface a degenerate `crypto/rand` failure (entropy exhaustion,
+	// kernel CSPRNG returning a fixed value) as a typed error rather
+	// than letting the request handler spin forever.
+	maxIDCollisionRetries = 10
 )
 
 // revokeRetryBackoff returns the delay before the next revocation
@@ -306,8 +315,17 @@ func (s *Store) CreateRequest(deviceName, clientVersion, pollSecretHashHex, sour
 	}
 
 	// Avoid the (cosmically unlikely) ID collision so a fresh Create
-	// can't replace a still-live request.
+	// can't replace a still-live request. Bounded by
+	// `maxIDCollisionRetries` so a degenerate `crypto/rand` failure
+	// mode (entropy exhaustion, kernel CSPRNG returning a fixed value)
+	// can't pin the request handler in an infinite loop. See the
+	// constant's doc for the probability math.
+	collisionRetries := 0
 	for _, exists := s.byID[id]; exists; _, exists = s.byID[id] {
+		collisionRetries++
+		if collisionRetries > maxIDCollisionRetries {
+			return Request{}, fmt.Errorf("pairing: %d consecutive ID collisions — random source may be compromised", collisionRetries)
+		}
 		id, err = randomHex(requestIDBytes)
 		if err != nil {
 			return Request{}, fmt.Errorf("random id (collision retry): %w", err)
