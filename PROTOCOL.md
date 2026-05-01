@@ -283,7 +283,46 @@ Distinct from `upscale_disabled`. The pool's queue cap is operator-tunable via `
 
 **Idempotency**: the worker pool dedups jobs on `(source_path, variant_id)`. A duplicate request while a job is queued or running is a silent no-op (still counted in `enqueued`); the iOS app can mash "Generate" without server-side duplicate work.
 
-**Asynchronous completion**: the response returns as soon as the jobs are queued. iOS discovers completed variants via the next `/v1/manifest` sync (which advertises the new `Track.variants` entries). There is no per-job status endpoint in v1.2; the manifest IS the authoritative completion signal.
+**Asynchronous completion**: the response returns as soon as the jobs are queued. iOS discovers completed variants via the next `/v1/manifest` sync (which advertises the new `Track.variants` entries). For pool-level visibility while jobs are in flight (queue depth, lifetime totals, failure counts) iOS calls the companion `GET /v1/upscale/stats` endpoint described below; for per-track completion the manifest is still the authoritative signal.
+
+### `GET /v1/upscale/stats` (additive, since v1.2)
+
+Snapshot of the upscale feature's runtime + on-disk state. Designed for the iOS app's per-share "Upscaling" management section to show the operator how many jobs are queued, in flight, finished, or failed without surfacing the admin console externally. The wire shape is intentionally identical to the admin tile's `/api/upscale/stats` payload — same numbers in both places.
+
+**Authentication**: standard `Authorization: Bearer <token>` (same rule as every other `/v1/*` endpoint except `/v1/health` and the pairing routes).
+
+**Response** (`200 OK`, JSON):
+
+```json
+{
+  "enabled": true,
+  "soxAvailable": true,
+  "pool": {
+    "workers": 4,
+    "queueCap": 5000,
+    "queueLen": 12,
+    "inflight": 4,
+    "enqueued": 142,
+    "done": 126,
+    "failed": 0
+  },
+  "cachedVariants": 138,
+  "cachedBytes": 4823917568
+}
+```
+
+
+| Field | Meaning |
+|---|---|
+| `enabled` | Live runtime state. False when `cfg.Upscale.Enabled` is false OR the sox-precheck demoted the feature at startup OR the operator just PATCHed the feature off (the long-lived Pool may still be alive, but the contract is "feature is off live", matching `/v1/health.upscaleEnabled`). |
+| `soxAvailable` | The current `sox(1)`-on-PATH probe result. Omitted when the test harness didn't wire a precheck closure. Operators can install sox without restarting the bridge — within ~30 s the field flips to `true`. |
+| `pool` | Live worker-pool snapshot. **Omitted when `enabled` is false** (no pool to query). `queueCap` is operator-tunable via `cfg.Upscale.QueueCap` (default 5000). `enqueued`/`done`/`failed` are lifetime counters since the bridge process started — they reset on restart; `cachedVariants` survives. |
+| `cachedVariants` | Row count from `track_variants`. Survives across restarts and reflects historical conversion work — non-zero even when `enabled == false` if the operator disabled the feature without `--gc`. |
+| `cachedBytes` | Total size of all sidecar files, summed from `track_variants.size_bytes`. Helps the operator gauge disk usage before deciding to re-enable or `--gc`. |
+
+**Empty / disabled bridge**: returns the zero-value response `{"enabled": false, "cachedVariants": 0, "cachedBytes": 0}`. iOS treats this identically to a 404 from a pre-v1.2 bridge — render "feature off" without distinguishing a missing endpoint from a disabled feature.
+
+**Polling cadence**: iOS polls every 5 s **only while the management page is foregrounded** (never in background). The handler is cheap enough — single SQL `COUNT` + a mutex-protected pool snapshot + a `sox` precheck — to absorb that cadence on Pi-class hosts.
 
 ### `GET /v1/artwork/{mbid}?size=<int>` and `GET /v1/artist-image/{mbid}`
 

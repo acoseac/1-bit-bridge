@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -43,6 +44,13 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/updater"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
+
+// Package-scoped logger for the cmd/bridge wiring layer. Most
+// startup output is `fmt.Fprintf(stdout/stderr)` because it's user-
+// facing; this is for backend-style telemetry from helpers like
+// upscaleStatsAdapter that fire on every request and shouldn't spam
+// the operator's terminal but should be visible via `bridge logs`.
+var logger = logging.Component("bridge")
 
 // variantStoreAdapter implements api.VariantStore on top of a
 // manifest.Provider. Just translates between the two packages'
@@ -168,6 +176,97 @@ func (a *upscaleEnqueuerAdapter) EnqueueOne(libraryRelativePath string) error {
 	default:
 		return enqueueErr
 	}
+}
+
+// upscaleStatsAdapter implements api.UpscaleStatsProvider. Mirrors
+// the admin /api/upscale/stats handler's data sources field-for-
+// field so the operator's Settings tile and a paired iOS client see
+// the same numbers.
+//
+// Two pool-related closures (rather than a captured `*transcode.Pool`):
+// the pool reference itself can be nil (operator never enabled the
+// feature) AND the operator can flip `cfg.Upscale.Enabled = false`
+// mid-flight without restart, leaving a live but logically-disabled
+// Pool. The closures evaluate both conditions at snapshot time so
+// `enabled` and the `pool` payload move together — same gating the
+// admin `UpscaleStats` closure already uses.
+//
+// **Known limitation**: `cfg.Upscale.Enabled` is read here without
+// synchronization while the admin PATCH handler writes the same
+// field under `admin.Server.mu`. This data race already existed in
+// the admin tile's closure (cmd/bridge/main.go:909) and is out-of-
+// scope for this endpoint addition; the proper fix is an `atomic.Bool`
+// on `*config.Config` (touching admin's writer too). Worst case
+// today: a single 5 s poll snapshot reads a racing flag value and
+// reports `enabled` inconsistently with the freshly-PATCHed state;
+// the next poll converges.
+//
+// Sox precheck is TTL-cached (mirrors `admin.Server.cachedSoxAvailability`,
+// also 30 s) so the per-5-s poll doesn't shell out 12×/min — the
+// precheck forks `sox --version`, which is cheap but not free, and
+// gemini-code-assist reasonably flagged the per-call cost on PR #111.
+type upscaleStatsAdapter struct {
+	pool    func() *transcode.Pool
+	enabled func() bool
+	store   *manifest.Store
+
+	soxMu sync.Mutex
+	soxAt time.Time
+	soxOK bool
+}
+
+const upscaleStatsSoxTTL = 30 * time.Second
+
+func (a *upscaleStatsAdapter) UpscaleStatsSnapshot() api.UpscaleStats {
+	var snap api.UpscaleStats
+	if a.enabled() {
+		if p := a.pool(); p != nil {
+			s := p.Stats()
+			snap.Pool = &api.UpscalePoolStats{
+				Workers:  s.Workers,
+				QueueCap: s.QueueCap,
+				QueueLen: s.QueueLen,
+				Inflight: s.Inflight,
+				Enqueued: s.Enqueued,
+				Done:     s.Done,
+				Failed:   s.Failed,
+			}
+		}
+	}
+	snap.Enabled = (snap.Pool != nil)
+	soxOK := a.cachedSoxOK()
+	snap.SoxAvailable = &soxOK
+	if a.store != nil {
+		count, bytes, err := a.store.CountVariants()
+		if err != nil {
+			// Same degrade-and-log policy the admin tile uses
+			// (PR #110): a SQL failure here shouldn't blank the
+			// whole response. Live counters still go out; the
+			// caller sees `cachedVariants: 0, cachedBytes: 0` and
+			// the operator can find the failure in logs.
+			logger.Warn("upscale stats: count variants", "err", err)
+		} else {
+			snap.CachedVariants = count
+			snap.CachedBytes = bytes
+		}
+	}
+	return snap
+}
+
+// cachedSoxOK returns the most recent `transcode.PrecheckSox` result
+// or runs a fresh probe when the cache is older than
+// `upscaleStatsSoxTTL`. Mirrors `admin.Server.cachedSoxAvailability`'s
+// 30 s TTL so the operator's Settings tile and the iOS-facing
+// endpoint stay aligned on what the host reports.
+func (a *upscaleStatsAdapter) cachedSoxOK() bool {
+	a.soxMu.Lock()
+	defer a.soxMu.Unlock()
+	if !a.soxAt.IsZero() && time.Since(a.soxAt) < upscaleStatsSoxTTL {
+		return a.soxOK
+	}
+	a.soxOK = (transcode.PrecheckSox() == nil)
+	a.soxAt = time.Now()
+	return a.soxOK
 }
 
 // updateInfoAdapter bridges *updater.Updater to api.UpdaterStatus +
@@ -864,6 +963,36 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			outputDir: filepath.Join(cfg.DataDir, "transcoded"),
 		})
 	}
+
+	// /v1/upscale/stats wiring. Always registered so paired iOS
+	// clients can render a clean "feature off" state on bridges where
+	// the operator hasn't enabled upscaling — same nil-safe contract
+	// the admin tile uses. The closure mirrors the admin
+	// /api/upscale/stats handler exactly so the operator's Settings
+	// page and the iOS management section show the same numbers.
+	//
+	// Three sources combined:
+	//   1. Live pool counters — only when upscalePool != nil AND
+	//      cfg.Upscale.Enabled (operator can disable mid-flight via a
+	//      PATCH; the long-lived Pool stays alive until restart, but
+	//      we honour the live flag and report no pool to keep the wire
+	//      semantics in lockstep with /v1/health.upscaleEnabled).
+	//   2. Cached-variants count + total bytes from `track_variants`
+	//      — survives across restarts and reflects historical work,
+	//      so it stays non-zero when the feature was disabled without
+	//      `--gc`. SQL failure degrades to "0 cached" with a logged
+	//      warning rather than turning the whole response into a 5xx.
+	//   3. Sox-availability probe — same `transcode.PrecheckSox` the
+	//      admin tile consumes, gated by the same 30 s TTL cache the
+	//      admin handler uses (the admin cache holds it; we re-probe
+	//      directly here, accepting one extra fork-exec per 5 s poll
+	//      since iOS only polls when the management page is fore-
+	//      grounded — typically zero polls per minute on average).
+	apiSrv.WithUpscaleStats(&upscaleStatsAdapter{
+		pool:    func() *transcode.Pool { return upscalePool },
+		enabled: func() bool { return upscalePool != nil && cfg.Upscale.Enabled },
+		store:   manifestStore,
+	})
 	httpSrv := &http.Server{
 		Addr:    cfg.ListenAddress,
 		Handler: apiSrv.Handler(),
