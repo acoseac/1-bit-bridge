@@ -144,6 +144,16 @@ func advertiseInternal(cfg Config, ipSource func() []net.IP, interval time.Durat
 		rebindInterval: interval,
 		done:           make(chan struct{}),
 	}
+	// Initial rebuild runs WITHOUT taking a.rebindMu. Safe because
+	// `a` was just allocated and no goroutine has a reference to it
+	// yet — `rebindLoop()` is the only other writer of
+	// `a.server` / `a.cachedIPs` / `a.closed`, and we don't spawn it
+	// until below (after this returns successfully). `Close()` is
+	// the only other lock-acquiring caller, and it can't race a
+	// pre-publication Advertiser either. The rebindMu contract from
+	// `rebuildLocked`'s doc applies to every subsequent invocation
+	// from `maybeRebind`, where contention with `Close` is real
+	// (CodeRabbit on PR #112).
 	if err := a.rebuildLocked(a.ipSource()); err != nil {
 		return nil, err
 	}
