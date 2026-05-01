@@ -99,7 +99,7 @@
       <dd id="update-deferred" hidden></dd>
       {{end}}
     </dl>
-    <p class="panel-note">Install downloads the release archive, verifies the SHA-256 from <code>checksums.txt</code>, swaps the binary, and arms a rollback marker. The bridge restarts to load the new version. Active downloads block install (use the override only when nothing critical is in flight).</p>
+    <p class="panel-note">Install downloads the release archive, verifies the SHA-256 from <code>checksums.txt</code>, swaps the binary, and arms a rollback marker. {{if .Data.IsSupervised}}The bridge restarts automatically to load the new version.{{else}}The bridge stops after install — start it again manually to load the new version.{{end}} Active downloads block install (use the override only when nothing critical is in flight).</p>
   </div>
 
   <div class="panel">
