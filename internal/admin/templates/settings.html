@@ -15,185 +15,213 @@
   </p>
 
   <form id="settings-form" class="panel">
-    <h2 class="section-head">General</h2>
-
-    <div class="field">
-      <label>Library name
-        <input name="libraryName" type="text" value="{{.Data.LibraryName}}">
-      </label>
-      <small class="hint">Shown in the iOS pairing UI and mDNS TXT records.</small>
-    </div>
-
-    <div class="field">
-      <label>Scan interval (seconds)
-        <input name="scanIntervalSec" type="number" min="1" value="{{.Data.ScanIntervalSec}}">
-      </label>
-      <small class="hint">How often the full walk runs. Defaults to 3600 (1 h).</small>
-    </div>
-
-    <div class="field read-only">
-      <label>Data directory
-        <input type="text" value="{{.Data.DataDir}}" disabled>
-      </label>
-      <small class="hint">Set at <code>bridge init</code> time; not editable here.</small>
-    </div>
-
-    <h2 class="section-head">Networking</h2>
-
-    <div class="field">
-      <label>Listen address <span class="badge warn">restart</span>
-        <input name="listenAddress" type="text" value="{{.Data.ListenAddress}}">
-      </label>
-      <small class="hint">What iOS clients dial, e.g. <code>:7788</code>.</small>
-    </div>
-
-    <div class="field">
-      <label>Admin address <span class="badge warn">restart</span>
-        <input name="adminAddress" type="text" value="{{.Data.AdminAddress}}">
-      </label>
-      <small class="hint">
-        Must be a loopback address (127.0.0.1, ::1, or localhost). Non-loopback
-        values are rejected — the admin console has no auth.
-      </small>
-    </div>
-
-    <div class="field">
-      <label>Custom endpoints
-        <textarea name="customEndpoints" rows="3"
-                  placeholder="https://bridge.example.com:7788">{{.Data.CustomEndpointsText}}</textarea>
-      </label>
-      <small class="hint">
-        One <code>https://</code> URL per line. Use this for reverse proxies,
-        port-forwarded WAN URLs, or Tailscale MagicDNS names the auto-detector
-        didn&rsquo;t pick up. Each line must be a complete URL including port.
-        Non-HTTPS or malformed entries are silently dropped on save.
-        <strong>For iOS clients to actually reach a custom URL, the TLS
-        certificate&rsquo;s SAN list must cover the URL&rsquo;s hostname or IP</strong>
-        — change the list, then rotate the cert and re-pair iOS devices.
-      </small>
-    </div>
-
     {{/*
-      Read-only Networking telemetry panels sit between the Networking
-      form fields and the Updates section so the visual relationship to
-      the configuration above (listen address, custom endpoints, TLS
-      identity) is immediate. They live inside <form> for layout reasons
-      but contain no submit-capable controls — DO NOT add <button> here
-      without type="button" or the form will submit on click.
+      Tab nav for the settings sections. JS in app.js's
+      `initSettingsTabs` (called from initSettings) toggles the
+      `hidden` attribute on tab panes and the `active` class on
+      buttons. Active tab is persisted in sessionStorage so a
+      restart bounce returns the operator to where they were.
+
+      Single shared <form> wraps every pane so the Save button at
+      the bottom commits all pending edits at once — switching
+      tabs doesn't lose work.
     */}}
-    <div class="telemetry-group">
-      <div class="panel telemetry-panel">
-        <div class="panel-head">
-          <h2>Reachable endpoints</h2>
+    <nav class="tab-nav" role="tablist" aria-label="Settings sections">
+      <button type="button" class="tab-btn active" role="tab"
+              data-tab="general" aria-selected="true">General</button>
+      <button type="button" class="tab-btn" role="tab"
+              data-tab="networking" aria-selected="false">Networking</button>
+      <button type="button" class="tab-btn" role="tab"
+              data-tab="updates" aria-selected="false">Updates</button>
+      <button type="button" class="tab-btn" role="tab"
+              data-tab="audio" aria-selected="false">Audio quality</button>
+    </nav>
+
+    <div class="tab-pane" data-tab="general" role="tabpanel">
+      <h2 class="section-head">General</h2>
+
+      <div class="field">
+        <label>Library name
+          <input name="libraryName" type="text" value="{{.Data.LibraryName}}">
+        </label>
+        <small class="hint">Shown in the iOS pairing UI and mDNS TXT records.</small>
+      </div>
+
+      <div class="field">
+        <label>Scan interval (seconds)
+          <input name="scanIntervalSec" type="number" min="1" value="{{.Data.ScanIntervalSec}}">
+        </label>
+        <small class="hint">How often the full walk runs. Defaults to 3600 (1 h).</small>
+      </div>
+
+      <div class="field read-only">
+        <label>Data directory
+          <input type="text" value="{{.Data.DataDir}}" disabled>
+        </label>
+        <small class="hint">Set at <code>bridge init</code> time; not editable here.</small>
+      </div>
+    </div>
+
+    <div class="tab-pane" data-tab="networking" role="tabpanel" hidden>
+      <h2 class="section-head">Networking</h2>
+
+      <div class="field">
+        <label>Listen address <span class="badge warn">restart</span>
+          <input name="listenAddress" type="text" value="{{.Data.ListenAddress}}">
+        </label>
+        <small class="hint">What iOS clients dial, e.g. <code>:7788</code>.</small>
+      </div>
+
+      <div class="field">
+        <label>Admin address <span class="badge warn">restart</span>
+          <input name="adminAddress" type="text" value="{{.Data.AdminAddress}}">
+        </label>
+        <small class="hint">
+          Must be a loopback address (127.0.0.1, ::1, or localhost). Non-loopback
+          values are rejected — the admin console has no auth.
+        </small>
+      </div>
+
+      <div class="field">
+        <label>Custom endpoints
+          <textarea name="customEndpoints" rows="3"
+                    placeholder="https://bridge.example.com:7788">{{.Data.CustomEndpointsText}}</textarea>
+        </label>
+        <small class="hint">
+          One <code>https://</code> URL per line. Use this for reverse proxies,
+          port-forwarded WAN URLs, or Tailscale MagicDNS names the auto-detector
+          didn&rsquo;t pick up. Each line must be a complete URL including port.
+          Non-HTTPS or malformed entries are silently dropped on save.
+          <strong>For iOS clients to actually reach a custom URL, the TLS
+          certificate&rsquo;s SAN list must cover the URL&rsquo;s hostname or IP</strong>
+          — change the list, then rotate the cert and re-pair iOS devices.
+        </small>
+      </div>
+
+      {{/*
+        Read-only Networking telemetry panels live inside the Networking
+        tab. They live inside <form> for layout reasons but contain no
+        submit-capable controls — DO NOT add <button> here without
+        type="button" or the form will submit on click.
+      */}}
+      <div class="telemetry-group">
+        <div class="panel telemetry-panel">
+          <div class="panel-head">
+            <h2>Reachable endpoints</h2>
+          </div>
+          <p class="muted">
+            Addresses this bridge advertises to paired iOS devices.
+            Devices try them in order and stick to whichever connects.
+            The list is recomputed live from network interfaces — bring a Tailscale
+            tunnel up and refresh to see the new entry.
+          </p>
+          <ul id="endpoints-list" class="endpoints-list">
+            <li class="endpoints-empty"><em>Loading…</em></li>
+          </ul>
         </div>
-        <p class="muted">
-          Addresses this bridge advertises to paired iOS devices.
-          Devices try them in order and stick to whichever connects.
-          The list is recomputed live from network interfaces — bring a Tailscale
-          tunnel up and refresh to see the new entry.
-        </p>
-        <ul id="endpoints-list" class="endpoints-list">
-          <li class="endpoints-empty"><em>Loading…</em></li>
-        </ul>
+
+        <div class="panel telemetry-panel">
+          <h2>TLS fingerprint</h2>
+          <p>iOS clients pin this value during pairing. Don't rotate without re-pairing.</p>
+          <code class="fingerprint">{{.Fingerprint}}</code>
+          <dl>
+            <dt>Expires</dt>
+            <dd id="cert-expiry">…</dd>
+          </dl>
+          <p class="panel-note">Rotation is CLI-only: <code>bridge cert rotate</code>. After rotation, every paired device must re-pair from a fresh QR.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="tab-pane" data-tab="updates" role="tabpanel" hidden>
+      <h2 class="section-head">Updates</h2>
+      <p class="lede">
+        The bridge polls the GitHub Releases API for new versions. Operator-triggered
+        install is always available on the dashboard; auto-install is opt-in.
+      </p>
+
+      <div class="field">
+        <label class="checkbox">
+          <input name="updateAutoInstall" type="checkbox" {{if .Data.UpdateAutoInstall}}checked{{end}}>
+          Auto-install new releases <span class="badge warn">restart</span>
+        </label>
+        <small class="hint">
+          When enabled, every successful poll that surfaces an update triggers
+          download → verify → atomic swap → restart, subject to the same
+          active-stream gate as the manual Install button. <strong>Default off</strong>
+          — opt-in is recommended even on stable channels.
+        </small>
       </div>
 
-      <div class="panel telemetry-panel">
-        <h2>TLS fingerprint</h2>
-        <p>iOS clients pin this value during pairing. Don't rotate without re-pairing.</p>
-        <code class="fingerprint">{{.Fingerprint}}</code>
-        <dl>
-          <dt>Expires</dt>
-          <dd id="cert-expiry">…</dd>
+      <div class="field">
+        <label>Quiet hours <span class="badge warn">restart</span>
+          <input name="updateQuietHours" type="text" placeholder="HH:MM-HH:MM (optional)"
+                 value="{{.Data.UpdateQuietHours}}" pattern="^[0-9]{2}:[0-9]{2}-[0-9]{2}:[0-9]{2}$">
+        </label>
+        <small class="hint">
+          Restricts auto-install to a daily window in server-local time.
+          Leave empty to permit any time. Wraps midnight (e.g.
+          <code>23:00-06:00</code>) for overnight schedules.
+        </small>
+      </div>
+
+      <div class="field">
+        <label>Check interval (hours) <span class="badge warn">restart</span>
+          <input name="updateCheckIntervalHours" type="number" min="0" placeholder="6"
+                 value="{{if gt .Data.UpdateCheckIntervalHours 0}}{{.Data.UpdateCheckIntervalHours}}{{end}}">
+        </label>
+        <small class="hint">
+          How often to poll the GitHub Releases API. Defaults to 6 (4 polls/day,
+          well under the 60/hr unauthenticated rate limit). Lower values are
+          clamped to a 1 h floor at runtime.
+        </small>
+      </div>
+    </div>
+
+    <div class="tab-pane" data-tab="audio" role="tabpanel" hidden>
+      <h2 class="section-head">Audio quality</h2>
+      <p class="lede">
+        Offline PCM upscaling renders high-rate FLAC sidecars from CD-rate sources via
+        <code>sox(1)</code>. Disabled by default — opt in below, then run
+        <code>bridge upscale</code> on the server to populate the cache (or trigger
+        from the iOS app's "Generate upscaled version" context menu).
+      </p>
+
+      <div class="field">
+        <label class="checkbox">
+          <input name="upscaleEnabled" type="checkbox" {{if .Data.UpscaleEnabled}}checked{{end}}>
+          Enable PCM upscaling <span class="badge warn">restart</span>
+        </label>
+        <small class="hint">
+          When enabled, the bridge runs a long-lived sox worker pool inside
+          <code>bridge serve</code>, advertises <code>upscaleEnabled: true</code> on
+          <code>/v1/health</code>, and accepts <code>POST /v1/upscale</code> requests
+          from iOS. Cached sidecars survive across toggles — disable to hide variants
+          from clients without losing converted files.
+        </small>
+        {{if .Data.UpscaleSoxMissing}}
+          <p class="warn-banner">
+            <strong>sox is not on PATH.</strong> Enabling here will write the flag,
+            but the bridge will degrade to feature-off at startup until sox is
+            installed on the bridge host:
+          </p>
+          <pre class="install-hint">{{.Data.UpscaleSoxInstallHint}}</pre>
+        {{end}}
+      </div>
+
+      <div id="upscale-stats" class="upscale-stats" hidden>
+        <h3>Upscale stats</h3>
+        <dl class="status-grid">
+          <dt>Cached variants</dt><dd id="upscale-cached-count">…</dd>
+          <dt>Cached on disk</dt><dd id="upscale-cached-bytes">…</dd>
+          <dt>Workers</dt><dd id="upscale-workers">…</dd>
+          <dt>Queue</dt><dd id="upscale-queue">…</dd>
+          <dt>In flight</dt><dd id="upscale-inflight">…</dd>
+          <dt>Lifetime done</dt><dd id="upscale-done">…</dd>
+          <dt>Lifetime failed</dt><dd id="upscale-failed">…</dd>
         </dl>
-        <p class="panel-note">Rotation is CLI-only: <code>bridge cert rotate</code>. After rotation, every paired device must re-pair from a fresh QR.</p>
+        <p class="panel-note">Refreshes every 5 s while this page is open. Lifetime counters reset on bridge restart; cached-variant count survives.</p>
       </div>
-    </div>
-
-    <h2 class="section-head">Updates</h2>
-    <p class="lede">
-      The bridge polls the GitHub Releases API for new versions. Operator-triggered
-      install is always available on the dashboard; auto-install is opt-in.
-    </p>
-
-    <div class="field">
-      <label class="checkbox">
-        <input name="updateAutoInstall" type="checkbox" {{if .Data.UpdateAutoInstall}}checked{{end}}>
-        Auto-install new releases <span class="badge warn">restart</span>
-      </label>
-      <small class="hint">
-        When enabled, every successful poll that surfaces an update triggers
-        download → verify → atomic swap → restart, subject to the same
-        active-stream gate as the manual Install button. <strong>Default off</strong>
-        — opt-in is recommended even on stable channels.
-      </small>
-    </div>
-
-    <div class="field">
-      <label>Quiet hours <span class="badge warn">restart</span>
-        <input name="updateQuietHours" type="text" placeholder="HH:MM-HH:MM (optional)"
-               value="{{.Data.UpdateQuietHours}}" pattern="^[0-9]{2}:[0-9]{2}-[0-9]{2}:[0-9]{2}$">
-      </label>
-      <small class="hint">
-        Restricts auto-install to a daily window in server-local time.
-        Leave empty to permit any time. Wraps midnight (e.g.
-        <code>23:00-06:00</code>) for overnight schedules.
-      </small>
-    </div>
-
-    <div class="field">
-      <label>Check interval (hours) <span class="badge warn">restart</span>
-        <input name="updateCheckIntervalHours" type="number" min="0" placeholder="6"
-               value="{{if gt .Data.UpdateCheckIntervalHours 0}}{{.Data.UpdateCheckIntervalHours}}{{end}}">
-      </label>
-      <small class="hint">
-        How often to poll the GitHub Releases API. Defaults to 6 (4 polls/day,
-        well under the 60/hr unauthenticated rate limit). Lower values are
-        clamped to a 1 h floor at runtime.
-      </small>
-    </div>
-
-    <h2 class="section-head">Audio quality</h2>
-    <p class="lede">
-      Offline PCM upscaling renders high-rate FLAC sidecars from CD-rate sources via
-      <code>sox(1)</code>. Disabled by default — opt in below, then run
-      <code>bridge upscale</code> on the server to populate the cache (or trigger
-      from the iOS app's "Generate upscaled version" context menu).
-    </p>
-
-    <div class="field">
-      <label class="checkbox">
-        <input name="upscaleEnabled" type="checkbox" {{if .Data.UpscaleEnabled}}checked{{end}}>
-        Enable PCM upscaling <span class="badge warn">restart</span>
-      </label>
-      <small class="hint">
-        When enabled, the bridge runs a long-lived sox worker pool inside
-        <code>bridge serve</code>, advertises <code>upscaleEnabled: true</code> on
-        <code>/v1/health</code>, and accepts <code>POST /v1/upscale</code> requests
-        from iOS. Cached sidecars survive across toggles — disable to hide variants
-        from clients without losing converted files.
-      </small>
-      {{if .Data.UpscaleSoxMissing}}
-        <p class="warn-banner">
-          <strong>sox is not on PATH.</strong> Enabling here will write the flag,
-          but the bridge will degrade to feature-off at startup until sox is
-          installed on the bridge host:
-        </p>
-        <pre class="install-hint">{{.Data.UpscaleSoxInstallHint}}</pre>
-      {{end}}
-    </div>
-
-    <div id="upscale-stats" class="upscale-stats" hidden>
-      <h3>Upscale stats</h3>
-      <dl class="status-grid">
-        <dt>Cached variants</dt><dd id="upscale-cached-count">…</dd>
-        <dt>Cached on disk</dt><dd id="upscale-cached-bytes">…</dd>
-        <dt>Workers</dt><dd id="upscale-workers">…</dd>
-        <dt>Queue</dt><dd id="upscale-queue">…</dd>
-        <dt>In flight</dt><dd id="upscale-inflight">…</dd>
-        <dt>Lifetime done</dt><dd id="upscale-done">…</dd>
-        <dt>Lifetime failed</dt><dd id="upscale-failed">…</dd>
-      </dl>
-      <p class="panel-note">Refreshes every 5 s while this page is open. Lifetime counters reset on bridge restart; cached-variant count survives.</p>
     </div>
 
     <div class="actions">

@@ -958,7 +958,69 @@ function parseDurationShorthand(s) {
 
 // --- settings ---
 
+// Tabbed Settings sections (PR feat/admin-shell-tabs-and-theme).
+// The Settings page used to scroll forever — General / Networking /
+// Updates / Audio quality each as a section header on one long form.
+// Tabs flatten to one section visible at a time. Single shared form
+// is preserved so the bottom Save button still commits every pending
+// edit at once; switching tabs doesn't lose work.
+//
+// Active tab is persisted in sessionStorage so a save+restart bounce
+// returns the operator where they were. Validates the persisted id
+// against the live tab set so a future template that drops a tab
+// can't trap the user on a hidden pane.
+function initSettingsTabs() {
+  const tabs = document.querySelectorAll(".tab-btn[data-tab]");
+  const panes = document.querySelectorAll(".tab-pane[data-tab]");
+  if (tabs.length === 0 || panes.length === 0) return;
+  const STORAGE_KEY = "settings.activeTab";
+  const validIds = new Set();
+  tabs.forEach(t => validIds.add(t.dataset.tab));
+  function activate(id) {
+    if (!validIds.has(id)) return;
+    tabs.forEach(t => {
+      const on = t.dataset.tab === id;
+      t.classList.toggle("active", on);
+      t.setAttribute("aria-selected", on ? "true" : "false");
+      // tabindex makes only the active tab keyboard-tabbable; arrow
+      // keys move within the role=tablist group per WAI-ARIA.
+      t.tabIndex = on ? 0 : -1;
+    });
+    panes.forEach(p => {
+      p.hidden = p.dataset.tab !== id;
+    });
+    try { sessionStorage.setItem(STORAGE_KEY, id); } catch { /* private mode */ }
+  }
+  tabs.forEach(t => {
+    t.addEventListener("click", () => activate(t.dataset.tab));
+  });
+  // Arrow-key navigation across the tab strip — standard WAI-ARIA
+  // tablist convention. Operators who navigate by keyboard expect
+  // Left/Right (and Home/End) on a focused tab to move within the
+  // group rather than jump out into the form.
+  const tabsArr = Array.from(tabs);
+  tabsArr.forEach((t, i) => {
+    t.addEventListener("keydown", (e) => {
+      let nextIdx = -1;
+      if (e.key === "ArrowRight") nextIdx = (i + 1) % tabsArr.length;
+      else if (e.key === "ArrowLeft") nextIdx = (i - 1 + tabsArr.length) % tabsArr.length;
+      else if (e.key === "Home") nextIdx = 0;
+      else if (e.key === "End") nextIdx = tabsArr.length - 1;
+      if (nextIdx >= 0) {
+        e.preventDefault();
+        const target = tabsArr[nextIdx];
+        activate(target.dataset.tab);
+        target.focus();
+      }
+    });
+  });
+  let saved = null;
+  try { saved = sessionStorage.getItem(STORAGE_KEY); } catch { /* private mode */ }
+  activate(saved && validIds.has(saved) ? saved : tabsArr[0].dataset.tab);
+}
+
 function initSettings() {
+  initSettingsTabs();
   // Cert info is a one-shot fetch — the cert doesn't change without
   // a restart, so polling it is wasted work. The endpoints panel is
   // hydrated by the SSE stream wired at the bottom of this file.

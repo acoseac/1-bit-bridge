@@ -1,74 +1,70 @@
-/* 1-bit bridge admin console — branded refresh.
+/* 1-bit bridge admin console — modern admin theme.
  *
- * Warm-gold-on-deep-teal in dark mode (matches the bridge brand artwork —
- * flaming gold "B" with harp on deep teal/navy). Light mode uses warm
- * parchment + bronze. Every class name and DOM shape from pre-refresh
- * is preserved so the JS in app.js (which reads no tokens, does no
- * style) works unchanged.
+ * Sharp white-base palette with citrus accent (orange primary, yellow
+ * warnings, green success, red danger). Replaces the prior warm-gold-on-
+ * teal motif with a flatter, more conventional admin-UI look. Dark mode
+ * mirrors the same accent set against a near-black surface so the
+ * operator's preferred system theme stays consistent.
+ *
+ * Every class name and DOM shape from pre-refresh is preserved so the
+ * JS in app.js (which reads no tokens, does no style) works unchanged.
  *
  * Colours are tokenised via CSS custom properties (--bg, --accent, etc.)
  * so the rest of the stylesheet reads through to the palette without
- * per-rule edits. The brand mark is now an <img> on .brand-mark instead
- * of CSS bracket pseudo-elements.
+ * per-rule edits.
  */
 
 :root {
-  /* Bridge palette — deep teal base, warm gold primary. */
-  --bg: #08141c;
-  --bg-panel: #0e1d28;
-  --bg-elev: #142a3a;
-  --fg: #f5e8d4;                    /* warm parchment */
-  --fg-muted: #a08a72;
-  --accent: #f4b740;                /* warm gold — primary */
-  --accent-hot: #ff7e3e;             /* ember orange — danger/destructive accent */
-  --accent-warm: #ffd47e;            /* paler gold — warnings (distinct from primary) */
-  --accent-soft: rgba(244, 183, 64, 0.16);
-  /* Precomputed alpha hex (≈45% opacity) used for .brand-mark glow.
-   * color-mix() only landed in baseline browsers in early 2023 — older
-   * Pi default browsers / enterprise ESR may lack it. Using a static
-   * hex token here guarantees the brand glow renders everywhere. The
-   * existing color-mix() usage on box-shadows / hover states elsewhere
-   * stays as-is — those degrading on old browsers was already the
-   * status quo before this refresh. */
-  --accent-glow-color: #f4b74073;
-  --danger: #e54b3a;
-  --ok: #6acf8a;
-  --warn: #ffb64a;
-  --border: #2a3f52;
-  --radius: 6px;
+  /* Default = light theme. Operators with a system dark-mode preference
+   * flip to the dark-on-near-black overrides via @media below. */
+  --bg: #fafafa;                     /* page background — almost white */
+  --bg-panel: #ffffff;               /* panel surface */
+  --bg-elev: #f4f4f5;                /* slight elevation tint (form-field bg) */
+  --fg: #18181b;                     /* near-black body text (Tailwind slate-900) */
+  --fg-muted: #71717a;               /* secondary text / hints (slate-500) */
+  --accent: #f97316;                 /* orange-500 — primary actions */
+  --accent-hot: #dc2626;             /* red-600 — destructive actions */
+  --accent-warm: #eab308;            /* yellow-500 — restart-required + warning badges */
+  --accent-soft: rgba(249, 115, 22, 0.10);
+  --accent-glow-color: #f973164d;    /* ≈30% alpha — used by .brand-mark */
+  --danger: #dc2626;
+  --ok: #16a34a;                     /* green-600 — online / success */
+  --warn: #eab308;
+  --border: #e5e7eb;                 /* slate-200 */
+  --radius: 8px;                     /* slightly softer than the prior 6px for a fresher feel */
   --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", Segoe UI, Roboto, system-ui, sans-serif;
-  /* Display stack used for titles. System-only — no web-font fetch on
-   * an offline admin console. Bahnschrift ships on Windows 10+; Avenir
-   * Next Condensed on macOS/iOS; Oswald on many Linux distros;
-   * Futura/Impact round out the fallback chain. */
+  /* Display stack used for titles — same system-only rationale as the
+   * prior theme. Bahnschrift ships on Windows 10+; Avenir Next
+   * Condensed on macOS/iOS; Oswald on many Linux distros. */
   --display: "Bahnschrift", "Avenir Next Condensed", "Oswald", "Futura", Impact, var(--sans);
-  --glow: 0 0 12px color-mix(in srgb, var(--accent) 40%, transparent);
-  --glow-hot: 0 0 12px color-mix(in srgb, var(--accent-hot) 40%, transparent);
-  --scanline-color: rgba(244, 183, 64, 0.025);
+  --glow: 0 0 0 3px var(--accent-soft);  /* focus-ring style halo, not the prior blur */
+  --glow-hot: 0 0 0 3px rgba(220, 38, 38, 0.15);
+  --scanline-color: transparent;     /* modern theme drops the retro scanline overlay */
 }
 
-@media (prefers-color-scheme: light) {
+@media (prefers-color-scheme: dark) {
   :root {
-    /* Daylight-bridge palette — warm parchment base, saturated bronze
-     * accents that pass WCAG AA on a white panel. */
-    --bg: #f8f1e4;
-    --bg-panel: #ffffff;
-    --bg-elev: #f0e6d2;
-    --fg: #2a1a0a;
-    --fg-muted: #6a5538;
-    --accent: #b87a1a;              /* saturated bronze — readable on white */
-    --accent-hot: #c14e1a;
-    --accent-warm: #d18a2a;
-    --accent-soft: rgba(184, 122, 26, 0.12);
-    --accent-glow-color: #b87a1a59;  /* ≈35% alpha — slightly weaker glow on light bg */
-    --danger: #c1292e;
-    --ok: #2f8a56;
-    --warn: #c06a00;
-    --border: #e0d5b8;
-    --glow: 0 0 10px color-mix(in srgb, var(--accent) 30%, transparent);
-    --glow-hot: 0 0 10px color-mix(in srgb, var(--accent-hot) 30%, transparent);
-    --scanline-color: rgba(184, 122, 26, 0.035);
+    /* Mirrored accent palette on a near-black surface; same orange/
+     * green/yellow accents shifted +2 lightness steps for AA contrast
+     * against bg-panel. */
+    --bg: #0a0a0b;
+    --bg-panel: #18181b;             /* slate-900 */
+    --bg-elev: #27272a;              /* slate-800 — form-field bg */
+    --fg: #fafafa;
+    --fg-muted: #a1a1aa;             /* slate-400 */
+    --accent: #fb923c;               /* orange-400 — readable on slate-900 */
+    --accent-hot: #ef4444;           /* red-500 */
+    --accent-warm: #facc15;          /* yellow-400 */
+    --accent-soft: rgba(251, 146, 60, 0.16);
+    --accent-glow-color: #fb923c59;
+    --danger: #ef4444;
+    --ok: #22c55e;                   /* green-500 — pops against slate-900 */
+    --warn: #facc15;
+    --border: #3f3f46;               /* slate-700 */
+    --glow: 0 0 0 3px var(--accent-soft);
+    --glow-hot: 0 0 0 3px rgba(239, 68, 68, 0.18);
+    --scanline-color: transparent;
   }
 }
 
@@ -798,4 +794,85 @@ dialog h2 { font-size: 18px; color: var(--accent); }
   margin: 0;
   font-variant-numeric: tabular-nums;
   color: var(--fg);
+}
+
+/* ---- Settings page: tabbed sections (PR feat/admin-shell-tabs-and-theme).
+ *
+ * The Settings form was scrolling forever — General / Networking / Updates /
+ * Audio quality + their telemetry panels stacked into ~6 screens of
+ * scroll. Tabs flatten the page into one section visible at a time.
+ *
+ * One <form id="settings-form"> still wraps every tab pane so the Save
+ * button at the bottom commits every change at once — switching tabs
+ * doesn't lose pending edits. The active tab is persisted in
+ * sessionStorage by the JS so a save+restart bounce returns the
+ * operator where they were.
+ *
+ * Pure presentation — no backend / API change.
+ */
+
+.tab-nav {
+  display: flex;
+  gap: 4px;
+  margin: 0 -20px 20px;          /* hangs out to the panel's edges */
+  padding: 0 20px 0;
+  border-bottom: 1px solid var(--border);
+  list-style: none;
+  flex-wrap: wrap;
+}
+
+.tab-btn {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--fg-muted);
+  font: inherit;
+  font-weight: 500;
+  font-size: 14px;
+  padding: 10px 14px;
+  margin-bottom: -1px;            /* overlap the panel border by 1px so the active border replaces it cleanly */
+  cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+  border-radius: var(--radius) var(--radius) 0 0;
+}
+
+.tab-btn:hover {
+  color: var(--fg);
+  background: var(--accent-soft);
+}
+
+.tab-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--glow);
+}
+
+.tab-btn.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  background: transparent;
+}
+
+.tab-pane {
+  /* Each pane renders its section heading via the existing
+   * `.section-head` class; nothing further needed here besides the
+   * default block layout. The `hidden` attribute (set by the JS for
+   * inactive tabs) disables display via the global rule. */
+}
+
+/* Hide the in-pane h2 section-head when tabs are active — the tab
+ * label already names the section. Keeping the h2 in the markup for
+ * accessibility (screen readers still announce it as a landmark) and
+ * for a future "single-page mode" toggle if anyone wants the long
+ * scroll back. The .tab-nav presence is the gate. */
+.settings .tab-nav ~ .tab-pane > .section-head {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
