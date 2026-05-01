@@ -22,6 +22,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -132,7 +133,12 @@ type ManifestProvider interface {
 	// libraries. Mid-stream errors are returned but unrecoverable on
 	// the wire (headers and prefix already sent); the handler logs and
 	// the truncated body fails iOS-side decode, which retries.
-	WriteManifest(w io.Writer, since time.Time) error
+	//
+	// `ctx` is checked inside the per-row stream loop so a client
+	// disconnect mid-response (slow network, iOS app backgrounded)
+	// terminates the SQLite scan instead of running it to EOF holding
+	// connection resources.
+	WriteManifest(ctx context.Context, w io.Writer, since time.Time) error
 	// BuildManifestPage is the v1.1 paginated-manifest variant used
 	// when the client asks for `?limit=`. `cursor=""` requests the
 	// first page. Callers iterate until the returned page's
@@ -527,7 +533,11 @@ func (s *Server) manifestHandler(w http.ResponseWriter, r *http.Request) {
 	// can only log the error — headers are committed.
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	dw := &deferredStatusWriter{w: w, status: http.StatusOK}
-	if err := s.manifest.WriteManifest(dw, since); err != nil {
+	// Pass r.Context() so a client disconnect mid-stream (slow network,
+	// iOS backgrounded mid-sync, attacker slow-reading) interrupts the
+	// SQLite scan within the next per-row check instead of running to
+	// EOF holding the read lock and CPU.
+	if err := s.manifest.WriteManifest(r.Context(), dw, since); err != nil {
 		if !dw.written {
 			writeError(w, http.StatusInternalServerError, "internal", err.Error())
 			return
