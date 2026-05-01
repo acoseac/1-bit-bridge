@@ -542,7 +542,20 @@ func (s *Server) manifestHandler(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "internal", err.Error())
 			return
 		}
-		logger.Error("manifest stream", "err", err)
+		// Demote client-disconnect errors to debug — context.Canceled
+		// is the normal outcome when an iOS client backgrounds the app
+		// mid-sync or a slow network drops the connection. Pre-fix
+		// these surfaced at .Error() and would have triggered
+		// false-positive alerts in production monitoring (gemini medium
+		// review on PR #117). DeadlineExceeded gets the same treatment
+		// — it represents a client-imposed deadline, not a server
+		// failure. Any other mid-stream error (DB read fault, fs
+		// unmount) still logs at .Error().
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			logger.Debug("manifest stream cancelled by client", "err", err)
+		} else {
+			logger.Error("manifest stream", "err", err)
+		}
 	}
 }
 
