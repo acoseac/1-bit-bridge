@@ -142,6 +142,16 @@ func (s *Server) upscaleRequest(w http.ResponseWriter, r *http.Request) {
 	if info.IsDir() {
 		walkErr := filepath.WalkDir(abs, func(p string, d os.DirEntry, walkErr error) error {
 			if walkErr != nil {
+				// Log the path that failed so the operator has
+				// something to act on. Returning the error
+				// terminates the walk; under WalkDir's
+				// fs.SkipDir convention `return nil` would skip
+				// this entry's children but continue siblings,
+				// but a permission failure on a parent
+				// directory indicates a configuration problem
+				// the user should know about — surface, don't
+				// silently truncate the upscale set.
+				logger.Error("upscale folder walk", "path", p, "err", walkErr)
 				return walkErr
 			}
 			if d.IsDir() {
