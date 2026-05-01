@@ -45,20 +45,21 @@ var logger = logging.Component("api")
 
 // Server owns the http.Handler and the per-request state it needs.
 type Server struct {
-	cfg             *config.Config
-	store           *auth.Store
-	resolver        *bridgefs.Resolver
-	manifest        ManifestProvider
-	artworkDirs     ArtworkDirProvider
-	mbidProbe       MBIDProbe
-	updater         UpdaterStatus
-	sessions        SessionTracker
-	pairing         *pairing.Store
-	variantStore    VariantStore    // nil unless WithUpscale(true, vs) called
-	upscaleEnabled  bool            // mirrors cfg.Upscale.Enabled (and sox-probe outcome)
-	upscaleEnqueuer UpscaleEnqueuer // nil unless WithUpscaleEnqueuer wired (Phase 2.5)
-	fingerprint     string
-	startedAt       time.Time
+	cfg                  *config.Config
+	store                *auth.Store
+	resolver             *bridgefs.Resolver
+	manifest             ManifestProvider
+	artworkDirs          ArtworkDirProvider
+	mbidProbe            MBIDProbe
+	updater              UpdaterStatus
+	sessions             SessionTracker
+	pairing              *pairing.Store
+	variantStore         VariantStore         // nil unless WithUpscale(true, vs) called
+	upscaleEnabled       bool                 // mirrors cfg.Upscale.Enabled (and sox-probe outcome)
+	upscaleEnqueuer      UpscaleEnqueuer      // nil unless WithUpscaleEnqueuer wired (Phase 2.5)
+	upscaleStatsProvider UpscaleStatsProvider // nil unless WithUpscaleStats wired (v1.2 management UI)
+	fingerprint          string
+	startedAt            time.Time
 }
 
 // ErrUpscaleQueueFull is the typed sentinel UpscaleEnqueuer
@@ -282,6 +283,22 @@ func (s *Server) WithPairing(p *pairing.Store) *Server {
 	return s
 }
 
+// WithUpscaleStats attaches the snapshot provider for GET
+// /v1/upscale/stats. Optional — when nil the endpoint returns the
+// zero-value UpscaleStats (`enabled=false`, no pool, no sox
+// availability), which iOS treats as "feature off" without
+// distinguishing missing-endpoint from disabled-feature. Lets older
+// bridges expose the route without the wiring overhead.
+//
+// Wired in cmd/bridge serve startup with the same closure the admin
+// `/api/upscale/stats` tile already consumes — the two surfaces
+// stay in lockstep so the admin operator and the paired iOS client
+// see the same numbers.
+func (s *Server) WithUpscaleStats(p UpscaleStatsProvider) *Server {
+	s.upscaleStatsProvider = p
+	return s
+}
+
 // Resolver returns the internal path Resolver so the admin console can
 // call SetRoots when adding or removing a library root at runtime. The
 // api handlers and admin handlers deliberately share the same Resolver
@@ -308,6 +325,7 @@ func (s *Server) Handler() http.Handler {
 	// when no Store is wired the handlers themselves return
 	// `pairing_not_supported`.
 	mux.HandleFunc("POST /v1/upscale", s.authed(s.upscaleRequest))
+	mux.HandleFunc("GET /v1/upscale/stats", s.authed(s.upscaleStats))
 	mux.HandleFunc("POST /v1/pairing/requests", s.pairingRequest)
 	mux.HandleFunc("GET /v1/pairing/{requestID}", s.pairingPoll)
 	mux.HandleFunc("DELETE /v1/pairing/{requestID}", s.pairingDelete)

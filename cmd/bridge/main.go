@@ -44,6 +44,13 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
 
+// Package-scoped logger for the cmd/bridge wiring layer. Most
+// startup output is `fmt.Fprintf(stdout/stderr)` because it's user-
+// facing; this is for backend-style telemetry from helpers like
+// upscaleStatsAdapter that fire on every request and shouldn't spam
+// the operator's terminal but should be visible via `bridge logs`.
+var logger = logging.Component("bridge")
+
 // variantStoreAdapter implements api.VariantStore on top of a
 // manifest.Provider. Just translates between the two packages'
 // equivalent record shapes — the api package can't import the
@@ -168,6 +175,65 @@ func (a *upscaleEnqueuerAdapter) EnqueueOne(libraryRelativePath string) error {
 	default:
 		return enqueueErr
 	}
+}
+
+// upscaleStatsAdapter implements api.UpscaleStatsProvider. Mirrors
+// the admin /api/upscale/stats handler's data sources field-for-
+// field so the operator's Settings tile and a paired iOS client see
+// the same numbers.
+//
+// Two pool-related closures (rather than a captured `*transcode.Pool`):
+// the pool reference itself can be nil (operator never enabled the
+// feature) AND the operator can flip `cfg.Upscale.Enabled = false`
+// mid-flight without restart, leaving a live but logically-disabled
+// Pool. The closures evaluate both conditions at snapshot time so
+// `enabled` and the `pool` payload move together — same gating the
+// admin `UpscaleStats` closure already uses.
+type upscaleStatsAdapter struct {
+	pool    func() *transcode.Pool
+	enabled func() bool
+	store   *manifest.Store
+}
+
+func (a *upscaleStatsAdapter) UpscaleStatsSnapshot() api.UpscaleStats {
+	var snap api.UpscaleStats
+	if a.enabled() {
+		if p := a.pool(); p != nil {
+			s := p.Stats()
+			snap.Pool = &api.UpscalePoolStats{
+				Workers:  s.Workers,
+				QueueCap: s.QueueCap,
+				QueueLen: s.QueueLen,
+				Inflight: s.Inflight,
+				Enqueued: s.Enqueued,
+				Done:     s.Done,
+				Failed:   s.Failed,
+			}
+		}
+	}
+	snap.Enabled = (snap.Pool != nil)
+	if err := transcode.PrecheckSox(); err == nil {
+		t := true
+		snap.SoxAvailable = &t
+	} else {
+		f := false
+		snap.SoxAvailable = &f
+	}
+	if a.store != nil {
+		count, bytes, err := a.store.CountVariants()
+		if err != nil {
+			// Same degrade-and-log policy the admin tile uses
+			// (PR #110): a SQL failure here shouldn't blank the
+			// whole response. Live counters still go out; the
+			// caller sees `cachedVariants: 0, cachedBytes: 0` and
+			// the operator can find the failure in logs.
+			logger.Warn("upscale stats: count variants", "err", err)
+		} else {
+			snap.CachedVariants = count
+			snap.CachedBytes = bytes
+		}
+	}
+	return snap
 }
 
 // updateInfoAdapter bridges *updater.Updater to api.UpdaterStatus +
@@ -864,6 +930,36 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			outputDir: filepath.Join(cfg.DataDir, "transcoded"),
 		})
 	}
+
+	// /v1/upscale/stats wiring. Always registered so paired iOS
+	// clients can render a clean "feature off" state on bridges where
+	// the operator hasn't enabled upscaling — same nil-safe contract
+	// the admin tile uses. The closure mirrors the admin
+	// /api/upscale/stats handler exactly so the operator's Settings
+	// page and the iOS management section show the same numbers.
+	//
+	// Three sources combined:
+	//   1. Live pool counters — only when upscalePool != nil AND
+	//      cfg.Upscale.Enabled (operator can disable mid-flight via a
+	//      PATCH; the long-lived Pool stays alive until restart, but
+	//      we honour the live flag and report no pool to keep the wire
+	//      semantics in lockstep with /v1/health.upscaleEnabled).
+	//   2. Cached-variants count + total bytes from `track_variants`
+	//      — survives across restarts and reflects historical work,
+	//      so it stays non-zero when the feature was disabled without
+	//      `--gc`. SQL failure degrades to "0 cached" with a logged
+	//      warning rather than turning the whole response into a 5xx.
+	//   3. Sox-availability probe — same `transcode.PrecheckSox` the
+	//      admin tile consumes, gated by the same 30 s TTL cache the
+	//      admin handler uses (the admin cache holds it; we re-probe
+	//      directly here, accepting one extra fork-exec per 5 s poll
+	//      since iOS only polls when the management page is fore-
+	//      grounded — typically zero polls per minute on average).
+	apiSrv.WithUpscaleStats(&upscaleStatsAdapter{
+		pool:    func() *transcode.Pool { return upscalePool },
+		enabled: func() bool { return upscalePool != nil && cfg.Upscale.Enabled },
+		store:   manifestStore,
+	})
 	httpSrv := &http.Server{
 		Addr:    cfg.ListenAddress,
 		Handler: apiSrv.Handler(),
