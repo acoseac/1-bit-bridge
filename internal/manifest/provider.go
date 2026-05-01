@@ -123,8 +123,21 @@ func (p *Provider) HasTrackWithArtistMBID(mbid string) bool {
 // The cmd/bridge serve wiring wraps this into the api.VariantStore
 // interface so the api package doesn't import the manifest package
 // directly (mirrors the MBIDProbe / ManifestProvider pattern).
+//
+// Routes through `Store.LookupVariant` (NOT the exact-match
+// `Store.GetVariant`) so iOS-shaped lowercase paths from
+// `/v1/download?path=…&variant=…` resolve against the case-preserved
+// `track_variants.source_path` rows. Pre-fix this called `GetVariant`,
+// matching exact only — every variant download from iOS returned 404
+// because iOS's `share.normalize()` lowercases paths while the
+// bridge's manifest writer preserves filesystem case. PR #126 split
+// the case-folded `LookupVariant` out of `GetVariant` for the
+// upscale-enqueue path; the `/v1/download` wrapper here was missed
+// in that split — same logical bug class as PR #126 itself, just on
+// a different caller. (CodeRabbit / Qodo on PR #126 second-pass
+// missed this site.)
 func (p *Provider) LookupVariant(sourcePath, variantID string) (*VariantLookup, error) {
-	v, err := p.store.GetVariant(sourcePath, variantID)
+	v, err := p.store.LookupVariant(sourcePath, variantID)
 	if err != nil {
 		return nil, err
 	}
