@@ -230,8 +230,13 @@ func (a *Advertiser) maybeRebind() {
 		// running (we only swap in rebuildLocked on success), so
 		// a transient NewMDNSService failure leaves us no worse
 		// off than before. Next tick retries.
+		//
+		// Same `ips` key + `ipsForLog` shaping the success log
+		// uses so log-greppers can correlate rebind-attempt
+		// sequences across success/failure ticks without learning
+		// a per-callsite vocabulary (Qodo on PR #112).
 		logger.Error("mdns: rebind failed; keeping previous advertisement",
-			"err", err, "newIPs", fresh)
+			"err", err, "ips", ipsForLog(fresh))
 		return
 	}
 	logger.Info("mdns: re-advertising on new interface set",
