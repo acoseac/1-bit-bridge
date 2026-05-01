@@ -14,20 +14,63 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sort"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/logging"
 	hcmdns "github.com/hashicorp/mdns"
 )
+
+var logger = logging.Component("mdns")
 
 // Service is the Bonjour service type the bridge registers under.
 // Underscore prefix is mandatory for DNS-SD service types.
 const Service = "_onebit-bridge._tcp"
 
+// defaultRebindInterval bounds how long a stale IP set can keep
+// silencing the advertisement before the re-advertise loop
+// notices and rebuilds. 60 s is the sweet spot — short enough
+// that an operator switching networks (Wi-Fi roam, Ethernet plug,
+// docking station) sees discovery work again within a minute,
+// long enough that the rebuild cost (tear down + restart of the
+// hashicorp/mdns server) doesn't fire on every spurious interface
+// flap.
+//
+// The hazard this defends against is real: hashicorp/mdns
+// snapshots the IP set at NewServer() time and never re-binds.
+// After 5 days uptime on a typical macOS dev machine the bridge
+// was logging "advertising" while `dns-sd -B _onebit-bridge._tcp`
+// found nothing — the cached sockets were tied to a now-gone IP.
+const defaultRebindInterval = 60 * time.Second
+
 // Advertiser wraps a running mDNS server. Close to stop advertising;
 // safe for concurrent callers.
+//
+// Internally manages a re-advertise goroutine that watches for
+// network-interface changes and rebuilds the underlying mDNS
+// server when the IP set drifts. The goroutine's lifetime is tied
+// to Close().
 type Advertiser struct {
+	cfg       Config
+	rebindMu  sync.Mutex // guards server + cachedIPs + closed against the rebind goroutine
 	server    *hcmdns.Server
+	cachedIPs []net.IP // last IP set advertised; compared against new snapshots in rebindLoop
+	closed    bool
+
+	// ipSource returns the current advertise-eligible interface
+	// IPs. Pluggable so tests can drive the rebind loop
+	// deterministically without touching the host's network
+	// state. Defaults to ipsForAdvertise() at Advertise() time.
+	ipSource func() []net.IP
+
+	// rebindInterval is how often the loop polls the IP source
+	// for changes. Tests override to a small value; production
+	// uses defaultRebindInterval.
+	rebindInterval time.Duration
+
+	done      chan struct{}
 	closeOnce sync.Once
 	closeErr  error
 }
@@ -60,7 +103,30 @@ type Config struct {
 // Advertise starts advertising Service with the given config. Returns
 // an error if the underlying UDP sockets can't be opened (typically a
 // permissions issue on Linux without cap_net_bind).
+//
+// On success, spawns a background goroutine that polls the
+// advertise-eligible interface set every defaultRebindInterval (60 s)
+// and rebuilds the underlying mDNS server when the IP set drifts —
+// hashicorp/mdns snapshots IPs at construction time and never re-
+// binds, so without this loop a Wi-Fi roam / Ethernet plug / docking-
+// station handoff silently kills discovery until process restart.
+// Goroutine stops on Close().
 func Advertise(cfg Config) (*Advertiser, error) {
+	return advertiseInternal(cfg, ipsForAdvertise, defaultRebindInterval, true /* spawn loop */)
+}
+
+// advertiseInternal is the shared core for Advertise() (production)
+// and the package-internal test constructor. Splitting the seams out
+// here lets tests inject a custom ipSource and a small
+// rebindInterval without ever writing to Advertiser.ipSource after
+// the rebind goroutine has started — the race detector caught that
+// pattern, and a lock-on-every-read fix would have introduced
+// contention against the (production) 60 s tick.
+//
+// `spawnLoop=false` is the test escape hatch: returns an Advertiser
+// whose maybeRebind() the test drives manually, with no background
+// goroutine. Production always passes true.
+func advertiseInternal(cfg Config, ipSource func() []net.IP, interval time.Duration, spawnLoop bool) (*Advertiser, error) {
 	if cfg.Port <= 0 || cfg.Port > 65535 {
 		// Reject out-of-TCP-range ports up-front. The TXT record now
 		// publishes `port=<int>` to clients, so an invalid value would
@@ -68,46 +134,166 @@ func Advertise(cfg Config) (*Advertiser, error) {
 		// unusable URLs from it.
 		return nil, errors.New("mdns: Port must be in 1-65535")
 	}
-	instance := sanitizeInstance(cfg.InstanceName)
-	if instance == "" {
-		instance = "1-bit Bridge"
-	}
-	// SRV target needs the trailing dot — `cfg.advertisedHost()` returns
-	// the bare ".local" form (matching what iOS reads from the TXT
-	// record), so we re-append it here.
-	host := cfg.advertisedHost() + "."
-
 	if cfg.ProtocolVersion <= 0 {
 		cfg.ProtocolVersion = 1
 	}
 
-	info := buildTXTRecords(cfg)
-
-	svc, err := hcmdns.NewMDNSService(
-		instance, Service, "", host,
-		cfg.Port, ipsForAdvertise(), info,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("mdns: NewMDNSService: %w", err)
+	a := &Advertiser{
+		cfg:            cfg,
+		ipSource:       ipSource,
+		rebindInterval: interval,
+		done:           make(chan struct{}),
 	}
-
-	srv, err := hcmdns.NewServer(&hcmdns.Config{Zone: svc})
-	if err != nil {
-		return nil, fmt.Errorf("mdns: NewServer: %w", err)
+	if err := a.rebuildLocked(a.ipSource()); err != nil {
+		return nil, err
 	}
-	return &Advertiser{server: srv}, nil
+	if spawnLoop {
+		go a.rebindLoop()
+	}
+	return a, nil
 }
 
-// Close stops the advertisement. Safe to call multiple times and from
-// concurrent goroutines. hashicorp/mdns's Shutdown() tears down the UDP
-// listeners but does NOT send TTL-0 "goodbye" packets, so clients may
-// see a stale entry until the record's TTL expires.
+// rebuildLocked tears down the existing hashicorp/mdns server (if
+// any) and stands a fresh one up bound to ips. The caller MUST
+// hold a.rebindMu so concurrent rebinds and Close calls don't
+// race the server pointer. Returns the error from NewServer when
+// the new server fails to start; in that case the cached server
+// is left as-nil so the next tick retries.
+func (a *Advertiser) rebuildLocked(ips []net.IP) error {
+	instance := sanitizeInstance(a.cfg.InstanceName)
+	if instance == "" {
+		instance = "1-bit Bridge"
+	}
+	// SRV target needs the trailing dot — `cfg.advertisedHost()`
+	// returns the bare ".local" form (matching what iOS reads from
+	// the TXT record), so we re-append it here.
+	host := a.cfg.advertisedHost() + "."
+	info := buildTXTRecords(a.cfg)
+
+	svc, err := hcmdns.NewMDNSService(instance, Service, "", host, a.cfg.Port, ips, info)
+	if err != nil {
+		return fmt.Errorf("mdns: NewMDNSService: %w", err)
+	}
+	srv, err := hcmdns.NewServer(&hcmdns.Config{Zone: svc})
+	if err != nil {
+		return fmt.Errorf("mdns: NewServer: %w", err)
+	}
+	if a.server != nil {
+		// Best-effort shutdown of the previous server; we already
+		// have the replacement built so a Shutdown error here is
+		// logged but not fatal — the new server is the source of
+		// truth for the next tick.
+		if shutdownErr := a.server.Shutdown(); shutdownErr != nil {
+			logger.Warn("mdns: shutdown previous server", "err", shutdownErr)
+		}
+	}
+	a.server = srv
+	a.cachedIPs = append([]net.IP(nil), ips...)
+	return nil
+}
+
+// rebindLoop runs in a background goroutine for the lifetime of
+// the Advertiser. Each tick it diffs the current IP source against
+// the cached set and rebuilds the underlying mDNS server when they
+// disagree. Logs the rebuild so operators can correlate "discovery
+// stopped working" reports against actual server-side action.
+//
+// Cheap when nothing changes: a single net.Interfaces() call + a
+// sorted-string compare. Expensive only on the (rare) network
+// transition tick: tears down and rebuilds the hashicorp/mdns
+// listener pair, which costs a couple of UDP sockets.
+func (a *Advertiser) rebindLoop() {
+	t := time.NewTicker(a.rebindInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-a.done:
+			return
+		case <-t.C:
+			a.maybeRebind()
+		}
+	}
+}
+
+func (a *Advertiser) maybeRebind() {
+	fresh := a.ipSource()
+	a.rebindMu.Lock()
+	defer a.rebindMu.Unlock()
+	if a.closed {
+		return
+	}
+	if ipSetEqual(a.cachedIPs, fresh) {
+		return
+	}
+	if err := a.rebuildLocked(fresh); err != nil {
+		// Don't blank cachedIPs — the previous server is still
+		// running (we only swap in rebuildLocked on success), so
+		// a transient NewMDNSService failure leaves us no worse
+		// off than before. Next tick retries.
+		logger.Error("mdns: rebind failed; keeping previous advertisement",
+			"err", err, "newIPs", fresh)
+		return
+	}
+	logger.Info("mdns: re-advertising on new interface set",
+		"ips", ipsForLog(a.cachedIPs))
+}
+
+// ipSetEqual returns true when a and b cover the same IPs, ignoring
+// order. Both inputs are typically small (<10 entries on a dev
+// machine), so the sorted-string compare is fine — no need for a
+// per-entry hash map.
+func ipSetEqual(a, b []net.IP) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	as := make([]string, len(a))
+	bs := make([]string, len(b))
+	for i, ip := range a {
+		as[i] = ip.String()
+	}
+	for i, ip := range b {
+		bs[i] = ip.String()
+	}
+	sort.Strings(as)
+	sort.Strings(bs)
+	for i := range as {
+		if as[i] != bs[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// ipsForLog formats an IP slice for the `ips` log attribute —
+// keeps the slog output readable without dumping the raw []net.IP.
+func ipsForLog(ips []net.IP) []string {
+	out := make([]string, 0, len(ips))
+	for _, ip := range ips {
+		out = append(out, ip.String())
+	}
+	return out
+}
+
+// Close stops the advertisement and the rebind loop. Safe to call
+// multiple times and from concurrent goroutines. hashicorp/mdns's
+// Shutdown() tears down the UDP listeners but does NOT send TTL-0
+// "goodbye" packets, so clients may see a stale entry until the
+// record's TTL expires.
 func (a *Advertiser) Close() error {
 	if a == nil {
 		return nil
 	}
 	a.closeOnce.Do(func() {
-		a.closeErr = a.server.Shutdown()
+		// Stop the rebind goroutine first so it can't race the
+		// server pointer below.
+		close(a.done)
+		a.rebindMu.Lock()
+		defer a.rebindMu.Unlock()
+		a.closed = true
+		if a.server != nil {
+			a.closeErr = a.server.Shutdown()
+			a.server = nil
+		}
 	})
 	return a.closeErr
 }
