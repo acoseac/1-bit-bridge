@@ -619,6 +619,14 @@ func TestServeVariantToleratesSMBFAT32MtimeGranularity(t *testing.T) {
 		{"FAT32 2s rounding passes (boundary)", 2_000_000_000, http.StatusOK},
 		{"3s drift trips stale gate", 3_000_000_000, http.StatusGone},
 		{"30s drift trips stale gate", 30_000_000_000, http.StatusGone},
+		// Negative-side cases: the production gate takes the absolute
+		// value of the delta, so source-newer-than-record (sidecar
+		// minted from an older version of the file) trips at the same
+		// thresholds. CodeRabbit on PR #132 — guard against a sign
+		// regression where only one direction was checked.
+		{"negative sub-second drift passes", -500_000_000, http.StatusOK},
+		{"negative FAT32 2s rounding passes (boundary)", -2_000_000_000, http.StatusOK},
+		{"negative 3s drift trips stale gate", -3_000_000_000, http.StatusGone},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

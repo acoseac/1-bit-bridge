@@ -487,7 +487,7 @@ func ArtistImagePath(cacheDir, mbid string) string {
 // UX is consistent end-to-end.
 func ArtistImagePathByName(cacheDir, artistName string) string {
 	folded := cases.Fold().String(strings.TrimSpace(artistName))
-	folded = strings.ReplaceAll(folded, "̇", "")
+	folded = strings.ReplaceAll(folded, "\u0307", "")
 	normalized := norm.NFC.String(folded)
 	sum := sha256.Sum256([]byte(normalized))
 	return filepath.Join(cacheDir, fmt.Sprintf("artist-name-%s.jpg", hex.EncodeToString(sum[:])))
