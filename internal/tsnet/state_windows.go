@@ -7,6 +7,15 @@ import (
 	"os"
 )
 
+// chmodStateDir is a no-op on Windows. POSIX file mode bits don't
+// affect ACL-protected directories, so calling os.Chmod here would
+// either succeed silently without changing real ACLs (misleading)
+// or fail on some FS configs. Operators are expected to rely on
+// the inherited %APPDATA% / %ProgramData% ACL.
+func chmodStateDir(path string, mode os.FileMode) error {
+	return nil
+}
+
 // assertSecureDir is a no-op-ish sanity check on Windows.
 //
 // POSIX 0700 / uid checks don't translate cleanly to Windows ACLs:

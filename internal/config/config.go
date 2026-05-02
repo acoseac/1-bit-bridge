@@ -95,9 +95,14 @@ type TailscaleConfig struct {
 	Mode string `yaml:"mode,omitempty"`
 
 	// AuthKey is the Tailscale auth key used by tsnet on first run.
-	// The TS_AUTHKEY environment variable is preferred (Tailscale's
-	// standard idiom and avoids checking secrets into yaml); this
-	// field is the back-up path for ops who can't set env vars.
+	//
+	// Precedence (matches Tailscale's standard idiom):
+	//   1. TS_AUTHKEY environment variable (preferred — keeps
+	//      secrets out of yaml on disk)
+	//   2. This field (fallback for ops who can't set env vars)
+	//   3. Empty → triggers interactive OAuth (`bridge tsnet auth`
+	//      prints an AuthURL the operator visits in a browser)
+	//
 	// Unused once tsnet has persisted state.
 	AuthKey string `yaml:"authKey,omitempty"`
 

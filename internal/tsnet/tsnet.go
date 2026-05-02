@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/tsnet"
@@ -18,12 +19,43 @@ import (
 // lifecycle (interactive auth, slog-routed logging, secure state-dir
 // guard, idempotent Start/Close). Construct with NewServer; call
 // Start once to bring the node up; call Close on shutdown.
+//
+// Concurrency model: Start and Close are caller-serialized in
+// production (cmd/bridge/main.go single-threaded). Read paths
+// (Status, ListenTLS, CertDomains, AuthURL) AND the userLogf
+// callback (invoked from tsnet's internal goroutines during the
+// Up() phase) need cheap, non-blocking access — so the lock
+// surface is split:
+//
+//   - lifecycleMu protects started + server. Start releases this
+//     lock during the long Up() I/O so userLogf can take authMu
+//     without deadlocking. Close holds it through the upstream
+//     Close() call (~ms).
+//   - authMu protects authURL only. userLogf takes it for ~µs
+//     per write; AuthURL() takes it for one read. Doesn't block
+//     on Up() I/O.
+//
+// Caller-side: Start and Close are NOT safe to call concurrently.
+// The wrapper detects double-Start (second caller sees the
+// in-progress flag and returns an error) but doesn't try to be
+// fully reentrant — cmd/bridge/main.go is the sole caller and
+// runs them serially.
 type Server struct {
-	cfg     Config
-	server  *tsnet.Server
-	log     *slog.Logger
-	started bool
-	authURL string // captured from UserLogf during Start; surfaced via AuthURL()
+	cfg Config
+	log *slog.Logger
+
+	// lifecycleMu protects started + server.
+	lifecycleMu sync.Mutex
+	server      *tsnet.Server
+	started     bool
+	starting    bool // detect double-Start
+
+	// authMu protects authURL ONLY. Held briefly by userLogf
+	// (background goroutine, write) and AuthURL() (caller, read).
+	// Separate mutex so AuthURL reads don't block on Start's
+	// long-running tsnet.Up() call.
+	authMu  sync.Mutex
+	authURL string
 }
 
 // Config carries everything NewServer needs. Mode is unused here —
@@ -75,7 +107,10 @@ func NewServer(cfg Config) (*Server, error) {
 }
 
 // Start brings the tailnet node up. Idempotent: a second Start on
-// an already-started server is a no-op.
+// an already-started server is a no-op (returns nil). A concurrent
+// Start while another is in flight returns an error rather than
+// racing — cmd/bridge/main.go calls Start serially, so this is a
+// programmer-error guard, not a performance path.
 //
 // First-run behaviour: if no AuthKey is configured AND no persisted
 // state exists, tsnet emits an AuthURL via UserLogf — Start blocks
@@ -84,22 +119,72 @@ func NewServer(cfg Config) (*Server, error) {
 // Subsequent runs (state persisted) re-authenticate from the state
 // store and return as soon as the tailnet is reachable.
 func (s *Server) Start(ctx context.Context) error {
+	// Phase 1: short critical section to claim the start slot.
+	s.lifecycleMu.Lock()
 	if s.started {
+		s.lifecycleMu.Unlock()
 		return nil
 	}
+	if s.starting {
+		s.lifecycleMu.Unlock()
+		return errors.New("tsnet: Start already in progress")
+	}
+	s.starting = true
+	s.lifecycleMu.Unlock()
 
+	// Phase 2: do the actual work without holding the mutex —
+	// tsnet.Server.Up() can block on interactive auth for minutes,
+	// and userLogf (which writes authURL) runs from tsnet's own
+	// goroutines during this window. Holding lifecycleMu through
+	// Up would deadlock against any concurrent AuthURL() read.
+	server, err := s.startUnlocked(ctx)
+
+	// Phase 3: short critical section to publish the result.
+	s.lifecycleMu.Lock()
+	s.starting = false
+	if err != nil {
+		// Close any half-built tsnet.Server BEFORE returning so
+		// retries don't leak goroutines. Pre-fix, only the Up()
+		// error path closed; the Start() error path leaked. Qodo
+		// bug #4 + CodeRabbit on PR #138.
+		if server != nil {
+			_ = server.Close()
+		}
+		s.lifecycleMu.Unlock()
+		return err
+	}
+	s.server = server
+	s.started = true
+	s.lifecycleMu.Unlock()
+	return nil
+}
+
+// startUnlocked does the I/O-heavy parts of Start without holding
+// lifecycleMu. Returns the constructed tsnet.Server (or nil on
+// pre-construction error) so Start can clean up under the lock.
+func (s *Server) startUnlocked(ctx context.Context) (*tsnet.Server, error) {
+	// MkdirAll doesn't tighten perms on an existing dir (Qodo bug #1).
+	// Always Chmod after to ensure 0700 even if the dir pre-existed
+	// with looser perms — assertSecureDir would otherwise refuse
+	// to start AND the operator wouldn't know we tried to fix it
+	// for them.
 	if err := os.MkdirAll(s.cfg.StateDir, 0o700); err != nil {
-		return fmt.Errorf("tsnet: create state dir %s: %w", s.cfg.StateDir, err)
+		return nil, fmt.Errorf("tsnet: create state dir %s: %w", s.cfg.StateDir, err)
+	}
+	if err := chmodStateDir(s.cfg.StateDir, 0o700); err != nil {
+		return nil, fmt.Errorf("tsnet: chmod state dir: %w", err)
 	}
 	if err := assertSecureDir(s.cfg.StateDir); err != nil {
-		return fmt.Errorf("tsnet: state dir security check failed: %w", err)
+		return nil, fmt.Errorf("tsnet: state dir security check failed: %w", err)
 	}
 
-	// AuthKey precedence: explicit Config.AuthKey > TS_AUTHKEY env
-	// var > empty (triggers interactive OAuth on first run).
-	authKey := s.cfg.AuthKey
+	// AuthKey precedence (Tailscale standard idiom): TS_AUTHKEY env
+	// var FIRST so secrets stay out of yaml; Config.AuthKey is the
+	// fallback for ops who can't set env vars; empty triggers
+	// interactive OAuth on first run.
+	authKey := os.Getenv("TS_AUTHKEY")
 	if authKey == "" {
-		authKey = os.Getenv("TS_AUTHKEY")
+		authKey = s.cfg.AuthKey
 	}
 
 	fresh := !hasPersistedTsnetState(s.cfg.StateDir)
@@ -108,34 +193,22 @@ func (s *Server) Start(ctx context.Context) error {
 			slog.String("stateDir", s.cfg.StateDir))
 	}
 
-	s.server = &tsnet.Server{
+	server := &tsnet.Server{
 		Dir:       s.cfg.StateDir,
 		Hostname:  s.cfg.Hostname,
 		AuthKey:   authKey,
 		Ephemeral: false,
-		// UserLogf carries operator-facing messages — the AuthURL is
-		// the load-bearing one. Route to a level-INFO-pinned adapter
-		// that also captures any login URL into s.authURL so
-		// `bridge tsnet auth` can echo it explicitly.
-		UserLogf: s.userLogf(),
-		// Logf is the firehose of magicsock / netcheck / control-plane
-		// chatter. Filtered down to error-flavoured lines via a
-		// string-match heuristic (tsnet's Logf doesn't carry a level).
-		Logf: noisyLogfFromSlog(s.log),
+		UserLogf:  s.userLogf(),
+		Logf:      noisyLogfFromSlog(s.log),
 	}
 
-	if err := s.server.Start(); err != nil {
-		return fmt.Errorf("tsnet: server start: %w", err)
+	if err := server.Start(); err != nil {
+		return server, fmt.Errorf("tsnet: server start: %w", err)
 	}
-	if _, err := s.server.Up(ctx); err != nil {
-		// On Up failure, close the partially-started server so
-		// subsequent Start retries don't run into a half-up state.
-		_ = s.server.Close()
-		s.server = nil
-		return fmt.Errorf("tsnet: bring node up: %w", err)
+	if _, err := server.Up(ctx); err != nil {
+		return server, fmt.Errorf("tsnet: bring node up: %w", err)
 	}
-	s.started = true
-	return nil
+	return server, nil
 }
 
 // ListenTLS returns an HTTPS listener with auto-renewing Let's
@@ -143,10 +216,13 @@ func (s *Server) Start(ctx context.Context) error {
 // on-disk cert material. addr should be ":443" or ":7798"; the
 // network is always "tcp".
 func (s *Server) ListenTLS(addr string) (net.Listener, error) {
-	if !s.started || s.server == nil {
+	s.lifecycleMu.Lock()
+	server, started := s.server, s.started
+	s.lifecycleMu.Unlock()
+	if !started || server == nil {
 		return nil, errors.New("tsnet: ListenTLS called before Start")
 	}
-	return s.server.ListenTLS("tcp", addr)
+	return server.ListenTLS("tcp", addr)
 }
 
 // Status returns the live tailnet view (peer reachability, magic-DNS
@@ -154,10 +230,13 @@ func (s *Server) ListenTLS(addr string) (net.Listener, error) {
 // ipnstate.Status so admin templates that already parse `tailscale
 // status --json` output don't need a translation layer.
 func (s *Server) Status(ctx context.Context) (*ipnstate.Status, error) {
-	if !s.started || s.server == nil {
+	s.lifecycleMu.Lock()
+	server, started := s.server, s.started
+	s.lifecycleMu.Unlock()
+	if !started || server == nil {
 		return nil, errors.New("tsnet: Status called before Start")
 	}
-	lc, err := s.server.LocalClient()
+	lc, err := server.LocalClient()
 	if err != nil {
 		return nil, fmt.Errorf("tsnet: local client: %w", err)
 	}
@@ -167,17 +246,25 @@ func (s *Server) Status(ctx context.Context) (*ipnstate.Status, error) {
 // CertDomains returns the magic-DNS names tsnet will serve LE certs
 // for. Empty slice before Start.
 func (s *Server) CertDomains() []string {
-	if !s.started || s.server == nil {
+	s.lifecycleMu.Lock()
+	server, started := s.server, s.started
+	s.lifecycleMu.Unlock()
+	if !started || server == nil {
 		return nil
 	}
-	return s.server.CertDomains()
+	return server.CertDomains()
 }
 
 // AuthURL returns the most recent interactive-auth URL captured from
 // UserLogf, or empty if none was emitted. Used by `bridge tsnet
 // auth` to echo the URL explicitly to the operator's terminal in
 // case the slog output was filtered or piped elsewhere.
+//
+// Read path is on a separate mutex from the lifecycle state so
+// AuthURL() polls during a long Up() don't block on Start.
 func (s *Server) AuthURL() string {
+	s.authMu.Lock()
+	defer s.authMu.Unlock()
 	return s.authURL
 }
 
@@ -186,13 +273,15 @@ func (s *Server) AuthURL() string {
 // goroutines — without it, every Start/Close cycle (e.g. integration
 // tests) leaks goroutines until process exit.
 func (s *Server) Close() error {
-	if s.server == nil {
-		return nil
-	}
-	err := s.server.Close()
+	s.lifecycleMu.Lock()
+	server := s.server
 	s.server = nil
 	s.started = false
-	return err
+	s.lifecycleMu.Unlock()
+	if server == nil {
+		return nil
+	}
+	return server.Close()
 }
 
 // userLogf returns a logger.Logf-shaped adapter that:
@@ -210,7 +299,12 @@ func (s *Server) userLogf() func(string, ...any) {
 	return func(format string, args ...any) {
 		msg := fmt.Sprintf(format, args...)
 		if u := extractTailscaleAuthURL(msg); u != "" {
+			// Hold authMu only for the write — keep the slog call
+			// outside the critical section so a slow log handler
+			// can't stall tsnet's internal goroutine.
+			s.authMu.Lock()
 			s.authURL = u
+			s.authMu.Unlock()
 		}
 		s.log.Info(msg, slog.String("source", "tsnet.user"))
 	}

@@ -263,6 +263,25 @@ func TestAssertSecureDirRejectsWorldReadableOnUnix(t *testing.T) {
 	}
 }
 
+// TestAssertSecureDirRejectsTooStrictPermsOnUnix — 0500 has no
+// group/world bits but ALSO drops owner write, which tsnet needs
+// to write state. The earlier `& 0o077 != 0` check would have
+// silently accepted 0500 (Qodo bug #2 on PR #138). Now we require
+// exactly 0700.
+func TestAssertSecureDirRejectsTooStrictPermsOnUnix(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX-only check")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
+	defer os.Chmod(dir, 0o700) // restore so t.TempDir cleanup works
+	if err := assertSecureDir(dir); err == nil {
+		t.Errorf("assertSecureDir on 0500 should error (no owner write)")
+	}
+}
+
 // TestAssertSecureDirAcceptsWellFormedDir — the happy path: 0700
 // directory owned by the test process. t.TempDir produces 0755 on
 // macOS (and varies by FS elsewhere), so we explicitly chmod 0700
@@ -277,18 +296,13 @@ func TestAssertSecureDirAcceptsWellFormedDir(t *testing.T) {
 	}
 }
 
-// TestStartIsIdempotent — Start must be a no-op when already started.
-// We can't easily exercise the real start path in unit tests (it
-// would require a fake control plane); instead we exercise the
-// idempotency guard by constructing a Server with started=true via
-// the seam below and calling Start twice.
-func TestStartIsIdempotent(t *testing.T) {
-	// We can't reach into Server.started without exporting it,
-	// but we CAN verify the documented behaviour: calling Close
-	// twice doesn't panic, calling AuthURL on an unstarted server
-	// returns empty, etc. The full Start-Idempotent contract is
-	// integration-tested at the cmd/bridge level (via a fake
-	// auth-key flow against a test tailnet), not here.
+// TestUnstartedServerInitialState — pre-Start, AuthURL is empty
+// and CertDomains is nil. The previous version of this test was
+// named TestStartIsIdempotent but never actually called Start
+// (CodeRabbit nitpick on PR #138) — the real idempotency contract
+// requires a live control plane and is integration-tested at the
+// cmd/bridge level. Renamed to reflect what it actually exercises.
+func TestUnstartedServerInitialState(t *testing.T) {
 	s, err := NewServer(Config{Logger: silentLogger(), StateDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
@@ -296,9 +310,38 @@ func TestStartIsIdempotent(t *testing.T) {
 	if got := s.AuthURL(); got != "" {
 		t.Errorf("AuthURL() = %q on unstarted server, want empty", got)
 	}
-	// Sanity: a never-Started server's CertDomains is empty.
 	if got := s.CertDomains(); len(got) != 0 {
 		t.Errorf("CertDomains() = %v on unstarted server, want empty", got)
+	}
+}
+
+// TestUserLogfRaceFreeWithAuthURL — verifies the userLogf write +
+// AuthURL read pair are race-free under -race. Without the authMu
+// guard added in the round-1 fixes, this test would trip the
+// race detector on every run.
+//
+// Designed for `go test -race`; the test always passes under the
+// non-race build but the race detector is the actual assertion.
+func TestUserLogfRaceFreeWithAuthURL(t *testing.T) {
+	s, err := NewServer(Config{Logger: silentLogger(), StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	logf := s.userLogf()
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 1000; i++ {
+			logf("To authenticate, visit: https://login.tailscale.com/a/token-%d", i)
+		}
+		close(done)
+	}()
+	for i := 0; i < 1000; i++ {
+		_ = s.AuthURL()
+	}
+	<-done
+	// Final value should be a real captured URL.
+	if got := s.AuthURL(); got == "" || !strings.HasPrefix(got, "https://login.tailscale.com/") {
+		t.Errorf("AuthURL after concurrent writes = %q", got)
 	}
 }
 
