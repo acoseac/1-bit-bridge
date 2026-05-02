@@ -117,12 +117,20 @@ func createPendingRequest(t *testing.T, hs *httptest.Server, label string) (stri
 	return created.RequestID, rawSecret
 }
 
+// pairingEventsRequestTimeout governs the per-test SSE connect
+// context. Bumped from 5 s → 10 s on CodeRabbit round-4: the
+// approval-push test legitimately consumes up to 5 s in its drain +
+// approval-wait loops, leaving no scheduling slack on slower CI;
+// 10 s gives ~5 s headroom while still failing fast on a wedged
+// handler.
+const pairingEventsRequestTimeout = 10 * time.Second
+
 // connectPairingEvents opens a streaming GET to
 // /v1/pairing/{id}/events with the pollSecret as bearer. Returns the
 // response (so the caller can read its Body line-by-line via a
 // Scanner) and a function to drop the connection.
 //
-// A 5 s context timeout protects the test suite from a hung handler
+// The context timeout protects the test suite from a hung handler
 // that never responds to the initial request — without it, a
 // regression in the SSE path could deadlock CI for the full test
 // timeout window. CodeRabbit caught this on PR #137. The downstream
@@ -130,7 +138,7 @@ func createPendingRequest(t *testing.T, hs *httptest.Server, label string) (stri
 // phase; this protects the connect phase only.
 func connectPairingEvents(t *testing.T, hs *httptest.Server, requestID, pollSecret string) *http.Response {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), pairingEventsRequestTimeout)
 	t.Cleanup(cancel)
 	req, _ := http.NewRequestWithContext(ctx, "GET", hs.URL+"/v1/pairing/"+requestID+"/events", nil)
 	req.Header.Set("Authorization", "Bearer "+pollSecret)
@@ -273,6 +281,9 @@ func TestPairingEventsSendsInitialState(t *testing.T) {
 			return
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("read SSE stream: %v", err)
+	}
 	t.Errorf("did not receive initial pending event (sawEvent=%v sawData=%v)",
 		sawPendingEvent, sawData)
 }
@@ -303,6 +314,9 @@ func TestPairingEventsInitialEventCarriesIDZero(t *testing.T) {
 			// saw `id: 0` before this terminator, the contract holds.
 			return
 		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("read SSE stream: %v", err)
 	}
 	t.Errorf("initial event did not carry `id: 0` (sawIDZero=%v)", sawIDZero)
 }
@@ -353,6 +367,9 @@ func TestPairingEventsPushesApprovalWithToken(t *testing.T) {
 		if sawApproved && sawToken {
 			return
 		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("read SSE stream: %v", err)
 	}
 	t.Errorf("approval push missed (sawApproved=%v sawToken=%v)", sawApproved, sawToken)
 }
