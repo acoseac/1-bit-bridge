@@ -35,6 +35,21 @@ func TestPairingRateLimiter_BurstThenThrottles(t *testing.T) {
 	if rl.allow("1.2.3.4") {
 		t.Errorf("request beyond burst should be throttled (got allowed)")
 	}
+
+	// Advance one refill interval — the bucket gains one token, so
+	// the next request succeeds. Without this clock-advance step the
+	// test only covers the throttle direction; CodeRabbit flagged
+	// that a refill-path regression could still pass.
+	now = now.Add(pairingRateRefillInterval)
+	if !rl.allow("1.2.3.4") {
+		t.Errorf("request after one refill interval should be allowed")
+	}
+	// Immediately retrying without further clock advance must
+	// throttle again — the bucket is back at zero after the previous
+	// allow consumed the freshly-refilled token.
+	if rl.allow("1.2.3.4") {
+		t.Errorf("second request right after refill (no further clock advance) should be throttled")
+	}
 }
 
 // TestPairingRateLimiter_PerIPIsolation: throttling one IP doesn't
