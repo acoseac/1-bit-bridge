@@ -67,9 +67,13 @@ type Config struct {
 	// logger and blocks until the operator authorizes in a browser).
 	// Once tsnet has persisted state, this field is ignored.
 	//
-	// Tailscale-native idiom is the TS_AUTHKEY environment variable;
-	// we read this field FIRST and fall back to the env var if
-	// empty. Yaml config is the third-tier escape hatch.
+	// Precedence at startup (Tailscale-standard idiom):
+	//   1. TS_AUTHKEY environment variable (preferred — keeps
+	//      secrets out of yaml-on-disk)
+	//   2. This field (fallback for ops who can't set env vars)
+	//   3. Empty → triggers interactive OAuth on first run
+	//
+	// See startUnlocked for the resolution code.
 	AuthKey string
 	// Hostname is the magic-DNS hostname tsnet registers with.
 	// Empty falls back to the deviceName / library name supplied
