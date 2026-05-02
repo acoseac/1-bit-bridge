@@ -2,6 +2,7 @@ package enrich
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1014,5 +1015,67 @@ func TestMusicBrainzReleaseGroupMBIDLookup(t *testing.T) {
 	}
 	if got != "rg-xyz" {
 		t.Errorf("got %q, want rg-xyz", got)
+	}
+}
+
+// TestEnricherRespectsContextCancelMidPacing pins the contract that
+// the rate-pacing sleeps inside enrichOne / resolveArtist /
+// ensureArtworkCached / resolveReleaseGroupMBID / ensureArtistImageCached
+// honor ctx cancellation. Pre-fix these were raw `time.Sleep` and held
+// shutdown for up to MBMinInterval (~1.1 s) per in-flight track. The
+// test sets MBMinInterval to 30 s so a regression to `time.Sleep` would
+// blow the assertion deadline by ~30×.
+//
+// We exercise the contract through `resolveReleaseGroupMBID` because
+// it's the simplest path to drive directly: one input MBID, one MB
+// stub, one pacer call. The cancellation gate wraps the same
+// `sleepCtx` helper used at every other swapped site.
+func TestEnricherRespectsContextCancelMidPacing(t *testing.T) {
+	mbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Should never be reached — the pacer must trip on cancel
+		// before the call goes out.
+		io.WriteString(w, `{"id":"rel"}`)
+	}))
+	defer mbSrv.Close()
+
+	dir := t.TempDir()
+	store, err := manifest.OpenStore(filepath.Join(dir, "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	e := NewEnricher(
+		store,
+		NewMusicBrainzClient(mbSrv.URL, "test", nil),
+		NewCoverArtClient("http://unused", "test", nil),
+		nil,
+		filepath.Join(dir, "artwork"),
+	)
+	// Long enough that the test's 200 ms deadline definitely beats the
+	// pacer if it falls back to raw time.Sleep.
+	e.MBMinInterval = 30 * time.Second
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		// Cancel just after the call goes in so we land inside the
+		// pacer rather than racing the entry.
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	rg, err := e.resolveReleaseGroupMBID(ctx, "11111111-1111-4111-8111-111111111111", "")
+	elapsed := time.Since(start)
+
+	if elapsed > 200*time.Millisecond {
+		t.Fatalf("resolveReleaseGroupMBID took %v after cancel, want <200 ms (regression to raw time.Sleep?)", elapsed)
+	}
+	// Sentinel-aware comparison so future error wrapping (e.g.
+	// `fmt.Errorf("retry: %w", err)`) doesn't break the regression
+	// net even though the contract is unchanged (qodo bot review on
+	// PR #140).
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("got (%q, %v), want errors.Is context.Canceled", rg, err)
 	}
 }
