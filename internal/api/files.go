@@ -248,15 +248,19 @@ func (s *Server) serveVariant(w http.ResponseWriter, r *http.Request, sourcePath
 	// never auto-delete a stale row here. iOS sees 410 Gone and
 	// falls back to the original.
 	//
-	// Mtime comparison tolerates µs-level rounding: ext4 stores
-	// nanoseconds, but some NFS exports truncate to microseconds and
-	// SMB mounts can carry FAT-style 2-second granularity. A bare
-	// `!=` would false-stale every variant on those filesystems on
-	// the next bridge restart even when the source was untouched.
-	// 1 ms is wider than every observed truncation granularity and
-	// still narrow enough that a real edit (audacity save → mtime
-	// jump of seconds) reliably trips the gate.
-	const mtimeToleranceNS int64 = 1_000_000
+	// Mtime comparison tolerates filesystem rounding granularities:
+	// ext4 stores nanoseconds, NFS exports can truncate to
+	// microseconds, and SMB / FAT32 mounts carry 2-second
+	// granularity. A bare `!=` (or a tolerance narrower than the
+	// FS's rounding step) would false-stale every variant on those
+	// filesystems on the next bridge restart even when the source
+	// was untouched. 2 s exactly covers FAT32 — the previous 1 ms
+	// constant was three orders of magnitude too tight and produced
+	// constant 410 Gone responses for libraries hosted on a NAS.
+	// Real edits jump mtime by far more than 2 s (audacity save,
+	// metadata rewrite, file replacement) so this tolerance still
+	// reliably trips the gate when the source actually drifts.
+	const mtimeToleranceNS int64 = 2_000_000_000
 	mtimeDelta := rec.SourceMTimeNS - sourceInfo.ModTime().UnixNano()
 	if mtimeDelta < 0 {
 		mtimeDelta = -mtimeDelta

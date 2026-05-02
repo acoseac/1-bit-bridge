@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/text/cases"
 	"golang.org/x/text/unicode/norm"
 
 	"github.com/acoseac/1-bit-bridge/internal/logging"
@@ -461,16 +462,33 @@ func ArtistImagePath(cacheDir, mbid string) string {
 
 // ArtistImagePathByName returns the canonical on-disk cache path for
 // an artist's image, keyed by a SHA-256 of the NFC-normalized,
-// whitespace-trimmed, lowercased artist name. Matches iOS's
+// whitespace-trimmed, case-folded artist name. Matches iOS's
 // `MetadataNormalizer.artistID` semantics so both sides key the same
 // canonical bytes for the same human-readable artist name.
+//
+// Uses `cases.Fold()` rather than `strings.ToLower()` for locale-aware
+// caseless matching. Critically, the Turkish/Azerbaijani dotted I
+// (`İ` U+0130) Unicode-default-folds to `i` + combining dot above
+// (`̇`), which is still distinct from plain ASCII `i` after NFC.
+// To collapse `İSTANBUL` and `istanbul` to the same key (the user's
+// real-world concern when tag writers across different locales emit
+// either form) we strip the combining-dot-above codepoint after the
+// fold. It only appears as a fold artifact in the dotted-I case;
+// other accents (combining acute U+0301 on Beyoncé's é, etc.) use
+// different combining marks and are preserved.
+//
+// `cases.Fold` is somewhat more CPU-intensive than `ToLower` but only
+// runs once per artist during enrichment — never in a tight parsing
+// loop — so the cost is negligible.
 //
 // Collisions: two distinct artists with the same display name ("Nirvana"
 // UK vs Nirvana US) collapse to the same file. iOS already collapses
 // them in its library model via the same normalization rules, so the
 // UX is consistent end-to-end.
 func ArtistImagePathByName(cacheDir, artistName string) string {
-	normalized := norm.NFC.String(strings.ToLower(strings.TrimSpace(artistName)))
+	folded := cases.Fold().String(strings.TrimSpace(artistName))
+	folded = strings.ReplaceAll(folded, "̇", "")
+	normalized := norm.NFC.String(folded)
 	sum := sha256.Sum256([]byte(normalized))
 	return filepath.Join(cacheDir, fmt.Sprintf("artist-name-%s.jpg", hex.EncodeToString(sum[:])))
 }

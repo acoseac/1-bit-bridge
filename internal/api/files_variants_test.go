@@ -158,8 +158,11 @@ func TestDownloadVariantStaleOnMtimeMismatchReturns410(t *testing.T) {
 	hs, tok, root, vs, sidecar := fileVariantFixture(t)
 	srcInfo := statSourceOrFail(t, root, "Artist/Album/01.flac")
 	vs.records["Artist/Album/01.flac|upscaled-v1-176400-24"] = &VariantRecord{
-		SidecarPath:   sidecar,
-		SourceMTimeNS: srcInfo.ModTime().UnixNano() - 1_000_000_000,
+		SidecarPath: sidecar,
+		// 30 s drift well exceeds the 2 s SMB/FAT32-aware tolerance.
+		// Don't bring this down to a sub-2 s value — the gate is
+		// intentionally tolerant of FS-rounding-scale drift.
+		SourceMTimeNS: srcInfo.ModTime().UnixNano() - 30_000_000_000,
 		SourceSize:    srcInfo.Size(),
 	}
 
