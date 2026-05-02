@@ -55,6 +55,7 @@ type Server struct {
 	updater              UpdaterStatus
 	sessions             SessionTracker
 	pairing              *pairing.Store
+	pairingRateLimiter   *pairingRateLimiter
 	variantStore         VariantStore         // nil unless WithUpscale(true, vs) called
 	upscaleEnabled       bool                 // mirrors cfg.Upscale.Enabled (and sox-probe outcome)
 	upscaleEnqueuer      UpscaleEnqueuer      // nil unless WithUpscaleEnqueuer wired (Phase 2.5)
@@ -195,12 +196,13 @@ type UpdateInfo struct {
 // early boot / tests — /v1/manifest will return 503 until it's populated.
 func New(cfg *config.Config, store *auth.Store, mp ManifestProvider, fingerprint string) *Server {
 	return &Server{
-		cfg:         cfg,
-		store:       store,
-		resolver:    bridgefs.New(cfg.LibraryRoots),
-		manifest:    mp,
-		fingerprint: fingerprint,
-		startedAt:   time.Now().UTC(),
+		cfg:                cfg,
+		store:              store,
+		resolver:           bridgefs.New(cfg.LibraryRoots),
+		manifest:           mp,
+		pairingRateLimiter: newPairingRateLimiter(),
+		fingerprint:        fingerprint,
+		startedAt:          time.Now().UTC(),
 	}
 }
 
@@ -276,6 +278,26 @@ func (s *Server) WithUpscale(enabled bool, vs VariantStore) *Server {
 func (s *Server) WithUpscaleEnqueuer(e UpscaleEnqueuer) *Server {
 	s.upscaleEnqueuer = e
 	return s
+}
+
+// StartPairingRateLimitGC kicks off the per-IP rate-limiter's
+// background sweep on a hidden goroutine. Called once from
+// `cmd/bridge` after `apiSrv := api.New(...).WithPairing(...)`. The
+// returned func, called on shutdown, signals the goroutine to exit
+// cleanly. Tests don't need to call this — the GC interval is hours,
+// so leaving it idle is harmless, and table-driven tests construct
+// fresh limiters via `New` anyway.
+func (s *Server) StartPairingRateLimitGC() (stopFn func()) {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		s.pairingRateLimiter.runGC(stop)
+		close(done)
+	}()
+	return func() {
+		close(stop)
+		<-done
+	}
 }
 
 // WithPairing attaches the in-memory pairing.Store that backs the
