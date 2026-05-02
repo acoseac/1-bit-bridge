@@ -898,11 +898,33 @@ func cacheKey(artist, album string) string { return artist + "\x00" + album }
 
 // sleepCtx sleeps for d or until ctx is done. Returns true if the sleep
 // completed normally.
+//
+// Uses `time.NewTimer` + `Stop` rather than `time.After` so that on
+// the cancellation path the underlying timer is released immediately
+// instead of remaining in the runtime's timer heap until d elapses
+// (qodo bot review on PR #140). Matters more now that the helper is
+// invoked from six additional rate-pacing call sites with intervals
+// up to several seconds — a SIGTERM mid-pace would otherwise leave a
+// pending timer per in-flight enrichOne call until the original
+// duration elapsed. Fast-path d <= 0 returns true without scheduling.
 func sleepCtx(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return ctx.Err() == nil
+	}
+	t := time.NewTimer(d)
 	select {
-	case <-time.After(d):
+	case <-t.C:
 		return true
 	case <-ctx.Done():
+		// Stop returns false if the timer already fired or was stopped;
+		// in the "already fired" race we drain the channel so the
+		// runtime can reclaim the timer cleanly.
+		if !t.Stop() {
+			select {
+			case <-t.C:
+			default:
+			}
+		}
 		return false
 	}
 }

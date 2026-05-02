@@ -2,6 +2,7 @@ package enrich
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1070,7 +1071,11 @@ func TestEnricherRespectsContextCancelMidPacing(t *testing.T) {
 	if elapsed > 200*time.Millisecond {
 		t.Fatalf("resolveReleaseGroupMBID took %v after cancel, want <200 ms (regression to raw time.Sleep?)", elapsed)
 	}
-	if err == nil || !strings.Contains(err.Error(), "context canceled") {
-		t.Fatalf("got (%q, %v), want (\"\", context.Canceled)", rg, err)
+	// Sentinel-aware comparison so future error wrapping (e.g.
+	// `fmt.Errorf("retry: %w", err)`) doesn't break the regression
+	// net even though the contract is unchanged (qodo bot review on
+	// PR #140).
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("got (%q, %v), want errors.Is context.Canceled", rg, err)
 	}
 }
