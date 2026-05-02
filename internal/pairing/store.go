@@ -222,6 +222,24 @@ type Options struct {
 	// mint and consume. nil means "never revoke" (test mode); production
 	// wires this to auth.Store.Revoke.
 	RevokeToken func(tokenID string) error
+
+	// OnStateChange is invoked AFTER every observable state transition
+	// (Pending→Approved via Approve, Pending→Declined via Decline,
+	// Pending→Expired via the timer sweep). The snapshot is the
+	// post-transition state; nil-safe (no-op when not wired).
+	//
+	// cmd/bridge wires this to publish a `pairing.<requestID>` event
+	// to the SSE broker so iOS clients see push-delivered approval/
+	// decline/expiry updates instead of polling. Production: paired
+	// with broker.Publish; tests: paired with a stubOnStateChange
+	// recorder.
+	//
+	// **Invoked OUTSIDE the pairing mutex** to mirror the RevokeToken
+	// pattern — the broker has its own mutex and we don't want
+	// cross-mutex coupling stalling concurrent CreateRequest calls.
+	// Same callback contract: keep handlers lightweight, hop to a
+	// goroutine for heavy work.
+	OnStateChange func(snapshot Request)
 }
 
 // Store holds the live set of pairing requests. Safe for concurrent use
@@ -239,6 +257,15 @@ type Store struct {
 	maxPending int
 	now        func() time.Time
 	revoke     func(tokenID string) error
+
+	// onStateChange callbacks live behind their own RWMutex so a
+	// post-construction SetOnStateChange (cmd/bridge wiring after the
+	// SSE broker starts) can install the hook without racing the
+	// Approve / Decline / onTimer fire paths. Tests construct via
+	// Options.OnStateChange; production wires via SetOnStateChange
+	// post-broker-start to avoid the chicken-and-egg with apiSrv.
+	stateChangeMu sync.RWMutex
+	onStateChange func(snapshot Request)
 }
 
 // NewStore constructs a Store with the given options.
@@ -256,13 +283,34 @@ func NewStore(opts Options) *Store {
 		opts.Now = time.Now
 	}
 	return &Store{
-		byID:       make(map[string]*Request),
-		ttl:        opts.TTL,
-		grace:      opts.Grace,
-		maxPending: opts.MaxPending,
-		now:        opts.Now,
-		revoke:     opts.RevokeToken,
+		byID:          make(map[string]*Request),
+		ttl:           opts.TTL,
+		grace:         opts.Grace,
+		maxPending:    opts.MaxPending,
+		now:           opts.Now,
+		revoke:        opts.RevokeToken,
+		onStateChange: opts.OnStateChange,
 	}
+}
+
+// SetOnStateChange wires (or rewires) the callback fired AFTER every
+// observable state transition (Approve, Decline, timer-driven Pending→
+// Expired). nil disables notification. cmd/bridge sets this after the
+// SSE broker starts — the chicken-and-egg with apiSrv means Options
+// can't carry the broker reference at construction time.
+func (s *Store) SetOnStateChange(fn func(snapshot Request)) {
+	s.stateChangeMu.Lock()
+	s.onStateChange = fn
+	s.stateChangeMu.Unlock()
+}
+
+// stateChangeFn returns the current onStateChange callback under the
+// stateChangeMu read lock so a concurrent SetOnStateChange can swap
+// it without racing. Returns nil when not wired.
+func (s *Store) stateChangeFn() func(Request) {
+	s.stateChangeMu.RLock()
+	defer s.stateChangeMu.RUnlock()
+	return s.onStateChange
 }
 
 // Sentinel errors returned by Store methods. Callers should branch via
@@ -477,6 +525,20 @@ func (s *Store) Approve(id, currentFingerprint string, mint MintFunc) (Request, 
 	if mint == nil {
 		return Request{}, errors.New("pairing: Approve requires a MintFunc")
 	}
+	// State-change snapshot fires AFTER the lock is released. Captured
+	// here as a closure-shared local; only the success path populates it.
+	// Mirrors the RevokeToken pattern — the broker has its own mutex and
+	// we don't want cross-mutex coupling stalling a concurrent
+	// CreateRequest behind a publish.
+	var afterUnlock Request
+	var fire bool
+	defer func() {
+		if fire {
+			if cb := s.stateChangeFn(); cb != nil {
+				cb(afterUnlock)
+			}
+		}
+	}()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -500,6 +562,8 @@ func (s *Store) Approve(id, currentFingerprint string, mint MintFunc) (Request, 
 		req.State = StateExpired
 		req.DecidedAt = s.now()
 		s.scheduleTimer(req, s.grace)
+		afterUnlock = snapshotForEvent(req)
+		fire = true
 		return snapshot(req), ErrAlreadyDecided
 	}
 	// Cert-rotation guard. Fails closed — once `req.CertFingerprint`
@@ -519,6 +583,8 @@ func (s *Store) Approve(id, currentFingerprint string, mint MintFunc) (Request, 
 		req.State = StateCertRotated
 		req.DecidedAt = s.now()
 		s.scheduleTimer(req, s.grace)
+		afterUnlock = snapshotForEvent(req)
+		fire = true
 		return snapshot(req), ErrCertRotated
 	}
 
@@ -541,12 +607,30 @@ func (s *Store) Approve(id, currentFingerprint string, mint MintFunc) (Request, 
 		remaining = time.Second
 	}
 	s.scheduleTimer(req, remaining)
+	// snapshotForEvent preserves RawToken so the SSE publisher can
+	// populate the approved event payload. The function's return
+	// value uses the original snapshot() (token-stripped) — admin
+	// callers don't need it, the wire layer does.
+	afterUnlock = snapshotForEvent(req)
+	fire = true
 	return snapshot(req), nil
 }
 
 // Decline transitions a Pending request to Declined and schedules the
 // grace-window cleanup. Returns the post-transition snapshot.
 func (s *Store) Decline(id string) (Request, error) {
+	// State-change snapshot fires AFTER the lock is released — same
+	// shape as Approve. Decline can also incidentally land an Expired
+	// transition (the wall-clock TTL guard); both fire onStateChange.
+	var afterUnlock Request
+	var fire bool
+	defer func() {
+		if fire {
+			if cb := s.stateChangeFn(); cb != nil {
+				cb(afterUnlock)
+			}
+		}
+	}()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -566,11 +650,15 @@ func (s *Store) Decline(id string) (Request, error) {
 		req.State = StateExpired
 		req.DecidedAt = s.now()
 		s.scheduleTimer(req, s.grace)
+		afterUnlock = snapshotForEvent(req)
+		fire = true
 		return snapshot(req), ErrAlreadyDecided
 	}
 	req.State = StateDeclined
 	req.DecidedAt = s.now()
 	s.scheduleTimer(req, s.grace)
+	afterUnlock = snapshotForEvent(req)
+	fire = true
 	return snapshot(req), nil
 }
 
@@ -622,12 +710,25 @@ func (s *Store) Close() {
 func (s *Store) onTimer(id string, gen uint64) {
 	s.mu.Lock()
 	var revokeID string
+	// State-change snapshot for the Pending→Expired transition fires
+	// AFTER the lock is released — same shape as Approve / Decline.
+	// Other onTimer branches don't observably transition (StateApproved
+	// is the revoke path, terminal-state branches just clean up the
+	// row), so they don't fire onStateChange.
+	var afterUnlock Request
+	var fire bool
 	if req, ok := s.byID[id]; ok && req.timerGen == gen {
 		switch req.State {
 		case StatePending:
 			req.State = StateExpired
 			req.DecidedAt = s.now()
 			s.scheduleTimer(req, s.grace)
+			// Expired transition has no token to leak — but use
+			// snapshotForEvent for symmetry with Approve / Decline
+			// fire sites and to keep the wire-shape contract
+			// consistent.
+			afterUnlock = snapshotForEvent(req)
+			fire = true
 		case StateApproved:
 			// Capture the intent but DON'T delete the row yet. If
 			// `s.revoke` fails we need to retry, and a deleted row
@@ -640,6 +741,11 @@ func (s *Store) onTimer(id string, gen uint64) {
 		}
 	}
 	s.mu.Unlock()
+	if fire {
+		if cb := s.stateChangeFn(); cb != nil {
+			cb(afterUnlock)
+		}
+	}
 
 	if revokeID == "" {
 		return
@@ -724,6 +830,27 @@ func snapshot(req *Request) Request {
 	cp := *req
 	cp.expiryTimer = nil
 	cp.RawToken = ""
+	cp.PollHash = [32]byte{}
+	return cp
+}
+
+// snapshotForEvent is the snapshot variant the OnStateChange callback
+// receives. **Preserves RawToken** so the SSE publisher in cmd/bridge
+// can populate the `pairing.<id>` event payload with the minted token —
+// iOS consumes it without a follow-up GET. The polling path
+// (`pairingPollResponse` built in pairingPoll handler) reads RawToken
+// the same way; both transports include it in the Approved state.
+//
+// Strips expiryTimer (lifecycle handle, not wire data) and PollHash
+// (internal auth binding, not for downstream consumers).
+//
+// Coderabbit + Qodo on PR #136's first revision caught that the
+// generic `snapshot()` was being passed to OnStateChange — the
+// approved event landed with an empty Token field, defeating the
+// push-delivery contract.
+func snapshotForEvent(req *Request) Request {
+	cp := *req
+	cp.expiryTimer = nil
 	cp.PollHash = [32]byte{}
 	return cp
 }

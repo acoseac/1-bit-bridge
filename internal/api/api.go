@@ -371,6 +371,13 @@ func (s *Server) WithUpscaleStats(p UpscaleStatsProvider) *Server {
 // other and /v1/list would serve stale top-level entries.
 func (s *Server) Resolver() *bridgefs.Resolver { return s.resolver }
 
+// StartedAt returns the server's construction timestamp. Used by the
+// SSE pairing-event publisher in cmd/bridge to populate the
+// `bridgeStartedAt` field, matching the polling endpoint's contract:
+// iOS observes a value change between events and treats it as
+// "bridge restarted, abandon this in-flight pairing request."
+func (s *Server) StartedAt() time.Time { return s.startedAt }
+
 // Handler returns the root http.Handler, pre-wrapped with the
 // X-Bridge-Protocol middleware.
 func (s *Server) Handler() http.Handler {

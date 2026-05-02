@@ -161,6 +161,144 @@ func TestPoolEnqueueAfterStopReturnsErrPoolClosed(t *testing.T) {
 	}
 }
 
+// TestPoolFiresOnStateChangeAfterEnqueueAndCompletion is the headline
+// contract for the SSE upstream-publisher wiring (PR following #135):
+// every observable pool state transition fires the registered
+// onStateChange callback. Cmd/bridge wires this to publish a fresh
+// `/v1/upscale/stats` snapshot to the SSE broker.
+//
+// Test flow:
+//  1. Wire SetOnStateChange to a counting recorder.
+//  2. Enqueue a JobSpec whose RunSox will fail (source missing) so the
+//     worker takes the failure path quickly.
+//  3. Wait for the failure to land (failedCnt to bump). The recorder
+//     should have observed: 1× enqueue + 1× sox-failure = 2 fires.
+//  4. A nil-callback Pool (the back-compat path) must not panic on
+//     the same flow.
+func TestPoolFiresOnStateChangeAfterEnqueueAndCompletion(t *testing.T) {
+	store := openTempStoreForPool(t)
+	t.Cleanup(func() { _ = store.Close() })
+
+	p := NewPool(store, 1, 4)
+	t.Cleanup(p.Stop)
+
+	var fires atomic.Int64
+	p.SetOnStateChange(func() {
+		fires.Add(1)
+	})
+
+	spec := JobSpec{
+		SourceLibraryRel: "Music/Album/01.flac",
+		SourceAbsPath:    "/dev/null/missing", // RunSox fails fast
+		TargetSampleRate: 176400,
+		TargetBits:       24,
+		Quality:          QualityVeryHigh,
+		OutputDir:        t.TempDir(),
+	}
+	if err := p.Enqueue(spec); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	// Wait up to 2s for the worker to dispatch the job, run sox
+	// (fail fast), and bump failedCnt. Bounded poll instead of a
+	// fixed sleep avoids flakiness in slow CI.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if p.Stats().Failed >= 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	got := fires.Load()
+	if got < 2 {
+		t.Errorf("onStateChange fires = %d, want ≥ 2 (enqueue + completion)", got)
+	}
+}
+
+// TestPoolNilOnStateChangeDoesNotPanic locks in the back-compat
+// shape: a Pool constructed without SetOnStateChange must run every
+// path without panicking on the nil callback.
+func TestPoolNilOnStateChangeDoesNotPanic(t *testing.T) {
+	store := openTempStoreForPool(t)
+	t.Cleanup(func() { _ = store.Close() })
+
+	p := NewPool(store, 1, 4)
+	t.Cleanup(p.Stop)
+	// Deliberately do NOT call SetOnStateChange.
+
+	spec := JobSpec{
+		SourceLibraryRel: "Music/Album/02.flac",
+		SourceAbsPath:    "/dev/null/missing",
+		TargetSampleRate: 176400,
+		TargetBits:       24,
+		Quality:          QualityVeryHigh,
+		OutputDir:        t.TempDir(),
+	}
+	if err := p.Enqueue(spec); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	// Wait for completion path to run.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if p.Stats().Failed >= 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// Test passes if no panic. No assertion needed beyond the
+	// implicit "no goroutine fault under -race".
+}
+
+// TestPoolSetOnStateChangeIsRaceSafe drives Set + fire concurrently to
+// surface any unsynchronised access on the callback slot. CodeRabbit-
+// style protection — the stateChangeMu RWMutex guards the swap.
+func TestPoolSetOnStateChangeIsRaceSafe(t *testing.T) {
+	store := openTempStoreForPool(t)
+	t.Cleanup(func() { _ = store.Close() })
+
+	p := NewPool(store, 2, 8)
+	t.Cleanup(p.Stop)
+
+	// Initial callback in place from t=0.
+	p.SetOnStateChange(func() {})
+
+	var wg sync.WaitGroup
+	// One goroutine swaps the callback every microsecond.
+	stop := make(chan struct{})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				p.SetOnStateChange(func() {})
+			}
+		}
+	}()
+
+	// Drive a burst of enqueues so workers fire the callback.
+	for i := 0; i < 8; i++ {
+		_ = p.Enqueue(JobSpec{
+			SourceLibraryRel: "Music/" + strconv.Itoa(i) + ".flac",
+			SourceAbsPath:    "/dev/null/missing",
+			TargetSampleRate: 176400,
+			TargetBits:       24,
+			Quality:          QualityVeryHigh,
+			OutputDir:        t.TempDir(),
+		})
+	}
+
+	// Let the workers churn briefly.
+	time.Sleep(100 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+
+	// Test passes if no race detected and no panic.
+}
+
 // --- helpers ---
 
 func openTempStoreForPool(t *testing.T) *manifest.Store {

@@ -36,7 +36,20 @@ type pairingCreateResponse struct {
 // returned on every authorized poll while the request is in that state
 // (NOT read-once) — see the pairing package doc for the read-many
 // delivery contract.
-type pairingPollResponse struct {
+//
+// Aliased to the exported `PairingStateEvent` (below) so the SSE
+// publisher in cmd/bridge can build the same wire shape directly,
+// keeping the polling endpoint and the SSE event JSON-identical from
+// iOS's decoder perspective.
+type pairingPollResponse = PairingStateEvent
+
+// PairingStateEvent is the wire shape the bridge publishes on the SSE
+// `pairing.<requestID>` topic AND returns from `GET /v1/pairing/{id}`.
+// Single source of truth — iOS reuses one decoder across both transports.
+//
+// JSON tags match the polling contract; do NOT rename without bumping
+// `ProtocolVersion` and a Mirror-PR pair on the iOS side.
+type PairingStateEvent struct {
 	Status              string `json:"status"`
 	TTLSecondsRemaining int    `json:"ttlSecondsRemaining"`
 	BridgeStartedAt     int64  `json:"bridgeStartedAt"`

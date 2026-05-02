@@ -50,6 +50,17 @@ type Pool struct {
 	enqueuedCnt atomic.Uint64
 	doneCnt     atomic.Uint64
 	failedCnt   atomic.Uint64
+
+	// onStateChange fires after every observable state transition
+	// (job enqueued, completed, sox-failed, store-failed). Nil when
+	// not wired — silently dropped, same back-compat shape as every
+	// other optional Pool integration. cmd/bridge wires this to
+	// publish a fresh `/v1/upscale/stats` snapshot to the SSE
+	// broker so iOS clients see push-delivered updates instead of
+	// polling. Callbacks are invoked synchronously on the worker
+	// goroutine — keep them lightweight.
+	stateChangeMu sync.RWMutex
+	onStateChange func()
 }
 
 // poolJob is one transcode unit on the Pool's queue. Carries the
@@ -124,16 +135,24 @@ func (p *Pool) Enqueue(spec JobSpec) error {
 		return ErrPoolClosed
 	}
 	dedup := spec.SourceLibraryRel + "|" + spec.VariantID()
+	// `defer` is intentionally NOT used here for unlock — pre-fix
+	// (PR #136 first revision) the success path used
+	// `defer p.mu.Unlock()` AND `defer fire()`. Go's LIFO defer
+	// order made `fire()` run BEFORE the unlock, deadlocking when
+	// the wired callback called UpscaleStatsSnapshot which takes
+	// p.mu.Lock() inside Stats(). CodeRabbit + Gemini caught this
+	// at critical severity. Now: explicit unlock per branch, fire
+	// in a goroutine OUTSIDE the lock so the publisher's DB query
+	// (CountVariants in UpscaleStatsSnapshot) doesn't stall the
+	// caller and the broker's own mutex can't cross-mutex couple
+	// with this lock.
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	// Re-check under the lock — Stop() might have flipped
-	// `closed` between our pre-lock load above and acquiring
-	// the mutex. Without this re-check the channel send below
-	// could race a concurrent close().
 	if p.closed.Load() {
+		p.mu.Unlock()
 		return ErrPoolClosed
 	}
 	if _, ok := p.inflight[dedup]; ok {
+		p.mu.Unlock()
 		return nil // already queued or running
 	}
 	// Optimistic insert: claim the slot before trying the channel
@@ -144,13 +163,40 @@ func (p *Pool) Enqueue(spec JobSpec) error {
 	select {
 	case p.jobs <- poolJob{spec: spec, dedup: dedup}:
 		p.enqueuedCnt.Add(1)
+		fire := p.notifyStateChangeFn()
+		p.mu.Unlock()
+		if fire != nil {
+			go fire()
+		}
 		return nil
 	default:
 		// Roll back the optimistic claim — couldn't fit the job
 		// after all.
 		delete(p.inflight, dedup)
+		p.mu.Unlock()
 		return ErrQueueFull
 	}
+}
+
+// notifyStateChangeFn returns the current onStateChange callback
+// under the stateChangeMu read lock so a concurrent
+// SetOnStateChange can swap it without racing. Returns nil when
+// not wired — caller checks before invoking.
+func (p *Pool) notifyStateChangeFn() func() {
+	p.stateChangeMu.RLock()
+	defer p.stateChangeMu.RUnlock()
+	return p.onStateChange
+}
+
+// SetOnStateChange wires (or rewires) the callback fired after every
+// observable state transition. nil disables notification (back-compat
+// for tests / non-broker deployments). Called once during cmd/bridge
+// wiring after the broker is up; subsequent calls are race-safe but
+// in practice this is set-once.
+func (p *Pool) SetOnStateChange(fn func()) {
+	p.stateChangeMu.Lock()
+	p.onStateChange = fn
+	p.stateChangeMu.Unlock()
 }
 
 // Stop signals the workers to drain the queue and exit. Blocks
@@ -234,6 +280,16 @@ func (p *Pool) workerLoop() {
 				logger.Warn("pool: sox failed", "source", job.spec.SourceLibraryRel, "err", err)
 			}
 			p.releaseDedup(job.dedup)
+			// Fire AFTER releaseDedup so the published snapshot
+			// reflects the final state (job out of inflight) —
+			// CodeRabbit on PR #136 caught the inconsistency vs
+			// the success / store-failure branches which already
+			// fire post-release.
+			if p.stopCtx.Err() == nil {
+				if fire := p.notifyStateChangeFn(); fire != nil {
+					go fire()
+				}
+			}
 			continue
 		}
 		_, settings := job.spec.SoxArgs()
@@ -257,10 +313,20 @@ func (p *Pool) workerLoop() {
 			// retry from a clean slate succeeds.
 			_ = os.Remove(row.SidecarPath)
 			p.releaseDedup(job.dedup)
+			// Async fire so the worker isn't stalled by the
+			// publisher's CountVariants DB query — Gemini high-
+			// severity review on PR #136. Caller never blocks on
+			// the publish.
+			if fire := p.notifyStateChangeFn(); fire != nil {
+				go fire()
+			}
 			continue
 		}
 		p.doneCnt.Add(1)
 		p.releaseDedup(job.dedup)
+		if fire := p.notifyStateChangeFn(); fire != nil {
+			go fire()
+		}
 	}
 }
 
