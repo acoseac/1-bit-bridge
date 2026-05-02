@@ -77,7 +77,7 @@ func TestIsTransient_PinsClassification(t *testing.T) {
 		{"errNotFound", errNotFound, false},
 		{"wrapped not-found", fmt.Errorf("lookup: %w", errNotFound), false},
 
-		// Wrap-survival: this is the regression PR #N's typed shape
+		// Wrap-survival: this is the regression PR #142's typed shape
 		// closes. Pre-fix `IsTransient` did
 		// `strings.HasPrefix(err.Error(), "musicbrainz: HTTP ")` over
 		// the formatted message — any caller that wrapped the MB
