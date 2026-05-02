@@ -288,6 +288,54 @@ Distinct from `upscale_disabled`. The pool's queue cap is operator-tunable via `
 
 **Asynchronous completion**: the response returns as soon as the jobs are queued. iOS discovers completed variants via the next `/v1/manifest` sync (which advertises the new `Track.variants` entries). For pool-level visibility while jobs are in flight (queue depth, lifetime totals, failure counts) iOS calls the companion `GET /v1/upscale/stats` endpoint described below; for per-track completion the manifest is still the authoritative signal.
 
+### `GET /v1/events` (additive, since v1.2)
+
+Server-sent events stream replacing per-resource polling for upscale stats and pairing approvals. Push delivery means iOS can react within tens of milliseconds instead of the 2–5s polling cadence the previous endpoints required, AND iOS doesn't burn radio cycles polling every few seconds while a management section is open.
+
+**Authentication**: standard `Authorization: Bearer <token>` (same rule as every other `/v1/*` endpoint except `/v1/health` and the pairing routes).
+
+**Query params**:
+- `topics` (optional): comma-separated allowlist. Example: `?topics=upscale,pairing` subscribes to every event whose topic equals or has the prefix `upscale.` or `pairing.`. Empty / absent = subscribe to all topics. Whitespace around entries is trimmed.
+
+**Response** (`200 OK`, `Content-Type: text/event-stream`):
+
+```text
+id: 42
+event: upscale.stats
+data: {"enabled":true,"pool":{"queueLen":12,"inflight":4,"done":126,"failed":0},"cachedVariants":138}
+
+event: pairing.abc123-def456
+data: {"state":"approved","verificationCode":"412 593"}
+
+event: heartbeat
+data: {}
+
+event: dropped
+data: {"missed":3}
+```
+
+**Topics**:
+- `upscale.stats` — fires whenever the bridge's upscale state changes (job queued, completed, failed). Payload matches `/v1/upscale/stats`.
+- `pairing.<requestID>` — fires on `Approve` or `Decline` of the named request. Payload matches `/v1/pairing/<requestID>` for the relevant state.
+- `heartbeat` — every 15s; payload `{}`. iOS uses missing heartbeats as a "connection dead" signal that triggers reconnect with backoff. Bridge-internal — iOS parsers swallow this at the transport layer.
+- `dropped` — synthetic notice fired when the server's per-subscriber buffer evicted events under back-pressure (slow client, network blip). Payload `{"missed":N}`. iOS treats this as "I missed state — refetch via the polling endpoint to reconcile."
+
+**Reconnect / replay**:
+- Each **publishable** event (`upscale.stats`, `pairing.<id>`) carries a monotonic `id:` field. Clients persist the last id observed and send `Last-Event-ID: <id>` on reconnect. The synthetic `heartbeat` and `dropped` events deliberately omit `id:` — they're transport-layer signals (keepalive, slow-consumer notice) that the iOS parser handles distinctly from publishable state changes, and including them in the Last-Event-ID stream would let a heartbeat-only window mask a missed publish on reconnect.
+- Server holds a 100-event sliding buffer; reconnects within the buffer get the missed events as a replay burst.
+- A `Last-Event-ID` the server doesn't recognise (older than the buffer) returns no replay — iOS interprets the empty replay + the next live event as "I missed too much; refetch state."
+
+**Headers**:
+- `Cache-Control: no-cache`
+- `Connection: keep-alive`
+- `Content-Encoding: identity` (defensive against future global gzip middleware that would buffer the stream)
+- `X-Accel-Buffering: no` (defensive against fronting reverse-proxies)
+
+**Backwards compatibility**:
+- Pre-v1.2 bridges return `404 events_not_supported` from this endpoint. iOS clients fall back to the polling endpoints.
+- The polling endpoints (`/v1/upscale/stats`, `/v1/pairing/{id}`) remain authoritative — operators or older clients can ignore SSE entirely.
+- This is a fully-additive change. **No `protocolVersion` bump.**
+
 ### `GET /v1/upscale/stats` (additive, since v1.2)
 
 Snapshot of the upscale feature's runtime + on-disk state. Designed for the iOS app's per-share "Upscaling" management section to show the operator how many jobs are queued, in flight, finished, or failed without surfacing the admin console externally. The wire shape is intentionally identical to the admin tile's `/api/upscale/stats` payload — same numbers in both places.
@@ -471,6 +519,8 @@ All errors are JSON:
 |    404 | `not_found`              | Path does not exist in any library root           |
 |    404 | `unknown_request`        | Pairing request ID unknown / cleaned up           |
 |    404 | `pairing_not_supported`  | Bridge build doesn't expose tap-to-pair           |
+|    404 | `events_not_supported`   | Bridge build doesn't expose `/v1/events` (pre-v1.2; iOS falls back to polling) |
+|    429 | `rate_limited`           | Per-IP pairing-create rate-limit tripped          |
 |    500 | `internal`               | Server-side failure                               |
 |    503 | `scan_in_progress`       | Manifest requested while an initial scan is busy  |
 |    503 | `queue_full`             | Pending pairing requests at the cap               |

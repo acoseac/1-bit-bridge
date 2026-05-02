@@ -980,6 +980,18 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	stopRLGC := apiSrv.StartPairingRateLimitGC()
 	defer stopRLGC()
 
+	// Start the event broker that backs GET /v1/events. iOS uses
+	// it to receive push notifications for upscale completions and
+	// pairing approvals (in lieu of polling). When publishers
+	// aren't yet wired (this PR ships the endpoint + broker; the
+	// transcode + pairing wiring follows in a separate PR), the
+	// endpoint stays functional but emits only heartbeats. iOS
+	// clients fall back to polling when /v1/events returns 404 (no
+	// broker) or when no real events arrive within the management
+	// section's lifetime.
+	stopBroker := apiSrv.StartEventBroker()
+	defer stopBroker()
+
 	// Phase 2.5: long-lived transcode worker pool inside `bridge
 	// serve`. Only instantiated when the feature is fully active
 	// — saves goroutines + a manifest store reference when the
