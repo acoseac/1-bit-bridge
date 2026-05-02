@@ -537,6 +537,113 @@ func TestSortEntriesByNameDeterministicForFoldEqual(t *testing.T) {
 	}
 }
 
+// fakeVariantStore is a minimal in-memory VariantStore for tests.
+// Returns a single record keyed on the configured (sourcePath,
+// variantID) tuple; all other lookups return (nil, nil).
+type fakeVariantStore struct {
+	wantSourcePath string
+	wantVariantID  string
+	rec            *VariantRecord
+}
+
+func (f *fakeVariantStore) LookupVariant(sourcePath, variantID string) (*VariantRecord, error) {
+	if sourcePath == f.wantSourcePath && variantID == f.wantVariantID {
+		return f.rec, nil
+	}
+	return nil, nil
+}
+
+// fileFixtureWithVariant lays down the same library tree as
+// fileFixture and additionally writes a sidecar file under tmp,
+// returning a server wired with a VariantStore that maps
+// (sourcePath, variantID) → that sidecar. The sidecar's recorded
+// SourceMTimeNS is offset from the source file's actual mtime by
+// `mtimeDriftNS` (positive: sidecar appears newer; negative: source
+// appears newer). Sourcesize equals the actual size on disk —
+// mtime is the only freshness axis under test here.
+func fileFixtureWithVariant(t *testing.T, sourceRel, variantID string, mtimeDriftNS int64) (*httptest.Server, string, string) {
+	t.Helper()
+	hs, _, root := fileFixture(t)
+	hs.Close()
+
+	srcAbs := filepath.Join(root, filepath.FromSlash(sourceRel))
+	srcInfo, err := os.Stat(srcAbs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sidecar := filepath.Join(t.TempDir(), "variant.bin")
+	if err := os.WriteFile(sidecar, bytes.Repeat([]byte{0xEE}, 64), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{
+		LibraryRoots:  []string{root},
+		ListenAddress: ":7788",
+		LibraryName:   "Test",
+	}
+	store, _ := auth.OpenStore(filepath.Join(t.TempDir(), "tokens.json"))
+	raw, _, _ := store.Mint("test")
+
+	srv := New(cfg, store, nil, "fp")
+	srv.WithUpscale(true, &fakeVariantStore{
+		wantSourcePath: sourceRel,
+		wantVariantID:  variantID,
+		rec: &VariantRecord{
+			SidecarPath:   sidecar,
+			SourceMTimeNS: srcInfo.ModTime().UnixNano() + mtimeDriftNS,
+			SourceSize:    srcInfo.Size(),
+		},
+	})
+	hs2 := httptest.NewServer(srv.Handler())
+	t.Cleanup(hs2.Close)
+	return hs2, raw, root
+}
+
+// TestServeVariantToleratesSMBFAT32MtimeGranularity locks in the
+// fix for the SMB/FAT32 freshness false-stale (PR #N): the previous
+// 1 ms tolerance constant was three orders of magnitude tighter
+// than FAT32's 2 s mtime granularity, producing constant 410 Gone
+// responses for libraries hosted on a NAS. Now: 2 s drift passes
+// (200 OK), 3 s drift trips (410 Gone) — the tolerance has to be
+// wide enough to cover real filesystem rounding without missing
+// genuine source edits, which always jump by far more than 2 s.
+func TestServeVariantToleratesSMBFAT32MtimeGranularity(t *testing.T) {
+	cases := []struct {
+		name         string
+		mtimeDriftNS int64
+		wantStatus   int
+	}{
+		{"exact match passes", 0, http.StatusOK},
+		{"sub-second drift passes", 500_000_000, http.StatusOK},
+		{"FAT32 1.5s rounding passes", 1_500_000_000, http.StatusOK},
+		{"FAT32 2s rounding passes (boundary)", 2_000_000_000, http.StatusOK},
+		{"3s drift trips stale gate", 3_000_000_000, http.StatusGone},
+		{"30s drift trips stale gate", 30_000_000_000, http.StatusGone},
+		// Negative-side cases: the production gate takes the absolute
+		// value of the delta, so source-newer-than-record (sidecar
+		// minted from an older version of the file) trips at the same
+		// thresholds. CodeRabbit on PR #132 — guard against a sign
+		// regression where only one direction was checked.
+		{"negative sub-second drift passes", -500_000_000, http.StatusOK},
+		{"negative FAT32 2s rounding passes (boundary)", -2_000_000_000, http.StatusOK},
+		{"negative 3s drift trips stale gate", -3_000_000_000, http.StatusGone},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hs, tok, _ := fileFixtureWithVariant(t,
+				"Artist/Album/01 Track.flac", "upscaled-pcm-192", tc.mtimeDriftNS)
+			resp := authGet(t, hs,
+				"/v1/download?path="+url.QueryEscape("Artist/Album/01 Track.flac")+"&variant=upscaled-pcm-192", tok)
+			defer resp.Body.Close()
+			if resp.StatusCode != tc.wantStatus {
+				body, _ := io.ReadAll(resp.Body)
+				t.Errorf("drift=%dns: status=%d (want %d), body=%s",
+					tc.mtimeDriftNS, resp.StatusCode, tc.wantStatus, string(body))
+			}
+		})
+	}
+}
+
 // BenchmarkSortEntriesByName1000 measures the alloc savings of the
 // decorate-sort-undecorate refactor against a typical large directory
 // listing. The previous shape allocated ~2 strings per comparison ×
