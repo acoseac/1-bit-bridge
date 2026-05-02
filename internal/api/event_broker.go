@@ -84,24 +84,28 @@ const (
 type eventBroker struct {
 	publish chan eventEnvelope
 
-	mu          sync.RWMutex
-	subscribers map[*subscriber]struct{}
+	// Single mu covers BOTH subscribers and replayBuffer. Combined
+	// access is required so subscribe() can capture replay AND
+	// insert the new subscriber atomically with respect to the
+	// broker goroutine's record+fanout cycle (which also takes
+	// this lock). Without the combined coverage, events published
+	// in the gap between replay-capture and subscriber-insertion
+	// would either duplicate or vanish — see subscribe() doc for
+	// the trade-off math. Contention is low (subscribe is rare,
+	// fan-out is hot but short-held).
+	mu             sync.Mutex
+	subscribers    map[*subscriber]struct{}
+	replayBuffer   []eventEnvelope
+	replayCapacity int
 
-	stopOnce sync.Once
-	stopCh   chan struct{}
-	doneCh   chan struct{}
+	stopOnce  sync.Once
+	stopCh    chan struct{}
+	doneCh    chan struct{}
+	startOnce sync.Once // guards Start() against duplicate goroutine spawn
 
 	nextID atomic.Int64
 
-	// Replay buffer for SSE Last-Event-ID reconnects. Bounded ring
-	// — events older than `replayBufferDuration` or beyond the
-	// `replayBufferSize`-th newest are evicted. iOS reconnects
-	// within the bounded window get the missed events; reconnects
-	// beyond it get current state via a "dropped" hint.
-	replayMu       sync.Mutex
-	replayBuffer   []eventEnvelope
-	replayCapacity int
-	now            func() time.Time
+	now func() time.Time
 }
 
 func newEventBroker() *eventBroker {
@@ -116,13 +120,27 @@ func newEventBroker() *eventBroker {
 }
 
 // Publish accepts a typed payload, encodes it once, and queues it for
-// the broker goroutine to fan out. Non-blocking-ish: the publish
-// channel is buffered, but if full, this falls through to a goroutine
-// that blocks on the queue rather than dropping at the publisher.
-// Publishers are in-process services we control, not adversarial
-// remote callers, so a brief queue-pulse is acceptable; the
-// drop-at-subscriber policy below is what protects against the
-// cumulative-buffer-exhaustion case.
+// the broker goroutine to fan out. Non-blocking: the publish channel
+// is buffered, but if full, the OLDEST queued event is dropped to
+// make room for the new one (LRU eviction at the broker level,
+// matching the slow-consumer policy at the subscriber level).
+//
+// Why drop-oldest at the publisher rather than the previous
+// goroutine-per-overflow approach: under burst load the
+// goroutine-spawn path could pile up an unbounded queue of blocked
+// goroutines AND deliver events to subscribers in scheduler-
+// dependent order, breaking the monotonic event-ID contract iOS
+// relies on for replay. Drop-oldest preserves order (the queue
+// stays a FIFO) and bounds memory at `eventPublishBufferSize`.
+// CodeRabbit on PR #135 caught the goroutine-spawn antipattern.
+//
+// The dropped event would have lived for milliseconds at most before
+// fan-out anyway — discarding it under sustained back-pressure is
+// preferable to either blocking the publisher (would stall the
+// transcode pool / pairing.Store) or unbounded queueing (memory DoS
+// surface). iOS subscribers see a `dropped` notice via the existing
+// per-subscriber bookkeeping when their fan-out queue is the
+// bottleneck.
 func (b *eventBroker) Publish(topic string, payload interface{}) {
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -139,21 +157,22 @@ func (b *eventBroker) Publish(topic string, payload interface{}) {
 		Data:  data,
 		ID:    formatEventID(id),
 	}
-	select {
-	case b.publish <- env:
-	default:
-		// Channel full. Hand off to a goroutine that blocks on
-		// queue room rather than synchronously stalling the
-		// publisher. The broker goroutine drains the publish
-		// channel as fast as it can; back-pressure here means
-		// the downstream subscriber path is the bottleneck, not
-		// the broker itself.
-		go func() {
+	for {
+		select {
+		case b.publish <- env:
+			return
+		default:
+			// Channel full. Drop the oldest queued event to
+			// make room. Loop because a concurrent producer
+			// may have just refilled the slot we tried to
+			// claim.
 			select {
-			case b.publish <- env:
-			case <-b.stopCh:
+			case <-b.publish:
+				// Slot freed; loop sends the new event.
+			default:
+				// Channel concurrently drained — race-fine.
 			}
-		}()
+		}
 	}
 }
 
@@ -177,8 +196,18 @@ func formatEventID(n int64) string {
 // Start launches the broker goroutine. Returns a stop func that
 // signals shutdown and waits for the goroutine to exit. Caller
 // (cmd/bridge/main.go) defers the stop func.
+//
+// Idempotent: calling Start a second time is a no-op (returns a
+// stop fn that delegates to the same underlying Stop). Without the
+// `startOnce` guard, a second Start would spawn another goroutine
+// that defers `close(b.doneCh)` on the same channel — Stop's
+// `<-b.doneCh` would unblock for the first goroutine, then the
+// second goroutine's deferred close would panic on
+// already-closed-channel. CodeRabbit + Qodo on PR #135 caught this.
 func (b *eventBroker) Start() func() {
-	go b.run()
+	b.startOnce.Do(func() {
+		go b.run()
+	})
 	return func() {
 		b.Stop()
 	}
@@ -201,19 +230,32 @@ func (b *eventBroker) run() {
 		case <-b.stopCh:
 			return
 		case env := <-b.publish:
-			b.recordReplay(env)
-			b.fanout(env)
+			// One critical section covers BOTH replay-buffer
+			// append AND subscriber fan-out. subscribe() holds
+			// the same lock for replay-capture +
+			// subscriber-insertion. Result: a publish either
+			// fully completes (reaching the replay buffer +
+			// every then-live subscriber) before subscribe()
+			// snapshots, OR fully completes after — never
+			// half-and-half. Closes the duplicate-vs-missed
+			// race the bots flagged.
+			b.mu.Lock()
+			b.recordReplayLocked(env)
+			b.fanoutLocked(env)
+			b.mu.Unlock()
 		case <-heartbeat.C:
-			b.fanoutHeartbeat()
+			b.mu.Lock()
+			b.fanoutHeartbeatLocked()
+			b.mu.Unlock()
 		}
 	}
 }
 
 // fanout writes the event to every matching subscriber, applying the
-// drop-oldest policy on full channels.
-func (b *eventBroker) fanout(env eventEnvelope) {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
+// drop-oldest policy on full channels. Caller MUST hold b.mu — used
+// from `run()` so the record+fanout cycle is atomic with respect to
+// `subscribe()`.
+func (b *eventBroker) fanoutLocked(env eventEnvelope) {
 	for sub := range b.subscribers {
 		if !sub.matches(env.Topic) {
 			continue
@@ -241,18 +283,14 @@ func (b *eventBroker) fanout(env eventEnvelope) {
 	}
 }
 
-// fanoutHeartbeat sends an empty heartbeat envelope to every
-// subscriber. Topic is "heartbeat" (matched by every subscriber's
-// allowlist via the empty-topics fallthrough OR the explicit
-// inclusion). iOS swallows heartbeats at the parser layer.
-func (b *eventBroker) fanoutHeartbeat() {
+// fanoutHeartbeatLocked sends an empty heartbeat envelope to every
+// subscriber. Caller MUST hold b.mu (called from run()).
+func (b *eventBroker) fanoutHeartbeatLocked() {
 	env := eventEnvelope{
 		Topic: "heartbeat",
 		Data:  []byte("{}"),
 		ID:    "",
 	}
-	b.mu.RLock()
-	defer b.mu.RUnlock()
 	for sub := range b.subscribers {
 		select {
 		case sub.ch <- env:
@@ -264,11 +302,25 @@ func (b *eventBroker) fanoutHeartbeat() {
 	}
 }
 
-// subscribe registers a subscriber. Returns the subscriber handle and
+// subscribe registers a subscriber atomically with respect to the
+// broker's record+fanout cycle. Returns the subscriber handle and
 // any events the broker has cached newer than `lastEventID` (for SSE
 // reconnect replay). The replay slice is empty for first-time
-// subscribers (lastEventID == ""). Caller MUST call unsubscribe when
-// the request ends.
+// subscribers (lastEventID == "").
+//
+// Atomicity is load-bearing: replay-capture and subscriber-insertion
+// MUST happen in a single critical section that the broker
+// goroutine's record+fanout cycle also serializes against. Otherwise
+// an event published in the gap is either delivered twice (via
+// replay AND fan-out — Qodo + CodeRabbit on PR #135's first commit)
+// OR missed entirely (the naive "do replay first" fix). The single
+// `mu` covering BOTH subscribers map AND replay buffer plus the
+// broker goroutine taking the same lock for record+fanout closes
+// both windows: from any handler's perspective, the broker's
+// processing of an event is either fully before or fully after the
+// subscribe() call.
+//
+// Caller MUST call unsubscribe when the request ends.
 func (b *eventBroker) subscribe(topics []string, lastEventID string) (*subscriber, []eventEnvelope) {
 	sub := &subscriber{
 		ch:          make(chan eventEnvelope, subscriberChannelBufferLen),
@@ -276,10 +328,9 @@ func (b *eventBroker) subscribe(topics []string, lastEventID string) (*subscribe
 		lastEventID: lastEventID,
 	}
 	b.mu.Lock()
+	defer b.mu.Unlock()
+	replay := b.replaySinceLocked(lastEventID, topics)
 	b.subscribers[sub] = struct{}{}
-	b.mu.Unlock()
-
-	replay := b.replaySince(lastEventID, topics)
 	return sub, replay
 }
 
@@ -291,27 +342,25 @@ func (b *eventBroker) unsubscribe(sub *subscriber) {
 	b.mu.Unlock()
 }
 
-// recordReplay appends the event to the bounded replay buffer.
-func (b *eventBroker) recordReplay(env eventEnvelope) {
-	b.replayMu.Lock()
-	defer b.replayMu.Unlock()
+// recordReplayLocked appends the event to the bounded replay buffer.
+// Caller MUST hold b.mu.
+func (b *eventBroker) recordReplayLocked(env eventEnvelope) {
 	b.replayBuffer = append(b.replayBuffer, env)
 	if len(b.replayBuffer) > b.replayCapacity {
 		b.replayBuffer = b.replayBuffer[len(b.replayBuffer)-b.replayCapacity:]
 	}
 }
 
-// replaySince returns events newer than lastEventID that match the
-// subscriber's topics. Empty lastEventID returns nothing (first-
+// replaySinceLocked returns events newer than lastEventID that match
+// the subscriber's topics. Empty lastEventID returns nothing (first-
 // connect subscribers don't get history). An ID we don't recognise
 // (older than the buffer's oldest) also returns nothing — iOS
-// interprets that as "I missed too much; refetch state".
-func (b *eventBroker) replaySince(lastEventID string, topics []string) []eventEnvelope {
+// interprets that as "I missed too much; refetch state". Caller
+// MUST hold b.mu.
+func (b *eventBroker) replaySinceLocked(lastEventID string, topics []string) []eventEnvelope {
 	if lastEventID == "" {
 		return nil
 	}
-	b.replayMu.Lock()
-	defer b.replayMu.Unlock()
 	startIdx := -1
 	for i, env := range b.replayBuffer {
 		if env.ID == lastEventID {

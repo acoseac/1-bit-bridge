@@ -299,7 +299,7 @@ Server-sent events stream replacing per-resource polling for upscale stats and p
 
 **Response** (`200 OK`, `Content-Type: text/event-stream`):
 
-```
+```text
 id: 42
 event: upscale.stats
 data: {"enabled":true,"pool":{"queueLen":12,"inflight":4,"done":126,"failed":0},"cachedVariants":138}
@@ -519,6 +519,8 @@ All errors are JSON:
 |    404 | `not_found`              | Path does not exist in any library root           |
 |    404 | `unknown_request`        | Pairing request ID unknown / cleaned up           |
 |    404 | `pairing_not_supported`  | Bridge build doesn't expose tap-to-pair           |
+|    404 | `events_not_supported`   | Bridge build doesn't expose `/v1/events` (pre-v1.2; iOS falls back to polling) |
+|    429 | `rate_limited`           | Per-IP pairing-create rate-limit tripped          |
 |    500 | `internal`               | Server-side failure                               |
 |    503 | `scan_in_progress`       | Manifest requested while an initial scan is busy  |
 |    503 | `queue_full`             | Pending pairing requests at the cap               |

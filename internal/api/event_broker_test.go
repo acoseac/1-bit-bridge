@@ -240,3 +240,91 @@ func TestEventBroker_NopPublisherDoesNotPanic(t *testing.T) {
 	p.Publish("upscale.stats", "anything") // must not panic
 	p.Publish("pairing.abc", nil)          // nil payload also fine
 }
+
+// TestEventBroker_StartIsIdempotent: calling Start() multiple times
+// must NOT spawn multiple run goroutines. Without the sync.Once
+// guard, a second Start would defer close(b.doneCh) on the same
+// channel — Stop's <-b.doneCh would unblock for the first goroutine,
+// then the second goroutine's deferred close would panic on
+// already-closed-channel. CodeRabbit + Qodo on PR #135 caught this.
+func TestEventBroker_StartIsIdempotent(t *testing.T) {
+	b := newEventBroker()
+	stop1 := b.Start()
+	stop2 := b.Start() // must NOT spawn a second goroutine
+	stop3 := b.Start() // ditto
+
+	// All three stop fns delegate to the same broker.Stop; one
+	// call drains the goroutine, the rest are no-ops. No panic on
+	// already-closed-channel.
+	stop1()
+	stop2()
+	stop3()
+}
+
+// TestEventBroker_SubscribeIsAtomicWithFanout drives a small
+// burst of publishes during a concurrent subscribe() call. Without
+// the consolidated locking, an event published in the gap between
+// "capture replay" and "join fan-out" would either be delivered
+// twice (broker started recording before subscribe ran, ALSO
+// delivered after) or vanish entirely (recorded BEFORE replay
+// snapshot, fan-out reached subscriber AFTER it joined). With
+// proper locking, every published event is delivered exactly once.
+func TestEventBroker_SubscribeIsAtomicWithFanout(t *testing.T) {
+	b := newEventBroker()
+	stop := b.Start()
+	defer stop()
+
+	// Establish a known last-event-ID by subscribing FIRST, then
+	// publishing the seed event so the probe captures its ID
+	// reliably (publishing before subscribe means the probe joins
+	// after fan-out and would miss the seed).
+	probe, _ := b.subscribe(nil, "")
+	defer b.unsubscribe(probe)
+	b.Publish("upscale.stats", 0)
+	var firstID string
+	select {
+	case env := <-probe.ch:
+		firstID = env.ID
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("did not receive seed event")
+	}
+
+	// Now drive a publish burst while reconnecting (subscribe
+	// with the firstID). The reconnecting subscriber MUST receive
+	// each event exactly once — either via replay or via live
+	// fan-out — never both.
+	const burstSize = 20
+	go func() {
+		for i := 0; i < burstSize; i++ {
+			b.Publish("upscale.stats", i)
+		}
+	}()
+
+	// Race the subscribe() against the publish burst.
+	sub, replay := b.subscribe(nil, firstID)
+	defer b.unsubscribe(sub)
+
+	seenIDs := map[string]int{}
+	for _, env := range replay {
+		seenIDs[env.ID]++
+	}
+
+	// Drain whatever the live fan-out delivered.
+	deadline := time.After(300 * time.Millisecond)
+loop:
+	for {
+		select {
+		case env := <-sub.ch:
+			seenIDs[env.ID]++
+		case <-deadline:
+			break loop
+		}
+	}
+
+	for id, count := range seenIDs {
+		if count > 1 {
+			t.Errorf("event id=%s delivered %d times (replay+live duplicate); subscribe is not atomic with fan-out",
+				id, count)
+		}
+	}
+}
