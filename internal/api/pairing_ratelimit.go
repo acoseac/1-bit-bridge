@@ -72,6 +72,14 @@ func newPairingRateLimiter() *pairingRateLimiter {
 // allow returns true if the IP may proceed. The empty-string IP
 // (failed RemoteAddr parse) is allowed — falling open beats locking
 // out every legitimate request behind a flaky proxy.
+//
+// Routes the rate-limit decision through `lim.AllowN(now, 1)` (NOT
+// `lim.Allow()`) so the injected clock is honoured. `Allow()`
+// internally calls the package-level `time.Now()`, which would make
+// tests using a fake clock non-deterministic for the actual
+// allow/deny verdict — the lastSeen field would update on the
+// injected time, but the bucket would refill on wall-clock time,
+// producing surprising assertions. Gemini bot review on PR #133.
 func (p *pairingRateLimiter) allow(ip string) bool {
 	if ip == "" {
 		return true
@@ -85,7 +93,7 @@ func (p *pairingRateLimiter) allow(ip string) bool {
 		p.limiters[ip] = entry
 	}
 	entry.lastSeen = now
-	return entry.lim.Allow()
+	return entry.lim.AllowN(now, 1)
 }
 
 // gc reclaims limiters that haven't been touched in `maxAge`. Called
