@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 
@@ -166,6 +167,154 @@ func (s *Server) pairingPoll(w http.ResponseWriter, r *http.Request) {
 		Token:               res.Token,
 		TokenID:             res.TokenID,
 	})
+}
+
+// pairingEvents handles GET /v1/pairing/{requestID}/events.
+//
+// Push-delivery sibling of pairingPoll. iOS connects with the same
+// `Authorization: Bearer <pollSecret>` shape as polling and receives
+// `pairing.<requestID>` SSE events as the request transitions
+// (Approve, Decline, timer-expiry).
+//
+// Why a separate endpoint and not /v1/events?topics=pairing.<id>:
+// /v1/events is bearer-token-authed (a minted `auth.Store` token),
+// but the pairing flow has no token until *after* approval — iOS
+// can't subscribe with a token it doesn't have yet. The pollSecret
+// + requestID pair is what authorises seeing the request's state
+// (and its eventual minted token); routing the SSE through this
+// pollSecret-authed endpoint lets iOS get push delivery for the
+// pairing flow without mixing auth schemes on the bus endpoint.
+//
+// Auth + initial state: a single `s.pairing.Poll(id, secret)` call
+// does double duty — authenticates (404/401 on miss/mismatch) AND
+// returns the current state, which we emit as the FIRST event on
+// the wire. iOS doesn't have to wait for the next state change to
+// know what state the request is in (helpful when the user
+// foregrounds the app mid-pairing).
+//
+// Status mapping:
+//   - 200 + SSE stream: authed; state events flow until the client
+//     disconnects or the request's lifecycle ends
+//   - 401: missing/invalid pollSecret
+//   - 404: unknown requestID OR the bridge doesn't have a broker
+//     wired (treated as terminal by iOS — falls back to polling)
+func (s *Server) pairingEvents(w http.ResponseWriter, r *http.Request) {
+	if s.pairing == nil {
+		writeError(w, http.StatusNotFound, "pairing_not_supported",
+			"this bridge does not support tap-to-pair")
+		return
+	}
+	if s.eventBroker == nil {
+		// Broker not wired (test harness, or feature disabled in
+		// a future config). Same back-compat shape as /v1/events
+		// — iOS treats 404 as "fall back to polling."
+		writeError(w, http.StatusNotFound, "events_not_supported",
+			"this bridge does not support push pairing events; client should use the polling endpoint")
+		return
+	}
+	id := r.PathValue("requestID")
+	secret := extractBearer(r)
+	res, err := s.pairing.Poll(id, secret)
+	switch {
+	case errors.Is(err, pairing.ErrUnauthorized):
+		writeError(w, http.StatusUnauthorized, "unauthorized",
+			"missing or invalid poll secret")
+		return
+	case errors.Is(err, pairing.ErrNotFound):
+		writeError(w, http.StatusNotFound, "unknown_request",
+			"no such pairing request (may have expired or been cleaned up)")
+		return
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+
+	// Same defensive headers as /v1/events — see events.go for the
+	// rationale on Content-Encoding: identity + X-Accel-Buffering: no
+	// (defends against future global gzip middleware and fronting
+	// reverse proxies that buffer response bodies).
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Content-Encoding", "identity")
+	w.Header().Set("X-Accel-Buffering", "no")
+	rc := http.NewResponseController(w)
+
+	// Scope the subscription to JUST this request's topic. The
+	// prefix-match contract on the broker means "pairing.<id>"
+	// matches exact + any future "pairing.<id>.<subtopic>" without
+	// leaking other in-flight pairing requests' state to this
+	// caller (which only authenticated for THIS request).
+	topic := "pairing." + id
+	// Subscribe BEFORE writing headers so an event published
+	// between the Poll above and the subscribe below doesn't slip
+	// through the gap. Same atomicity rationale as events.go.
+	sub, _ := s.eventBroker.subscribe([]string{topic}, "")
+	defer s.eventBroker.unsubscribe(sub)
+
+	w.WriteHeader(http.StatusOK)
+	if err := rc.Flush(); err != nil {
+		return
+	}
+
+	// Send the current state as the first event. iOS doesn't have
+	// to wait for the next transition to render — same payload
+	// shape as the polling endpoint AND the broker's
+	// `pairing.<id>` events (they all share the PairingStateEvent
+	// wire shape).
+	initial := PairingStateEvent{
+		Status:              res.State.String(),
+		TTLSecondsRemaining: res.TTLSecondsRemaining,
+		BridgeStartedAt:     s.startedAt.UnixMilli(),
+		VerificationCode:    res.VerificationCode,
+		Token:               res.Token,
+		TokenID:             res.TokenID,
+	}
+	if data, jsonErr := json.Marshal(initial); jsonErr == nil {
+		// Synthetic event ID 0 — broker IDs are monotonic from 1+
+		// so iOS can distinguish the initial-state synth from
+		// real broker events when comparing Last-Event-ID. (Today
+		// pairing reconnect doesn't use Last-Event-ID — the
+		// initial-state-on-connect mechanism replaces it — but
+		// the distinction keeps the wire honest.)
+		if err := writeEvent(w, eventEnvelope{
+			Topic: topic,
+			Data:  data,
+			ID:    "",
+		}); err != nil {
+			return
+		}
+		if err := rc.Flush(); err != nil {
+			return
+		}
+	}
+
+	ctx := r.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case env, ok := <-sub.ch:
+			if !ok {
+				return
+			}
+			if dropped := sub.dropped.Swap(0); dropped > 0 {
+				notice := eventEnvelope{
+					Topic: "dropped",
+					Data:  []byte(fmt.Sprintf(`{"missed":%d}`, dropped)),
+				}
+				if err := writeEvent(w, notice); err != nil {
+					return
+				}
+			}
+			if err := writeEvent(w, env); err != nil {
+				return
+			}
+			if err := rc.Flush(); err != nil {
+				return
+			}
+		}
+	}
 }
 
 // pairingDelete handles DELETE /v1/pairing/{requestID}. Used by iOS for

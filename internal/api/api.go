@@ -401,6 +401,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/events", s.authed(s.events))
 	mux.HandleFunc("POST /v1/pairing/requests", s.pairingRequest)
 	mux.HandleFunc("GET /v1/pairing/{requestID}", s.pairingPoll)
+	mux.HandleFunc("GET /v1/pairing/{requestID}/events", s.pairingEvents)
 	mux.HandleFunc("DELETE /v1/pairing/{requestID}", s.pairingDelete)
 	return protocolHeader(mux)
 }
