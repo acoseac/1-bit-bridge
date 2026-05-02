@@ -55,6 +55,7 @@ type Server struct {
 	updater              UpdaterStatus
 	sessions             SessionTracker
 	pairing              *pairing.Store
+	certNotAfter         time.Time            // zero when not wired (test harnesses)
 	variantStore         VariantStore         // nil unless WithUpscale(true, vs) called
 	upscaleEnabled       bool                 // mirrors cfg.Upscale.Enabled (and sox-probe outcome)
 	upscaleEnqueuer      UpscaleEnqueuer      // nil unless WithUpscaleEnqueuer wired (Phase 2.5)
@@ -289,6 +290,16 @@ func (s *Server) WithPairing(p *pairing.Store) *Server {
 	return s
 }
 
+// WithCertExpiry attaches the on-disk TLS cert's NotAfter date so
+// /v1/health can surface it to iOS. Wired from cmd/bridge after
+// `tls.Inspect(certPath)`. Test harnesses can omit this; the
+// HealthResponse field is `omitempty` (pointer) so the zero-time
+// stays off the wire.
+func (s *Server) WithCertExpiry(notAfter time.Time) *Server {
+	s.certNotAfter = notAfter
+	return s
+}
+
 // WithUpscaleStats attaches the snapshot provider for GET
 // /v1/upscale/stats. Optional — when nil the endpoint returns the
 // zero-value UpscaleStats (`enabled=false`, no pool, no sox
@@ -381,6 +392,18 @@ type HealthResponse struct {
 	// type so a true `false` value distinguishes "feature
 	// supported but disabled" from "no field on the wire".
 	UpscaleEnabled *bool `json:"upscaleEnabled,omitempty"`
+
+	// CertNotAfter is the on-disk TLS certificate's `NotAfter` (UTC).
+	// Lets iOS surface a "Bridge cert expires in X days — re-pair to
+	// refresh" warning before the cert actually expires and TLS
+	// handshakes start failing at Apple's ATS layer (Apple's 397-day
+	// cap means operators must re-pair roughly annually). Additive
+	// field; pre-bridge-with-this-PR servers omit it and iOS treats
+	// absence as "no expiry info, never warn". Pointer (not bare
+	// `time.Time`) because Go's `omitempty` doesn't treat the zero
+	// time as empty — and emitting `0001-01-01T00:00:00Z` from a
+	// test harness or a parse failure would actively confuse clients.
+	CertNotAfter *time.Time `json:"certNotAfter,omitempty"`
 }
 
 // ScanState reports the scanner's current status. Real fields populate once
@@ -429,6 +452,10 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// the field surface as nil on iOS, which iOS treats as false.
 	upscaleEnabled := s.upscaleEnabled
 	resp.UpscaleEnabled = &upscaleEnabled
+	if !s.certNotAfter.IsZero() {
+		notAfter := s.certNotAfter
+		resp.CertNotAfter = &notAfter
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 

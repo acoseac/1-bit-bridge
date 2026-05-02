@@ -700,6 +700,15 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		fmt.Fprintf(stderr, "TLS material: %v\n", err)
 		return 1
 	}
+	// Read the cert's NotAfter so /v1/health can surface it to iOS,
+	// which uses it to warn the operator before the cert actually
+	// expires (Apple's 397-day cap means re-pair roughly annually).
+	// Best-effort: a parse failure here drops the field from the
+	// wire shape (omitempty), preserving pre-PR behaviour.
+	var certNotAfter time.Time
+	if certInfo, infoErr := servertls.Inspect(certPath); infoErr == nil {
+		certNotAfter = certInfo.NotAfter
+	}
 
 	// SNI cert switcher. Routes incoming TLS handshakes to the
 	// self-signed cert (LAN/mDNS/IP-literal SNI — iOS pins this
@@ -950,6 +959,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		WithUpdater(updAdapter).
 		WithSessionTracker(sessions).
 		WithPairing(pairingStore).
+		WithCertExpiry(certNotAfter).
 		WithUpscale(upscaleActive, &variantStoreAdapter{provider: provider})
 
 	// Phase 2.5: long-lived transcode worker pool inside `bridge
