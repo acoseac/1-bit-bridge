@@ -77,8 +77,8 @@ func TestIsTransient_PinsClassification(t *testing.T) {
 		{"errNotFound", errNotFound, false},
 		{"wrapped not-found", fmt.Errorf("lookup: %w", errNotFound), false},
 
-		// Wrap-survival: this is the regression PR #142's typed shape
-		// closes. Pre-fix `IsTransient` did
+		// Wrap-survival: this is the regression the typed-httpError
+		// shape closes. Pre-fix `IsTransient` did
 		// `strings.HasPrefix(err.Error(), "musicbrainz: HTTP ")` over
 		// the formatted message — any caller that wrapped the MB
 		// error (`fmt.Errorf("retry: %w", err)`) silently broke the
@@ -117,6 +117,31 @@ func TestIsTransient_PinsClassification(t *testing.T) {
 				t.Errorf("IsTransient(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestHTTPErrorFormatStability pins the `httpError.Error()` rendering
+// byte-for-byte. The typed-shape refactor explicitly preserves the
+// prior `fmt.Errorf("musicbrainz: HTTP %d: %s", ...)` format so log
+// lines and any external tooling that scrapes them don't drift; this
+// test fails loudly if a future change to `Error()` breaks that
+// promise (coderabbit nit on PR #144). The classification cases above
+// all go through `IsTransient` and would not catch a format regression
+// in the rendered string itself.
+func TestHTTPErrorFormatStability(t *testing.T) {
+	cases := []struct {
+		err  *httpError
+		want string
+	}{
+		{&httpError{StatusCode: 503, Body: "service unavailable"}, "musicbrainz: HTTP 503: service unavailable"},
+		{&httpError{StatusCode: 429, Body: "too many requests"}, "musicbrainz: HTTP 429: too many requests"},
+		{&httpError{StatusCode: 400, Body: ""}, "musicbrainz: HTTP 400: "},
+		{&httpError{StatusCode: 404, Body: "not found"}, "musicbrainz: HTTP 404: not found"},
+	}
+	for _, tc := range cases {
+		if got := tc.err.Error(); got != tc.want {
+			t.Errorf("Error() = %q, want %q", got, tc.want)
+		}
 	}
 }
 
