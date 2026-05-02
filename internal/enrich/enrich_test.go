@@ -1062,12 +1062,23 @@ func TestITunesFallbackStreamingCapsOversizedBody(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		// MaxCoverArtBytes+1 is a lot of bytes (20 MB+1); write a few
 		// chunks to hit the cap rather than allocating a giant buffer.
+		// The client-side `writeArtworkAtomicStream` reads only up to
+		// MaxCoverArtBytes+1 (via io.LimitReader) before tripping the
+		// cap, after which it closes the connection — so once the
+		// server has written more than that, additional writes start
+		// returning (0, err). Without breaking on err / n==0 the loop
+		// could spin forever and hang the test (qodo bot review on
+		// PR #141). Belt-and-braces both: a tracked write error AND a
+		// zero-byte short write are exit conditions.
 		const chunk = 64 * 1024
 		buf := make([]byte, chunk)
 		written := 0
 		for written <= MaxCoverArtBytes {
-			n, _ := w.Write(buf)
+			n, err := w.Write(buf)
 			written += n
+			if err != nil || n == 0 {
+				return
+			}
 		}
 	}))
 	defer itunesSrv.Close()
