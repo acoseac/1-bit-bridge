@@ -615,13 +615,22 @@ func (e *Enricher) ensureArtworkCached(ctx context.Context, mbid, rgMBID, artist
 	// for. Caches under the same MBID-keyed path so iOS's existing
 	// /v1/artwork/{mbid} URL serves it transparently.
 	if e.itunes != nil && artist != "" && album != "" {
-		if itData, itErr := e.fetchITunesArtwork(ctx, artist, album); itErr == nil && len(itData) > 0 {
-			if werr := writeArtworkAtomic(path, itData); werr != nil {
+		itBody, itErr := e.fetchITunesArtwork(ctx, artist, album)
+		if itErr == nil {
+			// Stream straight to disk — same shape as the CAA branches
+			// above. Body close + size cap (MaxCoverArtBytes) live
+			// inside writeArtworkAtomicStream + io.LimitReader; the
+			// iTunes path now inherits the ~32 KB peak-RAM profile of
+			// the CAA fetches rather than buffering the whole image.
+			werr := writeArtworkAtomicStream(path, itBody, MaxCoverArtBytes)
+			itBody.Close()
+			if werr != nil {
 				return false, werr
 			}
 			e.itunesFallbackHits.Add(1)
 			return true, nil
-		} else if itErr != nil && !IsNotFound(itErr) {
+		}
+		if !IsNotFound(itErr) {
 			// Log iTunes errors but don't fail the whole call —
 			// the original release-level errNotFound is the more
 			// useful signal for the caller.
@@ -639,7 +648,9 @@ func (e *Enricher) ensureArtworkCached(ctx context.Context, mbid, rgMBID, artist
 //
 // Returns errNotFound (compatible with `IsNotFound`) when iTunes had
 // nothing for (artist, album). All other errors bubble up unchanged.
-func (e *Enricher) fetchITunesArtwork(ctx context.Context, artist, album string) ([]byte, error) {
+// Returns an io.ReadCloser the caller MUST close — the body streams
+// straight to disk in `ensureArtworkCached` via `writeArtworkAtomicStream`.
+func (e *Enricher) fetchITunesArtwork(ctx context.Context, artist, album string) (io.ReadCloser, error) {
 	// Use the ctx-aware `sleepCtx` helper rather than `time.Sleep` so
 	// shutdown / cancellation isn't blocked by up to ~2× ITunesMinInterval
 	// (default 6s) per in-flight iTunes call. Matches the pacing pattern
