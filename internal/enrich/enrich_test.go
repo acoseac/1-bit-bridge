@@ -979,6 +979,13 @@ func TestArtistImagePathByNameNormalizes(t *testing.T) {
 		// some tag writers produce different forms for the same name.
 		// Normalization must collapse them.
 		{"NFC vs NFD", "Beyonc\u00e9", "Beyonce\u0301"},
+		// Turkish dotted capital I (U+0130) folds to "i\u0307" via
+		// Unicode case-fold; lowercased with `strings.ToLower` it
+		// would stay as `i\u0307stanbul` (ASCII `i` + combining dot
+		// above), still distinct from plain `istanbul` after
+		// NFC normalization. `cases.Fold` collapses both to the
+		// same key.
+		{"Turkish dotted I", "\u0130STANBUL", "istanbul"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
