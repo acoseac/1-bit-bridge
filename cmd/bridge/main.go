@@ -42,6 +42,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/supervision"
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
+	"github.com/acoseac/1-bit-bridge/internal/tsnet"
 	"github.com/acoseac/1-bit-bridge/internal/updater"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
@@ -571,6 +572,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return logsCmd(ctx, args[1:], stdout, stderr)
 	case "library":
 		return libraryCmd(ctx, args[1:], stdout, stderr)
+	case "tsnet":
+		return tsnetCmd(ctx, args[1:], os.Stdin, stdout, stderr)
 	case "start":
 		return startCmd(args[1:], stdout, stderr)
 	case "stop":
@@ -614,6 +617,7 @@ Subcommands:
   restore  Restore bridge state from a snapshot directory.
   token    Manage paired tokens (list / rotate / expire / revoke).
   cert     Inspect or rotate the TLS cert (info / rotate).
+  tsnet    Embedded tailnet node management (auth | status | logout).
   version  Print version and protocol version.
 
 Run "bridge <subcommand> -h" for subcommand-specific flags.
@@ -774,20 +778,50 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	defer scanCancel()
 	go scanner.RunPeriodic(scanCtx, cfg.ScanInterval())
 
-	// Tailscale HTTPS auto-pilot: detect the local node's MagicDNS
-	// name + mint a Let's Encrypt cert via `tailscale cert` if the
-	// tailnet has HTTPS Certificates enabled. The cert is fed into
-	// `certManager`'s SNI switcher so connections to
-	// `<node>.<tailnet>.ts.net:7788` get the LE cert (ATS-trusted,
-	// no pinning needed) while LAN/mDNS/IP-literal connections keep
-	// getting the self-signed cert (iOS pins fingerprint at first
-	// contact). Detection + mint runs in a goroutine so a slow
-	// Tailscale CLI doesn't block the listen step. A renewer ticks
-	// every 24 h and re-mints inside the 14-day pre-expiry window.
-	// All errors logged but never fatal — bridge runs identically
-	// to today on hosts without Tailscale installed.
-	tailscaleAuto := newTailscaleAutoPilot(cfg.DataDir, cfg.ListenAddress, certManager, stderr)
-	tailscaleAuto.Start(scanCtx)
+	// Tailscale integration. Branched on cfg.Tailscale.EffectiveMode():
+	//
+	//   - `cli` (default): existing flow — tailscaleAutoPilot shells
+	//     out to `tailscale status --json` + `tailscale cert <magic>`
+	//     and feeds the resulting LE cert into certManager's SNI
+	//     switcher.
+	//   - `tsnet` (opt-in): bridge becomes its own embedded tailnet
+	//     node via internal/tsnet. The tsnet listener (added below)
+	//     terminates LE in-process — no on-disk cert material, no
+	//     SNI switcher needed for *.ts.net connections. CLI auto-
+	//     pilot is skipped entirely.
+	//   - `disabled`: skip both. LAN listener only; *.ts.net
+	//     connections aren't served.
+	//
+	// All three modes converge on the same handler/admin/scanner.
+	// In all modes, errors from the tailscale path are logged but
+	// non-fatal — the bridge keeps serving on the LAN listener.
+	tsMode, modeErr := cfg.Tailscale.EffectiveMode()
+	if modeErr != nil {
+		fmt.Fprintf(stderr, "tailscale.mode: %v (defaulting to cli)\n", modeErr)
+		tsMode = config.TailscaleModeCLI
+	}
+
+	var tailscaleAuto *tailscaleAutoPilot
+	var tsnetServer *tsnet.Server
+	switch tsMode {
+	case config.TailscaleModeCLI:
+		tailscaleAuto = newTailscaleAutoPilot(cfg.DataDir, cfg.ListenAddress, certManager, stderr)
+		tailscaleAuto.Start(scanCtx)
+	case config.TailscaleModeTsnet:
+		// Build the tsnet.Server but DO NOT block the listen step
+		// on Up() — interactive auth can take minutes on first
+		// run, and we want the LAN listener up immediately.
+		// Up() runs in a goroutine; the second http.Server gated
+		// on its success is started later in this function.
+		ts, err := newTsnetServer(cfg, stderr)
+		if err != nil {
+			fmt.Fprintf(stderr, "tsnet: %v (LAN listener still active)\n", err)
+		} else {
+			tsnetServer = ts
+		}
+	case config.TailscaleModeDisabled:
+		// No-op. Operator explicitly opted out.
+	}
 
 	// Optional fsnotify-based instant-update watcher. Off by default
 	// (cfg.LibraryWatch.Enabled). When on, the periodic full scan
@@ -1151,7 +1185,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		ScanCtx:         scanCtx,
 		Updater:         updAdapter,
 		BackupSources:   backupSources,
-		Tailscale:       tailscaleAdminAdapter{auto: tailscaleAuto},
+		Tailscale:       newTailscaleAdminSource(tailscaleAuto, tsnetServer),
 		Pairing:         pairingStore,
 		IsSupervised:    supervision.IsSupervised(),
 		UpscalePrecheck: transcode.PrecheckSox,
@@ -1244,6 +1278,46 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		serveErr <- httpSrv.ServeTLS(lis, "", "")
 	}()
 
+	// Tsnet path: spin up a SECOND http.Server bound to the embedded
+	// tsnet listener. tsnet.Server.ListenTLS auto-renews LE certs
+	// in-process; the listener accepts only on the tailnet virtual
+	// interface, so dual-binding the same logical port (cfg.ListenAddress)
+	// is safe — the LAN listener bind above sees the host's real
+	// interface, this listener sees the tsnet stack only.
+	//
+	// Up() blocks on interactive auth on first run; spawn it in a
+	// goroutine so the LAN listener is already serving while the
+	// operator visits the AuthURL. Errors are logged but non-fatal —
+	// the LAN listener keeps the bridge usable even if tsnet never
+	// comes up.
+	var tsnetHTTPSrv *http.Server
+	tsnetServeErr := make(chan error, 1)
+	if tsnetServer != nil {
+		go func() {
+			startCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+			defer cancel()
+			if err := tsnetServer.Start(startCtx); err != nil {
+				fmt.Fprintf(stderr, "tsnet: bring node up: %v (LAN listener still active)\n", err)
+				return
+			}
+			lis, err := tsnetServer.ListenTLS(cfg.ListenAddress)
+			if err != nil {
+				fmt.Fprintf(stderr, "tsnet: ListenTLS: %v\n", err)
+				return
+			}
+			// Build a sibling http.Server pointing at the same handler
+			// as httpSrv. Read/write timeout shape mirrors the LAN srv —
+			// see the rationale comment there.
+			tsnetHTTPSrv = &http.Server{
+				Handler:           apiSrv.Handler(),
+				ReadHeaderTimeout: 10 * time.Second,
+				ReadTimeout:       60 * time.Second,
+				IdleTimeout:       120 * time.Second,
+			}
+			tsnetServeErr <- tsnetHTTPSrv.Serve(lis)
+		}()
+	}
+
 	select {
 	case err := <-serveErr:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -1269,6 +1343,18 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			_ = httpSrv.Shutdown(shutdownCtx)
 			return 1
 		}
+	case err := <-tsnetServeErr:
+		// tsnet's secondary listener errored. LAN listener is still
+		// running, but a dead tsnet listener means *.ts.net iOS
+		// clients are silently failing — surface and exit so the
+		// operator notices.
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			fmt.Fprintf(stderr, "tsnet listener: %v\n", err)
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+			defer cancel()
+			_ = httpSrv.Shutdown(shutdownCtx)
+			return 1
+		}
 	case <-ctx.Done():
 		fmt.Fprintln(stdout, "\nShutting down...")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
@@ -1276,6 +1362,20 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 			fmt.Fprintf(stderr, "shutdown: %v\n", err)
 			return 1
+		}
+		// Tear down the tsnet listener + node before returning.
+		// Order matters: shut down the http.Server first so in-flight
+		// requests drain via http.ErrServerClosed; THEN call
+		// tsnetServer.Close to drain magicsock / netcheck / control
+		// plane goroutines (without this, integration tests leak
+		// goroutines per spawn — CLAUDE.md plan correction #5).
+		if tsnetHTTPSrv != nil {
+			_ = tsnetHTTPSrv.Shutdown(shutdownCtx)
+		}
+		if tsnetServer != nil {
+			if err := tsnetServer.Close(); err != nil {
+				fmt.Fprintf(stderr, "tsnet close: %v\n", err)
+			}
 		}
 	}
 	return 0
