@@ -64,6 +64,77 @@ type Config struct {
 	Backup          BackupConfig       `yaml:"backup,omitempty"`
 	LibraryWatch    LibraryWatchConfig `yaml:"libraryWatch,omitempty"`
 	Upscale         UpscaleConfig      `yaml:"upscale,omitempty"`
+	Tailscale       TailscaleConfig    `yaml:"tailscale,omitempty"`
+}
+
+// TailscaleConfig selects how the bridge integrates with Tailscale.
+// `cli` (default) preserves the historical CLI-shell-out flow:
+// `tailscale status` for endpoint detection + `tailscale cert` for
+// LE-on-magic-DNS cert minting. The CLI path requires the operator's
+// host to have `tailscaled` running and `tailscale` in $PATH, and
+// ships LE cert/key files to disk for the SNI cert switcher to read.
+//
+// `tsnet` makes the bridge its own tailnet node via the embedded
+// `tailscale.com/tsnet` library — no external daemon needed, no
+// on-disk LE cert dance (tsnet's ListenTLS terminates LE in-process).
+// State (machine identity + control-plane keys) persists under
+// `<dataDir>/tailscale/`. First-time auth uses an interactive
+// browser flow; subsequent boots load persisted state. Headless
+// deploys can pre-seed the state by setting AuthKey or the
+// TS_AUTHKEY environment variable.
+//
+// `disabled` skips both — useful for LAN-only deployments where the
+// operator doesn't want tailscale code paths exercised.
+//
+// Default is `cli` to preserve back-compat. Operators opt into
+// `tsnet` per-device; the default may be flipped in a future release
+// after the tsnet path soaks.
+type TailscaleConfig struct {
+	// Mode selects the integration: "cli" (default), "tsnet", or
+	// "disabled". Empty value falls back to "cli" at load time.
+	Mode string `yaml:"mode,omitempty"`
+
+	// AuthKey is the Tailscale auth key used by tsnet on first run.
+	//
+	// Precedence (matches Tailscale's standard idiom):
+	//   1. TS_AUTHKEY environment variable (preferred — keeps
+	//      secrets out of yaml on disk)
+	//   2. This field (fallback for ops who can't set env vars)
+	//   3. Empty → triggers interactive OAuth (`bridge tsnet auth`
+	//      prints an AuthURL the operator visits in a browser)
+	//
+	// Unused once tsnet has persisted state.
+	AuthKey string `yaml:"authKey,omitempty"`
+
+	// Hostname is the magic-DNS hostname tsnet will register with.
+	// Empty falls back to the bridge's deviceName / library name.
+	Hostname string `yaml:"hostname,omitempty"`
+}
+
+// TailscaleMode is the typed representation of TailscaleConfig.Mode.
+type TailscaleMode string
+
+const (
+	TailscaleModeCLI      TailscaleMode = "cli"
+	TailscaleModeTsnet    TailscaleMode = "tsnet"
+	TailscaleModeDisabled TailscaleMode = "disabled"
+)
+
+// EffectiveMode resolves the configured mode, applying the "cli"
+// default for empty values. Returns one of the three known modes
+// or an error when the yaml carries something unrecognised — the
+// safer shape than silently falling through to the default on a
+// typo (e.g. `mode: tnset` would otherwise look like it worked).
+func (t TailscaleConfig) EffectiveMode() (TailscaleMode, error) {
+	switch t.Mode {
+	case "", string(TailscaleModeCLI):
+		return TailscaleModeCLI, nil
+	case string(TailscaleModeTsnet):
+		return TailscaleModeTsnet, nil
+	case string(TailscaleModeDisabled):
+		return TailscaleModeDisabled, nil
+	}
+	return "", fmt.Errorf("tailscale.mode: unknown value %q (want cli|tsnet|disabled)", t.Mode)
 }
 
 // UpscaleConfig governs the optional offline PCM-upscaling feature

@@ -549,3 +549,42 @@ func TestConfigValidatePrunesCustomEndpoints(t *testing.T) {
 		t.Errorf("post-Validate CustomEndpoints = %v, want only the valid entry", c.CustomEndpoints)
 	}
 }
+
+// TestTailscaleEffectiveMode covers the mode-string validation in
+// TailscaleConfig.EffectiveMode. The yaml Mode field is a free-form
+// string but only three values are valid; anything else (typo'd or
+// future-flag-from-newer-config) MUST return an error rather than
+// silently fall through to the cli default — a typo like
+// `mode: tnset` would otherwise look like it activated tsnet when
+// it actually did nothing.
+func TestTailscaleEffectiveMode(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    TailscaleMode
+		wantErr bool
+	}{
+		{"", TailscaleModeCLI, false},
+		{"cli", TailscaleModeCLI, false},
+		{"tsnet", TailscaleModeTsnet, false},
+		{"disabled", TailscaleModeDisabled, false},
+		{"tnset", "", true},   // typo
+		{"TSNet", "", true},   // case-sensitive on purpose — yaml is case-sensitive
+		{"enabled", "", true}, // user might guess "enabled" as the inverse of "disabled"
+	}
+	for _, c := range cases {
+		got, err := (TailscaleConfig{Mode: c.in}).EffectiveMode()
+		if c.wantErr {
+			if err == nil {
+				t.Errorf("EffectiveMode(%q) want error, got %v", c.in, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("EffectiveMode(%q): unexpected error: %v", c.in, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("EffectiveMode(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
