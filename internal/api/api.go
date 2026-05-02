@@ -61,6 +61,7 @@ type Server struct {
 	upscaleEnabled       bool                 // mirrors cfg.Upscale.Enabled (and sox-probe outcome)
 	upscaleEnqueuer      UpscaleEnqueuer      // nil unless WithUpscaleEnqueuer wired (Phase 2.5)
 	upscaleStatsProvider UpscaleStatsProvider // nil unless WithUpscaleStats wired (v1.2 management UI)
+	eventBroker          *eventBroker         // nil disables /v1/events (back-compat for test harnesses)
 	fingerprint          string
 	startedAt            time.Time
 }
@@ -322,6 +323,31 @@ func (s *Server) WithCertExpiry(notAfter time.Time) *Server {
 	return s
 }
 
+// EventPublisher returns the broker as the Server-facing
+// `EventPublisher` interface so upstream services (transcode pool,
+// pairing store) can publish events without taking a hard dependency
+// on the api package. When the broker isn't wired (test harnesses,
+// pre-this-PR bridges) the returned publisher silently drops
+// publishes — same back-compat shape every upstream path already
+// handles.
+func (s *Server) EventPublisher() EventPublisher {
+	if s.eventBroker == nil {
+		return nopEventPublisher{}
+	}
+	return s.eventBroker
+}
+
+// StartEventBroker spins up the in-process event-bus goroutine that
+// backs GET /v1/events. Same pattern as `StartPairingRateLimitGC` —
+// returns a stopFn that drains the broker on shutdown. Wired from
+// cmd/bridge after `apiSrv := api.New(...)`.
+func (s *Server) StartEventBroker() (stopFn func()) {
+	if s.eventBroker == nil {
+		s.eventBroker = newEventBroker()
+	}
+	return s.eventBroker.Start()
+}
+
 // WithUpscaleStats attaches the snapshot provider for GET
 // /v1/upscale/stats. Optional — when nil the endpoint returns the
 // zero-value UpscaleStats (`enabled=false`, no pool, no sox
@@ -365,6 +391,7 @@ func (s *Server) Handler() http.Handler {
 	// `pairing_not_supported`.
 	mux.HandleFunc("POST /v1/upscale", s.authed(s.upscaleRequest))
 	mux.HandleFunc("GET /v1/upscale/stats", s.authed(s.upscaleStats))
+	mux.HandleFunc("GET /v1/events", s.authed(s.events))
 	mux.HandleFunc("POST /v1/pairing/requests", s.pairingRequest)
 	mux.HandleFunc("GET /v1/pairing/{requestID}", s.pairingPoll)
 	mux.HandleFunc("DELETE /v1/pairing/{requestID}", s.pairingDelete)
