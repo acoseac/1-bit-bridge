@@ -157,9 +157,22 @@ func (c *ITunesClient) SearchAlbum(ctx context.Context, artist, album string) (*
 // URL `a.ArtworkURL100` returned from `SearchAlbum`. The high-res
 // substitution (`/100x100bb.` → `/600x600bb.`) is documented Apple
 // behavior — iTunes's CDN serves any size suffix that matches the
-// pattern. Returns the raw image bytes; the caller writes to the
-// canonical on-disk path.
-func (c *ITunesClient) FetchArtwork(ctx context.Context, a *ITunesAlbum) ([]byte, error) {
+// pattern.
+//
+// Returns an `io.ReadCloser` (caller MUST Close) so the body streams
+// straight to disk via `writeArtworkAtomicStream` without ever
+// materialising the full payload in RAM. Mirrors the
+// `CoverArtClient.FetchReleaseFrontStream` shape so the iTunes
+// fallback path inherits the same ~32 KB peak-RAM profile and
+// `MaxCoverArtBytes` size cap as the CAA paths. The caller wraps the
+// body in `io.LimitReader(body, MaxCoverArtBytes+1)` (handled inside
+// `writeArtworkAtomicStream`) so this method does NOT pre-bound the
+// stream — the cap is applied uniformly with the destination size
+// guard. Pre-fix returned `[]byte` via `io.ReadAll(io.LimitReader(..,
+// 5<<20))`, which protected against multi-GB OOM but still allocated
+// up to 5 MB in RAM per fetch and lived inconsistently next to the
+// CAA streaming path.
+func (c *ITunesClient) FetchArtwork(ctx context.Context, a *ITunesAlbum) (io.ReadCloser, error) {
 	if a == nil || a.ArtworkURL100 == "" {
 		return nil, errNotFound
 	}
@@ -173,8 +186,8 @@ func (c *ITunesClient) FetchArtwork(ctx context.Context, a *ITunesAlbum) ([]byte
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
+		resp.Body.Close()
 		return nil, errNotFound
 	}
 	// Honor Retry-After on the artwork CDN the same way the search
@@ -186,15 +199,16 @@ func (c *ITunesClient) FetchArtwork(ctx context.Context, a *ITunesAlbum) ([]byte
 			select {
 			case <-time.After(delay):
 			case <-ctx.Done():
+				resp.Body.Close()
 				return nil, ctx.Err()
 			}
 		}
 	}
 	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
 		return nil, fmt.Errorf("itunes: artwork HTTP %d", resp.StatusCode)
 	}
-	const maxArtworkBytes = 5 << 20 // 5 MB ceiling matches CAA path
-	return io.ReadAll(io.LimitReader(resp.Body, maxArtworkBytes))
+	return resp.Body, nil
 }
 
 // get is the common JSON-fetch path with `Retry-After` honoring on
