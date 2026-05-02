@@ -224,7 +224,9 @@ func TestPairingEventsBrokerNotWiredReturns404(t *testing.T) {
 	// unknown-request 404) so iOS's fallback-to-polling decoder
 	// can distinguish.
 	var er ErrorResponse
-	_ = json.NewDecoder(resp.Body).Decode(&er)
+	if err := json.NewDecoder(resp.Body).Decode(&er); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
 	if er.Error != "events_not_supported" {
 		t.Errorf("error code = %q, want events_not_supported", er.Error)
 	}
@@ -367,15 +369,21 @@ func TestPairingEventsResponseIsNotGzipped(t *testing.T) {
 
 	// Short timeout — we're inspecting headers only.
 	client := &http.Client{Timeout: 200 * time.Millisecond}
-	resp, _ := client.Do(req)
-	if resp == nil {
+	resp, err := client.Do(req)
+	if err != nil || resp == nil {
 		// Connection cancelled by the timeout before headers landed
-		// — re-issue with a slightly longer window.
+		// — re-issue with a slightly longer window. Capturing the
+		// first error in `firstErr` so a re-issue failure can
+		// surface both diagnoses on a true network problem.
+		firstErr := err
 		req2, _ := http.NewRequest("GET", hs.URL+"/v1/pairing/"+id+"/events", nil)
 		req2.Header.Set("Authorization", "Bearer "+raw)
 		req2.Header.Set("Accept-Encoding", "gzip")
 		client2 := &http.Client{Timeout: 500 * time.Millisecond}
-		resp, _ = client2.Do(req2)
+		resp, err = client2.Do(req2)
+		if err != nil {
+			t.Fatalf("retry failed: %v (first attempt: %v)", err, firstErr)
+		}
 	}
 	if resp == nil {
 		t.Fatal("no response received")
