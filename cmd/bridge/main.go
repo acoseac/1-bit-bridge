@@ -801,10 +801,15 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// when the operator intended `tsnet`. EffectiveMode's whole
 	// purpose is to reject typos; respecting that here is the
 	// honest shape (CodeRabbit Major on PR #139).
+	//
+	// Exit code 2 = config/usage error (CodeRabbit round-2 on PR
+	// #139). Matches the rest of runServe's config-validation
+	// branches; a config typo shouldn't look like a runtime
+	// failure (1) to whatever supervisor is watching.
 	tsMode, modeErr := cfg.Tailscale.EffectiveMode()
 	if modeErr != nil {
 		fmt.Fprintf(stderr, "tailscale.mode: %v\n", modeErr)
-		return 1
+		return 2
 	}
 
 	var tailscaleAuto *tailscaleAutoPilot

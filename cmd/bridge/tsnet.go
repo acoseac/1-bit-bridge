@@ -45,6 +45,30 @@ func loadConfigForCmd(args []string, stderr io.Writer) (*config.Config, error) {
 	return cfg, nil
 }
 
+// loadConfigAndRequireTsnetMode is the shared gate for all `bridge
+// tsnet` subcommands. Loads the config AND verifies tailscale.mode
+// is exactly "tsnet". Surfaces EffectiveMode's typo-detection
+// error explicitly — pre-fix, the subcommands collapsed
+// `EffectiveMode()` errors into the generic "set mode to tsnet"
+// path, which hid config typos and reported the wrong current
+// mode. CodeRabbit round-2 on PR #139.
+func loadConfigAndRequireTsnetMode(args []string, stderr io.Writer) (*config.Config, error) {
+	cfg, err := loadConfigForCmd(args, stderr)
+	if err != nil {
+		return nil, err
+	}
+	mode, err := cfg.Tailscale.EffectiveMode()
+	if err != nil {
+		fmt.Fprintf(stderr, "tailscale.mode: %v\n", err)
+		return nil, err
+	}
+	if mode != config.TailscaleModeTsnet {
+		fmt.Fprintf(stderr, "tailscale.mode is %q; set to \"tsnet\" in bridge.yaml to use this command\n", mode)
+		return nil, fmt.Errorf("mode mismatch: %s", mode)
+	}
+	return cfg, nil
+}
+
 // newTsnetServer builds a configured *tsnet.Server from cfg. Returns
 // an error if state-dir setup fails AT CONSTRUCTION (perms / path).
 // The actual tailnet-Up dance happens in Server.Start, called from
@@ -213,15 +237,10 @@ Subcommands:
 // immediately without printing anything — operator sees "already
 // authenticated" and exits clean.
 func tsnetAuthCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	cfg, err := loadConfigForCmd(args, stderr)
+	cfg, err := loadConfigAndRequireTsnetMode(args, stderr)
 	if err != nil {
 		return 1
 	}
-	if mode, _ := cfg.Tailscale.EffectiveMode(); mode != config.TailscaleModeTsnet {
-		fmt.Fprintf(stderr, "tailscale.mode is %q; set to \"tsnet\" in bridge.yaml to use this command\n", mode)
-		return 1
-	}
-
 	server, err := newTsnetServer(cfg, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "construct tsnet server: %v\n", err)
@@ -277,12 +296,8 @@ func tsnetAuthCmd(ctx context.Context, args []string, stdout, stderr io.Writer) 
 // printed). Doesn't require interactive auth — works on any
 // previously-auth'd state.
 func tsnetStatusCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	cfg, err := loadConfigForCmd(args, stderr)
+	cfg, err := loadConfigAndRequireTsnetMode(args, stderr)
 	if err != nil {
-		return 1
-	}
-	if mode, _ := cfg.Tailscale.EffectiveMode(); mode != config.TailscaleModeTsnet {
-		fmt.Fprintf(stderr, "tailscale.mode is %q; set to \"tsnet\" in bridge.yaml to use this command\n", mode)
 		return 1
 	}
 	server, err := newTsnetServer(cfg, stderr)
@@ -298,7 +313,14 @@ func tsnetStatusCmd(ctx context.Context, args []string, stdout, stderr io.Writer
 		fmt.Fprintf(stderr, "tsnet start: %v\n", err)
 		return 1
 	}
-	st, err := server.Status(ctx)
+	// Bound the live LocalClient call (CodeRabbit Major round-2
+	// on PR #139). A stalled control plane shouldn't hang
+	// `bridge tsnet status` on the operator's terminal — fail
+	// fast at adminStatusTimeout so the caller can see the
+	// failure mode and try again.
+	statusCtx, statusCancel := context.WithTimeout(ctx, adminStatusTimeout)
+	defer statusCancel()
+	st, err := server.Status(statusCtx)
 	if err != nil {
 		fmt.Fprintf(stderr, "tsnet status: %v\n", err)
 		return 1
@@ -338,12 +360,8 @@ const logoutConfirmPhrase = "WIPE"
 func tsnetLogoutCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// Minimal shape for v1 — no flags. Operator confirms by typing
 	// the constant phrase at the prompt.
-	cfg, err := loadConfigForCmd(args, stderr)
+	cfg, err := loadConfigAndRequireTsnetMode(args, stderr)
 	if err != nil {
-		return 1
-	}
-	if mode, _ := cfg.Tailscale.EffectiveMode(); mode != config.TailscaleModeTsnet {
-		fmt.Fprintf(stderr, "tailscale.mode is %q; set to \"tsnet\" in bridge.yaml to use this command\n", mode)
 		return 1
 	}
 	stateDir := filepath.Join(cfg.DataDir, "tailscale")
