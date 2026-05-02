@@ -23,6 +23,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -795,10 +796,15 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// All three modes converge on the same handler/admin/scanner.
 	// In all modes, errors from the tailscale path are logged but
 	// non-fatal — the bridge keeps serving on the LAN listener.
+	// Fail closed on an invalid mode — silently defaulting to `cli`
+	// would let a typo (`mode: tnset`) re-enable the CLI shell-out
+	// when the operator intended `tsnet`. EffectiveMode's whole
+	// purpose is to reject typos; respecting that here is the
+	// honest shape (CodeRabbit Major on PR #139).
 	tsMode, modeErr := cfg.Tailscale.EffectiveMode()
 	if modeErr != nil {
-		fmt.Fprintf(stderr, "tailscale.mode: %v (defaulting to cli)\n", modeErr)
-		tsMode = config.TailscaleModeCLI
+		fmt.Fprintf(stderr, "tailscale.mode: %v\n", modeErr)
+		return 1
 	}
 
 	var tailscaleAuto *tailscaleAutoPilot
@@ -1290,9 +1296,36 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// operator visits the AuthURL. Errors are logged but non-fatal —
 	// the LAN listener keeps the bridge usable even if tsnet never
 	// comes up.
-	var tsnetHTTPSrv *http.Server
+	//
+	// `tsnetHTTPSrv` is published via atomic.Pointer because the
+	// startup goroutine writes it AFTER Up() succeeds and the
+	// shutdown path (any exit branch below) reads it. Pre-fix, this
+	// was a plain pointer with no synchronization — Qodo bug #1 +
+	// Gemini high + CodeRabbit major all flagged it as a real race.
+	//
+	// Cleanup is via `defer` so EVERY exit path (serveErr, adminErr,
+	// tsnetServeErr, ctx.Done) runs the same teardown sequence —
+	// pre-fix only ctx.Done called Close(), so error-exit paths
+	// leaked tsnet goroutines (Qodo bug #2 + Gemini medium).
+	var tsnetHTTPSrv atomic.Pointer[http.Server]
 	tsnetServeErr := make(chan error, 1)
 	if tsnetServer != nil {
+		defer func() {
+			// Drain the http.Server first so in-flight requests get
+			// http.ErrServerClosed instead of a mid-flight socket
+			// reset, THEN Close the tsnet.Server (drains magicsock /
+			// netcheck / control plane goroutines per CLAUDE.md
+			// plan correction #5).
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+			defer cancel()
+			if srv := tsnetHTTPSrv.Load(); srv != nil {
+				_ = srv.Shutdown(shutdownCtx)
+			}
+			if err := tsnetServer.Close(); err != nil {
+				fmt.Fprintf(stderr, "tsnet close: %v\n", err)
+			}
+		}()
+
 		go func() {
 			startCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 			defer cancel()
@@ -1308,13 +1341,14 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			// Build a sibling http.Server pointing at the same handler
 			// as httpSrv. Read/write timeout shape mirrors the LAN srv —
 			// see the rationale comment there.
-			tsnetHTTPSrv = &http.Server{
+			srv := &http.Server{
 				Handler:           apiSrv.Handler(),
 				ReadHeaderTimeout: 10 * time.Second,
 				ReadTimeout:       60 * time.Second,
 				IdleTimeout:       120 * time.Second,
 			}
-			tsnetServeErr <- tsnetHTTPSrv.Serve(lis)
+			tsnetHTTPSrv.Store(srv)
+			tsnetServeErr <- srv.Serve(lis)
 		}()
 	}
 
@@ -1363,20 +1397,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			fmt.Fprintf(stderr, "shutdown: %v\n", err)
 			return 1
 		}
-		// Tear down the tsnet listener + node before returning.
-		// Order matters: shut down the http.Server first so in-flight
-		// requests drain via http.ErrServerClosed; THEN call
-		// tsnetServer.Close to drain magicsock / netcheck / control
-		// plane goroutines (without this, integration tests leak
-		// goroutines per spawn — CLAUDE.md plan correction #5).
-		if tsnetHTTPSrv != nil {
-			_ = tsnetHTTPSrv.Shutdown(shutdownCtx)
-		}
-		if tsnetServer != nil {
-			if err := tsnetServer.Close(); err != nil {
-				fmt.Fprintf(stderr, "tsnet close: %v\n", err)
-			}
-		}
+		// Tsnet teardown is handled by the deferred cleanup
+		// registered alongside the goroutine spawn above — runs on
+		// every exit branch, not just this one.
 	}
 	return 0
 }

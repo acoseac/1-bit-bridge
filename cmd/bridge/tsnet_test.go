@@ -100,9 +100,11 @@ func TestTsnetLogoutNoState(t *testing.T) {
 	}
 }
 
-// TestTsnetLogoutDeclineCancels — answering "n" at the confirm
-// prompt MUST leave the state dir intact AND exit 0 (cancel is
-// a graceful no-op, not a failure).
+// TestTsnetLogoutDeclineCancels — typing anything other than the
+// constant confirm phrase MUST leave the state dir intact AND exit
+// 0 (cancel is a graceful no-op, not a failure). Round-1 of PR #139
+// raised the confirm bar from "y" to a typed phrase to make
+// destructive misuse vanishingly unlikely.
 func TestTsnetLogoutDeclineCancels(t *testing.T) {
 	tmp := t.TempDir()
 	cfgPath := writeMinimalConfigInDir(t, tmp, config.TailscaleConfig{Mode: "tsnet"})
@@ -115,24 +117,28 @@ func TestTsnetLogoutDeclineCancels(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	var out, errBuf bytes.Buffer
-	rc := tsnetCmd(context.Background(),
-		[]string{"logout", "--config", cfgPath},
-		strings.NewReader("n\n"),
-		&out, &errBuf)
-	if rc != 0 {
-		t.Errorf("rc = %d, want 0 (decline)", rc)
-	}
-	if !strings.Contains(out.String(), "cancelled") {
-		t.Errorf("expected 'cancelled' in output, got %q", out.String())
-	}
-	if _, err := os.Stat(stateFile); err != nil {
-		t.Errorf("state file removed despite decline: %v", err)
+	for _, decline := range []string{"y\n", "yes\n", "n\n", "\n", "WIPE-TYPO\n"} {
+		t.Run(strings.TrimSpace(decline), func(t *testing.T) {
+			var out, errBuf bytes.Buffer
+			rc := tsnetCmd(context.Background(),
+				[]string{"logout", "--config", cfgPath},
+				strings.NewReader(decline),
+				&out, &errBuf)
+			if rc != 0 {
+				t.Errorf("rc = %d, want 0 (decline)", rc)
+			}
+			if !strings.Contains(out.String(), "cancelled") {
+				t.Errorf("expected 'cancelled' in output, got %q", out.String())
+			}
+			if _, err := os.Stat(stateFile); err != nil {
+				t.Errorf("state file removed despite decline: %v", err)
+			}
+		})
 	}
 }
 
-// TestTsnetLogoutConfirmWipes — answering "y" wipes the state dir.
-// Exit 0, state file is gone.
+// TestTsnetLogoutConfirmWipes — typing the constant confirm phrase
+// (`WIPE`) wipes the state dir. Exit 0, state file is gone.
 func TestTsnetLogoutConfirmWipes(t *testing.T) {
 	tmp := t.TempDir()
 	cfgPath := writeMinimalConfigInDir(t, tmp, config.TailscaleConfig{Mode: "tsnet"})
@@ -148,10 +154,10 @@ func TestTsnetLogoutConfirmWipes(t *testing.T) {
 	var out, errBuf bytes.Buffer
 	rc := tsnetCmd(context.Background(),
 		[]string{"logout", "--config", cfgPath},
-		strings.NewReader("y\n"),
+		strings.NewReader("WIPE\n"),
 		&out, &errBuf)
 	if rc != 0 {
-		t.Errorf("rc = %d, want 0 (confirm wipe)", rc)
+		t.Errorf("rc = %d, want 0 (confirm wipe); err=%q", rc, errBuf.String())
 	}
 	if _, err := os.Stat(stateFile); !os.IsNotExist(err) {
 		t.Errorf("state file should have been wiped, stat err = %v", err)
@@ -202,11 +208,15 @@ func writeMinimalConfigInDir(t *testing.T, dir string, ts config.TailscaleConfig
 	if err := os.MkdirAll(libRoot, 0o755); err != nil {
 		t.Fatalf("MkdirAll lib: %v", err)
 	}
+	// Quote path scalars: t.TempDir() on Windows produces paths with
+	// `:` and `\` which would either break YAML parsing or be
+	// silently parsed wrong as bare scalars. CodeRabbit Major on
+	// PR #139.
 	yaml := fmt.Sprintf(`libraryRoots:
-  - %s
+  - %q
 listenAddress: ":7788"
 adminAddress: "127.0.0.1:7789"
-dataDir: %s
+dataDir: %q
 scanIntervalSec: 600
 libraryName: "test"
 tailscale:

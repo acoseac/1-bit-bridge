@@ -9,15 +9,16 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/admin"
@@ -94,12 +95,21 @@ func newTailscaleAdminSource(cli *tailscaleAutoPilot, ts *tsnet.Server) tailscal
 	return tailscaleAdminSource{cli: cli, tsnet: ts}
 }
 
+// adminStatusTimeout caps how long admin handlers will wait on the
+// tsnet LocalClient before degrading to a "stalled" tile. Without
+// this, a hung control-plane connection makes the admin UI
+// unresponsive instead of surfacing the failure. CodeRabbit Major
+// + Gemini medium on PR #139.
+const adminStatusTimeout = 5 * time.Second
+
 func (s tailscaleAdminSource) Status() admin.TailscaleStatus {
 	if s.cli != nil {
 		return toAdminStatus(s.cli.Snapshot())
 	}
 	if s.tsnet != nil {
-		return tsnetAdminStatus(s.tsnet)
+		ctx, cancel := context.WithTimeout(context.Background(), adminStatusTimeout)
+		defer cancel()
+		return tsnetAdminStatus(ctx, s.tsnet)
 	}
 	return admin.TailscaleStatus{
 		// Empty CLIAvailable + "tailscale disabled" message lets the
@@ -114,17 +124,28 @@ func (s tailscaleAdminSource) RefreshNow(ctx context.Context) admin.TailscaleSta
 	if s.cli != nil {
 		return toAdminStatus(s.cli.RefreshNow(ctx))
 	}
-	// tsnet doesn't have a "refresh" concept — Status() always
-	// reflects the live LocalClient view. Operator's Refresh
-	// click is just a re-render request.
+	if s.tsnet != nil {
+		// Honour the caller's context (Gemini medium on PR #139:
+		// the prior implementation ignored ctx and used
+		// context.Background, defeating any caller-side timeout).
+		// Cap with adminStatusTimeout so a hung tsnet doesn't sit
+		// past the admin handler's expectations even when the
+		// caller passed a longer ctx.
+		bounded, cancel := context.WithTimeout(ctx, adminStatusTimeout)
+		defer cancel()
+		return tsnetAdminStatus(bounded, s.tsnet)
+	}
+	// Disabled mode: no live state to refresh. Return the same
+	// sentinel Status() returns.
 	return s.Status()
 }
 
 // tsnetAdminStatus translates the tsnet Server's live tailnet view
 // into admin.TailscaleStatus. Maps the upstream ipnstate.Status
 // fields onto the admin tile shape — keeping the tile rendering
-// code path-agnostic.
-func tsnetAdminStatus(s *tsnet.Server) admin.TailscaleStatus {
+// code path-agnostic. Honours `ctx` so admin handlers can bound
+// the live LocalClient call.
+func tsnetAdminStatus(ctx context.Context, s *tsnet.Server) admin.TailscaleStatus {
 	out := admin.TailscaleStatus{
 		// CLIAvailable lights the "I can talk to tailscale" indicator
 		// in the admin UI. Under tsnet mode it's effectively always
@@ -132,7 +153,7 @@ func tsnetAdminStatus(s *tsnet.Server) admin.TailscaleStatus {
 		// there's no CLI to "find".
 		CLIAvailable: true,
 	}
-	st, err := s.Status(context.Background())
+	st, err := s.Status(ctx)
 	if err != nil {
 		out.LastError = fmt.Sprintf("tsnet status: %v", err)
 		return out
@@ -291,19 +312,32 @@ func tsnetStatusCmd(ctx context.Context, args []string, stdout, stderr io.Writer
 	return 0
 }
 
+// logoutConfirmPhrase is the operator-typed string `tsnetLogoutCmd`
+// requires before wiping state. A single "y" / "yes" was too easy
+// to fat-finger (CodeRabbit Major on PR #139); requiring a
+// destructive-action-flavoured phrase makes accidental wipe
+// vanishingly unlikely.
+const logoutConfirmPhrase = "WIPE"
+
 // tsnetLogoutCmd wipes the tsnet state dir AFTER an operator
 // confirmation prompt. Wiping kicks the bridge off the tailnet —
 // next start will require re-auth (interactive OAuth or AuthKey).
 //
-// Refuses to run while a `bridge serve` is active: the running
-// server holds an open file in the state dir, and racing the
-// wipe against the live server would either corrupt state or
-// leak goroutines. We detect by attempting to take a flock-style
-// marker (TODO: integrate with the existing supervision lock).
-// For v1, just print a warning and require explicit --force.
+// **v1 limitation: this command does NOT detect a running `bridge
+// serve`.** If the operator has the bridge running in another
+// shell, wiping the state dir while the live process holds open
+// files inside it can produce inconsistent state on disk +
+// surprise the running server's tsnet client into reauth-failure
+// mode. We require typed-phrase confirmation to make this
+// dangerous-when-misused command obviously deliberate; a future
+// iteration can integrate with internal/supervision's lock to
+// detect a running serve and refuse without --force.
+//
+// Operators are expected to `bridge stop` (or similar) before
+// `bridge tsnet logout`.
 func tsnetLogoutCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	// Minimal shape for v1 — no flags, no force-flag yet. Operator
-	// confirms via Y/n at the prompt.
+	// Minimal shape for v1 — no flags. Operator confirms by typing
+	// the constant phrase at the prompt.
 	cfg, err := loadConfigForCmd(args, stderr)
 	if err != nil {
 		return 1
@@ -317,17 +351,34 @@ func tsnetLogoutCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 		fmt.Fprintln(stdout, "tsnet: no state to wipe (already logged out)")
 		return 0
 	}
-	fmt.Fprintf(stdout, "About to wipe tsnet state at %s.\nThis logs the bridge off the tailnet; next start will require re-auth.\nProceed? [y/N]: ", stateDir)
-	var resp string
-	if _, err := fmt.Fscanln(stdin, &resp); err != nil && !errors.Is(err, io.EOF) {
-		// Empty response (just hit enter) → treat as "no". Other
-		// scanner errors → bail.
-		if !errors.Is(err, io.ErrUnexpectedEOF) && err.Error() != "unexpected newline" {
+	fmt.Fprintf(stdout, `About to wipe tsnet state at %s.
+
+This logs the bridge off the tailnet; next start will require re-auth.
+NOTE: stop any running `+"`bridge serve`"+` first — wiping state under
+a live server can leave the running process in an inconsistent
+state.
+
+Type %q to confirm, anything else to cancel: `, stateDir, logoutConfirmPhrase)
+
+	// Use a bufio.Scanner instead of fmt.Fscanln. Fscanln stops at
+	// the first whitespace AND surfaces a brittle "unexpected
+	// newline" string we previously matched against — Gemini medium
+	// on PR #139. Scanner reads whole lines and gives us a clean
+	// no-error path on a bare newline.
+	scanner := bufio.NewScanner(stdin)
+	if !scanner.Scan() {
+		// Stdin closed without a line of input (e.g. piped from
+		// /dev/null). Treat as cancel — destructive action shouldn't
+		// run on empty input.
+		if err := scanner.Err(); err != nil {
 			fmt.Fprintf(stderr, "read response: %v\n", err)
 			return 1
 		}
+		fmt.Fprintln(stdout, "cancelled")
+		return 0
 	}
-	if resp != "y" && resp != "Y" && resp != "yes" {
+	resp := strings.TrimSpace(scanner.Text())
+	if resp != logoutConfirmPhrase {
 		fmt.Fprintln(stdout, "cancelled")
 		return 0
 	}
