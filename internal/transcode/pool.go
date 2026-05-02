@@ -50,6 +50,17 @@ type Pool struct {
 	enqueuedCnt atomic.Uint64
 	doneCnt     atomic.Uint64
 	failedCnt   atomic.Uint64
+
+	// onStateChange fires after every observable state transition
+	// (job enqueued, completed, sox-failed, store-failed). Nil when
+	// not wired — silently dropped, same back-compat shape as every
+	// other optional Pool integration. cmd/bridge wires this to
+	// publish a fresh `/v1/upscale/stats` snapshot to the SSE
+	// broker so iOS clients see push-delivered updates instead of
+	// polling. Callbacks are invoked synchronously on the worker
+	// goroutine — keep them lightweight.
+	stateChangeMu sync.RWMutex
+	onStateChange func()
 }
 
 // poolJob is one transcode unit on the Pool's queue. Carries the
@@ -144,6 +155,23 @@ func (p *Pool) Enqueue(spec JobSpec) error {
 	select {
 	case p.jobs <- poolJob{spec: spec, dedup: dedup}:
 		p.enqueuedCnt.Add(1)
+		// Notify outside the dedup lock — onStateChange may take
+		// other locks (the broker's mu) and we don't want
+		// cross-mutex coupling. Capture the callback ref under
+		// the stateChangeMu so a concurrent SetOnStateChange
+		// doesn't race the read.
+		fire := p.notifyStateChangeFn()
+		if fire != nil {
+			// Defer keeps this outside the dedup-lock critical
+			// section that's currently held by `defer p.mu.Unlock()`
+			// at the function top — without `defer`, the call
+			// would happen before the unlock and the broker
+			// publish would acquire its own mutex while holding
+			// the pool's. Stays within the function so the
+			// publish is bounded by the Enqueue caller's
+			// goroutine context.
+			defer fire()
+		}
 		return nil
 	default:
 		// Roll back the optimistic claim — couldn't fit the job
@@ -151,6 +179,27 @@ func (p *Pool) Enqueue(spec JobSpec) error {
 		delete(p.inflight, dedup)
 		return ErrQueueFull
 	}
+}
+
+// notifyStateChangeFn returns the current onStateChange callback
+// under the stateChangeMu read lock so a concurrent
+// SetOnStateChange can swap it without racing. Returns nil when
+// not wired — caller checks before invoking.
+func (p *Pool) notifyStateChangeFn() func() {
+	p.stateChangeMu.RLock()
+	defer p.stateChangeMu.RUnlock()
+	return p.onStateChange
+}
+
+// SetOnStateChange wires (or rewires) the callback fired after every
+// observable state transition. nil disables notification (back-compat
+// for tests / non-broker deployments). Called once during cmd/bridge
+// wiring after the broker is up; subsequent calls are race-safe but
+// in practice this is set-once.
+func (p *Pool) SetOnStateChange(fn func()) {
+	p.stateChangeMu.Lock()
+	p.onStateChange = fn
+	p.stateChangeMu.Unlock()
 }
 
 // Stop signals the workers to drain the queue and exit. Blocks
@@ -232,6 +281,9 @@ func (p *Pool) workerLoop() {
 			if p.stopCtx.Err() == nil {
 				p.failedCnt.Add(1)
 				logger.Warn("pool: sox failed", "source", job.spec.SourceLibraryRel, "err", err)
+				if fire := p.notifyStateChangeFn(); fire != nil {
+					fire()
+				}
 			}
 			p.releaseDedup(job.dedup)
 			continue
@@ -257,10 +309,16 @@ func (p *Pool) workerLoop() {
 			// retry from a clean slate succeeds.
 			_ = os.Remove(row.SidecarPath)
 			p.releaseDedup(job.dedup)
+			if fire := p.notifyStateChangeFn(); fire != nil {
+				fire()
+			}
 			continue
 		}
 		p.doneCnt.Add(1)
 		p.releaseDedup(job.dedup)
+		if fire := p.notifyStateChangeFn(); fire != nil {
+			fire()
+		}
 	}
 }
 

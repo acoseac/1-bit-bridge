@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -722,4 +723,161 @@ func makeHexLen(n int) string {
 		out[i] = 'a'
 	}
 	return string(out)
+}
+
+// stubOnStateChange records every state-change snapshot the Store
+// fires. Mirror shape to stubRevoke. Used to test SetOnStateChange.
+type stubOnStateChange struct {
+	mu        sync.Mutex
+	snapshots []Request
+}
+
+func (s *stubOnStateChange) fn(snap Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.snapshots = append(s.snapshots, snap)
+}
+
+func (s *stubOnStateChange) all() []Request {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]Request, len(s.snapshots))
+	copy(out, s.snapshots)
+	return out
+}
+
+// TestApproveFiresOnStateChange is the headline contract for the SSE
+// upstream-publisher wiring (PR following #135): Approve fires
+// onStateChange with the post-transition snapshot. cmd/bridge wires
+// this to publish a `pairing.<requestID>` event to the SSE broker.
+func TestApproveFiresOnStateChange(t *testing.T) {
+	rec := &stubOnStateChange{}
+	mint := &stubMint{}
+	s := quickStore(t, time.Second, time.Second, nil)
+	s.SetOnStateChange(rec.fn)
+
+	_, hashHex := makePollPair(t, "approve-event")
+	req, err := s.CreateRequest("Phone", "1.4", hashHex, "10.0.0.1", "AB:CD")
+	if err != nil {
+		t.Fatalf("CreateRequest: %v", err)
+	}
+	// CreateRequest does NOT fire onStateChange — only state
+	// transitions do. Sanity check: no fires yet.
+	if got := len(rec.all()); got != 0 {
+		t.Errorf("CreateRequest fired onStateChange %d times, want 0", got)
+	}
+
+	if _, err := s.Approve(req.ID, "AB:CD", mint.fn); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+	snaps := rec.all()
+	if len(snaps) != 1 {
+		t.Fatalf("Approve onStateChange fires = %d, want 1", len(snaps))
+	}
+	if snaps[0].State != StateApproved {
+		t.Errorf("snapshot state = %v, want Approved", snaps[0].State)
+	}
+	if snaps[0].ID != req.ID {
+		t.Errorf("snapshot ID = %q, want %q", snaps[0].ID, req.ID)
+	}
+	if snaps[0].RawToken == "" {
+		t.Errorf("Approved snapshot RawToken empty; iOS wouldn't have a token to consume")
+	}
+}
+
+// TestDeclineFiresOnStateChange — Pending→Declined fires onStateChange.
+func TestDeclineFiresOnStateChange(t *testing.T) {
+	rec := &stubOnStateChange{}
+	s := quickStore(t, time.Second, time.Second, nil)
+	s.SetOnStateChange(rec.fn)
+
+	_, hashHex := makePollPair(t, "decline-event")
+	req, _ := s.CreateRequest("Phone", "1.4", hashHex, "10.0.0.1", "AB:CD")
+	if _, err := s.Decline(req.ID); err != nil {
+		t.Fatalf("Decline: %v", err)
+	}
+	snaps := rec.all()
+	if len(snaps) != 1 || snaps[0].State != StateDeclined {
+		t.Errorf("Decline fires = %d, last state = %v, want 1 Declined", len(snaps), snaps)
+	}
+}
+
+// TestPendingExpiresFiresOnStateChange — the timer-driven Pending→
+// Expired transition fires onStateChange. iOS uses this to update
+// the pairing UI to "expired" without needing to keep polling.
+func TestPendingExpiresFiresOnStateChange(t *testing.T) {
+	rec := &stubOnStateChange{}
+	// 50 ms TTL + 50 ms grace so the test runs in milliseconds.
+	s := quickStore(t, 50*time.Millisecond, 50*time.Millisecond, nil)
+	s.SetOnStateChange(rec.fn)
+
+	_, hashHex := makePollPair(t, "expire-event")
+	_, _ = s.CreateRequest("Phone", "1.4", hashHex, "10.0.0.1", "AB:CD")
+
+	// Wait for the TTL timer to fire + onStateChange to be invoked.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(rec.all()) >= 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	snaps := rec.all()
+	if len(snaps) < 1 {
+		t.Fatalf("Pending→Expired never fired onStateChange")
+	}
+	if snaps[0].State != StateExpired {
+		t.Errorf("first snapshot state = %v, want Expired", snaps[0].State)
+	}
+}
+
+// TestNilOnStateChangeIsNoOp locks back-compat: a Store constructed
+// without SetOnStateChange runs every transition path without
+// panicking on the nil callback.
+func TestNilOnStateChangeIsNoOp(t *testing.T) {
+	mint := &stubMint{}
+	s := quickStore(t, time.Second, time.Second, nil)
+	// Deliberately do NOT call SetOnStateChange.
+
+	_, hashHex := makePollPair(t, "nil-callback")
+	req, _ := s.CreateRequest("Phone", "1.4", hashHex, "10.0.0.1", "AB:CD")
+	if _, err := s.Approve(req.ID, "AB:CD", mint.fn); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+	// Test passes if no panic. No assertion needed beyond completion.
+}
+
+// TestSetOnStateChangeIsRaceSafe drives Set + Approve concurrently.
+// The stateChangeMu RWMutex guards the swap so the race detector
+// stays clean.
+func TestSetOnStateChangeIsRaceSafe(t *testing.T) {
+	mint := &stubMint{}
+	s := quickStore(t, time.Second, time.Second, nil)
+
+	// Background swapper: continuously rewires the callback.
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				s.SetOnStateChange(func(Request) {})
+			}
+		}
+	}()
+
+	// Drive a sequence of Approves to exercise the fire path.
+	for i := 0; i < 8; i++ {
+		_, hashHex := makePollPair(t, "race-"+strconv.Itoa(i))
+		req, _ := s.CreateRequest("Phone", "1.4", hashHex, "10.0.0.1", "AB:CD")
+		_, _ = s.Approve(req.ID, "AB:CD", mint.fn)
+	}
+
+	close(stop)
+	wg.Wait()
+	// No-panic + no race-detector flag = pass.
 }

@@ -1051,10 +1051,61 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	//      directly here, accepting one extra fork-exec per 5 s poll
 	//      since iOS only polls when the management page is fore-
 	//      grounded — typically zero polls per minute on average).
-	apiSrv.WithUpscaleStats(&upscaleStatsAdapter{
+	upscaleStats := &upscaleStatsAdapter{
 		pool:    func() *transcode.Pool { return upscalePool },
 		enabled: func() bool { return upscalePool != nil && cfg.Upscale.Enabled },
 		store:   manifestStore,
+	}
+	apiSrv.WithUpscaleStats(upscaleStats)
+
+	// SSE upstream-publisher wiring. The broker started at line 992
+	// (StartEventBroker) is now ready; hook the two upstream services
+	// (transcode pool, pairing store) to publish state-change events
+	// to it. Both use a setter pattern post-construction because
+	// pairingStore is built before apiSrv (chicken-and-egg with the
+	// broker reference), and the upscalePool snapshot needs the
+	// upscaleStatsAdapter built above.
+	//
+	// Pool fires onStateChange after each job transition (enqueue,
+	// completion, sox-fail, store-fail). The closure captures the
+	// `upscaleStats` adapter so the published payload is identical
+	// to what `/v1/upscale/stats` returns — iOS reuses the same
+	// decoder across SSE and polling transports.
+	if upscalePool != nil {
+		broker := apiSrv.EventPublisher()
+		upscalePool.SetOnStateChange(func() {
+			broker.Publish("upscale.stats", upscaleStats.UpscaleStatsSnapshot())
+		})
+	}
+
+	// Pairing store fires onStateChange after Approve / Decline /
+	// timer-driven Pending→Expired. The closure builds an
+	// `api.PairingStateEvent` from the Request snapshot — same wire
+	// shape `/v1/pairing/{id}` returns. TTLSecondsRemaining is
+	// computed exactly the way Store.Poll computes it (deadline =
+	// CreatedAt + ttl, floor at zero). Token / TokenID land only
+	// for the Approved state per the existing wire contract.
+	bridgeStartedAtUnix := apiSrv.StartedAt().UnixMilli()
+	pairingTTL := pairing.DefaultTTL
+	pairingStore.SetOnStateChange(func(snap pairing.Request) {
+		ev := api.PairingStateEvent{
+			Status:           snap.State.String(),
+			BridgeStartedAt:  bridgeStartedAtUnix,
+			VerificationCode: snap.VerificationCode,
+		}
+		if snap.State == pairing.StatePending {
+			deadline := snap.CreatedAt.Add(pairingTTL)
+			rem := time.Until(deadline)
+			if rem < 0 {
+				rem = 0
+			}
+			ev.TTLSecondsRemaining = int(rem / time.Second)
+		}
+		if snap.State == pairing.StateApproved {
+			ev.Token = snap.RawToken
+			ev.TokenID = snap.TokenID
+		}
+		apiSrv.EventPublisher().Publish("pairing."+snap.ID, ev)
 	})
 	httpSrv := &http.Server{
 		Addr:    cfg.ListenAddress,
