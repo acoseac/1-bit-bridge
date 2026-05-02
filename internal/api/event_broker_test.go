@@ -6,6 +6,24 @@ import (
 	"time"
 )
 
+// awaitTrue polls `cond` every 1ms until it returns true or the
+// deadline elapses. Replaces fixed `time.Sleep(...)` calls in tests
+// that were previously waiting "long enough" for the broker
+// goroutine to process work — flaky in slow CI environments where
+// the guess is too short, wasteful where it's too long. CodeRabbit
+// on PR #135 second-pass.
+func awaitTrue(t *testing.T, deadline time.Duration, msg string, cond func() bool) {
+	t.Helper()
+	end := time.Now().Add(deadline)
+	for time.Now().Before(end) {
+		if cond() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("condition never satisfied within %s: %s", deadline, msg)
+}
+
 // TestEventBroker_PublishedEventReachesSubscriber is the headline
 // contract: a single subscriber registered for "upscale" sees an
 // event published to that topic.
@@ -121,12 +139,12 @@ func TestEventBroker_SlowConsumerDropsOldest(t *testing.T) {
 		b.Publish("upscale.stats", i)
 	}
 
-	// Give the broker goroutine time to process the publish queue.
-	time.Sleep(50 * time.Millisecond)
-
-	if d := sub.dropped.Load(); d == 0 {
-		t.Errorf("dropped counter never incremented; expected slow-consumer policy to evict")
-	}
+	// Wait for the broker goroutine to process the publish queue
+	// and record at least one drop. Bounded poll instead of a
+	// fixed sleep so slow CI doesn't flake.
+	awaitTrue(t, 500*time.Millisecond,
+		"dropped counter never incremented (slow-consumer policy didn't evict)",
+		func() bool { return sub.dropped.Load() > 0 })
 
 	// Drain whatever the subscriber actually has — must not exceed
 	// buffer size.
@@ -165,7 +183,16 @@ func TestEventBroker_ReplaySinceReturnsNothingForUnknownID(t *testing.T) {
 	defer stop()
 
 	b.Publish("upscale.stats", 1)
-	time.Sleep(20 * time.Millisecond) // let the broker record it
+	// Bounded poll until the broker records the event in its
+	// replay buffer; replaces a fixed 20ms sleep that was flaky
+	// under CI load.
+	awaitTrue(t, 500*time.Millisecond,
+		"broker did not record published event in replay buffer",
+		func() bool {
+			b.mu.Lock()
+			defer b.mu.Unlock()
+			return len(b.replayBuffer) >= 1
+		})
 
 	// Subscribe with a Last-Event-ID we never issued.
 	_, replay := b.subscribe(nil, "9999999")
@@ -184,7 +211,15 @@ func TestEventBroker_ReplaySinceReturnsEventsAfterID(t *testing.T) {
 	b.Publish("upscale.stats", 1) // id = "1"
 	b.Publish("upscale.stats", 2) // id = "2"
 	b.Publish("upscale.stats", 3) // id = "3"
-	time.Sleep(50 * time.Millisecond)
+	// Wait for all three to land in the replay buffer before the
+	// reconnect read.
+	awaitTrue(t, 500*time.Millisecond,
+		"broker did not record all three events",
+		func() bool {
+			b.mu.Lock()
+			defer b.mu.Unlock()
+			return len(b.replayBuffer) >= 3
+		})
 
 	_, replay := b.subscribe(nil, "1")
 	if len(replay) != 2 {
@@ -239,6 +274,26 @@ func TestEventBroker_NopPublisherDoesNotPanic(t *testing.T) {
 	var p EventPublisher = nopEventPublisher{}
 	p.Publish("upscale.stats", "anything") // must not panic
 	p.Publish("pairing.abc", nil)          // nil payload also fine
+}
+
+// TestEventBroker_HeartbeatAndDroppedEventsOmitID: PROTOCOL.md
+// promises that synthetic transport-layer signals (heartbeat,
+// dropped) are NOT part of the Last-Event-ID stream — including
+// them would let a heartbeat-only window mask a missed publish on
+// reconnect. The broker enforces this by leaving `ID` empty on
+// those envelopes; writeEvent's "if env.ID != \"\" { write id }"
+// branch then drops the line from the wire. CodeRabbit on PR #135
+// caught the docs claiming "every event carries id" — this test is
+// the tripwire for the contract.
+func TestEventBroker_HeartbeatAndDroppedEventsOmitID(t *testing.T) {
+	heartbeat := eventEnvelope{Topic: "heartbeat", Data: []byte("{}"), ID: ""}
+	dropped := eventEnvelope{Topic: "dropped", Data: []byte(`{"missed":3}`), ID: ""}
+	if heartbeat.ID != "" {
+		t.Errorf("heartbeat envelope must have empty ID, got %q", heartbeat.ID)
+	}
+	if dropped.ID != "" {
+		t.Errorf("dropped envelope must have empty ID, got %q", dropped.ID)
+	}
 }
 
 // TestEventBroker_StartIsIdempotent: calling Start() multiple times

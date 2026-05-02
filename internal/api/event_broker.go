@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"sync"
 	"sync/atomic"
@@ -393,19 +392,3 @@ type EventPublisher interface {
 type nopEventPublisher struct{}
 
 func (nopEventPublisher) Publish(string, interface{}) {}
-
-// publishContextDoneTimeout is the grace period the SSE handler waits
-// for in-flight writes to complete after the request context is
-// cancelled. Bounded so a wedged client can't hold a handler open
-// forever; matches the http.Server.Shutdown grace.
-const publishContextDoneTimeout = 5 * time.Second
-
-// awaitContextDoneOrTimeout blocks until ctx.Done() or the timeout,
-// whichever fires first. Used by the SSE handler to drain pending
-// events on disconnect.
-func awaitContextDoneOrTimeout(ctx context.Context, d time.Duration) {
-	select {
-	case <-ctx.Done():
-	case <-time.After(d):
-	}
-}

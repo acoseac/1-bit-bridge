@@ -321,7 +321,7 @@ data: {"missed":3}
 - `dropped` — synthetic notice fired when the server's per-subscriber buffer evicted events under back-pressure (slow client, network blip). Payload `{"missed":N}`. iOS treats this as "I missed state — refetch via the polling endpoint to reconcile."
 
 **Reconnect / replay**:
-- Each event carries a monotonic `id:` field. Clients persist the last id observed and send `Last-Event-ID: <id>` on reconnect.
+- Each **publishable** event (`upscale.stats`, `pairing.<id>`) carries a monotonic `id:` field. Clients persist the last id observed and send `Last-Event-ID: <id>` on reconnect. The synthetic `heartbeat` and `dropped` events deliberately omit `id:` — they're transport-layer signals (keepalive, slow-consumer notice) that the iOS parser handles distinctly from publishable state changes, and including them in the Last-Event-ID stream would let a heartbeat-only window mask a missed publish on reconnect.
 - Server holds a 100-event sliding buffer; reconnects within the buffer get the missed events as a replay burst.
 - A `Last-Event-ID` the server doesn't recognise (older than the buffer) returns no replay — iOS interprets the empty replay + the next live event as "I missed too much; refetch state."
 
