@@ -769,6 +769,19 @@ func writeArtworkAtomicStream(path string, src io.Reader, maxBytes int64) error 
 	if n > maxBytes {
 		return fmt.Errorf("artwork exceeds %d-byte limit", maxBytes)
 	}
+	// Refuse zero-byte writes. The buffered `writeArtworkAtomic` /
+	// pre-streaming iTunes path implicitly guarded this via a
+	// `len(itData) > 0` check at the call site; the streaming
+	// refactor (PR #143) dropped that, so a 200 OK with an empty
+	// body would land a 0-byte file on disk that ensureArtworkCached
+	// then treats as a permanent cache hit (the existence check is
+	// `os.Stat(path) == nil` with no size validation). Refusing
+	// here benefits all streaming callers (CAA release, CAA
+	// release-group, iTunes) — an empty 200 from any of them is
+	// equally bogus (qodo bot review on PR #143).
+	if n == 0 {
+		return fmt.Errorf("artwork body was empty")
+	}
 	if err := tmp.Sync(); err != nil {
 		return err
 	}

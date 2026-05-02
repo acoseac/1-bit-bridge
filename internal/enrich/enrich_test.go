@@ -1047,7 +1047,12 @@ func TestITunesFallbackStreamingCapsOversizedBody(t *testing.T) {
 	}))
 	defer mbSrv.Close()
 
-	itunesArtworkRequested := false
+	// atomic.Bool because the handler writes from the httptest
+	// server's goroutine and the assertion reads from the test
+	// goroutine. -race would otherwise flag the unsynchronised
+	// access (coderabbit on PR #143). Matches the convention in
+	// other tests in this file (e.g. mbReleaseCalls atomic.Int32).
+	var itunesArtworkRequested atomic.Bool
 	var itunesURL string
 	itunesSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.RawQuery, "term=") {
@@ -1057,7 +1062,7 @@ func TestITunesFallbackStreamingCapsOversizedBody(t *testing.T) {
 		// Artwork CDN — emit MaxCoverArtBytes+1 bytes so the writer's
 		// io.LimitReader trips. We stream to avoid landing it in RAM
 		// in the test process either.
-		itunesArtworkRequested = true
+		itunesArtworkRequested.Store(true)
 		w.Header().Set("Content-Type", "image/jpeg")
 		w.WriteHeader(http.StatusOK)
 		// MaxCoverArtBytes+1 is a lot of bytes (20 MB+1); write a few
@@ -1110,7 +1115,7 @@ func TestITunesFallbackStreamingCapsOversizedBody(t *testing.T) {
 	if cached {
 		t.Fatalf("ensureArtworkCached returned cached=true on oversized iTunes body")
 	}
-	if !itunesArtworkRequested {
+	if !itunesArtworkRequested.Load() {
 		t.Errorf("iTunes artwork CDN was never hit — fallback didn't run")
 	}
 	// Original release-level errNotFound bubbles up from the CAA branch
