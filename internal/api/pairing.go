@@ -61,6 +61,18 @@ func (s *Server) pairingRequest(w http.ResponseWriter, r *http.Request) {
 			"this bridge does not support tap-to-pair")
 		return
 	}
+	// Per-IP rate limit (burst=5, ~1 req / 5 s steady). The pairing
+	// flow is unauthenticated, so an unauthenticated rate limit at the
+	// entry point is the right shape — a noisy LAN attacker can't
+	// burn through the operator's 16-pending admin queue alone. Empty
+	// IP (RemoteAddr parse failure) falls open; see allow().
+	ip := clientIP(r)
+	if !s.pairingRateLimiter.allow(ip) {
+		w.Header().Set("Retry-After", "5")
+		writeError(w, http.StatusTooManyRequests, "rate_limited",
+			"too many pairing requests; try again in a few seconds")
+		return
+	}
 	var req pairingCreateRequest
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, pairingMaxBodyBytes))
 	if err := dec.Decode(&req); err != nil {
@@ -76,7 +88,7 @@ func (s *Server) pairingRequest(w http.ResponseWriter, r *http.Request) {
 		req.DeviceName,
 		req.ClientVersion,
 		req.PollSecretHash,
-		clientIP(r),
+		ip,
 		s.fingerprint,
 	)
 	switch {

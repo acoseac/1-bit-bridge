@@ -972,6 +972,14 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		WithCertExpiry(certNotAfter).
 		WithUpscale(upscaleActive, &variantStoreAdapter{provider: provider})
 
+	// Background sweep for the pairing rate-limiter's per-IP map.
+	// Hourly cadence drops limiters untouched for ≥ 6 h, keeping the
+	// map bounded under high churn (operator deep-links + diverse
+	// client-IP set on the LAN). Stop fn is deferred so the goroutine
+	// exits cleanly on shutdown.
+	stopRLGC := apiSrv.StartPairingRateLimitGC()
+	defer stopRLGC()
+
 	// Phase 2.5: long-lived transcode worker pool inside `bridge
 	// serve`. Only instantiated when the feature is fully active
 	// — saves goroutines + a manifest store reference when the

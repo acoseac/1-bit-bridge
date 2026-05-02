@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/dhowden/tag v0.0.0-20240417053706-3d75831295e8
+	github.com/fsnotify/fsnotify v1.9.0
 	github.com/hashicorp/mdns v1.0.6
 	github.com/mattn/go-isatty v0.0.20
 	github.com/mewkiz/flac v1.0.13
@@ -11,13 +12,13 @@ require (
 	golang.org/x/mod v0.33.0
 	golang.org/x/sys v0.43.0
 	golang.org/x/text v0.34.0
+	golang.org/x/time v0.15.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.49.1
 )
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/icza/bitio v1.1.0 // indirect
 	github.com/mewkiz/pkg v0.0.0-20250417130911-3f050ff8c56d // indirect
