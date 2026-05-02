@@ -1086,7 +1086,12 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// CreatedAt + ttl, floor at zero). Token / TokenID land only
 	// for the Approved state per the existing wire contract.
 	bridgeStartedAtUnix := apiSrv.StartedAt().UnixMilli()
-	pairingTTL := pairing.DefaultTTL
+	// Use the live store's TTL rather than the package default — if
+	// pairing.NewStore was constructed with a custom TTL via Options
+	// (or a future config field), this closure must match. Gemini bot
+	// review on PR #136 caught the fragility of the package-constant
+	// reference.
+	pairingTTL := pairingStore.TTL()
 	pairingStore.SetOnStateChange(func(snap pairing.Request) {
 		ev := api.PairingStateEvent{
 			Status:           snap.State.String(),

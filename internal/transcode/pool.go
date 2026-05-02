@@ -135,16 +135,24 @@ func (p *Pool) Enqueue(spec JobSpec) error {
 		return ErrPoolClosed
 	}
 	dedup := spec.SourceLibraryRel + "|" + spec.VariantID()
+	// `defer` is intentionally NOT used here for unlock — pre-fix
+	// (PR #136 first revision) the success path used
+	// `defer p.mu.Unlock()` AND `defer fire()`. Go's LIFO defer
+	// order made `fire()` run BEFORE the unlock, deadlocking when
+	// the wired callback called UpscaleStatsSnapshot which takes
+	// p.mu.Lock() inside Stats(). CodeRabbit + Gemini caught this
+	// at critical severity. Now: explicit unlock per branch, fire
+	// in a goroutine OUTSIDE the lock so the publisher's DB query
+	// (CountVariants in UpscaleStatsSnapshot) doesn't stall the
+	// caller and the broker's own mutex can't cross-mutex couple
+	// with this lock.
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	// Re-check under the lock — Stop() might have flipped
-	// `closed` between our pre-lock load above and acquiring
-	// the mutex. Without this re-check the channel send below
-	// could race a concurrent close().
 	if p.closed.Load() {
+		p.mu.Unlock()
 		return ErrPoolClosed
 	}
 	if _, ok := p.inflight[dedup]; ok {
+		p.mu.Unlock()
 		return nil // already queued or running
 	}
 	// Optimistic insert: claim the slot before trying the channel
@@ -155,28 +163,17 @@ func (p *Pool) Enqueue(spec JobSpec) error {
 	select {
 	case p.jobs <- poolJob{spec: spec, dedup: dedup}:
 		p.enqueuedCnt.Add(1)
-		// Notify outside the dedup lock — onStateChange may take
-		// other locks (the broker's mu) and we don't want
-		// cross-mutex coupling. Capture the callback ref under
-		// the stateChangeMu so a concurrent SetOnStateChange
-		// doesn't race the read.
 		fire := p.notifyStateChangeFn()
+		p.mu.Unlock()
 		if fire != nil {
-			// Defer keeps this outside the dedup-lock critical
-			// section that's currently held by `defer p.mu.Unlock()`
-			// at the function top — without `defer`, the call
-			// would happen before the unlock and the broker
-			// publish would acquire its own mutex while holding
-			// the pool's. Stays within the function so the
-			// publish is bounded by the Enqueue caller's
-			// goroutine context.
-			defer fire()
+			go fire()
 		}
 		return nil
 	default:
 		// Roll back the optimistic claim — couldn't fit the job
 		// after all.
 		delete(p.inflight, dedup)
+		p.mu.Unlock()
 		return ErrQueueFull
 	}
 }
@@ -281,11 +278,18 @@ func (p *Pool) workerLoop() {
 			if p.stopCtx.Err() == nil {
 				p.failedCnt.Add(1)
 				logger.Warn("pool: sox failed", "source", job.spec.SourceLibraryRel, "err", err)
-				if fire := p.notifyStateChangeFn(); fire != nil {
-					fire()
-				}
 			}
 			p.releaseDedup(job.dedup)
+			// Fire AFTER releaseDedup so the published snapshot
+			// reflects the final state (job out of inflight) —
+			// CodeRabbit on PR #136 caught the inconsistency vs
+			// the success / store-failure branches which already
+			// fire post-release.
+			if p.stopCtx.Err() == nil {
+				if fire := p.notifyStateChangeFn(); fire != nil {
+					go fire()
+				}
+			}
 			continue
 		}
 		_, settings := job.spec.SoxArgs()
@@ -309,15 +313,19 @@ func (p *Pool) workerLoop() {
 			// retry from a clean slate succeeds.
 			_ = os.Remove(row.SidecarPath)
 			p.releaseDedup(job.dedup)
+			// Async fire so the worker isn't stalled by the
+			// publisher's CountVariants DB query — Gemini high-
+			// severity review on PR #136. Caller never blocks on
+			// the publish.
 			if fire := p.notifyStateChangeFn(); fire != nil {
-				fire()
+				go fire()
 			}
 			continue
 		}
 		p.doneCnt.Add(1)
 		p.releaseDedup(job.dedup)
 		if fire := p.notifyStateChangeFn(); fire != nil {
-			fire()
+			go fire()
 		}
 	}
 }

@@ -562,10 +562,9 @@ func (s *Store) Approve(id, currentFingerprint string, mint MintFunc) (Request, 
 		req.State = StateExpired
 		req.DecidedAt = s.now()
 		s.scheduleTimer(req, s.grace)
-		snap := snapshot(req)
-		afterUnlock = snap
+		afterUnlock = snapshotForEvent(req)
 		fire = true
-		return snap, ErrAlreadyDecided
+		return snapshot(req), ErrAlreadyDecided
 	}
 	// Cert-rotation guard. Fails closed — once `req.CertFingerprint`
 	// was captured at CreateRequest time, ANY divergence at Approve
@@ -584,10 +583,9 @@ func (s *Store) Approve(id, currentFingerprint string, mint MintFunc) (Request, 
 		req.State = StateCertRotated
 		req.DecidedAt = s.now()
 		s.scheduleTimer(req, s.grace)
-		snap := snapshot(req)
-		afterUnlock = snap
+		afterUnlock = snapshotForEvent(req)
 		fire = true
-		return snap, ErrCertRotated
+		return snapshot(req), ErrCertRotated
 	}
 
 	rawToken, tokenID, err := mint(req.DeviceName)
@@ -609,10 +607,13 @@ func (s *Store) Approve(id, currentFingerprint string, mint MintFunc) (Request, 
 		remaining = time.Second
 	}
 	s.scheduleTimer(req, remaining)
-	snap := snapshot(req)
-	afterUnlock = snap
+	// snapshotForEvent preserves RawToken so the SSE publisher can
+	// populate the approved event payload. The function's return
+	// value uses the original snapshot() (token-stripped) — admin
+	// callers don't need it, the wire layer does.
+	afterUnlock = snapshotForEvent(req)
 	fire = true
-	return snap, nil
+	return snapshot(req), nil
 }
 
 // Decline transitions a Pending request to Declined and schedules the
@@ -649,18 +650,16 @@ func (s *Store) Decline(id string) (Request, error) {
 		req.State = StateExpired
 		req.DecidedAt = s.now()
 		s.scheduleTimer(req, s.grace)
-		snap := snapshot(req)
-		afterUnlock = snap
+		afterUnlock = snapshotForEvent(req)
 		fire = true
-		return snap, ErrAlreadyDecided
+		return snapshot(req), ErrAlreadyDecided
 	}
 	req.State = StateDeclined
 	req.DecidedAt = s.now()
 	s.scheduleTimer(req, s.grace)
-	snap := snapshot(req)
-	afterUnlock = snap
+	afterUnlock = snapshotForEvent(req)
 	fire = true
-	return snap, nil
+	return snapshot(req), nil
 }
 
 // TTLSeconds returns the configured Pending TTL as whole seconds. Used
@@ -724,7 +723,11 @@ func (s *Store) onTimer(id string, gen uint64) {
 			req.State = StateExpired
 			req.DecidedAt = s.now()
 			s.scheduleTimer(req, s.grace)
-			afterUnlock = snapshot(req)
+			// Expired transition has no token to leak — but use
+			// snapshotForEvent for symmetry with Approve / Decline
+			// fire sites and to keep the wire-shape contract
+			// consistent.
+			afterUnlock = snapshotForEvent(req)
 			fire = true
 		case StateApproved:
 			// Capture the intent but DON'T delete the row yet. If
@@ -827,6 +830,27 @@ func snapshot(req *Request) Request {
 	cp := *req
 	cp.expiryTimer = nil
 	cp.RawToken = ""
+	cp.PollHash = [32]byte{}
+	return cp
+}
+
+// snapshotForEvent is the snapshot variant the OnStateChange callback
+// receives. **Preserves RawToken** so the SSE publisher in cmd/bridge
+// can populate the `pairing.<id>` event payload with the minted token —
+// iOS consumes it without a follow-up GET. The polling path
+// (`pairingPollResponse` built in pairingPoll handler) reads RawToken
+// the same way; both transports include it in the Approved state.
+//
+// Strips expiryTimer (lifecycle handle, not wire data) and PollHash
+// (internal auth binding, not for downstream consumers).
+//
+// Coderabbit + Qodo on PR #136's first revision caught that the
+// generic `snapshot()` was being passed to OnStateChange — the
+// approved event landed with an empty Token field, defeating the
+// push-delivery contract.
+func snapshotForEvent(req *Request) Request {
+	cp := *req
+	cp.expiryTimer = nil
 	cp.PollHash = [32]byte{}
 	return cp
 }
