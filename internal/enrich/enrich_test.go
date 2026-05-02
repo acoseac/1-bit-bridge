@@ -418,7 +418,12 @@ func TestITunesFetchArtworkUpscalesURL(t *testing.T) {
 		CollectionID:  1,
 		ArtworkURL100: srv.URL + "/path/to/100x100bb.jpg",
 	}
-	data, err := c.FetchArtwork(context.Background(), a)
+	body, err := c.FetchArtwork(context.Background(), a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer body.Close()
+	data, err := io.ReadAll(body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1015,6 +1020,112 @@ func TestMusicBrainzReleaseGroupMBIDLookup(t *testing.T) {
 	}
 	if got != "rg-xyz" {
 		t.Errorf("got %q, want rg-xyz", got)
+	}
+}
+
+// TestITunesFallbackStreamingCapsOversizedBody pins PR2's streaming
+// refactor: a malicious / runaway iTunes CDN that emits more than
+// MaxCoverArtBytes is rejected by writeArtworkAtomicStream's
+// io.LimitReader before landing on disk. Pre-fix `FetchArtwork`
+// returned `[]byte` via `io.ReadAll(io.LimitReader(.., 5<<20))` so the
+// 5 MB cap was enforced at the iTunes layer and the buffered body
+// landed in RAM regardless. Post-fix, the body streams straight to
+// disk and the cap lives at the writer (consistent with the CAA
+// streaming path).
+func TestITunesFallbackStreamingCapsOversizedBody(t *testing.T) {
+	// CAA always misses so the chain falls through to iTunes.
+	caaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer caaSrv.Close()
+
+	// iTunes search returns one usable result.
+	mbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Not actually used in this test — ensureArtworkCached is
+		// called directly with a release MBID.
+		http.NotFound(w, r)
+	}))
+	defer mbSrv.Close()
+
+	// atomic.Bool because the handler writes from the httptest
+	// server's goroutine and the assertion reads from the test
+	// goroutine. -race would otherwise flag the unsynchronised
+	// access (coderabbit on PR #143). Matches the convention in
+	// other tests in this file (e.g. mbReleaseCalls atomic.Int32).
+	var itunesArtworkRequested atomic.Bool
+	var itunesURL string
+	itunesSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.RawQuery, "term=") {
+			io.WriteString(w, `{"resultCount":1,"results":[{"collectionId":1,"collectionName":"Album","artworkUrl100":"`+itunesURL+`/100x100bb.jpg","wrapperType":"collection"}]}`)
+			return
+		}
+		// Artwork CDN — emit MaxCoverArtBytes+1 bytes so the writer's
+		// io.LimitReader trips. We stream to avoid landing it in RAM
+		// in the test process either.
+		itunesArtworkRequested.Store(true)
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.WriteHeader(http.StatusOK)
+		// MaxCoverArtBytes+1 is a lot of bytes (20 MB+1); write a few
+		// chunks to hit the cap rather than allocating a giant buffer.
+		// The client-side `writeArtworkAtomicStream` reads only up to
+		// MaxCoverArtBytes+1 (via io.LimitReader) before tripping the
+		// cap, after which it closes the connection — so once the
+		// server has written more than that, additional writes start
+		// returning (0, err). Without breaking on err / n==0 the loop
+		// could spin forever and hang the test (qodo bot review on
+		// PR #141). Belt-and-braces both: a tracked write error AND a
+		// zero-byte short write are exit conditions.
+		const chunk = 64 * 1024
+		buf := make([]byte, chunk)
+		written := 0
+		for written <= MaxCoverArtBytes {
+			n, err := w.Write(buf)
+			written += n
+			if err != nil || n == 0 {
+				return
+			}
+		}
+	}))
+	defer itunesSrv.Close()
+	itunesURL = itunesSrv.URL
+
+	// The artwork URL embeds the search server's host; rewrite it so
+	// the CDN GET lands on the same httptest server.
+	dir := t.TempDir()
+	store, err := manifest.OpenStore(filepath.Join(dir, "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	itunesClient := NewITunesClient(itunesSrv.URL, "test", nil)
+	e := NewEnricher(
+		store,
+		NewMusicBrainzClient(mbSrv.URL, "test", nil),
+		NewCoverArtClient(caaSrv.URL, "test", nil),
+		nil,
+		filepath.Join(dir, "artwork"),
+	).WithITunes(itunesClient)
+	e.MBMinInterval = 0
+	e.CAAMinInterval = 0
+	e.ITunesMinInterval = 0
+
+	const mbid = "11111111-1111-4111-8111-111111111111"
+	cached, fetchErr := e.ensureArtworkCached(context.Background(), mbid, "", "Artist", "Album", 500)
+	if cached {
+		t.Fatalf("ensureArtworkCached returned cached=true on oversized iTunes body")
+	}
+	if !itunesArtworkRequested.Load() {
+		t.Errorf("iTunes artwork CDN was never hit — fallback didn't run")
+	}
+	// Original release-level errNotFound bubbles up from the CAA branch
+	// (writer error is logged but the function returns the CAA notFound
+	// shape per existing contract). Either shape proves no artwork was
+	// cached.
+	_ = fetchErr
+	wantPath := ArtworkCachePath(filepath.Join(dir, "artwork"), mbid, 500)
+	if _, err := os.Stat(wantPath); err == nil {
+		t.Errorf("artwork file was written despite oversize cap: %s", wantPath)
 	}
 }
 

@@ -615,13 +615,22 @@ func (e *Enricher) ensureArtworkCached(ctx context.Context, mbid, rgMBID, artist
 	// for. Caches under the same MBID-keyed path so iOS's existing
 	// /v1/artwork/{mbid} URL serves it transparently.
 	if e.itunes != nil && artist != "" && album != "" {
-		if itData, itErr := e.fetchITunesArtwork(ctx, artist, album); itErr == nil && len(itData) > 0 {
-			if werr := writeArtworkAtomic(path, itData); werr != nil {
+		itBody, itErr := e.fetchITunesArtwork(ctx, artist, album)
+		if itErr == nil {
+			// Stream straight to disk — same shape as the CAA branches
+			// above. Body close + size cap (MaxCoverArtBytes) live
+			// inside writeArtworkAtomicStream + io.LimitReader; the
+			// iTunes path now inherits the ~32 KB peak-RAM profile of
+			// the CAA fetches rather than buffering the whole image.
+			werr := writeArtworkAtomicStream(path, itBody, MaxCoverArtBytes)
+			itBody.Close()
+			if werr != nil {
 				return false, werr
 			}
 			e.itunesFallbackHits.Add(1)
 			return true, nil
-		} else if itErr != nil && !IsNotFound(itErr) {
+		}
+		if !IsNotFound(itErr) {
 			// Log iTunes errors but don't fail the whole call —
 			// the original release-level errNotFound is the more
 			// useful signal for the caller.
@@ -639,7 +648,9 @@ func (e *Enricher) ensureArtworkCached(ctx context.Context, mbid, rgMBID, artist
 //
 // Returns errNotFound (compatible with `IsNotFound`) when iTunes had
 // nothing for (artist, album). All other errors bubble up unchanged.
-func (e *Enricher) fetchITunesArtwork(ctx context.Context, artist, album string) ([]byte, error) {
+// Returns an io.ReadCloser the caller MUST close — the body streams
+// straight to disk in `ensureArtworkCached` via `writeArtworkAtomicStream`.
+func (e *Enricher) fetchITunesArtwork(ctx context.Context, artist, album string) (io.ReadCloser, error) {
 	// Use the ctx-aware `sleepCtx` helper rather than `time.Sleep` so
 	// shutdown / cancellation isn't blocked by up to ~2× ITunesMinInterval
 	// (default 6s) per in-flight iTunes call. Matches the pacing pattern
@@ -757,6 +768,19 @@ func writeArtworkAtomicStream(path string, src io.Reader, maxBytes int64) error 
 	}
 	if n > maxBytes {
 		return fmt.Errorf("artwork exceeds %d-byte limit", maxBytes)
+	}
+	// Refuse zero-byte writes. The buffered `writeArtworkAtomic` /
+	// pre-streaming iTunes path implicitly guarded this via a
+	// `len(itData) > 0` check at the call site; the streaming
+	// refactor (PR #143) dropped that, so a 200 OK with an empty
+	// body would land a 0-byte file on disk that ensureArtworkCached
+	// then treats as a permanent cache hit (the existence check is
+	// `os.Stat(path) == nil` with no size validation). Refusing
+	// here benefits all streaming callers (CAA release, CAA
+	// release-group, iTunes) — an empty 200 from any of them is
+	// equally bogus (qodo bot review on PR #143).
+	if n == 0 {
+		return fmt.Errorf("artwork body was empty")
 	}
 	if err := tmp.Sync(); err != nil {
 		return err
