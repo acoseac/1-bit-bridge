@@ -150,7 +150,10 @@ func TestHealthCertNotAfterIsOmittedWhenUnset(t *testing.T) {
 		ListenAddress: ":0",
 		LibraryName:   "X",
 	}
-	store, _ := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
+	store, err := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	hs := httptest.NewServer(New(cfg, store, nil, "fp").Handler())
 	defer hs.Close()
 
@@ -178,7 +181,10 @@ func TestHealthCertNotAfterEmittedWhenSet(t *testing.T) {
 		ListenAddress: ":0",
 		LibraryName:   "X",
 	}
-	store, _ := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
+	store, err := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	expiry := time.Date(2027, 7, 1, 12, 0, 0, 0, time.UTC)
 	srv := New(cfg, store, nil, "fp").WithCertExpiry(expiry)
 	hs := httptest.NewServer(srv.Handler())
