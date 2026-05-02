@@ -246,11 +246,27 @@ func (s *Server) pairingEvents(w http.ResponseWriter, r *http.Request) {
 	// leaking other in-flight pairing requests' state to this
 	// caller (which only authenticated for THIS request).
 	topic := "pairing." + id
-	// Subscribe BEFORE writing headers so an event published
-	// between the Poll above and the subscribe below doesn't slip
-	// through the gap. Same atomicity rationale as events.go.
+	// Subscribe atomically with respect to the broker's record+fanout
+	// cycle (broker docs at internal/api/event_broker.go:304). The
+	// subscription is armed BEFORE we re-read state, so any transition
+	// that lands in the gap between this subscribe and the re-Poll
+	// below is delivered to our channel instead of being silently
+	// missed. Gemini + Qodo + CodeRabbit all flagged the prior
+	// subscribe-after-Poll shape as a stuck-on-stale-state hazard.
 	sub, _ := s.eventBroker.subscribe([]string{topic}, "")
 	defer s.eventBroker.unsubscribe(sub)
+
+	// Re-Poll AFTER subscribe so the initial state event reflects any
+	// transition that landed during the auth-Poll → subscribe gap. The
+	// broker also delivers that transition through `sub.ch`, which
+	// produces a duplicate event on the wire — iOS's state writes are
+	// idempotent, so a duplicate is harmless. (Missing the transition
+	// entirely was the real bug: with no replay buffer behind us, an
+	// approve/decline that fired before subscribe armed would never
+	// reach this client.)
+	if refreshed, pollErr := s.pairing.Poll(id, secret); pollErr == nil {
+		res = refreshed
+	}
 
 	w.WriteHeader(http.StatusOK)
 	if err := rc.Flush(); err != nil {
@@ -271,16 +287,18 @@ func (s *Server) pairingEvents(w http.ResponseWriter, r *http.Request) {
 		TokenID:             res.TokenID,
 	}
 	if data, jsonErr := json.Marshal(initial); jsonErr == nil {
-		// Synthetic event ID 0 — broker IDs are monotonic from 1+
+		// Synthetic event ID "0" — broker IDs are monotonic from 1+
 		// so iOS can distinguish the initial-state synth from
 		// real broker events when comparing Last-Event-ID. (Today
 		// pairing reconnect doesn't use Last-Event-ID — the
 		// initial-state-on-connect mechanism replaces it — but
-		// the distinction keeps the wire honest.)
+		// the distinction keeps the wire honest, and an empty ID
+		// would omit the `id:` field entirely per writeEvent's
+		// contract — Gemini caught the comment/code mismatch.)
 		if err := writeEvent(w, eventEnvelope{
 			Topic: topic,
 			Data:  data,
-			ID:    "",
+			ID:    "0",
 		}); err != nil {
 			return
 		}

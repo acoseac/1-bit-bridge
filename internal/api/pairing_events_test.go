@@ -2,6 +2,7 @@ package api
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -93,10 +94,13 @@ func createPendingRequest(t *testing.T, hs *httptest.Server, label string) (stri
 	sum := sha256.Sum256([]byte(rawSecret))
 	hashHex := hex.EncodeToString(sum[:])
 
-	body, _ := json.Marshal(map[string]string{
+	body, err := json.Marshal(map[string]string{
 		"deviceName":     "Phone-" + label,
 		"pollSecretHash": hashHex,
 	})
+	if err != nil {
+		t.Fatalf("marshal pairing request body: %v", err)
+	}
 	req, _ := http.NewRequest("POST", hs.URL+"/v1/pairing/requests", strings.NewReader(string(body)))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := hs.Client().Do(req)
@@ -118,9 +122,18 @@ func createPendingRequest(t *testing.T, hs *httptest.Server, label string) (stri
 // /v1/pairing/{id}/events with the pollSecret as bearer. Returns the
 // response (so the caller can read its Body line-by-line via a
 // Scanner) and a function to drop the connection.
+//
+// A 5 s context timeout protects the test suite from a hung handler
+// that never responds to the initial request — without it, a
+// regression in the SSE path could deadlock CI for the full test
+// timeout window. CodeRabbit caught this on PR #137. The downstream
+// Scanner loops have their own deadline checks for the streaming-read
+// phase; this protects the connect phase only.
 func connectPairingEvents(t *testing.T, hs *httptest.Server, requestID, pollSecret string) *http.Response {
 	t.Helper()
-	req, _ := http.NewRequest("GET", hs.URL+"/v1/pairing/"+requestID+"/events", nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	t.Cleanup(cancel)
+	req, _ := http.NewRequestWithContext(ctx, "GET", hs.URL+"/v1/pairing/"+requestID+"/events", nil)
 	req.Header.Set("Authorization", "Bearer "+pollSecret)
 	resp, err := hs.Client().Do(req)
 	if err != nil {
@@ -258,6 +271,36 @@ func TestPairingEventsSendsInitialState(t *testing.T) {
 	}
 	t.Errorf("did not receive initial pending event (sawEvent=%v sawData=%v)",
 		sawPendingEvent, sawData)
+}
+
+// TestPairingEventsInitialEventCarriesIDZero — the synthetic
+// initial-state event uses `id: 0` so iOS can distinguish it from
+// real broker-published events (broker IDs are monotonic from 1+).
+// Empty `id:` would omit the field entirely per writeEvent's
+// contract — Gemini caught the comment/code mismatch on PR #137's
+// first commit.
+func TestPairingEventsInitialEventCarriesIDZero(t *testing.T) {
+	hs, _, _, stop := pairingEventsTestSetup(t)
+	defer stop()
+	id, raw := createPendingRequest(t, hs, "initial-id-zero")
+
+	resp := connectPairingEvents(t, hs, id, raw)
+	defer resp.Body.Close()
+	scanner := bufio.NewScanner(resp.Body)
+	var sawIDZero bool
+	deadline := time.Now().Add(2 * time.Second)
+	for scanner.Scan() && time.Now().Before(deadline) {
+		line := scanner.Text()
+		if line == "id: 0" {
+			sawIDZero = true
+		}
+		if line == "" && sawIDZero {
+			// Blank line terminates the initial event group; if we
+			// saw `id: 0` before this terminator, the contract holds.
+			return
+		}
+	}
+	t.Errorf("initial event did not carry `id: 0` (sawIDZero=%v)", sawIDZero)
 }
 
 // TestPairingEventsPushesApprovalWithToken — an Approve transition
