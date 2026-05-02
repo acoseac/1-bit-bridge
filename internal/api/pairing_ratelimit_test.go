@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -91,6 +92,75 @@ func TestPairingRateLimiter_GCDropsStaleEntries(t *testing.T) {
 	for i := 0; i < pairingRateBurst; i++ {
 		if !rl.allow("4.4.4.4") {
 			t.Fatalf("request %d after GC should be allowed (fresh bucket)", i+1)
+		}
+	}
+}
+
+// TestPairingRateLimiter_BoundedMapEvictsUnderLoad covers the
+// memory-DoS hardening (CodeRabbit major review on PR #133): a
+// high-cardinality spray of distinct IPs MUST NOT grow the map
+// without bound. With a small test cap of 4, inserting 100 distinct
+// IPs leaves the map at ≤ cap. The per-IP token state is allowed to
+// be evicted under pressure — that's the documented trade-off for
+// keeping memory bounded.
+func TestPairingRateLimiter_BoundedMapEvictsUnderLoad(t *testing.T) {
+	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	rl := &pairingRateLimiter{
+		limiters:   make(map[string]*rateEntry),
+		burst:      pairingRateBurst,
+		limit:      rate.Every(pairingRateRefillInterval),
+		maxAge:     pairingRateGCMaxAge,
+		maxEntries: 4,
+		now:        func() time.Time { return now },
+	}
+
+	// 100 distinct IPs, each making a single request. Without the
+	// cap, the map would grow to 100. With it, the map is forced
+	// to ≤ 4 via gc-then-evict-oldest.
+	for i := 0; i < 100; i++ {
+		ip := "10.0.0." + fmt.Sprint(i)
+		_ = rl.allow(ip)
+		// Advance the clock per-iteration so lastSeen ordering is
+		// well-defined for the eviction policy.
+		now = now.Add(time.Millisecond)
+	}
+	if got := len(rl.limiters); got > 4 {
+		t.Errorf("map size = %d, want ≤ 4 (cap)", got)
+	}
+}
+
+// TestPairingRateLimiter_BoundedMapEvictsByOldestLastSeen verifies
+// the eviction policy: when at cap, the oldest-lastSeen entry is
+// evicted to make room for a new IP, NOT a random or arbitrary one.
+func TestPairingRateLimiter_BoundedMapEvictsByOldestLastSeen(t *testing.T) {
+	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	rl := &pairingRateLimiter{
+		limiters:   make(map[string]*rateEntry),
+		burst:      pairingRateBurst,
+		limit:      rate.Every(pairingRateRefillInterval),
+		maxAge:     pairingRateGCMaxAge,
+		maxEntries: 3,
+		now:        func() time.Time { return now },
+	}
+
+	// Fill to cap with three IPs at staggered times so we know
+	// which one is oldest.
+	rl.allow("ip1") // lastSeen = t
+	now = now.Add(time.Second)
+	rl.allow("ip2") // lastSeen = t + 1s
+	now = now.Add(time.Second)
+	rl.allow("ip3") // lastSeen = t + 2s
+
+	// Adding a fourth must evict ip1 (oldest lastSeen).
+	now = now.Add(time.Second)
+	rl.allow("ip4")
+
+	if _, ok := rl.limiters["ip1"]; ok {
+		t.Errorf("ip1 should have been evicted (oldest lastSeen)")
+	}
+	for _, ip := range []string{"ip2", "ip3", "ip4"} {
+		if _, ok := rl.limiters[ip]; !ok {
+			t.Errorf("%s should still be in the map", ip)
 		}
 	}
 }

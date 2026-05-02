@@ -29,12 +29,13 @@ import (
 // authentication for subsequent polls — so an unauthenticated rate
 // limit at this entry point is the right shape.
 type pairingRateLimiter struct {
-	mu       sync.Mutex
-	limiters map[string]*rateEntry
-	burst    int
-	limit    rate.Limit
-	maxAge   time.Duration
-	now      func() time.Time // injectable for tests
+	mu         sync.Mutex
+	limiters   map[string]*rateEntry
+	burst      int
+	limit      rate.Limit
+	maxAge     time.Duration
+	maxEntries int              // 0 = unbounded (tests)
+	now        func() time.Time // injectable for tests
 }
 
 type rateEntry struct {
@@ -59,13 +60,24 @@ const pairingRateGCInterval = time.Hour
 // gap without holding entries forever for one-shot scanners.
 const pairingRateGCMaxAge = 6 * time.Hour
 
+// pairingRateMaxEntries hard-caps the per-IP map size. Without this,
+// a high-cardinality spray (different source IPs per request) could
+// inflate `p.limiters` for the full GC window before reclamation —
+// turning the rate limiter itself into a memory-DoS surface (CodeRabbit
+// major review on PR #133). At 10k entries × ~200 B each that's about
+// 2 MB worst-case, well below process headroom even on Pi-class hosts.
+// On overflow we trigger a synchronous gc() pass first, and if that
+// doesn't free space we evict the oldest-lastSeen entry to make room.
+const pairingRateMaxEntries = 10_000
+
 func newPairingRateLimiter() *pairingRateLimiter {
 	return &pairingRateLimiter{
-		limiters: make(map[string]*rateEntry),
-		burst:    pairingRateBurst,
-		limit:    rate.Every(pairingRateRefillInterval),
-		maxAge:   pairingRateGCMaxAge,
-		now:      time.Now,
+		limiters:   make(map[string]*rateEntry),
+		burst:      pairingRateBurst,
+		limit:      rate.Every(pairingRateRefillInterval),
+		maxAge:     pairingRateGCMaxAge,
+		maxEntries: pairingRateMaxEntries,
+		now:        time.Now,
 	}
 }
 
@@ -89,11 +101,44 @@ func (p *pairingRateLimiter) allow(ip string) bool {
 	now := p.now()
 	entry, ok := p.limiters[ip]
 	if !ok {
+		// Cap-or-evict before allocating. Without this, a
+		// high-cardinality spray (different source IPs per request)
+		// would let `p.limiters` grow until the next periodic GC —
+		// turning the limiter itself into a memory-DoS surface.
+		if p.maxEntries > 0 && len(p.limiters) >= p.maxEntries {
+			p.gcLocked(now)
+			if len(p.limiters) >= p.maxEntries {
+				p.evictOldestLocked()
+			}
+		}
 		entry = &rateEntry{lim: rate.NewLimiter(p.limit, p.burst)}
 		p.limiters[ip] = entry
 	}
 	entry.lastSeen = now
 	return entry.lim.AllowN(now, 1)
+}
+
+// evictOldestLocked drops the entry with the smallest lastSeen.
+// Caller MUST hold p.mu. Single-pass O(N) — N is bounded by
+// `pairingRateMaxEntries` (10k), so even worst-case cost is sub-µs.
+// Doing this inside `allow()` only fires when (a) the map is at
+// cap AND (b) gcLocked() couldn't free space — i.e. the active
+// caller set genuinely fills the cap, which on a personal bridge
+// is itself a noteworthy signal.
+func (p *pairingRateLimiter) evictOldestLocked() {
+	var oldestIP string
+	var oldestSeen time.Time
+	first := true
+	for ip, e := range p.limiters {
+		if first || e.lastSeen.Before(oldestSeen) {
+			oldestIP = ip
+			oldestSeen = e.lastSeen
+			first = false
+		}
+	}
+	if oldestIP != "" {
+		delete(p.limiters, oldestIP)
+	}
 }
 
 // gc reclaims limiters that haven't been touched in `maxAge`. Called
@@ -102,7 +147,14 @@ func (p *pairingRateLimiter) allow(ip string) bool {
 func (p *pairingRateLimiter) gc() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	cutoff := p.now().Add(-p.maxAge)
+	p.gcLocked(p.now())
+}
+
+// gcLocked is the lock-already-held variant used by both the periodic
+// `gc()` sweep and the synchronous overflow path in `allow()`. Caller
+// MUST hold p.mu.
+func (p *pairingRateLimiter) gcLocked(now time.Time) {
+	cutoff := now.Add(-p.maxAge)
 	for ip, e := range p.limiters {
 		if e.lastSeen.Before(cutoff) {
 			delete(p.limiters, ip)
