@@ -222,7 +222,13 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 			albumMBID = res.ReleaseMBID
 			rgMBID = res.ReleaseGroupMBID
 		} else {
-			time.Sleep(e.MBMinInterval) // pace
+			// Honor ctx during the pacer so SIGTERM doesn't sit
+			// blocked for up to MBMinInterval per in-flight track.
+			// `enrichOne` is void; bare return on shutdown matches the
+			// existing `if ctx.Err() != nil { return }` shape below.
+			if !sleepCtx(ctx, e.MBMinInterval) {
+				return
+			}
 			res, err := e.mb.SearchRelease(ctx, t.Artist, t.Album)
 			if err != nil {
 				// Shutdown cancellation looks like an MB error; don't
@@ -345,7 +351,9 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) {
 	if cached, ok := e.artistCache.Get(key); ok {
 		artistMBID = cached
 	} else {
-		time.Sleep(e.MBMinInterval)
+		if !sleepCtx(ctx, e.MBMinInterval) {
+			return
+		}
 		res, err := e.mb.SearchArtist(ctx, t.Artist)
 		if err != nil {
 			// Don't cache transient errors session-wide — a network
@@ -427,7 +435,9 @@ func (e *Enricher) ensureArtistImageCached(ctx context.Context, mbid, artistName
 		}
 		return true, nil
 	}
-	time.Sleep(e.DeezerMinInterval)
+	if !sleepCtx(ctx, e.DeezerMinInterval) {
+		return false, ctx.Err()
+	}
 	imgURL, err := e.deezer.SearchArtist(ctx, artistName)
 	if err != nil {
 		return false, err
@@ -437,7 +447,9 @@ func (e *Enricher) ensureArtistImageCached(ctx context.Context, mbid, artistName
 	}
 	// Deezer image URLs are on their own CDN; second GET happens after
 	// a second DeezerMinInterval pause.
-	time.Sleep(e.DeezerMinInterval)
+	if !sleepCtx(ctx, e.DeezerMinInterval) {
+		return false, ctx.Err()
+	}
 	data, err := e.deezer.FetchImage(ctx, imgURL)
 	if err != nil {
 		return false, err
@@ -541,7 +553,9 @@ func (e *Enricher) ensureArtworkCached(ctx context.Context, mbid, rgMBID, artist
 	if _, err := os.Stat(path); err == nil {
 		return true, nil
 	}
-	time.Sleep(e.CAAMinInterval) // pace
+	if !sleepCtx(ctx, e.CAAMinInterval) { // pace
+		return false, ctx.Err()
+	}
 	body, err := e.caa.FetchReleaseFrontStream(ctx, mbid, size)
 	if err == nil {
 		// Stream straight to disk so the JPEG body never lands in RAM.
@@ -572,7 +586,9 @@ func (e *Enricher) ensureArtworkCached(ctx context.Context, mbid, rgMBID, artist
 		// and a transient MB lookup error shouldn't block the iTunes
 		// fallback below.
 	} else if rgMBID != "" {
-		time.Sleep(e.CAAMinInterval) // pace the second CAA call
+		if !sleepCtx(ctx, e.CAAMinInterval) { // pace the second CAA call
+			return false, ctx.Err()
+		}
 		rgBody, rgFetchErr := e.caa.FetchReleaseGroupFrontStream(ctx, rgMBID, size)
 		if rgFetchErr == nil {
 			werr := writeArtworkAtomicStream(path, rgBody, MaxCoverArtBytes)
@@ -657,7 +673,9 @@ func (e *Enricher) resolveReleaseGroupMBID(ctx context.Context, releaseMBID, hin
 	if cached, ok := e.releaseGroupCache.Get(releaseMBID); ok {
 		return cached, nil
 	}
-	time.Sleep(e.MBMinInterval) // pace
+	if !sleepCtx(ctx, e.MBMinInterval) { // pace
+		return "", ctx.Err()
+	}
 	rg, err := e.mb.ReleaseGroupMBID(ctx, releaseMBID)
 	if err != nil {
 		// Do not negative-cache on error — transient network failures
