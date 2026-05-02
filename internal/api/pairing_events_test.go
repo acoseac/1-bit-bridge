@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -389,6 +388,3 @@ func TestPairingEventsResponseIsNotGzipped(t *testing.T) {
 		t.Errorf("Content-Encoding = %q, want identity (or empty)", ce)
 	}
 }
-
-// Avoid unused-import for fmt in case I refactor the helpers.
-var _ = fmt.Sprintf
