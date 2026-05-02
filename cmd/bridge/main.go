@@ -700,6 +700,25 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		fmt.Fprintf(stderr, "TLS material: %v\n", err)
 		return 1
 	}
+	// Read the cert's NotAfter so /v1/health can surface it to iOS,
+	// which uses it to warn the operator before the cert actually
+	// expires (Apple's 397-day cap means re-pair roughly annually).
+	// Use the in-memory `CertNotAfter(cert)` helper rather than
+	// re-reading the PEM from disk via `Inspect(certPath)` — the cert
+	// object was already loaded a few lines up and parsing it twice
+	// is wasted I/O. Gemini bot review on PR #134.
+	//
+	// On failure we log so operators can diagnose why the iOS expiry
+	// warning isn't firing — silent omission was the prior behaviour
+	// and matched CodeRabbit's concern. The wire field still drops
+	// out cleanly via omitempty when certNotAfter stays zero.
+	var certNotAfter time.Time
+	if when, infoErr := servertls.CertNotAfter(cert); infoErr == nil {
+		certNotAfter = when
+	} else {
+		logger.Warn("could not read cert NotAfter; /v1/health certNotAfter omitted",
+			"path", certPath, "err", infoErr)
+	}
 
 	// SNI cert switcher. Routes incoming TLS handshakes to the
 	// self-signed cert (LAN/mDNS/IP-literal SNI — iOS pins this
@@ -950,6 +969,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		WithUpdater(updAdapter).
 		WithSessionTracker(sessions).
 		WithPairing(pairingStore).
+		WithCertExpiry(certNotAfter).
 		WithUpscale(upscaleActive, &variantStoreAdapter{provider: provider})
 
 	// Phase 2.5: long-lived transcode worker pool inside `bridge

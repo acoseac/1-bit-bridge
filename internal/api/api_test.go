@@ -135,6 +135,78 @@ func TestHealthReturns200WithExpectedShape(t *testing.T) {
 	}
 }
 
+// TestHealthCertNotAfterIsOmittedWhenUnset locks in the omitempty
+// shape: a Server constructed without WithCertExpiry (test harnesses,
+// pre-PR bridges) must not emit a `0001-01-01T00:00:00Z` zero-time
+// on the wire. Pre-PR-aware iOS clients treat absence as "no warn".
+// Asserts on the raw JSON bytes, not the decoded struct, because
+// `time.Time` zero round-trips through Go's decoder transparently
+// — the wire-shape check is the only way to catch a regression
+// where a typo on the field tag accidentally drops the pointer.
+func TestHealthCertNotAfterIsOmittedWhenUnset(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := &config.Config{
+		LibraryRoots:  []string{tmp},
+		ListenAddress: ":0",
+		LibraryName:   "X",
+	}
+	store, err := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hs := httptest.NewServer(New(cfg, store, nil, "fp").Handler())
+	defer hs.Close()
+
+	resp, err := http.Get(hs.URL + "/v1/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "certNotAfter") {
+		t.Errorf("certNotAfter should be omitted when unset, got: %s", body)
+	}
+}
+
+// TestHealthCertNotAfterEmittedWhenSet: WithCertExpiry plumbs the
+// NotAfter through to /v1/health so iOS can warn the operator before
+// the cert actually expires.
+func TestHealthCertNotAfterEmittedWhenSet(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := &config.Config{
+		LibraryRoots:  []string{tmp},
+		ListenAddress: ":0",
+		LibraryName:   "X",
+	}
+	store, err := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiry := time.Date(2027, 7, 1, 12, 0, 0, 0, time.UTC)
+	srv := New(cfg, store, nil, "fp").WithCertExpiry(expiry)
+	hs := httptest.NewServer(srv.Handler())
+	defer hs.Close()
+
+	resp, err := http.Get(hs.URL + "/v1/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var got HealthResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.CertNotAfter == nil {
+		t.Fatalf("certNotAfter unset on wire (expected %v)", expiry)
+	}
+	if !got.CertNotAfter.Equal(expiry) {
+		t.Errorf("certNotAfter = %v, want %v", *got.CertNotAfter, expiry)
+	}
+}
+
 // fakeUpdater stands in for internal/updater.Updater in tests so we can
 // drive UpdateInfo into /v1/health without spinning up a real poller.
 type fakeUpdater struct{ info UpdateInfo }
