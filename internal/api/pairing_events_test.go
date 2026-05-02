@@ -200,7 +200,10 @@ func TestPairingEventsBrokerNotWiredReturns404(t *testing.T) {
 		ListenAddress: ":7788",
 		LibraryName:   "Test",
 	}
-	authStore, _ := auth.OpenStore(filepath.Join(dir, "tokens.json"))
+	authStore, err := auth.OpenStore(filepath.Join(dir, "tokens.json"))
+	if err != nil {
+		t.Fatalf("open auth store: %v", err)
+	}
 	pairingStore := pairing.NewStore(pairing.Options{
 		TTL: time.Second, Grace: time.Second, MaxPending: 4,
 		RevokeToken: func(string) error { return nil },
