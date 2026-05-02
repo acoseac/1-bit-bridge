@@ -57,54 +57,58 @@ func TestIsTransient_PinsClassification(t *testing.T) {
 		{"EPIPE", syscall.EPIPE, true},
 		{"ETIMEDOUT", syscall.ETIMEDOUT, true},
 
-		// HTTP status codes are encoded in the error string by
-		// the MB client's Do formatter ("musicbrainz: HTTP NNN: …").
-		{"HTTP 500", fmt.Errorf("musicbrainz: HTTP 500: server error"), true},
-		{"HTTP 502", fmt.Errorf("musicbrainz: HTTP 502: bad gateway"), true},
-		{"HTTP 503", fmt.Errorf("musicbrainz: HTTP 503: service unavailable"), true},
-		{"HTTP 504", fmt.Errorf("musicbrainz: HTTP 504: gateway timeout"), true},
-		{"HTTP 429", fmt.Errorf("musicbrainz: HTTP 429: too many requests"), true},
+		// HTTP status codes flow through the typed `*httpError` returned
+		// by `MusicBrainzClient.get` and are matched via `errors.As`.
+		{"typed httpError 500", &httpError{StatusCode: 500, Body: "server error"}, true},
+		{"typed httpError 502", &httpError{StatusCode: 502, Body: "bad gateway"}, true},
+		{"typed httpError 503", &httpError{StatusCode: 503, Body: "service unavailable"}, true},
+		{"typed httpError 504", &httpError{StatusCode: 504, Body: "gateway timeout"}, true},
+		{"typed httpError 429", &httpError{StatusCode: 429, Body: "too many requests"}, true},
 
 		// Persistent statuses must NOT be classified as transient
 		// — they will fail every retry forever and the worker
 		// would loop indefinitely. errNotFound is the typed 404
 		// already; check 4xx-other-than-429 here.
-		{"HTTP 400", fmt.Errorf("musicbrainz: HTTP 400: bad request"), false},
-		{"HTTP 401", fmt.Errorf("musicbrainz: HTTP 401: unauthorized"), false},
-		{"HTTP 403", fmt.Errorf("musicbrainz: HTTP 403: forbidden"), false},
+		{"typed httpError 400", &httpError{StatusCode: 400, Body: "bad request"}, false},
+		{"typed httpError 401", &httpError{StatusCode: 401, Body: "unauthorized"}, false},
+		{"typed httpError 403", &httpError{StatusCode: 403, Body: "forbidden"}, false},
 		// errNotFound is the 404 path; verify both the typed
 		// shape and the wrapped form get handled.
 		{"errNotFound", errNotFound, false},
 		{"wrapped not-found", fmt.Errorf("lookup: %w", errNotFound), false},
+
+		// Wrap-survival: this is the regression the typed-httpError
+		// shape closes. Pre-fix `IsTransient` did
+		// `strings.HasPrefix(err.Error(), "musicbrainz: HTTP ")` over
+		// the formatted message — any caller that wrapped the MB
+		// error (`fmt.Errorf("retry: %w", err)`) silently broke the
+		// prefix match, returned false on a real 5xx, and the
+		// enricher poisoned the track exactly as PR #74 was
+		// supposed to prevent. `errors.As` survives any depth of
+		// wrap.
+		{"wrapped typed 503 (regression net for PR #74-class poisoning)",
+			fmt.Errorf("retry attempt: %w", &httpError{StatusCode: 503, Body: "x"}),
+			true},
+		{"double-wrapped typed 429",
+			fmt.Errorf("outer: %w", fmt.Errorf("inner: %w", &httpError{StatusCode: 429, Body: "y"})),
+			true},
+		{"wrapped typed 400 stays persistent",
+			fmt.Errorf("retry attempt: %w", &httpError{StatusCode: 400, Body: "z"}),
+			false},
 
 		// Decode errors / schema drift — guaranteed to fail every
 		// retry, must not be classified as transient.
 		{"JSON decode error", errors.New("invalid character ',' looking for beginning of value"), false},
 		{"unrelated text", errors.New("some other thing went wrong"), false},
 
-		// Bodies that mention "HTTP 503" without the canonical
-		// prefix do NOT match — the parser only reads the
-		// status code right after "musicbrainz: HTTP ", so an
-		// upstream's HTML error page mentioning a status code
-		// elsewhere can't false-positive.
-		{"body containing HTTP 503 but no prefix", errors.New("page says: HTTP 503 was returned"), false},
-		// Persistent 4xx WHOSE BODY CONTAINS "HTTP 503" must
-		// NOT be classified as transient — coderabbit MAJOR
-		// catch on PR #74 follow-up. Pre-fix substring match
-		// would treat this as transient and the worker would
-		// retry a guaranteed-fail track forever.
-		{"persistent 400 with body mentioning HTTP 503",
-			fmt.Errorf("musicbrainz: HTTP 400: server says HTTP 503 was returned earlier"),
-			false},
-		{"persistent 401 with body mentioning HTTP 429",
-			fmt.Errorf("musicbrainz: HTTP 401: too many requests (HTTP 429) on prior call"),
-			false},
-		// And the structured parser correctly handles the
-		// canonical transient cases even when the body is
-		// noisy.
-		{"transient 503 with messy body",
-			fmt.Errorf("musicbrainz: HTTP 503: <html>random text mentioning HTTP 200</html>"),
-			true},
+		// Plain-string errors that look like the old format string
+		// no longer match — the typed shape is the only signal now.
+		// This is intentional: the prior substring/prefix path was
+		// brittle, and any caller that needs to mark a custom error
+		// transient should attach a `*httpError` (or extend
+		// `IsTransient` with another typed predicate).
+		{"plain-string HTTP 503 no longer matches", errors.New("musicbrainz: HTTP 503: service unavailable"), false},
+		{"body containing HTTP 503 elsewhere", errors.New("page says: HTTP 503 was returned"), false},
 	}
 
 	for _, tc := range cases {
@@ -113,6 +117,31 @@ func TestIsTransient_PinsClassification(t *testing.T) {
 				t.Errorf("IsTransient(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestHTTPErrorFormatStability pins the `httpError.Error()` rendering
+// byte-for-byte. The typed-shape refactor explicitly preserves the
+// prior `fmt.Errorf("musicbrainz: HTTP %d: %s", ...)` format so log
+// lines and any external tooling that scrapes them don't drift; this
+// test fails loudly if a future change to `Error()` breaks that
+// promise (coderabbit nit on PR #144). The classification cases above
+// all go through `IsTransient` and would not catch a format regression
+// in the rendered string itself.
+func TestHTTPErrorFormatStability(t *testing.T) {
+	cases := []struct {
+		err  *httpError
+		want string
+	}{
+		{&httpError{StatusCode: 503, Body: "service unavailable"}, "musicbrainz: HTTP 503: service unavailable"},
+		{&httpError{StatusCode: 429, Body: "too many requests"}, "musicbrainz: HTTP 429: too many requests"},
+		{&httpError{StatusCode: 400, Body: ""}, "musicbrainz: HTTP 400: "},
+		{&httpError{StatusCode: 404, Body: "not found"}, "musicbrainz: HTTP 404: not found"},
+	}
+	for _, tc := range cases {
+		if got := tc.err.Error(); got != tc.want {
+			t.Errorf("Error() = %q, want %q", got, tc.want)
+		}
 	}
 }
 

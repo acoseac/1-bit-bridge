@@ -183,9 +183,29 @@ func (c *MusicBrainzClient) get(ctx context.Context, u string, out any) error {
 	}
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("musicbrainz: HTTP %d: %s", resp.StatusCode, string(b))
+		return &httpError{StatusCode: resp.StatusCode, Body: string(b)}
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+// httpError carries the upstream MB HTTP status code in a typed shape
+// `IsTransient` (and any future classifier) consumes via `errors.As`,
+// so the transient/persistent decision doesn't depend on `strings.HasPrefix`
+// over the formatted message. Pre-fix `IsTransient` parsed the status
+// out of "musicbrainz: HTTP NNN: …" with a load-bearing string-prefix
+// check; any caller that wrapped the error (`fmt.Errorf("foo: %w", err)`)
+// silently broke the prefix match, made `IsTransient` return false on a
+// real 5xx, and reintroduced the PR #74 poisoning regression.
+//
+// `Error()` preserves the prior format byte-for-byte so log lines and
+// existing string-shape assertions don't drift.
+type httpError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *httpError) Error() string {
+	return fmt.Sprintf("musicbrainz: HTTP %d: %s", e.StatusCode, e.Body)
 }
 
 // maxRetryAfter caps the wait to protect against a hostile or
@@ -296,30 +316,21 @@ func IsTransient(err error) bool {
 		errors.Is(err, syscall.ETIMEDOUT) {
 		return true
 	}
-	// HTTP status is encoded in the error string by `Do`'s formatter
-	// as "musicbrainz: HTTP NNN: <body>". Parse the actual status
-	// token instead of substring-matching anywhere in the message —
-	// coderabbit bot review on PR #74 caught that a persistent 4xx
-	// whose body contains "HTTP 503" or "HTTP 429" (e.g., an HTML
-	// error page that mentions a status code somewhere) would
-	// otherwise be misclassified as transient and the worker would
-	// retry a guaranteed-fail track forever.
-	const httpPrefix = "musicbrainz: HTTP "
-	msg := err.Error()
-	if strings.HasPrefix(msg, httpPrefix) {
-		rest := msg[len(httpPrefix):]
-		// Read the leading digits. Status codes are always 3 digits
-		// in HTTP/1.1; this loop tolerates any width.
-		end := 0
-		for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
-			end++
-		}
-		if end > 0 {
-			if code, parseErr := strconv.Atoi(rest[:end]); parseErr == nil {
-				if code >= 500 || code == 429 {
-					return true
-				}
-			}
+	// HTTP status is consulted via the typed `httpError` carried by
+	// `MusicBrainzClient.get`. `errors.As` survives any number of
+	// `fmt.Errorf("...: %w", err)` wraps a future caller might add,
+	// where the prior `strings.HasPrefix(msg, "musicbrainz: HTTP ")`
+	// shape would silently misclassify a wrapped 5xx as non-transient
+	// and reintroduce the PR #74 poisoning regression.
+	//
+	// The pre-fix substring guard against an HTML error body that
+	// mentions "HTTP 503" elsewhere is now structural — the typed
+	// StatusCode is the response status code, not anything text-
+	// matched out of the body.
+	var herr *httpError
+	if errors.As(err, &herr) {
+		if herr.StatusCode >= 500 || herr.StatusCode == 429 {
+			return true
 		}
 	}
 	return false
