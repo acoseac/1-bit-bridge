@@ -108,15 +108,34 @@ func newTsnetServer(cfg *config.Config, stderr io.Writer) (*tsnet.Server, error)
 // for the disabled case is deferred — for now we ship a clear
 // short string the operator can read.
 type tailscaleAdminSource struct {
-	cli   *tailscaleAutoPilot // nil unless mode=cli
-	tsnet *tsnet.Server       // nil unless mode=tsnet
+	cli        *tailscaleAutoPilot // nil unless mode=cli
+	tsnet      *tsnet.Server       // nil unless mode=tsnet
+	configPath string              // runtime --config value; surfaced in
+	// the disabled-mode recovery message so operators running with
+	// --config <other> see the actual file to edit instead of the
+	// hardcoded default. Empty string falls back to "bridge.yaml" via
+	// displayConfigPath so the message stays usable if any future
+	// caller ever constructs the struct without one.
 }
 
 // newTailscaleAdminSource picks the right source based on which
 // of the two backends was constructed. Mode=disabled → both nil,
-// Status() returns the "disabled" sentinel.
-func newTailscaleAdminSource(cli *tailscaleAutoPilot, ts *tsnet.Server) tailscaleAdminSource {
-	return tailscaleAdminSource{cli: cli, tsnet: ts}
+// Status() returns the "disabled" sentinel; configPath is the
+// runtime --config path, surfaced in that sentinel.
+func newTailscaleAdminSource(cli *tailscaleAutoPilot, ts *tsnet.Server, configPath string) tailscaleAdminSource {
+	return tailscaleAdminSource{cli: cli, tsnet: ts, configPath: configPath}
+}
+
+// displayConfigPath returns the operator-facing config-file reference.
+// Surfaces the actual --config value when set; falls back to the
+// default file name when empty. Defensive — keeps the recovery hint
+// usable if a future caller ever constructs the source without
+// threading a path through.
+func (s tailscaleAdminSource) displayConfigPath() string {
+	if s.configPath == "" {
+		return "bridge.yaml"
+	}
+	return s.configPath
 }
 
 // adminStatusTimeout caps how long admin handlers will wait on the
@@ -141,11 +160,17 @@ func (s tailscaleAdminSource) Status() admin.TailscaleStatus {
 		// empty card. Operators who want LAN-only deploys see this
 		// and don't go hunting for misconfig.
 		//
-		// The message names the config knob explicitly so an
-		// operator who DIDN'T mean to disable Tailscale can recover
-		// without grepping the source: edit `tailscale.mode` in
-		// `bridge.yaml` (cli | tsnet | disabled) and restart.
-		LastError: "Tailscale integration disabled. To enable, set tailscale.mode to \"cli\" or \"tsnet\" in bridge.yaml and restart the bridge.",
+		// The message names the config knob and the actual runtime
+		// config path (via displayConfigPath) so an operator who
+		// DIDN'T mean to disable Tailscale can recover without
+		// grepping the source. %q (not %s) for the config path:
+		// paths can contain spaces, and matching the visual
+		// treatment of "cli" / "tsnet" keeps the rendered sentence
+		// unambiguous.
+		LastError: fmt.Sprintf(
+			"Tailscale integration disabled. To enable, set tailscale.mode to %q or %q in %q and restart the bridge.",
+			"cli", "tsnet", s.displayConfigPath(),
+		),
 	}
 }
 
