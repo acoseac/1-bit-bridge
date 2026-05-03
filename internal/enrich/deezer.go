@@ -49,10 +49,17 @@ func NewDeezerClient(base, userAgent string, httpClient *http.Client) *DeezerCli
 		// API hosts — see transport.go for the rationale.
 		httpClient = &http.Client{Timeout: 10 * time.Second, Transport: sharedHTTPTransport}
 	}
+	// Shallow-copy the caller's client before installing the redirect
+	// guard. installRedirectGuard mutates CheckRedirect, and *http.Client
+	// instances are routinely shared across goroutines/services in Go;
+	// without this copy a caller passing http.DefaultClient or a client
+	// shared with NewMusicBrainzClient would suddenly see Deezer's
+	// SSRF allowlist constrain redirects across the whole process.
+	clientCopy := *httpClient
 	c := &DeezerClient{
 		base:              base,
 		userAgent:         userAgent,
-		http:              httpClient,
+		http:              &clientCopy,
 		allowedImageHosts: append([]string(nil), deezerAllowedHosts...),
 	}
 	c.installRedirectGuard()

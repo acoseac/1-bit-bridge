@@ -124,3 +124,50 @@ func TestFetchImage_FollowsRedirectWithinAllowlist(t *testing.T) {
 		t.Fatalf("unexpected body %q", string(buf))
 	}
 }
+
+// TestNewDeezerClient_DoesNotMutateSharedHTTPClient pins the shallow-copy
+// contract. *http.Client instances are designed to be shared across
+// services and goroutines; without the copy, installRedirectGuard would
+// overwrite CheckRedirect on the caller's pointer, retroactively
+// constraining redirects in unrelated code paths (a future caller passing
+// http.DefaultClient or a MusicBrainzClient-shared client).
+func TestNewDeezerClient_DoesNotMutateSharedHTTPClient(t *testing.T) {
+	t.Parallel()
+
+	// Shared client with no CheckRedirect installed. After
+	// NewDeezerClient returns, the original pointer's CheckRedirect must
+	// still be nil, and a second consumer of the same shared pointer
+	// must see Go's default redirect behaviour (not Deezer's allowlist).
+	shared := &http.Client{Timeout: 2 * time.Second}
+	if shared.CheckRedirect != nil {
+		t.Fatalf("precondition: shared.CheckRedirect should be nil before NewDeezerClient")
+	}
+
+	_ = NewDeezerClient("", "test-agent", shared)
+
+	if shared.CheckRedirect != nil {
+		t.Fatalf("NewDeezerClient mutated the caller's *http.Client.CheckRedirect; the deezer guard leaked into the shared client")
+	}
+
+	// Drive a real redirect through the shared client to a host the
+	// Deezer allowlist would reject. Default policy follows up to 10
+	// redirects; if Deezer's guard had leaked onto this client, this
+	// would error with "refusing redirect" instead.
+	final := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer final.Close()
+	hop := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, final.URL, http.StatusFound)
+	}))
+	defer hop.Close()
+
+	resp, err := shared.Get(hop.URL)
+	if err != nil {
+		t.Fatalf("shared client follow-redirect: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected status %d on shared client redirect chain", resp.StatusCode)
+	}
+}
