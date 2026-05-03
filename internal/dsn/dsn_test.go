@@ -95,10 +95,16 @@ func TestFile_PinsEncodingContract(t *testing.T) {
 	}
 }
 
-// TestFile_PathRoundTrips parses every produced DSN with url.Parse and
-// asserts the decoded path matches the input — defends against future
-// encoding changes that produce URLs Go's parser disagrees with.
-func TestFile_PathRoundTrips(t *testing.T) {
+// TestFile_AbsolutePathRoundTrips parses every produced absolute-path
+// DSN with url.Parse and asserts the decoded path matches the input —
+// defends against future encoding changes that produce URLs Go's
+// parser disagrees with.
+//
+// Absolute paths land in `URL.Path` (triple-slash form
+// `file:///abs/path`); relative paths land in `URL.Opaque` (opaque
+// form `file:rel/path`) and are pinned by
+// TestFile_RelativePathRoundTrips below.
+func TestFile_AbsolutePathRoundTrips(t *testing.T) {
 	t.Parallel()
 
 	cases := []string{
@@ -106,8 +112,6 @@ func TestFile_PathRoundTrips(t *testing.T) {
 		"/data/Lib?weird/bridge.db",
 		"/data/Lib#weird/bridge.db",
 		"/data/100%cool/bridge.db",
-		// Relative paths are stored in URL.Opaque, not URL.Path, when
-		// emitted as `file:rel` — handled below.
 	}
 	for _, p := range cases {
 		t.Run(p, func(t *testing.T) {
@@ -122,6 +126,53 @@ func TestFile_PathRoundTrips(t *testing.T) {
 			}
 			if u.Path != p {
 				t.Fatalf("decoded path = %q, want %q", u.Path, p)
+			}
+			if u.RawQuery != "mode=ro" {
+				t.Fatalf("RawQuery = %q, want %q", u.RawQuery, "mode=ro")
+			}
+		})
+	}
+}
+
+// TestFile_RelativePathRoundTrips pins the relative-path side of the
+// contract (Qodo on PR #146): `File("data/db.sqlite", ...)` MUST
+// emit the opaque form `file:data/db.sqlite?...` — NOT
+// `file://data/db.sqlite`, which RFC 3986 reads as host="data" +
+// path="/db.sqlite" (the wrong file).
+//
+// Relative paths come back from url.Parse as `URL.Opaque`, so the
+// assertion target is different from the absolute case. Without a
+// test that explicitly exercises this, a future refactor could swap
+// the helper to a `url.URL{Path: ...}.String()`-only implementation
+// (which produces `file://data/...`) and pass the absolute-path
+// suite while silently regressing every t.TempDir()-anchored test
+// in the rest of the codebase.
+func TestFile_RelativePathRoundTrips(t *testing.T) {
+	t.Parallel()
+
+	cases := []string{
+		"data/db.sqlite",
+		"./data/db.sqlite",
+	}
+	for _, p := range cases {
+		t.Run(p, func(t *testing.T) {
+			t.Parallel()
+			dsn := File(p, "mode=ro")
+			u, err := url.Parse(dsn)
+			if err != nil {
+				t.Fatalf("url.Parse(%q): %v", dsn, err)
+			}
+			if u.Scheme != "file" {
+				t.Fatalf("scheme = %q, want %q", u.Scheme, "file")
+			}
+			// Relative path → opaque, NOT host or path. A non-empty
+			// u.Host means we accidentally produced `file://rel/path`
+			// — the wrong file.
+			if u.Host != "" {
+				t.Fatalf("relative path produced non-empty host %q (would parse as host, not path) — DSN was %q", u.Host, dsn)
+			}
+			if u.Opaque != p {
+				t.Fatalf("decoded opaque = %q, want %q (DSN: %q)", u.Opaque, p, dsn)
 			}
 			if u.RawQuery != "mode=ro" {
 				t.Fatalf("RawQuery = %q, want %q", u.RawQuery, "mode=ro")
