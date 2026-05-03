@@ -167,7 +167,12 @@ func TestTsnetLogoutConfirmWipes(t *testing.T) {
 // TestTailscaleAdminSourceDisabledReturnsSentinel — when both CLI
 // and tsnet backends are nil (mode=disabled), Status() returns the
 // sentinel "tailscale disabled" tile so the admin UI doesn't render
-// an empty card.
+// an empty card. The sentinel must also name the recovery surface
+// — `tailscale.mode` in `bridge.yaml` — so an operator who didn't
+// mean to disable Tailscale can recover without grepping the source.
+// A regression that strips the recovery hint (e.g. shortening the
+// message to just "disabled") would otherwise pass silently and
+// leave operators stranded.
 func TestTailscaleAdminSourceDisabledReturnsSentinel(t *testing.T) {
 	src := newTailscaleAdminSource(nil, nil)
 	st := src.Status()
@@ -176,6 +181,24 @@ func TestTailscaleAdminSourceDisabledReturnsSentinel(t *testing.T) {
 	}
 	if !strings.Contains(st.LastError, "disabled") {
 		t.Errorf("LastError should mention disabled, got %q", st.LastError)
+	}
+	if !strings.Contains(st.LastError, "tailscale.mode") {
+		t.Errorf("LastError should name the config knob (tailscale.mode), got %q", st.LastError)
+	}
+	if !strings.Contains(st.LastError, "bridge.yaml") {
+		t.Errorf("LastError should name the config file (bridge.yaml), got %q", st.LastError)
+	}
+	// Naming the valid modes explicitly is the most actionable
+	// half of the recovery hint — without "cli" or "tsnet" the
+	// operator still has to dig into docs to learn what value
+	// to set. Locking these substrings prevents a future trim
+	// from silently regressing the recovery instruction
+	// (Gemini on PR #148).
+	if !strings.Contains(st.LastError, "cli") {
+		t.Errorf("LastError should mention the cli mode, got %q", st.LastError)
+	}
+	if !strings.Contains(st.LastError, "tsnet") {
+		t.Errorf("LastError should mention the tsnet mode, got %q", st.LastError)
 	}
 }
 
