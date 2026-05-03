@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"path/filepath"
 	"testing"
+
+	"github.com/acoseac/1-bit-bridge/internal/dsn"
 )
 
 // TestMigrationLadderFreshDB asserts a freshly created DB lands at
@@ -55,7 +57,7 @@ func TestMigrationLadderPreLadderUpgrade(t *testing.T) {
 
 	// Simulate the pre-ladder schema by hand-applying migration 1
 	// and then explicitly clearing user_version.
-	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)")
+	db, err := sql.Open("sqlite", dsn.File(path, "_pragma=journal_mode(WAL)"))
 	if err != nil {
 		t.Fatalf("sql.Open: %v", err)
 	}

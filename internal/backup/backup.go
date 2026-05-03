@@ -35,6 +35,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/dsn"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 	_ "modernc.org/sqlite" // register "sqlite" driver
 )
@@ -296,8 +297,8 @@ func List(backupsRoot string) ([]snapshotEntry, error) {
 // a running writer. Context-aware so a periodic snapshot can be
 // cancelled on bridge shutdown.
 func vacuumInto(ctx context.Context, srcDB, dstDB string) error {
-	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(5000)", srcDB)
-	db, err := sql.Open("sqlite", dsn)
+	uri := dsn.File(srcDB, "mode=ro&_pragma=busy_timeout(5000)")
+	db, err := sql.Open("sqlite", uri)
 	if err != nil {
 		return err
 	}
