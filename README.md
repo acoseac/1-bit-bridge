@@ -90,6 +90,16 @@ PRs welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the branch / PR conven
 
 Found a vulnerability? Please report privately via GitHub's [Security Advisories](https://github.com/acoseac/1-bit-bridge/security/advisories/new) — see [`SECURITY.md`](SECURITY.md) for scope, response SLA, and what to include in your report.
 
+## Tailscale modes
+
+The bridge offers three Tailscale integration modes via the `tailscale.mode` key in `bridge.yaml`:
+
+- **`cli`** *(default)* — shells out to the host's installed `tailscale` binary for status detection and Let's Encrypt cert provisioning on `*.ts.net` connections. Requires Tailscale to be installed and running on the host.
+- **`tsnet`** — embeds a tailnet node directly in the bridge process via `tailscale.com/tsnet`. No Tailscale binary required; LE cert is renewed in-process. Authenticate with `bridge tsnet auth` on first run, or set `tailscale.authKey` for unattended deployments.
+- **`disabled`** — turns off both the CLI auto-pilot and the embedded tsnet node. Use this for LAN-only deployments. The admin tile renders a one-line explanation so operators who flipped to `disabled` accidentally can recover.
+
+Mode changes require a bridge restart. The admin tile shows the current Tailscale state and any errors from the active path.
+
 ## Manual run (without `bridge init`)
 
 For anyone who wants to skip the service install or run the bridge out of an arbitrary directory:
