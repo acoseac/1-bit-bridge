@@ -192,6 +192,12 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request) {
 	// + Gemini single-root regression — both go away when the
 	// stat lives here, not in the manifest provider).
 	if variantID := r.URL.Query().Get("variant"); variantID != "" {
+		// Path normalization (collapse `//`, `.`, `..`) lives in the
+		// manifest store's normalizePathForLookup so /v1/download?variant=,
+		// /v1/upscale, and any other LookupTrack/LookupVariant caller
+		// share one fix (Gemini on PR #147). The API layer hands over
+		// the raw clientPath; the store applies path.Clean inside its
+		// case-folded fallback.
 		s.serveVariant(w, r, clientPath, info, variantID)
 		return
 	}

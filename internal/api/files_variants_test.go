@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/auth"
@@ -32,11 +34,24 @@ func newStubVariantStore() *stubVariantStore {
 }
 
 func (s *stubVariantStore) LookupVariant(sourcePath, variantID string) (*VariantRecord, error) {
-	rec, ok := s.records[sourcePath+"|"+variantID]
-	if !ok {
+	// Mirror the real store's two-stage lookup: exact match first
+	// (cheap + correct on case-sensitive filesystems where two
+	// case-colliding rows could otherwise alias), then fall back to
+	// the path-cleaned form. The real `normalizePathForLookup` lives
+	// in internal/manifest; replicate it here so the api-layer
+	// regression tests exercise the same client-shape→canonical-form
+	// behavior production users hit through Provider→Store.
+	if rec, ok := s.records[sourcePath+"|"+variantID]; ok {
+		return rec, nil
+	}
+	cleaned := strings.TrimPrefix(path.Clean("/"+sourcePath), "/")
+	if cleaned == sourcePath {
 		return nil, nil
 	}
-	return rec, nil
+	if rec, ok := s.records[cleaned+"|"+variantID]; ok {
+		return rec, nil
+	}
+	return nil, nil
 }
 
 // fileVariantFixture extends the file fixture with a real on-disk
@@ -249,6 +264,64 @@ func TestDownloadVariantWhenFeatureDisabledReturns404(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != 404 {
 		t.Errorf("status: got %d, want 404 (variant feature off)", resp.StatusCode)
+	}
+}
+
+// TestDownloadVariantNormalizesPathRedundantSeparators — request paths
+// with redundant `//` segments still successfully resolve on disk
+// (the filesystem treats them as a single separator) but a pre-fix
+// `serveFile` passed the un-cleaned string straight to the variant
+// store, so the row that was keyed on `Artist/Album/01.flac` would
+// silently miss for `Artist//Album/01.flac` and the user got the
+// source bytes instead of the upscaled sidecar — indistinguishable
+// from "no variant exists". path.Clean against a "/"-rooted copy
+// collapses `//`, `.`, `..` deterministically, and the lookup
+// succeeds.
+//
+// Pinning the cleaning step here (not in the variant store) keeps
+// the manifest's PRIMARY KEY shape authoritative — the scanner
+// continues to write the canonical form, and the API layer is the
+// single point that absorbs client-shaped variants.
+func TestDownloadVariantNormalizesPathRedundantSeparators(t *testing.T) {
+	hs, tok, root, vs, sidecar := fileVariantFixture(t)
+	srcInfo := statSourceOrFail(t, root, "Artist/Album/01.flac")
+	// Record is keyed at the canonical path (what the scanner stores).
+	vs.records["Artist/Album/01.flac|upscaled-v1-176400-24"] = &VariantRecord{
+		SidecarPath:   sidecar,
+		SourceMTimeNS: srcInfo.ModTime().UnixNano(),
+		SourceSize:    srcInfo.Size(),
+	}
+
+	// Three client-shape variants that all canonicalize to the same
+	// row: redundant separator, dot-segment, and a leading slash.
+	// All three should serve the sidecar (0xCC, 512 bytes), NOT the
+	// source (0xAA, 256 bytes).
+	cases := []struct {
+		name     string
+		rawPath  string
+		variant  string
+		wantSize int
+		wantByte byte
+	}{
+		{"redundant separator", "Artist//Album/01.flac", "upscaled-v1-176400-24", 512, 0xCC},
+		{"dot-segment", "Artist/./Album/01.flac", "upscaled-v1-176400-24", 512, 0xCC},
+		{"leading slash", "/Artist/Album/01.flac", "upscaled-v1-176400-24", 512, 0xCC},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			resp := authGet(t, hs, "/v1/download?path="+c.rawPath+"&variant="+c.variant, tok)
+			defer resp.Body.Close()
+			if resp.StatusCode != 200 {
+				t.Fatalf("status: got %d, want 200", resp.StatusCode)
+			}
+			body := readAllOrFail(t, resp)
+			if len(body) != c.wantSize {
+				t.Errorf("body length: got %d, want %d", len(body), c.wantSize)
+			}
+			if len(body) > 0 && body[0] != c.wantByte {
+				t.Errorf("body[0]: got %#x, want %#x (sidecar pattern)", body[0], c.wantByte)
+			}
+		})
 	}
 }
 
