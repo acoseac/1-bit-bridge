@@ -140,7 +140,12 @@ func (s tailscaleAdminSource) Status() admin.TailscaleStatus {
 		// admin tile render a one-line explanation instead of an
 		// empty card. Operators who want LAN-only deploys see this
 		// and don't go hunting for misconfig.
-		LastError: "tailscale integration disabled (tailscale.mode: disabled)",
+		//
+		// The message names the config knob explicitly so an
+		// operator who DIDN'T mean to disable Tailscale can recover
+		// without grepping the source: edit `tailscale.mode` in
+		// `bridge.yaml` (cli | tsnet | disabled) and restart.
+		LastError: "Tailscale integration disabled. To enable, set tailscale.mode to \"cli\" or \"tsnet\" in bridge.yaml and restart the bridge.",
 	}
 }
 
