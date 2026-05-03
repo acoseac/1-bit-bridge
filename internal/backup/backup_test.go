@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/backup"
+	"github.com/acoseac/1-bit-bridge/internal/dsn"
 	_ "modernc.org/sqlite"
 )
 
@@ -69,7 +70,7 @@ func TestSnapshotPreservesManifestDBContents(t *testing.T) {
 	// Write a recognizable row to the live db so we can read it
 	// back out of the snapshot.
 	dbPath := src.ManifestDB
-	live, err := sql.Open("sqlite", "file:"+dbPath+"?_pragma=journal_mode(WAL)")
+	live, err := sql.Open("sqlite", dsn.File(dbPath, "_pragma=journal_mode(WAL)"))
 	if err != nil {
 		t.Fatalf("open live db: %v", err)
 	}
@@ -86,7 +87,7 @@ func TestSnapshotPreservesManifestDBContents(t *testing.T) {
 		t.Fatalf("Snapshot: %v", err)
 	}
 
-	snap, err := sql.Open("sqlite", "file:"+filepath.Join(dst, "bridge.db")+"?mode=ro")
+	snap, err := sql.Open("sqlite", dsn.File(filepath.Join(dst, "bridge.db"), "mode=ro"))
 	if err != nil {
 		t.Fatalf("open snapshot db: %v", err)
 	}
@@ -295,7 +296,7 @@ func primeLiveState(t *testing.T, dataDir string) backup.Sources {
 
 	// Manifest db — a real SQLite file so VACUUM INTO works.
 	dbPath := filepath.Join(dataDir, "bridge.db")
-	db, err := sql.Open("sqlite", "file:"+dbPath+"?_pragma=journal_mode(WAL)")
+	db, err := sql.Open("sqlite", dsn.File(dbPath, "_pragma=journal_mode(WAL)"))
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
