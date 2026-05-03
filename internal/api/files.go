@@ -192,21 +192,13 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request) {
 	// + Gemini single-root regression — both go away when the
 	// stat lives here, not in the manifest provider).
 	if variantID := r.URL.Query().Get("variant"); variantID != "" {
-		// Clean the path before the variant lookup. The filesystem
-		// resolver above already canonicalized the path for the
-		// on-disk read (so resolution succeeds for clients that send
-		// `Artist//Album/01.flac` or `Artist/./Album/01.flac`), but
-		// the variant store keys rows by string equality against
-		// what the scanner wrote. Without this normalize step the
-		// row exists but the lookup misses, and the user silently
-		// gets the source file instead of the upscaled variant —
-		// indistinguishable from "no variant exists" on the iOS
-		// side. path.Clean against a "/"-prefixed copy collapses
-		// `//`, `.` and `..` segments deterministically; we then
-		// re-strip the leading "/" so the form matches the
-		// PRIMARY KEY shape stored by the scanner.
-		cleanPath := strings.TrimPrefix(path.Clean("/"+clientPath), "/")
-		s.serveVariant(w, r, cleanPath, info, variantID)
+		// Path normalization (collapse `//`, `.`, `..`) lives in the
+		// manifest store's normalizePathForLookup so /v1/download?variant=,
+		// /v1/upscale, and any other LookupTrack/LookupVariant caller
+		// share one fix (Gemini on PR #147). The API layer hands over
+		// the raw clientPath; the store applies path.Clean inside its
+		// case-folded fallback.
+		s.serveVariant(w, r, clientPath, info, variantID)
 		return
 	}
 

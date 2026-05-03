@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/auth"
@@ -32,11 +34,24 @@ func newStubVariantStore() *stubVariantStore {
 }
 
 func (s *stubVariantStore) LookupVariant(sourcePath, variantID string) (*VariantRecord, error) {
-	rec, ok := s.records[sourcePath+"|"+variantID]
-	if !ok {
+	// Mirror the real store's two-stage lookup: exact match first
+	// (cheap + correct on case-sensitive filesystems where two
+	// case-colliding rows could otherwise alias), then fall back to
+	// the path-cleaned form. The real `normalizePathForLookup` lives
+	// in internal/manifest; replicate it here so the api-layer
+	// regression tests exercise the same client-shape→canonical-form
+	// behavior production users hit through Provider→Store.
+	if rec, ok := s.records[sourcePath+"|"+variantID]; ok {
+		return rec, nil
+	}
+	cleaned := strings.TrimPrefix(path.Clean("/"+sourcePath), "/")
+	if cleaned == sourcePath {
 		return nil, nil
 	}
-	return rec, nil
+	if rec, ok := s.records[cleaned+"|"+variantID]; ok {
+		return rec, nil
+	}
+	return nil, nil
 }
 
 // fileVariantFixture extends the file fixture with a real on-disk

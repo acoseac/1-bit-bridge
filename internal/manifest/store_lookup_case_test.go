@@ -246,3 +246,88 @@ func TestLookupVariant_caseInsensitiveAndLeadingSlash(t *testing.T) {
 		})
 	}
 }
+
+// TestNormalizePathForLookup_CleansRedundantSeparators is the unit-
+// level pin for the path.Clean step added to normalizePathForLookup
+// (Gemini on PR #147). Pre-fix the helper only stripped a leading
+// slash; client-shape inputs containing redundant `//`, `.` or `..`
+// segments would silently miss every lookup that walked through this
+// helper (LookupTrack from /v1/upscale, LookupVariant from
+// /v1/download?variant=). Post-fix all three forms canonicalize to
+// the manifest's PRIMARY KEY shape.
+//
+// Tests the helper directly so a future refactor that splits the
+// cleaning out into a separate function or moves it to a different
+// layer can't bypass these cases.
+func TestNormalizePathForLookup_CleansRedundantSeparators(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"already canonical", "Artist/Album/01.flac", "Artist/Album/01.flac"},
+		{"empty stays empty", "", ""},
+		{"leading slash only (iOS bridge shape)", "/Artist/Album/01.flac", "Artist/Album/01.flac"},
+		{"redundant separators", "Artist//Album/01.flac", "Artist/Album/01.flac"},
+		{"multiple redundant separators", "Artist///Album//01.flac", "Artist/Album/01.flac"},
+		{"dot-segment", "Artist/./Album/01.flac", "Artist/Album/01.flac"},
+		{"trailing slash", "Artist/Album/", "Artist/Album"},
+		{"leading slash + redundant separators", "/Artist//Album/01.flac", "Artist/Album/01.flac"},
+		// path.Clean collapses `..` segments. Up-level escapes are
+		// already rejected at the resolver layer (Resolve refuses any
+		// `..` segment before path.Clean runs); this helper is a DB
+		// lookup key and not a security boundary, so the cleanup
+		// here is purely about matching the scanner's stored form.
+		{"dot-dot collapse", "Artist/Other/../Album/01.flac", "Artist/Album/01.flac"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := normalizePathForLookup(c.in); got != c.want {
+				t.Errorf("normalizePathForLookup(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+// TestLookupTrack_redundantSeparators_endToEnd asserts the
+// centralized cleaning fixes the same class of bug for LookupTrack
+// that PR #147 originally fixed for LookupVariant in the API layer.
+// A request shaped like the upscale endpoint's libraryRelativePath
+// (with `//` or `.` segments) MUST find the canonical row instead
+// of silent-falling-through to ErrUpscaleIneligible.
+func TestLookupTrack_redundantSeparators_endToEnd(t *testing.T) {
+	s, err := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer s.Close()
+
+	const canonical = "Artist/Album/01.flac"
+	if err := s.UpsertTrack(&Track{
+		Path: canonical, Size: 1, ModTime: time.Now(),
+		Artist: "Artist", Album: "Album",
+	}); err != nil {
+		t.Fatalf("UpsertTrack: %v", err)
+	}
+
+	cases := []string{
+		"Artist//Album/01.flac",
+		"Artist/./Album/01.flac",
+		"/Artist//Album/01.flac",
+		"Artist/Other/../Album/01.flac",
+	}
+	for _, p := range cases {
+		t.Run(p, func(t *testing.T) {
+			tr, err := s.LookupTrack(p)
+			if err != nil {
+				t.Fatalf("LookupTrack(%q): %v", p, err)
+			}
+			if tr == nil {
+				t.Fatalf("LookupTrack(%q) = nil; redundant-separator path should canonicalize and hit", p)
+			}
+			if tr.Path != canonical {
+				t.Errorf("LookupTrack(%q).Path = %q, want %q", p, tr.Path, canonical)
+			}
+		})
+	}
+}

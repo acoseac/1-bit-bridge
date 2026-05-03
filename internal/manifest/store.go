@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -232,7 +233,14 @@ var migrations = []migration{
 
 // normalizePathForLookup folds an iOS-shaped track path back toward
 // the form Store.GetTrack / GetVariant can compare with manifest's
-// canonical (case-preserved) PRIMARY KEY. Two transformations:
+// canonical (case-preserved) PRIMARY KEY. Three transformations:
+//   - collapse `//`, `.`, and `..` segments via path.Clean. Without
+//     this, a request shaped `Artist//Album/01.flac` would resolve
+//     correctly on disk (filesystem treats `//` as a single
+//     separator) but miss the manifest row keyed at the canonical
+//     `Artist/Album/01.flac` form, surfacing as
+//     ErrUpscaleIneligible / variant_not_found / track_not_found
+//     across the API surface (Gemini on PR #147).
 //   - strip a single leading "/" (iOS's `share.normalize` adds one
 //     to bridge-source paths so SMB and bridge paths share the
 //     same anchor; the manifest stores the bridge form without).
@@ -241,9 +249,21 @@ var migrations = []migration{
 //
 // Pure / nil-safe / cheap; called from the two lookup helpers
 // only, not from write paths (the manifest stays authoritative
-// for the original case).
+// for the original case). Centralizing the cleaning here means
+// /v1/download, /v1/download?variant=, and /v1/upscale all benefit
+// from the same fix — none of those endpoints have to repeat the
+// normalization logic.
 func normalizePathForLookup(p string) string {
-	return strings.TrimPrefix(p, "/")
+	if p == "" {
+		return ""
+	}
+	// Root the input before path.Clean to keep the result well-defined
+	// (path.Clean("") returns ".", path.Clean("/") returns "/"); strip
+	// the leading slash afterwards so the form matches the PRIMARY KEY
+	// shape the scanner stores (manifest paths are slash-free).
+	cleaned := path.Clean("/" + p)
+	cleaned = strings.TrimPrefix(cleaned, "/")
+	return cleaned
 }
 
 // migrate walks the migration ladder, applying any whose `version`
