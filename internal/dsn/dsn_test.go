@@ -82,6 +82,39 @@ func TestFile_PinsEncodingContract(t *testing.T) {
 			rawQuery: "",
 			want:     "file:///data/db.sqlite",
 		},
+
+		// Windows drive-letter paths (Gemini on PR #146). The bridge
+		// ships windows/amd64 + windows/arm64; without ToSlash +
+		// drive-letter detection, EscapedPath would percent-encode
+		// every `\` to `%5C` and SQLite would refuse the URI on
+		// Windows. These cases exercise the helper cross-platform —
+		// the absolute-detection runs on slashed string content,
+		// not on filepath.IsAbs (which is OS-dependent), so the
+		// assertions hold on Linux/Darwin CI too.
+		{
+			name:     "windows absolute backslash",
+			path:     `C:\data\db.sqlite`,
+			rawQuery: "mode=ro",
+			want:     "file:///C:/data/db.sqlite?mode=ro",
+		},
+		{
+			name:     "windows absolute forward-slash already",
+			path:     "C:/data/db.sqlite",
+			rawQuery: "mode=ro",
+			want:     "file:///C:/data/db.sqlite?mode=ro",
+		},
+		{
+			name:     "windows lowercase drive letter",
+			path:     `d:\data\db.sqlite`,
+			rawQuery: "mode=ro",
+			want:     "file:///d:/data/db.sqlite?mode=ro",
+		},
+		{
+			name:     "windows absolute with reserved char",
+			path:     `C:\data\Lib?weird\bridge.db`,
+			rawQuery: "mode=ro",
+			want:     "file:///C:/data/Lib%3Fweird/bridge.db?mode=ro",
+		},
 	}
 
 	for _, c := range cases {
