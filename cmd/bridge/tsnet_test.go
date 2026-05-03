@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -168,37 +169,84 @@ func TestTsnetLogoutConfirmWipes(t *testing.T) {
 // and tsnet backends are nil (mode=disabled), Status() returns the
 // sentinel "tailscale disabled" tile so the admin UI doesn't render
 // an empty card. The sentinel must also name the recovery surface
-// — `tailscale.mode` in `bridge.yaml` — so an operator who didn't
-// mean to disable Tailscale can recover without grepping the source.
-// A regression that strips the recovery hint (e.g. shortening the
-// message to just "disabled") would otherwise pass silently and
-// leave operators stranded.
+// — `tailscale.mode` in the actual runtime config path — so an
+// operator who didn't mean to disable Tailscale can recover without
+// grepping the source. A regression that strips the recovery hint
+// (e.g. shortening the message to just "disabled") would otherwise
+// pass silently and leave operators stranded.
+//
+// Sub-cases pin BOTH the threading (the configured path appears in
+// the message verbatim, NOT the hardcoded default) AND the visual
+// contract (the path is %q-quoted so paths containing spaces stay
+// unambiguous against the already-quoted "cli" / "tsnet" mode names
+// — Gemini on the original deferral plan).
 func TestTailscaleAdminSourceDisabledReturnsSentinel(t *testing.T) {
-	src := newTailscaleAdminSource(nil, nil)
+	cases := []struct {
+		name       string
+		configPath string
+	}{
+		{"non-default path", "/etc/onebit/test.yaml"},
+		// Path-with-spaces is the load-bearing reason for %q quoting
+		// in the format string. A future refactor that drops %q would
+		// render `... in /Users/admin/My Bridge/bridge.yaml and
+		// restart...` — visually ambiguous against the quoted mode
+		// names. The strconv.Quote-based assertion below fails in
+		// that case.
+		{"path with spaces", "/Users/admin/My Bridge/bridge.yaml"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			src := newTailscaleAdminSource(nil, nil, c.configPath)
+			st := src.Status()
+			if st.LastError == "" {
+				t.Fatalf("disabled mode should populate LastError, got %+v", st)
+			}
+			if !strings.Contains(st.LastError, "disabled") {
+				t.Errorf("LastError should mention disabled, got %q", st.LastError)
+			}
+			if !strings.Contains(st.LastError, "tailscale.mode") {
+				t.Errorf("LastError should name the config knob (tailscale.mode), got %q", st.LastError)
+			}
+			// %q quoting in the format string renders the path as
+			// `"<path>"` (literal quote bytes). Asserting against
+			// strconv.Quote(...) locks both the threading AND the
+			// visual contract — drops to %s, no quoting, missing
+			// path, or substituting the default would all fail.
+			wantQuoted := strconv.Quote(c.configPath)
+			if !strings.Contains(st.LastError, wantQuoted) {
+				t.Errorf("LastError should name the runtime config path as %s, got %q", wantQuoted, st.LastError)
+			}
+			// Naming the valid modes explicitly is the most actionable
+			// half of the recovery hint — without "cli" or "tsnet" the
+			// operator still has to dig into docs to learn what value
+			// to set. Locking these substrings prevents a future trim
+			// from silently regressing the recovery instruction
+			// (Gemini on PR #148).
+			if !strings.Contains(st.LastError, "cli") {
+				t.Errorf("LastError should mention the cli mode, got %q", st.LastError)
+			}
+			if !strings.Contains(st.LastError, "tsnet") {
+				t.Errorf("LastError should mention the tsnet mode, got %q", st.LastError)
+			}
+		})
+	}
+}
+
+// TestTailscaleAdminSourceDisabled_FallsBackToDefaultConfigName pins
+// the empty-path defensive branch in displayConfigPath: if any future
+// caller ever constructs the source without threading a path through,
+// the recovery hint stays usable by falling back to "bridge.yaml".
+// Asserts the quoted form (`"bridge.yaml"`) so the same %q visual
+// contract from the main test holds for the fallback case too.
+func TestTailscaleAdminSourceDisabled_FallsBackToDefaultConfigName(t *testing.T) {
+	src := newTailscaleAdminSource(nil, nil, "")
 	st := src.Status()
 	if st.LastError == "" {
-		t.Errorf("disabled mode should populate LastError, got %+v", st)
+		t.Fatalf("disabled mode should populate LastError, got %+v", st)
 	}
-	if !strings.Contains(st.LastError, "disabled") {
-		t.Errorf("LastError should mention disabled, got %q", st.LastError)
-	}
-	if !strings.Contains(st.LastError, "tailscale.mode") {
-		t.Errorf("LastError should name the config knob (tailscale.mode), got %q", st.LastError)
-	}
-	if !strings.Contains(st.LastError, "bridge.yaml") {
-		t.Errorf("LastError should name the config file (bridge.yaml), got %q", st.LastError)
-	}
-	// Naming the valid modes explicitly is the most actionable
-	// half of the recovery hint — without "cli" or "tsnet" the
-	// operator still has to dig into docs to learn what value
-	// to set. Locking these substrings prevents a future trim
-	// from silently regressing the recovery instruction
-	// (Gemini on PR #148).
-	if !strings.Contains(st.LastError, "cli") {
-		t.Errorf("LastError should mention the cli mode, got %q", st.LastError)
-	}
-	if !strings.Contains(st.LastError, "tsnet") {
-		t.Errorf("LastError should mention the tsnet mode, got %q", st.LastError)
+	wantQuoted := strconv.Quote("bridge.yaml")
+	if !strings.Contains(st.LastError, wantQuoted) {
+		t.Errorf("empty configPath should fall back to %s, got %q", wantQuoted, st.LastError)
 	}
 }
 
@@ -206,7 +254,7 @@ func TestTailscaleAdminSourceDisabledReturnsSentinel(t *testing.T) {
 // all-nil source returns the same sentinel as Status (no panic, no
 // crash).
 func TestTailscaleAdminSourceRefreshNowOnDisabled(t *testing.T) {
-	src := newTailscaleAdminSource(nil, nil)
+	src := newTailscaleAdminSource(nil, nil, "/etc/onebit/test.yaml")
 	st := src.RefreshNow(context.Background())
 	if st.LastError == "" {
 		t.Errorf("RefreshNow on disabled should populate LastError, got %+v", st)
