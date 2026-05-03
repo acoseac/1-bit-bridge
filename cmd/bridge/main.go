@@ -1196,7 +1196,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		ScanCtx:         scanCtx,
 		Updater:         updAdapter,
 		BackupSources:   backupSources,
-		Tailscale:       newTailscaleAdminSource(tailscaleAuto, tsnetServer, opts.configPath),
+		Tailscale:       newTailscaleAdminSource(tailscaleAuto, tsnetServer, absCfgPath),
 		Pairing:         pairingStore,
 		IsSupervised:    supervision.IsSupervised(),
 		UpscalePrecheck: transcode.PrecheckSox,

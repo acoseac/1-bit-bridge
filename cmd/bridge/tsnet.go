@@ -110,18 +110,25 @@ func newTsnetServer(cfg *config.Config, stderr io.Writer) (*tsnet.Server, error)
 type tailscaleAdminSource struct {
 	cli        *tailscaleAutoPilot // nil unless mode=cli
 	tsnet      *tsnet.Server       // nil unless mode=tsnet
-	configPath string              // runtime --config value; surfaced in
-	// the disabled-mode recovery message so operators running with
-	// --config <other> see the actual file to edit instead of the
-	// hardcoded default. Empty string falls back to "bridge.yaml" via
-	// displayConfigPath so the message stays usable if any future
-	// caller ever constructs the struct without one.
+	configPath string              // absolute path of the runtime config
+	// file (post-filepath.Abs); surfaced in the disabled-mode recovery
+	// message so operators running with --config <other> see the actual
+	// file to edit instead of the hardcoded default. Callers MUST pass
+	// the absolute form — passing the raw --config flag value would
+	// surface a relative path that's ambiguous once the operator is no
+	// longer in the bridge's startup CWD (Qodo + Gemini on PR #152).
+	// Empty string falls back to "bridge.yaml" via displayConfigPath so
+	// the message stays usable if any future caller ever constructs the
+	// struct without one.
 }
 
 // newTailscaleAdminSource picks the right source based on which
 // of the two backends was constructed. Mode=disabled → both nil,
 // Status() returns the "disabled" sentinel; configPath is the
-// runtime --config path, surfaced in that sentinel.
+// absolute path of the runtime config file, surfaced in that
+// sentinel — the canonical form admin.Cfg already uses, so the
+// message points operators at the same file the bridge is
+// operating on regardless of CWD changes post-boot.
 func newTailscaleAdminSource(cli *tailscaleAutoPilot, ts *tsnet.Server, configPath string) tailscaleAdminSource {
 	return tailscaleAdminSource{cli: cli, tsnet: ts, configPath: configPath}
 }
