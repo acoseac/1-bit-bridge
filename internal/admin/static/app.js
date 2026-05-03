@@ -229,15 +229,24 @@ async function refreshCertInfo() {
 // "iOS clients reach the bridge over Tailscale at <url>" hint. State
 // machine matches the plan's 5-cell breakdown:
 //
-//   • CLIAvailable=false                    → tile hidden (host has no Tailscale)
+//   • CLIAvailable=false, lastError empty    → tile hidden (host has no Tailscale)
+//   • CLIAvailable=false, lastError set      → tile shown with the recovery message
+//                                              (e.g. tailscale.mode=disabled sentinel)
 //   • magic-DNS empty                        → "MagicDNS not enabled"
 //   • lastError set                          → "Cert error" + the LastError text
 //   • cert present + fresh                   → "✓ HTTPS certs enabled"
 //   • cert absent / expiry within 14 days    → "Detecting…" / "Minting"
+//
+// The CLIAvailable=false-but-lastError-set branch was added so the
+// disabled-mode sentinel ("Tailscale integration disabled. To enable,
+// set tailscale.mode...") reaches operators in the admin UI; the
+// pre-fix gate `if (!s || !s.cliAvailable)` hid the panel
+// unconditionally on cliAvailable=false, so the recovery message
+// was never visible (Qodo on PR #148).
 function renderTailscaleTile(s) {
   const panel = document.getElementById("tailscale-panel");
   if (!panel) return;
-  if (!s || !s.cliAvailable) {
+  if (!s || (!s.cliAvailable && !s.lastError)) {
     panel.hidden = true;
     return;
   }
@@ -249,8 +258,20 @@ function renderTailscaleTile(s) {
   const noteEl = document.getElementById("tailscale-magicdns-url");
 
   // Status badge — pick state machine first cell that matches.
+  // Disabled-mode sentinel takes precedence over the generic "Error"
+  // branch so an intentionally-disabled bridge doesn't render a red
+  // "Error" badge that would send operators chasing an imaginary
+  // misconfiguration. Detected via the cliAvailable=false +
+  // lastError-set combination, which is uniquely produced by
+  // tailscaleAdminSource.Status() in disabled mode (cli/tsnet
+  // success paths set cliAvailable=true; cli/tsnet failure paths
+  // set cliAvailable=true with an error suffix).
   let badgeClass = "idle", badgeText = "Detecting…", suffix = "";
-  if (s.lastError) {
+  if (!s.cliAvailable && s.lastError) {
+    badgeClass = "idle";
+    badgeText = "Disabled";
+    suffix = ` <span class="hint">${escapeHTML(s.lastError)}</span>`;
+  } else if (s.lastError) {
     badgeClass = "danger";
     badgeText = "Error";
     suffix = ` <span class="hint">${escapeHTML(s.lastError)}</span>`;
