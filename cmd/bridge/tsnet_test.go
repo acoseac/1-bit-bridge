@@ -188,6 +188,18 @@ func TestTailscaleAdminSourceDisabledReturnsSentinel(t *testing.T) {
 	if !strings.Contains(st.LastError, "bridge.yaml") {
 		t.Errorf("LastError should name the config file (bridge.yaml), got %q", st.LastError)
 	}
+	// Naming the valid modes explicitly is the most actionable
+	// half of the recovery hint — without "cli" or "tsnet" the
+	// operator still has to dig into docs to learn what value
+	// to set. Locking these substrings prevents a future trim
+	// from silently regressing the recovery instruction
+	// (Gemini on PR #148).
+	if !strings.Contains(st.LastError, "cli") {
+		t.Errorf("LastError should mention the cli mode, got %q", st.LastError)
+	}
+	if !strings.Contains(st.LastError, "tsnet") {
+		t.Errorf("LastError should mention the tsnet mode, got %q", st.LastError)
+	}
 }
 
 // TestTailscaleAdminSourceRefreshNowDelegates — RefreshNow on an
