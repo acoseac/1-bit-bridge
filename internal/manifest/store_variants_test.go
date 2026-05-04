@@ -266,6 +266,360 @@ func TestVariantsHumanLabel(t *testing.T) {
 	}
 }
 
+// TestUpsertVariantBumpsParentIndexedAt: when a variant is written for
+// a track, the parent row's `indexed_at` MUST advance to the timestamp
+// that `Store.now()` returns at the call site. Without this, an iOS
+// client running an incremental sync after submitting an upscale
+// request never sees the new variant — the delta-filtered manifest
+// (`WHERE indexed_at > since`) skips the parent row entirely.
+//
+// Uses an injected clock so the assertion is deterministic. No
+// time.Sleep — eliminates CI flakiness on slow runners.
+func TestUpsertVariantBumpsParentIndexedAt(t *testing.T) {
+	s := openTempStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+
+	upsertParent(t, s, "Music/A/1.flac")
+	// Inject a stepping clock AFTER UpsertTrack so the parent's
+	// `indexed_at` (set via direct `time.Now()`, outside this PR's
+	// scope) doesn't overlap with our injected timestamps. Baseline
+	// is parent's `indexed_at + 1h` so each subsequent step is
+	// unambiguously past it.
+	var step int64
+	if err := s.db.QueryRow(
+		`SELECT indexed_at FROM tracks WHERE path = ?`, "Music/A/1.flac",
+	).Scan(&step); err != nil {
+		t.Fatalf("read parent indexed_at for clock seed: %v", err)
+	}
+	step += (1 * time.Hour).Nanoseconds()
+	s.now = func() time.Time {
+		step += 1_000_000_000 // +1 sec per call; arbitrary but >> wall-clock jitter
+		return time.Unix(0, step)
+	}
+	// Capture the parent's `indexed_at` from before UpsertVariant
+	// runs (set by UpsertTrack above). The test asserts UpsertVariant
+	// strictly advances it past this value AND lands at exactly the
+	// timestamp s.now() returned at the call site.
+	var beforeIndexedAt int64
+	if err := s.db.QueryRow(
+		`SELECT indexed_at FROM tracks WHERE path = ?`, "Music/A/1.flac",
+	).Scan(&beforeIndexedAt); err != nil {
+		t.Fatalf("read parent indexed_at: %v", err)
+	}
+
+	// Next s.now() will return step+1s. UpsertVariant should write
+	// exactly that value into tracks.indexed_at for the parent row.
+	expectedIndexedAt := step + 1_000_000_000
+	if err := s.UpsertVariant(VariantRow{
+		SourcePath: "Music/A/1.flac", VariantID: "upscaled-v1-176400-24",
+		SidecarPath: "/tmp/x.flac", Format: "flac",
+		SampleRate: 176400, BitsPerSample: 24, SizeBytes: 100,
+		SourceMTimeNS: 1, SourceSize: 1, SoxSettings: "{}", CreatedAt: 1,
+	}); err != nil {
+		t.Fatalf("UpsertVariant: %v", err)
+	}
+
+	var afterIndexedAt int64
+	if err := s.db.QueryRow(
+		`SELECT indexed_at FROM tracks WHERE path = ?`, "Music/A/1.flac",
+	).Scan(&afterIndexedAt); err != nil {
+		t.Fatalf("read parent indexed_at after UpsertVariant: %v", err)
+	}
+
+	if afterIndexedAt != expectedIndexedAt {
+		t.Errorf("parent indexed_at = %d, want %d (before=%d, %d ns advance)",
+			afterIndexedAt, expectedIndexedAt, beforeIndexedAt,
+			afterIndexedAt-beforeIndexedAt)
+	}
+	if afterIndexedAt <= beforeIndexedAt {
+		t.Errorf("parent indexed_at did not advance: before=%d after=%d",
+			beforeIndexedAt, afterIndexedAt)
+	}
+}
+
+// TestUpsertVariantDeltaManifestSurfacesNewVariant is the regression-
+// locking test for the user-visible bug. Mimics the exact iOS flow:
+//
+//  1. Track inserted at T0 (UpsertTrack sets `indexed_at = T0`).
+//  2. iOS finishes its initial sync with `share.lastScanFinishedAt = T0`.
+//  3. User submits an upscale; bridge produces variant at T1 > T0.
+//  4. iOS triggers a delta-sync with `since = T0`.
+//  5. Bridge runs `ListTracks(since: &T0)` — `WHERE indexed_at > T0`.
+//
+// Without the bump in UpsertVariant, the parent row's `indexed_at`
+// is still T0, so it doesn't pass the `> T0` filter; the delta-sync
+// returns zero rows and iOS never sees the variant. WITH the bump,
+// the row's `indexed_at` advances to T1, the row is returned, AND
+// its `Variants` slice contains the new variant.
+//
+// If this test ever fails, EITHER the UpsertVariant bump regressed,
+// OR the transaction silently rolled back. Single-failure → root
+// cause is in one of those two places.
+func TestUpsertVariantDeltaManifestSurfacesNewVariant(t *testing.T) {
+	s := openTempStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+
+	upsertParent(t, s, "Music/A/1.flac")
+
+	// Read T0 (the timestamp UpsertTrack stamped on the parent row).
+	var t0 int64
+	if err := s.db.QueryRow(
+		`SELECT indexed_at FROM tracks WHERE path = ?`, "Music/A/1.flac",
+	).Scan(&t0); err != nil {
+		t.Fatalf("read T0: %v", err)
+	}
+
+	// Inject a clock that returns T0 + 1 hour for the variant write
+	// — well past anything UpsertTrack could have set, so the delta
+	// filter unambiguously sees the bumped row.
+	t1 := t0 + (1 * time.Hour).Nanoseconds()
+	s.now = func() time.Time { return time.Unix(0, t1) }
+
+	if err := s.UpsertVariant(VariantRow{
+		SourcePath: "Music/A/1.flac", VariantID: "upscaled-v1-192000-24",
+		SidecarPath: "/tmp/u.flac", Format: "flac",
+		SampleRate: 192000, BitsPerSample: 24, SizeBytes: 100,
+		SourceMTimeNS: 1, SourceSize: 1, SoxSettings: "{}", CreatedAt: t1,
+	}); err != nil {
+		t.Fatalf("UpsertVariant: %v", err)
+	}
+
+	// Delta-sync from T0: the iOS-equivalent of "what changed since
+	// my last finished scan".
+	since := time.Unix(0, t0)
+	delta, err := s.ListTracks(&since)
+	if err != nil {
+		t.Fatalf("ListTracks(since=T0): %v", err)
+	}
+
+	if len(delta) != 1 {
+		t.Fatalf("delta returned %d rows, want 1 (the parent track whose variant just landed)", len(delta))
+	}
+	tr := delta[0]
+	if tr.Path != "Music/A/1.flac" {
+		t.Errorf("delta row path = %q, want %q", tr.Path, "Music/A/1.flac")
+	}
+	if len(tr.Variants) != 1 {
+		t.Fatalf("delta row variants = %d, want 1", len(tr.Variants))
+	}
+	if tr.Variants[0].SampleRate != 192000 {
+		t.Errorf("variant sample rate = %v, want 192000", tr.Variants[0].SampleRate)
+	}
+}
+
+// TestDeleteVariantBumpsParentIndexedAt: mirror coverage for
+// DeleteVariant. iOS needs to see variant-removals via delta-sync
+// for the same reason it needs to see variant-additions: a stale
+// `Track.bridgeVariants` after a server-side `--gc` would let the
+// iOS picker offer a variant whose sidecar no longer exists, and
+// the next `/v1/download?variant=` would 404.
+//
+// DeleteVariant has no production callers today (the GC sweep is
+// filesystem-only — see runGC in cmd/bridge/upscale.go), so this
+// is forward-looking coverage. Bump symmetry matches UpsertVariant.
+func TestDeleteVariantBumpsParentIndexedAt(t *testing.T) {
+	s := openTempStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+
+	upsertParent(t, s, "Music/A/1.flac")
+
+	// Read the parent's UpsertTrack-stamped indexed_at to seed the
+	// clock past it (the MAX guard would otherwise hold indexed_at
+	// at the parent's value).
+	var parentIndexedAt int64
+	if err := s.db.QueryRow(
+		`SELECT indexed_at FROM tracks WHERE path = ?`, "Music/A/1.flac",
+	).Scan(&parentIndexedAt); err != nil {
+		t.Fatalf("read parent indexed_at: %v", err)
+	}
+
+	// First insert a variant to delete. Clock returns parent + 1h
+	// so the UpsertVariant bump unambiguously advances past the
+	// UpsertTrack-stamped value (MAX guard succeeds).
+	preDeleteAt := parentIndexedAt + (1 * time.Hour).Nanoseconds()
+	s.now = func() time.Time { return time.Unix(0, preDeleteAt) }
+	if err := s.UpsertVariant(VariantRow{
+		SourcePath: "Music/A/1.flac", VariantID: "upscaled-v1-176400-24",
+		SidecarPath: "/tmp/x.flac", Format: "flac",
+		SampleRate: 176400, BitsPerSample: 24, SizeBytes: 100,
+		SourceMTimeNS: 1, SourceSize: 1, SoxSettings: "{}", CreatedAt: 1,
+	}); err != nil {
+		t.Fatalf("UpsertVariant (setup): %v", err)
+	}
+
+	var beforeDelete int64
+	if err := s.db.QueryRow(
+		`SELECT indexed_at FROM tracks WHERE path = ?`, "Music/A/1.flac",
+	).Scan(&beforeDelete); err != nil {
+		t.Fatalf("read pre-delete indexed_at: %v", err)
+	}
+	if beforeDelete != preDeleteAt {
+		t.Fatalf("pre-delete indexed_at = %d, want %d (UpsertVariant bump should have set it)", beforeDelete, preDeleteAt)
+	}
+
+	// Now flip the clock forward and delete. DeleteVariant must
+	// bump indexed_at past the pre-delete value.
+	expectedAfter := preDeleteAt + (1 * time.Hour).Nanoseconds()
+	s.now = func() time.Time { return time.Unix(0, expectedAfter) }
+	if err := s.DeleteVariant("Music/A/1.flac", "upscaled-v1-176400-24"); err != nil {
+		t.Fatalf("DeleteVariant: %v", err)
+	}
+
+	var afterDelete int64
+	if err := s.db.QueryRow(
+		`SELECT indexed_at FROM tracks WHERE path = ?`, "Music/A/1.flac",
+	).Scan(&afterDelete); err != nil {
+		t.Fatalf("read post-delete indexed_at: %v", err)
+	}
+	if afterDelete != expectedAfter {
+		t.Errorf("post-delete indexed_at = %d, want %d", afterDelete, expectedAfter)
+	}
+}
+
+// TestDeleteVariantNoOpSkipsBump: when the requested
+// (source_path, variant_id) doesn't exist, the parent row's
+// `indexed_at` MUST NOT advance — there's no actual variant-set
+// change to propagate to iOS via delta-sync, and bumping anyway
+// would create false manifest churn (CodeRabbit + Gemini on PR #156).
+func TestDeleteVariantNoOpSkipsBump(t *testing.T) {
+	s := openTempStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+
+	upsertParent(t, s, "Music/A/1.flac")
+	var beforeIndexedAt int64
+	if err := s.db.QueryRow(
+		`SELECT indexed_at FROM tracks WHERE path = ?`, "Music/A/1.flac",
+	).Scan(&beforeIndexedAt); err != nil {
+		t.Fatalf("read parent indexed_at: %v", err)
+	}
+
+	// Inject a clock that would advance indexed_at if the bump
+	// fired. The test asserts it does NOT.
+	expectedNoBump := beforeIndexedAt + (1 * time.Hour).Nanoseconds()
+	s.now = func() time.Time { return time.Unix(0, expectedNoBump) }
+
+	// Delete a (path, variantID) pair that doesn't exist. RowsAffected==0.
+	if err := s.DeleteVariant("Music/A/1.flac", "nonexistent-variant-id"); err != nil {
+		t.Fatalf("DeleteVariant (no-op): %v", err)
+	}
+
+	var afterIndexedAt int64
+	if err := s.db.QueryRow(
+		`SELECT indexed_at FROM tracks WHERE path = ?`, "Music/A/1.flac",
+	).Scan(&afterIndexedAt); err != nil {
+		t.Fatalf("read parent indexed_at after no-op delete: %v", err)
+	}
+	if afterIndexedAt != beforeIndexedAt {
+		t.Errorf("no-op DeleteVariant unexpectedly bumped indexed_at: before=%d after=%d (clock would have set %d)",
+			beforeIndexedAt, afterIndexedAt, expectedNoBump)
+	}
+}
+
+// TestUpsertVariantMonotonicGuard: an injected clock that returns a
+// timestamp in the PAST must NOT regress the parent row's `indexed_at`,
+// AND a real variant write must STRICTLY advance the value (never
+// equality). The CASE WHEN form on the SQL UPDATE delivers both:
+//   - past-clock → use the existing larger indexed_at + 1 (strict)
+//   - future-clock → use the new value (also strictly larger)
+//   - equal-clock → use existing + 1 (strict, the round-2 fix)
+//
+// Without strict advancement, a back-to-back variant write at the same
+// nanosecond (rapid test seeds, low-resolution wall clocks, NTP
+// equality) would leave indexed_at unchanged — a client that synced
+// at that timestamp would still miss the second mutation under the
+// `WHERE indexed_at > since` delta-sync filter.
+// (Qodo PR #156 round 1 — monotonic; CodeRabbit round 2 — strict.)
+func TestUpsertVariantMonotonicGuard(t *testing.T) {
+	s := openTempStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+
+	upsertParent(t, s, "Music/A/1.flac")
+	var initialIndexedAt int64
+	if err := s.db.QueryRow(
+		`SELECT indexed_at FROM tracks WHERE path = ?`, "Music/A/1.flac",
+	).Scan(&initialIndexedAt); err != nil {
+		t.Fatalf("read parent indexed_at: %v", err)
+	}
+
+	// Inject a clock that returns a timestamp WAY in the past — if
+	// the guard isn't applied, the UPDATE would regress indexed_at
+	// to this value and break delta-sync.
+	pastTimestamp := initialIndexedAt - (1 * time.Hour).Nanoseconds()
+	s.now = func() time.Time { return time.Unix(0, pastTimestamp) }
+
+	if err := s.UpsertVariant(VariantRow{
+		SourcePath: "Music/A/1.flac", VariantID: "upscaled-v1-176400-24",
+		SidecarPath: "/tmp/x.flac", Format: "flac",
+		SampleRate: 176400, BitsPerSample: 24, SizeBytes: 100,
+		SourceMTimeNS: 1, SourceSize: 1, SoxSettings: "{}", CreatedAt: 1,
+	}); err != nil {
+		t.Fatalf("UpsertVariant: %v", err)
+	}
+
+	var afterIndexedAt int64
+	if err := s.db.QueryRow(
+		`SELECT indexed_at FROM tracks WHERE path = ?`, "Music/A/1.flac",
+	).Scan(&afterIndexedAt); err != nil {
+		t.Fatalf("read parent indexed_at after UpsertVariant: %v", err)
+	}
+	if afterIndexedAt < initialIndexedAt {
+		t.Errorf("indexed_at regressed under past-clock injection: before=%d after=%d (clock returned %d)",
+			initialIndexedAt, afterIndexedAt, pastTimestamp)
+	}
+	// Strict advancement: not just monotonic, but STRICTLY greater.
+	// Past-clock case lands in the CASE WHEN branch that takes
+	// existing+1 ns, so afterIndexedAt should equal initialIndexedAt + 1.
+	if afterIndexedAt <= initialIndexedAt {
+		t.Errorf("expected strict advancement (indexed_at > %d), got %d", initialIndexedAt, afterIndexedAt)
+	}
+	if afterIndexedAt != initialIndexedAt+1 {
+		t.Errorf("past-clock should produce existing+1 strict bump: expected %d, got %d", initialIndexedAt+1, afterIndexedAt)
+	}
+}
+
+// TestUpsertVariantEqualClockStillAdvances: when the injected clock
+// returns EXACTLY the parent's current indexed_at (rapid back-to-back
+// writes at same nanosecond, low-resolution wall clocks, NTP equality),
+// the CASE WHEN form must still produce a strict advance — otherwise
+// clients that synced at the equal timestamp would miss the variant
+// change under `WHERE indexed_at > since`. (CodeRabbit on PR #156 round 2.)
+func TestUpsertVariantEqualClockStillAdvances(t *testing.T) {
+	s := openTempStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+
+	upsertParent(t, s, "Music/A/1.flac")
+	var initialIndexedAt int64
+	if err := s.db.QueryRow(
+		`SELECT indexed_at FROM tracks WHERE path = ?`, "Music/A/1.flac",
+	).Scan(&initialIndexedAt); err != nil {
+		t.Fatalf("read parent indexed_at: %v", err)
+	}
+
+	// Pin the clock to EXACTLY the existing indexed_at — the equality
+	// case the bot review flagged.
+	s.now = func() time.Time { return time.Unix(0, initialIndexedAt) }
+
+	if err := s.UpsertVariant(VariantRow{
+		SourcePath: "Music/A/1.flac", VariantID: "upscaled-v1-176400-24",
+		SidecarPath: "/tmp/x.flac", Format: "flac",
+		SampleRate: 176400, BitsPerSample: 24, SizeBytes: 100,
+		SourceMTimeNS: 1, SourceSize: 1, SoxSettings: "{}", CreatedAt: 1,
+	}); err != nil {
+		t.Fatalf("UpsertVariant: %v", err)
+	}
+
+	var afterIndexedAt int64
+	if err := s.db.QueryRow(
+		`SELECT indexed_at FROM tracks WHERE path = ?`, "Music/A/1.flac",
+	).Scan(&afterIndexedAt); err != nil {
+		t.Fatalf("read parent indexed_at: %v", err)
+	}
+	if afterIndexedAt != initialIndexedAt+1 {
+		t.Errorf("equal-clock UpsertVariant did not strictly advance: before=%d after=%d (want %d)",
+			initialIndexedAt, afterIndexedAt, initialIndexedAt+1)
+	}
+}
+
 // --- helpers ---
 
 func openTempStore(t *testing.T) *Store {

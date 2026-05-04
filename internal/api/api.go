@@ -461,6 +461,22 @@ type HealthResponse struct {
 	// time as empty — and emitting `0001-01-01T00:00:00Z` from a
 	// test harness or a parse failure would actively confuse clients.
 	CertNotAfter *time.Time `json:"certNotAfter,omitempty"`
+
+	// Features advertises capability flags the server supports.
+	// Additive over the wire (omitempty); iOS consults this list to
+	// skip belt-and-braces recovery paths when the server already
+	// provides the underlying guarantee. Stable string keys, never
+	// repurpose. Pre-feature-flag bridges omit the field entirely;
+	// iOS treats absence as "feature absent" so any client-side
+	// recovery path runs unconditionally on those bridges.
+	//
+	// Current keys:
+	//   - "variantBumpsIndex": UpsertVariant / DeleteVariant bump
+	//     `tracks.indexed_at` for the parent row, so iOS delta-sync
+	//     surfaces variant changes without needing a full rescan.
+	//     iOS gates its +600s "silent fullRescan recovery" rung on
+	//     absence of this flag.
+	Features []string `json:"features,omitempty"`
 }
 
 // ScanState reports the scanner's current status. Real fields populate once
@@ -513,6 +529,12 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		notAfter := s.certNotAfter
 		resp.CertNotAfter = &notAfter
 	}
+	// Capability flags — see HealthResponse.Features doc above for the
+	// stable-key convention. Order kept stable alphabetically so any
+	// client comparing /v1/health response fingerprints (e.g. for
+	// content-equality short-circuit caches) doesn't churn on every
+	// poll. New keys append in alpha order.
+	resp.Features = []string{"variantBumpsIndex"}
 	writeJSON(w, http.StatusOK, resp)
 }
 

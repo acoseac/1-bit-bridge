@@ -36,6 +36,15 @@ var logger = logging.Component("manifest")
 type Store struct {
 	db *sql.DB
 	mu sync.Mutex // serializes ALL writers (see contract above)
+	// now returns the timestamp used by `indexed_at` writes from the
+	// variant write paths (UpsertVariant, DeleteVariant). Defaults to
+	// time.Now in production; tests override with a deterministic
+	// monotonically-incrementing fake so the
+	// `delta-sync-surfaces-new-variant` regression assertions don't
+	// depend on wall-clock sleeps. Same DI shape we'd reach for the
+	// next time a write path needs a controllable clock; UpsertTrack
+	// stays on direct `time.Now()` for now (not in this PR's scope).
+	now func() time.Time
 }
 
 // OpenStore opens (or creates) a SQLite DB at path and applies the schema.
@@ -55,7 +64,7 @@ func OpenStore(path string) (*Store, error) {
 	if err := db.Ping(); err != nil {
 		return nil, fmt.Errorf("ping sqlite: %w", err)
 	}
-	s := &Store{db: db}
+	s := &Store{db: db, now: time.Now}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err
@@ -786,11 +795,18 @@ func formatSampleRateLabel(hz float64) string {
 
 // ListTracks returns all tracks, or (if since != nil) only tracks that
 // were written/updated in the index after since. Filtered by
-// indexed_at (when we last wrote the row) rather than mtime_ns (the
-// on-disk file time) so that files copied into the library with an
-// old mtime still surface in incremental deltas — otherwise the iOS
-// client has to do a full sync to see ripped-years-ago albums that
-// were just added.
+// indexed_at (when we last wrote the row OR when a variant write/delete
+// touched the row's variant set, see UpsertVariant / DeleteVariant)
+// rather than mtime_ns (the on-disk file time) so that files copied
+// into the library with an old mtime still surface in incremental
+// deltas — otherwise the iOS client has to do a full sync to see
+// ripped-years-ago albums that were just added.
+//
+// Variant writes bump `indexed_at` for the parent row so iOS clients
+// running an incremental sync after submitting an upscale request see
+// the new variant land within the next delta window — without that
+// bump, the wand on iOS sat at `.inFlight` then `.stalled` because
+// the delta-filtered manifest never returned the parent row at all.
 //
 // `Track.Enriched` is spliced in from the row's `enriched_at` column
 // (true iff != 0). The JSON-encoded `tags_json` blob doesn't carry
@@ -1381,14 +1397,32 @@ type VariantRow struct {
 	CreatedAt     int64
 }
 
-// UpsertVariant writes (or replaces) one row in `track_variants`.
+// UpsertVariant writes (or replaces) one row in `track_variants` AND
+// bumps the parent track row's `indexed_at` so iOS delta-sync (which
+// filters tracks via `WHERE indexed_at > ?`, see ListTracks) surfaces
+// the new variant on the next manifest fetch. Both writes happen in
+// a single transaction; if the INSERT succeeds but the parent UPDATE
+// fails (e.g. driver error), `defer tx.Rollback()` unwinds cleanly so
+// the variant doesn't appear without its parent row's freshness signal.
+//
+// Without the bump, an iOS client that submitted an upscale request,
+// got `enqueued=0` (variant cached) plus a successful `scanShare`, would
+// still NOT see the variant — the parent row's `indexed_at` predates
+// `share.lastScanFinishedAt`, so it falls outside the delta window.
+// The wand stays at `.inFlight` for 10 min, then flips to `.stalled`.
+//
 // Holds `s.mu` per the writer contract. Replacement semantics
 // mirror UpsertTrack — re-running `bridge upscale --force` re-
 // converts and overwrites the prior row's metadata cleanly.
 func (s *Store) UpsertVariant(v VariantRow) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.Exec(`
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() // no-op after Commit; structural rollback guarantee.
+	if _, err := tx.Exec(`
 		INSERT INTO track_variants
 			(source_path, variant_id, sidecar_path, format,
 			 sample_rate, bits_per_sample, size_bytes,
@@ -1406,8 +1440,44 @@ func (s *Store) UpsertVariant(v VariantRow) error {
 			created_at      = excluded.created_at
 	`, v.SourcePath, v.VariantID, v.SidecarPath, v.Format,
 		v.SampleRate, v.BitsPerSample, v.SizeBytes,
-		v.SourceMTimeNS, v.SourceSize, v.SoxSettings, v.CreatedAt)
-	return err
+		v.SourceMTimeNS, v.SourceSize, v.SoxSettings, v.CreatedAt); err != nil {
+		return err
+	}
+	// Parent indexed_at bump. UPDATE on a missing parent is a no-op
+	// (RowsAffected=0) but the FK on track_variants.source_path with
+	// ON DELETE CASCADE means a variant insert with no parent FK-fails
+	// at the INSERT above before we ever reach here — so a no-op UPDATE
+	// implies an out-of-band parent delete in another transaction
+	// (impossible under our `s.mu` contract). Safe to ignore.
+	//
+	// Strictly-advancing indexed_at update via CASE WHEN form. Three
+	// guarantees in one expression:
+	//   1. Monotonic — indexed_at can only advance, never regress
+	//      (defense against past-clock injection / NTP rewind).
+	//      (Qodo on PR #156, round 1.)
+	//   2. STRICTLY advancing — when the new clock value equals the
+	//      stored indexed_at (rapid back-to-back variant writes,
+	//      injected-clock test scenarios, low-resolution wall clocks),
+	//      we increment by 1 ns instead of leaving the value
+	//      unchanged. Without this, a real variant change can be
+	//      invisible to clients that already synced at the equal
+	//      timestamp (delta-sync filter is `indexed_at > since`).
+	//      (CodeRabbit on PR #156, round 2.)
+	//   3. Single-statement / single round-trip — no read-then-write
+	//      pattern that would race with a concurrent variant write
+	//      under our `s.mu` writer-serialization contract anyway, but
+	//      keeping it atomic is also marginally faster.
+	now := s.now().UnixNano()
+	if _, err := tx.Exec(`
+		UPDATE tracks SET indexed_at = CASE
+			WHEN indexed_at >= ? THEN indexed_at + 1
+			ELSE ?
+		END
+		WHERE path = ?
+	`, now, now, v.SourcePath); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // GetVariant fetches one row by (source_path, variant_id). Returns
@@ -1537,14 +1607,60 @@ func (s *Store) AllVariants() ([]VariantRow, error) {
 	return out, rows.Err()
 }
 
-// DeleteVariant removes one row by (source_path, variant_id). Holds
-// `s.mu`. Caller is responsible for removing the on-disk sidecar
+// DeleteVariant removes one row by (source_path, variant_id) AND bumps
+// the parent track row's `indexed_at` so iOS delta-sync sees the
+// removal on the next manifest fetch. Both writes happen in a single
+// transaction; `defer tx.Rollback()` is the structural unwind guarantee.
+//
+// **Skips the bump on a no-op delete** (RowsAffected==0): when the
+// requested (source_path, variant_id) didn't exist, the variant set
+// is unchanged and a manifest-churn-inducing indexed_at bump would be
+// false signal to iOS clients (CodeRabbit + Gemini on PR #156).
+//
+// Currently has no production callers (the `bridge upscale --gc` path
+// in cmd/bridge/upscale.go walks the filesystem and removes orphan
+// sidecar files; it does not touch DB rows). Defensive plumbing for the
+// case a future caller does delete a variant — the bump symmetry
+// matches UpsertVariant so iOS doesn't miss the disappearance.
+//
+// Holds `s.mu`. Caller is responsible for removing the on-disk sidecar
 // file — same separation-of-concerns as DeleteTrack pre-cleanup.
 func (s *Store) DeleteVariant(sourcePath, variantID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.Exec(`DELETE FROM track_variants WHERE source_path = ? AND variant_id = ?`, sourcePath, variantID)
-	return err
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`DELETE FROM track_variants WHERE source_path = ? AND variant_id = ?`,
+		sourcePath, variantID)
+	if err != nil {
+		return err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows > 0 {
+		// Strictly-advancing indexed_at update — see UpsertVariant
+		// for the full rationale. Same CASE WHEN form so a clock
+		// equality (test injection, low-resolution wall clock,
+		// rapid back-to-back variant writes) still produces a
+		// strictly-greater indexed_at, keeping
+		// `delta-sync WHERE indexed_at > since` reliable.
+		now := s.now().UnixNano()
+		if _, err := tx.Exec(`
+			UPDATE tracks SET indexed_at = CASE
+				WHEN indexed_at >= ? THEN indexed_at + 1
+				ELSE ?
+			END
+			WHERE path = ?
+		`, now, now, sourcePath); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // CountVariants returns (rowCount, totalSizeBytes) across the

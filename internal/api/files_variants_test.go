@@ -361,6 +361,46 @@ func TestHealthAdvertisesUpscaleEnabled(t *testing.T) {
 	}
 }
 
+// TestHealthAdvertisesVariantBumpsIndexFeature — iOS uses the
+// presence of "variantBumpsIndex" in `HealthResponse.Features` to
+// skip its +600s "silent fullRescan recovery" rung. Without this
+// gate, iOS clients paired with bridges that ship the indexed_at
+// bump would still pay the full-manifest fetch cost as defense-in-
+// depth even though the bridge already provides the underlying
+// guarantee. Pin the wire shape so a typo / accidental rename
+// can't silently break that gate.
+func TestHealthAdvertisesVariantBumpsIndexFeature(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := &config.Config{
+		LibraryRoots:  []string{tmp},
+		ListenAddress: ":7788",
+		LibraryName:   "Test",
+	}
+	store, _ := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
+	srv := New(cfg, store, nil, "fp")
+	hs := httptest.NewServer(srv.Handler())
+	t.Cleanup(hs.Close)
+
+	resp := authGet(t, hs, "/v1/health", "")
+	body := readAllOrFail(t, resp)
+	resp.Body.Close()
+
+	var got HealthResponse
+	if err := jsonUnmarshalForTest(body, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	found := false
+	for _, f := range got.Features {
+		if f == "variantBumpsIndex" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("Features did not contain \"variantBumpsIndex\"; got %v", got.Features)
+	}
+}
+
 // readAllOrFail is a tiny io.ReadAll wrapper that fails the test
 // on a read error, keeping per-case bodies focused on the
 // assertion they care about.
