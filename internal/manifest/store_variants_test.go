@@ -516,11 +516,19 @@ func TestDeleteVariantNoOpSkipsBump(t *testing.T) {
 }
 
 // TestUpsertVariantMonotonicGuard: an injected clock that returns a
-// timestamp in the PAST must NOT regress the parent row's
-// `indexed_at` — the SQL `MAX(indexed_at, ?)` form makes the bump
-// monotonic, preserving the `WHERE indexed_at > since` delta-sync
-// invariant under any clock-rewind condition (test injection, NTP
-// step, manual wall-clock change). (Qodo on PR #156.)
+// timestamp in the PAST must NOT regress the parent row's `indexed_at`,
+// AND a real variant write must STRICTLY advance the value (never
+// equality). The CASE WHEN form on the SQL UPDATE delivers both:
+//   - past-clock → use the existing larger indexed_at + 1 (strict)
+//   - future-clock → use the new value (also strictly larger)
+//   - equal-clock → use existing + 1 (strict, the round-2 fix)
+//
+// Without strict advancement, a back-to-back variant write at the same
+// nanosecond (rapid test seeds, low-resolution wall clocks, NTP
+// equality) would leave indexed_at unchanged — a client that synced
+// at that timestamp would still miss the second mutation under the
+// `WHERE indexed_at > since` delta-sync filter.
+// (Qodo PR #156 round 1 — monotonic; CodeRabbit round 2 — strict.)
 func TestUpsertVariantMonotonicGuard(t *testing.T) {
 	s := openTempStore(t)
 	t.Cleanup(func() { _ = s.Close() })
@@ -558,10 +566,57 @@ func TestUpsertVariantMonotonicGuard(t *testing.T) {
 		t.Errorf("indexed_at regressed under past-clock injection: before=%d after=%d (clock returned %d)",
 			initialIndexedAt, afterIndexedAt, pastTimestamp)
 	}
-	// The MAX(...) form should leave indexed_at unchanged when the
-	// new value is in the past — equality is the expected outcome.
-	if afterIndexedAt != initialIndexedAt {
-		t.Errorf("expected indexed_at to stay at %d (MAX guard), got %d", initialIndexedAt, afterIndexedAt)
+	// Strict advancement: not just monotonic, but STRICTLY greater.
+	// Past-clock case lands in the CASE WHEN branch that takes
+	// existing+1 ns, so afterIndexedAt should equal initialIndexedAt + 1.
+	if afterIndexedAt <= initialIndexedAt {
+		t.Errorf("expected strict advancement (indexed_at > %d), got %d", initialIndexedAt, afterIndexedAt)
+	}
+	if afterIndexedAt != initialIndexedAt+1 {
+		t.Errorf("past-clock should produce existing+1 strict bump: expected %d, got %d", initialIndexedAt+1, afterIndexedAt)
+	}
+}
+
+// TestUpsertVariantEqualClockStillAdvances: when the injected clock
+// returns EXACTLY the parent's current indexed_at (rapid back-to-back
+// writes at same nanosecond, low-resolution wall clocks, NTP equality),
+// the CASE WHEN form must still produce a strict advance — otherwise
+// clients that synced at the equal timestamp would miss the variant
+// change under `WHERE indexed_at > since`. (CodeRabbit on PR #156 round 2.)
+func TestUpsertVariantEqualClockStillAdvances(t *testing.T) {
+	s := openTempStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+
+	upsertParent(t, s, "Music/A/1.flac")
+	var initialIndexedAt int64
+	if err := s.db.QueryRow(
+		`SELECT indexed_at FROM tracks WHERE path = ?`, "Music/A/1.flac",
+	).Scan(&initialIndexedAt); err != nil {
+		t.Fatalf("read parent indexed_at: %v", err)
+	}
+
+	// Pin the clock to EXACTLY the existing indexed_at — the equality
+	// case the bot review flagged.
+	s.now = func() time.Time { return time.Unix(0, initialIndexedAt) }
+
+	if err := s.UpsertVariant(VariantRow{
+		SourcePath: "Music/A/1.flac", VariantID: "upscaled-v1-176400-24",
+		SidecarPath: "/tmp/x.flac", Format: "flac",
+		SampleRate: 176400, BitsPerSample: 24, SizeBytes: 100,
+		SourceMTimeNS: 1, SourceSize: 1, SoxSettings: "{}", CreatedAt: 1,
+	}); err != nil {
+		t.Fatalf("UpsertVariant: %v", err)
+	}
+
+	var afterIndexedAt int64
+	if err := s.db.QueryRow(
+		`SELECT indexed_at FROM tracks WHERE path = ?`, "Music/A/1.flac",
+	).Scan(&afterIndexedAt); err != nil {
+		t.Fatalf("read parent indexed_at: %v", err)
+	}
+	if afterIndexedAt != initialIndexedAt+1 {
+		t.Errorf("equal-clock UpsertVariant did not strictly advance: before=%d after=%d (want %d)",
+			initialIndexedAt, afterIndexedAt, initialIndexedAt+1)
 	}
 }
 

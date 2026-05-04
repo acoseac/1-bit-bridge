@@ -1450,13 +1450,31 @@ func (s *Store) UpsertVariant(v VariantRow) error {
 	// implies an out-of-band parent delete in another transaction
 	// (impossible under our `s.mu` contract). Safe to ignore.
 	//
-	// Monotonic guard via MAX(indexed_at, ?): even with an injected
-	// test clock that returns a value in the past (or under wall-clock
-	// skew from NTP rewind), the parent row's indexed_at can only
-	// advance — never regress — preserving the `WHERE indexed_at > since`
-	// delta-sync invariant (Qodo on PR #156).
-	if _, err := tx.Exec(`UPDATE tracks SET indexed_at = MAX(indexed_at, ?) WHERE path = ?`,
-		s.now().UnixNano(), v.SourcePath); err != nil {
+	// Strictly-advancing indexed_at update via CASE WHEN form. Three
+	// guarantees in one expression:
+	//   1. Monotonic — indexed_at can only advance, never regress
+	//      (defense against past-clock injection / NTP rewind).
+	//      (Qodo on PR #156, round 1.)
+	//   2. STRICTLY advancing — when the new clock value equals the
+	//      stored indexed_at (rapid back-to-back variant writes,
+	//      injected-clock test scenarios, low-resolution wall clocks),
+	//      we increment by 1 ns instead of leaving the value
+	//      unchanged. Without this, a real variant change can be
+	//      invisible to clients that already synced at the equal
+	//      timestamp (delta-sync filter is `indexed_at > since`).
+	//      (CodeRabbit on PR #156, round 2.)
+	//   3. Single-statement / single round-trip — no read-then-write
+	//      pattern that would race with a concurrent variant write
+	//      under our `s.mu` writer-serialization contract anyway, but
+	//      keeping it atomic is also marginally faster.
+	now := s.now().UnixNano()
+	if _, err := tx.Exec(`
+		UPDATE tracks SET indexed_at = CASE
+			WHEN indexed_at >= ? THEN indexed_at + 1
+			ELSE ?
+		END
+		WHERE path = ?
+	`, now, now, v.SourcePath); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -1625,14 +1643,20 @@ func (s *Store) DeleteVariant(sourcePath, variantID string) error {
 		return err
 	}
 	if rows > 0 {
-		// Monotonic guard via MAX(indexed_at, ?): even with an
-		// injected test clock that returns a value in the past
-		// (or under wall-clock skew from NTP rewind), the parent
-		// row's indexed_at can only advance — never regress —
-		// preserving the `WHERE indexed_at > since` delta-sync
-		// invariant (Qodo on PR #156).
-		if _, err := tx.Exec(`UPDATE tracks SET indexed_at = MAX(indexed_at, ?) WHERE path = ?`,
-			s.now().UnixNano(), sourcePath); err != nil {
+		// Strictly-advancing indexed_at update — see UpsertVariant
+		// for the full rationale. Same CASE WHEN form so a clock
+		// equality (test injection, low-resolution wall clock,
+		// rapid back-to-back variant writes) still produces a
+		// strictly-greater indexed_at, keeping
+		// `delta-sync WHERE indexed_at > since` reliable.
+		now := s.now().UnixNano()
+		if _, err := tx.Exec(`
+			UPDATE tracks SET indexed_at = CASE
+				WHEN indexed_at >= ? THEN indexed_at + 1
+				ELSE ?
+			END
+			WHERE path = ?
+		`, now, now, sourcePath); err != nil {
 			return err
 		}
 	}
