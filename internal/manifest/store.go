@@ -1449,7 +1449,13 @@ func (s *Store) UpsertVariant(v VariantRow) error {
 	// at the INSERT above before we ever reach here — so a no-op UPDATE
 	// implies an out-of-band parent delete in another transaction
 	// (impossible under our `s.mu` contract). Safe to ignore.
-	if _, err := tx.Exec(`UPDATE tracks SET indexed_at = ? WHERE path = ?`,
+	//
+	// Monotonic guard via MAX(indexed_at, ?): even with an injected
+	// test clock that returns a value in the past (or under wall-clock
+	// skew from NTP rewind), the parent row's indexed_at can only
+	// advance — never regress — preserving the `WHERE indexed_at > since`
+	// delta-sync invariant (Qodo on PR #156).
+	if _, err := tx.Exec(`UPDATE tracks SET indexed_at = MAX(indexed_at, ?) WHERE path = ?`,
 		s.now().UnixNano(), v.SourcePath); err != nil {
 		return err
 	}
@@ -1588,6 +1594,11 @@ func (s *Store) AllVariants() ([]VariantRow, error) {
 // removal on the next manifest fetch. Both writes happen in a single
 // transaction; `defer tx.Rollback()` is the structural unwind guarantee.
 //
+// **Skips the bump on a no-op delete** (RowsAffected==0): when the
+// requested (source_path, variant_id) didn't exist, the variant set
+// is unchanged and a manifest-churn-inducing indexed_at bump would be
+// false signal to iOS clients (CodeRabbit + Gemini on PR #156).
+//
 // Currently has no production callers (the `bridge upscale --gc` path
 // in cmd/bridge/upscale.go walks the filesystem and removes orphan
 // sidecar files; it does not touch DB rows). Defensive plumbing for the
@@ -1604,13 +1615,26 @@ func (s *Store) DeleteVariant(sourcePath, variantID string) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`DELETE FROM track_variants WHERE source_path = ? AND variant_id = ?`,
-		sourcePath, variantID); err != nil {
+	res, err := tx.Exec(`DELETE FROM track_variants WHERE source_path = ? AND variant_id = ?`,
+		sourcePath, variantID)
+	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`UPDATE tracks SET indexed_at = ? WHERE path = ?`,
-		s.now().UnixNano(), sourcePath); err != nil {
+	rows, err := res.RowsAffected()
+	if err != nil {
 		return err
+	}
+	if rows > 0 {
+		// Monotonic guard via MAX(indexed_at, ?): even with an
+		// injected test clock that returns a value in the past
+		// (or under wall-clock skew from NTP rewind), the parent
+		// row's indexed_at can only advance — never regress —
+		// preserving the `WHERE indexed_at > since` delta-sync
+		// invariant (Qodo on PR #156).
+		if _, err := tx.Exec(`UPDATE tracks SET indexed_at = MAX(indexed_at, ?) WHERE path = ?`,
+			s.now().UnixNano(), sourcePath); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }

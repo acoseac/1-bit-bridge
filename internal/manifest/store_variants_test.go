@@ -423,9 +423,20 @@ func TestDeleteVariantBumpsParentIndexedAt(t *testing.T) {
 
 	upsertParent(t, s, "Music/A/1.flac")
 
-	// First insert a variant to delete. Use a clock for the upsert
-	// so we know exactly where indexed_at sits going into the delete.
-	preDeleteAt := time.Now().Add(-1 * time.Hour).UnixNano()
+	// Read the parent's UpsertTrack-stamped indexed_at to seed the
+	// clock past it (the MAX guard would otherwise hold indexed_at
+	// at the parent's value).
+	var parentIndexedAt int64
+	if err := s.db.QueryRow(
+		`SELECT indexed_at FROM tracks WHERE path = ?`, "Music/A/1.flac",
+	).Scan(&parentIndexedAt); err != nil {
+		t.Fatalf("read parent indexed_at: %v", err)
+	}
+
+	// First insert a variant to delete. Clock returns parent + 1h
+	// so the UpsertVariant bump unambiguously advances past the
+	// UpsertTrack-stamped value (MAX guard succeeds).
+	preDeleteAt := parentIndexedAt + (1 * time.Hour).Nanoseconds()
 	s.now = func() time.Time { return time.Unix(0, preDeleteAt) }
 	if err := s.UpsertVariant(VariantRow{
 		SourcePath: "Music/A/1.flac", VariantID: "upscaled-v1-176400-24",
@@ -462,6 +473,95 @@ func TestDeleteVariantBumpsParentIndexedAt(t *testing.T) {
 	}
 	if afterDelete != expectedAfter {
 		t.Errorf("post-delete indexed_at = %d, want %d", afterDelete, expectedAfter)
+	}
+}
+
+// TestDeleteVariantNoOpSkipsBump: when the requested
+// (source_path, variant_id) doesn't exist, the parent row's
+// `indexed_at` MUST NOT advance — there's no actual variant-set
+// change to propagate to iOS via delta-sync, and bumping anyway
+// would create false manifest churn (CodeRabbit + Gemini on PR #156).
+func TestDeleteVariantNoOpSkipsBump(t *testing.T) {
+	s := openTempStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+
+	upsertParent(t, s, "Music/A/1.flac")
+	var beforeIndexedAt int64
+	if err := s.db.QueryRow(
+		`SELECT indexed_at FROM tracks WHERE path = ?`, "Music/A/1.flac",
+	).Scan(&beforeIndexedAt); err != nil {
+		t.Fatalf("read parent indexed_at: %v", err)
+	}
+
+	// Inject a clock that would advance indexed_at if the bump
+	// fired. The test asserts it does NOT.
+	expectedNoBump := beforeIndexedAt + (1 * time.Hour).Nanoseconds()
+	s.now = func() time.Time { return time.Unix(0, expectedNoBump) }
+
+	// Delete a (path, variantID) pair that doesn't exist. RowsAffected==0.
+	if err := s.DeleteVariant("Music/A/1.flac", "nonexistent-variant-id"); err != nil {
+		t.Fatalf("DeleteVariant (no-op): %v", err)
+	}
+
+	var afterIndexedAt int64
+	if err := s.db.QueryRow(
+		`SELECT indexed_at FROM tracks WHERE path = ?`, "Music/A/1.flac",
+	).Scan(&afterIndexedAt); err != nil {
+		t.Fatalf("read parent indexed_at after no-op delete: %v", err)
+	}
+	if afterIndexedAt != beforeIndexedAt {
+		t.Errorf("no-op DeleteVariant unexpectedly bumped indexed_at: before=%d after=%d (clock would have set %d)",
+			beforeIndexedAt, afterIndexedAt, expectedNoBump)
+	}
+}
+
+// TestUpsertVariantMonotonicGuard: an injected clock that returns a
+// timestamp in the PAST must NOT regress the parent row's
+// `indexed_at` — the SQL `MAX(indexed_at, ?)` form makes the bump
+// monotonic, preserving the `WHERE indexed_at > since` delta-sync
+// invariant under any clock-rewind condition (test injection, NTP
+// step, manual wall-clock change). (Qodo on PR #156.)
+func TestUpsertVariantMonotonicGuard(t *testing.T) {
+	s := openTempStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+
+	upsertParent(t, s, "Music/A/1.flac")
+	var initialIndexedAt int64
+	if err := s.db.QueryRow(
+		`SELECT indexed_at FROM tracks WHERE path = ?`, "Music/A/1.flac",
+	).Scan(&initialIndexedAt); err != nil {
+		t.Fatalf("read parent indexed_at: %v", err)
+	}
+
+	// Inject a clock that returns a timestamp WAY in the past — if
+	// the guard isn't applied, the UPDATE would regress indexed_at
+	// to this value and break delta-sync.
+	pastTimestamp := initialIndexedAt - (1 * time.Hour).Nanoseconds()
+	s.now = func() time.Time { return time.Unix(0, pastTimestamp) }
+
+	if err := s.UpsertVariant(VariantRow{
+		SourcePath: "Music/A/1.flac", VariantID: "upscaled-v1-176400-24",
+		SidecarPath: "/tmp/x.flac", Format: "flac",
+		SampleRate: 176400, BitsPerSample: 24, SizeBytes: 100,
+		SourceMTimeNS: 1, SourceSize: 1, SoxSettings: "{}", CreatedAt: 1,
+	}); err != nil {
+		t.Fatalf("UpsertVariant: %v", err)
+	}
+
+	var afterIndexedAt int64
+	if err := s.db.QueryRow(
+		`SELECT indexed_at FROM tracks WHERE path = ?`, "Music/A/1.flac",
+	).Scan(&afterIndexedAt); err != nil {
+		t.Fatalf("read parent indexed_at after UpsertVariant: %v", err)
+	}
+	if afterIndexedAt < initialIndexedAt {
+		t.Errorf("indexed_at regressed under past-clock injection: before=%d after=%d (clock returned %d)",
+			initialIndexedAt, afterIndexedAt, pastTimestamp)
+	}
+	// The MAX(...) form should leave indexed_at unchanged when the
+	// new value is in the past — equality is the expected outcome.
+	if afterIndexedAt != initialIndexedAt {
+		t.Errorf("expected indexed_at to stay at %d (MAX guard), got %d", initialIndexedAt, afterIndexedAt)
 	}
 }
 
