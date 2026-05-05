@@ -25,6 +25,15 @@ func newTmpStore(t *testing.T) (*Store, string) {
 	return s, path
 }
 
+// loadedForTest exposes the in-memory mtime snapshot for cross-process
+// race tests. Method lives on *Store but in a _test.go file, so it
+// compiles only during test runs and never ships in the binary.
+func (s *Store) loadedForTest() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.loaded
+}
+
 func TestOpenStoreMissingFile(t *testing.T) {
 	s, path := newTmpStore(t)
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
@@ -312,6 +321,69 @@ func TestPickUpExternalMint(t *testing.T) {
 
 	if _, ok := s1.Validate(raw); !ok {
 		t.Error("s1 did not pick up the externally-minted token")
+	}
+}
+
+func TestPickUpExternalMintSameMtime(t *testing.T) {
+	// Coarse filesystem mtime resolution (1 s on FAT32 / many NAS exports)
+	// can land a sibling-process write in the same tick as our last
+	// persist. Pre-fix, reloadIfStale's `info.ModTime().After(s.loaded)`
+	// returned false for that case and silently skipped the reload —
+	// dropping the new token on the next persist. Post-fix, the size
+	// tiebreaker catches it.
+	//
+	// Setup mirrors the production race:
+	//   1. s1 (the long-running serve process) mints a token, persisting
+	//      a real file with a real mtime. Without this seed step the
+	//      tokens.json file doesn't yet exist when s1 captures `loaded`,
+	//      and the resulting zero-time clamp tests the wrong invariant
+	//      (Caught by CodeRabbit on PR #159's first commit.)
+	//   2. s2 (the sibling `bridge pair` process) opens the same file
+	//      and mints a second token, growing the file by one token's
+	//      worth of bytes.
+	//   3. We force-clamp the file's mtime back to s1's pre-step-2
+	//      snapshot — deterministic on any host regardless of what the
+	//      host filesystem actually reports as mtime granularity.
+	//   4. s1.Validate(raw_from_s2) MUST hit. Pre-fix this fails: mtime
+	//      Equal → reload skipped → s1 still has only its own token →
+	//      Validate misses. Post-fix the size tiebreaker triggers reload.
+	s1, path := newTmpStore(t)
+	if _, _, err := s1.Mint("seed"); err != nil {
+		t.Fatalf("s1 seed Mint: %v", err)
+	}
+	loaded := s1.loadedForTest()
+	if loaded.IsZero() {
+		t.Fatal("s1.loaded was zero after Mint — store not persisted as expected")
+	}
+
+	s2, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _, _ := s2.Mint("external-client")
+
+	if err := os.Chtimes(path, loaded, loaded); err != nil {
+		t.Fatal(err)
+	}
+	// Verify the host filesystem honored the requested timestamp at
+	// nanosecond precision. macOS APFS preserves nanos; some other
+	// filesystems (FAT32, ext3) round to seconds. If the clamp didn't
+	// take, the test would falsely pass via the !Equal(mtime) branch
+	// instead of exercising the size tiebreaker — we'd be measuring
+	// the wrong contract. Skip rather than fail so the test stays
+	// useful on filesystems with looser mtime semantics (CodeRabbit
+	// minor review on PR #159's second round).
+	postChtimes, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !postChtimes.ModTime().Equal(loaded) {
+		t.Skipf("host filesystem rounded the requested mtime (%v → %v); test cannot exercise size-tiebreaker path here",
+			loaded, postChtimes.ModTime())
+	}
+
+	if _, ok := s1.Validate(raw); !ok {
+		t.Error("s1 missed the externally-minted token under same-mtime write")
 	}
 }
 
