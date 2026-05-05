@@ -101,9 +101,24 @@ const lastUsedFlushInterval = 30 * time.Second
 type Store struct {
 	path string
 
-	mu            sync.Mutex
-	tokens        []Token
-	loaded        time.Time // mtime of tokens file when we last loaded
+	mu     sync.Mutex
+	tokens []Token
+	// loaded + lastSize together identify the on-disk file state we
+	// reflect in memory. mtime alone is insufficient: many filesystems
+	// (FAT32, several NAS exports, some ZFS configurations) coarsen
+	// mtime to 1 s, so a sibling process (`bridge pair` writing while
+	// `bridge serve` is running) can land a write within the same tick
+	// our last persist captured. In that scenario `info.ModTime() ==
+	// s.loaded` and reloadIfStale's mtime-only check skips the reload,
+	// silently dropping the new token on the next persist. Using size
+	// as a tiebreaker catches the realistic same-tick scenarios — Mint
+	// (size grows), Revoke (size shrinks), Rotate (Hash field
+	// rewrites, size changes by re-marshalling). The pathological
+	// case (two distinct writes producing byte-identical files) is
+	// impossible by construction: every minted token carries a fresh
+	// random hash.
+	loaded        time.Time
+	lastSize      int64
 	isEmpty       bool      // tokens file didn't exist when we last looked
 	lastUsedFlush time.Time // last persist() driven by a LastUsedAt update
 }
@@ -130,6 +145,7 @@ func (s *Store) reload() error {
 		s.tokens = nil
 		s.isEmpty = true
 		s.loaded = time.Time{}
+		s.lastSize = 0
 		return nil
 	}
 	if err != nil {
@@ -189,12 +205,14 @@ func (s *Store) reload() error {
 	s.tokens = tokens
 	s.isEmpty = false
 	s.loaded = info.ModTime()
+	s.lastSize = info.Size()
 	return nil
 }
 
-// reloadIfStale compares the current file mtime to what we loaded and reloads
-// if it's newer. Called from Validate so a `bridge pair` run picks up
-// automatically in a concurrently-running `bridge serve`. Caller must hold mu.
+// reloadIfStale compares the current file mtime AND size to what we loaded
+// and reloads if either differs. Called from Validate so a `bridge pair` run
+// picks up automatically in a concurrently-running `bridge serve`. Caller
+// must hold mu. See Store.lastSize for the rationale on the size tiebreaker.
 func (s *Store) reloadIfStale() error {
 	info, err := os.Stat(s.path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -202,13 +220,14 @@ func (s *Store) reloadIfStale() error {
 			s.tokens = nil
 			s.isEmpty = true
 			s.loaded = time.Time{}
+			s.lastSize = 0
 		}
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	if info.ModTime().After(s.loaded) {
+	if !info.ModTime().Equal(s.loaded) || info.Size() != s.lastSize {
 		return s.reload()
 	}
 	return nil
@@ -275,6 +294,7 @@ func (s *Store) persist() error {
 	tmpName = "" // suppress defer cleanup
 	if info, err := os.Stat(s.path); err == nil {
 		s.loaded = info.ModTime()
+		s.lastSize = info.Size()
 		s.isEmpty = false
 	}
 	// Every successful persist resets the LastUsedAt debounce clock —

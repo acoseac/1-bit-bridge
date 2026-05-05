@@ -25,6 +25,15 @@ func newTmpStore(t *testing.T) (*Store, string) {
 	return s, path
 }
 
+// loadedForTest exposes the in-memory mtime snapshot for cross-process
+// race tests. Method lives on *Store but in a _test.go file, so it
+// compiles only during test runs and never ships in the binary.
+func (s *Store) loadedForTest() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.loaded
+}
+
 func TestOpenStoreMissingFile(t *testing.T) {
 	s, path := newTmpStore(t)
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
@@ -312,6 +321,34 @@ func TestPickUpExternalMint(t *testing.T) {
 
 	if _, ok := s1.Validate(raw); !ok {
 		t.Error("s1 did not pick up the externally-minted token")
+	}
+}
+
+func TestPickUpExternalMintSameMtime(t *testing.T) {
+	// Coarse filesystem mtime resolution (1 s on FAT32 / many NAS exports)
+	// can land a sibling-process write in the same tick as our last
+	// persist. Pre-fix, reloadIfStale's `info.ModTime().After(s.loaded)`
+	// returned false for that case and silently skipped the reload —
+	// dropping the new token on the next persist. Post-fix, the size
+	// tiebreaker catches it.
+	//
+	// We force-clamp the file's mtime to s1's snapshot so the test is
+	// deterministic regardless of what the host filesystem actually
+	// reports as its mtime granularity.
+	s1, path := newTmpStore(t)
+	s2, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _, _ := s2.Mint("external-client")
+
+	loaded := s1.loadedForTest()
+	if err := os.Chtimes(path, loaded, loaded); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := s1.Validate(raw); !ok {
+		t.Error("s1 missed the externally-minted token under same-mtime write")
 	}
 }
 
