@@ -332,17 +332,36 @@ func TestPickUpExternalMintSameMtime(t *testing.T) {
 	// dropping the new token on the next persist. Post-fix, the size
 	// tiebreaker catches it.
 	//
-	// We force-clamp the file's mtime to s1's snapshot so the test is
-	// deterministic regardless of what the host filesystem actually
-	// reports as its mtime granularity.
+	// Setup mirrors the production race:
+	//   1. s1 (the long-running serve process) mints a token, persisting
+	//      a real file with a real mtime. Without this seed step the
+	//      tokens.json file doesn't yet exist when s1 captures `loaded`,
+	//      and the resulting zero-time clamp tests the wrong invariant
+	//      (Caught by CodeRabbit on PR #159's first commit.)
+	//   2. s2 (the sibling `bridge pair` process) opens the same file
+	//      and mints a second token, growing the file by one token's
+	//      worth of bytes.
+	//   3. We force-clamp the file's mtime back to s1's pre-step-2
+	//      snapshot — deterministic on any host regardless of what the
+	//      host filesystem actually reports as mtime granularity.
+	//   4. s1.Validate(raw_from_s2) MUST hit. Pre-fix this fails: mtime
+	//      Equal → reload skipped → s1 still has only its own token →
+	//      Validate misses. Post-fix the size tiebreaker triggers reload.
 	s1, path := newTmpStore(t)
+	if _, _, err := s1.Mint("seed"); err != nil {
+		t.Fatalf("s1 seed Mint: %v", err)
+	}
+	loaded := s1.loadedForTest()
+	if loaded.IsZero() {
+		t.Fatal("s1.loaded was zero after Mint — store not persisted as expected")
+	}
+
 	s2, err := OpenStore(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	raw, _, _ := s2.Mint("external-client")
 
-	loaded := s1.loadedForTest()
 	if err := os.Chtimes(path, loaded, loaded); err != nil {
 		t.Fatal(err)
 	}

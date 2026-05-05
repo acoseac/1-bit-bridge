@@ -111,12 +111,28 @@ type Store struct {
 	// our last persist captured. In that scenario `info.ModTime() ==
 	// s.loaded` and reloadIfStale's mtime-only check skips the reload,
 	// silently dropping the new token on the next persist. Using size
-	// as a tiebreaker catches the realistic same-tick scenarios — Mint
-	// (size grows), Revoke (size shrinks), Rotate (Hash field
-	// rewrites, size changes by re-marshalling). The pathological
-	// case (two distinct writes producing byte-identical files) is
-	// impossible by construction: every minted token carries a fresh
-	// random hash.
+	// as a tiebreaker catches the realistic same-tick scenarios:
+	//   - Mint (size grows by one token's JSON shape)
+	//   - Revoke (size shrinks by one token's JSON shape)
+	//   - First-ever Rotate (RotatedAt field toggles from omitted to
+	//     RFC3339Nano-stamped)
+	//   - Any insert/clear of a timestamp field that toggles between
+	//     omitempty-absent and present.
+	//
+	// Known limitation (CodeRabbit on PR #159): re-rotating an
+	// already-rotated token leaves Hash + RotatedAt both as same-
+	// length strings (Hash is 64 hex chars; RFC3339Nano stays
+	// constant-length once sub-second precision is established).
+	// Two such rotations landing in the same mtime tick would
+	// produce a same-size file and slip past this check.
+	// Fingerprinting via SHA256 content hash was considered;
+	// rejected because reloadIfStale runs on every authenticated
+	// request and reading the file (or hashing it) on the hot path
+	// is too costly. The narrowness of the residual race
+	// (operator-initiated double-rotation, sub-1s apart, byte-
+	// equal serialization) makes the trade favour the cheap check;
+	// a follow-up "the writer just changed the file, force a
+	// reload" affordance can close it for callers that care.
 	loaded        time.Time
 	lastSize      int64
 	isEmpty       bool      // tokens file didn't exist when we last looked
