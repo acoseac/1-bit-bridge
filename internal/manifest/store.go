@@ -1304,6 +1304,52 @@ func (s *Store) TrackPaths() ([]string, error) {
 	return out, rows.Err()
 }
 
+// TrackPathsUnder returns every track path at or under relDir (sorted).
+// relDir is in the library-relative forward-slash form used in storage.
+//
+// Three normalizations on relDir:
+//   - "" or "." (single-root whole-library scope) returns every track,
+//     matching TrackPaths.
+//   - "<base>/." (multi-root whole-root sentinel; relPath form for an
+//     fsnotify event on the root itself) returns every track under
+//     "<base>/".
+//   - otherwise the match is "<relDir>/%" with LIKE-special characters
+//     escaped via the ESCAPE clause so a directory whose name happens to
+//     contain "%" or "_" doesn't widen the match.
+//
+// Tracks are files, never directories, so a track path can never equal
+// relDir itself — only the descendant pattern is needed.
+//
+// Used by ScanSubtree's bounded deletion pass.
+func (s *Store) TrackPathsUnder(relDir string) ([]string, error) {
+	if relDir == "" || relDir == "." {
+		return s.TrackPaths()
+	}
+	var pattern string
+	if strings.HasSuffix(relDir, "/.") {
+		pattern = likeEscape(strings.TrimSuffix(relDir, ".")) + "%"
+	} else {
+		pattern = likeEscape(relDir) + "/%"
+	}
+	rows, err := s.db.Query(
+		`SELECT path FROM tracks WHERE path LIKE ? ESCAPE '\' ORDER BY path ASC`,
+		pattern,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
 // ----- folders -----
 
 // UpsertFolder records a folder's mtime so the scanner can skip unchanged
@@ -1351,6 +1397,105 @@ func (s *Store) ListFolders() ([]Folder, error) {
 		out = append(out, Folder{Path: p, ModTime: time.Unix(0, ns).UTC()})
 	}
 	return out, rows.Err()
+}
+
+// FolderPaths returns every known folder path (sorted). Folder
+// analogue of TrackPaths — used by the scanner's orphan-folder
+// deletion pass to enumerate the "before" snapshot. Distinct from
+// ListFolders, which projects (path, mtime) tuples and is the right
+// shape for callers that need both fields.
+func (s *Store) FolderPaths() ([]string, error) {
+	rows, err := s.db.Query(`SELECT path FROM folders ORDER BY path ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// FolderPathsUnder returns every folder path at or under relDir
+// (sorted), INCLUDING relDir itself when a row for it exists.
+// relDir is in the library-relative forward-slash form used in storage.
+//
+// Same three normalizations as TrackPathsUnder. Unlike tracks (which
+// are always files), the row for relDir itself is a real folder row
+// the scanner upserted on its previous walk, so the match must
+// include it — otherwise a "directory was renamed in place" event
+// would leave the original folder row behind.
+//
+// Used by ScanSubtree's bounded deletion pass.
+func (s *Store) FolderPathsUnder(relDir string) ([]string, error) {
+	if relDir == "" || relDir == "." {
+		return s.FolderPaths()
+	}
+	if strings.HasSuffix(relDir, "/.") {
+		// Multi-root whole-root sentinel ("<base>/."): match every
+		// folder under "<base>/". The "<base>/." row IS upserted by
+		// the walker (relPath(root, root, true) returns this form),
+		// so include it via an exact-match alongside the LIKE.
+		stripped := strings.TrimSuffix(relDir, ".")
+		pattern := likeEscape(stripped) + "%"
+		rows, err := s.db.Query(
+			`SELECT path FROM folders WHERE path = ? OR path LIKE ? ESCAPE '\' ORDER BY path ASC`,
+			relDir, pattern,
+		)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		out := []string{}
+		for rows.Next() {
+			var p string
+			if err := rows.Scan(&p); err != nil {
+				return nil, err
+			}
+			out = append(out, p)
+		}
+		return out, rows.Err()
+	}
+	pattern := likeEscape(relDir) + "/%"
+	rows, err := s.db.Query(
+		`SELECT path FROM folders WHERE path = ? OR path LIKE ? ESCAPE '\' ORDER BY path ASC`,
+		relDir, pattern,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// DeleteFolder removes a single folder row by exact path. Missing
+// rows are not an error — same idempotent contract as DeleteTrack
+// for the scanner's deletion pass, which iterates over a snapshot
+// that may have raced with an out-of-process delete (admin "remove
+// library root" path).
+//
+// Folders carry no children in the schema (track_variants references
+// tracks, not folders), so this is a single DELETE with no cascade.
+//
+// Holds `s.mu` per the writer contract on Store.
+func (s *Store) DeleteFolder(path string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`DELETE FROM folders WHERE path = ?`, path)
+	return err
 }
 
 // ----- scan_state -----
