@@ -525,6 +525,48 @@ func TestValidateCustomEndpoints_Dedupes(t *testing.T) {
 	}
 }
 
+// TestValidateCustomEndpoints_RejectsOversizedHost verifies the SAN-bloat
+// guard: each accepted hostname is added to the generated TLS cert's
+// SAN list, so a hostile / typo'd entry with a multi-kilobyte hostname
+// would otherwise balloon the cert binary on every reload.
+func TestValidateCustomEndpoints_RejectsOversizedHost(t *testing.T) {
+	// 256-char label exceeds the 255-char cap by one. RFC 1035 max FQDN.
+	longLabel := strings.Repeat("a", maxCustomEndpointHostLen-len(".example.com")+1)
+	longHost := longLabel + ".example.com"
+	in := []string{
+		"https://" + longHost + ":7788",
+		"https://ok.example.com:7788",
+	}
+	kept, warns := ValidateCustomEndpoints(in)
+	if len(kept) != 1 || kept[0] != "https://ok.example.com:7788" {
+		t.Errorf("kept = %v, want only the short host", kept)
+	}
+	if len(warns) != 1 {
+		t.Errorf("expected 1 warning for oversized host, got %d: %v", len(warns), warns)
+	}
+}
+
+// TestValidateCustomEndpoints_AcceptsBoundaryHost pins the boundary at
+// exactly maxCustomEndpointHostLen — the hostname is allowed, not
+// rejected, when its length matches the constant.
+func TestValidateCustomEndpoints_AcceptsBoundaryHost(t *testing.T) {
+	// Construct a hostname of exactly maxCustomEndpointHostLen characters.
+	// "<label>.example.com" where label fills the remaining space.
+	const tld = ".example.com"
+	labelLen := maxCustomEndpointHostLen - len(tld)
+	host := strings.Repeat("a", labelLen) + tld
+	if len(host) != maxCustomEndpointHostLen {
+		t.Fatalf("test bug: host len = %d, want %d", len(host), maxCustomEndpointHostLen)
+	}
+	kept, warns := ValidateCustomEndpoints([]string{"https://" + host + ":7788"})
+	if len(kept) != 1 {
+		t.Errorf("kept = %v, want boundary host accepted", kept)
+	}
+	if len(warns) != 0 {
+		t.Errorf("expected no warnings, got %v", warns)
+	}
+}
+
 // TestConfigValidatePrunesCustomEndpoints verifies that Validate()
 // rewrites the slice in-place — invalid entries are dropped without
 // failing the whole config load.
