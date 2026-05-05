@@ -140,8 +140,12 @@ func TestStoreFolderPathsUnder(t *testing.T) {
 	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
 	defer s.Close()
 	now := time.Now().UTC()
+	// Seed a mix of single-root form rows ("b", "b/album") and multi-root
+	// form rows ("a/." for the rootBase, plus its descendants). In a real
+	// multi-root deployment the walker upserts rootBase as "a/." (not bare
+	// "a") via relPath(root, root, true) — see scanner.go's walkRoot.
 	for _, p := range []string{
-		"a",
+		"a/.",
 		"a/album1",
 		"a/album1/disc1",
 		"a/album2",
@@ -169,10 +173,20 @@ func TestStoreFolderPathsUnder(t *testing.T) {
 			"a/album1/disc1",
 		}},
 		{"like-escape", "100%", []string{"100%", "100%/x"}},
-		// Whole-library returns every folder.
+		// Whole-library returns every folder. Note "a/." sorts before
+		// "a/album1" because '.' < 'a' in ASCII.
 		{"dot returns all", ".", []string{
 			"100%", "100%/x", "100abc", "100abc/x",
-			"a", "a/album1", "a/album1/disc1", "a/album2", "b", "b/album",
+			"a/.", "a/album1", "a/album1/disc1", "a/album2", "b", "b/album",
+		}},
+		// Multi-root whole-root sentinel: relPath returns "<base>/."
+		// for the root itself in multi-root mode. Mirrors the
+		// TestStoreTrackPathsUnder coverage so a regression in
+		// FolderPathsUnder's same-shape branch is caught here too.
+		// Includes the rootBase row itself ("a/.") via the exact-match
+		// arm of the predicate, plus every descendant via the LIKE arm.
+		{"multi-root sentinel", "a/.", []string{
+			"a/.", "a/album1", "a/album1/disc1", "a/album2",
 		}},
 	}
 	for _, tc := range cases {
