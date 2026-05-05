@@ -365,6 +365,22 @@ func TestPickUpExternalMintSameMtime(t *testing.T) {
 	if err := os.Chtimes(path, loaded, loaded); err != nil {
 		t.Fatal(err)
 	}
+	// Verify the host filesystem honored the requested timestamp at
+	// nanosecond precision. macOS APFS preserves nanos; some other
+	// filesystems (FAT32, ext3) round to seconds. If the clamp didn't
+	// take, the test would falsely pass via the !Equal(mtime) branch
+	// instead of exercising the size tiebreaker — we'd be measuring
+	// the wrong contract. Skip rather than fail so the test stays
+	// useful on filesystems with looser mtime semantics (CodeRabbit
+	// minor review on PR #159's second round).
+	postChtimes, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !postChtimes.ModTime().Equal(loaded) {
+		t.Skipf("host filesystem rounded the requested mtime (%v → %v); test cannot exercise size-tiebreaker path here",
+			loaded, postChtimes.ModTime())
+	}
 
 	if _, ok := s1.Validate(raw); !ok {
 		t.Error("s1 missed the externally-minted token under same-mtime write")
