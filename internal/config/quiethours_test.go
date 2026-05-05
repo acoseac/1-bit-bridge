@@ -8,6 +8,13 @@ func TestParseQuietHoursAccepts(t *testing.T) {
 		"23:00-06:00": {1380, 360}, // wraps midnight
 		"01:30-02:45": {90, 165},
 		"12:00-12:00": {720, 720}, // degenerate, parses fine
+		// Whitespace tolerance: YAML preserves whatever the operator wrote, so
+		// "23:00 - 06:00" / leading-trailing space / mixed must all parse to
+		// the same minute pair as the canonical form.
+		"23:00 - 06:00":       {1380, 360},
+		" 23:00-06:00 ":       {1380, 360},
+		"  23:00  -  06:00  ": {1380, 360},
+		"\t01:30 - 02:45\t":   {90, 165},
 	}
 	for in, want := range cases {
 		s, e, err := ParseQuietHours(in)
