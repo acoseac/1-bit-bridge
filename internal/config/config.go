@@ -586,6 +586,14 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+// MaxCustomEndpointHostLen caps the per-entry hostname at the RFC 1035
+// maximum FQDN length. Each accepted hostname is added to the
+// generated TLS certificate's SAN list (via internal/advertise's
+// CertSANConfig); without a cap, a typo'd or hostile entry could bloat
+// the cert binary unboundedly. IPv6 string-form fits comfortably below
+// this ceiling (max ~45 chars), so a single bound covers both forms.
+const MaxCustomEndpointHostLen = 255
+
 // ValidateCustomEndpoints filters the input to entries that parse as
 // absolute HTTPS URLs with a non-empty host. Returns (kept, warnings)
 // where `warnings` is one error per dropped entry. Used by Validate()
@@ -616,6 +624,10 @@ func ValidateCustomEndpoints(in []string) (kept []string, warnings []error) {
 		}
 		if u.Host == "" {
 			warnings = append(warnings, fmt.Errorf("customEndpoints[%q]: missing host", raw))
+			continue
+		}
+		if hostLen := len(u.Hostname()); hostLen > MaxCustomEndpointHostLen {
+			warnings = append(warnings, fmt.Errorf("customEndpoints[%q]: hostname is %d characters, exceeds %d-character limit", raw, hostLen, MaxCustomEndpointHostLen))
 			continue
 		}
 		// Dedupe on the canonical URL string so two paste-friendly
