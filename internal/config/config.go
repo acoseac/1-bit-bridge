@@ -642,6 +642,12 @@ func ValidateCustomEndpoints(in []string) (kept []string, warnings []error) {
 // updater's auto-install scheduler to decide whether the current
 // wall-clock minute is inside the window.
 func ParseQuietHours(s string) (startMin, endMin int, err error) {
+	// Trim outer whitespace before splitting so YAML-clean values like
+	// "23:00-06:00" and operator-friendly forms like "23:00 - 06:00" or
+	// "  23:00-06:00  " all validate. parseHHMM trims its own input too
+	// for the "23:00 - 06:00" case where the dash-split leaves a leading
+	// or trailing space on each half.
+	s = strings.TrimSpace(s)
 	parts := strings.SplitN(s, "-", 2)
 	if len(parts) != 2 {
 		return 0, 0, fmt.Errorf("expected HH:MM-HH:MM")
@@ -658,6 +664,7 @@ func ParseQuietHours(s string) (startMin, endMin int, err error) {
 }
 
 func parseHHMM(s string) (int, error) {
+	s = strings.TrimSpace(s)
 	// strings.Split (no limit) so an extra colon in the input
 	// produces 3+ parts and fails — strings.SplitN(..., 2) would
 	// silently accept "01:00:00" as ["01", "00:00"].
