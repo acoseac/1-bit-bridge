@@ -215,7 +215,10 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 
 	// Snapshot of paths we knew about BEFORE this scan. At the end we drop
 	// rows whose paths weren't touched during the walk — that's the
-	// "deleted from disk" pass.
+	// "deleted from disk" pass. Folders snapshot the same way so the
+	// folder deletion pass can reap rows for directories the walker
+	// no longer encounters (rename / removal upstream of any tracks
+	// the user kept). Both snapshots are read-only post-walk.
 	before, err := s.store.TrackPaths()
 	if err != nil {
 		return 0, fmt.Errorf("list existing: %w", err)
@@ -224,12 +227,22 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	for _, p := range before {
 		beforeSet[p] = struct{}{}
 	}
+	beforeFolders, err := s.store.FolderPaths()
+	if err != nil {
+		return 0, fmt.Errorf("list existing folders: %w", err)
+	}
+	beforeFolderSet := make(map[string]struct{}, len(beforeFolders))
+	for _, p := range beforeFolders {
+		beforeFolderSet[p] = struct{}{}
+	}
 
-	// Walker writes `seen` from a single goroutine — workers don't
-	// touch it. Whether a worker actually persists a row is independent
-	// of the deletion-pass invariant ("we saw it on disk during this
-	// walk"); the walker decides on visibility, not the worker.
+	// Walker writes `seen` (tracks) and `seenFolders` (directories)
+	// from a single goroutine — workers don't touch either. Whether a
+	// worker actually persists a row is independent of the deletion-
+	// pass invariant ("we saw it on disk during this walk"); the
+	// walker decides on visibility, not the worker.
 	seen := make(map[string]struct{}, len(before))
+	seenFolders := make(map[string]struct{}, len(beforeFolders))
 
 	// Subtrees where the walker hit a transient I/O error (NAS drop,
 	// antivirus lock, permission flap). The deletion pass below MUST
@@ -279,7 +292,7 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	// track-upsert path (which holds s.mu).
 	var walkErr error
 	for _, root := range roots {
-		if err := s.walkRoot(ctx, root, multiRoot, seen, errorSubtrees, paths); err != nil {
+		if err := s.walkRoot(ctx, root, multiRoot, seen, seenFolders, errorSubtrees, paths); err != nil {
 			walkErr = err
 			break
 		}
@@ -324,6 +337,32 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	if spared > 0 {
 		scanLogger.Warn("spared tracks from deletion (parent walk error this pass)",
 			"spared", spared, "subtrees", len(errorSubtrees))
+	}
+
+	// Folder orphan-cleanup pass: a directory the walker no longer
+	// encounters (renamed or removed upstream of every track that was
+	// originally indexed under it) leaves a folders-table row behind
+	// otherwise. Without this pass the table grows unboundedly and
+	// `/v1/manifest`-derived "Folders" surfaces would ship phantom
+	// directories. Same errored-subtree sparing as tracks: a
+	// transient walk error must not wipe folder rows for paths still
+	// physically present on disk.
+	sparedFolders := 0
+	for p := range beforeFolderSet {
+		if _, ok := seenFolders[p]; ok {
+			continue
+		}
+		if isUnderErroredSubtree(p, errorSubtrees) {
+			sparedFolders++
+			continue
+		}
+		if err := s.store.DeleteFolder(p); err != nil {
+			scanLogger.Error("delete folder", "path", p, "err", err)
+		}
+	}
+	if sparedFolders > 0 {
+		scanLogger.Warn("spared folders from deletion (parent walk error this pass)",
+			"spared", sparedFolders, "subtrees", len(errorSubtrees))
 	}
 
 	s.lastFull.Store(time.Now().UTC().UnixNano())
@@ -486,13 +525,18 @@ func (s *Scanner) runScanWriter(ctx context.Context, writes <-chan *Track, commi
 // directory event — a 50k-track library doesn't need to walk every
 // root just because one folder gained a file.
 //
-// **Deliberately skips the deletion pass.** A subtree scan can't
-// safely decide whether tracks no longer present under `dir` are
-// "deleted" or "moved to a sibling root we didn't walk" — full
-// scans handle deletes via the `before` snapshot + `seen` set;
-// subtree scans only ADD or UPDATE. Stale rows for files
-// physically removed under `dir` are reconciled on the next
-// periodic full scan (default cadence ScanIntervalSec).
+// Runs a deletion pass **scoped to the resolved subtree**: tracks
+// and folders that were under `dir` per the previous DB state but
+// are NOT seen this pass get deleted. The original cross-root
+// concern ("could this be a moved file?") is closed by scope: a file
+// that moved from /A/foo to /B/bar fires fsnotify on both, and each
+// event's ScanSubtree only looks at rows under its own scope —
+// /A/foo's scan deletes the source-side row, /B/bar's scan adds the
+// destination-side row. No phantom duplicates, no ~6h wait for the
+// next periodic full Scan.
+//
+// Honours the same errored-subtree sparing as Scan: a transient
+// WalkDir error must not wipe rows for paths still on disk.
 //
 // Cancelable via ctx. Returns the count of rows committed by the
 // writer goroutine. A subtree scan that resolves to no audio
@@ -554,6 +598,37 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 		return 0, fmt.Errorf("dir %q is not under any configured library root", dir)
 	}
 
+	// `relScope` is the library-relative path of the subtree being
+	// scanned, used as the predicate for the bounded deletion pass.
+	// Same form `relPath` produces for everything the walker upserts,
+	// so set membership in `seen`/`seenFolders` is directly
+	// comparable against the snapshot keys.
+	relScope := relPath(owningRoot, absDir, multiRoot)
+
+	// Subtree-scoped "before" snapshots. Smaller than Scan's whole-
+	// library snapshot — one query per scope — and the deletion pass
+	// only considers rows that were already inside the scope.
+	beforeTracks, err := s.store.TrackPathsUnder(relScope)
+	if err != nil {
+		return 0, fmt.Errorf("list existing tracks under %q: %w", relScope, err)
+	}
+	beforeTrackSet := make(map[string]struct{}, len(beforeTracks))
+	for _, p := range beforeTracks {
+		beforeTrackSet[p] = struct{}{}
+	}
+	beforeFolders, err := s.store.FolderPathsUnder(relScope)
+	if err != nil {
+		return 0, fmt.Errorf("list existing folders under %q: %w", relScope, err)
+	}
+	beforeFolderSet := make(map[string]struct{}, len(beforeFolders))
+	for _, p := range beforeFolders {
+		beforeFolderSet[p] = struct{}{}
+	}
+
+	seen := make(map[string]struct{}, len(beforeTrackSet))
+	seenFolders := make(map[string]struct{}, len(beforeFolderSet))
+	errorSubtrees := make(map[string]struct{})
+
 	paths := make(chan pathInfo, scanChannelBuffer)
 	writes := make(chan *Track, scanChannelBuffer)
 
@@ -569,11 +644,17 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	writerWG.Add(1)
 	go s.runScanWriter(ctx, writes, committed, &writerWG)
 
-	// Subtree walker: same shape as walkRoot but no `seen` /
-	// `errorSubtrees` tracking — we don't run a deletion pass.
+	// Subtree walker: same shape as walkRoot, including the err-
+	// callback's errored-subtree recording so the deletion pass
+	// below skips rows under transiently-unreachable directories.
 	walkErr := filepath.WalkDir(absDir, func(abs string, d fs.DirEntry, err error) error {
 		if err != nil {
 			scanLogger.Warn("subtree walk", "path", abs, "err", err)
+			key := abs
+			if d != nil && !d.IsDir() {
+				key = filepath.Dir(abs)
+			}
+			errorSubtrees[relPath(owningRoot, key, multiRoot)] = struct{}{}
 			return nil
 		}
 		if ctx.Err() != nil {
@@ -586,6 +667,7 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 			if info, err := d.Info(); err == nil {
 				rel := relPath(owningRoot, abs, multiRoot)
 				_ = s.store.UpsertFolder(&Folder{Path: rel, ModTime: info.ModTime().UTC()})
+				seenFolders[rel] = struct{}{}
 			}
 			return nil
 		}
@@ -599,9 +681,11 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 		info, err := d.Info()
 		if err != nil {
 			scanLogger.Warn("subtree stat", "path", abs, "err", err)
+			errorSubtrees[relPath(owningRoot, filepath.Dir(abs), multiRoot)] = struct{}{}
 			return nil
 		}
 		rel := relPath(owningRoot, abs, multiRoot)
+		seen[rel] = struct{}{}
 		select {
 		case paths <- pathInfo{abs: abs, rel: rel, info: info}:
 		case <-ctx.Done():
@@ -620,27 +704,66 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	// on PR #83). `Scan` does the same; converting ctx.Err() to
 	// nil here would let the watcher's debounce loop log a
 	// success line for a scan that actually only committed a
-	// prefix of the work.
+	// prefix of the work. Skip the deletion pass on cancel for
+	// the same reason — half-walked state is a poor input.
 	if ctx.Err() != nil {
 		return int(committed.Load()), ctx.Err()
 	}
 	if walkErr != nil {
 		return int(committed.Load()), walkErr
 	}
+
+	// Bounded deletion pass: only rows that were under `relScope`
+	// to begin with are candidates, so a cross-root move (the
+	// original concern) cleans the source-side row from /A/foo's
+	// scan and the destination-side row already came in via
+	// /B/bar's scan. Errored-subtree sparing matches Scan.
+	sparedTracks := 0
+	for p := range beforeTrackSet {
+		if _, ok := seen[p]; ok {
+			continue
+		}
+		if isUnderErroredSubtree(p, errorSubtrees) {
+			sparedTracks++
+			continue
+		}
+		if err := s.store.DeleteTrack(p); err != nil {
+			scanLogger.Error("delete track", "path", p, "err", err)
+		}
+	}
+	sparedFolders := 0
+	for p := range beforeFolderSet {
+		if _, ok := seenFolders[p]; ok {
+			continue
+		}
+		if isUnderErroredSubtree(p, errorSubtrees) {
+			sparedFolders++
+			continue
+		}
+		if err := s.store.DeleteFolder(p); err != nil {
+			scanLogger.Error("delete folder", "path", p, "err", err)
+		}
+	}
+	if sparedTracks > 0 || sparedFolders > 0 {
+		scanLogger.Warn("subtree scan spared rows from deletion (parent walk error this pass)",
+			"tracks", sparedTracks, "folders", sparedFolders, "subtrees", len(errorSubtrees))
+	}
+
 	return int(committed.Load()), nil
 }
 
 // walkRoot drives `filepath.WalkDir` for one root, recording folder
 // mtimes inline (single-writer; no contention with the workers'
 // track-upsert pipeline) and handing off audio files to the worker
-// pool via `paths`. The deletion-pass `seen` map is written here so
-// workers don't need a mutex around it — visibility-during-walk is a
-// walker-domain concern, independent of whether the worker actually
-// re-extracts (early-skip case) or persists. `errorSubtrees` is also
-// written here when the WalkDir err callback fires — the deletion
-// pass uses it to spare tracks under transiently-unreachable
-// subtrees from being wiped from the manifest (PR #N).
-func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, seen, errorSubtrees map[string]struct{}, paths chan<- pathInfo) error {
+// pool via `paths`. The deletion-pass `seen` (tracks) and
+// `seenFolders` maps are written here so workers don't need a mutex
+// around them — visibility-during-walk is a walker-domain concern,
+// independent of whether the worker actually re-extracts (early-skip
+// case) or persists. `errorSubtrees` is also written here when the
+// WalkDir err callback fires — the deletion pass uses it to spare
+// tracks AND folders under transiently-unreachable subtrees from
+// being wiped from the manifest.
+func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, seen, seenFolders, errorSubtrees map[string]struct{}, paths chan<- pathInfo) error {
 	return filepath.WalkDir(root, func(abs string, d fs.DirEntry, err error) error {
 		if err != nil {
 			// Permission error on one dir shouldn't kill the whole scan.
@@ -674,6 +797,7 @@ func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, see
 			if info, err := d.Info(); err == nil {
 				rel := relPath(root, abs, multiRoot)
 				_ = s.store.UpsertFolder(&Folder{Path: rel, ModTime: info.ModTime().UTC()})
+				seenFolders[rel] = struct{}{}
 			}
 			return nil
 		}

@@ -85,6 +85,71 @@ func TestScannerSparesTracksUnderWalkErrorSubtree(t *testing.T) {
 	}
 }
 
+// TestScannerSparesFoldersUnderWalkErrorSubtree mirrors the track-
+// sparing contract for folders: a directory whose walk hit a
+// transient I/O error must not have its folder row reaped this
+// pass. Without this, a single permission flap on a NAS subtree
+// would empty the folders table for that subtree and trigger a full
+// re-walk on the next clean scan to repopulate.
+func TestScannerSparesFoldersUnderWalkErrorSubtree(t *testing.T) {
+	root := t.TempDir()
+	healthy := filepath.Join(root, "healthy")
+	flaky := filepath.Join(root, "flaky")
+	for _, sub := range []string{healthy, flaky} {
+		if err := os.MkdirAll(sub, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(sub, "song.flac"), []byte("not-a-real-flac"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	s, err := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	sc := NewScanner([]string{root}, s, "")
+
+	if _, err := sc.Scan(context.Background()); err != nil {
+		t.Fatalf("first scan: %v", err)
+	}
+	folders, _ := s.FolderPaths()
+	for _, want := range []string{"flaky", "healthy"} {
+		found := false
+		for _, p := range folders {
+			if p == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("first scan didn't index %q (got %v)", want, folders)
+		}
+	}
+
+	// chmod 0 on flaky — WalkDir's err callback fires when descending.
+	if err := os.Chmod(flaky, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(flaky, 0o755) })
+
+	if _, err := sc.Scan(context.Background()); err != nil {
+		t.Fatalf("second scan: %v", err)
+	}
+	folders, _ = s.FolderPaths()
+	flakyStillThere := false
+	for _, p := range folders {
+		if p == "flaky" {
+			flakyStillThere = true
+			break
+		}
+	}
+	if !flakyStillThere {
+		t.Errorf("flaky folder row was wiped after a transient walk error — folder-sparing guard regressed (got %v)", folders)
+	}
+}
+
 // TestScannerStillDeletesTracksUnderHealthySubtree pins the OTHER
 // half of the contract: the spare must NOT over-suppress. A track
 // genuinely removed from a healthy subtree (no walk error in scope)
