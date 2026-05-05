@@ -664,11 +664,23 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 			if shouldSkipDir(d.Name()) {
 				return filepath.SkipDir
 			}
-			if info, err := d.Info(); err == nil {
-				rel := relPath(owningRoot, abs, multiRoot)
-				_ = s.store.UpsertFolder(&Folder{Path: rel, ModTime: info.ModTime().UTC()})
-				seenFolders[rel] = struct{}{}
+			info, err := d.Info()
+			if err != nil {
+				// Stat failure on a directory must record the subtree
+				// as errored so the deletion pass spares its folder
+				// row AND any tracks under it. Without this, a
+				// transient stat failure (NAS drop mid-walk) on a
+				// directory whose row already existed would silently
+				// leak through and the row would be reaped — same
+				// regression class the file-stat branch below
+				// addresses.
+				scanLogger.Warn("subtree dir stat", "path", abs, "err", err)
+				errorSubtrees[relPath(owningRoot, abs, multiRoot)] = struct{}{}
+				return nil
 			}
+			rel := relPath(owningRoot, abs, multiRoot)
+			_ = s.store.UpsertFolder(&Folder{Path: rel, ModTime: info.ModTime().UTC()})
+			seenFolders[rel] = struct{}{}
 			return nil
 		}
 		if strings.HasPrefix(d.Name(), ".") {
@@ -794,11 +806,20 @@ func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, see
 				return filepath.SkipDir
 			}
 			// Record folder mtimes for the manifest / future skip logic.
-			if info, err := d.Info(); err == nil {
-				rel := relPath(root, abs, multiRoot)
-				_ = s.store.UpsertFolder(&Folder{Path: rel, ModTime: info.ModTime().UTC()})
-				seenFolders[rel] = struct{}{}
+			info, err := d.Info()
+			if err != nil {
+				// Same containment as the file-stat branch below: a
+				// transient I/O hiccup on a directory's stat must NOT
+				// leave the folder row eligible for deletion-pass
+				// reaping. Record the subtree as errored so the spare
+				// kicks in for the row AND every track / folder under it.
+				scanLogger.Warn("dir stat", "path", abs, "err", err)
+				errorSubtrees[relPath(root, abs, multiRoot)] = struct{}{}
+				return nil
 			}
+			rel := relPath(root, abs, multiRoot)
+			_ = s.store.UpsertFolder(&Folder{Path: rel, ModTime: info.ModTime().UTC()})
+			seenFolders[rel] = struct{}{}
 			return nil
 		}
 		// Skip dot-files and unsupported extensions.
