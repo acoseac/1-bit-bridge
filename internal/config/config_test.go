@@ -531,7 +531,7 @@ func TestValidateCustomEndpoints_Dedupes(t *testing.T) {
 // would otherwise balloon the cert binary on every reload.
 func TestValidateCustomEndpoints_RejectsOversizedHost(t *testing.T) {
 	// 256-char label exceeds the 255-char cap by one. RFC 1035 max FQDN.
-	longLabel := strings.Repeat("a", MaxCustomEndpointHostLen-len(".example.com")+1)
+	longLabel := strings.Repeat("a", maxCustomEndpointHostLen-len(".example.com")+1)
 	longHost := longLabel + ".example.com"
 	in := []string{
 		"https://" + longHost + ":7788",
@@ -547,16 +547,16 @@ func TestValidateCustomEndpoints_RejectsOversizedHost(t *testing.T) {
 }
 
 // TestValidateCustomEndpoints_AcceptsBoundaryHost pins the boundary at
-// exactly MaxCustomEndpointHostLen — the hostname is allowed, not
+// exactly maxCustomEndpointHostLen — the hostname is allowed, not
 // rejected, when its length matches the constant.
 func TestValidateCustomEndpoints_AcceptsBoundaryHost(t *testing.T) {
-	// Construct a hostname of exactly MaxCustomEndpointHostLen characters.
+	// Construct a hostname of exactly maxCustomEndpointHostLen characters.
 	// "<label>.example.com" where label fills the remaining space.
 	const tld = ".example.com"
-	labelLen := MaxCustomEndpointHostLen - len(tld)
+	labelLen := maxCustomEndpointHostLen - len(tld)
 	host := strings.Repeat("a", labelLen) + tld
-	if len(host) != MaxCustomEndpointHostLen {
-		t.Fatalf("test bug: host len = %d, want %d", len(host), MaxCustomEndpointHostLen)
+	if len(host) != maxCustomEndpointHostLen {
+		t.Fatalf("test bug: host len = %d, want %d", len(host), maxCustomEndpointHostLen)
 	}
 	kept, warns := ValidateCustomEndpoints([]string{"https://" + host + ":7788"})
 	if len(kept) != 1 {
