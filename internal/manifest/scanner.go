@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -649,6 +650,22 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	// below skips rows under transiently-unreachable directories.
 	walkErr := filepath.WalkDir(absDir, func(abs string, d fs.DirEntry, err error) error {
 		if err != nil {
+			// `fs.ErrNotExist` on the subtree root (or any descendant)
+			// is the SIGNAL we're here for — fsnotify fired because the
+			// directory was deleted/renamed, and the bounded deletion
+			// pass below is what reaps the now-stale rows. Recording
+			// errorSubtrees in this case would spare exactly the rows
+			// we came to clean (CodeRabbit Major review on PR #160's
+			// first commit). Return nil without marking — the empty
+			// `seen` / `seenFolders` for the missing scope, combined
+			// with the before-snapshot, drives the deletion correctly.
+			//
+			// Genuine transient failures (permission flap, EACCES, NAS
+			// drop) still record the subtree so the spare kicks in.
+			if errors.Is(err, fs.ErrNotExist) {
+				scanLogger.Info("subtree removed", "path", abs)
+				return nil
+			}
 			scanLogger.Warn("subtree walk", "path", abs, "err", err)
 			key := abs
 			if d != nil && !d.IsDir() {
@@ -679,7 +696,18 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 				return nil
 			}
 			rel := relPath(owningRoot, abs, multiRoot)
-			_ = s.store.UpsertFolder(&Folder{Path: rel, ModTime: info.ModTime().UTC()})
+			if err := s.store.UpsertFolder(&Folder{Path: rel, ModTime: info.ModTime().UTC()}); err != nil {
+				// Surface the failure but treat the row as errored-
+				// subtree so the bounded deletion pass spares it AND
+				// its descendants — without this guard, an UpsertFolder
+				// failure on a pre-existing row would leave seenFolders
+				// unmarked and the deletion pass would reap a still-
+				// valid row (CodeRabbit Major review on PR #160's
+				// second round).
+				scanLogger.Error("subtree upsert folder", "path", rel, "err", err)
+				errorSubtrees[rel] = struct{}{}
+				return nil
+			}
 			seenFolders[rel] = struct{}{}
 			return nil
 		}
@@ -818,7 +846,18 @@ func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, see
 				return nil
 			}
 			rel := relPath(root, abs, multiRoot)
-			_ = s.store.UpsertFolder(&Folder{Path: rel, ModTime: info.ModTime().UTC()})
+			if err := s.store.UpsertFolder(&Folder{Path: rel, ModTime: info.ModTime().UTC()}); err != nil {
+				// Surface the failure but treat the row as errored-
+				// subtree so the deletion pass spares it AND its
+				// descendants — without this guard, an UpsertFolder
+				// failure on a pre-existing row would leave seenFolders
+				// unmarked and the deletion pass would reap a still-
+				// valid row (CodeRabbit Major review on PR #160's
+				// second round).
+				scanLogger.Error("upsert folder", "path", rel, "err", err)
+				errorSubtrees[rel] = struct{}{}
+				return nil
+			}
 			seenFolders[rel] = struct{}{}
 			return nil
 		}

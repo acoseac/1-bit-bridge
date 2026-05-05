@@ -167,6 +167,60 @@ func TestScanSubtreeRemovesStaleFolderOnRename(t *testing.T) {
 	}
 }
 
+// TestScanSubtreeMissingDirReapsRows pins the contract caught by
+// CodeRabbit Major on PR #160's second-round review: when fsnotify
+// fires because a watched directory was deleted, ScanSubtree's walk
+// callback receives `fs.ErrNotExist` for the subtree root. The
+// errored-subtree spare guard MUST NOT kick in here — that would
+// preserve exactly the rows we came to reap. ErrNotExist on the
+// root is the delete SIGNAL, not a transient failure.
+func TestScanSubtreeMissingDirReapsRows(t *testing.T) {
+	root := t.TempDir()
+	doomed := filepath.Join(root, "doomed")
+	if err := os.MkdirAll(doomed, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	track := filepath.Join(doomed, "song.flac")
+	if err := os.WriteFile(track, audioBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	sc := NewScanner([]string{root}, s, "")
+	if _, err := sc.Scan(context.Background()); err != nil {
+		t.Fatalf("initial scan: %v", err)
+	}
+	if got, _ := s.GetTrack("doomed/song.flac"); got == nil {
+		t.Fatal("initial scan didn't index doomed/song.flac")
+	}
+
+	// Wipe the directory entirely. fsnotify would fire Remove events
+	// on its parent; for the watcher's debounce-then-ScanSubtree
+	// pattern we drive ScanSubtree directly on the (now non-existent)
+	// directory. Pre-fix the err-callback recorded relScope in
+	// errorSubtrees and the deletion pass spared the rows; post-fix
+	// the ErrNotExist branch returns nil without recording, leaving
+	// the deletion pass free to reap.
+	if err := os.RemoveAll(doomed); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sc.ScanSubtree(context.Background(), doomed); err != nil {
+		t.Fatalf("ScanSubtree on deleted dir: %v", err)
+	}
+	if got, _ := s.GetTrack("doomed/song.flac"); got != nil {
+		t.Errorf("track row left behind after dir was deleted: %+v", got)
+	}
+	folders, _ := s.FolderPaths()
+	if containsString(folders, "doomed") {
+		t.Errorf("doomed folder row not reaped after dir deletion: %v", folders)
+	}
+}
+
 // TestScanSubtreeAcrossRootsNoDuplicate pins the original concern that
 // kept the deletion pass disabled: a file moved across configured library
 // roots fires fsnotify on both, and each event's ScanSubtree only looks
