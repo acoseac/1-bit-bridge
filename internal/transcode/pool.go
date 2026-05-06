@@ -6,9 +6,25 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
+
+// defaultJobTimeout caps a single transcode invocation. A typical
+// 4-min FLAC upscale to 192/24 finishes in 10–30 s on commodity
+// hardware; long classical movements top out around 3–4 min. 10
+// minutes leaves generous headroom for legitimate long files while
+// structurally bounding the slot leak from a corrupt header that
+// puts sox into an indefinite spin. Files that genuinely need
+// longer surface as failed jobs — operator-actionable, vs the
+// prior silent deadlock.
+//
+// Per-pool override lives on `Pool.jobTimeout` so tests can shrink
+// the deadline without mutating package-level global state (which
+// would race with `t.Parallel()`). Matches the project's existing
+// per-instance DI shape — see `Pool.runner` and `manifest.Store.now`.
+const defaultJobTimeout = 10 * time.Minute
 
 // Pool is the long-lived worker pool that hosts SoX conversions
 // for the v1.2 PCM upscaling feature. Two consumers in production:
@@ -61,6 +77,19 @@ type Pool struct {
 	// goroutine — keep them lightweight.
 	stateChangeMu sync.RWMutex
 	onStateChange func()
+
+	// runner executes one transcode job under the supplied context.
+	// Defaults to RunSox in NewPool; tests inject a hang-until-ctx-
+	// cancelled stub to drive the per-job timeout branch without a
+	// real sox process. Same DI shape `manifest.Store.now` uses for
+	// the clock.
+	runner func(ctx context.Context, spec JobSpec) (int64, error)
+
+	// jobTimeout is the per-job deadline applied via context.WithTimeout
+	// inside processJob. Defaults to defaultJobTimeout in NewPool;
+	// tests override per-instance to drive the timeout branch in
+	// milliseconds without racing other tests on a package-level var.
+	jobTimeout time.Duration
 }
 
 // poolJob is one transcode unit on the Pool's queue. Carries the
@@ -107,6 +136,8 @@ func NewPool(store *manifest.Store, workers, queueCap int) *Pool {
 		inflight:   make(map[string]struct{}),
 		stopCtx:    stopCtx,
 		stopCancel: stopCancel,
+		runner:     RunSox,
+		jobTimeout: defaultJobTimeout,
 	}
 	for i := 0; i < workers; i++ {
 		p.wg.Add(1)
@@ -255,8 +286,7 @@ func (p *Pool) Stats() PoolStats {
 }
 
 // workerLoop is the body of each pool worker goroutine. Pulls
-// jobs off the channel, runs sox, writes the resulting variant
-// row to the store, and clears the dedup slot.
+// jobs off the channel and dispatches each through processJob.
 //
 // The pool's stopCtx is plumbed into RunSox via
 // exec.CommandContext, so a Stop() while a sox is in flight
@@ -264,69 +294,110 @@ func (p *Pool) Stats() PoolStats {
 func (p *Pool) workerLoop() {
 	defer p.wg.Done()
 	for job := range p.jobs {
-		// Cooperative stop check before spending CPU on a sox
-		// invocation we'll just kill.
-		if p.stopCtx.Err() != nil {
-			p.releaseDedup(job.dedup)
-			continue
-		}
-		size, err := RunSox(p.stopCtx, job.spec)
-		if err != nil {
-			// Drop cancellation noise — Stop() during
-			// graceful shutdown shouldn't increment the
-			// failure counter.
-			if p.stopCtx.Err() == nil {
-				p.failedCnt.Add(1)
-				logger.Warn("pool: sox failed", "source", job.spec.SourceLibraryRel, "err", err)
-			}
-			p.releaseDedup(job.dedup)
-			// Fire AFTER releaseDedup so the published snapshot
-			// reflects the final state (job out of inflight) —
-			// CodeRabbit on PR #136 caught the inconsistency vs
-			// the success / store-failure branches which already
-			// fire post-release.
-			if p.stopCtx.Err() == nil {
-				if fire := p.notifyStateChangeFn(); fire != nil {
-					go fire()
-				}
-			}
-			continue
-		}
-		_, settings := job.spec.SoxArgs()
-		row := manifest.VariantRow{
-			SourcePath:    job.spec.SourceLibraryRel,
-			VariantID:     job.spec.VariantID(),
-			SidecarPath:   job.spec.SidecarPath(),
-			Format:        "flac",
-			SampleRate:    job.spec.TargetSampleRate,
-			BitsPerSample: job.spec.TargetBits,
-			SizeBytes:     size,
-			SourceMTimeNS: job.spec.SourceMTimeNS,
-			SourceSize:    job.spec.SourceSize,
-			SoxSettings:   settings,
-			CreatedAt:     CreatedAtNow(),
-		}
-		if err := p.store.UpsertVariant(row); err != nil {
+		p.processJob(job)
+	}
+}
+
+// processJob runs one job to completion (or per-job timeout). Lives
+// in its own method so `defer cancel()` on the per-job timeout
+// context releases at the end of THIS job rather than accumulating
+// until workerLoop exits — running for the lifetime of the worker
+// would leak a pending timer per processed job.
+//
+// Shutdown gating uses `p.closed.Load()`, NOT `p.stopCtx.Err()`.
+// Stop() flips `p.closed` BEFORE it cancels `p.stopCtx`, so during
+// the gap between those two operations a worker that pulled a
+// buffered job sees `stopCtx.Err() == nil` even though Stop has
+// been called — the suppression check would falsely classify the
+// graceful-shutdown error as a real failure (CodeRabbit on PR #162).
+// Reading the atomic flag instead closes the window. The flag is
+// monotonic (false→true, never reverses), so a single read at each
+// branch suffices.
+//
+// Error branches mirror the pre-timeout shape 1:1: when the SERVER
+// is stopping (`p.closed.Load()`) we suppress both the
+// failure-counter increment AND the state-change fire — graceful-
+// shutdown noise. When the server is up, every error path bumps
+// `failedCnt` and fires the callback after `releaseDedup`, including
+// the new per-job timeout branch (logged distinctly so operators
+// can tell a hung-sox kill from an internal sox failure).
+func (p *Pool) processJob(job poolJob) {
+	// Cooperative stop check before spending CPU on a sox
+	// invocation we'll just kill.
+	if p.closed.Load() {
+		p.releaseDedup(job.dedup)
+		return
+	}
+
+	jobCtx, cancel := context.WithTimeout(p.stopCtx, p.jobTimeout)
+	defer cancel()
+
+	size, err := p.runner(jobCtx, job.spec)
+	if err != nil {
+		// Drop cancellation noise — Stop() during graceful
+		// shutdown shouldn't increment the failure counter or
+		// fire the state-change callback.
+		if !p.closed.Load() {
 			p.failedCnt.Add(1)
-			logger.Error("pool: store variant", "source", job.spec.SourceLibraryRel, "err", err)
-			// Best-effort: remove the orphan sidecar so a
-			// retry from a clean slate succeeds.
-			_ = os.Remove(row.SidecarPath)
-			p.releaseDedup(job.dedup)
-			// Async fire so the worker isn't stalled by the
-			// publisher's CountVariants DB query — Gemini high-
-			// severity review on PR #136. Caller never blocks on
-			// the publish.
+			if errors.Is(jobCtx.Err(), context.DeadlineExceeded) {
+				logger.Warn("pool: sox timed out",
+					"source", job.spec.SourceLibraryRel,
+					"timeout", p.jobTimeout,
+					"err", err)
+			} else {
+				logger.Warn("pool: sox failed",
+					"source", job.spec.SourceLibraryRel,
+					"err", err)
+			}
+		}
+		p.releaseDedup(job.dedup)
+		// Fire AFTER releaseDedup so the published snapshot
+		// reflects the final state (job out of inflight) —
+		// CodeRabbit on PR #136 caught the inconsistency vs
+		// the success / store-failure branches which already
+		// fire post-release.
+		if !p.closed.Load() {
 			if fire := p.notifyStateChangeFn(); fire != nil {
 				go fire()
 			}
-			continue
 		}
-		p.doneCnt.Add(1)
+		return
+	}
+
+	_, settings := job.spec.SoxArgs()
+	row := manifest.VariantRow{
+		SourcePath:    job.spec.SourceLibraryRel,
+		VariantID:     job.spec.VariantID(),
+		SidecarPath:   job.spec.SidecarPath(),
+		Format:        "flac",
+		SampleRate:    job.spec.TargetSampleRate,
+		BitsPerSample: job.spec.TargetBits,
+		SizeBytes:     size,
+		SourceMTimeNS: job.spec.SourceMTimeNS,
+		SourceSize:    job.spec.SourceSize,
+		SoxSettings:   settings,
+		CreatedAt:     CreatedAtNow(),
+	}
+	if err := p.store.UpsertVariant(row); err != nil {
+		p.failedCnt.Add(1)
+		logger.Error("pool: store variant", "source", job.spec.SourceLibraryRel, "err", err)
+		// Best-effort: remove the orphan sidecar so a
+		// retry from a clean slate succeeds.
+		_ = os.Remove(row.SidecarPath)
 		p.releaseDedup(job.dedup)
+		// Async fire so the worker isn't stalled by the
+		// publisher's CountVariants DB query — Gemini high-
+		// severity review on PR #136. Caller never blocks on
+		// the publish.
 		if fire := p.notifyStateChangeFn(); fire != nil {
 			go fire()
 		}
+		return
+	}
+	p.doneCnt.Add(1)
+	p.releaseDedup(job.dedup)
+	if fire := p.notifyStateChangeFn(); fire != nil {
+		go fire()
 	}
 }
 

@@ -1,6 +1,7 @@
 package transcode
 
 import (
+	"context"
 	"errors"
 	"path/filepath"
 	"strconv"
@@ -297,6 +298,155 @@ func TestPoolSetOnStateChangeIsRaceSafe(t *testing.T) {
 	wg.Wait()
 
 	// Test passes if no race detected and no panic.
+}
+
+// TestPoolJobTimesOutAndCountsAsFailure locks in the per-job timeout
+// contract added alongside processJob extraction: a runner that hangs
+// past `p.jobTimeout` is killed by the per-job context, the failure
+// counter ticks, AND the worker slot is reclaimed so the next queued
+// job runs.
+//
+// Without the per-job context, the worker would inherit only the
+// pool-wide stopCtx — a stuck sox would consume the slot until the
+// whole pool was Stop()'d, which on a 2–4 worker production deploy
+// is the difference between "one bad track failed" and "upscaling
+// is dead, restart bridge serve."
+//
+// Slot-reclaim coverage (CodeRabbit on PR #162): asserting Failed
+// ticks alone would let a regression that timed-out the job but
+// failed to release the worker slot pass — we explicitly enqueue a
+// second job AFTER the timeout and require it to run to prove the
+// recovery path is real.
+//
+// Mechanism:
+//  1. Per-instance `p.jobTimeout = 50 * time.Millisecond` so the
+//     test runs in a few hundred ms instead of 10 minutes. Field-
+//     level override (vs a package-level var) so parallel tests in
+//     the same package don't race on global state.
+//  2. Inject a `runner` stub keyed by spec — first job hangs on
+//     ctx.Done(), second job returns success immediately — exercising
+//     both the timeout branch AND the slot-reclaim path the second
+//     job depends on.
+//  3. Bounded poll on Stats().Failed reaching 1, then on a per-job
+//     completion channel for the second job.
+func TestPoolJobTimesOutAndCountsAsFailure(t *testing.T) {
+	store := openTempStoreForPool(t)
+	t.Cleanup(func() { _ = store.Close() })
+
+	p := NewPool(store, 1, 4)
+	p.jobTimeout = 50 * time.Millisecond
+	t.Cleanup(p.Stop)
+
+	started := make(chan struct{})
+	secondRan := make(chan struct{})
+	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
+		switch spec.SourceLibraryRel {
+		case "Music/Album/timeout.flac":
+			close(started)
+			<-ctx.Done()
+			return 0, ctx.Err()
+		case "Music/Album/recovery.flac":
+			close(secondRan)
+			return 1, nil
+		default:
+			t.Errorf("unexpected runner spec: %q", spec.SourceLibraryRel)
+			return 0, nil
+		}
+	}
+
+	stuckSpec := JobSpec{
+		SourceLibraryRel: "Music/Album/timeout.flac",
+		SourceAbsPath:    "/dev/null/missing",
+		TargetSampleRate: 176400,
+		TargetBits:       24,
+		Quality:          QualityVeryHigh,
+		OutputDir:        t.TempDir(),
+	}
+	if err := p.Enqueue(stuckSpec); err != nil {
+		t.Fatalf("Enqueue stuck: %v", err)
+	}
+
+	// Confirm the first job actually entered the runner.
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runner stub never invoked — pool dispatch broken?")
+	}
+
+	// Wait for failedCnt to tick — proves the timeout branch fired.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if p.Stats().Failed >= 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := p.Stats().Failed; got < 1 {
+		t.Fatalf("expected Stats.Failed to reach 1 after timeout, got %d", got)
+	}
+
+	// Slot-reclaim assertion: enqueue a second job and require it to
+	// run within a tight deadline. A regression that times out a job
+	// without releasing the worker slot would hang here.
+	recoverSpec := JobSpec{
+		SourceLibraryRel: "Music/Album/recovery.flac",
+		SourceAbsPath:    "/dev/null/missing",
+		TargetSampleRate: 176400,
+		TargetBits:       24,
+		Quality:          QualityVeryHigh,
+		OutputDir:        t.TempDir(),
+	}
+	if err := p.Enqueue(recoverSpec); err != nil {
+		t.Fatalf("Enqueue recovery: %v", err)
+	}
+	select {
+	case <-secondRan:
+		// Slot was reclaimed — recovery job ran. Pass.
+	case <-time.After(2 * time.Second):
+		t.Fatal("recovery job never ran — worker slot leaked after timeout")
+	}
+}
+
+// TestPoolStopDuringJobSuppressesFailure pins the inverse of the
+// timeout test: when Stop() cancels the pool while a job is in
+// flight, the resulting ctx.Err() must NOT count as a failure.
+// This is the existing graceful-shutdown contract that the timeout
+// branching had to preserve carefully.
+func TestPoolStopDuringJobSuppressesFailure(t *testing.T) {
+	store := openTempStoreForPool(t)
+	t.Cleanup(func() { _ = store.Close() })
+
+	p := NewPool(store, 1, 4)
+	// No t.Cleanup(p.Stop) — we Stop() explicitly mid-test.
+
+	started := make(chan struct{})
+	p.runner = func(ctx context.Context, _ JobSpec) (int64, error) {
+		close(started)
+		<-ctx.Done()
+		return 0, ctx.Err()
+	}
+
+	spec := JobSpec{
+		SourceLibraryRel: "Music/Album/stopduring.flac",
+		SourceAbsPath:    "/dev/null/missing",
+		TargetSampleRate: 176400,
+		TargetBits:       24,
+		Quality:          QualityVeryHigh,
+		OutputDir:        t.TempDir(),
+	}
+	if err := p.Enqueue(spec); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runner stub never invoked — pool dispatch broken?")
+	}
+	p.Stop() // blocks until the worker drains
+
+	if got := p.Stats().Failed; got != 0 {
+		t.Errorf("Stats.Failed during graceful shutdown: got %d, want 0", got)
+	}
 }
 
 // --- helpers ---
