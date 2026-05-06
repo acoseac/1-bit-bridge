@@ -1,6 +1,7 @@
 package transcode
 
 import (
+	"context"
 	"errors"
 	"path/filepath"
 	"strconv"
@@ -297,6 +298,118 @@ func TestPoolSetOnStateChangeIsRaceSafe(t *testing.T) {
 	wg.Wait()
 
 	// Test passes if no race detected and no panic.
+}
+
+// TestPoolJobTimesOutAndCountsAsFailure locks in the per-job timeout
+// contract added alongside processJob extraction: a runner that hangs
+// past `jobTimeout` is killed by the per-job context, the failure
+// counter ticks, and the worker slot is freed for the next job.
+//
+// Without the per-job context, the worker would inherit only the
+// pool-wide stopCtx — a stuck sox would consume the slot until the
+// whole pool was Stop()'d, which on a 2–4 worker production deploy
+// is the difference between "one bad track failed" and "upscaling
+// is dead, restart bridge serve."
+//
+// Mechanism:
+//  1. Override `jobTimeout` to 50 ms via t.Cleanup-restored swap so
+//     the test runs in a few hundred ms instead of 10 minutes.
+//  2. Inject a `runner` stub that blocks on ctx.Done() — exercises
+//     exactly the path RunSox would take when sox is hung (the real
+//     RunSox body returns ctx.Err() from cmd.Wait once SIGKILL fires).
+//  3. Bounded poll on Stats().Failed reaching 1.
+func TestPoolJobTimesOutAndCountsAsFailure(t *testing.T) {
+	store := openTempStoreForPool(t)
+	t.Cleanup(func() { _ = store.Close() })
+
+	// Shrink the deadline for test speed; restore on exit so a
+	// follow-up test in the same package sees the production value.
+	prevTimeout := jobTimeout
+	jobTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { jobTimeout = prevTimeout })
+
+	p := NewPool(store, 1, 4)
+	t.Cleanup(p.Stop)
+
+	started := make(chan struct{})
+	p.runner = func(ctx context.Context, _ JobSpec) (int64, error) {
+		select {
+		case <-started:
+			// Already closed (multi-job runs would hit this).
+		default:
+			close(started)
+		}
+		<-ctx.Done()
+		return 0, ctx.Err()
+	}
+
+	spec := JobSpec{
+		SourceLibraryRel: "Music/Album/timeout.flac",
+		SourceAbsPath:    "/dev/null/missing",
+		TargetSampleRate: 176400,
+		TargetBits:       24,
+		Quality:          QualityVeryHigh,
+		OutputDir:        t.TempDir(),
+	}
+	if err := p.Enqueue(spec); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	// Confirm the job actually entered the runner — without this
+	// guard a fast pool that returned ErrQueueFull silently would
+	// pass the bounded poll below by never running anything.
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runner stub never invoked — pool dispatch broken?")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if p.Stats().Failed >= 1 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("expected Stats.Failed to reach 1 after timeout, got %d", p.Stats().Failed)
+}
+
+// TestPoolStopDuringJobSuppressesFailure pins the inverse of the
+// timeout test: when Stop() cancels the pool while a job is in
+// flight, the resulting ctx.Err() must NOT count as a failure.
+// This is the existing graceful-shutdown contract that the timeout
+// branching had to preserve carefully.
+func TestPoolStopDuringJobSuppressesFailure(t *testing.T) {
+	store := openTempStoreForPool(t)
+	t.Cleanup(func() { _ = store.Close() })
+
+	p := NewPool(store, 1, 4)
+	// No t.Cleanup(p.Stop) — we Stop() explicitly mid-test.
+
+	started := make(chan struct{})
+	p.runner = func(ctx context.Context, _ JobSpec) (int64, error) {
+		close(started)
+		<-ctx.Done()
+		return 0, ctx.Err()
+	}
+
+	spec := JobSpec{
+		SourceLibraryRel: "Music/Album/stopduring.flac",
+		SourceAbsPath:    "/dev/null/missing",
+		TargetSampleRate: 176400,
+		TargetBits:       24,
+		Quality:          QualityVeryHigh,
+		OutputDir:        t.TempDir(),
+	}
+	if err := p.Enqueue(spec); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	<-started
+	p.Stop() // blocks until the worker drains
+
+	if got := p.Stats().Failed; got != 0 {
+		t.Errorf("Stats.Failed during graceful shutdown: got %d, want 0", got)
+	}
 }
 
 // --- helpers ---
