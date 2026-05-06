@@ -102,7 +102,7 @@
   <main>
     <a class="crumb" href="./">← 1-bit-bridge</a>
     <h1>Privacy</h1>
-    <p class="updated">Last updated: 26 April 2026</p>
+    <p class="updated">Last updated: 6 May 2026</p>
 
     <p class="lede">1-bit-bridge is a companion server you install on your own machine and pair with the 1-bit iOS music player. It does not phone home. It collects no analytics. It has no user account. This page explains what it stores on your machine, what it sends out, and what it doesn't.</p>
 
@@ -120,10 +120,11 @@
     <p>By default under <code>~/Library/Application Support/1-bit-bridge/</code> (macOS), <code>~/.config/1-bit-bridge/</code> (Linux), or <code>%LOCALAPPDATA%\1-bit-bridge\</code> (Windows):</p>
     <ul>
       <li><code>bridge.yaml</code> — configuration: library paths, listen addresses, scan interval, backup schedule, update-check toggle.</li>
-      <li><code>bridge.db</code> — SQLite manifest of your library: file paths, sizes, mtimes, parsed tag metadata (title, artist, album, year, sample rate, MusicBrainz IDs when enrichment finds them). Used to serve the manifest to the iOS app in a single request instead of re-scanning every connect.</li>
+      <li><code>bridge.db</code> — SQLite manifest of your library: file paths, sizes, mtimes, parsed tag metadata (title, artist, album, year, sample rate, MusicBrainz IDs when enrichment finds them). Used to serve the manifest to the iOS app in a single request instead of re-scanning every connect. When the optional upscale feature is enabled (v1.2), an additional <code>track_variants</code> table records the on-disk path, format, and source signature of each generated upscaled audio file so they survive restarts and re-pairs.</li>
       <li><code>tokens.json</code> — paired-device tokens. <strong>Raw tokens are never stored;</strong> only their SHA-256 hashes, plus a device name, creation date, last-used timestamp, and last-reported client version. File permissions <code>0600</code> (owner-only).</li>
       <li><code>server.crt</code> / <code>server.key</code> — self-signed TLS keypair generated on first run. The certificate's SHA-256 fingerprint is what the iOS app pins.</li>
       <li><code>artwork/</code> — JPEG cache for album covers and artist photos fetched during enrichment.</li>
+      <li><code>transcoded/</code> (v1.2, optional) — generated <code>.flac</code> sidecars for upscaled-PCM variants. Created only when the operator opts into <code>upscale.enabled: true</code> AND a paired iOS device requests a variant via <code>POST /v1/upscale</code>. The sidecars contain audio bytes derived from your own source files via a local <a href="https://sox.sourceforge.net">sox</a> resample — they never leave the bridge except over the same paired-token-authenticated channel as the originals. Removed when the source track is deleted, or in bulk via <code>bridge upscale --gc</code>.</li>
       <li><code>backups/&lt;timestamp&gt;/</code> — optional dated snapshots of the above. Operator-tunable in <code>bridge.yaml</code>; can be set to <code>0</code> to disable.</li>
     </ul>
     <p>Logs (errors and startup messages) go to your service manager — <code>journalctl</code> / <code>log show</code> / <code>%PROGRAMDATA%\1-bit-bridge\bridge.log</code> on Windows. Bearer tokens, client IP addresses, full file paths, request bodies, and artist names are <em>not</em> logged.</p>
@@ -147,7 +148,8 @@
     <p>As with any standard HTTPS request, GitHub will see the source IP address of the bridge machine. We do not see it, and the request carries no other identifier tying it to you. <code>update.checkIntervalHours</code> in <code>bridge.yaml</code> tunes the cadence (values below 1 hour are clamped at 1 hour; <code>0</code> resolves to the 6-hour default rather than disabling the poll). To stop the bridge from making any outbound requests at all, stop the service or block its egress at your firewall — operators running over Tor, a VPN, or Tailscale tend to do the latter for everything except their tunnel anyway.</p>
 
     <h2>Pairing &amp; tokens</h2>
-    <p>Pairing happens entirely between your machine and the iOS app. The admin console generates a 256-bit random token, shows it to you once (as a <code>bridge://pair?…</code> URL or QR code), and persists only its SHA-256 hash. The raw token never touches disk on the server. From the admin console you can rename, rotate, or revoke any paired device at any time; revoked tokens fail the very next request.</p>
+    <p>Pairing happens entirely between your machine and the iOS app. The admin console generates a 256-bit random token, shows it to you once (as a <code>bridge://pair?…</code> URL or QR code), and persists only its SHA-256 hash. The raw token never touches disk on the server. From the admin console you can rename, rotate, or revoke any paired device at any time; revoked tokens are hard-deleted from <code>tokens.json</code> on the next persist and fail the very next request — there is no tombstone, no audit log, and no orphan retention.</p>
+    <p><strong>Admin-approval pairing (v1.2).</strong> When an iOS device on your network taps "Discover" and selects your bridge, it submits a pairing request that lands on the admin console for you to approve or reject. While the request is pending, the bridge holds an in-memory record containing: the device-chosen display name, a hash of the device's poll-secret, a 6-digit verification code (shown on the device for you to confirm), and the bridge's TLS certificate fingerprint at request time (so a mid-flow cert rotation aborts the pairing rather than silently completing against a stale pin). Approval mints the long-lived token described above and discards the pending-request record; rejection or timeout discards it without minting. None of this state survives a bridge restart, and the client's TLS fingerprint is captured by the iOS app for client-side pinning — the bridge never persists it.</p>
 
     <h2>What we do not do</h2>
     <ul>
