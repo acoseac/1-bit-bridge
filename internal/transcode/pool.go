@@ -11,19 +11,20 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
-// jobTimeout caps a single transcode invocation. A typical 4-min FLAC
-// upscale to 192/24 finishes in 10–30 s on commodity hardware; long
-// classical movements top out around 3–4 min. 10 minutes leaves
-// generous headroom for legitimate long files while structurally
-// bounding the slot leak from a corrupt header that puts sox into
-// an indefinite spin. Files that genuinely need longer surface as
-// failed jobs — operator-actionable, vs the prior silent deadlock.
+// defaultJobTimeout caps a single transcode invocation. A typical
+// 4-min FLAC upscale to 192/24 finishes in 10–30 s on commodity
+// hardware; long classical movements top out around 3–4 min. 10
+// minutes leaves generous headroom for legitimate long files while
+// structurally bounding the slot leak from a corrupt header that
+// puts sox into an indefinite spin. Files that genuinely need
+// longer surface as failed jobs — operator-actionable, vs the
+// prior silent deadlock.
 //
-// `var` (not `const`) so tests can shrink the deadline via a
-// `t.Cleanup`-restored override and exercise the timeout branch in
-// milliseconds. Same shape `manifest.Store.now` uses for clock DI.
-// Don't promote back to `const` — see TestPoolJobTimesOutAndCountsAsFailure.
-var jobTimeout = 10 * time.Minute
+// Per-pool override lives on `Pool.jobTimeout` so tests can shrink
+// the deadline without mutating package-level global state (which
+// would race with `t.Parallel()`). Matches the project's existing
+// per-instance DI shape — see `Pool.runner` and `manifest.Store.now`.
+const defaultJobTimeout = 10 * time.Minute
 
 // Pool is the long-lived worker pool that hosts SoX conversions
 // for the v1.2 PCM upscaling feature. Two consumers in production:
@@ -83,6 +84,12 @@ type Pool struct {
 	// real sox process. Same DI shape `manifest.Store.now` uses for
 	// the clock.
 	runner func(ctx context.Context, spec JobSpec) (int64, error)
+
+	// jobTimeout is the per-job deadline applied via context.WithTimeout
+	// inside processJob. Defaults to defaultJobTimeout in NewPool;
+	// tests override per-instance to drive the timeout branch in
+	// milliseconds without racing other tests on a package-level var.
+	jobTimeout time.Duration
 }
 
 // poolJob is one transcode unit on the Pool's queue. Carries the
@@ -130,6 +137,7 @@ func NewPool(store *manifest.Store, workers, queueCap int) *Pool {
 		stopCtx:    stopCtx,
 		stopCancel: stopCancel,
 		runner:     RunSox,
+		jobTimeout: defaultJobTimeout,
 	}
 	for i := 0; i < workers; i++ {
 		p.wg.Add(1)
@@ -296,8 +304,18 @@ func (p *Pool) workerLoop() {
 // until workerLoop exits — running for the lifetime of the worker
 // would leak a pending timer per processed job.
 //
+// Shutdown gating uses `p.closed.Load()`, NOT `p.stopCtx.Err()`.
+// Stop() flips `p.closed` BEFORE it cancels `p.stopCtx`, so during
+// the gap between those two operations a worker that pulled a
+// buffered job sees `stopCtx.Err() == nil` even though Stop has
+// been called — the suppression check would falsely classify the
+// graceful-shutdown error as a real failure (CodeRabbit on PR #162).
+// Reading the atomic flag instead closes the window. The flag is
+// monotonic (false→true, never reverses), so a single read at each
+// branch suffices.
+//
 // Error branches mirror the pre-timeout shape 1:1: when the SERVER
-// is stopping (`p.stopCtx.Err() != nil`) we suppress both the
+// is stopping (`p.closed.Load()`) we suppress both the
 // failure-counter increment AND the state-change fire — graceful-
 // shutdown noise. When the server is up, every error path bumps
 // `failedCnt` and fires the callback after `releaseDedup`, including
@@ -306,12 +324,12 @@ func (p *Pool) workerLoop() {
 func (p *Pool) processJob(job poolJob) {
 	// Cooperative stop check before spending CPU on a sox
 	// invocation we'll just kill.
-	if p.stopCtx.Err() != nil {
+	if p.closed.Load() {
 		p.releaseDedup(job.dedup)
 		return
 	}
 
-	jobCtx, cancel := context.WithTimeout(p.stopCtx, jobTimeout)
+	jobCtx, cancel := context.WithTimeout(p.stopCtx, p.jobTimeout)
 	defer cancel()
 
 	size, err := p.runner(jobCtx, job.spec)
@@ -319,12 +337,12 @@ func (p *Pool) processJob(job poolJob) {
 		// Drop cancellation noise — Stop() during graceful
 		// shutdown shouldn't increment the failure counter or
 		// fire the state-change callback.
-		if p.stopCtx.Err() == nil {
+		if !p.closed.Load() {
 			p.failedCnt.Add(1)
 			if errors.Is(jobCtx.Err(), context.DeadlineExceeded) {
 				logger.Warn("pool: sox timed out",
 					"source", job.spec.SourceLibraryRel,
-					"timeout", jobTimeout,
+					"timeout", p.jobTimeout,
 					"err", err)
 			} else {
 				logger.Warn("pool: sox failed",
@@ -338,7 +356,7 @@ func (p *Pool) processJob(job poolJob) {
 		// CodeRabbit on PR #136 caught the inconsistency vs
 		// the success / store-failure branches which already
 		// fire post-release.
-		if p.stopCtx.Err() == nil {
+		if !p.closed.Load() {
 			if fire := p.notifyStateChangeFn(); fire != nil {
 				go fire()
 			}
