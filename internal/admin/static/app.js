@@ -647,7 +647,14 @@ const pendingActionLatch = new Map();
 // arrive (not just operators who happen to be on Devices when it
 // lands). The badge listener is wired in layout.html — it appears on
 // every admin page.
-let lastPendingCount = 0;
+//
+// Initialised to `null` so the FIRST snapshot is treated as a baseline
+// rather than a pulse trigger. Without this, opening a fresh tab while
+// a pending request is already in flight would misleadingly pulse the
+// badge (the prior frame the operator never saw was 0 → the current
+// non-zero value). After the first snapshot lands, we switch to the
+// increase-only comparison (CodeRabbit on PR #161).
+let lastPendingCount = null;
 
 // applyPairing renders the "Pending join requests" panel from a
 // parsed entries array. Called by the SSE `pairing` event listener
@@ -726,7 +733,11 @@ function updatePairingBadge(entries) {
     }
     // Increase-only pulse — operator just got a NEW request, deserves
     // attention. Decrease (operator approved one) doesn't re-fire.
-    if (pendingCount > lastPendingCount) {
+    // First snapshot (`lastPendingCount === null`) is the baseline; we
+    // skip the pulse and just establish the count, otherwise opening
+    // a fresh admin tab while a request is already pending would
+    // falsely fire the pulse for an event the operator never missed.
+    if (lastPendingCount !== null && pendingCount > lastPendingCount) {
       badge.classList.remove("pairing-badge-pulse");
       // Force reflow so re-adding the class restarts the animation.
       void badge.offsetWidth;
@@ -1417,22 +1428,39 @@ function applyConnState(state) {
 // resume (laptop closed for hours; the in-flight ES may have silently
 // failed to reconnect post-wake).
 let activeEventSource = null;
-let lastEventSourceConnectAt = 0;
+// Last time we saw evidence the SSE stream was alive — bumped on
+// `onopen`, on every successful event, AND on visibilitychange to
+// `visible`. Used by the visibility-restore handler to decide whether
+// the user has been away long enough to warrant a force-cycle
+// (CodeRabbit on PR #161 caught that the prior `lastEventSourceConnectAt`
+// was stream-creation time, NOT user-last-seen time, so a long-running
+// stream + short tab switch would falsely trigger reconnect).
+let lastEventSourceSeenAt = 0;
+const SSE_RECONNECT_IDLE_THRESHOLD_MS = 60 * 1000;
 
 function startEventStream() {
   // EventSource is a built-in browser API; no polyfill needed for
   // any iOS / desktop browser the admin console targets.
   const es = new EventSource("/api/events");
   activeEventSource = es;
-  lastEventSourceConnectAt = Date.now();
+  lastEventSourceSeenAt = Date.now();
 
-  es.addEventListener("stats",     (e) => safeApply("stats",     e.data, applyStats));
-  es.addEventListener("endpoints", (e) => safeApply("endpoints", e.data, applyEndpoints));
-  es.addEventListener("pairing",   (e) => safeApply("pairing",   e.data, applyPairing));
-  es.addEventListener("updates",   (e) => safeApply("updates",   e.data, renderUpdateTile));
-  es.addEventListener("tailscale", (e) => safeApply("tailscale", e.data, renderTailscaleTile));
+  // Wrap each handler so we can refresh `lastEventSourceSeenAt` on
+  // every successful frame — that way a long-running stream that's
+  // continuously delivering events keeps its "seen" timestamp fresh
+  // and the visibility-restore handler doesn't mis-classify it as
+  // idle when the user briefly switches tabs.
+  const seen = (fn) => (e) => { lastEventSourceSeenAt = Date.now(); fn(e); };
+  es.addEventListener("stats",     seen((e) => safeApply("stats",     e.data, applyStats)));
+  es.addEventListener("endpoints", seen((e) => safeApply("endpoints", e.data, applyEndpoints)));
+  es.addEventListener("pairing",   seen((e) => safeApply("pairing",   e.data, applyPairing)));
+  es.addEventListener("updates",   seen((e) => safeApply("updates",   e.data, renderUpdateTile)));
+  es.addEventListener("tailscale", seen((e) => safeApply("tailscale", e.data, renderTailscaleTile)));
 
-  es.onopen = () => applyConnState("connected");
+  es.onopen = () => {
+    lastEventSourceSeenAt = Date.now();
+    applyConnState("connected");
+  };
   // EventSource fires onerror on every transport hiccup AND between
   // reconnect attempts. Transient network blips → readyState === 0
   // (CONNECTING) and the browser will retry on its own backoff.
@@ -1453,8 +1481,13 @@ function startEventStream() {
 // pairing requests that arrived during the sleep gap.
 function handleVisibilityRestore() {
   if (document.visibilityState !== "visible") return;
-  const idleMs = Date.now() - lastEventSourceConnectAt;
-  if (idleMs < 60000) return;
+  const idleMs = Date.now() - lastEventSourceSeenAt;
+  // Refresh `seen` on visibility change either way, so a brief
+  // tab-out followed by a longer tab-out doesn't accumulate idle time
+  // across the gap. Only the gap between successive `visible` states
+  // counts.
+  lastEventSourceSeenAt = Date.now();
+  if (idleMs < SSE_RECONNECT_IDLE_THRESHOLD_MS) return;
   // Force-cycle the connection — auto-reconnect doesn't always cover
   // post-sleep recovery cleanly.
   if (activeEventSource) {

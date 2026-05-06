@@ -716,6 +716,15 @@ dialog h2 { font-size: 18px; color: var(--accent); }
   margin-left: 12px;
   padding: 4px 10px;
   border-radius: 999px;
+  /* Plain-color fallback first; modern browsers progressive-enhance
+   * to color-mix on the next line. Without this, browsers without
+   * color-mix() support (Chrome <111, Firefox <113, Safari <16.2)
+   * hit IACVT — color-mix containing var() is valid at parse time
+   * but invalid at computed-value time, which resolves background
+   * to `transparent` and the dark-mode badge becomes unreadable
+   * black-on-clear (CodeRabbit on PR #161).
+   */
+  background: var(--accent-warm);
   background: color-mix(in srgb, var(--warn) 90%, white);
   color: #1a1a1a;
   font-size: 12px;
@@ -745,13 +754,21 @@ dialog h2 { font-size: 18px; color: var(--accent); }
 }
 @media (prefers-color-scheme: dark) {
   .pairing-badge {
+    /* Same plain-color → color-mix progressive-enhance pattern as
+     * the light-mode rule above. */
+    background: var(--accent-warm);
     background: color-mix(in srgb, var(--warn) 90%, black);
     color: #1a1a1a;
   }
 }
 @keyframes pairing-badge-pulse {
+  /* The middle keyframe expands the box-shadow ring outward AND
+   * keeps it visible — Gemini caught the prior `0%` mix at 50% which
+   * made the glow fully transparent at peak expansion (the ring was
+   * there but invisible). Now the ring fades from 70% → 35% (still
+   * visible) → 0% over the full 1.4 s. */
   0%   { transform: scale(1);    box-shadow: 0 0 0 0 color-mix(in srgb, var(--warn) 70%, transparent); }
-  50%  { transform: scale(1.08); box-shadow: 0 0 0 6px color-mix(in srgb, var(--warn) 0%, transparent); }
+  50%  { transform: scale(1.08); box-shadow: 0 0 0 6px color-mix(in srgb, var(--warn) 35%, transparent); }
   100% { transform: scale(1);    box-shadow: 0 0 0 0 color-mix(in srgb, var(--warn) 0%, transparent); }
 }
 .pairing-badge-pulse {

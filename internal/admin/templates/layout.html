@@ -26,10 +26,10 @@
     bridge {{.ServerVersion}} · protocol v{{.ProtocolVersion}}
     <span id="conn-status" class="conn-badge" data-state="connecting" aria-live="polite">Connecting…</span>
     <a href="/devices" id="pairing-badge" class="pairing-badge" hidden
-       role="status" aria-live="polite" aria-atomic="true"
        aria-label="Pending pairing requests">
       <span class="pairing-badge-dot" aria-hidden="true"></span>
-      <span class="pairing-badge-count" data-count="0">0</span>
+      <span class="pairing-badge-count" data-count="0"
+            role="status" aria-live="polite" aria-atomic="true">0</span>
       <span class="pairing-badge-label">pending</span>
     </a>
   </div>
