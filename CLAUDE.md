@@ -322,6 +322,20 @@ User-reported regression: long-running bridge (5 days uptime) logs "advertising"
 - **Failure log uses the same `ips` key + `ipsForLog(...)` shaping as the success log** (Qodo on PR #112). Stable attribute keys per the logging convention — log-greppers correlate rebind sequences across success/failure ticks without learning a per-callsite vocabulary.
 - **Pairs with iOS PR #193's Bonjour Refresh button** — either side's recovery is enough on its own; both together cover the full "discovery stopped working" matrix.
 
+### Cross-page pairing badge (PR #161, mirror with iOS PR #267 Discover sheet)
+
+Surfaces incoming pairing requests on every admin page (Dashboard, Library, Settings) instead of only on Devices — operators on other pages were missing new requests entirely. Companion to the iOS "Discover on network" sheet ([acoseac/1-bit#267](https://github.com/acoseac/1-bit/pull/267)) but ships independently; either side works on its own.
+
+- **`#pairing-badge` lives in `layout.html`** (every page) — amber pill with count, links to `/devices`. `role="status" aria-live="polite" aria-atomic="true"` on the inner `<span class="pairing-badge-count">`, NOT on the outer `<a>` element. The anchor stays a link; the child span announces count changes politely. Putting `role="status"` on the anchor would override the native link semantics for assistive tech (CodeRabbit Major).
+- **Pulse animation fires on count INCREASE only** (operator just got a NEW request, deserves attention). Decrease (operator approved one) doesn't re-fire. **`prefers-reduced-motion` strips the pulse** to a static brighter background — the heightened color conveys "new request arrived" without movement.
+- **`lastPendingCount = null` baseline** — first SSE snapshot is treated as "establish state, don't pulse". Without this, opening a fresh admin tab while a pending request was already in flight would falsely pulse for an event the operator never missed (CodeRabbit). After the first snapshot lands, the increase-only comparison takes over.
+- **`lastEventSourceSeenAt` tracking** drives the visibility-restore handler (refreshed on `onopen`, on every successful SSE event, AND on `visibilitychange`). The prior `lastEventSourceConnectAt` (stream-creation time) was wrong for this purpose — a long-running stream + brief tab switch would falsely classify the connection as idle and force-cycle it (CodeRabbit). The 60 s threshold is `SSE_RECONNECT_IDLE_THRESHOLD_MS` (extracted constant — Gemini).
+- **Belt-and-braces `/api/pairing` backfill on visibility-restore** — covers the rare case where the SSE re-arm post-sleep takes a moment to deliver the first frame. Adds zero overhead on short tab switches (gated by the 60 s threshold).
+- **Plain-color `--accent-warm` fallback before each `color-mix(...)` declaration** on `.pairing-badge` (light + dark mode). `color-mix(...)` containing `var(--warn)` is valid at parse but invalid at computed-value time (IACVT) in browsers without color-mix support (Chrome <111, Firefox <113, Safari <16.2). Without the fallback, IACVT resolves `background` to `transparent` and the dark-mode badge becomes unreadable black-on-clear (CodeRabbit Major).
+- **Pulse animation peak `box-shadow` mix is 35%, NOT 0%** — the prior `0%` mix at the 50 % keyframe made the expanding ring fully transparent at peak expansion (the ring was there but invisible). 35 % keeps it visible mid-animation; 0 % at 100 % is correct (the ring fades out at the end).
+- **Pending-pairing card itself bumped from green to amber**: `--ok 35%` border was easy to miss against the panel background. New: `--warn 60%` border + 4 px left accent stripe + amber-tinted background + bigger halo. Same visual language as `.warn-banner` elsewhere in the admin UI.
+- **`--accent-warm-tint` precomputed CSS variable** for the card-background fallback path. Modern browsers progressive-enhance to `color-mix`; legacy enterprise webviews see the precomputed pastel without breaking.
+
 ## Repo clean-up
 
 Pre-push:
