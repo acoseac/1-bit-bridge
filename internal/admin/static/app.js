@@ -641,6 +641,14 @@ function applyEndpoints(entries) {
 // computing the transition.
 const pendingActionLatch = new Map();
 
+// Cross-page pending-pairing count tracking. Drives the global
+// header-bar pairing badge, including the pulse-on-increase animation
+// so an operator on Settings / Library / Dashboard sees a new request
+// arrive (not just operators who happen to be on Devices when it
+// lands). The badge listener is wired in layout.html — it appears on
+// every admin page.
+let lastPendingCount = 0;
+
 // applyPairing renders the "Pending join requests" panel from a
 // parsed entries array. Called by the SSE `pairing` event listener
 // (initial snapshot + ~1 s cadence while a request is in flight,
@@ -649,6 +657,12 @@ const pendingActionLatch = new Map();
 // called directly by handlePairingAction after a tap so the
 // optimistic re-render lands without waiting for the next SSE frame.
 function applyPairing(entries) {
+  // Update the global header badge first — it's present on every
+  // admin page, whereas the pending-pairing-panel only exists on
+  // Devices. Operators on other pages still need to see new requests
+  // arrive.
+  updatePairingBadge(entries);
+
   const panel = document.getElementById("pending-pairing-panel");
   const list = document.getElementById("pending-pairing-list");
   if (!panel || !list) return;
@@ -679,6 +693,47 @@ function applyPairing(entries) {
   list.querySelectorAll("[data-pairing-decline]").forEach((btn) => {
     btn.addEventListener("click", () => handlePairingAction(btn, "decline"));
   });
+}
+
+// updatePairingBadge — drives the global header pairing badge. Called
+// from applyPairing (which itself is called by the SSE `pairing`
+// listener on every admin page). Counts only `pending` entries
+// because approved/declined/expired states are operator-actioned
+// (they shouldn't pulse the operator's attention; the cards on the
+// Devices page show the post-action status). Pulse animation fires
+// when the count INCREASES — a new request arrived — but NOT when
+// the count drops (operator just approved one). prefers-reduced-
+// motion strips the pulse and shows a static brighter background
+// instead.
+function updatePairingBadge(entries) {
+  const badge = document.getElementById("pairing-badge");
+  if (!badge) return;
+  const pendingCount = Array.isArray(entries)
+    ? entries.filter((e) => String(e.status || "pending") === "pending").length
+    : 0;
+  const countEl = badge.querySelector(".pairing-badge-count");
+  if (pendingCount === 0) {
+    badge.hidden = true;
+    if (countEl) {
+      countEl.textContent = "0";
+      countEl.dataset.count = "0";
+    }
+  } else {
+    badge.hidden = false;
+    if (countEl) {
+      countEl.textContent = String(pendingCount);
+      countEl.dataset.count = String(pendingCount);
+    }
+    // Increase-only pulse — operator just got a NEW request, deserves
+    // attention. Decrease (operator approved one) doesn't re-fire.
+    if (pendingCount > lastPendingCount) {
+      badge.classList.remove("pairing-badge-pulse");
+      // Force reflow so re-adding the class restarts the animation.
+      void badge.offsetWidth;
+      badge.classList.add("pairing-badge-pulse");
+    }
+  }
+  lastPendingCount = pendingCount;
 }
 
 // renderPendingPairing fetches once and applies. Used by
@@ -1357,10 +1412,19 @@ function applyConnState(state) {
     "Disconnected";
 }
 
+// Active EventSource. Tracked at module scope so the
+// visibility-change handler can close + replace it on a long sleep
+// resume (laptop closed for hours; the in-flight ES may have silently
+// failed to reconnect post-wake).
+let activeEventSource = null;
+let lastEventSourceConnectAt = 0;
+
 function startEventStream() {
   // EventSource is a built-in browser API; no polyfill needed for
   // any iOS / desktop browser the admin console targets.
   const es = new EventSource("/api/events");
+  activeEventSource = es;
+  lastEventSourceConnectAt = Date.now();
 
   es.addEventListener("stats",     (e) => safeApply("stats",     e.data, applyStats));
   es.addEventListener("endpoints", (e) => safeApply("endpoints", e.data, applyEndpoints));
@@ -1377,6 +1441,36 @@ function startEventStream() {
   es.onerror = () => {
     applyConnState(es.readyState === EventSource.CLOSED ? "disconnected" : "reconnecting");
   };
+}
+
+// SSE reconnection resilience for the global pairing badge — the
+// badge is only useful if SSE keeps delivering events through laptop
+// sleep / wake cycles. The browser's auto-reconnect handles the
+// common case, but a long sleep (laptop closed for hours) can leave
+// the in-flight EventSource silently failed post-wake. When the tab
+// becomes visible again after >60 s away, force-close + re-arm the
+// EventSource and immediately fetch /api/pairing once to backfill any
+// pairing requests that arrived during the sleep gap.
+function handleVisibilityRestore() {
+  if (document.visibilityState !== "visible") return;
+  const idleMs = Date.now() - lastEventSourceConnectAt;
+  if (idleMs < 60000) return;
+  // Force-cycle the connection — auto-reconnect doesn't always cover
+  // post-sleep recovery cleanly.
+  if (activeEventSource) {
+    try { activeEventSource.close(); } catch (_) { /* ignore */ }
+  }
+  startEventStream();
+  // Belt-and-braces: backfill the pairing snapshot directly so the
+  // global badge updates immediately even if the first SSE frame
+  // takes a moment to arrive.
+  (async () => {
+    try {
+      applyPairing(await API.get("/api/pairing"));
+    } catch (_) {
+      // Transient — the next SSE frame will catch up.
+    }
+  })();
 }
 
 function safeApply(name, raw, fn) {
@@ -1408,4 +1502,10 @@ document.addEventListener("DOMContentLoaded", () => {
   // pairing / endpoints panels show their template-default empty
   // state.
   startEventStream();
+
+  // Visibility-change re-arm — covers the laptop-sleep-then-wake
+  // case where the in-flight EventSource silently failed to
+  // reconnect. Cheap no-op on every short tab-switch (<60 s), but
+  // closes + recycles the stream on a real long-idle wake.
+  document.addEventListener("visibilitychange", handleVisibilityRestore);
 });

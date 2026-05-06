@@ -25,6 +25,11 @@
   --accent: #f97316;                 /* orange-500 — primary actions */
   --accent-hot: #dc2626;             /* red-600 — destructive actions */
   --accent-warm: #eab308;            /* yellow-500 — restart-required + warning badges */
+  /* Pre-computed amber tint for legacy webviews that don't honor
+   * color-mix(). Modern browsers progressively enhance to color-mix
+   * (the second `background:` declaration wins). Older enterprise
+   * kiosk browsers see this pastel and the layout still works. */
+  --accent-warm-tint: #fdf6dc;
   --accent-soft: rgba(249, 115, 22, 0.10);
   --accent-glow-color: #f973164d;    /* ≈30% alpha — used by .brand-mark */
   --danger: #dc2626;
@@ -56,6 +61,8 @@
     --accent: #fb923c;               /* orange-400 — readable on slate-900 */
     --accent-hot: #ef4444;           /* red-500 */
     --accent-warm: #facc15;          /* yellow-400 */
+    /* Dark-mode equivalent of the pastel amber tint. */
+    --accent-warm-tint: #3a2f0a;
     --accent-soft: rgba(251, 146, 60, 0.16);
     --accent-glow-color: #fb923c59;
     --danger: #ef4444;
@@ -679,9 +686,84 @@ dialog h2 { font-size: 18px; color: var(--accent); }
   display: grid;
   gap: 8px;
 }
+/* Pending request — bumped from a subtle green tint to an amber
+ * border + amber-tinted background so it actually catches the
+ * operator's eye. The previous green-on-light-grey blended into the
+ * panel and hid the card behind the 28 px verification code on
+ * larger displays. Amber matches the "operator action expected"
+ * semantics of --warn / --accent-warm elsewhere in the admin UI.
+ *
+ * The pre-computed --accent-warm-tint fallback is the legacy-
+ * browser path: modern browsers progressively enhance to color-mix.
+ * Older enterprise webviews / kiosk browsers see the precomputed
+ * pastel without breaking. */
 .pairing-card.pairing-pending {
-  border-color: color-mix(in srgb, var(--ok) 35%, var(--border));
-  box-shadow: 0 0 10px color-mix(in srgb, var(--ok) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warn) 60%, var(--border));
+  border-left: 4px solid var(--warn);
+  background: var(--accent-warm-tint);
+  background: color-mix(in srgb, var(--warn) 10%, var(--bg-elev));
+  box-shadow: 0 0 14px color-mix(in srgb, var(--warn) 20%, transparent);
+}
+
+/* Header pairing badge — visible on every admin page (Dashboard /
+ * Library / Devices / Settings). Pulses on count increase. Click
+ * routes to /devices, where the per-row card surfaces the
+ * verification code + Approve / Decline buttons. */
+.pairing-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 12px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--warn) 90%, white);
+  color: #1a1a1a;
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: none;
+  letter-spacing: 0.02em;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.pairing-badge:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.15);
+}
+.pairing-badge:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.pairing-badge-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #1a1a1a;
+}
+.pairing-badge-count {
+  font-variant-numeric: tabular-nums;
+}
+@media (prefers-color-scheme: dark) {
+  .pairing-badge {
+    background: color-mix(in srgb, var(--warn) 90%, black);
+    color: #1a1a1a;
+  }
+}
+@keyframes pairing-badge-pulse {
+  0%   { transform: scale(1);    box-shadow: 0 0 0 0 color-mix(in srgb, var(--warn) 70%, transparent); }
+  50%  { transform: scale(1.08); box-shadow: 0 0 0 6px color-mix(in srgb, var(--warn) 0%, transparent); }
+  100% { transform: scale(1);    box-shadow: 0 0 0 0 color-mix(in srgb, var(--warn) 0%, transparent); }
+}
+.pairing-badge-pulse {
+  animation: pairing-badge-pulse 1.4s ease-out 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .pairing-badge-pulse {
+    /* No animation under reduced-motion. The brighter background
+     * already conveys "new request arrived" without movement. */
+    animation: none;
+    background: color-mix(in srgb, var(--warn) 100%, transparent);
+  }
 }
 .pairing-card-head {
   display: flex;
