@@ -16,12 +16,20 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
 
 // fakeManifestProvider is a tiny ManifestProvider stand-in for tests that
 // want to exercise /v1/manifest without spinning up the real scanner.
+//
+// `body` is the legacy non-paginated WriteManifest response — kept as
+// `any` because that path encodes whatever shape the test hands it
+// straight to the wire (some tests use `map[string]any{...}` to check
+// arbitrary JSON keys, e.g. the legacy-path back-compat assertion).
+// `pageBody` is typed via the api ManifestProvider contract so the
+// paginated path is statically checked from fake to handler.
 type fakeManifestProvider struct {
 	body          any
 	err           error
@@ -31,9 +39,10 @@ type fakeManifestProvider struct {
 	// pageBody / pageErr drive BuildManifestPage independently so
 	// pagination tests can assert against a different response than
 	// the legacy WriteManifest path without clobbering full-manifest
-	// coverage. nil pageBody falls back to `body` so tests that only
-	// care about the legacy path don't have to set both.
-	pageBody any
+	// coverage. nil pageBody returns an empty *manifest.Manifest so
+	// tests that only care about cursor/limit forwarding don't have
+	// to construct a fixture.
+	pageBody *manifest.Manifest
 	pageErr  error
 	// lastPageCursor / lastPageLimit let pagination tests verify the
 	// handler forwards query params correctly.
@@ -54,13 +63,16 @@ func (f *fakeManifestProvider) WriteManifest(ctx context.Context, w io.Writer, s
 	}
 	return json.NewEncoder(w).Encode(f.body)
 }
-func (f *fakeManifestProvider) BuildManifestPage(cursor string, limit int) (any, error) {
+func (f *fakeManifestProvider) BuildManifestPage(cursor string, limit int) (*ManifestPage, error) {
 	f.lastPageCursor = cursor
 	f.lastPageLimit = limit
-	if f.pageBody != nil || f.pageErr != nil {
+	if f.pageErr != nil {
 		return f.pageBody, f.pageErr
 	}
-	return f.body, f.err
+	if f.pageBody != nil {
+		return f.pageBody, nil
+	}
+	return &manifest.Manifest{}, nil
 }
 func (f *fakeManifestProvider) IsScanning() bool        { return f.isScanning }
 func (f *fakeManifestProvider) LastFullScan() time.Time { return f.lastFullScan }

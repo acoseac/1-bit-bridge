@@ -82,7 +82,7 @@ func (p *Provider) WriteManifest(ctx context.Context, w io.Writer, since time.Ti
 // BuildManifestPage satisfies api.ManifestProvider for the paginated
 // full-manifest path introduced in v1.1. See `BuildManifestPage` in
 // scanner.go for the cursor semantics.
-func (p *Provider) BuildManifestPage(cursor string, limit int) (any, error) {
+func (p *Provider) BuildManifestPage(cursor string, limit int) (*Manifest, error) {
 	return buildManifestPageGated(p.store, p.scanner.Roots(), cursor, limit, p.upscaleEnabled)
 }
 
