@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -800,10 +801,12 @@ func TestStringOfMatchesVorbisAndID3v2Spellings(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			// Pre-normalised keys: 3 wire spellings collapse to 2
+			// distinct normalised forms (the underscore-joined and
+			// the space-derived). See stringOf docstring.
 			got, ok := stringOf(tc.raw,
-				"MUSICBRAINZ_ALBUMID",
-				"MUSICBRAINZ ALBUM ID",
 				"musicbrainz_albumid",
+				"musicbrainz_album_id",
 			)
 			if !ok {
 				t.Fatalf("stringOf failed to find any key in %v", tc.raw)
@@ -831,9 +834,8 @@ func TestStringOfMatchesVorbisAndID3v2Spellings(t *testing.T) {
 func TestStringOfTrimsResultValue(t *testing.T) {
 	raw := map[string]any{"MusicBrainz Album Id": "  album-mbid  \n"}
 	got, ok := stringOf(raw,
-		"MUSICBRAINZ_ALBUMID",
-		"MUSICBRAINZ ALBUM ID",
 		"musicbrainz_albumid",
+		"musicbrainz_album_id",
 	)
 	if !ok {
 		t.Fatalf("stringOf failed to find key in raw=%v", raw)
@@ -849,7 +851,7 @@ func TestStringOfTrimsResultValue(t *testing.T) {
 // landscape might still return that as a "set" value.
 func TestStringOfRejectsEmptyAfterTrim(t *testing.T) {
 	raw := map[string]any{"MUSICBRAINZ_ALBUMID": "   \t\n  "}
-	if got, ok := stringOf(raw, "MUSICBRAINZ_ALBUMID"); ok {
+	if got, ok := stringOf(raw, "musicbrainz_albumid"); ok {
 		t.Errorf("stringOf returned %q for whitespace-only value, want absent", got)
 	}
 }
@@ -859,7 +861,7 @@ func TestStringOfRejectsEmptyAfterTrim(t *testing.T) {
 // trim-on-return for the slice path.
 func TestStringOfArrayValueTrimsFirst(t *testing.T) {
 	raw := map[string]any{"MUSICBRAINZ_ALBUMID": []string{"  vorbis-mbid  "}}
-	got, ok := stringOf(raw, "MUSICBRAINZ_ALBUMID")
+	got, ok := stringOf(raw, "musicbrainz_albumid")
 	if !ok {
 		t.Fatalf("stringOf failed to find key in []string value")
 	}
@@ -875,7 +877,7 @@ func TestStringOfArrayValueTrimsFirst(t *testing.T) {
 // Minor round-1 on PR #166.
 func TestStringOfArrayScansAllEntries(t *testing.T) {
 	raw := map[string]any{"COMMENT": []string{"  ", "  real-value  "}}
-	got, ok := stringOf(raw, "COMMENT")
+	got, ok := stringOf(raw, "comment")
 	if !ok {
 		t.Fatalf("stringOf should walk past blank entries, got absent")
 	}
@@ -910,7 +912,7 @@ func TestStringOfHandlesIntValueForCpil(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			raw := map[string]any{"compilation": tc.val}
-			got, ok := stringOf(raw, "TCMP", "CPIL", "COMPILATION")
+			got, ok := stringOf(raw, "tcmp", "cpil", "compilation")
 			if !ok {
 				t.Fatalf("stringOf should accept %T value, got absent", tc.val)
 			}
@@ -1032,7 +1034,7 @@ func TestCompilationFlagAcceptsDifferentSpellings(t *testing.T) {
 				tc.key: tc.val,
 			}
 			tr := &Track{}
-			if t1, ok := stringOf(raw, "TCMP", "CPIL", "COMPILATION"); !ok || t1 != "1" {
+			if t1, ok := stringOf(raw, "tcmp", "cpil", "compilation"); !ok || t1 != "1" {
 				t.Fatalf("stringOf with %s=%q: got (%q, %v)", tc.key, tc.val, t1, ok)
 			}
 			if tr.AlbumArtist == "Various Artists" {
@@ -1041,6 +1043,56 @@ func TestCompilationFlagAcceptsDifferentSpellings(t *testing.T) {
 		})
 	}
 }
+
+// --- parseReplayGain ---
+
+// TestParseReplayGain locks the suffix-strip + whitespace-trim
+// behaviour around the float parse. Pre-fix the four sequential
+// TrimSuffix calls (" dB" / " db" / "dB" / "db") only handled
+// those exact case combinations; mixed case ("Db", "DB") fell
+// through to ParseFloat and silently returned nil. The new form
+// uses ToLower + a single TrimSuffix("db"), which handles every
+// case combination AND removes redundant operations.
+func TestParseReplayGain(t *testing.T) {
+	cases := []struct {
+		in   string
+		want *float64
+	}{
+		{"-7.32 dB", floatPtr(-7.32)},
+		{"-7.32 db", floatPtr(-7.32)},
+		{"-7.32dB", floatPtr(-7.32)},
+		{"-7.32db", floatPtr(-7.32)},
+		{"-7.32 Db", floatPtr(-7.32)}, // pre-fix returned nil (silent miss)
+		{"-7.32 DB", floatPtr(-7.32)}, // pre-fix returned nil
+		{"  -7.32  dB  ", floatPtr(-7.32)},
+		{"-7.32 dB ", floatPtr(-7.32)}, // trailing space after suffix
+		{"-7.32", floatPtr(-7.32)},
+		{"+5.5 dB", floatPtr(5.5)},
+		{"0 dB", floatPtr(0)},
+		{"", nil},
+		{"   ", nil},
+		{"abc", nil},
+		{"dB", nil},
+		{" dB", nil},
+	}
+	for _, tc := range cases {
+		t.Run(strconv.Quote(tc.in), func(t *testing.T) {
+			got := parseReplayGain(tc.in)
+			switch {
+			case got == nil && tc.want == nil:
+				return
+			case got == nil:
+				t.Fatalf("got nil, want %v", *tc.want)
+			case tc.want == nil:
+				t.Fatalf("got %v, want nil", *got)
+			case *got != *tc.want:
+				t.Errorf("got %v, want %v", *got, *tc.want)
+			}
+		})
+	}
+}
+
+func floatPtr(v float64) *float64 { return &v }
 
 // Suppresses unused-import warning when running individual tests
 // (atomic / time are used but the package's other test files cover
