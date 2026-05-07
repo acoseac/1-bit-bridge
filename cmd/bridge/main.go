@@ -555,6 +555,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return scanCmd(args[1:], stdout, stderr)
 	case "upscale":
 		return upscaleCmd(ctx, args[1:], stdout, stderr)
+	case "artwork":
+		return artworkCmd(ctx, args[1:], stdout, stderr)
 	case "doctor":
 		return doctorCmd(args[1:], stdout, stderr)
 	case "update":
@@ -612,6 +614,7 @@ Subcommands:
   pair     Generate a new bearer token for an iOS client.
   scan     Force a full library rescan.
   upscale  Generate high-rate FLAC sidecars from PCM sources (requires sox + opt-in flag).
+  artwork  Maintain on-disk artwork cache: bridge artwork --gc removes orphans.
   doctor   Preflight: check ports, directories, service manager before init.
   update   Check for / install a new bridge release from GitHub.
   backup   Snapshot bridge state into <dataDir>/backups/<timestamp>/.

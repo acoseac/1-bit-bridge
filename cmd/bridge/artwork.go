@@ -1,0 +1,157 @@
+// `bridge artwork` CLI subcommand: maintenance for the on-disk
+// artwork cache at <dataDir>/artwork/. Today the only subaction is
+// `--gc` (garbage-collect orphaned cache files).
+//
+// Two cleanup targets:
+//   - scanner-side `local-<sha256>-500.jpg` files written by
+//     `stampLocalArtwork` for embedded ID3 APIC bytes / folder-level
+//     cover.jpg. Track rows reference these via the
+//     `local-<hash>` sentinel in `artworkMBID`.
+//   - enricher-side `<mbid>-500.jpg` files written by the
+//     MusicBrainz / CAA fetch path. Track rows reference these via
+//     the raw MBID UUID in `artworkMBID`.
+//
+// Both shapes share `artworkMBID` as the JSON-tag pointer, and the
+// store's `ArtworkMBIDsInUse()` returns the distinct set of
+// referenced ids. Any file in the artwork dir whose stem (filename
+// minus the `-500.jpg` suffix) isn't in that set is an orphan.
+//
+// **Manual subcommand, NOT auto-tail-of-Scan()**: per Gemini A10 /
+// iOS bug review #10. Operators on low-IOPS hosts (Pi SD cards)
+// want predictable maintenance windows; running GC at the tail of
+// every periodic Scan() would spike disk I/O exactly when the user
+// expected the scan to "finish".
+//
+// Per Gemini A10 / iOS bug review #10.
+
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
+)
+
+// artworkDirName lives under cfg.DataDir. Single source of truth for
+// the cache directory — kept in sync with the scanner's
+// `artworkDirBridge` resolution in main.go.
+const artworkDirName = "artwork"
+
+// artworkCacheSuffix is the trailing portion of every cached file
+// (`-500.jpg`). Files in the artwork dir that don't end with this are
+// skipped — any future cache shape (`-300.jpg`, `-thumb.jpg`) gets
+// added here without touching the orphan-detection loop.
+const artworkCacheSuffix = "-500.jpg"
+
+func artworkCmd(_ context.Context, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("artwork", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	configPath := fs.String("config", "bridge.yaml", "path to config file")
+	gc := fs.Bool("gc", false, "remove cached artwork files no longer referenced by any track row")
+	dryRun := fs.Bool("dry-run", false, "list orphans without removing them (use with --gc)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+
+	if !*gc {
+		fmt.Fprintln(stderr, "Usage: bridge artwork --gc [--dry-run] [--config bridge.yaml]")
+		fmt.Fprintln(stderr, "")
+		fmt.Fprintln(stderr, "Removes cached artwork files (local-<hash>-500.jpg, <mbid>-500.jpg) under")
+		fmt.Fprintln(stderr, "<dataDir>/artwork/ that no track row references. Use --dry-run to preview.")
+		return 2
+	}
+
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "config load: %v\n", err)
+		return 2
+	}
+
+	storePath := filepath.Join(cfg.DataDir, "data", "bridge.db")
+	store, err := manifest.OpenStore(storePath)
+	if err != nil {
+		fmt.Fprintf(stderr, "open store at %q: %v\n", storePath, err)
+		return 1
+	}
+	defer store.Close()
+
+	artworkDir := filepath.Join(cfg.DataDir, artworkDirName)
+	return runArtworkGC(stdout, stderr, store, artworkDir, *dryRun)
+}
+
+func runArtworkGC(stdout, stderr io.Writer, store *manifest.Store, artworkDir string, dryRun bool) int {
+	mbidsInUse, err := store.ArtworkMBIDsInUse()
+	if err != nil {
+		fmt.Fprintf(stderr, "list referenced artwork ids: %v\n", err)
+		return 1
+	}
+	known := make(map[string]bool, len(mbidsInUse))
+	for _, m := range mbidsInUse {
+		known[m] = true
+	}
+
+	var removed, kept, failed, skipped int
+	walkErr := filepath.WalkDir(artworkDir, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			// Cache dir may not exist yet (no scan ever ran). Treat
+			// as empty rather than erroring — same shape as the
+			// upscale GC (`runGC` in upscale.go).
+			if errors.Is(walkErr, os.ErrNotExist) {
+				return filepath.SkipDir
+			}
+			return walkErr
+		}
+		if d.IsDir() {
+			return nil
+		}
+		// Only consider files matching the cache suffix. Anything
+		// else (a stray README, a partial download, an old-format
+		// thumb) is treated as out-of-scope and skipped — a
+		// future GC pass with broader coverage can extend this.
+		base := filepath.Base(path)
+		if !strings.HasSuffix(base, artworkCacheSuffix) {
+			skipped++
+			return nil
+		}
+		stem := strings.TrimSuffix(base, artworkCacheSuffix)
+		if known[stem] {
+			kept++
+			return nil
+		}
+		if dryRun {
+			fmt.Fprintf(stdout, "would remove: %s\n", path)
+			removed++
+			return nil
+		}
+		if err := os.Remove(path); err != nil {
+			fmt.Fprintf(stderr, "remove %s: %v\n", path, err)
+			failed++
+			return nil
+		}
+		removed++
+		return nil
+	})
+	if walkErr != nil {
+		fmt.Fprintf(stderr, "walk artwork dir: %v\n", walkErr)
+		return 1
+	}
+	if dryRun {
+		fmt.Fprintf(stdout, "GC dry-run: %d orphan(s) would be removed, %d kept, %d skipped (non-cache file).\n",
+			removed, kept, skipped)
+	} else {
+		fmt.Fprintf(stdout, "GC: removed %d orphan(s), kept %d known cache file(s), %d skipped, %d failure(s).\n",
+			removed, kept, skipped, failed)
+	}
+	if failed > 0 {
+		return 1
+	}
+	return 0
+}
