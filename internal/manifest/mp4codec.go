@@ -57,8 +57,11 @@ func extractMP4Codec(r io.ReadSeeker) (string, error) {
 		return "", err
 	}
 
-	// Walk top-level atoms looking for moov.
-	moovStart, moovSize, err := findAtom(r, "moov", 0, mp4MaxHeaderReadBudget)
+	// Walk top-level atoms looking for moov. Each descent uses the
+	// actual header size of the parent box (8 for normal boxes, 16
+	// for 64-bit `largesize` boxes); see findAtom's docstring for
+	// why `+ mp4HeaderSize` would be wrong on a 64-bit container.
+	moovStart, moovHdr, moovSize, err := findAtom(r, "moov", 0, mp4MaxHeaderReadBudget)
 	if err != nil {
 		return "", err
 	}
@@ -67,7 +70,7 @@ func extractMP4Codec(r io.ReadSeeker) (string, error) {
 	}
 
 	// Inside moov, find the first trak.
-	trakStart, trakSize, err := findAtom(r, "trak", moovStart+mp4HeaderSize, moovStart+moovSize)
+	trakStart, trakHdr, trakSize, err := findAtom(r, "trak", moovStart+moovHdr, moovStart+moovSize)
 	if err != nil {
 		return "", err
 	}
@@ -76,28 +79,28 @@ func extractMP4Codec(r io.ReadSeeker) (string, error) {
 	}
 
 	// Walk trak/mdia/minf/stbl/stsd.
-	mdiaStart, mdiaSize, err := findAtom(r, "mdia", trakStart+mp4HeaderSize, trakStart+trakSize)
+	mdiaStart, mdiaHdr, mdiaSize, err := findAtom(r, "mdia", trakStart+trakHdr, trakStart+trakSize)
 	if err != nil {
 		return "", err
 	}
 	if mdiaSize <= 0 {
 		return "", errors.New("mp4: mdia not found")
 	}
-	minfStart, minfSize, err := findAtom(r, "minf", mdiaStart+mp4HeaderSize, mdiaStart+mdiaSize)
+	minfStart, minfHdr, minfSize, err := findAtom(r, "minf", mdiaStart+mdiaHdr, mdiaStart+mdiaSize)
 	if err != nil {
 		return "", err
 	}
 	if minfSize <= 0 {
 		return "", errors.New("mp4: minf not found")
 	}
-	stblStart, stblSize, err := findAtom(r, "stbl", minfStart+mp4HeaderSize, minfStart+minfSize)
+	stblStart, stblHdr, stblSize, err := findAtom(r, "stbl", minfStart+minfHdr, minfStart+minfSize)
 	if err != nil {
 		return "", err
 	}
 	if stblSize <= 0 {
 		return "", errors.New("mp4: stbl not found")
 	}
-	stsdStart, stsdSize, err := findAtom(r, "stsd", stblStart+mp4HeaderSize, stblStart+stblSize)
+	stsdStart, stsdHdr, stsdSize, err := findAtom(r, "stsd", stblStart+stblHdr, stblStart+stblSize)
 	if err != nil {
 		return "", err
 	}
@@ -105,14 +108,15 @@ func extractMP4Codec(r io.ReadSeeker) (string, error) {
 		return "", errors.New("mp4: stsd not found")
 	}
 
-	// stsd payload (after the 8-byte atom header):
+	// stsd payload (after the box header — 8 bytes for normal, 16 for
+	// 64-bit largesize):
 	//   1 byte: version
 	//   3 bytes: flags
 	//   4 bytes: entry_count (uint32)
 	//   then for each entry:
 	//     4 bytes: size (uint32)
 	//     4 bytes: format (FourCC)  ← the codec id
-	if _, err := r.Seek(int64(stsdStart+mp4HeaderSize+8), io.SeekStart); err != nil {
+	if _, err := r.Seek(int64(stsdStart+stsdHdr+8), io.SeekStart); err != nil {
 		return "", err
 	}
 	var entrySize uint32
@@ -141,38 +145,46 @@ func extractMP4Codec(r io.ReadSeeker) (string, error) {
 
 // findAtom scans MP4 atoms starting at `start` (absolute byte offset
 // in the reader) up to `endBound` (exclusive) for one with type
-// matching `name` (4-character ASCII). Returns the atom's start offset
-// AND its full size (header + payload). Size of 0 means not found.
+// matching `name` (4-character ASCII). Returns the atom's start
+// offset, its header size (8 for normal boxes, 16 for 64-bit
+// `largesize` boxes — size==1, where the next 8 bytes hold the real
+// uint64 size), and its full size (header + payload). A returned
+// `size` of 0 means not found.
 //
 // Single-pass, non-recursive — caller drives the descent into nested
-// containers. `endBound` is exclusive of the byte at that position
-// (so an atom that ends EXACTLY at endBound is included, but an atom
-// whose header would start at endBound is not).
-func findAtom(r io.ReadSeeker, name string, start, endBound uint64) (offset, size uint64, err error) {
+// containers. Callers descending into the payload MUST use
+// `offset + headerSize` (not `+ mp4HeaderSize`) so a 64-bit container
+// (e.g. a `moov`/`trak` exceeding 4 GiB in long audiobooks / DJ
+// mixes) doesn't have its descent collide with the 8-byte largesize
+// field. `endBound` is exclusive of the byte at that position (so an
+// atom that ends EXACTLY at endBound is included, but an atom whose
+// header would start at endBound is not).
+func findAtom(r io.ReadSeeker, name string, start, endBound uint64) (offset, headerSize, size uint64, err error) {
 	if len(name) != 4 {
-		return 0, 0, fmt.Errorf("mp4: findAtom: name %q must be 4 chars", name)
+		return 0, 0, 0, fmt.Errorf("mp4: findAtom: name %q must be 4 chars", name)
 	}
 	cursor := start
 	iterations := 0
 	for cursor+mp4HeaderSize <= endBound {
 		if iterations >= mp4MaxAtomsPerSearch {
-			return 0, 0, fmt.Errorf("mp4: atom walk exceeded %d-atom iteration budget at cursor %d", mp4MaxAtomsPerSearch, cursor)
+			return 0, 0, 0, fmt.Errorf("mp4: atom walk exceeded %d-atom iteration budget at cursor %d", mp4MaxAtomsPerSearch, cursor)
 		}
 		iterations++
 		if _, err := r.Seek(int64(cursor), io.SeekStart); err != nil {
-			return 0, 0, err
+			return 0, 0, 0, err
 		}
 		var header [mp4HeaderSize]byte
 		if _, err := io.ReadFull(r, header[:]); err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 				// Truncated atom near end-of-search-range; treat as
 				// not-found rather than propagating EOF up.
-				return 0, 0, nil
+				return 0, 0, 0, nil
 			}
-			return 0, 0, err
+			return 0, 0, 0, err
 		}
 		atomSize := uint64(binary.BigEndian.Uint32(header[0:4]))
 		atomType := string(header[4:8])
+		atomHeaderSize := uint64(mp4HeaderSize)
 		// MP4 large-size variant: size==1 means the next 8 bytes
 		// hold the real size (uint64). size==0 means "to EOF" (rare
 		// in practice; we treat it as the remainder of endBound).
@@ -182,23 +194,24 @@ func findAtom(r io.ReadSeeker, name string, start, endBound uint64) (offset, siz
 		case 1:
 			var bigSize [8]byte
 			if _, err := io.ReadFull(r, bigSize[:]); err != nil {
-				return 0, 0, err
+				return 0, 0, 0, err
 			}
 			atomSize = binary.BigEndian.Uint64(bigSize[:])
+			atomHeaderSize = 16
 		}
-		if atomSize < mp4HeaderSize {
+		if atomSize < atomHeaderSize {
 			// Malformed — atom claims smaller than its own header.
-			return 0, 0, fmt.Errorf("mp4: atom %q at %d has size %d < header", atomType, cursor, atomSize)
+			return 0, 0, 0, fmt.Errorf("mp4: atom %q at %d has size %d < header (%d)", atomType, cursor, atomSize, atomHeaderSize)
 		}
 		if atomType == name {
-			return cursor, atomSize, nil
+			return cursor, atomHeaderSize, atomSize, nil
 		}
 		next := cursor + atomSize
 		if next <= cursor {
 			// Wraparound / zero-size loop guard.
-			return 0, 0, fmt.Errorf("mp4: atom walk stalled at %d", cursor)
+			return 0, 0, 0, fmt.Errorf("mp4: atom walk stalled at %d", cursor)
 		}
 		cursor = next
 	}
-	return 0, 0, nil
+	return 0, 0, 0, nil
 }
