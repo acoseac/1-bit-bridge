@@ -1049,6 +1049,44 @@ func (s *Store) CountTracks() (int, error) {
 	return n, err
 }
 
+// ArtworkMBIDsInUse returns the distinct artworkMBID values currently
+// referenced by at least one track row. Used by `bridge artwork --gc`
+// to identify cached files in <dataDir>/artwork/ that are no longer
+// referenced and can be removed (orphan recovery, see Gemini A10 /
+// iOS bug review #10 — pre-fix the artwork directory grew unbounded
+// over months/years of curation since there was no cleanup path).
+//
+// Backed by the same functional index used by `HasTrackWithArtworkMBID`
+// (`idx_tracks_artwork_mbid`); the DISTINCT + WHERE-NOT-NULL filter
+// runs as an index scan. Scales to any library size.
+//
+// Returns NULL-filtered values: tracks without artworkMBID set
+// (`json_extract` returns NULL) are skipped at the SQL layer so the
+// caller's set logic doesn't have to handle empty strings explicitly.
+func (s *Store) ArtworkMBIDsInUse() ([]string, error) {
+	rows, err := s.db.Query(`
+		SELECT DISTINCT json_extract(tags_json, '$.artworkMBID')
+		FROM tracks
+		WHERE json_extract(tags_json, '$.artworkMBID') IS NOT NULL
+		  AND json_extract(tags_json, '$.artworkMBID') != ''
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var v sql.NullString
+		if err := rows.Scan(&v); err != nil {
+			return nil, err
+		}
+		if v.Valid && v.String != "" {
+			out = append(out, v.String)
+		}
+	}
+	return out, rows.Err()
+}
+
 // EnrichmentCounts returns the library-wide enrichment counters used
 // by the manifest's `enrichmentProgress` block: number of tracks past
 // the enrich pass (`enriched_at != 0`) and the wall-clock of the most
