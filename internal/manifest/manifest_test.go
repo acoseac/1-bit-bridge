@@ -452,9 +452,20 @@ func TestEnrichmentCountsUsesIndex(t *testing.T) {
 		}
 	}
 
+	// Populate sqlite_stat1 so the planner has selectivity stats.
+	// Without this, SQLite's planner falls back to a heuristic that
+	// chooses SCAN-with-COVERING-INDEX over SEARCH for high-cardinality
+	// matches — both touch every row, but SEARCH is the strictly
+	// better shape. The contract this test locks is that the index
+	// CAN be used for a bounded range lookup; ANALYZE makes the
+	// planner act on that capability. (CodeRabbit Major round-1.)
+	if _, err := s.db.Exec(`ANALYZE`); err != nil {
+		t.Fatal(err)
+	}
+
 	rows, err := s.db.Query(`EXPLAIN QUERY PLAN
 		SELECT
-			(SELECT COUNT(*) FROM tracks WHERE enriched_at != 0),
+			(SELECT COUNT(*) FROM tracks WHERE enriched_at > 0),
 			(SELECT MAX(enriched_at) FROM tracks)
 	`)
 	if err != nil {
@@ -476,27 +487,31 @@ func TestEnrichmentCountsUsesIndex(t *testing.T) {
 	planStr := plan.String()
 	t.Logf("EXPLAIN QUERY PLAN:\n%s", planStr)
 
-	// At least one subquery must reference the index. SQLite typically
-	// emits "SEARCH tracks USING INDEX idx_tracks_enriched" for the
-	// COUNT subquery's `WHERE enriched_at != 0` clause and "SEARCH
-	// tracks USING COVERING INDEX idx_tracks_enriched" for the MAX.
-	// We assert the index name appears AT LEAST ONCE in the plan and
-	// that the plain "SCAN tracks" (no INDEX) is absent.
-	if !strings.Contains(planStr, "idx_tracks_enriched") {
-		t.Errorf("expected EXPLAIN QUERY PLAN to mention idx_tracks_enriched, got:\n%s", planStr)
+	// Both scalar subqueries must reference the index. The COUNT(*)
+	// subquery uses `WHERE enriched_at > 0` (sargeable, becomes a
+	// SEARCH range scan), and the MAX(enriched_at) subquery uses
+	// the index B-tree's tail (also a SEARCH). We require the index
+	// name to appear AT LEAST TWICE in the plan — once per subquery —
+	// to lock the contract that NEITHER one degrades to a full
+	// table walk (CodeRabbit Major round-1 on PR #164). The
+	// `strings.Count` form catches the regression where the COUNT
+	// subquery silently falls back to `SCAN tracks USING COVERING
+	// INDEX` (which still touches every row) — the previous
+	// `strings.Contains` form let that pass.
+	if c := strings.Count(planStr, "idx_tracks_enriched"); c < 2 {
+		t.Errorf("expected both scalar subqueries to reference idx_tracks_enriched (>=2 mentions), got %d in:\n%s", c, planStr)
 	}
-	// "SCAN tracks" without an index is the failure mode we're locking
-	// out. SQLite emits "SCAN tracks" for a full table scan; the index
-	// path emits "SEARCH tracks USING INDEX ...". Reject the former.
+	// Any `SCAN tracks` line — even with COVERING INDEX — still
+	// traverses every row. The perf contract requires SEARCH for
+	// keyed/range lookups against the index. Reject SCAN tracks
+	// unconditionally (CodeRabbit Major round-1 on PR #164).
 	for _, line := range strings.Split(planStr, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
-		if strings.HasPrefix(line, "SCAN tracks") &&
-			!strings.Contains(line, "USING INDEX") &&
-			!strings.Contains(line, "USING COVERING INDEX") {
-			t.Errorf("EXPLAIN line %q indicates a full table scan, want index usage", line)
+		if strings.HasPrefix(line, "SCAN tracks") {
+			t.Errorf("EXPLAIN line %q uses SCAN, not keyed SEARCH — contract requires range index lookup", line)
 		}
 	}
 }

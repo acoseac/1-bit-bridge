@@ -1087,9 +1087,18 @@ func (s *Store) CountTracks() (int, error) {
 // parse that as a real date — breaking the 24 h freshness gate.
 func (s *Store) EnrichmentCounts() (enriched int, lastEnrichedAt *time.Time, err error) {
 	var lastNs sql.NullInt64
+	// `enriched_at > 0` is sargeable; `enriched_at != 0` is not. Even
+	// though both predicates describe the same row set (the column is
+	// only ever 0 or a positive Unix timestamp set by `MarkEnriched`),
+	// SQLite's planner converts `> 0` into a bounded index range scan
+	// against `idx_tracks_enriched`, while `!= 0` falls back to a
+	// covering-index full walk. Verified via EXPLAIN QUERY PLAN — the
+	// `> 0` form emits `SEARCH tracks USING COVERING INDEX
+	// idx_tracks_enriched (enriched_at>?)` while `!= 0` emits a bare
+	// `SCAN tracks` (CodeRabbit Major round-1 on PR #164).
 	err = s.db.QueryRow(`
 		SELECT
-			(SELECT COUNT(*) FROM tracks WHERE enriched_at != 0),
+			(SELECT COUNT(*) FROM tracks WHERE enriched_at > 0),
 			(SELECT MAX(enriched_at) FROM tracks)
 	`).Scan(&enriched, &lastNs)
 	if err != nil {
