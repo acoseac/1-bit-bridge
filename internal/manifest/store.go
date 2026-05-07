@@ -225,17 +225,61 @@ var migrations = []migration{
 		// SQLite's built-in LOWER() is ASCII-only — for libraries
 		// with accented characters (most non-English) iOS's full
 		// Unicode lowercase via `String.lowercased()` will land on
-		// a different byte sequence. Future fix: precompute the
-		// lowercased form Go-side and store as a separate column.
-		// For now this covers the 90% case (Western libraries) and
-		// the manifest's existing PRIMARY KEY remains authoritative
-		// for the canonical case-preserved form. See LookupTrack /
-		// LookupVariant in store.go.
+		// a different byte sequence.
+		//
+		// **Resolved in v4**: a Go-registered `unicode_lower()`
+		// scalar function (see internal/manifest/sqlfunc.go)
+		// replaces both these indexes with Unicode-aware variants
+		// keyed on `unicode_lower(path)` / `unicode_lower(source_path)`.
+		// The v3 indexes are dropped in v4. Don't rewrite v3 itself
+		// — the migration ladder convention forbids touching shipped
+		// entries; v3 ran on operator DBs in v1.2 and the v4 step
+		// must be the one that drops + recreates.
 		sql: `
 		CREATE INDEX IF NOT EXISTS idx_tracks_path_lower
 			ON tracks(LOWER(path));
 		CREATE INDEX IF NOT EXISTS idx_track_variants_source_path_lower
 			ON track_variants(LOWER(source_path), variant_id);
+		`,
+	},
+	{
+		version: 4,
+		name:    "unicode-aware path lookup indexes",
+		// The Go-registered `unicode_lower(text)` scalar (see
+		// internal/manifest/sqlfunc.go) folds the input via
+		// `cases.Lower(language.Und).String(...)`, matching iOS's
+		// `String.lowercased()` semantics byte-for-byte. The
+		// determinism flag at registration is required for use in
+		// functional indexes — without it SQLite would refuse to use
+		// the index and fall back to a full table scan.
+		//
+		// DROP-then-CREATE because functional indexes encode the
+		// expression at definition time; SQLite has no `ALTER INDEX`
+		// for the expression. The DROPs are `IF EXISTS` so a fresh
+		// DB without the v3 indexes still applies the migration
+		// cleanly.
+		//
+		// **Index-build cost**: rebuilding two functional indexes on
+		// a 50k-track DB takes a few hundred ms on a Pi-class host
+		// (the underlying scan is the dominant cost; the per-row
+		// `unicode_lower` call is sub-microsecond). First launch
+		// after upgrade pays this once.
+		//
+		// **Operator note**: a plain `sqlite3` CLI session that
+		// opens this DB outside of a Go process can't query
+		// `unicode_lower(...)` — the function is registered at the
+		// driver level and only exists inside processes that import
+		// internal/manifest. The TEXT data is preserved case in the
+		// column either way; ad-hoc inspection via the CLI should
+		// fall back to `lower(path)` (ASCII-only, same semantics
+		// the v3 indexes had).
+		sql: `
+		DROP INDEX IF EXISTS idx_tracks_path_lower;
+		DROP INDEX IF EXISTS idx_track_variants_source_path_lower;
+		CREATE INDEX IF NOT EXISTS idx_tracks_path_unicode_lower
+			ON tracks(unicode_lower(path));
+		CREATE INDEX IF NOT EXISTS idx_track_variants_source_path_unicode_lower
+			ON track_variants(unicode_lower(source_path), variant_id);
 		`,
 	},
 }
@@ -659,7 +703,7 @@ func (s *Store) lookupTrackByLowerCase(cleaned string) (*Track, error) {
 	// this only reaches the fallback when the iOS-shape genuinely
 	// can't be distinguished.
 	rows, err := s.db.Query(
-		`SELECT tags_json FROM tracks WHERE LOWER(path) = LOWER(?) LIMIT 2`,
+		`SELECT tags_json FROM tracks WHERE unicode_lower(path) = unicode_lower(?) LIMIT 2`,
 		cleaned,
 	)
 	if err != nil {
@@ -1751,7 +1795,7 @@ func (s *Store) lookupVariantByLowerCase(cleanedSourcePath, variantID string) (*
 		       sample_rate, bits_per_sample, size_bytes,
 		       source_mtime_ns, source_size, sox_settings, created_at
 		FROM track_variants
-		WHERE LOWER(source_path) = LOWER(?) AND variant_id = ?
+		WHERE unicode_lower(source_path) = unicode_lower(?) AND variant_id = ?
 		LIMIT 2
 	`, cleanedSourcePath, variantID)
 	if err != nil {
