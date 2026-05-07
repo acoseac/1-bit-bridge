@@ -95,6 +95,54 @@ func ExtractWithContext(absPath string, t *Track, ec *ExtractContext) error {
 	switch ext {
 	case ".dsf":
 		return extractDSFWithContext(absPath, t, ec)
+	case ".m4a", ".mp4", ".m4b", ".m4p":
+		// MP4 container — distinguish ALAC from AAC via the sample-
+		// description box (`tag.FileType()` doesn't actually do this
+		// for MP4 in dhowden/tag, despite the documented promise; their
+		// source carries a `FIXME: actually detect this` for the
+		// ALAC FileType constant). Open the file once for the codec
+		// walk + tag read; rewind in between. Per Gemini A1 / iOS
+		// bug review #1.
+		f, err := os.Open(absPath)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		// Log walker errors at Warn so a corrupted container, truncated
+		// atom tree, or NFS glitch mid-seek surfaces in the operator's
+		// scanner log instead of being silently swallowed. Per
+		// CodeRabbit Trivial round-1 on PR #168 — degraded-but-functional
+		// outcomes use Warn per the project logging convention. Codec
+		// stays unset on failure so downstream classification falls
+		// through to the extension-derived name.
+		if codec, err := extractMP4Codec(f); err != nil {
+			scanLogger.Warn("mp4 codec walk failed; falling back to extension classification",
+				"path", absPath, "err", err)
+		} else if codec != "" {
+			t.Codec = codec
+		}
+		// Seek to head before handing the reader to dhowden/tag —
+		// extractMP4Codec consumed bytes during the atom walk.
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
+		return extractViaDhowdenFromReader(f, absPath, t, ec)
+	case ".mp3":
+		// MP3 is unambiguous; stamp the codec at the path level so
+		// the iOS `Track.codec` filter matches "MP3" without
+		// fallback. dhowden's `tag.FileType()` IS reliable for MP3
+		// (returns `tag.MP3`), but we set it directly here to avoid
+		// an extra step.
+		t.Codec = "MP3"
+		return extractViaDhowdenWithContext(absPath, t, ec)
+	case ".ogg", ".oga":
+		// OGG container; for v1.2 we conservatively report "OGG"
+		// rather than trying to distinguish Vorbis vs Opus — both
+		// are lossy, both bin under the iOS `.lossy` filter via the
+		// `hasPrefix("OGG")` check (the legacy "M4A" branch covers
+		// this codepath today; "OGG" added to be explicit).
+		t.Codec = "OGG"
+		return extractViaDhowdenWithContext(absPath, t, ec)
 	case ".flac":
 		// Pre-fix the FLAC branch opened the file twice: once for
 		// `extractFLACFormat` (`flac.ParseFile`) and once for
@@ -502,6 +550,10 @@ func extractFLACFormatFromReader(r io.Reader, absPath string, t *Track) error {
 		d := float64(totalSamples) / float64(sampleRate)
 		t.Duration = &d
 	}
+	// v1.2 additive: stamp the canonical codec for the iOS-side
+	// `Track.codec` column. FLAC files are unambiguously FLAC at
+	// this point.
+	t.Codec = "FLAC"
 	return nil
 }
 
@@ -559,6 +611,8 @@ func extractDSFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 		d := float64(sampleCount) / float64(sampleRate)
 		t.Duration = &d
 	}
+	// v1.2 additive: canonical codec for iOS-side `Track.codec`.
+	t.Codec = "DSF"
 
 	// Tags: ID3v2 at metadataPointer (if non-zero).
 	var dsfMeta tag.Metadata
