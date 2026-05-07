@@ -4,6 +4,7 @@ package supervision
 
 import (
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -43,6 +44,19 @@ func isSupervisedForOS() bool {
 	// no analogous "0" sentinel — INVOCATION_ID is either an
 	// actual UUID or unset.
 	if os.Getenv("INVOCATION_ID") != "" {
+		return true
+	}
+	// systemd socket activation: a `bridge.socket` unit hands the
+	// listening fd to the bridge and starts it on the first incoming
+	// connection. The handoff sets LISTEN_FDS to the inherited fd
+	// count and LISTEN_PID to the receiving process's PID. Per
+	// sd_listen_fds(3) we MUST verify LISTEN_PID matches getpid() —
+	// the env can leak from a parent that exec()'d us, and without
+	// the PID check a parent socket-activated by systemd would
+	// falsely promote any unrelated child to "supervised". Socket
+	// activation implies the same Restart=on-failure semantics as a
+	// service-unit launch, so it correctly answers "yes, supervised."
+	if os.Getenv("LISTEN_FDS") != "" && os.Getenv("LISTEN_PID") == strconv.Itoa(os.Getpid()) {
 		return true
 	}
 	return false
