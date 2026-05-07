@@ -1052,8 +1052,21 @@ func (s *Store) CountTracks() (int, error) {
 // EnrichmentCounts returns the library-wide enrichment counters used
 // by the manifest's `enrichmentProgress` block: number of tracks past
 // the enrich pass (`enriched_at != 0`) and the wall-clock of the most
-// recent successful enrichment. Single SQL trip via aggregate
-// expressions so a 50k-track library doesn't allocate per-row.
+// recent successful enrichment. Two scalar subqueries so the SQLite
+// query planner can use `idx_tracks_enriched` for BOTH:
+//   - `COUNT(*) WHERE enriched_at != 0` — index range scan over the
+//     non-zero partition, often optimised to an index-only count.
+//   - `MAX(enriched_at)` — O(log n) B-tree tail lookup.
+//
+// **Pre-fix**: the query was a single `SELECT SUM(CASE WHEN
+// enriched_at != 0 THEN 1 ELSE 0 END), MAX(enriched_at) FROM tracks`.
+// The doc-comment claimed both clauses were index-friendly — that was
+// only true for the MAX clause; SQLite's planner cannot use an index
+// for `SUM(CASE WHEN ...)` because the CASE expression is opaque,
+// forcing a full table scan over `tracks` on every `/v1/health` poll.
+// On a 100k-track library on a low-power host (Pi 4/5, low-IOPS SD
+// cards), that's a measurable CPU spike every ~15 s. Per Gemini A9 /
+// iOS bug review #9.
 //
 // **Deliberately does NOT return total** — Qodo flagged the original
 // signature: combining `total` here with the `CountTracks()` call in
@@ -1072,17 +1085,21 @@ func (s *Store) CountTracks() (int, error) {
 // `encoding/json` doesn't treat the time-struct's IsZero as "empty"),
 // emit `"0001-01-01T00:00:00Z"` on the wire, and the iOS decoder would
 // parse that as a real date — breaking the 24 h freshness gate.
-//
-// Backed implicitly by `idx_tracks_enriched` (already present from
-// `migrate`) — the `enriched_at != 0` and `MAX(enriched_at)` clauses
-// are both index-friendly.
 func (s *Store) EnrichmentCounts() (enriched int, lastEnrichedAt *time.Time, err error) {
 	var lastNs sql.NullInt64
+	// `enriched_at > 0` is sargeable; `enriched_at != 0` is not. Even
+	// though both predicates describe the same row set (the column is
+	// only ever 0 or a positive Unix timestamp set by `MarkEnriched`),
+	// SQLite's planner converts `> 0` into a bounded index range scan
+	// against `idx_tracks_enriched`, while `!= 0` falls back to a
+	// covering-index full walk. Verified via EXPLAIN QUERY PLAN — the
+	// `> 0` form emits `SEARCH tracks USING COVERING INDEX
+	// idx_tracks_enriched (enriched_at>?)` while `!= 0` emits a bare
+	// `SCAN tracks` (CodeRabbit Major round-1 on PR #164).
 	err = s.db.QueryRow(`
 		SELECT
-			COALESCE(SUM(CASE WHEN enriched_at != 0 THEN 1 ELSE 0 END), 0),
-			MAX(enriched_at)
-		FROM tracks
+			(SELECT COUNT(*) FROM tracks WHERE enriched_at > 0),
+			(SELECT MAX(enriched_at) FROM tracks)
 	`).Scan(&enriched, &lastNs)
 	if err != nil {
 		return 0, nil, err
