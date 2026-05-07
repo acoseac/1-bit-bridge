@@ -96,6 +96,24 @@ type Track struct {
 	// rows (preserves the operator's "off" intent without losing the
 	// cached sidecars on disk).
 	Variants []Variant `json:"variants,omitempty"`
+
+	// Codec is the canonical codec string captured at scan time.
+	// Disambiguates ALAC vs AAC for `.m4a` containers (both ship in
+	// MP4, only ALAC is bit-exact lossless). v1.2 additive — pre-v1.2
+	// iOS clients ignore the field; v1.2+ clients prefer it over
+	// extension-derived classification at the AlbumQualityFilter
+	// layer. Populated values:
+	//   - "ALAC", "AAC"   — captured via internal MP4 sample-description
+	//                       walk (`extractMP4Codec`)
+	//   - "FLAC"           — set by extractFLACFormatFromReader
+	//   - "DSF"            — set by extractDSFWithContext
+	//   - "MP3", "OGG"     — set from `tag.FileType()` for those formats
+	//                       where dhowden's detection IS reliable
+	//   - "" (empty)       — unknown / undetected; iOS falls back to
+	//                       extension-derived codec name.
+	// `omitempty` so pre-v1.2 clients see no field at all on the wire.
+	// Per Gemini A1 / iOS bug review #1.
+	Codec string `json:"codec,omitempty"`
 }
 
 // Variant is one cached alternate rendering of a Track's source. The
