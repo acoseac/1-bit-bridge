@@ -98,11 +98,35 @@ func ExtractWithContext(absPath string, t *Track, ec *ExtractContext) error {
 	case ".dsf":
 		return extractDSFWithContext(absPath, t, ec)
 	case ".flac":
-		if err := extractFLACFormat(absPath, t); err != nil {
+		// Pre-fix the FLAC branch opened the file twice: once for
+		// `extractFLACFormat` (`flac.ParseFile`) and once for
+		// `extractViaDhowdenWithContext` (`os.Open` + `tag.ReadFrom`).
+		// On NAS-mounted libraries (or low-RAM Pi hosts where pages
+		// get evicted between reads), the embedded artwork — usually
+		// 5–10 MiB JPEGs — went over the wire twice per track, halving
+		// scanner throughput. Per Gemini A8 / iOS bug review #7.
+		//
+		// Open once, hand the *os.File to both layers with a
+		// Seek(0,Start) between. flac.New buffers internally via
+		// bufio.NewReader so the file's read pointer is somewhere
+		// inside the FLAC blocks when it returns; the Seek rewinds
+		// for tag.ReadFrom (which is io.ReadSeeker-shaped). On local
+		// disk this is a no-op (kernel page cache absorbed the second
+		// open before too); on a NAS mount it halves the per-track
+		// network read.
+		f, err := os.Open(absPath)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		if err := extractFLACFormatFromReader(f, absPath, t); err != nil {
 			// Format parse failure is fine — tags may still work.
 			_ = err
 		}
-		return extractViaDhowdenWithContext(absPath, t, ec)
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
+		return extractViaDhowdenFromReader(f, absPath, t, ec)
 	default:
 		return extractViaDhowdenWithContext(absPath, t, ec)
 	}
@@ -117,16 +141,30 @@ func extractViaDhowden(absPath string, t *Track) error {
 }
 
 // extractViaDhowdenWithContext is the variant called from
-// ExtractWithContext. After populating tag fields it hands the
-// dhowden Metadata (which holds the embedded APIC bytes via its
-// Picture() accessor) to extractLocalArtwork so embedded art and the
-// folder.jpg fallback both run from the same code path.
+// ExtractWithContext for non-FLAC paths. Opens the file itself and
+// hands it to extractViaDhowdenFromReader. The FLAC path uses
+// extractViaDhowdenFromReader directly — see ExtractWithContext for
+// the single-open-then-rewind pattern.
 func extractViaDhowdenWithContext(absPath string, t *Track, ec *ExtractContext) error {
 	f, err := os.Open(absPath)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+	return extractViaDhowdenFromReader(f, absPath, t, ec)
+}
+
+// extractViaDhowdenFromReader is the underlying tag-reading worker.
+// Takes an already-open io.ReadSeeker so the FLAC branch in
+// ExtractWithContext can hand off the same *os.File previously used
+// by extractFLACFormatFromReader (after a Seek(0,Start)) — single
+// open per FLAC scan instead of two. After populating tag fields it
+// hands the dhowden Metadata (which holds the embedded APIC bytes
+// via its Picture() accessor) to extractLocalArtwork so embedded art
+// and the folder.jpg fallback both run from the same code path.
+//
+// Per Gemini A8 / iOS bug review #7.
+func extractViaDhowdenFromReader(f io.ReadSeeker, absPath string, t *Track, ec *ExtractContext) error {
 	m, err := tag.ReadFrom(f)
 	if errors.Is(err, tag.ErrNoTagsFound) {
 		// No embedded tags — but a folder.jpg next to the file is
@@ -246,15 +284,44 @@ func parseReplayGain(s string) *float64 {
 	return &v
 }
 
-// extractFLACFormat reads STREAMINFO from a FLAC file and fills sample rate,
-// bit depth, and duration. Duration is derived from total samples /
-// sample rate, which is exact for FLAC.
+// extractFLACFormat reads STREAMINFO from a FLAC file and fills sample
+// rate, bit depth, and duration. Path-based shim — opens the file and
+// hands it to extractFLACFormatFromReader. Used by anything outside
+// ExtractWithContext (e.g. tests calling Extract directly).
 func extractFLACFormat(absPath string, t *Track) error {
-	stream, err := flac.ParseFile(absPath)
+	f, err := os.Open(absPath)
 	if err != nil {
 		return err
 	}
-	defer stream.Close()
+	defer f.Close()
+	return extractFLACFormatFromReader(f, absPath, t)
+}
+
+// extractFLACFormatFromReader reads STREAMINFO from an already-open
+// FLAC file. Duration is derived from total samples / sample rate,
+// which is exact for FLAC. Used by ExtractWithContext's FLAC branch
+// in the single-open-then-rewind path so we don't pull the file's
+// embedded artwork twice over the network on NAS-mounted libraries.
+//
+// `flac.New` buffers via bufio.NewReader internally; the caller must
+// `Seek(0, io.SeekStart)` after this returns before handing the
+// reader to anything else (the file's read pointer is wherever
+// flac's bufio left it, which can be ahead of where any subsequent
+// reader expects to start).
+//
+// Per Gemini A8 / iOS bug review #7.
+func extractFLACFormatFromReader(r io.Reader, absPath string, t *Track) error {
+	stream, err := flac.New(r)
+	if err != nil {
+		return err
+	}
+	// Don't `defer stream.Close()` — Close shuts the underlying
+	// io.Closer, which on the FLAC branch in ExtractWithContext is
+	// the parent function's *os.File. The parent owns the close. For
+	// the path-based shim above, the wrapping `f.Close()` defer in
+	// extractFLACFormat handles cleanup. Calling stream.Close() here
+	// would prematurely close the file in the ExtractWithContext flow
+	// and break the subsequent Seek + tag.ReadFrom.
 	si := stream.Info
 	if si == nil {
 		return fmt.Errorf("flac: no STREAMINFO in %q", absPath)
