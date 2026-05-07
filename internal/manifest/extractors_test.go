@@ -868,6 +868,59 @@ func TestStringOfArrayValueTrimsFirst(t *testing.T) {
 	}
 }
 
+// TestStringOfArrayScansAllEntries pins the contract that a leading
+// blank entry in the slice doesn't shadow a populated trailing one.
+// Vorbis allows duplicate keys; pre-fix the function only inspected
+// `s[0]`, treating `["  ", "real-value"]` as absent. CodeRabbit
+// Minor round-1 on PR #166.
+func TestStringOfArrayScansAllEntries(t *testing.T) {
+	raw := map[string]any{"COMMENT": []string{"  ", "  real-value  "}}
+	got, ok := stringOf(raw, "COMMENT")
+	if !ok {
+		t.Fatalf("stringOf should walk past blank entries, got absent")
+	}
+	if got != "real-value" {
+		t.Errorf("got %q, want %q", got, "real-value")
+	}
+}
+
+// TestStringOfHandlesIntValueForCpil is the load-bearing case for
+// the bridge#166 Critical fix. dhowden/tag's MP4 path stores the
+// `cpil` (compilation) atom as a Go `int` (0 or 1) in Metadata.Raw()
+// — the atom-class table maps `cpil` → "compilation", and the
+// "uint8" content-type calls `getInt(b[:1])` which returns int.
+// Pre-fix the type-switch only handled `string` and `[]string`,
+// silently failing for every M4A compilation.
+//
+// The Compilation safety net's call site checks `comp == "1"` —
+// stringOf must coerce the int to "1" so the comparison succeeds.
+func TestStringOfHandlesIntValueForCpil(t *testing.T) {
+	cases := []struct {
+		name string
+		val  any
+		want string
+	}{
+		{"int 1", int(1), "1"},
+		{"int 0", int(0), "0"},
+		{"int64 1", int64(1), "1"},
+		{"uint8 1", uint8(1), "1"},
+		{"bool true", true, "1"},
+		{"bool false", false, "0"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := map[string]any{"compilation": tc.val}
+			got, ok := stringOf(raw, "TCMP", "CPIL", "COMPILATION")
+			if !ok {
+				t.Fatalf("stringOf should accept %T value, got absent", tc.val)
+			}
+			if got != tc.want {
+				t.Errorf("got %q, want %q for %T(%v)", got, tc.want, tc.val, tc.val)
+			}
+		})
+	}
+}
+
 // --- whitespace trim on top-level tags ---
 
 // TestPopulateTrimsWhitespaceFromAllTagFields locks the
