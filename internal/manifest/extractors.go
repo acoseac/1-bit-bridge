@@ -322,11 +322,41 @@ func stringOf(raw map[string]any, keys ...string) (string, bool) {
 				return trimmed, true
 			}
 		case []string:
-			if len(s) > 0 {
-				if trimmed := strings.TrimSpace(s[0]); trimmed != "" {
+			// Scan the WHOLE slice — Vorbis comments can carry the
+			// same key multiple times (e.g. `COMMENT="" / COMMENT="real"`).
+			// Pre-fix, only `s[0]` was inspected so a leading blank
+			// entry treated the tag as absent. CodeRabbit Minor
+			// round-1 on PR #166.
+			for _, item := range s {
+				if trimmed := strings.TrimSpace(item); trimmed != "" {
 					return trimmed, true
 				}
 			}
+		case int:
+			// dhowden/tag surfaces MP4/M4A `cpil` (compilation atom)
+			// as int (0 or 1) via getInt(b[:1]) — NOT a string. Pre-fix
+			// the compilation safety net's `stringOf(... ) == "1"`
+			// check silently failed for every M4A compilation, leaving
+			// the AlbumArtist synth dead on that codepath. Coerce to
+			// string so downstream value comparisons work uniformly.
+			// CodeRabbit Critical round-1 on PR #166.
+			return strconv.Itoa(s), true
+		case int64:
+			return strconv.FormatInt(s, 10), true
+		case uint8:
+			// Defensive: dhowden's atomTypes class 21 (uint8) is the
+			// MP4 path most cpil values surface through; some library
+			// versions return uint8 directly rather than promoting to
+			// int. Both shapes mean the same thing on the wire.
+			return strconv.FormatUint(uint64(s), 10), true
+		case bool:
+			// Some tag libraries (and a future dhowden refactor) might
+			// surface boolean atoms directly. "1"/"0" matches the
+			// existing string-comparison conventions at call sites.
+			if s {
+				return "1", true
+			}
+			return "0", true
 		}
 	}
 	return "", false
