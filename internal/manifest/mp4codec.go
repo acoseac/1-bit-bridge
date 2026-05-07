@@ -19,11 +19,16 @@
 //     search for the top-level moov. Covers fast-start M4As (moov near
 //     head). Non-fast-start files (mdat-before-moov) silently return
 //     "moov not found" — separate, pre-existing limitation.
-//   - `mp4MaxAtomsPerSearch` (4096) bounds each nested atom-walk by
-//     count of headers read, NOT byte span. IO is governed by atom
-//     headers (8 bytes each); `cursor += atomSize` jumps payloads. A
-//     byte-span cap punished legitimately-large moov containers in long
-//     audiobooks / DJ mixes (>4 MiB moov), causing silent metadata drop.
+//   - `mp4MaxAtomsPerSearch` (4096) bounds EVERY findAtom call —
+//     including the top-level moov search — by count of headers read,
+//     NOT byte span. IO is governed by atom headers (8 bytes each);
+//     `cursor += atomSize` jumps payloads. A byte-span cap punished
+//     legitimately-large moov containers in long audiobooks / DJ
+//     mixes (>4 MiB moov), causing silent metadata drop. The 4096
+//     ceiling is generous for any realistic file (typical: <100;
+//     pathological: <1000); a top-level file with >4096 atoms before
+//     `moov` returns an "iteration budget" error, which is the
+//     desired safety-net behaviour.
 //
 // Per Gemini A1 / iOS bug review #1 (Mirror-PR pair with
 // `Track.codec` on the iOS side).

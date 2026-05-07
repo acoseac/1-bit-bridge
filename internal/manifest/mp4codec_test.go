@@ -124,7 +124,7 @@ func buildMinimalMP4(codec string) []byte {
 // large-moov scenarios for the iteration-budget regression test.
 func buildMP4WithMoovPadding(codec string, freePaddingBytes int) []byte {
 	if len(codec) != 4 {
-		panic("buildMinimalMP4: codec must be 4 chars")
+		panic("buildMP4WithMoovPadding: codec must be 4 chars")
 	}
 
 	// Build innermost first: stsd payload (1 entry of 16 bytes:
