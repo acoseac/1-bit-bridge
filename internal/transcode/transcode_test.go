@@ -99,6 +99,35 @@ func TestSidecarPathStableForSameInputs(t *testing.T) {
 	}
 }
 
+// TestSidecarFilenameLengthBounded locks the upper bound on the
+// filename's character count. With the 16-char hash truncation the
+// shape is `<16 hex>-upscaled-<vN>-<rate>-<bits>.flac` ≈ 50 chars
+// for typical variants. Pin at 80 to leave room for future variant
+// kinds (e.g. PCM→DSD synthesis) without re-engaging the Windows
+// MAX_PATH risk this truncation defends against.
+func TestSidecarFilenameLengthBounded(t *testing.T) {
+	const maxFilenameChars = 80
+	cases := []JobSpec{
+		// Common case: 24/176.4
+		{SourceLibraryRel: "x", OutputDir: "/tmp/x", TargetSampleRate: 176400, TargetBits: 24},
+		// High-rate case: 32/705600 (max practical sox upscale target)
+		{SourceLibraryRel: "x", OutputDir: "/tmp/x", TargetSampleRate: 705600, TargetBits: 32},
+		// Long source path (the hash is fixed-width regardless of input)
+		{
+			SourceLibraryRel: "Music/Composer/Performer/Conductor/Orchestra/Album Title (Remastered Deluxe Edition) [2026]/Disc 01/01 - Movement Title in C Major.flac",
+			OutputDir:        "/tmp/x",
+			TargetSampleRate: 192000,
+			TargetBits:       24,
+		},
+	}
+	for _, j := range cases {
+		got := filepath.Base(j.SidecarPath())
+		if n := len(got); n > maxFilenameChars {
+			t.Errorf("sidecar filename %d chars > %d: %q", n, maxFilenameChars, got)
+		}
+	}
+}
+
 // TestSoxArgsShape pins the exact argv shape we hand to sox.
 // Quality "very-high" → `rate -v <Hz>`, dither -s, bit depth flag
 // -b N, .tmp suffix on output. Any change to this shape needs an
