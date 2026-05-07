@@ -14,8 +14,6 @@ import (
 	"sync"
 	"time"
 
-	flac "github.com/mewkiz/flac"
-
 	tag "github.com/dhowden/tag"
 )
 
@@ -303,31 +301,87 @@ func extractFLACFormat(absPath string, t *Track) error {
 // in the single-open-then-rewind path so we don't pull the file's
 // embedded artwork twice over the network on NAS-mounted libraries.
 //
-// `flac.New` buffers via bufio.NewReader internally; the caller must
-// `Seek(0, io.SeekStart)` after this returns before handing the
-// reader to anything else (the file's read pointer is wherever
-// flac's bufio left it, which can be ahead of where any subsequent
-// reader expects to start).
+// **STREAMINFO-only parse** (CodeRabbit Major round-1 on PR #165): the
+// previous implementation called `flac.New(r)`, which after parsing
+// STREAMINFO walks every remaining metadata block via `block.Skip()`
+// — which CONSUMES the bytes from the underlying reader, not just
+// the bufio buffer. For a track with embedded ~5–10 MiB PICTURE
+// blocks, that meant the FLAC scan still pulled the picture bytes
+// over the network, and the subsequent `tag.ReadFrom` re-pulled them
+// — so the only thing the single-open path had actually saved was
+// the second `os.Open` syscall. This parser stops AFTER the first
+// metadata block (STREAMINFO is mandatory and must be first per the
+// FLAC spec), so the metadata-tail bytes (PICTURE / VORBIS_COMMENT /
+// etc.) are pulled exactly once, by the downstream `tag.ReadFrom`.
 //
-// Per Gemini A8 / iOS bug review #7.
+// Caller MUST `Seek(0, io.SeekStart)` after this returns before
+// handing the reader to `tag.ReadFrom` — we read the FLAC magic +
+// STREAMINFO header + body sequentially, so the read pointer is
+// inside the metadata region when this returns.
+//
+// Per Gemini A8 / iOS bug review #7 + CodeRabbit Major round-1 on PR #165.
 func extractFLACFormatFromReader(r io.Reader, absPath string, t *Track) error {
-	stream, err := flac.New(r)
-	if err != nil {
-		return err
+	// FLAC magic: 4 bytes "fLaC".
+	var magic [4]byte
+	if _, err := io.ReadFull(r, magic[:]); err != nil {
+		return fmt.Errorf("flac: %q: read magic: %w", absPath, err)
 	}
-	// Don't `defer stream.Close()` — Close shuts the underlying
-	// io.Closer, which on the FLAC branch in ExtractWithContext is
-	// the parent function's *os.File. The parent owns the close. For
-	// the path-based shim above, the wrapping `f.Close()` defer in
-	// extractFLACFormat handles cleanup. Calling stream.Close() here
-	// would prematurely close the file in the ExtractWithContext flow
-	// and break the subsequent Seek + tag.ReadFrom.
-	si := stream.Info
-	if si == nil {
-		return fmt.Errorf("flac: no STREAMINFO in %q", absPath)
+	if string(magic[:]) != "fLaC" {
+		return fmt.Errorf("flac: %q: bad magic %q", absPath, magic[:])
 	}
-	sr := float64(si.SampleRate)
-	bps := int(si.BitsPerSample)
+	// First metadata block header: 1 byte (is_last+type) + 3 bytes
+	// (length, big-endian).
+	var hdr [4]byte
+	if _, err := io.ReadFull(r, hdr[:]); err != nil {
+		return fmt.Errorf("flac: %q: read block header: %w", absPath, err)
+	}
+	blockType := hdr[0] & 0x7F
+	if blockType != 0 {
+		// STREAMINFO is mandatory and MUST be the first metadata
+		// block per the FLAC spec — refusing to recover from a
+		// non-conforming file rather than silently skipping it.
+		return fmt.Errorf("flac: %q: first metadata block is type %d, expected STREAMINFO (0)", absPath, blockType)
+	}
+	bodySize := uint32(hdr[1])<<16 | uint32(hdr[2])<<8 | uint32(hdr[3])
+	if bodySize != 34 {
+		return fmt.Errorf("flac: %q: STREAMINFO body size %d, expected 34", absPath, bodySize)
+	}
+	// STREAMINFO body — 34 bytes. Layout (big-endian, bit-packed):
+	//   16 bits: min block size
+	//   16 bits: max block size
+	//   24 bits: min frame size
+	//   24 bits: max frame size
+	//   20 bits: sample rate (Hz)
+	//    3 bits: channels - 1
+	//    5 bits: bits per sample - 1
+	//   36 bits: total samples
+	//  128 bits: MD5 checksum (ignored)
+	var body [34]byte
+	if _, err := io.ReadFull(r, body[:]); err != nil {
+		return fmt.Errorf("flac: %q: read STREAMINFO body: %w", absPath, err)
+	}
+	// Skip min/max block + min/max frame sizes (bytes 0..9).
+	// Sample rate occupies bytes 10..12 (top 20 bits).
+	sampleRate := uint32(body[10])<<12 | uint32(body[11])<<4 | uint32(body[12])>>4
+	// Channels: byte 12 bits 4..6 (lower 4 of byte 12 + … we just
+	// want bits-per-sample). Bit layout of bytes 12..13 (16 bits):
+	//   bits 0..3 (top of byte 12): low 4 bits of sample rate
+	//   bits 4..6 (mid of byte 12): channels - 1
+	//   bits 7..11: bits per sample - 1   ← spans byte 12 bit 7 and byte 13 bits 0..3
+	//   bits 12..15: top 4 bits of total samples
+	// Extract bits-per-sample (5 bits, packed across byte 12 bit 7
+	// and byte 13 top 4 bits):
+	bitsPerSample := int(((uint32(body[12])&0x01)<<4)|(uint32(body[13])>>4)) + 1
+	// Total samples (36 bits, packed across byte 13 low 4 bits +
+	// bytes 14..17):
+	totalSamples := (uint64(body[13])&0x0F)<<32 |
+		uint64(body[14])<<24 |
+		uint64(body[15])<<16 |
+		uint64(body[16])<<8 |
+		uint64(body[17])
+
+	sr := float64(sampleRate)
+	bps := bitsPerSample
 	t.SampleRate = &sr
 	t.BitsPerSample = &bps
 	// FLAC is always PCM by spec — set the explicit false so the
@@ -336,8 +390,8 @@ func extractFLACFormatFromReader(r io.Reader, absPath string, t *Track) error {
 	// in `extractDSF` below.
 	isDSD := false
 	t.IsDSD = &isDSD
-	if si.SampleRate > 0 && si.NSamples > 0 {
-		d := float64(si.NSamples) / float64(si.SampleRate)
+	if sampleRate > 0 && totalSamples > 0 {
+		d := float64(totalSamples) / float64(sampleRate)
 		t.Duration = &d
 	}
 	return nil
