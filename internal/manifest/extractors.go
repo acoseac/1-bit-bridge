@@ -302,23 +302,27 @@ func populateFromTagMetadata(m tag.Metadata, t *Track) {
 		// CPIL (iTunes / MP4), COMPILATION (Vorbis / FLAC) all
 		// carry the same semantic.
 		if t.AlbumArtist == "" {
-			if comp, ok := stringOf(raw, "TCMP", "CPIL", "COMPILATION"); ok && comp == "1" {
+			if comp, ok := stringOf(raw, "tcmp", "cpil", "compilation"); ok && comp == "1" {
 				t.AlbumArtist = "Various Artists"
 			}
 		}
-		if v, ok := stringOf(raw, "MUSICBRAINZ_TRACKID", "MUSICBRAINZ TRACK ID", "musicbrainz_trackid"); ok {
+		// Pass BOTH underscore-joined ("musicbrainz_trackid") AND
+		// space-derived ("musicbrainz_track_id") variants — they
+		// normalise differently and both are valid spellings on the
+		// wire (Vorbis vs ID3v2 TXXX). See stringOf docstring.
+		if v, ok := stringOf(raw, "musicbrainz_trackid", "musicbrainz_track_id"); ok {
 			t.MusicBrainzTrackID = v
 		}
-		if v, ok := stringOf(raw, "MUSICBRAINZ_ALBUMID", "MUSICBRAINZ ALBUM ID", "musicbrainz_albumid"); ok {
+		if v, ok := stringOf(raw, "musicbrainz_albumid", "musicbrainz_album_id"); ok {
 			t.MusicBrainzAlbumID = v
 		}
 		// ReplayGain.
-		if v, ok := stringOf(raw, "REPLAYGAIN_TRACK_GAIN", "replaygain_track_gain"); ok {
+		if v, ok := stringOf(raw, "replaygain_track_gain"); ok {
 			if g := parseReplayGain(v); g != nil {
 				t.ReplayGainTrackDB = g
 			}
 		}
-		if v, ok := stringOf(raw, "REPLAYGAIN_ALBUM_GAIN", "replaygain_album_gain"); ok {
+		if v, ok := stringOf(raw, "replaygain_album_gain"); ok {
 			if g := parseReplayGain(v); g != nil {
 				t.ReplayGainAlbumDB = g
 			}
@@ -326,16 +330,26 @@ func populateFromTagMetadata(m tag.Metadata, t *Track) {
 	}
 }
 
-// stringOf looks up keys in a raw tag map. Case-insensitive and
-// space/underscore-agnostic so ID3v2 TXXX frames (which dhowden
-// surfaces with their human-readable description, e.g.
-// "MusicBrainz Album Id") match the same lookup that hits Vorbis
-// comments (`MUSICBRAINZ_ALBUMID`). Pre-fix the lookup did exact
-// case-sensitive map subscripts, so MBID extraction silently failed
-// for any ID3v2-tagged album — Cover-Art-Archive enrichment fell
-// back to the lower-quality iTunes path, and the iOS app couldn't
-// fall through to bridge-served local-art for those files. Per
-// Gemini A6 / iOS bug review #6d.
+// stringOf looks up keys in a raw tag map. Caller-provided keys
+// MUST already be in normalised form: lowercased AND with spaces
+// replaced by underscores (the `normaliseRawTagKey` shape). The
+// function normalises each map key once per iteration and compares
+// directly against the caller's set — no per-call allocation, no
+// repeated normalisation of the static literals at call sites.
+//
+// To match BOTH Vorbis-style ("MUSICBRAINZ_ALBUMID") and ID3v2-TXXX-
+// style ("MusicBrainz Album Id") shapes, callers MUST pass BOTH
+// normalised variants where they differ — e.g. "musicbrainz_album_id"
+// (from the space-separated form) AND "musicbrainz_albumid" (from
+// the underscore-separated form). The normaliser bridges minor case
+// + space-vs-underscore variants WITHIN one spelling but NOT across
+// fundamentally different word-boundary shapes.
+//
+// Pre-fix the lookup did exact case-sensitive map subscripts, so
+// MBID extraction silently failed for any ID3v2-tagged album —
+// Cover-Art-Archive enrichment fell back to the lower-quality iTunes
+// path, and the iOS app couldn't fall through to bridge-served
+// local-art for those files. Per Gemini A6 / iOS bug review #6d.
 //
 // Trimmed return: every matched value is `strings.TrimSpace`'d
 // before being returned, defending against trailing-space tagging
@@ -346,17 +360,11 @@ func stringOf(raw map[string]any, keys ...string) (string, bool) {
 	if len(keys) == 0 {
 		return "", false
 	}
-	// Pre-normalise the search keys once so the per-map-key inner
-	// loop is just a string compare.
-	wanted := make([]string, 0, len(keys))
-	for _, k := range keys {
-		wanted = append(wanted, normaliseRawTagKey(k))
-	}
 	for mapKey, v := range raw {
 		norm := normaliseRawTagKey(mapKey)
 		matched := false
-		for _, w := range wanted {
-			if norm == w {
+		for _, k := range keys {
+			if norm == k {
 				matched = true
 				break
 			}
@@ -421,13 +429,15 @@ func normaliseRawTagKey(k string) string {
 }
 
 // parseReplayGain parses a Vorbis/ID3 ReplayGain string like "-7.32 dB".
+//
+// Lowercase + suffix strip is case-insensitive (handles "dB", "db",
+// "Db", "DB"). Two TrimSpace calls are load-bearing: the leading one
+// strips any trailing space AFTER the suffix (e.g. "-7.32 dB ") so
+// TrimSuffix("db") can match; the trailing one removes the inner
+// space the suffix removal exposed (e.g. "-7.32 db" → "-7.32 ").
 func parseReplayGain(s string) *float64 {
-	s = strings.TrimSpace(s)
-	s = strings.TrimSuffix(s, " dB")
-	s = strings.TrimSuffix(s, " db")
-	s = strings.TrimSuffix(s, "dB")
-	s = strings.TrimSuffix(s, "db")
-	s = strings.TrimSpace(s)
+	s = strings.ToLower(strings.TrimSpace(s))
+	s = strings.TrimSpace(strings.TrimSuffix(s, "db"))
 	if s == "" {
 		return nil
 	}
@@ -862,14 +872,14 @@ func writeArtworkAtomicScan(path string, data []byte) error {
 		}
 	}()
 	// Panic-safety FD close (LIFO order — runs before Remove). See
-	// internal/auth/auth.go for the rationale.
+	// internal/auth/auth.go for the rationale. Error branches below
+	// rely on this defer; only the success path needs an explicit
+	// close (Windows requires the FD released before rename).
 	defer func() { _ = tmp.Close() }()
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
 		return err
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
 		return err
 	}
 	if err := tmp.Close(); err != nil {
