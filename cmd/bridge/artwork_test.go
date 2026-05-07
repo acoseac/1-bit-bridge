@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -156,6 +157,61 @@ func TestArtworkGCMissingDirIsOK(t *testing.T) {
 	rc := runArtworkGC(&stdout, &stderr, store, missing, false)
 	if rc != 0 {
 		t.Errorf("missing dir should succeed, got rc=%d stderr=%s", rc, stderr.String())
+	}
+}
+
+// TestArtworkGCRequiresTypedPhrase exercises the `--confirm` gate
+// added in CodeRabbit Major round-1 on PR #167. `--gc` without
+// `--dry-run` and without `--confirm GC-ARTWORK` must refuse with a
+// non-zero exit and produce no filesystem effect. Driven through
+// the public `artworkCmd` entry point so the flag-parsing + gate
+// behaviour is exercised end-to-end.
+func TestArtworkGCRequiresTypedPhrase(t *testing.T) {
+	dir := t.TempDir()
+	// A bridge.yaml file is required by config.Load; build a minimal
+	// one. DataDir points at the test temp dir so the (unused) DB
+	// open path resolves to a known location.
+	cfgPath := filepath.Join(dir, "bridge.yaml")
+	if err := os.WriteFile(cfgPath, []byte("dataDir: \""+dir+"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name    string
+		args    []string
+		wantRC  int
+		wantErr string
+	}{
+		{
+			name:    "no confirm",
+			args:    []string{"--config", cfgPath, "--gc"},
+			wantRC:  2,
+			wantErr: "refusing to delete without --confirm GC-ARTWORK",
+		},
+		{
+			name:    "wrong confirm value",
+			args:    []string{"--config", cfgPath, "--gc", "--confirm", "yes"},
+			wantRC:  2,
+			wantErr: "refusing to delete without --confirm GC-ARTWORK",
+		},
+		{
+			name:    "case-mismatched confirm",
+			args:    []string{"--config", cfgPath, "--gc", "--confirm", "gc-artwork"},
+			wantRC:  2,
+			wantErr: "refusing to delete without --confirm GC-ARTWORK",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			rc := artworkCmd(context.Background(), tc.args, &stdout, &stderr)
+			if rc != tc.wantRC {
+				t.Errorf("rc: got %d, want %d (stderr: %s)", rc, tc.wantRC, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), tc.wantErr) {
+				t.Errorf("stderr should mention %q, got: %q", tc.wantErr, stderr.String())
+			}
+		})
 	}
 }
 
