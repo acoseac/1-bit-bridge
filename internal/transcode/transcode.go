@@ -174,13 +174,15 @@ func (j JobSpec) SoxArgs() ([]string, string) {
 
 // PickTargetRate decides the output sample rate from the source
 // rate when the operator passed `--target-rate auto`. Picks the
-// next octave above the source within the 44.1/48 family:
+// highest integer-ratio target within the 44.1/48 family that
+// stays at or below 192 kHz — the sweet spot for modern DACs'
+// integer-ratio oversampling filters:
 //
-//	44100  → 176400
-//	88200  → 176400 (already 88.2 → 176.4)
+//	44100  → 176400 (4× — two octaves above source)
+//	88200  → 176400 (2× — one octave above source)
 //	176400 → 0 (skip; source is already at the auto target)
-//	48000  → 192000
-//	96000  → 192000
+//	48000  → 192000 (4×)
+//	96000  → 192000 (2×)
 //	192000 → 0 (skip)
 //	other  → 0 (don't auto-pick a target for unfamiliar rates)
 //
@@ -260,23 +262,32 @@ func RunSox(ctx context.Context, j JobSpec) (int64, error) {
 	// run so SoX's open(O_CREAT) doesn't trip on prior crash debris.
 	_ = os.Remove(tmpPath)
 
+	// `cleanup := true; defer …` mirrors writeArtworkAtomicStream's
+	// pattern in internal/enrich. Cleared on the success path after
+	// the atomic rename; otherwise the deferred remove reaps the
+	// .tmp on every error / panic exit, so a future maintainer can
+	// add an early return without remembering the manual remove.
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
 	cmd := exec.CommandContext(ctx, "sox", args...)
 	// Capture combined stdout/stderr for the error path — sox
 	// writes its diagnostics to stderr and they're invaluable when
 	// debugging "this one file fails".
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		// Best-effort cleanup of the .tmp on failure so a retry
-		// doesn't accumulate junk.
-		_ = os.Remove(tmpPath)
 		return 0, fmt.Errorf("sox: %w (stderr: %s)", err, strings.TrimSpace(string(out)))
 	}
 	// Atomic rename on success. Same FS as DataDir so this is a
 	// rename(2), not a copy.
 	if err := os.Rename(tmpPath, finalPath); err != nil {
-		_ = os.Remove(tmpPath)
 		return 0, fmt.Errorf("rename sidecar: %w", err)
 	}
+	cleanup = false // success — keep the now-renamed final file
 	info, err := os.Stat(finalPath)
 	if err != nil {
 		return 0, fmt.Errorf("stat sidecar: %w", err)
