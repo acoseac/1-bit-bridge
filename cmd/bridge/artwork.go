@@ -51,21 +51,42 @@ const artworkDirName = "artwork"
 // added here without touching the orphan-detection loop.
 const artworkCacheSuffix = "-500.jpg"
 
+// artworkGCConfirmPhrase is the exact string operators must pass via
+// `--confirm` to authorize a destructive `--gc` run. Typed-phrase
+// confirmation matches the project convention for destructive CLI
+// surfaces (e.g. `bridge tsnet logout` requires typing `WIPE`); a
+// boolean `--yes` flag would be too easy to typo into a real
+// deletion. Per CodeRabbit Major round-1 on PR #167.
+const artworkGCConfirmPhrase = "GC-ARTWORK"
+
 func artworkCmd(_ context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("artwork", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	configPath := fs.String("config", "bridge.yaml", "path to config file")
 	gc := fs.Bool("gc", false, "remove cached artwork files no longer referenced by any track row")
 	dryRun := fs.Bool("dry-run", false, "list orphans without removing them (use with --gc)")
+	confirm := fs.String("confirm", "", "type "+artworkGCConfirmPhrase+" to authorize destructive deletion (required unless --dry-run)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 
 	if !*gc {
-		fmt.Fprintln(stderr, "Usage: bridge artwork --gc [--dry-run] [--config bridge.yaml]")
+		fmt.Fprintln(stderr, "Usage: bridge artwork --gc [--dry-run | --confirm "+artworkGCConfirmPhrase+"] [--config bridge.yaml]")
 		fmt.Fprintln(stderr, "")
 		fmt.Fprintln(stderr, "Removes cached artwork files (local-<hash>-500.jpg, <mbid>-500.jpg) under")
-		fmt.Fprintln(stderr, "<dataDir>/artwork/ that no track row references. Use --dry-run to preview.")
+		fmt.Fprintln(stderr, "<dataDir>/artwork/ that no track row references. Use --dry-run to preview")
+		fmt.Fprintln(stderr, "or --confirm "+artworkGCConfirmPhrase+" to authorize destructive deletion.")
+		return 2
+	}
+
+	// Typed-phrase confirmation gate (CodeRabbit Major round-1 on PR
+	// #167). `--gc` without `--dry-run` requires the operator to pass
+	// the exact phrase via `--confirm`. Exact match (no prefix
+	// tolerance) — fat-fingered yes/y/Y must NOT permit a destructive
+	// sweep. Mirrors the existing `bridge tsnet logout` pattern that
+	// requires typing `WIPE`.
+	if !*dryRun && *confirm != artworkGCConfirmPhrase {
+		fmt.Fprintf(stderr, "refusing to delete without --confirm %s (or use --dry-run)\n", artworkGCConfirmPhrase)
 		return 2
 	}
 
@@ -75,7 +96,14 @@ func artworkCmd(_ context.Context, args []string, stdout, stderr io.Writer) int 
 		return 2
 	}
 
-	storePath := filepath.Join(cfg.DataDir, "data", "bridge.db")
+	// Use the shared `manifest.DefaultDBPath` constructor to keep CLI
+	// behaviour aligned with `serveCmd` / `tokenCmd` / etc. Pre-fix
+	// `<dataDir>/data/bridge.db` was a hardcoded path that didn't
+	// match production layout (= `<dataDir>/bridge.db`) and would
+	// have opened an empty store on every operator run, with the GC
+	// pass then deleting every cached artwork file as "orphan".
+	// CodeRabbit Major round-1 on PR #167.
+	storePath := manifest.DefaultDBPath(cfg.DataDir)
 	store, err := manifest.OpenStore(storePath)
 	if err != nil {
 		fmt.Fprintf(stderr, "open store at %q: %v\n", storePath, err)
