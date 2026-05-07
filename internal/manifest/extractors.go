@@ -110,7 +110,17 @@ func ExtractWithContext(absPath string, t *Track, ec *ExtractContext) error {
 			return err
 		}
 		defer f.Close()
-		if codec, err := extractMP4Codec(f); err == nil && codec != "" {
+		// Log walker errors at Warn so a corrupted container, truncated
+		// atom tree, or NFS glitch mid-seek surfaces in the operator's
+		// scanner log instead of being silently swallowed. Per
+		// CodeRabbit Trivial round-1 on PR #168 — degraded-but-functional
+		// outcomes use Warn per the project logging convention. Codec
+		// stays unset on failure so downstream classification falls
+		// through to the extension-derived name.
+		if codec, err := extractMP4Codec(f); err != nil {
+			scanLogger.Warn("mp4 codec walk failed; falling back to extension classification",
+				"path", absPath, "err", err)
+		} else if codec != "" {
 			t.Codec = codec
 		}
 		// Seek to head before handing the reader to dhowden/tag —
