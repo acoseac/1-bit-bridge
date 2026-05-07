@@ -100,7 +100,7 @@ func (j JobSpec) VariantID() string {
 // SidecarPath returns the absolute filesystem path the converted
 // FLAC will land at. Filename pattern:
 //
-//	<sha256(SourceLibraryRel)>-<VariantID>.flac
+//	<sha256(SourceLibraryRel)[:16]>-<VariantID>.flac
 //
 // The variantID suffix is load-bearing: hashing only the source
 // path would let two runs at different target rates overwrite each
@@ -108,9 +108,19 @@ func (j JobSpec) VariantID() string {
 // by a second with --target-rate 192000 would clobber the first).
 // Including the variantID guarantees multiple variants of the same
 // source coexist safely on disk.
+//
+// 16 hex chars = 64 bits of entropy. Collisions are scoped to a
+// single user's SourceLibraryRel namespace (typically <100k tracks)
+// so 64 bits is far more than enough; truncating buys ~48 chars of
+// Windows MAX_PATH headroom for deeply-nested OutputDirs.
+//
+// Migration: existing 64-char-hash sidecars on disk stay served by
+// their existing track_variants.sidecar_path rows (the absolute
+// path stored in the DB still points at them). Only newly-transcoded
+// variants get the 16-char form. Zero-friction upgrade.
 func (j JobSpec) SidecarPath() string {
 	sum := sha256.Sum256([]byte(j.SourceLibraryRel))
-	hash := hex.EncodeToString(sum[:])
+	hash := hex.EncodeToString(sum[:])[:16]
 	return filepath.Join(j.OutputDir, fmt.Sprintf("%s-%s.flac", hash, j.VariantID()))
 }
 
