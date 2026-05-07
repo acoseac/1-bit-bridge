@@ -3,6 +3,7 @@ package manifest
 import (
 	"bytes"
 	"encoding/binary"
+	"strings"
 	"testing"
 )
 
@@ -60,12 +61,68 @@ func TestExtractMP4CodecMissingMoovErrors(t *testing.T) {
 	}
 }
 
+// TestExtractMP4CodecLargeMoovContainer pads the moov box with a 5 MiB
+// `free` atom BEFORE the trak, simulating a long M4A (audiobook / DJ
+// mix) whose moov legitimately exceeds the 4 MiB byte-span the walker
+// previously enforced. Pre-fix: findAtom errored with "search range …
+// exceeds budget" on the first nested call. Post-fix: the iteration-
+// count budget walks the atoms cleanly, finds trak, returns "ALAC".
+func TestExtractMP4CodecLargeMoovContainer(t *testing.T) {
+	const padding = 5 << 20 // 5 MiB free atom
+	mp4 := buildMP4WithMoovPadding("alac", padding)
+	if len(mp4) < padding {
+		t.Fatalf("padded MP4 too small: %d bytes", len(mp4))
+	}
+	got, err := extractMP4Codec(bytes.NewReader(mp4))
+	if err != nil {
+		t.Fatalf("extractMP4Codec: %v", err)
+	}
+	if got != "ALAC" {
+		t.Errorf("got %q, want %q", got, "ALAC")
+	}
+}
+
+// TestFindAtomIterationBudget asserts the atom-walk count budget
+// trips on a pathological input — a moov stuffed with 5000 tiny
+// `free` atoms before the trak. Locks the safety net so a future
+// regression that drops the budget can't silently allow unbounded
+// header reads.
+func TestFindAtomIterationBudget(t *testing.T) {
+	moov := &bytes.Buffer{}
+	// Write enough tiny `free` atoms to exceed mp4MaxAtomsPerSearch.
+	tiny := make([]byte, 0) // zero-byte payload → 8-byte atom
+	for i := 0; i < mp4MaxAtomsPerSearch+10; i++ {
+		writeAtom(moov, "free", tiny)
+	}
+	// Then a trak — should never be reached.
+	writeAtom(moov, "trak", []byte{})
+
+	out := &bytes.Buffer{}
+	writeAtom(out, "ftyp", []byte("M4A mp42M4A "))
+	writeAtom(out, "moov", moov.Bytes())
+
+	_, err := extractMP4Codec(bytes.NewReader(out.Bytes()))
+	if err == nil {
+		t.Fatal("expected iteration-budget error, got nil")
+	}
+	if !strings.Contains(err.Error(), "iteration budget") {
+		t.Errorf("expected iteration-budget error, got %v", err)
+	}
+}
+
 // buildMinimalMP4 returns a byte slice containing the smallest
 // MP4-shaped tree the codec walker needs: ftyp + moov containing one
 // trak/mdia/minf/stbl/stsd with one sample entry whose format is the
 // given codec FourCC. The other fields inside each atom are
 // zero-padded — the walker doesn't read them.
 func buildMinimalMP4(codec string) []byte {
+	return buildMP4WithMoovPadding(codec, 0)
+}
+
+// buildMP4WithMoovPadding is buildMinimalMP4 with an optional `free`
+// padding atom inserted into moov BEFORE the trak. Used to fabricate
+// large-moov scenarios for the iteration-budget regression test.
+func buildMP4WithMoovPadding(codec string, freePaddingBytes int) []byte {
 	if len(codec) != 4 {
 		panic("buildMinimalMP4: codec must be 4 chars")
 	}
@@ -99,6 +156,12 @@ func buildMinimalMP4(codec string) []byte {
 	writeAtom(trak, "mdia", mdia.Bytes())
 
 	moov := &bytes.Buffer{}
+	if freePaddingBytes > 0 {
+		// Insert a `free` atom whose payload is `freePaddingBytes` bytes.
+		// Atom header (8 bytes) + payload pads moov before the trak,
+		// forcing the walker to traverse the padding to find the trak.
+		writeAtom(moov, "free", make([]byte, freePaddingBytes))
+	}
 	writeAtom(moov, "trak", trak.Bytes())
 
 	out := &bytes.Buffer{}

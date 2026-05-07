@@ -14,10 +14,16 @@
 //   - `mp4a` → MPEG-4 Audio (typically AAC, occasionally legacy MP3
 //     wrapped in MP4)
 //
-// **Read budget**: bounded to avoid a naive walker spinning on a
-// pathological file. We give up after 4 MiB of header reads and
-// return UnknownCodec — the bridge falls through to extension-only
-// classification in that case.
+// **Read budgets**:
+//   - `mp4MaxHeaderReadBudget` (4 MiB) caps the *initial* file-position
+//     search for the top-level moov. Covers fast-start M4As (moov near
+//     head). Non-fast-start files (mdat-before-moov) silently return
+//     "moov not found" — separate, pre-existing limitation.
+//   - `mp4MaxAtomsPerSearch` (4096) bounds each nested atom-walk by
+//     count of headers read, NOT byte span. IO is governed by atom
+//     headers (8 bytes each); `cursor += atomSize` jumps payloads. A
+//     byte-span cap punished legitimately-large moov containers in long
+//     audiobooks / DJ mixes (>4 MiB moov), causing silent metadata drop.
 //
 // Per Gemini A1 / iOS bug review #1 (Mirror-PR pair with
 // `Track.codec` on the iOS side).
@@ -34,7 +40,8 @@ import (
 // MP4 atom walker constants.
 const (
 	mp4HeaderSize          = 8
-	mp4MaxHeaderReadBudget = 4 << 20 // 4 MiB — defensive cap
+	mp4MaxHeaderReadBudget = 4 << 20 // 4 MiB — file-position cap for the top-level moov search
+	mp4MaxAtomsPerSearch   = 4096    // per-search atom-walk budget (count, not bytes)
 )
 
 // extractMP4Codec parses the audio codec FourCC from an MP4 file's
@@ -140,11 +147,13 @@ func findAtom(r io.ReadSeeker, name string, start, endBound uint64) (offset, siz
 	if len(name) != 4 {
 		return 0, 0, fmt.Errorf("mp4: findAtom: name %q must be 4 chars", name)
 	}
-	if endBound > mp4MaxHeaderReadBudget && endBound-start > mp4MaxHeaderReadBudget {
-		return 0, 0, fmt.Errorf("mp4: search range %d..%d exceeds budget", start, endBound)
-	}
 	cursor := start
+	iterations := 0
 	for cursor+mp4HeaderSize <= endBound {
+		if iterations >= mp4MaxAtomsPerSearch {
+			return 0, 0, fmt.Errorf("mp4: atom walk exceeded %d-atom iteration budget at cursor %d", mp4MaxAtomsPerSearch, cursor)
+		}
+		iterations++
 		if _, err := r.Seek(int64(cursor), io.SeekStart); err != nil {
 			return 0, 0, err
 		}
