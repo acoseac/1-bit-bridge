@@ -764,6 +764,284 @@ func TestScanner_NoRecoveryForUUIDArtworkMBID(t *testing.T) {
 	// itself didn't fire above.
 }
 
+// --- stringOf case-insensitive lookup ---
+
+// TestStringOfMatchesVorbisAndID3v2Spellings locks the case + space
+// agnosticism. Vorbis writes `MUSICBRAINZ_ALBUMID`; ID3v2 TXXX writes
+// `MusicBrainz Album Id` (Picard's canonical form). Pre-fix the lookup
+// did exact case-sensitive map subscripts and silently missed every
+// ID3v2-tagged album. Per Gemini A6 / iOS bug review #6d.
+func TestStringOfMatchesVorbisAndID3v2Spellings(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  map[string]any
+		want string
+	}{
+		{
+			name: "Vorbis upper underscore",
+			raw:  map[string]any{"MUSICBRAINZ_ALBUMID": "vorbis-mbid"},
+			want: "vorbis-mbid",
+		},
+		{
+			name: "ID3v2 TXXX human-readable",
+			raw:  map[string]any{"MusicBrainz Album Id": "id3v2-mbid"},
+			want: "id3v2-mbid",
+		},
+		{
+			name: "all-lower underscored",
+			raw:  map[string]any{"musicbrainz_albumid": "lower-mbid"},
+			want: "lower-mbid",
+		},
+		{
+			name: "mixed-case spaced",
+			raw:  map[string]any{"MUSICBRAINZ ALBUM ID": "spaced-mbid"},
+			want: "spaced-mbid",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := stringOf(tc.raw,
+				"MUSICBRAINZ_ALBUMID",
+				"MUSICBRAINZ ALBUM ID",
+				"musicbrainz_albumid",
+			)
+			if !ok {
+				t.Fatalf("stringOf failed to find any key in %v", tc.raw)
+			}
+			if got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestStringOfTrimsResultValue locks the trim-on-return contract.
+// ID3v2 TXXX frames occasionally carry trailing whitespace; without
+// the trim, two tracks tagged identically except for trailing
+// whitespace would surface as different MBIDs (and on the iOS side
+// fan out into different per-album cover-art lookups).
+//
+// Note on search-key construction: the normaliser bridges minor
+// case + space-vs-underscore variants WITHIN one spelling (e.g.
+// `musicbrainz_albumid` vs `MUSICBRAINZ_ALBUMID`) but NOT across
+// fundamentally different word-boundary shapes (`MUSICBRAINZ_ALBUMID`
+// has no separator between "album" and "id"; `MusicBrainz Album Id`
+// has a space). Real callers pass BOTH spellings in the search keys
+// — this test mirrors that pattern.
+func TestStringOfTrimsResultValue(t *testing.T) {
+	raw := map[string]any{"MusicBrainz Album Id": "  album-mbid  \n"}
+	got, ok := stringOf(raw,
+		"MUSICBRAINZ_ALBUMID",
+		"MUSICBRAINZ ALBUM ID",
+		"musicbrainz_albumid",
+	)
+	if !ok {
+		t.Fatalf("stringOf failed to find key in raw=%v", raw)
+	}
+	if got != "album-mbid" {
+		t.Errorf("got %q, want %q (trim-on-return)", got, "album-mbid")
+	}
+}
+
+// TestStringOfRejectsEmptyAfterTrim — a tag whose value is only
+// whitespace should be treated as absent. Defends against taggers
+// that emit `MusicBrainz Album Id = "   "`. Pre-fix the rough-trim
+// landscape might still return that as a "set" value.
+func TestStringOfRejectsEmptyAfterTrim(t *testing.T) {
+	raw := map[string]any{"MUSICBRAINZ_ALBUMID": "   \t\n  "}
+	if got, ok := stringOf(raw, "MUSICBRAINZ_ALBUMID"); ok {
+		t.Errorf("stringOf returned %q for whitespace-only value, want absent", got)
+	}
+}
+
+// TestStringOfArrayValueTrimsFirst — Vorbis comments occasionally
+// surface as []string in dhowden's raw map. Locks the same
+// trim-on-return for the slice path.
+func TestStringOfArrayValueTrimsFirst(t *testing.T) {
+	raw := map[string]any{"MUSICBRAINZ_ALBUMID": []string{"  vorbis-mbid  "}}
+	got, ok := stringOf(raw, "MUSICBRAINZ_ALBUMID")
+	if !ok {
+		t.Fatalf("stringOf failed to find key in []string value")
+	}
+	if got != "vorbis-mbid" {
+		t.Errorf("got %q, want %q", got, "vorbis-mbid")
+	}
+}
+
+// TestStringOfArrayScansAllEntries pins the contract that a leading
+// blank entry in the slice doesn't shadow a populated trailing one.
+// Vorbis allows duplicate keys; pre-fix the function only inspected
+// `s[0]`, treating `["  ", "real-value"]` as absent. CodeRabbit
+// Minor round-1 on PR #166.
+func TestStringOfArrayScansAllEntries(t *testing.T) {
+	raw := map[string]any{"COMMENT": []string{"  ", "  real-value  "}}
+	got, ok := stringOf(raw, "COMMENT")
+	if !ok {
+		t.Fatalf("stringOf should walk past blank entries, got absent")
+	}
+	if got != "real-value" {
+		t.Errorf("got %q, want %q", got, "real-value")
+	}
+}
+
+// TestStringOfHandlesIntValueForCpil is the load-bearing case for
+// the bridge#166 Critical fix. dhowden/tag's MP4 path stores the
+// `cpil` (compilation) atom as a Go `int` (0 or 1) in Metadata.Raw()
+// — the atom-class table maps `cpil` → "compilation", and the
+// "uint8" content-type calls `getInt(b[:1])` which returns int.
+// Pre-fix the type-switch only handled `string` and `[]string`,
+// silently failing for every M4A compilation.
+//
+// The Compilation safety net's call site checks `comp == "1"` —
+// stringOf must coerce the int to "1" so the comparison succeeds.
+func TestStringOfHandlesIntValueForCpil(t *testing.T) {
+	cases := []struct {
+		name string
+		val  any
+		want string
+	}{
+		{"int 1", int(1), "1"},
+		{"int 0", int(0), "0"},
+		{"int64 1", int64(1), "1"},
+		{"uint8 1", uint8(1), "1"},
+		{"bool true", true, "1"},
+		{"bool false", false, "0"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := map[string]any{"compilation": tc.val}
+			got, ok := stringOf(raw, "TCMP", "CPIL", "COMPILATION")
+			if !ok {
+				t.Fatalf("stringOf should accept %T value, got absent", tc.val)
+			}
+			if got != tc.want {
+				t.Errorf("got %q, want %q for %T(%v)", got, tc.want, tc.val, tc.val)
+			}
+		})
+	}
+}
+
+// --- whitespace trim on top-level tags ---
+
+// TestPopulateTrimsWhitespaceFromAllTagFields locks the
+// `strings.TrimSpace` defense on every string tag. Pre-fix a track
+// tagged `Album: "Abbey Road "` and another tagged `Album: "Abbey
+// Road"` would surface as two separate Album rows on iOS (whose
+// `MetadataNormalizer.normalize` does trim, but a trim at the bridge
+// is one less round-trip for that hygiene). Per Gemini A6 /
+// iOS bug review #6e.
+func TestPopulateTrimsWhitespaceFromAllTagFields(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "t.flac")
+	writeMinimalFLAC(t, p, 44100, 16, map[string]string{
+		"TITLE":       "  Song  ",
+		"ARTIST":      "  An Artist\n",
+		"ALBUMARTIST": "\tAA\t",
+		"ALBUM":       "  An Album  ",
+		"GENRE":       " Jazz \n",
+	})
+	tr := &Track{Path: "t.flac", Size: 1, ModTime: time.Now()}
+	if err := Extract(p, tr); err != nil {
+		t.Fatal(err)
+	}
+	if tr.Title != "Song" {
+		t.Errorf("Title: got %q, want %q", tr.Title, "Song")
+	}
+	if tr.Artist != "An Artist" {
+		t.Errorf("Artist: got %q, want %q", tr.Artist, "An Artist")
+	}
+	if tr.AlbumArtist != "AA" {
+		t.Errorf("AlbumArtist: got %q, want %q", tr.AlbumArtist, "AA")
+	}
+	if tr.Album != "An Album" {
+		t.Errorf("Album: got %q, want %q", tr.Album, "An Album")
+	}
+	if tr.Genre != "Jazz" {
+		t.Errorf("Genre: got %q, want %q", tr.Genre, "Jazz")
+	}
+}
+
+// --- Compilation safety net ---
+
+// TestCompilationSynthesizesVariousArtistsWhenAlbumArtistMissing locks
+// the safety-net synthesis: a track tagged with COMPILATION=1 (Vorbis
+// flavour) and no AlbumArtist gets `AlbumArtist = "Various Artists"`.
+// Pre-fix iOS fell back to per-track Artist for the missing
+// albumArtist, fragmenting compilations into one Album row per
+// artist. Per Gemini A6 / iOS bug review #6b.
+func TestCompilationSynthesizesVariousArtistsWhenAlbumArtistMissing(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "comp.flac")
+	writeMinimalFLAC(t, p, 44100, 16, map[string]string{
+		"TITLE":       "Track 1",
+		"ARTIST":      "Various Performer A",
+		"ALBUM":       "Greatest Hits",
+		"COMPILATION": "1",
+	})
+	tr := &Track{Path: "comp.flac", Size: 1, ModTime: time.Now()}
+	if err := Extract(p, tr); err != nil {
+		t.Fatal(err)
+	}
+	if tr.AlbumArtist != "Various Artists" {
+		t.Errorf("AlbumArtist: got %q, want %q (synthesized from COMPILATION=1)",
+			tr.AlbumArtist, "Various Artists")
+	}
+}
+
+// TestCompilationDoesNotOverrideExplicitAlbumArtist — a tagger that
+// SET the AlbumArtist explicitly (e.g. "Marc-André Hamelin" on a
+// classical recital that's "compilation:1" because it spans labels)
+// must keep that explicit value. The synth fires only on missing /
+// empty AlbumArtist.
+func TestCompilationDoesNotOverrideExplicitAlbumArtist(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "explicit.flac")
+	writeMinimalFLAC(t, p, 44100, 16, map[string]string{
+		"TITLE":       "Track 1",
+		"ARTIST":      "Hamelin",
+		"ALBUMARTIST": "Marc-André Hamelin",
+		"ALBUM":       "Recital",
+		"COMPILATION": "1",
+	})
+	tr := &Track{Path: "explicit.flac", Size: 1, ModTime: time.Now()}
+	if err := Extract(p, tr); err != nil {
+		t.Fatal(err)
+	}
+	if tr.AlbumArtist != "Marc-André Hamelin" {
+		t.Errorf("explicit AlbumArtist clobbered: got %q, want %q",
+			tr.AlbumArtist, "Marc-André Hamelin")
+	}
+}
+
+// TestCompilationFlagAcceptsDifferentSpellings — TCMP (ID3v2),
+// CPIL (iTunes / MP4), and COMPILATION (Vorbis) all carry the same
+// semantic. Locks the case-agnostic stringOf lookup against every
+// spelling.
+func TestCompilationFlagAcceptsDifferentSpellings(t *testing.T) {
+	cases := []struct {
+		key, val string
+	}{
+		{"TCMP", "1"},
+		{"CPIL", "1"},
+		{"COMPILATION", "1"},
+		{"compilation", "1"}, // lowercase Vorbis
+	}
+	for _, tc := range cases {
+		t.Run(tc.key, func(t *testing.T) {
+			raw := map[string]any{
+				tc.key: tc.val,
+			}
+			tr := &Track{}
+			if t1, ok := stringOf(raw, "TCMP", "CPIL", "COMPILATION"); !ok || t1 != "1" {
+				t.Fatalf("stringOf with %s=%q: got (%q, %v)", tc.key, tc.val, t1, ok)
+			}
+			if tr.AlbumArtist == "Various Artists" {
+				t.Errorf("setup error — AlbumArtist already set")
+			}
+		})
+	}
+}
+
 // Suppresses unused-import warning when running individual tests
 // (atomic / time are used but the package's other test files cover
 // some of these — keeping explicit references here makes the file

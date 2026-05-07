@@ -191,39 +191,73 @@ func extractViaDhowdenFromReader(f io.ReadSeeker, absPath string, t *Track, ec *
 
 // populateFromTagMetadata copies known fields out of a dhowden/tag Metadata
 // into our Track, leaving empty what the file didn't have.
+//
+// **Whitespace hygiene** (Gemini A6 / iOS bug review #6e): every string
+// tag is `strings.TrimSpace`'d before persisting. iOS already
+// re-trims + collapses whitespace via `MetadataNormalizer.normalize`
+// at album-id-build time, so this is defensive cleanup — but the
+// trim happens once at the bridge and benefits any future consumer
+// of the manifest that doesn't normalize.
+//
+// **Compilation safety net** (Gemini A6 / iOS bug review #6b): when
+// the file carries a `COMPILATION` / `TCMP` / `cpil` flag set to "1"
+// AND has no explicit `AlbumArtist`, force `AlbumArtist = "Various
+// Artists"`. Pre-fix the iOS bridge upsert fell back to per-track
+// `Artist` for albumArtist on missing-tag, which produced one Album
+// row per artist on multi-artist compilations. iOS doesn't see the
+// compilation flag (it's not in BridgeTrack), so the synth has to
+// happen here.
 func populateFromTagMetadata(m tag.Metadata, t *Track) {
-	if v := m.Title(); v != "" {
+	if v := strings.TrimSpace(m.Title()); v != "" {
 		t.Title = v
 	}
-	if v := m.Artist(); v != "" {
+	if v := strings.TrimSpace(m.Artist()); v != "" {
 		t.Artist = v
 	}
-	if v := m.AlbumArtist(); v != "" {
+	if v := strings.TrimSpace(m.AlbumArtist()); v != "" {
 		t.AlbumArtist = v
 	}
-	if v := m.Album(); v != "" {
+	if v := strings.TrimSpace(m.Album()); v != "" {
 		t.Album = v
 	}
-	if v := m.Genre(); v != "" {
+	if v := strings.TrimSpace(m.Genre()); v != "" {
 		t.Genre = v
 	}
 	// `dhowden/tag` returns 0 for both "tag absent" and "tag value is 0"
 	// — there's no way to distinguish at this layer. We propagate the
 	// raw value as a non-nil pointer regardless, so a track legitimately
 	// tagged with year 0 / track 0 round-trips as `Some(0)` to the
-	// iOS decoder rather than getting silently dropped. iOS treats 0
-	// as the same sentinel as nil for these fields (no track number,
-	// no disc number, no year), so the user-visible behaviour is
-	// unchanged; the wire shape just stops lying about which case the
-	// extractor saw.
+	// iOS decoder rather than getting silently dropped.
+	//
+	// **Pointer-zero correctness pass** (the bridge-side companion
+	// to the iOS-side `MetadataNormalizer.albumID` year-zero guard)
+	// is deferred to a later release: shipping the bridge fix
+	// before the iOS guard has propagated via App Store / TestFlight
+	// would have legacy clients suddenly see `null` where they
+	// expected `0` and trigger mass library re-grouping. See
+	// `internal/manifest/types.go` doc-comment.
 	y := m.Year()
 	t.Year = &y
 	tn, _ := m.Track()
 	t.TrackNumber = &tn
 	d, _ := m.Disc()
 	t.DiscNumber = &d
-	// MusicBrainz IDs — many tagged libraries carry these.
+	// MusicBrainz IDs — many tagged libraries carry these. The
+	// case/space-agnostic stringOf below catches both Vorbis-flavour
+	// keys (`MUSICBRAINZ_ALBUMID`) AND ID3v2 TXXX descriptions
+	// (`MusicBrainz Album Id` — Picard's canonical form).
 	if raw := m.Raw(); raw != nil {
+		// Compilation safety net (CLAUDE.md / Gemini A6 / iOS bug
+		// review #6b). Only fires when albumArtist is empty AND a
+		// compilation flag is set to "1" — preserves the user's
+		// explicit albumArtist when one is tagged. TCMP (ID3v2),
+		// CPIL (iTunes / MP4), COMPILATION (Vorbis / FLAC) all
+		// carry the same semantic.
+		if t.AlbumArtist == "" {
+			if comp, ok := stringOf(raw, "TCMP", "CPIL", "COMPILATION"); ok && comp == "1" {
+				t.AlbumArtist = "Various Artists"
+			}
+		}
 		if v, ok := stringOf(raw, "MUSICBRAINZ_TRACKID", "MUSICBRAINZ TRACK ID", "musicbrainz_trackid"); ok {
 			t.MusicBrainzTrackID = v
 		}
@@ -244,24 +278,98 @@ func populateFromTagMetadata(m tag.Metadata, t *Track) {
 	}
 }
 
-// stringOf looks up keys in a raw tag map (case-and-spelling varies across
-// formats) and returns the first non-empty string value.
+// stringOf looks up keys in a raw tag map. Case-insensitive and
+// space/underscore-agnostic so ID3v2 TXXX frames (which dhowden
+// surfaces with their human-readable description, e.g.
+// "MusicBrainz Album Id") match the same lookup that hits Vorbis
+// comments (`MUSICBRAINZ_ALBUMID`). Pre-fix the lookup did exact
+// case-sensitive map subscripts, so MBID extraction silently failed
+// for any ID3v2-tagged album — Cover-Art-Archive enrichment fell
+// back to the lower-quality iTunes path, and the iOS app couldn't
+// fall through to bridge-served local-art for those files. Per
+// Gemini A6 / iOS bug review #6d.
+//
+// Trimmed return: every matched value is `strings.TrimSpace`'d
+// before being returned, defending against trailing-space tagging
+// hygiene issues at the consuming layer (Vorbis comments rarely
+// carry leading/trailing whitespace, but ID3v2 TXXX frames
+// occasionally do).
 func stringOf(raw map[string]any, keys ...string) (string, bool) {
+	if len(keys) == 0 {
+		return "", false
+	}
+	// Pre-normalise the search keys once so the per-map-key inner
+	// loop is just a string compare.
+	wanted := make([]string, 0, len(keys))
 	for _, k := range keys {
-		if v, ok := raw[k]; ok {
-			switch s := v.(type) {
-			case string:
-				if s != "" {
-					return s, true
-				}
-			case []string:
-				if len(s) > 0 && s[0] != "" {
-					return s[0], true
+		wanted = append(wanted, normaliseRawTagKey(k))
+	}
+	for mapKey, v := range raw {
+		norm := normaliseRawTagKey(mapKey)
+		matched := false
+		for _, w := range wanted {
+			if norm == w {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		switch s := v.(type) {
+		case string:
+			if trimmed := strings.TrimSpace(s); trimmed != "" {
+				return trimmed, true
+			}
+		case []string:
+			// Scan the WHOLE slice — Vorbis comments can carry the
+			// same key multiple times (e.g. `COMMENT="" / COMMENT="real"`).
+			// Pre-fix, only `s[0]` was inspected so a leading blank
+			// entry treated the tag as absent. CodeRabbit Minor
+			// round-1 on PR #166.
+			for _, item := range s {
+				if trimmed := strings.TrimSpace(item); trimmed != "" {
+					return trimmed, true
 				}
 			}
+		case int:
+			// dhowden/tag surfaces MP4/M4A `cpil` (compilation atom)
+			// as int (0 or 1) via getInt(b[:1]) — NOT a string. Pre-fix
+			// the compilation safety net's `stringOf(... ) == "1"`
+			// check silently failed for every M4A compilation, leaving
+			// the AlbumArtist synth dead on that codepath. Coerce to
+			// string so downstream value comparisons work uniformly.
+			// CodeRabbit Critical round-1 on PR #166.
+			return strconv.Itoa(s), true
+		case int64:
+			return strconv.FormatInt(s, 10), true
+		case uint8:
+			// Defensive: dhowden's atomTypes class 21 (uint8) is the
+			// MP4 path most cpil values surface through; some library
+			// versions return uint8 directly rather than promoting to
+			// int. Both shapes mean the same thing on the wire.
+			return strconv.FormatUint(uint64(s), 10), true
+		case bool:
+			// Some tag libraries (and a future dhowden refactor) might
+			// surface boolean atoms directly. "1"/"0" matches the
+			// existing string-comparison conventions at call sites.
+			if s {
+				return "1", true
+			}
+			return "0", true
 		}
 	}
 	return "", false
+}
+
+// normaliseRawTagKey lowercases and replaces spaces with underscores
+// so the search keys passed to stringOf can match both Vorbis-style
+// (`MUSICBRAINZ_ALBUMID`) and ID3v2-TXXX-style (`MusicBrainz Album Id`)
+// shapes uniformly. The replacement is space → underscore only —
+// other punctuation (slash, colon, etc.) stays intact since dhowden's
+// raw map keys preserve them on the surfaces we care about.
+func normaliseRawTagKey(k string) string {
+	return strings.ReplaceAll(strings.ToLower(k), " ", "_")
 }
 
 // parseReplayGain parses a Vorbis/ID3 ReplayGain string like "-7.32 dB".
