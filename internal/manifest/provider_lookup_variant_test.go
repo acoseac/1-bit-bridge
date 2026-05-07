@@ -37,8 +37,8 @@ func TestProviderLookupVariant_caseInsensitive(t *testing.T) {
 	}
 	if err := s.UpsertVariant(VariantRow{
 		SourcePath:    canonical,
-		VariantID:     "upscaled-v1-176400-24",
-		SidecarPath:   "/tmp/x/abc-upscaled-v1-176400-24.flac",
+		VariantID:     "upscaled-v2-176400-24",
+		SidecarPath:   "/tmp/x/abc-upscaled-v2-176400-24.flac",
 		Format:        "flac",
 		SampleRate:    176400,
 		BitsPerSample: 24,
@@ -69,14 +69,14 @@ func TestProviderLookupVariant_caseInsensitive(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := p.LookupVariant(tc.path, "upscaled-v1-176400-24")
+			got, err := p.LookupVariant(tc.path, "upscaled-v2-176400-24")
 			if err != nil {
 				t.Fatalf("LookupVariant(%q): %v", tc.path, err)
 			}
 			if got == nil {
 				t.Fatalf("LookupVariant(%q) = nil; expected the variant to be found", tc.path)
 			}
-			if got.SidecarPath != "/tmp/x/abc-upscaled-v1-176400-24.flac" {
+			if got.SidecarPath != "/tmp/x/abc-upscaled-v2-176400-24.flac" {
 				t.Errorf("SidecarPath: got %q", got.SidecarPath)
 			}
 		})
@@ -101,7 +101,7 @@ func TestProviderLookupVariant_stillReturnsNilOnMiss(t *testing.T) {
 	}
 
 	p := NewProvider(s, NewScanner(nil, s, ""))
-	got, err := p.LookupVariant("/some/other/track.flac", "upscaled-v1-176400-24")
+	got, err := p.LookupVariant("/some/other/track.flac", "upscaled-v2-176400-24")
 	if err != nil {
 		t.Fatalf("LookupVariant: %v", err)
 	}

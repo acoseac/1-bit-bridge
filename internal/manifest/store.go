@@ -760,7 +760,7 @@ func scanTrackVariants(t *Track, raw []byte) {
 
 // humanLabelForVariant renders an iOS-friendly description for
 // the picker UI. Today's only producer is `bridge upscale`, which
-// mints `upscaled-v1-<rate>-<bits>` IDs.
+// mints `upscaled-v2-<rate>-<bits>` IDs.
 func humanLabelForVariant(v Variant) string {
 	rateLabel := formatSampleRateLabel(v.SampleRate)
 	switch {

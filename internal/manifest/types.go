@@ -122,8 +122,8 @@ type Track struct {
 //
 // `ID` is opaque to clients; today the only producer is `bridge
 // upscale`, which mints IDs of the form
-// `upscaled-v1-<targetRate>-<targetBits>` (e.g.
-// `upscaled-v1-176400-24`). The iOS variant resolver keys on the
+// `upscaled-v2-<targetRate>-<targetBits>` (e.g.
+// `upscaled-v2-176400-24`). The iOS variant resolver keys on the
 // `upscaled-` prefix to slot a variant into the share-level "prefer
 // upscaled" toggle; future variant kinds (e.g. `dsd-`) get their
 // own slots without touching legacy resolution.

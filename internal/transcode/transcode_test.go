@@ -21,15 +21,15 @@ func TestVariantIDStable(t *testing.T) {
 	}{
 		{
 			JobSpec{TargetSampleRate: 176400, TargetBits: 24},
-			"upscaled-v1-176400-24",
+			"upscaled-v2-176400-24",
 		},
 		{
 			JobSpec{TargetSampleRate: 192000, TargetBits: 24},
-			"upscaled-v1-192000-24",
+			"upscaled-v2-192000-24",
 		},
 		{
 			JobSpec{TargetSampleRate: 352800, TargetBits: 32},
-			"upscaled-v1-352800-32",
+			"upscaled-v2-352800-32",
 		},
 	}
 	for _, c := range cases {
@@ -75,10 +75,10 @@ func TestSidecarPathIncludesVariantSuffix(t *testing.T) {
 	}
 	// The variantID must appear in each filename so a directory
 	// listing tells the operator which is which.
-	if !strings.Contains(pa, "upscaled-v1-176400-24") {
+	if !strings.Contains(pa, "upscaled-v2-176400-24") {
 		t.Errorf("sidecar path %q missing 176400 variantID", pa)
 	}
-	if !strings.Contains(pb, "upscaled-v1-192000-24") {
+	if !strings.Contains(pb, "upscaled-v2-192000-24") {
 		t.Errorf("sidecar path %q missing 192000 variantID", pb)
 	}
 }
@@ -129,9 +129,10 @@ func TestSidecarFilenameLengthBounded(t *testing.T) {
 }
 
 // TestSoxArgsShape pins the exact argv shape we hand to sox.
-// Quality "very-high" → `rate -v <Hz>`, dither -s, bit depth flag
-// -b N, .tmp suffix on output. Any change to this shape needs an
-// integration-test re-run on a known-good fixture.
+// `-G` (gain-guard) leads as a global option; quality "very-high"
+// → `rate -v <Hz>`, dither -s, bit depth flag -b N, .tmp suffix
+// on output. Any change to this shape needs an integration-test
+// re-run on a known-good fixture.
 func TestSoxArgsShape(t *testing.T) {
 	j := JobSpec{
 		SourceAbsPath:    "/lib/Music/Album/01.flac",
@@ -143,6 +144,7 @@ func TestSoxArgsShape(t *testing.T) {
 	}
 	args, settings := j.SoxArgs()
 	want := []string{
+		"-G",
 		"/lib/Music/Album/01.flac",
 		"-b", "24",
 		"-t", "flac",
@@ -158,13 +160,38 @@ func TestSoxArgsShape(t *testing.T) {
 			t.Errorf("args[%d]: got %q, want %q", i, args[i], want[i])
 		}
 	}
-	// Settings JSON must mention the rate flag, target rate, and
-	// schema version so a future post-mortem can identify what
-	// produced this sidecar.
-	for _, needle := range []string{`"resampler":"sox"`, `"rateFlag":"-v"`, `"targetRate":176400`, `"schemaVersion":"v1"`} {
+	// Settings JSON must mention the rate flag, target rate, guard
+	// flag, and schema version so a future post-mortem can identify
+	// what produced this sidecar.
+	for _, needle := range []string{`"resampler":"sox"`, `"rateFlag":"-v"`, `"targetRate":176400`, `"guard":true`, `"schemaVersion":"v2"`} {
 		if !strings.Contains(settings, needle) {
 			t.Errorf("settings JSON missing %q (got: %s)", needle, settings)
 		}
+	}
+}
+
+// TestSoxArgsIncludesGuardFlag pins `-G` as the leading global
+// option. Sox's gain-guard is what prevents intersample peaks on
+// 0 dBFS-mastered material from clipping through the rate-conversion
+// + dither pipeline. Regression trap: a future refactor that drops
+// or repositions `-G` would silently re-introduce occasional
+// clipping in upscale variants. Position matters — sox treats `-G`
+// as a global option that must precede the input file argument.
+func TestSoxArgsIncludesGuardFlag(t *testing.T) {
+	j := JobSpec{
+		SourceAbsPath:    "/lib/Music/Album/01.flac",
+		SourceLibraryRel: "Music/Album/01.flac",
+		TargetSampleRate: 176400,
+		TargetBits:       24,
+		Quality:          QualityVeryHigh,
+		OutputDir:        "/tmp/transcoded",
+	}
+	args, _ := j.SoxArgs()
+	if len(args) == 0 {
+		t.Fatal("SoxArgs returned empty slice")
+	}
+	if args[0] != "-G" {
+		t.Errorf("args[0] = %q, want %q (gain-guard must lead as a global option, before the input path)", args[0], "-G")
 	}
 }
 
