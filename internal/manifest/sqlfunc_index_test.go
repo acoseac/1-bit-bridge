@@ -46,3 +46,46 @@ func TestUnicodeLowerIndexIsSelected(t *testing.T) {
 		t.Errorf("query plan did not reference idx_tracks_path_unicode_lower — falling back to full table scan, which is the regression this index exists to prevent")
 	}
 }
+
+// TestUnicodeLowerVariantIndexIsSelected mirrors the trap above for
+// the `track_variants` table. LookupVariant is a paired-with-LookupTrack
+// hot path on every iOS-shaped /v1/download?variant=... call; if the
+// v4 migration's `idx_track_variants_source_path_unicode_lower` is
+// silently dropped or the WHERE expression drifts (refactored to
+// `lower()` by mistake), the planner falls back to a full table scan
+// of track_variants and the regression goes undetected because the
+// tracks-side trap above still passes. Greptile bot review on PR #182.
+func TestUnicodeLowerVariantIndexIsSelected(t *testing.T) {
+	s, err := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer s.Close()
+
+	rows, err := s.db.Query(
+		`EXPLAIN QUERY PLAN SELECT source_path FROM track_variants
+		 WHERE unicode_lower(source_path) = unicode_lower(?) AND variant_id = ?
+		 LIMIT 2`,
+		"any/path.flac", "upscaled-v2-44khz-16bit",
+	)
+	if err != nil {
+		t.Fatalf("EXPLAIN QUERY PLAN: %v", err)
+	}
+	defer rows.Close()
+
+	var found bool
+	for rows.Next() {
+		var id, parent, notused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		t.Logf("plan: %s", detail)
+		if strings.Contains(detail, "idx_track_variants_source_path_unicode_lower") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("query plan did not reference idx_track_variants_source_path_unicode_lower — falling back to full table scan, which is the regression this index exists to prevent")
+	}
+}
