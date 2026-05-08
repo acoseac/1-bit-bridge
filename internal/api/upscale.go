@@ -151,7 +151,21 @@ func (s *Server) upscaleRequest(w http.ResponseWriter, r *http.Request) {
 				// directory indicates a configuration problem
 				// the user should know about — surface, don't
 				// silently truncate the upscale set.
-				logger.Error("upscale folder walk", "path", p, "err", walkErr)
+				//
+				// Log the library-relative form (NOT `p`, which
+				// is the resolved absolute filesystem path on
+				// the host). docs/privacy.html commits to
+				// "absolute filesystem paths are not logged" —
+				// this branch is the only call site in v0.1.2
+				// that would have leaked one. Falls back to the
+				// requested `libraryRel` if `Rel` errors (root
+				// failure) so the operator still gets a useful
+				// pointer.
+				relForLog := libraryRel
+				if rel, relErr := filepath.Rel(abs, p); relErr == nil && rel != "." {
+					relForLog = path.Join(libraryRel, filepath.ToSlash(rel))
+				}
+				logger.Error("upscale folder walk", "path", relForLog, "err", walkErr)
 				return walkErr
 			}
 			if d.IsDir() {
