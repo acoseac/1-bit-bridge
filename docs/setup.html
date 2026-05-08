@@ -37,7 +37,7 @@
     </ul>
 
     <ol class="steps">
-      <li>
+      <li id="step-1">
         <h3>Download for your platform</h3>
         <p>Grab the archive matching your OS and CPU from the <a href="https://github.com/acoseac/1-bit-bridge/releases/latest">latest release page</a>. No installer — just unpack.</p>
         <div class="grid-2">
@@ -62,14 +62,14 @@ cd bridge</code></pre>
         </div>
       </li>
 
-      <li>
+      <li id="step-2">
         <h3>Run a preflight check (optional)</h3>
         <p><code>bridge doctor</code> prints a punch list of what's wrong with your environment before you commit to a config. It's safe — it makes no changes.</p>
         <pre><code>./bridge doctor</code></pre>
         <p>You're aiming for all green. The most common red is <strong>port already in use</strong> on <code>:7788</code> or <code>:7789</code> — close whatever owns those ports, or pick different ones in the next step.</p>
       </li>
 
-      <li>
+      <li id="step-3">
         <h3>Run <code>bridge init</code></h3>
         <p>The init wizard walks you through the minimum you need to start serving music: a library path, a bridge name (shows up on your iPhone), and an HTTPS listen address. Defaults are sane — pressing return is usually fine.</p>
         <pre><code>./bridge init</code></pre>
@@ -83,7 +83,7 @@ cd bridge</code></pre>
         <div class="note">If you'd rather not install a service yet, run <code>./bridge init --no-service --yes</code> and start the bridge manually with <code>./bridge serve</code>. Quit-on-close, keep-it-simple — recommended for first-time exploration.</div>
       </li>
 
-      <li>
+      <li id="step-4">
         <h3>Open the admin console</h3>
         <p>Once <code>bridge init</code> reports success, open <a href="http://127.0.0.1:7789/">http://127.0.0.1:7789/</a> in any browser on the same machine.</p>
         <p>The admin console is loopback-only — it answers exclusively on <code>127.0.0.1</code>, never on your LAN or Tailscale IP. There's no login because anyone with a shell on this machine already has access to the data the console manages. From here you can:</p>
@@ -95,7 +95,7 @@ cd bridge</code></pre>
         </ul>
       </li>
 
-      <li>
+      <li id="step-5">
         <h3>Wait for the first scan</h3>
         <p>The bridge starts scanning your library the moment it's pointed at a folder. The Library tab shows live progress: total files found, tagged so far, artwork fetched.</p>
         <p>What "first scan" looks like for typical libraries:</p>
@@ -109,7 +109,7 @@ cd bridge</code></pre>
         <div class="note note-ok"><strong>You can pair your iPhone before the scan finishes.</strong> The app will stream what's already indexed and pick up the rest as it lands.</div>
       </li>
 
-      <li>
+      <li id="step-6">
         <h3>Pair your iPhone — Method A: tap-to-pair (recommended)</h3>
         <p>This is the easiest path on iOS 1.2 and newer. Both devices must be on the same Wi-Fi.</p>
         <ol>
@@ -123,7 +123,7 @@ cd bridge</code></pre>
         <p>The verification code prevents an attacker on your network from MITM'ing the pair — only the device that actually holds the matching code is talking to your bridge.</p>
       </li>
 
-      <li>
+      <li id="step-7">
         <h3>Pair your iPhone — Method B: QR / manual entry</h3>
         <p>If you'd rather pair from the admin side first (e.g. you're configuring a phone for someone else), use the legacy flow.</p>
         <ol>
@@ -135,13 +135,13 @@ cd bridge</code></pre>
         <p>Either method ends with the bridge appearing as a paired source in 1-bit. Every subsequent request from the iPhone is bearer-token-authenticated and TLS-fingerprint-pinned.</p>
       </li>
 
-      <li>
+      <li id="step-8">
         <h3>Test playback</h3>
         <p>From the iPhone's Sources list, tap into the bridge. Browse to an album. Tap a track. You should hear it within a second or two.</p>
         <p>Check the bottom-of-screen mini-player chip — it should read <strong>BIT-EXACT</strong> green for FLAC / ALAC / DSF playback. If it shows orange (resampling), iOS hit a sample-rate ceiling on the route — usually means an AirPlay or BT speaker is in the path. Tap the chip for details.</p>
       </li>
 
-      <li>
+      <li id="step-9">
         <h3>Optional: enable remote access via Tailscale</h3>
         <p>If you want to listen to your library from outside your home network, the cleanest answer is <a href="https://tailscale.com/">Tailscale</a> — a free, peer-to-peer VPN. The bridge has built-in support for it.</p>
         <p>Two integration modes are available:</p>
