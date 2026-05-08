@@ -331,3 +331,66 @@ func TestLookupTrack_redundantSeparators_endToEnd(t *testing.T) {
 		})
 	}
 }
+
+// TestLookupTrack_unicodeFolding pins the v4 unicode_lower contract
+// against the iOS↔bridge path-shape boundary. Pre-v4 the LOWER()
+// fallback was ASCII-only: a path like `Sigur Rós/Ágætis byrjun/01.flac`
+// stored by the bridge could not be matched by iOS's NFC + lowercased
+// request shape `sigur rós/ágætis byrjun/01.flac` because SQLite's
+// built-in LOWER doesn't fold `Ó` → `ó`. v4 swaps the indexes + queries
+// to a Go-registered `unicode_lower(...)` function backed by
+// `golang.org/x/text/cases.Lower(language.Und)` — same byte-for-byte
+// fold iOS's `String.lowercased()` produces.
+//
+// Three regions cover the headline use-cases for non-English libraries:
+// Latin Extended (Icelandic), Slavic (Polish), and German sharp-s.
+func TestLookupTrack_unicodeFolding(t *testing.T) {
+	s, err := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer s.Close()
+
+	cases := []struct {
+		name      string
+		canonical string // shape the bridge scanner records
+		ioshape   string // shape iOS sends after NFC + lowercased + leading-slash
+	}{
+		{
+			"sigur ros (Icelandic / Latin Extended)",
+			"Sigur Rós/Ágætis byrjun/01 Svefn-g-englar.flac",
+			"/sigur rós/ágætis byrjun/01 svefn-g-englar.flac",
+		},
+		{
+			"hania rani (Polish)",
+			"Hania Rani/Esja/01 Eden.flac",
+			"/hania rani/esja/01 eden.flac",
+		},
+		{
+			"german sharp-s",
+			"Straße/Album/01.flac",
+			"/straße/album/01.flac",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := s.UpsertTrack(&Track{
+				Path: tc.canonical, Size: 1, ModTime: time.Now(),
+				Artist: "Artist", Album: "Album",
+			}); err != nil {
+				t.Fatalf("UpsertTrack(%q): %v", tc.canonical, err)
+			}
+			tr, err := s.LookupTrack(tc.ioshape)
+			if err != nil {
+				t.Fatalf("LookupTrack(%q): %v", tc.ioshape, err)
+			}
+			if tr == nil {
+				t.Fatalf("LookupTrack(%q) returned nil — pre-v4 ASCII-only LOWER would fail here; v4 unicode_lower must match", tc.ioshape)
+			}
+			if tr.Path != tc.canonical {
+				t.Errorf("LookupTrack(%q).Path = %q, want canonical %q", tc.ioshape, tr.Path, tc.canonical)
+			}
+		})
+	}
+}
