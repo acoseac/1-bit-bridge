@@ -183,7 +183,21 @@ func (s *Server) upscaleRequest(w http.ResponseWriter, r *http.Request) {
 			return nil
 		})
 		if walkErr != nil {
-			writeError(w, http.StatusInternalServerError, "internal", "walk folder: "+walkErr.Error())
+			// Unwrap *os.PathError before sending to the wire —
+			// its Error() string embeds the absolute host path
+			// (e.g. "open /Users/alice/Music/...: permission
+			// denied"), which would re-leak what the log fix
+			// above was added to prevent. The library-relative
+			// pointer is already in the server log; the client
+			// only needs the OS-level reason. Greptile flagged
+			// this on PR #185 — same root cause as the logger
+			// fix, different egress channel.
+			detail := walkErr.Error()
+			var pathErr *os.PathError
+			if errors.As(walkErr, &pathErr) {
+				detail = pathErr.Op + ": " + pathErr.Err.Error()
+			}
+			writeError(w, http.StatusInternalServerError, "internal", "walk folder: "+detail)
 			return
 		}
 	} else {

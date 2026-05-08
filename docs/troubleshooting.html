@@ -216,10 +216,10 @@
     </div>
     <div class="fix">
       <ol>
-        <li>Stop the bridge: macOS <code>launchctl unload ~/Library/LaunchAgents/com.acoseac.1-bit-bridge.plist</code>, Linux <code>systemctl --user stop 1-bit-bridge</code>, Windows <code>sc.exe stop 1-bit-bridge</code>.</li>
+        <li>Stop the bridge via your service manager: macOS <code>launchctl unload ~/Library/LaunchAgents/com.acoseac.1-bit-bridge.plist</code>, Linux <code>systemctl --user stop 1-bit-bridge</code>, Windows <code>sc.exe stop 1-bit-bridge</code>.</li>
         <li>List available snapshots: <code>./bridge restore --list</code>. They're dated <code>YYYYMMDD-HHMMSS</code>.</li>
         <li>Restore a specific snapshot: <code>./bridge restore --snapshot 20260508-104500</code>.</li>
-        <li>Start the bridge again. The data directory now matches the snapshot — config, manifest, paired devices.</li>
+        <li>Start the bridge again via the same service manager: <code>launchctl load ~/Library/LaunchAgents/com.acoseac.1-bit-bridge.plist</code> on macOS, <code>systemctl --user start 1-bit-bridge</code> on Linux, <code>sc.exe start 1-bit-bridge</code> on Windows. The data directory now matches the snapshot — config, manifest, paired devices.</li>
       </ol>
       <p>Snapshots restore the bridge's data directory only — your music files are never touched. iOS pairings continue to work because the token database is part of the snapshot.</p>
     </div>

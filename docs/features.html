@@ -102,11 +102,9 @@
 
     <h2 id="backups">Backups</h2>
     <p>The bridge writes timestamped snapshots of its data directory under <code>backups/&lt;timestamp&gt;/</code>. Both manual (<em>Settings → Take snapshot now</em>) and automatic (configurable interval, configurable retention via <code>backup.maxKept</code>). Each snapshot contains the YAML config, the SQLite manifest, and the paired-device list — enough to restore a full working bridge.</p>
-    <p>Restore is a CLI operation:</p>
-    <pre><code>./bridge stop
-./bridge restore --snapshot &lt;timestamp&gt;
-./bridge start</code></pre>
-    <p>Kept off the web UI by design — accidentally clicking <em>restore</em> on a running bridge would replace the live library mid-stream. The CLI requires you to stop the bridge first, surfacing the implication.</p>
+    <p>Restore is a CLI operation. Stop the bridge via your service manager first (<code>launchctl unload</code> on macOS, <code>systemctl --user stop 1-bit-bridge</code> on Linux, <code>sc.exe stop 1-bit-bridge</code> on Windows; see <a href="troubleshooting.html#logs-where">troubleshooting</a> for the exact commands), then:</p>
+    <pre><code>./bridge restore --snapshot &lt;timestamp&gt;</code></pre>
+    <p>Start the bridge again via the same service manager. Kept off the web UI by design — accidentally clicking <em>restore</em> on a running bridge would replace the live library mid-stream. The two-step CLI flow surfaces the implication.</p>
 
     <h2 id="discovery">Bonjour discovery</h2>
     <p>The bridge advertises itself on the LAN as <code>_onebit-bridge._tcp</code>. The iOS app picks it up via the <em>Discover on network</em> entry in the Add Bridge sheet — no manual URL entry, no fingerprint paste.</p>
