@@ -201,6 +201,7 @@
     </div>
     <div class="fix">
       <table>
+        <caption>Per-platform commands for live-tailing the bridge service log</caption>
         <tr><th>Platform</th><th>Live tail</th></tr>
         <tr><td>macOS (launchd)</td><td><code>log show --predicate 'subsystem == "com.acoseac.bridge"' --last 1h</code></td></tr>
         <tr><td>Linux (systemd)</td><td><code>journalctl --user -u 1-bit-bridge -f</code></td></tr>

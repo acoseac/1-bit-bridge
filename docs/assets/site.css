@@ -281,6 +281,17 @@ ol.steps ul { padding-left: 22px; }
 table { width: 100%; border-collapse: collapse; margin: 16px 0 24px; font-size: 0.95rem; }
 th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
 th { font-weight: 600; }
+/* <caption> on every <table> for screen-reader context. Browser default
+ * centers it above the table at body size, which fights the site's
+ * left-aligned reading rhythm — render as a quiet left-aligned subhead. */
+caption {
+  text-align: left;
+  caption-side: top;
+  padding: 0 0 6px;
+  font-size: 0.88rem;
+  color: var(--fg-muted);
+  font-style: italic;
+}
 
 /* Description lists (used on features.html for term/definition pairs) */
 dl { margin: 12px 0 24px; }

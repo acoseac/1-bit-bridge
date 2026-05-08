@@ -120,6 +120,7 @@
     <h2 id="admin">Admin console tour</h2>
     <p>Loopback-only at <code>http://127.0.0.1:7789/</code>. No login, by deliberate design — anyone with a shell on this machine already has filesystem access to the token store, so adding a password would be theatre.</p>
     <table>
+      <caption>Admin console tabs, what each manages, and what's reserved for the CLI</caption>
       <tr><th>Tab</th><th>Purpose</th><th>What's CLI-only</th></tr>
       <tr><td>Dashboard</td><td>Server status, library size, paired devices, latest scan stats, certificate expiry, Tailscale state</td><td>—</td></tr>
       <tr><td>Library</td><td>Add / remove root folders, full or delta re-scan, per-folder progress, orphan-variant cleanup</td><td>—</td></tr>
@@ -133,6 +134,7 @@
     <h2 id="logs">Logs</h2>
     <p>The bridge writes structured logs to your platform's service manager:</p>
     <table>
+      <caption>Per-platform commands for tailing the bridge service log</caption>
       <tr><th>Platform</th><th>How to view</th></tr>
       <tr><td>macOS (launchd)</td><td><code>log show --predicate 'subsystem == "com.acoseac.bridge"' --last 1h</code></td></tr>
       <tr><td>Linux (systemd)</td><td><code>journalctl --user -u 1-bit-bridge -f</code></td></tr>
@@ -146,6 +148,7 @@
     <p>The bridge runs cleanly under Docker, on a Synology / TrueNAS, or on any headless Linux box. Most config knobs that <code>bridge.yaml</code> exposes have an environment-variable equivalent for cases where editing YAML inside a container is awkward.</p>
     <p><strong>Precedence.</strong> Env wins over YAML; YAML wins over hardcoded defaults.</p>
     <table>
+      <caption>Environment-variable overrides for headless / container deployments, mapped to their <code>bridge.yaml</code> keys</caption>
       <tr><th>Env var</th><th>YAML key</th><th>Effect</th></tr>
       <tr><td><code>BRIDGE_LISTEN_ADDRESS</code></td><td><code>listenAddress</code></td><td>HTTPS listener (default <code>:7788</code>)</td></tr>
       <tr><td><code>BRIDGE_ADMIN_ADDRESS</code></td><td><code>adminAddress</code></td><td>Admin console listener (default <code>127.0.0.1:7789</code>; bound loopback by default)</td></tr>
