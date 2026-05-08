@@ -42,6 +42,9 @@ func TestUnicodeLowerIndexIsSelected(t *testing.T) {
 			found = true
 		}
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows iteration error: %v", err)
+	}
 	if !found {
 		t.Errorf("query plan did not reference idx_tracks_path_unicode_lower — falling back to full table scan, which is the regression this index exists to prevent")
 	}
@@ -84,6 +87,9 @@ func TestUnicodeLowerVariantIndexIsSelected(t *testing.T) {
 		if strings.Contains(detail, "idx_track_variants_source_path_unicode_lower") {
 			found = true
 		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows iteration error: %v", err)
 	}
 	if !found {
 		t.Errorf("query plan did not reference idx_track_variants_source_path_unicode_lower — falling back to full table scan, which is the regression this index exists to prevent")

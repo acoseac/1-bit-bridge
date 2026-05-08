@@ -9,21 +9,6 @@ import (
 	sqlite "modernc.org/sqlite"
 )
 
-// unicodeLowerCaser is the language-neutral Unicode lowercasing
-// transformer fed into the SQLite-side `unicode_lower(...)` scalar.
-// `language.Und` keeps the fold language-agnostic — same semantics
-// iOS gets from `String.lowercased()` with no locale set, which is
-// what the iOS client uses to normalise paths before sending them
-// to the bridge. Locale-specific transforms (Turkish dotted-I,
-// Lithuanian decompositions) would diverge from iOS and re-introduce
-// the same miss-class this function exists to fix.
-//
-// The Caser type is documented as safe for concurrent use and
-// allocation-cheap on subsequent calls; instantiating it once at
-// package init avoids the per-call allocation cost in tight LOWER-
-// fallback loops.
-var unicodeLowerCaser = cases.Lower(language.Und)
-
 // unicodeLowerScalar is the SQL-side `unicode_lower(text)` function
 // body. Mirrors SQLite's built-in `LOWER()` calling convention:
 // nil → nil pass-through, non-text → nil (LOWER's documented
@@ -36,23 +21,43 @@ var unicodeLowerCaser = cases.Lower(language.Und)
 // same hash for the same input across `INSERT` and `SELECT`. Without
 // the determinism flag, an index built on this expression would be
 // silently bypassed at query time.
+//
+// `language.Und` keeps the fold language-agnostic — same semantics
+// iOS gets from `String.lowercased()` with no locale set, which is
+// what the iOS client uses to normalise paths before sending them
+// to the bridge. Locale-specific transforms (Turkish dotted-I,
+// Lithuanian decompositions) would diverge from iOS and re-introduce
+// the same miss-class this function exists to fix.
+//
+// The Caser is constructed PER CALL, not cached at package init.
+// `cases.Lower()` returns a stateful Caser that the docs explicitly
+// warn must not be shared across goroutines (only `cases.Fold()`
+// carries the documented concurrent-safety guarantee — which we
+// can't use because Fold semantics differ from iOS's `lowercased()`).
+// Under `database/sql`'s default connection pool the SQLite scalar
+// runs on whichever goroutine is driving the connection, so a
+// shared Caser would land concurrent calls on the same instance.
+// Per-call construction is a cheap struct allocation — acceptable
+// for the path-lookup hot path and unambiguously safe per the
+// library's documented contract. (Greptile P1 on PR #182.)
 func unicodeLowerScalar(_ *sqlite.FunctionContext, args []driver.Value) (driver.Value, error) {
 	if len(args) != 1 {
 		return nil, fmt.Errorf("unicode_lower: expected 1 argument, got %d", len(args))
 	}
+	caser := cases.Lower(language.Und)
 	switch v := args[0].(type) {
 	case nil:
 		// SQLite NULL → NULL, matching LOWER()'s pass-through.
 		return nil, nil
 	case string:
-		return unicodeLowerCaser.String(v), nil
+		return caser.String(v), nil
 	case []byte:
 		// LOWER() accepts text that arrived as a BLOB and returns
 		// it lowered; mirror that for compat. The folded form is
 		// returned as a string (driver.Value supports both, and
 		// string is the canonical representation for the indexed
 		// expression `unicode_lower(path)` on a TEXT column).
-		return unicodeLowerCaser.String(string(v)), nil
+		return caser.String(string(v)), nil
 	default:
 		// Non-text input → nil, matching SQLite LOWER()'s
 		// behaviour on numeric / blob inputs that aren't text-
@@ -71,8 +76,10 @@ func unicodeLowerScalar(_ *sqlite.FunctionContext, args []driver.Value) (driver.
 // **Why init() is the right home**: modernc.org/sqlite (v1.50.0) does
 // not expose a per-connection ConnectHook (mattn/go-sqlite3 does, but
 // that driver isn't pure-Go). The driver-level registration is the
-// idiomatic path; the function is stateless and Caser is concurrent-
-// safe, so global registration carries no race or lifecycle risk.
+// idiomatic path; the registered scalar function is stateless (the
+// per-call Caser is constructed inside the function body, not
+// captured), so global registration carries no race or lifecycle
+// risk.
 //
 // **Operator note**: a plain `sqlite3 bridge.db` CLI session does NOT
 // see `unicode_lower(...)` — the function only exists inside processes
