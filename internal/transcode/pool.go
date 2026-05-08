@@ -347,6 +347,21 @@ func (p *Pool) processJob(job poolJob) {
 		}
 		if !released {
 			p.releaseDedup(job.dedup)
+			// Match the synchronous error branches' shape: fire
+			// notifyStateChangeFn AFTER releaseDedup so the published
+			// snapshot reflects the final state (job out of inflight).
+			// Without this, the panic-recovery path would silently
+			// skip the notification — operators would see failedCnt
+			// change in the next tick but SSE clients (admin UI,
+			// iOS) wouldn't get an immediate push update like every
+			// other terminal path produces. Skipped on graceful
+			// shutdown to match the runner-error branch's gate.
+			// (CodeRabbit + Gemini + Greptile concurring on PR #183.)
+			if !p.closed.Load() {
+				if fire := p.notifyStateChangeFn(); fire != nil {
+					go fire()
+				}
+			}
 		}
 	}()
 

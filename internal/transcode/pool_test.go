@@ -464,6 +464,15 @@ func TestPoolPanicInRunnerReleasesDedup(t *testing.T) {
 	p := NewPool(store, 1, 4)
 	t.Cleanup(p.Stop)
 
+	// Track onStateChange fires so we can assert the panic-recovery
+	// path fires the callback like every other terminal branch
+	// (otherwise SSE clients wouldn't see the failure tick until the
+	// next unrelated event lands).
+	var fires atomic.Int64
+	p.SetOnStateChange(func() {
+		fires.Add(1)
+	})
+
 	panicked := make(chan struct{})
 	survivorRan := make(chan struct{})
 	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
@@ -553,6 +562,26 @@ func TestPoolPanicInRunnerReleasesDedup(t *testing.T) {
 	}
 	if got := p.Stats().Inflight; got != 0 {
 		t.Errorf("expected Stats.Inflight == 0 after panic + survivor, got %d (a job slot leaked)", got)
+	}
+
+	// Assert the panic-recovery defer fires the onStateChange
+	// callback alongside the synchronous error branches. Expected
+	// fires: panic-job enqueue + panic-recovery + survivor-job
+	// enqueue + survivor runner-error = 4. We loosen to ≥ 4 so a
+	// future addition of an extra fire doesn't trip a brittle
+	// equality check; the load-bearing assertion is "the panic
+	// branch did NOT silently skip the fire" — without the fix
+	// fires would land at 3 (one fire missing from the panic
+	// branch).
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if fires.Load() >= 4 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := fires.Load(); got < 4 {
+		t.Errorf("onStateChange fires = %d, want ≥ 4 (panic-enqueue + panic-recovery + survivor-enqueue + survivor-fail)", got)
 	}
 }
 
