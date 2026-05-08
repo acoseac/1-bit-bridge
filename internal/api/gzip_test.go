@@ -65,6 +65,43 @@ func TestAcceptsGzip(t *testing.T) {
 	}
 }
 
+// TestAcceptsGzipHonorsMultipleHeaderLines pins the contract that
+// `acceptsGzip` reads ALL `Accept-Encoding` header lines, not just
+// the first. Per RFC 9110 §5.3, a client may send multiple lines
+// with the same field name and the recipient must treat them as
+// equivalent to a single comma-joined field. `Header.Get` returns
+// only the first; `Header.Values` returns all. CodeRabbit on PR #181.
+func TestAcceptsGzipHonorsMultipleHeaderLines(t *testing.T) {
+	cases := []struct {
+		name   string
+		values []string
+		want   bool
+	}{
+		// Two lines: wildcard accept + explicit gzip refuse. The
+		// explicit refusal must win; pre-fix `Header.Get` only saw
+		// the wildcard line and returned true.
+		{"wildcard then explicit refuse", []string{"*", "gzip;q=0"}, false},
+		// Two lines reversed: explicit refuse + wildcard accept.
+		// Same outcome.
+		{"explicit refuse then wildcard", []string{"gzip;q=0", "*"}, false},
+		// Two lines: identity + gzip. Either presence accepts.
+		{"identity then gzip", []string{"identity", "gzip"}, true},
+		// Single line shape still works (control case).
+		{"single combined line", []string{"*, gzip;q=0"}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r, _ := http.NewRequest("GET", "/", nil)
+			for _, v := range c.values {
+				r.Header.Add("Accept-Encoding", v)
+			}
+			if got := acceptsGzip(r); got != c.want {
+				t.Errorf("acceptsGzip(%v) = %v, want %v", c.values, got, c.want)
+			}
+		})
+	}
+}
+
 // fakeStreamingProvider writes a fixed JSON body to the manifest writer
 // — used to assert gzip wrapping of the streaming-manifest path.
 type fakeStreamingProvider struct {
@@ -123,13 +160,19 @@ func TestManifestEmitsGzipWhenAcceptEncodingGzip(t *testing.T) {
 	if got := resp.Header.Get("Vary"); got != "Accept-Encoding" {
 		t.Errorf("Vary = %q, want Accept-Encoding", got)
 	}
-	raw, _ := io.ReadAll(resp.Body)
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read raw body: %v (raw len %d)", err, len(raw))
+	}
 	gr, err := gzip.NewReader(bytes.NewReader(raw))
 	if err != nil {
 		t.Fatalf("gzip.NewReader: %v (raw len %d)", err, len(raw))
 	}
 	defer gr.Close()
-	got, _ := io.ReadAll(gr)
+	got, err := io.ReadAll(gr)
+	if err != nil {
+		t.Fatalf("decompress body: %v", err)
+	}
 	if !bytes.Equal(got, want) {
 		t.Errorf("decompressed body mismatch:\ngot:  %q\nwant: %q", got, want)
 	}

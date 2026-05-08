@@ -27,7 +27,16 @@ import (
 // token itself isn't refused — same conservative default any HTTP
 // proxy applies.
 func acceptsGzip(r *http.Request) bool {
-	ae := r.Header.Get("Accept-Encoding")
+	// Header.Values returns ALL Accept-Encoding header lines, not
+	// just the first. Per RFC 9110 §5.3, multiple header fields with
+	// the same name are equivalent to a single comma-joined field —
+	// a client sending separate `Accept-Encoding: *` and
+	// `Accept-Encoding: gzip;q=0` lines must have the explicit
+	// refusal honored. `Header.Get` would only see the first line
+	// and silently ignore the second. Joining with "," restores the
+	// equivalence so the existing comma-tokenizer below covers both
+	// shapes uniformly. (CodeRabbit on PR #181.)
+	ae := strings.Join(r.Header.Values("Accept-Encoding"), ",")
 	if ae == "" {
 		return false
 	}
