@@ -13,7 +13,12 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
+
+// pagePtrTo returns a pointer to its argument; helper so tests can
+// declare `pagePtrTo("cursor-1")` for the *string fields on Manifest.
+func pagePtrTo[T any](v T) *T { return &v }
 
 // withManifest spins up an httptest server whose /v1/manifest is backed by
 // the provided fakeManifestProvider.
@@ -156,12 +161,9 @@ func TestHealthReflectsScanState(t *testing.T) {
 // parsing so a refactor can't silently regress it.
 func TestManifestPaginatedRoutesToBuildManifestPage(t *testing.T) {
 	mp := &fakeManifestProvider{
-		pageBody: map[string]any{
-			"version":    1,
-			"tracks":     []any{},
-			"folders":    []any{},
-			"total":      0,
-			"nextCursor": nil,
+		pageBody: &manifest.Manifest{
+			Version: 1,
+			Total:   pagePtrTo(0),
 		},
 	}
 	hs, tok := withManifest(t, mp)
@@ -189,7 +191,7 @@ func TestManifestPaginatedRoutesToBuildManifestPage(t *testing.T) {
 // a smaller page) since exceeding the server's preferred ceiling
 // isn't a user-facing fault.
 func TestManifestPaginatedCapsHugeLimit(t *testing.T) {
-	mp := &fakeManifestProvider{pageBody: map[string]any{"tracks": []any{}}}
+	mp := &fakeManifestProvider{pageBody: &manifest.Manifest{}}
 	hs, tok := withManifest(t, mp)
 	req, _ := http.NewRequest("GET", hs.URL+"/v1/manifest?limit=10000000", nil)
 	req.Header.Set("Authorization", "Bearer "+tok)
@@ -277,9 +279,13 @@ func TestManifestStreamFailureBeforeFirstByteReturns500(t *testing.T) {
 // hits BuildManifest (not BuildManifestPage). Back-compat guard for
 // v1.0 iOS clients.
 func TestManifestLegacyPathUntouched(t *testing.T) {
+	// Sentinel total on the paginated body; if the legacy path
+	// accidentally fell through to the paginated builder, the
+	// response would carry total=42 instead of just the body's
+	// version=1.
 	mp := &fakeManifestProvider{
 		body:     map[string]any{"version": 1, "tracks": []any{}},
-		pageBody: map[string]any{"sentinel": "should-not-be-used"},
+		pageBody: &manifest.Manifest{Total: pagePtrTo(42)},
 	}
 	hs, tok := withManifest(t, mp)
 	req, _ := http.NewRequest("GET", hs.URL+"/v1/manifest", nil)
@@ -291,8 +297,8 @@ func TestManifestLegacyPathUntouched(t *testing.T) {
 	defer resp.Body.Close()
 	var got map[string]any
 	json.NewDecoder(resp.Body).Decode(&got)
-	if _, isPageBody := got["sentinel"]; isPageBody {
-		t.Errorf("legacy path hit paginated builder — back-compat broken")
+	if total, hasTotal := got["total"]; hasTotal {
+		t.Errorf("legacy path hit paginated builder — back-compat broken (total=%v)", total)
 	}
 	if mp.lastPageLimit != 0 {
 		t.Errorf("paginated builder was called (limit=%d)", mp.lastPageLimit)

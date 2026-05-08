@@ -38,9 +38,23 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/pairing"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
+
+// ManifestPage is the typed JSON-serializable shape returned by
+// `BuildManifestPage`. Aliased to `manifest.Manifest` so the wire
+// shape stays defined in exactly one place; the alias keeps the
+// `api` package's interface contract type-safe without forcing
+// callers to learn about `internal/manifest`.
+//
+// The `internal/api → internal/manifest` import is unidirectional:
+// manifest never imports api (the existing `VariantLookup` /
+// `VariantRecord` mirror pattern at api.go:105 / provider.go:26 is
+// what defends the OTHER direction; `Manifest` doesn't need a
+// mirror because nothing in manifest reaches into api for it).
+type ManifestPage = manifest.Manifest
 
 var logger = logging.Component("api")
 
@@ -148,7 +162,7 @@ type ManifestProvider interface {
 	// `NextCursor` is nil. Returns a fully-materialised value because
 	// per-page output is bounded by the page-size cap (5000) and the
 	// JSON writer can buffer the whole page without OOM risk.
-	BuildManifestPage(cursor string, limit int) (any, error)
+	BuildManifestPage(cursor string, limit int) (*ManifestPage, error)
 	IsScanning() bool
 	LastFullScan() time.Time
 	TracksIndexed() int
