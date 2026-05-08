@@ -322,10 +322,54 @@ func (p *Pool) workerLoop() {
 // the new per-job timeout branch (logged distinctly so operators
 // can tell a hung-sox kill from an internal sox failure).
 func (p *Pool) processJob(job poolJob) {
+	// Panic safety: a panic in p.runner (sox subprocess plumbing) or
+	// p.store.UpsertVariant (SQLite write) would otherwise (a) leak
+	// the (source, variant) dedup slot for the lifetime of the
+	// process — effectively blacklisting that variant from re-
+	// scheduling until restart — AND (b) crash the worker goroutine,
+	// reducing pool capacity until restart. The recover here contains
+	// the panic to this single job; the `released` flag preserves
+	// PR #136's documented release-then-fire ordering on the normal
+	// paths (the deferred cleanup runs ONLY when a normal path didn't
+	// get a chance to release first). The recovered panic is logged
+	// + bumps `failedCnt` so it's observable in the pool stats and
+	// admin UI; the worker stays alive to handle the next job.
+	released := false
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error("pool: recovered panic in job",
+				"source", job.spec.SourceLibraryRel,
+				"variantID", job.spec.VariantID(),
+				"panic", r)
+			if !p.closed.Load() {
+				p.failedCnt.Add(1)
+			}
+		}
+		if !released {
+			p.releaseDedup(job.dedup)
+			// Match the synchronous error branches' shape: fire
+			// notifyStateChangeFn AFTER releaseDedup so the published
+			// snapshot reflects the final state (job out of inflight).
+			// Without this, the panic-recovery path would silently
+			// skip the notification — operators would see failedCnt
+			// change in the next tick but SSE clients (admin UI,
+			// iOS) wouldn't get an immediate push update like every
+			// other terminal path produces. Skipped on graceful
+			// shutdown to match the runner-error branch's gate.
+			// (CodeRabbit + Gemini + Greptile concurring on PR #183.)
+			if !p.closed.Load() {
+				if fire := p.notifyStateChangeFn(); fire != nil {
+					go fire()
+				}
+			}
+		}
+	}()
+
 	// Cooperative stop check before spending CPU on a sox
 	// invocation we'll just kill.
 	if p.closed.Load() {
 		p.releaseDedup(job.dedup)
+		released = true
 		return
 	}
 
@@ -351,6 +395,7 @@ func (p *Pool) processJob(job poolJob) {
 			}
 		}
 		p.releaseDedup(job.dedup)
+		released = true
 		// Fire AFTER releaseDedup so the published snapshot
 		// reflects the final state (job out of inflight) —
 		// CodeRabbit on PR #136 caught the inconsistency vs
@@ -385,6 +430,7 @@ func (p *Pool) processJob(job poolJob) {
 		// retry from a clean slate succeeds.
 		_ = os.Remove(row.SidecarPath)
 		p.releaseDedup(job.dedup)
+		released = true
 		// Async fire so the worker isn't stalled by the
 		// publisher's CountVariants DB query — Gemini high-
 		// severity review on PR #136. Caller never blocks on
@@ -396,6 +442,7 @@ func (p *Pool) processJob(job poolJob) {
 	}
 	p.doneCnt.Add(1)
 	p.releaseDedup(job.dedup)
+	released = true
 	if fire := p.notifyStateChangeFn(); fire != nil {
 		go fire()
 	}
