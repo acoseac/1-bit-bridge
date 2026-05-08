@@ -120,7 +120,7 @@ func (f *fakeStreamingProvider) WriteManifest(ctx context.Context, w io.Writer, 
 	_, err := w.Write(f.body)
 	return err
 }
-func (f *fakeStreamingProvider) BuildManifestPage(cursor string, limit int) (any, error) {
+func (f *fakeStreamingProvider) BuildManifestPage(cursor string, limit int) (*ManifestPage, error) {
 	return nil, nil
 }
 func (f *fakeStreamingProvider) IsScanning() bool        { return false }
