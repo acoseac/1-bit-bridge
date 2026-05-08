@@ -154,7 +154,7 @@
       <tr><td><code>BRIDGE_LIBRARY_ROOTS</code></td><td><code>libraryRoots</code></td><td>Colon-separated list of music-library folders (e.g. <code>/music:/audiobooks</code>)</td></tr>
       <tr><td><code>TS_AUTHKEY</code></td><td><code>tailscale.authKey</code></td><td>Pre-baked Tailscale auth key for unattended <code>tsnet</code> mode boot</td></tr>
     </table>
-    <p>For the full Docker recipe — multi-arch builds, docker-compose example, reverse-proxy notes for the admin console — see the <a href="docker.md">Docker deployment guide</a>.</p>
+    <p>For the full Docker recipe — multi-arch builds, docker-compose example, reverse-proxy notes for the admin console — see the <a href="https://github.com/acoseac/1-bit-bridge/blob/main/docs/docker.md">Docker deployment guide on GitHub</a>.</p>
 
     <h2 id="protocol">Protocol</h2>
     <p>Every endpoint, request shape, and error code lives in <a href="https://github.com/acoseac/1-bit-bridge/blob/main/PROTOCOL.md">PROTOCOL.md</a>. The wire-protocol version is currently <strong>1</strong>; additive fields ship without a version bump, breaking changes don't. The iOS app advertises support for protocol versions in the <code>X-Bridge-Protocol</code> header and refuses to talk to a server it doesn't understand.</p>
