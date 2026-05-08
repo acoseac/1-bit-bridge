@@ -56,7 +56,16 @@ func isSupervisedForOS() bool {
 	// falsely promote any unrelated child to "supervised". Socket
 	// activation implies the same Restart=on-failure semantics as a
 	// service-unit launch, so it correctly answers "yes, supervised."
-	if os.Getenv("LISTEN_FDS") != "" && os.Getenv("LISTEN_PID") == strconv.Itoa(os.Getpid()) {
+	//
+	// LISTEN_FDS=0 is the documented "no fds inherited" sentinel
+	// (sd_listen_fds(3): "the function returns the number of file
+	// descriptors passed … if no file descriptors have been passed,
+	// 0 is returned"). Same semantic as the XPC_SERVICE_NAME=0
+	// sentinel above: a value is set but it announces "you are NOT
+	// socket-activated." Parse with strconv and require fds > 0 to
+	// reject the false-positive case.
+	if fds, err := strconv.Atoi(os.Getenv("LISTEN_FDS")); err == nil && fds > 0 &&
+		os.Getenv("LISTEN_PID") == strconv.Itoa(os.Getpid()) {
 		return true
 	}
 	return false

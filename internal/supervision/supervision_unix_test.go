@@ -35,6 +35,13 @@ func TestIsSupervised_envVarMatrix(t *testing.T) {
 	})
 
 	myPID := strconv.Itoa(os.Getpid())
+	// Derive a non-self PID from os.Getppid() — guaranteed != myPID
+	// for any non-init process (and the test harness always has a
+	// parent). Beats a hardcoded literal like "99999" which can in
+	// principle collide with the test runner's actual PID on a busy
+	// system; the collision would silently flip the env-leak guard
+	// case to passing-for-the-wrong-reason.
+	otherPID := strconv.Itoa(os.Getppid())
 
 	cases := []struct {
 		name      string
@@ -82,7 +89,17 @@ func TestIsSupervised_envVarMatrix(t *testing.T) {
 		// Env-leak guard: parent was socket-activated, exec()'d us,
 		// LISTEN_PID stayed pointing at the parent. Promoting us to
 		// supervised would lie to the admin UI about auto-relaunch.
-		{"LISTEN_FDS set but LISTEN_PID is parent", "", "", "3", "99999", false},
+		{"LISTEN_FDS set but LISTEN_PID is parent", "", "", "3", otherPID, false},
+		// sd_listen_fds(3) sentinel: LISTEN_FDS=0 means "no fds
+		// passed" — same shape as the XPC=0 launchd sentinel. Even
+		// with a matching LISTEN_PID, the process was not actually
+		// socket-activated and the admin UI must NOT promise
+		// auto-relaunch.
+		{"LISTEN_FDS zero sentinel (matching PID)", "", "", "0", myPID, false},
+		// Non-numeric LISTEN_FDS is malformed per spec; treat as
+		// unsupervised. Real systemd always sets a small positive
+		// integer.
+		{"LISTEN_FDS non-numeric (matching PID)", "", "", "garbage", myPID, false},
 		// LISTEN_FDS without LISTEN_PID is malformed per spec —
 		// treat conservatively (false). Real systemd always sets
 		// the pair together.
