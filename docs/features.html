@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Features — 1-bit-bridge</title>
+  <meta name="description" content="Feature deep-dive for 1-bit-bridge: pre-built library manifest, admin-approval pairing, Tailscale integration, optional PCM upscaling, opt-in auto-updates, automatic backups, Bonjour discovery, admin console tour, container-friendly env-var configuration.">
+  <meta name="theme-color" content="#0a84ff">
+  <meta property="og:type" content="article">
+  <meta property="og:url" content="https://acoseac.github.io/1-bit-bridge/features.html">
+  <meta property="og:title" content="Features — 1-bit-bridge">
+  <meta property="og:description" content="Detailed reference for every 1-bit-bridge capability — manifest, pairing models, Tailscale modes, upscale, updates, backups, admin console.">
+  <link rel="canonical" href="https://acoseac.github.io/1-bit-bridge/features.html">
+  <link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+  <nav class="site-nav" aria-label="Site">
+    <a class="brand" href="./">1-bit-bridge</a>
+    <a href="setup.html">Setup</a>
+    <a href="features.html" aria-current="page">Features</a>
+    <a href="troubleshooting.html">Troubleshooting</a>
+    <a href="privacy.html">Privacy</a>
+    <a href="https://github.com/acoseac/1-bit-bridge">GitHub</a>
+  </nav>
+  <main class="wide">
+    <a class="crumb" href="./">← 1-bit-bridge</a>
+    <h1>Features</h1>
+    <p class="lede">A reference rundown of what the bridge does and the design choices behind each piece. If you're new here, start with the <a href="setup.html">setup walkthrough</a> first — that gets you a working install in ten minutes. This page is for once you know your way around.</p>
+
+    <div class="grid-2">
+      <div class="card"><h3><a href="#manifest">Library manifest</a></h3><p>SQLite-backed index served in one paginated request — replaces SMB walks.</p></div>
+      <div class="card"><h3><a href="#pairing">Pairing</a></h3><p>Admin-approval (default) and manual-token flows.</p></div>
+      <div class="card"><h3><a href="#tailscale">Tailscale</a></h3><p>Three modes: <code>cli</code>, <code>tsnet</code>, <code>disabled</code>.</p></div>
+      <div class="card"><h3><a href="#upscale">Upscale variants</a></h3><p>Optional offline PCM resample for high-end DACs.</p></div>
+      <div class="card"><h3><a href="#updates">Updates</a></h3><p>Opt-in auto-install with quiet hours.</p></div>
+      <div class="card"><h3><a href="#backups">Backups</a></h3><p>Dated snapshots, CLI-only restore.</p></div>
+      <div class="card"><h3><a href="#discovery">Bonjour discovery</a></h3><p>Auto-discovery on the LAN.</p></div>
+      <div class="card"><h3><a href="#admin">Admin console</a></h3><p>Loopback-only web UI for everything operational.</p></div>
+      <div class="card"><h3><a href="#logs">Logs</a></h3><p>Where they live, what's logged, what's deliberately not.</p></div>
+      <div class="card"><h3><a href="#headless">Container & headless</a></h3><p>Env-var overrides for Docker / NAS deployments.</p></div>
+    </div>
+
+    <h2 id="manifest">Library manifest</h2>
+    <p>The bridge keeps a SQLite-backed index of your library — every track row carries the file path, sample rate, bits per sample, DSD flag, ReplayGain, and (when enrichment finds them) MusicBrainz IDs for release / artist. The iOS app fetches the whole library in one paginated <code>GET /v1/manifest</code> call, or a <code>?since=&lt;mtime&gt;</code> delta when it already has a baseline.</p>
+    <p>This replaces the iOS app's two-phase SMB scan (walk + tag-extract). On a 50,000-track library over Tailscale, the difference is a few hundred milliseconds via the bridge versus several minutes via SMB.</p>
+    <p>Bytes are never transcoded. <code>FLAC</code>, <code>ALAC</code>, <code>WAV</code>, <code>AIFF</code>, <code>MP3</code>, <code>AAC</code>, <code>DSF</code>, <code>DFF</code> stream as-is. The iOS app still pre-caches the full <code>.dsf</code> before playback so the DAC's DoP lock isn't at risk.</p>
+
+    <h2 id="pairing">Pairing models</h2>
+    <p>Two flows are supported. They produce identical bearer tokens; the difference is who initiates and who approves.</p>
+
+    <h3>Admin-approval pairing (recommended)</h3>
+    <p>The iOS app asks the bridge for permission, the operator approves it on the admin console. This is the default in iOS 1-bit 1.2 and lets users add their own devices without the operator having to mint a token in advance.</p>
+    <ol>
+      <li>iOS app submits a request to <code>POST /v1/pairing/requests</code>. The bridge holds it in memory with a 6-digit verification code, the device-chosen display name, and the iOS app's self-reported version.</li>
+      <li>Admin console shows a <em>Pending pair request</em> banner on every page. Operator clicks in, verifies the 6-digit code matches what the user sees on their phone, gives the device a name, and approves.</li>
+      <li>Bridge mints a long-lived bearer token, hands it to the iOS app via the polled <code>GET /v1/pairing/{requestId}</code>, and discards the pending-request record.</li>
+    </ol>
+    <p>The verification code defends against a same-network attacker — only the device with the matching code is talking to the bridge.</p>
+
+    <h3>Manual token (QR / paste)</h3>
+    <p>The legacy flow, still supported. Operator generates a token in the admin console's Devices tab; iOS app scans the resulting QR code or pastes the three fields (URL, token, TLS fingerprint) by hand.</p>
+    <p>Use this when you're configuring a phone for someone else, or when admin-approval is unavailable (e.g. headless server with no convenient browser, paired iOS device is older than 1.2).</p>
+
+    <h3>What's stored, what isn't</h3>
+    <p>Per paired device, the bridge stores: a 12-hex ID, a friendly name, the SHA-256 hash of the bearer token (never the raw token), creation and last-used timestamps, and the most recent <code>X-Client-Version</code> header value. TLS fingerprints are pinned <em>by the iOS app</em>, not by the bridge — the bridge has no idea what cert your phone trusts. See <a href="privacy.html">privacy</a> for the full list.</p>
+
+    <h2 id="tailscale">Tailscale integration</h2>
+    <p>If you want to reach your library from outside your home network, <a href="https://tailscale.com/">Tailscale</a> is the supported answer. The bridge offers three modes via <code>tailscale.mode</code> in <code>bridge.yaml</code>.</p>
+    <dl>
+      <dt><code>tsnet</code> — embedded tailnet node (recommended for new installs)</dt>
+      <dd>The bridge runs its own tailnet node in-process. No system Tailscale install required, no <code>tailscale</code> CLI on <code>$PATH</code>, and Let's Encrypt cert renewal happens in-process. Authenticate once with <code>./bridge tsnet auth</code> on first run, or set <code>tailscale.authKey</code> in <code>bridge.yaml</code> for unattended deployments.</dd>
+      <dt><code>cli</code> — delegate to system Tailscale</dt>
+      <dd>The bridge shells out to the host's installed <code>tailscale</code> binary for status detection and Let's Encrypt cert provisioning on <code>*.ts.net</code> connections. Use this if you already run Tailscale on the host and want one set of credentials. macOS users: see the <a href="troubleshooting.html#tailscale-mac">sandboxed-CLI gotcha</a> in troubleshooting.</dd>
+      <dt><code>disabled</code> — turn it off</dt>
+      <dd>LAN-only deployment. Both the CLI auto-pilot and the embedded node are skipped. The admin tile renders a one-line explanation so anyone who flipped to <code>disabled</code> by accident can recover.</dd>
+    </dl>
+    <p>Mode changes require a bridge restart. Switching between modes never invalidates pairings — the iOS app pins the bridge's certificate fingerprint, which doesn't depend on the transport mode.</p>
+
+    <h2 id="upscale">Upscale variants <span style="font-weight: normal; color: var(--fg-muted); font-size: 0.85em;">(v1.2, opt-in)</span></h2>
+    <p><strong>What it does.</strong> The bridge can produce upscaled PCM "variants" of your tracks — typically 96 kHz / 24-bit FLAC sidecars derived from a 44.1 kHz / 16-bit source — using the local <a href="https://sox.sourceforge.net">sox</a> binary. The iOS app surfaces a wand icon next to each eligible track; tap to switch the playback source between the original and the upscaled variant.</p>
+    <p><strong>Who it's for.</strong> Operators with a high-end DAC that responds well to upsampled material, and disk headroom for the additional <code>.flac</code> sidecars. Variants are stored under <code>transcoded/</code> in the bridge's data directory; figure roughly 3× the source size per variant.</p>
+    <p><strong>Off by default.</strong> Even on v1.2 bridges, no variants exist until the operator opts in by setting <code>upscale.enabled: true</code> in <code>bridge.yaml</code> (or toggling the switch in the admin console's Settings tab) <em>and</em> a paired iOS device explicitly requests an upscale via the wand icon. Nothing happens silently in the background.</p>
+    <p><strong>How to enable it.</strong></p>
+    <ol>
+      <li>Install <code>sox</code>: <code>brew install sox</code> (macOS), <code>apt install sox libsox-fmt-flac</code> (Debian/Ubuntu), or download the official build from <a href="https://sourceforge.net/projects/sox/">sourceforge</a>. Verify with <code>sox --version</code>.</li>
+      <li>Open the admin console → <em>Settings</em> → <em>Upscale</em> and flip the toggle. Or set <code>upscale.enabled: true</code> in <code>bridge.yaml</code>.</li>
+      <li>On the iPhone, navigate to any FLAC / ALAC / WAV track. The wand icon appears on the Now Playing screen.</li>
+      <li>Long-press the wand → <em>Generate</em>. The bridge enqueues the job; processing is asynchronous (typically a few seconds per track on a modern CPU). Once ready, tap the wand to switch the playback source.</li>
+    </ol>
+    <p><strong>Bit-exact still applies.</strong> The bridge never transcodes silently. The original file is always available, untouched, alongside any variant. Switching playback sources is one tap on the wand icon. If you don't trust the upscaling, don't enable it — the rest of the bridge works exactly as before.</p>
+    <p><strong>Cleanup.</strong> Run <code>./bridge upscale --gc</code> to remove orphan variants whose source files are gone. Or revoke a single variant from the admin console's Library tab.</p>
+
+    <h2 id="updates">Updates</h2>
+    <p>The bridge polls <code>https://api.github.com/repos/acoseac/1-bit-bridge/releases/latest</code> every six hours and surfaces an <em>Update available</em> banner in the admin console when a newer release exists. The poll is unauthenticated, sends no device identifier, and sees no library statistics — just the standard GitHub API call any browser would make.</p>
+    <p><strong>Auto-install is opt-in.</strong> Enable it in Settings → Updates if you want the bridge to install patches automatically. When enabled:</p>
+    <ul>
+      <li><strong>Quiet hours.</strong> Set a daily window (e.g. 02:00–06:00) during which the bridge will refuse to restart, even if an update is ready. Live playback is never interrupted.</li>
+      <li><strong>Compatibility floor.</strong> Each release ships a <code>release-meta.json</code> sidecar declaring the minimum iOS app version it expects. The bridge refuses installs that would orphan a paired client on an older app, unless the operator forces it manually.</li>
+      <li><strong>Apple notarization (macOS) and SHA-256 verification.</strong> The auto-installer verifies code signature, Team ID, and asset checksum before swapping the binary. Atomic rename on success; rollback on failure.</li>
+    </ul>
+    <p>Manual install runs the same path: download from the admin console's Updates tab, verify, atomic swap, one-tap rollback if the new build doesn't behave.</p>
+
+    <h2 id="backups">Backups</h2>
+    <p>The bridge writes timestamped snapshots of its data directory under <code>backups/&lt;timestamp&gt;/</code>. Both manual (<em>Settings → Take snapshot now</em>) and automatic (configurable interval, configurable retention via <code>backup.maxKept</code>). Each snapshot contains the YAML config, the SQLite manifest, and the paired-device list — enough to restore a full working bridge.</p>
+    <p>Restore is a CLI operation:</p>
+    <pre><code>./bridge stop
+./bridge restore --snapshot &lt;timestamp&gt;
+./bridge start</code></pre>
+    <p>Kept off the web UI by design — accidentally clicking <em>restore</em> on a running bridge would replace the live library mid-stream. The CLI requires you to stop the bridge first, surfacing the implication.</p>
+
+    <h2 id="discovery">Bonjour discovery</h2>
+    <p>The bridge advertises itself on the LAN as <code>_onebit-bridge._tcp</code>. The iOS app picks it up via the <em>Discover on network</em> entry in the Add Bridge sheet — no manual URL entry, no fingerprint paste.</p>
+    <p>The TXT record carries:</p>
+    <ul>
+      <li><code>host</code> — the bridge's hostname (e.g. <code>media-server.local</code>)</li>
+      <li><code>port</code> — the HTTPS port (default <code>7788</code>)</li>
+      <li><code>name</code> — the operator-set library name</li>
+      <li><code>version</code> — the bridge's protocol version (currently <code>1</code>)</li>
+    </ul>
+    <p>If multiple bridges run on the same network, each one advertises independently and shows up as a separate entry in the iOS Discover list.</p>
+
+    <h2 id="admin">Admin console tour</h2>
+    <p>Loopback-only at <code>http://127.0.0.1:7789/</code>. No login, by deliberate design — anyone with a shell on this machine already has filesystem access to the token store, so adding a password would be theatre.</p>
+    <table>
+      <tr><th>Tab</th><th>Purpose</th><th>What's CLI-only</th></tr>
+      <tr><td>Dashboard</td><td>Server status, library size, paired devices, latest scan stats, certificate expiry, Tailscale state</td><td>—</td></tr>
+      <tr><td>Library</td><td>Add / remove root folders, full or delta re-scan, per-folder progress, orphan-variant cleanup</td><td>—</td></tr>
+      <tr><td>Devices</td><td>Pair (manual flow), approve admin-approval requests, rotate / revoke / rename tokens</td><td>—</td></tr>
+      <tr><td>Settings</td><td>Tailscale mode, upscale toggle, auto-update + quiet hours, backup schedule + retention, custom endpoints</td><td>TLS cert rotation (<code>bridge cert rotate</code>), config edits other than the exposed knobs</td></tr>
+      <tr><td>Updates</td><td>Manual update check, install / rollback, release notes link</td><td>—</td></tr>
+      <tr><td>Logs</td><td>Live tail of the service-manager log (last 500 lines)</td><td>Full log retention via your service manager</td></tr>
+    </table>
+    <p>Restore-from-snapshot is intentionally CLI-only (see <a href="#backups">Backups</a>). TLS cert rotation is intentionally CLI-only because the operator-restart step has no safe web equivalent — clicking <em>Rotate cert</em> in a browser would orphan the very session that issued the click.</p>
+
+    <h2 id="logs">Logs</h2>
+    <p>The bridge writes structured logs to your platform's service manager:</p>
+    <table>
+      <tr><th>Platform</th><th>How to view</th></tr>
+      <tr><td>macOS (launchd)</td><td><code>log show --predicate 'subsystem == "com.acoseac.bridge"' --last 1h</code></td></tr>
+      <tr><td>Linux (systemd)</td><td><code>journalctl --user -u 1-bit-bridge -f</code></td></tr>
+      <tr><td>Windows Service</td><td><code>%PROGRAMDATA%\1-bit-bridge\bridge.log</code></td></tr>
+      <tr><td>Manual run</td><td>stdout / stderr of the <code>bridge serve</code> process</td></tr>
+    </table>
+    <p><strong>What's deliberately not logged:</strong> bearer tokens (raw or hashed), client IP addresses, absolute filesystem paths, full HTTP request bodies, and contents of MusicBrainz / Deezer / iTunes lookups.</p>
+    <p><strong>What is logged in error paths:</strong> library-relative paths of files that failed a scan / upscale / read — e.g. <code>music/Diana Krall/Live in Paris/01.flac</code>. These appear only on errors so the operator can act on the failure. The path is library-relative (no <code>/Users/...</code> prefix), but it does contain artist / album / track names by typical folder layout. If you handle these logs, treat them with the same care as the library metadata itself. See <a href="privacy.html#logs">privacy → logs</a> for the full breakdown.</p>
+
+    <h2 id="headless">Container & headless deployments</h2>
+    <p>The bridge runs cleanly under Docker, on a Synology / TrueNAS, or on any headless Linux box. Most config knobs that <code>bridge.yaml</code> exposes have an environment-variable equivalent for cases where editing YAML inside a container is awkward.</p>
+    <p><strong>Precedence.</strong> Env wins over YAML; YAML wins over hardcoded defaults.</p>
+    <table>
+      <tr><th>Env var</th><th>YAML key</th><th>Effect</th></tr>
+      <tr><td><code>BRIDGE_LISTEN_ADDRESS</code></td><td><code>listenAddress</code></td><td>HTTPS listener (default <code>:7788</code>)</td></tr>
+      <tr><td><code>BRIDGE_ADMIN_ADDRESS</code></td><td><code>adminAddress</code></td><td>Admin console listener (default <code>127.0.0.1:7789</code>; bound loopback by default)</td></tr>
+      <tr><td><code>BRIDGE_DATA_DIR</code></td><td><code>dataDir</code></td><td>Where config, manifest, tokens, artwork, backups live</td></tr>
+      <tr><td><code>BRIDGE_LIBRARY_NAME</code></td><td><code>libraryName</code></td><td>Display name shown in the iOS app's Sources list</td></tr>
+      <tr><td><code>BRIDGE_LIBRARY_ROOTS</code></td><td><code>libraryRoots</code></td><td>Colon-separated list of music-library folders (e.g. <code>/music:/audiobooks</code>)</td></tr>
+      <tr><td><code>TS_AUTHKEY</code></td><td><code>tailscale.authKey</code></td><td>Pre-baked Tailscale auth key for unattended <code>tsnet</code> mode boot</td></tr>
+    </table>
+    <p>For the full Docker recipe — multi-arch builds, docker-compose example, reverse-proxy notes for the admin console — see the <a href="docker.md">Docker deployment guide</a>.</p>
+
+    <h2 id="protocol">Protocol</h2>
+    <p>Every endpoint, request shape, and error code lives in <a href="https://github.com/acoseac/1-bit-bridge/blob/main/PROTOCOL.md">PROTOCOL.md</a>. The wire-protocol version is currently <strong>1</strong>; additive fields ship without a version bump, breaking changes don't. The iOS app advertises support for protocol versions in the <code>X-Bridge-Protocol</code> header and refuses to talk to a server it doesn't understand.</p>
+
+    <footer>
+      <div>© 2026 Arsenie Coseac · MIT License</div>
+      <div><a href="https://github.com/acoseac/1-bit-bridge">Source</a> · <a href="https://apps.apple.com/us/app/1-bit/id6762529497">iOS app</a> · <a href="privacy.html">Privacy</a></div>
+    </footer>
+  </main>
+</body>
+</html>
