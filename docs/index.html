@@ -61,186 +61,90 @@
     ]
   }
   </script>
-  <style>
-    :root {
-      --fg: #1c1c1e;
-      --fg-muted: #6b6b6f;
-      --bg: #ffffff;
-      --bg-soft: #f5f5f7;
-      --accent: #0a84ff;
-      --border: #e3e3e8;
-      --code-bg: #1c1c1e;
-      --code-fg: #f5f5f7;
-    }
-    @media (prefers-color-scheme: dark) {
-      :root {
-        --fg: #f5f5f7;
-        --fg-muted: #a1a1a6;
-        --bg: #0a0a0c;
-        --bg-soft: #17171a;
-        --accent: #0a84ff;
-        --border: #2c2c2e;
-        --code-bg: #17171a;
-        --code-fg: #f5f5f7;
-      }
-    }
-    * { box-sizing: border-box; }
-    html { -webkit-text-size-adjust: 100%; }
-    body {
-      margin: 0;
-      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      font-size: 17px;
-      line-height: 1.55;
-      color: var(--fg);
-      background: var(--bg);
-      -webkit-font-smoothing: antialiased;
-    }
-    a { color: var(--accent); text-decoration: none; }
-    a:hover { text-decoration: underline; }
-    main { max-width: 720px; margin: 0 auto; padding: 80px 24px 96px; }
-    h1 {
-      font-size: 2.5rem;
-      line-height: 1.1;
-      letter-spacing: -0.02em;
-      margin: 0 0 12px;
-      font-weight: 700;
-    }
-    h2 {
-      font-size: 1.25rem;
-      margin: 48px 0 12px;
-      font-weight: 600;
-      letter-spacing: -0.01em;
-    }
-    .lede { color: var(--fg-muted); font-size: 1.1rem; margin: 0 0 32px; }
-    .hero-links { display: flex; flex-wrap: wrap; gap: 12px; margin: 24px 0 32px; }
-    .btn {
-      display: inline-block;
-      padding: 10px 18px;
-      border-radius: 10px;
-      font-weight: 500;
-      font-size: 0.95rem;
-      border: 1px solid var(--border);
-      color: var(--fg);
-      background: var(--bg-soft);
-      transition: background 0.15s, border-color 0.15s;
-    }
-    .btn:hover { background: var(--border); text-decoration: none; }
-    .btn-primary {
-      background: var(--accent);
-      color: #fff;
-      border-color: var(--accent);
-    }
-    .btn-primary:hover { background: #006edc; }
-    pre {
-      background: var(--code-bg);
-      color: var(--code-fg);
-      padding: 16px 18px;
-      border-radius: 10px;
-      overflow-x: auto;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-      font-size: 0.9rem;
-      line-height: 1.5;
-    }
-    code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 0.9em; }
-    p code, li code {
-      background: var(--bg-soft);
-      padding: 1px 6px;
-      border-radius: 4px;
-      border: 1px solid var(--border);
-    }
-    ul { padding-left: 24px; }
-    li { margin-bottom: 8px; }
-    .features li strong { font-weight: 600; }
-    .install-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; margin: 20px 0; }
-    .install-row h3 { font-size: 1rem; margin: 0 0 8px; }
-    footer {
-      margin-top: 64px;
-      padding-top: 32px;
-      border-top: 1px solid var(--border);
-      color: var(--fg-muted);
-      font-size: 0.88rem;
-      display: flex;
-      flex-wrap: wrap;
-      gap: 16px;
-      justify-content: space-between;
-    }
-    .note {
-      background: var(--bg-soft);
-      border: 1px solid var(--border);
-      padding: 12px 16px;
-      border-radius: 10px;
-      font-size: 0.92rem;
-      margin: 20px 0;
-    }
-  </style>
+  <link rel="stylesheet" href="assets/site.css">
 </head>
 <body>
+  <nav class="site-nav" aria-label="Site">
+    <a class="brand" href="./" aria-current="page">1-bit-bridge</a>
+    <a href="setup.html">Setup</a>
+    <a href="features.html">Features</a>
+    <a href="troubleshooting.html">Troubleshooting</a>
+    <a href="privacy.html">Privacy</a>
+    <a href="https://github.com/acoseac/1-bit-bridge">GitHub</a>
+  </nav>
   <main>
     <h1>1-bit-bridge</h1>
     <p class="lede">Companion server for the <a href="https://apps.apple.com/us/app/1-bit/id6762529497">1-bit iOS music player</a>. Reach your home music library from anywhere — over Tailscale, a VPN, or a direct connection — without SMB's round-trip penalty.</p>
 
     <div class="hero-links">
       <a class="btn btn-primary" href="https://github.com/acoseac/1-bit-bridge/releases/latest">Download latest release</a>
+      <a class="btn" href="setup.html">Setup walkthrough</a>
       <a class="btn" href="https://github.com/acoseac/1-bit-bridge">GitHub</a>
-      <a class="btn" href="https://apps.apple.com/us/app/1-bit/id6762529497">iOS app (App Store)</a>
-      <a class="btn" href="privacy.html">Privacy</a>
+      <a class="btn" href="https://apps.apple.com/us/app/1-bit/id6762529497">iOS app</a>
     </div>
+
+    <h2>Quick start</h2>
+    <ol class="steps">
+      <li>
+        <h3>Download for your platform</h3>
+        <p>Pre-built archives for macOS / Linux / Windows × amd64 / arm64 on the <a href="https://github.com/acoseac/1-bit-bridge/releases/latest">releases page</a>. No Go toolchain required.</p>
+      </li>
+      <li>
+        <h3>Run <code>bridge init</code></h3>
+        <p>The init wizard asks for your library path, a friendly name, and a listen address — defaults are sane. Installs as a system service so the bridge starts on boot.</p>
+        <pre><code>./bridge init</code></pre>
+      </li>
+      <li>
+        <h3>Pair your iPhone</h3>
+        <p>Open <a href="http://127.0.0.1:7789/">the admin console</a>, install the <a href="https://apps.apple.com/us/app/1-bit/id6762529497">1-bit iOS app</a>, and tap-to-pair from the iPhone's Discover sheet. Approve the request on the admin console — done.</p>
+      </li>
+    </ol>
+    <p>For the full step-by-step including platform notes, the admin console tour, and what to do when something goes wrong: <a href="setup.html">setup walkthrough</a>.</p>
 
     <h2>Why</h2>
     <p>1-bit's built-in SMB transport is great on LAN but painful over high-latency links. Every <code>pread</code> on a remote share costs a round trip, so a library scan that finishes in seconds at home can take minutes over Tailscale's relay. <strong>1-bit-bridge</strong> replaces SMB with an HTTP/2 protocol purpose-built for the app, plus a pre-built library manifest that lets the iOS side skip its two-phase scan entirely.</p>
 
-    <h2>How it works</h2>
+    <h2>What you get</h2>
     <ul class="features">
-      <li><strong>Eight versioned endpoints</strong> under <code>/v1/</code> — health, directory listing and stat, byte-range read, full download with HTTP range support, paginated library manifest, and album + artist artwork. Every route is bearer-authenticated except the unauthenticated <code>/v1/health</code> pairing probe.</li>
-      <li><strong>Pre-built library manifest</strong> served from SQLite. iOS fetches the full library in a paginated call (<code>?limit</code>, <code>?cursor</code>), or a <code>?since=&lt;mtime&gt;</code> delta in a single shot — both scan phases replaced. Tracks carry sample rate, bits per sample, DSD flag and rate, ReplayGain, and MusicBrainz IDs.</li>
+      <li><strong>Pre-built library manifest</strong> served from SQLite — iOS fetches the full library (or a delta) in a single request, no walking. 50,000-track libraries sync in milliseconds.</li>
       <li><strong>Bit-exact, no transcoding ever.</strong> FLAC, ALAC, WAV, AIFF, MP3, AAC, DSF, DFF — served as-is. iOS still pre-caches the full DSF before playback so the DAC's DoP lock isn't at risk.</li>
-      <li><strong>Bearer tokens</strong> per device, with rotate / set-expiry / revoke from the admin console or the <code>bridge token</code> CLI. Each iOS device gets its own token; revoking one doesn't touch the others.</li>
-      <li><strong>TLS fingerprint pinning</strong> — captured once during pairing, enforced on every subsequent request. No CA trust needed. Cert rotation is supported (CLI-only via <code>bridge cert rotate</code>, by design — the operator-restart step has no safe web equivalent) and requires re-pairing affected devices.</li>
-      <li><strong>Bonjour discovery</strong> — bridge advertises <code>_onebit-bridge._tcp</code> with <code>host</code> and <code>port</code> in the TXT record so iOS finds it on the LAN automatically; the QR-code pair URL still carries the same fingerprint claim either way.</li>
-      <li><strong>Artwork enrichment</strong> against MusicBrainz, Cover Art Archive, and iTunes Search — rate-limited, well-behaved, cached by MusicBrainz ID. Returns <code>202</code> + <code>Retry-After</code> while still resolving so the iOS side knows to come back.</li>
-      <li><strong>Local admin console</strong> at <code>http://127.0.0.1:7789/</code> (loopback only, no auth) for library roots, manual scans, pairing, token lifecycle, on-demand snapshots, opt-in auto-update, and a dashboard with cert status and expiry warnings. TLS cert rotation and snapshot restore are CLI-only by design.</li>
+      <li><strong>Tap-to-pair from iOS</strong> with admin approval, or generate-token-and-scan-QR for power users. Bearer tokens per device, rotatable, revocable.</li>
+      <li><strong>Tailscale-ready</strong> with three integration modes — embedded tailnet node (zero CLI dependency), system-CLI passthrough, or LAN-only.</li>
+      <li><strong>Optional offline PCM upscaling</strong> via <code>sox</code> for high-end DACs that benefit from upsampled material — opt-in, off by default.</li>
     </ul>
+    <p>Detailed feature list with config snippets and design rationale: <a href="features.html">features deep-dive</a>.</p>
 
-    <h2>Install</h2>
-
-    <div class="install-row">
-      <div>
-        <h3>macOS</h3>
-        <pre><code>tar -xzf 1-bit-bridge_*_macos_arm64.tar.gz
-./bridge init</code></pre>
-        <p style="font-size: 0.88rem; color: var(--fg-muted);">Signed + notarized. Gatekeeper-accepted on first launch.</p>
+    <h2>Learn more</h2>
+    <div class="grid-2">
+      <div class="card">
+        <h3><a href="setup.html">Setup walkthrough →</a></h3>
+        <p>From a blank machine to a paired iPhone in ten minutes. Beginner-friendly, covers macOS, Linux, and Windows.</p>
       </div>
-      <div>
-        <h3>Linux</h3>
-        <pre><code>tar -xzf 1-bit-bridge_*_linux_amd64.tar.gz
-./bridge init</code></pre>
-        <p style="font-size: 0.88rem; color: var(--fg-muted);">Installs a systemd user unit.</p>
+      <div class="card">
+        <h3><a href="features.html">Features →</a></h3>
+        <p>Pairing models, Tailscale modes, upscale variants, updates, backups, admin console tour.</p>
       </div>
-      <div>
-        <h3>Windows</h3>
-        <pre><code>Expand-Archive -Path 1-bit-bridge_*_windows_amd64.zip -DestinationPath .
-.\bridge.exe init</code></pre>
-        <p style="font-size: 0.88rem; color: var(--fg-muted);">Startup-folder launcher; use <code>--service</code> from an admin shell for a real Windows Service.</p>
+      <div class="card">
+        <h3><a href="troubleshooting.html">Troubleshooting →</a></h3>
+        <p>Symptom-to-fix list. Discover not finding the bridge, slow scans, Tailscale gotchas, log locations.</p>
+      </div>
+      <div class="card">
+        <h3><a href="https://github.com/acoseac/1-bit-bridge/blob/main/docs/docker.md">Docker deployment →</a></h3>
+        <p>Multi-arch container build, docker-compose recipe, env-var configuration for headless deployments.</p>
+      </div>
+      <div class="card">
+        <h3><a href="https://github.com/acoseac/1-bit-bridge/blob/main/PROTOCOL.md">Wire protocol →</a></h3>
+        <p>Every endpoint, request shape, and error code. Versioned <code>X-Bridge-Protocol: 1</code>.</p>
+      </div>
+      <div class="card">
+        <h3><a href="privacy.html">Privacy →</a></h3>
+        <p>What's stored, what's sent, what's deliberately not logged. No telemetry, no analytics.</p>
       </div>
     </div>
-
-    <p>Downloads for every OS / arch are at the <a href="https://github.com/acoseac/1-bit-bridge/releases/latest">latest release page</a>. Full install walk-through and preflight checks (<code>bridge doctor</code>) are in the <a href="https://github.com/acoseac/1-bit-bridge/blob/main/README.md">README</a>.</p>
 
     <div class="note">
-      <strong>Windows note:</strong> current Windows binaries are unsigned. First launch will show SmartScreen's "unrecognized app" — click <em>More info</em> → <em>Run anyway</em>. Authenticode signing is pending SignPath Foundation review.
+      <strong>Windows note:</strong> current Windows binaries are unsigned. First launch will show SmartScreen's "unrecognized app" — click <em>More info</em> → <em>Run anyway</em>. Authenticode signing is pending SignPath Foundation review. macOS and Linux binaries are signed and notarized (macOS) or static (Linux).
     </div>
-
-    <h2>Pairing</h2>
-    <p>Open the admin console's <em>Devices</em> page, click <em>Pair new device</em>, give it a name, and generate a token. The page shows a QR encoding a <code>bridge://pair?...</code> URL — scan it from the 1-bit iOS app, or paste the three fields (URL, token, TLS fingerprint) manually. Every further request the iOS app makes is bearer-authenticated and fingerprint-pinned. iOS also auto-discovers the bridge over Bonjour on the LAN, so you only have to type the bearer token.</p>
-
-    <h2>Updates</h2>
-    <p>The bridge polls GitHub Releases and surfaces an update banner in the admin console. <strong>Auto-install is opt-in</strong>; once enabled, you can set quiet hours (the bridge won't restart inside that window). Manual install runs the same path: download, verify the release-meta sidecar, atomic swap, with a one-tap rollback if the new build doesn't behave. The iOS app reads the bridge's protocol/version envelope on every <code>/v1/health</code> probe and surfaces an inline advisory when an update is available — or when the bridge requires a newer iOS app.</p>
-
-    <h2>Backups</h2>
-    <p>Configuration, paired tokens, and the indexed library all live in a single state directory. The admin console's <em>Settings</em> page makes timestamped snapshots on demand; periodic automatic snapshots can be turned on with a configurable rotation count. Restoring a snapshot is a CLI operation (<code>bridge restore</code>) that requires stopping the bridge first — kept off the web UI so an accidental click can't replace the running library mid-stream.</p>
-
-    <h2>Protocol</h2>
-    <p>See <a href="https://github.com/acoseac/1-bit-bridge/blob/main/PROTOCOL.md">PROTOCOL.md</a> for every endpoint, shape, and error code. Every client endpoint is prefixed <code>/v1/</code>; the admin console (<code>/</code>, <code>/api/*</code>, <code>/static/*</code>) lives on a separate loopback listener and is not part of the wire protocol. Additive fields (manifest pagination, mDNS TXT keys) ship without a protocol bump; breaking changes do bump <code>X-Bridge-Protocol</code> and the iOS app refuses to talk to a server it doesn't understand.</p>
 
     <h2>Open source</h2>
     <p><strong>MIT-licensed</strong>. Source at <a href="https://github.com/acoseac/1-bit-bridge">github.com/acoseac/1-bit-bridge</a>: the Go server, the embedded admin console, the protocol spec, and the release pipeline. Issues and PRs welcome — see <a href="https://github.com/acoseac/1-bit-bridge/blob/main/CONTRIBUTING.md">CONTRIBUTING.md</a>. Security reports via <a href="https://github.com/acoseac/1-bit-bridge/security/advisories/new">GitHub's private advisory flow</a>.</p>

@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Troubleshooting — 1-bit-bridge</title>
+  <meta name="description" content="Common 1-bit-bridge problems and how to fix them — Discover not finding the bridge, server-unreachable errors, slow scans, Tailscale gotchas, stuck upscale jobs, certificate rotation, log locations, backup restore.">
+  <meta name="theme-color" content="#0a84ff">
+  <meta property="og:type" content="article">
+  <meta property="og:url" content="https://acoseac.github.io/1-bit-bridge/troubleshooting.html">
+  <meta property="og:title" content="Troubleshooting — 1-bit-bridge">
+  <meta property="og:description" content="Symptom-to-fix list for common 1-bit-bridge issues. Pairing, scanning, Tailscale, upscale, updates, logs, backup restore.">
+  <link rel="canonical" href="https://acoseac.github.io/1-bit-bridge/troubleshooting.html">
+  <link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+  <nav class="site-nav" aria-label="Site">
+    <a class="brand" href="./">1-bit-bridge</a>
+    <a href="setup.html">Setup</a>
+    <a href="features.html">Features</a>
+    <a href="troubleshooting.html" aria-current="page">Troubleshooting</a>
+    <a href="privacy.html">Privacy</a>
+    <a href="https://github.com/acoseac/1-bit-bridge">GitHub</a>
+  </nav>
+  <main class="wide">
+    <a class="crumb" href="./">← 1-bit-bridge</a>
+    <h1>Troubleshooting</h1>
+    <p class="lede">Symptom → fix. If your problem isn't here, run <code>./bridge doctor</code> for an environment punch-list, then <a href="https://github.com/acoseac/1-bit-bridge/issues">open an issue on GitHub</a> with the doctor output and your service-manager logs.</p>
+
+    <h2>Pairing</h2>
+
+    <div class="symptom">
+      <strong>The bridge isn't appearing in iOS "Discover on network".</strong> The iPhone shows an empty list or "No bridges found".
+    </div>
+    <div class="fix">
+      <p>Bonjour discovery requires both devices on the same Wi-Fi (or Wi-Fi + bridged Ethernet) and Local Network permission granted to the 1-bit app on iOS.</p>
+      <ol>
+        <li>Confirm the iPhone is on the same Wi-Fi SSID as the bridge host. A "guest" subnet that isolates clients from each other will block discovery.</li>
+        <li>Open the iPhone's <em>Settings</em> → <em>Privacy & Security</em> → <em>Local Network</em> → make sure <em>1-bit</em> is enabled. iOS prompts for this on first launch; if you tapped <em>Don't Allow</em>, you have to flip it back here.</li>
+        <li>On the bridge host, confirm the bridge process is running and Bonjour is enabled (default). The admin console's Dashboard shows a Bonjour status line; it should read <em>advertising</em>.</li>
+        <li>If you have multiple network interfaces (a VPN, virtual NICs from VMware / Parallels, Tailscale), the bridge advertises on each one — but a misbehaving virtual interface can swallow the announcement. Try toggling the suspect interface off, then run <em>Refresh</em> in the iOS Discover sheet.</li>
+        <li>As a fallback, use <a href="setup.html">Method B: manual pair</a> — generate a token in the admin console's Devices tab, scan the QR code from iOS.</li>
+      </ol>
+    </div>
+
+    <div class="symptom">
+      <strong>Pairing seems stuck on iOS</strong> — the app shows "Waiting for approval…" and nothing happens.
+    </div>
+    <div class="fix">
+      <p>The iOS app submitted the request, but the operator hasn't approved it yet on the admin console.</p>
+      <ol>
+        <li>Open the admin console in any browser on the bridge host (<code>http://127.0.0.1:7789/</code>). A yellow <em>Pending pair request</em> banner appears at the top of every page when one is waiting.</li>
+        <li>Click into the banner. The pending-request card shows the device name, iOS app version, and a 6-digit verification code.</li>
+        <li>Confirm the code matches what's on the iPhone, then click <strong>Approve</strong>.</li>
+        <li>iOS picks up the approval within a few seconds and finishes pairing.</li>
+      </ol>
+      <p>Pairing requests time out after 10 minutes. If you missed the window, the iOS app will tell you — just tap <em>Try again</em>.</p>
+    </div>
+
+    <div class="symptom">
+      <strong>iOS shows "Server unreachable" or "Pin mismatch" on a previously-working bridge.</strong>
+    </div>
+    <div class="fix">
+      <p>The bridge's TLS certificate fingerprint changed since pairing. This is expected after a cert rotation — by design, the iOS app refuses to silently trust a new cert. The fix is to re-pair the affected device.</p>
+      <ol>
+        <li>On the iPhone, open 1-bit → Sources → swipe the bridge entry → <em>Delete</em>. Or rename the old bridge and add a fresh entry.</li>
+        <li>On the admin console, generate a new pair token (Devices → <em>Pair new device</em>) or wait for the iPhone to submit a new request via Discover.</li>
+        <li>Pair as new (see <a href="setup.html#step-6">setup step 6</a>).</li>
+      </ol>
+      <p><strong>If you didn't rotate the cert intentionally,</strong> something else moved. Check the admin console's Dashboard for the current fingerprint, and check whether the bridge was reinstalled or the data directory was wiped. The cert lives at <code>tls/server.crt</code> in the data directory; if it's missing the bridge generates a new one on startup.</p>
+    </div>
+
+    <div class="symptom">
+      <strong>iOS app says "protocol mismatch" or "this server requires a newer iOS app".</strong>
+    </div>
+    <div class="fix">
+      <p>Version skew between the iOS app and the bridge. Each release of either side declares the minimum compatible version of the other.</p>
+      <ol>
+        <li>Check the iOS app version (Settings → About) and the bridge version (admin console Dashboard, or <code>./bridge version</code>).</li>
+        <li>Compare against the compatibility table in the <a href="https://github.com/acoseac/1-bit-bridge/blob/main/PROTOCOL.md#compatibility">protocol spec</a>.</li>
+        <li>Update whichever side is older. The iOS app updates through the App Store; the bridge updates via the admin console's Updates tab or by replacing the binary manually from the <a href="https://github.com/acoseac/1-bit-bridge/releases/latest">releases page</a>.</li>
+      </ol>
+    </div>
+
+    <h2 id="scanning">Library scanning</h2>
+
+    <div class="symptom">
+      <strong>First scan is taking forever.</strong> Library tab shows "Walking · NN files" for what feels like an unreasonably long time.
+    </div>
+    <div class="fix">
+      <p>First scans are slow by design — every track gets MusicBrainz / CAA / Deezer enrichment, and the lookups are rate-limited to be polite to those services.</p>
+      <ul>
+        <li><strong>2,000 tracks</strong> ≈ 30 seconds.</li>
+        <li><strong>10,000 tracks</strong> ≈ 2 minutes.</li>
+        <li><strong>50,000 tracks</strong> ≈ 5–15 minutes.</li>
+      </ul>
+      <p>Subsequent re-scans only enrich what's new — typically 30–60 seconds even on a 50k library.</p>
+      <p>The iOS app can play tracks while the scan is still running — it's not blocking. If you want to verify progress is happening, watch the Library tab's count fields tick upward, or tail the bridge log (see <a href="#logs-where">Where do I find logs?</a> below).</p>
+    </div>
+
+    <div class="symptom">
+      <strong>Tracks show up in the iOS app but artwork is missing.</strong> Some albums show a cover, others a generic placeholder.
+    </div>
+    <div class="fix">
+      <p>Artwork enrichment is best-effort. The bridge tries embedded artwork (APIC frames in ID3v2 tags, <code>covr</code> atoms in MP4), then a sibling <code>folder.jpg</code> / <code>cover.jpg</code>, then MusicBrainz Cover Art Archive, then iTunes Search as a fallback. A miss on all four leaves the placeholder.</p>
+      <ol>
+        <li>Check the album's tags — is the MusicBrainz Release ID present? If not, CAA can't look up the cover. Re-tag with <a href="https://picard.musicbrainz.org/">MusicBrainz Picard</a> for best-quality matches.</li>
+        <li>Drop a <code>folder.jpg</code> (any reasonable resolution, ≤ 2000×2000 px) in the album's folder. The bridge picks it up on the next scan.</li>
+        <li>For artist photos, the Deezer fallback only fires when the artist has a MusicBrainz ID. Tag the album with the MBID via Picard, re-scan.</li>
+      </ol>
+    </div>
+
+    <h2 id="upscale">Upscale</h2>
+
+    <div class="symptom">
+      <strong>The wand icon doesn't appear in iOS.</strong>
+    </div>
+    <div class="fix">
+      <p>Three preconditions must all be true:</p>
+      <ol>
+        <li><strong>Bridge has upscale enabled.</strong> Admin console → Settings → Upscale toggle on, OR <code>upscale.enabled: true</code> in <code>bridge.yaml</code>.</li>
+        <li><strong>The track is upscale-eligible.</strong> The wand only shows on FLAC / ALAC / WAV / AIFF / MP3 / AAC sources. DSD tracks already exceed PCM — there's nothing to upscale.</li>
+        <li><strong>The iOS app is 1.2 or newer.</strong> Older versions don't render the wand control.</li>
+      </ol>
+    </div>
+
+    <div class="symptom">
+      <strong>Upscale jobs are stuck — the wand stays on the spinner forever.</strong>
+    </div>
+    <div class="fix">
+      <ol>
+        <li>Confirm <code>sox</code> is installed and on the bridge's <code>$PATH</code>: <code>sox --version</code> on the bridge host. If it's missing, install it (<code>brew install sox</code>, <code>apt install sox libsox-fmt-flac</code>, etc.).</li>
+        <li>Check disk space in the bridge's data directory. Each variant is roughly 3× the source size; a stalled job is sometimes <code>ENOSPC</code> in disguise.</li>
+        <li>Look at the worker pool stats in the admin console's Settings → Upscale section. <em>Failed</em> count rising and <em>Queue full</em> showing? The pool is overwhelmed — let it drain, or restart the bridge to clear stuck jobs.</li>
+        <li>If you've seen many half-finished variants pile up after restarts or crashes, run <code>./bridge upscale --gc</code> to reap orphans whose source files are gone or whose sidecars are unreferenced.</li>
+      </ol>
+    </div>
+
+    <h2 id="tailscale">Tailscale</h2>
+
+    <div class="symptom" id="tailscale-mac">
+      <strong>macOS only:</strong> "Re-mint cert" in admin console fails with <code>tailscale cert: exit status 1 (… open /tmp/.../tailscale.crt.tmpNNNN: operation not permitted)</code>.
+    </div>
+    <div class="fix">
+      <p>This is a sandboxing collision between the macOS Tailscale GUI app and the bridge's CLI shell-out. The Tailscale.app binary at <code>/Applications/Tailscale.app/Contents/MacOS/Tailscale</code> inherits a sandbox profile that blocks writes to arbitrary paths under <code>/tmp</code> — exactly where <code>tailscale cert</code> wants to write its atomic-rename tempfile.</p>
+      <p>Two fixes, pick one:</p>
+      <ol>
+        <li><strong>Install the non-sandboxed Tailscale CLI via Homebrew:</strong>
+          <pre><code>brew install --cask tailscale</code></pre>
+          This puts a Tailscale-CLI-only binary at <code>/usr/local/bin/tailscale</code> (or <code>/opt/homebrew/bin/tailscale</code> on Apple Silicon). It runs unsandboxed; <code>tailscale cert</code> can write its tempfile and rename normally.</li>
+        <li><strong>Switch to embedded mode:</strong> in <code>bridge.yaml</code>, set
+          <pre><code>tailscale:
+  mode: tsnet</code></pre>
+          This skips the CLI shell-out entirely — the bridge runs its own tailnet node in-process. Authenticate once with <code>./bridge tsnet auth</code>, then restart the bridge.</li>
+      </ol>
+      <p>Either fix is good. <code>tsnet</code> is the more durable option because it removes the dependency on the host CLI altogether — recommended for new installs.</p>
+    </div>
+
+    <div class="symptom">
+      <strong>Bridge serves on the LAN but not over Tailscale.</strong> Local pairing works; pairing from a remote tailnet device fails to find the bridge.
+    </div>
+    <div class="fix">
+      <ol>
+        <li>Confirm Tailscale is running on the bridge host: <code>tailscale status</code>. The host should appear in the list with a <code>100.x.x.x</code> CGNAT IP.</li>
+        <li>From the remote device, try <code>https://&lt;hostname&gt;.tail-XXXX.ts.net:7788/v1/health</code> in a browser. A 200 response with JSON means Magic-DNS is reachable; the iOS app should also find it.</li>
+        <li>If you switched <code>tailscale.mode</code> recently, restart the bridge — mode changes don't take effect until restart. Check the admin console's Dashboard "Tailscale" tile for any error message from the active mode.</li>
+        <li>iOS 26.4+ ATS rejects self-signed certs at the network layer for non-LAN hosts; <code>*.ts.net</code> hostnames present a real Let's Encrypt cert (issued by the bridge in <code>tsnet</code> mode, or by the system Tailscale CLI in <code>cli</code> mode), so this should "just work" — but if you see TLS errors, check that the cert isn't expired.</li>
+      </ol>
+    </div>
+
+    <h2>Updates</h2>
+
+    <div class="symptom">
+      <strong>Auto-update didn't install</strong> — the admin console says "Update available" for days but nothing changes.
+    </div>
+    <div class="fix">
+      <ol>
+        <li>Check that auto-install is actually enabled. Settings → Updates → toggle <em>Auto-install</em> on. (Many operators leave this off intentionally.)</li>
+        <li>Check the quiet-hours window. If the candidate fell into quiet hours every day at the polling moment, it'll wait. Either widen the window or click <em>Install now</em> manually.</li>
+        <li>Check the compatibility floor. The release's <code>release-meta.json</code> declares a minimum iOS app version. If any paired device reports an older app version (via <code>X-Client-Version</code>), the bridge defers the install rather than orphaning it. Update those clients first.</li>
+        <li>If none of the above apply, look at the bridge log for an updater error. Manual install always works as a fallback: download the archive, extract, replace the binary, restart.</li>
+      </ol>
+    </div>
+
+    <h2>Other</h2>
+
+    <div class="symptom">
+      <strong>Bridge crashes on launch.</strong> The service-manager status shows the process exited; <code>bridge serve</code> by hand prints an error and quits.
+    </div>
+    <div class="fix">
+      <ol>
+        <li>Run <code>./bridge doctor</code>. Most launch failures are environmental — port already in use, library path doesn't exist, data directory permissions wrong. Doctor flags them.</li>
+        <li>Run <code>./bridge serve --config /path/to/bridge.yaml</code> by hand and watch stderr — the bridge prints a clear error message before exiting.</li>
+        <li>If the YAML config is corrupt, restore from a backup snapshot: <code>./bridge restore --snapshot &lt;timestamp&gt;</code>. Snapshots live under <code>backups/</code> in the data directory.</li>
+        <li>If the SQLite manifest is corrupt (rare — only seen after a hard crash mid-write or a hardware fault), delete <code>bridge.db</code> from the data directory and let the bridge re-scan from scratch. Pairings and config survive.</li>
+      </ol>
+    </div>
+
+    <div class="symptom" id="logs-where">
+      <strong>Where do I find logs?</strong>
+    </div>
+    <div class="fix">
+      <table>
+        <caption>Per-platform commands for live-tailing the bridge service log</caption>
+        <tr><th>Platform</th><th>Live tail</th></tr>
+        <tr><td>macOS (launchd)</td><td><code>log show --predicate 'subsystem == "com.acoseac.bridge"' --last 1h</code></td></tr>
+        <tr><td>Linux (systemd)</td><td><code>journalctl --user -u 1-bit-bridge -f</code></td></tr>
+        <tr><td>Windows Service</td><td><code>%PROGRAMDATA%\1-bit-bridge\bridge.log</code> (open in Notepad++ or tail with PowerShell <code>Get-Content -Wait</code>)</td></tr>
+        <tr><td>Manual run</td><td>stdout / stderr of the <code>./bridge serve</code> process</td></tr>
+        <tr><td>Docker</td><td><code>docker logs -f &lt;container&gt;</code></td></tr>
+      </table>
+      <p>The admin console also has a <em>Logs</em> tab that tails the last 500 lines in the browser. For deeper history, use the platform tools above. Bearer tokens and IP addresses are never logged; library-relative file paths appear only in error lines.</p>
+    </div>
+
+    <div class="symptom">
+      <strong>Restoring from a backup snapshot.</strong>
+    </div>
+    <div class="fix">
+      <ol>
+        <li>Stop the bridge via your service manager: macOS <code>launchctl unload ~/Library/LaunchAgents/com.acoseac.1-bit-bridge.plist</code>, Linux <code>systemctl --user stop 1-bit-bridge</code>, Windows <code>sc.exe stop 1-bit-bridge</code>.</li>
+        <li>List available snapshots: <code>./bridge restore --list</code>. They're dated <code>YYYYMMDD-HHMMSS</code>.</li>
+        <li>Restore a specific snapshot: <code>./bridge restore --snapshot 20260508-104500</code>.</li>
+        <li>Start the bridge again via the same service manager: <code>launchctl load ~/Library/LaunchAgents/com.acoseac.1-bit-bridge.plist</code> on macOS, <code>systemctl --user start 1-bit-bridge</code> on Linux, <code>sc.exe start 1-bit-bridge</code> on Windows. The data directory now matches the snapshot — config, manifest, paired devices.</li>
+      </ol>
+      <p>Snapshots restore the bridge's data directory only — your music files are never touched. iOS pairings continue to work because the token database is part of the snapshot.</p>
+    </div>
+
+    <h2>Still stuck?</h2>
+    <p>Open an issue with:</p>
+    <ul>
+      <li>Output of <code>./bridge doctor</code></li>
+      <li>Output of <code>./bridge version</code></li>
+      <li>The relevant section of the bridge log (with bearer tokens already redacted by the bridge — safe to share verbatim)</li>
+      <li>Your platform and how you installed (release archive / Docker / built from source)</li>
+    </ul>
+    <p>Issue tracker: <a href="https://github.com/acoseac/1-bit-bridge/issues">github.com/acoseac/1-bit-bridge/issues</a>.</p>
+
+    <footer>
+      <div>© 2026 Arsenie Coseac · MIT License</div>
+      <div><a href="https://github.com/acoseac/1-bit-bridge">Source</a> · <a href="https://apps.apple.com/us/app/1-bit/id6762529497">iOS app</a> · <a href="privacy.html">Privacy</a></div>
+    </footer>
+  </main>
+</body>
+</html>

@@ -47,6 +47,23 @@ type UpscaleEnqueuer interface {
 	EnqueueOne(libraryRelativePath string) error
 }
 
+// redactWalkErr returns walkErr's message with the absolute host
+// filesystem path stripped when walkErr is *os.PathError —
+// PathError's default Error() formatter is "<op> <path>: <reason>",
+// which would leak "/Users/.../music/..." into either log records
+// or wire responses. docs/privacy.html commits that absolute paths
+// are neither logged nor sent over the wire; this is the canonical
+// strip used by both egress channels in the upscale walk-error
+// branch (Greptile rounds 1+2 on PR #185). Falls through to the
+// raw Error() when walkErr isn't a PathError.
+func redactWalkErr(walkErr error) string {
+	var pathErr *os.PathError
+	if errors.As(walkErr, &pathErr) {
+		return pathErr.Op + ": " + pathErr.Err.Error()
+	}
+	return walkErr.Error()
+}
+
 // ErrUpscaleSourceMissing is returned by EnqueueOne when the
 // resolved source path doesn't exist on disk. Distinguished
 // from ErrUpscaleQueueFull so the handler can report it
@@ -151,7 +168,28 @@ func (s *Server) upscaleRequest(w http.ResponseWriter, r *http.Request) {
 				// directory indicates a configuration problem
 				// the user should know about — surface, don't
 				// silently truncate the upscale set.
-				logger.Error("upscale folder walk", "path", p, "err", walkErr)
+				//
+				// Log the library-relative form (NOT `p`, which
+				// is the resolved absolute filesystem path on
+				// the host). docs/privacy.html commits to
+				// "absolute filesystem paths are not logged" —
+				// this branch is the only call site in v0.1.2
+				// that would have leaked one. Falls back to the
+				// requested `libraryRel` if `Rel` errors (root
+				// failure) so the operator still gets a useful
+				// pointer.
+				relForLog := libraryRel
+				if rel, relErr := filepath.Rel(abs, p); relErr == nil && rel != "." {
+					relForLog = path.Join(libraryRel, filepath.ToSlash(rel))
+				}
+				// Pass a redacted error STRING (not the raw error
+				// value) so slog serialisation of "err" doesn't
+				// re-include the absolute path that *os.PathError's
+				// Error() embeds — Greptile round-2 catch on PR
+				// #185, complementing the wire-response unwrap
+				// below. redactWalkErr() centralises the strip
+				// rule for both egress channels.
+				logger.Error("upscale folder walk", "path", relForLog, "err", redactWalkErr(walkErr))
 				return walkErr
 			}
 			if d.IsDir() {
@@ -169,7 +207,13 @@ func (s *Server) upscaleRequest(w http.ResponseWriter, r *http.Request) {
 			return nil
 		})
 		if walkErr != nil {
-			writeError(w, http.StatusInternalServerError, "internal", "walk folder: "+walkErr.Error())
+			// Use redactWalkErr() to strip the absolute host path
+			// that *os.PathError's Error() string embeds (e.g.
+			// "open /Users/alice/Music/...: permission denied").
+			// docs/privacy.html commits to "absolute filesystem
+			// paths are not logged" AND not sent over the wire —
+			// the same redactor covers both egress channels.
+			writeError(w, http.StatusInternalServerError, "internal", "walk folder: "+redactWalkErr(walkErr))
 			return
 		}
 	} else {
