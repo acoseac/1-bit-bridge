@@ -22,6 +22,7 @@
 package api
 
 import (
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -652,14 +653,84 @@ func (s *Server) manifestHandler(w http.ResponseWriter, r *http.Request) {
 	// JSON decode (Qodo #1 on PR #70). Once any byte has gone out we
 	// can only log the error — headers are committed.
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+
+	// Negotiate gzip on the wire. JSON manifests compress 3–5× on
+	// typical libraries (50k tracks: ~150 MB identity → ~30–40 MB
+	// gzip). iOS URLSession sends `Accept-Encoding: gzip, deflate,
+	// br` by default and transparently decompresses, so the win is
+	// fully wire-side with no client change. SSE endpoints
+	// (events.go, pairing.go) explicitly set Content-Encoding:
+	// identity to defeat buffering middleware and have their own
+	// trip-wire tests — which is why this gzip lives at the
+	// manifest handler ONLY, not as global middleware.
+	useGzip := acceptsGzip(r)
+	if useGzip {
+		w.Header().Set("Vary", "Accept-Encoding")
+		w.Header().Set("Content-Encoding", "gzip")
+	}
+
 	dw := &deferredStatusWriter{w: w, status: http.StatusOK}
+
+	// Build the writer chain. The gzip writer sits between the
+	// JSON encoder and the deferredStatusWriter so:
+	//   - WriteManifest writes JSON tokens to gz
+	//   - gz emits compressed bytes to dw
+	//   - dw triggers WriteHeader(200) on the first compressed byte
+	// The pre-stream-DB-error path stays intact: if WriteManifest
+	// returns before producing any byte, gz hasn't been written
+	// either, dw.written is false, and the early-error branch below
+	// strips the encoding headers and emits a structured 5xx.
+	var bodyWriter io.Writer = dw
+	var gz *gzip.Writer
+	if useGzip {
+		gz = gzip.NewWriter(dw)
+		bodyWriter = gz
+	}
+
 	// Pass r.Context() so a client disconnect mid-stream (slow network,
 	// iOS backgrounded mid-sync, attacker slow-reading) interrupts the
 	// SQLite scan within the next per-row check instead of running to
 	// EOF holding the read lock and CPU.
-	if err := s.manifest.WriteManifest(r.Context(), dw, since); err != nil {
+	writeErr := s.manifest.WriteManifest(r.Context(), bodyWriter, since)
+
+	// Flush the gzip trailer ONLY if any compressed byte already
+	// reached the wire. `dw.written` is the authoritative signal:
+	// gzip.Writer emits its 10-byte header on first Write, and that
+	// first byte goes through dw — so gzip-was-touched ⇔ dw.written.
+	// On the early-error path (WriteManifest returns before writing
+	// anything), gz.Close() would emit a ~20-byte gzip header+trailer
+	// for an empty stream, committing WriteHeader(200) and stealing
+	// the structured 5xx the error branch below tries to emit. Skip
+	// the close in that case and let the error path write a clean
+	// uncompressed 500.
+	if useGzip && dw.written {
+		if closeErr := gz.Close(); closeErr != nil && writeErr == nil {
+			writeErr = closeErr
+		}
+	} else if useGzip && writeErr == nil {
+		// WriteManifest succeeded but produced zero bytes (empty
+		// library — no tracks, no folders). The negotiation headers
+		// were set up-front, but a zero-byte response with
+		// Content-Encoding: gzip is invalid (gzip needs at least the
+		// 10-byte header + 8-byte trailer). iOS URLSession honors
+		// Content-Encoding and would surface a transport error trying
+		// to decompress nothing. Strip the encoding headers so the
+		// client sees a plain empty 200 — same shape as the pre-stream
+		// error path below, without the 5xx.
+		w.Header().Del("Content-Encoding")
+		w.Header().Del("Vary")
+	}
+
+	if writeErr != nil {
 		if !dw.written {
-			writeError(w, http.StatusInternalServerError, "internal", err.Error())
+			// Headers haven't been committed yet. Strip the gzip-
+			// negotiation headers BEFORE writeError so the JSON
+			// error body isn't misinterpreted as gzip by the client
+			// (URLSession would surface a transport error and
+			// silently retry, masking the real DB failure).
+			w.Header().Del("Content-Encoding")
+			w.Header().Del("Vary")
+			writeError(w, http.StatusInternalServerError, "internal", writeErr.Error())
 			return
 		}
 		// Demote client-disconnect errors to debug — context.Canceled
@@ -671,10 +742,10 @@ func (s *Server) manifestHandler(w http.ResponseWriter, r *http.Request) {
 		// — it represents a client-imposed deadline, not a server
 		// failure. Any other mid-stream error (DB read fault, fs
 		// unmount) still logs at .Error().
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			logger.Debug("manifest stream cancelled by client", "err", err)
+		if errors.Is(writeErr, context.Canceled) || errors.Is(writeErr, context.DeadlineExceeded) {
+			logger.Debug("manifest stream cancelled by client", "err", writeErr)
 		} else {
-			logger.Error("manifest stream", "err", err)
+			logger.Error("manifest stream", "err", writeErr)
 		}
 	}
 }
