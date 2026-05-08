@@ -179,6 +179,20 @@ p code, li code, td code, dd code {
   border-radius: 4px;
   border: 1px solid var(--border);
 }
+/* `<pre><code>` blocks land inside <li> on setup.html / index.html
+ * step lists, where the descendant selector above would otherwise
+ * paint a light --bg-soft background on the inner <code>, leaving
+ * --code-fg (light) text on a light surface — invisible. The pre's
+ * own dark background and light foreground are the canonical render
+ * for fenced code; reset every inline-code styling property when the
+ * code is wrapped by <pre>. */
+pre code {
+  background: transparent;
+  padding: 0;
+  border: 0;
+  font-size: inherit;
+  color: inherit;
+}
 
 /* Lists */
 ul { padding-left: 24px; }
