@@ -72,7 +72,7 @@ func fileVariantFixture(t *testing.T) (*httptest.Server, string, string, *stubVa
 	// dir in production. Writes a known byte pattern so we can
 	// verify the response body actually came from the sidecar
 	// path rather than the source.
-	sidecarPath := filepath.Join(tmp, "transcoded", "abc-upscaled-v1-176400-24.flac")
+	sidecarPath := filepath.Join(tmp, "transcoded", "abc-upscaled-v2-176400-24.flac")
 	if err := os.MkdirAll(filepath.Dir(sidecarPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -123,13 +123,13 @@ func TestDownloadSourceServesOriginalWhenNoVariantParam(t *testing.T) {
 func TestDownloadVariantServesSidecar(t *testing.T) {
 	hs, tok, root, vs, sidecar := fileVariantFixture(t)
 	srcInfo := statSourceOrFail(t, root, "Artist/Album/01.flac")
-	vs.records["Artist/Album/01.flac|upscaled-v1-176400-24"] = &VariantRecord{
+	vs.records["Artist/Album/01.flac|upscaled-v2-176400-24"] = &VariantRecord{
 		SidecarPath:   sidecar,
 		SourceMTimeNS: srcInfo.ModTime().UnixNano(),
 		SourceSize:    srcInfo.Size(),
 	}
 
-	resp := authGet(t, hs, "/v1/download?path=Artist/Album/01.flac&variant=upscaled-v1-176400-24", tok)
+	resp := authGet(t, hs, "/v1/download?path=Artist/Album/01.flac&variant=upscaled-v2-176400-24", tok)
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatalf("status: got %d, want 200", resp.StatusCode)
@@ -152,7 +152,7 @@ func TestDownloadVariantServesSidecar(t *testing.T) {
 func TestDownloadVariantNotFoundReturns404(t *testing.T) {
 	hs, tok, _, _, _ := fileVariantFixture(t)
 	// vs.records is empty — every variantID misses.
-	resp := authGet(t, hs, "/v1/download?path=Artist/Album/01.flac&variant=upscaled-v1-176400-24", tok)
+	resp := authGet(t, hs, "/v1/download?path=Artist/Album/01.flac&variant=upscaled-v2-176400-24", tok)
 	defer resp.Body.Close()
 	if resp.StatusCode != 404 {
 		t.Errorf("status: got %d, want 404", resp.StatusCode)
@@ -172,7 +172,7 @@ func TestDownloadVariantNotFoundReturns404(t *testing.T) {
 func TestDownloadVariantStaleOnMtimeMismatchReturns410(t *testing.T) {
 	hs, tok, root, vs, sidecar := fileVariantFixture(t)
 	srcInfo := statSourceOrFail(t, root, "Artist/Album/01.flac")
-	vs.records["Artist/Album/01.flac|upscaled-v1-176400-24"] = &VariantRecord{
+	vs.records["Artist/Album/01.flac|upscaled-v2-176400-24"] = &VariantRecord{
 		SidecarPath: sidecar,
 		// 30 s drift well exceeds the 2 s SMB/FAT32-aware tolerance.
 		// Don't bring this down to a sub-2 s value — the gate is
@@ -181,7 +181,7 @@ func TestDownloadVariantStaleOnMtimeMismatchReturns410(t *testing.T) {
 		SourceSize:    srcInfo.Size(),
 	}
 
-	resp := authGet(t, hs, "/v1/download?path=Artist/Album/01.flac&variant=upscaled-v1-176400-24", tok)
+	resp := authGet(t, hs, "/v1/download?path=Artist/Album/01.flac&variant=upscaled-v2-176400-24", tok)
 	defer resp.Body.Close()
 	if resp.StatusCode != 410 {
 		t.Errorf("status: got %d, want 410", resp.StatusCode)
@@ -195,13 +195,13 @@ func TestDownloadVariantStaleOnMtimeMismatchReturns410(t *testing.T) {
 func TestDownloadVariantStaleOnSizeMismatchReturns410(t *testing.T) {
 	hs, tok, root, vs, sidecar := fileVariantFixture(t)
 	srcInfo := statSourceOrFail(t, root, "Artist/Album/01.flac")
-	vs.records["Artist/Album/01.flac|upscaled-v1-176400-24"] = &VariantRecord{
+	vs.records["Artist/Album/01.flac|upscaled-v2-176400-24"] = &VariantRecord{
 		SidecarPath:   sidecar,
 		SourceMTimeNS: srcInfo.ModTime().UnixNano(),
 		SourceSize:    srcInfo.Size() + 1,
 	}
 
-	resp := authGet(t, hs, "/v1/download?path=Artist/Album/01.flac&variant=upscaled-v1-176400-24", tok)
+	resp := authGet(t, hs, "/v1/download?path=Artist/Album/01.flac&variant=upscaled-v2-176400-24", tok)
 	defer resp.Body.Close()
 	if resp.StatusCode != 410 {
 		t.Errorf("status: got %d, want 410 (stale on size mismatch)", resp.StatusCode)
@@ -220,13 +220,13 @@ func TestDownloadVariantMissingOnDiskReturns410(t *testing.T) {
 	if err := os.Remove(sidecar); err != nil {
 		t.Fatalf("rm sidecar: %v", err)
 	}
-	vs.records["Artist/Album/01.flac|upscaled-v1-176400-24"] = &VariantRecord{
+	vs.records["Artist/Album/01.flac|upscaled-v2-176400-24"] = &VariantRecord{
 		SidecarPath:   sidecar,
 		SourceMTimeNS: srcInfo.ModTime().UnixNano(),
 		SourceSize:    srcInfo.Size(),
 	}
 
-	resp := authGet(t, hs, "/v1/download?path=Artist/Album/01.flac&variant=upscaled-v1-176400-24", tok)
+	resp := authGet(t, hs, "/v1/download?path=Artist/Album/01.flac&variant=upscaled-v2-176400-24", tok)
 	defer resp.Body.Close()
 	if resp.StatusCode != 410 {
 		t.Errorf("status: got %d, want 410", resp.StatusCode)
@@ -260,7 +260,7 @@ func TestDownloadVariantWhenFeatureDisabledReturns404(t *testing.T) {
 	hs := httptest.NewServer(srv.Handler())
 	t.Cleanup(hs.Close)
 
-	resp := authGet(t, hs, "/v1/download?path=Artist/Album/01.flac&variant=upscaled-v1-176400-24", raw)
+	resp := authGet(t, hs, "/v1/download?path=Artist/Album/01.flac&variant=upscaled-v2-176400-24", raw)
 	defer resp.Body.Close()
 	if resp.StatusCode != 404 {
 		t.Errorf("status: got %d, want 404 (variant feature off)", resp.StatusCode)
@@ -286,7 +286,7 @@ func TestDownloadVariantNormalizesPathRedundantSeparators(t *testing.T) {
 	hs, tok, root, vs, sidecar := fileVariantFixture(t)
 	srcInfo := statSourceOrFail(t, root, "Artist/Album/01.flac")
 	// Record is keyed at the canonical path (what the scanner stores).
-	vs.records["Artist/Album/01.flac|upscaled-v1-176400-24"] = &VariantRecord{
+	vs.records["Artist/Album/01.flac|upscaled-v2-176400-24"] = &VariantRecord{
 		SidecarPath:   sidecar,
 		SourceMTimeNS: srcInfo.ModTime().UnixNano(),
 		SourceSize:    srcInfo.Size(),
@@ -303,9 +303,9 @@ func TestDownloadVariantNormalizesPathRedundantSeparators(t *testing.T) {
 		wantSize int
 		wantByte byte
 	}{
-		{"redundant separator", "Artist//Album/01.flac", "upscaled-v1-176400-24", 512, 0xCC},
-		{"dot-segment", "Artist/./Album/01.flac", "upscaled-v1-176400-24", 512, 0xCC},
-		{"leading slash", "/Artist/Album/01.flac", "upscaled-v1-176400-24", 512, 0xCC},
+		{"redundant separator", "Artist//Album/01.flac", "upscaled-v2-176400-24", 512, 0xCC},
+		{"dot-segment", "Artist/./Album/01.flac", "upscaled-v2-176400-24", 512, 0xCC},
+		{"leading slash", "/Artist/Album/01.flac", "upscaled-v2-176400-24", 512, 0xCC},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

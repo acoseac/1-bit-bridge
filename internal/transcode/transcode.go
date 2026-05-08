@@ -49,7 +49,19 @@ var logger = logging.Component("transcode")
 // to a min-phase filter) bumps this so the iOS picker can
 // distinguish "v1 upscale" from "v2 upscale" if they ever coexist
 // during a transition.
-const VariantSchemaVersion = "v1"
+//
+// **v2 (this version)**: `-G` (gain-guard) added to SoxArgs. Sox
+// pre-scans the input for the headroom needed to prevent clipping
+// during the rate-conversion + dither pipeline and applies a
+// matching attenuation. Fires only when the source has 0 dBFS
+// peaks (most modern pop masters); the typical attenuation is
+// well under 1 dB. The audio CONTENT shifts under guard, so the
+// schema bump produces a fresh VariantID — operators run `bridge
+// upscale` once after upgrade and the iOS client picks up the new
+// guard-clean variants automatically. Pre-v2 sidecars stay served
+// by their existing track_variants rows until the next
+// `bridge upscale --gc` pass cleans them up.
+const VariantSchemaVersion = "v2"
 
 // Quality presets map to SoX `rate` flag combinations. We keep the
 // mapping internal so a future `-q` knob on the CLI doesn't bake
@@ -89,7 +101,7 @@ type JobSpec struct {
 //
 //	upscaled-<schemaVersion>-<targetRate>-<targetBits>
 //
-// e.g. `upscaled-v1-176400-24`. iOS keys on the `upscaled-` prefix
+// e.g. `upscaled-v2-176400-24`. iOS keys on the `upscaled-` prefix
 // to slot the variant into the share-level "prefer upscaled"
 // resolution. Future variant kinds (e.g. PCM→DSD synthesis) get
 // their own prefix.
@@ -141,6 +153,18 @@ func (j JobSpec) SidecarPath() string {
 // internal float to the 24/32-bit integer FLAC output. Required
 // for audible transparency at 24-bit and benign at 32-bit (the
 // dither noise is below the LSB).
+//
+// `-G` (gain-guard, leading global option) instructs sox to pre-
+// scan the input for the headroom needed to prevent clipping
+// through the rate-conversion + dither pipeline and apply a
+// matching attenuation. Required for upscaling 0 dBFS-mastered
+// material (most modern pop / loudness-war masters): without it,
+// intersample peaks the rate filter reconstructs above 0 dBFS
+// would clip on the integer FLAC output. The attenuation is
+// computed from the actual peak — typically well under 1 dB and
+// inaudible — and only fires when the source has the headroom
+// problem. Cost is one extra peak-scan pass; invisible against
+// the rate-conversion CPU dominating the run.
 func (j JobSpec) SoxArgs() ([]string, string) {
 	rateFlag := "-v"
 	switch j.Quality {
@@ -159,6 +183,7 @@ func (j JobSpec) SoxArgs() ([]string, string) {
 	// found post-merge of PR #126: enqueue worked but every sox
 	// invocation failed during the worker pool's actual run.)
 	args := []string{
+		"-G",
 		j.SourceAbsPath,
 		"-b", strconv.Itoa(j.TargetBits),
 		"-t", "flac",
@@ -167,7 +192,7 @@ func (j JobSpec) SoxArgs() ([]string, string) {
 		"dither", "-s",
 	}
 	settings := fmt.Sprintf(
-		`{"resampler":"sox","quality":%q,"rateFlag":%q,"targetRate":%d,"targetBits":%d,"schemaVersion":%q}`,
+		`{"resampler":"sox","quality":%q,"rateFlag":%q,"targetRate":%d,"targetBits":%d,"guard":true,"schemaVersion":%q}`,
 		j.Quality, rateFlag, j.TargetSampleRate, j.TargetBits, VariantSchemaVersion)
 	return args, settings
 }

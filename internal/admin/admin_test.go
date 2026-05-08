@@ -709,7 +709,7 @@ func TestUpscaleStatsDisabledWithHistory(t *testing.T) {
 	}
 	if err := srv.deps.Manifest.UpsertVariant(manifest.VariantRow{
 		SourcePath:    "Music/Album/01.flac",
-		VariantID:     "upscaled-v1-176400-24",
+		VariantID:     "upscaled-v2-176400-24",
 		SidecarPath:   "/dev/null/sidecar.flac",
 		Format:        "flac",
 		SampleRate:    176400,

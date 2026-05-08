@@ -19,8 +19,8 @@ func TestVariantCRUDRoundTrip(t *testing.T) {
 
 	row := VariantRow{
 		SourcePath:    "Music/Album/01.flac",
-		VariantID:     "upscaled-v1-176400-24",
-		SidecarPath:   "/tmp/x/abc-upscaled-v1-176400-24.flac",
+		VariantID:     "upscaled-v2-176400-24",
+		SidecarPath:   "/tmp/x/abc-upscaled-v2-176400-24.flac",
 		Format:        "flac",
 		SampleRate:    176400,
 		BitsPerSample: 24,
@@ -75,7 +75,7 @@ func TestUpsertVariantReplacesExisting(t *testing.T) {
 	upsertParent(t, s, "Music/A/1.flac")
 
 	first := VariantRow{
-		SourcePath: "Music/A/1.flac", VariantID: "upscaled-v1-176400-24",
+		SourcePath: "Music/A/1.flac", VariantID: "upscaled-v2-176400-24",
 		SidecarPath: "/tmp/old.flac", Format: "flac",
 		SampleRate: 176400, BitsPerSample: 24,
 		SizeBytes: 100, SourceMTimeNS: 1, SourceSize: 1,
@@ -120,7 +120,7 @@ func TestListTracksSplicesVariants(t *testing.T) {
 
 	// Two variants on track 1, none on track 2 — covers the
 	// non-empty + empty branches of the aggregation.
-	for _, vid := range []string{"upscaled-v1-176400-24", "upscaled-v1-352800-32"} {
+	for _, vid := range []string{"upscaled-v2-176400-24", "upscaled-v2-352800-32"} {
 		if err := s.UpsertVariant(VariantRow{
 			SourcePath: "Music/A/1.flac", VariantID: vid,
 			SidecarPath: "/tmp/" + vid + ".flac", Format: "flac",
@@ -177,8 +177,8 @@ func TestDeleteTrackRemovesSidecarFiles(t *testing.T) {
 
 	// Create two real sidecar files — proves DeleteTrack handles
 	// multi-variant tracks correctly.
-	side1 := filepath.Join(tempDir, "abc-upscaled-v1-176400-24.flac")
-	side2 := filepath.Join(tempDir, "abc-upscaled-v1-352800-32.flac")
+	side1 := filepath.Join(tempDir, "abc-upscaled-v2-176400-24.flac")
+	side2 := filepath.Join(tempDir, "abc-upscaled-v2-352800-32.flac")
 	for _, p := range []string{side1, side2} {
 		if err := os.WriteFile(p, []byte("not really a flac"), 0o644); err != nil {
 			t.Fatal(err)
@@ -186,8 +186,8 @@ func TestDeleteTrackRemovesSidecarFiles(t *testing.T) {
 	}
 
 	for vid, path := range map[string]string{
-		"upscaled-v1-176400-24": side1,
-		"upscaled-v1-352800-32": side2,
+		"upscaled-v2-176400-24": side1,
+		"upscaled-v2-352800-32": side2,
 	} {
 		if err := s.UpsertVariant(VariantRow{
 			SourcePath: "Music/A/1.flac", VariantID: vid,
@@ -229,7 +229,7 @@ func TestDeleteTrackToleratesMissingSidecar(t *testing.T) {
 
 	// Insert variant pointing at a path that doesn't exist on disk.
 	if err := s.UpsertVariant(VariantRow{
-		SourcePath: "Music/A/1.flac", VariantID: "upscaled-v1-176400-24",
+		SourcePath: "Music/A/1.flac", VariantID: "upscaled-v2-176400-24",
 		SidecarPath: "/does/not/exist/abc.flac", Format: "flac",
 		SampleRate: 176400, BitsPerSample: 24, SizeBytes: 1,
 		SourceMTimeNS: 1, SourceSize: 1, SoxSettings: "{}", CreatedAt: 1,
@@ -311,7 +311,7 @@ func TestUpsertVariantBumpsParentIndexedAt(t *testing.T) {
 	// exactly that value into tracks.indexed_at for the parent row.
 	expectedIndexedAt := step + 1_000_000_000
 	if err := s.UpsertVariant(VariantRow{
-		SourcePath: "Music/A/1.flac", VariantID: "upscaled-v1-176400-24",
+		SourcePath: "Music/A/1.flac", VariantID: "upscaled-v2-176400-24",
 		SidecarPath: "/tmp/x.flac", Format: "flac",
 		SampleRate: 176400, BitsPerSample: 24, SizeBytes: 100,
 		SourceMTimeNS: 1, SourceSize: 1, SoxSettings: "{}", CreatedAt: 1,
@@ -376,7 +376,7 @@ func TestUpsertVariantDeltaManifestSurfacesNewVariant(t *testing.T) {
 	s.now = func() time.Time { return time.Unix(0, t1) }
 
 	if err := s.UpsertVariant(VariantRow{
-		SourcePath: "Music/A/1.flac", VariantID: "upscaled-v1-192000-24",
+		SourcePath: "Music/A/1.flac", VariantID: "upscaled-v2-192000-24",
 		SidecarPath: "/tmp/u.flac", Format: "flac",
 		SampleRate: 192000, BitsPerSample: 24, SizeBytes: 100,
 		SourceMTimeNS: 1, SourceSize: 1, SoxSettings: "{}", CreatedAt: t1,
@@ -439,7 +439,7 @@ func TestDeleteVariantBumpsParentIndexedAt(t *testing.T) {
 	preDeleteAt := parentIndexedAt + (1 * time.Hour).Nanoseconds()
 	s.now = func() time.Time { return time.Unix(0, preDeleteAt) }
 	if err := s.UpsertVariant(VariantRow{
-		SourcePath: "Music/A/1.flac", VariantID: "upscaled-v1-176400-24",
+		SourcePath: "Music/A/1.flac", VariantID: "upscaled-v2-176400-24",
 		SidecarPath: "/tmp/x.flac", Format: "flac",
 		SampleRate: 176400, BitsPerSample: 24, SizeBytes: 100,
 		SourceMTimeNS: 1, SourceSize: 1, SoxSettings: "{}", CreatedAt: 1,
@@ -461,7 +461,7 @@ func TestDeleteVariantBumpsParentIndexedAt(t *testing.T) {
 	// bump indexed_at past the pre-delete value.
 	expectedAfter := preDeleteAt + (1 * time.Hour).Nanoseconds()
 	s.now = func() time.Time { return time.Unix(0, expectedAfter) }
-	if err := s.DeleteVariant("Music/A/1.flac", "upscaled-v1-176400-24"); err != nil {
+	if err := s.DeleteVariant("Music/A/1.flac", "upscaled-v2-176400-24"); err != nil {
 		t.Fatalf("DeleteVariant: %v", err)
 	}
 
@@ -548,7 +548,7 @@ func TestUpsertVariantMonotonicGuard(t *testing.T) {
 	s.now = func() time.Time { return time.Unix(0, pastTimestamp) }
 
 	if err := s.UpsertVariant(VariantRow{
-		SourcePath: "Music/A/1.flac", VariantID: "upscaled-v1-176400-24",
+		SourcePath: "Music/A/1.flac", VariantID: "upscaled-v2-176400-24",
 		SidecarPath: "/tmp/x.flac", Format: "flac",
 		SampleRate: 176400, BitsPerSample: 24, SizeBytes: 100,
 		SourceMTimeNS: 1, SourceSize: 1, SoxSettings: "{}", CreatedAt: 1,
@@ -600,7 +600,7 @@ func TestUpsertVariantEqualClockStillAdvances(t *testing.T) {
 	s.now = func() time.Time { return time.Unix(0, initialIndexedAt) }
 
 	if err := s.UpsertVariant(VariantRow{
-		SourcePath: "Music/A/1.flac", VariantID: "upscaled-v1-176400-24",
+		SourcePath: "Music/A/1.flac", VariantID: "upscaled-v2-176400-24",
 		SidecarPath: "/tmp/x.flac", Format: "flac",
 		SampleRate: 176400, BitsPerSample: 24, SizeBytes: 100,
 		SourceMTimeNS: 1, SourceSize: 1, SoxSettings: "{}", CreatedAt: 1,
