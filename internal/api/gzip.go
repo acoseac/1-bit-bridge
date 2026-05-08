@@ -11,6 +11,13 @@ import (
 // case-insensitive on the encoding tokens. Missing header → false
 // (identity is the documented default per the spec).
 //
+// Two-pass: first scan for any explicit `gzip` token and record its
+// outcome; only fall back to a wildcard if no explicit gzip token is
+// present. RFC 9110 §12.5.3: "a more specific reference has precedence
+// over a wildcard". Single-pass first-match-wins gets `*, gzip;q=0`
+// wrong (returns true, but the explicit gzip refusal must win
+// regardless of position).
+//
 // Deliberately simpler than a full content-negotiation parser: the
 // bridge's primary client (iOS URLSession) sends a fixed
 // `Accept-Encoding: gzip, deflate, br` shape and the secondary
@@ -24,6 +31,12 @@ func acceptsGzip(r *http.Request) bool {
 	if ae == "" {
 		return false
 	}
+	var (
+		sawGzip          bool
+		gzipAccepted     bool
+		sawWildcard      bool
+		wildcardAccepted bool
+	)
 	for _, part := range strings.Split(ae, ",") {
 		token, params, _ := strings.Cut(strings.TrimSpace(part), ";")
 		token = strings.ToLower(strings.TrimSpace(token))
@@ -46,9 +59,23 @@ func acceptsGzip(r *http.Request) bool {
 				break
 			}
 		}
-		if !refused {
-			return true
+		if token == "gzip" {
+			sawGzip = true
+			// Multiple gzip tokens are malformed per spec; preserve
+			// the prior "any non-refused gzip token rescues" shape so
+			// `gzip;q=0, gzip` continues to accept.
+			if !refused {
+				gzipAccepted = true
+			}
+		} else {
+			sawWildcard = true
+			if !refused {
+				wildcardAccepted = true
+			}
 		}
 	}
-	return false
+	if sawGzip {
+		return gzipAccepted
+	}
+	return sawWildcard && wildcardAccepted
 }

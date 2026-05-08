@@ -693,6 +693,18 @@ func (s *Server) manifestHandler(w http.ResponseWriter, r *http.Request) {
 		if closeErr := gz.Close(); closeErr != nil && writeErr == nil {
 			writeErr = closeErr
 		}
+	} else if useGzip && writeErr == nil {
+		// WriteManifest succeeded but produced zero bytes (empty
+		// library — no tracks, no folders). The negotiation headers
+		// were set up-front, but a zero-byte response with
+		// Content-Encoding: gzip is invalid (gzip needs at least the
+		// 10-byte header + 8-byte trailer). iOS URLSession honors
+		// Content-Encoding and would surface a transport error trying
+		// to decompress nothing. Strip the encoding headers so the
+		// client sees a plain empty 200 — same shape as the pre-stream
+		// error path below, without the 5xx.
+		w.Header().Del("Content-Encoding")
+		w.Header().Del("Vary")
 	}
 
 	if writeErr != nil {

@@ -42,6 +42,15 @@ func TestAcceptsGzip(t *testing.T) {
 		{"  gzip  ,  br  ", true},      // leading/trailing whitespace
 		{"gzip  ;  q=0.5", true},       // whitespace around q-param
 		{"gzip;q=0.5;extra=foo", true}, // unknown extension params
+		// RFC 9110 §12.5.3 — explicit reference takes precedence over
+		// a wildcard. Order MUST NOT matter.
+		{"*, gzip;q=0", false},     // wildcard accept, explicit gzip refuse → refuse
+		{"gzip;q=0, *", false},     // explicit gzip refuse before wildcard → refuse
+		{"gzip;q=0, *;q=1", false}, // explicit gzip refuse beats explicit wildcard accept
+		{"*;q=0, gzip", true},      // explicit wildcard refuse, explicit gzip accept → accept
+		{"*;q=1, gzip;q=0", false}, // explicit gzip refuse beats explicit wildcard accept (reversed)
+		{"*;q=0", false},           // bare wildcard refusal → refuse (no explicit gzip)
+		{"*;q=0.5", true},          // bare wildcard accept (non-zero q) → accept
 	}
 	for _, c := range cases {
 		t.Run(c.header, func(t *testing.T) {
@@ -63,6 +72,14 @@ type fakeStreamingProvider struct {
 }
 
 func (f *fakeStreamingProvider) WriteManifest(ctx context.Context, w io.Writer, since time.Time) error {
+	// Skip the Write entirely when body is empty so the test fake
+	// matches realistic behaviour: a real manifest streamer with an
+	// empty library returns without invoking Write, leaving the
+	// underlying gzip Writer un-touched (no header emitted, dw.written
+	// stays false).
+	if len(f.body) == 0 {
+		return nil
+	}
 	_, err := w.Write(f.body)
 	return err
 }
@@ -208,6 +225,44 @@ func TestManifestPreStreamErrorStripsGzipHeaders(t *testing.T) {
 	}
 	if er.Error != "internal" {
 		t.Errorf("error code = %q, want internal", er.Error)
+	}
+}
+
+// TestManifestEmptyBodyStripsGzipHeaders covers the empty-manifest
+// path: WriteManifest succeeds with zero bytes (an empty library,
+// or a `since` filter that excluded every track). A response with
+// Content-Encoding: gzip + zero body is invalid (gzip needs 10-byte
+// header + 8-byte trailer); iOS URLSession would surface a transport
+// error decoding the zero body. The handler must strip the encoding
+// headers so the wire response is a plain empty 200.
+func TestManifestEmptyBodyStripsGzipHeaders(t *testing.T) {
+	// fakeStreamingProvider with empty body — WriteManifest writes
+	// zero bytes and returns nil.
+	hs, tok := withManifest(t, &fakeStreamingProvider{body: nil})
+
+	req, _ := http.NewRequest("GET", hs.URL+"/v1/manifest", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("Accept-Encoding", "gzip")
+	tr := &http.Transport{DisableCompression: true}
+	cli := &http.Client{Transport: tr}
+	resp, err := cli.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Content-Encoding"); got != "" {
+		t.Errorf("Content-Encoding = %q, want empty (header stripped on empty body)", got)
+	}
+	if got := resp.Header.Get("Vary"); got != "" {
+		t.Errorf("Vary = %q, want empty (header stripped on empty body)", got)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if len(body) != 0 {
+		t.Errorf("body length = %d, want 0", len(body))
 	}
 }
 
