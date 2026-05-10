@@ -401,6 +401,52 @@ func TestHealthAdvertisesVariantBumpsIndexFeature(t *testing.T) {
 	}
 }
 
+// TestHealthAdvertisesUpscaleCompleteEventsFeature — iOS gates its
+// upscale resync ladder on this flag: when present, only the +600 s
+// safety rung fires (instead of the full 8 s/30 s/2 m/5 m/10 m
+// ladder). The polling savings on a folder-wide upscale request are
+// 4× per track. A typo / accidental rename here breaks the wire
+// contract iOS keys on — pin it.
+func TestHealthAdvertisesUpscaleCompleteEventsFeature(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := &config.Config{
+		LibraryRoots:  []string{tmp},
+		ListenAddress: ":7788",
+		LibraryName:   "Test",
+	}
+	store, _ := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
+	srv := New(cfg, store, nil, "fp")
+	hs := httptest.NewServer(srv.Handler())
+	t.Cleanup(hs.Close)
+
+	resp := authGet(t, hs, "/v1/health", "")
+	body := readAllOrFail(t, resp)
+	resp.Body.Close()
+
+	var got HealthResponse
+	if err := jsonUnmarshalForTest(body, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	found := false
+	for _, f := range got.Features {
+		if f == "upscaleCompleteEvents" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("Features did not contain \"upscaleCompleteEvents\"; got %v", got.Features)
+	}
+	// Alpha-sort invariant — clients comparing /v1/health response
+	// fingerprints rely on stable ordering.
+	for i := 1; i < len(got.Features); i++ {
+		if got.Features[i-1] > got.Features[i] {
+			t.Errorf("Features not alpha-sorted at index %d: %q > %q (got %v)",
+				i, got.Features[i-1], got.Features[i], got.Features)
+		}
+	}
+}
+
 // readAllOrFail is a tiny io.ReadAll wrapper that fails the test
 // on a read error, keeping per-case bodies focused on the
 // assertion they care about.

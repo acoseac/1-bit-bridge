@@ -1124,6 +1124,23 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		upscalePool.SetOnStateChange(func() {
 			broker.Publish("upscale.stats", upscaleStats.UpscaleStatsSnapshot())
 		})
+		// Per-job completion fires after UpsertVariant commits. The
+		// pool passes primitives so it never imports the api package;
+		// the closure builds the typed wire shape here. Topic name is
+		// flat alphanumeric+dot per the broker convention (sister to
+		// "upscale.stats" / "pairing.<id>"). iOS gates ladder rungs on
+		// the "upscaleCompleteEvents" capability flag advertised in
+		// /v1/health, so pre-feature iOS clients won't observe this
+		// event yet.
+		upscalePool.SetOnJobComplete(func(path, variantID string, sampleRate, bitsPerSample int, completedAt time.Time) {
+			broker.Publish("upscale.complete", api.UpscaleCompleteEvent{
+				Path:          path,
+				VariantID:     variantID,
+				SampleRate:    sampleRate,
+				BitsPerSample: bitsPerSample,
+				CompletedAt:   completedAt,
+			})
+		})
 	}
 
 	// Pairing store fires onStateChange after Approve / Decline /

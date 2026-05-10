@@ -485,7 +485,13 @@ type HealthResponse struct {
 	// iOS treats absence as "feature absent" so any client-side
 	// recovery path runs unconditionally on those bridges.
 	//
-	// Current keys:
+	// Current keys (kept alpha-sorted on the wire):
+	//   - "upscaleCompleteEvents": bridge publishes a per-job
+	//     `upscale.complete` SSE event after `UpsertVariant` commits.
+	//     iOS uses this to promote the wand chrome to "Ready" within
+	//     ~1-2 s of bridge-side completion (vs the legacy 8 s first
+	//     ladder rung), and skips 4-of-5 polling-ladder rungs when
+	//     present, keeping only the +600 s safety backstop.
 	//   - "variantBumpsIndex": UpsertVariant / DeleteVariant bump
 	//     `tracks.indexed_at` for the parent row, so iOS delta-sync
 	//     surfaces variant changes without needing a full rescan.
@@ -549,7 +555,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// client comparing /v1/health response fingerprints (e.g. for
 	// content-equality short-circuit caches) doesn't churn on every
 	// poll. New keys append in alpha order.
-	resp.Features = []string{"variantBumpsIndex"}
+	resp.Features = []string{"upscaleCompleteEvents", "variantBumpsIndex"}
 	writeJSON(w, http.StatusOK, resp)
 }
 
