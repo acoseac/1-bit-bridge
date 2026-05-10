@@ -73,8 +73,23 @@ type Pool struct {
 	// other optional Pool integration. cmd/bridge wires this to
 	// publish a fresh `/v1/upscale/stats` snapshot to the SSE
 	// broker so iOS clients see push-delivered updates instead of
-	// polling. Callbacks are invoked synchronously on the worker
-	// goroutine — keep them lightweight.
+	// polling.
+	//
+	// **Threading model**: invoked synchronously, serially, on the
+	// SINGLE long-lived publisher goroutine (`runPublisher`) when
+	// it drains `stateChangeChan`. Workers send signals via the
+	// non-blocking `fireStateChange()` helper (capacity-1 buffer +
+	// select-default = signals coalesce); the publisher then calls
+	// this callback at most once per drained signal. Implications
+	// for the wired callback: (a) keep it bounded — a slow callback
+	// stalls subsequent state-change AND job-complete deliveries
+	// because the same publisher serves both channels; (b) MUST
+	// NOT re-acquire `p.mu` (publisher already holds no Pool locks
+	// but `Stats() / UpscaleStatsSnapshot` reads p.mu, and a
+	// callback that takes another mutex layered above p.mu could
+	// reintroduce the cross-mutex coupling the publisher pattern
+	// was designed to eliminate); (c) MUST tolerate Stop() ordering
+	// — see Stop()'s docstring.
 	stateChangeMu sync.RWMutex
 	onStateChange func()
 
@@ -85,10 +100,20 @@ type Pool struct {
 	// bumped `tracks.indexed_at`. Nil when not wired. cmd/bridge
 	// builds an `api.UpscaleCompleteEvent` from these primitives and
 	// publishes it to the SSE broker on topic `"upscale.complete"`.
-	// Worker invokes the callback in a fresh goroutine OUTSIDE
-	// `p.mu` (see processJob), so a slow consumer can never back-
-	// pressure the transcode pool — mirrors the onStateChange
-	// pattern.
+	//
+	// **Threading model**: invoked synchronously, one-at-a-time, on
+	// the SINGLE long-lived publisher goroutine (`runPublisher`) as
+	// it drains `jobCompleteChan`. Workers send via the BLOCKING
+	// `fireJobComplete()` helper (buffered cap=2×workers, no drops)
+	// so every `upscale.complete` event reaches this callback —
+	// load-bearing for the iOS reverse-index path-promotion
+	// machinery that keys on per-event `path`/`variantID`. A full
+	// buffer briefly stalls the next worker send (correct
+	// backpressure: delaying the next sox job is better than losing
+	// an event). Same callback-side rules as `onStateChange` —
+	// don't block forever, don't re-acquire `p.mu`, respect Stop()
+	// ordering. `publisherWG` ensures every buffered event is
+	// drained before Stop returns.
 	jobCompleteMu sync.RWMutex
 	onJobComplete func(path, variantID string, sampleRate, bitsPerSample int, completedAt time.Time)
 
@@ -104,6 +129,39 @@ type Pool struct {
 	// tests override per-instance to drive the timeout branch in
 	// milliseconds without racing other tests on a package-level var.
 	jobTimeout time.Duration
+
+	// Coalescing publisher (CLAUDE.md: "Bounded SSE publisher
+	// goroutine for transcode events"). Replaces the prior pattern
+	// of spawning a fresh `go fire()` goroutine per state transition,
+	// which was unbounded under burst (a 500-clip enqueue storm
+	// fanned ≥3000 ephemeral goroutines if the broker briefly
+	// stalled). One long-lived publisher consumes both channels and
+	// invokes the wired callbacks synchronously, one at a time.
+	//
+	// `stateChangeChan` cap=1: state-change events are coalesce-able
+	// (the wired callback always reads a fresh snapshot, so any
+	// missed signal is equivalent to one that arrived). Workers
+	// non-blocking-send via select+default — drops are correct.
+	//
+	// `jobCompleteChan` cap=2×workers: `upscale.complete` events
+	// are NOT coalesce-able (each carries a unique path/variantID
+	// the iOS reverse index needs). Workers blocking-send for
+	// fidelity; a full buffer briefly stalls the next send, which
+	// is the correct backpressure (delaying the next sox job is
+	// better than losing an event the iOS path-promotion depends
+	// on).
+	//
+	// Deadlock-avoidance reasoning (preserves the invariant the
+	// pre-fix `go fire()` was protecting): the publisher is a
+	// SEPARATE goroutine; workers never hold p.mu while sending;
+	// the publisher invokes the broker callback synchronously but
+	// the broker takes its OWN mutex, not p.mu — so the prior
+	// re-entrancy hazard (callback → UpscaleStatsSnapshot → Stats →
+	// p.mu) cannot deadlock the worker. Stop() ordering is load-
+	// bearing — see Stop's docstring.
+	stateChangeChan chan struct{}
+	jobCompleteChan chan jobCompleteEvent
+	publisherWG     sync.WaitGroup
 }
 
 // poolJob is one transcode unit on the Pool's queue. Carries the
@@ -112,6 +170,24 @@ type Pool struct {
 type poolJob struct {
 	spec  JobSpec
 	dedup string
+}
+
+// jobCompleteEvent is the payload pushed onto Pool.jobCompleteChan
+// by a worker that just successfully wrote a new variant row. The
+// publisher consumes these and invokes the wired onJobComplete
+// callback (which builds an api.UpscaleCompleteEvent and publishes
+// it to the SSE broker on topic `"upscale.complete"`).
+//
+// Fields mirror the onJobComplete signature exactly so the publisher
+// is a straight unwrap-and-call. `path` is byte-identical to the
+// manifest's Track.path (what iOS keys on for its reverse index);
+// don't reformat or normalise.
+type jobCompleteEvent struct {
+	path          string
+	variantID     string
+	sampleRate    int
+	bitsPerSample int
+	completedAt   time.Time
 }
 
 // ErrQueueFull is returned by Enqueue when the pending-job channel
@@ -152,11 +228,18 @@ func NewPool(store *manifest.Store, workers, queueCap int) *Pool {
 		stopCancel: stopCancel,
 		runner:     RunSox,
 		jobTimeout: defaultJobTimeout,
+		// stateChange capacity 1 — coalesce. jobComplete capacity
+		// 2×workers — fidelity buffer per the docstring on the
+		// channel fields.
+		stateChangeChan: make(chan struct{}, 1),
+		jobCompleteChan: make(chan jobCompleteEvent, 2*workers),
 	}
 	for i := 0; i < workers; i++ {
 		p.wg.Add(1)
 		go p.workerLoop()
 	}
+	p.publisherWG.Add(1)
+	go p.runPublisher()
 	return p
 }
 
@@ -186,11 +269,11 @@ func (p *Pool) Enqueue(spec JobSpec) error {
 	// order made `fire()` run BEFORE the unlock, deadlocking when
 	// the wired callback called UpscaleStatsSnapshot which takes
 	// p.mu.Lock() inside Stats(). CodeRabbit + Gemini caught this
-	// at critical severity. Now: explicit unlock per branch, fire
-	// in a goroutine OUTSIDE the lock so the publisher's DB query
-	// (CountVariants in UpscaleStatsSnapshot) doesn't stall the
-	// caller and the broker's own mutex can't cross-mutex couple
-	// with this lock.
+	// at critical severity. Now: explicit unlock per branch, then
+	// fireStateChange() — the publisher consumes the signal
+	// asynchronously on its own goroutine, so the wired broker
+	// callback (with its own mutex) can't cross-mutex couple with
+	// p.mu via the publish path.
 	p.mu.Lock()
 	if p.closed.Load() {
 		p.mu.Unlock()
@@ -208,11 +291,11 @@ func (p *Pool) Enqueue(spec JobSpec) error {
 	select {
 	case p.jobs <- poolJob{spec: spec, dedup: dedup}:
 		p.enqueuedCnt.Add(1)
-		fire := p.notifyStateChangeFn()
 		p.mu.Unlock()
-		if fire != nil {
-			go fire()
-		}
+		// Non-blocking send to the publisher; safe to invoke after
+		// unlock OR (in principle) under the lock since the send
+		// can't park. Kept after unlock to minimise lock window.
+		p.fireStateChange()
 		return nil
 	default:
 		// Roll back the optimistic claim — couldn't fit the job
@@ -267,17 +350,34 @@ func (p *Pool) SetOnJobComplete(fn func(path, variantID string, sampleRate, bits
 // Stop signals the workers to drain the queue and exit. Blocks
 // until every in-flight conversion completes (either through
 // success, failure, or sox-process kill on the cancelled
-// context). The Pool can't be reused after Stop.
+// context) AND the publisher has drained its remaining buffered
+// events. The Pool can't be reused after Stop.
 //
 // Idempotent: calling Stop twice is safe (the underlying CancelFunc
 // is itself idempotent).
 //
-// **Acquires `p.mu` before closing the channel** so any in-flight
-// Enqueue completes its channel send (or its dedup-rollback)
-// before close() lands. Without this, a concurrent Enqueue could
-// pass its `closed` re-check, attempt to send, and hit a
-// "send on closed channel" panic. See the comment on Enqueue
-// for the full race trace.
+// **Shutdown ordering is load-bearing** — the sequence below
+// prevents BOTH "send on closed channel" panics AND publisher
+// deadlocks:
+//
+//  1. close(p.jobs) under p.mu so any in-flight Enqueue completes
+//     its channel send (or its dedup-rollback) before close()
+//     lands. See Enqueue's docstring for the full race trace.
+//  2. stopCancel() so any sox subprocess waiting on the per-job
+//     context dies promptly.
+//  3. p.wg.Wait() — block until every worker goroutine has
+//     returned. After this point, no worker can send to
+//     stateChangeChan or jobCompleteChan.
+//  4. close() both publisher channels — safe ONLY because step 3
+//     guaranteed no more sends are possible.
+//  5. p.publisherWG.Wait() — let the publisher drain its remaining
+//     buffered events (especially `upscale.complete` events the
+//     iOS path-promotion path depends on), observe both channels
+//     closed, and return.
+//
+// The publisher does NOT exit on stopCtx.Done() — workers blocking-
+// send to jobCompleteChan, and an early publisher exit would
+// deadlock the worker on a buffer-full send.
 func (p *Pool) Stop() {
 	if p.closed.Swap(true) {
 		return
@@ -287,6 +387,91 @@ func (p *Pool) Stop() {
 	p.mu.Unlock()
 	p.stopCancel()
 	p.wg.Wait()
+	// Workers are guaranteed exited; safe to close publisher inputs.
+	close(p.stateChangeChan)
+	close(p.jobCompleteChan)
+	p.publisherWG.Wait()
+}
+
+// fireStateChange enqueues a state-change signal for the publisher.
+// Non-blocking: the channel is capacity 1, and a full buffer means a
+// signal is already pending — dropping the new one is correct because
+// the wired callback always reads a fresh snapshot.
+//
+// Safe to call from any goroutine including under p.mu (the send is
+// non-blocking, so it can't park while holding the lock — preserves
+// the "no callbacks under p.mu" invariant the prior `go fire()`
+// pattern was protecting).
+//
+// Returns false only when the buffer was full and the signal was
+// dropped. Useful for tests that want to assert coalescing
+// behaviour; production callers ignore the return.
+func (p *Pool) fireStateChange() bool {
+	select {
+	case p.stateChangeChan <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+// fireJobComplete enqueues a per-job completion event for the
+// publisher. Blocking send — `upscale.complete` events are NOT
+// coalesce-able (each carries a unique path/variantID the iOS
+// reverse index needs); a full buffer briefly stalls the next
+// send, which is the correct backpressure (delaying the next
+// sox job is better than losing an event).
+//
+// MUST NOT be called under p.mu — a buffer-full stall while
+// holding p.mu would block any Stats() / Enqueue() that needs
+// the lock, which in turn could deadlock the broker callback if
+// it fans out via UpscaleStatsSnapshot. Workers call this from
+// processJob, never holding p.mu (releaseDedup runs first).
+func (p *Pool) fireJobComplete(evt jobCompleteEvent) {
+	p.jobCompleteChan <- evt
+}
+
+// runPublisher is the single long-lived goroutine that consumes
+// stateChangeChan + jobCompleteChan and invokes the wired callbacks
+// synchronously. Replaces the prior pattern of one ephemeral
+// goroutine per state transition (unbounded under burst).
+//
+// Exits ONLY when both input channels are closed AND drained — NOT
+// on stopCtx.Done(). Workers blocking-send to jobCompleteChan; if
+// the publisher exited on stopCtx cancellation while a worker was
+// mid-send, the worker would hang forever and p.wg.Wait() in Stop
+// would deadlock. Stop() closes the channels AFTER waiting for
+// workers, which is the correct synchronization point.
+//
+// Per-iteration channel-nil pattern: when one channel is observed
+// closed (`ok == false`), it's nil'd out in the local copy so
+// subsequent select iterations can't hot-spin on the always-ready
+// closed-channel case. Once both channels are nil, the for-loop
+// guard exits.
+func (p *Pool) runPublisher() {
+	defer p.publisherWG.Done()
+	stateCh := (<-chan struct{})(p.stateChangeChan)
+	jobCh := (<-chan jobCompleteEvent)(p.jobCompleteChan)
+	for stateCh != nil || jobCh != nil {
+		select {
+		case _, ok := <-stateCh:
+			if !ok {
+				stateCh = nil
+				continue
+			}
+			if fn := p.notifyStateChangeFn(); fn != nil {
+				fn()
+			}
+		case evt, ok := <-jobCh:
+			if !ok {
+				jobCh = nil
+				continue
+			}
+			if fn := p.notifyJobCompleteFn(); fn != nil {
+				fn(evt.path, evt.variantID, evt.sampleRate, evt.bitsPerSample, evt.completedAt)
+			}
+		}
+	}
 }
 
 // Stats returns a snapshot of pool counters for /v1/health
@@ -381,20 +566,18 @@ func (p *Pool) processJob(job poolJob) {
 		}
 		if !released {
 			p.releaseDedup(job.dedup)
-			// Match the synchronous error branches' shape: fire
-			// notifyStateChangeFn AFTER releaseDedup so the published
-			// snapshot reflects the final state (job out of inflight).
-			// Without this, the panic-recovery path would silently
-			// skip the notification — operators would see failedCnt
-			// change in the next tick but SSE clients (admin UI,
-			// iOS) wouldn't get an immediate push update like every
+			// Match the synchronous error branches' shape: fire the
+			// state-change AFTER releaseDedup so the published
+			// snapshot reflects the final state (job out of
+			// inflight). Without this, the panic-recovery path
+			// would silently skip the notification — operators would
+			// see failedCnt change in the next tick but SSE clients
+			// wouldn't get an immediate push update like every
 			// other terminal path produces. Skipped on graceful
 			// shutdown to match the runner-error branch's gate.
 			// (CodeRabbit + Gemini + Greptile concurring on PR #183.)
 			if !p.closed.Load() {
-				if fire := p.notifyStateChangeFn(); fire != nil {
-					go fire()
-				}
+				p.fireStateChange()
 			}
 		}
 	}()
@@ -436,9 +619,7 @@ func (p *Pool) processJob(job poolJob) {
 		// the success / store-failure branches which already
 		// fire post-release.
 		if !p.closed.Load() {
-			if fire := p.notifyStateChangeFn(); fire != nil {
-				go fire()
-			}
+			p.fireStateChange()
 		}
 		return
 	}
@@ -473,39 +654,33 @@ func (p *Pool) processJob(job poolJob) {
 		_ = os.Remove(row.SidecarPath)
 		p.releaseDedup(job.dedup)
 		released = true
-		// Async fire so the worker isn't stalled by the
-		// publisher's CountVariants DB query — Gemini high-
-		// severity review on PR #136. Caller never blocks on
-		// the publish.
-		if fire := p.notifyStateChangeFn(); fire != nil {
-			go fire()
-		}
+		// Worker isn't stalled by the publisher's CountVariants
+		// DB query — Gemini high-severity review on PR #136. The
+		// publisher consumes asynchronously on its own goroutine.
+		p.fireStateChange()
 		return
 	}
 	p.doneCnt.Add(1)
 	p.releaseDedup(job.dedup)
 	released = true
 	// Per-job completion event fires AFTER UpsertVariant commits
-	// (success branch above) and AFTER releaseDedup so the published
-	// snapshot reflects the final state. Path field is the raw
-	// `job.spec.SourceLibraryRel` — byte-identical to the manifest's
-	// `Track.path`, which is what iOS keys on for its reverse index.
-	// Reformatting / normalising here would break the iOS-side
-	// constant-time path lookup. Invoked OUTSIDE p.mu / dedup lock
-	// in a fresh goroutine so a slow SSE subscriber never back-
-	// pressures the worker.
-	if fireJob := p.notifyJobCompleteFn(); fireJob != nil {
-		go fireJob(
-			job.spec.SourceLibraryRel,
-			job.spec.VariantID(),
-			job.spec.TargetSampleRate,
-			job.spec.TargetBits,
-			completedAt,
-		)
-	}
-	if fire := p.notifyStateChangeFn(); fire != nil {
-		go fire()
-	}
+	// (success branch above) and AFTER releaseDedup so the
+	// published snapshot reflects the final state. Path field is
+	// the raw `job.spec.SourceLibraryRel` — byte-identical to the
+	// manifest's `Track.path`, which is what iOS keys on for its
+	// reverse index. Reformatting / normalising here would break
+	// the iOS-side constant-time path lookup. Invoked OUTSIDE
+	// p.mu / dedup lock — fireJobComplete blocking-sends to the
+	// publisher's bounded channel, which provides backpressure
+	// without losing events.
+	p.fireJobComplete(jobCompleteEvent{
+		path:          job.spec.SourceLibraryRel,
+		variantID:     job.spec.VariantID(),
+		sampleRate:    job.spec.TargetSampleRate,
+		bitsPerSample: job.spec.TargetBits,
+		completedAt:   completedAt,
+	})
+	p.fireStateChange()
 }
 
 // releaseDedup drops the (source, variant) slot from the inflight
