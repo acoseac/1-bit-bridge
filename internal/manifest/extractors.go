@@ -95,6 +95,8 @@ func ExtractWithContext(absPath string, t *Track, ec *ExtractContext) error {
 	switch ext {
 	case ".dsf":
 		return extractDSFWithContext(absPath, t, ec)
+	case ".dff":
+		return extractDFFWithContext(absPath, t, ec)
 	case ".m4a", ".mp4", ".m4b", ".m4p":
 		// MP4 container — distinguish ALAC from AAC via the sample-
 		// description box (`tag.FileType()` doesn't actually do this
@@ -648,6 +650,164 @@ func extractDSFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 	return nil
 }
 
+// extractDFFWithContext walks just enough of a DSDIFF (.dff) container
+// to populate Codec / IsDSD / SampleRate. Unlike DSF (a fixed binary
+// header), DFF is chunk-based (FRM8 outer container with PROP and DSD
+// children) and uses BIG-endian sizes. We don't decode tags — DFF's
+// DIIN/COMT chunks aren't widely populated in the wild, and dhowden/tag
+// doesn't recognize the container at all. Path-derived defaults +
+// future enrichment fill in the rest.
+//
+// Compression handling: only `DSD ` (uncompressed) is supported by the
+// iOS player. `DST ` (Direct Stream Transfer) is the lossless DSD
+// compressor used in some SACD rips; iOS would refuse to play it. We
+// log + return without populating IsDSD/SampleRate so iOS-side surface
+// classifies the row as "an unknown audio file" rather than "a DSD
+// track that fails to load". Codec stays "DFF" so `TrackQualityChip`
+// still renders something sensible.
+func extractDFFWithContext(absPath string, t *Track, ec *ExtractContext) error {
+	t.Codec = "DFF"
+
+	f, err := os.Open(absPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	// FRM8 outer chunk: 4 bytes magic, 8 bytes BE size, 4 bytes form
+	// type. The "DSD " form-type tag is what disambiguates a DSDIFF
+	// audio file from any other FRM8-based IFF dialect (e.g. AIFF
+	// shares the chunk-walker shape but a different form magic).
+	frm8 := make([]byte, 16)
+	if _, err := io.ReadFull(f, frm8); err != nil {
+		return fmt.Errorf("dff: short outer header: %w", err)
+	}
+	if string(frm8[0:4]) != "FRM8" {
+		return fmt.Errorf("dff: bad FRM8 magic %q", frm8[0:4])
+	}
+	if string(frm8[12:16]) != "DSD " {
+		return fmt.Errorf("dff: not a DSDIFF DSD form (got %q)", frm8[12:16])
+	}
+
+	// Walk top-level chunks looking for PROP. Each chunk: 4 bytes
+	// FOURCC, 8 bytes BE size, payload, then a single pad byte if
+	// size is odd (DSDIFF / IFF chunk-pad rule).
+	for {
+		var chunkHeader [12]byte
+		if _, err := io.ReadFull(f, chunkHeader[:]); err != nil {
+			// EOF before we hit PROP — DFF malformed but not a hard
+			// scan-aborting error. Codec already stamped.
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				return nil
+			}
+			return fmt.Errorf("dff: chunk header read: %w", err)
+		}
+		fourcc := string(chunkHeader[0:4])
+		size := be64(chunkHeader[4:12])
+		// Defensive size clamp — a corrupt chunk header could declare
+		// a multi-exabyte size and trap downstream allocations. 1 GiB
+		// is far above any plausible PROP / FVER chunk size.
+		if size > 1<<30 {
+			return fmt.Errorf("dff: chunk %q size %d exceeds sanity limit", fourcc, size)
+		}
+		if fourcc == "PROP" {
+			// PROP body: 4 bytes form type ("SND "), then nested chunks.
+			if size < 4 {
+				return nil
+			}
+			body := make([]byte, size)
+			if _, err := io.ReadFull(f, body); err != nil {
+				return fmt.Errorf("dff: PROP body read: %w", err)
+			}
+			if len(body) < 4 || string(body[0:4]) != "SND " {
+				return nil
+			}
+			if dstCompressed := parsePropChunks(body[4:], t); dstCompressed {
+				scanLogger.Warn("dff: DST-compressed DSDIFF not supported; skipping format stamp",
+					"path", absPath)
+			}
+			return nil
+		}
+		// Skip the chunk payload + odd-byte pad.
+		skip := int64(size)
+		if skip%2 == 1 {
+			skip++
+		}
+		if _, err := f.Seek(skip, io.SeekCurrent); err != nil {
+			return fmt.Errorf("dff: seek past %q: %w", fourcc, err)
+		}
+		// PROP must precede the DSD audio chunk per the spec — once we
+		// hit DSD without seeing PROP we won't find it later. Stop.
+		if fourcc == "DSD " {
+			return nil
+		}
+	}
+}
+
+// parsePropChunks walks the body of a DSDIFF PROP chunk (after the
+// leading "SND " form-type) and pulls FS (sample rate) + CMPR
+// (compression). Other property chunks (CHNL, ABSS, LSCO) aren't
+// needed for the iOS Track row.
+//
+// Returns true when CMPR == "DST " so the caller can log the path
+// alongside a "skipping format stamp" warning. Returns false on the
+// happy path AND on malformed-but-survivable input — chunk-walking
+// errors aren't surfaced because PROP is well-bounded by its parent
+// and partial reads stay inside the buffer.
+func parsePropChunks(body []byte, t *Track) (dstCompressed bool) {
+	for len(body) >= 12 {
+		fourcc := string(body[0:4])
+		size := be64(body[4:12])
+		// Bound size against the remaining slice — a corrupt header
+		// could over-read.
+		if size > uint64(len(body)-12) {
+			return false
+		}
+		payload := body[12 : 12+size]
+		switch fourcc {
+		case "FS  ":
+			if len(payload) >= 4 {
+				rate := float64(be32(payload[0:4]))
+				if rate > 0 {
+					t.SampleRate = &rate
+					isDSD := true
+					t.IsDSD = &isDSD
+					bits := 1
+					t.BitsPerSample = &bits
+				}
+			}
+		case "CMPR":
+			// CMPR payload: 4 bytes compression FOURCC + variable-
+			// length compression name. "DSD " = uncompressed,
+			// "DST " = DST compressed.
+			if len(payload) >= 4 {
+				compression := string(payload[0:4])
+				if compression == "DST " {
+					// Roll back any prior FS-stamped IsDSD so iOS
+					// doesn't try to load a DST-compressed file via
+					// its uncompressed-DFF path. Caller logs.
+					t.IsDSD = nil
+					t.SampleRate = nil
+					t.BitsPerSample = nil
+					return true
+				}
+			}
+		}
+		// Advance past chunk + odd-byte pad. Use uint64 arithmetic
+		// against a capped size to avoid signed overflow on a
+		// pathological header.
+		advance := 12 + size
+		if advance%2 == 1 {
+			advance++
+		}
+		if advance > uint64(len(body)) {
+			return false
+		}
+		body = body[advance:]
+	}
+	return false
+}
+
 // extractLocalArtwork stamps t.ArtworkMBID with `local-<sha256>` when
 // embedded artwork (preferred) or folder-level art (cover.jpg /
 // folder.jpg, case-insensitive — JPEG-only) is found. Caller must
@@ -953,4 +1113,15 @@ func le32(b []byte) uint32 {
 func le64(b []byte) uint64 {
 	return uint64(b[0]) | uint64(b[1])<<8 | uint64(b[2])<<16 | uint64(b[3])<<24 |
 		uint64(b[4])<<32 | uint64(b[5])<<40 | uint64(b[6])<<48 | uint64(b[7])<<56
+}
+
+// DSDIFF (DFF) chunks use big-endian sizes (IFF/AIFF dialect), unlike
+// DSF's little-endian header. Kept narrowly scoped to extractor needs.
+func be32(b []byte) uint32 {
+	return uint32(b[3]) | uint32(b[2])<<8 | uint32(b[1])<<16 | uint32(b[0])<<24
+}
+
+func be64(b []byte) uint64 {
+	return uint64(b[7]) | uint64(b[6])<<8 | uint64(b[5])<<16 | uint64(b[4])<<24 |
+		uint64(b[3])<<32 | uint64(b[2])<<40 | uint64(b[1])<<48 | uint64(b[0])<<56
 }

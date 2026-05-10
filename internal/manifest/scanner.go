@@ -279,7 +279,7 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	var workersWG sync.WaitGroup
 	for i := 0; i < nWorkers; i++ {
 		workersWG.Add(1)
-		go s.runScanWorker(ctx, paths, writes, &workersWG)
+		go s.runScanWorker(ctx, paths, writes, multiRoot, &workersWG)
 	}
 
 	committed := new(atomic.Int64)
@@ -377,7 +377,7 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 // channel. Errors from GetTrack/Extract are logged-and-skipped (matches
 // the legacy walker's "log + continue" semantics — a single corrupt
 // FLAC must not abort the whole scan).
-func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writes chan<- *Track, wg *sync.WaitGroup) {
+func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writes chan<- *Track, multiRoot bool, wg *sync.WaitGroup) {
 	defer wg.Done()
 	// One ExtractContext per worker, reused across every track this
 	// worker pulls. The pointer to s.folderArt is stable for the
@@ -423,7 +423,7 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 			Size:    pi.info.Size(),
 			ModTime: pi.info.ModTime().UTC(),
 		}
-		fillFromPath(t, pi.rel) // last-resort heuristics for files with no tags
+		fillFromPath(t, pi.rel, multiRoot) // last-resort heuristics for files with no tags
 		if err := ExtractWithContext(pi.abs, t, ec); err != nil {
 			scanLogger.Error("extract", "path", pi.abs, "err", err)
 		}
@@ -637,7 +637,7 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	var workersWG sync.WaitGroup
 	for i := 0; i < nWorkers; i++ {
 		workersWG.Add(1)
-		go s.runScanWorker(ctx, paths, writes, &workersWG)
+		go s.runScanWorker(ctx, paths, writes, multiRoot, &workersWG)
 	}
 
 	committed := new(atomic.Int64)
@@ -971,7 +971,21 @@ func relPath(root, abs string, multiRoot bool) string {
 // fillFromPath populates Title / Album / Artist fields from the library-
 // relative path as a last-resort heuristic for files with no embedded
 // tags. The iOS scanner does the same thing on its local walk path.
-func fillFromPath(t *Track, rel string) {
+//
+// In multi-root mode `relPath` prefixes every track's library-relative
+// form with the root's basename (e.g. `Music/Pink Floyd/Dark Side/
+// Money.flac` for root `/Music`). The album/artist heuristics here
+// derive Album/Artist from the trailing directory segments, so the
+// prefix has to be stripped FIRST — otherwise an untagged file directly
+// under a root named "Alphaville" was deriving Artist="Alphaville"
+// from the root basename instead of falling through to "no artist
+// guessable". (Bug ROOT.) Single-root scans don't carry the prefix
+// and pass through unchanged.
+//
+// Title is computed BEFORE the strip because the filename always lives
+// at the leaf regardless of prefix mode — stripping wouldn't change
+// `parts[len-1]`.
+func fillFromPath(t *Track, rel string, multiRoot bool) {
 	parts := strings.Split(rel, "/")
 	if len(parts) == 0 {
 		return
@@ -983,6 +997,11 @@ func fillFromPath(t *Track, rel string) {
 	}
 	if t.Title == "" {
 		t.Title = base
+	}
+	// Strip the multi-root prefix before the album/artist heuristics so
+	// they evaluate the legitimate `Artist/Album/Track.ext` shape.
+	if multiRoot && len(parts) > 1 {
+		parts = parts[1:]
 	}
 	// Album = immediate parent dir.
 	if len(parts) >= 2 && t.Album == "" {
