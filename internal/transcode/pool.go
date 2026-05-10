@@ -78,6 +78,20 @@ type Pool struct {
 	stateChangeMu sync.RWMutex
 	onStateChange func()
 
+	// onJobComplete fires exactly once per successful job, AFTER
+	// `manifest.Store.UpsertVariant` returns nil — i.e. AFTER the
+	// SQLite transaction commits, so any consumer-triggered manifest
+	// re-sync will observe the new `track_variants` row and the
+	// bumped `tracks.indexed_at`. Nil when not wired. cmd/bridge
+	// builds an `api.UpscaleCompleteEvent` from these primitives and
+	// publishes it to the SSE broker on topic `"upscale.complete"`.
+	// Worker invokes the callback in a fresh goroutine OUTSIDE
+	// `p.mu` (see processJob), so a slow consumer can never back-
+	// pressure the transcode pool — mirrors the onStateChange
+	// pattern.
+	jobCompleteMu sync.RWMutex
+	onJobComplete func(path, variantID string, sampleRate, bitsPerSample int, completedAt time.Time)
+
 	// runner executes one transcode job under the supplied context.
 	// Defaults to RunSox in NewPool; tests inject a hang-until-ctx-
 	// cancelled stub to drive the per-job timeout branch without a
@@ -228,6 +242,26 @@ func (p *Pool) SetOnStateChange(fn func()) {
 	p.stateChangeMu.Lock()
 	p.onStateChange = fn
 	p.stateChangeMu.Unlock()
+}
+
+// notifyJobCompleteFn returns the current onJobComplete callback
+// under the jobCompleteMu read lock so a concurrent SetOnJobComplete
+// can swap it without racing. Returns nil when not wired — caller
+// checks before invoking. Mirrors notifyStateChangeFn.
+func (p *Pool) notifyJobCompleteFn() func(string, string, int, int, time.Time) {
+	p.jobCompleteMu.RLock()
+	defer p.jobCompleteMu.RUnlock()
+	return p.onJobComplete
+}
+
+// SetOnJobComplete wires (or rewires) the per-job completion callback
+// (see Pool.onJobComplete docstring for ordering invariants). nil
+// disables notification. Set-once at cmd/bridge wiring time; race-
+// safe vs concurrent calls.
+func (p *Pool) SetOnJobComplete(fn func(path, variantID string, sampleRate, bitsPerSample int, completedAt time.Time)) {
+	p.jobCompleteMu.Lock()
+	p.onJobComplete = fn
+	p.jobCompleteMu.Unlock()
 }
 
 // Stop signals the workers to drain the queue and exit. Blocks
@@ -410,6 +444,14 @@ func (p *Pool) processJob(job poolJob) {
 	}
 
 	_, settings := job.spec.SoxArgs()
+	// Capture the completion instant ONCE so the DB row's CreatedAt
+	// and the SSE event's CompletedAt point to the same wall-clock
+	// moment. Without this, the row uses CreatedAtNow() (a separate
+	// time.Now().UnixNano() call) and the event used a third call —
+	// for a fast SQLite commit those values agree to the millisecond,
+	// but iOS-side log correlation expects equality (Gemini MEDIUM
+	// on PR #187).
+	completedAt := time.Now().UTC()
 	row := manifest.VariantRow{
 		SourcePath:    job.spec.SourceLibraryRel,
 		VariantID:     job.spec.VariantID(),
@@ -421,7 +463,7 @@ func (p *Pool) processJob(job poolJob) {
 		SourceMTimeNS: job.spec.SourceMTimeNS,
 		SourceSize:    job.spec.SourceSize,
 		SoxSettings:   settings,
-		CreatedAt:     CreatedAtNow(),
+		CreatedAt:     completedAt.UnixNano(),
 	}
 	if err := p.store.UpsertVariant(row); err != nil {
 		p.failedCnt.Add(1)
@@ -443,6 +485,24 @@ func (p *Pool) processJob(job poolJob) {
 	p.doneCnt.Add(1)
 	p.releaseDedup(job.dedup)
 	released = true
+	// Per-job completion event fires AFTER UpsertVariant commits
+	// (success branch above) and AFTER releaseDedup so the published
+	// snapshot reflects the final state. Path field is the raw
+	// `job.spec.SourceLibraryRel` — byte-identical to the manifest's
+	// `Track.path`, which is what iOS keys on for its reverse index.
+	// Reformatting / normalising here would break the iOS-side
+	// constant-time path lookup. Invoked OUTSIDE p.mu / dedup lock
+	// in a fresh goroutine so a slow SSE subscriber never back-
+	// pressures the worker.
+	if fireJob := p.notifyJobCompleteFn(); fireJob != nil {
+		go fireJob(
+			job.spec.SourceLibraryRel,
+			job.spec.VariantID(),
+			job.spec.TargetSampleRate,
+			job.spec.TargetBits,
+			completedAt,
+		)
+	}
 	if fire := p.notifyStateChangeFn(); fire != nil {
 		go fire()
 	}

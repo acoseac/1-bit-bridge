@@ -401,6 +401,101 @@ func TestHealthAdvertisesVariantBumpsIndexFeature(t *testing.T) {
 	}
 }
 
+// TestHealthAdvertisesUpscaleCompleteEventsFeature — iOS gates its
+// upscale resync ladder on this flag: when present, only the +600 s
+// safety rung fires (instead of the full 8 s/30 s/2 m/5 m/10 m
+// ladder). The polling savings on a folder-wide upscale request are
+// 4× per track. A typo / accidental rename here breaks the wire
+// contract iOS keys on — pin it.
+func TestHealthAdvertisesUpscaleCompleteEventsFeature(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := &config.Config{
+		LibraryRoots:  []string{tmp},
+		ListenAddress: ":7788",
+		LibraryName:   "Test",
+	}
+	store, _ := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
+	// Upscale must be enabled for the flag to advertise — that gate
+	// is the round-2 fix companion to this test (see
+	// `TestHealthOmitsUpscaleCompleteEventsWhenUpscaleDisabled` below).
+	srv := New(cfg, store, nil, "fp").WithUpscale(true, newStubVariantStore())
+	hs := httptest.NewServer(srv.Handler())
+	t.Cleanup(hs.Close)
+
+	resp := authGet(t, hs, "/v1/health", "")
+	body := readAllOrFail(t, resp)
+	resp.Body.Close()
+
+	var got HealthResponse
+	if err := jsonUnmarshalForTest(body, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	found := false
+	for _, f := range got.Features {
+		if f == "upscaleCompleteEvents" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("Features did not contain \"upscaleCompleteEvents\"; got %v", got.Features)
+	}
+	// Alpha-sort invariant — clients comparing /v1/health response
+	// fingerprints rely on stable ordering.
+	for i := 1; i < len(got.Features); i++ {
+		if got.Features[i-1] > got.Features[i] {
+			t.Errorf("Features not alpha-sorted at index %d: %q > %q (got %v)",
+				i, got.Features[i-1], got.Features[i], got.Features)
+		}
+	}
+}
+
+// TestHealthOmitsUpscaleCompleteEventsWhenUpscaleDisabled — bridges
+// without an upscale pool (sox missing OR cfg.Upscale.Enabled=false)
+// must NOT advertise the upscaleCompleteEvents capability. iOS gates
+// 4-of-5 ladder rungs on the flag and waits for SSE events that can
+// never arrive when upscalePool == nil → SetOnJobComplete was never
+// called. (Greptile P1 round-2 on PR #187.) `variantBumpsIndex` is
+// orthogonal (manifest correctness, not upscale-specific) and stays.
+func TestHealthOmitsUpscaleCompleteEventsWhenUpscaleDisabled(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := &config.Config{
+		LibraryRoots:  []string{tmp},
+		ListenAddress: ":7788",
+		LibraryName:   "Test",
+	}
+	store, _ := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
+	srv := New(cfg, store, nil, "fp")
+	// Deliberately do NOT call WithUpscale → upscaleEnabled stays false.
+	hs := httptest.NewServer(srv.Handler())
+	t.Cleanup(hs.Close)
+
+	resp := authGet(t, hs, "/v1/health", "")
+	body := readAllOrFail(t, resp)
+	resp.Body.Close()
+
+	var got HealthResponse
+	if err := jsonUnmarshalForTest(body, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	for _, f := range got.Features {
+		if f == "upscaleCompleteEvents" {
+			t.Errorf("upscale disabled but Features advertised upscaleCompleteEvents; got %v", got.Features)
+		}
+	}
+	// variantBumpsIndex is orthogonal and must remain present.
+	found := false
+	for _, f := range got.Features {
+		if f == "variantBumpsIndex" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("variantBumpsIndex should remain present when upscale is disabled; got %v", got.Features)
+	}
+}
+
 // readAllOrFail is a tiny io.ReadAll wrapper that fails the test
 // on a read error, keeping per-case bodies focused on the
 // assertion they care about.

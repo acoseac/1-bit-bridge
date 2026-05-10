@@ -585,6 +585,332 @@ func TestPoolPanicInRunnerReleasesDedup(t *testing.T) {
 	}
 }
 
+// TestPoolFiresOnJobCompleteAfterUpsertVariant pins the headline
+// contract for the iOS-side event-driven reconciliation path: when
+// a job succeeds, the registered onJobComplete callback fires with
+// the JobSpec's raw `SourceLibraryRel` AND the corresponding
+// `track_variants` row is already visible from inside the callback.
+// The latter ordering invariant is what makes the iOS-triggered
+// manifest re-sync safe — pre-fix the iOS client would race the DB
+// commit and miss the new variant.
+func TestPoolFiresOnJobCompleteAfterUpsertVariant(t *testing.T) {
+	store := openTempStoreForPool(t)
+	t.Cleanup(func() { _ = store.Close() })
+
+	// Seed the parent tracks row so UpsertVariant's FK constraint
+	// passes. The pool callback fires AFTER the variant insert
+	// commits — the FK FAIL we'd otherwise see (787) is exactly the
+	// failure mode the post-commit guarantee protects against.
+	seedTrackForPool(t, store, "Music/Album/01.flac")
+
+	p := NewPool(store, 1, 4)
+	t.Cleanup(p.Stop)
+
+	// Successful runner stub — RunSox isn't invoked, the worker
+	// reaches the UpsertVariant + callback path directly.
+	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
+		return 42, nil
+	}
+
+	type jobEvent struct {
+		path, variantID         string
+		sampleRate, bitsPerSamp int
+		completedAt             time.Time
+		variantsAtCallbackTime  int
+	}
+	gotCh := make(chan jobEvent, 1)
+	p.SetOnJobComplete(func(path, variantID string, sampleRate, bitsPerSample int, completedAt time.Time) {
+		// Critical ordering check: query the store from inside the
+		// callback. A regression that fires before UpsertVariant
+		// commits would see zero variants here.
+		count, _, err := store.CountVariants()
+		if err != nil {
+			t.Errorf("CountVariants inside callback: %v", err)
+		}
+		gotCh <- jobEvent{
+			path:                   path,
+			variantID:              variantID,
+			sampleRate:             sampleRate,
+			bitsPerSamp:            bitsPerSample,
+			completedAt:            completedAt,
+			variantsAtCallbackTime: count,
+		}
+	})
+
+	spec := JobSpec{
+		SourceLibraryRel: "Music/Album/01.flac",
+		SourceAbsPath:    "/dev/null/missing", // runner stubbed; path irrelevant
+		TargetSampleRate: 192000,
+		TargetBits:       24,
+		Quality:          QualityVeryHigh,
+		OutputDir:        t.TempDir(),
+	}
+	// UTC for parity with the pool's `time.Now().UTC()` capture — avoids
+	// the monotonic-clock-vs-wall-clock divergence the bare time.Now()
+	// would carry (Gemini MEDIUM on PR #187).
+	beforeEnqueue := time.Now().UTC()
+	if err := p.Enqueue(spec); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	var got jobEvent
+	select {
+	case got = <-gotCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("onJobComplete never fired on success path")
+	}
+
+	if got.path != spec.SourceLibraryRel {
+		t.Errorf("path = %q, want %q (raw SourceLibraryRel, no normalisation)", got.path, spec.SourceLibraryRel)
+	}
+	if got.variantID != spec.VariantID() {
+		t.Errorf("variantID = %q, want %q", got.variantID, spec.VariantID())
+	}
+	if got.sampleRate != 192000 {
+		t.Errorf("sampleRate = %d, want 192000", got.sampleRate)
+	}
+	if got.bitsPerSamp != 24 {
+		t.Errorf("bitsPerSample = %d, want 24", got.bitsPerSamp)
+	}
+	if got.completedAt.Before(beforeEnqueue) {
+		t.Errorf("completedAt = %v predates enqueue %v", got.completedAt, beforeEnqueue)
+	}
+	if got.variantsAtCallbackTime < 1 {
+		t.Errorf("CountVariants inside callback = %d, want ≥ 1 — fires-before-commit regression", got.variantsAtCallbackTime)
+	}
+
+	// Lock the single-capture timestamp guarantee: the inserted
+	// `track_variants.created_at` row column MUST equal
+	// `event.completedAt.UnixNano()` exactly — both surfaces derive
+	// from the same `completedAt := time.Now().UTC()` capture in
+	// processJob. A regression back to two separate `time.Now()`
+	// calls would produce slightly different values that this strict
+	// equality catches. (CodeRabbit nitpick on PR #187 — pinned so a
+	// future maintainer can't drop the shared capture.)
+	row, err := store.GetVariant(spec.SourceLibraryRel, spec.VariantID())
+	if err != nil {
+		t.Fatalf("GetVariant for parity check: %v", err)
+	}
+	if row.CreatedAt != got.completedAt.UnixNano() {
+		t.Errorf("DB row CreatedAt (%d) != event completedAt.UnixNano() (%d) — "+
+			"single-capture guarantee broken",
+			row.CreatedAt, got.completedAt.UnixNano())
+	}
+}
+
+// TestPoolDoesNotFireOnJobCompleteOnFailure pins the success-only
+// emission contract for v1. A sox failure / store failure must NOT
+// fire onJobComplete — iOS learns about failures via the stats push,
+// not the per-job event. If we ever ship `upscale.failed`, that's a
+// new callback, not a generalisation of this one.
+func TestPoolDoesNotFireOnJobCompleteOnFailure(t *testing.T) {
+	store := openTempStoreForPool(t)
+	t.Cleanup(func() { _ = store.Close() })
+
+	p := NewPool(store, 1, 4)
+	t.Cleanup(p.Stop)
+
+	soxErr := errors.New("sox synthetic failure")
+	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
+		return 0, soxErr
+	}
+
+	var jobFires atomic.Int64
+	p.SetOnJobComplete(func(string, string, int, int, time.Time) {
+		jobFires.Add(1)
+	})
+	var stateFires atomic.Int64
+	p.SetOnStateChange(func() {
+		stateFires.Add(1)
+	})
+
+	spec := JobSpec{
+		SourceLibraryRel: "Music/Album/fail.flac",
+		SourceAbsPath:    "/dev/null/missing",
+		TargetSampleRate: 176400,
+		TargetBits:       24,
+		Quality:          QualityVeryHigh,
+		OutputDir:        t.TempDir(),
+	}
+	if err := p.Enqueue(spec); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	// Bounded poll for the deferred `go fire()` goroutine to schedule
+	// after failedCnt.Add(1). A fixed sleep (greptile P2 on PR #187)
+	// could race on a loaded CI runner where the goroutine takes longer
+	// than 50 ms to be picked up by the scheduler. Same deadline shape
+	// the test's other poll uses.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if p.Stats().Failed >= 1 && stateFires.Load() >= 2 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	if got := jobFires.Load(); got != 0 {
+		t.Errorf("onJobComplete fires on failure = %d, want 0 (success-only contract)", got)
+	}
+	if got := stateFires.Load(); got < 2 {
+		t.Errorf("onStateChange fires = %d, want ≥ 2 — failure path must still notify state listeners", got)
+	}
+}
+
+// TestPoolNilOnJobCompleteDoesNotPanic locks the back-compat shape:
+// a pool built without SetOnJobComplete runs the success path
+// without panicking on the nil slot.
+func TestPoolNilOnJobCompleteDoesNotPanic(t *testing.T) {
+	store := openTempStoreForPool(t)
+	t.Cleanup(func() { _ = store.Close() })
+
+	seedTrackForPool(t, store, "Music/Album/no_cb.flac")
+
+	p := NewPool(store, 1, 4)
+	t.Cleanup(p.Stop)
+
+	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
+		return 1, nil
+	}
+	// Deliberately do NOT call SetOnJobComplete.
+
+	spec := JobSpec{
+		SourceLibraryRel: "Music/Album/no_cb.flac",
+		SourceAbsPath:    "/dev/null/missing",
+		TargetSampleRate: 176400,
+		TargetBits:       24,
+		Quality:          QualityVeryHigh,
+		OutputDir:        t.TempDir(),
+	}
+	if err := p.Enqueue(spec); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	// Wait for success path to land.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if p.Stats().Done >= 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := p.Stats().Done; got < 1 {
+		t.Fatalf("Stats.Done = %d, want ≥ 1", got)
+	}
+	// Pass condition: no panic under -race.
+}
+
+// TestPoolSetOnJobCompleteIsRaceSafe drives Set + concurrent worker
+// fires to surface any unsynchronised access on the callback slot.
+// Mirrors TestPoolSetOnStateChangeIsRaceSafe.
+func TestPoolSetOnJobCompleteIsRaceSafe(t *testing.T) {
+	store := openTempStoreForPool(t)
+	t.Cleanup(func() { _ = store.Close() })
+
+	// Seed parents for all 16 race-burst tracks so the success path
+	// runs to completion under FK constraints.
+	for i := 0; i < 16; i++ {
+		seedTrackForPool(t, store, "Music/Race/"+strconv.Itoa(i)+".flac")
+	}
+
+	p := NewPool(store, 2, 32)
+	t.Cleanup(p.Stop)
+
+	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
+		return 1, nil
+	}
+
+	var fires atomic.Int64
+	p.SetOnJobComplete(func(string, string, int, int, time.Time) {
+		fires.Add(1)
+	})
+
+	// Concurrent swap goroutine — alternates between the counting
+	// callback and nil to drive every Set path.
+	stopSwap := make(chan struct{})
+	var swapDone sync.WaitGroup
+	swapDone.Add(1)
+	go func() {
+		defer swapDone.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stopSwap:
+				return
+			default:
+			}
+			if i%2 == 0 {
+				p.SetOnJobComplete(nil)
+			} else {
+				p.SetOnJobComplete(func(string, string, int, int, time.Time) {
+					fires.Add(1)
+				})
+			}
+		}
+	}()
+
+	// Enqueue a burst of jobs. Fail-fast on a real enqueue error
+	// (ErrPoolClosed) — those are bugs and silently swallowing them
+	// would let the test pass without exercising the workload.
+	// ErrQueueFull is a legitimate transient outcome under bursty
+	// load with a fixed queueCap, so it's expected and counted but
+	// not fatal. (CodeRabbit Major round-3 on PR #187 — the prior
+	// `_ = p.Enqueue(spec)` discarded all errors indiscriminately
+	// and the count-shortfall check below couldn't tell a real
+	// failure from "no jobs actually ran.")
+	enqueued := 0
+	for i := 0; i < 16; i++ {
+		spec := JobSpec{
+			SourceLibraryRel: "Music/Race/" + strconv.Itoa(i) + ".flac",
+			SourceAbsPath:    "/dev/null/missing",
+			TargetSampleRate: 176400,
+			TargetBits:       24,
+			Quality:          QualityVeryHigh,
+			OutputDir:        t.TempDir(),
+		}
+		switch err := p.Enqueue(spec); err {
+		case nil:
+			enqueued++
+		case ErrQueueFull:
+			// Legitimate under-contention outcome with queueCap=32 +
+			// concurrent dedup churn. Don't escalate; the workload
+			// floor check below verifies we still ran enough jobs.
+		case ErrPoolClosed:
+			t.Fatalf("Enqueue %d returned ErrPoolClosed before Stop()", i)
+		default:
+			t.Fatalf("Enqueue %d unexpected error: %v", i, err)
+		}
+	}
+	// We MUST have enqueued enough to actually exercise concurrent
+	// fires. Less than half the burst lands → the race test would
+	// pass under -race trivially. queueCap=32 + workers=2 means
+	// every Enqueue should accept under normal conditions; this is
+	// a regression alarm, not a tight bound.
+	if enqueued < 8 {
+		t.Fatalf("only %d of 16 jobs enqueued; race coverage too thin to be meaningful", enqueued)
+	}
+
+	// Wait for the queue to drain — bounded. The terminal-count
+	// check now compares against `enqueued` (what actually
+	// landed) rather than the literal 16; with the fail-fast
+	// floor above, this guarantees we waited for the actual
+	// workload to run, not just for the deadline to elapse.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if s := p.Stats(); int(s.Done+s.Failed) >= enqueued {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if s := p.Stats(); int(s.Done+s.Failed) < enqueued {
+		t.Fatalf("workload didn't drain within deadline: enqueued=%d done=%d failed=%d",
+			enqueued, s.Done, s.Failed)
+	}
+	close(stopSwap)
+	swapDone.Wait()
+	// Pass condition: no data race under -race; fires count is
+	// non-deterministic (depends on which slot is set at fire time).
+}
+
 // --- helpers ---
 
 func openTempStoreForPool(t *testing.T) *manifest.Store {
@@ -595,4 +921,21 @@ func openTempStoreForPool(t *testing.T) *manifest.Store {
 		t.Fatalf("OpenStore: %v", err)
 	}
 	return s
+}
+
+// seedTrackForPool inserts a minimal parent tracks row so a
+// subsequent UpsertVariant on the same source path satisfies the
+// `track_variants → tracks` foreign-key constraint. Tests that
+// drive the pool's success path (i.e. exercise UpsertVariant) need
+// this; failure-path tests don't.
+func seedTrackForPool(t *testing.T, store *manifest.Store, path string) {
+	t.Helper()
+	tr := &manifest.Track{
+		Path:    path,
+		Size:    1,
+		ModTime: time.Now().UTC(),
+	}
+	if err := store.UpsertTrack(tr); err != nil {
+		t.Fatalf("seedTrackForPool UpsertTrack %q: %v", path, err)
+	}
 }
