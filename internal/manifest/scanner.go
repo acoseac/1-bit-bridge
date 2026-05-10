@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,6 +26,15 @@ import (
 // component=scanner so high-volume scan output filters cleanly from
 // store/manifest reads.
 var scanLogger = logging.Component("scanner")
+
+// afterExtractHookForTests, when non-nil, runs inside runScanWorker's
+// per-iteration recovery scope after ExtractWithContext returns. The
+// only intended use is to trigger a deterministic panic from a unit
+// test so the recover branch can be exercised without depending on a
+// specific dhowden/tag failure mode (which varies by version + file
+// shape). Production cost: one nil-check per file, negligible against
+// the actual extract work. Strictly internal to the package.
+var afterExtractHookForTests func(absPath string)
 
 // scanBatchSize is the per-transaction track-upsert batch size used by
 // the scanner's writer goroutine. SQLite's per-transaction fsync
@@ -88,6 +98,15 @@ type Scanner struct {
 	scanning atomic.Bool
 	lastFull atomic.Int64 // UnixNano of last successful full scan
 	progress atomic.Int64 // tracks indexed so far during the current scan
+
+	// panickedCnt counts files whose extraction panicked and was
+	// recovered by the per-iteration `defer recover()` in
+	// runScanWorker. Surfaced in the admin Library dashboard
+	// alongside the existing scan counters so a malformed file the
+	// dhowden/tag (or our own DSF/DFF parser) chokes on is visible
+	// to operators instead of silently being skipped. Monotonic for
+	// the process lifetime — rolls forward across scans.
+	panickedCnt atomic.Int64
 }
 
 // folderArtResult records the per-directory outcome of a folder-art
@@ -182,6 +201,13 @@ func (s *Scanner) LastFullScan() time.Time {
 // ScanProgress returns the number of tracks indexed during the current
 // scan (resets at the start of each Scan).
 func (s *Scanner) ScanProgress() int64 { return s.progress.Load() }
+
+// PanickedCount returns the cumulative number of files whose extraction
+// panicked and was recovered by the per-iteration `defer recover()` in
+// runScanWorker. Monotonic for the process lifetime — does NOT reset
+// between scans, so the admin "Library" dashboard can surface a steady
+// "N files unreadable" hint that persists past the latest scan.
+func (s *Scanner) PanickedCount() int64 { return s.panickedCnt.Load() }
 
 // Scan runs a full walk of the library roots. Safe to cancel via ctx;
 // any tracks whose batch flushed before cancellation are committed.
@@ -395,40 +421,71 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 			// can close the channel and we exit cleanly.
 			continue
 		}
-		// Early-skip on unchanged-since-last-scan: matches the legacy
-		// walker. Concurrent reads from N workers against the same
-		// SQLite handle are fine (modernc.org/sqlite WAL mode allows
-		// concurrent readers).
-		//
-		// Recovery exception (PR #98 follow-up): if the existing row
-		// carries a `local-<hash>` ArtworkMBID but the matching cache
-		// file is missing on disk (operator wiped <dataDir>/artwork
-		// after a scan, or copied the data dir without the artwork
-		// subdir), fall through to re-extract so the cache is
-		// rebuilt. Without this, the API serves 202+Retry-After
-		// indefinitely for the missing local- mbid because the
-		// enricher won't refetch a local- value. Pure UUID-bearing
-		// rows AND empty-ArtworkMBID rows still take the fast skip —
-		// the recovery cost is one os.Stat per `local-` track per
-		// scan, scoped narrowly to the one case the cache might
-		// genuinely need rebuilding.
-		existing, _ := s.store.GetTrack(pi.rel)
-		if existing != nil && existing.Size == pi.info.Size() && !existing.ModTime.Before(pi.info.ModTime()) {
-			if !s.needsLocalArtworkRecovery(existing) {
-				continue
+		// Per-iteration panic recovery: dhowden/tag and our own DSF/
+		// DFF parsers can panic on malformed files (truncated ID3v2
+		// headers, bad MP4 atom trees, FLAC blocks lying about their
+		// length). Without recovery a single bad file would crash the
+		// worker goroutine and reduce pool capacity for the rest of
+		// the scan; with recovery the file is logged + skipped and
+		// the worker proceeds to the next path on the channel.
+		// Mirrors the same pattern processJob uses in
+		// internal/transcode/pool.go.
+		var trackToWrite *Track
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					s.panickedCnt.Add(1)
+					scanLogger.Error("panic extracting track",
+						"path", pi.abs,
+						"panic", r,
+						"stack", string(debug.Stack()))
+					trackToWrite = nil
+				}
+			}()
+			// Early-skip on unchanged-since-last-scan: matches the legacy
+			// walker. Concurrent reads from N workers against the same
+			// SQLite handle are fine (modernc.org/sqlite WAL mode allows
+			// concurrent readers).
+			//
+			// Recovery exception (PR #98 follow-up): if the existing row
+			// carries a `local-<hash>` ArtworkMBID but the matching cache
+			// file is missing on disk (operator wiped <dataDir>/artwork
+			// after a scan, or copied the data dir without the artwork
+			// subdir), fall through to re-extract so the cache is
+			// rebuilt. Without this, the API serves 202+Retry-After
+			// indefinitely for the missing local- mbid because the
+			// enricher won't refetch a local- value. Pure UUID-bearing
+			// rows AND empty-ArtworkMBID rows still take the fast skip —
+			// the recovery cost is one os.Stat per `local-` track per
+			// scan, scoped narrowly to the one case the cache might
+			// genuinely need rebuilding.
+			existing, _ := s.store.GetTrack(pi.rel)
+			if existing != nil && existing.Size == pi.info.Size() && !existing.ModTime.Before(pi.info.ModTime()) {
+				if !s.needsLocalArtworkRecovery(existing) {
+					return
+				}
 			}
-		}
-		t := &Track{
-			Path:    pi.rel,
-			Size:    pi.info.Size(),
-			ModTime: pi.info.ModTime().UTC(),
-		}
-		fillFromPath(t, pi.rel, multiRoot) // last-resort heuristics for files with no tags
-		if err := ExtractWithContext(pi.abs, t, ec); err != nil {
-			scanLogger.Error("extract", "path", pi.abs, "err", err)
+			t := &Track{
+				Path:    pi.rel,
+				Size:    pi.info.Size(),
+				ModTime: pi.info.ModTime().UTC(),
+			}
+			fillFromPath(t, pi.rel, multiRoot) // last-resort heuristics for files with no tags
+			if err := ExtractWithContext(pi.abs, t, ec); err != nil {
+				scanLogger.Error("extract", "path", pi.abs, "err", err)
+			}
+			if afterExtractHookForTests != nil {
+				afterExtractHookForTests(pi.abs)
+			}
+			trackToWrite = t
+		}()
+		if trackToWrite == nil {
+			// Either an early-skip-unchanged hit, or a panic during
+			// extraction. Both paths skip the writer hand-off.
+			continue
 		}
 		select {
-		case writes <- t:
+		case writes <- trackToWrite:
 		case <-ctx.Done():
 			return
 		}
