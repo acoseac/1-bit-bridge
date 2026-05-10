@@ -444,6 +444,14 @@ func (p *Pool) processJob(job poolJob) {
 	}
 
 	_, settings := job.spec.SoxArgs()
+	// Capture the completion instant ONCE so the DB row's CreatedAt
+	// and the SSE event's CompletedAt point to the same wall-clock
+	// moment. Without this, the row uses CreatedAtNow() (a separate
+	// time.Now().UnixNano() call) and the event used a third call —
+	// for a fast SQLite commit those values agree to the millisecond,
+	// but iOS-side log correlation expects equality (Gemini MEDIUM
+	// on PR #187).
+	completedAt := time.Now().UTC()
 	row := manifest.VariantRow{
 		SourcePath:    job.spec.SourceLibraryRel,
 		VariantID:     job.spec.VariantID(),
@@ -455,7 +463,7 @@ func (p *Pool) processJob(job poolJob) {
 		SourceMTimeNS: job.spec.SourceMTimeNS,
 		SourceSize:    job.spec.SourceSize,
 		SoxSettings:   settings,
-		CreatedAt:     CreatedAtNow(),
+		CreatedAt:     completedAt.UnixNano(),
 	}
 	if err := p.store.UpsertVariant(row); err != nil {
 		p.failedCnt.Add(1)
@@ -492,7 +500,7 @@ func (p *Pool) processJob(job poolJob) {
 			job.spec.VariantID(),
 			job.spec.TargetSampleRate,
 			job.spec.TargetBits,
-			time.Now().UTC(),
+			completedAt,
 		)
 	}
 	if fire := p.notifyStateChangeFn(); fire != nil {

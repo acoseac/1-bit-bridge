@@ -645,7 +645,10 @@ func TestPoolFiresOnJobCompleteAfterUpsertVariant(t *testing.T) {
 		Quality:          QualityVeryHigh,
 		OutputDir:        t.TempDir(),
 	}
-	beforeEnqueue := time.Now()
+	// UTC for parity with the pool's `time.Now().UTC()` capture — avoids
+	// the monotonic-clock-vs-wall-clock divergence the bare time.Now()
+	// would carry (Gemini MEDIUM on PR #187).
+	beforeEnqueue := time.Now().UTC()
 	if err := p.Enqueue(spec); err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
@@ -715,16 +718,18 @@ func TestPoolDoesNotFireOnJobCompleteOnFailure(t *testing.T) {
 		t.Fatalf("Enqueue: %v", err)
 	}
 
-	// Wait for the failure path to complete via Stats.
+	// Bounded poll for the deferred `go fire()` goroutine to schedule
+	// after failedCnt.Add(1). A fixed sleep (greptile P2 on PR #187)
+	// could race on a loaded CI runner where the goroutine takes longer
+	// than 50 ms to be picked up by the scheduler. Same deadline shape
+	// the test's other poll uses.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if p.Stats().Failed >= 1 {
+		if p.Stats().Failed >= 1 && stateFires.Load() >= 2 {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	// Allow the deferred state-change goroutine to schedule.
-	time.Sleep(50 * time.Millisecond)
 
 	if got := jobFires.Load(); got != 0 {
 		t.Errorf("onJobComplete fires on failure = %d, want 0 (success-only contract)", got)
