@@ -119,6 +119,37 @@ func TestExtractDFF_PopulatesCodecIsDSDSampleRate(t *testing.T) {
 	}
 }
 
+func TestExtractDFF_UnknownCompressionRejection(t *testing.T) {
+	// Any CMPR FOURCC other than "DSD " (uncompressed) — including
+	// "DST " AND any future / unknown variant — must leave the DSD
+	// stamps nil. Pre-fix, the parser stamped IsDSD/SampleRate as
+	// soon as it saw FS and only rolled back for "DST " specifically;
+	// a corrupt encoder or future variant was left as playable
+	// uncompressed DFF (Greptile + CodeRabbit on PR #186). This test
+	// pins the post-fix "default-deny" contract.
+	for _, compression := range []string{"DST ", "XXXX", "RLE ", "FUTR"} {
+		t.Run(compression, func(t *testing.T) {
+			path := writeTempDFF(t, buildDFF(t, 2_822_400, compression))
+			track := &Track{}
+			if err := extractDFFWithContext(path, track, nil); err != nil {
+				t.Fatalf("extractDFFWithContext: %v", err)
+			}
+			if track.Codec != "DFF" {
+				t.Errorf("Codec = %q, want %q", track.Codec, "DFF")
+			}
+			if track.IsDSD != nil {
+				t.Errorf("CMPR=%q: IsDSD = %v, want nil", compression, *track.IsDSD)
+			}
+			if track.SampleRate != nil {
+				t.Errorf("CMPR=%q: SampleRate = %v, want nil", compression, *track.SampleRate)
+			}
+			if track.BitsPerSample != nil {
+				t.Errorf("CMPR=%q: BitsPerSample = %v, want nil", compression, *track.BitsPerSample)
+			}
+		})
+	}
+}
+
 func TestExtractDFF_DSTCompressionRejection(t *testing.T) {
 	// CMPR == "DST " is the lossless-DSD compressed variant. iOS
 	// can't decode it; the bridge must surface Codec="DFF" so the
