@@ -848,7 +848,16 @@ func TestPoolSetOnJobCompleteIsRaceSafe(t *testing.T) {
 		}
 	}()
 
-	// Enqueue a burst of jobs.
+	// Enqueue a burst of jobs. Fail-fast on a real enqueue error
+	// (ErrPoolClosed) — those are bugs and silently swallowing them
+	// would let the test pass without exercising the workload.
+	// ErrQueueFull is a legitimate transient outcome under bursty
+	// load with a fixed queueCap, so it's expected and counted but
+	// not fatal. (CodeRabbit Major round-3 on PR #187 — the prior
+	// `_ = p.Enqueue(spec)` discarded all errors indiscriminately
+	// and the count-shortfall check below couldn't tell a real
+	// failure from "no jobs actually ran.")
+	enqueued := 0
 	for i := 0; i < 16; i++ {
 		spec := JobSpec{
 			SourceLibraryRel: "Music/Race/" + strconv.Itoa(i) + ".flac",
@@ -858,16 +867,43 @@ func TestPoolSetOnJobCompleteIsRaceSafe(t *testing.T) {
 			Quality:          QualityVeryHigh,
 			OutputDir:        t.TempDir(),
 		}
-		_ = p.Enqueue(spec) // best-effort under contention
+		switch err := p.Enqueue(spec); err {
+		case nil:
+			enqueued++
+		case ErrQueueFull:
+			// Legitimate under-contention outcome with queueCap=32 +
+			// concurrent dedup churn. Don't escalate; the workload
+			// floor check below verifies we still ran enough jobs.
+		case ErrPoolClosed:
+			t.Fatalf("Enqueue %d returned ErrPoolClosed before Stop()", i)
+		default:
+			t.Fatalf("Enqueue %d unexpected error: %v", i, err)
+		}
+	}
+	// We MUST have enqueued enough to actually exercise concurrent
+	// fires. Less than half the burst lands → the race test would
+	// pass under -race trivially. queueCap=32 + workers=2 means
+	// every Enqueue should accept under normal conditions; this is
+	// a regression alarm, not a tight bound.
+	if enqueued < 8 {
+		t.Fatalf("only %d of 16 jobs enqueued; race coverage too thin to be meaningful", enqueued)
 	}
 
-	// Wait for the queue to drain — bounded.
+	// Wait for the queue to drain — bounded. The terminal-count
+	// check now compares against `enqueued` (what actually
+	// landed) rather than the literal 16; with the fail-fast
+	// floor above, this guarantees we waited for the actual
+	// workload to run, not just for the deadline to elapse.
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if s := p.Stats(); s.Done+s.Failed >= 16 {
+		if s := p.Stats(); int(s.Done+s.Failed) >= enqueued {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+	if s := p.Stats(); int(s.Done+s.Failed) < enqueued {
+		t.Fatalf("workload didn't drain within deadline: enqueued=%d done=%d failed=%d",
+			enqueued, s.Done, s.Failed)
 	}
 	close(stopSwap)
 	swapDone.Wait()
