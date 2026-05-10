@@ -73,8 +73,23 @@ type Pool struct {
 	// other optional Pool integration. cmd/bridge wires this to
 	// publish a fresh `/v1/upscale/stats` snapshot to the SSE
 	// broker so iOS clients see push-delivered updates instead of
-	// polling. Callbacks are invoked synchronously on the worker
-	// goroutine — keep them lightweight.
+	// polling.
+	//
+	// **Threading model**: invoked synchronously, serially, on the
+	// SINGLE long-lived publisher goroutine (`runPublisher`) when
+	// it drains `stateChangeChan`. Workers send signals via the
+	// non-blocking `fireStateChange()` helper (capacity-1 buffer +
+	// select-default = signals coalesce); the publisher then calls
+	// this callback at most once per drained signal. Implications
+	// for the wired callback: (a) keep it bounded — a slow callback
+	// stalls subsequent state-change AND job-complete deliveries
+	// because the same publisher serves both channels; (b) MUST
+	// NOT re-acquire `p.mu` (publisher already holds no Pool locks
+	// but `Stats() / UpscaleStatsSnapshot` reads p.mu, and a
+	// callback that takes another mutex layered above p.mu could
+	// reintroduce the cross-mutex coupling the publisher pattern
+	// was designed to eliminate); (c) MUST tolerate Stop() ordering
+	// — see Stop()'s docstring.
 	stateChangeMu sync.RWMutex
 	onStateChange func()
 
@@ -85,10 +100,20 @@ type Pool struct {
 	// bumped `tracks.indexed_at`. Nil when not wired. cmd/bridge
 	// builds an `api.UpscaleCompleteEvent` from these primitives and
 	// publishes it to the SSE broker on topic `"upscale.complete"`.
-	// Worker invokes the callback in a fresh goroutine OUTSIDE
-	// `p.mu` (see processJob), so a slow consumer can never back-
-	// pressure the transcode pool — mirrors the onStateChange
-	// pattern.
+	//
+	// **Threading model**: invoked synchronously, one-at-a-time, on
+	// the SINGLE long-lived publisher goroutine (`runPublisher`) as
+	// it drains `jobCompleteChan`. Workers send via the BLOCKING
+	// `fireJobComplete()` helper (buffered cap=2×workers, no drops)
+	// so every `upscale.complete` event reaches this callback —
+	// load-bearing for the iOS reverse-index path-promotion
+	// machinery that keys on per-event `path`/`variantID`. A full
+	// buffer briefly stalls the next worker send (correct
+	// backpressure: delaying the next sox job is better than losing
+	// an event). Same callback-side rules as `onStateChange` —
+	// don't block forever, don't re-acquire `p.mu`, respect Stop()
+	// ordering. `publisherWG` ensures every buffered event is
+	// drained before Stop returns.
 	jobCompleteMu sync.RWMutex
 	onJobComplete func(path, variantID string, sampleRate, bitsPerSample int, completedAt time.Time)
 
