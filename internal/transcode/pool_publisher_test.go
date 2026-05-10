@@ -369,11 +369,19 @@ func TestPoolPublisherStopDrainsBufferedEvents(t *testing.T) {
 		}
 	}
 
-	// Wait for workers to finish every job. doneCnt is bumped
-	// after UpsertVariant + before fireJobComplete (which is the
-	// blocking send onto jobCompleteChan). When doneCnt == jobs,
-	// every event is either in the publisher's buffer OR already
-	// consumed by the (slow) callback.
+	// Wait for workers to pass UpsertVariant on every job.
+	// doneCnt is bumped AFTER UpsertVariant commits and BEFORE
+	// the worker's blocking fireJobComplete send — so when
+	// doneCnt == jobs, a worker may still be mid-blocking-send
+	// with the event not yet in the channel buffer. The
+	// load-bearing guarantee that closes the gap is Stop()'s
+	// `p.wg.Wait()`: it parks until every worker has fully
+	// returned, which means every in-flight blocking send has
+	// completed (the event landed in the buffer). Only then does
+	// Stop close the publisher channels and wait for the publisher
+	// to drain. Greptile on PR #188 caught the prior docstring
+	// claiming doneCnt alone provided the buffer-or-consumed
+	// guarantee.
 	deadline := time.After(10 * time.Second)
 	for p.doneCnt.Load() < jobs {
 		select {

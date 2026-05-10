@@ -474,8 +474,14 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 			if err := ExtractWithContext(pi.abs, t, ec); err != nil {
 				scanLogger.Error("extract", "path", pi.abs, "err", err)
 			}
-			if afterExtractHookForTests != nil {
-				afterExtractHookForTests(pi.abs)
+			// Capture-then-call so a concurrent test that nils the
+			// hook between the check and invocation can't trigger a
+			// nil-deref panic. The hook is set/cleared from test
+			// goroutines while production code reads it from worker
+			// goroutines — the local copy makes the read+call atomic
+			// from this caller's view (Gemini medium on PR #188).
+			if hook := afterExtractHookForTests; hook != nil {
+				hook(pi.abs)
 			}
 			trackToWrite = t
 		}()
