@@ -678,6 +678,24 @@ func TestPoolFiresOnJobCompleteAfterUpsertVariant(t *testing.T) {
 	if got.variantsAtCallbackTime < 1 {
 		t.Errorf("CountVariants inside callback = %d, want ≥ 1 — fires-before-commit regression", got.variantsAtCallbackTime)
 	}
+
+	// Lock the single-capture timestamp guarantee: the inserted
+	// `track_variants.created_at` row column MUST equal
+	// `event.completedAt.UnixNano()` exactly — both surfaces derive
+	// from the same `completedAt := time.Now().UTC()` capture in
+	// processJob. A regression back to two separate `time.Now()`
+	// calls would produce slightly different values that this strict
+	// equality catches. (CodeRabbit nitpick on PR #187 — pinned so a
+	// future maintainer can't drop the shared capture.)
+	row, err := store.GetVariant(spec.SourceLibraryRel, spec.VariantID())
+	if err != nil {
+		t.Fatalf("GetVariant for parity check: %v", err)
+	}
+	if row.CreatedAt != got.completedAt.UnixNano() {
+		t.Errorf("DB row CreatedAt (%d) != event completedAt.UnixNano() (%d) — "+
+			"single-capture guarantee broken",
+			row.CreatedAt, got.completedAt.UnixNano())
+	}
 }
 
 // TestPoolDoesNotFireOnJobCompleteOnFailure pins the success-only

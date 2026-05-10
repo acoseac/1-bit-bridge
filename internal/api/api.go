@@ -555,7 +555,19 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// client comparing /v1/health response fingerprints (e.g. for
 	// content-equality short-circuit caches) doesn't churn on every
 	// poll. New keys append in alpha order.
-	resp.Features = []string{"upscaleCompleteEvents", "variantBumpsIndex"}
+	// `upscaleCompleteEvents` gated on `s.upscaleEnabled` because iOS
+	// will skip 4-of-5 ladder rungs when the flag is present and wait
+	// for an `upscale.complete` SSE event — but a bridge with upscale
+	// disabled has no transcode pool and `SetOnJobComplete` was never
+	// called, so no event ever arrives. iOS would spend 10 minutes
+	// silently waiting on a single backstop rung that may not even
+	// land any variants. Mirrors how `resp.UpscaleEnabled` already
+	// gates the feature visibility. (Greptile P1 on PR #187.)
+	if s.upscaleEnabled {
+		resp.Features = []string{"upscaleCompleteEvents", "variantBumpsIndex"}
+	} else {
+		resp.Features = []string{"variantBumpsIndex"}
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
