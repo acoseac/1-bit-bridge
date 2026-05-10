@@ -728,23 +728,21 @@ func (s *Store) lookupTrackByLowerCase(cleaned string) (*Track, error) {
 	return &t, nil
 }
 
-// Shared sentinels for `Track.Enriched`'s pointer assignments. The
-// field is `*bool` for wire-shape reasons (nil distinguishes
-// "pre-v1.1 server, field absent" from explicit `false`), but the
-// server-side scan only ever needs two values. Without these,
-// `t.Enriched = &enriched` where `enriched` is a loop-local would
-// force one heap allocation per track — Qodo flagged this on a
-// 50k-track library as a real GC-pressure issue. Two package-level
-// vars let every row share the same two pointers and the loop
-// allocates nothing extra.
+// boolPtr returns a heap-allocated *bool for the given value. Used by
+// the read paths (ListTracks / StreamTracks / ListTracksPage) to fill
+// `Track.Enriched`, which is *bool for wire-shape reasons (nil
+// distinguishes "pre-v1.1 server, field absent" from explicit false).
 //
-// Safe to share: the value at `*enrichedTrue` / `*enrichedFalse` is
-// never mutated (the `Track.Enriched` consumers only ever read,
-// and the JSON encoder only reads as well).
-var (
-	enrichedTrue  = true
-	enrichedFalse = false
-)
+// Per-row allocation is deliberate (replaces a prior pair of shared
+// package-level singletons). The earlier singleton optimisation was
+// premature: 50k tracks × 8-byte pointer + 1-byte bool ≈ 450 KB total
+// — noise next to the Track struct itself (~200 B + heap strings per
+// row) and SQLite query / JSON marshalling that already dominate the
+// read path. The singletons created an external-mutation footgun
+// because Track is exported: a downstream consumer writing
+// `*track.Enriched = ...` would have clobbered every subsequent read
+// for the process lifetime.
+func boolPtr(b bool) *bool { return &b }
 
 // variantsAggSQL is the correlated subquery suffix appended to every
 // `SELECT ... FROM tracks` that wants the variants column. Returns
@@ -884,13 +882,7 @@ func (s *Store) ListTracks(since *time.Time) ([]Track, error) {
 			return nil, err
 		}
 		scanTrackVariants(&t, variantsRaw)
-		// Share package-level pointers — see the `enrichedTrue` /
-		// `enrichedFalse` declaration above for the rationale.
-		if enrichedAt != 0 {
-			t.Enriched = &enrichedTrue
-		} else {
-			t.Enriched = &enrichedFalse
-		}
+		t.Enriched = boolPtr(enrichedAt != 0)
 		out = append(out, t)
 	}
 	return out, rows.Err()
@@ -947,11 +939,7 @@ func (s *Store) StreamTracks(sp *time.Time, fn func(*Track) error) error {
 		if err := json.Unmarshal(raw, &t); err != nil {
 			return err
 		}
-		if enrichedAt != 0 {
-			t.Enriched = &enrichedTrue
-		} else {
-			t.Enriched = &enrichedFalse
-		}
+		t.Enriched = boolPtr(enrichedAt != 0)
 		scanTrackVariants(&t, variantsRaw)
 		if err := fn(&t); err != nil {
 			return err
@@ -1003,15 +991,7 @@ func (s *Store) ListTracksPage(afterPath string, limit int) ([]Track, error) {
 			return nil, err
 		}
 		scanTrackVariants(&t, variantsRaw)
-		// Same enriched-from-column splice as `ListTracks` — see
-		// the comment there for the "why a column, not the JSON" detail
-		// and the `enrichedTrue` / `enrichedFalse` declaration for the
-		// pointer-sharing rationale.
-		if enrichedAt != 0 {
-			t.Enriched = &enrichedTrue
-		} else {
-			t.Enriched = &enrichedFalse
-		}
+		t.Enriched = boolPtr(enrichedAt != 0)
 		out = append(out, t)
 	}
 	return out, rows.Err()
