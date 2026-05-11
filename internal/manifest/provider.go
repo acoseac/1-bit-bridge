@@ -103,6 +103,18 @@ func (p *Provider) TracksIndexed() int {
 	return n
 }
 
+// PendingDeletions satisfies api.ManifestProvider. Reports the number of
+// tracks + folders rows the scanner has marked as missing this pass but
+// hasn't yet reached the configured delete threshold for. Cheap query —
+// two indexed counts.
+func (p *Provider) PendingDeletions() int64 {
+	n, err := p.store.PendingDeletions()
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
 // HasTrackWithArtworkMBID satisfies api.MBIDProbe. Delegates straight
 // to the Store so the api package doesn't need a direct dependency on
 // internal/manifest.

@@ -31,11 +31,12 @@ import (
 // `pageBody` is typed via the api ManifestProvider contract so the
 // paginated path is statically checked from fake to handler.
 type fakeManifestProvider struct {
-	body          any
-	err           error
-	isScanning    bool
-	lastFullScan  time.Time
-	tracksIndexed int
+	body             any
+	err              error
+	isScanning       bool
+	lastFullScan     time.Time
+	tracksIndexed    int
+	pendingDeletions int64
 	// pageBody / pageErr drive BuildManifestPage independently so
 	// pagination tests can assert against a different response than
 	// the legacy WriteManifest path without clobbering full-manifest
@@ -77,6 +78,7 @@ func (f *fakeManifestProvider) BuildManifestPage(cursor string, limit int) (*Man
 func (f *fakeManifestProvider) IsScanning() bool        { return f.isScanning }
 func (f *fakeManifestProvider) LastFullScan() time.Time { return f.lastFullScan }
 func (f *fakeManifestProvider) TracksIndexed() int      { return f.tracksIndexed }
+func (f *fakeManifestProvider) PendingDeletions() int64 { return f.pendingDeletions }
 
 // newTestServer spins up an httptest.Server with the api handler and a
 // populated auth store. Returns the server plus one valid raw token for

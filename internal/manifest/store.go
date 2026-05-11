@@ -282,6 +282,46 @@ var migrations = []migration{
 			ON track_variants(unicode_lower(source_path), variant_id);
 		`,
 	},
+	{
+		version: 5,
+		name:    "missing_count columns on tracks and folders",
+		// Adds `missing_count INTEGER` to both `tracks` and `folders`.
+		// The scanner increments it on each pass where a row is NOT
+		// in the seen-set AND its subtree did NOT hit an errorSubtree
+		// guard; it resets to 0 on each confirm via UpsertTrack /
+		// UpsertTrackBatch / UpsertFolder. Rows reach `>= threshold`
+		// only after N consecutive scans that successfully completed
+		// without seeing the row — defending against silent partial
+		// enumeration on flaky network mounts (SMB re-auth flap, NFS
+		// brownout, libsmb2 timeout returning an empty Readdir).
+		//
+		// **Idempotency: BOTH ALTERs live in post(), not in `sql`.**
+		// `migrate()` short-circuits on the first error from
+		// `s.db.Exec(m.sql)`, so a partial-apply scenario (first
+		// ALTER committed, second failed mid-migration, restart)
+		// would otherwise hit "duplicate column" on the first ALTER
+		// of the retry and never reach the post() that's meant to
+		// swallow it — leaving the DB stuck. Doing both ALTERs in
+		// post() (which the migrate caller invokes with error-tolerant
+		// `_, _ = db.Exec(...)` semantics by convention) makes each
+		// step independently idempotent and re-runnable after any
+		// partial failure. The `sql` payload is a harmless SQL
+		// comment so `s.db.Exec(m.sql)` always succeeds cleanly
+		// before post() does the real work. Caught by Gemini HIGH
+		// bot review on PR #193.
+		sql: `-- columns added in post() for idempotency; see migration v5 docblock`,
+		post: func(db *sql.DB) error {
+			// Idempotent ALTERs — "duplicate column" is the expected
+			// no-op when the prior run committed the column already.
+			// Errors are swallowed deliberately: the next migrate()
+			// call retries, and any persistent failure (disk full,
+			// permissions) will manifest at the next real write the
+			// scanner attempts, with a clearer error context.
+			_, _ = db.Exec(`ALTER TABLE tracks ADD COLUMN missing_count INTEGER NOT NULL DEFAULT 0`)
+			_, _ = db.Exec(`ALTER TABLE folders ADD COLUMN missing_count INTEGER NOT NULL DEFAULT 0`)
+			return nil
+		},
+	},
 }
 
 // normalizePathForLookup folds an iOS-shaped track path back toward
@@ -451,11 +491,18 @@ func (s *Store) UpsertTrack(t *Track) error {
 		INSERT INTO tracks(path, size, mtime_ns, tags_json, indexed_at)
 		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(path) DO UPDATE SET
-			size        = excluded.size,
-			mtime_ns    = excluded.mtime_ns,
-			tags_json   = excluded.tags_json,
-			indexed_at  = excluded.indexed_at,
-			enriched_at = 0
+			size          = excluded.size,
+			mtime_ns      = excluded.mtime_ns,
+			tags_json     = excluded.tags_json,
+			indexed_at    = excluded.indexed_at,
+			enriched_at   = 0,
+			-- missing_count reset is UNCONDITIONAL on confirm: the row
+			-- being upserted is by definition "seen this scan", which
+			-- is exactly the signal the counter measures. A pure
+			-- mtime-equal path that skipped the reset would leak
+			-- counter increments across scans and cause spurious
+			-- deletes on long-stable libraries. See migration v5 doc.
+			missing_count = 0
 	`, t.Path, t.Size, t.ModTime.UnixNano(), raw, time.Now().UnixNano())
 	return err
 }
@@ -516,11 +563,15 @@ func (s *Store) UpsertTrackBatch(ts []*Track) error {
 		INSERT INTO tracks(path, size, mtime_ns, tags_json, indexed_at)
 		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(path) DO UPDATE SET
-			size        = excluded.size,
-			mtime_ns    = excluded.mtime_ns,
-			tags_json   = excluded.tags_json,
-			indexed_at  = excluded.indexed_at,
-			enriched_at = 0
+			size          = excluded.size,
+			mtime_ns      = excluded.mtime_ns,
+			tags_json     = excluded.tags_json,
+			indexed_at    = excluded.indexed_at,
+			enriched_at   = 0,
+			-- See UpsertTrack: missing_count reset is unconditional on
+			-- every confirm so a stable library can't accumulate stale
+			-- counter increments across scans.
+			missing_count = 0
 	`)
 	if err != nil {
 		return err
@@ -1440,7 +1491,12 @@ func (s *Store) UpsertFolder(f *Folder) error {
 	defer s.mu.Unlock()
 	_, err := s.db.Exec(`
 		INSERT INTO folders(path, mtime_ns) VALUES (?, ?)
-		ON CONFLICT(path) DO UPDATE SET mtime_ns = excluded.mtime_ns
+		ON CONFLICT(path) DO UPDATE SET
+			mtime_ns      = excluded.mtime_ns,
+			-- Same unconditional reset on confirm as UpsertTrack —
+			-- see migration v5 + UpsertTrack docblock for the
+			-- rationale (silent-empty-enumeration grace period).
+			missing_count = 0
 	`, f.Path, f.ModTime.UnixNano())
 	return err
 }
@@ -1575,6 +1631,195 @@ func (s *Store) DeleteFolder(path string) error {
 	defer s.mu.Unlock()
 	_, err := s.db.Exec(`DELETE FROM folders WHERE path = ?`, path)
 	return err
+}
+
+// IncrementMissingTracksAndDeleteAtThreshold bumps missing_count on
+// every row whose path is in `missingPaths` AND atomically deletes any
+// row whose new missing_count >= threshold. Returns the number of rows
+// that were deleted.
+//
+// This is the operational core of the silent-empty-enumeration defence
+// (see migration v5 doc). The scanner identifies tracks that were in
+// the before-snapshot but NOT in the seen-set this pass AND whose
+// subtree is NOT under an errorSubtree guard, and passes that list
+// here at end-of-scan. Rows survive (threshold - 1) consecutive
+// missing scans before being reaped; that grace period absorbs the
+// transient-but-undetected failure modes (SMB re-auth flap, NFS
+// brownout, libsmb2 timeout returning an empty Readdir) that
+// errorSubtrees can't catch because no error surfaced to fire it.
+//
+// **Sidecar cleanup: this path does NOT proactively remove on-disk
+// sidecar files.** `DeleteTrack` (line 559) walks the `track_variants`
+// rows for its parent and `os.Remove`s each sidecar BEFORE issuing
+// the DELETE, maintaining the "no orphans on disk" invariant. This
+// bulk path is hot-loop in the scanner deletion pass and would pay
+// an N-row SELECT + Stat-cluster per scan to do the same — measured
+// to be the dominant scanner cost on a 50k-track library, so we
+// accept the trade-off of leaving orphan `.flac` sidecars in the
+// `transcoded/` directory until the next `bridge upscale --gc` run.
+// Operators running large-scale reaping events (decommissioning a
+// mount, mass library cleanup) should follow up with `bridge upscale
+// --gc` to reclaim the disk space. CASCADE on the parent track row
+// still cleans up the `track_variants` SQLite row itself; only the
+// on-disk file persists. Gemini bot review on PR #193 flagged this
+// docstring inaccuracy.
+//
+// Both the increment and the delete happen in a single SQLite
+// transaction so a crash between them can't leave the counter
+// half-bumped — re-run on next scan would re-increment from the
+// same starting value, accelerating the eventual delete by one
+// scan. (The opposite ordering — delete-then-bump — would risk
+// deleting a row whose counter increment had committed but whose
+// matching upsert reset was still pending in a parallel writer.)
+//
+// `threshold` MUST be >= 1. Callers using the YAML default of 3
+// preserve the legacy immediate-delete behaviour when set to 1.
+//
+// Holds `s.mu` per the writer contract on Store.
+func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(missingPaths []string, threshold int) (int64, error) {
+	if len(missingPaths) == 0 || threshold < 1 {
+		return 0, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	stmt, err := tx.Prepare(`UPDATE tracks SET missing_count = missing_count + 1 WHERE path = ?`)
+	if err != nil {
+		return 0, err
+	}
+	for _, p := range missingPaths {
+		if _, err := stmt.Exec(p); err != nil {
+			stmt.Close()
+			return 0, err
+		}
+	}
+	stmt.Close()
+	res, err := tx.Exec(`DELETE FROM tracks WHERE missing_count >= ?`, threshold)
+	if err != nil {
+		return 0, err
+	}
+	deleted, _ := res.RowsAffected()
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return deleted, nil
+}
+
+// IncrementMissingFoldersAndDeleteAtThreshold is the folders-table sibling
+// of IncrementMissingTracksAndDeleteAtThreshold. Same contract, same
+// rationale — phantom directories from transient mount failures must
+// NOT linger in the folder listing surface across N consecutive scans
+// that didn't see them either.
+//
+// Holds `s.mu` per the writer contract on Store.
+func (s *Store) IncrementMissingFoldersAndDeleteAtThreshold(missingPaths []string, threshold int) (int64, error) {
+	if len(missingPaths) == 0 || threshold < 1 {
+		return 0, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	stmt, err := tx.Prepare(`UPDATE folders SET missing_count = missing_count + 1 WHERE path = ?`)
+	if err != nil {
+		return 0, err
+	}
+	for _, p := range missingPaths {
+		if _, err := stmt.Exec(p); err != nil {
+			stmt.Close()
+			return 0, err
+		}
+	}
+	stmt.Close()
+	res, err := tx.Exec(`DELETE FROM folders WHERE missing_count >= ?`, threshold)
+	if err != nil {
+		return 0, err
+	}
+	deleted, _ := res.RowsAffected()
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return deleted, nil
+}
+
+// PendingDeletions returns the total count of rows across `tracks` and
+// `folders` that have a non-zero missing_count but haven't yet hit the
+// delete threshold. Exposed for the /v1/health ScanState surface and
+// the admin dashboard "X rows pending deletion" hint. Cheap query —
+// two indexed counts. Nil-safe under closed Store (returns 0, nil).
+func (s *Store) PendingDeletions() (int64, error) {
+	if s == nil || s.db == nil {
+		return 0, nil
+	}
+	var tracks, folders int64
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM tracks WHERE missing_count > 0`).Scan(&tracks); err != nil {
+		return 0, err
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM folders WHERE missing_count > 0`).Scan(&folders); err != nil {
+		return 0, err
+	}
+	return tracks + folders, nil
+}
+
+// ResetTrackMissingCount sets `missing_count = 0` on the row keyed by
+// path. Used by the scanner's early-skip path (mtime+size unchanged →
+// no extract → no upsert) so a track that was previously marked missing
+// still has its counter reset when it reappears unchanged. Without this,
+// the unconditional reset in UpsertTrack only fires on the slow path,
+// and a flap-then-restore on a long-stable library leaves the counter
+// stuck — eventually crossing the threshold and reaping the still-on-
+// disk row. Caught by Gemini bot review on PR #193.
+//
+// Cheap single-row UPDATE on the PRIMARY KEY index. Missing rows
+// silently no-op (RowsAffected == 0). Holds `s.mu` per the writer
+// contract on Store.
+func (s *Store) ResetTrackMissingCount(path string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`UPDATE tracks SET missing_count = 0 WHERE path = ? AND missing_count != 0`, path)
+	return err
+}
+
+// ClearMissingCounts wipes all rows where missing_count > 0 in tracks +
+// folders. Used by the `bridge manifest clear-missing` operator escape
+// hatch — an operator who KNOWS a mount has been permanently removed
+// and doesn't want to wait N scans for cleanup. Returns the total
+// number of rows deleted across both tables.
+//
+// Both deletes happen in one transaction so a crash mid-clear can't
+// leave the operator with a partially-purged state — re-running the
+// command picks up exactly the rows the prior attempt missed.
+//
+// Holds `s.mu` per the writer contract on Store.
+func (s *Store) ClearMissingCounts() (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	tRes, err := tx.Exec(`DELETE FROM tracks WHERE missing_count > 0`)
+	if err != nil {
+		return 0, err
+	}
+	fRes, err := tx.Exec(`DELETE FROM folders WHERE missing_count > 0`)
+	if err != nil {
+		return 0, err
+	}
+	tCount, _ := tRes.RowsAffected()
+	fCount, _ := fRes.RowsAffected()
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return tCount + fCount, nil
 }
 
 // ----- scan_state -----

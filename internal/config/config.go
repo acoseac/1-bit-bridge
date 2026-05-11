@@ -65,6 +65,29 @@ type Config struct {
 	LibraryWatch    LibraryWatchConfig `yaml:"libraryWatch,omitempty"`
 	Upscale         UpscaleConfig      `yaml:"upscale,omitempty"`
 	Tailscale       TailscaleConfig    `yaml:"tailscale,omitempty"`
+	Scanner         ScannerConfig      `yaml:"scanner,omitempty"`
+}
+
+// ScannerConfig controls the library scanner's resilience knobs.
+//
+// DeleteAfterMissingScans is the consecutive-missing-scan grace period
+// before a row is deleted. The scanner increments per-row
+// `missing_count` on every pass where the row is in the before-snapshot
+// but NOT in the seen-set AND not under an errorSubtree. Rows reach
+// the threshold only after that many CLEAN scans (no surfaced error)
+// all failed to see them — defending against silent-empty-enumeration
+// modes on network mounts (SMB re-auth flap, NFS brownout, libsmb2
+// timeout returning an empty Readdir) that errorSubtrees can't catch
+// because no error fired.
+//
+// Default is 3. Minimum is 1 (preserves the pre-resilience immediate-
+// delete behaviour — useful for local-disk-only deployments where the
+// failure modes don't apply). Maximum isn't enforced but values > 10
+// only make sense in heavily flaky-mount environments; the trade-off
+// is that a user-deleted track lingers in search until the threshold
+// expires.
+type ScannerConfig struct {
+	DeleteAfterMissingScans int `yaml:"deleteAfterMissingScans,omitempty"`
 }
 
 // TailscaleConfig selects how the bridge integrates with Tailscale.
@@ -369,6 +392,15 @@ const (
 	DefaultScanIntervalSec     = 21600
 	DefaultLibraryName         = "1-bit Bridge"
 	DefaultBackupIntervalHours = 24
+
+	// DefaultDeleteAfterMissingScans is the grace period before the
+	// scanner deletes a row that's been missing from successive scans.
+	// 3 is a balance: short enough that a user-deleted track disappears
+	// from search inside a typical day's rescan cadence (6h × 3 = 18h),
+	// long enough to absorb the silent-empty-enumeration failure modes
+	// network mounts produce occasionally. Operators on local-disk-only
+	// deployments can override to 1 to preserve pre-resilience behaviour.
+	DefaultDeleteAfterMissingScans = 3
 	DefaultBackupKeep          = 7
 	// DefaultLibraryWatchDebounceSeconds is the per-directory
 	// event coalesce window when fsnotify-based watching is on.
@@ -492,6 +524,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.LibraryName == "" {
 		c.LibraryName = DefaultLibraryName
+	}
+	if c.Scanner.DeleteAfterMissingScans <= 0 {
+		c.Scanner.DeleteAfterMissingScans = DefaultDeleteAfterMissingScans
 	}
 	// Backup section: pointer-typed IntervalHours preserves the
 	// "omitted vs explicit-zero" distinction at YAML-round-trip

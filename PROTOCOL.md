@@ -68,7 +68,8 @@ Pairing probe and liveness check. No auth token required for this endpoint (so t
   "scanState": {
     "lastFullScan": "2026-04-23T11:41:01Z",
     "tracksIndexed": 24518,
-    "isScanning": false
+    "isScanning": false,
+    "pendingDeletions": 0
   },
   "endpoints": [
     "https://192.168.1.10:7788",
@@ -88,6 +89,8 @@ Pairing probe and liveness check. No auth token required for this endpoint (so t
 The four `latestServerVersion` / `updateAvailable` / `updateReleaseNotesURL` / `minClientVersion` fields are an additive extension landed in bridge 0.1.0; they are populated only when the bridge has an updater configured (it polls the GitHub Releases API in the background) and at least one successful poll has cached a result. All four are `omitempty` on the wire — older bridges ship the response without them, and iOS clients MUST tolerate their absence.
 
 `upscaleEnabled` (additive since v1.2, `*bool` with `omitempty`) reports whether the bridge has the offline PCM-upscaling feature enabled in `bridge.yaml` AND a working `sox` binary available on PATH (a misconfigured server with the flag on but no sox advertises `false` here — graceful degradation). iOS uses this single capability flag to gate every variant-related UI surface for that bridge: when `false` (or the field is absent on a pre-v1.2 bridge), the picker, glyph, and "Generate upscaled" context menu items are all hidden — bridge rows in the library look identical to SMB / local rows, so the user sees no functionality they can't use. Operator opt-in is in `bridge.yaml`'s `upscale.enabled: true`; default is off. See "Upscaling (offline PCM variants)" below for the wire shape on `/v1/manifest` and `/v1/download` when the flag is on.
+
+`scanState.pendingDeletions` (additive since v1.2.x, `omitempty`) is the count of tracks + folders rows the scanner has marked missing across recent scans but hasn't yet reached the configured delete threshold for (default 3 consecutive missing scans, configurable via `scanner.deleteAfterMissingScans` in `bridge.yaml`). A non-zero value means the scanner is granting those rows a grace period before reaping — protecting against silent-empty-enumeration failure modes on flaky network mounts (SMB re-auth flap, NFS brownout, libsmb2 timeout returning an empty Readdir). A steadily climbing value indicates a real connectivity problem the operator should investigate. Pre-v1.2.x bridges (created before migration v5) omit the field; iOS and admin UIs treat absence as 0.
 
 `certNotAfter` (additive since v1.2, `*time.Time` with `omitempty`) is the on-disk TLS certificate's `NotAfter` (UTC). iOS uses it to surface a "Bridge cert expires in X days — re-pair to refresh" warning before the cert actually expires and TLS handshakes start failing at Apple's ATS layer (Apple's 397-day cap means operators must re-pair roughly annually). Pre-v1.2 bridges and bridges where cert parsing failed at startup omit the field; iOS treats absence as "no expiry info, never warn".
 

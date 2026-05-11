@@ -167,6 +167,10 @@ type ManifestProvider interface {
 	IsScanning() bool
 	LastFullScan() time.Time
 	TracksIndexed() int
+	// PendingDeletions returns the total count of rows across tracks
+	// and folders with missing_count > 0 — surfaced on ScanState. May
+	// return 0 for an unwired or pre-v5 store; never errors today.
+	PendingDeletions() int64
 }
 
 // MBIDProbe is an optional interface the artwork + artist-image
@@ -515,6 +519,19 @@ type ScanState struct {
 	IsScanning    bool      `json:"isScanning"`
 	LastFullScan  time.Time `json:"lastFullScan,omitempty"`
 	TracksIndexed int       `json:"tracksIndexed"`
+
+	// PendingDeletions reports the count of rows across `tracks` and
+	// `folders` whose missing_count is > 0 but haven't yet reached the
+	// configured delete threshold — i.e. rows the scanner has marked
+	// as "missing this pass" but is granting the configured grace
+	// period before reaping. Surfaced for the admin dashboard "X rows
+	// pending deletion" hint and as a diagnostic signal on /v1/health:
+	// a steadily climbing value suggests a flaky mount or partial
+	// network failure that errorSubtrees isn't catching. Pre-v1.2.x
+	// bridges (before migration v5) omit the field entirely; iOS and
+	// admin UI treat absence as "no pending deletions, nothing to
+	// surface". Additive field, no protocol bump.
+	PendingDeletions int64 `json:"pendingDeletions,omitempty"`
 }
 
 // ErrorResponse matches the shape documented in PROTOCOL.md ("short-code" +
@@ -530,6 +547,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		scanState.IsScanning = s.manifest.IsScanning()
 		scanState.LastFullScan = s.manifest.LastFullScan()
 		scanState.TracksIndexed = s.manifest.TracksIndexed()
+		scanState.PendingDeletions = s.manifest.PendingDeletions()
 	}
 	resp := HealthResponse{
 		ProtocolVersion: version.ProtocolVersion,
