@@ -418,7 +418,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/pairing/{requestID}", s.pairingPoll)
 	mux.HandleFunc("GET /v1/pairing/{requestID}/events", s.pairingEvents)
 	mux.HandleFunc("DELETE /v1/pairing/{requestID}", s.pairingDelete)
-	return protocolHeader(mux)
+	// Chain order matters:
+	//   - `recoverer` innermost so it can catch panics in the mux/handlers
+	//     and emit a sanitized 500 before unwinding.
+	//   - `requestLogging` wraps recoverer so the captured status (e.g.
+	//     500 on the recovery path) and request_id are emitted on the
+	//     same line.
+	//   - `protocolHeader` outermost is unchanged — header injection is
+	//     independent of the request body and can't fail.
+	return protocolHeader(requestLogging(recoverer(mux)))
 }
 
 // HealthResponse is the /v1/health JSON body. Field ordering must stay
