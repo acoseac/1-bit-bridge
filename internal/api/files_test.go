@@ -186,6 +186,148 @@ func TestListRequiresAuth(t *testing.T) {
 	}
 }
 
+func TestListMultiRootRendersReachabilityFields(t *testing.T) {
+	// One reachable root and one bogus path so the response covers both
+	// halves of the new Reachable/Reason additive shape.
+	tmp := t.TempDir()
+	good := filepath.Join(tmp, "Music")
+	if err := os.MkdirAll(good, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(tmp, "Audiobooks-missing")
+	cfg := &config.Config{
+		LibraryRoots:  []string{good, missing},
+		ListenAddress: ":7788",
+		LibraryName:   "Multi",
+	}
+	store, _ := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
+	raw, _, _ := store.Mint("test")
+	hs := httptest.NewServer(New(cfg, store, nil, "fp").Handler())
+	defer hs.Close()
+
+	resp := authGet(t, hs, "/v1/list?path=", raw)
+	defer resp.Body.Close()
+	var entries []Entry
+	if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("len(entries) = %d, want 2: %+v", len(entries), entries)
+	}
+	// Sort puts Audiobooks-missing first, Music second.
+	if entries[0].Reachable == nil || *entries[0].Reachable {
+		t.Errorf("missing root should report Reachable=false, got %+v", entries[0])
+	}
+	if entries[0].Reason != "not_mounted" {
+		t.Errorf("missing root reason = %q, want not_mounted", entries[0].Reason)
+	}
+	if entries[1].Reachable == nil || !*entries[1].Reachable {
+		t.Errorf("healthy root should report Reachable=true, got %+v", entries[1])
+	}
+	if entries[1].Reason != "" {
+		t.Errorf("healthy root should omit Reason, got %q", entries[1].Reason)
+	}
+}
+
+func TestStatReachableRootReturnsReachableTrue(t *testing.T) {
+	tmp := t.TempDir()
+	root := filepath.Join(tmp, "Music")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{LibraryRoots: []string{root}, ListenAddress: ":7788", LibraryName: "L"}
+	store, _ := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
+	raw, _, _ := store.Mint("test")
+	hs := httptest.NewServer(New(cfg, store, nil, "fp").Handler())
+	defer hs.Close()
+
+	resp := authGet(t, hs, "/v1/stat?path=", raw)
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	var sr StatResponse
+	if err := json.NewDecoder(resp.Body).Decode(&sr); err != nil {
+		t.Fatal(err)
+	}
+	if sr.Reachable == nil || !*sr.Reachable {
+		t.Errorf("Reachable = %v, want true ptr", sr.Reachable)
+	}
+}
+
+func TestStatUnreachableRootReturnsStructuredOffline(t *testing.T) {
+	// Multi-root setup where one root path doesn't exist. /v1/stat against
+	// that root's basename must come back as 200 + Reachable: false +
+	// Reason, NOT as a 404 ErrNotFound from the resolver.
+	tmp := t.TempDir()
+	good := filepath.Join(tmp, "Music")
+	if err := os.MkdirAll(good, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(tmp, "Gone")
+	cfg := &config.Config{LibraryRoots: []string{good, missing}, ListenAddress: ":7788", LibraryName: "L"}
+	store, _ := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
+	raw, _, _ := store.Mint("test")
+	hs := httptest.NewServer(New(cfg, store, nil, "fp").Handler())
+	defer hs.Close()
+
+	resp := authGet(t, hs, "/v1/stat?path=Gone", raw)
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200 (structured offline, not 404)", resp.StatusCode)
+	}
+	var sr StatResponse
+	if err := json.NewDecoder(resp.Body).Decode(&sr); err != nil {
+		t.Fatal(err)
+	}
+	if sr.Reachable == nil || *sr.Reachable {
+		t.Errorf("Reachable = %v, want false ptr", sr.Reachable)
+	}
+	if sr.Reason != "not_mounted" {
+		t.Errorf("Reason = %q, want not_mounted", sr.Reason)
+	}
+	if !sr.IsDir {
+		t.Error("offline root should report IsDir=true so iOS renders it as a directory")
+	}
+}
+
+func TestHealthReportsRootsArray(t *testing.T) {
+	tmp := t.TempDir()
+	good := filepath.Join(tmp, "Music")
+	if err := os.MkdirAll(good, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(tmp, "Gone")
+	cfg := &config.Config{LibraryRoots: []string{good, missing}, ListenAddress: ":7788", LibraryName: "L"}
+	store, _ := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
+	hs := httptest.NewServer(New(cfg, store, nil, "fp").Handler())
+	defer hs.Close()
+
+	resp, err := http.Get(hs.URL + "/v1/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var hr HealthResponse
+	if err := json.NewDecoder(resp.Body).Decode(&hr); err != nil {
+		t.Fatal(err)
+	}
+	if len(hr.Roots) != 2 {
+		t.Fatalf("len(Roots) = %d, want 2: %+v", len(hr.Roots), hr.Roots)
+	}
+	// Health response order = configured-roots order (NOT alphabetical
+	// like /v1/list — the contract is "same order as resolver.Roots()").
+	if hr.Roots[0].Name != "Music" || !hr.Roots[0].Reachable {
+		t.Errorf("Roots[0] = %+v, want Music reachable", hr.Roots[0])
+	}
+	if hr.Roots[1].Name != "Gone" || hr.Roots[1].Reachable {
+		t.Errorf("Roots[1] = %+v, want Gone unreachable", hr.Roots[1])
+	}
+	if hr.Roots[1].Reason != "not_mounted" {
+		t.Errorf("Roots[1].Reason = %q, want not_mounted", hr.Roots[1].Reason)
+	}
+}
+
 func TestListMultiRootEmptyPathReturnsRoots(t *testing.T) {
 	tmp := t.TempDir()
 	a := filepath.Join(tmp, "Music")

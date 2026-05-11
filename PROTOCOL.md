@@ -81,13 +81,19 @@ Pairing probe and liveness check. No auth token required for this endpoint (so t
   "updateReleaseNotesURL": "https://github.com/acoseac/1-bit-bridge/releases/tag/v0.1.0",
   "minClientVersion": "1.0.0",
   "upscaleEnabled": false,
-  "certNotAfter": "2027-05-26T10:15:04Z"
+  "certNotAfter": "2027-05-26T10:15:04Z",
+  "roots": [
+    { "name": "Music", "reachable": true },
+    { "name": "Audiobooks", "reachable": false, "reason": "offline" }
+  ]
 }
 ```
 
 The four `latestServerVersion` / `updateAvailable` / `updateReleaseNotesURL` / `minClientVersion` fields are an additive extension landed in bridge 0.1.0; they are populated only when the bridge has an updater configured (it polls the GitHub Releases API in the background) and at least one successful poll has cached a result. All four are `omitempty` on the wire — older bridges ship the response without them, and iOS clients MUST tolerate their absence.
 
 `upscaleEnabled` (additive since v1.2, `*bool` with `omitempty`) reports whether the bridge has the offline PCM-upscaling feature enabled in `bridge.yaml` AND a working `sox` binary available on PATH (a misconfigured server with the flag on but no sox advertises `false` here — graceful degradation). iOS uses this single capability flag to gate every variant-related UI surface for that bridge: when `false` (or the field is absent on a pre-v1.2 bridge), the picker, glyph, and "Generate upscaled" context menu items are all hidden — bridge rows in the library look identical to SMB / local rows, so the user sees no functionality they can't use. Operator opt-in is in `bridge.yaml`'s `upscale.enabled: true`; default is off. See "Upscaling (offline PCM variants)" below for the wire shape on `/v1/manifest` and `/v1/download` when the flag is on.
+
+`roots` (additive since v1.2, `omitempty`) is the per-library-root reachability snapshot. Each entry's `name` is the root's basename (matches the entry rendered at the top level of `/v1/list`). `reachable` is true when the bridge most recently saw the root's filesystem path respond to a `stat` within the bridge-side probe budget (~2 s). When `reachable` is false, `reason` is a stable machine-readable code: `"offline"` (timeout / unclassified I/O error), `"not_mounted"` (ENOENT on the path), or `"permission_denied"` (EACCES). New reason values may appear over time; clients SHOULD treat unknown reason codes as a generic offline indicator. Probes are server-side TTL-cached (~5 s) so an aggressive `/v1/health` poll cadence doesn't re-stat every network mount. iOS uses this to surface a "Library X offline" hint without paginating `/v1/list`.
 
 `certNotAfter` (additive since v1.2, `*time.Time` with `omitempty`) is the on-disk TLS certificate's `NotAfter` (UTC). iOS uses it to surface a "Bridge cert expires in X days — re-pair to refresh" warning before the cert actually expires and TLS handshakes start failing at Apple's ATS layer (Apple's 397-day cap means operators must re-pair roughly annually). Pre-v1.2 bridges and bridges where cert parsing failed at startup omit the field; iOS treats absence as "no expiry info, never warn".
 
@@ -118,6 +124,8 @@ Directory listing. Replaces `SMBConnectionPool.list`.
 ]
 ```
 
+`reachable` / `reason` (additive since v1.2, both with `omitempty`) appear ONLY on the synthetic root-level entries returned in multi-root mode for an empty `path` query. Ordinary directories and files inside a root omit both fields. `reachable` is a `*bool` (the zero-value-omits-`false` rule means pointer is needed to send explicit `false`). When `reachable` is `false`, `reason` carries the same stable code set as the `roots` block of `/v1/health` (`"offline"`, `"not_mounted"`, `"permission_denied"`). Pre-v1.2 iOS ignores the field; iOS 1.2+ uses it to render a "library offline" hint instead of inferring from a silent zero-size row.
+
 ### `GET /v1/stat?path=<rel>`
 
 Single-entry stat. Replaces `SMBConnectionPool.stat`. Used by the iOS scanner's folder-mtime skip logic.
@@ -126,6 +134,8 @@ Single-entry stat. Replaces `SMBConnectionPool.stat`. Used by the iOS scanner's 
 ```json
 { "mtime": "2026-04-20T12:00:00Z", "isDir": true, "size": 0 }
 ```
+
+`reachable` / `reason` (additive since v1.2, both with `omitempty`) populate when the requested path identifies a configured library root. On a healthy root, `reachable: true` is emitted (no `reason`). On an unreachable root, the server responds `200 OK` with `reachable: false` + the relevant `reason` instead of falling through to a 404 — this lets iOS distinguish "library is offline" from "user typed an unknown path", which the pre-v1.2 shape conflated. Descendants of a root (file or subdirectory inside a library) omit both fields.
 
 ### `GET /v1/read?path=<rel>`
 
