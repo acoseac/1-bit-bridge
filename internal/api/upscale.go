@@ -123,7 +123,8 @@ func (s *Server) upscaleRequest(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	var req UpscaleRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "bad_request", "request body must be JSON: "+err.Error())
+		writeErrorLog(w, r, http.StatusBadRequest, "bad_request",
+			"request body must be JSON", err)
 		return
 	}
 	// Normalise to forward-slash form before any path math. The
@@ -149,7 +150,8 @@ func (s *Server) upscaleRequest(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, bridgefs.ErrNotFound), errors.Is(err, bridgefs.ErrUnknownRoot):
 			writeError(w, http.StatusNotFound, "not_found", "path does not exist")
 		default:
-			writeError(w, http.StatusInternalServerError, "internal", err.Error())
+			writeErrorLog(w, r, http.StatusInternalServerError, "internal",
+				"the bridge couldn't resolve this path", err)
 		}
 		return
 	}
