@@ -63,10 +63,11 @@ const manifestLimiterIdleTimeout = 1 * time.Hour
 // is unreliable behind Tailscale CGNAT and the token IS the actual
 // identity boundary.
 type manifestRateLimiter struct {
-	mu      sync.Mutex
-	entries map[string]*manifestLimiterEntry
-	rate    rate.Limit
-	burst   int
+	mu         sync.Mutex
+	entries    map[string]*manifestLimiterEntry
+	rate       rate.Limit
+	burst      int
+	reaperOnce sync.Once // enforces Start's "called multiple times → no-op" contract
 }
 
 type manifestLimiterEntry struct {
@@ -127,22 +128,28 @@ func (m *manifestRateLimiter) reapIdle(now time.Time) int {
 // Start launches the periodic-reaper goroutine. Returns a cancel
 // function the caller invokes at shutdown — keeps the goroutine
 // scoped to the Server's lifetime and prevents test leakage. Safe
-// to call multiple times: subsequent calls are no-ops.
+// to call multiple times: subsequent calls are no-ops enforced by a
+// sync.Once. The original docstring claimed idempotence but didn't
+// actually enforce it — every call spawned a fresh reaper, leaking
+// goroutines on accidental re-entry. Caught by Gemini Medium +
+// Greptile P2 on PR #194.
 func (m *manifestRateLimiter) Start(stop <-chan struct{}) {
-	go func() {
-		t := time.NewTicker(manifestLimiterCleanupInterval)
-		defer t.Stop()
-		for {
-			select {
-			case <-stop:
-				return
-			case now := <-t.C:
-				m.mu.Lock()
-				m.reapIdle(now)
-				m.mu.Unlock()
+	m.reaperOnce.Do(func() {
+		go func() {
+			t := time.NewTicker(manifestLimiterCleanupInterval)
+			defer t.Stop()
+			for {
+				select {
+				case <-stop:
+					return
+				case now := <-t.C:
+					m.mu.Lock()
+					m.reapIdle(now)
+					m.mu.Unlock()
+				}
 			}
-		}
-	}()
+		}()
+	})
 }
 
 // disabled reports whether the limiter is configured to allow everything.

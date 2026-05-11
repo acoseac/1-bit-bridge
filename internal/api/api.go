@@ -223,7 +223,7 @@ func New(cfg *config.Config, store *auth.Store, mp ManifestProvider, fingerprint
 		resolver:            bridgefs.New(cfg.LibraryRoots),
 		manifest:            mp,
 		pairingRateLimiter:  newPairingRateLimiter(),
-		manifestRateLimiter: newManifestRateLimiter(cfg.Limits.Manifest.RequestsPerMinute, cfg.Limits.Manifest.Burst),
+		manifestRateLimiter: newManifestRateLimiter(cfg.Limits.Manifest.EffectiveRPM(), cfg.Limits.Manifest.EffectiveBurst()),
 		fingerprint:         fingerprint,
 		startedAt:           time.Now().UTC(),
 	}

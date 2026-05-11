@@ -101,10 +101,45 @@ type LimitsConfig struct {
 
 // ManifestLimitsConfig controls the per-token-ID token bucket applied
 // to /v1/manifest. See internal/api.manifestRateLimiter for the
-// runtime shape. Defaults applied in applyDefaults.
+// runtime shape.
+//
+// Pointer-typed RequestsPerMinute / Burst preserve the operator's
+// intent across the (missing-field) vs (explicit-zero) distinction
+// Go's bare `int` collapses. The documented opt-out path is
+// `limits.manifest.requestsPerMinute: 0` — explicit zero MUST disable
+// the limiter, while a missing field MUST pick up the default. Without
+// the pointer, applyDefaults can't tell those apart and silently
+// overrides operator-supplied zeros (Gemini HIGH + Greptile P1 on
+// PR #194). Same shape as Backup.IntervalHours uses for the same
+// reason. Always read via EffectiveRPM / EffectiveBurst below — never
+// dereference the pointer fields directly.
 type ManifestLimitsConfig struct {
-	RequestsPerMinute int `yaml:"requestsPerMinute,omitempty"`
-	Burst             int `yaml:"burst,omitempty"`
+	RequestsPerMinute *int `yaml:"requestsPerMinute,omitempty"`
+	Burst             *int `yaml:"burst,omitempty"`
+}
+
+// EffectiveRPM returns the configured requests-per-minute. A missing
+// field (pointer == nil) returns the default; an explicit zero is
+// preserved verbatim — the limiter's constructor maps zero to "no
+// budget" so callers fall open. That's the documented opt-out path.
+func (m ManifestLimitsConfig) EffectiveRPM() int {
+	if m.RequestsPerMinute == nil {
+		return DefaultManifestRequestsPerMinute
+	}
+	return *m.RequestsPerMinute
+}
+
+// EffectiveBurst returns the configured burst capacity. A missing
+// field returns the default. An explicit zero / negative gets clamped
+// to 1 by the limiter constructor — burst=0 in the rate package means
+// "deny everything", which would lock out legitimate clients on a
+// config typo. Operators opt out of the limiter via RequestsPerMinute=0,
+// not via Burst.
+func (m ManifestLimitsConfig) EffectiveBurst() int {
+	if m.Burst == nil {
+		return DefaultManifestBurst
+	}
+	return *m.Burst
 }
 
 // TailscaleConfig selects how the bridge integrates with Tailscale.
@@ -558,12 +593,15 @@ func (c *Config) applyDefaults() {
 	if c.Scanner.DeleteAfterMissingScans <= 0 {
 		c.Scanner.DeleteAfterMissingScans = DefaultDeleteAfterMissingScans
 	}
-	if c.Limits.Manifest.RequestsPerMinute == 0 {
-		c.Limits.Manifest.RequestsPerMinute = DefaultManifestRequestsPerMinute
-	}
-	if c.Limits.Manifest.Burst == 0 {
-		c.Limits.Manifest.Burst = DefaultManifestBurst
-	}
+	// Limits section: pointer-typed RequestsPerMinute / Burst preserve
+	// the "omitted vs explicit-zero" distinction at YAML-round-trip
+	// time, so an operator who writes `requestsPerMinute: 0` genuinely
+	// disables the limiter (matches PROTOCOL.md). Defaults are returned
+	// by the EffectiveRPM / EffectiveBurst helpers; applyDefaults
+	// intentionally leaves the raw fields untouched so a Save+Load
+	// round-trip preserves operator intent (same convention as
+	// Backup.IntervalHours).
+
 	// Backup section: pointer-typed IntervalHours preserves the
 	// "omitted vs explicit-zero" distinction at YAML-round-trip
 	// time, so an operator who writes `intervalHours: 0` genuinely

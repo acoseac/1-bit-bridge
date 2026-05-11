@@ -49,6 +49,46 @@ func TestManifestRateLimiter_DisabledWhenRPMZero(t *testing.T) {
 	}
 }
 
+// TestManifestLimitsConfig_EffectiveRPMPreservesExplicitZero is the
+// regression guard for Gemini HIGH / Greptile P1 on PR #194: PROTOCOL.md
+// documents `limits.manifest.requestsPerMinute: 0` as the limiter
+// opt-out. With the pre-fix bare-int field, applyDefaults silently
+// overrode operator zeros with the default value of 6. The pointer-
+// typed field + EffectiveRPM helper must preserve explicit zero while
+// applying the default only on missing fields (pointer == nil).
+func TestManifestLimitsConfig_EffectiveRPMPreservesExplicitZero(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  config.ManifestLimitsConfig
+		want int
+	}{
+		{
+			name: "missing field → default",
+			cfg:  config.ManifestLimitsConfig{},
+			want: config.DefaultManifestRequestsPerMinute,
+		},
+		{
+			name: "explicit zero → preserved (opt-out)",
+			cfg:  config.ManifestLimitsConfig{RequestsPerMinute: intPtr(0)},
+			want: 0,
+		},
+		{
+			name: "explicit non-zero → preserved",
+			cfg:  config.ManifestLimitsConfig{RequestsPerMinute: intPtr(120)},
+			want: 120,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.cfg.EffectiveRPM(); got != tc.want {
+				t.Errorf("EffectiveRPM = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func intPtr(v int) *int { return &v }
+
 func TestManifestRateLimiter_ReaperDropsIdle(t *testing.T) {
 	rl := newManifestRateLimiter(6, 3)
 	rl.limiterFor("stale")
@@ -90,8 +130,9 @@ func TestRateLimitManifestMiddleware_FallsOpenWithoutAuthContext(t *testing.T) {
 		ListenAddress: ":0",
 		LibraryName:   "X",
 	}
-	cfg.Limits.Manifest.RequestsPerMinute = 60
-	cfg.Limits.Manifest.Burst = 1
+	rpm, burst := 60, 1
+	cfg.Limits.Manifest.RequestsPerMinute = &rpm
+	cfg.Limits.Manifest.Burst = &burst
 	srv := New(cfg, nil, nil, "fp")
 
 	called := false
@@ -115,7 +156,7 @@ func TestRateLimitManifestMiddleware_FallsOpenWithoutAuthContext(t *testing.T) {
 // chain and burst=1, the second back-to-back request must come back as
 // 429 + Retry-After + the `rate_limited` typed error code.
 func TestRateLimitManifestMiddleware_429WithRetryAfter(t *testing.T) {
-	srv, raw := newRateLimitedTestServer(t, 60, 1)
+	srv, raw, _ := newRateLimitedTestServer(t, 60, 1)
 	defer srv.Close()
 
 	// First call passes through to the manifest handler. Provider is
@@ -151,13 +192,15 @@ func TestRateLimitManifestMiddleware_429WithRetryAfter(t *testing.T) {
 // TestRateLimitManifestMiddleware_PerClientIsolation: tokens A and B
 // share the bridge — burning A's burst MUST NOT block B.
 func TestRateLimitManifestMiddleware_PerClientIsolation(t *testing.T) {
-	srv, raw := newRateLimitedTestServer(t, 60, 1)
+	srv, raw, store := newRateLimitedTestServer(t, 60, 1)
 	defer srv.Close()
 
-	// Mint a second token against the same auth store. Reuse the same
-	// httptest server (the store is shared with the server's New call,
-	// via the closure inside newRateLimitedTestServer).
-	rawB := mintSecondToken(t, srv)
+	// Mint a second token against the same auth store the test server
+	// is validating against. Threading the store explicitly (rather
+	// than through a package-level handoff) keeps the test parallel-
+	// safe under any future t.Parallel() addition (Greptile P2 on
+	// PR #194).
+	rawB := mintToken(t, store, "test-B")
 
 	// Exhaust A.
 	r := manifestRequest(t, srv, raw)
@@ -179,7 +222,7 @@ func TestRateLimitManifestMiddleware_PerClientIsolation(t *testing.T) {
 // TestRateLimitManifestMiddleware_DisabledFallsOpen: rpm=0 in config
 // disables the limiter and every call passes through.
 func TestRateLimitManifestMiddleware_DisabledFallsOpen(t *testing.T) {
-	srv, raw := newRateLimitedTestServer(t, 0, 0)
+	srv, raw, _ := newRateLimitedTestServer(t, 0, 0)
 	defer srv.Close()
 
 	for i := 0; i < 10; i++ {
@@ -194,12 +237,15 @@ func TestRateLimitManifestMiddleware_DisabledFallsOpen(t *testing.T) {
 
 // --- shared local helpers (only this test file's tests use them) ---
 
-// authStoreForRateLimitTest is captured in the closure so mintSecondToken
-// can reach into the SAME store the running server is validating against.
-// This is a package-private test seam.
-var rateLimitAuthStore *auth.Store
-
-func newRateLimitedTestServer(t *testing.T, rpm, burst int) (*httptest.Server, string) {
+// newRateLimitedTestServer builds an authenticated test server with the
+// configured RPM / burst. Returns the server, an initial bearer token,
+// and the underlying auth store so callers that want a second token
+// can mint one without reaching into package-global state.
+//
+// rpm and burst use pointer semantics so an explicit zero (operator
+// opt-out) is preserved across the config layer's EffectiveRPM /
+// EffectiveBurst helpers.
+func newRateLimitedTestServer(t *testing.T, rpm, burst int) (*httptest.Server, string, *auth.Store) {
 	t.Helper()
 	tmp := t.TempDir()
 	cfg := &config.Config{
@@ -207,8 +253,8 @@ func newRateLimitedTestServer(t *testing.T, rpm, burst int) (*httptest.Server, s
 		ListenAddress: ":0",
 		LibraryName:   "X",
 	}
-	cfg.Limits.Manifest.RequestsPerMinute = rpm
-	cfg.Limits.Manifest.Burst = burst
+	cfg.Limits.Manifest.RequestsPerMinute = &rpm
+	cfg.Limits.Manifest.Burst = &burst
 	store, err := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -217,22 +263,18 @@ func newRateLimitedTestServer(t *testing.T, rpm, burst int) (*httptest.Server, s
 	if err != nil {
 		t.Fatal(err)
 	}
-	rateLimitAuthStore = store
 	srv := New(cfg, store, nil, "fp")
 	hs := httptest.NewServer(srv.Handler())
-	t.Cleanup(func() {
-		hs.Close()
-		rateLimitAuthStore = nil
-	})
-	return hs, raw
+	t.Cleanup(hs.Close)
+	return hs, raw, store
 }
 
-func mintSecondToken(t *testing.T, _ *httptest.Server) string {
+// mintToken issues a fresh bearer against the given auth store. Tests
+// that need a second token thread the store explicitly so there's no
+// package-level state to race on under future t.Parallel() additions.
+func mintToken(t *testing.T, store *auth.Store, name string) string {
 	t.Helper()
-	if rateLimitAuthStore == nil {
-		t.Fatal("rateLimitAuthStore not initialised — call newRateLimitedTestServer first")
-	}
-	raw, _, err := rateLimitAuthStore.Mint("test-B")
+	raw, _, err := store.Mint(name)
 	if err != nil {
 		t.Fatal(err)
 	}
