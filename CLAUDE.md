@@ -48,6 +48,20 @@ The iOS app **1-bit** lives at `github.com/acoseac/1-bit` with a local clone at 
 
 **Working the bridge**: `feat/<topic>` branches, PR to `main`, pre-push `make fmt vet test build-all`. **Working the iOS side**: same convention at `~/Desktop/com.acoseac.dsdplayer/`. Never push direct to `main` on either repo.
 
+## Wire-type discipline
+
+Types in [`internal/manifest/types.go`](internal/manifest/types.go) — `Track`, `Folder`, `Manifest`, `Variant`, `EnrichmentProgress` — ARE the wire contract. Their `json:` tags are versioned by `internal/version.ProtocolVersion`. Adding or renaming a tagged field requires a `ProtocolVersion` bump (or an `omitempty`-gated additive that pre-version-N iOS will ignore). This is intentional: the bridge serializes `manifest.Track` directly into the `/v1/manifest` stream and into the `Track.Variants` aggregation built by SQL `json_object` — those rows ARE the JSON payload iOS reads.
+
+All other domain types — SQLite row structs in [`internal/manifest/store.go`](internal/manifest/store.go), `pairing.Request` ([internal/pairing/store.go](internal/pairing/store.go)), `auth.Token` ([internal/auth/auth.go](internal/auth/auth.go)) — MUST NOT gain `json:` tags or be encoded directly via `json.NewEncoder(w).Encode(x)` / `json.Marshal(x)` from a handler. Wrap in a DTO under `internal/api/` (e.g. `UpscaleStats`, `HealthResponse`, `ScanState`, `Entry`, `StatResponse`, `ErrorResponse`). Adding `json:` tags to a non-wire domain type is a structural API leak — a future schema change (renaming a SQLite column, adding an internal field) would silently change the client-facing API.
+
+**Hidden-leak vectors to check during review:**
+
+- **`json.RawMessage` in any handler return path** passes bytes-shaped data through that bypasses the type-tag discipline. The `marshalForStorage` shim in [`internal/manifest/store.go`](internal/manifest/store.go) is the canonical correct use — deliberate pass-through of the `tags_json` BLOB, which IS the wire source-of-truth for Track metadata. Any new `json.RawMessage` site must be justified: name the wire field it serves, document the schema-stability contract.
+- **`any` / `interface{}` in handler-side helper signatures** defeats compile-time wire-shape checking. If a helper takes `any` (e.g. a generic `writeJSON(w, x any)`), the caller's responsibility to pass a wire DTO — not a domain type — is enforced by code review, not the compiler. Prefer wire-typed helpers (`writeJSON(w, UpscaleStats{...})`) over generic ones.
+- **SQL `json_object` / `json_group_array` aggregations** (used in `Track.Variants` via `variantsAggSQL` in [store.go](internal/manifest/store.go)) build wire JSON inside SQLite. The columns selected in the aggregation are wire fields and follow the same versioning rule as struct `json:` tags — adding a new column inside the `json_object(...)` call is an additive wire change.
+
+Audited PR-by-PR; verified clean at the time of this section's introduction. Re-audit when introducing a new handler or a new SQLite column on a wire-aggregated table.
+
 ## Local test fixture
 
 Point `--library` at any folder with a handful of tagged audio files and you've got a working test setup — FLAC / DSF / MP3 / M4A all work. A few dozen tracks across 4–5 artists covers the tag-extraction, enrichment, and playback paths without needing a NAS.
