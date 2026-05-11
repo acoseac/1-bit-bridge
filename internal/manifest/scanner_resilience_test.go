@@ -11,12 +11,32 @@ import (
 // promise of PR E: a track that disappears for one scan does NOT get
 // reaped if the configured threshold is 3 — it survives the missing
 // scan and the next confirm resets its counter.
+//
+// **Restoration uses identical mtime + size** (os.Chtimes) so the
+// scanner sees a row that's "the same file" rather than a fresh upsert.
+// That's the mode silent-empty-enumeration produces in production: the
+// file never changed on disk, the NAS just briefly stopped listing it.
+// The unconditional `missing_count = 0` reset in UpsertTrack (even on
+// mtime-equal no-op writes) is what makes this case work, and this
+// test is its regression guard. Gemini bot review on PR #193 caught
+// that the original test wrote a new-mtime file and so didn't exercise
+// the actual contract.
 func TestScannerSurvivesSingleMissingScanWithThreshold3(t *testing.T) {
 	dir := t.TempDir()
 	keep := filepath.Join(dir, "keep.flac")
 	flap := filepath.Join(dir, "flap.flac")
 	writeMinimalAudio(t, keep)
 	writeMinimalAudio(t, flap)
+
+	// Capture flap's original mtime so the restoration below produces
+	// a byte-and-mtime-identical file. Without this the second
+	// writeMinimalAudio gives a new mtime and exercises a different
+	// codepath (full re-upsert) than the production failure mode.
+	flapInfo, err := os.Stat(flap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flapMTime := flapInfo.ModTime()
 
 	store, err := OpenStore(filepath.Join(dir, "bridge.db"))
 	if err != nil {
@@ -50,13 +70,19 @@ func TestScannerSurvivesSingleMissingScanWithThreshold3(t *testing.T) {
 		t.Errorf("scan 2: flap missing_count = %d, want 1", got)
 	}
 
-	// Restore flap.flac, scan again. Counter must reset to 0.
+	// Restore flap.flac with the EXACT original mtime — simulates the
+	// "silent partial enumeration came back" production case. Counter
+	// must reset to 0 even though the file is byte-and-mtime-identical
+	// to what's already indexed.
 	writeMinimalAudio(t, flap)
+	if err := os.Chtimes(flap, flapMTime, flapMTime); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
 	if _, err := s.Scan(context.Background()); err != nil {
 		t.Fatalf("scan 3: %v", err)
 	}
 	if got := missingCountHelper(t, store, "flap.flac"); got != 0 {
-		t.Errorf("after restoration: flap missing_count = %d, want 0", got)
+		t.Errorf("after mtime-equal restoration: flap missing_count = %d, want 0", got)
 	}
 }
 

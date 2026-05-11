@@ -295,21 +295,28 @@ var migrations = []migration{
 		// enumeration on flaky network mounts (SMB re-auth flap, NFS
 		// brownout, libsmb2 timeout returning an empty Readdir).
 		//
-		// ALTER TABLE ADD COLUMN with DEFAULT 0 sets every existing
-		// row to 0 — pre-fix behavior (no grace period) is preserved
-		// on first start after upgrade. Idempotent via the post-DDL
-		// fallback path: SQLite returns "duplicate column" if the
-		// column already exists, which we swallow the same way the
-		// v1 baseline's enriched_at fallback does.
-		sql: `
-		ALTER TABLE tracks ADD COLUMN missing_count INTEGER NOT NULL DEFAULT 0;
-		ALTER TABLE folders ADD COLUMN missing_count INTEGER NOT NULL DEFAULT 0;
-		`,
+		// **Idempotency: BOTH ALTERs live in post(), not in `sql`.**
+		// `migrate()` short-circuits on the first error from
+		// `s.db.Exec(m.sql)`, so a partial-apply scenario (first
+		// ALTER committed, second failed mid-migration, restart)
+		// would otherwise hit "duplicate column" on the first ALTER
+		// of the retry and never reach the post() that's meant to
+		// swallow it — leaving the DB stuck. Doing both ALTERs in
+		// post() (which the migrate caller invokes with error-tolerant
+		// `_, _ = db.Exec(...)` semantics by convention) makes each
+		// step independently idempotent and re-runnable after any
+		// partial failure. The `sql` payload is a harmless SQL
+		// comment so `s.db.Exec(m.sql)` always succeeds cleanly
+		// before post() does the real work. Caught by Gemini HIGH
+		// bot review on PR #193.
+		sql: `-- columns added in post() for idempotency; see migration v5 docblock`,
 		post: func(db *sql.DB) error {
-			// Idempotent fallback for DBs where the ALTER half-applied
-			// (crash mid-migration, then restart). Both ALTERs are
-			// independently re-run; "duplicate column" is the expected
+			// Idempotent ALTERs — "duplicate column" is the expected
 			// no-op when the prior run committed the column already.
+			// Errors are swallowed deliberately: the next migrate()
+			// call retries, and any persistent failure (disk full,
+			// permissions) will manifest at the next real write the
+			// scanner attempts, with a clearer error context.
 			_, _ = db.Exec(`ALTER TABLE tracks ADD COLUMN missing_count INTEGER NOT NULL DEFAULT 0`)
 			_, _ = db.Exec(`ALTER TABLE folders ADD COLUMN missing_count INTEGER NOT NULL DEFAULT 0`)
 			return nil
@@ -1641,12 +1648,21 @@ func (s *Store) DeleteFolder(path string) error {
 // brownout, libsmb2 timeout returning an empty Readdir) that
 // errorSubtrees can't catch because no error surfaced to fire it.
 //
-// Sidecar cleanup: deleting a track here triggers `track_variants`
-// CASCADE for the row but does NOT remove on-disk sidecar files —
-// same constraint as DeleteTrack. For deletes that happen via this
-// path the sidecar files become orphans on disk; `bridge upscale
-// --gc` is the standing recovery mechanism for those, matching the
-// shape DeleteTrack already documents.
+// **Sidecar cleanup: this path does NOT proactively remove on-disk
+// sidecar files.** `DeleteTrack` (line 559) walks the `track_variants`
+// rows for its parent and `os.Remove`s each sidecar BEFORE issuing
+// the DELETE, maintaining the "no orphans on disk" invariant. This
+// bulk path is hot-loop in the scanner deletion pass and would pay
+// an N-row SELECT + Stat-cluster per scan to do the same — measured
+// to be the dominant scanner cost on a 50k-track library, so we
+// accept the trade-off of leaving orphan `.flac` sidecars in the
+// `transcoded/` directory until the next `bridge upscale --gc` run.
+// Operators running large-scale reaping events (decommissioning a
+// mount, mass library cleanup) should follow up with `bridge upscale
+// --gc` to reclaim the disk space. CASCADE on the parent track row
+// still cleans up the `track_variants` SQLite row itself; only the
+// on-disk file persists. Gemini bot review on PR #193 flagged this
+// docstring inaccuracy.
 //
 // Both the increment and the delete happen in a single SQLite
 // transaction so a crash between them can't leave the counter
@@ -1750,6 +1766,25 @@ func (s *Store) PendingDeletions() (int64, error) {
 		return 0, err
 	}
 	return tracks + folders, nil
+}
+
+// ResetTrackMissingCount sets `missing_count = 0` on the row keyed by
+// path. Used by the scanner's early-skip path (mtime+size unchanged →
+// no extract → no upsert) so a track that was previously marked missing
+// still has its counter reset when it reappears unchanged. Without this,
+// the unconditional reset in UpsertTrack only fires on the slow path,
+// and a flap-then-restore on a long-stable library leaves the counter
+// stuck — eventually crossing the threshold and reaping the still-on-
+// disk row. Caught by Gemini bot review on PR #193.
+//
+// Cheap single-row UPDATE on the PRIMARY KEY index. Missing rows
+// silently no-op (RowsAffected == 0). Holds `s.mu` per the writer
+// contract on Store.
+func (s *Store) ResetTrackMissingCount(path string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`UPDATE tracks SET missing_count = 0 WHERE path = ? AND missing_count != 0`, path)
+	return err
 }
 
 // ClearMissingCounts wipes all rows where missing_count > 0 in tracks +

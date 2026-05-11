@@ -510,6 +510,20 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 			existing, _ := s.store.GetTrack(pi.rel)
 			if existing != nil && existing.Size == pi.info.Size() && !existing.ModTime.Before(pi.info.ModTime()) {
 				if !s.needsLocalArtworkRecovery(existing) {
+					// Even on the early-skip path we MUST reset the
+					// missing_count for this row, otherwise a flap-
+					// then-restore on a mtime-equal file (the exact
+					// production case: silent partial enumeration came
+					// back and the file never changed) leaves the
+					// counter stuck and the row eventually gets reaped
+					// even though it's right there on disk. The
+					// UpsertTrack reset only fires on the slow extract
+					// path; without this targeted reset the skip
+					// optimization defeats the resilience contract.
+					// Cheap PRIMARY-KEY UPDATE, no-op when already 0.
+					if err := s.store.ResetTrackMissingCount(pi.rel); err != nil {
+						scanLogger.Warn("reset missing_count on skip", "path", pi.rel, "err", err)
+					}
 					return
 				}
 			}
