@@ -408,23 +408,28 @@ func childPath(parent, name string) string {
 // 4xx branches return the typed bridgefs sentinel's stable message
 // verbatim — those messages are stable, short, user-actionable strings
 // (e.g. "path not found", "unknown library root") that iOS surfaces
-// directly and don't leak internal state.
+// directly and don't leak internal state. The wrapped err still flows
+// through writeErrorLog so the per-request server log captures any
+// wrapping detail (the failing path component, the syscall errno) for
+// diagnostic correlation against the request_id, even though the wire
+// response stays sanitized. writeErrorLog's level split keeps these
+// 4xx records at Warn so they don't drown Error-level alerts (gemini
+// bot review on PR #191).
 //
 // The default branch is 5xx — for an UNKNOWN resolver error we don't
-// know the leak surface of err.Error(), so route through writeErrorLog
-// to record the underlying err server-side under the per-request logger
-// and respond with a generic sanitized message.
+// know the leak surface of err.Error(), so the wire body is the
+// generic "internal error" string.
 func writeResolveError(w http.ResponseWriter, r *http.Request, err error) bool {
 	if err == nil {
 		return false
 	}
 	switch {
 	case errors.Is(err, bridgefs.ErrBadPath):
-		writeError(w, http.StatusBadRequest, "bad_request", bridgefs.ErrBadPath.Error())
+		writeErrorLog(w, r, http.StatusBadRequest, "bad_request", bridgefs.ErrBadPath.Error(), err)
 	case errors.Is(err, bridgefs.ErrUnknownRoot):
-		writeError(w, http.StatusBadRequest, "bad_request", bridgefs.ErrUnknownRoot.Error())
+		writeErrorLog(w, r, http.StatusBadRequest, "bad_request", bridgefs.ErrUnknownRoot.Error(), err)
 	case errors.Is(err, bridgefs.ErrNotFound):
-		writeError(w, http.StatusNotFound, "not_found", bridgefs.ErrNotFound.Error())
+		writeErrorLog(w, r, http.StatusNotFound, "not_found", bridgefs.ErrNotFound.Error(), err)
 	default:
 		writeErrorLog(w, r, http.StatusInternalServerError, "internal",
 			"the bridge encountered an internal error", err)

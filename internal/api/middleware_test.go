@@ -15,6 +15,13 @@ import (
 // withTestSlog routes slog.Default to a buffer for the duration of the
 // test so we can assert against the structured log records the middleware
 // emits. Restores the previous default on cleanup.
+//
+// **Must NOT be used with t.Parallel()** — slog.SetDefault mutates a
+// process-global; two parallel tests calling this would race on the
+// default-logger swap and read each other's buffers. The tests below
+// run sequentially today; if a future change adds t.Parallel() to any
+// of them, this helper needs to grow a sync.Mutex (or move to per-test
+// loggers via slog.New + slog.NewLogLogger to avoid the global).
 func withTestSlog(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	prev := slog.Default()

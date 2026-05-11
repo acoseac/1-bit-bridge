@@ -67,9 +67,15 @@ func newRequestID() string {
 }
 
 // statusWriter wraps an http.ResponseWriter to capture the response
-// status code and byte count for the logging middleware. It transparently
-// delegates Flush, Hijack, and Unwrap so SSE / streaming / future
-// connection-hijacking handlers continue to work.
+// status code and byte count for the logging middleware. Implements
+// http.Flusher (SSE / chunked streaming need it) and Unwrap (Go 1.20+
+// `http.ResponseController` reaches through it — and ResponseController
+// is the supported path for callers that need Hijack / Deadline / etc.
+// behind a wrapped writer). The legacy direct-assertion path
+// `w.(http.Hijacker)` will NOT succeed once the request has been
+// wrapped here — handlers that need Hijack must use ResponseController.
+// The bridge has no Hijack callers today (only SSE), so this is a
+// future-proofing note rather than a regression risk.
 //
 // bytes is int64 — manifest responses for 50k-track libraries already
 // exceed 100 MB, and future streaming paths threading through this
