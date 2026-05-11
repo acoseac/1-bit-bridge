@@ -85,29 +85,17 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 				})
 				continue
 			}
-			info, err := os.Stat(root)
-			if err != nil {
-				// Race with the probe: reachable at probe time, gone
-				// 100ms later. Fall through to the offline shape so the
-				// client sees consistent data.
-				reachable := false
-				entries = append(entries, Entry{
-					Name:      base,
-					Path:      base,
-					IsDir:     true,
-					ModTime:   time.Time{},
-					Reachable: &reachable,
-					Reason:    "offline",
-				})
-				continue
-			}
+			// Healthy probe: reuse the ModTime captured by the probe's
+			// os.Stat instead of re-stating the path. On network-mounted
+			// libraries the second stat is the expensive one; pre-fix
+			// each multi-root /v1/list paid two stats per healthy root.
 			reachable := true
 			entries = append(entries, Entry{
 				Name:      base,
 				Path:      base,
 				IsDir:     true,
 				Size:      0,
-				ModTime:   info.ModTime().UTC(),
+				ModTime:   status.ModTime,
 				Reachable: &reachable,
 			})
 		}
@@ -182,21 +170,30 @@ func (s *Server) stat(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+		// Healthy root: build the response from the probe's cached
+		// stat to skip a second os.Stat. ResolveChecked would just
+		// rerun the same syscall the probe already did. The size
+		// field on a directory is conventionally 0 (matches what
+		// info.Size() returns on most filesystems for directory
+		// inodes) — keep it 0 here for consistency.
+		reachable := true
+		writeJSON(w, http.StatusOK, StatResponse{
+			IsDir:     true,
+			Size:      0,
+			ModTime:   status.ModTime,
+			Reachable: &reachable,
+		})
+		return
 	}
 	_, info, err := s.resolver.ResolveChecked(clientPath)
 	if ok := writeResolveError(w, r, err); ok {
 		return
 	}
-	resp := StatResponse{
+	writeJSON(w, http.StatusOK, StatResponse{
 		IsDir:   info.IsDir(),
 		Size:    info.Size(),
 		ModTime: info.ModTime().UTC(),
-	}
-	if absRoot := s.matchesRoot(clientPath); absRoot != "" {
-		reachable := true
-		resp.Reachable = &reachable
-	}
-	writeJSON(w, http.StatusOK, resp)
+	})
 }
 
 // read handles GET /v1/read?path=<rel>. Range header is REQUIRED per

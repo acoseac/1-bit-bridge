@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 // reachabilityTTL is how long a probe result is reused before refreshing.
@@ -27,7 +29,9 @@ const reachabilityTTL = 5 * time.Second
 // outlives the timeout leaks its goroutine until the kernel returns
 // (Go doesn't expose syscall cancellation) — accepted: the OS reaps
 // the stuck stat eventually, the leaked goroutine's only state is a
-// stale result that gets discarded.
+// stale result that gets discarded. singleflight (see reachabilityCache
+// docblock) keeps that leak to one goroutine per (root, stuck-window),
+// not per concurrent caller.
 const reachabilityProbeTimeout = 2 * time.Second
 
 // reachabilityStatus is the cached per-root probe result.
@@ -39,9 +43,17 @@ const reachabilityProbeTimeout = 2 * time.Second
 //   - "offline":            timeout or transport-level failure
 //   - "not_mounted":        os.ErrNotExist on the root path
 //   - "permission_denied":  EACCES on the root path
+//
+// ModTime is the canonical mtime captured by the probe's os.Stat — only
+// populated when Reachable is true. Reused by the list and stat
+// handlers so they don't re-stat the root path on a healthy probe-hit;
+// without this, every multi-root /v1/list call was doing two os.Stat
+// calls per root (one in the probe, one in the handler immediately
+// after) which doubles latency for network-mounted libraries.
 type reachabilityStatus struct {
 	Reachable bool
 	Reason    string
+	ModTime   time.Time
 	checkedAt time.Time
 }
 
@@ -50,9 +62,23 @@ type reachabilityStatus struct {
 // basename) avoids collisions in multi-root setups where two roots
 // share a name but differ in path, or where a root is reconfigured to
 // a new location with the same name.
+//
+// **Thundering herd mitigation**: a `singleflight.Group` collapses
+// concurrent in-flight probes for the same root onto a single
+// goroutine. Without it, under a 1 Hz /v1/health poll from multiple
+// iOS clients hitting the 5 s TTL boundary simultaneously, every
+// caller racing through the stale-or-miss window would spawn its own
+// probe goroutine. On a hung SMB/NFS mount that produces
+// O(clients × offline-roots) goroutines all blocked on the kernel
+// for up to 2 s — exactly the failure mode this code is supposed to
+// protect against. The singleflight key is the absRoot string, so
+// per-root staleness windows still go through their own probe (no
+// cross-root serialisation), but per-root concurrent callers all
+// wait on the first one's result.
 type reachabilityCache struct {
 	mu      sync.Mutex
 	entries map[string]reachabilityStatus
+	group   singleflight.Group
 }
 
 func newReachabilityCache() *reachabilityCache {
@@ -64,9 +90,21 @@ func newReachabilityCache() *reachabilityCache {
 // reachabilityProbeTimeout — a network mount that doesn't respond
 // within the budget reports "offline" rather than blocking the caller.
 //
+// Concurrent calls for the same absRoot are de-duplicated via the
+// singleflight group: only one probe goroutine runs at a time per
+// root, regardless of how many callers race through the cache miss.
+//
 // Pass the request's context.Context so a client disconnect short-
 // circuits the probe goroutine.
+//
+// Nil receiver is safe: returns Reachable=true with a generic
+// reason-less status so test harnesses that construct &Server{...}
+// without going through New() don't panic. Production callers always
+// go through New() which initialises the cache.
 func (c *reachabilityCache) probe(ctx context.Context, absRoot string) reachabilityStatus {
+	if c == nil {
+		return reachabilityStatus{Reachable: true, checkedAt: time.Now()}
+	}
 	c.mu.Lock()
 	if entry, ok := c.entries[absRoot]; ok && time.Since(entry.checkedAt) < reachabilityTTL {
 		c.mu.Unlock()
@@ -74,47 +112,78 @@ func (c *reachabilityCache) probe(ctx context.Context, absRoot string) reachabil
 	}
 	c.mu.Unlock()
 
+	// singleflight collapses concurrent callers onto one probe goroutine.
+	// The result is shared by every caller that arrived during the
+	// in-flight window.
+	v, _, _ := c.group.Do(absRoot, func() (interface{}, error) {
+		return c.probeLocked(ctx, absRoot), nil
+	})
+	return v.(reachabilityStatus)
+}
+
+// probeLocked is the actual stat-and-classify body. Runs inside the
+// singleflight closure so only one copy runs per (absRoot, stale-window).
+// Reads no shared state besides the per-call ctx.
+func (c *reachabilityCache) probeLocked(ctx context.Context, absRoot string) reachabilityStatus {
 	probeCtx, cancel := context.WithTimeout(ctx, reachabilityProbeTimeout)
 	defer cancel()
 
-	result := make(chan reachabilityStatus, 1)
+	type probeResult struct {
+		info os.FileInfo
+		err  error
+	}
+	resultCh := make(chan probeResult, 1)
 	go func() {
-		_, err := os.Stat(absRoot)
-		switch {
-		case err == nil:
-			result <- reachabilityStatus{Reachable: true, checkedAt: time.Now()}
-		case errors.Is(err, fs.ErrPermission):
-			result <- reachabilityStatus{Reachable: false, Reason: "permission_denied", checkedAt: time.Now()}
-		case errors.Is(err, os.ErrNotExist):
-			result <- reachabilityStatus{Reachable: false, Reason: "not_mounted", checkedAt: time.Now()}
-		default:
-			// Catch-all: I/O error, network filesystem returning a non-
-			// classified error, kernel-level SMB / NFS faults. Generic
-			// "offline" so iOS surfaces a network-style hint rather than
-			// a confusing permission-or-existence one.
-			result <- reachabilityStatus{Reachable: false, Reason: "offline", checkedAt: time.Now()}
-		}
+		info, err := os.Stat(absRoot)
+		resultCh <- probeResult{info: info, err: err}
 	}()
 
-	var status reachabilityStatus
+	var (
+		status     reachabilityStatus
+		fromCancel bool
+	)
 	select {
-	case status = <-result:
+	case pr := <-resultCh:
+		status = classifyProbeResult(pr.info, pr.err)
 	case <-probeCtx.Done():
-		// Timeout (or upstream cancel) — record offline but DON'T cache
-		// the cancellation case (the caller may have disconnected for
-		// reasons unrelated to the root's health). Distinguish by
-		// inspecting the parent ctx: only cache on a probe-timeout, not
-		// on an upstream client-cancel.
 		status = reachabilityStatus{Reachable: false, Reason: "offline", checkedAt: time.Now()}
+		// Distinguish probe-timeout from upstream client cancel: only
+		// cache the result when the timeout actually fired (deadline
+		// exceeded). Caller's parent ctx cancel may have nothing to
+		// do with the root's actual health.
 		if ctx.Err() != nil {
-			return status
+			fromCancel = true
 		}
 	}
 
+	if fromCancel {
+		return status
+	}
 	c.mu.Lock()
 	c.entries[absRoot] = status
 	c.mu.Unlock()
 	return status
+}
+
+// classifyProbeResult maps an os.Stat outcome to a reachabilityStatus.
+// Pure function; exported for testability and to keep the select
+// branches in probeLocked readable.
+func classifyProbeResult(info os.FileInfo, err error) reachabilityStatus {
+	now := time.Now()
+	switch {
+	case err == nil:
+		return reachabilityStatus{Reachable: true, ModTime: info.ModTime().UTC(), checkedAt: now}
+	case errors.Is(err, fs.ErrPermission):
+		return reachabilityStatus{Reachable: false, Reason: "permission_denied", checkedAt: now}
+	case errors.Is(err, os.ErrNotExist):
+		return reachabilityStatus{Reachable: false, Reason: "not_mounted", checkedAt: now}
+	default:
+		// Catch-all: I/O error, network filesystem returning a non-
+		// classified error, kernel-level SMB / NFS faults. Generic
+		// "offline" so iOS surfaces a network-style hint rather than
+		// a confusing permission-or-existence one.
+		return reachabilityStatus{Reachable: false, Reason: "offline", checkedAt: now}
+	}
 }
 
 // matchesRoot returns the absolute root path if clientPath identifies a
@@ -159,16 +228,31 @@ func (s *Server) matchesRoot(clientPath string) string {
 // probeAllRoots returns per-root reachability for every configured root,
 // in the same order as resolver.Roots(). Used by /v1/health to give iOS
 // a single-call view of which libraries are online.
+//
+// Probes run in parallel — sequential probing would make /v1/health
+// latency sum across every offline root (up to N × 2 s on a host with
+// multiple hung mounts). The bounded fan-out is fine: probes already
+// share the singleflight group, so concurrent callers don't multiply
+// goroutines per root.
 func (s *Server) probeAllRoots(ctx context.Context) []RootStatus {
 	roots := s.resolver.Roots()
-	out := make([]RootStatus, 0, len(roots))
-	for _, abs := range roots {
-		status := s.reachability.probe(ctx, abs)
-		out = append(out, RootStatus{
-			Name:      filepath.Base(abs),
-			Reachable: status.Reachable,
-			Reason:    status.Reason,
-		})
+	if len(roots) == 0 {
+		return nil
 	}
+	out := make([]RootStatus, len(roots))
+	var wg sync.WaitGroup
+	for i, abs := range roots {
+		wg.Add(1)
+		go func(i int, abs string) {
+			defer wg.Done()
+			status := s.reachability.probe(ctx, abs)
+			out[i] = RootStatus{
+				Name:      filepath.Base(abs),
+				Reachable: status.Reachable,
+				Reason:    status.Reason,
+			}
+		}(i, abs)
+	}
+	wg.Wait()
 	return out
 }
