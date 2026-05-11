@@ -107,6 +107,38 @@ type Scanner struct {
 	// to operators instead of silently being skipped. Monotonic for
 	// the process lifetime — rolls forward across scans.
 	panickedCnt atomic.Int64
+
+	// deleteThreshold is the N-consecutive-missing-scans grace period
+	// before a row is reaped. Set via SetDeleteThreshold from cmd/bridge
+	// at startup from cfg.Scanner.DeleteAfterMissingScans (default 3
+	// per internal/config.DefaultDeleteAfterMissingScans). A value of
+	// 1 preserves the pre-resilience immediate-delete behaviour for
+	// operators on local-disk-only deployments where the silent-empty-
+	// enumeration failure modes don't apply. Loaded via atomic.Int64
+	// so a future admin-console live tune doesn't race the scanner's
+	// deletion pass; today it's set once at boot.
+	deleteThreshold atomic.Int64
+}
+
+// SetDeleteThreshold configures the missing-count grace period. Values
+// <= 0 are normalised to 1 (immediate-delete behaviour). cmd/bridge
+// calls this once after construction.
+func (s *Scanner) SetDeleteThreshold(n int) {
+	if n < 1 {
+		n = 1
+	}
+	s.deleteThreshold.Store(int64(n))
+}
+
+// effectiveDeleteThreshold returns the configured threshold, falling
+// back to 1 (immediate delete) when no SetDeleteThreshold call has been
+// made — preserves the pre-resilience behaviour for any test harness
+// or call path that constructs a Scanner without wiring the knob.
+func (s *Scanner) effectiveDeleteThreshold() int {
+	if t := int(s.deleteThreshold.Load()); t > 0 {
+		return t
+	}
+	return 1
 }
 
 // folderArtResult records the per-directory outcome of a folder-art
@@ -339,15 +371,17 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 		return count, walkErr
 	}
 
-	// Deletion pass: anything in the "before" snapshot that we didn't see
-	// in this walk is gone from disk — UNLESS the path lives under an
-	// errored subtree, in which case we spare it. A transient WalkDir
-	// error (NAS drop, antivirus lock) leaves the affected paths
-	// outside `seen` even though the underlying files are still on
-	// disk; deleting them from the manifest in that case wipes the
-	// bridge's view of the library. PR #N introduced the spare;
-	// before, a single network blip during a 50k-track NAS scan was
-	// the most likely cause of "the bridge lost my library" reports.
+	// Deletion pass: anything in the "before" snapshot that we didn't
+	// see in this walk gets its missing_count bumped; rows whose
+	// missing_count hits the configured threshold get reaped.
+	// errorSubtrees-spared paths are skipped entirely (their counter
+	// is NOT incremented, so a transient flap doesn't burn one of
+	// their N grace scans). The threshold defaults to 3 — see
+	// internal/config.DefaultDeleteAfterMissingScans + the
+	// `missing_count` migration doc for the silent-empty-enumeration
+	// rationale.
+	threshold := s.effectiveDeleteThreshold()
+	missingTracks := make([]string, 0)
 	spared := 0
 	for p := range beforeSet {
 		if _, ok := seen[p]; ok {
@@ -357,13 +391,19 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 			spared++
 			continue
 		}
-		if err := s.store.DeleteTrack(p); err != nil {
-			scanLogger.Error("delete track", "path", p, "err", err)
-		}
+		missingTracks = append(missingTracks, p)
+	}
+	deletedTracks, err := s.store.IncrementMissingTracksAndDeleteAtThreshold(missingTracks, threshold)
+	if err != nil {
+		scanLogger.Error("missing-count tracks pass", "err", err, "missing", len(missingTracks))
 	}
 	if spared > 0 {
-		scanLogger.Warn("spared tracks from deletion (parent walk error this pass)",
+		scanLogger.Warn("spared tracks from deletion pass (parent walk error)",
 			"spared", spared, "subtrees", len(errorSubtrees))
+	}
+	if len(missingTracks) > 0 {
+		scanLogger.Info("tracks missing this scan",
+			"missing", len(missingTracks), "deleted", deletedTracks, "threshold", threshold)
 	}
 
 	// Folder orphan-cleanup pass: a directory the walker no longer
@@ -371,9 +411,11 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	// originally indexed under it) leaves a folders-table row behind
 	// otherwise. Without this pass the table grows unboundedly and
 	// `/v1/manifest`-derived "Folders" surfaces would ship phantom
-	// directories. Same errored-subtree sparing as tracks: a
-	// transient walk error must not wipe folder rows for paths still
-	// physically present on disk.
+	// directories. Same threshold-based grace period as tracks — a
+	// transient walk error AND a brief flap that escapes the
+	// errorSubtrees catch both get one missed-scan increment without
+	// data loss.
+	missingFolders := make([]string, 0)
 	sparedFolders := 0
 	for p := range beforeFolderSet {
 		if _, ok := seenFolders[p]; ok {
@@ -383,13 +425,19 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 			sparedFolders++
 			continue
 		}
-		if err := s.store.DeleteFolder(p); err != nil {
-			scanLogger.Error("delete folder", "path", p, "err", err)
-		}
+		missingFolders = append(missingFolders, p)
+	}
+	deletedFolders, err := s.store.IncrementMissingFoldersAndDeleteAtThreshold(missingFolders, threshold)
+	if err != nil {
+		scanLogger.Error("missing-count folders pass", "err", err, "missing", len(missingFolders))
 	}
 	if sparedFolders > 0 {
-		scanLogger.Warn("spared folders from deletion (parent walk error this pass)",
+		scanLogger.Warn("spared folders from deletion pass (parent walk error)",
 			"spared", sparedFolders, "subtrees", len(errorSubtrees))
+	}
+	if len(missingFolders) > 0 {
+		scanLogger.Info("folders missing this scan",
+			"missing", len(missingFolders), "deleted", deletedFolders, "threshold", threshold)
 	}
 
 	s.lastFull.Store(time.Now().UTC().UnixNano())
@@ -820,7 +868,10 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	// to begin with are candidates, so a cross-root move (the
 	// original concern) cleans the source-side row from /A/foo's
 	// scan and the destination-side row already came in via
-	// /B/bar's scan. Errored-subtree sparing matches Scan.
+	// /B/bar's scan. Same missing_count threshold model as the
+	// full-scan path — see Scan's docblock for the rationale.
+	threshold := s.effectiveDeleteThreshold()
+	missingTracks := make([]string, 0)
 	sparedTracks := 0
 	for p := range beforeTrackSet {
 		if _, ok := seen[p]; ok {
@@ -830,10 +881,13 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 			sparedTracks++
 			continue
 		}
-		if err := s.store.DeleteTrack(p); err != nil {
-			scanLogger.Error("delete track", "path", p, "err", err)
-		}
+		missingTracks = append(missingTracks, p)
 	}
+	deletedTracks, derr := s.store.IncrementMissingTracksAndDeleteAtThreshold(missingTracks, threshold)
+	if derr != nil {
+		scanLogger.Error("subtree missing-count tracks pass", "err", derr, "missing", len(missingTracks))
+	}
+	missingFolders := make([]string, 0)
 	sparedFolders := 0
 	for p := range beforeFolderSet {
 		if _, ok := seenFolders[p]; ok {
@@ -843,13 +897,21 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 			sparedFolders++
 			continue
 		}
-		if err := s.store.DeleteFolder(p); err != nil {
-			scanLogger.Error("delete folder", "path", p, "err", err)
-		}
+		missingFolders = append(missingFolders, p)
+	}
+	deletedFolders, derr := s.store.IncrementMissingFoldersAndDeleteAtThreshold(missingFolders, threshold)
+	if derr != nil {
+		scanLogger.Error("subtree missing-count folders pass", "err", derr, "missing", len(missingFolders))
 	}
 	if sparedTracks > 0 || sparedFolders > 0 {
-		scanLogger.Warn("subtree scan spared rows from deletion (parent walk error this pass)",
+		scanLogger.Warn("subtree scan spared rows from deletion pass (parent walk error)",
 			"tracks", sparedTracks, "folders", sparedFolders, "subtrees", len(errorSubtrees))
+	}
+	if len(missingTracks) > 0 || len(missingFolders) > 0 {
+		scanLogger.Info("subtree scan missing rows",
+			"tracks_missing", len(missingTracks), "tracks_deleted", deletedTracks,
+			"folders_missing", len(missingFolders), "folders_deleted", deletedFolders,
+			"threshold", threshold)
 	}
 
 	return int(committed.Load()), nil

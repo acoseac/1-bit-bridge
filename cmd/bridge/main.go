@@ -575,6 +575,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return logsCmd(ctx, args[1:], stdout, stderr)
 	case "library":
 		return libraryCmd(ctx, args[1:], stdout, stderr)
+	case "manifest":
+		return manifestCmd(args[1:], os.Stdin, stdout, stderr)
 	case "tsnet":
 		return tsnetCmd(ctx, args[1:], os.Stdin, stdout, stderr)
 	case "start":
@@ -765,6 +767,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// /v1/artwork mbid regex.
 	artworkDir := filepath.Join(cfg.DataDir, "artwork")
 	scanner := manifest.NewScanner(cfg.LibraryRoots, manifestStore, artworkDir)
+	// missing_count grace period — defaults applied in config.applyDefaults
+	// so operators who never touch the `scanner:` YAML block still get the
+	// standard 3-scan threshold.
+	scanner.SetDeleteThreshold(cfg.Scanner.DeleteAfterMissingScans)
 	provider := manifest.NewProvider(manifestStore, scanner)
 
 	// Fire up the periodic scanner in the background. It runs an initial

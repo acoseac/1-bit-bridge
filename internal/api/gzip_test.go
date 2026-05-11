@@ -126,6 +126,7 @@ func (f *fakeStreamingProvider) BuildManifestPage(cursor string, limit int) (*Ma
 func (f *fakeStreamingProvider) IsScanning() bool        { return false }
 func (f *fakeStreamingProvider) LastFullScan() time.Time { return time.Time{} }
 func (f *fakeStreamingProvider) TracksIndexed() int      { return 0 }
+func (f *fakeStreamingProvider) PendingDeletions() int64 { return 0 }
 
 // TestManifestEmitsGzipWhenAcceptEncodingGzip confirms the handler
 // sets Content-Encoding + Vary AND the body is valid gzip that
