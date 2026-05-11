@@ -16,19 +16,43 @@ import (
 
 // Entry is the JSON shape of a single directory entry returned by /v1/list.
 // The path field is library-root-relative, not the server's absolute path.
+//
+// Reachable / Reason (v1.2 additive) are populated ONLY on the synthetic
+// root-level entries returned in multi-root mode for an empty client
+// path. Ordinary directories and files inside a root omit both fields
+// (omitempty). iOS pre-1.2 ignores unknown fields; iOS 1.2+ can render
+// a "library offline" hint instead of inferring it from a silent zero-
+// size row.
+//
+// Reachable is a pointer-to-bool because Go's `omitempty` omits a bare
+// `false` (zero-value rule) — using a pointer lets us emit `false` when
+// we mean it and skip the field entirely when reachability is not
+// relevant (any non-root entry).
+//
+// Reason is a stable machine-readable code, not free text — see the
+// reachabilityStatus type's docblock for the value set.
 type Entry struct {
-	Name    string    `json:"name"`
-	Path    string    `json:"path"`
-	IsDir   bool      `json:"isDir"`
-	Size    int64     `json:"size"`
-	ModTime time.Time `json:"mtime"`
+	Name      string    `json:"name"`
+	Path      string    `json:"path"`
+	IsDir     bool      `json:"isDir"`
+	Size      int64     `json:"size"`
+	ModTime   time.Time `json:"mtime"`
+	Reachable *bool     `json:"reachable,omitempty"`
+	Reason    string    `json:"reason,omitempty"`
 }
 
 // StatResponse is the JSON shape returned by /v1/stat.
+//
+// Reachable / Reason (v1.2 additive) populate only when the requested
+// path identifies a configured library root AND that root is currently
+// unreachable. For descendants of a root, or for healthy roots, both
+// fields are omitted. See Entry's docblock for the rationale.
 type StatResponse struct {
-	IsDir   bool      `json:"isDir"`
-	Size    int64     `json:"size"`
-	ModTime time.Time `json:"mtime"`
+	IsDir     bool      `json:"isDir"`
+	Size      int64     `json:"size"`
+	ModTime   time.Time `json:"mtime"`
+	Reachable *bool     `json:"reachable,omitempty"`
+	Reason    string    `json:"reason,omitempty"`
 }
 
 // list handles GET /v1/list?path=<rel>. Returns the entries of the resolved
@@ -43,25 +67,48 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 		entries := make([]Entry, 0, len(roots))
 		for _, root := range roots {
 			base := filepath.Base(root)
-			info, err := os.Stat(root)
-			if err != nil {
-				// A root that's currently unreachable stays visible as a
-				// directory entry so iOS can render it (and surface a
-				// meaningful error if the user tries to descend).
+			status := s.reachability.probe(r.Context(), root)
+			if !status.Reachable {
+				// An unreachable root stays visible as a directory entry
+				// (legacy behaviour iOS already relies on) but now carries
+				// Reachable: false + a stable Reason code so iOS 1.2+ can
+				// surface "library offline" without descending and
+				// inferring from a silent empty listing.
+				reachable := false
 				entries = append(entries, Entry{
-					Name:    base,
-					Path:    base,
-					IsDir:   true,
-					ModTime: time.Time{},
+					Name:      base,
+					Path:      base,
+					IsDir:     true,
+					ModTime:   time.Time{},
+					Reachable: &reachable,
+					Reason:    status.Reason,
 				})
 				continue
 			}
+			info, err := os.Stat(root)
+			if err != nil {
+				// Race with the probe: reachable at probe time, gone
+				// 100ms later. Fall through to the offline shape so the
+				// client sees consistent data.
+				reachable := false
+				entries = append(entries, Entry{
+					Name:      base,
+					Path:      base,
+					IsDir:     true,
+					ModTime:   time.Time{},
+					Reachable: &reachable,
+					Reason:    "offline",
+				})
+				continue
+			}
+			reachable := true
 			entries = append(entries, Entry{
-				Name:    base,
-				Path:    base,
-				IsDir:   true,
-				Size:    0,
-				ModTime: info.ModTime().UTC(),
+				Name:      base,
+				Path:      base,
+				IsDir:     true,
+				Size:      0,
+				ModTime:   info.ModTime().UTC(),
+				Reachable: &reachable,
 			})
 		}
 		sortEntriesByName(entries)
@@ -112,17 +159,44 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 
 // stat handles GET /v1/stat?path=<rel>. Returns a single-entry StatResponse.
 // Works on both files and directories.
+//
+// Root-reachability special case: when clientPath identifies a configured
+// library root AND that root is currently unreachable (timeout / EACCES /
+// ENOENT on the absolute path), respond with a StatResponse carrying
+// Reachable: false + Reason instead of falling through to the generic
+// ErrNotFound 404. Without this, an iOS client probing a root via /stat
+// gets an opaque 404 and can't distinguish "library is offline" from
+// "user typed an unknown path" — both pre-PR-D outcomes for the same
+// shape. Reachable: true on a healthy root is also emitted so iOS can
+// trust the field without a parallel /v1/list call.
 func (s *Server) stat(w http.ResponseWriter, r *http.Request) {
 	clientPath := r.URL.Query().Get("path")
+	if absRoot := s.matchesRoot(clientPath); absRoot != "" {
+		status := s.reachability.probe(r.Context(), absRoot)
+		if !status.Reachable {
+			reachable := false
+			writeJSON(w, http.StatusOK, StatResponse{
+				IsDir:     true,
+				Reachable: &reachable,
+				Reason:    status.Reason,
+			})
+			return
+		}
+	}
 	_, info, err := s.resolver.ResolveChecked(clientPath)
 	if ok := writeResolveError(w, r, err); ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, StatResponse{
+	resp := StatResponse{
 		IsDir:   info.IsDir(),
 		Size:    info.Size(),
 		ModTime: info.ModTime().UTC(),
-	})
+	}
+	if absRoot := s.matchesRoot(clientPath); absRoot != "" {
+		reachable := true
+		resp.Reachable = &reachable
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // read handles GET /v1/read?path=<rel>. Range header is REQUIRED per

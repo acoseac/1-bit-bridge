@@ -78,6 +78,7 @@ type Server struct {
 	upscaleStatsProvider UpscaleStatsProvider // nil unless WithUpscaleStats wired (v1.2 management UI)
 	eventBroker          *eventBroker         // nil disables /v1/events (back-compat for test harnesses)
 	manifestRateLimiter  *manifestRateLimiter // per-token-ID token-bucket for /v1/manifest
+	reachability         *reachabilityCache   // per-root probe TTL cache used by /v1/list, /v1/stat, /v1/health
 	fingerprint          string
 	startedAt            time.Time
 }
@@ -224,6 +225,7 @@ func New(cfg *config.Config, store *auth.Store, mp ManifestProvider, fingerprint
 		manifest:            mp,
 		pairingRateLimiter:  newPairingRateLimiter(),
 		manifestRateLimiter: newManifestRateLimiter(cfg.Limits.Manifest.EffectiveRPM(), cfg.Limits.Manifest.EffectiveBurst()),
+		reachability:        newReachabilityCache(),
 		fingerprint:         fingerprint,
 		startedAt:           time.Now().UTC(),
 	}
@@ -533,6 +535,28 @@ type HealthResponse struct {
 	//     iOS gates its +600s "silent fullRescan recovery" rung on
 	//     absence of this flag.
 	Features []string `json:"features,omitempty"`
+
+	// Roots is the per-root reachability snapshot. Populated whenever the
+	// bridge has at least one configured library root; absent on bridges
+	// with zero roots (test harness). Lets iOS surface a "Library X
+	// offline" hint in a single /v1/health call instead of paginating
+	// /v1/list to discover offline roots. Probes are cached for
+	// reachabilityTTL (5 s) so the steady-state /v1/health poll cadence
+	// doesn't repeatedly stat every network mount.
+	//
+	// Pre-1.2 iOS ignores the field. iOS 1.2+ uses Reason as a stable
+	// machine-readable code mapped to a localized UI string.
+	Roots []RootStatus `json:"roots,omitempty"`
+}
+
+// RootStatus reports the reachability of a single library root. Wire-DTO
+// only — populated server-side from reachabilityStatus. Name is the
+// root's basename (same identifier iOS sees on /v1/list); Reason is the
+// stable code emitted by reachabilityCache.probe.
+type RootStatus struct {
+	Name      string `json:"name"`
+	Reachable bool   `json:"reachable"`
+	Reason    string `json:"reason,omitempty"`
 }
 
 // ScanState reports the scanner's current status. Real fields populate once
@@ -616,6 +640,13 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		resp.Features = []string{"upscaleCompleteEvents", "variantBumpsIndex"}
 	} else {
 		resp.Features = []string{"variantBumpsIndex"}
+	}
+	// Per-root reachability (v1.2 additive). Probed through the same TTL
+	// cache the list/stat handlers use, so a 1Hz iOS /v1/health poll
+	// doesn't restat network mounts every tick. Omitted entirely (via
+	// omitempty) on bridges with no configured roots — test harness shape.
+	if s.reachability != nil {
+		resp.Roots = s.probeAllRoots(r.Context())
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
