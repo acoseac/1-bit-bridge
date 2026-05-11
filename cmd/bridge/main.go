@@ -1034,6 +1034,14 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	stopRLGC := apiSrv.StartPairingRateLimitGC()
 	defer stopRLGC()
 
+	// /v1/manifest per-token rate limiter idle-entry reaper. 10 min
+	// cadence + 1 h idle timeout keeps the limiter map bounded across
+	// long-running bridges with high client churn. Defaults in
+	// internal/config.DefaultManifest* — operators tune via
+	// `limits: manifest:` in bridge.yaml.
+	stopManifestRL := apiSrv.StartManifestRateLimitReaper()
+	defer stopManifestRL()
+
 	// Start the event broker that backs GET /v1/events. iOS uses
 	// it to receive push notifications for upscale completions and
 	// pairing approvals (in lieu of polling). When publishers
