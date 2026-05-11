@@ -892,12 +892,12 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 	writeJSON(w, status, ErrorResponse{Error: code, Message: message})
 }
 
-// writeErrorLog is writeError plus a slog.Error record with the underlying
-// error attached. Use this whenever the message exposed to the client
-// would otherwise be the raw err.Error() string — record the diagnostic
-// detail server-side under the per-request logger (request_id correlation)
-// and respond with a sanitized, stable message the iOS surface can
-// translate cleanly.
+// writeErrorLog is writeError plus a structured-log record with the
+// underlying error attached. Use this whenever the message exposed to
+// the client would otherwise be the raw err.Error() string — record
+// the diagnostic detail server-side under the per-request logger
+// (request_id correlation) and respond with a sanitized, stable message
+// the iOS surface can translate cleanly.
 //
 // userMsg should:
 //   - For 4xx codes: be SPECIFIC and ACTIONABLE — the user can fix the
@@ -907,16 +907,25 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 //     paths, SQL fragments, or decoder internals in 5xx bodies; the typed
 //     code + the server log already carry the diagnostic detail.
 //
+// Log level mirrors HTTP semantics: 4xx → Warn (client-side issue,
+// expected on misbehaving callers and not actionable for the operator),
+// 5xx → Error (server-side fault worth surfacing in alerting). Without
+// this split, alerting on slog.Error counts would fire on every 400
+// "bad JSON" and drown the real signals — caught by gemini bot review
+// on PR #191.
+//
 // err is the original Go error, logged but not surfaced on the wire. May
 // be nil — in that case the message is still emitted (so the helper works
 // at sites where the failure is a state check, not a wrapped error).
 func writeErrorLog(w http.ResponseWriter, r *http.Request, status int, code, userMsg string, err error) {
 	if err != nil {
-		LoggerFromContext(r.Context()).Error("request failed",
-			"code", code,
-			"status", status,
-			"err", err,
-		)
+		l := LoggerFromContext(r.Context())
+		switch {
+		case status >= 500:
+			l.Error("request failed", "code", code, "status", status, "err", err)
+		default:
+			l.Warn("request failed", "code", code, "status", status, "err", err)
+		}
 	}
 	writeError(w, status, code, userMsg)
 }
