@@ -90,7 +90,8 @@ func (s *Server) pairingRequest(w http.ResponseWriter, r *http.Request) {
 	var req pairingCreateRequest
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, pairingMaxBodyBytes))
 	if err := dec.Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "bad_request", "invalid JSON body: "+err.Error())
+		writeErrorLog(w, r, http.StatusBadRequest, "bad_request",
+			"request body must be JSON", err)
 		return
 	}
 	if req.DeviceName == "" {
@@ -115,7 +116,8 @@ func (s *Server) pairingRequest(w http.ResponseWriter, r *http.Request) {
 			"too many pending pairing requests; try again later")
 		return
 	case err != nil:
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		writeErrorLog(w, r, http.StatusInternalServerError, "internal",
+			"the bridge couldn't create this pairing request", err)
 		return
 	}
 
@@ -156,7 +158,8 @@ func (s *Server) pairingPoll(w http.ResponseWriter, r *http.Request) {
 			"no such pairing request (may have expired or been cleaned up)")
 		return
 	case err != nil:
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		writeErrorLog(w, r, http.StatusInternalServerError, "internal",
+			"the bridge couldn't poll this pairing request", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, pairingPollResponse{
@@ -225,7 +228,8 @@ func (s *Server) pairingEvents(w http.ResponseWriter, r *http.Request) {
 			"no such pairing request (may have expired or been cleaned up)")
 		return
 	case err != nil:
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		writeErrorLog(w, r, http.StatusInternalServerError, "internal",
+			"the bridge couldn't poll this pairing request", err)
 		return
 	}
 
@@ -362,7 +366,8 @@ func (s *Server) pairingDelete(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	default:
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		writeErrorLog(w, r, http.StatusInternalServerError, "internal",
+			"the bridge couldn't delete this pairing request", err)
 		return
 	}
 }

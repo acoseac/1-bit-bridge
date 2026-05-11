@@ -69,7 +69,7 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	abs, info, err := s.resolver.ResolveChecked(clientPath)
-	if ok := writeResolveError(w, err); ok {
+	if ok := writeResolveError(w, r, err); ok {
 		return
 	}
 	if !info.IsDir() {
@@ -79,13 +79,15 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 
 	dir, err := os.Open(abs)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		writeErrorLog(w, r, http.StatusInternalServerError, "internal",
+			"the bridge couldn't open this directory", err)
 		return
 	}
 	defer dir.Close()
 	raw, err := dir.Readdir(-1)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		writeErrorLog(w, r, http.StatusInternalServerError, "internal",
+			"the bridge couldn't read this directory", err)
 		return
 	}
 
@@ -113,7 +115,7 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 func (s *Server) stat(w http.ResponseWriter, r *http.Request) {
 	clientPath := r.URL.Query().Get("path")
 	_, info, err := s.resolver.ResolveChecked(clientPath)
-	if ok := writeResolveError(w, err); ok {
+	if ok := writeResolveError(w, r, err); ok {
 		return
 	}
 	writeJSON(w, http.StatusOK, StatResponse{
@@ -173,7 +175,7 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request) {
 
 	clientPath := r.URL.Query().Get("path")
 	abs, info, err := s.resolver.ResolveChecked(clientPath)
-	if ok := writeResolveError(w, err); ok {
+	if ok := writeResolveError(w, r, err); ok {
 		return
 	}
 	if info.IsDir() {
@@ -204,7 +206,8 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request) {
 
 	f, err := os.Open(abs)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		writeErrorLog(w, r, http.StatusInternalServerError, "internal",
+			"the bridge couldn't open this file", err)
 		return
 	}
 	defer f.Close()
@@ -241,7 +244,8 @@ func (s *Server) serveVariant(w http.ResponseWriter, r *http.Request, sourcePath
 	}
 	rec, err := s.variantStore.LookupVariant(sourcePath, variantID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		writeErrorLog(w, r, http.StatusInternalServerError, "internal",
+			"the bridge couldn't look up this variant", err)
 		return
 	}
 	if rec == nil {
@@ -288,13 +292,15 @@ func (s *Server) serveVariant(w http.ResponseWriter, r *http.Request, sourcePath
 			writeError(w, http.StatusGone, "variant_missing_on_disk", "sidecar file missing")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal", "open sidecar: "+err.Error())
+		writeErrorLog(w, r, http.StatusInternalServerError, "internal",
+			"the bridge couldn't open the variant sidecar", err)
 		return
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		writeErrorLog(w, r, http.StatusInternalServerError, "internal",
+			"the bridge couldn't stat the variant sidecar", err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
@@ -324,19 +330,30 @@ func childPath(parent, name string) string {
 
 // writeResolveError maps an fs resolver error to the right JSON error
 // response. Returns true if an error was written (caller should bail).
-func writeResolveError(w http.ResponseWriter, err error) bool {
+//
+// 4xx branches return the typed bridgefs sentinel's stable message
+// verbatim — those messages are stable, short, user-actionable strings
+// (e.g. "path not found", "unknown library root") that iOS surfaces
+// directly and don't leak internal state.
+//
+// The default branch is 5xx — for an UNKNOWN resolver error we don't
+// know the leak surface of err.Error(), so route through writeErrorLog
+// to record the underlying err server-side under the per-request logger
+// and respond with a generic sanitized message.
+func writeResolveError(w http.ResponseWriter, r *http.Request, err error) bool {
 	if err == nil {
 		return false
 	}
 	switch {
 	case errors.Is(err, bridgefs.ErrBadPath):
-		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		writeError(w, http.StatusBadRequest, "bad_request", bridgefs.ErrBadPath.Error())
 	case errors.Is(err, bridgefs.ErrUnknownRoot):
-		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		writeError(w, http.StatusBadRequest, "bad_request", bridgefs.ErrUnknownRoot.Error())
 	case errors.Is(err, bridgefs.ErrNotFound):
-		writeError(w, http.StatusNotFound, "not_found", err.Error())
+		writeError(w, http.StatusNotFound, "not_found", bridgefs.ErrNotFound.Error())
 	default:
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		writeErrorLog(w, r, http.StatusInternalServerError, "internal",
+			"the bridge encountered an internal error", err)
 	}
 	return true
 }
