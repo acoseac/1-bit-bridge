@@ -520,10 +520,24 @@ All errors are JSON:
 |    404 | `unknown_request`        | Pairing request ID unknown / cleaned up           |
 |    404 | `pairing_not_supported`  | Bridge build doesn't expose tap-to-pair           |
 |    404 | `events_not_supported`   | Bridge build doesn't expose `/v1/events` (pre-v1.2; iOS falls back to polling) |
-|    429 | `rate_limited`           | Per-IP pairing-create rate-limit tripped          |
+|    429 | `rate_limited`           | Per-IP pairing-create rate-limit OR per-token `/v1/manifest` rate-limit tripped |
 |    500 | `internal`               | Server-side failure                               |
 |    503 | `scan_in_progress`       | Manifest requested while an initial scan is busy  |
 |    503 | `queue_full`             | Pending pairing requests at the cap               |
+
+### `/v1/manifest` rate limit (additive, since v1.2.x)
+
+`/v1/manifest` is the bridge's most expensive endpoint — a 50k-track library produces a 100+ MB JSON stream. To protect against a misbehaving paired client (buggy build, future web admin) from exhausting bridge CPU + bandwidth, the bridge applies a per-token token-bucket limiter sized via `bridge.yaml`'s `limits.manifest.requestsPerMinute` (default `6`) and `limits.manifest.burst` (default `3`). Defaults allow the first 3 calls instant + one call every 10 s sustained — fits a typical iOS paginated scan flow.
+
+On exceeded, the server responds:
+
+- Status `429 Too Many Requests`
+- Header `Retry-After: <seconds>` derived from the limiter's reservation delay (the honest cooldown)
+- Body `{"error": "rate_limited", "message": "too many manifest requests; retry after the Retry-After window"}`
+
+Clients SHOULD respect `Retry-After` rather than retrying immediately. iOS surfaces 429 as a generic transport error today; typed handling with Retry-After parsing is a Mirror-PR follow-up.
+
+Operators can disable the limiter by setting `limits.manifest.requestsPerMinute: 0` in `bridge.yaml`.
 
 ## Pairing URL scheme
 

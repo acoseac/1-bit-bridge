@@ -77,6 +77,7 @@ type Server struct {
 	upscaleEnqueuer      UpscaleEnqueuer      // nil unless WithUpscaleEnqueuer wired (Phase 2.5)
 	upscaleStatsProvider UpscaleStatsProvider // nil unless WithUpscaleStats wired (v1.2 management UI)
 	eventBroker          *eventBroker         // nil disables /v1/events (back-compat for test harnesses)
+	manifestRateLimiter  *manifestRateLimiter // per-token-ID token-bucket for /v1/manifest
 	fingerprint          string
 	startedAt            time.Time
 }
@@ -213,13 +214,14 @@ type UpdateInfo struct {
 // early boot / tests — /v1/manifest will return 503 until it's populated.
 func New(cfg *config.Config, store *auth.Store, mp ManifestProvider, fingerprint string) *Server {
 	return &Server{
-		cfg:                cfg,
-		store:              store,
-		resolver:           bridgefs.New(cfg.LibraryRoots),
-		manifest:           mp,
-		pairingRateLimiter: newPairingRateLimiter(),
-		fingerprint:        fingerprint,
-		startedAt:          time.Now().UTC(),
+		cfg:                 cfg,
+		store:               store,
+		resolver:            bridgefs.New(cfg.LibraryRoots),
+		manifest:            mp,
+		pairingRateLimiter:  newPairingRateLimiter(),
+		manifestRateLimiter: newManifestRateLimiter(cfg.Limits.Manifest.RequestsPerMinute, cfg.Limits.Manifest.Burst),
+		fingerprint:         fingerprint,
+		startedAt:           time.Now().UTC(),
 	}
 }
 
@@ -317,6 +319,21 @@ func (s *Server) StartPairingRateLimitGC() (stopFn func()) {
 	}
 }
 
+// StartManifestRateLimitReaper drains idle per-token entries from the
+// /v1/manifest limiter map on a 10-minute tick. Mirrors
+// StartPairingRateLimitGC's lifecycle contract — caller passes the
+// returned func to defer so the goroutine exits cleanly on shutdown.
+// Test harnesses can skip the call; the reaper is purely a memory-
+// pressure mitigation for long-running bridges with high client churn.
+func (s *Server) StartManifestRateLimitReaper() (stopFn func()) {
+	if s.manifestRateLimiter == nil {
+		return func() {}
+	}
+	stop := make(chan struct{})
+	s.manifestRateLimiter.Start(stop)
+	return func() { close(stop) }
+}
+
 // WithPairing attaches the in-memory pairing.Store that backs the
 // admin-approval pairing flow (POST /v1/pairing/requests, GET/DELETE
 // /v1/pairing/{id}). Optional — when nil the routes return 404
@@ -402,7 +419,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/stat", s.authed(s.stat))
 	mux.HandleFunc("GET /v1/read", s.authed(s.read))
 	mux.HandleFunc("GET /v1/download", s.authed(s.download))
-	mux.HandleFunc("GET /v1/manifest", s.authed(s.manifestHandler))
+	// Manifest is the bridge's most expensive endpoint — 50k-track
+	// libraries produce 100+ MB streams. authed() runs first so the
+	// limiter can key its per-token bucket on the validated Token.ID.
+	// Reversing the order would key on something pre-auth (IP, which is
+	// unreliable behind Tailscale CGNAT) and is exactly the design we
+	// ruled out at plan time.
+	mux.HandleFunc("GET /v1/manifest", s.authed(s.rateLimitManifest(s.manifestHandler)))
 	mux.HandleFunc("GET /v1/artwork/{mbid}", s.authed(s.artwork))
 	mux.HandleFunc("GET /v1/artist-image/{mbid}", s.authed(s.artistImage))
 	// Pairing routes are unauthenticated by design — pollSecret is the
@@ -839,7 +862,11 @@ func (s *Server) authed(next http.HandlerFunc) http.HandlerFunc {
 		if cv := r.Header.Get("X-Client-Version"); cv != "" && cv != tok.LastClientVersion {
 			s.store.RecordClientVersion(tok.ID, cv)
 		}
-		next(w, r)
+		// Thread the validated token ID into the request context so
+		// downstream middleware (today: rateLimitManifest for keying
+		// the per-client manifest bucket) doesn't need to re-extract
+		// or re-validate. Unwrapped via tokenIDFromContext.
+		next(w, r.WithContext(withTokenID(r.Context(), tok.ID)))
 	}
 }
 

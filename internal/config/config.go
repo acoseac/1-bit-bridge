@@ -65,6 +65,23 @@ type Config struct {
 	LibraryWatch    LibraryWatchConfig `yaml:"libraryWatch,omitempty"`
 	Upscale         UpscaleConfig      `yaml:"upscale,omitempty"`
 	Tailscale       TailscaleConfig    `yaml:"tailscale,omitempty"`
+	Limits          LimitsConfig       `yaml:"limits,omitempty"`
+}
+
+// LimitsConfig groups operator-facing throttle knobs. Today: just the
+// /v1/manifest rate limit. Lives at the top of the YAML so future
+// per-endpoint or per-resource limits can join the same block instead
+// of scattering across the config surface.
+type LimitsConfig struct {
+	Manifest ManifestLimitsConfig `yaml:"manifest,omitempty"`
+}
+
+// ManifestLimitsConfig controls the per-token-ID token bucket applied
+// to /v1/manifest. See internal/api.manifestRateLimiter for the
+// runtime shape. Defaults applied in applyDefaults.
+type ManifestLimitsConfig struct {
+	RequestsPerMinute int `yaml:"requestsPerMinute,omitempty"`
+	Burst             int `yaml:"burst,omitempty"`
 }
 
 // TailscaleConfig selects how the bridge integrates with Tailscale.
@@ -369,6 +386,19 @@ const (
 	DefaultScanIntervalSec     = 21600
 	DefaultLibraryName         = "1-bit Bridge"
 	DefaultBackupIntervalHours = 24
+
+	// DefaultManifestRequestsPerMinute / DefaultManifestBurst configure
+	// the per-token /v1/manifest rate limit. 6 rpm + 3 burst lets the
+	// first three calls fire instant (typical paginated scan: pull
+	// page, process, pull next) and then paces the steady state at one
+	// call every ~10 s. Tuned for the realistic worst case — an iOS
+	// client doing a full-manifest re-pull after a long offline window
+	// where it caches nothing on disk. Operators with bursty traffic
+	// can raise; operators tightening defence-in-depth can lower.
+	// Setting RequestsPerMinute to a negative value (or zero with
+	// burst > 0) disables the limit entirely — see manifestRateLimiter.
+	DefaultManifestRequestsPerMinute = 6
+	DefaultManifestBurst             = 3
 	DefaultBackupKeep          = 7
 	// DefaultLibraryWatchDebounceSeconds is the per-directory
 	// event coalesce window when fsnotify-based watching is on.
@@ -492,6 +522,12 @@ func (c *Config) applyDefaults() {
 	}
 	if c.LibraryName == "" {
 		c.LibraryName = DefaultLibraryName
+	}
+	if c.Limits.Manifest.RequestsPerMinute == 0 {
+		c.Limits.Manifest.RequestsPerMinute = DefaultManifestRequestsPerMinute
+	}
+	if c.Limits.Manifest.Burst == 0 {
+		c.Limits.Manifest.Burst = DefaultManifestBurst
 	}
 	// Backup section: pointer-typed IntervalHours preserves the
 	// "omitted vs explicit-zero" distinction at YAML-round-trip
