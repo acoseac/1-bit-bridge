@@ -188,12 +188,16 @@ header nav a:hover { color: var(--fg); }
  * tabs rather than a row of buttons. */
 body[data-active="dashboard"] nav a[data-tab="dashboard"],
 body[data-active="library"] nav a[data-tab="library"],
+body[data-active="library_inspector"] nav a[data-tab="library_inspector"],
+body[data-active="jobs"] nav a[data-tab="jobs"],
 body[data-active="devices"] nav a[data-tab="devices"],
 body[data-active="settings"] nav a[data-tab="settings"] {
   color: var(--accent);
 }
 body[data-active="dashboard"] nav a[data-tab="dashboard"]::after,
 body[data-active="library"] nav a[data-tab="library"]::after,
+body[data-active="library_inspector"] nav a[data-tab="library_inspector"]::after,
+body[data-active="jobs"] nav a[data-tab="jobs"]::after,
 body[data-active="devices"] nav a[data-tab="devices"]::after,
 body[data-active="settings"] nav a[data-tab="settings"]::after {
   content: "";
@@ -1027,8 +1031,36 @@ dialog h2 { font-size: 18px; color: var(--accent); }
   word-break: break-word;
 }
 
-.inspector-tree .folder-link {
+/* Folder row redesign (v1.3.1): folder name is plain text, not
+ * a blue link — the action surface lives in the explicit
+ * Inspect / Open buttons on the right. */
+.inspector-tree .folder-name {
+  color: var(--text, inherit);
+  font-weight: 500;
   cursor: pointer;
+  user-select: none;
+}
+.inspector-tree tr[data-kind="folder"] {
+  cursor: pointer;
+}
+.inspector-tree tr[data-kind="folder"]:hover {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.inspector-tree .folder-actions {
+  white-space: nowrap;
+  text-align: right;
+}
+.inspector-tree .folder-actions .btn {
+  margin-left: 0.25rem;
+  padding: 0.25rem 0.65rem;
+  font-size: 0.85em;
+}
+.inspector-tree .folder-action-inspect {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.inspector-tree .folder-action-open {
+  background: transparent;
+  color: var(--text-muted, #555);
 }
 
 .inspector-drawer dl.kv {

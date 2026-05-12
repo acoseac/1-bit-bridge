@@ -266,9 +266,15 @@ func normaliseBrowsePath(raw string) (string, bool) {
 	if strings.Contains(raw, `\`) {
 		return "", false
 	}
-	// Strip a single leading slash so a UI that sent
-	// "/MusicA" lands in the same shape as "MusicA".
-	raw = strings.TrimPrefix(raw, "/")
+	// Strip ALL leading slashes so a UI that sent
+	// "/MusicA", "//MusicA", or "///MusicA" lands in the same
+	// shape as "MusicA". Pre-fix the helper used `TrimPrefix`
+	// which only strips one — an input like `//../etc` would
+	// post-trim to `/../etc`, slip past path.Clean's
+	// resolution (which still saw a leading slash anchor), and
+	// could evade the `..`-traversal refusal. Per CodeRabbit
+	// med-sec on PR #203 round 2.
+	raw = strings.TrimLeft(raw, "/")
 	if raw == "" {
 		return "", true
 	}

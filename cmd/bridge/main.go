@@ -1518,27 +1518,29 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 				Failed:   s.Failed,
 			}
 		},
-		// Library Inspector projection closures (v1.3). Both
-		// wired only when upscale is enabled — the admin
-		// projection endpoint surfaces 503 when they're nil
-		// (matches the iOS-facing /v1/upscale gating).
-		// `DefaultCompressionFactor` is baked into the closure so
-		// admin doesn't need to know which factor matches which
-		// bit depth.
-		ProjectedSize: func(sourceSize int64, sourceRate, sourceBits, targetRate, targetBits int) int64 {
+		// Library Inspector projection closures (v1.3). Wired
+		// to nil when upscale is disabled so the admin
+		// projection handler's existing `nil` check fires (503
+		// `upscale-disabled`). The prior shape wired non-nil
+		// closures that returned an error string — admin
+		// handler then surfaced 500 `disk-probe` instead of
+		// 503. Per CodeRabbit major on PR #203 round 2.
+		ProjectedSize: func() func(int64, int, int, int, int) int64 {
 			if !cfg.Upscale.Enabled {
-				return 0
+				return nil
 			}
-			return transcode.ProjectedSize(sourceSize, sourceRate, sourceBits,
-				targetRate, targetBits,
-				transcode.DefaultCompressionFactor(targetBits))
-		},
-		AvailableDiskSpace: func(dir string) (int64, error) {
+			return func(sourceSize int64, sourceRate, sourceBits, targetRate, targetBits int) int64 {
+				return transcode.ProjectedSize(sourceSize, sourceRate, sourceBits,
+					targetRate, targetBits,
+					transcode.DefaultCompressionFactor(targetBits))
+			}
+		}(),
+		AvailableDiskSpace: func() func(string) (int64, error) {
 			if !cfg.Upscale.Enabled {
-				return 0, fmt.Errorf("upscale disabled")
+				return nil
 			}
-			return transcode.AvailableDiskSpace(dir)
-		},
+			return transcode.AvailableDiskSpace
+		}(),
 		BatchCoordinator: func() admin.AdminBatchCoordinator {
 			// Closure-resolved so admin doesn't see a typed-nil
 			// pointer when upscale is disabled at boot — returning

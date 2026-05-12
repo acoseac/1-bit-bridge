@@ -2300,6 +2300,8 @@ func (s *Store) ListChildFolders(parent string) ([]ChildFolderRollup, error) {
 			          WHERE tv.source_path >= f.path || '/' AND tv.source_path < f.path || '0') AS upscaled_size
 			  FROM folders f
 			 WHERE instr(f.path, '/') = 0
+			   AND f.path != ''
+			   AND f.path != '.'
 			 ORDER BY f.path ASC
 		`)
 	} else {

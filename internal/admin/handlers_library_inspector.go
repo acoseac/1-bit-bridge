@@ -20,6 +20,8 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
 // adminBatchSubmitRequest is the JSON shape POST /api/upscale/batch
@@ -130,10 +132,17 @@ func (s *Server) apiUpscaleTargetGet(w http.ResponseWriter, r *http.Request) {
 	}
 	rate, bits, err := s.deps.Manifest.GetUpscaleTarget()
 	if err != nil {
-		// Surface unseeded state as the YAML bootstrap default —
-		// reflects what the next Coordinator.Submit will use, so
-		// the operator's view matches reality before any explicit
-		// PATCH.
+		// `ErrUpscaleTargetUnset` is the legitimate "first run /
+		// pre-seed" case → surface YAML bootstrap defaults so the
+		// operator's view matches what `Coordinator.Submit` will
+		// use. Anything else (corrupt DB row, parse failure,
+		// SQLite I/O error) MUST surface as 500 so a real problem
+		// doesn't masquerade as default state. Per CodeRabbit
+		// major on PR #205 round 2.
+		if !errors.Is(err, manifest.ErrUpscaleTargetUnset) {
+			writeError(w, http.StatusInternalServerError, "read-target", err.Error())
+			return
+		}
 		rate = s.deps.Cfg.Upscale.EffectiveBootstrapTargetRate()
 		bits = s.deps.Cfg.Upscale.EffectiveBootstrapTargetBits()
 	}
