@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/transcode"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
 
@@ -140,6 +141,7 @@ func (s *Server) pageSettings(w http.ResponseWriter, r *http.Request) {
 		UpdateQuietHours:         s.deps.Cfg.Update.QuietHours,
 		UpdateCheckIntervalHours: s.deps.Cfg.Update.CheckIntervalHours,
 		UpscaleEnabled:           s.deps.Cfg.Upscale.Enabled,
+		UpscaleStoragePath:       transcode.OutputDirFor(s.deps.Cfg.DataDir),
 		IsSupervised:             s.deps.IsSupervised,
 		BackupIntervalHours:      s.deps.Cfg.Backup.EffectiveIntervalHours(),
 		BackupKeep:               s.deps.Cfg.Backup.EffectiveKeep(),

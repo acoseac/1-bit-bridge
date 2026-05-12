@@ -17,6 +17,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
+	"github.com/acoseac/1-bit-bridge/internal/transcode"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
 
@@ -131,6 +132,16 @@ type settingsResponse struct {
 	// Multi-line strings work via the template's `pre`
 	// rendering. Empty when sox is already available.
 	UpscaleSoxInstallHint string `json:"-"`
+	// UpscaleStoragePath is the absolute on-disk directory the
+	// long-lived transcode pool writes converted sidecar files
+	// to. Surfaced to the operator on the Settings → Audio tab
+	// AND the Library Inspector drawer so "where did my variants
+	// land?" is answerable without an SSH session. Always
+	// `<DataDir>/transcoded` today (see
+	// `transcode.OutputDirFor`); a future operator-controlled
+	// path would update this field, the runtime wiring, and
+	// `bridge upscale --gc`'s walker together.
+	UpscaleStoragePath string `json:"upscaleStoragePath,omitempty"`
 	// IsSupervised reports whether the current bridge process is
 	// running under launchd / systemd / Windows SCM — i.e.
 	// whether `os.Exit(0)` will trigger an automatic relaunch.
@@ -621,6 +632,7 @@ func (s *Server) apiSettingsGet(w http.ResponseWriter, r *http.Request) {
 		UpdateQuietHours:         s.deps.Cfg.Update.QuietHours,
 		UpdateCheckIntervalHours: s.deps.Cfg.Update.CheckIntervalHours,
 		UpscaleEnabled:           s.deps.Cfg.Upscale.Enabled,
+		UpscaleStoragePath:       transcode.OutputDirFor(s.deps.Cfg.DataDir),
 		IsSupervised:             s.deps.IsSupervised,
 		// Same backup fields the page-template handler emits
 		// (`pageSettings`). Without these the JSON API drops them
@@ -815,6 +827,16 @@ type upscaleStatsResponse struct {
 	// operator gauge disk usage before deciding to re-enable
 	// or `--gc`.
 	CachedBytes int64 `json:"cachedBytes"`
+	// StoragePath is the absolute on-disk directory the
+	// runtime pool writes converted sidecars to. Same value
+	// surfaced on /api/settings.upscaleStoragePath; included
+	// here too so the Settings page's live "Upscale stats"
+	// tile and the Library Inspector's drawer can render
+	// "Stored at <path>" without a second handler round
+	// trip. Computed via `transcode.OutputDirFor(cfg.DataDir)`
+	// — always populated regardless of whether the pool
+	// itself is running.
+	StoragePath string `json:"storagePath,omitempty"`
 }
 
 // apiUpscaleStats: GET /api/upscale/stats
@@ -840,6 +862,7 @@ type upscaleStatsResponse struct {
 // separately for the toggle's initial state.
 func (s *Server) apiUpscaleStats(w http.ResponseWriter, r *http.Request) {
 	var resp upscaleStatsResponse
+	resp.StoragePath = transcode.OutputDirFor(s.deps.Cfg.DataDir)
 	if avail := s.cachedSoxAvailability(); avail != nil {
 		resp.SoxAvailable = avail
 	}

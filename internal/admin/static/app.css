@@ -1078,6 +1078,18 @@ dialog h2 { font-size: 18px; color: var(--accent); }
   font-variant-numeric: tabular-nums;
 }
 
+/* Inline filesystem-path code chip used in the drawer's "Stored at"
+   row and Settings → Audio quality's matching row. Long paths
+   (operators with custom `dataDir` deep in `/Volumes/…`) must wrap
+   inside the dd cell rather than overflow the grid track. */
+code.storage-path {
+  display: inline-block;
+  max-width: 100%;
+  font-size: 0.85em;
+  word-break: break-all;
+  white-space: normal;
+}
+
 .inspector-drawer .error {
   background: rgba(220, 50, 50, 0.08);
   border: 1px solid rgba(220, 50, 50, 0.3);

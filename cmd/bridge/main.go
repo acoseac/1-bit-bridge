@@ -1304,13 +1304,13 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			store:     manifestStore,
 			resolver:  apiSrv.Resolver(),
 			cfg:       cfg,
-			outputDir: filepath.Join(cfg.DataDir, "transcoded"),
+			outputDir: transcode.OutputDirFor(cfg.DataDir),
 		})
 		apiSrv.WithBatchCoordinator(&upscaleBatchCoordinatorAdapter{
 			coord:     upscaleCoordinator,
 			store:     manifestStore,
 			dataDir:   cfg.DataDir,
-			outputDir: filepath.Join(cfg.DataDir, "transcoded"),
+			outputDir: transcode.OutputDirFor(cfg.DataDir),
 		})
 	}
 
@@ -1555,7 +1555,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 				coord:     upscaleCoordinator,
 				store:     manifestStore,
 				dataDir:   cfg.DataDir,
-				outputDir: filepath.Join(cfg.DataDir, "transcoded"),
+				outputDir: transcode.OutputDirFor(cfg.DataDir),
 			}
 		}(),
 	})

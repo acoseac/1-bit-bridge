@@ -22,6 +22,7 @@ import (
 	"strconv"
 
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
+	"github.com/acoseac/1-bit-bridge/internal/transcode"
 )
 
 // adminBatchSubmitRequest is the JSON shape POST /api/upscale/batch
@@ -176,8 +177,18 @@ func (s *Server) apiUpscaleTargetPatch(w http.ResponseWriter, r *http.Request) {
 }
 
 // pageLibraryInspector renders the Library Inspector HTML.
+//
+// `UpscaleStoragePath` is the absolute filesystem directory the
+// long-lived transcode pool writes converted sidecars to —
+// surfaced in the drawer alongside the "Free on data volume"
+// row so the operator can see WHERE the projected variants will
+// land before they hit "Upscale this scope." Always populated
+// regardless of whether the pool itself is running; mirrors
+// `/api/upscale/stats.storagePath`.
 func (s *Server) pageLibraryInspector(w http.ResponseWriter, r *http.Request) {
-	s.renderPage(w, "library_inspector", nil)
+	s.renderPage(w, "library_inspector", map[string]any{
+		"UpscaleStoragePath": transcode.OutputDirFor(s.deps.Cfg.DataDir),
+	})
 }
 
 // pageJobs renders the Jobs page HTML.

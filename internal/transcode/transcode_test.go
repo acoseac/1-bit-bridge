@@ -40,6 +40,36 @@ func TestVariantIDStable(t *testing.T) {
 	}
 }
 
+// TestOutputDirForJoinsSubdir pins the single source of truth for
+// "where converted sidecars land". Three independent surfaces read
+// it (cmd/bridge runtime pool wiring, admin Settings template,
+// admin Library Inspector template); any drift here would cause
+// the admin UI to advertise a path different from where the pool
+// actually writes.
+func TestOutputDirForJoinsSubdir(t *testing.T) {
+	cases := []struct {
+		dataDir string
+		want    string
+	}{
+		{"/var/lib/bridge", filepath.Join("/var/lib/bridge", "transcoded")},
+		{"/tmp/bridge-live/data", filepath.Join("/tmp/bridge-live/data", "transcoded")},
+		{"/Volumes/Audio/.bridge", filepath.Join("/Volumes/Audio/.bridge", "transcoded")},
+	}
+	for _, c := range cases {
+		got := OutputDirFor(c.dataDir)
+		if got != c.want {
+			t.Errorf("OutputDirFor(%q) = %q, want %q", c.dataDir, got, c.want)
+		}
+	}
+	// Symbolic check: the constant's literal value is the contract
+	// that `bridge upscale --gc` and the runtime pool share.
+	// Bumping the literal here without the GC walker would orphan
+	// every sidecar on the first restart after upgrade.
+	if OutputDirSubdir != "transcoded" {
+		t.Fatalf("OutputDirSubdir = %q, want %q (bumping this rehouses the cache; coordinate with --gc)", OutputDirSubdir, "transcoded")
+	}
+}
+
 // TestSidecarPathIncludesVariantSuffix proves that two JobSpecs
 // with the same source but different variants land at distinct
 // sidecar paths. Without this guarantee, the user's first call to
