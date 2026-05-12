@@ -169,17 +169,22 @@ func TestRunGCReverseSweepRemovesOrphanRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var sawDead, sawLive bool
+	var sawDead, sawLive, sawBrokenLink bool
 	for _, tr := range delta {
-		if tr.Path == deadSrc {
+		switch tr.Path {
+		case deadSrc:
 			sawDead = true
-		}
-		if tr.Path == liveSrc {
+		case liveSrc:
 			sawLive = true
+		case brokenLinkSrc:
+			sawBrokenLink = true
 		}
 	}
 	if !sawDead {
 		t.Error("expected dead-row's parent track to be returned by ListTracks(since:) — indexed_at bump missing")
+	}
+	if !sawBrokenLink {
+		t.Error("expected broken-link-row's parent track to be returned by ListTracks(since:) — indexed_at bump missing for the symlink case (CodeRabbit on PR #207 round 3)")
 	}
 	if sawLive {
 		t.Error("expected live-row's parent track NOT to be returned by ListTracks(since:) — false bump would re-pull untouched tracks")

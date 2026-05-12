@@ -480,8 +480,23 @@ func runGC(stdout, stderr io.Writer, store *manifest.Store, outputDir string) in
 	// gracefully via `filepath.SkipDir`, so this guard only fires
 	// when there's something to lose.
 	if len(allRows) > 0 {
-		if _, statErr := os.Stat(outputDir); errors.Is(statErr, os.ErrNotExist) {
+		_, statErr := os.Stat(outputDir)
+		switch {
+		case statErr == nil:
+			// Healthy state — proceed to the per-row loop below.
+		case errors.Is(statErr, os.ErrNotExist):
 			fmt.Fprintf(stderr, "GC reverse sweep: transcoded directory %q is missing but %d variant row(s) exist; refusing to delete rows en masse (likely a disconnected mount or filesystem issue — restore access and re-run).\n", outputDir, len(allRows))
+			return 1
+		default:
+			// Any other stat failure (permission denied, I/O
+			// error, stale NFS handle, etc.) means the per-row
+			// `os.Stat(SidecarPath)` below would almost certainly
+			// fail the same way for every row — accumulating N
+			// per-row "stat failure" log lines and burning the
+			// operator's terminal output without making progress.
+			// Bail upfront with a single distinct message.
+			// CodeRabbit on PR #207 round 3.
+			fmt.Fprintf(stderr, "GC reverse sweep: cannot stat transcoded directory %q (%v); refusing to proceed with %d variant row(s) at risk.\n", outputDir, statErr, len(allRows))
 			return 1
 		}
 	}
