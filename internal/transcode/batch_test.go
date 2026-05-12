@@ -109,7 +109,7 @@ func newTestCoordinatorWithStubbedPool(t *testing.T, s *manifest.Store) (*Coordi
 		return spec.SourceSize * 2, nil // arbitrary non-zero size
 	}
 	dataDir := t.TempDir()
-	c, err := NewCoordinator(p, s, dataDir, nil)
+	c, err := NewCoordinator(p, s, dataDir, nil, func(rel string) (string, error) { return "/tmp/abs/" + rel, nil })
 	if err != nil {
 		t.Fatalf("NewCoordinator: %v", err)
 	}
@@ -118,8 +118,8 @@ func newTestCoordinatorWithStubbedPool(t *testing.T, s *manifest.Store) (*Coordi
 	c.SetPublish(log.append)
 	// Wire pool callbacks the way cmd/bridge does — Coordinator
 	// consumes them.
-	p.SetOnJobComplete(func(path, variantID string, sampleRate, bitsPerSample int, batchID uuid.UUID, completedAt time.Time) {
-		c.OnJobComplete(path, variantID, sampleRate, bitsPerSample, batchID, completedAt)
+	p.SetOnJobComplete(func(path, variantID string, sampleRate, bitsPerSample int, durationSeconds float64, batchID uuid.UUID, completedAt time.Time) {
+		c.OnJobComplete(path, variantID, sampleRate, bitsPerSample, durationSeconds, batchID, completedAt)
 	})
 	p.SetOnJobFailed(func(path, variantID, errMsg string, durationSeconds float64, batchID uuid.UUID, failedAt time.Time) {
 		c.OnJobFailed(path, variantID, errMsg, durationSeconds, batchID, failedAt)
@@ -171,7 +171,7 @@ func TestSubmit_RefusesOnInsufficientDiskSpace(t *testing.T) {
 
 	p := NewPool(s, 1, 4)
 	t.Cleanup(p.Stop)
-	c, err := NewCoordinator(p, s, "/this/path/does/not/exist/anywhere", nil)
+	c, err := NewCoordinator(p, s, "/this/path/does/not/exist/anywhere", nil, func(rel string) (string, error) { return "/tmp/abs/" + rel, nil })
 	if err != nil {
 		t.Fatalf("NewCoordinator: %v", err)
 	}
@@ -276,7 +276,7 @@ func TestRecoverInterruptedBatches_RunsAtNewCoordinator(t *testing.T) {
 	}
 	p := NewPool(s, 1, 4)
 	t.Cleanup(p.Stop)
-	c, err := NewCoordinator(p, s, t.TempDir(), nil)
+	c, err := NewCoordinator(p, s, t.TempDir(), nil, func(rel string) (string, error) { return "/tmp/abs/" + rel, nil })
 	if err != nil {
 		t.Fatalf("NewCoordinator: %v", err)
 	}
@@ -302,7 +302,7 @@ func TestThroughput_ReturnsZeroBeforeMinSamples(t *testing.T) {
 
 	p := NewPool(s, 1, 4)
 	t.Cleanup(p.Stop)
-	c, err := NewCoordinator(p, s, t.TempDir(), nil)
+	c, err := NewCoordinator(p, s, t.TempDir(), nil, func(rel string) (string, error) { return "/tmp/abs/" + rel, nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -324,6 +324,7 @@ func TestThroughput_ReturnsZeroBeforeMinSamples(t *testing.T) {
 // TestRedactSoxErr_DropsPrefixesAndCaps locks the redaction
 // contract for sox stderr that lands in upscale_batches.error.
 func TestRedactSoxErr_DropsPrefixesAndCaps(t *testing.T) {
+	emptySpec := JobSpec{}
 	cases := []struct {
 		raw  string
 		want string
@@ -334,19 +335,51 @@ func TestRedactSoxErr_DropsPrefixesAndCaps(t *testing.T) {
 		{"unrelated content", "unrelated content"},
 	}
 	for _, c := range cases {
-		got := redactSoxErr(c.raw)
+		got := redactSoxErr(c.raw, emptySpec)
 		if got != c.want {
 			t.Errorf("redactSoxErr(%q) = %q, want %q", c.raw, got, c.want)
 		}
 	}
 	// Cap test.
 	long := strings.Repeat("a", 5000)
-	got := redactSoxErr(long)
+	got := redactSoxErr(long, emptySpec)
 	if !strings.HasSuffix(got, "…(truncated)") {
 		t.Errorf("long input not truncated: ends with %q", got[len(got)-30:])
 	}
 	if len(got) > 4096+len("…(truncated)") {
 		t.Errorf("truncated length = %d, expected ~4100", len(got))
+	}
+}
+
+// TestRedactSoxErr_ScrubsAbsolutePath locks the path-redaction
+// contract: when the JobSpec carries SourceAbsPath, every occurrence
+// of that absolute path in stderr is replaced with the library-
+// relative form. CodeRabbit security-medium on PR #201 — the
+// docstring promised this and the implementation only trimmed
+// prefixes.
+func TestRedactSoxErr_ScrubsAbsolutePath(t *testing.T) {
+	spec := JobSpec{
+		SourceAbsPath:    "/Users/alice/Music/Album/01.flac",
+		SourceLibraryRel: "Album/01.flac",
+		OutputDir:        "/var/lib/bridge/transcoded",
+	}
+	in := "sox FAIL formats: can't open input file '/Users/alice/Music/Album/01.flac': Not a directory"
+	got := redactSoxErr(in, spec)
+	if strings.Contains(got, "/Users/alice/Music") {
+		t.Errorf("redactSoxErr leaked absolute path: %q", got)
+	}
+	if !strings.Contains(got, "Album/01.flac") {
+		t.Errorf("redactSoxErr dropped library-relative form: %q", got)
+	}
+}
+
+// TestRedactSoxErr_ScrubsOutputDir locks the OutputDir scrub pass.
+func TestRedactSoxErr_ScrubsOutputDir(t *testing.T) {
+	spec := JobSpec{OutputDir: "/var/lib/bridge/transcoded"}
+	in := "sox FAIL formats: write failed on /var/lib/bridge/transcoded/abc123-upscaled-v2-192000-24.flac.tmp"
+	got := redactSoxErr(in, spec)
+	if strings.Contains(got, "/var/lib/bridge/transcoded/") {
+		t.Errorf("redactSoxErr leaked OutputDir prefix: %q", got)
 	}
 }
 

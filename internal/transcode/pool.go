@@ -117,7 +117,7 @@ type Pool struct {
 	// ordering. `publisherWG` ensures every buffered event is
 	// drained before Stop returns.
 	jobCompleteMu sync.RWMutex
-	onJobComplete func(path, variantID string, sampleRate, bitsPerSample int, batchID uuid.UUID, completedAt time.Time)
+	onJobComplete func(path, variantID string, sampleRate, bitsPerSample int, durationSeconds float64, batchID uuid.UUID, completedAt time.Time)
 
 	// onJobFailed fires once per job that errored (sox failure, store
 	// write failure, per-job timeout, panic-recovery). The Coordinator
@@ -218,6 +218,14 @@ type jobCompleteEvent struct {
 	sampleRate    int
 	bitsPerSample int
 	completedAt   time.Time
+	// durationSeconds is the wall-clock cost of the successful sox
+	// run (captured at processJob entry vs completion). Feeds the
+	// Coordinator's rolling-throughput average; 0 on a graceful-
+	// shutdown / closed-pool short-circuit where the job didn't
+	// actually run. Per CodeRabbit high on PR #201: previously this
+	// path passed 0 to `Coordinator.recordThroughput` and the
+	// throughput window stayed empty even on a busy bridge.
+	durationSeconds float64
 	// batchID attributes this completion to one operator-initiated
 	// batch (v1.3). Zero-value uuid.UUID for jobs submitted outside
 	// the batch path — the Coordinator filters those out before
@@ -393,7 +401,7 @@ func (p *Pool) SetOnStateChange(fn func()) {
 // Pre-batch callers (legacy `POST /v1/upscale`, `bridge upscale`
 // CLI) leave the field at zero-value uuid.UUID; the Coordinator
 // filters those out before updating counters.
-func (p *Pool) notifyJobCompleteFn() func(string, string, int, int, uuid.UUID, time.Time) {
+func (p *Pool) notifyJobCompleteFn() func(string, string, int, int, float64, uuid.UUID, time.Time) {
 	p.jobCompleteMu.RLock()
 	defer p.jobCompleteMu.RUnlock()
 	return p.onJobComplete
@@ -408,7 +416,7 @@ func (p *Pool) notifyJobCompleteFn() func(string, string, int, int, uuid.UUID, t
 // consumers in cmd/bridge/main.go pass it through to the
 // Coordinator's job-complete handler; pre-v1.3 callers that don't
 // care about batch attribution can ignore the new parameter.
-func (p *Pool) SetOnJobComplete(fn func(path, variantID string, sampleRate, bitsPerSample int, batchID uuid.UUID, completedAt time.Time)) {
+func (p *Pool) SetOnJobComplete(fn func(path, variantID string, sampleRate, bitsPerSample int, durationSeconds float64, batchID uuid.UUID, completedAt time.Time)) {
 	p.jobCompleteMu.Lock()
 	p.onJobComplete = fn
 	p.jobCompleteMu.Unlock()
@@ -567,7 +575,7 @@ func (p *Pool) runPublisher() {
 				continue
 			}
 			if fn := p.notifyJobCompleteFn(); fn != nil {
-				fn(evt.path, evt.variantID, evt.sampleRate, evt.bitsPerSample, evt.batchID, evt.completedAt)
+				fn(evt.path, evt.variantID, evt.sampleRate, evt.bitsPerSample, evt.durationSeconds, evt.batchID, evt.completedAt)
 			}
 		case evt, ok := <-failCh:
 			if !ok {
@@ -746,7 +754,7 @@ func (p *Pool) processJob(job poolJob) {
 		// the success / store-failure branches which already
 		// fire post-release.
 		if !p.closed.Load() {
-			errMsg := redactSoxErr(err.Error())
+			errMsg := redactSoxErr(err.Error(), job.spec)
 			if errors.Is(jobCtx.Err(), context.DeadlineExceeded) {
 				errMsg = "sox timed out after " + p.jobTimeout.String()
 			}
@@ -824,40 +832,67 @@ func (p *Pool) processJob(job poolJob) {
 	// publisher's bounded channel, which provides backpressure
 	// without losing events.
 	p.fireJobComplete(jobCompleteEvent{
-		path:          job.spec.SourceLibraryRel,
-		variantID:     job.spec.VariantID(),
-		sampleRate:    job.spec.TargetSampleRate,
-		bitsPerSample: job.spec.TargetBits,
-		completedAt:   completedAt,
-		batchID:       job.spec.BatchID,
+		path:            job.spec.SourceLibraryRel,
+		variantID:       job.spec.VariantID(),
+		sampleRate:      job.spec.TargetSampleRate,
+		bitsPerSample:   job.spec.TargetBits,
+		completedAt:     completedAt,
+		durationSeconds: completedAt.Sub(startedAt).Seconds(),
+		batchID:         job.spec.BatchID,
 	})
 	p.fireStateChange()
 }
 
-// redactSoxErr strips absolute filesystem paths from sox stderr
-// before the error string lands in `upscale_batches.error` (read
-// by the admin Jobs page) and the SSE event payload. The bridge
-// privacy contract bans surfacing absolute library paths; the
-// library-relative path is already carried on the event's `path`
-// field, so the error message only needs the sox-internal reason
-// (codec mismatch, header corruption, etc.).
+// redactSoxErr strips absolute filesystem paths and tempfile names
+// from sox stderr before the error string lands in
+// `upscale_batches.error` (read by the admin Jobs page) and the
+// SSE event payload. The bridge privacy contract bans surfacing
+// absolute library paths; the library-relative path is already
+// carried on the event's `path` field, so the error message only
+// needs the sox-internal reason (codec mismatch, header
+// corruption, etc.).
 //
-// Best-effort: looks for `<absPath>/<rel>` substrings and replaces
-// them with `<rel>`. If the redactor can't find a match it returns
-// the original — the admin Jobs page already shows raw sox stderr
-// today, so leaving an un-redacted path through is a regression on
-// no privacy worse than what ships pre-PR-3.
-func redactSoxErr(s string) string {
-	// Trim leading "exit status N: " prefixes the runner adds before
-	// sox stderr so the admin Jobs page surfaces the actual reason.
+// Two redaction passes:
+//
+//  1. If `spec.SourceAbsPath` is set AND it contains
+//     `spec.SourceLibraryRel` as a suffix (the normal case in
+//     production: absolute path = `<root>/<libraryRel>`), every
+//     occurrence of the absolute path in sox stderr is replaced
+//     by the library-relative form. This covers the most common
+//     sox failure shape: `sox FAIL formats: can't open input file
+//     '/Users/alice/Music/…': Not a directory`.
+//
+//  2. Output sidecar path scrubbing — sox stderr can carry the
+//     `<sidecar>.tmp` output path too. Strip everything up to
+//     and including the OutputDir prefix so only the sidecar
+//     basename remains.
+//
+// `exit status N: ` / `sox FAIL ` / `sox WARN ` / `sox: ` leading
+// prefixes are also trimmed so the admin Jobs page surfaces the
+// actual reason.
+//
+// Cap at 4 KiB — runaway sox stderr (e.g. corrupt MP4 dumping
+// hex into stderr) shouldn't bloat the upscale_batches row.
+func redactSoxErr(s string, spec JobSpec) string {
+	// Pass 1: scrub absolute source path → library-relative form.
+	if spec.SourceAbsPath != "" {
+		s = strings.ReplaceAll(s, spec.SourceAbsPath, spec.SourceLibraryRel)
+	}
+	// Pass 2: scrub OutputDir prefix from sidecar paths. We strip
+	// the directory prefix only — the sidecar basename is opaque
+	// hash + variant ID, no operator-identifying information.
+	if spec.OutputDir != "" {
+		s = strings.ReplaceAll(s, spec.OutputDir+"/", "")
+		s = strings.ReplaceAll(s, spec.OutputDir+`\`, "")
+	}
+	// Pass 3: drop leading prefixes the sox runner / exec wrapper
+	// adds.
 	for _, prefix := range []string{"sox FAIL ", "sox WARN ", "sox: ", "exit status "} {
 		if strings.HasPrefix(s, prefix) {
 			s = strings.TrimPrefix(s, prefix)
 			break
 		}
 	}
-	// Cap at 4 KiB — runaway sox stderr (e.g. corrupt MP4 dumping
-	// hex into stderr) shouldn't bloat the upscale_batches row.
 	const maxErrBytes = 4096
 	if len(s) > maxErrBytes {
 		s = s[:maxErrBytes] + "…(truncated)"

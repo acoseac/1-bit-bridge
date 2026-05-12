@@ -620,7 +620,7 @@ func TestPoolFiresOnJobCompleteAfterUpsertVariant(t *testing.T) {
 		variantsAtCallbackTime  int
 	}
 	gotCh := make(chan jobEvent, 1)
-	p.SetOnJobComplete(func(path, variantID string, sampleRate, bitsPerSample int, batchID uuid.UUID, completedAt time.Time) {
+	p.SetOnJobComplete(func(path, variantID string, sampleRate, bitsPerSample int, durationSeconds float64, batchID uuid.UUID, completedAt time.Time) {
 		// Critical ordering check: query the store from inside the
 		// callback. A regression that fires before UpsertVariant
 		// commits would see zero variants here.
@@ -718,7 +718,7 @@ func TestPoolDoesNotFireOnJobCompleteOnFailure(t *testing.T) {
 	}
 
 	var jobFires atomic.Int64
-	p.SetOnJobComplete(func(string, string, int, int, uuid.UUID, time.Time) {
+	p.SetOnJobComplete(func(string, string, int, int, float64, uuid.UUID, time.Time) {
 		jobFires.Add(1)
 	})
 	var stateFires atomic.Int64
@@ -823,7 +823,7 @@ func TestPoolSetOnJobCompleteIsRaceSafe(t *testing.T) {
 	}
 
 	var fires atomic.Int64
-	p.SetOnJobComplete(func(string, string, int, int, uuid.UUID, time.Time) {
+	p.SetOnJobComplete(func(string, string, int, int, float64, uuid.UUID, time.Time) {
 		fires.Add(1)
 	})
 
@@ -843,7 +843,7 @@ func TestPoolSetOnJobCompleteIsRaceSafe(t *testing.T) {
 			if i%2 == 0 {
 				p.SetOnJobComplete(nil)
 			} else {
-				p.SetOnJobComplete(func(string, string, int, int, uuid.UUID, time.Time) {
+				p.SetOnJobComplete(func(string, string, int, int, float64, uuid.UUID, time.Time) {
 					fires.Add(1)
 				})
 			}
