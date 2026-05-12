@@ -44,7 +44,11 @@ func (s *Server) apiUpscaleBatchSubmit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad-json", err.Error())
 		return
 	}
-	res, err := s.deps.BatchCoordinator.Submit(req.Path, req.TargetRate, req.TargetBits)
+	// Plumb the request context so an operator's browser
+	// disconnect cancels the underlying Coordinator.Submit (which
+	// in turn cancels its manifest projection walk).
+	// Per Gemini high on PR #202.
+	res, err := s.deps.BatchCoordinator.Submit(r.Context(), req.Path, req.TargetRate, req.TargetBits)
 	if err != nil {
 		var dskErr *AdminBatchInsufficientDiskSpace
 		if errors.As(err, &dskErr) {
