@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
+	"github.com/google/uuid"
 )
 
 // Pool tests focus on the dedup, queue-cap, and graceful-stop
@@ -619,7 +620,7 @@ func TestPoolFiresOnJobCompleteAfterUpsertVariant(t *testing.T) {
 		variantsAtCallbackTime  int
 	}
 	gotCh := make(chan jobEvent, 1)
-	p.SetOnJobComplete(func(path, variantID string, sampleRate, bitsPerSample int, completedAt time.Time) {
+	p.SetOnJobComplete(func(path, variantID string, sampleRate, bitsPerSample int, batchID uuid.UUID, completedAt time.Time) {
 		// Critical ordering check: query the store from inside the
 		// callback. A regression that fires before UpsertVariant
 		// commits would see zero variants here.
@@ -627,6 +628,7 @@ func TestPoolFiresOnJobCompleteAfterUpsertVariant(t *testing.T) {
 		if err != nil {
 			t.Errorf("CountVariants inside callback: %v", err)
 		}
+		_ = batchID // legacy single-track path leaves it zero
 		gotCh <- jobEvent{
 			path:                   path,
 			variantID:              variantID,
@@ -716,7 +718,7 @@ func TestPoolDoesNotFireOnJobCompleteOnFailure(t *testing.T) {
 	}
 
 	var jobFires atomic.Int64
-	p.SetOnJobComplete(func(string, string, int, int, time.Time) {
+	p.SetOnJobComplete(func(string, string, int, int, uuid.UUID, time.Time) {
 		jobFires.Add(1)
 	})
 	var stateFires atomic.Int64
@@ -821,7 +823,7 @@ func TestPoolSetOnJobCompleteIsRaceSafe(t *testing.T) {
 	}
 
 	var fires atomic.Int64
-	p.SetOnJobComplete(func(string, string, int, int, time.Time) {
+	p.SetOnJobComplete(func(string, string, int, int, uuid.UUID, time.Time) {
 		fires.Add(1)
 	})
 
@@ -841,7 +843,7 @@ func TestPoolSetOnJobCompleteIsRaceSafe(t *testing.T) {
 			if i%2 == 0 {
 				p.SetOnJobComplete(nil)
 			} else {
-				p.SetOnJobComplete(func(string, string, int, int, time.Time) {
+				p.SetOnJobComplete(func(string, string, int, int, uuid.UUID, time.Time) {
 					fires.Add(1)
 				})
 			}

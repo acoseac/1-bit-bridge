@@ -1,0 +1,634 @@
+// Coordinator wraps an existing *Pool with the v1.3 operator-driven
+// batch-tracking surface. Where Pool knows about per-job dedup and
+// worker scheduling, Coordinator knows about:
+//
+//   - per-batch enrollment (`upscale_batches` rows)
+//   - pre-flight projection + disk-space refusal
+//   - live per-batch counters bumped from pool callbacks
+//   - rolling throughput average for ETA rendering
+//   - SSE `upscale.batch` event emission on every counter change
+//
+// One Coordinator per Pool. Constructed at `bridge serve` boot via
+// `NewCoordinator(pool, store, dataDir, log, publish)`; the
+// publish closure injects the SSE broker so internal/transcode
+// stays free of internal/api as a dependency.
+//
+// Threading: all DB writes hold their own per-row coordinator lock
+// so concurrent pool callbacks (one per worker) can't interleave
+// reads with writes on the same `upscale_batches` row. The pool's
+// own write contracts (UpsertVariant under s.mu) are independent.
+
+package transcode
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"sync"
+	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/logging"
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
+	"github.com/google/uuid"
+)
+
+// CoordinatorPublishFunc is the broker-emit closure injected at
+// NewCoordinator time. cmd/bridge/main.go wires this to
+// `broker.Publish("upscale.batch", evt)` so internal/transcode
+// doesn't import internal/api / internal/api/event_broker.
+//
+// Nil-safe: a nil closure (test harness with no broker) is silently
+// dropped at the call site. Production deployments always wire it.
+type CoordinatorPublishFunc func(evt BatchProgressEvent)
+
+// BatchProgressEvent is the wire shape published on the SSE
+// `upscale.batch` topic. Admin Library Inspector + Jobs page render
+// from these; the iOS-facing API does NOT consume them (iOS uses
+// the per-track `upscale.complete` event from PR #B2 / v1.3).
+//
+// `BatchID` is stringified UUID for JSON-decode friendliness; the
+// raw 16-byte form lives in the SQLite BLOB column.
+type BatchProgressEvent struct {
+	BatchID        string    `json:"batchID"`
+	Path           string    `json:"path"`
+	Status         string    `json:"status"`
+	TargetRate     int       `json:"targetRate"`
+	TargetBits     int       `json:"targetBits"`
+	TotalFiles     int       `json:"totalFiles"`
+	ProcessedFiles int       `json:"processedFiles"`
+	FailedFiles    int       `json:"failedFiles"`
+	Error          string    `json:"error,omitempty"`
+	UpdatedAt      time.Time `json:"updatedAt"`
+}
+
+// ThroughputSnapshot carries the rolling-average derived values the
+// admin dashboard renders. Returned by Throughput().
+//
+// `JobsPerHour` is the rate computed from the most recent
+// `throughputWindowSize` completions; `EtaSeconds` is a forward
+// projection for the currently-running batches' remaining files
+// at that rate (zero when no batch is active or there's
+// insufficient sample data).
+type ThroughputSnapshot struct {
+	JobsPerHour float64 `json:"jobsPerHour"`
+	EtaSeconds  float64 `json:"etaSeconds"`
+	Samples     int     `json:"samples"`
+}
+
+// throughputWindowSize is the rolling-average window. Ten jobs is
+// enough to smooth out per-job variance (40 s SoX runs sit next to
+// 10 s ones) without making the dashboard ETA lag for two minutes
+// after a workload shift. Adjustable; not exposed via config because
+// the value isn't operator-tunable in a useful sense.
+const throughputWindowSize = 10
+
+// throughputMinSamples is the minimum samples Throughput() needs
+// before it produces a non-zero JobsPerHour. With < 3 completions
+// the average is dominated by initial-load noise and produces a
+// wildly wrong ETA. Surfaces as (0, 0, samples) until the window
+// fills enough to be useful.
+const throughputMinSamples = 3
+
+// jobCompleteHook + jobFailedHook signatures match the pool's
+// `onJobComplete` / `onJobFailed` exactly. The Coordinator implements
+// these and `cmd/bridge/main.go` calls `pool.SetOnJobComplete(c.OnJobComplete)`
+// / `pool.SetOnJobFailed(c.OnJobFailed)` at wiring time.
+
+// Coordinator wraps a Pool with per-batch enrollment, live
+// counters, throughput math, and SSE event emission.
+type Coordinator struct {
+	pool    *Pool
+	store   *manifest.Store
+	dataDir string
+	publish CoordinatorPublishFunc
+	logger  *slog.Logger
+	clock   func() time.Time // dependency-injected for tests
+
+	mu sync.Mutex
+	// liveBatches is the in-memory mirror of pending+running rows so
+	// pool callbacks bump counters without re-reading SQLite on
+	// every job completion. Coordinator writes through to
+	// `upscale_batches` on every counter change so a restart
+	// recovers the latest state via the rows directly.
+	liveBatches map[uuid.UUID]*batchState
+
+	// throughputSamples is a ring buffer of recent job durations in
+	// seconds. Read by Throughput(); written by OnJobComplete /
+	// OnJobFailed.
+	throughputSamples [throughputWindowSize]float64
+	throughputCount   int // total samples ever written (caps reads at min(count, window))
+	throughputCursor  int // next write position
+}
+
+// batchState mirrors the live row's counters. Snapshot-only — every
+// mutation immediately writes through to `upscale_batches` so a
+// restart recovers the latest state. Keeping the in-memory copy
+// avoids a SELECT-on-every-pool-callback hot path.
+type batchState struct {
+	Row          manifest.UpscaleBatchRow
+	RemainingIDs map[string]struct{} // source-path keys for tracks the batch still expects callbacks for
+}
+
+// NewCoordinator constructs a Coordinator and runs the boot-time
+// `RecoverInterruptedBatches` pass against `store`. The recovery
+// pass MUST complete before the Coordinator accepts new Submit
+// calls — repeated boots between which a batch was running would
+// otherwise leave phantom in-flight rows.
+//
+// `publish` is the SSE broker emitter; nil disables event emission
+// (test harness) but counter writes still land in the DB.
+func NewCoordinator(
+	pool *Pool,
+	store *manifest.Store,
+	dataDir string,
+	publish CoordinatorPublishFunc,
+) (*Coordinator, error) {
+	c := &Coordinator{
+		pool:        pool,
+		store:       store,
+		dataDir:     dataDir,
+		publish:     publish,
+		logger:      logging.Component("transcode.coordinator"),
+		clock:       func() time.Time { return time.Now().UTC() },
+		liveBatches: make(map[uuid.UUID]*batchState),
+	}
+	rows, err := store.RecoverInterruptedBatches(c.clock().UnixNano())
+	if err != nil {
+		return nil, fmt.Errorf("recover interrupted batches: %w", err)
+	}
+	if rows > 0 {
+		c.logger.Info("boot recovery: interrupted batches",
+			"rowsAffected", rows)
+	}
+	return c, nil
+}
+
+// SubmitResult is returned by Submit on success. The caller (the
+// HTTP handler) marshals it into the 202 Accepted body.
+type SubmitResult struct {
+	BatchID            uuid.UUID
+	Path               string
+	TargetRate         int
+	TargetBits         int
+	TotalFiles         int
+	AlreadyCovered     int
+	ProjectedSizeBytes int64
+	AvailableBytes     int64
+	EnqueuedCount      int
+}
+
+// Submit walks every track under `path`, filters ineligible /
+// already-covered, computes the projected variant size, refuses on
+// insufficient disk headroom, inserts an `upscale_batches` row,
+// and enqueues filtered jobs into the pool with their `BatchID`
+// stamped. Returns ErrInsufficientDiskSpace (wrapped) if pre-flight
+// refuses.
+//
+// `targetRate` / `targetBits` come from the admin Settings (DB-
+// backed via `Store.GetUpscaleTarget`); the caller is responsible
+// for falling back to YAML bootstrap when scan_state is unseeded.
+//
+// `outputDir` is `<dataDir>/transcoded` — same path the legacy
+// per-track CLI / HTTP path uses. The Pool dedups on `(source,
+// variant_id)` so a track that already has a variant at the same
+// target is silently skipped (counted as `AlreadyCovered`).
+func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targetBits int, outputDir string) (*SubmitResult, error) {
+	if targetRate <= 0 {
+		return nil, fmt.Errorf("submit: target rate %d Hz: must be positive", targetRate)
+	}
+	switch targetBits {
+	case 16, 24, 32:
+	default:
+		return nil, fmt.Errorf("submit: target bits %d: must be 16/24/32", targetBits)
+	}
+
+	projections, err := c.store.ListTrackProjectionsUnderPrefix(path)
+	if err != nil {
+		return nil, fmt.Errorf("submit: list projections: %w", err)
+	}
+
+	// Filter + project. Tracks with `HasVariant` already covered;
+	// tracks with zero source rate / bits are unknown-format and
+	// skipped (the operator pre-flight surfaced them separately).
+	type candidate struct {
+		path       string
+		size       int64
+		sampleRate int
+		bits       int
+	}
+	var (
+		cands          []candidate
+		alreadyCovered int
+		totalProjected int64
+		compressionFct = DefaultCompressionFactor(targetBits)
+	)
+	for _, t := range projections {
+		if t.HasVariant {
+			alreadyCovered++
+			continue
+		}
+		if t.SampleRate <= 0 || t.BitsPerSample <= 0 {
+			continue
+		}
+		// Refuse to downsample (target ≤ source). Sox would emit
+		// silence-with-warnings; we surface as filter-out so the
+		// operator sees an accurate `enqueued` count.
+		if t.SampleRate >= targetRate && t.BitsPerSample >= targetBits {
+			continue
+		}
+		cands = append(cands, candidate{
+			path:       t.Path,
+			size:       t.Size,
+			sampleRate: t.SampleRate,
+			bits:       t.BitsPerSample,
+		})
+		totalProjected += ProjectedSize(t.Size, t.SampleRate, t.BitsPerSample,
+			targetRate, targetBits, compressionFct)
+	}
+
+	// Pre-flight disk check. Refuse with a typed error carrying
+	// the operator-facing numbers.
+	ok, available, err := DiskHasHeadroom(c.dataDir, totalProjected, DefaultDiskSafetyMargin)
+	if err != nil {
+		return nil, fmt.Errorf("submit: disk probe: %w", err)
+	}
+	if !ok {
+		return nil, &InsufficientDiskSpaceError{
+			ProjectedBytes: totalProjected,
+			RequiredBytes:  int64(float64(totalProjected) * (1 + DefaultDiskSafetyMargin)),
+			AvailableBytes: available,
+			Dir:            c.dataDir,
+		}
+	}
+
+	// Insert the batch row first so any pool callback that races
+	// with the enqueue finds a row to attribute to.
+	batchID := uuid.Must(uuid.NewRandom())
+	now := c.clock().UnixNano()
+	row := manifest.UpscaleBatchRow{
+		ID:             batchID,
+		Path:           path,
+		TargetRate:     targetRate,
+		TargetBits:     targetBits,
+		Status:         "pending",
+		TotalFiles:     len(cands),
+		ProcessedFiles: 0,
+		FailedFiles:    0,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	if err := c.store.InsertUpscaleBatch(row); err != nil {
+		return nil, fmt.Errorf("submit: insert batch row: %w", err)
+	}
+
+	// Build in-memory state with the per-track remaining set so
+	// pool callbacks can find the right row by path even when many
+	// batches run concurrently.
+	state := &batchState{
+		Row:          row,
+		RemainingIDs: make(map[string]struct{}, len(cands)),
+	}
+	for _, ca := range cands {
+		state.RemainingIDs[ca.path] = struct{}{}
+	}
+	c.mu.Lock()
+	c.liveBatches[batchID] = state
+	c.mu.Unlock()
+
+	// Enqueue. Pool's bounded channel makes Enqueue non-blocking
+	// per-call; we transition the batch to `running` before the
+	// first job lands so a slow ListTrackProjections couldn't have
+	// the row sit in `pending` while jobs already started.
+	if err := c.transitionStatus(batchID, "running", "", c.clock()); err != nil {
+		c.logger.Warn("submit: transition to running",
+			"batchID", batchID.String(),
+			"err", err)
+	}
+	enqueued := 0
+	for _, ca := range cands {
+		spec := JobSpec{
+			SourceAbsPath:    "", // resolved by caller via Resolver; the Pool's runner consumes this
+			SourceLibraryRel: ca.path,
+			SourceMTimeNS:    0, // populated by caller from the manifest's mtime if needed
+			SourceSize:       ca.size,
+			SourceSampleRate: ca.sampleRate,
+			TargetSampleRate: targetRate,
+			TargetBits:       targetBits,
+			Quality:          QualityVeryHigh,
+			OutputDir:        outputDir,
+			BatchID:          batchID,
+		}
+		// Resolver-based abs-path resolution lives in the caller —
+		// the Coordinator just stamps the BatchID. Caller wires
+		// SubmitWithResolver below for the canonical path.
+		if err := c.pool.Enqueue(spec); err != nil {
+			// Queue full or pool closed — mark this batch as
+			// failed and surface the error. The already-enqueued
+			// jobs will run to completion; we count their results
+			// against the row even though it's now in failed state.
+			c.logger.Warn("submit: enqueue failed",
+				"batchID", batchID.String(),
+				"path", ca.path,
+				"err", err)
+			_ = c.transitionStatus(batchID, "failed", err.Error(), c.clock())
+			break
+		}
+		enqueued++
+	}
+
+	c.publishProgress(batchID)
+	return &SubmitResult{
+		BatchID:            batchID,
+		Path:               path,
+		TargetRate:         targetRate,
+		TargetBits:         targetBits,
+		TotalFiles:         len(cands),
+		AlreadyCovered:     alreadyCovered,
+		ProjectedSizeBytes: totalProjected,
+		AvailableBytes:     available,
+		EnqueuedCount:      enqueued,
+	}, nil
+}
+
+// SetPublish wires (or rewires) the SSE broker emit closure.
+// Construction-time callers may pass nil and call SetPublish later
+// once the broker handle is in scope (the canonical wiring pattern
+// in cmd/bridge/main.go — the Coordinator is built BEFORE the SSE
+// broker so `RecoverInterruptedBatches` can run synchronously
+// during startup). Concurrency-safe via the same coordinator mutex
+// that guards the live-batch state.
+func (c *Coordinator) SetPublish(publish CoordinatorPublishFunc) {
+	c.mu.Lock()
+	c.publish = publish
+	c.mu.Unlock()
+}
+
+// Cancel transitions a batch to `cancelled` AND tries to drain the
+// pool of its remaining jobs. The pool doesn't currently support
+// targeted dequeue (jobs are FIFO; the next worker pulls whichever
+// is at the head), so the practical effect is:
+//
+//   - any worker that started a job from this batch finishes it
+//     (the variant lands on disk + in `track_variants`)
+//   - any job still on the pool's pending channel runs when picked
+//     up (variant also lands)
+//   - the batch row is marked `cancelled` so the admin Jobs page
+//     stops surfacing it as live
+//
+// "Cancel" therefore means "stop tracking; stop counting" rather
+// than "kill in-flight." A future enhancement can add per-batch
+// dequeue if operators need a harder stop.
+func (c *Coordinator) Cancel(batchID uuid.UUID) error {
+	return c.transitionStatus(batchID, "cancelled", "", c.clock())
+}
+
+// transitionStatus writes the new status + (optionally) the error
+// message and updated_at into `upscale_batches`, drops the in-
+// memory state when the new status is terminal, and emits an SSE
+// progress event.
+//
+// Terminal statuses: completed / failed / cancelled / interrupted.
+// `pending` and `running` keep the in-memory state alive for
+// further pool callbacks.
+func (c *Coordinator) transitionStatus(batchID uuid.UUID, status, errMsg string, at time.Time) error {
+	c.mu.Lock()
+	state, ok := c.liveBatches[batchID]
+	if !ok {
+		c.mu.Unlock()
+		return nil // already terminal; idempotent no-op
+	}
+	state.Row.Status = status
+	if errMsg != "" {
+		state.Row.Error = errMsg
+	}
+	state.Row.UpdatedAt = at.UnixNano()
+	rowCopy := state.Row
+	terminal := isTerminalStatus(status)
+	if terminal {
+		delete(c.liveBatches, batchID)
+	}
+	c.mu.Unlock()
+
+	if err := c.store.UpdateUpscaleBatchStatus(rowCopy); err != nil {
+		return fmt.Errorf("transition %s -> %s: %w", batchID, status, err)
+	}
+	c.publishProgressRow(rowCopy)
+	return nil
+}
+
+// OnJobComplete is the Pool-side callback invoked when a sox
+// invocation succeeded AND `UpsertVariant` committed. Signature
+// matches the pool's `SetOnJobComplete` parameter exactly.
+//
+// Bumps `processed_files` on the owning batch (no-op when batchID
+// is zero — legacy single-track jobs that didn't go through Submit
+// don't have a batch to attribute to). Records the duration into
+// the throughput ring. Transitions the batch to `completed` when
+// all expected jobs have reported back.
+func (c *Coordinator) OnJobComplete(path, variantID string, sampleRate, bitsPerSample int, batchID uuid.UUID, completedAt time.Time) {
+	c.recordThroughput(completedAt)
+	if batchID == uuid.Nil {
+		return
+	}
+	c.mu.Lock()
+	state, ok := c.liveBatches[batchID]
+	if !ok {
+		c.mu.Unlock()
+		return
+	}
+	state.Row.ProcessedFiles++
+	delete(state.RemainingIDs, path)
+	state.Row.UpdatedAt = completedAt.UnixNano()
+	allDone := len(state.RemainingIDs) == 0
+	terminalErr := ""
+	terminalStatus := ""
+	if allDone {
+		if state.Row.FailedFiles == 0 {
+			terminalStatus = "completed"
+		} else if state.Row.FailedFiles == state.Row.TotalFiles {
+			terminalStatus = "failed"
+			terminalErr = "every track in this batch failed sox / store-write"
+		} else {
+			terminalStatus = "completed" // mixed results — `completed` reflects "the batch is done", failed count separately rendered
+		}
+		state.Row.Status = terminalStatus
+		if terminalErr != "" {
+			state.Row.Error = terminalErr
+		}
+	}
+	rowCopy := state.Row
+	if allDone {
+		delete(c.liveBatches, batchID)
+	}
+	c.mu.Unlock()
+
+	if err := c.store.UpdateUpscaleBatchProgress(rowCopy); err != nil {
+		c.logger.Warn("OnJobComplete: update progress",
+			"batchID", batchID.String(),
+			"err", err)
+	}
+	c.publishProgressRow(rowCopy)
+}
+
+// OnJobFailed mirrors OnJobComplete for the failure side. Bumps
+// `failed_files`; if every job in the batch has reported back and
+// failed_files > 0, transitions the batch to `failed`.
+func (c *Coordinator) OnJobFailed(path, variantID, errMsg string, durationSeconds float64, batchID uuid.UUID, failedAt time.Time) {
+	c.recordThroughputDuration(durationSeconds, failedAt)
+	if batchID == uuid.Nil {
+		return
+	}
+	c.mu.Lock()
+	state, ok := c.liveBatches[batchID]
+	if !ok {
+		c.mu.Unlock()
+		return
+	}
+	state.Row.FailedFiles++
+	delete(state.RemainingIDs, path)
+	// Surface the first error verbatim; subsequent failures
+	// append a count suffix so the Jobs page doesn't drown in
+	// repetitive text.
+	if state.Row.Error == "" {
+		state.Row.Error = errMsg
+	}
+	state.Row.UpdatedAt = failedAt.UnixNano()
+	allDone := len(state.RemainingIDs) == 0
+	if allDone {
+		if state.Row.FailedFiles == state.Row.TotalFiles {
+			state.Row.Status = "failed"
+		} else {
+			state.Row.Status = "completed"
+		}
+	}
+	rowCopy := state.Row
+	if allDone {
+		delete(c.liveBatches, batchID)
+	}
+	c.mu.Unlock()
+
+	if err := c.store.UpdateUpscaleBatchProgress(rowCopy); err != nil {
+		c.logger.Warn("OnJobFailed: update progress",
+			"batchID", batchID.String(),
+			"err", err)
+	}
+	c.publishProgressRow(rowCopy)
+}
+
+// recordThroughput captures the delta between now and the most
+// recent prior completion into the rolling window. Called by both
+// OnJobComplete and OnJobFailed so the ETA reflects total worker
+// throughput regardless of success/failure split.
+func (c *Coordinator) recordThroughput(now time.Time) {
+	c.recordThroughputDuration(0, now)
+}
+
+// recordThroughputDuration is the primary entry; the per-job
+// wall-clock seconds (from worker startedAt) is the authoritative
+// per-sample value. A zero duration falls back to "fast-fail"
+// semantics — the ring still advances so the window stays
+// meaningful, but the sample contributes zero seconds.
+func (c *Coordinator) recordThroughputDuration(durationSeconds float64, _ time.Time) {
+	c.mu.Lock()
+	c.throughputSamples[c.throughputCursor] = durationSeconds
+	c.throughputCursor = (c.throughputCursor + 1) % throughputWindowSize
+	c.throughputCount++
+	c.mu.Unlock()
+}
+
+// Throughput returns the rolling average jobs-per-hour + a forward
+// projection for the currently-live batches' remaining files. Both
+// numbers are zero when fewer than `throughputMinSamples` samples
+// have landed.
+func (c *Coordinator) Throughput() ThroughputSnapshot {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	samples := c.throughputCount
+	if samples > throughputWindowSize {
+		samples = throughputWindowSize
+	}
+	if samples < throughputMinSamples {
+		return ThroughputSnapshot{Samples: samples}
+	}
+	var totalSec float64
+	nonZero := 0
+	for i := 0; i < samples; i++ {
+		if c.throughputSamples[i] > 0 {
+			totalSec += c.throughputSamples[i]
+			nonZero++
+		}
+	}
+	if nonZero == 0 {
+		return ThroughputSnapshot{Samples: samples}
+	}
+	avgSeconds := totalSec / float64(nonZero)
+	jobsPerHour := 3600.0 / avgSeconds
+	// ETA: sum remaining across live batches × avgSeconds.
+	remaining := 0
+	for _, st := range c.liveBatches {
+		remaining += len(st.RemainingIDs)
+	}
+	return ThroughputSnapshot{
+		JobsPerHour: jobsPerHour,
+		EtaSeconds:  float64(remaining) * avgSeconds,
+		Samples:     samples,
+	}
+}
+
+// publishProgress emits a single SSE event for the given batchID.
+// No-op when the row is no longer live in-memory (terminal status
+// already published).
+func (c *Coordinator) publishProgress(batchID uuid.UUID) {
+	c.mu.Lock()
+	state, ok := c.liveBatches[batchID]
+	if !ok {
+		c.mu.Unlock()
+		return
+	}
+	row := state.Row
+	c.mu.Unlock()
+	c.publishProgressRow(row)
+}
+
+// publishProgressRow is the publish helper that takes a row copy
+// (already snapshot under c.mu) so it doesn't have to re-lock for
+// the SSE emit.
+func (c *Coordinator) publishProgressRow(row manifest.UpscaleBatchRow) {
+	if c.publish == nil {
+		return
+	}
+	c.publish(BatchProgressEvent{
+		BatchID:        row.ID.String(),
+		Path:           row.Path,
+		Status:         row.Status,
+		TargetRate:     row.TargetRate,
+		TargetBits:     row.TargetBits,
+		TotalFiles:     row.TotalFiles,
+		ProcessedFiles: row.ProcessedFiles,
+		FailedFiles:    row.FailedFiles,
+		Error:          row.Error,
+		UpdatedAt:      time.Unix(0, row.UpdatedAt).UTC(),
+	})
+}
+
+// isTerminalStatus reports whether the given status indicates the
+// batch has reached a final resting state — no further callbacks
+// should attribute to it.
+func isTerminalStatus(s string) bool {
+	switch s {
+	case "completed", "failed", "cancelled", "interrupted":
+		return true
+	}
+	return false
+}
+
+// ErrBatchNotFound is returned by Cancel / inspect operations when
+// the batchID isn't in `upscale_batches`. Distinct from a no-op
+// transition (terminal-status batch — Cancel returns nil for that).
+var ErrBatchNotFound = errors.New("upscale batch not found")
+
+// silence unused-context noise; `context.Context` is on Submit's
+// signature for forward-compat (the future per-batch cancel-via-
+// context surface) even though current Submit doesn't consult it.
+var _ = context.TODO

@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // Tests for the bounded coalescing publisher pattern (CLAUDE.md:
@@ -60,7 +62,7 @@ func TestPoolPublisherBurstStaysGoroutineBounded(t *testing.T) {
 		stateChanges.Add(1)
 		time.Sleep(50 * time.Microsecond)
 	})
-	p.SetOnJobComplete(func(path, variantID string, sampleRate, bitsPerSample int, completedAt time.Time) {
+	p.SetOnJobComplete(func(path, variantID string, sampleRate, bitsPerSample int, batchID uuid.UUID, completedAt time.Time) {
 		jobCompletes.Add(1)
 		time.Sleep(50 * time.Microsecond)
 	})
@@ -265,7 +267,7 @@ func TestPoolPublisherJobCompleteFidelity(t *testing.T) {
 	var mu sync.Mutex
 	gotPaths := make(map[string]int)
 	doneCh := make(chan struct{}, jobs)
-	p.SetOnJobComplete(func(path, variantID string, sampleRate, bitsPerSample int, completedAt time.Time) {
+	p.SetOnJobComplete(func(path, variantID string, sampleRate, bitsPerSample int, batchID uuid.UUID, completedAt time.Time) {
 		mu.Lock()
 		gotPaths[path]++
 		mu.Unlock()
@@ -348,7 +350,7 @@ func TestPoolPublisherStopDrainsBufferedEvents(t *testing.T) {
 	}
 
 	var jobCallbacks atomic.Int64
-	p.SetOnJobComplete(func(path, variantID string, sampleRate, bitsPerSample int, completedAt time.Time) {
+	p.SetOnJobComplete(func(path, variantID string, sampleRate, bitsPerSample int, batchID uuid.UUID, completedAt time.Time) {
 		jobCallbacks.Add(1)
 		// Slow callback so events queue up in the publisher
 		// channel.

@@ -2059,6 +2059,90 @@ func (s *Store) InsertUpscaleBatch(row UpscaleBatchRow) error {
 	return err
 }
 
+// UpdateUpscaleBatchProgress writes the counter columns + status
+// + error + updated_at on an existing row. Called from the
+// coordinator's pool-callback path; the row is identified by
+// row.ID. Idempotent on `id NOT FOUND` (returns nil with zero
+// rows affected — the coordinator deliberately calls this against
+// rows whose terminal status may have been written by a sibling
+// path).
+//
+// Holds s.mu per the writer contract.
+func (s *Store) UpdateUpscaleBatchProgress(row UpscaleBatchRow) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`
+		UPDATE upscale_batches
+		   SET status         = ?,
+		       processed_files = ?,
+		       failed_files    = ?,
+		       error          = ?,
+		       updated_at     = ?
+		 WHERE id = ?
+	`, row.Status, row.ProcessedFiles, row.FailedFiles, row.Error, row.UpdatedAt, row.ID[:])
+	return err
+}
+
+// UpdateUpscaleBatchStatus is the narrow flavour of
+// UpdateUpscaleBatchProgress for the cases that only flip status +
+// error + updated_at without touching counters. Used by
+// `Coordinator.Cancel`, `transitionStatus`, and pending→running
+// promotion at Submit.
+func (s *Store) UpdateUpscaleBatchStatus(row UpscaleBatchRow) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`
+		UPDATE upscale_batches
+		   SET status     = ?,
+		       error      = ?,
+		       updated_at = ?
+		 WHERE id = ?
+	`, row.Status, row.Error, row.UpdatedAt, row.ID[:])
+	return err
+}
+
+// ListUpscaleBatches returns up to `limit` rows ordered by
+// created_at DESC. limit ≤ 0 falls back to a sensible default
+// (100, matching the admin Jobs page's pagination). Used by the
+// `/v1/upscale/batches` endpoint and the admin Jobs page.
+func (s *Store) ListUpscaleBatches(limit int) ([]UpscaleBatchRow, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.Query(`
+		SELECT id, path, target_rate, target_bits, status,
+		       total_files, processed_files, failed_files,
+		       COALESCE(error, ''), created_at, updated_at
+		  FROM upscale_batches
+		 ORDER BY created_at DESC
+		 LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list upscale batches: %w", err)
+	}
+	defer rows.Close()
+	out := []UpscaleBatchRow{}
+	for rows.Next() {
+		var (
+			row    UpscaleBatchRow
+			idBlob []byte
+		)
+		if err := rows.Scan(
+			&idBlob, &row.Path, &row.TargetRate, &row.TargetBits, &row.Status,
+			&row.TotalFiles, &row.ProcessedFiles, &row.FailedFiles,
+			&row.Error, &row.CreatedAt, &row.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		if len(idBlob) != 16 {
+			return nil, fmt.Errorf("list upscale batches: id blob length %d, want 16", len(idBlob))
+		}
+		copy(row.ID[:], idBlob)
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
 // RecoverInterruptedBatches transitions any `pending` or `running`
 // batches to `interrupted` and is intended to run exactly once at
 // bridge boot, BEFORE the coordinator accepts new submissions.

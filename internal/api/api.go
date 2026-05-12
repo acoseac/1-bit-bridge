@@ -76,6 +76,7 @@ type Server struct {
 	upscaleEnabled       bool                 // mirrors cfg.Upscale.Enabled (and sox-probe outcome)
 	upscaleEnqueuer      UpscaleEnqueuer      // nil unless WithUpscaleEnqueuer wired (Phase 2.5)
 	upscaleStatsProvider UpscaleStatsProvider // nil unless WithUpscaleStats wired (v1.2 management UI)
+	batchCoordinator     BatchCoordinator     // nil unless WithBatchCoordinator wired (v1.3 operator-driven upscale)
 	eventBroker          *eventBroker         // nil disables /v1/events (back-compat for test harnesses)
 	manifestRateLimiter  *manifestRateLimiter // per-token-ID token-bucket for /v1/manifest
 	reachability         *reachabilityCache   // per-root probe TTL cache used by /v1/list, /v1/stat, /v1/health
@@ -442,6 +443,9 @@ func (s *Server) Handler() http.Handler {
 	// `pairing_not_supported`.
 	mux.HandleFunc("POST /v1/upscale", s.authed(s.upscaleRequest))
 	mux.HandleFunc("GET /v1/upscale/stats", s.authed(s.upscaleStats))
+	mux.HandleFunc("POST /v1/upscale/batch", s.authed(s.upscaleBatchSubmit))
+	mux.HandleFunc("GET /v1/upscale/batches", s.authed(s.upscaleBatchList))
+	mux.HandleFunc("DELETE /v1/upscale/batches/{id}", s.authed(s.upscaleBatchCancel))
 	mux.HandleFunc("GET /v1/events", s.authed(s.events))
 	mux.HandleFunc("POST /v1/pairing/requests", s.pairingRequest)
 	mux.HandleFunc("GET /v1/pairing/{requestID}", s.pairingPoll)
@@ -534,6 +538,16 @@ type HealthResponse struct {
 	//     surfaces variant changes without needing a full rescan.
 	//     iOS gates its +600s "silent fullRescan recovery" rung on
 	//     absence of this flag.
+	//   - "operatorDrivenUpscale" (v1.3): upscaling is managed in
+	//     the bridge's admin Library Inspector, not per-tap from
+	//     the iOS app. iOS gates ALL legacy upscale UI surfaces
+	//     (BridgeUpscaleControl wand, TrackSourceGlyph, long-press
+	//     "Upscale this track" menu items, BridgeUpscaleManagement
+	//     Section) on the ABSENCE of this flag. Pre-v1.3 bridges
+	//     omit it; iOS keeps the legacy wand UX alive against
+	//     those. v1.3+ bridges advertise it; iOS surfaces only the
+	//     mini-player haptic-press toggle + Settings device toggle
+	//     for variant override.
 	Features []string `json:"features,omitempty"`
 
 	// Roots is the per-root reachability snapshot. Populated whenever the
@@ -637,7 +651,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// land any variants. Mirrors how `resp.UpscaleEnabled` already
 	// gates the feature visibility. (Greptile P1 on PR #187.)
 	if s.upscaleEnabled {
-		resp.Features = []string{"upscaleCompleteEvents", "variantBumpsIndex"}
+		resp.Features = []string{"operatorDrivenUpscale", "upscaleCompleteEvents", "variantBumpsIndex"}
 	} else {
 		resp.Features = []string{"variantBumpsIndex"}
 	}
