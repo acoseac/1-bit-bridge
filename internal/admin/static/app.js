@@ -1518,6 +1518,368 @@ function safeApply(name, raw, fn) {
   }
 }
 
+// =============================================================
+// Library Inspector (v1.3 operator-driven upscale)
+// =============================================================
+
+const inspectorState = {
+  path: "", // current navigation path; "" = library root
+  selection: null, // {kind: "folder"|"track", row}
+};
+
+function initLibraryInspector() {
+  inspectorNavigate("");
+  document.getElementById("inspector-breadcrumbs")
+    .addEventListener("click", (e) => {
+      const a = e.target.closest("a[data-path]");
+      if (!a) return;
+      e.preventDefault();
+      inspectorNavigate(a.dataset.path);
+    });
+  document.getElementById("inspector-upscale-btn")
+    .addEventListener("click", inspectorSubmitBatch);
+}
+
+async function inspectorNavigate(path) {
+  inspectorState.path = path;
+  inspectorRenderBreadcrumbs(path);
+  inspectorResetDrawer();
+  document.getElementById("inspector-error").hidden = true;
+  document.getElementById("inspector-current-heading").textContent =
+    "Loading…";
+  try {
+    const res = await fetch(`/api/library/browse?path=${encodeURIComponent(path)}`);
+    if (!res.ok) {
+      throw new Error(`browse: HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    inspectorRender(data);
+  } catch (err) {
+    document.getElementById("inspector-error").hidden = false;
+    document.getElementById("inspector-error").textContent =
+      `Couldn’t load this folder: ${err.message}`;
+    document.getElementById("inspector-current-heading").textContent =
+      pathLabel(path);
+  }
+}
+
+function inspectorRenderBreadcrumbs(path) {
+  const crumbs = document.getElementById("inspector-breadcrumbs");
+  crumbs.innerHTML = "";
+  // Root crumb always present.
+  const root = document.createElement("a");
+  root.href = "#";
+  root.dataset.path = "";
+  root.textContent = "Library";
+  crumbs.appendChild(root);
+  if (!path) return;
+  const parts = path.split("/");
+  let acc = "";
+  for (const part of parts) {
+    crumbs.appendChild(document.createTextNode(" › "));
+    acc = acc ? `${acc}/${part}` : part;
+    const a = document.createElement("a");
+    a.href = "#";
+    a.dataset.path = acc;
+    a.textContent = part;
+    crumbs.appendChild(a);
+  }
+}
+
+function inspectorRender(data) {
+  document.getElementById("inspector-current-heading").textContent =
+    pathLabel(data.path);
+  const body = document.getElementById("inspector-rows-body");
+  body.innerHTML = "";
+  const folders = data.folders || [];
+  const tracks = data.tracks || [];
+  if (folders.length === 0 && tracks.length === 0) {
+    document.getElementById("inspector-rows-table").hidden = true;
+    document.getElementById("inspector-empty").hidden = false;
+    return;
+  }
+  document.getElementById("inspector-rows-table").hidden = false;
+  document.getElementById("inspector-empty").hidden = true;
+  for (const f of folders) {
+    const tr = document.createElement("tr");
+    tr.dataset.kind = "folder";
+    tr.dataset.path = f.path;
+    tr.innerHTML = `
+      <td><a href="#" class="folder-link">📁 ${escapeHTML(f.name)}</a></td>
+      <td class="num">${f.trackCount}</td>
+      <td class="num">${f.upscaledCount}</td>
+      <td class="num">${humanBytes(f.totalSizeBytes)}</td>
+    `;
+    tr.addEventListener("click", (e) => {
+      e.preventDefault();
+      inspectorSelectFolder(f);
+      // Double-click to navigate; single-click selects.
+    });
+    tr.querySelector(".folder-link").addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      inspectorNavigate(f.path);
+    });
+    body.appendChild(tr);
+  }
+  for (const t of tracks) {
+    const tr = document.createElement("tr");
+    tr.dataset.kind = "track";
+    tr.dataset.path = t.path;
+    const upscaled = t.isUpscaled ? "✓" : "";
+    tr.innerHTML = `
+      <td>🎵 ${escapeHTML(t.name)}</td>
+      <td class="num">${formatTrackQuality(t)}</td>
+      <td class="num">${upscaled}</td>
+      <td class="num">${humanBytes(t.sizeBytes)}</td>
+    `;
+    body.appendChild(tr);
+  }
+}
+
+function inspectorSelectFolder(folder) {
+  inspectorState.selection = { kind: "folder", row: folder };
+  document.getElementById("inspector-drawer-title").textContent =
+    folder.name;
+  document.getElementById("inspector-drawer-hint").hidden = true;
+  document.getElementById("inspector-drawer-content").hidden = false;
+  document.getElementById("inspector-drawer-tracks").textContent =
+    `${folder.trackCount} (${folder.upscaledCount} already upscaled)`;
+  document.getElementById("inspector-drawer-covered").textContent =
+    `${folder.upscaledCount}`;
+  document.getElementById("inspector-drawer-source-size").textContent =
+    humanBytes(folder.totalSizeBytes);
+  document.getElementById("inspector-drawer-projected").textContent = "—";
+  document.getElementById("inspector-drawer-free").textContent = "—";
+  document.getElementById("inspector-drawer-required").textContent = "—";
+  document.getElementById("inspector-drawer-warning").hidden = true;
+  document.getElementById("inspector-drawer-unknown").hidden = true;
+  document.getElementById("inspector-upscale-btn").disabled = true;
+  document.getElementById("inspector-submit-status").textContent = "";
+  inspectorFetchProjection(folder.path);
+}
+
+function inspectorResetDrawer() {
+  inspectorState.selection = null;
+  document.getElementById("inspector-drawer-title").textContent =
+    "Select a folder";
+  document.getElementById("inspector-drawer-hint").hidden = false;
+  document.getElementById("inspector-drawer-content").hidden = true;
+}
+
+async function inspectorFetchProjection(path) {
+  try {
+    const res = await fetch(`/api/library/browse-projection?path=${encodeURIComponent(path)}`);
+    if (res.status === 503) {
+      document.getElementById("inspector-drawer-warning").hidden = false;
+      document.getElementById("inspector-drawer-warning").textContent =
+        "Upscale feature is disabled on this bridge.";
+      return;
+    }
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    document.getElementById("inspector-drawer-projected").textContent =
+      `${humanBytes(data.projectedSizeBytes)} (${data.projectedFiles} files)`;
+    document.getElementById("inspector-drawer-free").textContent =
+      humanBytes(data.availableBytes);
+    document.getElementById("inspector-drawer-required").textContent =
+      humanBytes(data.requiredBytesWithMargin);
+    if (data.unknownFormatFiles > 0) {
+      document.getElementById("inspector-drawer-unknown").hidden = false;
+      document.getElementById("inspector-drawer-unknown").textContent =
+        `${data.unknownFormatFiles} tracks have unknown source format and will be skipped.`;
+    }
+    if (data.wouldFit && data.projectedFiles > 0) {
+      document.getElementById("inspector-upscale-btn").disabled = false;
+    } else if (data.projectedFiles === 0) {
+      document.getElementById("inspector-drawer-warning").hidden = false;
+      document.getElementById("inspector-drawer-warning").textContent =
+        "Nothing to upscale here — every eligible track already has a variant at the active target.";
+    } else {
+      document.getElementById("inspector-drawer-warning").hidden = false;
+      document.getElementById("inspector-drawer-warning").textContent =
+        `Not enough free space: needs ${humanBytes(data.requiredBytesWithMargin)} (incl. 10% safety margin), only ${humanBytes(data.availableBytes)} available on the bridge data volume.`;
+    }
+  } catch (err) {
+    document.getElementById("inspector-drawer-warning").hidden = false;
+    document.getElementById("inspector-drawer-warning").textContent =
+      `Couldn’t fetch projection: ${err.message}`;
+  }
+}
+
+async function inspectorSubmitBatch() {
+  const sel = inspectorState.selection;
+  if (!sel || sel.kind !== "folder") return;
+  const btn = document.getElementById("inspector-upscale-btn");
+  btn.disabled = true;
+  const status = document.getElementById("inspector-submit-status");
+  status.textContent = "Submitting…";
+  try {
+    const res = await fetch("/api/upscale/batch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: sel.row.path }),
+    });
+    if (res.status === 507) {
+      const data = await res.json();
+      status.textContent =
+        `Refused: needs ${humanBytes(data.requiredBytes)}, only ${humanBytes(data.availableBytes)} available.`;
+      btn.disabled = false;
+      return;
+    }
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    status.innerHTML =
+      `Batch enrolled · <strong>${data.enqueuedCount}</strong> tracks queued ` +
+      `(${data.alreadyCovered} already covered). ` +
+      `<a href="/jobs">View jobs →</a>`;
+  } catch (err) {
+    status.textContent = `Couldn’t submit: ${err.message}`;
+    btn.disabled = false;
+  }
+}
+
+function pathLabel(path) {
+  if (!path) return "Library root";
+  return path;
+}
+
+function escapeHTML(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function humanBytes(n) {
+  if (n == null || isNaN(n)) return "—";
+  const abs = Math.abs(n);
+  if (abs < 1024) return `${n} B`;
+  if (abs < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (abs < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  if (abs < 1024 ** 4) return `${(n / (1024 ** 3)).toFixed(2)} GB`;
+  return `${(n / (1024 ** 4)).toFixed(2)} TB`;
+}
+
+function formatTrackQuality(t) {
+  if (!t.sampleRate || !t.bitsPerSample) return "—";
+  // sampleRate is Hz; collapse to kHz with at most one decimal.
+  const khz = t.sampleRate >= 1000 ? `${(t.sampleRate / 1000).toFixed(1)}` : `${t.sampleRate}`;
+  return `${khz} kHz · ${t.bitsPerSample}-bit`;
+}
+
+// =============================================================
+// Jobs page (v1.3 upscale_batches history)
+// =============================================================
+
+function initJobs() {
+  jobsRefresh();
+  // Light polling — 5 s during job-active periods is plenty for
+  // the operator surface. SSE upgrade is a future enhancement.
+  setInterval(jobsRefresh, 5000);
+}
+
+async function jobsRefresh() {
+  try {
+    const res = await fetch("/api/upscale/batches?limit=100");
+    if (res.status === 503) {
+      document.getElementById("jobs-body").innerHTML =
+        '<tr><td colspan="8"><em>Upscale is disabled on this bridge.</em></td></tr>';
+      return;
+    }
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    jobsRender(data);
+    document.getElementById("jobs-error").hidden = true;
+  } catch (err) {
+    document.getElementById("jobs-error").hidden = false;
+    document.getElementById("jobs-error").textContent =
+      `Couldn’t load jobs: ${err.message}`;
+  }
+}
+
+function jobsRender(payload) {
+  const rows = payload.batches || [];
+  const tp = payload.throughput;
+  if (tp && tp.samples >= 3) {
+    document.getElementById("jobs-throughput-panel").hidden = false;
+    document.getElementById("jobs-throughput-rate").textContent =
+      tp.jobsPerHour.toFixed(0);
+    document.getElementById("jobs-throughput-eta").textContent =
+      formatDuration(tp.etaSeconds);
+    document.getElementById("jobs-throughput-samples").textContent =
+      ` · based on ${tp.samples} recent jobs`;
+  }
+  const body = document.getElementById("jobs-body");
+  if (rows.length === 0) {
+    body.innerHTML = '<tr><td colspan="8"><em>No batches yet.</em></td></tr>';
+    return;
+  }
+  body.innerHTML = "";
+  for (const r of rows) {
+    const tr = document.createElement("tr");
+    tr.dataset.id = r.id;
+    const scopeLabel = r.path || "(whole library)";
+    const updated = new Date(r.updatedAt / 1_000_000).toLocaleString();
+    const target = `${(r.targetRate / 1000).toFixed(1)} kHz · ${r.targetBits}-bit`;
+    tr.innerHTML = `
+      <td><span class="status status-${r.status}">${r.status}</span></td>
+      <td><code>${escapeHTML(scopeLabel)}</code></td>
+      <td>${target}</td>
+      <td class="num">${r.processedFiles}</td>
+      <td class="num">${r.failedFiles}</td>
+      <td class="num">${r.totalFiles}</td>
+      <td><time>${escapeHTML(updated)}</time></td>
+      <td></td>
+    `;
+    if (r.status === "pending" || r.status === "running") {
+      const cancelBtn = document.createElement("button");
+      cancelBtn.type = "button";
+      cancelBtn.className = "btn danger";
+      cancelBtn.textContent = "Cancel";
+      cancelBtn.addEventListener("click", () => jobsCancel(r.id));
+      tr.lastElementChild.appendChild(cancelBtn);
+    }
+    body.appendChild(tr);
+    if (r.error) {
+      const errRow = document.createElement("tr");
+      errRow.className = "job-error-row";
+      errRow.innerHTML = `<td colspan="8" class="error">${escapeHTML(r.error)}</td>`;
+      body.appendChild(errRow);
+    }
+  }
+}
+
+async function jobsCancel(id) {
+  if (!confirm("Cancel this batch? Workers will finish their current track but no new files will be enqueued.")) return;
+  try {
+    const res = await fetch(`/api/upscale/batches/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    });
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    jobsRefresh();
+  } catch (err) {
+    alert(`Cancel failed: ${err.message}`);
+  }
+}
+
+function formatDuration(seconds) {
+  if (!seconds || seconds <= 0) return "—";
+  if (seconds < 60) return `${seconds.toFixed(0)} s`;
+  if (seconds < 3600) return `${(seconds / 60).toFixed(1)} min`;
+  return `${(seconds / 3600).toFixed(1)} h`;
+}
+
 // --- boot ---
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -1525,6 +1887,8 @@ document.addEventListener("DOMContentLoaded", () => {
   switch (active) {
     case "dashboard": initDashboard(); break;
     case "library": initLibrary(); break;
+    case "library_inspector": initLibraryInspector(); break;
+    case "jobs": initJobs(); break;
     case "devices": initDevices(); break;
     case "settings": initSettings(); break;
   }

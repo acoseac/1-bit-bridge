@@ -1,0 +1,41 @@
+{{define "content"}}
+<section class="page jobs-page">
+  <h1>Upscale jobs</h1>
+  <p class="lede">
+    Operator-initiated upscale batches, most recent first. Live
+    batches show their counters as they progress; finished and
+    failed batches stay in the list for audit until the table caps
+    out (last 100 rows).
+  </p>
+
+  <div class="jobs-meta panel" id="jobs-throughput-panel" hidden>
+    <h2>Throughput</h2>
+    <p>
+      <strong id="jobs-throughput-rate">—</strong> jobs / hour ·
+      ETA <strong id="jobs-throughput-eta">—</strong>
+      <span class="hint" id="jobs-throughput-samples"></span>
+    </p>
+  </div>
+
+  <div class="panel">
+    <table class="rows" id="jobs-table">
+      <thead>
+        <tr>
+          <th>Status</th>
+          <th>Scope</th>
+          <th>Target</th>
+          <th class="num">Done</th>
+          <th class="num">Failed</th>
+          <th class="num">Total</th>
+          <th>Updated</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="jobs-body">
+        <tr><td colspan="8"><em>Loading…</em></td></tr>
+      </tbody>
+    </table>
+    <p id="jobs-error" class="error" hidden role="alert"></p>
+  </div>
+</section>
+{{end}}

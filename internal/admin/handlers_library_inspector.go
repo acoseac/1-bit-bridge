@@ -1,0 +1,173 @@
+// Library Inspector admin endpoints (v1.3 operator-driven upscale).
+// The admin web UI's "Library Inspector" page consumes these:
+//
+//   - GET /api/library/browse                (PR 2 — folder tree + rollup)
+//   - GET /api/library/browse-projection     (PR 2 — pre-flight)
+//   - POST /api/upscale/batch                (PR 4 — trigger a batch)
+//   - GET /api/upscale/batches               (PR 4 — Jobs page list)
+//   - DELETE /api/upscale/batches/{id}       (PR 4 — Cancel)
+//   - PATCH /api/upscale/target              (PR 4 — Settings target picker)
+//
+// All loopback-only (enforced upstream at the listener layer). The
+// Submit / Cancel / list handlers proxy through to the
+// `AdminBatchCoordinator` deps closure so the admin package stays
+// decoupled from internal/transcode.
+
+package admin
+
+import (
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strconv"
+)
+
+// adminBatchSubmitRequest is the JSON shape POST /api/upscale/batch
+// accepts. Optional `targetRate` / `targetBits` fall back to the
+// scan_state-stored admin Settings.
+type adminBatchSubmitRequest struct {
+	Path       string `json:"path"`
+	TargetRate int    `json:"targetRate,omitempty"`
+	TargetBits int    `json:"targetBits,omitempty"`
+}
+
+// apiUpscaleBatchSubmit handles POST /api/upscale/batch.
+func (s *Server) apiUpscaleBatchSubmit(w http.ResponseWriter, r *http.Request) {
+	if s.deps.BatchCoordinator == nil {
+		writeError(w, http.StatusServiceUnavailable, "upscale-disabled",
+			"upscaling is not enabled on this bridge")
+		return
+	}
+	defer r.Body.Close()
+	var req adminBatchSubmitRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, adminMaxBodyBytes)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad-json", err.Error())
+		return
+	}
+	res, err := s.deps.BatchCoordinator.Submit(req.Path, req.TargetRate, req.TargetBits)
+	if err != nil {
+		var dskErr *AdminBatchInsufficientDiskSpace
+		if errors.As(err, &dskErr) {
+			// 507 Insufficient Storage — well-defined HTTP semantics
+			// for "the request would consume more disk than is
+			// available." JSON body carries the numbers so the UI
+			// can render the projection without re-running it.
+			writeJSON(w, http.StatusInsufficientStorage, map[string]any{
+				"error":          "insufficient_disk_space",
+				"projectedBytes": dskErr.ProjectedBytes,
+				"requiredBytes":  dskErr.RequiredBytes,
+				"availableBytes": dskErr.AvailableBytes,
+			})
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "submit-failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, res)
+}
+
+// apiUpscaleBatchList handles GET /api/upscale/batches?limit=N.
+func (s *Server) apiUpscaleBatchList(w http.ResponseWriter, r *http.Request) {
+	if s.deps.BatchCoordinator == nil {
+		writeError(w, http.StatusServiceUnavailable, "upscale-disabled",
+			"upscaling is not enabled on this bridge")
+		return
+	}
+	limit := 100
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 500 {
+			limit = n
+		}
+	}
+	rows, err := s.deps.BatchCoordinator.ListBatches(limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "list-failed", err.Error())
+		return
+	}
+	tp := s.deps.BatchCoordinator.Throughput()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"batches":    rows,
+		"throughput": tp,
+	})
+}
+
+// apiUpscaleBatchCancel handles DELETE /api/upscale/batches/{id}.
+func (s *Server) apiUpscaleBatchCancel(w http.ResponseWriter, r *http.Request) {
+	if s.deps.BatchCoordinator == nil {
+		writeError(w, http.StatusServiceUnavailable, "upscale-disabled",
+			"upscaling is not enabled on this bridge")
+		return
+	}
+	idStr := r.PathValue("id")
+	if idStr == "" {
+		writeError(w, http.StatusBadRequest, "bad-request", "missing batch id")
+		return
+	}
+	if err := s.deps.BatchCoordinator.Cancel(idStr); err != nil {
+		writeError(w, http.StatusInternalServerError, "cancel-failed", err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// adminUpscaleTargetRequest is the JSON shape PATCH
+// /api/upscale/target accepts.
+type adminUpscaleTargetRequest struct {
+	TargetRate int `json:"targetRate"`
+	TargetBits int `json:"targetBits"`
+}
+
+// apiUpscaleTargetGet handles GET /api/upscale/target.
+func (s *Server) apiUpscaleTargetGet(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Manifest == nil {
+		writeError(w, http.StatusServiceUnavailable, "no-manifest",
+			"manifest store is not configured")
+		return
+	}
+	rate, bits, err := s.deps.Manifest.GetUpscaleTarget()
+	if err != nil {
+		// Surface unseeded state as the YAML bootstrap default —
+		// reflects what the next Coordinator.Submit will use, so
+		// the operator's view matches reality before any explicit
+		// PATCH.
+		rate = s.deps.Cfg.Upscale.EffectiveBootstrapTargetRate()
+		bits = s.deps.Cfg.Upscale.EffectiveBootstrapTargetBits()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"targetRate": rate,
+		"targetBits": bits,
+	})
+}
+
+// apiUpscaleTargetPatch handles PATCH /api/upscale/target.
+func (s *Server) apiUpscaleTargetPatch(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Manifest == nil {
+		writeError(w, http.StatusServiceUnavailable, "no-manifest",
+			"manifest store is not configured")
+		return
+	}
+	defer r.Body.Close()
+	var req adminUpscaleTargetRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, adminMaxBodyBytes)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad-json", err.Error())
+		return
+	}
+	if err := s.deps.Manifest.SetUpscaleTarget(req.TargetRate, req.TargetBits); err != nil {
+		writeError(w, http.StatusBadRequest, "bad-target", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"targetRate": req.TargetRate,
+		"targetBits": req.TargetBits,
+	})
+}
+
+// pageLibraryInspector renders the Library Inspector HTML.
+func (s *Server) pageLibraryInspector(w http.ResponseWriter, r *http.Request) {
+	s.renderPage(w, "library_inspector", nil)
+}
+
+// pageJobs renders the Jobs page HTML.
+func (s *Server) pageJobs(w http.ResponseWriter, r *http.Request) {
+	s.renderPage(w, "jobs", nil)
+}
