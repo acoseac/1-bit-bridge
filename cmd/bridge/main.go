@@ -27,6 +27,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/mattn/go-isatty"
 
 	"github.com/acoseac/1-bit-bridge/internal/admin"
@@ -200,6 +201,97 @@ func (a *upscaleEnqueuerAdapter) EnqueueOne(libraryRelativePath string) error {
 		return api.ErrUpscaleSourceMissing
 	default:
 		return enqueueErr
+	}
+}
+
+// upscaleBatchCoordinatorAdapter implements api.BatchCoordinator
+// over a *transcode.Coordinator. Translates between the two
+// packages' equivalent value types (SubmitResult, ThroughputSnapshot,
+// UpscaleBatchRow → BatchSubmitResult, BatchThroughput, BatchRow)
+// and injects the bridge-wired `outputDir` so the api package
+// stays free of that concern. Mirrors the upscaleEnqueuerAdapter
+// shape.
+type upscaleBatchCoordinatorAdapter struct {
+	coord     *transcode.Coordinator
+	store     *manifest.Store
+	dataDir   string
+	outputDir string
+}
+
+func (a *upscaleBatchCoordinatorAdapter) Submit(ctx context.Context, libraryRelPath string, targetRate, targetBits int) (api.BatchSubmitResult, error) {
+	// Resolve the active target from scan_state when the caller
+	// didn't override. Coordinator.Submit validates the resolved
+	// values and returns an error on out-of-range.
+	if targetRate == 0 || targetBits == 0 {
+		rate, bits, err := a.store.GetUpscaleTarget()
+		if err == nil {
+			if targetRate == 0 {
+				targetRate = rate
+			}
+			if targetBits == 0 {
+				targetBits = bits
+			}
+		}
+	}
+	res, err := a.coord.Submit(ctx, libraryRelPath, targetRate, targetBits, a.outputDir)
+	if err != nil {
+		var dskErr *transcode.InsufficientDiskSpaceError
+		if errors.As(err, &dskErr) {
+			return api.BatchSubmitResult{}, &api.BatchInsufficientDiskSpace{
+				ProjectedBytes: dskErr.ProjectedBytes,
+				RequiredBytes:  dskErr.RequiredBytes,
+				AvailableBytes: dskErr.AvailableBytes,
+			}
+		}
+		return api.BatchSubmitResult{}, err
+	}
+	return api.BatchSubmitResult{
+		BatchID:            res.BatchID.String(),
+		Path:               res.Path,
+		TargetRate:         res.TargetRate,
+		TargetBits:         res.TargetBits,
+		TotalFiles:         res.TotalFiles,
+		AlreadyCovered:     res.AlreadyCovered,
+		ProjectedSizeBytes: res.ProjectedSizeBytes,
+		AvailableBytes:     res.AvailableBytes,
+		EnqueuedCount:      res.EnqueuedCount,
+	}, nil
+}
+
+func (a *upscaleBatchCoordinatorAdapter) Cancel(id uuid.UUID) error {
+	return a.coord.Cancel(id)
+}
+
+func (a *upscaleBatchCoordinatorAdapter) ListBatches(limit int) ([]api.BatchRow, error) {
+	rows, err := a.store.ListUpscaleBatches(limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]api.BatchRow, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, api.BatchRow{
+			ID:             r.ID.String(),
+			Path:           r.Path,
+			TargetRate:     r.TargetRate,
+			TargetBits:     r.TargetBits,
+			Status:         r.Status,
+			TotalFiles:     r.TotalFiles,
+			ProcessedFiles: r.ProcessedFiles,
+			FailedFiles:    r.FailedFiles,
+			Error:          r.Error,
+			CreatedAt:      r.CreatedAt,
+			UpdatedAt:      r.UpdatedAt,
+		})
+	}
+	return out, nil
+}
+
+func (a *upscaleBatchCoordinatorAdapter) Throughput() api.BatchThroughput {
+	t := a.coord.Throughput()
+	return api.BatchThroughput{
+		JobsPerHour: t.JobsPerHour,
+		EtaSeconds:  t.EtaSeconds,
+		Samples:     t.Samples,
 	}
 }
 
@@ -1077,14 +1169,47 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// httpSrv.Shutdown completes, so accepting POST /v1/upscale
 	// can't race the pool teardown.
 	var upscalePool *transcode.Pool
+	var upscaleCoordinator *transcode.Coordinator
 	if upscaleActive {
 		upscalePool = transcode.NewPool(manifestStore, cfg.Upscale.EffectiveWorkers(), cfg.Upscale.EffectiveQueueCap())
 		defer upscalePool.Stop()
+		// v1.3 Coordinator wraps the Pool with per-batch tracking.
+		// `RecoverInterruptedBatches` runs synchronously inside
+		// NewCoordinator — any rows left in pending/running from a
+		// crash mid-batch transition to `interrupted` BEFORE Submit
+		// is reachable. The publish closure is wired below after
+		// the SSE broker handle is in scope; Pool callbacks are
+		// wired alongside.
+		var err error
+		upscaleCoordinator, err = transcode.NewCoordinator(upscalePool, manifestStore, cfg.DataDir, nil)
+		if err != nil {
+			fmt.Fprintf(stderr, "upscale coordinator: %v\n", err)
+			return 1
+		}
+		// Seed the DB-backed target settings from the YAML bootstrap
+		// on first run. Once seeded, admin Settings edits become
+		// authoritative; YAML stays the bootstrap-only path.
+		if _, _, err := manifestStore.GetUpscaleTarget(); err != nil {
+			if errors.Is(err, manifest.ErrUpscaleTargetUnset) {
+				rate := cfg.Upscale.EffectiveBootstrapTargetRate()
+				bits := cfg.Upscale.EffectiveBootstrapTargetBits()
+				if seedErr := manifestStore.SetUpscaleTarget(rate, bits); seedErr != nil {
+					fmt.Fprintf(stderr, "seed upscale target: %v\n", seedErr)
+					return 1
+				}
+			}
+		}
 		apiSrv.WithUpscaleEnqueuer(&upscaleEnqueuerAdapter{
 			pool:      upscalePool,
 			store:     manifestStore,
 			resolver:  apiSrv.Resolver(),
 			cfg:       cfg,
+			outputDir: filepath.Join(cfg.DataDir, "transcoded"),
+		})
+		apiSrv.WithBatchCoordinator(&upscaleBatchCoordinatorAdapter{
+			coord:     upscaleCoordinator,
+			store:     manifestStore,
+			dataDir:   cfg.DataDir,
 			outputDir: filepath.Join(cfg.DataDir, "transcoded"),
 		})
 	}
@@ -1138,6 +1263,15 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		upscalePool.SetOnStateChange(func() {
 			broker.Publish("upscale.stats", upscaleStats.UpscaleStatsSnapshot())
 		})
+		// Wire the Coordinator's SSE publish closure now that the
+		// broker is in scope. Coordinator was constructed earlier
+		// (with publish=nil) to keep `RecoverInterruptedBatches`
+		// running BEFORE we accept any pool callbacks.
+		if upscaleCoordinator != nil {
+			upscaleCoordinator.SetPublish(func(evt transcode.BatchProgressEvent) {
+				broker.Publish("upscale.batch", evt)
+			})
+		}
 		// Per-job completion fires after UpsertVariant commits. The
 		// pool passes primitives so it never imports the api package;
 		// the closure builds the typed wire shape here. Topic name is
@@ -1146,7 +1280,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// the "upscaleCompleteEvents" capability flag advertised in
 		// /v1/health, so pre-feature iOS clients won't observe this
 		// event yet.
-		upscalePool.SetOnJobComplete(func(path, variantID string, sampleRate, bitsPerSample int, completedAt time.Time) {
+		upscalePool.SetOnJobComplete(func(path, variantID string, sampleRate, bitsPerSample int, batchID uuid.UUID, completedAt time.Time) {
 			broker.Publish("upscale.complete", api.UpscaleCompleteEvent{
 				Path:          path,
 				VariantID:     variantID,
@@ -1154,6 +1288,23 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 				BitsPerSample: bitsPerSample,
 				CompletedAt:   completedAt,
 			})
+			// v1.3 batch attribution: forward to the Coordinator's
+			// callback so the owning `upscale_batches` row's
+			// `processed_files` counter advances. The Coordinator
+			// no-ops on zero batchID (legacy per-track jobs from the
+			// pre-v1.3 `POST /v1/upscale` path).
+			if upscaleCoordinator != nil {
+				upscaleCoordinator.OnJobComplete(path, variantID, sampleRate, bitsPerSample, batchID, completedAt)
+			}
+		})
+		// v1.3 per-job failure callback. Used by the Coordinator to
+		// bump `failed_files` on the owning batch's row AND surface
+		// the redacted error string to the admin Jobs page via the
+		// `upscale.batch` SSE event.
+		upscalePool.SetOnJobFailed(func(path, variantID, errMsg string, durationSeconds float64, batchID uuid.UUID, failedAt time.Time) {
+			if upscaleCoordinator != nil {
+				upscaleCoordinator.OnJobFailed(path, variantID, errMsg, durationSeconds, batchID, failedAt)
+			}
 		})
 	}
 

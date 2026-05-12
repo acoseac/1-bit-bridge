@@ -37,6 +37,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/logging"
+	"github.com/google/uuid"
 )
 
 var logger = logging.Component("transcode")
@@ -94,6 +95,16 @@ type JobSpec struct {
 	TargetBits       int // 16/24/32
 	Quality          Quality
 	OutputDir        string // <dataDir>/transcoded
+
+	// BatchID groups this JobSpec into one operator-initiated batch
+	// (v1.3 Coordinator). The zero-value uuid.UUID means the job was
+	// submitted outside the batch path — legacy `POST /v1/upscale`
+	// single-track requests and the `bridge upscale` CLI both leave
+	// it zero. The Coordinator stamps it at Submit time; pool
+	// callbacks (onJobComplete / onJobFailed) propagate it back so
+	// the coordinator can attribute completion / failure to the
+	// right `upscale_batches` row without a path-to-batch lookup.
+	BatchID uuid.UUID
 }
 
 // VariantID returns the opaque identifier that uniquely names this

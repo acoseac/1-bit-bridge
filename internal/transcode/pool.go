@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
+	"github.com/google/uuid"
 )
 
 // defaultJobTimeout caps a single transcode invocation. A typical
@@ -115,7 +117,28 @@ type Pool struct {
 	// ordering. `publisherWG` ensures every buffered event is
 	// drained before Stop returns.
 	jobCompleteMu sync.RWMutex
-	onJobComplete func(path, variantID string, sampleRate, bitsPerSample int, completedAt time.Time)
+	onJobComplete func(path, variantID string, sampleRate, bitsPerSample int, batchID uuid.UUID, completedAt time.Time)
+
+	// onJobFailed fires once per job that errored (sox failure, store
+	// write failure, per-job timeout, panic-recovery). The Coordinator
+	// (v1.3 batch.go) consumes this to bump `failed_files` on the
+	// `upscale_batches` row keyed by batchID. Pre-existing
+	// `onStateChange` carries only counter snapshots — without
+	// per-job attribution the Coordinator cannot tell which batch
+	// owned a failure.
+	//
+	// Threading model mirrors `onJobComplete`: invoked on the SINGLE
+	// long-lived publisher goroutine (`runPublisher`) as it drains
+	// `jobFailedChan`. Workers send via the BLOCKING `fireJobFailed`
+	// helper (buffered cap=2×workers, no drops) — failure events
+	// are NOT coalesce-able (each carries a unique path / errMsg the
+	// admin Jobs page needs). A full buffer briefly stalls the next
+	// worker send (correct backpressure: delaying the next sox job
+	// is better than losing a failure event). Same callback-side
+	// rules as onJobComplete — don't block forever, don't re-acquire
+	// p.mu, respect Stop() ordering.
+	jobFailedMu sync.RWMutex
+	onJobFailed func(path, variantID, errMsg string, durationSeconds float64, batchID uuid.UUID, failedAt time.Time)
 
 	// runner executes one transcode job under the supplied context.
 	// Defaults to RunSox in NewPool; tests inject a hang-until-ctx-
@@ -161,7 +184,14 @@ type Pool struct {
 	// bearing — see Stop's docstring.
 	stateChangeChan chan struct{}
 	jobCompleteChan chan jobCompleteEvent
-	publisherWG     sync.WaitGroup
+	// jobFailedChan carries per-job failure events to the publisher.
+	// Same cap=2×workers fidelity buffer as jobCompleteChan; same
+	// blocking-send semantics. Pre-PR-3 the failure path only fired
+	// `stateChange` (counter snapshot, no per-job attribution); the
+	// v1.3 Coordinator needs the path + errMsg + batchID to mark
+	// the right `upscale_batches.failed_files` slot.
+	jobFailedChan chan jobFailedEvent
+	publisherWG   sync.WaitGroup
 }
 
 // poolJob is one transcode unit on the Pool's queue. Carries the
@@ -188,6 +218,31 @@ type jobCompleteEvent struct {
 	sampleRate    int
 	bitsPerSample int
 	completedAt   time.Time
+	// batchID attributes this completion to one operator-initiated
+	// batch (v1.3). Zero-value uuid.UUID for jobs submitted outside
+	// the batch path — the Coordinator filters those out before
+	// updating counters.
+	batchID uuid.UUID
+}
+
+// jobFailedEvent is the per-batch failure-attribution payload. Fires
+// once per job that failed sox / store-write / per-job timeout /
+// panic-recovery. Mirrors jobCompleteEvent's batch-aware shape so
+// the Coordinator can bump `failed_files` on the right row.
+//
+// `errMsg` is the redacted operator-facing reason (sox stderr, the
+// store-write error string, or `"sox timed out after Ns"`). Multi-
+// line tolerated; the Coordinator caps at ~4 KiB before writing to
+// `upscale_batches.error`. `durationSeconds` feeds the rolling
+// throughput average; non-zero for legitimate runs, ~0 for fast-
+// fail paths (panic-recovery, closed-pool short-circuit).
+type jobFailedEvent struct {
+	path            string
+	variantID       string
+	errMsg          string
+	durationSeconds float64
+	failedAt        time.Time
+	batchID         uuid.UUID
 }
 
 // ErrQueueFull is returned by Enqueue when the pending-job channel
@@ -233,6 +288,7 @@ func NewPool(store *manifest.Store, workers, queueCap int) *Pool {
 		// channel fields.
 		stateChangeChan: make(chan struct{}, 1),
 		jobCompleteChan: make(chan jobCompleteEvent, 2*workers),
+		jobFailedChan:   make(chan jobFailedEvent, 2*workers),
 	}
 	for i := 0; i < workers; i++ {
 		p.wg.Add(1)
@@ -331,7 +387,13 @@ func (p *Pool) SetOnStateChange(fn func()) {
 // under the jobCompleteMu read lock so a concurrent SetOnJobComplete
 // can swap it without racing. Returns nil when not wired — caller
 // checks before invoking. Mirrors notifyStateChangeFn.
-func (p *Pool) notifyJobCompleteFn() func(string, string, int, int, time.Time) {
+//
+// PR 3 (v1.3) extended the signature with `batchID` so the publisher
+// can attribute the completion to the right `upscale_batches` row.
+// Pre-batch callers (legacy `POST /v1/upscale`, `bridge upscale`
+// CLI) leave the field at zero-value uuid.UUID; the Coordinator
+// filters those out before updating counters.
+func (p *Pool) notifyJobCompleteFn() func(string, string, int, int, uuid.UUID, time.Time) {
 	p.jobCompleteMu.RLock()
 	defer p.jobCompleteMu.RUnlock()
 	return p.onJobComplete
@@ -341,10 +403,32 @@ func (p *Pool) notifyJobCompleteFn() func(string, string, int, int, time.Time) {
 // (see Pool.onJobComplete docstring for ordering invariants). nil
 // disables notification. Set-once at cmd/bridge wiring time; race-
 // safe vs concurrent calls.
-func (p *Pool) SetOnJobComplete(fn func(path, variantID string, sampleRate, bitsPerSample int, completedAt time.Time)) {
+//
+// PR 3 (v1.3) extended the signature with `batchID`. Existing
+// consumers in cmd/bridge/main.go pass it through to the
+// Coordinator's job-complete handler; pre-v1.3 callers that don't
+// care about batch attribution can ignore the new parameter.
+func (p *Pool) SetOnJobComplete(fn func(path, variantID string, sampleRate, bitsPerSample int, batchID uuid.UUID, completedAt time.Time)) {
 	p.jobCompleteMu.Lock()
 	p.onJobComplete = fn
 	p.jobCompleteMu.Unlock()
+}
+
+// notifyJobFailedFn mirrors notifyJobCompleteFn for the failure side.
+// Returns nil when no callback is wired.
+func (p *Pool) notifyJobFailedFn() func(string, string, string, float64, uuid.UUID, time.Time) {
+	p.jobFailedMu.RLock()
+	defer p.jobFailedMu.RUnlock()
+	return p.onJobFailed
+}
+
+// SetOnJobFailed wires the per-job failure callback. nil disables.
+// See Pool.onJobFailed docstring for threading invariants. Set-once
+// at cmd/bridge wiring time alongside SetOnJobComplete.
+func (p *Pool) SetOnJobFailed(fn func(path, variantID, errMsg string, durationSeconds float64, batchID uuid.UUID, failedAt time.Time)) {
+	p.jobFailedMu.Lock()
+	p.onJobFailed = fn
+	p.jobFailedMu.Unlock()
 }
 
 // Stop signals the workers to drain the queue and exit. Blocks
@@ -390,6 +474,7 @@ func (p *Pool) Stop() {
 	// Workers are guaranteed exited; safe to close publisher inputs.
 	close(p.stateChangeChan)
 	close(p.jobCompleteChan)
+	close(p.jobFailedChan)
 	p.publisherWG.Wait()
 }
 
@@ -431,6 +516,19 @@ func (p *Pool) fireJobComplete(evt jobCompleteEvent) {
 	p.jobCompleteChan <- evt
 }
 
+// fireJobFailed mirrors fireJobComplete for the failure side. Same
+// blocking-send fidelity contract — failure events carry unique
+// path / errMsg / batchID that the Coordinator needs to mark the
+// right `upscale_batches.failed_files` slot AND surface the error
+// reason to the admin Jobs page.
+//
+// MUST NOT be called under p.mu (same reasoning as fireJobComplete).
+// Workers call this from processJob's failure branches after
+// releaseDedup.
+func (p *Pool) fireJobFailed(evt jobFailedEvent) {
+	p.jobFailedChan <- evt
+}
+
 // runPublisher is the single long-lived goroutine that consumes
 // stateChangeChan + jobCompleteChan and invokes the wired callbacks
 // synchronously. Replaces the prior pattern of one ephemeral
@@ -452,7 +550,8 @@ func (p *Pool) runPublisher() {
 	defer p.publisherWG.Done()
 	stateCh := (<-chan struct{})(p.stateChangeChan)
 	jobCh := (<-chan jobCompleteEvent)(p.jobCompleteChan)
-	for stateCh != nil || jobCh != nil {
+	failCh := (<-chan jobFailedEvent)(p.jobFailedChan)
+	for stateCh != nil || jobCh != nil || failCh != nil {
 		select {
 		case _, ok := <-stateCh:
 			if !ok {
@@ -468,7 +567,15 @@ func (p *Pool) runPublisher() {
 				continue
 			}
 			if fn := p.notifyJobCompleteFn(); fn != nil {
-				fn(evt.path, evt.variantID, evt.sampleRate, evt.bitsPerSample, evt.completedAt)
+				fn(evt.path, evt.variantID, evt.sampleRate, evt.bitsPerSample, evt.batchID, evt.completedAt)
+			}
+		case evt, ok := <-failCh:
+			if !ok {
+				failCh = nil
+				continue
+			}
+			if fn := p.notifyJobFailedFn(); fn != nil {
+				fn(evt.path, evt.variantID, evt.errMsg, evt.durationSeconds, evt.batchID, evt.failedAt)
 			}
 		}
 	}
@@ -541,6 +648,13 @@ func (p *Pool) workerLoop() {
 // the new per-job timeout branch (logged distinctly so operators
 // can tell a hung-sox kill from an internal sox failure).
 func (p *Pool) processJob(job poolJob) {
+	// `startedAt` feeds durationSeconds on every failure / completion
+	// path so the Coordinator's rolling-throughput average sees the
+	// wall-clock cost of each job regardless of which exit path is
+	// taken. Captured once before any I/O so panic-recovery has a
+	// meaningful value too.
+	startedAt := time.Now().UTC()
+
 	// Panic safety: a panic in p.runner (sox subprocess plumbing) or
 	// p.store.UpsertVariant (SQLite write) would otherwise (a) leak
 	// the (source, variant) dedup slot for the lifetime of the
@@ -577,6 +691,19 @@ func (p *Pool) processJob(job poolJob) {
 			// shutdown to match the runner-error branch's gate.
 			// (CodeRabbit + Gemini + Greptile concurring on PR #183.)
 			if !p.closed.Load() {
+				// Panic-recovery failure event — surfaces the
+				// recovered panic to the Coordinator so the
+				// containing batch's `failed_files` advances and
+				// the admin Jobs page renders the same outcome
+				// it does for sox / store failures.
+				p.fireJobFailed(jobFailedEvent{
+					path:            job.spec.SourceLibraryRel,
+					variantID:       job.spec.VariantID(),
+					errMsg:          "panic recovered in worker",
+					durationSeconds: time.Since(startedAt).Seconds(),
+					failedAt:        time.Now().UTC(),
+					batchID:         job.spec.BatchID,
+				})
 				p.fireStateChange()
 			}
 		}
@@ -619,6 +746,18 @@ func (p *Pool) processJob(job poolJob) {
 		// the success / store-failure branches which already
 		// fire post-release.
 		if !p.closed.Load() {
+			errMsg := redactSoxErr(err.Error())
+			if errors.Is(jobCtx.Err(), context.DeadlineExceeded) {
+				errMsg = "sox timed out after " + p.jobTimeout.String()
+			}
+			p.fireJobFailed(jobFailedEvent{
+				path:            job.spec.SourceLibraryRel,
+				variantID:       job.spec.VariantID(),
+				errMsg:          errMsg,
+				durationSeconds: time.Since(startedAt).Seconds(),
+				failedAt:        time.Now().UTC(),
+				batchID:         job.spec.BatchID,
+			})
 			p.fireStateChange()
 		}
 		return
@@ -654,6 +793,17 @@ func (p *Pool) processJob(job poolJob) {
 		_ = os.Remove(row.SidecarPath)
 		p.releaseDedup(job.dedup)
 		released = true
+		// Surface store-side failures to the Coordinator too —
+		// admin Jobs page distinguishes them from sox failures
+		// via the errMsg prefix.
+		p.fireJobFailed(jobFailedEvent{
+			path:            job.spec.SourceLibraryRel,
+			variantID:       job.spec.VariantID(),
+			errMsg:          "store variant: " + err.Error(),
+			durationSeconds: time.Since(startedAt).Seconds(),
+			failedAt:        time.Now().UTC(),
+			batchID:         job.spec.BatchID,
+		})
 		// Worker isn't stalled by the publisher's CountVariants
 		// DB query — Gemini high-severity review on PR #136. The
 		// publisher consumes asynchronously on its own goroutine.
@@ -679,8 +829,40 @@ func (p *Pool) processJob(job poolJob) {
 		sampleRate:    job.spec.TargetSampleRate,
 		bitsPerSample: job.spec.TargetBits,
 		completedAt:   completedAt,
+		batchID:       job.spec.BatchID,
 	})
 	p.fireStateChange()
+}
+
+// redactSoxErr strips absolute filesystem paths from sox stderr
+// before the error string lands in `upscale_batches.error` (read
+// by the admin Jobs page) and the SSE event payload. The bridge
+// privacy contract bans surfacing absolute library paths; the
+// library-relative path is already carried on the event's `path`
+// field, so the error message only needs the sox-internal reason
+// (codec mismatch, header corruption, etc.).
+//
+// Best-effort: looks for `<absPath>/<rel>` substrings and replaces
+// them with `<rel>`. If the redactor can't find a match it returns
+// the original — the admin Jobs page already shows raw sox stderr
+// today, so leaving an un-redacted path through is a regression on
+// no privacy worse than what ships pre-PR-3.
+func redactSoxErr(s string) string {
+	// Trim leading "exit status N: " prefixes the runner adds before
+	// sox stderr so the admin Jobs page surfaces the actual reason.
+	for _, prefix := range []string{"sox FAIL ", "sox WARN ", "sox: ", "exit status "} {
+		if strings.HasPrefix(s, prefix) {
+			s = strings.TrimPrefix(s, prefix)
+			break
+		}
+	}
+	// Cap at 4 KiB — runaway sox stderr (e.g. corrupt MP4 dumping
+	// hex into stderr) shouldn't bloat the upscale_batches row.
+	const maxErrBytes = 4096
+	if len(s) > maxErrBytes {
+		s = s[:maxErrBytes] + "…(truncated)"
+	}
+	return s
 }
 
 // releaseDedup drops the (source, variant) slot from the inflight
