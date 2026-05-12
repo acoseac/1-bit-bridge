@@ -20,6 +20,9 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
+	"github.com/acoseac/1-bit-bridge/internal/transcode"
 )
 
 // adminBatchSubmitRequest is the JSON shape POST /api/upscale/batch
@@ -130,10 +133,17 @@ func (s *Server) apiUpscaleTargetGet(w http.ResponseWriter, r *http.Request) {
 	}
 	rate, bits, err := s.deps.Manifest.GetUpscaleTarget()
 	if err != nil {
-		// Surface unseeded state as the YAML bootstrap default —
-		// reflects what the next Coordinator.Submit will use, so
-		// the operator's view matches reality before any explicit
-		// PATCH.
+		// `ErrUpscaleTargetUnset` is the legitimate "first run /
+		// pre-seed" case → surface YAML bootstrap defaults so the
+		// operator's view matches what `Coordinator.Submit` will
+		// use. Anything else (corrupt DB row, parse failure,
+		// SQLite I/O error) MUST surface as 500 so a real problem
+		// doesn't masquerade as default state. Per CodeRabbit
+		// major on PR #205 round 2.
+		if !errors.Is(err, manifest.ErrUpscaleTargetUnset) {
+			writeError(w, http.StatusInternalServerError, "read-target", err.Error())
+			return
+		}
 		rate = s.deps.Cfg.Upscale.EffectiveBootstrapTargetRate()
 		bits = s.deps.Cfg.Upscale.EffectiveBootstrapTargetBits()
 	}
@@ -167,8 +177,18 @@ func (s *Server) apiUpscaleTargetPatch(w http.ResponseWriter, r *http.Request) {
 }
 
 // pageLibraryInspector renders the Library Inspector HTML.
+//
+// `UpscaleStoragePath` is the absolute filesystem directory the
+// long-lived transcode pool writes converted sidecars to —
+// surfaced in the drawer alongside the "Free on data volume"
+// row so the operator can see WHERE the projected variants will
+// land before they hit "Upscale this scope." Always populated
+// regardless of whether the pool itself is running; mirrors
+// `/api/upscale/stats.storagePath`.
 func (s *Server) pageLibraryInspector(w http.ResponseWriter, r *http.Request) {
-	s.renderPage(w, "library_inspector", nil)
+	s.renderPage(w, "library_inspector", map[string]any{
+		"UpscaleStoragePath": transcode.OutputDirFor(s.deps.Cfg.DataDir),
+	})
 }
 
 // pageJobs renders the Jobs page HTML.

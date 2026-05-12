@@ -1618,22 +1618,42 @@ function inspectorRender(data) {
     const tr = document.createElement("tr");
     tr.dataset.kind = "folder";
     tr.dataset.path = f.path;
+    // Row split into three explicit affordances per the v1.3.1
+    // UX review: (a) folder name + counts is the click-target
+    // for "select to see upscale info" (the whole row before
+    // the action cell); (b) an explicit "Inspect" button on
+    // the right shows the action so operators don't have to
+    // guess "tap empty space"; (c) the folder name is plain
+    // text, not a blue link, so it doesn't compete visually
+    // with the action button; navigation INTO the folder
+    // happens via the chevron control alongside.
     tr.innerHTML = `
-      <td><a href="#" class="folder-link">📁 ${escapeHTML(f.name)}</a></td>
+      <td class="folder-cell">
+        <span class="folder-name">📁 ${escapeHTML(f.name)}</span>
+      </td>
       <td class="num">${f.trackCount}</td>
       <td class="num">${f.upscaledCount}</td>
       <td class="num">${humanBytes(f.totalSizeBytes)}</td>
+      <td class="folder-actions">
+        <button type="button" class="btn folder-action-inspect"
+          aria-label="Show upscale projection for ${escapeHTML(f.name)}">Inspect</button>
+        <button type="button" class="btn folder-action-open"
+          aria-label="Open ${escapeHTML(f.name)}">Open →</button>
+      </td>
     `;
-    tr.addEventListener("click", (e) => {
+    tr.querySelector(".folder-action-inspect").addEventListener("click", (e) => {
       e.preventDefault();
+      e.stopPropagation();
       inspectorSelectFolder(f);
-      // Double-click to navigate; single-click selects.
     });
-    tr.querySelector(".folder-link").addEventListener("click", (e) => {
+    tr.querySelector(".folder-action-open").addEventListener("click", (e) => {
       e.preventDefault();
       e.stopPropagation();
       inspectorNavigate(f.path);
     });
+    // Row click anywhere else also selects (cheap discoverability
+    // bonus — but the explicit buttons are the primary surface).
+    tr.addEventListener("click", () => inspectorSelectFolder(f));
     body.appendChild(tr);
   }
   for (const t of tracks) {
@@ -1646,6 +1666,7 @@ function inspectorRender(data) {
       <td class="num">${formatTrackQuality(t)}</td>
       <td class="num">${upscaled}</td>
       <td class="num">${humanBytes(t.sizeBytes)}</td>
+      <td class="folder-actions"></td>
     `;
     body.appendChild(tr);
   }
@@ -1682,8 +1703,18 @@ function inspectorResetDrawer() {
 }
 
 async function inspectorFetchProjection(path) {
+  // Race-guard: snapshot the path we were called with; bail out
+  // on any branch below if the user has since selected a
+  // different folder. Mirrors `inspectorNavigate`'s pattern.
+  // Per CodeRabbit major on PR #205 round 2.
+  const requested = path;
+  const stillCurrent = () =>
+    inspectorState.selection &&
+    inspectorState.selection.kind === "folder" &&
+    inspectorState.selection.row.path === requested;
   try {
     const res = await fetch(`/api/library/browse-projection?path=${encodeURIComponent(path)}`);
+    if (!stillCurrent()) return;
     if (res.status === 503) {
       document.getElementById("inspector-drawer-warning").hidden = false;
       document.getElementById("inspector-drawer-warning").textContent =
@@ -1694,6 +1725,7 @@ async function inspectorFetchProjection(path) {
       throw new Error(`HTTP ${res.status}`);
     }
     const data = await res.json();
+    if (!stillCurrent()) return;
     document.getElementById("inspector-drawer-projected").textContent =
       `${humanBytes(data.projectedSizeBytes)} (${data.projectedFiles} files)`;
     document.getElementById("inspector-drawer-free").textContent =
@@ -1703,20 +1735,37 @@ async function inspectorFetchProjection(path) {
     if (data.unknownFormatFiles > 0) {
       document.getElementById("inspector-drawer-unknown").hidden = false;
       document.getElementById("inspector-drawer-unknown").textContent =
-        `${data.unknownFormatFiles} tracks have unknown source format and will be skipped.`;
+        `${data.unknownFormatFiles} tracks here are in formats we can’t upscale (DSD, lossy, or unknown). They’ll be skipped.`;
     }
     if (data.wouldFit && data.projectedFiles > 0) {
       document.getElementById("inspector-upscale-btn").disabled = false;
     } else if (data.projectedFiles === 0) {
+      // Differentiate three states for clearer operator UX
+      // (per the screenshot review — original message
+      // "every eligible track already has a variant"
+      // misrepresents the unknown-format / no-eligible case).
       document.getElementById("inspector-drawer-warning").hidden = false;
-      document.getElementById("inspector-drawer-warning").textContent =
-        "Nothing to upscale here — every eligible track already has a variant at the active target.";
+      const total = data.alreadyCoveredFiles + data.unknownFormatFiles;
+      let msg;
+      if (data.alreadyCoveredFiles > 0 && data.unknownFormatFiles === 0) {
+        msg = "All eligible tracks already have an upscaled variant.";
+      } else if (data.alreadyCoveredFiles === 0 && data.unknownFormatFiles > 0) {
+        msg = "No tracks here support upscaling (DSD or unknown source format).";
+      } else if (data.alreadyCoveredFiles > 0 && data.unknownFormatFiles > 0) {
+        msg = `${data.alreadyCoveredFiles} tracks already upscaled, ${data.unknownFormatFiles} can’t be upscaled — nothing eligible left.`;
+      } else if (total === 0) {
+        msg = "No tracks here.";
+      } else {
+        msg = "Nothing eligible to upscale.";
+      }
+      document.getElementById("inspector-drawer-warning").textContent = msg;
     } else {
       document.getElementById("inspector-drawer-warning").hidden = false;
       document.getElementById("inspector-drawer-warning").textContent =
         `Not enough free space: needs ${humanBytes(data.requiredBytesWithMargin)} (incl. 10% safety margin), only ${humanBytes(data.availableBytes)} available on the bridge data volume.`;
     }
   } catch (err) {
+    if (!stillCurrent()) return;
     document.getElementById("inspector-drawer-warning").hidden = false;
     document.getElementById("inspector-drawer-warning").textContent =
       `Couldn’t fetch projection: ${err.message}`;
@@ -1740,6 +1789,15 @@ async function inspectorSubmitBatch() {
       const data = await res.json();
       status.textContent =
         `Refused: needs ${humanBytes(data.requiredBytes)}, only ${humanBytes(data.availableBytes)} available.`;
+      btn.disabled = false;
+      return;
+    }
+    if (res.status === 503) {
+      // Bridge upscale feature disabled mid-flight (operator
+      // toggled it off after the Inspector loaded). Surface a
+      // clear message rather than the generic HTTP fall-through.
+      // Per CodeRabbit minor on PR #205 round 2.
+      status.textContent = "Upscale feature is disabled on this bridge.";
       btn.disabled = false;
       return;
     }
@@ -1793,10 +1851,16 @@ function formatTrackQuality(t) {
 // =============================================================
 
 function initJobs() {
-  jobsRefresh();
-  // Light polling — 5 s during job-active periods is plenty for
-  // the operator surface. SSE upgrade is a future enhancement.
-  setInterval(jobsRefresh, 5000);
+  // setTimeout chain (not setInterval) so a slow response can't
+  // build up overlapping in-flight requests when the bridge is
+  // under load — the next poll is scheduled only AFTER the
+  // current one resolves. Per CodeRabbit medium on PR #205
+  // round 2.
+  const tick = async () => {
+    await jobsRefresh();
+    setTimeout(tick, 5000);
+  };
+  tick();
 }
 
 async function jobsRefresh() {
@@ -1823,6 +1887,11 @@ async function jobsRefresh() {
 function jobsRender(payload) {
   const rows = payload.batches || [];
   const tp = payload.throughput;
+  // Hide the panel + reset its fields when there isn't a fresh
+  // sample window. Pre-fix the panel stayed visible with stale
+  // values when a later poll yielded `samples < 3` (e.g., after
+  // the bridge restarted and the rolling window emptied). Per
+  // CodeRabbit minor on PR #205 round 2.
   if (tp && tp.samples >= 3) {
     document.getElementById("jobs-throughput-panel").hidden = false;
     document.getElementById("jobs-throughput-rate").textContent =
@@ -1831,6 +1900,11 @@ function jobsRender(payload) {
       formatDuration(tp.etaSeconds);
     document.getElementById("jobs-throughput-samples").textContent =
       ` · based on ${tp.samples} recent jobs`;
+  } else {
+    document.getElementById("jobs-throughput-panel").hidden = true;
+    document.getElementById("jobs-throughput-rate").textContent = "—";
+    document.getElementById("jobs-throughput-eta").textContent = "—";
+    document.getElementById("jobs-throughput-samples").textContent = "";
   }
   const body = document.getElementById("jobs-body");
   if (rows.length === 0) {

@@ -50,10 +50,11 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
 )
 
-// transcodedDirName lives under cfg.DataDir. Centralised here so a
-// future relocation (e.g. operator-controllable storage path)
-// touches one constant.
-const transcodedDirName = "transcoded"
+// transcodedDirName lives under cfg.DataDir. The literal name is
+// owned by `transcode.OutputDirSubdir` (single source of truth so
+// the CLI's `--gc` walker and the runtime pool's `OutputDir` can't
+// drift); the alias below stays for in-package readability.
+const transcodedDirName = transcode.OutputDirSubdir
 
 func upscaleCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("upscale", flag.ContinueOnError)

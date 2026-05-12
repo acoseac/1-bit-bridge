@@ -76,6 +76,23 @@ const (
 	QualityMedium   Quality = "medium"    // rate -m dither -s — sanity / ad-hoc
 )
 
+// OutputDirSubdir is the fixed subdirectory under `cfg.DataDir`
+// where transcoded sidecar files land. Single source of truth so
+// cmd/bridge (which wires the runtime pool's `OutputDir`) and the
+// admin handlers (which surface "Stored at <path>" to operators)
+// can't drift. Changing this value rehouses the cache; existing
+// rows in `track_variants.sidecar_path` continue to point at the
+// old location until they're rewritten by `bridge upscale --gc`.
+const OutputDirSubdir = "transcoded"
+
+// OutputDirFor returns the absolute on-disk directory where the
+// pool writes converted sidecars given the bridge's `dataDir`.
+// Mirrors the path the runtime pool is configured with at startup;
+// safe to call from any goroutine (pure path arithmetic).
+func OutputDirFor(dataDir string) string {
+	return filepath.Join(dataDir, OutputDirSubdir)
+}
+
 // JobSpec describes one source-to-sidecar conversion. Constructed
 // by the CLI / handler from a (Track, target params) pair; passed
 // to RunSox.

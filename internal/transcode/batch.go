@@ -262,10 +262,30 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 		if t.SampleRate <= 0 || t.BitsPerSample <= 0 {
 			continue
 		}
-		// Refuse to downsample (target ≤ source). Sox would emit
-		// silence-with-warnings; we surface as filter-out so the
-		// operator sees an accurate `enqueued` count.
-		if t.SampleRate >= targetRate && t.BitsPerSample >= targetBits {
+		// Eligibility for upscaling. The full skip predicate
+		// covers three cases:
+		//
+		//   (1) source rate strictly > target rate — sox would
+		//       downsample rate (e.g., 384 → 192). Pre-fix gate
+		//       used `&&` here and missed this when bits would
+		//       have upsampled (384/24 → 192/32 leaked through).
+		//       Per CodeRabbit major on PR #204 round 2.
+		//   (2) source bits strictly > target bits — sox would
+		//       downsample bit depth (e.g., 32 → 24).
+		//   (3) both axes equal to target — no-op pass; sox would
+		//       produce a bit-identical variant at the same
+		//       (rate, bits) as the source. UpsertVariant dedup
+		//       catches this AFTER the run but skipping at the
+		//       gate avoids the wasted CPU.
+		//
+		// Strict-greater on each axis (not `>=`) is load-bearing:
+		// it lets same-on-one + upsample-the-other through —
+		// 44.1/24 → 192/24 (rate-only upsample) and 192/16 → 192/24
+		// (bit-only upsample) are both legitimate batches.
+		if t.SampleRate > targetRate || t.BitsPerSample > targetBits {
+			continue
+		}
+		if t.SampleRate == targetRate && t.BitsPerSample == targetBits {
 			continue
 		}
 		// Resolve abs path BEFORE projecting size, so a resolver
@@ -383,6 +403,11 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 				"path", ca.path,
 				"err", err)
 			c.mu.Lock()
+			var (
+				rowSnapshot    manifest.UpscaleBatchRow
+				becameTerminal bool
+				stateModified  bool
+			)
 			if st, ok := c.liveBatches[batchID]; ok {
 				// Drop the never-enqueued tail from RemainingIDs.
 				// (Includes the current `ca.path` since we didn't
@@ -401,8 +426,35 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 				// count alone.
 				st.Row.TotalFiles -= len(cands) - enqueued
 				st.Row.Error = "partial enqueue: " + err.Error()
+				st.Row.UpdatedAt = c.clock().UnixNano()
+				// If nothing was enqueued, no callback will ever
+				// arrive — transition to a terminal state now so
+				// the row doesn't sit `running` forever. Per
+				// CodeRabbit major on PR #204 round 2.
+				if len(st.RemainingIDs) == 0 {
+					st.Row.Status = "failed"
+					becameTerminal = true
+				}
+				rowSnapshot = st.Row
+				stateModified = true
+				if becameTerminal {
+					delete(c.liveBatches, batchID)
+				}
 			}
 			c.mu.Unlock()
+			// Persist the adjusted row OUTSIDE the lock — without
+			// the write, the truncation lives only in
+			// `liveBatches`. If the first enqueue fails (nothing
+			// to drive a future callback), the DB row stays
+			// `running` with the original totals forever.
+			if stateModified {
+				if writeErr := c.store.UpdateUpscaleBatchProgress(rowSnapshot); writeErr != nil {
+					c.logger.Warn("submit: persist truncated batch",
+						"batchID", batchID.String(),
+						"err", writeErr)
+				}
+				c.publishProgressRow(rowSnapshot)
+			}
 			break
 		}
 		enqueued++

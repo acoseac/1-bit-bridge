@@ -651,7 +651,18 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// land any variants. Mirrors how `resp.UpscaleEnabled` already
 	// gates the feature visibility. (Greptile P1 on PR #187.)
 	if s.upscaleEnabled {
-		resp.Features = []string{"operatorDrivenUpscale", "upscaleCompleteEvents", "variantBumpsIndex"}
+		// `operatorDrivenUpscale` requires BOTH the upscale switch
+		// AND a wired `batchCoordinator`. iOS keys off this flag to
+		// hide the legacy wand UX — if we advertise it without the
+		// coordinator, iOS hides its surface and the
+		// /v1/upscale/batch endpoints surface 503 with nothing to
+		// fall back to. Two-condition gate avoids that gap. Per
+		// CodeRabbit major on PR #204 round 2.
+		if s.batchCoordinator != nil {
+			resp.Features = []string{"operatorDrivenUpscale", "upscaleCompleteEvents", "variantBumpsIndex"}
+		} else {
+			resp.Features = []string{"upscaleCompleteEvents", "variantBumpsIndex"}
+		}
 	} else {
 		resp.Features = []string{"variantBumpsIndex"}
 	}
