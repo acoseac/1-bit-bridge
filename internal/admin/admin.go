@@ -190,8 +190,13 @@ type Deps struct {
 // decoupling pattern. The methods mirror `api.BatchCoordinator`
 // but use admin-package wire shapes (`AdminBatchRow`, etc.) so
 // the admin package stays free of internal/api.
+//
+// `Submit` takes a `context.Context` so the HTTP request's
+// cancellation propagates through to the coordinator and any
+// downstream listings the coordinator does internally
+// (manifest projection walk). Per Gemini high on PR #202.
 type AdminBatchCoordinator interface {
-	Submit(libraryRelPath string, targetRate, targetBits int) (AdminBatchSubmitResult, error)
+	Submit(ctx context.Context, libraryRelPath string, targetRate, targetBits int) (AdminBatchSubmitResult, error)
 	Cancel(idHex string) error
 	ListBatches(limit int) ([]AdminBatchRow, error)
 	Throughput() AdminBatchThroughput
@@ -215,18 +220,25 @@ type AdminBatchSubmitResult struct {
 
 // AdminBatchRow is the per-row wire shape returned by the admin
 // list endpoint (Jobs page consumer).
+//
+// `CreatedAt` / `UpdatedAt` are `time.Time` (RFC 3339-encoded on
+// the wire) rather than int64 nanoseconds. JavaScript's Number
+// type can't safely represent 64-bit ns timestamps — values above
+// 2^53 round, causing the Jobs page to render a date a few
+// hundred milliseconds off. The string form parses safely via
+// `new Date(...)`. Per Gemini high on PR #202.
 type AdminBatchRow struct {
-	ID             string `json:"id"`
-	Path           string `json:"path"`
-	TargetRate     int    `json:"targetRate"`
-	TargetBits     int    `json:"targetBits"`
-	Status         string `json:"status"`
-	TotalFiles     int    `json:"totalFiles"`
-	ProcessedFiles int    `json:"processedFiles"`
-	FailedFiles    int    `json:"failedFiles"`
-	Error          string `json:"error,omitempty"`
-	CreatedAt      int64  `json:"createdAt"`
-	UpdatedAt      int64  `json:"updatedAt"`
+	ID             string    `json:"id"`
+	Path           string    `json:"path"`
+	TargetRate     int       `json:"targetRate"`
+	TargetBits     int       `json:"targetBits"`
+	Status         string    `json:"status"`
+	TotalFiles     int       `json:"totalFiles"`
+	ProcessedFiles int       `json:"processedFiles"`
+	FailedFiles    int       `json:"failedFiles"`
+	Error          string    `json:"error,omitempty"`
+	CreatedAt      time.Time `json:"createdAt"`
+	UpdatedAt      time.Time `json:"updatedAt"`
 }
 
 // AdminBatchThroughput is the wire shape returned by the

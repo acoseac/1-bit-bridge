@@ -1549,12 +1549,26 @@ async function inspectorNavigate(path) {
     "Loading…";
   try {
     const res = await fetch(`/api/library/browse?path=${encodeURIComponent(path)}`);
+    // Race guard: a slow response from an earlier navigation must
+    // not overwrite the newer navigation's content. Compare against
+    // the live `inspectorState.path` set synchronously at the top
+    // of this call; subsequent navigations bump it before their
+    // own fetch awaits. Per Gemini medium on PR #202.
+    if (inspectorState.path !== path) {
+      return;
+    }
     if (!res.ok) {
       throw new Error(`browse: HTTP ${res.status}`);
     }
     const data = await res.json();
+    if (inspectorState.path !== path) {
+      return;
+    }
     inspectorRender(data);
   } catch (err) {
+    if (inspectorState.path !== path) {
+      return;
+    }
     document.getElementById("inspector-error").hidden = false;
     document.getElementById("inspector-error").textContent =
       `Couldn’t load this folder: ${err.message}`;
@@ -1828,7 +1842,9 @@ function jobsRender(payload) {
     const tr = document.createElement("tr");
     tr.dataset.id = r.id;
     const scopeLabel = r.path || "(whole library)";
-    const updated = new Date(r.updatedAt / 1_000_000).toLocaleString();
+    // `r.updatedAt` is RFC 3339 (server-side time.Time JSON
+    // marshalling). `new Date(string)` parses it safely.
+    const updated = new Date(r.updatedAt).toLocaleString();
     const target = `${(r.targetRate / 1000).toFixed(1)} kHz · ${r.targetBits}-bit`;
     tr.innerHTML = `
       <td><span class="status status-${r.status}">${r.status}</span></td>

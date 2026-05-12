@@ -306,7 +306,7 @@ type adminBatchCoordinatorAdapter struct {
 	outputDir string
 }
 
-func (a *adminBatchCoordinatorAdapter) Submit(libraryRelPath string, targetRate, targetBits int) (admin.AdminBatchSubmitResult, error) {
+func (a *adminBatchCoordinatorAdapter) Submit(ctx context.Context, libraryRelPath string, targetRate, targetBits int) (admin.AdminBatchSubmitResult, error) {
 	if targetRate == 0 || targetBits == 0 {
 		if rate, bits, err := a.store.GetUpscaleTarget(); err == nil {
 			if targetRate == 0 {
@@ -317,7 +317,7 @@ func (a *adminBatchCoordinatorAdapter) Submit(libraryRelPath string, targetRate,
 			}
 		}
 	}
-	res, err := a.coord.Submit(context.Background(), libraryRelPath, targetRate, targetBits, a.outputDir)
+	res, err := a.coord.Submit(ctx, libraryRelPath, targetRate, targetBits, a.outputDir)
 	if err != nil {
 		var dskErr *transcode.InsufficientDiskSpaceError
 		if errors.As(err, &dskErr) {
@@ -367,8 +367,12 @@ func (a *adminBatchCoordinatorAdapter) ListBatches(limit int) ([]admin.AdminBatc
 			ProcessedFiles: r.ProcessedFiles,
 			FailedFiles:    r.FailedFiles,
 			Error:          r.Error,
-			CreatedAt:      r.CreatedAt,
-			UpdatedAt:      r.UpdatedAt,
+			// time.Time encoded as RFC 3339 — avoids JS Number
+			// precision loss on int64 ns values > 2^53. The
+			// iOS-facing api.BatchRow keeps int64 ns because Swift
+			// handles Int64 natively. Per Gemini high on PR #202.
+			CreatedAt: time.Unix(0, r.CreatedAt).UTC(),
+			UpdatedAt: time.Unix(0, r.UpdatedAt).UTC(),
 		})
 	}
 	return out, nil
