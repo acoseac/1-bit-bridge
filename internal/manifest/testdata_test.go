@@ -18,6 +18,19 @@ import (
 // round-trip them exactly like a real file from ffmpeg / dBpoweramp.
 func writeMinimalFLAC(t *testing.T, path string, sampleRate, bitsPerSample int, vorbisTags map[string]string) {
 	t.Helper()
+	pairs := make([][2]string, 0, len(vorbisTags))
+	for k, v := range vorbisTags {
+		pairs = append(pairs, [2]string{k, v})
+	}
+	writeMinimalFLACPairs(t, path, sampleRate, bitsPerSample, pairs)
+}
+
+// writeMinimalFLACPairs is the multi-value-aware variant — accepts
+// `[][2]string` so duplicate keys (e.g. multiple `ARTIST=` Vorbis
+// Comments on a collaboration FLAC) are preserved in source order
+// rather than collapsed by Go's map semantics.
+func writeMinimalFLACPairs(t *testing.T, path string, sampleRate, bitsPerSample int, vorbisTags [][2]string) {
+	t.Helper()
 
 	// STREAMINFO block. Most fields can be placeholder; only SampleRate,
 	// BitsPerSample, and NSamples are material to our extractor.
@@ -36,9 +49,7 @@ func writeMinimalFLAC(t *testing.T, path string, sampleRate, bitsPerSample int, 
 	vc := meta.VorbisComment{
 		Vendor: "1-bit-bridge test fixture",
 	}
-	for k, v := range vorbisTags {
-		vc.Tags = append(vc.Tags, [2]string{k, v})
-	}
+	vc.Tags = append(vc.Tags, vorbisTags...)
 
 	// Build the file bytes manually. mewkiz/flac's Encoder is geared at
 	// audio frames; for a tag/format round-trip the raw metadata-block

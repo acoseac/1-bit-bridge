@@ -15,6 +15,7 @@ import (
 	"time"
 
 	tag "github.com/dhowden/tag"
+	"github.com/mewkiz/flac/meta"
 )
 
 // maxArtworkBytes caps the per-image bytes the local-artwork extractor
@@ -174,7 +175,26 @@ func ExtractWithContext(absPath string, t *Track, ec *ExtractContext) error {
 		if _, err := f.Seek(0, io.SeekStart); err != nil {
 			return err
 		}
-		return extractViaDhowdenFromReader(f, absPath, t, ec)
+		if err := extractViaDhowdenFromReader(f, absPath, t, ec); err != nil {
+			return err
+		}
+		// dhowden/tag's Vorbis reader collapses multi-value tags into a
+		// single value (last-wins map insert) — a FLAC tagged with
+		// `ARTIST=Abdullah Ibrahim` + `ARTIST=Ekaya` arrives at
+		// `m.Artist() == "Ekaya"`, losing the primary credit. A third
+		// pass over the same file handle reads the raw Vorbis Comment
+		// block via mewkiz/flac and overrides `t.Artist` /
+		// `t.AlbumArtist` with `"; "`-joined strings when multi-value
+		// is detected. Cheap: only the Vorbis Comment block body is
+		// actually parsed (typically a few hundred bytes); the
+		// PICTURE block (the heavy 5-10 MiB JPEG) is skipped via the
+		// block header's length field. No extra `os.Open` — uses the
+		// same `*os.File` after a rewind.
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
+		applyFLACMultiValueArtists(f, t)
+		return nil
 	default:
 		return extractViaDhowdenWithContext(absPath, t, ec)
 	}
@@ -328,6 +348,86 @@ func populateFromTagMetadata(m tag.Metadata, t *Track) {
 			if g := parseReplayGain(v); g != nil {
 				t.ReplayGainAlbumDB = g
 			}
+		}
+	}
+}
+
+// applyFLACMultiValueArtists scans the FLAC's Vorbis Comment block for
+// repeated `ARTIST` / `ALBUMARTIST` entries (which dhowden/tag's
+// last-wins map collapses to a single value) and overrides
+// `t.Artist` / `t.AlbumArtist` with a `"; "`-joined string when
+// multi-value is detected. The separator matches the iOS-side
+// `VorbisCommentParser.appendMulti` convention so the iOS picker /
+// upsert split logic activates without any wire-protocol change.
+//
+// Cost: parses the block header for every metadata block (cheap —
+// 4 bytes each) and the BODY of only the Vorbis Comment block.
+// PICTURE blocks (the 5–10 MiB JPEGs the existing single-open
+// optimization was protecting) get skipped via the block's
+// `Skip()` method — which uses `Seek` on `io.Seeker` inputs and
+// falls back to `io.Copy(io.Discard, ...)` otherwise.
+//
+// Best-effort: malformed / corrupt FLAC streams silently no-op
+// rather than failing the scan. Single-value tags also no-op (the
+// dhowden-populated value is correct in that case). Non-FLAC
+// formats are NOT covered by this helper — ID3v2 TPE1 multi-value
+// (MP3 / DSF / M4A) is a deferred follow-up.
+func applyFLACMultiValueArtists(r io.Reader, t *Track) {
+	// FLAC magic.
+	var magic [4]byte
+	if _, err := io.ReadFull(r, magic[:]); err != nil {
+		return
+	}
+	if string(magic[:]) != "fLaC" {
+		return
+	}
+	for {
+		block, err := meta.New(r)
+		if err != nil {
+			return
+		}
+		if block.Type == meta.TypeVorbisComment {
+			if err := block.Parse(); err != nil {
+				return
+			}
+			vc, ok := block.Body.(*meta.VorbisComment)
+			if !ok {
+				return
+			}
+			var artists, albumArtists []string
+			for _, tg := range vc.Tags {
+				switch strings.ToLower(tg[0]) {
+				case "artist":
+					if v := strings.TrimSpace(tg[1]); v != "" {
+						artists = append(artists, v)
+					}
+				case "albumartist":
+					if v := strings.TrimSpace(tg[1]); v != "" {
+						albumArtists = append(albumArtists, v)
+					}
+				}
+			}
+			// Only override when multi-value was actually present —
+			// single-value or absent tags leave dhowden's result
+			// intact, so the no-multi-tags case is a structural
+			// no-op.
+			if len(artists) > 1 {
+				t.Artist = strings.Join(artists, "; ")
+			}
+			if len(albumArtists) > 1 {
+				t.AlbumArtist = strings.Join(albumArtists, "; ")
+			}
+			return
+		}
+		// Non-Vorbis block (STREAMINFO, PICTURE, PADDING, etc.) —
+		// skip the body without reading it. For `*os.File` the
+		// underlying `Skip()` uses `Seek` and never touches the
+		// payload bytes.
+		if err := block.Skip(); err != nil {
+			return
+		}
+		if block.IsLast {
+			return
 		}
 	}
 }
