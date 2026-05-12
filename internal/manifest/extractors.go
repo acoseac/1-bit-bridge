@@ -401,20 +401,36 @@ func applyFLACMultiValueArtists(r io.Reader, t *Track) {
 					if v := strings.TrimSpace(tg[1]); v != "" {
 						artists = append(artists, v)
 					}
-				case "albumartist":
+				case "albumartist", "album artist":
+					// Both spellings exist in the wild — Picard /
+					// dBpoweramp use `ALBUMARTIST`, older taggers +
+					// some manual edits use `ALBUM ARTIST` (with
+					// space). dhowden/tag normalises both internally
+					// when querying via `AlbumArtist()` but on raw
+					// iteration we have to accept either spelling
+					// or multi-value `ALBUM ARTIST` Vorbis files
+					// would silently fall through this branch.
+					// Gemini HIGH on PR #208.
 					if v := strings.TrimSpace(tg[1]); v != "" {
 						albumArtists = append(albumArtists, v)
 					}
 				}
 			}
-			// Only override when multi-value was actually present —
-			// single-value or absent tags leave dhowden's result
-			// intact, so the no-multi-tags case is a structural
-			// no-op.
-			if len(artists) > 1 {
+			// Override whenever we found at least one non-empty entry
+			// in the raw block. Catches the edge case where dhowden
+			// saw `ARTIST=Name` followed by `ARTIST=` (a trailing
+			// empty multi-value): dhowden's last-wins map stored "",
+			// `populateFromTagMetadata` skipped the empty assignment,
+			// and `t.Artist` was left at whatever the path-derived
+			// fallback produced. Our multi-value pass filters empties
+			// out per segment, so a single non-empty entry in
+			// `artists` is the correct ground-truth result —
+			// asserting it over dhowden's possibly-empty value is
+			// strictly an improvement. Gemini medium on PR #208.
+			if len(artists) > 0 {
 				t.Artist = strings.Join(artists, "; ")
 			}
-			if len(albumArtists) > 1 {
+			if len(albumArtists) > 0 {
 				t.AlbumArtist = strings.Join(albumArtists, "; ")
 			}
 			return

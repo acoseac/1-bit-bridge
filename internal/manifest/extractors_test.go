@@ -1154,6 +1154,54 @@ func TestSingleArtistFLACUnchanged(t *testing.T) {
 	}
 }
 
+func TestMultiValueAlbumArtistSpacedVariantAccepted(t *testing.T) {
+	// `ALBUM ARTIST` (with space) is a legitimate older / hand-tagged
+	// spelling alongside the canonical `ALBUMARTIST`. The multi-value
+	// pass must accept either spelling — pre-fix the spaced variant
+	// fell through and the iOS picker would lose the second album-
+	// artist credit for that subset of files (Gemini HIGH on PR #208).
+	dir := t.TempDir()
+	p := filepath.Join(dir, "spaced.flac")
+	writeMinimalFLACPairs(t, p, 44100, 16, [][2]string{
+		{"TITLE", "Track"},
+		{"ALBUM", "Compilation"},
+		{"ARTIST", "Performer"},
+		{"ALBUM ARTIST", "Curator A"},
+		{"ALBUM ARTIST", "Curator B"},
+	})
+	tr := &Track{Path: "spaced.flac", Size: 1, ModTime: time.Now()}
+	if err := Extract(p, tr); err != nil {
+		t.Fatal(err)
+	}
+	if tr.AlbumArtist != "Curator A; Curator B" {
+		t.Errorf("AlbumArtist: got %q, want %q (spaced `ALBUM ARTIST` variant must be accepted)", tr.AlbumArtist, "Curator A; Curator B")
+	}
+}
+
+func TestMultiValueArtistRecoversFromTrailingEmptyTag(t *testing.T) {
+	// `ARTIST=Name` followed by `ARTIST=` (trailing empty) trips
+	// dhowden/tag's last-wins map: it stores `""`, then
+	// `populateFromTagMetadata` skips the empty assignment, leaving
+	// `t.Artist` at whatever the path-derived fallback set. The
+	// multi-value pass filters empties out per segment and surfaces
+	// the real name as the ground truth (Gemini medium on PR #208).
+	dir := t.TempDir()
+	p := filepath.Join(dir, "trail-empty.flac")
+	writeMinimalFLACPairs(t, p, 44100, 16, [][2]string{
+		{"TITLE", "Track"},
+		{"ALBUM", "Album"},
+		{"ARTIST", "Real Name"},
+		{"ARTIST", ""},
+	})
+	tr := &Track{Path: "trail-empty.flac", Size: 1, ModTime: time.Now()}
+	if err := Extract(p, tr); err != nil {
+		t.Fatal(err)
+	}
+	if tr.Artist != "Real Name" {
+		t.Errorf("Artist: got %q, want %q (trailing empty `ARTIST=` must not erase a real name)", tr.Artist, "Real Name")
+	}
+}
+
 func TestMultiValueArtistTrimsWhitespacePerSegment(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "trimmy.flac")
