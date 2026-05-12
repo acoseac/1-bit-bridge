@@ -1942,13 +1942,34 @@ var ErrUpscaleTargetUnset = errors.New("upscale target not configured")
 // either a buggy writer or DB corruption, and silently substituting a
 // default would mask the bug.
 func (s *Store) GetUpscaleTarget() (rateHz int, bits int, err error) {
-	rateStr, err := s.GetScanState(UpscaleTargetRateKey)
-	if err != nil {
-		return 0, 0, fmt.Errorf("read %s: %w", UpscaleTargetRateKey, err)
+	// Single query reads both keys in one round-trip — atomic vs a
+	// concurrent SetUpscaleTarget that could otherwise commit
+	// between two separate GetScanState calls and leave callers
+	// with a mismatched (rate, bits) pair. Per CodeRabbit medium
+	// on PR #199.
+	rows, qerr := s.db.Query(
+		`SELECT k, v FROM scan_state WHERE k IN (?, ?)`,
+		UpscaleTargetRateKey, UpscaleTargetBitsKey,
+	)
+	if qerr != nil {
+		return 0, 0, fmt.Errorf("read upscale target: %w", qerr)
 	}
-	bitsStr, err := s.GetScanState(UpscaleTargetBitsKey)
-	if err != nil {
-		return 0, 0, fmt.Errorf("read %s: %w", UpscaleTargetBitsKey, err)
+	defer rows.Close()
+	var rateStr, bitsStr string
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return 0, 0, fmt.Errorf("scan upscale target: %w", err)
+		}
+		switch k {
+		case UpscaleTargetRateKey:
+			rateStr = v
+		case UpscaleTargetBitsKey:
+			bitsStr = v
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, 0, fmt.Errorf("iter upscale target: %w", err)
 	}
 	if rateStr == "" || bitsStr == "" {
 		return 0, 0, ErrUpscaleTargetUnset
@@ -1960,6 +1981,19 @@ func (s *Store) GetUpscaleTarget() (rateHz int, bits int, err error) {
 	b, err := strconv.Atoi(bitsStr)
 	if err != nil {
 		return 0, 0, fmt.Errorf("parse %s=%q: %w", UpscaleTargetBitsKey, bitsStr, err)
+	}
+	// Validate parsed values — a manually-edited scan_state row
+	// (sqlite3 CLI session, leaked bug, etc.) could leak garbage
+	// into callers. Defense-in-depth alongside the validate-on-
+	// write contract in SetUpscaleTarget. Per CodeRabbit medium
+	// on PR #199.
+	if r <= 0 {
+		return 0, 0, fmt.Errorf("invalid upscale target rate %d Hz in scan_state", r)
+	}
+	switch b {
+	case 16, 24, 32:
+	default:
+		return 0, 0, fmt.Errorf("invalid upscale target bits %d in scan_state (want 16/24/32)", b)
 	}
 	return r, b, nil
 }
@@ -2246,14 +2280,24 @@ func (s *Store) ListChildFolders(parent string) ([]ChildFolderRollup, error) {
 		// album folders (e.g. "AlbumA").
 		rows, err = s.db.Query(`
 			SELECT f.path,
+			       -- Range comparisons (not LIKE) because f.path is a
+			       -- column value: any folder name containing the LIKE
+			       -- metacharacters '_' or '%' would otherwise match
+			       -- sibling subtrees. '0' (0x30) is the character
+			       -- immediately after '/' (0x2F) in ASCII, so the
+			       -- exclusive upper bound captures everything starting
+			       -- with "f.path/" and nothing past. Index-friendly:
+			       -- uses the existing PRIMARY KEY on tracks(path) /
+			       -- track_variants(source_path) for the range scan.
+			       -- Per Gemini medium on PR #200.
 			       (SELECT COUNT(*) FROM tracks t
-			          WHERE t.path LIKE f.path || '/%' ESCAPE '\') AS track_count,
+			          WHERE t.path >= f.path || '/' AND t.path < f.path || '0') AS track_count,
 			       (SELECT COUNT(DISTINCT tv.source_path) FROM track_variants tv
-			          WHERE tv.source_path LIKE f.path || '/%' ESCAPE '\') AS upscaled_count,
+			          WHERE tv.source_path >= f.path || '/' AND tv.source_path < f.path || '0') AS upscaled_count,
 			       (SELECT COALESCE(SUM(t.size), 0) FROM tracks t
-			          WHERE t.path LIKE f.path || '/%' ESCAPE '\') AS total_size,
+			          WHERE t.path >= f.path || '/' AND t.path < f.path || '0') AS total_size,
 			       (SELECT COALESCE(SUM(tv.size_bytes), 0) FROM track_variants tv
-			          WHERE tv.source_path LIKE f.path || '/%' ESCAPE '\') AS upscaled_size
+			          WHERE tv.source_path >= f.path || '/' AND tv.source_path < f.path || '0') AS upscaled_size
 			  FROM folders f
 			 WHERE instr(f.path, '/') = 0
 			 ORDER BY f.path ASC
@@ -2267,14 +2311,24 @@ func (s *Store) ListChildFolders(parent string) ([]ChildFolderRollup, error) {
 		// over-shoot by `bytes - chars` on a parent like "Müller".
 		rows, err = s.db.Query(`
 			SELECT f.path,
+			       -- Range comparisons (not LIKE) because f.path is a
+			       -- column value: any folder name containing the LIKE
+			       -- metacharacters '_' or '%' would otherwise match
+			       -- sibling subtrees. '0' (0x30) is the character
+			       -- immediately after '/' (0x2F) in ASCII, so the
+			       -- exclusive upper bound captures everything starting
+			       -- with "f.path/" and nothing past. Index-friendly:
+			       -- uses the existing PRIMARY KEY on tracks(path) /
+			       -- track_variants(source_path) for the range scan.
+			       -- Per Gemini medium on PR #200.
 			       (SELECT COUNT(*) FROM tracks t
-			          WHERE t.path LIKE f.path || '/%' ESCAPE '\') AS track_count,
+			          WHERE t.path >= f.path || '/' AND t.path < f.path || '0') AS track_count,
 			       (SELECT COUNT(DISTINCT tv.source_path) FROM track_variants tv
-			          WHERE tv.source_path LIKE f.path || '/%' ESCAPE '\') AS upscaled_count,
+			          WHERE tv.source_path >= f.path || '/' AND tv.source_path < f.path || '0') AS upscaled_count,
 			       (SELECT COALESCE(SUM(t.size), 0) FROM tracks t
-			          WHERE t.path LIKE f.path || '/%' ESCAPE '\') AS total_size,
+			          WHERE t.path >= f.path || '/' AND t.path < f.path || '0') AS total_size,
 			       (SELECT COALESCE(SUM(tv.size_bytes), 0) FROM track_variants tv
-			          WHERE tv.source_path LIKE f.path || '/%' ESCAPE '\') AS upscaled_size
+			          WHERE tv.source_path >= f.path || '/' AND tv.source_path < f.path || '0') AS upscaled_size
 			  FROM folders f
 			 WHERE f.path LIKE ? ESCAPE '\'
 			   AND instr(substr(f.path, length(?) + 2), '/') = 0
@@ -2436,6 +2490,7 @@ func (s *Store) RollupByPrefix(prefix string) (FolderRollup, error) {
 type TrackProjection struct {
 	Path          string
 	Size          int64
+	MTimeNS       int64 // for VariantRow.SourceMTimeNS at JobSpec construction
 	SampleRate    int
 	BitsPerSample int
 	HasVariant    bool
@@ -2462,7 +2517,7 @@ func (s *Store) ListTrackProjectionsUnderPrefix(prefix string) ([]TrackProjectio
 		pattern = escaped + `/%`
 	}
 	rows, err := s.db.Query(`
-		SELECT t.path, t.size,
+		SELECT t.path, t.size, t.mtime_ns,
 		       CAST(COALESCE(json_extract(t.tags_json, '$.sampleRate'),    0) AS INTEGER) AS rate,
 		       CAST(COALESCE(json_extract(t.tags_json, '$.bitsPerSample'), 0) AS INTEGER) AS bits,
 		       EXISTS(SELECT 1 FROM track_variants tv WHERE tv.source_path = t.path) AS has_variant
@@ -2478,7 +2533,7 @@ func (s *Store) ListTrackProjectionsUnderPrefix(prefix string) ([]TrackProjectio
 	for rows.Next() {
 		var tp TrackProjection
 		var has int
-		if err := rows.Scan(&tp.Path, &tp.Size, &tp.SampleRate, &tp.BitsPerSample, &has); err != nil {
+		if err := rows.Scan(&tp.Path, &tp.Size, &tp.MTimeNS, &tp.SampleRate, &tp.BitsPerSample, &has); err != nil {
 			return nil, err
 		}
 		tp.HasVariant = has != 0
