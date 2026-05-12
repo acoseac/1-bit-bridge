@@ -10,9 +10,18 @@
 //   - `--dry-run`: print the candidate list without invoking sox.
 //
 // Maintenance modes:
-//   - `--gc`: walk the on-disk transcoded/ directory and remove
-//     files with no matching DB row (orphan recovery — see PROJECT
-//     CLAUDE.md "DeleteTrack sidecar-cleanup contract" for context).
+//   - `--gc`: symmetric garbage collection. Walks the on-disk
+//     `<dataDir>/transcoded/` directory and removes files with no
+//     matching DB row (forward sweep — orphan file recovery), AND
+//     walks `track_variants` rows and removes rows whose
+//     `sidecar_path` does not exist on disk (reverse sweep — orphan
+//     row recovery). The reverse sweep closes the "phantom variant"
+//     loop where the bridge advertises a variant in `/v1/manifest`,
+//     iOS clients persist the ID, then every play attempt hits
+//     `410 Gone` on `/v1/download` because the sidecar was already
+//     removed (e.g. by a prior upscale generation pass that
+//     replaced v1 with v2 files but didn't migrate the DB rows).
+//     See PROJECT CLAUDE.md "DeleteTrack sidecar-cleanup contract".
 //
 // Feature gate: refuses to run when `cfg.Upscale.Enabled == false`
 // — operators must explicitly opt in via bridge.yaml. Sox-on-PATH
@@ -57,7 +66,7 @@ func upscaleCmd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	filter := fs.String("filter", "", "case-sensitive substring filter on track path (empty = all)")
 	dryRun := fs.Bool("dry-run", false, "list candidates without converting")
 	force := fs.Bool("force", false, "re-convert even if a fresh sidecar already exists")
-	gc := fs.Bool("gc", false, "remove orphan sidecars (files with no matching DB row); skips conversion")
+	gc := fs.Bool("gc", false, "remove orphan sidecars (files with no DB row) AND orphan DB rows (rows with no on-disk sidecar); skips conversion")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -382,11 +391,34 @@ producerLoop:
 	return 0
 }
 
-// runGC walks <dataDir>/transcoded/ and removes any file that
-// doesn't have a matching row in `track_variants`. Companion to
-// the proactive sidecar deletion in DeleteTrack — catches sidecars
-// that escape the proactive path (interrupted DeleteTrack, manual
-// SQL tampering, restored-from-backup mismatch).
+// runGC performs symmetric garbage collection on the variant store:
+//
+//  1. **Forward sweep** — walks `<dataDir>/transcoded/` and removes
+//     any file that doesn't have a matching row in `track_variants`.
+//     Companion to the proactive sidecar deletion in DeleteTrack;
+//     catches sidecars that escape the proactive path (interrupted
+//     DeleteTrack, manual SQL tampering, restored-from-backup
+//     mismatch).
+//
+//  2. **Reverse sweep** — walks `track_variants` and removes any
+//     row whose `sidecar_path` does not exist on disk. Closes the
+//     "phantom variant" loop where the bridge advertises a variant
+//     in `/v1/manifest`, iOS clients persist the ID and request it
+//     on play, then every download attempt hits `410 Gone` because
+//     the file was already removed (e.g. an earlier `bridge upscale`
+//     pass switched the sidecar naming scheme — v1 64-char-hash to
+//     v2 16-char-hash — without cleaning up the v1 DB rows). Without
+//     this sweep, iOS clients pay a 410 round-trip on every fresh
+//     play even after the stale-variant fallback ships (acoseac/1-bit
+//     PR #351) — the next manifest rescan re-pulls the same dead ID
+//     and the loop restarts.
+//
+// Both sweeps run unconditionally under `--gc` because they share
+// the same semantic: keep the on-disk inventory and the DB-row
+// inventory consistent with each other. Splitting into separate
+// flags would let operators run them out of order, which is fine
+// for the forward sweep but the reverse sweep would re-introduce
+// the very mismatch we're fixing.
 func runGC(stdout, stderr io.Writer, store *manifest.Store, outputDir string) int {
 	allRows, err := store.AllVariants()
 	if err != nil {
@@ -399,9 +431,9 @@ func runGC(stdout, stderr io.Writer, store *manifest.Store, outputDir string) in
 	}
 
 	var removed, kept, failed int
-	// WalkDir over Walk: avoids the per-file os.Lstat — DirEntry
-	// already carries IsDir(), so a flat directory of N sidecars
-	// pays N fewer syscalls (Gemini bot review on PR #108).
+	// Forward sweep: WalkDir over Walk avoids the per-file os.Lstat —
+	// DirEntry already carries IsDir(), so a flat directory of N
+	// sidecars pays N fewer syscalls (Gemini bot review on PR #108).
 	walkErr := filepath.WalkDir(outputDir, func(path string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			// Output dir may not exist yet (no upscales ever
@@ -431,8 +463,85 @@ func runGC(stdout, stderr io.Writer, store *manifest.Store, outputDir string) in
 		fmt.Fprintf(stderr, "walk transcoded dir: %v\n", walkErr)
 		return 1
 	}
-	fmt.Fprintf(stdout, "GC: removed %d orphan(s), kept %d known sidecar(s), %d failure(s).\n", removed, kept, failed)
-	if failed > 0 {
+	fmt.Fprintf(stdout, "GC forward sweep: removed %d orphan file(s), kept %d known sidecar(s), %d failure(s).\n", removed, kept, failed)
+
+	// Guard against mass-delete on a disappeared transcoded root.
+	// If `outputDir` is missing but `track_variants` has rows, the
+	// per-row `os.Stat` below would return ENOENT for every row and
+	// the reverse sweep would nuke the entire variant catalog —
+	// even though the rows are almost certainly fine and the
+	// underlying issue is environmental (external drive
+	// disconnected, mount point gone, filesystem error). Refuse to
+	// proceed; restore access and re-run. Per CodeRabbit on PR #207.
+	//
+	// `len(allRows) == 0` is the LEGITIMATELY-empty case (no
+	// upscales ever generated on this bridge) and the forward
+	// sweep's `WalkDir` already handles a missing `outputDir`
+	// gracefully via `filepath.SkipDir`, so this guard only fires
+	// when there's something to lose.
+	if len(allRows) > 0 {
+		_, statErr := os.Stat(outputDir)
+		switch {
+		case statErr == nil:
+			// Healthy state — proceed to the per-row loop below.
+		case errors.Is(statErr, os.ErrNotExist):
+			fmt.Fprintf(stderr, "GC reverse sweep: transcoded directory %q is missing but %d variant row(s) exist; refusing to delete rows en masse (likely a disconnected mount or filesystem issue — restore access and re-run).\n", outputDir, len(allRows))
+			return 1
+		default:
+			// Any other stat failure (permission denied, I/O
+			// error, stale NFS handle, etc.) means the per-row
+			// `os.Stat(SidecarPath)` below would almost certainly
+			// fail the same way for every row — accumulating N
+			// per-row "stat failure" log lines and burning the
+			// operator's terminal output without making progress.
+			// Bail upfront with a single distinct message.
+			// CodeRabbit on PR #207 round 3.
+			fmt.Fprintf(stderr, "GC reverse sweep: cannot stat transcoded directory %q (%v); refusing to proceed with %d variant row(s) at risk.\n", outputDir, statErr, len(allRows))
+			return 1
+		}
+	}
+	// Reverse sweep: each row in `track_variants` whose `sidecar_path`
+	// is missing on disk is a phantom variant. `DeleteVariant` is the
+	// store API designed for this exact case — it bumps the parent
+	// track's `indexed_at` so the next iOS delta sync sees the row
+	// disappear, closing the loop. Use `os.Stat` (NOT `os.Lstat`) so
+	// a symlink pointing at a missing target is correctly treated as
+	// a phantom: the bridge's `/v1/download` path opens the file
+	// through the symlink and would 410 on a broken target, so the
+	// gc should treat that case identically to a directly-missing
+	// file. Per Gemini on PR #207.
+	//
+	// Per-row `DeleteVariant` (one transaction per orphan) over a
+	// bulk-delete API: `--gc` is operator-initiated and infrequent,
+	// orphan counts are typically <100 in practice, and a new bulk
+	// path on the Store would duplicate the `indexed_at`-bump
+	// machinery `DeleteVariant` already provides. CLAUDE.md "no
+	// premature abstractions" — revisit if a future call site
+	// proves the volume out.
+	var rowsRemoved, rowsKept, rowsFailed int
+	for _, r := range allRows {
+		_, statErr := os.Stat(r.SidecarPath)
+		switch {
+		case statErr == nil:
+			rowsKept++
+		case errors.Is(statErr, os.ErrNotExist):
+			if err := store.DeleteVariant(r.SourcePath, r.VariantID); err != nil {
+				fmt.Fprintf(stderr, "delete orphan row %s / %s: %v\n", r.SourcePath, r.VariantID, err)
+				rowsFailed++
+				continue
+			}
+			rowsRemoved++
+		default:
+			// Permission denied, I/O error, etc. — log and keep
+			// the row rather than risk a destructive delete on a
+			// transient failure. Operator re-runs `--gc` after
+			// fixing the environment.
+			fmt.Fprintf(stderr, "stat %s: %v\n", r.SidecarPath, statErr)
+			rowsFailed++
+		}
+	}
+	fmt.Fprintf(stdout, "GC reverse sweep: removed %d orphan row(s), kept %d row(s) with live sidecar, %d failure(s).\n", rowsRemoved, rowsKept, rowsFailed)
+	if failed > 0 || rowsFailed > 0 {
 		return 1
 	}
 	return 0
