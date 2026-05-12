@@ -162,6 +162,14 @@ type Deps struct {
 	// is enabled, both nil when disabled).
 	AvailableDiskSpace func(dir string) (int64, error)
 
+	// BatchCoordinator is the v1.3 admin Library Inspector's gateway
+	// to the transcode.Coordinator. Wired to a closure-based adapter
+	// in cmd/bridge/main.go (same decoupling pattern as
+	// UpscaleStats / UpscaleEnqueuer). Nil-safe — when absent the
+	// admin Library Inspector renders the folder tree but the
+	// "Upscale this folder" trigger surfaces a 503.
+	BatchCoordinator AdminBatchCoordinator
+
 	// IsSupervised reports whether the current process is running
 	// under launchd / systemd / Windows SCM — i.e. whether
 	// `os.Exit(0)` will trigger an automatic relaunch. Threaded
@@ -173,6 +181,84 @@ type Deps struct {
 	// test harnesses, which yields the conservative — never-
 	// promise-relaunch — UI wording, never the lying one.
 	IsSupervised bool
+}
+
+// AdminBatchCoordinator is the admin-side interface the Library
+// Inspector's "Upscale this folder" button + the Jobs page consume.
+// Implemented by an adapter in cmd/bridge/main.go around
+// transcode.Coordinator — same UpscaleEnqueuer / UpscaleStats
+// decoupling pattern. The methods mirror `api.BatchCoordinator`
+// but use admin-package wire shapes (`AdminBatchRow`, etc.) so
+// the admin package stays free of internal/api.
+//
+// `Submit` takes a `context.Context` so the HTTP request's
+// cancellation propagates through to the coordinator and any
+// downstream listings the coordinator does internally
+// (manifest projection walk). Per Gemini high on PR #202.
+type AdminBatchCoordinator interface {
+	Submit(ctx context.Context, libraryRelPath string, targetRate, targetBits int) (AdminBatchSubmitResult, error)
+	Cancel(idHex string) error
+	ListBatches(limit int) ([]AdminBatchRow, error)
+	Throughput() AdminBatchThroughput
+}
+
+// AdminBatchSubmitResult is the wire shape returned by the admin
+// Submit endpoint. Mirrors transcode.SubmitResult + api.BatchSubmitResult
+// field-for-field but lives here so the admin templates can
+// JSON-decode without importing either of those packages.
+type AdminBatchSubmitResult struct {
+	BatchID            string `json:"batchID"`
+	Path               string `json:"path"`
+	TargetRate         int    `json:"targetRate"`
+	TargetBits         int    `json:"targetBits"`
+	TotalFiles         int    `json:"totalFiles"`
+	AlreadyCovered     int    `json:"alreadyCovered"`
+	ProjectedSizeBytes int64  `json:"projectedSizeBytes"`
+	AvailableBytes     int64  `json:"availableBytes"`
+	EnqueuedCount      int    `json:"enqueuedCount"`
+}
+
+// AdminBatchRow is the per-row wire shape returned by the admin
+// list endpoint (Jobs page consumer).
+//
+// `CreatedAt` / `UpdatedAt` are `time.Time` (RFC 3339-encoded on
+// the wire) rather than int64 nanoseconds. JavaScript's Number
+// type can't safely represent 64-bit ns timestamps — values above
+// 2^53 round, causing the Jobs page to render a date a few
+// hundred milliseconds off. The string form parses safely via
+// `new Date(...)`. Per Gemini high on PR #202.
+type AdminBatchRow struct {
+	ID             string    `json:"id"`
+	Path           string    `json:"path"`
+	TargetRate     int       `json:"targetRate"`
+	TargetBits     int       `json:"targetBits"`
+	Status         string    `json:"status"`
+	TotalFiles     int       `json:"totalFiles"`
+	ProcessedFiles int       `json:"processedFiles"`
+	FailedFiles    int       `json:"failedFiles"`
+	Error          string    `json:"error,omitempty"`
+	CreatedAt      time.Time `json:"createdAt"`
+	UpdatedAt      time.Time `json:"updatedAt"`
+}
+
+// AdminBatchThroughput is the wire shape returned by the
+// throughput proxy. Mirrors transcode.ThroughputSnapshot.
+type AdminBatchThroughput struct {
+	JobsPerHour float64 `json:"jobsPerHour"`
+	EtaSeconds  float64 `json:"etaSeconds"`
+	Samples     int     `json:"samples"`
+}
+
+// AdminBatchInsufficientDiskSpace is the typed-error shape
+// returned when the coordinator's pre-flight refuses a submit.
+type AdminBatchInsufficientDiskSpace struct {
+	ProjectedBytes int64
+	RequiredBytes  int64
+	AvailableBytes int64
+}
+
+func (e *AdminBatchInsufficientDiskSpace) Error() string {
+	return "upscale batch: insufficient disk space"
 }
 
 // UpscalePoolStats mirrors `transcode.PoolStats` field-for-
@@ -328,10 +414,12 @@ type Server struct {
 
 // pages maps the URL-friendly page name to its template filename.
 var pages = map[string]string{
-	"dashboard": "dashboard.html",
-	"library":   "library.html",
-	"devices":   "devices.html",
-	"settings":  "settings.html",
+	"dashboard":         "dashboard.html",
+	"library":           "library.html",
+	"library_inspector": "library_inspector.html",
+	"jobs":              "jobs.html",
+	"devices":           "devices.html",
+	"settings":          "settings.html",
 }
 
 // New constructs an admin Server. Call Handler to get the http.Handler for
@@ -367,6 +455,8 @@ func (s *Server) Handler() http.Handler {
 	// Pages.
 	mux.HandleFunc("GET /{$}", s.pageDashboard)
 	mux.HandleFunc("GET /library", s.pageLibrary)
+	mux.HandleFunc("GET /library/inspector", s.pageLibraryInspector)
+	mux.HandleFunc("GET /jobs", s.pageJobs)
 	mux.HandleFunc("GET /devices", s.pageDevices)
 	mux.HandleFunc("GET /settings", s.pageSettings)
 
@@ -392,6 +482,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/upscale/stats", s.apiUpscaleStats)
 	mux.HandleFunc("GET /api/library/browse", s.apiLibraryBrowse)
 	mux.HandleFunc("GET /api/library/browse-projection", s.apiLibraryBrowseProjection)
+	mux.HandleFunc("POST /api/upscale/batch", s.apiUpscaleBatchSubmit)
+	mux.HandleFunc("GET /api/upscale/batches", s.apiUpscaleBatchList)
+	mux.HandleFunc("DELETE /api/upscale/batches/{id}", s.apiUpscaleBatchCancel)
+	mux.HandleFunc("GET /api/upscale/target", s.apiUpscaleTargetGet)
+	mux.HandleFunc("PATCH /api/upscale/target", s.apiUpscaleTargetPatch)
 	mux.HandleFunc("POST /api/restart", s.apiRestart)
 	mux.HandleFunc("GET /api/pair-qr", s.apiPairQR)
 	mux.HandleFunc("GET /api/backups", s.apiBackupsList)

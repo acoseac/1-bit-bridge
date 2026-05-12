@@ -295,6 +295,98 @@ func (a *upscaleBatchCoordinatorAdapter) Throughput() api.BatchThroughput {
 	}
 }
 
+// adminBatchCoordinatorAdapter implements admin.AdminBatchCoordinator
+// over a *transcode.Coordinator. Translates between the two
+// packages' equivalent value types so the admin package stays free
+// of internal/transcode (mirrors UpscaleEnqueuer / UpscaleStats).
+type adminBatchCoordinatorAdapter struct {
+	coord     *transcode.Coordinator
+	store     *manifest.Store
+	dataDir   string
+	outputDir string
+}
+
+func (a *adminBatchCoordinatorAdapter) Submit(ctx context.Context, libraryRelPath string, targetRate, targetBits int) (admin.AdminBatchSubmitResult, error) {
+	if targetRate == 0 || targetBits == 0 {
+		if rate, bits, err := a.store.GetUpscaleTarget(); err == nil {
+			if targetRate == 0 {
+				targetRate = rate
+			}
+			if targetBits == 0 {
+				targetBits = bits
+			}
+		}
+	}
+	res, err := a.coord.Submit(ctx, libraryRelPath, targetRate, targetBits, a.outputDir)
+	if err != nil {
+		var dskErr *transcode.InsufficientDiskSpaceError
+		if errors.As(err, &dskErr) {
+			return admin.AdminBatchSubmitResult{}, &admin.AdminBatchInsufficientDiskSpace{
+				ProjectedBytes: dskErr.ProjectedBytes,
+				RequiredBytes:  dskErr.RequiredBytes,
+				AvailableBytes: dskErr.AvailableBytes,
+			}
+		}
+		return admin.AdminBatchSubmitResult{}, err
+	}
+	return admin.AdminBatchSubmitResult{
+		BatchID:            res.BatchID.String(),
+		Path:               res.Path,
+		TargetRate:         res.TargetRate,
+		TargetBits:         res.TargetBits,
+		TotalFiles:         res.TotalFiles,
+		AlreadyCovered:     res.AlreadyCovered,
+		ProjectedSizeBytes: res.ProjectedSizeBytes,
+		AvailableBytes:     res.AvailableBytes,
+		EnqueuedCount:      res.EnqueuedCount,
+	}, nil
+}
+
+func (a *adminBatchCoordinatorAdapter) Cancel(idHex string) error {
+	id, err := uuid.Parse(idHex)
+	if err != nil {
+		return fmt.Errorf("parse batch id %q: %w", idHex, err)
+	}
+	return a.coord.Cancel(id)
+}
+
+func (a *adminBatchCoordinatorAdapter) ListBatches(limit int) ([]admin.AdminBatchRow, error) {
+	rows, err := a.store.ListUpscaleBatches(limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]admin.AdminBatchRow, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, admin.AdminBatchRow{
+			ID:             r.ID.String(),
+			Path:           r.Path,
+			TargetRate:     r.TargetRate,
+			TargetBits:     r.TargetBits,
+			Status:         r.Status,
+			TotalFiles:     r.TotalFiles,
+			ProcessedFiles: r.ProcessedFiles,
+			FailedFiles:    r.FailedFiles,
+			Error:          r.Error,
+			// time.Time encoded as RFC 3339 — avoids JS Number
+			// precision loss on int64 ns values > 2^53. The
+			// iOS-facing api.BatchRow keeps int64 ns because Swift
+			// handles Int64 natively. Per Gemini high on PR #202.
+			CreatedAt: time.Unix(0, r.CreatedAt).UTC(),
+			UpdatedAt: time.Unix(0, r.UpdatedAt).UTC(),
+		})
+	}
+	return out, nil
+}
+
+func (a *adminBatchCoordinatorAdapter) Throughput() admin.AdminBatchThroughput {
+	t := a.coord.Throughput()
+	return admin.AdminBatchThroughput{
+		JobsPerHour: t.JobsPerHour,
+		EtaSeconds:  t.EtaSeconds,
+		Samples:     t.Samples,
+	}
+}
+
 // upscaleStatsAdapter implements api.UpscaleStatsProvider. Mirrors
 // the admin /api/upscale/stats handler's data sources field-for-
 // field so the operator's Settings tile and a paired iOS client see
@@ -1447,6 +1539,23 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			}
 			return transcode.AvailableDiskSpace(dir)
 		},
+		BatchCoordinator: func() admin.AdminBatchCoordinator {
+			// Closure-resolved so admin doesn't see a typed-nil
+			// pointer when upscale is disabled at boot — returning
+			// the interface as untyped-nil keeps the admin handler's
+			// `nil` check honest. Returns a real adapter only when
+			// the Coordinator was constructed (i.e. cfg.Upscale.Enabled
+			// AND the sox precheck passed).
+			if upscaleCoordinator == nil {
+				return nil
+			}
+			return &adminBatchCoordinatorAdapter{
+				coord:     upscaleCoordinator,
+				store:     manifestStore,
+				dataDir:   cfg.DataDir,
+				outputDir: filepath.Join(cfg.DataDir, "transcoded"),
+			}
+		}(),
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "admin: %v\n", err)

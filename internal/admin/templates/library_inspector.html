@@ -1,0 +1,58 @@
+{{define "content"}}
+<section class="page library-inspector">
+  <h1>Library Inspector</h1>
+  <p class="lede">
+    Browse the indexed library and trigger upscaling at folder /
+    root / whole-library granularity. The bridge handles the work
+    in the background; paired iOS devices pick up upscaled
+    variants automatically when their "Prefer upscaled audio"
+    toggle is on.
+  </p>
+
+  <nav class="breadcrumbs" id="inspector-breadcrumbs" aria-label="Folder path">
+    <a href="#" data-path="">Library</a>
+  </nav>
+
+  <div class="inspector-layout">
+    <div class="inspector-tree panel">
+      <h2 id="inspector-current-heading">Loading…</h2>
+      <table class="rows" id="inspector-rows-table" hidden>
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th class="num">Tracks</th>
+            <th class="num">Upscaled</th>
+            <th class="num">Size</th>
+          </tr>
+        </thead>
+        <tbody id="inspector-rows-body"></tbody>
+      </table>
+      <p id="inspector-empty" class="hint" hidden><em>Nothing here.</em></p>
+      <p id="inspector-error" class="error" hidden role="alert"></p>
+    </div>
+
+    <aside class="inspector-drawer panel" aria-live="polite">
+      <h2 id="inspector-drawer-title">Select a folder</h2>
+      <p class="hint" id="inspector-drawer-hint">
+        Tap a row on the left to see the upscale projection and trigger a batch.
+      </p>
+      <div id="inspector-drawer-content" hidden>
+        <dl class="kv">
+          <dt>Tracks</dt><dd id="inspector-drawer-tracks">—</dd>
+          <dt>Already upscaled</dt><dd id="inspector-drawer-covered">—</dd>
+          <dt>Source size</dt><dd id="inspector-drawer-source-size">—</dd>
+          <dt>Projected upscaled</dt><dd id="inspector-drawer-projected">—</dd>
+          <dt>Free on data volume</dt><dd id="inspector-drawer-free">—</dd>
+          <dt>Required (with 10% margin)</dt><dd id="inspector-drawer-required">—</dd>
+        </dl>
+        <p id="inspector-drawer-warning" class="error" hidden role="alert"></p>
+        <p id="inspector-drawer-unknown" class="hint" hidden></p>
+        <button type="button" id="inspector-upscale-btn" class="btn primary" disabled>
+          Upscale this scope
+        </button>
+        <p id="inspector-submit-status" class="hint" aria-live="polite"></p>
+      </div>
+    </aside>
+  </div>
+</section>
+{{end}}
