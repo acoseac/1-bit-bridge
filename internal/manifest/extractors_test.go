@@ -1092,6 +1092,132 @@ func TestParseReplayGain(t *testing.T) {
 	}
 }
 
+// TestMultiValueArtistOverridesDhowdenFlattening covers the
+// `applyFLACMultiValueArtists` path: a FLAC with two `ARTIST=` Vorbis
+// Comments should land on the bridge as `"; "`-joined, NOT as the
+// last value (which is what dhowden/tag's map-based parser collapses
+// the multi-value tag set down to).
+func TestMultiValueArtistOverridesDhowdenFlattening(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "duo.flac")
+	writeMinimalFLACPairs(t, p, 44100, 16, [][2]string{
+		{"TITLE", "Dreamtime"},
+		{"ALBUM", "The Balance"},
+		{"ARTIST", "Abdullah Ibrahim"},
+		{"ARTIST", "Ekaya"},
+	})
+	tr := &Track{Path: "duo.flac", Size: 1, ModTime: time.Now()}
+	if err := Extract(p, tr); err != nil {
+		t.Fatal(err)
+	}
+	if tr.Artist != "Abdullah Ibrahim; Ekaya" {
+		t.Errorf("Artist: got %q, want %q (multi-value ARTIST must join with \"; \" — pre-fix the last ARTIST won)", tr.Artist, "Abdullah Ibrahim; Ekaya")
+	}
+}
+
+func TestMultiValueAlbumArtistOverridesDhowdenFlattening(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "compilation.flac")
+	writeMinimalFLACPairs(t, p, 44100, 16, [][2]string{
+		{"TITLE", "Various"},
+		{"ALBUM", "Cool Reissue"},
+		{"ARTIST", "Track Artist"},
+		{"ALBUMARTIST", "Curator A"},
+		{"ALBUMARTIST", "Curator B"},
+	})
+	tr := &Track{Path: "compilation.flac", Size: 1, ModTime: time.Now()}
+	if err := Extract(p, tr); err != nil {
+		t.Fatal(err)
+	}
+	if tr.AlbumArtist != "Curator A; Curator B" {
+		t.Errorf("AlbumArtist: got %q, want %q", tr.AlbumArtist, "Curator A; Curator B")
+	}
+}
+
+func TestSingleArtistFLACUnchanged(t *testing.T) {
+	// Single-value ARTIST must pass through dhowden/tag unchanged —
+	// the multi-value override is a strict superset that no-ops on
+	// the common single-credit case.
+	dir := t.TempDir()
+	p := filepath.Join(dir, "solo.flac")
+	writeMinimalFLAC(t, p, 44100, 16, map[string]string{
+		"TITLE":  "Solo Track",
+		"ARTIST": "Ekaya",
+		"ALBUM":  "The Balance",
+	})
+	tr := &Track{Path: "solo.flac", Size: 1, ModTime: time.Now()}
+	if err := Extract(p, tr); err != nil {
+		t.Fatal(err)
+	}
+	if tr.Artist != "Ekaya" {
+		t.Errorf("Artist: got %q, want %q (single-value path must not be touched by the multi-value override)", tr.Artist, "Ekaya")
+	}
+}
+
+func TestMultiValueAlbumArtistSpacedVariantAccepted(t *testing.T) {
+	// `ALBUM ARTIST` (with space) is a legitimate older / hand-tagged
+	// spelling alongside the canonical `ALBUMARTIST`. The multi-value
+	// pass must accept either spelling — pre-fix the spaced variant
+	// fell through and the iOS picker would lose the second album-
+	// artist credit for that subset of files (Gemini HIGH on PR #208).
+	dir := t.TempDir()
+	p := filepath.Join(dir, "spaced.flac")
+	writeMinimalFLACPairs(t, p, 44100, 16, [][2]string{
+		{"TITLE", "Track"},
+		{"ALBUM", "Compilation"},
+		{"ARTIST", "Performer"},
+		{"ALBUM ARTIST", "Curator A"},
+		{"ALBUM ARTIST", "Curator B"},
+	})
+	tr := &Track{Path: "spaced.flac", Size: 1, ModTime: time.Now()}
+	if err := Extract(p, tr); err != nil {
+		t.Fatal(err)
+	}
+	if tr.AlbumArtist != "Curator A; Curator B" {
+		t.Errorf("AlbumArtist: got %q, want %q (spaced `ALBUM ARTIST` variant must be accepted)", tr.AlbumArtist, "Curator A; Curator B")
+	}
+}
+
+func TestMultiValueArtistRecoversFromTrailingEmptyTag(t *testing.T) {
+	// `ARTIST=Name` followed by `ARTIST=` (trailing empty) trips
+	// dhowden/tag's last-wins map: it stores `""`, then
+	// `populateFromTagMetadata` skips the empty assignment, leaving
+	// `t.Artist` at whatever the path-derived fallback set. The
+	// multi-value pass filters empties out per segment and surfaces
+	// the real name as the ground truth (Gemini medium on PR #208).
+	dir := t.TempDir()
+	p := filepath.Join(dir, "trail-empty.flac")
+	writeMinimalFLACPairs(t, p, 44100, 16, [][2]string{
+		{"TITLE", "Track"},
+		{"ALBUM", "Album"},
+		{"ARTIST", "Real Name"},
+		{"ARTIST", ""},
+	})
+	tr := &Track{Path: "trail-empty.flac", Size: 1, ModTime: time.Now()}
+	if err := Extract(p, tr); err != nil {
+		t.Fatal(err)
+	}
+	if tr.Artist != "Real Name" {
+		t.Errorf("Artist: got %q, want %q (trailing empty `ARTIST=` must not erase a real name)", tr.Artist, "Real Name")
+	}
+}
+
+func TestMultiValueArtistTrimsWhitespacePerSegment(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "trimmy.flac")
+	writeMinimalFLACPairs(t, p, 44100, 16, [][2]string{
+		{"ARTIST", "  Abdullah Ibrahim  "},
+		{"ARTIST", "\tEkaya\n"},
+	})
+	tr := &Track{Path: "trimmy.flac", Size: 1, ModTime: time.Now()}
+	if err := Extract(p, tr); err != nil {
+		t.Fatal(err)
+	}
+	if tr.Artist != "Abdullah Ibrahim; Ekaya" {
+		t.Errorf("Artist: got %q, want %q (per-segment TrimSpace must run before the join)", tr.Artist, "Abdullah Ibrahim; Ekaya")
+	}
+}
+
 func floatPtr(v float64) *float64 { return &v }
 
 // Suppresses unused-import warning when running individual tests
