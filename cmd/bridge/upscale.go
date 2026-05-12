@@ -465,6 +465,26 @@ func runGC(stdout, stderr io.Writer, store *manifest.Store, outputDir string) in
 	}
 	fmt.Fprintf(stdout, "GC forward sweep: removed %d orphan file(s), kept %d known sidecar(s), %d failure(s).\n", removed, kept, failed)
 
+	// Guard against mass-delete on a disappeared transcoded root.
+	// If `outputDir` is missing but `track_variants` has rows, the
+	// per-row `os.Stat` below would return ENOENT for every row and
+	// the reverse sweep would nuke the entire variant catalog —
+	// even though the rows are almost certainly fine and the
+	// underlying issue is environmental (external drive
+	// disconnected, mount point gone, filesystem error). Refuse to
+	// proceed; restore access and re-run. Per CodeRabbit on PR #207.
+	//
+	// `len(allRows) == 0` is the LEGITIMATELY-empty case (no
+	// upscales ever generated on this bridge) and the forward
+	// sweep's `WalkDir` already handles a missing `outputDir`
+	// gracefully via `filepath.SkipDir`, so this guard only fires
+	// when there's something to lose.
+	if len(allRows) > 0 {
+		if _, statErr := os.Stat(outputDir); errors.Is(statErr, os.ErrNotExist) {
+			fmt.Fprintf(stderr, "GC reverse sweep: transcoded directory %q is missing but %d variant row(s) exist; refusing to delete rows en masse (likely a disconnected mount or filesystem issue — restore access and re-run).\n", outputDir, len(allRows))
+			return 1
+		}
+	}
 	// Reverse sweep: each row in `track_variants` whose `sidecar_path`
 	// is missing on disk is a phantom variant. `DeleteVariant` is the
 	// store API designed for this exact case — it bumps the parent

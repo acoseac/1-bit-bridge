@@ -198,3 +198,73 @@ func TestRunGCReverseSweepRemovesOrphanRows(t *testing.T) {
 		t.Errorf("expected reverse-sweep removal count to be 2 (dead + broken-link): %s", out)
 	}
 }
+
+// TestRunGCRefusesWhenOutputDirMissingButRowsExist locks the
+// mass-delete safety guard. Scenario: operator's transcoded
+// directory disappears (external drive disconnected, broken
+// mount, filesystem error) but `track_variants` still has rows.
+// Without the guard, the reverse sweep would `os.Stat` every
+// row, get ENOENT for all of them, and call `DeleteVariant` on
+// every single one — wiping the entire variant catalog.
+// CodeRabbit on PR #207.
+//
+// The legitimate empty-state case (`len(allRows) == 0`, no
+// upscales ever generated) is NOT covered here because the
+// forward sweep's `WalkDir` already handles a missing
+// `outputDir` via `filepath.SkipDir` and the reverse sweep's
+// loop body is a no-op against an empty row set — both pass
+// trivially without the guard. The guard only fires when
+// there's something to lose.
+func TestRunGCRefusesWhenOutputDirMissingButRowsExist(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "bridge.db")
+	store, err := manifest.OpenStore(storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	// Seed one variant row whose sidecar_path lives under a
+	// transcoded directory that we WILL NOT create.
+	src := "Artist/Album/01 - protected.flac"
+	if err := store.UpsertTrack(&manifest.Track{
+		Path: src, Size: 100, ModTime: time.Now().Add(-time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	missingDir := filepath.Join(dir, "transcoded-never-created")
+	if err := store.UpsertVariant(manifest.VariantRow{
+		SourcePath: src, VariantID: "upscaled-v2-176400-24",
+		SidecarPath: filepath.Join(missingDir, "abc-upscaled-v2-176400-24.flac"),
+		Format:      "flac",
+		SampleRate:  176400, BitsPerSample: 24, SizeBytes: 10,
+		SourceMTimeNS: 1, SourceSize: 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	rc := runGC(&stdout, &stderr, store, missingDir)
+	if rc == 0 {
+		t.Fatalf("expected runGC to fail when outputDir is missing but rows exist; stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+
+	// Critical assertion: the row MUST still be in the DB. The
+	// guard's whole purpose is to prevent a mass-delete on
+	// environmental failure.
+	all, err := store.AllVariants()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 || all[0].SourcePath != src {
+		t.Errorf("expected the variant row to survive the refused gc; got %d rows: %+v", len(all), all)
+	}
+
+	// Stderr must explain WHY the gc refused, so an operator
+	// running this from cron / a script sees an actionable
+	// message rather than a silent failure.
+	se := stderr.String()
+	if !strings.Contains(se, "refusing to delete rows") {
+		t.Errorf("expected stderr to explain the refusal: %s", se)
+	}
+}
