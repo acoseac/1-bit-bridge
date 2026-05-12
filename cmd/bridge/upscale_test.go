@@ -83,6 +83,34 @@ func TestRunGCReverseSweepRemovesOrphanRows(t *testing.T) {
 		t.Fatalf("UpsertVariant dead: %v", err)
 	}
 
+	// Third scenario: a row whose `sidecar_path` IS a live symlink,
+	// but the symlink's target is missing. The bridge's
+	// `/v1/download` path opens through the symlink and would 410
+	// on the broken target, so the gc must treat this identically
+	// to a directly-missing file. `os.Stat` follows the link and
+	// returns ENOENT on the missing target; `os.Lstat` would have
+	// succeeded (the link itself exists) and left this row in
+	// place, which is wrong. Per Gemini on PR #207.
+	brokenLinkSrc := "Artist/Album/03 - phantom-link.flac"
+	if err := store.UpsertTrack(&manifest.Track{
+		Path: brokenLinkSrc, Size: 100, ModTime: oldTime,
+	}); err != nil {
+		t.Fatalf("UpsertTrack brokenLink: %v", err)
+	}
+	missingTarget := filepath.Join(transcodedDir, "this-target-never-existed.flac")
+	brokenLink := filepath.Join(transcodedDir, "ghi789-upscaled-v1-176400-24.flac")
+	if err := os.Symlink(missingTarget, brokenLink); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if err := store.UpsertVariant(manifest.VariantRow{
+		SourcePath: brokenLinkSrc, VariantID: "upscaled-v1-176400-24",
+		SidecarPath: brokenLink, Format: "flac",
+		SampleRate: 176400, BitsPerSample: 24, SizeBytes: 10,
+		SourceMTimeNS: 1, SourceSize: 100,
+	}); err != nil {
+		t.Fatalf("UpsertVariant brokenLink: %v", err)
+	}
+
 	// Snapshot of indexed_at via the public API: `ListTracks(since:)`
 	// returns rows where `indexed_at > since`. Captured just before
 	// runGC so the reverse-sweep bump for the dead-row's parent
@@ -97,18 +125,25 @@ func TestRunGCReverseSweepRemovesOrphanRows(t *testing.T) {
 		t.Fatalf("runGC rc=%d, stderr=%s", rc, stderr.String())
 	}
 
-	// Live row + live sidecar must survive.
+	// Live row + live sidecar must survive. Dead row + broken-link
+	// row must be removed (both are phantom variants from the
+	// bridge's `/v1/download` perspective: opening through either
+	// yields ENOENT). Per Gemini on PR #207: the broken-link case
+	// is exactly why `os.Stat` (follows links) is correct here
+	// rather than `os.Lstat` (link presence ≠ servability).
 	all, err := store.AllVariants()
 	if err != nil {
 		t.Fatal(err)
 	}
-	var keptLive, keptDead bool
+	var keptLive, keptDead, keptBrokenLink bool
 	for _, v := range all {
-		if v.SourcePath == liveSrc {
+		switch v.SourcePath {
+		case liveSrc:
 			keptLive = true
-		}
-		if v.SourcePath == deadSrc {
+		case deadSrc:
 			keptDead = true
+		case brokenLinkSrc:
+			keptBrokenLink = true
 		}
 	}
 	if !keptLive {
@@ -116,6 +151,9 @@ func TestRunGCReverseSweepRemovesOrphanRows(t *testing.T) {
 	}
 	if keptDead {
 		t.Error("expected dead variant row (missing sidecar) to be removed")
+	}
+	if keptBrokenLink {
+		t.Error("expected broken-symlink variant row to be removed — os.Lstat-based check would erroneously keep it")
 	}
 	if _, err := os.Stat(liveSidecar); err != nil {
 		t.Errorf("expected live sidecar to survive forward sweep: %v", err)
@@ -156,7 +194,7 @@ func TestRunGCReverseSweepRemovesOrphanRows(t *testing.T) {
 	if !strings.Contains(out, "reverse sweep") {
 		t.Errorf("expected stdout to mention reverse sweep: %s", out)
 	}
-	if !strings.Contains(out, "removed 1 orphan row") {
-		t.Errorf("expected reverse-sweep removal count to be 1: %s", out)
+	if !strings.Contains(out, "removed 2 orphan row") {
+		t.Errorf("expected reverse-sweep removal count to be 2 (dead + broken-link): %s", out)
 	}
 }

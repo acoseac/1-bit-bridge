@@ -469,12 +469,23 @@ func runGC(stdout, stderr io.Writer, store *manifest.Store, outputDir string) in
 	// is missing on disk is a phantom variant. `DeleteVariant` is the
 	// store API designed for this exact case — it bumps the parent
 	// track's `indexed_at` so the next iOS delta sync sees the row
-	// disappear, closing the loop. Stat with `os.Lstat` (not `os.Stat`)
-	// so a broken symlink counts as missing rather than following the
-	// link.
+	// disappear, closing the loop. Use `os.Stat` (NOT `os.Lstat`) so
+	// a symlink pointing at a missing target is correctly treated as
+	// a phantom: the bridge's `/v1/download` path opens the file
+	// through the symlink and would 410 on a broken target, so the
+	// gc should treat that case identically to a directly-missing
+	// file. Per Gemini on PR #207.
+	//
+	// Per-row `DeleteVariant` (one transaction per orphan) over a
+	// bulk-delete API: `--gc` is operator-initiated and infrequent,
+	// orphan counts are typically <100 in practice, and a new bulk
+	// path on the Store would duplicate the `indexed_at`-bump
+	// machinery `DeleteVariant` already provides. CLAUDE.md "no
+	// premature abstractions" — revisit if a future call site
+	// proves the volume out.
 	var rowsRemoved, rowsKept, rowsFailed int
 	for _, r := range allRows {
-		_, statErr := os.Lstat(r.SidecarPath)
+		_, statErr := os.Stat(r.SidecarPath)
 		switch {
 		case statErr == nil:
 			rowsKept++
@@ -490,7 +501,7 @@ func runGC(stdout, stderr io.Writer, store *manifest.Store, outputDir string) in
 			// the row rather than risk a destructive delete on a
 			// transient failure. Operator re-runs `--gc` after
 			// fixing the environment.
-			fmt.Fprintf(stderr, "lstat %s: %v\n", r.SidecarPath, statErr)
+			fmt.Fprintf(stderr, "stat %s: %v\n", r.SidecarPath, statErr)
 			rowsFailed++
 		}
 	}
