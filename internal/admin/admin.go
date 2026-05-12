@@ -144,6 +144,24 @@ type Deps struct {
 	// semantically wrong).
 	UpscaleStats func() *UpscalePoolStats
 
+	// ProjectedSize estimates the on-disk size of a FLAC
+	// variant produced from (sourceSize, sourceRate, sourceBits)
+	// at (targetRate, targetBits). Wired to
+	// `transcode.ProjectedSize` (with `DefaultCompressionFactor`
+	// baked in) via a closure in cmd/bridge/main.go so the admin
+	// package doesn't import internal/transcode. Mirrors the
+	// UpscaleStats / UpscalePrecheck decoupling pattern.
+	//
+	// Nil when upscale is disabled — the projection endpoint
+	// surfaces a clean 503 in that case.
+	ProjectedSize func(sourceSize int64, sourceRate, sourceBits, targetRate, targetBits int) int64
+
+	// AvailableDiskSpace probes free bytes on the volume holding
+	// `dir`. Wired to `transcode.AvailableDiskSpace`. Nil-safe
+	// alongside ProjectedSize (both wired together when upscale
+	// is enabled, both nil when disabled).
+	AvailableDiskSpace func(dir string) (int64, error)
+
 	// IsSupervised reports whether the current process is running
 	// under launchd / systemd / Windows SCM — i.e. whether
 	// `os.Exit(0)` will trigger an automatic relaunch. Threaded
@@ -372,6 +390,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/settings", s.apiSettingsGet)
 	mux.HandleFunc("PATCH /api/settings", s.apiSettingsPatch)
 	mux.HandleFunc("GET /api/upscale/stats", s.apiUpscaleStats)
+	mux.HandleFunc("GET /api/library/browse", s.apiLibraryBrowse)
+	mux.HandleFunc("GET /api/library/browse-projection", s.apiLibraryBrowseProjection)
 	mux.HandleFunc("POST /api/restart", s.apiRestart)
 	mux.HandleFunc("GET /api/pair-qr", s.apiPairQR)
 	mux.HandleFunc("GET /api/backups", s.apiBackupsList)

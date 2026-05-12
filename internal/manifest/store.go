@@ -2099,6 +2099,310 @@ func (s *Store) RecoverInterruptedBatches(nowUnixNS int64) (rowsAffected int64, 
 	return n, nil
 }
 
+// ----- Library Browse (v1.3 admin Library Inspector) -----
+
+// FolderRollup is the recursive aggregation under one path prefix:
+// total tracks, tracks with at least one variant, sum of source
+// sizes, sum of variant sizes. Used by `RollupByPrefix` and embedded
+// in `ChildFolderRollup` for browse rows.
+//
+// Sizes are int64 bytes; counts are int (a library plausibly past
+// MaxInt32 tracks is implausible for the bridge's target deployment).
+type FolderRollup struct {
+	TrackCount         int
+	UpscaledTrackCount int
+	TotalSizeBytes     int64
+	UpscaledSizeBytes  int64
+}
+
+// ChildFolderRollup represents one folder row in the admin Library
+// Inspector's tree view. Each carries the recursive rollup for its
+// subtree so the UI can render the per-folder status ring + size
+// summary without a follow-up call per row.
+type ChildFolderRollup struct {
+	Path string
+	FolderRollup
+}
+
+// ChildTrack is the projection a track exposes to the browse API.
+// Reads json_extract for sample rate / bit depth / codec / isDSD so
+// the admin endpoint doesn't deserialise the full tags_json blob for
+// every row. `IsUpscaled` is determined by an EXISTS subquery against
+// `track_variants` — true if at least one variant exists for the
+// source path (regardless of target rate / bits).
+type ChildTrack struct {
+	Path          string
+	Size          int64
+	SampleRate    *float64
+	BitsPerSample *int
+	Codec         string
+	IsDSD         *bool
+	IsUpscaled    bool
+}
+
+// ListChildFolders returns the immediate-child folders of `parent`,
+// each carrying rollup counters for its subtree (tracks + upscaled
+// variants). `parent` is the library-relative folder path — no
+// leading slash, no trailing slash. Empty string means "the library
+// root" and returns folders whose path contains no slash (matches
+// both single-root album folders and multi-root basename folders).
+//
+// The rollup is computed via correlated subqueries against `tracks`
+// and `track_variants`. Loopback admin-only callers; no rate limit
+// needed. SQLite plans the subqueries against the existing PRIMARY
+// KEY indexes (tracks.path, track_variants.source_path).
+func (s *Store) ListChildFolders(parent string) ([]ChildFolderRollup, error) {
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if parent == "" {
+		// Top-level: folders whose path has no slash. Matches
+		// multi-root basenames (e.g. "MusicRootA") AND single-root
+		// album folders (e.g. "AlbumA").
+		rows, err = s.db.Query(`
+			SELECT f.path,
+			       (SELECT COUNT(*) FROM tracks t
+			          WHERE t.path LIKE f.path || '/%' ESCAPE '\') AS track_count,
+			       (SELECT COUNT(DISTINCT tv.source_path) FROM track_variants tv
+			          WHERE tv.source_path LIKE f.path || '/%' ESCAPE '\') AS upscaled_count,
+			       (SELECT COALESCE(SUM(t.size), 0) FROM tracks t
+			          WHERE t.path LIKE f.path || '/%' ESCAPE '\') AS total_size,
+			       (SELECT COALESCE(SUM(tv.size_bytes), 0) FROM track_variants tv
+			          WHERE tv.source_path LIKE f.path || '/%' ESCAPE '\') AS upscaled_size
+			  FROM folders f
+			 WHERE instr(f.path, '/') = 0
+			 ORDER BY f.path ASC
+		`)
+	} else {
+		likePat := likeEscape(parent) + `/%`
+		// `length(?)` in SQL (NOT Go's len()) so UTF-8 parents with
+		// multi-byte characters compute the substring offset on
+		// the same character-counted basis as substr(). Go's
+		// len() returns byte count for a UTF-8 string and would
+		// over-shoot by `bytes - chars` on a parent like "Müller".
+		rows, err = s.db.Query(`
+			SELECT f.path,
+			       (SELECT COUNT(*) FROM tracks t
+			          WHERE t.path LIKE f.path || '/%' ESCAPE '\') AS track_count,
+			       (SELECT COUNT(DISTINCT tv.source_path) FROM track_variants tv
+			          WHERE tv.source_path LIKE f.path || '/%' ESCAPE '\') AS upscaled_count,
+			       (SELECT COALESCE(SUM(t.size), 0) FROM tracks t
+			          WHERE t.path LIKE f.path || '/%' ESCAPE '\') AS total_size,
+			       (SELECT COALESCE(SUM(tv.size_bytes), 0) FROM track_variants tv
+			          WHERE tv.source_path LIKE f.path || '/%' ESCAPE '\') AS upscaled_size
+			  FROM folders f
+			 WHERE f.path LIKE ? ESCAPE '\'
+			   AND instr(substr(f.path, length(?) + 2), '/') = 0
+			 ORDER BY f.path ASC
+		`, likePat, parent)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list child folders %q: %w", parent, err)
+	}
+	defer rows.Close()
+	out := []ChildFolderRollup{}
+	for rows.Next() {
+		var row ChildFolderRollup
+		if err := rows.Scan(
+			&row.Path,
+			&row.TrackCount,
+			&row.UpscaledTrackCount,
+			&row.TotalSizeBytes,
+			&row.UpscaledSizeBytes,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+// ListChildTracks returns the immediate-child tracks of `parent`
+// (one level deep, NOT recursive). `parent == ""` returns tracks
+// whose path contains no slash (single-root libraries with audio
+// files at the FS root, rare but possible).
+//
+// Sample rate / bits / codec / isDSD are read via `json_extract`
+// against `tags_json` — typed via NULL-safe Scan into pointer fields
+// so an extractor that left a field empty returns `nil` rather than
+// a zero-valued non-pointer that pretends to be set.
+//
+// `IsUpscaled` is determined by EXISTS against `track_variants` —
+// "at least one variant" regardless of target rate / bits. The
+// admin Library Inspector uses this to render the per-row
+// "upscale ready" indicator without joining the full variant rows.
+func (s *Store) ListChildTracks(parent string) ([]ChildTrack, error) {
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if parent == "" {
+		rows, err = s.db.Query(`
+			SELECT t.path, t.size,
+			       json_extract(t.tags_json, '$.sampleRate')    AS sample_rate,
+			       json_extract(t.tags_json, '$.bitsPerSample') AS bits_per_sample,
+			       json_extract(t.tags_json, '$.codec')         AS codec,
+			       json_extract(t.tags_json, '$.isDSD')         AS is_dsd,
+			       EXISTS(SELECT 1 FROM track_variants tv
+			               WHERE tv.source_path = t.path)       AS is_upscaled
+			  FROM tracks t
+			 WHERE instr(t.path, '/') = 0
+			 ORDER BY t.path ASC
+		`)
+	} else {
+		likePat := likeEscape(parent) + `/%`
+		// `length(?)` (SQLite character count) — see ListChildFolders
+		// for the UTF-8 byte-vs-char rationale.
+		rows, err = s.db.Query(`
+			SELECT t.path, t.size,
+			       json_extract(t.tags_json, '$.sampleRate')    AS sample_rate,
+			       json_extract(t.tags_json, '$.bitsPerSample') AS bits_per_sample,
+			       json_extract(t.tags_json, '$.codec')         AS codec,
+			       json_extract(t.tags_json, '$.isDSD')         AS is_dsd,
+			       EXISTS(SELECT 1 FROM track_variants tv
+			               WHERE tv.source_path = t.path)       AS is_upscaled
+			  FROM tracks t
+			 WHERE t.path LIKE ? ESCAPE '\'
+			   AND instr(substr(t.path, length(?) + 2), '/') = 0
+			 ORDER BY t.path ASC
+		`, likePat, parent)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list child tracks %q: %w", parent, err)
+	}
+	defer rows.Close()
+	out := []ChildTrack{}
+	for rows.Next() {
+		var (
+			ct       ChildTrack
+			rate     sql.NullFloat64
+			bits     sql.NullInt64
+			codec    sql.NullString
+			isDSDRaw sql.NullInt64 // SQLite returns 0/1 for booleans; isDSD is stored as bool JSON, json_extract gives 0/1
+			upscaled int           // EXISTS returns 0/1
+		)
+		if err := rows.Scan(&ct.Path, &ct.Size, &rate, &bits, &codec, &isDSDRaw, &upscaled); err != nil {
+			return nil, err
+		}
+		if rate.Valid {
+			v := rate.Float64
+			ct.SampleRate = &v
+		}
+		if bits.Valid {
+			v := int(bits.Int64)
+			ct.BitsPerSample = &v
+		}
+		if codec.Valid {
+			ct.Codec = codec.String
+		}
+		if isDSDRaw.Valid {
+			b := isDSDRaw.Int64 != 0
+			ct.IsDSD = &b
+		}
+		ct.IsUpscaled = upscaled != 0
+		out = append(out, ct)
+	}
+	return out, rows.Err()
+}
+
+// RollupByPrefix returns the recursive aggregation under `prefix`:
+// total track count, tracks with at least one variant, sum of source
+// sizes, sum of variant sizes. Empty prefix means "the whole library."
+//
+// Used by the admin Library Inspector to render per-root summaries
+// on the empty-parent browse, and by the projection endpoint
+// (apiLibraryBrowseProjection) to back out the source-size sum the
+// operator's pre-flight needs before a batch submit.
+//
+// The four counters come from two scalar queries (tracks + variants)
+// so the round-trip cost is two SQLite calls regardless of subtree
+// size. Indexes on `tracks(path)` and `track_variants(source_path)`
+// make these O(matched rows) lookups.
+func (s *Store) RollupByPrefix(prefix string) (FolderRollup, error) {
+	var pattern string
+	if prefix == "" {
+		pattern = `%` // match all rows
+	} else {
+		escaped := likeEscape(prefix)
+		pattern = escaped + `/%`
+	}
+	var out FolderRollup
+	if err := s.db.QueryRow(`
+		SELECT COUNT(*), COALESCE(SUM(size), 0)
+		  FROM tracks
+		 WHERE path LIKE ? ESCAPE '\'
+	`, pattern).Scan(&out.TrackCount, &out.TotalSizeBytes); err != nil {
+		return FolderRollup{}, fmt.Errorf("rollup tracks %q: %w", prefix, err)
+	}
+	if err := s.db.QueryRow(`
+		SELECT COUNT(DISTINCT source_path), COALESCE(SUM(size_bytes), 0)
+		  FROM track_variants
+		 WHERE source_path LIKE ? ESCAPE '\'
+	`, pattern).Scan(&out.UpscaledTrackCount, &out.UpscaledSizeBytes); err != nil {
+		return FolderRollup{}, fmt.Errorf("rollup variants %q: %w", prefix, err)
+	}
+	return out, nil
+}
+
+// TrackProjection carries the per-track fields the operator pre-
+// flight (apiLibraryBrowseProjection) needs to call ProjectedSize.
+// Slim shape so listing every track under a path doesn't pay the
+// per-row JSON allocation for unused tag fields.
+type TrackProjection struct {
+	Path          string
+	Size          int64
+	SampleRate    int
+	BitsPerSample int
+	HasVariant    bool
+}
+
+// ListTrackProjectionsUnderPrefix iterates every track under `prefix`
+// (recursive — NOT one-level) and returns the slim projection fields
+// the admin pre-flight needs to compute the batch's projected
+// upscaled size. `HasVariant` is true when at least one variant
+// exists at the source path, so the caller can subtract tracks
+// already covered from the projected total.
+//
+// Tracks with no `sampleRate` or `bitsPerSample` in `tags_json`
+// (extractor couldn't read the format) return zero in those fields;
+// `ProjectedSize` returns 0 for zero rates / bits, so they
+// naturally contribute nothing to the projection. The admin can
+// surface a separate "X unknown-format tracks" counter if needed.
+func (s *Store) ListTrackProjectionsUnderPrefix(prefix string) ([]TrackProjection, error) {
+	var pattern string
+	if prefix == "" {
+		pattern = `%`
+	} else {
+		escaped := likeEscape(prefix)
+		pattern = escaped + `/%`
+	}
+	rows, err := s.db.Query(`
+		SELECT t.path, t.size,
+		       CAST(COALESCE(json_extract(t.tags_json, '$.sampleRate'),    0) AS INTEGER) AS rate,
+		       CAST(COALESCE(json_extract(t.tags_json, '$.bitsPerSample'), 0) AS INTEGER) AS bits,
+		       EXISTS(SELECT 1 FROM track_variants tv WHERE tv.source_path = t.path) AS has_variant
+		  FROM tracks t
+		 WHERE t.path LIKE ? ESCAPE '\'
+		 ORDER BY t.path ASC
+	`, pattern)
+	if err != nil {
+		return nil, fmt.Errorf("list track projections %q: %w", prefix, err)
+	}
+	defer rows.Close()
+	out := []TrackProjection{}
+	for rows.Next() {
+		var tp TrackProjection
+		var has int
+		if err := rows.Scan(&tp.Path, &tp.Size, &tp.SampleRate, &tp.BitsPerSample, &has); err != nil {
+			return nil, err
+		}
+		tp.HasVariant = has != 0
+		out = append(out, tp)
+	}
+	return out, rows.Err()
+}
+
 // VariantRow is the on-disk record for one cached transcoded
 // rendering of a track. Mirrors `track_variants` schema column-for-
 // column. Constructed by the transcode package when a sox run

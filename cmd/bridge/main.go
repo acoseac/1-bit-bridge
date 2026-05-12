@@ -1267,6 +1267,27 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 				Failed:   s.Failed,
 			}
 		},
+		// Library Inspector projection closures (v1.3). Both
+		// wired only when upscale is enabled — the admin
+		// projection endpoint surfaces 503 when they're nil
+		// (matches the iOS-facing /v1/upscale gating).
+		// `DefaultCompressionFactor` is baked into the closure so
+		// admin doesn't need to know which factor matches which
+		// bit depth.
+		ProjectedSize: func(sourceSize int64, sourceRate, sourceBits, targetRate, targetBits int) int64 {
+			if !cfg.Upscale.Enabled {
+				return 0
+			}
+			return transcode.ProjectedSize(sourceSize, sourceRate, sourceBits,
+				targetRate, targetBits,
+				transcode.DefaultCompressionFactor(targetBits))
+		},
+		AvailableDiskSpace: func(dir string) (int64, error) {
+			if !cfg.Upscale.Enabled {
+				return 0, fmt.Errorf("upscale disabled")
+			}
+			return transcode.AvailableDiskSpace(dir)
+		},
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "admin: %v\n", err)
