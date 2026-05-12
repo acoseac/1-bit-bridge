@@ -15,6 +15,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/dsn"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
+	"github.com/google/uuid"
 	_ "modernc.org/sqlite" // register "sqlite" driver (pure-Go, no cgo)
 )
 
@@ -321,6 +322,74 @@ var migrations = []migration{
 			_, _ = db.Exec(`ALTER TABLE folders ADD COLUMN missing_count INTEGER NOT NULL DEFAULT 0`)
 			return nil
 		},
+	},
+	{
+		version: 6,
+		name:    "upscale_batches (v1.3 — operator-driven upscaling)",
+		// Tracks operator-initiated upscale runs at folder / root /
+		// library granularity. Replaces the per-track-tap model in
+		// v1.2 — the iOS wand UI submitted one job at a time with no
+		// queue position or ETA visibility; this table is the bridge-
+		// side ledger that admin Library Inspector + Jobs page render.
+		//
+		// Schema notes:
+		//   - `id BLOB PRIMARY KEY` carries a UUID v4 emitted by the
+		//     coordinator at Submit time. BLOB chosen over TEXT to
+		//     store the raw 16-byte form; saves ~36 bytes per row vs
+		//     hex-encoded TEXT at the cost of needing
+		//     `uuid.FromBytes(...)` on read. Negligible at expected
+		//     scale (hundreds of rows over a library's lifetime).
+		//   - `path` is the operator-selected scope: library-relative
+		//     folder, library-relative root, or empty string for
+		//     "whole library." Same normalization rules as
+		//     `normalizePathForLookup` (NFC, slash-collapsed, no
+		//     leading slash).
+		//   - `target_rate INTEGER` in Hz (e.g. 192000), `target_bits
+		//     INTEGER` (16 / 24). Each batch carries the resolved
+		//     target at Submit time so a mid-run change to the global
+		//     setting doesn't retroactively shift in-flight work.
+		//   - `status` lifecycle: `pending` → `running` → `completed`
+		//     | `failed` | `cancelled` | `interrupted`. `interrupted`
+		//     is the bridge-restart recovery state — set by
+		//     `RecoverInterruptedBatches` at boot, distinct from
+		//     `cancelled` (operator action) and `failed` (every job
+		//     errored). Pre-CHECK constraint enforces the enum at the
+		//     DB layer; future statuses require a CHECK rewrite +
+		//     migration bump.
+		//   - `total_files` / `processed_files` / `failed_files`
+		//     counters are bumped by the coordinator on each pool
+		//     callback (PR 3 wires this).
+		//   - `error TEXT` accommodates redacted sox stderr which can
+		//     run multi-line for codec-mismatch / corrupt-header
+		//     failures. SQLite TEXT is unbounded — DON'T add a
+		//     `CHECK (length(error) < N)` constraint; truncation
+		//     belongs in the coordinator's writer if needed (~4 KiB
+		//     cap is a reasonable upper bound but not enforced here).
+		//   - `created_at` / `updated_at` are nanosecond Unix epochs,
+		//     matching the existing `indexed_at` / `enriched_at`
+		//     convention.
+		//
+		// Index `idx_upscale_batches_status_created` powers the Jobs
+		// page's filter chips (All / Running / Completed / Failed)
+		// without a full table scan.
+		sql: `
+		CREATE TABLE IF NOT EXISTS upscale_batches (
+			id              BLOB    PRIMARY KEY,
+			path            TEXT    NOT NULL,
+			target_rate     INTEGER NOT NULL,
+			target_bits     INTEGER NOT NULL,
+			status          TEXT    NOT NULL
+				CHECK (status IN ('pending','running','completed','failed','cancelled','interrupted')),
+			total_files     INTEGER NOT NULL DEFAULT 0,
+			processed_files INTEGER NOT NULL DEFAULT 0,
+			failed_files    INTEGER NOT NULL DEFAULT 0,
+			error           TEXT,
+			created_at      INTEGER NOT NULL,
+			updated_at      INTEGER NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_upscale_batches_status_created
+			ON upscale_batches(status, created_at DESC);
+		`,
 	},
 }
 
@@ -1845,6 +1914,189 @@ func (s *Store) GetScanState(key string) (string, error) {
 		return "", nil
 	}
 	return v, err
+}
+
+// ----- upscale target settings (v1.3) -----
+
+// scan_state keys carrying the operator-controlled upscale target.
+// Stored as decimal strings; parsing happens at the boundary. Centralised
+// constants so the seeder (cmd/bridge/main.go) and the reader can't
+// drift on key naming.
+const (
+	UpscaleTargetRateKey = "upscale_target_hz"
+	UpscaleTargetBitsKey = "upscale_target_bits"
+)
+
+// ErrUpscaleTargetUnset is returned by GetUpscaleTarget when neither
+// scan_state row has been seeded. Callers (typically the coordinator
+// at job-Submit time) should fall back to their config-derived default.
+var ErrUpscaleTargetUnset = errors.New("upscale target not configured")
+
+// GetUpscaleTarget returns the operator-chosen target rate (Hz) and
+// bit depth (16 / 24 / 32) from scan_state. Returns ErrUpscaleTargetUnset
+// if either key is missing — the coordinator should seed both with the
+// `bridge.yaml` bootstrap defaults via SetUpscaleTarget at startup.
+//
+// Parse failures (non-numeric stored value) are surfaced as wrapped
+// errors rather than silently falling back: a malformed value means
+// either a buggy writer or DB corruption, and silently substituting a
+// default would mask the bug.
+func (s *Store) GetUpscaleTarget() (rateHz int, bits int, err error) {
+	rateStr, err := s.GetScanState(UpscaleTargetRateKey)
+	if err != nil {
+		return 0, 0, fmt.Errorf("read %s: %w", UpscaleTargetRateKey, err)
+	}
+	bitsStr, err := s.GetScanState(UpscaleTargetBitsKey)
+	if err != nil {
+		return 0, 0, fmt.Errorf("read %s: %w", UpscaleTargetBitsKey, err)
+	}
+	if rateStr == "" || bitsStr == "" {
+		return 0, 0, ErrUpscaleTargetUnset
+	}
+	r, err := strconv.Atoi(rateStr)
+	if err != nil {
+		return 0, 0, fmt.Errorf("parse %s=%q: %w", UpscaleTargetRateKey, rateStr, err)
+	}
+	b, err := strconv.Atoi(bitsStr)
+	if err != nil {
+		return 0, 0, fmt.Errorf("parse %s=%q: %w", UpscaleTargetBitsKey, bitsStr, err)
+	}
+	return r, b, nil
+}
+
+// SetUpscaleTarget writes both keys atomically (single transaction so
+// a reader after a partial-failure write never sees a mismatched
+// rate/bits pair). Rate must be > 0, bits ∈ {16, 24, 32}; out-of-range
+// values are rejected with a typed error before the write commits.
+func (s *Store) SetUpscaleTarget(rateHz, bits int) error {
+	if rateHz <= 0 {
+		return fmt.Errorf("upscale target rate %d Hz: must be positive", rateHz)
+	}
+	switch bits {
+	case 16, 24, 32:
+	default:
+		return fmt.Errorf("upscale target bits %d: must be 16, 24, or 32", bits)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() // no-op after Commit
+	const upsert = `
+		INSERT INTO scan_state(k, v) VALUES(?, ?)
+		ON CONFLICT(k) DO UPDATE SET v = excluded.v
+	`
+	if _, err := tx.Exec(upsert, UpscaleTargetRateKey, strconv.Itoa(rateHz)); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(upsert, UpscaleTargetBitsKey, strconv.Itoa(bits)); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// ----- upscale_batches CRUD (v1.3) -----
+
+// UpscaleBatchRow is the on-disk record for one operator-initiated
+// batch. Constructed by the coordinator at Submit time; updated as
+// the pool drains the contained jobs. PR 3 introduces the full CRUD
+// surface; PR 1 ships InsertUpscaleBatch + RecoverInterruptedBatches
+// so the migration v6 schema is exercised end-to-end and bridge
+// startup can clean up after a crash.
+type UpscaleBatchRow struct {
+	// ID is a UUID minted by the coordinator at Submit time. Stored
+	// as the raw 16-byte BLOB; uuid.UUID's `[16]byte` underlying
+	// type makes the conversion trivial at the SQL boundary.
+	ID uuid.UUID
+	// Path is the library-relative scope (folder, root, or empty for
+	// whole-library). Normalisation is the caller's responsibility.
+	Path string
+	// TargetRate is the resolved output rate in Hz (e.g. 192000),
+	// captured at Submit time. A mid-run change to the global setting
+	// does not retroactively shift this batch.
+	TargetRate int
+	// TargetBits is the resolved output bit depth (16/24/32).
+	TargetBits int
+	// Status is one of 'pending','running','completed','failed',
+	// 'cancelled','interrupted'. The CHECK constraint at the SQL
+	// layer enforces the enum; an invalid value rejects the insert.
+	Status string
+	// Counters are bumped by the coordinator on each pool callback
+	// (PR 3). PR 1 inserts them at zero or seed values.
+	TotalFiles     int
+	ProcessedFiles int
+	FailedFiles    int
+	// Error holds redacted sox stderr / coordinator-side failure
+	// reason. Empty on the happy path. Multi-line tolerated.
+	Error string
+	// CreatedAt / UpdatedAt are nanosecond Unix epochs.
+	CreatedAt int64
+	UpdatedAt int64
+}
+
+// InsertUpscaleBatch writes one row. Used by the coordinator at
+// Submit time; also called directly from tests covering migration v6.
+// The status value is validated against the SQL CHECK constraint by
+// SQLite; an invalid string surfaces as a constraint failure.
+//
+// Holds s.mu per the writer contract.
+func (s *Store) InsertUpscaleBatch(row UpscaleBatchRow) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`
+		INSERT INTO upscale_batches
+			(id, path, target_rate, target_bits, status,
+			 total_files, processed_files, failed_files,
+			 error, created_at, updated_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?)
+	`,
+		row.ID[:], row.Path, row.TargetRate, row.TargetBits, row.Status,
+		row.TotalFiles, row.ProcessedFiles, row.FailedFiles,
+		row.Error, row.CreatedAt, row.UpdatedAt,
+	)
+	return err
+}
+
+// RecoverInterruptedBatches transitions any `pending` or `running`
+// batches to `interrupted` and is intended to run exactly once at
+// bridge boot, BEFORE the coordinator accepts new submissions.
+//
+// Why this matters: a crash, `kill -9`, or scheduler-shutdown signal
+// mid-batch leaves rows stuck in `running` forever. The admin Jobs
+// page would render them as phantom in-flight batches and the
+// coordinator's in-memory state (which is rebuilt empty at boot)
+// could never resync. The transition gives the operator a
+// deterministic "interrupted" status they can Retry from the Jobs
+// page — `Coordinator.Submit` already filters tracks that have
+// variants at the target, so retry picks up only the still-unfinished
+// work.
+//
+// Returns the number of rows updated for observability (admin can log
+// it). Idempotent — repeated calls are no-ops once all rows have
+// terminal status.
+//
+// Holds s.mu per the writer contract.
+func (s *Store) RecoverInterruptedBatches(nowUnixNS int64) (rowsAffected int64, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	res, err := s.db.Exec(`
+		UPDATE upscale_batches
+		   SET status = 'interrupted', updated_at = ?
+		 WHERE status IN ('pending','running')
+	`, nowUnixNS)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		// RowsAffected on modernc/sqlite shouldn't error in practice,
+		// but the contract permits it. Treat as success-without-count
+		// rather than fail the boot path.
+		return 0, nil
+	}
+	return n, nil
 }
 
 // VariantRow is the on-disk record for one cached transcoded

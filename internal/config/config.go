@@ -314,6 +314,40 @@ func (u UpscaleConfig) EffectiveTargetRate() string {
 	return u.TargetRate
 }
 
+// EffectiveBootstrapTargetRate resolves a concrete integer Hz value
+// for seeding the DB-backed operator-controlled upscale target on
+// first run. The legacy `TargetRate` field accepts "auto" (the
+// source-rate-aware default) and arbitrary strings for the
+// per-track CLI / HTTP path; the new v1.3 operator-driven model
+// stores a fixed integer in scan_state that admin Settings edits.
+//
+// Resolution order:
+//   - explicit numeric string (e.g. "192000") → parsed and returned
+//   - "auto" or unset → DefaultBootstrapTargetRate (192000 Hz)
+//   - parse failure → DefaultBootstrapTargetRate (don't fail boot
+//     on a malformed YAML; admin Settings can correct via UI)
+//
+// Called once by cmd/bridge/main.go at boot: if scan_state has no
+// upscale_target_hz row, seed it via Store.SetUpscaleTarget(this,
+// EffectiveBootstrapTargetBits()).
+func (u UpscaleConfig) EffectiveBootstrapTargetRate() int {
+	if u.TargetRate == "" || u.TargetRate == "auto" {
+		return DefaultBootstrapTargetRate
+	}
+	if n, err := strconv.Atoi(u.TargetRate); err == nil && n > 0 {
+		return n
+	}
+	return DefaultBootstrapTargetRate
+}
+
+// EffectiveBootstrapTargetBits is the int counterpart to
+// EffectiveBootstrapTargetRate for the scan_state seed. Reuses the
+// existing EffectiveTargetBits resolver (16/24/32 with 24 default)
+// so the operator-facing default matches the legacy CLI behaviour.
+func (u UpscaleConfig) EffectiveBootstrapTargetBits() int {
+	return u.EffectiveTargetBits()
+}
+
 // LibraryWatchConfig governs the optional fsnotify-based
 // instant-update watcher. Off by default — the periodic scan
 // (ScanIntervalSec) remains the safety net in either case. Power
@@ -479,6 +513,13 @@ const (
 	// well under the cap, the user-spam-the-button case bounces
 	// against a clean 503 instead of exhausting memory.
 	DefaultUpscaleQueueCap = 5000
+	// DefaultBootstrapTargetRate is the integer Hz value used to seed
+	// scan_state.upscale_target_hz on first run when the YAML field
+	// is unset or "auto". 192000 covers most 44.1- and 48-family
+	// sources without resampling artifacts; admin Settings can edit
+	// at runtime via the v1.3 Library Inspector. Per
+	// `UpscaleConfig.EffectiveBootstrapTargetRate`.
+	DefaultBootstrapTargetRate = 192000
 )
 
 // Load parses a bridge.yaml file, fills defaults, resolves relative paths
