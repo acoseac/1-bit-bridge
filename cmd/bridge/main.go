@@ -1181,7 +1181,15 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// the SSE broker handle is in scope; Pool callbacks are
 		// wired alongside.
 		var err error
-		upscaleCoordinator, err = transcode.NewCoordinator(upscalePool, manifestStore, cfg.DataDir, nil)
+		// Resolver closure: library-relative → absolute via the live
+		// api.Server resolver. Without this the Coordinator enqueues
+		// JobSpecs with empty SourceAbsPath and every sox run fails
+		// (CodeRabbit critical on PR #201).
+		batchResolver := func(libraryRel string) (string, error) {
+			abs, _, err := apiSrv.Resolver().ResolveChecked(libraryRel)
+			return abs, err
+		}
+		upscaleCoordinator, err = transcode.NewCoordinator(upscalePool, manifestStore, cfg.DataDir, nil, batchResolver)
 		if err != nil {
 			fmt.Fprintf(stderr, "upscale coordinator: %v\n", err)
 			return 1
@@ -1280,7 +1288,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// the "upscaleCompleteEvents" capability flag advertised in
 		// /v1/health, so pre-feature iOS clients won't observe this
 		// event yet.
-		upscalePool.SetOnJobComplete(func(path, variantID string, sampleRate, bitsPerSample int, batchID uuid.UUID, completedAt time.Time) {
+		upscalePool.SetOnJobComplete(func(path, variantID string, sampleRate, bitsPerSample int, durationSeconds float64, batchID uuid.UUID, completedAt time.Time) {
 			broker.Publish("upscale.complete", api.UpscaleCompleteEvent{
 				Path:          path,
 				VariantID:     variantID,
@@ -1294,7 +1302,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			// no-ops on zero batchID (legacy per-track jobs from the
 			// pre-v1.3 `POST /v1/upscale` path).
 			if upscaleCoordinator != nil {
-				upscaleCoordinator.OnJobComplete(path, variantID, sampleRate, bitsPerSample, batchID, completedAt)
+				upscaleCoordinator.OnJobComplete(path, variantID, sampleRate, bitsPerSample, durationSeconds, batchID, completedAt)
 			}
 		})
 		// v1.3 per-job failure callback. Used by the Coordinator to

@@ -98,12 +98,13 @@ const throughputMinSamples = 3
 // Coordinator wraps a Pool with per-batch enrollment, live
 // counters, throughput math, and SSE event emission.
 type Coordinator struct {
-	pool    *Pool
-	store   *manifest.Store
-	dataDir string
-	publish CoordinatorPublishFunc
-	logger  *slog.Logger
-	clock   func() time.Time // dependency-injected for tests
+	pool     *Pool
+	store    *manifest.Store
+	dataDir  string
+	publish  CoordinatorPublishFunc
+	resolver ResolverFunc
+	logger   *slog.Logger
+	clock    func() time.Time // dependency-injected for tests
 
 	mu sync.Mutex
 	// liveBatches is the in-memory mirror of pending+running rows so
@@ -120,6 +121,22 @@ type Coordinator struct {
 	throughputCount   int // total samples ever written (caps reads at min(count, window))
 	throughputCursor  int // next write position
 }
+
+// ResolverFunc converts a library-relative path (e.g. `Music/Album/01.flac`)
+// to its absolute filesystem path. Required at JobSpec construction
+// time — `RunSox` consumes the absolute path directly and fails fast
+// on empty input. Wired in cmd/bridge/main.go via a closure around
+// `apiSrv.Resolver().Resolve(...)` so this package stays free of
+// internal/fs.
+//
+// Returns the absolute path on success. On failure (unknown root,
+// path traversal, IO error) the closure returns an error; Submit
+// silently filters those tracks out of the batch and surfaces the
+// rest, so a single bad path doesn't abort an otherwise-valid
+// folder submission. The filtered count is reflected in the
+// returned `TotalFiles` vs the input track count — operators can
+// reconcile from logs if they care which tracks dropped.
+type ResolverFunc func(libraryRel string) (absPath string, err error)
 
 // batchState mirrors the live row's counters. Snapshot-only — every
 // mutation immediately writes through to `upscale_batches` so a
@@ -138,17 +155,24 @@ type batchState struct {
 //
 // `publish` is the SSE broker emitter; nil disables event emission
 // (test harness) but counter writes still land in the DB.
+//
+// `resolver` converts library-relative paths to absolute paths at
+// JobSpec construction time. nil is permitted (test harness) but
+// Submit then refuses with an explicit error rather than enqueueing
+// broken JobSpecs.
 func NewCoordinator(
 	pool *Pool,
 	store *manifest.Store,
 	dataDir string,
 	publish CoordinatorPublishFunc,
+	resolver ResolverFunc,
 ) (*Coordinator, error) {
 	c := &Coordinator{
 		pool:        pool,
 		store:       store,
 		dataDir:     dataDir,
 		publish:     publish,
+		resolver:    resolver,
 		logger:      logging.Component("transcode.coordinator"),
 		clock:       func() time.Time { return time.Now().UTC() },
 		liveBatches: make(map[uuid.UUID]*batchState),
@@ -203,6 +227,10 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 		return nil, fmt.Errorf("submit: target bits %d: must be 16/24/32", targetBits)
 	}
 
+	if c.resolver == nil {
+		return nil, fmt.Errorf("submit: no resolver wired — Coordinator can't build JobSpec absolute paths")
+	}
+
 	projections, err := c.store.ListTrackProjectionsUnderPrefix(path)
 	if err != nil {
 		return nil, fmt.Errorf("submit: list projections: %w", err)
@@ -213,7 +241,9 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 	// skipped (the operator pre-flight surfaced them separately).
 	type candidate struct {
 		path       string
+		absPath    string
 		size       int64
+		mtimeNS    int64
 		sampleRate int
 		bits       int
 	}
@@ -222,6 +252,7 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 		alreadyCovered int
 		totalProjected int64
 		compressionFct = DefaultCompressionFactor(targetBits)
+		resolveErrors  int
 	)
 	for _, t := range projections {
 		if t.HasVariant {
@@ -237,14 +268,31 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 		if t.SampleRate >= targetRate && t.BitsPerSample >= targetBits {
 			continue
 		}
+		// Resolve abs path BEFORE projecting size, so a resolver
+		// failure (unknown root, traversal, etc.) drops the track
+		// from the projection too — operators don't see a number
+		// for work that won't actually run.
+		absPath, err := c.resolver(t.Path)
+		if err != nil {
+			resolveErrors++
+			c.logger.Warn("submit: resolve failed; skipping track",
+				"path", t.Path, "err", err)
+			continue
+		}
 		cands = append(cands, candidate{
 			path:       t.Path,
+			absPath:    absPath,
 			size:       t.Size,
+			mtimeNS:    t.MTimeNS,
 			sampleRate: t.SampleRate,
 			bits:       t.BitsPerSample,
 		})
 		totalProjected += ProjectedSize(t.Size, t.SampleRate, t.BitsPerSample,
 			targetRate, targetBits, compressionFct)
+	}
+	if resolveErrors > 0 {
+		c.logger.Info("submit: filtered tracks with resolver failures",
+			"batchPath", path, "count", resolveErrors)
 	}
 
 	// Pre-flight disk check. Refuse with a typed error carrying
@@ -308,9 +356,9 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 	enqueued := 0
 	for _, ca := range cands {
 		spec := JobSpec{
-			SourceAbsPath:    "", // resolved by caller via Resolver; the Pool's runner consumes this
+			SourceAbsPath:    ca.absPath,
 			SourceLibraryRel: ca.path,
-			SourceMTimeNS:    0, // populated by caller from the manifest's mtime if needed
+			SourceMTimeNS:    ca.mtimeNS,
 			SourceSize:       ca.size,
 			SourceSampleRate: ca.sampleRate,
 			TargetSampleRate: targetRate,
@@ -319,19 +367,42 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 			OutputDir:        outputDir,
 			BatchID:          batchID,
 		}
-		// Resolver-based abs-path resolution lives in the caller —
-		// the Coordinator just stamps the BatchID. Caller wires
-		// SubmitWithResolver below for the canonical path.
 		if err := c.pool.Enqueue(spec); err != nil {
-			// Queue full or pool closed — mark this batch as
-			// failed and surface the error. The already-enqueued
-			// jobs will run to completion; we count their results
-			// against the row even though it's now in failed state.
-			c.logger.Warn("submit: enqueue failed",
+			// Queue full or pool closed — log the failure and stop
+			// enqueueing further jobs, BUT keep the batch in
+			// `liveBatches` so the already-enqueued jobs' callbacks
+			// still attribute correctly. The remaining (never-
+			// enqueued) tracks are dropped from RemainingIDs so the
+			// terminal-status transition fires on the right count.
+			// Per CodeRabbit security-high on PR #201: dropping the
+			// batch on enqueue failure would leave in-flight workers
+			// reporting back to a vanished slot — their progress
+			// would never reach the row.
+			c.logger.Warn("submit: enqueue failed; truncating batch",
 				"batchID", batchID.String(),
 				"path", ca.path,
 				"err", err)
-			_ = c.transitionStatus(batchID, "failed", err.Error(), c.clock())
+			c.mu.Lock()
+			if st, ok := c.liveBatches[batchID]; ok {
+				// Drop the never-enqueued tail from RemainingIDs.
+				// (Includes the current `ca.path` since we didn't
+				// successfully enqueue it.)
+				dropping := false
+				for _, c2 := range cands {
+					if c2.path == ca.path {
+						dropping = true
+					}
+					if dropping {
+						delete(st.RemainingIDs, c2.path)
+					}
+				}
+				// Reduce TotalFiles so the batch can still reach
+				// terminal state via the enqueued-and-completed
+				// count alone.
+				st.Row.TotalFiles -= len(cands) - enqueued
+				st.Row.Error = "partial enqueue: " + err.Error()
+			}
+			c.mu.Unlock()
 			break
 		}
 		enqueued++
@@ -421,13 +492,18 @@ func (c *Coordinator) transitionStatus(batchID uuid.UUID, status, errMsg string,
 // invocation succeeded AND `UpsertVariant` committed. Signature
 // matches the pool's `SetOnJobComplete` parameter exactly.
 //
+// `durationSeconds` is the wall-clock cost of the sox run (captured
+// at worker startedAt → completedAt). Feeds the rolling throughput
+// ring so ETAs reflect real bridge throughput; previously this
+// path passed 0, leaving the ring empty even on a busy bridge
+// (CodeRabbit high on PR #201).
+//
 // Bumps `processed_files` on the owning batch (no-op when batchID
 // is zero — legacy single-track jobs that didn't go through Submit
-// don't have a batch to attribute to). Records the duration into
-// the throughput ring. Transitions the batch to `completed` when
-// all expected jobs have reported back.
-func (c *Coordinator) OnJobComplete(path, variantID string, sampleRate, bitsPerSample int, batchID uuid.UUID, completedAt time.Time) {
-	c.recordThroughput(completedAt)
+// don't have a batch to attribute to). Transitions the batch to
+// `completed` when all expected jobs have reported back.
+func (c *Coordinator) OnJobComplete(path, variantID string, sampleRate, bitsPerSample int, durationSeconds float64, batchID uuid.UUID, completedAt time.Time) {
+	c.recordThroughputDuration(durationSeconds, completedAt)
 	if batchID == uuid.Nil {
 		return
 	}
@@ -516,14 +592,6 @@ func (c *Coordinator) OnJobFailed(path, variantID, errMsg string, durationSecond
 	c.publishProgressRow(rowCopy)
 }
 
-// recordThroughput captures the delta between now and the most
-// recent prior completion into the rolling window. Called by both
-// OnJobComplete and OnJobFailed so the ETA reflects total worker
-// throughput regardless of success/failure split.
-func (c *Coordinator) recordThroughput(now time.Time) {
-	c.recordThroughputDuration(0, now)
-}
-
 // recordThroughputDuration is the primary entry; the per-job
 // wall-clock seconds (from worker startedAt) is the authoritative
 // per-sample value. A zero duration falls back to "fast-fail"
@@ -563,15 +631,26 @@ func (c *Coordinator) Throughput() ThroughputSnapshot {
 		return ThroughputSnapshot{Samples: samples}
 	}
 	avgSeconds := totalSec / float64(nonZero)
-	jobsPerHour := 3600.0 / avgSeconds
-	// ETA: sum remaining across live batches × avgSeconds.
+	// Workers process in parallel — per-job seconds divided by worker
+	// count gives the wall-clock time the operator actually waits
+	// when the queue is full. JobsPerHour reflects total throughput
+	// (jobs/hr across all workers), so it's already in the right
+	// shape for an admin dashboard rate display.
+	workers := 1
+	if c.pool != nil {
+		if n := c.pool.Stats().Workers; n > 0 {
+			workers = n
+		}
+	}
+	jobsPerHour := 3600.0 / avgSeconds * float64(workers)
 	remaining := 0
 	for _, st := range c.liveBatches {
 		remaining += len(st.RemainingIDs)
 	}
+	etaSeconds := float64(remaining) * avgSeconds / float64(workers)
 	return ThroughputSnapshot{
 		JobsPerHour: jobsPerHour,
-		EtaSeconds:  float64(remaining) * avgSeconds,
+		EtaSeconds:  etaSeconds,
 		Samples:     samples,
 	}
 }
