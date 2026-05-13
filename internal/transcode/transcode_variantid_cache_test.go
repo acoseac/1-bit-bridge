@@ -49,6 +49,30 @@ func TestVariantID_negativeInputsFallThrough(t *testing.T) {
 	}
 }
 
+// TestVariantID_noBitDepthAliasing pins the lossless-key contract
+// (CodeRabbit Major on PR #211). Pre-fix the cache key packed
+// `bits & 0xff`, so `bits=272` (256+16) collided with the cached
+// `bits=16` entry and returned the wrong VariantID. With the
+// `[2]int` key, any out-of-set (rate, bits) pair misses cleanly
+// and falls through to the live fmt.Sprintf.
+func TestVariantID_noBitDepthAliasing(t *testing.T) {
+	canonical := JobSpec{TargetSampleRate: 192000, TargetBits: 16}.VariantID()
+	want := fmt.Sprintf("upscaled-%s-192000-16", VariantSchemaVersion)
+	if canonical != want {
+		t.Fatalf("warm cache: got %q, want %q", canonical, want)
+	}
+	// Pre-fix this aliased to the warm (192000, 16) slot via the
+	// truncated 8-bit key.
+	aliased := JobSpec{TargetSampleRate: 192000, TargetBits: 272}.VariantID()
+	wantAliased := fmt.Sprintf("upscaled-%s-192000-272", VariantSchemaVersion)
+	if aliased != wantAliased {
+		t.Errorf("aliasing: got %q, want %q", aliased, wantAliased)
+	}
+	if aliased == canonical {
+		t.Errorf("aliasing returned the cached canonical %q for bits=272 — key truncation bug regressed", aliased)
+	}
+}
+
 // TestVariantID_memoizedNoAllocFastPath pins the perf invariant.
 // A cached lookup must NOT allocate. fmt.Sprintf would; the
 // memoized path returns a pre-built string reference.

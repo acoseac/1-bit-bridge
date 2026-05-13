@@ -160,34 +160,37 @@ func (j JobSpec) VariantID() string {
 // the unmemoized cost once and that's correct.
 var (
 	variantIDCacheOnce sync.Once
-	variantIDCache     map[uint64]string
+	variantIDCache     map[[2]int]string
 )
 
+// lookupCachedVariantID returns the memoized VariantID string for
+// the given (rate, bits) pair, or `_, false` on miss. The caller
+// falls through to the live fmt.Sprintf path on miss.
+//
+// **Lossless cache key** (CodeRabbit Major on PR #211): the prior
+// uint64-pack form `(rate << 8) | (bits & 0xff)` truncated bits
+// to 8 bits, so `bits=272` (256+16) silently aliased to the
+// cached `bits=16` entry and returned the wrong VariantID. A
+// `[2]int` key compares byte-identical to the lookup tuple with
+// zero allocation (arrays are value types) and admits the full
+// `int` range on both axes — out-of-set inputs miss cleanly and
+// fall through to the unmemoized path.
 func lookupCachedVariantID(rate, bits int) (string, bool) {
 	variantIDCacheOnce.Do(initVariantIDCache)
 	if rate < 0 || bits < 0 {
 		return "", false
 	}
-	id, ok := variantIDCache[encodeVariantKey(rate, bits)]
+	id, ok := variantIDCache[[2]int{rate, bits}]
 	return id, ok
-}
-
-// encodeVariantKey packs (rate, bits) into a single uint64 map
-// key. Rate fits in 24 bits (max 16 777 215 ≫ 192 000), bits
-// fits in 8 bits (max 255 ≫ 24). Pack avoids the per-call
-// string-keyed allocation a `fmt.Sprintf("%d-%d", …)` key would
-// reintroduce.
-func encodeVariantKey(rate, bits int) uint64 {
-	return (uint64(rate) << 8) | uint64(bits&0xff)
 }
 
 func initVariantIDCache() {
 	rates := []int{44100, 48000, 88200, 96000, 176400, 192000}
 	bitsList := []int{16, 24}
-	variantIDCache = make(map[uint64]string, len(rates)*len(bitsList))
+	variantIDCache = make(map[[2]int]string, len(rates)*len(bitsList))
 	for _, r := range rates {
 		for _, b := range bitsList {
-			variantIDCache[encodeVariantKey(r, b)] =
+			variantIDCache[[2]int{r, b}] =
 				fmt.Sprintf("upscaled-%s-%d-%d", VariantSchemaVersion, r, b)
 		}
 	}
