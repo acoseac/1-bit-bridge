@@ -1573,9 +1573,17 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			// updates, etc.). 2 s is the same budget the
 			// /v1/upscale/stats HTTP route uses for the same
 			// query. Gemini Medium on PR #218.
+			//
+			// `defer cancel()` (vs. explicit `cancel()` after the
+			// Snapshot call) keeps the cleanup robust against a
+			// future panic or early-return between the WithTimeout
+			// and the Snapshot. Matches the project-wide convention
+			// for `context.WithTimeout` (mirror of the four
+			// `defer cancel()` sites at lines 1900-1977 below).
+			// Gemini Medium on PR #219.
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
 			snap, err := upscaleStats.UpscaleStatsSnapshot(ctx)
-			cancel()
 			if err != nil {
 				// Drop the publish — pushing a partial snapshot
 				// (zero cachedVariants on timeout) would cause

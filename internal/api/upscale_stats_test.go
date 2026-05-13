@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -16,13 +17,19 @@ import (
 
 // stubStatsProvider is a test double for api.UpscaleStatsProvider.
 // Returns a fixed snapshot so tests can assert the wire shape and
-// the auth gate without standing up a transcode pool.
+// the auth gate without standing up a transcode pool. The optional
+// `err` field forces `UpscaleStatsSnapshot` to surface a failure —
+// used by `TestUpscaleStatsProviderErrorReturns503` to pin the new
+// 503 `stats_unavailable` branch wired up in PR #219 (CodeRabbit
+// nitpick on round-1: without an error-injectable stub the new
+// branch could regress silently on a future refactor).
 type stubStatsProvider struct {
 	snap UpscaleStats
+	err  error
 }
 
 func (s *stubStatsProvider) UpscaleStatsSnapshot(ctx context.Context) (UpscaleStats, error) {
-	return s.snap, nil
+	return s.snap, s.err
 }
 
 func upscaleStatsFixture(t *testing.T, withProvider bool, snap UpscaleStats) (string /* baseURL */, string /* token */) {
@@ -160,6 +167,65 @@ func TestUpscaleStatsDisabledPoolOmitted(t *testing.T) {
 	}
 	if got, ok := parsed["cachedBytes"].(float64); !ok || got != 1024 {
 		t.Errorf("cachedBytes: got %v, want 1024 (raw: %s)", parsed["cachedBytes"], bs)
+	}
+}
+
+// TestUpscaleStatsProviderErrorReturns503 pins the wire contract
+// for the `stats_unavailable` 503 branch added in PR #219: when the
+// provider surfaces an error (typically `context.DeadlineExceeded`
+// from the 2 s server-side ctx timeout), the handler emits 503 with
+// the `stats_unavailable` error code rather than swallowing the
+// failure into an all-zeros snapshot. Without this test the branch
+// could regress silently on a future provider refactor — CodeRabbit
+// nitpick on PR #219.
+func TestUpscaleStatsProviderErrorReturns503(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := &config.Config{
+		LibraryRoots:  []string{filepath.Join(tmp, "lib")},
+		ListenAddress: ":7788",
+		LibraryName:   "Test",
+	}
+	store, err := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	raw, _, err := store.Mint("test")
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+
+	srv := New(cfg, store, nil, "fp")
+	srv = srv.WithUpscaleStats(&stubStatsProvider{
+		// Mirror the ctx-cancellation error the production adapter
+		// would surface — `cmd/bridge/main.go`'s adapter routes
+		// `context.DeadlineExceeded` straight through to the
+		// handler so iOS clients see 503 distinct from "all-zeros
+		// feature-off".
+		err: errors.New("simulated provider error"),
+	})
+	hs := httptest.NewServer(srv.Handler())
+	t.Cleanup(hs.Close)
+
+	req, err := http.NewRequest("GET", hs.URL+"/v1/upscale/stats", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+raw)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status: got %d, want 503", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if !strings.Contains(string(body), `"stats_unavailable"`) {
+		t.Errorf("expected error.code = stats_unavailable in body; got: %s",
+			string(body))
 	}
 }
 
