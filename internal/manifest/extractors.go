@@ -455,6 +455,41 @@ func populateFromTagMetadata(m tag.Metadata, t *Track) {
 				t.ReplayGainAlbumDB = g
 			}
 		}
+		// Classical-metadata fields (PR-D). Each is presence-gated
+		// via stringOf's (string, bool) return — present-but-empty
+		// raw values are dropped at the populate site below by the
+		// non-empty check, but the bool gate also lets explicit
+		// zero values surface for OriginalYear / BPM (the iOS-side
+		// absent-vs-zero discipline established in PR-B).
+		if v, ok := stringOf(raw, "tcom", "composer", "©wrt"); ok && v != "" {
+			t.Composer = v
+		}
+		if v, ok := stringOf(raw, "tpe3", "conductor", "©con"); ok && v != "" {
+			t.Conductor = v
+		}
+		// Work title: classical taggers store the work in TIT1
+		// (Content Group Description) while keeping the movement
+		// in TIT2 (Title). Both ID3v2 spelling AND the Vorbis /
+		// MP4 equivalents need to map to t.Work.
+		if v, ok := stringOf(raw, "tit1", "work", "©wrk"); ok && v != "" {
+			t.Work = v
+		}
+		// OriginalYear: parsed via strconv to mirror dhowden's
+		// year parse. Accepts both 4-digit "YYYY" and ISO-8601
+		// "YYYY-MM-DD" prefixes (TDOR is ISO-8601 in ID3v2.4).
+		if v, ok := stringOf(raw, "tory", "tdor", "originalyear", "originaldate"); ok && v != "" {
+			if y, err := parseYearPrefix(v); err == nil {
+				t.OriginalYear = &y
+			}
+		}
+		// BPM: TBPM is an integer-valued text frame in ID3v2; the
+		// MP4 `tmpo` atom is a uint16. Both surface via stringOf
+		// as the parsed-int's string form.
+		if v, ok := stringOf(raw, "tbpm", "bpm", "tmpo"); ok && v != "" {
+			if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+				t.BPM = &n
+			}
+		}
 	}
 }
 
@@ -833,6 +868,31 @@ func parseReplayGain(s string) *float64 {
 		return nil
 	}
 	return &v
+}
+
+// parseYearPrefix extracts a 4-digit year from the leading characters
+// of `s`. Accepts both bare year strings ("1985") and ISO-8601 dates
+// ("1985-06-22", "1985-06", "1985"). Returns an error if the first
+// four characters aren't a parseable integer in the realistic
+// year range [1, 9999].
+//
+// Used by populateFromTagMetadata for `OriginalYear` parsing: ID3v2.3
+// `TORY` is a 4-digit year, ID3v2.4 `TDOR` is an ISO-8601 timestamp,
+// Vorbis `ORIGINALDATE` is operator-discretion (often ISO-8601). The
+// prefix parse handles all three uniformly.
+func parseYearPrefix(s string) (int, error) {
+	s = strings.TrimSpace(s)
+	if len(s) < 4 {
+		return 0, fmt.Errorf("year prefix too short: %q", s)
+	}
+	y, err := strconv.Atoi(s[:4])
+	if err != nil {
+		return 0, err
+	}
+	if y < 1 || y > 9999 {
+		return 0, fmt.Errorf("year out of range: %d", y)
+	}
+	return y, nil
 }
 
 // extractFLACFormat reads STREAMINFO from a FLAC file and fills sample

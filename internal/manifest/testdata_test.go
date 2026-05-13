@@ -185,14 +185,19 @@ func writeMinimalDSF(t *testing.T, path string, sampleRate uint32, frames map[st
 func buildID3v2_3(fields map[string]string) []byte {
 	// Map human keys to ID3v2.3 frame IDs.
 	frameKeys := map[string]string{
-		"title":       "TIT2",
-		"artist":      "TPE1",
-		"albumArtist": "TPE2",
-		"album":       "TALB",
-		"track":       "TRCK",
-		"year":        "TYER",
-		"genre":       "TCON",
-		"disc":        "TPOS",
+		"title":        "TIT2",
+		"artist":       "TPE1",
+		"albumArtist":  "TPE2",
+		"album":        "TALB",
+		"track":        "TRCK",
+		"year":         "TYER",
+		"genre":        "TCON",
+		"disc":         "TPOS",
+		"composer":     "TCOM",
+		"conductor":    "TPE3",
+		"work":         "TIT1",
+		"originalYear": "TORY",
+		"bpm":          "TBPM",
 	}
 	var body bytes.Buffer
 	for k, v := range fields {
