@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -22,7 +23,7 @@ func browseTestSeed(t *testing.T, srv *Server) {
 		"MusicB/Album3",
 	}
 	for _, p := range folders {
-		if err := srv.deps.Manifest.UpsertFolder(&manifest.Folder{Path: p}); err != nil {
+		if err := srv.deps.Manifest.UpsertFolder(context.Background(), &manifest.Folder{Path: p}); err != nil {
 			t.Fatalf("UpsertFolder %q: %v", p, err)
 		}
 	}
@@ -42,7 +43,7 @@ func browseTestSeed(t *testing.T, srv *Server) {
 		rate := r.rate
 		bits := r.bits
 		isDSD := false
-		if err := srv.deps.Manifest.UpsertTrack(&manifest.Track{
+		if err := srv.deps.Manifest.UpsertTrack(context.Background(), &manifest.Track{
 			Path:          r.path,
 			Size:          r.size,
 			SampleRate:    &rate,
@@ -53,7 +54,7 @@ func browseTestSeed(t *testing.T, srv *Server) {
 			t.Fatalf("UpsertTrack %q: %v", r.path, err)
 		}
 	}
-	if err := srv.deps.Manifest.UpsertVariant(manifest.VariantRow{
+	if err := srv.deps.Manifest.UpsertVariant(context.Background(), manifest.VariantRow{
 		SourcePath: "MusicA/Album1/01.flac", VariantID: "upscaled-v2-192000-24",
 		SidecarPath: "/tmp/a.flac", Format: "flac",
 		SampleRate: 192000, BitsPerSample: 24, SizeBytes: 1000,
@@ -61,7 +62,7 @@ func browseTestSeed(t *testing.T, srv *Server) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := srv.deps.Manifest.UpsertVariant(manifest.VariantRow{
+	if err := srv.deps.Manifest.UpsertVariant(context.Background(), manifest.VariantRow{
 		SourcePath: "MusicA/Album2/01.flac", VariantID: "upscaled-v2-192000-24",
 		SidecarPath: "/tmp/b.flac", Format: "flac",
 		SampleRate: 192000, BitsPerSample: 24, SizeBytes: 1500,

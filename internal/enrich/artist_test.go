@@ -146,7 +146,7 @@ func TestEnricherFetchesAndCachesArtistImage(t *testing.T) {
 	dir := t.TempDir()
 	store, _ := manifest.OpenStore(filepath.Join(dir, "bridge.db"))
 	defer store.Close()
-	store.UpsertTrack(&manifest.Track{
+	store.UpsertTrack(context.Background(), &manifest.Track{
 		Path: "Artist/Album/01.flac", Size: 1, ModTime: time.Now(),
 		Artist: "Artist", Album: "Album",
 	})
@@ -181,7 +181,7 @@ func TestEnricherFetchesAndCachesArtistImage(t *testing.T) {
 	}
 
 	// Verify Track has ArtistMBID set.
-	got, _ := store.GetTrack("Artist/Album/01.flac")
+	got, _ := store.GetTrack(context.Background(), "Artist/Album/01.flac")
 	if got == nil || got.ArtistMBID != "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" {
 		t.Errorf("ArtistMBID not set: %+v", got)
 	}
@@ -272,7 +272,7 @@ func TestEnricherDeduplicatesArtistLookups(t *testing.T) {
 	store, _ := manifest.OpenStore(filepath.Join(dir, "bridge.db"))
 	defer store.Close()
 	for _, p := range []string{"a.flac", "b.flac", "c.flac"} {
-		store.UpsertTrack(&manifest.Track{
+		store.UpsertTrack(context.Background(), &manifest.Track{
 			Path: p, Size: 1, ModTime: time.Now(),
 			Artist: "Artist", Album: "Album",
 		})
@@ -435,7 +435,7 @@ func TestCAAReleaseGroupFallbackSalvagesArtwork(t *testing.T) {
 	dir := t.TempDir()
 	store, _ := manifest.OpenStore(filepath.Join(dir, "bridge.db"))
 	defer store.Close()
-	store.UpsertTrack(&manifest.Track{
+	store.UpsertTrack(context.Background(), &manifest.Track{
 		Path: "Artist/Album/01.flac", Size: 1, ModTime: time.Now(),
 		Artist: "Artist", Album: "Album",
 	})

@@ -79,13 +79,13 @@ func TestScannerWorkerRecoversFromExtractPanic(t *testing.T) {
 
 	// And the manifest must reflect that: GetTrack on the healthy
 	// files succeeds, GetTrack on the bad file returns nil.
-	if got, _ := store.GetTrack("healthy1.flac"); got == nil {
+	if got, _ := store.GetTrack(context.Background(), "healthy1.flac"); got == nil {
 		t.Error("GetTrack(healthy1.flac) returned nil, want a row")
 	}
-	if got, _ := store.GetTrack("healthy2.flac"); got == nil {
+	if got, _ := store.GetTrack(context.Background(), "healthy2.flac"); got == nil {
 		t.Error("GetTrack(healthy2.flac) returned nil, want a row")
 	}
-	if got, _ := store.GetTrack("bad.flac"); got != nil {
+	if got, _ := store.GetTrack(context.Background(), "bad.flac"); got != nil {
 		t.Errorf("GetTrack(bad.flac) = %+v, want nil (panic should have skipped the write)", got)
 	}
 }

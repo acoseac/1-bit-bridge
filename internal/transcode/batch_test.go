@@ -32,7 +32,7 @@ func openTempStoreForBatch(t *testing.T) *manifest.Store {
 // (above target). Exercises every Submit-side filter.
 func seedBatchFixture(t *testing.T, s *manifest.Store) {
 	t.Helper()
-	if err := s.UpsertFolder(&manifest.Folder{Path: "Album"}); err != nil {
+	if err := s.UpsertFolder(context.Background(), &manifest.Folder{Path: "Album"}); err != nil {
 		t.Fatal(err)
 	}
 	tracks := []struct {
@@ -51,7 +51,7 @@ func seedBatchFixture(t *testing.T, s *manifest.Store) {
 		rate := float64(tr.rate)
 		bits := tr.bits
 		isDSD := false
-		if err := s.UpsertTrack(&manifest.Track{
+		if err := s.UpsertTrack(context.Background(), &manifest.Track{
 			Path:          tr.path,
 			Size:          tr.size,
 			SampleRate:    &rate,
@@ -63,7 +63,7 @@ func seedBatchFixture(t *testing.T, s *manifest.Store) {
 		}
 	}
 	// 01.flac is already covered.
-	if err := s.UpsertVariant(manifest.VariantRow{
+	if err := s.UpsertVariant(context.Background(), manifest.VariantRow{
 		SourcePath: "Album/01.flac", VariantID: "upscaled-v2-192000-24",
 		SidecarPath: "/tmp/sidecar.flac", Format: "flac",
 		SampleRate: 192000, BitsPerSample: 24, SizeBytes: 1_500_000,
@@ -212,7 +212,7 @@ func TestSubmit_InsertsBatchRowAndPublishesProgress(t *testing.T) {
 		t.Errorf("no progress events published; want ≥ 1")
 	}
 	// Verify the row landed in SQLite.
-	rows, err := s.ListUpscaleBatches(10)
+	rows, err := s.ListUpscaleBatches(context.Background(), 10)
 	if err != nil {
 		t.Fatalf("ListUpscaleBatches: %v", err)
 	}
@@ -247,7 +247,7 @@ func TestCancel_TransitionsRow(t *testing.T) {
 	// on whether the stubbed pool finished before Cancel landed.
 	// Either is a legitimate terminal state under the documented
 	// Cancel semantics (it stops tracking but doesn't kill in-flight).
-	rows, err := s.ListUpscaleBatches(10)
+	rows, err := s.ListUpscaleBatches(context.Background(), 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,7 +268,7 @@ func TestRecoverInterruptedBatches_RunsAtNewCoordinator(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 
 	id := uuid.Must(uuid.NewRandom())
-	if err := s.InsertUpscaleBatch(manifest.UpscaleBatchRow{
+	if err := s.InsertUpscaleBatch(context.Background(), manifest.UpscaleBatchRow{
 		ID: id, Path: "Album", TargetRate: 192000, TargetBits: 24,
 		Status: "running", CreatedAt: 1, UpdatedAt: 1,
 	}); err != nil {
@@ -282,7 +282,7 @@ func TestRecoverInterruptedBatches_RunsAtNewCoordinator(t *testing.T) {
 	}
 	_ = c
 
-	rows, err := s.ListUpscaleBatches(10)
+	rows, err := s.ListUpscaleBatches(context.Background(), 10)
 	if err != nil {
 		t.Fatal(err)
 	}

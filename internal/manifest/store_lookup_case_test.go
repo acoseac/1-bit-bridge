@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 	"time"
@@ -35,7 +36,7 @@ func TestLookupTrack_caseInsensitiveAndLeadingSlash(t *testing.T) {
 	defer s.Close()
 
 	const canonical = "Abdullah Ibrahim/The Balance/09 - Devotion.flac"
-	if err := s.UpsertTrack(&Track{
+	if err := s.UpsertTrack(context.Background(), &Track{
 		Path: canonical, Size: 1, ModTime: time.Now(),
 		Artist: "Abdullah Ibrahim", Album: "The Balance",
 	}); err != nil {
@@ -58,7 +59,7 @@ func TestLookupTrack_caseInsensitiveAndLeadingSlash(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tr, err := s.LookupTrack(tc.path)
+			tr, err := s.LookupTrack(context.Background(), tc.path)
 			if err != nil {
 				t.Fatalf("LookupTrack(%q): %v", tc.path, err)
 			}
@@ -81,13 +82,13 @@ func TestLookupTrack_stillReturnsNilOnMiss(t *testing.T) {
 	}
 	defer s.Close()
 
-	if err := s.UpsertTrack(&Track{
+	if err := s.UpsertTrack(context.Background(), &Track{
 		Path: "Real/Track.flac", Size: 1, ModTime: time.Now(),
 	}); err != nil {
 		t.Fatalf("UpsertTrack: %v", err)
 	}
 
-	tr, err := s.LookupTrack("/some/other/track.flac")
+	tr, err := s.LookupTrack(context.Background(), "/some/other/track.flac")
 	if err != nil {
 		t.Fatalf("LookupTrack: %v", err)
 	}
@@ -117,19 +118,19 @@ func TestLookupTrack_ambiguousCaseFoldReturnsNil(t *testing.T) {
 	defer s.Close()
 
 	// Two distinct rows that fold to the same lowercase path.
-	if err := s.UpsertTrack(&Track{
+	if err := s.UpsertTrack(context.Background(), &Track{
 		Path: "Artist/Album/Track.flac", Size: 1, ModTime: time.Now(),
 	}); err != nil {
 		t.Fatalf("UpsertTrack 1: %v", err)
 	}
-	if err := s.UpsertTrack(&Track{
+	if err := s.UpsertTrack(context.Background(), &Track{
 		Path: "ARTIST/ALBUM/TRACK.flac", Size: 2, ModTime: time.Now(),
 	}); err != nil {
 		t.Fatalf("UpsertTrack 2: %v", err)
 	}
 
 	// iOS-shape that matches BOTH after lowercasing.
-	tr, err := s.LookupTrack("/artist/album/track.flac")
+	tr, err := s.LookupTrack(context.Background(), "/artist/album/track.flac")
 	if err != nil {
 		t.Fatalf("LookupTrack: %v", err)
 	}
@@ -140,7 +141,7 @@ func TestLookupTrack_ambiguousCaseFoldReturnsNil(t *testing.T) {
 
 	// An exact case match must still win — only the fallback path
 	// is ambiguous.
-	exact, err := s.LookupTrack("Artist/Album/Track.flac")
+	exact, err := s.LookupTrack(context.Background(), "Artist/Album/Track.flac")
 	if err != nil {
 		t.Fatalf("LookupTrack exact: %v", err)
 	}
@@ -164,24 +165,24 @@ func TestGetTrack_remainsExactMatch(t *testing.T) {
 	defer s.Close()
 
 	const canonical = "Artist/Album/Track.flac"
-	if err := s.UpsertTrack(&Track{
+	if err := s.UpsertTrack(context.Background(), &Track{
 		Path: canonical, Size: 1, ModTime: time.Now(),
 	}); err != nil {
 		t.Fatalf("UpsertTrack: %v", err)
 	}
 
 	// Exact case → hit.
-	if tr, err := s.GetTrack(canonical); err != nil || tr == nil {
+	if tr, err := s.GetTrack(context.Background(), canonical); err != nil || tr == nil {
 		t.Fatalf("GetTrack(canonical) = (%v, %v); want non-nil", tr, err)
 	}
 	// Lowercase variant → MISS. The scanner relies on this.
-	if tr, err := s.GetTrack("artist/album/track.flac"); err != nil {
+	if tr, err := s.GetTrack(context.Background(), "artist/album/track.flac"); err != nil {
 		t.Fatalf("GetTrack(lowercase): %v", err)
 	} else if tr != nil {
 		t.Errorf("GetTrack(lowercase) = %v; want nil — exact-match contract broken", tr)
 	}
 	// Leading slash → MISS. Manifest never stores leading slash.
-	if tr, err := s.GetTrack("/" + canonical); err != nil {
+	if tr, err := s.GetTrack(context.Background(), "/"+canonical); err != nil {
 		t.Fatalf("GetTrack(leading-slash): %v", err)
 	} else if tr != nil {
 		t.Errorf("GetTrack(leading-slash) = %v; want nil — exact-match contract broken", tr)
@@ -203,12 +204,12 @@ func TestLookupVariant_caseInsensitiveAndLeadingSlash(t *testing.T) {
 
 	const canonical = "Abdullah Ibrahim/The Balance/09 - Devotion.flac"
 	const variantID = "v176400-24"
-	if err := s.UpsertTrack(&Track{
+	if err := s.UpsertTrack(context.Background(), &Track{
 		Path: canonical, Size: 1, ModTime: time.Now(),
 	}); err != nil {
 		t.Fatalf("UpsertTrack: %v", err)
 	}
-	if err := s.UpsertVariant(VariantRow{
+	if err := s.UpsertVariant(context.Background(), VariantRow{
 		SourcePath:    canonical,
 		VariantID:     variantID,
 		SidecarPath:   "/cache/variant.flac",
@@ -233,7 +234,7 @@ func TestLookupVariant_caseInsensitiveAndLeadingSlash(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			v, err := s.LookupVariant(tc.path, variantID)
+			v, err := s.LookupVariant(context.Background(), tc.path, variantID)
 			if err != nil {
 				t.Fatalf("LookupVariant: %v", err)
 			}
@@ -303,7 +304,7 @@ func TestLookupTrack_redundantSeparators_endToEnd(t *testing.T) {
 	defer s.Close()
 
 	const canonical = "Artist/Album/01.flac"
-	if err := s.UpsertTrack(&Track{
+	if err := s.UpsertTrack(context.Background(), &Track{
 		Path: canonical, Size: 1, ModTime: time.Now(),
 		Artist: "Artist", Album: "Album",
 	}); err != nil {
@@ -318,7 +319,7 @@ func TestLookupTrack_redundantSeparators_endToEnd(t *testing.T) {
 	}
 	for _, p := range cases {
 		t.Run(p, func(t *testing.T) {
-			tr, err := s.LookupTrack(p)
+			tr, err := s.LookupTrack(context.Background(), p)
 			if err != nil {
 				t.Fatalf("LookupTrack(%q): %v", p, err)
 			}
@@ -375,13 +376,13 @@ func TestLookupTrack_unicodeFolding(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := s.UpsertTrack(&Track{
+			if err := s.UpsertTrack(context.Background(), &Track{
 				Path: tc.canonical, Size: 1, ModTime: time.Now(),
 				Artist: "Artist", Album: "Album",
 			}); err != nil {
 				t.Fatalf("UpsertTrack(%q): %v", tc.canonical, err)
 			}
-			tr, err := s.LookupTrack(tc.ioshape)
+			tr, err := s.LookupTrack(context.Background(), tc.ioshape)
 			if err != nil {
 				t.Fatalf("LookupTrack(%q): %v", tc.ioshape, err)
 			}

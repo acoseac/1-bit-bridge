@@ -51,7 +51,7 @@ func TestScannerDeletesOrphanedFolders(t *testing.T) {
 	if _, err := sc.Scan(context.Background()); err != nil {
 		t.Fatalf("first scan: %v", err)
 	}
-	folders, _ := s.FolderPaths()
+	folders, _ := s.FolderPaths(context.Background())
 	if !containsString(folders, "doomed") || !containsString(folders, "keep") {
 		t.Fatalf("first scan didn't index expected folders: %v", folders)
 	}
@@ -63,7 +63,7 @@ func TestScannerDeletesOrphanedFolders(t *testing.T) {
 	if _, err := sc.Scan(context.Background()); err != nil {
 		t.Fatalf("second scan: %v", err)
 	}
-	folders, _ = s.FolderPaths()
+	folders, _ = s.FolderPaths(context.Background())
 	sort.Strings(folders)
 	if containsString(folders, "doomed") {
 		t.Errorf("orphaned folder row not deleted: got %v", folders)
@@ -99,7 +99,7 @@ func TestScanSubtreeRemovesStaleTrackOnRename(t *testing.T) {
 	if _, err := sc.Scan(context.Background()); err != nil {
 		t.Fatalf("initial scan: %v", err)
 	}
-	if got, _ := s.GetTrack("album/01 song.flac"); got == nil {
+	if got, _ := s.GetTrack(context.Background(), "album/01 song.flac"); got == nil {
 		t.Fatal("initial scan didn't index original track")
 	}
 
@@ -111,10 +111,10 @@ func TestScanSubtreeRemovesStaleTrackOnRename(t *testing.T) {
 	if _, err := sc.ScanSubtree(context.Background(), album); err != nil {
 		t.Fatalf("ScanSubtree: %v", err)
 	}
-	if got, _ := s.GetTrack("album/01 song.flac"); got != nil {
+	if got, _ := s.GetTrack(context.Background(), "album/01 song.flac"); got != nil {
 		t.Errorf("stale track row left behind after rename: %+v", got)
 	}
-	if got, _ := s.GetTrack("album/01 song-renamed.flac"); got == nil {
+	if got, _ := s.GetTrack(context.Background(), "album/01 song-renamed.flac"); got == nil {
 		t.Error("renamed track row not added")
 	}
 }
@@ -144,7 +144,7 @@ func TestScanSubtreeRemovesStaleFolderOnRename(t *testing.T) {
 	if _, err := sc.Scan(context.Background()); err != nil {
 		t.Fatalf("initial scan: %v", err)
 	}
-	folders, _ := s.FolderPaths()
+	folders, _ := s.FolderPaths(context.Background())
 	if !containsString(folders, "OldAlbum") {
 		t.Fatalf("initial scan didn't index OldAlbum: %v", folders)
 	}
@@ -158,7 +158,7 @@ func TestScanSubtreeRemovesStaleFolderOnRename(t *testing.T) {
 	if _, err := sc.ScanSubtree(context.Background(), root); err != nil {
 		t.Fatalf("ScanSubtree: %v", err)
 	}
-	folders, _ = s.FolderPaths()
+	folders, _ = s.FolderPaths(context.Background())
 	if containsString(folders, "OldAlbum") {
 		t.Errorf("stale folder row left behind after rename: %v", folders)
 	}
@@ -195,7 +195,7 @@ func TestScanSubtreeMissingDirReapsRows(t *testing.T) {
 	if _, err := sc.Scan(context.Background()); err != nil {
 		t.Fatalf("initial scan: %v", err)
 	}
-	if got, _ := s.GetTrack("doomed/song.flac"); got == nil {
+	if got, _ := s.GetTrack(context.Background(), "doomed/song.flac"); got == nil {
 		t.Fatal("initial scan didn't index doomed/song.flac")
 	}
 
@@ -212,10 +212,10 @@ func TestScanSubtreeMissingDirReapsRows(t *testing.T) {
 	if _, err := sc.ScanSubtree(context.Background(), doomed); err != nil {
 		t.Fatalf("ScanSubtree on deleted dir: %v", err)
 	}
-	if got, _ := s.GetTrack("doomed/song.flac"); got != nil {
+	if got, _ := s.GetTrack(context.Background(), "doomed/song.flac"); got != nil {
 		t.Errorf("track row left behind after dir was deleted: %+v", got)
 	}
-	folders, _ := s.FolderPaths()
+	folders, _ := s.FolderPaths(context.Background())
 	if containsString(folders, "doomed") {
 		t.Errorf("doomed folder row not reaped after dir deletion: %v", folders)
 	}
@@ -258,7 +258,7 @@ func TestScanSubtreeAcrossRootsNoDuplicate(t *testing.T) {
 	rootBBase := filepath.Base(rootB)
 	sourcePath := rootABase + "/album/song.flac"
 	destPath := rootBBase + "/album/song.flac"
-	if got, _ := s.GetTrack(sourcePath); got == nil {
+	if got, _ := s.GetTrack(context.Background(), sourcePath); got == nil {
 		t.Fatalf("initial scan didn't index source path %q", sourcePath)
 	}
 
@@ -275,13 +275,13 @@ func TestScanSubtreeAcrossRootsNoDuplicate(t *testing.T) {
 		t.Fatalf("ScanSubtree(dirB): %v", err)
 	}
 
-	if got, _ := s.GetTrack(sourcePath); got != nil {
+	if got, _ := s.GetTrack(context.Background(), sourcePath); got != nil {
 		t.Errorf("source-side row not deleted after move: %+v", got)
 	}
-	if got, _ := s.GetTrack(destPath); got == nil {
+	if got, _ := s.GetTrack(context.Background(), destPath); got == nil {
 		t.Error("destination-side row not added after move")
 	}
-	tracks, _ := s.TrackPaths()
+	tracks, _ := s.TrackPaths(context.Background())
 	if len(tracks) != 1 {
 		t.Errorf("post-move track count = %d (%v), want 1", len(tracks), tracks)
 	}

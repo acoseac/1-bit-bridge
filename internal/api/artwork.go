@@ -68,7 +68,7 @@ func (s *Server) artistImage(w http.ResponseWriter, r *http.Request) {
 			// collapsed into 404 and iOS treated it as terminal,
 			// orphaning artwork that would have been cached a few
 			// seconds later on a cold-cache first scan.
-			if s.mbidProbe != nil && s.mbidProbe.HasTrackWithArtistMBID(mbid) {
+			if s.mbidProbe != nil && s.mbidProbe.HasTrackWithArtistMBID(r.Context(), mbid) {
 				w.Header().Set("Retry-After", strconv.Itoa(artworkPendingRetryAfterSeconds))
 				writeError(w, http.StatusAccepted, "pending",
 					"artist image enrichment pending; retry after the Retry-After window")
@@ -124,7 +124,7 @@ func (s *Server) artwork(w http.ResponseWriter, r *http.Request) {
 			// See artistImage handler for the full rationale — 202 +
 			// Retry-After signals "enrichment pending, try later"
 			// while 404 is "we've never heard of this MBID".
-			if s.mbidProbe != nil && s.mbidProbe.HasTrackWithArtworkMBID(mbid) {
+			if s.mbidProbe != nil && s.mbidProbe.HasTrackWithArtworkMBID(r.Context(), mbid) {
 				w.Header().Set("Retry-After", strconv.Itoa(artworkPendingRetryAfterSeconds))
 				writeError(w, http.StatusAccepted, "pending",
 					"artwork enrichment pending; retry after the Retry-After window")

@@ -27,14 +27,14 @@ func TestArtworkGCRemovesOrphans(t *testing.T) {
 
 	// Two tracks reference distinct artwork ids: one local-* shape
 	// (scanner-side), one MBID shape (enricher-side).
-	if err := store.UpsertTrack(&manifest.Track{
+	if err := store.UpsertTrack(context.Background(), &manifest.Track{
 		Path: "a/t1.flac", Size: 1, ModTime: time.Now(),
 		Artist: "A", Album: "B",
 		ArtworkMBID: "local-deadbeef",
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.UpsertTrack(&manifest.Track{
+	if err := store.UpsertTrack(context.Background(), &manifest.Track{
 		Path: "a/t2.flac", Size: 2, ModTime: time.Now(),
 		Artist: "C", Album: "D",
 		ArtworkMBID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -100,7 +100,7 @@ func TestArtworkGCDryRunPreservesAll(t *testing.T) {
 	}
 	defer store.Close()
 
-	if err := store.UpsertTrack(&manifest.Track{
+	if err := store.UpsertTrack(context.Background(), &manifest.Track{
 		Path: "a/t1.flac", Size: 1, ModTime: time.Now(),
 		Artist: "A", Album: "B",
 		ArtworkMBID: "local-keep",
@@ -236,7 +236,7 @@ func TestArtworkMBIDsInUseDistinctFiltering(t *testing.T) {
 		{"a/t5.flac", "00000000-0000-4000-8000-000000000000"},
 	}
 	for _, r := range rows {
-		if err := store.UpsertTrack(&manifest.Track{
+		if err := store.UpsertTrack(context.Background(), &manifest.Track{
 			Path: r.path, Size: 1, ModTime: time.Now(),
 			Artist: "A", Album: "B", ArtworkMBID: r.mbid,
 		}); err != nil {
@@ -244,7 +244,7 @@ func TestArtworkMBIDsInUseDistinctFiltering(t *testing.T) {
 		}
 	}
 
-	got, err := store.ArtworkMBIDsInUse()
+	got, err := store.ArtworkMBIDsInUse(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -154,7 +154,7 @@ func libraryRemoveCmd(ctx context.Context, args []string, stdout, stderr io.Writ
 	defer store.Close()
 
 	if willCollapse {
-		if err := store.WipeAllTracks(); err != nil {
+		if err := store.WipeAllTracks(context.Background()); err != nil {
 			fmt.Fprintf(stderr, "library remove: wipe manifest: %v\n", err)
 			return 1
 		}
@@ -177,7 +177,7 @@ func libraryRemoveCmd(ctx context.Context, args []string, stdout, stderr io.Writ
 				return 1
 			}
 		}
-		if _, err := store.DeleteTracksByPrefix(basename + "/"); err != nil {
+		if _, err := store.DeleteTracksByPrefix(context.Background(), basename+"/"); err != nil {
 			fmt.Fprintf(stderr, "library remove: prune tracks: %v\n", err)
 			return 1
 		}
@@ -286,7 +286,7 @@ func wipeManifest(cfg *config.Config) error {
 		return err
 	}
 	defer store.Close()
-	return store.WipeAllTracks()
+	return store.WipeAllTracks(context.Background())
 }
 
 // openManifestStore resolves the manifest DB path the same way

@@ -64,7 +64,7 @@ func (f *fakeManifestProvider) WriteManifest(ctx context.Context, w io.Writer, s
 	}
 	return json.NewEncoder(w).Encode(f.body)
 }
-func (f *fakeManifestProvider) BuildManifestPage(cursor string, limit int) (*ManifestPage, error) {
+func (f *fakeManifestProvider) BuildManifestPage(ctx context.Context, cursor string, limit int) (*ManifestPage, error) {
 	f.lastPageCursor = cursor
 	f.lastPageLimit = limit
 	if f.pageErr != nil {
@@ -75,10 +75,10 @@ func (f *fakeManifestProvider) BuildManifestPage(cursor string, limit int) (*Man
 	}
 	return &manifest.Manifest{}, nil
 }
-func (f *fakeManifestProvider) IsScanning() bool        { return f.isScanning }
-func (f *fakeManifestProvider) LastFullScan() time.Time { return f.lastFullScan }
-func (f *fakeManifestProvider) TracksIndexed() int      { return f.tracksIndexed }
-func (f *fakeManifestProvider) PendingDeletions() int64 { return f.pendingDeletions }
+func (f *fakeManifestProvider) IsScanning() bool                           { return f.isScanning }
+func (f *fakeManifestProvider) LastFullScan() time.Time                    { return f.lastFullScan }
+func (f *fakeManifestProvider) TracksIndexed(ctx context.Context) int      { return f.tracksIndexed }
+func (f *fakeManifestProvider) PendingDeletions(ctx context.Context) int64 { return f.pendingDeletions }
 
 // newTestServer spins up an httptest.Server with the api handler and a
 // populated auth store. Returns the server plus one valid raw token for

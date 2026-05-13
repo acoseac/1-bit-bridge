@@ -103,12 +103,12 @@ func (s *Server) apiLibraryBrowse(w http.ResponseWriter, r *http.Request) {
 			"path contains traversal segments or is otherwise invalid")
 		return
 	}
-	folders, err := s.deps.Manifest.ListChildFolders(normalised)
+	folders, err := s.deps.Manifest.ListChildFolders(r.Context(), normalised)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "browse-folders", err.Error())
 		return
 	}
-	tracks, err := s.deps.Manifest.ListChildTracks(normalised)
+	tracks, err := s.deps.Manifest.ListChildTracks(r.Context(), normalised)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "browse-tracks", err.Error())
 		return
@@ -176,7 +176,7 @@ func (s *Server) apiLibraryBrowseProjection(w http.ResponseWriter, r *http.Reque
 	// Resolve active target: DB-backed setting wins; YAML
 	// bootstrap is the fall-back for unseeded installs (will be
 	// the case until PR 3's coordinator runs first-boot seed).
-	rate, bits, err := s.deps.Manifest.GetUpscaleTarget()
+	rate, bits, err := s.deps.Manifest.GetUpscaleTarget(r.Context())
 	if err != nil && !errors.Is(err, manifest.ErrUpscaleTargetUnset) {
 		writeError(w, http.StatusInternalServerError, "read-target", err.Error())
 		return
@@ -186,7 +186,7 @@ func (s *Server) apiLibraryBrowseProjection(w http.ResponseWriter, r *http.Reque
 		bits = s.deps.Cfg.Upscale.EffectiveBootstrapTargetBits()
 	}
 
-	projections, err := s.deps.Manifest.ListTrackProjectionsUnderPrefix(normalised)
+	projections, err := s.deps.Manifest.ListTrackProjectionsUnderPrefix(r.Context(), normalised)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "list-projections", err.Error())
 		return

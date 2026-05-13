@@ -220,14 +220,14 @@ type ManifestProvider interface {
 	// `NextCursor` is nil. Returns a fully-materialised value because
 	// per-page output is bounded by the page-size cap (5000) and the
 	// JSON writer can buffer the whole page without OOM risk.
-	BuildManifestPage(cursor string, limit int) (*ManifestPage, error)
+	BuildManifestPage(ctx context.Context, cursor string, limit int) (*ManifestPage, error)
 	IsScanning() bool
 	LastFullScan() time.Time
-	TracksIndexed() int
+	TracksIndexed(ctx context.Context) int
 	// PendingDeletions returns the total count of rows across tracks
 	// and folders with missing_count > 0 — surfaced on ScanState. May
 	// return 0 for an unwired or pre-v5 store; never errors today.
-	PendingDeletions() int64
+	PendingDeletions(ctx context.Context) int64
 }
 
 // MBIDProbe is an optional interface the artwork + artist-image
@@ -239,8 +239,8 @@ type ManifestProvider interface {
 // pre-v1.1 behaviour of 404-on-miss. `internal/manifest.Provider`
 // satisfies this interface in production.
 type MBIDProbe interface {
-	HasTrackWithArtworkMBID(mbid string) bool
-	HasTrackWithArtistMBID(mbid string) bool
+	HasTrackWithArtworkMBID(ctx context.Context, mbid string) bool
+	HasTrackWithArtistMBID(ctx context.Context, mbid string) bool
 }
 
 // UpdaterStatus is the optional interface the /v1/health handler uses
@@ -649,8 +649,8 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	if s.manifest != nil {
 		scanState.IsScanning = s.manifest.IsScanning()
 		scanState.LastFullScan = s.manifest.LastFullScan()
-		scanState.TracksIndexed = s.manifest.TracksIndexed()
-		scanState.PendingDeletions = s.manifest.PendingDeletions()
+		scanState.TracksIndexed = s.manifest.TracksIndexed(r.Context())
+		scanState.PendingDeletions = s.manifest.PendingDeletions(r.Context())
 	}
 	resp := HealthResponse{
 		ProtocolVersion: version.ProtocolVersion,
@@ -808,7 +808,7 @@ func (s *Server) manifestHandler(w http.ResponseWriter, r *http.Request) {
 			limit = maxPageLimit
 		}
 		cursor := q.Get("cursor")
-		body, err := s.manifest.BuildManifestPage(cursor, limit)
+		body, err := s.manifest.BuildManifestPage(r.Context(), cursor, limit)
 		if err != nil {
 			writeErrorLog(w, r, http.StatusInternalServerError, "internal",
 				"the bridge couldn't build this manifest page", err)

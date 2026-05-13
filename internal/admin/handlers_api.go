@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -176,7 +177,10 @@ func (s *Server) apiStats(w http.ResponseWriter, r *http.Request) {
 // network. Suitable for sub-second polling.
 func (s *Server) getStatsSnapshot() statsResponse {
 	now := time.Now().UTC()
-	tracks, _ := s.deps.Manifest.CountTracks()
+	// No request context here (called from SSE event publisher
+	// too). Use Background — admin dashboard stats are best-
+	// effort and not user-cancellable anyway.
+	tracks, _ := s.deps.Manifest.CountTracks(context.Background())
 	dbBytes := dbSize(filepath.Join(s.deps.Cfg.DataDir, "bridge.db"))
 	return statsResponse{
 		LibraryName:     s.deps.Cfg.LibraryName,
@@ -336,9 +340,9 @@ func (s *Server) apiRootsList(w http.ResponseWriter, r *http.Request) {
 	for _, root := range roots {
 		var n int
 		if multi {
-			n, _ = s.deps.Manifest.CountTracksByPrefix(filepath.Base(root) + "/")
+			n, _ = s.deps.Manifest.CountTracksByPrefix(r.Context(), filepath.Base(root)+"/")
 		} else {
-			n, _ = s.deps.Manifest.CountTracks()
+			n, _ = s.deps.Manifest.CountTracks(r.Context())
 		}
 		out = append(out, rootRow{Path: root, Tracks: n})
 	}
@@ -406,7 +410,7 @@ func (s *Server) apiRootsAdd(w http.ResponseWriter, r *http.Request) {
 	// every failure window lands in a state the scanner can heal.
 	willTransition := len(current) == 1 // 1 → N: storage form flips
 	if willTransition {
-		if err := s.deps.Manifest.WipeAllTracks(); err != nil {
+		if err := s.deps.Manifest.WipeAllTracks(r.Context()); err != nil {
 			writeError(w, http.StatusInternalServerError, "wipe-tracks", err.Error())
 			return
 		}
@@ -487,12 +491,12 @@ func (s *Server) apiRootsRemove(w http.ResponseWriter, r *http.Request) {
 	// successful wipe means the next scan simply re-populates — every
 	// failure window lands in a state the scanner can heal.
 	if willCollapse {
-		if err := s.deps.Manifest.WipeAllTracks(); err != nil {
+		if err := s.deps.Manifest.WipeAllTracks(r.Context()); err != nil {
 			writeError(w, http.StatusInternalServerError, "wipe-tracks", err.Error())
 			return
 		}
 	} else {
-		if _, err := s.deps.Manifest.DeleteTracksByPrefix(removedBasename + "/"); err != nil {
+		if _, err := s.deps.Manifest.DeleteTracksByPrefix(r.Context(), removedBasename+"/"); err != nil {
 			writeError(w, http.StatusInternalServerError, "delete-tracks", err.Error())
 			return
 		}
@@ -871,7 +875,7 @@ func (s *Server) apiUpscaleStats(w http.ResponseWriter, r *http.Request) {
 	}
 	resp.Enabled = (resp.Pool != nil)
 	if s.deps.Manifest != nil {
-		count, bytes, err := s.deps.Manifest.CountVariants()
+		count, bytes, err := s.deps.Manifest.CountVariants(r.Context())
 		if err != nil {
 			// Log + degrade: caller still gets the live
 			// fields. A SQL failure here is the kind of

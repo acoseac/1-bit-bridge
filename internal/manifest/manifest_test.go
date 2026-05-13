@@ -141,10 +141,10 @@ func TestStoreRoundTrip(t *testing.T) {
 
 	now := time.Now().UTC().Truncate(time.Second)
 	tr := &Track{Path: "a/b.flac", Size: 100, ModTime: now, Title: "X", Artist: "Y"}
-	if err := s.UpsertTrack(tr); err != nil {
+	if err := s.UpsertTrack(context.Background(), tr); err != nil {
 		t.Fatal(err)
 	}
-	got, err := s.GetTrack("a/b.flac")
+	got, err := s.GetTrack(context.Background(), "a/b.flac")
 	if err != nil || got == nil {
 		t.Fatalf("GetTrack: %v / %v", err, got)
 	}
@@ -154,25 +154,25 @@ func TestStoreRoundTrip(t *testing.T) {
 
 	// Update via upsert.
 	tr.Title = "XX"
-	if err := s.UpsertTrack(tr); err != nil {
+	if err := s.UpsertTrack(context.Background(), tr); err != nil {
 		t.Fatal(err)
 	}
-	got, _ = s.GetTrack("a/b.flac")
+	got, _ = s.GetTrack(context.Background(), "a/b.flac")
 	if got.Title != "XX" {
 		t.Errorf("update: %+v", got)
 	}
 
 	// List: one entry.
-	all, _ := s.ListTracks(nil)
+	all, _ := s.ListTracks(context.Background(), nil)
 	if len(all) != 1 {
 		t.Errorf("list: %d", len(all))
 	}
 
 	// Delete.
-	if err := s.DeleteTrack("a/b.flac"); err != nil {
+	if err := s.DeleteTrack(context.Background(), "a/b.flac"); err != nil {
 		t.Fatal(err)
 	}
-	got, _ = s.GetTrack("a/b.flac")
+	got, _ = s.GetTrack(context.Background(), "a/b.flac")
 	if got != nil {
 		t.Errorf("delete didn't take: %+v", got)
 	}
@@ -196,14 +196,14 @@ func TestUpsertTrackBatchHappyPath(t *testing.T) {
 		{Path: "A/2.flac", Size: 20, ModTime: now, Title: "two"},
 		{Path: "B/3.flac", Size: 30, ModTime: now, Title: "three"},
 	}
-	if err := s.UpsertTrackBatch(first); err != nil {
+	if err := s.UpsertTrackBatch(context.Background(), first); err != nil {
 		t.Fatalf("first batch: %v", err)
 	}
-	got, _ := s.CountTracks()
+	got, _ := s.CountTracks(context.Background())
 	if got != 3 {
 		t.Errorf("post-batch count = %d, want 3", got)
 	}
-	one, _ := s.GetTrack("A/1.flac")
+	one, _ := s.GetTrack(context.Background(), "A/1.flac")
 	if one == nil || one.Title != "one" {
 		t.Errorf("first batch didn't persist A/1.flac: %+v", one)
 	}
@@ -213,14 +213,14 @@ func TestUpsertTrackBatchHappyPath(t *testing.T) {
 		{Path: "A/1.flac", Size: 99, ModTime: now, Title: "one-updated"},
 		{Path: "C/4.flac", Size: 40, ModTime: now, Title: "four"},
 	}
-	if err := s.UpsertTrackBatch(second); err != nil {
+	if err := s.UpsertTrackBatch(context.Background(), second); err != nil {
 		t.Fatalf("second batch: %v", err)
 	}
-	got, _ = s.CountTracks()
+	got, _ = s.CountTracks(context.Background())
 	if got != 4 {
 		t.Errorf("post-overlap-batch count = %d, want 4", got)
 	}
-	updated, _ := s.GetTrack("A/1.flac")
+	updated, _ := s.GetTrack(context.Background(), "A/1.flac")
 	if updated == nil || updated.Title != "one-updated" || updated.Size != 99 {
 		t.Errorf("overlap row not updated: %+v", updated)
 	}
@@ -235,13 +235,13 @@ func TestUpsertTrackBatchEmptyIsNoOp(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if err := s.UpsertTrackBatch(nil); err != nil {
+	if err := s.UpsertTrackBatch(context.Background(), nil); err != nil {
 		t.Errorf("nil batch: %v", err)
 	}
-	if err := s.UpsertTrackBatch([]*Track{}); err != nil {
+	if err := s.UpsertTrackBatch(context.Background(), []*Track{}); err != nil {
 		t.Errorf("empty batch: %v", err)
 	}
-	got, _ := s.CountTracks()
+	got, _ := s.CountTracks(context.Background())
 	if got != 0 {
 		t.Errorf("empty batch wrote rows: count = %d", got)
 	}
@@ -280,7 +280,7 @@ func TestStreamTracksCancelledCtxStopsIteration(t *testing.T) {
 	// emit — without rows the cancellation could trivially
 	// "succeed" by emitting zero callbacks.
 	for i := 0; i < 5; i++ {
-		if err := s.UpsertTrack(&Track{
+		if err := s.UpsertTrack(context.Background(), &Track{
 			Path:    fmt.Sprintf("track-%d.flac", i),
 			Size:    100,
 			ModTime: time.Now(),
@@ -319,18 +319,18 @@ func TestStoreHasTrackWithArtworkMBID(t *testing.T) {
 	known := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 	unknown := "99999999-9999-4999-8999-999999999999"
 
-	s.UpsertTrack(&Track{
+	s.UpsertTrack(context.Background(), &Track{
 		Path: "a/b.flac", Size: 1, ModTime: time.Now(),
 		Artist: "A", Album: "B", ArtworkMBID: known,
 	})
 
-	if !s.HasTrackWithArtworkMBID(known) {
+	if !s.HasTrackWithArtworkMBID(context.Background(), known) {
 		t.Errorf("known MBID should report true")
 	}
-	if s.HasTrackWithArtworkMBID(unknown) {
+	if s.HasTrackWithArtworkMBID(context.Background(), unknown) {
 		t.Errorf("unknown MBID should report false")
 	}
-	if s.HasTrackWithArtworkMBID("") {
+	if s.HasTrackWithArtworkMBID(context.Background(), "") {
 		t.Errorf("empty MBID should short-circuit to false")
 	}
 }
@@ -341,15 +341,15 @@ func TestStoreHasTrackWithArtistMBID(t *testing.T) {
 
 	known := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 
-	s.UpsertTrack(&Track{
+	s.UpsertTrack(context.Background(), &Track{
 		Path: "a/b.flac", Size: 1, ModTime: time.Now(),
 		Artist: "A", Album: "B", ArtistMBID: known,
 	})
 
-	if !s.HasTrackWithArtistMBID(known) {
+	if !s.HasTrackWithArtistMBID(context.Background(), known) {
 		t.Errorf("known artist MBID should report true")
 	}
-	if s.HasTrackWithArtistMBID("not-a-uuid") {
+	if s.HasTrackWithArtistMBID(context.Background(), "not-a-uuid") {
 		t.Errorf("unknown artist MBID should report false")
 	}
 }
@@ -375,7 +375,7 @@ func TestEnrichmentCountsCorrectness(t *testing.T) {
 			ModTime: now,
 			Artist:  "A", Album: "B",
 		}
-		if err := s.UpsertTrack(tr); err != nil {
+		if err := s.UpsertTrack(context.Background(), tr); err != nil {
 			t.Fatal(err)
 		}
 		if i <= 3 {
@@ -383,13 +383,13 @@ func TestEnrichmentCountsCorrectness(t *testing.T) {
 			tr.Title = fmt.Sprintf("T%d", i)
 			// MarkEnriched stamps `enriched_at = NOW()`. Use distinct
 			// monotonic offsets so the latest is deterministic.
-			if err := s.MarkEnriched(tr); err != nil {
+			if err := s.MarkEnriched(context.Background(), tr); err != nil {
 				t.Fatal(err)
 			}
 		}
 	}
 
-	enriched, last, err := s.EnrichmentCounts()
+	enriched, last, err := s.EnrichmentCounts(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -415,7 +415,7 @@ func TestEnrichmentCountsEmpty(t *testing.T) {
 	}
 	defer s.Close()
 
-	enriched, last, err := s.EnrichmentCounts()
+	enriched, last, err := s.EnrichmentCounts(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -440,7 +440,7 @@ func TestEnrichmentCountsAllUnenriched(t *testing.T) {
 	defer s.Close()
 
 	for i := 1; i <= 3; i++ {
-		if err := s.UpsertTrack(&Track{
+		if err := s.UpsertTrack(context.Background(), &Track{
 			Path: fmt.Sprintf("a/t%d.flac", i), Size: int64(i),
 			ModTime: time.Now(), Artist: "A", Album: "B",
 		}); err != nil {
@@ -448,7 +448,7 @@ func TestEnrichmentCountsAllUnenriched(t *testing.T) {
 		}
 	}
 
-	enriched, last, err := s.EnrichmentCounts()
+	enriched, last, err := s.EnrichmentCounts(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -487,12 +487,12 @@ func TestEnrichmentCountsUsesIndex(t *testing.T) {
 			ModTime: time.Now(),
 			Artist:  "A", Album: "B",
 		}
-		if err := s.UpsertTrack(tr); err != nil {
+		if err := s.UpsertTrack(context.Background(), tr); err != nil {
 			t.Fatal(err)
 		}
 		if i <= 95 {
 			tr.Title = fmt.Sprintf("T%d", i)
-			if err := s.MarkEnriched(tr); err != nil {
+			if err := s.MarkEnriched(context.Background(), tr); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -576,7 +576,7 @@ func TestStoreListTracksPageWalksAllRowsExactlyOnce(t *testing.T) {
 	// 7 tracks, page size 3 → pages of 3, 3, 1. Non-divisible on
 	// purpose.
 	for i := 1; i <= 7; i++ {
-		s.UpsertTrack(&Track{
+		s.UpsertTrack(context.Background(), &Track{
 			Path:    fmt.Sprintf("Music/Artist/%02d.flac", i),
 			Size:    int64(i),
 			ModTime: time.Now(),
@@ -587,7 +587,7 @@ func TestStoreListTracksPageWalksAllRowsExactlyOnce(t *testing.T) {
 	cursor := ""
 	pages := 0
 	for {
-		page, err := s.ListTracksPage(cursor, 3)
+		page, err := s.ListTracksPage(context.Background(), cursor, 3)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -621,7 +621,7 @@ func TestStoreListTracksPageEmptyStoreReturnsEmpty(t *testing.T) {
 	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
 	defer s.Close()
 
-	page, err := s.ListTracksPage("", 100)
+	page, err := s.ListTracksPage(context.Background(), "", 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -637,13 +637,13 @@ func TestStoreListTracksPageZeroLimitDefaults(t *testing.T) {
 	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
 	defer s.Close()
 	for i := 1; i <= 5; i++ {
-		s.UpsertTrack(&Track{
+		s.UpsertTrack(context.Background(), &Track{
 			Path:    fmt.Sprintf("Music/%02d.flac", i),
 			Size:    int64(i),
 			ModTime: time.Now(),
 		})
 	}
-	page, err := s.ListTracksPage("", 0) // 0 → default 1000
+	page, err := s.ListTracksPage(context.Background(), "", 0) // 0 → default 1000
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -662,7 +662,7 @@ func TestBuildManifestPageSetsNextCursorAndTotal(t *testing.T) {
 	s, _ := OpenStore(filepath.Join(dir, "bridge.db"))
 	defer s.Close()
 	for i := 1; i <= 5; i++ {
-		s.UpsertTrack(&Track{
+		s.UpsertTrack(context.Background(), &Track{
 			Path:    fmt.Sprintf("Music/%02d.flac", i),
 			Size:    int64(i),
 			ModTime: time.Now(),
@@ -670,7 +670,7 @@ func TestBuildManifestPageSetsNextCursorAndTotal(t *testing.T) {
 	}
 
 	// Page size 2 → first page is full, NextCursor non-nil, Total set.
-	m, err := BuildManifestPage(s, []string{filepath.Join(dir, "Music")}, "", 2)
+	m, err := BuildManifestPage(context.Background(), s, []string{filepath.Join(dir, "Music")}, "", 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -686,7 +686,7 @@ func TestBuildManifestPageSetsNextCursorAndTotal(t *testing.T) {
 
 	// Second page (cursor=="Music/02.flac") — still mid-run, so
 	// NextCursor non-nil, but Folders + Total absent.
-	m, err = BuildManifestPage(s, []string{filepath.Join(dir, "Music")}, "Music/02.flac", 2)
+	m, err = BuildManifestPage(context.Background(), s, []string{filepath.Join(dir, "Music")}, "Music/02.flac", 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -702,7 +702,7 @@ func TestBuildManifestPageSetsNextCursorAndTotal(t *testing.T) {
 
 	// Last page (cursor=="Music/04.flac" → only Music/05.flac left).
 	// Short read, NextCursor nil.
-	m, err = BuildManifestPage(s, []string{filepath.Join(dir, "Music")}, "Music/04.flac", 2)
+	m, err = BuildManifestPage(context.Background(), s, []string{filepath.Join(dir, "Music")}, "Music/04.flac", 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -725,7 +725,7 @@ func TestBuildManifestPageExactMultipleOfLimitStopsAtCorrectPage(t *testing.T) {
 	defer s.Close()
 	// 4 tracks, page size 2 — exactly two full pages.
 	for i := 1; i <= 4; i++ {
-		s.UpsertTrack(&Track{
+		s.UpsertTrack(context.Background(), &Track{
 			Path:    fmt.Sprintf("Music/%02d.flac", i),
 			Size:    int64(i),
 			ModTime: time.Now(),
@@ -733,7 +733,7 @@ func TestBuildManifestPageExactMultipleOfLimitStopsAtCorrectPage(t *testing.T) {
 	}
 
 	// Page 1: 2 tracks, NextCursor set to Music/02.flac.
-	p1, _ := BuildManifestPage(s, []string{filepath.Join(dir, "Music")}, "", 2)
+	p1, _ := BuildManifestPage(context.Background(), s, []string{filepath.Join(dir, "Music")}, "", 2)
 	if p1.NextCursor == nil {
 		t.Fatalf("page 1 should have NextCursor")
 	}
@@ -741,7 +741,7 @@ func TestBuildManifestPageExactMultipleOfLimitStopsAtCorrectPage(t *testing.T) {
 	// Page 2: 2 tracks, NextCursor MUST be nil — we've reached the
 	// end. Pre-fix this would have set NextCursor to Music/04.flac
 	// and forced a third empty round-trip.
-	p2, _ := BuildManifestPage(s, []string{filepath.Join(dir, "Music")}, *p1.NextCursor, 2)
+	p2, _ := BuildManifestPage(context.Background(), s, []string{filepath.Join(dir, "Music")}, *p1.NextCursor, 2)
 	if len(p2.Tracks) != 2 {
 		t.Errorf("page 2 tracks = %d, want 2", len(p2.Tracks))
 	}
@@ -760,20 +760,20 @@ func TestStoreSinceFilterIndexedAt(t *testing.T) {
 	defer s.Close()
 
 	oldMtime := time.Now().Add(-10 * 365 * 24 * time.Hour).UTC().Truncate(time.Second)
-	s.UpsertTrack(&Track{Path: "old.flac", Size: 1, ModTime: oldMtime})
+	s.UpsertTrack(context.Background(), &Track{Path: "old.flac", Size: 1, ModTime: oldMtime})
 	// Sleep spans a couple of Go-time ticks so the cursor lands
 	// strictly between the two UpsertTrack calls' indexed_at values.
 	time.Sleep(10 * time.Millisecond)
 	cursor := time.Now().UTC()
 	time.Sleep(10 * time.Millisecond)
-	s.UpsertTrack(&Track{Path: "mid.flac", Size: 1, ModTime: oldMtime})
-	s.UpsertTrack(&Track{Path: "new.flac", Size: 1, ModTime: time.Now()})
+	s.UpsertTrack(context.Background(), &Track{Path: "mid.flac", Size: 1, ModTime: oldMtime})
+	s.UpsertTrack(context.Background(), &Track{Path: "new.flac", Size: 1, ModTime: time.Now()})
 
-	all, _ := s.ListTracks(nil)
+	all, _ := s.ListTracks(context.Background(), nil)
 	if len(all) != 3 {
 		t.Errorf("all: %d", len(all))
 	}
-	newer, _ := s.ListTracks(&cursor)
+	newer, _ := s.ListTracks(context.Background(), &cursor)
 	if len(newer) != 2 {
 		t.Fatalf("newer than cursor: want 2 (mid+new), got %d", len(newer))
 	}
@@ -793,7 +793,7 @@ func TestStoreSinceFilterIndexedAt(t *testing.T) {
 func TestStorePersistsAcrossReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "bridge.db")
 	s1, _ := OpenStore(path)
-	s1.UpsertTrack(&Track{Path: "p.flac", Size: 1, ModTime: time.Now(), Title: "persists"})
+	s1.UpsertTrack(context.Background(), &Track{Path: "p.flac", Size: 1, ModTime: time.Now(), Title: "persists"})
 	s1.Close()
 
 	s2, err := OpenStore(path)
@@ -801,7 +801,7 @@ func TestStorePersistsAcrossReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s2.Close()
-	got, _ := s2.GetTrack("p.flac")
+	got, _ := s2.GetTrack(context.Background(), "p.flac")
 	if got == nil || got.Title != "persists" {
 		t.Errorf("didn't persist: %+v", got)
 	}
@@ -811,12 +811,12 @@ func TestStoreFolderRoundTrip(t *testing.T) {
 	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
 	defer s.Close()
 	now := time.Now().UTC().Truncate(time.Second)
-	s.UpsertFolder(&Folder{Path: "a", ModTime: now})
-	got, _ := s.FolderMTime("a")
+	s.UpsertFolder(context.Background(), &Folder{Path: "a", ModTime: now})
+	got, _ := s.FolderMTime(context.Background(), "a")
 	if !got.Equal(now) {
 		t.Errorf("folder mtime: got %v, want %v", got, now)
 	}
-	folders, _ := s.ListFolders()
+	folders, _ := s.ListFolders(context.Background())
 	if len(folders) != 1 {
 		t.Errorf("folders: %+v", folders)
 	}
@@ -837,7 +837,7 @@ func TestScannerIndexesAllTracks(t *testing.T) {
 	if n != expected {
 		t.Errorf("scanned %d, want %d", n, expected)
 	}
-	all, _ := s.ListTracks(nil)
+	all, _ := s.ListTracks(context.Background(), nil)
 	if len(all) != expected {
 		t.Errorf("stored %d, want %d", len(all), expected)
 	}
@@ -879,12 +879,12 @@ func TestScannerRemovesDeletedTracks(t *testing.T) {
 		t.Fatal(err)
 	}
 	sc.Scan(context.Background())
-	got, _ := s.GetTrack("Artist A/Album 1/01 FlacTrack.flac")
+	got, _ := s.GetTrack(context.Background(), "Artist A/Album 1/01 FlacTrack.flac")
 	if got != nil {
 		t.Errorf("deleted track still in DB: %+v", got)
 	}
 	// The sibling DSF track should still be there.
-	sibling, _ := s.GetTrack("Artist A/Album 1/02 DsfTrack.dsf")
+	sibling, _ := s.GetTrack(context.Background(), "Artist A/Album 1/02 DsfTrack.dsf")
 	if sibling == nil {
 		t.Error("sibling track lost during deletion pass")
 	}
@@ -940,7 +940,7 @@ func TestScannerWorkerPoolCommitsAllTracks(t *testing.T) {
 	if got := sc.ScanProgress(); got != int64(n) {
 		t.Errorf("ScanProgress = %d, want %d", got, n)
 	}
-	got, err := s.CountTracks()
+	got, err := s.CountTracks(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -981,7 +981,7 @@ func TestScannerCancellationLeavesCommittedBatchesIntact(t *testing.T) {
 	if count < 0 || count > n {
 		t.Errorf("count = %d, want 0..%d", count, n)
 	}
-	got, _ := s.CountTracks()
+	got, _ := s.CountTracks(context.Background())
 	if got != count {
 		t.Errorf("CountTracks (%d) != Scan count (%d) — partial batch leaked", got, count)
 	}
@@ -1018,7 +1018,7 @@ func TestNewScannerSeedsLastFullScanFromStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Second)
-	if err := s.SetScanState("last_full_scan", want.Format(time.RFC3339Nano)); err != nil {
+	if err := s.SetScanState(context.Background(), "last_full_scan", want.Format(time.RFC3339Nano)); err != nil {
 		t.Fatalf("SetScanState: %v", err)
 	}
 	s.Close()
@@ -1063,7 +1063,7 @@ func TestBuildManifestShape(t *testing.T) {
 	sc := NewScanner([]string{root}, s, "")
 	sc.Scan(context.Background())
 
-	mf, err := BuildManifest(s, []string{root}, time.Time{})
+	mf, err := BuildManifest(context.Background(), s, []string{root}, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1095,7 +1095,7 @@ func TestWriteManifestParityWithBuildManifest(t *testing.T) {
 	sc := NewScanner([]string{root}, s, "")
 	sc.Scan(context.Background())
 
-	want, err := BuildManifest(s, []string{root}, time.Time{})
+	want, err := BuildManifest(context.Background(), s, []string{root}, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1161,7 +1161,7 @@ func TestWriteManifestStreamsLargeLibraryWithoutOOM(t *testing.T) {
 	defer s.Close()
 
 	for i := 0; i < n; i++ {
-		if err := s.UpsertTrack(&Track{
+		if err := s.UpsertTrack(context.Background(), &Track{
 			Path:    fmt.Sprintf("Artist/Album/%05d.flac", i),
 			Size:    1234,
 			ModTime: time.Now(),
@@ -1197,7 +1197,7 @@ func TestBuildManifestSinceFilter(t *testing.T) {
 	sc.Scan(context.Background())
 
 	future := time.Now().Add(time.Hour)
-	mf, _ := BuildManifest(s, []string{root}, future)
+	mf, _ := BuildManifest(context.Background(), s, []string{root}, future)
 	if len(mf.Tracks) != 0 {
 		t.Errorf("since-future: got %d tracks, want 0", len(mf.Tracks))
 	}
@@ -1225,28 +1225,28 @@ func TestScannerSetRootsAppliesToNextScan(t *testing.T) {
 	if _, err := sc.Scan(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	total, _ := s.CountTracks()
+	total, _ := s.CountTracks(context.Background())
 	if total != 3 {
 		t.Fatalf("root A count = %d, want 3", total)
 	}
 
 	// Transition to multi-root. A 1→N transition changes storage form
 	// (tracks get a "<basename>/" prefix), so the admin flow wipes first.
-	if err := s.WipeAllTracks(); err != nil {
+	if err := s.WipeAllTracks(context.Background()); err != nil {
 		t.Fatalf("Wipe: %v", err)
 	}
 	sc.SetRoots([]string{a, b})
 	if _, err := sc.Scan(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	total, _ = s.CountTracks()
+	total, _ = s.CountTracks(context.Background())
 	if total != 4 {
 		t.Errorf("A+B count = %d, want 4", total)
 	}
 
 	// Per-root counts should match the multi-root storage form.
-	nA, _ := s.CountTracksByPrefix(filepath.Base(a) + "/")
-	nB, _ := s.CountTracksByPrefix(filepath.Base(b) + "/")
+	nA, _ := s.CountTracksByPrefix(context.Background(), filepath.Base(a)+"/")
+	nB, _ := s.CountTracksByPrefix(context.Background(), filepath.Base(b)+"/")
 	if nA != 3 || nB != 1 {
 		t.Errorf("per-root counts A=%d B=%d, want 3,1", nA, nB)
 	}
@@ -1308,22 +1308,22 @@ func TestStoreDeleteTracksByPrefix(t *testing.T) {
 		// must treat these literally rather than as wildcards.
 		"A%magic/1.flac", "A_magic/1.flac",
 	} {
-		if err := s.UpsertTrack(&Track{Path: p, Size: 1, ModTime: time.Now()}); err != nil {
+		if err := s.UpsertTrack(context.Background(), &Track{Path: p, Size: 1, ModTime: time.Now()}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	nA, _ := s.CountTracksByPrefix("A/")
+	nA, _ := s.CountTracksByPrefix(context.Background(), "A/")
 	if nA != 2 {
 		t.Errorf("prefix A/ count = %d, want 2 (the %%/_ variants must not match)", nA)
 	}
-	removed, err := s.DeleteTracksByPrefix("A/")
+	removed, err := s.DeleteTracksByPrefix(context.Background(), "A/")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if removed != 2 {
 		t.Errorf("DeleteTracksByPrefix removed %d, want 2", removed)
 	}
-	total, _ := s.CountTracks()
+	total, _ := s.CountTracks(context.Background())
 	if total != 3 {
 		t.Errorf("remaining = %d, want 3 (B + two escaped)", total)
 	}
@@ -1333,7 +1333,7 @@ func TestStoreDeleteTracksByPrefix(t *testing.T) {
 
 func mustPaths(t *testing.T, s *Store) []string {
 	t.Helper()
-	paths, err := s.TrackPaths()
+	paths, err := s.TrackPaths(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}

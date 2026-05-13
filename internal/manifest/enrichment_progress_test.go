@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"context"
 	"encoding/json"
 	"path/filepath"
 	"testing"
@@ -33,7 +34,7 @@ func openTestStore(t *testing.T) *Store {
 func TestStoreEnrichmentCountsEmpty(t *testing.T) {
 	s := openTestStore(t)
 	defer s.Close()
-	enriched, last, err := s.EnrichmentCounts()
+	enriched, last, err := s.EnrichmentCounts(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,20 +52,20 @@ func TestStoreEnrichmentCountsMixed(t *testing.T) {
 	defer s.Close()
 	now := time.Now().UTC().Truncate(time.Second)
 	for i := 0; i < 10; i++ {
-		s.UpsertTrack(&Track{
+		s.UpsertTrack(context.Background(), &Track{
 			Path: filepath.Join("Music", "x", "t.flac") + string(rune('0'+i)),
 			Size: 1, ModTime: now,
 		})
 	}
 	// MarkEnriched 3 of them. The mark stamps `enriched_at` to now.
-	all, _ := s.ListTracks(nil)
+	all, _ := s.ListTracks(context.Background(), nil)
 	for i := 0; i < 3; i++ {
 		t2 := all[i]
-		if err := s.MarkEnriched(&t2); err != nil {
+		if err := s.MarkEnriched(context.Background(), &t2); err != nil {
 			t.Fatal(err)
 		}
 	}
-	enriched, last, err := s.EnrichmentCounts()
+	enriched, last, err := s.EnrichmentCounts(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,12 +90,12 @@ func TestEnrichmentProgressTotalMatchesManifestTotal(t *testing.T) {
 	defer s.Close()
 	now := time.Now().UTC().Truncate(time.Second)
 	for i := 0; i < 7; i++ {
-		s.UpsertTrack(&Track{
+		s.UpsertTrack(context.Background(), &Track{
 			Path: "Music/" + string(rune('0'+i)) + ".flac",
 			Size: 1, ModTime: now,
 		})
 	}
-	m, err := BuildManifestPage(s, []string{"/tmp/nope/Music"}, "", 100)
+	m, err := BuildManifestPage(context.Background(), s, []string{"/tmp/nope/Music"}, "", 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,10 +120,10 @@ func TestListTracksPopulatesEnriched(t *testing.T) {
 	s := openTestStore(t)
 	defer s.Close()
 	now := time.Now().UTC().Truncate(time.Second)
-	s.UpsertTrack(&Track{Path: "a.flac", Size: 1, ModTime: now})
-	s.UpsertTrack(&Track{Path: "b.flac", Size: 1, ModTime: now})
+	s.UpsertTrack(context.Background(), &Track{Path: "a.flac", Size: 1, ModTime: now})
+	s.UpsertTrack(context.Background(), &Track{Path: "b.flac", Size: 1, ModTime: now})
 
-	pre, _ := s.ListTracks(nil)
+	pre, _ := s.ListTracks(context.Background(), nil)
 	for _, tr := range pre {
 		if tr.Enriched == nil {
 			t.Fatalf("Enriched should never be nil on read from this server, got nil for %q", tr.Path)
@@ -133,10 +134,10 @@ func TestListTracksPopulatesEnriched(t *testing.T) {
 	}
 
 	bRow := pre[1]
-	if err := s.MarkEnriched(&bRow); err != nil {
+	if err := s.MarkEnriched(context.Background(), &bRow); err != nil {
 		t.Fatal(err)
 	}
-	post, _ := s.ListTracks(nil)
+	post, _ := s.ListTracks(context.Background(), nil)
 	for _, tr := range post {
 		if tr.Path == "b.flac" {
 			if tr.Enriched == nil || !*tr.Enriched {
@@ -158,12 +159,12 @@ func TestListTracksPagePopulatesEnriched(t *testing.T) {
 	defer s.Close()
 	now := time.Now().UTC().Truncate(time.Second)
 	for i := 0; i < 5; i++ {
-		s.UpsertTrack(&Track{
+		s.UpsertTrack(context.Background(), &Track{
 			Path: filepath.Join("Music", string(rune('a'+i))+".flac"),
 			Size: 1, ModTime: now,
 		})
 	}
-	page, _ := s.ListTracksPage("", 100)
+	page, _ := s.ListTracksPage(context.Background(), "", 100)
 	for _, tr := range page {
 		if tr.Enriched == nil {
 			t.Errorf("page row %q should have non-nil Enriched", tr.Path)
@@ -180,13 +181,13 @@ func TestBuildManifestSetsEnrichmentProgress(t *testing.T) {
 	defer s.Close()
 	now := time.Now().UTC().Truncate(time.Second)
 	for i := 0; i < 4; i++ {
-		s.UpsertTrack(&Track{Path: string(rune('a'+i)) + ".flac", Size: 1, ModTime: now})
+		s.UpsertTrack(context.Background(), &Track{Path: string(rune('a'+i)) + ".flac", Size: 1, ModTime: now})
 	}
-	first, _ := s.ListTracks(nil)
-	s.MarkEnriched(&first[0])
-	s.MarkEnriched(&first[1])
+	first, _ := s.ListTracks(context.Background(), nil)
+	s.MarkEnriched(context.Background(), &first[0])
+	s.MarkEnriched(context.Background(), &first[1])
 
-	m, err := BuildManifest(s, []string{"/tmp/nope/Music"}, time.Time{})
+	m, err := BuildManifest(context.Background(), s, []string{"/tmp/nope/Music"}, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,13 +212,13 @@ func TestBuildManifestPageEnrichmentProgressOnFirstPageOnly(t *testing.T) {
 	defer s.Close()
 	now := time.Now().UTC().Truncate(time.Second)
 	for i := 1; i <= 5; i++ {
-		s.UpsertTrack(&Track{
+		s.UpsertTrack(context.Background(), &Track{
 			Path: "Music/" + string(rune('0'+i)) + ".flac",
 			Size: int64(i), ModTime: now,
 		})
 	}
 
-	first, err := BuildManifestPage(s, []string{"/tmp/nope/Music"}, "", 2)
+	first, err := BuildManifestPage(context.Background(), s, []string{"/tmp/nope/Music"}, "", 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +229,7 @@ func TestBuildManifestPageEnrichmentProgressOnFirstPageOnly(t *testing.T) {
 		t.Errorf("first page TracksTotal = %d, want 5", first.EnrichmentProgress.TracksTotal)
 	}
 
-	mid, err := BuildManifestPage(s, []string{"/tmp/nope/Music"}, "Music/2.flac", 2)
+	mid, err := BuildManifestPage(context.Background(), s, []string{"/tmp/nope/Music"}, "Music/2.flac", 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -332,14 +333,14 @@ func TestUpsertTrackDoesNotPersistEnrichedField(t *testing.T) {
 	// "caller fed a row from ListTracks back into UpsertTrack" path).
 	yes := true
 	tr := &Track{Path: "x.flac", Size: 1, ModTime: now, Enriched: &yes}
-	if err := s.UpsertTrack(tr); err != nil {
+	if err := s.UpsertTrack(context.Background(), tr); err != nil {
 		t.Fatal(err)
 	}
 
 	// GetTrack reads only `tags_json`. If the JSON contains
 	// `"enriched": true`, the returned Track will surface
 	// `Enriched != nil` — that's the bug.
-	got, err := s.GetTrack("x.flac")
+	got, err := s.GetTrack(context.Background(), "x.flac")
 	if err != nil || got == nil {
 		t.Fatalf("GetTrack: %v / %v", err, got)
 	}
@@ -355,17 +356,17 @@ func TestMarkEnrichedDoesNotPersistEnrichedField(t *testing.T) {
 	defer s.Close()
 	now := time.Now().UTC().Truncate(time.Second)
 
-	if err := s.UpsertTrack(&Track{Path: "y.flac", Size: 1, ModTime: now}); err != nil {
+	if err := s.UpsertTrack(context.Background(), &Track{Path: "y.flac", Size: 1, ModTime: now}); err != nil {
 		t.Fatal(err)
 	}
 
 	yes := true
 	tr := &Track{Path: "y.flac", Size: 1, ModTime: now, Enriched: &yes}
-	if err := s.MarkEnriched(tr); err != nil {
+	if err := s.MarkEnriched(context.Background(), tr); err != nil {
 		t.Fatal(err)
 	}
 
-	got, err := s.GetTrack("y.flac")
+	got, err := s.GetTrack(context.Background(), "y.flac")
 	if err != nil || got == nil {
 		t.Fatalf("GetTrack: %v / %v", err, got)
 	}
@@ -394,9 +395,9 @@ func TestEnrichmentProgressOmitsLastEnrichedAtWhenNeverEnriched(t *testing.T) {
 	// A track that's been upserted but NOT enriched — the realistic
 	// "fresh-pair, scan ran but enricher hasn't finished a single
 	// row yet" state.
-	s.UpsertTrack(&Track{Path: "a.flac", Size: 1, ModTime: now})
+	s.UpsertTrack(context.Background(), &Track{Path: "a.flac", Size: 1, ModTime: now})
 
-	m, err := BuildManifest(s, []string{"/tmp/nope/Music"}, time.Time{})
+	m, err := BuildManifest(context.Background(), s, []string{"/tmp/nope/Music"}, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}

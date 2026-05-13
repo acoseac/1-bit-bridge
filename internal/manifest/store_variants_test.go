@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -30,11 +31,11 @@ func TestVariantCRUDRoundTrip(t *testing.T) {
 		SoxSettings:   `{"resampler":"sox"}`,
 		CreatedAt:     time.Now().UnixNano(),
 	}
-	if err := s.UpsertVariant(row); err != nil {
+	if err := s.UpsertVariant(context.Background(), row); err != nil {
 		t.Fatalf("UpsertVariant: %v", err)
 	}
 
-	got, err := s.GetVariant(row.SourcePath, row.VariantID)
+	got, err := s.GetVariant(context.Background(), row.SourcePath, row.VariantID)
 	if err != nil {
 		t.Fatalf("GetVariant: %v", err)
 	}
@@ -48,7 +49,7 @@ func TestVariantCRUDRoundTrip(t *testing.T) {
 		t.Errorf("SampleRate: got %d want %d", got.SampleRate, row.SampleRate)
 	}
 
-	all, err := s.AllVariants()
+	all, err := s.AllVariants(context.Background())
 	if err != nil {
 		t.Fatalf("AllVariants: %v", err)
 	}
@@ -56,10 +57,10 @@ func TestVariantCRUDRoundTrip(t *testing.T) {
 		t.Fatalf("AllVariants: got %d rows, want 1", len(all))
 	}
 
-	if err := s.DeleteVariant(row.SourcePath, row.VariantID); err != nil {
+	if err := s.DeleteVariant(context.Background(), row.SourcePath, row.VariantID); err != nil {
 		t.Fatalf("DeleteVariant: %v", err)
 	}
-	got2, _ := s.GetVariant(row.SourcePath, row.VariantID)
+	got2, _ := s.GetVariant(context.Background(), row.SourcePath, row.VariantID)
 	if got2 != nil {
 		t.Fatal("DeleteVariant: row still present after delete")
 	}
@@ -81,7 +82,7 @@ func TestUpsertVariantReplacesExisting(t *testing.T) {
 		SizeBytes: 100, SourceMTimeNS: 1, SourceSize: 1,
 		SoxSettings: "{}", CreatedAt: 1,
 	}
-	if err := s.UpsertVariant(first); err != nil {
+	if err := s.UpsertVariant(context.Background(), first); err != nil {
 		t.Fatal(err)
 	}
 
@@ -89,11 +90,11 @@ func TestUpsertVariantReplacesExisting(t *testing.T) {
 	second.SidecarPath = "/tmp/new.flac"
 	second.SizeBytes = 200
 	second.CreatedAt = 99
-	if err := s.UpsertVariant(second); err != nil {
+	if err := s.UpsertVariant(context.Background(), second); err != nil {
 		t.Fatal(err)
 	}
 
-	got, err := s.GetVariant(first.SourcePath, first.VariantID)
+	got, err := s.GetVariant(context.Background(), first.SourcePath, first.VariantID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +102,7 @@ func TestUpsertVariantReplacesExisting(t *testing.T) {
 		t.Errorf("UpsertVariant did not replace: got %+v", got)
 	}
 
-	all, _ := s.AllVariants()
+	all, _ := s.AllVariants(context.Background())
 	if len(all) != 1 {
 		t.Errorf("AllVariants: expected 1 row after replace, got %d", len(all))
 	}
@@ -121,7 +122,7 @@ func TestListTracksSplicesVariants(t *testing.T) {
 	// Two variants on track 1, none on track 2 — covers the
 	// non-empty + empty branches of the aggregation.
 	for _, vid := range []string{"upscaled-v2-176400-24", "upscaled-v2-352800-32"} {
-		if err := s.UpsertVariant(VariantRow{
+		if err := s.UpsertVariant(context.Background(), VariantRow{
 			SourcePath: "Music/A/1.flac", VariantID: vid,
 			SidecarPath: "/tmp/" + vid + ".flac", Format: "flac",
 			SampleRate: 176400, BitsPerSample: 24, SizeBytes: 10,
@@ -131,7 +132,7 @@ func TestListTracksSplicesVariants(t *testing.T) {
 		}
 	}
 
-	tracks, err := s.ListTracks(nil)
+	tracks, err := s.ListTracks(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("ListTracks: %v", err)
 	}
@@ -189,7 +190,7 @@ func TestDeleteTrackRemovesSidecarFiles(t *testing.T) {
 		"upscaled-v2-176400-24": side1,
 		"upscaled-v2-352800-32": side2,
 	} {
-		if err := s.UpsertVariant(VariantRow{
+		if err := s.UpsertVariant(context.Background(), VariantRow{
 			SourcePath: "Music/A/1.flac", VariantID: vid,
 			SidecarPath: path, Format: "flac",
 			SampleRate: 176400, BitsPerSample: 24,
@@ -200,7 +201,7 @@ func TestDeleteTrackRemovesSidecarFiles(t *testing.T) {
 		}
 	}
 
-	if err := s.DeleteTrack("Music/A/1.flac"); err != nil {
+	if err := s.DeleteTrack(context.Background(), "Music/A/1.flac"); err != nil {
 		t.Fatalf("DeleteTrack: %v", err)
 	}
 
@@ -211,7 +212,7 @@ func TestDeleteTrackRemovesSidecarFiles(t *testing.T) {
 	}
 
 	// CASCADE should have removed the variant rows too.
-	all, _ := s.AllVariants()
+	all, _ := s.AllVariants(context.Background())
 	if len(all) != 0 {
 		t.Errorf("variants should have been cascaded; got %d rows", len(all))
 	}
@@ -228,7 +229,7 @@ func TestDeleteTrackToleratesMissingSidecar(t *testing.T) {
 	upsertParent(t, s, "Music/A/1.flac")
 
 	// Insert variant pointing at a path that doesn't exist on disk.
-	if err := s.UpsertVariant(VariantRow{
+	if err := s.UpsertVariant(context.Background(), VariantRow{
 		SourcePath: "Music/A/1.flac", VariantID: "upscaled-v2-176400-24",
 		SidecarPath: "/does/not/exist/abc.flac", Format: "flac",
 		SampleRate: 176400, BitsPerSample: 24, SizeBytes: 1,
@@ -237,11 +238,11 @@ func TestDeleteTrackToleratesMissingSidecar(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := s.DeleteTrack("Music/A/1.flac"); err != nil {
+	if err := s.DeleteTrack(context.Background(), "Music/A/1.flac"); err != nil {
 		t.Fatalf("DeleteTrack should swallow missing-sidecar errors: %v", err)
 	}
 
-	got, _ := s.GetTrack("Music/A/1.flac")
+	got, _ := s.GetTrack(context.Background(), "Music/A/1.flac")
 	if got != nil {
 		t.Error("DeleteTrack: row still present despite cleanup tolerance")
 	}
@@ -310,7 +311,7 @@ func TestUpsertVariantBumpsParentIndexedAt(t *testing.T) {
 	// Next s.now() will return step+1s. UpsertVariant should write
 	// exactly that value into tracks.indexed_at for the parent row.
 	expectedIndexedAt := step + 1_000_000_000
-	if err := s.UpsertVariant(VariantRow{
+	if err := s.UpsertVariant(context.Background(), VariantRow{
 		SourcePath: "Music/A/1.flac", VariantID: "upscaled-v2-176400-24",
 		SidecarPath: "/tmp/x.flac", Format: "flac",
 		SampleRate: 176400, BitsPerSample: 24, SizeBytes: 100,
@@ -375,7 +376,7 @@ func TestUpsertVariantDeltaManifestSurfacesNewVariant(t *testing.T) {
 	t1 := t0 + (1 * time.Hour).Nanoseconds()
 	s.now = func() time.Time { return time.Unix(0, t1) }
 
-	if err := s.UpsertVariant(VariantRow{
+	if err := s.UpsertVariant(context.Background(), VariantRow{
 		SourcePath: "Music/A/1.flac", VariantID: "upscaled-v2-192000-24",
 		SidecarPath: "/tmp/u.flac", Format: "flac",
 		SampleRate: 192000, BitsPerSample: 24, SizeBytes: 100,
@@ -387,7 +388,7 @@ func TestUpsertVariantDeltaManifestSurfacesNewVariant(t *testing.T) {
 	// Delta-sync from T0: the iOS-equivalent of "what changed since
 	// my last finished scan".
 	since := time.Unix(0, t0)
-	delta, err := s.ListTracks(&since)
+	delta, err := s.ListTracks(context.Background(), &since)
 	if err != nil {
 		t.Fatalf("ListTracks(since=T0): %v", err)
 	}
@@ -438,7 +439,7 @@ func TestDeleteVariantBumpsParentIndexedAt(t *testing.T) {
 	// UpsertTrack-stamped value (MAX guard succeeds).
 	preDeleteAt := parentIndexedAt + (1 * time.Hour).Nanoseconds()
 	s.now = func() time.Time { return time.Unix(0, preDeleteAt) }
-	if err := s.UpsertVariant(VariantRow{
+	if err := s.UpsertVariant(context.Background(), VariantRow{
 		SourcePath: "Music/A/1.flac", VariantID: "upscaled-v2-176400-24",
 		SidecarPath: "/tmp/x.flac", Format: "flac",
 		SampleRate: 176400, BitsPerSample: 24, SizeBytes: 100,
@@ -461,7 +462,7 @@ func TestDeleteVariantBumpsParentIndexedAt(t *testing.T) {
 	// bump indexed_at past the pre-delete value.
 	expectedAfter := preDeleteAt + (1 * time.Hour).Nanoseconds()
 	s.now = func() time.Time { return time.Unix(0, expectedAfter) }
-	if err := s.DeleteVariant("Music/A/1.flac", "upscaled-v2-176400-24"); err != nil {
+	if err := s.DeleteVariant(context.Background(), "Music/A/1.flac", "upscaled-v2-176400-24"); err != nil {
 		t.Fatalf("DeleteVariant: %v", err)
 	}
 
@@ -499,7 +500,7 @@ func TestDeleteVariantNoOpSkipsBump(t *testing.T) {
 	s.now = func() time.Time { return time.Unix(0, expectedNoBump) }
 
 	// Delete a (path, variantID) pair that doesn't exist. RowsAffected==0.
-	if err := s.DeleteVariant("Music/A/1.flac", "nonexistent-variant-id"); err != nil {
+	if err := s.DeleteVariant(context.Background(), "Music/A/1.flac", "nonexistent-variant-id"); err != nil {
 		t.Fatalf("DeleteVariant (no-op): %v", err)
 	}
 
@@ -547,7 +548,7 @@ func TestUpsertVariantMonotonicGuard(t *testing.T) {
 	pastTimestamp := initialIndexedAt - (1 * time.Hour).Nanoseconds()
 	s.now = func() time.Time { return time.Unix(0, pastTimestamp) }
 
-	if err := s.UpsertVariant(VariantRow{
+	if err := s.UpsertVariant(context.Background(), VariantRow{
 		SourcePath: "Music/A/1.flac", VariantID: "upscaled-v2-176400-24",
 		SidecarPath: "/tmp/x.flac", Format: "flac",
 		SampleRate: 176400, BitsPerSample: 24, SizeBytes: 100,
@@ -599,7 +600,7 @@ func TestUpsertVariantEqualClockStillAdvances(t *testing.T) {
 	// case the bot review flagged.
 	s.now = func() time.Time { return time.Unix(0, initialIndexedAt) }
 
-	if err := s.UpsertVariant(VariantRow{
+	if err := s.UpsertVariant(context.Background(), VariantRow{
 		SourcePath: "Music/A/1.flac", VariantID: "upscaled-v2-176400-24",
 		SidecarPath: "/tmp/x.flac", Format: "flac",
 		SampleRate: 176400, BitsPerSample: 24, SizeBytes: 100,
@@ -637,7 +638,7 @@ func openTempStore(t *testing.T) *Store {
 // content for these tests — only that the row exists.
 func upsertParent(t *testing.T, s *Store, path string) {
 	t.Helper()
-	if err := s.UpsertTrack(&Track{
+	if err := s.UpsertTrack(context.Background(), &Track{
 		Path:    path,
 		Size:    100,
 		ModTime: time.Now(),

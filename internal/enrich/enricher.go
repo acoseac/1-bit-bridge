@@ -188,7 +188,7 @@ func (e *Enricher) Run(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		batch, err := e.store.UnenrichedTracks(e.BatchLimit)
+		batch, err := e.store.UnenrichedTracks(ctx, e.BatchLimit)
 		if err != nil {
 			logger.Error("list unenriched", "err", err)
 			if !sleepCtx(ctx, e.PollInterval) {
@@ -219,7 +219,7 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 	// Skip tracks that have no artist+album info to search by. Mark them
 	// done anyway so we don't poll them forever.
 	if t.Artist == "" || t.Album == "" {
-		e.markSkipped(t, "no artist/album to search by")
+		e.markSkipped(ctx, t, "no artist/album to search by")
 		return
 	}
 
@@ -287,7 +287,7 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 				// schema drift, decode error). The cache is
 				// process-local; restart clears it.
 				e.albumCache.Set(key, albumResolution{})
-				e.markSkipped(t, fmt.Sprintf("MB error: %v", err))
+				e.markSkipped(ctx, t, fmt.Sprintf("MB error: %v", err))
 				return
 			}
 			resolution := albumResolution{}
@@ -316,7 +316,7 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 	// doesn't loop on it. Without this relaxation, the local-artwork
 	// feature would silently fail to fix the very case it targets.
 	if albumMBID == "" && !strings.HasPrefix(t.ArtworkMBID, "local-") {
-		e.markSkipped(t, "no MB match")
+		e.markSkipped(ctx, t, "no MB match")
 		return
 	}
 
@@ -348,7 +348,7 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 	// Resolve artist MBID + fetch artist image (Deezer fallback).
 	e.resolveArtist(ctx, t)
 
-	if err := e.store.MarkEnriched(t); err != nil {
+	if err := e.store.MarkEnriched(ctx, t); err != nil {
 		logger.Error("mark enriched", "path", t.Path, "err", err)
 		return
 	}
@@ -543,9 +543,9 @@ func linkOrCopy(src, dst string) error {
 
 // markSkipped stamps enriched_at so the worker doesn't retry the same
 // unsearchable track forever.
-func (e *Enricher) markSkipped(t *manifest.Track, reason string) {
+func (e *Enricher) markSkipped(ctx context.Context, t *manifest.Track, reason string) {
 	_ = reason // kept for future logging/observability
-	if err := e.store.MarkEnriched(t); err != nil {
+	if err := e.store.MarkEnriched(ctx, t); err != nil {
 		logger.Error("mark skipped", "path", t.Path, "err", err)
 	}
 	e.skipped.Add(1)

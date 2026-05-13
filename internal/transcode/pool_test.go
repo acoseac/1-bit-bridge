@@ -624,7 +624,7 @@ func TestPoolFiresOnJobCompleteAfterUpsertVariant(t *testing.T) {
 		// Critical ordering check: query the store from inside the
 		// callback. A regression that fires before UpsertVariant
 		// commits would see zero variants here.
-		count, _, err := store.CountVariants()
+		count, _, err := store.CountVariants(context.Background())
 		if err != nil {
 			t.Errorf("CountVariants inside callback: %v", err)
 		}
@@ -689,7 +689,7 @@ func TestPoolFiresOnJobCompleteAfterUpsertVariant(t *testing.T) {
 	// calls would produce slightly different values that this strict
 	// equality catches. (CodeRabbit nitpick on PR #187 — pinned so a
 	// future maintainer can't drop the shared capture.)
-	row, err := store.GetVariant(spec.SourceLibraryRel, spec.VariantID())
+	row, err := store.GetVariant(context.Background(), spec.SourceLibraryRel, spec.VariantID())
 	if err != nil {
 		t.Fatalf("GetVariant for parity check: %v", err)
 	}
@@ -937,7 +937,7 @@ func seedTrackForPool(t *testing.T, store *manifest.Store, path string) {
 		Size:    1,
 		ModTime: time.Now().UTC(),
 	}
-	if err := store.UpsertTrack(tr); err != nil {
+	if err := store.UpsertTrack(context.Background(), tr); err != nil {
 		t.Fatalf("seedTrackForPool UpsertTrack %q: %v", path, err)
 	}
 }

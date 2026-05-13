@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"context"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -14,11 +15,11 @@ func TestStoreFolderPaths(t *testing.T) {
 	defer s.Close()
 	now := time.Now().UTC()
 	for _, p := range []string{"b/album", "a/album", "a/album/disc1"} {
-		if err := s.UpsertFolder(&Folder{Path: p, ModTime: now}); err != nil {
+		if err := s.UpsertFolder(context.Background(), &Folder{Path: p, ModTime: now}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	got, err := s.FolderPaths()
+	got, err := s.FolderPaths(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,21 +37,21 @@ func TestStoreDeleteFolder(t *testing.T) {
 	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
 	defer s.Close()
 	now := time.Now().UTC()
-	if err := s.UpsertFolder(&Folder{Path: "album", ModTime: now}); err != nil {
+	if err := s.UpsertFolder(context.Background(), &Folder{Path: "album", ModTime: now}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.DeleteFolder("album"); err != nil {
+	if err := s.DeleteFolder(context.Background(), "album"); err != nil {
 		t.Fatalf("DeleteFolder existing: %v", err)
 	}
-	if got, _ := s.FolderPaths(); len(got) != 0 {
+	if got, _ := s.FolderPaths(context.Background()); len(got) != 0 {
 		t.Errorf("post-delete FolderPaths = %v, want empty", got)
 	}
 	// Idempotent: deleting again is a no-op, not an error.
-	if err := s.DeleteFolder("album"); err != nil {
+	if err := s.DeleteFolder(context.Background(), "album"); err != nil {
 		t.Errorf("DeleteFolder missing returned error: %v", err)
 	}
 	// Likewise for a path that never existed.
-	if err := s.DeleteFolder("never-existed"); err != nil {
+	if err := s.DeleteFolder(context.Background(), "never-existed"); err != nil {
 		t.Errorf("DeleteFolder unknown returned error: %v", err)
 	}
 }
@@ -76,10 +77,10 @@ func TestStoreTrackPathsUnder(t *testing.T) {
 	} {
 		// Ensure each parent dir's folder row exists; harmless for the
 		// per-track query but mirrors the real on-disk shape.
-		if err := s.UpsertFolder(&Folder{Path: filepath.Dir(p), ModTime: now}); err != nil {
+		if err := s.UpsertFolder(context.Background(), &Folder{Path: filepath.Dir(p), ModTime: now}); err != nil {
 			t.Fatal(err)
 		}
-		if err := s.UpsertTrack(&Track{Path: p, ModTime: now}); err != nil {
+		if err := s.UpsertTrack(context.Background(), &Track{Path: p, ModTime: now}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -118,7 +119,7 @@ func TestStoreTrackPathsUnder(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := s.TrackPathsUnder(tc.dir)
+			got, err := s.TrackPathsUnder(context.Background(), tc.dir)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -156,7 +157,7 @@ func TestStoreFolderPathsUnder(t *testing.T) {
 		"100abc",
 		"100abc/x",
 	} {
-		if err := s.UpsertFolder(&Folder{Path: p, ModTime: now}); err != nil {
+		if err := s.UpsertFolder(context.Background(), &Folder{Path: p, ModTime: now}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -191,7 +192,7 @@ func TestStoreFolderPathsUnder(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := s.FolderPathsUnder(tc.dir)
+			got, err := s.FolderPathsUnder(context.Background(), tc.dir)
 			if err != nil {
 				t.Fatal(err)
 			}

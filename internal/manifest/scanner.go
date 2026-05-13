@@ -190,7 +190,7 @@ func NewScanner(roots []string, store *Store, artworkCacheDir string) *Scanner {
 	rc := append([]string(nil), roots...)
 	s.roots.Store(&rc)
 	if store != nil {
-		if v, err := store.GetScanState("last_full_scan"); err == nil && v != "" {
+		if v, err := store.GetScanState(context.Background(), "last_full_scan"); err == nil && v != "" {
 			if t, perr := time.Parse(time.RFC3339Nano, v); perr == nil && !t.IsZero() {
 				s.lastFull.Store(t.UTC().UnixNano())
 			}
@@ -278,7 +278,7 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	// folder deletion pass can reap rows for directories the walker
 	// no longer encounters (rename / removal upstream of any tracks
 	// the user kept). Both snapshots are read-only post-walk.
-	before, err := s.store.TrackPaths()
+	before, err := s.store.TrackPaths(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("list existing: %w", err)
 	}
@@ -286,7 +286,7 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	for _, p := range before {
 		beforeSet[p] = struct{}{}
 	}
-	beforeFolders, err := s.store.FolderPaths()
+	beforeFolders, err := s.store.FolderPaths(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("list existing folders: %w", err)
 	}
@@ -393,7 +393,7 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 		}
 		missingTracks = append(missingTracks, p)
 	}
-	deletedTracks, err := s.store.IncrementMissingTracksAndDeleteAtThreshold(missingTracks, threshold)
+	deletedTracks, err := s.store.IncrementMissingTracksAndDeleteAtThreshold(ctx, missingTracks, threshold)
 	if err != nil {
 		scanLogger.Error("missing-count tracks pass", "err", err, "missing", len(missingTracks))
 	}
@@ -427,7 +427,7 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 		}
 		missingFolders = append(missingFolders, p)
 	}
-	deletedFolders, err := s.store.IncrementMissingFoldersAndDeleteAtThreshold(missingFolders, threshold)
+	deletedFolders, err := s.store.IncrementMissingFoldersAndDeleteAtThreshold(ctx, missingFolders, threshold)
 	if err != nil {
 		scanLogger.Error("missing-count folders pass", "err", err, "missing", len(missingFolders))
 	}
@@ -441,7 +441,7 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	}
 
 	s.lastFull.Store(time.Now().UTC().UnixNano())
-	_ = s.store.SetScanState("last_full_scan", time.Now().UTC().Format(time.RFC3339Nano))
+	_ = s.store.SetScanState(ctx, "last_full_scan", time.Now().UTC().Format(time.RFC3339Nano))
 	return count, nil
 }
 
@@ -507,7 +507,7 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 			// the recovery cost is one os.Stat per `local-` track per
 			// scan, scoped narrowly to the one case the cache might
 			// genuinely need rebuilding.
-			existing, _ := s.store.GetTrack(pi.rel)
+			existing, _ := s.store.GetTrack(ctx, pi.rel)
 			if existing != nil && existing.Size == pi.info.Size() && !existing.ModTime.Before(pi.info.ModTime()) {
 				if !s.needsLocalArtworkRecovery(existing) {
 					// Even on the early-skip path we MUST reset the
@@ -521,7 +521,7 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 					// path; without this targeted reset the skip
 					// optimization defeats the resilience contract.
 					// Cheap PRIMARY-KEY UPDATE, no-op when already 0.
-					if err := s.store.ResetTrackMissingCount(pi.rel); err != nil {
+					if err := s.store.ResetTrackMissingCount(ctx, pi.rel); err != nil {
 						scanLogger.Warn("reset missing_count on skip", "path", pi.rel, "err", err)
 					}
 					return
@@ -618,7 +618,7 @@ func (s *Scanner) runScanWriter(ctx context.Context, writes <-chan *Track, commi
 		if len(batch) == 0 {
 			return
 		}
-		if err := s.store.UpsertTrackBatch(batch); err != nil {
+		if err := s.store.UpsertTrackBatch(ctx, batch); err != nil {
 			scanLogger.Error("upsert batch", "rows", len(batch), "err", err)
 		} else {
 			n := committed.Add(int64(len(batch)))
@@ -734,7 +734,7 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	// Subtree-scoped "before" snapshots. Smaller than Scan's whole-
 	// library snapshot — one query per scope — and the deletion pass
 	// only considers rows that were already inside the scope.
-	beforeTracks, err := s.store.TrackPathsUnder(relScope)
+	beforeTracks, err := s.store.TrackPathsUnder(ctx, relScope)
 	if err != nil {
 		return 0, fmt.Errorf("list existing tracks under %q: %w", relScope, err)
 	}
@@ -742,7 +742,7 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	for _, p := range beforeTracks {
 		beforeTrackSet[p] = struct{}{}
 	}
-	beforeFolders, err := s.store.FolderPathsUnder(relScope)
+	beforeFolders, err := s.store.FolderPathsUnder(ctx, relScope)
 	if err != nil {
 		return 0, fmt.Errorf("list existing folders under %q: %w", relScope, err)
 	}
@@ -821,7 +821,7 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 				return nil
 			}
 			rel := relPath(owningRoot, abs, multiRoot)
-			if err := s.store.UpsertFolder(&Folder{Path: rel, ModTime: info.ModTime().UTC()}); err != nil {
+			if err := s.store.UpsertFolder(ctx, &Folder{Path: rel, ModTime: info.ModTime().UTC()}); err != nil {
 				// Surface the failure but treat the row as errored-
 				// subtree so the bounded deletion pass spares it AND
 				// its descendants — without this guard, an UpsertFolder
@@ -897,7 +897,7 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 		}
 		missingTracks = append(missingTracks, p)
 	}
-	deletedTracks, derr := s.store.IncrementMissingTracksAndDeleteAtThreshold(missingTracks, threshold)
+	deletedTracks, derr := s.store.IncrementMissingTracksAndDeleteAtThreshold(ctx, missingTracks, threshold)
 	if derr != nil {
 		scanLogger.Error("subtree missing-count tracks pass", "err", derr, "missing", len(missingTracks))
 	}
@@ -913,7 +913,7 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 		}
 		missingFolders = append(missingFolders, p)
 	}
-	deletedFolders, derr := s.store.IncrementMissingFoldersAndDeleteAtThreshold(missingFolders, threshold)
+	deletedFolders, derr := s.store.IncrementMissingFoldersAndDeleteAtThreshold(ctx, missingFolders, threshold)
 	if derr != nil {
 		scanLogger.Error("subtree missing-count folders pass", "err", derr, "missing", len(missingFolders))
 	}
@@ -985,7 +985,7 @@ func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, see
 				return nil
 			}
 			rel := relPath(root, abs, multiRoot)
-			if err := s.store.UpsertFolder(&Folder{Path: rel, ModTime: info.ModTime().UTC()}); err != nil {
+			if err := s.store.UpsertFolder(ctx, &Folder{Path: rel, ModTime: info.ModTime().UTC()}); err != nil {
 				// Surface the failure but treat the row as errored-
 				// subtree so the deletion pass spares it AND its
 				// descendants — without this guard, an UpsertFolder
@@ -1199,16 +1199,16 @@ func (s *Scanner) RunPeriodic(ctx context.Context, interval time.Duration) {
 // BuildManifest returns a Manifest built from the current Store contents.
 // since, if non-zero, filters tracks by mtime (for incremental iOS
 // updates).
-func BuildManifest(store *Store, roots []string, since time.Time) (*Manifest, error) {
+func BuildManifest(ctx context.Context, store *Store, roots []string, since time.Time) (*Manifest, error) {
 	var sp *time.Time
 	if !since.IsZero() {
 		sp = &since
 	}
-	tracks, err := store.ListTracks(sp)
+	tracks, err := store.ListTracks(ctx, sp)
 	if err != nil {
 		return nil, err
 	}
-	folders, err := store.ListFolders()
+	folders, err := store.ListFolders(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -1240,10 +1240,10 @@ func BuildManifest(store *Store, roots []string, since time.Time) (*Manifest, er
 	// top-level `total`, so we still need this count — but we now do
 	// it once, here, instead of letting both the manifest builder and
 	// EnrichmentCounts each issue their own `COUNT(*)`.
-	total, terr := store.CountTracks()
+	total, terr := store.CountTracks(ctx)
 	if terr != nil {
 		logger.Error("CountTracks for enrichment-progress", "err", terr)
-	} else if enriched, lastEnrichedAt, perr := store.EnrichmentCounts(); perr == nil {
+	} else if enriched, lastEnrichedAt, perr := store.EnrichmentCounts(ctx); perr == nil {
 		m.EnrichmentProgress = &EnrichmentProgress{
 			TracksTotal:    total,
 			TracksEnriched: enriched,
@@ -1295,7 +1295,7 @@ func WriteManifest(ctx context.Context, w io.Writer, store *Store, roots []strin
 // running to EOF. The check returns ctx.Err() which propagates up
 // through `streamErr` and surfaces in the caller's log line.
 func writeManifestGated(ctx context.Context, w io.Writer, store *Store, roots []string, since time.Time, withVariants bool) (err error) {
-	folders, err := store.ListFolders()
+	folders, err := store.ListFolders(ctx)
 	if err != nil {
 		return fmt.Errorf("list folders: %w", err)
 	}
@@ -1306,9 +1306,9 @@ func writeManifestGated(ctx context.Context, w io.Writer, store *Store, roots []
 	// CountTracks() call so the protocol invariant `manifest.total ==
 	// EnrichmentProgress.TracksTotal` holds (Qodo #2 carry-over).
 	var ep *EnrichmentProgress
-	if total, terr := store.CountTracks(); terr != nil {
+	if total, terr := store.CountTracks(ctx); terr != nil {
 		logger.Error("CountTracks for enrichment-progress", "err", terr)
-	} else if enriched, lastEnrichedAt, perr := store.EnrichmentCounts(); perr == nil {
+	} else if enriched, lastEnrichedAt, perr := store.EnrichmentCounts(ctx); perr == nil {
 		ep = &EnrichmentProgress{
 			TracksTotal:    total,
 			TracksEnriched: enriched,
@@ -1449,20 +1449,20 @@ func writeManifestGated(ctx context.Context, w io.Writer, store *Store, roots []
 // nil. Old behaviour ("request limit; if exactly limit, assume more")
 // caused an extra round-trip that returned zero rows whenever the
 // track count was an exact multiple of limit.
-func BuildManifestPage(store *Store, roots []string, cursor string, limit int) (*Manifest, error) {
-	return buildManifestPageGated(store, roots, cursor, limit, false)
+func BuildManifestPage(ctx context.Context, store *Store, roots []string, cursor string, limit int) (*Manifest, error) {
+	return buildManifestPageGated(ctx, store, roots, cursor, limit, false)
 }
 
 // buildManifestPageGated is the gated worker behind the public
 // BuildManifestPage. Strips Track.Variants when the feature flag
 // is off — see writeManifestGated for the symmetrical contract.
-func buildManifestPageGated(store *Store, roots []string, cursor string, limit int, withVariants bool) (*Manifest, error) {
+func buildManifestPageGated(ctx context.Context, store *Store, roots []string, cursor string, limit int, withVariants bool) (*Manifest, error) {
 	if limit <= 0 {
 		limit = 1000
 	}
 	// Over-fetch by one so the last row of the current query tells us
 	// "is there another page" definitively.
-	tracks, err := store.ListTracksPage(cursor, limit+1)
+	tracks, err := store.ListTracksPage(ctx, cursor, limit+1)
 	if err != nil {
 		return nil, err
 	}
@@ -1494,17 +1494,17 @@ func buildManifestPageGated(store *Store, roots []string, cursor string, limit i
 	// field, newer clients fall back to "no progress hint" — but we
 	// log so the failure isn't invisible (Qodo #3).
 	if cursor == "" {
-		folders, ferr := store.ListFolders()
+		folders, ferr := store.ListFolders(ctx)
 		if ferr != nil {
 			return nil, ferr
 		}
-		total, terr := store.CountTracks()
+		total, terr := store.CountTracks(ctx)
 		if terr != nil {
 			return nil, terr
 		}
 		m.Folders = folders
 		m.Total = &total
-		if enriched, lastEnrichedAt, perr := store.EnrichmentCounts(); perr == nil {
+		if enriched, lastEnrichedAt, perr := store.EnrichmentCounts(ctx); perr == nil {
 			m.EnrichmentProgress = &EnrichmentProgress{
 				TracksTotal:    total,
 				TracksEnriched: enriched,

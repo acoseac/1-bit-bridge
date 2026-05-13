@@ -68,7 +68,11 @@ type variantStoreAdapter struct {
 }
 
 func (a *variantStoreAdapter) LookupVariant(sourcePath, variantID string) (*api.VariantRecord, error) {
-	v, err := a.provider.LookupVariant(sourcePath, variantID)
+	// api.VariantStore interface doesn't thread ctx yet — that's the
+	// next focused follow-up. For now use Background; the Store-side
+	// ctx-awareness is complete, just not yet bridged through the
+	// api interface boundary.
+	v, err := a.provider.LookupVariant(context.Background(), sourcePath, variantID)
 	if err != nil {
 		return nil, err
 	}
@@ -99,7 +103,7 @@ type variantDeleterAdapter struct {
 }
 
 func (a *variantDeleterAdapter) AllVariants() ([]api.VariantSummary, error) {
-	rows, err := a.store.AllVariants()
+	rows, err := a.store.AllVariants(context.Background())
 	if err != nil {
 		return nil, err
 	}
@@ -107,7 +111,7 @@ func (a *variantDeleterAdapter) AllVariants() ([]api.VariantSummary, error) {
 }
 
 func (a *variantDeleterAdapter) ListVariantsByPathPrefix(prefix string) ([]api.VariantSummary, error) {
-	rows, err := a.store.ListVariantsByPathPrefix(prefix)
+	rows, err := a.store.ListVariantsByPathPrefix(context.Background(), prefix)
 	if err != nil {
 		return nil, err
 	}
@@ -115,7 +119,7 @@ func (a *variantDeleterAdapter) ListVariantsByPathPrefix(prefix string) ([]api.V
 }
 
 func (a *variantDeleterAdapter) ListVariantsForPath(sourcePath string) ([]api.VariantSummary, error) {
-	rows, err := a.store.ListVariantsForPath(sourcePath)
+	rows, err := a.store.ListVariantsForPath(context.Background(), sourcePath)
 	if err != nil {
 		return nil, err
 	}
@@ -123,7 +127,7 @@ func (a *variantDeleterAdapter) ListVariantsForPath(sourcePath string) ([]api.Va
 }
 
 func (a *variantDeleterAdapter) DeleteVariant(sourcePath, variantID string) error {
-	return a.store.DeleteVariant(sourcePath, variantID)
+	return a.store.DeleteVariant(context.Background(), sourcePath, variantID)
 }
 
 func variantSummariesFromRows(rows []manifest.VariantRow) []api.VariantSummary {
@@ -161,7 +165,7 @@ type integrityVariantListerAdapter struct {
 }
 
 func (a *integrityVariantListerAdapter) AllVariants() ([]integrity.VariantSnapshot, error) {
-	rows, err := a.store.AllVariants()
+	rows, err := a.store.AllVariants(context.Background())
 	if err != nil {
 		return nil, err
 	}
@@ -186,7 +190,7 @@ type integrityVariantDeleterAdapter struct {
 }
 
 func (a *integrityVariantDeleterAdapter) DeleteVariant(sourcePath, variantID string) error {
-	return a.store.DeleteVariant(sourcePath, variantID)
+	return a.store.DeleteVariant(context.Background(), sourcePath, variantID)
 }
 
 // upscaleEnqueuerAdapter implements api.UpscaleEnqueuer on top
@@ -224,7 +228,7 @@ func (a *upscaleEnqueuerAdapter) EnqueueOne(libraryRelativePath string) error {
 	// LOWER() compare via the v3 functional index. The scanner's
 	// hot loop deliberately stays on GetTrack so two distinct
 	// case-colliding rows can't alias each other (Qodo on PR #126).
-	track, err := a.store.LookupTrack(libraryRelativePath)
+	track, err := a.store.LookupTrack(context.Background(), libraryRelativePath)
 	if err != nil {
 		// Surface DB errors as a generic 5xx upstream rather
 		// than silently enqueuing — the resumability check
@@ -286,7 +290,7 @@ func (a *upscaleEnqueuerAdapter) EnqueueOne(libraryRelativePath string) error {
 	// construction above. Either path would work here (LookupVariant
 	// case-folds), but the canonical form keeps every downstream
 	// store call consistent.
-	existing, getVErr := a.store.LookupVariant(track.Path, spec.VariantID())
+	existing, getVErr := a.store.LookupVariant(context.Background(), track.Path, spec.VariantID())
 	if getVErr != nil {
 		return fmt.Errorf("get variant row: %w", getVErr)
 	}
@@ -331,7 +335,7 @@ func (a *upscaleBatchCoordinatorAdapter) Submit(ctx context.Context, libraryRelP
 	// didn't override. Coordinator.Submit validates the resolved
 	// values and returns an error on out-of-range.
 	if targetRate == 0 || targetBits == 0 {
-		rate, bits, err := a.store.GetUpscaleTarget()
+		rate, bits, err := a.store.GetUpscaleTarget(context.Background())
 		if err == nil {
 			if targetRate == 0 {
 				targetRate = rate
@@ -371,7 +375,7 @@ func (a *upscaleBatchCoordinatorAdapter) Cancel(id uuid.UUID) error {
 }
 
 func (a *upscaleBatchCoordinatorAdapter) ListBatches(limit int) ([]api.BatchRow, error) {
-	rows, err := a.store.ListUpscaleBatches(limit)
+	rows, err := a.store.ListUpscaleBatches(context.Background(), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -416,7 +420,7 @@ type adminBatchCoordinatorAdapter struct {
 
 func (a *adminBatchCoordinatorAdapter) Submit(ctx context.Context, libraryRelPath string, targetRate, targetBits int) (admin.AdminBatchSubmitResult, error) {
 	if targetRate == 0 || targetBits == 0 {
-		if rate, bits, err := a.store.GetUpscaleTarget(); err == nil {
+		if rate, bits, err := a.store.GetUpscaleTarget(context.Background()); err == nil {
 			if targetRate == 0 {
 				targetRate = rate
 			}
@@ -459,7 +463,7 @@ func (a *adminBatchCoordinatorAdapter) Cancel(idHex string) error {
 }
 
 func (a *adminBatchCoordinatorAdapter) ListBatches(limit int) ([]admin.AdminBatchRow, error) {
-	rows, err := a.store.ListUpscaleBatches(limit)
+	rows, err := a.store.ListUpscaleBatches(context.Background(), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -554,7 +558,7 @@ func (a *upscaleStatsAdapter) UpscaleStatsSnapshot() api.UpscaleStats {
 	soxOK := a.cachedSoxOK()
 	snap.SoxAvailable = &soxOK
 	if a.store != nil {
-		count, bytes, err := a.store.CountVariants()
+		count, bytes, err := a.store.CountVariants(context.Background())
 		if err != nil {
 			// Same degrade-and-log policy the admin tile uses
 			// (PR #110): a SQL failure here shouldn't blank the
@@ -1397,11 +1401,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// Seed the DB-backed target settings from the YAML bootstrap
 		// on first run. Once seeded, admin Settings edits become
 		// authoritative; YAML stays the bootstrap-only path.
-		if _, _, err := manifestStore.GetUpscaleTarget(); err != nil {
+		if _, _, err := manifestStore.GetUpscaleTarget(context.Background()); err != nil {
 			if errors.Is(err, manifest.ErrUpscaleTargetUnset) {
 				rate := cfg.Upscale.EffectiveBootstrapTargetRate()
 				bits := cfg.Upscale.EffectiveBootstrapTargetBits()
-				if seedErr := manifestStore.SetUpscaleTarget(rate, bits); seedErr != nil {
+				if seedErr := manifestStore.SetUpscaleTarget(context.Background(), rate, bits); seedErr != nil {
 					fmt.Fprintf(stderr, "seed upscale target: %v\n", seedErr)
 					return 1
 				}

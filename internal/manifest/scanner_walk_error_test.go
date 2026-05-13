@@ -58,7 +58,7 @@ func TestScannerSparesTracksUnderWalkErrorSubtree(t *testing.T) {
 		t.Fatalf("first scan: %v", err)
 	}
 	for _, p := range []string{"healthy/h.flac", "flaky/f.flac"} {
-		got, _ := s.GetTrack(p)
+		got, _ := s.GetTrack(context.Background(), p)
 		if got == nil {
 			t.Fatalf("first scan didn't index %q", p)
 		}
@@ -77,10 +77,10 @@ func TestScannerSparesTracksUnderWalkErrorSubtree(t *testing.T) {
 	if _, err := sc.Scan(context.Background()); err != nil {
 		t.Fatalf("second scan: %v", err)
 	}
-	if got, _ := s.GetTrack("flaky/f.flac"); got == nil {
+	if got, _ := s.GetTrack(context.Background(), "flaky/f.flac"); got == nil {
 		t.Errorf("flaky/f.flac was wiped from manifest after a transient walk error — regression of PR #N's deletion-pass guard")
 	}
-	if got, _ := s.GetTrack("healthy/h.flac"); got == nil {
+	if got, _ := s.GetTrack(context.Background(), "healthy/h.flac"); got == nil {
 		t.Errorf("healthy/h.flac was wiped (it should still be present — sibling subtree wasn't affected)")
 	}
 }
@@ -114,7 +114,7 @@ func TestScannerSparesFoldersUnderWalkErrorSubtree(t *testing.T) {
 	if _, err := sc.Scan(context.Background()); err != nil {
 		t.Fatalf("first scan: %v", err)
 	}
-	folders, _ := s.FolderPaths()
+	folders, _ := s.FolderPaths(context.Background())
 	for _, want := range []string{"flaky", "healthy"} {
 		found := false
 		for _, p := range folders {
@@ -137,7 +137,7 @@ func TestScannerSparesFoldersUnderWalkErrorSubtree(t *testing.T) {
 	if _, err := sc.Scan(context.Background()); err != nil {
 		t.Fatalf("second scan: %v", err)
 	}
-	folders, _ = s.FolderPaths()
+	folders, _ = s.FolderPaths(context.Background())
 	flakyStillThere := false
 	for _, p := range folders {
 		if p == "flaky" {
@@ -175,7 +175,7 @@ func TestScannerStillDeletesTracksUnderHealthySubtree(t *testing.T) {
 	if _, err := sc.Scan(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := s.GetTrack("albums/song.flac"); got == nil {
+	if got, _ := s.GetTrack(context.Background(), "albums/song.flac"); got == nil {
 		t.Fatal("first scan didn't index albums/song.flac")
 	}
 
@@ -188,7 +188,7 @@ func TestScannerStillDeletesTracksUnderHealthySubtree(t *testing.T) {
 	if _, err := sc.Scan(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := s.GetTrack("albums/song.flac"); got != nil {
+	if got, _ := s.GetTrack(context.Background(), "albums/song.flac"); got != nil {
 		t.Error("legitimately-removed track still in manifest — the spare-on-walk-error guard is over-suppressing")
 	}
 }

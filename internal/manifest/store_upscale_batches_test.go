@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -54,7 +55,7 @@ func TestMigrationV6_CheckConstraintRejectsInvalidStatus(t *testing.T) {
 		CreatedAt:  time.Now().UnixNano(),
 		UpdatedAt:  time.Now().UnixNano(),
 	}
-	if err := s.InsertUpscaleBatch(row); err == nil {
+	if err := s.InsertUpscaleBatch(context.Background(), row); err == nil {
 		t.Fatal("InsertUpscaleBatch with invalid status: want error, got nil")
 	}
 }
@@ -86,7 +87,7 @@ func TestInsertUpscaleBatch_RoundTrip(t *testing.T) {
 				CreatedAt:      time.Now().UnixNano(),
 				UpdatedAt:      time.Now().UnixNano(),
 			}
-			if err := s.InsertUpscaleBatch(row); err != nil {
+			if err := s.InsertUpscaleBatch(context.Background(), row); err != nil {
 				t.Fatalf("InsertUpscaleBatch(%q): %v", status, err)
 			}
 
@@ -140,7 +141,7 @@ func TestRecoverInterruptedBatches_TransitionsPendingAndRunning(t *testing.T) {
 	}
 	now := time.Now().UnixNano()
 	for status, id := range seedRows {
-		if err := s.InsertUpscaleBatch(UpscaleBatchRow{
+		if err := s.InsertUpscaleBatch(context.Background(), UpscaleBatchRow{
 			ID:         id,
 			Path:       "scope/" + status,
 			TargetRate: 192000,
@@ -154,7 +155,7 @@ func TestRecoverInterruptedBatches_TransitionsPendingAndRunning(t *testing.T) {
 	}
 
 	recoverAt := now + 1_000_000 // 1 ms later, deterministic
-	rowsAffected, err := s.RecoverInterruptedBatches(recoverAt)
+	rowsAffected, err := s.RecoverInterruptedBatches(context.Background(), recoverAt)
 	if err != nil {
 		t.Fatalf("RecoverInterruptedBatches: %v", err)
 	}
@@ -205,18 +206,18 @@ func TestRecoverInterruptedBatches_Idempotent(t *testing.T) {
 
 	id := uuid.Must(uuid.NewRandom())
 	now := time.Now().UnixNano()
-	if err := s.InsertUpscaleBatch(UpscaleBatchRow{
+	if err := s.InsertUpscaleBatch(context.Background(), UpscaleBatchRow{
 		ID: id, Path: "x", TargetRate: 192000, TargetBits: 24,
 		Status: "running", CreatedAt: now, UpdatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := s.RecoverInterruptedBatches(now + 1); err != nil {
+	if _, err := s.RecoverInterruptedBatches(context.Background(), now+1); err != nil {
 		t.Fatal(err)
 	}
 	// Second call: nothing to do.
-	rows, err := s.RecoverInterruptedBatches(now + 2)
+	rows, err := s.RecoverInterruptedBatches(context.Background(), now+2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,10 +232,10 @@ func TestSetGetUpscaleTarget_RoundTrip(t *testing.T) {
 	s := openTempStore(t)
 	t.Cleanup(func() { _ = s.Close() })
 
-	if err := s.SetUpscaleTarget(192000, 24); err != nil {
+	if err := s.SetUpscaleTarget(context.Background(), 192000, 24); err != nil {
 		t.Fatalf("SetUpscaleTarget: %v", err)
 	}
-	rate, bits, err := s.GetUpscaleTarget()
+	rate, bits, err := s.GetUpscaleTarget(context.Background())
 	if err != nil {
 		t.Fatalf("GetUpscaleTarget: %v", err)
 	}
@@ -243,10 +244,10 @@ func TestSetGetUpscaleTarget_RoundTrip(t *testing.T) {
 	}
 
 	// Overwrite — both keys flip atomically.
-	if err := s.SetUpscaleTarget(96000, 16); err != nil {
+	if err := s.SetUpscaleTarget(context.Background(), 96000, 16); err != nil {
 		t.Fatalf("SetUpscaleTarget (overwrite): %v", err)
 	}
-	rate, bits, err = s.GetUpscaleTarget()
+	rate, bits, err = s.GetUpscaleTarget(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +264,7 @@ func TestGetUpscaleTarget_UnsetReturnsSentinel(t *testing.T) {
 	s := openTempStore(t)
 	t.Cleanup(func() { _ = s.Close() })
 
-	_, _, err := s.GetUpscaleTarget()
+	_, _, err := s.GetUpscaleTarget(context.Background())
 	if !errors.Is(err, ErrUpscaleTargetUnset) {
 		t.Errorf("err = %v, want errors.Is(ErrUpscaleTargetUnset)", err)
 	}
@@ -290,13 +291,13 @@ func TestSetUpscaleTarget_RejectsInvalidValues(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if err := s.SetUpscaleTarget(c.rate, c.bits); err == nil {
+			if err := s.SetUpscaleTarget(context.Background(), c.rate, c.bits); err == nil {
 				t.Errorf("SetUpscaleTarget(%d, %d): want error, got nil",
 					c.rate, c.bits)
 			}
 			// Verify nothing landed in the DB on rejection — both
 			// keys remain unset.
-			if _, _, err := s.GetUpscaleTarget(); !errors.Is(err, ErrUpscaleTargetUnset) {
+			if _, _, err := s.GetUpscaleTarget(context.Background()); !errors.Is(err, ErrUpscaleTargetUnset) {
 				t.Errorf("rejected write leaked partial state: %v", err)
 			}
 		})

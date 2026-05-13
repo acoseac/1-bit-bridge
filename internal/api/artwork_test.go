@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -269,8 +270,8 @@ func TestArtistImageRequiresAuth(t *testing.T) {
 // returns false so the 404 branch stays exercised.
 type fakeMBIDProbe struct{ known map[string]bool }
 
-func (f fakeMBIDProbe) HasTrackWithArtworkMBID(m string) bool { return f.known[m] }
-func (f fakeMBIDProbe) HasTrackWithArtistMBID(m string) bool  { return f.known[m] }
+func (f fakeMBIDProbe) HasTrackWithArtworkMBID(ctx context.Context, m string) bool { return f.known[m] }
+func (f fakeMBIDProbe) HasTrackWithArtistMBID(ctx context.Context, m string) bool  { return f.known[m] }
 
 // artworkFixtureWithProbe layers an MBIDProbe onto the base artwork
 // fixture. `present` is still about whether the cache file exists on

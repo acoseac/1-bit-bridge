@@ -131,7 +131,7 @@ func (s *Server) apiUpscaleTargetGet(w http.ResponseWriter, r *http.Request) {
 			"manifest store is not configured")
 		return
 	}
-	rate, bits, err := s.deps.Manifest.GetUpscaleTarget()
+	rate, bits, err := s.deps.Manifest.GetUpscaleTarget(r.Context())
 	if err != nil {
 		// `ErrUpscaleTargetUnset` is the legitimate "first run /
 		// pre-seed" case → surface YAML bootstrap defaults so the
@@ -166,7 +166,7 @@ func (s *Server) apiUpscaleTargetPatch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad-json", err.Error())
 		return
 	}
-	if err := s.deps.Manifest.SetUpscaleTarget(req.TargetRate, req.TargetBits); err != nil {
+	if err := s.deps.Manifest.SetUpscaleTarget(r.Context(), req.TargetRate, req.TargetBits); err != nil {
 		writeError(w, http.StatusBadRequest, "bad-target", err.Error())
 		return
 	}
