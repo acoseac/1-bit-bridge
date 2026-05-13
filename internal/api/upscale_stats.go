@@ -21,7 +21,15 @@ import (
 // disabled feature, which matches the /v1/health.upscaleEnabled
 // contract iOS already gates on.
 type UpscaleStatsProvider interface {
-	UpscaleStatsSnapshot(ctx context.Context) UpscaleStats
+	// UpscaleStatsSnapshot returns the live runtime+on-disk
+	// snapshot for the upscale feature. The error return surfaces
+	// transient/timeout failures (notably `context.DeadlineExceeded`
+	// from the /v1/upscale/stats handler's 2s ctx-timeout) so the
+	// handler can emit a 5xx instead of silently returning the
+	// zero-value UpscaleStats. Pre-PR-218 the signature was
+	// error-less and a wedged DB just produced an all-zeros body
+	// the client misread as "feature off". Gemini HIGH on PR #218.
+	UpscaleStatsSnapshot(ctx context.Context) (UpscaleStats, error)
 }
 
 // UpscaleStats is the wire shape GET /v1/upscale/stats returns.
@@ -85,7 +93,22 @@ type UpscalePoolStats struct {
 func (s *Server) upscaleStats(w http.ResponseWriter, r *http.Request) {
 	var resp UpscaleStats
 	if s.upscaleStatsProvider != nil {
-		resp = s.upscaleStatsProvider.UpscaleStatsSnapshot(r.Context())
+		snap, err := s.upscaleStatsProvider.UpscaleStatsSnapshot(r.Context())
+		if err != nil {
+			// Surface DB-wedge / timeout as 503 instead of a
+			// silent-zero 200. The handler is wrapped with a 2s
+			// ctx-timeout (see route_classification.go); when
+			// the timeout fires the underlying CountVariants
+			// returns `context.DeadlineExceeded` and this branch
+			// routes it through writeErrorLog. iOS treats 5xx
+			// the same way it treated the old silent zero
+			// (renders "feature status unavailable") but the
+			// signal in operator logs is now load-bearing.
+			writeErrorLog(w, r, http.StatusServiceUnavailable, "stats_unavailable",
+				"upscale stats are temporarily unavailable", err)
+			return
+		}
+		resp = snap
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

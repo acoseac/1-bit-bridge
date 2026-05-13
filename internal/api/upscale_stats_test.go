@@ -21,7 +21,9 @@ type stubStatsProvider struct {
 	snap UpscaleStats
 }
 
-func (s *stubStatsProvider) UpscaleStatsSnapshot(ctx context.Context) UpscaleStats { return s.snap }
+func (s *stubStatsProvider) UpscaleStatsSnapshot(ctx context.Context) (UpscaleStats, error) {
+	return s.snap, nil
+}
 
 func upscaleStatsFixture(t *testing.T, withProvider bool, snap UpscaleStats) (string /* baseURL */, string /* token */) {
 	t.Helper()
