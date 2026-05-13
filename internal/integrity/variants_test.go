@@ -208,6 +208,59 @@ func TestVariantWatcher_multipleMissesBatchIntoSingleEvent(t *testing.T) {
 	}
 }
 
+// TestVariantWatcher_dedupesPathsAcrossMultipleVariants pins the
+// `Paths` dedup contract from `internal/api/upscale_deleted_event.go`'s
+// `UpscaleDeletedEvent` docstring: paths is the SET of affected
+// source paths, not the per-variant repetition. A track with two
+// missing variants (e.g. 96k AND 192k variants for the same
+// source path, both wiped by an external rm) emits the path
+// ONCE in the published event, while `variantIDs` carries both
+// variantIDs verbatim (variantIDs are NOT zipped 1:1 to paths
+// — they're the union of what disappeared, possibly overlapping
+// across the path set). CodeRabbit Minor on PR #209.
+func TestVariantWatcher_dedupesPathsAcrossMultipleVariants(t *testing.T) {
+	tmpDir := t.TempDir()
+	publisher := &fakePublisher{}
+	// Two variants for the SAME source path — both sidecars missing.
+	lister := &fakeLister{snapshots: [][]VariantSnapshot{{
+		{SourcePath: "A/1.flac", VariantID: "v96", SidecarPath: filepath.Join(tmpDir, "a-v96.flac")},
+		{SourcePath: "A/1.flac", VariantID: "v192", SidecarPath: filepath.Join(tmpDir, "a-v192.flac")},
+	}}}
+	deleter := &fakeDeleter{}
+
+	w := NewVariantWatcher(lister, deleter, publisher.publish, 1*time.Hour)
+	tickDone := make(chan int, 1)
+	w.SetOnTickComplete(func(n int) { tickDone <- n })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	stop := w.Start(ctx)
+	t.Cleanup(stop)
+
+	select {
+	case n := <-tickDone:
+		if n != 2 {
+			t.Fatalf("sweep deleted %d rows, want 2 (both variants)", n)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("sweep never completed")
+	}
+
+	if publisher.eventCount() != 1 {
+		t.Fatalf("publisher fired %d events, want 1", publisher.eventCount())
+	}
+	paths, variantIDs := publisher.lastEvent()
+	if len(paths) != 1 {
+		t.Errorf("paths not deduplicated: got %v, want one entry for A/1.flac", paths)
+	}
+	if paths[0] != "A/1.flac" {
+		t.Errorf("paths[0]: got %q, want A/1.flac", paths[0])
+	}
+	if len(variantIDs) != 2 {
+		t.Errorf("variantIDs: got %v, want both [v96, v192]", variantIDs)
+	}
+}
+
 // TestVariantWatcher_noMissesNoEvent pins the silence invariant:
 // every sidecar present → zero SSE events. iOS doesn't want to
 // see periodic noise from a healthy bridge.

@@ -217,9 +217,21 @@ func (w *VariantWatcher) tick(ctx context.Context) int {
 	if len(rows) == 0 {
 		return 0
 	}
+	// `paths` is the deduplicated set of affected source paths;
+	// `variantIDs` is the (potentially repeating) set of deleted
+	// variantIDs. Per the upscale.deleted contract documented in
+	// internal/api/upscale_deleted_event.go: `Paths` and
+	// `VariantIDs` are NOT zipped 1:1, just the union of what
+	// disappeared. Dedup paths so a track with multiple missing
+	// variants (rare but legitimate — e.g. 96k + 192k variants
+	// for the same source both wiped by an external rm) doesn't
+	// emit the same path twice in the SSE payload. CodeRabbit
+	// Minor on PR #209.
 	var (
-		paths      []string
-		variantIDs []string
+		paths       []string
+		variantIDs  []string
+		pathsSeen   = make(map[string]struct{})
+		deletedRows int
 	)
 	for _, r := range rows {
 		// Honour cancellation between rows so a shutdown
@@ -227,7 +239,7 @@ func (w *VariantWatcher) tick(ctx context.Context) int {
 		// hold the process up for minutes.
 		select {
 		case <-ctx.Done():
-			return len(paths)
+			return deletedRows
 		default:
 		}
 		_, statErr := os.Stat(r.SidecarPath)
@@ -253,8 +265,12 @@ func (w *VariantWatcher) tick(ctx context.Context) int {
 			)
 			continue
 		}
-		paths = append(paths, r.SourcePath)
+		deletedRows++
 		variantIDs = append(variantIDs, r.VariantID)
+		if _, seen := pathsSeen[r.SourcePath]; !seen {
+			pathsSeen[r.SourcePath] = struct{}{}
+			paths = append(paths, r.SourcePath)
+		}
 	}
 	if len(paths) > 0 && w.publish != nil {
 		// Single batched callback per sweep — iOS
@@ -262,5 +278,5 @@ func (w *VariantWatcher) tick(ctx context.Context) int {
 		// rather than fielding N separate event hops.
 		w.publish(paths, variantIDs)
 	}
-	return len(paths)
+	return deletedRows
 }
