@@ -256,8 +256,54 @@ func TestStreamTracksRejectsNilCallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if err := s.StreamTracks(nil, nil); err == nil {
-		t.Error("StreamTracks(nil, nil) returned nil error, want explicit failure")
+	if err := s.StreamTracks(context.Background(), nil, nil); err == nil {
+		t.Error("StreamTracks(nil callback) returned nil error, want explicit failure")
+	}
+}
+
+// TestStreamTracksCancelledCtxStopsIteration pins the
+// ctx-propagation contract added in the senior-audit follow-up:
+// a cancelled ctx surfaces as a ctx-error from StreamTracks
+// without invoking the row callback. Pre-fix, StreamTracks used
+// `db.Query` (no ctx), so a client-disconnect mid-manifest-pull
+// would let the SQLite scan run to completion holding the read
+// lock; iOS would just discard the body but the bridge wasted
+// CPU + IO for the rest of the stream. With QueryContext the
+// query itself cancels at the next row boundary.
+func TestStreamTracksCancelledCtxStopsIteration(t *testing.T) {
+	s, err := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	// Insert a few tracks so the query has rows to potentially
+	// emit — without rows the cancellation could trivially
+	// "succeed" by emitting zero callbacks.
+	for i := 0; i < 5; i++ {
+		if err := s.UpsertTrack(&Track{
+			Path:    fmt.Sprintf("track-%d.flac", i),
+			Size:    100,
+			ModTime: time.Now(),
+		}); err != nil {
+			t.Fatalf("UpsertTrack: %v", err)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancel so the query rejects immediately
+	called := 0
+	err = s.StreamTracks(ctx, nil, func(*Track) error {
+		called++
+		return nil
+	})
+	// Either the QueryContext returns context.Canceled OR the
+	// row iteration sees it on the first row.Next() — both are
+	// acceptable. What matters: the callback didn't run for
+	// EVERY row.
+	if called >= 5 {
+		t.Errorf("callback fired for all rows despite ctx cancellation; got %d", called)
+	}
+	if err == nil {
+		t.Error("StreamTracks returned nil; expected context error to propagate")
 	}
 }
 

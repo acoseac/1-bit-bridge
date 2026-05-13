@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -37,14 +38,21 @@ var logger = logging.Component("manifest")
 type Store struct {
 	db *sql.DB
 	mu sync.Mutex // serializes ALL writers (see contract above)
-	// now returns the timestamp used by `indexed_at` writes from the
-	// variant write paths (UpsertVariant, DeleteVariant). Defaults to
-	// time.Now in production; tests override with a deterministic
-	// monotonically-incrementing fake so the
-	// `delta-sync-surfaces-new-variant` regression assertions don't
-	// depend on wall-clock sleeps. Same DI shape we'd reach for the
-	// next time a write path needs a controllable clock; UpsertTrack
-	// stays on direct `time.Now()` for now (not in this PR's scope).
+	// now returns the timestamp used by every Store write path that
+	// writes a timestamp into a row (indexed_at on variants, enriched_at
+	// on tracks, etc.). Defaults to time.Now in production; tests
+	// override with a deterministic monotonically-incrementing fake
+	// so delta-sync regression assertions don't depend on wall-clock
+	// sleeps.
+	//
+	// Senior-audit follow-up: previously only the variant write paths
+	// routed through `s.now()`; UpsertTrack / MarkEnriched and
+	// DeleteVariant's `now := time.Now().UnixNano()` line used direct
+	// `time.Now()`. The sweep through `time.Now() → s.now()` lands
+	// every timestamped write inside Store on the injectable clock
+	// surface, so a future test that wants to pin a strictly-advancing
+	// indexed_at across UpsertTrack / UpsertVariant in one transaction
+	// can do so without racing the wall clock.
 	now func() time.Time
 }
 
@@ -535,11 +543,30 @@ func (s *Store) MarkEnriched(t *Track) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// `indexed_at` MUST bump on every enrichment write — without it,
+	// iOS delta-sync (`WHERE indexed_at > since`) silently drops
+	// enriched rows from incremental manifest fetches. The track was
+	// already in the manifest at its UpsertTrack-time indexed_at, so
+	// iOS's last sync `since` is later than that, and the freshly-
+	// enriched tags_json would otherwise never surface until a full
+	// manifest re-pull. Gemini Medium on PR #215 caught this.
+	//
+	// CASE-WHEN strict-advance pattern mirrors UpsertVariant /
+	// DeleteVariant: a same-nanosecond clock (test-injected fakes,
+	// low-res wall clocks, rapid back-to-back enrichment writes) still
+	// produces a strictly-greater indexed_at, keeping delta-sync's
+	// `> since` boundary semantically correct.
+	now := s.now().UnixNano()
 	_, err = s.db.Exec(`
 		UPDATE tracks
-		SET tags_json = ?, enriched_at = ?
+		SET tags_json = ?,
+		    enriched_at = ?,
+		    indexed_at = CASE
+		        WHEN indexed_at >= ? THEN indexed_at + 1
+		        ELSE ?
+		    END
 		WHERE path = ?
-	`, raw, time.Now().UnixNano(), t.Path)
+	`, raw, now, now, now, t.Path)
 	return err
 }
 
@@ -572,7 +599,7 @@ func (s *Store) UpsertTrack(t *Track) error {
 			-- counter increments across scans and cause spurious
 			-- deletes on long-stable libraries. See migration v5 doc.
 			missing_count = 0
-	`, t.Path, t.Size, t.ModTime.UnixNano(), raw, time.Now().UnixNano())
+	`, t.Path, t.Size, t.ModTime.UnixNano(), raw, s.now().UnixNano())
 	return err
 }
 
@@ -646,7 +673,7 @@ func (s *Store) UpsertTrackBatch(ts []*Track) error {
 		return err
 	}
 	defer stmt.Close()
-	now := time.Now().UnixNano()
+	now := s.now().UnixNano()
 	for _, r := range rows {
 		if _, err := stmt.Exec(r.path, r.size, r.mtime, r.tagsRaw, now); err != nil {
 			return err
@@ -1023,7 +1050,7 @@ func (s *Store) ListTracks(since *time.Time) ([]Track, error) {
 // Iteration stops on the first non-nil error fn returns; that error
 // is propagated. rows.Err() (post-iteration) is also returned if fn
 // finished cleanly.
-func (s *Store) StreamTracks(sp *time.Time, fn func(*Track) error) error {
+func (s *Store) StreamTracks(ctx context.Context, sp *time.Time, fn func(*Track) error) error {
 	if fn == nil {
 		// Defensive guard: invoking the callback later would panic with
 		// a nil-deref. CodeRabbit on PR #70 — surface a clear error
@@ -1038,7 +1065,16 @@ func (s *Store) StreamTracks(sp *time.Time, fn func(*Track) error) error {
 		args = append(args, sp.UnixNano())
 	}
 	q += ` ORDER BY path ASC`
-	rows, err := s.db.Query(q, args...)
+	// **QueryContext (not Query)** so a client disconnect mid-stream
+	// terminates the SQLite scan instead of holding the read lock +
+	// CPU until SQLite exhausts the result set. Senior-audit
+	// follow-up. The per-row `ctx.Err()` check in the caller
+	// (writeManifestGated) catches the disconnect within one row of
+	// the next pulse; this widens the cancellation surface to the
+	// query itself so a slow SELECT (5k-folder library with
+	// dependent CTEs in variantsAggSQL) cancels mid-execution
+	// rather than running to completion.
+	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return err
 	}
