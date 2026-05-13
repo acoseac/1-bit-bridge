@@ -54,22 +54,24 @@ func writeMinimalDSFWithBits(t *testing.T, sampleRate, bitsPerSample uint32) str
 	return path
 }
 
-// TestIsLossyCodec_TruthTable pins the canonical lossy / lossless
-// classification used by every `t.BitsPerSample` write site as a
-// defense-in-depth gate against the iOS PR #371 "M4A 32-bit" chip
-// regression.
-func TestIsLossyCodec_TruthTable(t *testing.T) {
+// TestCanSetBitsPerSample_TruthTable pins the allowlist gate used
+// by every `t.BitsPerSample` write site as defense-in-depth against
+// the iOS PR #371 "M4A 32-bit" chip regression. Inverted from the
+// original denylist shape per CodeRabbit Major on PR #225: an
+// empty / unrecognised codec MUST fail closed (refuse the write),
+// not fail open (allow it).
+func TestCanSetBitsPerSample_TruthTable(t *testing.T) {
 	t.Helper()
-	lossy := []string{"AAC", "MP3", "OGG", "OPUS", "WMA", "aac", "mp3"}
-	lossless := []string{"FLAC", "ALAC", "DSF", "DFF", "WAV", "AIFF", "", "PCM"}
-	for _, c := range lossy {
-		if !isLossyCodec(c) {
-			t.Errorf("isLossyCodec(%q) = false, want true", c)
+	allowed := []string{"FLAC", "ALAC", "DSF", "DFF", "WAV", "AIFF", "flac", "alac"}
+	refused := []string{"AAC", "MP3", "OGG", "OPUS", "WMA", "", "PCM", "UNKNOWN", "aac", "mp3"}
+	for _, c := range allowed {
+		if !canSetBitsPerSample(c) {
+			t.Errorf("canSetBitsPerSample(%q) = false, want true", c)
 		}
 	}
-	for _, c := range lossless {
-		if isLossyCodec(c) {
-			t.Errorf("isLossyCodec(%q) = true, want false", c)
+	for _, c := range refused {
+		if canSetBitsPerSample(c) {
+			t.Errorf("canSetBitsPerSample(%q) = true, want false", c)
 		}
 	}
 }
@@ -88,6 +90,7 @@ func TestIsValidDSDSampleRate_TruthTable(t *testing.T) {
 		22_579_200, // DSD512 (44.1k base)
 		24_576_000, // DSD512 (48k base)
 		45_158_400, // DSD1024 (44.1k base)
+		49_152_000, // DSD1024 (48k base)
 	}
 	pcmRates := []uint32{
 		0,

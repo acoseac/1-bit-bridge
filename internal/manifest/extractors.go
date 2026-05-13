@@ -33,32 +33,32 @@ import (
 // the track still gets indexed without an ArtworkMBID.
 const maxArtworkBytes = 25 * 1024 * 1024 // 25 MiB
 
-// isLossyCodec reports whether `codec` denotes a format with no
-// meaningful integer bit depth on its native side (lossy codecs
-// decode to a float/Float32 PCM stream — the "bits per sample" of
-// that decoded PCM is the decoder's container width, NOT a property
-// of the original encoded signal).
+// canSetBitsPerSample reports whether `codec` is one of the canonical
+// lossless codecs the bridge tracks AND for which `t.BitsPerSample`
+// carries a meaningful integer bit-depth on the wire.
+//
+// **Allowlist by design** (CodeRabbit Major on PR #225): a lossy
+// denylist (`isLossyCodec`) would fail open on `t.Codec == ""` —
+// reachable today via the MP4 codec-walk error branch
+// (`extractMP4Codec` returns "" on a truncated atom tree). Inverting
+// to an allowlist closes that hole: any future enricher addition
+// that writes `t.BitsPerSample` with an unset / unrecognised codec
+// is correctly refused, since the iOS PR #371 "M4A 32-bit Now
+// Playing chip" regression's root cause was exactly the
+// container-width misclassification a fail-open gate would re-admit.
 //
 // Defense-in-depth contract: every site in this file that writes
-// `t.BitsPerSample` MUST first check `!isLossyCodec(t.Codec)` so
-// AAC / MP3 / OGG / OPUS / WMA tracks never carry a misleading
-// bit-depth value into the manifest. Today only FLAC + DSF +
-// (via dhowden Picture path) ALAC actually set bitsPerSample; the
-// gate is structural insurance against a future enricher addition
-// that pulls a container width from a codec where it has no
-// musical meaning.
-//
-// The iOS PR #371 "M4A 32-bit Now Playing chip" regression was
-// reported against the iOS-side `resolvePCMBits` fallback chain
-// (AVAudioFile reported its Float32 output container width on AAC
-// decode); the bridge isn't currently emitting the wrong value,
-// but this gate ensures it never starts to.
+// `t.BitsPerSample` MUST first check `canSetBitsPerSample(t.Codec)`.
+// Today only FLAC + DSF + DFF actually assign bitsPerSample (ALAC
+// flows through the MP4 dhowden path which doesn't surface
+// BitsPerSample today); the allowlist is structural insurance
+// against a future addition with an unknown codec slipping through.
 //
 // Case-folded via strings.EqualFold so the gate works regardless
 // of how a caller-supplied codec string is cased.
-func isLossyCodec(codec string) bool {
-	for _, lossy := range []string{"AAC", "MP3", "OGG", "OPUS", "WMA"} {
-		if strings.EqualFold(codec, lossy) {
+func canSetBitsPerSample(codec string) bool {
+	for _, lossless := range []string{"FLAC", "ALAC", "DSF", "DFF", "WAV", "AIFF"} {
+		if strings.EqualFold(codec, lossless) {
 			return true
 		}
 	}
@@ -321,7 +321,7 @@ func extractViaDhowdenFromReader(f io.ReadSeeker, absPath string, t *Track, ec *
 // discriminates ALAC vs AAC for M4A, the extension routing pins
 // MP3 / OGG / FLAC / DSF / DFF / WAV / AIFF — and is authoritative.
 // Overwriting from `m.FileType()` here would erase the ALAC-vs-AAC
-// discrimination the `isLossyCodec` gate at every `t.BitsPerSample`
+// discrimination the `canSetBitsPerSample` gate at every `t.BitsPerSample`
 // write site depends on, re-introducing the iOS PR #371 "M4A 32-bit"
 // chip regression by a different path.
 //
@@ -730,14 +730,14 @@ func extractFLACFormatFromReader(r io.Reader, absPath string, t *Track) error {
 	// v1.2 additive: stamp the canonical codec for the iOS-side
 	// `Track.codec` column. FLAC files are unambiguously FLAC at
 	// this point. Codec MUST be stamped BEFORE BitsPerSample so the
-	// `isLossyCodec` gate sees the authoritative value (FLAC is
+	// `canSetBitsPerSample` gate sees the authoritative value (FLAC is
 	// lossless → gate allows the bits write).
 	t.Codec = "FLAC"
 
 	sr := float64(sampleRate)
 	bps := bitsPerSample
 	t.SampleRate = &sr
-	if !isLossyCodec(t.Codec) {
+	if canSetBitsPerSample(t.Codec) {
 		t.BitsPerSample = &bps
 	}
 	// FLAC is always PCM by spec — set the explicit false so the
@@ -799,14 +799,14 @@ func extractDSFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 
 	// v1.2 additive: canonical codec for iOS-side `Track.codec`.
 	// Codec MUST be stamped BEFORE BitsPerSample so the
-	// `isLossyCodec` gate sees the authoritative value (DSF is
+	// `canSetBitsPerSample` gate sees the authoritative value (DSF is
 	// lossless → gate allows the bits write).
 	t.Codec = "DSF"
 
 	sr := float64(sampleRate)
 	bps := int(bitsPerSample)
 	t.SampleRate = &sr
-	if !isLossyCodec(t.Codec) {
+	if canSetBitsPerSample(t.Codec) {
 		t.BitsPerSample = &bps
 	}
 	// IsDSD policy (PR-A2):
@@ -1061,7 +1061,7 @@ func parsePropChunks(body []byte, t *Track) (dstCompressed bool) {
 		// extractDFFWithContext, before this function is called —
 		// the lossy-codec gate sees the authoritative value (DFF is
 		// lossless → gate allows the bits write).
-		if !isLossyCodec(t.Codec) {
+		if canSetBitsPerSample(t.Codec) {
 			bits := 1
 			t.BitsPerSample = &bits
 		}
