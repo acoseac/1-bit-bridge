@@ -534,7 +534,7 @@ type upscaleStatsAdapter struct {
 
 const upscaleStatsSoxTTL = 30 * time.Second
 
-func (a *upscaleStatsAdapter) UpscaleStatsSnapshot(ctx context.Context) api.UpscaleStats {
+func (a *upscaleStatsAdapter) UpscaleStatsSnapshot(ctx context.Context) (api.UpscaleStats, error) {
 	var snap api.UpscaleStats
 	if a.enabled() {
 		if p := a.pool(); p != nil {
@@ -556,18 +556,32 @@ func (a *upscaleStatsAdapter) UpscaleStatsSnapshot(ctx context.Context) api.Upsc
 	if a.store != nil {
 		count, bytes, err := a.store.CountVariants(ctx)
 		if err != nil {
-			// Same degrade-and-log policy the admin tile uses
-			// (PR #110): a SQL failure here shouldn't blank the
-			// whole response. Live counters still go out; the
-			// caller sees `cachedVariants: 0, cachedBytes: 0` and
-			// the operator can find the failure in logs.
+			// Two failure shapes get different treatment
+			// (Gemini HIGH on PR #218):
+			//
+			//   - ctx-cancellation (handler 2s timeout fired,
+			//     SSE publisher 2s timeout fired, or the caller
+			//     disconnected) — return the error so the
+			//     handler can emit a 5xx promptly. iOS treats
+			//     5xx as "feature status unknown" (same UX
+			//     the pre-PR-218 silent-zero produced).
+			//
+			//   - Genuine SQL faults (disk full, corruption,
+			//     migration mid-flight) — keep the legacy
+			//     degrade-and-log policy: log + return live
+			//     counters with zero cachedVariants. Operators
+			//     check logs; iOS shows "feature off". This
+			//     mirrors the admin tile's PR #110 contract.
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return snap, err
+			}
 			logger.Warn("upscale stats: count variants", "err", err)
 		} else {
 			snap.CachedVariants = count
 			snap.CachedBytes = bytes
 		}
 	}
-	return snap
+	return snap, nil
 }
 
 // cachedSoxOK returns the most recent `transcode.PrecheckSox` result
@@ -1506,10 +1520,27 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	if upscalePool != nil {
 		broker := apiSrv.EventPublisher()
 		upscalePool.SetOnStateChange(func() {
-			// SSE publisher fires from a worker goroutine — no
-			// caller ctx in scope. Background is correct here
-			// (the broker handles its own backpressure).
-			broker.Publish("upscale.stats", upscaleStats.UpscaleStatsSnapshot(context.Background()))
+			// SSE publisher fires from a single long-lived
+			// goroutine. A wedged CountVariants query inside
+			// UpscaleStatsSnapshot would otherwise block all
+			// subsequent SSE deliveries (job completions, batch
+			// updates, etc.). 2 s is the same budget the
+			// /v1/upscale/stats HTTP route uses for the same
+			// query. Gemini Medium on PR #218.
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			snap, err := upscaleStats.UpscaleStatsSnapshot(ctx)
+			cancel()
+			if err != nil {
+				// Drop the publish — pushing a partial snapshot
+				// (zero cachedVariants on timeout) would cause
+				// iOS clients to flash "feature off" briefly
+				// before the next successful poll. The
+				// degrade-and-log policy lives inside the
+				// adapter; here we just suppress the event.
+				logger.Debug("upscale.stats SSE: snapshot timed out", "err", err)
+				return
+			}
+			broker.Publish("upscale.stats", snap)
 		})
 		// Wire the Coordinator's SSE publish closure now that the
 		// broker is in scope. Coordinator was constructed earlier
