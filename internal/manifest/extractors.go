@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -806,33 +807,43 @@ func extractDFFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 		return fmt.Errorf("dff: not a DSDIFF DSD form (got %q)", frm8[12:16])
 	}
 
-	// Walk top-level chunks looking for PROP. Each chunk: 4 bytes
-	// FOURCC, 8 bytes BE size, payload, then a single pad byte if
-	// size is odd (DSDIFF / IFF chunk-pad rule). The DSD audio chunk
-	// holds the actual samples — for high-resolution DSD256+ stereo
-	// this routinely exceeds 1 GiB. We don't allocate for it (we
-	// just Seek past), so no sanity limit is needed at the outer
-	// walk; only the PROP body allocation has a size cap.
+	// Walk top-level chunks looking for PROP and DIIN. Each chunk: 4
+	// bytes FOURCC, 8 bytes BE size, payload, then a single pad byte
+	// if size is odd (DSDIFF / IFF chunk-pad rule). The DSD audio
+	// chunk holds the actual samples — for high-resolution DSD256+
+	// stereo this routinely exceeds 1 GiB. We don't allocate for it
+	// (we just Seek past), so no sanity limit is needed at the outer
+	// walk; only the PROP / DIIN body allocations have size caps.
+	//
+	// Chunk ORDER in DSDIFF is FRM8 → FVER → PROP → DSD → DIIN (DIIN
+	// typically follows the audio payload per the spec). The walker
+	// continues past every recognised chunk until EOF so DIIN is
+	// reached regardless of where it lands.
 	for {
 		var chunkHeader [12]byte
 		if _, err := io.ReadFull(f, chunkHeader[:]); err != nil {
-			// EOF before we hit PROP — DFF malformed but not a hard
-			// scan-aborting error. Codec already stamped.
+			// EOF — normal terminator regardless of whether we found
+			// PROP / DIIN. Codec already stamped.
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				if ec != nil && ec.ArtworkCacheDir != "" {
+					extractLocalArtwork(absPath, t, nil, ec)
+				}
 				return nil
 			}
 			return fmt.Errorf("dff: chunk header read: %w", err)
 		}
 		fourcc := string(chunkHeader[0:4])
 		size := be64(chunkHeader[4:12])
-		if fourcc == "PROP" {
-			// PROP body: 4 bytes form type ("SND "), then nested chunks.
-			// 1 MiB cap on the body allocation — real PROP chunks hold
-			// a handful of small property chunks (FS, CHNL, CMPR, ABSS,
-			// LSCO) totalling well under 1 KiB; a multi-MiB declared
-			// PROP is a corruption signal, not a high-res DSD payload.
+		switch fourcc {
+		case "PROP":
+			// PROP body: 4 bytes form type ("SND "), then nested
+			// chunks. 1 MiB cap on the body allocation — real PROP
+			// chunks hold a handful of small property chunks (FS,
+			// CHNL, CMPR, ABSS, LSCO) totalling well under 1 KiB; a
+			// multi-MiB declared PROP is a corruption signal, not a
+			// high-res DSD payload.
 			if size < 4 {
-				return nil
+				continue
 			}
 			const maxPROPSize = 1 << 20
 			if size > maxPROPSize {
@@ -843,41 +854,188 @@ func extractDFFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 				return fmt.Errorf("dff: PROP body read: %w", err)
 			}
 			if len(body) < 4 || string(body[0:4]) != "SND " {
-				return nil
+				continue
 			}
 			if dstCompressed := parsePropChunks(body[4:], t); dstCompressed {
 				scanLogger.Warn("dff: DST-compressed DSDIFF not supported; skipping format stamp",
 					"path", absPath)
 			}
-			// `extractLocalArtwork` mirrors the DSF path — even though
-			// DFF doesn't carry embedded artwork in a parsed-here
-			// chunk, the folder-level `cover.jpg` / `folder.jpg`
-			// fallback should still fire for DFF albums. Pass `nil`
-			// for the metadata since we don't decode embedded
-			// pictures from DFF (DIIN parsing deferred). Caller
-			// matches DSF's ec gating.
-			if ec != nil && ec.ArtworkCacheDir != "" {
-				extractLocalArtwork(absPath, t, nil, ec)
+			// Pad byte after odd-size payload — the body slice already
+			// consumed `size` bytes, but the file cursor needs a pad
+			// advance to stay aligned for the next chunk.
+			if size%2 == 1 {
+				if _, err := f.Seek(1, io.SeekCurrent); err != nil {
+					return fmt.Errorf("dff: PROP pad seek: %w", err)
+				}
 			}
-			return nil
-		}
-		// Skip the chunk payload + odd-byte pad. Use int64 directly —
-		// we don't allocate, so a multi-GiB DSD audio chunk passes
-		// through unchallenged. `int64(size)` is safe because os.File.Seek
-		// takes int64 and Linux/macOS file sizes max at int64.
-		skip := int64(size)
-		if skip%2 == 1 {
-			skip++
-		}
-		if _, err := f.Seek(skip, io.SeekCurrent); err != nil {
-			return fmt.Errorf("dff: seek past %q: %w", fourcc, err)
-		}
-		// PROP must precede the DSD audio chunk per the spec — once we
-		// hit DSD without seeing PROP we won't find it later. Stop.
-		if fourcc == "DSD " {
-			return nil
+		case "DIIN":
+			// DIIN container body: nested sub-chunks (DITI, DIAR,
+			// DIAL, DIGN, COMT, …). 1 MiB cap mirrors PROP — real
+			// DIIN bodies are well under 1 KiB.
+			const maxDIINSize = 1 << 20
+			if size == 0 {
+				continue
+			}
+			if size > maxDIINSize {
+				scanLogger.Warn("dff: DIIN chunk size exceeds sanity limit; skipping",
+					"path", absPath, "size", size, "limit", maxDIINSize)
+				// Guard against uint64 → int64 overflow on a
+				// malformed-but-plausible DIIN size: maxDIINSize is
+				// 1 MiB so a normal oversize lands well below
+				// math.MaxInt64, but a corrupt header declaring
+				// `size = 0xFFFFFFFFFFFFFFFF` would convert to -1
+				// and seek BACKWARD by one byte. Refuse the
+				// conversion rather than re-read the same chunk
+				// header in a loop (CodeRabbit Major on PR #223).
+				skip, err := safeSeekSkip(size)
+				if err != nil {
+					return fmt.Errorf("dff: oversized DIIN unsafe to skip: %w", err)
+				}
+				if skip%2 == 1 {
+					skip++
+				}
+				if _, err := f.Seek(skip, io.SeekCurrent); err != nil {
+					return fmt.Errorf("dff: seek past oversized DIIN: %w", err)
+				}
+				continue
+			}
+			body := make([]byte, size)
+			if _, err := io.ReadFull(f, body); err != nil {
+				return fmt.Errorf("dff: DIIN body read: %w", err)
+			}
+			parseDIINChunks(body, t, absPath)
+			if size%2 == 1 {
+				if _, err := f.Seek(1, io.SeekCurrent); err != nil {
+					return fmt.Errorf("dff: DIIN pad seek: %w", err)
+				}
+			}
+		default:
+			// Skip the chunk payload + odd-byte pad. Real DSD audio
+			// chunks reach single-digit GB for DSD512+ — well below
+			// int64 max (~9.2 EiB). But a malformed header declaring
+			// `size = 0xFFFFFFFFFFFFFFFF` would convert to int64(-1)
+			// and seek BACKWARD by one byte, causing the walker to
+			// re-read the same chunk header in an infinite loop.
+			// Guard the conversion (CodeRabbit Major on PR #223).
+			skip, err := safeSeekSkip(size)
+			if err != nil {
+				return fmt.Errorf("dff: chunk %q unsafe to skip: %w", fourcc, err)
+			}
+			if skip%2 == 1 {
+				skip++
+			}
+			if _, err := f.Seek(skip, io.SeekCurrent); err != nil {
+				return fmt.Errorf("dff: seek past %q: %w", fourcc, err)
+			}
+			// DSDIFF spec allows DIIN to follow the audio payload, so
+			// the walker continues past every unrecognised / non-PROP
+			// / non-DIIN chunk (including the DSD audio chunk itself).
+			// Natural termination is the EOF branch at the top of the
+			// loop.
 		}
 	}
+}
+
+// safeSeekSkip converts a `uint64` chunk size to the `int64` form
+// `os.File.Seek` requires, refusing the conversion when `size`
+// exceeds `math.MaxInt64`. Without this guard, a malformed DSDIFF
+// header declaring `size = 0xFFFFFFFFFFFFFFFF` would convert to
+// `int64(-1)` and seek BACKWARD by one byte instead of skipping
+// the chunk — the next iteration would re-read the same chunk
+// header in an infinite loop. Real DSD audio chunks (single-digit
+// GB at DSD512+) sit comfortably below `int64` max (~9.2 EiB), so
+// this guard never fires for well-formed files. CodeRabbit Major
+// on PR #223.
+func safeSeekSkip(size uint64) (int64, error) {
+	if size > math.MaxInt64 {
+		return 0, fmt.Errorf("chunk size %d exceeds int64 seek limit", size)
+	}
+	return int64(size), nil
+}
+
+// parseDIINChunks walks the body of a DSDIFF DIIN container chunk and
+// pulls title (DITI), artist (DIAR), album (DIAL), and genre (DIGN)
+// from their respective sub-chunks. Each text sub-chunk's payload is
+// a DSDIFF Pascal-string: 1-byte length + N bytes ASCII/UTF-8 text,
+// with one pad byte if (1 + N) is odd (the 16-bit chunk alignment
+// rule). COMT (Comments) sub-chunks are recognised but skipped — the
+// Track struct has no Comment field today, and COMT's structured
+// per-comment layout differs from the pstring text chunks.
+//
+// Bounds: every read is gated on `remaining` — a pstring declaring
+// length > remaining is logged + the rest of the sub-chunk skipped,
+// matching parsePropChunks's defensive posture. The outer DIIN
+// container's size has already been validated against the file
+// bounds by the caller.
+func parseDIINChunks(body []byte, t *Track, absPath string) {
+	for len(body) >= 12 {
+		fourcc := string(body[0:4])
+		size := be64(body[4:12])
+		if size > uint64(len(body)-12) {
+			break
+		}
+		payload := body[12 : 12+size]
+		switch fourcc {
+		case "DITI":
+			if s, ok := readDIINPString(payload, fourcc, absPath); ok && t.Title == "" {
+				t.Title = s
+			}
+		case "DIAR":
+			if s, ok := readDIINPString(payload, fourcc, absPath); ok && t.Artist == "" {
+				t.Artist = s
+			}
+		case "DIAL":
+			if s, ok := readDIINPString(payload, fourcc, absPath); ok && t.Album == "" {
+				t.Album = s
+			}
+		case "DIGN":
+			if s, ok := readDIINPString(payload, fourcc, absPath); ok && t.Genre == "" {
+				t.Genre = s
+			}
+		case "COMT":
+			// Comments chunk — structured (2-byte count + per-
+			// comment timestamps + text). No Track.Comment surface
+			// today, so skip past correctly via the chunk-header
+			// size and continue the walk.
+		}
+		advance := 12 + size
+		if advance%2 == 1 {
+			advance++
+		}
+		if advance > uint64(len(body)) {
+			break
+		}
+		body = body[advance:]
+	}
+}
+
+// readDIINPString parses a DSDIFF text sub-chunk payload as
+// (1 byte length, N bytes text). Returns the decoded string and a
+// presence bool. A malformed declared length (zero-payload or
+// length > available) returns ("", false) so the caller leaves the
+// Track field untouched. Logs a warn for the malformed case so
+// operators can correlate against the offending file path.
+//
+// The pad byte after odd `1+length` totals is consumed by the outer
+// walker's `advance%2` adjustment in parseDIINChunks — not here, so
+// the helper stays focused on the single concern of decoding one
+// pstring.
+func readDIINPString(payload []byte, fourcc, absPath string) (string, bool) {
+	if len(payload) < 1 {
+		scanLogger.Warn("dff: DIIN sub-chunk empty payload",
+			"path", absPath, "chunk", fourcc)
+		return "", false
+	}
+	length := int(payload[0])
+	if length == 0 {
+		return "", false
+	}
+	if length > len(payload)-1 {
+		scanLogger.Warn("dff: DIIN sub-chunk pstring overruns declared size",
+			"path", absPath, "chunk", fourcc, "length", length, "available", len(payload)-1)
+		return "", false
+	}
+	return string(payload[1 : 1+length]), true
 }
 
 // parsePropChunks walks the body of a DSDIFF PROP chunk (after the
