@@ -62,6 +62,7 @@ var Ext = map[string]bool{
 	".wav":  true,
 	".aif":  true,
 	".aiff": true,
+	".aifc": true, // AIFC = compressed-AIFF FORM type; same chunk-walker shape, accepted by extractAIFFWithContext
 }
 
 // Extract reads as much metadata as it can from the file at absPath and
@@ -100,6 +101,10 @@ func ExtractWithContext(absPath string, t *Track, ec *ExtractContext) error {
 		return extractDSFWithContext(absPath, t, ec)
 	case ".dff":
 		return extractDFFWithContext(absPath, t, ec)
+	case ".aif", ".aiff", ".aifc":
+		return extractAIFFWithContext(absPath, t, ec)
+	case ".wav":
+		return extractWAVWithContext(absPath, t, ec)
 	case ".m4a", ".mp4", ".m4b", ".m4p":
 		// MP4 container — distinguish ALAC from AAC via the sample-
 		// description box (`tag.FileType()` doesn't actually do this
