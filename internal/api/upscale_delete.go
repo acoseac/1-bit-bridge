@@ -26,6 +26,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -57,10 +58,10 @@ type VariantSummary struct {
 // exact path to ListVariantsForPath. The handler picks based on
 // query-param parsing; this interface stays narrow.
 type VariantDeleter interface {
-	AllVariants() ([]VariantSummary, error)
-	ListVariantsByPathPrefix(prefix string) ([]VariantSummary, error)
-	ListVariantsForPath(sourcePath string) ([]VariantSummary, error)
-	DeleteVariant(sourcePath, variantID string) error
+	AllVariants(ctx context.Context) ([]VariantSummary, error)
+	ListVariantsByPathPrefix(ctx context.Context, prefix string) ([]VariantSummary, error)
+	ListVariantsForPath(ctx context.Context, sourcePath string) ([]VariantSummary, error)
+	DeleteVariant(ctx context.Context, sourcePath, variantID string) error
 }
 
 // InflightDropper is the interface the delete handler uses to
@@ -179,11 +180,11 @@ func (s *Server) upscaleDelete(w http.ResponseWriter, r *http.Request) {
 	)
 	switch {
 	case hasPath:
-		rows, err = s.variantDeleter.ListVariantsForPath(pathParam)
+		rows, err = s.variantDeleter.ListVariantsForPath(r.Context(), pathParam)
 	case hasPrefix:
-		rows, err = s.variantDeleter.ListVariantsByPathPrefix(prefix)
+		rows, err = s.variantDeleter.ListVariantsByPathPrefix(r.Context(), prefix)
 	default:
-		rows, err = s.variantDeleter.AllVariants()
+		rows, err = s.variantDeleter.AllVariants(r.Context())
 	}
 	if err != nil {
 		writeErrorLog(w, r, http.StatusInternalServerError, "internal",
@@ -247,7 +248,7 @@ func (s *Server) upscaleDelete(w http.ResponseWriter, r *http.Request) {
 			)
 			continue
 		}
-		if err := s.variantDeleter.DeleteVariant(row.SourcePath, row.VariantID); err != nil {
+		if err := s.variantDeleter.DeleteVariant(r.Context(), row.SourcePath, row.VariantID); err != nil {
 			logger.Warn("variant DB delete failed after unlink; sidecar gone but row remains",
 				slog.String("source_path", row.SourcePath),
 				slog.String("variant_id", row.VariantID),

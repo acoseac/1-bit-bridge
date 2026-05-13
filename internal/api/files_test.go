@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -688,7 +689,7 @@ type fakeVariantStore struct {
 	rec            *VariantRecord
 }
 
-func (f *fakeVariantStore) LookupVariant(sourcePath, variantID string) (*VariantRecord, error) {
+func (f *fakeVariantStore) LookupVariant(ctx context.Context, sourcePath, variantID string) (*VariantRecord, error) {
 	if sourcePath == f.wantSourcePath && variantID == f.wantVariantID {
 		return f.rec, nil
 	}

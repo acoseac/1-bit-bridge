@@ -21,6 +21,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"time"
 )
@@ -95,6 +96,32 @@ func boundedHandler(h http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// withCtxTimeout wraps the handler with `context.WithTimeout(r.Context(), d)`.
+// Composes with `boundedHandler`: the write-deadline guards the
+// socket; the ctx-timeout guards the DOWNSTREAM work (SQLite,
+// resolver lookups, etc.) — both run against the same request.
+//
+// Used for fast-query routes (/v1/health, /v1/upscale/stats, etc.)
+// where a wedged DB shouldn't be allowed to consume the full
+// 60 s write-deadline budget before the goroutine releases. The
+// 2 s / 10 s budgets here are deliberately well below the
+// boundedRouteWriteDeadline so the ctx fires first and the
+// downstream Store query returns `context.DeadlineExceeded`
+// promptly (now possible because the Store methods are all
+// ctx-aware — PR #216).
+//
+// On timeout the handler still emits its own response (the
+// downstream Store error path will surface via writeErrorLog
+// → 5xx). The wrapper doesn't itself write anything; it only
+// adjusts the request's ctx.
+func withCtxTimeout(d time.Duration, h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), d)
+		defer cancel()
+		h(w, r.WithContext(ctx))
+	}
+}
+
 // route is the per-route registry entry. `pattern` is the
 // `http.ServeMux` pattern (method + path); `kind` is the
 // classification; `handler` is the per-route handler closure
@@ -131,11 +158,19 @@ type route struct {
 func (s *Server) routeRegistry() []route {
 	return []route{
 		// /v1/health is unauthed; everything below is authed.
-		{pattern: "GET /v1/health", kind: boundedRoute, handler: s.health},
+		// 2 s ctx-timeout: health probe must NEVER block more than
+		// ~the iOS UI's "still alive?" poll interval. A wedged
+		// CountTracks should surface as 5xx within 2 s rather
+		// than backing up the goroutine queue.
+		{pattern: "GET /v1/health", kind: boundedRoute, handler: withCtxTimeout(2*time.Second, s.health)},
 
 		// Browse — short JSON responses except `/v1/read` and
 		// `/v1/download`, which stream file bytes.
-		{pattern: "GET /v1/list", kind: boundedRoute, handler: s.authed(s.list)},
+		// 10 s ctx-timeout: directory enumerations on a 50k-track
+		// SMB-mounted library can legitimately take seconds on
+		// the cold path; 10 s leaves comfortable headroom while
+		// still bounding a hung mount.
+		{pattern: "GET /v1/list", kind: boundedRoute, handler: withCtxTimeout(10*time.Second, s.authed(s.list))},
 		{pattern: "GET /v1/stat", kind: boundedRoute, handler: s.authed(s.stat)},
 		{pattern: "GET /v1/read", kind: streamingRoute, handler: s.authed(s.read)},
 		{pattern: "GET /v1/download", kind: streamingRoute, handler: s.authed(s.download)},
@@ -152,7 +187,11 @@ func (s *Server) routeRegistry() []route {
 		// Upscale — small JSON responses on every endpoint
 		// (stats / batches / variants — never streams).
 		{pattern: "POST /v1/upscale", kind: boundedRoute, handler: s.authed(s.upscaleRequest)},
-		{pattern: "GET /v1/upscale/stats", kind: boundedRoute, handler: s.authed(s.upscaleStats)},
+		// 2 s ctx-timeout: /v1/upscale/stats is iOS's
+		// management-section poller — a wedged CountVariants
+		// query backs up at scary rates under high-frequency
+		// polling. Surface as 5xx within 2 s instead.
+		{pattern: "GET /v1/upscale/stats", kind: boundedRoute, handler: withCtxTimeout(2*time.Second, s.authed(s.upscaleStats))},
 		{pattern: "POST /v1/upscale/batch", kind: boundedRoute, handler: s.authed(s.upscaleBatchSubmit)},
 		{pattern: "GET /v1/upscale/batches", kind: boundedRoute, handler: s.authed(s.upscaleBatchList)},
 		{pattern: "DELETE /v1/upscale/batches/{id}", kind: boundedRoute, handler: s.authed(s.upscaleBatchCancel)},
