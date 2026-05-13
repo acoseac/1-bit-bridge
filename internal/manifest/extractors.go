@@ -362,25 +362,56 @@ func populateFromTagMetadata(m tag.Metadata, t *Track) {
 	if v := strings.TrimSpace(m.Genre()); v != "" {
 		t.Genre = v
 	}
-	// `dhowden/tag` returns 0 for both "tag absent" and "tag value is 0"
-	// — there's no way to distinguish at this layer. We propagate the
-	// raw value as a non-nil pointer regardless, so a track legitimately
-	// tagged with year 0 / track 0 round-trips as `Some(0)` to the
-	// iOS decoder rather than getting silently dropped.
+	// **Pointer-zero correctness pass** (PR-B): `dhowden/tag` returns
+	// 0 for BOTH "tag absent" and "tag value is 0" — at the parsed-
+	// value layer they're indistinguishable. To preserve the
+	// `*int` "absent" semantic (nil vs Some(0)), we probe the raw
+	// tag map BEFORE calling m.Year() / m.Track() / m.Disc() and
+	// only assign the pointer when at least one alias for the
+	// underlying tag is actually present in the raw map.
 	//
-	// **Pointer-zero correctness pass** (the bridge-side companion
-	// to the iOS-side `MetadataNormalizer.albumID` year-zero guard)
-	// is deferred to a later release: shipping the bridge fix
-	// before the iOS guard has propagated via App Store / TestFlight
-	// would have legacy clients suddenly see `null` where they
-	// expected `0` and trigger mass library re-grouping. See
-	// `internal/manifest/types.go` doc-comment.
-	y := m.Year()
-	t.Year = &y
-	tn, _ := m.Track()
-	t.TrackNumber = &tn
-	d, _ := m.Disc()
-	t.DiscNumber = &d
+	// stringOf already returns (string, bool) with case-folded +
+	// space-to-underscore normalisation via normaliseRawTagKey, so
+	// the presence signal is the second return value. Aliases are
+	// passed in lowercase to match the normalised lookup form.
+	// A returned "0" still counts as present (the user-intent case
+	// the original docblock was protecting); only absence drops
+	// to nil so the iOS client can distinguish "no tag" from
+	// "explicit year=0" and surface "Unknown" cleanly.
+	//
+	// When raw is nil (defensive — most format parsers return a
+	// non-nil map even when empty), fall back to the legacy
+	// always-Some-pointer shape so partial-tag scenarios stay
+	// observable from the wire.
+	if raw := m.Raw(); raw != nil {
+		// CodeRabbit Major on PR #226: `stringOf` returns `ok=false`
+		// when the key IS present but the underlying `m.Raw()` value
+		// type isn't one of `string` / `[]string` / `int` (e.g. MP4's
+		// `trkn` atom surfaces as `*tag.Position` via dhowden,
+		// `[]byte`, etc.). Using stringOf-based presence here would
+		// silently drop `Year` / `TrackNumber` / `DiscNumber` even
+		// though the dhowden accessor would happily parse the value.
+		// `hasAnyRawKey` is key-only — value shape is irrelevant.
+		if hasAnyRawKey(raw, "tyer", "tdrc", "tdrl", "date", "year", "©day", "©yyy") {
+			y := m.Year()
+			t.Year = &y
+		}
+		if hasAnyRawKey(raw, "trck", "tracknumber", "trkn") {
+			tn, _ := m.Track()
+			t.TrackNumber = &tn
+		}
+		if hasAnyRawKey(raw, "tpos", "discnumber", "disk") {
+			d, _ := m.Disc()
+			t.DiscNumber = &d
+		}
+	} else {
+		y := m.Year()
+		t.Year = &y
+		tn, _ := m.Track()
+		t.TrackNumber = &tn
+		d, _ := m.Disc()
+		t.DiscNumber = &d
+	}
 	// MusicBrainz IDs — many tagged libraries carry these. The
 	// case/space-agnostic stringOf below catches both Vorbis-flavour
 	// keys (`MUSICBRAINZ_ALBUMID`) AND ID3v2 TXXX descriptions
@@ -613,6 +644,41 @@ func stringOf(raw map[string]any, keys ...string) (string, bool) {
 // raw map keys preserve them on the surfaces we care about.
 func normaliseRawTagKey(k string) string {
 	return strings.ReplaceAll(strings.ToLower(k), " ", "_")
+}
+
+// hasAnyRawKey reports whether `raw` contains a tag entry whose
+// normalised key (lowercased + space→underscore) matches any of the
+// supplied aliases. Value-shape agnostic — unlike `stringOf` which
+// peeks at the value and returns `ok=false` for unsupported types,
+// this helper only checks for key presence.
+//
+// **Why a key-only helper exists alongside `stringOf`** (CodeRabbit
+// Major on PR #226): the `populateFromTagMetadata` presence gates for
+// `Year` / `TrackNumber` / `DiscNumber` need to know whether the
+// underlying ID3v2 / Vorbis / MP4 tag was actually present, not
+// whether stringOf can decode its value. dhowden surfaces MP4's
+// `trkn` atom as `*tag.Position` (NOT a string / []string / int), so
+// a stringOf-based gate would treat a tagged MP4 with explicit track
+// number as "absent" and drop `t.TrackNumber` — even though
+// `m.Track()` would parse it correctly. The same risk applies to any
+// future raw value shape dhowden emits (e.g. `[]byte` for binary
+// frames).
+//
+// Aliases are passed in their normalised lowercase form to match
+// what `normaliseRawTagKey` produces.
+func hasAnyRawKey(raw map[string]any, keys ...string) bool {
+	if raw == nil {
+		return false
+	}
+	for mapKey := range raw {
+		norm := normaliseRawTagKey(mapKey)
+		for _, k := range keys {
+			if norm == k {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // parseReplayGain parses a Vorbis/ID3 ReplayGain string like "-7.32 dB".
