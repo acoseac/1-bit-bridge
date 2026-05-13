@@ -1340,7 +1340,17 @@ func (s *Store) DeleteTracksByPrefix(prefix string) (int64, error) {
 	// Step 1: enumerate doomed sidecars BEFORE the cascade drops
 	// the rows. Reuses the proactive-cleanup contract documented
 	// on DeleteTrack.
-	doomedSidecars, _ := s.listSidecarsByPathPrefix(escaped)
+	//
+	// **Iterator-error refusal** (CodeRabbit Major + Gemini High on
+	// PR #210): if the enumeration was truncated mid-scan, the
+	// downstream `removeSidecarFiles` would leak orphan sidecar
+	// files on disk — the row-cascade hasn't run yet so we can
+	// abort cleanly and surface the error to the caller. Refusing
+	// upfront is better than committing a partial delete.
+	doomedSidecars, err := s.listSidecarsByPathPrefix(escaped)
+	if err != nil {
+		return 0, err
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return 0, err
@@ -1463,7 +1473,16 @@ func removeSidecarFiles(paths []string) {
 func (s *Store) WipeAllTracks() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	doomedSidecars, _ := s.listAllSidecars()
+	// **Iterator-error refusal** (CodeRabbit Major + Gemini High on
+	// PR #210): a truncated enumeration would skip orphan-cleanup
+	// for an unknown number of sidecars while still committing
+	// the rows-wipe. Surface the error and let the caller retry
+	// rather than commit a partial wipe whose on-disk leaks `--gc`
+	// would have to clean up later.
+	doomedSidecars, err := s.listAllSidecars()
+	if err != nil {
+		return err
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
