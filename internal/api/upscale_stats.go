@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 )
 
@@ -20,7 +21,7 @@ import (
 // disabled feature, which matches the /v1/health.upscaleEnabled
 // contract iOS already gates on.
 type UpscaleStatsProvider interface {
-	UpscaleStatsSnapshot() UpscaleStats
+	UpscaleStatsSnapshot(ctx context.Context) UpscaleStats
 }
 
 // UpscaleStats is the wire shape GET /v1/upscale/stats returns.
@@ -84,7 +85,7 @@ type UpscalePoolStats struct {
 func (s *Server) upscaleStats(w http.ResponseWriter, r *http.Request) {
 	var resp UpscaleStats
 	if s.upscaleStatsProvider != nil {
-		resp = s.upscaleStatsProvider.UpscaleStatsSnapshot()
+		resp = s.upscaleStatsProvider.UpscaleStatsSnapshot(r.Context())
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

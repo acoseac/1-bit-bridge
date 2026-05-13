@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -20,7 +21,7 @@ type stubStatsProvider struct {
 	snap UpscaleStats
 }
 
-func (s *stubStatsProvider) UpscaleStatsSnapshot() UpscaleStats { return s.snap }
+func (s *stubStatsProvider) UpscaleStatsSnapshot(ctx context.Context) UpscaleStats { return s.snap }
 
 func upscaleStatsFixture(t *testing.T, withProvider bool, snap UpscaleStats) (string /* baseURL */, string /* token */) {
 	t.Helper()

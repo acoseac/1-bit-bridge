@@ -67,12 +67,8 @@ type variantStoreAdapter struct {
 	provider *manifest.Provider
 }
 
-func (a *variantStoreAdapter) LookupVariant(sourcePath, variantID string) (*api.VariantRecord, error) {
-	// api.VariantStore interface doesn't thread ctx yet — that's the
-	// next focused follow-up. For now use Background; the Store-side
-	// ctx-awareness is complete, just not yet bridged through the
-	// api interface boundary.
-	v, err := a.provider.LookupVariant(context.Background(), sourcePath, variantID)
+func (a *variantStoreAdapter) LookupVariant(ctx context.Context, sourcePath, variantID string) (*api.VariantRecord, error) {
+	v, err := a.provider.LookupVariant(ctx, sourcePath, variantID)
 	if err != nil {
 		return nil, err
 	}
@@ -102,32 +98,32 @@ type variantDeleterAdapter struct {
 	store *manifest.Store
 }
 
-func (a *variantDeleterAdapter) AllVariants() ([]api.VariantSummary, error) {
-	rows, err := a.store.AllVariants(context.Background())
+func (a *variantDeleterAdapter) AllVariants(ctx context.Context) ([]api.VariantSummary, error) {
+	rows, err := a.store.AllVariants(ctx)
 	if err != nil {
 		return nil, err
 	}
 	return variantSummariesFromRows(rows), nil
 }
 
-func (a *variantDeleterAdapter) ListVariantsByPathPrefix(prefix string) ([]api.VariantSummary, error) {
-	rows, err := a.store.ListVariantsByPathPrefix(context.Background(), prefix)
+func (a *variantDeleterAdapter) ListVariantsByPathPrefix(ctx context.Context, prefix string) ([]api.VariantSummary, error) {
+	rows, err := a.store.ListVariantsByPathPrefix(ctx, prefix)
 	if err != nil {
 		return nil, err
 	}
 	return variantSummariesFromRows(rows), nil
 }
 
-func (a *variantDeleterAdapter) ListVariantsForPath(sourcePath string) ([]api.VariantSummary, error) {
-	rows, err := a.store.ListVariantsForPath(context.Background(), sourcePath)
+func (a *variantDeleterAdapter) ListVariantsForPath(ctx context.Context, sourcePath string) ([]api.VariantSummary, error) {
+	rows, err := a.store.ListVariantsForPath(ctx, sourcePath)
 	if err != nil {
 		return nil, err
 	}
 	return variantSummariesFromRows(rows), nil
 }
 
-func (a *variantDeleterAdapter) DeleteVariant(sourcePath, variantID string) error {
-	return a.store.DeleteVariant(context.Background(), sourcePath, variantID)
+func (a *variantDeleterAdapter) DeleteVariant(ctx context.Context, sourcePath, variantID string) error {
+	return a.store.DeleteVariant(ctx, sourcePath, variantID)
 }
 
 func variantSummariesFromRows(rows []manifest.VariantRow) []api.VariantSummary {
@@ -538,7 +534,7 @@ type upscaleStatsAdapter struct {
 
 const upscaleStatsSoxTTL = 30 * time.Second
 
-func (a *upscaleStatsAdapter) UpscaleStatsSnapshot() api.UpscaleStats {
+func (a *upscaleStatsAdapter) UpscaleStatsSnapshot(ctx context.Context) api.UpscaleStats {
 	var snap api.UpscaleStats
 	if a.enabled() {
 		if p := a.pool(); p != nil {
@@ -558,7 +554,7 @@ func (a *upscaleStatsAdapter) UpscaleStatsSnapshot() api.UpscaleStats {
 	soxOK := a.cachedSoxOK()
 	snap.SoxAvailable = &soxOK
 	if a.store != nil {
-		count, bytes, err := a.store.CountVariants(context.Background())
+		count, bytes, err := a.store.CountVariants(ctx)
 		if err != nil {
 			// Same degrade-and-log policy the admin tile uses
 			// (PR #110): a SQL failure here shouldn't blank the
@@ -1510,7 +1506,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	if upscalePool != nil {
 		broker := apiSrv.EventPublisher()
 		upscalePool.SetOnStateChange(func() {
-			broker.Publish("upscale.stats", upscaleStats.UpscaleStatsSnapshot())
+			// SSE publisher fires from a worker goroutine — no
+			// caller ctx in scope. Background is correct here
+			// (the broker handles its own backpressure).
+			broker.Publish("upscale.stats", upscaleStats.UpscaleStatsSnapshot(context.Background()))
 		})
 		// Wire the Coordinator's SSE publish closure now that the
 		// broker is in scope. Coordinator was constructed earlier

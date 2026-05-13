@@ -315,7 +315,7 @@ func (s *Server) serveVariant(w http.ResponseWriter, r *http.Request, sourcePath
 		writeError(w, http.StatusNotFound, "variant_not_found", "upscaling is not enabled on this bridge")
 		return
 	}
-	rec, err := s.variantStore.LookupVariant(sourcePath, variantID)
+	rec, err := s.variantStore.LookupVariant(r.Context(), sourcePath, variantID)
 	if err != nil {
 		writeErrorLog(w, r, http.StatusInternalServerError, "internal",
 			"the bridge couldn't look up this variant", err)
@@ -402,7 +402,7 @@ func (s *Server) serveVariant(w http.ResponseWriter, r *http.Request, sourcePath
 				if canonVariant == "" {
 					canonVariant = variantID
 				}
-				if delErr := s.variantDeleter.DeleteVariant(canonSource, canonVariant); delErr != nil {
+				if delErr := s.variantDeleter.DeleteVariant(r.Context(), canonSource, canonVariant); delErr != nil {
 					LoggerFromContext(r.Context()).Warn(
 						"variant DB cleanup failed after sidecar miss",
 						slog.String("source_path", canonSource),

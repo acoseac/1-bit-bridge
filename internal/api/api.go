@@ -157,7 +157,7 @@ var ErrUpscaleQueueFull = errors.New("upscale queue is full")
 // `internal/manifest.Provider` satisfies this in production via
 // a thin LookupVariant wrapper around the SQLite row read.
 type VariantStore interface {
-	LookupVariant(sourcePath, variantID string) (*VariantRecord, error)
+	LookupVariant(ctx context.Context, sourcePath, variantID string) (*VariantRecord, error)
 }
 
 // VariantRecord is the minimum metadata the api needs to (a) decide

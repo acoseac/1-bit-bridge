@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -27,7 +28,7 @@ type stubVariantDeleter struct {
 	delErr  error    // injected for the per-row delete failure branch
 }
 
-func (s *stubVariantDeleter) AllVariants() ([]VariantSummary, error) {
+func (s *stubVariantDeleter) AllVariants(ctx context.Context) ([]VariantSummary, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.listErr != nil {
@@ -38,7 +39,7 @@ func (s *stubVariantDeleter) AllVariants() ([]VariantSummary, error) {
 	return out, nil
 }
 
-func (s *stubVariantDeleter) ListVariantsByPathPrefix(prefix string) ([]VariantSummary, error) {
+func (s *stubVariantDeleter) ListVariantsByPathPrefix(ctx context.Context, prefix string) ([]VariantSummary, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.listErr != nil {
@@ -53,7 +54,7 @@ func (s *stubVariantDeleter) ListVariantsByPathPrefix(prefix string) ([]VariantS
 	return out, nil
 }
 
-func (s *stubVariantDeleter) ListVariantsForPath(sourcePath string) ([]VariantSummary, error) {
+func (s *stubVariantDeleter) ListVariantsForPath(ctx context.Context, sourcePath string) ([]VariantSummary, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.listErr != nil {
@@ -67,7 +68,7 @@ func (s *stubVariantDeleter) ListVariantsForPath(sourcePath string) ([]VariantSu
 	return nil, nil
 }
 
-func (s *stubVariantDeleter) DeleteVariant(sourcePath, variantID string) error {
+func (s *stubVariantDeleter) DeleteVariant(ctx context.Context, sourcePath, variantID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.delErr != nil {
