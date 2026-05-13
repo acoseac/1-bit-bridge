@@ -45,6 +45,32 @@ func TestApplyMultiValueArtistsFromRaw_SliceVariant(t *testing.T) {
 	}
 }
 
+// TestExtractMultiValueTagFromRaw_LongestWinsAcrossAliases pins the
+// scan-all-then-pick-longest tie-break (CodeRabbit Minor on PR #227).
+// Go map iteration order is non-deterministic, so an early-return on
+// the first matching alias could mask a genuinely-multi-valued entry
+// if a single-value alias surfaced first. The "longest wins" tie-
+// break always picks the multi-value entry regardless of map order.
+//
+// The test exercises 50 iterations to amortise away the chance of
+// the same iteration order winning every time (map randomization is
+// per-`for-range` evaluation, not per-process).
+func TestExtractMultiValueTagFromRaw_LongestWinsAcrossAliases(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		raw := map[string]any{
+			"tpe1": "Just One",                // single-value string (no NULL)
+			"©art": []string{"Real", "Multi"}, // genuine multi-value
+		}
+		got := extractMultiValueTagFromRaw(raw, "tpe1", "©art")
+		if len(got) != 2 {
+			t.Fatalf("iter %d: got %v, want 2-element slice (multi-value alias must win)", i, got)
+		}
+		if got[0] != "Real" || got[1] != "Multi" {
+			t.Fatalf("iter %d: got %v, want [Real Multi]", i, got)
+		}
+	}
+}
+
 // TestApplyMultiValueArtistsFromRaw_TrailingNullDropped: ID3v2.4
 // taggers sometimes emit a trailing NULL after the last value as
 // a frame terminator. The trimNonEmpty pass should drop it so the
