@@ -95,7 +95,7 @@ func libraryAddCmd(ctx context.Context, args []string, stdout, stderr io.Writer)
 		// 1 → N: stored path form changes from bare "Artist/…" to
 		// "<basename>/Artist/…". Wipe so the next scan repopulates
 		// in the new form. Same rationale as the admin API path.
-		if err := wipeManifest(cfg); err != nil {
+		if err := wipeManifest(ctx, cfg); err != nil {
 			fmt.Fprintf(stderr, "library add: wipe manifest: %v\n", err)
 			return 1
 		}
@@ -154,7 +154,7 @@ func libraryRemoveCmd(ctx context.Context, args []string, stdout, stderr io.Writ
 	defer store.Close()
 
 	if willCollapse {
-		if err := store.WipeAllTracks(context.Background()); err != nil {
+		if err := store.WipeAllTracks(ctx); err != nil {
 			fmt.Fprintf(stderr, "library remove: wipe manifest: %v\n", err)
 			return 1
 		}
@@ -177,7 +177,7 @@ func libraryRemoveCmd(ctx context.Context, args []string, stdout, stderr io.Writ
 				return 1
 			}
 		}
-		if _, err := store.DeleteTracksByPrefix(context.Background(), basename+"/"); err != nil {
+		if _, err := store.DeleteTracksByPrefix(ctx, basename+"/"); err != nil {
 			fmt.Fprintf(stderr, "library remove: prune tracks: %v\n", err)
 			return 1
 		}
@@ -280,13 +280,13 @@ func tryLibraryViaAdmin(ctx context.Context, cfg *config.Config, method, path st
 
 // wipeManifest opens the manifest store, wipes it, and closes.
 // Used by the offline library-add path on a 1→N transition.
-func wipeManifest(cfg *config.Config) error {
+func wipeManifest(ctx context.Context, cfg *config.Config) error {
 	store, err := openManifestStore(cfg)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
-	return store.WipeAllTracks(context.Background())
+	return store.WipeAllTracks(ctx)
 }
 
 // openManifestStore resolves the manifest DB path the same way

@@ -846,7 +846,14 @@ func (p *Pool) processJob(job poolJob) {
 		SoxSettings:   settings,
 		CreatedAt:     completedAt.UnixNano(),
 	}
-	if err := p.store.UpsertVariant(p.stopCtx, row); err != nil {
+	// Use jobCtx, NOT p.stopCtx — the per-job timeout
+	// (defaultJobTimeout = 10 min) bounds the DB write the
+	// same way it bounds the sox process. p.stopCtx only
+	// fires at shutdown, so a SQLite write that hangs
+	// (extremely rare but possible under deep contention)
+	// would otherwise pin a worker indefinitely. CodeRabbit
+	// Major on PR #216.
+	if err := p.store.UpsertVariant(jobCtx, row); err != nil {
 		p.failedCnt.Add(1)
 		logger.Error("pool: store variant", "source", job.spec.SourceLibraryRel, "err", err)
 		// Best-effort: remove the orphan sidecar so a

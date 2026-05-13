@@ -59,7 +59,7 @@ const artworkCacheSuffix = "-500.jpg"
 // deletion. Per CodeRabbit Major round-1 on PR #167.
 const artworkGCConfirmPhrase = "GC-ARTWORK"
 
-func artworkCmd(_ context.Context, args []string, stdout, stderr io.Writer) int {
+func artworkCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("artwork", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	configPath := fs.String("config", "bridge.yaml", "path to config file")
@@ -112,11 +112,11 @@ func artworkCmd(_ context.Context, args []string, stdout, stderr io.Writer) int 
 	defer store.Close()
 
 	artworkDir := filepath.Join(cfg.DataDir, artworkDirName)
-	return runArtworkGC(stdout, stderr, store, artworkDir, *dryRun)
+	return runArtworkGC(ctx, stdout, stderr, store, artworkDir, *dryRun)
 }
 
-func runArtworkGC(stdout, stderr io.Writer, store *manifest.Store, artworkDir string, dryRun bool) int {
-	mbidsInUse, err := store.ArtworkMBIDsInUse(context.Background())
+func runArtworkGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store, artworkDir string, dryRun bool) int {
+	mbidsInUse, err := store.ArtworkMBIDsInUse(ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "list referenced artwork ids: %v\n", err)
 		return 1
