@@ -504,20 +504,33 @@ func applyMultiValueArtistsFromRaw(m tag.Metadata, t *Track) {
 	}
 }
 
-// extractMultiValueTagFromRaw iterates m.Raw() looking for an
-// entry whose normalised key matches any of the supplied aliases.
-// On match, returns the list of trimmed non-empty values from
+// extractMultiValueTagFromRaw iterates m.Raw() looking for entries
+// whose normalised key matches any of the supplied aliases. On
+// match, the entry's value is converted to a `[]string` from
 // either:
-//   - a `string` value with embedded `\x00` NULL-separators (split
-//     into pieces), OR
-//   - a `[]string` value (each element treated as one value).
+//   - a `string` with embedded `\x00` NULL-separators (split into
+//     pieces — ID3v2.4 convention), OR
+//   - a `[]string` (each element treated as one value — MP4
+//     multiple-data-atom convention).
 //
-// Returns nil when no match OR only a single non-empty value is
-// found — caller checks `len(values) > 1` before overriding so a
-// single-value tag doesn't get pointlessly rewritten.
+// **Scans all matching aliases and returns the longest list**
+// rather than returning on first match (CodeRabbit Minor on
+// PR #227). Map iteration order is non-deterministic in Go, so an
+// early-return on the first match would make override behaviour
+// order-dependent: if `raw` happened to surface a single-value
+// alias before a truly-multi-value one, the multi-value alias
+// would be silently masked. The "longest wins" tie-break is the
+// least-surprising shape — it always picks the genuinely multi-
+// valued entry when one is present, regardless of map order.
+//
+// Returns nil when no match OR every match collapses to one
+// non-empty entry; caller checks `len(values) > 1` before
+// overriding so a single-value tag doesn't get pointlessly
+// rewritten.
 //
 // Aliases passed in lowercase to match normaliseRawTagKey output.
 func extractMultiValueTagFromRaw(raw map[string]any, keys ...string) []string {
+	var best []string
 	for rawKey, v := range raw {
 		norm := normaliseRawTagKey(rawKey)
 		matched := false
@@ -530,19 +543,20 @@ func extractMultiValueTagFromRaw(raw map[string]any, keys ...string) []string {
 		if !matched {
 			continue
 		}
+		var candidate []string
 		switch s := v.(type) {
 		case string:
-			// NULL-separated multi-value (ID3v2.4 convention).
 			if strings.Contains(s, "\x00") {
-				parts := strings.Split(s, "\x00")
-				return trimNonEmpty(parts)
+				candidate = trimNonEmpty(strings.Split(s, "\x00"))
 			}
 		case []string:
-			// MP4 multiple-data-atom multi-value (Apple convention).
-			return trimNonEmpty(s)
+			candidate = trimNonEmpty(s)
+		}
+		if len(candidate) > len(best) {
+			best = candidate
 		}
 	}
-	return nil
+	return best
 }
 
 // trimNonEmpty trims whitespace from each entry and drops empties.
