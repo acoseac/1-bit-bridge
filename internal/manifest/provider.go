@@ -24,6 +24,16 @@ import (
 // (which already has a validated `os.FileInfo` from
 // `bridgefs.Resolver.ResolveChecked`) compares.
 type VariantLookup struct {
+	// SourcePath / VariantID are the CANONICAL row values (case-
+	// preserved) — LookupVariant matches case-insensitively via
+	// `unicode_lower`, but downstream consumers (reactive
+	// open-on-serve cleanup in api/files.go) need the canonical
+	// form to drive DeleteVariant + the upscale.deleted SSE
+	// emission so the wire path matches `Track.path` byte-
+	// identical for iOS reverse-index resolution. CodeRabbit
+	// Major on PR #209.
+	SourcePath    string
+	VariantID     string
 	SidecarPath   string
 	SourceMTimeNS int64
 	SourceSize    int64
@@ -157,6 +167,11 @@ func (p *Provider) LookupVariant(sourcePath, variantID string) (*VariantLookup, 
 		return nil, nil
 	}
 	return &VariantLookup{
+		// Carry forward the row's canonical-case values — NOT
+		// the request inputs the case-insensitive lookup
+		// resolved from.
+		SourcePath:    v.SourcePath,
+		VariantID:     v.VariantID,
 		SidecarPath:   v.SidecarPath,
 		SourceMTimeNS: v.SourceMTimeNS,
 		SourceSize:    v.SourceSize,

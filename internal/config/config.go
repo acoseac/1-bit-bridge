@@ -67,6 +67,40 @@ type Config struct {
 	Tailscale       TailscaleConfig    `yaml:"tailscale,omitempty"`
 	Scanner         ScannerConfig      `yaml:"scanner,omitempty"`
 	Limits          LimitsConfig       `yaml:"limits,omitempty"`
+	Integrity       IntegrityConfig    `yaml:"integrity,omitempty"`
+}
+
+// IntegrityConfig controls the proactive consistency watchers
+// — today just the upscale-variant sweep. The library-scanner's
+// own scheduling lives at the top-level `scanIntervalSec` for
+// back-compat with v1.0 deploys; this block exists so future
+// orthogonal integrity surfaces (artwork-cache reconcile, sidecar
+// freshness re-validate) can join the same YAML node without
+// scattering top-level fields.
+type IntegrityConfig struct {
+	// VariantSweepIntervalSec controls how often the
+	// integrity.VariantWatcher walks `track_variants` and
+	// stat()s each sidecar to detect external deletions.
+	// Default 3600 s (1 h). Explicit zero disables the
+	// watcher entirely — operators on minimal deploys who
+	// run `bridge upscale --gc` manually opt out via this
+	// knob.
+	//
+	// Pointer-typed so applyDefaults can distinguish
+	// "missing field, use default" from "explicit zero,
+	// disable". Same pattern LimitsConfig.RequestsPerMinute
+	// uses for the same reason. Always read via
+	// Config.VariantSweepInterval() below — never
+	// dereference directly.
+	//
+	// Pair with the reactive serve-side cleanup in
+	// internal/api.serveVariant: that path closes the
+	// active-playback case the moment a client requests a
+	// missing sidecar. The watcher catches the
+	// not-currently-playing case at most VariantSweepInterval
+	// later. Both publish the same `upscale.deleted` SSE
+	// event so iOS reconciliation is uniform.
+	VariantSweepIntervalSec *int `yaml:"variantSweepIntervalSec,omitempty"`
 }
 
 // ScannerConfig controls the library scanner's resilience knobs.
@@ -901,6 +935,31 @@ func validateLoopbackAddress(addr string) error {
 // ScanInterval returns scanIntervalSec as a time.Duration.
 func (c *Config) ScanInterval() time.Duration {
 	return time.Duration(c.ScanIntervalSec) * time.Second
+}
+
+// DefaultVariantSweepIntervalSec is the default cadence (1 h) for
+// the upscale-variant integrity watcher. See IntegrityConfig
+// docstring for the rationale (closes the operator-rm / backup-
+// software / disk-failure cases without exhausting filesystem IO).
+const DefaultVariantSweepIntervalSec = 3600
+
+// VariantSweepInterval returns the configured sweep cadence as a
+// time.Duration. Missing field (pointer nil) returns the default
+// (1 h); an explicit zero opt-out is preserved verbatim and the
+// integrity package treats ≤ 0 as "watcher disabled".
+//
+// Negative values are clamped to zero (disabled) — a typo'd
+// negative would otherwise create a busy-loop ticker that
+// stat()s every variant row continuously and saturates IOPS.
+func (c *Config) VariantSweepInterval() time.Duration {
+	if c.Integrity.VariantSweepIntervalSec == nil {
+		return time.Duration(DefaultVariantSweepIntervalSec) * time.Second
+	}
+	secs := *c.Integrity.VariantSweepIntervalSec
+	if secs < 0 {
+		secs = 0
+	}
+	return time.Duration(secs) * time.Second
 }
 
 // Save atomically writes c as YAML to path (temp file + rename). Parent

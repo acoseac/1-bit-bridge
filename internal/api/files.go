@@ -3,6 +3,8 @@ package api
 import (
 	"errors"
 	"io"
+	"io/fs"
+	"log/slog"
 	"net/http"
 	"os"
 	"path"
@@ -359,7 +361,59 @@ func (s *Server) serveVariant(w http.ResponseWriter, r *http.Request, sourcePath
 		// would hide a permissions misconfig as if the variant
 		// were permanently missing). CodeRabbit second-pass on
 		// PR #108.
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
+			// Reactive cleanup (open-on-serve, no stat-then-open
+			// — saves a syscall on the happy path AND avoids the
+			// TOCTOU window where the file could disappear
+			// between the stat and the open). The DB row is now
+			// known-stale: drop it AND emit upscale.deleted so
+			// iOS reconciles immediately (Ready chrome reverts,
+			// currently-playing tracks fall back to source via
+			// the existing PR-A2 SSE handler).
+			//
+			// Detached context — must NOT use r.Context() here.
+			// A client that disconnected (the same event that
+			// often surfaces the miss) would cancel our DB
+			// write mid-transaction. Cleanup MUST reflect
+			// reality regardless of who hung up first. Today
+			// the DeleteVariant signature doesn't take a ctx
+			// (PR-B's mechanical sweep adds one); when it does,
+			// build a 5 s timeout-bound background ctx here so
+			// a wedged DB doesn't park the response goroutine
+			// indefinitely.
+			if s.variantDeleter != nil {
+				// Use the canonical values from the looked-up
+				// record, NOT the request input. The request
+				// `sourcePath`/`variantID` may be case-folded
+				// (iOS sends `share.normalize`d paths); the
+				// LookupVariant result carries the canonical
+				// row form that matches `Track.path` byte-
+				// identical and that DeleteVariant's
+				// `source_path = ?` predicate will hit.
+				// Falling back to the request values when the
+				// record didn't surface them (test stub
+				// returning a sparse record) keeps the cleanup
+				// path functional without a hard nil deref.
+				canonSource := rec.SourcePath
+				if canonSource == "" {
+					canonSource = sourcePath
+				}
+				canonVariant := rec.VariantID
+				if canonVariant == "" {
+					canonVariant = variantID
+				}
+				if delErr := s.variantDeleter.DeleteVariant(canonSource, canonVariant); delErr != nil {
+					LoggerFromContext(r.Context()).Warn(
+						"variant DB cleanup failed after sidecar miss",
+						slog.String("source_path", canonSource),
+						slog.String("variant_id", canonVariant),
+						slog.Any("err", delErr),
+					)
+				} else {
+					publishUpscaleDeleted(s.EventPublisher(),
+						[]string{canonSource}, []string{canonVariant})
+				}
+			}
 			writeError(w, http.StatusGone, "variant_missing_on_disk", "sidecar file missing")
 			return
 		}

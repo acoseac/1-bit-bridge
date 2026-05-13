@@ -2773,6 +2773,95 @@ func (s *Store) AllVariants() ([]VariantRow, error) {
 	return out, rows.Err()
 }
 
+// ListVariantsByPathPrefix returns every variant row whose
+// source_path starts with `prefix` (case-insensitively via the
+// project's `unicode_lower` SQLite scalar; Unicode case-folding
+// matches every other path lookup in the store). Used by the
+// admin DELETE /v1/upscale/variants?prefix=<rel-path> route to
+// resolve the deletion target set BEFORE unlinking sidecars from
+// disk.
+//
+// `prefix` is escaped via `likeEscape` so a literal `%` or `_` in
+// an album folder name (`Albums/20%_Hits/...`) does not match
+// every album starting with `Albums/20`. The `ESCAPE '\'` clause
+// pairs with the `likeEscape` helper.
+//
+// Empty `prefix` matches every row — caller is responsible for
+// rejecting accidental deletes (the handler refuses an unscoped
+// delete-all without an explicit `?confirm=true` query parameter).
+//
+// Returns `(out, rows.Err())` rather than `(out, nil)` — the
+// caller-side cleanup loop hands real iterator errors back to the
+// handler so a partial result never silently leaks. Hits the v4
+// `idx_track_variants_source_path_unicode_lower` index.
+func (s *Store) ListVariantsByPathPrefix(prefix string) ([]VariantRow, error) {
+	pattern := likeEscape(prefix) + "%"
+	rows, err := s.db.Query(`
+		SELECT source_path, variant_id, sidecar_path, format,
+		       sample_rate, bits_per_sample, size_bytes,
+		       source_mtime_ns, source_size, sox_settings, created_at
+		FROM track_variants
+		WHERE unicode_lower(source_path) LIKE unicode_lower(?) ESCAPE '\'
+		ORDER BY source_path ASC, variant_id ASC
+	`, pattern)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []VariantRow{}
+	for rows.Next() {
+		var v VariantRow
+		if err := rows.Scan(
+			&v.SourcePath, &v.VariantID, &v.SidecarPath, &v.Format,
+			&v.SampleRate, &v.BitsPerSample, &v.SizeBytes,
+			&v.SourceMTimeNS, &v.SourceSize, &v.SoxSettings, &v.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+// ListVariantsForPath returns every variant row whose source_path
+// equals `sourcePath` (case-insensitively via the project's
+// `unicode_lower` scalar; matches DeleteVariant / LookupVariant
+// case-folding semantics). Used by DELETE /v1/upscale/variants?path=<rel>
+// — a single source file typically has 0 or 1 variants, but the
+// schema doesn't enforce that (different `variant_id` values for
+// the same source path coexist via the composite primary key) so
+// this returns a slice rather than `*VariantRow`.
+//
+// Returns `(out, rows.Err())` — same iterator-error discipline as
+// ListVariantsByPathPrefix.
+func (s *Store) ListVariantsForPath(sourcePath string) ([]VariantRow, error) {
+	rows, err := s.db.Query(`
+		SELECT source_path, variant_id, sidecar_path, format,
+		       sample_rate, bits_per_sample, size_bytes,
+		       source_mtime_ns, source_size, sox_settings, created_at
+		FROM track_variants
+		WHERE unicode_lower(source_path) = unicode_lower(?)
+		ORDER BY variant_id ASC
+	`, sourcePath)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []VariantRow{}
+	for rows.Next() {
+		var v VariantRow
+		if err := rows.Scan(
+			&v.SourcePath, &v.VariantID, &v.SidecarPath, &v.Format,
+			&v.SampleRate, &v.BitsPerSample, &v.SizeBytes,
+			&v.SourceMTimeNS, &v.SourceSize, &v.SoxSettings, &v.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
 // DeleteVariant removes one row by (source_path, variant_id) AND bumps
 // the parent track row's `indexed_at` so iOS delta-sync sees the
 // removal on the next manifest fetch. Both writes happen in a single
