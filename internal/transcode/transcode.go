@@ -34,6 +34,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/logging"
@@ -133,8 +134,63 @@ type JobSpec struct {
 // to slot the variant into the share-level "prefer upscaled"
 // resolution. Future variant kinds (e.g. PCM→DSD synthesis) get
 // their own prefix.
+//
+// Hot path during manifest scan + every pool callback. The
+// finite (rate × bits) cross-product across all real DACs makes
+// memoization a clean O(1) win — see `variantIDCache`. Per-call
+// cost goes from a `fmt.Sprintf` allocation to a map read.
 func (j JobSpec) VariantID() string {
+	if id, ok := lookupCachedVariantID(j.TargetSampleRate, j.TargetBits); ok {
+		return id
+	}
 	return fmt.Sprintf("upscaled-%s-%d-%d", VariantSchemaVersion, j.TargetSampleRate, j.TargetBits)
+}
+
+// variantIDCache memoizes the `VariantID()` output for the
+// finite (rate × bits) cross-product covering every real DAC.
+// Built once via sync.Once on first VariantID call (lazy
+// initialization beats init()-time so test binaries that don't
+// touch VariantID never pay the construction cost). Sub-mics
+// O(1) lookup vs ~150 ns fmt.Sprintf + alloc per call.
+//
+// Out-of-set combinations fall through to the live fmt.Sprintf
+// path (forward-compat with future rates / bit depths). Don't
+// pre-seed every conceivable combination — keep the cache tight
+// to what real hardware uses; an unknown (rate, bits) pair pays
+// the unmemoized cost once and that's correct.
+var (
+	variantIDCacheOnce sync.Once
+	variantIDCache     map[uint64]string
+)
+
+func lookupCachedVariantID(rate, bits int) (string, bool) {
+	variantIDCacheOnce.Do(initVariantIDCache)
+	if rate < 0 || bits < 0 {
+		return "", false
+	}
+	id, ok := variantIDCache[encodeVariantKey(rate, bits)]
+	return id, ok
+}
+
+// encodeVariantKey packs (rate, bits) into a single uint64 map
+// key. Rate fits in 24 bits (max 16 777 215 ≫ 192 000), bits
+// fits in 8 bits (max 255 ≫ 24). Pack avoids the per-call
+// string-keyed allocation a `fmt.Sprintf("%d-%d", …)` key would
+// reintroduce.
+func encodeVariantKey(rate, bits int) uint64 {
+	return (uint64(rate) << 8) | uint64(bits&0xff)
+}
+
+func initVariantIDCache() {
+	rates := []int{44100, 48000, 88200, 96000, 176400, 192000}
+	bitsList := []int{16, 24}
+	variantIDCache = make(map[uint64]string, len(rates)*len(bitsList))
+	for _, r := range rates {
+		for _, b := range bitsList {
+			variantIDCache[encodeVariantKey(r, b)] =
+				fmt.Sprintf("upscaled-%s-%d-%d", VariantSchemaVersion, r, b)
+		}
+	}
 }
 
 // SidecarPath returns the absolute filesystem path the converted
