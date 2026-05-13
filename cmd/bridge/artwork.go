@@ -128,6 +128,12 @@ func runArtworkGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 
 	var removed, kept, failed, skipped int
 	walkErr := filepath.WalkDir(artworkDir, func(path string, d os.DirEntry, walkErr error) error {
+		// Honor ctx cancellation so SIGINT actually stops the
+		// sweep mid-walk instead of churning through the rest of
+		// the directory. CodeRabbit Major on PR #217.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if walkErr != nil {
 			// Cache dir may not exist yet (no scan ever ran). Treat
 			// as empty rather than erroring — same shape as the
@@ -168,6 +174,13 @@ func runArtworkGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 		return nil
 	})
 	if walkErr != nil {
+		// Operator-interrupt path: surface a clean "interrupted"
+		// message instead of the raw `context canceled` error so
+		// the SIGINT case reads as intentional rather than a bug.
+		if errors.Is(walkErr, context.Canceled) || errors.Is(walkErr, context.DeadlineExceeded) {
+			fmt.Fprintln(stderr, "artwork gc interrupted")
+			return 1
+		}
 		fmt.Fprintf(stderr, "walk artwork dir: %v\n", walkErr)
 		return 1
 	}

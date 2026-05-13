@@ -346,11 +346,19 @@ func runUpscaleBatch(ctx context.Context, stdout, stderr io.Writer, store *manif
 					CreatedAt:     transcode.CreatedAtNow(),
 				}
 				if err := store.UpsertVariant(ctx, row); err != nil {
-					atomic.AddUint64(&failCount, 1)
-					fmt.Fprintf(stderr, "FAIL %s (db write): %v\n", c.spec.SourceLibraryRel, err)
-					// Best-effort: remove the orphan sidecar so a
-					// retry from a clean slate succeeds.
-					_ = os.Remove(row.SidecarPath)
+					// Suppress the failure log + counter increment
+					// when the ctx itself is what cancelled the
+					// write — mirrors the RunSox-cancelled-by-SIGINT
+					// branch above so an operator Ctrl-C run doesn't
+					// produce a flood of `context canceled` error
+					// lines. Gemini Medium on PR #217.
+					if ctx.Err() == nil {
+						atomic.AddUint64(&failCount, 1)
+						fmt.Fprintf(stderr, "FAIL %s (db write): %v\n", c.spec.SourceLibraryRel, err)
+						// Best-effort: remove the orphan sidecar so a
+						// retry from a clean slate succeeds.
+						_ = os.Remove(row.SidecarPath)
+					}
 					continue
 				}
 				atomic.AddUint64(&doneCount, 1)
@@ -436,6 +444,13 @@ func runGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store,
 	// DirEntry already carries IsDir(), so a flat directory of N
 	// sidecars pays N fewer syscalls (Gemini bot review on PR #108).
 	walkErr := filepath.WalkDir(outputDir, func(path string, d os.DirEntry, walkErr error) error {
+		// Stop the forward sweep promptly on SIGINT. Without
+		// the check, a Ctrl-C mid-walk would let the GC keep
+		// deleting files until it finished iterating the
+		// directory. CodeRabbit Major on PR #217.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if walkErr != nil {
 			// Output dir may not exist yet (no upscales ever
 			// run on this bridge). Treat as empty rather than
@@ -461,6 +476,12 @@ func runGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store,
 		return nil
 	})
 	if walkErr != nil {
+		// Operator-interrupt path: distinguish from a real
+		// walk error so the SIGINT case reads cleanly.
+		if errors.Is(walkErr, context.Canceled) || errors.Is(walkErr, context.DeadlineExceeded) {
+			fmt.Fprintln(stderr, "GC interrupted")
+			return 1
+		}
 		fmt.Fprintf(stderr, "walk transcoded dir: %v\n", walkErr)
 		return 1
 	}
@@ -521,14 +542,27 @@ func runGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store,
 	// proves the volume out.
 	var rowsRemoved, rowsKept, rowsFailed int
 	for _, r := range allRows {
+		// Stop the reverse sweep promptly on SIGINT — same
+		// rationale as the forward-walk gate. CodeRabbit Major
+		// + Gemini Medium on PR #217.
+		if err := ctx.Err(); err != nil {
+			fmt.Fprintln(stderr, "GC interrupted")
+			return 1
+		}
 		_, statErr := os.Stat(r.SidecarPath)
 		switch {
 		case statErr == nil:
 			rowsKept++
 		case errors.Is(statErr, os.ErrNotExist):
 			if err := store.DeleteVariant(ctx, r.SourcePath, r.VariantID); err != nil {
-				fmt.Fprintf(stderr, "delete orphan row %s / %s: %v\n", r.SourcePath, r.VariantID, err)
-				rowsFailed++
+				// Suppress the "context canceled" log when the
+				// ctx itself is what cancelled the delete —
+				// avoids a flood of identical error lines on
+				// operator interrupt.
+				if ctx.Err() == nil {
+					fmt.Fprintf(stderr, "delete orphan row %s / %s: %v\n", r.SourcePath, r.VariantID, err)
+					rowsFailed++
+				}
 				continue
 			}
 			rowsRemoved++
