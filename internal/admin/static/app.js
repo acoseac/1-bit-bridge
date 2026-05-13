@@ -1958,7 +1958,14 @@ async function inspectorDeleteVariants() {
       headers: { "Content-Type": "application/json" },
     });
     if (res.status === 503) {
+      // Bridge upscale feature disabled mid-flight. Re-enable the
+      // button so the operator can retry after toggling the
+      // feature back on — matches `inspectorSubmitBatch`'s 503
+      // handler. Without this, a single mid-session toggle-off
+      // would force a navigation away + back to re-enable the
+      // delete affordance (CodeRabbit Minor on PR #220).
       status.textContent = "Upscale feature is disabled on this bridge.";
+      btn.disabled = false;
       return;
     }
     if (!res.ok) {

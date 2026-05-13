@@ -56,7 +56,7 @@ func (s *Server) apiUpscaleVariantsDelete(w http.ResponseWriter, r *http.Request
 
 	resp, err := s.deps.VariantDeleter.Delete(r.Context(), req)
 	if err != nil {
-		if errors.Is(err, AdminVariantDeleterUnavailable) {
+		if errors.Is(err, ErrAdminVariantDeleterUnavailable) {
 			// Deleter was wired at admin-Server construction but
 			// the underlying api.Server lost it mid-life — same
 			// surface as the nil-deps case at the top, distinct

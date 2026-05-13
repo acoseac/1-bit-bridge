@@ -283,7 +283,7 @@ func (e *AdminBatchInsufficientDiskSpace) Error() string {
 // pattern as `AdminBatchCoordinator`).
 //
 // Errors:
-//   - `AdminVariantDeleterUnavailable` (sentinel) → handler emits
+//   - `ErrAdminVariantDeleterUnavailable` (sentinel) → handler emits
 //     503 service_unavailable. Distinguishes "feature off on this
 //     bridge" from "feature on but listing failed".
 //   - Any other error → handler emits 500 internal, with the error
@@ -315,12 +315,12 @@ type AdminVariantDeleteResponse struct {
 	DeletedPaths []string `json:"deletedPaths"`
 }
 
-// AdminVariantDeleterUnavailable is the sentinel error the
+// ErrAdminVariantDeleterUnavailable is the sentinel error the
 // `DELETE /api/upscale/variants` handler matches against to emit
-// 503 — wired to wrap `api.VariantDeleteUnavailable` in the
+// 503 — wired to wrap `api.ErrVariantDeleteUnavailable` in the
 // cmd/bridge adapter so the admin package stays decoupled from
 // the api package's error definitions.
-var AdminVariantDeleterUnavailable = errors.New("variant deleter not wired")
+var ErrAdminVariantDeleterUnavailable = errors.New("variant deleter not wired")
 
 // UpscalePoolStats mirrors `transcode.PoolStats` field-for-
 // field but lives here so the admin package compiles without

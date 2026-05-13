@@ -133,12 +133,12 @@ type VariantDeleteResponse struct {
 	DeletedPaths []string `json:"deletedPaths"`
 }
 
-// VariantDeleteUnavailable is the sentinel error `RunVariantDelete`
+// ErrVariantDeleteUnavailable is the sentinel error `RunVariantDelete`
 // returns when the server has no `VariantDeleter` wired (i.e. the
 // `deleteVariants` capability is off on this bridge). The HTTP
 // handler maps this to 404 variant_not_found; admin maps it to 503
 // service_unavailable to match its existing "feature off" pattern.
-var VariantDeleteUnavailable = errors.New("variant deleter not wired")
+var ErrVariantDeleteUnavailable = errors.New("variant deleter not wired")
 
 // upscaleDelete is the http.HandlerFunc registered at
 // DELETE /v1/upscale/variants. Wraps the request scope so the
@@ -162,7 +162,7 @@ func (s *Server) upscaleDelete(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := s.RunVariantDelete(r.Context(), req)
 	if err != nil {
-		if errors.Is(err, VariantDeleteUnavailable) {
+		if errors.Is(err, ErrVariantDeleteUnavailable) {
 			writeError(w, http.StatusNotFound, "variant_not_found", "upscaling is not enabled on this bridge")
 			return
 		}
@@ -243,12 +243,12 @@ func parseVariantDeleteQuery(q map[string][]string) (req VariantDeleteRequest, e
 // duplicating the four-phase list/dedup-drop/unlink+delete/SSE-publish
 // loop. The HTTP handler and the admin handler both parse their
 // own query params, call this method, and translate the result
-// (or `VariantDeleteUnavailable`) into their respective response
+// (or `ErrVariantDeleteUnavailable`) into their respective response
 // shapes.
 //
 // Returns `(VariantDeleteResponse, nil)` for the success path
 // (including the empty-rows fast path → zero-counts response).
-// Returns `(_, VariantDeleteUnavailable)` when `variantDeleter`
+// Returns `(_, ErrVariantDeleteUnavailable)` when `variantDeleter`
 // is nil — callers map to 404 (api) or 503 (admin). Any other
 // error is a SQLite enumeration failure during the list phase;
 // the per-row unlink / DeleteVariant errors log+continue
@@ -261,7 +261,7 @@ func parseVariantDeleteQuery(q map[string][]string) (req VariantDeleteRequest, e
 // console, or invoked the HTTP endpoint directly.
 func (s *Server) RunVariantDelete(ctx context.Context, req VariantDeleteRequest) (VariantDeleteResponse, error) {
 	if s.variantDeleter == nil {
-		return VariantDeleteResponse{}, VariantDeleteUnavailable
+		return VariantDeleteResponse{}, ErrVariantDeleteUnavailable
 	}
 
 	// Defense in depth: validate the exact-one-shape invariant the

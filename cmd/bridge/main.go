@@ -508,7 +508,7 @@ type adminVariantDeleterAdapter struct {
 
 func (a *adminVariantDeleterAdapter) Delete(ctx context.Context, req admin.AdminVariantDeleteRequest) (admin.AdminVariantDeleteResponse, error) {
 	if a == nil || a.apiSrv == nil {
-		return admin.AdminVariantDeleteResponse{}, admin.AdminVariantDeleterUnavailable
+		return admin.AdminVariantDeleteResponse{}, admin.ErrAdminVariantDeleterUnavailable
 	}
 	apiReq := api.VariantDeleteRequest{
 		All:    req.All,
@@ -517,11 +517,11 @@ func (a *adminVariantDeleterAdapter) Delete(ctx context.Context, req admin.Admin
 	}
 	resp, err := a.apiSrv.RunVariantDelete(ctx, apiReq)
 	if err != nil {
-		if errors.Is(err, api.VariantDeleteUnavailable) {
+		if errors.Is(err, api.ErrVariantDeleteUnavailable) {
 			// Translate the api package's sentinel to the admin
 			// package's sentinel so the admin handler can match
 			// without importing internal/api.
-			return admin.AdminVariantDeleteResponse{}, admin.AdminVariantDeleterUnavailable
+			return admin.AdminVariantDeleteResponse{}, admin.ErrAdminVariantDeleterUnavailable
 		}
 		return admin.AdminVariantDeleteResponse{}, err
 	}

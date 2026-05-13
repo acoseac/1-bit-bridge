@@ -170,12 +170,12 @@ func TestUpscaleVariantsDelete_returns400OnMalformedQuery(t *testing.T) {
 func TestUpscaleVariantsDelete_translatesUnavailableErrTo503(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	srv.deps.VariantDeleter = &stubVariantDeleter{
-		err: AdminVariantDeleterUnavailable,
+		err: ErrAdminVariantDeleterUnavailable,
 	}
 	code := doJSON(t, srv.Handler(),
 		"DELETE", "/api/upscale/variants?confirm=true", nil, nil)
 	if code != http.StatusServiceUnavailable {
-		t.Errorf("AdminVariantDeleterUnavailable surface: got status=%d, want 503", code)
+		t.Errorf("ErrAdminVariantDeleterUnavailable surface: got status=%d, want 503", code)
 	}
 }
 
