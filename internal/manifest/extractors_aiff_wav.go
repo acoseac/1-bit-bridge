@@ -202,6 +202,16 @@ func extractWAVWithContext(absPath string, t *Track, ec *ExtractContext) error {
 			// (typically <1 KiB) with comfortable headroom.
 			const maxLISTSize = 64 << 10
 			if size < 4 {
+				// Malformed: LIST payload too short to even hold a
+				// 4-byte form-type. The bare `continue` would leave
+				// the cursor inside the truncated payload and have
+				// the next iteration read garbage as a chunk header.
+				// Advance past whatever's declared so the walker
+				// stays aligned for later valid chunks (CodeRabbit
+				// Minor on PR #224).
+				if err := seekPastChunk(f, int64(size)); err != nil {
+					return err
+				}
 				continue
 			}
 			if size > maxLISTSize {

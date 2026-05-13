@@ -323,6 +323,94 @@ func TestExtractWAV_ID3WinsOverLISTInfo(t *testing.T) {
 	}
 }
 
+// TestExtractWAV_MalformedShortLISTChunkSkipped pins the cursor-
+// alignment fix: a LIST chunk declaring size < 4 (too short to hold
+// even the 4-byte form-type) used to leave the cursor inside the
+// truncated payload, mis-aligning every subsequent chunk header.
+// The fix routes the short-size branch through seekPastChunk so the
+// walker stays aligned and the trailing id3 chunk still parses.
+// (CodeRabbit Minor on PR #224.)
+func TestExtractWAV_MalformedShortLISTChunkSkipped(t *testing.T) {
+	body := []byte("WAVE")
+	// Malformed LIST (size=3, junk payload). Without the fix, the
+	// next iteration reads the junk as a chunk header and the id3
+	// chunk after it is never found.
+	body = append(body, []byte("LIST")...)
+	var listSize [4]byte
+	binary.LittleEndian.PutUint32(listSize[:], 3)
+	body = append(body, listSize[:]...)
+	body = append(body, 0xAA, 0xBB, 0xCC)
+	body = append(body, 0x00) // pad: (3 is odd) → 1 byte
+
+	// Valid id3 chunk with a TIT2 afterwards.
+	id3 := buildID3v2_3(map[string]string{"title": "RecoveredAfterBadLIST"})
+	var sub [8]byte
+	copy(sub[0:4], []byte("id3 "))
+	binary.LittleEndian.PutUint32(sub[4:8], uint32(len(id3)))
+	body = append(body, sub[:]...)
+	body = append(body, id3...)
+	if len(id3)%2 == 1 {
+		body = append(body, 0x00)
+	}
+
+	out := []byte("RIFF")
+	var size [4]byte
+	binary.LittleEndian.PutUint32(size[:], uint32(len(body)))
+	out = append(out, size[:]...)
+	out = append(out, body...)
+
+	path := writeTempWAV(t, out)
+	track := &Track{}
+	if err := extractWAVWithContext(path, track, nil); err != nil {
+		t.Fatalf("extractWAVWithContext: %v", err)
+	}
+	if track.Title != "RecoveredAfterBadLIST" {
+		t.Errorf("Title = %q, want %q (malformed LIST left cursor misaligned?)",
+			track.Title, "RecoveredAfterBadLIST")
+	}
+}
+
+// TestExtractAIFC_RoutedFromExtractWithContext locks the .aifc
+// dispatcher routing. extractAIFFWithContext already accepted the
+// "AIFC" form-type internally, but the dispatcher only routed
+// .aif/.aiff. Pre-fix, .aifc files fell through to the dhowden
+// default branch (which doesn't support AIFF/AIFC at all) and
+// surfaced no metadata. (CodeRabbit Major on PR #224.)
+func TestExtractAIFC_RoutedFromExtractWithContext(t *testing.T) {
+	id3 := buildID3v2_3(map[string]string{"title": "AIFCTitle"})
+	innerBody := []byte("AIFC")
+	var sub [8]byte
+	copy(sub[0:4], []byte("ID3 "))
+	binary.BigEndian.PutUint32(sub[4:8], uint32(len(id3)))
+	innerBody = append(innerBody, sub[:]...)
+	innerBody = append(innerBody, id3...)
+	if len(id3)%2 == 1 {
+		innerBody = append(innerBody, 0x00)
+	}
+	out := []byte("FORM")
+	var formSize [4]byte
+	binary.BigEndian.PutUint32(formSize[:], uint32(len(innerBody)))
+	out = append(out, formSize[:]...)
+	out = append(out, innerBody...)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fixture.aifc")
+	if err := os.WriteFile(path, out, 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	track := &Track{}
+	if err := ExtractWithContext(path, track, nil); err != nil {
+		t.Fatalf("ExtractWithContext: %v", err)
+	}
+	if track.Codec != "AIFF" {
+		t.Errorf("Codec = %q, want %q", track.Codec, "AIFF")
+	}
+	if track.Title != "AIFCTitle" {
+		t.Errorf("Title = %q, want %q (.aifc routing missing?)",
+			track.Title, "AIFCTitle")
+	}
+}
+
 func TestExtractWAV_BadRIFFMagic(t *testing.T) {
 	path := writeTempWAV(t, []byte("NOTWAV not a real wav file"))
 	track := &Track{}
