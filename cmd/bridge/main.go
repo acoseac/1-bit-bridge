@@ -1601,7 +1601,18 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// WriteTimeout would cut the response mid-flight and crash
 		// Hugo 2's DoP lock. ReadHeaderTimeout + ReadTimeout guard the
 		// request side only; IdleTimeout drains kept-alive connections.
-		ReadHeaderTimeout: 10 * time.Second,
+		//
+		// ReadHeaderTimeout tightened from 10s to 5s (PR-C audit
+		// follow-up). A legitimate request completes its header
+		// transmission in well under a second on every supported
+		// network (LAN, Tailscale, Wi-Fi over mobile); 5s leaves
+		// ample headroom for the slowest legitimate clients while
+		// halving the slot-occupation window a slowloris attacker
+		// can hold per connection. ReadTimeout (60s) covers the
+		// body-read window for `POST /v1/pairing/requests` (4 KiB
+		// max body, easily comfortable inside 60s under any sane
+		// network).
+		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       60 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
@@ -1817,8 +1828,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			// as httpSrv. Read/write timeout shape mirrors the LAN srv —
 			// see the rationale comment there.
 			srv := &http.Server{
-				Handler:           apiSrv.Handler(),
-				ReadHeaderTimeout: 10 * time.Second,
+				Handler: apiSrv.Handler(),
+				// Same slow-loris defence as the LAN listener
+				// (PR-C tightened ReadHeaderTimeout 10s → 5s).
+				ReadHeaderTimeout: 5 * time.Second,
 				ReadTimeout:       60 * time.Second,
 				IdleTimeout:       120 * time.Second,
 			}

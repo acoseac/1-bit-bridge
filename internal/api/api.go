@@ -1022,7 +1022,23 @@ func extractBearer(r *http.Request) string {
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+	// Encode errors usually mean the client disconnected mid-
+	// response (`broken pipe` / `connection reset by peer`).
+	// These are common in mobile networks (iOS app backgrounded,
+	// Wi-Fi roam, Tailscale relay drop) and not operator-
+	// actionable — log at debug level so they're visible under
+	// the per-request log when investigating, but don't bubble
+	// up to error-level alerts. Same level the broken-pipe
+	// branch of writeErrorLog inherits.
+	//
+	// Headers + status are already written by the time Encode
+	// fails so we can't surface anything on the wire; the body
+	// is half-written and the client will fail to decode. The
+	// log line is the only diagnostic surface.
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		logger.Debug("writeJSON: encode failed",
+			"status", status, "err", err)
+	}
 }
 
 // writeError serializes an ErrorResponse with the given status + short code
