@@ -543,11 +543,30 @@ func (s *Store) MarkEnriched(t *Track) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// `indexed_at` MUST bump on every enrichment write — without it,
+	// iOS delta-sync (`WHERE indexed_at > since`) silently drops
+	// enriched rows from incremental manifest fetches. The track was
+	// already in the manifest at its UpsertTrack-time indexed_at, so
+	// iOS's last sync `since` is later than that, and the freshly-
+	// enriched tags_json would otherwise never surface until a full
+	// manifest re-pull. Gemini Medium on PR #215 caught this.
+	//
+	// CASE-WHEN strict-advance pattern mirrors UpsertVariant /
+	// DeleteVariant: a same-nanosecond clock (test-injected fakes,
+	// low-res wall clocks, rapid back-to-back enrichment writes) still
+	// produces a strictly-greater indexed_at, keeping delta-sync's
+	// `> since` boundary semantically correct.
+	now := s.now().UnixNano()
 	_, err = s.db.Exec(`
 		UPDATE tracks
-		SET tags_json = ?, enriched_at = ?
+		SET tags_json = ?,
+		    enriched_at = ?,
+		    indexed_at = CASE
+		        WHEN indexed_at >= ? THEN indexed_at + 1
+		        ELSE ?
+		    END
 		WHERE path = ?
-	`, raw, s.now().UnixNano(), t.Path)
+	`, raw, now, now, now, t.Path)
 	return err
 }
 
