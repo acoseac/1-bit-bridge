@@ -1386,7 +1386,7 @@ func writeManifestGated(ctx context.Context, w io.Writer, store *Store, roots []
 	// `]` lands after the last track's `\n` — also valid whitespace.
 	enc := json.NewEncoder(bw)
 	first := true
-	streamErr := store.StreamTracks(sp, func(t *Track) error {
+	streamErr := store.StreamTracks(ctx, sp, func(t *Track) error {
 		// Cheap per-row cancel check. SQLite's row iteration is
 		// synchronous so this is the natural pulse to honour the
 		// client's deadline / disconnect. Returning the ctx error
