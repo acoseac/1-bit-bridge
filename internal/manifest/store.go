@@ -577,6 +577,15 @@ func (s *Store) MarkEnriched(ctx context.Context, t *Track) error {
 // as JSON so the schema can evolve without column migrations during v0.
 //
 // Holds `s.mu` per the writer contract on Store.
+//
+// indexed_at uses the same strict-advance CASE WHEN form as UpsertVariant /
+// MarkEnriched (lines 565 + 2730) — without it, a back-to-back UpsertTrack
+// at the same nanosecond (rapid test seeds, low-resolution wall clocks, an
+// mtime-changed-but-clock-stable scan tick) would leave indexed_at
+// unchanged, and a client that synced at the equal timestamp would miss
+// the second mutation under the `WHERE indexed_at > since` delta-sync
+// filter. The `excluded.indexed_at` reference keeps the bind count at 5
+// (the original UPSERT shape) rather than broadening to 7.
 func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
 	raw, err := marshalForStorage(t)
 	if err != nil {
@@ -591,7 +600,10 @@ func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
 			size          = excluded.size,
 			mtime_ns      = excluded.mtime_ns,
 			tags_json     = excluded.tags_json,
-			indexed_at    = excluded.indexed_at,
+			indexed_at    = CASE
+				WHEN tracks.indexed_at >= excluded.indexed_at THEN tracks.indexed_at + 1
+				ELSE excluded.indexed_at
+			END,
 			enriched_at   = 0,
 			-- missing_count reset is UNCONDITIONAL on confirm: the row
 			-- being upserted is by definition "seen this scan", which
@@ -656,6 +668,15 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 		return err
 	}
 	defer tx.Rollback()
+	// indexed_at uses the strict-advance CASE WHEN form from UpsertTrack
+	// (and UpsertVariant / MarkEnriched). Batch semantics: `now` is computed
+	// once per flush (below) and bound to every row's `excluded.indexed_at`;
+	// the CASE WHEN holds per-row, comparing each existing track's
+	// indexed_at against the shared `now`. A stale row at `now-1ns`
+	// advances to `now`; a row already at `now` (or beyond, under a fake
+	// clock) advances to `existing+1`. The batch-level shared `now` is
+	// the right shape — per-track s.now() calls would burn 500 syscalls
+	// per batch on Pi-class hardware and break the deterministic test seam.
 	stmt, err := tx.Prepare(`
 		INSERT INTO tracks(path, size, mtime_ns, tags_json, indexed_at)
 		VALUES (?, ?, ?, ?, ?)
@@ -663,7 +684,10 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 			size          = excluded.size,
 			mtime_ns      = excluded.mtime_ns,
 			tags_json     = excluded.tags_json,
-			indexed_at    = excluded.indexed_at,
+			indexed_at    = CASE
+				WHEN tracks.indexed_at >= excluded.indexed_at THEN tracks.indexed_at + 1
+				ELSE excluded.indexed_at
+			END,
 			enriched_at   = 0,
 			-- See UpsertTrack: missing_count reset is unconditional on
 			-- every confirm so a stable library can't accumulate stale
