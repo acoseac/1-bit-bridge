@@ -378,15 +378,23 @@ func populateFromTagMetadata(m tag.Metadata, t *Track) {
 	// always-Some-pointer shape so partial-tag scenarios stay
 	// observable from the wire.
 	if raw := m.Raw(); raw != nil {
-		if _, ok := stringOf(raw, "tyer", "tdrc", "tdrl", "date", "year", "©day", "©yyy"); ok {
+		// CodeRabbit Major on PR #226: `stringOf` returns `ok=false`
+		// when the key IS present but the underlying `m.Raw()` value
+		// type isn't one of `string` / `[]string` / `int` (e.g. MP4's
+		// `trkn` atom surfaces as `*tag.Position` via dhowden,
+		// `[]byte`, etc.). Using stringOf-based presence here would
+		// silently drop `Year` / `TrackNumber` / `DiscNumber` even
+		// though the dhowden accessor would happily parse the value.
+		// `hasAnyRawKey` is key-only — value shape is irrelevant.
+		if hasAnyRawKey(raw, "tyer", "tdrc", "tdrl", "date", "year", "©day", "©yyy") {
 			y := m.Year()
 			t.Year = &y
 		}
-		if _, ok := stringOf(raw, "trck", "tracknumber", "trkn"); ok {
+		if hasAnyRawKey(raw, "trck", "tracknumber", "trkn") {
 			tn, _ := m.Track()
 			t.TrackNumber = &tn
 		}
-		if _, ok := stringOf(raw, "tpos", "discnumber", "disk"); ok {
+		if hasAnyRawKey(raw, "tpos", "discnumber", "disk") {
 			d, _ := m.Disc()
 			t.DiscNumber = &d
 		}
@@ -630,6 +638,41 @@ func stringOf(raw map[string]any, keys ...string) (string, bool) {
 // raw map keys preserve them on the surfaces we care about.
 func normaliseRawTagKey(k string) string {
 	return strings.ReplaceAll(strings.ToLower(k), " ", "_")
+}
+
+// hasAnyRawKey reports whether `raw` contains a tag entry whose
+// normalised key (lowercased + space→underscore) matches any of the
+// supplied aliases. Value-shape agnostic — unlike `stringOf` which
+// peeks at the value and returns `ok=false` for unsupported types,
+// this helper only checks for key presence.
+//
+// **Why a key-only helper exists alongside `stringOf`** (CodeRabbit
+// Major on PR #226): the `populateFromTagMetadata` presence gates for
+// `Year` / `TrackNumber` / `DiscNumber` need to know whether the
+// underlying ID3v2 / Vorbis / MP4 tag was actually present, not
+// whether stringOf can decode its value. dhowden surfaces MP4's
+// `trkn` atom as `*tag.Position` (NOT a string / []string / int), so
+// a stringOf-based gate would treat a tagged MP4 with explicit track
+// number as "absent" and drop `t.TrackNumber` — even though
+// `m.Track()` would parse it correctly. The same risk applies to any
+// future raw value shape dhowden emits (e.g. `[]byte` for binary
+// frames).
+//
+// Aliases are passed in their normalised lowercase form to match
+// what `normaliseRawTagKey` produces.
+func hasAnyRawKey(raw map[string]any, keys ...string) bool {
+	if raw == nil {
+		return false
+	}
+	for mapKey := range raw {
+		norm := normaliseRawTagKey(mapKey)
+		for _, k := range keys {
+			if norm == k {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // parseReplayGain parses a Vorbis/ID3 ReplayGain string like "-7.32 dB".

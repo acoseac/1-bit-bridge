@@ -3,7 +3,98 @@ package manifest
 import (
 	"path/filepath"
 	"testing"
+
+	tag "github.com/dhowden/tag"
 )
+
+// TestHasAnyRawKey_TruthTable pins the value-shape-agnostic
+// presence helper introduced for CodeRabbit Major on PR #226. The
+// key contract: a tag key whose value type is NOT one of stringOf's
+// supported shapes (string / []string / int) — e.g. dhowden's
+// `*tag.Position` for MP4 `trkn` — must still register as present.
+func TestHasAnyRawKey_TruthTable(t *testing.T) {
+	raw := map[string]any{
+		"tyer":      "1985",                               // string
+		"©ART":      []string{"Mozart", "Salieri"},        // []string
+		"tbpm":      120,                                  // int
+		"trkn":      &tag.Picture{MIMEType: "image/jpeg"}, // arbitrary non-supported type
+		"album_art": []byte{0x89, 0x50, 0x4e, 0x47},       // []byte
+		"date":      "2020",                               // for case-insensitive alias check
+	}
+	// Present (any value type counts).
+	for _, k := range []string{"tyer", "©art", "tbpm", "trkn", "album_art", "date"} {
+		if !hasAnyRawKey(raw, k) {
+			t.Errorf("hasAnyRawKey(%q) = false, want true (value type doesn't matter)", k)
+		}
+	}
+	// Absent.
+	for _, k := range []string{"composer", "tit2", "unknown"} {
+		if hasAnyRawKey(raw, k) {
+			t.Errorf("hasAnyRawKey(%q) = true, want false (key not in map)", k)
+		}
+	}
+	// nil map fast-path.
+	if hasAnyRawKey(nil, "anything") {
+		t.Errorf("hasAnyRawKey(nil, ...) = true, want false (defensive fast-path)")
+	}
+	// No aliases.
+	if hasAnyRawKey(raw) {
+		t.Errorf("hasAnyRawKey with no aliases returned true, want false")
+	}
+	// Case-fold + space normalisation via normaliseRawTagKey: a
+	// raw map key with mixed case + spaces matches its lowercase-
+	// underscored alias form.
+	if !hasAnyRawKey(map[string]any{"Track Number": "5"}, "track_number") {
+		t.Errorf("normalised-key match failed: 'Track Number' should match 'track_number'")
+	}
+}
+
+// nilRawMetadata is a tag.Metadata stub whose Raw() returns nil —
+// used to exercise populateFromTagMetadata's defensive fallback
+// branch (CodeRabbit Trivial on PR #226). Lifted here as a local
+// type so the test stays self-contained; the multi-value test file
+// on a sibling branch has a richer stubMetadata which we deliberately
+// don't share to avoid coupling between PRs.
+type nilRawMetadata struct {
+	year, track, disc int
+}
+
+func (n nilRawMetadata) Format() tag.Format          { return "" }
+func (n nilRawMetadata) FileType() tag.FileType      { return "" }
+func (n nilRawMetadata) Title() string               { return "" }
+func (n nilRawMetadata) Album() string               { return "" }
+func (n nilRawMetadata) AlbumArtist() string         { return "" }
+func (n nilRawMetadata) Artist() string              { return "" }
+func (n nilRawMetadata) Composer() string            { return "" }
+func (n nilRawMetadata) Year() int                   { return n.year }
+func (n nilRawMetadata) Genre() string               { return "" }
+func (n nilRawMetadata) Track() (int, int)           { return n.track, 0 }
+func (n nilRawMetadata) Disc() (int, int)            { return n.disc, 0 }
+func (n nilRawMetadata) Picture() *tag.Picture       { return nil }
+func (n nilRawMetadata) Lyrics() string              { return "" }
+func (n nilRawMetadata) Comment() string             { return "" }
+func (n nilRawMetadata) Raw() map[string]interface{} { return nil }
+
+// TestPopulateFromTag_RawNilFallback locks the defensive branch
+// at populateFromTagMetadata: when m.Raw() returns nil (rare —
+// most format parsers return at least an empty map), the function
+// must fall back to assigning Year / TrackNumber / DiscNumber as
+// non-nil pointers from the dhowden accessors. CodeRabbit Trivial
+// nitpick on PR #226.
+func TestPopulateFromTag_RawNilFallback(t *testing.T) {
+	m := nilRawMetadata{year: 1999, track: 3, disc: 2}
+	track := &Track{}
+	populateFromTagMetadata(m, track)
+	if track.Year == nil || *track.Year != 1999 {
+		t.Errorf("Year = %v, want pointer to 1999 (Raw==nil fallback must assign)", track.Year)
+	}
+	if track.TrackNumber == nil || *track.TrackNumber != 3 {
+		t.Errorf("TrackNumber = %v, want pointer to 3", track.TrackNumber)
+	}
+	if track.DiscNumber == nil || *track.DiscNumber != 2 {
+		t.Errorf("DiscNumber = %v, want pointer to 2", track.DiscNumber)
+	}
+}
 
 // TestPopulateFromTag_YearTrackDisc_AbsentReturnsNil pins the PR-B
 // presence-gate contract: when the underlying file has NO year /
