@@ -102,3 +102,35 @@ func TestConcurrentAccess(t *testing.T) {
 		t.Errorf("Len = %d, want <= 100", c.Len())
 	}
 }
+
+// TestGetIsZeroAlloc pins the headline contract of the
+// container/list → struct-based rewrite (PR-F): cached Get must
+// not allocate. Pre-rewrite every Get paid one `interface{}`
+// box-and-assert; the new struct-based linked list reads the
+// concrete `*node[K, V]` directly so the read is allocation-free.
+//
+// Set may amortise an allocation per insert (new node, possible
+// map rehash on cold-start), so we exercise Get specifically.
+func TestGetIsZeroAlloc(t *testing.T) {
+	c := New[string, int](16)
+	c.Set("k", 42)
+	allocs := testing.AllocsPerRun(1000, func() {
+		_, _ = c.Get("k")
+	})
+	if allocs > 0 {
+		t.Errorf("Get allocated %g times/op, want 0", allocs)
+	}
+}
+
+// TestHasIsZeroAlloc — same contract for Has, which is on the
+// negative-cache hot path (deezerNegCache in enricher.go).
+func TestHasIsZeroAlloc(t *testing.T) {
+	c := New[string, struct{}](16)
+	c.Set("k", struct{}{})
+	allocs := testing.AllocsPerRun(1000, func() {
+		_ = c.Has("k")
+	})
+	if allocs > 0 {
+		t.Errorf("Has allocated %g times/op, want 0", allocs)
+	}
+}
