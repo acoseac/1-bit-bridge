@@ -185,8 +185,14 @@ func TestUpscaleStatsProviderErrorReturns503(t *testing.T) {
 		ListenAddress: ":7788",
 		LibraryName:   "Test",
 	}
-	store, _ := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
-	raw, _, _ := store.Mint("test")
+	store, err := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	raw, _, err := store.Mint("test")
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
 
 	srv := New(cfg, store, nil, "fp")
 	srv = srv.WithUpscaleStats(&stubStatsProvider{
@@ -200,7 +206,10 @@ func TestUpscaleStatsProviderErrorReturns503(t *testing.T) {
 	hs := httptest.NewServer(srv.Handler())
 	t.Cleanup(hs.Close)
 
-	req, _ := http.NewRequest("GET", hs.URL+"/v1/upscale/stats", nil)
+	req, err := http.NewRequest("GET", hs.URL+"/v1/upscale/stats", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
 	req.Header.Set("Authorization", "Bearer "+raw)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -210,7 +219,10 @@ func TestUpscaleStatsProviderErrorReturns503(t *testing.T) {
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("status: got %d, want 503", resp.StatusCode)
 	}
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
 	if !strings.Contains(string(body), `"stats_unavailable"`) {
 		t.Errorf("expected error.code = stats_unavailable in body; got: %s",
 			string(body))
