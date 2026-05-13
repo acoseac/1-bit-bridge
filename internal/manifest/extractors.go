@@ -356,25 +356,48 @@ func populateFromTagMetadata(m tag.Metadata, t *Track) {
 	if v := strings.TrimSpace(m.Genre()); v != "" {
 		t.Genre = v
 	}
-	// `dhowden/tag` returns 0 for both "tag absent" and "tag value is 0"
-	// — there's no way to distinguish at this layer. We propagate the
-	// raw value as a non-nil pointer regardless, so a track legitimately
-	// tagged with year 0 / track 0 round-trips as `Some(0)` to the
-	// iOS decoder rather than getting silently dropped.
+	// **Pointer-zero correctness pass** (PR-B): `dhowden/tag` returns
+	// 0 for BOTH "tag absent" and "tag value is 0" — at the parsed-
+	// value layer they're indistinguishable. To preserve the
+	// `*int` "absent" semantic (nil vs Some(0)), we probe the raw
+	// tag map BEFORE calling m.Year() / m.Track() / m.Disc() and
+	// only assign the pointer when at least one alias for the
+	// underlying tag is actually present in the raw map.
 	//
-	// **Pointer-zero correctness pass** (the bridge-side companion
-	// to the iOS-side `MetadataNormalizer.albumID` year-zero guard)
-	// is deferred to a later release: shipping the bridge fix
-	// before the iOS guard has propagated via App Store / TestFlight
-	// would have legacy clients suddenly see `null` where they
-	// expected `0` and trigger mass library re-grouping. See
-	// `internal/manifest/types.go` doc-comment.
-	y := m.Year()
-	t.Year = &y
-	tn, _ := m.Track()
-	t.TrackNumber = &tn
-	d, _ := m.Disc()
-	t.DiscNumber = &d
+	// stringOf already returns (string, bool) with case-folded +
+	// space-to-underscore normalisation via normaliseRawTagKey, so
+	// the presence signal is the second return value. Aliases are
+	// passed in lowercase to match the normalised lookup form.
+	// A returned "0" still counts as present (the user-intent case
+	// the original docblock was protecting); only absence drops
+	// to nil so the iOS client can distinguish "no tag" from
+	// "explicit year=0" and surface "Unknown" cleanly.
+	//
+	// When raw is nil (defensive — most format parsers return a
+	// non-nil map even when empty), fall back to the legacy
+	// always-Some-pointer shape so partial-tag scenarios stay
+	// observable from the wire.
+	if raw := m.Raw(); raw != nil {
+		if _, ok := stringOf(raw, "tyer", "tdrc", "tdrl", "date", "year", "©day", "©yyy"); ok {
+			y := m.Year()
+			t.Year = &y
+		}
+		if _, ok := stringOf(raw, "trck", "tracknumber", "trkn"); ok {
+			tn, _ := m.Track()
+			t.TrackNumber = &tn
+		}
+		if _, ok := stringOf(raw, "tpos", "discnumber", "disk"); ok {
+			d, _ := m.Disc()
+			t.DiscNumber = &d
+		}
+	} else {
+		y := m.Year()
+		t.Year = &y
+		tn, _ := m.Track()
+		t.TrackNumber = &tn
+		d, _ := m.Disc()
+		t.DiscNumber = &d
+	}
 	// MusicBrainz IDs — many tagged libraries carry these. The
 	// case/space-agnostic stringOf below catches both Vorbis-flavour
 	// keys (`MUSICBRAINZ_ALBUMID`) AND ID3v2 TXXX descriptions
