@@ -33,6 +33,58 @@ import (
 // the track still gets indexed without an ArtworkMBID.
 const maxArtworkBytes = 25 * 1024 * 1024 // 25 MiB
 
+// isLossyCodec reports whether `codec` denotes a format with no
+// meaningful integer bit depth on its native side (lossy codecs
+// decode to a float/Float32 PCM stream — the "bits per sample" of
+// that decoded PCM is the decoder's container width, NOT a property
+// of the original encoded signal).
+//
+// Defense-in-depth contract: every site in this file that writes
+// `t.BitsPerSample` MUST first check `!isLossyCodec(t.Codec)` so
+// AAC / MP3 / OGG / OPUS / WMA tracks never carry a misleading
+// bit-depth value into the manifest. Today only FLAC + DSF +
+// (via dhowden Picture path) ALAC actually set bitsPerSample; the
+// gate is structural insurance against a future enricher addition
+// that pulls a container width from a codec where it has no
+// musical meaning.
+//
+// The iOS PR #371 "M4A 32-bit Now Playing chip" regression was
+// reported against the iOS-side `resolvePCMBits` fallback chain
+// (AVAudioFile reported its Float32 output container width on AAC
+// decode); the bridge isn't currently emitting the wrong value,
+// but this gate ensures it never starts to.
+//
+// Case-folded via strings.EqualFold so the gate works regardless
+// of how a caller-supplied codec string is cased.
+func isLossyCodec(codec string) bool {
+	for _, lossy := range []string{"AAC", "MP3", "OGG", "OPUS", "WMA"} {
+		if strings.EqualFold(codec, lossy) {
+			return true
+		}
+	}
+	return false
+}
+
+// isValidDSDSampleRate reports whether `sr` (Hz) is a recognised
+// DSD sample rate — any positive multiple of either 2,822,400 Hz
+// (64 × 44.1 kHz, the DSD64 base) or 3,072,000 Hz (64 × 48 kHz,
+// the alternate DSD64 base). Covers DSD64 / 128 / 256 / 512 / 1024
+// and the 48k-derived variants.
+//
+// Used by `extractDSFWithContext` as a sanity floor on the
+// default-true `IsDSD` flip: a `.dsf` file structurally IS DSD, so
+// the default-true stance is correct for well-formed files; but a
+// fmt chunk that reports a PCM-like rate (44100, 48000, …) is
+// almost certainly a mislabeled PCM-in-DSF container and should
+// classify as non-DSD to avoid the iOS decoder attempting a DoP
+// lock that will fail.
+func isValidDSDSampleRate(sr uint32) bool {
+	if sr == 0 {
+		return false
+	}
+	return sr%2_822_400 == 0 || sr%3_072_000 == 0
+}
+
 // ExtractContext carries the side channels Extract needs to perform
 // local-artwork extraction (write cached JPEGs, dedupe per-directory
 // folder.jpg lookups). nil → tag-only extraction (the original Extract
@@ -262,6 +314,16 @@ func extractViaDhowdenFromReader(f io.ReadSeeker, absPath string, t *Track, ec *
 
 // populateFromTagMetadata copies known fields out of a dhowden/tag Metadata
 // into our Track, leaving empty what the file didn't have.
+//
+// **Codec invariant** (DO NOT VIOLATE): this function MUST NOT set
+// `t.Codec` from `m.FileType()` or any other source. Format-specific
+// identification runs upstream — mp4codec.go's stsd FourCC walk
+// discriminates ALAC vs AAC for M4A, the extension routing pins
+// MP3 / OGG / FLAC / DSF / DFF / WAV / AIFF — and is authoritative.
+// Overwriting from `m.FileType()` here would erase the ALAC-vs-AAC
+// discrimination the `isLossyCodec` gate at every `t.BitsPerSample`
+// write site depends on, re-introducing the iOS PR #371 "M4A 32-bit"
+// chip regression by a different path.
 //
 // **Whitespace hygiene** (Gemini A6 / iOS bug review #6e): every string
 // tag is `strings.TrimSpace`'d before persisting. iOS already
@@ -665,10 +727,19 @@ func extractFLACFormatFromReader(r io.Reader, absPath string, t *Track) error {
 		uint64(body[16])<<8 |
 		uint64(body[17])
 
+	// v1.2 additive: stamp the canonical codec for the iOS-side
+	// `Track.codec` column. FLAC files are unambiguously FLAC at
+	// this point. Codec MUST be stamped BEFORE BitsPerSample so the
+	// `isLossyCodec` gate sees the authoritative value (FLAC is
+	// lossless → gate allows the bits write).
+	t.Codec = "FLAC"
+
 	sr := float64(sampleRate)
 	bps := bitsPerSample
 	t.SampleRate = &sr
-	t.BitsPerSample = &bps
+	if !isLossyCodec(t.Codec) {
+		t.BitsPerSample = &bps
+	}
 	// FLAC is always PCM by spec — set the explicit false so the
 	// iOS decoder can trust `isDSD: false` to mean "definitely PCM"
 	// rather than "format unknown". Mirrors the explicit `true` set
@@ -679,10 +750,6 @@ func extractFLACFormatFromReader(r io.Reader, absPath string, t *Track) error {
 		d := float64(totalSamples) / float64(sampleRate)
 		t.Duration = &d
 	}
-	// v1.2 additive: stamp the canonical codec for the iOS-side
-	// `Track.codec` column. FLAC files are unambiguously FLAC at
-	// this point.
-	t.Codec = "FLAC"
 	return nil
 }
 
@@ -730,18 +797,48 @@ func extractDSFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 	// and yields garbage on every real-encoder (Korg/Sony/dCS) DSF.
 	sampleCount := le64(fmtChunk[36:44])
 
+	// v1.2 additive: canonical codec for iOS-side `Track.codec`.
+	// Codec MUST be stamped BEFORE BitsPerSample so the
+	// `isLossyCodec` gate sees the authoritative value (DSF is
+	// lossless → gate allows the bits write).
+	t.Codec = "DSF"
+
 	sr := float64(sampleRate)
 	bps := int(bitsPerSample)
 	t.SampleRate = &sr
-	t.BitsPerSample = &bps
-	isDSD := bitsPerSample == 1
+	if !isLossyCodec(t.Codec) {
+		t.BitsPerSample = &bps
+	}
+	// IsDSD policy (PR-A2):
+	//   - `.dsf` is structurally a DSD container — default `IsDSD`
+	//     to true rather than the pre-PR strict `bitsPerSample == 1`
+	//     gate. The strict gate left well-formed files alone but
+	//     mis-classified any anomalous-fmt-chunk DSF (e.g. a Korg
+	//     encoder bug declaring bitsPerSample=8) as non-DSD even
+	//     though the audio data structurally IS DSD.
+	//   - BUT: a fmt chunk reporting a PCM-like sample rate
+	//     (44100, 48000, etc.) is almost certainly a mislabeled
+	//     PCM-in-DSF container; in that case force IsDSD=false to
+	//     avoid the iOS decoder attempting a DoP lock that will
+	//     fail. `isValidDSDSampleRate` accepts any multiple of
+	//     64×44.1kHz or 64×48kHz (DSD64/128/256/512/1024).
+	//   - Anomalous-bits-but-valid-DSD-rate case logs a warn so
+	//     operators can correlate against offending files without
+	//     blocking playback.
+	isDSD := true
+	if !isValidDSDSampleRate(sampleRate) {
+		isDSD = false
+		scanLogger.Warn("dsf: fmt chunk reports non-DSD sampleRate; classifying as non-DSD",
+			"path", absPath, "sampleRate", sampleRate, "bitsPerSample", bitsPerSample)
+	} else if bitsPerSample != 1 {
+		scanLogger.Warn("dsf: fmt chunk reports non-1 bitsPerSample on valid DSD rate; keeping IsDSD=true",
+			"path", absPath, "bitsPerSample", bitsPerSample, "sampleRate", sampleRate)
+	}
 	t.IsDSD = &isDSD
 	if sampleRate > 0 && sampleCount > 0 {
 		d := float64(sampleCount) / float64(sampleRate)
 		t.Duration = &d
 	}
-	// v1.2 additive: canonical codec for iOS-side `Track.codec`.
-	t.Codec = "DSF"
 
 	// Tags: ID3v2 at metadataPointer (if non-zero).
 	var dsfMeta tag.Metadata
@@ -960,8 +1057,14 @@ func parsePropChunks(body []byte, t *Track) (dstCompressed bool) {
 		t.SampleRate = &rate
 		isDSD := true
 		t.IsDSD = &isDSD
-		bits := 1
-		t.BitsPerSample = &bits
+		// `t.Codec` is stamped as "DFF" at the top of
+		// extractDFFWithContext, before this function is called —
+		// the lossy-codec gate sees the authoritative value (DFF is
+		// lossless → gate allows the bits write).
+		if !isLossyCodec(t.Codec) {
+			bits := 1
+			t.BitsPerSample = &bits
+		}
 	}
 	return dstCompressed
 }
