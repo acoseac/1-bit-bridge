@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -382,36 +383,53 @@ const logoutConfirmPhrase = "WIPE"
 // confirmation prompt. Wiping kicks the bridge off the tailnet —
 // next start will require re-auth (interactive OAuth or AuthKey).
 //
-// **v1 limitation: this command does NOT detect a running `bridge
-// serve`.** If the operator has the bridge running in another
-// shell, wiping the state dir while the live process holds open
-// files inside it can produce inconsistent state on disk +
-// surprise the running server's tsnet client into reauth-failure
-// mode. We require typed-phrase confirmation to make this
-// dangerous-when-misused command obviously deliberate; a future
-// iteration can integrate with internal/supervision's lock to
-// detect a running serve and refuse without --force.
-//
-// Operators are expected to `bridge stop` (or similar) before
-// `bridge tsnet logout`.
+// Detects a running `bridge serve` by probing the admin port; if
+// the bridge is live, refuses unless `--force` is set. Wiping
+// state under a live server can leave runtime/disk state
+// inconsistent.
 func tsnetLogoutCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	// Minimal shape for v1 — no flags. Operator confirms by typing
-	// the constant phrase at the prompt.
-	cfg, err := loadConfigAndRequireTsnetMode(args, stderr)
-	if err != nil {
+	fs := flag.NewFlagSet("tsnet logout", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	configPath := fs.String("config", "bridge.yaml", "path to config file")
+	force := fs.Bool("force", false, "skip running-instance check")
+	if err := fs.Parse(args); err != nil {
 		return 1
 	}
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "config load failed: %v\n", err)
+		return 1
+	}
+	mode, modeErr := cfg.Tailscale.EffectiveMode()
+	if modeErr != nil {
+		fmt.Fprintf(stderr, "tailscale config: %v\n", modeErr)
+		return 1
+	}
+	if mode != config.TailscaleModeTsnet {
+		fmt.Fprintf(stderr, "tailscale.mode is %q, not %q — nothing to wipe\n", mode, config.TailscaleModeTsnet)
+		return 1
+	}
+
 	stateDir := filepath.Join(cfg.DataDir, "tailscale")
 	if _, err := os.Stat(stateDir); os.IsNotExist(err) {
 		fmt.Fprintln(stdout, "tsnet: no state to wipe (already logged out)")
 		return 0
 	}
+
+	// Detect a running bridge by probing the admin port. Same
+	// pattern as tryLibraryViaAdmin (cmd/bridge/library.go).
+	if !*force {
+		if running := isAdminAlive(cfg); running {
+			fmt.Fprintln(stderr, "tsnet logout: a bridge instance appears to be running (admin port responded).")
+			fmt.Fprintln(stderr, "  stop the bridge first (`bridge stop` or the platform service manager),")
+			fmt.Fprintln(stderr, "  or pass --force to override.")
+			return 1
+		}
+	}
+
 	fmt.Fprintf(stdout, `About to wipe tsnet state at %s.
 
 This logs the bridge off the tailnet; next start will require re-auth.
-NOTE: stop any running `+"`bridge serve`"+` first — wiping state under
-a live server can leave the running process in an inconsistent
-state.
 
 Type %q to confirm, anything else to cancel: `, stateDir, logoutConfirmPhrase)
 
@@ -437,10 +455,40 @@ Type %q to confirm, anything else to cancel: `, stateDir, logoutConfirmPhrase)
 		fmt.Fprintln(stdout, "cancelled")
 		return 0
 	}
+	// Re-check liveness right before the destructive op — a bridge may have
+	// started while the operator was sitting at the confirmation prompt.
+	if !*force && isAdminAlive(cfg) {
+		fmt.Fprintln(stderr, "error: bridge came online while waiting for confirmation; aborting. Use --force to override.")
+		return 1
+	}
 	if err := os.RemoveAll(stateDir); err != nil {
 		fmt.Fprintf(stderr, "wipe state: %v\n", err)
 		return 1
 	}
 	fmt.Fprintln(stdout, "tsnet: state wiped. Next `bridge serve` will require re-auth.")
 	return 0
+}
+
+// isAdminAlive probes the configured admin address with a short
+// timeout. Returns true if the admin API responds, indicating a
+// running bridge instance. Connection refused / timeout = not
+// running.
+func isAdminAlive(cfg *config.Config) bool {
+	addr := cfg.AdminAddress
+	if addr == "" {
+		addr = config.DefaultAdminAddress
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/api/stats", nil)
+	if err != nil {
+		return false
+	}
+	client := &http.Client{Timeout: 500 * time.Millisecond}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
 }

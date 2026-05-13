@@ -594,8 +594,8 @@ func (s *Server) scanCtx() context.Context {
 // during normal teardown. Labelled so the log line identifies which
 // handler path produced the error.
 //
-// Mirrors the pattern in `apiScan` — keep them in sync if either
-// changes.
+// `apiScan` calls this directly. All admin-initiated scans MUST
+// route through this helper — don't reintroduce a raw `go func()`.
 func (s *Server) spawnBackgroundScan(label string) {
 	ctx := s.scanCtx()
 	s.bgScans.Add(1)

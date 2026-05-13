@@ -368,6 +368,12 @@ Surfaces incoming pairing requests on every admin page (Dashboard, Library, Sett
 - **Pending-pairing card itself bumped from green to amber**: `--ok 35%` border was easy to miss against the panel background. New: `--warn 60%` border + 4 px left accent stripe + amber-tinted background + bigger halo. Same visual language as `.warn-banner` elsewhere in the admin UI.
 - **`--accent-warm-tint` precomputed CSS variable** for the card-background fallback path. Modern browsers progressive-enhance to `color-mix`; legacy enterprise webviews see the precomputed pastel without breaking.
 
+### Bug-fix batch — review-identified regressions
+
+- **`apiScan` MUST route through `spawnBackgroundScan`, NOT a raw `go func()`** ([handlers_api.go](internal/admin/handlers_api.go)). Pre-fix `POST /api/scan` launched a background goroutine without `s.bgScans.Add(1)` / `defer s.bgScans.Done()`, so admin shutdown (which waits on the `bgScans` WaitGroup capped at 5 s grace) could exit while the scan was mid-write to SQLite. The existing `spawnBackgroundScan` helper already carried the correct WG tracking + `scanCtx` usage + error logging; `apiScan` was the only caller that duplicated the logic without the WG. Comment on `spawnBackgroundScan` updated to reflect that `apiScan` calls it directly — the previous "mirrors the pattern in `apiScan`" note was stale. **Don't reintroduce a raw `go func()` at any new scan-trigger site — funnel through `spawnBackgroundScan`.** This is the same invariant documented under PR #76 ("Don't reintroduce a fire-and-forget `go func()` in `spawnBackgroundScan` without re-wiring the WG"); the `apiScan` handler pre-dated that entry and was missed.
+- **`bridge tsnet logout` probes the admin port before wiping state** ([tsnet.go](cmd/bridge/tsnet.go)). Pre-fix the command was documented as a v1 limitation: it did NOT detect a running `bridge serve`, so wiping the tsnet state dir while the live server held open files inside it could leave runtime/disk state inconsistent. Fix: `isAdminAlive(cfg)` probes `http://<adminAddress>/api/stats` with a 500 ms timeout (same pattern as `tryLibraryViaAdmin` in `library.go`). If the admin responds, logout refuses with a clear error message directing the operator to stop the bridge first. `--force` flag overrides the guard for scripted/automated use. The function now uses `flag.FlagSet` to parse `--config` and `--force` instead of the shared `loadConfigAndRequireTsnetMode` helper (which doesn't support extra flags); the mode-check logic is inlined. Existing tests pass `--force` to exercise the confirmation-prompt logic without being affected by a local running bridge. New `TestTsnetLogoutRefusesWhileRunning` spins up a test HTTP server and asserts both the refuse path and the `--force` override. **Don't remove the admin-port probe without re-introducing an equivalent guard** (lock file, PID check, etc.) — the v1-era "operators are expected to stop first" honour system was the original design acknowledgement that this was needed.
+- **`TestPoolPublisherBurstStaysGoroutineBounded` passes (not a regression).** The reported bug claimed the pinning test was FAILING with peak=38 (want≤28). Investigation: test passes consistently (5/5 runs, `go test -run TestPoolPublisherBurstStaysGoroutineBounded -v -count=1 ./internal/transcode/`). The production `onStateChange` callback ([cmd/bridge/main.go:1568-1597](cmd/bridge/main.go)) does call `UpscaleStatsSnapshot` with a 2 s context timeout, which is a blocking DB call — but the test's own callback uses a trivial `time.Sleep(50µs)`, so it doesn't reproduce the reported production stall. The test is sound as a goroutine-bound contract; the production callback's timeout guard (2 s `context.WithTimeout`) prevents the publisher from wedging indefinitely. No code change warranted.
+
 ## Repo clean-up
 
 Pre-push:
@@ -453,6 +459,21 @@ The pattern that works:
 Lean toward consulting whenever you'd otherwise ship code with a "I think this is right but I'm not 100% sure" caveat. Worth consulting on: subtle Go concurrency questions (lock ordering, goroutine lifecycle), tsnet / Tailscale internals not covered in their docs, cross-platform behavior that differs between darwin / linux / windows, framework upgrade gotchas. Pattern proven on the iOS side (1-bit) — see CLAUDE.md `## External consultation (Gemini)` entry there for examples that prevented multiple SwiftUI / iOS-internal regressions.
 
 **Skip when:** the answer is verifiable by reading the code, running a test (the project's `make test` is fast), or checking the upstream library's source. Don't consult on things you could resolve in a minute by reading the source.
+
+## Development workflow
+
+Standard single-PR loop for any non-trivial change:
+
+1. **Branch off main.** `git checkout -b feat/<topic>`. Never push code directly to main (CLAUDE.md-only docs changes are the sole exception).
+2. **Pre-push gate.** `make fmt vet test build-all` — clean before pushing. Paste the output into the PR body.
+3. **Open PR to main.** One PR per logical theme. Push the branch and open the PR; don't wait to batch unrelated changes into it.
+4. **Wait ~6 min for bot reviews.** CodeRabbit, Gemini, and Qodo/Greptile each post within ~3 min; 6 min covers the slow tail. Don't poll.
+5. **Address all comments in one fix commit per round.** Don't merge after round 1 — bots run a second pass on the fixes. Batch all round-N comments into a single commit.
+6. **Reject suggestions that contradict deliberate rationale.** When a bot flags something that was a conscious design decision, cite the rationale in a reply and move on. Don't blindly apply suggestions that would undo a documented invariant (e.g. the `apiScan → spawnBackgroundScan` WG contract, the `pairing.Poll` read-many contract).
+7. **Expect 2 rounds minimum.** One round of fixes, one confirmation pass. High-surface PRs (new endpoints, config changes, concurrency) routinely take 3–4 rounds.
+8. **Merge once reviews are quiet** and `make fmt vet test build-all` is clean.
+
+For jobs spanning 3+ PRs, use the stacking pattern below instead.
 
 ## Multi-PR batch workflow
 
