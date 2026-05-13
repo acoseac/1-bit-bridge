@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 )
 
 func TestWriteArtworkAtomic_RaceWinnerCleansTmp(t *testing.T) {
@@ -31,9 +33,8 @@ func TestWriteArtworkAtomic_RaceWinnerCleansTmp(t *testing.T) {
 
 	// Inject rename failure so the stat-and-accept branch fires
 	// without burning the full ~750 ms retry backoff budget.
-	orig := renameFunc
-	renameFunc = func(src, dst string) error { return os.ErrPermission }
-	t.Cleanup(func() { renameFunc = orig })
+	orig := atomicwrite.SetRenameFuncForTest(func(src, dst string) error { return os.ErrPermission })
+	t.Cleanup(func() { atomicwrite.SetRenameFuncForTest(orig) })
 
 	if err := writeArtworkAtomic(dst, data); err != nil {
 		t.Fatalf("writeArtworkAtomic: %v (expected nil — race winner with matching size)", err)
@@ -74,9 +75,8 @@ func TestWriteArtworkAtomic_RaceLoserDoesNotAcceptOnSizeCollision(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	orig := renameFunc
-	renameFunc = func(src, dst string) error { return os.ErrPermission }
-	t.Cleanup(func() { renameFunc = orig })
+	orig := atomicwrite.SetRenameFuncForTest(func(src, dst string) error { return os.ErrPermission })
+	t.Cleanup(func() { atomicwrite.SetRenameFuncForTest(orig) })
 
 	if err := writeArtworkAtomic(dst, want); err == nil {
 		t.Fatal("writeArtworkAtomic returned nil; expected the rename error to propagate when destination is size-equal but byte-different")
@@ -150,9 +150,8 @@ func TestWriteArtworkAtomicStream_RaceWinnerSizeMatch(t *testing.T) {
 	if err := os.WriteFile(dst, payload, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	orig := renameFunc
-	renameFunc = func(src, dst string) error { return os.ErrPermission }
-	t.Cleanup(func() { renameFunc = orig })
+	orig := atomicwrite.SetRenameFuncForTest(func(src, dst string) error { return os.ErrPermission })
+	t.Cleanup(func() { atomicwrite.SetRenameFuncForTest(orig) })
 
 	if err := writeArtworkAtomicStream(dst, bytes.NewReader(payload), int64(len(payload)+1)); err != nil {
 		t.Fatalf("writeArtworkAtomicStream: %v (expected nil — race winner with matching size)", err)
@@ -204,9 +203,8 @@ func TestWriteArtworkAtomicStream_RenameFailRejectsDifferentBytesOfSameSize(t *t
 		t.Fatal(err)
 	}
 
-	orig := renameFunc
-	renameFunc = func(src, dst string) error { return os.ErrPermission }
-	t.Cleanup(func() { renameFunc = orig })
+	orig := atomicwrite.SetRenameFuncForTest(func(src, dst string) error { return os.ErrPermission })
+	t.Cleanup(func() { atomicwrite.SetRenameFuncForTest(orig) })
 
 	if err := writeArtworkAtomicStream(dst, bytes.NewReader(want), int64(len(want)+1)); err == nil {
 		t.Fatal("writeArtworkAtomicStream returned nil; expected the rename error to propagate when destination is size-equal but byte-different")
