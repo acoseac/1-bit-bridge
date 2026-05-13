@@ -312,6 +312,12 @@ func extractViaDhowdenFromReader(f io.ReadSeeker, absPath string, t *Track, ec *
 		return nil
 	}
 	populateFromTagMetadata(m, t)
+	// ID3v2 / MP4 multi-value pickup. Reads m.Raw() for embedded
+	// NULL-separators (ID3v2.4) or []string slices (MP4 multiple-
+	// data-atom), joins with "; " and overrides Artist /
+	// AlbumArtist on hit. Runs AFTER populateFromTagMetadata so the
+	// override sees dhowden's last-wins value as the baseline.
+	applyMultiValueArtistsFromRaw(m, t)
 	if ec != nil && ec.ArtworkCacheDir != "" {
 		extractLocalArtwork(absPath, t, m, ec)
 	}
@@ -450,6 +456,120 @@ func populateFromTagMetadata(m tag.Metadata, t *Track) {
 			}
 		}
 	}
+}
+
+// applyMultiValueArtistsFromRaw mirrors applyFLACMultiValueArtists
+// for MP4 (M4A / M4B / M4P) iTunes-style multi-value tagging. Reads
+// dhowden/tag's `m.Raw()` map for entries surfaced as `[]string`
+// (multiple `data` sub-atoms inside one ilst tag atom — `©ART` /
+// `aART`) and overrides Artist / AlbumArtist with `"; "`-joined
+// strings.
+//
+// Also includes a defensive NULL-separated-string code path that
+// fires when ANY consumer (dhowden, a future tag library) surfaces
+// a tag value with embedded `\x00` separators in m.Raw(). Today's
+// dhowden ID3v2 text-frame reader strips NULLs internally (see
+// readTFrame in dhowden/id3v2frames.go: `strings.Join(strings.Split
+// (txt, string([]byte{0})), "")`), so this branch is forward-
+// compatible against a future dhowden release that preserves NULLs
+// rather than load-bearing for v2.4 today.
+//
+// Limitations (documented honestly):
+//   - ID3v2.3 multi-FRAME (two separate TPE1 frames): NOT covered.
+//     dhowden's map collapses repeated frame IDs to last-wins, and
+//     there's no public dhowden API to recover prior frame
+//     instances. A custom ID3v2 frame walker could close this;
+//     deferred until field reports require it.
+//   - ID3v2.4 NULL-separated within one TPE1 frame: NOT effectively
+//     covered today (dhowden strips NULLs). The same custom walker
+//     would close this. The NULL-detection path stays as forward-
+//     compat insurance — it costs nothing when no NULLs are seen.
+//
+// In practice, this PR primarily benefits MP4-tagged libraries
+// (where dhowden DOES surface multi-data atoms as []string).
+// FLAC / OGG already have the FLAC-specific multi-value pass via
+// applyFLACMultiValueArtists. MP3 / DSF multi-value remains
+// last-wins until a custom ID3v2 walker lands.
+//
+// Best-effort: a single-value tag (no NULLs, single-string raw)
+// no-ops — dhowden's last-wins value already populated the field
+// via populateFromTagMetadata. Detected multi-value with only one
+// non-empty entry after trim also no-ops (the override would be
+// a no-op rewrite of the same single value).
+func applyMultiValueArtistsFromRaw(m tag.Metadata, t *Track) {
+	if m == nil {
+		return
+	}
+	raw := m.Raw()
+	if raw == nil {
+		return
+	}
+	// ID3v2: tpe1 (artist), tpe2 (album artist).
+	// MP4 ilst: ©art (artist), aart (album artist).
+	// Vorbis (FLAC/OGG): artist, albumartist, album_artist —
+	// included for the case where applyFLACMultiValueArtists
+	// missed (it's only invoked on the FLAC branch; OGG paths
+	// can still benefit from the generic NULL-separated detection).
+	if values := extractMultiValueTagFromRaw(raw, "tpe1", "©art", "artist"); len(values) > 1 {
+		t.Artist = strings.Join(values, "; ")
+	}
+	if values := extractMultiValueTagFromRaw(raw, "tpe2", "aart", "albumartist", "album_artist"); len(values) > 1 {
+		t.AlbumArtist = strings.Join(values, "; ")
+	}
+}
+
+// extractMultiValueTagFromRaw iterates m.Raw() looking for an
+// entry whose normalised key matches any of the supplied aliases.
+// On match, returns the list of trimmed non-empty values from
+// either:
+//   - a `string` value with embedded `\x00` NULL-separators (split
+//     into pieces), OR
+//   - a `[]string` value (each element treated as one value).
+//
+// Returns nil when no match OR only a single non-empty value is
+// found — caller checks `len(values) > 1` before overriding so a
+// single-value tag doesn't get pointlessly rewritten.
+//
+// Aliases passed in lowercase to match normaliseRawTagKey output.
+func extractMultiValueTagFromRaw(raw map[string]any, keys ...string) []string {
+	for rawKey, v := range raw {
+		norm := normaliseRawTagKey(rawKey)
+		matched := false
+		for _, k := range keys {
+			if norm == k {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		switch s := v.(type) {
+		case string:
+			// NULL-separated multi-value (ID3v2.4 convention).
+			if strings.Contains(s, "\x00") {
+				parts := strings.Split(s, "\x00")
+				return trimNonEmpty(parts)
+			}
+		case []string:
+			// MP4 multiple-data-atom multi-value (Apple convention).
+			return trimNonEmpty(s)
+		}
+	}
+	return nil
+}
+
+// trimNonEmpty trims whitespace from each entry and drops empties.
+// Used by extractMultiValueTagFromRaw to filter trailing-empty
+// segments (a trailing NULL or a `data` atom with empty payload).
+func trimNonEmpty(in []string) []string {
+	var out []string
+	for _, s := range in {
+		if trimmed := strings.TrimSpace(s); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
 
 // applyFLACMultiValueArtists scans the FLAC's Vorbis Comment block for
