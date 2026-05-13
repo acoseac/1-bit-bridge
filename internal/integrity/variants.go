@@ -59,7 +59,16 @@ type VariantWatcher struct {
 	// production — Go's linker drops the call when unused.
 	onTickComplete func(deletedCount int)
 
+	// startOnce + stopOnce + done live on the struct (NOT as
+	// locals inside Start) so a hypothetical second Start
+	// returns a stopFn that closes the SAME channel the
+	// original run goroutine selects on. Pre-fix `done` was
+	// `Start`-local: a second Start's stopFn closed a fresh
+	// channel and couldn't reach the active loop. CodeRabbit
+	// Major on PR #209.
 	startOnce sync.Once
+	stopOnce  sync.Once
+	done      chan struct{}
 }
 
 // VariantLister enumerates every row in the track_variants
@@ -133,28 +142,31 @@ func (w *VariantWatcher) SetOnTickComplete(fn func(deletedCount int)) {
 // cancelled context AND the returned stopFn both cleanly stop
 // the loop; either is sufficient (they're equivalent paths).
 //
-// Idempotent: a duplicate Start returns the previous stopFn
-// (via sync.Once). Calling Start with interval ≤ 0 returns
-// a no-op stopFn — no goroutine is spawned at all (avoids
-// the per-process resource cost on minimal deploys).
+// Idempotent: a duplicate Start returns a stopFn that closes
+// the SAME `w.done` channel the active run goroutine is
+// selecting on. Both `startOnce` and `stopOnce` live on the
+// struct so a second Start's stopFn doesn't pointlessly close
+// a fresh per-call channel the run loop never sees. Calling
+// Start with interval ≤ 0 returns a no-op stopFn — no
+// goroutine is spawned at all (avoids the per-process resource
+// cost on minimal deploys).
 func (w *VariantWatcher) Start(ctx context.Context) (stopFn func()) {
 	if w == nil || w.interval <= 0 {
 		return func() {}
 	}
-	var (
-		stopOnce sync.Once
-		done     = make(chan struct{})
-	)
 	w.startOnce.Do(func() {
-		go w.run(ctx, done)
+		w.done = make(chan struct{})
+		go w.run(ctx, w.done)
 	})
 	return func() {
-		stopOnce.Do(func() {
+		w.stopOnce.Do(func() {
 			// Cancel via the done channel — the run loop
 			// selects on both ctx.Done() AND `done`, so the
 			// caller can short-circuit even when the ctx
 			// is the long-lived process-root context.
-			close(done)
+			if w.done != nil {
+				close(w.done)
+			}
 		})
 	}
 }

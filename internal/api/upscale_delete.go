@@ -236,6 +236,7 @@ func (s *Server) upscaleDelete(w http.ResponseWriter, r *http.Request) {
 	// throughout; iOS reconciles on the SSE we emit at the end
 	// with whatever DID disappear.
 	deletedPaths := map[string]struct{}{}
+	deletedVariantIDs := make([]string, 0, len(rows))
 	logger := LoggerFromContext(r.Context())
 	for _, row := range rows {
 		if err := os.Remove(row.SidecarPath); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -256,6 +257,12 @@ func (s *Server) upscaleDelete(w http.ResponseWriter, r *http.Request) {
 		}
 		resp.DeletedCount++
 		resp.FreedBytes += row.SizeBytes
+		// Only successfully-deleted variantIDs land in the SSE
+		// payload (CodeRabbit Major + Gemini High on PR #209) —
+		// the prior shape leaked failed-delete variantIDs into
+		// the event, telling iOS clients "these variants are
+		// gone" while the DB row was still alive.
+		deletedVariantIDs = append(deletedVariantIDs, row.VariantID)
 		if _, seen := deletedPaths[row.SourcePath]; !seen {
 			deletedPaths[row.SourcePath] = struct{}{}
 			resp.DeletedPaths = append(resp.DeletedPaths, row.SourcePath)
@@ -267,11 +274,7 @@ func (s *Server) upscaleDelete(w http.ResponseWriter, r *http.Request) {
 	// successfully removed. Pre-feature bridges have a nop
 	// publisher; tests can stub via EventPublisher.
 	if resp.DeletedCount > 0 {
-		variantIDs := make([]string, 0, len(rows))
-		for _, row := range rows {
-			variantIDs = append(variantIDs, row.VariantID)
-		}
-		publishUpscaleDeleted(s.EventPublisher(), resp.DeletedPaths, variantIDs)
+		publishUpscaleDeleted(s.EventPublisher(), resp.DeletedPaths, deletedVariantIDs)
 	}
 
 	writeJSON(w, http.StatusOK, resp)

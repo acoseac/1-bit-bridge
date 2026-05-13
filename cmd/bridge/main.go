@@ -76,6 +76,14 @@ func (a *variantStoreAdapter) LookupVariant(sourcePath, variantID string) (*api.
 		return nil, nil
 	}
 	return &api.VariantRecord{
+		// Canonical values from the row — NOT the request input.
+		// Case-insensitive lookup may have resolved a folded
+		// request against the canonical-case row; the api
+		// consumer needs the canonical form for any subsequent
+		// DeleteVariant + SSE publish so the wire shape matches
+		// `Track.path` byte-for-byte. CodeRabbit Major on PR #209.
+		SourcePath:    v.SourcePath,
+		VariantID:     v.VariantID,
 		SidecarPath:   v.SidecarPath,
 		SourceMTimeNS: v.SourceMTimeNS,
 		SourceSize:    v.SourceSize,

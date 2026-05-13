@@ -382,16 +382,36 @@ func (s *Server) serveVariant(w http.ResponseWriter, r *http.Request, sourcePath
 			// a wedged DB doesn't park the response goroutine
 			// indefinitely.
 			if s.variantDeleter != nil {
-				if delErr := s.variantDeleter.DeleteVariant(sourcePath, variantID); delErr != nil {
+				// Use the canonical values from the looked-up
+				// record, NOT the request input. The request
+				// `sourcePath`/`variantID` may be case-folded
+				// (iOS sends `share.normalize`d paths); the
+				// LookupVariant result carries the canonical
+				// row form that matches `Track.path` byte-
+				// identical and that DeleteVariant's
+				// `source_path = ?` predicate will hit.
+				// Falling back to the request values when the
+				// record didn't surface them (test stub
+				// returning a sparse record) keeps the cleanup
+				// path functional without a hard nil deref.
+				canonSource := rec.SourcePath
+				if canonSource == "" {
+					canonSource = sourcePath
+				}
+				canonVariant := rec.VariantID
+				if canonVariant == "" {
+					canonVariant = variantID
+				}
+				if delErr := s.variantDeleter.DeleteVariant(canonSource, canonVariant); delErr != nil {
 					LoggerFromContext(r.Context()).Warn(
 						"variant DB cleanup failed after sidecar miss",
-						slog.String("source_path", sourcePath),
-						slog.String("variant_id", variantID),
+						slog.String("source_path", canonSource),
+						slog.String("variant_id", canonVariant),
 						slog.Any("err", delErr),
 					)
 				} else {
 					publishUpscaleDeleted(s.EventPublisher(),
-						[]string{sourcePath}, []string{variantID})
+						[]string{canonSource}, []string{canonVariant})
 				}
 			}
 			writeError(w, http.StatusGone, "variant_missing_on_disk", "sidecar file missing")

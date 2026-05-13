@@ -128,7 +128,21 @@ type VariantStore interface {
 // LookupVariant lets `nil` distinguish "no such row" from "row
 // exists but freshness fails" — caller can still surface a
 // targeted 404 vs 410 from the same return shape.
+//
+// `SourcePath` and `VariantID` are the CANONICAL row values
+// (case-preserved, matching the SwiftData `Track.path` byte-for-
+// byte). LookupVariant resolves case-insensitively (iOS sends
+// `share.normalize`d paths) but the returned record carries
+// the canonical form so the reactive cleanup path in
+// `serveVariant` can delete the right row AND emit an SSE
+// `upscale.deleted` event whose paths match `Track.path` for
+// iOS-side reverse-index resolution. CodeRabbit Major on PR
+// #209 caught this: without the canonical values, a case-folded
+// request would silently no-op DeleteVariant while the SSE
+// fired with the wrong-case path.
 type VariantRecord struct {
+	SourcePath    string
+	VariantID     string
 	SidecarPath   string
 	SourceMTimeNS int64
 	SourceSize    int64
@@ -671,7 +685,14 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		// passively when a variant disappears server-side. Gated
 		// on `s.variantDeleter != nil` so a feature-disabled deploy
 		// (no variant store wired) advertises honestly.
-		feats := []string{}
+		// Alpha-sorted: deleteVariants < operatorDrivenUpscale <
+		// upscaleCompleteEvents < variantBumpsIndex. Append in
+		// that order; conditional flags slot in their alpha
+		// position without per-permutation logic. Gemini Medium
+		// on PR #209 suggested seeding the slice with the
+		// always-present pair, which we still do (capacity
+		// preallocation includes the conditional max).
+		feats := make([]string, 0, 4)
 		if s.variantDeleter != nil {
 			feats = append(feats, "deleteVariants")
 		}

@@ -135,12 +135,6 @@ func (p *stubPublisher) lastEvent() (string, any, bool) {
 	return e.topic, e.payload, true
 }
 
-func (p *stubPublisher) eventCount() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return len(p.captured)
-}
-
 // deleteFixture stands up a Server wired with stubs for the
 // variant deleter, the inflight dropper, AND the SSE broker.
 // Returns the live test server + token + stubs for per-test
