@@ -121,7 +121,7 @@ func TestRunGCReverseSweepRemovesOrphanRows(t *testing.T) {
 	time.Sleep(2 * time.Millisecond)
 
 	var stdout, stderr bytes.Buffer
-	rc := runGC(&stdout, &stderr, store, transcodedDir)
+	rc := runGC(context.Background(), &stdout, &stderr, store, transcodedDir)
 	if rc != 0 {
 		t.Fatalf("runGC rc=%d, stderr=%s", rc, stderr.String())
 	}
@@ -250,7 +250,7 @@ func TestRunGCRefusesWhenOutputDirMissingButRowsExist(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	rc := runGC(&stdout, &stderr, store, missingDir)
+	rc := runGC(context.Background(), &stdout, &stderr, store, missingDir)
 	if rc == 0 {
 		t.Fatalf("expected runGC to fail when outputDir is missing but rows exist; stdout=%s stderr=%s", stdout.String(), stderr.String())
 	}

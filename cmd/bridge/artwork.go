@@ -59,7 +59,7 @@ const artworkCacheSuffix = "-500.jpg"
 // deletion. Per CodeRabbit Major round-1 on PR #167.
 const artworkGCConfirmPhrase = "GC-ARTWORK"
 
-func artworkCmd(_ context.Context, args []string, stdout, stderr io.Writer) int {
+func artworkCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("artwork", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	configPath := fs.String("config", "bridge.yaml", "path to config file")
@@ -112,11 +112,11 @@ func artworkCmd(_ context.Context, args []string, stdout, stderr io.Writer) int 
 	defer store.Close()
 
 	artworkDir := filepath.Join(cfg.DataDir, artworkDirName)
-	return runArtworkGC(stdout, stderr, store, artworkDir, *dryRun)
+	return runArtworkGC(ctx, stdout, stderr, store, artworkDir, *dryRun)
 }
 
-func runArtworkGC(stdout, stderr io.Writer, store *manifest.Store, artworkDir string, dryRun bool) int {
-	mbidsInUse, err := store.ArtworkMBIDsInUse(context.Background())
+func runArtworkGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store, artworkDir string, dryRun bool) int {
+	mbidsInUse, err := store.ArtworkMBIDsInUse(ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "list referenced artwork ids: %v\n", err)
 		return 1
@@ -128,6 +128,12 @@ func runArtworkGC(stdout, stderr io.Writer, store *manifest.Store, artworkDir st
 
 	var removed, kept, failed, skipped int
 	walkErr := filepath.WalkDir(artworkDir, func(path string, d os.DirEntry, walkErr error) error {
+		// Honor ctx cancellation so SIGINT actually stops the
+		// sweep mid-walk instead of churning through the rest of
+		// the directory. CodeRabbit Major on PR #217.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if walkErr != nil {
 			// Cache dir may not exist yet (no scan ever ran). Treat
 			// as empty rather than erroring — same shape as the
@@ -168,6 +174,13 @@ func runArtworkGC(stdout, stderr io.Writer, store *manifest.Store, artworkDir st
 		return nil
 	})
 	if walkErr != nil {
+		// Operator-interrupt path: surface a clean "interrupted"
+		// message instead of the raw `context canceled` error so
+		// the SIGINT case reads as intentional rather than a bug.
+		if errors.Is(walkErr, context.Canceled) || errors.Is(walkErr, context.DeadlineExceeded) {
+			fmt.Fprintln(stderr, "artwork gc interrupted")
+			return 1
+		}
 		fmt.Fprintf(stderr, "walk artwork dir: %v\n", walkErr)
 		return 1
 	}

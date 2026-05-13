@@ -449,12 +449,24 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 			// `liveBatches`. If the first enqueue fails (nothing
 			// to drive a future callback), the DB row stays
 			// `running` with the original totals forever.
+			//
+			// **Detached ctx** (CodeRabbit Major on PR #216): if
+			// the caller cancels the request mid-truncate, the
+			// in-memory totals get adjusted but the DB row stays
+			// stale forever. Use a Background-rooted 5 s deadline
+			// so a wedged DB doesn't park the goroutine while
+			// still making the persist robust to caller-side
+			// cancellation. The 5 s is generous for a single-
+			// row UPDATE; orders of magnitude shorter than the
+			// jobs the row is tracking.
 			if stateModified {
-				if writeErr := c.store.UpdateUpscaleBatchProgress(ctx, rowSnapshot); writeErr != nil {
+				persistCtx, cancelPersist := context.WithTimeout(context.Background(), 5*time.Second)
+				if writeErr := c.store.UpdateUpscaleBatchProgress(persistCtx, rowSnapshot); writeErr != nil {
 					c.logger.Warn("submit: persist truncated batch",
 						"batchID", batchID.String(),
 						"err", writeErr)
 				}
+				cancelPersist()
 				c.publishProgressRow(rowSnapshot)
 			}
 			break

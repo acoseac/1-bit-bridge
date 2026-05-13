@@ -335,7 +335,7 @@ func (a *upscaleBatchCoordinatorAdapter) Submit(ctx context.Context, libraryRelP
 	// didn't override. Coordinator.Submit validates the resolved
 	// values and returns an error on out-of-range.
 	if targetRate == 0 || targetBits == 0 {
-		rate, bits, err := a.store.GetUpscaleTarget(context.Background())
+		rate, bits, err := a.store.GetUpscaleTarget(ctx)
 		if err == nil {
 			if targetRate == 0 {
 				targetRate = rate
@@ -420,7 +420,7 @@ type adminBatchCoordinatorAdapter struct {
 
 func (a *adminBatchCoordinatorAdapter) Submit(ctx context.Context, libraryRelPath string, targetRate, targetBits int) (admin.AdminBatchSubmitResult, error) {
 	if targetRate == 0 || targetBits == 0 {
-		if rate, bits, err := a.store.GetUpscaleTarget(context.Background()); err == nil {
+		if rate, bits, err := a.store.GetUpscaleTarget(ctx); err == nil {
 			if targetRate == 0 {
 				targetRate = rate
 			}
@@ -1401,11 +1401,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// Seed the DB-backed target settings from the YAML bootstrap
 		// on first run. Once seeded, admin Settings edits become
 		// authoritative; YAML stays the bootstrap-only path.
-		if _, _, err := manifestStore.GetUpscaleTarget(context.Background()); err != nil {
+		if _, _, err := manifestStore.GetUpscaleTarget(ctx); err != nil {
 			if errors.Is(err, manifest.ErrUpscaleTargetUnset) {
 				rate := cfg.Upscale.EffectiveBootstrapTargetRate()
 				bits := cfg.Upscale.EffectiveBootstrapTargetBits()
-				if seedErr := manifestStore.SetUpscaleTarget(context.Background(), rate, bits); seedErr != nil {
+				if seedErr := manifestStore.SetUpscaleTarget(ctx, rate, bits); seedErr != nil {
 					fmt.Fprintf(stderr, "seed upscale target: %v\n", seedErr)
 					return 1
 				}
