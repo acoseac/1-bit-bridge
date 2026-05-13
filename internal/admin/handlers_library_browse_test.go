@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
@@ -207,7 +208,10 @@ func TestApiLibraryBrowseProjection_HappyPath(t *testing.T) {
 	// Enable upscale and provide a bootstrap target. The handler's
 	// fallback path consults the YAML defaults when scan_state is
 	// unseeded — exercise that branch.
-	srv.deps.Cfg.Upscale.Enabled = true
+	cfg := srv.deps.CfgHolder.Load()
+	next := config.Clone(cfg)
+	next.Upscale.Enabled = true
+	srv.deps.CfgHolder.Store(next)
 
 	var resp browseProjectionResponse
 	code := doJSON(t, srv.Handler(), "GET", "/api/library/browse-projection?path=MusicA", nil, &resp)

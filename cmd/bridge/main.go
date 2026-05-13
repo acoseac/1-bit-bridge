@@ -1377,6 +1377,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		WithPairing(pairingStore).
 		WithCertExpiry(certNotAfter).
 		WithUpscale(upscaleActive, &variantStoreAdapter{provider: provider})
+	cfgHolder := apiSrv.ConfigHolder()
 
 	// Background sweep for the pairing rate-limiter's per-IP map.
 	// Hourly cadence drops limiters untouched for ≥ 6 h, keeping the
@@ -1545,7 +1546,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	//      grounded — typically zero polls per minute on average).
 	upscaleStats := &upscaleStatsAdapter{
 		pool:    func() *transcode.Pool { return upscalePool },
-		enabled: func() bool { return upscalePool != nil && cfg.Upscale.Enabled },
+		enabled: func() bool {
+			live := cfgHolder.Load()
+			return upscalePool != nil && live != nil && live.Upscale.Enabled
+		},
 		store:   manifestStore,
 	}
 	apiSrv.WithUpscaleStats(upscaleStats)
@@ -1714,7 +1718,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// (shouldn't happen, but let's not trip them up).
 	absCfgPath, _ := filepath.Abs(*configPath)
 	adminSrv, err := admin.New(admin.Deps{
-		Cfg:             cfg,
+		CfgHolder:       cfgHolder,
 		CfgPath:         absCfgPath,
 		Auth:            store,
 		Manifest:        manifestStore,
@@ -1748,7 +1752,8 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			//      facing /v1/health.upscaleEnabled and the
 			//      admin tile's `enabled` field both gate
 			//      on this).
-			if upscalePool == nil || !cfg.Upscale.Enabled {
+			live := cfgHolder.Load()
+			if upscalePool == nil || live == nil || !live.Upscale.Enabled {
 				return nil
 			}
 			s := upscalePool.Stats()
@@ -1770,7 +1775,8 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// handler then surfaced 500 `disk-probe` instead of
 		// 503. Per CodeRabbit major on PR #203 round 2.
 		ProjectedSize: func() func(int64, int, int, int, int) int64 {
-			if !cfg.Upscale.Enabled {
+			live := cfgHolder.Load()
+			if live == nil || !live.Upscale.Enabled {
 				return nil
 			}
 			return func(sourceSize int64, sourceRate, sourceBits, targetRate, targetBits int) int64 {
@@ -1780,7 +1786,8 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			}
 		}(),
 		AvailableDiskSpace: func() func(string) (int64, error) {
-			if !cfg.Upscale.Enabled {
+			live := cfgHolder.Load()
+			if live == nil || !live.Upscale.Enabled {
 				return nil
 			}
 			return transcode.AvailableDiskSpace

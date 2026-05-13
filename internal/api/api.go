@@ -99,7 +99,7 @@ var manifestGzipPool = sync.Pool{
 
 // Server owns the http.Handler and the per-request state it needs.
 type Server struct {
-	cfg                  *config.Config
+	cfgHolder            *config.RuntimeConfig
 	store                *auth.Store
 	resolver             *bridgefs.Resolver
 	manifest             ManifestProvider
@@ -123,6 +123,10 @@ type Server struct {
 	fingerprint          string
 	startedAt            time.Time
 }
+
+// ConfigHolder exposes the API server's live runtime-config holder so
+// cmd wiring can share one source of truth with admin writers.
+func (s *Server) ConfigHolder() *config.RuntimeConfig { return s.cfgHolder }
 
 // ErrUpscaleQueueFull is the typed sentinel UpscaleEnqueuer
 // returns when the underlying worker pool can't accept another
@@ -273,8 +277,9 @@ type UpdateInfo struct {
 // for display in /v1/health (iOS pins by this value). mp can be nil during
 // early boot / tests — /v1/manifest will return 503 until it's populated.
 func New(cfg *config.Config, store *auth.Store, mp ManifestProvider, fingerprint string) *Server {
+	holder := config.NewRuntimeConfig(cfg)
 	return &Server{
-		cfg:                 cfg,
+		cfgHolder:           holder,
 		store:               store,
 		resolver:            bridgefs.New(cfg.LibraryRoots),
 		manifest:            mp,
@@ -645,6 +650,7 @@ type ErrorResponse struct {
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
+	cfg := s.cfgHolder.Load()
 	scanState := ScanState{}
 	if s.manifest != nil {
 		scanState.IsScanning = s.manifest.IsScanning()
@@ -655,8 +661,8 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	resp := HealthResponse{
 		ProtocolVersion: version.ProtocolVersion,
 		ServerVersion:   version.ServerVersion,
-		LibraryName:     s.cfg.LibraryName,
-		LibraryRoots:    libraryRootBasenames(s.cfg.LibraryRoots),
+		LibraryName:     cfg.LibraryName,
+		LibraryRoots:    libraryRootBasenames(cfg.LibraryRoots),
 		CertFingerprint: s.fingerprint,
 		StartedAt:       s.startedAt,
 		ScanState:       scanState,
@@ -746,7 +752,8 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 // `net.Interfaces()` + `.Addrs()` walk — cheap enough to not warrant
 // caching.
 func (s *Server) reachableEndpoints() []string {
-	_, portStr, err := net.SplitHostPort(s.cfg.ListenAddress)
+	cfg := s.cfgHolder.Load()
+	_, portStr, err := net.SplitHostPort(cfg.ListenAddress)
 	if err != nil {
 		return nil
 	}
@@ -756,7 +763,7 @@ func (s *Server) reachableEndpoints() []string {
 	}
 	return advertise.URLs(advertise.Params{
 		Port:            port,
-		CustomEndpoints: s.cfg.CustomEndpoints,
+		CustomEndpoints: cfg.CustomEndpoints,
 	})
 }
 

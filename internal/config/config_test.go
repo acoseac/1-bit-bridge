@@ -2,11 +2,14 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 )
 
 // writeConfig writes YAML to a tmp dir and returns (configPath, libraryRoot).
@@ -493,6 +496,148 @@ func TestValidateCustomEndpoints_DropsMalformed(t *testing.T) {
 	}
 	if len(warns) < 2 {
 		t.Errorf("expected >= 2 warnings, got %v", warns)
+	}
+}
+
+func TestConfigCloneIsDeep(t *testing.T) {
+	// Auto-populate every exported field so assertNoSharedPointers never
+	// silently skips a nil slice or pointer. If a future field is added to
+	// Config (or any nested struct) without updating this test, fillNonZero
+	// will fill it in and the walk will catch a missing deep-copy.
+	cfg := &Config{}
+	fillNonZero(reflect.ValueOf(cfg).Elem())
+
+	clone := Clone(cfg)
+	if clone == nil {
+		t.Fatal("Clone returned nil")
+	}
+	seen := map[uintptr]string{}
+	assertNoSharedPointers(t, reflect.ValueOf(cfg).Elem(), reflect.ValueOf(clone).Elem(), "Config", seen)
+
+	// spot-check mutability isolation
+	cfg.LibraryRoots[0] = "/mutated"
+	if clone.LibraryRoots[0] == "/mutated" {
+		t.Fatal("clone LibraryRoots shares backing array")
+	}
+	if cfg.Backup.IntervalHours != nil && clone.Backup.IntervalHours != nil {
+		*cfg.Backup.IntervalHours = 99
+		if *clone.Backup.IntervalHours == 99 {
+			t.Fatal("clone Backup.IntervalHours shares pointer")
+		}
+	}
+}
+
+func assertNoSharedPointers(t *testing.T, a, b reflect.Value, path string, seen map[uintptr]string) {
+	t.Helper()
+	if !a.IsValid() || !b.IsValid() {
+		return
+	}
+	if a.Type() != b.Type() {
+		t.Fatalf("%s: type mismatch %v vs %v", path, a.Type(), b.Type())
+	}
+	switch a.Kind() {
+	case reflect.Struct:
+		for i := 0; i < a.NumField(); i++ {
+			field := a.Type().Field(i)
+			assertNoSharedPointers(t, a.Field(i), b.Field(i), path+"."+field.Name, seen)
+		}
+	case reflect.Slice:
+		if a.IsNil() || b.IsNil() {
+			return
+		}
+		if a.Len() > 0 && b.Len() > 0 {
+			pa := a.Pointer()
+			pb := b.Pointer()
+			if pa == pb {
+				t.Fatalf("%s: shared slice backing array", path)
+			}
+			key := pa
+			if key == 0 {
+				key = uintptr(unsafe.Pointer(a.UnsafePointer()))
+			}
+			if prev, ok := seen[key]; ok {
+				_ = prev
+			}
+			seen[key] = path
+		}
+		for i := 0; i < a.Len() && i < b.Len(); i++ {
+			assertNoSharedPointers(t, a.Index(i), b.Index(i), fmt.Sprintf("%s[%d]", path, i), seen)
+		}
+	case reflect.Pointer:
+		if a.IsNil() || b.IsNil() {
+			return
+		}
+		if a.Pointer() == b.Pointer() {
+			t.Fatalf("%s: shared pointer", path)
+		}
+		assertNoSharedPointers(t, a.Elem(), b.Elem(), path+"*", seen)
+	case reflect.Interface:
+		if a.IsNil() || b.IsNil() {
+			return
+		}
+		assertNoSharedPointers(t, a.Elem(), b.Elem(), path+"(iface)", seen)
+	case reflect.Map:
+		if a.IsNil() || b.IsNil() {
+			return
+		}
+		if a.Pointer() == b.Pointer() {
+			t.Fatalf("%s: shared map header", path)
+		}
+	}
+}
+
+// fillNonZero recursively assigns a non-zero value to every exported field in
+// v (which must be a settable reflect.Value of Kind Struct). This ensures
+// TestConfigCloneIsDeep covers future pointer/slice fields automatically —
+// assertNoSharedPointers silently skips nil values, so an unset field in the
+// fixture would create a coverage blind spot.
+func fillNonZero(v reflect.Value) {
+	if v.Kind() != reflect.Struct {
+		return
+	}
+	for i := 0; i < v.NumField(); i++ {
+		f := v.Field(i)
+		if !f.CanSet() {
+			continue
+		}
+		switch f.Kind() {
+		case reflect.String:
+			if f.String() == "" {
+				f.SetString("x")
+			}
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			if f.Int() == 0 {
+				f.SetInt(1)
+			}
+		case reflect.Bool:
+			if !f.Bool() {
+				f.SetBool(true)
+			}
+		case reflect.Slice:
+			if f.IsNil() {
+				sl := reflect.MakeSlice(f.Type(), 1, 1)
+				elem := sl.Index(0)
+				if elem.Kind() == reflect.String {
+					elem.SetString("x")
+				}
+				f.Set(sl)
+			}
+		case reflect.Pointer:
+			if f.IsNil() {
+				nv := reflect.New(f.Type().Elem())
+				switch nv.Elem().Kind() {
+				case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+					nv.Elem().SetInt(1)
+				case reflect.Struct:
+					fillNonZero(nv.Elem())
+				}
+				f.Set(nv)
+			} else if f.Elem().Kind() == reflect.Struct {
+				fillNonZero(f.Elem())
+			}
+		case reflect.Struct:
+			fillNonZero(f)
+		}
 	}
 }
 

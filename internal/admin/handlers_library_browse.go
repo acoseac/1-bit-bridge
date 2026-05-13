@@ -158,6 +158,7 @@ func (s *Server) apiLibraryBrowse(w http.ResponseWriter, r *http.Request) {
 // that WOULD happen if they hit "Upscale this folder," not the
 // theoretical max.
 func (s *Server) apiLibraryBrowseProjection(w http.ResponseWriter, r *http.Request) {
+	cfg := s.deps.CfgHolder.Load()
 	rawPath := r.URL.Query().Get("path")
 	normalised, ok := normaliseBrowsePath(rawPath)
 	if !ok {
@@ -182,8 +183,8 @@ func (s *Server) apiLibraryBrowseProjection(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if errors.Is(err, manifest.ErrUpscaleTargetUnset) {
-		rate = s.deps.Cfg.Upscale.EffectiveBootstrapTargetRate()
-		bits = s.deps.Cfg.Upscale.EffectiveBootstrapTargetBits()
+		rate = cfg.Upscale.EffectiveBootstrapTargetRate()
+		bits = cfg.Upscale.EffectiveBootstrapTargetBits()
 	}
 
 	projections, err := s.deps.Manifest.ListTrackProjectionsUnderPrefix(r.Context(), normalised)
@@ -218,7 +219,7 @@ func (s *Server) apiLibraryBrowseProjection(w http.ResponseWriter, r *http.Reque
 		projectedFiles++
 	}
 
-	free, err := s.deps.AvailableDiskSpace(s.deps.Cfg.DataDir)
+	free, err := s.deps.AvailableDiskSpace(cfg.DataDir)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "disk-probe", err.Error())
 		return

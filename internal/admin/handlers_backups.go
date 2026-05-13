@@ -72,6 +72,7 @@ func (s *Server) apiBackupsList(w http.ResponseWriter, r *http.Request) {
 // list-response comment for why. Operators who need to move
 // snapshots offsite use `scp`/`rsync` against `<dataDir>/backups/`.
 func (s *Server) apiBackupsCreate(w http.ResponseWriter, r *http.Request) {
+	cfg := s.deps.CfgHolder.Load()
 	if s.deps.BackupSources.DataDir == "" {
 		writeError(w, http.StatusServiceUnavailable, "backup-not-wired",
 			"admin server constructed without backup sources")
@@ -101,7 +102,7 @@ func (s *Server) apiBackupsCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	keep := s.deps.Cfg.Backup.EffectiveKeep()
+	keep := cfg.Backup.EffectiveKeep()
 	if body.Keep != nil {
 		keep = *body.Keep
 	}
