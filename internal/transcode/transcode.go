@@ -34,6 +34,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/logging"
@@ -133,8 +134,66 @@ type JobSpec struct {
 // to slot the variant into the share-level "prefer upscaled"
 // resolution. Future variant kinds (e.g. PCM→DSD synthesis) get
 // their own prefix.
+//
+// Hot path during manifest scan + every pool callback. The
+// finite (rate × bits) cross-product across all real DACs makes
+// memoization a clean O(1) win — see `variantIDCache`. Per-call
+// cost goes from a `fmt.Sprintf` allocation to a map read.
 func (j JobSpec) VariantID() string {
+	if id, ok := lookupCachedVariantID(j.TargetSampleRate, j.TargetBits); ok {
+		return id
+	}
 	return fmt.Sprintf("upscaled-%s-%d-%d", VariantSchemaVersion, j.TargetSampleRate, j.TargetBits)
+}
+
+// variantIDCache memoizes the `VariantID()` output for the
+// finite (rate × bits) cross-product covering every real DAC.
+// Built once via sync.Once on first VariantID call (lazy
+// initialization beats init()-time so test binaries that don't
+// touch VariantID never pay the construction cost). Sub-mics
+// O(1) lookup vs ~150 ns fmt.Sprintf + alloc per call.
+//
+// Out-of-set combinations fall through to the live fmt.Sprintf
+// path (forward-compat with future rates / bit depths). Don't
+// pre-seed every conceivable combination — keep the cache tight
+// to what real hardware uses; an unknown (rate, bits) pair pays
+// the unmemoized cost once and that's correct.
+var (
+	variantIDCacheOnce sync.Once
+	variantIDCache     map[[2]int]string
+)
+
+// lookupCachedVariantID returns the memoized VariantID string for
+// the given (rate, bits) pair, or `_, false` on miss. The caller
+// falls through to the live fmt.Sprintf path on miss.
+//
+// **Lossless cache key** (CodeRabbit Major on PR #211): the prior
+// uint64-pack form `(rate << 8) | (bits & 0xff)` truncated bits
+// to 8 bits, so `bits=272` (256+16) silently aliased to the
+// cached `bits=16` entry and returned the wrong VariantID. A
+// `[2]int` key compares byte-identical to the lookup tuple with
+// zero allocation (arrays are value types) and admits the full
+// `int` range on both axes — out-of-set inputs miss cleanly and
+// fall through to the unmemoized path.
+func lookupCachedVariantID(rate, bits int) (string, bool) {
+	variantIDCacheOnce.Do(initVariantIDCache)
+	if rate < 0 || bits < 0 {
+		return "", false
+	}
+	id, ok := variantIDCache[[2]int{rate, bits}]
+	return id, ok
+}
+
+func initVariantIDCache() {
+	rates := []int{44100, 48000, 88200, 96000, 176400, 192000}
+	bitsList := []int{16, 24}
+	variantIDCache = make(map[[2]int]string, len(rates)*len(bitsList))
+	for _, r := range rates {
+		for _, b := range bitsList {
+			variantIDCache[[2]int{r, b}] =
+				fmt.Sprintf("upscaled-%s-%d-%d", VariantSchemaVersion, r, b)
+		}
+	}
 }
 
 // SidecarPath returns the absolute filesystem path the converted

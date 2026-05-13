@@ -36,6 +36,21 @@ type Enricher struct {
 	// CacheDir is the root where the cached JPEGs live. Album covers go
 	// in <CacheDir>/<mbid>-<size>.jpg (see ArtworkCachePath); artist
 	// images go in <CacheDir>/artist-<mbid>.jpg (see ArtistImagePath).
+	//
+	// **Same-partition requirement (best-effort, fallback-safe)**:
+	// `linkOrCopy` uses `os.Link` to deduplicate identical JPEG
+	// payloads across MBID + name-keyed entries — hard links only
+	// work within one filesystem partition. The atomic-write
+	// helper uses `os.CreateTemp(filepath.Dir(path), …)` so the
+	// temp file is co-located with the final destination ON THE
+	// SAME PARTITION by construction; that part is structural.
+	// What's NOT structural: a future operator mounting
+	// `<CacheDir>` itself across two partitions (e.g. symlinking
+	// `<CacheDir>/portraits` to a different volume from
+	// `<CacheDir>/covers`) would break the link path silently —
+	// the writeArtworkAtomic copy fallback covers that case
+	// cleanly, but operators benefit from knowing the design
+	// expects a single-partition layout.
 	CacheDir string
 
 	// MBMinInterval is the minimum gap between MusicBrainz requests. MB's

@@ -32,6 +32,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/advertise"
@@ -58,6 +59,43 @@ import (
 type ManifestPage = manifest.Manifest
 
 var logger = logging.Component("api")
+
+// manifestGzipPool reuses gzip.Writer instances across concurrent
+// /v1/manifest requests. `gzip.NewWriter` allocates a ~256 KB
+// LZ77 window buffer per call; under high concurrency (many iOS
+// clients hitting album-sync at the same time) the per-request
+// allocation cost is measurable in heap pressure AND GC pauses.
+// Pool keeps the buffers warm.
+//
+// Lifecycle contract (see manifestHandler for the live usage):
+//
+//  1. Get → returns either a fresh writer (cold path, first request)
+//     or a previously-Put one (warm path).
+//  2. Reset(w) → re-binds the writer to the new ResponseWriter. MUST
+//     come before any Write call; otherwise the gzip framing would
+//     stream into whatever ResponseWriter the previous user had.
+//  3. Write through the writer.
+//  4. Close → writes the gzip trailer (CRC + ISIZE). MUST run
+//     before Put or the response is truncated mid-trailer.
+//  5. Put → returns the writer to the pool.
+//
+// `Close()` may fail when the client has disconnected mid-response
+// (broken pipe writing the trailer). The writer's INTERNAL state
+// is still clean — the next `Reset(w2)` re-binds cleanly to a
+// fresh writer. Log the close error at debug per the same
+// convention as writeJSON's encoder discard. The defer in
+// manifestHandler runs Put unconditionally so a panic mid-stream
+// (rare; the inner WriteManifest catches its own SQLite errors)
+// still returns the buffer.
+var manifestGzipPool = sync.Pool{
+	New: func() any {
+		// io.Discard as a sentinel target — every consumer calls
+		// Reset(realWriter) immediately after Get, so the
+		// io.Discard binding is never actually written to. NewWriter
+		// requires a non-nil io.Writer at construction time.
+		return gzip.NewWriter(io.Discard)
+	},
+}
 
 // Server owns the http.Handler and the per-request state it needs.
 type Server struct {
@@ -845,8 +883,15 @@ func (s *Server) manifestHandler(w http.ResponseWriter, r *http.Request) {
 	var bodyWriter io.Writer = dw
 	var gz *gzip.Writer
 	if useGzip {
-		gz = gzip.NewWriter(dw)
+		gz = manifestGzipPool.Get().(*gzip.Writer)
+		gz.Reset(dw)
 		bodyWriter = gz
+		// `Put` AFTER `Close` per the documented contract — see
+		// manifestGzipPool's docblock. The defer is unconditional
+		// so a panic mid-WriteManifest still returns the writer
+		// to the pool (the Close path further down is the happy-
+		// path trailer-flush; this defer is the safety net).
+		defer manifestGzipPool.Put(gz)
 	}
 
 	// Pass r.Context() so a client disconnect mid-stream (slow network,
@@ -866,8 +911,21 @@ func (s *Server) manifestHandler(w http.ResponseWriter, r *http.Request) {
 	// the close in that case and let the error path write a clean
 	// uncompressed 500.
 	if useGzip && dw.written {
-		if closeErr := gz.Close(); closeErr != nil && writeErr == nil {
-			writeErr = closeErr
+		if closeErr := gz.Close(); closeErr != nil {
+			if writeErr == nil {
+				writeErr = closeErr
+			} else {
+				// A close error AFTER a non-nil writeErr (mid-
+				// stream DB fault) is the broken-pipe trailer-
+				// write — usually `connection reset by peer`.
+				// Pre-pool this was silently masked; now log at
+				// debug so production monitoring can correlate
+				// trailer-failures with the underlying writeErr
+				// when investigating a "client disconnect rate
+				// spike" alert.
+				logger.Debug("manifest gzip trailer Close failed",
+					"err", closeErr, "writeErr", writeErr)
+			}
 		}
 	} else if useGzip && writeErr == nil {
 		// WriteManifest succeeded but produced zero bytes (empty
