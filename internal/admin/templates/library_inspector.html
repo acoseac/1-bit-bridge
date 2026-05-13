@@ -52,6 +52,24 @@
         <button type="button" id="inspector-upscale-btn" class="btn primary" disabled>
           Upscale this scope
         </button>
+        {{/*
+          Per-scope variant delete. Enabled by the JS when the drawer's
+          "Already upscaled" count is > 0 — there's nothing to clear on
+          a scope that's never been upscaled. The button fires a
+          DELETE /api/upscale/variants?prefix=<scope> request which the
+          admin handler forwards to api.RunVariantDelete; the same
+          upscale.deleted SSE event reaches iOS clients regardless of
+          which surface (admin / iOS) triggered the delete.
+          Uses a native confirm() rather than the typed-phrase modal
+          from the settings page because the scope here is bounded
+          (one folder) and the operator already drilled into it
+          deliberately — the explicit click + browser confirm is
+          proportionate to the blast radius.
+        */}}
+        <button type="button" id="inspector-delete-variants-btn"
+                class="btn destructive" disabled>
+          Delete variants in this scope
+        </button>
         <p id="inspector-submit-status" class="hint" aria-live="polite"></p>
       </div>
     </aside>

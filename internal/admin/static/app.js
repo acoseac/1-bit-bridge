@@ -1290,6 +1290,86 @@ function initSettings() {
   // feature is off) keeps the dashboard quiet for operators
   // who never enabled upscaling.
   startUpscaleStatsPoller();
+  // Typed-phrase clear-all-variants modal wiring. Lives in
+  // initSettings because the button + dialog are on this page.
+  initUpscaleClearAllModal();
+}
+
+// Required typed phrase for the "Clear all upscaled variants"
+// destructive action. Matches the `bridge artwork --gc
+// --confirm GC-ARTWORK` CLI convention — exact case + dash
+// sensitivity so an accidental click can't tab-+-Enter through.
+const UPSCALE_CLEAR_PHRASE = "delete-all-variants";
+
+function initUpscaleClearAllModal() {
+  const btn = document.getElementById("upscale-clear-all-btn");
+  const modal = document.getElementById("upscale-clear-modal");
+  if (!btn || !modal) return; // settings page not loaded yet
+  const input = document.getElementById("upscale-clear-modal-input");
+  const submitBtn = document.getElementById("upscale-clear-modal-submit");
+  const statusEl = document.getElementById("upscale-clear-modal-status");
+
+  btn.addEventListener("click", () => {
+    input.value = "";
+    submitBtn.disabled = true;
+    statusEl.hidden = true;
+    statusEl.textContent = "";
+    modal.showModal();
+    // Defer focus to next tick so the dialog has time to mount.
+    setTimeout(() => input.focus(), 0);
+  });
+
+  modal.querySelectorAll("[data-close]").forEach((closeBtn) =>
+    closeBtn.addEventListener("click", () => modal.close())
+  );
+
+  input.addEventListener("input", () => {
+    submitBtn.disabled = input.value !== UPSCALE_CLEAR_PHRASE;
+  });
+
+  submitBtn.addEventListener("click", async () => {
+    // Belt-and-braces: re-check the phrase here too. The disabled
+    // gate above should make this branch unreachable, but a future
+    // JS regression that leaves the button enabled mustn't be able
+    // to fire the delete without the operator's exact typed
+    // confirmation.
+    if (input.value !== UPSCALE_CLEAR_PHRASE) return;
+    submitBtn.disabled = true;
+    statusEl.hidden = false;
+    statusEl.textContent = "Deleting every variant…";
+    try {
+      const res = await fetch("/api/upscale/variants?confirm=true", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+      });
+      if (res.status === 503) {
+        statusEl.textContent = "Upscale feature is disabled on this bridge.";
+        return;
+      }
+      if (!res.ok) {
+        const body = await res.text();
+        throw new Error(body || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      statusEl.textContent =
+        `Done · deleted ${data.deletedCount} variants, ` +
+        `freed ${formatBytes(data.freedBytes ?? 0)}.`;
+      // Refresh stats so the "Cached variants" / "Cached on disk"
+      // counters reflect the post-delete state. The poller would
+      // catch up within 5 s anyway, but the immediate refresh
+      // closes the visual loop on the operator's action.
+      const tile = document.getElementById("upscale-stats");
+      if (tile) refreshUpscaleStats(tile);
+      // Auto-close after a short readback window so the operator
+      // sees the result before the modal disappears.
+      setTimeout(() => {
+        if (modal.open) modal.close();
+      }, 1500);
+    } catch (err) {
+      statusEl.textContent = `Couldn’t delete: ${err.message}`;
+      submitBtn.disabled = false; // allow retry without retyping
+    }
+  });
 }
 
 const upscaleStatsPollMs = 5000;
@@ -1338,6 +1418,14 @@ async function refreshUpscaleStats(tile) {
       setText("upscale-inflight", "—");
       setText("upscale-done", "—");
       setText("upscale-failed", "—");
+    }
+    // Toggle the "Clear all upscaled variants" button: nothing to
+    // clear when the cache is empty, so disable to communicate
+    // that visually. Re-enables on the next stats tick if a fresh
+    // batch lands cached variants while this page is open.
+    const clearBtn = document.getElementById("upscale-clear-all-btn");
+    if (clearBtn) {
+      clearBtn.disabled = !(r.cachedVariants > 0);
     }
   } catch (err) {
     // Stats endpoint failure isn't user-visible — log to
@@ -1538,6 +1626,8 @@ function initLibraryInspector() {
     });
   document.getElementById("inspector-upscale-btn")
     .addEventListener("click", inspectorSubmitBatch);
+  document.getElementById("inspector-delete-variants-btn")
+    .addEventListener("click", inspectorDeleteVariants);
 }
 
 async function inspectorNavigate(path) {
@@ -1690,6 +1780,13 @@ function inspectorSelectFolder(folder) {
   document.getElementById("inspector-drawer-warning").hidden = true;
   document.getElementById("inspector-drawer-unknown").hidden = true;
   document.getElementById("inspector-upscale-btn").disabled = true;
+  // Delete-variants button: enabled only when this scope has at
+  // least one already-upscaled track. Disabled-with-zero-count is
+  // the right shape — there's literally nothing to delete on a
+  // scope that's never been upscaled, and a click would surface as
+  // a 0-deleted noop response that's just visual noise.
+  document.getElementById("inspector-delete-variants-btn").disabled =
+    !(folder.upscaledCount > 0);
   document.getElementById("inspector-submit-status").textContent = "";
   inspectorFetchProjection(folder.path);
 }
@@ -1811,6 +1908,91 @@ async function inspectorSubmitBatch() {
       `<a href="/jobs">View jobs →</a>`;
   } catch (err) {
     status.textContent = `Couldn’t submit: ${err.message}`;
+    btn.disabled = false;
+  }
+}
+
+// inspectorDeleteVariants fires DELETE /api/upscale/variants?prefix=<scope>
+// against the admin port. The handler forwards to api.RunVariantDelete
+// which does the unlink + DB delete + SSE publish loop — paired iOS
+// clients receive the same `upscale.deleted` event they'd get from a
+// direct DELETE /v1/upscale/variants. Uses a native confirm() for the
+// scope-bounded delete; the global "Clear all" path on the settings
+// page has its own typed-phrase modal because the blast radius is wider.
+//
+// On success the inspector drawer's "Already upscaled" count is locally
+// zeroed AND the underlying folder row's `upscaledCount` snapshot is
+// updated, so subsequent selections (without navigation) reflect the
+// post-delete state without waiting for the browse fetch to re-fire.
+async function inspectorDeleteVariants() {
+  const sel = inspectorState.selection;
+  if (!sel || sel.kind !== "folder") return;
+  const scope = sel.row.path || "";
+  const scopeLabel = scope === "" ? "the library root" : scope;
+  if (!confirm(
+    `Delete every cached upscaled variant under “${scopeLabel}”?\n\n` +
+    `This removes the FLAC sidecars on disk AND the matching DB rows.\n` +
+    `Paired iOS devices will reconcile via the upscale.deleted SSE event.\n\n` +
+    `Source files are untouched — re-upscale anytime.`
+  )) return;
+
+  const btn = document.getElementById("inspector-delete-variants-btn");
+  btn.disabled = true;
+  const status = document.getElementById("inspector-submit-status");
+  status.textContent = "Deleting…";
+
+  try {
+    // Empty prefix is the library-root case → unscoped delete,
+    // which requires `?confirm=true` per the shared parser's
+    // safety gate. The native confirm() above is the operator's
+    // explicit opt-in for that wider scope; relay it as the
+    // ?confirm=true flag.
+    let url;
+    if (scope === "") {
+      url = `/api/upscale/variants?confirm=true`;
+    } else {
+      url = `/api/upscale/variants?prefix=${encodeURIComponent(scope)}`;
+    }
+    const res = await fetch(url, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+    });
+    if (res.status === 503) {
+      // Bridge upscale feature disabled mid-flight. Re-enable the
+      // button so the operator can retry after toggling the
+      // feature back on — matches `inspectorSubmitBatch`'s 503
+      // handler. Without this, a single mid-session toggle-off
+      // would force a navigation away + back to re-enable the
+      // delete affordance (CodeRabbit Minor on PR #220).
+      status.textContent = "Upscale feature is disabled on this bridge.";
+      btn.disabled = false;
+      return;
+    }
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(body || `HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    status.innerHTML =
+      `Deleted <strong>${data.deletedCount}</strong> variants · ` +
+      `freed ${humanBytes(data.freedBytes ?? 0)}.`;
+    // Re-fetch the authoritative folder state instead of deriving
+    // a post-delete count locally. `data.deletedCount` is the
+    // number of VARIANT ROWS removed; `folder.upscaledCount` is
+    // the number of TRACKS that have at least one variant.
+    // Subtracting variant-count from track-count is wrong-unit
+    // arithmetic — multi-variant-per-track tracks (operator
+    // generated several target rates over the lifetime of the
+    // bridge) would silently underflow the displayed count.
+    // CodeRabbit Major on PR #220 caught this. The re-navigation
+    // also refreshes every other row in the folder list, so a
+    // delete that affected sibling folders shows up immediately
+    // (rare — prefix scope is typically the selected folder
+    // itself, but possible if the selection is a parent and a
+    // child has variants too).
+    await inspectorNavigate(inspectorState.path);
+  } catch (err) {
+    status.textContent = `Couldn’t delete: ${err.message}`;
     btn.disabled = false;
   }
 }

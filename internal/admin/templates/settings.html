@@ -286,6 +286,29 @@
           <dt>Lifetime failed</dt><dd id="upscale-failed">…</dd>
         </dl>
         <p class="panel-note">Refreshes every 5 s while this page is open. Lifetime counters reset on bridge restart; cached-variant count survives.</p>
+
+        {{/*
+          Clear-all-variants affordance. Gated behind a typed-phrase
+          modal (matching the `bridge artwork --gc --confirm GC-ARTWORK`
+          CLI convention) so an accidental click can't wipe the cache
+          in one tap. The button is always present on the stats panel
+          but disabled when the cached count is zero — the JS toggles
+          `disabled` whenever the stats refresh lands. The DELETE
+          fires through /api/upscale/variants?confirm=true, which the
+          admin handler forwards to the same api.RunVariantDelete path
+          the iOS app uses, so paired clients see the upscale.deleted
+          SSE event uniformly.
+        */}}
+        <div class="upscale-clear-row">
+          <button type="button" id="upscale-clear-all-btn"
+                  class="btn destructive" disabled>
+            Clear all upscaled variants…
+          </button>
+          <p class="hint">
+            Removes every cached variant on disk + the matching DB rows. iOS clients
+            reconcile via the <code>upscale.deleted</code> SSE event.
+          </p>
+        </div>
       </div>
     </div>
 
@@ -325,4 +348,46 @@
     <p id="settings-msg" class="status" hidden></p>
   </form>
 </section>
+
+{{/*
+  Typed-phrase confirmation modal for the destructive "Clear all
+  upscaled variants" action. Mirrors the `bridge artwork --gc
+  --confirm GC-ARTWORK` CLI convention — operator must type
+  `delete-all-variants` exactly before the submit button enables.
+  Closed via the Cancel button OR the native `Esc` key (the
+  `<dialog>` element's built-in dismissal). Lives outside the
+  settings <form> so its inputs don't accidentally serialise into
+  the form's submit payload.
+*/}}
+<dialog id="upscale-clear-modal" aria-labelledby="upscale-clear-modal-title">
+  <section>
+    <h2 id="upscale-clear-modal-title">Clear all upscaled variants?</h2>
+    <p class="lede">
+      This deletes every cached <code>.flac</code> sidecar in
+      <code class="storage-path">{{.Data.UpscaleStoragePath}}</code> AND the
+      matching rows in <code>track_variants</code>. Paired iOS clients
+      will reconcile via the <code>upscale.deleted</code> SSE event and
+      drop their cached variant references.
+    </p>
+    <p class="hint">
+      The action is <strong>not undoable</strong>. Source files are untouched —
+      operators can re-upscale anything from the Library inspector or
+      from the iOS app's per-track menu after this clears.
+    </p>
+    <label>
+      Type <code>delete-all-variants</code> to confirm
+      <input id="upscale-clear-modal-input" type="text"
+             autocomplete="off" autocapitalize="off" spellcheck="false"
+             placeholder="delete-all-variants">
+    </label>
+    <p id="upscale-clear-modal-status" class="status" hidden></p>
+    <div class="actions">
+      <button type="button" class="btn" data-close>Cancel</button>
+      <button type="button" id="upscale-clear-modal-submit"
+              class="btn destructive" disabled>
+        Delete every variant
+      </button>
+    </div>
+  </section>
+</dialog>
 {{end}}

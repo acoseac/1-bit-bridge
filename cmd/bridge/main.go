@@ -486,6 +486,52 @@ func (a *adminBatchCoordinatorAdapter) ListBatches(limit int) ([]admin.AdminBatc
 	return out, nil
 }
 
+// adminVariantDeleterAdapter implements admin.AdminVariantDeleter
+// over the api.Server's `RunVariantDelete` method. Translates
+// between the two packages' equivalent request / response types so
+// the admin package stays free of internal/api (mirrors
+// `adminBatchCoordinatorAdapter` / UpscaleStats decoupling), AND so
+// the destructive list/unlink/DB-delete/SSE loop has exactly one
+// implementation regardless of caller (admin console vs. iOS app
+// vs. direct curl). The shared loop is what guarantees the
+// `upscale.deleted` SSE event fans out identically across all
+// three surfaces — paired clients reconcile their local state
+// regardless of origin.
+//
+// Nil-safe at construction: when `apiSrv` is nil (test harness,
+// pre-feature build) the admin Deps field is set to nil, and the
+// admin handler's `s.deps.VariantDeleter == nil` short-circuit
+// surfaces 503. The adapter itself never panics on a nil server.
+type adminVariantDeleterAdapter struct {
+	apiSrv *api.Server
+}
+
+func (a *adminVariantDeleterAdapter) Delete(ctx context.Context, req admin.AdminVariantDeleteRequest) (admin.AdminVariantDeleteResponse, error) {
+	if a == nil || a.apiSrv == nil {
+		return admin.AdminVariantDeleteResponse{}, admin.ErrAdminVariantDeleterUnavailable
+	}
+	apiReq := api.VariantDeleteRequest{
+		All:    req.All,
+		Prefix: req.Prefix,
+		Path:   req.Path,
+	}
+	resp, err := a.apiSrv.RunVariantDelete(ctx, apiReq)
+	if err != nil {
+		if errors.Is(err, api.ErrVariantDeleteUnavailable) {
+			// Translate the api package's sentinel to the admin
+			// package's sentinel so the admin handler can match
+			// without importing internal/api.
+			return admin.AdminVariantDeleteResponse{}, admin.ErrAdminVariantDeleterUnavailable
+		}
+		return admin.AdminVariantDeleteResponse{}, err
+	}
+	return admin.AdminVariantDeleteResponse{
+		DeletedCount: resp.DeletedCount,
+		FreedBytes:   resp.FreedBytes,
+		DeletedPaths: resp.DeletedPaths,
+	}, nil
+}
+
 func (a *adminBatchCoordinatorAdapter) Throughput() admin.AdminBatchThroughput {
 	t := a.coord.Throughput()
 	return admin.AdminBatchThroughput{
@@ -1747,6 +1793,20 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 				dataDir:   cfg.DataDir,
 				outputDir: transcode.OutputDirFor(cfg.DataDir),
 			}
+		}(),
+		VariantDeleter: func() admin.AdminVariantDeleter {
+			// Same untyped-nil pattern as BatchCoordinator: when the
+			// api.Server was constructed without
+			// `WithVariantDeleter` (pre-feature build, sox precheck
+			// failed, etc.), surface untyped-nil so the admin
+			// handler's `s.deps.VariantDeleter == nil` short-circuit
+			// returns 503. The adapter itself defends against this
+			// too — both layers gate so a misconfigured boot can't
+			// reach a panicking call site.
+			if apiSrv == nil {
+				return nil
+			}
+			return &adminVariantDeleterAdapter{apiSrv: apiSrv}
 		}(),
 	})
 	if err != nil {
