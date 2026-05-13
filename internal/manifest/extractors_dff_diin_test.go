@@ -2,8 +2,107 @@ package manifest
 
 import (
 	"encoding/binary"
+	"math"
 	"testing"
 )
+
+// TestSafeSeekSkip_TruthTable pins the uint64 → int64 overflow guard
+// used by the DFF chunk walker. A real DSD audio chunk (single-digit
+// GB at DSD512+) is well below int64 max, but a malformed header
+// claiming a giant size would silently convert to a negative int64
+// and cause a backward seek, locking the walker in a loop.
+// (CodeRabbit Major on PR #223.)
+func TestSafeSeekSkip_TruthTable(t *testing.T) {
+	cases := []struct {
+		name    string
+		in      uint64
+		want    int64
+		wantErr bool
+	}{
+		{"zero", 0, 0, false},
+		{"small", 4, 4, false},
+		{"realistic DSD audio chunk (~4 GiB)", 4 << 30, 4 << 30, false},
+		{"int64 max", math.MaxInt64, math.MaxInt64, false},
+		{"int64 max + 1 (uint64-only)", uint64(math.MaxInt64) + 1, 0, true},
+		{"uint64 max (malformed)", math.MaxUint64, 0, true},
+	}
+	for _, c := range cases {
+		got, err := safeSeekSkip(c.in)
+		if c.wantErr {
+			if err == nil {
+				t.Errorf("%s: safeSeekSkip(%d) = (%d, nil), want error", c.name, c.in, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s: safeSeekSkip(%d) unexpected error: %v", c.name, c.in, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("%s: safeSeekSkip(%d) = %d, want %d", c.name, c.in, got, c.want)
+		}
+	}
+}
+
+// TestExtractDFF_OversizedChunkRejected verifies the overflow guard
+// fires end-to-end: a DSDIFF file with a chunk declaring a uint64
+// size beyond int64 max must error rather than seek backward and
+// loop. The DSDIFF chunk-size field is BE64 (full uint64 range), so
+// a malicious file can trigger this.
+func TestExtractDFF_OversizedChunkRejected(t *testing.T) {
+	// Build a minimal valid PROP/SND chunk, then append a hostile
+	// chunk with size = 0xFFFFFFFFFFFFFFFF after it.
+	prop := []byte("SND ")
+	fs := []byte("FS  ")
+	var fsSize [8]byte
+	binary.BigEndian.PutUint64(fsSize[:], 4)
+	fs = append(fs, fsSize[:]...)
+	var rate [4]byte
+	binary.BigEndian.PutUint32(rate[:], 2_822_400)
+	fs = append(fs, rate[:]...)
+	prop = append(prop, fs...)
+	cmpr := []byte("CMPR")
+	var cmprSize [8]byte
+	binary.BigEndian.PutUint64(cmprSize[:], 5)
+	cmpr = append(cmpr, cmprSize[:]...)
+	cmpr = append(cmpr, []byte("DSD ")...)
+	cmpr = append(cmpr, 0x00, 0x00)
+	prop = append(prop, cmpr...)
+
+	propWithHeader := []byte("PROP")
+	var propSize [8]byte
+	binary.BigEndian.PutUint64(propSize[:], uint64(len(prop)))
+	propWithHeader = append(propWithHeader, propSize[:]...)
+	propWithHeader = append(propWithHeader, prop...)
+
+	// Hostile chunk: FOURCC + uint64-max size.
+	bad := []byte("XXXX")
+	var badSize [8]byte
+	binary.BigEndian.PutUint64(badSize[:], math.MaxUint64)
+	bad = append(bad, badSize[:]...)
+
+	body := []byte("DSD ")
+	body = append(body, propWithHeader...)
+	body = append(body, bad...)
+
+	out := []byte("FRM8")
+	var size [8]byte
+	binary.BigEndian.PutUint64(size[:], uint64(len(body)))
+	out = append(out, size[:]...)
+	out = append(out, body...)
+
+	path := writeTempDFF(t, out)
+	track := &Track{}
+	err := extractDFFWithContext(path, track, nil)
+	if err == nil {
+		t.Fatalf("extractDFFWithContext: want error on uint64-max chunk size, got nil")
+	}
+	// Codec was stamped before the walk so the manifest row still
+	// classifies as DFF even on a malformed file.
+	if track.Codec != "DFF" {
+		t.Errorf("Codec = %q, want %q (must stamp before walk)", track.Codec, "DFF")
+	}
+}
 
 // buildDIINSubChunk constructs one DSDIFF DIIN sub-chunk (DITI / DIAR /
 // DIAL / DIGN) carrying a pstring payload. Layout:

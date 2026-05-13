@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -880,7 +881,18 @@ func extractDFFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 			if size > maxDIINSize {
 				scanLogger.Warn("dff: DIIN chunk size exceeds sanity limit; skipping",
 					"path", absPath, "size", size, "limit", maxDIINSize)
-				skip := int64(size)
+				// Guard against uint64 → int64 overflow on a
+				// malformed-but-plausible DIIN size: maxDIINSize is
+				// 1 MiB so a normal oversize lands well below
+				// math.MaxInt64, but a corrupt header declaring
+				// `size = 0xFFFFFFFFFFFFFFFF` would convert to -1
+				// and seek BACKWARD by one byte. Refuse the
+				// conversion rather than re-read the same chunk
+				// header in a loop (CodeRabbit Major on PR #223).
+				skip, err := safeSeekSkip(size)
+				if err != nil {
+					return fmt.Errorf("dff: oversized DIIN unsafe to skip: %w", err)
+				}
 				if skip%2 == 1 {
 					skip++
 				}
@@ -900,12 +912,17 @@ func extractDFFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 				}
 			}
 		default:
-			// Skip the chunk payload + odd-byte pad. Use int64
-			// directly — we don't allocate, so a multi-GiB DSD audio
-			// chunk passes through unchallenged. `int64(size)` is
-			// safe because os.File.Seek takes int64 and Linux/macOS
-			// file sizes max at int64.
-			skip := int64(size)
+			// Skip the chunk payload + odd-byte pad. Real DSD audio
+			// chunks reach single-digit GB for DSD512+ — well below
+			// int64 max (~9.2 EiB). But a malformed header declaring
+			// `size = 0xFFFFFFFFFFFFFFFF` would convert to int64(-1)
+			// and seek BACKWARD by one byte, causing the walker to
+			// re-read the same chunk header in an infinite loop.
+			// Guard the conversion (CodeRabbit Major on PR #223).
+			skip, err := safeSeekSkip(size)
+			if err != nil {
+				return fmt.Errorf("dff: chunk %q unsafe to skip: %w", fourcc, err)
+			}
 			if skip%2 == 1 {
 				skip++
 			}
@@ -920,6 +937,23 @@ func extractDFFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 			_ = haveProp
 		}
 	}
+}
+
+// safeSeekSkip converts a `uint64` chunk size to the `int64` form
+// `os.File.Seek` requires, refusing the conversion when `size`
+// exceeds `math.MaxInt64`. Without this guard, a malformed DSDIFF
+// header declaring `size = 0xFFFFFFFFFFFFFFFF` would convert to
+// `int64(-1)` and seek BACKWARD by one byte instead of skipping
+// the chunk — the next iteration would re-read the same chunk
+// header in an infinite loop. Real DSD audio chunks (single-digit
+// GB at DSD512+) sit comfortably below `int64` max (~9.2 EiB), so
+// this guard never fires for well-formed files. CodeRabbit Major
+// on PR #223.
+func safeSeekSkip(size uint64) (int64, error) {
+	if size > math.MaxInt64 {
+		return 0, fmt.Errorf("chunk size %d exceeds int64 seek limit", size)
+	}
+	return int64(size), nil
 }
 
 // parseDIINChunks walks the body of a DSDIFF DIIN container chunk and
