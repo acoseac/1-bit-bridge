@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 )
 
 // minimalJPEG is a 12-byte JPEG-ish blob (SOI + APP0 marker prefix +
@@ -556,9 +558,8 @@ func TestWriteArtworkAtomicScan_RaceWinnerCleansTmp(t *testing.T) {
 
 	// Inject rename failure so the stat-and-accept branch fires
 	// without burning the full ~750 ms retry backoff budget.
-	orig := renameFunc
-	renameFunc = func(src, dst string) error { return os.ErrPermission }
-	t.Cleanup(func() { renameFunc = orig })
+	orig := atomicwrite.SetRenameFuncForTest(func(src, dst string) error { return os.ErrPermission })
+	t.Cleanup(func() { atomicwrite.SetRenameFuncForTest(orig) })
 
 	if err := writeArtworkAtomicScan(dst, data); err != nil {
 		t.Fatalf("writeArtworkAtomicScan: %v (expected nil — race winner with matching size)", err)
@@ -602,9 +603,8 @@ func TestWriteArtworkAtomicScan_RaceLoserDoesNotAcceptOnSizeCollision(t *testing
 		t.Fatal(err)
 	}
 
-	orig := renameFunc
-	renameFunc = func(src, dst string) error { return os.ErrPermission }
-	t.Cleanup(func() { renameFunc = orig })
+	orig := atomicwrite.SetRenameFuncForTest(func(src, dst string) error { return os.ErrPermission })
+	t.Cleanup(func() { atomicwrite.SetRenameFuncForTest(orig) })
 
 	if err := writeArtworkAtomicScan(dst, want); err == nil {
 		t.Fatal("writeArtworkAtomicScan returned nil; expected the rename error to propagate when destination is size-equal but byte-different")
