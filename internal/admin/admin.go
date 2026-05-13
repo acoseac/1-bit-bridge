@@ -170,6 +170,18 @@ type Deps struct {
 	// "Upscale this folder" trigger surfaces a 503.
 	BatchCoordinator AdminBatchCoordinator
 
+	// VariantDeleter is the admin-side gateway to the same
+	// list/unlink/DeleteVariant/SSE-publish pipeline that powers
+	// the public `DELETE /v1/upscale/variants` endpoint. Wired in
+	// cmd/bridge to an adapter around `api.Server.RunVariantDelete`
+	// so the admin console and the iOS app go through exactly one
+	// code path on the way out — no risk of drift between the two
+	// destructive surfaces. Nil-safe: when absent (upscale disabled
+	// on this bridge OR pre-feature build) the admin handler
+	// surfaces 503 service_unavailable, matching the
+	// `BatchCoordinator == nil` shape on the same page.
+	VariantDeleter AdminVariantDeleter
+
 	// IsSupervised reports whether the current process is running
 	// under launchd / systemd / Windows SCM — i.e. whether
 	// `os.Exit(0)` will trigger an automatic relaunch. Threaded
@@ -260,6 +272,55 @@ type AdminBatchInsufficientDiskSpace struct {
 func (e *AdminBatchInsufficientDiskSpace) Error() string {
 	return "upscale batch: insufficient disk space"
 }
+
+// AdminVariantDeleter is the admin-side interface the
+// `DELETE /api/upscale/variants` handler consumes. The single
+// `Delete` method takes a parsed admin-package request and
+// returns a parsed admin-package response — the adapter in
+// cmd/bridge/main.go translates to/from the `api` package's
+// `VariantDeleteRequest` / `VariantDeleteResponse` shapes so the
+// admin package stays free of `internal/api` (same decoupling
+// pattern as `AdminBatchCoordinator`).
+//
+// Errors:
+//   - `AdminVariantDeleterUnavailable` (sentinel) → handler emits
+//     503 service_unavailable. Distinguishes "feature off on this
+//     bridge" from "feature on but listing failed".
+//   - Any other error → handler emits 500 internal, with the error
+//     surface text in the response body.
+type AdminVariantDeleter interface {
+	Delete(ctx context.Context, req AdminVariantDeleteRequest) (AdminVariantDeleteResponse, error)
+}
+
+// AdminVariantDeleteRequest is the parsed-and-validated input to
+// the admin handler's call into the deleter. Exactly one of `All` /
+// `Prefix` / `Path` is set on any valid request; the handler
+// short-circuits the unscoped form behind a typed-phrase
+// confirmation in the UI (matches the `bridge artwork --gc`
+// `--confirm` CLI convention) plus the existing `?confirm=true`
+// query gate for direct callers.
+type AdminVariantDeleteRequest struct {
+	All    bool
+	Prefix string
+	Path   string
+}
+
+// AdminVariantDeleteResponse is the wire shape returned on
+// success. Same field set as the public endpoint's response so
+// the admin UI can render "deleted N variants, freed Y bytes"
+// directly from this body.
+type AdminVariantDeleteResponse struct {
+	DeletedCount int      `json:"deletedCount"`
+	FreedBytes   int64    `json:"freedBytes"`
+	DeletedPaths []string `json:"deletedPaths"`
+}
+
+// AdminVariantDeleterUnavailable is the sentinel error the
+// `DELETE /api/upscale/variants` handler matches against to emit
+// 503 — wired to wrap `api.VariantDeleteUnavailable` in the
+// cmd/bridge adapter so the admin package stays decoupled from
+// the api package's error definitions.
+var AdminVariantDeleterUnavailable = errors.New("variant deleter not wired")
 
 // UpscalePoolStats mirrors `transcode.PoolStats` field-for-
 // field but lives here so the admin package compiles without
@@ -485,6 +546,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/upscale/batch", s.apiUpscaleBatchSubmit)
 	mux.HandleFunc("GET /api/upscale/batches", s.apiUpscaleBatchList)
 	mux.HandleFunc("DELETE /api/upscale/batches/{id}", s.apiUpscaleBatchCancel)
+	mux.HandleFunc("DELETE /api/upscale/variants", s.apiUpscaleVariantsDelete)
 	mux.HandleFunc("GET /api/upscale/target", s.apiUpscaleTargetGet)
 	mux.HandleFunc("PATCH /api/upscale/target", s.apiUpscaleTargetPatch)
 	mux.HandleFunc("POST /api/restart", s.apiRestart)

@@ -182,13 +182,13 @@ func authDelete(t *testing.T, hs *httptest.Server, path, token string) *http.Res
 	return resp
 }
 
-func decodeDeleteResponse(t *testing.T, resp *http.Response) upscaleDeleteResponse {
+func decodeDeleteResponse(t *testing.T, resp *http.Response) VariantDeleteResponse {
 	t.Helper()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatalf("read body: %v", err)
 	}
-	var r upscaleDeleteResponse
+	var r VariantDeleteResponse
 	if err := json.NewDecoder(bytes.NewReader(body)).Decode(&r); err != nil {
 		t.Fatalf("decode response: %v (body=%q)", err, string(body))
 	}

@@ -99,17 +99,46 @@ func (s *Server) WithInflightDropper(d InflightDropper) *Server {
 	return s
 }
 
-// upscaleDeleteResponse is the wire shape returned on success.
+// VariantDeleteRequest is the parsed, validated input to
+// `RunVariantDelete`. The HTTP handler builds this from query
+// parameters; the admin-console wrapper builds it from its own
+// URL parsing. Exactly one of `All`, `Prefix`, `Path` is set on
+// any valid request — see `(*Server).validateVariantDeleteRequest`
+// for the validation surface that produces it.
+type VariantDeleteRequest struct {
+	// All true → delete every variant in the manifest. Mutually
+	// exclusive with `Prefix` / `Path`. The HTTP handler additionally
+	// requires `?confirm=true` for this shape; that gate lives in
+	// the parsing layer because admin / future callers may have
+	// their own confirmation surface.
+	All bool
+	// Prefix non-empty → delete all variants whose source path is
+	// under this path prefix. Must be a cleaned relative path
+	// (validateRelativePath).
+	Prefix string
+	// Path non-empty → delete variants for one exact source path.
+	// Must be a cleaned relative path.
+	Path string
+}
+
+// VariantDeleteResponse is the wire shape returned on success.
 // DeletedPaths is the set of source paths that had at least one
 // variant removed — iOS uses this to reconcile its local
 // `Track.bridgeVariants` without waiting for a full delta-sync
 // (alongside the upscale.deleted SSE event, which is the primary
 // fan-out path).
-type upscaleDeleteResponse struct {
+type VariantDeleteResponse struct {
 	DeletedCount int      `json:"deletedCount"`
 	FreedBytes   int64    `json:"freedBytes"`
 	DeletedPaths []string `json:"deletedPaths"`
 }
+
+// VariantDeleteUnavailable is the sentinel error `RunVariantDelete`
+// returns when the server has no `VariantDeleter` wired (i.e. the
+// `deleteVariants` capability is off on this bridge). The HTTP
+// handler maps this to 404 variant_not_found; admin maps it to 503
+// service_unavailable to match its existing "feature off" pattern.
+var VariantDeleteUnavailable = errors.New("variant deleter not wired")
 
 // upscaleDelete is the http.HandlerFunc registered at
 // DELETE /v1/upscale/variants. Wraps the request scope so the
@@ -125,19 +154,54 @@ func (s *Server) upscaleDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	q := r.URL.Query()
-	hasPrefix := q.Has("prefix")
-	hasPath := q.Has("path")
-	prefix := strings.TrimSpace(q.Get("prefix"))
-	pathParam := strings.TrimSpace(q.Get("path"))
-	confirm := strings.EqualFold(q.Get("confirm"), "true")
+	req, errCode, errMsg := parseVariantDeleteQuery(q)
+	if errCode != "" {
+		writeError(w, http.StatusBadRequest, errCode, errMsg)
+		return
+	}
+
+	resp, err := s.RunVariantDelete(r.Context(), req)
+	if err != nil {
+		if errors.Is(err, VariantDeleteUnavailable) {
+			writeError(w, http.StatusNotFound, "variant_not_found", "upscaling is not enabled on this bridge")
+			return
+		}
+		writeErrorLog(w, r, http.StatusInternalServerError, "internal",
+			"the bridge couldn't enumerate variants to delete", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// parseVariantDeleteQuery validates the three mutually-exclusive
+// query-param shapes (`?confirm=true` / `?prefix=<rel>` /
+// `?path=<rel>`) and returns a normalised `VariantDeleteRequest`.
+// On rejection returns `(zero, code, message)` where `code` is the
+// wire `error.code` the HTTP handler emits (caller maps to status).
+// Exported indirectly via the admin-console wrapper which uses the
+// same query-param shape; the admin's CSRF + loopback gates layer
+// on top of this validation, not in place of it.
+func parseVariantDeleteQuery(q map[string][]string) (req VariantDeleteRequest, errCode string, errMsg string) {
+	get := func(k string) string {
+		if vs := q[k]; len(vs) > 0 {
+			return vs[0]
+		}
+		return ""
+	}
+	has := func(k string) bool { _, ok := q[k]; return ok }
+
+	hasPrefix := has("prefix")
+	hasPath := has("path")
+	prefix := strings.TrimSpace(get("prefix"))
+	pathParam := strings.TrimSpace(get("path"))
+	confirm := strings.EqualFold(get("confirm"), "true")
 
 	// Mutually-exclusive shape — `prefix` AND `path` together is
 	// ambiguous (do we widen or narrow?); reject upfront rather
 	// than guess.
 	if hasPrefix && hasPath {
-		writeError(w, http.StatusBadRequest, "bad_request",
-			"cannot combine `prefix` and `path` query parameters; pick one")
-		return
+		return req, "bad_request",
+			"cannot combine `prefix` and `path` query parameters; pick one"
 	}
 
 	// Defense against accidental tooling — a stray
@@ -147,28 +211,57 @@ func (s *Server) upscaleDelete(w http.ResponseWriter, r *http.Request) {
 	// already scoped by the parameter; only the unscoped form
 	// requires confirm.
 	if !hasPrefix && !hasPath && !confirm {
-		writeError(w, http.StatusBadRequest, "bad_request",
-			"deleting all variants requires `?confirm=true` to be set explicitly")
-		return
+		return req, "bad_request",
+			"deleting all variants requires `?confirm=true` to be set explicitly"
 	}
 
 	if hasPrefix {
-		if v, ok := validateRelativePath(prefix); ok {
-			prefix = v
-		} else {
-			writeError(w, http.StatusBadRequest, "bad_request",
-				"`prefix` must be a clean relative path (no leading `/`, no `..`)")
-			return
+		v, ok := validateRelativePath(prefix)
+		if !ok {
+			return req, "bad_request",
+				"`prefix` must be a clean relative path (no leading `/`, no `..`)"
 		}
+		req.Prefix = v
+		return req, "", ""
 	}
 	if hasPath {
-		if v, ok := validateRelativePath(pathParam); ok {
-			pathParam = v
-		} else {
-			writeError(w, http.StatusBadRequest, "bad_request",
-				"`path` must be a clean relative path (no leading `/`, no `..`)")
-			return
+		v, ok := validateRelativePath(pathParam)
+		if !ok {
+			return req, "bad_request",
+				"`path` must be a clean relative path (no leading `/`, no `..`)"
 		}
+		req.Path = v
+		return req, "", ""
+	}
+	req.All = true
+	return req, "", ""
+}
+
+// RunVariantDelete is the core delete-variants execution path,
+// extracted from `upscaleDelete` so the admin console
+// (`DELETE /api/upscale/variants`) can share it without
+// duplicating the four-phase list/dedup-drop/unlink+delete/SSE-publish
+// loop. The HTTP handler and the admin handler both parse their
+// own query params, call this method, and translate the result
+// (or `VariantDeleteUnavailable`) into their respective response
+// shapes.
+//
+// Returns `(VariantDeleteResponse, nil)` for the success path
+// (including the empty-rows fast path → zero-counts response).
+// Returns `(_, VariantDeleteUnavailable)` when `variantDeleter`
+// is nil — callers map to 404 (api) or 503 (admin). Any other
+// error is a SQLite enumeration failure during the list phase;
+// the per-row unlink / DeleteVariant errors log+continue
+// internally so the response always reflects what actually
+// happened.
+//
+// The same `upscale.deleted` SSE event is emitted regardless of
+// caller — iOS reconciles via that single fan-out path no matter
+// whether the user clicked Delete in the iOS app, the admin
+// console, or invoked the HTTP endpoint directly.
+func (s *Server) RunVariantDelete(ctx context.Context, req VariantDeleteRequest) (VariantDeleteResponse, error) {
+	if s.variantDeleter == nil {
+		return VariantDeleteResponse{}, VariantDeleteUnavailable
 	}
 
 	// Phase 1: resolve the target row set under the request ctx.
@@ -179,23 +272,21 @@ func (s *Server) upscaleDelete(w http.ResponseWriter, r *http.Request) {
 		err  error
 	)
 	switch {
-	case hasPath:
-		rows, err = s.variantDeleter.ListVariantsForPath(r.Context(), pathParam)
-	case hasPrefix:
-		rows, err = s.variantDeleter.ListVariantsByPathPrefix(r.Context(), prefix)
+	case req.Path != "":
+		rows, err = s.variantDeleter.ListVariantsForPath(ctx, req.Path)
+	case req.Prefix != "":
+		rows, err = s.variantDeleter.ListVariantsByPathPrefix(ctx, req.Prefix)
 	default:
-		rows, err = s.variantDeleter.AllVariants(r.Context())
+		// req.All — confirm gate enforced at parse time.
+		rows, err = s.variantDeleter.AllVariants(ctx)
 	}
 	if err != nil {
-		writeErrorLog(w, r, http.StatusInternalServerError, "internal",
-			"the bridge couldn't enumerate variants to delete", err)
-		return
+		return VariantDeleteResponse{}, err
 	}
 
-	resp := upscaleDeleteResponse{DeletedPaths: []string{}}
+	resp := VariantDeleteResponse{DeletedPaths: []string{}}
 	if len(rows) == 0 {
-		writeJSON(w, http.StatusOK, resp)
-		return
+		return resp, nil
 	}
 
 	// Phase 2: pre-cancel matching transcode-pool dedup entries
@@ -217,8 +308,8 @@ func (s *Server) upscaleDelete(w http.ResponseWriter, r *http.Request) {
 		// Keep the shape uniform so future predicate evolutions
 		// don't fork.
 		targets := make(map[string]struct{}, len(rows))
-		for _, r := range rows {
-			targets[r.SourcePath] = struct{}{}
+		for _, row := range rows {
+			targets[row.SourcePath] = struct{}{}
 		}
 		_ = s.inflightDropper.DropInflight(func(sourcePath string) bool {
 			_, hit := targets[sourcePath]
@@ -238,7 +329,7 @@ func (s *Server) upscaleDelete(w http.ResponseWriter, r *http.Request) {
 	// with whatever DID disappear.
 	deletedPaths := map[string]struct{}{}
 	deletedVariantIDs := make([]string, 0, len(rows))
-	logger := LoggerFromContext(r.Context())
+	logger := LoggerFromContext(ctx)
 	for _, row := range rows {
 		if err := os.Remove(row.SidecarPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			logger.Warn("variant unlink failed; leaving DB row in place",
@@ -248,7 +339,7 @@ func (s *Server) upscaleDelete(w http.ResponseWriter, r *http.Request) {
 			)
 			continue
 		}
-		if err := s.variantDeleter.DeleteVariant(r.Context(), row.SourcePath, row.VariantID); err != nil {
+		if err := s.variantDeleter.DeleteVariant(ctx, row.SourcePath, row.VariantID); err != nil {
 			logger.Warn("variant DB delete failed after unlink; sidecar gone but row remains",
 				slog.String("source_path", row.SourcePath),
 				slog.String("variant_id", row.VariantID),
@@ -278,7 +369,7 @@ func (s *Server) upscaleDelete(w http.ResponseWriter, r *http.Request) {
 		publishUpscaleDeleted(s.EventPublisher(), resp.DeletedPaths, deletedVariantIDs)
 	}
 
-	writeJSON(w, http.StatusOK, resp)
+	return resp, nil
 }
 
 // validateRelativePath enforces the project-wide "no leading slash,
