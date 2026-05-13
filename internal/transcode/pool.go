@@ -602,6 +602,59 @@ type PoolStats struct {
 	Failed   uint64
 }
 
+// DropInflight removes entries from the dedup `inflight` map whose
+// source_path satisfies the supplied predicate. Returns the count
+// dropped.
+//
+// Used by the variant-delete handler (DELETE /v1/upscale/variants)
+// and the integrity watcher to make sure a re-submission of an
+// upscale request for a deleted path doesn't no-op against the
+// stale dedup slot — without dropping the entry, a follow-up
+// Enqueue would silently coalesce against an in-flight worker
+// that's about to write a sidecar the caller intends to delete.
+//
+// Does NOT cancel in-flight workers — there is no per-job
+// cancellation primitive (workers run under the pool's stopCtx
+// only). The unlink race is the caller's problem; the caller
+// removes the sidecar file BEFORE the worker can write it, and if
+// a worker beats the unlink the next `--gc` reverse pass / the
+// integrity watcher reaps the orphan within ≤1 h. Document the
+// race shape at the call site, not here.
+//
+// Lock discipline: `p.mu` held only for the iteration window.
+// Predicate is called synchronously under the lock; predicate
+// authors keep predicates allocation-light (no DB calls, no map
+// lookups on shared state). Caller proceeds to any I/O / SSE
+// publishes AFTER this method returns, not under p.mu.
+//
+// Map key parsing: keys are `source_path + "|" + variant_id` per
+// the Enqueue contract. Splits on the FIRST `|` via
+// strings.IndexByte (no SplitN allocation per iteration) and
+// passes only the source_path segment to the predicate. The
+// `|` byte is reserved (paths never contain it in practice, and
+// the manifest scanner rejects upserts with malformed paths at
+// the boundary); a defensive missing-pipe entry is left untouched
+// rather than logged — it's never legitimately present.
+func (p *Pool) DropInflight(matches func(sourcePath string) bool) int {
+	if matches == nil {
+		return 0
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	dropped := 0
+	for key := range p.inflight {
+		pipe := strings.IndexByte(key, '|')
+		if pipe < 0 {
+			continue
+		}
+		if matches(key[:pipe]) {
+			delete(p.inflight, key)
+			dropped++
+		}
+	}
+	return dropped
+}
+
 // Stats returns the current snapshot. Safe to call concurrently
 // with Enqueue / worker activity.
 func (p *Pool) Stats() PoolStats {

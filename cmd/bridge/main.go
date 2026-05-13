@@ -37,6 +37,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/enrich"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
+	"github.com/acoseac/1-bit-bridge/internal/integrity"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	bridgemdns "github.com/acoseac/1-bit-bridge/internal/mdns"
@@ -79,6 +80,105 @@ func (a *variantStoreAdapter) LookupVariant(sourcePath, variantID string) (*api.
 		SourceMTimeNS: v.SourceMTimeNS,
 		SourceSize:    v.SourceSize,
 	}, nil
+}
+
+// variantDeleterAdapter implements api.VariantDeleter on top of a
+// manifest.Store. Translates between manifest.VariantRow and
+// api.VariantSummary (the api-package-local projection). Same
+// upward-cycle-avoidance pattern variantStoreAdapter uses.
+type variantDeleterAdapter struct {
+	store *manifest.Store
+}
+
+func (a *variantDeleterAdapter) AllVariants() ([]api.VariantSummary, error) {
+	rows, err := a.store.AllVariants()
+	if err != nil {
+		return nil, err
+	}
+	return variantSummariesFromRows(rows), nil
+}
+
+func (a *variantDeleterAdapter) ListVariantsByPathPrefix(prefix string) ([]api.VariantSummary, error) {
+	rows, err := a.store.ListVariantsByPathPrefix(prefix)
+	if err != nil {
+		return nil, err
+	}
+	return variantSummariesFromRows(rows), nil
+}
+
+func (a *variantDeleterAdapter) ListVariantsForPath(sourcePath string) ([]api.VariantSummary, error) {
+	rows, err := a.store.ListVariantsForPath(sourcePath)
+	if err != nil {
+		return nil, err
+	}
+	return variantSummariesFromRows(rows), nil
+}
+
+func (a *variantDeleterAdapter) DeleteVariant(sourcePath, variantID string) error {
+	return a.store.DeleteVariant(sourcePath, variantID)
+}
+
+func variantSummariesFromRows(rows []manifest.VariantRow) []api.VariantSummary {
+	out := make([]api.VariantSummary, len(rows))
+	for i, r := range rows {
+		out[i] = api.VariantSummary{
+			SourcePath:  r.SourcePath,
+			VariantID:   r.VariantID,
+			SidecarPath: r.SidecarPath,
+			SizeBytes:   r.SizeBytes,
+		}
+	}
+	return out
+}
+
+// inflightDropperAdapter implements api.InflightDropper on top of a
+// transcode.Pool. One-line passthrough; lives here so the api
+// package keeps its narrow handler-facing interface without an
+// inverted dependency on internal/transcode.
+type inflightDropperAdapter struct {
+	pool *transcode.Pool
+}
+
+func (a *inflightDropperAdapter) DropInflight(matches func(sourcePath string) bool) int {
+	return a.pool.DropInflight(matches)
+}
+
+// integrityVariantListerAdapter implements integrity.VariantLister on
+// top of a manifest.Store. Mirrors variantDeleterAdapter's narrow
+// projection but for the watcher's use — no SidecarPath/SizeBytes
+// in the api.VariantSummary mapping is needed here since the
+// watcher reads them off its own VariantSnapshot type.
+type integrityVariantListerAdapter struct {
+	store *manifest.Store
+}
+
+func (a *integrityVariantListerAdapter) AllVariants() ([]integrity.VariantSnapshot, error) {
+	rows, err := a.store.AllVariants()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]integrity.VariantSnapshot, len(rows))
+	for i, r := range rows {
+		out[i] = integrity.VariantSnapshot{
+			SourcePath:  r.SourcePath,
+			VariantID:   r.VariantID,
+			SidecarPath: r.SidecarPath,
+		}
+	}
+	return out, nil
+}
+
+// integrityVariantDeleterAdapter implements integrity.VariantDeleter
+// on top of a manifest.Store. Same one-line passthrough as
+// variantDeleterAdapter's DeleteVariant; lives separately so the
+// integrity package stays decoupled from internal/api's
+// VariantSummary type.
+type integrityVariantDeleterAdapter struct {
+	store *manifest.Store
+}
+
+func (a *integrityVariantDeleterAdapter) DeleteVariant(sourcePath, variantID string) error {
+	return a.store.DeleteVariant(sourcePath, variantID)
 }
 
 // upscaleEnqueuerAdapter implements api.UpscaleEnqueuer on top
@@ -1312,6 +1412,43 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			dataDir:   cfg.DataDir,
 			outputDir: transcode.OutputDirFor(cfg.DataDir),
 		})
+		// Variant lifecycle: DELETE /v1/upscale/variants + reactive
+		// serve-side cleanup + integrity ticker all share the same
+		// store + pool refs. Wired together so the feature flag
+		// `deleteVariants` in /v1/health reliably reflects whether
+		// the underlying paths are reachable — see api.go's health
+		// handler for the gate.
+		apiSrv.WithVariantDeleter(&variantDeleterAdapter{store: manifestStore})
+		apiSrv.WithInflightDropper(&inflightDropperAdapter{pool: upscalePool})
+
+		// Periodic integrity sweep: walks `track_variants` on the
+		// configured cadence (default 1 h, opt-out via
+		// `integrity.variantSweepIntervalSec: 0`) and reconciles
+		// rows whose sidecar files no longer exist on disk. Pairs
+		// with the reactive open-on-serve cleanup in
+		// internal/api/files.go::serveVariant — that path closes
+		// the active-playback case immediately; this one catches
+		// the not-currently-playing case. The publish closure
+		// builds the typed api.UpscaleDeletedEvent so the SSE wire
+		// shape stays in lockstep with the operator-driven delete
+		// handler. Skipped silently when the interval is ≤ 0.
+		sweepInterval := cfg.VariantSweepInterval()
+		if sweepInterval > 0 {
+			variantWatcher := integrity.NewVariantWatcher(
+				&integrityVariantListerAdapter{store: manifestStore},
+				&integrityVariantDeleterAdapter{store: manifestStore},
+				func(paths, variantIDs []string) {
+					apiSrv.EventPublisher().Publish("upscale.deleted", api.UpscaleDeletedEvent{
+						Paths:      paths,
+						VariantIDs: variantIDs,
+						DeletedAt:  time.Now(),
+					})
+				},
+				sweepInterval,
+			)
+			stopVariantWatcher := variantWatcher.Start(scanCtx)
+			defer stopVariantWatcher()
+		}
 	}
 
 	// /v1/upscale/stats wiring. Always registered so paired iOS

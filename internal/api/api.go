@@ -73,6 +73,8 @@ type Server struct {
 	pairingRateLimiter   *pairingRateLimiter
 	certNotAfter         time.Time            // zero when not wired (test harnesses)
 	variantStore         VariantStore         // nil unless WithUpscale(true, vs) called
+	variantDeleter       VariantDeleter       // nil unless WithVariantDeleter wired (variant-lifecycle delete)
+	inflightDropper      InflightDropper      // nil unless WithInflightDropper wired (transcode pool dedup)
 	upscaleEnabled       bool                 // mirrors cfg.Upscale.Enabled (and sox-probe outcome)
 	upscaleEnqueuer      UpscaleEnqueuer      // nil unless WithUpscaleEnqueuer wired (Phase 2.5)
 	upscaleStatsProvider UpscaleStatsProvider // nil unless WithUpscaleStats wired (v1.2 management UI)
@@ -446,6 +448,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/upscale/batch", s.authed(s.upscaleBatchSubmit))
 	mux.HandleFunc("GET /v1/upscale/batches", s.authed(s.upscaleBatchList))
 	mux.HandleFunc("DELETE /v1/upscale/batches/{id}", s.authed(s.upscaleBatchCancel))
+	mux.HandleFunc("DELETE /v1/upscale/variants", s.authed(s.upscaleDelete))
 	mux.HandleFunc("GET /v1/events", s.authed(s.events))
 	mux.HandleFunc("POST /v1/pairing/requests", s.pairingRequest)
 	mux.HandleFunc("GET /v1/pairing/{requestID}", s.pairingPoll)
@@ -658,11 +661,25 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		// /v1/upscale/batch endpoints surface 503 with nothing to
 		// fall back to. Two-condition gate avoids that gap. Per
 		// CodeRabbit major on PR #204 round 2.
-		if s.batchCoordinator != nil {
-			resp.Features = []string{"operatorDrivenUpscale", "upscaleCompleteEvents", "variantBumpsIndex"}
-		} else {
-			resp.Features = []string{"upscaleCompleteEvents", "variantBumpsIndex"}
+		//
+		// `deleteVariants` advertises the DELETE /v1/upscale/variants
+		// route AND the upscale.deleted SSE topic. iOS reads it on
+		// the same probe to know the bridge fires reliable
+		// `upscale.deleted` events (operator-driven, reactive
+		// serve-side cleanup, AND the integrity ticker) — without
+		// the flag, iOS can't trust the wand chrome to revert
+		// passively when a variant disappears server-side. Gated
+		// on `s.variantDeleter != nil` so a feature-disabled deploy
+		// (no variant store wired) advertises honestly.
+		feats := []string{}
+		if s.variantDeleter != nil {
+			feats = append(feats, "deleteVariants")
 		}
+		if s.batchCoordinator != nil {
+			feats = append(feats, "operatorDrivenUpscale")
+		}
+		feats = append(feats, "upscaleCompleteEvents", "variantBumpsIndex")
+		resp.Features = feats
 	} else {
 		resp.Features = []string{"variantBumpsIndex"}
 	}
