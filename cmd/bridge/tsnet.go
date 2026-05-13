@@ -455,6 +455,12 @@ Type %q to confirm, anything else to cancel: `, stateDir, logoutConfirmPhrase)
 		fmt.Fprintln(stdout, "cancelled")
 		return 0
 	}
+	// Re-check liveness right before the destructive op — a bridge may have
+	// started while the operator was sitting at the confirmation prompt.
+	if !*force && isAdminAlive(cfg) {
+		fmt.Fprintln(stderr, "error: bridge came online while waiting for confirmation; aborting. Use --force to override.")
+		return 1
+	}
 	if err := os.RemoveAll(stateDir); err != nil {
 		fmt.Fprintf(stderr, "wipe state: %v\n", err)
 		return 1
