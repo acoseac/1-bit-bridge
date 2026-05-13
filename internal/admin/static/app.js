@@ -1343,7 +1343,16 @@ function initUpscaleClearAllModal() {
         headers: { "Content-Type": "application/json" },
       });
       if (res.status === 503) {
+        // Bridge upscale feature toggled off mid-flight. Re-enable
+        // the submit button so the operator can retry after
+        // toggling the feature back on without having to close
+        // and re-open the modal (which would also force them to
+        // re-type the confirmation phrase). Mirror of the
+        // `inspector-delete-variants-btn` 503 handler — same
+        // reasoning, same fix shape. CodeRabbit Minor on PR #220
+        // (post-merge — comment landed 37 s after merge).
         statusEl.textContent = "Upscale feature is disabled on this bridge.";
+        submitBtn.disabled = false;
         return;
       }
       if (!res.ok) {

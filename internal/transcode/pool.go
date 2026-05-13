@@ -882,13 +882,25 @@ func (p *Pool) processJob(job poolJob) {
 				failedAt:        time.Now().UTC(),
 				batchID:         job.spec.BatchID,
 			})
+		}
+		// Release the dedup slot BEFORE publishing the state change
+		// so the publisher's snapshot reflects the post-failure
+		// `inflight` set, not a transient state still holding this
+		// failed job. Mirrors the success branch's
+		// `releaseDedup → fireStateChange` ordering (documented at
+		// the per-job completion comment below) — CodeRabbit Minor
+		// on PR #217 caught the inconsistency. The previous shape
+		// fired the SSE first while the failed job was still in
+		// `p.inflight`, briefly publishing a stale snapshot that
+		// iOS clients then had to reconcile away on the next tick.
+		p.releaseDedup(job.dedup)
+		released = true
+		if !p.closed.Load() {
 			// Worker isn't stalled by the publisher's CountVariants
 			// DB query — Gemini high-severity review on PR #136. The
 			// publisher consumes asynchronously on its own goroutine.
 			p.fireStateChange()
 		}
-		p.releaseDedup(job.dedup)
-		released = true
 		return
 	}
 	p.doneCnt.Add(1)
