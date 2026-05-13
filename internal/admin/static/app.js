@@ -1969,24 +1969,21 @@ async function inspectorDeleteVariants() {
     status.innerHTML =
       `Deleted <strong>${data.deletedCount}</strong> variants · ` +
       `freed ${humanBytes(data.freedBytes ?? 0)}.`;
-    // Locally reflect the post-delete state so the drawer doesn't
-    // need a fresh browse fetch to look right. The folder row in
-    // inspectorState.selection is the same object reference the
-    // browse data put in `currentRows`, so this propagates back
-    // to a subsequent re-select on the same folder.
-    sel.row.upscaledCount = Math.max(0, sel.row.upscaledCount - data.deletedCount);
-    document.getElementById("inspector-drawer-covered").textContent =
-      `${sel.row.upscaledCount}`;
-    document.getElementById("inspector-drawer-tracks").textContent =
-      `${sel.row.trackCount} (${sel.row.upscaledCount} already upscaled)`;
-    // Disable the delete button if we've cleared the scope; the
-    // upscale button's enabled-state is owned by the projection
-    // fetch + wouldFit logic and shouldn't be flipped from here.
-    if (sel.row.upscaledCount === 0) {
-      btn.disabled = true;
-    } else {
-      btn.disabled = false;
-    }
+    // Re-fetch the authoritative folder state instead of deriving
+    // a post-delete count locally. `data.deletedCount` is the
+    // number of VARIANT ROWS removed; `folder.upscaledCount` is
+    // the number of TRACKS that have at least one variant.
+    // Subtracting variant-count from track-count is wrong-unit
+    // arithmetic — multi-variant-per-track tracks (operator
+    // generated several target rates over the lifetime of the
+    // bridge) would silently underflow the displayed count.
+    // CodeRabbit Major on PR #220 caught this. The re-navigation
+    // also refreshes every other row in the folder list, so a
+    // delete that affected sibling folders shows up immediately
+    // (rare — prefix scope is typically the selected folder
+    // itself, but possible if the selection is a parent and a
+    // child has variants too).
+    await inspectorNavigate(inspectorState.path);
   } catch (err) {
     status.textContent = `Couldn’t delete: ${err.message}`;
     btn.disabled = false;

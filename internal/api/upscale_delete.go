@@ -264,6 +264,25 @@ func (s *Server) RunVariantDelete(ctx context.Context, req VariantDeleteRequest)
 		return VariantDeleteResponse{}, VariantDeleteUnavailable
 	}
 
+	// Defense in depth: validate the exact-one-shape invariant the
+	// parsers (api + admin) both produce. The HTTP path can only
+	// reach here via `parseVariantDeleteQuery`, which sets exactly
+	// one of `All` / `Prefix` / `Path`. But `RunVariantDelete` is
+	// an exported method on `*Server` — a future caller (test
+	// harness, internal tool) that constructs `VariantDeleteRequest`
+	// directly could omit the explicit `All=true` and fall through
+	// to the `default` switch arm pre-fix, silently wiping the
+	// whole cache. Reject zero-value and mixed-shape requests
+	// upfront so the load-bearing "every all-variants delete is an
+	// explicit operator opt-in" property holds at the execution
+	// boundary, not just at the HTTP boundary (CodeRabbit Major on
+	// PR #220).
+	if (req.All && (req.Prefix != "" || req.Path != "")) ||
+		(req.Prefix != "" && req.Path != "") ||
+		(!req.All && req.Prefix == "" && req.Path == "") {
+		return VariantDeleteResponse{}, errors.New("variant delete request must set exactly one of All, Prefix, Path")
+	}
+
 	// Phase 1: resolve the target row set under the request ctx.
 	// A client disconnect here surfaces as an error and we return —
 	// no rows touched.
@@ -276,9 +295,17 @@ func (s *Server) RunVariantDelete(ctx context.Context, req VariantDeleteRequest)
 		rows, err = s.variantDeleter.ListVariantsForPath(ctx, req.Path)
 	case req.Prefix != "":
 		rows, err = s.variantDeleter.ListVariantsByPathPrefix(ctx, req.Prefix)
-	default:
-		// req.All — confirm gate enforced at parse time.
+	case req.All:
+		// Validated above; explicit `case req.All` (rather than
+		// `default`) closes the "zero-value falls through to wipe
+		// the cache" gap noted in the guard comment.
 		rows, err = s.variantDeleter.AllVariants(ctx)
+	default:
+		// Unreachable — the guard above rejects every shape that
+		// would land here. Defensive return so a future refactor
+		// that loosens the guard doesn't silently re-open the
+		// zero-value wipe path.
+		return VariantDeleteResponse{}, errors.New("variant delete request must set exactly one of All, Prefix, Path")
 	}
 	if err != nil {
 		return VariantDeleteResponse{}, err
