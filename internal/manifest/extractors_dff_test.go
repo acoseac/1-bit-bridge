@@ -224,3 +224,104 @@ func TestExtractDFF_CodecStampsBeforeOpen(t *testing.T) {
 		t.Errorf("Codec = %q, want %q (must stamp before open attempt)", track.Codec, "DFF")
 	}
 }
+
+// TestExtractDFF_PROPShortPayloadKeepsCursorAligned regression-tests
+// the CodeRabbit Critical post-merge finding on PR #223: a PROP
+// chunk with `size < 4` (too short to hold even the "SND " form-
+// type) previously bare-`continue`'d without skipping the
+// payload, leaving the cursor inside the PROP body and corrupting
+// every subsequent chunk-header read. The fix routes the short-
+// size branch through safeSeekSkip + seekPastChunk so the walker
+// stays aligned, and a trailing DIIN chunk with title metadata
+// is recovered correctly.
+func TestExtractDFF_PROPShortPayloadKeepsCursorAligned(t *testing.T) {
+	// Hand-craft: FRM8 + "DSD " form-type + PROP with size=3 (3
+	// bytes of junk, odd → 1 pad byte) + DSD audio stub + DIIN
+	// with a DITI title. Without the fix, the post-PROP cursor
+	// would be 16 bytes off (12 chunk-header reread + 4 misread
+	// payload bytes), so the DSD-chunk header would be misread
+	// and DIIN never found.
+	body := []byte("DSD ") // FRM8 form type
+
+	// Malformed PROP: size=3, three junk bytes + 1 pad.
+	body = append(body, []byte("PROP")...)
+	var propSize [8]byte
+	binary.BigEndian.PutUint64(propSize[:], 3)
+	body = append(body, propSize[:]...)
+	body = append(body, 0xAA, 0xBB, 0xCC, 0x00) // 3 junk + 1 pad
+
+	// Valid DSD audio chunk (1-byte stub + 1 pad).
+	body = append(body, []byte("DSD ")...)
+	var dsdSize [8]byte
+	binary.BigEndian.PutUint64(dsdSize[:], 1)
+	body = append(body, dsdSize[:]...)
+	body = append(body, 0x00, 0x00) // 1 byte + 1 pad
+
+	// DIIN with a DITI title — only reachable if the walker stays
+	// aligned after the malformed PROP.
+	diin := buildDIINContainer(buildDIINSubChunk("DITI", "RecoveredAfterBadPROP"))
+	body = append(body, diin...)
+
+	out := []byte("FRM8")
+	var size [8]byte
+	binary.BigEndian.PutUint64(size[:], uint64(len(body)))
+	out = append(out, size[:]...)
+	out = append(out, body...)
+
+	path := writeTempDFF(t, out)
+	track := &Track{}
+	if err := extractDFFWithContext(path, track, nil); err != nil {
+		t.Fatalf("extractDFFWithContext: %v", err)
+	}
+	if track.Title != "RecoveredAfterBadPROP" {
+		t.Errorf("Title = %q, want %q (PROP short-payload mis-aligned walker?)",
+			track.Title, "RecoveredAfterBadPROP")
+	}
+}
+
+// TestExtractDFF_PROPNonSNDFormTypeKeepsCursorAligned regression-
+// tests the second half of the PR #223 Critical finding: a PROP
+// chunk with an odd size AND a non-"SND " form-type previously
+// bare-`continue`'d without consuming the pad byte, shifting
+// every subsequent chunk header by one byte. The fix consumes
+// the pad before continuing.
+func TestExtractDFF_PROPNonSNDFormTypeKeepsCursorAligned(t *testing.T) {
+	body := []byte("DSD ")
+
+	// PROP with non-"SND " form-type AND odd size (5 bytes — 4
+	// form-type bytes + 1 junk). Pre-fix the walker would skip
+	// past 5 bytes of body content but leave the 1 pad byte
+	// unread, shifting alignment by 1.
+	body = append(body, []byte("PROP")...)
+	var propSize [8]byte
+	binary.BigEndian.PutUint64(propSize[:], 5)
+	body = append(body, propSize[:]...)
+	body = append(body, []byte("WRNG")...) // not "SND "
+	body = append(body, 0xDD)              // 1 junk byte
+	body = append(body, 0x00)              // pad byte (1+5=6 even when wrapped — actually 5 is odd so pad needed)
+
+	body = append(body, []byte("DSD ")...)
+	var dsdSize [8]byte
+	binary.BigEndian.PutUint64(dsdSize[:], 1)
+	body = append(body, dsdSize[:]...)
+	body = append(body, 0x00, 0x00)
+
+	diin := buildDIINContainer(buildDIINSubChunk("DITI", "RecoveredAfterNonSNDPROP"))
+	body = append(body, diin...)
+
+	out := []byte("FRM8")
+	var size [8]byte
+	binary.BigEndian.PutUint64(size[:], uint64(len(body)))
+	out = append(out, size[:]...)
+	out = append(out, body...)
+
+	path := writeTempDFF(t, out)
+	track := &Track{}
+	if err := extractDFFWithContext(path, track, nil); err != nil {
+		t.Fatalf("extractDFFWithContext: %v", err)
+	}
+	if track.Title != "RecoveredAfterNonSNDPROP" {
+		t.Errorf("Title = %q, want %q (PROP non-SND pad mis-handled?)",
+			track.Title, "RecoveredAfterNonSNDPROP")
+	}
+}

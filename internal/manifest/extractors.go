@@ -880,10 +880,22 @@ func parseReplayGain(s string) *float64 {
 // `TORY` is a 4-digit year, ID3v2.4 `TDOR` is an ISO-8601 timestamp,
 // Vorbis `ORIGINALDATE` is operator-discretion (often ISO-8601). The
 // prefix parse handles all three uniformly.
+//
+// **5+ digit prefix rejection** (CodeRabbit Minor post-merge on
+// PR #228 → #231): a malformed value like `"10000-01-01"` used to
+// silently truncate to `1000`, corrupting OriginalYear. Now refuse
+// the parse when the 5th character (if present) is also a digit —
+// real ISO-8601 years are bounded at 4 digits in this format, and
+// real bare-year strings end at 4 digits too. A 5th-position
+// non-digit (separator, end-of-string) confirms the prefix is the
+// year.
 func parseYearPrefix(s string) (int, error) {
 	s = strings.TrimSpace(s)
 	if len(s) < 4 {
 		return 0, fmt.Errorf("year prefix too short: %q", s)
+	}
+	if len(s) > 4 && s[4] >= '0' && s[4] <= '9' {
+		return 0, fmt.Errorf("year prefix too long (5+ digit): %q", s)
 	}
 	y, err := strconv.Atoi(s[:4])
 	if err != nil {
@@ -1205,6 +1217,22 @@ func extractDFFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 			// multi-MiB declared PROP is a corruption signal, not a
 			// high-res DSD payload.
 			if size < 4 {
+				// Malformed: PROP payload too short to hold the
+				// "SND " form-type. Pre-fix the bare `continue`
+				// left the cursor at the start of the payload —
+				// next iteration read 12 bytes from INSIDE the
+				// PROP body and mis-interpreted them as a chunk
+				// header, mis-aligning the rest of the walk.
+				// Seek past whatever's declared (+ pad if odd) so
+				// the walker stays aligned for later valid chunks.
+				// CodeRabbit Critical post-merge on PR #223.
+				skip, err := safeSeekSkip(size)
+				if err != nil {
+					return fmt.Errorf("dff: PROP short payload unsafe to skip: %w", err)
+				}
+				if err := seekPastChunk(f, skip); err != nil {
+					return fmt.Errorf("dff: PROP short seek: %w", err)
+				}
 				continue
 			}
 			const maxPROPSize = 1 << 20
@@ -1216,6 +1244,18 @@ func extractDFFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 				return fmt.Errorf("dff: PROP body read: %w", err)
 			}
 			if len(body) < 4 || string(body[0:4]) != "SND " {
+				// Body consumed (size bytes), but the odd-size pad
+				// byte still belongs to this chunk's footprint and
+				// must be consumed before the next iteration reads
+				// the next chunk header. Pre-fix the bare `continue`
+				// left the pad byte unread on odd-size payloads,
+				// shifting every subsequent chunk header by one
+				// byte. CodeRabbit Critical post-merge on PR #223.
+				if size%2 == 1 {
+					if _, err := f.Seek(1, io.SeekCurrent); err != nil {
+						return fmt.Errorf("dff: PROP non-SND pad seek: %w", err)
+					}
+				}
 				continue
 			}
 			if dstCompressed := parsePropChunks(body[4:], t); dstCompressed {

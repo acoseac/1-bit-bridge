@@ -162,7 +162,10 @@ func TestParseYearPrefix_TruthTable(t *testing.T) {
 		{"19", 0, true, "too short"},
 		{"", 0, true, "empty"},
 		{"0000", 0, true, "year 0 out of range"},
-		{"10000-01-01", 1000, false, "prefix-only parse returns first-four-chars 1000 — documents the by-design behavior"},
+		{"10000-01-01", 0, true, "5+ digit prefix must be rejected, not silently truncated (CodeRabbit Minor post-merge on bridge #231)"},
+		{"99999", 0, true, "5+ digit bare prefix — refuse rather than parse first 4 chars as 9999"},
+		{"1985-", 1985, false, "trailing non-digit at position 4 confirms year prefix is exactly 4 digits"},
+		{"1985Z", 1985, false, "trailing alpha at position 4 also counts as separator (ISO-8601 'Z' suffix on year-only)"},
 	}
 	for _, c := range cases {
 		got, err := parseYearPrefix(c.in)
