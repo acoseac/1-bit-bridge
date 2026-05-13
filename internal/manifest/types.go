@@ -28,25 +28,35 @@ import "time"
 // number, no year), so user-visible behaviour is unchanged; the wire
 // shape just stops lying about which case the extractor saw.
 type Track struct {
-	Path               string    `json:"path"`
-	Size               int64     `json:"size"`
-	ModTime            time.Time `json:"mtime"`
-	Title              string    `json:"title,omitempty"`
-	Artist             string    `json:"artist,omitempty"`
-	AlbumArtist        string    `json:"albumArtist,omitempty"`
-	Album              string    `json:"album,omitempty"`
-	TrackNumber        *int      `json:"trackNumber,omitempty"`
-	DiscNumber         *int      `json:"discNumber,omitempty"`
-	Year               *int      `json:"year,omitempty"`
-	Genre              string    `json:"genre,omitempty"`
-	Duration           *float64  `json:"duration,omitempty"`      // seconds
-	SampleRate         *float64  `json:"sampleRate,omitempty"`    // Hz (e.g. 96000, 2822400)
-	BitsPerSample      *int      `json:"bitsPerSample,omitempty"` // 1 for DSD, 16/24/32 for PCM
-	IsDSD              *bool     `json:"isDSD,omitempty"`
-	ReplayGainTrackDB  *float64  `json:"replayGainTrackDB,omitempty"`
-	ReplayGainAlbumDB  *float64  `json:"replayGainAlbumDB,omitempty"`
-	MusicBrainzTrackID string    `json:"musicBrainzTrackID,omitempty"`
-	MusicBrainzAlbumID string    `json:"musicBrainzAlbumID,omitempty"`
+	Path        string    `json:"path"`
+	Size        int64     `json:"size"`
+	ModTime     time.Time `json:"mtime"`
+	Title       string    `json:"title,omitempty"`
+	Artist      string    `json:"artist,omitempty"`
+	AlbumArtist string    `json:"albumArtist,omitempty"`
+	Album       string    `json:"album,omitempty"`
+	TrackNumber *int      `json:"trackNumber,omitempty"`
+	DiscNumber  *int      `json:"discNumber,omitempty"`
+	Year        *int      `json:"year,omitempty"`
+	Genre       string    `json:"genre,omitempty"`
+	Duration    *float64  `json:"duration,omitempty"`   // seconds
+	SampleRate  *float64  `json:"sampleRate,omitempty"` // Hz (e.g. 96000, 2822400)
+	// BitsPerSample MUST remain nil for lossy formats (AAC / MP3 /
+	// OGG / OPUS / WMA) — the value would be the decoder's container
+	// width (e.g. 32 for AAC's Float32 output), not a meaningful
+	// integer bit depth of the encoded signal. Surfacing it would
+	// re-introduce the iOS PR #371 "M4A 32-bit" Now Playing chip
+	// regression. Every site in `extractors.go` that writes this
+	// field is gated by `!isLossyCodec(t.Codec)` (see PR-A2).
+	// Today FLAC + DSF + DFF + ALAC-via-M4A are the only formats
+	// that ACTUALLY populate this — the gate is structural insurance
+	// against a future enricher addition.
+	BitsPerSample      *int     `json:"bitsPerSample,omitempty"` // 1 for DSD, 16/24/32 for PCM
+	IsDSD              *bool    `json:"isDSD,omitempty"`
+	ReplayGainTrackDB  *float64 `json:"replayGainTrackDB,omitempty"`
+	ReplayGainAlbumDB  *float64 `json:"replayGainAlbumDB,omitempty"`
+	MusicBrainzTrackID string   `json:"musicBrainzTrackID,omitempty"`
+	MusicBrainzAlbumID string   `json:"musicBrainzAlbumID,omitempty"`
 	// ArtworkMBID identifies cached front-cover artwork. Two value
 	// shapes share this field:
 	//   - <UUID>          : MusicBrainz release MBID, set by the
@@ -114,6 +124,40 @@ type Track struct {
 	// `omitempty` so pre-v1.2 clients see no field at all on the wire.
 	// Per Gemini A1 / iOS bug review #1.
 	Codec string `json:"codec,omitempty"`
+
+	// Classical-metadata fields (PR-D, wire-additive, no
+	// ProtocolVersion bump). Pre-PR-D bridges omit all five; the
+	// iOS decoder treats absent fields as empty / nil.
+	//
+	// Composer / Conductor / Work: classical music listeners (who
+	// favour DSD / FLAC) heavily rely on these. Many classical
+	// taggers store the work title (e.g. "Symphony No. 5 in C
+	// minor, Op. 67") in ID3v2 TIT1 (Content Group) and the
+	// movement name in TIT2 (Title). Track.Title stays mapped to
+	// TIT2; Track.Work adds the grouping axis without overloading
+	// existing fields. iOS PR-H's work-grouping helper depends on
+	// this exact split.
+	Composer  string `json:"composer,omitempty"`
+	Conductor string `json:"conductor,omitempty"`
+	Work      string `json:"work,omitempty"`
+
+	// OriginalYear distinguishes the year the album was first
+	// released (ID3v2 TORY / TDOR; Vorbis ORIGINALYEAR /
+	// ORIGINALDATE) from Year (which often holds the pressing /
+	// remaster year for catalog re-issues). Many collectors treat
+	// OriginalYear as the canonical sort key.
+	//
+	// Pointer + omitempty so the absent-vs-zero distinction
+	// matches Year / TrackNumber / DiscNumber. The presence-gate
+	// from PR-B applies: only set when the underlying tag is
+	// actually present in the raw map (a returned "0" still counts
+	// as present; only absence drops to nil).
+	OriginalYear *int `json:"originalYear,omitempty"`
+
+	// BPM (beats per minute) — niche for DSD libraries but free to
+	// surface since dhowden picks it up via TBPM / BPM / tmpo.
+	// Pointer + omitempty; presence-gated.
+	BPM *int `json:"bpm,omitempty"`
 }
 
 // Variant is one cached alternate rendering of a Track's source. The
