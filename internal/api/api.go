@@ -475,37 +475,24 @@ func (s *Server) StartedAt() time.Time { return s.startedAt }
 // X-Bridge-Protocol middleware.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /v1/health", s.health)
-	mux.HandleFunc("GET /v1/list", s.authed(s.list))
-	mux.HandleFunc("GET /v1/stat", s.authed(s.stat))
-	mux.HandleFunc("GET /v1/read", s.authed(s.read))
-	mux.HandleFunc("GET /v1/download", s.authed(s.download))
-	// Manifest is the bridge's most expensive endpoint — 50k-track
-	// libraries produce 100+ MB streams. authed() runs first so the
-	// limiter can key its per-token bucket on the validated Token.ID.
-	// Reversing the order would key on something pre-auth (IP, which is
-	// unreliable behind Tailscale CGNAT) and is exactly the design we
-	// ruled out at plan time.
-	mux.HandleFunc("GET /v1/manifest", s.authed(s.rateLimitManifest(s.manifestHandler)))
-	mux.HandleFunc("GET /v1/artwork/{mbid}", s.authed(s.artwork))
-	mux.HandleFunc("GET /v1/artist-image/{mbid}", s.authed(s.artistImage))
-	// Pairing routes are unauthenticated by design — pollSecret is the
-	// auth where needed, the captured cert pin is the trust anchor for
-	// the rest. Always registered so a 404 from the unregistered route
-	// can't be confused with a successful "no such request" response;
-	// when no Store is wired the handlers themselves return
-	// `pairing_not_supported`.
-	mux.HandleFunc("POST /v1/upscale", s.authed(s.upscaleRequest))
-	mux.HandleFunc("GET /v1/upscale/stats", s.authed(s.upscaleStats))
-	mux.HandleFunc("POST /v1/upscale/batch", s.authed(s.upscaleBatchSubmit))
-	mux.HandleFunc("GET /v1/upscale/batches", s.authed(s.upscaleBatchList))
-	mux.HandleFunc("DELETE /v1/upscale/batches/{id}", s.authed(s.upscaleBatchCancel))
-	mux.HandleFunc("DELETE /v1/upscale/variants", s.authed(s.upscaleDelete))
-	mux.HandleFunc("GET /v1/events", s.authed(s.events))
-	mux.HandleFunc("POST /v1/pairing/requests", s.pairingRequest)
-	mux.HandleFunc("GET /v1/pairing/{requestID}", s.pairingPoll)
-	mux.HandleFunc("GET /v1/pairing/{requestID}/events", s.pairingEvents)
-	mux.HandleFunc("DELETE /v1/pairing/{requestID}", s.pairingDelete)
+	// Iterate the single-source-of-truth registry (see
+	// route_classification.go). `boundedRoute` entries get
+	// per-route `SetWriteDeadline` via boundedHandler;
+	// `streamingRoute` entries are registered raw so the
+	// long-lived SSE / multi-GB-download paths aren't cut off
+	// mid-write.
+	//
+	// Authed / rate-limit / manifest middleware chains are
+	// baked into the registry entries' `handler` field — the
+	// wrapping order matters there (authed before rate-limit
+	// so the limiter keys on Token.ID, not IP).
+	for _, rt := range s.routeRegistry() {
+		h := rt.handler
+		if rt.kind == boundedRoute {
+			h = boundedHandler(h)
+		}
+		mux.HandleFunc(rt.pattern, h)
+	}
 	// Chain order matters:
 	//   - `recoverer` innermost so it can catch panics in the mux/handlers
 	//     and emit a sanitized 500 before unwinding.
