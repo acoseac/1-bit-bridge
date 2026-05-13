@@ -92,8 +92,8 @@ func (p *Provider) WriteManifest(ctx context.Context, w io.Writer, since time.Ti
 // BuildManifestPage satisfies api.ManifestProvider for the paginated
 // full-manifest path introduced in v1.1. See `BuildManifestPage` in
 // scanner.go for the cursor semantics.
-func (p *Provider) BuildManifestPage(cursor string, limit int) (*Manifest, error) {
-	return buildManifestPageGated(p.store, p.scanner.Roots(), cursor, limit, p.upscaleEnabled)
+func (p *Provider) BuildManifestPage(ctx context.Context, cursor string, limit int) (*Manifest, error) {
+	return buildManifestPageGated(ctx, p.store, p.scanner.Roots(), cursor, limit, p.upscaleEnabled)
 }
 
 // IsScanning satisfies api.ManifestProvider.
@@ -105,8 +105,8 @@ func (p *Provider) LastFullScan() time.Time { return p.scanner.LastFullScan() }
 // TracksIndexed reports the total number of tracks currently in the
 // manifest store (not the count for a single scan). Backed by a
 // `SELECT COUNT(*)` so /v1/health doesn't allocate O(n) strings per poll.
-func (p *Provider) TracksIndexed() int {
-	n, err := p.store.CountTracks()
+func (p *Provider) TracksIndexed(ctx context.Context) int {
+	n, err := p.store.CountTracks(ctx)
 	if err != nil {
 		return 0
 	}
@@ -117,8 +117,8 @@ func (p *Provider) TracksIndexed() int {
 // tracks + folders rows the scanner has marked as missing this pass but
 // hasn't yet reached the configured delete threshold for. Cheap query —
 // two indexed counts.
-func (p *Provider) PendingDeletions() int64 {
-	n, err := p.store.PendingDeletions()
+func (p *Provider) PendingDeletions(ctx context.Context) int64 {
+	n, err := p.store.PendingDeletions(ctx)
 	if err != nil {
 		return 0
 	}
@@ -128,13 +128,13 @@ func (p *Provider) PendingDeletions() int64 {
 // HasTrackWithArtworkMBID satisfies api.MBIDProbe. Delegates straight
 // to the Store so the api package doesn't need a direct dependency on
 // internal/manifest.
-func (p *Provider) HasTrackWithArtworkMBID(mbid string) bool {
-	return p.store.HasTrackWithArtworkMBID(mbid)
+func (p *Provider) HasTrackWithArtworkMBID(ctx context.Context, mbid string) bool {
+	return p.store.HasTrackWithArtworkMBID(ctx, mbid)
 }
 
 // HasTrackWithArtistMBID satisfies api.MBIDProbe.
-func (p *Provider) HasTrackWithArtistMBID(mbid string) bool {
-	return p.store.HasTrackWithArtistMBID(mbid)
+func (p *Provider) HasTrackWithArtistMBID(ctx context.Context, mbid string) bool {
+	return p.store.HasTrackWithArtistMBID(ctx, mbid)
 }
 
 // LookupVariant returns the cached metadata for one (sourcePath,
@@ -158,8 +158,8 @@ func (p *Provider) HasTrackWithArtistMBID(mbid string) bool {
 // in that split — same logical bug class as PR #126 itself, just on
 // a different caller. (CodeRabbit / Qodo on PR #126 second-pass
 // missed this site.)
-func (p *Provider) LookupVariant(sourcePath, variantID string) (*VariantLookup, error) {
-	v, err := p.store.LookupVariant(sourcePath, variantID)
+func (p *Provider) LookupVariant(ctx context.Context, sourcePath, variantID string) (*VariantLookup, error) {
+	v, err := p.store.LookupVariant(ctx, sourcePath, variantID)
 	if err != nil {
 		return nil, err
 	}

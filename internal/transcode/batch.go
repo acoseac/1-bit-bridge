@@ -177,7 +177,9 @@ func NewCoordinator(
 		clock:       func() time.Time { return time.Now().UTC() },
 		liveBatches: make(map[uuid.UUID]*batchState),
 	}
-	rows, err := store.RecoverInterruptedBatches(c.clock().UnixNano())
+	// NewCoordinator runs at bridge boot — no caller ctx in scope.
+	// Use Background since this is a one-shot init-time recovery.
+	rows, err := store.RecoverInterruptedBatches(context.Background(), c.clock().UnixNano())
 	if err != nil {
 		return nil, fmt.Errorf("recover interrupted batches: %w", err)
 	}
@@ -231,7 +233,7 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 		return nil, fmt.Errorf("submit: no resolver wired — Coordinator can't build JobSpec absolute paths")
 	}
 
-	projections, err := c.store.ListTrackProjectionsUnderPrefix(path)
+	projections, err := c.store.ListTrackProjectionsUnderPrefix(ctx, path)
 	if err != nil {
 		return nil, fmt.Errorf("submit: list projections: %w", err)
 	}
@@ -346,7 +348,7 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}
-	if err := c.store.InsertUpscaleBatch(row); err != nil {
+	if err := c.store.InsertUpscaleBatch(ctx, row); err != nil {
 		return nil, fmt.Errorf("submit: insert batch row: %w", err)
 	}
 
@@ -448,7 +450,7 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 			// to drive a future callback), the DB row stays
 			// `running` with the original totals forever.
 			if stateModified {
-				if writeErr := c.store.UpdateUpscaleBatchProgress(rowSnapshot); writeErr != nil {
+				if writeErr := c.store.UpdateUpscaleBatchProgress(ctx, rowSnapshot); writeErr != nil {
 					c.logger.Warn("submit: persist truncated batch",
 						"batchID", batchID.String(),
 						"err", writeErr)
@@ -533,7 +535,10 @@ func (c *Coordinator) transitionStatus(batchID uuid.UUID, status, errMsg string,
 	}
 	c.mu.Unlock()
 
-	if err := c.store.UpdateUpscaleBatchStatus(rowCopy); err != nil {
+	// No caller ctx for the internal callback-driven path; use
+	// Background. Future enhancement could thread ctx through the
+	// Coordinator's public API but that's out of scope here.
+	if err := c.store.UpdateUpscaleBatchStatus(context.Background(), rowCopy); err != nil {
 		return fmt.Errorf("transition %s -> %s: %w", batchID, status, err)
 	}
 	c.publishProgressRow(rowCopy)
@@ -591,7 +596,7 @@ func (c *Coordinator) OnJobComplete(path, variantID string, sampleRate, bitsPerS
 	}
 	c.mu.Unlock()
 
-	if err := c.store.UpdateUpscaleBatchProgress(rowCopy); err != nil {
+	if err := c.store.UpdateUpscaleBatchProgress(context.Background(), rowCopy); err != nil {
 		c.logger.Warn("OnJobComplete: update progress",
 			"batchID", batchID.String(),
 			"err", err)
@@ -636,7 +641,7 @@ func (c *Coordinator) OnJobFailed(path, variantID, errMsg string, durationSecond
 	}
 	c.mu.Unlock()
 
-	if err := c.store.UpdateUpscaleBatchProgress(rowCopy); err != nil {
+	if err := c.store.UpdateUpscaleBatchProgress(context.Background(), rowCopy); err != nil {
 		c.logger.Warn("OnJobFailed: update progress",
 			"batchID", batchID.String(),
 			"err", err)

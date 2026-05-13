@@ -306,7 +306,7 @@ var migrations = []migration{
 		//
 		// **Idempotency: BOTH ALTERs live in post(), not in `sql`.**
 		// `migrate()` short-circuits on the first error from
-		// `s.db.Exec(m.sql)`, so a partial-apply scenario (first
+		// `s.db.ExecContext(ctx, m.sql)`, so a partial-apply scenario (first
 		// ALTER committed, second failed mid-migration, restart)
 		// would otherwise hit "duplicate column" on the first ALTER
 		// of the retry and never reach the post() that's meant to
@@ -315,7 +315,7 @@ var migrations = []migration{
 		// `_, _ = db.Exec(...)` semantics by convention) makes each
 		// step independently idempotent and re-runnable after any
 		// partial failure. The `sql` payload is a harmless SQL
-		// comment so `s.db.Exec(m.sql)` always succeeds cleanly
+		// comment so `s.db.ExecContext(ctx, m.sql)` always succeeds cleanly
 		// before post() does the real work. Caught by Gemini HIGH
 		// bot review on PR #193.
 		sql: `-- columns added in post() for idempotency; see migration v5 docblock`,
@@ -447,15 +447,16 @@ func normalizePathForLookup(p string) string {
 // ALTER), so re-running it on those DBs is a no-op that just bumps
 // the version stamp.
 func (s *Store) migrate() error {
+	ctx := context.Background() // migrations run during OpenStore — no caller ctx.
 	var current int
-	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&current); err != nil {
+	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&current); err != nil {
 		return fmt.Errorf("read user_version: %w", err)
 	}
 	for _, m := range migrations {
 		if m.version <= current {
 			continue
 		}
-		if _, err := s.db.Exec(m.sql); err != nil {
+		if _, err := s.db.ExecContext(ctx, m.sql); err != nil {
 			return fmt.Errorf("migration %d (%s): %w", m.version, m.name, err)
 		}
 		if m.post != nil {
@@ -467,7 +468,7 @@ func (s *Store) migrate() error {
 		// directive, not DML), so format the int into the literal SQL.
 		// The version comes from a hardcoded slice — never user input —
 		// so SQL-injection risk is zero.
-		if _, err := s.db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, m.version)); err != nil {
+		if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, m.version)); err != nil {
 			return fmt.Errorf("set user_version to %d: %w", m.version, err)
 		}
 	}
@@ -476,11 +477,11 @@ func (s *Store) migrate() error {
 
 // UnenrichedTracks returns up to limit tracks that haven't been through the
 // MusicBrainz/CoverArt pass. Used by internal/enrich.
-func (s *Store) UnenrichedTracks(limit int) ([]Track, error) {
+func (s *Store) UnenrichedTracks(ctx context.Context, limit int) ([]Track, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := s.db.Query(`
+	rows, err := s.db.QueryContext(ctx, `
 		SELECT tags_json FROM tracks
 		WHERE enriched_at = 0
 		ORDER BY path ASC
@@ -536,7 +537,7 @@ func marshalForStorage(t *Track) ([]byte, error) {
 // the contract documented on the Store type forbids them from
 // overlapping in SQLite. JSON marshalling stays outside the lock so
 // the critical section is one statement long.
-func (s *Store) MarkEnriched(t *Track) error {
+func (s *Store) MarkEnriched(ctx context.Context, t *Track) error {
 	raw, err := marshalForStorage(t)
 	if err != nil {
 		return err
@@ -557,7 +558,7 @@ func (s *Store) MarkEnriched(t *Track) error {
 	// produces a strictly-greater indexed_at, keeping delta-sync's
 	// `> since` boundary semantically correct.
 	now := s.now().UnixNano()
-	_, err = s.db.Exec(`
+	_, err = s.db.ExecContext(ctx, `
 		UPDATE tracks
 		SET tags_json = ?,
 		    enriched_at = ?,
@@ -576,14 +577,14 @@ func (s *Store) MarkEnriched(t *Track) error {
 // as JSON so the schema can evolve without column migrations during v0.
 //
 // Holds `s.mu` per the writer contract on Store.
-func (s *Store) UpsertTrack(t *Track) error {
+func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
 	raw, err := marshalForStorage(t)
 	if err != nil {
 		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err = s.db.Exec(`
+	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO tracks(path, size, mtime_ns, tags_json, indexed_at)
 		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(path) DO UPDATE SET
@@ -618,7 +619,7 @@ func (s *Store) UpsertTrack(t *Track) error {
 // `MarkEnriched` / `WipeAllTracks` / `DeleteTracksByPrefix` don't
 // interleave their multi-statement sections with our writes — matches
 // the existing convention from those callers.
-func (s *Store) UpsertTrackBatch(ts []*Track) error {
+func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 	if len(ts) == 0 {
 		return nil
 	}
@@ -650,7 +651,7 @@ func (s *Store) UpsertTrackBatch(ts []*Track) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	tx, err := s.db.Begin()
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -703,14 +704,14 @@ func (s *Store) UpsertTrackBatch(ts []*Track) error {
 // `bridge upscale --gc` is the recovery path for sidecars that
 // escape this — interrupted DeleteTrack, manual SQL tampering,
 // restored-from-backup mismatch.
-func (s *Store) DeleteTrack(path string) error {
+func (s *Store) DeleteTrack(ctx context.Context, path string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// Step 1: enumerate sidecars BEFORE the DB delete. Shared
 	// helper keeps the per-policy details (rows.Err handling,
 	// log-and-continue per-row) aligned with the bulk-delete
 	// paths.
-	rows, err := s.db.Query(`SELECT sidecar_path FROM track_variants WHERE source_path = ?`, path)
+	rows, err := s.db.QueryContext(ctx, `SELECT sidecar_path FROM track_variants WHERE source_path = ?`, path)
 	var sidecars []string
 	if err == nil {
 		for rows.Next() {
@@ -735,7 +736,7 @@ func (s *Store) DeleteTrack(path string) error {
 	// Step 2: parent delete. CASCADE clears `track_variants`
 	// rows; sidecar files we just enumerated will be unlinked
 	// next.
-	if _, err = s.db.Exec(`DELETE FROM tracks WHERE path = ?`, path); err != nil {
+	if _, err = s.db.ExecContext(ctx, `DELETE FROM tracks WHERE path = ?`, path); err != nil {
 		return err
 	}
 	// Step 3: best-effort filesystem cleanup, shared with the
@@ -761,9 +762,9 @@ func (s *Store) DeleteTrack(path string) error {
 // at the cost of a slower index scan, which is fine for the
 // once-per-request /v1/upscale eligibility gate but wrong for the
 // scanner's hot inner loop. (Qodo on PR #126.)
-func (s *Store) GetTrack(path string) (*Track, error) {
+func (s *Store) GetTrack(ctx context.Context, path string) (*Track, error) {
 	var raw []byte
-	err := s.db.QueryRow(`SELECT tags_json FROM tracks WHERE path = ?`, path).Scan(&raw)
+	err := s.db.QueryRowContext(ctx, `SELECT tags_json FROM tracks WHERE path = ?`, path).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -811,8 +812,8 @@ func (s *Store) GetTrack(path string) (*Track, error) {
 // SQLite's LOWER, and lookups will still miss. Documented in the
 // v3 migration; future fix is a Go-side-precomputed
 // `path_lower` column populated from `golang.org/x/text/cases`.
-func (s *Store) LookupTrack(path string) (*Track, error) {
-	if t, err := s.GetTrack(path); err != nil || t != nil {
+func (s *Store) LookupTrack(ctx context.Context, path string) (*Track, error) {
+	if t, err := s.GetTrack(ctx, path); err != nil || t != nil {
 		return t, err
 	}
 	cleaned := normalizePathForLookup(path)
@@ -820,19 +821,19 @@ func (s *Store) LookupTrack(path string) (*Track, error) {
 		// Exact already missed and the cleaned form is identical
 		// — no further fallback to attempt that wouldn't repeat
 		// the same query.
-		return s.lookupTrackByLowerCase(cleaned)
+		return s.lookupTrackByLowerCase(ctx, cleaned)
 	}
 	// Try the leading-slash-stripped form as a back-compat
 	// exact match before falling through to the case-folded
 	// scan; some iOS code paths only strip the slash without
 	// lowercasing, and that exact form should land cheaply.
-	if t, err := s.GetTrack(cleaned); err != nil || t != nil {
+	if t, err := s.GetTrack(ctx, cleaned); err != nil || t != nil {
 		return t, err
 	}
-	return s.lookupTrackByLowerCase(cleaned)
+	return s.lookupTrackByLowerCase(ctx, cleaned)
 }
 
-func (s *Store) lookupTrackByLowerCase(cleaned string) (*Track, error) {
+func (s *Store) lookupTrackByLowerCase(ctx context.Context, cleaned string) (*Track, error) {
 	// Fail closed on ambiguity: fetch LIMIT 2, and if a second row
 	// exists, refuse to pick one. On case-sensitive filesystems
 	// (most Linux deployments) two distinct files can legitimately
@@ -849,7 +850,7 @@ func (s *Store) lookupTrackByLowerCase(cleaned string) (*Track, error) {
 	// iOS sends a path that already matches one row's case, so
 	// this only reaches the fallback when the iOS-shape genuinely
 	// can't be distinguished.
-	rows, err := s.db.Query(
+	rows, err := s.db.QueryContext(ctx,
 		`SELECT tags_json FROM tracks WHERE unicode_lower(path) = unicode_lower(?) LIMIT 2`,
 		cleaned,
 	)
@@ -1003,7 +1004,7 @@ func formatSampleRateLabel(hz float64) string {
 // separately from tag content — embedding it in `tags_json` would
 // require re-marshalling every track on each `MarkEnriched` write
 // just to flip a bool, which is what the column is for.
-func (s *Store) ListTracks(since *time.Time) ([]Track, error) {
+func (s *Store) ListTracks(ctx context.Context, since *time.Time) ([]Track, error) {
 	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + ` FROM tracks`
 	args := []any{}
 	if since != nil {
@@ -1011,7 +1012,7 @@ func (s *Store) ListTracks(since *time.Time) ([]Track, error) {
 		args = append(args, since.UnixNano())
 	}
 	q += ` ORDER BY path ASC`
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1120,11 +1121,11 @@ func (s *Store) StreamTracks(ctx context.Context, sp *time.Time, fn func(*Track)
 // composite cursor (timestamp + path) for consistent ordering,
 // which isn't worth the complexity for a code path that already
 // returns bounded output.
-func (s *Store) ListTracksPage(afterPath string, limit int) ([]Track, error) {
+func (s *Store) ListTracksPage(ctx context.Context, afterPath string, limit int) ([]Track, error) {
 	if limit <= 0 {
 		limit = 1000
 	}
-	rows, err := s.db.Query(`
+	rows, err := s.db.QueryContext(ctx, `
 		SELECT tags_json, enriched_at, `+variantsAggSQL+` FROM tracks
 		WHERE path > ?
 		ORDER BY path ASC
@@ -1164,21 +1165,21 @@ func (s *Store) ListTracksPage(afterPath string, limit int) ([]Track, error) {
 // '$.artworkMBID')` (added in `migrate`) so the lookup is O(log n)
 // instead of a full table scan on a 50k-track library. The `LIMIT 1`
 // lets SQLite stop at first match.
-func (s *Store) HasTrackWithArtworkMBID(mbid string) bool {
+func (s *Store) HasTrackWithArtworkMBID(ctx context.Context, mbid string) bool {
 	if mbid == "" {
 		return false
 	}
-	return s.hasTrackWithJSONField(artworkMBIDField, mbid)
+	return s.hasTrackWithJSONField(ctx, artworkMBIDField, mbid)
 }
 
 // HasTrackWithArtistMBID mirrors HasTrackWithArtworkMBID for the
 // `/v1/artist-image/{mbid}` handler. Same 202-vs-404 distinction.
 // Also indexed (see `migrate`).
-func (s *Store) HasTrackWithArtistMBID(mbid string) bool {
+func (s *Store) HasTrackWithArtistMBID(ctx context.Context, mbid string) bool {
 	if mbid == "" {
 		return false
 	}
-	return s.hasTrackWithJSONField(artistMBIDField, mbid)
+	return s.hasTrackWithJSONField(ctx, artistMBIDField, mbid)
 }
 
 // Field names for the JSON-extract lookup. Declared as constants
@@ -1196,7 +1197,7 @@ const (
 	artistMBIDField  jsonField = "artistMBID"
 )
 
-func (s *Store) hasTrackWithJSONField(field jsonField, value string) bool {
+func (s *Store) hasTrackWithJSONField(ctx context.Context, field jsonField, value string) bool {
 	var q string
 	switch field {
 	case artworkMBIDField:
@@ -1209,7 +1210,7 @@ func (s *Store) hasTrackWithJSONField(field jsonField, value string) bool {
 		return false
 	}
 	var found int
-	err := s.db.QueryRow(q, value).Scan(&found)
+	err := s.db.QueryRowContext(ctx, q, value).Scan(&found)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		// Genuine database errors (disk I/O, connection closed,
 		// migration mid-flight) get logged. `sql.ErrNoRows` is the
@@ -1223,9 +1224,9 @@ func (s *Store) hasTrackWithJSONField(field jsonField, value string) bool {
 // CountTracks returns the total number of track rows. /v1/health polls
 // this frequently, so it's backed by a SELECT COUNT(*) instead of a
 // full path-materialization + len().
-func (s *Store) CountTracks() (int, error) {
+func (s *Store) CountTracks(ctx context.Context) (int, error) {
 	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM tracks`).Scan(&n)
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tracks`).Scan(&n)
 	return n, err
 }
 
@@ -1243,8 +1244,8 @@ func (s *Store) CountTracks() (int, error) {
 // Returns NULL-filtered values: tracks without artworkMBID set
 // (`json_extract` returns NULL) are skipped at the SQL layer so the
 // caller's set logic doesn't have to handle empty strings explicitly.
-func (s *Store) ArtworkMBIDsInUse() ([]string, error) {
-	rows, err := s.db.Query(`
+func (s *Store) ArtworkMBIDsInUse(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
 		SELECT DISTINCT json_extract(tags_json, '$.artworkMBID')
 		FROM tracks
 		WHERE json_extract(tags_json, '$.artworkMBID') IS NOT NULL
@@ -1303,7 +1304,7 @@ func (s *Store) ArtworkMBIDsInUse() ([]string, error) {
 // `encoding/json` doesn't treat the time-struct's IsZero as "empty"),
 // emit `"0001-01-01T00:00:00Z"` on the wire, and the iOS decoder would
 // parse that as a real date — breaking the 24 h freshness gate.
-func (s *Store) EnrichmentCounts() (enriched int, lastEnrichedAt *time.Time, err error) {
+func (s *Store) EnrichmentCounts(ctx context.Context) (enriched int, lastEnrichedAt *time.Time, err error) {
 	var lastNs sql.NullInt64
 	// `enriched_at > 0` is sargeable; `enriched_at != 0` is not. Even
 	// though both predicates describe the same row set (the column is
@@ -1314,7 +1315,7 @@ func (s *Store) EnrichmentCounts() (enriched int, lastEnrichedAt *time.Time, err
 	// `> 0` form emits `SEARCH tracks USING COVERING INDEX
 	// idx_tracks_enriched (enriched_at>?)` while `!= 0` emits a bare
 	// `SCAN tracks` (CodeRabbit Major round-1 on PR #164).
-	err = s.db.QueryRow(`
+	err = s.db.QueryRowContext(ctx, `
 		SELECT
 			(SELECT COUNT(*) FROM tracks WHERE enriched_at > 0),
 			(SELECT MAX(enriched_at) FROM tracks)
@@ -1334,10 +1335,10 @@ func (s *Store) EnrichmentCounts() (enriched int, lastEnrichedAt *time.Time, err
 // "<rootBasename>/" to get a per-root count. prefix is matched literally —
 // "_" and "%" are escaped via the ESCAPE clause so a root named "foo_bar"
 // isn't treated as a LIKE wildcard.
-func (s *Store) CountTracksByPrefix(prefix string) (int, error) {
+func (s *Store) CountTracksByPrefix(ctx context.Context, prefix string) (int, error) {
 	escaped := likeEscape(prefix)
 	var n int
-	err := s.db.QueryRow(
+	err := s.db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM tracks WHERE path LIKE ? ESCAPE '\'`,
 		escaped+"%",
 	).Scan(&n)
@@ -1369,7 +1370,7 @@ func (s *Store) CountTracksByPrefix(prefix string) (int, error) {
 // #108. Single-track DeleteTrack and the wipe-all paths share
 // the same `removeSidecarsForPaths` helper so all three deletion
 // entry points stay aligned.
-func (s *Store) DeleteTracksByPrefix(prefix string) (int64, error) {
+func (s *Store) DeleteTracksByPrefix(ctx context.Context, prefix string) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	escaped := likeEscape(prefix)
@@ -1383,16 +1384,16 @@ func (s *Store) DeleteTracksByPrefix(prefix string) (int64, error) {
 	// files on disk — the row-cascade hasn't run yet so we can
 	// abort cleanly and surface the error to the caller. Refusing
 	// upfront is better than committing a partial delete.
-	doomedSidecars, err := s.listSidecarsByPathPrefix(escaped)
+	doomedSidecars, err := s.listSidecarsByPathPrefix(ctx, escaped)
 	if err != nil {
 		return 0, err
 	}
-	tx, err := s.db.Begin()
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback()
-	res, err := tx.Exec(
+	res, err := tx.ExecContext(ctx,
 		`DELETE FROM tracks WHERE path LIKE ? ESCAPE '\'`,
 		escaped+"%",
 	)
@@ -1424,8 +1425,8 @@ func (s *Store) DeleteTracksByPrefix(prefix string) (int64, error) {
 // masking partial-result truncation. Callers (the cascading
 // delete path) need to know when the enumeration was truncated
 // so they don't silently leave orphan sidecar files on disk.
-func (s *Store) listSidecarsByPathPrefix(escapedPrefix string) ([]string, error) {
-	rows, err := s.db.Query(
+func (s *Store) listSidecarsByPathPrefix(ctx context.Context, escapedPrefix string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
 		`SELECT sidecar_path FROM track_variants WHERE source_path LIKE ? ESCAPE '\'`,
 		escapedPrefix+"%",
 	)
@@ -1457,8 +1458,8 @@ func (s *Store) listSidecarsByPathPrefix(escapedPrefix string) ([]string, error)
 // listSidecarsByPathPrefix above. WipeAllTracks treats a
 // truncated enumeration as a fatal error because the on-disk
 // cleanup must be complete to fulfil the wipe contract.
-func (s *Store) listAllSidecars() ([]string, error) {
-	rows, err := s.db.Query(`SELECT sidecar_path FROM track_variants`)
+func (s *Store) listAllSidecars(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT sidecar_path FROM track_variants`)
 	if err != nil {
 		logger.Warn("list all sidecars", "err", err)
 		return nil, err
@@ -1506,7 +1507,7 @@ func removeSidecarFiles(paths []string) {
 // Sidecar-cleanup: same orphan-prevention contract as
 // `DeleteTrack`/`DeleteTracksByPrefix`. CodeRabbit second-pass on
 // PR #108. CASCADE alone would leak every cached `.flac` sidecar.
-func (s *Store) WipeAllTracks() error {
+func (s *Store) WipeAllTracks(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// **Iterator-error refusal** (CodeRabbit Major + Gemini High on
@@ -1515,19 +1516,19 @@ func (s *Store) WipeAllTracks() error {
 	// the rows-wipe. Surface the error and let the caller retry
 	// rather than commit a partial wipe whose on-disk leaks `--gc`
 	// would have to clean up later.
-	doomedSidecars, err := s.listAllSidecars()
+	doomedSidecars, err := s.listAllSidecars(ctx)
 	if err != nil {
 		return err
 	}
-	tx, err := s.db.Begin()
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`DELETE FROM tracks`); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM tracks`); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`DELETE FROM folders`); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM folders`); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -1554,8 +1555,8 @@ func likeEscape(s string) string {
 
 // TrackPaths returns every known track path (sorted). Used by the scanner's
 // "remove tracks deleted from disk" pass.
-func (s *Store) TrackPaths() ([]string, error) {
-	rows, err := s.db.Query(`SELECT path FROM tracks ORDER BY path ASC`)
+func (s *Store) TrackPaths(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT path FROM tracks ORDER BY path ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -1588,9 +1589,9 @@ func (s *Store) TrackPaths() ([]string, error) {
 // relDir itself — only the descendant pattern is needed.
 //
 // Used by ScanSubtree's bounded deletion pass.
-func (s *Store) TrackPathsUnder(relDir string) ([]string, error) {
+func (s *Store) TrackPathsUnder(ctx context.Context, relDir string) ([]string, error) {
 	if relDir == "" || relDir == "." {
-		return s.TrackPaths()
+		return s.TrackPaths(ctx)
 	}
 	var pattern string
 	if strings.HasSuffix(relDir, "/.") {
@@ -1598,7 +1599,7 @@ func (s *Store) TrackPathsUnder(relDir string) ([]string, error) {
 	} else {
 		pattern = likeEscape(relDir) + "/%"
 	}
-	rows, err := s.db.Query(
+	rows, err := s.db.QueryContext(ctx,
 		`SELECT path FROM tracks WHERE path LIKE ? ESCAPE '\' ORDER BY path ASC`,
 		pattern,
 	)
@@ -1623,10 +1624,10 @@ func (s *Store) TrackPathsUnder(relDir string) ([]string, error) {
 // subtrees.
 //
 // Holds `s.mu` per the writer contract on Store.
-func (s *Store) UpsertFolder(f *Folder) error {
+func (s *Store) UpsertFolder(ctx context.Context, f *Folder) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.Exec(`
+	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO folders(path, mtime_ns) VALUES (?, ?)
 		ON CONFLICT(path) DO UPDATE SET
 			mtime_ns      = excluded.mtime_ns,
@@ -1640,9 +1641,9 @@ func (s *Store) UpsertFolder(f *Folder) error {
 
 // FolderMTime returns the stored mtime for a folder path, or the zero time
 // if absent.
-func (s *Store) FolderMTime(path string) (time.Time, error) {
+func (s *Store) FolderMTime(ctx context.Context, path string) (time.Time, error) {
 	var ns int64
-	err := s.db.QueryRow(`SELECT mtime_ns FROM folders WHERE path = ?`, path).Scan(&ns)
+	err := s.db.QueryRowContext(ctx, `SELECT mtime_ns FROM folders WHERE path = ?`, path).Scan(&ns)
 	if errors.Is(err, sql.ErrNoRows) {
 		return time.Time{}, nil
 	}
@@ -1653,8 +1654,8 @@ func (s *Store) FolderMTime(path string) (time.Time, error) {
 }
 
 // ListFolders returns every folder record (sorted).
-func (s *Store) ListFolders() ([]Folder, error) {
-	rows, err := s.db.Query(`SELECT path, mtime_ns FROM folders ORDER BY path ASC`)
+func (s *Store) ListFolders(ctx context.Context) ([]Folder, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT path, mtime_ns FROM folders ORDER BY path ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -1676,8 +1677,8 @@ func (s *Store) ListFolders() ([]Folder, error) {
 // deletion pass to enumerate the "before" snapshot. Distinct from
 // ListFolders, which projects (path, mtime) tuples and is the right
 // shape for callers that need both fields.
-func (s *Store) FolderPaths() ([]string, error) {
-	rows, err := s.db.Query(`SELECT path FROM folders ORDER BY path ASC`)
+func (s *Store) FolderPaths(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT path FROM folders ORDER BY path ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -1704,9 +1705,9 @@ func (s *Store) FolderPaths() ([]string, error) {
 // would leave the original folder row behind.
 //
 // Used by ScanSubtree's bounded deletion pass.
-func (s *Store) FolderPathsUnder(relDir string) ([]string, error) {
+func (s *Store) FolderPathsUnder(ctx context.Context, relDir string) ([]string, error) {
 	if relDir == "" || relDir == "." {
-		return s.FolderPaths()
+		return s.FolderPaths(ctx)
 	}
 	if strings.HasSuffix(relDir, "/.") {
 		// Multi-root whole-root sentinel ("<base>/."): match every
@@ -1715,7 +1716,7 @@ func (s *Store) FolderPathsUnder(relDir string) ([]string, error) {
 		// so include it via an exact-match alongside the LIKE.
 		stripped := strings.TrimSuffix(relDir, ".")
 		pattern := likeEscape(stripped) + "%"
-		rows, err := s.db.Query(
+		rows, err := s.db.QueryContext(ctx,
 			`SELECT path FROM folders WHERE path = ? OR path LIKE ? ESCAPE '\' ORDER BY path ASC`,
 			relDir, pattern,
 		)
@@ -1734,7 +1735,7 @@ func (s *Store) FolderPathsUnder(relDir string) ([]string, error) {
 		return out, rows.Err()
 	}
 	pattern := likeEscape(relDir) + "/%"
-	rows, err := s.db.Query(
+	rows, err := s.db.QueryContext(ctx,
 		`SELECT path FROM folders WHERE path = ? OR path LIKE ? ESCAPE '\' ORDER BY path ASC`,
 		relDir, pattern,
 	)
@@ -1763,10 +1764,10 @@ func (s *Store) FolderPathsUnder(relDir string) ([]string, error) {
 // tracks, not folders), so this is a single DELETE with no cascade.
 //
 // Holds `s.mu` per the writer contract on Store.
-func (s *Store) DeleteFolder(path string) error {
+func (s *Store) DeleteFolder(ctx context.Context, path string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.Exec(`DELETE FROM folders WHERE path = ?`, path)
+	_, err := s.db.ExecContext(ctx, `DELETE FROM folders WHERE path = ?`, path)
 	return err
 }
 
@@ -1813,13 +1814,13 @@ func (s *Store) DeleteFolder(path string) error {
 // preserve the legacy immediate-delete behaviour when set to 1.
 //
 // Holds `s.mu` per the writer contract on Store.
-func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(missingPaths []string, threshold int) (int64, error) {
+func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(ctx context.Context, missingPaths []string, threshold int) (int64, error) {
 	if len(missingPaths) == 0 || threshold < 1 {
 		return 0, nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	tx, err := s.db.Begin()
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -1850,7 +1851,7 @@ func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(missingPaths []string
 		}
 	}
 	stmt.Close()
-	res, err := tx.Exec(`DELETE FROM tracks WHERE missing_count >= ?`, threshold)
+	res, err := tx.ExecContext(ctx, `DELETE FROM tracks WHERE missing_count >= ?`, threshold)
 	if err != nil {
 		return 0, err
 	}
@@ -1868,13 +1869,13 @@ func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(missingPaths []string
 // that didn't see them either.
 //
 // Holds `s.mu` per the writer contract on Store.
-func (s *Store) IncrementMissingFoldersAndDeleteAtThreshold(missingPaths []string, threshold int) (int64, error) {
+func (s *Store) IncrementMissingFoldersAndDeleteAtThreshold(ctx context.Context, missingPaths []string, threshold int) (int64, error) {
 	if len(missingPaths) == 0 || threshold < 1 {
 		return 0, nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	tx, err := s.db.Begin()
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -1899,7 +1900,7 @@ func (s *Store) IncrementMissingFoldersAndDeleteAtThreshold(missingPaths []strin
 		}
 	}
 	stmt.Close()
-	res, err := tx.Exec(`DELETE FROM folders WHERE missing_count >= ?`, threshold)
+	res, err := tx.ExecContext(ctx, `DELETE FROM folders WHERE missing_count >= ?`, threshold)
 	if err != nil {
 		return 0, err
 	}
@@ -1915,15 +1916,15 @@ func (s *Store) IncrementMissingFoldersAndDeleteAtThreshold(missingPaths []strin
 // delete threshold. Exposed for the /v1/health ScanState surface and
 // the admin dashboard "X rows pending deletion" hint. Cheap query —
 // two indexed counts. Nil-safe under closed Store (returns 0, nil).
-func (s *Store) PendingDeletions() (int64, error) {
+func (s *Store) PendingDeletions(ctx context.Context) (int64, error) {
 	if s == nil || s.db == nil {
 		return 0, nil
 	}
 	var tracks, folders int64
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM tracks WHERE missing_count > 0`).Scan(&tracks); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tracks WHERE missing_count > 0`).Scan(&tracks); err != nil {
 		return 0, err
 	}
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM folders WHERE missing_count > 0`).Scan(&folders); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM folders WHERE missing_count > 0`).Scan(&folders); err != nil {
 		return 0, err
 	}
 	return tracks + folders, nil
@@ -1941,10 +1942,10 @@ func (s *Store) PendingDeletions() (int64, error) {
 // Cheap single-row UPDATE on the PRIMARY KEY index. Missing rows
 // silently no-op (RowsAffected == 0). Holds `s.mu` per the writer
 // contract on Store.
-func (s *Store) ResetTrackMissingCount(path string) error {
+func (s *Store) ResetTrackMissingCount(ctx context.Context, path string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.Exec(`UPDATE tracks SET missing_count = 0 WHERE path = ? AND missing_count != 0`, path)
+	_, err := s.db.ExecContext(ctx, `UPDATE tracks SET missing_count = 0 WHERE path = ? AND missing_count != 0`, path)
 	return err
 }
 
@@ -1959,19 +1960,19 @@ func (s *Store) ResetTrackMissingCount(path string) error {
 // command picks up exactly the rows the prior attempt missed.
 //
 // Holds `s.mu` per the writer contract on Store.
-func (s *Store) ClearMissingCounts() (int64, error) {
+func (s *Store) ClearMissingCounts(ctx context.Context) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	tx, err := s.db.Begin()
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback()
-	tRes, err := tx.Exec(`DELETE FROM tracks WHERE missing_count > 0`)
+	tRes, err := tx.ExecContext(ctx, `DELETE FROM tracks WHERE missing_count > 0`)
 	if err != nil {
 		return 0, err
 	}
-	fRes, err := tx.Exec(`DELETE FROM folders WHERE missing_count > 0`)
+	fRes, err := tx.ExecContext(ctx, `DELETE FROM folders WHERE missing_count > 0`)
 	if err != nil {
 		return 0, err
 	}
@@ -1988,10 +1989,10 @@ func (s *Store) ClearMissingCounts() (int64, error) {
 // SetScanState writes a key/value pair to the scan_state table.
 //
 // Holds `s.mu` per the writer contract on Store.
-func (s *Store) SetScanState(key, value string) error {
+func (s *Store) SetScanState(ctx context.Context, key, value string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.Exec(`
+	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO scan_state(k, v) VALUES(?, ?)
 		ON CONFLICT(k) DO UPDATE SET v = excluded.v
 	`, key, value)
@@ -1999,9 +2000,9 @@ func (s *Store) SetScanState(key, value string) error {
 }
 
 // GetScanState returns the value for key, or "" if missing.
-func (s *Store) GetScanState(key string) (string, error) {
+func (s *Store) GetScanState(ctx context.Context, key string) (string, error) {
 	var v string
-	err := s.db.QueryRow(`SELECT v FROM scan_state WHERE k = ?`, key).Scan(&v)
+	err := s.db.QueryRowContext(ctx, `SELECT v FROM scan_state WHERE k = ?`, key).Scan(&v)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
@@ -2033,13 +2034,13 @@ var ErrUpscaleTargetUnset = errors.New("upscale target not configured")
 // errors rather than silently falling back: a malformed value means
 // either a buggy writer or DB corruption, and silently substituting a
 // default would mask the bug.
-func (s *Store) GetUpscaleTarget() (rateHz int, bits int, err error) {
+func (s *Store) GetUpscaleTarget(ctx context.Context) (rateHz int, bits int, err error) {
 	// Single query reads both keys in one round-trip — atomic vs a
 	// concurrent SetUpscaleTarget that could otherwise commit
 	// between two separate GetScanState calls and leave callers
 	// with a mismatched (rate, bits) pair. Per CodeRabbit medium
 	// on PR #199.
-	rows, qerr := s.db.Query(
+	rows, qerr := s.db.QueryContext(ctx,
 		`SELECT k, v FROM scan_state WHERE k IN (?, ?)`,
 		UpscaleTargetRateKey, UpscaleTargetBitsKey,
 	)
@@ -2094,7 +2095,7 @@ func (s *Store) GetUpscaleTarget() (rateHz int, bits int, err error) {
 // a reader after a partial-failure write never sees a mismatched
 // rate/bits pair). Rate must be > 0, bits ∈ {16, 24, 32}; out-of-range
 // values are rejected with a typed error before the write commits.
-func (s *Store) SetUpscaleTarget(rateHz, bits int) error {
+func (s *Store) SetUpscaleTarget(ctx context.Context, rateHz, bits int) error {
 	if rateHz <= 0 {
 		return fmt.Errorf("upscale target rate %d Hz: must be positive", rateHz)
 	}
@@ -2105,7 +2106,7 @@ func (s *Store) SetUpscaleTarget(rateHz, bits int) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	tx, err := s.db.Begin()
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -2114,10 +2115,10 @@ func (s *Store) SetUpscaleTarget(rateHz, bits int) error {
 		INSERT INTO scan_state(k, v) VALUES(?, ?)
 		ON CONFLICT(k) DO UPDATE SET v = excluded.v
 	`
-	if _, err := tx.Exec(upsert, UpscaleTargetRateKey, strconv.Itoa(rateHz)); err != nil {
+	if _, err := tx.ExecContext(ctx, upsert, UpscaleTargetRateKey, strconv.Itoa(rateHz)); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(upsert, UpscaleTargetBitsKey, strconv.Itoa(bits)); err != nil {
+	if _, err := tx.ExecContext(ctx, upsert, UpscaleTargetBitsKey, strconv.Itoa(bits)); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -2168,10 +2169,10 @@ type UpscaleBatchRow struct {
 // SQLite; an invalid string surfaces as a constraint failure.
 //
 // Holds s.mu per the writer contract.
-func (s *Store) InsertUpscaleBatch(row UpscaleBatchRow) error {
+func (s *Store) InsertUpscaleBatch(ctx context.Context, row UpscaleBatchRow) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.Exec(`
+	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO upscale_batches
 			(id, path, target_rate, target_bits, status,
 			 total_files, processed_files, failed_files,
@@ -2194,10 +2195,10 @@ func (s *Store) InsertUpscaleBatch(row UpscaleBatchRow) error {
 // path).
 //
 // Holds s.mu per the writer contract.
-func (s *Store) UpdateUpscaleBatchProgress(row UpscaleBatchRow) error {
+func (s *Store) UpdateUpscaleBatchProgress(ctx context.Context, row UpscaleBatchRow) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.Exec(`
+	_, err := s.db.ExecContext(ctx, `
 		UPDATE upscale_batches
 		   SET status         = ?,
 		       processed_files = ?,
@@ -2214,10 +2215,10 @@ func (s *Store) UpdateUpscaleBatchProgress(row UpscaleBatchRow) error {
 // error + updated_at without touching counters. Used by
 // `Coordinator.Cancel`, `transitionStatus`, and pending→running
 // promotion at Submit.
-func (s *Store) UpdateUpscaleBatchStatus(row UpscaleBatchRow) error {
+func (s *Store) UpdateUpscaleBatchStatus(ctx context.Context, row UpscaleBatchRow) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.Exec(`
+	_, err := s.db.ExecContext(ctx, `
 		UPDATE upscale_batches
 		   SET status     = ?,
 		       error      = ?,
@@ -2231,11 +2232,11 @@ func (s *Store) UpdateUpscaleBatchStatus(row UpscaleBatchRow) error {
 // created_at DESC. limit ≤ 0 falls back to a sensible default
 // (100, matching the admin Jobs page's pagination). Used by the
 // `/v1/upscale/batches` endpoint and the admin Jobs page.
-func (s *Store) ListUpscaleBatches(limit int) ([]UpscaleBatchRow, error) {
+func (s *Store) ListUpscaleBatches(ctx context.Context, limit int) ([]UpscaleBatchRow, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := s.db.Query(`
+	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, path, target_rate, target_bits, status,
 		       total_files, processed_files, failed_files,
 		       COALESCE(error, ''), created_at, updated_at
@@ -2288,10 +2289,10 @@ func (s *Store) ListUpscaleBatches(limit int) ([]UpscaleBatchRow, error) {
 // terminal status.
 //
 // Holds s.mu per the writer contract.
-func (s *Store) RecoverInterruptedBatches(nowUnixNS int64) (rowsAffected int64, err error) {
+func (s *Store) RecoverInterruptedBatches(ctx context.Context, nowUnixNS int64) (rowsAffected int64, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	res, err := s.db.Exec(`
+	res, err := s.db.ExecContext(ctx, `
 		UPDATE upscale_batches
 		   SET status = 'interrupted', updated_at = ?
 		 WHERE status IN ('pending','running')
@@ -2361,7 +2362,7 @@ type ChildTrack struct {
 // and `track_variants`. Loopback admin-only callers; no rate limit
 // needed. SQLite plans the subqueries against the existing PRIMARY
 // KEY indexes (tracks.path, track_variants.source_path).
-func (s *Store) ListChildFolders(parent string) ([]ChildFolderRollup, error) {
+func (s *Store) ListChildFolders(ctx context.Context, parent string) ([]ChildFolderRollup, error) {
 	var (
 		rows *sql.Rows
 		err  error
@@ -2370,7 +2371,7 @@ func (s *Store) ListChildFolders(parent string) ([]ChildFolderRollup, error) {
 		// Top-level: folders whose path has no slash. Matches
 		// multi-root basenames (e.g. "MusicRootA") AND single-root
 		// album folders (e.g. "AlbumA").
-		rows, err = s.db.Query(`
+		rows, err = s.db.QueryContext(ctx, `
 			SELECT f.path,
 			       -- Range comparisons (not LIKE) because f.path is a
 			       -- column value: any folder name containing the LIKE
@@ -2403,7 +2404,7 @@ func (s *Store) ListChildFolders(parent string) ([]ChildFolderRollup, error) {
 		// the same character-counted basis as substr(). Go's
 		// len() returns byte count for a UTF-8 string and would
 		// over-shoot by `bytes - chars` on a parent like "Müller".
-		rows, err = s.db.Query(`
+		rows, err = s.db.QueryContext(ctx, `
 			SELECT f.path,
 			       -- Range comparisons (not LIKE) because f.path is a
 			       -- column value: any folder name containing the LIKE
@@ -2464,13 +2465,13 @@ func (s *Store) ListChildFolders(parent string) ([]ChildFolderRollup, error) {
 // "at least one variant" regardless of target rate / bits. The
 // admin Library Inspector uses this to render the per-row
 // "upscale ready" indicator without joining the full variant rows.
-func (s *Store) ListChildTracks(parent string) ([]ChildTrack, error) {
+func (s *Store) ListChildTracks(ctx context.Context, parent string) ([]ChildTrack, error) {
 	var (
 		rows *sql.Rows
 		err  error
 	)
 	if parent == "" {
-		rows, err = s.db.Query(`
+		rows, err = s.db.QueryContext(ctx, `
 			SELECT t.path, t.size,
 			       json_extract(t.tags_json, '$.sampleRate')    AS sample_rate,
 			       json_extract(t.tags_json, '$.bitsPerSample') AS bits_per_sample,
@@ -2486,7 +2487,7 @@ func (s *Store) ListChildTracks(parent string) ([]ChildTrack, error) {
 		likePat := likeEscape(parent) + `/%`
 		// `length(?)` (SQLite character count) — see ListChildFolders
 		// for the UTF-8 byte-vs-char rationale.
-		rows, err = s.db.Query(`
+		rows, err = s.db.QueryContext(ctx, `
 			SELECT t.path, t.size,
 			       json_extract(t.tags_json, '$.sampleRate')    AS sample_rate,
 			       json_extract(t.tags_json, '$.bitsPerSample') AS bits_per_sample,
@@ -2551,7 +2552,7 @@ func (s *Store) ListChildTracks(parent string) ([]ChildTrack, error) {
 // so the round-trip cost is two SQLite calls regardless of subtree
 // size. Indexes on `tracks(path)` and `track_variants(source_path)`
 // make these O(matched rows) lookups.
-func (s *Store) RollupByPrefix(prefix string) (FolderRollup, error) {
+func (s *Store) RollupByPrefix(ctx context.Context, prefix string) (FolderRollup, error) {
 	var pattern string
 	if prefix == "" {
 		pattern = `%` // match all rows
@@ -2560,14 +2561,14 @@ func (s *Store) RollupByPrefix(prefix string) (FolderRollup, error) {
 		pattern = escaped + `/%`
 	}
 	var out FolderRollup
-	if err := s.db.QueryRow(`
+	if err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*), COALESCE(SUM(size), 0)
 		  FROM tracks
 		 WHERE path LIKE ? ESCAPE '\'
 	`, pattern).Scan(&out.TrackCount, &out.TotalSizeBytes); err != nil {
 		return FolderRollup{}, fmt.Errorf("rollup tracks %q: %w", prefix, err)
 	}
-	if err := s.db.QueryRow(`
+	if err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(DISTINCT source_path), COALESCE(SUM(size_bytes), 0)
 		  FROM track_variants
 		 WHERE source_path LIKE ? ESCAPE '\'
@@ -2602,7 +2603,7 @@ type TrackProjection struct {
 // `ProjectedSize` returns 0 for zero rates / bits, so they
 // naturally contribute nothing to the projection. The admin can
 // surface a separate "X unknown-format tracks" counter if needed.
-func (s *Store) ListTrackProjectionsUnderPrefix(prefix string) ([]TrackProjection, error) {
+func (s *Store) ListTrackProjectionsUnderPrefix(ctx context.Context, prefix string) ([]TrackProjection, error) {
 	var pattern string
 	if prefix == "" {
 		pattern = `%`
@@ -2610,7 +2611,7 @@ func (s *Store) ListTrackProjectionsUnderPrefix(prefix string) ([]TrackProjectio
 		escaped := likeEscape(prefix)
 		pattern = escaped + `/%`
 	}
-	rows, err := s.db.Query(`
+	rows, err := s.db.QueryContext(ctx, `
 		SELECT t.path, t.size, t.mtime_ns,
 		       CAST(COALESCE(json_extract(t.tags_json, '$.sampleRate'),    0) AS INTEGER) AS rate,
 		       CAST(COALESCE(json_extract(t.tags_json, '$.bitsPerSample'), 0) AS INTEGER) AS bits,
@@ -2672,15 +2673,15 @@ type VariantRow struct {
 // Holds `s.mu` per the writer contract. Replacement semantics
 // mirror UpsertTrack — re-running `bridge upscale --force` re-
 // converts and overwrites the prior row's metadata cleanly.
-func (s *Store) UpsertVariant(v VariantRow) error {
+func (s *Store) UpsertVariant(ctx context.Context, v VariantRow) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	tx, err := s.db.Begin()
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback() // no-op after Commit; structural rollback guarantee.
-	if _, err := tx.Exec(`
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO track_variants
 			(source_path, variant_id, sidecar_path, format,
 			 sample_rate, bits_per_sample, size_bytes,
@@ -2726,7 +2727,7 @@ func (s *Store) UpsertVariant(v VariantRow) error {
 	//      under our `s.mu` writer-serialization contract anyway, but
 	//      keeping it atomic is also marginally faster.
 	now := s.now().UnixNano()
-	if _, err := tx.Exec(`
+	if _, err := tx.ExecContext(ctx, `
 		UPDATE tracks SET indexed_at = CASE
 			WHEN indexed_at >= ? THEN indexed_at + 1
 			ELSE ?
@@ -2740,7 +2741,7 @@ func (s *Store) UpsertVariant(v VariantRow) error {
 
 // GetVariant fetches one row by (source_path, variant_id). Returns
 // (nil, nil) if absent — same convention as GetTrack.
-func (s *Store) GetVariant(sourcePath, variantID string) (*VariantRow, error) {
+func (s *Store) GetVariant(ctx context.Context, sourcePath, variantID string) (*VariantRow, error) {
 	var v VariantRow
 	// Exact match by design — `track_variants.source_path` is part
 	// of the SQL PRIMARY KEY and case-insensitive lookups would risk
@@ -2749,7 +2750,7 @@ func (s *Store) GetVariant(sourcePath, variantID string) (*VariantRow, error) {
 	// that hand in iOS-shaped paths from `share.normalize`. (Qodo
 	// on PR #126: variant lookup non-determinism could stream the
 	// wrong sidecar from /v1/download.)
-	err := s.db.QueryRow(`
+	err := s.db.QueryRowContext(ctx, `
 		SELECT source_path, variant_id, sidecar_path, format,
 		       sample_rate, bits_per_sample, size_bytes,
 		       source_mtime_ns, source_size, sox_settings, created_at
@@ -2783,28 +2784,28 @@ func (s *Store) GetVariant(sourcePath, variantID string) (*VariantRow, error) {
 // stay on `GetVariant`. (Qodo on PR #126: the upscale freshness
 // check is the canonical caller — it follows a `LookupTrack` and
 // must agree with it on which row is being inspected.)
-func (s *Store) LookupVariant(sourcePath, variantID string) (*VariantRow, error) {
-	if v, err := s.GetVariant(sourcePath, variantID); err != nil || v != nil {
+func (s *Store) LookupVariant(ctx context.Context, sourcePath, variantID string) (*VariantRow, error) {
+	if v, err := s.GetVariant(ctx, sourcePath, variantID); err != nil || v != nil {
 		return v, err
 	}
 	cleaned := normalizePathForLookup(sourcePath)
 	if cleaned == sourcePath {
-		return s.lookupVariantByLowerCase(cleaned, variantID)
+		return s.lookupVariantByLowerCase(ctx, cleaned, variantID)
 	}
-	if v, err := s.GetVariant(cleaned, variantID); err != nil || v != nil {
+	if v, err := s.GetVariant(ctx, cleaned, variantID); err != nil || v != nil {
 		return v, err
 	}
-	return s.lookupVariantByLowerCase(cleaned, variantID)
+	return s.lookupVariantByLowerCase(ctx, cleaned, variantID)
 }
 
-func (s *Store) lookupVariantByLowerCase(cleanedSourcePath, variantID string) (*VariantRow, error) {
+func (s *Store) lookupVariantByLowerCase(ctx context.Context, cleanedSourcePath, variantID string) (*VariantRow, error) {
 	// Same fail-closed-on-ambiguity contract as
 	// `lookupTrackByLowerCase` — see that function's comment for
 	// the case-collision rationale. Two distinct case-colliding
 	// `track_variants.source_path` rows under the same
 	// `variant_id` would otherwise let LIMIT 1 stream the wrong
 	// sidecar from /v1/download. (CodeRabbit on PR #126.)
-	rows, err := s.db.Query(`
+	rows, err := s.db.QueryContext(ctx, `
 		SELECT source_path, variant_id, sidecar_path, format,
 		       sample_rate, bits_per_sample, size_bytes,
 		       source_mtime_ns, source_size, sox_settings, created_at
@@ -2838,8 +2839,8 @@ func (s *Store) lookupVariantByLowerCase(cleanedSourcePath, variantID string) (*
 // AllVariants returns every row in track_variants. Used by `bridge
 // upscale --gc` to drive the mark-and-sweep against the on-disk
 // `<dataDir>/transcoded/` directory.
-func (s *Store) AllVariants() ([]VariantRow, error) {
-	rows, err := s.db.Query(`
+func (s *Store) AllVariants(ctx context.Context) ([]VariantRow, error) {
+	rows, err := s.db.QueryContext(ctx, `
 		SELECT source_path, variant_id, sidecar_path, format,
 		       sample_rate, bits_per_sample, size_bytes,
 		       source_mtime_ns, source_size, sox_settings, created_at
@@ -2886,9 +2887,9 @@ func (s *Store) AllVariants() ([]VariantRow, error) {
 // caller-side cleanup loop hands real iterator errors back to the
 // handler so a partial result never silently leaks. Hits the v4
 // `idx_track_variants_source_path_unicode_lower` index.
-func (s *Store) ListVariantsByPathPrefix(prefix string) ([]VariantRow, error) {
+func (s *Store) ListVariantsByPathPrefix(ctx context.Context, prefix string) ([]VariantRow, error) {
 	pattern := likeEscape(prefix) + "%"
-	rows, err := s.db.Query(`
+	rows, err := s.db.QueryContext(ctx, `
 		SELECT source_path, variant_id, sidecar_path, format,
 		       sample_rate, bits_per_sample, size_bytes,
 		       source_mtime_ns, source_size, sox_settings, created_at
@@ -2926,8 +2927,8 @@ func (s *Store) ListVariantsByPathPrefix(prefix string) ([]VariantRow, error) {
 //
 // Returns `(out, rows.Err())` — same iterator-error discipline as
 // ListVariantsByPathPrefix.
-func (s *Store) ListVariantsForPath(sourcePath string) ([]VariantRow, error) {
-	rows, err := s.db.Query(`
+func (s *Store) ListVariantsForPath(ctx context.Context, sourcePath string) ([]VariantRow, error) {
+	rows, err := s.db.QueryContext(ctx, `
 		SELECT source_path, variant_id, sidecar_path, format,
 		       sample_rate, bits_per_sample, size_bytes,
 		       source_mtime_ns, source_size, sox_settings, created_at
@@ -2972,15 +2973,15 @@ func (s *Store) ListVariantsForPath(sourcePath string) ([]VariantRow, error) {
 //
 // Holds `s.mu`. Caller is responsible for removing the on-disk sidecar
 // file — same separation-of-concerns as DeleteTrack pre-cleanup.
-func (s *Store) DeleteVariant(sourcePath, variantID string) error {
+func (s *Store) DeleteVariant(ctx context.Context, sourcePath, variantID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	tx, err := s.db.Begin()
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	res, err := tx.Exec(`DELETE FROM track_variants WHERE source_path = ? AND variant_id = ?`,
+	res, err := tx.ExecContext(ctx, `DELETE FROM track_variants WHERE source_path = ? AND variant_id = ?`,
 		sourcePath, variantID)
 	if err != nil {
 		return err
@@ -2997,7 +2998,7 @@ func (s *Store) DeleteVariant(sourcePath, variantID string) error {
 		// strictly-greater indexed_at, keeping
 		// `delta-sync WHERE indexed_at > since` reliable.
 		now := s.now().UnixNano()
-		if _, err := tx.Exec(`
+		if _, err := tx.ExecContext(ctx, `
 			UPDATE tracks SET indexed_at = CASE
 				WHEN indexed_at >= ? THEN indexed_at + 1
 				ELSE ?
@@ -3018,12 +3019,12 @@ func (s *Store) DeleteVariant(sourcePath, variantID string) error {
 // Returns (0, 0, nil) when the table is empty (or the upscale
 // feature has never been used). Errors propagate; the admin
 // handler degrades to "stats unavailable" on failure.
-func (s *Store) CountVariants() (int, int64, error) {
+func (s *Store) CountVariants(ctx context.Context) (int, int64, error) {
 	var (
 		count int
 		bytes sql.NullInt64
 	)
-	row := s.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM track_variants`)
+	row := s.db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM track_variants`)
 	if err := row.Scan(&count, &bytes); err != nil {
 		return 0, 0, err
 	}

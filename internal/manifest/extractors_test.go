@@ -711,7 +711,7 @@ func TestScanner_RecoversWipedLocalArtworkCache(t *testing.T) {
 	}
 
 	// And the manifest still carries the same local- value.
-	got, _ := store.GetTrack("track.mp3")
+	got, _ := store.GetTrack(context.Background(), "track.mp3")
 	if got == nil || got.ArtworkMBID != expectedMBID {
 		t.Errorf("ArtworkMBID after recovery = %v, want %q", got, expectedMBID)
 	}
@@ -740,7 +740,7 @@ func TestScanner_NoRecoveryForUUIDArtworkMBID(t *testing.T) {
 	// irrelevant — recovery must NOT trigger for non-local rows.
 	info, _ := os.Stat(audioPath)
 	uuidMBID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-	store.UpsertTrack(&Track{
+	store.UpsertTrack(context.Background(), &Track{
 		Path: "track.mp3", Size: info.Size(), ModTime: info.ModTime().UTC(),
 		Artist: "X", Album: "Y", ArtworkMBID: uuidMBID,
 	})
@@ -751,7 +751,7 @@ func TestScanner_NoRecoveryForUUIDArtworkMBID(t *testing.T) {
 	// The recovery helper itself is the unit-test shape — assert
 	// directly that a UUID-prefixed track does NOT trigger
 	// recovery, regardless of the cache file's presence.
-	stored, _ := store.GetTrack("track.mp3")
+	stored, _ := store.GetTrack(context.Background(), "track.mp3")
 	if scanner.needsLocalArtworkRecovery(stored) {
 		t.Errorf("UUID-form ArtworkMBID must not trigger recovery (got true)")
 	}

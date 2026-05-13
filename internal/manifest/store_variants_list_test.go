@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -23,7 +24,7 @@ func TestListVariantsByPathPrefix_exactPrefixOnly(t *testing.T) {
 		"Diana Krall/Live/02.flac",
 		"Dianasaurs/Greatest/01.flac",
 	} {
-		if err := s.UpsertVariant(VariantRow{
+		if err := s.UpsertVariant(context.Background(), VariantRow{
 			SourcePath:    p,
 			VariantID:     "upscaled-v2-176400-24",
 			SidecarPath:   "/tmp/" + p + ".flac",
@@ -40,7 +41,7 @@ func TestListVariantsByPathPrefix_exactPrefixOnly(t *testing.T) {
 		}
 	}
 
-	rows, err := s.ListVariantsByPathPrefix("Diana Krall/")
+	rows, err := s.ListVariantsByPathPrefix(context.Background(), "Diana Krall/")
 	if err != nil {
 		t.Fatalf("ListVariantsByPathPrefix: %v", err)
 	}
@@ -71,7 +72,7 @@ func TestListVariantsByPathPrefix_likeEscape(t *testing.T) {
 		"Albums/2020 Best/01.flac",
 		"Albums/2025 Best/01.flac",
 	} {
-		if err := s.UpsertVariant(VariantRow{
+		if err := s.UpsertVariant(context.Background(), VariantRow{
 			SourcePath: p, VariantID: "v", SidecarPath: "/tmp/x", Format: "flac",
 			SampleRate: 176400, BitsPerSample: 24, SizeBytes: 1, SourceMTimeNS: 1, SourceSize: 1,
 			SoxSettings: "{}", CreatedAt: 1,
@@ -80,7 +81,7 @@ func TestListVariantsByPathPrefix_likeEscape(t *testing.T) {
 		}
 	}
 
-	rows, err := s.ListVariantsByPathPrefix("Albums/20%_Hits/")
+	rows, err := s.ListVariantsByPathPrefix(context.Background(), "Albums/20%_Hits/")
 	if err != nil {
 		t.Fatalf("ListVariantsByPathPrefix: %v", err)
 	}
@@ -98,7 +99,7 @@ func TestListVariantsByPathPrefix_empty(t *testing.T) {
 	s := openTempStore(t)
 	t.Cleanup(func() { _ = s.Close() })
 
-	rows, err := s.ListVariantsByPathPrefix("Nothing/Here/")
+	rows, err := s.ListVariantsByPathPrefix(context.Background(), "Nothing/Here/")
 	if err != nil {
 		t.Fatalf("ListVariantsByPathPrefix: %v", err)
 	}
@@ -116,7 +117,7 @@ func TestListVariantsForPath_exactMatchCaseInsensitive(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 
 	upsertParent(t, s, "Music/Album/01.flac")
-	if err := s.UpsertVariant(VariantRow{
+	if err := s.UpsertVariant(context.Background(), VariantRow{
 		SourcePath: "Music/Album/01.flac", VariantID: "v",
 		SidecarPath: "/tmp/x.flac", Format: "flac",
 		SampleRate: 176400, BitsPerSample: 24, SizeBytes: 1,
@@ -126,7 +127,7 @@ func TestListVariantsForPath_exactMatchCaseInsensitive(t *testing.T) {
 	}
 
 	// Lowercase shape iOS would send
-	rows, err := s.ListVariantsForPath("music/album/01.flac")
+	rows, err := s.ListVariantsForPath(context.Background(), "music/album/01.flac")
 	if err != nil {
 		t.Fatalf("ListVariantsForPath: %v", err)
 	}
@@ -141,7 +142,7 @@ func TestListVariantsForPath_empty(t *testing.T) {
 	s := openTempStore(t)
 	t.Cleanup(func() { _ = s.Close() })
 
-	rows, err := s.ListVariantsForPath("Music/Missing/track.flac")
+	rows, err := s.ListVariantsForPath(context.Background(), "Music/Missing/track.flac")
 	if err != nil {
 		t.Fatalf("ListVariantsForPath: %v", err)
 	}

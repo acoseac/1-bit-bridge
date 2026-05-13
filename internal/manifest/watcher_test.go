@@ -52,7 +52,7 @@ func TestWatcherDebounce(t *testing.T) {
 
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		got, _ := store.ListTracks(nil)
+		got, _ := store.ListTracks(context.Background(), nil)
 		if len(got) > 0 {
 			return // success
 		}
@@ -95,7 +95,7 @@ func TestWatcherIgnoresDotfiles(t *testing.T) {
 	}
 	time.Sleep(200 * time.Millisecond)
 
-	got, _ := store.ListTracks(nil)
+	got, _ := store.ListTracks(context.Background(), nil)
 	if len(got) != 0 {
 		t.Errorf("expected 0 tracks for dotfile event; got %d", len(got))
 	}

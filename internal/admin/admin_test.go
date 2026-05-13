@@ -700,14 +700,14 @@ func TestUpscaleStatsDisabledWithHistory(t *testing.T) {
 	// reports a non-zero history. UpscaleStats stays nil
 	// (closure not wired) → simulates "feature off with
 	// historical converted files on disk".
-	if err := srv.deps.Manifest.UpsertTrack(&manifest.Track{
+	if err := srv.deps.Manifest.UpsertTrack(context.Background(), &manifest.Track{
 		Path:    "Music/Album/01.flac",
 		Size:    100,
 		ModTime: time.Now(),
 	}); err != nil {
 		t.Fatalf("UpsertTrack: %v", err)
 	}
-	if err := srv.deps.Manifest.UpsertVariant(manifest.VariantRow{
+	if err := srv.deps.Manifest.UpsertVariant(context.Background(), manifest.VariantRow{
 		SourcePath:    "Music/Album/01.flac",
 		VariantID:     "upscaled-v2-176400-24",
 		SidecarPath:   "/dev/null/sidecar.flac",

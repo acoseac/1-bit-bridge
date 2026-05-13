@@ -57,7 +57,7 @@ func (s *Server) renderPage(w http.ResponseWriter, active string, data any) {
 }
 
 func (s *Server) pageDashboard(w http.ResponseWriter, r *http.Request) {
-	tracks, _ := s.deps.Manifest.CountTracks()
+	tracks, _ := s.deps.Manifest.CountTracks(r.Context())
 	dbBytes := dbSize(filepath.Join(s.deps.Cfg.DataDir, "bridge.db"))
 	data := map[string]any{
 		"Uptime":        time.Since(s.deps.StartedAt),
@@ -101,9 +101,9 @@ func (s *Server) pageLibrary(w http.ResponseWriter, r *http.Request) {
 	for _, root := range roots {
 		var n int
 		if multi {
-			n, _ = s.deps.Manifest.CountTracksByPrefix(filepath.Base(root) + "/")
+			n, _ = s.deps.Manifest.CountTracksByPrefix(r.Context(), filepath.Base(root)+"/")
 		} else {
-			n, _ = s.deps.Manifest.CountTracks()
+			n, _ = s.deps.Manifest.CountTracks(r.Context())
 		}
 		rows = append(rows, rootRow{Path: root, Tracks: n})
 	}

@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
@@ -41,7 +42,7 @@ func seedBrowseFixture(t *testing.T, s *Store) {
 		"MusicB/Album3",
 	}
 	for _, p := range folders {
-		if err := s.UpsertFolder(&Folder{Path: p}); err != nil {
+		if err := s.UpsertFolder(context.Background(), &Folder{Path: p}); err != nil {
 			t.Fatalf("UpsertFolder %q: %v", p, err)
 		}
 	}
@@ -92,7 +93,7 @@ func seedBrowseFixture(t *testing.T, s *Store) {
 		},
 	}
 	for _, v := range variants {
-		if err := s.UpsertVariant(v); err != nil {
+		if err := s.UpsertVariant(context.Background(), v); err != nil {
 			t.Fatalf("UpsertVariant %q: %v", v.SourcePath, err)
 		}
 	}
@@ -106,7 +107,7 @@ func TestListChildFolders_EmptyParentReturnsTopLevel(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 	seedBrowseFixture(t, s)
 
-	rows, err := s.ListChildFolders("")
+	rows, err := s.ListChildFolders(context.Background(), "")
 	if err != nil {
 		t.Fatalf("ListChildFolders(\"\"): %v", err)
 	}
@@ -145,7 +146,7 @@ func TestListChildFolders_NestedParentReturnsOneLevelOnly(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 	seedBrowseFixture(t, s)
 
-	rows, err := s.ListChildFolders("MusicA")
+	rows, err := s.ListChildFolders(context.Background(), "MusicA")
 	if err != nil {
 		t.Fatalf("ListChildFolders(MusicA): %v", err)
 	}
@@ -173,7 +174,7 @@ func TestListChildFolders_DeepestLevelReturnsEmpty(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 	seedBrowseFixture(t, s)
 
-	rows, err := s.ListChildFolders("MusicA/Album1")
+	rows, err := s.ListChildFolders(context.Background(), "MusicA/Album1")
 	if err != nil {
 		t.Fatalf("ListChildFolders(MusicA/Album1): %v", err)
 	}
@@ -190,7 +191,7 @@ func TestListChildTracks_PicksUpJSONFields(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 	seedBrowseFixture(t, s)
 
-	rows, err := s.ListChildTracks("MusicA/Album1")
+	rows, err := s.ListChildTracks(context.Background(), "MusicA/Album1")
 	if err != nil {
 		t.Fatalf("ListChildTracks: %v", err)
 	}
@@ -229,7 +230,7 @@ func TestRollupByPrefix_EmptyMatchesAll(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 	seedBrowseFixture(t, s)
 
-	r, err := s.RollupByPrefix("")
+	r, err := s.RollupByPrefix(context.Background(), "")
 	if err != nil {
 		t.Fatalf("RollupByPrefix(\"\"): %v", err)
 	}
@@ -261,7 +262,7 @@ func TestRollupByPrefix_LikeEscapeProtectsAgainstWildcard(t *testing.T) {
 	// single character including the % in "Test%A".
 	folders := []string{"Test_A", "Test_A/album", "TestQA", "TestQA/album"}
 	for _, p := range folders {
-		if err := s.UpsertFolder(&Folder{Path: p}); err != nil {
+		if err := s.UpsertFolder(context.Background(), &Folder{Path: p}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -275,7 +276,7 @@ func TestRollupByPrefix_LikeEscapeProtectsAgainstWildcard(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	r, err := s.RollupByPrefix("Test_A")
+	r, err := s.RollupByPrefix(context.Background(), "Test_A")
 	if err != nil {
 		t.Fatalf("RollupByPrefix: %v", err)
 	}
@@ -292,7 +293,7 @@ func TestListTrackProjectionsUnderPrefix_FiltersDescendants(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 	seedBrowseFixture(t, s)
 
-	projs, err := s.ListTrackProjectionsUnderPrefix("MusicA")
+	projs, err := s.ListTrackProjectionsUnderPrefix(context.Background(), "MusicA")
 	if err != nil {
 		t.Fatalf("ListTrackProjectionsUnderPrefix: %v", err)
 	}
@@ -327,7 +328,7 @@ func TestUpscaleBatchesTablePersistsUUID(t *testing.T) {
 	seedBrowseFixture(t, s)
 
 	id := uuid.Must(uuid.NewRandom())
-	if err := s.InsertUpscaleBatch(UpscaleBatchRow{
+	if err := s.InsertUpscaleBatch(context.Background(), UpscaleBatchRow{
 		ID: id, Path: "MusicA", TargetRate: 192000, TargetBits: 24,
 		Status: "pending", CreatedAt: 1, UpdatedAt: 1,
 	}); err != nil {

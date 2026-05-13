@@ -580,7 +580,7 @@ func TestEnricherProcessesTracksEndToEnd(t *testing.T) {
 
 	// Seed two un-enriched tracks on the same album.
 	for _, path := range []string{"Artist/Album/01.flac", "Artist/Album/02.flac"} {
-		store.UpsertTrack(&manifest.Track{
+		store.UpsertTrack(context.Background(), &manifest.Track{
 			Path:    path,
 			Size:    100,
 			ModTime: time.Now(),
@@ -619,7 +619,7 @@ func TestEnricherProcessesTracksEndToEnd(t *testing.T) {
 	}
 
 	// Verify both tracks have ArtworkMBID set.
-	all, _ := store.ListTracks(nil)
+	all, _ := store.ListTracks(context.Background(), nil)
 	for _, tr := range all {
 		if tr.ArtworkMBID != "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" {
 			t.Errorf("%s ArtworkMBID = %q", tr.Path, tr.ArtworkMBID)
@@ -662,7 +662,7 @@ func TestEnricherDeduplicatesAlbumLookups(t *testing.T) {
 	store, _ := manifest.OpenStore(filepath.Join(dir, "bridge.db"))
 	defer store.Close()
 	for _, p := range []string{"a.flac", "b.flac", "c.flac"} {
-		store.UpsertTrack(&manifest.Track{
+		store.UpsertTrack(context.Background(), &manifest.Track{
 			Path: p, Size: 1, ModTime: time.Now(),
 			Artist: "Artist", Album: "Album",
 		})
@@ -703,7 +703,7 @@ func TestEnricherSkipsUnsearchableTracks(t *testing.T) {
 	store, _ := manifest.OpenStore(filepath.Join(dir, "bridge.db"))
 	defer store.Close()
 	// Track with no artist/album → can't be searched.
-	store.UpsertTrack(&manifest.Track{Path: "orphan.flac", Size: 1, ModTime: time.Now()})
+	store.UpsertTrack(context.Background(), &manifest.Track{Path: "orphan.flac", Size: 1, ModTime: time.Now()})
 
 	e := NewEnricher(store, NewMusicBrainzClient(mbSrv.URL, "t", nil),
 		NewCoverArtClient(caaSrv.URL, "t", nil), nil, filepath.Join(dir, "artwork"))
@@ -722,7 +722,7 @@ func TestEnricherSkipsUnsearchableTracks(t *testing.T) {
 	}
 
 	// Track's enriched_at should be non-zero so the worker doesn't spin.
-	remaining, _ := store.UnenrichedTracks(100)
+	remaining, _ := store.UnenrichedTracks(context.Background(), 100)
 	if len(remaining) != 0 {
 		t.Errorf("skipped track still un-enriched: %+v", remaining)
 	}
@@ -749,7 +749,7 @@ func TestEnricherSkipsNetworkCallIfCoverAlreadyCached(t *testing.T) {
 
 	store, _ := manifest.OpenStore(filepath.Join(dir, "bridge.db"))
 	defer store.Close()
-	store.UpsertTrack(&manifest.Track{Path: "x.flac", Size: 1, ModTime: time.Now(), Artist: "Artist", Album: "Album"})
+	store.UpsertTrack(context.Background(), &manifest.Track{Path: "x.flac", Size: 1, ModTime: time.Now(), Artist: "Artist", Album: "Album"})
 
 	e := NewEnricher(store, NewMusicBrainzClient(mbSrv.URL, "t", nil),
 		NewCoverArtClient(caaSrv.URL, "t", nil), nil, artDir)
@@ -841,7 +841,7 @@ func TestEnricherSkipsArtworkFetchForLocalMBID(t *testing.T) {
 		Artist: "Artist", Album: "Album",
 		ArtworkMBID: localMBID,
 	}
-	if err := store.UpsertTrack(tr); err != nil {
+	if err := store.UpsertTrack(context.Background(), tr); err != nil {
 		t.Fatal(err)
 	}
 
@@ -874,7 +874,7 @@ func TestEnricherSkipsArtworkFetchForLocalMBID(t *testing.T) {
 	// Round-trip the track from storage to confirm ArtworkMBID
 	// survived MarkEnriched without being overwritten by the
 	// enricher's UUID-stamping branch.
-	got, err := store.GetTrack("x.flac")
+	got, err := store.GetTrack(context.Background(), "x.flac")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -921,7 +921,7 @@ func TestEnricherFallthroughForLocalPrefixWithoutMBMatch(t *testing.T) {
 		Artist: "ObscureArtist", Album: "RareAlbum",
 		ArtworkMBID: localMBID,
 	}
-	if err := store.UpsertTrack(tr); err != nil {
+	if err := store.UpsertTrack(context.Background(), tr); err != nil {
 		t.Fatal(err)
 	}
 
@@ -947,7 +947,7 @@ func TestEnricherFallthroughForLocalPrefixWithoutMBMatch(t *testing.T) {
 	if got := caaCalls.Load(); got != 0 {
 		t.Errorf("CAA called %d times despite albumMBID==\"\" + local prefix; want 0", got)
 	}
-	got, _ := store.GetTrack("y.flac")
+	got, _ := store.GetTrack(context.Background(), "y.flac")
 	if got == nil || got.ArtworkMBID != localMBID {
 		t.Errorf("ArtworkMBID lost on local-prefix obscure-album path (got %v)", got)
 	}

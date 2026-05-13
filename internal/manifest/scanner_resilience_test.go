@@ -186,7 +186,7 @@ func TestClearMissingCounts(t *testing.T) {
 		t.Fatalf("scan 2: %v", err)
 	}
 	// doomed has missing_count=1 now; healthy is at 0.
-	n, err := store.ClearMissingCounts()
+	n, err := store.ClearMissingCounts(context.Background())
 	if err != nil {
 		t.Fatalf("ClearMissingCounts: %v", err)
 	}
@@ -217,7 +217,7 @@ func TestPendingDeletionsCount(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got, _ := store.PendingDeletions(); got != 0 {
+	if got, _ := store.PendingDeletions(context.Background()); got != 0 {
 		t.Errorf("clean state: PendingDeletions = %d, want 0", got)
 	}
 
@@ -227,7 +227,7 @@ func TestPendingDeletionsCount(t *testing.T) {
 	if _, err := s.Scan(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := store.PendingDeletions(); got != 1 {
+	if got, _ := store.PendingDeletions(context.Background()); got != 1 {
 		t.Errorf("after first miss: PendingDeletions = %d, want 1", got)
 	}
 }
@@ -236,7 +236,7 @@ func TestPendingDeletionsCount(t *testing.T) {
 
 func countTracksHelper(t *testing.T, store *Store) int {
 	t.Helper()
-	n, err := store.CountTracks()
+	n, err := store.CountTracks(context.Background())
 	if err != nil {
 		t.Fatalf("CountTracks: %v", err)
 	}

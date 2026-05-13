@@ -173,7 +173,7 @@ type runUpscaleParams struct {
 // it, Ctrl-C on a 50-track album would block until the largest
 // file's sox finished.
 func runUpscaleBatch(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store, cfg *config.Config, resolver *bridgefs.Resolver, p runUpscaleParams) int {
-	allTracks, err := store.ListTracks(nil)
+	allTracks, err := store.ListTracks(context.Background(), nil)
 	if err != nil {
 		fmt.Fprintf(stderr, "list tracks: %v\n", err)
 		return 1
@@ -251,7 +251,7 @@ func runUpscaleBatch(ctx context.Context, stdout, stderr io.Writer, store *manif
 		needsRun := true
 		var skipNote string
 		if !p.force {
-			if existing, _ := store.GetVariant(t.Path, spec.VariantID()); existing != nil {
+			if existing, _ := store.GetVariant(context.Background(), t.Path, spec.VariantID()); existing != nil {
 				if existing.SourceMTimeNS == spec.SourceMTimeNS && existing.SourceSize == spec.SourceSize {
 					if _, err := os.Stat(existing.SidecarPath); err == nil {
 						needsRun = false
@@ -345,7 +345,7 @@ func runUpscaleBatch(ctx context.Context, stdout, stderr io.Writer, store *manif
 					SoxSettings:   settings,
 					CreatedAt:     transcode.CreatedAtNow(),
 				}
-				if err := store.UpsertVariant(row); err != nil {
+				if err := store.UpsertVariant(context.Background(), row); err != nil {
 					atomic.AddUint64(&failCount, 1)
 					fmt.Fprintf(stderr, "FAIL %s (db write): %v\n", c.spec.SourceLibraryRel, err)
 					// Best-effort: remove the orphan sidecar so a
@@ -421,7 +421,7 @@ producerLoop:
 // for the forward sweep but the reverse sweep would re-introduce
 // the very mismatch we're fixing.
 func runGC(stdout, stderr io.Writer, store *manifest.Store, outputDir string) int {
-	allRows, err := store.AllVariants()
+	allRows, err := store.AllVariants(context.Background())
 	if err != nil {
 		fmt.Fprintf(stderr, "list variants: %v\n", err)
 		return 1
@@ -526,7 +526,7 @@ func runGC(stdout, stderr io.Writer, store *manifest.Store, outputDir string) in
 		case statErr == nil:
 			rowsKept++
 		case errors.Is(statErr, os.ErrNotExist):
-			if err := store.DeleteVariant(r.SourcePath, r.VariantID); err != nil {
+			if err := store.DeleteVariant(context.Background(), r.SourcePath, r.VariantID); err != nil {
 				fmt.Fprintf(stderr, "delete orphan row %s / %s: %v\n", r.SourcePath, r.VariantID, err)
 				rowsFailed++
 				continue

@@ -120,13 +120,13 @@ func (f *fakeStreamingProvider) WriteManifest(ctx context.Context, w io.Writer, 
 	_, err := w.Write(f.body)
 	return err
 }
-func (f *fakeStreamingProvider) BuildManifestPage(cursor string, limit int) (*ManifestPage, error) {
+func (f *fakeStreamingProvider) BuildManifestPage(ctx context.Context, cursor string, limit int) (*ManifestPage, error) {
 	return nil, nil
 }
-func (f *fakeStreamingProvider) IsScanning() bool        { return false }
-func (f *fakeStreamingProvider) LastFullScan() time.Time { return time.Time{} }
-func (f *fakeStreamingProvider) TracksIndexed() int      { return 0 }
-func (f *fakeStreamingProvider) PendingDeletions() int64 { return 0 }
+func (f *fakeStreamingProvider) IsScanning() bool                           { return false }
+func (f *fakeStreamingProvider) LastFullScan() time.Time                    { return time.Time{} }
+func (f *fakeStreamingProvider) TracksIndexed(ctx context.Context) int      { return 0 }
+func (f *fakeStreamingProvider) PendingDeletions(ctx context.Context) int64 { return 0 }
 
 // TestManifestEmitsGzipWhenAcceptEncodingGzip confirms the handler
 // sets Content-Encoding + Vary AND the body is valid gzip that

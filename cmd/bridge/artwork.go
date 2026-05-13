@@ -116,7 +116,7 @@ func artworkCmd(_ context.Context, args []string, stdout, stderr io.Writer) int 
 }
 
 func runArtworkGC(stdout, stderr io.Writer, store *manifest.Store, artworkDir string, dryRun bool) int {
-	mbidsInUse, err := store.ArtworkMBIDsInUse()
+	mbidsInUse, err := store.ArtworkMBIDsInUse(context.Background())
 	if err != nil {
 		fmt.Fprintf(stderr, "list referenced artwork ids: %v\n", err)
 		return 1

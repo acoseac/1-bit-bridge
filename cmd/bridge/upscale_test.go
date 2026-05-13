@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -50,7 +51,7 @@ func TestRunGCReverseSweepRemovesOrphanRows(t *testing.T) {
 	// under us — we want to measure the gc's bump in isolation.
 	oldTime := time.Now().Add(-time.Hour)
 	for _, p := range []string{liveSrc, deadSrc} {
-		if err := store.UpsertTrack(&manifest.Track{
+		if err := store.UpsertTrack(context.Background(), &manifest.Track{
 			Path: p, Size: 100, ModTime: oldTime,
 		}); err != nil {
 			t.Fatalf("UpsertTrack %s: %v", p, err)
@@ -61,7 +62,7 @@ func TestRunGCReverseSweepRemovesOrphanRows(t *testing.T) {
 	if err := os.WriteFile(liveSidecar, []byte("flac-bytes"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.UpsertVariant(manifest.VariantRow{
+	if err := store.UpsertVariant(context.Background(), manifest.VariantRow{
 		SourcePath: liveSrc, VariantID: "upscaled-v2-176400-24",
 		SidecarPath: liveSidecar, Format: "flac",
 		SampleRate: 176400, BitsPerSample: 24, SizeBytes: 10,
@@ -74,7 +75,7 @@ func TestRunGCReverseSweepRemovesOrphanRows(t *testing.T) {
 	// NOTE: deliberately do NOT create deadSidecar — that's the bug
 	// scenario. The DB row will reference a path that never existed
 	// (equivalent to one whose file was later removed).
-	if err := store.UpsertVariant(manifest.VariantRow{
+	if err := store.UpsertVariant(context.Background(), manifest.VariantRow{
 		SourcePath: deadSrc, VariantID: "upscaled-v1-176400-24",
 		SidecarPath: deadSidecar, Format: "flac",
 		SampleRate: 176400, BitsPerSample: 24, SizeBytes: 10,
@@ -92,7 +93,7 @@ func TestRunGCReverseSweepRemovesOrphanRows(t *testing.T) {
 	// succeeded (the link itself exists) and left this row in
 	// place, which is wrong. Per Gemini on PR #207.
 	brokenLinkSrc := "Artist/Album/03 - phantom-link.flac"
-	if err := store.UpsertTrack(&manifest.Track{
+	if err := store.UpsertTrack(context.Background(), &manifest.Track{
 		Path: brokenLinkSrc, Size: 100, ModTime: oldTime,
 	}); err != nil {
 		t.Fatalf("UpsertTrack brokenLink: %v", err)
@@ -102,7 +103,7 @@ func TestRunGCReverseSweepRemovesOrphanRows(t *testing.T) {
 	if err := os.Symlink(missingTarget, brokenLink); err != nil {
 		t.Fatalf("symlink: %v", err)
 	}
-	if err := store.UpsertVariant(manifest.VariantRow{
+	if err := store.UpsertVariant(context.Background(), manifest.VariantRow{
 		SourcePath: brokenLinkSrc, VariantID: "upscaled-v1-176400-24",
 		SidecarPath: brokenLink, Format: "flac",
 		SampleRate: 176400, BitsPerSample: 24, SizeBytes: 10,
@@ -131,7 +132,7 @@ func TestRunGCReverseSweepRemovesOrphanRows(t *testing.T) {
 	// yields ENOENT). Per Gemini on PR #207: the broken-link case
 	// is exactly why `os.Stat` (follows links) is correct here
 	// rather than `os.Lstat` (link presence ≠ servability).
-	all, err := store.AllVariants()
+	all, err := store.AllVariants(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +166,7 @@ func TestRunGCReverseSweepRemovesOrphanRows(t *testing.T) {
 	// the dead row's parent MUST appear (its indexed_at was bumped
 	// past watermark by DeleteVariant); the live row's parent MUST
 	// NOT (no bump happened for it).
-	delta, err := store.ListTracks(&watermark)
+	delta, err := store.ListTracks(context.Background(), &watermark)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,13 +233,13 @@ func TestRunGCRefusesWhenOutputDirMissingButRowsExist(t *testing.T) {
 	// Seed one variant row whose sidecar_path lives under a
 	// transcoded directory that we WILL NOT create.
 	src := "Artist/Album/01 - protected.flac"
-	if err := store.UpsertTrack(&manifest.Track{
+	if err := store.UpsertTrack(context.Background(), &manifest.Track{
 		Path: src, Size: 100, ModTime: time.Now().Add(-time.Hour),
 	}); err != nil {
 		t.Fatal(err)
 	}
 	missingDir := filepath.Join(dir, "transcoded-never-created")
-	if err := store.UpsertVariant(manifest.VariantRow{
+	if err := store.UpsertVariant(context.Background(), manifest.VariantRow{
 		SourcePath: src, VariantID: "upscaled-v2-176400-24",
 		SidecarPath: filepath.Join(missingDir, "abc-upscaled-v2-176400-24.flac"),
 		Format:      "flac",
@@ -257,7 +258,7 @@ func TestRunGCRefusesWhenOutputDirMissingButRowsExist(t *testing.T) {
 	// Critical assertion: the row MUST still be in the DB. The
 	// guard's whole purpose is to prevent a mass-delete on
 	// environmental failure.
-	all, err := store.AllVariants()
+	all, err := store.AllVariants(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -846,7 +846,7 @@ func (p *Pool) processJob(job poolJob) {
 		SoxSettings:   settings,
 		CreatedAt:     completedAt.UnixNano(),
 	}
-	if err := p.store.UpsertVariant(row); err != nil {
+	if err := p.store.UpsertVariant(p.stopCtx, row); err != nil {
 		p.failedCnt.Add(1)
 		logger.Error("pool: store variant", "source", job.spec.SourceLibraryRel, "err", err)
 		// Best-effort: remove the orphan sidecar so a

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -95,7 +96,7 @@ func manifestClearMissingCmd(args []string, stdin io.Reader, stdout, stderr io.W
 	}
 	defer store.Close()
 
-	n, err := store.ClearMissingCounts()
+	n, err := store.ClearMissingCounts(context.Background())
 	if err != nil {
 		fmt.Fprintf(stderr, "clear-missing: %v\n", err)
 		return 1

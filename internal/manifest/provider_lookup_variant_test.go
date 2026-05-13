@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 	"time"
@@ -30,12 +31,12 @@ func TestProviderLookupVariant_caseInsensitive(t *testing.T) {
 	defer s.Close()
 
 	const canonical = "Abdullah Ibrahim/The Balance/09 - Devotion.flac"
-	if err := s.UpsertTrack(&Track{
+	if err := s.UpsertTrack(context.Background(), &Track{
 		Path: canonical, Size: 1, ModTime: time.Now(),
 	}); err != nil {
 		t.Fatalf("UpsertTrack: %v", err)
 	}
-	if err := s.UpsertVariant(VariantRow{
+	if err := s.UpsertVariant(context.Background(), VariantRow{
 		SourcePath:    canonical,
 		VariantID:     "upscaled-v2-176400-24",
 		SidecarPath:   "/tmp/x/abc-upscaled-v2-176400-24.flac",
@@ -69,7 +70,7 @@ func TestProviderLookupVariant_caseInsensitive(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := p.LookupVariant(tc.path, "upscaled-v2-176400-24")
+			got, err := p.LookupVariant(context.Background(), tc.path, "upscaled-v2-176400-24")
 			if err != nil {
 				t.Fatalf("LookupVariant(%q): %v", tc.path, err)
 			}
@@ -94,14 +95,14 @@ func TestProviderLookupVariant_stillReturnsNilOnMiss(t *testing.T) {
 	}
 	defer s.Close()
 
-	if err := s.UpsertTrack(&Track{
+	if err := s.UpsertTrack(context.Background(), &Track{
 		Path: "Real/Track.flac", Size: 1, ModTime: time.Now(),
 	}); err != nil {
 		t.Fatalf("UpsertTrack: %v", err)
 	}
 
 	p := NewProvider(s, NewScanner(nil, s, ""))
-	got, err := p.LookupVariant("/some/other/track.flac", "upscaled-v2-176400-24")
+	got, err := p.LookupVariant(context.Background(), "/some/other/track.flac", "upscaled-v2-176400-24")
 	if err != nil {
 		t.Fatalf("LookupVariant: %v", err)
 	}
