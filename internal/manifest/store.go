@@ -1372,6 +1372,12 @@ func (s *Store) DeleteTracksByPrefix(prefix string) (int64, error) {
 // source_path matches the LIKE-escaped prefix. Used by
 // DeleteTracksByPrefix's pre-cascade enumeration. Caller MUST
 // hold s.mu (writer-serialization contract).
+//
+// **Iterator-error returns propagate** (PR-C, audit follow-up):
+// the previous shape logged `rows.Err()` and returned `nil`,
+// masking partial-result truncation. Callers (the cascading
+// delete path) need to know when the enumeration was truncated
+// so they don't silently leave orphan sidecar files on disk.
 func (s *Store) listSidecarsByPathPrefix(escapedPrefix string) ([]string, error) {
 	rows, err := s.db.Query(
 		`SELECT sidecar_path FROM track_variants WHERE source_path LIKE ? ESCAPE '\'`,
@@ -1393,12 +1399,18 @@ func (s *Store) listSidecarsByPathPrefix(escapedPrefix string) ([]string, error)
 	}
 	if iterErr := rows.Err(); iterErr != nil {
 		logger.Warn("iter sidecars by prefix", "err", iterErr)
+		return out, iterErr
 	}
 	return out, nil
 }
 
 // listAllSidecars returns every sidecar_path in the table. Used
 // by WipeAllTracks. Same writer-lock contract.
+//
+// **Iterator-error returns propagate** — same rationale as
+// listSidecarsByPathPrefix above. WipeAllTracks treats a
+// truncated enumeration as a fatal error because the on-disk
+// cleanup must be complete to fulfil the wipe contract.
 func (s *Store) listAllSidecars() ([]string, error) {
 	rows, err := s.db.Query(`SELECT sidecar_path FROM track_variants`)
 	if err != nil {
@@ -1417,6 +1429,7 @@ func (s *Store) listAllSidecars() ([]string, error) {
 	}
 	if iterErr := rows.Err(); iterErr != nil {
 		logger.Warn("iter all sidecars", "err", iterErr)
+		return out, iterErr
 	}
 	return out, nil
 }
@@ -1761,9 +1774,24 @@ func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(missingPaths []string
 		return 0, err
 	}
 	for _, p := range missingPaths {
-		if _, err := stmt.Exec(p); err != nil {
+		res, err := stmt.Exec(p)
+		if err != nil {
 			stmt.Close()
 			return 0, err
+		}
+		// Diagnostic: a missingPaths entry that doesn't match any
+		// row is a scanner / store-state desync. Pre-fix the
+		// silent `_` discard would mask a path-shape drift
+		// (e.g. trailing slash mismatch, case-fold drift after
+		// schema migration) — every miss-increment would no-op
+		// and `IncrementMissingFoldersAndDelete` would never
+		// fire its deletion path. Log at warn (the bridge is
+		// still functional; this is operator-actionable
+		// detection of a real bug upstream).
+		if affected, raErr := res.RowsAffected(); raErr == nil && affected == 0 {
+			logger.Warn("IncrementMissingTracks: missing path did not match any row",
+				"path", p,
+			)
 		}
 	}
 	stmt.Close()
@@ -1801,9 +1829,18 @@ func (s *Store) IncrementMissingFoldersAndDeleteAtThreshold(missingPaths []strin
 		return 0, err
 	}
 	for _, p := range missingPaths {
-		if _, err := stmt.Exec(p); err != nil {
+		res, err := stmt.Exec(p)
+		if err != nil {
 			stmt.Close()
 			return 0, err
+		}
+		// Mirror IncrementMissingTracks: a zero-rows-affected
+		// here points at the same path-shape drift bug. Same
+		// warn-and-continue policy.
+		if affected, raErr := res.RowsAffected(); raErr == nil && affected == 0 {
+			logger.Warn("IncrementMissingFolders: missing path did not match any row",
+				"path", p,
+			)
 		}
 	}
 	stmt.Close()
