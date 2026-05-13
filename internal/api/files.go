@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"io"
 	"io/fs"
@@ -315,7 +316,7 @@ func (s *Server) serveVariant(w http.ResponseWriter, r *http.Request, sourcePath
 		writeError(w, http.StatusNotFound, "variant_not_found", "upscaling is not enabled on this bridge")
 		return
 	}
-	rec, err := s.variantStore.LookupVariant(sourcePath, variantID)
+	rec, err := s.variantStore.LookupVariant(r.Context(), sourcePath, variantID)
 	if err != nil {
 		writeErrorLog(w, r, http.StatusInternalServerError, "internal",
 			"the bridge couldn't look up this variant", err)
@@ -375,13 +376,12 @@ func (s *Server) serveVariant(w http.ResponseWriter, r *http.Request, sourcePath
 			// A client that disconnected (the same event that
 			// often surfaces the miss) would cancel our DB
 			// write mid-transaction. Cleanup MUST reflect
-			// reality regardless of who hung up first. Today
-			// the DeleteVariant signature doesn't take a ctx
-			// (PR-B's mechanical sweep adds one); when it does,
-			// build a 5 s timeout-bound background ctx here so
-			// a wedged DB doesn't park the response goroutine
-			// indefinitely.
+			// reality regardless of who hung up first. 5 s
+			// budget bounds the response goroutine if the DB
+			// is wedged. Gemini HIGH on PR #218.
 			if s.variantDeleter != nil {
+				cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
 				// Use the canonical values from the looked-up
 				// record, NOT the request input. The request
 				// `sourcePath`/`variantID` may be case-folded
@@ -402,7 +402,7 @@ func (s *Server) serveVariant(w http.ResponseWriter, r *http.Request, sourcePath
 				if canonVariant == "" {
 					canonVariant = variantID
 				}
-				if delErr := s.variantDeleter.DeleteVariant(canonSource, canonVariant); delErr != nil {
+				if delErr := s.variantDeleter.DeleteVariant(cleanupCtx, canonSource, canonVariant); delErr != nil {
 					LoggerFromContext(r.Context()).Warn(
 						"variant DB cleanup failed after sidecar miss",
 						slog.String("source_path", canonSource),

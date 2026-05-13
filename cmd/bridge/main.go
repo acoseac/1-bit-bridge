@@ -67,12 +67,8 @@ type variantStoreAdapter struct {
 	provider *manifest.Provider
 }
 
-func (a *variantStoreAdapter) LookupVariant(sourcePath, variantID string) (*api.VariantRecord, error) {
-	// api.VariantStore interface doesn't thread ctx yet — that's the
-	// next focused follow-up. For now use Background; the Store-side
-	// ctx-awareness is complete, just not yet bridged through the
-	// api interface boundary.
-	v, err := a.provider.LookupVariant(context.Background(), sourcePath, variantID)
+func (a *variantStoreAdapter) LookupVariant(ctx context.Context, sourcePath, variantID string) (*api.VariantRecord, error) {
+	v, err := a.provider.LookupVariant(ctx, sourcePath, variantID)
 	if err != nil {
 		return nil, err
 	}
@@ -102,32 +98,32 @@ type variantDeleterAdapter struct {
 	store *manifest.Store
 }
 
-func (a *variantDeleterAdapter) AllVariants() ([]api.VariantSummary, error) {
-	rows, err := a.store.AllVariants(context.Background())
+func (a *variantDeleterAdapter) AllVariants(ctx context.Context) ([]api.VariantSummary, error) {
+	rows, err := a.store.AllVariants(ctx)
 	if err != nil {
 		return nil, err
 	}
 	return variantSummariesFromRows(rows), nil
 }
 
-func (a *variantDeleterAdapter) ListVariantsByPathPrefix(prefix string) ([]api.VariantSummary, error) {
-	rows, err := a.store.ListVariantsByPathPrefix(context.Background(), prefix)
+func (a *variantDeleterAdapter) ListVariantsByPathPrefix(ctx context.Context, prefix string) ([]api.VariantSummary, error) {
+	rows, err := a.store.ListVariantsByPathPrefix(ctx, prefix)
 	if err != nil {
 		return nil, err
 	}
 	return variantSummariesFromRows(rows), nil
 }
 
-func (a *variantDeleterAdapter) ListVariantsForPath(sourcePath string) ([]api.VariantSummary, error) {
-	rows, err := a.store.ListVariantsForPath(context.Background(), sourcePath)
+func (a *variantDeleterAdapter) ListVariantsForPath(ctx context.Context, sourcePath string) ([]api.VariantSummary, error) {
+	rows, err := a.store.ListVariantsForPath(ctx, sourcePath)
 	if err != nil {
 		return nil, err
 	}
 	return variantSummariesFromRows(rows), nil
 }
 
-func (a *variantDeleterAdapter) DeleteVariant(sourcePath, variantID string) error {
-	return a.store.DeleteVariant(context.Background(), sourcePath, variantID)
+func (a *variantDeleterAdapter) DeleteVariant(ctx context.Context, sourcePath, variantID string) error {
+	return a.store.DeleteVariant(ctx, sourcePath, variantID)
 }
 
 func variantSummariesFromRows(rows []manifest.VariantRow) []api.VariantSummary {
@@ -538,7 +534,7 @@ type upscaleStatsAdapter struct {
 
 const upscaleStatsSoxTTL = 30 * time.Second
 
-func (a *upscaleStatsAdapter) UpscaleStatsSnapshot() api.UpscaleStats {
+func (a *upscaleStatsAdapter) UpscaleStatsSnapshot(ctx context.Context) (api.UpscaleStats, error) {
 	var snap api.UpscaleStats
 	if a.enabled() {
 		if p := a.pool(); p != nil {
@@ -558,20 +554,34 @@ func (a *upscaleStatsAdapter) UpscaleStatsSnapshot() api.UpscaleStats {
 	soxOK := a.cachedSoxOK()
 	snap.SoxAvailable = &soxOK
 	if a.store != nil {
-		count, bytes, err := a.store.CountVariants(context.Background())
+		count, bytes, err := a.store.CountVariants(ctx)
 		if err != nil {
-			// Same degrade-and-log policy the admin tile uses
-			// (PR #110): a SQL failure here shouldn't blank the
-			// whole response. Live counters still go out; the
-			// caller sees `cachedVariants: 0, cachedBytes: 0` and
-			// the operator can find the failure in logs.
+			// Two failure shapes get different treatment
+			// (Gemini HIGH on PR #218):
+			//
+			//   - ctx-cancellation (handler 2s timeout fired,
+			//     SSE publisher 2s timeout fired, or the caller
+			//     disconnected) — return the error so the
+			//     handler can emit a 5xx promptly. iOS treats
+			//     5xx as "feature status unknown" (same UX
+			//     the pre-PR-218 silent-zero produced).
+			//
+			//   - Genuine SQL faults (disk full, corruption,
+			//     migration mid-flight) — keep the legacy
+			//     degrade-and-log policy: log + return live
+			//     counters with zero cachedVariants. Operators
+			//     check logs; iOS shows "feature off". This
+			//     mirrors the admin tile's PR #110 contract.
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return snap, err
+			}
 			logger.Warn("upscale stats: count variants", "err", err)
 		} else {
 			snap.CachedVariants = count
 			snap.CachedBytes = bytes
 		}
 	}
-	return snap
+	return snap, nil
 }
 
 // cachedSoxOK returns the most recent `transcode.PrecheckSox` result
@@ -1510,7 +1520,27 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	if upscalePool != nil {
 		broker := apiSrv.EventPublisher()
 		upscalePool.SetOnStateChange(func() {
-			broker.Publish("upscale.stats", upscaleStats.UpscaleStatsSnapshot())
+			// SSE publisher fires from a single long-lived
+			// goroutine. A wedged CountVariants query inside
+			// UpscaleStatsSnapshot would otherwise block all
+			// subsequent SSE deliveries (job completions, batch
+			// updates, etc.). 2 s is the same budget the
+			// /v1/upscale/stats HTTP route uses for the same
+			// query. Gemini Medium on PR #218.
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			snap, err := upscaleStats.UpscaleStatsSnapshot(ctx)
+			cancel()
+			if err != nil {
+				// Drop the publish — pushing a partial snapshot
+				// (zero cachedVariants on timeout) would cause
+				// iOS clients to flash "feature off" briefly
+				// before the next successful poll. The
+				// degrade-and-log policy lives inside the
+				// adapter; here we just suppress the event.
+				logger.Debug("upscale.stats SSE: snapshot timed out", "err", err)
+				return
+			}
+			broker.Publish("upscale.stats", snap)
 		})
 		// Wire the Coordinator's SSE publish closure now that the
 		// broker is in scope. Coordinator was constructed earlier

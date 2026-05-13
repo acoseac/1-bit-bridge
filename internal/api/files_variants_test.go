@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -33,7 +34,7 @@ func newStubVariantStore() *stubVariantStore {
 	return &stubVariantStore{records: map[string]*VariantRecord{}}
 }
 
-func (s *stubVariantStore) LookupVariant(sourcePath, variantID string) (*VariantRecord, error) {
+func (s *stubVariantStore) LookupVariant(ctx context.Context, sourcePath, variantID string) (*VariantRecord, error) {
 	// Mirror the real store's two-stage lookup: exact match first
 	// (cheap + correct on case-sensitive filesystems where two
 	// case-colliding rows could otherwise alias), then fall back to
