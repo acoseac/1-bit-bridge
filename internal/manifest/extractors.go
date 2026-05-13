@@ -819,7 +819,6 @@ func extractDFFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 	// typically follows the audio payload per the spec). The walker
 	// continues past every recognised chunk until EOF so DIIN is
 	// reached regardless of where it lands.
-	var haveProp bool
 	for {
 		var chunkHeader [12]byte
 		if _, err := io.ReadFull(f, chunkHeader[:]); err != nil {
@@ -854,7 +853,6 @@ func extractDFFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 			if _, err := io.ReadFull(f, body); err != nil {
 				return fmt.Errorf("dff: PROP body read: %w", err)
 			}
-			haveProp = true
 			if len(body) < 4 || string(body[0:4]) != "SND " {
 				continue
 			}
@@ -929,12 +927,11 @@ func extractDFFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 			if _, err := f.Seek(skip, io.SeekCurrent); err != nil {
 				return fmt.Errorf("dff: seek past %q: %w", fourcc, err)
 			}
-			// If PROP hasn't been seen by the time we hit DSD and the
-			// file has no DIIN either, there's nothing more to glean.
-			// Continue past DSD anyway in case DIIN follows (DSDIFF
-			// spec allows DIIN after the audio payload); the EOF case
-			// above handles natural termination.
-			_ = haveProp
+			// DSDIFF spec allows DIIN to follow the audio payload, so
+			// the walker continues past every unrecognised / non-PROP
+			// / non-DIIN chunk (including the DSD audio chunk itself).
+			// Natural termination is the EOF branch at the top of the
+			// loop.
 		}
 	}
 }
