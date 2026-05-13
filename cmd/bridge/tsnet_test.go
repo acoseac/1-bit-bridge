@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -122,7 +124,7 @@ func TestTsnetLogoutDeclineCancels(t *testing.T) {
 		t.Run(strings.TrimSpace(decline), func(t *testing.T) {
 			var out, errBuf bytes.Buffer
 			rc := tsnetCmd(context.Background(),
-				[]string{"logout", "--config", cfgPath},
+				[]string{"logout", "--config", cfgPath, "--force"},
 				strings.NewReader(decline),
 				&out, &errBuf)
 			if rc != 0 {
@@ -154,7 +156,7 @@ func TestTsnetLogoutConfirmWipes(t *testing.T) {
 
 	var out, errBuf bytes.Buffer
 	rc := tsnetCmd(context.Background(),
-		[]string{"logout", "--config", cfgPath},
+		[]string{"logout", "--config", cfgPath, "--force"},
 		strings.NewReader("WIPE\n"),
 		&out, &errBuf)
 	if rc != 0 {
@@ -162,6 +164,56 @@ func TestTsnetLogoutConfirmWipes(t *testing.T) {
 	}
 	if _, err := os.Stat(stateFile); !os.IsNotExist(err) {
 		t.Errorf("state file should have been wiped, stat err = %v", err)
+	}
+}
+
+// TestTsnetLogoutRefusesWhileRunning — when the admin port responds,
+// logout refuses unless --force is set.
+func TestTsnetLogoutRefusesWhileRunning(t *testing.T) {
+	tmp := t.TempDir()
+	// Spin up a tiny HTTP server to simulate a running bridge admin.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	defer ln.Close()
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})}
+	go srv.Serve(ln) //nolint:errcheck
+	defer srv.Close()
+
+	cfgPath := writeMinimalConfigWithAdminAddr(t, tmp, config.TailscaleConfig{Mode: "tsnet"}, ln.Addr().String())
+	stateDir := filepath.Join(tmp, "tailscale")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "tailscaled.state"), []byte("{}"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	// Without --force: should refuse.
+	var out, errBuf bytes.Buffer
+	rc := tsnetCmd(context.Background(),
+		[]string{"logout", "--config", cfgPath},
+		strings.NewReader("WIPE\n"),
+		&out, &errBuf)
+	if rc != 1 {
+		t.Errorf("rc = %d, want 1 (refuse while running)", rc)
+	}
+	if !strings.Contains(errBuf.String(), "appears to be running") {
+		t.Errorf("expected running-instance error, got %q", errBuf.String())
+	}
+
+	// With --force: should proceed to confirm prompt and wipe.
+	out.Reset()
+	errBuf.Reset()
+	rc = tsnetCmd(context.Background(),
+		[]string{"logout", "--config", cfgPath, "--force"},
+		strings.NewReader("WIPE\n"),
+		&out, &errBuf)
+	if rc != 0 {
+		t.Errorf("--force: rc = %d, want 0; err=%q", rc, errBuf.String())
 	}
 }
 
@@ -309,3 +361,29 @@ var _ = admin.TailscaleStatus{}
 // references io.EOF in its scanner-error path, and tests of that
 // path don't exercise the symbol via the function call alone.
 var _ = io.EOF
+
+// writeMinimalConfigWithAdminAddr is like writeMinimalConfigInDir
+// but overrides the adminAddress — used by the running-instance
+// detection test to point at a test-local HTTP server.
+func writeMinimalConfigWithAdminAddr(t *testing.T, dir string, ts config.TailscaleConfig, adminAddr string) string {
+	t.Helper()
+	libRoot := filepath.Join(dir, "lib")
+	if err := os.MkdirAll(libRoot, 0o755); err != nil {
+		t.Fatalf("MkdirAll lib: %v", err)
+	}
+	yaml := fmt.Sprintf(`libraryRoots:
+  - %q
+listenAddress: ":7788"
+adminAddress: %q
+dataDir: %q
+scanIntervalSec: 600
+libraryName: "test"
+tailscale:
+  mode: %q
+`, libRoot, adminAddr, dir, ts.Mode)
+	cfgPath := filepath.Join(dir, "bridge.yaml")
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o600); err != nil {
+		t.Fatalf("WriteFile config: %v", err)
+	}
+	return cfgPath
+}

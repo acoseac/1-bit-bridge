@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -314,20 +313,11 @@ func (s *Server) getEndpointsSnapshot() ([]adminEndpointEntry, *endpointsErr) {
 // --- POST /api/scan ---
 
 func (s *Server) apiScan(w http.ResponseWriter, r *http.Request) {
-	// Scanner serializes concurrent Scan() via its own mu; we fire and
-	// forget. If one is already running, this call blocks the goroutine
-	// (not the HTTP response) until the running scan finishes, then
-	// starts a fresh walk. Uses the admin's scan context (tied to server
-	// shutdown) rather than r.Context so a client disconnect doesn't kill
-	// the rescan mid-walk.
-	ctx := s.scanCtx()
-	go func() {
-		if _, err := s.deps.Scanner.Scan(ctx); err != nil {
-			if !errors.Is(err, ctx.Err()) {
-				fmt.Fprintf(os.Stderr, "admin: triggered scan: %v\n", err)
-			}
-		}
-	}()
+	// Route through spawnBackgroundScan so the goroutine is tracked
+	// by s.bgScans — admin shutdown waits for the WG (capped at 5s
+	// grace) and a process exit during a mid-write scan won't
+	// corrupt SQLite. The previous raw `go func()` was untracked.
+	s.spawnBackgroundScan("triggered scan")
 	writeJSON(w, http.StatusAccepted, map[string]bool{"started": true})
 }
 
