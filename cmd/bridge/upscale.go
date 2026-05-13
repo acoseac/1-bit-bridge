@@ -555,14 +555,29 @@ func runGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store,
 			rowsKept++
 		case errors.Is(statErr, os.ErrNotExist):
 			if err := store.DeleteVariant(ctx, r.SourcePath, r.VariantID); err != nil {
-				// Suppress the "context canceled" log when the
-				// ctx itself is what cancelled the delete —
-				// avoids a flood of identical error lines on
-				// operator interrupt.
-				if ctx.Err() == nil {
-					fmt.Fprintf(stderr, "delete orphan row %s / %s: %v\n", r.SourcePath, r.VariantID, err)
-					rowsFailed++
+				// Two cancellation shapes get different
+				// treatment (CodeRabbit Major round-3 on
+				// PR #217):
+				//
+				//   - ctx-cancellation: return interrupted
+				//     status immediately. Falling through to
+				//     the success summary would hide the
+				//     interrupt — the operator's Ctrl-C
+				//     wouldn't show up in the exit code on
+				//     the last-row case. The top-of-loop gate
+				//     catches THIS row's cancellation on the
+				//     next iteration, but if this IS the last
+				//     row the loop exits and the summary
+				//     reports success.
+				//
+				//   - Real DB fault: log + count + continue
+				//     (same legacy degrade policy).
+				if ctx.Err() != nil {
+					fmt.Fprintln(stderr, "GC interrupted")
+					return 1
 				}
+				fmt.Fprintf(stderr, "delete orphan row %s / %s: %v\n", r.SourcePath, r.VariantID, err)
+				rowsFailed++
 				continue
 			}
 			rowsRemoved++

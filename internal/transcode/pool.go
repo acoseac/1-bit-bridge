@@ -732,7 +732,7 @@ func (p *Pool) processJob(job poolJob) {
 	defer func() {
 		if r := recover(); r != nil {
 			logger.Error("pool: recovered panic in job",
-				"source", job.spec.SourceLibraryRel,
+				"path", job.spec.SourceLibraryRel,
 				"variantID", job.spec.VariantID(),
 				"panic", r)
 			if !p.closed.Load() {
@@ -790,12 +790,12 @@ func (p *Pool) processJob(job poolJob) {
 			p.failedCnt.Add(1)
 			if errors.Is(jobCtx.Err(), context.DeadlineExceeded) {
 				logger.Warn("pool: sox timed out",
-					"source", job.spec.SourceLibraryRel,
+					"path", job.spec.SourceLibraryRel,
 					"timeout", p.jobTimeout,
 					"err", err)
 			} else {
 				logger.Warn("pool: sox failed",
-					"source", job.spec.SourceLibraryRel,
+					"path", job.spec.SourceLibraryRel,
 					"err", err)
 			}
 		}
@@ -867,7 +867,7 @@ func (p *Pool) processJob(job poolJob) {
 		// in this function. Gemini Medium on PR #217.
 		if !p.closed.Load() {
 			p.failedCnt.Add(1)
-			logger.Error("pool: store variant", "source", job.spec.SourceLibraryRel, "err", err)
+			logger.Error("pool: store variant", "path", job.spec.SourceLibraryRel, "err", err)
 			// Best-effort: remove the orphan sidecar so a
 			// retry from a clean slate succeeds.
 			_ = os.Remove(row.SidecarPath)

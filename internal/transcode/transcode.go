@@ -405,7 +405,7 @@ func RunSox(ctx context.Context, j JobSpec) (int64, error) {
 		return 0, fmt.Errorf("stat sidecar: %w", err)
 	}
 	logger.Debug("sox ok",
-		"source", j.SourceLibraryRel,
+		"path", j.SourceLibraryRel,
 		"variant", j.VariantID(),
 		"sidecar_bytes", info.Size())
 	return info.Size(), nil
