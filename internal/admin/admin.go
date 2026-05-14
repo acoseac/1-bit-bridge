@@ -558,6 +558,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/upscale/variants", s.apiUpscaleVariantsDelete)
 	mux.HandleFunc("GET /api/upscale/target", s.apiUpscaleTargetGet)
 	mux.HandleFunc("PATCH /api/upscale/target", s.apiUpscaleTargetPatch)
+	mux.HandleFunc("GET /api/upscale/variants-dir", s.apiVariantsDirGet)
+	mux.HandleFunc("POST /api/upscale/variants-dir", s.apiVariantsDirPatch)
 	mux.HandleFunc("POST /api/restart", s.apiRestart)
 	mux.HandleFunc("GET /api/pair-qr", s.apiPairQR)
 	mux.HandleFunc("GET /api/backups", s.apiBackupsList)

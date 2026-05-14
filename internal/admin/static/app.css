@@ -1087,9 +1087,11 @@ dialog h2 { font-size: 18px; color: var(--accent); }
   text-decoration: underline;
 }
 
-/* Sticky storage bar (v1.4). Sits directly below the toolbar.
- * `[Change…]` is disabled in PR A (static read-only); becomes
- * interactive in PR D2 alongside the migrate-legacy affordance. */
+/* Sticky storage bar (v1.4 PR A + PR D2). Sits directly below the
+ * toolbar via the sticky stack from PR A; the interactive Change…
+ * button + modal + legacy-migrate affordance come from PR D2.
+ * Populated client-side from GET /api/upscale/variants-dir on
+ * inspector mount. */
 .library-inspector .inspector-storage-bar {
   position: sticky;
   top: var(--inspector-toolbar-bottom);
@@ -1100,20 +1102,88 @@ dialog h2 { font-size: 18px; color: var(--accent); }
   gap: 0.5rem;
   margin: 0 0 1rem;
   padding: 0.4rem 0.75rem;
-  background: var(--bg-elev, #fafafa);
+  background: var(--bg-elev);
   border: 1px solid var(--border);
   border-radius: 6px;
   font-size: 0.85rem;
 }
 .library-inspector .inspector-storage-label {
   color: var(--fg-muted);
+  flex-shrink: 0;
 }
 .library-inspector .inspector-storage-bar code.storage-path {
   flex: 1 1 auto;
+  min-width: 0; /* let flex shrink with ellipsis */
+}
+.library-inspector .inspector-storage-stats,
+.library-inspector .inspector-storage-legacy {
+  color: var(--fg-muted);
+  font-size: 0.85em;
+}
+.library-inspector .inspector-storage-legacy {
+  /* Highlights the migration affordance — operator should notice it. */
+  color: var(--accent-warm);
 }
 .library-inspector .inspector-storage-btn {
-  padding: 0.2rem 0.6rem;
+  padding: 0.25rem 0.65rem;
   font-size: 0.85em;
+  margin-left: auto; /* push to the right on wide layouts */
+}
+
+/* Change-path modal (PR D2). Centered overlay; click outside
+ * doesn't dismiss (operator must Cancel or Save explicitly —
+ * protects against accidental discard of a typed path). */
+.library-inspector .inspector-storage-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.4);
+}
+.library-inspector .inspector-storage-modal[hidden] {
+  display: none;
+}
+.library-inspector .inspector-storage-modal-content {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1.25rem;
+  width: min(560px, 90vw);
+  box-shadow: 0 16px 32px rgba(0, 0, 0, 0.2);
+}
+.library-inspector .inspector-storage-modal-content h2 {
+  margin: 0 0 0.75rem;
+  font-size: 1.05rem;
+}
+.library-inspector .inspector-storage-modal-content label {
+  display: block;
+  margin-top: 0.5rem;
+  font-size: 0.85em;
+  color: var(--fg-muted);
+}
+.library-inspector .inspector-storage-modal-content input[type="text"] {
+  width: 100%;
+  min-height: 44px;
+  padding: 0.5rem 0.75rem;
+  font: inherit;
+  font-family: var(--mono, monospace);
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--fg);
+  margin-top: 0.25rem;
+}
+.library-inspector .inspector-storage-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+.library-inspector .inspector-storage-modal-actions .btn {
+  min-height: 44px;
+  padding: 0.5rem 1rem;
 }
 
 .inspector-layout {

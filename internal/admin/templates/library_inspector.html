@@ -79,6 +79,70 @@
     </button>
   </div>
 
+  {{/*
+    Variants storage bar (v1.4 PR D2). Populated client-side from
+    GET /api/upscale/variants-dir on inspector mount. The [Change…]
+    button opens a modal that POSTs the new path; legacy variants
+    (sidecars outside the current dir) surface a "Migrate legacy
+    variants (N)" affordance — deferred to a follow-up alongside
+    the SSE-driven migration runner.
+
+    NOTE: When merged with PR A (feat/inspector-folder-nav), the
+    surrounding toolbar markup A introduces wraps this bar. PR D2
+    branches off D1 (no toolbar yet), so this element ships standalone
+    here; the rebase resolution at merge time keeps a single coherent
+    storage bar — D2's shape is the authoritative interactive form.
+  */}}
+  <div class="inspector-storage-bar" id="inspector-storage-bar">
+    <span class="inspector-storage-label">Variants stored at</span>
+    <code class="storage-path" id="inspector-storage-path">{{.Data.UpscaleStoragePath}}</code>
+    <span class="inspector-storage-stats" id="inspector-storage-stats" hidden>
+      Used <span id="inspector-storage-used">—</span> · Free
+      <span id="inspector-storage-free">—</span>
+    </span>
+    <span class="inspector-storage-legacy" id="inspector-storage-legacy" hidden>
+      <span id="inspector-storage-legacy-count">0</span> legacy variants
+      (<span id="inspector-storage-legacy-bytes">—</span>) —
+      run <code>bridge variants move --to &lt;path&gt;</code> to migrate.
+    </span>
+    <button type="button" id="inspector-storage-change"
+      class="btn inspector-storage-btn"
+      aria-label="Change variants storage path">
+      Change…
+    </button>
+  </div>
+
+  {{/* Change-path modal. Hidden by default; shown by the JS when
+       Change… is clicked. */}}
+  <div class="inspector-storage-modal" id="inspector-storage-modal"
+       hidden role="dialog" aria-modal="true" aria-labelledby="inspector-storage-modal-title">
+    <div class="inspector-storage-modal-content">
+      <h2 id="inspector-storage-modal-title">Change variants storage path</h2>
+      <p class="hint">
+        Enter an absolute path on a writable volume. The path must NOT
+        be inside any library root. Existing variants are not moved by
+        this action — they remain served from their original location
+        until you run <code>bridge variants move --to &lt;path&gt;</code>.
+      </p>
+      <label for="inspector-storage-modal-input">New path</label>
+      <input type="text" id="inspector-storage-modal-input"
+        autocomplete="off" placeholder="/mnt/external/variants">
+      <p class="hint">
+        Leave empty to revert to the default
+        (<code id="inspector-storage-modal-default">—</code>).
+      </p>
+      <p class="error" id="inspector-storage-modal-error" hidden role="alert"></p>
+      <div class="inspector-storage-modal-actions">
+        <button type="button" id="inspector-storage-modal-cancel" class="btn">
+          Cancel
+        </button>
+        <button type="button" id="inspector-storage-modal-save" class="btn primary">
+          Save
+        </button>
+      </div>
+    </div>
+  </div>
+
   <div class="inspector-layout">
     <div class="inspector-tree panel">
       <h2 id="inspector-current-heading">Loading…</h2>

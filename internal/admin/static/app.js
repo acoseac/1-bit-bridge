@@ -1767,6 +1767,142 @@ function initLibraryInspector() {
       restoreScroll: ev.state ? ev.state.scrollY : 0,
     });
   });
+
+  // Variants-storage bar wiring (PR D2). Element-presence-guarded so
+  // a bridge build without this template region (older custom
+  // deployments) just no-ops cleanly.
+  const storageBar = document.getElementById("inspector-storage-bar");
+  if (storageBar) {
+    inspectorStorageRefresh();
+    const changeBtn = document.getElementById("inspector-storage-change");
+    if (changeBtn) {
+      changeBtn.addEventListener("click", inspectorStorageOpenModal);
+    }
+    const cancelBtn = document.getElementById("inspector-storage-modal-cancel");
+    if (cancelBtn) {
+      cancelBtn.addEventListener("click", inspectorStorageCloseModal);
+    }
+    const saveBtn = document.getElementById("inspector-storage-modal-save");
+    if (saveBtn) {
+      saveBtn.addEventListener("click", inspectorStorageSubmit);
+    }
+    const modalInput = document.getElementById("inspector-storage-modal-input");
+    if (modalInput) {
+      modalInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          inspectorStorageSubmit();
+        } else if (e.key === "Escape") {
+          inspectorStorageCloseModal();
+        }
+      });
+    }
+  }
+}
+
+// inspectorStorageRefresh hits GET /api/upscale/variants-dir and
+// populates the storage bar with current path + usage stats +
+// legacy-variant count. Called on inspector mount AND after every
+// successful POST so the bar reflects the saved state without a
+// page reload.
+async function inspectorStorageRefresh() {
+  try {
+    const res = await fetch("/api/upscale/variants-dir");
+    if (!res.ok) {
+      // 404 (route not wired in older builds) / 500 — surface nothing
+      // rather than breaking the inspector.
+      return;
+    }
+    const data = await res.json();
+    const pathEl = document.getElementById("inspector-storage-path");
+    if (pathEl) pathEl.textContent = data.current || "—";
+    const stats = document.getElementById("inspector-storage-stats");
+    if (stats) {
+      document.getElementById("inspector-storage-used").textContent = humanBytes(data.usedBytes);
+      document.getElementById("inspector-storage-free").textContent = humanBytes(data.freeBytes);
+      stats.hidden = false;
+    }
+    const legacy = document.getElementById("inspector-storage-legacy");
+    if (legacy) {
+      if ((data.legacyCount || 0) > 0) {
+        document.getElementById("inspector-storage-legacy-count").textContent =
+          String(data.legacyCount);
+        document.getElementById("inspector-storage-legacy-bytes").textContent =
+          humanBytes(data.legacyBytes);
+        legacy.hidden = false;
+      } else {
+        legacy.hidden = true;
+      }
+    }
+    // Stash the default + current values on the modal so the user
+    // sees them when they open the Change dialog.
+    const defaultEl = document.getElementById("inspector-storage-modal-default");
+    if (defaultEl) defaultEl.textContent = data.default || "—";
+    const input = document.getElementById("inspector-storage-modal-input");
+    if (input) input.placeholder = data.default || "/mnt/external/variants";
+  } catch (err) {
+    // Best-effort. The bar is informational; a transient blip
+    // doesn't warrant a banner.
+  }
+}
+
+function inspectorStorageOpenModal() {
+  const modal = document.getElementById("inspector-storage-modal");
+  if (!modal) return;
+  const input = document.getElementById("inspector-storage-modal-input");
+  const errEl = document.getElementById("inspector-storage-modal-error");
+  if (errEl) errEl.hidden = true;
+  // Pre-fill with the current path so the operator can edit in place
+  // rather than retype from scratch.
+  if (input) {
+    const current = document.getElementById("inspector-storage-path")?.textContent || "";
+    input.value = current;
+    setTimeout(() => input.focus(), 0); // after the show transition
+  }
+  modal.hidden = false;
+}
+
+function inspectorStorageCloseModal() {
+  const modal = document.getElementById("inspector-storage-modal");
+  if (modal) modal.hidden = true;
+}
+
+async function inspectorStorageSubmit() {
+  const input = document.getElementById("inspector-storage-modal-input");
+  const errEl = document.getElementById("inspector-storage-modal-error");
+  const saveBtn = document.getElementById("inspector-storage-modal-save");
+  if (!input || !errEl || !saveBtn) return;
+  errEl.hidden = true;
+  saveBtn.disabled = true;
+  try {
+    const res = await fetch("/api/upscale/variants-dir", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: input.value.trim() }),
+    });
+    if (res.status === 400) {
+      const data = await res.json();
+      errEl.textContent = data.message || "Validation failed";
+      errEl.hidden = false;
+      saveBtn.disabled = false;
+      return;
+    }
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(body || `HTTP ${res.status}`);
+    }
+    // Server returned the refreshed snapshot — render it directly.
+    const data = await res.json();
+    const pathEl = document.getElementById("inspector-storage-path");
+    if (pathEl) pathEl.textContent = data.current || "—";
+    inspectorStorageRefresh(); // updates stats + legacy count
+    inspectorStorageCloseModal();
+  } catch (err) {
+    errEl.textContent = `Couldn’t save: ${err.message}`;
+    errEl.hidden = false;
+  } finally {
+    saveBtn.disabled = false;
+  }
 }
 
 // updateInspectorStickyHeights measures the toolbar + storage bar
