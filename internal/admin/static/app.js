@@ -1638,7 +1638,22 @@ const inspectorState = {
   nextTrackCursor: null,
   totalFolders: 0,
   totalTracks: 0,
+  // renderedFolders / renderedTracks track the count of rows in
+  // the tbody for the CURRENT navigation. Bumped per appended row
+  // by inspectorAppendRows; used by Load-more sentinel math.
+  // Maintaining counters here is O(1) vs the prior
+  // `querySelectorAll('tr[data-kind=...]').length` walk which was
+  // O(N) per pagination cycle (Gemini medium on PR C).
+  renderedFolders: 0,
+  renderedTracks: 0,
   loadingMore: false, // re-entrancy guard for Load-more clicks / observer fires
+  // Generation counter for rAF-chunked rendering. Bumped on every
+  // inspectorNavigate AND every replace-render. The pump() body
+  // captures its expected generation at spawn time and bails out
+  // if the live generation has moved on — prevents chunks from a
+  // stale folder from interleaving into the new folder's table
+  // (Gemini HIGH on PR C).
+  renderGeneration: 0,
 };
 
 // IntersectionObserver instance for auto-load-more sentinel.
@@ -2027,7 +2042,15 @@ function inspectorRender(data) {
 // land, appends/refreshes the Load-more sentinel based on the
 // current cursor state.
 function inspectorAppendRows(body, folders, tracks, replace) {
-  if (replace) body.innerHTML = "";
+  if (replace) {
+    body.innerHTML = "";
+    inspectorState.renderedFolders = 0;
+    inspectorState.renderedTracks = 0;
+    // Bump generation so any in-flight pump from a prior
+    // navigation bails on next rAF — prevents stale-folder rows
+    // from interleaving into the freshly-loaded folder.
+    inspectorState.renderGeneration++;
+  }
   // Build a single mixed list (folders first, then tracks) so the
   // chunker can interleave; ordering inside each group is preserved.
   const rows = [];
@@ -2036,11 +2059,22 @@ function inspectorAppendRows(body, folders, tracks, replace) {
 
   const CHUNK = 200;
   let i = 0;
+  // Capture the live generation NOW. If a fresh navigation /
+  // re-render bumps it between rAF frames, this pump exits
+  // cleanly without appending more rows.
+  const myGen = inspectorState.renderGeneration;
   function pump() {
+    if (inspectorState.renderGeneration !== myGen) {
+      return; // stale chunk — newer render has taken over.
+    }
     const frag = document.createDocumentFragment();
     const end = Math.min(i + CHUNK, rows.length);
     for (; i < end; i++) {
       frag.appendChild(buildInspectorRow(rows[i]));
+      // Maintain rendered counters here (O(1) per row) so the
+      // Load-more sentinel math doesn't need a DOM walk.
+      if (rows[i].kind === "folder") inspectorState.renderedFolders++;
+      else inspectorState.renderedTracks++;
     }
     body.appendChild(frag);
     if (i < rows.length) {
@@ -2153,16 +2187,12 @@ function inspectorRefreshLoadMoreSentinel() {
   const hasTrackMore = !!inspectorState.nextTrackCursor;
   if (!hasFolderMore && !hasTrackMore) return;
 
-  // Compute how many remain. Folder remaining = totalFolders - (rendered folder count).
-  // We count rendered rows by walking the tbody — cheaper than
-  // tracking a separate counter and avoids drift on duplicate
-  // appends.
-  let renderedFolders = 0;
-  let renderedTracks = 0;
-  body.querySelectorAll("tr[data-kind=folder]").forEach(() => renderedFolders++);
-  body.querySelectorAll("tr[data-kind=track]").forEach(() => renderedTracks++);
-  const foldersRemaining = Math.max(0, inspectorState.totalFolders - renderedFolders);
-  const tracksRemaining = Math.max(0, inspectorState.totalTracks - renderedTracks);
+  // Compute how many remain. Read from the in-state counters
+  // (O(1) — bumped per appended row in inspectorAppendRows)
+  // instead of the prior `querySelectorAll(...).length` walk
+  // which was O(N) per pagination cycle. Gemini medium on PR C.
+  const foldersRemaining = Math.max(0, inspectorState.totalFolders - inspectorState.renderedFolders);
+  const tracksRemaining = Math.max(0, inspectorState.totalTracks - inspectorState.renderedTracks);
   const totalRemaining = foldersRemaining + tracksRemaining;
   if (totalRemaining === 0) return;
 
@@ -2211,8 +2241,12 @@ async function inspectorLoadMore() {
     inspectorState.nextFolderCursor = data.nextFolderCursor || "";
     inspectorState.nextTrackCursor = data.nextTrackCursor || "";
     // Merge new totals — server may have refreshed counts.
-    inspectorState.totalFolders = data.totalFolders || inspectorState.totalFolders;
-    inspectorState.totalTracks = data.totalTracks || inspectorState.totalTracks;
+    // Nullish-coalesce (??) instead of OR (||) so a server-reported
+    // 0 (e.g. folder emptied between pages) updates state to 0
+    // rather than retaining the stale non-zero count. Gemini medium
+    // on PR C.
+    inspectorState.totalFolders = data.totalFolders ?? inspectorState.totalFolders;
+    inspectorState.totalTracks = data.totalTracks ?? inspectorState.totalTracks;
     const body = document.getElementById("inspector-rows-body");
     inspectorAppendRows(body, data.folders || [], data.tracks || [], /*replace=*/false);
   } catch (err) {
