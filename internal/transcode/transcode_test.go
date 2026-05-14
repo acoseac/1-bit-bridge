@@ -127,8 +127,10 @@ func TestSidecarPathStableForSameInputs(t *testing.T) {
 		TargetSampleRate: 176400,
 		TargetBits:       24,
 	}
-	if j.SidecarPath() != j.SidecarPath() {
-		t.Fatal("SidecarPath not deterministic across calls with identical inputs")
+	first := j.SidecarPath()
+	second := j.SidecarPath()
+	if first != second {
+		t.Fatalf("SidecarPath not deterministic across calls with identical inputs: %q vs %q", first, second)
 	}
 }
 

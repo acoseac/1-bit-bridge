@@ -19,6 +19,26 @@ testdata/
 *.plist
 *.service
 
+# Operator-side state from a host-side `bridge init` / `bridge serve`.
+# `data/` carries the SQLite manifest + paired-device token hashes;
+# `tls/` carries the self-signed cert and its private key; `bridge.yaml`
+# is the operator's config with API tokens. None should ever land in
+# a container build context — the builder stage's `COPY . .` would
+# otherwise pull them in, slowing cache invalidation AND making a
+# future careless multi-stage COPY a credentials-leak risk.
+data/
+tls/
+bridge.yaml
+*.db
+*.db-shm
+*.db-wal
+
+# Source-control + CI metadata. `.git/` invalidates the cache layer
+# on every commit; `.github/` references repository secrets that are
+# never needed inside an image.
+.git/
+.github/
+
 # Misc.
 coverage.out
 *.test
