@@ -2662,6 +2662,222 @@ func (s *Store) ListChildTracks(ctx context.Context, parent string) ([]ChildTrac
 	return out, rows.Err()
 }
 
+// ListChildFoldersPage is the cursor-paginated variant of
+// ListChildFolders (v1.4 PR C). `after` is the last folder path
+// the caller received in the previous page (empty means "first
+// page"); `limit` caps the result count.
+//
+// Cursor semantics: SQL `WHERE f.path > ? ORDER BY f.path ASC LIMIT ?`.
+// O(log N) B-tree seek on the existing PRIMARY KEY index — beats
+// the O(N) scan that `OFFSET` does at deep ranges. The caller's
+// next-page cursor is the last path of the current page; an empty
+// cursor on a fresh response signals "no more rows."
+//
+// Rollup subqueries are unchanged — each folder row still carries
+// its full recursive aggregation. The count-only path skips the
+// rollups (see `CountChildFolders`).
+func (s *Store) ListChildFoldersPage(ctx context.Context, parent, after string, limit int) ([]ChildFolderRollup, error) {
+	if limit <= 0 {
+		// Conservative default; admin browse uses 500 explicitly.
+		limit = 500
+	}
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if parent == "" {
+		rows, err = s.db.QueryContext(ctx, `
+			SELECT f.path,
+			       (SELECT COUNT(*) FROM tracks t
+			          WHERE t.path >= f.path || '/' AND t.path < f.path || '0') AS track_count,
+			       (SELECT COUNT(DISTINCT tv.source_path) FROM track_variants tv
+			          WHERE tv.source_path >= f.path || '/' AND tv.source_path < f.path || '0') AS upscaled_count,
+			       (SELECT COALESCE(SUM(t.size), 0) FROM tracks t
+			          WHERE t.path >= f.path || '/' AND t.path < f.path || '0') AS total_size,
+			       (SELECT COALESCE(SUM(tv.size_bytes), 0) FROM track_variants tv
+			          WHERE tv.source_path >= f.path || '/' AND tv.source_path < f.path || '0') AS upscaled_size
+			  FROM folders f
+			 WHERE instr(f.path, '/') = 0
+			   AND f.path != ''
+			   AND f.path != '.'
+			   AND f.path > ?
+			 ORDER BY f.path ASC
+			 LIMIT ?
+		`, after, limit)
+	} else {
+		likePat := likeEscape(parent) + `/%`
+		rows, err = s.db.QueryContext(ctx, `
+			SELECT f.path,
+			       (SELECT COUNT(*) FROM tracks t
+			          WHERE t.path >= f.path || '/' AND t.path < f.path || '0') AS track_count,
+			       (SELECT COUNT(DISTINCT tv.source_path) FROM track_variants tv
+			          WHERE tv.source_path >= f.path || '/' AND tv.source_path < f.path || '0') AS upscaled_count,
+			       (SELECT COALESCE(SUM(t.size), 0) FROM tracks t
+			          WHERE t.path >= f.path || '/' AND t.path < f.path || '0') AS total_size,
+			       (SELECT COALESCE(SUM(tv.size_bytes), 0) FROM track_variants tv
+			          WHERE tv.source_path >= f.path || '/' AND tv.source_path < f.path || '0') AS upscaled_size
+			  FROM folders f
+			 WHERE f.path LIKE ? ESCAPE '\'
+			   AND instr(substr(f.path, length(?) + 2), '/') = 0
+			   AND f.path > ?
+			 ORDER BY f.path ASC
+			 LIMIT ?
+		`, likePat, parent, after, limit)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list child folders page %q: %w", parent, err)
+	}
+	defer rows.Close()
+	out := []ChildFolderRollup{}
+	for rows.Next() {
+		var row ChildFolderRollup
+		if err := rows.Scan(
+			&row.Path,
+			&row.TrackCount,
+			&row.UpscaledTrackCount,
+			&row.TotalSizeBytes,
+			&row.UpscaledSizeBytes,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+// ListChildTracksPage is the cursor-paginated variant of
+// ListChildTracks. Mirrors ListChildFoldersPage's contract.
+func (s *Store) ListChildTracksPage(ctx context.Context, parent, after string, limit int) ([]ChildTrack, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if parent == "" {
+		rows, err = s.db.QueryContext(ctx, `
+			SELECT t.path, t.size,
+			       json_extract(t.tags_json, '$.sampleRate')    AS sample_rate,
+			       json_extract(t.tags_json, '$.bitsPerSample') AS bits_per_sample,
+			       json_extract(t.tags_json, '$.codec')         AS codec,
+			       json_extract(t.tags_json, '$.isDSD')         AS is_dsd,
+			       EXISTS(SELECT 1 FROM track_variants tv
+			               WHERE tv.source_path = t.path)       AS is_upscaled
+			  FROM tracks t
+			 WHERE instr(t.path, '/') = 0
+			   AND t.path > ?
+			 ORDER BY t.path ASC
+			 LIMIT ?
+		`, after, limit)
+	} else {
+		likePat := likeEscape(parent) + `/%`
+		rows, err = s.db.QueryContext(ctx, `
+			SELECT t.path, t.size,
+			       json_extract(t.tags_json, '$.sampleRate')    AS sample_rate,
+			       json_extract(t.tags_json, '$.bitsPerSample') AS bits_per_sample,
+			       json_extract(t.tags_json, '$.codec')         AS codec,
+			       json_extract(t.tags_json, '$.isDSD')         AS is_dsd,
+			       EXISTS(SELECT 1 FROM track_variants tv
+			               WHERE tv.source_path = t.path)       AS is_upscaled
+			  FROM tracks t
+			 WHERE t.path LIKE ? ESCAPE '\'
+			   AND instr(substr(t.path, length(?) + 2), '/') = 0
+			   AND t.path > ?
+			 ORDER BY t.path ASC
+			 LIMIT ?
+		`, likePat, parent, after, limit)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list child tracks page %q: %w", parent, err)
+	}
+	defer rows.Close()
+	out := []ChildTrack{}
+	for rows.Next() {
+		var (
+			ct       ChildTrack
+			rate     sql.NullFloat64
+			bits     sql.NullInt64
+			codec    sql.NullString
+			isDSDRaw sql.NullInt64
+			upscaled int
+		)
+		if err := rows.Scan(&ct.Path, &ct.Size, &rate, &bits, &codec, &isDSDRaw, &upscaled); err != nil {
+			return nil, err
+		}
+		if rate.Valid {
+			v := rate.Float64
+			ct.SampleRate = &v
+		}
+		if bits.Valid {
+			v := int(bits.Int64)
+			ct.BitsPerSample = &v
+		}
+		if codec.Valid {
+			ct.Codec = codec.String
+		}
+		if isDSDRaw.Valid {
+			b := isDSDRaw.Int64 != 0
+			ct.IsDSD = &b
+		}
+		ct.IsUpscaled = upscaled != 0
+		out = append(out, ct)
+	}
+	return out, rows.Err()
+}
+
+// CountChildFolders returns the total count of immediate-child
+// folders under `parent`, WITHOUT running the expensive rollup
+// subqueries that `ListChildFolders` does per row. The admin
+// Library Inspector uses this to render the "X of Y" page hint
+// alongside cursor-based pagination at zero rollup cost.
+func (s *Store) CountChildFolders(ctx context.Context, parent string) (int, error) {
+	var n int
+	var err error
+	if parent == "" {
+		err = s.db.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM folders
+			 WHERE instr(path, '/') = 0 AND path != '' AND path != '.'
+		`).Scan(&n)
+	} else {
+		likePat := likeEscape(parent) + `/%`
+		err = s.db.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM folders
+			 WHERE path LIKE ? ESCAPE '\'
+			   AND instr(substr(path, length(?) + 2), '/') = 0
+		`, likePat, parent).Scan(&n)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("count child folders %q: %w", parent, err)
+	}
+	return n, nil
+}
+
+// CountChildTracks returns the total count of immediate-child
+// tracks under `parent`. Pairs with CountChildFolders for the
+// cursor-paginated admin browse — both avoid the rollup overhead.
+func (s *Store) CountChildTracks(ctx context.Context, parent string) (int, error) {
+	var n int
+	var err error
+	if parent == "" {
+		err = s.db.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM tracks
+			 WHERE instr(path, '/') = 0
+		`).Scan(&n)
+	} else {
+		likePat := likeEscape(parent) + `/%`
+		err = s.db.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM tracks
+			 WHERE path LIKE ? ESCAPE '\'
+			   AND instr(substr(path, length(?) + 2), '/') = 0
+		`, likePat, parent).Scan(&n)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("count child tracks %q: %w", parent, err)
+	}
+	return n, nil
+}
+
 // RollupByPrefix returns the recursive aggregation under `prefix`:
 // total track count, tracks with at least one variant, sum of source
 // sizes, sum of variant sizes. Empty prefix means "the whole library."

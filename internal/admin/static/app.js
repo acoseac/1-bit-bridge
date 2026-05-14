@@ -1630,7 +1630,36 @@ const inspectorState = {
   mode: "browse",
   searchQuery: "",
   searchActiveIndex: -1, // keyboard navigation cursor in dropdown
+  // Pagination state (PR C). The cursors track folder + track
+  // pagination INDEPENDENTLY — each turns empty when its
+  // collection is exhausted, which means subsequent Load-more
+  // requests skip that collection on the server.
+  nextFolderCursor: null,
+  nextTrackCursor: null,
+  totalFolders: 0,
+  totalTracks: 0,
+  // renderedFolders / renderedTracks track the count of rows in
+  // the tbody for the CURRENT navigation. Bumped per appended row
+  // by inspectorAppendRows; used by Load-more sentinel math.
+  // Maintaining counters here is O(1) vs the prior
+  // `querySelectorAll('tr[data-kind=...]').length` walk which was
+  // O(N) per pagination cycle (Gemini medium on PR C).
+  renderedFolders: 0,
+  renderedTracks: 0,
+  loadingMore: false, // re-entrancy guard for Load-more clicks / observer fires
+  // Generation counter for rAF-chunked rendering. Bumped on every
+  // inspectorNavigate AND every replace-render. The pump() body
+  // captures its expected generation at spawn time and bails out
+  // if the live generation has moved on — prevents chunks from a
+  // stale folder from interleaving into the new folder's table
+  // (Gemini HIGH on PR C).
+  renderGeneration: 0,
 };
+
+// IntersectionObserver instance for auto-load-more sentinel.
+// Lazily constructed; same observer reused across folder navigates
+// to avoid leaks.
+let inspectorLoadMoreObserver = null;
 
 // Search debounce + race-cancel state. Module-level so the search
 // handler can clear the timer between keystrokes AND cancel an
@@ -1969,14 +1998,27 @@ function inspectorRender(data) {
     pathLabel(data.path);
   const body = document.getElementById("inspector-rows-body");
   body.innerHTML = "";
+
+  // Capture pagination metadata so Load-more (manual click or
+  // IntersectionObserver auto-fire) can advance against the right
+  // cursors. Empty cursors = exhausted on the server side.
+  inspectorState.nextFolderCursor = data.nextFolderCursor || "";
+  inspectorState.nextTrackCursor = data.nextTrackCursor || "";
+  inspectorState.totalFolders = data.totalFolders || 0;
+  inspectorState.totalTracks = data.totalTracks || 0;
+
   const folders = data.folders || [];
   const tracks = data.tracks || [];
   // Toolbar actions are enabled iff this folder has any tracks
-  // anywhere underneath. Shared single-pass rollup helper handles
-  // the count (Gemini medium on PR A — was three separate reduces).
-  const totalTracks = inspectorBrowseRollup(data).trackCount;
-  document.getElementById("inspector-action-upscale").disabled = totalTracks === 0;
-  document.getElementById("inspector-action-delete").disabled = totalTracks === 0;
+  // anywhere underneath. Use the AUTHORITATIVE total from the
+  // paginated browse response (immediate-children count from PR C)
+  // OR the recursive sum from folder rollups (subfolders' tracks).
+  // Routes through the inspectorBrowseRollup single-pass helper
+  // for the recursive sum (PR A's dedupe).
+  const hasAnyTracks = (data.totalTracks || 0) > 0
+    || inspectorBrowseRollup(data).trackCount > 0;
+  document.getElementById("inspector-action-upscale").disabled = !hasAnyTracks;
+  document.getElementById("inspector-action-delete").disabled = !hasAnyTracks;
 
   if (folders.length === 0 && tracks.length === 0) {
     document.getElementById("inspector-rows-table").hidden = true;
@@ -1985,79 +2027,237 @@ function inspectorRender(data) {
   }
   document.getElementById("inspector-rows-table").hidden = false;
   document.getElementById("inspector-empty").hidden = true;
-  for (const f of folders) {
-    const tr = document.createElement("tr");
-    tr.dataset.kind = "folder";
-    tr.dataset.path = f.path;
-    // v1.4 nav rework: whole-row click navigates INTO the folder
-    // (traditional file-manager model). The trailing ⓘ button
-    // opens the projection drawer WITHOUT navigating so operators
-    // can preview upscale impact across child folders without
-    // having to enter each one. Row is `role="link"` + tabindex
-    // so keyboard users can navigate via Enter without leaving
-    // the keyboard.
-    tr.setAttribute("role", "link");
-    tr.tabIndex = 0;
-    tr.setAttribute("aria-label", `Open folder ${f.name}`);
-    tr.innerHTML = `
-      <td class="folder-cell">
-        <span class="folder-name">📁 ${escapeHTML(f.name)}</span>
-      </td>
-      <td class="num">${f.trackCount}</td>
-      <td class="num">${f.upscaledCount}</td>
-      <td class="num">${humanBytes(f.totalSizeBytes)}</td>
-      <td class="folder-actions">
-        <button type="button" class="btn folder-action-info"
-          aria-label="Show upscale projection for ${escapeHTML(f.name)}">ⓘ</button>
-      </td>
-    `;
-    const infoBtn = tr.querySelector(".folder-action-info");
-    infoBtn.addEventListener("click", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      inspectorSelectFolder(f);
-    });
-    // Stop keydown propagation from the Info button so Enter/Space
-    // activation triggers the button's native click (which opens
-    // the drawer) WITHOUT also bubbling to the row's keydown
-    // handler (which would navigate). Without this, keyboard
-    // users tabbing to the ⓘ button and pressing Enter would
-    // BOTH open the drawer AND navigate into the folder — the
-    // navigation wins (drawer closes immediately via the
-    // inspectorCloseDrawer that runs at the top of every
-    // inspectorNavigate). CodeRabbit Major on PR A.
-    infoBtn.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.key === " ") {
-        e.stopPropagation();
-      }
-    });
-    // Row click → navigate INTO the folder.
-    tr.addEventListener("click", () => inspectorNavigate(f.path));
-    // Keyboard activation: Enter on the row navigates; the Info
-    // button is its own focusable child (handled by its own click
-    // handler when keyboard-activated, with keydown propagation
-    // stopped above so the row's keydown doesn't also fire).
-    tr.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.key === " ") {
-        e.preventDefault();
-        inspectorNavigate(f.path);
-      }
-    });
-    body.appendChild(tr);
+
+  // Chunked append: build all rows into a fragment, then schedule
+  // 200-row chunks via rAF so initial paint lands before the full
+  // list materialises on huge folders (1000+ children). Smaller
+  // pages (<= 250) render in one chunk (no perceptible difference).
+  inspectorAppendRows(body, folders, tracks, /*replace=*/true);
+}
+
+// inspectorAppendRows is the shared chunked-render helper used by
+// the initial render path AND the Load-more append path. Builds row
+// elements into DocumentFragments and appends them in 200-row rAF
+// chunks so the main thread yields between chunks. After all rows
+// land, appends/refreshes the Load-more sentinel based on the
+// current cursor state.
+function inspectorAppendRows(body, folders, tracks, replace) {
+  if (replace) {
+    body.innerHTML = "";
+    inspectorState.renderedFolders = 0;
+    inspectorState.renderedTracks = 0;
+    // Bump generation so any in-flight pump from a prior
+    // navigation bails on next rAF — prevents stale-folder rows
+    // from interleaving into the freshly-loaded folder.
+    inspectorState.renderGeneration++;
   }
-  for (const t of tracks) {
-    const tr = document.createElement("tr");
-    tr.dataset.kind = "track";
-    tr.dataset.path = t.path;
-    const upscaled = t.isUpscaled ? "✓" : "";
-    tr.innerHTML = `
-      <td>🎵 ${escapeHTML(t.name)}</td>
-      <td class="num">${formatTrackQuality(t)}</td>
-      <td class="num">${upscaled}</td>
-      <td class="num">${humanBytes(t.sizeBytes)}</td>
-      <td class="folder-actions"></td>
-    `;
-    body.appendChild(tr);
+  // Build a single mixed list (folders first, then tracks) so the
+  // chunker can interleave; ordering inside each group is preserved.
+  const rows = [];
+  for (const f of folders) rows.push({ kind: "folder", data: f });
+  for (const t of tracks) rows.push({ kind: "track", data: t });
+
+  const CHUNK = 200;
+  let i = 0;
+  // Capture the live generation NOW. If a fresh navigation /
+  // re-render bumps it between rAF frames, this pump exits
+  // cleanly without appending more rows.
+  const myGen = inspectorState.renderGeneration;
+  function pump() {
+    if (inspectorState.renderGeneration !== myGen) {
+      return; // stale chunk — newer render has taken over.
+    }
+    const frag = document.createDocumentFragment();
+    const end = Math.min(i + CHUNK, rows.length);
+    for (; i < end; i++) {
+      frag.appendChild(buildInspectorRow(rows[i]));
+      // Maintain rendered counters here (O(1) per row) so the
+      // Load-more sentinel math doesn't need a DOM walk.
+      if (rows[i].kind === "folder") inspectorState.renderedFolders++;
+      else inspectorState.renderedTracks++;
+    }
+    body.appendChild(frag);
+    if (i < rows.length) {
+      requestAnimationFrame(pump);
+    } else {
+      // All page rows in place. Refresh the Load-more sentinel.
+      inspectorRefreshLoadMoreSentinel();
+    }
+  }
+  if (rows.length === 0) {
+    inspectorRefreshLoadMoreSentinel();
+    return;
+  }
+  pump();
+}
+
+function buildInspectorRow(item) {
+  if (item.kind === "folder") return buildFolderRow(item.data);
+  return buildTrackRow(item.data);
+}
+
+function buildFolderRow(f) {
+  const tr = document.createElement("tr");
+  tr.dataset.kind = "folder";
+  tr.dataset.path = f.path;
+  // v1.4 nav rework: whole-row click navigates INTO the folder
+  // (traditional file-manager model). The trailing ⓘ button
+  // opens the projection drawer WITHOUT navigating so operators
+  // can preview upscale impact across child folders without
+  // having to enter each one. Row is `role="link"` + tabindex
+  // so keyboard users can navigate via Enter without leaving
+  // the keyboard.
+  tr.setAttribute("role", "link");
+  tr.tabIndex = 0;
+  tr.setAttribute("aria-label", `Open folder ${f.name}`);
+  tr.innerHTML = `
+    <td class="folder-cell">
+      <span class="folder-name">📁 ${escapeHTML(f.name)}</span>
+    </td>
+    <td class="num">${f.trackCount}</td>
+    <td class="num">${f.upscaledCount}</td>
+    <td class="num">${humanBytes(f.totalSizeBytes)}</td>
+    <td class="folder-actions">
+      <button type="button" class="btn folder-action-info"
+        aria-label="Show upscale projection for ${escapeHTML(f.name)}">ⓘ</button>
+    </td>
+  `;
+  const infoBtn = tr.querySelector(".folder-action-info");
+  infoBtn.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    inspectorSelectFolder(f);
+  });
+  // Stop keydown propagation from the Info button so Enter/Space
+  // activation triggers the button's native click (which opens the
+  // drawer) WITHOUT also bubbling to the row's keydown handler
+  // (which would navigate). CodeRabbit Major on PR A — preserved
+  // here after PR C extracted the row builder into a helper.
+  infoBtn.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.stopPropagation();
+    }
+  });
+  // Row click → navigate INTO the folder.
+  tr.addEventListener("click", () => inspectorNavigate(f.path));
+  // Keyboard activation: Enter on the row navigates; the Info
+  // button is its own focusable child (its own keydown handler
+  // stops propagation so the row's keydown doesn't also fire).
+  tr.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      inspectorNavigate(f.path);
+    }
+  });
+  return tr;
+}
+
+function buildTrackRow(t) {
+  const tr = document.createElement("tr");
+  tr.dataset.kind = "track";
+  tr.dataset.path = t.path;
+  const upscaled = t.isUpscaled ? "✓" : "";
+  tr.innerHTML = `
+    <td>🎵 ${escapeHTML(t.name)}</td>
+    <td class="num">${formatTrackQuality(t)}</td>
+    <td class="num">${upscaled}</td>
+    <td class="num">${humanBytes(t.sizeBytes)}</td>
+    <td class="folder-actions"></td>
+  `;
+  return tr;
+}
+
+// inspectorRefreshLoadMoreSentinel rebuilds the "Load more (N
+// remaining)" row at the bottom of the tbody based on the current
+// nextCursor state. Called after every page render. Removes any
+// pre-existing sentinel before checking — handles the "all done"
+// case where Load-more's response had empty next cursors.
+function inspectorRefreshLoadMoreSentinel() {
+  const body = document.getElementById("inspector-rows-body");
+  if (!body) return;
+  // Drop any prior sentinel.
+  const existing = body.querySelector("tr.inspector-loadmore");
+  if (existing) {
+    if (inspectorLoadMoreObserver) {
+      inspectorLoadMoreObserver.unobserve(existing);
+    }
+    existing.remove();
+  }
+  const hasFolderMore = !!inspectorState.nextFolderCursor;
+  const hasTrackMore = !!inspectorState.nextTrackCursor;
+  if (!hasFolderMore && !hasTrackMore) return;
+
+  // Compute how many remain. Read from the in-state counters
+  // (O(1) — bumped per appended row in inspectorAppendRows)
+  // instead of the prior `querySelectorAll(...).length` walk
+  // which was O(N) per pagination cycle. Gemini medium on PR C.
+  const foldersRemaining = Math.max(0, inspectorState.totalFolders - inspectorState.renderedFolders);
+  const tracksRemaining = Math.max(0, inspectorState.totalTracks - inspectorState.renderedTracks);
+  const totalRemaining = foldersRemaining + tracksRemaining;
+  if (totalRemaining === 0) return;
+
+  const tr = document.createElement("tr");
+  tr.className = "inspector-loadmore";
+  tr.innerHTML = `<td colspan="5">Load more (${totalRemaining} remaining)</td>`;
+  tr.addEventListener("click", inspectorLoadMore);
+  body.appendChild(tr);
+  // IntersectionObserver: auto-fire Load-more when the sentinel
+  // scrolls into view. The first construction caches the observer;
+  // observation is per-element so we re-observe each new sentinel.
+  if (!inspectorLoadMoreObserver) {
+    inspectorLoadMoreObserver = new IntersectionObserver((entries) => {
+      for (const e of entries) {
+        if (e.isIntersecting) inspectorLoadMore();
+      }
+    }, { root: null, rootMargin: "200px" });
+  }
+  inspectorLoadMoreObserver.observe(tr);
+}
+
+// inspectorLoadMore fetches the next page from the current cursors
+// and appends results. Re-entrant calls (rapid scroll past sentinel
+// before the prior fetch lands) are suppressed via `loadingMore`.
+async function inspectorLoadMore() {
+  if (inspectorState.loadingMore) return;
+  if (!inspectorState.nextFolderCursor && !inspectorState.nextTrackCursor) return;
+  inspectorState.loadingMore = true;
+  const path = inspectorState.path;
+  try {
+    const params = new URLSearchParams({ path });
+    // Include each cursor param IF the collection isn't exhausted;
+    // OMIT the param to signal exhausted to the server.
+    if (inspectorState.nextFolderCursor) {
+      params.set("afterFolder", inspectorState.nextFolderCursor);
+    }
+    if (inspectorState.nextTrackCursor) {
+      params.set("afterTrack", inspectorState.nextTrackCursor);
+    }
+    const res = await fetch(`/api/library/browse?${params.toString()}`);
+    if (inspectorState.path !== path) return; // navigation moved on
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (inspectorState.path !== path) return;
+    // Advance cursors based on the new page response.
+    inspectorState.nextFolderCursor = data.nextFolderCursor || "";
+    inspectorState.nextTrackCursor = data.nextTrackCursor || "";
+    // Merge new totals — server may have refreshed counts.
+    // Nullish-coalesce (??) instead of OR (||) so a server-reported
+    // 0 (e.g. folder emptied between pages) updates state to 0
+    // rather than retaining the stale non-zero count. Gemini medium
+    // on PR C.
+    inspectorState.totalFolders = data.totalFolders ?? inspectorState.totalFolders;
+    inspectorState.totalTracks = data.totalTracks ?? inspectorState.totalTracks;
+    const body = document.getElementById("inspector-rows-body");
+    inspectorAppendRows(body, data.folders || [], data.tracks || [], /*replace=*/false);
+  } catch (err) {
+    // Surface a non-blocking toast-style update by replacing the
+    // sentinel text. Sentinel cleanup happens on next render.
+    const sentinel = document.querySelector("tr.inspector-loadmore td");
+    if (sentinel) {
+      sentinel.textContent = `Load failed: ${err.message} — click to retry`;
+    }
+  } finally {
+    inspectorState.loadingMore = false;
   }
 }
 

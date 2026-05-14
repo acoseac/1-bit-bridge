@@ -1137,6 +1137,63 @@ dialog h2 { font-size: 18px; color: var(--accent); }
 .inspector-tree table.rows td:first-child {
   word-break: break-word;
 }
+
+/* Virtualized-scrolling via browser-native `content-visibility: auto`
+ * (PR C). Rows outside the viewport skip paint + layout while the
+ * browser reserves their scroll height from `contain-intrinsic-size`.
+ * Both folder and track rows pin to 36 px height so heterogeneous
+ * lists don't reflow the scrollbar mid-scroll as the browser
+ * discovers true row sizes. `text-overflow: ellipsis` keeps long
+ * names from wrapping past the reserved height — a wrapped row
+ * would mismatch contain-intrinsic-size and re-introduce the jump.
+ *
+ * Support: Chromium 85+, Safari 18+, Firefox 125+. Older Safari
+ * gracefully degrades to normal rendering.
+ */
+.inspector-tree #inspector-rows-body tr {
+  height: 36px;
+  content-visibility: auto;
+  contain-intrinsic-size: 0 36px;
+}
+.inspector-tree #inspector-rows-body td {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 0; /* required for ellipsis inside table cells */
+}
+.inspector-tree #inspector-rows-body td.folder-cell {
+  /* The first cell carries the bulk of the name + emoji prefix; let
+   * it grow but still ellipsis. Search flat-list rows put two lines
+   * here; honour that exception via the secondary-text class. */
+  max-width: 60ch;
+}
+.inspector-tree #inspector-rows-body td .inspector-search-secondary {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* "Load more" sentinel row (PR C). IntersectionObserver auto-fires
+ * the next page when this row scrolls into view, but it's also
+ * clickable as a fallback. Min-height matches the regular rows so
+ * the observer always has a visible target before being scrolled
+ * past. */
+.inspector-tree #inspector-rows-body tr.inspector-loadmore {
+  height: 44px;
+  contain-intrinsic-size: 0 44px;
+  cursor: pointer;
+  font-style: italic;
+  color: var(--text-muted, #555);
+  text-align: center;
+}
+.inspector-tree #inspector-rows-body tr.inspector-loadmore td {
+  /* Override the per-td max-width: 0 so the centered text shows. */
+  max-width: none;
+  white-space: normal;
+}
+.inspector-tree #inspector-rows-body tr.inspector-loadmore:hover {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
 /* Sticky table header — operator never loses column context while
  * scrolling through 1k+ folder children. Top offset accounts for
  * the toolbar + storage bar stack above. */
