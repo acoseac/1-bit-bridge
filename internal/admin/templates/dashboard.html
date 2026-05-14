@@ -71,11 +71,11 @@
         {{else if .Data.Update.LatestVersion}}
           <span class="badge idle">up to date</span>
           <span>· latest <code id="update-latest">{{.Data.Update.LatestVersion}}</code></span>
-          <a id="update-notes" {{if .Data.Update.ReleaseNotesURL}}href="{{.Data.Update.ReleaseNotesURL}}"{{end}} target="_blank" rel="noopener" hidden></a>
+          <a id="update-notes" {{if .Data.Update.ReleaseNotesURL}}href="{{.Data.Update.ReleaseNotesURL}}"{{end}} target="_blank" rel="noopener" hidden aria-hidden="true"></a>
         {{else if .Data.Update.LastError}}
           <span class="badge idle">check failed</span>
           <code id="update-latest" hidden></code>
-          <a id="update-notes" hidden></a>
+          <a id="update-notes" hidden aria-hidden="true"></a>
         {{else if .Data.Update.LastCheck.IsZero}}
           {{/* No poll has fired yet (bridge just started, default
                check interval is 6h). Distinguish from the
@@ -84,11 +84,11 @@
                the check was hung. */}}
           <span class="badge idle">scheduled</span>
           <code id="update-latest" hidden></code>
-          <a id="update-notes" hidden></a>
+          <a id="update-notes" hidden aria-hidden="true"></a>
         {{else}}
           <span class="badge idle">checking…</span>
           <code id="update-latest" hidden></code>
-          <a id="update-notes" hidden></a>
+          <a id="update-notes" hidden aria-hidden="true"></a>
         {{end}}
       </dd>
       <dt>Last check</dt>
