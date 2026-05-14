@@ -1002,10 +1002,49 @@ dialog h2 { font-size: 18px; color: var(--accent); }
    Library Inspector + Jobs page (v1.3 operator-driven upscale)
    =========================================================== */
 
-.library-inspector .breadcrumbs {
-  margin: 0 0 1rem;
+/* Sticky toolbar (v1.4 nav rework). Stays pinned at the top while
+ * the operator scrolls through folder contents so navigation +
+ * search + per-folder actions are always reachable. */
+.library-inspector .inspector-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 0 0.5rem;
   padding: 0.5rem 0.75rem;
   background: var(--panel-bg, #f5f5f5);
+  border: 1px solid var(--border, rgba(0,0,0,0.08));
+  border-radius: 6px;
+}
+.library-inspector .inspector-nav-group,
+.library-inspector .inspector-action-group {
+  display: flex;
+  gap: 0.25rem;
+  align-items: center;
+}
+.library-inspector .inspector-nav-btn,
+.library-inspector .inspector-action-group .btn {
+  min-height: 44px; /* HIG floor — toolbar buttons must be tappable */
+  padding: 0.4rem 0.75rem;
+}
+.library-inspector .inspector-nav-btn[aria-disabled="true"] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.library-inspector .inspector-search-slot {
+  flex: 1 1 12rem; /* search input lands here in PR B */
+  min-width: 8rem;
+}
+
+/* Breadcrumbs (folded into the toolbar v1.4). Margin reset so they
+ * sit cleanly between the nav and search slots. */
+.library-inspector .breadcrumbs {
+  margin: 0;
+  padding: 0.25rem 0.75rem;
+  background: transparent;
   border-radius: 6px;
   font-size: 0.9rem;
 }
@@ -1016,10 +1055,46 @@ dialog h2 { font-size: 18px; color: var(--accent); }
   text-decoration: underline;
 }
 
+/* Sticky storage bar (v1.4). Sits directly below the toolbar.
+ * `[Change…]` is disabled in PR A (static read-only); becomes
+ * interactive in PR D2 alongside the migrate-legacy affordance. */
+.library-inspector .inspector-storage-bar {
+  position: sticky;
+  top: calc(44px + 1.5rem); /* sticks under the toolbar; tuned for default font */
+  z-index: 2;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 0 1rem;
+  padding: 0.4rem 0.75rem;
+  background: var(--bg-elev, #fafafa);
+  border: 1px solid var(--border, rgba(0,0,0,0.06));
+  border-radius: 6px;
+  font-size: 0.85rem;
+}
+.library-inspector .inspector-storage-label {
+  color: var(--text-muted, #555);
+}
+.library-inspector .inspector-storage-bar code.storage-path {
+  flex: 1 1 auto;
+}
+.library-inspector .inspector-storage-btn {
+  padding: 0.2rem 0.6rem;
+  font-size: 0.85em;
+}
+
 .inspector-layout {
   display: grid;
   grid-template-columns: 1.6fr 1fr;
   gap: 1rem;
+}
+.inspector-layout .inspector-drawer[hidden] {
+  display: none;
+}
+.inspector-layout:has(.inspector-drawer[hidden]) {
+  /* No drawer → tree takes the full width. */
+  grid-template-columns: 1fr;
 }
 @media (max-width: 720px) {
   .inspector-layout {
@@ -1030,21 +1105,32 @@ dialog h2 { font-size: 18px; color: var(--accent); }
 .inspector-tree table.rows td:first-child {
   word-break: break-word;
 }
+/* Sticky table header — operator never loses column context while
+ * scrolling through 1k+ folder children. Top offset accounts for
+ * the toolbar + storage bar stack above. */
+.inspector-tree table.rows thead {
+  position: sticky;
+  top: calc(44px + 0.4rem * 2 + 0.85rem + 0.5rem + 1rem);
+  background: var(--panel-bg, #f5f5f5);
+  z-index: 1;
+}
 
-/* Folder row redesign (v1.3.1): folder name is plain text, not
- * a blue link — the action surface lives in the explicit
- * Inspect / Open buttons on the right. */
+/* Folder row (v1.4): whole row is the navigate-into affordance.
+ * Plain folder name (not a blue link) keeps the visual hierarchy
+ * clean against the trailing ⓘ button. Keyboard-focused row gets
+ * the same accent hover treatment via :focus-visible. */
 .inspector-tree .folder-name {
   color: var(--text, inherit);
   font-weight: 500;
-  cursor: pointer;
   user-select: none;
 }
 .inspector-tree tr[data-kind="folder"] {
   cursor: pointer;
 }
-.inspector-tree tr[data-kind="folder"]:hover {
+.inspector-tree tr[data-kind="folder"]:hover,
+.inspector-tree tr[data-kind="folder"]:focus-visible {
   background: color-mix(in srgb, var(--accent) 8%, transparent);
+  outline: none;
 }
 .inspector-tree .folder-actions {
   white-space: nowrap;
@@ -1055,10 +1141,19 @@ dialog h2 { font-size: 18px; color: var(--accent); }
   padding: 0.25rem 0.65rem;
   font-size: 0.85em;
 }
-.inspector-tree .folder-action-inspect {
+.inspector-tree .folder-action-info {
   background: color-mix(in srgb, var(--accent) 12%, transparent);
+  /* Distinct hover state from the row's own hover so operators
+   * see the button as separately actionable. */
 }
-.inspector-tree .folder-action-open {
+.inspector-tree .folder-action-info:hover {
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+}
+
+/* Drawer close affordance (v1.4): drawer is hidden by default; the
+ * close button gives the operator an explicit dismiss. */
+.inspector-drawer-close {
+  margin-top: 0.5rem;
   background: transparent;
   color: var(--text-muted, #555);
 }

@@ -3,15 +3,66 @@
   <h1>Library Inspector</h1>
   <p class="lede">
     Browse the indexed library and trigger upscaling at folder /
-    root / whole-library granularity. The bridge handles the work
-    in the background; paired iOS devices pick up upscaled
-    variants automatically when their "Prefer upscaled audio"
-    toggle is on.
+    root / whole-library granularity. Click a folder to enter it;
+    use the ⓘ button on a row to see the upscale projection without
+    navigating. The bridge handles the work in the background;
+    paired iOS devices pick up upscaled variants automatically when
+    their "Prefer upscaled audio" toggle is on.
   </p>
 
-  <nav class="breadcrumbs" id="inspector-breadcrumbs" aria-label="Folder path">
-    <a href="#" data-path="">Library</a>
-  </nav>
+  {{/*
+    Sticky toolbar (v1.4 nav rework). Up = parent folder; Back =
+    browser history; Home = library root. The Upscale + Delete
+    toolbar buttons act on the CURRENTLY-OPEN folder via the same
+    drawer that the per-row ⓘ icon opens for child folders.
+  */}}
+  <div class="inspector-toolbar" id="inspector-toolbar" role="toolbar" aria-label="Inspector navigation">
+    <div class="inspector-nav-group">
+      <button type="button" id="inspector-nav-up"
+        class="btn inspector-nav-btn" aria-label="Go to parent folder">
+        <span aria-hidden="true">←</span> Up
+      </button>
+      <button type="button" id="inspector-nav-back"
+        class="btn inspector-nav-btn" aria-label="Go back in history">
+        <span aria-hidden="true">↶</span> Back
+      </button>
+      <button type="button" id="inspector-nav-home"
+        class="btn inspector-nav-btn" aria-label="Go to library root">
+        <span aria-hidden="true">⌂</span> Home
+      </button>
+    </div>
+    <nav class="breadcrumbs" id="inspector-breadcrumbs" aria-label="Folder path">
+      <a href="#" data-path="">Library</a>
+    </nav>
+    {{/* Search input slot reserved for PR B (FTS5 search). */}}
+    <div class="inspector-search-slot" id="inspector-search-slot"></div>
+    <div class="inspector-action-group">
+      <button type="button" id="inspector-action-upscale"
+        class="btn primary" disabled
+        aria-label="Upscale the currently-open folder">
+        🔼 Upscale this folder
+      </button>
+      <button type="button" id="inspector-action-delete"
+        class="btn destructive" disabled
+        aria-label="Delete cached variants in the currently-open folder">
+        🗑 Delete variants here
+      </button>
+    </div>
+  </div>
+
+  {{/*
+    Sticky storage bar. Static read-only in PR A; the [Change…]
+    button + migration affordance become interactive in PR D2.
+  */}}
+  <div class="inspector-storage-bar" id="inspector-storage-bar">
+    <span class="inspector-storage-label">Variants stored at</span>
+    <code class="storage-path" id="inspector-storage-path">{{.Data.UpscaleStoragePath}}</code>
+    <button type="button" id="inspector-storage-change"
+      class="btn inspector-storage-btn" disabled
+      aria-label="Change variants storage path">
+      Change…
+    </button>
+  </div>
 
   <div class="inspector-layout">
     <div class="inspector-tree panel">
@@ -32,12 +83,13 @@
       <p id="inspector-error" class="error" hidden role="alert"></p>
     </div>
 
-    <aside class="inspector-drawer panel" aria-live="polite">
+    <aside class="inspector-drawer panel" id="inspector-drawer" aria-live="polite" hidden>
       <h2 id="inspector-drawer-title">Select a folder</h2>
-      <p class="hint" id="inspector-drawer-hint">
-        Tap a row on the left to see the upscale projection and trigger a batch.
+      <p class="hint" id="inspector-drawer-hint" hidden>
+        Tap the ⓘ icon on a row, or the "Upscale this folder" toolbar
+        button, to see the upscale projection.
       </p>
-      <div id="inspector-drawer-content" hidden>
+      <div id="inspector-drawer-content">
         <dl class="kv">
           <dt>Tracks</dt><dd id="inspector-drawer-tracks">—</dd>
           <dt>Already upscaled</dt><dd id="inspector-drawer-covered">—</dd>
@@ -69,6 +121,10 @@
         <button type="button" id="inspector-delete-variants-btn"
                 class="btn destructive" disabled>
           Delete variants in this scope
+        </button>
+        <button type="button" id="inspector-drawer-close"
+                class="btn inspector-drawer-close" aria-label="Close drawer">
+          Close
         </button>
         <p id="inspector-submit-status" class="hint" aria-live="polite"></p>
       </div>
