@@ -340,6 +340,7 @@ func TestPoolJobTimesOutAndCountsAsFailure(t *testing.T) {
 
 	started := make(chan struct{})
 	secondRan := make(chan struct{})
+	p.fsyncFn = noopFsync
 	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
 		switch spec.SourceLibraryRel {
 		case "Music/Album/timeout.flac":
@@ -421,6 +422,7 @@ func TestPoolStopDuringJobSuppressesFailure(t *testing.T) {
 	// No t.Cleanup(p.Stop) — we Stop() explicitly mid-test.
 
 	started := make(chan struct{})
+	p.fsyncFn = noopFsync
 	p.runner = func(ctx context.Context, _ JobSpec) (int64, error) {
 		close(started)
 		<-ctx.Done()
@@ -476,6 +478,7 @@ func TestPoolPanicInRunnerReleasesDedup(t *testing.T) {
 
 	panicked := make(chan struct{})
 	survivorRan := make(chan struct{})
+	p.fsyncFn = noopFsync
 	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
 		switch spec.SourceLibraryRel {
 		case "Music/Album/panic.flac":
@@ -609,6 +612,7 @@ func TestPoolFiresOnJobCompleteAfterUpsertVariant(t *testing.T) {
 
 	// Successful runner stub — RunSox isn't invoked, the worker
 	// reaches the UpsertVariant + callback path directly.
+	p.fsyncFn = noopFsync
 	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
 		return 42, nil
 	}
@@ -713,6 +717,7 @@ func TestPoolDoesNotFireOnJobCompleteOnFailure(t *testing.T) {
 	t.Cleanup(p.Stop)
 
 	soxErr := errors.New("sox synthetic failure")
+	p.fsyncFn = noopFsync
 	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
 		return 0, soxErr
 	}
@@ -771,6 +776,7 @@ func TestPoolNilOnJobCompleteDoesNotPanic(t *testing.T) {
 	p := NewPool(store, 1, 4)
 	t.Cleanup(p.Stop)
 
+	p.fsyncFn = noopFsync
 	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
 		return 1, nil
 	}
@@ -818,6 +824,7 @@ func TestPoolSetOnJobCompleteIsRaceSafe(t *testing.T) {
 	p := NewPool(store, 2, 32)
 	t.Cleanup(p.Stop)
 
+	p.fsyncFn = noopFsync
 	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
 		return 1, nil
 	}

@@ -25,6 +25,7 @@ func TestDropInflightRemovesMatchingEntries(t *testing.T) {
 	runnerStarted := make(chan struct{}, 2)
 	runnerCtx, runnerCancel := context.WithCancel(context.Background())
 	t.Cleanup(runnerCancel)
+	p.fsyncFn = noopFsync
 	p.runner = func(ctx context.Context, _ JobSpec) (int64, error) {
 		runnerStarted <- struct{}{}
 		<-runnerCtx.Done()
@@ -88,6 +89,7 @@ func TestDropInflightPredicateReceivesSourcePathOnly(t *testing.T) {
 
 	runnerCtx, runnerCancel := context.WithCancel(context.Background())
 	t.Cleanup(runnerCancel)
+	p.fsyncFn = noopFsync
 	p.runner = func(ctx context.Context, _ JobSpec) (int64, error) {
 		<-runnerCtx.Done()
 		return 0, ctx.Err()

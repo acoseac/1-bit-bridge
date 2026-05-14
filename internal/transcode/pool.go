@@ -153,6 +153,14 @@ type Pool struct {
 	// milliseconds without racing other tests on a package-level var.
 	jobTimeout time.Duration
 
+	// fsyncFn flushes a freshly-written variant's file (and on POSIX
+	// systems its parent directory) to stable storage before the
+	// `UpsertVariant` DB row commits. Defaults to
+	// `fsyncFileAndParent`; tests inject a stub to drive the
+	// fsync-failure branch without touching the real filesystem.
+	// Same DI shape `runner` uses for the sox subprocess.
+	fsyncFn func(path string) error
+
 	// Coalescing publisher (CLAUDE.md: "Bounded SSE publisher
 	// goroutine for transcode events"). Replaces the prior pattern
 	// of spawning a fresh `go fire()` goroutine per state transition,
@@ -291,6 +299,7 @@ func NewPool(store *manifest.Store, workers, queueCap int) *Pool {
 		stopCancel: stopCancel,
 		runner:     RunSox,
 		jobTimeout: defaultJobTimeout,
+		fsyncFn:    fsyncFileAndParent,
 		// stateChange capacity 1 — coalesce. jobComplete capacity
 		// 2×workers — fidelity buffer per the docstring on the
 		// channel fields.
@@ -833,10 +842,47 @@ func (p *Pool) processJob(job poolJob) {
 	// but iOS-side log correlation expects equality (Gemini MEDIUM
 	// on PR #187).
 	completedAt := time.Now().UTC()
+	sidecarPath := job.spec.SidecarPath()
+
+	// Durability: flush the freshly-renamed sidecar (and its parent
+	// directory entry on POSIX) BEFORE committing the
+	// `track_variants` row that points at it. Without this barrier,
+	// a power-loss between the DB commit and the kernel's flush of
+	// the rename would leave iOS clients pointed at a non-durable
+	// file. Recovery from the inverse ordering (fsync-then-commit)
+	// is clean: a crash post-fsync but pre-commit means the next
+	// manifest scan re-transcodes — wasted work, but no torn state.
+	//
+	// On fsync failure we run the same release-and-fire path as a
+	// store failure (best-effort sidecar cleanup so a retry hits a
+	// clean slate, jobFailed event, releaseDedup, fireStateChange).
+	// Same shutdown gate as the UpsertVariant branch.
+	if err := p.fsyncFn(sidecarPath); err != nil {
+		if !p.closed.Load() {
+			p.failedCnt.Add(1)
+			logger.Error("pool: fsync sidecar", "path", job.spec.SourceLibraryRel, "err", err)
+			_ = os.Remove(sidecarPath)
+			p.fireJobFailed(jobFailedEvent{
+				path:            job.spec.SourceLibraryRel,
+				variantID:       job.spec.VariantID(),
+				errMsg:          "fsync sidecar: " + err.Error(),
+				durationSeconds: time.Since(startedAt).Seconds(),
+				failedAt:        time.Now().UTC(),
+				batchID:         job.spec.BatchID,
+			})
+		}
+		p.releaseDedup(job.dedup)
+		released = true
+		if !p.closed.Load() {
+			p.fireStateChange()
+		}
+		return
+	}
+
 	row := manifest.VariantRow{
 		SourcePath:    job.spec.SourceLibraryRel,
 		VariantID:     job.spec.VariantID(),
-		SidecarPath:   job.spec.SidecarPath(),
+		SidecarPath:   sidecarPath,
 		Format:        "flac",
 		SampleRate:    job.spec.TargetSampleRate,
 		BitsPerSample: job.spec.TargetBits,

@@ -105,6 +105,7 @@ func newTestCoordinatorWithStubbedPool(t *testing.T, s *manifest.Store) (*Coordi
 	t.Helper()
 	p := NewPool(s, 2, 16)
 	t.Cleanup(p.Stop)
+	p.fsyncFn = noopFsync
 	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
 		return spec.SourceSize * 2, nil // arbitrary non-zero size
 	}
