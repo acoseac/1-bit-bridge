@@ -907,6 +907,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return scanCmd(args[1:], stdout, stderr)
 	case "upscale":
 		return upscaleCmd(ctx, args[1:], stdout, stderr)
+	case "variants":
+		return variantsCmd(ctx, args[1:], stdout, stderr)
 	case "artwork":
 		return artworkCmd(ctx, args[1:], stdout, stderr)
 	case "doctor":
