@@ -8,6 +8,19 @@ import (
 	"os/exec"
 )
 
+// runSystemctlUser runs `systemctl --user <verb> <ServiceLabel>.service`
+// and wraps a non-zero exit with the combined output. Shared by
+// stopForOS / startForOS / restartForOS so the verb-specific
+// boilerplate doesn't duplicate three ways (SonarCloud per-PR
+// duplication gate caught this).
+func runSystemctlUser(verb string) error {
+	out, err := exec.Command("systemctl", systemdUserFlag, verb, ServiceLabel+systemdUnitSuffix).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("systemctl --user %s: %v: %s", verb, err, string(out))
+	}
+	return nil
+}
+
 // stopForOS shells out to the user's service manager. The kind
 // argument carries the InstalledKind classification from Stop's
 // dispatcher — only user-context kinds reach here (system kinds
@@ -35,11 +48,7 @@ func stopForOS(kind ServiceKind) error {
 		}
 		return nil
 	case KindSystemdUser:
-		out, err := exec.Command("systemctl", systemdUserFlag, "stop", ServiceLabel+systemdUnitSuffix).CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("systemctl --user stop: %v: %s", err, string(out))
-		}
-		return nil
+		return runSystemctlUser("stop")
 	}
 	return nil
 }
@@ -62,11 +71,7 @@ func startForOS(kind ServiceKind) error {
 		}
 		return nil
 	case KindSystemdUser:
-		out, err := exec.Command("systemctl", systemdUserFlag, "start", ServiceLabel+systemdUnitSuffix).CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("systemctl --user start: %v: %s", err, string(out))
-		}
-		return nil
+		return runSystemctlUser("start")
 	}
 	return nil
 }
@@ -96,11 +101,7 @@ func restartForOS(kind ServiceKind) error {
 		}
 		return nil
 	case KindSystemdUser:
-		out, err := exec.Command("systemctl", systemdUserFlag, "restart", ServiceLabel+systemdUnitSuffix).CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("systemctl --user restart: %v: %s", err, string(out))
-		}
-		return nil
+		return runSystemctlUser("restart")
 	}
 	return nil
 }
