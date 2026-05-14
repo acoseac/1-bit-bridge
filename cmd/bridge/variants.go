@@ -72,6 +72,7 @@ func variantsMoveCmd(ctx context.Context, args []string, stdout, stderr io.Write
 	configPath := fs.String("config", "bridge.yaml", "path to config file")
 	to := fs.String("to", "", "absolute destination directory for variants (required)")
 	dryRun := fs.Bool("dry-run", false, "list planned moves without touching files or DB")
+	confirm := fs.String("confirm", "", "type MOVE to confirm destructive relocation (skipped under --dry-run)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -83,6 +84,17 @@ func variantsMoveCmd(ctx context.Context, args []string, stdout, stderr io.Write
 		fmt.Fprintln(stderr, "--to must be an absolute path")
 		return 2
 	}
+	// Typed-phrase confirmation gate (CodeRabbit Major on PR #245).
+	// `variants move` unlinks source sidecar files; the rest of the
+	// bridge CLI's destructive subcommands (notably `bridge tsnet
+	// logout`) require the operator to type WIPE / similar to
+	// confirm. Exact-match (not prefix-match) so `M`, `mov`, etc.
+	// don't slip past.
+	if !*dryRun && *confirm != "MOVE" {
+		fmt.Fprintln(stderr, "refusing to proceed without --confirm MOVE")
+		fmt.Fprintln(stderr, "(use --dry-run to preview the moves without writing)")
+		return 2
+	}
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -91,14 +103,25 @@ func variantsMoveCmd(ctx context.Context, args []string, stdout, stderr io.Write
 	}
 	// Same validation the runtime config-load applies, mirrored
 	// inline so the CLI surfaces a friendly error before touching
-	// any DB / disk state.
+	// any DB / disk state. The containment check rejects any path
+	// AT or UNDER a library root.
+	//
+	// Pre-fix the predicate used `rel[0] != '.'` which slipped two
+	// classes of inputs past: `rel == "."` (destination identical to
+	// the root) and `rel == ".cache/sub"` (a literal-dot-prefixed
+	// child). CodeRabbit Major on PR #245. The
+	// `!HasPrefix(rel, ".."+sep)` check matches the same shape that
+	// `config.validateVariantsDir` uses — both must stay aligned.
 	for _, root := range cfg.LibraryRoots {
 		if root == "" {
 			continue
 		}
 		cleanedRoot := filepath.Clean(root)
 		rel, rerr := filepath.Rel(cleanedRoot, filepath.Clean(*to))
-		if rerr == nil && rel != ".." && len(rel) > 0 && rel[0] != '.' {
+		if rerr != nil {
+			continue // different volumes on Windows; can't be nested.
+		}
+		if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			fmt.Fprintf(stderr, "--to must not be under library root %q\n", cleanedRoot)
 			return 2
 		}

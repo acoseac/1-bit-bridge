@@ -1051,14 +1051,12 @@ dialog h2 { font-size: 18px; color: var(--accent); }
   border: 1px solid var(--border);
   border-radius: 6px;
 }
-.library-inspector .inspector-nav-group,
-.library-inspector .inspector-action-group {
+.library-inspector .inspector-nav-group {
   display: flex;
   gap: 0.25rem;
   align-items: center;
 }
-.library-inspector .inspector-nav-btn,
-.library-inspector .inspector-action-group .btn {
+.library-inspector .inspector-nav-btn {
   min-height: 44px; /* HIG floor — toolbar buttons must be tappable */
   padding: 0.4rem 0.75rem;
 }
@@ -1072,19 +1070,49 @@ dialog h2 { font-size: 18px; color: var(--accent); }
 }
 
 /* Breadcrumbs (folded into the toolbar v1.4). Margin reset so they
- * sit cleanly between the nav and search slots. */
+ * sit cleanly between the nav and search slots. Link color uses the
+ * theme accent rather than the default browser blue so the trail
+ * matches the rest of the admin UI; the active crumb (the current
+ * folder) stays in --fg so it reads as "you are here." */
 .library-inspector .breadcrumbs {
   margin: 0;
   padding: 0.25rem 0.75rem;
   background: transparent;
   border-radius: 6px;
   font-size: 0.9rem;
+  color: var(--fg-muted);
 }
 .library-inspector .breadcrumbs a {
   text-decoration: none;
+  color: var(--accent);
 }
 .library-inspector .breadcrumbs a:hover {
   text-decoration: underline;
+  color: var(--accent-hot);
+}
+
+/* Current-folder heading row (v1.4 followup): the inspector header
+ * H2 + adjacent ⓘ button that replaces the toolbar Upscale/Delete
+ * buttons. Flex layout so the ⓘ button sits flush right at the
+ * heading's baseline. */
+.inspector-tree .inspector-current-heading-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+}
+.inspector-tree .inspector-current-heading-row h2 {
+  margin: 0;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.inspector-tree .inspector-current-heading-row .folder-action-info {
+  flex-shrink: 0;
+}
+.inspector-tree .inspector-current-heading-row .folder-action-info:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 /* Sticky storage bar (v1.4 PR A + PR D2). Sits directly below the
@@ -1236,6 +1264,18 @@ dialog h2 { font-size: 18px; color: var(--accent); }
    * it grow but still ellipsis. Search flat-list rows put two lines
    * here; honour that exception via the secondary-text class. */
   max-width: 60ch;
+}
+/* The trailing folder-actions cell holds the ⓘ button — `max-width: 0`
+ * from the general `td` rule above was clipping the button (~half cut
+ * off on narrow viewports + always cut when the projection drawer
+ * takes the right column). Reset width + overflow so the button
+ * always renders in full. */
+.inspector-tree #inspector-rows-body td.folder-actions {
+  max-width: none;
+  overflow: visible;
+  width: 1%; /* shrink to content — the rest of the row gets the slack */
+  text-align: right;
+  padding-right: 0.5rem;
 }
 .inspector-tree #inspector-rows-body td .inspector-search-secondary {
   white-space: nowrap;

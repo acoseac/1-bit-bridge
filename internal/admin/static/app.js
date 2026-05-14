@@ -1696,11 +1696,12 @@ function initLibraryInspector() {
   document.getElementById("inspector-nav-home")
     .addEventListener("click", () => inspectorNavigate(""));
 
-  // Toolbar actions act on the CURRENT folder
-  document.getElementById("inspector-action-upscale")
-    .addEventListener("click", inspectorOpenProjectionForCurrent);
-  document.getElementById("inspector-action-delete")
-    .addEventListener("click", inspectorOpenDeleteForCurrent);
+  // Current-folder ⓘ affordance (v1.4 followup): replaces the
+  // toolbar Upscale + Delete buttons that wrapped inconsistently.
+  // Same drawer flow as the per-row ⓘ on child folders — the
+  // operator picks Upscale / Delete inside the drawer.
+  document.getElementById("inspector-current-info")
+    ?.addEventListener("click", inspectorOpenProjectionForCurrent);
 
   // Drawer-internal buttons (unchanged behaviour, preserved IDs)
   document.getElementById("inspector-upscale-btn")
@@ -2037,9 +2038,10 @@ function inspectorUpdateToolbarState(path) {
   } else {
     homeBtn.removeAttribute("aria-current");
   }
-  // Action buttons start disabled; flipped on once we have data.
-  document.getElementById("inspector-action-upscale").disabled = true;
-  document.getElementById("inspector-action-delete").disabled = true;
+  // Current-folder info button starts disabled; flipped on once
+  // browse data lands AND the folder is non-empty.
+  const infoBtn = document.getElementById("inspector-current-info");
+  if (infoBtn) infoBtn.disabled = true;
 }
 
 // inspectorOpenProjectionForCurrent is the toolbar handler that
@@ -2091,13 +2093,6 @@ function inspectorBrowseRollup(data) {
     totalSizeBytes += f.totalSizeBytes || 0;
   }
   return { trackCount, upscaledCount, totalSizeBytes };
-}
-
-// inspectorOpenDeleteForCurrent opens the drawer focused on the
-// current folder so the operator can hit "Delete variants in this
-// scope" — same drawer as inspectorOpenProjectionForCurrent.
-function inspectorOpenDeleteForCurrent() {
-  inspectorOpenProjectionForCurrent();
 }
 
 function inspectorCloseDrawer() {
@@ -2153,8 +2148,8 @@ function inspectorRender(data) {
   // for the recursive sum (PR A's dedupe).
   const hasAnyTracks = (data.totalTracks || 0) > 0
     || inspectorBrowseRollup(data).trackCount > 0;
-  document.getElementById("inspector-action-upscale").disabled = !hasAnyTracks;
-  document.getElementById("inspector-action-delete").disabled = !hasAnyTracks;
+  const currentInfoBtn = document.getElementById("inspector-current-info");
+  if (currentInfoBtn) currentInfoBtn.disabled = !hasAnyTracks;
 
   if (folders.length === 0 && tracks.length === 0) {
     document.getElementById("inspector-rows-table").hidden = true;
@@ -2177,6 +2172,15 @@ function inspectorRender(data) {
 // chunks so the main thread yields between chunks. After all rows
 // land, appends/refreshes the Load-more sentinel based on the
 // current cursor state.
+//
+// Returns a Promise that resolves AFTER all chunks have been
+// appended (or after the pump bails on a stale generation). Callers
+// like `inspectorLoadMore` await this so the re-entrancy guard
+// doesn't unlock mid-render — pre-fix the guard was released the
+// moment this function returned (synchronously, before any rAF
+// fired), letting a fast IntersectionObserver tick spawn an
+// overlapping Load-more whose rows interleaved with the chunks
+// still rendering from the prior batch. Gemini HIGH on PR C.
 function inspectorAppendRows(body, folders, tracks, replace) {
   if (replace) {
     body.innerHTML = "";
@@ -2193,38 +2197,43 @@ function inspectorAppendRows(body, folders, tracks, replace) {
   for (const f of folders) rows.push({ kind: "folder", data: f });
   for (const t of tracks) rows.push({ kind: "track", data: t });
 
-  const CHUNK = 200;
-  let i = 0;
-  // Capture the live generation NOW. If a fresh navigation /
-  // re-render bumps it between rAF frames, this pump exits
-  // cleanly without appending more rows.
-  const myGen = inspectorState.renderGeneration;
-  function pump() {
-    if (inspectorState.renderGeneration !== myGen) {
-      return; // stale chunk — newer render has taken over.
-    }
-    const frag = document.createDocumentFragment();
-    const end = Math.min(i + CHUNK, rows.length);
-    for (; i < end; i++) {
-      frag.appendChild(buildInspectorRow(rows[i]));
-      // Maintain rendered counters here (O(1) per row) so the
-      // Load-more sentinel math doesn't need a DOM walk.
-      if (rows[i].kind === "folder") inspectorState.renderedFolders++;
-      else inspectorState.renderedTracks++;
-    }
-    body.appendChild(frag);
-    if (i < rows.length) {
-      requestAnimationFrame(pump);
-    } else {
-      // All page rows in place. Refresh the Load-more sentinel.
-      inspectorRefreshLoadMoreSentinel();
-    }
-  }
   if (rows.length === 0) {
     inspectorRefreshLoadMoreSentinel();
-    return;
+    return Promise.resolve();
   }
-  pump();
+
+  return new Promise((resolve) => {
+    const CHUNK = 200;
+    let i = 0;
+    // Capture the live generation NOW. If a fresh navigation /
+    // re-render bumps it between rAF frames, this pump exits
+    // cleanly without appending more rows.
+    const myGen = inspectorState.renderGeneration;
+    function pump() {
+      if (inspectorState.renderGeneration !== myGen) {
+        resolve(); // stale chunk — newer render has taken over.
+        return;
+      }
+      const frag = document.createDocumentFragment();
+      const end = Math.min(i + CHUNK, rows.length);
+      for (; i < end; i++) {
+        frag.appendChild(buildInspectorRow(rows[i]));
+        // Maintain rendered counters here (O(1) per row) so the
+        // Load-more sentinel math doesn't need a DOM walk.
+        if (rows[i].kind === "folder") inspectorState.renderedFolders++;
+        else inspectorState.renderedTracks++;
+      }
+      body.appendChild(frag);
+      if (i < rows.length) {
+        requestAnimationFrame(pump);
+      } else {
+        // All page rows in place. Refresh the Load-more sentinel.
+        inspectorRefreshLoadMoreSentinel();
+        resolve();
+      }
+    }
+    pump();
+  });
 }
 
 function buildInspectorRow(item) {
@@ -2352,10 +2361,22 @@ function inspectorRefreshLoadMoreSentinel() {
 
 // inspectorLoadMore fetches the next page from the current cursors
 // and appends results. Re-entrant calls (rapid scroll past sentinel
-// before the prior fetch lands) are suppressed via `loadingMore`.
+// before the prior fetch lands) are suppressed via `loadingMore` —
+// the guard is held until BOTH the fetch lands AND the chunked
+// rAF render completes (await inspectorAppendRows). Pre-fix the
+// guard was released synchronously when inspectorAppendRows
+// returned, letting an IntersectionObserver tick spawn an
+// overlapping page whose rows interleaved with the still-rendering
+// chunks. Gemini HIGH on PR C.
+//
+// Search-mode guard: a fetch that landed AFTER the user typed a
+// global search query would otherwise overwrite the flat-list view
+// with browse rows. Both the path AND mode are re-checked after
+// each await.
 async function inspectorLoadMore() {
   if (inspectorState.loadingMore) return;
   if (!inspectorState.nextFolderCursor && !inspectorState.nextTrackCursor) return;
+  if (inspectorState.mode === "search") return;
   inspectorState.loadingMore = true;
   const path = inspectorState.path;
   try {
@@ -2369,10 +2390,10 @@ async function inspectorLoadMore() {
       params.set("afterTrack", inspectorState.nextTrackCursor);
     }
     const res = await fetch(`/api/library/browse?${params.toString()}`);
-    if (inspectorState.path !== path) return; // navigation moved on
+    if (inspectorState.path !== path || inspectorState.mode === "search") return;
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
-    if (inspectorState.path !== path) return;
+    if (inspectorState.path !== path || inspectorState.mode === "search") return;
     // Advance cursors based on the new page response.
     inspectorState.nextFolderCursor = data.nextFolderCursor || "";
     inspectorState.nextTrackCursor = data.nextTrackCursor || "";
@@ -2384,7 +2405,10 @@ async function inspectorLoadMore() {
     inspectorState.totalFolders = data.totalFolders ?? inspectorState.totalFolders;
     inspectorState.totalTracks = data.totalTracks ?? inspectorState.totalTracks;
     const body = document.getElementById("inspector-rows-body");
-    inspectorAppendRows(body, data.folders || [], data.tracks || [], /*replace=*/false);
+    // Await the chunked render — the loadingMore guard must stay
+    // held until every rAF chunk has appended, otherwise a fast
+    // IntersectionObserver tick spawns an overlapping page.
+    await inspectorAppendRows(body, data.folders || [], data.tracks || [], /*replace=*/false);
   } catch (err) {
     // Surface a non-blocking toast-style update by replacing the
     // sentinel text. Sentinel cleanup happens on next render.
