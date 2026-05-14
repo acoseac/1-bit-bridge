@@ -1696,11 +1696,12 @@ function initLibraryInspector() {
   document.getElementById("inspector-nav-home")
     .addEventListener("click", () => inspectorNavigate(""));
 
-  // Toolbar actions act on the CURRENT folder
-  document.getElementById("inspector-action-upscale")
-    .addEventListener("click", inspectorOpenProjectionForCurrent);
-  document.getElementById("inspector-action-delete")
-    .addEventListener("click", inspectorOpenDeleteForCurrent);
+  // Current-folder ⓘ affordance (v1.4 followup): replaces the
+  // toolbar Upscale + Delete buttons that wrapped inconsistently.
+  // Same drawer flow as the per-row ⓘ on child folders — the
+  // operator picks Upscale / Delete inside the drawer.
+  document.getElementById("inspector-current-info")
+    ?.addEventListener("click", inspectorOpenProjectionForCurrent);
 
   // Drawer-internal buttons (unchanged behaviour, preserved IDs)
   document.getElementById("inspector-upscale-btn")
@@ -1708,7 +1709,7 @@ function initLibraryInspector() {
   document.getElementById("inspector-delete-variants-btn")
     .addEventListener("click", inspectorDeleteVariants);
   document.getElementById("inspector-drawer-close")
-    .addEventListener("click", inspectorCloseDrawer);
+    .addEventListener("click", () => inspectorCloseDrawer({ userInitiated: true }));
 
   // Sticky-stack height tracker (from PR A): write actual measured
   // offsetHeight of the toolbar + storage bar into CSS custom
@@ -1718,10 +1719,12 @@ function initLibraryInspector() {
   updateInspectorStickyHeights();
   window.addEventListener("resize", updateInspectorStickyHeights);
   if (typeof ResizeObserver === "function") {
+    const search = document.getElementById("inspector-search-slot");
     const toolbar = document.getElementById("inspector-toolbar");
     const storage = document.getElementById("inspector-storage-bar");
-    if (toolbar || storage) {
+    if (search || toolbar || storage) {
       const ro = new ResizeObserver(updateInspectorStickyHeights);
+      if (search) ro.observe(search);
       if (toolbar) ro.observe(toolbar);
       if (storage) ro.observe(storage);
     }
@@ -1913,10 +1916,14 @@ async function inspectorStorageSubmit() {
 // height is the AUTHORITATIVE one — the CSS fallback assumes a
 // single-row toolbar (good default for the common case).
 function updateInspectorStickyHeights() {
+  const search = document.getElementById("inspector-search-slot");
   const toolbar = document.getElementById("inspector-toolbar");
   const storage = document.getElementById("inspector-storage-bar");
   const root = document.querySelector(".library-inspector");
   if (!root) return;
+  if (search) {
+    root.style.setProperty("--inspector-search-h", `${search.offsetHeight}px`);
+  }
   if (toolbar) {
     root.style.setProperty("--inspector-toolbar-h", `${toolbar.offsetHeight}px`);
   }
@@ -1971,9 +1978,19 @@ async function inspectorNavigate(path, opts = {}) {
 
   inspectorState.path = path;
   inspectorState.lastBrowseData = null;
+  // Any navigation exits search mode — covers the case where the
+  // operator clicked a search-result folder/track and we land in
+  // browse mode without an explicit Exit. Without this reset the
+  // load-more sentinel's `mode === "search"` short-circuit kept
+  // pagination permanently disabled in the post-search folder.
+  // CodeRabbit Major on PR #246 round-2.
+  inspectorState.mode = "browse";
+  // Clear the "user-closed" latch on every navigation so a fresh
+  // folder auto-opens the projection drawer in inspectorRender.
+  inspectorState.drawerClosedByUser = false;
   inspectorRenderBreadcrumbs(path);
   inspectorUpdateToolbarState(path);
-  inspectorCloseDrawer();
+  inspectorCloseDrawer(); // transient close — userInitiated defaults to false
   document.getElementById("inspector-error").hidden = true;
   document.getElementById("inspector-current-heading").textContent =
     "Loading…";
@@ -2001,11 +2018,15 @@ async function inspectorNavigate(path, opts = {}) {
       return;
     }
     inspectorState.lastBrowseData = data;
-    inspectorRender(data);
-    // Restore scroll after layout settles. rAF runs after the
-    // current style/layout pass on the next paint, so the table
-    // body has its true height by then. Falls back to 0 when no
-    // state (fresh tab / first nav).
+    // Await inspectorRender → the chunked-render pump fully
+    // populates the table body before we restore scroll.
+    // Without this await, only the first 200-row chunk has
+    // appended when scrollTo runs and the browser clamps a
+    // deep scroll-target to the partial document height.
+    // CodeRabbit Major on PR #246 round-2.
+    await inspectorRender(data);
+    if (inspectorState.path !== path) return;
+    // Restore scroll after the table body is fully realized.
     const targetY = typeof opts.restoreScroll === "number"
       ? opts.restoreScroll
       : 0;
@@ -2037,9 +2058,10 @@ function inspectorUpdateToolbarState(path) {
   } else {
     homeBtn.removeAttribute("aria-current");
   }
-  // Action buttons start disabled; flipped on once we have data.
-  document.getElementById("inspector-action-upscale").disabled = true;
-  document.getElementById("inspector-action-delete").disabled = true;
+  // Current-folder info button starts disabled; flipped on once
+  // browse data lands AND the folder is non-empty.
+  const infoBtn = document.getElementById("inspector-current-info");
+  if (infoBtn) infoBtn.disabled = true;
 }
 
 // inspectorOpenProjectionForCurrent is the toolbar handler that
@@ -2093,17 +2115,21 @@ function inspectorBrowseRollup(data) {
   return { trackCount, upscaledCount, totalSizeBytes };
 }
 
-// inspectorOpenDeleteForCurrent opens the drawer focused on the
-// current folder so the operator can hit "Delete variants in this
-// scope" — same drawer as inspectorOpenProjectionForCurrent.
-function inspectorOpenDeleteForCurrent() {
-  inspectorOpenProjectionForCurrent();
-}
-
-function inspectorCloseDrawer() {
+// inspectorCloseDrawer hides the projection drawer. `userInitiated`
+// distinguishes:
+//   - true (user clicked × or pressed Esc): persists `drawerClosedByUser`
+//     so the drawer doesn't auto-reopen on the current navigation's
+//     re-render. Cleared on the next navigation.
+//   - false (transient close from inspectorNavigate / inspectorRender
+//     setup): doesn't latch the flag, so the navigation's downstream
+//     auto-open path still fires.
+function inspectorCloseDrawer({ userInitiated = false } = {}) {
   inspectorState.selection = null;
   const drawer = document.getElementById("inspector-drawer");
   if (drawer) drawer.hidden = true;
+  if (userInitiated) {
+    inspectorState.drawerClosedByUser = true;
+  }
 }
 
 function inspectorRenderBreadcrumbs(path) {
@@ -2129,7 +2155,12 @@ function inspectorRenderBreadcrumbs(path) {
   }
 }
 
-function inspectorRender(data) {
+// Returns a Promise resolved once the chunked-render pump has
+// fully populated the table body (CodeRabbit Major on PR #246
+// round-2). The caller (inspectorNavigate) awaits this so scroll
+// restoration runs against the FINAL document height, not the
+// partial height after just the first 200-row chunk.
+async function inspectorRender(data) {
   document.getElementById("inspector-current-heading").textContent =
     pathLabel(data.path);
   const body = document.getElementById("inspector-rows-body");
@@ -2153,8 +2184,20 @@ function inspectorRender(data) {
   // for the recursive sum (PR A's dedupe).
   const hasAnyTracks = (data.totalTracks || 0) > 0
     || inspectorBrowseRollup(data).trackCount > 0;
-  document.getElementById("inspector-action-upscale").disabled = !hasAnyTracks;
-  document.getElementById("inspector-action-delete").disabled = !hasAnyTracks;
+  const currentInfoBtn = document.getElementById("inspector-current-info");
+  if (currentInfoBtn) currentInfoBtn.disabled = !hasAnyTracks;
+
+  // Auto-open the projection drawer for the CURRENT folder whenever
+  // it has tracks. Operators don't need to discover an ⓘ to act on
+  // the open folder — the drawer is right there. User explicitly
+  // requested this UX on the v1.4 followup ("maybe keep the upscale
+  // panel always open"). The drawer can still be closed manually
+  // via its × button; closing sets `drawerClosedByUser` so the
+  // current navigation doesn't re-open it on a same-path refresh.
+  // Any subsequent navigation clears the flag and re-opens.
+  if (hasAnyTracks && !inspectorState.drawerClosedByUser) {
+    inspectorOpenProjectionForCurrent();
+  }
 
   if (folders.length === 0 && tracks.length === 0) {
     document.getElementById("inspector-rows-table").hidden = true;
@@ -2168,7 +2211,9 @@ function inspectorRender(data) {
   // 200-row chunks via rAF so initial paint lands before the full
   // list materialises on huge folders (1000+ children). Smaller
   // pages (<= 250) render in one chunk (no perceptible difference).
-  inspectorAppendRows(body, folders, tracks, /*replace=*/true);
+  // Await so the caller's scroll-restore runs against the final
+  // document height, not the partial first-chunk height.
+  await inspectorAppendRows(body, folders, tracks, /*replace=*/true);
 }
 
 // inspectorAppendRows is the shared chunked-render helper used by
@@ -2177,6 +2222,15 @@ function inspectorRender(data) {
 // chunks so the main thread yields between chunks. After all rows
 // land, appends/refreshes the Load-more sentinel based on the
 // current cursor state.
+//
+// Returns a Promise that resolves AFTER all chunks have been
+// appended (or after the pump bails on a stale generation). Callers
+// like `inspectorLoadMore` await this so the re-entrancy guard
+// doesn't unlock mid-render — pre-fix the guard was released the
+// moment this function returned (synchronously, before any rAF
+// fired), letting a fast IntersectionObserver tick spawn an
+// overlapping Load-more whose rows interleaved with the chunks
+// still rendering from the prior batch. Gemini HIGH on PR C.
 function inspectorAppendRows(body, folders, tracks, replace) {
   if (replace) {
     body.innerHTML = "";
@@ -2193,38 +2247,43 @@ function inspectorAppendRows(body, folders, tracks, replace) {
   for (const f of folders) rows.push({ kind: "folder", data: f });
   for (const t of tracks) rows.push({ kind: "track", data: t });
 
-  const CHUNK = 200;
-  let i = 0;
-  // Capture the live generation NOW. If a fresh navigation /
-  // re-render bumps it between rAF frames, this pump exits
-  // cleanly without appending more rows.
-  const myGen = inspectorState.renderGeneration;
-  function pump() {
-    if (inspectorState.renderGeneration !== myGen) {
-      return; // stale chunk — newer render has taken over.
-    }
-    const frag = document.createDocumentFragment();
-    const end = Math.min(i + CHUNK, rows.length);
-    for (; i < end; i++) {
-      frag.appendChild(buildInspectorRow(rows[i]));
-      // Maintain rendered counters here (O(1) per row) so the
-      // Load-more sentinel math doesn't need a DOM walk.
-      if (rows[i].kind === "folder") inspectorState.renderedFolders++;
-      else inspectorState.renderedTracks++;
-    }
-    body.appendChild(frag);
-    if (i < rows.length) {
-      requestAnimationFrame(pump);
-    } else {
-      // All page rows in place. Refresh the Load-more sentinel.
-      inspectorRefreshLoadMoreSentinel();
-    }
-  }
   if (rows.length === 0) {
     inspectorRefreshLoadMoreSentinel();
-    return;
+    return Promise.resolve();
   }
-  pump();
+
+  return new Promise((resolve) => {
+    const CHUNK = 200;
+    let i = 0;
+    // Capture the live generation NOW. If a fresh navigation /
+    // re-render bumps it between rAF frames, this pump exits
+    // cleanly without appending more rows.
+    const myGen = inspectorState.renderGeneration;
+    function pump() {
+      if (inspectorState.renderGeneration !== myGen) {
+        resolve(); // stale chunk — newer render has taken over.
+        return;
+      }
+      const frag = document.createDocumentFragment();
+      const end = Math.min(i + CHUNK, rows.length);
+      for (; i < end; i++) {
+        frag.appendChild(buildInspectorRow(rows[i]));
+        // Maintain rendered counters here (O(1) per row) so the
+        // Load-more sentinel math doesn't need a DOM walk.
+        if (rows[i].kind === "folder") inspectorState.renderedFolders++;
+        else inspectorState.renderedTracks++;
+      }
+      body.appendChild(frag);
+      if (i < rows.length) {
+        requestAnimationFrame(pump);
+      } else {
+        // All page rows in place. Refresh the Load-more sentinel.
+        inspectorRefreshLoadMoreSentinel();
+        resolve();
+      }
+    }
+    pump();
+  });
 }
 
 function buildInspectorRow(item) {
@@ -2246,9 +2305,14 @@ function buildFolderRow(f) {
   tr.setAttribute("role", "link");
   tr.tabIndex = 0;
   tr.setAttribute("aria-label", `Open folder ${f.name}`);
+  // `title` on the folder-name span: hover reveals the full name
+  // when the cell ellipsises a long title (v1.4 followup —
+  // operators with long album titles + the drawer open were
+  // seeing the name cut). Screen readers read the title alongside
+  // the aria-label, so it's also a11y-friendly.
   tr.innerHTML = `
     <td class="folder-cell">
-      <span class="folder-name">📁 ${escapeHTML(f.name)}</span>
+      <span class="folder-name" title="${escapeHTML(f.name)}">📁 ${escapeHTML(f.name)}</span>
     </td>
     <td class="num">${f.trackCount}</td>
     <td class="num">${f.upscaledCount}</td>
@@ -2293,8 +2357,10 @@ function buildTrackRow(t) {
   tr.dataset.kind = "track";
   tr.dataset.path = t.path;
   const upscaled = t.isUpscaled ? "✓" : "";
+  // `title` on the name cell: hover reveals full track name when
+  // the cell ellipsises a long title (v1.4 followup).
   tr.innerHTML = `
-    <td>🎵 ${escapeHTML(t.name)}</td>
+    <td class="folder-cell" title="${escapeHTML(t.name)}">🎵 ${escapeHTML(t.name)}</td>
     <td class="num">${formatTrackQuality(t)}</td>
     <td class="num">${upscaled}</td>
     <td class="num">${humanBytes(t.sizeBytes)}</td>
@@ -2352,10 +2418,22 @@ function inspectorRefreshLoadMoreSentinel() {
 
 // inspectorLoadMore fetches the next page from the current cursors
 // and appends results. Re-entrant calls (rapid scroll past sentinel
-// before the prior fetch lands) are suppressed via `loadingMore`.
+// before the prior fetch lands) are suppressed via `loadingMore` —
+// the guard is held until BOTH the fetch lands AND the chunked
+// rAF render completes (await inspectorAppendRows). Pre-fix the
+// guard was released synchronously when inspectorAppendRows
+// returned, letting an IntersectionObserver tick spawn an
+// overlapping page whose rows interleaved with the still-rendering
+// chunks. Gemini HIGH on PR C.
+//
+// Search-mode guard: a fetch that landed AFTER the user typed a
+// global search query would otherwise overwrite the flat-list view
+// with browse rows. Both the path AND mode are re-checked after
+// each await.
 async function inspectorLoadMore() {
   if (inspectorState.loadingMore) return;
   if (!inspectorState.nextFolderCursor && !inspectorState.nextTrackCursor) return;
+  if (inspectorState.mode === "search") return;
   inspectorState.loadingMore = true;
   const path = inspectorState.path;
   try {
@@ -2369,10 +2447,10 @@ async function inspectorLoadMore() {
       params.set("afterTrack", inspectorState.nextTrackCursor);
     }
     const res = await fetch(`/api/library/browse?${params.toString()}`);
-    if (inspectorState.path !== path) return; // navigation moved on
+    if (inspectorState.path !== path || inspectorState.mode === "search") return;
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
-    if (inspectorState.path !== path) return;
+    if (inspectorState.path !== path || inspectorState.mode === "search") return;
     // Advance cursors based on the new page response.
     inspectorState.nextFolderCursor = data.nextFolderCursor || "";
     inspectorState.nextTrackCursor = data.nextTrackCursor || "";
@@ -2384,7 +2462,10 @@ async function inspectorLoadMore() {
     inspectorState.totalFolders = data.totalFolders ?? inspectorState.totalFolders;
     inspectorState.totalTracks = data.totalTracks ?? inspectorState.totalTracks;
     const body = document.getElementById("inspector-rows-body");
-    inspectorAppendRows(body, data.folders || [], data.tracks || [], /*replace=*/false);
+    // Await the chunked render — the loadingMore guard must stay
+    // held until every rAF chunk has appended, otherwise a fast
+    // IntersectionObserver tick spawns an overlapping page.
+    await inspectorAppendRows(body, data.folders || [], data.tracks || [], /*replace=*/false);
   } catch (err) {
     // Surface a non-blocking toast-style update by replacing the
     // sentinel text. Sentinel cleanup happens on next render.
@@ -2416,14 +2497,22 @@ function inspectorSelectFolder(folder) {
   document.getElementById("inspector-drawer-required").textContent = "—";
   document.getElementById("inspector-drawer-warning").hidden = true;
   document.getElementById("inspector-drawer-unknown").hidden = true;
-  document.getElementById("inspector-upscale-btn").disabled = true;
-  // Delete-variants button: enabled only when this scope has at
-  // least one already-upscaled track. Disabled-with-zero-count is
-  // the right shape — there's literally nothing to delete on a
-  // scope that's never been upscaled, and a click would surface as
-  // a 0-deleted noop response that's just visual noise.
-  document.getElementById("inspector-delete-variants-btn").disabled =
-    !(folder.upscaledCount > 0);
+  // Reset action-button visibility on each select. Final hide/show
+  // happens in inspectorFetchProjection once the projection response
+  // tells us how many eligible files exist + whether variants are
+  // present. Default state before projection lands: Upscale visible
+  // but disabled; Delete visibility based on the rollup hint we
+  // have right now.
+  const upBtn = document.getElementById("inspector-upscale-btn");
+  const delBtn = document.getElementById("inspector-delete-variants-btn");
+  upBtn.hidden = false;
+  upBtn.disabled = true;
+  // Delete-variants button: hidden entirely when this scope has no
+  // upscaled tracks — user-requested cleanup of stale-but-unactionable
+  // chrome. Pre-fix it was only `disabled`. Conditional `hidden`
+  // lets the drawer's action row collapse on empty scopes.
+  delBtn.hidden = !(folder.upscaledCount > 0);
+  delBtn.disabled = !(folder.upscaledCount > 0);
   document.getElementById("inspector-submit-status").textContent = "";
   inspectorFetchProjection(folder.path);
 }
@@ -2463,8 +2552,19 @@ async function inspectorFetchProjection(path) {
       document.getElementById("inspector-drawer-unknown").textContent =
         `${data.unknownFormatFiles} tracks here are in formats we can’t upscale (DSD, lossy, or unknown). They’ll be skipped.`;
     }
+    // Conditional Upscale button visibility (v1.4 followup —
+    // user-requested cleanup of stale-but-unactionable chrome):
+    // hide the button entirely when nothing eligible remains rather
+    // than disabling it. The warning + "All eligible tracks already
+    // upscaled" hint below already communicates the state.
+    const upBtnEl = document.getElementById("inspector-upscale-btn");
+    if (data.projectedFiles === 0) {
+      upBtnEl.hidden = true;
+    } else {
+      upBtnEl.hidden = false;
+    }
     if (data.wouldFit && data.projectedFiles > 0) {
-      document.getElementById("inspector-upscale-btn").disabled = false;
+      upBtnEl.disabled = false;
     } else if (data.projectedFiles === 0) {
       // Differentiate three states for clearer operator UX
       // (per the screenshot review — original message

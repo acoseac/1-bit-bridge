@@ -101,6 +101,15 @@ func (s *Store) SearchTracks(ctx context.Context, query string, limit int) ([]Tr
 	if limit <= 0 {
 		limit = 50
 	}
+	// Hard cap at the manifest layer so a user-controlled `limit`
+	// can't drive an unbounded slice allocation (CodeQL Sec/HIGH
+	// on PR #243). The admin handler already caps at 200, but
+	// this defense lives at the trust boundary so any future
+	// caller — internal API, CLI, test — gets the same ceiling.
+	const searchHardCap = 500
+	if limit > searchHardCap {
+		limit = searchHardCap
+	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT path,
 		       COALESCE(title, ''),

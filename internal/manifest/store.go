@@ -498,6 +498,59 @@ var migrations = []migration{
 			return nil
 		},
 	},
+	{
+		version: 8,
+		name:    "scope tracks_fts_au trigger to indexed columns (v1.4 followup)",
+		// The v7 tracks_fts_au trigger fired on EVERY UPDATE to
+		// `tracks` — including hot-path counter writes
+		// (`missing_count`, `indexed_at`) that don't change any
+		// FTS-indexed column. Each write triggered a redundant
+		// DELETE-then-INSERT pair on `tracks_fts`, which on a 50k-row
+		// library compounds during scan / enrich loops. CodeRabbit
+		// caught it post-merge on PR #243.
+		//
+		// Fix: drop the broad trigger + recreate with `AFTER UPDATE
+		// OF path, tags_json` so only column changes that actually
+		// affect FTS content fire the trigger.
+		//
+		// Probe-gated like v7: if FTS5 isn't available, this is a
+		// no-op (the trigger doesn't exist to drop, the table
+		// doesn't exist to scope; the search API stays disabled).
+		sql: `-- probe-gated; runs in post()`,
+		post: func(db *sql.DB) error {
+			// If tracks_fts wasn't created in v7 (FTS5 unavailable),
+			// the trigger doesn't exist either. The DROP is harmless
+			// (IF EXISTS), and the CREATE is skipped via the
+			// existence probe below.
+			var ftsTableCount int
+			if err := db.QueryRow(`
+				SELECT COUNT(*) FROM sqlite_master
+				 WHERE type='table' AND name='tracks_fts'
+			`).Scan(&ftsTableCount); err != nil {
+				return fmt.Errorf("probe tracks_fts existence: %w", err)
+			}
+			if ftsTableCount == 0 {
+				return nil // FTS5 unavailable, nothing to scope.
+			}
+			ddl := `
+			DROP TRIGGER IF EXISTS tracks_fts_au;
+			CREATE TRIGGER IF NOT EXISTS tracks_fts_au
+			  AFTER UPDATE OF path, tags_json ON tracks BEGIN
+				DELETE FROM tracks_fts WHERE path = old.path;
+				INSERT INTO tracks_fts(path, title, artist, album) VALUES (
+					new.path,
+					COALESCE(json_extract(new.tags_json, '$.title'), ''),
+					COALESCE(json_extract(new.tags_json, '$.artist'), ''),
+					COALESCE(json_extract(new.tags_json, '$.album'), '')
+				);
+			END;
+			`
+			if _, err := db.Exec(ddl); err != nil {
+				return fmt.Errorf("re-scope tracks_fts_au trigger: %w", err)
+			}
+			return nil
+		},
+	},
 }
 
 // normalizePathForLookup folds an iOS-shaped track path back toward

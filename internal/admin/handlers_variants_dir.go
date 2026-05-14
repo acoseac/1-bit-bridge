@@ -80,9 +80,13 @@ func (s *Server) apiVariantsDirPatch(w http.ResponseWriter, r *http.Request) {
 	req.Path = strings.TrimSpace(req.Path)
 
 	// Validation: empty = revert-to-default (valid); non-empty must
-	// be absolute AND not under any library root.
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// be absolute AND not under any library root. Validation reads
+	// the live config snapshot WITHOUT holding the mutex —
+	// CfgHolder is atomic-pointer-backed (PR #234) so the read is
+	// race-free. The mutex is acquired ONLY for the save+publish
+	// pair below, narrowing the contended region from
+	// "validation + disk save + DB probes" down to "save + publish."
+	// CodeRabbit Major on PR #245.
 	cfg := s.deps.CfgHolder.Load()
 	if req.Path != "" {
 		if !filepath.IsAbs(req.Path) {
@@ -97,17 +101,26 @@ func (s *Server) apiVariantsDirPatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Mutate config + persist. Save() does atomic temp-file + rename.
+	// Mutex serialises concurrent operators editing config (single-
+	// user surface in practice, but the guard is a correctness
+	// backstop). The disk-snapshot + DB-count probes below run
+	// OUTSIDE the mutex so a slow filesystem stat can't serialise
+	// unrelated admin work.
 	next := *cfg // shallow copy is fine; UpscaleConfig is all value types.
 	next.Upscale.VariantsDir = req.Path
+	s.mu.Lock()
 	if err := next.Save(s.deps.CfgPath); err != nil {
+		s.mu.Unlock()
 		writeError(w, http.StatusInternalServerError, "save-config", err.Error())
 		return
 	}
 	// Reload via the holder so subsequent reads (including the
 	// transcode pool's next OutputDir computation) see the new value.
 	s.deps.CfgHolder.Store(&next)
+	s.mu.Unlock()
 
-	// Return the refreshed snapshot.
+	// Return the refreshed snapshot. Disk + DB probes run unlocked —
+	// they're read-only and a stale-by-a-few-ms snapshot is fine.
 	current := next.Upscale.EffectiveVariantsDir(next.DataDir)
 	defaultDir := transcode.OutputDirFor(next.DataDir)
 	ctx := r.Context()

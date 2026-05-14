@@ -12,10 +12,30 @@
 
   {{/*
     Sticky toolbar (v1.4 nav rework). Up = parent folder; Back =
-    browser history; Home = library root. The Upscale + Delete
-    toolbar buttons act on the CURRENTLY-OPEN folder via the same
-    drawer that the per-row ⓘ icon opens for child folders.
+    browser history; Home = library root. Acting on the CURRENT
+    folder is via the ⓘ button next to the heading below; acting
+    on a CHILD folder is via the ⓘ button on its row.
   */}}
+  {{/*
+    Search bar (v1.4 followup — promoted from inside the nav toolbar
+    to its own row above). The toolbar got crowded next to the
+    breadcrumbs; search is the operator's primary entry point
+    on a 50k-row library so it gets its own prominent row at the
+    top. PR B's two-phase behaviour (client-side filter first, then
+    server-side `/api/library/search` on miss) is unchanged. Press
+    `/` from anywhere on the page to focus this input.
+  */}}
+  <div class="inspector-search-bar" id="inspector-search-slot">
+    <input type="search" id="inspector-search"
+      placeholder="Search library (press /)"
+      aria-label="Search library"
+      aria-describedby="inspector-search-status"
+      autocomplete="off">
+    <div id="inspector-search-results" class="inspector-search-results"
+      role="listbox" aria-label="Search results" hidden></div>
+    <div id="inspector-search-status" class="sr-only" aria-live="polite"></div>
+  </div>
+
   <div class="inspector-toolbar" id="inspector-toolbar" role="toolbar" aria-label="Inspector navigation">
     <div class="inspector-nav-group">
       <button type="button" id="inspector-nav-up"
@@ -34,49 +54,6 @@
     <nav class="breadcrumbs" id="inspector-breadcrumbs" aria-label="Folder path">
       <a href="#" data-path="">Library</a>
     </nav>
-    {{/*
-      Search input (v1.4 PR B — FTS5). Two-phase behaviour wired
-      in app.js: client-side filter against `inspectorState.lastBrowseData`
-      first (instant); server-side `/api/library/search` only when
-      the current folder yields zero matches. Press `/` from
-      anywhere on the page to focus this input.
-    */}}
-    <div class="inspector-search-slot" id="inspector-search-slot">
-      <input type="search" id="inspector-search"
-        placeholder="Search library (press /)"
-        aria-label="Search library"
-        aria-describedby="inspector-search-status"
-        autocomplete="off">
-      <div id="inspector-search-results" class="inspector-search-results"
-        role="listbox" aria-label="Search results" hidden></div>
-      <div id="inspector-search-status" class="sr-only" aria-live="polite"></div>
-    </div>
-    <div class="inspector-action-group">
-      <button type="button" id="inspector-action-upscale"
-        class="btn primary" disabled
-        aria-label="Upscale the currently-open folder">
-        🔼 Upscale this folder
-      </button>
-      <button type="button" id="inspector-action-delete"
-        class="btn danger" disabled
-        aria-label="Delete cached variants in the currently-open folder">
-        🗑 Delete variants here
-      </button>
-    </div>
-  </div>
-
-  {{/*
-    Sticky storage bar. Static read-only in PR A; the [Change…]
-    button + migration affordance become interactive in PR D2.
-  */}}
-  <div class="inspector-storage-bar" id="inspector-storage-bar">
-    <span class="inspector-storage-label">Variants stored at</span>
-    <code class="storage-path" id="inspector-storage-path">{{.Data.UpscaleStoragePath}}</code>
-    <button type="button" id="inspector-storage-change"
-      class="btn inspector-storage-btn" disabled
-      aria-label="Change variants storage path">
-      Change…
-    </button>
   </div>
 
   {{/*
@@ -145,7 +122,17 @@
 
   <div class="inspector-layout">
     <div class="inspector-tree panel">
-      <h2 id="inspector-current-heading">Loading…</h2>
+      <div class="inspector-current-heading-row">
+        <h2 id="inspector-current-heading">Loading…</h2>
+        {{/* Acts on the CURRENTLY-OPEN folder — replaces the v1.4
+             toolbar buttons that wrapped inconsistently. Same
+             drawer + projection flow as the per-row ⓘ button on
+             child folders. Hidden when there are no tracks under
+             this folder (toolbar enable check happens in JS). */}}
+        <button type="button" id="inspector-current-info"
+          class="btn folder-action-info" disabled
+          aria-label="Show upscale projection for this folder">ⓘ</button>
+      </div>
       <table class="rows" id="inspector-rows-table" hidden>
         <thead>
           <tr>
@@ -163,12 +150,43 @@
     </div>
 
     <aside class="inspector-drawer panel" id="inspector-drawer" aria-live="polite" hidden>
-      <h2 id="inspector-drawer-title">Select a folder</h2>
+      {{/* Header: title + × close (v1.4 followup — replaces the
+           CLOSE button at the bottom of the drawer body, which
+           sat below the destructive Delete button and felt buried). */}}
+      <div class="inspector-drawer-header">
+        <h2 id="inspector-drawer-title">Select a folder</h2>
+        <button type="button" id="inspector-drawer-close"
+                class="inspector-drawer-close-x" aria-label="Close drawer">×</button>
+      </div>
       <p class="hint" id="inspector-drawer-hint" hidden>
-        Tap the ⓘ icon on a row, or the "Upscale this folder" toolbar
-        button, to see the upscale projection.
+        Tap the ⓘ icon on a row, or the heading ⓘ above, to see
+        the upscale projection.
       </p>
       <div id="inspector-drawer-content">
+        {{/* Action buttons at the TOP of the body (user-requested
+             reorder). Each button is hidden when its action is moot:
+             Upscale hides when projection has 0 eligible files; Delete
+             hides when this scope has no existing variants. */}}
+        <div class="inspector-drawer-actions">
+          <button type="button" id="inspector-upscale-btn" class="btn primary" disabled>
+            Upscale this scope
+          </button>
+          {{/*
+            Per-scope variant delete. Enabled by the JS when the
+            drawer's "Already upscaled" count is > 0. Fires
+            DELETE /api/upscale/variants?prefix=<scope>; the same
+            upscale.deleted SSE event reaches iOS clients regardless
+            of surface. Uses a native confirm() rather than the
+            typed-phrase modal from the settings page because the
+            scope is bounded (one folder) and the operator already
+            drilled into it deliberately.
+          */}}
+          <button type="button" id="inspector-delete-variants-btn"
+                  class="btn danger" disabled>
+            Delete variants in this scope
+          </button>
+        </div>
+        <p id="inspector-submit-status" class="hint" aria-live="polite"></p>
         <dl class="kv">
           <dt>Tracks</dt><dd id="inspector-drawer-tracks">—</dd>
           <dt>Already upscaled</dt><dd id="inspector-drawer-covered">—</dd>
@@ -180,32 +198,6 @@
         </dl>
         <p id="inspector-drawer-warning" class="error" hidden role="alert"></p>
         <p id="inspector-drawer-unknown" class="hint" hidden></p>
-        <button type="button" id="inspector-upscale-btn" class="btn primary" disabled>
-          Upscale this scope
-        </button>
-        {{/*
-          Per-scope variant delete. Enabled by the JS when the drawer's
-          "Already upscaled" count is > 0 — there's nothing to clear on
-          a scope that's never been upscaled. The button fires a
-          DELETE /api/upscale/variants?prefix=<scope> request which the
-          admin handler forwards to api.RunVariantDelete; the same
-          upscale.deleted SSE event reaches iOS clients regardless of
-          which surface (admin / iOS) triggered the delete.
-          Uses a native confirm() rather than the typed-phrase modal
-          from the settings page because the scope here is bounded
-          (one folder) and the operator already drilled into it
-          deliberately — the explicit click + browser confirm is
-          proportionate to the blast radius.
-        */}}
-        <button type="button" id="inspector-delete-variants-btn"
-                class="btn danger" disabled>
-          Delete variants in this scope
-        </button>
-        <button type="button" id="inspector-drawer-close"
-                class="btn inspector-drawer-close" aria-label="Close drawer">
-          Close
-        </button>
-        <p id="inspector-submit-status" class="hint" aria-live="polite"></p>
       </div>
     </aside>
   </div>

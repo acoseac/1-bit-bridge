@@ -3,7 +3,7 @@ package manifest
 import (
 	"context"
 	"fmt"
-	"path/filepath"
+	"path"
 	"testing"
 	"time"
 )
@@ -25,7 +25,7 @@ func TestListChildFoldersPageCursorAdvance(t *testing.T) {
 			t.Fatal(err)
 		}
 		tk := Track{
-			Path:    filepath.Join(name, "01.flac"),
+			Path:    path.Join(name, "01.flac"),
 			Size:    100,
 			ModTime: now,
 			Title:   "T",
@@ -167,7 +167,7 @@ func TestCountChildTracks(t *testing.T) {
 	}
 	for i := 0; i < 3; i++ {
 		if err := s.UpsertTrack(ctx, &Track{
-			Path: filepath.Join("sub", fmt.Sprintf("n%d.flac", i)), Size: 1, ModTime: now,
+			Path: path.Join("sub", fmt.Sprintf("n%d.flac", i)), Size: 1, ModTime: now,
 		}); err != nil {
 			t.Fatal(err)
 		}

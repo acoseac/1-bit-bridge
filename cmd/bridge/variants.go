@@ -72,6 +72,7 @@ func variantsMoveCmd(ctx context.Context, args []string, stdout, stderr io.Write
 	configPath := fs.String("config", "bridge.yaml", "path to config file")
 	to := fs.String("to", "", "absolute destination directory for variants (required)")
 	dryRun := fs.Bool("dry-run", false, "list planned moves without touching files or DB")
+	confirm := fs.String("confirm", "", "type MOVE to confirm destructive relocation (skipped under --dry-run)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -83,25 +84,26 @@ func variantsMoveCmd(ctx context.Context, args []string, stdout, stderr io.Write
 		fmt.Fprintln(stderr, "--to must be an absolute path")
 		return 2
 	}
+	// Typed-phrase confirmation gate (CodeRabbit Major on PR #245).
+	// `variants move` unlinks source sidecar files; the rest of the
+	// bridge CLI's destructive subcommands (notably `bridge tsnet
+	// logout`) require the operator to type WIPE / similar to
+	// confirm. Exact-match (not prefix-match) so `M`, `mov`, etc.
+	// don't slip past.
+	if !*dryRun && *confirm != "MOVE" {
+		fmt.Fprintln(stderr, "refusing to proceed without --confirm MOVE")
+		fmt.Fprintln(stderr, "(use --dry-run to preview the moves without writing)")
+		return 2
+	}
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "config load: %v\n", err)
 		return 2
 	}
-	// Same validation the runtime config-load applies, mirrored
-	// inline so the CLI surfaces a friendly error before touching
-	// any DB / disk state.
-	for _, root := range cfg.LibraryRoots {
-		if root == "" {
-			continue
-		}
-		cleanedRoot := filepath.Clean(root)
-		rel, rerr := filepath.Rel(cleanedRoot, filepath.Clean(*to))
-		if rerr == nil && rel != ".." && len(rel) > 0 && rel[0] != '.' {
-			fmt.Fprintf(stderr, "--to must not be under library root %q\n", cleanedRoot)
-			return 2
-		}
+	if conflictingRoot := isUnderAnyLibraryRoot(*to, cfg.LibraryRoots); conflictingRoot != "" {
+		fmt.Fprintf(stderr, "--to must not be under library root %q\n", conflictingRoot)
+		return 2
 	}
 
 	store, err := manifest.OpenStore(manifest.DefaultDBPath(cfg.DataDir))
@@ -309,4 +311,33 @@ func isCrossDeviceError(err error) bool {
 		strings.Contains(s, "EXDEV") ||
 		strings.Contains(s, "different file system") ||
 		strings.Contains(s, "different disk drive")
+}
+
+// isUnderAnyLibraryRoot returns the first library root that `to`
+// resolves at OR under. Returns "" when `to` is safely outside
+// every root (or when every Rel() returns a cross-volume error).
+//
+// Pure helper extracted from variantsMoveCmd so the predicate can
+// be table-tested. Mirrors `config.validateVariantsDir`'s shape:
+// "rel == '..'" / "rel starts with '..'+sep" means the destination
+// is OUTSIDE the root; anything else (including `rel == "."` for
+// equal-to-root AND `rel == ".cache/..."` for dot-prefixed subs)
+// means AT-OR-UNDER. Gemini medium on PR #246 asked for regression
+// coverage on the dot-prefixed cases that pre-fix passed through.
+func isUnderAnyLibraryRoot(to string, libraryRoots []string) string {
+	cleanedTo := filepath.Clean(to)
+	for _, root := range libraryRoots {
+		if root == "" {
+			continue
+		}
+		cleanedRoot := filepath.Clean(root)
+		rel, err := filepath.Rel(cleanedRoot, cleanedTo)
+		if err != nil {
+			continue // cross-volume on Windows; can't be nested.
+		}
+		if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return cleanedRoot
+		}
+	}
+	return ""
 }
