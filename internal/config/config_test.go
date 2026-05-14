@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -770,6 +771,52 @@ func TestConfigValidatePrunesCustomEndpoints(t *testing.T) {
 	}
 }
 
+// TestValidateRejectsBadTailscaleMode pins that typos in the
+// tailscale.mode field surface at config-load time — same surface
+// as every other field's validation — instead of slipping through to
+// the lifecycle wiring deep inside `bridge serve`. Gemini medium
+// on PR #249.
+func TestValidateRejectsBadTailscaleMode(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{
+		LibraryRoots:    []string{dir},
+		ListenAddress:   ":7788",
+		AdminAddress:    DefaultAdminAddress, // Validate insists on a loopback addr
+		ScanIntervalSec: 3600,
+		Tailscale:       TailscaleConfig{Mode: "tnset"}, // typo
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected Validate() to reject a typo'd tailscale.mode, got nil")
+	}
+	if !strings.Contains(err.Error(), "tailscale.mode") {
+		t.Errorf("error should mention tailscale.mode, got %v", err)
+	}
+	if !strings.Contains(err.Error(), strconv.Quote("tnset")) {
+		t.Errorf("error should preserve the original input %q verbatim, got %v", "tnset", err)
+	}
+}
+
+// TestValidateAcceptsKnownTailscaleModes asserts the inverse — that
+// Validate() doesn't accidentally start rejecting the three known
+// modes (case + whitespace variants included) under the wire-in.
+func TestValidateAcceptsKnownTailscaleModes(t *testing.T) {
+	dir := t.TempDir()
+	cases := []string{"", "cli", "tsnet", "disabled", "  CLI  ", "\tdisabled\n", "TSNet"}
+	for _, mode := range cases {
+		cfg := &Config{
+			LibraryRoots:    []string{dir},
+			ListenAddress:   ":7788",
+			AdminAddress:    DefaultAdminAddress,
+			ScanIntervalSec: 3600,
+			Tailscale:       TailscaleConfig{Mode: mode},
+		}
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("Validate() rejected known mode %q: %v", mode, err)
+		}
+	}
+}
+
 // TestTailscaleEffectiveMode covers the mode-string validation in
 // TailscaleConfig.EffectiveMode. The yaml Mode field is a free-form
 // string but only three values are valid; anything else (typo'd or
@@ -777,25 +824,52 @@ func TestConfigValidatePrunesCustomEndpoints(t *testing.T) {
 // silently fall through to the cli default — a typo like
 // `mode: tnset` would otherwise look like it activated tsnet when
 // it actually did nothing.
+//
+// The parser tolerates leading/trailing whitespace and case
+// differences (`mode: " TSNet "` → `tsnet`) — common from
+// hand-edited YAML — but preserves the original (untrimmed) value
+// in the error message so a typo report doesn't mislead with an
+// invisible-whitespace explanation.
 func TestTailscaleEffectiveMode(t *testing.T) {
 	cases := []struct {
 		in      string
 		want    TailscaleMode
 		wantErr bool
 	}{
+		// Canonical inputs.
 		{"", TailscaleModeCLI, false},
 		{"cli", TailscaleModeCLI, false},
 		{"tsnet", TailscaleModeTsnet, false},
 		{"disabled", TailscaleModeDisabled, false},
-		{"tnset", "", true},   // typo
-		{"TSNet", "", true},   // case-sensitive on purpose — yaml is case-sensitive
-		{"enabled", "", true}, // user might guess "enabled" as the inverse of "disabled"
+		// Whitespace tolerance — common after a yaml merge / format-on-save.
+		{"  cli", TailscaleModeCLI, false},
+		{"tsnet  ", TailscaleModeTsnet, false},
+		{"  disabled  ", TailscaleModeDisabled, false},
+		{"\tcli\n", TailscaleModeCLI, false},
+		{"   ", TailscaleModeCLI, false}, // whitespace-only collapses to empty → CLI default
+		// Case tolerance — operator typed Title Case or upper case.
+		{"CLI", TailscaleModeCLI, false},
+		{"TSNET", TailscaleModeTsnet, false},
+		{"TSNet", TailscaleModeTsnet, false}, // mixed case from a previous version of this comment's docs
+		{"Disabled", TailscaleModeDisabled, false},
+		// Real errors — must still trip the validation gate.
+		{"tnset", "", true},      // typo
+		{"enabled", "", true},    // user might guess "enabled" as the inverse of "disabled"
+		{"on", "", true},         // truthy synonym
+		{"   tnset ", "", true},  // trimmed but still a typo — error message must carry the original
+		{"TS-NET", "", true},     // hyphenated guess
 	}
 	for _, c := range cases {
 		got, err := (TailscaleConfig{Mode: c.in}).EffectiveMode()
 		if c.wantErr {
 			if err == nil {
 				t.Errorf("EffectiveMode(%q) want error, got %v", c.in, got)
+				continue
+			}
+			// Error message preserves the ORIGINAL (untrimmed) input
+			// so the operator sees what they actually typed.
+			if !strings.Contains(err.Error(), strconv.Quote(c.in)) {
+				t.Errorf("EffectiveMode(%q) error message %q must contain the original input verbatim", c.in, err.Error())
 			}
 			continue
 		}

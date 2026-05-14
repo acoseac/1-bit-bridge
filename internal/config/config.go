@@ -234,8 +234,19 @@ const (
 // or an error when the yaml carries something unrecognised — the
 // safer shape than silently falling through to the default on a
 // typo (e.g. `mode: tnset` would otherwise look like it worked).
+//
+// Tolerant of leading/trailing whitespace and case differences in
+// the YAML value — hand-edited config files frequently pick up
+// trailing spaces after a merge / format-on-save, and the
+// resulting "unknown value" error trapped operators who couldn't
+// see the invisible character. Normalisation is one-way: the
+// error message preserves the ORIGINAL untrimmed `t.Mode` so the
+// operator sees their actual input verbatim, which matters most
+// for a typo path where the invisible-whitespace explanation
+// would mislead.
 func (t TailscaleConfig) EffectiveMode() (TailscaleMode, error) {
-	switch t.Mode {
+	mode := strings.ToLower(strings.TrimSpace(t.Mode))
+	switch mode {
 	case "", string(TailscaleModeCLI):
 		return TailscaleModeCLI, nil
 	case string(TailscaleModeTsnet):
@@ -825,6 +836,16 @@ func (c *Config) Validate() error {
 	c.CustomEndpoints = kept
 	for _, w := range warns {
 		validateLogger.Warn("dropped invalid custom endpoint", "err", w)
+	}
+
+	// tailscale.mode: surface typos at config-load time rather than
+	// deep inside the lifecycle wiring. Without this gate a typo'd
+	// `mode: tnset` would silently fall through to `bridge serve`'s
+	// EffectiveMode call which prints the error and exits 2 — already
+	// safe, but the operator gets the error from the same surface as
+	// every other field's validation here. Gemini medium on PR #249.
+	if _, err := c.Tailscale.EffectiveMode(); err != nil {
+		return err
 	}
 	return nil
 }
