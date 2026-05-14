@@ -1616,16 +1616,27 @@ function safeApply(name, raw, fn) {
 }
 
 // =============================================================
-// Library Inspector (v1.3 operator-driven upscale)
+// Library Inspector (v1.4 folder-first navigation)
 // =============================================================
 
 const inspectorState = {
   path: "", // current navigation path; "" = library root
   selection: null, // {kind: "folder"|"track", row}
+  lastBrowseData: null, // last successful browse response (used by toolbar action + future search filter)
 };
 
 function initLibraryInspector() {
-  inspectorNavigate("");
+  // Initial path comes from `?path=` query so bookmarks / refresh
+  // land on the right folder. Falls back to library root.
+  const params = new URLSearchParams(window.location.search);
+  const initialPath = params.get("path") || "";
+  // Replace (not push) the initial entry so the user's first Back
+  // press doesn't land them on a redundant `?path=` history slot.
+  history.replaceState({ path: initialPath, scrollY: 0 }, "",
+    inspectorURLFor(initialPath));
+  inspectorNavigate(initialPath, { skipHistory: true });
+
+  // Breadcrumb clicks
   document.getElementById("inspector-breadcrumbs")
     .addEventListener("click", (e) => {
       const a = e.target.closest("a[data-path]");
@@ -1633,19 +1644,143 @@ function initLibraryInspector() {
       e.preventDefault();
       inspectorNavigate(a.dataset.path);
     });
+
+  // Toolbar navigation
+  document.getElementById("inspector-nav-up")
+    .addEventListener("click", inspectorNavigateUp);
+  document.getElementById("inspector-nav-back")
+    .addEventListener("click", () => history.back());
+  document.getElementById("inspector-nav-home")
+    .addEventListener("click", () => inspectorNavigate(""));
+
+  // Toolbar actions act on the CURRENT folder
+  document.getElementById("inspector-action-upscale")
+    .addEventListener("click", inspectorOpenProjectionForCurrent);
+  document.getElementById("inspector-action-delete")
+    .addEventListener("click", inspectorOpenDeleteForCurrent);
+
+  // Drawer-internal buttons (unchanged behaviour, preserved IDs)
   document.getElementById("inspector-upscale-btn")
     .addEventListener("click", inspectorSubmitBatch);
   document.getElementById("inspector-delete-variants-btn")
     .addEventListener("click", inspectorDeleteVariants);
+  document.getElementById("inspector-drawer-close")
+    .addEventListener("click", inspectorCloseDrawer);
+
+  // Sticky-stack height tracker: write actual measured offsetHeight
+  // of the toolbar + storage bar into CSS custom properties so the
+  // downstream sticky elements (storage bar's top, table header's
+  // top) bind to the LIVE heights rather than a hardcoded
+  // single-row assumption. Without this, a narrow viewport that
+  // wraps the toolbar to two rows OR Accessibility text scaling
+  // that grows toolbar buttons would put the storage bar UNDER the
+  // toolbar's second row. CodeRabbit Major on PR A round-2.
+  updateInspectorStickyHeights();
+  window.addEventListener("resize", updateInspectorStickyHeights);
+  // Element-size observer for the more nuanced case: AX text-size
+  // change without a resize event (Settings → Accessibility text
+  // size on iOS Safari). ResizeObserver fires on any size change.
+  if (typeof ResizeObserver === "function") {
+    const toolbar = document.getElementById("inspector-toolbar");
+    const storage = document.getElementById("inspector-storage-bar");
+    if (toolbar || storage) {
+      const ro = new ResizeObserver(updateInspectorStickyHeights);
+      if (toolbar) ro.observe(toolbar);
+      if (storage) ro.observe(storage);
+    }
+  }
+
+  // Browser history integration. popstate restores path + scroll
+  // from the entry's stored state without re-pushing history.
+  window.addEventListener("popstate", (ev) => {
+    const target = (ev.state && typeof ev.state.path === "string")
+      ? ev.state.path
+      : (new URLSearchParams(window.location.search).get("path") || "");
+    inspectorNavigate(target, {
+      skipHistory: true,
+      restoreScroll: ev.state ? ev.state.scrollY : 0,
+    });
+  });
 }
 
-async function inspectorNavigate(path) {
+// updateInspectorStickyHeights measures the toolbar + storage bar
+// offsetHeights and writes them as CSS custom properties so the
+// sticky-stack `top:` values flow through the cascade. Called on
+// init, window resize, and ResizeObserver events. If the toolbar
+// wraps to N lines (narrow viewport / large AX text), the JS-measured
+// height is the AUTHORITATIVE one — the CSS fallback assumes a
+// single-row toolbar (good default for the common case).
+function updateInspectorStickyHeights() {
+  const toolbar = document.getElementById("inspector-toolbar");
+  const storage = document.getElementById("inspector-storage-bar");
+  const root = document.querySelector(".library-inspector");
+  if (!root) return;
+  if (toolbar) {
+    root.style.setProperty("--inspector-toolbar-h", `${toolbar.offsetHeight}px`);
+  }
+  if (storage) {
+    root.style.setProperty("--inspector-storage-h", `${storage.offsetHeight}px`);
+  }
+}
+
+// inspectorURLFor builds the canonical URL for a given inspector
+// path. Centralised so the pushState / replaceState / initial-load
+// branches don't drift in encoding.
+function inspectorURLFor(path) {
+  return path
+    ? `/library/inspector?path=${encodeURIComponent(path)}`
+    : `/library/inspector`;
+}
+
+function inspectorNavigateUp() {
+  // Parent folder = strip the last `/`-segment of the current path.
+  // Disabled at the library root via the `aria-disabled` flag the
+  // toolbar updater sets after each navigate.
+  if (!inspectorState.path) return;
+  const parts = inspectorState.path.split("/");
+  parts.pop();
+  inspectorNavigate(parts.join("/"));
+}
+
+// inspectorNavigate is the single state-mutation entrypoint for
+// folder navigation. Options:
+//   - skipHistory: don't push a new history entry (used by initial
+//     load + popstate handler).
+//   - restoreScroll: number of pixels to scrollTo after the table
+//     body re-renders (popstate-driven restoration).
+async function inspectorNavigate(path, opts = {}) {
+  // Same-path refresh: don't add a duplicate history entry. This
+  // covers callers like inspectorDeleteVariants that re-navigate
+  // to the current folder to refresh row data after mutation, AND
+  // a user clicking the active breadcrumb crumb.
+  if (!opts.skipHistory && history.state
+    && history.state.path === path) {
+    opts = { ...opts, skipHistory: true };
+  }
+  // Capture the OUTGOING entry's scroll position BEFORE we mutate
+  // state — the user might pop back to this exact folder later.
+  if (!opts.skipHistory && history.state) {
+    history.replaceState(
+      { ...history.state, scrollY: window.scrollY },
+      "",
+      window.location.href,
+    );
+  }
+
   inspectorState.path = path;
+  inspectorState.lastBrowseData = null;
   inspectorRenderBreadcrumbs(path);
-  inspectorResetDrawer();
+  inspectorUpdateToolbarState(path);
+  inspectorCloseDrawer();
   document.getElementById("inspector-error").hidden = true;
   document.getElementById("inspector-current-heading").textContent =
     "Loading…";
+  document.title = `Library Inspector — ${path || "Root"}`;
+
+  if (!opts.skipHistory) {
+    history.pushState({ path, scrollY: 0 }, "", inspectorURLFor(path));
+  }
+
   try {
     const res = await fetch(`/api/library/browse?path=${encodeURIComponent(path)}`);
     // Race guard: a slow response from an earlier navigation must
@@ -1663,7 +1798,16 @@ async function inspectorNavigate(path) {
     if (inspectorState.path !== path) {
       return;
     }
+    inspectorState.lastBrowseData = data;
     inspectorRender(data);
+    // Restore scroll after layout settles. rAF runs after the
+    // current style/layout pass on the next paint, so the table
+    // body has its true height by then. Falls back to 0 when no
+    // state (fresh tab / first nav).
+    const targetY = typeof opts.restoreScroll === "number"
+      ? opts.restoreScroll
+      : 0;
+    requestAnimationFrame(() => window.scrollTo(0, targetY));
   } catch (err) {
     if (inspectorState.path !== path) {
       return;
@@ -1674,6 +1818,90 @@ async function inspectorNavigate(path) {
     document.getElementById("inspector-current-heading").textContent =
       pathLabel(path);
   }
+}
+
+// inspectorUpdateToolbarState reflects the current path into the
+// toolbar control affordances: Up disabled at root; Upscale +
+// Delete enabled iff the current folder has any tracks at all
+// (toggled true when lastBrowseData lands).
+function inspectorUpdateToolbarState(path) {
+  const upBtn = document.getElementById("inspector-nav-up");
+  const homeBtn = document.getElementById("inspector-nav-home");
+  const atRoot = !path;
+  upBtn.disabled = atRoot;
+  upBtn.setAttribute("aria-disabled", atRoot ? "true" : "false");
+  if (atRoot) {
+    homeBtn.setAttribute("aria-current", "page");
+  } else {
+    homeBtn.removeAttribute("aria-current");
+  }
+  // Action buttons start disabled; flipped on once we have data.
+  document.getElementById("inspector-action-upscale").disabled = true;
+  document.getElementById("inspector-action-delete").disabled = true;
+}
+
+// inspectorOpenProjectionForCurrent is the toolbar handler that
+// acts on the OPEN folder rather than a child row. Builds a
+// synthetic folder object from the cached browse rollup (or the
+// library root semantics when path === "") and routes through the
+// same drawer code path the per-row ⓘ icon uses.
+function inspectorOpenProjectionForCurrent() {
+  const data = inspectorState.lastBrowseData;
+  if (!data) return; // toolbar button is disabled in this state, defensive
+  // For non-root folders the rollup we want is THIS folder's data
+  // — which the browse response describes via aggregate counts
+  // across its `folders` + `tracks` arrays. The projection
+  // endpoint accepts the path as-is and walks server-side, so the
+  // synthetic numbers here are only used to pre-populate the
+  // drawer's "Tracks / Source size" rows before the projection
+  // fetch lands. Root path is semantically valid; the projection
+  // endpoint already handles empty path as "whole library."
+  const rollup = inspectorBrowseRollup(data);
+  inspectorSelectFolder({
+    name: inspectorState.path || "Library root",
+    path: inspectorState.path,
+    trackCount: rollup.trackCount,
+    upscaledCount: rollup.upscaledCount,
+    totalSizeBytes: rollup.totalSizeBytes,
+  });
+}
+
+// inspectorBrowseRollup aggregates a browse response's folders +
+// tracks arrays into a single (trackCount, upscaledCount,
+// totalSizeBytes) rollup in one pass (vs the prior three-pass
+// reduce shape). Used by inspectorOpenProjectionForCurrent and
+// the toolbar-action enablement check in inspectorRender — both
+// previously did the same math inline. Extracted per Gemini medium
+// on PR A.
+function inspectorBrowseRollup(data) {
+  const folders = data.folders || [];
+  const tracks = data.tracks || [];
+  let trackCount = tracks.length;
+  let upscaledCount = 0;
+  let totalSizeBytes = 0;
+  for (const t of tracks) {
+    if (t.isUpscaled) upscaledCount++;
+    totalSizeBytes += t.sizeBytes || 0;
+  }
+  for (const f of folders) {
+    trackCount += f.trackCount || 0;
+    upscaledCount += f.upscaledCount || 0;
+    totalSizeBytes += f.totalSizeBytes || 0;
+  }
+  return { trackCount, upscaledCount, totalSizeBytes };
+}
+
+// inspectorOpenDeleteForCurrent opens the drawer focused on the
+// current folder so the operator can hit "Delete variants in this
+// scope" — same drawer as inspectorOpenProjectionForCurrent.
+function inspectorOpenDeleteForCurrent() {
+  inspectorOpenProjectionForCurrent();
+}
+
+function inspectorCloseDrawer() {
+  inspectorState.selection = null;
+  const drawer = document.getElementById("inspector-drawer");
+  if (drawer) drawer.hidden = true;
 }
 
 function inspectorRenderBreadcrumbs(path) {
@@ -1706,6 +1934,13 @@ function inspectorRender(data) {
   body.innerHTML = "";
   const folders = data.folders || [];
   const tracks = data.tracks || [];
+  // Toolbar actions are enabled iff this folder has any tracks
+  // anywhere underneath. Shared single-pass rollup helper handles
+  // the count (Gemini medium on PR A — was three separate reduces).
+  const totalTracks = inspectorBrowseRollup(data).trackCount;
+  document.getElementById("inspector-action-upscale").disabled = totalTracks === 0;
+  document.getElementById("inspector-action-delete").disabled = totalTracks === 0;
+
   if (folders.length === 0 && tracks.length === 0) {
     document.getElementById("inspector-rows-table").hidden = true;
     document.getElementById("inspector-empty").hidden = false;
@@ -1717,15 +1952,16 @@ function inspectorRender(data) {
     const tr = document.createElement("tr");
     tr.dataset.kind = "folder";
     tr.dataset.path = f.path;
-    // Row split into three explicit affordances per the v1.3.1
-    // UX review: (a) folder name + counts is the click-target
-    // for "select to see upscale info" (the whole row before
-    // the action cell); (b) an explicit "Inspect" button on
-    // the right shows the action so operators don't have to
-    // guess "tap empty space"; (c) the folder name is plain
-    // text, not a blue link, so it doesn't compete visually
-    // with the action button; navigation INTO the folder
-    // happens via the chevron control alongside.
+    // v1.4 nav rework: whole-row click navigates INTO the folder
+    // (traditional file-manager model). The trailing ⓘ button
+    // opens the projection drawer WITHOUT navigating so operators
+    // can preview upscale impact across child folders without
+    // having to enter each one. Row is `role="link"` + tabindex
+    // so keyboard users can navigate via Enter without leaving
+    // the keyboard.
+    tr.setAttribute("role", "link");
+    tr.tabIndex = 0;
+    tr.setAttribute("aria-label", `Open folder ${f.name}`);
     tr.innerHTML = `
       <td class="folder-cell">
         <span class="folder-name">📁 ${escapeHTML(f.name)}</span>
@@ -1734,25 +1970,42 @@ function inspectorRender(data) {
       <td class="num">${f.upscaledCount}</td>
       <td class="num">${humanBytes(f.totalSizeBytes)}</td>
       <td class="folder-actions">
-        <button type="button" class="btn folder-action-inspect"
-          aria-label="Show upscale projection for ${escapeHTML(f.name)}">Inspect</button>
-        <button type="button" class="btn folder-action-open"
-          aria-label="Open ${escapeHTML(f.name)}">Open →</button>
+        <button type="button" class="btn folder-action-info"
+          aria-label="Show upscale projection for ${escapeHTML(f.name)}">ⓘ</button>
       </td>
     `;
-    tr.querySelector(".folder-action-inspect").addEventListener("click", (e) => {
+    const infoBtn = tr.querySelector(".folder-action-info");
+    infoBtn.addEventListener("click", (e) => {
       e.preventDefault();
       e.stopPropagation();
       inspectorSelectFolder(f);
     });
-    tr.querySelector(".folder-action-open").addEventListener("click", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      inspectorNavigate(f.path);
+    // Stop keydown propagation from the Info button so Enter/Space
+    // activation triggers the button's native click (which opens
+    // the drawer) WITHOUT also bubbling to the row's keydown
+    // handler (which would navigate). Without this, keyboard
+    // users tabbing to the ⓘ button and pressing Enter would
+    // BOTH open the drawer AND navigate into the folder — the
+    // navigation wins (drawer closes immediately via the
+    // inspectorCloseDrawer that runs at the top of every
+    // inspectorNavigate). CodeRabbit Major on PR A.
+    infoBtn.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.stopPropagation();
+      }
     });
-    // Row click anywhere else also selects (cheap discoverability
-    // bonus — but the explicit buttons are the primary surface).
-    tr.addEventListener("click", () => inspectorSelectFolder(f));
+    // Row click → navigate INTO the folder.
+    tr.addEventListener("click", () => inspectorNavigate(f.path));
+    // Keyboard activation: Enter on the row navigates; the Info
+    // button is its own focusable child (handled by its own click
+    // handler when keyboard-activated, with keydown propagation
+    // stopped above so the row's keydown doesn't also fire).
+    tr.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        inspectorNavigate(f.path);
+      }
+    });
     body.appendChild(tr);
   }
   for (const t of tracks) {
@@ -1773,9 +2026,11 @@ function inspectorRender(data) {
 
 function inspectorSelectFolder(folder) {
   inspectorState.selection = { kind: "folder", row: folder };
+  // Drawer is hidden by default in v1.4; opening it is the
+  // explicit operator action (per-row ⓘ or toolbar Upscale/Delete).
+  document.getElementById("inspector-drawer").hidden = false;
   document.getElementById("inspector-drawer-title").textContent =
-    folder.name;
-  document.getElementById("inspector-drawer-hint").hidden = true;
+    folder.name || "Library root";
   document.getElementById("inspector-drawer-content").hidden = false;
   document.getElementById("inspector-drawer-tracks").textContent =
     `${folder.trackCount} (${folder.upscaledCount} already upscaled)`;
@@ -1798,14 +2053,6 @@ function inspectorSelectFolder(folder) {
     !(folder.upscaledCount > 0);
   document.getElementById("inspector-submit-status").textContent = "";
   inspectorFetchProjection(folder.path);
-}
-
-function inspectorResetDrawer() {
-  inspectorState.selection = null;
-  document.getElementById("inspector-drawer-title").textContent =
-    "Select a folder";
-  document.getElementById("inspector-drawer-hint").hidden = false;
-  document.getElementById("inspector-drawer-content").hidden = true;
 }
 
 async function inspectorFetchProjection(path) {
