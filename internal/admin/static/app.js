@@ -1813,21 +1813,39 @@ function inspectorOpenProjectionForCurrent() {
   // drawer's "Tracks / Source size" rows before the projection
   // fetch lands. Root path is semantically valid; the projection
   // endpoint already handles empty path as "whole library."
-  const folders = data.folders || [];
-  const tracks = data.tracks || [];
-  const trackCount = tracks.length
-    + folders.reduce((acc, f) => acc + (f.trackCount || 0), 0);
-  const upscaledCount = tracks.filter((t) => t.isUpscaled).length
-    + folders.reduce((acc, f) => acc + (f.upscaledCount || 0), 0);
-  const totalSizeBytes = tracks.reduce((acc, t) => acc + (t.sizeBytes || 0), 0)
-    + folders.reduce((acc, f) => acc + (f.totalSizeBytes || 0), 0);
+  const rollup = inspectorBrowseRollup(data);
   inspectorSelectFolder({
     name: inspectorState.path || "Library root",
     path: inspectorState.path,
-    trackCount,
-    upscaledCount,
-    totalSizeBytes,
+    trackCount: rollup.trackCount,
+    upscaledCount: rollup.upscaledCount,
+    totalSizeBytes: rollup.totalSizeBytes,
   });
+}
+
+// inspectorBrowseRollup aggregates a browse response's folders +
+// tracks arrays into a single (trackCount, upscaledCount,
+// totalSizeBytes) rollup in one pass (vs the prior three-pass
+// reduce shape). Used by inspectorOpenProjectionForCurrent and
+// the toolbar-action enablement check in inspectorRender — both
+// previously did the same math inline. Extracted per Gemini medium
+// on PR A.
+function inspectorBrowseRollup(data) {
+  const folders = data.folders || [];
+  const tracks = data.tracks || [];
+  let trackCount = tracks.length;
+  let upscaledCount = 0;
+  let totalSizeBytes = 0;
+  for (const t of tracks) {
+    if (t.isUpscaled) upscaledCount++;
+    totalSizeBytes += t.sizeBytes || 0;
+  }
+  for (const f of folders) {
+    trackCount += f.trackCount || 0;
+    upscaledCount += f.upscaledCount || 0;
+    totalSizeBytes += f.totalSizeBytes || 0;
+  }
+  return { trackCount, upscaledCount, totalSizeBytes };
 }
 
 // inspectorOpenDeleteForCurrent opens the drawer focused on the
@@ -1874,10 +1892,9 @@ function inspectorRender(data) {
   const folders = data.folders || [];
   const tracks = data.tracks || [];
   // Toolbar actions are enabled iff this folder has any tracks
-  // anywhere underneath. Inferred from the rollup the browse
-  // response already carries.
-  const totalTracks = tracks.length
-    + folders.reduce((acc, f) => acc + (f.trackCount || 0), 0);
+  // anywhere underneath. Shared single-pass rollup helper handles
+  // the count (Gemini medium on PR A — was three separate reduces).
+  const totalTracks = inspectorBrowseRollup(data).trackCount;
   document.getElementById("inspector-action-upscale").disabled = totalTracks === 0;
   document.getElementById("inspector-action-delete").disabled = totalTracks === 0;
 
@@ -1914,16 +1931,32 @@ function inspectorRender(data) {
           aria-label="Show upscale projection for ${escapeHTML(f.name)}">ⓘ</button>
       </td>
     `;
-    tr.querySelector(".folder-action-info").addEventListener("click", (e) => {
+    const infoBtn = tr.querySelector(".folder-action-info");
+    infoBtn.addEventListener("click", (e) => {
       e.preventDefault();
       e.stopPropagation();
       inspectorSelectFolder(f);
+    });
+    // Stop keydown propagation from the Info button so Enter/Space
+    // activation triggers the button's native click (which opens
+    // the drawer) WITHOUT also bubbling to the row's keydown
+    // handler (which would navigate). Without this, keyboard
+    // users tabbing to the ⓘ button and pressing Enter would
+    // BOTH open the drawer AND navigate into the folder — the
+    // navigation wins (drawer closes immediately via the
+    // inspectorCloseDrawer that runs at the top of every
+    // inspectorNavigate). CodeRabbit Major on PR A.
+    infoBtn.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.stopPropagation();
+      }
     });
     // Row click → navigate INTO the folder.
     tr.addEventListener("click", () => inspectorNavigate(f.path));
     // Keyboard activation: Enter on the row navigates; the Info
     // button is its own focusable child (handled by its own click
-    // handler when keyboard-activated).
+    // handler when keyboard-activated, with keydown propagation
+    // stopped above so the row's keydown doesn't also fire).
     tr.addEventListener("keydown", (e) => {
       if (e.key === "Enter" || e.key === " ") {
         e.preventDefault();
