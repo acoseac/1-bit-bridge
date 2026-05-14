@@ -165,6 +165,216 @@ type runUpscaleParams struct {
 	outputDir      string
 }
 
+// upscaleCandidate carries the resolved JobSpec plus the
+// resumability decision for one track. `needsRun = false` is the
+// "already up-to-date sidecar" path; `skipNote` is the human-readable
+// reason rendered in dry-run mode.
+type upscaleCandidate struct {
+	spec     transcode.JobSpec
+	needsRun bool
+	skipNote string
+}
+
+// upscaleSkipCounters tallies the per-track filter outcomes during
+// candidate classification. Surfaced verbatim by reportUpscaleSummary.
+type upscaleSkipCounters struct {
+	notPCM          int
+	sourceMissing   int
+	alreadyAtTarget int
+}
+
+// classifyUpscaleTrack evaluates one manifest track against the run
+// params and returns either (a) an `upscaleCandidate` for the worker
+// pool / dry-run output, (b) a non-nil exitCode for a fatal CLI error
+// (e.g. ResolveTargetRate refused the flag), or (c) bumps one of the
+// `upscaleSkipCounters` and returns `(nil, 0)` for a silent skip.
+//
+// Split out of runUpscaleBatch so the inner filter loop reads as a
+// linear dispatch rather than an 80-line nested-control block (the
+// pre-refactor body tripped SonarCloud go:S3776 with cognitive
+// complexity 81).
+func classifyUpscaleTrack(
+	ctx context.Context,
+	stderr io.Writer,
+	store *manifest.Store,
+	resolver *bridgefs.Resolver,
+	t manifest.Track,
+	p runUpscaleParams,
+	counters *upscaleSkipCounters,
+) (*upscaleCandidate, int) {
+	if !matchesFilter(t.Path, p.filter) {
+		return nil, 0
+	}
+	if t.IsDSD != nil && *t.IsDSD {
+		counters.notPCM++
+		return nil, 0
+	}
+	if t.SampleRate == nil {
+		// No rate metadata → can't decide a target; skip
+		// silently. The scanner sets this for every PCM file
+		// it parses successfully; absence usually means the
+		// extractor failed to identify the format.
+		counters.notPCM++
+		return nil, 0
+	}
+	sourceRateHz := int(*t.SampleRate)
+	target, err := transcode.ResolveTargetRate(p.targetRateFlag, sourceRateHz)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", t.Path, err)
+		return nil, 2
+	}
+	if target == 0 {
+		counters.alreadyAtTarget++
+		return nil, 0
+	}
+	// Find the absolute path via the canonical resolver —
+	// handles single-root (rootless paths) and multi-root
+	// (basename-prefixed paths) uniformly. A resolution
+	// error here means the manifest row points at a path
+	// that's no longer routable (root removed at runtime,
+	// renamed off-disk, etc.); treat as missing-source.
+	absPath, resolveErr := resolver.Resolve(t.Path)
+	if resolveErr != nil {
+		counters.sourceMissing++
+		return nil, 0
+	}
+	if _, statErr := os.Stat(absPath); statErr != nil {
+		counters.sourceMissing++
+		return nil, 0
+	}
+	spec := transcode.JobSpec{
+		SourceAbsPath:    absPath,
+		SourceLibraryRel: t.Path,
+		SourceSampleRate: sourceRateHz,
+		TargetSampleRate: target,
+		TargetBits:       p.targetBits,
+		Quality:          p.quality,
+		OutputDir:        p.outputDir,
+	}
+	if err := spec.FreshnessFromFile(); err != nil {
+		counters.sourceMissing++
+		return nil, 0
+	}
+	needsRun, skipNote := upscaleResumeDecision(ctx, store, t.Path, spec, p.force)
+	return &upscaleCandidate{spec: spec, needsRun: needsRun, skipNote: skipNote}, 0
+}
+
+// upscaleResumeDecision implements the `--force`-aware resumability
+// check: if a fresh sidecar already covers this (source, variant) at
+// the same source mtime + size, return needsRun=false with a
+// dry-run-suitable reason string.
+func upscaleResumeDecision(ctx context.Context, store *manifest.Store, trackPath string, spec transcode.JobSpec, force bool) (bool, string) {
+	if force {
+		return true, ""
+	}
+	existing, _ := store.GetVariant(ctx, trackPath, spec.VariantID())
+	if existing == nil {
+		return true, ""
+	}
+	if existing.SourceMTimeNS != spec.SourceMTimeNS || existing.SourceSize != spec.SourceSize {
+		return true, ""
+	}
+	if _, err := os.Stat(existing.SidecarPath); err != nil {
+		return true, ""
+	}
+	return false, "already up-to-date"
+}
+
+// reportUpscaleSummary prints the pre-conversion candidate /
+// already-at-target / not-PCM / source-missing counters. Pulled out
+// of runUpscaleBatch as the second of the cognitive-complexity
+// refactor's helpers — pure I/O over the tally values.
+func reportUpscaleSummary(stdout io.Writer, totalCandidates, toRun int, counters upscaleSkipCounters) {
+	fmt.Fprintf(stdout, "Found %d candidate track(s); %d need conversion.\n", totalCandidates, toRun)
+	if counters.alreadyAtTarget > 0 {
+		fmt.Fprintf(stdout, "Skipped %d track(s) already at or above target rate.\n", counters.alreadyAtTarget)
+	}
+	if counters.notPCM > 0 {
+		fmt.Fprintf(stdout, "Skipped %d non-PCM or unparseable track(s).\n", counters.notPCM)
+	}
+	if counters.sourceMissing > 0 {
+		fmt.Fprintf(stdout, "Skipped %d track(s) with missing source files (run `bridge scan` to reconcile).\n", counters.sourceMissing)
+	}
+}
+
+// printUpscaleDryRun emits the per-candidate "WILL CONVERT" / "SKIP"
+// table the operator sees with `--dry-run`. Pure I/O; no side effects
+// beyond stdout.
+func printUpscaleDryRun(stdout io.Writer, candidates []upscaleCandidate) {
+	for _, c := range candidates {
+		tag := "WILL CONVERT"
+		if !c.needsRun {
+			tag = "SKIP (" + c.skipNote + ")"
+		}
+		fmt.Fprintf(stdout, "  %s  %s → %d/%d FLAC\n", tag, c.spec.SourceLibraryRel, c.spec.TargetBits, c.spec.TargetSampleRate)
+	}
+}
+
+// runUpscaleWorker is the body of one sox / DB-upsert goroutine
+// spawned by runUpscaleBatch. Drains `jobsCh`, runs sox, persists the
+// resulting `track_variants` row, bumps the success / failure
+// counters. Cancellation noise (SIGINT) is suppressed so a Ctrl-C run
+// doesn't emit one FAIL line per in-flight worker.
+func runUpscaleWorker(
+	ctx context.Context,
+	stderr io.Writer,
+	store *manifest.Store,
+	jobsCh <-chan upscaleCandidate,
+	doneCount, failCount *uint64,
+) {
+	for c := range jobsCh {
+		if !c.needsRun {
+			continue
+		}
+		// Cooperative cancel check before spending sox CPU.
+		// exec.CommandContext below is the harder gate
+		// (kills an in-flight process), but checking here
+		// avoids spawning a sox we'll immediately kill.
+		if ctx.Err() != nil {
+			return
+		}
+		size, err := transcode.RunSox(ctx, c.spec)
+		if err != nil {
+			if ctx.Err() == nil {
+				atomic.AddUint64(failCount, 1)
+				fmt.Fprintf(stderr, "FAIL %s: %v\n", c.spec.SourceLibraryRel, err)
+			}
+			continue
+		}
+		_, settings := c.spec.SoxArgs()
+		row := manifest.VariantRow{
+			SourcePath:    c.spec.SourceLibraryRel,
+			VariantID:     c.spec.VariantID(),
+			SidecarPath:   c.spec.SidecarPath(),
+			Format:        "flac",
+			SampleRate:    c.spec.TargetSampleRate,
+			BitsPerSample: c.spec.TargetBits,
+			SizeBytes:     size,
+			SourceMTimeNS: c.spec.SourceMTimeNS,
+			SourceSize:    c.spec.SourceSize,
+			SoxSettings:   settings,
+			CreatedAt:     transcode.CreatedAtNow(),
+		}
+		if err := store.UpsertVariant(ctx, row); err != nil {
+			// Suppress the failure log + counter increment
+			// when the ctx itself is what cancelled the
+			// write — mirrors the RunSox-cancelled-by-SIGINT
+			// branch above so an operator Ctrl-C run doesn't
+			// produce a flood of `context canceled` error
+			// lines. Gemini Medium on PR #217.
+			if ctx.Err() == nil {
+				atomic.AddUint64(failCount, 1)
+				fmt.Fprintf(stderr, "FAIL %s (db write): %v\n", c.spec.SourceLibraryRel, err)
+				// Best-effort: remove the orphan sidecar so a
+				// retry from a clean slate succeeds.
+				_ = os.Remove(row.SidecarPath)
+			}
+			continue
+		}
+		atomic.AddUint64(doneCount, 1)
+	}
+}
+
 // runUpscaleBatch is the main per-track loop. Walks every track in
 // the manifest store, decides eligibility per the params, dispatches
 // eligible jobs to the worker pool, prints progress, returns 0 on
@@ -177,6 +387,13 @@ type runUpscaleParams struct {
 // via exec.CommandContext (Gemini bot review on PR #108). Without
 // it, Ctrl-C on a 50-track album would block until the largest
 // file's sox finished.
+//
+// Refactored from a single 230-line body (CC 81 vs the 15 limit)
+// into a series of single-purpose helpers above
+// (`classifyUpscaleTrack` / `upscaleResumeDecision` /
+// `reportUpscaleSummary` / `printUpscaleDryRun` /
+// `runUpscaleWorker`). Behaviour and exit codes are byte-identical;
+// locked by the existing cmd/bridge upscale test suite.
 func runUpscaleBatch(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store, cfg *config.Config, resolver *bridgefs.Resolver, p runUpscaleParams) int {
 	allTracks, err := store.ListTracks(ctx, nil)
 	if err != nil {
@@ -187,85 +404,17 @@ func runUpscaleBatch(ctx context.Context, stdout, stderr io.Writer, store *manif
 	// First pass: build the candidate list. Decoupled from
 	// conversion so dry-run can print without spawning workers,
 	// and so the count is known upfront for the progress meter.
-	type candidate struct {
-		spec     transcode.JobSpec
-		needsRun bool   // false → already-fresh sidecar, will skip unless --force
-		skipNote string // empty when needsRun is true
-	}
-	candidates := make([]candidate, 0, 64)
-	skippedNotPCM := 0
-	skippedSourceMissing := 0
-	skippedAlreadyAtTarget := 0
-
+	candidates := make([]upscaleCandidate, 0, 64)
+	var counters upscaleSkipCounters
 	for _, t := range allTracks {
-		if !matchesFilter(t.Path, p.filter) {
+		c, exit := classifyUpscaleTrack(ctx, stderr, store, resolver, t, p, &counters)
+		if exit != 0 {
+			return exit
+		}
+		if c == nil {
 			continue
 		}
-		if t.IsDSD != nil && *t.IsDSD {
-			skippedNotPCM++
-			continue
-		}
-		if t.SampleRate == nil {
-			// No rate metadata → can't decide a target; skip
-			// silently. The scanner sets this for every PCM file
-			// it parses successfully; absence usually means the
-			// extractor failed to identify the format.
-			skippedNotPCM++
-			continue
-		}
-		sourceRateHz := int(*t.SampleRate)
-		target, err := transcode.ResolveTargetRate(p.targetRateFlag, sourceRateHz)
-		if err != nil {
-			fmt.Fprintf(stderr, "%s: %v\n", t.Path, err)
-			return 2
-		}
-		if target == 0 {
-			skippedAlreadyAtTarget++
-			continue
-		}
-		// Find the absolute path via the canonical resolver —
-		// handles single-root (rootless paths) and multi-root
-		// (basename-prefixed paths) uniformly. A resolution
-		// error here means the manifest row points at a path
-		// that's no longer routable (root removed at runtime,
-		// renamed off-disk, etc.); treat as missing-source.
-		absPath, resolveErr := resolver.Resolve(t.Path)
-		if resolveErr != nil {
-			skippedSourceMissing++
-			continue
-		}
-		if _, statErr := os.Stat(absPath); statErr != nil {
-			skippedSourceMissing++
-			continue
-		}
-		spec := transcode.JobSpec{
-			SourceAbsPath:    absPath,
-			SourceLibraryRel: t.Path,
-			SourceSampleRate: sourceRateHz,
-			TargetSampleRate: target,
-			TargetBits:       p.targetBits,
-			Quality:          p.quality,
-			OutputDir:        p.outputDir,
-		}
-		if err := spec.FreshnessFromFile(); err != nil {
-			skippedSourceMissing++
-			continue
-		}
-		// Resumability check: sidecar already there + DB row's
-		// freshness matches current source → no work needed.
-		needsRun := true
-		var skipNote string
-		if !p.force {
-			if existing, _ := store.GetVariant(ctx, t.Path, spec.VariantID()); existing != nil {
-				if existing.SourceMTimeNS == spec.SourceMTimeNS && existing.SourceSize == spec.SourceSize {
-					if _, err := os.Stat(existing.SidecarPath); err == nil {
-						needsRun = false
-						skipNote = "already up-to-date"
-					}
-				}
-			}
-		}
-		candidates = append(candidates, candidate{spec: spec, needsRun: needsRun, skipNote: skipNote})
+		candidates = append(candidates, *c)
 	}
 
 	totalCandidates := len(candidates)
@@ -275,26 +424,10 @@ func runUpscaleBatch(ctx context.Context, stdout, stderr io.Writer, store *manif
 			toRun++
 		}
 	}
-
-	fmt.Fprintf(stdout, "Found %d candidate track(s); %d need conversion.\n", totalCandidates, toRun)
-	if skippedAlreadyAtTarget > 0 {
-		fmt.Fprintf(stdout, "Skipped %d track(s) already at or above target rate.\n", skippedAlreadyAtTarget)
-	}
-	if skippedNotPCM > 0 {
-		fmt.Fprintf(stdout, "Skipped %d non-PCM or unparseable track(s).\n", skippedNotPCM)
-	}
-	if skippedSourceMissing > 0 {
-		fmt.Fprintf(stdout, "Skipped %d track(s) with missing source files (run `bridge scan` to reconcile).\n", skippedSourceMissing)
-	}
+	reportUpscaleSummary(stdout, totalCandidates, toRun, counters)
 
 	if p.dryRun {
-		for _, c := range candidates {
-			tag := "WILL CONVERT"
-			if !c.needsRun {
-				tag = "SKIP (" + c.skipNote + ")"
-			}
-			fmt.Fprintf(stdout, "  %s  %s → %d/%d FLAC\n", tag, c.spec.SourceLibraryRel, c.spec.TargetBits, c.spec.TargetSampleRate)
-		}
+		printUpscaleDryRun(stdout, candidates)
 		return 0
 	}
 
@@ -306,7 +439,7 @@ func runUpscaleBatch(ctx context.Context, stdout, stderr io.Writer, store *manif
 	// `workers` parallel sox processes and let the OS scheduler
 	// fan them across cores. A bounded channel keeps memory
 	// predictable on a 50k-track library.
-	jobsCh := make(chan candidate, p.workers*2)
+	jobsCh := make(chan upscaleCandidate, p.workers*2)
 	var wg sync.WaitGroup
 	var doneCount, failCount uint64
 
@@ -314,60 +447,7 @@ func runUpscaleBatch(ctx context.Context, stdout, stderr io.Writer, store *manif
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for c := range jobsCh {
-				if !c.needsRun {
-					continue
-				}
-				// Cooperative cancel check before spending sox CPU.
-				// exec.CommandContext below is the harder gate
-				// (kills an in-flight process), but checking here
-				// avoids spawning a sox we'll immediately kill.
-				if ctx.Err() != nil {
-					return
-				}
-				size, err := transcode.RunSox(ctx, c.spec)
-				if err != nil {
-					// Drop cancellation noise — operator-driven
-					// SIGINT shouldn't print one FAIL line per
-					// in-flight worker.
-					if ctx.Err() == nil {
-						atomic.AddUint64(&failCount, 1)
-						fmt.Fprintf(stderr, "FAIL %s: %v\n", c.spec.SourceLibraryRel, err)
-					}
-					continue
-				}
-				_, settings := c.spec.SoxArgs()
-				row := manifest.VariantRow{
-					SourcePath:    c.spec.SourceLibraryRel,
-					VariantID:     c.spec.VariantID(),
-					SidecarPath:   c.spec.SidecarPath(),
-					Format:        "flac",
-					SampleRate:    c.spec.TargetSampleRate,
-					BitsPerSample: c.spec.TargetBits,
-					SizeBytes:     size,
-					SourceMTimeNS: c.spec.SourceMTimeNS,
-					SourceSize:    c.spec.SourceSize,
-					SoxSettings:   settings,
-					CreatedAt:     transcode.CreatedAtNow(),
-				}
-				if err := store.UpsertVariant(ctx, row); err != nil {
-					// Suppress the failure log + counter increment
-					// when the ctx itself is what cancelled the
-					// write — mirrors the RunSox-cancelled-by-SIGINT
-					// branch above so an operator Ctrl-C run doesn't
-					// produce a flood of `context canceled` error
-					// lines. Gemini Medium on PR #217.
-					if ctx.Err() == nil {
-						atomic.AddUint64(&failCount, 1)
-						fmt.Fprintf(stderr, "FAIL %s (db write): %v\n", c.spec.SourceLibraryRel, err)
-						// Best-effort: remove the orphan sidecar so a
-						// retry from a clean slate succeeds.
-						_ = os.Remove(row.SidecarPath)
-					}
-					continue
-				}
-				atomic.AddUint64(&doneCount, 1)
-			}
+			runUpscaleWorker(ctx, stderr, store, jobsCh, &doneCount, &failCount)
 		}()
 	}
 
@@ -427,23 +507,13 @@ producerLoop:
 //     PR #351) — the next manifest rescan re-pulls the same dead ID
 //     and the loop restarts.
 //
-// Both sweeps run unconditionally under `--gc` because they share
-// the same semantic: keep the on-disk inventory and the DB-row
-// inventory consistent with each other. Splitting into separate
-// flags would let operators run them out of order, which is fine
-// for the forward sweep but the reverse sweep would re-introduce
-// the very mismatch we're fixing.
-func runGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store, outputDir string) int {
-	allRows, err := store.AllVariants(ctx)
-	if err != nil {
-		fmt.Fprintf(stderr, "list variants: %v\n", err)
-		return 1
-	}
-	known := make(map[string]bool, len(allRows))
-	for _, r := range allRows {
-		known[r.SidecarPath] = true
-	}
-
+// runGCForwardSweep walks `outputDir` and removes every file whose
+// path is not in the `known` set built from `track_variants` rows. Returns
+// `(removed, kept, failed, exitCode)` — `exitCode != 0` signals a
+// fatal sweep error (or a SIGINT) and runGC bails immediately. The
+// pre-refactor inline closure inflated cognitive complexity to 36; the
+// extraction makes runGC a flat sequence of three named steps.
+func runGCForwardSweep(ctx context.Context, stdout, stderr io.Writer, outputDir string, known map[string]bool) (int, int, int, int) {
 	var removed, kept, failed int
 	// Forward sweep: WalkDir over Walk avoids the per-file os.Lstat —
 	// DirEntry already carries IsDir(), so a flat directory of N
@@ -485,48 +555,59 @@ func runGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store,
 		// walk error so the SIGINT case reads cleanly.
 		if errors.Is(walkErr, context.Canceled) || errors.Is(walkErr, context.DeadlineExceeded) {
 			fmt.Fprintln(stderr, gcInterruptedMessage)
-			return 1
+			return removed, kept, failed, 1
 		}
 		fmt.Fprintf(stderr, "walk transcoded dir: %v\n", walkErr)
-		return 1
+		return removed, kept, failed, 1
 	}
 	fmt.Fprintf(stdout, "GC forward sweep: removed %d orphan file(s), kept %d known sidecar(s), %d failure(s).\n", removed, kept, failed)
+	return removed, kept, failed, 0
+}
 
-	// Guard against mass-delete on a disappeared transcoded root.
-	// If `outputDir` is missing but `track_variants` has rows, the
-	// per-row `os.Stat` below would return ENOENT for every row and
-	// the reverse sweep would nuke the entire variant catalog —
-	// even though the rows are almost certainly fine and the
-	// underlying issue is environmental (external drive
-	// disconnected, mount point gone, filesystem error). Refuse to
-	// proceed; restore access and re-run. Per CodeRabbit on PR #207.
-	//
-	// `len(allRows) == 0` is the LEGITIMATELY-empty case (no
-	// upscales ever generated on this bridge) and the forward
-	// sweep's `WalkDir` already handles a missing `outputDir`
-	// gracefully via `filepath.SkipDir`, so this guard only fires
-	// when there's something to lose.
-	if len(allRows) > 0 {
-		_, statErr := os.Stat(outputDir)
-		switch {
-		case statErr == nil:
-			// Healthy state — proceed to the per-row loop below.
-		case errors.Is(statErr, os.ErrNotExist):
-			fmt.Fprintf(stderr, "GC reverse sweep: transcoded directory %q is missing but %d variant row(s) exist; refusing to delete rows en masse (likely a disconnected mount or filesystem issue — restore access and re-run).\n", outputDir, len(allRows))
-			return 1
-		default:
-			// Any other stat failure (permission denied, I/O
-			// error, stale NFS handle, etc.) means the per-row
-			// `os.Stat(SidecarPath)` below would almost certainly
-			// fail the same way for every row — accumulating N
-			// per-row "stat failure" log lines and burning the
-			// operator's terminal output without making progress.
-			// Bail upfront with a single distinct message.
-			// CodeRabbit on PR #207 round 3.
-			fmt.Fprintf(stderr, "GC reverse sweep: cannot stat transcoded directory %q (%v); refusing to proceed with %d variant row(s) at risk.\n", outputDir, statErr, len(allRows))
-			return 1
-		}
+// gcCheckOutputDirBeforeReverseSweep enforces the "don't mass-delete
+// rows on a disappeared transcoded root" guard documented in PR #207.
+// Returns 0 on healthy state (proceed) or a non-zero exit code on
+// missing / unreadable root with extant rows. Split from runGC so the
+// cognitive-complexity refactor reads as a flat sequence of guards
+// rather than an inline switch.
+func gcCheckOutputDirBeforeReverseSweep(stderr io.Writer, outputDir string, rowCount int) int {
+	if rowCount == 0 {
+		// LEGITIMATELY-empty case (no upscales ever generated on
+		// this bridge); the forward sweep's WalkDir handles a
+		// missing outputDir via filepath.SkipDir, so the guard
+		// only protects against mass-delete when there's
+		// something to lose.
+		return 0
 	}
+	_, statErr := os.Stat(outputDir)
+	switch {
+	case statErr == nil:
+		return 0 // Healthy state — proceed to the per-row loop.
+	case errors.Is(statErr, os.ErrNotExist):
+		fmt.Fprintf(stderr, "GC reverse sweep: transcoded directory %q is missing but %d variant row(s) exist; refusing to delete rows en masse (likely a disconnected mount or filesystem issue — restore access and re-run).\n", outputDir, rowCount)
+		return 1
+	default:
+		// Any other stat failure (permission denied, I/O
+		// error, stale NFS handle, etc.) means the per-row
+		// `os.Stat(SidecarPath)` below would almost certainly
+		// fail the same way for every row — accumulating N
+		// per-row "stat failure" log lines and burning the
+		// operator's terminal output without making progress.
+		// Bail upfront with a single distinct message.
+		// CodeRabbit on PR #207 round 3.
+		fmt.Fprintf(stderr, "GC reverse sweep: cannot stat transcoded directory %q (%v); refusing to proceed with %d variant row(s) at risk.\n", outputDir, statErr, rowCount)
+		return 1
+	}
+}
+
+// runGCReverseSweep is the per-row sweep: every track_variants row
+// whose `sidecar_path` is missing on disk is deleted via the store's
+// DeleteVariant (which bumps indexed_at). Returns
+// `(rowsRemoved, rowsKept, rowsFailed, exitCode)`. exitCode is 1 on
+// SIGINT-during-sweep, 0 otherwise — bot-reviewed cancellation shape
+// from PR #217 (ctx cancel during the inner DeleteVariant surfaces as
+// interrupted, real DB fault is logged and counted).
+func runGCReverseSweep(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store, allRows []manifest.VariantRow) (int, int, int, int) {
 	// Reverse sweep: each row in `track_variants` whose `sidecar_path`
 	// is missing on disk is a phantom variant. `DeleteVariant` is the
 	// store API designed for this exact case — it bumps the parent
@@ -552,7 +633,7 @@ func runGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store,
 		// + Gemini Medium on PR #217.
 		if err := ctx.Err(); err != nil {
 			fmt.Fprintln(stderr, gcInterruptedMessage)
-			return 1
+			return rowsRemoved, rowsKept, rowsFailed, 1
 		}
 		_, statErr := os.Stat(r.SidecarPath)
 		switch {
@@ -579,7 +660,7 @@ func runGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store,
 				//     (same legacy degrade policy).
 				if ctx.Err() != nil {
 					fmt.Fprintln(stderr, gcInterruptedMessage)
-					return 1
+					return rowsRemoved, rowsKept, rowsFailed, 1
 				}
 				fmt.Fprintf(stderr, "delete orphan row %s / %s: %v\n", r.SourcePath, r.VariantID, err)
 				rowsFailed++
@@ -596,6 +677,44 @@ func runGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store,
 		}
 	}
 	fmt.Fprintf(stdout, "GC reverse sweep: removed %d orphan row(s), kept %d row(s) with live sidecar, %d failure(s).\n", rowsRemoved, rowsKept, rowsFailed)
+	return rowsRemoved, rowsKept, rowsFailed, 0
+}
+
+// Both sweeps run unconditionally under `--gc` because they share
+// the same semantic: keep the on-disk inventory and the DB-row
+// inventory consistent with each other. Splitting into separate
+// flags would let operators run them out of order, which is fine
+// for the forward sweep but the reverse sweep would re-introduce
+// the very mismatch we're fixing.
+//
+// Refactored from a single 170-line body (CC 36 vs the 15 limit) into
+// three helpers (`runGCForwardSweep` / `gcCheckOutputDirBeforeReverseSweep`
+// / `runGCReverseSweep`). Behaviour is byte-identical; locked by the
+// existing GC test suite.
+func runGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store, outputDir string) int {
+	allRows, err := store.AllVariants(ctx)
+	if err != nil {
+		fmt.Fprintf(stderr, "list variants: %v\n", err)
+		return 1
+	}
+	known := make(map[string]bool, len(allRows))
+	for _, r := range allRows {
+		known[r.SidecarPath] = true
+	}
+
+	_, _, failed, exitCode := runGCForwardSweep(ctx, stdout, stderr, outputDir, known)
+	if exitCode != 0 {
+		return exitCode
+	}
+
+	if exitCode := gcCheckOutputDirBeforeReverseSweep(stderr, outputDir, len(allRows)); exitCode != 0 {
+		return exitCode
+	}
+
+	_, _, rowsFailed, exitCode := runGCReverseSweep(ctx, stdout, stderr, store, allRows)
+	if exitCode != 0 {
+		return exitCode
+	}
 	if failed > 0 || rowsFailed > 0 {
 		return 1
 	}
