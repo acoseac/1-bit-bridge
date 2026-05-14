@@ -1978,6 +1978,13 @@ async function inspectorNavigate(path, opts = {}) {
 
   inspectorState.path = path;
   inspectorState.lastBrowseData = null;
+  // Any navigation exits search mode — covers the case where the
+  // operator clicked a search-result folder/track and we land in
+  // browse mode without an explicit Exit. Without this reset the
+  // load-more sentinel's `mode === "search"` short-circuit kept
+  // pagination permanently disabled in the post-search folder.
+  // CodeRabbit Major on PR #246 round-2.
+  inspectorState.mode = "browse";
   // Clear the "user-closed" latch on every navigation so a fresh
   // folder auto-opens the projection drawer in inspectorRender.
   inspectorState.drawerClosedByUser = false;
@@ -2011,11 +2018,15 @@ async function inspectorNavigate(path, opts = {}) {
       return;
     }
     inspectorState.lastBrowseData = data;
-    inspectorRender(data);
-    // Restore scroll after layout settles. rAF runs after the
-    // current style/layout pass on the next paint, so the table
-    // body has its true height by then. Falls back to 0 when no
-    // state (fresh tab / first nav).
+    // Await inspectorRender → the chunked-render pump fully
+    // populates the table body before we restore scroll.
+    // Without this await, only the first 200-row chunk has
+    // appended when scrollTo runs and the browser clamps a
+    // deep scroll-target to the partial document height.
+    // CodeRabbit Major on PR #246 round-2.
+    await inspectorRender(data);
+    if (inspectorState.path !== path) return;
+    // Restore scroll after the table body is fully realized.
     const targetY = typeof opts.restoreScroll === "number"
       ? opts.restoreScroll
       : 0;
@@ -2144,7 +2155,12 @@ function inspectorRenderBreadcrumbs(path) {
   }
 }
 
-function inspectorRender(data) {
+// Returns a Promise resolved once the chunked-render pump has
+// fully populated the table body (CodeRabbit Major on PR #246
+// round-2). The caller (inspectorNavigate) awaits this so scroll
+// restoration runs against the FINAL document height, not the
+// partial height after just the first 200-row chunk.
+async function inspectorRender(data) {
   document.getElementById("inspector-current-heading").textContent =
     pathLabel(data.path);
   const body = document.getElementById("inspector-rows-body");
@@ -2195,7 +2211,9 @@ function inspectorRender(data) {
   // 200-row chunks via rAF so initial paint lands before the full
   // list materialises on huge folders (1000+ children). Smaller
   // pages (<= 250) render in one chunk (no perceptible difference).
-  inspectorAppendRows(body, folders, tracks, /*replace=*/true);
+  // Await so the caller's scroll-restore runs against the final
+  // document height, not the partial first-chunk height.
+  await inspectorAppendRows(body, folders, tracks, /*replace=*/true);
 }
 
 // inspectorAppendRows is the shared chunked-render helper used by
