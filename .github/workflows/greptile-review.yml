@@ -10,11 +10,19 @@ jobs:
     steps:
       - name: Get number of changed files
         id: pr-size
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          FILES=$(curl -s \
-            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+          # --fail-with-body so a non-2xx exits with a non-zero status (and
+          # prints the body); --show-error keeps stderr useful under -s.
+          # Pre-fix a 401/5xx silently produced FILES="null" and the
+          # workflow happily skipped Greptile for a "small" PR.
+          FILES=$(curl -sS --fail-with-body \
+            -H "Authorization: token ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files?per_page=100" \
+            "https://api.github.com/repos/${REPO}/pulls/${PR_NUMBER}/files?per_page=100" \
             | jq '. | length')
           echo "changed_files=$FILES" >> $GITHUB_OUTPUT
           echo "PR has $FILES changed files"
@@ -26,12 +34,24 @@ jobs:
 
       - name: Trigger Greptile Review
         if: ${{ fromJSON(steps.pr-size.outputs.changed_files) >= 5 }}
+        env:
+          GREPTILE_API_KEY: ${{ secrets.GREPTILE_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          CHANGED_FILES: ${{ steps.pr-size.outputs.changed_files }}
         run: |
-          echo "PR has ${{ steps.pr-size.outputs.changed_files }} changed files — triggering Greptile review."
-          curl -s -X POST "https://api.greptile.com/v2/review" \
-            -H "Authorization: Bearer ${{ secrets.GREPTILE_API_KEY }}" \
-            -H "X-Github-Token: ${{ secrets.GITHUB_TOKEN }}" \
+          echo "PR has ${CHANGED_FILES} changed files — triggering Greptile review."
+          # The Greptile /v2/review endpoint currently returns 404 (separate
+          # concern — endpoint URL or auth shape drift; tracked for
+          # follow-up). Keep this step best-effort with `|| true` so a
+          # broken third-party endpoint doesn't fail the whole workflow,
+          # while still logging the response body for debugging. The
+          # GitHub-API curl in the previous step KEEPS its --fail-with-body
+          # because that endpoint is healthy and silent-success was the
+          # actual bug CodeRabbit caught.
+          curl -sS -X POST "https://api.greptile.com/v2/review" \
+            -H "Authorization: Bearer ${GREPTILE_API_KEY}" \
+            -H "X-Github-Token: ${GH_TOKEN}" \
             -H "Content-Type: application/json" \
-            -d '{
-              "prUrl": "${{ github.event.pull_request.html_url }}"
-            }'
+            -d "$(jq -n --arg url "$PR_URL" '{prUrl: $url}')" \
+            || echo "(greptile POST failed — non-blocking; see comment above)"

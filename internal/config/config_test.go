@@ -853,11 +853,11 @@ func TestTailscaleEffectiveMode(t *testing.T) {
 		{"TSNet", TailscaleModeTsnet, false}, // mixed case from a previous version of this comment's docs
 		{"Disabled", TailscaleModeDisabled, false},
 		// Real errors — must still trip the validation gate.
-		{"tnset", "", true},      // typo
-		{"enabled", "", true},    // user might guess "enabled" as the inverse of "disabled"
-		{"on", "", true},         // truthy synonym
-		{"   tnset ", "", true},  // trimmed but still a typo — error message must carry the original
-		{"TS-NET", "", true},     // hyphenated guess
+		{"tnset", "", true},     // typo
+		{"enabled", "", true},   // user might guess "enabled" as the inverse of "disabled"
+		{"on", "", true},        // truthy synonym
+		{"   tnset ", "", true}, // trimmed but still a typo — error message must carry the original
+		{"TS-NET", "", true},    // hyphenated guess
 	}
 	for _, c := range cases {
 		got, err := (TailscaleConfig{Mode: c.in}).EffectiveMode()
