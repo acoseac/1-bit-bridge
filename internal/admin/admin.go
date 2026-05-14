@@ -471,6 +471,14 @@ type Server struct {
 	soxAvailabilityMu sync.Mutex
 	soxAvailability   bool
 	soxAvailabilityAt time.Time
+
+	// boundAdminAddr is the address the TCP listener was actually
+	// bound to, recorded in Serve() once net.Listen succeeds. It is
+	// used by originMatchesAdmin() so that CSRF validation reflects
+	// the port the server is *currently* listening on rather than
+	// the AdminAddress value in the live config (which may have been
+	// updated via a PATCH before a restart).
+	boundAdminAddr string
 }
 
 // pages maps the URL-friendly page name to its template filename.
@@ -620,6 +628,7 @@ func (s *Server) Serve(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("admin listen %s: %w", addr, err)
 	}
+	s.boundAdminAddr = lis.Addr().String()
 	srv := &http.Server{
 		Handler: s.Handler(),
 		// BaseContext derives every request's r.Context() from the
@@ -808,10 +817,18 @@ func (s *Server) originMatchesAdmin(origin string) bool {
 			return false
 		}
 	}
-	cfg := s.deps.CfgHolder.Load()
-	adminAddr := cfg.AdminAddress
+	// Use the address the listener was actually bound to so that a
+	// pending config change (AdminAddress PATCH before restart) does
+	// not shift the CSRF allowlist while the server is still on the
+	// old port. Fall back to the live config only if boundAdminAddr
+	// is not yet set (defensive; should not happen in practice).
+	adminAddr := s.boundAdminAddr
 	if adminAddr == "" {
-		adminAddr = config.DefaultAdminAddress
+		cfg := s.deps.CfgHolder.Load()
+		adminAddr = cfg.AdminAddress
+		if adminAddr == "" {
+			adminAddr = config.DefaultAdminAddress
+		}
 	}
 	adminHost, adminPort, err := net.SplitHostPort(adminAddr)
 	if err != nil {

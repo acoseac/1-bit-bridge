@@ -556,7 +556,7 @@ func assertNoSharedPointers(t *testing.T, a, b reflect.Value, path string, seen 
 				key = uintptr(unsafe.Pointer(a.UnsafePointer()))
 			}
 			if prev, ok := seen[key]; ok {
-				_ = prev
+				t.Fatalf("%s: slice backing array already seen at %s", path, prev)
 			}
 			seen[key] = path
 		}
