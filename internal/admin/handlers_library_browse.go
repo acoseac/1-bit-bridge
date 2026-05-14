@@ -27,6 +27,7 @@ import (
 	"errors"
 	"net/http"
 	"path"
+	"strconv"
 	"strings"
 
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
@@ -62,14 +63,26 @@ type browseTrackRow struct {
 
 // browseResponse is the JSON envelope returned by
 // GET /api/library/browse.
+//
+// v1.4 PR C: cursor-based pagination. Callers can pass
+// `?after=&limit=` (defaults: ""/500); response surfaces the
+// total counts (immediate-children only, no rollup) AND the
+// next cursors so the UI can render a "Load more (N remaining)"
+// sentinel. Empty `nextFolderCursor` / `nextTrackCursor` signals
+// "no more pages" for the respective collection.
 type browseResponse struct {
 	// Path is the normalised library-relative path the response
 	// describes; echoed back so the UI can verify what it asked
 	// for (especially helpful for traversal-rejected requests
 	// that landed on the empty-path branch).
-	Path    string            `json:"path"`
-	Folders []browseFolderRow `json:"folders"`
-	Tracks  []browseTrackRow  `json:"tracks"`
+	Path             string            `json:"path"`
+	Folders          []browseFolderRow `json:"folders"`
+	Tracks           []browseTrackRow  `json:"tracks"`
+	TotalFolders     int               `json:"totalFolders"`
+	TotalTracks      int               `json:"totalTracks"`
+	NextFolderCursor string            `json:"nextFolderCursor,omitempty"`
+	NextTrackCursor  string            `json:"nextTrackCursor,omitempty"`
+	Limit            int               `json:"limit"`
 }
 
 // browseProjectionResponse is the JSON envelope returned by
@@ -103,20 +116,70 @@ func (s *Server) apiLibraryBrowse(w http.ResponseWriter, r *http.Request) {
 			"path contains traversal segments or is otherwise invalid")
 		return
 	}
-	folders, err := s.deps.Manifest.ListChildFolders(r.Context(), normalised)
+	// Cursor-based pagination (PR C). Folders and tracks paginate
+	// INDEPENDENTLY — each has its own ordering scope on the
+	// underlying table, so the client passes a separate cursor per
+	// collection. The presence (not value) of each cursor param
+	// signals "keep paginating this collection." A request that
+	// omits `afterFolder` means folders are exhausted on the client
+	// side; the server skips that query entirely. Mirror logic for
+	// tracks. Initial-page request omits BOTH cursors → server
+	// fetches the first page of each (treat as exhausted-of-nothing).
+	q := r.URL.Query()
+	hasAfterFolder := q.Has("afterFolder")
+	hasAfterTrack := q.Has("afterTrack")
+	afterFolder := q.Get("afterFolder")
+	afterTrack := q.Get("afterTrack")
+	isFirstPage := !hasAfterFolder && !hasAfterTrack
+	fetchFolders := isFirstPage || hasAfterFolder
+	fetchTracks := isFirstPage || hasAfterTrack
+
+	limit := 500
+	if v := q.Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			if n > 2000 {
+				n = 2000
+			}
+			limit = n
+		}
+	}
+
+	var (
+		folders []manifest.ChildFolderRollup
+		tracks  []manifest.ChildTrack
+		err     error
+	)
+	if fetchFolders {
+		folders, err = s.deps.Manifest.ListChildFoldersPage(r.Context(), normalised, afterFolder, limit)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "browse-folders", err.Error())
+			return
+		}
+	}
+	if fetchTracks {
+		tracks, err = s.deps.Manifest.ListChildTracksPage(r.Context(), normalised, afterTrack, limit)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "browse-tracks", err.Error())
+			return
+		}
+	}
+	totalFolders, err := s.deps.Manifest.CountChildFolders(r.Context(), normalised)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "browse-folders", err.Error())
+		writeError(w, http.StatusInternalServerError, "count-folders", err.Error())
 		return
 	}
-	tracks, err := s.deps.Manifest.ListChildTracks(r.Context(), normalised)
+	totalTracks, err := s.deps.Manifest.CountChildTracks(r.Context(), normalised)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "browse-tracks", err.Error())
+		writeError(w, http.StatusInternalServerError, "count-tracks", err.Error())
 		return
 	}
 	resp := browseResponse{
-		Path:    normalised,
-		Folders: make([]browseFolderRow, 0, len(folders)),
-		Tracks:  make([]browseTrackRow, 0, len(tracks)),
+		Path:         normalised,
+		Folders:      make([]browseFolderRow, 0, len(folders)),
+		Tracks:       make([]browseTrackRow, 0, len(tracks)),
+		TotalFolders: totalFolders,
+		TotalTracks:  totalTracks,
+		Limit:        limit,
 	}
 	for _, f := range folders {
 		resp.Folders = append(resp.Folders, browseFolderRow{
@@ -139,6 +202,20 @@ func (s *Server) apiLibraryBrowse(w http.ResponseWriter, r *http.Request) {
 			IsDSD:         t.IsDSD,
 			IsUpscaled:    t.IsUpscaled,
 		})
+	}
+	// Next-page cursors: a "full page" (len == limit) MIGHT have
+	// more; signal continuation via the last row's path. A
+	// short page (len < limit) is the final page — no cursor.
+	// The exact-multiple-of-limit boundary case (page size == limit
+	// AND exactly that many rows remain) costs one wasted round
+	// trip — the next request will return 0 rows and the frontend
+	// stops; acceptable v1 vs the alternative of an extra COUNT
+	// query per page advance.
+	if len(folders) == limit && fetchFolders {
+		resp.NextFolderCursor = folders[len(folders)-1].Path
+	}
+	if len(tracks) == limit && fetchTracks {
+		resp.NextTrackCursor = tracks[len(tracks)-1].Path
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
