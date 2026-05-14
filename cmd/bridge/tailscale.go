@@ -226,6 +226,14 @@ func (a *tailscaleAutoPilot) detectAndMint(ctx context.Context, trigger string) 
 		snap.CertNotAfter = &expiry
 		snap.HTTPSCertsEnabled = true
 		if time.Until(existing.Leaf.NotAfter) > servertailscale.FreshnessThreshold {
+			// Cert is fresh enough to skip the mint, but still
+			// warn if we're under the 30-day window (cert is in
+			// the 14d-30d zone). Tailscale's auto-renew should
+			// refresh well before this point — a persistent
+			// warning means the renewer's stuck.
+			if msg := warnLECertExpiringSoon(info.MagicDNSName, existing.Leaf.NotAfter, time.Now()); msg != "" {
+				fmt.Fprintln(a.stderr, msg)
+			}
 			a.publish(snap)
 			return snap
 		}
@@ -280,8 +288,53 @@ func (a *tailscaleAutoPilot) detectAndMint(ctx context.Context, trigger string) 
 	}
 	fmt.Fprintf(os.Stdout, "tailscale (%s): minted LE cert for %s, expires %s\n",
 		trigger, info.MagicDNSName, expiryStr)
+	// A freshly-minted LE cert should be ~90 days from expiry. If
+	// we're already under 30 days remaining, Tailscale's control
+	// plane / LE pipeline is having trouble — surface the diagnostic
+	// rather than letting it expire silently. Same wording surface
+	// as the existing-cert path above.
+	if loaded.Leaf != nil {
+		if msg := warnLECertExpiringSoon(info.MagicDNSName, loaded.Leaf.NotAfter, time.Now()); msg != "" {
+			fmt.Fprintln(a.stderr, msg)
+		}
+	}
 	a.publish(snap)
 	return snap
+}
+
+// warnLECertExpiringSoon returns the operator-facing warning string
+// when a Tailscale LE cert is within 30 days of expiry — typically
+// signalling renewal-loop or tailnet-misconfig trouble since Tailscale
+// auto-renews well before that window. Returns "" when the cert is
+// comfortably fresh OR the input is zero (no cert known).
+//
+// Pure helper so `TestWarnLECertExpiringSoon` can pin the thresholding
+// without spinning up a real autopilot. The 30-day threshold mirrors
+// `bridge cert info`'s manual diagnostic (cmd/bridge/cert.go:105-106)
+// so operators see the same signal regardless of which surface they
+// look at.
+func warnLECertExpiringSoon(magicDNS string, notAfter, now time.Time) string {
+	if notAfter.IsZero() {
+		return ""
+	}
+	remaining := notAfter.Sub(now)
+	if remaining > 30*24*time.Hour {
+		return ""
+	}
+	if remaining < 0 {
+		// Floor at 0 in the message rather than printing a negative
+		// "expires in -3 days" which reads worse than "expired 3 days
+		// ago" (same convention `bridge cert info` uses).
+		daysOver := int(-remaining / (24 * time.Hour))
+		return fmt.Sprintf("WARNING: tailscale LE cert for %s has EXPIRED (%d days past). "+
+			"Auto-renew appears stuck — run `bridge tailscale status` and check the admin DNS page.",
+			magicDNS, daysOver)
+	}
+	daysLeft := int(remaining / (24 * time.Hour))
+	return fmt.Sprintf("WARNING: tailscale LE cert for %s expires in %d days. "+
+		"Auto-renew should refresh inside this window; if the warning persists, "+
+		"run `bridge tailscale status` and check the admin DNS page.",
+		magicDNS, daysLeft)
 }
 
 // Snapshot returns the latest tile state. Cheap (atomic load) so the
