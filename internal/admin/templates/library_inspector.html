@@ -16,6 +16,26 @@
     folder is via the ⓘ button next to the heading below; acting
     on a CHILD folder is via the ⓘ button on its row.
   */}}
+  {{/*
+    Search bar (v1.4 followup — promoted from inside the nav toolbar
+    to its own row above). The toolbar got crowded next to the
+    breadcrumbs; search is the operator's primary entry point
+    on a 50k-row library so it gets its own prominent row at the
+    top. PR B's two-phase behaviour (client-side filter first, then
+    server-side `/api/library/search` on miss) is unchanged. Press
+    `/` from anywhere on the page to focus this input.
+  */}}
+  <div class="inspector-search-bar" id="inspector-search-slot">
+    <input type="search" id="inspector-search"
+      placeholder="Search library (press /)"
+      aria-label="Search library"
+      aria-describedby="inspector-search-status"
+      autocomplete="off">
+    <div id="inspector-search-results" class="inspector-search-results"
+      role="listbox" aria-label="Search results" hidden></div>
+    <div id="inspector-search-status" class="sr-only" aria-live="polite"></div>
+  </div>
+
   <div class="inspector-toolbar" id="inspector-toolbar" role="toolbar" aria-label="Inspector navigation">
     <div class="inspector-nav-group">
       <button type="button" id="inspector-nav-up"
@@ -34,23 +54,6 @@
     <nav class="breadcrumbs" id="inspector-breadcrumbs" aria-label="Folder path">
       <a href="#" data-path="">Library</a>
     </nav>
-    {{/*
-      Search input (v1.4 PR B — FTS5). Two-phase behaviour wired
-      in app.js: client-side filter against `inspectorState.lastBrowseData`
-      first (instant); server-side `/api/library/search` only when
-      the current folder yields zero matches. Press `/` from
-      anywhere on the page to focus this input.
-    */}}
-    <div class="inspector-search-slot" id="inspector-search-slot">
-      <input type="search" id="inspector-search"
-        placeholder="Search library (press /)"
-        aria-label="Search library"
-        aria-describedby="inspector-search-status"
-        autocomplete="off">
-      <div id="inspector-search-results" class="inspector-search-results"
-        role="listbox" aria-label="Search results" hidden></div>
-      <div id="inspector-search-status" class="sr-only" aria-live="polite"></div>
-    </div>
   </div>
 
   {{/*

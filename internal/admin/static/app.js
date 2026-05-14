@@ -1719,10 +1719,12 @@ function initLibraryInspector() {
   updateInspectorStickyHeights();
   window.addEventListener("resize", updateInspectorStickyHeights);
   if (typeof ResizeObserver === "function") {
+    const search = document.getElementById("inspector-search-slot");
     const toolbar = document.getElementById("inspector-toolbar");
     const storage = document.getElementById("inspector-storage-bar");
-    if (toolbar || storage) {
+    if (search || toolbar || storage) {
       const ro = new ResizeObserver(updateInspectorStickyHeights);
+      if (search) ro.observe(search);
       if (toolbar) ro.observe(toolbar);
       if (storage) ro.observe(storage);
     }
@@ -1914,10 +1916,14 @@ async function inspectorStorageSubmit() {
 // height is the AUTHORITATIVE one — the CSS fallback assumes a
 // single-row toolbar (good default for the common case).
 function updateInspectorStickyHeights() {
+  const search = document.getElementById("inspector-search-slot");
   const toolbar = document.getElementById("inspector-toolbar");
   const storage = document.getElementById("inspector-storage-bar");
   const root = document.querySelector(".library-inspector");
   if (!root) return;
+  if (search) {
+    root.style.setProperty("--inspector-search-h", `${search.offsetHeight}px`);
+  }
   if (toolbar) {
     root.style.setProperty("--inspector-toolbar-h", `${toolbar.offsetHeight}px`);
   }

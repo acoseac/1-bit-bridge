@@ -300,6 +300,17 @@ h2 {
  * lede flows to the page max-width like the rest of the content. */
 .lede { color: var(--fg-muted); margin: 0 0 20px; }
 .hint { color: var(--fg-muted); font-size: 12px; margin-top: 4px; display: block; }
+/* Restore the user-agent `hidden` attribute. The `.hint { display:
+ * block }` rule above wins specificity over the UA `[hidden] {
+ * display: none }`, which silently defeats JS that sets
+ * `el.hidden = true` on a `.hint` element — so `<p class="hint"
+ * hidden>` paragraphs stayed visible. User-reported as "Nothing
+ * here." showing alongside actual tracks in the Library Inspector
+ * (root cause: the inspector-empty / drawer-hint / drawer-unknown
+ * paragraphs all carry `class="hint"`). Re-asserting [hidden] with
+ * !important is the canonical CSS reset for this UA-vs-author
+ * conflict; cheap and applies everywhere. */
+[hidden] { display: none !important; }
 /* In-panel explanatory text. Pre-existing classes (used in dashboard /
  * devices / settings panels) that lacked rules; the templates were
  * relying on browser default which rendered at full body contrast.
@@ -1032,21 +1043,45 @@ dialog h2 { font-size: 18px; color: var(--accent); }
    * wraps (narrow viewports + AX text scaling). CodeRabbit Major
    * on PR A round-2 caught the wrap case as breaking the sticky
    * stack.
+   *
+   * Stack as of v1.4 followup: search-bar → nav-toolbar → storage-bar.
+   * The search-bar was promoted out of the toolbar to its own row
+   * (user-requested — toolbar was crowded). Each *-bottom variable
+   * accumulates the height of every sticky surface above it so the
+   * sticky table header underneath them flows correctly.
    */
+  --inspector-search-h:  calc(44px + 1rem);    /* search input + padding */
   --inspector-toolbar-h: calc(44px + 1rem);    /* min-height button + 2× padding */
   --inspector-storage-h: calc(1.2em + 0.8rem); /* one-line text + 2× padding */
-  --inspector-toolbar-bottom: var(--inspector-toolbar-h);
+  --inspector-search-bottom:  var(--inspector-search-h);
+  --inspector-toolbar-bottom: calc(
+    var(--inspector-search-bottom) + var(--inspector-toolbar-h)
+  );
   --inspector-storage-bottom: calc(
     var(--inspector-toolbar-bottom) + var(--inspector-storage-h)
   );
 }
 
-/* Sticky toolbar (v1.4 nav rework). Stays pinned at the top while
- * the operator scrolls through folder contents so navigation +
- * search + per-folder actions are always reachable. */
-.library-inspector .inspector-toolbar {
+/* Sticky search bar (v1.4 followup). Sits ABOVE the nav toolbar so
+ * the operator's primary entry point (search on a large library)
+ * doesn't compete with breadcrumbs for horizontal space. */
+.library-inspector .inspector-search-bar {
   position: sticky;
   top: 0;
+  z-index: 4;
+  padding: 0.5rem 0.75rem;
+  margin: 0 0 0.5rem;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+/* Sticky toolbar (v1.4 nav rework). Stays pinned UNDER the search
+ * bar (which is at top: 0); offset by --inspector-search-bottom so
+ * the two sticky rows stack correctly. */
+.library-inspector .inspector-toolbar {
+  position: sticky;
+  top: var(--inspector-search-bottom);
   z-index: 3;
   display: flex;
   flex-wrap: wrap;
@@ -1071,10 +1106,8 @@ dialog h2 { font-size: 18px; color: var(--accent); }
   opacity: 0.45;
   cursor: not-allowed;
 }
-.library-inspector .inspector-search-slot {
-  flex: 1 1 12rem; /* search input lands here in PR B */
-  min-width: 8rem;
-}
+/* (Search slot moved to its own row .inspector-search-bar above —
+ * this rule was the in-toolbar flex sizing it no longer needs.) */
 
 /* Breadcrumbs (folded into the toolbar v1.4). Margin reset so they
  * sit cleanly between the nav and search slots. Link color uses the
@@ -1453,10 +1486,10 @@ dialog h2 { font-size: 18px; color: var(--accent); }
  * positioning; dropdown is an absolute overlay anchored under
  * the input so the table layout doesn't reflow when results
  * appear. */
-.inspector-search-slot {
-  position: relative;
-}
-.inspector-search-slot #inspector-search {
+/* (.inspector-search-bar's positioning lives in the inspector-toolbar
+ * stack at the top of this section — `position: sticky` doubles as
+ * the containing block for the absolute dropdown below.) */
+.inspector-search-bar #inspector-search {
   width: 100%;
   min-height: 44px;
   padding: 0.4rem 0.75rem;
@@ -1466,7 +1499,7 @@ dialog h2 { font-size: 18px; color: var(--accent); }
   border-radius: 6px;
   color: var(--text, inherit);
 }
-.inspector-search-slot #inspector-search:focus {
+.inspector-search-bar #inspector-search:focus {
   outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
   outline-offset: 1px;
 }
