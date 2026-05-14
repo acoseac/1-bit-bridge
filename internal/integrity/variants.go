@@ -152,7 +152,11 @@ func (w *VariantWatcher) SetOnTickComplete(fn func(deletedCount int)) {
 // cost on minimal deploys).
 func (w *VariantWatcher) Start(ctx context.Context) (stopFn func()) {
 	if w == nil || w.interval <= 0 {
-		return func() {}
+		return func() {
+			// No-op stopFn — Start was a no-op (interval ≤ 0
+			// disables the watcher entirely; see docstring above),
+			// so there's nothing to stop.
+		}
 	}
 	w.startOnce.Do(func() {
 		w.done = make(chan struct{})

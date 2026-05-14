@@ -391,4 +391,6 @@ type EventPublisher interface {
 // harnesses, pre-this-PR bridges). All Publish calls drop silently.
 type nopEventPublisher struct{}
 
-func (nopEventPublisher) Publish(string, interface{}) {}
+func (nopEventPublisher) Publish(string, interface{}) {
+	// Intentional no-op — see the nopEventPublisher type docstring.
+}
