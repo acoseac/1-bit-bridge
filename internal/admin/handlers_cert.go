@@ -38,7 +38,7 @@ func (s *Server) apiCertInfo(w http.ResponseWriter, r *http.Request) {
 // for "where the cert lives" (Gemini flagged the prior duplication
 // on PR #46).
 func (s *Server) certPaths() (certPath, keyPath string) {
-	cfg := s.deps.Cfg
+	cfg := s.deps.CfgHolder.Load()
 	certPath, keyPath = cfg.TLSCertPath, cfg.TLSKeyPath
 	if certPath == "" || keyPath == "" {
 		certPath, keyPath = servertls.DefaultPaths(cfg.DataDir)

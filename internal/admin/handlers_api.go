@@ -15,6 +15,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/advertise"
 	"github.com/acoseac/1-bit-bridge/internal/auth"
+	"github.com/acoseac/1-bit-bridge/internal/config"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
@@ -175,14 +176,15 @@ func (s *Server) apiStats(w http.ResponseWriter, r *http.Request) {
 // handler (apiEvents). Cheap reads only — no DB writes, no external
 // network. Suitable for sub-second polling.
 func (s *Server) getStatsSnapshot() statsResponse {
+	cfg := s.deps.CfgHolder.Load()
 	now := time.Now().UTC()
 	// No request context here (called from SSE event publisher
 	// too). Use Background — admin dashboard stats are best-
 	// effort and not user-cancellable anyway.
 	tracks, _ := s.deps.Manifest.CountTracks(context.Background())
-	dbBytes := dbSize(filepath.Join(s.deps.Cfg.DataDir, "bridge.db"))
+	dbBytes := dbSize(filepath.Join(cfg.DataDir, "bridge.db"))
 	return statsResponse{
-		LibraryName:     s.deps.Cfg.LibraryName,
+		LibraryName:     cfg.LibraryName,
 		ProtocolVersion: version.ProtocolVersion,
 		ServerVersion:   version.ServerVersion,
 		UptimeSec:       int64(now.Sub(s.deps.StartedAt).Seconds()),
@@ -194,8 +196,8 @@ func (s *Server) getStatsSnapshot() statsResponse {
 		DBBytes:         dbBytes,
 		Fingerprint:     s.deps.Fingerprint,
 		DeviceCount:     len(s.deps.Auth.List()),
-		ListenAddress:   s.deps.Cfg.ListenAddress,
-		AdminAddress:    s.deps.Cfg.AdminAddress,
+		ListenAddress:   cfg.ListenAddress,
+		AdminAddress:    cfg.AdminAddress,
 	}
 }
 
@@ -270,7 +272,8 @@ func (e *endpointsErr) Error() string { return e.code + ": " + e.msg }
 // parse failure. The error type is opaque to callers — REST maps
 // to 500 + short code; SSE just skips the publish.
 func (s *Server) getEndpointsSnapshot() ([]adminEndpointEntry, *endpointsErr) {
-	_, portStr, err := net.SplitHostPort(s.deps.Cfg.ListenAddress)
+	cfg := s.deps.CfgHolder.Load()
+	_, portStr, err := net.SplitHostPort(cfg.ListenAddress)
 	if err != nil {
 		return nil, &endpointsErr{code: "bad_listen", msg: "could not parse listen address"}
 	}
@@ -298,7 +301,7 @@ func (s *Server) getEndpointsSnapshot() ([]adminEndpointEntry, *endpointsErr) {
 	}
 	eps := advertise.Endpoints(advertise.Params{
 		Port:            port,
-		CustomEndpoints: s.deps.Cfg.CustomEndpoints,
+		CustomEndpoints: cfg.CustomEndpoints,
 	})
 	out := make([]adminEndpointEntry, 0, len(eps))
 	for _, e := range eps {
@@ -371,6 +374,7 @@ func (s *Server) apiRootsAdd(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	cfg := s.deps.CfgHolder.Load()
 
 	current := s.deps.Scanner.Roots()
 	if slices.Contains(current, abs) {
@@ -405,16 +409,13 @@ func (s *Server) apiRootsAdd(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// Snapshot prev roots before mutating so we can roll back on a
-	// failed Save. Mirrors the apiRootsRemove path: without the
-	// rollback, a failed Save leaves in-memory holding the new list
-	// while disk has the old — and any later successful Save from an
-	// unrelated edit (library-name change, bind-address change, etc.)
-	// silently commits the addition the operator had seen fail.
-	prevRoots := append([]string(nil), s.deps.Cfg.LibraryRoots...)
-	s.deps.Cfg.LibraryRoots = newList
-	if err := s.deps.Cfg.Save(s.deps.CfgPath); err != nil {
-		s.deps.Cfg.LibraryRoots = prevRoots
+	// Clone cfg before mutating. With copy-on-write semantics the live
+	// snapshot is only updated by the Store() call below; if Save fails
+	// we simply return early and the clone is discarded — no manual
+	// rollback required.
+	next := config.Clone(cfg)
+	next.LibraryRoots = newList
+	if err := next.Save(s.deps.CfgPath); err != nil {
 		// Compensating scan: if we reached here via the transition
 		// branch, WipeAllTracks has already emptied the manifest but
 		// the config was never persisted — /v1/manifest will serve
@@ -433,6 +434,7 @@ func (s *Server) apiRootsAdd(w http.ResponseWriter, r *http.Request) {
 	}
 	s.deps.Scanner.SetRoots(newList)
 	s.deps.Resolver.SetRoots(newList)
+	s.deps.CfgHolder.Store(next)
 	s.spawnBackgroundScan("post-add scan")
 	writeJSON(w, http.StatusCreated, rootRow{Path: abs, Tracks: 0})
 }
@@ -450,6 +452,7 @@ func (s *Server) apiRootsRemove(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	cfg := s.deps.CfgHolder.Load()
 
 	current := s.deps.Scanner.Roots()
 	idx := slices.Index(current, req.Path)
@@ -491,16 +494,13 @@ func (s *Server) apiRootsRemove(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// Capture prev roots before mutating so we can roll back on a
-	// Save failure. Without this, a failed Save leaves the in-memory
-	// Cfg holding the new list while disk still has the old — any
-	// later Save call from an unrelated path (library-name edit,
-	// bind-address change, etc.) would silently commit a removal the
-	// operator had already seen fail.
-	prevRoots := append([]string(nil), s.deps.Cfg.LibraryRoots...)
-	s.deps.Cfg.LibraryRoots = newList
-	if err := s.deps.Cfg.Save(s.deps.CfgPath); err != nil {
-		s.deps.Cfg.LibraryRoots = prevRoots
+	// Clone cfg before mutating. With copy-on-write semantics the live
+	// snapshot is only updated by the Store() call below; if Save fails
+	// we simply return early and the clone is discarded — no manual
+	// rollback required.
+	next := config.Clone(cfg)
+	next.LibraryRoots = newList
+	if err := next.Save(s.deps.CfgPath); err != nil {
 		// Compensating scan — same rationale as the Add path: the
 		// manifest op above already mutated /v1/manifest (wipe or
 		// prefix-delete), and without a rescan the manifest sits in
@@ -516,6 +516,7 @@ func (s *Server) apiRootsRemove(w http.ResponseWriter, r *http.Request) {
 	}
 	s.deps.Scanner.SetRoots(newList)
 	s.deps.Resolver.SetRoots(newList)
+	s.deps.CfgHolder.Store(next)
 	s.spawnBackgroundScan("post-remove scan")
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -541,6 +542,7 @@ func (s *Server) apiTokensList(w http.ResponseWriter, r *http.Request) {
 // --- POST /api/tokens {name, url} ---
 
 func (s *Server) apiTokensMint(w http.ResponseWriter, r *http.Request) {
+	cfg := s.deps.CfgHolder.Load()
 	var req struct {
 		Name string `json:"name"`
 		URL  string `json:"url"` // bridge URL iOS will dial (e.g. https://host.local:7788)
@@ -556,7 +558,7 @@ func (s *Server) apiTokensMint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.URL == "" {
-		req.URL = defaultBridgeURL(s.deps.Cfg.ListenAddress)
+		req.URL = defaultBridgeURL(cfg.ListenAddress)
 	}
 
 	s.mu.Lock()
@@ -572,8 +574,8 @@ func (s *Server) apiTokensMint(w http.ResponseWriter, r *http.Request) {
 	// moment of pairing. Empty slice if enumeration fails — the
 	// operator-supplied primary URL is always the first entry, so the
 	// QR always pairs even on an interface-less environment.
-	alternates := ensurePrimaryFirst(req.URL, pairAlternates(req.URL, s.deps.Cfg.ListenAddress))
-	pairURL := buildPairURL(req.URL, rawToken, s.deps.Fingerprint, s.deps.Cfg.LibraryName, alternates)
+	alternates := ensurePrimaryFirst(req.URL, pairAlternates(req.URL, cfg.ListenAddress))
+	pairURL := buildPairURL(req.URL, rawToken, s.deps.Fingerprint, cfg.LibraryName, alternates)
 	qrData, err := qrDataURL(pairURL)
 	if err != nil {
 		// QR render failures don't block the pairing — the user can still
@@ -612,21 +614,22 @@ func (s *Server) apiTokensRevoke(w http.ResponseWriter, r *http.Request) {
 // --- GET /api/settings ---
 
 func (s *Server) apiSettingsGet(w http.ResponseWriter, r *http.Request) {
+	cfg := s.deps.CfgHolder.Load()
 	resp := settingsResponse{
-		LibraryName:              s.deps.Cfg.LibraryName,
-		ListenAddress:            s.deps.Cfg.ListenAddress,
-		AdminAddress:             s.deps.Cfg.AdminAddress,
-		DataDir:                  s.deps.Cfg.DataDir,
-		ScanIntervalSec:          s.deps.Cfg.ScanIntervalSec,
-		TLSCertPath:              s.deps.Cfg.TLSCertPath,
-		TLSKeyPath:               s.deps.Cfg.TLSKeyPath,
-		CustomEndpoints:          s.deps.Cfg.CustomEndpoints,
-		CustomEndpointsText:      strings.Join(s.deps.Cfg.CustomEndpoints, "\n"),
-		UpdateAutoInstall:        s.deps.Cfg.Update.AutoInstall,
-		UpdateQuietHours:         s.deps.Cfg.Update.QuietHours,
-		UpdateCheckIntervalHours: s.deps.Cfg.Update.CheckIntervalHours,
-		UpscaleEnabled:           s.deps.Cfg.Upscale.Enabled,
-		UpscaleStoragePath:       transcode.OutputDirFor(s.deps.Cfg.DataDir),
+		LibraryName:              cfg.LibraryName,
+		ListenAddress:            cfg.ListenAddress,
+		AdminAddress:             cfg.AdminAddress,
+		DataDir:                  cfg.DataDir,
+		ScanIntervalSec:          cfg.ScanIntervalSec,
+		TLSCertPath:              cfg.TLSCertPath,
+		TLSKeyPath:               cfg.TLSKeyPath,
+		CustomEndpoints:          cfg.CustomEndpoints,
+		CustomEndpointsText:      strings.Join(cfg.CustomEndpoints, "\n"),
+		UpdateAutoInstall:        cfg.Update.AutoInstall,
+		UpdateQuietHours:         cfg.Update.QuietHours,
+		UpdateCheckIntervalHours: cfg.Update.CheckIntervalHours,
+		UpscaleEnabled:           cfg.Upscale.Enabled,
+		UpscaleStoragePath:       transcode.OutputDirFor(cfg.DataDir),
 		IsSupervised:             s.deps.IsSupervised,
 		// Same backup fields the page-template handler emits
 		// (`pageSettings`). Without these the JSON API drops them
@@ -634,8 +637,8 @@ func (s *Server) apiSettingsGet(w http.ResponseWriter, r *http.Request) {
 		// caller (curl, future iOS / external tooling) sees a
 		// payload missing the retention policy values. Keep the
 		// two handlers in lockstep. (CodeRabbit on PR #129.)
-		BackupIntervalHours: s.deps.Cfg.Backup.EffectiveIntervalHours(),
-		BackupKeep:          s.deps.Cfg.Backup.EffectiveKeep(),
+		BackupIntervalHours: cfg.Backup.EffectiveIntervalHours(),
+		BackupKeep:          cfg.Backup.EffectiveKeep(),
 	}
 	// Probe sox availability so the Settings UI can warn the
 	// operator before they enable the feature. Cheap (one
@@ -690,37 +693,39 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	// Snapshot the current config so a failed Validate rolls us back cleanly.
-	backup := *s.deps.Cfg
+	cfg := s.deps.CfgHolder.Load()
+	next := config.Clone(cfg)
 	restart := false
 
 	if p.LibraryName != nil {
-		s.deps.Cfg.LibraryName = strings.TrimSpace(*p.LibraryName)
+		next.LibraryName = strings.TrimSpace(*p.LibraryName)
 		// Library name reaches iOS via /v1/health, which reads the live
 		// cfg each request — no restart needed.
 	}
 	if p.ListenAddress != nil {
-		if *p.ListenAddress != s.deps.Cfg.ListenAddress {
-			s.deps.Cfg.ListenAddress = *p.ListenAddress
+		if *p.ListenAddress != next.ListenAddress {
+			next.ListenAddress = *p.ListenAddress
 			restart = true
 		}
 	}
 	if p.AdminAddress != nil {
-		if *p.AdminAddress != s.deps.Cfg.AdminAddress {
-			s.deps.Cfg.AdminAddress = *p.AdminAddress
+		if *p.AdminAddress != next.AdminAddress {
+			next.AdminAddress = *p.AdminAddress
 			restart = true
 		}
 	}
 	if p.ScanIntervalSec != nil {
-		s.deps.Cfg.ScanIntervalSec = *p.ScanIntervalSec
-		// Periodic ticker picks up the new interval on the next tick; if
-		// users want it immediately they can hit "Scan now". Not worth a
-		// restart banner.
+		if *p.ScanIntervalSec != next.ScanIntervalSec {
+			next.ScanIntervalSec = *p.ScanIntervalSec
+			// scanner.RunPeriodic creates a static time.NewTicker at
+			// startup and never re-evaluates the interval; the new value
+			// only takes effect after a restart.
+			restart = true
+		}
 	}
 	if p.UpdateAutoInstall != nil {
-		if *p.UpdateAutoInstall != s.deps.Cfg.Update.AutoInstall {
-			s.deps.Cfg.Update.AutoInstall = *p.UpdateAutoInstall
+		if *p.UpdateAutoInstall != next.Update.AutoInstall {
+			next.Update.AutoInstall = *p.UpdateAutoInstall
 			// AutoInstall is wired into the updater at constructor
 			// time (cmd/bridge/main.go reads cfg.Update.AutoInstall
 			// once when building updater.Options). Toggling it at
@@ -729,14 +734,14 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if p.UpdateQuietHours != nil {
-		if *p.UpdateQuietHours != s.deps.Cfg.Update.QuietHours {
-			s.deps.Cfg.Update.QuietHours = *p.UpdateQuietHours
+		if *p.UpdateQuietHours != next.Update.QuietHours {
+			next.Update.QuietHours = *p.UpdateQuietHours
 			restart = true
 		}
 	}
 	if p.UpdateCheckIntervalHours != nil {
-		if *p.UpdateCheckIntervalHours != s.deps.Cfg.Update.CheckIntervalHours {
-			s.deps.Cfg.Update.CheckIntervalHours = *p.UpdateCheckIntervalHours
+		if *p.UpdateCheckIntervalHours != next.Update.CheckIntervalHours {
+			next.Update.CheckIntervalHours = *p.UpdateCheckIntervalHours
 			restart = true
 		}
 	}
@@ -750,8 +755,8 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 	// Cert SAN coverage for new entries is operator-driven via the
 	// admin Cert tile (PR feat/tls-broader-sans).
 	if p.UpscaleEnabled != nil {
-		if *p.UpscaleEnabled != s.deps.Cfg.Upscale.Enabled {
-			s.deps.Cfg.Upscale.Enabled = *p.UpscaleEnabled
+		if *p.UpscaleEnabled != next.Upscale.Enabled {
+			next.Upscale.Enabled = *p.UpscaleEnabled
 			// Pool / sox-precheck / api wiring happens once at
 			// `bridge serve` startup. A live flip would have to
 			// instantiate (or shut down) the Pool, change the
@@ -766,21 +771,20 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if p.CustomEndpoints != nil {
-		s.deps.Cfg.CustomEndpoints = *p.CustomEndpoints
+		next.CustomEndpoints = *p.CustomEndpoints
 	} else if p.CustomEndpointsText != nil {
-		s.deps.Cfg.CustomEndpoints = splitCustomEndpointsText(*p.CustomEndpointsText)
+		next.CustomEndpoints = splitCustomEndpointsText(*p.CustomEndpointsText)
 	}
 
-	if err := s.deps.Cfg.Validate(); err != nil {
-		*s.deps.Cfg = backup
+	if err := next.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, "validate", err.Error())
 		return
 	}
-	if err := s.deps.Cfg.Save(s.deps.CfgPath); err != nil {
-		*s.deps.Cfg = backup
+	if err := next.Save(s.deps.CfgPath); err != nil {
 		writeError(w, http.StatusInternalServerError, "save-config", err.Error())
 		return
 	}
+	s.deps.CfgHolder.Store(next)
 	writeJSON(w, http.StatusOK, settingsPatchResponse{RestartRequired: restart})
 }
 
@@ -855,8 +859,9 @@ type upscaleStatsResponse struct {
 // `cfg.Upscale.Enabled` from `/api/settings.upscaleEnabled`
 // separately for the toggle's initial state.
 func (s *Server) apiUpscaleStats(w http.ResponseWriter, r *http.Request) {
+	cfg := s.deps.CfgHolder.Load()
 	var resp upscaleStatsResponse
-	resp.StoragePath = transcode.OutputDirFor(s.deps.Cfg.DataDir)
+	resp.StoragePath = transcode.OutputDirFor(cfg.DataDir)
 	if avail := s.cachedSoxAvailability(); avail != nil {
 		resp.SoxAvailable = avail
 	}

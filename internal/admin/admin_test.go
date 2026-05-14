@@ -70,7 +70,7 @@ func newTestServer(t *testing.T) (*Server, *config.Config, string) {
 	})
 
 	srv, err := New(Deps{
-		Cfg:         cfg,
+		CfgHolder:   config.NewRuntimeConfig(cfg),
 		CfgPath:     cfgPath,
 		Auth:        astore,
 		Manifest:    mstore,
@@ -364,7 +364,7 @@ func TestRootsRemoveManifestFailureDoesNotCommitRoots(t *testing.T) {
 	if code := doJSON(t, h, "POST", "/api/roots", map[string]string{"path": extra}, nil); code != http.StatusCreated {
 		t.Fatalf("add root: %d", code)
 	}
-	rootsBefore := append([]string(nil), srv.deps.Cfg.LibraryRoots...)
+	rootsBefore := append([]string(nil), srv.deps.CfgHolder.Load().LibraryRoots...)
 
 	// Force DeleteTracksByPrefix to fail by closing the sqlite handle.
 	if err := srv.deps.Manifest.Close(); err != nil {
@@ -379,9 +379,9 @@ func TestRootsRemoveManifestFailureDoesNotCommitRoots(t *testing.T) {
 	}
 
 	// In-memory config still holds the pre-request roots.
-	if !stringSlicesEqual(srv.deps.Cfg.LibraryRoots, rootsBefore) {
+	if !stringSlicesEqual(srv.deps.CfgHolder.Load().LibraryRoots, rootsBefore) {
 		t.Errorf("Cfg.LibraryRoots mutated on manifest failure: got %v, want %v",
-			srv.deps.Cfg.LibraryRoots, rootsBefore)
+			srv.deps.CfgHolder.Load().LibraryRoots, rootsBefore)
 	}
 	// On-disk config matches too — no phantom-state window.
 	reloaded, err := config.Load(cfgPath)
@@ -421,7 +421,7 @@ func TestRootsRemoveSaveFailureRollsBackInMemory(t *testing.T) {
 	if code := doJSON(t, h, "POST", "/api/roots", map[string]string{"path": extra}, nil); code != http.StatusCreated {
 		t.Fatalf("add root: %d", code)
 	}
-	rootsBefore := append([]string(nil), srv.deps.Cfg.LibraryRoots...)
+	rootsBefore := append([]string(nil), srv.deps.CfgHolder.Load().LibraryRoots...)
 
 	// Make the config directory read-only so Cfg.Save's atomic-
 	// write-then-rename pattern can't land the new file. Reverted in
@@ -440,9 +440,9 @@ func TestRootsRemoveSaveFailureRollsBackInMemory(t *testing.T) {
 		t.Fatalf("save failure: got %d, want 500", code)
 	}
 
-	if !stringSlicesEqual(srv.deps.Cfg.LibraryRoots, rootsBefore) {
+	if !stringSlicesEqual(srv.deps.CfgHolder.Load().LibraryRoots, rootsBefore) {
 		t.Errorf("Cfg.LibraryRoots not rolled back on Save failure: got %v, want %v",
-			srv.deps.Cfg.LibraryRoots, rootsBefore)
+			srv.deps.CfgHolder.Load().LibraryRoots, rootsBefore)
 	}
 	// Mirror on-disk assertion — same rationale as the Add Save-failure
 	// test. A failed Save must leave no observable state change.
@@ -468,7 +468,7 @@ func TestRootsAddSaveFailureRollsBackInMemory(t *testing.T) {
 	srv, cfg, cfgPath := newTestServer(t)
 	h := srv.Handler()
 
-	rootsBefore := append([]string(nil), srv.deps.Cfg.LibraryRoots...)
+	rootsBefore := append([]string(nil), srv.deps.CfgHolder.Load().LibraryRoots...)
 
 	// New root we're about to try to add.
 	extra := filepath.Join(filepath.Dir(cfg.DataDir), "ExtraAdd")
@@ -489,9 +489,9 @@ func TestRootsAddSaveFailureRollsBackInMemory(t *testing.T) {
 		t.Fatalf("save failure: got %d, want 500", code)
 	}
 
-	if !stringSlicesEqual(srv.deps.Cfg.LibraryRoots, rootsBefore) {
+	if !stringSlicesEqual(srv.deps.CfgHolder.Load().LibraryRoots, rootsBefore) {
 		t.Errorf("Cfg.LibraryRoots not rolled back on Save failure: got %v, want %v",
-			srv.deps.Cfg.LibraryRoots, rootsBefore)
+			srv.deps.CfgHolder.Load().LibraryRoots, rootsBefore)
 	}
 	// On-disk config must also match — the in-memory slice could be
 	// rolled back while a half-written file still lived on disk.
@@ -563,8 +563,8 @@ func TestSettingsPatchValidationRollsBack(t *testing.T) {
 	if code != http.StatusBadRequest {
 		t.Errorf("bad admin addr: got %d, want 400", code)
 	}
-	if srv.deps.Cfg.AdminAddress != "127.0.0.1:7789" {
-		t.Errorf("admin addr leaked through: %q", srv.deps.Cfg.AdminAddress)
+	if srv.deps.CfgHolder.Load().AdminAddress != "127.0.0.1:7789" {
+		t.Errorf("admin addr leaked through: %q", srv.deps.CfgHolder.Load().AdminAddress)
 	}
 }
 
@@ -586,7 +586,7 @@ func TestSettingsPatchUpscaleEnabled(t *testing.T) {
 	if !resp.RestartRequired {
 		t.Error("upscaleEnabled change must mark restart required (Pool wired at constructor time)")
 	}
-	if !srv.deps.Cfg.Upscale.Enabled {
+	if !srv.deps.CfgHolder.Load().Upscale.Enabled {
 		t.Error("in-memory cfg did not reflect upscale.enabled=true")
 	}
 
@@ -663,7 +663,10 @@ func TestUpscaleStatsHandler(t *testing.T) {
 			Enqueued: 100, Done: 86, Failed: 1,
 		}
 	}
-	srv.deps.Cfg.Upscale.Enabled = true
+	cur := srv.deps.CfgHolder.Load()
+	next := config.Clone(cur)
+	next.Upscale.Enabled = true
+	srv.deps.CfgHolder.Store(next)
 
 	got = upscaleStatsResponse{}
 	code = doJSON(t, h, "GET", "/api/upscale/stats", nil, &got)

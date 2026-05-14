@@ -126,6 +126,7 @@ type adminUpscaleTargetRequest struct {
 
 // apiUpscaleTargetGet handles GET /api/upscale/target.
 func (s *Server) apiUpscaleTargetGet(w http.ResponseWriter, r *http.Request) {
+	cfg := s.deps.CfgHolder.Load()
 	if s.deps.Manifest == nil {
 		writeError(w, http.StatusServiceUnavailable, "no-manifest",
 			"manifest store is not configured")
@@ -144,8 +145,8 @@ func (s *Server) apiUpscaleTargetGet(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "read-target", err.Error())
 			return
 		}
-		rate = s.deps.Cfg.Upscale.EffectiveBootstrapTargetRate()
-		bits = s.deps.Cfg.Upscale.EffectiveBootstrapTargetBits()
+			rate = cfg.Upscale.EffectiveBootstrapTargetRate()
+			bits = cfg.Upscale.EffectiveBootstrapTargetBits()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"targetRate": rate,
@@ -186,8 +187,9 @@ func (s *Server) apiUpscaleTargetPatch(w http.ResponseWriter, r *http.Request) {
 // regardless of whether the pool itself is running; mirrors
 // `/api/upscale/stats.storagePath`.
 func (s *Server) pageLibraryInspector(w http.ResponseWriter, r *http.Request) {
+	cfg := s.deps.CfgHolder.Load()
 	s.renderPage(w, "library_inspector", map[string]any{
-		"UpscaleStoragePath": transcode.OutputDirFor(s.deps.Cfg.DataDir),
+		"UpscaleStoragePath": transcode.OutputDirFor(cfg.DataDir),
 	})
 }
 

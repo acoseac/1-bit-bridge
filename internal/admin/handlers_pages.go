@@ -36,6 +36,7 @@ type pageData struct {
 }
 
 func (s *Server) renderPage(w http.ResponseWriter, active string, data any) {
+	cfg := s.deps.CfgHolder.Load()
 	t, ok := s.pageTmpls[active]
 	if !ok {
 		http.Error(w, "unknown page", http.StatusInternalServerError)
@@ -45,7 +46,7 @@ func (s *Server) renderPage(w http.ResponseWriter, active string, data any) {
 	w.Header().Set("Cache-Control", "no-store")
 	envelope := pageData{
 		ActiveTab:       active,
-		LibraryName:     s.deps.Cfg.LibraryName,
+		LibraryName:     cfg.LibraryName,
 		Fingerprint:     s.deps.Fingerprint,
 		ServerVersion:   version.ServerVersion,
 		ProtocolVersion: version.ProtocolVersion,
@@ -57,8 +58,9 @@ func (s *Server) renderPage(w http.ResponseWriter, active string, data any) {
 }
 
 func (s *Server) pageDashboard(w http.ResponseWriter, r *http.Request) {
+	cfg := s.deps.CfgHolder.Load()
 	tracks, _ := s.deps.Manifest.CountTracks(r.Context())
-	dbBytes := dbSize(filepath.Join(s.deps.Cfg.DataDir, "bridge.db"))
+	dbBytes := dbSize(filepath.Join(cfg.DataDir, "bridge.db"))
 	data := map[string]any{
 		"Uptime":        time.Since(s.deps.StartedAt),
 		"StartedAt":     s.deps.StartedAt,
@@ -111,6 +113,7 @@ func (s *Server) pageLibrary(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) pageDevices(w http.ResponseWriter, r *http.Request) {
+	cfg := s.deps.CfgHolder.Load()
 	tokens := s.deps.Auth.List()
 	rows := make([]tokenRow, 0, len(tokens))
 	for _, t := range tokens {
@@ -121,30 +124,31 @@ func (s *Server) pageDevices(w http.ResponseWriter, r *http.Request) {
 	}
 	data := map[string]any{
 		"Tokens":     rows,
-		"DefaultURL": defaultBridgeURL(s.deps.Cfg.ListenAddress),
+		"DefaultURL": defaultBridgeURL(cfg.ListenAddress),
 	}
 	s.renderPage(w, "devices", data)
 }
 
 func (s *Server) pageSettings(w http.ResponseWriter, r *http.Request) {
+	cfg := s.deps.CfgHolder.Load()
 	data := settingsResponse{
-		LibraryName:              s.deps.Cfg.LibraryName,
-		ListenAddress:            s.deps.Cfg.ListenAddress,
-		AdminAddress:             s.deps.Cfg.AdminAddress,
-		DataDir:                  s.deps.Cfg.DataDir,
-		ScanIntervalSec:          s.deps.Cfg.ScanIntervalSec,
-		TLSCertPath:              s.deps.Cfg.TLSCertPath,
-		TLSKeyPath:               s.deps.Cfg.TLSKeyPath,
-		CustomEndpoints:          s.deps.Cfg.CustomEndpoints,
-		CustomEndpointsText:      strings.Join(s.deps.Cfg.CustomEndpoints, "\n"),
-		UpdateAutoInstall:        s.deps.Cfg.Update.AutoInstall,
-		UpdateQuietHours:         s.deps.Cfg.Update.QuietHours,
-		UpdateCheckIntervalHours: s.deps.Cfg.Update.CheckIntervalHours,
-		UpscaleEnabled:           s.deps.Cfg.Upscale.Enabled,
-		UpscaleStoragePath:       transcode.OutputDirFor(s.deps.Cfg.DataDir),
+		LibraryName:              cfg.LibraryName,
+		ListenAddress:            cfg.ListenAddress,
+		AdminAddress:             cfg.AdminAddress,
+		DataDir:                  cfg.DataDir,
+		ScanIntervalSec:          cfg.ScanIntervalSec,
+		TLSCertPath:              cfg.TLSCertPath,
+		TLSKeyPath:               cfg.TLSKeyPath,
+		CustomEndpoints:          cfg.CustomEndpoints,
+		CustomEndpointsText:      strings.Join(cfg.CustomEndpoints, "\n"),
+		UpdateAutoInstall:        cfg.Update.AutoInstall,
+		UpdateQuietHours:         cfg.Update.QuietHours,
+		UpdateCheckIntervalHours: cfg.Update.CheckIntervalHours,
+		UpscaleEnabled:           cfg.Upscale.Enabled,
+		UpscaleStoragePath:       transcode.OutputDirFor(cfg.DataDir),
 		IsSupervised:             s.deps.IsSupervised,
-		BackupIntervalHours:      s.deps.Cfg.Backup.EffectiveIntervalHours(),
-		BackupKeep:               s.deps.Cfg.Backup.EffectiveKeep(),
+		BackupIntervalHours:      cfg.Backup.EffectiveIntervalHours(),
+		BackupKeep:               cfg.Backup.EffectiveKeep(),
 	}
 	// v1.2 Audio quality section: pre-compute the boolean +
 	// install hint so the template doesn't need a `deref`

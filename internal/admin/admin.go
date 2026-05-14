@@ -61,8 +61,8 @@ var staticFS embed.FS
 // Deps bundles the runtime state the admin console reads and mutates. All
 // fields are required unless marked optional.
 type Deps struct {
-	Cfg      *config.Config // mutable — admin edits in place and calls Save(CfgPath)
-	CfgPath  string         // path to bridge.yaml, for Cfg.Save()
+	CfgHolder *config.RuntimeConfig // live config snapshot holder
+	CfgPath   string                // path to bridge.yaml, for Config.Save()
 	Auth     *auth.Store    // token list / mint / revoke
 	Manifest *manifest.Store
 	Scanner  *manifest.Scanner
@@ -471,6 +471,14 @@ type Server struct {
 	soxAvailabilityMu sync.Mutex
 	soxAvailability   bool
 	soxAvailabilityAt time.Time
+
+	// boundAdminAddr is the address the TCP listener was actually
+	// bound to, recorded in Serve() once net.Listen succeeds. It is
+	// used by originMatchesAdmin() so that CSRF validation reflects
+	// the port the server is *currently* listening on rather than
+	// the AdminAddress value in the live config (which may have been
+	// updated via a PATCH before a restart).
+	boundAdminAddr string
 }
 
 // pages maps the URL-friendly page name to its template filename.
@@ -487,8 +495,8 @@ var pages = map[string]string{
 // ListenAndServe, or Serve to run a background listener with graceful
 // shutdown.
 func New(deps Deps) (*Server, error) {
-	if deps.Cfg == nil || deps.CfgPath == "" {
-		return nil, fmt.Errorf("admin: Cfg and CfgPath are required")
+	if deps.CfgHolder == nil || deps.CfgHolder.Load() == nil || deps.CfgPath == "" {
+		return nil, fmt.Errorf("admin: CfgHolder and CfgPath are required")
 	}
 	if deps.Auth == nil || deps.Manifest == nil || deps.Scanner == nil || deps.Resolver == nil {
 		return nil, fmt.Errorf("admin: Auth, Manifest, Scanner, Resolver are required")
@@ -611,7 +619,8 @@ func (s *Server) spawnBackgroundScan(label string) {
 // Returns on listener error or after graceful shutdown. Intended for
 // serveCmd; tests should use Handler + httptest.
 func (s *Server) Serve(ctx context.Context) error {
-	addr := s.deps.Cfg.AdminAddress
+	cfg := s.deps.CfgHolder.Load()
+	addr := cfg.AdminAddress
 	if addr == "" {
 		addr = config.DefaultAdminAddress
 	}
@@ -619,6 +628,7 @@ func (s *Server) Serve(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("admin listen %s: %w", addr, err)
 	}
+	s.boundAdminAddr = lis.Addr().String()
 	srv := &http.Server{
 		Handler: s.Handler(),
 		// BaseContext derives every request's r.Context() from the
@@ -807,9 +817,18 @@ func (s *Server) originMatchesAdmin(origin string) bool {
 			return false
 		}
 	}
-	adminAddr := s.deps.Cfg.AdminAddress
+	// Use the address the listener was actually bound to so that a
+	// pending config change (AdminAddress PATCH before restart) does
+	// not shift the CSRF allowlist while the server is still on the
+	// old port. Fall back to the live config only if boundAdminAddr
+	// is not yet set (defensive; should not happen in practice).
+	adminAddr := s.boundAdminAddr
 	if adminAddr == "" {
-		adminAddr = config.DefaultAdminAddress
+		cfg := s.deps.CfgHolder.Load()
+		adminAddr = cfg.AdminAddress
+		if adminAddr == "" {
+			adminAddr = config.DefaultAdminAddress
+		}
 	}
 	adminHost, adminPort, err := net.SplitHostPort(adminAddr)
 	if err != nil {

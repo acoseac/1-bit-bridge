@@ -67,7 +67,7 @@ func newPairingTestServer(t *testing.T, fingerprint string) (*Server, http.Handl
 	scanCtx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	srv, err := New(Deps{
-		Cfg:         cfg,
+		CfgHolder:   config.NewRuntimeConfig(cfg),
 		CfgPath:     cfgPath,
 		Auth:        astore,
 		Manifest:    mstore,
@@ -194,7 +194,7 @@ func TestApiPairingListNilStore(t *testing.T) {
 	scanner := manifest.NewScanner(cfg.LibraryRoots, mstore, "")
 	resolver := bridgefs.New(cfg.LibraryRoots)
 	srv, err := New(Deps{
-		Cfg: cfg, CfgPath: cfgPath, Auth: astore, Manifest: mstore,
+		CfgHolder: config.NewRuntimeConfig(cfg), CfgPath: cfgPath, Auth: astore, Manifest: mstore,
 		Scanner: scanner, Resolver: resolver,
 		Fingerprint: "FP", StartedAt: time.Now(), Restart: func() {},
 		ScanCtx: context.Background(),

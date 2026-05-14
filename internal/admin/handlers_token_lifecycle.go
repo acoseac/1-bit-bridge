@@ -42,6 +42,7 @@ func decodeOptionalJSONBody(w http.ResponseWriter, r *http.Request, dst any) (ok
 // row identity but produces a fresh secret on every call.
 func (s *Server) apiTokensRotate(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	cfg := s.deps.CfgHolder.Load()
 
 	// Optional body for a re-pair URL override — mirrors apiTokensMint.
 	// Empty / absent body falls back to the operator-default URL the
@@ -53,7 +54,7 @@ func (s *Server) apiTokensRotate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.URL == "" {
-		req.URL = defaultBridgeURL(s.deps.Cfg.ListenAddress)
+		req.URL = defaultBridgeURL(cfg.ListenAddress)
 	}
 
 	s.mu.Lock()
@@ -69,8 +70,8 @@ func (s *Server) apiTokensRotate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	alternates := ensurePrimaryFirst(req.URL, pairAlternates(req.URL, s.deps.Cfg.ListenAddress))
-	pairURL := buildPairURL(req.URL, rawToken, s.deps.Fingerprint, s.deps.Cfg.LibraryName, alternates)
+	alternates := ensurePrimaryFirst(req.URL, pairAlternates(req.URL, cfg.ListenAddress))
+	pairURL := buildPairURL(req.URL, rawToken, s.deps.Fingerprint, cfg.LibraryName, alternates)
 	qrData, err := qrDataURL(pairURL)
 	if err != nil {
 		// QR render failures don't block the rotate — operator can
