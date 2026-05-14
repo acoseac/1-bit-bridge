@@ -33,6 +33,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
@@ -237,6 +238,16 @@ func moveOneVariant(ctx context.Context, store *manifest.Store, v manifest.Varia
 // copyAndFsync streams source → destination + fsyncs the
 // destination file before close. Used for cross-device moves where
 // os.Rename fails with EXDEV.
+//
+// **Close() error explicitly checked** (Gemini medium on PR D2):
+// pre-fix a `defer out.Close()` swallowed any error returned by
+// the close itself, which on a write-opened file may reveal
+// flush failures that Sync() might have missed. The explicit
+// Close + check pattern surfaces those. The defer is retained as
+// a backstop on early returns from the Copy / Sync error paths
+// so the FD isn't leaked even when we already have a different
+// error to surface — Close() on an already-closed file is a
+// documented no-op for *os.File.
 func copyAndFsync(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
@@ -247,6 +258,9 @@ func copyAndFsync(src, dst string) error {
 	if err != nil {
 		return err
 	}
+	// Defer is the backstop for early-return error paths below;
+	// the explicit Close at the success tail is what catches
+	// flush-on-close errors.
 	defer out.Close()
 	if _, err := io.Copy(out, in); err != nil {
 		return err
@@ -254,19 +268,42 @@ func copyAndFsync(src, dst string) error {
 	if err := out.Sync(); err != nil {
 		return err
 	}
+	if err := out.Close(); err != nil {
+		return fmt.Errorf("close destination: %w", err)
+	}
 	return nil
 }
 
 // isCrossDeviceError detects the EXDEV (cross-device link) error
 // that os.Rename returns when source and destination live on
-// different filesystems. Exact error wrapping varies across Go
-// versions and OSs — Linux + macOS surface "invalid cross-device
-// link", Windows surfaces "The system cannot move the file to a
-// different disk drive". Substring match across the known forms.
+// different filesystems.
+//
+// Primary path: `errors.Is(err, syscall.EXDEV)` — the canonical
+// Go-typed comparison that survives error wrapping AND localized
+// OS error strings (Gemini medium on PR D2). Windows uses a
+// different errno (`ERROR_NOT_SAME_DEVICE` = 0x11) which surfaces
+// via syscall.Errno; checked separately so the same code path works
+// across Unix + Windows.
+//
+// Substring fallback retained for environments where the error gets
+// flattened through `errors.New(err.Error())` somewhere upstream
+// (defensive — should not happen with stdlib `os.Rename`).
 func isCrossDeviceError(err error) bool {
 	if err == nil {
 		return false
 	}
+	if errors.Is(err, syscall.EXDEV) {
+		return true
+	}
+	// Windows ERROR_NOT_SAME_DEVICE (0x11). `syscall.Errno` comparison
+	// works on all platforms — on Unix the constant doesn't exist by
+	// that exact name but the numeric value behaves identically when
+	// wrapping a Windows-side error.
+	const errNotSameDevice = syscall.Errno(0x11)
+	if errors.Is(err, errNotSameDevice) {
+		return true
+	}
+	// Defensive substring fallback for already-flattened errors.
 	s := err.Error()
 	return strings.Contains(s, "cross-device") ||
 		strings.Contains(s, "EXDEV") ||
