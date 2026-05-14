@@ -184,6 +184,24 @@ func (s *Server) rateLimitManifest(next http.HandlerFunc) http.HandlerFunc {
 			next(w, r)
 			return
 		}
+		// Paginated requests are inherently client-paced: the iOS app
+		// pulls the next page only after parsing the prior one (each
+		// page returns up to 1000 tracks; a 50k-track library is ~50
+		// HTTP round-trips). Burst budget — tuned for "a single
+		// full-manifest re-pull after an offline window" — is exhausted
+		// after 3 pages, then every subsequent page 429s and the
+		// rescan terminates because iOS surfaces 429 as a transport
+		// error and does not retry. The limiter's stated purpose is
+		// defense against a misbehaving client issuing repeated
+		// full-manifest dumps; paginated streams are NOT that traffic
+		// shape (they're already paced by per-page processing time),
+		// so exempting them is correct. Single-shot /v1/manifest with
+		// no query params still pays the limit.
+		q := r.URL.Query()
+		if q.Has("cursor") || q.Has("limit") {
+			next(w, r)
+			return
+		}
 		tokenID := tokenIDFromContext(r.Context())
 		if tokenID == "" {
 			next(w, r)

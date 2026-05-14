@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -219,6 +220,56 @@ func TestRateLimitManifestMiddleware_PerClientIsolation(t *testing.T) {
 	}
 }
 
+// TestRateLimitManifestMiddleware_PaginationBypass: paginated requests
+// (those carrying ?cursor= or ?limit=) are inherently client-paced —
+// the iOS app pulls the next page only after parsing the prior one —
+// so they're exempt from the bucket. A 50k-track library is ~50
+// pages, far above any reasonable burst budget; without this bypass
+// the limiter terminates legitimate paginated full-rescans after the
+// first few pages and iOS surfaces it as a transport error.
+//
+// Burst=1 here so the underlying limiter would 429 any 2nd unmarked
+// call. The pagination calls must succeed regardless.
+func TestRateLimitManifestMiddleware_PaginationBypass(t *testing.T) {
+	srv, raw, _ := newRateLimitedTestServer(t, 60, 1)
+	defer srv.Close()
+
+	// 10 sequential paginated requests with ?cursor=...; none should
+	// trip the limiter. Provider is nil → 503 from the handler — we
+	// only care that NONE come back as 429.
+	for i := 0; i < 10; i++ {
+		resp := manifestRequestWithQuery(t, srv, raw, fmt.Sprintf("cursor=page-%d", i))
+		if resp.StatusCode == http.StatusTooManyRequests {
+			resp.Body.Close()
+			t.Fatalf("cursor request %d should bypass rate limit, got 429", i)
+		}
+		resp.Body.Close()
+	}
+
+	// 10 more with ?limit=1000; same expectation. Exercises the OR
+	// branch of the bypass gate independently.
+	for i := 0; i < 10; i++ {
+		resp := manifestRequestWithQuery(t, srv, raw, "limit=1000")
+		if resp.StatusCode == http.StatusTooManyRequests {
+			resp.Body.Close()
+			t.Fatalf("limit request %d should bypass rate limit, got 429", i)
+		}
+		resp.Body.Close()
+	}
+
+	// And finally — a NON-paginated request still pays the limit.
+	// First call burns the burst (passes); the second-back-to-back
+	// no-params call must 429. Confirms the bypass is targeted, not
+	// a blanket disable.
+	resp := manifestRequest(t, srv, raw)
+	resp.Body.Close()
+	resp = manifestRequest(t, srv, raw)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("no-query 2nd call should still 429, got %d", resp.StatusCode)
+	}
+}
+
 // TestRateLimitManifestMiddleware_DisabledFallsOpen: rpm=0 in config
 // disables the limiter and every call passes through.
 func TestRateLimitManifestMiddleware_DisabledFallsOpen(t *testing.T) {
@@ -284,6 +335,23 @@ func mintToken(t *testing.T, store *auth.Store, name string) string {
 func manifestRequest(t *testing.T, hs *httptest.Server, raw string) *http.Response {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodGet, hs.URL+"/v1/manifest", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+raw)
+	resp, err := hs.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+// manifestRequestWithQuery is the same as manifestRequest but appends
+// arbitrary query parameters. Used by the pagination-bypass test to
+// exercise the `?cursor=` / `?limit=` exemption.
+func manifestRequestWithQuery(t *testing.T, hs *httptest.Server, raw, query string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, hs.URL+"/v1/manifest?"+query, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
