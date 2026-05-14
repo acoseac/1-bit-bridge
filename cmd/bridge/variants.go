@@ -101,30 +101,9 @@ func variantsMoveCmd(ctx context.Context, args []string, stdout, stderr io.Write
 		fmt.Fprintf(stderr, "config load: %v\n", err)
 		return 2
 	}
-	// Same validation the runtime config-load applies, mirrored
-	// inline so the CLI surfaces a friendly error before touching
-	// any DB / disk state. The containment check rejects any path
-	// AT or UNDER a library root.
-	//
-	// Pre-fix the predicate used `rel[0] != '.'` which slipped two
-	// classes of inputs past: `rel == "."` (destination identical to
-	// the root) and `rel == ".cache/sub"` (a literal-dot-prefixed
-	// child). CodeRabbit Major on PR #245. The
-	// `!HasPrefix(rel, ".."+sep)` check matches the same shape that
-	// `config.validateVariantsDir` uses — both must stay aligned.
-	for _, root := range cfg.LibraryRoots {
-		if root == "" {
-			continue
-		}
-		cleanedRoot := filepath.Clean(root)
-		rel, rerr := filepath.Rel(cleanedRoot, filepath.Clean(*to))
-		if rerr != nil {
-			continue // different volumes on Windows; can't be nested.
-		}
-		if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			fmt.Fprintf(stderr, "--to must not be under library root %q\n", cleanedRoot)
-			return 2
-		}
+	if conflictingRoot := isUnderAnyLibraryRoot(*to, cfg.LibraryRoots); conflictingRoot != "" {
+		fmt.Fprintf(stderr, "--to must not be under library root %q\n", conflictingRoot)
+		return 2
 	}
 
 	store, err := manifest.OpenStore(manifest.DefaultDBPath(cfg.DataDir))
@@ -332,4 +311,33 @@ func isCrossDeviceError(err error) bool {
 		strings.Contains(s, "EXDEV") ||
 		strings.Contains(s, "different file system") ||
 		strings.Contains(s, "different disk drive")
+}
+
+// isUnderAnyLibraryRoot returns the first library root that `to`
+// resolves at OR under. Returns "" when `to` is safely outside
+// every root (or when every Rel() returns a cross-volume error).
+//
+// Pure helper extracted from variantsMoveCmd so the predicate can
+// be table-tested. Mirrors `config.validateVariantsDir`'s shape:
+// "rel == '..'" / "rel starts with '..'+sep" means the destination
+// is OUTSIDE the root; anything else (including `rel == "."` for
+// equal-to-root AND `rel == ".cache/..."` for dot-prefixed subs)
+// means AT-OR-UNDER. Gemini medium on PR #246 asked for regression
+// coverage on the dot-prefixed cases that pre-fix passed through.
+func isUnderAnyLibraryRoot(to string, libraryRoots []string) string {
+	cleanedTo := filepath.Clean(to)
+	for _, root := range libraryRoots {
+		if root == "" {
+			continue
+		}
+		cleanedRoot := filepath.Clean(root)
+		rel, err := filepath.Rel(cleanedRoot, cleanedTo)
+		if err != nil {
+			continue // cross-volume on Windows; can't be nested.
+		}
+		if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return cleanedRoot
+		}
+	}
+	return ""
 }

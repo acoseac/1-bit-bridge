@@ -42,6 +42,55 @@ func TestBuildFTSMatchExpr(t *testing.T) {
 	}
 }
 
+// TestSearchTracksLimitHardCapped pins the manifest-layer slice
+// allocation cap (CodeQL Sec/HIGH on PR #243, hard cap added in
+// PR #246). A caller-supplied `limit` above 500 must be clamped
+// to 500 so the result-slice make() can't blow up memory. Gemini
+// medium on PR #246 asked for regression coverage.
+//
+// Seeds 510 tracks and queries with limit=10000. Result must be
+// exactly 500 (not 510, not 10000).
+func TestSearchTracksLimitHardCapped(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	for i := 0; i < 510; i++ {
+		tk := Track{
+			Path: filepath.Join("Album", "Foo", "track-"+itoaN(i)+".flac"),
+			Size: 100, ModTime: now,
+			Title:  "Foo " + itoaN(i),
+			Artist: "Foo Artist",
+			Album:  "Foo Album",
+		}
+		if err := s.UpsertTrack(ctx, &tk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hits, err := s.SearchTracks(ctx, "foo", 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 500 {
+		t.Errorf("limit cap: got %d hits, want exactly 500", len(hits))
+	}
+}
+
+// itoaN is a tiny non-allocating integer→string for test fixture
+// names. strconv.Itoa pulls in the strconv import just for one
+// per-test loop, and the test only needs ASCII digits.
+func itoaN(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	out := make([]byte, 0, 4)
+	for n > 0 {
+		out = append([]byte{byte('0' + n%10)}, out...)
+		n /= 10
+	}
+	return string(out)
+}
+
 // TestSplitFTSTokens covers the lower-level tokeniser independently
 // of MATCH-string construction. Catches regressions where alnum
 // classification changes (e.g. switching from `unicode.IsLetter` to
