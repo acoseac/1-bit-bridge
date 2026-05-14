@@ -176,26 +176,26 @@ func (s *Server) probeVariantsDirUsage(ctx context.Context, dir string) (int64, 
 //
 // Used by the UI to surface "Migrate legacy variants (N)" only
 // when there's actually something to migrate.
+//
+// Implementation routes through `Manifest.CountVariantsNotUnderPrefix`,
+// a single SQL aggregate. Pre-fix this helper fetched every variant
+// into Go-side memory and iterated — inefficient at 50k+ variants
+// AND run while holding `s.mu` in apiVariantsDirPatch (Gemini medium
+// on PR D2). The SQL path is bounded to a single index range scan +
+// aggregate.
 func (s *Server) countLegacyVariants(ctx context.Context, currentDir string) (int, int64) {
 	if currentDir == "" {
 		return 0, 0
 	}
-	currClean := filepath.Clean(currentDir) + string(filepath.Separator)
-	all, err := s.deps.Manifest.AllVariants(ctx)
+	// Pattern: descendants of `currentDir` start with `currentDir + sep`.
+	// `NOT LIKE` against that prefix excludes them; everything else is
+	// legacy. Trailing separator prevents false matches on a sibling
+	// directory with the same name prefix (e.g. /a/transcoded vs
+	// /a/transcoded2).
+	prefix := filepath.Clean(currentDir) + string(filepath.Separator)
+	count, bytes, err := s.deps.Manifest.CountVariantsNotUnderPrefix(ctx, prefix)
 	if err != nil {
 		return 0, 0
-	}
-	var count int
-	var bytes int64
-	for _, v := range all {
-		// A variant is "legacy" iff its sidecar_path doesn't sit
-		// under the current variants directory. Includes BOTH the
-		// hash-flat variants in the old `transcoded/` dir AND any
-		// variants left behind after a previous variants_dir change.
-		if !strings.HasPrefix(filepath.Clean(v.SidecarPath)+string(filepath.Separator), currClean) {
-			count++
-			bytes += v.SizeBytes
-		}
 	}
 	return count, bytes
 }

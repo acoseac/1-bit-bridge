@@ -3059,12 +3059,55 @@ func (s *Store) UpdateVariantSidecarPath(ctx context.Context, sourcePath, varian
 	if err != nil {
 		return fmt.Errorf("update variant sidecar_path: %w", err)
 	}
-	n, _ := res.RowsAffected()
+	// Check RowsAffected error explicitly (Gemini medium on PR D2):
+	// an unchecked `res.RowsAffected()` that errors would silently
+	// surface as `sql.ErrNoRows` via the n == 0 fall-through,
+	// masking the real driver-level failure.
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
 	if n == 0 {
 		return fmt.Errorf("variant row not found for source=%q variant=%q: %w",
 			sourcePath, variantID, sql.ErrNoRows)
 	}
 	return nil
+}
+
+// CountVariantsNotUnderPrefix returns (count, totalSizeBytes) of
+// variants whose sidecar_path is NOT a descendant of `prefix`. Used
+// by the admin variants-dir endpoint to surface a "Migrate legacy
+// variants (N)" affordance without dragging every row into memory.
+//
+// `prefix` MUST end with the platform path separator so the LIKE
+// pattern matches only true descendants (`/data/transcoded/` matches
+// `/data/transcoded/foo.flac` but not `/data/transcoded2/...`). Empty
+// `prefix` returns the total count + size (every variant is "not
+// under empty").
+//
+// Implemented as a single COALESCE-aggregate query — O(rows scanned)
+// inside SQLite vs the prior in-Go AllVariants + loop approach which
+// allocated every VariantRow into the admin handler's working set
+// while holding `s.mu`. Gemini medium on PR D2.
+func (s *Store) CountVariantsNotUnderPrefix(ctx context.Context, prefix string) (int, int64, error) {
+	// Escape LIKE metacharacters (% and _) in the prefix so a literal
+	// underscore in the operator's path doesn't false-match. The
+	// existing `likeEscape` helper handles the prefix sanitisation
+	// the rest of the manifest already uses.
+	pattern := likeEscape(prefix) + `%`
+	var (
+		count int
+		bytes sql.NullInt64
+	)
+	row := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*), COALESCE(SUM(size_bytes), 0)
+		  FROM track_variants
+		 WHERE sidecar_path NOT LIKE ? ESCAPE '\'
+	`, pattern)
+	if err := row.Scan(&count, &bytes); err != nil {
+		return 0, 0, fmt.Errorf("count variants not under prefix: %w", err)
+	}
+	return count, bytes.Int64, nil
 }
 
 // CountVariants returns (rowCount, totalSizeBytes) across the

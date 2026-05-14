@@ -61,6 +61,59 @@ func TestUpdateVariantSidecarPathRoundTrip(t *testing.T) {
 	}
 }
 
+// TestCountVariantsNotUnderPrefix confirms the SQL-aggregate
+// replacement for the prior in-Go AllVariants walk: variants
+// under the prefix are excluded, anything elsewhere is counted.
+//
+// Trailing-separator requirement: `/tmp/new` is a sibling of
+// `/tmp/new2`; callers must pass a trailing separator so the LIKE
+// pattern doesn't false-match a co-named sibling directory.
+func TestCountVariantsNotUnderPrefix(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, name := range []string{"A.flac", "B.flac", "C.flac"} {
+		if err := s.UpsertTrack(ctx, &Track{
+			Path: filepath.Join("Album", name), Size: 100, ModTime: now,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fixtures := []VariantRow{
+		{SourcePath: filepath.Join("Album", "A.flac"), VariantID: "upscaled-v2-176400-24",
+			SidecarPath: "/tmp/new/Album/A.flac.upscaled-v2-176400-24.flac",
+			Format:      "flac", SampleRate: 176400, BitsPerSample: 24, SizeBytes: 100, CreatedAt: now.UnixNano()},
+		{SourcePath: filepath.Join("Album", "B.flac"), VariantID: "upscaled-v2-176400-24",
+			SidecarPath: "/tmp/new/Album/B.flac.upscaled-v2-176400-24.flac",
+			Format:      "flac", SampleRate: 176400, BitsPerSample: 24, SizeBytes: 200, CreatedAt: now.UnixNano()},
+		{SourcePath: filepath.Join("Album", "C.flac"), VariantID: "upscaled-v2-176400-24",
+			SidecarPath: "/tmp/old/Album/C.flac.upscaled-v2-176400-24.flac",
+			Format:      "flac", SampleRate: 176400, BitsPerSample: 24, SizeBytes: 50, CreatedAt: now.UnixNano()},
+	}
+	for _, v := range fixtures {
+		if err := s.UpsertVariant(ctx, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	count, bytes, err := s.CountVariantsNotUnderPrefix(ctx, "/tmp/new/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 || bytes != 50 {
+		t.Errorf("not under /tmp/new/: got (%d, %d), want (1, 50)", count, bytes)
+	}
+
+	count, bytes, err = s.CountVariantsNotUnderPrefix(ctx, "/tmp/old/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 || bytes != 300 {
+		t.Errorf("not under /tmp/old/: got (%d, %d), want (2, 300)", count, bytes)
+	}
+}
+
 // TestUpdateVariantSidecarPathMissingRow returns sql.ErrNoRows
 // wrapped so callers can distinguish "row not found" from a transient
 // driver error. The CLI move pipeline relies on this to skip
