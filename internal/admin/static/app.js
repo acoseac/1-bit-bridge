@@ -1667,6 +1667,29 @@ function initLibraryInspector() {
   document.getElementById("inspector-drawer-close")
     .addEventListener("click", inspectorCloseDrawer);
 
+  // Sticky-stack height tracker: write actual measured offsetHeight
+  // of the toolbar + storage bar into CSS custom properties so the
+  // downstream sticky elements (storage bar's top, table header's
+  // top) bind to the LIVE heights rather than a hardcoded
+  // single-row assumption. Without this, a narrow viewport that
+  // wraps the toolbar to two rows OR Accessibility text scaling
+  // that grows toolbar buttons would put the storage bar UNDER the
+  // toolbar's second row. CodeRabbit Major on PR A round-2.
+  updateInspectorStickyHeights();
+  window.addEventListener("resize", updateInspectorStickyHeights);
+  // Element-size observer for the more nuanced case: AX text-size
+  // change without a resize event (Settings → Accessibility text
+  // size on iOS Safari). ResizeObserver fires on any size change.
+  if (typeof ResizeObserver === "function") {
+    const toolbar = document.getElementById("inspector-toolbar");
+    const storage = document.getElementById("inspector-storage-bar");
+    if (toolbar || storage) {
+      const ro = new ResizeObserver(updateInspectorStickyHeights);
+      if (toolbar) ro.observe(toolbar);
+      if (storage) ro.observe(storage);
+    }
+  }
+
   // Browser history integration. popstate restores path + scroll
   // from the entry's stored state without re-pushing history.
   window.addEventListener("popstate", (ev) => {
@@ -1678,6 +1701,26 @@ function initLibraryInspector() {
       restoreScroll: ev.state ? ev.state.scrollY : 0,
     });
   });
+}
+
+// updateInspectorStickyHeights measures the toolbar + storage bar
+// offsetHeights and writes them as CSS custom properties so the
+// sticky-stack `top:` values flow through the cascade. Called on
+// init, window resize, and ResizeObserver events. If the toolbar
+// wraps to N lines (narrow viewport / large AX text), the JS-measured
+// height is the AUTHORITATIVE one — the CSS fallback assumes a
+// single-row toolbar (good default for the common case).
+function updateInspectorStickyHeights() {
+  const toolbar = document.getElementById("inspector-toolbar");
+  const storage = document.getElementById("inspector-storage-bar");
+  const root = document.querySelector(".library-inspector");
+  if (!root) return;
+  if (toolbar) {
+    root.style.setProperty("--inspector-toolbar-h", `${toolbar.offsetHeight}px`);
+  }
+  if (storage) {
+    root.style.setProperty("--inspector-storage-h", `${storage.offsetHeight}px`);
+  }
 }
 
 // inspectorURLFor builds the canonical URL for a given inspector

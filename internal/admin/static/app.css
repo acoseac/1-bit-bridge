@@ -1019,6 +1019,13 @@ dialog h2 { font-size: 18px; color: var(--accent); }
  * as brittle; this consolidation is the structural fix.
  */
 .library-inspector {
+  /* Default heights cover the single-row case; the JS updater
+   * `updateInspectorStickyHeights()` measures actual offsetHeight
+   * on load + resize and overrides these values when the toolbar
+   * wraps (narrow viewports + AX text scaling). CodeRabbit Major
+   * on PR A round-2 caught the wrap case as breaking the sticky
+   * stack.
+   */
   --inspector-toolbar-h: calc(44px + 1rem);    /* min-height button + 2× padding */
   --inspector-storage-h: calc(1.2em + 0.8rem); /* one-line text + 2× padding */
   --inspector-toolbar-bottom: var(--inspector-toolbar-h);
@@ -1152,10 +1159,20 @@ dialog h2 { font-size: 18px; color: var(--accent); }
 .inspector-tree tr[data-kind="folder"] {
   cursor: pointer;
 }
-.inspector-tree tr[data-kind="folder"]:hover,
+.inspector-tree tr[data-kind="folder"]:hover {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+/* Keyboard focus indicator: do NOT remove the outline. The accent
+ * background tint alone is invisible under high-contrast / forced-
+ * colors modes, AND on operators whose browsers don't honor
+ * color-mix(). Restore a real outline so keyboard users can always
+ * track focus (CodeRabbit Major on PR A round-2). `-2px` inset so
+ * the outline lives inside the row's edge rather than overflowing
+ * into the row above when scrolling. */
 .inspector-tree tr[data-kind="folder"]:focus-visible {
   background: color-mix(in srgb, var(--accent) 8%, transparent);
-  outline: none;
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 .inspector-tree .folder-actions {
   white-space: nowrap;
