@@ -12,9 +12,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/pairing"
 )
 
 // stubVariantStore is a tiny test double that the api files_test
@@ -495,6 +497,251 @@ func TestHealthOmitsUpscaleCompleteEventsWhenUpscaleDisabled(t *testing.T) {
 	if !found {
 		t.Errorf("variantBumpsIndex should remain present when upscale is disabled; got %v", got.Features)
 	}
+}
+
+// TestHealthAdvertisesPushEventsSupportedWhenBrokerWired — iOS / third-party
+// clients can branch on this flag rather than always probing /v1/events and
+// falling back on 404. Gated on `eventBroker != nil` (StartEventBroker
+// called by cmd/bridge or by the test harness directly).
+func TestHealthAdvertisesPushEventsSupportedWhenBrokerWired(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := &config.Config{
+		LibraryRoots:  []string{tmp},
+		ListenAddress: ":7788",
+		LibraryName:   "Test",
+	}
+	store, _ := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
+	srv := New(cfg, store, nil, "fp")
+	stop := srv.StartEventBroker()
+	t.Cleanup(stop)
+
+	hs := httptest.NewServer(srv.Handler())
+	t.Cleanup(hs.Close)
+
+	resp := authGet(t, hs, "/v1/health", "")
+	body := readAllOrFail(t, resp)
+	resp.Body.Close()
+
+	var got HealthResponse
+	if err := jsonUnmarshalForTest(body, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !containsString(got.Features, "pushEventsSupported") {
+		t.Errorf("Features did not contain \"pushEventsSupported\"; got %v", got.Features)
+	}
+	// pairingEventsSupported MUST NOT appear without WithPairing.
+	if containsString(got.Features, "pairingEventsSupported") {
+		t.Errorf("pairingEventsSupported advertised without pairing wired; got %v", got.Features)
+	}
+	assertAlphaSorted(t, got.Features)
+}
+
+// TestHealthOmitsPushEventsSupportedWhenBrokerNil — a bridge without a
+// wired broker (test harness, future feature-off config) must NOT
+// advertise the push surfaces. iOS would otherwise opt into SSE and
+// pay a connect-then-fall-back penalty on every cold start.
+func TestHealthOmitsPushEventsSupportedWhenBrokerNil(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := &config.Config{
+		LibraryRoots:  []string{tmp},
+		ListenAddress: ":7788",
+		LibraryName:   "Test",
+	}
+	store, _ := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
+	srv := New(cfg, store, nil, "fp")
+	// Deliberately do NOT call StartEventBroker → s.eventBroker stays nil.
+
+	hs := httptest.NewServer(srv.Handler())
+	t.Cleanup(hs.Close)
+
+	resp := authGet(t, hs, "/v1/health", "")
+	body := readAllOrFail(t, resp)
+	resp.Body.Close()
+
+	var got HealthResponse
+	if err := jsonUnmarshalForTest(body, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if containsString(got.Features, "pushEventsSupported") {
+		t.Errorf("broker nil but Features advertised pushEventsSupported; got %v", got.Features)
+	}
+	if containsString(got.Features, "pairingEventsSupported") {
+		t.Errorf("broker nil but Features advertised pairingEventsSupported; got %v", got.Features)
+	}
+	// variantBumpsIndex is orthogonal and must remain present regardless.
+	if !containsString(got.Features, "variantBumpsIndex") {
+		t.Errorf("variantBumpsIndex missing; got %v", got.Features)
+	}
+}
+
+// TestHealthAdvertisesPairingEventsSupportedWhenBrokerAndPairingWired —
+// the flag requires BOTH the broker and the pairing.Store. With only one
+// of the two wired, the route can't deliver useful events and iOS would
+// pay the connect-then-fall-back cost. The double gate keeps the
+// advertisement honest.
+func TestHealthAdvertisesPairingEventsSupportedWhenBrokerAndPairingWired(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := &config.Config{
+		LibraryRoots:  []string{tmp},
+		ListenAddress: ":7788",
+		LibraryName:   "Test",
+	}
+	authStore, _ := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
+	pairingStore := newPairingStoreForFeaturesTest(t, authStore)
+
+	srv := New(cfg, authStore, nil, "fp").WithPairing(pairingStore)
+	stop := srv.StartEventBroker()
+	t.Cleanup(stop)
+
+	hs := httptest.NewServer(srv.Handler())
+	t.Cleanup(hs.Close)
+
+	resp := authGet(t, hs, "/v1/health", "")
+	body := readAllOrFail(t, resp)
+	resp.Body.Close()
+
+	var got HealthResponse
+	if err := jsonUnmarshalForTest(body, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !containsString(got.Features, "pairingEventsSupported") {
+		t.Errorf("Features did not contain \"pairingEventsSupported\"; got %v", got.Features)
+	}
+	if !containsString(got.Features, "pushEventsSupported") {
+		t.Errorf("Features did not contain \"pushEventsSupported\" alongside pairingEventsSupported; got %v", got.Features)
+	}
+	assertAlphaSorted(t, got.Features)
+}
+
+// TestHealthOmitsPairingEventsSupportedWhenBrokerWiredButPairingNil —
+// without `WithPairing`, the pairing routes 404 unconditionally. iOS
+// must NOT see `pairingEventsSupported` in that state.
+func TestHealthOmitsPairingEventsSupportedWhenBrokerWiredButPairingNil(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := &config.Config{
+		LibraryRoots:  []string{tmp},
+		ListenAddress: ":7788",
+		LibraryName:   "Test",
+	}
+	store, _ := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
+	srv := New(cfg, store, nil, "fp")
+	stop := srv.StartEventBroker()
+	t.Cleanup(stop)
+	// Deliberately do NOT call WithPairing → s.pairing stays nil.
+
+	hs := httptest.NewServer(srv.Handler())
+	t.Cleanup(hs.Close)
+
+	resp := authGet(t, hs, "/v1/health", "")
+	body := readAllOrFail(t, resp)
+	resp.Body.Close()
+
+	var got HealthResponse
+	if err := jsonUnmarshalForTest(body, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if containsString(got.Features, "pairingEventsSupported") {
+		t.Errorf("pairing nil but Features advertised pairingEventsSupported; got %v", got.Features)
+	}
+	// pushEventsSupported is orthogonal (broker is wired) and should remain.
+	if !containsString(got.Features, "pushEventsSupported") {
+		t.Errorf("pushEventsSupported missing; got %v", got.Features)
+	}
+}
+
+// TestHealthFeaturesAlphaSortedAcrossAllConditionals — full-fan-out
+// case with every conditional flag wired. Locks the alpha-sort
+// invariant against any future addition that slots between existing
+// keys. Bridges this batch:
+//
+//	deleteVariants < operatorDrivenUpscale < pairingEventsSupported <
+//	pushEventsSupported < upscaleCompleteEvents < variantBumpsIndex
+func TestHealthFeaturesAlphaSortedAcrossAllConditionals(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := &config.Config{
+		LibraryRoots:  []string{tmp},
+		ListenAddress: ":7788",
+		LibraryName:   "Test",
+	}
+	authStore, _ := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
+	pairingStore := newPairingStoreForFeaturesTest(t, authStore)
+
+	srv := New(cfg, authStore, nil, "fp").
+		WithPairing(pairingStore).
+		WithUpscale(true, newStubVariantStore())
+	stop := srv.StartEventBroker()
+	t.Cleanup(stop)
+
+	hs := httptest.NewServer(srv.Handler())
+	t.Cleanup(hs.Close)
+
+	resp := authGet(t, hs, "/v1/health", "")
+	body := readAllOrFail(t, resp)
+	resp.Body.Close()
+
+	var got HealthResponse
+	if err := jsonUnmarshalForTest(body, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// Minimum set with upscale-on + broker + pairing wired but no
+	// batchCoordinator / variantDeleter: pairingEventsSupported +
+	// pushEventsSupported + upscaleCompleteEvents + variantBumpsIndex.
+	wantAtLeast := []string{
+		"pairingEventsSupported",
+		"pushEventsSupported",
+		"upscaleCompleteEvents",
+		"variantBumpsIndex",
+	}
+	for _, w := range wantAtLeast {
+		if !containsString(got.Features, w) {
+			t.Errorf("Features missing %q; got %v", w, got.Features)
+		}
+	}
+	assertAlphaSorted(t, got.Features)
+}
+
+// containsString is a tiny helper to keep the new health/feature test
+// bodies readable. Used only by the test cases above; not exported.
+func containsString(haystack []string, needle string) bool {
+	for _, h := range haystack {
+		if h == needle {
+			return true
+		}
+	}
+	return false
+}
+
+// assertAlphaSorted fails the test if the slice is not strictly
+// non-decreasing under string comparison. Same shape as the inline
+// loop in TestHealthAdvertisesUpscaleCompleteEventsFeature — factored
+// out so the new feature-flag tests don't duplicate it.
+func assertAlphaSorted(t *testing.T, feats []string) {
+	t.Helper()
+	for i := 1; i < len(feats); i++ {
+		if feats[i-1] > feats[i] {
+			t.Errorf("Features not alpha-sorted at index %d: %q > %q (got %v)",
+				i, feats[i-1], feats[i], feats)
+		}
+	}
+}
+
+// newPairingStoreForFeaturesTest spins up a minimal pairing.Store
+// for the feature-flag tests. The store doesn't need to be exercised
+// end-to-end here — the /v1/health handler only consults `s.pairing != nil`
+// — but constructing it through the real `NewStore` keeps the test
+// fixture honest against any future field that gets read at health-time.
+func newPairingStoreForFeaturesTest(t *testing.T, authStore *auth.Store) *pairing.Store {
+	t.Helper()
+	store := pairing.NewStore(pairing.Options{
+		TTL:        500 * time.Millisecond,
+		Grace:      300 * time.Millisecond,
+		MaxPending: 4,
+		RevokeToken: func(id string) error {
+			return authStore.Revoke(id)
+		},
+	})
+	t.Cleanup(store.Close)
+	return store
 }
 
 // readAllOrFail is a tiny io.ReadAll wrapper that fails the test

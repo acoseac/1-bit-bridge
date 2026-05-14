@@ -574,6 +574,36 @@ type HealthResponse struct {
 	// recovery path runs unconditionally on those bridges.
 	//
 	// Current keys (kept alpha-sorted on the wire):
+	//   - "deleteVariants" (v1.3): bridge supports DELETE
+	//     /v1/upscale/variants AND fires `upscale.deleted` SSE
+	//     events on operator-driven cleanup + integrity-ticker
+	//     reconciliation. iOS reads it on the same probe to know
+	//     the wand chrome can revert passively when a variant
+	//     disappears server-side. Gated on `variantDeleter != nil`
+	//     AND `upscaleEnabled`.
+	//   - "operatorDrivenUpscale" (v1.3): upscaling is managed in
+	//     the bridge's admin Library Inspector, not per-tap from
+	//     the iOS app. iOS gates ALL legacy upscale UI surfaces
+	//     (BridgeUpscaleControl wand, TrackSourceGlyph, long-press
+	//     "Upscale this track" menu items, BridgeUpscaleManagement
+	//     Section) on the ABSENCE of this flag. Pre-v1.3 bridges
+	//     omit it; iOS keeps the legacy wand UX alive against
+	//     those. v1.3+ bridges advertise it; iOS surfaces only the
+	//     mini-player haptic-press toggle + Settings device toggle
+	//     for variant override.
+	//   - "pairingEventsSupported" (v1.4): the bridge backs
+	//     `GET /v1/pairing/{id}/events` with the same SSE broker
+	//     that powers `/v1/events`. iOS's BridgeJoinSession can
+	//     opt into the push transport up-front when the flag is
+	//     present (vs probing then falling back to 2 s polling on
+	//     404). Gated on `eventBroker != nil && pairing != nil`
+	//     — both routes must be live for the consumer to see
+	//     useful events.
+	//   - "pushEventsSupported" (v1.4): the bridge backs
+	//     `GET /v1/events` with a live SSE broker. Future iOS /
+	//     third-party clients can branch on this flag rather than
+	//     attempting the connect-and-fall-back dance on every cold
+	//     start. Gated on `eventBroker != nil`.
 	//   - "upscaleCompleteEvents": bridge publishes a per-job
 	//     `upscale.complete` SSE event after `UpsertVariant` commits.
 	//     iOS uses this to promote the wand chrome to "Ready" within
@@ -585,16 +615,6 @@ type HealthResponse struct {
 	//     surfaces variant changes without needing a full rescan.
 	//     iOS gates its +600s "silent fullRescan recovery" rung on
 	//     absence of this flag.
-	//   - "operatorDrivenUpscale" (v1.3): upscaling is managed in
-	//     the bridge's admin Library Inspector, not per-tap from
-	//     the iOS app. iOS gates ALL legacy upscale UI surfaces
-	//     (BridgeUpscaleControl wand, TrackSourceGlyph, long-press
-	//     "Upscale this track" menu items, BridgeUpscaleManagement
-	//     Section) on the ABSENCE of this flag. Pre-v1.3 bridges
-	//     omit it; iOS keeps the legacy wand UX alive against
-	//     those. v1.3+ bridges advertise it; iOS surfaces only the
-	//     mini-player haptic-press toggle + Settings device toggle
-	//     for variant override.
 	Features []string `json:"features,omitempty"`
 
 	// Roots is the per-root reachability snapshot. Populated whenever the
@@ -690,51 +710,55 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// client comparing /v1/health response fingerprints (e.g. for
 	// content-equality short-circuit caches) doesn't churn on every
 	// poll. New keys append in alpha order.
-	// `upscaleCompleteEvents` gated on `s.upscaleEnabled` because iOS
-	// will skip 4-of-5 ladder rungs when the flag is present and wait
-	// for an `upscale.complete` SSE event — but a bridge with upscale
-	// disabled has no transcode pool and `SetOnJobComplete` was never
-	// called, so no event ever arrives. iOS would spend 10 minutes
-	// silently waiting on a single backstop rung that may not even
-	// land any variants. Mirrors how `resp.UpscaleEnabled` already
-	// gates the feature visibility. (Greptile P1 on PR #187.)
+	//
+	// Gating rules:
+	//   - `upscaleCompleteEvents`, `deleteVariants`, `operatorDrivenUpscale`:
+	//     gated on `s.upscaleEnabled` because iOS will skip
+	//     4-of-5 ladder rungs when `upscaleCompleteEvents` is
+	//     present and wait for an `upscale.complete` SSE event —
+	//     but a bridge with upscale disabled has no transcode pool
+	//     and `SetOnJobComplete` was never called, so no event ever
+	//     arrives. Mirrors how `resp.UpscaleEnabled` already gates
+	//     the feature visibility. (Greptile P1 on PR #187.)
+	//   - `operatorDrivenUpscale` additionally requires a wired
+	//     `batchCoordinator` — without it the /v1/upscale/batch
+	//     endpoints surface 503 with nothing to fall back to.
+	//     (CodeRabbit major on PR #204 round 2.)
+	//   - `deleteVariants` additionally requires a wired
+	//     `variantDeleter` so a feature-disabled deploy advertises
+	//     honestly.
+	//   - `pushEventsSupported` / `pairingEventsSupported`: gated on
+	//     `s.eventBroker != nil` (and `s.pairing != nil` for the
+	//     pairing variant). Orthogonal to `upscaleEnabled` — the
+	//     event surfaces are wired by `StartEventBroker` regardless
+	//     of whether the transcode pool exists.
+	//
+	// Alpha-sort stays correct by construction: each conditional
+	// appends in lex order, terminal `variantBumpsIndex` ends every
+	// path. Capacity 6 covers the maximum (deleteVariants +
+	// operatorDrivenUpscale + pairingEventsSupported +
+	// pushEventsSupported + upscaleCompleteEvents +
+	// variantBumpsIndex).
+	feats := make([]string, 0, 6)
 	if s.upscaleEnabled {
-		// `operatorDrivenUpscale` requires BOTH the upscale switch
-		// AND a wired `batchCoordinator`. iOS keys off this flag to
-		// hide the legacy wand UX — if we advertise it without the
-		// coordinator, iOS hides its surface and the
-		// /v1/upscale/batch endpoints surface 503 with nothing to
-		// fall back to. Two-condition gate avoids that gap. Per
-		// CodeRabbit major on PR #204 round 2.
-		//
-		// `deleteVariants` advertises the DELETE /v1/upscale/variants
-		// route AND the upscale.deleted SSE topic. iOS reads it on
-		// the same probe to know the bridge fires reliable
-		// `upscale.deleted` events (operator-driven, reactive
-		// serve-side cleanup, AND the integrity ticker) — without
-		// the flag, iOS can't trust the wand chrome to revert
-		// passively when a variant disappears server-side. Gated
-		// on `s.variantDeleter != nil` so a feature-disabled deploy
-		// (no variant store wired) advertises honestly.
-		// Alpha-sorted: deleteVariants < operatorDrivenUpscale <
-		// upscaleCompleteEvents < variantBumpsIndex. Append in
-		// that order; conditional flags slot in their alpha
-		// position without per-permutation logic. Gemini Medium
-		// on PR #209 suggested seeding the slice with the
-		// always-present pair, which we still do (capacity
-		// preallocation includes the conditional max).
-		feats := make([]string, 0, 4)
 		if s.variantDeleter != nil {
 			feats = append(feats, "deleteVariants")
 		}
 		if s.batchCoordinator != nil {
 			feats = append(feats, "operatorDrivenUpscale")
 		}
-		feats = append(feats, "upscaleCompleteEvents", "variantBumpsIndex")
-		resp.Features = feats
-	} else {
-		resp.Features = []string{"variantBumpsIndex"}
 	}
+	if s.eventBroker != nil {
+		if s.pairing != nil {
+			feats = append(feats, "pairingEventsSupported")
+		}
+		feats = append(feats, "pushEventsSupported")
+	}
+	if s.upscaleEnabled {
+		feats = append(feats, "upscaleCompleteEvents")
+	}
+	feats = append(feats, "variantBumpsIndex")
+	resp.Features = feats
 	// Per-root reachability (v1.2 additive). Probed through the same TTL
 	// cache the list/stat handlers use, so a 1Hz iOS /v1/health poll
 	// doesn't restat network mounts every tick. Omitted entirely (via
