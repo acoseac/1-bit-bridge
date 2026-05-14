@@ -63,10 +63,10 @@ var staticFS embed.FS
 type Deps struct {
 	CfgHolder *config.RuntimeConfig // live config snapshot holder
 	CfgPath   string                // path to bridge.yaml, for Config.Save()
-	Auth     *auth.Store    // token list / mint / revoke
-	Manifest *manifest.Store
-	Scanner  *manifest.Scanner
-	Resolver *bridgefs.Resolver
+	Auth      *auth.Store           // token list / mint / revoke
+	Manifest  *manifest.Store
+	Scanner   *manifest.Scanner
+	Resolver  *bridgefs.Resolver
 
 	// Fingerprint is the TLS cert SHA-256 in colon-hex form. Shown in the
 	// pairing modal and the dashboard.

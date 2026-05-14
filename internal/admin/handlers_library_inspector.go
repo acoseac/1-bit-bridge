@@ -145,8 +145,8 @@ func (s *Server) apiUpscaleTargetGet(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "read-target", err.Error())
 			return
 		}
-			rate = cfg.Upscale.EffectiveBootstrapTargetRate()
-			bits = cfg.Upscale.EffectiveBootstrapTargetBits()
+		rate = cfg.Upscale.EffectiveBootstrapTargetRate()
+		bits = cfg.Upscale.EffectiveBootstrapTargetBits()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"targetRate": rate,

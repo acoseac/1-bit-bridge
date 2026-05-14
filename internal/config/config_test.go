@@ -617,8 +617,23 @@ func fillNonZero(v reflect.Value) {
 			if f.IsNil() {
 				sl := reflect.MakeSlice(f.Type(), 1, 1)
 				elem := sl.Index(0)
-				if elem.Kind() == reflect.String {
+				// Recursively seed the first element so future Config
+				// fields that hold slices of structs / pointers don't
+				// silently bypass `assertNoSharedPointers` — that
+				// walker skips nil values, so an unset element would
+				// be a coverage blind spot. Coderabbit Major on PR
+				// #234.
+				switch elem.Kind() {
+				case reflect.String:
 					elem.SetString("x")
+				case reflect.Struct:
+					fillNonZero(elem)
+				case reflect.Pointer:
+					nv := reflect.New(elem.Type().Elem())
+					if nv.Elem().Kind() == reflect.Struct {
+						fillNonZero(nv.Elem())
+					}
+					elem.Set(nv)
 				}
 				f.Set(sl)
 			}
