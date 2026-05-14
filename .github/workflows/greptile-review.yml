@@ -41,10 +41,17 @@ jobs:
           CHANGED_FILES: ${{ steps.pr-size.outputs.changed_files }}
         run: |
           echo "PR has ${CHANGED_FILES} changed files — triggering Greptile review."
-          # --fail-with-body so a non-2xx (auth fail, rate limit, etc.)
-          # surfaces as a workflow failure instead of a silent no-op.
-          curl -sS --fail-with-body -X POST "https://api.greptile.com/v2/review" \
+          # The Greptile /v2/review endpoint currently returns 404 (separate
+          # concern — endpoint URL or auth shape drift; tracked for
+          # follow-up). Keep this step best-effort with `|| true` so a
+          # broken third-party endpoint doesn't fail the whole workflow,
+          # while still logging the response body for debugging. The
+          # GitHub-API curl in the previous step KEEPS its --fail-with-body
+          # because that endpoint is healthy and silent-success was the
+          # actual bug CodeRabbit caught.
+          curl -sS -X POST "https://api.greptile.com/v2/review" \
             -H "Authorization: Bearer ${GREPTILE_API_KEY}" \
             -H "X-Github-Token: ${GH_TOKEN}" \
             -H "Content-Type: application/json" \
-            -d "$(jq -n --arg url "$PR_URL" '{prUrl: $url}')"
+            -d "$(jq -n --arg url "$PR_URL" '{prUrl: $url}')" \
+            || echo "(greptile POST failed — non-blocking; see comment above)"
