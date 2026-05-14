@@ -834,14 +834,6 @@ func (p *Pool) processJob(job poolJob) {
 	}
 
 	_, settings := job.spec.SoxArgs()
-	// Capture the completion instant ONCE so the DB row's CreatedAt
-	// and the SSE event's CompletedAt point to the same wall-clock
-	// moment. Without this, the row uses CreatedAtNow() (a separate
-	// time.Now().UnixNano() call) and the event used a third call —
-	// for a fast SQLite commit those values agree to the millisecond,
-	// but iOS-side log correlation expects equality (Gemini MEDIUM
-	// on PR #187).
-	completedAt := time.Now().UTC()
 	sidecarPath := job.spec.SidecarPath()
 
 	// Durability: flush the freshly-renamed sidecar (and its parent
@@ -879,6 +871,20 @@ func (p *Pool) processJob(job poolJob) {
 		return
 	}
 
+	// Capture the completion instant ONCE so the DB row's CreatedAt
+	// and the SSE event's CompletedAt point to the same wall-clock
+	// moment. Without this, the row uses CreatedAtNow() (a separate
+	// time.Now().UnixNano() call) and the event used a third call —
+	// for a fast SQLite commit those values agree to the millisecond,
+	// but iOS-side log correlation expects equality (Gemini MEDIUM
+	// on PR #187).
+	//
+	// Captured AFTER fsync (not before) so `completedAt` and the
+	// resulting `durationSeconds` include the fsync wall-clock time.
+	// Pre-fix the timestamp captured before fsync excluded that
+	// window — misleading on slow disks where fsync is a meaningful
+	// share of per-job latency. Gemini MEDIUM on PR #251.
+	completedAt := time.Now().UTC()
 	row := manifest.VariantRow{
 		SourcePath:    job.spec.SourceLibraryRel,
 		VariantID:     job.spec.VariantID(),

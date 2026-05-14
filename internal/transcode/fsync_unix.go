@@ -24,11 +24,15 @@ import (
 // POSIX semantics.
 func syncDir(filePath string) error {
 	dir := filepath.Dir(filePath)
-	if dir == "" || dir == "." {
-		// Pathological input — file in cwd with no directory component.
-		// Treat as no-op so the helper stays robust against test
-		// fixtures using bare filenames.
-		return nil
+	if dir == "" {
+		// `filepath.Dir("")` returns "." per the stdlib contract, so
+		// this only fires on pathological input. Normalise to cwd
+		// rather than no-opping — the durability guarantee is the
+		// load-bearing reason this function exists, and a bare
+		// filename in production (test fixture or otherwise) should
+		// still get its parent directory synced. CodeRabbit minor on
+		// PR #251.
+		dir = "."
 	}
 	d, err := os.Open(dir)
 	if err != nil {
