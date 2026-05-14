@@ -2,7 +2,7 @@ package manifest
 
 import (
 	"context"
-	"path/filepath"
+	"path"
 	"testing"
 	"time"
 )
@@ -57,7 +57,7 @@ func TestSearchTracksLimitHardCapped(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	for i := 0; i < 510; i++ {
 		tk := Track{
-			Path: filepath.Join("Album", "Foo", "track-"+itoaN(i)+".flac"),
+			Path: path.Join("Album", "Foo", "track-"+itoaN(i)+".flac"),
 			Size: 100, ModTime: now,
 			Title:  "Foo " + itoaN(i),
 			Artist: "Foo Artist",
@@ -171,13 +171,13 @@ func TestSearchTracksRoundTripViaTriggers(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Second)
 	fixtures := []Track{
-		{Path: filepath.Join("Diana Krall", "Look of Love", "01 Love Letters.flac"),
+		{Path: path.Join("Diana Krall", "Look of Love", "01 Love Letters.flac"),
 			Size: 100, ModTime: now,
 			Title: "Love Letters", Artist: "Diana Krall", Album: "The Look of Love"},
-		{Path: filepath.Join("Diana Krall", "Look of Love", "02 I Remember You.flac"),
+		{Path: path.Join("Diana Krall", "Look of Love", "02 I Remember You.flac"),
 			Size: 100, ModTime: now,
 			Title: "I Remember You", Artist: "Diana Krall", Album: "The Look of Love"},
-		{Path: filepath.Join("Beethoven", "Symphony No 9", "01 Allegro.flac"),
+		{Path: path.Join("Beethoven", "Symphony No 9", "01 Allegro.flac"),
 			Size: 100, ModTime: now,
 			Title: "Allegro", Artist: "Berliner Philharmoniker", Album: "Symphony No. 9"},
 	}
@@ -236,7 +236,7 @@ func TestSearchTracksUnicodeDiacritics(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Second)
 	tk := Track{
-		Path: filepath.Join("Dvořák", "Symphony 9", "01 Allegro.flac"),
+		Path: path.Join("Dvořák", "Symphony 9", "01 Allegro.flac"),
 		Size: 100, ModTime: now,
 		Title: "Allegro", Artist: "Antonín Dvořák", Album: "Symphony No. 9",
 	}
@@ -262,7 +262,7 @@ func TestSearchFoldersRollup(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	for i := 0; i < 3; i++ {
 		tk := Track{
-			Path: filepath.Join("Diana Krall", "Look of Love", "0"+string(rune('1'+i))+" Love.flac"),
+			Path: path.Join("Diana Krall", "Look of Love", "0"+string(rune('1'+i))+" Love.flac"),
 			Size: 100, ModTime: now,
 			Title: "Love Song", Artist: "Diana Krall", Album: "The Look of Love",
 		}
@@ -291,7 +291,7 @@ func TestSearchTracksUpdateTriggerKeepsFTSCoherent(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Second)
 	tk := Track{
-		Path: filepath.Join("Music", "Foo.flac"),
+		Path: path.Join("Music", "Foo.flac"),
 		Size: 100, ModTime: now,
 		Title: "OldTitle", Artist: "Foo", Album: "Bar",
 	}

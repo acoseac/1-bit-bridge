@@ -2980,7 +2980,17 @@ type TrackProjection struct {
 	MTimeNS       int64 // for VariantRow.SourceMTimeNS at JobSpec construction
 	SampleRate    int
 	BitsPerSample int
-	HasVariant    bool
+	// IsDSD distinguishes DSF / DFF tracks (which the upscale
+	// pipeline rejects — DSD is 1-bit modulated and not a SoX-
+	// resampleable source) from PCM. The admin projection loop
+	// folds DSD into the `unknownFormat` bucket so the surfaced
+	// "X tracks here can't be upscaled" count reflects reality;
+	// without this gate DSF folders showed a projectable size +
+	// active Upscale button, but the submit returned
+	// `enqueuedCount: 0`. User-reported on the v1.4 followup
+	// inspector polish.
+	IsDSD      bool
+	HasVariant bool
 }
 
 // ListTrackProjectionsUnderPrefix iterates every track under `prefix`
@@ -3007,6 +3017,7 @@ func (s *Store) ListTrackProjectionsUnderPrefix(ctx context.Context, prefix stri
 		SELECT t.path, t.size, t.mtime_ns,
 		       CAST(COALESCE(json_extract(t.tags_json, '$.sampleRate'),    0) AS INTEGER) AS rate,
 		       CAST(COALESCE(json_extract(t.tags_json, '$.bitsPerSample'), 0) AS INTEGER) AS bits,
+		       CAST(COALESCE(json_extract(t.tags_json, '$.isDSD'),         0) AS INTEGER) AS is_dsd,
 		       EXISTS(SELECT 1 FROM track_variants tv WHERE tv.source_path = t.path) AS has_variant
 		  FROM tracks t
 		 WHERE t.path LIKE ? ESCAPE '\'
@@ -3019,10 +3030,11 @@ func (s *Store) ListTrackProjectionsUnderPrefix(ctx context.Context, prefix stri
 	out := []TrackProjection{}
 	for rows.Next() {
 		var tp TrackProjection
-		var has int
-		if err := rows.Scan(&tp.Path, &tp.Size, &tp.MTimeNS, &tp.SampleRate, &tp.BitsPerSample, &has); err != nil {
+		var isDSD, has int
+		if err := rows.Scan(&tp.Path, &tp.Size, &tp.MTimeNS, &tp.SampleRate, &tp.BitsPerSample, &isDSD, &has); err != nil {
 			return nil, err
 		}
+		tp.IsDSD = isDSD != 0
 		tp.HasVariant = has != 0
 		out = append(out, tp)
 	}

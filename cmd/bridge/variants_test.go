@@ -17,6 +17,13 @@ import (
 // on PR #246 asked for regression coverage so a future refactor
 // doesn't accidentally weaken or remove it.
 func TestVariantsMoveRefusesWithoutConfirm(t *testing.T) {
+	// `t.TempDir()` gives a per-platform absolute path so the
+	// `filepath.IsAbs` gate in `variantsMoveCmd` passes uniformly
+	// on Unix + Windows. A literal `/tmp/variants-test` would
+	// fail `IsAbs` on Windows (no volume name) and short-circuit
+	// the test before reaching the typed-phrase gate that's
+	// actually under test. CodeRabbit Major on PR #246 round-2.
+	toDir := filepath.Join(t.TempDir(), "variants-test")
 	cases := []struct {
 		name      string
 		args      []string
@@ -25,19 +32,19 @@ func TestVariantsMoveRefusesWithoutConfirm(t *testing.T) {
 	}{
 		{
 			name:      "no confirm",
-			args:      []string{"--to", "/tmp/variants-test"},
+			args:      []string{"--to", toDir},
 			wantCode:  2,
 			wantInErr: "refusing to proceed without --confirm MOVE",
 		},
 		{
 			name:      "wrong confirm value (prefix)",
-			args:      []string{"--to", "/tmp/variants-test", "--confirm", "MOV"},
+			args:      []string{"--to", toDir, "--confirm", "MOV"},
 			wantCode:  2,
 			wantInErr: "refusing to proceed without --confirm MOVE",
 		},
 		{
 			name:      "wrong confirm value (lowercase)",
-			args:      []string{"--to", "/tmp/variants-test", "--confirm", "move"},
+			args:      []string{"--to", toDir, "--confirm", "move"},
 			wantCode:  2,
 			wantInErr: "refusing to proceed without --confirm MOVE",
 		},
@@ -66,10 +73,15 @@ func TestVariantsMoveRefusesWithoutConfirm(t *testing.T) {
 // we're pinning).
 func TestVariantsMoveDryRunSkipsConfirm(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	// Point at a nonexistent config so it fails after the gate;
-	// we just want to confirm the gate doesn't trip.
+	// Per-platform absolute paths so `filepath.IsAbs` is satisfied
+	// uniformly (Windows volume requirement). Point at a
+	// nonexistent config so the command fails after the gate; we
+	// just want to confirm the gate doesn't trip.
+	baseDir := t.TempDir()
+	missingConfig := filepath.Join(baseDir, "missing-bridge.yaml")
+	toDir := filepath.Join(baseDir, "variants-test")
 	code := variantsMoveCmd(context.Background(),
-		[]string{"--config", "/nonexistent/bridge.yaml", "--to", "/tmp/variants-test", "--dry-run"},
+		[]string{"--config", missingConfig, "--to", toDir, "--dry-run"},
 		&stdout, &stderr)
 	if code == 2 && strings.Contains(stderr.String(), "refusing to proceed") {
 		t.Errorf("--dry-run should bypass the confirm gate; got refusal: %q",
