@@ -37,9 +37,12 @@ func (r *RuntimeConfig) Clone() *Config {
 	return Clone(r.Load())
 }
 
-// IMPORTANT: When adding pointer or slice fields to Config, update this
-// function to deep-copy them. TestConfigCloneIsDeep verifies coverage.
 // Clone returns a deep clone of cfg. Nil input returns nil.
+//
+// IMPORTANT: When adding pointer or slice fields to Config, update
+// this function to deep-copy them. TestConfigCloneIsDeep verifies
+// coverage via the reflection-based assertNoSharedPointers walker
+// over a fillNonZero-populated fixture.
 func Clone(cfg *Config) *Config {
 	if cfg == nil {
 		return nil

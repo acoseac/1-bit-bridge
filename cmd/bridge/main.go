@@ -1545,12 +1545,12 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	//      since iOS only polls when the management page is fore-
 	//      grounded — typically zero polls per minute on average).
 	upscaleStats := &upscaleStatsAdapter{
-		pool:    func() *transcode.Pool { return upscalePool },
+		pool: func() *transcode.Pool { return upscalePool },
 		enabled: func() bool {
 			live := cfgHolder.Load()
 			return upscalePool != nil && live != nil && live.Upscale.Enabled
 		},
-		store:   manifestStore,
+		store: manifestStore,
 	}
 	apiSrv.WithUpscaleStats(upscaleStats)
 

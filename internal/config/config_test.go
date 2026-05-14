@@ -617,8 +617,41 @@ func fillNonZero(v reflect.Value) {
 			if f.IsNil() {
 				sl := reflect.MakeSlice(f.Type(), 1, 1)
 				elem := sl.Index(0)
-				if elem.Kind() == reflect.String {
+				// Recursively seed the first element so future Config
+				// fields that hold slices of structs / pointers /
+				// nested containers don't silently bypass
+				// `assertNoSharedPointers` — that walker skips nil
+				// values, so an unset element would be a coverage
+				// blind spot. Coderabbit Major on PR #234 (initial
+				// struct + pointer cases); Gemini medium on PR #236
+				// added Int / Bool / nested Slice / Map for
+				// completeness.
+				switch elem.Kind() {
+				case reflect.String:
 					elem.SetString("x")
+				case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+					elem.SetInt(1)
+				case reflect.Bool:
+					elem.SetBool(true)
+				case reflect.Struct:
+					fillNonZero(elem)
+				case reflect.Pointer:
+					nv := reflect.New(elem.Type().Elem())
+					if nv.Elem().Kind() == reflect.Struct {
+						fillNonZero(nv.Elem())
+					}
+					elem.Set(nv)
+				case reflect.Slice:
+					// Nested slice (e.g. `[][]T`) — allocate so the
+					// walker descends rather than short-circuiting
+					// on a nil inner slice. The walker handles the
+					// deeper recursion itself.
+					elem.Set(reflect.MakeSlice(elem.Type(), 1, 1))
+				case reflect.Map:
+					// Map header allocation — same rationale; the
+					// walker only checks `shared map header` at this
+					// level, so an empty initialised map is enough.
+					elem.Set(reflect.MakeMap(elem.Type()))
 				}
 				f.Set(sl)
 			}
