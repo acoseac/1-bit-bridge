@@ -1622,8 +1622,22 @@ function safeApply(name, raw, fn) {
 const inspectorState = {
   path: "", // current navigation path; "" = library root
   selection: null, // {kind: "folder"|"track", row}
-  lastBrowseData: null, // last successful browse response (used by toolbar action + future search filter)
+  lastBrowseData: null, // last successful browse response (used by toolbar action + search filter)
+  // Search state (PR B). `mode` is "browse" (default) or "search"
+  // (flat-results view). `searchQuery` is the active query; the
+  // debounced timer + in-flight controller live in module-level
+  // vars below.
+  mode: "browse",
+  searchQuery: "",
+  searchActiveIndex: -1, // keyboard navigation cursor in dropdown
 };
+
+// Search debounce + race-cancel state. Module-level so the search
+// handler can clear the timer between keystrokes AND cancel an
+// in-flight fetch when a newer query is typed. Mirrors the same
+// pattern the browse handler's race-guards use.
+let inspectorSearchDebounce = null;
+let inspectorSearchController = null;
 
 function initLibraryInspector() {
   // Initial path comes from `?path=` query so bookmarks / refresh
@@ -1667,19 +1681,13 @@ function initLibraryInspector() {
   document.getElementById("inspector-drawer-close")
     .addEventListener("click", inspectorCloseDrawer);
 
-  // Sticky-stack height tracker: write actual measured offsetHeight
-  // of the toolbar + storage bar into CSS custom properties so the
-  // downstream sticky elements (storage bar's top, table header's
-  // top) bind to the LIVE heights rather than a hardcoded
-  // single-row assumption. Without this, a narrow viewport that
-  // wraps the toolbar to two rows OR Accessibility text scaling
-  // that grows toolbar buttons would put the storage bar UNDER the
-  // toolbar's second row. CodeRabbit Major on PR A round-2.
+  // Sticky-stack height tracker (from PR A): write actual measured
+  // offsetHeight of the toolbar + storage bar into CSS custom
+  // properties so the downstream sticky elements (storage bar's
+  // top, table header's top) bind to the LIVE heights rather than
+  // a hardcoded single-row assumption.
   updateInspectorStickyHeights();
   window.addEventListener("resize", updateInspectorStickyHeights);
-  // Element-size observer for the more nuanced case: AX text-size
-  // change without a resize event (Settings → Accessibility text
-  // size on iOS Safari). ResizeObserver fires on any size change.
   if (typeof ResizeObserver === "function") {
     const toolbar = document.getElementById("inspector-toolbar");
     const storage = document.getElementById("inspector-storage-bar");
@@ -1689,6 +1697,35 @@ function initLibraryInspector() {
       if (storage) ro.observe(storage);
     }
   }
+
+  // Search wiring (PR B). Input is in the toolbar slot; results
+  // render as a dropdown overlay below or as a flat-list view
+  // when the operator clicks "View all results →".
+  const searchInput = document.getElementById("inspector-search");
+  if (searchInput) {
+    searchInput.addEventListener("input", inspectorSearchInputChanged);
+    searchInput.addEventListener("keydown", inspectorSearchKeyDown);
+  }
+  // Global `/` shortcut: focus the search input from anywhere on
+  // the page unless the user is already typing into another input.
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "/") return;
+    const tgt = e.target;
+    if (tgt && (tgt.tagName === "INPUT" || tgt.tagName === "TEXTAREA" || tgt.isContentEditable)) {
+      return;
+    }
+    e.preventDefault();
+    searchInput && searchInput.focus();
+  });
+  // Click outside the dropdown to dismiss it.
+  document.addEventListener("click", (e) => {
+    const dropdown = document.getElementById("inspector-search-results");
+    if (!dropdown || dropdown.hidden) return;
+    const slot = document.getElementById("inspector-search-slot");
+    if (slot && !slot.contains(e.target)) {
+      inspectorSearchHideDropdown();
+    }
+  });
 
   // Browser history integration. popstate restores path + scroll
   // from the entry's stored state without re-pushing history.
@@ -2282,6 +2319,424 @@ function formatTrackQuality(t) {
   // sampleRate is Hz; collapse to kHz with at most one decimal.
   const khz = t.sampleRate >= 1000 ? `${(t.sampleRate / 1000).toFixed(1)}` : `${t.sampleRate}`;
   return `${khz} kHz · ${t.bitsPerSample}-bit`;
+}
+
+// =============================================================
+// Library Inspector — search (v1.4 PR B FTS5)
+// =============================================================
+
+// inspectorSearchInputChanged is the input handler. 250 ms debounce
+// before any work; on each keystroke we cancel the prior timer +
+// any in-flight server fetch so a fast typer doesn't see stale
+// results land on top of newer ones.
+function inspectorSearchInputChanged(e) {
+  const q = (e.target.value || "").trim();
+  inspectorState.searchQuery = q;
+  if (inspectorSearchDebounce) {
+    clearTimeout(inspectorSearchDebounce);
+    inspectorSearchDebounce = null;
+  }
+  if (inspectorSearchController) {
+    inspectorSearchController.abort();
+    inspectorSearchController = null;
+  }
+  if (q.length === 0) {
+    inspectorSearchHideDropdown();
+    inspectorSearchClearClientFilter();
+    if (inspectorState.mode === "search") {
+      inspectorExitSearchMode();
+    }
+    return;
+  }
+  inspectorSearchDebounce = setTimeout(() => {
+    inspectorSearchDebounce = null;
+    inspectorSearchExecute(q);
+  }, 250);
+}
+
+// inspectorSearchExecute is the debounced body. Two-phase:
+//   1. Instant client-side filter against `lastBrowseData` rows
+//      — toggles row visibility via the `.inspector-row-hidden`
+//      class; zero network cost.
+//   2. If q ≥ 2 chars AND zero current-folder matches, fire the
+//      server-side /api/library/search and populate the dropdown.
+async function inspectorSearchExecute(q) {
+  if (q.length < 2) {
+    inspectorSearchHideDropdown();
+    inspectorSearchClearClientFilter();
+    return;
+  }
+  const localCount = inspectorSearchClientFilter(q);
+  if (localCount > 0) {
+    // Local matches: hide the server dropdown (results would
+    // duplicate what the user is already seeing in the table).
+    inspectorSearchHideDropdown();
+    inspectorSearchAnnounce(`${localCount} matches in this folder`);
+    return;
+  }
+  // No local matches → fall through to server-side search.
+  inspectorSearchClearClientFilter();
+  inspectorSearchController = new AbortController();
+  try {
+    const res = await fetch(
+      `/api/library/search?q=${encodeURIComponent(q)}&limit=50`,
+      { signal: inspectorSearchController.signal });
+    // Race-guard: ensure the response still corresponds to the
+    // active query before we render. Same shape as the browse
+    // handler's path-match guard.
+    if (inspectorState.searchQuery !== q) return;
+    if (res.status === 503) {
+      inspectorSearchRenderUnavailable();
+      return;
+    }
+    if (res.status === 400) {
+      // query-too-short OR similar validation; silently hide.
+      inspectorSearchHideDropdown();
+      return;
+    }
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    if (inspectorState.searchQuery !== q) return;
+    inspectorSearchRenderDropdown(data, q);
+  } catch (err) {
+    if (err.name === "AbortError") return;
+    inspectorSearchRenderError(err.message);
+  }
+}
+
+// inspectorSearchClientFilter applies a case-insensitive substring
+// match to the visible rows in the current browse table. Returns
+// the count of matches. Pure DOM toggle — no re-render cost.
+function inspectorSearchClientFilter(q) {
+  if (!inspectorState.lastBrowseData) return 0;
+  const needle = q.toLowerCase();
+  const body = document.getElementById("inspector-rows-body");
+  if (!body) return 0;
+  let count = 0;
+  for (const tr of body.querySelectorAll("tr")) {
+    // Match on the visible name (first cell) — operator-typed
+    // queries align with what they're seeing in the column.
+    const name = (tr.querySelector(".folder-name, td:first-child")?.textContent || "").toLowerCase();
+    if (name.includes(needle)) {
+      tr.classList.remove("inspector-row-hidden");
+      count++;
+    } else {
+      tr.classList.add("inspector-row-hidden");
+    }
+  }
+  return count;
+}
+
+// inspectorSearchClearClientFilter restores all rows to visible —
+// called when the search is cleared OR when we're about to render
+// server-side results (the current folder rows are no longer the
+// authoritative answer).
+function inspectorSearchClearClientFilter() {
+  const body = document.getElementById("inspector-rows-body");
+  if (!body) return;
+  for (const tr of body.querySelectorAll("tr.inspector-row-hidden")) {
+    tr.classList.remove("inspector-row-hidden");
+  }
+}
+
+function inspectorSearchRenderDropdown(data, q) {
+  const dropdown = document.getElementById("inspector-search-results");
+  if (!dropdown) return;
+  const folders = data.folders || [];
+  const tracks = data.tracks || [];
+  const totalCount = folders.length + tracks.length;
+  inspectorState.searchActiveIndex = -1;
+  if (totalCount === 0) {
+    dropdown.innerHTML = `<div class="inspector-search-empty">
+      No matches for <em>${escapeHTML(q)}</em>.
+    </div>`;
+    dropdown.hidden = false;
+    inspectorSearchAnnounce(`No matches for ${q}`);
+    return;
+  }
+  const items = [];
+  folders.forEach((f, i) => {
+    items.push({
+      kind: "folder",
+      data: f,
+      html: `
+        <div class="inspector-search-row inspector-search-folder"
+             role="option" data-idx="${items.length + i}" data-kind="folder"
+             data-path="${escapeHTML(f.path)}">
+          <span class="inspector-search-primary">📁 ${escapeHTML(f.name)}</span>
+          <span class="inspector-search-secondary">${escapeHTML(f.parentPath || "Library root")} · ${f.hitCount} match${f.hitCount === 1 ? "" : "es"}</span>
+        </div>`,
+    });
+  });
+  tracks.forEach((t) => {
+    const ctx = [t.artist, t.album, t.parentPath || "Library root"]
+      .filter(Boolean).join(" · ");
+    items.push({
+      kind: "track",
+      data: t,
+      html: `
+        <div class="inspector-search-row inspector-search-track"
+             role="option" data-idx="${items.length}" data-kind="track"
+             data-path="${escapeHTML(t.path)}"
+             data-parent-path="${escapeHTML(t.parentPath)}">
+          <span class="inspector-search-primary">🎵 ${escapeHTML(t.title || t.name)}</span>
+          <span class="inspector-search-secondary">${escapeHTML(ctx)}</span>
+        </div>`,
+    });
+  });
+  // Reindex data-idx after appending in mixed order (folders first).
+  let viewAllRow = "";
+  if (data.truncated) {
+    viewAllRow = `<div class="inspector-search-viewall"
+      role="option" data-action="view-all">
+      View all results in flat list →
+    </div>`;
+  }
+  dropdown.innerHTML = items.map((it) => it.html).join("") + viewAllRow;
+  // Renumber data-idx in DOM order so keyboard nav matches visual.
+  dropdown.querySelectorAll("[role=option]").forEach((el, i) => {
+    el.dataset.idx = String(i);
+    el.addEventListener("click", () => inspectorSearchActivateAt(i));
+  });
+  dropdown.hidden = false;
+  inspectorSearchAnnounce(`${totalCount} matches`);
+}
+
+function inspectorSearchRenderUnavailable() {
+  const dropdown = document.getElementById("inspector-search-results");
+  if (!dropdown) return;
+  dropdown.innerHTML = `<div class="inspector-search-empty">
+    Library search is not available on this bridge (FTS5 not compiled in).
+  </div>`;
+  dropdown.hidden = false;
+  inspectorSearchAnnounce("Search unavailable on this bridge");
+}
+
+function inspectorSearchRenderError(msg) {
+  const dropdown = document.getElementById("inspector-search-results");
+  if (!dropdown) return;
+  dropdown.innerHTML = `<div class="inspector-search-empty">
+    Search failed: ${escapeHTML(msg)}
+  </div>`;
+  dropdown.hidden = false;
+}
+
+function inspectorSearchHideDropdown() {
+  const dropdown = document.getElementById("inspector-search-results");
+  if (dropdown) {
+    dropdown.hidden = true;
+    dropdown.innerHTML = "";
+  }
+  inspectorState.searchActiveIndex = -1;
+}
+
+function inspectorSearchAnnounce(text) {
+  const status = document.getElementById("inspector-search-status");
+  if (status) status.textContent = text;
+}
+
+// inspectorSearchKeyDown handles ↓/↑/Enter/Esc in the search input.
+function inspectorSearchKeyDown(e) {
+  const dropdown = document.getElementById("inspector-search-results");
+  if (e.key === "Escape") {
+    inspectorSearchHideDropdown();
+    inspectorSearchClearClientFilter();
+    if (inspectorState.mode === "search") {
+      inspectorExitSearchMode();
+    }
+    e.target.value = "";
+    inspectorState.searchQuery = "";
+    return;
+  }
+  if (!dropdown || dropdown.hidden) return;
+  const items = dropdown.querySelectorAll("[role=option]");
+  if (items.length === 0) return;
+  if (e.key === "ArrowDown") {
+    e.preventDefault();
+    inspectorState.searchActiveIndex = Math.min(
+      inspectorState.searchActiveIndex + 1, items.length - 1);
+    inspectorSearchHighlightActive(items);
+  } else if (e.key === "ArrowUp") {
+    e.preventDefault();
+    inspectorState.searchActiveIndex = Math.max(
+      inspectorState.searchActiveIndex - 1, 0);
+    inspectorSearchHighlightActive(items);
+  } else if (e.key === "Enter") {
+    e.preventDefault();
+    const idx = inspectorState.searchActiveIndex >= 0
+      ? inspectorState.searchActiveIndex : 0;
+    inspectorSearchActivateAt(idx);
+  }
+}
+
+function inspectorSearchHighlightActive(items) {
+  items.forEach((el, i) => {
+    if (i === inspectorState.searchActiveIndex) {
+      el.classList.add("inspector-search-active");
+      el.scrollIntoView({ block: "nearest" });
+    } else {
+      el.classList.remove("inspector-search-active");
+    }
+  });
+}
+
+function inspectorSearchActivateAt(idx) {
+  const dropdown = document.getElementById("inspector-search-results");
+  if (!dropdown) return;
+  const items = dropdown.querySelectorAll("[role=option]");
+  if (idx < 0 || idx >= items.length) return;
+  const el = items[idx];
+  if (el.dataset.action === "view-all") {
+    inspectorEnterSearchMode(inspectorState.searchQuery);
+    return;
+  }
+  if (el.dataset.kind === "folder") {
+    inspectorNavigate(el.dataset.path);
+    inspectorSearchHideDropdown();
+    return;
+  }
+  if (el.dataset.kind === "track") {
+    const parent = el.dataset.parentPath || "";
+    const trackPath = el.dataset.path;
+    inspectorSearchHideDropdown();
+    inspectorNavigate(parent).then(() => {
+      // After navigate completes, highlight the matching row.
+      inspectorHighlightRow(trackPath);
+    });
+  }
+}
+
+// inspectorHighlightRow scrolls a row into view and applies a
+// short-lived `aria-current="true"` + tinted background so the
+// operator can see WHICH track was the search hit.
+function inspectorHighlightRow(trackPath) {
+  const body = document.getElementById("inspector-rows-body");
+  if (!body) return;
+  const tr = body.querySelector(`tr[data-path="${cssEscape(trackPath)}"]`);
+  if (!tr) return;
+  tr.setAttribute("aria-current", "true");
+  tr.classList.add("inspector-row-highlight");
+  tr.scrollIntoView({ block: "center" });
+  setTimeout(() => {
+    tr.removeAttribute("aria-current");
+    tr.classList.remove("inspector-row-highlight");
+  }, 1500);
+}
+
+// cssEscape is a minimal substitute for CSS.escape — needed for
+// paths that contain quotes / backslashes when used in a query
+// selector. Most library paths won't need it but defending the
+// edge case is cheap.
+function cssEscape(s) {
+  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
+    return CSS.escape(s);
+  }
+  return String(s).replace(/(["'\\])/g, "\\$1");
+}
+
+// inspectorEnterSearchMode replaces the main table with a flat
+// search-results list (richer per-row metadata) so the operator
+// can scan many matches at once.
+function inspectorEnterSearchMode(q) {
+  inspectorState.mode = "search";
+  inspectorSearchHideDropdown();
+  inspectorSearchClearClientFilter();
+  document.getElementById("inspector-current-heading").textContent =
+    `Search results for "${q}"`;
+  const body = document.getElementById("inspector-rows-body");
+  body.innerHTML = `<tr><td colspan="5" class="hint"><em>Loading…</em></td></tr>`;
+  document.getElementById("inspector-rows-table").hidden = false;
+  document.getElementById("inspector-empty").hidden = true;
+  fetch(`/api/library/search?q=${encodeURIComponent(q)}&limit=200`)
+    .then((res) => res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`)))
+    .then((data) => inspectorRenderSearchFlatList(data, q))
+    .catch((err) => {
+      body.innerHTML = `<tr><td colspan="5" class="error">Search failed: ${escapeHTML(err.message)}</td></tr>`;
+    });
+}
+
+function inspectorExitSearchMode() {
+  inspectorState.mode = "browse";
+  // Re-render the current folder from cached data; cheap, no
+  // network call.
+  if (inspectorState.lastBrowseData) {
+    inspectorRender(inspectorState.lastBrowseData);
+    document.getElementById("inspector-current-heading").textContent =
+      pathLabel(inspectorState.path);
+  } else {
+    // Cache miss (rare — only if user typed search before initial
+    // browse landed). Fall back to re-navigating to the path.
+    inspectorNavigate(inspectorState.path, { skipHistory: true });
+  }
+}
+
+function inspectorRenderSearchFlatList(data, q) {
+  const folders = data.folders || [];
+  const tracks = data.tracks || [];
+  const body = document.getElementById("inspector-rows-body");
+  body.innerHTML = "";
+  const total = folders.length + tracks.length;
+  if (total === 0) {
+    body.innerHTML = `<tr><td colspan="5" class="hint"><em>No matches for ${escapeHTML(q)}.</em></td></tr>`;
+    return;
+  }
+  for (const f of folders) {
+    const tr = document.createElement("tr");
+    tr.dataset.kind = "folder";
+    tr.dataset.path = f.path;
+    tr.setAttribute("role", "link");
+    tr.tabIndex = 0;
+    tr.innerHTML = `
+      <td class="folder-cell">
+        <span class="folder-name">📁 ${escapeHTML(f.name)}</span>
+        <span class="inspector-search-secondary">${escapeHTML(f.parentPath || "Library root")} · ${f.hitCount} match${f.hitCount === 1 ? "" : "es"}</span>
+      </td>
+      <td class="num">—</td>
+      <td class="num">—</td>
+      <td class="num">—</td>
+      <td class="folder-actions"></td>
+    `;
+    tr.addEventListener("click", () => inspectorNavigate(f.path));
+    tr.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        inspectorNavigate(f.path);
+      }
+    });
+    body.appendChild(tr);
+  }
+  for (const t of tracks) {
+    const tr = document.createElement("tr");
+    tr.dataset.kind = "track";
+    tr.dataset.path = t.path;
+    tr.setAttribute("role", "link");
+    tr.tabIndex = 0;
+    const ctx = [t.artist, t.album, t.parentPath || "Library root"]
+      .filter(Boolean).join(" · ");
+    tr.innerHTML = `
+      <td>
+        🎵 ${escapeHTML(t.title || t.name)}
+        <span class="inspector-search-secondary">${escapeHTML(ctx)}</span>
+      </td>
+      <td class="num">—</td>
+      <td class="num">—</td>
+      <td class="num">—</td>
+      <td class="folder-actions"></td>
+    `;
+    const parent = t.parentPath || "";
+    tr.addEventListener("click", () => {
+      inspectorNavigate(parent).then(() => inspectorHighlightRow(t.path));
+    });
+    tr.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        inspectorNavigate(parent).then(() => inspectorHighlightRow(t.path));
+      }
+    });
+    body.appendChild(tr);
+  }
 }
 
 // =============================================================

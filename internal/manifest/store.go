@@ -399,6 +399,105 @@ var migrations = []migration{
 			ON upscale_batches(status, created_at DESC);
 		`,
 	},
+	{
+		version: 7,
+		name:    "tracks_fts (v1.4 — FTS5 library search)",
+		// Standalone FTS5 virtual table indexing path / title / artist /
+		// album so the admin Library Inspector can search across a 50k
+		// track library in O(log N) rather than the O(N) LIKE scan that
+		// a 2026-vintage Pi 4 would visibly stall on. Standalone
+		// (not external-content) because title/artist/album live inside
+		// the tags_json BLOB on `tracks` — FTS5 cannot index JSON content
+		// directly, so triggers + backfill use json_extract to materialise
+		// the indexed columns. ~10–15% storage overhead vs an
+		// external-content shape; in exchange we avoid rowid coupling and
+		// a tags_json deserialize per hit on read.
+		//
+		// `unicode61 remove_diacritics 2` lets "dvorak" match "Dvořák" —
+		// audiophile-collection friendly. Don't pre-lowercase user input
+		// before passing to MATCH; the tokenizer normalises both index
+		// and query.
+		//
+		// Probe-and-skip-on-failure: the migration tries an FTS5 TEMP
+		// table first. On environments where modernc.org/sqlite was
+		// compiled without FTS5 (highly unusual but possible on minimal
+		// builds), the probe errors, the migration logs a warning, and
+		// bumps the version stamp without creating the real table. The
+		// search API checks `tracks_fts` existence at request time and
+		// returns 503 if absent, so library search degrades gracefully
+		// rather than the whole bridge failing to start.
+		sql: `-- table + triggers + backfill run in post() so we can probe FTS5 availability`,
+		post: func(db *sql.DB) error {
+			// FTS5 capability probe via TEMP table — no schema side
+			// effects if it fails, cheap if it succeeds. The two
+			// `db.Exec` calls below are tolerated because the inner
+			// `if err != nil` immediately swallows and returns nil
+			// (graceful degradation).
+			if _, err := db.Exec(`CREATE VIRTUAL TABLE temp.__fts5_probe USING fts5(x)`); err != nil {
+				logger.Warn("FTS5 unavailable; library search will be disabled",
+					"err", err.Error())
+				return nil
+			}
+			_, _ = db.Exec(`DROP TABLE temp.__fts5_probe`)
+
+			// FTS5 confirmed. Create the real table + triggers.
+			// IF NOT EXISTS on all DDL — defends against partial-apply
+			// resumes (migration aborted mid-step, version stamp not
+			// bumped, retry sees existing artefacts).
+			ddl := `
+			CREATE VIRTUAL TABLE IF NOT EXISTS tracks_fts USING fts5(
+				path, title, artist, album,
+				tokenize='unicode61 remove_diacritics 2'
+			);
+			CREATE TRIGGER IF NOT EXISTS tracks_fts_ai AFTER INSERT ON tracks BEGIN
+				INSERT INTO tracks_fts(path, title, artist, album) VALUES (
+					new.path,
+					COALESCE(json_extract(new.tags_json, '$.title'), ''),
+					COALESCE(json_extract(new.tags_json, '$.artist'), ''),
+					COALESCE(json_extract(new.tags_json, '$.album'), '')
+				);
+			END;
+			CREATE TRIGGER IF NOT EXISTS tracks_fts_au AFTER UPDATE ON tracks BEGIN
+				DELETE FROM tracks_fts WHERE path = old.path;
+				INSERT INTO tracks_fts(path, title, artist, album) VALUES (
+					new.path,
+					COALESCE(json_extract(new.tags_json, '$.title'), ''),
+					COALESCE(json_extract(new.tags_json, '$.artist'), ''),
+					COALESCE(json_extract(new.tags_json, '$.album'), '')
+				);
+			END;
+			CREATE TRIGGER IF NOT EXISTS tracks_fts_ad AFTER DELETE ON tracks BEGIN
+				DELETE FROM tracks_fts WHERE path = old.path;
+			END;
+			`
+			if _, err := db.Exec(ddl); err != nil {
+				return fmt.Errorf("create tracks_fts table+triggers: %w", err)
+			}
+
+			// Backfill — only if FTS table is empty. The version stamp
+			// only bumps after this post() succeeds, so a retry after
+			// partial-success would see a non-empty FTS table here and
+			// skip; that's correct (every prior INSERT was atomic at
+			// the SQL level).
+			var ftsCount int
+			if err := db.QueryRow(`SELECT COUNT(*) FROM tracks_fts`).Scan(&ftsCount); err != nil {
+				return fmt.Errorf("probe tracks_fts count: %w", err)
+			}
+			if ftsCount == 0 {
+				if _, err := db.Exec(`
+					INSERT INTO tracks_fts(path, title, artist, album)
+					SELECT path,
+					       COALESCE(json_extract(tags_json, '$.title'), ''),
+					       COALESCE(json_extract(tags_json, '$.artist'), ''),
+					       COALESCE(json_extract(tags_json, '$.album'), '')
+					FROM tracks
+				`); err != nil {
+					return fmt.Errorf("backfill tracks_fts: %w", err)
+				}
+			}
+			return nil
+		},
+	},
 }
 
 // normalizePathForLookup folds an iOS-shaped track path back toward

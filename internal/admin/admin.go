@@ -551,6 +551,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/upscale/stats", s.apiUpscaleStats)
 	mux.HandleFunc("GET /api/library/browse", s.apiLibraryBrowse)
 	mux.HandleFunc("GET /api/library/browse-projection", s.apiLibraryBrowseProjection)
+	mux.HandleFunc("GET /api/library/search", s.apiLibrarySearch)
 	mux.HandleFunc("POST /api/upscale/batch", s.apiUpscaleBatchSubmit)
 	mux.HandleFunc("GET /api/upscale/batches", s.apiUpscaleBatchList)
 	mux.HandleFunc("DELETE /api/upscale/batches/{id}", s.apiUpscaleBatchCancel)
