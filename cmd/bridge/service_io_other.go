@@ -6,4 +6,6 @@ package main
 // guarded by isWindowsService(), which is always false off Windows —
 // so in practice this never runs, but keeps main.go platform-
 // agnostic.
-func redirectServiceIO() {}
+func redirectServiceIO() {
+	// Intentional no-op off Windows — see file docstring above.
+}

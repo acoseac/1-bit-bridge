@@ -194,7 +194,7 @@ async function refreshBackups() {
     } else {
       setText("backup-latest", "no snapshots yet");
     }
-  } catch (e) {
+  } catch {
     // Quietly leave the placeholders alone.
   }
 }
@@ -210,7 +210,7 @@ async function refreshCertInfo() {
   if (!cell) return;
   try {
     const info = await API.get("/api/cert");
-    if (!info || !info.notAfter) {
+    if (!info?.notAfter) {
       cell.textContent = "—";
       return;
     }
@@ -336,7 +336,7 @@ function bindTailscaleRefreshButton() {
       const s = await API.post("/api/tailscale/refresh-cert");
       renderTailscaleTile(s);
     } catch (err) {
-      alert("Re-mint failed: " + (err && err.message ? err.message : "unknown error"));
+      alert("Re-mint failed: " + (err?.message ?? "unknown error"));
     } finally {
       btn.textContent = oldText;
       btn.disabled = false;
@@ -437,7 +437,7 @@ function renderUpdateTile(u) {
   const actions = document.querySelector(".panel-head .panel-actions");
   let installBtn = document.getElementById("update-install");
   if (actions) {
-    const should = u && u.updateAvailable && u.canInstall;
+    const should = u?.updateAvailable && u?.canInstall;
     if (should && !installBtn) {
       // Mirror the supervision-aware label + dataset attribute the
       // server-rendered first-paint path emits — without this the
@@ -462,7 +462,7 @@ function renderUpdateTile(u) {
     }
   }
 
-  if (u && u.updateAvailable && u.latestVersion) {
+  if (u?.updateAvailable && u?.latestVersion) {
     status.innerHTML = `<span class="badge running">update available</span><span>· <code>${escapeHTML(u.latestVersion)}</code></span>`;
     if (u.releaseNotesURL) {
       const notes = document.createElement("a");
@@ -474,9 +474,9 @@ function renderUpdateTile(u) {
       status.appendChild(document.createTextNode(" "));
       status.appendChild(notes);
     }
-  } else if (u && u.latestVersion) {
+  } else if (u?.latestVersion) {
     status.innerHTML = `<span class="badge idle">up to date</span><span>· latest <code>${escapeHTML(u.latestVersion)}</code></span>`;
-  } else if (u && u.lastError) {
+  } else if (u?.lastError) {
     status.innerHTML = `<span class="badge idle">check failed</span>`;
   } else if (u && isUpdateLastCheckZero(u)) {
     // Distinguish "no check has fired yet" from "check is in
@@ -501,7 +501,7 @@ function renderUpdateTile(u) {
     }
   }
   if (lastError) {
-    if (u && u.lastError) {
+    if (u?.lastError) {
       lastError.innerHTML = `<code>${escapeHTML(u.lastError)}</code>`;
       lastError.hidden = false;
       const dt = lastError.previousElementSibling;
@@ -513,7 +513,7 @@ function renderUpdateTile(u) {
       if (dt) dt.hidden = true;
     }
   }
-  if (latest && u && u.latestVersion) {
+  if (latest && u?.latestVersion) {
     latest.textContent = u.latestVersion;
     latest.hidden = false;
   }
@@ -524,7 +524,7 @@ function renderUpdateTile(u) {
   // update isn't installing automatically.
   const deferred = document.getElementById("update-deferred");
   if (deferred) {
-    if (u && u.deferredReason) {
+    if (u?.deferredReason) {
       deferred.innerHTML = `<span class="badge running">deferred</span> ${escapeHTML(u.deferredReason)}`;
       deferred.hidden = false;
       const dt = deferred.previousElementSibling;
@@ -1588,7 +1588,7 @@ function handleVisibilityRestore() {
   // Force-cycle the connection — auto-reconnect doesn't always cover
   // post-sleep recovery cleanly.
   if (activeEventSource) {
-    try { activeEventSource.close(); } catch (_) { /* ignore */ }
+    try { activeEventSource.close(); } catch { /* ignore */ }
   }
   startEventStream();
   // Belt-and-braces: backfill the pairing snapshot directly so the
@@ -1597,7 +1597,7 @@ function handleVisibilityRestore() {
   (async () => {
     try {
       applyPairing(await API.get("/api/pairing"));
-    } catch (_) {
+    } catch {
       // Transient — the next SSE frame will catch up.
     }
   })();
@@ -1747,7 +1747,7 @@ function initLibraryInspector() {
       return;
     }
     e.preventDefault();
-    searchInput && searchInput.focus();
+    searchInput?.focus();
   });
   // Click outside the dropdown to dismiss it.
   document.addEventListener("click", (e) => {
@@ -1843,7 +1843,7 @@ async function inspectorStorageRefresh() {
     if (defaultEl) defaultEl.textContent = data.default || "—";
     const input = document.getElementById("inspector-storage-modal-input");
     if (input) input.placeholder = data.default || "/mnt/external/variants";
-  } catch (err) {
+  } catch {
     // Best-effort. The bar is informational; a transient blip
     // doesn't warrant a banner.
   }
@@ -2532,8 +2532,7 @@ async function inspectorFetchProjection(path) {
   // Per CodeRabbit major on PR #205 round 2.
   const requested = path;
   const stillCurrent = () =>
-    inspectorState.selection &&
-    inspectorState.selection.kind === "folder" &&
+    inspectorState.selection?.kind === "folder" &&
     inspectorState.selection.row.path === requested;
   try {
     const res = await fetch(`/api/library/browse-projection?path=${encodeURIComponent(path)}`);
@@ -2608,7 +2607,7 @@ async function inspectorFetchProjection(path) {
 
 async function inspectorSubmitBatch() {
   const sel = inspectorState.selection;
-  if (!sel || sel.kind !== "folder") return;
+  if (sel?.kind !== "folder") return;
   const btn = document.getElementById("inspector-upscale-btn");
   btn.disabled = true;
   const status = document.getElementById("inspector-submit-status");
@@ -2663,7 +2662,7 @@ async function inspectorSubmitBatch() {
 // post-delete state without waiting for the browse fetch to re-fire.
 async function inspectorDeleteVariants() {
   const sel = inspectorState.selection;
-  if (!sel || sel.kind !== "folder") return;
+  if (sel?.kind !== "folder") return;
   const scope = sel.row.path || "";
   const scopeLabel = scope === "" ? "the library root" : scope;
   if (!confirm(
