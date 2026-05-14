@@ -143,6 +143,149 @@ func extractMP4Codec(r io.ReadSeeker) (string, error) {
 	}
 }
 
+// extractALACBitDepth walks the same atom chain as extractMP4Codec
+// (moov → trak → mdia → minf → stbl → stsd → outer `alac` sample
+// entry) and descends one level further into the inner `alac` config
+// atom to read the source bit depth from the ALACSpecificConfig.
+//
+// Returns the source bit depth (typically 16 / 20 / 24 / 32) on
+// success, (0, nil) when the layout doesn't match (atypical encoder /
+// non-ALAC file / corrupt container) so the caller can skip the
+// manifest assignment without erroring, or a non-nil error on I/O
+// failure or budget exhaustion in `findAtom`.
+//
+// MP4 layout reference (validated against `01 Espina.m4a` 2026-05-14):
+//
+//	stsd payload:
+//	  [1 byte version][3 bytes flags][4 bytes entry_count]
+//	  entry:
+//	    [4 bytes entry_size][4 bytes FourCC = "alac"]
+//	    audio sample-entry header (28 bytes):
+//	      [6 reserved][2 data_reference_index]
+//	      [8 reserved][2 channel_count][2 sample_size]
+//	      [2 pre_defined][2 reserved][4 sample_rate (16.16 fixed)]
+//	    inner `alac` config atom:
+//	      [8 bytes atom header (size + "alac")]
+//	      FullBox payload:
+//	        [4 bytes version+flags]
+//	        ALACSpecificConfig (24 bytes):
+//	          [4 frameLength][1 compatibleVersion][1 BIT_DEPTH]...
+//
+// So bitDepth lives at (inner alac payload offset 4) + 5 = 9. The
+// outer sample entry is NOT a FullBox; the inner one IS, hence the
+// 4-byte version+flags shift before ALACSpecificConfig.
+func extractALACBitDepth(r io.ReadSeeker) (int, error) {
+	if _, err := r.Seek(0, io.SeekStart); err != nil {
+		return 0, err
+	}
+
+	moovStart, moovHdr, moovSize, err := findAtom(r, "moov", 0, mp4MaxHeaderReadBudget)
+	if err != nil {
+		return 0, err
+	}
+	if moovSize <= 0 {
+		return 0, nil
+	}
+	trakStart, trakHdr, trakSize, err := findAtom(r, "trak", moovStart+moovHdr, moovStart+moovSize)
+	if err != nil {
+		return 0, err
+	}
+	if trakSize <= 0 {
+		return 0, nil
+	}
+	mdiaStart, mdiaHdr, mdiaSize, err := findAtom(r, "mdia", trakStart+trakHdr, trakStart+trakSize)
+	if err != nil {
+		return 0, err
+	}
+	if mdiaSize <= 0 {
+		return 0, nil
+	}
+	minfStart, minfHdr, minfSize, err := findAtom(r, "minf", mdiaStart+mdiaHdr, mdiaStart+mdiaSize)
+	if err != nil {
+		return 0, err
+	}
+	if minfSize <= 0 {
+		return 0, nil
+	}
+	stblStart, stblHdr, stblSize, err := findAtom(r, "stbl", minfStart+minfHdr, minfStart+minfSize)
+	if err != nil {
+		return 0, err
+	}
+	if stblSize <= 0 {
+		return 0, nil
+	}
+	stsdStart, stsdHdr, stsdSize, err := findAtom(r, "stsd", stblStart+stblHdr, stblStart+stblSize)
+	if err != nil {
+		return 0, err
+	}
+	if stsdSize <= 0 {
+		return 0, nil
+	}
+
+	// Skip stsd version+flags (4 bytes) + entry_count (4 bytes) to
+	// land on the first sample entry's 4-byte size field.
+	entryStart := stsdStart + stsdHdr + 8
+	if entryStart+8 > stsdStart+stsdSize {
+		return 0, nil
+	}
+	if _, err := r.Seek(int64(entryStart), io.SeekStart); err != nil {
+		return 0, err
+	}
+	var entrySize uint32
+	if err := binary.Read(r, binary.BigEndian, &entrySize); err != nil {
+		return 0, err
+	}
+	var fourcc [4]byte
+	if _, err := io.ReadFull(r, fourcc[:]); err != nil {
+		return 0, err
+	}
+	if string(fourcc[:]) != "alac" {
+		// Not ALAC — caller doesn't need bits.
+		return 0, nil
+	}
+
+	// Outer sample-entry box: header is the 8 bytes we just read.
+	// Audio sample-entry header is 28 more bytes (see docblock).
+	// Inner atoms start at entryStart + 8 (sample-entry header) + 28.
+	const audioSampleEntryHeaderBytes = 28
+	innerSearchStart := entryStart + 8 + audioSampleEntryHeaderBytes
+	innerSearchEnd := entryStart + uint64(entrySize)
+	if innerSearchStart > innerSearchEnd {
+		return 0, nil
+	}
+
+	innerStart, innerHdr, innerSize, err := findAtom(r, "alac", innerSearchStart, innerSearchEnd)
+	if err != nil {
+		return 0, err
+	}
+	if innerSize == 0 {
+		// Atypical encoder / corrupt container — caller skips
+		// assignment gracefully.
+		return 0, nil
+	}
+
+	// Inner `alac` is a FullBox. Payload = 4-byte version+flags
+	// followed by ALACSpecificConfig. bitDepth = ALACSpecificConfig
+	// byte 5 = inner payload byte 9. The ALAC magic cookie ref
+	// (ALACMagicCookieDescription.txt): bytes 0-3 frameLength,
+	// byte 4 compatibleVersion, BYTE 5 bitDepth.
+	const bitDepthPayloadOffset = 9
+	if innerSize < innerHdr+bitDepthPayloadOffset+1 {
+		// Truncated inner atom — return 0 rather than error so the
+		// caller falls through cleanly (matches PR #376's "honest
+		// suppression" precedent for ALAC bit-depth uncertainty).
+		return 0, nil
+	}
+	if _, err := r.Seek(int64(innerStart+innerHdr+bitDepthPayloadOffset), io.SeekStart); err != nil {
+		return 0, err
+	}
+	var bitDepth [1]byte
+	if _, err := io.ReadFull(r, bitDepth[:]); err != nil {
+		return 0, err
+	}
+	return int(bitDepth[0]), nil
+}
+
 // findAtom scans MP4 atoms starting at `start` (absolute byte offset
 // in the reader) up to `endBound` (exclusive) for one with type
 // matching `name` (4-character ASCII). Returns the atom's start
