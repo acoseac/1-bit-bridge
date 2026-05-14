@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -219,6 +220,106 @@ func TestRateLimitManifestMiddleware_PerClientIsolation(t *testing.T) {
 	}
 }
 
+// TestRateLimitManifestMiddleware_PaginationBypass: paginated requests
+// (those carrying ?cursor= or ?limit=) are inherently client-paced —
+// the iOS app pulls the next page only after parsing the prior one —
+// so they're exempt from the bucket. A 50k-track library is ~50
+// pages, far above any reasonable burst budget; without this bypass
+// the limiter terminates legitimate paginated full-rescans after the
+// first few pages and iOS surfaces it as a transport error.
+//
+// Burst=1 here so the underlying limiter would 429 any 2nd unmarked
+// call. The pagination calls must succeed regardless.
+func TestRateLimitManifestMiddleware_PaginationBypass(t *testing.T) {
+	srv, raw, _ := newRateLimitedTestServer(t, 60, 1)
+	defer srv.Close()
+
+	// 10 sequential paginated requests with ?limit=1000&cursor=...;
+	// none should trip the limiter. Provider is nil → 503 from the
+	// handler — we only care that NONE come back as 429. The `limit`
+	// presence is what the handler itself uses to enter the paginated
+	// path (api.go:803), and the bypass mirrors that predicate.
+	for i := 0; i < 10; i++ {
+		resp := manifestRequestWithQuery(t, srv, raw,
+			fmt.Sprintf("limit=1000&cursor=page-%d", i))
+		if resp.StatusCode == http.StatusTooManyRequests {
+			resp.Body.Close()
+			t.Fatalf("paginated request %d should bypass rate limit, got 429", i)
+		}
+		resp.Body.Close()
+	}
+
+	// 10 more with ?limit=1000 (first-page shape, no cursor). Same
+	// expectation — the cursor is optional within the paginated path.
+	for i := 0; i < 10; i++ {
+		resp := manifestRequestWithQuery(t, srv, raw, "limit=1000")
+		if resp.StatusCode == http.StatusTooManyRequests {
+			resp.Body.Close()
+			t.Fatalf("limit-only request %d should bypass rate limit, got 429", i)
+		}
+		resp.Body.Close()
+	}
+
+	// And finally — a NON-paginated request still pays the limit.
+	// First call burns the burst (passes); the second-back-to-back
+	// no-params call must 429. Confirms the bypass is targeted, not
+	// a blanket disable.
+	resp := manifestRequest(t, srv, raw)
+	resp.Body.Close()
+	resp = manifestRequest(t, srv, raw)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("no-query 2nd call should still 429, got %d", resp.StatusCode)
+	}
+}
+
+// TestRateLimitManifestMiddleware_CursorWithoutLimitStillRateLimited
+// is a regression guard for the Gemini medium finding on PR #235:
+// the bypass MUST NOT fire on a `?cursor=` query param alone, since
+// the handler doesn't enter the paginated path without a non-empty
+// `?limit=` (api.go:803 — `if limitRaw != ""`). A `?cursor=anything`
+// request still surfaces the full single-shot manifest, which is
+// exactly the runaway-dump case the limiter constrains. Without
+// this regression test, a future refactor could re-broaden the gate
+// to `cursor` OR `limit` and silently reopen the loophole.
+func TestRateLimitManifestMiddleware_CursorWithoutLimitStillRateLimited(t *testing.T) {
+	srv, raw, _ := newRateLimitedTestServer(t, 60, 1)
+	defer srv.Close()
+
+	// First `?cursor=...` (no limit) burns the burst.
+	resp := manifestRequestWithQuery(t, srv, raw, "cursor=foo")
+	resp.Body.Close()
+
+	// Second back-to-back `?cursor=...` must 429 — the limiter is
+	// NOT bypassed because the handler doesn't treat this as
+	// paginated, and the bypass predicate must match the handler's
+	// pagination predicate.
+	resp = manifestRequestWithQuery(t, srv, raw, "cursor=bar")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("?cursor=...-only 2nd call must still 429 (no bypass), got %d",
+			resp.StatusCode)
+	}
+}
+
+// TestRateLimitManifestMiddleware_EmptyLimitStillRateLimited covers
+// the edge case `?limit=` (param key present but value empty). The
+// handler's `if limitRaw != ""` rejects this from the paginated
+// path; the bypass must do the same.
+func TestRateLimitManifestMiddleware_EmptyLimitStillRateLimited(t *testing.T) {
+	srv, raw, _ := newRateLimitedTestServer(t, 60, 1)
+	defer srv.Close()
+
+	resp := manifestRequestWithQuery(t, srv, raw, "limit=")
+	resp.Body.Close()
+	resp = manifestRequestWithQuery(t, srv, raw, "limit=")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("?limit= (empty value) 2nd call must still 429, got %d",
+			resp.StatusCode)
+	}
+}
+
 // TestRateLimitManifestMiddleware_DisabledFallsOpen: rpm=0 in config
 // disables the limiter and every call passes through.
 func TestRateLimitManifestMiddleware_DisabledFallsOpen(t *testing.T) {
@@ -284,6 +385,23 @@ func mintToken(t *testing.T, store *auth.Store, name string) string {
 func manifestRequest(t *testing.T, hs *httptest.Server, raw string) *http.Response {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodGet, hs.URL+"/v1/manifest", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+raw)
+	resp, err := hs.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+// manifestRequestWithQuery is the same as manifestRequest but appends
+// arbitrary query parameters. Used by the pagination-bypass test to
+// exercise the `?cursor=` / `?limit=` exemption.
+func manifestRequestWithQuery(t *testing.T, hs *httptest.Server, raw, query string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, hs.URL+"/v1/manifest?"+query, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
