@@ -291,7 +291,14 @@ h2 {
 }
 .section-head:first-child { margin-top: 0; }
 
-.lede { color: var(--fg-muted); margin: 0 0 20px; max-width: 72ch; }
+/* Lede paragraph (intro text below each page heading). Pre-fix
+ * had `max-width: 72ch` for readability — but every full-width
+ * admin page (Library Inspector tables, Settings forms, Devices)
+ * had a lede paragraph wrapping at ~50% width while the content
+ * below flowed to the 1100px page bound. Visually disjointed and
+ * the user-reported "half-width text" issue. Drop the cap so the
+ * lede flows to the page max-width like the rest of the content. */
+.lede { color: var(--fg-muted); margin: 0 0 20px; }
 .hint { color: var(--fg-muted); font-size: 12px; margin-top: 4px; display: block; }
 /* In-panel explanatory text. Pre-existing classes (used in dashboard /
  * devices / settings panels) that lacked rules; the templates were
@@ -1262,8 +1269,34 @@ dialog h2 { font-size: 18px; color: var(--accent); }
 .inspector-tree #inspector-rows-body td.folder-cell {
   /* The first cell carries the bulk of the name + emoji prefix; let
    * it grow but still ellipsis. Search flat-list rows put two lines
-   * here; honour that exception via the secondary-text class. */
-  max-width: 60ch;
+   * here; honour that exception via the secondary-text class.
+   *
+   * v1.4 followup: bumped from 60ch → 80ch, and added a hover
+   * `title` attribute on the folder name span in JS so a truncated
+   * name reveals on mouseover. Operators with long album titles
+   * ("Jenna-Mammina_Soldiers_Format-Bundle") + the drawer open were
+   * seeing the name cut. */
+  max-width: 80ch;
+}
+.inspector-tree #inspector-rows-body td.folder-cell .folder-name {
+  /* Restrict the inner span too, so the ellipsis triggers cleanly
+   * regardless of how the outer cell flexes when the drawer
+   * collapses. */
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+}
+/* Make the column headers user-resizable. CSS `resize: horizontal`
+ * on the <th> with `overflow: hidden` is the cheapest path —
+ * native drag handle in the bottom-right of the cell, no JS. The
+ * row body's column widths follow because the table uses the
+ * browser default `table-layout: auto`. */
+#inspector-rows-table th {
+  overflow: hidden;
+  resize: horizontal;
+  min-width: 4ch;
 }
 /* The trailing folder-actions cell holds the ⓘ button — `max-width: 0`
  * from the general `td` rule above was clipping the button (~half cut
@@ -1359,12 +1392,61 @@ dialog h2 { font-size: 18px; color: var(--accent); }
   background: color-mix(in srgb, var(--accent) 24%, transparent);
 }
 
-/* Drawer close affordance (v1.4): drawer is hidden by default; the
- * close button gives the operator an explicit dismiss. */
-.inspector-drawer-close {
-  margin-top: 0.5rem;
+/* Drawer header (v1.4 followup): title flex-grows, close × pins
+ * to the top-right corner per the user-requested reorder.
+ * Replaces the bottom-of-body CLOSE button which sat below the
+ * destructive Delete and felt buried. */
+.inspector-drawer-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+.inspector-drawer-header h2 {
+  margin: 0;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.inspector-drawer-close-x {
+  /* Plain text × with a 32×32 hit area. Not a .btn — looks like a
+   * macOS-style dismiss control rather than a competing CTA. */
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
   background: transparent;
   color: var(--fg-muted);
+  font-size: 1.4rem;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+.inspector-drawer-close-x:hover {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--fg);
+}
+.inspector-drawer-close-x:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* Drawer action row (v1.4 followup): Upscale + Delete buttons at
+ * the TOP of the body, side-by-side on wide drawers and stacked on
+ * narrow ones. Each is independently hideable via the [hidden]
+ * attribute (Upscale hides when 0 eligible files; Delete hides
+ * when scope has no variants). */
+.inspector-drawer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+.inspector-drawer-actions .btn[hidden] {
+  display: none;
 }
 
 /* Search input + dropdown (v1.4 PR B FTS5). Slot owns the

@@ -147,12 +147,43 @@
     </div>
 
     <aside class="inspector-drawer panel" id="inspector-drawer" aria-live="polite" hidden>
-      <h2 id="inspector-drawer-title">Select a folder</h2>
+      {{/* Header: title + × close (v1.4 followup — replaces the
+           CLOSE button at the bottom of the drawer body, which
+           sat below the destructive Delete button and felt buried). */}}
+      <div class="inspector-drawer-header">
+        <h2 id="inspector-drawer-title">Select a folder</h2>
+        <button type="button" id="inspector-drawer-close"
+                class="inspector-drawer-close-x" aria-label="Close drawer">×</button>
+      </div>
       <p class="hint" id="inspector-drawer-hint" hidden>
-        Tap the ⓘ icon on a row, or the "Upscale this folder" toolbar
-        button, to see the upscale projection.
+        Tap the ⓘ icon on a row, or the heading ⓘ above, to see
+        the upscale projection.
       </p>
       <div id="inspector-drawer-content">
+        {{/* Action buttons at the TOP of the body (user-requested
+             reorder). Each button is hidden when its action is moot:
+             Upscale hides when projection has 0 eligible files; Delete
+             hides when this scope has no existing variants. */}}
+        <div class="inspector-drawer-actions">
+          <button type="button" id="inspector-upscale-btn" class="btn primary" disabled>
+            Upscale this scope
+          </button>
+          {{/*
+            Per-scope variant delete. Enabled by the JS when the
+            drawer's "Already upscaled" count is > 0. Fires
+            DELETE /api/upscale/variants?prefix=<scope>; the same
+            upscale.deleted SSE event reaches iOS clients regardless
+            of surface. Uses a native confirm() rather than the
+            typed-phrase modal from the settings page because the
+            scope is bounded (one folder) and the operator already
+            drilled into it deliberately.
+          */}}
+          <button type="button" id="inspector-delete-variants-btn"
+                  class="btn danger" disabled>
+            Delete variants in this scope
+          </button>
+        </div>
+        <p id="inspector-submit-status" class="hint" aria-live="polite"></p>
         <dl class="kv">
           <dt>Tracks</dt><dd id="inspector-drawer-tracks">—</dd>
           <dt>Already upscaled</dt><dd id="inspector-drawer-covered">—</dd>
@@ -164,32 +195,6 @@
         </dl>
         <p id="inspector-drawer-warning" class="error" hidden role="alert"></p>
         <p id="inspector-drawer-unknown" class="hint" hidden></p>
-        <button type="button" id="inspector-upscale-btn" class="btn primary" disabled>
-          Upscale this scope
-        </button>
-        {{/*
-          Per-scope variant delete. Enabled by the JS when the drawer's
-          "Already upscaled" count is > 0 — there's nothing to clear on
-          a scope that's never been upscaled. The button fires a
-          DELETE /api/upscale/variants?prefix=<scope> request which the
-          admin handler forwards to api.RunVariantDelete; the same
-          upscale.deleted SSE event reaches iOS clients regardless of
-          which surface (admin / iOS) triggered the delete.
-          Uses a native confirm() rather than the typed-phrase modal
-          from the settings page because the scope here is bounded
-          (one folder) and the operator already drilled into it
-          deliberately — the explicit click + browser confirm is
-          proportionate to the blast radius.
-        */}}
-        <button type="button" id="inspector-delete-variants-btn"
-                class="btn danger" disabled>
-          Delete variants in this scope
-        </button>
-        <button type="button" id="inspector-drawer-close"
-                class="btn inspector-drawer-close" aria-label="Close drawer">
-          Close
-        </button>
-        <p id="inspector-submit-status" class="hint" aria-live="polite"></p>
       </div>
     </aside>
   </div>

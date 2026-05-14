@@ -1709,7 +1709,7 @@ function initLibraryInspector() {
   document.getElementById("inspector-delete-variants-btn")
     .addEventListener("click", inspectorDeleteVariants);
   document.getElementById("inspector-drawer-close")
-    .addEventListener("click", inspectorCloseDrawer);
+    .addEventListener("click", () => inspectorCloseDrawer({ userInitiated: true }));
 
   // Sticky-stack height tracker (from PR A): write actual measured
   // offsetHeight of the toolbar + storage bar into CSS custom
@@ -1972,9 +1972,12 @@ async function inspectorNavigate(path, opts = {}) {
 
   inspectorState.path = path;
   inspectorState.lastBrowseData = null;
+  // Clear the "user-closed" latch on every navigation so a fresh
+  // folder auto-opens the projection drawer in inspectorRender.
+  inspectorState.drawerClosedByUser = false;
   inspectorRenderBreadcrumbs(path);
   inspectorUpdateToolbarState(path);
-  inspectorCloseDrawer();
+  inspectorCloseDrawer(); // transient close — userInitiated defaults to false
   document.getElementById("inspector-error").hidden = true;
   document.getElementById("inspector-current-heading").textContent =
     "Loading…";
@@ -2095,10 +2098,21 @@ function inspectorBrowseRollup(data) {
   return { trackCount, upscaledCount, totalSizeBytes };
 }
 
-function inspectorCloseDrawer() {
+// inspectorCloseDrawer hides the projection drawer. `userInitiated`
+// distinguishes:
+//   - true (user clicked × or pressed Esc): persists `drawerClosedByUser`
+//     so the drawer doesn't auto-reopen on the current navigation's
+//     re-render. Cleared on the next navigation.
+//   - false (transient close from inspectorNavigate / inspectorRender
+//     setup): doesn't latch the flag, so the navigation's downstream
+//     auto-open path still fires.
+function inspectorCloseDrawer({ userInitiated = false } = {}) {
   inspectorState.selection = null;
   const drawer = document.getElementById("inspector-drawer");
   if (drawer) drawer.hidden = true;
+  if (userInitiated) {
+    inspectorState.drawerClosedByUser = true;
+  }
 }
 
 function inspectorRenderBreadcrumbs(path) {
@@ -2150,6 +2164,18 @@ function inspectorRender(data) {
     || inspectorBrowseRollup(data).trackCount > 0;
   const currentInfoBtn = document.getElementById("inspector-current-info");
   if (currentInfoBtn) currentInfoBtn.disabled = !hasAnyTracks;
+
+  // Auto-open the projection drawer for the CURRENT folder whenever
+  // it has tracks. Operators don't need to discover an ⓘ to act on
+  // the open folder — the drawer is right there. User explicitly
+  // requested this UX on the v1.4 followup ("maybe keep the upscale
+  // panel always open"). The drawer can still be closed manually
+  // via its × button; closing sets `drawerClosedByUser` so the
+  // current navigation doesn't re-open it on a same-path refresh.
+  // Any subsequent navigation clears the flag and re-opens.
+  if (hasAnyTracks && !inspectorState.drawerClosedByUser) {
+    inspectorOpenProjectionForCurrent();
+  }
 
   if (folders.length === 0 && tracks.length === 0) {
     document.getElementById("inspector-rows-table").hidden = true;
@@ -2255,9 +2281,14 @@ function buildFolderRow(f) {
   tr.setAttribute("role", "link");
   tr.tabIndex = 0;
   tr.setAttribute("aria-label", `Open folder ${f.name}`);
+  // `title` on the folder-name span: hover reveals the full name
+  // when the cell ellipsises a long title (v1.4 followup —
+  // operators with long album titles + the drawer open were
+  // seeing the name cut). Screen readers read the title alongside
+  // the aria-label, so it's also a11y-friendly.
   tr.innerHTML = `
     <td class="folder-cell">
-      <span class="folder-name">📁 ${escapeHTML(f.name)}</span>
+      <span class="folder-name" title="${escapeHTML(f.name)}">📁 ${escapeHTML(f.name)}</span>
     </td>
     <td class="num">${f.trackCount}</td>
     <td class="num">${f.upscaledCount}</td>
@@ -2302,8 +2333,10 @@ function buildTrackRow(t) {
   tr.dataset.kind = "track";
   tr.dataset.path = t.path;
   const upscaled = t.isUpscaled ? "✓" : "";
+  // `title` on the name cell: hover reveals full track name when
+  // the cell ellipsises a long title (v1.4 followup).
   tr.innerHTML = `
-    <td>🎵 ${escapeHTML(t.name)}</td>
+    <td class="folder-cell" title="${escapeHTML(t.name)}">🎵 ${escapeHTML(t.name)}</td>
     <td class="num">${formatTrackQuality(t)}</td>
     <td class="num">${upscaled}</td>
     <td class="num">${humanBytes(t.sizeBytes)}</td>
@@ -2440,14 +2473,22 @@ function inspectorSelectFolder(folder) {
   document.getElementById("inspector-drawer-required").textContent = "—";
   document.getElementById("inspector-drawer-warning").hidden = true;
   document.getElementById("inspector-drawer-unknown").hidden = true;
-  document.getElementById("inspector-upscale-btn").disabled = true;
-  // Delete-variants button: enabled only when this scope has at
-  // least one already-upscaled track. Disabled-with-zero-count is
-  // the right shape — there's literally nothing to delete on a
-  // scope that's never been upscaled, and a click would surface as
-  // a 0-deleted noop response that's just visual noise.
-  document.getElementById("inspector-delete-variants-btn").disabled =
-    !(folder.upscaledCount > 0);
+  // Reset action-button visibility on each select. Final hide/show
+  // happens in inspectorFetchProjection once the projection response
+  // tells us how many eligible files exist + whether variants are
+  // present. Default state before projection lands: Upscale visible
+  // but disabled; Delete visibility based on the rollup hint we
+  // have right now.
+  const upBtn = document.getElementById("inspector-upscale-btn");
+  const delBtn = document.getElementById("inspector-delete-variants-btn");
+  upBtn.hidden = false;
+  upBtn.disabled = true;
+  // Delete-variants button: hidden entirely when this scope has no
+  // upscaled tracks — user-requested cleanup of stale-but-unactionable
+  // chrome. Pre-fix it was only `disabled`. Conditional `hidden`
+  // lets the drawer's action row collapse on empty scopes.
+  delBtn.hidden = !(folder.upscaledCount > 0);
+  delBtn.disabled = !(folder.upscaledCount > 0);
   document.getElementById("inspector-submit-status").textContent = "";
   inspectorFetchProjection(folder.path);
 }
@@ -2487,8 +2528,19 @@ async function inspectorFetchProjection(path) {
       document.getElementById("inspector-drawer-unknown").textContent =
         `${data.unknownFormatFiles} tracks here are in formats we can’t upscale (DSD, lossy, or unknown). They’ll be skipped.`;
     }
+    // Conditional Upscale button visibility (v1.4 followup —
+    // user-requested cleanup of stale-but-unactionable chrome):
+    // hide the button entirely when nothing eligible remains rather
+    // than disabling it. The warning + "All eligible tracks already
+    // upscaled" hint below already communicates the state.
+    const upBtnEl = document.getElementById("inspector-upscale-btn");
+    if (data.projectedFiles === 0) {
+      upBtnEl.hidden = true;
+    } else {
+      upBtnEl.hidden = false;
+    }
     if (data.wouldFit && data.projectedFiles > 0) {
-      document.getElementById("inspector-upscale-btn").disabled = false;
+      upBtnEl.disabled = false;
     } else if (data.projectedFiles === 0) {
       // Differentiate three states for clearer operator UX
       // (per the screenshot review — original message
