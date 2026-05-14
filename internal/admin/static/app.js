@@ -1977,6 +1977,14 @@ async function inspectorNavigate(path, opts = {}) {
   }
 
   inspectorState.path = path;
+  // Invalidate any in-flight chunked-render pump from a previous
+  // navigation or load-more BEFORE the new fetch starts. Pre-fix
+  // the generation was only bumped INSIDE inspectorAppendRows on
+  // the new render — which means between the navigation start and
+  // that bump (could be hundreds of ms on a slow browse fetch), a
+  // stale load-more pump would keep appending rows from the old
+  // folder under the new path. CodeRabbit Major late on PR #246.
+  inspectorState.renderGeneration++;
   inspectorState.lastBrowseData = null;
   // Any navigation exits search mode — covers the case where the
   // operator clicked a search-result folder/track and we land in

@@ -281,6 +281,22 @@ func (s *Server) apiLibraryBrowseProjection(w http.ResponseWriter, r *http.Reque
 			coveredFiles++
 			continue
 		}
+		if t.IsDSD {
+			// DSD (DSF/DFF) is 1-bit modulated and the SoX upscale
+			// pipeline rejects it — there's no meaningful "upscale"
+			// from a delta-sigma stream to a PCM resampler target.
+			// Pre-fix DSD tracks fell through to the rate>0 / bits>0
+			// branch (DSF reports e.g. rate=2822400, bits=1) AND
+			// ProjectedSize returned a non-zero value, so the UI
+			// surfaced an active "Upscale this folder" button. The
+			// submit then enqueued 0 tracks ("Batch enrolled · 0
+			// tracks queued"). Folding DSD into `unknownFormat` is
+			// honest: the UI already labels that bucket as "DSD,
+			// lossy, or unknown — they'll be skipped." User-reported
+			// on the v1.4 followup.
+			unknownFormat++
+			continue
+		}
 		if t.SampleRate <= 0 || t.BitsPerSample <= 0 {
 			// Extractor couldn't determine source format — surface
 			// these separately so the operator sees them but they
