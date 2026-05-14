@@ -197,8 +197,18 @@ func (s *Server) rateLimitManifest(next http.HandlerFunc) http.HandlerFunc {
 		// shape (they're already paced by per-page processing time),
 		// so exempting them is correct. Single-shot /v1/manifest with
 		// no query params still pays the limit.
-		q := r.URL.Query()
-		if q.Has("cursor") || q.Has("limit") {
+		//
+		// Gate tied STRICTLY to a non-empty `limit` query param,
+		// mirroring the handler's actual pagination predicate at
+		// `manifestHandler` (api.go:803 — `if limitRaw != ""`). A
+		// bare `?cursor=…` without `?limit=…` is NOT treated as
+		// paginated server-side: the handler falls through to the
+		// legacy single-shot full-manifest path, which is exactly
+		// the runaway-dump case the limiter is built to constrain.
+		// Per Gemini medium on PR #235: a `cursor`-OR-`limit` gate
+		// would let a misbehaving authed client send `?cursor=anything`
+		// to bypass the bucket while still receiving the full dump.
+		if r.URL.Query().Get("limit") != "" {
 			next(w, r)
 			return
 		}
