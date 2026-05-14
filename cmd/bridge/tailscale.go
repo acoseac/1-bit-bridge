@@ -231,8 +231,14 @@ func (a *tailscaleAutoPilot) detectAndMint(ctx context.Context, trigger string) 
 			// the 14d-30d zone). Tailscale's auto-renew should
 			// refresh well before this point — a persistent
 			// warning means the renewer's stuck.
-			if msg := warnLECertExpiringSoon(info.MagicDNSName, existing.Leaf.NotAfter, time.Now()); msg != "" {
-				fmt.Fprintln(a.stderr, msg)
+			//
+			// Uses `now` (captured at the function head) for a
+			// consistent time reference across this detection
+			// pass, and includes `trigger` in the prefix so the
+			// log line matches the other stderr messages in this
+			// function. Gemini medium on PR #250.
+			if msg := warnLECertExpiringSoon(info.MagicDNSName, existing.Leaf.NotAfter, now); msg != "" {
+				fmt.Fprintf(a.stderr, "tailscale (%s): %s\n", trigger, msg)
 			}
 			a.publish(snap)
 			return snap
@@ -292,10 +298,11 @@ func (a *tailscaleAutoPilot) detectAndMint(ctx context.Context, trigger string) 
 	// we're already under 30 days remaining, Tailscale's control
 	// plane / LE pipeline is having trouble — surface the diagnostic
 	// rather than letting it expire silently. Same wording surface
-	// as the existing-cert path above.
+	// as the existing-cert path above; uses `now` + `trigger`
+	// prefix for consistency.
 	if loaded.Leaf != nil {
-		if msg := warnLECertExpiringSoon(info.MagicDNSName, loaded.Leaf.NotAfter, time.Now()); msg != "" {
-			fmt.Fprintln(a.stderr, msg)
+		if msg := warnLECertExpiringSoon(info.MagicDNSName, loaded.Leaf.NotAfter, now); msg != "" {
+			fmt.Fprintf(a.stderr, "tailscale (%s): %s\n", trigger, msg)
 		}
 	}
 	a.publish(snap)
