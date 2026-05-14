@@ -49,63 +49,24 @@ const (
 	mp4MaxAtomsPerSearch   = 4096    // per-search atom-walk budget (count, not bytes)
 )
 
+// errMP4StructureNotFound wraps the "expected box missing" failures
+// from `findSTSD` (moov / trak / mdia / minf / stbl / stsd not
+// found). Callers can `errors.Is(err, errMP4StructureNotFound)` to
+// distinguish "this isn't a valid MP4 audio file / the file mutated
+// between walks" from genuine I/O failures (seek / read /
+// atom-iteration-budget) — the former should produce honest
+// suppression (return 0 bits, no error), the latter should propagate
+// to the caller's `scanLogger.Warn` so operators see real I/O
+// problems on their scan log. Per CodeRabbit Major round-2 on PR #237.
+var errMP4StructureNotFound = errors.New("mp4: structure not found")
+
 // extractMP4Codec parses the audio codec FourCC from an MP4 file's
 // stsd box. Returns one of "ALAC", "AAC", or "" (unknown — caller
 // should fall through to extension-derived classification).
 func extractMP4Codec(r io.ReadSeeker) (string, error) {
-	if _, err := r.Seek(0, io.SeekStart); err != nil {
-		return "", err
-	}
-
-	// Walk top-level atoms looking for moov. Each descent uses the
-	// actual header size of the parent box (8 for normal boxes, 16
-	// for 64-bit `largesize` boxes); see findAtom's docstring for
-	// why `+ mp4HeaderSize` would be wrong on a 64-bit container.
-	moovStart, moovHdr, moovSize, err := findAtom(r, "moov", 0, mp4MaxHeaderReadBudget)
+	stsdStart, stsdHdr, stsdSize, err := findSTSD(r)
 	if err != nil {
 		return "", err
-	}
-	if moovSize <= 0 {
-		return "", errors.New("mp4: moov not found")
-	}
-
-	// Inside moov, find the first trak.
-	trakStart, trakHdr, trakSize, err := findAtom(r, "trak", moovStart+moovHdr, moovStart+moovSize)
-	if err != nil {
-		return "", err
-	}
-	if trakSize <= 0 {
-		return "", errors.New("mp4: trak not found")
-	}
-
-	// Walk trak/mdia/minf/stbl/stsd.
-	mdiaStart, mdiaHdr, mdiaSize, err := findAtom(r, "mdia", trakStart+trakHdr, trakStart+trakSize)
-	if err != nil {
-		return "", err
-	}
-	if mdiaSize <= 0 {
-		return "", errors.New("mp4: mdia not found")
-	}
-	minfStart, minfHdr, minfSize, err := findAtom(r, "minf", mdiaStart+mdiaHdr, mdiaStart+mdiaSize)
-	if err != nil {
-		return "", err
-	}
-	if minfSize <= 0 {
-		return "", errors.New("mp4: minf not found")
-	}
-	stblStart, stblHdr, stblSize, err := findAtom(r, "stbl", minfStart+minfHdr, minfStart+minfSize)
-	if err != nil {
-		return "", err
-	}
-	if stblSize <= 0 {
-		return "", errors.New("mp4: stbl not found")
-	}
-	stsdStart, stsdHdr, stsdSize, err := findAtom(r, "stsd", stblStart+stblHdr, stblStart+stblSize)
-	if err != nil {
-		return "", err
-	}
-	if stsdSize <= 0 {
-		return "", errors.New("mp4: stsd not found")
 	}
 
 	// stsd payload (after the box header — 8 bytes for normal, 16 for
@@ -116,6 +77,7 @@ func extractMP4Codec(r io.ReadSeeker) (string, error) {
 	//   then for each entry:
 	//     4 bytes: size (uint32)
 	//     4 bytes: format (FourCC)  ← the codec id
+	_ = stsdSize // bounds checking lives in extractALACBitDepth's inner walk
 	if _, err := r.Seek(int64(stsdStart+stsdHdr+8), io.SeekStart); err != nil {
 		return "", err
 	}
@@ -141,6 +103,209 @@ func extractMP4Codec(r io.ReadSeeker) (string, error) {
 		// Unknown codec FourCC — caller falls through.
 		return "", nil
 	}
+}
+
+// findSTSD walks the standard MP4 atom hierarchy
+// `moov → trak → mdia → minf → stbl → stsd` and returns the stsd
+// box's start offset, header size (8 or 16 for 64-bit largesize),
+// and total size. Each descent uses the parent's actual header size
+// (NOT a hardcoded `mp4HeaderSize`) so 64-bit largesize containers
+// (long audiobooks / DJ mixes whose moov / trak exceeds 4 GiB) are
+// re-entered at the correct offset rather than 8 bytes into the
+// extended header.
+//
+// Shared by `extractMP4Codec` (reads the first sample entry's
+// FourCC) and `extractALACBitDepth` (descends one level further into
+// the inner `alac` config atom). Pre-share, the descent chain was
+// inlined twice — Gemini medium on PR #237: a duplicated walk over
+// NAS / SMB is six extra round-trips per ALAC file scanned, and
+// any future change to the descent chain would need two edits in
+// lockstep.
+//
+// Returns an error when any box in the chain is missing — the only
+// caller (extractMP4Codec) propagates that, which `extractALACBitDepth`
+// upgrades to honest-suppression (returns `(0, nil)`) since the
+// caller can't tell apart "this isn't an MP4" from "this is an MP4
+// with no audio track" and either way the right behaviour is "leave
+// bits nil".
+func findSTSD(r io.ReadSeeker) (start, headerSize, size uint64, err error) {
+	if _, err := r.Seek(0, io.SeekStart); err != nil {
+		return 0, 0, 0, err
+	}
+
+	moovStart, moovHdr, moovSize, err := findAtom(r, "moov", 0, mp4MaxHeaderReadBudget)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	if moovSize <= 0 {
+		return 0, 0, 0, fmt.Errorf("%w: moov", errMP4StructureNotFound)
+	}
+	trakStart, trakHdr, trakSize, err := findAtom(r, "trak", moovStart+moovHdr, moovStart+moovSize)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	if trakSize <= 0 {
+		return 0, 0, 0, fmt.Errorf("%w: trak", errMP4StructureNotFound)
+	}
+	mdiaStart, mdiaHdr, mdiaSize, err := findAtom(r, "mdia", trakStart+trakHdr, trakStart+trakSize)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	if mdiaSize <= 0 {
+		return 0, 0, 0, fmt.Errorf("%w: mdia", errMP4StructureNotFound)
+	}
+	minfStart, minfHdr, minfSize, err := findAtom(r, "minf", mdiaStart+mdiaHdr, mdiaStart+mdiaSize)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	if minfSize <= 0 {
+		return 0, 0, 0, fmt.Errorf("%w: minf", errMP4StructureNotFound)
+	}
+	stblStart, stblHdr, stblSize, err := findAtom(r, "stbl", minfStart+minfHdr, minfStart+minfSize)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	if stblSize <= 0 {
+		return 0, 0, 0, fmt.Errorf("%w: stbl", errMP4StructureNotFound)
+	}
+	stsdStart, stsdHdr, stsdSize, err := findAtom(r, "stsd", stblStart+stblHdr, stblStart+stblSize)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	if stsdSize <= 0 {
+		return 0, 0, 0, fmt.Errorf("%w: stsd", errMP4StructureNotFound)
+	}
+	return stsdStart, stsdHdr, stsdSize, nil
+}
+
+// extractALACBitDepth walks the same atom chain as extractMP4Codec
+// (moov → trak → mdia → minf → stbl → stsd → outer `alac` sample
+// entry) and descends one level further into the inner `alac` config
+// atom to read the source bit depth from the ALACSpecificConfig.
+//
+// Returns the source bit depth (typically 16 / 20 / 24 / 32) on
+// success, (0, nil) when the layout doesn't match (atypical encoder /
+// non-ALAC file / corrupt container) so the caller can skip the
+// manifest assignment without erroring, or a non-nil error on I/O
+// failure or budget exhaustion in `findAtom`.
+//
+// MP4 layout reference (validated against `01 Espina.m4a` 2026-05-14):
+//
+//	stsd payload:
+//	  [1 byte version][3 bytes flags][4 bytes entry_count]
+//	  entry:
+//	    [4 bytes entry_size][4 bytes FourCC = "alac"]
+//	    audio sample-entry header (28 bytes):
+//	      [6 reserved][2 data_reference_index]
+//	      [8 reserved][2 channel_count][2 sample_size]
+//	      [2 pre_defined][2 reserved][4 sample_rate (16.16 fixed)]
+//	    inner `alac` config atom:
+//	      [8 bytes atom header (size + "alac")]
+//	      FullBox payload:
+//	        [4 bytes version+flags]
+//	        ALACSpecificConfig (24 bytes):
+//	          [4 frameLength][1 compatibleVersion][1 BIT_DEPTH]...
+//
+// So bitDepth lives at (inner alac payload offset 4) + 5 = 9. The
+// outer sample entry is NOT a FullBox; the inner one IS, hence the
+// 4-byte version+flags shift before ALACSpecificConfig.
+func extractALACBitDepth(r io.ReadSeeker) (int, error) {
+	stsdStart, stsdHdr, stsdSize, err := findSTSD(r)
+	if err != nil {
+		// Distinguish structural-not-found from genuine I/O failures.
+		// Structural cases (moov / trak / .../stsd missing) are
+		// suppressed to (0, nil) — the caller already knows the file
+		// is ALAC from `extractMP4Codec`, so a chain-failure here
+		// means the file mutated between the two walks (NAS hiccup,
+		// scanner timing), and the right behaviour is to leave bits
+		// nil rather than fail-loud the whole track scan. I/O / seek
+		// / atom-walk-budget errors propagate so the caller's
+		// `scanLogger.Warn` surfaces real I/O problems on the operator
+		// scan log. Per CodeRabbit Major round-2 on PR #237.
+		if errors.Is(err, errMP4StructureNotFound) {
+			return 0, nil
+		}
+		return 0, err
+	}
+
+	// Skip stsd version+flags (4 bytes) + entry_count (4 bytes) to
+	// land on the first sample entry's 4-byte size field.
+	entryStart := stsdStart + stsdHdr + 8
+	if entryStart+8 > stsdStart+stsdSize {
+		return 0, nil
+	}
+	if _, err := r.Seek(int64(entryStart), io.SeekStart); err != nil {
+		return 0, err
+	}
+	var entrySize uint32
+	if err := binary.Read(r, binary.BigEndian, &entrySize); err != nil {
+		return 0, err
+	}
+	var fourcc [4]byte
+	if _, err := io.ReadFull(r, fourcc[:]); err != nil {
+		return 0, err
+	}
+	if string(fourcc[:]) != "alac" {
+		// Not ALAC — caller doesn't need bits.
+		return 0, nil
+	}
+
+	// Outer sample-entry box: header is the 8 bytes we just read.
+	// Audio sample-entry header is 28 more bytes (see docblock).
+	// Inner atoms start at entryStart + 8 (sample-entry header) + 28.
+	const audioSampleEntryHeaderBytes = 28
+	innerSearchStart := entryStart + 8 + audioSampleEntryHeaderBytes
+	// Bound entrySize against the enclosing stsd box. `entrySize` is
+	// untrusted container data: a malformed file declaring
+	// `entrySize == 0xFFFFFFFF` would otherwise let the inner
+	// `findAtom("alac", …)` scan beyond stsd into unrelated mp4 boxes
+	// (stts, stsc, stsz, …) — and any 4-byte stretch that happens to
+	// spell "alac" would yield a false-positive bit depth instead of
+	// honest suppression. Clamp to `min(entryStart + entrySize,
+	// stsdEnd)` and bail on underflow / inversion. Per CodeRabbit
+	// Major on PR #237.
+	entryEnd := entryStart + uint64(entrySize)
+	stsdEnd := stsdStart + stsdSize
+	if entryEnd < entryStart || entryEnd > stsdEnd {
+		// Underflow (overflow wraparound) OR entry claims to extend
+		// past stsd — both are corruption signals; return honest 0.
+		return 0, nil
+	}
+	innerSearchEnd := entryEnd
+	if innerSearchStart > innerSearchEnd {
+		return 0, nil
+	}
+
+	innerStart, innerHdr, innerSize, err := findAtom(r, "alac", innerSearchStart, innerSearchEnd)
+	if err != nil {
+		return 0, err
+	}
+	if innerSize == 0 {
+		// Atypical encoder / corrupt container — caller skips
+		// assignment gracefully.
+		return 0, nil
+	}
+
+	// Inner `alac` is a FullBox. Payload = 4-byte version+flags
+	// followed by ALACSpecificConfig. bitDepth = ALACSpecificConfig
+	// byte 5 = inner payload byte 9. The ALAC magic cookie ref
+	// (ALACMagicCookieDescription.txt): bytes 0-3 frameLength,
+	// byte 4 compatibleVersion, BYTE 5 bitDepth.
+	const bitDepthPayloadOffset = 9
+	if innerSize < innerHdr+bitDepthPayloadOffset+1 {
+		// Truncated inner atom — return 0 rather than error so the
+		// caller falls through cleanly (matches PR #376's "honest
+		// suppression" precedent for ALAC bit-depth uncertainty).
+		return 0, nil
+	}
+	if _, err := r.Seek(int64(innerStart+innerHdr+bitDepthPayloadOffset), io.SeekStart); err != nil {
+		return 0, err
+	}
+	var bitDepth [1]byte
+	if _, err := io.ReadFull(r, bitDepth[:]); err != nil {
+		return 0, err
+	}
+	return int(bitDepth[0]), nil
 }
 
 // findAtom scans MP4 atoms starting at `start` (absolute byte offset

@@ -3,9 +3,22 @@ package manifest
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"strings"
 	"testing"
 )
+
+// failingReadSeeker is a deterministic I/O failure source for the
+// hard-error-propagation test below. Both Read and Seek return a
+// sentinel error so the test can assert it propagates through
+// extractALACBitDepth without being swallowed by the
+// errMP4StructureNotFound short-circuit.
+type failingReadSeeker struct {
+	err error
+}
+
+func (f failingReadSeeker) Read(p []byte) (int, error)     { return 0, f.err }
+func (f failingReadSeeker) Seek(int64, int) (int64, error) { return 0, f.err }
 
 // TestExtractMP4CodecAlac builds a minimal MP4 atom hierarchy by hand
 // (ftyp + moov/trak/mdia/minf/stbl/stsd with an `alac` sample entry)
@@ -137,6 +150,183 @@ func TestFindAtomIterationBudget(t *testing.T) {
 	}
 }
 
+// TestExtractALACBitDepth_16BitFixture builds a minimal MP4 with an
+// outer `alac` sample entry containing an inner `alac` config atom
+// whose ALACSpecificConfig declares 16-bit source data. Matches the
+// shape afinfo reports for the project's reference fixture
+// (`01 Espina.m4a` — bit-exact byte layout validated 2026-05-14).
+func TestExtractALACBitDepth_16BitFixture(t *testing.T) {
+	mp4 := buildMP4WithALACConfig(16)
+	got, err := extractALACBitDepth(bytes.NewReader(mp4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 16 {
+		t.Errorf("got %d, want 16", got)
+	}
+}
+
+// TestExtractALACBitDepth_20BitFixture — defensive coverage for the
+// rare 20-bit ALAC source (no known fixture in the project's test
+// library; pinned by construction).
+func TestExtractALACBitDepth_20BitFixture(t *testing.T) {
+	mp4 := buildMP4WithALACConfig(20)
+	got, err := extractALACBitDepth(bytes.NewReader(mp4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 20 {
+		t.Errorf("got %d, want 20", got)
+	}
+}
+
+// TestExtractALACBitDepth_24BitFixture — common HD ALAC source depth.
+func TestExtractALACBitDepth_24BitFixture(t *testing.T) {
+	mp4 := buildMP4WithALACConfig(24)
+	got, err := extractALACBitDepth(bytes.NewReader(mp4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 24 {
+		t.Errorf("got %d, want 24", got)
+	}
+}
+
+// TestExtractALACBitDepth_32BitFixture — defends against the
+// (legitimate) 32-bit ALAC source case, distinct from the
+// (illegitimate) decoder-width 32 that prompted PR-pending.
+func TestExtractALACBitDepth_32BitFixture(t *testing.T) {
+	mp4 := buildMP4WithALACConfig(32)
+	got, err := extractALACBitDepth(bytes.NewReader(mp4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 32 {
+		t.Errorf("got %d, want 32", got)
+	}
+}
+
+// TestExtractALACBitDepth_NonALACReturnsZero — an MP4 whose outer
+// sample-entry FourCC is `mp4a` (AAC) must return (0, nil), NOT
+// error. The caller short-circuits on bits==0 and leaves
+// `t.BitsPerSample` nil, which is the correct AAC contract.
+func TestExtractALACBitDepth_NonALACReturnsZero(t *testing.T) {
+	mp4 := buildMinimalMP4("mp4a")
+	got, err := extractALACBitDepth(bytes.NewReader(mp4))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != 0 {
+		t.Errorf("got %d, want 0 for non-ALAC sample entry", got)
+	}
+}
+
+// TestExtractALACBitDepth_MissingInnerAtomReturnsZero — an outer
+// `alac` sample entry whose 28-byte audio header is followed by NO
+// inner `alac` config atom (atypical / corrupt encoder). The walker
+// must return (0, nil) so the caller falls through gracefully
+// without erroring. Honest-suppression contract, per PR #376
+// precedent.
+func TestExtractALACBitDepth_MissingInnerAtomReturnsZero(t *testing.T) {
+	mp4 := buildMP4WithALACSampleEntryNoInnerConfig()
+	got, err := extractALACBitDepth(bytes.NewReader(mp4))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != 0 {
+		t.Errorf("got %d, want 0 for missing inner alac config", got)
+	}
+}
+
+// TestExtractALACBitDepth_TruncatedInnerAtomReturnsZero — inner
+// `alac` config atom whose payload is too short to carry the
+// ALACSpecificConfig (only 4 bytes of ver+flags, no bitDepth byte).
+// Returns (0, nil) — honest suppression rather than erroring.
+func TestExtractALACBitDepth_TruncatedInnerAtomReturnsZero(t *testing.T) {
+	mp4 := buildMP4WithALACSampleEntryTruncatedInner()
+	got, err := extractALACBitDepth(bytes.NewReader(mp4))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != 0 {
+		t.Errorf("got %d, want 0 for truncated inner alac config", got)
+	}
+}
+
+// TestExtractALACBitDepth_PropagatesIOFailure — locks the contract
+// that genuine I/O failures (Seek / Read / atom-walk budget
+// exhaustion) surface as non-nil errors instead of being swallowed
+// by the errMP4StructureNotFound short-circuit. A regression that
+// broadened the short-circuit to suppress ALL findSTSD errors
+// (round-1 of this PR) would mask real disk / NAS faults; the
+// caller's `scanLogger.Warn` would never fire on legitimate
+// problems. Per CodeRabbit Trivial round-2 on PR #237.
+func TestExtractALACBitDepth_PropagatesIOFailure(t *testing.T) {
+	sentinel := errors.New("simulated NAS read failure")
+	_, err := extractALACBitDepth(failingReadSeeker{err: sentinel})
+	if err == nil {
+		t.Fatal("expected I/O error to propagate, got nil")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("expected error to wrap sentinel %v, got %v", sentinel, err)
+	}
+}
+
+// TestExtractALACBitDepth_SuppressesStructuralNotFound — symmetric
+// contract: a non-MP4 file (the sentinel hits during structural
+// walk, not I/O) is honestly suppressed so the caller doesn't log
+// Warn for "this isn't ALAC anyway". An empty-bytes reader walks
+// fine but finds no moov → errMP4StructureNotFound → swallowed.
+func TestExtractALACBitDepth_SuppressesStructuralNotFound(t *testing.T) {
+	// Empty 8-byte non-MP4 input — Seek/Read succeed but findAtom
+	// returns size==0 for "moov", which findSTSD wraps as
+	// errMP4StructureNotFound.
+	got, err := extractALACBitDepth(bytes.NewReader(make([]byte, 8)))
+	if err != nil {
+		t.Errorf("unexpected error for structural-not-found case: %v", err)
+	}
+	if got != 0 {
+		t.Errorf("got %d, want 0 for non-MP4 input", got)
+	}
+}
+
+// TestExtractALACBitDepth_OversizedEntrySizeIsClampedToStsd — a
+// malformed sample entry whose declared `entrySize` extends beyond
+// the enclosing stsd box could otherwise let the inner walker scan
+// adjacent mp4 boxes (stts, stsc, stsz, …) and false-positive on any
+// 4-byte stretch spelling "alac". The bounds clamp returns honest 0
+// (CodeRabbit Major on PR #237).
+func TestExtractALACBitDepth_OversizedEntrySizeIsClampedToStsd(t *testing.T) {
+	mp4 := buildMP4WithOversizedALACEntry()
+	got, err := extractALACBitDepth(bytes.NewReader(mp4))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != 0 {
+		t.Errorf("got %d, want 0 (entry claims to extend past stsd — must suppress)", got)
+	}
+}
+
+// TestExtractALACBitDepth_LargesizeOuterBox — defensive: every box
+// in the moov→trak→mdia→minf→stbl descent chain encoded in the
+// 64-bit largesize form. Mirrors the codec-walker's
+// TestExtractMP4CodecLargesize64Bit regression at each site for the
+// bit-depth walker too.
+func TestExtractALACBitDepth_LargesizeOuterBox(t *testing.T) {
+	for _, which := range []string{"moov", "trak", "mdia", "minf", "stbl"} {
+		t.Run(which, func(t *testing.T) {
+			mp4 := buildMP4WithALACConfigLargesize(16, which)
+			got, err := extractALACBitDepth(bytes.NewReader(mp4))
+			if err != nil {
+				t.Fatalf("extractALACBitDepth with 64-bit %s: %v", which, err)
+			}
+			if got != 16 {
+				t.Errorf("64-bit %s box: got %d, want 16", which, got)
+			}
+		})
+	}
+}
+
 // buildMinimalMP4 returns a byte slice containing the smallest
 // MP4-shaped tree the codec walker needs: ftyp + moov containing one
 // trak/mdia/minf/stbl/stsd with one sample entry whose format is the
@@ -251,6 +441,193 @@ func buildMP4WithMoovPadding(codec string, freePaddingBytes int) []byte {
 	out := &bytes.Buffer{}
 	writeAtom(out, "ftyp", []byte("M4A mp42M4A ")) // 12-byte body, valid-shaped
 	writeAtom(out, "moov", moov.Bytes())
+	return out.Bytes()
+}
+
+// buildALACSampleEntryPayload returns the 28-byte audio sample-entry
+// header followed by an inner `alac` config atom carrying the given
+// source bit depth in ALACSpecificConfig. Matches the real-file layout
+// validated 2026-05-14 against `/Users/arsenie/medialibtest/Amestoy
+// Trio/Le Fil/01 Espina.m4a`:
+//   - 28-byte AudioSampleEntry header (6 reserved, 2 dri, 8 reserved,
+//     2 channels, 2 sample_size, 2 pre_defined, 2 reserved, 4 sr)
+//   - inner `alac` atom: 8-byte header + 4-byte FullBox ver+flags +
+//     24-byte ALACSpecificConfig
+func buildALACSampleEntryPayload(bitDepth byte) []byte {
+	out := &bytes.Buffer{}
+	// AudioSampleEntry header (28 bytes, zeros are fine for the walker).
+	out.Write(make([]byte, 28))
+
+	// Inner `alac` config atom payload: 4-byte FullBox ver+flags,
+	// then 24-byte ALACSpecificConfig. Only bitDepth at offset 5
+	// matters for the walker; other fields filled with shape-valid
+	// defaults so a future read-more-than-bitDepth test stays
+	// realistic.
+	innerPayload := &bytes.Buffer{}
+	innerPayload.Write(make([]byte, 4))                         // version+flags
+	binary.Write(innerPayload, binary.BigEndian, uint32(4096))  // frameLength
+	innerPayload.WriteByte(0)                                   // compatibleVersion
+	innerPayload.WriteByte(bitDepth)                            // BIT_DEPTH ← what we read
+	innerPayload.WriteByte(40)                                  // pb
+	innerPayload.WriteByte(10)                                  // mb
+	innerPayload.WriteByte(14)                                  // kb
+	innerPayload.WriteByte(2)                                   // numChannels
+	binary.Write(innerPayload, binary.BigEndian, uint16(255))   // maxRun
+	binary.Write(innerPayload, binary.BigEndian, uint32(0))     // maxFrameBytes
+	binary.Write(innerPayload, binary.BigEndian, uint32(0))     // avgBitRate
+	binary.Write(innerPayload, binary.BigEndian, uint32(44100)) // sampleRate
+
+	writeAtom(out, "alac", innerPayload.Bytes())
+	return out.Bytes()
+}
+
+// buildMP4WithALACConfig builds a minimal MP4 in which the single
+// sample entry is an outer `alac` FourCC whose payload carries the
+// inner `alac` config atom with the chosen source bit depth. Used by
+// the extractALACBitDepth tests above.
+func buildMP4WithALACConfig(bitDepth byte) []byte {
+	return buildMP4WithSampleEntryPayload("alac", buildALACSampleEntryPayload(bitDepth))
+}
+
+// buildMP4WithSampleEntryPayload builds a minimal MP4 tree
+// (ftyp + moov/trak/mdia/minf/stbl/stsd) with one sample entry whose
+// FourCC is `codec` and whose payload (post-FourCC) is `payload`.
+// Generalised form of buildMinimalMP4 — the older helper writes a
+// fixed 8-byte payload that suffices for the codec walker but not for
+// the bit-depth walker, which needs to read into the sample-entry
+// payload itself.
+func buildMP4WithSampleEntryPayload(codec string, payload []byte) []byte {
+	if len(codec) != 4 {
+		panic("buildMP4WithSampleEntryPayload: codec must be 4 chars")
+	}
+
+	entry := &bytes.Buffer{}
+	binary.Write(entry, binary.BigEndian, uint32(8+len(payload))) // entry size = header + payload
+	entry.WriteString(codec)
+	entry.Write(payload)
+
+	stsdPayload := &bytes.Buffer{}
+	stsdPayload.Write(make([]byte, 4))                     // version+flags
+	binary.Write(stsdPayload, binary.BigEndian, uint32(1)) // entry_count
+	stsdPayload.Write(entry.Bytes())
+
+	stbl := &bytes.Buffer{}
+	writeAtom(stbl, "stsd", stsdPayload.Bytes())
+
+	minf := &bytes.Buffer{}
+	writeAtom(minf, "stbl", stbl.Bytes())
+
+	mdia := &bytes.Buffer{}
+	writeAtom(mdia, "minf", minf.Bytes())
+
+	trak := &bytes.Buffer{}
+	writeAtom(trak, "mdia", mdia.Bytes())
+
+	moov := &bytes.Buffer{}
+	writeAtom(moov, "trak", trak.Bytes())
+
+	out := &bytes.Buffer{}
+	writeAtom(out, "ftyp", []byte("M4A mp42M4A "))
+	writeAtom(out, "moov", moov.Bytes())
+	return out.Bytes()
+}
+
+// buildMP4WithALACSampleEntryNoInnerConfig — outer `alac` sample entry
+// with the 28-byte audio header but NO inner `alac` config atom. The
+// walker must return (0, nil), not error.
+func buildMP4WithALACSampleEntryNoInnerConfig() []byte {
+	return buildMP4WithSampleEntryPayload("alac", make([]byte, 28))
+}
+
+// buildMP4WithALACSampleEntryTruncatedInner — inner `alac` atom whose
+// payload is only 4 bytes (FullBox ver+flags) and stops there, with
+// no ALACSpecificConfig. The walker must return (0, nil).
+func buildMP4WithALACSampleEntryTruncatedInner() []byte {
+	out := &bytes.Buffer{}
+	out.Write(make([]byte, 28))
+	writeAtom(out, "alac", make([]byte, 4)) // inner alac w/ payload < 6
+	return buildMP4WithSampleEntryPayload("alac", out.Bytes())
+}
+
+// buildMP4WithOversizedALACEntry — a minimal MP4 whose outer `alac`
+// sample-entry box claims `entrySize == 0xFFFFFFFF` (or any value
+// exceeding the enclosing stsd size). The actual payload is a
+// well-formed 16-bit ALAC config; if the extractor failed to clamp
+// `innerSearchEnd` to `stsdEnd`, it would either walk past stsd into
+// unrelated atoms OR find the legitimate inner alac and return 16 —
+// wrong behaviour either way. With the clamp, returns 0.
+func buildMP4WithOversizedALACEntry() []byte {
+	payload := buildALACSampleEntryPayload(16)
+
+	// Construct the sample entry with a deliberately-too-large
+	// `size` field. The real payload bytes are still well-formed; only
+	// the declared size lies.
+	entry := &bytes.Buffer{}
+	binary.Write(entry, binary.BigEndian, uint32(0xFFFFFFFF)) // oversized
+	entry.WriteString("alac")
+	entry.Write(payload)
+
+	stsdPayload := &bytes.Buffer{}
+	stsdPayload.Write(make([]byte, 4))
+	binary.Write(stsdPayload, binary.BigEndian, uint32(1))
+	stsdPayload.Write(entry.Bytes())
+
+	stbl := &bytes.Buffer{}
+	writeAtom(stbl, "stsd", stsdPayload.Bytes())
+	minf := &bytes.Buffer{}
+	writeAtom(minf, "stbl", stbl.Bytes())
+	mdia := &bytes.Buffer{}
+	writeAtom(mdia, "minf", minf.Bytes())
+	trak := &bytes.Buffer{}
+	writeAtom(trak, "mdia", mdia.Bytes())
+	moov := &bytes.Buffer{}
+	writeAtom(moov, "trak", trak.Bytes())
+
+	out := &bytes.Buffer{}
+	writeAtom(out, "ftyp", []byte("M4A mp42M4A "))
+	writeAtom(out, "moov", moov.Bytes())
+	return out.Bytes()
+}
+
+// buildMP4WithALACConfigLargesize — variant of buildMP4WithALACConfig
+// where exactly one box in the moov→trak→mdia→minf→stbl chain is
+// encoded in 64-bit largesize form. Mirrors the codec-walker's
+// buildMP4WithLargesizeBox helper for the bit-depth walker.
+func buildMP4WithALACConfigLargesize(bitDepth byte, which string) []byte {
+	payload := buildALACSampleEntryPayload(bitDepth)
+
+	entry := &bytes.Buffer{}
+	binary.Write(entry, binary.BigEndian, uint32(8+len(payload)))
+	entry.WriteString("alac")
+	entry.Write(payload)
+
+	stsdPayload := &bytes.Buffer{}
+	stsdPayload.Write(make([]byte, 4))
+	binary.Write(stsdPayload, binary.BigEndian, uint32(1))
+	stsdPayload.Write(entry.Bytes())
+
+	writeWith := func(w *bytes.Buffer, atomType string, p []byte) {
+		if atomType == which {
+			writeAtom64(w, atomType, p)
+			return
+		}
+		writeAtom(w, atomType, p)
+	}
+
+	stbl := &bytes.Buffer{}
+	writeAtom(stbl, "stsd", stsdPayload.Bytes())
+	minf := &bytes.Buffer{}
+	writeWith(minf, "stbl", stbl.Bytes())
+	mdia := &bytes.Buffer{}
+	writeWith(mdia, "minf", minf.Bytes())
+	trak := &bytes.Buffer{}
+	writeWith(trak, "mdia", mdia.Bytes())
+	moov := &bytes.Buffer{}
+	writeWith(moov, "trak", trak.Bytes())
+
+	out := &bytes.Buffer{}
+	writeAtom(out, "ftyp", []byte("M4A mp42M4A "))
+	writeWith(out, "moov", moov.Bytes())
 	return out.Bytes()
 }
 

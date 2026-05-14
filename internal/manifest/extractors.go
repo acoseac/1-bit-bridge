@@ -183,8 +183,27 @@ func ExtractWithContext(absPath string, t *Track, ec *ExtractContext) error {
 		} else if codec != "" {
 			t.Codec = codec
 		}
+		// When the codec walk identified ALAC, descend one level into
+		// the inner `alac` config atom to capture the source bit depth
+		// from ALACSpecificConfig (the `dhowden/tag` MP4 path does NOT
+		// surface it). `canSetBitsPerSample` keeps the gate aligned
+		// with the wider lossless set; for MP4 today that's effectively
+		// ALAC only — `mp4a` paths fall through. Logged at Warn on
+		// walker failure with manifest carrying nil bits (consistent
+		// with the codec-walk Warn path above).
+		if canSetBitsPerSample(t.Codec) {
+			if _, err := f.Seek(0, io.SeekStart); err != nil {
+				return err
+			}
+			if bits, err := extractALACBitDepth(f); err != nil {
+				scanLogger.Warn("mp4 ALAC bit-depth walk failed; manifest will carry nil bits",
+					"path", absPath, "err", err)
+			} else if bits > 0 {
+				t.BitsPerSample = &bits
+			}
+		}
 		// Seek to head before handing the reader to dhowden/tag —
-		// extractMP4Codec consumed bytes during the atom walk.
+		// extractMP4Codec and extractALACBitDepth both consumed bytes.
 		if _, err := f.Seek(0, io.SeekStart); err != nil {
 			return err
 		}
