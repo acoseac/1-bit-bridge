@@ -240,6 +240,23 @@ func TestExtractALACBitDepth_TruncatedInnerAtomReturnsZero(t *testing.T) {
 	}
 }
 
+// TestExtractALACBitDepth_OversizedEntrySizeIsClampedToStsd — a
+// malformed sample entry whose declared `entrySize` extends beyond
+// the enclosing stsd box could otherwise let the inner walker scan
+// adjacent mp4 boxes (stts, stsc, stsz, …) and false-positive on any
+// 4-byte stretch spelling "alac". The bounds clamp returns honest 0
+// (CodeRabbit Major on PR #237).
+func TestExtractALACBitDepth_OversizedEntrySizeIsClampedToStsd(t *testing.T) {
+	mp4 := buildMP4WithOversizedALACEntry()
+	got, err := extractALACBitDepth(bytes.NewReader(mp4))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != 0 {
+		t.Errorf("got %d, want 0 (entry claims to extend past stsd — must suppress)", got)
+	}
+}
+
 // TestExtractALACBitDepth_LargesizeOuterBox — defensive: every box
 // in the moov→trak→mdia→minf→stbl descent chain encoded in the
 // 64-bit largesize form. Mirrors the codec-walker's
@@ -480,6 +497,46 @@ func buildMP4WithALACSampleEntryTruncatedInner() []byte {
 	out.Write(make([]byte, 28))
 	writeAtom(out, "alac", make([]byte, 4)) // inner alac w/ payload < 6
 	return buildMP4WithSampleEntryPayload("alac", out.Bytes())
+}
+
+// buildMP4WithOversizedALACEntry — a minimal MP4 whose outer `alac`
+// sample-entry box claims `entrySize == 0xFFFFFFFF` (or any value
+// exceeding the enclosing stsd size). The actual payload is a
+// well-formed 16-bit ALAC config; if the extractor failed to clamp
+// `innerSearchEnd` to `stsdEnd`, it would either walk past stsd into
+// unrelated atoms OR find the legitimate inner alac and return 16 —
+// wrong behaviour either way. With the clamp, returns 0.
+func buildMP4WithOversizedALACEntry() []byte {
+	payload := buildALACSampleEntryPayload(16)
+
+	// Construct the sample entry with a deliberately-too-large
+	// `size` field. The real payload bytes are still well-formed; only
+	// the declared size lies.
+	entry := &bytes.Buffer{}
+	binary.Write(entry, binary.BigEndian, uint32(0xFFFFFFFF)) // oversized
+	entry.WriteString("alac")
+	entry.Write(payload)
+
+	stsdPayload := &bytes.Buffer{}
+	stsdPayload.Write(make([]byte, 4))
+	binary.Write(stsdPayload, binary.BigEndian, uint32(1))
+	stsdPayload.Write(entry.Bytes())
+
+	stbl := &bytes.Buffer{}
+	writeAtom(stbl, "stsd", stsdPayload.Bytes())
+	minf := &bytes.Buffer{}
+	writeAtom(minf, "stbl", stbl.Bytes())
+	mdia := &bytes.Buffer{}
+	writeAtom(mdia, "minf", minf.Bytes())
+	trak := &bytes.Buffer{}
+	writeAtom(trak, "mdia", mdia.Bytes())
+	moov := &bytes.Buffer{}
+	writeAtom(moov, "trak", trak.Bytes())
+
+	out := &bytes.Buffer{}
+	writeAtom(out, "ftyp", []byte("M4A mp42M4A "))
+	writeAtom(out, "moov", moov.Bytes())
+	return out.Bytes()
 }
 
 // buildMP4WithALACConfigLargesize — variant of buildMP4WithALACConfig
