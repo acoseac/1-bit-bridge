@@ -3,9 +3,22 @@ package manifest
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"strings"
 	"testing"
 )
+
+// failingReadSeeker is a deterministic I/O failure source for the
+// hard-error-propagation test below. Both Read and Seek return a
+// sentinel error so the test can assert it propagates through
+// extractALACBitDepth without being swallowed by the
+// errMP4StructureNotFound short-circuit.
+type failingReadSeeker struct {
+	err error
+}
+
+func (f failingReadSeeker) Read(p []byte) (int, error)     { return 0, f.err }
+func (f failingReadSeeker) Seek(int64, int) (int64, error) { return 0, f.err }
 
 // TestExtractMP4CodecAlac builds a minimal MP4 atom hierarchy by hand
 // (ftyp + moov/trak/mdia/minf/stbl/stsd with an `alac` sample entry)
@@ -237,6 +250,43 @@ func TestExtractALACBitDepth_TruncatedInnerAtomReturnsZero(t *testing.T) {
 	}
 	if got != 0 {
 		t.Errorf("got %d, want 0 for truncated inner alac config", got)
+	}
+}
+
+// TestExtractALACBitDepth_PropagatesIOFailure — locks the contract
+// that genuine I/O failures (Seek / Read / atom-walk budget
+// exhaustion) surface as non-nil errors instead of being swallowed
+// by the errMP4StructureNotFound short-circuit. A regression that
+// broadened the short-circuit to suppress ALL findSTSD errors
+// (round-1 of this PR) would mask real disk / NAS faults; the
+// caller's `scanLogger.Warn` would never fire on legitimate
+// problems. Per CodeRabbit Trivial round-2 on PR #237.
+func TestExtractALACBitDepth_PropagatesIOFailure(t *testing.T) {
+	sentinel := errors.New("simulated NAS read failure")
+	_, err := extractALACBitDepth(failingReadSeeker{err: sentinel})
+	if err == nil {
+		t.Fatal("expected I/O error to propagate, got nil")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("expected error to wrap sentinel %v, got %v", sentinel, err)
+	}
+}
+
+// TestExtractALACBitDepth_SuppressesStructuralNotFound — symmetric
+// contract: a non-MP4 file (the sentinel hits during structural
+// walk, not I/O) is honestly suppressed so the caller doesn't log
+// Warn for "this isn't ALAC anyway". An empty-bytes reader walks
+// fine but finds no moov → errMP4StructureNotFound → swallowed.
+func TestExtractALACBitDepth_SuppressesStructuralNotFound(t *testing.T) {
+	// Empty 8-byte non-MP4 input — Seek/Read succeed but findAtom
+	// returns size==0 for "moov", which findSTSD wraps as
+	// errMP4StructureNotFound.
+	got, err := extractALACBitDepth(bytes.NewReader(make([]byte, 8)))
+	if err != nil {
+		t.Errorf("unexpected error for structural-not-found case: %v", err)
+	}
+	if got != 0 {
+		t.Errorf("got %d, want 0 for non-MP4 input", got)
 	}
 }
 

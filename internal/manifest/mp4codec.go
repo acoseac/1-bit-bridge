@@ -49,6 +49,17 @@ const (
 	mp4MaxAtomsPerSearch   = 4096    // per-search atom-walk budget (count, not bytes)
 )
 
+// errMP4StructureNotFound wraps the "expected box missing" failures
+// from `findSTSD` (moov / trak / mdia / minf / stbl / stsd not
+// found). Callers can `errors.Is(err, errMP4StructureNotFound)` to
+// distinguish "this isn't a valid MP4 audio file / the file mutated
+// between walks" from genuine I/O failures (seek / read /
+// atom-iteration-budget) — the former should produce honest
+// suppression (return 0 bits, no error), the latter should propagate
+// to the caller's `scanLogger.Warn` so operators see real I/O
+// problems on their scan log. Per CodeRabbit Major round-2 on PR #237.
+var errMP4StructureNotFound = errors.New("mp4: structure not found")
+
 // extractMP4Codec parses the audio codec FourCC from an MP4 file's
 // stsd box. Returns one of "ALAC", "AAC", or "" (unknown — caller
 // should fall through to extension-derived classification).
@@ -127,42 +138,42 @@ func findSTSD(r io.ReadSeeker) (start, headerSize, size uint64, err error) {
 		return 0, 0, 0, err
 	}
 	if moovSize <= 0 {
-		return 0, 0, 0, errors.New("mp4: moov not found")
+		return 0, 0, 0, fmt.Errorf("%w: moov", errMP4StructureNotFound)
 	}
 	trakStart, trakHdr, trakSize, err := findAtom(r, "trak", moovStart+moovHdr, moovStart+moovSize)
 	if err != nil {
 		return 0, 0, 0, err
 	}
 	if trakSize <= 0 {
-		return 0, 0, 0, errors.New("mp4: trak not found")
+		return 0, 0, 0, fmt.Errorf("%w: trak", errMP4StructureNotFound)
 	}
 	mdiaStart, mdiaHdr, mdiaSize, err := findAtom(r, "mdia", trakStart+trakHdr, trakStart+trakSize)
 	if err != nil {
 		return 0, 0, 0, err
 	}
 	if mdiaSize <= 0 {
-		return 0, 0, 0, errors.New("mp4: mdia not found")
+		return 0, 0, 0, fmt.Errorf("%w: mdia", errMP4StructureNotFound)
 	}
 	minfStart, minfHdr, minfSize, err := findAtom(r, "minf", mdiaStart+mdiaHdr, mdiaStart+mdiaSize)
 	if err != nil {
 		return 0, 0, 0, err
 	}
 	if minfSize <= 0 {
-		return 0, 0, 0, errors.New("mp4: minf not found")
+		return 0, 0, 0, fmt.Errorf("%w: minf", errMP4StructureNotFound)
 	}
 	stblStart, stblHdr, stblSize, err := findAtom(r, "stbl", minfStart+minfHdr, minfStart+minfSize)
 	if err != nil {
 		return 0, 0, 0, err
 	}
 	if stblSize <= 0 {
-		return 0, 0, 0, errors.New("mp4: stbl not found")
+		return 0, 0, 0, fmt.Errorf("%w: stbl", errMP4StructureNotFound)
 	}
 	stsdStart, stsdHdr, stsdSize, err := findAtom(r, "stsd", stblStart+stblHdr, stblStart+stblSize)
 	if err != nil {
 		return 0, 0, 0, err
 	}
 	if stsdSize <= 0 {
-		return 0, 0, 0, errors.New("mp4: stsd not found")
+		return 0, 0, 0, fmt.Errorf("%w: stsd", errMP4StructureNotFound)
 	}
 	return stsdStart, stsdHdr, stsdSize, nil
 }
@@ -201,14 +212,20 @@ func findSTSD(r io.ReadSeeker) (start, headerSize, size uint64, err error) {
 func extractALACBitDepth(r io.ReadSeeker) (int, error) {
 	stsdStart, stsdHdr, stsdSize, err := findSTSD(r)
 	if err != nil {
-		// Promote findSTSD's "moov/trak/mdia/minf/stbl/stsd not found"
-		// errors to honest suppression — the caller (extractors.go's
-		// M4A case) only invokes this when extractMP4Codec already
-		// returned codec == "ALAC", so a chain-failure here means the
-		// file moved / mutated between the two walks (NAS hiccup,
+		// Distinguish structural-not-found from genuine I/O failures.
+		// Structural cases (moov / trak / .../stsd missing) are
+		// suppressed to (0, nil) — the caller already knows the file
+		// is ALAC from `extractMP4Codec`, so a chain-failure here
+		// means the file mutated between the two walks (NAS hiccup,
 		// scanner timing), and the right behaviour is to leave bits
-		// nil rather than fail-loud the whole track scan.
-		return 0, nil
+		// nil rather than fail-loud the whole track scan. I/O / seek
+		// / atom-walk-budget errors propagate so the caller's
+		// `scanLogger.Warn` surfaces real I/O problems on the operator
+		// scan log. Per CodeRabbit Major round-2 on PR #237.
+		if errors.Is(err, errMP4StructureNotFound) {
+			return 0, nil
+		}
+		return 0, err
 	}
 
 	// Skip stsd version+flags (4 bytes) + entry_count (4 bytes) to
