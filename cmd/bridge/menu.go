@@ -294,13 +294,19 @@ func actDoctor(_ context.Context, _ *bufio.Reader, stdout, stderr io.Writer, _ m
 // of runServe.
 var runServeForMenu = runServe
 
+// menuNoConfigHint is the stderr line printed from every menu action
+// that requires a loaded `bridge.yaml` (start now, install service,
+// pair device). Three call sites; one literal so the wording stays
+// consistent.
+const menuNoConfigHint = "  no bridge.yaml found — run Setup wizard first."
+
 // actStartNow drives a foreground serve session. CRITICAL: each
 // invocation gets its own signal.NotifyContext scope so a Ctrl+C
 // cancels just this serve, not the menu's outer ctx. A second
 // invocation works because the previous serveCtx was scoped here.
 func actStartNow(_ context.Context, _ *bufio.Reader, stdout, stderr io.Writer, s menuState) int {
 	if s.cfgPath == "" {
-		fmt.Fprintln(stderr, "  no bridge.yaml found — run Setup wizard first.")
+		fmt.Fprintln(stderr, menuNoConfigHint)
 		return -1
 	}
 	serveCtx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -317,7 +323,7 @@ func actStartNow(_ context.Context, _ *bufio.Reader, stdout, stderr io.Writer, s
 // elevation error inline rather than letting it crash the menu.
 func actInstallService(_ context.Context, in *bufio.Reader, stdout, stderr io.Writer, s menuState) int {
 	if s.cfgPath == "" {
-		fmt.Fprintln(stderr, "  no bridge.yaml found — run Setup wizard first.")
+		fmt.Fprintln(stderr, menuNoConfigHint)
 		return -1
 	}
 	// POSIX-running-as-root install is destructive (resolves $HOME
@@ -390,7 +396,7 @@ func actInstallService(_ context.Context, in *bufio.Reader, stdout, stderr io.Wr
 // without --name so we have to gather it interactively.
 func actPair(_ context.Context, in *bufio.Reader, stdout, stderr io.Writer, s menuState) int {
 	if s.cfgPath == "" {
-		fmt.Fprintln(stderr, "  no bridge.yaml found — run Setup wizard first.")
+		fmt.Fprintln(stderr, menuNoConfigHint)
 		return -1
 	}
 	fmt.Fprintln(stdout)

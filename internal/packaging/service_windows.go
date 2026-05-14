@@ -29,7 +29,7 @@ func InstallWindowsService(p Params) (string, error) {
 	// surface to init's caller verbatim (clear enough hint).
 	m, err := mgr.Connect()
 	if err != nil {
-		return "", fmt.Errorf("connect SCM (need admin?): %w", err)
+		return "", fmt.Errorf(scmConnectAdminErr, err)
 	}
 	defer m.Disconnect()
 
@@ -105,7 +105,7 @@ func InstallWindowsService(p Params) (string, error) {
 func UninstallWindowsService() error {
 	m, err := mgr.Connect()
 	if err != nil {
-		return fmt.Errorf("connect SCM: %w", err)
+		return fmt.Errorf(scmConnectErr, err)
 	}
 	defer m.Disconnect()
 	s, err := m.OpenService(ServiceLabel)
@@ -203,7 +203,7 @@ func tryInstallWindowsService(p Params) (string, error) {
 			// Non-elevated: fall through to startup folder.
 			return "", nil
 		}
-		return "", fmt.Errorf("connect SCM: %w", err)
+		return "", fmt.Errorf(scmConnectErr, err)
 	}
 	m.Disconnect()
 	// We're elevated — proceed with the real install. Any error
@@ -222,7 +222,7 @@ func tryUninstallWindowsService() error {
 		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
 			return nil
 		}
-		return fmt.Errorf("connect SCM: %w", err)
+		return fmt.Errorf(scmConnectErr, err)
 	}
 	m.Disconnect()
 	return UninstallWindowsService()

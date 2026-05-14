@@ -21,7 +21,7 @@ func stopForOS(kind ServiceKind) error {
 	case KindLaunchdUser:
 		path, err := launchdPlistPath()
 		if err != nil {
-			return fmt.Errorf("resolve plist path: %w", err)
+			return fmt.Errorf(plistPathErrFormat, err)
 		}
 		// `bootout` returns non-zero with a "Could not find specified
 		// service" message when the agent isn't loaded — that's the
@@ -35,7 +35,7 @@ func stopForOS(kind ServiceKind) error {
 		}
 		return nil
 	case KindSystemdUser:
-		out, err := exec.Command("systemctl", "--user", "stop", ServiceLabel+".service").CombinedOutput()
+		out, err := exec.Command("systemctl", systemdUserFlag, "stop", ServiceLabel+systemdUnitSuffix).CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("systemctl --user stop: %v: %s", err, string(out))
 		}
@@ -54,7 +54,7 @@ func startForOS(kind ServiceKind) error {
 	case KindLaunchdUser:
 		path, err := launchdPlistPath()
 		if err != nil {
-			return fmt.Errorf("resolve plist path: %w", err)
+			return fmt.Errorf(plistPathErrFormat, err)
 		}
 		out, err := exec.Command("launchctl", "bootstrap", "gui/"+uidString(), path).CombinedOutput()
 		if err != nil && !bytes.Contains(out, []byte("service already loaded")) && !bytes.Contains(out, []byte("Bootstrap failed: 17: File exists")) {
@@ -62,7 +62,7 @@ func startForOS(kind ServiceKind) error {
 		}
 		return nil
 	case KindSystemdUser:
-		out, err := exec.Command("systemctl", "--user", "start", ServiceLabel+".service").CombinedOutput()
+		out, err := exec.Command("systemctl", systemdUserFlag, "start", ServiceLabel+systemdUnitSuffix).CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("systemctl --user start: %v: %s", err, string(out))
 		}
@@ -79,7 +79,7 @@ func restartForOS(kind ServiceKind) error {
 	case KindLaunchdUser:
 		path, err := launchdPlistPath()
 		if err != nil {
-			return fmt.Errorf("resolve plist path: %w", err)
+			return fmt.Errorf(plistPathErrFormat, err)
 		}
 		// bootout-then-bootstrap. bootout's not-loaded case is fine
 		// (same swallow pattern as stopForOS); the real test is the
@@ -96,7 +96,7 @@ func restartForOS(kind ServiceKind) error {
 		}
 		return nil
 	case KindSystemdUser:
-		out, err := exec.Command("systemctl", "--user", "restart", ServiceLabel+".service").CombinedOutput()
+		out, err := exec.Command("systemctl", systemdUserFlag, "restart", ServiceLabel+systemdUnitSuffix).CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("systemctl --user restart: %v: %s", err, string(out))
 		}

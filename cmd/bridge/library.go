@@ -19,6 +19,11 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
+// libraryAddFailedFormat is the stderr error template for every
+// `bridge library add` failure path (live admin POST, headless mutation,
+// scan-trigger). One literal so a future copy edit only happens once.
+const libraryAddFailedFormat = "library add: %v\n"
+
 // libraryCmd dispatches `bridge library <add|remove> <path>`. CLI
 // front-end for the same library-roots mutation the admin API
 // (POST /api/roots / DELETE /api/roots) exposes. The wrapper
@@ -58,12 +63,12 @@ func libraryAddCmd(ctx context.Context, args []string, stdout, stderr io.Writer)
 	}
 	target, err := filepath.Abs(fs.Arg(0))
 	if err != nil {
-		fmt.Fprintf(stderr, "library add: %v\n", err)
+		fmt.Fprintf(stderr, libraryAddFailedFormat, err)
 		return 2
 	}
 	info, err := os.Stat(target)
 	if err != nil {
-		fmt.Fprintf(stderr, "library add: %v\n", err)
+		fmt.Fprintf(stderr, libraryAddFailedFormat, err)
 		return 2
 	}
 	if !info.IsDir() {
@@ -87,7 +92,7 @@ func libraryAddCmd(ctx context.Context, args []string, stdout, stderr io.Writer)
 	}
 	newList := append(append([]string(nil), cfg.LibraryRoots...), target)
 	if err := bridgefs.ValidateRoots(newList); err != nil {
-		fmt.Fprintf(stderr, "library add: %v\n", err)
+		fmt.Fprintf(stderr, libraryAddFailedFormat, err)
 		return 1
 	}
 	willTransition := len(cfg.LibraryRoots) == 1

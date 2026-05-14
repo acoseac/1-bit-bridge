@@ -24,6 +24,17 @@ import (
 	"github.com/google/uuid"
 )
 
+// Shared upscale-disabled error pair surfaced by every /v1/upscale*
+// handler when the feature is off (cfg.Upscale.Enabled == false or
+// no BatchCoordinator wired). Same payload shape as the admin
+// package's pair, but the code uses an underscore (`upscale_disabled`)
+// matching the public wire convention; admin uses kebab-case for the
+// admin JSON channel.
+const (
+	errCodeUpscaleDisabled    = "upscale_disabled"
+	errMsgUpscalingNotEnabled = "upscaling is not enabled on this bridge"
+)
+
 // BatchCoordinator is the interface POST /v1/upscale/batch and
 // the sibling GET / DELETE endpoints consume. Implemented by
 // `transcode.Coordinator` over in internal/transcode; this
@@ -122,8 +133,8 @@ func (s *Server) WithBatchCoordinator(c BatchCoordinator) *Server {
 // upscaleBatchSubmit handles POST /v1/upscale/batch.
 func (s *Server) upscaleBatchSubmit(w http.ResponseWriter, r *http.Request) {
 	if s.batchCoordinator == nil {
-		writeError(w, http.StatusServiceUnavailable, "upscale_disabled",
-			"upscaling is not enabled on this bridge")
+		writeError(w, http.StatusServiceUnavailable, errCodeUpscaleDisabled,
+			errMsgUpscalingNotEnabled)
 		return
 	}
 	defer r.Body.Close()
@@ -180,8 +191,8 @@ func (s *Server) upscaleBatchSubmit(w http.ResponseWriter, r *http.Request) {
 // upscaleBatchList handles GET /v1/upscale/batches?limit=N.
 func (s *Server) upscaleBatchList(w http.ResponseWriter, r *http.Request) {
 	if s.batchCoordinator == nil {
-		writeError(w, http.StatusServiceUnavailable, "upscale_disabled",
-			"upscaling is not enabled on this bridge")
+		writeError(w, http.StatusServiceUnavailable, errCodeUpscaleDisabled,
+			errMsgUpscalingNotEnabled)
 		return
 	}
 	limit := 100
@@ -207,8 +218,8 @@ func (s *Server) upscaleBatchList(w http.ResponseWriter, r *http.Request) {
 // upscaleBatchCancel handles DELETE /v1/upscale/batches/{id}.
 func (s *Server) upscaleBatchCancel(w http.ResponseWriter, r *http.Request) {
 	if s.batchCoordinator == nil {
-		writeError(w, http.StatusServiceUnavailable, "upscale_disabled",
-			"upscaling is not enabled on this bridge")
+		writeError(w, http.StatusServiceUnavailable, errCodeUpscaleDisabled,
+			errMsgUpscalingNotEnabled)
 		return
 	}
 	idStr := r.PathValue("id")

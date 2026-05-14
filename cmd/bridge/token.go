@@ -61,18 +61,18 @@ Run "bridge token <subcommand> -h" for subcommand-specific flags.
 func tokenListCmd(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("token list", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "bridge.yaml", "path to config file")
+	configPath := fs.String("config", defaultConfigPath, configFlagUsage)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "config load failed: %v\n", err)
+		fmt.Fprintf(stderr, configLoadFailedFormat, err)
 		return 2
 	}
-	store, err := auth.OpenStore(filepath.Join(cfg.DataDir, "tokens.json"))
+	store, err := auth.OpenStore(filepath.Join(cfg.DataDir, tokensFileName))
 	if err != nil {
-		fmt.Fprintf(stderr, "open token store: %v\n", err)
+		fmt.Fprintf(stderr, openTokenStoreFailedFormat, err)
 		return 1
 	}
 	tokens := store.List()
@@ -111,7 +111,7 @@ func tokenListCmd(args []string, stdout, stderr io.Writer) int {
 func tokenRotateCmd(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("token rotate", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "bridge.yaml", "path to config file")
+	configPath := fs.String("config", defaultConfigPath, configFlagUsage)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -123,12 +123,12 @@ func tokenRotateCmd(args []string, stdout, stderr io.Writer) int {
 	id := fs.Arg(0)
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "config load failed: %v\n", err)
+		fmt.Fprintf(stderr, configLoadFailedFormat, err)
 		return 2
 	}
-	store, err := auth.OpenStore(filepath.Join(cfg.DataDir, "tokens.json"))
+	store, err := auth.OpenStore(filepath.Join(cfg.DataDir, tokensFileName))
 	if err != nil {
-		fmt.Fprintf(stderr, "open token store: %v\n", err)
+		fmt.Fprintf(stderr, openTokenStoreFailedFormat, err)
 		return 1
 	}
 	raw, tok, err := store.Rotate(id)
@@ -148,7 +148,7 @@ func tokenRotateCmd(args []string, stdout, stderr io.Writer) int {
 func tokenExpireCmd(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("token expire", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "bridge.yaml", "path to config file")
+	configPath := fs.String("config", defaultConfigPath, configFlagUsage)
 	in := fs.Duration("in", 0, "invalidate the token after this duration from now (e.g. 24h, 7*24h). Required unless --clear is set.")
 	clear := fs.Bool("clear", false, "remove an existing expiry from the token")
 	if err := fs.Parse(args); err != nil {
@@ -170,12 +170,12 @@ func tokenExpireCmd(args []string, stdout, stderr io.Writer) int {
 	id := fs.Arg(0)
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "config load failed: %v\n", err)
+		fmt.Fprintf(stderr, configLoadFailedFormat, err)
 		return 2
 	}
-	store, err := auth.OpenStore(filepath.Join(cfg.DataDir, "tokens.json"))
+	store, err := auth.OpenStore(filepath.Join(cfg.DataDir, tokensFileName))
 	if err != nil {
-		fmt.Fprintf(stderr, "open token store: %v\n", err)
+		fmt.Fprintf(stderr, openTokenStoreFailedFormat, err)
 		return 1
 	}
 	var exp *time.Time
@@ -200,7 +200,7 @@ func tokenExpireCmd(args []string, stdout, stderr io.Writer) int {
 func tokenRevokeCmd(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("token revoke", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "bridge.yaml", "path to config file")
+	configPath := fs.String("config", defaultConfigPath, configFlagUsage)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -212,12 +212,12 @@ func tokenRevokeCmd(args []string, stdout, stderr io.Writer) int {
 	id := fs.Arg(0)
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "config load failed: %v\n", err)
+		fmt.Fprintf(stderr, configLoadFailedFormat, err)
 		return 2
 	}
-	store, err := auth.OpenStore(filepath.Join(cfg.DataDir, "tokens.json"))
+	store, err := auth.OpenStore(filepath.Join(cfg.DataDir, tokensFileName))
 	if err != nil {
-		fmt.Fprintf(stderr, "open token store: %v\n", err)
+		fmt.Fprintf(stderr, openTokenStoreFailedFormat, err)
 		return 1
 	}
 	if err := store.Revoke(id); err != nil {

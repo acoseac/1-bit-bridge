@@ -738,13 +738,13 @@ func mapUpdaterError(err error) error {
 	}
 	switch {
 	case errors.Is(err, updater.ErrNoUpdate):
-		return fmt.Errorf("%w: %s", admin.ErrUpdateNoUpdate, err.Error())
+		return fmt.Errorf(errWrapDetailFormat, admin.ErrUpdateNoUpdate, err.Error())
 	case errors.Is(err, updater.ErrActiveSessions):
-		return fmt.Errorf("%w: %s", admin.ErrUpdateActiveSessions, err.Error())
+		return fmt.Errorf(errWrapDetailFormat, admin.ErrUpdateActiveSessions, err.Error())
 	case errors.Is(err, updater.ErrInstallNotSupported):
-		return fmt.Errorf("%w: %s", admin.ErrUpdateNotSupported, err.Error())
+		return fmt.Errorf(errWrapDetailFormat, admin.ErrUpdateNotSupported, err.Error())
 	case errors.Is(err, updater.ErrPathNotWritable):
-		return fmt.Errorf("%w: %s", admin.ErrUpdatePathNotWritable, err.Error())
+		return fmt.Errorf(errWrapDetailFormat, admin.ErrUpdatePathNotWritable, err.Error())
 	default:
 		return err
 	}
@@ -1003,7 +1003,7 @@ type serveOpts struct {
 func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "bridge.yaml", "path to config file")
+	configPath := fs.String("config", defaultConfigPath, configFlagUsage)
 	addrOverride := fs.String("addr", "", "override listenAddress from config (host:port)")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -1020,7 +1020,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	addrOverride := &opts.addrOverride
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "config load failed: %v\n", err)
+		fmt.Fprintf(stderr, configLoadFailedFormat, err)
 		return 2
 	}
 	if err := bridgefs.ValidateRoots(cfg.LibraryRoots); err != nil {
@@ -2006,7 +2006,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 func pairCmd(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("pair", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "bridge.yaml", "path to config file")
+	configPath := fs.String("config", defaultConfigPath, configFlagUsage)
 	name := fs.String("name", "", "client name (e.g. \"iPhone 15 Pro\")")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -2017,7 +2017,7 @@ func pairCmd(args []string, stdout, stderr io.Writer) int {
 	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "config load failed: %v\n", err)
+		fmt.Fprintf(stderr, configLoadFailedFormat, err)
 		return 2
 	}
 	store, err := auth.OpenStore(filepath.Join(cfg.DataDir, "tokens.json"))
@@ -2041,13 +2041,13 @@ func pairCmd(args []string, stdout, stderr io.Writer) int {
 func scanCmd(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("scan", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "bridge.yaml", "path to config file")
+	configPath := fs.String("config", defaultConfigPath, configFlagUsage)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "config load failed: %v\n", err)
+		fmt.Fprintf(stderr, configLoadFailedFormat, err)
 		return 2
 	}
 	store, err := manifest.OpenStore(manifest.DefaultDBPath(cfg.DataDir))

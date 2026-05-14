@@ -21,6 +21,17 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
 
+// Shared writeError codes / messages whose literals were flagged for
+// duplication by SonarCloud (go:S1192). Extracted so a copy edit only
+// happens once and code-points stay grep-able. Not exhaustive — only
+// the codes the rule flagged at 3+ duplicates land here.
+const (
+	errCodeBadJSON         = "bad-json"
+	errCodeSaveConfig      = "save-config"
+	errCodeNoUpdater       = "no-updater"
+	errMsgUpdaterNotConfig = "updater is not configured"
+)
+
 // --- response shapes ---
 
 type statsResponse struct {
@@ -348,7 +359,7 @@ func (s *Server) apiRootsAdd(w http.ResponseWriter, r *http.Request) {
 		Path string `json:"path"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, adminMaxBodyBytes)).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "bad-json", err.Error())
+		writeError(w, http.StatusBadRequest, errCodeBadJSON, err.Error())
 		return
 	}
 	req.Path = strings.TrimSpace(req.Path)
@@ -428,7 +439,7 @@ func (s *Server) apiRootsAdd(w http.ResponseWriter, r *http.Request) {
 		if willTransition {
 			s.spawnBackgroundScan("compensating-scan (add)")
 		}
-		writeError(w, http.StatusInternalServerError, "save-config", err.Error())
+		writeError(w, http.StatusInternalServerError, errCodeSaveConfig, err.Error())
 		return
 	}
 	s.deps.Scanner.SetRoots(newList)
@@ -445,7 +456,7 @@ func (s *Server) apiRootsRemove(w http.ResponseWriter, r *http.Request) {
 		Path string `json:"path"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, adminMaxBodyBytes)).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "bad-json", err.Error())
+		writeError(w, http.StatusBadRequest, errCodeBadJSON, err.Error())
 		return
 	}
 
@@ -510,7 +521,7 @@ func (s *Server) apiRootsRemove(w http.ResponseWriter, r *http.Request) {
 		// failure; a compensating-scan error is additional recovery
 		// and only matters for operator observability.
 		s.spawnBackgroundScan("compensating-scan (remove)")
-		writeError(w, http.StatusInternalServerError, "save-config", err.Error())
+		writeError(w, http.StatusInternalServerError, errCodeSaveConfig, err.Error())
 		return
 	}
 	s.deps.Scanner.SetRoots(newList)
@@ -547,7 +558,7 @@ func (s *Server) apiTokensMint(w http.ResponseWriter, r *http.Request) {
 		URL  string `json:"url"` // bridge URL iOS will dial (e.g. https://host.local:7788)
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, adminMaxBodyBytes)).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "bad-json", err.Error())
+		writeError(w, http.StatusBadRequest, errCodeBadJSON, err.Error())
 		return
 	}
 	req.Name = strings.TrimSpace(req.Name)
@@ -686,7 +697,7 @@ type settingsPatchResponse struct {
 func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 	var p settingsPatch
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, adminMaxBodyBytes)).Decode(&p); err != nil {
-		writeError(w, http.StatusBadRequest, "bad-json", err.Error())
+		writeError(w, http.StatusBadRequest, errCodeBadJSON, err.Error())
 		return
 	}
 
@@ -780,7 +791,7 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := next.Save(s.deps.CfgPath); err != nil {
-		writeError(w, http.StatusInternalServerError, "save-config", err.Error())
+		writeError(w, http.StatusInternalServerError, errCodeSaveConfig, err.Error())
 		return
 	}
 	s.deps.CfgHolder.Store(next)
@@ -976,7 +987,7 @@ func (s *Server) getUpdatesSnapshot() UpdateStatus {
 // slow) GitHub call rather than letting it run uselessly to completion.
 func (s *Server) apiUpdatesCheck(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Updater == nil {
-		writeError(w, http.StatusServiceUnavailable, "no-updater", "updater is not configured")
+		writeError(w, http.StatusServiceUnavailable, errCodeNoUpdater, errMsgUpdaterNotConfig)
 		return
 	}
 	writeJSON(w, http.StatusOK, s.deps.Updater.CheckNow(r.Context()))
@@ -1002,7 +1013,7 @@ func (s *Server) apiUpdatesCheck(w http.ResponseWriter, r *http.Request) {
 //   - 502 on download / verify / swap failures
 func (s *Server) apiUpdatesInstall(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Updater == nil {
-		writeError(w, http.StatusServiceUnavailable, "no-updater", "updater is not configured")
+		writeError(w, http.StatusServiceUnavailable, errCodeNoUpdater, errMsgUpdaterNotConfig)
 		return
 	}
 	force := r.URL.Query().Get("force") == "1"
@@ -1030,7 +1041,7 @@ func (s *Server) apiUpdatesInstall(w http.ResponseWriter, r *http.Request) {
 //   - 502 on rollback I/O failure (.bak missing, etc.)
 func (s *Server) apiUpdatesRollback(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Updater == nil {
-		writeError(w, http.StatusServiceUnavailable, "no-updater", "updater is not configured")
+		writeError(w, http.StatusServiceUnavailable, errCodeNoUpdater, errMsgUpdaterNotConfig)
 		return
 	}
 	force := r.URL.Query().Get("force") == "1"

@@ -387,16 +387,25 @@ func shellHandoff(binPath, cfgPath string) string {
 	return b.String()
 }
 
+// Shared format strings for the three writeShell* shell-snippet builders
+// (PowerShell / cmd / bash+zsh). Each rendered example has the same 3-line
+// indentation contract; one literal so a tweak to the spacing only happens
+// once.
+const (
+	shellLabelFormat      = "  %s\n"
+	shellConfigLineFormat = "      --config %s\n"
+)
+
 // writeShellPS emits the PowerShell variant flush-left with backtick
 // line-continuations. `& <path>` invocation works regardless of CWD —
 // the PowerShell rule that bit the original transcript user. Label is
 // caller-controlled so the SSH-from-Windows path can render the
 // "PowerShell (if reachable):" qualifier without a separate helper.
 func writeShellPS(b *strings.Builder, label, binPath, cfgPath string) {
-	fmt.Fprintf(b, "  %s\n", paint(cBrightYellow, label))
+	fmt.Fprintf(b, shellLabelFormat, paint(cBrightYellow, label))
 	fmt.Fprintf(b, "    & %s `\n", quotePS(binPath))
 	fmt.Fprintf(b, "      serve `\n")
-	fmt.Fprintf(b, "      --config %s\n", quotePS(cfgPath))
+	fmt.Fprintf(b, shellConfigLineFormat, quotePS(cfgPath))
 	fmt.Fprintln(b)
 }
 
@@ -407,10 +416,10 @@ func writeShellPS(b *strings.Builder, label, binPath, cfgPath string) {
 // We print a fully-quoted binary path for determinism so the command
 // works whether the binary is on PATH or not.
 func writeShellCmd(b *strings.Builder, binPath, cfgPath string) {
-	fmt.Fprintf(b, "  %s\n", paint(cBrightYellow, "cmd.exe:"))
+	fmt.Fprintf(b, shellLabelFormat, paint(cBrightYellow, "cmd.exe:"))
 	fmt.Fprintf(b, "    %s ^\n", quoteCmd(binPath))
 	fmt.Fprintf(b, "      serve ^\n")
-	fmt.Fprintf(b, "      --config %s\n", quoteCmd(cfgPath))
+	fmt.Fprintf(b, shellConfigLineFormat, quoteCmd(cfgPath))
 	fmt.Fprintln(b)
 }
 
@@ -418,10 +427,10 @@ func writeShellCmd(b *strings.Builder, binPath, cfgPath string) {
 // the POSIX continuation char. Path is single-quoted to disable all
 // shell expansion so `$` / `~` / spaces survive intact.
 func writeShellPosix(b *strings.Builder, binPath, cfgPath string) {
-	fmt.Fprintf(b, "  %s\n", paint(cBrightYellow, "bash / zsh:"))
+	fmt.Fprintf(b, shellLabelFormat, paint(cBrightYellow, "bash / zsh:"))
 	fmt.Fprintf(b, "    %s \\\n", quotePosix(binPath))
 	fmt.Fprintf(b, "      serve \\\n")
-	fmt.Fprintf(b, "      --config %s\n", quotePosix(cfgPath))
+	fmt.Fprintf(b, shellConfigLineFormat, quotePosix(cfgPath))
 	fmt.Fprintln(b)
 }
 

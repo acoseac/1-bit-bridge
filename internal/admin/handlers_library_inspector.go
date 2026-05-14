@@ -24,6 +24,15 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
+// Shared upscale-disabled error pair surfaced by every admin handler that
+// gates on `deps.Coordinator.UpscaleEnabled() == false`. Three call sites
+// inside handlers_library_inspector.go + two in handlers_upscale_delete.go;
+// SonarCloud go:S1192 flagged the duplicates.
+const (
+	errCodeUpscaleDisabled    = "upscale-disabled"
+	errMsgUpscalingNotEnabled = "upscaling is not enabled on this bridge"
+)
+
 // adminBatchSubmitRequest is the JSON shape POST /api/upscale/batch
 // accepts. Optional `targetRate` / `targetBits` fall back to the
 // scan_state-stored admin Settings.
@@ -36,8 +45,8 @@ type adminBatchSubmitRequest struct {
 // apiUpscaleBatchSubmit handles POST /api/upscale/batch.
 func (s *Server) apiUpscaleBatchSubmit(w http.ResponseWriter, r *http.Request) {
 	if s.deps.BatchCoordinator == nil {
-		writeError(w, http.StatusServiceUnavailable, "upscale-disabled",
-			"upscaling is not enabled on this bridge")
+		writeError(w, http.StatusServiceUnavailable, errCodeUpscaleDisabled,
+			errMsgUpscalingNotEnabled)
 		return
 	}
 	defer r.Body.Close()
@@ -75,8 +84,8 @@ func (s *Server) apiUpscaleBatchSubmit(w http.ResponseWriter, r *http.Request) {
 // apiUpscaleBatchList handles GET /api/upscale/batches?limit=N.
 func (s *Server) apiUpscaleBatchList(w http.ResponseWriter, r *http.Request) {
 	if s.deps.BatchCoordinator == nil {
-		writeError(w, http.StatusServiceUnavailable, "upscale-disabled",
-			"upscaling is not enabled on this bridge")
+		writeError(w, http.StatusServiceUnavailable, errCodeUpscaleDisabled,
+			errMsgUpscalingNotEnabled)
 		return
 	}
 	limit := 100
@@ -100,8 +109,8 @@ func (s *Server) apiUpscaleBatchList(w http.ResponseWriter, r *http.Request) {
 // apiUpscaleBatchCancel handles DELETE /api/upscale/batches/{id}.
 func (s *Server) apiUpscaleBatchCancel(w http.ResponseWriter, r *http.Request) {
 	if s.deps.BatchCoordinator == nil {
-		writeError(w, http.StatusServiceUnavailable, "upscale-disabled",
-			"upscaling is not enabled on this bridge")
+		writeError(w, http.StatusServiceUnavailable, errCodeUpscaleDisabled,
+			errMsgUpscalingNotEnabled)
 		return
 	}
 	idStr := r.PathValue("id")

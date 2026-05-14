@@ -60,6 +60,11 @@ type ManifestPage = manifest.Manifest
 
 var logger = logging.Component("api")
 
+// headerContentEncoding is the canonical HTTP header name written and
+// deleted across the manifest gzip negotiation path. Extracted to
+// satisfy SonarCloud go:S1192; the value is fixed by RFC 7231 §3.1.2.2.
+const headerContentEncoding = "Content-Encoding"
+
 // manifestGzipPool reuses gzip.Writer instances across concurrent
 // /v1/manifest requests. `gzip.NewWriter` allocates a ~256 KB
 // LZ77 window buffer per call; under high concurrency (many iOS
@@ -884,7 +889,7 @@ func (s *Server) manifestHandler(w http.ResponseWriter, r *http.Request) {
 	useGzip := acceptsGzip(r)
 	if useGzip {
 		w.Header().Set("Vary", "Accept-Encoding")
-		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Set(headerContentEncoding, "gzip")
 	}
 
 	dw := &deferredStatusWriter{w: w, status: http.StatusOK}
@@ -955,7 +960,7 @@ func (s *Server) manifestHandler(w http.ResponseWriter, r *http.Request) {
 		// to decompress nothing. Strip the encoding headers so the
 		// client sees a plain empty 200 — same shape as the pre-stream
 		// error path below, without the 5xx.
-		w.Header().Del("Content-Encoding")
+		w.Header().Del(headerContentEncoding)
 		w.Header().Del("Vary")
 	}
 
@@ -966,7 +971,7 @@ func (s *Server) manifestHandler(w http.ResponseWriter, r *http.Request) {
 			// error body isn't misinterpreted as gzip by the client
 			// (URLSession would surface a transport error and
 			// silently retry, masking the real DB failure).
-			w.Header().Del("Content-Encoding")
+			w.Header().Del(headerContentEncoding)
 			w.Header().Del("Vary")
 			writeError(w, http.StatusInternalServerError, "internal", writeErr.Error())
 			return
