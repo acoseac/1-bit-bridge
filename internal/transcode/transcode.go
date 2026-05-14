@@ -197,30 +197,184 @@ func initVariantIDCache() {
 }
 
 // SidecarPath returns the absolute filesystem path the converted
-// FLAC will land at. Filename pattern:
+// FLAC will land at. Filename pattern (v1.4):
 //
-//	<sha256(SourceLibraryRel)[:16]>-<VariantID>.flac
+//	<OutputDir>/<libRel-dirname>/<libRel-basename>.<VariantID>.flac
 //
-// The variantID suffix is load-bearing: hashing only the source
-// path would let two runs at different target rates overwrite each
-// other (the user's first call with --target-rate 176400 followed
-// by a second with --target-rate 192000 would clobber the first).
-// Including the variantID guarantees multiple variants of the same
-// source coexist safely on disk.
+// Example: SourceLibraryRel `Diana Krall/The Look of Love/01 Love Letters.flac`
+// + VariantID `upscaled-v2-176400-24` →
 //
-// 16 hex chars = 64 bits of entropy. Collisions are scoped to a
-// single user's SourceLibraryRel namespace (typically <100k tracks)
-// so 64 bits is far more than enough; truncating buys ~48 chars of
-// Windows MAX_PATH headroom for deeply-nested OutputDirs.
+//	<OutputDir>/Diana Krall/The Look of Love/01 Love Letters.flac.upscaled-v2-176400-24.flac
 //
-// Migration: existing 64-char-hash sidecars on disk stay served by
-// their existing track_variants.sidecar_path rows (the absolute
-// path stored in the DB still points at them). Only newly-transcoded
-// variants get the 16-char form. Zero-friction upgrade.
+// **Why source-path-mirrored layout**: operators with write access to
+// their library can `mv` the OutputDir contents directly into the
+// library and slot variants alongside source files. The variantID
+// suffix on the filename is load-bearing (multiple targets coexist:
+// `01 Love Letters.flac.upscaled-v2-176400-24.flac` next to
+// `01 Love Letters.flac.upscaled-v2-352800-24.flac`).
+//
+// **Why keep the original extension** (`.flac`) in the basename: a
+// folder with `Track1.flac` AND `Track1.wav` (legit A/B testing case)
+// would otherwise both write to `Track1.upscaled-…flac` — zero
+// collision tolerance for that exact case is structural.
+//
+// **Migration**: existing hash-flat sidecars on disk stay served by
+// their existing `track_variants.sidecar_path` rows (absolute paths;
+// DB lookup is the only resolver — never filesystem-walked). Only
+// newly-transcoded variants use the new layout. Mixed-layout state
+// is fine; `bridge variants relayout` (separate CLI) opt-in
+// renames legacy variants to match.
+//
+// **Filesystem safety**: long basenames + Windows-illegal characters
+// + reserved names route through `safeVariantFilename` which:
+//   - replaces `: * ? " < > |` with `_` (deterministic),
+//   - middle-truncates the basename + appends a short SHA8 of the
+//     original full basename for uniqueness when total would exceed
+//     255 bytes (ext4 / NTFS / exFAT cap).
+//
+// Dirname segments are NOT sanitised — they came from the source
+// filesystem which already accepts them.
 func (j JobSpec) SidecarPath() string {
-	sum := sha256.Sum256([]byte(j.SourceLibraryRel))
-	hash := hex.EncodeToString(sum[:])[:16]
-	return filepath.Join(j.OutputDir, fmt.Sprintf("%s-%s.flac", hash, j.VariantID()))
+	dir := filepath.Dir(j.SourceLibraryRel)
+	base := filepath.Base(j.SourceLibraryRel)
+	filename := safeVariantFilename(base, j.VariantID())
+	if dir == "" || dir == "." {
+		return filepath.Join(j.OutputDir, filename)
+	}
+	return filepath.Join(j.OutputDir, dir, filename)
+}
+
+// safeVariantFilename builds the variant FLAC's basename for the
+// source-path-mirrored layout. Trade-offs documented in
+// `SidecarPath`'s docblock.
+//
+// The output shape is:
+//
+//	<srcBase>.<variantID>.flac
+//
+// — with srcBase optionally middle-truncated + SHA8-suffixed when
+// the full filename would exceed 255 bytes (the ext4 / NTFS /
+// exFAT / encrypted-overlay basename cap).
+//
+// Characters illegal on FAT-family filesystems (`: * ? " < > |`)
+// are replaced with `_` deterministically. The replacement is
+// path-wide rather than condition-on-target-filesystem because the
+// transcoder doesn't know the destination filesystem at write time
+// AND the deterministic mapping is friendly to GC + admin migration
+// (re-running with the same source produces the same filename,
+// keeping `track_variants.sidecar_path` rows valid).
+//
+// Pure helper — testable in isolation; table-tested across cases.
+func safeVariantFilename(srcBase, variantID string) string {
+	const fsBasenameCap = 255
+	srcBase = sanitiseForFAT(srcBase)
+	candidate := fmt.Sprintf("%s.%s.flac", srcBase, variantID)
+	if len(candidate) <= fsBasenameCap {
+		return candidate
+	}
+	// Over-length: compute a stable SHA8 of the ORIGINAL full
+	// basename for uniqueness, then middle-truncate srcBase to fit.
+	sum := sha256.Sum256([]byte(srcBase))
+	sha8 := hex.EncodeToString(sum[:])[:8]
+	// Reserved budget for: "~<sha8>." + variantID + ".flac".
+	suffix := fmt.Sprintf("~%s.%s.flac", sha8, variantID)
+	budget := fsBasenameCap - len(suffix)
+	if budget < 8 {
+		// Pathological: variantID alone consumes the budget. Fall
+		// back to a fully-hash-named filename — losing the
+		// source-mirror property but guaranteeing a valid filename.
+		// In practice the variantID is ~25 chars; this branch is
+		// dead under realistic configs.
+		return fmt.Sprintf("v.%s%s", sha8, suffix)
+	}
+	if len(srcBase) <= budget {
+		return srcBase + suffix
+	}
+	// Middle-truncate: keep `head + ".." + tail`, then append suffix.
+	// UTF-8-safe rune-boundary clip: byte-level slicing could land in
+	// the middle of a multi-byte rune ("Dvořák" mid-truncated at byte
+	// 2 would corrupt the `ř`). Use `truncateUTF8AtMost` which scans
+	// rune boundaries up to the byte budget.
+	half := (budget - 2) / 2
+	if half < 1 {
+		return truncateUTF8AtMost(srcBase, budget) + suffix
+	}
+	head := truncateUTF8AtMost(srcBase, half)
+	tail := truncateUTF8FromEnd(srcBase, half)
+	return head + ".." + tail + suffix
+}
+
+// truncateUTF8AtMost returns the longest prefix of `s` whose byte
+// length is ≤ `maxBytes`, ending on a rune boundary. Safe against
+// multi-byte characters; never slices mid-rune.
+func truncateUTF8AtMost(s string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(s) <= maxBytes {
+		return s
+	}
+	// Walk rune boundaries; the largest i such that s[:i] is ≤
+	// maxBytes AND ends on a rune boundary.
+	end := 0
+	for i := range s {
+		if i > maxBytes {
+			break
+		}
+		end = i
+	}
+	return s[:end]
+}
+
+// truncateUTF8FromEnd returns the longest suffix of `s` whose byte
+// length is ≤ `maxBytes`, starting on a rune boundary. Mirrors
+// truncateUTF8AtMost for the tail-keep case.
+func truncateUTF8FromEnd(s string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(s) <= maxBytes {
+		return s
+	}
+	// Walk rune boundaries from the end; the smallest start such that
+	// s[start:] fits in maxBytes.
+	start := len(s)
+	for i := range s {
+		if len(s)-i <= maxBytes {
+			start = i
+			break
+		}
+	}
+	return s[start:]
+}
+
+// sanitiseForFAT replaces characters that FAT-family filesystems
+// (FAT32 / exFAT / NTFS) reject in filenames with `_`. The
+// substitution is deterministic so re-runs of the same source
+// produce identical output — the DB lookup contract depends on it.
+//
+// Forward slash isn't included: the caller has already split the
+// path; this operates on a basename only. Backslash (`\`) IS
+// included because some sources have it embedded in a single path
+// segment (rare; cross-OS rip tools sometimes do this) and FAT
+// rejects it.
+func sanitiseForFAT(s string) string {
+	// Direct byte-level check beats `strings.ContainsRune` per
+	// iteration — the bad set is all ASCII (each char fits in one
+	// byte). UTF-8 multi-byte runes start with a high-bit byte
+	// (>= 0x80) and never collide with the ASCII bad chars, so the
+	// byte loop is safe even on Unicode input. Gemini Medium on
+	// PR D1 flagged the prior `strings.ContainsRune` form as
+	// converting the byte to a rune + scanning the string on every
+	// iteration.
+	out := []byte(s)
+	for i, b := range out {
+		switch b {
+		case ':', '*', '?', '"', '<', '>', '|', '\\':
+			out[i] = '_'
+		}
+	}
+	return string(out)
 }
 
 // SoxArgs builds the argv for the sox invocation. Returns the
@@ -364,11 +518,18 @@ func ResolveTargetRate(flagValue string, sourceRate int) (int, error) {
 // Output directory created if missing — `bridge upscale` only
 // guarantees DataDir exists, not the `transcoded` subdir.
 func RunSox(ctx context.Context, j JobSpec) (int64, error) {
-	if err := os.MkdirAll(j.OutputDir, 0o755); err != nil {
-		return 0, fmt.Errorf("mkdir output dir: %w", err)
-	}
 	args, _ := j.SoxArgs()
 	finalPath := j.SidecarPath()
+	// v1.4 source-mirrored layout: sidecars land under
+	// <OutputDir>/<libRel-dirname>/<filename>. The parent of
+	// finalPath may NOT exist yet (first variant in a new album
+	// folder) — MkdirAll on the parent covers both the OutputDir
+	// root case AND the per-album subdir case. Pre-v1.4 only
+	// needed MkdirAll(j.OutputDir); the per-file form is now
+	// the load-bearing call (CodeRabbit CRITICAL on PR D1).
+	if err := os.MkdirAll(filepath.Dir(finalPath), 0o755); err != nil {
+		return 0, fmt.Errorf("mkdir sidecar dir: %w", err)
+	}
 	tmpPath := finalPath + ".tmp"
 	// Defensive: clear any stale .tmp from a previous interrupted
 	// run so SoX's open(O_CREAT) doesn't trip on prior crash debris.

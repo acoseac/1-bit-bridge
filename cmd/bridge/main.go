@@ -1473,13 +1473,13 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			store:     manifestStore,
 			resolver:  apiSrv.Resolver(),
 			cfg:       cfg,
-			outputDir: transcode.OutputDirFor(cfg.DataDir),
+			outputDir: cfg.Upscale.EffectiveVariantsDir(cfg.DataDir),
 		})
 		apiSrv.WithBatchCoordinator(&upscaleBatchCoordinatorAdapter{
 			coord:     upscaleCoordinator,
 			store:     manifestStore,
 			dataDir:   cfg.DataDir,
-			outputDir: transcode.OutputDirFor(cfg.DataDir),
+			outputDir: cfg.Upscale.EffectiveVariantsDir(cfg.DataDir),
 		})
 		// Variant lifecycle: DELETE /v1/upscale/variants + reactive
 		// serve-side cleanup + integrity ticker all share the same
@@ -1806,7 +1806,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 				coord:     upscaleCoordinator,
 				store:     manifestStore,
 				dataDir:   cfg.DataDir,
-				outputDir: transcode.OutputDirFor(cfg.DataDir),
+				outputDir: cfg.Upscale.EffectiveVariantsDir(cfg.DataDir),
 			}
 		}(),
 		VariantDeleter: func() admin.AdminVariantDeleter {

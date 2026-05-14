@@ -299,6 +299,28 @@ type UpscaleConfig struct {
 	// realistic dither quantisation noise. 32-bit-int output is
 	// supported for completeness but rarely a sonic improvement.
 	TargetBits int `yaml:"targetBits,omitempty"`
+
+	// VariantsDir lets operators relocate upscaled FLAC sidecars off
+	// the bridge's data partition onto any writable mount they have
+	// space on — external drive, secondary disk, dedicated NAS subdir.
+	// Empty (the default) falls through to `<dataDir>/transcoded/`
+	// (preserved historical layout — no existing install breaks).
+	//
+	// MUST be an absolute path. MUST NOT resolve under any library
+	// root (catastrophic — variants tangled with source files would
+	// confuse the scanner AND collide with the read-only library
+	// invariant from PR #75). Validation in `Config.Validate` enforces
+	// both constraints; the directory itself is created on first
+	// upscale via `os.MkdirAll`.
+	//
+	// On-disk layout under VariantsDir is source-path-mirrored
+	// (`<artist>/<album>/<basename>.<variantID>.flac` style) so
+	// operators with write access to their library can `mv` the
+	// variants dir contents into the library and slot variants next
+	// to source files. The DB lookup remains the only path-resolution
+	// mechanism — moves do NOT change the wire shape; iOS doesn't
+	// care.
+	VariantsDir string `yaml:"variantsDir,omitempty"`
 }
 
 // EffectiveWorkers resolves the runtime worker count from the YAML
@@ -381,6 +403,40 @@ func (u UpscaleConfig) EffectiveBootstrapTargetRate() int {
 func (u UpscaleConfig) EffectiveBootstrapTargetBits() int {
 	return u.EffectiveTargetBits()
 }
+
+// EffectiveVariantsDir resolves the absolute on-disk directory the
+// transcode pool writes variant sidecars to. Explicit YAML setting
+// wins; empty falls through to the legacy `<dataDir>/transcoded/`
+// path so existing installs without a `variantsDir` setting are
+// unaffected.
+//
+// Centralised so every consumer (transcode pool, admin "Stored at"
+// surface, free-space probe, CLI `bridge variants move`) reads from
+// one helper and can't drift. Mirrors the
+// `EffectiveBootstrapTargetRate` convention.
+//
+// Pure / no I/O. Validation (must be absolute, must not be under a
+// library root) lives in `Config.Validate` so a misconfiguration
+// fails fast at boot — by the time this helper is called, the path
+// has already been vetted.
+func (u UpscaleConfig) EffectiveVariantsDir(dataDir string) string {
+	if u.VariantsDir != "" {
+		return u.VariantsDir
+	}
+	// Delegate to the transcode default helper via the
+	// well-known subdir name. Inlined here to avoid a config →
+	// transcode import (config is the foundation; transcode
+	// imports config). The constant value MUST track
+	// transcode.OutputDirSubdir.
+	return filepath.Join(dataDir, defaultVariantsSubdir)
+}
+
+// defaultVariantsSubdir mirrors transcode.OutputDirSubdir. Kept as
+// a duplicated constant to avoid a config → transcode import; both
+// values MUST stay in lockstep. Validated by a same-package test
+// that asserts the string matches transcode.OutputDirSubdir's
+// observable behaviour (`OutputDirFor("a") == filepath.Join("a", defaultVariantsSubdir)`).
+const defaultVariantsSubdir = "transcoded"
 
 // LibraryWatchConfig governs the optional fsnotify-based
 // instant-update watcher. Off by default — the periodic scan
@@ -738,6 +794,9 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("update.quietHours %q: %w", c.Update.QuietHours, err)
 		}
 	}
+	if err := validateVariantsDir(c.Upscale.VariantsDir, c.LibraryRoots); err != nil {
+		return fmt.Errorf("upscale.variantsDir %q: %w", c.Upscale.VariantsDir, err)
+	}
 	if c.Update.CheckIntervalHours < 0 {
 		return fmt.Errorf("update.checkIntervalHours: must be >= 0, got %d", c.Update.CheckIntervalHours)
 	}
@@ -768,6 +827,81 @@ func (c *Config) Validate() error {
 		validateLogger.Warn("dropped invalid custom endpoint", "err", w)
 	}
 	return nil
+}
+
+// validateVariantsDir checks the `upscale.variantsDir` setting
+// against two constraints that, if violated, would catastrophically
+// tangle variants with source files OR produce a path the transcode
+// pool can't write to:
+//
+//  1. MUST be absolute. A relative path would be resolved against
+//     the bridge process's working directory — which differs between
+//     `bridge serve` (typically the launchd / systemd cwd) and
+//     `bridge upscale` (operator-launched, varies). Variants written
+//     in one context would be unfindable in the other.
+//  2. MUST NOT resolve under any library root. The library is
+//     read-only by design (CLAUDE.md PR #75 invariant); writing
+//     variants into it would break the contract AND surface to
+//     scanner re-scans as mystery audio files. The check uses
+//     `filepath.Rel` to handle symlink-cleanup edge cases.
+//
+// Empty `variantsDir` is the documented "use the default
+// <dataDir>/transcoded" path — always valid; nothing to check.
+// Directory existence is NOT validated here; `os.MkdirAll` on first
+// upscale creates it as needed.
+//
+// Pure / no I/O beyond the optional Stat for the conflict check.
+func validateVariantsDir(variantsDir string, libraryRoots []string) error {
+	if variantsDir == "" {
+		return nil
+	}
+	if !filepath.IsAbs(variantsDir) {
+		return errors.New("must be an absolute path")
+	}
+	// Symlink resolution before the containment check (CodeRabbit
+	// Major on PR D1). The prior lexical-only check using
+	// `filepath.Clean` + `filepath.Rel` could be bypassed if either
+	// the variantsDir OR a library root contained a symlink that
+	// resolved into the other tree. EvalSymlinks fails on non-existent
+	// paths — variantsDir may legitimately not exist yet (created on
+	// first upscale). We try EvalSymlinks first; on failure, fall
+	// through to the lexical check so a brand-new install still
+	// validates.
+	candidate := evalSymlinksOrClean(variantsDir)
+	for _, root := range libraryRoots {
+		if root == "" {
+			continue
+		}
+		cleanedRoot := evalSymlinksOrClean(root)
+		rel, err := filepath.Rel(cleanedRoot, candidate)
+		if err != nil {
+			// Different volumes on Windows; can't compare → not nested.
+			continue
+		}
+		// rel starts with ".." iff candidate is OUTSIDE cleanedRoot.
+		// Equal-to-".." or starts-with-"../" / "..\\" means "above".
+		// Anything else means candidate is AT or UNDER cleanedRoot —
+		// rejected.
+		if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("must not be under library root %q (variants would tangle with source files)", cleanedRoot)
+		}
+	}
+	return nil
+}
+
+// evalSymlinksOrClean returns `filepath.EvalSymlinks(p)` when it
+// succeeds, falling back to `filepath.Clean(p)` when the path
+// doesn't exist (typical for a brand-new install where
+// variants_dir hasn't been created yet, or for a library root that
+// the operator typed into bridge.yaml but hasn't mounted). The
+// fallback is lexical-only — symlink bypass is theoretically
+// possible on a non-existent target, but a missing path can't be
+// a real attack surface today (no file would land there).
+func evalSymlinksOrClean(p string) string {
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
+	}
+	return filepath.Clean(p)
 }
 
 // maxCustomEndpointHostLen caps the per-entry hostname at the RFC 1035

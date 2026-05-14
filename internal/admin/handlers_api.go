@@ -18,7 +18,6 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
-	"github.com/acoseac/1-bit-bridge/internal/transcode"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
 
@@ -629,7 +628,7 @@ func (s *Server) apiSettingsGet(w http.ResponseWriter, r *http.Request) {
 		UpdateQuietHours:         cfg.Update.QuietHours,
 		UpdateCheckIntervalHours: cfg.Update.CheckIntervalHours,
 		UpscaleEnabled:           cfg.Upscale.Enabled,
-		UpscaleStoragePath:       transcode.OutputDirFor(cfg.DataDir),
+		UpscaleStoragePath:       cfg.Upscale.EffectiveVariantsDir(cfg.DataDir),
 		IsSupervised:             s.deps.IsSupervised,
 		// Same backup fields the page-template handler emits
 		// (`pageSettings`). Without these the JSON API drops them
@@ -831,7 +830,7 @@ type upscaleStatsResponse struct {
 	// here too so the Settings page's live "Upscale stats"
 	// tile and the Library Inspector's drawer can render
 	// "Stored at <path>" without a second handler round
-	// trip. Computed via `transcode.OutputDirFor(cfg.DataDir)`
+	// trip. Computed via `cfg.Upscale.EffectiveVariantsDir(cfg.DataDir)`
 	// — always populated regardless of whether the pool
 	// itself is running.
 	StoragePath string `json:"storagePath,omitempty"`
@@ -861,7 +860,7 @@ type upscaleStatsResponse struct {
 func (s *Server) apiUpscaleStats(w http.ResponseWriter, r *http.Request) {
 	cfg := s.deps.CfgHolder.Load()
 	var resp upscaleStatsResponse
-	resp.StoragePath = transcode.OutputDirFor(cfg.DataDir)
+	resp.StoragePath = cfg.Upscale.EffectiveVariantsDir(cfg.DataDir)
 	if avail := s.cachedSoxAvailability(); avail != nil {
 		resp.SoxAvailable = avail
 	}

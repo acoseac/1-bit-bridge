@@ -22,7 +22,6 @@ import (
 	"strconv"
 
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
-	"github.com/acoseac/1-bit-bridge/internal/transcode"
 )
 
 // adminBatchSubmitRequest is the JSON shape POST /api/upscale/batch
@@ -189,7 +188,7 @@ func (s *Server) apiUpscaleTargetPatch(w http.ResponseWriter, r *http.Request) {
 func (s *Server) pageLibraryInspector(w http.ResponseWriter, r *http.Request) {
 	cfg := s.deps.CfgHolder.Load()
 	s.renderPage(w, "library_inspector", map[string]any{
-		"UpscaleStoragePath": transcode.OutputDirFor(cfg.DataDir),
+		"UpscaleStoragePath": cfg.Upscale.EffectiveVariantsDir(cfg.DataDir),
 	})
 }
 

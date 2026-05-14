@@ -94,9 +94,12 @@ func TestSidecarPathIncludesVariantSuffix(t *testing.T) {
 	if pa == pb {
 		t.Fatalf("two variants of the same source produced identical sidecar paths: %q", pa)
 	}
-	// Both must live under OutputDir (no path-traversal escape).
+	// Both must live UNDER OutputDir (v1.4 source-mirrored layout
+	// means the sidecar is in <OutputDir>/<libRel-dir>/<filename>,
+	// not directly in OutputDir). Use HasPrefix to assert containment
+	// rather than equality.
 	for _, p := range []string{pa, pb} {
-		if filepath.Dir(p) != base.OutputDir {
+		if !strings.HasPrefix(p, base.OutputDir+string(filepath.Separator)) {
 			t.Errorf("sidecar path %q escapes OutputDir %q", p, base.OutputDir)
 		}
 		if !strings.HasSuffix(p, ".flac") {
