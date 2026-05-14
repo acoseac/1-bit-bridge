@@ -291,13 +291,61 @@ func safeVariantFilename(srcBase, variantID string) string {
 		return srcBase + suffix
 	}
 	// Middle-truncate: keep `head + ".." + tail`, then append suffix.
+	// UTF-8-safe rune-boundary clip: byte-level slicing could land in
+	// the middle of a multi-byte rune ("Dvořák" mid-truncated at byte
+	// 2 would corrupt the `ř`). Use `truncateUTF8AtMost` which scans
+	// rune boundaries up to the byte budget.
 	half := (budget - 2) / 2
 	if half < 1 {
-		return srcBase[:budget] + suffix
+		return truncateUTF8AtMost(srcBase, budget) + suffix
 	}
-	head := srcBase[:half]
-	tail := srcBase[len(srcBase)-half:]
+	head := truncateUTF8AtMost(srcBase, half)
+	tail := truncateUTF8FromEnd(srcBase, half)
 	return head + ".." + tail + suffix
+}
+
+// truncateUTF8AtMost returns the longest prefix of `s` whose byte
+// length is ≤ `maxBytes`, ending on a rune boundary. Safe against
+// multi-byte characters; never slices mid-rune.
+func truncateUTF8AtMost(s string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(s) <= maxBytes {
+		return s
+	}
+	// Walk rune boundaries; the largest i such that s[:i] is ≤
+	// maxBytes AND ends on a rune boundary.
+	end := 0
+	for i := range s {
+		if i > maxBytes {
+			break
+		}
+		end = i
+	}
+	return s[:end]
+}
+
+// truncateUTF8FromEnd returns the longest suffix of `s` whose byte
+// length is ≤ `maxBytes`, starting on a rune boundary. Mirrors
+// truncateUTF8AtMost for the tail-keep case.
+func truncateUTF8FromEnd(s string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(s) <= maxBytes {
+		return s
+	}
+	// Walk rune boundaries from the end; the smallest start such that
+	// s[start:] fits in maxBytes.
+	start := len(s)
+	for i := range s {
+		if len(s)-i <= maxBytes {
+			start = i
+			break
+		}
+	}
+	return s[start:]
 }
 
 // sanitiseForFAT replaces characters that FAT-family filesystems
@@ -311,10 +359,18 @@ func safeVariantFilename(srcBase, variantID string) string {
 // segment (rare; cross-OS rip tools sometimes do this) and FAT
 // rejects it.
 func sanitiseForFAT(s string) string {
-	const bad = `:*?"<>|\`
+	// Direct byte-level check beats `strings.ContainsRune` per
+	// iteration — the bad set is all ASCII (each char fits in one
+	// byte). UTF-8 multi-byte runes start with a high-bit byte
+	// (>= 0x80) and never collide with the ASCII bad chars, so the
+	// byte loop is safe even on Unicode input. Gemini Medium on
+	// PR D1 flagged the prior `strings.ContainsRune` form as
+	// converting the byte to a rune + scanning the string on every
+	// iteration.
 	out := []byte(s)
 	for i, b := range out {
-		if strings.ContainsRune(bad, rune(b)) {
+		switch b {
+		case ':', '*', '?', '"', '<', '>', '|', '\\':
 			out[i] = '_'
 		}
 	}
@@ -462,11 +518,18 @@ func ResolveTargetRate(flagValue string, sourceRate int) (int, error) {
 // Output directory created if missing — `bridge upscale` only
 // guarantees DataDir exists, not the `transcoded` subdir.
 func RunSox(ctx context.Context, j JobSpec) (int64, error) {
-	if err := os.MkdirAll(j.OutputDir, 0o755); err != nil {
-		return 0, fmt.Errorf("mkdir output dir: %w", err)
-	}
 	args, _ := j.SoxArgs()
 	finalPath := j.SidecarPath()
+	// v1.4 source-mirrored layout: sidecars land under
+	// <OutputDir>/<libRel-dirname>/<filename>. The parent of
+	// finalPath may NOT exist yet (first variant in a new album
+	// folder) — MkdirAll on the parent covers both the OutputDir
+	// root case AND the per-album subdir case. Pre-v1.4 only
+	// needed MkdirAll(j.OutputDir); the per-file form is now
+	// the load-bearing call (CodeRabbit CRITICAL on PR D1).
+	if err := os.MkdirAll(filepath.Dir(finalPath), 0o755); err != nil {
+		return 0, fmt.Errorf("mkdir sidecar dir: %w", err)
+	}
 	tmpPath := finalPath + ".tmp"
 	// Defensive: clear any stale .tmp from a previous interrupted
 	// run so SoX's open(O_CREAT) doesn't trip on prior crash debris.

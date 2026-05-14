@@ -858,26 +858,50 @@ func validateVariantsDir(variantsDir string, libraryRoots []string) error {
 	if !filepath.IsAbs(variantsDir) {
 		return errors.New("must be an absolute path")
 	}
-	cleaned := filepath.Clean(variantsDir)
+	// Symlink resolution before the containment check (CodeRabbit
+	// Major on PR D1). The prior lexical-only check using
+	// `filepath.Clean` + `filepath.Rel` could be bypassed if either
+	// the variantsDir OR a library root contained a symlink that
+	// resolved into the other tree. EvalSymlinks fails on non-existent
+	// paths — variantsDir may legitimately not exist yet (created on
+	// first upscale). We try EvalSymlinks first; on failure, fall
+	// through to the lexical check so a brand-new install still
+	// validates.
+	candidate := evalSymlinksOrClean(variantsDir)
 	for _, root := range libraryRoots {
 		if root == "" {
 			continue
 		}
-		cleanedRoot := filepath.Clean(root)
-		rel, err := filepath.Rel(cleanedRoot, cleaned)
+		cleanedRoot := evalSymlinksOrClean(root)
+		rel, err := filepath.Rel(cleanedRoot, candidate)
 		if err != nil {
 			// Different volumes on Windows; can't compare → not nested.
 			continue
 		}
-		// rel starts with ".." iff cleaned is OUTSIDE cleanedRoot.
+		// rel starts with ".." iff candidate is OUTSIDE cleanedRoot.
 		// Equal-to-".." or starts-with-"../" / "..\\" means "above".
-		// Anything else means cleaned is AT or UNDER cleanedRoot —
+		// Anything else means candidate is AT or UNDER cleanedRoot —
 		// rejected.
 		if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return fmt.Errorf("must not be under library root %q (variants would tangle with source files)", cleanedRoot)
 		}
 	}
 	return nil
+}
+
+// evalSymlinksOrClean returns `filepath.EvalSymlinks(p)` when it
+// succeeds, falling back to `filepath.Clean(p)` when the path
+// doesn't exist (typical for a brand-new install where
+// variants_dir hasn't been created yet, or for a library root that
+// the operator typed into bridge.yaml but hasn't mounted). The
+// fallback is lexical-only — symlink bypass is theoretically
+// possible on a non-existent target, but a missing path can't be
+// a real attack surface today (no file would land there).
+func evalSymlinksOrClean(p string) string {
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
+	}
+	return filepath.Clean(p)
 }
 
 // maxCustomEndpointHostLen caps the per-entry hostname at the RFC 1035

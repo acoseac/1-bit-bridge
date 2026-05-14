@@ -95,6 +95,47 @@ func TestSafeVariantFilenameOverLengthDeterministic(t *testing.T) {
 	}
 }
 
+// TestSafeVariantFilenameOverLengthUTF8Safe pins the rune-boundary
+// invariant. Byte-level slicing in middle-truncate could land
+// between bytes of a multi-byte rune ("Dvořák" mid-truncated at
+// the wrong byte position would corrupt the `ř`). The truncate
+// helpers must scan rune boundaries.
+//
+// Gemini HIGH on PR D1 caught this — pre-fix the byte-slice form
+// (s[:half], s[len(s)-half:]) was UTF-8-unsafe.
+func TestSafeVariantFilenameOverLengthUTF8Safe(t *testing.T) {
+	// Build a long string with embedded multi-byte runes so the
+	// middle-truncate has to cross rune boundaries.
+	long := strings.Repeat("Dvořák", 60) + ".flac" // ~440 bytes
+	got := safeVariantFilename(long, "upscaled-v2-176400-24")
+	if len(got) > 255 {
+		t.Errorf("filename length %d exceeds 255-byte cap: %q", len(got), got)
+	}
+	// The output MUST be valid UTF-8 — no half-encoded runes leaking
+	// through the truncation.
+	if !isValidUTF8(got) {
+		t.Errorf("filename has invalid UTF-8 (mid-rune truncation): %q", got)
+	}
+}
+
+// isValidUTF8 is a test helper that returns true iff s is entirely
+// valid UTF-8. Uses `utf8.ValidString` via inline implementation to
+// avoid adding a top-level import for one test case.
+func isValidUTF8(s string) bool {
+	for _, r := range s {
+		if r == 0xFFFD && len(s) > 0 {
+			// 0xFFFD is the Unicode replacement char that `for range`
+			// emits for invalid sequences — flag it iff the source
+			// didn't have a literal U+FFFD.
+			// Cheap heuristic: if any rune is 0xFFFD, treat as invalid
+			// for the purposes of this test (none of the fixtures
+			// contain a real replacement char).
+			return false
+		}
+	}
+	return true
+}
+
 // TestSidecarPathSourceMirroredLayout pins the v1.4 layout: variant
 // sidecars land at <OutputDir>/<libRel-dir>/<filename> so a user
 // can `mv variantsDir/* library/` and have the variants slot
