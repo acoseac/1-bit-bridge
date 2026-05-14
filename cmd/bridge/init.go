@@ -576,6 +576,11 @@ func splitFingerprint(fp string) (first, second string) {
 	return fp[:len(fp)/2], fp[len(fp)/2:]
 }
 
+// futureLaunchHeader is the section header printed for each per-mode
+// launch-hint branch in printFutureLaunchHint. Extracted so the literal
+// lives in one place across the five `runtime.GOOS` switch arms.
+const futureLaunchHeader = "How it'll start in the future:"
+
 // printFutureLaunchHint tells the operator how the bridge is going to
 // come up next time — the asymmetry we're fixing is that Windows init
 // used to leave them with a dead port and no explanation. Per-mode
@@ -587,28 +592,28 @@ func printFutureLaunchHint(stdout io.Writer, choice launchChoice, binary, cfgPat
 	case "windows":
 		switch {
 		case choice.useService:
-			fmt.Fprintln(stdout, "How it'll start in the future:")
+			fmt.Fprintln(stdout, futureLaunchHeader)
 			fmt.Fprintln(stdout, "  • Automatically at boot (Windows Service, delayed-start)")
 			fmt.Fprintln(stdout, "  • Survives logout — always on")
 			fmt.Fprintf(stdout, "  • To stop: `sc stop %s` from an elevated shell\n", packaging.ServiceLabel)
 		case choice.spawnNow:
-			fmt.Fprintln(stdout, "How it'll start in the future:")
+			fmt.Fprintln(stdout, futureLaunchHeader)
 			fmt.Fprintln(stdout, "  • Automatically when you log in (Startup-folder launcher)")
 			fmt.Fprintf(stdout, "  • To stop now: close the minimized \"1-bit-bridge\" window, or End Task in Task Manager\n")
 			fmt.Fprintln(stdout, "  • To start manually any time:")
 			fmt.Fprint(stdout, shellHandoff(binary, cfgPath))
 		default:
-			fmt.Fprintln(stdout, "How it'll start in the future:")
+			fmt.Fprintln(stdout, futureLaunchHeader)
 			fmt.Fprintln(stdout, "  • Automatically when you next log in (Startup-folder launcher)")
 			fmt.Fprintln(stdout, "  • To start right now:")
 			fmt.Fprint(stdout, shellHandoff(binary, cfgPath))
 		}
 	case "darwin":
-		fmt.Fprintln(stdout, "How it'll start in the future:")
+		fmt.Fprintln(stdout, futureLaunchHeader)
 		fmt.Fprintln(stdout, "  • Automatically at login (launchd user agent, already running)")
 		fmt.Fprintf(stdout, "  • To stop: `launchctl bootout gui/$UID ~/Library/LaunchAgents/%s.plist`\n", packaging.ServiceLabel)
 	case "linux":
-		fmt.Fprintln(stdout, "How it'll start in the future:")
+		fmt.Fprintln(stdout, futureLaunchHeader)
 		fmt.Fprintln(stdout, "  • Automatically at login (systemd user unit, already running)")
 		fmt.Fprintf(stdout, "  • To stop: `systemctl --user stop %s.service`\n", packaging.ServiceLabel)
 	}

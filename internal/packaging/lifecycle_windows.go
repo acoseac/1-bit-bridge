@@ -31,9 +31,9 @@ func stopForOS(_ ServiceKind) error {
 	m, err := mgr.Connect()
 	if err != nil {
 		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
-			return fmt.Errorf("connect SCM (need admin?): %w", err)
+			return fmt.Errorf(scmConnectAdminErr, err)
 		}
-		return fmt.Errorf("connect SCM: %w", err)
+		return fmt.Errorf(scmConnectErr, err)
 	}
 	defer m.Disconnect()
 	s, err := m.OpenService(ServiceLabel)
@@ -43,10 +43,10 @@ func stopForOS(_ ServiceKind) error {
 			return nil
 		}
 		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
-			return fmt.Errorf("open service (need admin?): %w", err)
+			return fmt.Errorf(scmOpenSvcAdminErr, err)
 		}
 		// Real SCM fault — RPC down, service marked-for-delete, etc.
-		return fmt.Errorf("open service: %w", err)
+		return fmt.Errorf(scmOpenSvcErr, err)
 	}
 	defer s.Close()
 	if _, err := s.Control(svc.Stop); err != nil {
@@ -78,9 +78,9 @@ func restartForOS(_ ServiceKind) error {
 	m, err := mgr.Connect()
 	if err != nil {
 		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
-			return fmt.Errorf("connect SCM (need admin?): %w", err)
+			return fmt.Errorf(scmConnectAdminErr, err)
 		}
-		return fmt.Errorf("connect SCM: %w", err)
+		return fmt.Errorf(scmConnectErr, err)
 	}
 	defer m.Disconnect()
 	s, err := m.OpenService(ServiceLabel)
@@ -92,9 +92,9 @@ func restartForOS(_ ServiceKind) error {
 			return nil
 		}
 		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
-			return fmt.Errorf("open service (need admin?): %w", err)
+			return fmt.Errorf(scmOpenSvcAdminErr, err)
 		}
-		return fmt.Errorf("open service: %w", err)
+		return fmt.Errorf(scmOpenSvcErr, err)
 	}
 	defer s.Close()
 	if _, err := s.Control(svc.Stop); err != nil {
@@ -128,9 +128,9 @@ func startForOS(_ ServiceKind) error {
 	m, err := mgr.Connect()
 	if err != nil {
 		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
-			return fmt.Errorf("connect SCM (need admin?): %w", err)
+			return fmt.Errorf(scmConnectAdminErr, err)
 		}
-		return fmt.Errorf("connect SCM: %w", err)
+		return fmt.Errorf(scmConnectErr, err)
 	}
 	defer m.Disconnect()
 	s, err := m.OpenService(ServiceLabel)
@@ -139,9 +139,9 @@ func startForOS(_ ServiceKind) error {
 			return nil
 		}
 		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
-			return fmt.Errorf("open service (need admin?): %w", err)
+			return fmt.Errorf(scmOpenSvcAdminErr, err)
 		}
-		return fmt.Errorf("open service: %w", err)
+		return fmt.Errorf(scmOpenSvcErr, err)
 	}
 	defer s.Close()
 	if err := s.Start(); err != nil {

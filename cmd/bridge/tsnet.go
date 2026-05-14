@@ -34,13 +34,13 @@ import (
 func loadConfigForCmd(args []string, stderr io.Writer) (*config.Config, error) {
 	fs := flag.NewFlagSet("tsnet", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "bridge.yaml", "path to config file")
+	configPath := fs.String("config", defaultConfigPath, configFlagUsage)
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "config load failed: %v\n", err)
+		fmt.Fprintf(stderr, configLoadFailedFormat, err)
 		return nil, err
 	}
 	return cfg, nil
@@ -141,7 +141,7 @@ func newTailscaleAdminSource(cli *tailscaleAutoPilot, ts *tsnet.Server, configPa
 // threading a path through.
 func (s tailscaleAdminSource) displayConfigPath() string {
 	if s.configPath == "" {
-		return "bridge.yaml"
+		return defaultConfigPath
 	}
 	return s.configPath
 }
@@ -390,14 +390,14 @@ const logoutConfirmPhrase = "WIPE"
 func tsnetLogoutCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("tsnet logout", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "bridge.yaml", "path to config file")
+	configPath := fs.String("config", defaultConfigPath, configFlagUsage)
 	force := fs.Bool("force", false, "skip running-instance check")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "config load failed: %v\n", err)
+		fmt.Fprintf(stderr, configLoadFailedFormat, err)
 		return 1
 	}
 	mode, modeErr := cfg.Tailscale.EffectiveMode()

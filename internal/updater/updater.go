@@ -65,6 +65,12 @@ const DefaultCheckInterval = 6 * time.Hour
 // to 1 h aligns the contract end-to-end.
 const minCheckInterval = 1 * time.Hour
 
+// autoInstallDeferredMessage is the log message emitted whenever the
+// auto-install scheduler steps off the install path (outside window,
+// active downloads, compat-gate refusal). Three call sites; one string
+// so log-aggregator queries match a single event name.
+const autoInstallDeferredMessage = "auto-install deferred"
+
 // Status is a snapshot of the updater's current view of the world.
 // All times are UTC. Returned by Status() as a value so callers don't
 // hold the mutex across reads.
@@ -318,13 +324,13 @@ func (u *Updater) maybeAutoInstall(ctx context.Context) {
 		return
 	}
 	if !u.inAllowedWindow(u.now()) {
-		logger.Info("auto-install deferred", "reason", "outside quiet-hours window")
+		logger.Info(autoInstallDeferredMessage, "reason", "outside quiet-hours window")
 		return
 	}
 	// Sessions inflight gate: refuse cleanly. The next poll cycle
 	// will try again.
 	if u.autoInstallOpts.Sessions != nil && u.autoInstallOpts.Sessions.Inflight() > 0 {
-		logger.Info("auto-install deferred", "reason", "active downloads", "inflight", u.autoInstallOpts.Sessions.Inflight())
+		logger.Info(autoInstallDeferredMessage, "reason", "active downloads", "inflight", u.autoInstallOpts.Sessions.Inflight())
 		return
 	}
 
@@ -336,7 +342,7 @@ func (u *Updater) maybeAutoInstall(ctx context.Context) {
 		// and stay in the log without polluting the dashboard's
 		// held-update card.
 		if errors.Is(err, ErrCompatGateRefused) {
-			logger.Info("auto-install deferred", "err", err)
+			logger.Info(autoInstallDeferredMessage, "err", err)
 		} else {
 			logger.Error("auto-install failed", "err", err)
 		}

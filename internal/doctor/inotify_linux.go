@@ -11,6 +11,10 @@ import (
 	"strings"
 )
 
+// checkNameInotifyWatchLimit is the slug for the Linux-only inotify
+// budget check. Six call sites in this file across the ok/warn paths.
+const checkNameInotifyWatchLimit = "inotify-watch-limit"
+
 // checkInotifyLimit warns when fs.inotify.max_user_watches looks
 // too low for the configured library roots and the operator has
 // LibraryWatch enabled. We count directories under each root and
@@ -27,30 +31,30 @@ import (
 //     ro might trip this — non-fatal)
 func checkInotifyLimit(d Deps) Check {
 	if !d.LibraryWatchEnabled {
-		return ok("inotify-watch-limit", "library watcher disabled — check skipped")
+		return ok(checkNameInotifyWatchLimit, "library watcher disabled — check skipped")
 	}
 	if len(d.LibraryRoots) == 0 {
-		return ok("inotify-watch-limit", "no library roots configured yet")
+		return ok(checkNameInotifyWatchLimit, "no library roots configured yet")
 	}
 	limit, err := readInotifyLimit()
 	if err != nil {
-		return warn("inotify-watch-limit",
+		return warn(checkNameInotifyWatchLimit,
 			fmt.Sprintf("could not read /proc/sys/fs/inotify/max_user_watches: %v", err),
 			"falling back to runtime detection — watcher will log a clear error if the budget is exceeded.")
 	}
 	dirs, err := countDirs(d.LibraryRoots)
 	if err != nil {
-		return warn("inotify-watch-limit",
+		return warn(checkNameInotifyWatchLimit,
 			fmt.Sprintf("could not enumerate library directories: %v", err),
 			"check failed; runtime detection still applies.")
 	}
 	threshold := int(float64(limit) * 0.8)
 	if dirs > threshold {
-		return warn("inotify-watch-limit",
+		return warn(checkNameInotifyWatchLimit,
 			fmt.Sprintf("%d directories vs limit %d (>80%%) — watcher may exhaust kernel budget", dirs, limit),
 			"raise the limit: `echo fs.inotify.max_user_watches=524288 | sudo tee -a /etc/sysctl.d/99-bridge.conf && sudo sysctl -p`")
 	}
-	return ok("inotify-watch-limit",
+	return ok(checkNameInotifyWatchLimit,
 		fmt.Sprintf("%d directories vs limit %d", dirs, limit))
 }
 

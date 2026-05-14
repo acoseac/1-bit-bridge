@@ -43,8 +43,8 @@ import (
 // never duplicates the underlying delete loop.
 func (s *Server) apiUpscaleVariantsDelete(w http.ResponseWriter, r *http.Request) {
 	if s.deps.VariantDeleter == nil {
-		writeError(w, http.StatusServiceUnavailable, "upscale-disabled",
-			"upscaling is not enabled on this bridge")
+		writeError(w, http.StatusServiceUnavailable, errCodeUpscaleDisabled,
+			errMsgUpscalingNotEnabled)
 		return
 	}
 
@@ -63,8 +63,8 @@ func (s *Server) apiUpscaleVariantsDelete(w http.ResponseWriter, r *http.Request
 			// only in that we got here via the adapter rather
 			// than the short-circuit. Keep the response shape
 			// stable so the JS handler doesn't fork.
-			writeError(w, http.StatusServiceUnavailable, "upscale-disabled",
-				"upscaling is not enabled on this bridge")
+			writeError(w, http.StatusServiceUnavailable, errCodeUpscaleDisabled,
+				errMsgUpscalingNotEnabled)
 			return
 		}
 		// SQLite enumeration failure during the list phase, or
