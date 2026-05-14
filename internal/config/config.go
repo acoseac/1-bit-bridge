@@ -837,6 +837,16 @@ func (c *Config) Validate() error {
 	for _, w := range warns {
 		validateLogger.Warn("dropped invalid custom endpoint", "err", w)
 	}
+
+	// tailscale.mode: surface typos at config-load time rather than
+	// deep inside the lifecycle wiring. Without this gate a typo'd
+	// `mode: tnset` would silently fall through to `bridge serve`'s
+	// EffectiveMode call which prints the error and exits 2 — already
+	// safe, but the operator gets the error from the same surface as
+	// every other field's validation here. Gemini medium on PR #249.
+	if _, err := c.Tailscale.EffectiveMode(); err != nil {
+		return err
+	}
 	return nil
 }
 

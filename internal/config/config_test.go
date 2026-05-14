@@ -771,6 +771,52 @@ func TestConfigValidatePrunesCustomEndpoints(t *testing.T) {
 	}
 }
 
+// TestValidateRejectsBadTailscaleMode pins that typos in the
+// tailscale.mode field surface at config-load time — same surface
+// as every other field's validation — instead of slipping through to
+// the lifecycle wiring deep inside `bridge serve`. Gemini medium
+// on PR #249.
+func TestValidateRejectsBadTailscaleMode(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{
+		LibraryRoots:    []string{dir},
+		ListenAddress:   ":7788",
+		AdminAddress:    DefaultAdminAddress, // Validate insists on a loopback addr
+		ScanIntervalSec: 3600,
+		Tailscale:       TailscaleConfig{Mode: "tnset"}, // typo
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected Validate() to reject a typo'd tailscale.mode, got nil")
+	}
+	if !strings.Contains(err.Error(), "tailscale.mode") {
+		t.Errorf("error should mention tailscale.mode, got %v", err)
+	}
+	if !strings.Contains(err.Error(), strconv.Quote("tnset")) {
+		t.Errorf("error should preserve the original input %q verbatim, got %v", "tnset", err)
+	}
+}
+
+// TestValidateAcceptsKnownTailscaleModes asserts the inverse — that
+// Validate() doesn't accidentally start rejecting the three known
+// modes (case + whitespace variants included) under the wire-in.
+func TestValidateAcceptsKnownTailscaleModes(t *testing.T) {
+	dir := t.TempDir()
+	cases := []string{"", "cli", "tsnet", "disabled", "  CLI  ", "\tdisabled\n", "TSNet"}
+	for _, mode := range cases {
+		cfg := &Config{
+			LibraryRoots:    []string{dir},
+			ListenAddress:   ":7788",
+			AdminAddress:    DefaultAdminAddress,
+			ScanIntervalSec: 3600,
+			Tailscale:       TailscaleConfig{Mode: mode},
+		}
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("Validate() rejected known mode %q: %v", mode, err)
+		}
+	}
+}
+
 // TestTailscaleEffectiveMode covers the mode-string validation in
 // TailscaleConfig.EffectiveMode. The yaml Mode field is a free-form
 // string but only three values are valid; anything else (typo'd or
