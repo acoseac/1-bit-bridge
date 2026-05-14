@@ -56,6 +56,11 @@ import (
 // drift); the alias below stays for in-package readability.
 const transcodedDirName = transcode.OutputDirSubdir
 
+// gcInterruptedMessage is the stderr line printed when an upscale GC
+// pass is cancelled via ctx (Ctrl+C, parent shutdown). Three call sites
+// — forward sweep, reverse sweep, and the per-row inner loop.
+const gcInterruptedMessage = "GC interrupted"
+
 func upscaleCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("upscale", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -479,7 +484,7 @@ func runGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store,
 		// Operator-interrupt path: distinguish from a real
 		// walk error so the SIGINT case reads cleanly.
 		if errors.Is(walkErr, context.Canceled) || errors.Is(walkErr, context.DeadlineExceeded) {
-			fmt.Fprintln(stderr, "GC interrupted")
+			fmt.Fprintln(stderr, gcInterruptedMessage)
 			return 1
 		}
 		fmt.Fprintf(stderr, "walk transcoded dir: %v\n", walkErr)
@@ -546,7 +551,7 @@ func runGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store,
 		// rationale as the forward-walk gate. CodeRabbit Major
 		// + Gemini Medium on PR #217.
 		if err := ctx.Err(); err != nil {
-			fmt.Fprintln(stderr, "GC interrupted")
+			fmt.Fprintln(stderr, gcInterruptedMessage)
 			return 1
 		}
 		_, statErr := os.Stat(r.SidecarPath)
@@ -573,7 +578,7 @@ func runGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store,
 				//   - Real DB fault: log + count + continue
 				//     (same legacy degrade policy).
 				if ctx.Err() != nil {
-					fmt.Fprintln(stderr, "GC interrupted")
+					fmt.Fprintln(stderr, gcInterruptedMessage)
 					return 1
 				}
 				fmt.Fprintf(stderr, "delete orphan row %s / %s: %v\n", r.SourcePath, r.VariantID, err)

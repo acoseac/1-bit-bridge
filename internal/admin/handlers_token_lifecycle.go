@@ -10,6 +10,10 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 )
 
+// errCodeUnknownToken is the 404 error code for every token-lifecycle
+// handler when the requested token id is absent from the store.
+const errCodeUnknownToken = "unknown-token"
+
 // decodeOptionalJSONBody decodes a JSON body into `dst` when one
 // is present, treats an empty body as "no fields supplied", and
 // surfaces a typed BadRequest on malformed JSON. Replaces the
@@ -63,7 +67,7 @@ func (s *Server) apiTokensRotate(w http.ResponseWriter, r *http.Request) {
 	rawToken, tok, err := s.deps.Auth.Rotate(id)
 	if err != nil {
 		if errors.Is(err, auth.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "unknown-token", id)
+			writeError(w, http.StatusNotFound, errCodeUnknownToken, id)
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "rotate", err.Error())
@@ -136,7 +140,7 @@ func (s *Server) apiTokensSetLifecycle(w http.ResponseWriter, r *http.Request) {
 		tok, err := s.deps.Auth.SetExpiry(id, exp)
 		if err != nil {
 			if errors.Is(err, auth.ErrNotFound) {
-				writeError(w, http.StatusNotFound, "unknown-token", id)
+				writeError(w, http.StatusNotFound, errCodeUnknownToken, id)
 				return
 			}
 			writeError(w, http.StatusInternalServerError, "set-expiry", err.Error())
@@ -159,7 +163,7 @@ func (s *Server) apiTokensSetLifecycle(w http.ResponseWriter, r *http.Request) {
 	t, err := s.deps.Auth.Get(id)
 	if err != nil {
 		if errors.Is(err, auth.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "unknown-token", id)
+			writeError(w, http.StatusNotFound, errCodeUnknownToken, id)
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "lookup", err.Error())

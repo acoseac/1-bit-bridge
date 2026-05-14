@@ -48,6 +48,12 @@ const SchemaVersion = 1
 // ManifestFile is the metadata file written into every snapshot dir.
 const ManifestFile = "manifest.json"
 
+// ManifestDBFileName is the on-disk basename for the SQLite manifest
+// inside a backup directory. Three duplicates flagged by go:S1192;
+// extracted so a future rename only happens once across Capture,
+// captured-list emission, and Restore.
+const ManifestDBFileName = "bridge.db"
+
 // BackupsDirName is the dir under `dataDir` that holds snapshots.
 const BackupsDirName = "backups"
 
@@ -120,10 +126,10 @@ func Snapshot(ctx context.Context, src Sources) (string, error) {
 
 	if src.ManifestDB != "" {
 		if _, err := os.Stat(src.ManifestDB); err == nil {
-			if err := vacuumInto(ctx, src.ManifestDB, filepath.Join(dst, "bridge.db")); err != nil {
+			if err := vacuumInto(ctx, src.ManifestDB, filepath.Join(dst, ManifestDBFileName)); err != nil {
 				return "", fmt.Errorf("vacuum manifest db: %w", err)
 			}
-			captured = append(captured, "bridge.db")
+			captured = append(captured, ManifestDBFileName)
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return "", fmt.Errorf("stat manifest db: %w", err)
 		}
@@ -191,11 +197,11 @@ func Restore(snapshotDir string, dst Targets) error {
 	// snapshot are skipped silently (the snapshot just didn't
 	// capture that one).
 	mapping := map[string]string{
-		"bridge.db":   dst.ManifestDB,
-		"tokens.json": dst.TokensJSON,
-		"server.crt":  dst.ServerCert,
-		"server.key":  dst.ServerKey,
-		"bridge.yaml": dst.BridgeYAML,
+		ManifestDBFileName: dst.ManifestDB,
+		"tokens.json":      dst.TokensJSON,
+		"server.crt":       dst.ServerCert,
+		"server.key":       dst.ServerKey,
+		"bridge.yaml":      dst.BridgeYAML,
 	}
 	for _, name := range m.Files {
 		target, ok := mapping[name]

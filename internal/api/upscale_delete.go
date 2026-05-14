@@ -149,7 +149,7 @@ var ErrVariantDeleteUnavailable = errors.New("variant deleter not wired")
 // the request gets cut short).
 func (s *Server) upscaleDelete(w http.ResponseWriter, r *http.Request) {
 	if s.variantDeleter == nil {
-		writeError(w, http.StatusNotFound, "variant_not_found", "upscaling is not enabled on this bridge")
+		writeError(w, http.StatusNotFound, "variant_not_found", errMsgUpscalingNotEnabled)
 		return
 	}
 
@@ -163,7 +163,7 @@ func (s *Server) upscaleDelete(w http.ResponseWriter, r *http.Request) {
 	resp, err := s.RunVariantDelete(r.Context(), req)
 	if err != nil {
 		if errors.Is(err, ErrVariantDeleteUnavailable) {
-			writeError(w, http.StatusNotFound, "variant_not_found", "upscaling is not enabled on this bridge")
+			writeError(w, http.StatusNotFound, "variant_not_found", errMsgUpscalingNotEnabled)
 			return
 		}
 		writeErrorLog(w, r, http.StatusInternalServerError, "internal",

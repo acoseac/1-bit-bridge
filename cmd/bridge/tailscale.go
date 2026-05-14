@@ -16,6 +16,11 @@ import (
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
 )
 
+// tailscaleStderrFormat is the operator-visible stderr line the
+// tailscale auto-pilot emits on every error edge during a refresh.
+// `(%s)` carries the trigger label, `%s\n` the error message.
+const tailscaleStderrFormat = "tailscale (%s): %s\n"
+
 // tailscaleStatus is the snapshot the admin tile reads. Threaded
 // through `*tailscaleAutoPilot` so a single struct owns "everything
 // the admin handler needs to render the tile" — keeps the admin
@@ -203,7 +208,7 @@ func (a *tailscaleAutoPilot) detectAndMint(ctx context.Context, trigger string) 
 	snap.CertPath = certPath
 	if err := servertailscale.EnsureCertDir(a.dataDir); err != nil {
 		snap.LastError = fmt.Sprintf("create %s/tls: %v", a.dataDir, err)
-		fmt.Fprintf(a.stderr, "tailscale (%s): %s\n", trigger, snap.LastError)
+		fmt.Fprintf(a.stderr, tailscaleStderrFormat, trigger, snap.LastError)
 		a.publish(snap)
 		return snap
 	}
@@ -238,7 +243,7 @@ func (a *tailscaleAutoPilot) detectAndMint(ctx context.Context, trigger string) 
 			// log line matches the other stderr messages in this
 			// function. Gemini medium on PR #250.
 			if msg := warnLECertExpiringSoon(info.MagicDNSName, existing.Leaf.NotAfter, now); msg != "" {
-				fmt.Fprintf(a.stderr, "tailscale (%s): %s\n", trigger, msg)
+				fmt.Fprintf(a.stderr, tailscaleStderrFormat, trigger, msg)
 			}
 			a.publish(snap)
 			return snap
@@ -279,7 +284,7 @@ func (a *tailscaleAutoPilot) detectAndMint(ctx context.Context, trigger string) 
 	loaded, err := servertls.LoadTailscaleCertFromDisk(certPath, keyPath)
 	if err != nil {
 		snap.LastError = fmt.Sprintf("load freshly-minted cert: %v", err)
-		fmt.Fprintf(a.stderr, "tailscale (%s): %s\n", trigger, snap.LastError)
+		fmt.Fprintf(a.stderr, tailscaleStderrFormat, trigger, snap.LastError)
 		a.publish(snap)
 		return snap
 	}
@@ -302,7 +307,7 @@ func (a *tailscaleAutoPilot) detectAndMint(ctx context.Context, trigger string) 
 	// prefix for consistency.
 	if loaded.Leaf != nil {
 		if msg := warnLECertExpiringSoon(info.MagicDNSName, loaded.Leaf.NotAfter, now); msg != "" {
-			fmt.Fprintf(a.stderr, "tailscale (%s): %s\n", trigger, msg)
+			fmt.Fprintf(a.stderr, tailscaleStderrFormat, trigger, msg)
 		}
 	}
 	a.publish(snap)

@@ -313,7 +313,7 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request) {
 // FileInfo from somewhere else.
 func (s *Server) serveVariant(w http.ResponseWriter, r *http.Request, sourcePath string, sourceInfo os.FileInfo, variantID string) {
 	if s.variantStore == nil {
-		writeError(w, http.StatusNotFound, "variant_not_found", "upscaling is not enabled on this bridge")
+		writeError(w, http.StatusNotFound, "variant_not_found", errMsgUpscalingNotEnabled)
 		return
 	}
 	rec, err := s.variantStore.LookupVariant(r.Context(), sourcePath, variantID)

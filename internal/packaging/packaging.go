@@ -26,6 +26,22 @@ var tmplFS embed.FS
 // sensibly alongside the app's user defaults.
 const ServiceLabel = "com.acoseac.1-bit-bridge"
 
+// Package-level literals extracted to satisfy SonarCloud go:S1192 across
+// packaging.go, lifecycle_other.go, lifecycle_windows.go, and
+// service_windows.go. Each value is shared across multiple call sites for
+// systemd / per-OS state-dir / log-file path construction.
+const (
+	systemdUserFlag    = "--user"
+	systemdUnitSuffix  = ".service"
+	productName        = "1-bit-bridge"
+	bridgeLogFileName  = "bridge.log"
+	plistPathErrFormat = "resolve plist path: %w"
+	scmConnectAdminErr = "connect SCM (need admin?): %w"
+	scmConnectErr      = "connect SCM: %w"
+	scmOpenSvcAdminErr = "open service (need admin?): %w"
+	scmOpenSvcErr      = "open service: %w"
+)
+
 // Params bundles the values the templates expand. All paths must be
 // absolute — launchd won't expand $HOME inside a plist, and systemd
 // user units on most distros inherit a minimal PATH.
@@ -188,7 +204,7 @@ func systemdUnitPath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".config", "systemd", "user", ServiceLabel+".service"), nil
+	return filepath.Join(home, ".config", "systemd", "user", ServiceLabel+systemdUnitSuffix), nil
 }
 
 func installSystemd(p Params) (string, error) {
@@ -206,17 +222,17 @@ func installSystemd(p Params) (string, error) {
 	if err := os.WriteFile(path, body, 0o644); err != nil {
 		return path, err
 	}
-	if out, err := exec.Command("systemctl", "--user", "daemon-reload").CombinedOutput(); err != nil {
+	if out, err := exec.Command("systemctl", systemdUserFlag, "daemon-reload").CombinedOutput(); err != nil {
 		return path, fmt.Errorf("systemctl daemon-reload: %v: %s", err, string(out))
 	}
-	if out, err := exec.Command("systemctl", "--user", "enable", "--now", ServiceLabel+".service").CombinedOutput(); err != nil {
+	if out, err := exec.Command("systemctl", systemdUserFlag, "enable", "--now", ServiceLabel+systemdUnitSuffix).CombinedOutput(); err != nil {
 		return path, fmt.Errorf("systemctl enable --now: %v: %s", err, string(out))
 	}
 	return path, nil
 }
 
 func uninstallSystemd() (string, error) {
-	_ = exec.Command("systemctl", "--user", "disable", "--now", ServiceLabel+".service").Run()
+	_ = exec.Command("systemctl", systemdUserFlag, "disable", "--now", ServiceLabel+systemdUnitSuffix).Run()
 	path, err := systemdUnitPath()
 	if err != nil {
 		return "", err
@@ -224,7 +240,7 @@ func uninstallSystemd() (string, error) {
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return path, err
 	}
-	_ = exec.Command("systemctl", "--user", "daemon-reload").Run()
+	_ = exec.Command("systemctl", systemdUserFlag, "daemon-reload").Run()
 	return path, nil
 }
 
@@ -311,18 +327,18 @@ func DefaultConfigDir() (string, error) {
 	}
 	switch runtime.GOOS {
 	case "darwin":
-		return filepath.Join(home, "Library", "Application Support", "1-bit-bridge"), nil
+		return filepath.Join(home, "Library", "Application Support", productName), nil
 	case "windows":
 		if x := os.Getenv("LOCALAPPDATA"); x != "" {
-			return filepath.Join(x, "1-bit-bridge"), nil
+			return filepath.Join(x, productName), nil
 		}
-		return filepath.Join(home, "AppData", "Local", "1-bit-bridge"), nil
+		return filepath.Join(home, "AppData", "Local", productName), nil
 	}
 	// XDG default when XDG_CONFIG_HOME is unset.
 	if x := os.Getenv("XDG_CONFIG_HOME"); x != "" {
-		return filepath.Join(x, "1-bit-bridge"), nil
+		return filepath.Join(x, productName), nil
 	}
-	return filepath.Join(home, ".config", "1-bit-bridge"), nil
+	return filepath.Join(home, ".config", productName), nil
 }
 
 // DefaultLogPath returns a per-OS log file location.
@@ -340,13 +356,13 @@ func DefaultLogPath() (string, error) {
 		// writes under %APPDATA% (which roams) vs %LOCALAPPDATA% (which
 		// doesn't).
 		if x := os.Getenv("LOCALAPPDATA"); x != "" {
-			return filepath.Join(x, "1-bit-bridge", "bridge.log"), nil
+			return filepath.Join(x, productName, bridgeLogFileName), nil
 		}
-		return filepath.Join(home, "AppData", "Local", "1-bit-bridge", "bridge.log"), nil
+		return filepath.Join(home, "AppData", "Local", productName, bridgeLogFileName), nil
 	}
 	// On Linux, keep logs alongside the config under XDG_STATE_HOME.
 	if x := os.Getenv("XDG_STATE_HOME"); x != "" {
-		return filepath.Join(x, "1-bit-bridge", "bridge.log"), nil
+		return filepath.Join(x, productName, bridgeLogFileName), nil
 	}
-	return filepath.Join(home, ".local", "state", "1-bit-bridge", "bridge.log"), nil
+	return filepath.Join(home, ".local", "state", productName, bridgeLogFileName), nil
 }

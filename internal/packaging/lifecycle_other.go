@@ -8,6 +8,34 @@ import (
 	"os/exec"
 )
 
+// runSystemctlUser runs `systemctl --user <verb> <ServiceLabel>.service`
+// and wraps a non-zero exit with the combined output. Shared by
+// stopForOS / startForOS / restartForOS so the verb-specific
+// boilerplate doesn't duplicate three ways (SonarCloud per-PR
+// duplication gate caught this).
+func runSystemctlUser(verb string) error {
+	out, err := exec.Command("systemctl", systemdUserFlag, verb, ServiceLabel+systemdUnitSuffix).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("systemctl --user %s: %v: %s", verb, err, string(out))
+	}
+	return nil
+}
+
+// runLaunchctlBootout invokes `launchctl bootout gui/<uid> <path>` and
+// swallows the well-known "agent not loaded" stderr signatures —
+// stopForOS treats not-loaded as the idempotent no-op, restartForOS
+// wants the same swallow before re-bootstrapping. Pulled into a helper
+// to eliminate the two-way duplicate of the bytes.Contains pair (the
+// SonarCloud per-PR duplication gate caught it on PR #253 after the
+// first refactor pass).
+func runLaunchctlBootout(plistPath string) error {
+	out, err := exec.Command("launchctl", "bootout", "gui/"+uidString(), plistPath).CombinedOutput()
+	if err != nil && !bytes.Contains(out, []byte("Could not find")) && !bytes.Contains(out, []byte("not currently loaded")) {
+		return fmt.Errorf("launchctl bootout: %v: %s", err, string(out))
+	}
+	return nil
+}
+
 // stopForOS shells out to the user's service manager. The kind
 // argument carries the InstalledKind classification from Stop's
 // dispatcher — only user-context kinds reach here (system kinds
@@ -21,25 +49,14 @@ func stopForOS(kind ServiceKind) error {
 	case KindLaunchdUser:
 		path, err := launchdPlistPath()
 		if err != nil {
-			return fmt.Errorf("resolve plist path: %w", err)
+			return fmt.Errorf(plistPathErrFormat, err)
 		}
 		// `bootout` returns non-zero with a "Could not find specified
 		// service" message when the agent isn't loaded — that's the
-		// no-op case we want and surfacing it as an error confuses
-		// callers. Capture combined output and only swallow when the
-		// stderr matches the not-loaded sentinel; any other failure
-		// returns a wrapped error.
-		out, err := exec.Command("launchctl", "bootout", "gui/"+uidString(), path).CombinedOutput()
-		if err != nil && !bytes.Contains(out, []byte("Could not find")) && !bytes.Contains(out, []byte("not currently loaded")) {
-			return fmt.Errorf("launchctl bootout: %v: %s", err, string(out))
-		}
-		return nil
+		// no-op case we want; runLaunchctlBootout swallows it.
+		return runLaunchctlBootout(path)
 	case KindSystemdUser:
-		out, err := exec.Command("systemctl", "--user", "stop", ServiceLabel+".service").CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("systemctl --user stop: %v: %s", err, string(out))
-		}
-		return nil
+		return runSystemctlUser("stop")
 	}
 	return nil
 }
@@ -54,7 +71,7 @@ func startForOS(kind ServiceKind) error {
 	case KindLaunchdUser:
 		path, err := launchdPlistPath()
 		if err != nil {
-			return fmt.Errorf("resolve plist path: %w", err)
+			return fmt.Errorf(plistPathErrFormat, err)
 		}
 		out, err := exec.Command("launchctl", "bootstrap", "gui/"+uidString(), path).CombinedOutput()
 		if err != nil && !bytes.Contains(out, []byte("service already loaded")) && !bytes.Contains(out, []byte("Bootstrap failed: 17: File exists")) {
@@ -62,11 +79,7 @@ func startForOS(kind ServiceKind) error {
 		}
 		return nil
 	case KindSystemdUser:
-		out, err := exec.Command("systemctl", "--user", "start", ServiceLabel+".service").CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("systemctl --user start: %v: %s", err, string(out))
-		}
-		return nil
+		return runSystemctlUser("start")
 	}
 	return nil
 }
@@ -79,28 +92,23 @@ func restartForOS(kind ServiceKind) error {
 	case KindLaunchdUser:
 		path, err := launchdPlistPath()
 		if err != nil {
-			return fmt.Errorf("resolve plist path: %w", err)
+			return fmt.Errorf(plistPathErrFormat, err)
 		}
 		// bootout-then-bootstrap. bootout's not-loaded case is fine
-		// (same swallow pattern as stopForOS); the real test is the
+		// (runLaunchctlBootout swallows it); the real test is the
 		// bootstrap step succeeding — if the agent failed to stop
 		// for a real reason, bootstrap will fail too with a clear
 		// "service already loaded" message.
-		out, err := exec.Command("launchctl", "bootout", "gui/"+uidString(), path).CombinedOutput()
-		if err != nil && !bytes.Contains(out, []byte("Could not find")) && !bytes.Contains(out, []byte("not currently loaded")) {
-			return fmt.Errorf("launchctl bootout: %v: %s", err, string(out))
+		if err := runLaunchctlBootout(path); err != nil {
+			return err
 		}
-		out, err = exec.Command("launchctl", "bootstrap", "gui/"+uidString(), path).CombinedOutput()
+		out, err := exec.Command("launchctl", "bootstrap", "gui/"+uidString(), path).CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("launchctl bootstrap: %v: %s", err, string(out))
 		}
 		return nil
 	case KindSystemdUser:
-		out, err := exec.Command("systemctl", "--user", "restart", ServiceLabel+".service").CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("systemctl --user restart: %v: %s", err, string(out))
-		}
-		return nil
+		return runSystemctlUser("restart")
 	}
 	return nil
 }

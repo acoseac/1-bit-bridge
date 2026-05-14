@@ -17,6 +17,12 @@ import (
 // CAA / Deezer.
 const artworkPendingRetryAfterSeconds = 30
 
+// errMsgInternalError is the opaque user-facing error string returned
+// from every 500 path in artwork. Real diagnostic context lands in the
+// server-side log via writeErrorLog; the public response stays generic
+// so a malicious caller can't probe filesystem layout.
+const errMsgInternalError = "internal error"
+
 // ArtworkDirProvider is the minimal interface api needs to serve cached
 // artwork. Implemented by cmd/bridge's serveCmd (via the Enricher's
 // CacheDir). Split out so api tests don't have to import internal/enrich.
@@ -79,14 +85,14 @@ func (s *Server) artistImage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		logger.Error("open artist image", "mbid", mbid, "err", err)
-		writeError(w, http.StatusInternalServerError, "internal", "internal error")
+		writeError(w, http.StatusInternalServerError, "internal", errMsgInternalError)
 		return
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil {
 		logger.Error("stat artist image", "mbid", mbid, "err", err)
-		writeError(w, http.StatusInternalServerError, "internal", "internal error")
+		writeError(w, http.StatusInternalServerError, "internal", errMsgInternalError)
 		return
 	}
 	w.Header().Set("Content-Type", "image/jpeg")
@@ -135,14 +141,14 @@ func (s *Server) artwork(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		logger.Error("open release artwork", "mbid", mbid, "size", size, "err", err)
-		writeError(w, http.StatusInternalServerError, "internal", "internal error")
+		writeError(w, http.StatusInternalServerError, "internal", errMsgInternalError)
 		return
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil {
 		logger.Error("stat release artwork", "mbid", mbid, "size", size, "err", err)
-		writeError(w, http.StatusInternalServerError, "internal", "internal error")
+		writeError(w, http.StatusInternalServerError, "internal", errMsgInternalError)
 		return
 	}
 	w.Header().Set("Content-Type", "image/jpeg")

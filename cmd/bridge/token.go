@@ -58,22 +58,39 @@ Run "bridge token <subcommand> -h" for subcommand-specific flags.
 `)
 }
 
+// openTokenStoreFromCfg is the shared config-load + token-store-open
+// tail used by every `bridge token <subcommand>` after each subcommand's
+// own flag.Parse runs. Each token subcommand has its own flag shape
+// (rotate / revoke take a positional id, expire adds --in / --clear),
+// so the FlagSet itself can't be shared — only the load+open pair can.
+// Returns (store, exitCode); exitCode != 0 means the caller should
+// return exitCode immediately and `store` is nil. Extracted to
+// eliminate the four-way duplicate the SonarCloud per-PR duplication
+// gate flagged.
+func openTokenStoreFromCfg(configPath string, stderr io.Writer) (*auth.Store, int) {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		fmt.Fprintf(stderr, configLoadFailedFormat, err)
+		return nil, 2
+	}
+	store, err := auth.OpenStore(filepath.Join(cfg.DataDir, tokensFileName))
+	if err != nil {
+		fmt.Fprintf(stderr, openTokenStoreFailedFormat, err)
+		return nil, 1
+	}
+	return store, 0
+}
+
 func tokenListCmd(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("token list", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "bridge.yaml", "path to config file")
+	configPath := fs.String("config", defaultConfigPath, configFlagUsage)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	cfg, err := config.Load(*configPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "config load failed: %v\n", err)
-		return 2
-	}
-	store, err := auth.OpenStore(filepath.Join(cfg.DataDir, "tokens.json"))
-	if err != nil {
-		fmt.Fprintf(stderr, "open token store: %v\n", err)
-		return 1
+	store, exit := openTokenStoreFromCfg(*configPath, stderr)
+	if exit != 0 {
+		return exit
 	}
 	tokens := store.List()
 	if len(tokens) == 0 {
@@ -111,7 +128,7 @@ func tokenListCmd(args []string, stdout, stderr io.Writer) int {
 func tokenRotateCmd(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("token rotate", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "bridge.yaml", "path to config file")
+	configPath := fs.String("config", defaultConfigPath, configFlagUsage)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -121,15 +138,9 @@ func tokenRotateCmd(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	id := fs.Arg(0)
-	cfg, err := config.Load(*configPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "config load failed: %v\n", err)
-		return 2
-	}
-	store, err := auth.OpenStore(filepath.Join(cfg.DataDir, "tokens.json"))
-	if err != nil {
-		fmt.Fprintf(stderr, "open token store: %v\n", err)
-		return 1
+	store, exit := openTokenStoreFromCfg(*configPath, stderr)
+	if exit != 0 {
+		return exit
 	}
 	raw, tok, err := store.Rotate(id)
 	if err != nil {
@@ -148,7 +159,7 @@ func tokenRotateCmd(args []string, stdout, stderr io.Writer) int {
 func tokenExpireCmd(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("token expire", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "bridge.yaml", "path to config file")
+	configPath := fs.String("config", defaultConfigPath, configFlagUsage)
 	in := fs.Duration("in", 0, "invalidate the token after this duration from now (e.g. 24h, 7*24h). Required unless --clear is set.")
 	clear := fs.Bool("clear", false, "remove an existing expiry from the token")
 	if err := fs.Parse(args); err != nil {
@@ -168,15 +179,9 @@ func tokenExpireCmd(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	id := fs.Arg(0)
-	cfg, err := config.Load(*configPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "config load failed: %v\n", err)
-		return 2
-	}
-	store, err := auth.OpenStore(filepath.Join(cfg.DataDir, "tokens.json"))
-	if err != nil {
-		fmt.Fprintf(stderr, "open token store: %v\n", err)
-		return 1
+	store, exit := openTokenStoreFromCfg(*configPath, stderr)
+	if exit != 0 {
+		return exit
 	}
 	var exp *time.Time
 	if !*clear {
@@ -200,7 +205,7 @@ func tokenExpireCmd(args []string, stdout, stderr io.Writer) int {
 func tokenRevokeCmd(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("token revoke", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "bridge.yaml", "path to config file")
+	configPath := fs.String("config", defaultConfigPath, configFlagUsage)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -210,15 +215,9 @@ func tokenRevokeCmd(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	id := fs.Arg(0)
-	cfg, err := config.Load(*configPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "config load failed: %v\n", err)
-		return 2
-	}
-	store, err := auth.OpenStore(filepath.Join(cfg.DataDir, "tokens.json"))
-	if err != nil {
-		fmt.Fprintf(stderr, "open token store: %v\n", err)
-		return 1
+	store, exit := openTokenStoreFromCfg(*configPath, stderr)
+	if exit != 0 {
+		return exit
 	}
 	if err := store.Revoke(id); err != nil {
 		fmt.Fprintf(stderr, "revoke: %v\n", err)

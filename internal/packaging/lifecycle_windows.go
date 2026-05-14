@@ -21,6 +21,45 @@ func isServiceMissing(err error) bool {
 	return errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST)
 }
 
+// openBridgeServiceForSCM is the shared connect-SCM + open-service
+// preamble for every lifecycle action (stop / restart / start). Returns
+// `(manager, service, isMissing, err)`:
+//   - On success, the caller defers `m.Disconnect()` AND `s.Close()` and
+//     proceeds with the lifecycle command (`Stop` / `Start`).
+//   - `isMissing == true` is the idempotent "service not installed" case;
+//     callers return nil immediately (Stop/Restart short-circuit, Start
+//     reports nothing-to-start). manager + service are nil.
+//   - Any other error is wrapped via the shared `scmConnectAdminErr` /
+//     `scmConnectErr` / `scmOpenSvcAdminErr` / `scmOpenSvcErr` formats so
+//     access-denied bubbles up with the operator-readable "(need admin?)"
+//     hint. manager + service are nil.
+//
+// Extracted to eliminate the three-way duplicate of this preamble that
+// stopForOS / restartForOS / startForOS each carried (CodeRabbit / Qodo
+// would have flagged this as code-smell; SonarCloud's per-PR duplication
+// gate did).
+func openBridgeServiceForSCM() (*mgr.Mgr, *mgr.Service, bool, error) {
+	m, err := mgr.Connect()
+	if err != nil {
+		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+			return nil, nil, false, fmt.Errorf(scmConnectAdminErr, err)
+		}
+		return nil, nil, false, fmt.Errorf(scmConnectErr, err)
+	}
+	s, err := m.OpenService(ServiceLabel)
+	if err != nil {
+		m.Disconnect()
+		if isServiceMissing(err) {
+			return nil, nil, true, nil
+		}
+		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+			return nil, nil, false, fmt.Errorf(scmOpenSvcAdminErr, err)
+		}
+		return nil, nil, false, fmt.Errorf(scmOpenSvcErr, err)
+	}
+	return m, s, false, nil
+}
+
 // stopForOS asks the SCM to stop the bridge service. The kind
 // argument is unused on Windows (Stop's dispatcher only forwards
 // KindWindowsSCM here; Startup-folder installs are user processes,
@@ -28,26 +67,15 @@ func isServiceMissing(err error) bool {
 // caller's friendly "Re-launch as Administrator" path can classify
 // it via errors.Is(err, windows.ERROR_ACCESS_DENIED).
 func stopForOS(_ ServiceKind) error {
-	m, err := mgr.Connect()
+	m, s, missing, err := openBridgeServiceForSCM()
 	if err != nil {
-		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
-			return fmt.Errorf("connect SCM (need admin?): %w", err)
-		}
-		return fmt.Errorf("connect SCM: %w", err)
+		return err
+	}
+	if missing {
+		// Truly idempotent no-op.
+		return nil
 	}
 	defer m.Disconnect()
-	s, err := m.OpenService(ServiceLabel)
-	if err != nil {
-		if isServiceMissing(err) {
-			// Truly idempotent no-op.
-			return nil
-		}
-		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
-			return fmt.Errorf("open service (need admin?): %w", err)
-		}
-		// Real SCM fault — RPC down, service marked-for-delete, etc.
-		return fmt.Errorf("open service: %w", err)
-	}
 	defer s.Close()
 	if _, err := s.Control(svc.Stop); err != nil {
 		// Stop on an already-stopped service returns
@@ -75,27 +103,17 @@ func stopForOS(_ ServiceKind) error {
 // else surfaces before we attempt Start (so the user doesn't see
 // a misleading start-error masking a real stop fault).
 func restartForOS(_ ServiceKind) error {
-	m, err := mgr.Connect()
+	m, s, missing, err := openBridgeServiceForSCM()
 	if err != nil {
-		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
-			return fmt.Errorf("connect SCM (need admin?): %w", err)
-		}
-		return fmt.Errorf("connect SCM: %w", err)
+		return err
+	}
+	if missing {
+		// Nothing to restart — caller's contract via Restart's
+		// KindNone short-circuit means we shouldn't reach here,
+		// but the SCM probe could race a parallel Uninstall.
+		return nil
 	}
 	defer m.Disconnect()
-	s, err := m.OpenService(ServiceLabel)
-	if err != nil {
-		if isServiceMissing(err) {
-			// Nothing to restart — caller's contract via Restart's
-			// KindNone short-circuit means we shouldn't reach here,
-			// but the SCM probe could race a parallel Uninstall.
-			return nil
-		}
-		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
-			return fmt.Errorf("open service (need admin?): %w", err)
-		}
-		return fmt.Errorf("open service: %w", err)
-	}
 	defer s.Close()
 	if _, err := s.Control(svc.Stop); err != nil {
 		// Same classification as stopForOS — already stopped is OK,
@@ -125,24 +143,14 @@ func restartForOS(_ ServiceKind) error {
 // `s.Start()` reports ERROR_SERVICE_ALREADY_RUNNING). Same admin
 // gate semantics as stopForOS / restartForOS.
 func startForOS(_ ServiceKind) error {
-	m, err := mgr.Connect()
+	m, s, missing, err := openBridgeServiceForSCM()
 	if err != nil {
-		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
-			return fmt.Errorf("connect SCM (need admin?): %w", err)
-		}
-		return fmt.Errorf("connect SCM: %w", err)
+		return err
+	}
+	if missing {
+		return nil
 	}
 	defer m.Disconnect()
-	s, err := m.OpenService(ServiceLabel)
-	if err != nil {
-		if isServiceMissing(err) {
-			return nil
-		}
-		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
-			return fmt.Errorf("open service (need admin?): %w", err)
-		}
-		return fmt.Errorf("open service: %w", err)
-	}
 	defer s.Close()
 	if err := s.Start(); err != nil {
 		if errors.Is(err, windows.ERROR_SERVICE_ALREADY_RUNNING) {

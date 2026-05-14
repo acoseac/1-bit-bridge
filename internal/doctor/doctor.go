@@ -30,6 +30,18 @@ const (
 	Fail Status = "fail"
 )
 
+// Check-name slugs. Stable identifiers consumers use as keys for test
+// assertions, admin-UI mapping, or CI dashboards. Extracted because
+// SonarCloud go:S1192 flagged the repeated literals across the doctor
+// per-check builders (warn/fail/ok branches in checkConfigDir,
+// checkTLSCert, checkLibraryRoots, checkServiceManager).
+const (
+	checkNameConfigDir      = "config-dir"
+	checkNameTLSCert        = "tls-cert"
+	checkNameLibraryRoots   = "library-roots"
+	checkNameServiceManager = "service-manager"
+)
+
 // Check is one line of the doctor report.
 type Check struct {
 	// Name is a stable slug (kebab-case, no spaces). Consumers use it as
@@ -130,27 +142,27 @@ func checkPlatform(d Deps) Check {
 func checkConfigDir(d Deps) Check {
 	dir := d.ConfigDir
 	if dir == "" {
-		return warn("config-dir", "no config dir set", "pass Deps.ConfigDir so doctor can verify write access")
+		return warn(checkNameConfigDir, "no config dir set", "pass Deps.ConfigDir so doctor can verify write access")
 	}
 	// Ensure it exists (create if missing — init() does this anyway,
 	// but doctor running standalone should report the same outcome
 	// whether or not init has been attempted).
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fail("config-dir", dir, "can't create: "+err.Error())
+		return fail(checkNameConfigDir, dir, "can't create: "+err.Error())
 	}
 	// Touch a temp file to verify write access — MkdirAll's success
 	// isn't proof (the dir could exist read-only).
 	probe := filepath.Join(dir, ".doctor-probe")
 	if err := os.WriteFile(probe, []byte("probe"), 0o600); err != nil {
-		return fail("config-dir", dir, "not writable: "+err.Error())
+		return fail(checkNameConfigDir, dir, "not writable: "+err.Error())
 	}
 	_ = os.Remove(probe)
-	return ok("config-dir", dir)
+	return ok(checkNameConfigDir, dir)
 }
 
 func checkTLSCert(d Deps) Check {
 	if d.DataDir == "" {
-		return warn("tls-cert", "no data dir set",
+		return warn(checkNameTLSCert, "no data dir set",
 			"pass Deps.DataDir so doctor can inspect cert state")
 	}
 	certPath, keyPath := servertls.DefaultPaths(d.DataDir)
@@ -158,15 +170,15 @@ func checkTLSCert(d Deps) Check {
 	keyExists := fileExists(keyPath)
 	switch {
 	case certExists && keyExists:
-		return ok("tls-cert", "present")
+		return ok(checkNameTLSCert, "present")
 	case !certExists && !keyExists:
 		// Fresh install — init() will mint on first serve.
-		return ok("tls-cert", "absent (init will mint)")
+		return ok(checkNameTLSCert, "absent (init will mint)")
 	default:
 		// One file without the other is an error no automatic recovery
 		// handles safely — deleting the survivor would break existing
 		// client pins.
-		return fail("tls-cert", "partial state",
+		return fail(checkNameTLSCert, "partial state",
 			fmt.Sprintf("found %q but not its pair; remove the orphan and re-run init",
 				firstPresent(certPath, keyPath, certExists, keyExists)))
 	}
@@ -209,7 +221,7 @@ func checkPort(name string, port int, ownPIDFile string) Check {
 
 func checkLibraryRoots(d Deps) Check {
 	if len(d.LibraryRoots) == 0 {
-		return ok("library-roots", "none configured (init will prompt)")
+		return ok(checkNameLibraryRoots, "none configured (init will prompt)")
 	}
 	missing := []string{}
 	unreadable := []string{}
@@ -235,47 +247,47 @@ func checkLibraryRoots(d Deps) Check {
 	}
 	if len(missing)+len(unreadable) > 0 {
 		problems := append(append([]string{}, missing...), unreadable...)
-		return fail("library-roots", fmt.Sprintf("%d problem(s)", len(problems)),
+		return fail(checkNameLibraryRoots, fmt.Sprintf("%d problem(s)", len(problems)),
 			"fix or remove: "+strings.Join(problems, "; "))
 	}
 	if len(empty) > 0 {
-		return warn("library-roots", fmt.Sprintf("%d empty root(s)", len(empty)),
+		return warn(checkNameLibraryRoots, fmt.Sprintf("%d empty root(s)", len(empty)),
 			"empty root (scan will find 0 tracks): "+strings.Join(empty, "; "))
 	}
-	return ok("library-roots", fmt.Sprintf("%d root(s) reachable", len(d.LibraryRoots)))
+	return ok(checkNameLibraryRoots, fmt.Sprintf("%d root(s) reachable", len(d.LibraryRoots)))
 }
 
 func checkServiceManager(d Deps) Check {
 	switch runtime.GOOS {
 	case "darwin":
 		if _, err := exec.LookPath("launchctl"); err != nil {
-			return fail("service-manager", "launchctl missing",
+			return fail(checkNameServiceManager, "launchctl missing",
 				"`launchctl` is part of macOS; missing implies a broken install — use `bridge init --no-service` to skip")
 		}
-		return ok("service-manager", "launchctl available")
+		return ok(checkNameServiceManager, "launchctl available")
 	case "linux":
 		// A user-level systemd install needs a DBus session. Detect by
 		// running `systemctl --user show-environment`; it prints
 		// something only if the user-bus is reachable.
 		cmd := exec.Command("systemctl", "--user", "show-environment")
 		if err := cmd.Run(); err != nil {
-			return warn("service-manager", "no user systemd session",
+			return warn(checkNameServiceManager, "no user systemd session",
 				"headless session? use `bridge init --no-service` and run `bridge serve` yourself")
 		}
-		return ok("service-manager", "systemctl --user reachable")
+		return ok(checkNameServiceManager, "systemctl --user reachable")
 	case "windows":
 		dir := windowsStartupDir()
 		if dir == "" {
-			return warn("service-manager", "can't resolve Startup folder",
+			return warn(checkNameServiceManager, "can't resolve Startup folder",
 				"set %APPDATA% and re-run — doctor needs it to place the login shortcut")
 		}
 		if err := probeWritable(dir); err != nil {
-			return fail("service-manager", "Startup folder not writable",
+			return fail(checkNameServiceManager, "Startup folder not writable",
 				dir+": "+err.Error())
 		}
-		return ok("service-manager", "Startup folder writable: "+dir)
+		return ok(checkNameServiceManager, "Startup folder writable: "+dir)
 	default:
-		return warn("service-manager", runtime.GOOS+" unsupported",
+		return warn(checkNameServiceManager, runtime.GOOS+" unsupported",
 			"no service-install path for this OS; run `bridge serve` manually")
 	}
 }

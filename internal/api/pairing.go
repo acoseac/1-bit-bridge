@@ -10,6 +10,14 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/pairing"
 )
 
+// Shared pairing-error messages surfaced by every /v1/pairing*
+// handler. Four+ duplicates each across the create / poll / SSE /
+// acknowledge paths.
+const (
+	errMsgPairingNotSupported = "this bridge does not support tap-to-pair"
+	errMsgPairingBadSecret    = "missing or invalid poll secret"
+)
+
 // pairingCreateRequest is the POST /v1/pairing/requests body shape iOS sends.
 type pairingCreateRequest struct {
 	DeviceName     string `json:"deviceName"`
@@ -71,8 +79,7 @@ const pairingMaxBodyBytes = 4 * 1024
 // at this point.
 func (s *Server) pairingRequest(w http.ResponseWriter, r *http.Request) {
 	if s.pairing == nil {
-		writeError(w, http.StatusNotFound, "pairing_not_supported",
-			"this bridge does not support tap-to-pair")
+		writeError(w, http.StatusNotFound, "pairing_not_supported", errMsgPairingNotSupported)
 		return
 	}
 	// Per-IP rate limit (burst=5, ~1 req / 5 s steady). The pairing
@@ -141,8 +148,7 @@ func (s *Server) pairingRequest(w http.ResponseWriter, r *http.Request) {
 //   - 404 for an unknown requestID (treated as terminal by iOS)
 func (s *Server) pairingPoll(w http.ResponseWriter, r *http.Request) {
 	if s.pairing == nil {
-		writeError(w, http.StatusNotFound, "pairing_not_supported",
-			"this bridge does not support tap-to-pair")
+		writeError(w, http.StatusNotFound, "pairing_not_supported", errMsgPairingNotSupported)
 		return
 	}
 	id := r.PathValue("requestID")
@@ -150,8 +156,7 @@ func (s *Server) pairingPoll(w http.ResponseWriter, r *http.Request) {
 	res, err := s.pairing.Poll(id, secret)
 	switch {
 	case errors.Is(err, pairing.ErrUnauthorized):
-		writeError(w, http.StatusUnauthorized, "unauthorized",
-			"missing or invalid poll secret")
+		writeError(w, http.StatusUnauthorized, "unauthorized", errMsgPairingBadSecret)
 		return
 	case errors.Is(err, pairing.ErrNotFound):
 		writeError(w, http.StatusNotFound, "unknown_request",
@@ -203,8 +208,7 @@ func (s *Server) pairingPoll(w http.ResponseWriter, r *http.Request) {
 //     wired (treated as terminal by iOS — falls back to polling)
 func (s *Server) pairingEvents(w http.ResponseWriter, r *http.Request) {
 	if s.pairing == nil {
-		writeError(w, http.StatusNotFound, "pairing_not_supported",
-			"this bridge does not support tap-to-pair")
+		writeError(w, http.StatusNotFound, "pairing_not_supported", errMsgPairingNotSupported)
 		return
 	}
 	if s.eventBroker == nil {
@@ -220,8 +224,7 @@ func (s *Server) pairingEvents(w http.ResponseWriter, r *http.Request) {
 	res, err := s.pairing.Poll(id, secret)
 	switch {
 	case errors.Is(err, pairing.ErrUnauthorized):
-		writeError(w, http.StatusUnauthorized, "unauthorized",
-			"missing or invalid poll secret")
+		writeError(w, http.StatusUnauthorized, "unauthorized", errMsgPairingBadSecret)
 		return
 	case errors.Is(err, pairing.ErrNotFound):
 		writeError(w, http.StatusNotFound, "unknown_request",
@@ -348,8 +351,7 @@ func (s *Server) pairingEvents(w http.ResponseWriter, r *http.Request) {
 // 401.
 func (s *Server) pairingDelete(w http.ResponseWriter, r *http.Request) {
 	if s.pairing == nil {
-		writeError(w, http.StatusNotFound, "pairing_not_supported",
-			"this bridge does not support tap-to-pair")
+		writeError(w, http.StatusNotFound, "pairing_not_supported", errMsgPairingNotSupported)
 		return
 	}
 	id := r.PathValue("requestID")
@@ -357,8 +359,7 @@ func (s *Server) pairingDelete(w http.ResponseWriter, r *http.Request) {
 	err := s.pairing.Delete(id, secret)
 	switch {
 	case errors.Is(err, pairing.ErrUnauthorized):
-		writeError(w, http.StatusUnauthorized, "unauthorized",
-			"missing or invalid poll secret")
+		writeError(w, http.StatusUnauthorized, "unauthorized", errMsgPairingBadSecret)
 		return
 	case errors.Is(err, pairing.ErrNotFound), err == nil:
 		// Both paths are success at the wire level — the row is gone

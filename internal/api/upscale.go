@@ -117,7 +117,7 @@ func (s *Server) upscaleRequest(w http.ResponseWriter, r *http.Request) {
 		// failed at startup. Both surface as the same wire code
 		// — operator privacy, and iOS only needs to know "no
 		// variant chrome here".
-		writeError(w, http.StatusServiceUnavailable, "upscale_disabled", "upscaling is not enabled on this bridge")
+		writeError(w, http.StatusServiceUnavailable, errCodeUpscaleDisabled, errMsgUpscalingNotEnabled)
 		return
 	}
 	defer r.Body.Close()
