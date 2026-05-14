@@ -398,7 +398,12 @@ func (s *Server) StartPairingRateLimitGC() (stopFn func()) {
 // pressure mitigation for long-running bridges with high client churn.
 func (s *Server) StartManifestRateLimitReaper() (stopFn func()) {
 	if s.manifestRateLimiter == nil {
-		return func() {}
+		return func() {
+			// No-op stopFn — the reaper goroutine was never
+			// spawned (limiter not wired). Return the same
+			// shape as the live path so callers can `defer` it
+			// unconditionally.
+		}
 	}
 	stop := make(chan struct{})
 	s.manifestRateLimiter.Start(stop)
