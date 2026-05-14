@@ -3035,6 +3035,38 @@ func (s *Store) DeleteVariant(ctx context.Context, sourcePath, variantID string)
 	return tx.Commit()
 }
 
+// UpdateVariantSidecarPath rewrites the `sidecar_path` of a single
+// `track_variants` row keyed by `(source_path, variant_id)`. Used by
+// `bridge variants move` to update DB rows after a successful
+// filesystem move/copy.
+//
+// **Does NOT bump the parent track's `indexed_at`** (unlike
+// `UpsertVariant`). A path-only update doesn't change the variant's
+// content from iOS's perspective; bumping indexed_at across 5000
+// variants in one bulk operation would trigger a wasteful full
+// delta-sync. Mirrors the same intent as `UpsertVariant`'s
+// indexed_at bump, but in reverse — we explicitly skip it here.
+//
+// Returns `sql.ErrNoRows` (wrapped) when the keyed row doesn't exist.
+func (s *Store) UpdateVariantSidecarPath(ctx context.Context, sourcePath, variantID, newSidecarPath string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE track_variants
+		   SET sidecar_path = ?
+		 WHERE source_path = ? AND variant_id = ?
+	`, newSidecarPath, sourcePath, variantID)
+	if err != nil {
+		return fmt.Errorf("update variant sidecar_path: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("variant row not found for source=%q variant=%q: %w",
+			sourcePath, variantID, sql.ErrNoRows)
+	}
+	return nil
+}
+
 // CountVariants returns (rowCount, totalSizeBytes) across the
 // whole `track_variants` table. Used by the admin console's
 // upscale stats card. Single SQL aggregate — cheap even on

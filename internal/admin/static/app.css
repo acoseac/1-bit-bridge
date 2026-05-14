@@ -1016,6 +1016,103 @@ dialog h2 { font-size: 18px; color: var(--accent); }
   text-decoration: underline;
 }
 
+/* Variants storage bar (v1.4 PR D2). Information + Change action
+ * for the upscale variants directory; populated client-side from
+ * GET /api/upscale/variants-dir on inspector mount. The bar sits
+ * directly below the breadcrumbs so operators see WHERE variants
+ * land before they start clicking "Upscale this folder."
+ */
+.library-inspector .inspector-storage-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 0 1rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--bg-elev, var(--panel-bg, #f5f5f5));
+  border: 1px solid var(--border, rgba(0,0,0,0.06));
+  border-radius: 6px;
+  font-size: 0.85rem;
+}
+.library-inspector .inspector-storage-label {
+  color: var(--fg-muted, var(--text-muted, #555));
+  flex-shrink: 0;
+}
+.library-inspector .inspector-storage-bar code.storage-path {
+  flex: 1 1 auto;
+  min-width: 0; /* let flex shrink with ellipsis */
+}
+.library-inspector .inspector-storage-stats,
+.library-inspector .inspector-storage-legacy {
+  color: var(--fg-muted, var(--text-muted, #555));
+  font-size: 0.85em;
+}
+.library-inspector .inspector-storage-legacy {
+  /* Highlights the migration affordance — operator should notice it. */
+  color: var(--accent-warm, #eab308);
+}
+.library-inspector .inspector-storage-btn {
+  padding: 0.25rem 0.65rem;
+  font-size: 0.85em;
+  margin-left: auto; /* push to the right on wide layouts */
+}
+
+/* Change-path modal. Centered overlay; click outside doesn't
+ * dismiss (operator must Cancel or Save explicitly — protects
+ * against accidental discard of a typed path). */
+.library-inspector .inspector-storage-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.4);
+}
+.library-inspector .inspector-storage-modal[hidden] {
+  display: none;
+}
+.library-inspector .inspector-storage-modal-content {
+  background: var(--bg-panel, #fff);
+  border: 1px solid var(--border, rgba(0,0,0,0.12));
+  border-radius: 8px;
+  padding: 1.25rem;
+  width: min(560px, 90vw);
+  box-shadow: 0 16px 32px rgba(0, 0, 0, 0.2);
+}
+.library-inspector .inspector-storage-modal-content h2 {
+  margin: 0 0 0.75rem;
+  font-size: 1.05rem;
+}
+.library-inspector .inspector-storage-modal-content label {
+  display: block;
+  margin-top: 0.5rem;
+  font-size: 0.85em;
+  color: var(--fg-muted, var(--text-muted, #555));
+}
+.library-inspector .inspector-storage-modal-content input[type="text"] {
+  width: 100%;
+  min-height: 44px;
+  padding: 0.5rem 0.75rem;
+  font: inherit;
+  font-family: var(--mono, monospace);
+  background: var(--bg-elev, var(--panel-bg, #f5f5f5));
+  border: 1px solid var(--border, rgba(0,0,0,0.12));
+  border-radius: 6px;
+  color: var(--fg, inherit);
+  margin-top: 0.25rem;
+}
+.library-inspector .inspector-storage-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+.library-inspector .inspector-storage-modal-actions .btn {
+  min-height: 44px;
+  padding: 0.5rem 1rem;
+}
+
 .inspector-layout {
   display: grid;
   grid-template-columns: 1.6fr 1fr;
