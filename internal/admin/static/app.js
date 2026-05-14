@@ -2639,7 +2639,14 @@ function cssEscape(s) {
 // inspectorEnterSearchMode replaces the main table with a flat
 // search-results list (richer per-row metadata) so the operator
 // can scan many matches at once.
-function inspectorEnterSearchMode(q) {
+//
+// Race guard: reuses `inspectorSearchController` so a fresh query
+// (typed mid-flight) cancels this fetch and replaces it with the
+// new one. Without the guard, a slow flat-list response could land
+// after the user already exited search mode (or typed a different
+// query) and overwrite the live folder view with stale results.
+// Gemini medium on PR B.
+async function inspectorEnterSearchMode(q) {
   inspectorState.mode = "search";
   inspectorSearchHideDropdown();
   inspectorSearchClearClientFilter();
@@ -2649,12 +2656,27 @@ function inspectorEnterSearchMode(q) {
   body.innerHTML = `<tr><td colspan="5" class="hint"><em>Loading…</em></td></tr>`;
   document.getElementById("inspector-rows-table").hidden = false;
   document.getElementById("inspector-empty").hidden = true;
-  fetch(`/api/library/search?q=${encodeURIComponent(q)}&limit=200`)
-    .then((res) => res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`)))
-    .then((data) => inspectorRenderSearchFlatList(data, q))
-    .catch((err) => {
-      body.innerHTML = `<tr><td colspan="5" class="error">Search failed: ${escapeHTML(err.message)}</td></tr>`;
-    });
+  // Cancel any in-flight server search (e.g., from the dropdown
+  // path) so a stale response can't land on top of the flat-list.
+  if (inspectorSearchController) {
+    inspectorSearchController.abort();
+  }
+  inspectorSearchController = new AbortController();
+  try {
+    const res = await fetch(
+      `/api/library/search?q=${encodeURIComponent(q)}&limit=200`,
+      { signal: inspectorSearchController.signal });
+    // Path guard: bail if the user has navigated away OR exited
+    // search mode while the fetch was in flight.
+    if (inspectorState.mode !== "search" || inspectorState.searchQuery !== q) return;
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (inspectorState.mode !== "search" || inspectorState.searchQuery !== q) return;
+    inspectorRenderSearchFlatList(data, q);
+  } catch (err) {
+    if (err.name === "AbortError") return;
+    body.innerHTML = `<tr><td colspan="5" class="error">Search failed: ${escapeHTML(err.message)}</td></tr>`;
+  }
 }
 
 function inspectorExitSearchMode() {
