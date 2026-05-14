@@ -15,7 +15,11 @@ jobs:
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          FILES=$(curl -s \
+          # --fail-with-body so a non-2xx exits with a non-zero status (and
+          # prints the body); --show-error keeps stderr useful under -s.
+          # Pre-fix a 401/5xx silently produced FILES="null" and the
+          # workflow happily skipped Greptile for a "small" PR.
+          FILES=$(curl -sS --fail-with-body \
             -H "Authorization: token ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${REPO}/pulls/${PR_NUMBER}/files?per_page=100" \
@@ -37,7 +41,9 @@ jobs:
           CHANGED_FILES: ${{ steps.pr-size.outputs.changed_files }}
         run: |
           echo "PR has ${CHANGED_FILES} changed files — triggering Greptile review."
-          curl -s -X POST "https://api.greptile.com/v2/review" \
+          # --fail-with-body so a non-2xx (auth fail, rate limit, etc.)
+          # surfaces as a workflow failure instead of a silent no-op.
+          curl -sS --fail-with-body -X POST "https://api.greptile.com/v2/review" \
             -H "Authorization: Bearer ${GREPTILE_API_KEY}" \
             -H "X-Github-Token: ${GH_TOKEN}" \
             -H "Content-Type: application/json" \
