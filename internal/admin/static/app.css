@@ -1263,14 +1263,15 @@ dialog h2 { font-size: 18px; color: var(--accent); }
    *   the right drawer is squeezed to ~10% of the viewport — stats
    *   labels then wrap onto every other character ("Tracks 12928 (0
    *   already upscaled)" displays one character per line). With
-   *   min-width: 0 the .folder-cell { max-width: 80ch; overflow: hidden;
-   *   text-overflow: ellipsis } rule below (line 1296-1313) actually
-   *   takes effect and the cell truncates with a clean ellipsis.
+   *   min-width: 0 the .folder-cell rule in the .inspector-tree section
+   *   ({ max-width: 80ch; overflow: hidden; text-overflow: ellipsis })
+   *   actually takes effect and the cell truncates with a clean
+   *   ellipsis.
    * minmax(260px, 1fr): floors the right drawer so labels stay readable
    *   even when the table content is wider than its share. 260px is
    *   wide enough for "Tracks 12928 (0 already upscaled)" to wrap to
    *   two lines instead of one-character-per-line; tracks the
-   *   single-column responsive breakpoint character (720px). */
+   *   single-column responsive breakpoint (720px). */
   grid-template-columns: minmax(0, 1.6fr) minmax(260px, 1fr);
   gap: 1rem;
 }
