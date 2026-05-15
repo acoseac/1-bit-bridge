@@ -86,7 +86,9 @@ Pairing probe and liveness check. No auth token required for this endpoint (so t
   "roots": [
     { "name": "Music", "reachable": true },
     { "name": "Audiobooks", "reachable": false, "reason": "offline" }
-  ]
+  ],
+  "pushEventsSupported": true,
+  "pairingEventsSupported": true
 }
 ```
 
@@ -103,6 +105,8 @@ The four `latestServerVersion` / `updateAvailable` / `updateReleaseNotesURL` / `
 `minClientVersion` advertises the iOS app version *this bridge* needs from its clients (build-time-injected via `-ldflags -X .../version.MinClientVersion=…`). iOS uses it to surface "your app may be too old for this bridge" hints. It is NOT the floor a *candidate update* would require — that's a Phase B install-side concern and is delivered through admin-console / CLI surfaces, not `/v1/health`.
 
 `endpoints` (additive since v1, optional, may be absent or empty) is the full list of URLs the server is currently reachable at — LAN IPv4/IPv6 (global unicast only; link-local is filtered because it's not reachable across devices), the `<hostname>.local` mDNS form, and any Tailscale interface (CGNAT `100.64/10` for v4, `fd7a:115c:a1e0::/48` ULA for v6). Clients use this to learn new alternates at heartbeat time so they can roam between LAN and Tailscale without re-pairing.
+
+`pushEventsSupported` and `pairingEventsSupported` (both additive since v1.3, `*bool` with `omitempty`) are capability flags advertising that this bridge implements the SSE streams documented at `/v1/events` (`upscale.*` + generic push events) and `/v1/pairing/{id}/events` (per-pairing-request push) respectively. iOS uses them to decide whether to subscribe via SSE or fall back to the polling endpoints — pre-v1.3 bridges omit both fields, and iOS treats absence as "polling only". Splitting the two flags means a bridge can support generic push without pairing push (or vice versa) as separate rollout vectors.
 
 **Ordering** (reflects the server's recommendation — clients pick the first URL they can reach):
 
@@ -212,7 +216,12 @@ Pagination semantics:
       "musicBrainzAlbumID": "...",
       "artworkMBID": "...",
       "artistMBID": "...",
-      "enriched": true
+      "enriched": true,
+      "composer": "Ludwig van Beethoven",
+      "conductor": "Herbert von Karajan",
+      "work": "Symphony No. 5 in C minor, Op. 67",
+      "originalYear": 1808,
+      "bpm": 108
     }
   ],
   "nextCursor": "Music/Artist/Album/last-track.flac",
@@ -248,6 +257,16 @@ iOS uses this to render an "Enrichment in progress (X / Y)…" footer and gates 
 **Pagination behaviour.** `enrichmentProgress` is populated only on the **first page** of a paginated full-manifest response (request has no `cursor`) and on every non-paginated response. Same first-page-only convention as `folders` / `total` — the values are stable across a pagination run, so iOS snapshots them off the first page and ignores any later pages.
 
 Both fields are additive — `ProtocolVersion` stays at `1`. Pre-v1.1 servers omit them; pre-v1.1 clients ignore them.
+
+#### Classical metadata (additive, since v1.3)
+
+`composer`, `conductor`, `work`, `originalYear`, and `bpm` are populated by the bridge's extractor when the source tags carry them. All five are `omitempty` — pre-v1.3 bridges emit nothing here and iOS treats absence as "no classical metadata". String fields (`composer` / `conductor` / `work`) ship the tag value verbatim after the standard display-name normalization; integer fields (`originalYear` / `bpm`) ship as `*int` so a zero-valued source can be distinguished from an unset one.
+
+iOS surfaces these on a third subtitle line in track rows ("Composer: X" with conductor fallback) and as a "Conducted by X" header on albums where ≥80% of tracks share a conductor. Source-tag coverage: ID3v2 `TCOM` / `TPE3` / `TIT1` / `TORY` / `TDOR` / `TBPM`; Vorbis-comment `COMPOSER` / `CONDUCTOR` / `WORK` / `ORIGINALDATE` / `BPM`; MP4 `©wrt` / `cond` / `©wrk` / `BPM`. The bridge tag layer is the single source of truth — iOS no longer extracts classical fields from local sources on bridge shares.
+
+#### Multi-value artist preservation (additive, since v1.3)
+
+Source-tag multi-value `ARTIST` / `ALBUMARTIST` (FLAC Vorbis arrays, MP4 raw `[]string`) are preserved by the extractor and serialised as a `; `-joined scalar string on the existing `artist` / `albumArtist` fields. The wire shape stays scalar; the iOS app splits on `; ` and exposes a sub-menu picker on multi-artist rows. Pre-v1.3 extractors silently collapsed multi-value tags to whichever single value the underlying library returned first; the v1.3 behavior is backwards-compatible (single-artist sources are unchanged).
 
 #### DSD specifics
 
@@ -317,6 +336,10 @@ id: 42
 event: upscale.stats
 data: {"enabled":true,"pool":{"queueLen":12,"inflight":4,"done":126,"failed":0},"cachedVariants":138}
 
+id: 43
+event: upscale.complete
+data: {"path":"Music/Diana Krall/Live in Paris/01.flac","variantID":"upscaled-v1-176400-24","sampleRate":176400,"bitsPerSample":24,"completedAt":"2026-05-15T11:40:12Z"}
+
 event: pairing.abc123-def456
 data: {"state":"approved","verificationCode":"412 593"}
 
@@ -329,6 +352,7 @@ data: {"missed":3}
 
 **Topics**:
 - `upscale.stats` — fires whenever the bridge's upscale state changes (job queued, completed, failed). Payload matches `/v1/upscale/stats`.
+- `upscale.complete` (additive, since v1.3) — fires once per successful variant generation, immediately after the bridge has `UpsertVariant`-committed the row. Payload carries the library-relative source `path`, the resulting `variantID`, the variant's `sampleRate` + `bitsPerSample`, and a `completedAt` UTC timestamp. iOS uses this to reconcile in-flight wand state within ~1 s of the variant landing on disk instead of waiting for the next manifest poll. Failure paths still fire `upscale.stats` (the `failed` counter bumps); `upscale.complete` is success-only by design — `upscale.failed` is a deliberate follow-up.
 - `pairing.<requestID>` — fires on `Approve` or `Decline` of the named request. Payload matches `/v1/pairing/<requestID>` for the relevant state.
 - `heartbeat` — every 15s; payload `{}`. iOS uses missing heartbeats as a "connection dead" signal that triggers reconnect with backoff. Bridge-internal — iOS parsers swallow this at the transport layer.
 - `dropped` — synthetic notice fired when the server's per-subscriber buffer evicted events under back-pressure (slow client, network blip). Payload `{"missed":N}`. iOS treats this as "I missed state — refetch via the polling endpoint to reconcile."
