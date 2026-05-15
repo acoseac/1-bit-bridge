@@ -129,10 +129,10 @@
     </div>
     <div class="fix">
       <ol>
+        <li>Open the admin console's <strong>Jobs</strong> tab — it lists every pending / in-flight / failed upscale with its submission time and last-error string. A failure stack here usually points straight at the cause (most often <code>sox</code> missing, disk full, or an unreadable source file).</li>
         <li>Confirm <code>sox</code> is installed and on the bridge's <code>$PATH</code>: <code>sox --version</code> on the bridge host. If it's missing, install it (<code>brew install sox</code>, <code>apt install sox libsox-fmt-flac</code>, etc.).</li>
-        <li>Check disk space in the bridge's data directory. Each variant is roughly 3× the source size; a stalled job is sometimes <code>ENOSPC</code> in disguise.</li>
-        <li>Look at the worker pool stats in the admin console's Settings → Upscale section. <em>Failed</em> count rising and <em>Queue full</em> showing? The pool is overwhelmed — let it drain, or restart the bridge to clear stuck jobs.</li>
-        <li>If you've seen many half-finished variants pile up after restarts or crashes, run <code>./bridge upscale --gc</code> to reap orphans whose source files are gone or whose sidecars are unreferenced.</li>
+        <li>Check free space on the volume where variants live. The Library Inspector header shows the absolute path and current free space; if you've outgrown the default location, set <code>upscale.variantsDir</code> in <code>bridge.yaml</code> (or use <code>./bridge upscale move</code> to migrate without re-generating). Each variant is roughly 3× the source size — a stalled job is sometimes <code>ENOSPC</code> in disguise.</li>
+        <li>If many half-finished variants piled up after restarts or crashes, run <code>./bridge upscale --gc</code> to reap orphans whose source files are gone or whose sidecars are unreferenced.</li>
       </ol>
     </div>
 

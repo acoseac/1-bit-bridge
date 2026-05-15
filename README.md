@@ -19,7 +19,7 @@ Companion server for the **[1-bit iOS music player](https://apps.apple.com/us/ap
 
 ## Status
 
-**v0.1.2** — wire protocol frozen at [`PROTOCOL.md`](PROTOCOL.md) v1. macOS binaries are Developer-ID-signed and Apple-notarized; Windows binaries are unsigned for now (Authenticode signing via SignPath Foundation pending). See the [releases page](https://github.com/acoseac/1-bit-bridge/releases) for per-release notes.
+**v0.1.3** — wire protocol stays at [`PROTOCOL.md`](PROTOCOL.md) v1 (additive only since v0.1.2: classical-metadata fields on `TrackEntry`, `pushEventsSupported` / `pairingEventsSupported` on `/v1/health`, per-root structured reachability, `upscale.complete` SSE). macOS binaries are Developer-ID-signed and Apple-notarized; Windows binaries are unsigned for now (Authenticode signing via SignPath Foundation pending). See the [releases page](https://github.com/acoseac/1-bit-bridge/releases) for per-release notes.
 
 ## Install
 

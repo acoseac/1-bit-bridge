@@ -106,11 +106,11 @@
 
     <h2>What you get</h2>
     <ul class="features">
-      <li><strong>Pre-built library manifest</strong> served from SQLite — iOS fetches the full library (or a delta) in a single request, no walking. 50,000-track libraries sync in milliseconds.</li>
-      <li><strong>Bit-exact, no transcoding ever.</strong> FLAC, ALAC, WAV, AIFF, MP3, AAC, DSF, DFF — served as-is. iOS still pre-caches the full DSF before playback so the DAC's DoP lock isn't at risk.</li>
+      <li><strong>Pre-built library manifest</strong> served from SQLite — iOS fetches the full library (or a delta) in a single request, no walking. 50,000-track libraries sync in milliseconds. Classical metadata (composer / conductor / work / BPM) and multi-value artist credits ride along.</li>
+      <li><strong>Bit-exact, no transcoding ever.</strong> FLAC, ALAC, WAV, AIFF, MP3, AAC, DSF, DFF — served as-is. iOS still pre-caches the full DSF / DFF before playback so the DAC's DoP lock isn't at risk.</li>
       <li><strong>Tap-to-pair from iOS</strong> with admin approval, or generate-token-and-scan-QR for power users. Bearer tokens per device, rotatable, revocable.</li>
       <li><strong>Tailscale-ready</strong> with three integration modes — embedded tailnet node (zero CLI dependency), system-CLI passthrough, or LAN-only.</li>
-      <li><strong>Optional offline PCM upscaling</strong> via <code>sox</code> for high-end DACs that benefit from upsampled material — opt-in, off by default.</li>
+      <li><strong>Optional offline PCM upscaling</strong> via <code>sox</code> for high-end DACs that benefit from upsampled material — opt-in, off by default. Variants are managed from a folder-first Library Inspector in the admin console.</li>
     </ul>
     <p>Detailed feature list with config snippets and design rationale: <a href="features.html">features deep-dive</a>.</p>
 
