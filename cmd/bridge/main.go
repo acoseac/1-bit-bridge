@@ -1727,6 +1727,14 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// writes to the right file even if the operator changes cwd post-boot
 	// (shouldn't happen, but let's not trip them up).
 	absCfgPath, _ := filepath.Abs(*configPath)
+	// Shared instance across the admin tile AND the api server: the
+	// api layer's `/v1/health.endpoints` advertising in tsnet mode
+	// queries this same source for the embedded node's MagicDNSName +
+	// tailnet IPs (5s TTL cached at the api boundary). Constructed
+	// once so the per-source state (rare LastError stickiness, etc.)
+	// stays consistent across both consumers.
+	tailscaleAdminSrc := newTailscaleAdminSource(tailscaleAuto, tsnetServer, absCfgPath)
+	apiSrv.SetTailscaleStatus(tailscaleAdminSrc)
 	adminSrv, err := admin.New(admin.Deps{
 		CfgHolder:       cfgHolder,
 		CfgPath:         absCfgPath,
@@ -1740,7 +1748,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		Restart:         cancel,
 		Updater:         updAdapter,
 		BackupSources:   backupSources,
-		Tailscale:       newTailscaleAdminSource(tailscaleAuto, tsnetServer, absCfgPath),
+		Tailscale:       tailscaleAdminSrc,
 		Pairing:         pairingStore,
 		IsSupervised:    supervision.IsSupervised(),
 		UpscalePrecheck: transcode.PrecheckSox,

@@ -31,11 +31,13 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/admin"
 	"github.com/acoseac/1-bit-bridge/internal/advertise"
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
@@ -128,6 +130,23 @@ type Server struct {
 	reachability         *reachabilityCache   // per-root probe TTL cache used by /v1/list, /v1/stat, /v1/health
 	fingerprint          string
 	startedAt            time.Time
+
+	// tailscaleStatus is the embedded-tsnet status provider used by
+	// `reachableEndpoints` to advertise the bridge's `*.ts.net` URL +
+	// tailnet IPs in tsnet mode. Nil unless `WithTailscaleStatus` or
+	// `SetTailscaleStatus` is wired by cmd/bridge. Stays nil in unit
+	// tests that don't exercise the advertising path.
+	//
+	// 5s TTL cache below mirrors the `reachabilityCache` pattern —
+	// `/v1/health` is unauthenticated, so the underlying tsnet
+	// LocalClient IPC must not be invoked once per request under a
+	// LAN-flood scenario. The lock serializes concurrent callers
+	// onto a single in-flight Status() probe; subsequent callers
+	// observe the cached value.
+	tailscaleStatus        admin.TailscaleProvider
+	tailscaleStatusMu      sync.Mutex
+	tailscaleStatusCache   admin.TailscaleStatus
+	tailscaleStatusFetched time.Time
 }
 
 // ConfigHolder exposes the API server's live runtime-config holder so
@@ -430,6 +449,70 @@ func (s *Server) WithPairing(p *pairing.Store) *Server {
 func (s *Server) WithCertExpiry(notAfter time.Time) *Server {
 	s.certNotAfter = notAfter
 	return s
+}
+
+// WithTailscaleStatus wires the embedded-tsnet status provider used by
+// `reachableEndpoints` to advertise the bridge's `*.ts.net` URL +
+// tailnet IPs in tsnet mode. Builder form for consistency with the
+// surrounding chain in `cmd/bridge/main.go`. Pass `nil` (or skip the
+// call entirely) to opt out — the advertising path no-ops cleanly.
+//
+// In `cli` / `disabled` modes the provider is consulted but the
+// mode-gate in `reachableEndpoints` short-circuits before any
+// advertisement is emitted, so wiring it unconditionally is safe.
+func (s *Server) WithTailscaleStatus(p admin.TailscaleProvider) *Server {
+	s.tailscaleStatusMu.Lock()
+	s.tailscaleStatus = p
+	s.tailscaleStatusMu.Unlock()
+	return s
+}
+
+// SetTailscaleStatus is the deferred-setter counterpart to
+// `WithTailscaleStatus`. Two-phase init sites in cmd/bridge that
+// construct the api server BEFORE the tailscale status source is
+// available call this after both are ready. Idiomatic for components
+// whose lifecycles span early-setup + network-binding phases (the
+// embedded tsnet Server is created after `api.New(...)` in some
+// configurations and `newTailscaleAdminSource` needs it as input).
+func (s *Server) SetTailscaleStatus(p admin.TailscaleProvider) {
+	s.tailscaleStatusMu.Lock()
+	s.tailscaleStatus = p
+	s.tailscaleStatusMu.Unlock()
+}
+
+// tailscaleStatusTTL bounds how often `/v1/health` advertising will
+// re-probe the underlying tsnet LocalClient. Mirrors `reachabilityTTL`
+// (the existing 5-second cache for /v1/health-adjacent network probes).
+// The endpoint is unauthenticated; without this cap a LAN flood could
+// thrash the IPC channel. 5s is a comfortable upper bound on the
+// time-to-discover-newly-approved-tsnet-node UX (iOS polls /v1/health
+// every 15s so cache-miss latency is bounded by the cache TTL, not the
+// poll cadence).
+const tailscaleStatusTTL = 5 * time.Second
+
+// cachedTailscaleStatus returns a per-Server 5s-TTL-cached snapshot of
+// the embedded tsnet node's state. Uses `Status()` (cheap snapshot),
+// NOT `RefreshNow(ctx)` — the admin tile uses the latter for "force a
+// fresh probe" semantics; this code path is on an unauthenticated
+// hot route and must not allow per-request IPC.
+//
+// Returns the zero value when no provider is wired (test harnesses,
+// pre-tsnet bridges). Downstream callers gate on `BackendState ==
+// "Running" && MagicDNSName != ""` so the zero value is safe to use
+// without an explicit nil check at the call site.
+func (s *Server) cachedTailscaleStatus() admin.TailscaleStatus {
+	s.tailscaleStatusMu.Lock()
+	defer s.tailscaleStatusMu.Unlock()
+	if s.tailscaleStatus == nil {
+		return admin.TailscaleStatus{}
+	}
+	if !s.tailscaleStatusFetched.IsZero() &&
+		time.Since(s.tailscaleStatusFetched) < tailscaleStatusTTL {
+		return s.tailscaleStatusCache
+	}
+	s.tailscaleStatusCache = s.tailscaleStatus.Status()
+	s.tailscaleStatusFetched = time.Now()
+	return s.tailscaleStatusCache
 }
 
 // EventPublisher returns the broker as the Server-facing
@@ -805,24 +888,113 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 // removing a network interface (Tailscale up, Wi-Fi down) takes effect
 // on the next heartbeat without requiring a restart. Cost is a
 // `net.Interfaces()` + `.Addrs()` walk — cheap enough to not warrant
-// caching.
+// caching for the host-network part.
+//
+// In `tsnet` mode the embedded tsnet node's MagicDNSName + tailnet IPs
+// are appended from `s.cachedTailscaleStatus()` (5s TTL — see
+// `tailscaleStatusTTL`). The append happens BEFORE the class-stable
+// sort + dedupe so that a duplicate URL (e.g. an operator who
+// hardcoded the magic-DNS URL into `customEndpoints` as a pre-fix
+// workaround) ends up classified as `ClassTailscaleDNS` rather than
+// `ClassCustom`, keeping the URL ranked correctly in the iOS endpoint
+// selector's hint order.
 func (s *Server) reachableEndpoints() []string {
 	cfg := s.cfgHolder.Load()
 	_, portStr, err := net.SplitHostPort(cfg.ListenAddress)
 	if err != nil {
 		return nil
 	}
+	// `port` retained only for the >0 sanity check on the listen
+	// address; everything downstream uses `portStr` directly so we
+	// don't `strconv.Itoa(port)` once per synthesized endpoint.
 	port, err := strconv.Atoi(portStr)
 	if err != nil || port <= 0 {
 		return nil
 	}
-	return advertise.URLs(advertise.Params{
+	eps := advertise.Endpoints(advertise.Params{
 		Port:            port,
 		CustomEndpoints: cfg.CustomEndpoints,
 		// Drives host-Tailscale-vs-embedded-tsnet endpoint
 		// discrimination — see `advertise.Params.TailscaleMode` docblock.
 		TailscaleMode: cfg.Tailscale.Mode,
 	})
+	if cfg.Tailscale.Mode == "tsnet" {
+		eps = s.appendTsnetEndpoints(eps, portStr)
+	}
+	return classStableUniqueURLs(eps)
+}
+
+// appendTsnetEndpoints adds the embedded tsnet node's MagicDNSName +
+// tailnet IPs to `eps` when the cached status reports the node is
+// fully up. No-op when:
+//   - the provider isn't wired (`s.tailscaleStatus` nil — collapses
+//     `cachedTailscaleStatus` to a zero value),
+//   - `BackendState != "Running"` (pre-auth states have no LE cert
+//     yet; advertising would surface the TLS error PR #267 just
+//     closed),
+//   - `MagicDNSName == ""` (MagicDNS can be tailnet-disabled even
+//     in Running state; the LE cert covers the hostname only so
+//     IP-only advertising offers no usable TLS path).
+//
+// Split out from `reachableEndpoints` to keep that function below
+// the cognitive-complexity threshold and to give the gate decision
+// a single named home.
+func (s *Server) appendTsnetEndpoints(eps []advertise.Endpoint, portStr string) []advertise.Endpoint {
+	snap := s.cachedTailscaleStatus()
+	if snap.BackendState != "Running" || snap.MagicDNSName == "" {
+		return eps
+	}
+	magicDNS := strings.TrimSuffix(snap.MagicDNSName, ".")
+	eps = append(eps, advertise.Endpoint{
+		URL:   fmt.Sprintf("https://%s", net.JoinHostPort(magicDNS, portStr)),
+		Class: advertise.ClassTailscaleDNS,
+	})
+	for _, ipStr := range snap.TailscaleIPs {
+		// `st.Self.TailscaleIPs` is `[]netip.Addr.String()` values —
+		// guaranteed well-formed. `strings.Contains(":")` is a
+		// sufficient v4-vs-v6 discriminator without `net.ParseIP`'s
+		// 16-byte allocation per IP.
+		class := advertise.ClassTailscaleV4
+		if strings.Contains(ipStr, ":") {
+			class = advertise.ClassTailscaleV6
+		}
+		eps = append(eps, advertise.Endpoint{
+			URL:   fmt.Sprintf("https://%s", net.JoinHostPort(ipStr, portStr)),
+			Class: class,
+		})
+	}
+	return eps
+}
+
+// classStableUniqueURLs applies the class-stable sort + dedupe + URL
+// flatten that `reachableEndpoints` returns. Sort happens BEFORE
+// dedupe so that a duplicate URL across classes (the canonical
+// case: an operator hardcoded the magic-DNS URL into
+// `customEndpoints` as a pre-tsnet-auto-advertising workaround,
+// producing both a `ClassCustom` and a `ClassTailscaleDNS` entry
+// for the same URL) lands in the result under the lower-numbered
+// (higher-priority) class — `ClassTailscaleDNS` (3) wins over
+// `ClassCustom` (7). A dedupe-first pass would keep insertion-order
+// (`ClassCustom` first) and demote the URL to the bottom of the
+// ranking.
+func classStableUniqueURLs(eps []advertise.Endpoint) []string {
+	sort.SliceStable(eps, func(i, j int) bool {
+		return eps[i].Class < eps[j].Class
+	})
+	seen := make(map[string]bool, len(eps))
+	unique := eps[:0]
+	for _, e := range eps {
+		if seen[e.URL] {
+			continue
+		}
+		seen[e.URL] = true
+		unique = append(unique, e)
+	}
+	out := make([]string, len(unique))
+	for i, e := range unique {
+		out[i] = e.URL
+	}
+	return out
 }
 
 // manifestHandler serves GET /v1/manifest?since=<rfc3339> with the current
