@@ -918,55 +918,66 @@ func (s *Server) reachableEndpoints() []string {
 		// discrimination — see `advertise.Params.TailscaleMode` docblock.
 		TailscaleMode: cfg.Tailscale.Mode,
 	})
-
-	// Tsnet-mode embedded-node advertising. Gated on:
-	//   - mode == "tsnet" (cli/disabled never advertise via this path)
-	//   - provider is wired (`s.tailscaleStatus` non-nil; nil collapses
-	//     `cachedTailscaleStatus` to a zero value which fails the next
-	//     two checks)
-	//   - BackendState == "Running" (the node is fully up; pre-auth
-	//     states have no LE cert yet and advertising would surface
-	//     the TLS error that PR #267 just closed)
-	//   - MagicDNSName non-empty (MagicDNS can be tailnet-disabled even
-	//     in Running state; the LE cert covers the hostname only so
-	//     IP-only advertising offers no useful TLS path)
 	if cfg.Tailscale.Mode == "tsnet" {
-		snap := s.cachedTailscaleStatus()
-		if snap.BackendState == "Running" && snap.MagicDNSName != "" {
-			magicDNS := strings.TrimSuffix(snap.MagicDNSName, ".")
-			eps = append(eps, advertise.Endpoint{
-				URL:   fmt.Sprintf("https://%s", net.JoinHostPort(magicDNS, portStr)),
-				Class: advertise.ClassTailscaleDNS,
-			})
-			for _, ipStr := range snap.TailscaleIPs {
-				// `st.Self.TailscaleIPs` is `[]netip.Addr.String()`
-				// values — guaranteed well-formed. `strings.Contains(":")`
-				// is a sufficient v4-vs-v6 discriminator without
-				// `net.ParseIP`'s 16-byte allocation per IP.
-				class := advertise.ClassTailscaleV4
-				if strings.Contains(ipStr, ":") {
-					class = advertise.ClassTailscaleV6
-				}
-				eps = append(eps, advertise.Endpoint{
-					URL:   fmt.Sprintf("https://%s", net.JoinHostPort(ipStr, portStr)),
-					Class: class,
-				})
-			}
-		}
+		eps = s.appendTsnetEndpoints(eps, portStr)
 	}
+	return classStableUniqueURLs(eps)
+}
 
-	// CRITICAL ORDER — sort FIRST, then dedupe. `advertise.Endpoints`
-	// returns class-sorted output including any operator-configured
-	// `CustomEndpoints` at the tail (`ClassCustom`). If an operator
-	// hardcoded the magic-DNS URL into `customEndpoints` (the pre-PR
-	// workaround for embedded-tsnet advertising landing late), it
-	// sits at position N-1 with `ClassCustom`. Appending the new
-	// tsnet entries puts them AFTER that — so a dedupe-first pass
-	// would see the `ClassCustom` instance first, keep its (wrong)
-	// class, and the subsequent sort would rank the URL at the bottom
-	// under `ClassCustom`. Sorting first puts the `ClassTailscaleDNS`
-	// instance ahead of the `ClassCustom` duplicate; first-occurrence-
-	// wins dedupe then preserves the higher-priority classification.
+// appendTsnetEndpoints adds the embedded tsnet node's MagicDNSName +
+// tailnet IPs to `eps` when the cached status reports the node is
+// fully up. No-op when:
+//   - the provider isn't wired (`s.tailscaleStatus` nil — collapses
+//     `cachedTailscaleStatus` to a zero value),
+//   - `BackendState != "Running"` (pre-auth states have no LE cert
+//     yet; advertising would surface the TLS error PR #267 just
+//     closed),
+//   - `MagicDNSName == ""` (MagicDNS can be tailnet-disabled even
+//     in Running state; the LE cert covers the hostname only so
+//     IP-only advertising offers no usable TLS path).
+//
+// Split out from `reachableEndpoints` to keep that function below
+// the cognitive-complexity threshold and to give the gate decision
+// a single named home.
+func (s *Server) appendTsnetEndpoints(eps []advertise.Endpoint, portStr string) []advertise.Endpoint {
+	snap := s.cachedTailscaleStatus()
+	if snap.BackendState != "Running" || snap.MagicDNSName == "" {
+		return eps
+	}
+	magicDNS := strings.TrimSuffix(snap.MagicDNSName, ".")
+	eps = append(eps, advertise.Endpoint{
+		URL:   fmt.Sprintf("https://%s", net.JoinHostPort(magicDNS, portStr)),
+		Class: advertise.ClassTailscaleDNS,
+	})
+	for _, ipStr := range snap.TailscaleIPs {
+		// `st.Self.TailscaleIPs` is `[]netip.Addr.String()` values —
+		// guaranteed well-formed. `strings.Contains(":")` is a
+		// sufficient v4-vs-v6 discriminator without `net.ParseIP`'s
+		// 16-byte allocation per IP.
+		class := advertise.ClassTailscaleV4
+		if strings.Contains(ipStr, ":") {
+			class = advertise.ClassTailscaleV6
+		}
+		eps = append(eps, advertise.Endpoint{
+			URL:   fmt.Sprintf("https://%s", net.JoinHostPort(ipStr, portStr)),
+			Class: class,
+		})
+	}
+	return eps
+}
+
+// classStableUniqueURLs applies the class-stable sort + dedupe + URL
+// flatten that `reachableEndpoints` returns. Sort happens BEFORE
+// dedupe so that a duplicate URL across classes (the canonical
+// case: an operator hardcoded the magic-DNS URL into
+// `customEndpoints` as a pre-tsnet-auto-advertising workaround,
+// producing both a `ClassCustom` and a `ClassTailscaleDNS` entry
+// for the same URL) lands in the result under the lower-numbered
+// (higher-priority) class — `ClassTailscaleDNS` (3) wins over
+// `ClassCustom` (7). A dedupe-first pass would keep insertion-order
+// (`ClassCustom` first) and demote the URL to the bottom of the
+// ranking.
+func classStableUniqueURLs(eps []advertise.Endpoint) []string {
 	sort.SliceStable(eps, func(i, j int) bool {
 		return eps[i].Class < eps[j].Class
 	})
@@ -979,7 +990,6 @@ func (s *Server) reachableEndpoints() []string {
 		seen[e.URL] = true
 		unique = append(unique, e)
 	}
-
 	out := make([]string, len(unique))
 	for i, e := range unique {
 		out[i] = e.URL

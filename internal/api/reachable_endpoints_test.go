@@ -78,7 +78,7 @@ func TestReachableEndpoints_TsnetRunningAddsMagicDNSAndIPs(t *testing.T) {
 	dnsIdx := indexOf(eps, "https://bridge.example.ts.net:7788")
 	v4Idx := indexOf(eps, "https://100.64.0.5:7788")
 	v6Idx := indexOf(eps, "https://[fd7a:115c::1]:7788")
-	if !(dnsIdx < v4Idx && v4Idx < v6Idx) {
+	if dnsIdx >= v4Idx || v4Idx >= v6Idx {
 		t.Errorf("class-stable order broken: dns=%d v4=%d v6=%d in %v",
 			dnsIdx, v4Idx, v6Idx, eps)
 	}
@@ -281,7 +281,7 @@ func TestReachableEndpoints_TsnetMagicDNSDupAgainstCustomKeepsTsnetClass(t *test
 	if anchorIdx < 0 {
 		t.Fatalf("anchor URL missing: %v", eps)
 	}
-	if !(magicIdx < anchorIdx) {
+	if magicIdx >= anchorIdx {
 		t.Errorf("magic-DNS URL did not rank ahead of pure-custom URL: magic=%d anchor=%d in %v",
 			magicIdx, anchorIdx, eps)
 	}
