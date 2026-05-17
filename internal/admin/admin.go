@@ -372,6 +372,24 @@ type TailscaleStatus struct {
 	MagicDNSURL       string     `json:"magicDNSURL,omitempty"`
 	LastError         string     `json:"lastError,omitempty"`
 	LastChecked       *time.Time `json:"lastChecked,omitempty"`
+
+	// BackendState is the upstream `ipnstate.Status.BackendState`
+	// surfaced for consumers that need to gate on whether the embedded
+	// tsnet node is fully up. One of: "NoState", "NeedsLogin",
+	// "NeedsMachineAuth", "Stopped", "Starting", "Running". Empty when
+	// the source is the CLI auto-pilot (cli-mode adapter) — that path
+	// drives its own check via `CLIAvailable` + `MagicDNSName` for
+	// existing consumers; new consumers consult this explicit field.
+	BackendState string `json:"backendState,omitempty"`
+
+	// TailscaleIPs are the tsnet node's tailnet-assigned addresses
+	// (CGNAT 100.x IPv4 + ULA fd7a:115c:a1e0::/48 IPv6) as strings,
+	// surfaced so the api layer can advertise them in
+	// `/v1/health.endpoints` for iOS clients that need an IP fallback
+	// when MagicDNS resolution misses. Empty in cli-mode; populated
+	// only by the embedded-tsnet path. `omitempty` keeps the existing
+	// admin-tile JSON shape unchanged when the source doesn't populate.
+	TailscaleIPs []string `json:"tailscaleIPs,omitempty"`
 }
 
 // UpdateProvider is the read-side of the updater used by the admin

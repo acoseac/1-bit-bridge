@@ -220,10 +220,26 @@ func tsnetAdminStatus(ctx context.Context, s *tsnet.Server) admin.TailscaleStatu
 		out.LastError = fmt.Sprintf("tsnet status: %v", err)
 		return out
 	}
+	// Surface BackendState unconditionally so consumers (api layer's
+	// `/v1/health.endpoints` advertising in particular) can gate on
+	// "Running" vs the pre-auth states (NeedsLogin / NeedsMachineAuth /
+	// NoState). The pre-fix path only inferred up-ness from the
+	// presence of a MagicDNSName, which is a weaker signal — Self can
+	// carry a populated DNSName across an explicit logout for a brief
+	// window before the local state is fully torn down.
+	out.BackendState = st.BackendState
 	if st.Self != nil {
 		out.NodeName = st.Self.HostName
 		if len(st.Self.TailscaleIPs) > 0 {
 			out.MagicDNSName = st.Self.DNSName
+		}
+		// Always copy the tailnet IPs even if MagicDNSName is empty —
+		// the api-layer advertising gate is independent and may have
+		// its own MagicDNSName-required rule (it does, per the plan,
+		// since the LE cert covers the hostname only — but the
+		// representation here should be honest about what tsnet has).
+		for _, ip := range st.Self.TailscaleIPs {
+			out.TailscaleIPs = append(out.TailscaleIPs, ip.String())
 		}
 	}
 	domains := s.CertDomains()
