@@ -1137,7 +1137,10 @@ dialog h2 { font-size: 18px; color: var(--accent); }
  * heading's baseline. */
 .inspector-tree .inspector-current-heading-row {
   display: flex;
-  align-items: baseline;
+  /* `center` (not `baseline`): button has padding above its text, so
+   * baseline alignment floats it visibly above the H2's optical
+   * center. Center keeps the ⓘ pill aligned with the heading. */
+  align-items: center;
   gap: 0.75rem;
 }
 .inspector-tree .inspector-current-heading-row h2 {
@@ -1337,14 +1340,18 @@ dialog h2 { font-size: 18px; color: var(--accent); }
   text-overflow: ellipsis;
   vertical-align: bottom;
 }
-/* Make the column headers user-resizable. CSS `resize: horizontal`
- * on the <th> with `overflow: hidden` is the cheapest path —
- * native drag handle in the bottom-right of the cell, no JS. The
- * row body's column widths follow because the table uses the
- * browser default `table-layout: auto`. */
+/* Column headers carry a `min-width: 4ch` floor so a very-narrow tree
+ * column doesn't collapse the numeric columns to single-character
+ * stubs. The prior `resize: horizontal` + `overflow: hidden` combo
+ * was removed: CSS `resize` on `display: table-cell` elements
+ * renders a small diagonal drag-handle artifact in the cell corner
+ * (visible as a `↙`-shaped mark under each label) that operators
+ * read as a rendering bug. The feature also doesn't work cleanly on
+ * Chromium — manual width drags from the cell corner often miss the
+ * adjacent column or trip the table-layout-auto reflow. If column
+ * resize is wanted back, do it with a dedicated drag handle in JS
+ * rather than the native `resize` property on `<th>`. */
 #inspector-rows-table th {
-  overflow: hidden;
-  resize: horizontal;
   min-width: 4ch;
 }
 /* The trailing folder-actions cell holds the ⓘ button — `max-width: 0`
