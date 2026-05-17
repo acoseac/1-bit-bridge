@@ -68,6 +68,10 @@ type Config struct {
 	Scanner         ScannerConfig      `yaml:"scanner,omitempty"`
 	Limits          LimitsConfig       `yaml:"limits,omitempty"`
 	Integrity       IntegrityConfig    `yaml:"integrity,omitempty"`
+
+	// DisableHTTP3 prevents the server from binding UDP ports and
+	// advertising Alt-Svc headers for HTTP/3 upgrades. Defaults to false.
+	DisableHTTP3 bool `yaml:"disableHttp3,omitempty"`
 }
 
 // IntegrityConfig controls the proactive consistency watchers
@@ -690,6 +694,11 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if v := os.Getenv("BRIDGE_LIBRARY_NAME"); v != "" {
 		c.LibraryName = v
+	}
+	if v := os.Getenv("BRIDGE_DISABLE_HTTP3"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.DisableHTTP3 = b
+		}
 	}
 	if v := os.Getenv("BRIDGE_LIBRARY_ROOTS"); v != "" {
 		// Use the OS-native PATH-style separator: `:` on POSIX,

@@ -12,8 +12,9 @@ This is the **source of truth** for the wire contract between the `1-bit-bridge`
 
 ## Transport
 
-- **HTTPS only**, HTTP/2 preferred. No plaintext HTTP endpoint.
+- **HTTPS only**, HTTP/2 and HTTP/3 (QUIC) preferred. No plaintext HTTP endpoint.
 - Server mints a self-signed certificate on first run (see `internal/tls`); iOS pins by the SHA-256 fingerprint captured during pairing. A public-CA cert is also supported if configured.
+- **HTTP/3 Discovery**: Server advertises HTTP/3 capability via the `Alt-Svc` header on HTTP/1.1 and HTTP/2 responses. Clients supporting QUIC should upgrade future connections to the advertised UDP port.
 - Path segment: all endpoints are prefixed `/v1/`.
 
 ## Authentication

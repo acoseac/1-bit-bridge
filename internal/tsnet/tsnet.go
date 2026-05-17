@@ -2,6 +2,7 @@ package tsnet
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -14,6 +15,45 @@ import (
 	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/tsnet"
 )
+
+// ... rest of the struct definition ...
+
+// ListenPacket wraps the underlying tsnet.Server.ListenPacket.
+func (s *Server) ListenPacket(network, addr string) (net.PacketConn, error) {
+	s.lifecycleMu.Lock()
+	server, started := s.server, s.started
+	s.lifecycleMu.Unlock()
+
+	if !started || server == nil {
+		return nil, errors.New("tsnet: ListenPacket called before Start")
+	}
+	return server.ListenPacket(network, addr)
+}
+
+// HTTP3TLSConfig returns a tls.Config suitable for use with http3.Server.
+// It uses GetCertificate to dynamically fetch certificates from the
+// tailnet engine, ensuring QUIC handshakes work over tsnet without
+// on-disk cert files.
+func (s *Server) HTTP3TLSConfig() *tls.Config {
+	return &tls.Config{
+		NextProtos: []string{"h3"}, // Required for HTTP/3 ALPN
+		GetCertificate: func(chi *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			s.lifecycleMu.Lock()
+			srv := s.server
+			started := s.started
+			s.lifecycleMu.Unlock()
+
+			if !started || srv == nil {
+				return nil, errors.New("tsnet server not ready for TLS handshake")
+			}
+			lc, err := srv.LocalClient()
+			if err != nil {
+				return nil, err
+			}
+			return lc.GetCertificate(chi)
+		},
+	}
+}
 
 // Server wraps tailscale.com/tsnet.Server with the bridge-specific
 // lifecycle (interactive auth, slog-routed logging, secure state-dir

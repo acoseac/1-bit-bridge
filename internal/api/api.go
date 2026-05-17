@@ -26,6 +26,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -486,8 +487,27 @@ func (s *Server) Resolver() *bridgefs.Resolver { return s.resolver }
 // "bridge restarted, abandon this in-flight pairing request."
 func (s *Server) StartedAt() time.Time { return s.startedAt }
 
+func (s *Server) withAltSvc(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.cfgHolder.Load().DisableHTTP3 {
+			_, requestPort, err := net.SplitHostPort(r.Host)
+			if err != nil {
+				// Default fallback for standard port/tsnet connections
+				requestPort = "443"
+			}
+			w.Header().Set("Alt-Svc", fmt.Sprintf(`h3=":%s"; ma=2592000`, requestPort))
+		} else {
+			// Actively instruct the client to flush its cached protocol upgrade routes
+			w.Header().Set("Alt-Svc", "clear")
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // Handler returns the root http.Handler, pre-wrapped with the
-// X-Bridge-Protocol middleware.
+// X-Bridge-Protocol middleware. Outermost wrapper is withAltSvc so
+// protocol upgrades (or cache-clear directives) land even on 500
+// panic recovery paths.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	// Iterate the single-source-of-truth registry (see
@@ -514,9 +534,10 @@ func (s *Server) Handler() http.Handler {
 	//   - `requestLogging` wraps recoverer so the captured status (e.g.
 	//     500 on the recovery path) and request_id are emitted on the
 	//     same line.
-	//   - `protocolHeader` outermost is unchanged — header injection is
-	//     independent of the request body and can't fail.
-	return protocolHeader(requestLogging(recoverer(mux)))
+	//   - `protocolHeader` wraps logging so the version header is injected.
+	//   - `withAltSvc` outermost ensures protocol hints reach the client
+	//     even on failure paths.
+	return s.withAltSvc(protocolHeader(requestLogging(recoverer(mux))))
 }
 
 // HealthResponse is the /v1/health JSON body. Field ordering must stay

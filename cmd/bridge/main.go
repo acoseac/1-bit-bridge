@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -29,6 +30,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/mattn/go-isatty"
+	"github.com/quic-go/quic-go/http3"
 
 	"github.com/acoseac/1-bit-bridge/internal/admin"
 	"github.com/acoseac/1-bit-bridge/internal/advertise"
@@ -1684,13 +1686,16 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		}
 		apiSrv.EventPublisher().Publish("pairing."+snap.ID, ev)
 	})
+
+	tlsConfig := &tls.Config{
+		GetCertificate: certManager.Get,
+		MinVersion:     tls.VersionTLS12,
+	}
+
 	httpSrv := &http.Server{
-		Addr:    cfg.ListenAddress,
-		Handler: apiSrv.Handler(),
-		TLSConfig: &tls.Config{
-			GetCertificate: certManager.Get,
-			MinVersion:     tls.VersionTLS12,
-		},
+		Addr:      cfg.ListenAddress,
+		Handler:   apiSrv.Handler(),
+		TLSConfig: tlsConfig,
 		// Defence-in-depth against slow-loris / half-open sockets.
 		// WriteTimeout is deliberately left UNSET (zero) because
 		// `/v1/download` streams multi-GB DSD files to iOS (and needs
@@ -1878,6 +1883,81 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		defer advertiser.Close()
 	}
 
+	var lanH3Srv *http3.Server
+	var udpConn *net.UDPConn
+	var tsH3Srv *http3.Server
+	var tsUDPConn net.PacketConn
+
+	if !cfg.DisableHTTP3 {
+		// 1. Resilient LAN Listener
+		udpAddr, err := net.ResolveUDPAddr("udp", cfg.ListenAddress)
+		if err != nil {
+			logger.Warn("Failed to resolve UDP address, bypassing HTTP/3", "err", err)
+		} else {
+			udpConn, err = net.ListenUDP("udp", udpAddr)
+			if err != nil {
+				logger.Warn("Failed to bind LAN UDP socket, running HTTP/2 only", "err", err)
+			} else {
+				// Expand the UDP window to accommodate heavy FLAC/PCM streaming arrays
+				const socketBufferSize = 2500 * 1024 // 2.5 MB
+				if err := udpConn.SetReadBuffer(socketBufferSize); err != nil {
+					logger.Debug("Could not expand UDP read buffer size", "err", err)
+				}
+				if err := udpConn.SetWriteBuffer(socketBufferSize); err != nil {
+					logger.Debug("Could not expand UDP write buffer size", "err", err)
+				}
+
+				var lanTLSConfig *tls.Config
+				if tlsConfig != nil {
+					lanTLSConfig = tlsConfig.Clone()
+					lanTLSConfig.NextProtos = []string{"h3"} // Force HTTP/3 ALPN exclusively
+				}
+
+				if lanTLSConfig != nil {
+					lanH3Srv = &http3.Server{
+						Handler:   apiSrv.Handler(), // Crucial: Extract the compiled http.Handler
+						TLSConfig: lanTLSConfig,
+					}
+					go func() {
+						if err := lanH3Srv.Serve(udpConn); err != nil &&
+							!errors.Is(err, http.ErrServerClosed) &&
+							!strings.Contains(err.Error(), "server closed") {
+							logger.Error("h3 serve direct", "err", err)
+						}
+					}()
+				} else {
+					logger.Warn("LAN TLS configuration is missing; bypassing LAN HTTP/3 initialization")
+					if udpConn != nil {
+						_ = udpConn.Close()
+						udpConn = nil
+					}
+				}
+			}
+		}
+
+		// 2. Tailscale Listener
+		if tsnetServer != nil {
+			var err error
+			tsUDPConn, err = tsnetServer.ListenPacket("udp", ":443")
+			if err != nil {
+				logger.Warn("Failed to bind tsnet UDP socket, running HTTP/2 only on tailnet", "err", err)
+			} else {
+				tsTLSConf := tsnetServer.HTTP3TLSConfig()
+				tsH3Srv = &http3.Server{
+					Handler:   apiSrv.Handler(), // Crucial: Extract the compiled http.Handler
+					TLSConfig: tsTLSConf,
+				}
+				go func() {
+					if err := tsH3Srv.Serve(tsUDPConn); err != nil &&
+						!errors.Is(err, http.ErrServerClosed) &&
+						!strings.Contains(err.Error(), "server closed") {
+						logger.Error("h3 serve tsnet", "err", err)
+					}
+				}()
+			}
+		}
+	}
+
 	fmt.Fprintln(stdout, "Press Ctrl-C to shut down.")
 
 	serveErr := make(chan error, 1)
@@ -1995,14 +2075,46 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	case <-ctx.Done():
 		fmt.Fprintln(stdout, "\nShutting down...")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
-		defer cancel()
-		if err := httpSrv.Shutdown(shutdownCtx); err != nil {
-			fmt.Fprintf(stderr, "shutdown: %v\n", err)
-			return 1
+		// No defer cancel() here — we need to control the release timing manually
+		// to avoid leaks during reboots while guaranteeing resource release.
+
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+				fmt.Fprintf(stderr, "http shutdown: %v\n", err)
+			}
+		}()
+
+		if lanH3Srv != nil {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := lanH3Srv.Shutdown(shutdownCtx); err != nil {
+					fmt.Fprintf(stderr, "lan h3 shutdown: %v\n", err)
+				}
+			}()
 		}
-		// Tsnet teardown is handled by the deferred cleanup
-		// registered alongside the goroutine spawn above — runs on
-		// every exit branch, not just this one.
+		if tsH3Srv != nil {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := tsH3Srv.Shutdown(shutdownCtx); err != nil {
+					fmt.Fprintf(stderr, "tsnet h3 shutdown: %v\n", err)
+				}
+			}()
+		}
+
+		wg.Wait()
+		cancel() // Explicitly release context resources immediately
+
+		if udpConn != nil {
+			_ = udpConn.Close()
+		}
+		if tsUDPConn != nil {
+			_ = tsUDPConn.Close()
+		}
 	}
 	return 0
 }
