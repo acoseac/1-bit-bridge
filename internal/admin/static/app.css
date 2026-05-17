@@ -1139,7 +1139,7 @@ dialog h2 { font-size: 18px; color: var(--accent); }
   display: flex;
   /* `center` (not `baseline`): button has padding above its text, so
    * baseline alignment floats it visibly above the H2's optical
-   * centre. Center keeps the ⓘ pill aligned with the heading. */
+   * center. Center keeps the ⓘ pill aligned with the heading. */
   align-items: center;
   gap: 0.75rem;
 }
