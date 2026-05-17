@@ -1016,6 +1016,9 @@ func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 // listener, same SIGINT graceful-shutdown — just with the inputs
 // pre-parsed. Returns the exit code the CLI would.
 func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	configPath := &opts.configPath
 	addrOverride := &opts.addrOverride
 	cfg, err := config.Load(*configPath)
@@ -1729,6 +1732,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		Fingerprint:     fingerprint,
 		StartedAt:       time.Now().UTC(),
 		ScanCtx:         scanCtx,
+		Restart:         cancel,
 		Updater:         updAdapter,
 		BackupSources:   backupSources,
 		Tailscale:       newTailscaleAdminSource(tailscaleAuto, tsnetServer, absCfgPath),
