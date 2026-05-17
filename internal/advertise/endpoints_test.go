@@ -134,6 +134,45 @@ func TestShouldAdvertiseHostTailscale(t *testing.T) {
 	}
 }
 
+// TestEndpointsSkipsTailscaleCLIInTsnetMode is the structural complement
+// to TestEndpointsRespectsTailscaleMode: it pins that `Endpoints()` not
+// only filters Tailscale entries OUT of its result in tsnet/disabled
+// mode, but ALSO never invokes the `tailscale status --json` CLI shell-
+// out in the first place. The output-only assertion below would pass
+// even if `Endpoints()` shelled out the CLI and then discarded the
+// result — a regression that would silently reintroduce the
+// sandboxed-CLI dependency this PR removes (cert-mint failures on
+// macOS systems with the App Store Tailscale install, per CLAUDE.md
+// "macOS Tailscale gotcha"). Using the existing `withStubTailscaleStatus`
+// seam (also `tailscaleStatusJSONFunc`) so the spy is local and
+// disposed via t.Cleanup.
+func TestEndpointsSkipsTailscaleCLIInTsnetMode(t *testing.T) {
+	for _, mode := range []string{"tsnet", "disabled"} {
+		t.Run(mode, func(t *testing.T) {
+			var calls int
+			prev := tailscaleStatusJSONFunc
+			resetTailscaleStatusCache()
+			t.Cleanup(func() {
+				tailscaleStatusJSONFunc = prev
+				resetTailscaleStatusCache()
+			})
+			tailscaleStatusJSONFunc = func() (tailscaleStatus, error) {
+				calls++
+				return tailscaleStatus{}, nil
+			}
+			_ = Endpoints(Params{
+				Port:          7788,
+				HostOverride:  "testhost",
+				TailscaleMode: mode,
+			})
+			if calls != 0 {
+				t.Errorf("mode=%q: expected zero CLI shell-outs, got %d",
+					mode, calls)
+			}
+		})
+	}
+}
+
 // TestEndpointsRespectsTailscaleMode locks the structural intent of
 // the mode gate: tsnet/disabled-mode callers see NO Tailscale-classed
 // endpoints (neither the IP-walk ClassTailscaleV4/V6 from
