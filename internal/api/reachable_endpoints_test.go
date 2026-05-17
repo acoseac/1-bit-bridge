@@ -220,6 +220,34 @@ func TestReachableEndpoints_CLIModeSkipsWhenCertMissing(t *testing.T) {
 	}
 }
 
+// TestReachableEndpoints_EmptyModeBehavesLikeCLI is the regression
+// guard Gemini flagged on PR #269 round 1: operators with no
+// `tailscale:` block in YAML (the common pre-tsnet config shape)
+// carry `cfg.Tailscale.Mode == ""`. Pre-refactor, the package-level
+// `shouldAdvertiseHostTailscale("")` returned true and host
+// Tailscale advertising fired. After the refactor, the api-layer
+// gate must resolve "" → "cli" so those operators see no
+// behavioural change. Mirrors `config.TailscaleConfig.EffectiveMode()`
+// which resolves the same default at validate time.
+func TestReachableEndpoints_EmptyModeBehavesLikeCLI(t *testing.T) {
+	s := makeServerForEndpoints(t, "", nil) // ← empty mode
+	s.tailscaleStatus = &fakeTailscaleProvider{
+		snap: admin.TailscaleStatus{
+			CertPresent:  true,
+			MagicDNSName: "host.tailnet.ts.net",
+			TailscaleIPs: []string{"100.64.0.5"},
+		},
+	}
+	eps := s.reachableEndpoints()
+	if !contains(eps, "https://host.tailnet.ts.net:7788") {
+		t.Errorf("empty mode + CertPresent should advertise MagicDNS URL "+
+			"(empty defaults to cli, same as config.EffectiveMode); got=%v", eps)
+	}
+	if !contains(eps, "https://100.64.0.5:7788") {
+		t.Errorf("empty mode + CertPresent should advertise tailnet v4 IP; got=%v", eps)
+	}
+}
+
 // TestReachableEndpoints_DisabledModeSkipsTsnetAdvertising — same as
 // cli mode but for the explicit `disabled` setting.
 func TestReachableEndpoints_DisabledModeSkipsTsnetAdvertising(t *testing.T) {

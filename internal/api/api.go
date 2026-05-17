@@ -919,8 +919,19 @@ func (s *Server) reachableEndpoints() []string {
 	// provider for both `cli` and `tsnet` modes. The advertise package
 	// is no longer Tailscale-aware (no CLI shell-out, no utun
 	// interface-walk gate). `disabled` mode skips this path entirely.
-	if cfg.Tailscale.Mode == "cli" || cfg.Tailscale.Mode == "tsnet" {
-		eps = s.appendTailscaleEndpoints(eps, portStr, cfg.Tailscale.Mode)
+	//
+	// Empty mode is resolved to "cli" here matching `config.TailscaleConfig
+	// .EffectiveMode()`'s default at validate time. Operators with no
+	// `tailscale:` block in YAML (the common pre-tsnet shape) carry
+	// `cfg.Tailscale.Mode == ""`; treating that as a skip would silently
+	// drop the host's Tailscale advertising those operators relied on
+	// before PR #267 (a regression Gemini caught on PR #269).
+	mode := cfg.Tailscale.Mode
+	if mode == "" {
+		mode = "cli"
+	}
+	if mode == "cli" || mode == "tsnet" {
+		eps = s.appendTailscaleEndpoints(eps, portStr, mode)
 	}
 	return classStableUniqueURLs(eps)
 }
