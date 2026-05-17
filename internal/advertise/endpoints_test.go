@@ -92,6 +92,78 @@ func TestPortDefaultsTo7788(t *testing.T) {
 	// is the real guard.
 }
 
+// TestShouldAdvertiseHostTailscale pins the mode gate used in two
+// places (the `net.Interfaces()` walk filter and the GetTailscaleDNSName
+// call) so a future refactor that touches one site can't drift the
+// behaviour silently. Back-compat for callers that don't pass the
+// field (empty string → include) is locked in by the empty-mode case.
+//
+// The contract:
+//   - cli / "" → include host Tailscale advertising (back-compat)
+//   - tsnet / disabled → suppress (LAN listener can't serve LE for
+//     the host's MagicDNS hostname; the embedded tsnet node has its
+//     own listener that handles the *.ts.net SNI correctly)
+//   - unknown values → include (fail-open; mirrors `EffectiveMode`
+//     which falls back to cli on empty but errors on typos at the
+//     config-validate layer — by the time we read it here it's
+//     already been validated)
+//   - case + surrounding whitespace are normalised
+func TestShouldAdvertiseHostTailscale(t *testing.T) {
+	cases := []struct {
+		mode string
+		want bool
+	}{
+		{"", true},
+		{"cli", true},
+		{"CLI", true},
+		{" cli ", true},
+		{"tsnet", false},
+		{"TSNET", false},
+		{" tsnet\n", false},
+		{"disabled", false},
+		{"Disabled", false},
+		{"unknown", true}, // fail-open per docblock
+	}
+	for _, tc := range cases {
+		t.Run(tc.mode, func(t *testing.T) {
+			if got := shouldAdvertiseHostTailscale(tc.mode); got != tc.want {
+				t.Errorf("shouldAdvertiseHostTailscale(%q) = %v, want %v",
+					tc.mode, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestEndpointsRespectsTailscaleMode locks the structural intent of
+// the mode gate: tsnet/disabled-mode callers see NO Tailscale-classed
+// endpoints (neither the IP-walk ClassTailscaleV4/V6 from
+// `net.Interfaces()` nor the MagicDNS ClassTailscaleDNS from the
+// `tailscale status --json` shell-out). Best-effort assertion — on a
+// test host without Tailscale there's no Tailscale class to suppress
+// in the first place, but the function MUST NEVER add one back when
+// mode is tsnet/disabled regardless of host state.
+//
+// The cli/"" cases preserve the v1.x behaviour (Tailscale endpoints
+// are included if the host runs Tailscale).
+func TestEndpointsRespectsTailscaleMode(t *testing.T) {
+	for _, mode := range []string{"tsnet", "disabled"} {
+		t.Run(mode, func(t *testing.T) {
+			eps := Endpoints(Params{
+				Port:          7788,
+				HostOverride:  "testhost",
+				TailscaleMode: mode,
+			})
+			for _, e := range eps {
+				switch e.Class {
+				case ClassTailscaleDNS, ClassTailscaleV4, ClassTailscaleV6:
+					t.Errorf("mode=%q must not advertise host Tailscale "+
+						"endpoint, got %+v", mode, e)
+				}
+			}
+		})
+	}
+}
+
 // TestURLsMirrorsEndpoints verifies the convenience wrapper returns
 // the same ordering as Endpoints(), just without the class info.
 func TestURLsMirrorsEndpoints(t *testing.T) {
