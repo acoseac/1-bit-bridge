@@ -819,6 +819,9 @@ func (s *Server) reachableEndpoints() []string {
 	return advertise.URLs(advertise.Params{
 		Port:            port,
 		CustomEndpoints: cfg.CustomEndpoints,
+		// Drives host-Tailscale-vs-embedded-tsnet endpoint
+		// discrimination — see `advertise.Params.TailscaleMode` docblock.
+		TailscaleMode: cfg.Tailscale.Mode,
 	})
 }
 
