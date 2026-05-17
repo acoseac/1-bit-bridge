@@ -75,6 +75,15 @@ type NodeInfo struct {
 	// to the LE cert vs the self-signed cert.
 	TailnetSuffix string
 
+	// TailscaleIPs are the local node's tailnet-assigned addresses
+	// (CGNAT 100.x IPv4 + ULA fd7a:115c:a1e0::/48 IPv6) parsed from
+	// `tailscale status --json`'s `Self.TailscaleIPs` array. Surfaced
+	// so the admin `TailscaleProvider` adapter can carry them into
+	// `admin.TailscaleStatus.TailscaleIPs` for `/v1/health.endpoints`
+	// advertising. Empty when MagicDNS is off OR the node isn't
+	// joined to a tailnet.
+	TailscaleIPs []string
+
 	// LastError is the human-readable error message from the most-recent
 	// failed CLI invocation, empty on success. Surfaced verbatim in the
 	// admin tile.
@@ -111,8 +120,9 @@ func Detect(ctx context.Context) (NodeInfo, error) {
 
 	var raw struct {
 		Self struct {
-			HostName string `json:"HostName"`
-			DNSName  string `json:"DNSName"`
+			HostName     string   `json:"HostName"`
+			DNSName      string   `json:"DNSName"`
+			TailscaleIPs []string `json:"TailscaleIPs"`
 		} `json:"Self"`
 		MagicDNSSuffix string `json:"MagicDNSSuffix"`
 	}
@@ -127,6 +137,11 @@ func Detect(ctx context.Context) (NodeInfo, error) {
 	info.NodeName = strings.TrimSpace(raw.Self.HostName)
 	info.TailnetSuffix = strings.TrimSpace(raw.MagicDNSSuffix)
 	info.MagicDNSName = strings.TrimSuffix(strings.TrimSpace(raw.Self.DNSName), ".")
+	for _, ip := range raw.Self.TailscaleIPs {
+		if ip = strings.TrimSpace(ip); ip != "" {
+			info.TailscaleIPs = append(info.TailscaleIPs, ip)
+		}
+	}
 
 	if info.TailnetSuffix == "" {
 		info.LastError = "MagicDNS not enabled in tailnet"

@@ -167,25 +167,56 @@ func TestReachableEndpoints_TsnetNilProviderSafe(t *testing.T) {
 	}
 }
 
-// TestReachableEndpoints_CLIModeSkipsTsnetAdvertising — `cli` mode must
-// keep using the legacy `GetTailscaleDNSName()` path in
-// `advertise.Endpoints`; the new provider-driven advertising MUST NOT
-// fire even when the provider is wired and reports a Running tsnet
-// node (defends against future regressions where the mode gate is
-// accidentally widened).
-func TestReachableEndpoints_CLIModeSkipsTsnetAdvertising(t *testing.T) {
+// TestReachableEndpoints_CLIModeAdvertisesWhenCertPresent — `cli` mode
+// now flows through the same provider abstraction as tsnet mode
+// (PR refactor/cli-mode-advertise-via-provider). The gate differs:
+// cli uses `CertPresent` (the LE cert is on disk under
+// `data/tailscale/lecert/...`) instead of `BackendState == "Running"`
+// (which is a tsnet-internal concept never populated in cli mode).
+func TestReachableEndpoints_CLIModeAdvertisesWhenCertPresent(t *testing.T) {
 	s := makeServerForEndpoints(t, "cli", nil)
-	fake := &fakeTailscaleProvider{
+	s.tailscaleStatus = &fakeTailscaleProvider{
 		snap: admin.TailscaleStatus{
-			BackendState: "Running",
-			MagicDNSName: "bridge.example.ts.net",
+			CertPresent:  true,
+			MagicDNSName: "host.tailnet.ts.net",
+			TailscaleIPs: []string{"100.64.0.5", "fd7a:115c::1"},
+		},
+	}
+	eps := s.reachableEndpoints()
+	if !contains(eps, "https://host.tailnet.ts.net:7788") {
+		t.Errorf("cli mode + CertPresent should advertise MagicDNS URL; got=%v", eps)
+	}
+	if !contains(eps, "https://100.64.0.5:7788") {
+		t.Errorf("cli mode + CertPresent should advertise tailnet v4 IP; got=%v", eps)
+	}
+	if !contains(eps, "https://[fd7a:115c::1]:7788") {
+		t.Errorf("cli mode + CertPresent should advertise tailnet v6 IP; got=%v", eps)
+	}
+}
+
+// TestReachableEndpoints_CLIModeSkipsWhenCertMissing — cli mode's
+// gate is `CertPresent`. Without the LE cert on disk the SNI switcher
+// would fall through to the self-signed cert on any `.ts.net` SNI;
+// iOS skips fingerprint pinning on `.ts.net` and trips ATS on the
+// self-signed chain. Advertising in that state surfaces the same
+// TLS-error class that PR #267 closed for tsnet — skip it.
+func TestReachableEndpoints_CLIModeSkipsWhenCertMissing(t *testing.T) {
+	s := makeServerForEndpoints(t, "cli", nil)
+	s.tailscaleStatus = &fakeTailscaleProvider{
+		snap: admin.TailscaleStatus{
+			CertPresent:  false, // ← LE cert hasn't been minted yet
+			MagicDNSName: "host.tailnet.ts.net",
 			TailscaleIPs: []string{"100.64.0.5"},
 		},
 	}
-	s.tailscaleStatus = fake
-	_ = s.reachableEndpoints()
-	if fake.calls != 0 {
-		t.Errorf("cli mode invoked provider %d time(s); want 0", fake.calls)
+	eps := s.reachableEndpoints()
+	for _, u := range eps {
+		if strings.Contains(u, ".ts.net") {
+			t.Errorf("cli mode + !CertPresent must not advertise MagicDNS URL; got %q in %v", u, eps)
+		}
+		if strings.Contains(u, "100.64.") || strings.Contains(u, "fd7a:115c") {
+			t.Errorf("cli mode + !CertPresent must not advertise tailnet IP; got %q in %v", u, eps)
+		}
 	}
 }
 

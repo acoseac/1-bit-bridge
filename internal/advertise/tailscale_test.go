@@ -125,55 +125,6 @@ func TestGetTailscaleIPs_ErrorReturnsNil(t *testing.T) {
 	}
 }
 
-// TestEndpoints_AppendsMagicDNS verifies the new ClassTailscaleDNS
-// entry shows up in Endpoints() output when the helper returns a
-// MagicDNS name, and ranks AFTER LAN+mDNS but BEFORE the IP-based
-// Tailscale classes.
-func TestEndpoints_AppendsMagicDNS(t *testing.T) {
-	withStubTailscaleStatus(t, tailscaleStatus{
-		Self: struct {
-			DNSName      string   `json:"DNSName"`
-			TailscaleIPs []string `json:"TailscaleIPs"`
-		}{DNSName: "home.tailfoo.ts.net"},
-	}, nil)
-	eps := Endpoints(Params{Port: 7788, HostOverride: "test"})
-
-	// Find the MagicDNS entry; assert URL shape and Class.
-	var found *Endpoint
-	for i := range eps {
-		if eps[i].Class == ClassTailscaleDNS {
-			found = &eps[i]
-			break
-		}
-	}
-	if found == nil {
-		t.Fatalf("MagicDNS entry missing; got %v", eps)
-	}
-	wantURL := "https://home.tailfoo.ts.net:7788"
-	if found.URL != wantURL {
-		t.Errorf("URL = %q, want %q", found.URL, wantURL)
-	}
-
-	// Class.String renders the new label.
-	if got := ClassTailscaleDNS.String(); got != "Tailscale DNS" {
-		t.Errorf("Class.String = %q, want %q", got, "Tailscale DNS")
-	}
-}
-
-// TestEndpoints_NoMagicDNSWhenAbsent verifies Endpoints() doesn't
-// emit a MagicDNS entry when the helper returns "" (Tailscale not
-// installed / not running). Matches the current pre-PR-3 behaviour
-// for hosts without Tailscale.
-func TestEndpoints_NoMagicDNSWhenAbsent(t *testing.T) {
-	withStubTailscaleStatus(t, tailscaleStatus{}, errors.New("not running"))
-	eps := Endpoints(Params{Port: 7788, HostOverride: "test"})
-	for _, e := range eps {
-		if e.Class == ClassTailscaleDNS {
-			t.Errorf("unexpected MagicDNS entry: %v", e)
-		}
-	}
-}
-
 // TestCachedTailscaleStatus_DedupesConcurrentCallers pins the
 // singleflight contract: N concurrent callers in the same TTL window
 // produce ONE underlying CLI invocation. /v1/health on a busy bridge

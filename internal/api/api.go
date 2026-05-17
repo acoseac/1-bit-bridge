@@ -914,34 +914,59 @@ func (s *Server) reachableEndpoints() []string {
 	eps := advertise.Endpoints(advertise.Params{
 		Port:            port,
 		CustomEndpoints: cfg.CustomEndpoints,
-		// Drives host-Tailscale-vs-embedded-tsnet endpoint
-		// discrimination — see `advertise.Params.TailscaleMode` docblock.
-		TailscaleMode: cfg.Tailscale.Mode,
 	})
-	if cfg.Tailscale.Mode == "tsnet" {
-		eps = s.appendTsnetEndpoints(eps, portStr)
+	// Tailscale advertising now flows ENTIRELY through the api-layer
+	// provider for both `cli` and `tsnet` modes. The advertise package
+	// is no longer Tailscale-aware (no CLI shell-out, no utun
+	// interface-walk gate). `disabled` mode skips this path entirely.
+	if cfg.Tailscale.Mode == "cli" || cfg.Tailscale.Mode == "tsnet" {
+		eps = s.appendTailscaleEndpoints(eps, portStr, cfg.Tailscale.Mode)
 	}
 	return classStableUniqueURLs(eps)
 }
 
-// appendTsnetEndpoints adds the embedded tsnet node's MagicDNSName +
-// tailnet IPs to `eps` when the cached status reports the node is
-// fully up. No-op when:
-//   - the provider isn't wired (`s.tailscaleStatus` nil — collapses
-//     `cachedTailscaleStatus` to a zero value),
-//   - `BackendState != "Running"` (pre-auth states have no LE cert
-//     yet; advertising would surface the TLS error PR #267 just
-//     closed),
-//   - `MagicDNSName == ""` (MagicDNS can be tailnet-disabled even
-//     in Running state; the LE cert covers the hostname only so
-//     IP-only advertising offers no usable TLS path).
+// appendTailscaleEndpoints adds the local Tailscale node's
+// MagicDNSName + tailnet IPs to `eps` when the cached `TailscaleProvider`
+// snapshot reports the node is fully up. Gate logic differs by mode:
 //
-// Split out from `reachableEndpoints` to keep that function below
-// the cognitive-complexity threshold and to give the gate decision
-// a single named home.
-func (s *Server) appendTsnetEndpoints(eps []advertise.Endpoint, portStr string) []advertise.Endpoint {
+//   - `tsnet`: `BackendState == "Running"` (the embedded node's in-process
+//     LE cert is provisioned only at Running; pre-auth states would
+//     route iOS to a self-signed cert and trip ATS — the same failure
+//     PR #267 closed).
+//   - `cli`: `CertPresent` (the LE cert is on disk under
+//     `data/tailscale/lecert/{...}.crt` once `tailscale cert` minted it;
+//     pre-mint, the SNI switcher falls through to the self-signed cert
+//     for any `.ts.net` SNI and ATS rejects → operator sees TLS error).
+//     `BackendState` is intentionally NOT consulted in cli mode — the
+//     cli-side `tailscale.Detect()` reads only `Self.{HostName,DNSName,
+//     TailscaleIPs}` + `MagicDNSSuffix`, never the daemon's BackendState
+//     (it's not a useful signal there: `tailscale status --json`
+//     succeeding at all implies the daemon is up).
+//
+// No-op when:
+//   - the provider isn't wired (`s.tailscaleStatus` nil — collapses
+//     `cachedTailscaleStatus` to a zero value, which fails both gates),
+//   - `MagicDNSName == ""` (MagicDNS can be tailnet-disabled in any
+//     mode; the LE cert covers the hostname only so IP-only
+//     advertising offers no usable TLS path).
+func (s *Server) appendTailscaleEndpoints(eps []advertise.Endpoint, portStr string, mode string) []advertise.Endpoint {
 	snap := s.cachedTailscaleStatus()
-	if snap.BackendState != "Running" || snap.MagicDNSName == "" {
+	if snap.MagicDNSName == "" {
+		return eps
+	}
+	switch mode {
+	case "tsnet":
+		if snap.BackendState != "Running" {
+			return eps
+		}
+	case "cli":
+		if !snap.CertPresent {
+			return eps
+		}
+	default:
+		// Defensive — the caller already gates on mode but a future
+		// refactor that widens the call site shouldn't accidentally
+		// advertise without a known-good gate.
 		return eps
 	}
 	magicDNS := strings.TrimSuffix(snap.MagicDNSName, ".")
@@ -950,10 +975,11 @@ func (s *Server) appendTsnetEndpoints(eps []advertise.Endpoint, portStr string) 
 		Class: advertise.ClassTailscaleDNS,
 	})
 	for _, ipStr := range snap.TailscaleIPs {
-		// `st.Self.TailscaleIPs` is `[]netip.Addr.String()` values —
-		// guaranteed well-formed. `strings.Contains(":")` is a
-		// sufficient v4-vs-v6 discriminator without `net.ParseIP`'s
-		// 16-byte allocation per IP.
+		// IP strings come from either `ipnstate.Status.Self.TailscaleIPs`
+		// (tsnet mode) or `tailscale status --json`'s `Self.TailscaleIPs`
+		// (cli mode) — both are guaranteed well-formed addresses.
+		// `strings.Contains(":")` is a sufficient v4-vs-v6 discriminator
+		// without `net.ParseIP`'s 16-byte allocation per IP.
 		class := advertise.ClassTailscaleV4
 		if strings.Contains(ipStr, ":") {
 			class = advertise.ClassTailscaleV6

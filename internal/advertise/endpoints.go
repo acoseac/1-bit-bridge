@@ -110,45 +110,19 @@ func (c Class) String() string {
 // operator-configured CustomEndpoints list (each element is a complete
 // URL string). Tests pass all three explicitly so the function is pure.
 //
-// TailscaleMode controls whether HOST-Tailscale enumeration is included
-// in the advertised set ("cli" or "" → include; "tsnet" or "disabled"
-// → skip). The host's Tailscale identity (MagicDNS hostname + tailnet
-// IPs) is only useful when the bridge's LAN HTTPS listener is fronted
-// by an SNI cert switcher that can serve an LE cert for the host's
-// `*.ts.net` SNI — that pre-condition only holds in `cli` mode. In
-// `tsnet` mode the bridge has its own embedded tailnet node and its
-// own ListenTLS-bound listener (different virtual interface, different
-// LE cert); advertising the host's identity instead would route iOS
-// clients to the LAN listener which serves the self-signed cert and
-// fails ATS verification on the `.ts.net` SNI.
+// Tailscale awareness is NOT in this package anymore: the host-CLI
+// shell-out used to enumerate the host's MagicDNS hostname here, but
+// that path moved to `internal/api`'s `reachableEndpoints` so cli AND
+// tsnet modes share a single `admin.TailscaleProvider`-driven
+// advertising codepath (PR refactor/cli-mode-advertise-via-provider).
+// The `net.Interfaces()` walk below NO LONGER emits Tailscale-classed
+// IPs either — the api layer pulls them via the provider too. This
+// keeps `internal/advertise` purely host-network / mDNS aware (no
+// Tailscale-library imports, no `tailscale` CLI dependency).
 type Params struct {
 	Port            int
 	HostOverride    string   // pass "" to use os.Hostname()
 	CustomEndpoints []string // pass nil/empty to skip
-	TailscaleMode   string   // "cli" / "" → include host Tailscale; "tsnet" / "disabled" → skip
-}
-
-// shouldAdvertiseHostTailscale reports whether host-Tailscale identity
-// (host MagicDNS hostname + host tailnet IPs from `net.Interfaces()`)
-// should be in the advertised endpoint set. Empty mode preserves the
-// pre-tsnet-aware behaviour (include) for back-compat with callers that
-// don't pass the field yet.
-func shouldAdvertiseHostTailscale(mode string) bool {
-	// Fast path: the two common production values short-circuit before
-	// the normalize-and-switch path. `Endpoints()` calls this per
-	// classified interface IP — 5–10 calls per /v1/health request on a
-	// typical home host — and the cli-mode caller does NOT want to pay
-	// a `strings.ToLower` + `strings.TrimSpace` allocation pair per
-	// call when the answer is trivially "include".
-	if mode == "" || mode == "cli" {
-		return true
-	}
-	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case "tsnet", "disabled":
-		return false
-	default:
-		return true
-	}
 }
 
 // Endpoints returns every reachable `https://<host>:<port>` URL for
@@ -203,19 +177,12 @@ func Endpoints(p Params) []Endpoint {
 					continue
 				}
 				class := classify(iface, ip)
-				// Class check first (cheap enum compare) so the mode
-				// helper only fires for the ~5% of IPs that fall into a
-				// Tailscale class — avoids the normalize-and-match work
-				// on every LAN address.
-				if (class == ClassTailscaleV4 || class == ClassTailscaleV6) &&
-					!shouldAdvertiseHostTailscale(p.TailscaleMode) {
-					// Host's tailnet IPs route to the LAN listener (which
-					// is bound to `*:port` so it accepts on every interface
-					// including the host's `utun*` Tailscale virtual one).
-					// The LAN listener serves the self-signed bridge cert
-					// with `<machine>.local` SANs — wrong cert for the
-					// `.ts.net` SNI the iOS client sends, ATS rejects,
-					// iOS surfaces "TLS error". Skip.
+				// Tailscale-classed IPs (CGNAT 100.64/10, ULA
+				// fd7a:115c:a1e0::/48) are NEVER emitted by this
+				// package — they flow through the api-layer provider
+				// path so cli/tsnet modes use one consistent source.
+				// See Params docblock.
+				if class == ClassTailscaleV4 || class == ClassTailscaleV6 {
 					continue
 				}
 				out = append(out, Endpoint{
@@ -243,29 +210,11 @@ func Endpoints(p Params) []Endpoint {
 		})
 	}
 
-	// Tailscale MagicDNS — append a `https://<host>.<tailnet>.ts.net`
-	// entry when the local Tailscale CLI surfaces one. Best-effort:
-	// `GetTailscaleDNSName` returns "" on every error path (Tailscale
-	// not installed, not running, JSON parse failure, CLI timeout).
-	// The resulting URL passes Apple ATS without re-pairing because
-	// iOS allowlists `*.ts.net`; the IP-based Tailscale entries stay
-	// in the list as fallback for non-ATS clients.
-	//
-	// Skipped in `tsnet` / `disabled` mode: the LAN listener doesn't
-	// have an LE cert for the host's MagicDNS hostname, and the
-	// embedded tsnet node (when configured) has its OWN identity
-	// served by its OWN ListenTLS listener — not by this LAN-listener
-	// advertise pass. Advertising the host MagicDNS in those modes
-	// would route iOS to the LAN listener with the self-signed cert
-	// and trip an ATS error on the `.ts.net` SNI.
-	if shouldAdvertiseHostTailscale(p.TailscaleMode) {
-		if magic := GetTailscaleDNSName(); magic != "" {
-			out = append(out, Endpoint{
-				URL:   fmt.Sprintf("https://%s:%d", magic, port),
-				Class: ClassTailscaleDNS,
-			})
-		}
-	}
+	// Tailscale MagicDNS advertising moved to `internal/api`'s
+	// `reachableEndpoints` — see this file's Params docblock. The
+	// `advertise` package no longer shells out to the `tailscale`
+	// CLI; cli + tsnet modes both consume an
+	// `admin.TailscaleProvider` snapshot at the api layer.
 
 	// Custom operator-supplied endpoints — already validated by
 	// cfg.Validate (HTTPS-only, parseable). We append in input order;
