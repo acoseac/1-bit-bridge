@@ -51,6 +51,14 @@ type tailscaleStatus struct {
 	MagicDNSURL string     `json:"magicDNSURL,omitempty"`
 	LastError   string     `json:"lastError,omitempty"`
 	LastChecked *time.Time `json:"lastChecked,omitempty"`
+
+	// TailscaleIPs are the local node's tailnet IPs as strings,
+	// copied from `tailscale.NodeInfo.TailscaleIPs` per cli detect.
+	// Plumbed through to `admin.TailscaleStatus.TailscaleIPs` so the
+	// api layer's `reachableEndpoints` can advertise them in
+	// `/v1/health.endpoints` (PR refactor/cli-mode-advertise-via-provider).
+	// Empty when MagicDNS is off or detection failed.
+	TailscaleIPs []string `json:"tailscaleIPs,omitempty"`
 }
 
 // tailscaleAutoPilot owns the auto-mint + auto-renew lifecycle and
@@ -169,6 +177,7 @@ func (a *tailscaleAutoPilot) detectAndMint(ctx context.Context, trigger string) 
 	snap.NodeName = info.NodeName
 	snap.MagicDNSName = info.MagicDNSName
 	snap.MagicDNSURL = a.magicDNSURL(info.MagicDNSName)
+	snap.TailscaleIPs = append([]string(nil), info.TailscaleIPs...)
 	if !info.CLIAvailable {
 		// Tailscale uninstalled / removed from PATH between bridge
 		// startup and this tick. Without clearing, the SNI switcher
@@ -406,5 +415,10 @@ func toAdminStatus(s tailscaleStatus) admin.TailscaleStatus {
 		MagicDNSURL:       s.MagicDNSURL,
 		LastError:         s.LastError,
 		LastChecked:       s.LastChecked,
+		// BackendState stays empty in cli mode — cli-mode "is the LE
+		// cert ready?" gates on CertPresent, not BackendState. The
+		// tsnet-mode admin source populates BackendState from the
+		// embedded `ipnstate.Status.BackendState`.
+		TailscaleIPs: append([]string(nil), s.TailscaleIPs...),
 	}
 }

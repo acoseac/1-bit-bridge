@@ -92,172 +92,53 @@ func TestPortDefaultsTo7788(t *testing.T) {
 	// is the real guard.
 }
 
-// TestShouldAdvertiseHostTailscale pins the mode gate used in two
-// places (the `net.Interfaces()` walk filter and the GetTailscaleDNSName
-// call) so a future refactor that touches one site can't drift the
-// behaviour silently. Back-compat for callers that don't pass the
-// field (empty string → include) is locked in by the empty-mode case.
+// TestEndpointsNeverEmitsTailscaleClassesUnconditionally locks the
+// post-cleanup contract: the advertise package is no longer
+// Tailscale-aware. Regardless of host state, mode, or whether the
+// test machine has a `utun*` interface with a 100.x IP, `Endpoints()`
+// MUST NOT emit any `ClassTailscaleDNS` / `ClassTailscaleV4` /
+// `ClassTailscaleV6` entry. Tailscale advertising flows exclusively
+// through `internal/api`'s `reachableEndpoints` via the
+// `admin.TailscaleProvider` injection.
 //
-// The contract:
-//   - cli / "" → include host Tailscale advertising (back-compat)
-//   - tsnet / disabled → suppress (LAN listener can't serve LE for
-//     the host's MagicDNS hostname; the embedded tsnet node has its
-//     own listener that handles the *.ts.net SNI correctly)
-//   - unknown values → include (fail-open; mirrors `EffectiveMode`
-//     which falls back to cli on empty but errors on typos at the
-//     config-validate layer — by the time we read it here it's
-//     already been validated)
-//   - case + surrounding whitespace are normalised
-func TestShouldAdvertiseHostTailscale(t *testing.T) {
-	cases := []struct {
-		mode string
-		want bool
-	}{
-		{"", true},
-		{"cli", true},
-		{"CLI", true},
-		{" cli ", true},
-		{"tsnet", false},
-		{"TSNET", false},
-		{" tsnet\n", false},
-		{"disabled", false},
-		{"Disabled", false},
-		{"unknown", true}, // fail-open per docblock
-	}
-	for _, tc := range cases {
-		t.Run(tc.mode, func(t *testing.T) {
-			if got := shouldAdvertiseHostTailscale(tc.mode); got != tc.want {
-				t.Errorf("shouldAdvertiseHostTailscale(%q) = %v, want %v",
-					tc.mode, got, tc.want)
-			}
-		})
+// Replaces the prior four tests
+// (TestShouldAdvertiseHostTailscale + TestEndpointsRespectsTailscaleMode +
+// TestEndpointsSkipsTailscaleCLIInTsnetMode +
+// TestEndpointsIncludesTailscaleInCLIMode) which gated on the now-
+// removed `Params.TailscaleMode` field and the now-removed
+// `shouldAdvertiseHostTailscale` helper.
+func TestEndpointsNeverEmitsTailscaleClassesUnconditionally(t *testing.T) {
+	eps := Endpoints(Params{Port: 7788, HostOverride: "testhost"})
+	for _, e := range eps {
+		switch e.Class {
+		case ClassTailscaleDNS, ClassTailscaleV4, ClassTailscaleV6:
+			t.Errorf("advertise.Endpoints emitted a Tailscale-classed entry %+v — those move via internal/api provider now", e)
+		}
 	}
 }
 
-// TestEndpointsSkipsTailscaleCLIInTsnetMode is the structural complement
-// to TestEndpointsRespectsTailscaleMode: it pins that `Endpoints()` not
-// only filters Tailscale entries OUT of its result in tsnet/disabled
-// mode, but ALSO never invokes the `tailscale status --json` CLI shell-
-// out in the first place. The output-only assertion below would pass
-// even if `Endpoints()` shelled out the CLI and then discarded the
-// result — a regression that would silently reintroduce the
-// sandboxed-CLI dependency this PR removes (cert-mint failures on
-// macOS systems with the App Store Tailscale install, per CLAUDE.md
-// "macOS Tailscale gotcha"). Using the existing `withStubTailscaleStatus`
-// seam (also `tailscaleStatusJSONFunc`) so the spy is local and
-// disposed via t.Cleanup.
-func TestEndpointsSkipsTailscaleCLIInTsnetMode(t *testing.T) {
-	for _, mode := range []string{"tsnet", "disabled"} {
-		t.Run(mode, func(t *testing.T) {
-			var calls int
-			prev := tailscaleStatusJSONFunc
-			resetTailscaleStatusCache()
-			t.Cleanup(func() {
-				tailscaleStatusJSONFunc = prev
-				resetTailscaleStatusCache()
-			})
-			tailscaleStatusJSONFunc = func() (tailscaleStatus, error) {
-				calls++
-				return tailscaleStatus{}, nil
-			}
-			_ = Endpoints(Params{
-				Port:          7788,
-				HostOverride:  "testhost",
-				TailscaleMode: mode,
-			})
-			if calls != 0 {
-				t.Errorf("mode=%q: expected zero CLI shell-outs, got %d",
-					mode, calls)
-			}
-		})
+// TestEndpointsDoesNotInvokeTailscaleCLI is the behavioural complement
+// to the structural test above: even when the `tailscaleStatusJSONFunc`
+// seam is wired (still kept around for SAN-side callers in
+// `sans.go`'s `GatherCertSANDNS/IPs`), `Endpoints()` MUST NOT call it.
+// Locks the cleanup's removal of the CLI shell-out from the endpoint
+// path so a future refactor that accidentally re-introduces it gets
+// caught here rather than at iOS-pair time.
+func TestEndpointsDoesNotInvokeTailscaleCLI(t *testing.T) {
+	var calls int
+	prev := tailscaleStatusJSONFunc
+	resetTailscaleStatusCache()
+	t.Cleanup(func() {
+		tailscaleStatusJSONFunc = prev
+		resetTailscaleStatusCache()
+	})
+	tailscaleStatusJSONFunc = func() (tailscaleStatus, error) {
+		calls++
+		return tailscaleStatus{}, nil
 	}
-}
-
-// TestEndpointsIncludesTailscaleInCLIMode is the positive complement
-// to TestEndpointsSkipsTailscaleCLIInTsnetMode + TestEndpointsRespectsTailscaleMode:
-// guards against an over-broad suppression regression where the gate
-// accidentally fires for cli/"" mode too. Verifies BOTH halves of the
-// contract for the cli path: the CLI IS invoked (callCount > 0) AND
-// the MagicDNS endpoint appears in the result set (Class =
-// ClassTailscaleDNS). Tailscale-IP-class endpoints are NOT asserted
-// here because they come from `net.Interfaces()` walk and the test
-// host may not have a tailnet interface — `net.Interfaces()` isn't
-// mocked (see TestEndpointsIncludesHost docblock for that rationale).
-// The MagicDNS half is sufficient: it routes through the stubbed
-// CLI hook, so we can deterministically assert its presence.
-func TestEndpointsIncludesTailscaleInCLIMode(t *testing.T) {
-	for _, mode := range []string{"", "cli"} {
-		t.Run("mode=["+mode+"]", func(t *testing.T) {
-			var calls int
-			prev := tailscaleStatusJSONFunc
-			resetTailscaleStatusCache()
-			t.Cleanup(func() {
-				tailscaleStatusJSONFunc = prev
-				resetTailscaleStatusCache()
-			})
-			tailscaleStatusJSONFunc = func() (tailscaleStatus, error) {
-				calls++
-				return tailscaleStatus{
-					Self: struct {
-						DNSName      string   `json:"DNSName"`
-						TailscaleIPs []string `json:"TailscaleIPs"`
-					}{
-						DNSName: "host.tailnet.ts.net",
-					},
-				}, nil
-			}
-			eps := Endpoints(Params{
-				Port:          7788,
-				HostOverride:  "testhost",
-				TailscaleMode: mode,
-			})
-			if calls == 0 {
-				t.Errorf("mode=%q: expected CLI to be invoked, got 0 calls",
-					mode)
-			}
-			var sawDNS bool
-			for _, e := range eps {
-				if e.Class == ClassTailscaleDNS &&
-					e.URL == "https://host.tailnet.ts.net:7788" {
-					sawDNS = true
-					break
-				}
-			}
-			if !sawDNS {
-				t.Errorf("mode=%q: expected ClassTailscaleDNS endpoint in result, got %+v",
-					mode, eps)
-			}
-		})
-	}
-}
-
-// TestEndpointsRespectsTailscaleMode locks the structural intent of
-// the mode gate: tsnet/disabled-mode callers see NO Tailscale-classed
-// endpoints (neither the IP-walk ClassTailscaleV4/V6 from
-// `net.Interfaces()` nor the MagicDNS ClassTailscaleDNS from the
-// `tailscale status --json` shell-out). Best-effort assertion — on a
-// test host without Tailscale there's no Tailscale class to suppress
-// in the first place, but the function MUST NEVER add one back when
-// mode is tsnet/disabled regardless of host state.
-//
-// The cli/"" cases preserve the v1.x behaviour (Tailscale endpoints
-// are included if the host runs Tailscale).
-func TestEndpointsRespectsTailscaleMode(t *testing.T) {
-	for _, mode := range []string{"tsnet", "disabled"} {
-		t.Run(mode, func(t *testing.T) {
-			eps := Endpoints(Params{
-				Port:          7788,
-				HostOverride:  "testhost",
-				TailscaleMode: mode,
-			})
-			for _, e := range eps {
-				switch e.Class {
-				case ClassTailscaleDNS, ClassTailscaleV4, ClassTailscaleV6:
-					t.Errorf("mode=%q must not advertise host Tailscale "+
-						"endpoint, got %+v", mode, e)
-				}
-			}
-		})
+	_ = Endpoints(Params{Port: 7788, HostOverride: "testhost"})
+	if calls != 0 {
+		t.Errorf("Endpoints invoked tailscale CLI %d time(s); want 0 (host Tailscale advertising now flows through internal/api)", calls)
 	}
 }
 
