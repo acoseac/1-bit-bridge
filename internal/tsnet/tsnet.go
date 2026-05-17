@@ -37,6 +37,7 @@ func (s *Server) ListenPacket(network, addr string) (net.PacketConn, error) {
 func (s *Server) HTTP3TLSConfig() *tls.Config {
 	return &tls.Config{
 		NextProtos: []string{"h3"}, // Required for HTTP/3 ALPN
+		MinVersion: tls.VersionTLS13,
 		GetCertificate: func(chi *tls.ClientHelloInfo) (*tls.Certificate, error) {
 			s.lifecycleMu.Lock()
 			srv := s.server

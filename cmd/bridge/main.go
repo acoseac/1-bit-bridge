@@ -1911,6 +1911,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 				if tlsConfig != nil {
 					lanTLSConfig = tlsConfig.Clone()
 					lanTLSConfig.NextProtos = []string{"h3"} // Force HTTP/3 ALPN exclusively
+					lanTLSConfig.MinVersion = tls.VersionTLS13
 				}
 
 				if lanTLSConfig != nil {
