@@ -71,11 +71,14 @@ Once `/data/bridge.yaml` exists:
 ```sh
 docker run -d \
     --name 1-bit-bridge \
-    -p 7788:7788 \
+    -p 7788:7788/tcp \
+    -p 7788:7788/udp \
     -v ~/music:/library:ro \
     -v 1-bit-bridge-state:/data \
     1-bit-bridge:dev
 ```
+
+**Note:** Both TCP and UDP must be published for the API port (7788) to support HTTP/3 upgrades. If you omit the `/udp` mapping, the bridge will fall back to HTTP/2.
 
 iOS devices pair against `https://<host>:7788` with the
 fingerprint shown by `docker exec 1-bit-bridge bridge cert info`
@@ -93,6 +96,7 @@ defaults. Empty / unset env = no change.
 | `BRIDGE_ADMIN_ADDRESS` | `adminAddress` | Loopback admin console. Stays loopback even when overridden — there's no auth. |
 | `BRIDGE_DATA_DIR` | `dataDir` | Persistent volume path inside the container. |
 | `BRIDGE_LIBRARY_NAME` | `libraryName` | Display name for the library. |
+| `BRIDGE_DISABLE_HTTP3` | `disableHttp3` | Set to `true` to bypass UDP listeners. |
 | `BRIDGE_LIBRARY_ROOTS` | `libraryRoots` | Colon-separated list. Example: `/library:/library2`. |
 
 ### Why env overrides
@@ -113,7 +117,8 @@ services:
     image: 1-bit-bridge:dev
     container_name: 1-bit-bridge
     ports:
-      - "7788:7788"
+      - "7788:7788/tcp"
+      - "7788:7788/udp"
     volumes:
       - ./bridge-data:/data
       - /mnt/nas/music:/library1:ro

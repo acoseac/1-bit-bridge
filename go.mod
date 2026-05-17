@@ -9,6 +9,7 @@ require (
 	github.com/hashicorp/mdns v1.0.6
 	github.com/mattn/go-isatty v0.0.22
 	github.com/mewkiz/flac v1.0.13
+	github.com/quic-go/quic-go v0.59.1
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	golang.org/x/mod v0.35.0
 	golang.org/x/sync v0.20.0
@@ -62,6 +63,7 @@ require (
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/pires/go-proxyproto v0.8.1 // indirect
 	github.com/prometheus-community/pro-bing v0.4.0 // indirect
+	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/safchain/ethtool v0.3.0 // indirect
 	github.com/tailscale/certstore v0.1.1-0.20231202035212-d3fa0460f47e // indirect
