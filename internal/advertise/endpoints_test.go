@@ -173,6 +173,64 @@ func TestEndpointsSkipsTailscaleCLIInTsnetMode(t *testing.T) {
 	}
 }
 
+// TestEndpointsIncludesTailscaleInCLIMode is the positive complement
+// to TestEndpointsSkipsTailscaleCLIInTsnetMode + TestEndpointsRespectsTailscaleMode:
+// guards against an over-broad suppression regression where the gate
+// accidentally fires for cli/"" mode too. Verifies BOTH halves of the
+// contract for the cli path: the CLI IS invoked (callCount > 0) AND
+// the MagicDNS endpoint appears in the result set (Class =
+// ClassTailscaleDNS). Tailscale-IP-class endpoints are NOT asserted
+// here because they come from `net.Interfaces()` walk and the test
+// host may not have a tailnet interface — `net.Interfaces()` isn't
+// mocked (see TestEndpointsIncludesHost docblock for that rationale).
+// The MagicDNS half is sufficient: it routes through the stubbed
+// CLI hook, so we can deterministically assert its presence.
+func TestEndpointsIncludesTailscaleInCLIMode(t *testing.T) {
+	for _, mode := range []string{"", "cli"} {
+		t.Run("mode=["+mode+"]", func(t *testing.T) {
+			var calls int
+			prev := tailscaleStatusJSONFunc
+			resetTailscaleStatusCache()
+			t.Cleanup(func() {
+				tailscaleStatusJSONFunc = prev
+				resetTailscaleStatusCache()
+			})
+			tailscaleStatusJSONFunc = func() (tailscaleStatus, error) {
+				calls++
+				return tailscaleStatus{
+					Self: struct {
+						DNSName      string   `json:"DNSName"`
+						TailscaleIPs []string `json:"TailscaleIPs"`
+					}{
+						DNSName: "host.tailnet.ts.net",
+					},
+				}, nil
+			}
+			eps := Endpoints(Params{
+				Port:          7788,
+				HostOverride:  "testhost",
+				TailscaleMode: mode,
+			})
+			if calls == 0 {
+				t.Errorf("mode=%q: expected CLI to be invoked, got 0 calls",
+					mode)
+			}
+			var sawDNS bool
+			for _, e := range eps {
+				if e.Class == ClassTailscaleDNS &&
+					e.URL == "https://host.tailnet.ts.net:7788" {
+					sawDNS = true
+					break
+				}
+			}
+			if !sawDNS {
+				t.Errorf("mode=%q: expected ClassTailscaleDNS endpoint in result, got %+v",
+					mode, eps)
+			}
+		})
+	}
+}
+
 // TestEndpointsRespectsTailscaleMode locks the structural intent of
 // the mode gate: tsnet/disabled-mode callers see NO Tailscale-classed
 // endpoints (neither the IP-walk ClassTailscaleV4/V6 from
