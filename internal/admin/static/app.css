@@ -1354,6 +1354,35 @@ dialog h2 { font-size: 18px; color: var(--accent); }
 #inspector-rows-table th {
   min-width: 4ch;
 }
+
+/* `table-layout: fixed` is load-bearing here. Default `auto` sizes
+ * columns from content, so a long filename — common with hi-res
+ * masters: "Meghan Andrews - Sneak Peek - 03 - Strange and Beautiful -
+ * 19224-FLAC.flac" — wins every pixel of the row and pushes the
+ * Tracks / Upscaled / Size cells to 1-2ch stubs (operator-reported on
+ * the CarPlay-optimize PR's library-inspector screenshots).
+ *
+ * Fixed widths declared on the THs route column sizing through the
+ * header instead of the body, so the Name cell always gets the
+ * remainder of the row width while the numeric columns reserve a
+ * stable, readable amount. `td { max-width: 0; overflow: hidden;
+ * text-overflow: ellipsis }` above keeps long names truncating
+ * cleanly inside the auto-sized first column.
+ *
+ *   .num:                8ch  — fits "14.85 GB" / "1,234,567" with room
+ *   .folder-actions-col: 44px — HIG hit floor for the ⓘ button
+ *   first column:        auto — flex remainder
+ */
+#inspector-rows-table {
+  table-layout: fixed;
+  width: 100%;
+}
+#inspector-rows-table th.num {
+  width: 8ch;
+}
+#inspector-rows-table th.folder-actions-col {
+  width: 44px;
+}
 /* The trailing folder-actions cell holds the ⓘ button — `max-width: 0`
  * from the general `td` rule above was clipping the button (~half cut
  * off on narrow viewports + always cut when the projection drawer
