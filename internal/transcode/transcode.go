@@ -609,23 +609,28 @@ func TargetRateForOptimize(sourceRate int) int {
 }
 
 // ResolveTargetRateForOptimize is the optimize-kind analog of
-// `ResolveTargetRate`. INVERTS the gate direction: downsampling
-// IS the point. Returns (0, nil) when the source is already at-
-// or-below the family target (nothing to do — already optimal
-// for CarPlay).
+// `ResolveTargetRate`. Pure pick — returns the family-preserving
+// target rate unconditionally. Eligibility is the authoritative
+// gate (see `OptimizeEligible`); this function does NOT
+// re-evaluate "is the source already at the target".
+//
+// **Why no rate-only skip**: a 44.1/24 source is at the target
+// rate (44.1k) but `OptimizeEligible` correctly returns true
+// (bits > 16 → needs 24→16 downsample). A previous version of
+// this function returned 0 when `sourceRate <= target`, which
+// silently skipped legitimate bit-only optimize candidates at
+// every call site that checked `if target == 0 { skip }`. The
+// gate AND the resolver must agree on eligibility for the bit-
+// only case to flow through. Per Gemini bot review on PR #270.
 //
 // **Don't reuse `ResolveTargetRate`** — its `target <= sourceRate`
-// branch refuses every downsample request, which is exactly what
-// optimize jobs always are.
+// branch is correct for upscale (refuse downsampling), but wrong
+// for optimize.
 func ResolveTargetRateForOptimize(sourceRate int) (int, error) {
 	if sourceRate <= 0 {
 		return 0, fmt.Errorf("source rate must be positive, got %d", sourceRate)
 	}
-	target := TargetRateForOptimize(sourceRate)
-	if sourceRate <= target {
-		return 0, nil
-	}
-	return target, nil
+	return TargetRateForOptimize(sourceRate), nil
 }
 
 // ResolveTargetRate converts the user-facing `--target-rate` flag

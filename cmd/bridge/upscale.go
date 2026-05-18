@@ -253,10 +253,11 @@ func classifyUpscaleTrack(
 			fmt.Fprintf(stderr, "%s: %v\n", t.Path, err)
 			return nil, 2
 		}
-		if target == 0 {
-			counters.alreadyAtTarget++
-			return nil, 0
-		}
+		// `OptimizeEligible` above is the authoritative gate; the
+		// resolver always returns a real target now (it does NOT
+		// re-evaluate "is the source at the floor", so a 44.1/24
+		// candidate that needs only a bit-depth downsample flows
+		// through). Don't reintroduce a `target == 0` skip here.
 		targetBitsForJob = 16
 	} else {
 		target, err = transcode.ResolveTargetRate(p.targetRateFlag, sourceRateHz)

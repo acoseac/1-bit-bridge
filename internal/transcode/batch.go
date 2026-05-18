@@ -509,6 +509,33 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 // preflight, batch row, RemainingIDs, enqueue truncation handling.
 // Some duplication is accepted; a future refactor can consolidate
 // once both paths are battle-tested.
+// optimizeCandidate is the per-track work item produced by the
+// optimize-batch selection pass. Same shape as upscale's internal
+// candidate but carries `targetRate` per row (family-preserving).
+type optimizeCandidate struct {
+	path       string
+	absPath    string
+	size       int64
+	mtimeNS    int64
+	sampleRate int
+	bits       int
+	targetRate int
+}
+
+// optimizeCandidates is the aggregated result of `buildOptimizeCandidates`.
+// Carries both the per-track candidates and the run-level counters the
+// caller needs for the SubmitResult.
+type optimizeCandidates struct {
+	cands          []optimizeCandidate
+	alreadyCovered int
+	totalProjected int64
+}
+
+// SubmitOptimize is the CarPlay-targeted batch entry point.
+// Pipeline: build candidates → disk-headroom preflight → insert batch
+// row → enqueue jobs (with truncation handling). The pure-helpers
+// split keeps cognitive complexity below the repo gate while
+// preserving the structural pipeline upscale's `Submit` follows.
 func (c *Coordinator) SubmitOptimize(ctx context.Context, path string, outputDir string) (*SubmitResult, error) {
 	if c.resolver == nil {
 		return nil, fmt.Errorf("submit optimize: no resolver wired — Coordinator can't build JobSpec absolute paths")
@@ -519,25 +546,82 @@ func (c *Coordinator) SubmitOptimize(ctx context.Context, path string, outputDir
 		return nil, fmt.Errorf("submit optimize: list projections: %w", err)
 	}
 
-	type candidate struct {
-		path       string
-		absPath    string
-		size       int64
-		mtimeNS    int64
-		sampleRate int
-		bits       int
-		targetRate int // per-track, family-preserving (TargetRateForOptimize)
+	picked := c.buildOptimizeCandidates(path, projections)
+
+	ok, available, err := DiskHasHeadroom(c.dataDir, picked.totalProjected, DefaultDiskSafetyMargin)
+	if err != nil {
+		return nil, fmt.Errorf("submit optimize: disk probe: %w", err)
 	}
+	if !ok {
+		return nil, &InsufficientDiskSpaceError{
+			ProjectedBytes: picked.totalProjected,
+			RequiredBytes:  int64(float64(picked.totalProjected) * (1 + DefaultDiskSafetyMargin)),
+			AvailableBytes: available,
+			Dir:            c.dataDir,
+		}
+	}
+
+	batchID, err := c.initOptimizeBatchState(ctx, path, picked.cands)
+	if err != nil {
+		return nil, err
+	}
+
+	// Empty-batch short-circuit: no candidates → no worker callback
+	// will ever fire to transition the row out of `pending`. Mark
+	// the batch completed synchronously so the admin row doesn't
+	// sit `running` indefinitely. CodeRabbit bot review on PR #270.
+	if len(picked.cands) == 0 {
+		if err := c.transitionStatus(batchID, "completed", "", c.clock()); err != nil {
+			c.logger.Warn("submit optimize: transition empty batch to completed",
+				"batchID", batchID.String(), "err", err)
+		}
+		c.publishProgress(batchID)
+		return &SubmitResult{
+			BatchID:            batchID,
+			Path:               path,
+			TargetRate:         0,
+			TargetBits:         16,
+			TotalFiles:         0,
+			AlreadyCovered:     picked.alreadyCovered,
+			ProjectedSizeBytes: picked.totalProjected,
+			AvailableBytes:     available,
+			EnqueuedCount:      0,
+		}, nil
+	}
+
+	if err := c.transitionStatus(batchID, "running", "", c.clock()); err != nil {
+		c.logger.Warn("submit optimize: transition to running",
+			"batchID", batchID.String(), "err", err)
+	}
+	enqueued := c.enqueueOptimizeJobs(batchID, picked.cands, outputDir)
+	c.publishProgress(batchID)
+	return &SubmitResult{
+		BatchID:            batchID,
+		Path:               path,
+		TargetRate:         0, // per-track varies; admin surfaces "Mobile optimization"
+		TargetBits:         16,
+		TotalFiles:         len(picked.cands),
+		AlreadyCovered:     picked.alreadyCovered,
+		ProjectedSizeBytes: picked.totalProjected,
+		AvailableBytes:     available,
+		EnqueuedCount:      enqueued,
+	}, nil
+}
+
+// buildOptimizeCandidates filters projections through the optimize
+// eligibility gate, resolves absolute paths, and accumulates the
+// projected-size total. Resolver failures are logged-and-skipped
+// (treated as "skip silently" by the caller). Pure helper — no
+// side effects beyond logging.
+func (c *Coordinator) buildOptimizeCandidates(batchPath string, projections []manifest.TrackProjection) optimizeCandidates {
 	var (
-		cands          []candidate
-		alreadyCovered int
-		totalProjected int64
-		compressionFct = DefaultCompressionFactor(16) // optimize bits fixed
+		out            optimizeCandidates
+		compressionFct = DefaultCompressionFactor(16)
 		resolveErrors  int
 	)
 	for _, t := range projections {
 		if t.HasVariant {
-			alreadyCovered++
+			out.alreadyCovered++
 			continue
 		}
 		if t.SampleRate <= 0 || t.BitsPerSample <= 0 {
@@ -551,10 +635,7 @@ func (c *Coordinator) SubmitOptimize(ctx context.Context, path string, outputDir
 			continue
 		}
 		targetRate, terr := ResolveTargetRateForOptimize(t.SampleRate)
-		if terr != nil || targetRate == 0 {
-			// targetRate == 0 means "already optimal" — already at
-			// 44.1k / 48k for its family. OptimizeEligible should
-			// have rejected, but defensive: skip silently.
+		if terr != nil {
 			continue
 		}
 		absPath, err := c.resolver(t.Path)
@@ -564,7 +645,7 @@ func (c *Coordinator) SubmitOptimize(ctx context.Context, path string, outputDir
 				"path", t.Path, "err", err)
 			continue
 		}
-		cands = append(cands, candidate{
+		out.cands = append(out.cands, optimizeCandidate{
 			path:       t.Path,
 			absPath:    absPath,
 			size:       t.Size,
@@ -573,33 +654,26 @@ func (c *Coordinator) SubmitOptimize(ctx context.Context, path string, outputDir
 			bits:       t.BitsPerSample,
 			targetRate: targetRate,
 		})
-		totalProjected += ProjectedSize(t.Size, t.SampleRate, t.BitsPerSample,
+		out.totalProjected += ProjectedSize(t.Size, t.SampleRate, t.BitsPerSample,
 			targetRate, 16, compressionFct)
 	}
 	if resolveErrors > 0 {
 		c.logger.Info("submit optimize: filtered tracks with resolver failures",
-			"batchPath", path, "count", resolveErrors)
+			"batchPath", batchPath, "count", resolveErrors)
 	}
+	return out
+}
 
-	ok, available, err := DiskHasHeadroom(c.dataDir, totalProjected, DefaultDiskSafetyMargin)
-	if err != nil {
-		return nil, fmt.Errorf("submit optimize: disk probe: %w", err)
-	}
-	if !ok {
-		return nil, &InsufficientDiskSpaceError{
-			ProjectedBytes: totalProjected,
-			RequiredBytes:  int64(float64(totalProjected) * (1 + DefaultDiskSafetyMargin)),
-			AvailableBytes: available,
-			Dir:            c.dataDir,
-		}
-	}
-
+// initOptimizeBatchState inserts the SQLite batch row and installs the
+// in-memory `liveBatches` entry. Returns the freshly-minted batch ID.
+// Caller transitions status separately.
+func (c *Coordinator) initOptimizeBatchState(ctx context.Context, batchPath string, cands []optimizeCandidate) (uuid.UUID, error) {
 	batchID := uuid.Must(uuid.NewRandom())
 	now := c.clock().UnixNano()
 	row := manifest.UpscaleBatchRow{
 		ID:             batchID,
-		Path:           path,
-		TargetRate:     0, // per-track varies; admin surface treats 0 as "Mobile optimization"
+		Path:           batchPath,
+		TargetRate:     0, // per-track varies
 		TargetBits:     16,
 		Status:         "pending",
 		TotalFiles:     len(cands),
@@ -609,9 +683,8 @@ func (c *Coordinator) SubmitOptimize(ctx context.Context, path string, outputDir
 		UpdatedAt:      now,
 	}
 	if err := c.store.InsertUpscaleBatch(ctx, row); err != nil {
-		return nil, fmt.Errorf("submit optimize: insert batch row: %w", err)
+		return uuid.Nil, fmt.Errorf("submit optimize: insert batch row: %w", err)
 	}
-
 	state := &batchState{
 		Row:          row,
 		RemainingIDs: make(map[string]struct{}, len(cands)),
@@ -622,11 +695,15 @@ func (c *Coordinator) SubmitOptimize(ctx context.Context, path string, outputDir
 	c.mu.Lock()
 	c.liveBatches[batchID] = state
 	c.mu.Unlock()
+	return batchID, nil
+}
 
-	if err := c.transitionStatus(batchID, "running", "", c.clock()); err != nil {
-		c.logger.Warn("submit optimize: transition to running",
-			"batchID", batchID.String(), "err", err)
-	}
+// enqueueOptimizeJobs drains the candidate list into the pool. On
+// queue-full / pool-closed mid-batch, drops the never-enqueued tail
+// from `RemainingIDs` and persists the truncated row so a partial
+// enqueue still reaches a terminal status. Returns the count
+// successfully enqueued.
+func (c *Coordinator) enqueueOptimizeJobs(batchID uuid.UUID, cands []optimizeCandidate, outputDir string) int {
 	enqueued := 0
 	for _, ca := range cands {
 		spec := JobSpec{
@@ -643,64 +720,60 @@ func (c *Coordinator) SubmitOptimize(ctx context.Context, path string, outputDir
 			Kind:             JobKindOptimize,
 		}
 		if err := c.pool.Enqueue(spec); err != nil {
-			c.logger.Warn("submit optimize: enqueue failed; truncating batch",
-				"batchID", batchID.String(), "path", ca.path, "err", err)
-			c.mu.Lock()
-			var (
-				rowSnapshot    manifest.UpscaleBatchRow
-				becameTerminal bool
-				stateModified  bool
-			)
-			if st, ok := c.liveBatches[batchID]; ok {
-				dropping := false
-				for _, c2 := range cands {
-					if c2.path == ca.path {
-						dropping = true
-					}
-					if dropping {
-						delete(st.RemainingIDs, c2.path)
-					}
-				}
-				st.Row.TotalFiles -= len(cands) - enqueued
-				st.Row.Error = "partial enqueue: " + err.Error()
-				st.Row.UpdatedAt = c.clock().UnixNano()
-				if len(st.RemainingIDs) == 0 {
-					st.Row.Status = "failed"
-					becameTerminal = true
-				}
-				rowSnapshot = st.Row
-				stateModified = true
-				if becameTerminal {
-					delete(c.liveBatches, batchID)
-				}
-			}
-			c.mu.Unlock()
-			if stateModified {
-				persistCtx, cancelPersist := context.WithTimeout(context.Background(), 5*time.Second)
-				if writeErr := c.store.UpdateUpscaleBatchProgress(persistCtx, rowSnapshot); writeErr != nil {
-					c.logger.Warn("submit optimize: persist truncated batch",
-						"batchID", batchID.String(), "err", writeErr)
-				}
-				cancelPersist()
-				c.publishProgressRow(rowSnapshot)
-			}
+			c.handleOptimizeEnqueueFailure(batchID, cands, ca.path, enqueued, err)
 			break
 		}
 		enqueued++
 	}
+	return enqueued
+}
 
-	c.publishProgress(batchID)
-	return &SubmitResult{
-		BatchID:            batchID,
-		Path:               path,
-		TargetRate:         0, // per-track varies
-		TargetBits:         16,
-		TotalFiles:         len(cands),
-		AlreadyCovered:     alreadyCovered,
-		ProjectedSizeBytes: totalProjected,
-		AvailableBytes:     available,
-		EnqueuedCount:      enqueued,
-	}, nil
+// handleOptimizeEnqueueFailure drops the never-enqueued tail from the
+// live batch state and persists the truncated row. Mirrors the
+// truncation handling in `Submit` upscale path.
+func (c *Coordinator) handleOptimizeEnqueueFailure(batchID uuid.UUID, cands []optimizeCandidate, failedPath string, enqueued int, failureErr error) {
+	c.logger.Warn("submit optimize: enqueue failed; truncating batch",
+		"batchID", batchID.String(), "path", failedPath, "err", failureErr)
+	c.mu.Lock()
+	var (
+		rowSnapshot    manifest.UpscaleBatchRow
+		stateModified  bool
+		becameTerminal bool
+	)
+	if st, ok := c.liveBatches[batchID]; ok {
+		dropping := false
+		for _, c2 := range cands {
+			if c2.path == failedPath {
+				dropping = true
+			}
+			if dropping {
+				delete(st.RemainingIDs, c2.path)
+			}
+		}
+		st.Row.TotalFiles -= len(cands) - enqueued
+		st.Row.Error = "partial enqueue: " + failureErr.Error()
+		st.Row.UpdatedAt = c.clock().UnixNano()
+		if len(st.RemainingIDs) == 0 {
+			st.Row.Status = "failed"
+			becameTerminal = true
+		}
+		rowSnapshot = st.Row
+		stateModified = true
+		if becameTerminal {
+			delete(c.liveBatches, batchID)
+		}
+	}
+	c.mu.Unlock()
+	if !stateModified {
+		return
+	}
+	persistCtx, cancelPersist := context.WithTimeout(context.Background(), 5*time.Second)
+	if writeErr := c.store.UpdateUpscaleBatchProgress(persistCtx, rowSnapshot); writeErr != nil {
+		c.logger.Warn("submit optimize: persist truncated batch",
+			"batchID", batchID.String(), "err", writeErr)
+	}
+	cancelPersist()
+	c.publishProgressRow(rowSnapshot)
 }
 
 // SetPublish wires (or rewires) the SSE broker emit closure.

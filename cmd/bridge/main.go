@@ -252,9 +252,10 @@ func (a *upscaleEnqueuerAdapter) EnqueueOptimize(libraryRelativePath string) err
 	if err != nil {
 		return fmt.Errorf("resolve optimize target rate: %w", err)
 	}
-	if target == 0 {
-		return api.ErrUpscaleIneligible
-	}
+	// `OptimizeEligible` above is the authoritative gate; resolver
+	// always returns a real target. Don't reintroduce `target == 0`
+	// → ineligible — would silently drop 44.1/24 / 48/24 bit-only
+	// candidates (Gemini bot review on PR #270).
 	spec := transcode.JobSpec{
 		SourceAbsPath:    abs,
 		SourceLibraryRel: track.Path,
@@ -282,7 +283,13 @@ func (a *upscaleEnqueuerAdapter) EnqueueOptimize(libraryRelativePath string) err
 	case errors.Is(enqueueErr, transcode.ErrQueueFull):
 		return api.ErrUpscaleQueueFull
 	case errors.Is(enqueueErr, transcode.ErrPoolClosed):
-		return api.ErrUpscaleSourceMissing
+		// Wrap the original sentinel rather than collapsing to
+		// `ErrUpscaleSourceMissing` — pool closure is a server-state
+		// issue (likely shutdown), not a file-reconciliation issue,
+		// and the misclassification would have the handler log it
+		// as "rejected" without surfacing the real cause. Gemini bot
+		// review on PR #270.
+		return fmt.Errorf("pool closed: %w", enqueueErr)
 	case enqueueErr != nil:
 		return fmt.Errorf("enqueue: %w", enqueueErr)
 	}

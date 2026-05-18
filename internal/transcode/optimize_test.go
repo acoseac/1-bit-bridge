@@ -107,8 +107,12 @@ func TestTargetRateForOptimize(t *testing.T) {
 	}
 }
 
-// ResolveTargetRateForOptimize: returns 0 when at/below floor; real
-// target otherwise; error on non-positive source rate.
+// ResolveTargetRateForOptimize: unconditionally returns the
+// family-preserving target rate. Eligibility (PCM-only, hi-res
+// gate) is handled separately by `OptimizeEligible`. A previous
+// version of this function returned 0 for `sourceRate <= target`,
+// which silently skipped bit-only optimize candidates (44.1/24 →
+// 44.1/16 never ran). Gemini bot review on PR #270.
 func TestResolveTargetRateForOptimize(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -121,8 +125,8 @@ func TestResolveTargetRateForOptimize(t *testing.T) {
 		{96000, 48000, false, "96k → 48k (hi-res 48 family)"},
 		{176400, 44100, false, "176.4k → 44.1k (hi-res 44.1 family)"},
 		{88200, 44100, false, "88.2k → 44.1k (hi-res 44.1 family)"},
-		{44100, 0, false, "44.1k → 0 (already at family floor)"},
-		{48000, 0, false, "48k → 0 (already at family floor)"},
+		{44100, 44100, false, "44.1k → 44.1k (bit-only candidate eligibility flows through)"},
+		{48000, 48000, false, "48k → 48k (bit-only candidate eligibility flows through)"},
 		{0, 0, true, "source rate 0 → error"},
 		{-1, 0, true, "source rate negative → error"},
 	}
