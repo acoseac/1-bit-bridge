@@ -89,6 +89,32 @@ func TestStatusAndListenTLSBeforeStartReturnError(t *testing.T) {
 	}
 }
 
+// TestListenPacketBeforeStartReturnsError — ListenPacket is the
+// HTTP/3 (QUIC) entry point for tailnet UDP binds; pre-Start it must
+// return the documented "called before Start" error rather than
+// panic or return a half-constructed PacketConn. cmd/bridge/main.go's
+// serve handler relies on this guard: a PR #264 regression placed
+// ListenPacket synchronously in main BEFORE the tsnet startup
+// goroutine fired Start(), so the call always tripped this guard
+// and HTTP/3 over tailnet silently fell back to HTTP/2 on every
+// boot. The fix moved the call into the goroutine after Start
+// succeeds; this test pins the wrapper invariant the caller now
+// depends on.
+func TestListenPacketBeforeStartReturnsError(t *testing.T) {
+	s, err := NewServer(Config{Logger: silentLogger(), StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	pconn, err := s.ListenPacket("udp", ":0")
+	if err == nil {
+		_ = pconn.Close()
+		t.Fatalf("ListenPacket before Start should error, got pconn=%v", pconn)
+	}
+	if !strings.Contains(err.Error(), "before Start") {
+		t.Errorf("error should mention before-Start guard, got %q", err.Error())
+	}
+}
+
 // TestExtractTailscaleAuthURL — the AuthURL string heuristic. tsnet
 // emits user-facing messages like:
 //

@@ -65,6 +65,15 @@ var logger = logging.Component("bridge")
 // manifest package directly (would create an upward cycle), so
 // this thin adapter lives at the wiring point. Same pattern as
 // MBIDProbe / ManifestProvider.
+// tsnetH3State pairs the tsnet HTTP/3 (QUIC) server with its UDP
+// PacketConn so shutdown reads them atomically together. See the
+// `tsH3 atomic.Pointer[tsnetH3State]` declaration inside the serve
+// command for the why-it-has-to-be-stored-from-a-goroutine rationale.
+type tsnetH3State struct {
+	srv  *http3.Server
+	conn net.PacketConn
+}
+
 type variantStoreAdapter struct {
 	provider *manifest.Provider
 }
@@ -1937,7 +1946,17 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		return 1
 	}
 
-	fmt.Fprintf(stdout, "1-bit-bridge v%s (protocol v%d) — listening on https://%s\n",
+	// Format string uses bare %s — ServerVersion already carries the
+	// "v" prefix when the Makefile / goreleaser inject it via -ldflags
+	// (the Makefile reads `git describe --tags` which emits "v0.1.3..."
+	// verbatim; goreleaser's {{.Version}} is also v-prefixed at release
+	// time). Pre-fix this format string prepended an extra "v" and the
+	// banner read "1-bit-bridge vv0.1.3-9-..." on every Makefile-built
+	// bridge. The other format sites that print ServerVersion
+	// (main.go's `bridge version` subcommand, styles.go's logo) now
+	// agree on bare %s; tests in main_test.go's TestVersion pin the
+	// same shape.
+	fmt.Fprintf(stdout, "1-bit-bridge %s (protocol v%d) — listening on https://%s\n",
 		version.ServerVersion, version.ProtocolVersion, lis.Addr())
 	fmt.Fprintf(stdout, "Library: %q (roots: %v)\n", cfg.LibraryName, cfg.LibraryRoots)
 	fmt.Fprintf(stdout, "TLS fingerprint (pin this on the iOS side):\n  %s\n", fingerprint)
@@ -1968,8 +1987,17 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 
 	var lanH3Srv *http3.Server
 	var udpConn *net.UDPConn
-	var tsH3Srv *http3.Server
-	var tsUDPConn net.PacketConn
+	// tsH3 pairs the tsnet HTTP/3 server with its UDP PacketConn so
+	// shutdown reads them atomically together. Stored from inside the
+	// tsnet startup goroutine AFTER tsnetServer.Start succeeds — the
+	// wrapper's ListenPacket guard at internal/tsnet/tsnet.go returns
+	// "called before Start" otherwise. Pre-fix the HTTP/3 setup ran
+	// synchronously above (before tsnetServer.Start fired in its
+	// goroutine), so HTTP/3 over tailnet ALWAYS failed to bind on
+	// every boot — the WARN log fired but the bridge silently fell
+	// through to HTTP/2-only on the tailnet endpoint. Mirrors the
+	// `tsnetHTTPSrv atomic.Pointer[http.Server]` race-safe pattern.
+	var tsH3 atomic.Pointer[tsnetH3State]
 
 	if !cfg.DisableHTTP3 {
 		// 1. Resilient LAN Listener
@@ -2019,27 +2047,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			}
 		}
 
-		// 2. Tailscale Listener
-		if tsnetServer != nil {
-			var err error
-			tsUDPConn, err = tsnetServer.ListenPacket("udp", ":443")
-			if err != nil {
-				logger.Warn("Failed to bind tsnet UDP socket, running HTTP/2 only on tailnet", "err", err)
-			} else {
-				tsTLSConf := tsnetServer.HTTP3TLSConfig()
-				tsH3Srv = &http3.Server{
-					Handler:   apiSrv.Handler(), // Crucial: Extract the compiled http.Handler
-					TLSConfig: tsTLSConf,
-				}
-				go func() {
-					if err := tsH3Srv.Serve(tsUDPConn); err != nil &&
-						!errors.Is(err, http.ErrServerClosed) &&
-						!strings.Contains(err.Error(), "server closed") {
-						logger.Error("h3 serve tsnet", "err", err)
-					}
-				}()
-			}
-		}
+		// 2. Tailscale HTTP/3 listener is set up INSIDE the tsnet
+		// startup goroutine below, after tsnetServer.Start succeeds.
+		// The wrapper's ListenPacket guard returns an error if called
+		// before Start, so the original synchronous shape here always
+		// failed at boot for tsnet-mode bridges (PR #264 regression).
 	}
 
 	fmt.Fprintln(stdout, "Press Ctrl-C to shut down.")
@@ -2076,13 +2088,20 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	tsnetServeErr := make(chan error, 1)
 	if tsnetServer != nil {
 		defer func() {
-			// Drain the http.Server first so in-flight requests get
-			// http.ErrServerClosed instead of a mid-flight socket
-			// reset, THEN Close the tsnet.Server (drains magicsock /
-			// netcheck / control plane goroutines per CLAUDE.md
-			// plan correction #5).
+			// Drain HTTP/3 first (if up), then HTTP/2, so in-flight
+			// requests on either listener get a clean
+			// http.ErrServerClosed instead of a mid-flight socket /
+			// QUIC reset. THEN Close the tsnet.Server (drains
+			// magicsock / netcheck / control plane goroutines per
+			// CLAUDE.md plan correction #5). Each drain step gates on
+			// a non-nil Load — failure to start either listener (e.g.
+			// LAN-only tsnet timeout) leaves that slot nil.
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
 			defer cancel()
+			if slot := tsH3.Load(); slot != nil {
+				_ = slot.srv.Shutdown(shutdownCtx)
+				_ = slot.conn.Close()
+			}
 			if srv := tsnetHTTPSrv.Load(); srv != nil {
 				_ = srv.Shutdown(shutdownCtx)
 			}
@@ -2098,6 +2117,55 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 				fmt.Fprintf(stderr, "tsnet: bring node up: %v (LAN listener still active)\n", err)
 				return
 			}
+
+			// HTTP/3 (QUIC) over tailnet — must be set up here, AFTER
+			// Start succeeded, because the wrapper's ListenPacket
+			// returns "called before Start" otherwise (the synchronous
+			// PR #264 placement always tripped that guard at boot).
+			// Bind failure is non-fatal: HTTP/2 over tailnet still
+			// serves through tsnetHTTPSrv below.
+			//
+			// Upstream tsnet.Server.ListenPacket requires an explicit
+			// tailnet IP (not the ":port" shorthand the LAN path uses
+			// with net.ListenUDP) — the listener binds to the virtual
+			// tailnet interface specifically, and a bare ":443" fails
+			// with "address must be a valid IP". We query Status for
+			// the assigned IPs and bind on the first one; net.JoinHostPort
+			// handles IPv6 bracketing transparently. Status() can take
+			// a few hundred ms to settle right after Start so use a
+			// bounded context — failure here just degrades to HTTP/2
+			// without retrying.
+			if !cfg.DisableHTTP3 {
+				statusCtx, statusCancel := context.WithTimeout(ctx, 5*time.Second)
+				status, statusErr := tsnetServer.Status(statusCtx)
+				statusCancel()
+				switch {
+				case statusErr != nil:
+					logger.Warn("Failed to query tsnet status for h3 bind, running HTTP/2 only on tailnet", "err", statusErr)
+				case status == nil || status.Self == nil || len(status.Self.TailscaleIPs) == 0:
+					logger.Warn("tsnet status returned no tailnet IPs for h3 bind, running HTTP/2 only on tailnet")
+				default:
+					bindAddr := net.JoinHostPort(status.Self.TailscaleIPs[0].String(), "443")
+					pconn, err := tsnetServer.ListenPacket("udp", bindAddr)
+					if err != nil {
+						logger.Warn("Failed to bind tsnet UDP socket, running HTTP/2 only on tailnet", "addr", bindAddr, "err", err)
+					} else {
+						h3srv := &http3.Server{
+							Handler:   apiSrv.Handler(),
+							TLSConfig: tsnetServer.HTTP3TLSConfig(),
+						}
+						tsH3.Store(&tsnetH3State{srv: h3srv, conn: pconn})
+						go func() {
+							if err := h3srv.Serve(pconn); err != nil &&
+								!errors.Is(err, http.ErrServerClosed) &&
+								!strings.Contains(err.Error(), "server closed") {
+								logger.Error("h3 serve tsnet", "err", err)
+							}
+						}()
+					}
+				}
+			}
+
 			lis, err := tsnetServer.ListenTLS(cfg.ListenAddress)
 			if err != nil {
 				fmt.Fprintf(stderr, "tsnet: ListenTLS: %v\n", err)
@@ -2180,11 +2248,17 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 				}
 			}()
 		}
-		if tsH3Srv != nil {
+		// tsnet HTTP/3 shutdown reads through atomic.Pointer — the
+		// slot is stored from inside the tsnet startup goroutine and
+		// may still be nil here if Start() never completed or HTTP/3
+		// bind failed. Idempotent against the tsnet defer's drain
+		// (http.Server.Shutdown returns ErrServerClosed on a server
+		// already shut down).
+		if slot := tsH3.Load(); slot != nil {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				if err := tsH3Srv.Shutdown(shutdownCtx); err != nil {
+				if err := slot.srv.Shutdown(shutdownCtx); err != nil {
 					fmt.Fprintf(stderr, "tsnet h3 shutdown: %v\n", err)
 				}
 			}()
@@ -2196,8 +2270,8 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		if udpConn != nil {
 			_ = udpConn.Close()
 		}
-		if tsUDPConn != nil {
-			_ = tsUDPConn.Close()
+		if slot := tsH3.Load(); slot != nil {
+			_ = slot.conn.Close()
 		}
 	}
 	return 0

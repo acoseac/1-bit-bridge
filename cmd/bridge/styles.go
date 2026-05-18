@@ -451,7 +451,10 @@ func fprintBox(w io.Writer, s string) {
 // NO_COLOR / dumb terminals, the ASCII fallback box-drawing chars
 // (+/-/|/=) take over automatically via boxStyle.
 func logo(serverVersion string, protocol int) string {
-	title := fmt.Sprintf("1-bit-bridge  v%s", serverVersion)
+	// Bare %s — serverVersion already carries the "v" prefix at
+	// release / Makefile build time. See banner format-string comment
+	// in cmd/bridge/main.go's serve handler for the full rationale.
+	title := fmt.Sprintf("1-bit-bridge  %s", serverVersion)
 	subtitle := fmt.Sprintf("companion server · protocol v%d", protocol)
 	return box("", []string{
 		"",
