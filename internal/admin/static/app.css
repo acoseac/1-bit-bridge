@@ -1402,7 +1402,17 @@ dialog h2 { font-size: 18px; color: var(--accent); }
   white-space: nowrap;
 }
 #inspector-rows-table th.num {
-  width: 11ch;
+  /* 13ch was 11ch pre-PR. The three numeric columns ("Tracks",
+   * "Upscaled", "Size") share this width via `table-layout: fixed`.
+   * 11ch was binding under the open-drawer layout (right column
+   * takes ~half the table width): the uppercased + letter-spaced
+   * "UPSCALED" header truncated to "UPSC…", and size values like
+   * "21.21 GB" (8 chars, the worst case from humanBytes()'s GB
+   * branch in app.js — 2 decimals + " GB") clipped to "21.…". 13ch
+   * fits both the "UPSCALED" header AND the widest GB value with
+   * ellipsis margin. Cost is ~6ch of slack absorbed from the Name
+   * column — invisible at typical folder-name widths. */
+  width: 13ch;
 }
 #inspector-rows-table th.folder-actions-col {
   width: 44px;
