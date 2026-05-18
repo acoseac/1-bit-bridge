@@ -475,8 +475,86 @@ Standard single-PR loop for any non-trivial change:
 6. **Reject suggestions that contradict deliberate rationale.** When a bot flags something that was a conscious design decision, cite the rationale in a reply and move on. Don't blindly apply suggestions that would undo a documented invariant (e.g. the `apiScan → spawnBackgroundScan` WG contract, the `pairing.Poll` read-many contract).
 7. **Expect 2 rounds minimum.** One round of fixes, one confirmation pass. High-surface PRs (new endpoints, config changes, concurrency) routinely take 3–4 rounds.
 8. **Merge once reviews are quiet** and `make fmt vet test build-all` is clean.
+9. **Post-merge deploy.** Once main carries the fix, deploy it to the two reachable bridges so the change is actually live — see [Post-merge deployment](#post-merge-deployment) below. Skipping this step leaves the codebase ahead of every actual bridge a paired iOS client can reach.
 
 For jobs spanning 3+ PRs, use the stacking pattern below instead.
+
+## Post-merge deployment
+
+After **any** main-branch merge that ships a runtime fix, regenerate the local test fixture AND the Windows production host's binary. The PR workflow above ends at "merge"; this section is what runs next so the visible bridges actually pick up the change. Skip this for docs-only / CLAUDE.md-only / test-only merges where no shipped binary changes behavior.
+
+### Step 1 — local test fixture (`/tmp/bridge-live/`)
+
+```sh
+git checkout main && git pull --ff-only
+make build
+kill -TERM $(pgrep -f "bin/bridge serve --config /tmp/bridge-live")   # graceful — wait for STOPPED
+nohup ./bin/bridge serve --config /tmp/bridge-live/bridge.yaml >> /tmp/bridge-live/serve.log 2>&1 &
+disown
+curl -sk https://127.0.0.1:7788/v1/health   # confirm new serverVersion
+```
+
+Health-check tail: `tail -25 /tmp/bridge-live/serve.log` — look for the single-`v` banner and (on tsnet-mode bridges) the `tsnet HTTP/3 listeners bound count=N ipsReported=N port=...` INFO line.
+
+### Step 2 — Windows production bridge (`192.168.0.158`)
+
+Production host coordinates (verified 2026-05-18, [PR #271](https://github.com/acoseac/1-bit-bridge/pull/271) deploy):
+
+| Item | Value |
+|---|---|
+| SSH | `ssh arsenie@192.168.0.158` (key auth, BatchMode-safe) |
+| Default shell | CMD (not PowerShell, not WSL — commands use CMD syntax: `&&` not `;`, `\` paths) |
+| Service name | `com.acoseac.1-bit-bridge` (LocalSystem, AUTO_START DELAYED) |
+| Binary path | `C:\Users\arsenie\Desktop\bridge-windows-amd64.exe` |
+| Config path | `C:\Users\arsenie\AppData\Local\1-bit-bridge\bridge.yaml` |
+| Data dir | `C:\Users\arsenie\AppData\Local\1-bit-bridge\data` |
+| Log file | `C:\ProgramData\1-bit-bridge\bridge.log` |
+| Library | `F:\Media\Music` (~18k tracks at last check) |
+| Tailscale mode | `cli` (host Tailscale.app, NOT tsnet) — tsnet-only fixes are dormant on this host |
+| iOS reachability | LAN: `https://192.168.0.158:7788`; Tailscale: CGNAT v4 + ULA v6 |
+
+Proven upgrade sequence (v0.1.3-9 → v0.1.3-11 swap, 2026-05-18):
+
+1. **Cross-compile** the Windows binary against current `main`:
+   ```sh
+   GOOS=windows GOARCH=amd64 go build \
+     -ldflags "-s -w -X github.com/acoseac/1-bit-bridge/internal/version.ServerVersion=$(git describe --tags --always)" \
+     -o dist/bridge-windows-amd64.exe ./cmd/bridge
+   ```
+2. **Upload as `.new` then verify SHA-256** — never overwrite the live binary directly. `scp` over Wi-Fi can silently truncate on connection drops; mismatched hashes mean retry the upload while the OLD binary keeps serving clients.
+   ```sh
+   scp dist/bridge-windows-amd64.exe arsenie@192.168.0.158:'C:/Users/arsenie/Desktop/bridge-windows-amd64.exe.new'
+   shasum -a 256 dist/bridge-windows-amd64.exe                                                              # local
+   ssh arsenie@192.168.0.158 'certutil -hashfile "C:\Users\arsenie\Desktop\bridge-windows-amd64.exe.new" SHA256'  # remote
+   ```
+3. **Stop the service + wait 8 seconds** (load-bearing — see gotcha below):
+   ```sh
+   ssh arsenie@192.168.0.158 'C:\Users\arsenie\Desktop\bridge-windows-amd64.exe stop'
+   # poll `sc query com.acoseac.1-bit-bridge` until STOPPED, then sleep 8s MORE
+   ```
+4. **Two-step rename swap** (NOT `move /Y` — see gotcha):
+   ```sh
+   TS=$(date +%Y%m%d-%H%M%S)
+   ssh arsenie@192.168.0.158 "ren \"C:\\Users\\arsenie\\Desktop\\bridge-windows-amd64.exe\" \"bridge-windows-amd64.exe.old-$TS\""
+   ssh arsenie@192.168.0.158 'ren "C:\Users\arsenie\Desktop\bridge-windows-amd64.exe.new" "bridge-windows-amd64.exe"'
+   ```
+5. **Start + verify version + LAN health**:
+   ```sh
+   ssh arsenie@192.168.0.158 'C:\Users\arsenie\Desktop\bridge-windows-amd64.exe start'
+   # poll until sc query shows RUNNING
+   ssh arsenie@192.168.0.158 'C:\Users\arsenie\Desktop\bridge-windows-amd64.exe status --config "C:\Users\arsenie\AppData\Local\1-bit-bridge\bridge.yaml"'
+   curl -sk https://192.168.0.158:7788/v1/health | python3 -m json.tool
+   ```
+6. **Leave the `.old-<ts>` backup in place ~24h** so a regression caught by an iOS client has a one-step rollback (`ren` the bad EXE aside, `ren` the .old- back). Don't delete proactively — only the user authorizes destructive cleanup on the production host.
+
+**Critical gotcha — `move /Y` fails after `sc stop`.** Direct `move /Y .new EXE` returns `Access is denied` even after `sc query` shows STOPPED. The Windows SCM holds a transient handle on the EXE for several seconds after the service stops (Windows Defender real-time protection scans the file too). **Two-step rename succeeds** where overwrite fails because Windows allows renaming directory entries independent of file-content locks. Don't reach for `taskkill` / `del` workarounds — they introduce their own failure modes (ungraceful exit corrupts the log file, accidental delete kills the rollback path).
+
+**What's safe to skip across upgrades:**
+- TLS cert / fingerprint — unchanged, so paired iOS clients don't need re-pairing.
+- Config file — unchanged, so library / dataDir / tailscale-mode settings persist.
+- Library DB (SQLite in `internal/manifest/`) — unchanged for bug-fix releases. Schema migrations are a separate deployment plan (out of scope for this section).
+
+**Cli-mode vs tsnet-mode caveat.** The home-pc bridge runs in default `cli` mode, so any tsnet-specific code path (e.g. the dual-stack HTTP/3 binding from PR #271) is dormant on it. The LAN HTTP/3 listener still serves QUIC over the LAN endpoint. If the host ever flips to `tailscale: { mode: tsnet }`, re-verify tsnet-specific behavior on a post-upgrade restart.
 
 ## Multi-PR batch workflow
 
@@ -490,6 +568,7 @@ For any larger job spanning **3+ PRs**, use the **stack-and-batch** pattern inst
 6. **One combined follow-up PR** for any post-merge bot comments. Bots run a second review pass after the first round of fixes lands — that's the realistic floor (two rounds, not one). Batch the late-arriving items into a single follow-up PR rather than amending merged branches.
 7. **CLAUDE.md updates direct to main.** Per the existing memory-entry convention — docs-only changes bypass the feature-branch path.
 8. **End-of-session quality gate.** `make fmt vet test build-all` on bridge, `xcodebuild build` on iOS, resolve any warnings before reporting done. The stacked workflow's main risk is cross-PR drift; the build matrix catches it cheaply at the end.
+9. **Post-merge deploy** after the whole stack lands — see [Post-merge deployment](#post-merge-deployment). For a stack, deploy ONCE at the end carrying every merged fix, not per-merge.
 
 **Avoid small PRs.** 5 cohesive ~200-line PRs ship faster and review better than 15 micro-PRs — bots calibrate review priority to PR scope, and a coherent theme per PR makes the eventual squash-commit message useful as ship-history.
 
