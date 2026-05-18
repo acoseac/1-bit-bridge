@@ -1369,19 +1369,40 @@ dialog h2 { font-size: 18px; color: var(--accent); }
  * text-overflow: ellipsis }` above keeps long names truncating
  * cleanly inside the auto-sized first column.
  *
- *   .num:                8ch  — fits "14.85 GB" / "1,234,567" with room
+ *   .num:                11ch — fits "Upscaled" header AND values
+ *                                  like "14.85 GB" / "269.1 MB" with
+ *                                  padding. 1ch = width of "0" in
+ *                                  the current font, which is much
+ *                                  narrower than "G" / "B" / space;
+ *                                  8ch (initial attempt) clipped
+ *                                  both the header text AND the
+ *                                  GB/MB-suffixed size values.
  *   .folder-actions-col: 44px — HIG hit floor for the ⓘ button
  *   first column:        auto — flex remainder
+ *
+ * Header cells also clip overflow defensively. Body cells already
+ * have `overflow: hidden; text-overflow: ellipsis` via the general
+ * `#inspector-rows-body td` rule above, but THs were inheriting
+ * default visible-overflow — so an oversized header label ("Upscaled"
+ * at the original 8ch width) spilled into the neighboring column's
+ * header text ("Size" → "...IZE"). Adding the same ellipsis chain to
+ * THs prevents future column-header drift from re-introducing the
+ * same visual artifact.
  */
 #inspector-rows-table {
   table-layout: fixed;
   width: 100%;
 }
 #inspector-rows-table th.num {
-  width: 8ch;
+  width: 11ch;
 }
 #inspector-rows-table th.folder-actions-col {
   width: 44px;
+}
+#inspector-rows-table th {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 /* The trailing folder-actions cell holds the ⓘ button — `max-width: 0`
  * from the general `td` rule above was clipping the button (~half cut
