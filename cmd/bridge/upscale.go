@@ -192,6 +192,57 @@ type upscaleSkipCounters struct {
 	alreadyAtTarget int
 }
 
+// resolveCLITargetForKind picks the per-track (targetRate, targetBits)
+// for the CLI batch path based on `p.kind`. Returns:
+//
+//	(target, bits, skip=false, 0)     → enqueue this track
+//	(0,      0,    skip=true,  0)     → silent skip; counter already
+//	                                     bumped by this function
+//	(0,      0,    -,          2)     → fatal CLI error; caller returns
+//
+// Split out of `classifyUpscaleTrack` so the kind branch doesn't
+// push the parent function's cognitive complexity over the repo
+// gate. SonarCloud go:S3776 enforcer caught the unconsolidated form
+// at complexity 19; this helper extraction drops the parent to ~13.
+func resolveCLITargetForKind(
+	stderr io.Writer,
+	t manifest.Track,
+	p runUpscaleParams,
+	sourceRateHz int,
+	counters *upscaleSkipCounters,
+) (target, bits int, skip bool, exitCode int) {
+	if p.kind == transcode.JobKindOptimize {
+		sourceBits := 0
+		if t.BitsPerSample != nil {
+			sourceBits = *t.BitsPerSample
+		}
+		if !transcode.OptimizeEligible(t.Path, t.Codec, sourceRateHz, sourceBits) {
+			counters.alreadyAtTarget++
+			return 0, 0, true, 0
+		}
+		r, err := transcode.ResolveTargetRateForOptimize(sourceRateHz)
+		if err != nil {
+			fmt.Fprintf(stderr, "%s: %v\n", t.Path, err)
+			return 0, 0, false, 2
+		}
+		// `OptimizeEligible` above is the authoritative gate; the
+		// resolver always returns a real target now (does NOT
+		// re-evaluate "is source at the floor" — a 44.1/24 candidate
+		// flows through). Don't reintroduce a `r == 0` skip here.
+		return r, 16, false, 0
+	}
+	r, err := transcode.ResolveTargetRate(p.targetRateFlag, sourceRateHz)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", t.Path, err)
+		return 0, 0, false, 2
+	}
+	if r == 0 {
+		counters.alreadyAtTarget++
+		return 0, 0, true, 0
+	}
+	return r, p.targetBits, false, 0
+}
+
 // classifyUpscaleTrack evaluates one manifest track against the run
 // params and returns either (a) an `upscaleCandidate` for the worker
 // pool / dry-run output, (b) a non-nil exitCode for a fatal CLI error
@@ -227,49 +278,9 @@ func classifyUpscaleTrack(
 		return nil, 0
 	}
 	sourceRateHz := int(*t.SampleRate)
-
-	// Kind-discriminated target resolution + eligibility:
-	//   - optimize: per-track family-preserving target (44.1k/48k);
-	//     gate via OptimizeEligible (PCM-hi-res only, lossy/AAC
-	//     rejected even on legacy-codec rows via filename fallback).
-	//     Forces bits=16 regardless of source.
-	//   - upscale: legacy global --target-rate / --target-bits; gate
-	//     by `target <= source → skip`.
-	var (
-		target, targetBitsForJob int
-		err                      error
-	)
-	if p.kind == transcode.JobKindOptimize {
-		sourceBits := 0
-		if t.BitsPerSample != nil {
-			sourceBits = *t.BitsPerSample
-		}
-		if !transcode.OptimizeEligible(t.Path, t.Codec, sourceRateHz, sourceBits) {
-			counters.alreadyAtTarget++
-			return nil, 0
-		}
-		target, err = transcode.ResolveTargetRateForOptimize(sourceRateHz)
-		if err != nil {
-			fmt.Fprintf(stderr, "%s: %v\n", t.Path, err)
-			return nil, 2
-		}
-		// `OptimizeEligible` above is the authoritative gate; the
-		// resolver always returns a real target now (it does NOT
-		// re-evaluate "is the source at the floor", so a 44.1/24
-		// candidate that needs only a bit-depth downsample flows
-		// through). Don't reintroduce a `target == 0` skip here.
-		targetBitsForJob = 16
-	} else {
-		target, err = transcode.ResolveTargetRate(p.targetRateFlag, sourceRateHz)
-		if err != nil {
-			fmt.Fprintf(stderr, "%s: %v\n", t.Path, err)
-			return nil, 2
-		}
-		if target == 0 {
-			counters.alreadyAtTarget++
-			return nil, 0
-		}
-		targetBitsForJob = p.targetBits
+	target, targetBitsForJob, skip, exitCode := resolveCLITargetForKind(stderr, t, p, sourceRateHz, counters)
+	if exitCode != 0 || skip {
+		return nil, exitCode
 	}
 	// Find the absolute path via the canonical resolver —
 	// handles single-root (rootless paths) and multi-root

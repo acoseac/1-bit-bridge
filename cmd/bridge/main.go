@@ -289,6 +289,40 @@ func (a *upscaleEnqueuerAdapter) finalizeAndEnqueue(spec transcode.JobSpec, trac
 	return nil
 }
 
+// buildOptimizeSpec runs the optimize-kind eligibility gate against
+// `track` and returns the JobSpec on accept, or a typed error on
+// reject. Split out of `EnqueueOptimize` to keep that function's
+// cognitive complexity below the repo gate. Pure path / DB-free.
+func buildOptimizeSpec(track *manifest.Track, absPath, outputDir string) (transcode.JobSpec, error) {
+	if track.SampleRate == nil || track.BitsPerSample == nil {
+		return transcode.JobSpec{}, api.ErrUpscaleIneligible
+	}
+	sourceHz := int(*track.SampleRate)
+	sourceBits := *track.BitsPerSample
+	if !transcode.OptimizeEligible(track.Path, track.Codec, sourceHz, sourceBits) {
+		return transcode.JobSpec{}, api.ErrUpscaleIneligible
+	}
+	target, err := transcode.ResolveTargetRateForOptimize(sourceHz)
+	if err != nil {
+		return transcode.JobSpec{}, fmt.Errorf("resolve optimize target rate: %w", err)
+	}
+	// `OptimizeEligible` above is the authoritative gate; the
+	// resolver always returns a real target now (does NOT re-evaluate
+	// "is the source at the floor" — a 44.1/24 candidate flows
+	// through with target=44.1k). Don't reintroduce a `target == 0`
+	// skip (Gemini bot review on PR #270).
+	return transcode.JobSpec{
+		SourceAbsPath:    absPath,
+		SourceLibraryRel: track.Path,
+		SourceSampleRate: sourceHz,
+		TargetSampleRate: target,
+		TargetBits:       16,
+		Quality:          transcode.QualityVeryHigh,
+		OutputDir:        outputDir,
+		Kind:             transcode.JobKindOptimize,
+	}, nil
+}
+
 // EnqueueOptimize is the CarPlay-targeted parallel of EnqueueOne.
 // Downsamples hi-res PCM sources to 16-bit / 44.1k or 48k
 // (family-preserving — see transcode.TargetRateForOptimize). Reuses
@@ -306,31 +340,9 @@ func (a *upscaleEnqueuerAdapter) EnqueueOptimize(libraryRelativePath string) err
 	if err != nil {
 		return err
 	}
-	if track.SampleRate == nil || track.BitsPerSample == nil {
-		return api.ErrUpscaleIneligible
-	}
-	sourceHz := int(*track.SampleRate)
-	sourceBits := *track.BitsPerSample
-	if !transcode.OptimizeEligible(track.Path, track.Codec, sourceHz, sourceBits) {
-		return api.ErrUpscaleIneligible
-	}
-	target, err := transcode.ResolveTargetRateForOptimize(sourceHz)
+	spec, err := buildOptimizeSpec(track, abs, a.outputDir)
 	if err != nil {
-		return fmt.Errorf("resolve optimize target rate: %w", err)
-	}
-	// `OptimizeEligible` above is the authoritative gate; resolver
-	// always returns a real target. Don't reintroduce `target == 0`
-	// → ineligible — would silently drop 44.1/24 / 48/24 bit-only
-	// candidates (Gemini bot review on PR #270).
-	spec := transcode.JobSpec{
-		SourceAbsPath:    abs,
-		SourceLibraryRel: track.Path,
-		SourceSampleRate: sourceHz,
-		TargetSampleRate: target,
-		TargetBits:       16,
-		Quality:          transcode.QualityVeryHigh,
-		OutputDir:        a.outputDir,
-		Kind:             transcode.JobKindOptimize,
+		return err
 	}
 	return a.finalizeAndEnqueue(spec, track.Path, false)
 }
