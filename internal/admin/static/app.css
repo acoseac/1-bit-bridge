@@ -1365,14 +1365,19 @@ dialog h2 { font-size: 18px; color: var(--accent); }
  * text-overflow: ellipsis }` above keeps long names truncating
  * cleanly inside the auto-sized first column.
  *
- *   .num:                11ch — fits "Upscaled" header AND values
- *                                  like "14.85 GB" / "269.1 MB" with
- *                                  padding. 1ch = width of "0" in
- *                                  the current font, which is much
- *                                  narrower than "G" / "B" / space;
- *                                  8ch (initial attempt) clipped
- *                                  both the header text AND the
- *                                  GB/MB-suffixed size values.
+ *   .num:                13ch — fits "Upscaled" header AND the
+ *                                  widest size value from
+ *                                  humanBytes()'s GB branch
+ *                                  ("21.21 GB", 8 chars: 2 decimals
+ *                                  + " GB") with ellipsis margin.
+ *                                  1ch = width of "0" in the current
+ *                                  font, which is much narrower than
+ *                                  "G" / "B" / space; 8ch (initial
+ *                                  attempt) clipped both the header
+ *                                  AND the GB/MB-suffixed values;
+ *                                  11ch was binding under the open
+ *                                  projection drawer (right column
+ *                                  takes ~half the table width).
  *   .folder-actions-col: 44px — HIG hit floor for the ⓘ button
  *   first column:        auto — flex remainder
  *
@@ -1402,7 +1407,10 @@ dialog h2 { font-size: 18px; color: var(--accent); }
   white-space: nowrap;
 }
 #inspector-rows-table th.num {
-  width: 11ch;
+  /* Shared width for "Tracks" / "Upscaled" / "Size" via
+   * table-layout: fixed. See the block comment above for the
+   * 13ch rationale. */
+  width: 13ch;
 }
 #inspector-rows-table th.folder-actions-col {
   width: 44px;
