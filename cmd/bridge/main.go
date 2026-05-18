@@ -213,12 +213,88 @@ type upscaleEnqueuerAdapter struct {
 	outputDir string
 }
 
+// resolveAndLookupTrack is the shared scaffolding for `EnqueueOne`
+// and `EnqueueOptimize`: resolve abs path + look up the manifest
+// Track row + filter DSD. Returns the typed error sentinels both
+// callers map directly into their wire response. Kind-specific
+// checks (rate/bits validation, eligibility predicate, target
+// resolution) stay in each caller.
+//
+// Use Lookup (not Get): iOS hands in a path through
+// `share.normalize(path:)` — lowercase + leading slash — while
+// the manifest stores the FS-canonical case. LookupTrack does an
+// exact-match fast path then falls back to LOWER() via the v3
+// functional index. Per CLAUDE.md PR #126.
+func (a *upscaleEnqueuerAdapter) resolveAndLookupTrack(libraryRelativePath string) (string, *manifest.Track, error) {
+	abs, err := a.resolver.Resolve(libraryRelativePath)
+	if err != nil {
+		return "", nil, api.ErrUpscaleSourceMissing
+	}
+	track, err := a.store.LookupTrack(context.Background(), libraryRelativePath)
+	if err != nil {
+		// DB errors propagate so the handler logs the real cause
+		// instead of silently enqueuing — the resumability check
+		// below depends on the same store.
+		return "", nil, fmt.Errorf("get track row: %w", err)
+	}
+	if track == nil {
+		// File exists on disk but scanner hasn't reached it yet.
+		// Silent reject (no remediation path beyond rescan).
+		return "", nil, api.ErrUpscaleIneligible
+	}
+	if track.IsDSD != nil && *track.IsDSD {
+		return "", nil, api.ErrUpscaleIneligible
+	}
+	return abs, track, nil
+}
+
+// finalizeAndEnqueue is the shared trailing scaffolding for both
+// `EnqueueOne` and `EnqueueOptimize`: capture freshness, run the
+// resumability check, hand to the pool, map pool errors. The kind-
+// specific spec construction (target rate, bits, Kind field) stays
+// in each caller; this function takes the prepared spec.
+//
+// `errPoolClosedAsSourceMissing` chooses between the two documented
+// `ErrPoolClosed` mappings:
+//   - true → `api.ErrUpscaleSourceMissing` (upscale path; matches
+//     CLAUDE.md PR #109's CodeRabbit nit — iOS UX wants the
+//     "feature unavailable" framing).
+//   - false → `fmt.Errorf("pool closed: %w", ...)` (optimize path;
+//     Gemini bot review on PR #270 — wrap original sentinel so the
+//     handler logs the real cause; optimize is invisible runtime
+//     infrastructure with no user-facing toast).
+func (a *upscaleEnqueuerAdapter) finalizeAndEnqueue(spec transcode.JobSpec, trackPath string, errPoolClosedAsSourceMissing bool) error {
+	if err := spec.FreshnessFromFile(); err != nil {
+		return api.ErrUpscaleSourceMissing
+	}
+	existing, getVErr := a.store.LookupVariant(context.Background(), trackPath, spec.VariantID())
+	if getVErr != nil {
+		return fmt.Errorf("get variant row: %w", getVErr)
+	}
+	if existing != nil && existing.SourceMTimeNS == spec.SourceMTimeNS && existing.SourceSize == spec.SourceSize {
+		return api.ErrUpscaleIneligible
+	}
+	enqueueErr := a.pool.Enqueue(spec)
+	switch {
+	case errors.Is(enqueueErr, transcode.ErrQueueFull):
+		return api.ErrUpscaleQueueFull
+	case errors.Is(enqueueErr, transcode.ErrPoolClosed):
+		if errPoolClosedAsSourceMissing {
+			return api.ErrUpscaleSourceMissing
+		}
+		return fmt.Errorf("pool closed: %w", enqueueErr)
+	case enqueueErr != nil:
+		return fmt.Errorf("enqueue: %w", enqueueErr)
+	}
+	return nil
+}
+
 // EnqueueOptimize is the CarPlay-targeted parallel of EnqueueOne.
-// Downsamples hi-res PCM sources to 16-bit / 44.1 or 48 kHz
+// Downsamples hi-res PCM sources to 16-bit / 44.1k or 48k
 // (family-preserving — see transcode.TargetRateForOptimize). Reuses
 // the same Pool, same `track_variants` table, same resumability
-// gate via spec.VariantID() (which is kind-aware now). The only
-// shape differences vs. upscale: eligibility predicate
+// gate via spec.VariantID() (kind-aware). The only shape
+// differences vs. upscale: eligibility predicate
 // (transcode.OptimizeEligible — PCM-hi-res only), target-rate
 // resolver (ResolveTargetRateForOptimize), TargetBits fixed to 16,
 // and Kind: transcode.JobKindOptimize on the JobSpec.
@@ -226,19 +302,9 @@ type upscaleEnqueuerAdapter struct {
 // Same error taxonomy as EnqueueOne so the handler's switch arm
 // doesn't have to discriminate.
 func (a *upscaleEnqueuerAdapter) EnqueueOptimize(libraryRelativePath string) error {
-	abs, err := a.resolver.Resolve(libraryRelativePath)
+	abs, track, err := a.resolveAndLookupTrack(libraryRelativePath)
 	if err != nil {
-		return api.ErrUpscaleSourceMissing
-	}
-	track, err := a.store.LookupTrack(context.Background(), libraryRelativePath)
-	if err != nil {
-		return fmt.Errorf("get track row: %w", err)
-	}
-	if track == nil {
-		return api.ErrUpscaleIneligible
-	}
-	if track.IsDSD != nil && *track.IsDSD {
-		return api.ErrUpscaleIneligible
+		return err
 	}
 	if track.SampleRate == nil || track.BitsPerSample == nil {
 		return api.ErrUpscaleIneligible
@@ -266,70 +332,13 @@ func (a *upscaleEnqueuerAdapter) EnqueueOptimize(libraryRelativePath string) err
 		OutputDir:        a.outputDir,
 		Kind:             transcode.JobKindOptimize,
 	}
-	if err := spec.FreshnessFromFile(); err != nil {
-		return api.ErrUpscaleSourceMissing
-	}
-	existing, getVErr := a.store.LookupVariant(context.Background(), track.Path, spec.VariantID())
-	if getVErr != nil {
-		return fmt.Errorf("get variant row: %w", getVErr)
-	}
-	if existing != nil {
-		if existing.SourceMTimeNS == spec.SourceMTimeNS && existing.SourceSize == spec.SourceSize {
-			return api.ErrUpscaleIneligible
-		}
-	}
-	enqueueErr := a.pool.Enqueue(spec)
-	switch {
-	case errors.Is(enqueueErr, transcode.ErrQueueFull):
-		return api.ErrUpscaleQueueFull
-	case errors.Is(enqueueErr, transcode.ErrPoolClosed):
-		// Wrap the original sentinel rather than collapsing to
-		// `ErrUpscaleSourceMissing` — pool closure is a server-state
-		// issue (likely shutdown), not a file-reconciliation issue,
-		// and the misclassification would have the handler log it
-		// as "rejected" without surfacing the real cause. Gemini bot
-		// review on PR #270.
-		return fmt.Errorf("pool closed: %w", enqueueErr)
-	case enqueueErr != nil:
-		return fmt.Errorf("enqueue: %w", enqueueErr)
-	}
-	return nil
+	return a.finalizeAndEnqueue(spec, track.Path, false)
 }
 
 func (a *upscaleEnqueuerAdapter) EnqueueOne(libraryRelativePath string) error {
-	abs, err := a.resolver.Resolve(libraryRelativePath)
+	abs, track, err := a.resolveAndLookupTrack(libraryRelativePath)
 	if err != nil {
-		return api.ErrUpscaleSourceMissing
-	}
-	// Use Lookup (not Get) here because iOS hands in a path that's
-	// been through `share.normalize(path:)` — lowercase + leading
-	// slash — while the manifest stores the FS-canonical case.
-	// LookupTrack does an exact-match fast path first (handles
-	// case-sensitive filesystems correctly) then falls back to a
-	// LOWER() compare via the v3 functional index. The scanner's
-	// hot loop deliberately stays on GetTrack so two distinct
-	// case-colliding rows can't alias each other (Qodo on PR #126).
-	track, err := a.store.LookupTrack(context.Background(), libraryRelativePath)
-	if err != nil {
-		// Surface DB errors as a generic 5xx upstream rather
-		// than silently enqueuing — the resumability check
-		// below depends on the same store, so a sick DB would
-		// likely double-convert tracks (Gemini medium on
-		// PR #109).
-		return fmt.Errorf("get track row: %w", err)
-	}
-	if track == nil {
-		// File exists on disk but no manifest row yet — scanner
-		// hasn't seen it. The HTTP handler treats this as an
-		// ineligible candidate (silent reject) rather than an
-		// error; the user has no remediation path beyond
-		// triggering a rescan.
-		return api.ErrUpscaleIneligible
-	}
-	// Eligibility gate: PCM only, source rate present, source
-	// rate strictly below target rate.
-	if track.IsDSD != nil && *track.IsDSD {
-		return api.ErrUpscaleIneligible
+		return err
 	}
 	if track.SampleRate == nil {
 		return api.ErrUpscaleIneligible
@@ -347,11 +356,7 @@ func (a *upscaleEnqueuerAdapter) EnqueueOne(libraryRelativePath string) error {
 	// `FOREIGN KEY (source_path) REFERENCES tracks(path)` constraint
 	// on the case-sensitive PRIMARY KEY; passing the lowercase iOS
 	// shape through to UpsertVariant makes the FK fail at write
-	// time with `constraint failed: FOREIGN KEY constraint failed`,
-	// after sox has already done the work. PR #126 introduced this
-	// regression: LookupTrack finds the row via case-folded fallback
-	// but the spec then carried the unmatched input forward.
-	// `track.Path` is the authoritative form the manifest stores.
+	// time. Per CLAUDE.md PR #126.
 	spec := transcode.JobSpec{
 		SourceAbsPath:    abs,
 		SourceLibraryRel: track.Path,
@@ -361,40 +366,7 @@ func (a *upscaleEnqueuerAdapter) EnqueueOne(libraryRelativePath string) error {
 		Quality:          transcode.QualityVeryHigh,
 		OutputDir:        a.outputDir,
 	}
-	if err := spec.FreshnessFromFile(); err != nil {
-		return api.ErrUpscaleSourceMissing
-	}
-	// Resumability: skip when a fresh sidecar already exists.
-	// Same handle-the-error policy as the parent track lookup —
-	// a sick DB shouldn't silently re-convert a track.
-	// Use track.Path (canonical) — same rationale as the spec
-	// construction above. Either path would work here (LookupVariant
-	// case-folds), but the canonical form keeps every downstream
-	// store call consistent.
-	existing, getVErr := a.store.LookupVariant(context.Background(), track.Path, spec.VariantID())
-	if getVErr != nil {
-		return fmt.Errorf("get variant row: %w", getVErr)
-	}
-	if existing != nil {
-		if existing.SourceMTimeNS == spec.SourceMTimeNS && existing.SourceSize == spec.SourceSize {
-			return api.ErrUpscaleIneligible
-		}
-	}
-	enqueueErr := a.pool.Enqueue(spec)
-	switch {
-	case errors.Is(enqueueErr, transcode.ErrQueueFull):
-		return api.ErrUpscaleQueueFull
-	case errors.Is(enqueueErr, transcode.ErrPoolClosed):
-		// Should never reach here in production — Stop()
-		// only fires during graceful shutdown when no new
-		// HTTP requests are accepted. Surface as
-		// upscale-disabled so the iOS toast reads "feature
-		// unavailable" rather than a confusing transient
-		// error (CodeRabbit nit on PR #109).
-		return api.ErrUpscaleSourceMissing
-	default:
-		return enqueueErr
-	}
+	return a.finalizeAndEnqueue(spec, track.Path, true)
 }
 
 // upscaleBatchCoordinatorAdapter implements api.BatchCoordinator
