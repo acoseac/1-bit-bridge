@@ -1125,13 +1125,26 @@ func scanTrackVariants(t *Track, raw []byte) {
 }
 
 // humanLabelForVariant renders an iOS-friendly description for
-// the picker UI. Today's only producer is `bridge upscale`, which
-// mints `upscaled-v2-<rate>-<bits>` IDs.
+// the picker UI / operator-facing diagnostics. Two producer prefixes:
+//
+//   - `upscaled-` → "Upscaled FLAC 24/96" (operator-driven hi-res
+//     render for home-DAC playback).
+//   - `optimized-` → "Optimized FLAC 16/44.1" (CarPlay-targeted
+//     downsample, runtime-routed on iOS — invisible in the wand
+//     long-press menu for v1, but surfaces in admin web UI and
+//     server logs).
+//
+// **Don't reintroduce the hardcoded "Upscaled" literal** at any
+// new variant-label site — branch on the prefix.
 func humanLabelForVariant(v Variant) string {
 	rateLabel := formatSampleRateLabel(v.SampleRate)
+	kind := "Upscaled"
+	if strings.HasPrefix(v.ID, "optimized-") {
+		kind = "Optimized"
+	}
 	switch {
 	case v.Format == "flac":
-		return fmt.Sprintf("Upscaled FLAC %d/%s", v.BitsPerSample, rateLabel)
+		return fmt.Sprintf("%s FLAC %d/%s", kind, v.BitsPerSample, rateLabel)
 	default:
 		return fmt.Sprintf("%s %d/%s", v.Format, v.BitsPerSample, rateLabel)
 	}
@@ -2980,6 +2993,12 @@ type TrackProjection struct {
 	MTimeNS       int64 // for VariantRow.SourceMTimeNS at JobSpec construction
 	SampleRate    int
 	BitsPerSample int
+	// Codec is the upper-case canonical codec string (FLAC / ALAC /
+	// WAV / AIFF / AAC / MP3 / DSF / DFF) the scanner stamped into
+	// `tags_json`. Empty for legacy pre-codec-column rows; consumers
+	// that need codec discrimination on legacy DBs fall back to the
+	// on-disk extension (see transcode.OptimizeEligible).
+	Codec string
 	// IsDSD distinguishes DSF / DFF tracks (which the upscale
 	// pipeline rejects — DSD is 1-bit modulated and not a SoX-
 	// resampleable source) from PCM. The admin projection loop
@@ -3017,6 +3036,7 @@ func (s *Store) ListTrackProjectionsUnderPrefix(ctx context.Context, prefix stri
 		SELECT t.path, t.size, t.mtime_ns,
 		       CAST(COALESCE(json_extract(t.tags_json, '$.sampleRate'),    0) AS INTEGER) AS rate,
 		       CAST(COALESCE(json_extract(t.tags_json, '$.bitsPerSample'), 0) AS INTEGER) AS bits,
+		       COALESCE(json_extract(t.tags_json, '$.codec'),              '') AS codec,
 		       CAST(COALESCE(json_extract(t.tags_json, '$.isDSD'),         0) AS INTEGER) AS is_dsd,
 		       EXISTS(SELECT 1 FROM track_variants tv WHERE tv.source_path = t.path) AS has_variant
 		  FROM tracks t
@@ -3031,7 +3051,7 @@ func (s *Store) ListTrackProjectionsUnderPrefix(ctx context.Context, prefix stri
 	for rows.Next() {
 		var tp TrackProjection
 		var isDSD, has int
-		if err := rows.Scan(&tp.Path, &tp.Size, &tp.MTimeNS, &tp.SampleRate, &tp.BitsPerSample, &isDSD, &has); err != nil {
+		if err := rows.Scan(&tp.Path, &tp.Size, &tp.MTimeNS, &tp.SampleRate, &tp.BitsPerSample, &tp.Codec, &isDSD, &has); err != nil {
 			return nil, err
 		}
 		tp.IsDSD = isDSD != 0

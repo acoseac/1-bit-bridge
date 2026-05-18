@@ -45,6 +45,16 @@ import (
 //     logs and counts as rejected.
 type UpscaleEnqueuer interface {
 	EnqueueOne(libraryRelativePath string) error
+
+	// EnqueueOptimize is the CarPlay-targeted parallel path:
+	// downsamples hi-res PCM sources to 16-bit / 44.1 or 48 kHz
+	// (family-preserving). Same error taxonomy as EnqueueOne —
+	// ErrUpscaleQueueFull / ErrUpscaleSourceMissing /
+	// ErrUpscaleIneligible — so the handler's switch arm reuses
+	// without branching. Always-present on the interface so the
+	// handler can route on `UpscaleRequest.Kind` without a
+	// downcast / capability probe.
+	EnqueueOptimize(libraryRelativePath string) error
 }
 
 // redactWalkErr returns walkErr's message with the absolute host
@@ -84,8 +94,15 @@ var ErrUpscaleIneligible = errors.New("upscale source is ineligible")
 // file under the folder; the enqueuer's per-track eligibility
 // check filters non-PCM / already-at-target / already-cached
 // candidates.
+//
+// `kind` discriminates upscale (default, "" or "upscale" — full
+// back-compat for pre-v1.x iOS clients that omit the field) from
+// optimize (CarPlay-targeted downsample, "optimize"). The handler
+// routes per-candidate without changing the rest of the request
+// shape — additive wire change, no ProtocolVersion bump.
 type UpscaleRequest struct {
 	Path string `json:"path"`
+	Kind string `json:"kind,omitempty"`
 }
 
 // UpscaleResponse is the wire shape POST /v1/upscale returns
@@ -222,11 +239,32 @@ func (s *Server) upscaleRequest(w http.ResponseWriter, r *http.Request) {
 		candidates = append(candidates, libraryRel)
 	}
 
+	// Normalise + route by kind. Empty / "upscale" → legacy upscale
+	// path (back-compat with pre-v1.x iOS clients that omit the
+	// field). "optimize" → CarPlay-targeted downsample. Unknown
+	// strings reject — surface a 400 so a future kind that the
+	// server doesn't know about doesn't silently downgrade to
+	// upscale.
+	kind := strings.ToLower(strings.TrimSpace(req.Kind))
+	switch kind {
+	case "", "upscale", "optimize":
+		// ok
+	default:
+		writeError(w, http.StatusBadRequest, "bad_request",
+			"unknown kind: "+req.Kind+` (expected "upscale" or "optimize")`)
+		return
+	}
+
 	enqueued := 0
 	rejected := 0
 	queueFull := false
 	for _, c := range candidates {
-		err := s.upscaleEnqueuer.EnqueueOne(c)
+		var err error
+		if kind == "optimize" {
+			err = s.upscaleEnqueuer.EnqueueOptimize(c)
+		} else {
+			err = s.upscaleEnqueuer.EnqueueOne(c)
+		}
 		switch {
 		case err == nil:
 			enqueued++

@@ -285,6 +285,15 @@ type UpscaleConfig struct {
 	// Enabled is the master toggle. Default false.
 	Enabled bool `yaml:"enabled,omitempty"`
 
+	// OptimizeEnabled gates the CarPlay-optimize feature
+	// (`optimized-*` variant class — downsample to 16-bit /
+	// 44.1k or 48k for fast cellular CarPlay playback).
+	// Pointer-bool so the default is true when the field is
+	// absent (`nil` → enabled); operators on storage-constrained
+	// hosts can opt out via `optimizeEnabled: false`. Ignored
+	// when `Enabled` is false (the master toggle covers both).
+	OptimizeEnabled *bool `yaml:"optimizeEnabled,omitempty"`
+
 	// Workers is the size of the long-lived transcode worker pool
 	// instantiated by `bridge serve` when Enabled. Zero (the default)
 	// resolves to min(NumCPU-1, 4) at startup. Operators with beefy
@@ -362,6 +371,18 @@ func (u UpscaleConfig) EffectiveQueueCap() int {
 		return u.QueueCap
 	}
 	return DefaultUpscaleQueueCap
+}
+
+// EffectiveOptimizeEnabled returns the optimize-feature gate value
+// with nil-defaulting-to-true. Operators who never touch the field
+// inherit the on-by-default behavior; `optimizeEnabled: false` in
+// YAML explicitly opts out (storage-constrained hosts who only
+// want upscale).
+func (u UpscaleConfig) EffectiveOptimizeEnabled() bool {
+	if u.OptimizeEnabled == nil {
+		return true
+	}
+	return *u.OptimizeEnabled
 }
 
 // EffectiveTargetBits resolves the output bit depth. Defaults to 24.

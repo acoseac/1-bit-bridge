@@ -249,15 +249,23 @@ func TestDeleteTrackToleratesMissingSidecar(t *testing.T) {
 }
 
 // TestVariantsHumanLabel pins the iOS-facing label format — any
-// drift here will look wrong in the picker UI.
+// drift here will look wrong in the picker UI. Both `upscaled-*`
+// and `optimized-*` prefixes are emitted; the prefix discriminates
+// the "Upscaled FLAC ..." vs "Optimized FLAC ..." label string.
 func TestVariantsHumanLabel(t *testing.T) {
 	cases := []struct {
 		v    Variant
 		want string
 	}{
-		{Variant{Format: "flac", BitsPerSample: 24, SampleRate: 176400}, "Upscaled FLAC 24/176.4"},
-		{Variant{Format: "flac", BitsPerSample: 24, SampleRate: 192000}, "Upscaled FLAC 24/192"},
-		{Variant{Format: "flac", BitsPerSample: 32, SampleRate: 352800}, "Upscaled FLAC 32/352.8"},
+		{Variant{ID: "upscaled-v2-176400-24", Format: "flac", BitsPerSample: 24, SampleRate: 176400}, "Upscaled FLAC 24/176.4"},
+		{Variant{ID: "upscaled-v2-192000-24", Format: "flac", BitsPerSample: 24, SampleRate: 192000}, "Upscaled FLAC 24/192"},
+		{Variant{ID: "upscaled-v2-352800-32", Format: "flac", BitsPerSample: 32, SampleRate: 352800}, "Upscaled FLAC 32/352.8"},
+		// Optimize prefix → "Optimized" label (CarPlay-targeted).
+		{Variant{ID: "optimized-v2-44100-16", Format: "flac", BitsPerSample: 16, SampleRate: 44100}, "Optimized FLAC 16/44.1"},
+		{Variant{ID: "optimized-v2-48000-16", Format: "flac", BitsPerSample: 16, SampleRate: 48000}, "Optimized FLAC 16/48"},
+		// Empty / unknown prefix defaults to Upscaled (back-compat with
+		// pre-prefix-discriminator producers).
+		{Variant{ID: "", Format: "flac", BitsPerSample: 24, SampleRate: 96000}, "Upscaled FLAC 24/96"},
 	}
 	for _, c := range cases {
 		got := humanLabelForVariant(c.v)
