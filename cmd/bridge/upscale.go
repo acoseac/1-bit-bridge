@@ -61,6 +61,88 @@ const transcodedDirName = transcode.OutputDirSubdir
 // — forward sweep, reverse sweep, and the per-row inner loop.
 const gcInterruptedMessage = "GC interrupted"
 
+// transcodeBootstrapResult bundles the prepared state shared by the
+// `upscale` and `optimize` CLI subcommands: validated quality preset,
+// loaded config, opened manifest store, output directory, and the
+// bridgefs resolver. Caller is responsible for `store.Close()` via
+// defer.
+type transcodeBootstrapResult struct {
+	cfg       *config.Config
+	store     *manifest.Store
+	quality   transcode.Quality
+	outputDir string
+	resolver  *bridgefs.Resolver
+}
+
+// bootstrapTranscodeCmd runs the shared CLI scaffolding both
+// `upscaleCmd` and `optimizeCmd` need: config load + upscale feature
+// gate + sox precheck (gated on `gcMode`) + quality validation +
+// manifest store open + outputDir resolve + bridgefs resolver
+// construction. Returns the populated result + 0 on success, or
+// `(nil, exitCode)` on any failure (caller `return exitCode`s).
+//
+// `gcMode == true` skips the sox precheck — GC sweeps only consult
+// the DB and the filesystem, no sox required.
+func bootstrapTranscodeCmd(stderr io.Writer, configPath, qualityFlag string, gcMode bool) (*transcodeBootstrapResult, int) {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "config load: %v\n", err)
+		return nil, 2
+	}
+
+	// Feature flag gate. Disabled bridges refuse to run the CLI
+	// even if all the inputs are valid — operators must consciously
+	// opt in.
+	if !cfg.Upscale.Enabled {
+		fmt.Fprint(stderr, "Transcoding (upscale + optimize) is disabled in bridge.yaml.\n"+
+			"Set `upscale.enabled: true` and restart `bridge serve`, then re-run this command.\n")
+		return nil, 2
+	}
+
+	// SoX-on-PATH probe. The pure-function part of the feature
+	// (manifest queries, GC) doesn't need sox, so we defer this
+	// check until just before a conversion would actually fire.
+	if !gcMode {
+		if err := transcode.PrecheckSox(); err != nil {
+			if errors.Is(err, transcode.ErrSoxMissing) {
+				fmt.Fprintf(stderr, "%v\n\nInstall sox:\n", err)
+				printSoxInstallHint(stderr)
+			} else {
+				fmt.Fprintf(stderr, "sox precheck: %v\n", err)
+			}
+			return nil, 1
+		}
+	}
+
+	q := transcode.Quality(qualityFlag)
+	switch q {
+	case transcode.QualityVeryHigh, transcode.QualityHigh, transcode.QualityMedium:
+	default:
+		fmt.Fprintf(stderr, "invalid --quality %q (want very-high|high|medium)\n", qualityFlag)
+		return nil, 2
+	}
+
+	store, err := manifest.OpenStore(manifest.DefaultDBPath(cfg.DataDir))
+	if err != nil {
+		fmt.Fprintf(stderr, "open manifest store: %v\n", err)
+		return nil, 1
+	}
+	// Build a Resolver from the config roots. Same routing engine
+	// the api uses for /v1/list / /v1/download — handles
+	// single-root (rootless paths) AND multi-root (basename-
+	// prefixed paths) uniformly. Pre-fix, the CLI had its own
+	// hand-rolled basename-stripping helper that silently returned
+	// "" for every track in single-root layouts (CodeRabbit
+	// second-pass on PR #108).
+	return &transcodeBootstrapResult{
+		cfg:       cfg,
+		store:     store,
+		quality:   q,
+		outputDir: filepath.Join(cfg.DataDir, transcodedDirName),
+		resolver:  bridgefs.New(cfg.LibraryRoots),
+	}, 0
+}
+
 func upscaleCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("upscale", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -76,81 +158,29 @@ func upscaleCmd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-
-	cfg, err := config.Load(*configPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "config load: %v\n", err)
-		return 2
-	}
-
-	// Feature flag gate. Disabled bridges refuse to run the CLI
-	// even if all the inputs are valid — operators must
-	// consciously opt in.
-	if !cfg.Upscale.Enabled {
-		fmt.Fprint(stderr, "Upscaling is disabled in bridge.yaml.\n"+
-			"Set `upscale.enabled: true` and restart `bridge serve`, then re-run this command.\n")
-		return 2
-	}
-
-	// SoX-on-PATH probe. The pure-function part of the feature
-	// (manifest queries, GC) doesn't need sox, so we defer this
-	// check until just before a conversion would actually fire.
-	if !*gc {
-		if err := transcode.PrecheckSox(); err != nil {
-			if errors.Is(err, transcode.ErrSoxMissing) {
-				fmt.Fprintf(stderr, "%v\n\nInstall sox:\n", err)
-				printSoxInstallHint(stderr)
-			} else {
-				fmt.Fprintf(stderr, "sox precheck: %v\n", err)
-			}
-			return 1
-		}
-	}
-
-	q := transcode.Quality(*quality)
-	switch q {
-	case transcode.QualityVeryHigh, transcode.QualityHigh, transcode.QualityMedium:
-	default:
-		fmt.Fprintf(stderr, "invalid --quality %q (want very-high|high|medium)\n", *quality)
-		return 2
-	}
 	if *targetBits != 16 && *targetBits != 24 && *targetBits != 32 {
 		fmt.Fprintf(stderr, "invalid --target-bits %d (want 16/24/32)\n", *targetBits)
 		return 2
 	}
 
-	store, err := manifest.OpenStore(manifest.DefaultDBPath(cfg.DataDir))
-	if err != nil {
-		fmt.Fprintf(stderr, "open manifest store: %v\n", err)
-		return 1
+	r, exitCode := bootstrapTranscodeCmd(stderr, *configPath, *quality, *gc)
+	if r == nil {
+		return exitCode
 	}
-	defer store.Close()
-
-	outputDir := filepath.Join(cfg.DataDir, transcodedDirName)
+	defer r.store.Close()
 
 	if *gc {
-		return runGC(ctx, stdout, stderr, store, outputDir)
+		return runGC(ctx, stdout, stderr, r.store, r.outputDir)
 	}
-
-	// Build a Resolver from the config roots. Same routing
-	// engine the api uses for /v1/list / /v1/download — handles
-	// single-root (rootless paths) AND multi-root (basename-
-	// prefixed paths) uniformly. Pre-fix, this CLI had its own
-	// hand-rolled basename-stripping helper that silently
-	// returned "" for every track in single-root layouts —
-	// nothing got converted (CodeRabbit second-pass on PR #108,
-	// continuation of the api-side fix).
-	resolver := bridgefs.New(cfg.LibraryRoots)
-
-	return runUpscaleBatch(ctx, stdout, stderr, store, cfg, resolver, runUpscaleParams{
+	return runUpscaleBatch(ctx, stdout, stderr, r.store, r.cfg, r.resolver, runUpscaleParams{
 		targetRateFlag: *targetRate,
 		targetBits:     *targetBits,
-		quality:        q,
+		quality:        r.quality,
 		workers:        effectiveWorkerCount(*workers),
 		filter:         *filter,
 		dryRun:         *dryRun,
 		force:          *force,
-		outputDir:      outputDir,
+		outputDir:      r.outputDir,
 	})
 }
 
