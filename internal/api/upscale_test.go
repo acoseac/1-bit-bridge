@@ -21,9 +21,10 @@ import (
 // queue-full / source-missing / ineligible / generic-error
 // branches.
 type stubEnqueuer struct {
-	calls       []string
-	resultByRel map[string]error // optional override per-rel; default nil = success
-	defaultErr  error            // applied to any rel not in resultByRel
+	calls         []string
+	optimizeCalls []string
+	resultByRel   map[string]error // optional override per-rel; default nil = success
+	defaultErr    error            // applied to any rel not in resultByRel
 }
 
 func newStubEnqueuer() *stubEnqueuer {
@@ -32,6 +33,14 @@ func newStubEnqueuer() *stubEnqueuer {
 
 func (s *stubEnqueuer) EnqueueOne(libraryRelativePath string) error {
 	s.calls = append(s.calls, libraryRelativePath)
+	if err, ok := s.resultByRel[libraryRelativePath]; ok {
+		return err
+	}
+	return s.defaultErr
+}
+
+func (s *stubEnqueuer) EnqueueOptimize(libraryRelativePath string) error {
+	s.optimizeCalls = append(s.optimizeCalls, libraryRelativePath)
 	if err, ok := s.resultByRel[libraryRelativePath]; ok {
 		return err
 	}

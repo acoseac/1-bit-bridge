@@ -213,6 +213,82 @@ type upscaleEnqueuerAdapter struct {
 	outputDir string
 }
 
+// EnqueueOptimize is the CarPlay-targeted parallel of EnqueueOne.
+// Downsamples hi-res PCM sources to 16-bit / 44.1 or 48 kHz
+// (family-preserving — see transcode.TargetRateForOptimize). Reuses
+// the same Pool, same `track_variants` table, same resumability
+// gate via spec.VariantID() (which is kind-aware now). The only
+// shape differences vs. upscale: eligibility predicate
+// (transcode.OptimizeEligible — PCM-hi-res only), target-rate
+// resolver (ResolveTargetRateForOptimize), TargetBits fixed to 16,
+// and Kind: transcode.JobKindOptimize on the JobSpec.
+//
+// Same error taxonomy as EnqueueOne so the handler's switch arm
+// doesn't have to discriminate.
+func (a *upscaleEnqueuerAdapter) EnqueueOptimize(libraryRelativePath string) error {
+	abs, err := a.resolver.Resolve(libraryRelativePath)
+	if err != nil {
+		return api.ErrUpscaleSourceMissing
+	}
+	track, err := a.store.LookupTrack(context.Background(), libraryRelativePath)
+	if err != nil {
+		return fmt.Errorf("get track row: %w", err)
+	}
+	if track == nil {
+		return api.ErrUpscaleIneligible
+	}
+	if track.IsDSD != nil && *track.IsDSD {
+		return api.ErrUpscaleIneligible
+	}
+	if track.SampleRate == nil || track.BitsPerSample == nil {
+		return api.ErrUpscaleIneligible
+	}
+	sourceHz := int(*track.SampleRate)
+	sourceBits := *track.BitsPerSample
+	if !transcode.OptimizeEligible(track.Path, track.Codec, sourceHz, sourceBits) {
+		return api.ErrUpscaleIneligible
+	}
+	target, err := transcode.ResolveTargetRateForOptimize(sourceHz)
+	if err != nil {
+		return fmt.Errorf("resolve optimize target rate: %w", err)
+	}
+	if target == 0 {
+		return api.ErrUpscaleIneligible
+	}
+	spec := transcode.JobSpec{
+		SourceAbsPath:    abs,
+		SourceLibraryRel: track.Path,
+		SourceSampleRate: sourceHz,
+		TargetSampleRate: target,
+		TargetBits:       16,
+		Quality:          transcode.QualityVeryHigh,
+		OutputDir:        a.outputDir,
+		Kind:             transcode.JobKindOptimize,
+	}
+	if err := spec.FreshnessFromFile(); err != nil {
+		return api.ErrUpscaleSourceMissing
+	}
+	existing, getVErr := a.store.LookupVariant(context.Background(), track.Path, spec.VariantID())
+	if getVErr != nil {
+		return fmt.Errorf("get variant row: %w", getVErr)
+	}
+	if existing != nil {
+		if existing.SourceMTimeNS == spec.SourceMTimeNS && existing.SourceSize == spec.SourceSize {
+			return api.ErrUpscaleIneligible
+		}
+	}
+	enqueueErr := a.pool.Enqueue(spec)
+	switch {
+	case errors.Is(enqueueErr, transcode.ErrQueueFull):
+		return api.ErrUpscaleQueueFull
+	case errors.Is(enqueueErr, transcode.ErrPoolClosed):
+		return api.ErrUpscaleSourceMissing
+	case enqueueErr != nil:
+		return fmt.Errorf("enqueue: %w", enqueueErr)
+	}
+	return nil
+}
+
 func (a *upscaleEnqueuerAdapter) EnqueueOne(libraryRelativePath string) error {
 	abs, err := a.resolver.Resolve(libraryRelativePath)
 	if err != nil {
@@ -909,6 +985,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return scanCmd(args[1:], stdout, stderr)
 	case "upscale":
 		return upscaleCmd(ctx, args[1:], stdout, stderr)
+	case "optimize":
+		return optimizeCmd(ctx, args[1:], stdout, stderr)
 	case "variants":
 		return variantsCmd(ctx, args[1:], stdout, stderr)
 	case "artwork":
@@ -972,6 +1050,11 @@ Subcommands:
   pair     Generate a new bearer token for an iOS client.
   scan     Force a full library rescan.
   upscale  Generate high-rate FLAC sidecars from PCM sources (requires sox + opt-in flag).
+  optimize Generate CarPlay-targeted 16-bit / 44.1k or 48k FLAC sidecars from hi-res PCM
+           sources (requires sox + opt-in flag). Family-preserving downsample: 88.2/176.4k
+           → 44.1k; 96/192k → 48k. Shrinks 100 MB hi-res FLAC to ~15-20 MB for fast
+           CarPlay / cellular streaming with zero fidelity loss vs. what the head unit
+           accepts.
   artwork  Maintain on-disk artwork cache: bridge artwork --gc removes orphans.
   doctor   Preflight: check ports, directories, service manager before init.
   update   Check for / install a new bridge release from GitHub.
@@ -1383,7 +1466,8 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		WithSessionTracker(sessions).
 		WithPairing(pairingStore).
 		WithCertExpiry(certNotAfter).
-		WithUpscale(upscaleActive, &variantStoreAdapter{provider: provider})
+		WithUpscale(upscaleActive, &variantStoreAdapter{provider: provider}).
+		WithCarPlayOptimize(upscaleActive && cfg.Upscale.EffectiveOptimizeEnabled())
 	cfgHolder := apiSrv.ConfigHolder()
 
 	// Background sweep for the pairing rate-limiter's per-IP map.

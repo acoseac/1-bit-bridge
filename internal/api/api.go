@@ -107,29 +107,30 @@ var manifestGzipPool = sync.Pool{
 
 // Server owns the http.Handler and the per-request state it needs.
 type Server struct {
-	cfgHolder            *config.RuntimeConfig
-	store                *auth.Store
-	resolver             *bridgefs.Resolver
-	manifest             ManifestProvider
-	artworkDirs          ArtworkDirProvider
-	mbidProbe            MBIDProbe
-	updater              UpdaterStatus
-	sessions             SessionTracker
-	pairing              *pairing.Store
-	pairingRateLimiter   *pairingRateLimiter
-	certNotAfter         time.Time            // zero when not wired (test harnesses)
-	variantStore         VariantStore         // nil unless WithUpscale(true, vs) called
-	variantDeleter       VariantDeleter       // nil unless WithVariantDeleter wired (variant-lifecycle delete)
-	inflightDropper      InflightDropper      // nil unless WithInflightDropper wired (transcode pool dedup)
-	upscaleEnabled       bool                 // mirrors cfg.Upscale.Enabled (and sox-probe outcome)
-	upscaleEnqueuer      UpscaleEnqueuer      // nil unless WithUpscaleEnqueuer wired (Phase 2.5)
-	upscaleStatsProvider UpscaleStatsProvider // nil unless WithUpscaleStats wired (v1.2 management UI)
-	batchCoordinator     BatchCoordinator     // nil unless WithBatchCoordinator wired (v1.3 operator-driven upscale)
-	eventBroker          *eventBroker         // nil disables /v1/events (back-compat for test harnesses)
-	manifestRateLimiter  *manifestRateLimiter // per-token-ID token-bucket for /v1/manifest
-	reachability         *reachabilityCache   // per-root probe TTL cache used by /v1/list, /v1/stat, /v1/health
-	fingerprint          string
-	startedAt            time.Time
+	cfgHolder              *config.RuntimeConfig
+	store                  *auth.Store
+	resolver               *bridgefs.Resolver
+	manifest               ManifestProvider
+	artworkDirs            ArtworkDirProvider
+	mbidProbe              MBIDProbe
+	updater                UpdaterStatus
+	sessions               SessionTracker
+	pairing                *pairing.Store
+	pairingRateLimiter     *pairingRateLimiter
+	certNotAfter           time.Time            // zero when not wired (test harnesses)
+	variantStore           VariantStore         // nil unless WithUpscale(true, vs) called
+	variantDeleter         VariantDeleter       // nil unless WithVariantDeleter wired (variant-lifecycle delete)
+	inflightDropper        InflightDropper      // nil unless WithInflightDropper wired (transcode pool dedup)
+	upscaleEnabled         bool                 // mirrors cfg.Upscale.Enabled (and sox-probe outcome)
+	carPlayOptimizeEnabled bool                 // gated AND-wise on upscaleEnabled by the wiring layer
+	upscaleEnqueuer        UpscaleEnqueuer      // nil unless WithUpscaleEnqueuer wired (Phase 2.5)
+	upscaleStatsProvider   UpscaleStatsProvider // nil unless WithUpscaleStats wired (v1.2 management UI)
+	batchCoordinator       BatchCoordinator     // nil unless WithBatchCoordinator wired (v1.3 operator-driven upscale)
+	eventBroker            *eventBroker         // nil disables /v1/events (back-compat for test harnesses)
+	manifestRateLimiter    *manifestRateLimiter // per-token-ID token-bucket for /v1/manifest
+	reachability           *reachabilityCache   // per-root probe TTL cache used by /v1/list, /v1/stat, /v1/health
+	fingerprint            string
+	startedAt              time.Time
 
 	// tailscaleStatus is the embedded-tsnet status provider used by
 	// `reachableEndpoints` to advertise the bridge's `*.ts.net` URL +
@@ -372,6 +373,17 @@ func (s *Server) WithUpscale(enabled bool, vs VariantStore) *Server {
 	if enabled {
 		s.variantStore = vs
 	}
+	return s
+}
+
+// WithCarPlayOptimize toggles the CarPlay-optimize feature
+// advertisement (the `carPlayOptimize` entry in /v1/health.features).
+// Caller is responsible for the AND-gate with upscale enablement —
+// the wire-emit branch in /v1/health additionally requires
+// `s.upscaleEnabled` (optimize shares the SoX pool with upscale and
+// has no meaning without it).
+func (s *Server) WithCarPlayOptimize(enabled bool) *Server {
+	s.carPlayOptimizeEnabled = enabled
 	return s
 }
 
@@ -853,8 +865,11 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// operatorDrivenUpscale + pairingEventsSupported +
 	// pushEventsSupported + upscaleCompleteEvents +
 	// variantBumpsIndex).
-	feats := make([]string, 0, 6)
+	feats := make([]string, 0, 7)
 	if s.upscaleEnabled {
+		if s.carPlayOptimizeEnabled {
+			feats = append(feats, "carPlayOptimize")
+		}
 		if s.variantDeleter != nil {
 			feats = append(feats, "deleteVariants")
 		}

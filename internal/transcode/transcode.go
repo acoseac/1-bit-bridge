@@ -65,6 +65,40 @@ var logger = logging.Component("transcode")
 // `bridge upscale --gc` pass cleans them up.
 const VariantSchemaVersion = "v2"
 
+// Variant ID prefixes. Two transcode classes coexist today:
+//
+//   - "upscaled-" — render a hi-res target (e.g. 192/24) FROM a
+//     lower-res source, for home-DAC playback. Operator-driven
+//     (POST /v1/upscale + `bridge upscale --all`).
+//
+//   - "optimized-" — render a CarPlay-compatible 16/44.1 or 16/48
+//     target FROM a hi-res source. iOS auto-routes to these when
+//     CarPlay is the active audio output; the sample-rate-family
+//     selector (`TargetRateForOptimize`) keeps SoX on the integer-
+//     ratio fast path.
+//
+// **Don't share the variant ID cache between kinds** — the
+// (44100, 16) entry exists in BOTH spaces and the upscale memo
+// returns `upscaled-v2-44100-16` for either kind's lookup, silently
+// corrupting variant routing at the SQL persistence boundary. Two
+// parallel memos (this file: `variantIDCache` + `optimizeIDCache`)
+// keep the prefix semantics tight.
+const (
+	VariantPrefixUpscaled  = "upscaled"
+	VariantPrefixOptimized = "optimized"
+)
+
+// JobKind discriminates upscale (default) from optimize jobs across
+// the full pool / coordinator / handler / CLI surface. Zero-value
+// `JobKindUpscale` preserves legacy behavior for every existing
+// JobSpec construction site that didn't yet learn about the field.
+type JobKind string
+
+const (
+	JobKindUpscale  JobKind = "upscale"
+	JobKindOptimize JobKind = "optimize"
+)
+
 // Quality presets map to SoX `rate` flag combinations. We keep the
 // mapping internal so a future `-q` knob on the CLI doesn't bake
 // flag strings into the user-facing surface — operators see "very-
@@ -114,6 +148,13 @@ type JobSpec struct {
 	Quality          Quality
 	OutputDir        string // <dataDir>/transcoded
 
+	// Kind discriminates the transcode class — upscale (default,
+	// zero-value preserves legacy behavior) or optimize (CarPlay-
+	// targeted downsample to 16/44.1 or 16/48). Drives the variant
+	// ID prefix in `VariantID()` and the eligibility-gate branch in
+	// `Coordinator.Submit`.
+	Kind JobKind
+
 	// BatchID groups this JobSpec into one operator-initiated batch
 	// (v1.3 Coordinator). The zero-value uuid.UUID means the job was
 	// submitted outside the batch path — legacy `POST /v1/upscale`
@@ -128,18 +169,29 @@ type JobSpec struct {
 // VariantID returns the opaque identifier that uniquely names this
 // JobSpec's output variant. Convention:
 //
-//	upscaled-<schemaVersion>-<targetRate>-<targetBits>
+//	upscaled-<schemaVersion>-<targetRate>-<targetBits>   // JobKindUpscale (default)
+//	optimized-<schemaVersion>-<targetRate>-<targetBits>  // JobKindOptimize
 //
-// e.g. `upscaled-v2-176400-24`. iOS keys on the `upscaled-` prefix
-// to slot the variant into the share-level "prefer upscaled"
-// resolution. Future variant kinds (e.g. PCM→DSD synthesis) get
-// their own prefix.
+// e.g. `upscaled-v2-176400-24` or `optimized-v2-44100-16`. iOS keys
+// on the prefix to slot the variant into the share-level "prefer
+// upscaled" toggle vs. the runtime CarPlay-routing path. Future
+// variant kinds (e.g. PCM→DSD synthesis) get their own prefix.
 //
-// Hot path during manifest scan + every pool callback. The
-// finite (rate × bits) cross-product across all real DACs makes
-// memoization a clean O(1) win — see `variantIDCache`. Per-call
-// cost goes from a `fmt.Sprintf` allocation to a map read.
+// Hot path during manifest scan + every pool callback. The finite
+// (rate × bits) cross-product across all real DACs makes memoization
+// a clean O(1) win — two parallel caches keep the prefix discriminator
+// strict at the SQL boundary (see the docblock on the prefix constants).
+//
+// **Don't share `variantIDCache` between kinds** — pre-seeded with
+// `upscaled-v2-*` for `(44100, 16)`, returning that for an optimize
+// job would silently emit the wrong variant ID into `track_variants`.
 func (j JobSpec) VariantID() string {
+	if j.Kind == JobKindOptimize {
+		if id, ok := lookupCachedOptimizeVariantID(j.TargetSampleRate, j.TargetBits); ok {
+			return id
+		}
+		return fmt.Sprintf("optimized-%s-%d-%d", VariantSchemaVersion, j.TargetSampleRate, j.TargetBits)
+	}
 	if id, ok := lookupCachedVariantID(j.TargetSampleRate, j.TargetBits); ok {
 		return id
 	}
@@ -193,6 +245,36 @@ func initVariantIDCache() {
 			variantIDCache[[2]int{r, b}] =
 				fmt.Sprintf("upscaled-%s-%d-%d", VariantSchemaVersion, r, b)
 		}
+	}
+}
+
+// optimizeIDCache memoizes the optimize-kind VariantID strings. Tiny
+// space: 16-bit × {44100, 48000} — the only family-aligned targets
+// `TargetRateForOptimize` ever picks. Out-of-set inputs fall through
+// to the live `fmt.Sprintf` path in `VariantID()`.
+//
+// **Strictly disjoint from `variantIDCache`** — sharing the map
+// would silently corrupt variant IDs at the SQL persistence
+// boundary (the upscale memo's `(44100, 16) → "upscaled-v2-..."`
+// entry would win for optimize-kind lookups too).
+var (
+	optimizeIDCacheOnce sync.Once
+	optimizeIDCache     map[[2]int]string
+)
+
+func lookupCachedOptimizeVariantID(rate, bits int) (string, bool) {
+	optimizeIDCacheOnce.Do(initOptimizeIDCache)
+	if rate < 0 || bits < 0 {
+		return "", false
+	}
+	id, ok := optimizeIDCache[[2]int{rate, bits}]
+	return id, ok
+}
+
+func initOptimizeIDCache() {
+	optimizeIDCache = map[[2]int]string{
+		{44100, 16}: fmt.Sprintf("optimized-%s-44100-16", VariantSchemaVersion),
+		{48000, 16}: fmt.Sprintf("optimized-%s-48000-16", VariantSchemaVersion),
 	}
 }
 
@@ -465,6 +547,85 @@ func PickTargetRate(sourceRate int) int {
 	default:
 		return 0
 	}
+}
+
+// OptimizeEligible returns true when the source is structurally
+// higher fidelity than any CarPlay route accepts. Pre-filters at
+// the eligibility layer so the downstream rate-resolver isn't
+// called on no-op candidates.
+//
+// Carries `sourcePath` AND `codec` so legacy DB rows scanned before
+// the codec column was populated (codec == "") can fall back to
+// the on-disk extension. Without that fallback, `bridge optimize
+// --all` on a pre-upgrade library would silently skip every track
+// until the operator runs a destructive full re-scan to backfill
+// the codec column.
+//
+// Eligibility:
+//   - PCM-only (DSD / lossy MP3/AAC / unknown rejected).
+//     .m4a is treated as PCM-candidate because ALAC-in-M4A is the
+//     common lossless case; AAC-in-M4A fails the rate/bits gate at
+//     the bottom (lossy is always 44.1/16 in practice).
+//   - Higher than CarPlay floor: sourceRate > 48000 OR sourceBits > 16.
+//     Already-at-floor 44.1/16 and 48/16 sources return false.
+func OptimizeEligible(sourcePath, codec string, sourceRate, sourceBits int) bool {
+	c := strings.ToUpper(strings.TrimSpace(codec))
+	isPCM := c == "FLAC" || c == "ALAC" || c == "WAV" || c == "AIFF" || c == "PCM"
+
+	if c == "" {
+		ext := strings.ToLower(filepath.Ext(sourcePath))
+		isPCM = ext == ".flac" || ext == ".wav" ||
+			ext == ".aif" || ext == ".aiff" || ext == ".m4a"
+	}
+
+	if !isPCM {
+		return false
+	}
+	return sourceRate > 48000 || sourceBits > 16
+}
+
+// TargetRateForOptimize picks the CarPlay-compatible downsample
+// target while preserving sample-rate-family alignment so SoX
+// takes the integer-ratio fast path:
+//
+//	44.1k family (44100 / 88200 / 176400) → 44100  (exact /1, /2, /4)
+//	48k family   (48000 / 96000 / 192000) → 48000  (exact /1, /2, /4)
+//	Anything else (rare/exotic) → 48000  (broader compatibility floor)
+//
+// Wired CarPlay accepts up to 16-bit / 48 kHz uncompressed LPCM,
+// wireless CarPlay encodes through a 16-bit / 48 kHz AAC pipeline,
+// so 48 kHz is just as valid a CarPlay target as 44.1 kHz — picking
+// the same family as the source avoids the fractional-resample CPU
+// cost (`96000/44100 = 2.176…`) and the resampling artifacts a
+// variable-rate filter has to defend against.
+func TargetRateForOptimize(sourceRate int) int {
+	if sourceRate%48000 == 0 {
+		return 48000
+	}
+	if sourceRate%44100 == 0 {
+		return 44100
+	}
+	return 48000
+}
+
+// ResolveTargetRateForOptimize is the optimize-kind analog of
+// `ResolveTargetRate`. INVERTS the gate direction: downsampling
+// IS the point. Returns (0, nil) when the source is already at-
+// or-below the family target (nothing to do — already optimal
+// for CarPlay).
+//
+// **Don't reuse `ResolveTargetRate`** — its `target <= sourceRate`
+// branch refuses every downsample request, which is exactly what
+// optimize jobs always are.
+func ResolveTargetRateForOptimize(sourceRate int) (int, error) {
+	if sourceRate <= 0 {
+		return 0, fmt.Errorf("source rate must be positive, got %d", sourceRate)
+	}
+	target := TargetRateForOptimize(sourceRate)
+	if sourceRate <= target {
+		return 0, nil
+	}
+	return target, nil
 }
 
 // ResolveTargetRate converts the user-facing `--target-rate` flag

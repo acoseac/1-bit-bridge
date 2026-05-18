@@ -163,6 +163,15 @@ type runUpscaleParams struct {
 	dryRun         bool
 	force          bool
 	outputDir      string
+
+	// Kind discriminates upscale (zero-value / JobKindUpscale,
+	// legacy CLI behavior) from optimize (CarPlay-targeted
+	// downsample). Drives the classifier's eligibility predicate +
+	// target-rate resolution + JobSpec.Kind. For optimize, the
+	// global targetRateFlag is ignored (each track's family
+	// dictates target via TargetRateForOptimize) and targetBits is
+	// uniformly 16 (CarPlay floor).
+	kind transcode.JobKind
 }
 
 // upscaleCandidate carries the resolved JobSpec plus the
@@ -218,14 +227,48 @@ func classifyUpscaleTrack(
 		return nil, 0
 	}
 	sourceRateHz := int(*t.SampleRate)
-	target, err := transcode.ResolveTargetRate(p.targetRateFlag, sourceRateHz)
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", t.Path, err)
-		return nil, 2
-	}
-	if target == 0 {
-		counters.alreadyAtTarget++
-		return nil, 0
+
+	// Kind-discriminated target resolution + eligibility:
+	//   - optimize: per-track family-preserving target (44.1k/48k);
+	//     gate via OptimizeEligible (PCM-hi-res only, lossy/AAC
+	//     rejected even on legacy-codec rows via filename fallback).
+	//     Forces bits=16 regardless of source.
+	//   - upscale: legacy global --target-rate / --target-bits; gate
+	//     by `target <= source → skip`.
+	var (
+		target, targetBitsForJob int
+		err                      error
+	)
+	if p.kind == transcode.JobKindOptimize {
+		sourceBits := 0
+		if t.BitsPerSample != nil {
+			sourceBits = *t.BitsPerSample
+		}
+		if !transcode.OptimizeEligible(t.Path, t.Codec, sourceRateHz, sourceBits) {
+			counters.alreadyAtTarget++
+			return nil, 0
+		}
+		target, err = transcode.ResolveTargetRateForOptimize(sourceRateHz)
+		if err != nil {
+			fmt.Fprintf(stderr, "%s: %v\n", t.Path, err)
+			return nil, 2
+		}
+		if target == 0 {
+			counters.alreadyAtTarget++
+			return nil, 0
+		}
+		targetBitsForJob = 16
+	} else {
+		target, err = transcode.ResolveTargetRate(p.targetRateFlag, sourceRateHz)
+		if err != nil {
+			fmt.Fprintf(stderr, "%s: %v\n", t.Path, err)
+			return nil, 2
+		}
+		if target == 0 {
+			counters.alreadyAtTarget++
+			return nil, 0
+		}
+		targetBitsForJob = p.targetBits
 	}
 	// Find the absolute path via the canonical resolver —
 	// handles single-root (rootless paths) and multi-root
@@ -247,9 +290,10 @@ func classifyUpscaleTrack(
 		SourceLibraryRel: t.Path,
 		SourceSampleRate: sourceRateHz,
 		TargetSampleRate: target,
-		TargetBits:       p.targetBits,
+		TargetBits:       targetBitsForJob,
 		Quality:          p.quality,
 		OutputDir:        p.outputDir,
+		Kind:             p.kind, // zero-value preserves upscale for legacy callers
 	}
 	if err := spec.FreshnessFromFile(); err != nil {
 		counters.sourceMissing++

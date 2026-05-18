@@ -488,6 +488,221 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 	}, nil
 }
 
+// SubmitOptimize is the CarPlay-targeted batch path: enrolls every
+// eligible hi-res PCM track under `path` for downsampling to 16-bit /
+// 44.1 or 48 kHz (family-preserving — see TargetRateForOptimize).
+//
+// Differs from Submit in three places:
+//  1. Eligibility — per-track via OptimizeEligible (PCM-hi-res only,
+//     legacy-codec fallback). NOT the upscale gate that rejects
+//     downsampling targets.
+//  2. Target rate / bits — resolved per-track from the source's
+//     sample-rate family. TargetBits is uniformly 16.
+//  3. JobSpec.Kind is JobKindOptimize so VariantID() mints the
+//     `optimized-*` prefix.
+//
+// The batch row records TargetRate=0 to signal "per-track varies";
+// the admin UI surfaces "Mobile optimization" instead of a fixed
+// rate. TargetBits is 16 (uniform).
+//
+// Same infrastructure as Submit: Pool, ProjectedSize, disk-headroom
+// preflight, batch row, RemainingIDs, enqueue truncation handling.
+// Some duplication is accepted; a future refactor can consolidate
+// once both paths are battle-tested.
+func (c *Coordinator) SubmitOptimize(ctx context.Context, path string, outputDir string) (*SubmitResult, error) {
+	if c.resolver == nil {
+		return nil, fmt.Errorf("submit optimize: no resolver wired — Coordinator can't build JobSpec absolute paths")
+	}
+
+	projections, err := c.store.ListTrackProjectionsUnderPrefix(ctx, path)
+	if err != nil {
+		return nil, fmt.Errorf("submit optimize: list projections: %w", err)
+	}
+
+	type candidate struct {
+		path       string
+		absPath    string
+		size       int64
+		mtimeNS    int64
+		sampleRate int
+		bits       int
+		targetRate int // per-track, family-preserving (TargetRateForOptimize)
+	}
+	var (
+		cands          []candidate
+		alreadyCovered int
+		totalProjected int64
+		compressionFct = DefaultCompressionFactor(16) // optimize bits fixed
+		resolveErrors  int
+	)
+	for _, t := range projections {
+		if t.HasVariant {
+			alreadyCovered++
+			continue
+		}
+		if t.SampleRate <= 0 || t.BitsPerSample <= 0 {
+			continue
+		}
+		if t.IsDSD {
+			// DSD is structurally excluded from CarPlay routing.
+			continue
+		}
+		if !OptimizeEligible(t.Path, t.Codec, t.SampleRate, t.BitsPerSample) {
+			continue
+		}
+		targetRate, terr := ResolveTargetRateForOptimize(t.SampleRate)
+		if terr != nil || targetRate == 0 {
+			// targetRate == 0 means "already optimal" — already at
+			// 44.1k / 48k for its family. OptimizeEligible should
+			// have rejected, but defensive: skip silently.
+			continue
+		}
+		absPath, err := c.resolver(t.Path)
+		if err != nil {
+			resolveErrors++
+			c.logger.Warn("submit optimize: resolve failed; skipping track",
+				"path", t.Path, "err", err)
+			continue
+		}
+		cands = append(cands, candidate{
+			path:       t.Path,
+			absPath:    absPath,
+			size:       t.Size,
+			mtimeNS:    t.MTimeNS,
+			sampleRate: t.SampleRate,
+			bits:       t.BitsPerSample,
+			targetRate: targetRate,
+		})
+		totalProjected += ProjectedSize(t.Size, t.SampleRate, t.BitsPerSample,
+			targetRate, 16, compressionFct)
+	}
+	if resolveErrors > 0 {
+		c.logger.Info("submit optimize: filtered tracks with resolver failures",
+			"batchPath", path, "count", resolveErrors)
+	}
+
+	ok, available, err := DiskHasHeadroom(c.dataDir, totalProjected, DefaultDiskSafetyMargin)
+	if err != nil {
+		return nil, fmt.Errorf("submit optimize: disk probe: %w", err)
+	}
+	if !ok {
+		return nil, &InsufficientDiskSpaceError{
+			ProjectedBytes: totalProjected,
+			RequiredBytes:  int64(float64(totalProjected) * (1 + DefaultDiskSafetyMargin)),
+			AvailableBytes: available,
+			Dir:            c.dataDir,
+		}
+	}
+
+	batchID := uuid.Must(uuid.NewRandom())
+	now := c.clock().UnixNano()
+	row := manifest.UpscaleBatchRow{
+		ID:             batchID,
+		Path:           path,
+		TargetRate:     0, // per-track varies; admin surface treats 0 as "Mobile optimization"
+		TargetBits:     16,
+		Status:         "pending",
+		TotalFiles:     len(cands),
+		ProcessedFiles: 0,
+		FailedFiles:    0,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	if err := c.store.InsertUpscaleBatch(ctx, row); err != nil {
+		return nil, fmt.Errorf("submit optimize: insert batch row: %w", err)
+	}
+
+	state := &batchState{
+		Row:          row,
+		RemainingIDs: make(map[string]struct{}, len(cands)),
+	}
+	for _, ca := range cands {
+		state.RemainingIDs[ca.path] = struct{}{}
+	}
+	c.mu.Lock()
+	c.liveBatches[batchID] = state
+	c.mu.Unlock()
+
+	if err := c.transitionStatus(batchID, "running", "", c.clock()); err != nil {
+		c.logger.Warn("submit optimize: transition to running",
+			"batchID", batchID.String(), "err", err)
+	}
+	enqueued := 0
+	for _, ca := range cands {
+		spec := JobSpec{
+			SourceAbsPath:    ca.absPath,
+			SourceLibraryRel: ca.path,
+			SourceMTimeNS:    ca.mtimeNS,
+			SourceSize:       ca.size,
+			SourceSampleRate: ca.sampleRate,
+			TargetSampleRate: ca.targetRate,
+			TargetBits:       16,
+			Quality:          QualityVeryHigh,
+			OutputDir:        outputDir,
+			BatchID:          batchID,
+			Kind:             JobKindOptimize,
+		}
+		if err := c.pool.Enqueue(spec); err != nil {
+			c.logger.Warn("submit optimize: enqueue failed; truncating batch",
+				"batchID", batchID.String(), "path", ca.path, "err", err)
+			c.mu.Lock()
+			var (
+				rowSnapshot    manifest.UpscaleBatchRow
+				becameTerminal bool
+				stateModified  bool
+			)
+			if st, ok := c.liveBatches[batchID]; ok {
+				dropping := false
+				for _, c2 := range cands {
+					if c2.path == ca.path {
+						dropping = true
+					}
+					if dropping {
+						delete(st.RemainingIDs, c2.path)
+					}
+				}
+				st.Row.TotalFiles -= len(cands) - enqueued
+				st.Row.Error = "partial enqueue: " + err.Error()
+				st.Row.UpdatedAt = c.clock().UnixNano()
+				if len(st.RemainingIDs) == 0 {
+					st.Row.Status = "failed"
+					becameTerminal = true
+				}
+				rowSnapshot = st.Row
+				stateModified = true
+				if becameTerminal {
+					delete(c.liveBatches, batchID)
+				}
+			}
+			c.mu.Unlock()
+			if stateModified {
+				persistCtx, cancelPersist := context.WithTimeout(context.Background(), 5*time.Second)
+				if writeErr := c.store.UpdateUpscaleBatchProgress(persistCtx, rowSnapshot); writeErr != nil {
+					c.logger.Warn("submit optimize: persist truncated batch",
+						"batchID", batchID.String(), "err", writeErr)
+				}
+				cancelPersist()
+				c.publishProgressRow(rowSnapshot)
+			}
+			break
+		}
+		enqueued++
+	}
+
+	c.publishProgress(batchID)
+	return &SubmitResult{
+		BatchID:            batchID,
+		Path:               path,
+		TargetRate:         0, // per-track varies
+		TargetBits:         16,
+		TotalFiles:         len(cands),
+		AlreadyCovered:     alreadyCovered,
+		ProjectedSizeBytes: totalProjected,
+		AvailableBytes:     available,
+		EnqueuedCount:      enqueued,
+	}, nil
+}
+
 // SetPublish wires (or rewires) the SSE broker emit closure.
 // Construction-time callers may pass nil and call SetPublish later
 // once the broker handle is in scope (the canonical wiring pattern
