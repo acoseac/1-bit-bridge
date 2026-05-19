@@ -20,6 +20,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
@@ -36,8 +37,15 @@ const (
 // adminBatchSubmitRequest is the JSON shape POST /api/upscale/batch
 // accepts. Optional `targetRate` / `targetBits` fall back to the
 // scan_state-stored admin Settings.
+//
+// `Kind` is one of "upscale" (default when omitted, back-compat) or
+// "optimize" (v1.x CarPlay-optimized variants — family-preserving
+// 16/44.1 or 16/48 FLAC, target params auto-derived per-track). The
+// admin Library Inspector's tile-level multi-select batch UI emits
+// one POST per kind per selected folder.
 type adminBatchSubmitRequest struct {
 	Path       string `json:"path"`
+	Kind       string `json:"kind,omitempty"`
 	TargetRate int    `json:"targetRate,omitempty"`
 	TargetBits int    `json:"targetBits,omitempty"`
 }
@@ -59,7 +67,24 @@ func (s *Server) apiUpscaleBatchSubmit(w http.ResponseWriter, r *http.Request) {
 	// disconnect cancels the underlying Coordinator.Submit (which
 	// in turn cancels its manifest projection walk).
 	// Per Gemini high on PR #202.
-	res, err := s.deps.BatchCoordinator.Submit(r.Context(), req.Path, req.TargetRate, req.TargetBits)
+	kind := strings.ToLower(strings.TrimSpace(req.Kind))
+	var (
+		res AdminBatchSubmitResult
+		err error
+	)
+	switch kind {
+	case "", "upscale":
+		res, err = s.deps.BatchCoordinator.Submit(r.Context(), req.Path, req.TargetRate, req.TargetBits)
+	case "optimize":
+		// Optimize ignores caller-supplied targetRate/targetBits —
+		// the coordinator auto-derives per-track via
+		// TargetRateForOptimize (family-preserving 16/44.1 or 16/48).
+		res, err = s.deps.BatchCoordinator.SubmitOptimize(r.Context(), req.Path)
+	default:
+		writeError(w, http.StatusBadRequest, "invalid-kind",
+			`unknown kind: `+req.Kind+` (expected "upscale" or "optimize")`)
+		return
+	}
 	if err != nil {
 		var dskErr *AdminBatchInsufficientDiskSpace
 		if errors.As(err, &dskErr) {
@@ -194,10 +219,25 @@ func (s *Server) apiUpscaleTargetPatch(w http.ResponseWriter, r *http.Request) {
 // land before they hit "Upscale this scope." Always populated
 // regardless of whether the pool itself is running; mirrors
 // `/api/upscale/stats.storagePath`.
+//
+// `SoxAvailable` reflects whether SoX is on PATH (via the wired
+// `UpscalePrecheck` closure). The tile-redesign template uses this
+// to mark per-tile "Generate variants" buttons disabled with an
+// inline "Install SoX" tooltip when false. Delete buttons stay
+// enabled regardless — the operator can reclaim space on a
+// SoX-less box. Nil-safe: when the closure is absent (test
+// harness, upscale feature off at boot), defaults to false so
+// the UI assumes "no variant generation" — strictly safer than
+// assuming yes.
 func (s *Server) pageLibraryInspector(w http.ResponseWriter, r *http.Request) {
 	cfg := s.deps.CfgHolder.Load()
+	soxAvailable := false
+	if s.deps.UpscalePrecheck != nil {
+		soxAvailable = s.deps.UpscalePrecheck() == nil
+	}
 	s.renderPage(w, "library_inspector", map[string]any{
 		"UpscaleStoragePath": cfg.Upscale.EffectiveVariantsDir(cfg.DataDir),
+		"SoxAvailable":       soxAvailable,
 	})
 }
 

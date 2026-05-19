@@ -233,7 +233,7 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 		return nil, fmt.Errorf("submit: no resolver wired — Coordinator can't build JobSpec absolute paths")
 	}
 
-	projections, err := c.store.ListTrackProjectionsUnderPrefix(ctx, path)
+	projections, err := c.store.ListTrackProjectionsUnderPrefix(ctx, path, manifest.VariantKindPrefixUpscaled)
 	if err != nil {
 		return nil, fmt.Errorf("submit: list projections: %w", err)
 	}
@@ -541,7 +541,7 @@ func (c *Coordinator) SubmitOptimize(ctx context.Context, path string, outputDir
 		return nil, fmt.Errorf("submit optimize: no resolver wired — Coordinator can't build JobSpec absolute paths")
 	}
 
-	projections, err := c.store.ListTrackProjectionsUnderPrefix(ctx, path)
+	projections, err := c.store.ListTrackProjectionsUnderPrefix(ctx, path, manifest.VariantKindPrefixOptimized)
 	if err != nil {
 		return nil, fmt.Errorf("submit optimize: list projections: %w", err)
 	}

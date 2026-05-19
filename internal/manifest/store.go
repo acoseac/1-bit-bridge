@@ -2515,18 +2515,55 @@ func (s *Store) RecoverInterruptedBatches(ctx context.Context, nowUnixNS int64) 
 
 // ----- Library Browse (v1.3 admin Library Inspector) -----
 
+// Variant-kind prefix discriminators for `variant_id` LIKE filters.
+// These MIRROR `transcode.VariantPrefixUpscaled` /
+// `transcode.VariantPrefixOptimized` (transcode/transcode.go:87–88)
+// and are duplicated here because the `manifest` package can't import
+// `transcode` (would be circular — transcode imports manifest). The
+// trailing `-` byte appended at LIKE-pattern construction time is
+// defensive against any hypothetical `optimizedX-...` collision;
+// current variant IDs always have `<prefix>-<schemaVersion>-…`
+// shape so this is belt-and-braces, not load-bearing.
+//
+// **Version-agnostic** — match `upscaled-%` / `optimized-%`, NOT
+// `upscaled-v2-%`. The transcode docblock at transcode.go:55–63
+// explicitly preserves pre-v2 sidecars until `bridge upscale --gc`
+// runs; filtering by `v2` would silently hide legacy v1 coverage
+// from the inspector counters.
+//
+// Exported so admin / transcode callers pass these into
+// `ListTrackProjectionsUnderPrefix(ctx, prefix, kind)` rather than
+// repeating the literal "upscaled" / "optimized" string at every
+// call site.
+const (
+	VariantKindPrefixUpscaled  = "upscaled"
+	VariantKindPrefixOptimized = "optimized"
+)
+
 // FolderRollup is the recursive aggregation under one path prefix:
-// total tracks, tracks with at least one variant, sum of source
-// sizes, sum of variant sizes. Used by `RollupByPrefix` and embedded
-// in `ChildFolderRollup` for browse rows.
+// total tracks, tracks with at least one variant (split by kind),
+// sum of source sizes, sum of variant sizes (split by kind). Used
+// by `RollupByPrefix` and embedded in `ChildFolderRollup` for browse
+// rows.
 //
 // Sizes are int64 bytes; counts are int (a library plausibly past
 // MaxInt32 tracks is implausible for the bridge's target deployment).
+//
+// **Per-kind split** (PR feat/library-inspector-tiles): variant
+// counters and size totals were previously kind-agnostic (any
+// `track_variants` row counted). Splitting by `variant_id` prefix
+// (`upscaled-%` vs `optimized-%`) lets the Library Inspector render
+// dual coverage bars per folder tile without an extra round-trip.
+// The legacy field names `UpscaledTrackCount` / `UpscaledSizeBytes`
+// are preserved (now scoped to upscale variants only); the new
+// `Optimized*` fields surface the CarPlay-optimize variant counts.
 type FolderRollup struct {
-	TrackCount         int
-	UpscaledTrackCount int
-	TotalSizeBytes     int64
-	UpscaledSizeBytes  int64
+	TrackCount          int
+	UpscaledTrackCount  int
+	OptimizedTrackCount int
+	TotalSizeBytes      int64
+	UpscaledSizeBytes   int64
+	OptimizedSizeBytes  int64
 }
 
 // ChildFolderRollup represents one folder row in the admin Library
@@ -2541,9 +2578,9 @@ type ChildFolderRollup struct {
 // ChildTrack is the projection a track exposes to the browse API.
 // Reads json_extract for sample rate / bit depth / codec / isDSD so
 // the admin endpoint doesn't deserialise the full tags_json blob for
-// every row. `IsUpscaled` is determined by an EXISTS subquery against
-// `track_variants` — true if at least one variant exists for the
-// source path (regardless of target rate / bits).
+// every row. `IsUpscaled` / `IsOptimized` are determined by EXISTS
+// subqueries against `track_variants`, filtered by `variant_id`
+// prefix so the two flags discriminate kind.
 type ChildTrack struct {
 	Path          string
 	Size          int64
@@ -2552,6 +2589,7 @@ type ChildTrack struct {
 	Codec         string
 	IsDSD         *bool
 	IsUpscaled    bool
+	IsOptimized   bool
 }
 
 // ListChildFolders returns the immediate-child folders of `parent`,
@@ -2586,14 +2624,30 @@ func (s *Store) ListChildFolders(ctx context.Context, parent string) ([]ChildFol
 			       -- uses the existing PRIMARY KEY on tracks(path) /
 			       -- track_variants(source_path) for the range scan.
 			       -- Per Gemini medium on PR #200.
+			       --
+			       -- Variant counters / sizes are split by variant_id
+			       -- prefix (upscaled-% vs optimized-%) so the
+			       -- Library Inspector renders dual coverage bars
+			       -- per tile without a follow-up call. Version-
+			       -- agnostic prefix matches BOTH v1 (legacy, pre-gain-
+			       -- guard) and v2 sidecars — see VariantKindPrefix*
+			       -- docblock for the rationale.
 			       (SELECT COUNT(*) FROM tracks t
 			          WHERE t.path >= f.path || '/' AND t.path < f.path || '0') AS track_count,
 			       (SELECT COUNT(DISTINCT tv.source_path) FROM track_variants tv
-			          WHERE tv.source_path >= f.path || '/' AND tv.source_path < f.path || '0') AS upscaled_count,
+			          WHERE tv.source_path >= f.path || '/' AND tv.source_path < f.path || '0'
+			            AND tv.variant_id LIKE 'upscaled-%') AS upscaled_count,
+			       (SELECT COUNT(DISTINCT tv.source_path) FROM track_variants tv
+			          WHERE tv.source_path >= f.path || '/' AND tv.source_path < f.path || '0'
+			            AND tv.variant_id LIKE 'optimized-%') AS optimized_count,
 			       (SELECT COALESCE(SUM(t.size), 0) FROM tracks t
 			          WHERE t.path >= f.path || '/' AND t.path < f.path || '0') AS total_size,
 			       (SELECT COALESCE(SUM(tv.size_bytes), 0) FROM track_variants tv
-			          WHERE tv.source_path >= f.path || '/' AND tv.source_path < f.path || '0') AS upscaled_size
+			          WHERE tv.source_path >= f.path || '/' AND tv.source_path < f.path || '0'
+			            AND tv.variant_id LIKE 'upscaled-%') AS upscaled_size,
+			       (SELECT COALESCE(SUM(tv.size_bytes), 0) FROM track_variants tv
+			          WHERE tv.source_path >= f.path || '/' AND tv.source_path < f.path || '0'
+			            AND tv.variant_id LIKE 'optimized-%') AS optimized_size
 			  FROM folders f
 			 WHERE instr(f.path, '/') = 0
 			   AND f.path != ''
@@ -2609,24 +2663,22 @@ func (s *Store) ListChildFolders(ctx context.Context, parent string) ([]ChildFol
 		// over-shoot by `bytes - chars` on a parent like "Müller".
 		rows, err = s.db.QueryContext(ctx, `
 			SELECT f.path,
-			       -- Range comparisons (not LIKE) because f.path is a
-			       -- column value: any folder name containing the LIKE
-			       -- metacharacters '_' or '%' would otherwise match
-			       -- sibling subtrees. '0' (0x30) is the character
-			       -- immediately after '/' (0x2F) in ASCII, so the
-			       -- exclusive upper bound captures everything starting
-			       -- with "f.path/" and nothing past. Index-friendly:
-			       -- uses the existing PRIMARY KEY on tracks(path) /
-			       -- track_variants(source_path) for the range scan.
-			       -- Per Gemini medium on PR #200.
 			       (SELECT COUNT(*) FROM tracks t
 			          WHERE t.path >= f.path || '/' AND t.path < f.path || '0') AS track_count,
 			       (SELECT COUNT(DISTINCT tv.source_path) FROM track_variants tv
-			          WHERE tv.source_path >= f.path || '/' AND tv.source_path < f.path || '0') AS upscaled_count,
+			          WHERE tv.source_path >= f.path || '/' AND tv.source_path < f.path || '0'
+			            AND tv.variant_id LIKE 'upscaled-%') AS upscaled_count,
+			       (SELECT COUNT(DISTINCT tv.source_path) FROM track_variants tv
+			          WHERE tv.source_path >= f.path || '/' AND tv.source_path < f.path || '0'
+			            AND tv.variant_id LIKE 'optimized-%') AS optimized_count,
 			       (SELECT COALESCE(SUM(t.size), 0) FROM tracks t
 			          WHERE t.path >= f.path || '/' AND t.path < f.path || '0') AS total_size,
 			       (SELECT COALESCE(SUM(tv.size_bytes), 0) FROM track_variants tv
-			          WHERE tv.source_path >= f.path || '/' AND tv.source_path < f.path || '0') AS upscaled_size
+			          WHERE tv.source_path >= f.path || '/' AND tv.source_path < f.path || '0'
+			            AND tv.variant_id LIKE 'upscaled-%') AS upscaled_size,
+			       (SELECT COALESCE(SUM(tv.size_bytes), 0) FROM track_variants tv
+			          WHERE tv.source_path >= f.path || '/' AND tv.source_path < f.path || '0'
+			            AND tv.variant_id LIKE 'optimized-%') AS optimized_size
 			  FROM folders f
 			 WHERE f.path LIKE ? ESCAPE '\'
 			   AND instr(substr(f.path, length(?) + 2), '/') = 0
@@ -2644,8 +2696,10 @@ func (s *Store) ListChildFolders(ctx context.Context, parent string) ([]ChildFol
 			&row.Path,
 			&row.TrackCount,
 			&row.UpscaledTrackCount,
+			&row.OptimizedTrackCount,
 			&row.TotalSizeBytes,
 			&row.UpscaledSizeBytes,
+			&row.OptimizedSizeBytes,
 		); err != nil {
 			return nil, err
 		}
@@ -2664,10 +2718,13 @@ func (s *Store) ListChildFolders(ctx context.Context, parent string) ([]ChildFol
 // so an extractor that left a field empty returns `nil` rather than
 // a zero-valued non-pointer that pretends to be set.
 //
-// `IsUpscaled` is determined by EXISTS against `track_variants` —
-// "at least one variant" regardless of target rate / bits. The
-// admin Library Inspector uses this to render the per-row
-// "upscale ready" indicator without joining the full variant rows.
+// `IsUpscaled` / `IsOptimized` are determined by EXISTS against
+// `track_variants` filtered by `variant_id` prefix — kind-specific
+// "at least one variant exists" signals. The admin Library Inspector
+// uses these to render dual per-row "variant ready" dots without
+// joining the full variant rows. Version-agnostic prefix match
+// (`upscaled-%` / `optimized-%`) covers BOTH v1 (legacy) and v2
+// sidecars.
 func (s *Store) ListChildTracks(ctx context.Context, parent string) ([]ChildTrack, error) {
 	var (
 		rows *sql.Rows
@@ -2681,7 +2738,11 @@ func (s *Store) ListChildTracks(ctx context.Context, parent string) ([]ChildTrac
 			       json_extract(t.tags_json, '$.codec')         AS codec,
 			       json_extract(t.tags_json, '$.isDSD')         AS is_dsd,
 			       EXISTS(SELECT 1 FROM track_variants tv
-			               WHERE tv.source_path = t.path)       AS is_upscaled
+			               WHERE tv.source_path = t.path
+			                 AND tv.variant_id LIKE 'upscaled-%')  AS is_upscaled,
+			       EXISTS(SELECT 1 FROM track_variants tv
+			               WHERE tv.source_path = t.path
+			                 AND tv.variant_id LIKE 'optimized-%') AS is_optimized
 			  FROM tracks t
 			 WHERE instr(t.path, '/') = 0
 			 ORDER BY t.path ASC
@@ -2697,7 +2758,11 @@ func (s *Store) ListChildTracks(ctx context.Context, parent string) ([]ChildTrac
 			       json_extract(t.tags_json, '$.codec')         AS codec,
 			       json_extract(t.tags_json, '$.isDSD')         AS is_dsd,
 			       EXISTS(SELECT 1 FROM track_variants tv
-			               WHERE tv.source_path = t.path)       AS is_upscaled
+			               WHERE tv.source_path = t.path
+			                 AND tv.variant_id LIKE 'upscaled-%')  AS is_upscaled,
+			       EXISTS(SELECT 1 FROM track_variants tv
+			               WHERE tv.source_path = t.path
+			                 AND tv.variant_id LIKE 'optimized-%') AS is_optimized
 			  FROM tracks t
 			 WHERE t.path LIKE ? ESCAPE '\'
 			   AND instr(substr(t.path, length(?) + 2), '/') = 0
@@ -2711,14 +2776,15 @@ func (s *Store) ListChildTracks(ctx context.Context, parent string) ([]ChildTrac
 	out := []ChildTrack{}
 	for rows.Next() {
 		var (
-			ct       ChildTrack
-			rate     sql.NullFloat64
-			bits     sql.NullInt64
-			codec    sql.NullString
-			isDSDRaw sql.NullInt64 // SQLite returns 0/1 for booleans; isDSD is stored as bool JSON, json_extract gives 0/1
-			upscaled int           // EXISTS returns 0/1
+			ct        ChildTrack
+			rate      sql.NullFloat64
+			bits      sql.NullInt64
+			codec     sql.NullString
+			isDSDRaw  sql.NullInt64 // SQLite returns 0/1 for booleans; isDSD is stored as bool JSON, json_extract gives 0/1
+			upscaled  int           // EXISTS returns 0/1
+			optimized int           // EXISTS returns 0/1
 		)
-		if err := rows.Scan(&ct.Path, &ct.Size, &rate, &bits, &codec, &isDSDRaw, &upscaled); err != nil {
+		if err := rows.Scan(&ct.Path, &ct.Size, &rate, &bits, &codec, &isDSDRaw, &upscaled, &optimized); err != nil {
 			return nil, err
 		}
 		if rate.Valid {
@@ -2737,6 +2803,7 @@ func (s *Store) ListChildTracks(ctx context.Context, parent string) ([]ChildTrac
 			ct.IsDSD = &b
 		}
 		ct.IsUpscaled = upscaled != 0
+		ct.IsOptimized = optimized != 0
 		out = append(out, ct)
 	}
 	return out, rows.Err()
@@ -2771,11 +2838,19 @@ func (s *Store) ListChildFoldersPage(ctx context.Context, parent, after string, 
 			       (SELECT COUNT(*) FROM tracks t
 			          WHERE t.path >= f.path || '/' AND t.path < f.path || '0') AS track_count,
 			       (SELECT COUNT(DISTINCT tv.source_path) FROM track_variants tv
-			          WHERE tv.source_path >= f.path || '/' AND tv.source_path < f.path || '0') AS upscaled_count,
+			          WHERE tv.source_path >= f.path || '/' AND tv.source_path < f.path || '0'
+			            AND tv.variant_id LIKE 'upscaled-%') AS upscaled_count,
+			       (SELECT COUNT(DISTINCT tv.source_path) FROM track_variants tv
+			          WHERE tv.source_path >= f.path || '/' AND tv.source_path < f.path || '0'
+			            AND tv.variant_id LIKE 'optimized-%') AS optimized_count,
 			       (SELECT COALESCE(SUM(t.size), 0) FROM tracks t
 			          WHERE t.path >= f.path || '/' AND t.path < f.path || '0') AS total_size,
 			       (SELECT COALESCE(SUM(tv.size_bytes), 0) FROM track_variants tv
-			          WHERE tv.source_path >= f.path || '/' AND tv.source_path < f.path || '0') AS upscaled_size
+			          WHERE tv.source_path >= f.path || '/' AND tv.source_path < f.path || '0'
+			            AND tv.variant_id LIKE 'upscaled-%') AS upscaled_size,
+			       (SELECT COALESCE(SUM(tv.size_bytes), 0) FROM track_variants tv
+			          WHERE tv.source_path >= f.path || '/' AND tv.source_path < f.path || '0'
+			            AND tv.variant_id LIKE 'optimized-%') AS optimized_size
 			  FROM folders f
 			 WHERE instr(f.path, '/') = 0
 			   AND f.path != ''
@@ -2791,11 +2866,19 @@ func (s *Store) ListChildFoldersPage(ctx context.Context, parent, after string, 
 			       (SELECT COUNT(*) FROM tracks t
 			          WHERE t.path >= f.path || '/' AND t.path < f.path || '0') AS track_count,
 			       (SELECT COUNT(DISTINCT tv.source_path) FROM track_variants tv
-			          WHERE tv.source_path >= f.path || '/' AND tv.source_path < f.path || '0') AS upscaled_count,
+			          WHERE tv.source_path >= f.path || '/' AND tv.source_path < f.path || '0'
+			            AND tv.variant_id LIKE 'upscaled-%') AS upscaled_count,
+			       (SELECT COUNT(DISTINCT tv.source_path) FROM track_variants tv
+			          WHERE tv.source_path >= f.path || '/' AND tv.source_path < f.path || '0'
+			            AND tv.variant_id LIKE 'optimized-%') AS optimized_count,
 			       (SELECT COALESCE(SUM(t.size), 0) FROM tracks t
 			          WHERE t.path >= f.path || '/' AND t.path < f.path || '0') AS total_size,
 			       (SELECT COALESCE(SUM(tv.size_bytes), 0) FROM track_variants tv
-			          WHERE tv.source_path >= f.path || '/' AND tv.source_path < f.path || '0') AS upscaled_size
+			          WHERE tv.source_path >= f.path || '/' AND tv.source_path < f.path || '0'
+			            AND tv.variant_id LIKE 'upscaled-%') AS upscaled_size,
+			       (SELECT COALESCE(SUM(tv.size_bytes), 0) FROM track_variants tv
+			          WHERE tv.source_path >= f.path || '/' AND tv.source_path < f.path || '0'
+			            AND tv.variant_id LIKE 'optimized-%') AS optimized_size
 			  FROM folders f
 			 WHERE f.path LIKE ? ESCAPE '\'
 			   AND instr(substr(f.path, length(?) + 2), '/') = 0
@@ -2815,8 +2898,10 @@ func (s *Store) ListChildFoldersPage(ctx context.Context, parent, after string, 
 			&row.Path,
 			&row.TrackCount,
 			&row.UpscaledTrackCount,
+			&row.OptimizedTrackCount,
 			&row.TotalSizeBytes,
 			&row.UpscaledSizeBytes,
+			&row.OptimizedSizeBytes,
 		); err != nil {
 			return nil, err
 		}
@@ -2843,7 +2928,11 @@ func (s *Store) ListChildTracksPage(ctx context.Context, parent, after string, l
 			       json_extract(t.tags_json, '$.codec')         AS codec,
 			       json_extract(t.tags_json, '$.isDSD')         AS is_dsd,
 			       EXISTS(SELECT 1 FROM track_variants tv
-			               WHERE tv.source_path = t.path)       AS is_upscaled
+			               WHERE tv.source_path = t.path
+			                 AND tv.variant_id LIKE 'upscaled-%')  AS is_upscaled,
+			       EXISTS(SELECT 1 FROM track_variants tv
+			               WHERE tv.source_path = t.path
+			                 AND tv.variant_id LIKE 'optimized-%') AS is_optimized
 			  FROM tracks t
 			 WHERE instr(t.path, '/') = 0
 			   AND t.path > ?
@@ -2859,7 +2948,11 @@ func (s *Store) ListChildTracksPage(ctx context.Context, parent, after string, l
 			       json_extract(t.tags_json, '$.codec')         AS codec,
 			       json_extract(t.tags_json, '$.isDSD')         AS is_dsd,
 			       EXISTS(SELECT 1 FROM track_variants tv
-			               WHERE tv.source_path = t.path)       AS is_upscaled
+			               WHERE tv.source_path = t.path
+			                 AND tv.variant_id LIKE 'upscaled-%')  AS is_upscaled,
+			       EXISTS(SELECT 1 FROM track_variants tv
+			               WHERE tv.source_path = t.path
+			                 AND tv.variant_id LIKE 'optimized-%') AS is_optimized
 			  FROM tracks t
 			 WHERE t.path LIKE ? ESCAPE '\'
 			   AND instr(substr(t.path, length(?) + 2), '/') = 0
@@ -2875,14 +2968,15 @@ func (s *Store) ListChildTracksPage(ctx context.Context, parent, after string, l
 	out := []ChildTrack{}
 	for rows.Next() {
 		var (
-			ct       ChildTrack
-			rate     sql.NullFloat64
-			bits     sql.NullInt64
-			codec    sql.NullString
-			isDSDRaw sql.NullInt64
-			upscaled int
+			ct        ChildTrack
+			rate      sql.NullFloat64
+			bits      sql.NullInt64
+			codec     sql.NullString
+			isDSDRaw  sql.NullInt64
+			upscaled  int
+			optimized int
 		)
-		if err := rows.Scan(&ct.Path, &ct.Size, &rate, &bits, &codec, &isDSDRaw, &upscaled); err != nil {
+		if err := rows.Scan(&ct.Path, &ct.Size, &rate, &bits, &codec, &isDSDRaw, &upscaled, &optimized); err != nil {
 			return nil, err
 		}
 		if rate.Valid {
@@ -2901,6 +2995,7 @@ func (s *Store) ListChildTracksPage(ctx context.Context, parent, after string, l
 			ct.IsDSD = &b
 		}
 		ct.IsUpscaled = upscaled != 0
+		ct.IsOptimized = optimized != 0
 		out = append(out, ct)
 	}
 	return out, rows.Err()
@@ -2991,8 +3086,77 @@ func (s *Store) RollupByPrefix(ctx context.Context, prefix string) (FolderRollup
 		SELECT COUNT(DISTINCT source_path), COALESCE(SUM(size_bytes), 0)
 		  FROM track_variants
 		 WHERE source_path LIKE ? ESCAPE '\'
+		   AND variant_id LIKE 'upscaled-%'
 	`, pattern).Scan(&out.UpscaledTrackCount, &out.UpscaledSizeBytes); err != nil {
-		return FolderRollup{}, fmt.Errorf("rollup variants %q: %w", prefix, err)
+		return FolderRollup{}, fmt.Errorf("rollup upscale variants %q: %w", prefix, err)
+	}
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(DISTINCT source_path), COALESCE(SUM(size_bytes), 0)
+		  FROM track_variants
+		 WHERE source_path LIKE ? ESCAPE '\'
+		   AND variant_id LIKE 'optimized-%'
+	`, pattern).Scan(&out.OptimizedTrackCount, &out.OptimizedSizeBytes); err != nil {
+		return FolderRollup{}, fmt.Errorf("rollup optimize variants %q: %w", prefix, err)
+	}
+	return out, nil
+}
+
+// CountVariantsByKind returns the total `track_variants.size_bytes`
+// summed per variant kind ("upscale" / "optimize"). Used by the admin
+// Library Inspector's storage bar to render a per-kind usage
+// breakdown alongside the existing total Used / Free counters.
+//
+// The CASE expression buckets by `variant_id` LIKE prefix so the
+// classification is version-agnostic — both v1 (legacy) and v2
+// sidecars roll into their respective kind. Rows whose variant_id
+// matches neither prefix land in the "unknown" bucket (defensive,
+// should be empty in practice — callers can choose to log if
+// non-zero so operators see drift).
+//
+// Returned map always carries both "upscale" and "optimize" keys
+// (zero-valued when no matching rows) so call sites can read
+// `m["upscale"]` without a nil-map check. The "unknown" key only
+// appears if the bucket is non-empty.
+//
+// Single SQL round-trip; SQLite plans the GROUP BY against
+// `track_variants`'s primary key on (source_path, variant_id) — no
+// extra index needed.
+//
+// **Architectural note**: this method exists on `*Store` (rather
+// than as raw SQL inline in the admin handler) to preserve the
+// existing boundary where `s.db` references stay private to the
+// `manifest` package. Admin / API layers talk to typed Store
+// methods only.
+func (s *Store) CountVariantsByKind(ctx context.Context) (map[string]int64, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT
+		  CASE
+		    WHEN variant_id LIKE 'upscaled-%'  THEN 'upscale'
+		    WHEN variant_id LIKE 'optimized-%' THEN 'optimize'
+		    ELSE 'unknown'
+		  END AS kind,
+		  COALESCE(SUM(size_bytes), 0) AS total
+		FROM track_variants
+		GROUP BY kind
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("count variants by kind: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]int64{
+		"upscale":  0,
+		"optimize": 0,
+	}
+	for rows.Next() {
+		var kind string
+		var total int64
+		if err := rows.Scan(&kind, &total); err != nil {
+			return nil, err
+		}
+		out[kind] = total
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -3029,16 +3193,29 @@ type TrackProjection struct {
 // ListTrackProjectionsUnderPrefix iterates every track under `prefix`
 // (recursive — NOT one-level) and returns the slim projection fields
 // the admin pre-flight needs to compute the batch's projected
-// upscaled size. `HasVariant` is true when at least one variant
-// exists at the source path, so the caller can subtract tracks
-// already covered from the projected total.
+// variant size. `HasVariant` is true when at least one variant
+// matching `variantPrefix` exists at the source path, so the caller
+// can subtract tracks already covered from the projected total.
+//
+// `variantPrefix` is one of `VariantKindPrefixUpscaled` /
+// `VariantKindPrefixOptimized` (e.g. "upscaled" or "optimized").
+// The internal LIKE pattern appends `-%` so the match is scoped
+// to "<prefix>-<schemaVersion>-…" variant IDs. Version-agnostic
+// to cover both v1 (legacy) and v2 sidecars in the same kind.
+//
+// **Why kind-specific HasVariant matters**: the upscale projection
+// must not see optimize variants as "already covered" — running
+// the optimize projection against a track that has only an upscale
+// variant would otherwise mis-count it and skip generation entirely
+// (silently zero out the projected file count). Senior-review fix
+// to PR feat/library-inspector-tiles.
 //
 // Tracks with no `sampleRate` or `bitsPerSample` in `tags_json`
 // (extractor couldn't read the format) return zero in those fields;
 // `ProjectedSize` returns 0 for zero rates / bits, so they
 // naturally contribute nothing to the projection. The admin can
 // surface a separate "X unknown-format tracks" counter if needed.
-func (s *Store) ListTrackProjectionsUnderPrefix(ctx context.Context, prefix string) ([]TrackProjection, error) {
+func (s *Store) ListTrackProjectionsUnderPrefix(ctx context.Context, prefix, variantPrefix string) ([]TrackProjection, error) {
 	var pattern string
 	if prefix == "" {
 		pattern = `%`
@@ -3046,17 +3223,27 @@ func (s *Store) ListTrackProjectionsUnderPrefix(ctx context.Context, prefix stri
 		escaped := likeEscape(prefix)
 		pattern = escaped + `/%`
 	}
+	// **Parameter binding order is load-bearing**: the new `?` for
+	// `variantPrefix` lives inside the SELECT-block EXISTS subquery,
+	// so it appears POSITIONALLY BEFORE the `WHERE t.path LIKE ?`
+	// placeholder. Bind `variantPrefix` first, `pattern` second.
+	// Swapping them silently returns zero rows because SQLite would
+	// search track paths for the variant-prefix string. Locked by
+	// TestListTrackProjectionsUnderPrefix_bindingOrder.
+	variantLike := variantPrefix + `-%`
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT t.path, t.size, t.mtime_ns,
 		       CAST(COALESCE(json_extract(t.tags_json, '$.sampleRate'),    0) AS INTEGER) AS rate,
 		       CAST(COALESCE(json_extract(t.tags_json, '$.bitsPerSample'), 0) AS INTEGER) AS bits,
 		       COALESCE(json_extract(t.tags_json, '$.codec'),              '') AS codec,
 		       CAST(COALESCE(json_extract(t.tags_json, '$.isDSD'),         0) AS INTEGER) AS is_dsd,
-		       EXISTS(SELECT 1 FROM track_variants tv WHERE tv.source_path = t.path) AS has_variant
+		       EXISTS(SELECT 1 FROM track_variants tv
+		               WHERE tv.source_path = t.path
+		                 AND tv.variant_id LIKE ?) AS has_variant
 		  FROM tracks t
 		 WHERE t.path LIKE ? ESCAPE '\'
 		 ORDER BY t.path ASC
-	`, pattern)
+	`, variantLike, pattern)
 	if err != nil {
 		return nil, fmt.Errorf("list track projections %q: %w", prefix, err)
 	}

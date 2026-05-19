@@ -1732,3 +1732,402 @@ code.storage-path {
   padding: 0.4rem 0.75rem;
   font-size: 0.85rem;
 }
+
+/* ===== Library Inspector — tile grid (PR feat/library-inspector-tiles) ===== */
+/*
+ * Replaces the legacy column table (.inspector-tree table.rows) with a
+ * two-section tile grid: folders + tracks paginate independently so
+ * each gets its own sub-grid + load-more sentinel. The legacy table
+ * CSS rules above stay until a follow-up purges them, but the new
+ * markup renders only the .inspector-content branch.
+ *
+ * Tokens:
+ *   --kind-upscale  → reuses --accent (warm orange) — matches the
+ *                     primary CTA color, signals "this is the
+ *                     headline workflow."
+ *   --kind-optimize → cool-cyan, distinct from any existing accent
+ *                     so dual coverage bars per tile are
+ *                     distinguishable at a glance. Defined here
+ *                     rather than at :root because it's scoped to
+ *                     the inspector page.
+ */
+.library-inspector {
+  --kind-upscale: var(--accent);
+  --kind-optimize: #06b6d4; /* cyan-500 */
+}
+@media (prefers-color-scheme: dark) {
+  .library-inspector {
+    --kind-optimize: #22d3ee; /* cyan-400 — readable on slate-900 */
+  }
+}
+
+.inspector-content {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.folders-section, .tracks-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.section-header {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  padding: 0 0.25rem;
+}
+.section-header h3 {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: color-mix(in srgb, currentColor 78%, transparent);
+}
+.section-count {
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+  color: color-mix(in srgb, currentColor 56%, transparent);
+}
+
+.inspector-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 0.75rem;
+}
+
+/* The base tile shell — used for both folder and track tiles. */
+.inspector-tile {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease, transform 0.12s ease;
+  position: relative;
+}
+.inspector-tile[data-kind="folder"] {
+  cursor: pointer;
+}
+.inspector-tile:hover {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  box-shadow: 0 4px 12px color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.inspector-tile[data-selected="true"] {
+  border-color: var(--accent);
+  box-shadow: var(--glow);
+}
+@media (prefers-reduced-motion: reduce) {
+  .inspector-tile { transition: none; }
+}
+
+.tile-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.tile-select {
+  display: inline-flex;
+  align-items: center;
+  /* HIG-floor hit area even though the visible checkbox is small. */
+  min-width: 28px;
+  min-height: 28px;
+  cursor: pointer;
+}
+.tile-select input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+.tile-icon {
+  font-size: 1.1rem;
+  flex-shrink: 0;
+}
+.tile-name {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  flex-grow: 1;
+  /* Long classical-album names get middle-truncated so both ends
+     stay visible (the disambiguating part is often at the tail). */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tile-menu-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 1.1rem;
+  line-height: 1;
+  padding: 0.25rem 0.4rem;
+  border-radius: 6px;
+  color: color-mix(in srgb, currentColor 60%, transparent);
+  /* HIG floor — generous tap target even on the tile corner. */
+  min-width: 32px;
+  min-height: 32px;
+  flex-shrink: 0;
+}
+.tile-menu-btn:hover {
+  background: var(--bg-elev);
+  color: currentColor;
+}
+
+.tile-meta {
+  display: flex;
+  gap: 0.85rem;
+  margin: 0;
+  font-size: 0.8rem;
+  color: color-mix(in srgb, currentColor 70%, transparent);
+}
+.tile-meta > div { display: flex; gap: 0.3rem; }
+.tile-meta dt { font-weight: 500; }
+.tile-meta dd { margin: 0; font-variant-numeric: tabular-nums; }
+
+/* Coverage bars — dual stacked, one per kind. The progress element
+   is themed per `[data-kind]` parent so they're visually distinct
+   at a glance. */
+.tile-coverage {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.coverage-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.75rem;
+}
+.coverage-row .coverage-label {
+  color: color-mix(in srgb, currentColor 75%, transparent);
+}
+.coverage-row .coverage-count {
+  font-variant-numeric: tabular-nums;
+  color: color-mix(in srgb, currentColor 60%, transparent);
+}
+.coverage-row progress {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 100%;
+  height: 6px;
+  border: none;
+  border-radius: 3px;
+  background: var(--bg-elev);
+}
+.coverage-row progress::-webkit-progress-bar {
+  background: var(--bg-elev);
+  border-radius: 3px;
+}
+.coverage-row[data-kind="upscale"] progress::-webkit-progress-value {
+  background: var(--kind-upscale);
+  border-radius: 3px;
+}
+.coverage-row[data-kind="upscale"] progress::-moz-progress-bar {
+  background: var(--kind-upscale);
+  border-radius: 3px;
+}
+.coverage-row[data-kind="optimize"] progress::-webkit-progress-value {
+  background: var(--kind-optimize);
+  border-radius: 3px;
+}
+.coverage-row[data-kind="optimize"] progress::-moz-progress-bar {
+  background: var(--kind-optimize);
+  border-radius: 3px;
+}
+
+/* Track tiles use the same shell but a compact `.tile-track-dots`
+   row in place of the coverage block (per-track is binary, so the
+   bars would always be 0/1 or 1/1). */
+.tile-track-dots {
+  display: flex;
+  gap: 0.5rem;
+  font-size: 0.75rem;
+  color: color-mix(in srgb, currentColor 75%, transparent);
+}
+.tile-track-dot {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+.tile-track-dot::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+}
+.tile-track-dot[data-kind="upscale"][data-present="true"]::before {
+  background: var(--kind-upscale);
+  border-color: var(--kind-upscale);
+}
+.tile-track-dot[data-kind="optimize"][data-present="true"]::before {
+  background: var(--kind-optimize);
+  border-color: var(--kind-optimize);
+}
+
+/* "Load more" button visually de-emphasised but tappable. */
+.load-more {
+  align-self: center;
+  margin-top: 0.5rem;
+  background: var(--bg-elev);
+  border: 1px dashed var(--border);
+}
+
+/* ===== Native popover menu (tile-menu-popover) ===== */
+.tile-menu-popover {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-panel);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  padding: 0.4rem 0;
+  min-width: 240px;
+  /* Positioning fallback for browsers without CSS Anchor; the JS
+     places the popover via popover API but explicit centering keeps
+     it on-screen if anchor positioning fails. */
+  margin: 0;
+}
+.tile-menu-popover .menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 0.5rem 0.85rem;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: inherit;
+}
+.tile-menu-popover .menu-item:hover {
+  background: var(--bg-elev);
+}
+.tile-menu-popover .menu-item[disabled] {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.tile-menu-popover hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 0.3rem 0;
+}
+
+/* SoX-missing gate: the page root carries data-sox-available;
+   any menu item or button marked data-needs-sox is visually
+   disabled and pointer-inert. JS also disables the button so
+   keyboard activation is blocked. */
+.library-inspector[data-sox-available="false"] [data-needs-sox] {
+  opacity: 0.4;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+.library-inspector[data-sox-available="false"] [data-needs-sox]::after {
+  content: " (install SoX)";
+  font-size: 0.7em;
+  color: color-mix(in srgb, currentColor 60%, transparent);
+}
+
+/* ===== Selection bar ===== */
+.inspector-selection-bar {
+  position: sticky;
+  bottom: 1rem;
+  margin: 1rem 0 0;
+  padding: 0.5rem 1rem;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  background: var(--bg-panel);
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  z-index: 5;
+  flex-wrap: wrap;
+}
+.inspector-selection-bar .selection-count {
+  font-weight: 600;
+  color: var(--accent);
+}
+.inspector-selection-bar .selection-gap {
+  font-size: 0.8rem;
+  color: color-mix(in srgb, currentColor 70%, transparent);
+  font-variant-numeric: tabular-nums;
+}
+.inspector-selection-bar .selection-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-left: auto;
+}
+@media (prefers-reduced-motion: reduce) {
+  .inspector-selection-bar { transition: none; }
+}
+
+/* ===== Drawer per-kind sections ===== */
+.drawer-kind {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.75rem 0;
+  border-top: 1px solid var(--border);
+}
+.drawer-kind:first-of-type {
+  border-top: none;
+  padding-top: 0;
+}
+.drawer-kind-header {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+.drawer-kind-header h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+.drawer-kind-soxchip {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  background: var(--accent-warm-tint);
+  color: var(--accent-warm);
+  font-weight: 500;
+}
+.drawer-kind-intro {
+  margin: 0;
+  font-size: 0.8rem;
+  color: color-mix(in srgb, currentColor 70%, transparent);
+}
+.drawer-kind .inspector-drawer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.drawer-kind .inspector-drawer-actions .btn { font-size: 0.85rem; }
+
+/* Per-kind storage usage breakdown in the storage bar. */
+.storage-used-breakdown {
+  font-size: 0.78rem;
+  color: color-mix(in srgb, currentColor 65%, transparent);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ===== Mobile / narrow viewport adjustments ===== */
+@media (max-width: 600px) {
+  .inspector-grid {
+    grid-template-columns: 1fr;
+  }
+  .inspector-selection-bar {
+    bottom: 0.5rem;
+    padding: 0.5rem 0.75rem;
+  }
+  .inspector-selection-bar .selection-actions {
+    margin-left: 0;
+    width: 100%;
+    justify-content: stretch;
+  }
+  .inspector-selection-bar .selection-actions .btn {
+    flex: 1;
+  }
+}

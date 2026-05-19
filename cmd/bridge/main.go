@@ -464,6 +464,32 @@ func (a *upscaleBatchCoordinatorAdapter) Submit(ctx context.Context, libraryRelP
 	}, nil
 }
 
+func (a *upscaleBatchCoordinatorAdapter) SubmitOptimize(ctx context.Context, libraryRelPath string) (api.BatchSubmitResult, error) {
+	res, err := a.coord.SubmitOptimize(ctx, libraryRelPath, a.outputDir)
+	if err != nil {
+		var dskErr *transcode.InsufficientDiskSpaceError
+		if errors.As(err, &dskErr) {
+			return api.BatchSubmitResult{}, &api.BatchInsufficientDiskSpace{
+				ProjectedBytes: dskErr.ProjectedBytes,
+				RequiredBytes:  dskErr.RequiredBytes,
+				AvailableBytes: dskErr.AvailableBytes,
+			}
+		}
+		return api.BatchSubmitResult{}, err
+	}
+	return api.BatchSubmitResult{
+		BatchID:            res.BatchID.String(),
+		Path:               res.Path,
+		TargetRate:         res.TargetRate,
+		TargetBits:         res.TargetBits,
+		TotalFiles:         res.TotalFiles,
+		AlreadyCovered:     res.AlreadyCovered,
+		ProjectedSizeBytes: res.ProjectedSizeBytes,
+		AvailableBytes:     res.AvailableBytes,
+		EnqueuedCount:      res.EnqueuedCount,
+	}, nil
+}
+
 func (a *upscaleBatchCoordinatorAdapter) Cancel(id uuid.UUID) error {
 	return a.coord.Cancel(id)
 }
@@ -524,6 +550,32 @@ func (a *adminBatchCoordinatorAdapter) Submit(ctx context.Context, libraryRelPat
 		}
 	}
 	res, err := a.coord.Submit(ctx, libraryRelPath, targetRate, targetBits, a.outputDir)
+	if err != nil {
+		var dskErr *transcode.InsufficientDiskSpaceError
+		if errors.As(err, &dskErr) {
+			return admin.AdminBatchSubmitResult{}, &admin.AdminBatchInsufficientDiskSpace{
+				ProjectedBytes: dskErr.ProjectedBytes,
+				RequiredBytes:  dskErr.RequiredBytes,
+				AvailableBytes: dskErr.AvailableBytes,
+			}
+		}
+		return admin.AdminBatchSubmitResult{}, err
+	}
+	return admin.AdminBatchSubmitResult{
+		BatchID:            res.BatchID.String(),
+		Path:               res.Path,
+		TargetRate:         res.TargetRate,
+		TargetBits:         res.TargetBits,
+		TotalFiles:         res.TotalFiles,
+		AlreadyCovered:     res.AlreadyCovered,
+		ProjectedSizeBytes: res.ProjectedSizeBytes,
+		AvailableBytes:     res.AvailableBytes,
+		EnqueuedCount:      res.EnqueuedCount,
+	}, nil
+}
+
+func (a *adminBatchCoordinatorAdapter) SubmitOptimize(ctx context.Context, libraryRelPath string) (admin.AdminBatchSubmitResult, error) {
+	res, err := a.coord.SubmitOptimize(ctx, libraryRelPath, a.outputDir)
 	if err != nil {
 		var dskErr *transcode.InsufficientDiskSpaceError
 		if errors.As(err, &dskErr) {
@@ -1914,6 +1966,27 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 				return nil
 			}
 			return transcode.AvailableDiskSpace
+		}(),
+		// CarPlay-optimize deps closures. Nil-safe alongside
+		// ProjectedSize / AvailableDiskSpace (all four gated on
+		// the same `Upscale.Enabled` config so the absence of one
+		// implies the absence of the others on a fresh process).
+		// The optimize-projection branch in
+		// `apiLibraryBrowseProjection` surfaces a 503 when either
+		// closure is nil.
+		OptimizeEligible: func() func(string, string, int, int) bool {
+			live := cfgHolder.Load()
+			if live == nil || !live.Upscale.Enabled {
+				return nil
+			}
+			return transcode.OptimizeEligible
+		}(),
+		TargetRateForOptimize: func() func(int) int {
+			live := cfgHolder.Load()
+			if live == nil || !live.Upscale.Enabled {
+				return nil
+			}
+			return transcode.TargetRateForOptimize
 		}(),
 		BatchCoordinator: func() admin.AdminBatchCoordinator {
 			// Closure-resolved so admin doesn't see a typed-nil
