@@ -190,12 +190,18 @@ func MBCacheLookupsTotals() (hits, misses uint64) {
 // guaranteed to succeed for healthy counters; failure means the
 // metric isn't registered or has been concurrently torn down,
 // both of which we want to surface as "no data" rather than panicking).
+//
+// Uses the generated proto getters (`GetCounter().GetValue()`)
+// rather than direct field access — golangci-lint's `protogetter`
+// rule flags `m.Counter` / `m.Counter.Value` as a CI failure,
+// and the getter form is nil-safe by construction (both
+// `GetCounter` and `GetValue` handle their nil receivers).
 func counterValue(c prometheus.Counter) uint64 {
 	var m dto.Metric
-	if err := c.Write(&m); err != nil || m.Counter == nil || m.Counter.Value == nil {
+	if err := c.Write(&m); err != nil || m.GetCounter() == nil {
 		return 0
 	}
-	return uint64(*m.Counter.Value)
+	return uint64(m.GetCounter().GetValue())
 }
 
 // LogEventCountsSnapshot returns the current counter values for the
