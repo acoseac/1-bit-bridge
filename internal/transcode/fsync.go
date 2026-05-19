@@ -24,26 +24,12 @@ import (
 // Production wiring goes through `pool.NewPool` defaulting
 // `p.fsyncFn = fsyncFileAndParent`.
 func fsyncFileAndParent(path string) error {
-	// File fsync — cross-platform. **O_RDWR**, not O_RDONLY, because
-	// Go's `File.Sync()` maps to `FlushFileBuffers` on Windows, and
-	// that WinAPI explicitly **requires the handle be opened with
-	// GENERIC_WRITE access**:
-	//   https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers
-	//   "The handle for hFile must be opened with the GENERIC_WRITE
-	//    access right."
-	// Opening RDONLY surfaces as ERROR_ACCESS_DENIED at sync time on
-	// Windows — every Windows operator running optimize/upscale would
-	// see "fsync sidecar: Access is denied" on every job (verified
-	// 2026-05-19 on home-pc with SoX 14.4.2). POSIX side keeps
-	// working because `fsync(2)` doesn't care about access mode —
-	// any open fd is fine. RDWR is the cross-platform answer; we
-	// don't actually write anything new through this handle, so
-	// there's no behavioral cost on the POSIX side.
-	//
-	// The earlier `RDONLY because Sync only needs to flush pending
-	// writes` rationale was a POSIX-centric micro-optimization that
-	// quietly broke Windows when the optimize/upscale feature was
-	// later exercised against a real Windows install.
+	// O_RDWR (not O_RDONLY) because Go's File.Sync() maps to
+	// FlushFileBuffers on Windows, and that WinAPI requires the handle
+	// be opened with GENERIC_WRITE — O_RDONLY surfaces as
+	// ERROR_ACCESS_DENIED at sync time. POSIX fsync(2) accepts any
+	// open fd, so this is the cross-platform answer.
+	// https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers
 	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
 		return fmt.Errorf("open for fsync: %w", err)
