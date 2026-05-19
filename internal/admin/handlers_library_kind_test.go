@@ -41,6 +41,40 @@ func (f *fakeBatchCoordinator) ListBatches(int) ([]AdminBatchRow, error) {
 }
 func (f *fakeBatchCoordinator) Throughput() AdminBatchThroughput { return AdminBatchThroughput{} }
 
+// kindDispatchCase describes one row in the kind-dispatch table.
+// Extracted so the test body stays under the SonarCloud cognitive-
+// complexity threshold (each sub-test runs through `runKindCase`'s
+// linear flow rather than re-implementing fetch+assert per case).
+type kindDispatchCase struct {
+	name             string
+	body             map[string]any
+	wantStatus       int
+	wantSubmit       int
+	wantSubmitOpt    int
+	wantBodyContains string // only checked when non-empty
+}
+
+// runKindCase resets the stub, fires the request, and asserts the
+// expected dispatch shape. Single chokepoint keeps the per-row
+// branching out of the table itself.
+func runKindCase(t *testing.T, srv *Server, stub *fakeBatchCoordinator, tc kindDispatchCase) {
+	t.Helper()
+	stub.submitCalls = nil
+	stub.submitOptimizeCalls = nil
+	var res AdminBatchSubmitResult
+	code := doJSON(t, srv.Handler(), "POST", "/api/upscale/batch", tc.body, &res)
+	if code != tc.wantStatus {
+		t.Errorf("status: got %d, want %d", code, tc.wantStatus)
+	}
+	if len(stub.submitCalls) != tc.wantSubmit {
+		t.Errorf("Submit calls: %d, want %d", len(stub.submitCalls), tc.wantSubmit)
+	}
+	if len(stub.submitOptimizeCalls) != tc.wantSubmitOpt {
+		t.Errorf("SubmitOptimize calls: %d, want %d",
+			len(stub.submitOptimizeCalls), tc.wantSubmitOpt)
+	}
+}
+
 // TestApiUpscaleBatchSubmit_KindDispatch asserts the admin handler
 // routes on the request body's `kind` field: empty/"upscale" →
 // Submit, "optimize" → SubmitOptimize, anything else → 400. The
@@ -50,57 +84,45 @@ func TestApiUpscaleBatchSubmit_KindDispatch(t *testing.T) {
 	stub := &fakeBatchCoordinator{}
 	srv.deps.BatchCoordinator = stub
 
-	t.Run("empty kind dispatches to upscale Submit", func(t *testing.T) {
-		stub.submitCalls = nil
-		stub.submitOptimizeCalls = nil
-		var res AdminBatchSubmitResult
-		code := doJSON(t, srv.Handler(), "POST", "/api/upscale/batch",
-			map[string]any{"path": "MusicA", "targetRate": 192000, "targetBits": 24}, &res)
-		if code != http.StatusAccepted {
-			t.Errorf("empty kind: got %d, want 202", code)
-		}
-		if len(stub.submitCalls) != 1 {
-			t.Errorf("Submit calls: %d, want 1", len(stub.submitCalls))
-		}
-		if len(stub.submitOptimizeCalls) != 0 {
-			t.Errorf("SubmitOptimize calls: %d, want 0", len(stub.submitOptimizeCalls))
-		}
-	})
+	cases := []kindDispatchCase{
+		{
+			name:          "empty kind dispatches to upscale Submit",
+			body:          map[string]any{"path": "MusicA", "targetRate": 192000, "targetBits": 24},
+			wantStatus:    http.StatusAccepted,
+			wantSubmit:    1,
+			wantSubmitOpt: 0,
+		},
+		{
+			name:          "kind=upscale dispatches to Submit",
+			body:          map[string]any{"path": "MusicA", "kind": "upscale", "targetRate": 192000, "targetBits": 24},
+			wantStatus:    http.StatusAccepted,
+			wantSubmit:    1,
+			wantSubmitOpt: 0,
+		},
+		{
+			name:          "kind=optimize dispatches to SubmitOptimize",
+			body:          map[string]any{"path": "MusicA", "kind": "optimize"},
+			wantStatus:    http.StatusAccepted,
+			wantSubmit:    0,
+			wantSubmitOpt: 1,
+		},
+		{
+			name:          "kind=OPTIMIZE (case-insensitive) dispatches",
+			body:          map[string]any{"path": "MusicA", "kind": "OPTIMIZE"},
+			wantStatus:    http.StatusAccepted,
+			wantSubmit:    0,
+			wantSubmitOpt: 1,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runKindCase(t, srv, stub, tc)
+		})
+	}
 
-	t.Run("kind=upscale dispatches to Submit", func(t *testing.T) {
-		stub.submitCalls = nil
-		stub.submitOptimizeCalls = nil
-		var res AdminBatchSubmitResult
-		code := doJSON(t, srv.Handler(), "POST", "/api/upscale/batch",
-			map[string]any{"path": "MusicA", "kind": "upscale", "targetRate": 192000, "targetBits": 24}, &res)
-		if code != http.StatusAccepted {
-			t.Errorf("kind=upscale: got %d, want 202", code)
-		}
-		if len(stub.submitCalls) != 1 {
-			t.Errorf("Submit calls: %d, want 1", len(stub.submitCalls))
-		}
-	})
-
-	t.Run("kind=optimize dispatches to SubmitOptimize", func(t *testing.T) {
-		stub.submitCalls = nil
-		stub.submitOptimizeCalls = nil
-		var res AdminBatchSubmitResult
-		code := doJSON(t, srv.Handler(), "POST", "/api/upscale/batch",
-			map[string]any{"path": "MusicA", "kind": "optimize"}, &res)
-		if code != http.StatusAccepted {
-			t.Errorf("kind=optimize: got %d, want 202", code)
-		}
-		if len(stub.submitCalls) != 0 {
-			t.Errorf("Submit calls: %d, want 0 (optimize dispatch)", len(stub.submitCalls))
-		}
-		if len(stub.submitOptimizeCalls) != 1 {
-			t.Errorf("SubmitOptimize calls: %d, want 1", len(stub.submitOptimizeCalls))
-		}
-		if stub.submitOptimizeCalls[0].path != "MusicA" {
-			t.Errorf("SubmitOptimize path: %q, want MusicA", stub.submitOptimizeCalls[0].path)
-		}
-	})
-
+	// kind=junk: 400 + error body check, kept as a focused sub-test
+	// because the assertion shape (body-substring check + no
+	// dispatch) doesn't fit the table runner.
 	t.Run("kind=junk rejected with 400", func(t *testing.T) {
 		stub.submitCalls = nil
 		stub.submitOptimizeCalls = nil
@@ -122,17 +144,17 @@ func TestApiUpscaleBatchSubmit_KindDispatch(t *testing.T) {
 		}
 	})
 
-	t.Run("kind=OPTIMIZE (case-insensitive) dispatches", func(t *testing.T) {
+	// kind=optimize path-preservation check, distinct from the
+	// dispatch-count assertion so the table runner stays focused.
+	t.Run("kind=optimize preserves path argument", func(t *testing.T) {
 		stub.submitCalls = nil
 		stub.submitOptimizeCalls = nil
 		var res AdminBatchSubmitResult
-		code := doJSON(t, srv.Handler(), "POST", "/api/upscale/batch",
-			map[string]any{"path": "MusicA", "kind": "OPTIMIZE"}, &res)
-		if code != http.StatusAccepted {
-			t.Errorf("kind=OPTIMIZE: got %d, want 202", code)
-		}
-		if len(stub.submitOptimizeCalls) != 1 {
-			t.Errorf("SubmitOptimize calls: %d, want 1 (case folded)", len(stub.submitOptimizeCalls))
+		doJSON(t, srv.Handler(), "POST", "/api/upscale/batch",
+			map[string]any{"path": "MusicA", "kind": "optimize"}, &res)
+		if len(stub.submitOptimizeCalls) != 1 ||
+			stub.submitOptimizeCalls[0].path != "MusicA" {
+			t.Errorf("SubmitOptimize path: %+v", stub.submitOptimizeCalls)
 		}
 	})
 }
@@ -147,11 +169,16 @@ func TestApiUpscaleBatchSubmit_KindDispatch(t *testing.T) {
 //   - the response carries `Kind:"optimize"` echo
 //   - tracks failing OptimizeEligible roll into UnknownFormatFiles
 //     (a 16/44.1 source is already at the CarPlay floor → skipped)
-func TestApiLibraryBrowseProjection_KindOptimize(t *testing.T) {
-	srv, _, _ := newTestServer(t)
-	browseTestSeed(t, srv)
-
-	// Wire all four projection closures with simple stubs.
+//
+// wireOptimizeTestDeps installs simple stubs for all four
+// projection closures + enables upscale on the test config. Pulled
+// out of `TestApiLibraryBrowseProjection_KindOptimize` so the test
+// body stays focused on the assertions (per CodeRabbit major /
+// SonarCloud cognitive-complexity on PR #276). Mirrors
+// `transcode.OptimizeEligible`'s real semantics without pulling
+// internal/transcode into the test.
+func wireOptimizeTestDeps(t *testing.T, srv *Server) {
+	t.Helper()
 	srv.deps.ProjectedSize = func(sourceSize int64, sourceRate, sourceBits, targetRate, targetBits int) int64 {
 		if sourceSize <= 0 || sourceRate <= 0 || sourceBits <= 0 ||
 			targetRate <= 0 || targetBits <= 0 {
@@ -161,11 +188,7 @@ func TestApiLibraryBrowseProjection_KindOptimize(t *testing.T) {
 			int64(targetRate) / int64(sourceRate) *
 			int64(targetBits) / int64(sourceBits)
 	}
-	srv.deps.AvailableDiskSpace = func(string) (int64, error) {
-		return 1 << 40, nil // 1 TB
-	}
-	// Mirrors transcode.OptimizeEligible: PCM-only AND not-already-
-	// at-CarPlay-floor (source rate > 48000 OR source bits > 16).
+	srv.deps.AvailableDiskSpace = func(string) (int64, error) { return 1 << 40, nil }
 	srv.deps.OptimizeEligible = func(_, codec string, sourceRate, sourceBits int) bool {
 		isPCM := codec == "FLAC" || codec == "ALAC" || codec == "WAV" || codec == "AIFF"
 		if !isPCM {
@@ -187,6 +210,12 @@ func TestApiLibraryBrowseProjection_KindOptimize(t *testing.T) {
 	next := config.Clone(cfg)
 	next.Upscale.Enabled = true
 	srv.deps.CfgHolder.Store(next)
+}
+
+func TestApiLibraryBrowseProjection_KindOptimize(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	browseTestSeed(t, srv)
+	wireOptimizeTestDeps(t, srv)
 
 	var resp browseProjectionResponse
 	code := doJSON(t, srv.Handler(), "GET",

@@ -235,7 +235,7 @@ body[data-active="settings"] nav a[data-tab="settings"]::after {
   text-transform: uppercase;
   padding: 2px 8px;
   border-radius: 999px;
-  border: 1px solid currentColor;
+  border: 1px solid currentcolor;
   white-space: nowrap;
   transition: color 120ms ease, opacity 120ms ease;
 }
@@ -664,7 +664,7 @@ dialog h2 { font-size: 18px; color: var(--accent); }
   letter-spacing: 0.06em;
   padding: 2px 8px;
   border-radius: 999px;
-  border: 1px solid currentColor;
+  border: 1px solid currentcolor;
   /* Default tone for unknown classes — overridden per class below.
    * Using `currentColor` for the border keeps it tinted with the
    * tag's text color so a future class string just needs a single
@@ -1789,12 +1789,12 @@ section.library-inspector {
   margin: 0;
   font-size: 0.95rem;
   font-weight: 600;
-  color: color-mix(in srgb, currentColor 78%, transparent);
+  color: color-mix(in srgb, currentcolor 78%, transparent);
 }
 .section-count {
   font-size: 0.8rem;
   font-variant-numeric: tabular-nums;
-  color: color-mix(in srgb, currentColor 56%, transparent);
+  color: color-mix(in srgb, currentcolor 56%, transparent);
 }
 
 .inspector-grid {
@@ -1872,7 +1872,7 @@ section.library-inspector {
   line-height: 1;
   padding: 0.25rem 0.4rem;
   border-radius: 6px;
-  color: color-mix(in srgb, currentColor 60%, transparent);
+  color: color-mix(in srgb, currentcolor 60%, transparent);
   /* HIG floor — generous tap target even on the tile corner. */
   min-width: 32px;
   min-height: 32px;
@@ -1880,7 +1880,7 @@ section.library-inspector {
 }
 .tile-menu-btn:hover {
   background: var(--bg-elev);
-  color: currentColor;
+  color: currentcolor;
 }
 
 .tile-meta {
@@ -1888,7 +1888,7 @@ section.library-inspector {
   gap: 0.85rem;
   margin: 0;
   font-size: 0.8rem;
-  color: color-mix(in srgb, currentColor 70%, transparent);
+  color: color-mix(in srgb, currentcolor 70%, transparent);
 }
 .tile-meta > div { display: flex; gap: 0.3rem; }
 .tile-meta dt { font-weight: 500; }
@@ -1910,11 +1910,11 @@ section.library-inspector {
   font-size: 0.75rem;
 }
 .coverage-row .coverage-label {
-  color: color-mix(in srgb, currentColor 75%, transparent);
+  color: color-mix(in srgb, currentcolor 75%, transparent);
 }
 .coverage-row .coverage-count {
   font-variant-numeric: tabular-nums;
-  color: color-mix(in srgb, currentColor 60%, transparent);
+  color: color-mix(in srgb, currentcolor 60%, transparent);
 }
 .coverage-row progress {
   appearance: none;
@@ -1953,7 +1953,7 @@ section.library-inspector {
   display: flex;
   gap: 0.5rem;
   font-size: 0.75rem;
-  color: color-mix(in srgb, currentColor 75%, transparent);
+  color: color-mix(in srgb, currentcolor 75%, transparent);
 }
 .tile-track-dot {
   display: inline-flex;
@@ -2035,7 +2035,7 @@ section.library-inspector {
 .library-inspector[data-sox-available="false"] [data-needs-sox]::after {
   content: " (install SoX)";
   font-size: 0.7em;
-  color: color-mix(in srgb, currentColor 60%, transparent);
+  color: color-mix(in srgb, currentcolor 60%, transparent);
 }
 
 /* ===== Selection bar ===== */
@@ -2060,7 +2060,7 @@ section.library-inspector {
 }
 .inspector-selection-bar .selection-gap {
   font-size: 0.8rem;
-  color: color-mix(in srgb, currentColor 70%, transparent);
+  color: color-mix(in srgb, currentcolor 70%, transparent);
   font-variant-numeric: tabular-nums;
 }
 .inspector-selection-bar .selection-actions {
@@ -2104,7 +2104,7 @@ section.library-inspector {
 .drawer-kind-intro {
   margin: 0;
   font-size: 0.8rem;
-  color: color-mix(in srgb, currentColor 70%, transparent);
+  color: color-mix(in srgb, currentcolor 70%, transparent);
 }
 .drawer-kind .inspector-drawer-actions {
   display: flex;
@@ -2116,7 +2116,7 @@ section.library-inspector {
 /* Per-kind storage usage breakdown in the storage bar. */
 .storage-used-breakdown {
   font-size: 0.78rem;
-  color: color-mix(in srgb, currentColor 65%, transparent);
+  color: color-mix(in srgb, currentcolor 65%, transparent);
   font-variant-numeric: tabular-nums;
 }
 

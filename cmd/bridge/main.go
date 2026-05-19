@@ -1968,23 +1968,27 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			}
 			return transcode.AvailableDiskSpace
 		}(),
-		// CarPlay-optimize deps closures. Nil-safe alongside
-		// ProjectedSize / AvailableDiskSpace (all four gated on
-		// the same `Upscale.Enabled` config so the absence of one
-		// implies the absence of the others on a fresh process).
-		// The optimize-projection branch in
-		// `apiLibraryBrowseProjection` surfaces a 503 when either
-		// closure is nil.
+		// CarPlay-optimize deps closures. Gated on BOTH
+		// `Upscale.Enabled` AND `EffectiveOptimizeEnabled()` so
+		// the projection endpoint surfaces 503 in lockstep with
+		// the api.Server's `WithCarPlayOptimize(upscaleActive
+		// && cfg.Upscale.EffectiveOptimizeEnabled())` advertisement
+		// (line ~1543 above). Pre-fix gated on Upscale.Enabled
+		// alone, so a bridge with optimize explicitly DISABLED in
+		// the config would still serve `?kind=optimize` projection
+		// data — divergent from what /v1/health advertises and
+		// from what POST /v1/upscale (kind=optimize) accepts. Per
+		// CodeRabbit major on PR #276.
 		OptimizeEligible: func() func(string, string, int, int) bool {
 			live := cfgHolder.Load()
-			if live == nil || !live.Upscale.Enabled {
+			if live == nil || !live.Upscale.Enabled || !live.Upscale.EffectiveOptimizeEnabled() {
 				return nil
 			}
 			return transcode.OptimizeEligible
 		}(),
 		TargetRateForOptimize: func() func(int) int {
 			live := cfgHolder.Load()
-			if live == nil || !live.Upscale.Enabled {
+			if live == nil || !live.Upscale.Enabled || !live.Upscale.EffectiveOptimizeEnabled() {
 				return nil
 			}
 			return transcode.TargetRateForOptimize

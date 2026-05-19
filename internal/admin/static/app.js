@@ -3125,9 +3125,28 @@ async function inspectorSelectionSubmit(ev) {
   if (paths.length === 0) return;
   btn.disabled = true;
   try {
-    await inspectorSubmitBatchForKind(kind, paths);
-    inspectorState.selectedPaths.clear();
-    inspectorUpdateSelectionBar();
+    // Clear the selection ONLY when every submit landed cleanly.
+    // On any partial / total failure, preserve the selection so
+    // the operator can retry the failed folders without rebuilding
+    // the entire selection from scratch (could be 20+ folders on
+    // a deep multi-album batch). Per CodeRabbit major on PR #276.
+    // The toast on the selection bar (rendered by
+    // inspectorSubmitBatchForKind) carries the per-folder failure
+    // detail so the operator knows what didn't enqueue.
+    const result = await inspectorSubmitBatchForKind(kind, paths);
+    if (result && result.failed === 0) {
+      inspectorState.selectedPaths.clear();
+      // Mirror the DOM uncheck — keep checkbox state in sync with
+      // the cleared internal map. Same shape as the Clear button
+      // handler in initLibraryInspector.
+      for (const cb of document.querySelectorAll(
+        '.inspector-tile input[type="checkbox"][data-path]:checked')) {
+        cb.checked = false;
+        const tile = cb.closest(".inspector-tile");
+        if (tile) delete tile.dataset.selected;
+      }
+      inspectorUpdateSelectionBar();
+    }
   } finally {
     if (btn) btn.disabled = false;
   }
