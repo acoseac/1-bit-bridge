@@ -1,7 +1,7 @@
 package metrics
 
 import (
-	"sort"
+	"slices"
 	"sync"
 	"time"
 )
@@ -109,7 +109,10 @@ func (h *SlidingHistogram) SnapshotWithin(window time.Duration) (p50Seconds, p99
 	if len(valid) == 0 {
 		return 0, 0
 	}
-	sort.Slice(valid, func(i, j int) bool { return valid[i] < valid[j] })
+	// `slices.Sort` over `sort.Slice`: more efficient for primitive
+	// slices (no reflection / no interface boxing per swap) and the
+	// idiomatic Go 1.21+ form.
+	slices.Sort(valid)
 	p50us := valid[(len(valid)*50)/100]
 	p99idx := (len(valid) * 99) / 100
 	if p99idx >= len(valid) {

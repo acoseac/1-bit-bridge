@@ -177,10 +177,14 @@ func requestLogging(next http.Handler) http.Handler {
 		// blow the metric out. We approximate the template via
 		// `r.Pattern`, which on Go 1.22+ exposes the registered
 		// pattern; if empty (defensive — handler registered without
-		// a method pattern), fall back to the bare path.
+		// a method pattern, or 404 fallthroughs that ServeMux didn't
+		// match), collapse to the constant `"_unmatched"` so the
+		// label cardinality stays bounded by the route count + 1
+		// rather than the request-path cardinality (which can be
+		// arbitrary attacker-controlled garbage).
 		labelPath := r.Pattern
 		if labelPath == "" {
-			labelPath = r.URL.Path
+			labelPath = "_unmatched"
 		}
 		metrics.HTTPRequestsTotal.WithLabelValues(
 			labelPath,

@@ -1,9 +1,7 @@
 package metrics
 
 import (
-	"context"
 	"sync"
-	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -117,12 +115,11 @@ func (c *tsnetCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(c.peersOnline, prometheus.GaugeValue, 0)
 		return
 	}
-	// Cap the per-collector read at 1 s — a hung control plane
-	// must not stall Prometheus scrapes. The provider methods
-	// themselves use their own internal timeout; this is a
-	// belt-and-braces guard.
-	_, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
+	// Provider methods handle their own internal timeouts (see
+	// `tsnet.Server.MetricsPeersOnline`'s 1 s Status() bound).
+	// A wrapper `context.WithTimeout` here would have been dead
+	// code: the resulting context wasn't passed to anything, so
+	// it couldn't actually cancel a hung call.
 	ch <- prometheus.MustNewConstMetric(c.nodeState, prometheus.GaugeValue, float64(p.MetricsState()))
 	ch <- prometheus.MustNewConstMetric(c.peersOnline, prometheus.GaugeValue, float64(p.MetricsPeersOnline()))
 	for region, latency := range p.MetricsDERPLatencies() {

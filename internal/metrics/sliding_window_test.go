@@ -47,8 +47,15 @@ func TestSlidingHistogram_DropsObservationsPastFreshnessWindow(t *testing.T) {
 	p50, p99 := h.Snapshot()
 	// Only the fresh observation survives the 60-s window — both
 	// quantiles should reflect 0.010s, NOT the stale 999_999µs.
-	if p50 > 0.020 || p99 > 0.020 {
-		t.Fatalf("stale observation polluted quantiles: p50=%v p99=%v (expected ~0.010 for both)", p50, p99)
+	// Tightened bound (CodeRabbit nit): assert the fresh value is
+	// non-zero AND within tolerance, so a future regression where
+	// the window incorrectly drops EVERY observation collapses to
+	// (0, 0) and fails this test instead of silently passing.
+	if p50 < 0.005 || p50 > 0.020 {
+		t.Fatalf("p50 wrong: got %v, want ~0.010 (stale-drop or all-drop bug)", p50)
+	}
+	if p99 < 0.005 || p99 > 0.020 {
+		t.Fatalf("p99 wrong: got %v, want ~0.010 (stale-drop or all-drop bug)", p99)
 	}
 }
 
