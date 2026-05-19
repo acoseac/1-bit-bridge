@@ -2543,10 +2543,19 @@ function handleTileMenuAction(action, item) {
       break;
     case "projection":
       // Reuse the folder-selection path (also fires the drawer
-      // auto-open). For track items, projection acts on the
-      // parent folder.
+      // auto-open) for folder tiles. For track tiles, fall back
+      // to projection for the CURRENT folder — track tiles don't
+      // carry per-folder rollup fields (upscaledCount /
+      // optimizedCount are undefined), so a direct
+      // inspectorSelectFolder(item) would render misleading "—"
+      // values everywhere. The current-folder projection covers
+      // the parent the operator is already viewing, which is the
+      // user-meaningful scope for a track's "View projection"
+      // tap. Per CodeRabbit major on PR #276 round 3.
       if (item.upscaledCount !== undefined) {
         inspectorSelectFolder(item);
+      } else {
+        inspectorOpenProjectionForCurrent();
       }
       break;
   }

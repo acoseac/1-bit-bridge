@@ -424,22 +424,15 @@ type upscaleBatchCoordinatorAdapter struct {
 	outputDir string
 }
 
-func (a *upscaleBatchCoordinatorAdapter) Submit(ctx context.Context, libraryRelPath string, targetRate, targetBits int) (api.BatchSubmitResult, error) {
-	// Resolve the active target from scan_state when the caller
-	// didn't override. Coordinator.Submit validates the resolved
-	// values and returns an error on out-of-range.
-	if targetRate == 0 || targetBits == 0 {
-		rate, bits, err := a.store.GetUpscaleTarget(ctx)
-		if err == nil {
-			if targetRate == 0 {
-				targetRate = rate
-			}
-			if targetBits == 0 {
-				targetBits = bits
-			}
-		}
-	}
-	res, err := a.coord.Submit(ctx, libraryRelPath, targetRate, targetBits, a.outputDir)
+// translateApiSubmitResult is the shared result/error translator
+// used by both Submit and SubmitOptimize on the api-side adapter.
+// Translates transcode's typed disk-space error into the api
+// package's mirror, and copies the success-result fields field-
+// for-field (the two value types intentionally don't share a
+// definition so the api package stays free of internal/transcode).
+// Extracted to dedup the result-copy boilerplate after the
+// optimize-batch surface landed on PR #276.
+func translateApiSubmitResult(res *transcode.SubmitResult, err error) (api.BatchSubmitResult, error) {
 	if err != nil {
 		var dskErr *transcode.InsufficientDiskSpaceError
 		if errors.As(err, &dskErr) {
@@ -464,30 +457,28 @@ func (a *upscaleBatchCoordinatorAdapter) Submit(ctx context.Context, libraryRelP
 	}, nil
 }
 
-func (a *upscaleBatchCoordinatorAdapter) SubmitOptimize(ctx context.Context, libraryRelPath string) (api.BatchSubmitResult, error) {
-	res, err := a.coord.SubmitOptimize(ctx, libraryRelPath, a.outputDir)
-	if err != nil {
-		var dskErr *transcode.InsufficientDiskSpaceError
-		if errors.As(err, &dskErr) {
-			return api.BatchSubmitResult{}, &api.BatchInsufficientDiskSpace{
-				ProjectedBytes: dskErr.ProjectedBytes,
-				RequiredBytes:  dskErr.RequiredBytes,
-				AvailableBytes: dskErr.AvailableBytes,
+func (a *upscaleBatchCoordinatorAdapter) Submit(ctx context.Context, libraryRelPath string, targetRate, targetBits int) (api.BatchSubmitResult, error) {
+	// Resolve the active target from scan_state when the caller
+	// didn't override. Coordinator.Submit validates the resolved
+	// values and returns an error on out-of-range.
+	if targetRate == 0 || targetBits == 0 {
+		rate, bits, err := a.store.GetUpscaleTarget(ctx)
+		if err == nil {
+			if targetRate == 0 {
+				targetRate = rate
+			}
+			if targetBits == 0 {
+				targetBits = bits
 			}
 		}
-		return api.BatchSubmitResult{}, err
 	}
-	return api.BatchSubmitResult{
-		BatchID:            res.BatchID.String(),
-		Path:               res.Path,
-		TargetRate:         res.TargetRate,
-		TargetBits:         res.TargetBits,
-		TotalFiles:         res.TotalFiles,
-		AlreadyCovered:     res.AlreadyCovered,
-		ProjectedSizeBytes: res.ProjectedSizeBytes,
-		AvailableBytes:     res.AvailableBytes,
-		EnqueuedCount:      res.EnqueuedCount,
-	}, nil
+	res, err := a.coord.Submit(ctx, libraryRelPath, targetRate, targetBits, a.outputDir)
+	return translateApiSubmitResult(res, err)
+}
+
+func (a *upscaleBatchCoordinatorAdapter) SubmitOptimize(ctx context.Context, libraryRelPath string) (api.BatchSubmitResult, error) {
+	res, err := a.coord.SubmitOptimize(ctx, libraryRelPath, a.outputDir)
+	return translateApiSubmitResult(res, err)
 }
 
 func (a *upscaleBatchCoordinatorAdapter) Cancel(id uuid.UUID) error {
@@ -538,18 +529,12 @@ type adminBatchCoordinatorAdapter struct {
 	outputDir string
 }
 
-func (a *adminBatchCoordinatorAdapter) Submit(ctx context.Context, libraryRelPath string, targetRate, targetBits int) (admin.AdminBatchSubmitResult, error) {
-	if targetRate == 0 || targetBits == 0 {
-		if rate, bits, err := a.store.GetUpscaleTarget(ctx); err == nil {
-			if targetRate == 0 {
-				targetRate = rate
-			}
-			if targetBits == 0 {
-				targetBits = bits
-			}
-		}
-	}
-	res, err := a.coord.Submit(ctx, libraryRelPath, targetRate, targetBits, a.outputDir)
+// translateAdminSubmitResult mirrors translateApiSubmitResult for
+// the admin-side adapter; same dedup pattern, different target
+// value types (admin.AdminBatchSubmitResult / AdminBatchInsufficient-
+// DiskSpace can't share with api's because the admin package
+// intentionally doesn't import internal/api).
+func translateAdminSubmitResult(res *transcode.SubmitResult, err error) (admin.AdminBatchSubmitResult, error) {
 	if err != nil {
 		var dskErr *transcode.InsufficientDiskSpaceError
 		if errors.As(err, &dskErr) {
@@ -574,30 +559,24 @@ func (a *adminBatchCoordinatorAdapter) Submit(ctx context.Context, libraryRelPat
 	}, nil
 }
 
-func (a *adminBatchCoordinatorAdapter) SubmitOptimize(ctx context.Context, libraryRelPath string) (admin.AdminBatchSubmitResult, error) {
-	res, err := a.coord.SubmitOptimize(ctx, libraryRelPath, a.outputDir)
-	if err != nil {
-		var dskErr *transcode.InsufficientDiskSpaceError
-		if errors.As(err, &dskErr) {
-			return admin.AdminBatchSubmitResult{}, &admin.AdminBatchInsufficientDiskSpace{
-				ProjectedBytes: dskErr.ProjectedBytes,
-				RequiredBytes:  dskErr.RequiredBytes,
-				AvailableBytes: dskErr.AvailableBytes,
+func (a *adminBatchCoordinatorAdapter) Submit(ctx context.Context, libraryRelPath string, targetRate, targetBits int) (admin.AdminBatchSubmitResult, error) {
+	if targetRate == 0 || targetBits == 0 {
+		if rate, bits, err := a.store.GetUpscaleTarget(ctx); err == nil {
+			if targetRate == 0 {
+				targetRate = rate
+			}
+			if targetBits == 0 {
+				targetBits = bits
 			}
 		}
-		return admin.AdminBatchSubmitResult{}, err
 	}
-	return admin.AdminBatchSubmitResult{
-		BatchID:            res.BatchID.String(),
-		Path:               res.Path,
-		TargetRate:         res.TargetRate,
-		TargetBits:         res.TargetBits,
-		TotalFiles:         res.TotalFiles,
-		AlreadyCovered:     res.AlreadyCovered,
-		ProjectedSizeBytes: res.ProjectedSizeBytes,
-		AvailableBytes:     res.AvailableBytes,
-		EnqueuedCount:      res.EnqueuedCount,
-	}, nil
+	res, err := a.coord.Submit(ctx, libraryRelPath, targetRate, targetBits, a.outputDir)
+	return translateAdminSubmitResult(res, err)
+}
+
+func (a *adminBatchCoordinatorAdapter) SubmitOptimize(ctx context.Context, libraryRelPath string) (admin.AdminBatchSubmitResult, error) {
+	res, err := a.coord.SubmitOptimize(ctx, libraryRelPath, a.outputDir)
+	return translateAdminSubmitResult(res, err)
 }
 
 func (a *adminBatchCoordinatorAdapter) Cancel(idHex string) error {

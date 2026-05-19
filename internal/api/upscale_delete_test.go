@@ -286,8 +286,11 @@ func TestUpscaleDelete_pathHappyPath(t *testing.T) {
 // variants untouched. Without the filter (the load-bearing
 // gap before the fix) per-kind drawer Delete buttons would have
 // silently wiped both kinds.
-func TestUpscaleDelete_kindNarrowsToUpscale(t *testing.T) {
-	hs, raw, deleter, _ := deleteFixture(t, true)
+// seedMixedKindFixture installs three variant rows (one upscaled +
+// two optimized) on the deleter stub. Shared by the upscale-only
+// and optimize-only kind-narrow tests below so the row literal
+// doesn't repeat across files (was a SonarCloud duplication trip).
+func seedMixedKindFixture(deleter *stubVariantDeleter) {
 	deleter.all = []VariantSummary{
 		{SourcePath: "Music/Album/01.flac", VariantID: "upscaled-v2-192000-24",
 			SidecarPath: "/tmp/u1", SizeBytes: 1000},
@@ -296,6 +299,11 @@ func TestUpscaleDelete_kindNarrowsToUpscale(t *testing.T) {
 		{SourcePath: "Music/Album/02.flac", VariantID: "optimized-v2-44100-16",
 			SidecarPath: "/tmp/o2", SizeBytes: 250},
 	}
+}
+
+func TestUpscaleDelete_kindNarrowsToUpscale(t *testing.T) {
+	hs, raw, deleter, _ := deleteFixture(t, true)
+	seedMixedKindFixture(deleter)
 
 	resp := authDelete(t, hs, "/v1/upscale/variants?confirm=true&kind=upscale", raw)
 	defer resp.Body.Close()
@@ -317,14 +325,7 @@ func TestUpscaleDelete_kindNarrowsToUpscale(t *testing.T) {
 // rows are deleted and the upscaled-v2 row is NOT.
 func TestUpscaleDelete_kindNarrowsToOptimize(t *testing.T) {
 	hs, raw, deleter, _ := deleteFixture(t, true)
-	deleter.all = []VariantSummary{
-		{SourcePath: "Music/Album/01.flac", VariantID: "upscaled-v2-192000-24",
-			SidecarPath: "/tmp/u1", SizeBytes: 1000},
-		{SourcePath: "Music/Album/01.flac", VariantID: "optimized-v2-48000-16",
-			SidecarPath: "/tmp/o1", SizeBytes: 200},
-		{SourcePath: "Music/Album/02.flac", VariantID: "optimized-v2-44100-16",
-			SidecarPath: "/tmp/o2", SizeBytes: 250},
-	}
+	seedMixedKindFixture(deleter)
 
 	resp := authDelete(t, hs, "/v1/upscale/variants?confirm=true&kind=optimize", raw)
 	defer resp.Body.Close()
@@ -376,6 +377,53 @@ func TestUpscaleDelete_kindUnknownReturns400(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("kind=junk: got %d, want 400", resp.StatusCode)
+	}
+}
+
+// TestRunVariantDelete_unknownKindRejected is the defense-in-depth
+// mirror at the RunVariantDelete method boundary. The HTTP parser
+// already rejects unknown kinds at the wire (TestUpscaleDelete_
+// kindUnknownReturns400 above), but RunVariantDelete is exported —
+// a direct caller (test harness, internal tool, future
+// integration) that constructs VariantDeleteRequest{Kind: "junk"}
+// would have the empty wantPrefix match every row via
+// `strings.HasPrefix(..., "")` and silently widen the delete back
+// to BOTH kinds. The `default` arm in the switch closes that gap.
+// Per CodeRabbit major on PR #276 round 3.
+func TestRunVariantDelete_unknownKindRejected(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := &config.Config{
+		LibraryRoots:  []string{tmp},
+		ListenAddress: ":7788",
+		LibraryName:   "Test",
+	}
+	authStore, _ := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
+	srv := New(cfg, authStore, nil, "fp")
+	deleter := &stubVariantDeleter{
+		all: []VariantSummary{
+			{SourcePath: "Music/Album/01.flac", VariantID: "upscaled-v2-192000-24",
+				SidecarPath: "/tmp/u1", SizeBytes: 1000},
+		},
+		byPath: map[string][]VariantSummary{},
+	}
+	srv = srv.WithVariantDeleter(deleter)
+
+	_, err := srv.RunVariantDelete(context.Background(), VariantDeleteRequest{
+		All:  true,
+		Kind: "junk",
+	})
+	if err == nil {
+		t.Fatalf("RunVariantDelete Kind=\"junk\": got nil, want unknown-kind error")
+	}
+	if !strings.Contains(err.Error(), "unknown kind") {
+		t.Errorf("error message: %q, want \"unknown kind\" substring", err.Error())
+	}
+	// Critically: no rows were touched. Without the default arm,
+	// strings.HasPrefix(row.VariantID, "") would have matched every
+	// row and the unlink+delete loop would have silently widened
+	// the operation to all kinds.
+	if got := deleter.deletedKeys(); len(got) != 0 {
+		t.Errorf("unexpected deletions on unknown-kind reject: %v", got)
 	}
 }
 

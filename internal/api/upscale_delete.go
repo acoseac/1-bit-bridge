@@ -28,6 +28,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -341,16 +342,29 @@ func (s *Server) RunVariantDelete(ctx context.Context, req VariantDeleteRequest)
 	// return the full row set; filtering in-memory keeps the Store
 	// interface unchanged. Version-agnostic prefix (matches v1
 	// AND v2 sidecars) by design — see manifest.VariantKindPrefix*
-	// docblock for the rationale. Empty Kind preserves pre-feature
-	// behaviour (no filter, delete BOTH kinds).
-	if req.Kind != "" {
-		var wantPrefix string
-		switch req.Kind {
-		case "upscale":
-			wantPrefix = "upscaled-"
-		case "optimize":
-			wantPrefix = "optimized-"
-		}
+	// docblock for the rationale.
+	//
+	// Defense in depth: parseVariantDeleteQuery rejects unknown
+	// values at the HTTP boundary, but RunVariantDelete is
+	// exported — a future direct caller (test harness, internal
+	// tool) that passes `Kind = "junk"` would have `wantPrefix`
+	// remain "" and `strings.HasPrefix(..., "")` match every row,
+	// silently widening the delete back to BOTH kinds. The
+	// `default` arm here closes that gap by returning an error.
+	// Empty Kind preserves pre-feature behaviour (no filter,
+	// delete BOTH kinds). Per CodeRabbit major on PR #276 round 3.
+	var wantPrefix string
+	switch req.Kind {
+	case "":
+		// Empty → no filter; preserves pre-feature back-compat.
+	case "upscale":
+		wantPrefix = "upscaled-"
+	case "optimize":
+		wantPrefix = "optimized-"
+	default:
+		return VariantDeleteResponse{}, fmt.Errorf("variant delete request: unknown kind %q (expected empty, \"upscale\", or \"optimize\")", req.Kind)
+	}
+	if wantPrefix != "" {
 		filtered := rows[:0]
 		for _, row := range rows {
 			if strings.HasPrefix(row.VariantID, wantPrefix) {
