@@ -2498,15 +2498,33 @@ function buildTrackTile(t) {
 // (delete actions disabled when count==0), and appends to the tile.
 // Uses the native HTML `popover` API for outside-click / Escape
 // dismissal — no JS wrapper needed.
+//
+// **SoX-gated generate actions** carry an actual `disabled`
+// property (not just the CSS `data-needs-sox` visual gate). The
+// CSS rule handles the visual treatment (opacity + cursor +
+// pointer-events) but doesn't stop keyboard activation; setting
+// `disabled` on the button is what blocks Enter/Space invocation.
+// Per CodeRabbit major on PR #276 round 4 — defense in depth for
+// accessibility.
 function attachTileMenu(tile, item) {
   const tmpl = document.getElementById("tile-menu-template");
   if (!tmpl || !item.pathHash) return;
   const popover = tmpl.content.firstElementChild.cloneNode(true);
   popover.id = "menu-" + item.pathHash;
-  // Disable delete actions when no variants of that kind exist
-  // (operator can't "delete" what isn't there).
   const upCount = (item.upscaledCount || (item.isUpscaled ? 1 : 0)) || 0;
   const opCount = (item.optimizedCount || (item.isOptimized ? 1 : 0)) || 0;
+  const soxMissing = !inspectorState.soxAvailable;
+  // Disable generate actions when SoX is unavailable — keyboard
+  // accessibility gate alongside the CSS [data-needs-sox] visual
+  // dim. Without this `disabled` property, a Tab+Enter on a
+  // SoX-less bridge would still queue a job that the backend
+  // immediately rejects.
+  const genUp = popover.querySelector('[data-action="upscale"]');
+  const genOp = popover.querySelector('[data-action="optimize"]');
+  if (genUp) genUp.disabled = soxMissing;
+  if (genOp) genOp.disabled = soxMissing;
+  // Disable delete actions when no variants of that kind exist
+  // (operator can't "delete" what isn't there).
   const delUp = popover.querySelector('[data-action="delete-upscale"]');
   const delOp = popover.querySelector('[data-action="delete-optimize"]');
   if (delUp) delUp.disabled = upCount === 0;
@@ -2525,14 +2543,21 @@ function attachTileMenu(tile, item) {
 
 // handleTileMenuAction routes a per-tile kebab-menu action to the
 // right submit/delete/projection handler. `item` is the folder or
-// track row data (carries .path, .upscaledCount etc).
+// track row data (carries .path, .upscaledCount etc). Defense-in-
+// depth SoX gate at the action sites — the button's `disabled`
+// property already blocks user activation, but a future JS-direct
+// caller (test, console-driven automation) bypassing the click
+// handler would otherwise queue jobs the backend rejects.
 function handleTileMenuAction(action, item) {
   const path = item.path;
+  const soxMissing = !inspectorState.soxAvailable;
   switch (action) {
     case "upscale":
+      if (soxMissing) break;
       inspectorSubmitBatchForKind("upscale", [path]);
       break;
     case "optimize":
+      if (soxMissing) break;
       inspectorSubmitBatchForKind("optimize", [path]);
       break;
     case "delete-upscale":
@@ -2972,15 +2997,17 @@ async function inspectorSubmitBatchForKind(kind, paths) {
     }
   }
 
-  // Refresh the page after a successful submit so coverage bars
-  // update on the tiles the operator is looking at. Per Gemini
-  // medium on PR #276: the previous `paths.includes(inspectorState.path)`
-  // guard was too restrictive — when subfolders are selected from
-  // the parent view, the parent's coverage bars need to refresh
-  // too. The `originPath === inspectorState.path` check ensures
-  // we don't re-navigate if the user moved to a different folder
-  // mid-submit.
-  if (ok.length > 0 && inspectorState.path === originPath) {
+  // Refresh the page after a CLEAN-SUCCESS submit so coverage
+  // bars update on the tiles the operator is looking at. Gated
+  // on `failed.length === 0` because `inspectorRender` clears
+  // `selectedPaths` on every navigate — refreshing after a
+  // partial failure would clobber the preserve-on-failure
+  // behaviour that `inspectorSelectionSubmit` depends on for
+  // the operator's retry workflow. The `originPath ===
+  // inspectorState.path` check ensures we don't re-navigate if
+  // the user moved to a different folder mid-submit. Per
+  // CodeRabbit major on PR #276 round 4.
+  if (ok.length > 0 && failed.length === 0 && inspectorState.path === originPath) {
     await inspectorNavigate(originPath);
   }
   return { ok: ok.length, failed: failed.length, enqueued };
@@ -3143,7 +3170,7 @@ async function inspectorSelectionSubmit(ev) {
     // inspectorSubmitBatchForKind) carries the per-folder failure
     // detail so the operator knows what didn't enqueue.
     const result = await inspectorSubmitBatchForKind(kind, paths);
-    if (result && result.failed === 0) {
+    if (result?.failed === 0) {
       inspectorState.selectedPaths.clear();
       // Mirror the DOM uncheck — keep checkbox state in sync with
       // the cleared internal map. Same shape as the Clear button
