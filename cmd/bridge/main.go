@@ -501,6 +501,7 @@ func (a *upscaleBatchCoordinatorAdapter) ListBatches(limit int) ([]api.BatchRow,
 			TotalFiles:     r.TotalFiles,
 			ProcessedFiles: r.ProcessedFiles,
 			FailedFiles:    r.FailedFiles,
+			SkippedFiles:   r.SkippedFiles,
 			Error:          r.Error,
 			CreatedAt:      r.CreatedAt,
 			UpdatedAt:      r.UpdatedAt,
@@ -603,6 +604,7 @@ func (a *adminBatchCoordinatorAdapter) ListBatches(limit int) ([]admin.AdminBatc
 			TotalFiles:     r.TotalFiles,
 			ProcessedFiles: r.ProcessedFiles,
 			FailedFiles:    r.FailedFiles,
+			SkippedFiles:   r.SkippedFiles,
 			Error:          r.Error,
 			// time.Time encoded as RFC 3339 — avoids JS Number
 			// precision loss on int64 ns values > 2^53. The

@@ -563,6 +563,33 @@ var migrations = []migration{
 			return nil
 		},
 	},
+	{
+		version: 9,
+		name:    "upscale_batches.skipped_files (v1.5 inspector skip-reason)",
+		// Additive column: persists the number of tracks that
+		// `Coordinator.Submit` / `SubmitOptimize` saw in the
+		// projection but did NOT enqueue (failed `OptimizeEligible`,
+		// were DSD, had zero / missing rate-or-bits, source format
+		// already at target, etc.). Distinct from `total_files`
+		// (which equals the EnqueuedCount on the live row) and
+		// from `failed_files` (per-job SoX failures during the run).
+		//
+		// Operators looking at the Jobs page row for a batch that
+		// "completed 0/0" previously had no way to distinguish
+		// "empty folder" from "every track ineligible" from "every
+		// track already had a variant". The skip-count closes that
+		// gap — the admin Jobs page surfaces "X tracks skipped" as
+		// a sub-line on the row whenever this column is non-zero.
+		//
+		// SQLite `ALTER TABLE ADD COLUMN ... DEFAULT 0` is constant-
+		// time (doesn't rewrite existing rows). Backfill is implicit:
+		// pre-migration rows get 0, which is harmless — the UI only
+		// renders the sub-line when `SkippedFiles > 0`, so legacy
+		// rows look identical to the pre-feature shape.
+		sql: `
+		ALTER TABLE upscale_batches ADD COLUMN skipped_files INTEGER NOT NULL DEFAULT 0;
+		`,
+	},
 }
 
 // normalizePathForLookup folds an iOS-shaped track path back toward
@@ -2358,6 +2385,17 @@ type UpscaleBatchRow struct {
 	TotalFiles     int
 	ProcessedFiles int
 	FailedFiles    int
+	// SkippedFiles counts tracks the projection saw but Submit /
+	// SubmitOptimize did NOT enqueue (rate>target, bits>target,
+	// rate==target && bits==target no-op, failed OptimizeEligible,
+	// DSD, zero/missing rate-or-bits). Distinct from
+	// `AlreadyCovered` (returned in SubmitResult but not persisted)
+	// and from FailedFiles (per-job SoX failures during the run).
+	// Writeable at insert time only — the Coordinator computes it
+	// from the projection loop alongside the candidate list and
+	// never updates it post-insert. v1.5 migration v9 added the
+	// column; pre-migration rows carry 0.
+	SkippedFiles int
 	// Error holds redacted sox stderr / coordinator-side failure
 	// reason. Empty on the happy path. Multi-line tolerated.
 	Error string
@@ -2379,12 +2417,12 @@ func (s *Store) InsertUpscaleBatch(ctx context.Context, row UpscaleBatchRow) err
 		INSERT INTO upscale_batches
 			(id, path, target_rate, target_bits, status,
 			 total_files, processed_files, failed_files,
-			 error, created_at, updated_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?)
+			 error, created_at, updated_at, skipped_files)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
 	`,
 		row.ID[:], row.Path, row.TargetRate, row.TargetBits, row.Status,
 		row.TotalFiles, row.ProcessedFiles, row.FailedFiles,
-		row.Error, row.CreatedAt, row.UpdatedAt,
+		row.Error, row.CreatedAt, row.UpdatedAt, row.SkippedFiles,
 	)
 	return err
 }
@@ -2442,7 +2480,8 @@ func (s *Store) ListUpscaleBatches(ctx context.Context, limit int) ([]UpscaleBat
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, path, target_rate, target_bits, status,
 		       total_files, processed_files, failed_files,
-		       COALESCE(error, ''), created_at, updated_at
+		       COALESCE(error, ''), created_at, updated_at,
+		       skipped_files
 		  FROM upscale_batches
 		 ORDER BY created_at DESC
 		 LIMIT ?
@@ -2461,6 +2500,7 @@ func (s *Store) ListUpscaleBatches(ctx context.Context, limit int) ([]UpscaleBat
 			&idBlob, &row.Path, &row.TargetRate, &row.TargetBits, &row.Status,
 			&row.TotalFiles, &row.ProcessedFiles, &row.FailedFiles,
 			&row.Error, &row.CreatedAt, &row.UpdatedAt,
+			&row.SkippedFiles,
 		); err != nil {
 			return nil, err
 		}

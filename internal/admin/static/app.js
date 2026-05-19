@@ -2910,6 +2910,31 @@ async function inspectorSubmitBatch(ev) {
 // kind's drawer section (when paths.length === 1) or the selection
 // bar (when paths.length > 1). The selection-bar callers route
 // through inspectorSelectionSubmit, which delegates here.
+// inspectorPreflightNoOpReason — pure helper that maps a single
+// projection response to a human-readable "nothing to do because…"
+// string when `projectedFiles === 0`. Reuses the message matrix
+// from inspectorFetchProjection so the pre-flight toast wording
+// matches what the drawer would have shown. Returns null when
+// there IS work to do (caller proceeds with submit).
+function inspectorPreflightNoOpReason(data, kind) {
+  if (!data || data.projectedFiles > 0) return null;
+  const lbl = kind === "upscale" ? "upscaled" : "optimized";
+  const covered = data.alreadyCoveredFiles || 0;
+  const unknown = data.unknownFormatFiles || 0;
+  if (covered > 0 && unknown === 0) {
+    return `All eligible tracks already have a ${lbl} variant.`;
+  }
+  if (covered === 0 && unknown > 0) {
+    return kind === "optimize"
+      ? "No tracks here are eligible for CarPlay-optimize (already at target, lossy, DSD, or unknown source format)."
+      : "No tracks here support upscaling (DSD or unknown source format).";
+  }
+  if (covered > 0 && unknown > 0) {
+    return `${covered} tracks already ${lbl}, ${unknown} not eligible — nothing left to generate.`;
+  }
+  return "No tracks here.";
+}
+
 async function inspectorSubmitBatchForKind(kind, paths) {
   if (!Array.isArray(paths) || paths.length === 0) return;
   if (kind !== "upscale" && kind !== "optimize") return;
@@ -2919,6 +2944,35 @@ async function inspectorSubmitBatchForKind(kind, paths) {
     ? document.querySelector(`.drawer-submit-status[data-kind="${kind}"]`)
     : null;
   if (status) status.textContent = "Submitting…";
+
+  // Pre-flight projection on single-path submits (the kebab-menu and
+  // drawer "Generate" both hit this branch). Avoids the silent no-op
+  // batch that lands on the Jobs page as "completed 0/0" when the
+  // folder has zero eligible tracks — instead the operator gets an
+  // honest "nothing to do because <X>" toast BEFORE the POST. Skips
+  // pre-flight on multi-path (selection-bar) submits because each
+  // path would cost a separate projection GET and the aggregated
+  // sub-toast is less useful than the per-batch Jobs row.
+  // Per the inspector skip-reason feedback to-do (PR feat/inspector-skip-feedback).
+  if (single && paths.length === 1) {
+    try {
+      const probeURL = `/api/library/browse-projection?path=${encodeURIComponent(paths[0])}&kind=${kind}`;
+      const probe = await fetch(probeURL);
+      if (probe.ok) {
+        const data = await probe.json();
+        const reason = inspectorPreflightNoOpReason(data, kind);
+        if (reason) {
+          if (status) status.textContent = `Nothing to do — ${reason}`;
+          return { ok: 0, failed: 0, enqueued: 0, skippedDueToPreflight: true };
+        }
+      }
+      // Non-200 / non-JSON falls through to the regular POST path —
+      // we don't block submits on a flaky projection probe.
+    } catch (e) {
+      // Same: don't block on probe failure. The POST will run, and
+      // its result message will be the operator's feedback.
+    }
+  }
   // Capture the path the operator is currently viewing so the
   // post-success refresh (below) doesn't race a mid-flight
   // navigation to a different folder — Gemini medium on PR #276.
@@ -3768,6 +3822,18 @@ function jobsRender(payload) {
       errRow.className = "job-error-row";
       errRow.innerHTML = `<td colspan="8" class="error">${escapeHTML(r.error)}</td>`;
       body.appendChild(errRow);
+    }
+    // Skip-count sub-line. Surfaces "X tracks skipped" when Submit /
+    // SubmitOptimize saw projection-eligible-by-format tracks but
+    // didn't enqueue them (already at target, lossy, DSD, etc.).
+    // Backed by upscale_batches.skipped_files (migration v9). Hidden
+    // on rows where skippedFiles is 0 / missing — keeps pre-feature
+    // batches and clean-everything-eligible batches uncluttered.
+    if (r.skippedFiles && r.skippedFiles > 0) {
+      const skipRow = document.createElement("tr");
+      skipRow.className = "job-skipped-row";
+      skipRow.innerHTML = `<td colspan="8" class="hint">${r.skippedFiles} track${r.skippedFiles === 1 ? "" : "s"} skipped (ineligible for this batch kind — already at target, lossy, DSD, or unknown format)</td>`;
+      body.appendChild(skipRow);
     }
   }
 }
