@@ -192,6 +192,12 @@ func (s *Server) routeRegistry() []route {
 		// query backs up at scary rates under high-frequency
 		// polling. Surface as 5xx within 2 s instead.
 		{pattern: "GET /v1/upscale/stats", kind: boundedRoute, handler: withCtxTimeout(2*time.Second, s.authed(s.upscaleStats))},
+		// Diagnostics summary — atomic-counter + sliding-window
+		// reads only; no SQLite queries, no subprocess spawns, no
+		// disk-blocking work. 2 s ctx-timeout matches the other
+		// fast-query routes; the handler returns in <1 ms in
+		// steady state.
+		{pattern: "GET /v1/diagnostics", kind: boundedRoute, handler: withCtxTimeout(2*time.Second, s.authed(s.diagnostics))},
 		{pattern: "POST /v1/upscale/batch", kind: boundedRoute, handler: s.authed(s.upscaleBatchSubmit)},
 		{pattern: "GET /v1/upscale/batches", kind: boundedRoute, handler: s.authed(s.upscaleBatchList)},
 		{pattern: "DELETE /v1/upscale/batches/{id}", kind: boundedRoute, handler: s.authed(s.upscaleBatchCancel)},
