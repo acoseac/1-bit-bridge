@@ -272,17 +272,23 @@ type AdminBatchSubmitResult struct {
 // hundred milliseconds off. The string form parses safely via
 // `new Date(...)`. Per Gemini high on PR #202.
 type AdminBatchRow struct {
-	ID             string    `json:"id"`
-	Path           string    `json:"path"`
-	TargetRate     int       `json:"targetRate"`
-	TargetBits     int       `json:"targetBits"`
-	Status         string    `json:"status"`
-	TotalFiles     int       `json:"totalFiles"`
-	ProcessedFiles int       `json:"processedFiles"`
-	FailedFiles    int       `json:"failedFiles"`
-	Error          string    `json:"error,omitempty"`
-	CreatedAt      time.Time `json:"createdAt"`
-	UpdatedAt      time.Time `json:"updatedAt"`
+	ID             string `json:"id"`
+	Path           string `json:"path"`
+	TargetRate     int    `json:"targetRate"`
+	TargetBits     int    `json:"targetBits"`
+	Status         string `json:"status"`
+	TotalFiles     int    `json:"totalFiles"`
+	ProcessedFiles int    `json:"processedFiles"`
+	FailedFiles    int    `json:"failedFiles"`
+	// SkippedFiles is the count of projection-eligible tracks that
+	// Submit/SubmitOptimize did NOT enqueue (already at target,
+	// lossy, DSD, unknown format, etc.). Distinct from FailedFiles
+	// (per-job SoX failures during the run). The Jobs page renders
+	// "X tracks skipped" as a sub-line whenever this is > 0.
+	SkippedFiles int       `json:"skippedFiles,omitempty"`
+	Error        string    `json:"error,omitempty"`
+	CreatedAt    time.Time `json:"createdAt"`
+	UpdatedAt    time.Time `json:"updatedAt"`
 }
 
 // AdminBatchThroughput is the wire shape returned by the

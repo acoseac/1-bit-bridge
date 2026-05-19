@@ -336,6 +336,17 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 	// with the enqueue finds a row to attribute to.
 	batchID := uuid.Must(uuid.NewRandom())
 	now := c.clock().UnixNano()
+	// Skip count = projected − enqueued − already-covered. Captures
+	// every `continue` arm of the loop above (rate>target, bits>target,
+	// rate==target && bits==target no-op, missing rate/bits, resolver
+	// failure) without threading a per-arm counter through the
+	// branches. Surfaced on the Jobs page row as "X tracks skipped"
+	// so operators who see a "completed 0/0" batch understand whether
+	// nothing was eligible vs nothing was found.
+	skipped := len(projections) - len(cands) - alreadyCovered
+	if skipped < 0 {
+		skipped = 0 // defensive — should be impossible
+	}
 	row := manifest.UpscaleBatchRow{
 		ID:             batchID,
 		Path:           path,
@@ -345,6 +356,7 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 		TotalFiles:     len(cands),
 		ProcessedFiles: 0,
 		FailedFiles:    0,
+		SkippedFiles:   skipped,
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}
@@ -365,6 +377,30 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 	c.mu.Lock()
 	c.liveBatches[batchID] = state
 	c.mu.Unlock()
+
+	// Empty-batch short-circuit: no candidates → no worker callback
+	// will ever fire to transition the row out of `pending`. Mark
+	// the batch completed synchronously so the admin row doesn't
+	// sit `running` indefinitely. Mirrors SubmitOptimize's branch
+	// (CodeRabbit major on PR #270 + PR #278 outside-diff).
+	if len(cands) == 0 {
+		if err := c.transitionStatus(batchID, "completed", "", c.clock()); err != nil {
+			c.logger.Warn("submit: transition empty batch to completed",
+				"batchID", batchID.String(), "err", err)
+		}
+		c.publishProgress(batchID)
+		return &SubmitResult{
+			BatchID:            batchID,
+			Path:               path,
+			TargetRate:         targetRate,
+			TargetBits:         targetBits,
+			TotalFiles:         0,
+			AlreadyCovered:     alreadyCovered,
+			ProjectedSizeBytes: totalProjected,
+			AvailableBytes:     available,
+			EnqueuedCount:      0,
+		}, nil
+	}
 
 	// Enqueue. Pool's bounded channel makes Enqueue non-blocking
 	// per-call; we transition the batch to `running` before the
@@ -529,6 +565,13 @@ type optimizeCandidates struct {
 	cands          []optimizeCandidate
 	alreadyCovered int
 	totalProjected int64
+	// projectionsSeen is the pre-filter count of track projections
+	// the helper walked. Lets the caller derive `skipped =
+	// projectionsSeen − len(cands) − alreadyCovered` for persistence
+	// on the upscale_batches.skipped_files column (v1.5 migration v9).
+	// Distinct from len(cands) which is post-filter (only enqueue-
+	// able tracks).
+	projectionsSeen int
 }
 
 // SubmitOptimize is the CarPlay-targeted batch entry point.
@@ -561,7 +604,15 @@ func (c *Coordinator) SubmitOptimize(ctx context.Context, path string, outputDir
 		}
 	}
 
-	batchID, err := c.initOptimizeBatchState(ctx, path, picked.cands)
+	// Skip count = projections seen − enqueueable − already-covered.
+	// Captures every `continue` arm of `buildOptimizeCandidates` in
+	// one derivation rather than counting per-arm. Persisted on the
+	// batch row for the Jobs page sub-line ("12 tracks skipped").
+	skipped := picked.projectionsSeen - len(picked.cands) - picked.alreadyCovered
+	if skipped < 0 {
+		skipped = 0 // defensive — should be impossible
+	}
+	batchID, err := c.initOptimizeBatchState(ctx, path, picked.cands, skipped)
 	if err != nil {
 		return nil, err
 	}
@@ -619,6 +670,12 @@ func (c *Coordinator) buildOptimizeCandidates(batchPath string, projections []ma
 		compressionFct = DefaultCompressionFactor(16)
 		resolveErrors  int
 	)
+	// Capture pre-filter total so the caller can derive `skipped =
+	// total − len(cands) − alreadyCovered` and persist it on the
+	// batch row. Single source of truth — keeps the per-arm skip
+	// classification out of the loop body.
+	out.totalProjected = 0
+	out.projectionsSeen = len(projections)
 	for _, t := range projections {
 		if t.HasVariant {
 			out.alreadyCovered++
@@ -667,7 +724,7 @@ func (c *Coordinator) buildOptimizeCandidates(batchPath string, projections []ma
 // initOptimizeBatchState inserts the SQLite batch row and installs the
 // in-memory `liveBatches` entry. Returns the freshly-minted batch ID.
 // Caller transitions status separately.
-func (c *Coordinator) initOptimizeBatchState(ctx context.Context, batchPath string, cands []optimizeCandidate) (uuid.UUID, error) {
+func (c *Coordinator) initOptimizeBatchState(ctx context.Context, batchPath string, cands []optimizeCandidate, skipped int) (uuid.UUID, error) {
 	batchID := uuid.Must(uuid.NewRandom())
 	now := c.clock().UnixNano()
 	row := manifest.UpscaleBatchRow{
@@ -679,6 +736,7 @@ func (c *Coordinator) initOptimizeBatchState(ctx context.Context, batchPath stri
 		TotalFiles:     len(cands),
 		ProcessedFiles: 0,
 		FailedFiles:    0,
+		SkippedFiles:   skipped,
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}

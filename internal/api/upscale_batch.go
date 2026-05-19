@@ -83,6 +83,7 @@ type BatchRow struct {
 	TotalFiles     int    `json:"totalFiles"`
 	ProcessedFiles int    `json:"processedFiles"`
 	FailedFiles    int    `json:"failedFiles"`
+	SkippedFiles   int    `json:"skippedFiles,omitempty"`
 	Error          string `json:"error,omitempty"`
 	CreatedAt      int64  `json:"createdAt"`
 	UpdatedAt      int64  `json:"updatedAt"`
