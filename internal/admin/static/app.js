@@ -1766,7 +1766,7 @@ function initLibraryInspector() {
   // visual state; JS uses this for the selection bar's
   // gate-disabled check.
   const page = document.querySelector(".library-inspector");
-  inspectorState.soxAvailable = !page || page.dataset.soxAvailable !== "false";
+  inspectorState.soxAvailable = page?.dataset.soxAvailable !== "false";
 
   // Sticky-stack height tracker (from PR A): write actual measured
   // offsetHeight of the toolbar + storage bar into CSS custom
@@ -2833,7 +2833,10 @@ async function inspectorFetchProjection(path, kind) {
         }
         genBtn.disabled = true;
         genBtn.hidden = true;
-      } else if (!data.wouldFit) {
+      } else if (data.wouldFit) {
+        genBtn.hidden = false;
+        genBtn.disabled = soxMissing; // SoX gate is the final word
+      } else {
         genBtn.hidden = false;
         genBtn.disabled = true;
         if (warnEl) {
@@ -2841,9 +2844,6 @@ async function inspectorFetchProjection(path, kind) {
           warnEl.textContent =
             `Not enough free space: needs ${humanBytes(data.requiredBytesWithMargin)} (incl. 10% safety margin), only ${humanBytes(data.availableBytes)} available on the bridge data volume.`;
         }
-      } else {
-        genBtn.hidden = false;
-        genBtn.disabled = soxMissing; // SoX gate is the final word
       }
     }
   } catch (err) {
@@ -3070,9 +3070,9 @@ function inspectorUpdateSelectionBar() {
     const cb = document.querySelector(
       `.inspector-tile input[type="checkbox"][data-path="${CSS.escape(path)}"]`);
     if (!cb) continue;
-    const total = parseInt(cb.dataset.trackCount, 10) || 0;
-    const upHave = parseInt(cb.dataset.upscaledCount, 10) || 0;
-    const opHave = parseInt(cb.dataset.optimizedCount, 10) || 0;
+    const total = Number.parseInt(cb.dataset.trackCount, 10) || 0;
+    const upHave = Number.parseInt(cb.dataset.upscaledCount, 10) || 0;
+    const opHave = Number.parseInt(cb.dataset.optimizedCount, 10) || 0;
     upscaleGap += Math.max(0, total - upHave);
     optimizeGap += Math.max(0, total - opHave);
   }

@@ -1751,12 +1751,19 @@ code.storage-path {
  *                     rather than at :root because it's scoped to
  *                     the inspector page.
  */
-.library-inspector {
+/* Use a more-specific selector (`section.library-inspector`) so this
+ * declaration doesn't collide with the bare `.library-inspector`
+ * rule earlier in this file (line 1039 — search-bar / layout
+ * scoping). The token definitions stay scoped to the inspector
+ * page; the heightened specificity makes them survive any future
+ * cascade ordering tweaks on the earlier block. Per SonarCloud
+ * css:S4666 on PR #276 (duplicate-selector lint). */
+section.library-inspector {
   --kind-upscale: var(--accent);
   --kind-optimize: #06b6d4; /* cyan-500 */
 }
 @media (prefers-color-scheme: dark) {
-  .library-inspector {
+  section.library-inspector {
     --kind-optimize: #22d3ee; /* cyan-400 — readable on slate-900 */
   }
 }
