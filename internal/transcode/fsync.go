@@ -24,10 +24,13 @@ import (
 // Production wiring goes through `pool.NewPool` defaulting
 // `p.fsyncFn = fsyncFileAndParent`.
 func fsyncFileAndParent(path string) error {
-	// File fsync — cross-platform. RDONLY because Sync only needs to
-	// flush pending writes the kernel has buffered; we don't write
-	// anything new through this handle.
-	f, err := os.OpenFile(path, os.O_RDONLY, 0)
+	// O_RDWR (not O_RDONLY) because Go's File.Sync() maps to
+	// FlushFileBuffers on Windows, and that WinAPI requires the handle
+	// be opened with GENERIC_WRITE — O_RDONLY surfaces as
+	// ERROR_ACCESS_DENIED at sync time. POSIX fsync(2) accepts any
+	// open fd, so this is the cross-platform answer.
+	// https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
 		return fmt.Errorf("open for fsync: %w", err)
 	}
