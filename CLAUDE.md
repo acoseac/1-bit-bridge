@@ -144,6 +144,7 @@ All scoped to the exe path, NOT port-wide. Old rules at the legacy exe paths (`C
 | `rotate-cert-windows.ps1` | `bridge cert rotate` then restart (use after any `customEndpoints` edit to refresh SANs; **invalidates every paired iOS device's pinned fingerprint** — every device must re-pair) |
 | `firewall-bridge-windows.ps1` | install the 3 inbound rules above (idempotent — removes pre-existing rules with the same DisplayName first) |
 | `task-bridge-windows.ps1` | register the scheduled task + start it now; survives SSH disconnect / logout / reboot |
+| `restart-bridge-windows.ps1` | restart the running bridge via the scheduled task (`Stop-ScheduledTask` + kill orphan + `Start-ScheduledTask`). Cheapest path for "I edited the YAML, kick the process". |
 | `start-bridge-windows.ps1` | legacy foreground-start script — **don't use over SSH**, dies on session close. Kept for in-person interactive debugging only. Prefer the scheduled task. |
 
 **Canonical update procedure** (from operator's macOS workstation):
@@ -167,6 +168,20 @@ ssh arsenie@192.168.0.158 'pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass \
 
 # 4. Verify from LAN.
 curl -sS -k --max-time 10 https://192.168.0.158:7788/v1/health | jq .serverVersion
+```
+
+**Just restart (no rebuild)** — after a YAML edit or to recover from a wedged process:
+
+```sh
+ssh arsenie@192.168.0.158 'pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass \
+    -File C:\Users\arsenie\Desktop\restart-bridge-windows.ps1'
+```
+
+Or inline without the script:
+
+```sh
+ssh arsenie@192.168.0.158 \
+    'pwsh -Command "Stop-ScheduledTask -TaskName ''1-bit-bridge (home-pc)''; Start-Sleep 1; Start-ScheduledTask -TaskName ''1-bit-bridge (home-pc)''"'
 ```
 
 **Don't reintroduce `Start-Process -RedirectStandardOutput` for the bridge serve** on Windows over SSH — `RedirectStandardOutput` flips `UseShellExecute=false` which makes the bridge a true subprocess of the SSH-launched pwsh, and the bridge dies when SSH disconnects. Use the scheduled task (`task-bridge-windows.ps1`); it spawns detached at the OS level. The bridge silently dying after a fresh install over SSH was the symptom — listener log lines wrote fine, then nothing, then `Get-Process bridge` returned empty (Burned 2026-05-19 during the post-PR-#276 deployment).
