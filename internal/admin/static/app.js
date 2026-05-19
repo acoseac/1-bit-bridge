@@ -2958,7 +2958,7 @@ function inspectorSelectionToast(msg) {
     toast.className = "selection-toast hint";
     bar.appendChild(toast);
   }
-  if (msg && msg.indexOf("<") >= 0) {
+  if (msg && msg.includes("<")) {
     toast.innerHTML = msg;
   } else {
     toast.textContent = msg || "";
@@ -2984,7 +2984,7 @@ async function inspectorSubmitBatchForKind(kind, paths) {
   // path would cost a separate projection GET and the aggregated
   // sub-toast is less useful than the per-batch Jobs row.
   // Per the inspector skip-reason feedback to-do (PR feat/inspector-skip-feedback).
-  if (single && paths.length === 1) {
+  if (single) {
     try {
       const probeURL = `/api/library/browse-projection?path=${encodeURIComponent(paths[0])}&kind=${kind}`;
       const probe = await fetch(probeURL);
@@ -3004,8 +3004,10 @@ async function inspectorSubmitBatchForKind(kind, paths) {
       // Non-200 / non-JSON falls through to the regular POST path —
       // we don't block submits on a flaky projection probe.
     } catch (e) {
-      // Same: don't block on probe failure. The POST will run, and
-      // its result message will be the operator's feedback.
+      // Don't block on probe failure — the POST will run, and its
+      // result message will be the operator's feedback. Breadcrumb
+      // for diagnosis (SonarCloud + CodeRabbit minor on PR #278).
+      console.warn("preflight probe failed, falling through to submit:", e);
     }
   }
   // Capture the path the operator is currently viewing so the
