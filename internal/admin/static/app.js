@@ -2920,19 +2920,49 @@ function inspectorPreflightNoOpReason(data, kind) {
   if (!data || data.projectedFiles > 0) return null;
   const lbl = kind === "upscale" ? "upscaled" : "optimized";
   const covered = data.alreadyCoveredFiles || 0;
+  // Aggregate every "skipped at projection time" bucket the
+  // bridge reports — unknown source format, DSD, lossy. Pre-fix
+  // only `unknownFormatFiles` was consulted, so an all-DSD or
+  // all-lossy folder produced the wrong "no tracks here" toast.
+  // Per CodeRabbit minor on PR #278.
   const unknown = data.unknownFormatFiles || 0;
-  if (covered > 0 && unknown === 0) {
+  const dsd = data.dsdFiles || 0;
+  const lossy = data.lossyFiles || 0;
+  const ineligible = unknown + dsd + lossy;
+  if (covered > 0 && ineligible === 0) {
     return `All eligible tracks already have a ${lbl} variant.`;
   }
-  if (covered === 0 && unknown > 0) {
+  if (covered === 0 && ineligible > 0) {
     return kind === "optimize"
       ? "No tracks here are eligible for CarPlay-optimize (already at target, lossy, DSD, or unknown source format)."
       : "No tracks here support upscaling (DSD or unknown source format).";
   }
-  if (covered > 0 && unknown > 0) {
-    return `${covered} tracks already ${lbl}, ${unknown} not eligible — nothing left to generate.`;
+  if (covered > 0 && ineligible > 0) {
+    return `${covered} tracks already ${lbl}, ${ineligible} not eligible — nothing left to generate.`;
   }
   return "No tracks here.";
+}
+
+// inspectorSelectionToast — chokepoint for the floating selection-bar
+// toast. Lazy-creates the span on first use; idempotent on update.
+// Used by both the multi-path submit aggregator and the no-op
+// preflight branch — the latter needs a visible surface for the
+// tile-menu case where the drawer is closed (CodeRabbit major on
+// PR #278: drawer status text is invisible on tile-menu submits).
+function inspectorSelectionToast(msg) {
+  const bar = document.getElementById("inspector-selection-bar");
+  if (!bar) return;
+  let toast = bar.querySelector(".selection-toast");
+  if (!toast) {
+    toast = document.createElement("span");
+    toast.className = "selection-toast hint";
+    bar.appendChild(toast);
+  }
+  if (msg && msg.indexOf("<") >= 0) {
+    toast.innerHTML = msg;
+  } else {
+    toast.textContent = msg || "";
+  }
 }
 
 async function inspectorSubmitBatchForKind(kind, paths) {
@@ -2962,7 +2992,12 @@ async function inspectorSubmitBatchForKind(kind, paths) {
         const data = await probe.json();
         const reason = inspectorPreflightNoOpReason(data, kind);
         if (reason) {
-          if (status) status.textContent = `Nothing to do — ${reason}`;
+          const msg = `Nothing to do — ${reason}`;
+          if (status) status.textContent = msg;
+          // Selection-bar toast for the tile-menu path (drawer
+          // closed, drawer-status invisible). CodeRabbit major
+          // on PR #278.
+          inspectorSelectionToast(msg);
           return { ok: 0, failed: 0, enqueued: 0, skippedDueToPreflight: true };
         }
       }
@@ -3030,24 +3065,15 @@ async function inspectorSubmitBatchForKind(kind, paths) {
     // Multi-path: render a single toast-style message on the
     // selection bar. Fold into a small floating notice so the
     // operator sees the aggregated counts.
-    const bar = document.getElementById("inspector-selection-bar");
-    if (bar) {
-      let toast = bar.querySelector(".selection-toast");
-      if (!toast) {
-        toast = document.createElement("span");
-        toast.className = "selection-toast hint";
-        bar.appendChild(toast);
-      }
-      if (failed.length > 0 && ok.length === 0) {
-        toast.textContent = `Couldn't submit any: ${failed[0].error}`;
-      } else if (failed.length > 0) {
-        toast.textContent =
-          `${enqueued} tracks queued across ${ok.length} folders · ${failed.length} folders failed`;
-      } else {
-        toast.innerHTML =
-          `Batch enrolled · <strong>${enqueued}</strong> tracks queued across ${ok.length} folders. ` +
-          `<a href="/jobs">View jobs →</a>`;
-      }
+    if (failed.length > 0 && ok.length === 0) {
+      inspectorSelectionToast(`Couldn't submit any: ${failed[0].error}`);
+    } else if (failed.length > 0) {
+      inspectorSelectionToast(
+        `${enqueued} tracks queued across ${ok.length} folders · ${failed.length} folders failed`);
+    } else {
+      inspectorSelectionToast(
+        `Batch enrolled · <strong>${enqueued}</strong> tracks queued across ${ok.length} folders. ` +
+        `<a href="/jobs">View jobs →</a>`);
     }
   }
 

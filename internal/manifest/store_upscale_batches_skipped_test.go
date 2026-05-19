@@ -8,6 +8,22 @@ import (
 	"github.com/google/uuid"
 )
 
+// findUpscaleBatchByID is a test helper that locates a freshly-inserted
+// batch in ListUpscaleBatches output. Splitting it out keeps the
+// driving test bodies below the per-method cognitive-complexity
+// threshold SonarCloud enforces on this repo (caught by CodeRabbit
+// major on PR #278's first push).
+func findUpscaleBatchByID(t *testing.T, rows []UpscaleBatchRow, id uuid.UUID) UpscaleBatchRow {
+	t.Helper()
+	for _, r := range rows {
+		if r.ID == id {
+			return r
+		}
+	}
+	t.Fatalf("row %s not in ListUpscaleBatches output", id)
+	return UpscaleBatchRow{}
+}
+
 // TestInsertUpscaleBatch_SkippedFilesRoundTrip pins the v9 migration's
 // `skipped_files` column round-trips correctly through InsertUpscaleBatch
 // + ListUpscaleBatches. Distinct from the legacy round-trip test which
@@ -47,16 +63,7 @@ func TestInsertUpscaleBatch_SkippedFilesRoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ListUpscaleBatches: %v", err)
 			}
-			var got UpscaleBatchRow
-			for _, r := range out {
-				if r.ID == id {
-					got = r
-					break
-				}
-			}
-			if got.ID == (uuid.UUID{}) {
-				t.Fatalf("row not in ListUpscaleBatches output")
-			}
+			got := findUpscaleBatchByID(t, out, id)
 			if got.SkippedFiles != tc.skipped {
 				t.Errorf("SkippedFiles round-trip: got %d, want %d", got.SkippedFiles, tc.skipped)
 			}
@@ -92,13 +99,8 @@ func TestInsertUpscaleBatch_SkippedFilesDefaultsToZero(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListUpscaleBatches: %v", err)
 	}
-	for _, r := range out {
-		if r.ID == id {
-			if r.SkippedFiles != 0 {
-				t.Errorf("SkippedFiles default: got %d, want 0", r.SkippedFiles)
-			}
-			return
-		}
+	got := findUpscaleBatchByID(t, out, id)
+	if got.SkippedFiles != 0 {
+		t.Errorf("SkippedFiles default: got %d, want 0", got.SkippedFiles)
 	}
-	t.Fatalf("row not in ListUpscaleBatches output")
 }

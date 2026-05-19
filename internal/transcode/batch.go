@@ -378,6 +378,30 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 	c.liveBatches[batchID] = state
 	c.mu.Unlock()
 
+	// Empty-batch short-circuit: no candidates → no worker callback
+	// will ever fire to transition the row out of `pending`. Mark
+	// the batch completed synchronously so the admin row doesn't
+	// sit `running` indefinitely. Mirrors SubmitOptimize's branch
+	// (CodeRabbit major on PR #270 + PR #278 outside-diff).
+	if len(cands) == 0 {
+		if err := c.transitionStatus(batchID, "completed", "", c.clock()); err != nil {
+			c.logger.Warn("submit: transition empty batch to completed",
+				"batchID", batchID.String(), "err", err)
+		}
+		c.publishProgress(batchID)
+		return &SubmitResult{
+			BatchID:            batchID,
+			Path:               path,
+			TargetRate:         targetRate,
+			TargetBits:         targetBits,
+			TotalFiles:         0,
+			AlreadyCovered:     alreadyCovered,
+			ProjectedSizeBytes: totalProjected,
+			AvailableBytes:     available,
+			EnqueuedCount:      0,
+		}, nil
+	}
+
 	// Enqueue. Pool's bounded channel makes Enqueue non-blocking
 	// per-call; we transition the batch to `running` before the
 	// first job lands so a slow ListTrackProjections couldn't have

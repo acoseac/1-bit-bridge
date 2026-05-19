@@ -586,9 +586,21 @@ var migrations = []migration{
 		// pre-migration rows get 0, which is harmless — the UI only
 		// renders the sub-line when `SkippedFiles > 0`, so legacy
 		// rows look identical to the pre-feature shape.
-		sql: `
-		ALTER TABLE upscale_batches ADD COLUMN skipped_files INTEGER NOT NULL DEFAULT 0;
-		`,
+		//
+		// **Idempotency: ALTER lives in post(), not in `sql`.** Same
+		// rationale as the v5 docblock: if a partial-apply scenario
+		// commits the column but crashes before `user_version` is
+		// bumped, the next boot retries — and `ALTER TABLE ADD COLUMN`
+		// errors "duplicate column name" on a column that already
+		// exists. Doing it in post() with error-tolerant
+		// `_, _ = db.Exec(...)` makes the step re-runnable.
+		sql: `-- column added in post() for idempotency; see migration v9 docblock`,
+		post: func(db *sql.DB) error {
+			// Idempotent ALTER — "duplicate column" is the expected
+			// no-op when the prior run committed the column already.
+			_, _ = db.Exec(`ALTER TABLE upscale_batches ADD COLUMN skipped_files INTEGER NOT NULL DEFAULT 0`)
+			return nil
+		},
 	},
 }
 
