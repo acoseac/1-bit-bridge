@@ -335,6 +335,14 @@ type AdminVariantDeleteRequest struct {
 	All    bool
 	Prefix string
 	Path   string
+	// Kind narrows the deletion to one variant kind ("upscale" /
+	// "optimize"); empty preserves pre-feature behaviour (deletes
+	// BOTH kinds matching the path scope). Wire-shape mirror of
+	// `api.VariantDeleteRequest.Kind`; the adapter in
+	// cmd/bridge/main.go translates the field across the
+	// admin↔api boundary. The Library Inspector's per-kind drawer
+	// Delete buttons set this to scope the destructive action.
+	Kind string
 }
 
 // AdminVariantDeleteResponse is the wire shape returned on

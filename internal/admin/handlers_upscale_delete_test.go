@@ -130,6 +130,72 @@ func TestParseVariantDeleteRequest_emptyPrefixRejected(t *testing.T) {
 	}
 }
 
+// --- Kind-narrowing parser tests (PR #276 senior-review fix) ---
+
+func TestParseVariantDeleteRequest_emptyKindPreservesLegacyBehaviour(t *testing.T) {
+	req, code, _ := parseVariantDeleteRequest(map[string][]string{
+		"prefix": {"Diana Krall"},
+	})
+	if code != "" {
+		t.Fatalf("legacy shape: got code=%q, want empty (success)", code)
+	}
+	if req.Kind != "" {
+		t.Errorf("legacy shape: got kind=%q, want empty", req.Kind)
+	}
+	if req.Prefix != "Diana Krall" {
+		t.Errorf("prefix not preserved: got %q", req.Prefix)
+	}
+}
+
+func TestParseVariantDeleteRequest_kindUpscaleAccepted(t *testing.T) {
+	req, code, _ := parseVariantDeleteRequest(map[string][]string{
+		"prefix": {"Diana Krall"},
+		"kind":   {"upscale"},
+	})
+	if code != "" {
+		t.Fatalf("kind=upscale: got code=%q, want empty", code)
+	}
+	if req.Kind != "upscale" {
+		t.Errorf("kind: got %q, want upscale", req.Kind)
+	}
+}
+
+func TestParseVariantDeleteRequest_kindOptimizeAccepted(t *testing.T) {
+	req, code, _ := parseVariantDeleteRequest(map[string][]string{
+		"prefix": {"Diana Krall"},
+		"kind":   {"optimize"},
+	})
+	if code != "" {
+		t.Fatalf("kind=optimize: got code=%q, want empty", code)
+	}
+	if req.Kind != "optimize" {
+		t.Errorf("kind: got %q, want optimize", req.Kind)
+	}
+}
+
+func TestParseVariantDeleteRequest_kindCaseFoldedToLower(t *testing.T) {
+	req, code, _ := parseVariantDeleteRequest(map[string][]string{
+		"prefix": {"Diana Krall"},
+		"kind":   {"OPTIMIZE"},
+	})
+	if code != "" {
+		t.Fatalf("kind=OPTIMIZE: got code=%q, want empty", code)
+	}
+	if req.Kind != "optimize" {
+		t.Errorf("kind: got %q, want optimize (case folded)", req.Kind)
+	}
+}
+
+func TestParseVariantDeleteRequest_kindUnknownRejected(t *testing.T) {
+	_, code, _ := parseVariantDeleteRequest(map[string][]string{
+		"prefix": {"Diana Krall"},
+		"kind":   {"junk"},
+	})
+	if code != "bad_request" {
+		t.Errorf("kind=junk: got code=%q, want bad_request", code)
+	}
+}
+
 // --- Handler integration tests via the admin Server's Handler() ---
 
 func TestUpscaleVariantsDelete_returns503WhenUnwired(t *testing.T) {

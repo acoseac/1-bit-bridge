@@ -119,6 +119,17 @@ type VariantDeleteRequest struct {
 	// Path non-empty → delete variants for one exact source path.
 	// Must be a cleaned relative path.
 	Path string
+	// Kind narrows the deletion to one variant kind: "" (default,
+	// back-compat — deletes ALL kinds matching the path scope),
+	// "upscale" (only `upscaled-*` variants), or "optimize" (only
+	// `optimized-*` variants). The PR feat/library-inspector-tiles
+	// added the kind-aware admin DELETE so per-kind buttons in the
+	// inspector drawer can clear one kind without wiping the other.
+	// Validated at the parsing layer; invalid values rejected with
+	// `bad_request` before reaching here. Empty preserves the
+	// pre-feature behaviour so a stray external `DELETE
+	// /v1/upscale/variants?prefix=…` keeps working as it did.
+	Kind string
 }
 
 // VariantDeleteResponse is the wire shape returned on success.
@@ -195,6 +206,18 @@ func parseVariantDeleteQuery(q map[string][]string) (req VariantDeleteRequest, e
 	prefix := strings.TrimSpace(get("prefix"))
 	pathParam := strings.TrimSpace(get("path"))
 	confirm := strings.EqualFold(get("confirm"), "true")
+	// Kind narrows the delete to one variant kind. Empty preserves
+	// the pre-feature behaviour (deletes BOTH kinds matching the
+	// path scope). Validated here so the downstream
+	// RunVariantDelete sees a known-clean value.
+	kind := strings.ToLower(strings.TrimSpace(get("kind")))
+	switch kind {
+	case "", "upscale", "optimize":
+		req.Kind = kind
+	default:
+		return req, "bad_request",
+			`unknown kind: ` + kind + ` (expected "upscale" or "optimize")`
+	}
 
 	// Mutually-exclusive shape — `prefix` AND `path` together is
 	// ambiguous (do we widen or narrow?); reject upfront rather
@@ -309,6 +332,32 @@ func (s *Server) RunVariantDelete(ctx context.Context, req VariantDeleteRequest)
 	}
 	if err != nil {
 		return VariantDeleteResponse{}, err
+	}
+
+	// Kind narrowing: filter the listed rows by variant_id prefix
+	// before any unlink / DB-delete fires. Done here rather than
+	// at the Store layer because all three list shapes
+	// (ListVariantsForPath / ListVariantsByPathPrefix / AllVariants)
+	// return the full row set; filtering in-memory keeps the Store
+	// interface unchanged. Version-agnostic prefix (matches v1
+	// AND v2 sidecars) by design — see manifest.VariantKindPrefix*
+	// docblock for the rationale. Empty Kind preserves pre-feature
+	// behaviour (no filter, delete BOTH kinds).
+	if req.Kind != "" {
+		var wantPrefix string
+		switch req.Kind {
+		case "upscale":
+			wantPrefix = "upscaled-"
+		case "optimize":
+			wantPrefix = "optimized-"
+		}
+		filtered := rows[:0]
+		for _, row := range rows {
+			if strings.HasPrefix(row.VariantID, wantPrefix) {
+				filtered = append(filtered, row)
+			}
+		}
+		rows = filtered
 	}
 
 	resp := VariantDeleteResponse{DeletedPaths: []string{}}

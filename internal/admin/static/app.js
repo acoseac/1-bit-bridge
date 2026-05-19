@@ -1623,13 +1623,16 @@ const inspectorState = {
   path: "", // current navigation path; "" = library root
   selection: null, // {kind: "folder"|"track", row}
   lastBrowseData: null, // last successful browse response (used by toolbar action + search filter)
-  // Multi-select state (PR feat/library-inspector-tiles). Set of
-  // folder paths whose tiles are currently checked. The selection
-  // bar floats when size > 0 and aggregates per-kind gap counts
-  // CLIENT-SIDE from the data-* attrs on the selected tile
-  // checkboxes — zero network calls on selection. See
-  // inspectorUpdateSelectionBar.
-  selectedPaths: new Set(),
+  // Multi-select state (PR feat/library-inspector-tiles). Map of
+  // folder path → {trackCount, upscaledCount, optimizedCount}
+  // snapshot, captured from the checkbox's data-* attrs at
+  // toggle time. Using a Map (vs the original Set) means the
+  // selection-bar aggregator iterates O(M) over the map's values
+  // — no document.querySelector calls per checkbox tick (Gemini
+  // medium on PR #276: the prior implementation was O(M×N) where
+  // M=selected and N=total tiles in the DOM). Selection bar
+  // floats when map.size > 0. Cleared on every browse re-render.
+  selectedPaths: new Map(),
   // SoX availability snapshot — seeded once at init() time from
   // the page root's data-sox-available attribute. Used by the
   // selection bar + per-tile menu to gate generate actions.
@@ -2882,8 +2885,19 @@ async function inspectorSubmitBatchForKind(kind, paths) {
     ? document.querySelector(`.drawer-submit-status[data-kind="${kind}"]`)
     : null;
   if (status) status.textContent = "Submitting…";
+  // Capture the path the operator is currently viewing so the
+  // post-success refresh (below) doesn't race a mid-flight
+  // navigation to a different folder — Gemini medium on PR #276.
+  const originPath = inspectorState.path;
 
-  const results = await Promise.all(paths.map(async (path) => {
+  // Sequential submit (not Promise.all). Multi-select against
+  // many folders can otherwise burst N concurrent connections at
+  // the bridge — over browser per-host limits AND the SQLite
+  // single-writer envelope. The serial loop keeps the admin
+  // server responsive under a 20+ folder Optimize push. Per
+  // Gemini medium on PR #276.
+  const results = [];
+  for (const path of paths) {
     try {
       const res = await fetch("/api/upscale/batch", {
         method: "POST",
@@ -2892,18 +2906,23 @@ async function inspectorSubmitBatchForKind(kind, paths) {
       });
       if (res.status === 507) {
         const data = await res.json();
-        return { path, error: `needs ${humanBytes(data.requiredBytes)}, only ${humanBytes(data.availableBytes)} available` };
+        results.push({ path, error: `needs ${humanBytes(data.requiredBytes)}, only ${humanBytes(data.availableBytes)} available` });
+        continue;
       }
       if (res.status === 503) {
-        return { path, error: `${kind} feature disabled on this bridge` };
+        results.push({ path, error: `${kind} feature disabled on this bridge` });
+        continue;
       }
-      if (!res.ok) return { path, error: `HTTP ${res.status}` };
+      if (!res.ok) {
+        results.push({ path, error: `HTTP ${res.status}` });
+        continue;
+      }
       const data = await res.json();
-      return { path, ok: true, data };
+      results.push({ path, ok: true, data });
     } catch (err) {
-      return { path, error: err.message };
+      results.push({ path, error: err.message });
     }
-  }));
+  }
 
   const ok = results.filter(r => r.ok);
   const failed = results.filter(r => r.error);
@@ -2944,13 +2963,16 @@ async function inspectorSubmitBatchForKind(kind, paths) {
     }
   }
 
-  // Refresh the page after a batched submit so coverage bars
-  // update against the new variants. Only fires on success to
-  // preserve the operator's view on a failure they'll want to
-  // diagnose.
-  if (ok.length > 0 && paths.includes(inspectorState.path)) {
-    // Same-path submit — page rendered already shows this folder.
-    await inspectorNavigate(inspectorState.path);
+  // Refresh the page after a successful submit so coverage bars
+  // update on the tiles the operator is looking at. Per Gemini
+  // medium on PR #276: the previous `paths.includes(inspectorState.path)`
+  // guard was too restrictive — when subfolders are selected from
+  // the parent view, the parent's coverage bars need to refresh
+  // too. The `originPath === inspectorState.path` check ensures
+  // we don't re-navigate if the user moved to a different folder
+  // mid-submit.
+  if (ok.length > 0 && inspectorState.path === originPath) {
+    await inspectorNavigate(originPath);
   }
   return { ok: ok.length, failed: failed.length, enqueued };
 }
@@ -3039,7 +3061,16 @@ function inspectorOnTileCheckboxChange(ev) {
   const tile = cb.closest(".inspector-tile");
   const path = cb.dataset.path;
   if (cb.checked) {
-    inspectorState.selectedPaths.add(path);
+    // Capture the rollup snapshot at toggle time so the selection-
+    // bar aggregator doesn't have to re-find the checkbox in the
+    // DOM on every tick. Numeric coercion with `|| 0` defends
+    // against any data-* attr that wasn't populated by the Go
+    // template (defensive — server side fills all three fields).
+    inspectorState.selectedPaths.set(path, {
+      trackCount: Number.parseInt(cb.dataset.trackCount, 10) || 0,
+      upscaledCount: Number.parseInt(cb.dataset.upscaledCount, 10) || 0,
+      optimizedCount: Number.parseInt(cb.dataset.optimizedCount, 10) || 0,
+    });
     if (tile) tile.dataset.selected = "true";
   } else {
     inspectorState.selectedPaths.delete(path);
@@ -3048,10 +3079,11 @@ function inspectorOnTileCheckboxChange(ev) {
   inspectorUpdateSelectionBar();
 }
 
-// inspectorUpdateSelectionBar reads the data-* attrs from every
-// currently-selected tile checkbox and computes per-kind gap
-// numbers client-side (zero network calls — the rollup is already
-// in the DOM from the original browse). Shows / hides the bar.
+// inspectorUpdateSelectionBar iterates the cached rollup snapshots
+// in `inspectorState.selectedPaths` and computes per-kind gap
+// numbers. O(M) over selected count (M typically <50) with NO DOM
+// queries — Gemini medium on PR #276 caught the prior O(M×N)
+// `document.querySelector` per tick.
 function inspectorUpdateSelectionBar() {
   const bar = document.getElementById("inspector-selection-bar");
   if (!bar) return;
@@ -3063,18 +3095,9 @@ function inspectorUpdateSelectionBar() {
   bar.hidden = false;
   let upscaleGap = 0;
   let optimizeGap = 0;
-  for (const path of sel) {
-    // The tile's checkbox carries the rollup data attrs. Selector
-    // is escaped via CSS.escape so paths with `/` / `.` / quotes
-    // don't break the attribute matcher.
-    const cb = document.querySelector(
-      `.inspector-tile input[type="checkbox"][data-path="${CSS.escape(path)}"]`);
-    if (!cb) continue;
-    const total = Number.parseInt(cb.dataset.trackCount, 10) || 0;
-    const upHave = Number.parseInt(cb.dataset.upscaledCount, 10) || 0;
-    const opHave = Number.parseInt(cb.dataset.optimizedCount, 10) || 0;
-    upscaleGap += Math.max(0, total - upHave);
-    optimizeGap += Math.max(0, total - opHave);
+  for (const snap of sel.values()) {
+    upscaleGap += Math.max(0, snap.trackCount - snap.upscaledCount);
+    optimizeGap += Math.max(0, snap.trackCount - snap.optimizedCount);
   }
   document.getElementById("selection-count").textContent =
     `${sel.size} selected`;
@@ -3095,7 +3118,10 @@ function inspectorUpdateSelectionBar() {
 async function inspectorSelectionSubmit(ev) {
   const btn = ev?.currentTarget;
   const kind = btn?.dataset.kind || "upscale";
-  const paths = Array.from(inspectorState.selectedPaths);
+  // `Array.from(map)` would yield [key, value] tuples; we want the
+  // keys (paths) only. `map.keys()` is iterable; spread captures
+  // them in insertion order.
+  const paths = Array.from(inspectorState.selectedPaths.keys());
   if (paths.length === 0) return;
   btn.disabled = true;
   try {

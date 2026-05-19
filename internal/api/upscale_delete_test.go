@@ -279,6 +279,106 @@ func TestUpscaleDelete_pathHappyPath(t *testing.T) {
 	}
 }
 
+// TestUpscaleDelete_kindNarrowsToUpscale pins the per-kind filter
+// contract added in PR #276 (senior-review high-severity fix from
+// Gemini): a DELETE with ?kind=upscale must delete ONLY variants
+// whose variant_id begins with "upscaled-", leaving "optimized-"
+// variants untouched. Without the filter (the load-bearing
+// gap before the fix) per-kind drawer Delete buttons would have
+// silently wiped both kinds.
+func TestUpscaleDelete_kindNarrowsToUpscale(t *testing.T) {
+	hs, raw, deleter, _ := deleteFixture(t, true)
+	deleter.all = []VariantSummary{
+		{SourcePath: "Music/Album/01.flac", VariantID: "upscaled-v2-192000-24",
+			SidecarPath: "/tmp/u1", SizeBytes: 1000},
+		{SourcePath: "Music/Album/01.flac", VariantID: "optimized-v2-48000-16",
+			SidecarPath: "/tmp/o1", SizeBytes: 200},
+		{SourcePath: "Music/Album/02.flac", VariantID: "optimized-v2-44100-16",
+			SidecarPath: "/tmp/o2", SizeBytes: 250},
+	}
+
+	resp := authDelete(t, hs, "/v1/upscale/variants?confirm=true&kind=upscale", raw)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", resp.StatusCode)
+	}
+	dr := decodeDeleteResponse(t, resp)
+	if dr.DeletedCount != 1 {
+		t.Errorf("deletedCount: got %d, want 1 (only the upscaled-v2 row)", dr.DeletedCount)
+	}
+	got := deleter.deletedKeys()
+	if len(got) != 1 || got[0] != "Music/Album/01.flac|upscaled-v2-192000-24" {
+		t.Errorf("DeleteVariant calls: got %v, want [Music/Album/01.flac|upscaled-v2-192000-24]", got)
+	}
+}
+
+// TestUpscaleDelete_kindNarrowsToOptimize is the optimize-side
+// mirror of the upscale test above. Asserts the optimized-v2
+// rows are deleted and the upscaled-v2 row is NOT.
+func TestUpscaleDelete_kindNarrowsToOptimize(t *testing.T) {
+	hs, raw, deleter, _ := deleteFixture(t, true)
+	deleter.all = []VariantSummary{
+		{SourcePath: "Music/Album/01.flac", VariantID: "upscaled-v2-192000-24",
+			SidecarPath: "/tmp/u1", SizeBytes: 1000},
+		{SourcePath: "Music/Album/01.flac", VariantID: "optimized-v2-48000-16",
+			SidecarPath: "/tmp/o1", SizeBytes: 200},
+		{SourcePath: "Music/Album/02.flac", VariantID: "optimized-v2-44100-16",
+			SidecarPath: "/tmp/o2", SizeBytes: 250},
+	}
+
+	resp := authDelete(t, hs, "/v1/upscale/variants?confirm=true&kind=optimize", raw)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", resp.StatusCode)
+	}
+	dr := decodeDeleteResponse(t, resp)
+	if dr.DeletedCount != 2 {
+		t.Errorf("deletedCount: got %d, want 2 (both optimized- rows)", dr.DeletedCount)
+	}
+	for _, key := range deleter.deletedKeys() {
+		if !strings.Contains(key, "optimized-") {
+			t.Errorf("unexpected deletion of non-optimize variant: %s", key)
+		}
+	}
+}
+
+// TestUpscaleDelete_kindEmptyPreservesLegacyBehaviour asserts that
+// callers that DON'T set kind (e.g. an iOS client predating the
+// per-kind feature, or a stray external curl) keep the pre-feature
+// behaviour: all variants matching the path scope get deleted
+// regardless of kind. Critical for back-compat.
+func TestUpscaleDelete_kindEmptyPreservesLegacyBehaviour(t *testing.T) {
+	hs, raw, deleter, _ := deleteFixture(t, true)
+	deleter.all = []VariantSummary{
+		{SourcePath: "Music/Album/01.flac", VariantID: "upscaled-v2-192000-24",
+			SidecarPath: "/tmp/u1", SizeBytes: 1000},
+		{SourcePath: "Music/Album/01.flac", VariantID: "optimized-v2-48000-16",
+			SidecarPath: "/tmp/o1", SizeBytes: 200},
+	}
+
+	// No kind param.
+	resp := authDelete(t, hs, "/v1/upscale/variants?confirm=true", raw)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", resp.StatusCode)
+	}
+	dr := decodeDeleteResponse(t, resp)
+	if dr.DeletedCount != 2 {
+		t.Errorf("deletedCount: got %d, want 2 (both kinds, legacy behaviour)", dr.DeletedCount)
+	}
+}
+
+// TestUpscaleDelete_kindUnknownReturns400 pins the parser-layer
+// rejection so a typo doesn't silently fall through.
+func TestUpscaleDelete_kindUnknownReturns400(t *testing.T) {
+	hs, raw, _, _ := deleteFixture(t, true)
+	resp := authDelete(t, hs, "/v1/upscale/variants?confirm=true&kind=junk", raw)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("kind=junk: got %d, want 400", resp.StatusCode)
+	}
+}
+
 // TestUpscaleDelete_inflightDropperCalledWithSourcePathOnly pins the
 // dedup-cancel contract: the predicate the handler hands to
 // DropInflight must see source_paths, not composite keys.

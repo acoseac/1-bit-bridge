@@ -664,6 +664,7 @@ func (a *adminVariantDeleterAdapter) Delete(ctx context.Context, req admin.Admin
 		All:    req.All,
 		Prefix: req.Prefix,
 		Path:   req.Path,
+		Kind:   req.Kind,
 	}
 	resp, err := a.apiSrv.RunVariantDelete(ctx, apiReq)
 	if err != nil {
