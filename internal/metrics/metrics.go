@@ -171,6 +171,39 @@ func RecordMBCache(kind string, hit bool) {
 	MBCacheLookups.WithLabelValues(kind, result).Inc()
 }
 
+// MBCacheLookupsTotals returns (hits, misses) across all kinds
+// combined — used by /v1/diagnostics's hit-ratio derivation. Walks
+// the labels via `Write(*dto.Metric)` rather than parsing the
+// exposition format, which would be both slower and structurally
+// dependent on prometheus's text rendering.
+func MBCacheLookupsTotals() (hits, misses uint64) {
+	for _, kind := range []string{"album", "artist", "release_group"} {
+		hits += counterValue(MBCacheLookups.WithLabelValues(kind, "hit"))
+		misses += counterValue(MBCacheLookups.WithLabelValues(kind, "miss"))
+	}
+	return
+}
+
+// counterValue is the shared helper for snapshotting current
+// `prometheus.Counter` values without touching package internals.
+// Returns 0 on any read error (defensive — the Write path is
+// guaranteed to succeed for healthy counters; failure means the
+// metric isn't registered or has been concurrently torn down,
+// both of which we want to surface as "no data" rather than panicking).
+//
+// Uses the generated proto getters (`GetCounter().GetValue()`)
+// rather than direct field access — golangci-lint's `protogetter`
+// rule flags `m.Counter` / `m.Counter.Value` as a CI failure,
+// and the getter form is nil-safe by construction (both
+// `GetCounter` and `GetValue` handle their nil receivers).
+func counterValue(c prometheus.Counter) uint64 {
+	var m dto.Metric
+	if err := c.Write(&m); err != nil || m.GetCounter() == nil {
+		return 0
+	}
+	return uint64(m.GetCounter().GetValue())
+}
+
 // LogEventCountsSnapshot returns the current counter values for the
 // closed set {DEBUG, INFO, WARN, ERROR}. Backs /v1/diagnostics's
 // `logEventCounts` field. Any other label (e.g. a misconfigured slog
@@ -180,14 +213,7 @@ func LogEventCountsSnapshot() map[string]uint64 {
 	whitelist := []string{"DEBUG", "INFO", "WARN", "ERROR"}
 	out := make(map[string]uint64, len(whitelist))
 	for _, level := range whitelist {
-		c := LogEventsCounter.WithLabelValues(level)
-		// `client_golang`'s `Counter` exposes its current value via
-		// `Write(*dto.Metric)`. We read once at snapshot time; the
-		// counter is monotonic so the value is always non-negative.
-		var m dto.Metric
-		if err := c.Write(&m); err == nil && m.Counter != nil && m.Counter.Value != nil {
-			out[level] = uint64(*m.Counter.Value)
-		}
+		out[level] = counterValue(LogEventsCounter.WithLabelValues(level))
 	}
 	return out
 }

@@ -861,11 +861,11 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	//
 	// Alpha-sort stays correct by construction: each conditional
 	// appends in lex order, terminal `variantBumpsIndex` ends every
-	// path. Capacity 6 covers the maximum (deleteVariants +
-	// operatorDrivenUpscale + pairingEventsSupported +
-	// pushEventsSupported + upscaleCompleteEvents +
-	// variantBumpsIndex).
-	feats := make([]string, 0, 7)
+	// path. Capacity 8 covers the current maximum (carPlayOptimize +
+	// deleteVariants + diagnosticsSummary + operatorDrivenUpscale +
+	// pairingEventsSupported + pushEventsSupported +
+	// upscaleCompleteEvents + variantBumpsIndex).
+	feats := make([]string, 0, 8)
 	if s.upscaleEnabled {
 		if s.carPlayOptimizeEnabled {
 			feats = append(feats, "carPlayOptimize")
@@ -873,6 +873,14 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		if s.variantDeleter != nil {
 			feats = append(feats, "deleteVariants")
 		}
+	}
+	// `diagnosticsSummary` advertises `/v1/diagnostics`. Always-on in
+	// this build — the endpoint is unconditionally wired. Lexically
+	// lands between `deleteVariants` and `operatorDrivenUpscale`,
+	// which is why the upscale gate above is split into two blocks
+	// instead of a single contiguous one.
+	feats = append(feats, "diagnosticsSummary")
+	if s.upscaleEnabled {
 		if s.batchCoordinator != nil {
 			feats = append(feats, "operatorDrivenUpscale")
 		}
