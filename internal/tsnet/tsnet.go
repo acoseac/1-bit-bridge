@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/tsnet"
@@ -298,6 +299,69 @@ func (s *Server) CertDomains() []string {
 		return nil
 	}
 	return server.CertDomains()
+}
+
+// MetricsState returns the abstract state value the /metrics +
+// /v1/diagnostics surfaces consume:
+//   - 0: down (Start() not yet called, or Close() torn it down)
+//   - 1: starting (Start() in flight, before Up() returns)
+//   - 2: running (Start() succeeded; node is live on the tailnet)
+//
+// **Disabled** mode (tailscale.mode=disabled in bridge.yaml) never
+// constructs a Server, so the metrics collector's "no provider
+// registered" branch handles that case; this method is only ever
+// called on a real Server instance.
+//
+// Lock-light: reads `started` / `starting` under the same lifecycle
+// mutex Start/Close already use. No control-plane I/O.
+func (s *Server) MetricsState() int {
+	s.lifecycleMu.Lock()
+	started, starting := s.started, s.starting
+	s.lifecycleMu.Unlock()
+	switch {
+	case started:
+		return 2
+	case starting:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// MetricsPeersOnline counts peers reported online by the tailnet's
+// most recent Status() snapshot. A 1-second context cap defends
+// against a hung control-plane stalling a Prometheus scrape.
+//
+// Returns zero before Start completes OR if the Status() call fails
+// — both indistinguishable on the wire but documented in the
+// metric's Help string ("Count of peers reported online via tsnet
+// Status()"; absence is honest).
+func (s *Server) MetricsPeersOnline() int {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	status, err := s.Status(ctx)
+	if err != nil || status == nil {
+		return 0
+	}
+	var online int
+	for _, p := range status.Peer {
+		if p != nil && p.Online {
+			online++
+		}
+	}
+	return online
+}
+
+// MetricsDERPLatencies returns the current per-region DERP latency
+// table from the tailnet, in seconds. v1 returns an empty map —
+// `ipnstate.Status` doesn't surface DERP latencies directly (those
+// live in the `netcheck` subsystem), and wiring an independent
+// netcheck client into the bridge would balloon the dependency
+// surface for marginal observability value. Follow-up: import
+// `tailscale.com/net/netcheck` and run one probe per scrape if real
+// operators ask for it.
+func (s *Server) MetricsDERPLatencies() map[string]float64 {
+	return map[string]float64{}
 }
 
 // AuthURL returns the most recent interactive-auth URL captured from

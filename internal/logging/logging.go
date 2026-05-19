@@ -151,7 +151,51 @@ func (h *dynamicHandler) Enabled(ctx context.Context, level slog.Level) bool {
 	return slog.Default().Handler().Enabled(ctx, level)
 }
 
+// logHook is the decoupled observation seam for higher-level packages
+// (e.g. internal/metrics) that want to count log events by level
+// without forcing internal/logging — the absolute base of the bridge
+// dependency tree — to import them.
+//
+// **Importer direction is one-way**: internal/metrics imports
+// internal/logging and registers a callback via RegisterLogHook at
+// init(). internal/logging never imports internal/metrics; this
+// closes the package-cycle hazard the alternative would create.
+//
+// **Hot-path placement**: the hook is invoked at function entry,
+// BEFORE the cache-hit early return at the top of Handle. Placing
+// the invocation after the early return would mean the steady-state
+// (cache-hit) path never reaches the counter — every increment
+// would happen only on cold-path rebuilds.
+//
+// The hook stays nil until something registers — meaning the
+// logging package compiles + tests in isolation with zero
+// dependency on Prometheus or any sibling observability layer.
+var logHook atomic.Pointer[func(level string)]
+
+// RegisterLogHook installs a callback invoked on every log emission.
+// Typically called from `internal/metrics.init()` to wire the log-
+// level counter. Safe to call multiple times — last-writer-wins;
+// pass nil to disable.
+//
+// `atomic.Pointer[func]` load is ~1 ns on amd64/arm64; the hot-path
+// cost of the call site below is negligible relative to the
+// downstream handler's I/O.
+func RegisterLogHook(f func(level string)) {
+	if f == nil {
+		logHook.Store(nil)
+		return
+	}
+	logHook.Store(&f)
+}
+
 func (h *dynamicHandler) Handle(ctx context.Context, r slog.Record) error {
+	// Fire the metrics hook FIRST so steady-state cache hits still
+	// produce counter increments — placing this below the early
+	// return would zero out the hot path's contribution to the
+	// counter, defeating the entire reason the hook exists.
+	if hookPtr := logHook.Load(); hookPtr != nil {
+		(*hookPtr)(r.Level.String())
+	}
 	logger := slog.Default()
 	if c := h.cache.Load(); c != nil && c.base == logger {
 		return c.resolved.Handle(ctx, r)

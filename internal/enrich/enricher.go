@@ -20,6 +20,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/lrucache"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
+	"github.com/acoseac/1-bit-bridge/internal/metrics"
 )
 
 var logger = logging.Component("enricher")
@@ -235,9 +236,11 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 		// share one MB call.
 		key := cacheKey(t.Artist, t.Album)
 		if res, ok := e.albumCache.Get(key); ok {
+			metrics.RecordMBCache("album", true)
 			albumMBID = res.ReleaseMBID
 			rgMBID = res.ReleaseGroupMBID
 		} else {
+			metrics.RecordMBCache("album", false)
 			// Honor ctx during the pacer so SIGTERM doesn't sit
 			// blocked for up to MBMinInterval per in-flight track.
 			// `enrichOne` is void; bare return on shutdown matches the
@@ -365,8 +368,10 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) {
 	key := "artist\x00" + t.Artist
 	var artistMBID string
 	if cached, ok := e.artistCache.Get(key); ok {
+		metrics.RecordMBCache("artist", true)
 		artistMBID = cached
 	} else {
+		metrics.RecordMBCache("artist", false)
 		if !sleepCtx(ctx, e.MBMinInterval) {
 			return
 		}
@@ -698,8 +703,10 @@ func (e *Enricher) resolveReleaseGroupMBID(ctx context.Context, releaseMBID, hin
 		return hint, nil
 	}
 	if cached, ok := e.releaseGroupCache.Get(releaseMBID); ok {
+		metrics.RecordMBCache("release_group", true)
 		return cached, nil
 	}
+	metrics.RecordMBCache("release_group", false)
 	if !sleepCtx(ctx, e.MBMinInterval) { // pace
 		return "", ctx.Err()
 	}

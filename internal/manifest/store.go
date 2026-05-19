@@ -16,9 +16,21 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/dsn"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
+	"github.com/acoseac/1-bit-bridge/internal/metrics"
 	"github.com/google/uuid"
 	_ "modernc.org/sqlite" // register "sqlite" driver (pure-Go, no cgo)
 )
+
+// observeLockWait records SQLite transaction lock-wait timing into
+// both the Prometheus histogram (for /metrics scrapers) AND the
+// sliding-window backbone (for /v1/diagnostics's p50/p99 read).
+// Centralized helper so the dual-publish contract can't drift between
+// the BeginTx and ExecContext call sites.
+func observeLockWait(op string, start time.Time) {
+	dur := time.Since(start).Seconds()
+	metrics.SQLiteLockWaitHist.WithLabelValues(op).Observe(dur)
+	metrics.SQLiteLockWaitWindow.Observe(dur)
+}
 
 var logger = logging.Component("manifest")
 
@@ -815,10 +827,12 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	beginAt := time.Now()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
+	observeLockWait("upsert_batch", beginAt)
 	defer tx.Rollback()
 	// indexed_at uses the strict-advance CASE WHEN form from UpsertTrack
 	// (and UpsertVariant / MarkEnriched). Batch semantics: `now` is computed
