@@ -164,6 +164,25 @@ type Deps struct {
 	// is enabled, both nil when disabled).
 	AvailableDiskSpace func(dir string) (int64, error)
 
+	// OptimizeEligible is the per-track gate for kind="optimize"
+	// projections / batches. Wired to `transcode.OptimizeEligible`
+	// in cmd/bridge/main.go. Tracks failing the gate (DSD, lossy
+	// codecs, or already-at-CarPlay-floor like 16/44.1) fold into
+	// the projection's `unknownFormatFiles` counter so the UI's
+	// "X tracks skipped" copy reconciles with the JSON payload.
+	// Nil-safe: when absent the projection endpoint serves only
+	// the upscale kind and surfaces a 503 for kind=optimize.
+	OptimizeEligible func(sourcePath, codec string, sourceRate, sourceBits int) bool
+
+	// TargetRateForOptimize returns the family-preserving target
+	// rate (44100 or 48000) for a given source rate. Wired to
+	// `transcode.TargetRateForOptimize` in cmd/bridge/main.go.
+	// Called per-track inside the optimize projection loop so
+	// mixed-family folders (44.1k + 96k FLAC sharing one album)
+	// produce honest per-track size estimates.
+	// Nil-safe alongside OptimizeEligible.
+	TargetRateForOptimize func(sourceRate int) int
+
 	// BatchCoordinator is the v1.3 admin Library Inspector's gateway
 	// to the transcode.Coordinator. Wired to a closure-based adapter
 	// in cmd/bridge/main.go (same decoupling pattern as
@@ -209,8 +228,19 @@ type Deps struct {
 // cancellation propagates through to the coordinator and any
 // downstream listings the coordinator does internally
 // (manifest projection walk). Per Gemini high on PR #202.
+//
+// `SubmitOptimize` is the kind="optimize" sibling — it enrolls a
+// path into a CarPlay-optimized batch (16-bit, family-preserving
+// 44.1k/48k FLAC). The target params are auto-derived per-track
+// (see transcode.TargetRateForOptimize) so there's no rate/bits
+// argument; the result struct's `TargetRate`/`TargetBits` reflect
+// the most common per-track resolution (mixed-family scopes use
+// 0 to signal "varies"). Added in the Library Inspector tile-redesign
+// PR alongside the per-tile "Generate CarPlay-optimized variants"
+// affordance.
 type AdminBatchCoordinator interface {
 	Submit(ctx context.Context, libraryRelPath string, targetRate, targetBits int) (AdminBatchSubmitResult, error)
+	SubmitOptimize(ctx context.Context, libraryRelPath string) (AdminBatchSubmitResult, error)
 	Cancel(idHex string) error
 	ListBatches(limit int) ([]AdminBatchRow, error)
 	Throughput() AdminBatchThroughput
@@ -305,6 +335,14 @@ type AdminVariantDeleteRequest struct {
 	All    bool
 	Prefix string
 	Path   string
+	// Kind narrows the deletion to one variant kind ("upscale" /
+	// "optimize"); empty preserves pre-feature behaviour (deletes
+	// BOTH kinds matching the path scope). Wire-shape mirror of
+	// `api.VariantDeleteRequest.Kind`; the adapter in
+	// cmd/bridge/main.go translates the field across the
+	// admin↔api boundary. The Library Inspector's per-kind drawer
+	// Delete buttons set this to scope the destructive action.
+	Kind string
 }
 
 // AdminVariantDeleteResponse is the wire shape returned on

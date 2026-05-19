@@ -293,7 +293,7 @@ func TestListTrackProjectionsUnderPrefix_FiltersDescendants(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 	seedBrowseFixture(t, s)
 
-	projs, err := s.ListTrackProjectionsUnderPrefix(context.Background(), "MusicA")
+	projs, err := s.ListTrackProjectionsUnderPrefix(context.Background(), "MusicA", VariantKindPrefixUpscaled)
 	if err != nil {
 		t.Fatalf("ListTrackProjectionsUnderPrefix: %v", err)
 	}

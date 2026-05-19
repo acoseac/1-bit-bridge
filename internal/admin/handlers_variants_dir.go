@@ -25,19 +25,33 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
 )
 
 // variantsDirResponse is the shape returned by both GET and POST.
 // Including the snapshot in the POST response lets the UI refresh
 // without a follow-up GET round-trip.
+//
+// `UsedByKind` splits the total `UsedBytes` figure by variant kind
+// ("upscale" / "optimize") so the inspector's storage bar can render
+// `Used 12 GB (upscale 8 GB · optimize 4 GB)`. Keys are pre-seeded
+// to 0 so consumers can read both unconditionally. A defensive
+// "unknown" bucket appears only if `track_variants` ever holds a
+// row whose variant_id doesn't match either prefix (should be empty
+// in practice; the bridge logs at notice level when it sees one).
+//
+// Legacy `Current` / `Default` / `UsedBytes` / `FreeBytes` field
+// names preserved (existing JS consumers parse them) — `UsedByKind`
+// is strictly additive.
 type variantsDirResponse struct {
-	Current     string `json:"current"`
-	Default     string `json:"default"`
-	UsedBytes   int64  `json:"usedBytes"`
-	FreeBytes   int64  `json:"freeBytes"`
-	LegacyCount int    `json:"legacyCount"`
-	LegacyBytes int64  `json:"legacyBytes"`
+	Current     string           `json:"current"`
+	Default     string           `json:"default"`
+	UsedBytes   int64            `json:"usedBytes"`
+	UsedByKind  map[string]int64 `json:"usedByKind"`
+	FreeBytes   int64            `json:"freeBytes"`
+	LegacyCount int              `json:"legacyCount"`
+	LegacyBytes int64            `json:"legacyBytes"`
 }
 
 type variantsDirPatchRequest struct {
@@ -53,11 +67,13 @@ func (s *Server) apiVariantsDirGet(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	used, free := s.probeVariantsDirUsage(ctx, current)
 	legacyCount, legacyBytes := s.countLegacyVariants(ctx, current)
+	usedByKind := s.probeUsedByKind(ctx)
 
 	writeJSON(w, http.StatusOK, variantsDirResponse{
 		Current:     current,
 		Default:     defaultDir,
 		UsedBytes:   used,
+		UsedByKind:  usedByKind,
 		FreeBytes:   free,
 		LegacyCount: legacyCount,
 		LegacyBytes: legacyBytes,
@@ -126,14 +142,50 @@ func (s *Server) apiVariantsDirPatch(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	used, free := s.probeVariantsDirUsage(ctx, current)
 	legacyCount, legacyBytes := s.countLegacyVariants(ctx, current)
+	usedByKind := s.probeUsedByKind(ctx)
 	writeJSON(w, http.StatusOK, variantsDirResponse{
 		Current:     current,
 		Default:     defaultDir,
 		UsedBytes:   used,
+		UsedByKind:  usedByKind,
 		FreeBytes:   free,
 		LegacyCount: legacyCount,
 		LegacyBytes: legacyBytes,
 	})
+}
+
+// probeUsedByKind returns the per-kind byte breakdown of cached
+// variants ({"upscale": X, "optimize": Y}) via the manifest store's
+// `CountVariantsByKind` aggregate. Always returns BOTH keys pre-
+// seeded to 0 even on probe failure so the inspector's storage-bar
+// JS reads `usedByKind.upscale` / `usedByKind.optimize` without
+// nil-map / missing-key gymnastics.
+//
+// A non-zero "unknown" bucket (variant_id matching neither
+// `upscaled-%` nor `optimized-%`) gets logged at notice level so
+// operators see drift in production; the UI ignores the bucket.
+func (s *Server) probeUsedByKind(ctx context.Context) map[string]int64 {
+	out := map[string]int64{
+		"upscale":  0,
+		"optimize": 0,
+	}
+	got, err := s.deps.Manifest.CountVariantsByKind(ctx)
+	if err != nil {
+		return out
+	}
+	if v, ok := got["upscale"]; ok {
+		out["upscale"] = v
+	}
+	if v, ok := got["optimize"]; ok {
+		out["optimize"] = v
+	}
+	if unk, ok := got["unknown"]; ok && unk > 0 {
+		logging.Component("admin.variants-dir").Warn(
+			"unknown variant kind bucket non-empty",
+			"bytes", unk,
+		)
+	}
+	return out
 }
 
 // assertNotUnderLibraryRoots mirrors `config.validateVariantsDir`'s

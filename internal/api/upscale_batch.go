@@ -41,11 +41,14 @@ const (
 // package can't import internal/transcode directly (mirrors the
 // UpscaleEnqueuer / VariantStore decoupling pattern).
 //
-// `Submit` enrolls a path into a new batch; `Cancel` flips an
-// existing batch's status; `ListBatches` returns recent history
-// for the admin Jobs page.
+// `Submit` enrolls a path into a new batch; `SubmitOptimize` is the
+// kind="optimize" sibling (CarPlay-optimized 16-bit family-preserving
+// FLAC, target auto-derived per-track); `Cancel` flips an existing
+// batch's status; `ListBatches` returns recent history for the admin
+// Jobs page.
 type BatchCoordinator interface {
 	Submit(ctx context.Context, libraryRelPath string, targetRate, targetBits int) (BatchSubmitResult, error)
+	SubmitOptimize(ctx context.Context, libraryRelPath string) (BatchSubmitResult, error)
 	Cancel(id uuid.UUID) error
 	ListBatches(limit int) ([]BatchRow, error)
 	Throughput() BatchThroughput
@@ -116,8 +119,13 @@ func (e *BatchInsufficientDiskSpace) Unwrap() error { return ErrBatchInsufficien
 // BatchRequest is the request body shape for POST /v1/upscale/batch.
 // `targetRate` / `targetBits` are optional — when omitted the
 // coordinator falls back to the DB-stored admin Settings.
+//
+// `Kind` is one of "upscale" (default when omitted) or "optimize"
+// (CarPlay-optimized; targetRate/targetBits are ignored — the
+// coordinator picks family-preserving 16/44.1 or 16/48 per-track).
 type BatchRequest struct {
 	Path       string `json:"path"`
+	Kind       string `json:"kind,omitempty"`
 	TargetRate int    `json:"targetRate,omitempty"`
 	TargetBits int    `json:"targetBits,omitempty"`
 }
@@ -164,7 +172,25 @@ func (s *Server) upscaleBatchSubmit(w http.ResponseWriter, r *http.Request) {
 	// Coordinator.Submit resolves the target / outputDir from
 	// scan_state + dataDir; the handler doesn't need to know those
 	// values. Pass zero for target so the coordinator falls back.
-	res, err := s.batchCoordinator.Submit(r.Context(), libraryRel, req.TargetRate, req.TargetBits)
+	//
+	// Kind dispatch mirrors POST /v1/upscale's behaviour: empty or
+	// "upscale" → Submit (upscale variants); "optimize" → SubmitOptimize
+	// (CarPlay-optimized variants, target params auto-derived per-track).
+	kind := strings.ToLower(strings.TrimSpace(req.Kind))
+	var (
+		res BatchSubmitResult
+		err error
+	)
+	switch kind {
+	case "", "upscale":
+		res, err = s.batchCoordinator.Submit(r.Context(), libraryRel, req.TargetRate, req.TargetBits)
+	case "optimize":
+		res, err = s.batchCoordinator.SubmitOptimize(r.Context(), libraryRel)
+	default:
+		writeError(w, http.StatusBadRequest, "bad_request",
+			`unknown kind: `+req.Kind+` (expected "upscale" or "optimize")`)
+		return
+	}
 	if err != nil {
 		var dskErr *BatchInsufficientDiskSpace
 		if errors.As(err, &dskErr) {

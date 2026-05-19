@@ -1623,6 +1623,20 @@ const inspectorState = {
   path: "", // current navigation path; "" = library root
   selection: null, // {kind: "folder"|"track", row}
   lastBrowseData: null, // last successful browse response (used by toolbar action + search filter)
+  // Multi-select state (PR feat/library-inspector-tiles). Map of
+  // folder path → {trackCount, upscaledCount, optimizedCount}
+  // snapshot, captured from the checkbox's data-* attrs at
+  // toggle time. Using a Map (vs the original Set) means the
+  // selection-bar aggregator iterates O(M) over the map's values
+  // — no document.querySelector calls per checkbox tick (Gemini
+  // medium on PR #276: the prior implementation was O(M×N) where
+  // M=selected and N=total tiles in the DOM). Selection bar
+  // floats when map.size > 0. Cleared on every browse re-render.
+  selectedPaths: new Map(),
+  // SoX availability snapshot — seeded once at init() time from
+  // the page root's data-sox-available attribute. Used by the
+  // selection bar + per-tile menu to gate generate actions.
+  soxAvailable: true,
   // Search state (PR B). `mode` is "browse" (default) or "search"
   // (flat-results view). `searchQuery` is the active query; the
   // debounced timer + in-flight controller live in module-level
@@ -1703,13 +1717,59 @@ function initLibraryInspector() {
   document.getElementById("inspector-current-info")
     ?.addEventListener("click", inspectorOpenProjectionForCurrent);
 
-  // Drawer-internal buttons (unchanged behaviour, preserved IDs)
-  document.getElementById("inspector-upscale-btn")
-    .addEventListener("click", inspectorSubmitBatch);
-  document.getElementById("inspector-delete-variants-btn")
-    .addEventListener("click", inspectorDeleteVariants);
+  // Per-kind drawer buttons (event delegation — N=2 sections per
+  // page, 2 buttons each; the new tile redesign replaces the
+  // legacy single Upscale + Delete pair with one Generate + one
+  // Delete per kind).
+  for (const btn of document.querySelectorAll(".drawer-generate-btn")) {
+    btn.addEventListener("click", inspectorSubmitBatch);
+  }
+  for (const btn of document.querySelectorAll(".drawer-delete-btn")) {
+    btn.addEventListener("click", inspectorDeleteVariants);
+  }
   document.getElementById("inspector-drawer-close")
     .addEventListener("click", () => inspectorCloseDrawer({ userInitiated: true }));
+
+  // Two independent Load-more buttons (folders + tracks). The shared
+  // inspectorLoadMore reads both cursors and the server returns
+  // pages for whichever collection is still in flight; the
+  // IntersectionObserver in inspectorRefreshLoadMoreSentinel also
+  // attaches to these buttons for auto-fire.
+  for (const btn of document.querySelectorAll(".load-more")) {
+    btn.addEventListener("click", inspectorLoadMore);
+  }
+
+  // Tile checkbox change → multi-select state update + bar refresh.
+  // Event delegation from the inspector content root so the listener
+  // survives chunked appends without re-wiring per tile.
+  const contentRoot = document.getElementById("inspector-content");
+  if (contentRoot) {
+    contentRoot.addEventListener("change", inspectorOnTileCheckboxChange);
+  }
+
+  // Selection-bar buttons.
+  document.getElementById("selection-clear")
+    ?.addEventListener("click", () => {
+      // Untick every visible tile checkbox to keep DOM state in sync.
+      for (const cb of document.querySelectorAll(
+        '.inspector-tile input[type="checkbox"][data-path]')) {
+        if (cb.checked) cb.checked = false;
+        const tile = cb.closest(".inspector-tile");
+        if (tile) delete tile.dataset.selected;
+      }
+      inspectorState.selectedPaths.clear();
+      inspectorUpdateSelectionBar();
+    });
+  for (const btn of document.querySelectorAll(".selection-submit-btn")) {
+    btn.addEventListener("click", inspectorSelectionSubmit);
+  }
+
+  // SoX availability snapshot (set once at mount). The CSS gate
+  // (`[data-sox-available="false"] [data-needs-sox]`) handles
+  // visual state; JS uses this for the selection bar's
+  // gate-disabled check.
+  const page = document.querySelector(".library-inspector");
+  inspectorState.soxAvailable = page?.dataset.soxAvailable !== "false";
 
   // Sticky-stack height tracker (from PR A): write actual measured
   // offsetHeight of the toolbar + storage bar into CSS custom
@@ -1821,7 +1881,17 @@ async function inspectorStorageRefresh() {
     if (pathEl) pathEl.textContent = data.current || "—";
     const stats = document.getElementById("inspector-storage-stats");
     if (stats) {
-      document.getElementById("inspector-storage-used").textContent = humanBytes(data.usedBytes);
+      // Per-kind breakdown (Library Inspector tile-redesign PR).
+      // When both kinds are present in `usedByKind`, surface the
+      // parenthesised split alongside the total. Falls back
+      // gracefully on pre-feature bridge responses that omit the
+      // field.
+      let usedHTML = humanBytes(data.usedBytes);
+      const byKind = data.usedByKind;
+      if (byKind && (byKind.upscale > 0 || byKind.optimize > 0)) {
+        usedHTML += ` <span class="storage-used-breakdown">(upscale ${humanBytes(byKind.upscale || 0)} · optimize ${humanBytes(byKind.optimize || 0)})</span>`;
+      }
+      document.getElementById("inspector-storage-used").innerHTML = usedHTML;
       document.getElementById("inspector-storage-free").textContent = humanBytes(data.freeBytes);
       stats.hidden = false;
     }
@@ -2094,33 +2164,38 @@ function inspectorOpenProjectionForCurrent() {
     path: inspectorState.path,
     trackCount: rollup.trackCount,
     upscaledCount: rollup.upscaledCount,
+    optimizedCount: rollup.optimizedCount,
     totalSizeBytes: rollup.totalSizeBytes,
   });
 }
 
 // inspectorBrowseRollup aggregates a browse response's folders +
 // tracks arrays into a single (trackCount, upscaledCount,
-// totalSizeBytes) rollup in one pass (vs the prior three-pass
-// reduce shape). Used by inspectorOpenProjectionForCurrent and
-// the toolbar-action enablement check in inspectorRender — both
+// optimizedCount, totalSizeBytes) rollup in one pass (vs the prior
+// three-pass reduce shape). Used by inspectorOpenProjectionForCurrent
+// and the toolbar-action enablement check in inspectorRender — both
 // previously did the same math inline. Extracted per Gemini medium
-// on PR A.
+// on PR A; extended to track per-kind variant coverage in the
+// Library Inspector tile-redesign PR.
 function inspectorBrowseRollup(data) {
   const folders = data.folders || [];
   const tracks = data.tracks || [];
   let trackCount = tracks.length;
   let upscaledCount = 0;
+  let optimizedCount = 0;
   let totalSizeBytes = 0;
   for (const t of tracks) {
     if (t.isUpscaled) upscaledCount++;
+    if (t.isOptimized) optimizedCount++;
     totalSizeBytes += t.sizeBytes || 0;
   }
   for (const f of folders) {
     trackCount += f.trackCount || 0;
     upscaledCount += f.upscaledCount || 0;
+    optimizedCount += f.optimizedCount || 0;
     totalSizeBytes += f.totalSizeBytes || 0;
   }
-  return { trackCount, upscaledCount, totalSizeBytes };
+  return { trackCount, upscaledCount, optimizedCount, totalSizeBytes };
 }
 
 // inspectorCloseDrawer hides the projection drawer. `userInitiated`
@@ -2171,8 +2246,6 @@ function inspectorRenderBreadcrumbs(path) {
 async function inspectorRender(data) {
   document.getElementById("inspector-current-heading").textContent =
     pathLabel(data.path);
-  const body = document.getElementById("inspector-rows-body");
-  body.innerHTML = "";
 
   // Capture pagination metadata so Load-more (manual click or
   // IntersectionObserver auto-fire) can advance against the right
@@ -2182,46 +2255,51 @@ async function inspectorRender(data) {
   inspectorState.totalFolders = data.totalFolders || 0;
   inspectorState.totalTracks = data.totalTracks || 0;
 
+  // Multi-select is per-navigation — clear on every browse render
+  // so a stale selection from a prior folder doesn't bleed into
+  // the new view.
+  inspectorState.selectedPaths.clear();
+  inspectorUpdateSelectionBar();
+
   const folders = data.folders || [];
   const tracks = data.tracks || [];
-  // Toolbar actions are enabled iff this folder has any tracks
-  // anywhere underneath. Use the AUTHORITATIVE total from the
-  // paginated browse response (immediate-children count from PR C)
-  // OR the recursive sum from folder rollups (subfolders' tracks).
-  // Routes through the inspectorBrowseRollup single-pass helper
-  // for the recursive sum (PR A's dedupe).
   const hasAnyTracks = (data.totalTracks || 0) > 0
     || inspectorBrowseRollup(data).trackCount > 0;
   const currentInfoBtn = document.getElementById("inspector-current-info");
   if (currentInfoBtn) currentInfoBtn.disabled = !hasAnyTracks;
 
   // Auto-open the projection drawer for the CURRENT folder whenever
-  // it has tracks. Operators don't need to discover an ⓘ to act on
-  // the open folder — the drawer is right there. User explicitly
-  // requested this UX on the v1.4 followup ("maybe keep the upscale
-  // panel always open"). The drawer can still be closed manually
-  // via its × button; closing sets `drawerClosedByUser` so the
-  // current navigation doesn't re-open it on a same-path refresh.
-  // Any subsequent navigation clears the flag and re-opens.
+  // it has tracks. The drawer can still be closed manually via its
+  // × button; closing sets `drawerClosedByUser` so the current
+  // navigation doesn't re-open on a same-path refresh.
   if (hasAnyTracks && !inspectorState.drawerClosedByUser) {
     inspectorOpenProjectionForCurrent();
   }
 
   if (folders.length === 0 && tracks.length === 0) {
-    document.getElementById("inspector-rows-table").hidden = true;
+    document.getElementById("inspector-content").hidden = true;
     document.getElementById("inspector-empty").hidden = false;
     return;
   }
-  document.getElementById("inspector-rows-table").hidden = false;
+  document.getElementById("inspector-content").hidden = false;
   document.getElementById("inspector-empty").hidden = true;
 
-  // Chunked append: build all rows into a fragment, then schedule
-  // 200-row chunks via rAF so initial paint lands before the full
-  // list materialises on huge folders (1000+ children). Smaller
-  // pages (<= 250) render in one chunk (no perceptible difference).
-  // Await so the caller's scroll-restore runs against the final
-  // document height, not the partial first-chunk height.
-  await inspectorAppendRows(body, folders, tracks, /*replace=*/true);
+  // Two independent sub-grids: folders + tracks paginate
+  // independently, so each gets its own section/load-more
+  // sentinel. Hide a section entirely if its collection is empty
+  // to avoid a stray empty header.
+  document.getElementById("folders-section").hidden = folders.length === 0;
+  document.getElementById("tracks-section").hidden = tracks.length === 0;
+  document.getElementById("folders-count").textContent =
+    String(data.totalFolders || folders.length);
+  document.getElementById("tracks-count").textContent =
+    String(data.totalTracks || tracks.length);
+
+  // Chunked append. Folder + track tiles render into separate
+  // grids so a "Load more folders" click can append into
+  // .folders-grid without disturbing the tracks-grid (or its
+  // independent cursor).
+  await inspectorAppendTiles(folders, tracks, /*replace=*/true);
 }
 
 // inspectorAppendRows is the shared chunked-render helper used by
@@ -2239,23 +2317,36 @@ async function inspectorRender(data) {
 // fired), letting a fast IntersectionObserver tick spawn an
 // overlapping Load-more whose rows interleaved with the chunks
 // still rendering from the prior batch. Gemini HIGH on PR C.
-function inspectorAppendRows(body, folders, tracks, replace) {
+// inspectorAppendTiles renders folder + track tiles into the two
+// dedicated sub-grids (.folders-grid + .tracks-grid). Replaces the
+// legacy single-tbody chunker. Folders and tracks paginate
+// independently — keeping them in separate DOM containers means a
+// "Load more folders" click appends to .folders-grid without
+// disturbing the track grid (which has its own independent cursor
+// + Load-more button), eliminating the layout-jump regression
+// flagged in the senior review.
+//
+// Same chunked-render machinery as the legacy table path:
+// 200-tile rAF chunks with `renderGeneration` guard so an in-flight
+// pump from a prior navigation bails as soon as a newer render
+// bumps the generation.
+function inspectorAppendTiles(folders, tracks, replace) {
+  const foldersGrid = document.getElementById("folders-grid");
+  const tracksGrid = document.getElementById("tracks-grid");
+  if (!foldersGrid || !tracksGrid) return Promise.resolve();
   if (replace) {
-    body.innerHTML = "";
+    foldersGrid.innerHTML = "";
+    tracksGrid.innerHTML = "";
     inspectorState.renderedFolders = 0;
     inspectorState.renderedTracks = 0;
-    // Bump generation so any in-flight pump from a prior
-    // navigation bails on next rAF — prevents stale-folder rows
-    // from interleaving into the freshly-loaded folder.
     inspectorState.renderGeneration++;
   }
-  // Build a single mixed list (folders first, then tracks) so the
-  // chunker can interleave; ordering inside each group is preserved.
-  const rows = [];
-  for (const f of folders) rows.push({ kind: "folder", data: f });
-  for (const t of tracks) rows.push({ kind: "track", data: t });
 
-  if (rows.length === 0) {
+  const items = [];
+  for (const f of folders) items.push({ kind: "folder", data: f });
+  for (const t of tracks) items.push({ kind: "track", data: t });
+
+  if (items.length === 0) {
     inspectorRefreshLoadMoreSentinel();
     return Promise.resolve();
   }
@@ -2263,29 +2354,30 @@ function inspectorAppendRows(body, folders, tracks, replace) {
   return new Promise((resolve) => {
     const CHUNK = 200;
     let i = 0;
-    // Capture the live generation NOW. If a fresh navigation /
-    // re-render bumps it between rAF frames, this pump exits
-    // cleanly without appending more rows.
     const myGen = inspectorState.renderGeneration;
     function pump() {
       if (inspectorState.renderGeneration !== myGen) {
-        resolve(); // stale chunk — newer render has taken over.
+        resolve();
         return;
       }
-      const frag = document.createDocumentFragment();
-      const end = Math.min(i + CHUNK, rows.length);
+      const folderFrag = document.createDocumentFragment();
+      const trackFrag = document.createDocumentFragment();
+      const end = Math.min(i + CHUNK, items.length);
       for (; i < end; i++) {
-        frag.appendChild(buildInspectorRow(rows[i]));
-        // Maintain rendered counters here (O(1) per row) so the
-        // Load-more sentinel math doesn't need a DOM walk.
-        if (rows[i].kind === "folder") inspectorState.renderedFolders++;
-        else inspectorState.renderedTracks++;
+        const it = items[i];
+        if (it.kind === "folder") {
+          folderFrag.appendChild(buildFolderTile(it.data));
+          inspectorState.renderedFolders++;
+        } else {
+          trackFrag.appendChild(buildTrackTile(it.data));
+          inspectorState.renderedTracks++;
+        }
       }
-      body.appendChild(frag);
-      if (i < rows.length) {
+      if (folderFrag.childNodes.length) foldersGrid.appendChild(folderFrag);
+      if (trackFrag.childNodes.length) tracksGrid.appendChild(trackFrag);
+      if (i < items.length) {
         requestAnimationFrame(pump);
       } else {
-        // All page rows in place. Refresh the Load-more sentinel.
         inspectorRefreshLoadMoreSentinel();
         resolve();
       }
@@ -2294,87 +2386,204 @@ function inspectorAppendRows(body, folders, tracks, replace) {
   });
 }
 
-function buildInspectorRow(item) {
-  if (item.kind === "folder") return buildFolderRow(item.data);
-  return buildTrackRow(item.data);
+// Keep the legacy entry point name as a shim so callers that grew
+// up against `inspectorAppendRows` (notably inspectorLoadMore)
+// don't break. Translates the (body, folders, tracks, replace)
+// shape to the new (folders, tracks, replace) one.
+function inspectorAppendRows(_body, folders, tracks, replace) {
+  return inspectorAppendTiles(folders, tracks, replace);
 }
 
-function buildFolderRow(f) {
-  const tr = document.createElement("tr");
-  tr.dataset.kind = "folder";
-  tr.dataset.path = f.path;
-  // v1.4 nav rework: whole-row click navigates INTO the folder
-  // (traditional file-manager model). The trailing ⓘ button
-  // opens the projection drawer WITHOUT navigating so operators
-  // can preview upscale impact across child folders without
-  // having to enter each one. Row is `role="link"` + tabindex
-  // so keyboard users can navigate via Enter without leaving
-  // the keyboard.
-  tr.setAttribute("role", "link");
-  tr.tabIndex = 0;
-  tr.setAttribute("aria-label", `Open folder ${f.name}`);
-  // `title` on the folder-name span: hover reveals the full name
-  // when the cell ellipsises a long title (v1.4 followup —
-  // operators with long album titles + the drawer open were
-  // seeing the name cut). Screen readers read the title alongside
-  // the aria-label, so it's also a11y-friendly.
-  tr.innerHTML = `
-    <td class="folder-cell">
-      <span class="folder-name" title="${escapeHTML(f.name)}">📁 ${escapeHTML(f.name)}</span>
-    </td>
-    <td class="num">${f.trackCount}</td>
-    <td class="num">${f.upscaledCount}</td>
-    <td class="num">${humanBytes(f.totalSizeBytes)}</td>
-    <td class="folder-actions">
-      <button type="button" class="btn folder-action-info"
-        aria-label="Show upscale projection for ${escapeHTML(f.name)}">ⓘ</button>
-    </td>
+function buildFolderTile(f) {
+  const tile = document.createElement("article");
+  tile.className = "inspector-tile";
+  tile.dataset.kind = "folder";
+  tile.dataset.path = f.path;
+  tile.setAttribute("role", "link");
+  tile.tabIndex = 0;
+  tile.setAttribute("aria-label", `Open folder ${f.name}`);
+
+  const upMax = Math.max(1, f.trackCount || 0);
+  const upVal = Math.min(f.upscaledCount || 0, upMax);
+  const opMax = Math.max(1, f.trackCount || 0);
+  const opVal = Math.min(f.optimizedCount || 0, opMax);
+
+  // The data-* attrs on the checkbox carry the client-side
+  // aggregation inputs the selection bar reads — no fetch needed
+  // on toolbar updates.
+  tile.innerHTML = `
+    <header class="tile-header">
+      <label class="tile-select" title="Select this folder">
+        <input type="checkbox"
+          data-path="${escapeHTML(f.path)}"
+          data-track-count="${f.trackCount || 0}"
+          data-upscaled-count="${f.upscaledCount || 0}"
+          data-optimized-count="${f.optimizedCount || 0}" />
+      </label>
+      <span class="tile-icon" aria-hidden="true">📁</span>
+      <h3 class="tile-name" title="${escapeHTML(f.name)}">${escapeHTML(f.name)}</h3>
+      <button class="tile-menu-btn" type="button"
+        popovertarget="menu-${escapeHTML(f.pathHash || "")}"
+        aria-label="Actions for ${escapeHTML(f.name)}">⋯</button>
+    </header>
+    <dl class="tile-meta">
+      <div><dt>Tracks</dt><dd>${f.trackCount || 0}</dd></div>
+      <div><dt>Size</dt><dd>${humanBytes(f.totalSizeBytes || 0)}</dd></div>
+    </dl>
+    <div class="tile-coverage">
+      <div class="coverage-row" data-kind="upscale">
+        <span class="coverage-label">Upscaled</span>
+        <progress value="${upVal}" max="${upMax}"></progress>
+        <span class="coverage-count">${f.upscaledCount || 0} / ${f.trackCount || 0}</span>
+      </div>
+      <div class="coverage-row" data-kind="optimize">
+        <span class="coverage-label">CarPlay-optimized</span>
+        <progress value="${opVal}" max="${opMax}"></progress>
+        <span class="coverage-count">${f.optimizedCount || 0} / ${f.trackCount || 0}</span>
+      </div>
+    </div>
   `;
-  const infoBtn = tr.querySelector(".folder-action-info");
-  infoBtn.addEventListener("click", (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    inspectorSelectFolder(f);
+  attachTileMenu(tile, f);
+
+  // Tile click → navigate INTO the folder. Excludes clicks on the
+  // checkbox label (selection toggle) and the kebab menu button.
+  tile.addEventListener("click", (e) => {
+    if (e.target.closest(".tile-select")) return;
+    if (e.target.closest(".tile-menu-btn")) return;
+    if (e.target.closest(".tile-menu-popover")) return;
+    inspectorNavigate(f.path);
   });
-  // Stop keydown propagation from the Info button so Enter/Space
-  // activation triggers the button's native click (which opens the
-  // drawer) WITHOUT also bubbling to the row's keydown handler
-  // (which would navigate). CodeRabbit Major on PR A — preserved
-  // here after PR C extracted the row builder into a helper.
-  infoBtn.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" || e.key === " ") {
-      e.stopPropagation();
-    }
-  });
-  // Row click → navigate INTO the folder.
-  tr.addEventListener("click", () => inspectorNavigate(f.path));
-  // Keyboard activation: Enter on the row navigates; the Info
-  // button is its own focusable child (its own keydown handler
-  // stops propagation so the row's keydown doesn't also fire).
-  tr.addEventListener("keydown", (e) => {
+  tile.addEventListener("keydown", (e) => {
+    if (e.target.closest(".tile-menu-btn")) return;
+    if (e.target.closest("input[type=checkbox]")) return;
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
       inspectorNavigate(f.path);
     }
   });
-  return tr;
+  return tile;
 }
 
-function buildTrackRow(t) {
-  const tr = document.createElement("tr");
-  tr.dataset.kind = "track";
-  tr.dataset.path = t.path;
-  const upscaled = t.isUpscaled ? "✓" : "";
-  // `title` on the name cell: hover reveals full track name when
-  // the cell ellipsises a long title (v1.4 followup).
-  tr.innerHTML = `
-    <td class="folder-cell" title="${escapeHTML(t.name)}">🎵 ${escapeHTML(t.name)}</td>
-    <td class="num">${formatTrackQuality(t)}</td>
-    <td class="num">${upscaled}</td>
-    <td class="num">${humanBytes(t.sizeBytes)}</td>
-    <td class="folder-actions"></td>
+function buildTrackTile(t) {
+  const tile = document.createElement("article");
+  tile.className = "inspector-tile";
+  tile.dataset.kind = "track";
+  tile.dataset.path = t.path;
+
+  tile.innerHTML = `
+    <header class="tile-header">
+      <span class="tile-icon" aria-hidden="true">🎵</span>
+      <h3 class="tile-name" title="${escapeHTML(t.name)}">${escapeHTML(t.name)}</h3>
+      <button class="tile-menu-btn" type="button"
+        popovertarget="menu-${escapeHTML(t.pathHash || "")}"
+        aria-label="Actions for ${escapeHTML(t.name)}">⋯</button>
+    </header>
+    <dl class="tile-meta">
+      <div><dt>Quality</dt><dd>${formatTrackQuality(t)}</dd></div>
+      <div><dt>Size</dt><dd>${humanBytes(t.sizeBytes || 0)}</dd></div>
+    </dl>
+    <div class="tile-track-dots" aria-label="Variant status">
+      <span class="tile-track-dot" data-kind="upscale"
+        data-present="${t.isUpscaled ? "true" : "false"}">Upscaled</span>
+      <span class="tile-track-dot" data-kind="optimize"
+        data-present="${t.isOptimized ? "true" : "false"}">CarPlay</span>
+    </div>
   `;
-  return tr;
+  attachTileMenu(tile, t);
+  return tile;
+}
+
+// attachTileMenu clones the popover template, customises menu-item
+// disabled states based on the tile's current variant counts
+// (delete actions disabled when count==0), and appends to the tile.
+// Uses the native HTML `popover` API for outside-click / Escape
+// dismissal — no JS wrapper needed.
+//
+// **SoX-gated generate actions** carry an actual `disabled`
+// property (not just the CSS `data-needs-sox` visual gate). The
+// CSS rule handles the visual treatment (opacity + cursor +
+// pointer-events) but doesn't stop keyboard activation; setting
+// `disabled` on the button is what blocks Enter/Space invocation.
+// Per CodeRabbit major on PR #276 round 4 — defense in depth for
+// accessibility.
+function attachTileMenu(tile, item) {
+  const tmpl = document.getElementById("tile-menu-template");
+  if (!tmpl || !item.pathHash) return;
+  const popover = tmpl.content.firstElementChild.cloneNode(true);
+  popover.id = "menu-" + item.pathHash;
+  const upCount = (item.upscaledCount || (item.isUpscaled ? 1 : 0)) || 0;
+  const opCount = (item.optimizedCount || (item.isOptimized ? 1 : 0)) || 0;
+  const soxMissing = !inspectorState.soxAvailable;
+  // Disable generate actions when SoX is unavailable — keyboard
+  // accessibility gate alongside the CSS [data-needs-sox] visual
+  // dim. Without this `disabled` property, a Tab+Enter on a
+  // SoX-less bridge would still queue a job that the backend
+  // immediately rejects.
+  const genUp = popover.querySelector('[data-action="upscale"]');
+  const genOp = popover.querySelector('[data-action="optimize"]');
+  if (genUp) genUp.disabled = soxMissing;
+  if (genOp) genOp.disabled = soxMissing;
+  // Disable delete actions when no variants of that kind exist
+  // (operator can't "delete" what isn't there).
+  const delUp = popover.querySelector('[data-action="delete-upscale"]');
+  const delOp = popover.querySelector('[data-action="delete-optimize"]');
+  if (delUp) delUp.disabled = upCount === 0;
+  if (delOp) delOp.disabled = opCount === 0;
+  // Wire click handler — routes via data-action.
+  popover.addEventListener("click", (e) => {
+    const btn = e.target.closest(".menu-item");
+    if (!btn || btn.disabled) return;
+    const action = btn.dataset.action;
+    handleTileMenuAction(action, item);
+    // Close the popover natively.
+    if (typeof popover.hidePopover === "function") popover.hidePopover();
+  });
+  tile.appendChild(popover);
+}
+
+// handleTileMenuAction routes a per-tile kebab-menu action to the
+// right submit/delete/projection handler. `item` is the folder or
+// track row data (carries .path, .upscaledCount etc). Defense-in-
+// depth SoX gate at the action sites — the button's `disabled`
+// property already blocks user activation, but a future JS-direct
+// caller (test, console-driven automation) bypassing the click
+// handler would otherwise queue jobs the backend rejects.
+function handleTileMenuAction(action, item) {
+  const path = item.path;
+  const soxMissing = !inspectorState.soxAvailable;
+  switch (action) {
+    case "upscale":
+      if (soxMissing) break;
+      inspectorSubmitBatchForKind("upscale", [path]);
+      break;
+    case "optimize":
+      if (soxMissing) break;
+      inspectorSubmitBatchForKind("optimize", [path]);
+      break;
+    case "delete-upscale":
+      inspectorDeleteVariantsForKind("upscale", path);
+      break;
+    case "delete-optimize":
+      inspectorDeleteVariantsForKind("optimize", path);
+      break;
+    case "projection":
+      // Reuse the folder-selection path (also fires the drawer
+      // auto-open) for folder tiles. For track tiles, fall back
+      // to projection for the CURRENT folder — track tiles don't
+      // carry per-folder rollup fields (upscaledCount /
+      // optimizedCount are undefined), so a direct
+      // inspectorSelectFolder(item) would render misleading "—"
+      // values everywhere. The current-folder projection covers
+      // the parent the operator is already viewing, which is the
+      // user-meaningful scope for a track's "View projection"
+      // tap. Per CodeRabbit major on PR #276 round 3.
+      if (item.upscaledCount !== undefined) {
+        inspectorSelectFolder(item);
+      } else {
+        inspectorOpenProjectionForCurrent();
+      }
+      break;
+  }
 }
 
 // inspectorRefreshLoadMoreSentinel rebuilds the "Load more (N
@@ -2383,45 +2592,43 @@ function buildTrackRow(t) {
 // pre-existing sentinel before checking — handles the "all done"
 // case where Load-more's response had empty next cursors.
 function inspectorRefreshLoadMoreSentinel() {
-  const body = document.getElementById("inspector-rows-body");
-  if (!body) return;
-  // Drop any prior sentinel.
-  const existing = body.querySelector("tr.inspector-loadmore");
-  if (existing) {
-    if (inspectorLoadMoreObserver) {
-      inspectorLoadMoreObserver.unobserve(existing);
-    }
-    existing.remove();
+  // Two independent sentinels — folders + tracks paginate via
+  // separate cursors. Show/hide each Load-more button based on
+  // its collection's remaining count.
+  const foldersBtn = document.getElementById("folders-load-more");
+  const tracksBtn = document.getElementById("tracks-load-more");
+  if (!foldersBtn || !tracksBtn) return;
+
+  const foldersRemaining = Math.max(0,
+    inspectorState.totalFolders - inspectorState.renderedFolders);
+  const tracksRemaining = Math.max(0,
+    inspectorState.totalTracks - inspectorState.renderedTracks);
+
+  const hasFolderMore = !!inspectorState.nextFolderCursor && foldersRemaining > 0;
+  const hasTrackMore = !!inspectorState.nextTrackCursor && tracksRemaining > 0;
+
+  foldersBtn.hidden = !hasFolderMore;
+  tracksBtn.hidden = !hasTrackMore;
+  if (hasFolderMore) {
+    foldersBtn.textContent = `Load more folders (${foldersRemaining} remaining)`;
   }
-  const hasFolderMore = !!inspectorState.nextFolderCursor;
-  const hasTrackMore = !!inspectorState.nextTrackCursor;
-  if (!hasFolderMore && !hasTrackMore) return;
+  if (hasTrackMore) {
+    tracksBtn.textContent = `Load more tracks (${tracksRemaining} remaining)`;
+  }
 
-  // Compute how many remain. Read from the in-state counters
-  // (O(1) — bumped per appended row in inspectorAppendRows)
-  // instead of the prior `querySelectorAll(...).length` walk
-  // which was O(N) per pagination cycle. Gemini medium on PR C.
-  const foldersRemaining = Math.max(0, inspectorState.totalFolders - inspectorState.renderedFolders);
-  const tracksRemaining = Math.max(0, inspectorState.totalTracks - inspectorState.renderedTracks);
-  const totalRemaining = foldersRemaining + tracksRemaining;
-  if (totalRemaining === 0) return;
-
-  const tr = document.createElement("tr");
-  tr.className = "inspector-loadmore";
-  tr.innerHTML = `<td colspan="5">Load more (${totalRemaining} remaining)</td>`;
-  tr.addEventListener("click", inspectorLoadMore);
-  body.appendChild(tr);
-  // IntersectionObserver: auto-fire Load-more when the sentinel
-  // scrolls into view. The first construction caches the observer;
-  // observation is per-element so we re-observe each new sentinel.
+  // IntersectionObserver auto-fires Load-more when either sentinel
+  // scrolls into view. One observer, two observed buttons; the
+  // click handlers wired in initLibraryInspector dispatch to the
+  // same inspectorLoadMore (which reads both cursors).
   if (!inspectorLoadMoreObserver) {
     inspectorLoadMoreObserver = new IntersectionObserver((entries) => {
       for (const e of entries) {
-        if (e.isIntersecting) inspectorLoadMore();
+        if (e.isIntersecting && !e.target.hidden) inspectorLoadMore();
       }
     }, { root: null, rootMargin: "200px" });
+    inspectorLoadMoreObserver.observe(foldersBtn);
+    inspectorLoadMoreObserver.observe(tracksBtn);
   }
-  inspectorLoadMoreObserver.observe(tr);
 }
 
 // inspectorLoadMore fetches the next page from the current cursors
@@ -2469,17 +2676,34 @@ async function inspectorLoadMore() {
     // on PR C.
     inspectorState.totalFolders = data.totalFolders ?? inspectorState.totalFolders;
     inspectorState.totalTracks = data.totalTracks ?? inspectorState.totalTracks;
-    const body = document.getElementById("inspector-rows-body");
+    // Update per-section count headers so they reflect the freshly
+    // landed totals (folders / tracks paginate independently).
+    const foldersCountEl = document.getElementById("folders-count");
+    const tracksCountEl = document.getElementById("tracks-count");
+    if (foldersCountEl) foldersCountEl.textContent = String(inspectorState.totalFolders);
+    if (tracksCountEl) tracksCountEl.textContent = String(inspectorState.totalTracks);
+    // Reveal each section whose collection just gained rows.
+    if ((data.folders || []).length > 0) {
+      document.getElementById("folders-section").hidden = false;
+    }
+    if ((data.tracks || []).length > 0) {
+      document.getElementById("tracks-section").hidden = false;
+    }
     // Await the chunked render — the loadingMore guard must stay
     // held until every rAF chunk has appended, otherwise a fast
     // IntersectionObserver tick spawns an overlapping page.
-    await inspectorAppendRows(body, data.folders || [], data.tracks || [], /*replace=*/false);
+    await inspectorAppendTiles(data.folders || [], data.tracks || [], /*replace=*/false);
   } catch (err) {
-    // Surface a non-blocking toast-style update by replacing the
-    // sentinel text. Sentinel cleanup happens on next render.
-    const sentinel = document.querySelector("tr.inspector-loadmore td");
-    if (sentinel) {
-      sentinel.textContent = `Load failed: ${err.message} — click to retry`;
+    // Surface a non-blocking failure on whichever sentinel is
+    // still showing. Both buttons fall back to a generic retry
+    // label; next successful page restores the standard text.
+    const foldersBtn = document.getElementById("folders-load-more");
+    const tracksBtn = document.getElementById("tracks-load-more");
+    if (foldersBtn && !foldersBtn.hidden) {
+      foldersBtn.textContent = `Load failed: ${err.message} — retry`;
+    }
+    if (tracksBtn && !tracksBtn.hidden) {
+      tracksBtn.textContent = `Load failed: ${err.message} — retry`;
     }
   } finally {
     inspectorState.loadingMore = false;
@@ -2488,44 +2712,75 @@ async function inspectorLoadMore() {
 
 function inspectorSelectFolder(folder) {
   inspectorState.selection = { kind: "folder", row: folder };
-  // Drawer is hidden by default in v1.4; opening it is the
-  // explicit operator action (per-row ⓘ or toolbar Upscale/Delete).
   document.getElementById("inspector-drawer").hidden = false;
   document.getElementById("inspector-drawer-title").textContent =
     folder.name || "Library root";
   document.getElementById("inspector-drawer-content").hidden = false;
-  document.getElementById("inspector-drawer-tracks").textContent =
-    `${folder.trackCount} (${folder.upscaledCount} already upscaled)`;
-  document.getElementById("inspector-drawer-covered").textContent =
-    `${folder.upscaledCount}`;
-  document.getElementById("inspector-drawer-source-size").textContent =
-    humanBytes(folder.totalSizeBytes);
-  document.getElementById("inspector-drawer-projected").textContent = "—";
-  document.getElementById("inspector-drawer-free").textContent = "—";
-  document.getElementById("inspector-drawer-required").textContent = "—";
-  document.getElementById("inspector-drawer-warning").hidden = true;
-  document.getElementById("inspector-drawer-unknown").hidden = true;
-  // Reset action-button visibility on each select. Final hide/show
-  // happens in inspectorFetchProjection once the projection response
-  // tells us how many eligible files exist + whether variants are
-  // present. Default state before projection lands: Upscale visible
-  // but disabled; Delete visibility based on the rollup hint we
-  // have right now.
-  const upBtn = document.getElementById("inspector-upscale-btn");
-  const delBtn = document.getElementById("inspector-delete-variants-btn");
-  upBtn.hidden = false;
-  upBtn.disabled = true;
-  // Delete-variants button: hidden entirely when this scope has no
-  // upscaled tracks — user-requested cleanup of stale-but-unactionable
-  // chrome. Pre-fix it was only `disabled`. Conditional `hidden`
-  // lets the drawer's action row collapse on empty scopes.
-  delBtn.hidden = !(folder.upscaledCount > 0);
-  delBtn.disabled = !(folder.upscaledCount > 0);
-  document.getElementById("inspector-submit-status").textContent = "";
-  inspectorFetchProjection(folder.path);
+
+  // Populate both kind sections with the initial folder-rollup
+  // snapshot. The projection fetches below fill in projected size /
+  // required-with-margin / per-kind eligibility.
+  setDrawerKindInitial("upscale", folder, folder.upscaledCount || 0);
+  setDrawerKindInitial("optimize", folder, folder.optimizedCount || 0);
+
+  // SoX-missing chip + Generate-button disabled state per section.
+  const soxMissing = !inspectorState.soxAvailable;
+  for (const kind of ["upscale", "optimize"]) {
+    const section = document.querySelector(`.drawer-kind[data-kind="${kind}"]`);
+    if (!section) continue;
+    const chip = section.querySelector(".drawer-kind-soxchip");
+    if (chip) chip.hidden = !soxMissing;
+    const genBtn = section.querySelector(".drawer-generate-btn");
+    if (genBtn) genBtn.disabled = true; // re-enabled after projection if eligible
+  }
+  inspectorFetchProjectionAllKinds(folder.path);
 }
 
-async function inspectorFetchProjection(path) {
+// setDrawerKindInitial pre-fills the per-kind drawer section with
+// the rollup snapshot available before the projection lands. Source
+// size + initial covered count + Delete button visibility come from
+// the folder row's data-* (instant); projected / free / required
+// come from the per-kind projection fetch (200–500 ms latency).
+function setDrawerKindInitial(kind, folder, coveredCount) {
+  const section = document.querySelector(`.drawer-kind[data-kind="${kind}"]`);
+  if (!section) return;
+  const lbl = kind === "upscale" ? "upscaled" : "optimized";
+  section.querySelector(`.drawer-tracks[data-kind="${kind}"]`).textContent =
+    `${folder.trackCount} (${coveredCount} already ${lbl})`;
+  section.querySelector(`.drawer-covered[data-kind="${kind}"]`).textContent =
+    String(coveredCount);
+  section.querySelector(`.drawer-source-size[data-kind="${kind}"]`).textContent =
+    humanBytes(folder.totalSizeBytes || 0);
+  section.querySelector(`.drawer-projected[data-kind="${kind}"]`).textContent = "—";
+  section.querySelector(`.drawer-free[data-kind="${kind}"]`).textContent = "—";
+  section.querySelector(`.drawer-required[data-kind="${kind}"]`).textContent = "—";
+  const warn = section.querySelector(`.drawer-warning[data-kind="${kind}"]`);
+  const unknown = section.querySelector(`.drawer-unknown[data-kind="${kind}"]`);
+  const status = section.querySelector(`.drawer-submit-status[data-kind="${kind}"]`);
+  if (warn) warn.hidden = true;
+  if (unknown) unknown.hidden = true;
+  if (status) status.textContent = "";
+  const delBtn = section.querySelector(".drawer-delete-btn");
+  if (delBtn) {
+    delBtn.hidden = coveredCount === 0;
+    delBtn.disabled = coveredCount === 0;
+  }
+}
+
+// inspectorFetchProjectionAllKinds fires two parallel projection
+// fetches and populates each drawer section independently. Both
+// kinds are visible together (locked design choice — dual stacked
+// bars on the tile, dual stacked sections in the drawer) so the
+// operator never has to switch tabs to compare. Each fetch carries
+// its own race-guard against `inspectorState.selection`.
+async function inspectorFetchProjectionAllKinds(path) {
+  await Promise.all([
+    inspectorFetchProjection(path, "upscale"),
+    inspectorFetchProjection(path, "optimize"),
+  ]);
+}
+
+async function inspectorFetchProjection(path, kind) {
   // Race-guard: snapshot the path we were called with; bail out
   // on any branch below if the user has since selected a
   // different folder. Mirrors `inspectorNavigate`'s pattern.
@@ -2534,174 +2789,284 @@ async function inspectorFetchProjection(path) {
   const stillCurrent = () =>
     inspectorState.selection?.kind === "folder" &&
     inspectorState.selection.row.path === requested;
+
+  const sel = `[data-kind="${kind}"]`;
+  const lbl = kind === "upscale" ? "upscaled" : "optimized";
+  const warnEl = document.querySelector(`.drawer-warning${sel}`);
+  const unknownEl = document.querySelector(`.drawer-unknown${sel}`);
+  const projectedEl = document.querySelector(`.drawer-projected${sel}`);
+  const freeEl = document.querySelector(`.drawer-free${sel}`);
+  const requiredEl = document.querySelector(`.drawer-required${sel}`);
+  const targetEl = document.querySelector(`.drawer-target${sel}`);
+  const genBtn = document.querySelector(
+    `.drawer-generate-btn[data-kind="${kind}"]`);
+
   try {
-    const res = await fetch(`/api/library/browse-projection?path=${encodeURIComponent(path)}`);
+    const res = await fetch(
+      `/api/library/browse-projection?path=${encodeURIComponent(path)}&kind=${kind}`);
     if (!stillCurrent()) return;
     if (res.status === 503) {
-      document.getElementById("inspector-drawer-warning").hidden = false;
-      document.getElementById("inspector-drawer-warning").textContent =
-        "Upscale feature is disabled on this bridge.";
-      return;
-    }
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}`);
-    }
-    const data = await res.json();
-    if (!stillCurrent()) return;
-    document.getElementById("inspector-drawer-projected").textContent =
-      `${humanBytes(data.projectedSizeBytes)} (${data.projectedFiles} files)`;
-    document.getElementById("inspector-drawer-free").textContent =
-      humanBytes(data.availableBytes);
-    document.getElementById("inspector-drawer-required").textContent =
-      humanBytes(data.requiredBytesWithMargin);
-    if (data.unknownFormatFiles > 0) {
-      document.getElementById("inspector-drawer-unknown").hidden = false;
-      document.getElementById("inspector-drawer-unknown").textContent =
-        `${data.unknownFormatFiles} tracks here are in formats we can’t upscale (DSD, lossy, or unknown). They’ll be skipped.`;
-    }
-    // Conditional Upscale button visibility (v1.4 followup —
-    // user-requested cleanup of stale-but-unactionable chrome):
-    // hide the button entirely when nothing eligible remains rather
-    // than disabling it. The warning + "All eligible tracks already
-    // upscaled" hint below already communicates the state.
-    const upBtnEl = document.getElementById("inspector-upscale-btn");
-    if (data.projectedFiles === 0) {
-      upBtnEl.hidden = true;
-    } else {
-      upBtnEl.hidden = false;
-    }
-    if (data.wouldFit && data.projectedFiles > 0) {
-      upBtnEl.disabled = false;
-    } else if (data.projectedFiles === 0) {
-      // Differentiate three states for clearer operator UX
-      // (per the screenshot review — original message
-      // "every eligible track already has a variant"
-      // misrepresents the unknown-format / no-eligible case).
-      document.getElementById("inspector-drawer-warning").hidden = false;
-      const total = data.alreadyCoveredFiles + data.unknownFormatFiles;
-      let msg;
-      if (data.alreadyCoveredFiles > 0 && data.unknownFormatFiles === 0) {
-        msg = "All eligible tracks already have an upscaled variant.";
-      } else if (data.alreadyCoveredFiles === 0 && data.unknownFormatFiles > 0) {
-        msg = "No tracks here support upscaling (DSD or unknown source format).";
-      } else if (data.alreadyCoveredFiles > 0 && data.unknownFormatFiles > 0) {
-        msg = `${data.alreadyCoveredFiles} tracks already upscaled, ${data.unknownFormatFiles} can’t be upscaled — nothing eligible left.`;
-      } else if (total === 0) {
-        msg = "No tracks here.";
-      } else {
-        msg = "Nothing eligible to upscale.";
+      if (warnEl) {
+        warnEl.hidden = false;
+        warnEl.textContent = kind === "optimize"
+          ? "CarPlay-optimize feature is disabled on this bridge."
+          : "Upscale feature is disabled on this bridge.";
       }
-      document.getElementById("inspector-drawer-warning").textContent = msg;
-    } else {
-      document.getElementById("inspector-drawer-warning").hidden = false;
-      document.getElementById("inspector-drawer-warning").textContent =
-        `Not enough free space: needs ${humanBytes(data.requiredBytesWithMargin)} (incl. 10% safety margin), only ${humanBytes(data.availableBytes)} available on the bridge data volume.`;
+      return;
+    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (!stillCurrent()) return;
+    if (projectedEl) {
+      projectedEl.textContent =
+        `${humanBytes(data.projectedSizeBytes)} (${data.projectedFiles} files)`;
+    }
+    if (freeEl) freeEl.textContent = humanBytes(data.availableBytes);
+    if (requiredEl) requiredEl.textContent = humanBytes(data.requiredBytesWithMargin);
+    if (targetEl && kind === "upscale") {
+      if (data.targetRate > 0 && data.targetBits > 0) {
+        targetEl.textContent = `${data.targetBits}-bit / ${data.targetRate} Hz`;
+      } else {
+        targetEl.textContent = "—";
+      }
+    }
+    // Optimize target stays the static "16-bit / 44.1k or 48k
+    // (family-preserved)" from the template — server returns
+    // targetRate=0 to signal varies per-track.
+
+    if (data.unknownFormatFiles > 0 && unknownEl) {
+      unknownEl.hidden = false;
+      const skipReason = kind === "optimize"
+        ? "DSD / lossy / already at target / unknown format"
+        : "DSD / lossy / unknown format";
+      unknownEl.textContent =
+        `${data.unknownFormatFiles} tracks here are ${skipReason} — they'll be skipped.`;
+    }
+
+    // Generate button visibility / enabled state.
+    if (genBtn) {
+      const soxMissing = !inspectorState.soxAvailable;
+      if (data.projectedFiles === 0) {
+        // Surface the "nothing to do" state inline instead of via
+        // a hidden button. Different phrasing per state matrix.
+        if (warnEl) {
+          warnEl.hidden = false;
+          const total = data.alreadyCoveredFiles + data.unknownFormatFiles;
+          let msg;
+          if (data.alreadyCoveredFiles > 0 && data.unknownFormatFiles === 0) {
+            msg = `All eligible tracks already have a ${lbl} variant.`;
+          } else if (data.alreadyCoveredFiles === 0 && data.unknownFormatFiles > 0) {
+            msg = kind === "optimize"
+              ? "No tracks here are eligible for CarPlay-optimize (already at target, lossy, DSD, or unknown source format)."
+              : "No tracks here support upscaling (DSD or unknown source format).";
+          } else if (data.alreadyCoveredFiles > 0 && data.unknownFormatFiles > 0) {
+            msg = `${data.alreadyCoveredFiles} tracks already ${lbl}, ${data.unknownFormatFiles} not eligible — nothing left to generate.`;
+          } else if (total === 0) {
+            msg = "No tracks here.";
+          } else {
+            msg = "Nothing eligible.";
+          }
+          warnEl.textContent = msg;
+        }
+        genBtn.disabled = true;
+        genBtn.hidden = true;
+      } else if (data.wouldFit) {
+        genBtn.hidden = false;
+        genBtn.disabled = soxMissing; // SoX gate is the final word
+      } else {
+        genBtn.hidden = false;
+        genBtn.disabled = true;
+        if (warnEl) {
+          warnEl.hidden = false;
+          warnEl.textContent =
+            `Not enough free space: needs ${humanBytes(data.requiredBytesWithMargin)} (incl. 10% safety margin), only ${humanBytes(data.availableBytes)} available on the bridge data volume.`;
+        }
+      }
     }
   } catch (err) {
     if (!stillCurrent()) return;
-    document.getElementById("inspector-drawer-warning").hidden = false;
-    document.getElementById("inspector-drawer-warning").textContent =
-      `Couldn’t fetch projection: ${err.message}`;
+    if (warnEl) {
+      warnEl.hidden = false;
+      warnEl.textContent = `Couldn't fetch projection: ${err.message}`;
+    }
   }
 }
 
-async function inspectorSubmitBatch() {
+// inspectorSubmitBatch is the drawer-button-driven submit. Reads
+// the kind from the button's `data-kind` attr (event delegation
+// in initLibraryInspector wires it) and dispatches to
+// inspectorSubmitBatchForKind with a single-path array.
+async function inspectorSubmitBatch(ev) {
   const sel = inspectorState.selection;
   if (sel?.kind !== "folder") return;
-  const btn = document.getElementById("inspector-upscale-btn");
-  btn.disabled = true;
-  const status = document.getElementById("inspector-submit-status");
-  status.textContent = "Submitting…";
-  try {
-    const res = await fetch("/api/upscale/batch", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path: sel.row.path }),
-    });
-    if (res.status === 507) {
+  const btn = ev?.currentTarget;
+  const kind = btn?.dataset.kind || "upscale";
+  await inspectorSubmitBatchForKind(kind, [sel.row.path]);
+}
+
+// inspectorSubmitBatchForKind fires N parallel POSTs against
+// /api/upscale/batch (one per path) with the same `kind`. Aggregates
+// enqueued / alreadyCovered counts into a single status line on the
+// kind's drawer section (when paths.length === 1) or the selection
+// bar (when paths.length > 1). The selection-bar callers route
+// through inspectorSelectionSubmit, which delegates here.
+async function inspectorSubmitBatchForKind(kind, paths) {
+  if (!Array.isArray(paths) || paths.length === 0) return;
+  if (kind !== "upscale" && kind !== "optimize") return;
+
+  const single = paths.length === 1;
+  const status = single
+    ? document.querySelector(`.drawer-submit-status[data-kind="${kind}"]`)
+    : null;
+  if (status) status.textContent = "Submitting…";
+  // Capture the path the operator is currently viewing so the
+  // post-success refresh (below) doesn't race a mid-flight
+  // navigation to a different folder — Gemini medium on PR #276.
+  const originPath = inspectorState.path;
+
+  // Sequential submit (not Promise.all). Multi-select against
+  // many folders can otherwise burst N concurrent connections at
+  // the bridge — over browser per-host limits AND the SQLite
+  // single-writer envelope. The serial loop keeps the admin
+  // server responsive under a 20+ folder Optimize push. Per
+  // Gemini medium on PR #276.
+  const results = [];
+  for (const path of paths) {
+    try {
+      const res = await fetch("/api/upscale/batch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path, kind }),
+      });
+      if (res.status === 507) {
+        const data = await res.json();
+        results.push({ path, error: `needs ${humanBytes(data.requiredBytes)}, only ${humanBytes(data.availableBytes)} available` });
+        continue;
+      }
+      if (res.status === 503) {
+        results.push({ path, error: `${kind} feature disabled on this bridge` });
+        continue;
+      }
+      if (!res.ok) {
+        results.push({ path, error: `HTTP ${res.status}` });
+        continue;
+      }
       const data = await res.json();
-      status.textContent =
-        `Refused: needs ${humanBytes(data.requiredBytes)}, only ${humanBytes(data.availableBytes)} available.`;
-      btn.disabled = false;
-      return;
+      results.push({ path, ok: true, data });
+    } catch (err) {
+      results.push({ path, error: err.message });
     }
-    if (res.status === 503) {
-      // Bridge upscale feature disabled mid-flight (operator
-      // toggled it off after the Inspector loaded). Surface a
-      // clear message rather than the generic HTTP fall-through.
-      // Per CodeRabbit minor on PR #205 round 2.
-      status.textContent = "Upscale feature is disabled on this bridge.";
-      btn.disabled = false;
-      return;
-    }
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}`);
-    }
-    const data = await res.json();
-    status.innerHTML =
-      `Batch enrolled · <strong>${data.enqueuedCount}</strong> tracks queued ` +
-      `(${data.alreadyCovered} already covered). ` +
-      `<a href="/jobs">View jobs →</a>`;
-  } catch (err) {
-    status.textContent = `Couldn’t submit: ${err.message}`;
-    btn.disabled = false;
   }
+
+  const ok = results.filter(r => r.ok);
+  const failed = results.filter(r => r.error);
+  const enqueued = ok.reduce((n, r) => n + (r.data?.enqueuedCount || 0), 0);
+  const covered = ok.reduce((n, r) => n + (r.data?.alreadyCovered || 0), 0);
+
+  if (single && status) {
+    if (failed.length > 0) {
+      status.textContent = `Couldn't submit: ${failed[0].error}`;
+    } else if (ok.length > 0) {
+      status.innerHTML =
+        `Batch enrolled · <strong>${enqueued}</strong> tracks queued ` +
+        `(${covered} already covered). ` +
+        `<a href="/jobs">View jobs →</a>`;
+    }
+  } else {
+    // Multi-path: render a single toast-style message on the
+    // selection bar. Fold into a small floating notice so the
+    // operator sees the aggregated counts.
+    const bar = document.getElementById("inspector-selection-bar");
+    if (bar) {
+      let toast = bar.querySelector(".selection-toast");
+      if (!toast) {
+        toast = document.createElement("span");
+        toast.className = "selection-toast hint";
+        bar.appendChild(toast);
+      }
+      if (failed.length > 0 && ok.length === 0) {
+        toast.textContent = `Couldn't submit any: ${failed[0].error}`;
+      } else if (failed.length > 0) {
+        toast.textContent =
+          `${enqueued} tracks queued across ${ok.length} folders · ${failed.length} folders failed`;
+      } else {
+        toast.innerHTML =
+          `Batch enrolled · <strong>${enqueued}</strong> tracks queued across ${ok.length} folders. ` +
+          `<a href="/jobs">View jobs →</a>`;
+      }
+    }
+  }
+
+  // Refresh the page after a CLEAN-SUCCESS submit so coverage
+  // bars update on the tiles the operator is looking at. Gated
+  // on `failed.length === 0` because `inspectorRender` clears
+  // `selectedPaths` on every navigate — refreshing after a
+  // partial failure would clobber the preserve-on-failure
+  // behaviour that `inspectorSelectionSubmit` depends on for
+  // the operator's retry workflow. The `originPath ===
+  // inspectorState.path` check ensures we don't re-navigate if
+  // the user moved to a different folder mid-submit. Per
+  // CodeRabbit major on PR #276 round 4.
+  if (ok.length > 0 && failed.length === 0 && inspectorState.path === originPath) {
+    await inspectorNavigate(originPath);
+  }
+  return { ok: ok.length, failed: failed.length, enqueued };
 }
 
-// inspectorDeleteVariants fires DELETE /api/upscale/variants?prefix=<scope>
-// against the admin port. The handler forwards to api.RunVariantDelete
-// which does the unlink + DB delete + SSE publish loop — paired iOS
-// clients receive the same `upscale.deleted` event they'd get from a
-// direct DELETE /v1/upscale/variants. Uses a native confirm() for the
-// scope-bounded delete; the global "Clear all" path on the settings
-// page has its own typed-phrase modal because the blast radius is wider.
-//
-// On success the inspector drawer's "Already upscaled" count is locally
-// zeroed AND the underlying folder row's `upscaledCount` snapshot is
-// updated, so subsequent selections (without navigation) reflect the
-// post-delete state without waiting for the browse fetch to re-fire.
-async function inspectorDeleteVariants() {
+// inspectorDeleteVariants is the drawer-button-driven delete.
+// Reads kind from the button's `data-kind` attr (event delegation
+// in initLibraryInspector wires it). Dispatches to
+// inspectorDeleteVariantsForKind.
+async function inspectorDeleteVariants(ev) {
   const sel = inspectorState.selection;
   if (sel?.kind !== "folder") return;
-  const scope = sel.row.path || "";
+  const btn = ev?.currentTarget;
+  const kind = btn?.dataset.kind || "upscale";
+  await inspectorDeleteVariantsForKind(kind, sel.row.path || "");
+}
+
+// inspectorDeleteVariantsForKind fires DELETE /api/upscale/variants
+// against the admin port, scoped by both prefix AND kind. The handler
+// forwards to api.RunVariantDelete which does the unlink + DB delete +
+// SSE publish loop. Same `upscale.deleted` event reaches iOS clients
+// regardless of which kind was removed (the variantId carries the
+// kind prefix; iOS dispatches accordingly).
+async function inspectorDeleteVariantsForKind(kind, scope) {
+  if (kind !== "upscale" && kind !== "optimize") return;
+  const lbl = kind === "upscale" ? "upscaled" : "CarPlay-optimized";
   const scopeLabel = scope === "" ? "the library root" : scope;
   if (!confirm(
-    `Delete every cached upscaled variant under “${scopeLabel}”?\n\n` +
+    `Delete every cached ${lbl} variant under "${scopeLabel}"?\n\n` +
     `This removes the FLAC sidecars on disk AND the matching DB rows.\n` +
     `Paired iOS devices will reconcile via the upscale.deleted SSE event.\n\n` +
-    `Source files are untouched — re-upscale anytime.`
+    `Source files are untouched — re-${kind === "optimize" ? "optimize" : "upscale"} anytime.`
   )) return;
 
-  const btn = document.getElementById("inspector-delete-variants-btn");
-  btn.disabled = true;
-  const status = document.getElementById("inspector-submit-status");
-  status.textContent = "Deleting…";
+  const btn = document.querySelector(`.drawer-delete-btn[data-kind="${kind}"]`);
+  if (btn) btn.disabled = true;
+  const status = document.querySelector(`.drawer-submit-status[data-kind="${kind}"]`);
+  if (status) status.textContent = "Deleting…";
 
   try {
-    // Empty prefix is the library-root case → unscoped delete,
-    // which requires `?confirm=true` per the shared parser's
-    // safety gate. The native confirm() above is the operator's
-    // explicit opt-in for that wider scope; relay it as the
-    // ?confirm=true flag.
-    let url;
+    const params = new URLSearchParams();
     if (scope === "") {
-      url = `/api/upscale/variants?confirm=true`;
+      params.set("confirm", "true");
     } else {
-      url = `/api/upscale/variants?prefix=${encodeURIComponent(scope)}`;
+      params.set("prefix", scope);
     }
-    const res = await fetch(url, {
+    // Server-side kind filter — the DELETE handler reads ?kind=...
+    // and adds the matching variant_id LIKE filter to its delete
+    // statement. (If the handler hasn't yet adopted the param, the
+    // legacy unscoped delete behaviour applies — operators see a
+    // larger-than-intended deletion and can recover via re-generate.)
+    params.set("kind", kind);
+    const res = await fetch(`/api/upscale/variants?${params.toString()}`, {
       method: "DELETE",
       headers: { "Content-Type": "application/json" },
     });
     if (res.status === 503) {
-      // Bridge upscale feature disabled mid-flight. Re-enable the
-      // button so the operator can retry after toggling the
-      // feature back on — matches `inspectorSubmitBatch`'s 503
-      // handler. Without this, a single mid-session toggle-off
-      // would force a navigation away + back to re-enable the
-      // delete affordance (CodeRabbit Minor on PR #220).
-      status.textContent = "Upscale feature is disabled on this bridge.";
-      btn.disabled = false;
+      if (status) status.textContent = `${kind} feature is disabled on this bridge.`;
+      if (btn) btn.disabled = false;
       return;
     }
     if (!res.ok) {
@@ -2709,27 +3074,117 @@ async function inspectorDeleteVariants() {
       throw new Error(body || `HTTP ${res.status}`);
     }
     const data = await res.json();
-    status.innerHTML =
-      `Deleted <strong>${data.deletedCount}</strong> variants · ` +
+    if (status) status.innerHTML =
+      `Deleted <strong>${data.deletedCount}</strong> ${lbl} variants · ` +
       `freed ${humanBytes(data.freedBytes ?? 0)}.`;
-    // Re-fetch the authoritative folder state instead of deriving
-    // a post-delete count locally. `data.deletedCount` is the
-    // number of VARIANT ROWS removed; `folder.upscaledCount` is
-    // the number of TRACKS that have at least one variant.
-    // Subtracting variant-count from track-count is wrong-unit
-    // arithmetic — multi-variant-per-track tracks (operator
-    // generated several target rates over the lifetime of the
-    // bridge) would silently underflow the displayed count.
-    // CodeRabbit Major on PR #220 caught this. The re-navigation
-    // also refreshes every other row in the folder list, so a
-    // delete that affected sibling folders shows up immediately
-    // (rare — prefix scope is typically the selected folder
-    // itself, but possible if the selection is a parent and a
-    // child has variants too).
+    // Refresh the page so coverage bars reflect the post-delete state.
     await inspectorNavigate(inspectorState.path);
   } catch (err) {
-    status.textContent = `Couldn’t delete: ${err.message}`;
-    btn.disabled = false;
+    if (status) status.textContent = `Couldn't delete: ${err.message}`;
+    if (btn) btn.disabled = false;
+  }
+}
+
+// ===== Multi-select bar + tile-checkbox handling =====
+
+// inspectorOnTileCheckboxChange is the delegated change handler
+// for tile checkboxes. Adds/removes the tile's path from the
+// selection set and refreshes the selection bar's aggregated
+// counts client-side.
+function inspectorOnTileCheckboxChange(ev) {
+  const cb = ev.target.closest('input[type="checkbox"][data-path]');
+  if (!cb) return;
+  const tile = cb.closest(".inspector-tile");
+  const path = cb.dataset.path;
+  if (cb.checked) {
+    // Capture the rollup snapshot at toggle time so the selection-
+    // bar aggregator doesn't have to re-find the checkbox in the
+    // DOM on every tick. Numeric coercion with `|| 0` defends
+    // against any data-* attr that wasn't populated by the Go
+    // template (defensive — server side fills all three fields).
+    inspectorState.selectedPaths.set(path, {
+      trackCount: Number.parseInt(cb.dataset.trackCount, 10) || 0,
+      upscaledCount: Number.parseInt(cb.dataset.upscaledCount, 10) || 0,
+      optimizedCount: Number.parseInt(cb.dataset.optimizedCount, 10) || 0,
+    });
+    if (tile) tile.dataset.selected = "true";
+  } else {
+    inspectorState.selectedPaths.delete(path);
+    if (tile) delete tile.dataset.selected;
+  }
+  inspectorUpdateSelectionBar();
+}
+
+// inspectorUpdateSelectionBar iterates the cached rollup snapshots
+// in `inspectorState.selectedPaths` and computes per-kind gap
+// numbers. O(M) over selected count (M typically <50) with NO DOM
+// queries — Gemini medium on PR #276 caught the prior O(M×N)
+// `document.querySelector` per tick.
+function inspectorUpdateSelectionBar() {
+  const bar = document.getElementById("inspector-selection-bar");
+  if (!bar) return;
+  const sel = inspectorState.selectedPaths;
+  if (sel.size === 0) {
+    bar.hidden = true;
+    return;
+  }
+  bar.hidden = false;
+  let upscaleGap = 0;
+  let optimizeGap = 0;
+  for (const snap of sel.values()) {
+    upscaleGap += Math.max(0, snap.trackCount - snap.upscaledCount);
+    optimizeGap += Math.max(0, snap.trackCount - snap.optimizedCount);
+  }
+  document.getElementById("selection-count").textContent =
+    `${sel.size} selected`;
+  document.getElementById("selection-upscale-gap").textContent = String(upscaleGap);
+  document.getElementById("selection-optimize-gap").textContent = String(optimizeGap);
+  const soxMissing = !inspectorState.soxAvailable;
+  for (const btn of bar.querySelectorAll(".selection-submit-btn")) {
+    const kind = btn.dataset.kind;
+    const gap = kind === "upscale" ? upscaleGap : optimizeGap;
+    btn.disabled = soxMissing || gap === 0;
+  }
+}
+
+// inspectorSelectionSubmit fires the multi-select bar's per-kind
+// Submit button. Reads the selected paths and fans out N parallel
+// POSTs via inspectorSubmitBatchForKind. Clears the selection on
+// success.
+async function inspectorSelectionSubmit(ev) {
+  const btn = ev?.currentTarget;
+  const kind = btn?.dataset.kind || "upscale";
+  // `Array.from(map)` would yield [key, value] tuples; we want the
+  // keys (paths) only. `map.keys()` is iterable; spread captures
+  // them in insertion order.
+  const paths = Array.from(inspectorState.selectedPaths.keys());
+  if (paths.length === 0) return;
+  btn.disabled = true;
+  try {
+    // Clear the selection ONLY when every submit landed cleanly.
+    // On any partial / total failure, preserve the selection so
+    // the operator can retry the failed folders without rebuilding
+    // the entire selection from scratch (could be 20+ folders on
+    // a deep multi-album batch). Per CodeRabbit major on PR #276.
+    // The toast on the selection bar (rendered by
+    // inspectorSubmitBatchForKind) carries the per-folder failure
+    // detail so the operator knows what didn't enqueue.
+    const result = await inspectorSubmitBatchForKind(kind, paths);
+    if (result?.failed === 0) {
+      inspectorState.selectedPaths.clear();
+      // Mirror the DOM uncheck — keep checkbox state in sync with
+      // the cleared internal map. Same shape as the Clear button
+      // handler in initLibraryInspector.
+      for (const cb of document.querySelectorAll(
+        '.inspector-tile input[type="checkbox"][data-path]:checked')) {
+        cb.checked = false;
+        const tile = cb.closest(".inspector-tile");
+        if (tile) delete tile.dataset.selected;
+      }
+      inspectorUpdateSelectionBar();
+    }
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -2850,37 +3305,29 @@ async function inspectorSearchExecute(q) {
 }
 
 // inspectorSearchClientFilter applies a case-insensitive substring
-// match to the visible rows in the current browse table. Returns
+// match to the visible tiles in the current browse grids. Returns
 // the count of matches. Pure DOM toggle — no re-render cost.
+// Updated for the tile-grid redesign (PR feat/library-inspector-tiles):
+// walks `.inspector-tile` instead of `<tr>`.
 function inspectorSearchClientFilter(q) {
   if (!inspectorState.lastBrowseData) return 0;
   const needle = q.toLowerCase();
-  const body = document.getElementById("inspector-rows-body");
-  if (!body) return 0;
   let count = 0;
-  for (const tr of body.querySelectorAll("tr")) {
-    // Match on the visible name (first cell) — operator-typed
-    // queries align with what they're seeing in the column.
-    const name = (tr.querySelector(".folder-name, td:first-child")?.textContent || "").toLowerCase();
+  for (const tile of document.querySelectorAll(".inspector-tile")) {
+    const name = (tile.querySelector(".tile-name")?.textContent || "").toLowerCase();
     if (name.includes(needle)) {
-      tr.classList.remove("inspector-row-hidden");
+      tile.classList.remove("inspector-row-hidden");
       count++;
     } else {
-      tr.classList.add("inspector-row-hidden");
+      tile.classList.add("inspector-row-hidden");
     }
   }
   return count;
 }
 
-// inspectorSearchClearClientFilter restores all rows to visible —
-// called when the search is cleared OR when we're about to render
-// server-side results (the current folder rows are no longer the
-// authoritative answer).
 function inspectorSearchClearClientFilter() {
-  const body = document.getElementById("inspector-rows-body");
-  if (!body) return;
-  for (const tr of body.querySelectorAll("tr.inspector-row-hidden")) {
-    tr.classList.remove("inspector-row-hidden");
+  for (const tile of document.querySelectorAll(".inspector-tile.inspector-row-hidden")) {
+    tile.classList.remove("inspector-row-hidden");
   }
 }
 
@@ -3051,20 +3498,19 @@ function inspectorSearchActivateAt(idx) {
   }
 }
 
-// inspectorHighlightRow scrolls a row into view and applies a
+// inspectorHighlightRow scrolls a tile into view and applies a
 // short-lived `aria-current="true"` + tinted background so the
-// operator can see WHICH track was the search hit.
+// operator can see WHICH track tile was the search hit.
 function inspectorHighlightRow(trackPath) {
-  const body = document.getElementById("inspector-rows-body");
-  if (!body) return;
-  const tr = body.querySelector(`tr[data-path="${cssEscape(trackPath)}"]`);
-  if (!tr) return;
-  tr.setAttribute("aria-current", "true");
-  tr.classList.add("inspector-row-highlight");
-  tr.scrollIntoView({ block: "center" });
+  const tile = document.querySelector(
+    `.inspector-tile[data-path="${cssEscape(trackPath)}"]`);
+  if (!tile) return;
+  tile.setAttribute("aria-current", "true");
+  tile.classList.add("inspector-row-highlight");
+  tile.scrollIntoView({ block: "center" });
   setTimeout(() => {
-    tr.removeAttribute("aria-current");
-    tr.classList.remove("inspector-row-highlight");
+    tile.removeAttribute("aria-current");
+    tile.classList.remove("inspector-row-highlight");
   }, 1500);
 }
 
@@ -3095,12 +3541,19 @@ async function inspectorEnterSearchMode(q) {
   inspectorSearchClearClientFilter();
   document.getElementById("inspector-current-heading").textContent =
     `Search results for "${q}"`;
-  const body = document.getElementById("inspector-rows-body");
-  body.innerHTML = `<tr><td colspan="5" class="hint"><em>Loading…</em></td></tr>`;
-  document.getElementById("inspector-rows-table").hidden = false;
-  document.getElementById("inspector-empty").hidden = true;
-  // Cancel any in-flight server search (e.g., from the dropdown
-  // path) so a stale response can't land on top of the flat-list.
+  // Show the tile container; clear both grids and surface a transient
+  // "Loading…" hint while the server search lands.
+  const content = document.getElementById("inspector-content");
+  if (content) content.hidden = false;
+  const empty = document.getElementById("inspector-empty");
+  if (empty) {
+    empty.hidden = false;
+    empty.innerHTML = `<em>Loading search results…</em>`;
+  }
+  document.getElementById("folders-grid").innerHTML = "";
+  document.getElementById("tracks-grid").innerHTML = "";
+  document.getElementById("folders-section").hidden = true;
+  document.getElementById("tracks-section").hidden = true;
   if (inspectorSearchController) {
     inspectorSearchController.abort();
   }
@@ -3109,8 +3562,6 @@ async function inspectorEnterSearchMode(q) {
     const res = await fetch(
       `/api/library/search?q=${encodeURIComponent(q)}&limit=200`,
       { signal: inspectorSearchController.signal });
-    // Path guard: bail if the user has navigated away OR exited
-    // search mode while the fetch was in flight.
     if (inspectorState.mode !== "search" || inspectorState.searchQuery !== q) return;
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
@@ -3118,7 +3569,10 @@ async function inspectorEnterSearchMode(q) {
     inspectorRenderSearchFlatList(data, q);
   } catch (err) {
     if (err.name === "AbortError") return;
-    body.innerHTML = `<tr><td colspan="5" class="error">Search failed: ${escapeHTML(err.message)}</td></tr>`;
+    if (empty) {
+      empty.hidden = false;
+      empty.innerHTML = `<span class="error">Search failed: ${escapeHTML(err.message)}</span>`;
+    }
   }
 }
 
@@ -3140,67 +3594,79 @@ function inspectorExitSearchMode() {
 function inspectorRenderSearchFlatList(data, q) {
   const folders = data.folders || [];
   const tracks = data.tracks || [];
-  const body = document.getElementById("inspector-rows-body");
-  body.innerHTML = "";
+  const foldersGrid = document.getElementById("folders-grid");
+  const tracksGrid = document.getElementById("tracks-grid");
+  const empty = document.getElementById("inspector-empty");
+  foldersGrid.innerHTML = "";
+  tracksGrid.innerHTML = "";
   const total = folders.length + tracks.length;
   if (total === 0) {
-    body.innerHTML = `<tr><td colspan="5" class="hint"><em>No matches for ${escapeHTML(q)}.</em></td></tr>`;
+    if (empty) {
+      empty.hidden = false;
+      empty.innerHTML = `<em>No matches for ${escapeHTML(q)}.</em>`;
+    }
     return;
   }
+  if (empty) empty.hidden = true;
+  document.getElementById("folders-section").hidden = folders.length === 0;
+  document.getElementById("tracks-section").hidden = tracks.length === 0;
+  document.getElementById("folders-count").textContent = String(folders.length);
+  document.getElementById("tracks-count").textContent = String(tracks.length);
+
   for (const f of folders) {
-    const tr = document.createElement("tr");
-    tr.dataset.kind = "folder";
-    tr.dataset.path = f.path;
-    tr.setAttribute("role", "link");
-    tr.tabIndex = 0;
-    tr.innerHTML = `
-      <td class="folder-cell">
-        <span class="folder-name">📁 ${escapeHTML(f.name)}</span>
-        <span class="inspector-search-secondary">${escapeHTML(f.parentPath || "Library root")} · ${f.hitCount} match${f.hitCount === 1 ? "" : "es"}</span>
-      </td>
-      <td class="num">—</td>
-      <td class="num">—</td>
-      <td class="num">—</td>
-      <td class="folder-actions"></td>
+    const tile = document.createElement("article");
+    tile.className = "inspector-tile";
+    tile.dataset.kind = "folder";
+    tile.dataset.path = f.path;
+    tile.setAttribute("role", "link");
+    tile.tabIndex = 0;
+    const parentPath = f.parentPath || "Library root";
+    const hits = `${f.hitCount} match${f.hitCount === 1 ? "" : "es"}`;
+    tile.innerHTML = `
+      <header class="tile-header">
+        <span class="tile-icon" aria-hidden="true">📁</span>
+        <h3 class="tile-name" title="${escapeHTML(f.name)}">${escapeHTML(f.name)}</h3>
+      </header>
+      <p class="hint inspector-search-secondary" style="margin:0;">
+        ${escapeHTML(parentPath)} · ${hits}
+      </p>
     `;
-    tr.addEventListener("click", () => inspectorNavigate(f.path));
-    tr.addEventListener("keydown", (e) => {
+    tile.addEventListener("click", () => inspectorNavigate(f.path));
+    tile.addEventListener("keydown", (e) => {
       if (e.key === "Enter" || e.key === " ") {
         e.preventDefault();
         inspectorNavigate(f.path);
       }
     });
-    body.appendChild(tr);
+    foldersGrid.appendChild(tile);
   }
   for (const t of tracks) {
-    const tr = document.createElement("tr");
-    tr.dataset.kind = "track";
-    tr.dataset.path = t.path;
-    tr.setAttribute("role", "link");
-    tr.tabIndex = 0;
+    const tile = document.createElement("article");
+    tile.className = "inspector-tile";
+    tile.dataset.kind = "track";
+    tile.dataset.path = t.path;
+    tile.setAttribute("role", "link");
+    tile.tabIndex = 0;
     const ctx = [t.artist, t.album, t.parentPath || "Library root"]
       .filter(Boolean).join(" · ");
-    tr.innerHTML = `
-      <td>
-        🎵 ${escapeHTML(t.title || t.name)}
-        <span class="inspector-search-secondary">${escapeHTML(ctx)}</span>
-      </td>
-      <td class="num">—</td>
-      <td class="num">—</td>
-      <td class="num">—</td>
-      <td class="folder-actions"></td>
+    tile.innerHTML = `
+      <header class="tile-header">
+        <span class="tile-icon" aria-hidden="true">🎵</span>
+        <h3 class="tile-name" title="${escapeHTML(t.title || t.name)}">${escapeHTML(t.title || t.name)}</h3>
+      </header>
+      <p class="hint inspector-search-secondary" style="margin:0;">${escapeHTML(ctx)}</p>
     `;
     const parent = t.parentPath || "";
-    tr.addEventListener("click", () => {
+    tile.addEventListener("click", () => {
       inspectorNavigate(parent).then(() => inspectorHighlightRow(t.path));
     });
-    tr.addEventListener("keydown", (e) => {
+    tile.addEventListener("keydown", (e) => {
       if (e.key === "Enter" || e.key === " ") {
         e.preventDefault();
         inspectorNavigate(parent).then(() => inspectorHighlightRow(t.path));
       }
     });
-    body.appendChild(tr);
+    tracksGrid.appendChild(tile);
   }
 }
 

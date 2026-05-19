@@ -28,6 +28,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -119,6 +120,17 @@ type VariantDeleteRequest struct {
 	// Path non-empty → delete variants for one exact source path.
 	// Must be a cleaned relative path.
 	Path string
+	// Kind narrows the deletion to one variant kind: "" (default,
+	// back-compat — deletes ALL kinds matching the path scope),
+	// "upscale" (only `upscaled-*` variants), or "optimize" (only
+	// `optimized-*` variants). The PR feat/library-inspector-tiles
+	// added the kind-aware admin DELETE so per-kind buttons in the
+	// inspector drawer can clear one kind without wiping the other.
+	// Validated at the parsing layer; invalid values rejected with
+	// `bad_request` before reaching here. Empty preserves the
+	// pre-feature behaviour so a stray external `DELETE
+	// /v1/upscale/variants?prefix=…` keeps working as it did.
+	Kind string
 }
 
 // VariantDeleteResponse is the wire shape returned on success.
@@ -195,6 +207,18 @@ func parseVariantDeleteQuery(q map[string][]string) (req VariantDeleteRequest, e
 	prefix := strings.TrimSpace(get("prefix"))
 	pathParam := strings.TrimSpace(get("path"))
 	confirm := strings.EqualFold(get("confirm"), "true")
+	// Kind narrows the delete to one variant kind. Empty preserves
+	// the pre-feature behaviour (deletes BOTH kinds matching the
+	// path scope). Validated here so the downstream
+	// RunVariantDelete sees a known-clean value.
+	kind := strings.ToLower(strings.TrimSpace(get("kind")))
+	switch kind {
+	case "", "upscale", "optimize":
+		req.Kind = kind
+	default:
+		return req, "bad_request",
+			`unknown kind: ` + kind + ` (expected "upscale" or "optimize")`
+	}
 
 	// Mutually-exclusive shape — `prefix` AND `path` together is
 	// ambiguous (do we widen or narrow?); reject upfront rather
@@ -309,6 +333,45 @@ func (s *Server) RunVariantDelete(ctx context.Context, req VariantDeleteRequest)
 	}
 	if err != nil {
 		return VariantDeleteResponse{}, err
+	}
+
+	// Kind narrowing: filter the listed rows by variant_id prefix
+	// before any unlink / DB-delete fires. Done here rather than
+	// at the Store layer because all three list shapes
+	// (ListVariantsForPath / ListVariantsByPathPrefix / AllVariants)
+	// return the full row set; filtering in-memory keeps the Store
+	// interface unchanged. Version-agnostic prefix (matches v1
+	// AND v2 sidecars) by design — see manifest.VariantKindPrefix*
+	// docblock for the rationale.
+	//
+	// Defense in depth: parseVariantDeleteQuery rejects unknown
+	// values at the HTTP boundary, but RunVariantDelete is
+	// exported — a future direct caller (test harness, internal
+	// tool) that passes `Kind = "junk"` would have `wantPrefix`
+	// remain "" and `strings.HasPrefix(..., "")` match every row,
+	// silently widening the delete back to BOTH kinds. The
+	// `default` arm here closes that gap by returning an error.
+	// Empty Kind preserves pre-feature behaviour (no filter,
+	// delete BOTH kinds). Per CodeRabbit major on PR #276 round 3.
+	var wantPrefix string
+	switch req.Kind {
+	case "":
+		// Empty → no filter; preserves pre-feature back-compat.
+	case "upscale":
+		wantPrefix = "upscaled-"
+	case "optimize":
+		wantPrefix = "optimized-"
+	default:
+		return VariantDeleteResponse{}, fmt.Errorf("variant delete request: unknown kind %q (expected empty, \"upscale\", or \"optimize\")", req.Kind)
+	}
+	if wantPrefix != "" {
+		filtered := rows[:0]
+		for _, row := range rows {
+			if strings.HasPrefix(row.VariantID, wantPrefix) {
+				filtered = append(filtered, row)
+			}
+		}
+		rows = filtered
 	}
 
 	resp := VariantDeleteResponse{DeletedPaths: []string{}}

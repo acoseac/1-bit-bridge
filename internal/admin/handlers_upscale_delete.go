@@ -108,6 +108,20 @@ func parseVariantDeleteRequest(q map[string][]string) (req AdminVariantDeleteReq
 	prefix := strings.TrimSpace(get("prefix"))
 	pathParam := strings.TrimSpace(get("path"))
 	confirm := strings.EqualFold(get("confirm"), "true")
+	// Kind narrows the delete to one variant kind. Empty preserves
+	// pre-feature behaviour (deletes BOTH kinds matching the path
+	// scope). Mirrors api.parseVariantDeleteQuery's contract — both
+	// parsers MUST stay in lockstep; the downstream RunVariantDelete
+	// only filters once, and a mismatch here would either reject a
+	// valid kind or accept an unknown one.
+	kind := strings.ToLower(strings.TrimSpace(get("kind")))
+	switch kind {
+	case "", "upscale", "optimize":
+		req.Kind = kind
+	default:
+		return req, "bad_request",
+			`unknown kind: ` + kind + ` (expected "upscale" or "optimize")`
+	}
 
 	if hasPrefix && hasPath {
 		return req, "bad_request",

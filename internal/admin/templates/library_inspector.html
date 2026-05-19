@@ -1,29 +1,23 @@
 {{define "content"}}
-<section class="page library-inspector">
+<section class="page library-inspector" data-sox-available="{{.Data.SoxAvailable}}">
   <h1>Library Inspector</h1>
   <p class="lede">
-    Browse the indexed library and trigger upscaling at folder /
-    root / whole-library granularity. Click a folder to enter it;
-    use the ⓘ button on a row to see the upscale projection without
-    navigating. The bridge handles the work in the background;
-    paired iOS devices pick up upscaled variants automatically when
-    their "Prefer upscaled audio" toggle is on.
+    Browse the indexed library and generate variants at folder / root
+    / whole-library granularity. Each folder tile shows upscaled
+    coverage (hi-res target — Hugo / Mojo / Qutest path) AND
+    CarPlay-optimized coverage (16-bit family-preserving 44.1k or
+    48k — head-unit friendly, ~30% the file size of high-res FLAC).
+    Tap a tile to enter; use its ⋯ menu to act per-tile, or select
+    multiple tiles via the corner checkbox to act in batch. The
+    bridge handles the work in the background; paired iOS devices
+    pick up new variants automatically when their corresponding
+    toggle is on (or when CarPlay is the active route — Tier 0
+    routing prefers optimized variants there).
   </p>
 
   {{/*
-    Sticky toolbar (v1.4 nav rework). Up = parent folder; Back =
-    browser history; Home = library root. Acting on the CURRENT
-    folder is via the ⓘ button next to the heading below; acting
-    on a CHILD folder is via the ⓘ button on its row.
-  */}}
-  {{/*
-    Search bar (v1.4 followup — promoted from inside the nav toolbar
-    to its own row above). The toolbar got crowded next to the
-    breadcrumbs; search is the operator's primary entry point
-    on a 50k-row library so it gets its own prominent row at the
-    top. PR B's two-phase behaviour (client-side filter first, then
-    server-side `/api/library/search` on miss) is unchanged. Press
-    `/` from anywhere on the page to focus this input.
+    Search bar (PR B's two-phase behaviour preserved). `/` focuses
+    from anywhere on the page.
   */}}
   <div class="inspector-search-bar" id="inspector-search-slot">
     <input type="search" id="inspector-search"
@@ -57,18 +51,12 @@
   </div>
 
   {{/*
-    Variants storage bar (v1.4 PR D2). Populated client-side from
-    GET /api/upscale/variants-dir on inspector mount. The [Change…]
-    button opens a modal that POSTs the new path; legacy variants
-    (sidecars outside the current dir) surface a "Migrate legacy
-    variants (N)" affordance — deferred to a follow-up alongside
-    the SSE-driven migration runner.
-
-    NOTE: When merged with PR A (feat/inspector-folder-nav), the
-    surrounding toolbar markup A introduces wraps this bar. PR D2
-    branches off D1 (no toolbar yet), so this element ships standalone
-    here; the rebase resolution at merge time keeps a single coherent
-    storage bar — D2's shape is the authoritative interactive form.
+    Variants storage bar. The per-kind breakdown
+    (Used X GB (upscale Y GB · optimize Z GB)) lands in
+    `inspector-storage-used` — JS reads the new `usedByKind` field
+    from /api/upscale/variants-dir and formats the parenthesised
+    breakdown when both kinds are non-zero. Pre-feature bridges and
+    fresh installs render just the total without the breakdown.
   */}}
   <div class="inspector-storage-bar" id="inspector-storage-bar">
     <span class="inspector-storage-label">Variants stored at</span>
@@ -89,8 +77,7 @@
     </button>
   </div>
 
-  {{/* Change-path modal. Hidden by default; shown by the JS when
-       Change… is clicked. */}}
+  {{/* Change-path modal — unchanged from PR D2. */}}
   <div class="inspector-storage-modal" id="inspector-storage-modal"
        hidden role="dialog" aria-modal="true" aria-labelledby="inspector-storage-modal-title">
     <div class="inspector-storage-modal-content">
@@ -124,82 +111,189 @@
     <div class="inspector-tree panel">
       <div class="inspector-current-heading-row">
         <h2 id="inspector-current-heading">Loading…</h2>
-        {{/* Acts on the CURRENTLY-OPEN folder — replaces the v1.4
-             toolbar buttons that wrapped inconsistently. Same
-             drawer + projection flow as the per-row ⓘ button on
-             child folders. Hidden when there are no tracks under
-             this folder (toolbar enable check happens in JS). */}}
         <button type="button" id="inspector-current-info"
           class="btn folder-action-info" disabled
-          aria-label="Show upscale projection for this folder">ⓘ</button>
+          aria-label="Show variant projection for this folder">ⓘ</button>
       </div>
-      <table class="rows" id="inspector-rows-table" hidden>
-        <thead>
-          <tr>
-            <th>Name</th>
-            <th class="num">Tracks</th>
-            <th class="num">Upscaled</th>
-            <th class="num">Size</th>
-            <th class="folder-actions-col" aria-label="Folder actions"></th>
-          </tr>
-        </thead>
-        <tbody id="inspector-rows-body"></tbody>
-      </table>
+
+      {{/*
+        Two independent sub-grids. Folders and tracks paginate
+        independently (each has its own NextFolderCursor /
+        NextTrackCursor in the API response), so a single flat
+        grid would jump on "Load more folders" — new folders
+        inject before tracks, pushing the track grid down. Stacked
+        sub-grids keep load-more local to each collection.
+      */}}
+      <div class="inspector-content" id="inspector-content" hidden>
+        <section class="folders-section" id="folders-section" hidden>
+          <header class="section-header">
+            <h3>Folders</h3>
+            <span class="section-count" id="folders-count">0</span>
+          </header>
+          <div class="inspector-grid folders-grid" id="folders-grid"></div>
+          <button type="button" class="btn load-more" id="folders-load-more"
+            data-target="folders" hidden>Load more folders</button>
+        </section>
+
+        <section class="tracks-section" id="tracks-section" hidden>
+          <header class="section-header">
+            <h3>Tracks</h3>
+            <span class="section-count" id="tracks-count">0</span>
+          </header>
+          <div class="inspector-grid tracks-grid" id="tracks-grid"></div>
+          <button type="button" class="btn load-more" id="tracks-load-more"
+            data-target="tracks" hidden>Load more tracks</button>
+        </section>
+      </div>
+
       <p id="inspector-empty" class="hint" hidden><em>Nothing here.</em></p>
       <p id="inspector-error" class="error" hidden role="alert"></p>
     </div>
 
+    {{/*
+      Right drawer — split into two stacked sections (Upscale +
+      CarPlay-optimized). Each section carries its own projection
+      data, Generate button, Delete button, and skipped-tracks
+      note. SoX-missing state surfaces as a `[needs SoX]` chip in
+      each section header + disabled Generate buttons; Delete
+      buttons stay enabled regardless so operators can reclaim
+      space on a SoX-less box.
+    */}}
     <aside class="inspector-drawer panel" id="inspector-drawer" aria-live="polite" hidden>
-      {{/* Header: title + × close (v1.4 followup — replaces the
-           CLOSE button at the bottom of the drawer body, which
-           sat below the destructive Delete button and felt buried). */}}
       <div class="inspector-drawer-header">
         <h2 id="inspector-drawer-title">Select a folder</h2>
         <button type="button" id="inspector-drawer-close"
                 class="inspector-drawer-close-x" aria-label="Close drawer">×</button>
       </div>
       <p class="hint" id="inspector-drawer-hint" hidden>
-        Tap the ⓘ icon on a row, or the heading ⓘ above, to see
-        the upscale projection.
+        Tap the ⓘ icon on a tile, or the heading ⓘ above, to see
+        the variant projection.
       </p>
-      <div id="inspector-drawer-content">
-        {{/* Action buttons at the TOP of the body (user-requested
-             reorder). Each button is hidden when its action is moot:
-             Upscale hides when projection has 0 eligible files; Delete
-             hides when this scope has no existing variants. */}}
-        <div class="inspector-drawer-actions">
-          <button type="button" id="inspector-upscale-btn" class="btn primary" disabled>
-            Upscale this scope
-          </button>
-          {{/*
-            Per-scope variant delete. Enabled by the JS when the
-            drawer's "Already upscaled" count is > 0. Fires
-            DELETE /api/upscale/variants?prefix=<scope>; the same
-            upscale.deleted SSE event reaches iOS clients regardless
-            of surface. Uses a native confirm() rather than the
-            typed-phrase modal from the settings page because the
-            scope is bounded (one folder) and the operator already
-            drilled into it deliberately.
-          */}}
-          <button type="button" id="inspector-delete-variants-btn"
-                  class="btn danger" disabled>
-            Delete variants in this scope
-          </button>
-        </div>
-        <p id="inspector-submit-status" class="hint" aria-live="polite"></p>
-        <dl class="kv">
-          <dt>Tracks</dt><dd id="inspector-drawer-tracks">—</dd>
-          <dt>Already upscaled</dt><dd id="inspector-drawer-covered">—</dd>
-          <dt>Source size</dt><dd id="inspector-drawer-source-size">—</dd>
-          <dt>Projected upscaled</dt><dd id="inspector-drawer-projected">—</dd>
-          <dt>Free on data volume</dt><dd id="inspector-drawer-free">—</dd>
-          <dt>Required (with 10% margin)</dt><dd id="inspector-drawer-required">—</dd>
-          <dt>Stored at</dt><dd><code class="storage-path">{{.Data.UpscaleStoragePath}}</code></dd>
-        </dl>
-        <p id="inspector-drawer-warning" class="error" hidden role="alert"></p>
-        <p id="inspector-drawer-unknown" class="hint" hidden></p>
+
+      <div id="inspector-drawer-content" hidden>
+        {{/* Upscale section */}}
+        <section class="drawer-kind" data-kind="upscale" id="drawer-section-upscale">
+          <header class="drawer-kind-header">
+            <h3>Upscale</h3>
+            <span class="drawer-kind-soxchip" hidden>needs SoX</span>
+          </header>
+          <div class="inspector-drawer-actions">
+            <button type="button" class="btn primary drawer-generate-btn"
+                    data-kind="upscale" disabled>
+              Generate upscaled variants
+            </button>
+            <button type="button" class="btn danger drawer-delete-btn"
+                    data-kind="upscale" disabled>
+              Delete upscaled variants
+            </button>
+          </div>
+          <p class="hint drawer-submit-status" data-kind="upscale" aria-live="polite"></p>
+          <dl class="kv">
+            <dt>Tracks</dt><dd class="drawer-tracks" data-kind="upscale">—</dd>
+            <dt>Already upscaled</dt><dd class="drawer-covered" data-kind="upscale">—</dd>
+            <dt>Source size</dt><dd class="drawer-source-size" data-kind="upscale">—</dd>
+            <dt>Projected upscaled</dt><dd class="drawer-projected" data-kind="upscale">—</dd>
+            <dt>Free on data volume</dt><dd class="drawer-free" data-kind="upscale">—</dd>
+            <dt>Required (with 10% margin)</dt><dd class="drawer-required" data-kind="upscale">—</dd>
+            <dt>Target</dt><dd class="drawer-target" data-kind="upscale">—</dd>
+            <dt>Stored at</dt><dd><code class="storage-path">{{.Data.UpscaleStoragePath}}</code></dd>
+          </dl>
+          <p class="error drawer-warning" data-kind="upscale" hidden role="alert"></p>
+          <p class="hint drawer-unknown" data-kind="upscale" hidden></p>
+        </section>
+
+        {{/* CarPlay-optimized section */}}
+        <section class="drawer-kind" data-kind="optimize" id="drawer-section-optimize">
+          <header class="drawer-kind-header">
+            <h3>CarPlay-optimized</h3>
+            <span class="drawer-kind-soxchip" hidden>needs SoX</span>
+          </header>
+          <p class="hint drawer-kind-intro">
+            Pre-cooked 16-bit, 44.1k or 48k FLAC for head units that
+            can't decode high-res, AND for cellular streaming where
+            bandwidth matters. iOS routes to these automatically when
+            CarPlay is the active output.
+          </p>
+          <div class="inspector-drawer-actions">
+            <button type="button" class="btn primary drawer-generate-btn"
+                    data-kind="optimize" disabled>
+              Generate CarPlay-optimized variants
+            </button>
+            <button type="button" class="btn danger drawer-delete-btn"
+                    data-kind="optimize" disabled>
+              Delete CarPlay-optimized variants
+            </button>
+          </div>
+          <p class="hint drawer-submit-status" data-kind="optimize" aria-live="polite"></p>
+          <dl class="kv">
+            <dt>Tracks</dt><dd class="drawer-tracks" data-kind="optimize">—</dd>
+            <dt>Already optimized</dt><dd class="drawer-covered" data-kind="optimize">—</dd>
+            <dt>Source size</dt><dd class="drawer-source-size" data-kind="optimize">—</dd>
+            <dt>Projected optimized</dt><dd class="drawer-projected" data-kind="optimize">—</dd>
+            <dt>Free on data volume</dt><dd class="drawer-free" data-kind="optimize">—</dd>
+            <dt>Required (with 10% margin)</dt><dd class="drawer-required" data-kind="optimize">—</dd>
+            <dt>Target</dt><dd class="drawer-target" data-kind="optimize">16-bit / 44.1k or 48k (family-preserved)</dd>
+            <dt>Stored at</dt><dd><code class="storage-path">{{.Data.UpscaleStoragePath}}</code></dd>
+          </dl>
+          <p class="error drawer-warning" data-kind="optimize" hidden role="alert"></p>
+          <p class="hint drawer-unknown" data-kind="optimize" hidden></p>
+        </section>
       </div>
     </aside>
   </div>
+
+  {{/*
+    Multi-select selection bar. Floats sticky at the bottom of the
+    inspector viewport when ≥1 tile is selected. The "gap" numbers
+    are aggregated CLIENT-SIDE from the data-* attributes on the
+    selected checkboxes — zero network calls on selection. The
+    precise eligible count (filtered by DSD / lossy / unknown) is
+    only known via apiLibraryBrowseProjection, which fires when
+    the drawer is opened OR on submit confirmation.
+  */}}
+  <div class="inspector-selection-bar" id="inspector-selection-bar" hidden>
+    <span class="selection-count" id="selection-count">0 selected</span>
+    <button type="button" class="btn" id="selection-clear">Clear</button>
+    <span class="selection-gap">
+      ~<span id="selection-upscale-gap">0</span> upscale gap ·
+      ~<span id="selection-optimize-gap">0</span> optimize gap
+    </span>
+    <div class="selection-actions">
+      <button type="button" class="btn primary selection-submit-btn"
+              data-kind="upscale" disabled>Upscale selected</button>
+      <button type="button" class="btn primary selection-submit-btn"
+              data-kind="optimize" disabled>Optimize selected</button>
+    </div>
+  </div>
 </section>
+
+{{/*
+  Tile menu popover prototype. Cloned and customised per-tile by the
+  JS at render time; the `popover` attribute makes outside-click /
+  Escape dismissal native (no JS wrapper needed). Each menu item
+  carries `data-action` so the click delegation routes to the
+  right handler; `data-needs-sox` items are CSS-disabled when
+  `data-sox-available="false"` on the page root.
+*/}}
+<template id="tile-menu-template">
+  <div class="tile-menu-popover" popover>
+    <button class="menu-item" type="button" data-action="upscale" data-needs-sox>
+      Generate upscaled variants
+    </button>
+    <button class="menu-item" type="button" data-action="optimize" data-needs-sox>
+      Generate CarPlay-optimized variants
+    </button>
+    <hr>
+    <button class="menu-item" type="button" data-action="delete-upscale">
+      Delete upscaled variants
+    </button>
+    <button class="menu-item" type="button" data-action="delete-optimize">
+      Delete CarPlay-optimized variants
+    </button>
+    <hr>
+    <button class="menu-item" type="button" data-action="projection">
+      View projection
+    </button>
+  </div>
+</template>
 {{end}}

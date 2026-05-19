@@ -25,6 +25,8 @@ package admin
 
 import (
 	"errors"
+	"fmt"
+	"hash/crc32"
 	"net/http"
 	"path"
 	"strconv"
@@ -33,23 +35,46 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
+// pathHash returns a stable 8-character lowercase hex digest of the
+// library-relative path via CRC32 (IEEE polynomial). Used as a
+// transient HTML identifier for the per-tile popover menus
+// (`id="menu-<hash>"` + `popovertarget="menu-<hash>"`). Library
+// paths regularly carry spaces, `/`, `.`, parentheses, and non-ASCII
+// (`Édith Piaf/Mon Légionnaire (Remastered).flac`) — those
+// characters are illegal or unstable as HTML `id` / `popovertarget`
+// tokens, so a sanitized-string approach is fragile. CRC32 collision
+// probability across the few-thousand-tile inspector view is
+// vanishingly small; if a collision ever fires the popover opens
+// for the wrong tile (no data corruption). JS reads `data-path`
+// (the raw value) for any API call — `pathHash` is strictly an
+// HTML-attribute escape hatch.
+func pathHash(p string) string {
+	return fmt.Sprintf("%08x", crc32.ChecksumIEEE([]byte(p)))
+}
+
 // --- response shapes ---
 
 // browseFolderRow is the JSON shape for one folder entry in
-// /api/library/browse responses.
+// /api/library/browse responses. Variant counters / sizes split
+// by kind (upscale vs CarPlay-optimized) so the inspector tile
+// renders dual coverage bars without a follow-up call.
 type browseFolderRow struct {
-	Name              string `json:"name"`
-	Path              string `json:"path"`
-	TrackCount        int    `json:"trackCount"`
-	UpscaledCount     int    `json:"upscaledCount"`
-	TotalSizeBytes    int64  `json:"totalSizeBytes"`
-	UpscaledSizeBytes int64  `json:"upscaledSizeBytes"`
+	Name               string `json:"name"`
+	Path               string `json:"path"`
+	TrackCount         int    `json:"trackCount"`
+	UpscaledCount      int    `json:"upscaledCount"`
+	OptimizedCount     int    `json:"optimizedCount"`
+	TotalSizeBytes     int64  `json:"totalSizeBytes"`
+	UpscaledSizeBytes  int64  `json:"upscaledSizeBytes"`
+	OptimizedSizeBytes int64  `json:"optimizedSizeBytes"`
+	PathHash           string `json:"pathHash"`
 }
 
 // browseTrackRow is the JSON shape for one track entry. Pointer
 // fields preserve the "tag absent" vs "tag = 0" distinction that
 // the manifest's `Track` wire shape already documents — same
-// convention.
+// convention. `IsOptimized` mirrors `IsUpscaled` for the CarPlay
+// variant kind.
 type browseTrackRow struct {
 	Name          string   `json:"name"`
 	Path          string   `json:"path"`
@@ -59,6 +84,8 @@ type browseTrackRow struct {
 	Codec         string   `json:"codec,omitempty"`
 	IsDSD         *bool    `json:"isDSD,omitempty"`
 	IsUpscaled    bool     `json:"isUpscaled"`
+	IsOptimized   bool     `json:"isOptimized"`
+	PathHash      string   `json:"pathHash"`
 }
 
 // browseResponse is the JSON envelope returned by
@@ -90,7 +117,11 @@ type browseResponse struct {
 // `wouldFit` carries the verdict against the bridge dataDir
 // volume's free space using `transcode.DefaultDiskSafetyMargin`.
 type browseProjectionResponse struct {
-	Path                    string `json:"path"`
+	Path string `json:"path"`
+	// Kind echoes the resolved variant kind ("upscale" / "optimize")
+	// so the UI knows which section of the drawer this payload
+	// populates.
+	Kind                    string `json:"kind"`
 	ProjectedFiles          int    `json:"projectedFiles"`
 	AlreadyCoveredFiles     int    `json:"alreadyCoveredFiles"`
 	ProjectedSizeBytes      int64  `json:"projectedSizeBytes"`
@@ -183,12 +214,15 @@ func (s *Server) apiLibraryBrowse(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, f := range folders {
 		resp.Folders = append(resp.Folders, browseFolderRow{
-			Name:              path.Base(f.Path),
-			Path:              f.Path,
-			TrackCount:        f.TrackCount,
-			UpscaledCount:     f.UpscaledTrackCount,
-			TotalSizeBytes:    f.TotalSizeBytes,
-			UpscaledSizeBytes: f.UpscaledSizeBytes,
+			Name:               path.Base(f.Path),
+			Path:               f.Path,
+			TrackCount:         f.TrackCount,
+			UpscaledCount:      f.UpscaledTrackCount,
+			OptimizedCount:     f.OptimizedTrackCount,
+			TotalSizeBytes:     f.TotalSizeBytes,
+			UpscaledSizeBytes:  f.UpscaledSizeBytes,
+			OptimizedSizeBytes: f.OptimizedSizeBytes,
+			PathHash:           pathHash(f.Path),
 		})
 	}
 	for _, t := range tracks {
@@ -201,6 +235,8 @@ func (s *Server) apiLibraryBrowse(w http.ResponseWriter, r *http.Request) {
 			Codec:         t.Codec,
 			IsDSD:         t.IsDSD,
 			IsUpscaled:    t.IsUpscaled,
+			IsOptimized:   t.IsOptimized,
+			PathHash:      pathHash(t.Path),
 		})
 	}
 	// Next-page cursors: a "full page" (len == limit) MIGHT have
@@ -221,7 +257,7 @@ func (s *Server) apiLibraryBrowse(w http.ResponseWriter, r *http.Request) {
 }
 
 // apiLibraryBrowseProjection handles
-// GET /api/library/browse-projection?path=...
+// GET /api/library/browse-projection?path=...&kind=upscale|optimize
 //
 // Walks every track under `path`, computes per-track projected
 // size via the wired closure (transcode.ProjectedSize), probes
@@ -229,11 +265,21 @@ func (s *Server) apiLibraryBrowse(w http.ResponseWriter, r *http.Request) {
 // pre-flight verdict the Library Inspector renders in the action
 // drawer.
 //
-// Tracks that ALREADY have a variant at the active target are
+// `?kind=upscale` (default when omitted, back-compat) projects
+// against the active upscale target (rate/bits resolved from
+// scan_state). `?kind=optimize` projects against per-track
+// family-preserving 16/44.1 or 16/48 targets (via the wired
+// `TargetRateForOptimize` closure); tracks failing
+// `OptimizeEligible` (DSD, lossy, already-at-CarPlay-floor) roll
+// into `unknownFormatFiles` so the UI's "X skipped" copy
+// reconciles with the JSON payload.
+//
+// Tracks that ALREADY have a variant OF THE REQUESTED KIND are
 // counted separately (`alreadyCoveredFiles`) and excluded from
-// the projection — the operator's pre-flight reflects the work
-// that WOULD happen if they hit "Upscale this folder," not the
-// theoretical max.
+// the projection. **Kind-scoped HasVariant** (senior-review fix):
+// a track with only an upscale variant correctly shows as
+// eligible (not "already covered") under kind=optimize, and
+// vice versa.
 func (s *Server) apiLibraryBrowseProjection(w http.ResponseWriter, r *http.Request) {
 	cfg := s.deps.CfgHolder.Load()
 	rawPath := r.URL.Query().Get("path")
@@ -251,20 +297,52 @@ func (s *Server) apiLibraryBrowseProjection(w http.ResponseWriter, r *http.Reque
 			"upscale feature is not configured on this bridge")
 		return
 	}
-	// Resolve active target: DB-backed setting wins; YAML
-	// bootstrap is the fall-back for unseeded installs (will be
-	// the case until PR 3's coordinator runs first-boot seed).
-	rate, bits, err := s.deps.Manifest.GetUpscaleTarget(r.Context())
-	if err != nil && !errors.Is(err, manifest.ErrUpscaleTargetUnset) {
-		writeError(w, http.StatusInternalServerError, "read-target", err.Error())
+
+	// Resolve kind (back-compat default = "upscale").
+	kind := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("kind")))
+	switch kind {
+	case "", "upscale":
+		kind = "upscale"
+	case "optimize":
+		// Optimize requires both eligibility + target-rate closures.
+		if s.deps.OptimizeEligible == nil || s.deps.TargetRateForOptimize == nil {
+			writeError(w, http.StatusServiceUnavailable, "optimize-disabled",
+				"carplay-optimize feature is not configured on this bridge")
+			return
+		}
+	default:
+		writeError(w, http.StatusBadRequest, "invalid-kind",
+			`unknown kind: `+kind+` (expected "upscale" or "optimize")`)
 		return
 	}
-	if errors.Is(err, manifest.ErrUpscaleTargetUnset) {
-		rate = cfg.Upscale.EffectiveBootstrapTargetRate()
-		bits = cfg.Upscale.EffectiveBootstrapTargetBits()
+
+	// Resolve active upscale target: DB-backed setting wins; YAML
+	// bootstrap is the fall-back for unseeded installs.
+	// Used by kind=upscale; kind=optimize derives per-track instead.
+	var (
+		rate, bits int
+		err        error
+	)
+	if kind == "upscale" {
+		rate, bits, err = s.deps.Manifest.GetUpscaleTarget(r.Context())
+		if err != nil && !errors.Is(err, manifest.ErrUpscaleTargetUnset) {
+			writeError(w, http.StatusInternalServerError, "read-target", err.Error())
+			return
+		}
+		if errors.Is(err, manifest.ErrUpscaleTargetUnset) {
+			rate = cfg.Upscale.EffectiveBootstrapTargetRate()
+			bits = cfg.Upscale.EffectiveBootstrapTargetBits()
+		}
 	}
 
-	projections, err := s.deps.Manifest.ListTrackProjectionsUnderPrefix(r.Context(), normalised)
+	// Kind-scoped HasVariant: pass the prefix matching the requested
+	// kind so a track with only an upscale variant correctly shows
+	// as eligible under kind=optimize, and vice versa.
+	variantPrefix := manifest.VariantKindPrefixUpscaled
+	if kind == "optimize" {
+		variantPrefix = manifest.VariantKindPrefixOptimized
+	}
+	projections, err := s.deps.Manifest.ListTrackProjectionsUnderPrefix(r.Context(), normalised, variantPrefix)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "list-projections", err.Error())
 		return
@@ -304,7 +382,28 @@ func (s *Server) apiLibraryBrowseProjection(w http.ResponseWriter, r *http.Reque
 			unknownFormat++
 			continue
 		}
-		size := s.deps.ProjectedSize(t.Size, t.SampleRate, t.BitsPerSample, rate, bits)
+		// Per-track target derivation for optimize: family-preserving
+		// 16/44.1 or 16/48 depending on source rate. Upscale uses the
+		// static outer-scope target resolved above. The OptimizeEligible
+		// gate folds below-target / lossy tracks into unknownFormat so
+		// the UI's "X skipped" copy reconciles with the JSON payload.
+		var trackRate, trackBits int
+		if kind == "optimize" {
+			if !s.deps.OptimizeEligible(t.Path, t.Codec, t.SampleRate, t.BitsPerSample) {
+				unknownFormat++
+				continue
+			}
+			trackRate = s.deps.TargetRateForOptimize(t.SampleRate)
+			trackBits = 16
+			if trackRate <= 0 {
+				unknownFormat++
+				continue
+			}
+		} else {
+			trackRate = rate
+			trackBits = bits
+		}
+		size := s.deps.ProjectedSize(t.Size, t.SampleRate, t.BitsPerSample, trackRate, trackBits)
 		if size <= 0 {
 			continue
 		}
@@ -322,15 +421,27 @@ func (s *Server) apiLibraryBrowseProjection(w http.ResponseWriter, r *http.Reque
 	// at the wire boundary so the UI's "X GB needed" copy matches
 	// what the coordinator will refuse at Submit time.
 	required := int64(float64(totalProjected) * 1.10)
+	// For kind=optimize, surface TargetBits=16 (always) but
+	// TargetRate=0 to signal "per-track family-preserved" — the UI
+	// renders "Target: 16-bit / 44.1k or 48k (family-preserved)"
+	// rather than a single static rate that would lie about mixed-
+	// family scopes.
+	respTargetRate := rate
+	respTargetBits := bits
+	if kind == "optimize" {
+		respTargetRate = 0
+		respTargetBits = 16
+	}
 	writeJSON(w, http.StatusOK, browseProjectionResponse{
 		Path:                    normalised,
+		Kind:                    kind,
 		ProjectedFiles:          projectedFiles,
 		AlreadyCoveredFiles:     coveredFiles,
 		ProjectedSizeBytes:      totalProjected,
 		AvailableBytes:          free,
 		WouldFit:                required <= free,
-		TargetRate:              rate,
-		TargetBits:              bits,
+		TargetRate:              respTargetRate,
+		TargetBits:              respTargetBits,
 		UnknownFormatFiles:      unknownFormat,
 		RequiredBytesWithMargin: required,
 	})

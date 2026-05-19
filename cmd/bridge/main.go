@@ -424,22 +424,15 @@ type upscaleBatchCoordinatorAdapter struct {
 	outputDir string
 }
 
-func (a *upscaleBatchCoordinatorAdapter) Submit(ctx context.Context, libraryRelPath string, targetRate, targetBits int) (api.BatchSubmitResult, error) {
-	// Resolve the active target from scan_state when the caller
-	// didn't override. Coordinator.Submit validates the resolved
-	// values and returns an error on out-of-range.
-	if targetRate == 0 || targetBits == 0 {
-		rate, bits, err := a.store.GetUpscaleTarget(ctx)
-		if err == nil {
-			if targetRate == 0 {
-				targetRate = rate
-			}
-			if targetBits == 0 {
-				targetBits = bits
-			}
-		}
-	}
-	res, err := a.coord.Submit(ctx, libraryRelPath, targetRate, targetBits, a.outputDir)
+// translateApiSubmitResult is the shared result/error translator
+// used by both Submit and SubmitOptimize on the api-side adapter.
+// Translates transcode's typed disk-space error into the api
+// package's mirror, and copies the success-result fields field-
+// for-field (the two value types intentionally don't share a
+// definition so the api package stays free of internal/transcode).
+// Extracted to dedup the result-copy boilerplate after the
+// optimize-batch surface landed on PR #276.
+func translateApiSubmitResult(res *transcode.SubmitResult, err error) (api.BatchSubmitResult, error) {
 	if err != nil {
 		var dskErr *transcode.InsufficientDiskSpaceError
 		if errors.As(err, &dskErr) {
@@ -462,6 +455,30 @@ func (a *upscaleBatchCoordinatorAdapter) Submit(ctx context.Context, libraryRelP
 		AvailableBytes:     res.AvailableBytes,
 		EnqueuedCount:      res.EnqueuedCount,
 	}, nil
+}
+
+func (a *upscaleBatchCoordinatorAdapter) Submit(ctx context.Context, libraryRelPath string, targetRate, targetBits int) (api.BatchSubmitResult, error) {
+	// Resolve the active target from scan_state when the caller
+	// didn't override. Coordinator.Submit validates the resolved
+	// values and returns an error on out-of-range.
+	if targetRate == 0 || targetBits == 0 {
+		rate, bits, err := a.store.GetUpscaleTarget(ctx)
+		if err == nil {
+			if targetRate == 0 {
+				targetRate = rate
+			}
+			if targetBits == 0 {
+				targetBits = bits
+			}
+		}
+	}
+	res, err := a.coord.Submit(ctx, libraryRelPath, targetRate, targetBits, a.outputDir)
+	return translateApiSubmitResult(res, err)
+}
+
+func (a *upscaleBatchCoordinatorAdapter) SubmitOptimize(ctx context.Context, libraryRelPath string) (api.BatchSubmitResult, error) {
+	res, err := a.coord.SubmitOptimize(ctx, libraryRelPath, a.outputDir)
+	return translateApiSubmitResult(res, err)
 }
 
 func (a *upscaleBatchCoordinatorAdapter) Cancel(id uuid.UUID) error {
@@ -512,18 +529,12 @@ type adminBatchCoordinatorAdapter struct {
 	outputDir string
 }
 
-func (a *adminBatchCoordinatorAdapter) Submit(ctx context.Context, libraryRelPath string, targetRate, targetBits int) (admin.AdminBatchSubmitResult, error) {
-	if targetRate == 0 || targetBits == 0 {
-		if rate, bits, err := a.store.GetUpscaleTarget(ctx); err == nil {
-			if targetRate == 0 {
-				targetRate = rate
-			}
-			if targetBits == 0 {
-				targetBits = bits
-			}
-		}
-	}
-	res, err := a.coord.Submit(ctx, libraryRelPath, targetRate, targetBits, a.outputDir)
+// translateAdminSubmitResult mirrors translateApiSubmitResult for
+// the admin-side adapter; same dedup pattern, different target
+// value types (admin.AdminBatchSubmitResult / AdminBatchInsufficient-
+// DiskSpace can't share with api's because the admin package
+// intentionally doesn't import internal/api).
+func translateAdminSubmitResult(res *transcode.SubmitResult, err error) (admin.AdminBatchSubmitResult, error) {
 	if err != nil {
 		var dskErr *transcode.InsufficientDiskSpaceError
 		if errors.As(err, &dskErr) {
@@ -546,6 +557,26 @@ func (a *adminBatchCoordinatorAdapter) Submit(ctx context.Context, libraryRelPat
 		AvailableBytes:     res.AvailableBytes,
 		EnqueuedCount:      res.EnqueuedCount,
 	}, nil
+}
+
+func (a *adminBatchCoordinatorAdapter) Submit(ctx context.Context, libraryRelPath string, targetRate, targetBits int) (admin.AdminBatchSubmitResult, error) {
+	if targetRate == 0 || targetBits == 0 {
+		if rate, bits, err := a.store.GetUpscaleTarget(ctx); err == nil {
+			if targetRate == 0 {
+				targetRate = rate
+			}
+			if targetBits == 0 {
+				targetBits = bits
+			}
+		}
+	}
+	res, err := a.coord.Submit(ctx, libraryRelPath, targetRate, targetBits, a.outputDir)
+	return translateAdminSubmitResult(res, err)
+}
+
+func (a *adminBatchCoordinatorAdapter) SubmitOptimize(ctx context.Context, libraryRelPath string) (admin.AdminBatchSubmitResult, error) {
+	res, err := a.coord.SubmitOptimize(ctx, libraryRelPath, a.outputDir)
+	return translateAdminSubmitResult(res, err)
 }
 
 func (a *adminBatchCoordinatorAdapter) Cancel(idHex string) error {
@@ -612,6 +643,7 @@ func (a *adminVariantDeleterAdapter) Delete(ctx context.Context, req admin.Admin
 		All:    req.All,
 		Prefix: req.Prefix,
 		Path:   req.Path,
+		Kind:   req.Kind,
 	}
 	resp, err := a.apiSrv.RunVariantDelete(ctx, apiReq)
 	if err != nil {
@@ -1914,6 +1946,31 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 				return nil
 			}
 			return transcode.AvailableDiskSpace
+		}(),
+		// CarPlay-optimize deps closures. Gated on BOTH
+		// `Upscale.Enabled` AND `EffectiveOptimizeEnabled()` so
+		// the projection endpoint surfaces 503 in lockstep with
+		// the api.Server's `WithCarPlayOptimize(upscaleActive
+		// && cfg.Upscale.EffectiveOptimizeEnabled())` advertisement
+		// (line ~1543 above). Pre-fix gated on Upscale.Enabled
+		// alone, so a bridge with optimize explicitly DISABLED in
+		// the config would still serve `?kind=optimize` projection
+		// data — divergent from what /v1/health advertises and
+		// from what POST /v1/upscale (kind=optimize) accepts. Per
+		// CodeRabbit major on PR #276.
+		OptimizeEligible: func() func(string, string, int, int) bool {
+			live := cfgHolder.Load()
+			if live == nil || !live.Upscale.Enabled || !live.Upscale.EffectiveOptimizeEnabled() {
+				return nil
+			}
+			return transcode.OptimizeEligible
+		}(),
+		TargetRateForOptimize: func() func(int) int {
+			live := cfgHolder.Load()
+			if live == nil || !live.Upscale.Enabled || !live.Upscale.EffectiveOptimizeEnabled() {
+				return nil
+			}
+			return transcode.TargetRateForOptimize
 		}(),
 		BatchCoordinator: func() admin.AdminBatchCoordinator {
 			// Closure-resolved so admin doesn't see a typed-nil
