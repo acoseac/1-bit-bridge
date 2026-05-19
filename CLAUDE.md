@@ -99,6 +99,82 @@ curl -s -X POST http://127.0.0.1:7789/api/scan   # or wait for next iOS sync
 
 The wipe survives the TLS fingerprint + tokens (different tables); iOS pairing stays valid.
 
+## Production deployments
+
+### home-pc (Windows, SSH `arsenie@192.168.0.158`)
+
+Operator's home Windows machine. Reachable from the operator's macOS workstation via SSH (OpenSSH server, **session is auto-elevated to admin** — no UAC popup needed for `New-NetFirewallRule` etc.). PowerShell 7 (`pwsh`), Git, and Go are pre-installed. Tailscale runs in CLI mode (`tailscale.exe` on PATH).
+
+**Layout (committed by setup script):**
+
+| Path | Purpose |
+|---|---|
+| `C:\1-bit-bridge\src\` | git clone of `acoseac/1-bit-bridge`, refreshed on each update |
+| `C:\1-bit-bridge\bin\bridge.exe` | built binary (`go build` from `src\`, no CGO) |
+| `C:\1-bit-bridge\data\bridge.yaml` | live config |
+| `C:\1-bit-bridge\data\data\` | manifest DB + artwork cache + scan state |
+| `C:\1-bit-bridge\data\serve.log` / `serve.err.log` | stdout / stderr from the scheduled-task launch |
+| `F:\media\music` | library root |
+| `E:\temp` | upscale + optimize variants storage (separate disk from library by design — variant generation is heavy I/O and shouldn't compete with the library drive) |
+
+**Runtime ownership:** Scheduled Task `1-bit-bridge (home-pc)` running as `arsenie\Interactive`, triggered `AtLogOn`. Survives SSH disconnect / logout / reboot. **Old bridge service install (different exe path) is registered but stopped** — leave alone or remove manually if cleanup is wanted; the new task is the canonical runtime.
+
+**Windows Defender Firewall rules** added by `firewall-bridge-windows.ps1`:
+- `1-bit-bridge (C:\1-bit-bridge)` — inbound TCP 7788 (HTTPS)
+- `1-bit-bridge (C:\1-bit-bridge) admin` — inbound TCP 7789 (admin console, loopback-only by bind but the rule is belt-and-braces)
+- `1-bit-bridge (C:\1-bit-bridge) UDP` — inbound UDP 7788 (HTTP/3 / QUIC, per the PR #271 LAN HTTP/3 path)
+
+All scoped to the exe path, NOT port-wide. Old rules at the legacy exe paths (`C:\users\arsenie\desktop\1-bit-bridge_0.1.2_windows_amd64\bridge.exe`, `C:\users\arsenie\src\1-bit-bridge\bridge.exe`, etc.) are still in the firewall — harmless but stale; nuke at the next cleanup pass.
+
+**Endpoints advertised in `/v1/health`** (six total, in registration order):
+- `https://192.168.0.158:7788` — LAN (Ethernet)
+- `https://home-pc.local:7788` — mDNS
+- `https://home-pc.sable-eagle.ts.net:7788` — **Tailscale magic-DNS** (Let's Encrypt cert via the SNI cert switcher + `*.ts.net` pinning bypass in `PinningDelegate.shouldSkipPinning`; this is the working remote-access path from iOS over cellular)
+- `https://100.91.73.88:7788` — Tailscale IPv4 (iOS skips per `isTailscaleCGNATURL` filter — expected, magic-DNS replaces it)
+- `https://[fd7a:115c:a1e0::6e39:4958]:7788` — Tailscale IPv6
+- `https://145.224.86.89:7788` — **WAN custom endpoint** (router port-forward 7788 → 192.168.0.158:7788). Configured via `customEndpoints:` top-level YAML field. Public IP is RIPE-allocated (NOT CGNAT), so iOS will probe it normally.
+
+**Cert SAN gotcha (re-discovered 2026-05-19):** `bridge init` mints the TLS cert against the **config at that moment**. If you edit `customEndpoints:` in `bridge.yaml` AFTER `init`, the cert's SAN list is stale and the first `serve` logs `WARN cert SANs are stale — missing_ips=[...]`. Run `bridge cert rotate --config ...\bridge.yaml --yes` after any customEndpoints edit. The fresh-install script flow gets this right because it rotates after the YAML edit; manual edits in the field need the same follow-up.
+
+**Helper scripts on `C:\Users\arsenie\Desktop\`** (idempotent — re-runnable for updates):
+
+| Script | Purpose |
+|---|---|
+| `setup-bridge-windows.ps1` | full fresh install: clone/pull → `go build` → `bridge init` → inject `customEndpoints` + `upscale.variantsDir` into the generated YAML → print cert info |
+| `rotate-cert-windows.ps1` | `bridge cert rotate` then restart (use after any `customEndpoints` edit to refresh SANs; **invalidates every paired iOS device's pinned fingerprint** — every device must re-pair) |
+| `firewall-bridge-windows.ps1` | install the 3 inbound rules above (idempotent — removes pre-existing rules with the same DisplayName first) |
+| `task-bridge-windows.ps1` | register the scheduled task + start it now; survives SSH disconnect / logout / reboot |
+| `start-bridge-windows.ps1` | legacy foreground-start script — **don't use over SSH**, dies on session close. Kept for in-person interactive debugging only. Prefer the scheduled task. |
+
+**Canonical update procedure** (from operator's macOS workstation):
+
+```sh
+# 1. Push the script files if you've changed them locally (they live in /tmp/ on macOS).
+scp /tmp/setup-bridge-windows.ps1 \
+    /tmp/rotate-cert-windows.ps1 \
+    /tmp/firewall-bridge-windows.ps1 \
+    /tmp/task-bridge-windows.ps1 \
+    arsenie@192.168.0.158:C:/Users/arsenie/Desktop/
+
+# 2. Re-run setup (pulls latest origin/main, rebuilds, refreshes YAML — but
+#    does NOT touch the cert unless you also pass `-force` to bridge init).
+ssh arsenie@192.168.0.158 'pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass \
+    -File C:\Users\arsenie\Desktop\setup-bridge-windows.ps1'
+
+# 3. Restart via the scheduled task (already registered — this just kicks it).
+ssh arsenie@192.168.0.158 'pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass \
+    -File C:\Users\arsenie\Desktop\task-bridge-windows.ps1'
+
+# 4. Verify from LAN.
+curl -sS -k --max-time 10 https://192.168.0.158:7788/v1/health | jq .serverVersion
+```
+
+**Don't reintroduce `Start-Process -RedirectStandardOutput` for the bridge serve** on Windows over SSH — `RedirectStandardOutput` flips `UseShellExecute=false` which makes the bridge a true subprocess of the SSH-launched pwsh, and the bridge dies when SSH disconnects. Use the scheduled task (`task-bridge-windows.ps1`); it spawns detached at the OS level. The bridge silently dying after a fresh install over SSH was the symptom — listener log lines wrote fine, then nothing, then `Get-Process bridge` returned empty (Burned 2026-05-19 during the post-PR-#276 deployment).
+
+**Don't reintroduce `Start-Process -Verb RunAs` for the firewall script** assuming a UAC popup will appear over SSH — UAC popups pop on the **physical Windows desktop**, not in the SSH session. On `home-pc` the SSH session is already admin-elevated by default so the elevation branch is a no-op, but the script still has it as a fallback for any future host where SSH is non-elevated.
+
+**Multiple desktop network categories on Windows**: `Get-NetConnectionProfile` may report multiple connections (Ethernet "ORBI16 2" → Public, Tailscale → Private). Firewall rules added via `firewall-bridge-windows.ps1` target ALL three profiles (`Domain,Private,Public`) by design — without `Public` the Ethernet LAN would still be blocked even though it's the active surface. Don't narrow the profile scope without checking `Get-NetConnectionProfile` first.
+
 ## Things that have bitten before
 
 - **Byte-by-byte async iteration kills throughput.** Early `BridgeSourceClient` on the iOS side used `URLSession.bytes(for:)` which yields one `UInt8` per async step — 20M yields for a 20 MB file stalled the pipeline and surfaced as "Network connection lost" even over localhost. Fixed by switching to `URLSession.download(for:)`. Don't regress the iOS side back to byte-wise async reads; and don't add a server-side chunked-encoding mode that assumes byte-wise client consumption.
