@@ -38,18 +38,18 @@ type DiagnosticsResponse struct {
 	ServerUptimeSeconds       int64             `json:"serverUptime"`
 }
 
-// serverStartedAt is set at package init for the uptime calculation.
-// Re-initializes on every `bridge serve` invocation, which is the
-// correct semantic — uptime is "how long the current process has
-// been running", not "how long has anything been running ever".
-var serverStartedAt = time.Now()
-
 // diagnostics renders the diagnostics summary. Wired as
 // `GET /v1/diagnostics` in route_classification.go.
+//
+// **Uptime source**: reads `s.startedAt` — the same instance-level
+// timestamp `/v1/health` returns — so the two surfaces stay
+// consistent. A package-level `var serverStartedAt = time.Now()`
+// would diverge when tests spin up multiple Server instances and
+// would silently make the wire shape contradict itself.
 func (s *Server) diagnostics(w http.ResponseWriter, r *http.Request) {
 	resp := DiagnosticsResponse{
 		LogEventCounts:      metrics.LogEventCountsSnapshot(),
-		ServerUptimeSeconds: int64(time.Since(serverStartedAt).Seconds()),
+		ServerUptimeSeconds: int64(time.Since(s.startedAt).Seconds()),
 	}
 
 	resp.SQLiteLockWaitP50Seconds, resp.SQLiteLockWaitP99Seconds =

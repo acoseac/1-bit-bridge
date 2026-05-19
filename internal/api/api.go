@@ -861,10 +861,10 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	//
 	// Alpha-sort stays correct by construction: each conditional
 	// appends in lex order, terminal `variantBumpsIndex` ends every
-	// path. Capacity 6 covers the maximum (deleteVariants +
-	// operatorDrivenUpscale + pairingEventsSupported +
-	// pushEventsSupported + upscaleCompleteEvents +
-	// variantBumpsIndex).
+	// path. Capacity 8 covers the current maximum (carPlayOptimize +
+	// deleteVariants + diagnosticsSummary + operatorDrivenUpscale +
+	// pairingEventsSupported + pushEventsSupported +
+	// upscaleCompleteEvents + variantBumpsIndex).
 	feats := make([]string, 0, 8)
 	if s.upscaleEnabled {
 		if s.carPlayOptimizeEnabled {
