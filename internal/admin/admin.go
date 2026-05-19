@@ -31,6 +31,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/backup"
 	"github.com/acoseac/1-bit-bridge/internal/config"
@@ -588,6 +590,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/pairing", s.apiPairingList)
 	mux.HandleFunc("POST /api/pairing/{id}/approve", s.apiPairingApprove)
 	mux.HandleFunc("POST /api/pairing/{id}/decline", s.apiPairingDecline)
+
+	// Prometheus exposition. Loopback-bound by the outer
+	// `loopbackOnly` wrap — scrapers must run on the same host
+	// (local Prometheus / Grafana Alloy / node_exporter sidecar).
+	// The CSRF guard is a no-op for GET so the bare promhttp
+	// handler is safe to pass through both layers.
+	mux.Handle("GET /metrics", promhttp.Handler())
 
 	// Static. The embed keeps files at "static/app.css", not "app.css",
 	// so we serve the fs directly — the request path already matches.

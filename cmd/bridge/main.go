@@ -42,7 +42,13 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/integrity"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
+	// Imported for its init() side effects (log-hook + collector
+	// registration) AND for `metrics.RegisterTsnetProvider` invoked
+	// from the tsnet startup goroutine below. Without this import,
+	// /metrics would expose an empty registry and the log-event
+	// counter would stay at zero forever.
 	bridgemdns "github.com/acoseac/1-bit-bridge/internal/mdns"
+	"github.com/acoseac/1-bit-bridge/internal/metrics"
 	"github.com/acoseac/1-bit-bridge/internal/pairing"
 	"github.com/acoseac/1-bit-bridge/internal/supervision"
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
@@ -2133,6 +2139,14 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 				fmt.Fprintf(stderr, "tsnet: bring node up: %v (LAN listener still active)\n", err)
 				return
 			}
+			// Wire the metrics tsnet collector so /metrics +
+			// /v1/diagnostics surfaces report the live tailnet
+			// state. The provider is a structural interface match:
+			// tsnet.Server's `MetricsState` / `MetricsPeersOnline` /
+			// `MetricsDERPLatencies` methods satisfy
+			// `metrics.tsnetStatusProvider` without an explicit
+			// import in either direction at the interface level.
+			metrics.RegisterTsnetProvider(tsnetServer)
 
 			// HTTP/3 (QUIC) over tailnet — set up here, AFTER Start
 			// succeeded, because the wrapper's ListenPacket returns

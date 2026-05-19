@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/logging"
+	"github.com/acoseac/1-bit-bridge/internal/metrics"
 )
 
 // httpLogger is the package-level slog logger for HTTP request telemetry.
@@ -163,11 +164,29 @@ func requestLogging(next http.Handler) http.Handler {
 		case status >= 400:
 			level = slog.LevelWarn
 		}
+		duration := time.Since(start)
 		reqLogger.LogAttrs(ctx, level, "http",
 			slog.Int("status", status),
-			slog.Int64("duration_ms", time.Since(start).Milliseconds()),
+			slog.Int64("duration_ms", duration.Milliseconds()),
 			slog.Int64("bytes", sw.bytes),
 		)
+		// Prometheus mirrors. Pattern (route template) over the raw
+		// path so cardinality stays bounded — `/v1/list?path=...` is
+		// the same line of code as `/v1/list?path=other`, and
+		// counting each query string as a distinct path label would
+		// blow the metric out. We approximate the template via
+		// `r.Pattern`, which on Go 1.22+ exposes the registered
+		// pattern; if empty (defensive — handler registered without
+		// a method pattern), fall back to the bare path.
+		labelPath := r.Pattern
+		if labelPath == "" {
+			labelPath = r.URL.Path
+		}
+		metrics.HTTPRequestsTotal.WithLabelValues(
+			labelPath,
+			fmt.Sprintf("%d", status),
+		).Inc()
+		metrics.HTTPRequestDurationHist.WithLabelValues(labelPath).Observe(duration.Seconds())
 	})
 }
 

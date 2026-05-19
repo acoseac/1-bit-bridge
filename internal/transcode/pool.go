@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
+	"github.com/acoseac/1-bit-bridge/internal/metrics"
 	"github.com/google/uuid"
 )
 
@@ -746,6 +747,7 @@ func (p *Pool) processJob(job poolJob) {
 				"panic", r)
 			if !p.closed.Load() {
 				p.failedCnt.Add(1)
+				metrics.UpscaleJobsCompletedTotal.WithLabelValues("failure").Inc()
 			}
 		}
 		if !released {
@@ -797,6 +799,7 @@ func (p *Pool) processJob(job poolJob) {
 		// fire the state-change callback.
 		if !p.closed.Load() {
 			p.failedCnt.Add(1)
+			metrics.UpscaleJobsCompletedTotal.WithLabelValues("failure").Inc()
 			if errors.Is(jobCtx.Err(), context.DeadlineExceeded) {
 				logger.Warn("pool: sox timed out",
 					"path", job.spec.SourceLibraryRel,
@@ -852,6 +855,7 @@ func (p *Pool) processJob(job poolJob) {
 	if err := p.fsyncFn(sidecarPath); err != nil {
 		if !p.closed.Load() {
 			p.failedCnt.Add(1)
+			metrics.UpscaleJobsCompletedTotal.WithLabelValues("failure").Inc()
 			logger.Error("pool: fsync sidecar", "path", job.spec.SourceLibraryRel, "err", err)
 			_ = os.Remove(sidecarPath)
 			p.fireJobFailed(jobFailedEvent{
@@ -919,6 +923,7 @@ func (p *Pool) processJob(job poolJob) {
 		// in this function. Gemini Medium on PR #217.
 		if !p.closed.Load() {
 			p.failedCnt.Add(1)
+			metrics.UpscaleJobsCompletedTotal.WithLabelValues("failure").Inc()
 			logger.Error("pool: store variant", "path", job.spec.SourceLibraryRel, "err", err)
 			// Best-effort: remove the orphan sidecar so a
 			// retry from a clean slate succeeds.
@@ -956,6 +961,10 @@ func (p *Pool) processJob(job poolJob) {
 		return
 	}
 	p.doneCnt.Add(1)
+	metrics.UpscaleJobsCompletedTotal.WithLabelValues("success").Inc()
+	dur := time.Since(startedAt).Seconds()
+	metrics.UpscaleDurationHist.Observe(dur)
+	metrics.UpscaleDurationWindow.Observe(dur)
 	p.releaseDedup(job.dedup)
 	released = true
 	// Per-job completion event fires AFTER UpsertVariant commits
