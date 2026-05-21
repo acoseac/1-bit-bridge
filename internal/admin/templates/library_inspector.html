@@ -7,12 +7,13 @@
     coverage (hi-res target — Hugo / Mojo / Qutest path) AND
     CarPlay-optimized coverage (16-bit family-preserving 44.1k or
     48k — head-unit friendly, ~30% the file size of high-res FLAC).
-    Tap a tile to enter; use its ⋯ menu to act per-tile, or select
-    multiple tiles via the corner checkbox to act in batch. The
-    bridge handles the work in the background; paired iOS devices
-    pick up new variants automatically when their corresponding
-    toggle is on (or when CarPlay is the active route — Tier 0
-    routing prefers optimized variants there).
+    Tap a tile to enter; tap the ⓘ icon to open the action panel,
+    or use the ⋯ menu for quick per-tile actions. Select multiple
+    tiles via the corner checkbox to act in batch. The bridge
+    handles the work in the background; paired iOS devices pick up
+    new variants automatically when their corresponding toggle is on
+    (or when CarPlay is the active route — Tier 0 routing prefers
+    optimized variants there).
   </p>
 
   {{/*
@@ -113,7 +114,7 @@
         <h2 id="inspector-current-heading">Loading…</h2>
         <button type="button" id="inspector-current-info"
           class="btn folder-action-info" disabled
-          aria-label="Show variant projection for this folder">ⓘ</button>
+          aria-label="Open action panel for this folder">ⓘ</button>
       </div>
 
       {{/*
@@ -149,120 +150,143 @@
       <p id="inspector-empty" class="hint" hidden><em>Nothing here.</em></p>
       <p id="inspector-error" class="error" hidden role="alert"></p>
     </div>
+  </div>
 
-    {{/*
-      Right drawer — split into two stacked sections (Upscale +
-      CarPlay-optimized). Each section carries its own projection
-      data, Generate button, Delete button, and skipped-tracks
-      note. SoX-missing state surfaces as a `[needs SoX]` chip in
-      each section header + disabled Generate buttons; Delete
-      buttons stay enabled regardless so operators can reclaim
-      space on a SoX-less box.
-    */}}
-    <aside class="inspector-drawer panel" id="inspector-drawer" aria-live="polite" hidden>
-      <div class="inspector-drawer-header">
-        <h2 id="inspector-drawer-title">Select a folder</h2>
-        <button type="button" id="inspector-drawer-close"
-                class="inspector-drawer-close-x" aria-label="Close drawer">×</button>
+  {{/*
+    Unified floating action panel. Replaces the legacy right-side
+    drawer + bottom selection bar with one popover that adapts to:
+      - data-mode="single" (anchored absolute to a tile or heading ⓘ)
+      - data-mode="batch"  (fixed bottom-center; auto-opens on
+                            checkbox selection)
+      - data-confirming="<kind>" (overlay swap inside, batch-only)
+    `popover="manual"` for top-layer rendering without light-dismiss
+    (the batch-confirm step must not vanish on an accidental click).
+    Escape + focus-trap are JS-wired in app.js#inspectorA11yListeners.
+  */}}
+  <div id="inspector-action-panel" popover="manual" class="inspector-action-panel">
+    <header class="panel-header">
+      <h2 id="panel-title">—</h2>
+      <div class="panel-header-actions">
+        <button type="button" id="panel-clear-selection"
+                class="btn panel-clear-btn" hidden>Clear</button>
+        <button type="button" id="panel-close-btn"
+                class="panel-close-x" aria-label="Close panel">×</button>
       </div>
-      <p class="hint" id="inspector-drawer-hint" hidden>
-        Tap the ⓘ icon on a tile, or the heading ⓘ above, to see
-        the variant projection.
-      </p>
+    </header>
 
-      <div id="inspector-drawer-content" hidden>
-        {{/* Upscale section */}}
-        <section class="drawer-kind" data-kind="upscale" id="drawer-section-upscale">
-          <header class="drawer-kind-header">
-            <h3>Upscale</h3>
-            <span class="drawer-kind-soxchip" hidden>needs SoX</span>
-          </header>
-          <div class="inspector-drawer-actions">
-            <button type="button" class="btn primary drawer-generate-btn"
+    <div id="panel-main-content">
+      {{/* Upscale summary + expanded card. */}}
+      <section class="panel-card" data-kind="upscale" id="panel-card-upscale">
+        <header class="card-summary-trigger" role="button" tabindex="0"
+                aria-expanded="false" aria-controls="panel-details-upscale">
+          <span class="card-chevron" aria-hidden="true">▸</span>
+          <h3>Hi-Res Upscale</h3>
+          <div class="coverage-bar" role="progressbar"
+               aria-valuenow="0" aria-valuemin="0" aria-valuemax="1"
+               aria-label="Upscale variant coverage"
+               id="panel-coverage-bar-upscale">
+            <div class="coverage-bar-fill" style="--cov: 0%"></div>
+          </div>
+          <span class="coverage-ratio" id="panel-ratio-upscale">0 / 0</span>
+          <span class="card-summary-hint" id="panel-hint-upscale"></span>
+        </header>
+
+        <div class="card-details" id="panel-details-upscale" hidden>
+          <div class="panel-actions-row">
+            <button type="button" class="btn primary panel-generate-btn"
                     data-kind="upscale" disabled>
               Generate upscaled variants
             </button>
-            <button type="button" class="btn danger drawer-delete-btn"
-                    data-kind="upscale" disabled>
+            <button type="button" class="btn danger panel-delete-btn"
+                    data-kind="upscale" hidden disabled>
               Delete upscaled variants
             </button>
           </div>
-          <p class="hint drawer-submit-status" data-kind="upscale" aria-live="polite"></p>
+          <p class="hint panel-submit-status" data-kind="upscale" aria-live="polite"></p>
           <dl class="kv">
-            <dt>Tracks</dt><dd class="drawer-tracks" data-kind="upscale">—</dd>
-            <dt>Already upscaled</dt><dd class="drawer-covered" data-kind="upscale">—</dd>
-            <dt>Source size</dt><dd class="drawer-source-size" data-kind="upscale">—</dd>
-            <dt>Projected upscaled</dt><dd class="drawer-projected" data-kind="upscale">—</dd>
-            <dt>Free on data volume</dt><dd class="drawer-free" data-kind="upscale">—</dd>
-            <dt>Required (with 10% margin)</dt><dd class="drawer-required" data-kind="upscale">—</dd>
-            <dt>Target</dt><dd class="drawer-target" data-kind="upscale">—</dd>
+            <dt>Tracks</dt><dd class="panel-tracks" data-kind="upscale">—</dd>
+            <dt>Already upscaled</dt><dd class="panel-covered" data-kind="upscale">—</dd>
+            <dt>Source size</dt><dd class="panel-source-size" data-kind="upscale">—</dd>
+            <dt>Projected upscaled</dt><dd class="panel-projected" data-kind="upscale">—</dd>
+            <dt>Free on data volume</dt><dd class="panel-free" data-kind="upscale">—</dd>
+            <dt>Required (with 10% margin)</dt><dd class="panel-required" data-kind="upscale">—</dd>
+            <dt>Target</dt><dd class="panel-target" data-kind="upscale">—</dd>
             <dt>Stored at</dt><dd><code class="storage-path">{{.Data.UpscaleStoragePath}}</code></dd>
           </dl>
-          <p class="error drawer-warning" data-kind="upscale" hidden role="alert"></p>
-          <p class="hint drawer-unknown" data-kind="upscale" hidden></p>
-        </section>
+          <p class="error panel-warning" data-kind="upscale" hidden role="alert"></p>
+          <p class="hint panel-unknown" data-kind="upscale" hidden></p>
+        </div>
+      </section>
 
-        {{/* CarPlay-optimized section */}}
-        <section class="drawer-kind" data-kind="optimize" id="drawer-section-optimize">
-          <header class="drawer-kind-header">
-            <h3>CarPlay-optimized</h3>
-            <span class="drawer-kind-soxchip" hidden>needs SoX</span>
-          </header>
-          <p class="hint drawer-kind-intro">
+      {{/* CarPlay-optimized summary + expanded card. */}}
+      <section class="panel-card" data-kind="optimize" id="panel-card-optimize">
+        <header class="card-summary-trigger" role="button" tabindex="0"
+                aria-expanded="false" aria-controls="panel-details-optimize">
+          <span class="card-chevron" aria-hidden="true">▸</span>
+          <h3>CarPlay-optimized</h3>
+          <div class="coverage-bar" role="progressbar"
+               aria-valuenow="0" aria-valuemin="0" aria-valuemax="1"
+               aria-label="CarPlay-optimized variant coverage"
+               id="panel-coverage-bar-optimize">
+            <div class="coverage-bar-fill" style="--cov: 0%"></div>
+          </div>
+          <span class="coverage-ratio" id="panel-ratio-optimize">0 / 0</span>
+          <span class="card-summary-hint" id="panel-hint-optimize"></span>
+        </header>
+
+        <div class="card-details" id="panel-details-optimize" hidden>
+          <p class="hint card-kind-intro">
             Pre-cooked 16-bit, 44.1k or 48k FLAC for head units that
             can't decode high-res, AND for cellular streaming where
             bandwidth matters. iOS routes to these automatically when
             CarPlay is the active output.
           </p>
-          <div class="inspector-drawer-actions">
-            <button type="button" class="btn primary drawer-generate-btn"
+          <div class="panel-actions-row">
+            <button type="button" class="btn primary panel-generate-btn"
                     data-kind="optimize" disabled>
               Generate CarPlay-optimized variants
             </button>
-            <button type="button" class="btn danger drawer-delete-btn"
-                    data-kind="optimize" disabled>
+            <button type="button" class="btn danger panel-delete-btn"
+                    data-kind="optimize" hidden disabled>
               Delete CarPlay-optimized variants
             </button>
           </div>
-          <p class="hint drawer-submit-status" data-kind="optimize" aria-live="polite"></p>
+          <p class="hint panel-submit-status" data-kind="optimize" aria-live="polite"></p>
           <dl class="kv">
-            <dt>Tracks</dt><dd class="drawer-tracks" data-kind="optimize">—</dd>
-            <dt>Already optimized</dt><dd class="drawer-covered" data-kind="optimize">—</dd>
-            <dt>Source size</dt><dd class="drawer-source-size" data-kind="optimize">—</dd>
-            <dt>Projected optimized</dt><dd class="drawer-projected" data-kind="optimize">—</dd>
-            <dt>Free on data volume</dt><dd class="drawer-free" data-kind="optimize">—</dd>
-            <dt>Required (with 10% margin)</dt><dd class="drawer-required" data-kind="optimize">—</dd>
-            <dt>Target</dt><dd class="drawer-target" data-kind="optimize">16-bit / 44.1k or 48k (family-preserved)</dd>
+            <dt>Tracks</dt><dd class="panel-tracks" data-kind="optimize">—</dd>
+            <dt>Already optimized</dt><dd class="panel-covered" data-kind="optimize">—</dd>
+            <dt>Source size</dt><dd class="panel-source-size" data-kind="optimize">—</dd>
+            <dt>Projected optimized</dt><dd class="panel-projected" data-kind="optimize">—</dd>
+            <dt>Free on data volume</dt><dd class="panel-free" data-kind="optimize">—</dd>
+            <dt>Required (with 10% margin)</dt><dd class="panel-required" data-kind="optimize">—</dd>
+            <dt>Target</dt><dd class="panel-target" data-kind="optimize">16-bit / 44.1k or 48k (family-preserved)</dd>
             <dt>Stored at</dt><dd><code class="storage-path">{{.Data.UpscaleStoragePath}}</code></dd>
           </dl>
-          <p class="error drawer-warning" data-kind="optimize" hidden role="alert"></p>
-          <p class="hint drawer-unknown" data-kind="optimize" hidden></p>
-        </section>
-      </div>
-    </aside>
-  </div>
+          <p class="error panel-warning" data-kind="optimize" hidden role="alert"></p>
+          <p class="hint panel-unknown" data-kind="optimize" hidden></p>
+        </div>
+      </section>
+    </div>
 
-  {{/*
-    Multi-select selection bar. Floats sticky at the bottom of the
-    inspector viewport when ≥1 tile is selected. The "gap" numbers
-    are aggregated CLIENT-SIDE from the data-* attributes on the
-    selected checkboxes — zero network calls on selection. The
-    precise eligible count (filtered by DSD / lossy / unknown) is
-    only known via apiLibraryBrowseProjection, which fires when
-    the drawer is opened OR on submit confirmation.
-  */}}
-  <div class="inspector-selection-bar" id="inspector-selection-bar" hidden>
-    <span class="selection-count" id="selection-count">0 selected</span>
-    <button type="button" class="btn" id="selection-clear">Clear</button>
-    <span class="selection-gap">
-      ~<span id="selection-upscale-gap">0</span> upscale gap ·
-      ~<span id="selection-optimize-gap">0</span> optimize gap
-    </span>
-    <div class="selection-actions">
-      <button type="button" class="btn primary selection-submit-btn"
-              data-kind="upscale" disabled>Upscale selected</button>
-      <button type="button" class="btn primary selection-submit-btn"
-              data-kind="optimize" disabled>Optimize selected</button>
+    {{/*
+      Batch confirmation overlay. Absolutely positioned inside the
+      panel; shown when the operator clicks Generate in batch mode.
+      The overlay drives a parallel projection rollup with
+      concurrency-5 throttling (50-path cap → skip pre-flight, fire
+      submit blind). Cancel returns to summary; Confirm fires the
+      same inspectorSubmitBatchForKind as the single-tile path.
+    */}}
+    <div id="panel-confirm-overlay" class="panel-confirm" hidden>
+      <h3 id="confirm-title">Confirm batch operation</h3>
+      <div id="confirm-stats-content">
+        <p class="hint">Calculating batch estimates…</p>
+      </div>
+      <p class="hint panel-confirm-status" aria-live="polite"></p>
+      <div class="panel-confirm-actions">
+        <button type="button" id="panel-confirm-cancel" class="btn">Cancel</button>
+        <button type="button" id="panel-confirm-submit"
+                class="btn primary" disabled>Confirm and start</button>
+      </div>
     </div>
   </div>
 </section>
@@ -274,6 +298,9 @@
   carries `data-action` so the click delegation routes to the
   right handler; `data-needs-sox` items are CSS-disabled when
   `data-sox-available="false"` on the page root.
+
+  The action panel covers detail-rich flows (projection + stats);
+  this menu stays as the power-user quick-action shortcut.
 */}}
 <template id="tile-menu-template">
   <div class="tile-menu-popover" popover>
@@ -292,7 +319,7 @@
     </button>
     <hr>
     <button class="menu-item" type="button" data-action="projection">
-      View projection
+      Open action panel
     </button>
   </div>
 </template>
