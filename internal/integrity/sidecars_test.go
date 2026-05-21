@@ -102,6 +102,10 @@ func TestOrphanSidecarSweeperTickUnlinksOrphans(t *testing.T) {
 	lister := &fakeSidecarLister{known: known}
 
 	s := NewOrphanSidecarSweeper(lister, outputDir, 1*time.Hour)
+	// Bypass the 10-minute production grace floor — the seeded files
+	// are brand new (modtime ≈ now), and the race-protection
+	// regression has its own dedicated test below.
+	s.gracePeriodForTest = 1 * time.Nanosecond
 	unlinked := s.tick(context.Background())
 	if unlinked != 3 {
 		t.Errorf("unlinked = %d, want 3 (paths[3..5] are orphans)", unlinked)
@@ -125,31 +129,39 @@ func TestOrphanSidecarSweeperTickUnlinksOrphans(t *testing.T) {
 // the next tick doesn't re-walk the same prefix.
 func TestOrphanSidecarSweeperRespectsChunkCap(t *testing.T) {
 	outputDir := t.TempDir()
-	// Seed gcChunkSize + 50 = 150 entries so we observably split
-	// across two ticks. All orphan (empty known set).
-	totalEntries := gcChunkSize + 50
+	// Test-local chunk size so we don't have to seed gcChunkSize (5000)
+	// files for every run. 100 is small enough for sub-second test
+	// wall-clock; the chunked-walk + cursor contract is the same shape
+	// regardless of the constant. The chunkSizeForTest seam matches
+	// the gracePeriodForTest convention.
+	const testChunk = 100
+	totalEntries := testChunk + 50 // 150 entries → splits into 100 + 50
 	paths := seedTestSidecarTree(t, outputDir, "x", totalEntries)
 	lister := &fakeSidecarLister{known: map[string]struct{}{}}
 
 	s := NewOrphanSidecarSweeper(lister, outputDir, 1*time.Hour)
+	s.chunkSizeForTest = testChunk
+	// Same bypass as TestOrphanSidecarSweeperTickUnlinksOrphans —
+	// freshly-seeded files would otherwise hit the 10-min grace floor.
+	s.gracePeriodForTest = 1 * time.Nanosecond
 
 	tick1 := s.tick(context.Background())
-	if tick1 != gcChunkSize {
-		t.Errorf("tick1 unlinked = %d, want %d (chunk cap)", tick1, gcChunkSize)
+	if tick1 != testChunk {
+		t.Errorf("tick1 unlinked = %d, want %d (chunk cap)", tick1, testChunk)
 	}
 	if s.lastProcessedPath == "" {
 		t.Errorf("cursor should be set after hitting chunk cap; got empty")
 	}
-	// The cursor should be the gcChunkSize-th path (the last one
+	// The cursor should be the testChunk-th path (the last one
 	// processed this tick).
-	wantCursor := paths[gcChunkSize-1]
+	wantCursor := paths[testChunk-1]
 	if s.lastProcessedPath != wantCursor {
 		t.Errorf("cursor = %q, want %q (last processed path of tick1)",
 			s.lastProcessedPath, wantCursor)
 	}
 
 	tick2 := s.tick(context.Background())
-	want2 := totalEntries - gcChunkSize
+	want2 := totalEntries - testChunk
 	if tick2 != want2 {
 		t.Errorf("tick2 unlinked = %d, want %d (remainder after chunk cap)",
 			tick2, want2)
@@ -170,6 +182,7 @@ func TestOrphanSidecarSweeperHonoursCancellation(t *testing.T) {
 	seedTestSidecarTree(t, outputDir, "c", 200) // plenty to walk
 	lister := &fakeSidecarLister{known: map[string]struct{}{}}
 	s := NewOrphanSidecarSweeper(lister, outputDir, 1*time.Hour)
+	s.gracePeriodForTest = 1 * time.Nanosecond
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel BEFORE the tick starts
@@ -213,6 +226,7 @@ func TestOrphanSidecarSweeperStartTickFires(t *testing.T) {
 	seedTestSidecarTree(t, outputDir, "s", 3) // all orphan
 	lister := &fakeSidecarLister{known: map[string]struct{}{}}
 	s := NewOrphanSidecarSweeper(lister, outputDir, 1*time.Hour)
+	s.gracePeriodForTest = 1 * time.Nanosecond
 
 	tickFired := make(chan int, 1)
 	s.SetOnTickComplete(func(unlinked int) {
@@ -265,6 +279,7 @@ func TestOrphanSidecarSweeperPreservesNonFlacFiles(t *testing.T) {
 
 	lister := &fakeSidecarLister{known: map[string]struct{}{}}
 	s := NewOrphanSidecarSweeper(lister, outputDir, 1*time.Hour)
+	s.gracePeriodForTest = 1 * time.Nanosecond
 	unlinked := s.tick(context.Background())
 
 	if unlinked != 1 {
@@ -279,5 +294,105 @@ func TestOrphanSidecarSweeperPreservesNonFlacFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(flacOrphan); !os.IsNotExist(err) {
 		t.Errorf("orphan .flac was NOT unlinked: stat err=%v", err)
+	}
+}
+
+// TestOrphanSidecarSweeperGracePeriodProtectsConcurrentWrites is the
+// race-condition regression test Gemini HIGH on PR #282 asked for.
+// A concurrent `UpsertVariant` writer lands the sidecar on disk
+// BEFORE its row commits to `track_variants`. If the sweeper takes
+// its snapshot DURING that window, the file looks orphan; without
+// the grace-period gate, the sweeper would unlink it behind the
+// writer's in-flight transaction.
+//
+// Contract: a fresh file (modtime < grace) is skipped REGARDLESS of
+// whether the snapshot contains its path. Both branches must respect
+// the grace:
+//   - Sidecar present in known-set: protected by the known-set check.
+//   - Sidecar absent from known-set + modtime < grace: protected by
+//     the grace gate (this test).
+//   - Sidecar absent + modtime >= grace: ordinary orphan, unlinked.
+//
+// Test shape: seed one fresh file (modtime ≈ now), set
+// gracePeriodForTest to a value longer than test wall-clock (5s is
+// safe), assert the file SURVIVES the sweep. Then backdate the file
+// past the grace, sweep again, assert it's gone.
+func TestOrphanSidecarSweeperGracePeriodProtectsConcurrentWrites(t *testing.T) {
+	outputDir := t.TempDir()
+	flacFile := filepath.Join(outputDir, "in-flight.flac")
+	if err := os.WriteFile(flacFile, []byte{0}, 0o644); err != nil {
+		t.Fatalf("write fresh file: %v", err)
+	}
+
+	// Empty known-set: the file is NOT in track_variants (writer's
+	// row hasn't committed yet). Without the grace gate, the sweeper
+	// would unlink immediately.
+	lister := &fakeSidecarLister{known: map[string]struct{}{}}
+	s := NewOrphanSidecarSweeper(lister, outputDir, 1*time.Hour)
+	// Grace period longer than test wall-clock — the fresh file's
+	// modtime (just now) is firmly inside the grace window.
+	s.gracePeriodForTest = 5 * time.Second
+
+	unlinked := s.tick(context.Background())
+	if unlinked != 0 {
+		t.Errorf("tick with fresh in-flight file unlinked %d files; want 0 "+
+			"(grace period should protect concurrent UpsertVariant writes)",
+			unlinked)
+	}
+	if _, err := os.Stat(flacFile); err != nil {
+		t.Errorf("fresh in-flight file %q was unlinked (grace period "+
+			"should have protected it): %v", flacFile, err)
+	}
+
+	// Now backdate the file past the grace window. Real-world this
+	// is the "transaction committed long ago but the row was later
+	// deleted, leaving the sidecar truly orphaned" case.
+	pastModTime := time.Now().Add(-10 * time.Second)
+	if err := os.Chtimes(flacFile, pastModTime, pastModTime); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	unlinked = s.tick(context.Background())
+	if unlinked != 1 {
+		t.Errorf("tick with backdated orphan unlinked %d files; want 1",
+			unlinked)
+	}
+	if _, err := os.Stat(flacFile); !os.IsNotExist(err) {
+		t.Errorf("backdated orphan %q was NOT unlinked: stat err=%v",
+			flacFile, err)
+	}
+}
+
+// TestOrphanSidecarSweeperEffectiveOverrides locks the test-seam
+// helpers' contract — production constants when override is zero or
+// negative, override value when positive. Defensive against an
+// accidental shape change to `effectiveGracePeriod` /
+// `effectiveChunkSize` that would silently bypass the production
+// floor.
+func TestOrphanSidecarSweeperEffectiveOverrides(t *testing.T) {
+	cases := []struct {
+		name           string
+		override       time.Duration
+		wantGrace      time.Duration
+		chunkOverride  int
+		wantChunkSize  int
+	}{
+		{"zero-uses-production", 0, gcGracePeriod, 0, gcChunkSize},
+		{"negative-uses-production", -1 * time.Second, gcGracePeriod, -5, gcChunkSize},
+		{"positive-override-wins", 250 * time.Millisecond, 250 * time.Millisecond, 250, 250},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := &OrphanSidecarSweeper{
+				gracePeriodForTest: c.override,
+				chunkSizeForTest:   c.chunkOverride,
+			}
+			if got := s.effectiveGracePeriod(); got != c.wantGrace {
+				t.Errorf("effectiveGracePeriod = %v, want %v", got, c.wantGrace)
+			}
+			if got := s.effectiveChunkSize(); got != c.wantChunkSize {
+				t.Errorf("effectiveChunkSize = %d, want %d", got, c.wantChunkSize)
+			}
+		})
 	}
 }
