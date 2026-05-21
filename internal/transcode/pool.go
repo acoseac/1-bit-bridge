@@ -54,10 +54,30 @@ const defaultJobTimeout = 10 * time.Minute
 // enqueue site. Same lock covers both — contention is bounded by
 // the worker count.
 type Pool struct {
-	store    *manifest.Store
-	workers  int
-	jobs     chan poolJob
-	queueCap int
+	store   *manifest.Store
+	workers int
+	// Two-channel priority queue (PR-pending). `optimizeJobs` carries
+	// foreground/latency-sensitive `JobKindOptimize` jobs (CarPlay
+	// downsample variants generated on-demand from the iOS handheld
+	// plug-in path); `upscaleJobs` carries background `JobKindUpscale`
+	// + empty-Kind (legacy default) jobs. Worker drain biases toward
+	// optimize via a select-default phase + fair fallback select so
+	// neither channel can starve the other.
+	//
+	// Pre-fix this was a single `jobs chan poolJob` FIFO; a 100-job
+	// batch upscale could head-of-line block a CarPlay request that
+	// landed mid-batch. Channel-level priority eliminates that HOL
+	// blocking; it does NOT preempt an in-flight `exec.CommandContext`
+	// sox subprocess once spawned — that mitigation belongs in a
+	// future PR layering OS-level `nice` / `ionice` / `SetPriorityClass`
+	// on the subprocess.
+	//
+	// `queueCap` is applied per-channel: each holds up to `queueCap`
+	// jobs before the non-blocking enqueue path returns ErrQueueFull.
+	// The 503 HTTP semantics carry over independently for each kind.
+	optimizeJobs chan poolJob
+	upscaleJobs  chan poolJob
+	queueCap     int
 
 	mu       sync.Mutex
 	inflight map[string]struct{} // key = source_path + "|" + variant_id
@@ -291,16 +311,17 @@ func NewPool(store *manifest.Store, workers, queueCap int) *Pool {
 	}
 	stopCtx, stopCancel := context.WithCancel(context.Background())
 	p := &Pool{
-		store:      store,
-		workers:    workers,
-		jobs:       make(chan poolJob, queueCap),
-		queueCap:   queueCap,
-		inflight:   make(map[string]struct{}),
-		stopCtx:    stopCtx,
-		stopCancel: stopCancel,
-		runner:     RunSox,
-		jobTimeout: defaultJobTimeout,
-		fsyncFn:    fsyncFileAndParent,
+		store:        store,
+		workers:      workers,
+		optimizeJobs: make(chan poolJob, queueCap),
+		upscaleJobs:  make(chan poolJob, queueCap),
+		queueCap:     queueCap,
+		inflight:     make(map[string]struct{}),
+		stopCtx:      stopCtx,
+		stopCancel:   stopCancel,
+		runner:       RunSox,
+		jobTimeout:   defaultJobTimeout,
+		fsyncFn:      fsyncFileAndParent,
 		// stateChange capacity 1 — coalesce. jobComplete capacity
 		// 2×workers — fidelity buffer per the docstring on the
 		// channel fields.
@@ -322,9 +343,10 @@ func NewPool(store *manifest.Store, workers, queueCap int) *Pool {
 // silent — a duplicate (same source_path + variant_id) returns
 // nil without taking a slot. After Stop, returns ErrPoolClosed.
 //
-// **Race-safe vs Stop**: pre-fix, Stop() did `close(p.jobs)`
-// concurrently with an Enqueue holding `inflight[dedup]` but not
-// yet at the channel send — sending on a closed channel panics
+// **Race-safe vs Stop**: pre-fix, Stop() did `close(p.optimizeJobs)
+// / close(p.upscaleJobs)` concurrently with an Enqueue holding
+// `inflight[dedup]` but not yet at the channel send — sending on a
+// closed channel panics
 // (Gemini high + Qodo bug 1 + CodeRabbit echo on PR #109). Fix:
 // the channel-send branch runs INSIDE `p.mu` and Stop() takes
 // the same mutex before close. The mutex serialises the two
@@ -362,8 +384,17 @@ func (p *Pool) Enqueue(spec JobSpec) error {
 	// pass the dedup check. If the channel send fails, we roll
 	// back below.
 	p.inflight[dedup] = struct{}{}
+	// Route per JobKind. `JobKindOptimize` → optimizeJobs (foreground);
+	// every other kind (`JobKindUpscale` AND empty-Kind legacy default)
+	// → upscaleJobs (background). Routing is pinned by a pure helper
+	// so the test suite can assert the routing contract without
+	// spinning a Pool.
+	jobsChan := p.upscaleJobs
+	if routesToOptimizeChannel(spec.Kind) {
+		jobsChan = p.optimizeJobs
+	}
 	select {
-	case p.jobs <- poolJob{spec: spec, dedup: dedup}:
+	case jobsChan <- poolJob{spec: spec, dedup: dedup}:
 		p.enqueuedCnt.Add(1)
 		p.mu.Unlock()
 		// Non-blocking send to the publisher; safe to invoke after
@@ -378,6 +409,22 @@ func (p *Pool) Enqueue(spec JobSpec) error {
 		p.mu.Unlock()
 		return ErrQueueFull
 	}
+}
+
+// routesToOptimizeChannel is the pure routing decision used by Enqueue
+// to pick the destination channel for a given JobKind. Pulled out as a
+// static helper so the test suite can pin the routing contract without
+// the rest of the Pool machinery, mirroring the friendlyErrorMessage /
+// isRenderGap test-affordance convention used elsewhere in the project.
+//
+// **Contract**: `JobKindOptimize` is the only kind that routes to the
+// optimize/foreground channel. Every other kind (`JobKindUpscale` AND
+// the empty-Kind zero value) routes to upscale/background. The empty
+// default exists because many legacy test fixtures + the
+// pre-batch-feature `bridge upscale` CLI invoke `JobSpec{...}` without
+// setting Kind explicitly.
+func routesToOptimizeChannel(kind JobKind) bool {
+	return kind == JobKindOptimize
 }
 
 // notifyStateChangeFn returns the current onStateChange callback
@@ -462,9 +509,11 @@ func (p *Pool) SetOnJobFailed(fn func(path, variantID, errMsg string, durationSe
 // prevents BOTH "send on closed channel" panics AND publisher
 // deadlocks:
 //
-//  1. close(p.jobs) under p.mu so any in-flight Enqueue completes
-//     its channel send (or its dedup-rollback) before close()
-//     lands. See Enqueue's docstring for the full race trace.
+//  1. close(p.optimizeJobs) + close(p.upscaleJobs) under p.mu so any
+//     in-flight Enqueue completes its channel send (or its dedup-
+//     rollback) before either close() lands. See Enqueue's docstring
+//     for the full race trace. Both channels share the same p.mu so
+//     ordering between them inside the lock is irrelevant.
 //  2. stopCancel() so any sox subprocess waiting on the per-job
 //     context dies promptly.
 //  3. p.wg.Wait() — block until every worker goroutine has
@@ -485,7 +534,8 @@ func (p *Pool) Stop() {
 		return
 	}
 	p.mu.Lock()
-	close(p.jobs)
+	close(p.optimizeJobs)
+	close(p.upscaleJobs)
 	p.mu.Unlock()
 	p.stopCancel()
 	p.wg.Wait()
@@ -667,6 +717,17 @@ func (p *Pool) DropInflight(matches func(sourcePath string) bool) int {
 
 // Stats returns the current snapshot. Safe to call concurrently
 // with Enqueue / worker activity.
+//
+// **QueueLen is the COMBINED depth** across both priority channels
+// — the admin tile + iOS `UpscaleStatsSnapshot` consume this as
+// "how much work is pending", which doesn't distinguish kind. If a
+// future surface needs per-channel split (e.g. an admin "optimize
+// queue depth" indicator), extend PoolStats with sibling fields
+// rather than retargeting QueueLen — back-compat consumers depend
+// on the combined-depth semantic.
+//
+// `QueueCap` retains its per-channel meaning (each priority queue
+// holds up to QueueCap jobs); combined capacity is `2 * QueueCap`.
 func (p *Pool) Stats() PoolStats {
 	p.mu.Lock()
 	inflight := len(p.inflight)
@@ -674,7 +735,7 @@ func (p *Pool) Stats() PoolStats {
 	return PoolStats{
 		Workers:  p.workers,
 		QueueCap: p.queueCap,
-		QueueLen: len(p.jobs),
+		QueueLen: len(p.optimizeJobs) + len(p.upscaleJobs),
 		Inflight: inflight,
 		Enqueued: p.enqueuedCnt.Load(),
 		Done:     p.doneCnt.Load(),
@@ -683,15 +744,63 @@ func (p *Pool) Stats() PoolStats {
 }
 
 // workerLoop is the body of each pool worker goroutine. Pulls
-// jobs off the channel and dispatches each through processJob.
+// jobs off the two-channel priority queue and dispatches each
+// through processJob.
+//
+// **Bias-select pattern** (PR-pending): Phase 1 polls the optimize
+// channel with `select { ... default: }` to drain any pending
+// foreground/CarPlay backlog FIRST. If the optimize channel is
+// empty (or already nil'd after close), Phase 2 falls into a fair
+// select across both channels — so an empty optimize channel
+// cannot starve the upscale channel from making progress.
+//
+// **Channel-nil pattern** for clean shutdown: when Stop() closes a
+// channel, the local copy (optCh or upsCh) is set to nil. A nil
+// channel's `select` case blocks forever — Go-idiomatic — so the
+// surviving channel's case stays live and the loop exits cleanly
+// once both are nil. Mirrors the same pattern `runPublisher` uses
+// for stateChangeChan / jobCompleteChan / jobFailedChan.
 //
 // The pool's stopCtx is plumbed into RunSox via
 // exec.CommandContext, so a Stop() while a sox is in flight
 // SIGKILLs the process and the worker exits the loop cleanly.
 func (p *Pool) workerLoop() {
 	defer p.wg.Done()
-	for job := range p.jobs {
-		p.processJob(job)
+	optCh := (<-chan poolJob)(p.optimizeJobs)
+	upsCh := (<-chan poolJob)(p.upscaleJobs)
+	for optCh != nil || upsCh != nil {
+		// Phase 1: bias toward optimize if its channel is active.
+		// `select` with a `default` arm is non-blocking — if no
+		// optimize job is pending, fall through to Phase 2.
+		if optCh != nil {
+			select {
+			case job, ok := <-optCh:
+				if !ok {
+					optCh = nil
+					continue
+				}
+				p.processJob(job)
+				continue
+			default:
+			}
+		}
+		// Phase 2: fair select across active channels. If both are
+		// active and both have jobs, Go's runtime picks pseudo-
+		// randomly — that's the anti-starvation property.
+		select {
+		case job, ok := <-optCh:
+			if !ok {
+				optCh = nil
+				continue
+			}
+			p.processJob(job)
+		case job, ok := <-upsCh:
+			if !ok {
+				upsCh = nil
+				continue
+			}
+			p.processJob(job)
+		}
 	}
 }
 
