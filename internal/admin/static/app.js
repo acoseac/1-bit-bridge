@@ -2757,6 +2757,23 @@ async function inspectorLoadMore() {
 function inspectorOpenPanelSingle(folder, anchorEl) {
   const panel = document.getElementById("inspector-action-panel");
   if (!panel) return;
+  // Clicking ⓘ on a tile is a focused action that supersedes any
+  // pending multi-select. Pre-fix, leaving `selectedPaths` populated
+  // meant closing the single panel hid every visible affordance
+  // (panel gone, no selection bar) — the operator's checkboxes were
+  // still ticked but there was no UI to act on them (CodeRabbit
+  // major on PR #279). Clearing here is the simplest fix and
+  // matches the operator's mental model: "open the action panel
+  // for THIS tile" is single-tile-scoped.
+  if (inspectorState.selectedPaths.size > 0) {
+    for (const cb of document.querySelectorAll(
+      '.inspector-tile input[type="checkbox"][data-path]:checked')) {
+      cb.checked = false;
+      const tile = cb.closest(".inspector-tile");
+      if (tile) delete tile.dataset.selected;
+    }
+    inspectorState.selectedPaths.clear();
+  }
   inspectorState.selection = { kind: "folder", row: folder };
   inspectorState.panelMode = "single";
 
@@ -3077,15 +3094,35 @@ function inspectorPreflightNoOpReason(data, kind) {
 // row OR the expanded card's submit-status row is preferred when
 // available; otherwise lazy-creates a one-time toast at the bottom
 // of the viewport.
+//
+// API contract:
+//   - Plain string  → rendered via textContent (XSS-safe).
+//   - { html: "…" } → rendered via innerHTML; ONLY callers that
+//                     construct trusted HTML from server-numeric
+//                     fields (e.g. enqueued/covered counts +
+//                     hardcoded <strong> / <a>) may use this form.
+//
+// Pre-fix the heuristic `msg.includes("<")` was used to auto-detect
+// HTML — that turned a server-supplied error string like
+// "HTTP 502: <html>...</html>" into a live XSS surface
+// (Gemini high on PR #279).
 function inspectorSelectionToast(msg) {
-  const isHTML = typeof msg === "string" && msg.includes("<");
+  const trusted = (msg && typeof msg === "object" && typeof msg.html === "string")
+    ? msg.html
+    : null;
+  const plain = trusted == null ? (msg || "") : null;
+  const apply = (el) => {
+    if (trusted != null) el.innerHTML = trusted;
+    else el.textContent = plain;
+  };
+
   const panel = document.getElementById("inspector-action-panel");
   if (panel && panel.matches(":popover-open")) {
     // Batch-confirm overlay open → status row sits there.
     if (panel.dataset.confirming) {
       const cs = panel.querySelector(".panel-confirm-status");
       if (cs) {
-        if (isHTML) cs.innerHTML = msg; else cs.textContent = msg || "";
+        apply(cs);
         return;
       }
     }
@@ -3094,7 +3131,7 @@ function inspectorSelectionToast(msg) {
     const status = panel.querySelector(
       `.panel-submit-status[data-kind="${kind}"]`);
     if (status) {
-      if (isHTML) status.innerHTML = msg; else status.textContent = msg || "";
+      apply(status);
       return;
     }
   }
@@ -3109,12 +3146,12 @@ function inspectorSelectionToast(msg) {
     toast.setAttribute("aria-live", "polite");
     document.body.appendChild(toast);
   }
-  if (!msg) {
+  if (trusted == null && !plain) {
     toast.hidden = true;
     return;
   }
   toast.hidden = false;
-  if (isHTML) toast.innerHTML = msg; else toast.textContent = msg;
+  apply(toast);
   // Auto-dismiss after 6 s — long enough to read "tracks queued"
   // even on a slow read, short enough to disappear when the operator
   // moves on.
@@ -3221,18 +3258,23 @@ async function inspectorSubmitBatchForKind(kind, paths) {
         `<a href="/jobs">View jobs →</a>`;
     }
   } else {
-    // Multi-path: render a single toast-style message on the
-    // selection bar. Fold into a small floating notice so the
-    // operator sees the aggregated counts.
+    // Multi-path: render a single toast-style message on the panel
+    // (or as a floating page-level toast when the panel is closed).
+    // The trusted-HTML form is reserved for the success branch where
+    // every interpolated value is a numeric count from the server.
     if (failed.length > 0 && ok.length === 0) {
       inspectorSelectionToast(`Couldn't submit any: ${failed[0].error}`);
     } else if (failed.length > 0) {
       inspectorSelectionToast(
         `${enqueued} tracks queued across ${ok.length} folders · ${failed.length} folders failed`);
     } else {
-      inspectorSelectionToast(
-        `Batch enrolled · <strong>${enqueued}</strong> tracks queued across ${ok.length} folders. ` +
-        `<a href="/jobs">View jobs →</a>`);
+      // SAFE: enqueued + ok.length are server-supplied integers,
+      // not user-controlled strings; rendered via the html sentinel
+      // so the <strong> and <a> elements paint as markup.
+      inspectorSelectionToast({
+        html: `Batch enrolled · <strong>${enqueued}</strong> tracks queued across ${ok.length} folders. ` +
+          `<a href="/jobs">View jobs →</a>`,
+      });
     }
   }
 
@@ -3484,6 +3526,16 @@ const PANEL_BATCH_PROJECTION_CONCURRENCY = 5;
 async function inspectorPanelConfirmBatch(kind) {
   const panel = document.getElementById("inspector-action-panel");
   if (!panel || inspectorState.panelMode !== "batch") return;
+
+  // Per-invocation request ID — guards against a stale worker pool
+  // landing results on a fresh same-kind confirmation. Pre-fix the
+  // race-guard was `dataset.confirming === kind` only; an operator
+  // who Cancelled and immediately re-opened the same kind would
+  // see the old workers' counts merge with the new pool's (Gemini
+  // high on PR #279). Stored on the panel element so concurrent
+  // invocations share a single source of truth.
+  const requestId = (panel._batchRequestId = (panel._batchRequestId || 0) + 1);
+
   panel.dataset.confirming = kind;
   inspectorA11yListeners("batch-confirm");
 
@@ -3519,15 +3571,24 @@ async function inspectorPanelConfirmBatch(kind) {
   let projectedFiles = 0;
   let projectedSize = 0;
   let requiredSize = 0;
-  let availableBytes = 0;
+  // availableBytes intentionally starts null so we can distinguish
+  // "real zero (volume is full)" from "no probe has landed yet"
+  // (CodeRabbit major + Gemini medium on PR #279). The last
+  // SUCCESSFUL probe's numeric value wins — server returns the
+  // same volume stat per-path, so any single success is enough.
+  let availableBytes = null;
+  let successfulProbes = 0;
   let failedProbes = 0;
   let completed = 0;
   const queue = paths.slice();
 
-  // Race-guard token. If the operator hits Cancel mid-pool the
-  // dataset.confirming flips away; the workers bail out before
-  // landing more results.
-  const guard = () => panel.dataset.confirming === kind;
+  // Race-guard token. Workers bail if EITHER the operator hits
+  // Cancel (data-confirming flips) OR a NEW same-kind confirmation
+  // starts (request-id mismatch). Pre-fix only the kind was checked;
+  // a same-kind retry merged old + new pool results.
+  const guard = () =>
+    panel.dataset.confirming === kind
+    && panel._batchRequestId === requestId;
 
   async function worker() {
     while (queue.length > 0) {
@@ -3538,12 +3599,18 @@ async function inspectorPanelConfirmBatch(kind) {
           `/api/library/browse-projection?path=${encodeURIComponent(path)}&kind=${kind}`);
         if (res.ok) {
           const data = await res.json();
+          successfulProbes++;
           projectedFiles += data.projectedFiles || 0;
           projectedSize += data.projectedSizeBytes || 0;
           requiredSize += data.requiredBytesWithMargin || 0;
           // Available bytes is per-host (same volume for every
-          // path); take the last response's value.
-          availableBytes = data.availableBytes || availableBytes;
+          // path). Only overwrite when the server actually returned
+          // a finite number — pre-fix `|| availableBytes` kept the
+          // stale value when the server reported 0 (full disk).
+          if (typeof data.availableBytes === "number"
+            && Number.isFinite(data.availableBytes)) {
+            availableBytes = data.availableBytes;
+          }
         } else {
           failedProbes++;
         }
@@ -3565,6 +3632,16 @@ async function inspectorPanelConfirmBatch(kind) {
   await Promise.all(workers);
   if (!guard()) return;
 
+  // "All probes failed" → estimator is offline; let the operator
+  // submit and rely on server-side per-folder validation.
+  if (successfulProbes === 0) {
+    content.innerHTML =
+      `<p class="hint">Couldn't estimate this batch right now (every projection probe failed). You can still submit it; the bridge will validate each folder server-side.</p>`;
+    submitBtn.disabled = false;
+    submitBtn.dataset.kind = kind;
+    return;
+  }
+
   if (projectedFiles === 0) {
     content.innerHTML =
       `<p class="hint">Nothing eligible to ${kind === "upscale" ? "upscale" : "CarPlay-optimize"} across the selected folders — every track is already covered, lossy, DSD, or in an unknown source format.</p>`;
@@ -3572,23 +3649,36 @@ async function inspectorPanelConfirmBatch(kind) {
     return;
   }
 
-  const wouldFit = availableBytes === 0 || availableBytes >= requiredSize;
-  const probeNote = failedProbes > 0
-    ? `<p class="hint">${failedProbes} folder${failedProbes === 1 ? "" : "s"} couldn't be probed — estimates below cover the rest.</p>`
-    : "";
+  // wouldFit decision: capacity must be known AND >= required.
+  // Unknown capacity (availableBytes == null) blocks the submit so
+  // the operator can re-try the estimate — defends a freshly-cleaned
+  // volume that the projection couldn't stat.
+  const wouldFit = availableBytes != null
+    && availableBytes >= requiredSize;
+
+  // Extracted from a nested ternary (SonarCloud nested-ternary
+  // warning on PR #279).
+  let probeNote = "";
+  if (failedProbes > 0) {
+    const noun = failedProbes === 1 ? "folder" : "folders";
+    probeNote = `<p class="hint">${failedProbes} ${noun} couldn't be probed — estimates below cover the rest.</p>`;
+  }
+  const freeText = availableBytes == null
+    ? "unknown"
+    : humanBytes(availableBytes);
   let html = probeNote + `
     <dl class="kv">
       <dt>Folders</dt><dd>${paths.length}</dd>
       <dt>Eligible tracks</dt><dd>${projectedFiles}</dd>
       <dt>Projected size</dt><dd>${humanBytes(projectedSize)}</dd>
-      <dt>Free on data volume</dt><dd>${humanBytes(availableBytes)}</dd>
+      <dt>Free on data volume</dt><dd>${freeText}</dd>
       <dt>Required (with 10% margin)</dt><dd>${humanBytes(requiredSize)}</dd>
     </dl>`;
-  if (!wouldFit) {
-    html += `<p class="error" role="alert">Not enough free space: needs ${humanBytes(requiredSize)}, only ${humanBytes(availableBytes)} available on the bridge data volume.</p>`;
-    submitBtn.disabled = true;
-  } else {
+  if (wouldFit) {
     submitBtn.disabled = false;
+  } else {
+    html += `<p class="error" role="alert">Not enough free space: needs ${humanBytes(requiredSize)}, only ${freeText} available on the bridge data volume.</p>`;
+    submitBtn.disabled = true;
   }
   content.innerHTML = html;
   submitBtn.dataset.kind = kind;
@@ -3723,9 +3813,14 @@ function inspectorA11yListeners(mode) {
     inspectorState.panelFocusHandler = (e) => {
       if (panel.contains(e.target)) return;
       // Focus drifted out — pull it back to the first focusable
-      // element inside the panel.
+      // element inside the panel. Include `a[href]` so the
+      // success-toast "View jobs →" links AND any future panel
+      // hyperlinks participate in the trap (Gemini medium on PR
+      // #279).
       const focusable = panel.querySelectorAll(
-        'button:not([disabled]):not([hidden]), [tabindex="0"]:not([disabled])');
+        'button:not([disabled]):not([hidden]), '
+        + 'a[href]:not([hidden]), '
+        + '[tabindex="0"]:not([disabled])');
       if (focusable.length > 0) focusable[0].focus();
     };
     document.addEventListener("focusin", inspectorState.panelFocusHandler);
