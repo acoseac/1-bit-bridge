@@ -310,9 +310,17 @@ func initOptimizeIDCache() {
 // **Filesystem safety**: long basenames + Windows-illegal characters
 // + reserved names route through `safeVariantFilename` which:
 //   - replaces `: * ? " < > |` with `_` (deterministic),
-//   - middle-truncates the basename + appends a short SHA8 of the
-//     original full basename for uniqueness when total would exceed
-//     255 bytes (ext4 / NTFS / exFAT cap).
+//   - appends a `~<sha8>.` disambiguation segment derived from the
+//     RAW (pre-sanitization) basename bytes whenever sanitization
+//     touched the name OR the total would exceed 255 bytes (ext4 /
+//     NTFS / exFAT cap). The raw-bytes hash is load-bearing: two
+//     source files differing only in FAT-illegal characters
+//     (`Track:A.flac` + `Track*A.flac`) sanitize to identical bytes,
+//     and pre-fix the hash was computed over the sanitized form so
+//     it collapsed too — silently overwriting one variant with the
+//     other via `os.Rename`. The current shape keeps distinct raw
+//     inputs distinct on disk; DO NOT move the hash computation
+//     past `sanitiseForFAT` at any new call site.
 //
 // Dirname segments are NOT sanitised — they came from the source
 // filesystem which already accepts them.
@@ -349,14 +357,31 @@ func (j JobSpec) SidecarPath() string {
 // Pure helper — testable in isolation; table-tested across cases.
 func safeVariantFilename(srcBase, variantID string) string {
 	const fsBasenameCap = 255
-	srcBase = sanitiseForFAT(srcBase)
-	candidate := fmt.Sprintf("%s.%s.flac", srcBase, variantID)
-	if len(candidate) <= fsBasenameCap {
+	raw := srcBase
+	sanitized := sanitiseForFAT(srcBase)
+
+	// Clean path: name didn't trip FAT sanitization AND fits the cap.
+	// Pre-fix this branch ran even when sanitization rewrote the name,
+	// which let two distinct raw inputs (`Track:A.flac` + `Track*A.flac`)
+	// collapse onto the same sanitized output and silently overwrite each
+	// other's variant via os.Rename. The `sanitized == raw` clause closes
+	// that hole — any name that touched sanitization falls through to the
+	// raw-bytes SHA8 suffix path so distinct sources stay distinct on disk.
+	candidate := fmt.Sprintf("%s.%s.flac", sanitized, variantID)
+	if len(candidate) <= fsBasenameCap && sanitized == raw {
 		return candidate
 	}
-	// Over-length: compute a stable SHA8 of the ORIGINAL full
-	// basename for uniqueness, then middle-truncate srcBase to fit.
-	sum := sha256.Sum256([]byte(srcBase))
+	// Disambiguation path. Hash the RAW (pre-sanitization) bytes — hashing
+	// the sanitized form was the original bug (`Track:A.flac` and
+	// `Track*A.flac` sanitize identically, so they hashed identically too).
+	// Note: Unicode normalisation drift (NFC vs NFD of the same character)
+	// does NOT collapse here because sanitiseForFAT only rewrites ASCII
+	// target bytes and leaves multi-byte sequences alone — the raw bytes
+	// of the two forms differ, so the SHA8 differs even when the visible
+	// glyph matches. A future refactor that adds Unicode normalisation
+	// INSIDE sanitiseForFAT would re-open the collision; a regression test
+	// guards this.
+	sum := sha256.Sum256([]byte(raw))
 	sha8 := hex.EncodeToString(sum[:])[:8]
 	// Reserved budget for: "~<sha8>." + variantID + ".flac".
 	suffix := fmt.Sprintf("~%s.%s.flac", sha8, variantID)
@@ -369,8 +394,8 @@ func safeVariantFilename(srcBase, variantID string) string {
 		// dead under realistic configs.
 		return fmt.Sprintf("v.%s%s", sha8, suffix)
 	}
-	if len(srcBase) <= budget {
-		return srcBase + suffix
+	if len(sanitized) <= budget {
+		return sanitized + suffix
 	}
 	// Middle-truncate: keep `head + ".." + tail`, then append suffix.
 	// UTF-8-safe rune-boundary clip: byte-level slicing could land in
@@ -379,10 +404,10 @@ func safeVariantFilename(srcBase, variantID string) string {
 	// rune boundaries up to the byte budget.
 	half := (budget - 2) / 2
 	if half < 1 {
-		return truncateUTF8AtMost(srcBase, budget) + suffix
+		return truncateUTF8AtMost(sanitized, budget) + suffix
 	}
-	head := truncateUTF8AtMost(srcBase, half)
-	tail := truncateUTF8FromEnd(srcBase, half)
+	head := truncateUTF8AtMost(sanitized, half)
+	tail := truncateUTF8FromEnd(sanitized, half)
 	return head + ".." + tail + suffix
 }
 

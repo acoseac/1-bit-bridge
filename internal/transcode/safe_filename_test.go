@@ -2,9 +2,17 @@ package transcode
 
 import (
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
+
+// sha8Marker matches the `~<8 hex chars>.` segment the disambiguation
+// path inserts when sanitization touched the basename or the candidate
+// exceeded the FS cap. The exact hex isn't asserted (covered by the
+// dedicated collision-pair test); structural presence is what callers
+// of safeVariantFilename actually depend on.
+var sha8Marker = regexp.MustCompile(`~[0-9a-f]{8}\.`)
 
 // TestSafeVariantFilenameDefault covers the normal-case shape:
 // `<srcBase>.<variantID>.flac`.
@@ -17,31 +25,118 @@ func TestSafeVariantFilenameDefault(t *testing.T) {
 }
 
 // TestSafeVariantFilenameSanitisesFATIllegalChars covers the
-// FAT-family character substitutions. Single-character cases assert
-// each illegal byte maps to `_` deterministically.
+// FAT-family character substitutions. Each illegal byte maps to `_`
+// deterministically, AND the output carries the `~<sha8>` disambiguation
+// suffix so two raw inputs that sanitize identically stay distinct on
+// disk (see TestSafeVariantFilenameDistinguishesSanitizationCollisions
+// for the collision-pair contract).
 func TestSafeVariantFilenameSanitisesFATIllegalChars(t *testing.T) {
 	cases := []struct {
-		name    string
-		srcBase string
-		want    string
+		name            string
+		srcBase         string
+		wantSanitizedIn string // substring of the sanitized form
 	}{
-		{"colon", "Bach: BWV 1006.flac", "Bach_ BWV 1006.flac.upscaled-v2-176400-24.flac"},
-		{"asterisk", "Track*.flac", "Track_.flac.upscaled-v2-176400-24.flac"},
-		{"question", "Track?.flac", "Track_.flac.upscaled-v2-176400-24.flac"},
-		{"quote", `Foo"Bar.flac`, "Foo_Bar.flac.upscaled-v2-176400-24.flac"},
-		{"lt", "Foo<Bar.flac", "Foo_Bar.flac.upscaled-v2-176400-24.flac"},
-		{"gt", "Foo>Bar.flac", "Foo_Bar.flac.upscaled-v2-176400-24.flac"},
-		{"pipe", "Foo|Bar.flac", "Foo_Bar.flac.upscaled-v2-176400-24.flac"},
-		{"backslash", `Foo\Bar.flac`, "Foo_Bar.flac.upscaled-v2-176400-24.flac"},
-		{"all-illegal", `:*?"<>|\.flac`, "________.flac.upscaled-v2-176400-24.flac"},
+		{"colon", "Bach: BWV 1006.flac", "Bach_ BWV 1006.flac"},
+		{"asterisk", "Track*.flac", "Track_.flac"},
+		{"question", "Track?.flac", "Track_.flac"},
+		{"quote", `Foo"Bar.flac`, "Foo_Bar.flac"},
+		{"lt", "Foo<Bar.flac", "Foo_Bar.flac"},
+		{"gt", "Foo>Bar.flac", "Foo_Bar.flac"},
+		{"pipe", "Foo|Bar.flac", "Foo_Bar.flac"},
+		{"backslash", `Foo\Bar.flac`, "Foo_Bar.flac"},
+		{"all-illegal", `:*?"<>|\.flac`, "________.flac"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			got := safeVariantFilename(c.srcBase, "upscaled-v2-176400-24")
-			if got != c.want {
-				t.Errorf("got %q, want %q", got, c.want)
+			if !strings.Contains(got, c.wantSanitizedIn) {
+				t.Errorf("missing sanitized portion %q in %q", c.wantSanitizedIn, got)
+			}
+			if !sha8Marker.MatchString(got) {
+				t.Errorf("missing ~<sha8>. disambiguation marker in %q", got)
+			}
+			if !strings.HasSuffix(got, ".upscaled-v2-176400-24.flac") {
+				t.Errorf("missing variantID + .flac suffix in %q", got)
 			}
 		})
+	}
+}
+
+// TestSafeVariantFilenameDistinguishesSanitizationCollisions is the
+// load-bearing collision-pair contract. Two raw basenames that differ
+// ONLY in FAT-illegal characters MUST produce distinct output
+// filenames — otherwise `os.Rename` silently overwrites the earlier
+// sidecar with the later one inside the source-mirrored tree. The
+// SHA8 must be computed over the RAW (pre-sanitization) bytes; pre-fix
+// the hash was over the SANITIZED form and these two inputs collided
+// at both the short-path branch AND the over-length branch.
+func TestSafeVariantFilenameDistinguishesSanitizationCollisions(t *testing.T) {
+	cases := []struct {
+		name string
+		a, b string
+	}{
+		{"colon-vs-asterisk", "Disc 1:Track A.flac", "Disc 1*Track A.flac"},
+		{"colon-vs-question", "Movement: I.flac", "Movement? I.flac"},
+		{"lt-vs-gt", "Foo<Bar.flac", "Foo>Bar.flac"},
+		{"pipe-vs-backslash", "X|Y.flac", `X\Y.flac`},
+		// Three-way: every illegal char that maps to `_` would
+		// otherwise produce the same output.
+		{"colon-vs-lt", "A:B.flac", "A<B.flac"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			gotA := safeVariantFilename(c.a, "upscaled-v2-176400-24")
+			gotB := safeVariantFilename(c.b, "upscaled-v2-176400-24")
+			if gotA == gotB {
+				t.Errorf("collision: %q and %q both produced %q",
+					c.a, c.b, gotA)
+			}
+		})
+	}
+}
+
+// TestSafeVariantFilenameCleanNameSkipsSuffix confirms the no-op fast
+// path: a basename that doesn't trip sanitization AND fits the FS cap
+// returns the plain `<srcBase>.<variantID>.flac` shape with NO `~<sha8>`
+// suffix. Critical for the source-mirror property — clean names stay
+// human-readable.
+func TestSafeVariantFilenameCleanNameSkipsSuffix(t *testing.T) {
+	got := safeVariantFilename("01 Love Letters.flac", "upscaled-v2-176400-24")
+	want := "01 Love Letters.flac.upscaled-v2-176400-24.flac"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+	if sha8Marker.MatchString(got) {
+		t.Errorf("clean name should NOT carry the ~<sha8> marker: %q", got)
+	}
+}
+
+// TestSafeVariantFilenameNFCvsNFD pins the Unicode-normalisation
+// invariant: two strings that render the same glyph but differ in
+// composition form (NFC `é` U+00E9 vs NFD `e` + combining acute U+0065
+// U+0301) MUST produce distinct output filenames. Pre-fix this was
+// implicitly guaranteed because sanitiseForFAT touched only ASCII bytes;
+// a future refactor that adds Unicode normalisation INSIDE
+// sanitiseForFAT (collapsing both to NFC) would re-introduce a silent
+// collision. This test will fail under such a refactor.
+//
+// Note: today both inputs are "clean" (no FAT-illegal chars), so they
+// take the short-path branch. The contract this test enforces is
+// "distinct raw bytes → distinct output filenames" — even if a future
+// sanitiseForFAT normalises the visible form, the raw-byte SHA8 path
+// MUST kick in for either of the normalised inputs to stay distinct
+// from the other.
+func TestSafeVariantFilenameNFCvsNFD(t *testing.T) {
+	nfc := "Café.flac"  // "Café.flac" — 2-byte é
+	nfd := "Café.flac" // "Café.flac" — 'e' + combining acute, 3 bytes total for the glyph
+	if nfc == nfd {
+		t.Fatal("test fixtures are byte-identical; check the string literals")
+	}
+	gotNFC := safeVariantFilename(nfc, "upscaled-v2-176400-24")
+	gotNFD := safeVariantFilename(nfd, "upscaled-v2-176400-24")
+	if gotNFC == gotNFD {
+		t.Errorf("NFC vs NFD collision: %q and %q both produced %q",
+			nfc, nfd, gotNFC)
 	}
 }
 
