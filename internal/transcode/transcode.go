@@ -367,9 +367,17 @@ func safeVariantFilename(srcBase, variantID string) string {
 	// other's variant via os.Rename. The `sanitized == raw` clause closes
 	// that hole — any name that touched sanitization falls through to the
 	// raw-bytes SHA8 suffix path so distinct sources stay distinct on disk.
-	candidate := fmt.Sprintf("%s.%s.flac", sanitized, variantID)
-	if len(candidate) <= fsBasenameCap && sanitized == raw {
-		return candidate
+	//
+	// The `sanitized == raw` byte-compare is a cheap O(len(srcBase))
+	// pre-check; it gates the more expensive `fmt.Sprintf` so names that
+	// DID get rewritten (classical-music libraries with colons + question
+	// marks are the common case) skip the string allocation entirely
+	// (Gemini medium on PR #280).
+	if sanitized == raw {
+		candidate := fmt.Sprintf("%s.%s.flac", sanitized, variantID)
+		if len(candidate) <= fsBasenameCap {
+			return candidate
+		}
 	}
 	// Disambiguation path. Hash the RAW (pre-sanitization) bytes — hashing
 	// the sanitized form was the original bug (`Track:A.flac` and
