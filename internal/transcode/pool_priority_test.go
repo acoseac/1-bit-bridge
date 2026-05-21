@@ -167,21 +167,24 @@ func TestPoolOptimizeBacklogDrainsBeforeUpscale(t *testing.T) {
 	}
 }
 
-// TestPoolUpscaleStarvationAvoidance pins the anti-starvation property
-// of the bias-select pattern: a sustained stream of optimize jobs
-// MUST NOT prevent upscale from making forward progress. The
-// implementation provides this via Phase 2's fair `select { case opt:
-// case ups: }` — when Phase 1's non-blocking poll on optimize misses
-// (the channel is momentarily empty between sends), Phase 2 picks
-// pseudo-randomly across whichever channel is ready.
+// TestPoolUpscaleProgressUnderInterleavedLoad pins the partial-fair
+// property of the bias-select under INTERLEAVED enqueue load: when
+// optimize and upscale jobs land alternately, Phase 1's non-blocking
+// poll finds the optimize channel intermittently empty (during the
+// windows BETWEEN successive optimize sends), Phase 2 fires, and
+// pseudo-random fair-select gives upscale enough chances to drain.
 //
-// Test shape: a single worker, runner that records the kind. Enqueue
-// 10 optimize + 10 upscale jobs interleaved. By the time all 20
-// drain, BOTH kinds must be present in the processed list. (Strict
-// priority would have processed all 10 optimize first and starved
-// upscale entirely under sustained optimize load — that's the
-// failure mode this test rules out.)
-func TestPoolUpscaleStarvationAvoidance(t *testing.T) {
+// **What this DOES NOT test**: strict anti-starvation under SUSTAINED
+// optimize streams. Gemini medium on PR #281 correctly flagged the
+// implementation as susceptible to upscale starvation if the optimize
+// channel is never empty at the moment of each Phase 1 poll — the
+// worker would `continue` after every Phase 1 hit and never reach
+// Phase 2. That's the documented limitation; testing it would require
+// a producer goroutine that maintains continuous backpressure, which
+// is outside the scope of this PR. For the CarPlay-Optimize use case
+// (single-track user-tap submissions), the interleaved-load shape is
+// the realistic regime.
+func TestPoolUpscaleProgressUnderInterleavedLoad(t *testing.T) {
 	store := openTempStoreForPool(t)
 	t.Cleanup(func() { _ = store.Close() })
 
@@ -252,7 +255,7 @@ func TestPoolUpscaleStarvationAvoidance(t *testing.T) {
 	}
 	if optCount != 10 || upsCount != 10 {
 		t.Errorf("kind distribution: optimize=%d (want 10), upscale=%d (want 10) — "+
-			"starvation regression?", optCount, upsCount)
+			"upscale progress regression under interleaved load", optCount, upsCount)
 	}
 }
 
@@ -364,5 +367,14 @@ func TestPoolStatsQueueLenIsCombinedDepth(t *testing.T) {
 	if stats.QueueLen != 6 {
 		t.Errorf("QueueLen = %d, want 6 (combined depth across both "+
 			"priority channels)", stats.QueueLen)
+	}
+	// Per Gemini medium on PR #281: QueueCap must also report the
+	// COMBINED capacity (2 × per-channel) so admin tiles computing
+	// QueueLen/QueueCap as a fill ratio can't exceed 100%. NewPool
+	// was constructed with queueCap=16; combined capacity is 32.
+	if stats.QueueCap != 32 {
+		t.Errorf("QueueCap = %d, want 32 (combined capacity across both "+
+			"priority channels — per-channel back-pressure still enforced "+
+			"at Enqueue time)", stats.QueueCap)
 	}
 }

@@ -718,23 +718,31 @@ func (p *Pool) DropInflight(matches func(sourcePath string) bool) int {
 // Stats returns the current snapshot. Safe to call concurrently
 // with Enqueue / worker activity.
 //
-// **QueueLen is the COMBINED depth** across both priority channels
-// — the admin tile + iOS `UpscaleStatsSnapshot` consume this as
-// "how much work is pending", which doesn't distinguish kind. If a
-// future surface needs per-channel split (e.g. an admin "optimize
-// queue depth" indicator), extend PoolStats with sibling fields
-// rather than retargeting QueueLen — back-compat consumers depend
-// on the combined-depth semantic.
+// **QueueLen AND QueueCap are both COMBINED across the two priority
+// channels** so the ratio `QueueLen / QueueCap` stays bounded by 1.0
+// for monitoring tools that compute a fill-percentage. Pre-fix the
+// snapshot reported a per-channel QueueCap alongside a combined
+// QueueLen, which produced ratios >100% whenever both channels were
+// partially full — caught by Gemini medium on PR #281.
 //
-// `QueueCap` retains its per-channel meaning (each priority queue
-// holds up to QueueCap jobs); combined capacity is `2 * QueueCap`.
+// **Per-channel back-pressure is still enforced** at Enqueue time:
+// each channel independently has `p.queueCap` slots, and each
+// independently triggers `ErrQueueFull` when full. The doubling
+// here is presentational — it gives consumers a single combined
+// capacity number to divide against the combined depth.
+//
+// If a future surface needs per-channel split (e.g. an admin
+// "optimize queue depth" indicator), extend PoolStats with sibling
+// fields rather than retargeting either of the existing combined
+// values — back-compat consumers depend on QueueLen + QueueCap
+// staying ratio-coherent.
 func (p *Pool) Stats() PoolStats {
 	p.mu.Lock()
 	inflight := len(p.inflight)
 	p.mu.Unlock()
 	return PoolStats{
 		Workers:  p.workers,
-		QueueCap: p.queueCap,
+		QueueCap: 2 * p.queueCap,
 		QueueLen: len(p.optimizeJobs) + len(p.upscaleJobs),
 		Inflight: inflight,
 		Enqueued: p.enqueuedCnt.Load(),
@@ -749,10 +757,28 @@ func (p *Pool) Stats() PoolStats {
 //
 // **Bias-select pattern** (PR-pending): Phase 1 polls the optimize
 // channel with `select { ... default: }` to drain any pending
-// foreground/CarPlay backlog FIRST. If the optimize channel is
-// empty (or already nil'd after close), Phase 2 falls into a fair
-// select across both channels — so an empty optimize channel
-// cannot starve the upscale channel from making progress.
+// foreground/CarPlay backlog FIRST and `continue` back to the top
+// of the loop if anything was there. Phase 2 fires only when
+// optimize was empty at the moment of the Phase 1 poll, and fairly
+// selects across whichever channels are still active.
+//
+// **Anti-starvation is partial, NOT strict** — caught by Gemini
+// medium on PR #281. Under a SUSTAINED stream of optimize jobs
+// (one always pending at the moment of each Phase 1 poll), the
+// worker will continuously hit the `continue` after the Phase 1
+// case and never reach Phase 2 — upscale CAN starve in that regime.
+// Phase 2's fair select only buys progress for the upscale channel
+// during the BRIEF windows when the optimize channel happens to
+// drain to empty between worker iterations.
+//
+// For the CarPlay-Optimize use case this is acceptable: optimize
+// jobs are user-driven (one iOS tap per request, single-track at
+// a time), so a sustained-stream regime that fully starves upscale
+// is not a real scenario. If a future workload (e.g. an automated
+// CarPlay-prep batch from an iOS device) does produce sustained
+// optimize streams, the next iteration is a weighted scheduler
+// (e.g. "every Nth iteration, force a Phase 2 path") rather than
+// trying to fix this within the current bias-select shape.
 //
 // **Channel-nil pattern** for clean shutdown: when Stop() closes a
 // channel, the local copy (optCh or upsCh) is set to nil. A nil
@@ -784,9 +810,14 @@ func (p *Pool) workerLoop() {
 			default:
 			}
 		}
-		// Phase 2: fair select across active channels. If both are
-		// active and both have jobs, Go's runtime picks pseudo-
-		// randomly — that's the anti-starvation property.
+		// Phase 2: fair select across active channels. Reaches here
+		// only when Phase 1's non-blocking poll found the optimize
+		// channel empty (or already nil'd after close). If both
+		// channels are active and both have jobs at this point,
+		// Go's runtime picks pseudo-randomly — that gives upscale
+		// a chance to make progress during the windows when
+		// optimize happens to drain. See the docstring for the
+		// honest sustained-stream caveat.
 		select {
 		case job, ok := <-optCh:
 			if !ok {
