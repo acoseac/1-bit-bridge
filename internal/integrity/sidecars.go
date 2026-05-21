@@ -16,12 +16,23 @@ import (
 // (multiple ticks to fully cover the tree) rather than one
 // long-running pass that could compete with library-scan I/O.
 //
-// 100 is the empirically chosen floor: each entry pays one
-// `os.Stat` + one map lookup, ~10-50 µs amortised on a warm-cache
-// SSD walk. 100 entries fits in well under 10 ms wall-clock per
-// tick on the slowest tier of bridge deployments (Raspberry Pi 5
-// with USB-attached spinning rust), which is the headroom budget
-// the watcher reserves so library scans + serving stay responsive.
+// 5000 trades off two concerns: each tick processes a meaningful
+// slice in well under 100 ms wall-clock on a warm-cache SSD walk
+// (~5-10 µs per entry once the OS dirent cache is hot), AND a
+// 100k-variant library completes one full sweep in ~20 ticks
+// rather than the ~1000 ticks the original 100-floor required.
+// Pre-fix the chunk-size-100 + per-tick AllSidecarPaths SELECT
+// produced O(N × N/chunk) total DB read on every full sweep — for
+// a 100k-variant library, ~100M rows per cycle. Gemini medium on
+// PR #282 caught the quadratic blow-up.
+//
+// `filepath.WalkDir` is single-threaded so the per-tick budget is
+// strictly bounded by chunk × per-entry-cost — at 5000 entries +
+// 50 µs/entry (cold cache, NTFS / exFAT on USB-attached spinning
+// rust, the pathological tier) the per-tick wall-clock tops out
+// around 250 ms. That still leaves the next ticker fire (interval
+// is operator-configured, typically minutes to hours) with full
+// headroom for library scans + serving.
 //
 // Pure constant, not configurable — the operator-facing knob is
 // the SWEEP CADENCE (`cfg.Integrity.OrphanSidecarSweepIntervalSec`),
@@ -29,7 +40,33 @@ import (
 // chunk tuning should add it as a sibling config field rather
 // than ripping this out, so the default-shape semantics stay
 // stable for existing operators.
-const gcChunkSize = 100
+const gcChunkSize = 5000
+
+// gcGracePeriod gates orphan detection on file modification time:
+// files newer than this threshold are skipped during the sweep so a
+// concurrent `UpsertVariant` writer that lands the sidecar on disk
+// BEFORE its row commits to the manifest store doesn't get treated
+// as orphan and unlinked behind its in-flight transaction. Gemini
+// HIGH on PR #282 caught the race — SQLite WAL gives the SELECT a
+// consistent snapshot, but the snapshot reflects state AT THE MOMENT
+// the SELECT runs, while the filesystem walk happens AFTER. The
+// window between `INSERT INTO track_variants` (file already on
+// disk) and the COMMIT (snapshot now includes the row) is bounded
+// by the transaction duration — typically <100 ms even on slow
+// SQLite hosts, but a contending writer could push it to seconds.
+//
+// 10 minutes is chosen as the safe-by-construction overshoot:
+// orders of magnitude longer than any plausible transaction
+// window, short enough that an actually-orphan file lingers for
+// at most one extra sweep cycle (operator-tolerable for the opt-in
+// feature), and uniform across deploys regardless of disk speed.
+//
+// **Test seam**: production reads the constant; the
+// `gracePeriodForTest` field on OrphanSidecarSweeper overrides it
+// per-instance so the regression test can use a millisecond-scale
+// grace without sleeping 10 minutes. Same DI shape `Pool.runner`
+// uses for the sox subprocess.
+const gcGracePeriod = 10 * time.Minute
 
 // OrphanSidecarSweeper walks `outputDir/transcoded/` on a cadence
 // (configured via `cfg.Integrity.OrphanSidecarSweepIntervalSec`)
@@ -94,9 +131,46 @@ type OrphanSidecarSweeper struct {
 	// sync without polling internal state.
 	onTickComplete func(unlinked int)
 
+	// gracePeriodForTest overrides gcGracePeriod when positive. The
+	// regression test for the race-condition contract injects a
+	// millisecond-scale grace; the unrelated tests that just need
+	// "no grace floor" set it to `1 * time.Nanosecond`. Same DI
+	// shape as onTickComplete + the `Pool.runner` precedent.
+	//
+	// Zero (default) → production constant. Negative → also production
+	// constant (defensive against accidental negative).
+	gracePeriodForTest time.Duration
+
+	// chunkSizeForTest overrides gcChunkSize when positive. Lets the
+	// chunk-cap regression test exercise the cursor / split-tick
+	// behaviour with a small chunk (~100) instead of seeding the
+	// production chunk size (5000) of files. Production leaves it
+	// zero.
+	chunkSizeForTest int
+
 	startOnce sync.Once
 	stopOnce  sync.Once
 	done      chan struct{}
+}
+
+// effectiveGracePeriod returns the per-instance grace override when
+// the test seam is set, otherwise the production constant. Pure
+// helper for the inline use inside `tick`.
+func (s *OrphanSidecarSweeper) effectiveGracePeriod() time.Duration {
+	if s.gracePeriodForTest > 0 {
+		return s.gracePeriodForTest
+	}
+	return gcGracePeriod
+}
+
+// effectiveChunkSize returns the per-instance chunk size override
+// when the test seam is set, otherwise the production constant.
+// Pure helper for the inline use inside `tick`.
+func (s *OrphanSidecarSweeper) effectiveChunkSize() int {
+	if s.chunkSizeForTest > 0 {
+		return s.chunkSizeForTest
+	}
+	return gcChunkSize
 }
 
 // SidecarLister is the integrity-package-local read surface for
@@ -202,7 +276,23 @@ func (s *OrphanSidecarSweeper) run(ctx context.Context, done chan struct{}) {
 // failed file counts 0). Logs WARN on per-file unlink failures;
 // logs ERROR only on the outer snapshot fetch failure.
 //
-// Walk order is lexical via filepath.Walk; the `lastProcessedPath`
+// **Uses `filepath.WalkDir`** (NOT `filepath.Walk`) so the per-entry
+// callback receives a cheap `fs.DirEntry` instead of `fs.FileInfo`
+// — `os.Stat`-per-entry is deferred until we actually need ModTime
+// for the grace-period check, AND `WalkDir` natively handles
+// `filepath.SkipAll` as the "stop the walk cleanly" sentinel.
+// `filepath.Walk` (legacy form) treats SkipAll as a generic error
+// and logs the misleading "walk aborted" warning — caught by Gemini
+// HIGH on PR #282.
+//
+// **Grace-period gate**: files modified within `effectiveGracePeriod()`
+// of the tick start are skipped. Closes the race between
+// `UpsertVariant` writers (file on disk before row commit) and the
+// sweeper — without it, a sweep that takes its snapshot DURING the
+// writer's transaction window would treat the brand-new sidecar as
+// orphan and unlink it.
+//
+// Walk order is lexical via filepath.WalkDir; the `lastProcessedPath`
 // cursor lets successive ticks pick up where the prior tick
 // stopped. The cursor resets to empty when the walk completes
 // without hitting the chunk cap — that's the "we've covered the
@@ -216,6 +306,9 @@ func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 		return 0
 	}
 
+	grace := s.effectiveGracePeriod()
+	chunkSize := s.effectiveChunkSize()
+	tickStart := time.Now()
 	walkStartCursor := s.lastProcessedPath
 	var (
 		examined    int
@@ -224,7 +317,7 @@ func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 		newCursor   string
 	)
 
-	err = filepath.Walk(s.outputDir, func(path string, info fs.FileInfo, walkErr error) error {
+	err = filepath.WalkDir(s.outputDir, func(path string, d fs.DirEntry, walkErr error) error {
 		// Honour cancellation between entries — a shutdown
 		// during a long walk on a multi-TB variant tree should
 		// return promptly.
@@ -244,7 +337,11 @@ func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 			)
 			return nil
 		}
-		if info.IsDir() || !shouldConsiderSidecarFile(path) {
+		// Cheap pre-check via DirEntry (no stat syscall) — directories
+		// + non-FLAC entries skip without touching the filesystem.
+		// This is the load-bearing reason WalkDir wins over Walk on a
+		// 100k-variant library: most entries don't need ModTime.
+		if d.IsDir() || !shouldConsiderSidecarFile(path) {
 			return nil
 		}
 		// Skip past the cursor: only process entries whose lexical
@@ -262,15 +359,49 @@ func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 		newCursor = path
 
 		if _, isKnown := known[path]; isKnown {
-			// Sidecar is in the DB — nothing to do.
-			if examined >= gcChunkSize {
+			// Sidecar is in the DB — nothing to do. No ModTime read
+			// needed; the known-set check already proved consistency.
+			if examined >= chunkSize {
 				hitChunkCap = true
 				return filepath.SkipAll
 			}
 			return nil
 		}
 
-		// Orphan: present on disk, NOT in track_variants.
+		// Candidate orphan: present on disk, NOT in track_variants.
+		// Before unlinking, gate on file ModTime — a concurrent
+		// UpsertVariant writer could have landed this file in the
+		// gap between the SELECT snapshot above and the walk below,
+		// and unlinking it would corrupt the writer's in-flight
+		// transaction. Files newer than the grace period stay put;
+		// the next sweep cycle re-evaluates them once the writer's
+		// row has had time to commit.
+		info, infoErr := d.Info()
+		if infoErr != nil {
+			logger.Warn("orphan sidecar sweep: stat failed",
+				slog.String("path", path),
+				slog.Any("err", infoErr),
+			)
+			// Don't unlink a file we can't stat — same defensive
+			// shape the existing VariantWatcher uses for stat
+			// failures (skip and continue).
+			if examined >= chunkSize {
+				hitChunkCap = true
+				return filepath.SkipAll
+			}
+			return nil
+		}
+		if tickStart.Sub(info.ModTime()) < grace {
+			// Too new to risk unlinking — UpsertVariant writer may
+			// still be in flight. Skip; next sweep re-checks.
+			if examined >= chunkSize {
+				hitChunkCap = true
+				return filepath.SkipAll
+			}
+			return nil
+		}
+
+		// Confirmed orphan: old enough to rule out the writer race.
 		if rmErr := os.Remove(path); rmErr != nil {
 			logger.Warn("orphan sidecar sweep: unlink failed",
 				slog.String("path", path),
@@ -282,7 +413,7 @@ func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 				slog.String("path", path),
 			)
 		}
-		if examined >= gcChunkSize {
+		if examined >= chunkSize {
 			hitChunkCap = true
 			return filepath.SkipAll
 		}
