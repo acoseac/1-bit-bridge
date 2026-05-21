@@ -105,6 +105,46 @@ type IntegrityConfig struct {
 	// later. Both publish the same `upscale.deleted` SSE
 	// event so iOS reconciliation is uniform.
 	VariantSweepIntervalSec *int `yaml:"variantSweepIntervalSec,omitempty"`
+
+	// OrphanSidecarSweepIntervalSec controls how often the
+	// integrity.OrphanSidecarSweeper walks `<variantsDir>/transcoded/`
+	// for sidecar files that have no matching `track_variants` row
+	// and unlinks them. The forward-sweep half of what the operator-
+	// triggered `bridge upscale --gc` does today; the existing
+	// VariantWatcher above handles the reverse half (DB rows whose
+	// sidecar file no longer exists).
+	//
+	// **Default zero (disabled)** — opt-in feature. Operators on
+	// minimal deploys or low-disk-pressure libraries can keep running
+	// `--gc` manually; operators on libraries that churn variants
+	// (frequent rip / re-tag passes that delete + re-add tracks under
+	// the SAME relative path but produce different `track_variants.id`
+	// rows) opt in via a non-zero value here.
+	//
+	// **Chunked + low-priority**: each tick processes at most
+	// `gcChunkSize` filesystem entries (100, defined in the integrity
+	// package). The operator-triggered `--gc` keeps its existing
+	// unbounded-sweep semantics; this knob exists for the
+	// hands-off-operator profile where chunking + cadence-spacing
+	// matters.
+	//
+	// **Snapshot semantics**: each tick takes a `BEGIN DEFERRED`
+	// snapshot of `track_variants.sidecar_path` BEFORE the
+	// filesystem walk so a concurrent `UpsertVariant` writer can't
+	// produce a false-positive orphan (the new sidecar lands on disk
+	// before its row commits to the snapshot; pre-snapshot the
+	// reverse race would have the sweeper unlink the file before the
+	// row caught up).
+	//
+	// Pointer-typed to distinguish "missing field → use default
+	// (disabled)" from "explicit zero → also disabled" — kept
+	// symmetric with VariantSweepIntervalSec above even though they
+	// resolve to the same behaviour here, so a future migration that
+	// flips the default doesn't silently change operator-zeroed
+	// configs.
+	//
+	// Always read via Config.OrphanSidecarSweepInterval() below.
+	OrphanSidecarSweepIntervalSec *int `yaml:"orphanSidecarSweepIntervalSec,omitempty"`
 }
 
 // ScannerConfig controls the library scanner's resilience knobs.
@@ -1141,6 +1181,27 @@ func (c *Config) VariantSweepInterval() time.Duration {
 		return time.Duration(DefaultVariantSweepIntervalSec) * time.Second
 	}
 	secs := *c.Integrity.VariantSweepIntervalSec
+	if secs < 0 {
+		secs = 0
+	}
+	return time.Duration(secs) * time.Second
+}
+
+// OrphanSidecarSweepInterval returns the configured forward-sweep
+// cadence (orphan sidecar files on disk → unlink). Default zero
+// (DISABLED); explicit zero or negative also map to disabled.
+// Symmetric to VariantSweepInterval but with a different default
+// because the forward sweep is opt-in (see IntegrityConfig.
+// OrphanSidecarSweepIntervalSec docstring for the rationale).
+//
+// Negative values are clamped to zero — a typo'd negative would
+// otherwise create a busy-loop ticker. Same hardening as
+// VariantSweepInterval.
+func (c *Config) OrphanSidecarSweepInterval() time.Duration {
+	if c.Integrity.OrphanSidecarSweepIntervalSec == nil {
+		return 0
+	}
+	secs := *c.Integrity.OrphanSidecarSweepIntervalSec
 	if secs < 0 {
 		secs = 0
 	}

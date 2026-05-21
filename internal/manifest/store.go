@@ -3448,6 +3448,49 @@ func (s *Store) lookupVariantByLowerCase(ctx context.Context, cleanedSourcePath,
 // AllVariants returns every row in track_variants. Used by `bridge
 // upscale --gc` to drive the mark-and-sweep against the on-disk
 // `<dataDir>/transcoded/` directory.
+// AllSidecarPaths returns the set of `sidecar_path` strings currently
+// recorded in `track_variants`, projected as a map for O(1) lookup
+// by the integrity package's forward-sweep (orphan sidecar) watcher.
+//
+// **Why a single SELECT, no explicit transaction**: SQLite in WAL
+// mode (the project default — see `internal/manifest/migrations`) gives
+// every SELECT a consistent snapshot via its built-in MVCC; the bare
+// query produces a point-in-time view without blocking writers, which
+// is exactly the guarantee the sweeper needs to safely diff against
+// the filesystem. An explicit `BEGIN DEFERRED` would only matter for
+// multi-statement consistency, which this single projection doesn't
+// need. CLAUDE.md "Bridge background GC" docs the snapshot semantics
+// in more detail.
+//
+// **Memory shape**: returns a `map[string]struct{}` keyed on the
+// absolute sidecar path. A 50k-variant library projects to ~5 MB of
+// strings (avg sidecar path ~100 bytes); a 500k-variant library
+// projects to ~50 MB. The sweeper holds the map for the duration of
+// one tick (typically seconds), then drops it. If a future library
+// scale pushes this past comfortable RAM, the next migration is a
+// streaming variant `EachSidecarPath(ctx, func(path string) bool)` —
+// but the projection-map shape is simpler to reason about and matches
+// the existing `AllVariants` API surface.
+func (s *Store) AllSidecarPaths(ctx context.Context) (map[string]struct{}, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT sidecar_path
+		FROM track_variants
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]struct{})
+	for rows.Next() {
+		var sidecar string
+		if err := rows.Scan(&sidecar); err != nil {
+			return nil, err
+		}
+		out[sidecar] = struct{}{}
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) AllVariants(ctx context.Context) ([]VariantRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT source_path, variant_id, sidecar_path, format,
