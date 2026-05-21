@@ -220,6 +220,19 @@ func (a *integrityVariantDeleterAdapter) DeleteVariant(sourcePath, variantID str
 	return a.store.DeleteVariant(context.Background(), sourcePath, variantID)
 }
 
+// integritySidecarListerAdapter implements integrity.SidecarLister on
+// top of a manifest.Store. Mirrors integrityVariantListerAdapter but
+// projects only `track_variants.sidecar_path` (no per-row metadata
+// reads — the forward-sweep sweeper only needs to know "what paths
+// exist in the DB" to diff against the filesystem walk).
+type integritySidecarListerAdapter struct {
+	store *manifest.Store
+}
+
+func (a *integritySidecarListerAdapter) AllSidecarPaths(ctx context.Context) (map[string]struct{}, error) {
+	return a.store.AllSidecarPaths(ctx)
+}
+
 // upscaleEnqueuerAdapter implements api.UpscaleEnqueuer on top
 // of a transcode.Pool plus a manifest.Store + bridgefs.Resolver.
 // Per-call work:
@@ -1662,6 +1675,28 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			)
 			stopVariantWatcher := variantWatcher.Start(scanCtx)
 			defer stopVariantWatcher()
+		}
+
+		// Background forward-sweep GC: walks the variants directory
+		// for `.flac` files NOT present in `track_variants.sidecar_path`
+		// and unlinks them. Pairs with the operator-triggered
+		// `bridge upscale --gc` (cmd/bridge/upscale.go) — that path
+		// keeps its unbounded-sweep semantics for one-shot operator
+		// cleanups; this background variant is chunked + opt-in via
+		// `cfg.Integrity.OrphanSidecarSweepIntervalSec`. Default zero
+		// (disabled) — operators on minimal deploys see zero
+		// behavioural change. Skipped silently when the interval is
+		// ≤ 0. See CLAUDE.md "Bridge background GC" for the snapshot
+		// + chunking + cursor invariants.
+		gcInterval := cfg.OrphanSidecarSweepInterval()
+		if gcInterval > 0 {
+			orphanSweeper := integrity.NewOrphanSidecarSweeper(
+				&integritySidecarListerAdapter{store: manifestStore},
+				cfg.Upscale.EffectiveVariantsDir(cfg.DataDir),
+				gcInterval,
+			)
+			stopOrphanSweeper := orphanSweeper.Start(scanCtx)
+			defer stopOrphanSweeper()
 		}
 	}
 
