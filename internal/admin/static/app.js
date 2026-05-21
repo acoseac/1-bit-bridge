@@ -1627,12 +1627,25 @@ const inspectorState = {
   // folder path → {trackCount, upscaledCount, optimizedCount}
   // snapshot, captured from the checkbox's data-* attrs at
   // toggle time. Using a Map (vs the original Set) means the
-  // selection-bar aggregator iterates O(M) over the map's values
+  // panel batch aggregator iterates O(M) over the map's values
   // — no document.querySelector calls per checkbox tick (Gemini
   // medium on PR #276: the prior implementation was O(M×N) where
-  // M=selected and N=total tiles in the DOM). Selection bar
-  // floats when map.size > 0. Cleared on every browse re-render.
+  // M=selected and N=total tiles in the DOM). The action panel
+  // auto-opens in batch mode when map.size > 0. Cleared on every
+  // browse re-render.
   selectedPaths: new Map(),
+  // Unified floating action panel state (replaces drawerClosedByUser).
+  // `panelMode`: "single" (anchored to a tile / heading ⓘ),
+  //              "batch"  (multi-select bottom-center),
+  //               null    (closed).
+  // `panelExpandedKind`: which card is expanded — preserved across
+  //                       opens so the operator's last choice sticks.
+  // The Escape + focus-trap listeners are stored here so removal at
+  // close-time is symmetric with their addEventListener pair.
+  panelMode: null,
+  panelExpandedKind: "upscale",
+  panelEscapeHandler: null,
+  panelFocusHandler: null,
   // SoX availability snapshot — seeded once at init() time from
   // the page root's data-sox-available attribute. Used by the
   // selection bar + per-tile menu to gate generate actions.
@@ -1710,25 +1723,46 @@ function initLibraryInspector() {
   document.getElementById("inspector-nav-home")
     .addEventListener("click", () => inspectorNavigate(""));
 
-  // Current-folder ⓘ affordance (v1.4 followup): replaces the
-  // toolbar Upscale + Delete buttons that wrapped inconsistently.
-  // Same drawer flow as the per-row ⓘ on child folders — the
-  // operator picks Upscale / Delete inside the drawer.
+  // Current-folder ⓘ affordance: opens the unified action panel
+  // anchored to the heading.
   document.getElementById("inspector-current-info")
-    ?.addEventListener("click", inspectorOpenProjectionForCurrent);
+    ?.addEventListener("click", (ev) => {
+      inspectorOpenProjectionForCurrent(ev?.currentTarget || null);
+    });
 
-  // Per-kind drawer buttons (event delegation — N=2 sections per
-  // page, 2 buttons each; the new tile redesign replaces the
-  // legacy single Upscale + Delete pair with one Generate + one
-  // Delete per kind).
-  for (const btn of document.querySelectorAll(".drawer-generate-btn")) {
-    btn.addEventListener("click", inspectorSubmitBatch);
+  // Panel close + clear-selection. Generate / Delete / expand wiring
+  // is handled per-card by event delegation below.
+  document.getElementById("panel-close-btn")
+    ?.addEventListener("click", inspectorClosePanel);
+  document.getElementById("panel-clear-selection")
+    ?.addEventListener("click", inspectorClearSelection);
+
+  // Card expand/collapse via the summary trigger (click + keyboard).
+  for (const trigger of document.querySelectorAll(".card-summary-trigger")) {
+    trigger.addEventListener("click", inspectorOnCardTriggerActivate);
+    trigger.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        inspectorOnCardTriggerActivate(e);
+      }
+    });
   }
-  for (const btn of document.querySelectorAll(".drawer-delete-btn")) {
-    btn.addEventListener("click", inspectorDeleteVariants);
+
+  // Per-kind Generate / Delete buttons live inside the action panel
+  // now. Single-tile and batch modes both route through these — the
+  // button's `data-kind` carries the verb's kind.
+  for (const btn of document.querySelectorAll(".panel-generate-btn")) {
+    btn.addEventListener("click", inspectorPanelGenerateClick);
   }
-  document.getElementById("inspector-drawer-close")
-    .addEventListener("click", () => inspectorCloseDrawer({ userInitiated: true }));
+  for (const btn of document.querySelectorAll(".panel-delete-btn")) {
+    btn.addEventListener("click", inspectorPanelDeleteClick);
+  }
+
+  // Batch-confirmation overlay buttons.
+  document.getElementById("panel-confirm-cancel")
+    ?.addEventListener("click", inspectorPanelCancelConfirm);
+  document.getElementById("panel-confirm-submit")
+    ?.addEventListener("click", inspectorPanelConfirmSubmit);
 
   // Two independent Load-more buttons (folders + tracks). The shared
   // inspectorLoadMore reads both cursors and the server returns
@@ -1739,29 +1773,25 @@ function initLibraryInspector() {
     btn.addEventListener("click", inspectorLoadMore);
   }
 
-  // Tile checkbox change → multi-select state update + bar refresh.
-  // Event delegation from the inspector content root so the listener
-  // survives chunked appends without re-wiring per tile.
+  // Tile checkbox change → multi-select state update + panel
+  // auto-open/close. ⓘ tile-button click → open panel in single
+  // mode anchored to that tile. Both via event delegation from the
+  // inspector content root so listeners survive chunked appends.
   const contentRoot = document.getElementById("inspector-content");
   if (contentRoot) {
     contentRoot.addEventListener("change", inspectorOnTileCheckboxChange);
-  }
-
-  // Selection-bar buttons.
-  document.getElementById("selection-clear")
-    ?.addEventListener("click", () => {
-      // Untick every visible tile checkbox to keep DOM state in sync.
-      for (const cb of document.querySelectorAll(
-        '.inspector-tile input[type="checkbox"][data-path]')) {
-        if (cb.checked) cb.checked = false;
-        const tile = cb.closest(".inspector-tile");
-        if (tile) delete tile.dataset.selected;
-      }
-      inspectorState.selectedPaths.clear();
-      inspectorUpdateSelectionBar();
+    contentRoot.addEventListener("click", (ev) => {
+      const infoBtn = ev.target.closest(".tile-info-btn");
+      if (!infoBtn) return;
+      ev.stopPropagation();
+      ev.preventDefault();
+      const tile = infoBtn.closest(".inspector-tile");
+      const path = tile?.dataset.path;
+      if (path == null) return;
+      const folders = inspectorState.lastBrowseData?.folders || [];
+      const folder = folders.find((f) => f.path === path);
+      if (folder) inspectorOpenPanelSingle(folder, infoBtn);
     });
-  for (const btn of document.querySelectorAll(".selection-submit-btn")) {
-    btn.addEventListener("click", inspectorSelectionSubmit);
   }
 
   // SoX availability snapshot (set once at mount). The CSS gate
@@ -2063,12 +2093,12 @@ async function inspectorNavigate(path, opts = {}) {
   // pagination permanently disabled in the post-search folder.
   // CodeRabbit Major on PR #246 round-2.
   inspectorState.mode = "browse";
-  // Clear the "user-closed" latch on every navigation so a fresh
-  // folder auto-opens the projection drawer in inspectorRender.
-  inspectorState.drawerClosedByUser = false;
   inspectorRenderBreadcrumbs(path);
   inspectorUpdateToolbarState(path);
-  inspectorCloseDrawer(); // transient close — userInitiated defaults to false
+  // Every navigation closes the panel. The new "explicit-open" model
+  // (ⓘ icon / heading ⓘ / multi-select) replaces the prior
+  // auto-open-on-render flow.
+  inspectorClosePanel();
   document.getElementById("inspector-error").hidden = true;
   document.getElementById("inspector-current-heading").textContent =
     "Loading…";
@@ -2142,31 +2172,28 @@ function inspectorUpdateToolbarState(path) {
   if (infoBtn) infoBtn.disabled = true;
 }
 
-// inspectorOpenProjectionForCurrent is the toolbar handler that
-// acts on the OPEN folder rather than a child row. Builds a
-// synthetic folder object from the cached browse rollup (or the
-// library root semantics when path === "") and routes through the
-// same drawer code path the per-row ⓘ icon uses.
-function inspectorOpenProjectionForCurrent() {
+// inspectorOpenProjectionForCurrent opens the action panel for the
+// OPEN folder (rather than a child tile). Built from the cached
+// browse rollup; the projection endpoint accepts the path as-is and
+// walks server-side, so the synthetic numbers here are only used to
+// pre-populate the panel's "Tracks / Source size" rows before the
+// projection fetch lands. Root path is semantically valid; the
+// projection endpoint handles empty path as "whole library."
+function inspectorOpenProjectionForCurrent(anchorEl) {
   const data = inspectorState.lastBrowseData;
   if (!data) return; // toolbar button is disabled in this state, defensive
-  // For non-root folders the rollup we want is THIS folder's data
-  // — which the browse response describes via aggregate counts
-  // across its `folders` + `tracks` arrays. The projection
-  // endpoint accepts the path as-is and walks server-side, so the
-  // synthetic numbers here are only used to pre-populate the
-  // drawer's "Tracks / Source size" rows before the projection
-  // fetch lands. Root path is semantically valid; the projection
-  // endpoint already handles empty path as "whole library."
   const rollup = inspectorBrowseRollup(data);
-  inspectorSelectFolder({
+  const folder = {
     name: inspectorState.path || "Library root",
     path: inspectorState.path,
     trackCount: rollup.trackCount,
     upscaledCount: rollup.upscaledCount,
     optimizedCount: rollup.optimizedCount,
     totalSizeBytes: rollup.totalSizeBytes,
-  });
+  };
+  const anchor = anchorEl
+    || document.getElementById("inspector-current-info");
+  inspectorOpenPanelSingle(folder, anchor);
 }
 
 // inspectorBrowseRollup aggregates a browse response's folders +
@@ -2198,21 +2225,31 @@ function inspectorBrowseRollup(data) {
   return { trackCount, upscaledCount, optimizedCount, totalSizeBytes };
 }
 
-// inspectorCloseDrawer hides the projection drawer. `userInitiated`
-// distinguishes:
-//   - true (user clicked × or pressed Esc): persists `drawerClosedByUser`
-//     so the drawer doesn't auto-reopen on the current navigation's
-//     re-render. Cleared on the next navigation.
-//   - false (transient close from inspectorNavigate / inspectorRender
-//     setup): doesn't latch the flag, so the navigation's downstream
-//     auto-open path still fires.
-function inspectorCloseDrawer({ userInitiated = false } = {}) {
+// inspectorClosePanel hides the floating action panel and tears
+// down the Escape + focus-trap listeners. Symmetric counterpart to
+// inspectorOpenPanelSingle / inspectorOpenPanelBatch.
+function inspectorClosePanel() {
   inspectorState.selection = null;
-  const drawer = document.getElementById("inspector-drawer");
-  if (drawer) drawer.hidden = true;
-  if (userInitiated) {
-    inspectorState.drawerClosedByUser = true;
+  inspectorState.panelMode = null;
+  const panel = document.getElementById("inspector-action-panel");
+  if (!panel) {
+    inspectorA11yListeners("none");
+    return;
   }
+  delete panel.dataset.mode;
+  delete panel.dataset.confirming;
+  // Clear inline-positioned coordinates so the next open recomputes.
+  panel.style.top = "";
+  panel.style.left = "";
+  panel.style.right = "";
+  panel.style.bottom = "";
+  const overlay = document.getElementById("panel-confirm-overlay");
+  if (overlay) overlay.hidden = true;
+  if (typeof panel.hidePopover === "function"
+    && panel.matches(":popover-open")) {
+    panel.hidePopover();
+  }
+  inspectorA11yListeners("none");
 }
 
 function inspectorRenderBreadcrumbs(path) {
@@ -2257,9 +2294,11 @@ async function inspectorRender(data) {
 
   // Multi-select is per-navigation — clear on every browse render
   // so a stale selection from a prior folder doesn't bleed into
-  // the new view.
+  // the new view. inspectorClosePanel was already called in
+  // inspectorNavigate above; defensive close here too in case
+  // inspectorRender is invoked via another path.
   inspectorState.selectedPaths.clear();
-  inspectorUpdateSelectionBar();
+  inspectorClosePanel();
 
   const folders = data.folders || [];
   const tracks = data.tracks || [];
@@ -2267,14 +2306,6 @@ async function inspectorRender(data) {
     || inspectorBrowseRollup(data).trackCount > 0;
   const currentInfoBtn = document.getElementById("inspector-current-info");
   if (currentInfoBtn) currentInfoBtn.disabled = !hasAnyTracks;
-
-  // Auto-open the projection drawer for the CURRENT folder whenever
-  // it has tracks. The drawer can still be closed manually via its
-  // × button; closing sets `drawerClosedByUser` so the current
-  // navigation doesn't re-open on a same-path refresh.
-  if (hasAnyTracks && !inspectorState.drawerClosedByUser) {
-    inspectorOpenProjectionForCurrent();
-  }
 
   if (folders.length === 0 && tracks.length === 0) {
     document.getElementById("inspector-content").hidden = true;
@@ -2409,8 +2440,8 @@ function buildFolderTile(f) {
   const opVal = Math.min(f.optimizedCount || 0, opMax);
 
   // The data-* attrs on the checkbox carry the client-side
-  // aggregation inputs the selection bar reads — no fetch needed
-  // on toolbar updates.
+  // aggregation inputs the panel's batch summary reads — no fetch
+  // needed on selection updates.
   tile.innerHTML = `
     <header class="tile-header">
       <label class="tile-select" title="Select this folder">
@@ -2422,9 +2453,11 @@ function buildFolderTile(f) {
       </label>
       <span class="tile-icon" aria-hidden="true">📁</span>
       <h3 class="tile-name" title="${escapeHTML(f.name)}">${escapeHTML(f.name)}</h3>
+      <button class="tile-info-btn" type="button"
+        aria-label="Open action panel for ${escapeHTML(f.name)}">ⓘ</button>
       <button class="tile-menu-btn" type="button"
         popovertarget="menu-${escapeHTML(f.pathHash || "")}"
-        aria-label="Actions for ${escapeHTML(f.name)}">⋯</button>
+        aria-label="Quick actions for ${escapeHTML(f.name)}">⋯</button>
     </header>
     <dl class="tile-meta">
       <div><dt>Tracks</dt><dd>${f.trackCount || 0}</dd></div>
@@ -2446,14 +2479,18 @@ function buildFolderTile(f) {
   attachTileMenu(tile, f);
 
   // Tile click → navigate INTO the folder. Excludes clicks on the
-  // checkbox label (selection toggle) and the kebab menu button.
+  // checkbox label (selection toggle), the ⓘ info button (opens
+  // the action panel — handled by the delegated listener on
+  // #inspector-content), and the kebab menu button.
   tile.addEventListener("click", (e) => {
     if (e.target.closest(".tile-select")) return;
+    if (e.target.closest(".tile-info-btn")) return;
     if (e.target.closest(".tile-menu-btn")) return;
     if (e.target.closest(".tile-menu-popover")) return;
     inspectorNavigate(f.path);
   });
   tile.addEventListener("keydown", (e) => {
+    if (e.target.closest(".tile-info-btn")) return;
     if (e.target.closest(".tile-menu-btn")) return;
     if (e.target.closest("input[type=checkbox]")) return;
     if (e.key === "Enter" || e.key === " ") {
@@ -2567,18 +2604,14 @@ function handleTileMenuAction(action, item) {
       inspectorDeleteVariantsForKind("optimize", path);
       break;
     case "projection":
-      // Reuse the folder-selection path (also fires the drawer
-      // auto-open) for folder tiles. For track tiles, fall back
-      // to projection for the CURRENT folder — track tiles don't
-      // carry per-folder rollup fields (upscaledCount /
-      // optimizedCount are undefined), so a direct
-      // inspectorSelectFolder(item) would render misleading "—"
-      // values everywhere. The current-folder projection covers
-      // the parent the operator is already viewing, which is the
-      // user-meaningful scope for a track's "View projection"
-      // tap. Per CodeRabbit major on PR #276 round 3.
+          // Folder tiles open the panel anchored to themselves; track
+      // tiles fall back to the current-folder panel (no per-track
+      // rollup fields on the row data).
       if (item.upscaledCount !== undefined) {
-        inspectorSelectFolder(item);
+        const tile = document.querySelector(
+          `.inspector-tile[data-path="${cssEscapeAttr(item.path)}"]`);
+        const anchor = tile?.querySelector(".tile-info-btn") || tile;
+        inspectorOpenPanelSingle(item, anchor);
       } else {
         inspectorOpenProjectionForCurrent();
       }
@@ -2710,96 +2743,186 @@ async function inspectorLoadMore() {
   }
 }
 
-function inspectorSelectFolder(folder) {
+// =============================================================
+// Floating action panel (replaces the persistent right drawer +
+// sticky bottom selection bar). Two operating modes:
+//   - single: anchored to a tile / heading ⓘ; coverage + stats
+//     reflect that single folder. Projection fetch fills the
+//     bytes/required rows.
+//   - batch:  bottom-center fixed; coverage rollups come from the
+//     selectedPaths Map (client-side). Generate transitions to a
+//     batch-confirm overlay with throttled per-path projection.
+// =============================================================
+
+function inspectorOpenPanelSingle(folder, anchorEl) {
+  const panel = document.getElementById("inspector-action-panel");
+  if (!panel) return;
   inspectorState.selection = { kind: "folder", row: folder };
-  document.getElementById("inspector-drawer").hidden = false;
-  document.getElementById("inspector-drawer-title").textContent =
-    folder.name || "Library root";
-  document.getElementById("inspector-drawer-content").hidden = false;
+  inspectorState.panelMode = "single";
 
-  // Populate both kind sections with the initial folder-rollup
-  // snapshot. The projection fetches below fill in projected size /
-  // required-with-margin / per-kind eligibility.
-  setDrawerKindInitial("upscale", folder, folder.upscaledCount || 0);
-  setDrawerKindInitial("optimize", folder, folder.optimizedCount || 0);
+  panel.dataset.mode = "single";
+  delete panel.dataset.confirming;
+  const overlay = document.getElementById("panel-confirm-overlay");
+  if (overlay) overlay.hidden = true;
 
-  // SoX-missing chip + Generate-button disabled state per section.
-  const soxMissing = !inspectorState.soxAvailable;
-  for (const kind of ["upscale", "optimize"]) {
-    const section = document.querySelector(`.drawer-kind[data-kind="${kind}"]`);
-    if (!section) continue;
-    const chip = section.querySelector(".drawer-kind-soxchip");
-    if (chip) chip.hidden = !soxMissing;
-    const genBtn = section.querySelector(".drawer-generate-btn");
-    if (genBtn) genBtn.disabled = true; // re-enabled after projection if eligible
+  const titleEl = document.getElementById("panel-title");
+  if (titleEl) titleEl.textContent = folder.name || "Library root";
+  const clearBtn = document.getElementById("panel-clear-selection");
+  if (clearBtn) clearBtn.hidden = true;
+
+  setPanelKindInitial("upscale", folder, folder.upscaledCount || 0);
+  setPanelKindInitial("optimize", folder, folder.optimizedCount || 0);
+
+  // Restore the operator's last-expanded card; default to upscale.
+  inspectorSetExpandedCard(inspectorState.panelExpandedKind || "upscale");
+
+  if (typeof panel.showPopover === "function"
+    && !panel.matches(":popover-open")) {
+    panel.showPopover();
   }
-  inspectorFetchProjectionAllKinds(folder.path);
+  inspectorPositionPanel(anchorEl);
+  inspectorA11yListeners("single");
+
+  // Async projection fetch fills in projected / free / required /
+  // target and decides Generate button enablement.
+  inspectorFetchPanelProjectionAllKinds(folder.path);
 }
 
-// setDrawerKindInitial pre-fills the per-kind drawer section with
-// the rollup snapshot available before the projection lands. Source
-// size + initial covered count + Delete button visibility come from
-// the folder row's data-* (instant); projected / free / required
-// come from the per-kind projection fetch (200–500 ms latency).
-function setDrawerKindInitial(kind, folder, coveredCount) {
-  const section = document.querySelector(`.drawer-kind[data-kind="${kind}"]`);
-  if (!section) return;
+// setPanelKindInitial pre-fills a card with the rollup snapshot
+// (instant from data-*) before the projection fetch lands. The
+// per-kind detail rows + coverage bar both get a first paint here.
+function setPanelKindInitial(kind, folder, coveredCount) {
+  const card = document.getElementById(`panel-card-${kind}`);
+  if (!card) return;
   const lbl = kind === "upscale" ? "upscaled" : "optimized";
-  section.querySelector(`.drawer-tracks[data-kind="${kind}"]`).textContent =
-    `${folder.trackCount} (${coveredCount} already ${lbl})`;
-  section.querySelector(`.drawer-covered[data-kind="${kind}"]`).textContent =
-    String(coveredCount);
-  section.querySelector(`.drawer-source-size[data-kind="${kind}"]`).textContent =
-    humanBytes(folder.totalSizeBytes || 0);
-  section.querySelector(`.drawer-projected[data-kind="${kind}"]`).textContent = "—";
-  section.querySelector(`.drawer-free[data-kind="${kind}"]`).textContent = "—";
-  section.querySelector(`.drawer-required[data-kind="${kind}"]`).textContent = "—";
-  const warn = section.querySelector(`.drawer-warning[data-kind="${kind}"]`);
-  const unknown = section.querySelector(`.drawer-unknown[data-kind="${kind}"]`);
-  const status = section.querySelector(`.drawer-submit-status[data-kind="${kind}"]`);
-  if (warn) warn.hidden = true;
-  if (unknown) unknown.hidden = true;
-  if (status) status.textContent = "";
-  const delBtn = section.querySelector(".drawer-delete-btn");
+  const trackCount = folder.trackCount || 0;
+  const remaining = Math.max(0, trackCount - coveredCount);
+
+  // Coverage bar (custom progressbar div + ARIA semantics).
+  updateCoverageBar(kind, coveredCount, trackCount, lbl);
+
+  const ratioEl = document.getElementById(`panel-ratio-${kind}`);
+  if (ratioEl) ratioEl.textContent = `${coveredCount} / ${trackCount}`;
+  const hintEl = document.getElementById(`panel-hint-${kind}`);
+  if (hintEl) {
+    if (trackCount === 0) hintEl.textContent = "";
+    else if (remaining === 0) hintEl.textContent = "All covered";
+    else hintEl.textContent = `${remaining} left`;
+  }
+
+  setPanelDetailText(card, kind, ".panel-tracks",
+    `${trackCount} (${coveredCount} already ${lbl})`);
+  setPanelDetailText(card, kind, ".panel-covered", String(coveredCount));
+  setPanelDetailText(card, kind, ".panel-source-size",
+    humanBytes(folder.totalSizeBytes || 0));
+  setPanelDetailText(card, kind, ".panel-projected", "—");
+  setPanelDetailText(card, kind, ".panel-free", "—");
+  setPanelDetailText(card, kind, ".panel-required", "—");
+  if (kind === "upscale") {
+    setPanelDetailText(card, kind, ".panel-target", "—");
+  }
+
+  hidePanelEl(card, kind, ".panel-warning");
+  hidePanelEl(card, kind, ".panel-unknown");
+  setPanelDetailText(card, kind, ".panel-submit-status", "");
+
+  // Buttons start disabled; the projection response decides Generate
+  // enablement. Delete enabled iff there's coverage to delete.
+  const genBtn = card.querySelector(`.panel-generate-btn[data-kind="${kind}"]`);
+  if (genBtn) {
+    genBtn.disabled = true;
+    genBtn.hidden = false;
+  }
+  const delBtn = card.querySelector(`.panel-delete-btn[data-kind="${kind}"]`);
   if (delBtn) {
     delBtn.hidden = coveredCount === 0;
     delBtn.disabled = coveredCount === 0;
   }
 }
 
-// inspectorFetchProjectionAllKinds fires two parallel projection
-// fetches and populates each drawer section independently. Both
-// kinds are visible together (locked design choice — dual stacked
-// bars on the tile, dual stacked sections in the drawer) so the
-// operator never has to switch tabs to compare. Each fetch carries
-// its own race-guard against `inspectorState.selection`.
-async function inspectorFetchProjectionAllKinds(path) {
+function setPanelDetailText(card, kind, selector, text) {
+  const el = card.querySelector(`${selector}[data-kind="${kind}"]`);
+  if (el) el.textContent = text;
+}
+function hidePanelEl(card, kind, selector) {
+  const el = card.querySelector(`${selector}[data-kind="${kind}"]`);
+  if (el) el.hidden = true;
+}
+
+// updateCoverageBar — keeps the role="progressbar" ARIA attrs +
+// CSS custom property in sync. Default `safeMax = max(1, total)`
+// because aria-valuemax must not be 0 (would compute NaN%).
+function updateCoverageBar(kind, value, total, lbl) {
+  const bar = document.getElementById(`panel-coverage-bar-${kind}`);
+  if (!bar) return;
+  const safeMax = Math.max(1, total);
+  const v = Math.min(Math.max(0, value), safeMax);
+  bar.setAttribute("aria-valuenow", String(v));
+  bar.setAttribute("aria-valuemin", "0");
+  bar.setAttribute("aria-valuemax", String(safeMax));
+  bar.setAttribute("aria-label",
+    `${value} of ${total} tracks ${lbl}`);
+  const fill = bar.querySelector(".coverage-bar-fill");
+  if (fill) {
+    const pct = total > 0 ? (v / safeMax) * 100 : 0;
+    fill.style.setProperty("--cov", `${pct}%`);
+  }
+}
+
+// Card expand / collapse. Click target is the .card-summary-trigger
+// inside each panel-card. Only one card is expanded at a time; the
+// other folds back to the summary row. `panelExpandedKind` is the
+// remembered choice across panel opens.
+function inspectorOnCardTriggerActivate(ev) {
+  const trigger = ev.currentTarget;
+  const card = trigger.closest(".panel-card");
+  if (!card) return;
+  const kind = card.dataset.kind;
+  if (!kind) return;
+  inspectorSetExpandedCard(kind);
+}
+
+function inspectorSetExpandedCard(kind) {
+  inspectorState.panelExpandedKind = kind;
+  for (const k of ["upscale", "optimize"]) {
+    const card = document.getElementById(`panel-card-${k}`);
+    if (!card) continue;
+    const trigger = card.querySelector(".card-summary-trigger");
+    const details = document.getElementById(`panel-details-${k}`);
+    const expanded = k === kind;
+    card.dataset.expanded = expanded ? "true" : "false";
+    if (trigger) trigger.setAttribute("aria-expanded", expanded ? "true" : "false");
+    if (details) details.hidden = !expanded;
+  }
+}
+
+// Fire both projection fetches in parallel for single-tile mode.
+async function inspectorFetchPanelProjectionAllKinds(path) {
   await Promise.all([
-    inspectorFetchProjection(path, "upscale"),
-    inspectorFetchProjection(path, "optimize"),
+    inspectorFetchPanelProjection(path, "upscale"),
+    inspectorFetchPanelProjection(path, "optimize"),
   ]);
 }
 
-async function inspectorFetchProjection(path, kind) {
-  // Race-guard: snapshot the path we were called with; bail out
-  // on any branch below if the user has since selected a
-  // different folder. Mirrors `inspectorNavigate`'s pattern.
-  // Per CodeRabbit major on PR #205 round 2.
+async function inspectorFetchPanelProjection(path, kind) {
+  // Race-guard: bail if the operator opened a different panel
+  // mid-fetch. Mirrors the legacy drawer pattern.
   const requested = path;
   const stillCurrent = () =>
-    inspectorState.selection?.kind === "folder" &&
-    inspectorState.selection.row.path === requested;
+    inspectorState.panelMode === "single"
+    && inspectorState.selection?.kind === "folder"
+    && inspectorState.selection.row.path === requested;
 
-  const sel = `[data-kind="${kind}"]`;
+  const card = document.getElementById(`panel-card-${kind}`);
+  if (!card) return;
   const lbl = kind === "upscale" ? "upscaled" : "optimized";
-  const warnEl = document.querySelector(`.drawer-warning${sel}`);
-  const unknownEl = document.querySelector(`.drawer-unknown${sel}`);
-  const projectedEl = document.querySelector(`.drawer-projected${sel}`);
-  const freeEl = document.querySelector(`.drawer-free${sel}`);
-  const requiredEl = document.querySelector(`.drawer-required${sel}`);
-  const targetEl = document.querySelector(`.drawer-target${sel}`);
-  const genBtn = document.querySelector(
-    `.drawer-generate-btn[data-kind="${kind}"]`);
+  const warnEl = card.querySelector(`.panel-warning[data-kind="${kind}"]`);
+  const unknownEl = card.querySelector(`.panel-unknown[data-kind="${kind}"]`);
+  const projectedEl = card.querySelector(`.panel-projected[data-kind="${kind}"]`);
+  const freeEl = card.querySelector(`.panel-free[data-kind="${kind}"]`);
+  const requiredEl = card.querySelector(`.panel-required[data-kind="${kind}"]`);
+  const targetEl = card.querySelector(`.panel-target[data-kind="${kind}"]`);
+  const genBtn = card.querySelector(`.panel-generate-btn[data-kind="${kind}"]`);
 
   try {
     const res = await fetch(
@@ -2830,9 +2953,6 @@ async function inspectorFetchProjection(path, kind) {
         targetEl.textContent = "—";
       }
     }
-    // Optimize target stays the static "16-bit / 44.1k or 48k
-    // (family-preserved)" from the template — server returns
-    // targetRate=0 to signal varies per-track.
 
     if (data.unknownFormatFiles > 0 && unknownEl) {
       unknownEl.hidden = false;
@@ -2843,12 +2963,9 @@ async function inspectorFetchProjection(path, kind) {
         `${data.unknownFormatFiles} tracks here are ${skipReason} — they'll be skipped.`;
     }
 
-    // Generate button visibility / enabled state.
     if (genBtn) {
       const soxMissing = !inspectorState.soxAvailable;
       if (data.projectedFiles === 0) {
-        // Surface the "nothing to do" state inline instead of via
-        // a hidden button. Different phrasing per state matrix.
         if (warnEl) {
           warnEl.hidden = false;
           const total = data.alreadyCoveredFiles + data.unknownFormatFiles;
@@ -2869,12 +2986,9 @@ async function inspectorFetchProjection(path, kind) {
           warnEl.textContent = msg;
         }
         genBtn.disabled = true;
-        genBtn.hidden = true;
       } else if (data.wouldFit) {
-        genBtn.hidden = false;
-        genBtn.disabled = soxMissing; // SoX gate is the final word
+        genBtn.disabled = soxMissing;
       } else {
-        genBtn.hidden = false;
         genBtn.disabled = true;
         if (warnEl) {
           warnEl.hidden = false;
@@ -2892,16 +3006,28 @@ async function inspectorFetchProjection(path, kind) {
   }
 }
 
-// inspectorSubmitBatch is the drawer-button-driven submit. Reads
-// the kind from the button's `data-kind` attr (event delegation
-// in initLibraryInspector wires it) and dispatches to
-// inspectorSubmitBatchForKind with a single-path array.
-async function inspectorSubmitBatch(ev) {
-  const sel = inspectorState.selection;
-  if (sel?.kind !== "folder") return;
+// Generate-button click. Single mode → submit directly with the
+// folder path. Batch mode → enter the confirmation overlay.
+function inspectorPanelGenerateClick(ev) {
   const btn = ev?.currentTarget;
   const kind = btn?.dataset.kind || "upscale";
-  await inspectorSubmitBatchForKind(kind, [sel.row.path]);
+  if (inspectorState.panelMode === "batch") {
+    inspectorPanelConfirmBatch(kind);
+    return;
+  }
+  const sel = inspectorState.selection;
+  if (sel?.kind !== "folder") return;
+  inspectorSubmitBatchForKind(kind, [sel.row.path]);
+}
+
+// Delete-button click. Single mode only (matches today's UX — batch
+// delete is deliberately not exposed).
+function inspectorPanelDeleteClick(ev) {
+  const btn = ev?.currentTarget;
+  const kind = btn?.dataset.kind || "upscale";
+  const sel = inspectorState.selection;
+  if (sel?.kind !== "folder") return;
+  inspectorDeleteVariantsForKind(kind, sel.row.path || "");
 }
 
 // inspectorSubmitBatchForKind fires N parallel POSTs against
@@ -2943,26 +3069,57 @@ function inspectorPreflightNoOpReason(data, kind) {
   return "No tracks here.";
 }
 
-// inspectorSelectionToast — chokepoint for the floating selection-bar
-// toast. Lazy-creates the span on first use; idempotent on update.
-// Used by both the multi-path submit aggregator and the no-op
-// preflight branch — the latter needs a visible surface for the
-// tile-menu case where the drawer is closed (CodeRabbit major on
-// PR #278: drawer status text is invisible on tile-menu submits).
+// inspectorSelectionToast — surface aggregate / preflight messages
+// that previously landed on the (now removed) selection bar. Falls
+// through to a transient page-level toast so tile-menu submits with
+// the panel closed still get visible feedback (preserves the
+// CodeRabbit major fix from PR #278). The panel's own confirm-status
+// row OR the expanded card's submit-status row is preferred when
+// available; otherwise lazy-creates a one-time toast at the bottom
+// of the viewport.
 function inspectorSelectionToast(msg) {
-  const bar = document.getElementById("inspector-selection-bar");
-  if (!bar) return;
-  let toast = bar.querySelector(".selection-toast");
+  const isHTML = typeof msg === "string" && msg.includes("<");
+  const panel = document.getElementById("inspector-action-panel");
+  if (panel && panel.matches(":popover-open")) {
+    // Batch-confirm overlay open → status row sits there.
+    if (panel.dataset.confirming) {
+      const cs = panel.querySelector(".panel-confirm-status");
+      if (cs) {
+        if (isHTML) cs.innerHTML = msg; else cs.textContent = msg || "";
+        return;
+      }
+    }
+    // Otherwise drop it on the currently-expanded card's submit row.
+    const kind = inspectorState.panelExpandedKind || "upscale";
+    const status = panel.querySelector(
+      `.panel-submit-status[data-kind="${kind}"]`);
+    if (status) {
+      if (isHTML) status.innerHTML = msg; else status.textContent = msg || "";
+      return;
+    }
+  }
+  // Fallback: lazy floating toast so tile-menu submits with the
+  // panel closed still get visible feedback.
+  let toast = document.getElementById("inspector-floating-toast");
   if (!toast) {
-    toast = document.createElement("span");
-    toast.className = "selection-toast hint";
-    bar.appendChild(toast);
+    toast = document.createElement("div");
+    toast.id = "inspector-floating-toast";
+    toast.className = "inspector-floating-toast hint";
+    toast.setAttribute("role", "status");
+    toast.setAttribute("aria-live", "polite");
+    document.body.appendChild(toast);
   }
-  if (msg && msg.includes("<")) {
-    toast.innerHTML = msg;
-  } else {
-    toast.textContent = msg || "";
+  if (!msg) {
+    toast.hidden = true;
+    return;
   }
+  toast.hidden = false;
+  if (isHTML) toast.innerHTML = msg; else toast.textContent = msg;
+  // Auto-dismiss after 6 s — long enough to read "tracks queued"
+  // even on a slow read, short enough to disappear when the operator
+  // moves on.
+  if (toast._dismiss) clearTimeout(toast._dismiss);
+  toast._dismiss = setTimeout(() => { toast.hidden = true; }, 6000);
 }
 
 async function inspectorSubmitBatchForKind(kind, paths) {
@@ -2971,7 +3128,7 @@ async function inspectorSubmitBatchForKind(kind, paths) {
 
   const single = paths.length === 1;
   const status = single
-    ? document.querySelector(`.drawer-submit-status[data-kind="${kind}"]`)
+    ? document.querySelector(`.panel-submit-status[data-kind="${kind}"]`)
     : null;
   if (status) status.textContent = "Submitting…";
 
@@ -3095,18 +3252,6 @@ async function inspectorSubmitBatchForKind(kind, paths) {
   return { ok: ok.length, failed: failed.length, enqueued };
 }
 
-// inspectorDeleteVariants is the drawer-button-driven delete.
-// Reads kind from the button's `data-kind` attr (event delegation
-// in initLibraryInspector wires it). Dispatches to
-// inspectorDeleteVariantsForKind.
-async function inspectorDeleteVariants(ev) {
-  const sel = inspectorState.selection;
-  if (sel?.kind !== "folder") return;
-  const btn = ev?.currentTarget;
-  const kind = btn?.dataset.kind || "upscale";
-  await inspectorDeleteVariantsForKind(kind, sel.row.path || "");
-}
-
 // inspectorDeleteVariantsForKind fires DELETE /api/upscale/variants
 // against the admin port, scoped by both prefix AND kind. The handler
 // forwards to api.RunVariantDelete which does the unlink + DB delete +
@@ -3124,9 +3269,9 @@ async function inspectorDeleteVariantsForKind(kind, scope) {
     `Source files are untouched — re-${kind === "optimize" ? "optimize" : "upscale"} anytime.`
   )) return;
 
-  const btn = document.querySelector(`.drawer-delete-btn[data-kind="${kind}"]`);
+  const btn = document.querySelector(`.panel-delete-btn[data-kind="${kind}"]`);
   if (btn) btn.disabled = true;
-  const status = document.querySelector(`.drawer-submit-status[data-kind="${kind}"]`);
+  const status = document.querySelector(`.panel-submit-status[data-kind="${kind}"]`);
   if (status) status.textContent = "Deleting…";
 
   try {
@@ -3167,23 +3312,17 @@ async function inspectorDeleteVariantsForKind(kind, scope) {
   }
 }
 
-// ===== Multi-select bar + tile-checkbox handling =====
+// ===== Multi-select + batch panel mode =====
 
-// inspectorOnTileCheckboxChange is the delegated change handler
-// for tile checkboxes. Adds/removes the tile's path from the
-// selection set and refreshes the selection bar's aggregated
-// counts client-side.
+// Tile checkbox change — add/remove the path's rollup snapshot in
+// inspectorState.selectedPaths and auto-open/close the panel in
+// batch mode based on the selection size.
 function inspectorOnTileCheckboxChange(ev) {
   const cb = ev.target.closest('input[type="checkbox"][data-path]');
   if (!cb) return;
   const tile = cb.closest(".inspector-tile");
   const path = cb.dataset.path;
   if (cb.checked) {
-    // Capture the rollup snapshot at toggle time so the selection-
-    // bar aggregator doesn't have to re-find the checkbox in the
-    // DOM on every tick. Numeric coercion with `|| 0` defends
-    // against any data-* attr that wasn't populated by the Go
-    // template (defensive — server side fills all three fields).
     inspectorState.selectedPaths.set(path, {
       trackCount: Number.parseInt(cb.dataset.trackCount, 10) || 0,
       upscaledCount: Number.parseInt(cb.dataset.upscaledCount, 10) || 0,
@@ -3194,80 +3333,414 @@ function inspectorOnTileCheckboxChange(ev) {
     inspectorState.selectedPaths.delete(path);
     if (tile) delete tile.dataset.selected;
   }
-  inspectorUpdateSelectionBar();
+  inspectorOnSelectionChanged();
 }
 
-// inspectorUpdateSelectionBar iterates the cached rollup snapshots
-// in `inspectorState.selectedPaths` and computes per-kind gap
-// numbers. O(M) over selected count (M typically <50) with NO DOM
-// queries — Gemini medium on PR #276 caught the prior O(M×N)
-// `document.querySelector` per tick.
-function inspectorUpdateSelectionBar() {
-  const bar = document.getElementById("inspector-selection-bar");
-  if (!bar) return;
+// inspectorOnSelectionChanged is the central transition handler.
+// Selection size 0 → close panel. Size > 0 → open / refresh in
+// batch mode. Skip auto-open if the panel is currently in single
+// mode (operator clicked ⓘ — leave that view alone) OR in the
+// confirmation overlay (don't bulldoze a pending submit).
+function inspectorOnSelectionChanged() {
   const sel = inspectorState.selectedPaths;
+  const panel = document.getElementById("inspector-action-panel");
   if (sel.size === 0) {
-    bar.hidden = true;
+    if (inspectorState.panelMode === "batch") inspectorClosePanel();
     return;
   }
-  bar.hidden = false;
-  let upscaleGap = 0;
-  let optimizeGap = 0;
-  for (const snap of sel.values()) {
-    upscaleGap += Math.max(0, snap.trackCount - snap.upscaledCount);
-    optimizeGap += Math.max(0, snap.trackCount - snap.optimizedCount);
+  if (panel?.dataset.confirming) {
+    // Confirmation in flight — refresh stats on Cancel will pick up
+    // the new selection naturally; don't hijack the overlay.
+    return;
   }
-  document.getElementById("selection-count").textContent =
-    `${sel.size} selected`;
-  document.getElementById("selection-upscale-gap").textContent = String(upscaleGap);
-  document.getElementById("selection-optimize-gap").textContent = String(optimizeGap);
+  if (inspectorState.panelMode === "single") {
+    // Operator opened a single-tile detail and then toggled a
+    // checkbox — keep the single-mode view (less surprising). The
+    // checkbox count still reflects in the .inspector-tile selected
+    // outlines; switching to batch happens when they explicitly
+    // close the single panel.
+    return;
+  }
+  inspectorOpenPanelBatch();
+}
+
+// Render the panel in batch mode. Coverage bars are client-side
+// rollups across `selectedPaths`; the bytes/required/free fields
+// stay "—" until the operator clicks Generate (which routes to
+// inspectorPanelConfirmBatch).
+function inspectorOpenPanelBatch() {
+  const panel = document.getElementById("inspector-action-panel");
+  if (!panel) return;
+  const sel = inspectorState.selectedPaths;
+  if (sel.size === 0) return;
+
+  inspectorState.selection = null;
+  inspectorState.panelMode = "batch";
+
+  panel.dataset.mode = "batch";
+  delete panel.dataset.confirming;
+  const overlay = document.getElementById("panel-confirm-overlay");
+  if (overlay) overlay.hidden = true;
+  // CSS centers the batch panel via fixed + left:50% + transform;
+  // clear any single-mode inline coords that linger.
+  panel.style.top = "";
+  panel.style.left = "";
+
+  // Aggregate rollup math (same shape as the legacy selection bar
+  // — O(M), no DOM queries).
+  let trackCount = 0;
+  let upscaledCount = 0;
+  let optimizedCount = 0;
+  for (const snap of sel.values()) {
+    trackCount += snap.trackCount;
+    upscaledCount += snap.upscaledCount;
+    optimizedCount += snap.optimizedCount;
+  }
+  const upscaleGap = Math.max(0, trackCount - upscaledCount);
+  const optimizeGap = Math.max(0, trackCount - optimizedCount);
+
+  const titleEl = document.getElementById("panel-title");
+  if (titleEl) {
+    titleEl.textContent = `${sel.size} folder${sel.size === 1 ? "" : "s"} selected`;
+  }
+  const clearBtn = document.getElementById("panel-clear-selection");
+  if (clearBtn) clearBtn.hidden = false;
+
+  setPanelKindBatch("upscale", trackCount, upscaledCount, upscaleGap);
+  setPanelKindBatch("optimize", trackCount, optimizedCount, optimizeGap);
+
+  inspectorSetExpandedCard(inspectorState.panelExpandedKind || "upscale");
+
+  if (typeof panel.showPopover === "function"
+    && !panel.matches(":popover-open")) {
+    panel.showPopover();
+  }
+  inspectorA11yListeners("batch-summary");
+}
+
+function setPanelKindBatch(kind, trackCount, coveredCount, gap) {
+  const card = document.getElementById(`panel-card-${kind}`);
+  if (!card) return;
+  const lbl = kind === "upscale" ? "upscaled" : "optimized";
+  updateCoverageBar(kind, coveredCount, trackCount, lbl);
+
+  const ratioEl = document.getElementById(`panel-ratio-${kind}`);
+  if (ratioEl) ratioEl.textContent = `${coveredCount} / ${trackCount}`;
+  const hintEl = document.getElementById(`panel-hint-${kind}`);
+  if (hintEl) hintEl.textContent = gap > 0 ? `${gap} left` : "All covered";
+
+  setPanelDetailText(card, kind, ".panel-tracks",
+    `${trackCount} (${coveredCount} already ${lbl})`);
+  setPanelDetailText(card, kind, ".panel-covered", String(coveredCount));
+  setPanelDetailText(card, kind, ".panel-source-size", "—");
+  setPanelDetailText(card, kind, ".panel-projected",
+    gap > 0 ? "tap Generate to estimate" : "—");
+  setPanelDetailText(card, kind, ".panel-free", "—");
+  setPanelDetailText(card, kind, ".panel-required", "—");
+  if (kind === "upscale") {
+    setPanelDetailText(card, kind, ".panel-target", "—");
+  }
+  hidePanelEl(card, kind, ".panel-warning");
+  hidePanelEl(card, kind, ".panel-unknown");
+  setPanelDetailText(card, kind, ".panel-submit-status", "");
+
   const soxMissing = !inspectorState.soxAvailable;
-  for (const btn of bar.querySelectorAll(".selection-submit-btn")) {
-    const kind = btn.dataset.kind;
-    const gap = kind === "upscale" ? upscaleGap : optimizeGap;
-    btn.disabled = soxMissing || gap === 0;
+  const genBtn = card.querySelector(`.panel-generate-btn[data-kind="${kind}"]`);
+  if (genBtn) {
+    genBtn.disabled = soxMissing || gap === 0;
+    genBtn.hidden = false;
+  }
+  // Batch mode hides Delete — destructive multi-folder delete is
+  // intentionally not exposed (preserves the v1 selection-bar UX).
+  const delBtn = card.querySelector(`.panel-delete-btn[data-kind="${kind}"]`);
+  if (delBtn) {
+    delBtn.hidden = true;
+    delBtn.disabled = true;
   }
 }
 
-// inspectorSelectionSubmit fires the multi-select bar's per-kind
-// Submit button. Reads the selected paths and fans out N parallel
-// POSTs via inspectorSubmitBatchForKind. Clears the selection on
-// success.
-async function inspectorSelectionSubmit(ev) {
-  const btn = ev?.currentTarget;
-  const kind = btn?.dataset.kind || "upscale";
-  // `Array.from(map)` would yield [key, value] tuples; we want the
-  // keys (paths) only. `map.keys()` is iterable; spread captures
-  // them in insertion order.
+// Clear selection — untick every visible checkbox + clear the Map
+// + close the panel. Wired to the panel's "Clear" header button.
+function inspectorClearSelection() {
+  for (const cb of document.querySelectorAll(
+    '.inspector-tile input[type="checkbox"][data-path]')) {
+    if (cb.checked) cb.checked = false;
+    const tile = cb.closest(".inspector-tile");
+    if (tile) delete tile.dataset.selected;
+  }
+  inspectorState.selectedPaths.clear();
+  inspectorClosePanel();
+}
+
+// inspectorPanelConfirmBatch — operator clicked Generate on a card
+// in batch mode. Transitions to the confirmation overlay, fires
+// per-path projection probes through a concurrency-5 pool (defends
+// the browser's per-host connection limit AND SQLite write
+// envelope), then renders aggregated stats + a Confirm CTA. >50
+// paths bypasses the estimate entirely.
+const PANEL_BATCH_PROJECTION_CAP = 50;
+const PANEL_BATCH_PROJECTION_CONCURRENCY = 5;
+
+async function inspectorPanelConfirmBatch(kind) {
+  const panel = document.getElementById("inspector-action-panel");
+  if (!panel || inspectorState.panelMode !== "batch") return;
+  panel.dataset.confirming = kind;
+  inspectorA11yListeners("batch-confirm");
+
+  const overlay = document.getElementById("panel-confirm-overlay");
+  const content = document.getElementById("confirm-stats-content");
+  const titleEl = document.getElementById("confirm-title");
+  const statusEl = panel.querySelector(".panel-confirm-status");
+  const submitBtn = document.getElementById("panel-confirm-submit");
+  if (!overlay || !content || !submitBtn) return;
+
+  const paths = Array.from(inspectorState.selectedPaths.keys());
+  const label = kind === "upscale" ? "Hi-Res Upscale" : "CarPlay-optimize";
+  if (titleEl) titleEl.textContent = `Confirm batch ${label}`;
+  if (statusEl) statusEl.textContent = "";
+  submitBtn.disabled = true;
+  overlay.hidden = false;
+
+  // Above the cap → submit blind. Operator sees an honest "no
+  // estimate" hint; the Confirm button enables immediately.
+  if (paths.length > PANEL_BATCH_PROJECTION_CAP) {
+    content.innerHTML = `
+      <p class="hint">${paths.length} folders selected — too many to
+      pre-estimate without delaying you. The bridge will queue the
+      eligible tracks in the background.</p>`;
+    submitBtn.disabled = false;
+    submitBtn.dataset.kind = kind;
+    return;
+  }
+
+  content.innerHTML =
+    `<p class="hint">Estimating 0 / ${paths.length} folders…</p>`;
+
+  let projectedFiles = 0;
+  let projectedSize = 0;
+  let requiredSize = 0;
+  let availableBytes = 0;
+  let failedProbes = 0;
+  let completed = 0;
+  const queue = paths.slice();
+
+  // Race-guard token. If the operator hits Cancel mid-pool the
+  // dataset.confirming flips away; the workers bail out before
+  // landing more results.
+  const guard = () => panel.dataset.confirming === kind;
+
+  async function worker() {
+    while (queue.length > 0) {
+      if (!guard()) return;
+      const path = queue.shift();
+      try {
+        const res = await fetch(
+          `/api/library/browse-projection?path=${encodeURIComponent(path)}&kind=${kind}`);
+        if (res.ok) {
+          const data = await res.json();
+          projectedFiles += data.projectedFiles || 0;
+          projectedSize += data.projectedSizeBytes || 0;
+          requiredSize += data.requiredBytesWithMargin || 0;
+          // Available bytes is per-host (same volume for every
+          // path); take the last response's value.
+          availableBytes = data.availableBytes || availableBytes;
+        } else {
+          failedProbes++;
+        }
+      } catch (e) {
+        failedProbes++;
+        console.warn("batch projection probe failed:", path, e);
+      }
+      completed++;
+      if (guard() && content) {
+        content.innerHTML =
+          `<p class="hint">Estimating ${completed} / ${paths.length} folders…</p>`;
+      }
+    }
+  }
+
+  const workers = [];
+  const n = Math.min(PANEL_BATCH_PROJECTION_CONCURRENCY, paths.length);
+  for (let i = 0; i < n; i++) workers.push(worker());
+  await Promise.all(workers);
+  if (!guard()) return;
+
+  if (projectedFiles === 0) {
+    content.innerHTML =
+      `<p class="hint">Nothing eligible to ${kind === "upscale" ? "upscale" : "CarPlay-optimize"} across the selected folders — every track is already covered, lossy, DSD, or in an unknown source format.</p>`;
+    submitBtn.disabled = true;
+    return;
+  }
+
+  const wouldFit = availableBytes === 0 || availableBytes >= requiredSize;
+  const probeNote = failedProbes > 0
+    ? `<p class="hint">${failedProbes} folder${failedProbes === 1 ? "" : "s"} couldn't be probed — estimates below cover the rest.</p>`
+    : "";
+  let html = probeNote + `
+    <dl class="kv">
+      <dt>Folders</dt><dd>${paths.length}</dd>
+      <dt>Eligible tracks</dt><dd>${projectedFiles}</dd>
+      <dt>Projected size</dt><dd>${humanBytes(projectedSize)}</dd>
+      <dt>Free on data volume</dt><dd>${humanBytes(availableBytes)}</dd>
+      <dt>Required (with 10% margin)</dt><dd>${humanBytes(requiredSize)}</dd>
+    </dl>`;
+  if (!wouldFit) {
+    html += `<p class="error" role="alert">Not enough free space: needs ${humanBytes(requiredSize)}, only ${humanBytes(availableBytes)} available on the bridge data volume.</p>`;
+    submitBtn.disabled = true;
+  } else {
+    submitBtn.disabled = false;
+  }
+  content.innerHTML = html;
+  submitBtn.dataset.kind = kind;
+}
+
+function inspectorPanelCancelConfirm() {
+  const panel = document.getElementById("inspector-action-panel");
+  if (!panel) return;
+  delete panel.dataset.confirming;
+  const overlay = document.getElementById("panel-confirm-overlay");
+  if (overlay) overlay.hidden = true;
+  inspectorA11yListeners("batch-summary");
+}
+
+async function inspectorPanelConfirmSubmit() {
+  const panel = document.getElementById("inspector-action-panel");
+  if (!panel) return;
+  const submitBtn = document.getElementById("panel-confirm-submit");
+  const kind = submitBtn?.dataset.kind || panel.dataset.confirming;
+  if (!kind) return;
+
   const paths = Array.from(inspectorState.selectedPaths.keys());
   if (paths.length === 0) return;
-  btn.disabled = true;
+
+  submitBtn.disabled = true;
+  const statusEl = panel.querySelector(".panel-confirm-status");
+  if (statusEl) statusEl.textContent = "Submitting…";
+
   try {
-    // Clear the selection ONLY when every submit landed cleanly.
-    // On any partial / total failure, preserve the selection so
-    // the operator can retry the failed folders without rebuilding
-    // the entire selection from scratch (could be 20+ folders on
-    // a deep multi-album batch). Per CodeRabbit major on PR #276.
-    // The toast on the selection bar (rendered by
-    // inspectorSubmitBatchForKind) carries the per-folder failure
-    // detail so the operator knows what didn't enqueue.
     const result = await inspectorSubmitBatchForKind(kind, paths);
     if (result?.failed === 0) {
-      inspectorState.selectedPaths.clear();
-      // Mirror the DOM uncheck — keep checkbox state in sync with
-      // the cleared internal map. Same shape as the Clear button
-      // handler in initLibraryInspector.
+      // Clean success — clear checkboxes + close the panel.
       for (const cb of document.querySelectorAll(
         '.inspector-tile input[type="checkbox"][data-path]:checked')) {
         cb.checked = false;
         const tile = cb.closest(".inspector-tile");
         if (tile) delete tile.dataset.selected;
       }
-      inspectorUpdateSelectionBar();
+      inspectorState.selectedPaths.clear();
+      inspectorClosePanel();
+    } else {
+      // Partial / total failure — drop back to the summary so the
+      // operator can retry. The toast on the panel carries the
+      // per-folder failure summary.
+      delete panel.dataset.confirming;
+      const overlay = document.getElementById("panel-confirm-overlay");
+      if (overlay) overlay.hidden = true;
+      inspectorA11yListeners("batch-summary");
     }
   } finally {
-    if (btn) btn.disabled = false;
+    if (submitBtn) submitBtn.disabled = false;
   }
+}
+
+// inspectorPositionPanel — anchor the panel near the trigger
+// element (tile ⓘ button or heading ⓘ) for single-tile mode.
+// position: absolute relative to the document so the panel scrolls
+// with the tile grid (review feedback: position:fixed + scroll =
+// panel drifts away from the anchor). Skips entirely for batch
+// mode — CSS handles fixed bottom-center.
+function inspectorPositionPanel(triggerEl) {
+  const panel = document.getElementById("inspector-action-panel");
+  if (!panel) return;
+  if (panel.dataset.mode !== "single") return;
+  if (!triggerEl) return;
+  // Wait one frame so the popover has a real bounding box.
+  requestAnimationFrame(() => {
+    const rect = triggerEl.getBoundingClientRect();
+    const panelRect = panel.getBoundingClientRect();
+    const viewportW = window.innerWidth;
+    const viewportH = window.innerHeight;
+    const margin = 8;
+
+    // Default: drop the panel just below the trigger, left-aligned.
+    let top = window.scrollY + rect.bottom + margin;
+    let left = window.scrollX + rect.left;
+
+    // If the panel would overflow the right edge, slide it left.
+    if (left + panelRect.width > window.scrollX + viewportW - margin) {
+      left = window.scrollX + viewportW - panelRect.width - margin;
+    }
+    if (left < window.scrollX + margin) {
+      left = window.scrollX + margin;
+    }
+    // If there isn't room below, flip above the trigger.
+    if (rect.bottom + panelRect.height + margin > viewportH
+      && rect.top - panelRect.height - margin > 0) {
+      top = window.scrollY + rect.top - panelRect.height - margin;
+    }
+    panel.style.top = `${top}px`;
+    panel.style.left = `${left}px`;
+  });
+}
+
+// inspectorA11yListeners — install / tear down Escape + focus-trap
+// listeners. Modes:
+//   - "single" / "batch-confirm": Escape + focus trap
+//   - "batch-summary": Escape only (operator must Tab back to tile
+//     checkboxes to add/remove from the selection)
+//   - "none": tear everything down
+function inspectorA11yListeners(mode) {
+  if (inspectorState.panelEscapeHandler) {
+    document.removeEventListener("keydown",
+      inspectorState.panelEscapeHandler);
+    inspectorState.panelEscapeHandler = null;
+  }
+  if (inspectorState.panelFocusHandler) {
+    document.removeEventListener("focusin",
+      inspectorState.panelFocusHandler);
+    inspectorState.panelFocusHandler = null;
+  }
+  if (mode === "none") return;
+
+  const panel = document.getElementById("inspector-action-panel");
+  if (!panel) return;
+
+  inspectorState.panelEscapeHandler = (e) => {
+    if (e.key !== "Escape") return;
+    // Batch-confirm: Escape cancels the confirmation, not the whole
+    // panel — operator's selection isn't lost.
+    if (panel.dataset.confirming) {
+      e.preventDefault();
+      inspectorPanelCancelConfirm();
+      return;
+    }
+    e.preventDefault();
+    inspectorClosePanel();
+  };
+  document.addEventListener("keydown", inspectorState.panelEscapeHandler);
+
+  if (mode === "single" || mode === "batch-confirm") {
+    inspectorState.panelFocusHandler = (e) => {
+      if (panel.contains(e.target)) return;
+      // Focus drifted out — pull it back to the first focusable
+      // element inside the panel.
+      const focusable = panel.querySelectorAll(
+        'button:not([disabled]):not([hidden]), [tabindex="0"]:not([disabled])');
+      if (focusable.length > 0) focusable[0].focus();
+    };
+    document.addEventListener("focusin", inspectorState.panelFocusHandler);
+  }
+}
+
+// cssEscapeAttr — narrow CSS selector escape for path values that
+// land in `[data-path="${path}"]`. CSS.escape is the canonical
+// helper; fall back to a regex-based escape on the rare browser
+// that lacks it.
+function cssEscapeAttr(s) {
+  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
+    return CSS.escape(s);
+  }
+  return String(s).replace(/(["\\])/g, "\\$1");
 }
 
 function pathLabel(path) {

@@ -1257,38 +1257,11 @@ dialog h2 { font-size: 18px; color: var(--accent); }
   padding: 0.5rem 1rem;
 }
 
+/* Single-column now — the persistent right drawer is gone; the
+   action surface lives in the floating #inspector-action-panel below.
+   Tile grid gets the full viewport width. */
 .inspector-layout {
-  display: grid;
-  /* minmax(0, 1.6fr): overrides CSS Grid's implicit min-width: auto on
-   *   the left column. Without this override, a long row name (e.g.
-   *   "ABDULLAH IBRAHIM, Composer feat. Noah Jackson, Soloist, Cleave
-   *   Guyton Jr., Soloist") grows the column past its 1.6fr share, and
-   *   the right drawer is squeezed to ~10% of the viewport — stats
-   *   labels then wrap onto every other character ("Tracks 12928 (0
-   *   already upscaled)" displays one character per line). With
-   *   min-width: 0 the .folder-cell rule in the .inspector-tree section
-   *   ({ max-width: 80ch; overflow: hidden; text-overflow: ellipsis })
-   *   actually takes effect and the cell truncates with a clean
-   *   ellipsis.
-   * minmax(260px, 1fr): floors the right drawer so labels stay readable
-   *   even when the table content is wider than its share. 260px is
-   *   wide enough for "Tracks 12928 (0 already upscaled)" to wrap to
-   *   two lines instead of one-character-per-line; tracks the
-   *   single-column responsive breakpoint (720px). */
-  grid-template-columns: minmax(0, 1.6fr) minmax(260px, 1fr);
-  gap: 1rem;
-}
-.inspector-layout .inspector-drawer[hidden] {
-  display: none;
-}
-.inspector-layout:has(.inspector-drawer[hidden]) {
-  /* No drawer → tree takes the full width. */
-  grid-template-columns: 1fr;
-}
-@media (max-width: 720px) {
-  .inspector-layout {
-    grid-template-columns: 1fr;
-  }
+  display: block;
 }
 
 .inspector-tree table.rows td:first-child {
@@ -1509,62 +1482,8 @@ dialog h2 { font-size: 18px; color: var(--accent); }
   background: color-mix(in srgb, var(--accent) 24%, transparent);
 }
 
-/* Drawer header (v1.4 followup): title flex-grows, close × pins
- * to the top-right corner per the user-requested reorder.
- * Replaces the bottom-of-body CLOSE button which sat below the
- * destructive Delete and felt buried. */
-.inspector-drawer-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 0.5rem;
-  margin-bottom: 0.5rem;
-}
-.inspector-drawer-header h2 {
-  margin: 0;
-  flex: 1 1 auto;
-  min-width: 0;
-}
-.inspector-drawer-close-x {
-  /* Plain text × with a 32×32 hit area. Not a .btn — looks like a
-   * macOS-style dismiss control rather than a competing CTA. */
-  width: 32px;
-  height: 32px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid transparent;
-  background: transparent;
-  color: var(--fg-muted);
-  font-size: 1.4rem;
-  line-height: 1;
-  cursor: pointer;
-  border-radius: 6px;
-  flex-shrink: 0;
-}
-.inspector-drawer-close-x:hover {
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
-  color: var(--fg);
-}
-.inspector-drawer-close-x:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
-}
-
-/* Drawer action row (v1.4 followup): Upscale + Delete buttons at
- * the TOP of the body, side-by-side on wide drawers and stacked on
- * narrow ones. Each is independently hideable via the [hidden]
- * attribute (Upscale hides when 0 eligible files; Delete hides
- * when scope has no variants). */
-.inspector-drawer-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  margin-bottom: 0.75rem;
-}
-.inspector-drawer-actions .btn[hidden] {
-  display: none;
-}
+/* Drawer rules removed — see #inspector-action-panel rules at the
+ * end of this section for the replacement floating panel surface. */
 
 /* Search input + dropdown (v1.4 PR B FTS5). Slot owns the
  * positioning; dropdown is an absolute overlay anchored under
@@ -1675,39 +1594,16 @@ dialog h2 { font-size: 18px; color: var(--accent); }
   border: 0;
 }
 
-.inspector-drawer dl.kv {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 0.25rem 1rem;
-  margin: 0.5rem 0 1rem;
-  font-size: 0.9rem;
-}
-.inspector-drawer dl.kv dt {
-  color: var(--fg-muted);
-}
-.inspector-drawer dl.kv dd {
-  margin: 0;
-  font-variant-numeric: tabular-nums;
-}
-
-/* Inline filesystem-path code chip used in the drawer's "Stored at"
-   row and Settings → Audio quality's matching row. Long paths
-   (operators with custom `dataDir` deep in `/Volumes/…`) must wrap
-   inside the dd cell rather than overflow the grid track. */
+/* Inline filesystem-path code chip used in the action panel's
+   "Stored at" row and Settings → Audio quality's matching row. Long
+   paths (operators with custom `dataDir` deep in `/Volumes/…`) must
+   wrap inside the dd cell rather than overflow the grid track. */
 code.storage-path {
   display: inline-block;
   max-width: 100%;
   font-size: 0.85em;
   word-break: break-all;
   white-space: normal;
-}
-
-.inspector-drawer .error {
-  background: rgba(220, 50, 50, 0.08);
-  border: 1px solid rgba(220, 50, 50, 0.3);
-  padding: 0.5rem 0.75rem;
-  border-radius: 6px;
-  font-size: 0.85rem;
 }
 
 /* Jobs page status pill colours follow the same warning /
@@ -2038,80 +1934,361 @@ section.library-inspector {
   color: color-mix(in srgb, currentcolor 60%, transparent);
 }
 
-/* ===== Selection bar ===== */
-.inspector-selection-bar {
-  position: sticky;
-  bottom: 1rem;
-  margin: 1rem 0 0;
-  padding: 0.5rem 1rem;
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-  background: var(--bg-panel);
-  border: 1px solid var(--accent);
-  border-radius: 10px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
-  z-index: 5;
-  flex-wrap: wrap;
+/* ===== Tile ⓘ button (sits between .tile-name and .tile-menu-btn) ===== */
+.tile-info-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0.25rem 0.4rem;
+  border-radius: 6px;
+  color: color-mix(in srgb, var(--accent) 80%, currentcolor);
+  /* HIG floor — generous tap target. */
+  min-width: 32px;
+  min-height: 32px;
+  flex-shrink: 0;
 }
-.inspector-selection-bar .selection-count {
-  font-weight: 600;
+.tile-info-btn:hover {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
   color: var(--accent);
 }
-.inspector-selection-bar .selection-gap {
-  font-size: 0.8rem;
-  color: color-mix(in srgb, currentcolor 70%, transparent);
-  font-variant-numeric: tabular-nums;
-}
-.inspector-selection-bar .selection-actions {
-  display: flex;
-  gap: 0.5rem;
-  margin-left: auto;
-}
-@media (prefers-reduced-motion: reduce) {
-  .inspector-selection-bar { transition: none; }
+.tile-info-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
-/* ===== Drawer per-kind sections ===== */
-.drawer-kind {
+/* ===== Unified floating action panel ===== */
+/* Replaces the legacy persistent right drawer + sticky bottom
+   selection bar. Native popover for top-layer rendering; positioning
+   + Escape + focus-trap are JS-driven (see app.js). */
+.inspector-action-panel {
+  /* Plain-color fallback before color-mix (IACVT-safe; the gradient
+     selectors below progressive-enhance via color-mix). */
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.22);
+  padding: 1rem 1.1rem;
+  color: inherit;
+  box-sizing: border-box;
+  width: min(560px, calc(100vw - 2rem));
+  max-height: 80vh;
+  overflow-y: auto;
+  /* Popover starts in display:none; popover-open flips it on. */
+  margin: 0;
+}
+.inspector-action-panel:popover-open {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+/* Subtle enter animation. Strip on reduced-motion (below). */
+@starting-style {
+  .inspector-action-panel:popover-open {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+.inspector-action-panel {
+  transition: opacity 180ms ease-out, transform 180ms ease-out;
+}
+.inspector-action-panel[data-mode="batch"] {
+  transform: translateX(-50%);
+}
+@starting-style {
+  .inspector-action-panel[data-mode="batch"]:popover-open {
+    opacity: 0;
+    transform: translate(-50%, 8px);
+  }
+}
+
+/* Single-tile mode — JS positions via window.scrollY + getBoundingClientRect. */
+.inspector-action-panel[data-mode="single"] {
+  position: absolute;
+}
+/* Batch mode — fixed bottom-center, scrolls independently of grid. */
+.inspector-action-panel[data-mode="batch"] {
+  position: fixed;
+  bottom: 1.5rem;
+  left: 50%;
+  top: auto;
+}
+
+/* Backdrop is mode-gated. In batch-summary mode the panel must NOT
+   block additional tile checkboxes; in single + batch-confirm the
+   operator's attention is on the panel so the dim + blur is fine. */
+.inspector-action-panel[data-mode="single"]::backdrop,
+.inspector-action-panel[data-confirming]::backdrop {
+  background: rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(2px);
+  pointer-events: auto;
+}
+.inspector-action-panel[data-mode="batch"]:not([data-confirming])::backdrop {
+  background: transparent;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .inspector-action-panel { transition: none; }
+}
+
+/* Header row: title + clear (batch only) + close ×. */
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border);
+}
+.panel-header h2 {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.panel-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-shrink: 0;
+}
+.panel-clear-btn {
+  padding: 0.25rem 0.65rem;
+  font-size: 0.8rem;
+}
+.panel-close-x {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--fg-muted);
+  font-size: 1.4rem;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: 6px;
+}
+.panel-close-x:hover {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--fg);
+}
+.panel-close-x:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* Per-kind summary + expanded card. */
+#panel-main-content {
   display: flex;
   flex-direction: column;
   gap: 0.6rem;
-  padding: 0.75rem 0;
-  border-top: 1px solid var(--border);
 }
-.drawer-kind:first-of-type {
-  border-top: none;
-  padding-top: 0;
+.panel-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-elev) 50%, var(--bg-panel));
+  /* Plain fallback */
+  background-color: var(--bg-elev);
+  overflow: hidden;
 }
-.drawer-kind-header {
-  display: flex;
-  align-items: baseline;
-  gap: 0.5rem;
+.panel-card .card-summary-trigger {
+  display: grid;
+  grid-template-columns: auto auto 1fr auto auto;
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+  padding: 0.65rem 0.8rem;
+  background: none;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  user-select: none;
+  font: inherit;
+  color: inherit;
 }
-.drawer-kind-header h3 {
+.panel-card .card-summary-trigger:hover {
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+.panel-card .card-summary-trigger:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.panel-card .card-chevron {
+  font-family: var(--mono, monospace);
+  width: 1.2ch;
+  color: color-mix(in srgb, currentcolor 60%, transparent);
+  font-size: 0.85rem;
+  transition: transform 120ms ease;
+}
+.panel-card[data-kind="upscale"] .card-summary-trigger h3 { color: var(--kind-upscale); }
+.panel-card[data-kind="optimize"] .card-summary-trigger h3 { color: var(--kind-optimize); }
+.panel-card .card-summary-trigger h3 {
   margin: 0;
-  font-size: 1rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
 }
-.drawer-kind-soxchip {
-  font-size: 0.7rem;
-  padding: 0.1rem 0.4rem;
+.panel-card .coverage-ratio {
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+  color: color-mix(in srgb, currentcolor 70%, transparent);
+  white-space: nowrap;
+}
+.panel-card .card-summary-hint {
+  font-size: 0.78rem;
+  color: color-mix(in srgb, currentcolor 65%, transparent);
+  white-space: nowrap;
+}
+
+/* Coverage bar inside the summary row. Custom role="progressbar"
+   div carries the same a11y semantics as a native <progress>. */
+.panel-card .coverage-bar {
+  width: 100%;
+  height: 8px;
+  background: color-mix(in srgb, var(--bg-elev) 100%, transparent);
+  background-color: var(--bg-elev);
   border-radius: 4px;
-  background: var(--accent-warm-tint);
-  color: var(--accent-warm);
-  font-weight: 500;
+  overflow: hidden;
 }
-.drawer-kind-intro {
-  margin: 0;
+.panel-card[data-kind="upscale"] .coverage-bar-fill {
+  background: var(--kind-upscale);
+}
+.panel-card[data-kind="optimize"] .coverage-bar-fill {
+  background: var(--kind-optimize);
+}
+.panel-card .coverage-bar-fill {
+  height: 100%;
+  width: var(--cov, 0%);
+  border-radius: 4px;
+  transition: width 180ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .panel-card .coverage-bar-fill { transition: none; }
+  .panel-card .card-chevron { transition: none; }
+}
+
+/* Expanded-state details. Toggled via aria-expanded + hidden. */
+.panel-card[data-expanded="true"] .card-chevron {
+  transform: rotate(90deg);
+}
+.panel-card .card-details {
+  border-top: 1px solid var(--border);
+  padding: 0.8rem;
+  background: var(--bg-panel);
+}
+.panel-card .card-details .card-kind-intro {
+  margin: 0 0 0.6rem;
   font-size: 0.8rem;
   color: color-mix(in srgb, currentcolor 70%, transparent);
 }
-.drawer-kind .inspector-drawer-actions {
+.panel-card .panel-actions-row {
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem;
+  margin-bottom: 0.6rem;
 }
-.drawer-kind .inspector-drawer-actions .btn { font-size: 0.85rem; }
+.panel-card .panel-actions-row .btn { font-size: 0.85rem; }
+.panel-card .panel-actions-row .btn[hidden] { display: none; }
+
+.panel-card dl.kv {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.25rem 1rem;
+  margin: 0.5rem 0 0;
+  font-size: 0.85rem;
+}
+.panel-card dl.kv dt {
+  color: var(--fg-muted);
+}
+.panel-card dl.kv dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.panel-card .panel-warning {
+  margin-top: 0.6rem;
+  background: rgba(220, 50, 50, 0.08);
+  border: 1px solid rgba(220, 50, 50, 0.3);
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  font-size: 0.82rem;
+}
+.panel-card .panel-unknown {
+  margin-top: 0.4rem;
+  font-size: 0.78rem;
+  color: color-mix(in srgb, currentcolor 65%, transparent);
+}
+.panel-card .panel-submit-status {
+  margin: 0;
+  font-size: 0.82rem;
+  min-height: 1.2em;
+}
+
+/* ===== Batch confirmation overlay ===== */
+/* Absolutely positioned over #panel-main-content; toggled hidden by JS. */
+.panel-confirm {
+  position: absolute;
+  inset: 0;
+  background: var(--bg-panel);
+  border-radius: 12px;
+  padding: 1.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  z-index: 2;
+}
+.panel-confirm[hidden] { display: none; }
+.panel-confirm h3 {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border);
+}
+.panel-confirm #confirm-stats-content {
+  flex: 1 1 auto;
+  overflow-y: auto;
+}
+.panel-confirm dl.kv {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.3rem 1rem;
+  margin: 0.5rem 0;
+  font-size: 0.88rem;
+}
+.panel-confirm dl.kv dt { color: var(--fg-muted); }
+.panel-confirm dl.kv dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+.panel-confirm .panel-confirm-status {
+  margin: 0;
+  font-size: 0.82rem;
+  min-height: 1.2em;
+}
+.panel-confirm .error {
+  background: rgba(220, 50, 50, 0.08);
+  border: 1px solid rgba(220, 50, 50, 0.3);
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
+}
+.panel-confirm .panel-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--border);
+  margin-top: auto;
+}
 
 /* Per-kind storage usage breakdown in the storage bar. */
 .storage-used-breakdown {
@@ -2120,21 +2297,44 @@ section.library-inspector {
   font-variant-numeric: tabular-nums;
 }
 
+/* Lazy floating toast used by inspectorSelectionToast when the
+   action panel isn't open (tile-menu power-user path). Pinned to
+   the viewport bottom-right; auto-dismissed by JS after 6 s. */
+.inspector-floating-toast {
+  position: fixed;
+  right: 1rem;
+  bottom: 1rem;
+  z-index: 9999;
+  max-width: min(420px, calc(100vw - 2rem));
+  background: var(--bg-panel);
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  padding: 0.6rem 0.85rem;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.2);
+  font-size: 0.85rem;
+  color: inherit;
+}
+.inspector-floating-toast[hidden] { display: none; }
+.inspector-floating-toast a {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
 /* ===== Mobile / narrow viewport adjustments ===== */
 @media (max-width: 600px) {
   .inspector-grid {
     grid-template-columns: 1fr;
   }
-  .inspector-selection-bar {
+  .inspector-action-panel[data-mode="batch"] {
     bottom: 0.5rem;
-    padding: 0.5rem 0.75rem;
+    width: calc(100vw - 1rem);
   }
-  .inspector-selection-bar .selection-actions {
-    margin-left: 0;
-    width: 100%;
-    justify-content: stretch;
+  .panel-card .card-summary-trigger {
+    /* Drop the hint column on narrow viewports — the chevron + label
+       + bar + ratio is already a lot to pack into ~280 px. */
+    grid-template-columns: auto auto 1fr auto;
   }
-  .inspector-selection-bar .selection-actions .btn {
-    flex: 1;
+  .panel-card .card-summary-hint {
+    display: none;
   }
 }
