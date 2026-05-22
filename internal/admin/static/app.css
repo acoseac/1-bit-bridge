@@ -2011,11 +2011,13 @@ section.library-inspector {
    fight the transform-centering on Chromium / WebKit. */
 .inspector-action-panel[data-mode="single"] {
   position: fixed;
+  /* Shorthand BEFORE longhands — `inset` cascades over top/right/bottom/left,
+     so placing it after `top: 50%; left: 50%` would silently revert them. */
+  inset: auto;
+  margin: 0;
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  inset: auto;
-  margin: 0;
 }
 @starting-style {
   .inspector-action-panel[data-mode="single"]:popover-open {
