@@ -1723,11 +1723,10 @@ function initLibraryInspector() {
   document.getElementById("inspector-nav-home")
     .addEventListener("click", () => inspectorNavigate(""));
 
-  // Current-folder ⓘ affordance: opens the unified action panel
-  // anchored to the heading.
+  // Current-folder ⓘ affordance: opens the unified action panel.
   document.getElementById("inspector-current-info")
-    ?.addEventListener("click", (ev) => {
-      inspectorOpenProjectionForCurrent(ev?.currentTarget || null);
+    ?.addEventListener("click", () => {
+      inspectorOpenProjectionForCurrent();
     });
 
   // Panel close + clear-selection. Generate / Delete / expand wiring
@@ -1790,7 +1789,7 @@ function initLibraryInspector() {
       if (path == null) return;
       const folders = inspectorState.lastBrowseData?.folders || [];
       const folder = folders.find((f) => f.path === path);
-      if (folder) inspectorOpenPanelSingle(folder, infoBtn);
+      if (folder) inspectorOpenPanelSingle(folder);
     });
   }
 
@@ -2179,7 +2178,7 @@ function inspectorUpdateToolbarState(path) {
 // pre-populate the panel's "Tracks / Source size" rows before the
 // projection fetch lands. Root path is semantically valid; the
 // projection endpoint handles empty path as "whole library."
-function inspectorOpenProjectionForCurrent(anchorEl) {
+function inspectorOpenProjectionForCurrent() {
   const data = inspectorState.lastBrowseData;
   if (!data) return; // toolbar button is disabled in this state, defensive
   const rollup = inspectorBrowseRollup(data);
@@ -2191,9 +2190,7 @@ function inspectorOpenProjectionForCurrent(anchorEl) {
     optimizedCount: rollup.optimizedCount,
     totalSizeBytes: rollup.totalSizeBytes,
   };
-  const anchor = anchorEl
-    || document.getElementById("inspector-current-info");
-  inspectorOpenPanelSingle(folder, anchor);
+  inspectorOpenPanelSingle(folder);
 }
 
 // inspectorBrowseRollup aggregates a browse response's folders +
@@ -2604,14 +2601,11 @@ function handleTileMenuAction(action, item) {
       inspectorDeleteVariantsForKind("optimize", path);
       break;
     case "projection":
-          // Folder tiles open the panel anchored to themselves; track
-      // tiles fall back to the current-folder panel (no per-track
-      // rollup fields on the row data).
+      // Folder tiles open the panel for themselves; track tiles fall
+      // back to the current-folder panel (no per-track rollup fields
+      // on the row data).
       if (item.upscaledCount !== undefined) {
-        const tile = document.querySelector(
-          `.inspector-tile[data-path="${cssEscapeAttr(item.path)}"]`);
-        const anchor = tile?.querySelector(".tile-info-btn") || tile;
-        inspectorOpenPanelSingle(item, anchor);
+        inspectorOpenPanelSingle(item);
       } else {
         inspectorOpenProjectionForCurrent();
       }
@@ -2754,7 +2748,7 @@ async function inspectorLoadMore() {
 //     batch-confirm overlay with throttled per-path projection.
 // =============================================================
 
-function inspectorOpenPanelSingle(folder, anchorEl) {
+function inspectorOpenPanelSingle(folder) {
   const panel = document.getElementById("inspector-action-panel");
   if (!panel) return;
   // Clicking ⓘ on a tile is a focused action that supersedes any
@@ -2797,7 +2791,6 @@ function inspectorOpenPanelSingle(folder, anchorEl) {
     && !panel.matches(":popover-open")) {
     panel.showPopover();
   }
-  inspectorPositionPanel(anchorEl);
   inspectorA11yListeners("single");
 
   // Async projection fetch fills in projected / free / required /
@@ -3733,46 +3726,6 @@ async function inspectorPanelConfirmSubmit() {
   }
 }
 
-// inspectorPositionPanel — anchor the panel near the trigger
-// element (tile ⓘ button or heading ⓘ) for single-tile mode.
-// position: absolute relative to the document so the panel scrolls
-// with the tile grid (review feedback: position:fixed + scroll =
-// panel drifts away from the anchor). Skips entirely for batch
-// mode — CSS handles fixed bottom-center.
-function inspectorPositionPanel(triggerEl) {
-  const panel = document.getElementById("inspector-action-panel");
-  if (!panel) return;
-  if (panel.dataset.mode !== "single") return;
-  if (!triggerEl) return;
-  // Wait one frame so the popover has a real bounding box.
-  requestAnimationFrame(() => {
-    const rect = triggerEl.getBoundingClientRect();
-    const panelRect = panel.getBoundingClientRect();
-    const viewportW = window.innerWidth;
-    const viewportH = window.innerHeight;
-    const margin = 8;
-
-    // Default: drop the panel just below the trigger, left-aligned.
-    let top = window.scrollY + rect.bottom + margin;
-    let left = window.scrollX + rect.left;
-
-    // If the panel would overflow the right edge, slide it left.
-    if (left + panelRect.width > window.scrollX + viewportW - margin) {
-      left = window.scrollX + viewportW - panelRect.width - margin;
-    }
-    if (left < window.scrollX + margin) {
-      left = window.scrollX + margin;
-    }
-    // If there isn't room below, flip above the trigger.
-    if (rect.bottom + panelRect.height + margin > viewportH
-      && rect.top - panelRect.height - margin > 0) {
-      top = window.scrollY + rect.top - panelRect.height - margin;
-    }
-    panel.style.top = `${top}px`;
-    panel.style.left = `${left}px`;
-  });
-}
-
 // inspectorA11yListeners — install / tear down Escape + focus-trap
 // listeners. Modes:
 //   - "single" / "batch-confirm": Escape + focus trap
@@ -3825,17 +3778,6 @@ function inspectorA11yListeners(mode) {
     };
     document.addEventListener("focusin", inspectorState.panelFocusHandler);
   }
-}
-
-// cssEscapeAttr — narrow CSS selector escape for path values that
-// land in `[data-path="${path}"]`. CSS.escape is the canonical
-// helper; fall back to a regex-based escape on the rare browser
-// that lacks it.
-function cssEscapeAttr(s) {
-  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
-    return CSS.escape(s);
-  }
-  return String(s).replace(/(["\\])/g, "\\$1");
 }
 
 function pathLabel(path) {
