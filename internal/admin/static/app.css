@@ -2003,9 +2003,25 @@ section.library-inspector {
   }
 }
 
-/* Single-tile mode — JS positions via window.scrollY + getBoundingClientRect. */
+/* Single-tile mode — fixed viewport-centered. The HTML5 Popover top-layer
+   breaks position:absolute coordinate-system assumptions inside the
+   independently-scrolling inspector grid, so all positioning is declarative
+   here. inset:auto + margin:0 defeat the Popover UA defaults
+   (inset:0; margin:auto; width/height:fit-content) that would otherwise
+   fight the transform-centering on Chromium / WebKit. */
 .inspector-action-panel[data-mode="single"] {
-  position: absolute;
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  inset: auto;
+  margin: 0;
+}
+@starting-style {
+  .inspector-action-panel[data-mode="single"]:popover-open {
+    opacity: 0;
+    transform: translate(-50%, calc(-50% + 8px));
+  }
 }
 /* Batch mode — fixed bottom-center, scrolls independently of grid. */
 .inspector-action-panel[data-mode="batch"] {
