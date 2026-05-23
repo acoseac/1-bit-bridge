@@ -1,0 +1,56 @@
+name: gofmt
+
+# Fails the PR if any Go source file isn't `gofmt`-clean.
+#
+# Why this exists: the Makefile target `make fmt` runs `go fmt ./...`
+# which REWRITES files in place — it's "fix", not "check". Without a
+# read-only gate, drift sneaks in: a contributor (or an AI assistant)
+# commits unaligned struct fields, no bot review catches it, the
+# operator's next `make fmt vet test build-all` silently re-formats
+# the file and produces a confusing dirty working tree. PR #284's
+# `internal/integrity/sidecars_test.go` drift is the canonical case
+# this gate prevents.
+#
+# Action references are commit-pinned (not tag-pinned) so a hijacked
+# upstream can't silently alter what runs here — matches the project
+# convention from `.github/workflows/codeql.yml`. Version comments are
+# what Dependabot reads to keep the SHAs current.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  gofmt:
+    name: gofmt -l
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # `gofmt -l` prints filenames of mis-formatted files (and only
+      # those). Fail the job when its output is non-empty so a PR with
+      # drift can't merge silently. `gofmt -d` runs on the same set to
+      # surface the actual diffs in the job log — gives the contributor
+      # a concrete patch to apply locally via `make fmt`.
+      - name: Check formatting
+        run: |
+          mis=$(gofmt -l .)
+          if [ -n "$mis" ]; then
+            echo "::error::The following files are not gofmt-clean:"
+            echo "$mis"
+            echo ""
+            echo "Run 'make fmt' locally and commit the result. Diff:"
+            echo "$mis" | xargs gofmt -d
+            exit 1
+          fi
+          echo "All Go files are gofmt-clean."

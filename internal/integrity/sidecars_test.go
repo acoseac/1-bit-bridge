@@ -371,11 +371,11 @@ func TestOrphanSidecarSweeperGracePeriodProtectsConcurrentWrites(t *testing.T) {
 // floor.
 func TestOrphanSidecarSweeperEffectiveOverrides(t *testing.T) {
 	cases := []struct {
-		name           string
-		override       time.Duration
-		wantGrace      time.Duration
-		chunkOverride  int
-		wantChunkSize  int
+		name          string
+		override      time.Duration
+		wantGrace     time.Duration
+		chunkOverride int
+		wantChunkSize int
 	}{
 		{"zero-uses-production", 0, gcGracePeriod, 0, gcChunkSize},
 		{"negative-uses-production", -1 * time.Second, gcGracePeriod, -5, gcChunkSize},
