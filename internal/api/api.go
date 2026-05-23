@@ -1079,7 +1079,12 @@ func (s *Server) manifestHandler(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "scan_in_progress", "manifest not ready")
 		return
 	}
-	q := r.URL.Query()
+	// safeQuery preserves literal '+' in query values — load-bearing for
+	// RFC3339 ?since= timestamps with positive timezone offsets like
+	// 2026-05-23T15:40:00+02:00, which the stdlib's r.URL.Query() would
+	// otherwise decode to a space and break time.Parse downstream. See
+	// internal/api/query.go for the rationale.
+	q := safeQuery(r)
 	sinceRaw := q.Get("since")
 	limitRaw := q.Get("limit")
 

@@ -64,7 +64,7 @@ type StatResponse struct {
 // entries — one per configured root, keyed by basename — so iOS can
 // enumerate roots the same way SMB enumerates shares.
 func (s *Server) list(w http.ResponseWriter, r *http.Request) {
-	clientPath := r.URL.Query().Get("path")
+	clientPath := safeQuery(r).Get("path")
 	roots := s.resolver.Roots()
 	if len(roots) > 1 && (clientPath == "" || clientPath == "/") {
 		entries := make([]Entry, 0, len(roots))
@@ -161,7 +161,7 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 // shape. Reachable: true on a healthy root is also emitted so iOS can
 // trust the field without a parallel /v1/list call.
 func (s *Server) stat(w http.ResponseWriter, r *http.Request) {
-	clientPath := r.URL.Query().Get("path")
+	clientPath := safeQuery(r).Get("path")
 	if absRoot := s.matchesRoot(clientPath); absRoot != "" {
 		status := s.reachability.probe(r.Context(), absRoot)
 		if !status.Reachable {
@@ -247,7 +247,8 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request) {
 		defer s.sessions.End()
 	}
 
-	clientPath := r.URL.Query().Get("path")
+	q := safeQuery(r)
+	clientPath := q.Get("path")
 	abs, info, err := s.resolver.ResolveChecked(clientPath)
 	if ok := writeResolveError(w, r, err); ok {
 		return
@@ -267,7 +268,7 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request) {
 	// (CodeQL alert: "uncontrolled data used in path expression"
 	// + Gemini single-root regression — both go away when the
 	// stat lives here, not in the manifest provider).
-	if variantID := r.URL.Query().Get("variant"); variantID != "" {
+	if variantID := q.Get("variant"); variantID != "" {
 		// Path normalization (collapse `//`, `.`, `..`) lives in the
 		// manifest store's normalizePathForLookup so /v1/download?variant=,
 		// /v1/upscale, and any other LookupTrack/LookupVariant caller

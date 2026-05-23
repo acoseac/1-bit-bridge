@@ -775,8 +775,15 @@ func TestServeVariantToleratesSMBFAT32MtimeGranularity(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			hs, tok, _ := fileFixtureWithVariant(t,
 				"Artist/Album/01 Track.flac", "upscaled-pcm-192", tc.mtimeDriftNS)
+			// iOS-shaped encoding (spaces → %20, literal + → %2B). Pre-fix
+			// the test used url.QueryEscape which form-encodes spaces as
+			// '+' — that relied on the stdlib's now-replaced form-decode
+			// to recover the space. Real iOS clients never send form-
+			// encoded spaces; using the iOS shape here keeps the test
+			// realistic.
+			iosPath := strings.ReplaceAll(url.QueryEscape("Artist/Album/01 Track.flac"), "+", "%20")
 			resp := authGet(t, hs,
-				"/v1/download?path="+url.QueryEscape("Artist/Album/01 Track.flac")+"&variant=upscaled-pcm-192", tok)
+				"/v1/download?path="+iosPath+"&variant=upscaled-pcm-192", tok)
 			defer resp.Body.Close()
 			if resp.StatusCode != tc.wantStatus {
 				body, _ := io.ReadAll(resp.Body)
