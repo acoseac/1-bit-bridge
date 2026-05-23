@@ -24,17 +24,18 @@ import (
 // occurrences from already-correct clients are left intact by
 // `strings.ReplaceAll`, so the change is fully backward-compatible.
 //
-// The malformed-query fallback returns the stdlib's `r.URL.Query()` so
-// callers never observe a behaviour regression even if the request is
-// pathological.
+// On malformed input we deliberately discard `url.ParseQuery`'s error
+// rather than fall back to `r.URL.Query()` — `url.ParseQuery` returns a
+// best-effort partial map even on parse failure, and that partial map
+// already has '+' preserved correctly. Falling back to `r.URL.Query()`
+// would re-introduce the very form-decoding hazard this helper exists
+// to prevent. This mirrors the error-ignoring contract of `r.URL.Query()`
+// (which itself silently ignores parse errors via the same idiom).
 func safeQuery(r *http.Request) url.Values {
-	if r.URL.RawQuery == "" {
+	if r == nil || r.URL == nil || r.URL.RawQuery == "" {
 		return url.Values{}
 	}
 	safe := strings.ReplaceAll(r.URL.RawQuery, "+", "%2B")
-	values, err := url.ParseQuery(safe)
-	if err != nil {
-		return r.URL.Query()
-	}
+	values, _ := url.ParseQuery(safe)
 	return values
 }

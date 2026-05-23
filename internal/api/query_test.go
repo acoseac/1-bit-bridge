@@ -1,6 +1,7 @@
 package api
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"testing"
 )
@@ -87,13 +88,42 @@ func TestSafeQueryHandlesMultipleParams(t *testing.T) {
 	}
 }
 
-func TestSafeQueryMalformedQueryFallsBackGracefully(t *testing.T) {
+func TestSafeQueryMalformedQueryProducesPartialResult(t *testing.T) {
 	// A pathological query that fails url.ParseQuery still produces a
-	// usable result (the stdlib fallback). The exact behaviour matches
-	// pre-fix stdlib behaviour, which is the right shape for a defensive
-	// fallback.
-	req := httptest.NewRequest("GET", "/v1/x?%ZZ", nil)
+	// best-effort partial map — '+'-preservation is maintained across
+	// the malformed segment. We deliberately don't fall back to
+	// `r.URL.Query()` because that would re-introduce form-decoding of
+	// '+' to space (the bug the helper exists to prevent).
+	//
+	// Compose the URL via Path + RawQuery directly: httptest.NewRequest
+	// itself calls url.Parse, which would reject a query containing a
+	// literal `%ZZ` before we even reach safeQuery. The shape we want
+	// to exercise is "the request reached the handler but RawQuery is
+	// malformed" — building the URL manually preserves the raw bytes.
+	req := httptest.NewRequest("GET", "/v1/x", nil)
+	req.URL.RawQuery = "good=1&bad=%ZZ&path=A+B"
 	values := safeQuery(req)
-	// Don't assert exact contents — just confirm it returned without panic.
-	_ = values
+	// '+'-preservation must survive even when other parts of the query
+	// fail to parse: the partial-result contract.
+	if got := values.Get("path"); got != "A+B" {
+		t.Fatalf("safeQuery on partially-malformed query: path=%q, want %q", got, "A+B")
+	}
+	// The well-formed prefix is still usable.
+	if got := values.Get("good"); got != "1" {
+		t.Fatalf("safeQuery on partially-malformed query: good=%q, want %q", got, "1")
+	}
+}
+
+func TestSafeQueryNilRequestSurvives(t *testing.T) {
+	// Defensive: if a nil *http.Request or nil URL is somehow passed in
+	// (test seam, future caller), safeQuery must not panic.
+	values := safeQuery(nil)
+	if len(values) != 0 {
+		t.Fatalf("safeQuery(nil): got %d values, want 0", len(values))
+	}
+	req := &http.Request{URL: nil}
+	values = safeQuery(req)
+	if len(values) != 0 {
+		t.Fatalf("safeQuery(&http.Request{URL: nil}): got %d values, want 0", len(values))
+	}
 }
