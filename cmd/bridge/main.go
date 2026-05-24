@@ -1566,6 +1566,19 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	}
 	provider.SetUpscaleEnabled(upscaleActive)
 
+	// LE-cert expiry provider for /v1/health (public mode). Live
+	// closure so background autocert renewals surface on the next
+	// health probe without a restart; same backing source as the
+	// admin's autocert tile so the two surfaces never drift.
+	// Returns the zero time when autocert isn't wired (loopback /
+	// pre-mint window), and api.Server omits the wire field in
+	// that case.
+	var leCertExpiry func() time.Time
+	if acmeManager != nil {
+		am := acmeManager
+		leCertExpiry = func() time.Time { return am.Status().NotAfter }
+	}
+
 	apiSrv := api.New(cfg, store, provider, fingerprint).
 		WithArtworkDirs(artworkDirBridge(artworkDir)).
 		WithMBIDProbe(provider).
@@ -1573,6 +1586,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		WithSessionTracker(sessions).
 		WithPairing(pairingStore).
 		WithCertExpiry(certNotAfter).
+		WithLECertExpiry(leCertExpiry).
 		WithUpscale(upscaleActive, &variantStoreAdapter{provider: provider}).
 		WithCarPlayOptimize(upscaleActive && cfg.Upscale.EffectiveOptimizeEnabled())
 	cfgHolder := apiSrv.ConfigHolder()
@@ -2260,17 +2274,12 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// Operators with a non-standard proxy mapping will
 		// recognise this is just the prompt and substitute
 		// their actual URL.
-		var adminURL string
-		if cfg.Deployment.AdminTLSTerminatedByProxy {
-			adminURL = "https://" + strings.TrimSuffix(cfg.Autocert.Domain, ".") + "/"
-		} else {
-			adminURL = banneradminURL(cfg.Autocert.Domain, cfg.AdminAddress, adminScheme)
-		}
+		adminURL := operatorAdminURL(cfg, adminScheme)
 		fmt.Fprintf(stdout, "Admin console: %s — log in with the credentials from `bridge admin reset-password`\n", adminURL)
 	} else {
 		fmt.Fprintf(stdout, "Library: %q (roots: %v)\n", cfg.LibraryName, cfg.LibraryRoots)
 		fmt.Fprintf(stdout, "TLS fingerprint (pin this on the iOS side):\n  %s\n", fingerprint)
-		fmt.Fprintf(stdout, "Admin console: %s://%s/ — add library folders, pair devices, view stats\n", adminScheme, cfg.AdminAddress)
+		fmt.Fprintf(stdout, "Admin console: %s — add library folders, pair devices, view stats\n", operatorAdminURL(cfg, adminScheme))
 	}
 
 	// Advertise on mDNS so iOS clients on the same LAN auto-discover

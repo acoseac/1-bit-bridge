@@ -118,6 +118,7 @@ type Server struct {
 	pairing                *pairing.Store
 	pairingRateLimiter     *pairingRateLimiter
 	certNotAfter           time.Time            // zero when not wired (test harnesses)
+	leCertNotAfterProvider func() time.Time     // public-mode autocert; nil unless WithLECertExpiry wired
 	variantStore           VariantStore         // nil unless WithUpscale(true, vs) called
 	variantDeleter         VariantDeleter       // nil unless WithVariantDeleter wired (variant-lifecycle delete)
 	inflightDropper        InflightDropper      // nil unless WithInflightDropper wired (transcode pool dedup)
@@ -463,6 +464,27 @@ func (s *Server) WithCertExpiry(notAfter time.Time) *Server {
 	return s
 }
 
+// WithLECertExpiry wires the live Let's Encrypt cert expiry provider.
+// Closure-based (not a stamped time.Time) because autocert renews the
+// cert in the background — every /v1/health call should reflect the
+// CURRENT cached cert's `NotAfter`, not whatever was on disk when the
+// bridge started. cmd/bridge passes the same `autocert.Manager.Status`
+// closure the admin tile reads from, so /v1/health and the admin tile
+// always agree about expiry.
+//
+// Provider may return zero time when no cert is cached yet (autocert
+// hasn't completed the first mint, or the manager isn't enabled).
+// HealthResponse omits the field in that case — iOS treats absence as
+// "no LE cert" (= LAN-only / loopback bridge), which is the right
+// fallback for a public-mode bridge mid-first-handshake too.
+//
+// Pass `nil` (or skip the call) to opt out — loopback installs never
+// wire it.
+func (s *Server) WithLECertExpiry(provider func() time.Time) *Server {
+	s.leCertNotAfterProvider = provider
+	return s
+}
+
 // WithTailscaleStatus wires the embedded-tsnet status provider used by
 // `reachableEndpoints` to advertise the bridge's `*.ts.net` URL +
 // tailnet IPs in tsnet mode. Builder form for consistency with the
@@ -679,17 +701,47 @@ type HealthResponse struct {
 	// supported but disabled" from "no field on the wire".
 	UpscaleEnabled *bool `json:"upscaleEnabled,omitempty"`
 
-	// CertNotAfter is the on-disk TLS certificate's `NotAfter` (UTC).
-	// Lets iOS surface a "Bridge cert expires in X days — re-pair to
-	// refresh" warning before the cert actually expires and TLS
-	// handshakes start failing at Apple's ATS layer (Apple's 397-day
-	// cap means operators must re-pair roughly annually). Additive
-	// field; pre-bridge-with-this-PR servers omit it and iOS treats
-	// absence as "no expiry info, never warn". Pointer (not bare
-	// `time.Time`) because Go's `omitempty` doesn't treat the zero
-	// time as empty — and emitting `0001-01-01T00:00:00Z` from a
-	// test harness or a parse failure would actively confuse clients.
+	// CertNotAfter is the **on-disk self-signed TLS certificate's**
+	// `NotAfter` (UTC). This is the cert that fronts LAN, mDNS,
+	// IP-literal, and Tailscale-IP SNI handshakes — i.e. the cert
+	// iOS captures + pins at pairing time. Lets iOS surface a
+	// "Bridge cert expires in X days — re-pair to refresh" warning
+	// before the cert actually expires and TLS handshakes start
+	// failing at Apple's ATS layer (Apple's 397-day cap means
+	// operators must re-pair roughly annually).
+	//
+	// **In public mode this is NOT the cert the public-domain
+	// connection sees** — `LECertNotAfter` (below) carries the
+	// Let's Encrypt cert's expiry, which is the operative cert when
+	// iOS dials `https://<autocert.domain>/`. Both fields are
+	// emitted in public mode so iOS / operator tooling can render
+	// the right warning per posture (the self-signed cert is still
+	// the pinned cert iOS used at pair-time, so its expiry still
+	// matters for the "re-pair" prompt; the LE cert expiry matters
+	// for the public-trust handshake).
+	//
+	// Additive field; pre-bridge-with-this-PR servers omit it and
+	// iOS treats absence as "no expiry info, never warn". Pointer
+	// (not bare `time.Time`) because Go's `omitempty` doesn't treat
+	// the zero time as empty — and emitting `0001-01-01T00:00:00Z`
+	// from a test harness or a parse failure would actively confuse
+	// clients.
 	CertNotAfter *time.Time `json:"certNotAfter,omitempty"`
+
+	// LECertNotAfter is the public-domain Let's Encrypt certificate's
+	// `NotAfter` (UTC), populated only in public mode (autocert
+	// enabled + cert minted on disk). Surfaces the ~90-day LE rotation
+	// expiry distinctly from `CertNotAfter` (the self-signed cert
+	// pinned by iOS at LAN pair-time, capped at 397 days). Without
+	// this, an operator glancing at `/v1/health` on a freshly-deployed
+	// public VPS would see the 397-day self-signed expiry and
+	// reasonably assume their LE cert lasts that long too — masking
+	// the real ~60-day "rotation is about to happen" signal.
+	//
+	// Loopback bridges omit this field; pre-autocert servers omit it.
+	// iOS treats absence as "no LE cert" (= LAN-only bridge). Pointer
+	// for the same `omitempty`-vs-zero-time reason as `CertNotAfter`.
+	LECertNotAfter *time.Time `json:"leCertNotAfter,omitempty"`
 
 	// Features advertises capability flags the server supports.
 	// Additive over the wire (omitempty); iOS consults this list to
@@ -830,6 +882,17 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	if !s.certNotAfter.IsZero() {
 		notAfter := s.certNotAfter
 		resp.CertNotAfter = &notAfter
+	}
+	// Public-mode autocert expiry — read live so background renewals
+	// surface on the next /v1/health probe without restart. Zero
+	// time means "no cert cached yet" (autocert hasn't completed the
+	// first mint, or provider isn't wired); leave the field off the
+	// wire in that case.
+	if s.leCertNotAfterProvider != nil {
+		if lena := s.leCertNotAfterProvider(); !lena.IsZero() {
+			leNotAfter := lena
+			resp.LECertNotAfter = &leNotAfter
+		}
 	}
 	// Capability flags — see HealthResponse.Features doc above for the
 	// stable-key convention. Order kept stable alphabetically so any

@@ -84,6 +84,7 @@ Pairing probe and liveness check. No auth token required for this endpoint (so t
   "minClientVersion": "1.0.0",
   "upscaleEnabled": false,
   "certNotAfter": "2027-05-26T10:15:04Z",
+  "leCertNotAfter": "2026-08-22T12:00:00Z",
   "roots": [
     { "name": "Music", "reachable": true },
     { "name": "Audiobooks", "reachable": false, "reason": "offline" }
@@ -101,7 +102,9 @@ The four `latestServerVersion` / `updateAvailable` / `updateReleaseNotesURL` / `
 
 `roots` (additive since v1.2, `omitempty`) is the per-library-root reachability snapshot. Each entry's `name` is the root's basename (matches the entry rendered at the top level of `/v1/list`). `reachable` is true when the bridge most recently saw the root's filesystem path respond to a `stat` within the bridge-side probe budget (~2 s). When `reachable` is false, `reason` is a stable machine-readable code: `"offline"` (timeout / unclassified I/O error), `"not_mounted"` (ENOENT on the path), or `"permission_denied"` (EACCES). New reason values may appear over time; clients SHOULD treat unknown reason codes as a generic offline indicator. Probes are server-side TTL-cached (~5 s) so an aggressive `/v1/health` poll cadence doesn't re-stat every network mount. iOS uses this to surface a "Library X offline" hint without paginating `/v1/list`.
 
-`certNotAfter` (additive since v1.2, `*time.Time` with `omitempty`) is the on-disk TLS certificate's `NotAfter` (UTC). iOS uses it to surface a "Bridge cert expires in X days — re-pair to refresh" warning before the cert actually expires and TLS handshakes start failing at Apple's ATS layer (Apple's 397-day cap means operators must re-pair roughly annually). Pre-v1.2 bridges and bridges where cert parsing failed at startup omit the field; iOS treats absence as "no expiry info, never warn".
+`certNotAfter` (additive since v1.2, `*time.Time` with `omitempty`) is the **on-disk self-signed** TLS certificate's `NotAfter` (UTC) — i.e. the cert iOS captures + pins at pairing time and uses for LAN, mDNS, IP-literal, and Tailscale-IP SNI handshakes. iOS uses it to surface a "Bridge cert expires in X days — re-pair to refresh" warning before the cert actually expires and TLS handshakes start failing at Apple's ATS layer (Apple's 397-day cap means operators must re-pair roughly annually). Pre-v1.2 bridges and bridges where cert parsing failed at startup omit the field; iOS treats absence as "no expiry info, never warn".
+
+`leCertNotAfter` (additive in the v0.1.3 followup, `*time.Time` with `omitempty`) is the **public-domain Let's Encrypt** certificate's `NotAfter` (UTC) — i.e. the cert served on the operator's autocert domain when iOS dials `https://<autocert.domain>/`. Populated only in public mode (autocert enabled + cert minted on disk); loopback bridges and pre-autocert servers omit the field. Distinct from `certNotAfter` because the two certs follow different rotation schedules (self-signed: Apple's ~397-day cap; LE: ~90 days) and the operator needs both expiries to plan correctly. iOS / operator tooling reads this field live per probe (so background autocert renewals surface without restart) and treats absence as "no LE cert" (= LAN-only bridge).
 
 `minClientVersion` advertises the iOS app version *this bridge* needs from its clients (build-time-injected via `-ldflags -X .../version.MinClientVersion=…`). iOS uses it to surface "your app may be too old for this bridge" hints. It is NOT the floor a *candidate update* would require — that's a Phase B install-side concern and is delivered through admin-console / CLI surfaces, not `/v1/health`.
 

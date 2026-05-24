@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/acoseac/1-bit-bridge/internal/config"
+)
 
 // TestBanneradminURLShapes pins the operator-facing URL the
 // public-mode startup banner prints. CodeRabbit Major review
@@ -109,5 +113,100 @@ func TestBanneradminURLShapes(t *testing.T) {
 					tc.domain, tc.adminAddress, tc.scheme, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestOperatorAdminURLShapesAcrossPostures pins the three-branch
+// helper that drives BOTH the `bridge serve` startup banner AND
+// the `bridge init` completion footer. Pre-fix init.go hardcoded
+// `http://<adminAddress>/` (e.g. `http://0.0.0.0:7789/`) which
+// is dial-broken from any browser on a fresh public-mode VPS
+// install. Post-fix both surfaces converge on the same URL for
+// the same posture via this helper.
+func TestOperatorAdminURLShapesAcrossPostures(t *testing.T) {
+	publicAutocert := &config.Config{
+		AdminAddress: "0.0.0.0:7789",
+		Deployment:   config.DeploymentConfig{Mode: string(config.DeploymentModePublic)},
+		Autocert:     config.AutocertConfig{Enabled: true, Domain: "bridge.example.com"},
+	}
+	publicAutocertOn443 := &config.Config{
+		AdminAddress: "0.0.0.0:443",
+		Deployment:   config.DeploymentConfig{Mode: string(config.DeploymentModePublic)},
+		Autocert:     config.AutocertConfig{Enabled: true, Domain: "bridge.example.com"},
+	}
+	publicProxy := &config.Config{
+		AdminAddress: "127.0.0.1:7789",
+		Deployment: config.DeploymentConfig{
+			Mode:                      string(config.DeploymentModePublic),
+			AdminTLSTerminatedByProxy: true,
+		},
+		Autocert: config.AutocertConfig{Domain: "bridge.example.com"},
+	}
+	publicProxyNonStandardBackend := &config.Config{
+		// Operator chose an alternative loopback port for the
+		// reverse-proxy backend. The PRINTED URL must still be
+		// `https://<domain>/` — the bridge can't know how the
+		// proxy maps that backend externally.
+		AdminAddress: "127.0.0.1:9999",
+		Deployment: config.DeploymentConfig{
+			Mode:                      string(config.DeploymentModePublic),
+			AdminTLSTerminatedByProxy: true,
+		},
+		Autocert: config.AutocertConfig{Domain: "bridge.example.com"},
+	}
+	publicProxyTrailingDot := &config.Config{
+		AdminAddress: "127.0.0.1:7789",
+		Deployment: config.DeploymentConfig{
+			Mode:                      string(config.DeploymentModePublic),
+			AdminTLSTerminatedByProxy: true,
+		},
+		Autocert: config.AutocertConfig{Domain: "bridge.example.com."},
+	}
+	loopback := &config.Config{
+		AdminAddress: "127.0.0.1:7789",
+	}
+	loopbackNoScheme := &config.Config{
+		AdminAddress: "127.0.0.1:7789",
+	}
+
+	cases := []struct {
+		name        string
+		cfg         *config.Config
+		adminScheme string
+		want        string
+	}{
+		{"public autocert direct-TLS non-:443", publicAutocert, "https", "https://bridge.example.com:7789/"},
+		// init.go's footer passes "http" as the loopback default;
+		// in public direct-TLS mode the helper must IGNORE that
+		// override and force https — otherwise the operator sees
+		// `http://bridge.example.com:7789/` and dials plain HTTP
+		// against an https-terminating listener.
+		{"public autocert direct-TLS: caller-supplied http is ignored", publicAutocert, "http", "https://bridge.example.com:7789/"},
+		{"public autocert direct-TLS: caller-supplied empty also forced to https", publicAutocert, "", "https://bridge.example.com:7789/"},
+		{"public autocert direct-TLS :443 omits port", publicAutocertOn443, "https", "https://bridge.example.com/"},
+		{"public reverse-proxy: scheme-aware https + bare domain", publicProxy, "http", "https://bridge.example.com/"},
+		{"public reverse-proxy: non-standard backend doesn't leak port", publicProxyNonStandardBackend, "http", "https://bridge.example.com/"},
+		{"public reverse-proxy: trailing dot stripped", publicProxyTrailingDot, "http", "https://bridge.example.com/"},
+		{"loopback: historical http://addr/ shape", loopback, "http", "http://127.0.0.1:7789/"},
+		{"loopback: empty adminScheme defaults to http", loopbackNoScheme, "", "http://127.0.0.1:7789/"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := operatorAdminURL(tc.cfg, tc.adminScheme)
+			if got != tc.want {
+				t.Errorf("operatorAdminURL = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestOperatorAdminURLNilConfigDoesNotPanic — `bridge init` calls
+// the helper with a possibly-nil *config.Config (config.Load can
+// fail post-write on a malformed YAML); helper must not panic on
+// that path. Returns a degenerate-but-non-crashing URL.
+func TestOperatorAdminURLNilConfigDoesNotPanic(t *testing.T) {
+	got := operatorAdminURL(nil, "http")
+	if got == "" {
+		t.Error("operatorAdminURL(nil, ...) returned empty string — should return at least the scheme")
 	}
 }

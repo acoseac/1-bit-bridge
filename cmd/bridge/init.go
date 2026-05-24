@@ -492,8 +492,12 @@ func finishInit(in *bufio.Reader, nonInteractive bool, stdout, stderr io.Writer,
 	// check always missed, the second process tried to bind the
 	// configured port, and the log filled with port-bind errors.
 	adminAddr := config.DefaultAdminAddress
-	if cfg, err := config.Load(cfgPath); err == nil && cfg.AdminAddress != "" {
-		adminAddr = cfg.AdminAddress
+	var loadedCfg *config.Config
+	if cfg, err := config.Load(cfgPath); err == nil {
+		loadedCfg = cfg
+		if cfg.AdminAddress != "" {
+			adminAddr = cfg.AdminAddress
+		}
 	}
 
 	// `printAdmin` is called once per mode with per-mode copy. On
@@ -501,16 +505,37 @@ func finishInit(in *bufio.Reader, nonInteractive bool, stdout, stderr io.Writer,
 	// right now — if it is, we poll briefly before opening the browser
 	// so the user doesn't hit "site can't be reached" on a fast machine
 	// that outran the cmd.exe handoff.
+	//
+	// Two URLs in play (kept distinct on purpose):
+	//   - browseURL: what the operator types into a browser. Derived
+	//     from `operatorAdminURL` so a public-mode install prints
+	//     `https://<domain>[:port]/` (autocert direct-TLS) or
+	//     `https://<domain>/` (reverse-proxy), NOT the literal bind
+	//     target like `http://0.0.0.0:7789/` which is dial-broken
+	//     from any other host. Loopback installs keep the historical
+	//     `http://<adminAddress>/` shape.
+	//   - probeURL semantics live on `adminAddr` directly: the
+	//     listen-port probe before browser-open uses the bind
+	//     target because that's where the local listener actually
+	//     binds (proxy/autocert layer wraps it on top). Auto-
+	//     opening a browser on the server's local desktop only
+	//     fires when the bridge is starting in this process tree
+	//     (Windows skip-service "open in cmd.exe" path); on a
+	//     headless VPS this branch never runs.
+	//
+	// CodeRabbit/Gemini followup post-PR-#296.
 	printAdmin := func(serverIsLive bool) {
-		url := "http://" + adminAddr + "/"
+		// Loopback installs default to http; the helper picks
+		// https for public modes regardless of the override slot.
+		browseURL := operatorAdminURL(loadedCfg, "http")
 		if serverIsLive {
 			if host, port, ok := splitHostPort(adminAddr); ok {
 				_ = packaging.WaitForListen(host, port, 2*time.Second)
 			}
 		}
-		fmt.Fprintf(stdout, "\nAdmin console: %s\n", url)
+		fmt.Fprintf(stdout, "\nAdmin console: %s\n", browseURL)
 		if serverIsLive {
-			openInBrowser(url)
+			openInBrowser(browseURL)
 		}
 		fmt.Fprintf(stdout, "\nDone. Open the admin console to add library folders and pair iOS devices.\n")
 	}

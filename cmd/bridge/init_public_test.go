@@ -97,6 +97,124 @@ func TestInitPublicHappyPath(t *testing.T) {
 	}
 }
 
+// TestInitPublicFooterUsesDomainURL pins the post-PR-#296
+// followup contract: the final "Admin console: ..." line printed
+// by `bridge init` MUST use the public-mode-aware URL (derived
+// from autocert.domain), NOT the historical
+// `http://<adminAddress>/` shape. The bridge.yaml has
+// `adminAddress: 0.0.0.0:7789` in default direct-TLS public
+// mode — printing `http://0.0.0.0:7789/` to the operator is
+// dial-broken from any browser on the VPS (0.0.0.0 isn't a
+// dialable host on darwin/linux) AND wrong even from the local
+// host (admin serves HTTPS in direct-TLS mode).
+//
+// Regression-locks the user-reported observation from the
+// 2026-05-24 deployment to bridge.ars.md: "bridge init's final
+// footer line `Admin console: http://0.0.0.0:7789/` is from
+// init.go and missed the PR #296 banner fix".
+func TestInitPublicFooterUsesDomainURL(t *testing.T) {
+	tmp := t.TempDir()
+	cfgDir := filepath.Join(tmp, "cfg")
+
+	var stdout, stderr bytes.Buffer
+	code := initCmd([]string{
+		"--yes",
+		"--no-service",
+		"--skip-doctor",
+		"--public",
+		"--domain", "bridge.example.com",
+		"--email", "ops@example.com",
+		"--dir", cfgDir,
+		"--name", "Public Library",
+	}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("initCmd: code=%d stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	// Default direct-TLS public init binds admin on
+	// 0.0.0.0:7789; the URL printed at the footer must be
+	// https://bridge.example.com:7789/ (domain-derived). The
+	// bind-address form must NOT appear in the footer.
+	want := "Admin console: https://bridge.example.com:7789/"
+	if !strings.Contains(out, want) {
+		t.Errorf("init footer missing public-mode URL %q; full stdout:\n%s", want, out)
+	}
+	if strings.Contains(out, "http://0.0.0.0:7789/") {
+		t.Errorf("init footer leaked bind-target URL http://0.0.0.0:7789/; full stdout:\n%s", out)
+	}
+}
+
+// TestInitPublicProxyFooterUsesBareDomain pins the reverse-proxy
+// branch of the same fix. In `--admin-tls-proxy` mode the admin
+// listener serves plain HTTP on loopback (127.0.0.1:7789), but
+// the FOOTER must print the canonical proxy-fronted URL
+// `https://<domain>/` — the proxy maps it externally on its own
+// port (often :443, sometimes :8443). Bridge can't know the
+// external port; the bare-domain form is the right default.
+func TestInitPublicProxyFooterUsesBareDomain(t *testing.T) {
+	tmp := t.TempDir()
+	cfgDir := filepath.Join(tmp, "cfg")
+
+	var stdout, stderr bytes.Buffer
+	code := initCmd([]string{
+		"--yes",
+		"--no-service",
+		"--skip-doctor",
+		"--public",
+		"--admin-tls-proxy",
+		"--domain", "bridge.example.com",
+		"--dir", cfgDir,
+		"--name", "Proxy Library",
+	}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("initCmd: code=%d stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	want := "Admin console: https://bridge.example.com/"
+	if !strings.Contains(out, want) {
+		t.Errorf("proxy-mode init footer missing canonical URL %q; full stdout:\n%s", want, out)
+	}
+	if strings.Contains(out, "http://127.0.0.1:7789/") {
+		t.Errorf("proxy-mode init footer leaked backend URL http://127.0.0.1:7789/; full stdout:\n%s", out)
+	}
+}
+
+// TestInitLoopbackFooterUnchanged pins the regression-safety
+// guarantee for the loopback path: the historical
+// `http://<adminAddress>/` shape MUST survive the public-mode-
+// aware refactor. Operators on existing single-host installs
+// don't expect any UX change.
+func TestInitLoopbackFooterUnchanged(t *testing.T) {
+	tmp := t.TempDir()
+	cfgDir := filepath.Join(tmp, "cfg")
+	libRoot := filepath.Join(tmp, "music")
+	if err := os.MkdirAll(libRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := initCmd([]string{
+		"--yes",
+		"--no-service",
+		"--skip-doctor",
+		"--dir", cfgDir,
+		"--library", libRoot,
+		"--name", "LAN Library",
+	}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("initCmd: code=%d stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	// Default loopback admin address — exact shape preserved.
+	wantPrefix := "Admin console: http://127.0.0.1:7789/"
+	if !strings.Contains(out, wantPrefix) {
+		t.Errorf("loopback init footer changed shape; want substring %q in:\n%s", wantPrefix, out)
+	}
+	if strings.Contains(out, "https://") {
+		t.Errorf("loopback init footer leaked https:// — should be plain http for loopback installs:\n%s", out)
+	}
+}
+
 // TestInitPublicRequiresDomain pins the gate: --public without
 // --domain refuses with a clear error.
 func TestInitPublicRequiresDomain(t *testing.T) {
