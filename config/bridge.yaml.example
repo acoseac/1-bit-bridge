@@ -24,3 +24,25 @@ dataDir: "./data"
 scanIntervalSec: 3600
 
 libraryName: "My Music Library"
+
+# deployment.mode: "loopback" (default) | "public"
+#
+# loopback (default): admin console binds 127.0.0.1, no auth — the
+#   historical home-LAN posture. Anyone on the host already owns the
+#   token store + SQLite DB, so adding auth on top would be theatre.
+#
+# public: VPS deployment posture. Admin console accepts non-loopback
+#   binds and gates every request behind a session cookie
+#   (bcrypt-hashed credentials at <dataDir>/adminauth.json). REQUIRES:
+#     - autocert.domain   (the publicly-routable hostname iOS dials)
+#     - deployment.adminTLSTerminatedByProxy: true   (PR 2 scope; PR 3
+#       will add native ACME and relax this requirement)
+#     - Run `bridge admin reset-password` (or `bridge init --public`)
+#       before `bridge serve` — refuses to start without credentials.
+#
+# deployment:
+#   mode: public
+#   adminTLSTerminatedByProxy: true
+#
+# autocert:
+#   domain: bridge.example.com

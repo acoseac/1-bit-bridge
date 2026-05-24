@@ -33,6 +33,7 @@ import (
 	"github.com/quic-go/quic-go/http3"
 
 	"github.com/acoseac/1-bit-bridge/internal/admin"
+	"github.com/acoseac/1-bit-bridge/internal/adminauth"
 	"github.com/acoseac/1-bit-bridge/internal/advertise"
 	"github.com/acoseac/1-bit-bridge/internal/api"
 	"github.com/acoseac/1-bit-bridge/internal/auth"
@@ -1076,6 +1077,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return logsCmd(ctx, args[1:], stdout, stderr)
 	case "library":
 		return libraryCmd(ctx, args[1:], stdout, stderr)
+	case "admin":
+		return adminCmd(args[1:], os.Stdin, stdout, stderr)
 	case "manifest":
 		return manifestCmd(args[1:], os.Stdin, stdout, stderr)
 	case "tsnet":
@@ -1114,6 +1117,7 @@ Subcommands:
   status   Probe the running bridge — track count, endpoints, uptime.
   logs     Tail the per-OS bridge log file. -f to follow.
   library  Manage library roots: bridge library add|remove <path>.
+  admin    Manage admin console credentials (public-mode deployments).
   pair     Generate a new bearer token for an iOS client.
   scan     Force a full library rescan.
   upscale  Generate high-rate FLAC sidecars from PCM sources (requires sox + opt-in flag).
@@ -1908,6 +1912,36 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// stays consistent across both consumers.
 	tailscaleAdminSrc := newTailscaleAdminSource(tailscaleAuto, tsnetServer, absCfgPath)
 	apiSrv.SetTailscaleStatus(tailscaleAdminSrc)
+
+	// Admin auth (public mode only). adminauth.Store holds the
+	// bcrypt-hashed credentials + in-memory session state; the
+	// rate limiter caps failed-login attempts per (clientIP,
+	// username). In loopback mode both stay nil and the admin
+	// middleware is a passthrough — preserves the historical
+	// no-auth contract.
+	//
+	// Public-mode refuse-to-start: if `deployment.mode: public`
+	// is set but no admin credentials have been minted yet (no
+	// `bridge init --public` run, no `bridge admin reset-password`),
+	// surface a clear error rather than serve unauthenticated
+	// traffic.
+	var adminAuthStore *adminauth.Store
+	var loginLimiter *adminauth.RateLimiter
+	if cfg.IsPublic() {
+		adminAuthPath := filepath.Join(cfg.DataDir, "adminauth.json")
+		adminAuthStore, err = adminauth.OpenStore(adminAuthPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "adminauth: open %s: %v\n", adminAuthPath, err)
+			return 1
+		}
+		if !adminAuthStore.IsInitialised() {
+			fmt.Fprintf(stderr, "adminauth: no admin credentials at %s — run `bridge admin reset-password` (or `bridge init --public` on a fresh install)\n", adminAuthPath)
+			return 1
+		}
+		loginLimiter = adminauth.NewRateLimiter()
+		defer loginLimiter.Stop()
+	}
+
 	adminSrv, err := admin.New(admin.Deps{
 		CfgHolder:       cfgHolder,
 		CfgPath:         absCfgPath,
@@ -1916,6 +1950,8 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		Scanner:         scanner,
 		Resolver:        apiSrv.Resolver(),
 		Fingerprint:     fingerprint,
+		AdminAuth:       adminAuthStore,
+		LoginLimiter:    loginLimiter,
 		StartedAt:       time.Now().UTC(),
 		ScanCtx:         scanCtx,
 		Restart:         cancel,

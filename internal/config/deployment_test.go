@@ -80,11 +80,62 @@ func TestValidatePublicModeAllowsNonLoopbackAdmin(t *testing.T) {
 			ListenAddress:   ":7788",
 			AdminAddress:    addr,
 			ScanIntervalSec: 3600,
-			Deployment:      DeploymentConfig{Mode: "public"},
+			Deployment:      DeploymentConfig{Mode: "public", AdminTLSTerminatedByProxy: true},
+			Autocert:        AutocertConfig{Domain: "bridge.example.com"},
 		}
 		if err := cfg.Validate(); err != nil {
 			t.Errorf("public-mode Validate(%q): unexpected error %v", addr, err)
 		}
+	}
+}
+
+// TestValidatePublicModeRejectsMissingAutocertDomain pins the
+// pairing-side prerequisite: iOS dials a specific hostname, and
+// without a configured Autocert.Domain the Origin allowlist + the
+// upcoming ACME wiring have no anchor to validate against.
+func TestValidatePublicModeRejectsMissingAutocertDomain(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{
+		LibraryRoots:    []string{dir},
+		ListenAddress:   ":7788",
+		AdminAddress:    "0.0.0.0:7789",
+		ScanIntervalSec: 3600,
+		Deployment:      DeploymentConfig{Mode: "public", AdminTLSTerminatedByProxy: true},
+		// Autocert.Domain intentionally unset.
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "autocert.domain") {
+		t.Errorf("error %q should mention autocert.domain", err.Error())
+	}
+}
+
+// TestValidatePublicModeRejectsWithoutProxyFlag pins the PR 2
+// scope: until PR 3 adds native ACME + tls.NewListener wrapping
+// for the admin listener, public mode requires an external
+// reverse proxy to terminate TLS. The bridge's session cookies
+// are Secure-flagged in public mode; serving them over plain
+// HTTP would silently break login (browsers refuse Secure
+// cookies over HTTP).
+func TestValidatePublicModeRejectsWithoutProxyFlag(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{
+		LibraryRoots:    []string{dir},
+		ListenAddress:   ":7788",
+		AdminAddress:    "0.0.0.0:7789",
+		ScanIntervalSec: 3600,
+		Deployment:      DeploymentConfig{Mode: "public"},
+		Autocert:        AutocertConfig{Domain: "bridge.example.com"},
+		// AdminTLSTerminatedByProxy intentionally unset.
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "adminTLSTerminatedByProxy") {
+		t.Errorf("error %q should mention adminTLSTerminatedByProxy", err.Error())
 	}
 }
 
@@ -139,7 +190,11 @@ func TestValidatePublicModeAllowsEmptyLibraryRoots(t *testing.T) {
 		ListenAddress:   ":7788",
 		AdminAddress:    "0.0.0.0:7789",
 		ScanIntervalSec: 3600,
-		Deployment:      DeploymentConfig{Mode: "public"},
+		Deployment: DeploymentConfig{
+			Mode:                      "public",
+			AdminTLSTerminatedByProxy: true,
+		},
+		Autocert: AutocertConfig{Domain: "bridge.example.com"},
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Errorf("public-mode empty libraryRoots: unexpected error %v", err)
@@ -205,7 +260,8 @@ func TestLoadPublicModeRejectsEmptyAdminAddress(t *testing.T) {
 	configPath := filepath.Join(dir, "bridge.yaml")
 	yaml := "libraryRoots:\n  - " + libRoot + "\n" +
 		"listenAddress: \"0.0.0.0:7788\"\n" +
-		"deployment:\n  mode: public\n"
+		"deployment:\n  mode: public\n  adminTLSTerminatedByProxy: true\n" +
+		"autocert:\n  domain: bridge.example.com\n"
 	if err := os.WriteFile(configPath, []byte(yaml), 0o600); err != nil {
 		t.Fatal(err)
 	}
