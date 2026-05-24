@@ -221,6 +221,171 @@ func TestHealthCertNotAfterEmittedWhenSet(t *testing.T) {
 	}
 }
 
+// TestHealthLECertNotAfterOmittedWithoutProvider pins the
+// post-PR-#296 followup contract: a Server constructed without
+// WithLECertExpiry (loopback bridges, pre-autocert deploys, test
+// harnesses) must NOT emit `leCertNotAfter` on the wire — iOS
+// treats absence as "no LE cert" (LAN-only bridge).
+func TestHealthLECertNotAfterOmittedWithoutProvider(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := &config.Config{
+		LibraryRoots:  []string{tmp},
+		ListenAddress: ":0",
+		LibraryName:   "X",
+	}
+	store, err := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hs := httptest.NewServer(New(cfg, store, nil, "fp").Handler())
+	defer hs.Close()
+
+	resp, err := http.Get(hs.URL + "/v1/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "leCertNotAfter") {
+		t.Errorf("leCertNotAfter should be omitted when no provider, got: %s", body)
+	}
+}
+
+// TestHealthLECertNotAfterOmittedWhenProviderReturnsZero — autocert
+// hasn't completed first mint yet (or manager is disabled). The
+// provider returns the zero time and the field must stay off the
+// wire. iOS treats absence the same as a loopback bridge — correct
+// fallback for a public-mode bridge mid-first-handshake too.
+func TestHealthLECertNotAfterOmittedWhenProviderReturnsZero(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := &config.Config{
+		LibraryRoots:  []string{tmp},
+		ListenAddress: ":0",
+		LibraryName:   "X",
+	}
+	store, err := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := New(cfg, store, nil, "fp").WithLECertExpiry(func() time.Time { return time.Time{} })
+	hs := httptest.NewServer(srv.Handler())
+	defer hs.Close()
+
+	resp, err := http.Get(hs.URL + "/v1/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "leCertNotAfter") {
+		t.Errorf("leCertNotAfter should be omitted when provider returns zero, got: %s", body)
+	}
+}
+
+// TestHealthLECertNotAfterEmittedWhenSet: WithLECertExpiry plumbs
+// the autocert manager's NotAfter through to /v1/health so iOS /
+// operator tooling can render the ~90-day LE rotation warning
+// distinctly from the self-signed cert's ~397-day cap. Distinct
+// from CertNotAfter — public-mode bridges emit BOTH (different
+// certs, different audiences).
+func TestHealthLECertNotAfterEmittedWhenSet(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := &config.Config{
+		LibraryRoots:  []string{tmp},
+		ListenAddress: ":0",
+		LibraryName:   "X",
+	}
+	store, err := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	selfSigned := time.Date(2027, 6, 25, 12, 0, 0, 0, time.UTC)
+	leExpiry := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
+	srv := New(cfg, store, nil, "fp").
+		WithCertExpiry(selfSigned).
+		WithLECertExpiry(func() time.Time { return leExpiry })
+	hs := httptest.NewServer(srv.Handler())
+	defer hs.Close()
+
+	resp, err := http.Get(hs.URL + "/v1/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var got HealthResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.LECertNotAfter == nil {
+		t.Fatalf("leCertNotAfter unset on wire (expected %v)", leExpiry)
+	}
+	if !got.LECertNotAfter.Equal(leExpiry) {
+		t.Errorf("leCertNotAfter = %v, want %v", *got.LECertNotAfter, leExpiry)
+	}
+	// CertNotAfter must STILL be emitted alongside — both surface
+	// on a public-mode bridge so the operator sees both the iOS-pin
+	// expiry and the public-trust expiry.
+	if got.CertNotAfter == nil {
+		t.Fatalf("certNotAfter dropped from wire when leCertNotAfter present — they're independent fields")
+	}
+	if !got.CertNotAfter.Equal(selfSigned) {
+		t.Errorf("certNotAfter = %v, want %v", *got.CertNotAfter, selfSigned)
+	}
+}
+
+// TestHealthLECertNotAfterIsRead Live — autocert renews in the
+// background, so the provider must be called per-request (not
+// stamped at WithLECertExpiry time). Drive a mutable counter
+// through the closure; assert the second /v1/health probe sees
+// the second value.
+func TestHealthLECertNotAfterIsReadLive(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := &config.Config{
+		LibraryRoots:  []string{tmp},
+		ListenAddress: ":0",
+		LibraryName:   "X",
+	}
+	store, err := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
+	second := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC) // simulated renewal
+	current := first
+	srv := New(cfg, store, nil, "fp").WithLECertExpiry(func() time.Time { return current })
+	hs := httptest.NewServer(srv.Handler())
+	defer hs.Close()
+
+	fetch := func() *time.Time {
+		resp, err := http.Get(hs.URL + "/v1/health")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var got HealthResponse
+		if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		return got.LECertNotAfter
+	}
+
+	got1 := fetch()
+	if got1 == nil || !got1.Equal(first) {
+		t.Fatalf("first probe leCertNotAfter = %v, want %v", got1, first)
+	}
+	current = second // simulate autocert renewal between probes
+	got2 := fetch()
+	if got2 == nil || !got2.Equal(second) {
+		t.Fatalf("second probe leCertNotAfter = %v, want %v (live-read regression)", got2, second)
+	}
+}
+
 // fakeUpdater stands in for internal/updater.Updater in tests so we can
 // drive UpdateInfo into /v1/health without spinning up a real poller.
 type fakeUpdater struct{ info UpdateInfo }

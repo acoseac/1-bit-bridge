@@ -3,6 +3,8 @@ package main
 import (
 	"net"
 	"strings"
+
+	"github.com/acoseac/1-bit-bridge/internal/config"
 )
 
 // banneradminURL composes the operator-facing admin console URL
@@ -47,4 +49,96 @@ func banneradminURL(domain, adminAddress, scheme string) string {
 		return scheme + "://" + domain + "/"
 	}
 	return scheme + "://" + domain + ":" + port + "/"
+}
+
+// operatorAdminURL is the single source of truth for the
+// "where do I point my browser?" string surfaced to operators
+// after `bridge init` and at the top of `bridge serve` output.
+//
+// Three-branch dispatch keeps `bridge init`'s footer in lockstep
+// with `bridge serve`'s banner — pre-fix `init.go` hardcoded
+// `http://<adminAddress>/` (e.g. `http://0.0.0.0:7789/`) which
+// is dial-broken from any browser on a fresh VPS install and
+// gave the operator the wrong impression of where admin lives.
+// Post-fix both surfaces converge on the same URL for the same
+// posture. CodeRabbit/Gemini followup post-PR-#296.
+//
+//   - loopback (no public mode): plain http on the configured
+//     bind address — same as the historical pre-public banner.
+//   - public + reverse-proxy: https://<domain>/ — the proxy
+//     fronts admin at the canonical URL on the operator's
+//     domain. The bridge can't know the proxy's external port
+//     mapping, so we surface the conventional 443 form and trust
+//     the operator to know if their proxy uses a non-default
+//     port.
+//   - public + autocert-direct-TLS: https://<domain>[:port]/ —
+//     port suffix omitted for :443 (the https default) so a
+//     ":443" bind reads cleanly.
+//
+// adminScheme parameter is the **loopback-only** override slot —
+// the public-mode branches force https unconditionally (autocert
+// direct-TLS terminates TLS in-process; reverse-proxy fronts TLS
+// externally — both are https-on-the-wire from the operator's
+// browser). For loopback installs pass "http" (or "" to default
+// to http); the historical-shape `http://<adminAddress>/` is what
+// existing operators expect. Falls back to "http" on empty for
+// loopback callers who don't carry a scheme context (e.g.
+// init.go's footer, where TLS state isn't yet wired).
+//
+// Defensive-fallback rules (CodeRabbit Minor + Gemini Medium
+// post-#297 review): every return path produces a complete,
+// browseable URL — never a bare `<scheme>://` or `https:///`
+// that would land in `printAdmin`'s "Admin console: ..." line
+// and confuse the operator. Each branch substitutes
+// `config.DefaultAdminAddress` when its preferred host source
+// (cfg.Autocert.Domain, cfg.AdminAddress) is missing or empty.
+// The substitutions cover paths that shouldn't trigger in
+// production (validators reject empty AdminAddress and
+// public+missing-domain at load time) but ARE reachable: a raced
+// `config.Load` + `Save` ordering in init.go can hand a nil cfg,
+// and a future caller could plausibly construct a cfg with the
+// missing fields. Bare-scheme URLs in the operator's terminal
+// would be a real UX paper-cut; the defensive fallback is cheap.
+func operatorAdminURL(cfg *config.Config, adminScheme string) string {
+	if cfg == nil {
+		if adminScheme == "" {
+			adminScheme = "https"
+		}
+		return adminScheme + "://" + config.DefaultAdminAddress + "/"
+	}
+	if cfg.IsPublic() {
+		domain := strings.TrimSuffix(cfg.Autocert.Domain, ".")
+		if cfg.Deployment.AdminTLSTerminatedByProxy {
+			// Reverse-proxy mode: bare-domain canonical URL.
+			// Empty domain (defensive — validators reject this
+			// at load time) falls back to the bind address so
+			// the operator at least sees a working URL rather
+			// than `https:///`.
+			if domain == "" {
+				return "https://" + cfgOrDefaultAdminAddress(cfg) + "/"
+			}
+			return "https://" + domain + "/"
+		}
+		// Public direct-TLS: scheme is always https, regardless of
+		// the caller's adminScheme hint. The hint is a loopback
+		// concern only — callers from init.go pass "http" as a
+		// historical default, which would otherwise downgrade the
+		// public-mode URL silently.
+		return banneradminURL(domain, cfgOrDefaultAdminAddress(cfg), "https")
+	}
+	if adminScheme == "" {
+		adminScheme = "http"
+	}
+	return adminScheme + "://" + cfgOrDefaultAdminAddress(cfg) + "/"
+}
+
+// cfgOrDefaultAdminAddress returns cfg.AdminAddress when set,
+// falling back to config.DefaultAdminAddress otherwise. Centralises
+// the "AdminAddress empty → use the known-good default" recovery
+// so every operatorAdminURL branch composes a complete URL.
+func cfgOrDefaultAdminAddress(cfg *config.Config) string {
+	if cfg != nil && cfg.AdminAddress != "" {
+		return cfg.AdminAddress
+	}
+	return config.DefaultAdminAddress
 }
