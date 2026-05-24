@@ -1907,14 +1907,18 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	}
 	// Merge autocert's required ALPN proto-id ("acme-tls/1") into
 	// the public API listener's NextProtos so LE's TLS-ALPN-01
-	// challenge handshake finds the right path. NextProtos for
-	// the regular traffic ("h2", "http/1.1") is set by the
-	// http.Server.TLSConfig negotiation downstream — we only
-	// inject the autocert addendum here. Skip when autocert is
-	// not configured (NextProtos returns nil) so loopback
-	// installs see byte-identical handshake behaviour.
+	// challenge handshake finds the right path.
+	//
+	// **MUST include "h2" + "http/1.1" explicitly** when NextProtos
+	// is non-empty (Gemini-high security review on PR #293).
+	// `http.Server.serveTLS` auto-adds these only when
+	// `TLSConfig.NextProtos == nil`; once we set it to anything
+	// (e.g. just `acme-tls/1`), the auto-add is suppressed and
+	// modern browsers fail to negotiate HTTP/2 against the public
+	// API. Loopback installs (extra==nil) skip this branch entirely
+	// and see byte-identical handshake behaviour.
 	if extra := certManager.NextProtos(); len(extra) > 0 {
-		tlsConfig.NextProtos = append(tlsConfig.NextProtos, extra...)
+		tlsConfig.NextProtos = append([]string{"h2", "http/1.1"}, extra...)
 	}
 
 	httpSrv := &http.Server{
