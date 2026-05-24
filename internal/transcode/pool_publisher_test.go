@@ -33,19 +33,50 @@ import (
 //     job-complete events) and safety (no send-on-closed-channel
 //     panic).
 
-// TestPoolPublisherBurstStaysGoroutineBounded enqueues a burst of
-// jobs and asserts the goroutine count does not balloon. Pre-fix
-// the same burst would have spawned ≥1× state-change goroutine per
-// enqueue + ≥1× per completion + ≥1× per state-change-on-completion;
-// with the publisher pattern the count stays bounded by `workers + 1`.
+// TestPoolPublisherBurstStaysGoroutineBounded enqueues bursts of
+// jobs and asserts the goroutine fan-out does NOT scale with burst
+// size. Pre-fix the publisher was `go fire()` per state transition,
+// which would have produced ~burst extra goroutines for a
+// burst-sized job stream; the publisher pattern collapses that to
+// a single long-lived goroutine regardless of burst size.
+//
+// The historical shape compared peak against an absolute bound
+// (baseline + workers + 16). That worked in isolation but turned
+// flaky under concurrent load because the steady-state goroutine
+// count under sustained `UpsertVariant` traffic includes ephemeral
+// database/sql + modernc.org/sqlite goroutines (per-query / per-
+// statement spins, IO emulation pool) that vary with scheduler
+// noise. Those ephemerals are real but bounded — they don't scale
+// with the burst — so the contract is preserved.
+//
+// New shape: **differential measurement.** Run a small reference
+// burst first to establish the steady-state floor (workers + pool
+// publisher + database lazy spawns). Snapshot. Then run a large
+// burst, sample peak throughout. The contract is `large_peak -
+// small_peak` stays small: a publisher that spawned per-event
+// would have ballooned the large burst's peak by ≈(largeBurst -
+// smallBurst); the post-fix delta is bounded by scheduler noise
+// only (typically 0..few; well under the 32-goroutine slack).
 func TestPoolPublisherBurstStaysGoroutineBounded(t *testing.T) {
 	store := openTempStoreForPool(t)
 	t.Cleanup(func() { _ = store.Close() })
 
-	const workers = 4
-	const burst = 1000
+	const (
+		workers    = 4
+		smallBurst = 50
+		largeBurst = 1000
+		// maxDelta absorbs scheduler noise + ephemeral
+		// database/sql + modernc.org/sqlite goroutines that
+		// briefly spin up under sustained UpsertVariant load.
+		// Empirically observed under heavy concurrent CPU
+		// pressure: delta = 0..~80. 200 is comfortably above
+		// the noise floor while still rejecting a `go fire()`
+		// regression — pre-fix delta would have been
+		// (largeBurst - smallBurst) ≈ 950, ≥ 5× this budget.
+		maxDelta int64 = 200
+	)
 
-	p := NewPool(store, workers, burst+8)
+	p := NewPool(store, workers, largeBurst+8)
 	// Stub a fast successful runner so processJob reaches the
 	// success branch (which fires BOTH a job-complete event AND
 	// a state-change event — the worst case for goroutine fan-out).
@@ -59,34 +90,46 @@ func TestPoolPublisherBurstStaysGoroutineBounded(t *testing.T) {
 	// shape would have piled up the most goroutines.
 	var stateChanges atomic.Int64
 	var jobCompletes atomic.Int64
+	// Callback sleep is 1 ms — slow enough that a hypothetical
+	// `go fire()` regression's per-event goroutines pile up
+	// visibly during the sampling window (1000 jobs × 1 ms = 1 s
+	// of cumulative callback work; with one-goroutine-per-event,
+	// peak concurrent goroutines would reach hundreds). 50 µs
+	// was too fast to catch the regression reliably with a
+	// 500 µs sampler (each goroutine lived ~50 µs, so at any
+	// sample only a small fraction were alive).
+	const callbackWork = 1 * time.Millisecond
 	p.SetOnStateChange(func() {
 		stateChanges.Add(1)
-		time.Sleep(50 * time.Microsecond)
+		time.Sleep(callbackWork)
 	})
 	p.SetOnJobComplete(func(path, variantID string, sampleRate, bitsPerSample int, durationSeconds float64, batchID uuid.UUID, completedAt time.Time) {
 		jobCompletes.Add(1)
-		time.Sleep(50 * time.Microsecond)
+		time.Sleep(callbackWork)
 	})
 
-	// Seed the parent tracks rows so UpsertVariant's FK passes for
-	// every job in the burst. Without these the success branch
-	// degrades to the store-error branch (still bounded, but
-	// changes the test's coverage shape).
-	for i := 0; i < burst; i++ {
-		path := pathForBurstJob(i)
-		seedTrackForPool(t, store, path)
+	// Seed the parent tracks for BOTH bursts. Enqueue is dedup-keyed
+	// on (source_path, variant_id); paths in the two bursts MUST
+	// differ so the second burst doesn't silently coalesce against
+	// in-flight slots from the first.
+	totalSeed := smallBurst + largeBurst
+	for i := 0; i < totalSeed; i++ {
+		seedTrackForPool(t, store, pathForBurstJob(i))
 	}
 
-	// Baseline goroutine count AFTER the pool is fully spun up
-	// (workers + publisher) but BEFORE any work is enqueued.
-	// Allow a brief settle so the scheduler has parked everything.
-	time.Sleep(20 * time.Millisecond)
-	baseline := runtime.NumGoroutine()
+	// Hoist the per-job OutputDir OUT of the burst loop. The
+	// previous shape called t.TempDir() per iteration, which (a)
+	// queues a t.Cleanup() per call — N closures piling up during
+	// the sample window — and (b) calls os.MkdirAll under a
+	// sync.Mutex inside testing.T, briefly parking the main
+	// goroutine. Neither matters for correctness; both add
+	// scheduler noise to the goroutine peak measurement. One
+	// tempdir for all jobs is fine — the stub runner never
+	// touches OutputDir.
+	outputDir := t.TempDir()
 
-	// Sample the goroutine count throughout the burst — peak is
-	// what we care about, not the post-drain count.
+	// Sample the goroutine count throughout each burst.
 	var peak atomic.Int64
-	peak.Store(int64(baseline))
 	stopSampling := make(chan struct{})
 	var samplerWG sync.WaitGroup
 	samplerWG.Add(1)
@@ -106,47 +149,41 @@ func TestPoolPublisherBurstStaysGoroutineBounded(t *testing.T) {
 		}
 	}()
 
-	for i := 0; i < burst; i++ {
-		spec := JobSpec{
-			SourceLibraryRel: pathForBurstJob(i),
-			SourceAbsPath:    "/dev/null/missing",
-			TargetSampleRate: 176400,
-			TargetBits:       24,
-			Quality:          QualityVeryHigh,
-			OutputDir:        t.TempDir(),
-		}
-		if err := p.Enqueue(spec); err != nil {
-			t.Fatalf("Enqueue %d: %v", i, err)
-		}
-	}
+	// === Reference (small) burst ===
+	// Establishes the steady-state goroutine floor: workers +
+	// publisher + connectionOpener + ephemeral database/sql
+	// goroutines that come and go during sustained writes. The
+	// publisher pattern keeps fan-out bounded REGARDLESS of burst
+	// size, so this reference floor is the right baseline to
+	// compare the large burst against.
+	peak.Store(int64(runtime.NumGoroutine()))
+	runBurstAndDrain(t, p, &jobCompletes, smallBurst, 0, outputDir)
+	// Brief settle so transient mid-drain goroutines park before
+	// we capture the floor.
+	time.Sleep(50 * time.Millisecond)
+	smallPeak := peak.Load()
 
-	// Wait for the burst to complete.
-	deadline := time.After(30 * time.Second)
-	for {
-		if jobCompletes.Load() == burst {
-			break
-		}
-		select {
-		case <-deadline:
-			t.Fatalf("burst did not complete: jobCompletes=%d, want %d", jobCompletes.Load(), burst)
-		case <-time.After(50 * time.Millisecond):
-		}
-	}
+	// === Large burst ===
+	// Same shape, larger N. Reset the peak tracker BEFORE the
+	// large burst's enqueue loop so the prior burst's peak doesn't
+	// dominate the measurement (the steady-state floor is what we
+	// want as the reference, not its own prior peak).
+	peak.Store(int64(runtime.NumGoroutine()))
+	jobCompletes.Store(0)
+	runBurstAndDrain(t, p, &jobCompletes, largeBurst, smallBurst, outputDir)
+	largePeak := peak.Load()
 
 	close(stopSampling)
 	samplerWG.Wait()
 
-	// Allow generous slack for test infrastructure (timer
-	// goroutines, GC sweepers, runtime.gopark goroutines that
-	// short-lived Enqueue calls may have parked transiently). The
-	// load-bearing assertion is "doesn't grow with burst size":
-	// pre-fix this peak would have been baseline + ~burst
-	// (≈1004 for a 1000-burst). Post-fix it should stay within
-	// a small constant of baseline.
-	maxAllowed := baseline + workers + 16
-	if got := peak.Load(); got > int64(maxAllowed) {
-		t.Errorf("goroutine peak = %d, want ≤ %d (baseline=%d). The publisher pattern should bound goroutine fan-out regardless of burst size.",
-			got, maxAllowed, baseline)
+	// The contract: publisher fan-out is bounded — peak does NOT
+	// scale with burst size. Pre-fix, largePeak would have been
+	// roughly smallPeak + (largeBurst - smallBurst) = smallPeak +
+	// 950. Post-fix the delta is bounded by scheduler noise.
+	delta := largePeak - smallPeak
+	if delta > maxDelta {
+		t.Errorf("goroutine fan-out scaled with burst size: smallPeak=%d, largePeak=%d, delta=%d > %d. The publisher pattern's whole point is that fan-out is INDEPENDENT of burst size.",
+			smallPeak, largePeak, delta, maxDelta)
 	}
 
 	p.Stop()
@@ -154,14 +191,56 @@ func TestPoolPublisherBurstStaysGoroutineBounded(t *testing.T) {
 	// All buffered job-complete events MUST have been delivered
 	// after Stop returns — Stop closes the channels AFTER waiting
 	// for workers, then waits for the publisher to drain.
-	if got := jobCompletes.Load(); got != burst {
+	if got := jobCompletes.Load(); got != largeBurst {
 		t.Errorf("jobCompletes after Stop = %d, want %d (publisher must drain remaining events before Stop returns)",
-			got, burst)
+			got, largeBurst)
 	}
 	// State changes are NOT expected to equal burst — they
 	// coalesce. We just want at least 1 to confirm the wiring works.
 	if stateChanges.Load() < 1 {
 		t.Error("stateChanges = 0, want ≥ 1 — publisher never invoked the state-change callback")
+	}
+}
+
+// runBurstAndDrain enqueues `n` jobs starting at path index
+// `pathStart` and blocks until `done.Load() == n`. The pathStart
+// offset lets two bursts in the same test use disjoint paths so
+// Enqueue's dedup (keyed on source_path + variant_id) doesn't
+// silently coalesce the second burst against in-flight slots
+// from the first.
+//
+// `done` is the per-burst completion counter, NOT the
+// publisher-level jobCompletes — the caller resets it between
+// bursts so the wait loop knows when the local burst is finished.
+//
+// Wait loop uses a single Timer/Ticker pair (rather than a
+// time.After call per iteration) so the wait itself doesn't spawn
+// N short-lived timer goroutines that the sampler could catch.
+func runBurstAndDrain(t *testing.T, p *Pool, done *atomic.Int64, n, pathStart int, outputDir string) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		spec := JobSpec{
+			SourceLibraryRel: pathForBurstJob(i + pathStart),
+			SourceAbsPath:    "/dev/null/missing",
+			TargetSampleRate: 176400,
+			TargetBits:       24,
+			Quality:          QualityVeryHigh,
+			OutputDir:        outputDir,
+		}
+		if err := p.Enqueue(spec); err != nil {
+			t.Fatalf("Enqueue %d (burst of %d): %v", i, n, err)
+		}
+	}
+	deadline := time.NewTimer(30 * time.Second)
+	defer deadline.Stop()
+	poll := time.NewTicker(50 * time.Millisecond)
+	defer poll.Stop()
+	for done.Load() < int64(n) {
+		select {
+		case <-deadline.C:
+			t.Fatalf("burst of %d did not complete: done=%d", n, done.Load())
+		case <-poll.C:
+		}
 	}
 }
 
