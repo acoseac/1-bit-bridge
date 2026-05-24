@@ -349,11 +349,38 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	// enqueuing audio files for the workers. Folder upserts stay inline
 	// — single-goroutine writes, no contention with the batched
 	// track-upsert path (which holds s.mu).
+	//
+	// FUSE drop mode (b) — clean-empty mount: immediately after each
+	// per-root walk, if zero entries were observed AND the DB carries
+	// history for this root AND no `.bridge-allow-empty` sentinel
+	// file is present, sentinel the whole root so the deletion pass
+	// spares its rows. Without this guard a cleanly-unmounted FUSE
+	// mount (host directory still exists, contents vanished) is
+	// indistinguishable from "operator legitimately wiped the root"
+	// — `os.Stat(root)` and `WalkDir(root)` both succeed silently,
+	// `errorSubtrees` stays empty, and the deletion pass nukes every
+	// row under the dropped root. Per-root interrogation (not a
+	// global post-loop check) isolates the protection to the failing
+	// mount.
 	var walkErr error
 	for _, root := range roots {
-		if err := s.walkRoot(ctx, root, multiRoot, seen, seenFolders, errorSubtrees, paths); err != nil {
+		observed, err := s.walkRoot(ctx, root, multiRoot, seen, seenFolders, errorSubtrees, paths)
+		if err != nil {
 			walkErr = err
 			break
+		}
+		if observed == 0 && !hasAllowEmptySentinel(root) {
+			n, countErr := s.store.CountTracksUnderRoot(ctx, root, multiRoot)
+			if countErr != nil {
+				scanLogger.Warn("count tracks under root", "root", root, "err", countErr)
+				continue
+			}
+			if n > 0 {
+				scanLogger.Error("suspected clean-empty mount failure",
+					"root", root, "rows_in_db", n,
+					"hint", "place .bridge-allow-empty at the root to confirm intent")
+				errorSubtrees[relPath(root, root, multiRoot)] = struct{}{}
+			}
 		}
 	}
 
@@ -781,16 +808,36 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 			// pass below is what reaps the now-stale rows. Recording
 			// errorSubtrees in this case would spare exactly the rows
 			// we came to clean (CodeRabbit Major review on PR #160's
-			// first commit). Return nil without marking — the empty
-			// `seen` / `seenFolders` for the missing scope, combined
-			// with the before-snapshot, drives the deletion correctly.
+			// first commit).
 			//
-			// Genuine transient failures (permission flap, EACCES, NAS
-			// drop) still record the subtree so the spare kicks in.
+			// FUSE drop mode (c) — host-dir-vs-mount-state distinction:
+			// a cleanly-unmounted FUSE binds the host directory back to
+			// an empty inode, so the owning root *succeeds* `os.Stat`
+			// while nested paths fail with `fs.ErrNotExist`
+			// indistinguishable from "operator rm -rf'd this folder."
+			// Naive trust-on-fs.ErrNotExist would let the bounded
+			// deletion pass nuke every row under the dropped mount.
+			// Audit the owning root before proceeding:
+			//   (i) os.Stat root — if missing/unreadable, hard error.
+			//   (ii) os.ReadDir root — any error is a hard stop (we
+			//        can't audit the root, so the state is untrusted).
+			//   (iii) only if ReadDir succeeds AND zero entries AND no
+			//        .bridge-allow-empty sentinel AND DB has tracks →
+			//        hard error.
+			// Otherwise (root alive AND non-empty, or sentinel present)
+			// fs.ErrNotExist on the subtree is a legitimate operator
+			// delete and the bounded deletion pass runs as before.
 			if errors.Is(err, fs.ErrNotExist) {
+				if auditErr := auditOwningRootOnSubtreeMiss(ctx, s.store, owningRoot, multiRoot); auditErr != nil {
+					scanLogger.Error("subtree absent but owning root audit failed",
+						"path", abs, "root", owningRoot, "err", auditErr)
+					return auditErr
+				}
 				scanLogger.Info("subtree removed", "path", abs)
 				return nil
 			}
+			// Genuine transient failures (permission flap, EACCES, NAS
+			// drop) still record the subtree so the spare kicks in.
 			scanLogger.Warn("subtree walk", "path", abs, "err", err)
 			key := abs
 			if d != nil && !d.IsDir() {
@@ -942,8 +989,33 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 // WalkDir err callback fires — the deletion pass uses it to spare
 // tracks AND folders under transiently-unreachable subtrees from
 // being wiped from the manifest.
-func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, seen, seenFolders, errorSubtrees map[string]struct{}, paths chan<- pathInfo) error {
-	return filepath.WalkDir(root, func(abs string, d fs.DirEntry, err error) error {
+//
+// Returns the count of entries observed beneath the root (file or
+// dir DirEntries excluding the root itself) and any walk error. The
+// count drives the caller's "clean-empty mount" detection — zero
+// entries beneath a root that the DB carries history for is a strong
+// FUSE-drop signal, since `os.Stat(root)` and `WalkDir(root)` both
+// succeed silently in that scenario.
+//
+// FUSE drop mode (a) — unreadable / nonexistent root: explicit
+// upfront `os.Stat(root)` so the operator gets a clear .error log
+// keyed on the root rather than a generic mid-walk warning. Sentinel
+// the whole root into errorSubtrees and return (0, nil) so the
+// outer Scan loop continues to the next root rather than fatal-
+// aborting. In a multi-root deployment (local SSD + remote FUSE
+// archive), a cloud outage on the archive must NOT block cleanup
+// of legitimately-deleted files on the SSD.
+func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, seen, seenFolders, errorSubtrees map[string]struct{}, paths chan<- pathInfo) (int, error) {
+	if _, err := os.Stat(root); err != nil {
+		scanLogger.Error("root unreachable", "root", root, "err", err)
+		errorSubtrees[relPath(root, root, multiRoot)] = struct{}{}
+		return 0, nil
+	}
+	var observed int
+	walkErr := filepath.WalkDir(root, func(abs string, d fs.DirEntry, err error) error {
+		if abs != root {
+			observed++
+		}
 		if err != nil {
 			// Permission error on one dir shouldn't kill the whole scan.
 			scanLogger.Warn("walk", "path", abs, "err", err)
@@ -1032,6 +1104,76 @@ func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, see
 		}
 		return nil
 	})
+	return observed, walkErr
+}
+
+// allowEmptySentinelFilename is the marker file an operator places
+// at a library root to confirm "yes, this root is legitimately empty
+// now — proceed with the deletion pass." Without the sentinel, the
+// scanner's FUSE drop-mode (b) guard treats an empty root with DB
+// history as a suspected mount failure and spares the rows.
+const allowEmptySentinelFilename = ".bridge-allow-empty"
+
+// hasAllowEmptySentinel reports whether the operator has placed the
+// `.bridge-allow-empty` marker file at the given library root.
+// Returning true bypasses the clean-empty-mount guard for this root,
+// so a deliberate "I really did wipe this library" operation can
+// complete without manual sentinel cleanup.
+//
+// Any os.Stat error other than nil (including ErrNotExist and
+// permission errors) returns false — only an explicit, successfully-
+// stat'd sentinel file authorises the deletion pass to proceed.
+func hasAllowEmptySentinel(root string) bool {
+	_, err := os.Stat(filepath.Join(root, allowEmptySentinelFilename))
+	return err == nil
+}
+
+// auditOwningRootOnSubtreeMiss validates that a subtree walker's
+// `fs.ErrNotExist` reflects a legitimate operator-deleted directory
+// rather than a FUSE mount that has dropped underneath the bridge.
+// Returns nil when the subtree absence is trustworthy and the
+// caller's deletion pass should proceed; returns a non-nil error
+// when the state is untrusted and the deletion pass MUST be aborted.
+//
+// Decision matrix:
+//   - root missing/unreadable: untrusted — return wrapped os.Stat err.
+//   - os.ReadDir on root fails: untrusted — return wrapped err. Any
+//     ReadDir failure (permission drop, transient FUSE disruption)
+//     means we can't audit the root state, so the safe default is
+//     to refuse the deletion.
+//   - root exists AND has entries: trustworthy — fs.ErrNotExist on
+//     the subtree is a legitimate operator delete, return nil.
+//   - root exists AND is empty AND has .bridge-allow-empty sentinel:
+//     trustworthy — operator deliberately wiped the library.
+//   - root exists AND is empty AND no sentinel AND
+//     CountTracksUnderRoot > 0: untrusted — DB carries history but
+//     the root has nothing, this looks like a mount drop. Return a
+//     suspected-mount-drop error to abort the deletion pass.
+//   - root exists AND is empty AND no sentinel AND
+//     CountTracksUnderRoot == 0: trustworthy — fresh install or
+//     post-wipe state with no rows to protect.
+func auditOwningRootOnSubtreeMiss(ctx context.Context, store *Store, owningRoot string, multiRoot bool) error {
+	if _, err := os.Stat(owningRoot); err != nil {
+		return fmt.Errorf("audit owning root: stat: %w", err)
+	}
+	entries, err := os.ReadDir(owningRoot)
+	if err != nil {
+		return fmt.Errorf("audit owning root: read dir: %w", err)
+	}
+	if len(entries) > 0 {
+		return nil
+	}
+	if hasAllowEmptySentinel(owningRoot) {
+		return nil
+	}
+	n, err := store.CountTracksUnderRoot(ctx, owningRoot, multiRoot)
+	if err != nil {
+		return fmt.Errorf("audit owning root: count tracks: %w", err)
+	}
+	if n > 0 {
+		return fmt.Errorf("audit owning root %q: empty on disk but %d tracks in DB (suspected mount drop; place .bridge-allow-empty to confirm intent)", owningRoot, n)
+	}
+	return nil
 }
 
 // isUnderErroredSubtree reports whether `path` is at or under any of

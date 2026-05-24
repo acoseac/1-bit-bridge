@@ -173,15 +173,32 @@ func TestScanSubtreeRemovesStaleFolderOnRename(t *testing.T) {
 // callback receives `fs.ErrNotExist` for the subtree root. The
 // errored-subtree spare guard MUST NOT kick in here — that would
 // preserve exactly the rows we came to reap. ErrNotExist on the
-// root is the delete SIGNAL, not a transient failure.
+// subtree (with the owning root still alive AND non-empty) is the
+// delete SIGNAL, not a transient failure.
+//
+// The library must contain at least one sibling at the root level so
+// the new FUSE drop mode (c) audit can verify "owning root is alive
+// AND non-empty" before trusting the subtree's absence as a
+// legitimate operator delete. A library with exactly one folder at
+// the root level that gets removed is now ambiguous (clean-unmount
+// loophole) and the audit refuses to reap — see
+// TestScanSubtreeHardErrorOnCleanUnmountLoophole.
 func TestScanSubtreeMissingDirReapsRows(t *testing.T) {
 	root := t.TempDir()
 	doomed := filepath.Join(root, "doomed")
-	if err := os.MkdirAll(doomed, 0o755); err != nil {
-		t.Fatal(err)
+	// Sibling folder at the root level so the audit verifies the
+	// owning root is non-empty after `doomed/` is removed.
+	sibling := filepath.Join(root, "sibling")
+	for _, d := range []string{doomed, sibling} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	track := filepath.Join(doomed, "song.flac")
 	if err := os.WriteFile(track, audioBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sibling, "other.flac"), audioBytes, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
