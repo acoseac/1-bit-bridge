@@ -375,3 +375,52 @@ func applyCustomEndpoints(cfg *config.Config, eps []string) *config.Config {
 	clone.CustomEndpoints = eps
 	return &clone
 }
+
+// TestReachableEndpoints_PublicModeOnlyCustomAndAutocert pins
+// the PR 5 short-circuit: public-mode deployments suppress all
+// auto-enumeration (LAN / mDNS / Tailscale) and advertise only
+// the operator-declared customEndpoints + the autocert public
+// domain. Without this gate, a VPS would leak its private RFC
+// 1918 LAN address (docker0 bridge, internal hostnames) on
+// /v1/health to every paired iOS client.
+func TestReachableEndpoints_PublicModeOnlyCustomAndAutocert(t *testing.T) {
+	cfg := &config.Config{
+		ListenAddress: ":443",
+		LibraryName:   "Public",
+		Deployment: config.DeploymentConfig{
+			Mode:                      "public",
+			AdminTLSTerminatedByProxy: true,
+		},
+		Autocert:        config.AutocertConfig{Domain: "bridge.example.com"},
+		CustomEndpoints: []string{"https://alt.example.com:443"},
+	}
+	s := &Server{cfgHolder: config.NewRuntimeConfig(cfg)}
+	// Wire a Tailscale provider with a populated MagicDNS state
+	// — public mode must NOT enumerate it.
+	s.tailscaleStatus = &fakeTailscaleProvider{
+		snap: admin.TailscaleStatus{
+			BackendState: "Running",
+			CertPresent:  true,
+			MagicDNSName: "bridge.example.ts.net",
+			TailscaleIPs: []string{"100.64.0.5"},
+		},
+	}
+	eps := s.reachableEndpoints()
+	if len(eps) == 0 {
+		t.Fatal("public-mode reachableEndpoints returned 0 URLs (want customEndpoints + autocert domain)")
+	}
+	for _, u := range eps {
+		if strings.Contains(u, ".ts.net") || strings.Contains(u, "100.64.") {
+			t.Errorf("public-mode leaked Tailscale URL %q", u)
+		}
+		if strings.Contains(u, ".local:") {
+			t.Errorf("public-mode leaked .local URL %q", u)
+		}
+	}
+	if !contains(eps, "https://bridge.example.com:443") {
+		t.Errorf("public-mode missing autocert domain URL; got %v", eps)
+	}
+	if !contains(eps, "https://alt.example.com:443") {
+		t.Errorf("public-mode missing customEndpoint URL; got %v", eps)
+	}
+}

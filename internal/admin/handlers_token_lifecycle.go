@@ -74,7 +74,7 @@ func (s *Server) apiTokensRotate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	alternates := ensurePrimaryFirst(req.URL, pairAlternates(req.URL, cfg.ListenAddress))
+	alternates := ensurePrimaryFirst(req.URL, pairAlternates(req.URL, cfg))
 	pairURL := buildPairURL(req.URL, rawToken, s.deps.Fingerprint, cfg.LibraryName, alternates)
 	qrData, err := qrDataURL(pairURL)
 	if err != nil {

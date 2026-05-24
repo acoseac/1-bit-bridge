@@ -4,6 +4,8 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/acoseac/1-bit-bridge/internal/config"
 )
 
 // TestBuildPairURLOmitsUrlsWhenOnlyPrimary keeps the QR payload small
@@ -65,7 +67,7 @@ func TestPairAlternatesPrependsPrimary(t *testing.T) {
 	// our pairAlternates helper is what ensures it lands first. Test
 	// with a non-default listen address just to exercise the port
 	// parse.
-	got := pairAlternates("https://user-chose-this:9999", "127.0.0.1:7788")
+	got := pairAlternates("https://user-chose-this:9999", &config.Config{ListenAddress: "127.0.0.1:7788"})
 	if len(got) == 0 {
 		t.Fatal("expected non-empty alternates")
 	}
@@ -82,6 +84,39 @@ func TestPairAlternatesPrependsPrimary(t *testing.T) {
 	}
 	if count != 1 {
 		t.Errorf("primary appeared %d times; want exactly once", count)
+	}
+}
+
+// TestPairAlternatesPublicModeFiltersLANAndTailscale pins the
+// PR 5 contract: in public mode the QR contains only the
+// operator-declared customEndpoints + the autocert public
+// domain — NO LAN addresses, NO mDNS, NO Tailscale. Avoids
+// baking VPS-internal hostnames into the iOS pair payload.
+func TestPairAlternatesPublicModeFiltersLANAndTailscale(t *testing.T) {
+	cfg := &config.Config{
+		ListenAddress: ":443",
+		Deployment: config.DeploymentConfig{
+			Mode:                      "public",
+			AdminTLSTerminatedByProxy: true,
+		},
+		Autocert:        config.AutocertConfig{Domain: "bridge.example.com"},
+		CustomEndpoints: []string{"https://alt.example.com:443"},
+	}
+	got := pairAlternates("https://bridge.example.com:443", cfg)
+	if len(got) == 0 {
+		t.Fatal("expected non-empty alternates")
+	}
+	// Every URL must come from customEndpoints OR be the autocert
+	// domain. NO LAN / .local / Tailscale URLs.
+	for _, u := range got {
+		if !strings.Contains(u, "bridge.example.com") && !strings.Contains(u, "alt.example.com") {
+			t.Errorf("public-mode alternate %q is neither a customEndpoint nor the autocert domain — leak", u)
+		}
+		// Defensive: refuse hostnames that look like LAN/.local
+		// even if they happened to contain the domain (paranoid).
+		if strings.Contains(u, ".local:") || strings.Contains(u, "192.168.") || strings.Contains(u, "10.") {
+			t.Errorf("public-mode alternate %q includes a LAN/mDNS hint", u)
+		}
 	}
 }
 

@@ -2227,9 +2227,25 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// same shape.
 	fmt.Fprintf(stdout, "1-bit-bridge %s (protocol v%d) — listening on https://%s\n",
 		version.ServerVersion, version.ProtocolVersion, lis.Addr())
-	fmt.Fprintf(stdout, "Library: %q (roots: %v)\n", cfg.LibraryName, cfg.LibraryRoots)
-	fmt.Fprintf(stdout, "TLS fingerprint (pin this on the iOS side):\n  %s\n", fingerprint)
-	fmt.Fprintf(stdout, "Admin console: %s://%s/ — add library folders, pair devices, view stats\n", adminScheme, cfg.AdminAddress)
+	// Public-mode banner (PR 5): shorter shape — operator's
+	// iOS clients dial the public domain (not the bound LAN
+	// address), iOS doesn't pin the LE cert (so the fingerprint
+	// box would mislead more than help), and the mDNS line
+	// doesn't apply on a VPS. Loopback installs see the
+	// historical banner unchanged.
+	if cfg.IsPublic() {
+		fmt.Fprintf(stdout, "Public mode — domain: %s\n", cfg.Autocert.Domain)
+		if len(cfg.LibraryRoots) == 0 {
+			fmt.Fprintf(stdout, "Library: %q (no roots — add one via the admin console or `bridge library add` once your storage is mounted)\n", cfg.LibraryName)
+		} else {
+			fmt.Fprintf(stdout, "Library: %q (roots: %v)\n", cfg.LibraryName, cfg.LibraryRoots)
+		}
+		fmt.Fprintf(stdout, "Admin console: %s://%s/ — log in with the credentials from `bridge admin reset-password`\n", adminScheme, cfg.AdminAddress)
+	} else {
+		fmt.Fprintf(stdout, "Library: %q (roots: %v)\n", cfg.LibraryName, cfg.LibraryRoots)
+		fmt.Fprintf(stdout, "TLS fingerprint (pin this on the iOS side):\n  %s\n", fingerprint)
+		fmt.Fprintf(stdout, "Admin console: %s://%s/ — add library folders, pair devices, view stats\n", adminScheme, cfg.AdminAddress)
+	}
 
 	// Advertise on mDNS so iOS clients on the same LAN auto-discover
 	// this server. Failures are non-fatal — mDNS is a nice-to-have,

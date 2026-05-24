@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/acoseac/1-bit-bridge/internal/advertise"
+	"github.com/acoseac/1-bit-bridge/internal/config"
 	qrcode "github.com/skip2/go-qrcode"
 )
 
@@ -52,7 +53,18 @@ func buildPairURL(bridgeURL, rawToken, fingerprint, libraryName string, alternat
 // the operator's explicit `primary` URL moved to the front so older
 // iOS builds (which only read `url`) pick the same default the
 // operator saw in the admin modal.
-func pairAlternates(primary, listenAddress string) []string {
+//
+// **Public-mode short-circuit (PR 5)**: when cfg.IsPublic(), skip
+// the LAN / mDNS / Tailscale enumeration and use only the
+// operator-declared customEndpoints plus the autocert public
+// domain. Avoids baking VPS-internal hostnames into the iOS
+// pair QR (an iOS device that connects to the public bridge
+// from outside the VPS network would then keep retrying the
+// useless LAN URL on every fail-over attempt). Matches the
+// `reachableEndpoints` filter on the iOS-facing /v1/health
+// side, so both surfaces agree.
+func pairAlternates(primary string, cfg *config.Config) []string {
+	listenAddress := cfg.ListenAddress
 	_, portStr, err := net.SplitHostPort(listenAddress)
 	if err != nil {
 		return []string{primary}
@@ -61,23 +73,36 @@ func pairAlternates(primary, listenAddress string) []string {
 	if err != nil || port <= 0 {
 		return []string{primary}
 	}
-	// pairAlternates is called from the admin pairing flow only — it
-	// has no direct config handle (the deep-link/QR baker doesn't
-	// take a *Config), so the CustomEndpoints aren't seeded here.
-	// /v1/health and /admin/api/endpoints both pick them up via the
-	// Server-scoped accessors below; pair URLs include the auto-
-	// discovered entries only. Operators that need a custom URL in
-	// the QR can pass it as `primary` from the calling layer.
-	eps := advertise.URLs(advertise.Params{Port: port})
-	if len(eps) == 0 {
+
+	var urls []string
+	if cfg.IsPublic() {
+		// Public mode: operator-declared customEndpoints +
+		// the autocert public domain only.
+		for _, e := range cfg.CustomEndpoints {
+			if e = strings.TrimSpace(e); e != "" {
+				urls = append(urls, e)
+			}
+		}
+		if d := strings.TrimSpace(cfg.Autocert.Domain); d != "" {
+			urls = append(urls, "https://"+d+":"+portStr)
+		}
+	} else {
+		// Loopback mode (historical behaviour): the
+		// auto-discovered LAN / mDNS / Tailscale enumeration.
+		// CustomEndpoints aren't seeded here because the
+		// deep-link/QR baker traditionally relied on the
+		// caller passing one via `primary`.
+		urls = advertise.URLs(advertise.Params{Port: port})
+	}
+	if len(urls) == 0 {
 		return []string{primary}
 	}
 
 	// Move `primary` to the head if already present; else prepend.
-	out := make([]string, 0, len(eps)+1)
+	out := make([]string, 0, len(urls)+1)
 	out = append(out, primary)
 	seen := map[string]bool{primary: true}
-	for _, u := range eps {
+	for _, u := range urls {
 		if !seen[u] {
 			seen[u] = true
 			out = append(out, u)

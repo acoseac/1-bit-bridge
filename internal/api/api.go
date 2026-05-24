@@ -934,6 +934,17 @@ func (s *Server) reachableEndpoints() []string {
 	if err != nil || port <= 0 {
 		return nil
 	}
+	// **Public-mode short-circuit (PR 5)**: VPS deployments must
+	// not leak internal hostnames / LAN IPs / Tailscale URLs to
+	// iOS clients. The only endpoints the operator wants
+	// advertised are the customEndpoints they explicitly declared
+	// (operator's public domain via reverse proxy + optional
+	// alt routes) and the autocert public domain. Skip the host-
+	// interface walk + the Tailscale append entirely.
+	if cfg.IsPublic() {
+		eps := publicModeEndpoints(cfg, port, portStr)
+		return classStableUniqueURLs(eps)
+	}
 	eps := advertise.Endpoints(advertise.Params{
 		Port:            port,
 		CustomEndpoints: cfg.CustomEndpoints,
@@ -1021,6 +1032,36 @@ func (s *Server) appendTailscaleEndpoints(eps []advertise.Endpoint, portStr stri
 		eps = append(eps, advertise.Endpoint{
 			URL:   fmt.Sprintf("https://%s", net.JoinHostPort(ipStr, portStr)),
 			Class: class,
+		})
+	}
+	return eps
+}
+
+// publicModeEndpoints returns the endpoint set for a public-mode
+// VPS deployment: the operator-declared customEndpoints and the
+// autocert public domain. LAN / mDNS / Tailscale enumeration is
+// intentionally skipped — those would leak VPS-internal
+// hostnames (private RFC 1918 addresses, the host's docker0
+// bridge, …) to iOS clients, and the operator's iOS app dials
+// only the public domain anyway.
+//
+// The autocert domain is synthesized as `https://<domain>:<port>`
+// — same shape as the customEndpoints entries — so iOS treats it
+// uniformly. When the customEndpoints already list the same
+// URL (operator typed the domain into customEndpoints AND set
+// autocert.domain to the same value), classStableUniqueURLs
+// dedupes downstream.
+func publicModeEndpoints(cfg *config.Config, port int, portStr string) []advertise.Endpoint {
+	var eps []advertise.Endpoint
+	for _, raw := range cfg.CustomEndpoints {
+		if raw = strings.TrimSpace(raw); raw != "" {
+			eps = append(eps, advertise.Endpoint{URL: raw, Class: advertise.ClassCustom})
+		}
+	}
+	if d := strings.TrimSpace(cfg.Autocert.Domain); d != "" {
+		eps = append(eps, advertise.Endpoint{
+			URL:   "https://" + d + ":" + portStr,
+			Class: advertise.ClassCustom,
 		})
 	}
 	return eps
