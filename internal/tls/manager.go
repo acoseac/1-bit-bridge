@@ -11,8 +11,8 @@ import (
 )
 
 // Manager owns the cert(s) the bridge serves and routes incoming TLS
-// handshakes to the right cert by SNI. The bridge can carry up to two
-// active certs at a time:
+// handshakes to the right cert by SNI. The bridge can carry up to
+// THREE active certs at a time:
 //
 //  1. The self-signed cert at <dataDir>/server.crt, served for LAN /
 //     mDNS / IP-literal connections. iOS clients pin its fingerprint
@@ -23,6 +23,12 @@ import (
 //     (e.g. *.<tailnet>.ts.net). iOS clients on the LE path do NOT
 //     pin — the LE chain validates standard ATS, and the tailnet
 //     tunnel already authenticates the peer.
+//  3. (Optional, public-mode only) A native autocert-minted LE cert
+//     for the operator's configured public domain (set via
+//     `SetAutocertProvider` after `internal/tlsacme.New`). Served
+//     when the SNI matches the configured domain exactly.
+//     iOS clients on this path do NOT pin either — same LE-chain
+//     reasoning as the Tailscale cert.
 //
 // **Why a Manager and not just a `tls.Config{Certificates: ...}`**:
 // `tls.Config.Certificates` matches by SAN, which would push the LE
@@ -38,7 +44,11 @@ import (
 // stored in an `atomic.Pointer` so the renewer (which runs in a
 // separate goroutine) can swap a fresh cert in mid-flight without a
 // mutex on the hot path. The MagicDNS suffix is stored in an
-// `atomic.Value` for the same reason.
+// `atomic.Value` for the same reason. The autocert provider is also
+// `atomic.Pointer`-held + atomic.Value-name'd; production wiring
+// sets these once at boot and never touches them again, but the
+// atomic shape future-proofs against a runtime SetAutocertProvider
+// (e.g. for a TLS renewal that swaps the underlying autocert.Manager).
 type Manager struct {
 	selfSigned    *cryptotls.Certificate
 	tailscaleCert atomic.Pointer[cryptotls.Certificate]
@@ -47,11 +57,41 @@ type Manager struct {
 	// because the type is fixed (always `string`), and the swap
 	// happens at most once per process (right after Detect succeeds).
 	magicDNSSuffix atomic.Value
+
+	// autocertProvider is the GetCertificate callback for the
+	// operator's configured public domain (PR 3). Nil = not
+	// configured (loopback installs, public installs running
+	// behind a reverse proxy that terminates TLS, or any
+	// deployment with `autocert.enabled: false`).
+	autocertProvider atomic.Pointer[autocertHook]
+
+	// autocertDomain holds the lowercase + trailing-dot-stripped
+	// hostname the autocert provider is pinned to. Empty = no
+	// autocert configured. atomic.Value typed string for the same
+	// rationale as magicDNSSuffix.
+	autocertDomain atomic.Value
+
+	// nextProtos is the union of NextProtos requirements from
+	// every active cert provider. PR 3 adds `acme.ALPNProto`
+	// when autocert is wired so the same listener handles the
+	// TLS-ALPN-01 challenge handshake. Read by AdminTLSConfig +
+	// the public-API tlsConfig.
+	nextProtos atomic.Value
+}
+
+// autocertHook is the interface tlsacme.Manager satisfies; the tls
+// package keeps the indirection so it doesn't need to import
+// internal/tlsacme directly (and tlsacme already imports
+// internal/tls for CertNotAfter — avoiding the cycle).
+type autocertHook struct {
+	GetCert    func(*cryptotls.ClientHelloInfo) (*cryptotls.Certificate, error)
+	NextProtos []string
 }
 
 // NewManager constructs a Manager with the self-signed cert as the
 // only routing target. Tailscale auto-pilot calls SetTailscaleCert /
-// SetMagicDNSSuffix after detection succeeds.
+// SetMagicDNSSuffix after detection succeeds; autocert wiring calls
+// SetAutocertProvider when `cfg.Autocert.Enabled` is true.
 func NewManager(selfSigned *cryptotls.Certificate) *Manager {
 	if selfSigned == nil {
 		// Programmer error — the bridge's self-signed cert is loaded
@@ -61,7 +101,75 @@ func NewManager(selfSigned *cryptotls.Certificate) *Manager {
 	}
 	m := &Manager{selfSigned: selfSigned}
 	m.magicDNSSuffix.Store("")
+	m.autocertDomain.Store("")
+	m.nextProtos.Store([]string(nil))
 	return m
+}
+
+// SetAutocertProvider installs (or clears, when both args are
+// zero-valued) the autocert SNI route. Safe to call from any
+// goroutine; the swap is atomic.
+//
+// domain is the operator's configured public hostname (normalized
+// to lowercase, trailing-dot stripped — pass the value
+// `tlsacme.Manager.Domain()` returns directly).
+//
+// getCert is the autocert-side GetCertificate function — typically
+// `tlsacmeManager.GetCertificate`. Pass nil to clear the route.
+//
+// nextProtos is the ALPN proto-id list autocert needs the listener
+// to advertise (`acme.ALPNProto`). Empty when clearing.
+func (m *Manager) SetAutocertProvider(domain string, getCert func(*cryptotls.ClientHelloInfo) (*cryptotls.Certificate, error), nextProtos []string) {
+	domain = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")
+	if getCert == nil || domain == "" {
+		m.autocertProvider.Store(nil)
+		m.autocertDomain.Store("")
+		m.nextProtos.Store([]string(nil))
+		return
+	}
+	hook := &autocertHook{
+		GetCert:    getCert,
+		NextProtos: append([]string(nil), nextProtos...),
+	}
+	m.autocertProvider.Store(hook)
+	m.autocertDomain.Store(domain)
+	m.nextProtos.Store(append([]string(nil), nextProtos...))
+}
+
+// NextProtos returns the ALPN proto-ids the wired providers need
+// the underlying listener to advertise. Public-API + admin
+// listener tls.Config merge this with their own NextProtos
+// (typically "h2", "http/1.1"). Returns nil when no provider has
+// custom requirements — callers default to the standard
+// proto list.
+func (m *Manager) NextProtos() []string {
+	v, _ := m.nextProtos.Load().([]string)
+	if len(v) == 0 {
+		return nil
+	}
+	return append([]string(nil), v...)
+}
+
+// AdminTLSConfig returns a tls.Config suitable for wrapping the
+// admin listener via tls.NewListener. The config's GetCertificate
+// is bound to this Manager's `Get` so the admin listener serves
+// the same SNI-routed cert pool as the public API (autocert cert
+// for the operator's domain, self-signed for direct-IP / unknown
+// SNI). NextProtos merges the autocert ALPN proto with the
+// standard HTTP/1.1 + HTTP/2 entries so the admin listener
+// handles both real admin traffic AND the TLS-ALPN-01 challenge
+// (the challenge runs against TCP/443 by spec; deployments where
+// the admin listener IS the :443 listener get both for free).
+func (m *Manager) AdminTLSConfig() *cryptotls.Config {
+	cfg := &cryptotls.Config{
+		GetCertificate: m.Get,
+		MinVersion:     cryptotls.VersionTLS12,
+	}
+	cfg.NextProtos = append(cfg.NextProtos, "h2", "http/1.1")
+	if extra := m.NextProtos(); len(extra) > 0 {
+		cfg.NextProtos = append(cfg.NextProtos, extra...)
+	}
+	return cfg
 }
 
 // SetTailscaleCert installs a freshly-loaded LE cert. Safe to call
@@ -86,31 +194,63 @@ func (m *Manager) SetMagicDNSSuffix(suffix string) {
 	m.magicDNSSuffix.Store(strings.ToLower(strings.TrimSpace(suffix)))
 }
 
-// Get is the `tls.Config.GetCertificate` callback. Returns the LE cert
-// when:
+// Get is the `tls.Config.GetCertificate` callback. SNI precedence:
 //
-//  1. The client supplied an SNI hostname (no SNI → self-signed; rare
-//     in 2026 but legal per RFC 6066, e.g. older curl with --resolve)
-//  2. The SNI ends in the configured MagicDNS suffix
-//  3. The Tailscale cert is loaded and non-expired
+//  1. **Normalize SNI once at the top** — lowercase + trailing-dot
+//     strip. The TLS ClientHello can carry a trailing dot (FQDN
+//     form) AND mixed-case host (RFC 4343: DNS comparison is
+//     case-insensitive). Without normalization,
+//     "BRIDGE.EXAMPLE.COM." mis-matches a stored lowercase
+//     "bridge.example.com" and falls through to self-signed,
+//     causing iOS ATS rejection on a perfectly-routed handshake.
+//  2. **autocert path** (PR 3): SNI matches the configured public
+//     domain exactly. Delegates to the autocert hook's
+//     GetCertificate, which mints / serves the LE cert. On
+//     autocert error, falls through to self-signed (logged
+//     elsewhere — the renewer surfaces the failure to the admin
+//     tile).
+//  3. **Tailscale path**: SNI ends in the configured MagicDNS
+//     suffix AND the Tailscale cert is loaded + non-expired.
+//  4. **Fallback**: self-signed cert.
 //
-// All other branches return the self-signed cert. The renewer tries
-// hard to keep the LE cert fresh, but if it slips past expiry the
-// honest fallback is "serve self-signed and let ATS reject" — same
-// behaviour as a host without Tailscale at all, no surprise.
+// Empty SNI (rare in 2026 but legal per RFC 6066, e.g. older curl
+// with --resolve) goes straight to self-signed.
+//
+// Order: autocert before Tailscale because an operator running
+// public mode with Tailscale also enabled (legitimate — tailnet-
+// routed public bridge) wants the LE cert to win against the
+// public domain SNI even if it happens to share a suffix with the
+// MagicDNS zone. In practice the two never overlap (autocert
+// domain is the operator's public FQDN; MagicDNS is *.ts.net),
+// but the precedence is documented.
 func (m *Manager) Get(hello *cryptotls.ClientHelloInfo) (*cryptotls.Certificate, error) {
 	if hello == nil || hello.ServerName == "" {
 		return m.selfSigned, nil
 	}
+	sni := strings.TrimSuffix(strings.ToLower(hello.ServerName), ".")
+
+	// (2) Autocert — operator's public domain.
+	if domain, _ := m.autocertDomain.Load().(string); domain != "" && sni == domain {
+		if hook := m.autocertProvider.Load(); hook != nil && hook.GetCert != nil {
+			cert, err := hook.GetCert(hello)
+			if err == nil && cert != nil {
+				return cert, nil
+			}
+			// Fall through to self-signed on autocert error.
+			// The tlsacme.Manager records lastError for the
+			// admin tile; we don't double-log here because
+			// every failed handshake would spam the log.
+		}
+	}
+
+	// (3) Tailscale magic-DNS path.
 	suffix, _ := m.magicDNSSuffix.Load().(string)
 	if suffix == "" {
 		return m.selfSigned, nil
 	}
-	sni := strings.ToLower(strings.TrimSuffix(hello.ServerName, "."))
 	if !strings.HasSuffix(sni, "."+suffix) && sni != suffix {
 		return m.selfSigned, nil
 	}
-
 	leCert := m.tailscaleCert.Load()
 	if leCert == nil {
 		return m.selfSigned, nil

@@ -43,6 +43,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/integrity"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
+	"github.com/acoseac/1-bit-bridge/internal/tlsacme"
 	// Imported for its init() side effects (log-hook + collector
 	// registration) AND for `metrics.RegisterTsnetProvider` invoked
 	// from the tsnet startup goroutine below. Without this import,
@@ -1250,7 +1251,43 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// cert is loaded asynchronously by the auto-mint goroutine below;
 	// until that completes the manager falls through to self-signed
 	// for every connection (= today's behaviour).
+	//
+	// PR 3 extension: when `autocert.enabled` is set, a third
+	// route fires for the operator-configured public domain
+	// (see `acmeManager` wiring below). Routes are mutually
+	// exclusive by SNI: autocert serves only its configured
+	// domain, Tailscale serves only `*.<magicdns>.ts.net`, every
+	// other SNI falls through to self-signed.
 	certManager := servertls.NewManager(cert)
+
+	// Autocert (ACME / Let's Encrypt) wiring. Only fires when
+	// the operator opts in via `autocert.enabled: true` in
+	// public mode — the config Validate already enforced the
+	// prerequisites (domain + email + port-443 reachability).
+	// Loopback installs and public installs running behind a
+	// reverse proxy stay autocert-free; the SNI switcher keeps
+	// the self-signed cert as the only routing target.
+	var acmeManager *tlsacme.Manager
+	if cfg.Autocert.Enabled {
+		am, amErr := tlsacme.New(tlsacme.Config{
+			Domain:     cfg.Autocert.Domain,
+			Email:      cfg.Autocert.Email,
+			CacheDir:   cfg.EffectiveAutocertCacheDir(),
+			UseStaging: cfg.Autocert.UseStaging,
+		})
+		if amErr != nil {
+			fmt.Fprintf(stderr, "autocert: %v\n", amErr)
+			return 1
+		}
+		acmeManager = am
+		certManager.SetAutocertProvider(am.Domain(), am.GetCertificate, am.NextProtos())
+		fmt.Fprintf(stdout, "autocert: ACME provisioning enabled for %q (cache: %s)\n",
+			am.Domain(), cfg.EffectiveAutocertCacheDir())
+		if cfg.Autocert.UseStaging {
+			fmt.Fprintf(stdout, "autocert: using LE STAGING directory — certs will not be browser-trusted\n")
+		}
+	}
+	_ = acmeManager // referenced later by the admin tile wiring in this PR
 
 	store, err := auth.OpenStore(filepath.Join(cfg.DataDir, "tokens.json"))
 	if err != nil {
@@ -1868,6 +1905,21 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		GetCertificate: certManager.Get,
 		MinVersion:     tls.VersionTLS12,
 	}
+	// Merge autocert's required ALPN proto-id ("acme-tls/1") into
+	// the public API listener's NextProtos so LE's TLS-ALPN-01
+	// challenge handshake finds the right path.
+	//
+	// **MUST include "h2" + "http/1.1" explicitly** when NextProtos
+	// is non-empty (Gemini-high security review on PR #293).
+	// `http.Server.serveTLS` auto-adds these only when
+	// `TLSConfig.NextProtos == nil`; once we set it to anything
+	// (e.g. just `acme-tls/1`), the auto-add is suppressed and
+	// modern browsers fail to negotiate HTTP/2 against the public
+	// API. Loopback installs (extra==nil) skip this branch entirely
+	// and see byte-identical handshake behaviour.
+	if extra := certManager.NextProtos(); len(extra) > 0 {
+		tlsConfig.NextProtos = append([]string{"h2", "http/1.1"}, extra...)
+	}
 
 	httpSrv := &http.Server{
 		Addr:      cfg.ListenAddress,
@@ -1942,6 +1994,37 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		defer loginLimiter.Stop()
 	}
 
+	// Admin TLS wiring (public mode + direct-TLS path only). When
+	// IsPublic() && !AdminTLSTerminatedByProxy, wrap the admin
+	// listener via certManager's AdminTLSConfig — the same SNI
+	// switcher fronts both the public API and the admin
+	// console. Loopback installs and reverse-proxy deployments
+	// stay on plain HTTP (the proxy fronts TLS; the bridge
+	// serves on a private interface).
+	var adminTLSConfig *tls.Config
+	adminScheme := "http"
+	if cfg.IsPublic() && !cfg.Deployment.AdminTLSTerminatedByProxy {
+		adminTLSConfig = certManager.AdminTLSConfig()
+		adminScheme = "https"
+	}
+	// Autocert status closure for the admin tile / API endpoint.
+	// Nil-safe: when autocert isn't wired, returns the
+	// "disabled" snapshot (admin tile hidden, /api returns
+	// disabled shape).
+	autocertStatusClosure := func() admin.AutocertStatusSnapshot {
+		if acmeManager == nil {
+			return admin.AutocertStatusSnapshot{}
+		}
+		st := acmeManager.Status()
+		return admin.AutocertStatusSnapshot{
+			Domain:      st.Domain,
+			CertPresent: st.CertPresent,
+			NotAfter:    st.NotAfter,
+			LastError:   st.LastError,
+			LastCheck:   st.LastCheck,
+		}
+	}
+
 	adminSrv, err := admin.New(admin.Deps{
 		CfgHolder:       cfgHolder,
 		CfgPath:         absCfgPath,
@@ -1952,6 +2035,8 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		Fingerprint:     fingerprint,
 		AdminAuth:       adminAuthStore,
 		LoginLimiter:    loginLimiter,
+		TLSConfig:       adminTLSConfig,
+		AutocertStatus:  autocertStatusClosure,
 		StartedAt:       time.Now().UTC(),
 		ScanCtx:         scanCtx,
 		Restart:         cancel,
@@ -2110,7 +2195,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		version.ServerVersion, version.ProtocolVersion, lis.Addr())
 	fmt.Fprintf(stdout, "Library: %q (roots: %v)\n", cfg.LibraryName, cfg.LibraryRoots)
 	fmt.Fprintf(stdout, "TLS fingerprint (pin this on the iOS side):\n  %s\n", fingerprint)
-	fmt.Fprintf(stdout, "Admin console: http://%s/ — add library folders, pair devices, view stats\n", cfg.AdminAddress)
+	fmt.Fprintf(stdout, "Admin console: %s://%s/ — add library folders, pair devices, view stats\n", adminScheme, cfg.AdminAddress)
 
 	// Advertise on mDNS so iOS clients on the same LAN auto-discover
 	// this server. Failures are non-fatal — mDNS is a nice-to-have,

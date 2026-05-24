@@ -298,3 +298,195 @@ func TestLoadLoopbackModeKeepsAdminAddressDefault(t *testing.T) {
 		t.Errorf("AdminAddress = %q, want default %q", cfg.AdminAddress, DefaultAdminAddress)
 	}
 }
+
+// TestValidatePublicModeAutocertEnabledRelaxesProxyRequirement pins
+// the PR 3 relaxation: in PR 2, public mode hard-required
+// adminTLSTerminatedByProxy=true (because the bridge couldn't
+// terminate TLS itself for the admin console yet). PR 3 adds the
+// autocert path, so an operator with autocert.enabled=true (and
+// the required Email + port-443 prerequisites) no longer needs the
+// proxy flag — the bridge terminates TLS itself via the same SNI
+// switcher that serves the public API.
+func TestValidatePublicModeAutocertEnabledRelaxesProxyRequirement(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{
+		LibraryRoots:    []string{dir},
+		ListenAddress:   ":443",
+		AdminAddress:    "0.0.0.0:7789",
+		ScanIntervalSec: 3600,
+		Deployment:      DeploymentConfig{Mode: "public"},
+		Autocert: AutocertConfig{
+			Enabled: true,
+			Domain:  "bridge.example.com",
+			Email:   "ops@example.com",
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("public + autocert.enabled (no proxy): unexpected error %v", err)
+	}
+}
+
+// TestValidatePublicModeRejectsBothPathsDisabled pins the
+// admin-TLS gate: in public mode, EITHER the bridge terminates
+// TLS itself (autocert.enabled) OR the operator delegates to a
+// reverse proxy. Both off is a misconfiguration that would leak
+// session cookies + credentials cleartext.
+func TestValidatePublicModeRejectsBothPathsDisabled(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{
+		LibraryRoots:    []string{dir},
+		ListenAddress:   ":7788",
+		AdminAddress:    "0.0.0.0:7789",
+		ScanIntervalSec: 3600,
+		Deployment:      DeploymentConfig{Mode: "public"},
+		Autocert:        AutocertConfig{Domain: "bridge.example.com"},
+		// Neither AdminTLSTerminatedByProxy=true NOR Autocert.Enabled=true.
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "plain HTTP") {
+		t.Errorf("error %q should mention plain HTTP", err.Error())
+	}
+}
+
+// TestValidateAutocertEnabledRequiresEmail pins the ACME-side
+// prerequisite: LE registers the account key against the
+// operator-supplied email. Without it, autocert.Manager construction
+// would still work but expiry-warning / revocation notices would
+// have nowhere to go.
+func TestValidateAutocertEnabledRequiresEmail(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{
+		LibraryRoots:    []string{dir},
+		ListenAddress:   ":443",
+		AdminAddress:    "0.0.0.0:7789",
+		ScanIntervalSec: 3600,
+		Deployment:      DeploymentConfig{Mode: "public"},
+		Autocert: AutocertConfig{
+			Enabled: true,
+			Domain:  "bridge.example.com",
+			// Email intentionally unset.
+		},
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "autocert.email") {
+		t.Errorf("error %q should mention autocert.email", err.Error())
+	}
+}
+
+// TestValidateAutocertRequiresPort443OrExternalMapping pins the
+// LE TLS-ALPN-01 constraint: the challenge validator connects on
+// TCP/443 exclusively. The operator must either bind :443 directly
+// (e.g. as root or with CAP_NET_BIND_SERVICE) OR run an external
+// port-forward and confirm via the external443Mapping flag.
+func TestValidateAutocertRequiresPort443OrExternalMapping(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{
+		LibraryRoots:    []string{dir},
+		ListenAddress:   ":7788", // NOT port 443
+		AdminAddress:    "0.0.0.0:7789",
+		ScanIntervalSec: 3600,
+		Deployment:      DeploymentConfig{Mode: "public"},
+		Autocert: AutocertConfig{
+			Enabled: true,
+			Domain:  "bridge.example.com",
+			Email:   "ops@example.com",
+			// External443Mapping intentionally unset.
+		},
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "443") {
+		t.Errorf("error %q should mention port 443", err.Error())
+	}
+
+	// With external443Mapping=true, the same config passes.
+	cfg.Autocert.External443Mapping = true
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("external443Mapping=true: unexpected error %v", err)
+	}
+}
+
+// TestListenAddrIsPort443Forms covers the realistic bind shapes.
+func TestListenAddrIsPort443Forms(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{":443", true},
+		{"0.0.0.0:443", true},
+		{"[::]:443", true},
+		{"192.0.2.10:443", true},
+		{"[2001:db8::1]:443", true},
+		{":7788", false},
+		{"0.0.0.0:7788", false},
+		{"", false},
+		{"not-an-addr", false},
+		{":4430", false}, // adjacent-port false-positive guard
+	}
+	for _, tc := range cases {
+		if got := listenAddrIsPort443(tc.in); got != tc.want {
+			t.Errorf("listenAddrIsPort443(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestEffectiveAutocertCacheDirDefault: when CacheDir is empty,
+// defaults to <dataDir>/acme. When set, used verbatim.
+//
+// Path construction uses filepath.Join so the test is OS-agnostic
+// — pre-fix the hardcoded "/srv/..." literals would fail on
+// Windows even though the helper itself works correctly there
+// (CodeRabbit Minor on PR #293).
+func TestEffectiveAutocertCacheDirDefault(t *testing.T) {
+	base := t.TempDir()
+	cfg := &Config{DataDir: filepath.Join(base, "data")}
+	if got, want := cfg.EffectiveAutocertCacheDir(), filepath.Join(cfg.DataDir, "acme"); got != want {
+		t.Errorf("default: got %q, want %q", got, want)
+	}
+	cfg.Autocert.CacheDir = filepath.Join(base, "letsencrypt")
+	if got, want := cfg.EffectiveAutocertCacheDir(), cfg.Autocert.CacheDir; got != want {
+		t.Errorf("explicit: got %q, want %q", got, want)
+	}
+}
+
+// TestLoadResolvesAutocertCacheDirRelative pins the
+// resolvePaths contract: a relative `autocert.cacheDir` in YAML
+// must resolve against the config file's directory (matching the
+// existing behaviour for libraryRoots / dataDir / TLS paths).
+// Pre-fix the relative path would have been used verbatim and
+// resolved against process CWD — different across operator
+// shells (CodeRabbit Major on PR #293).
+func TestLoadResolvesAutocertCacheDirRelative(t *testing.T) {
+	dir := t.TempDir()
+	libRoot := filepath.Join(dir, "Music")
+	if err := os.MkdirAll(libRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dir, "bridge.yaml")
+	yaml := "libraryRoots:\n  - " + libRoot + "\n" +
+		"listenAddress: \":443\"\n" +
+		"adminAddress: \"0.0.0.0:7789\"\n" +
+		"deployment:\n  mode: public\n" +
+		"autocert:\n  enabled: true\n  domain: bridge.example.com\n" +
+		"  email: ops@example.com\n  cacheDir: \"./acme-cache\"\n"
+	if err := os.WriteFile(configPath, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := filepath.Join(dir, "acme-cache")
+	if cfg.Autocert.CacheDir != want {
+		t.Errorf("Autocert.CacheDir = %q, want %q (must resolve against config-dir, not CWD)",
+			cfg.Autocert.CacheDir, want)
+	}
+}

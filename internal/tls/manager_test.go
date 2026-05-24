@@ -233,3 +233,172 @@ func TestManager_NewManagerPanicsOnNilSelfSigned(t *testing.T) {
 	}()
 	_ = NewManager(nil)
 }
+
+func TestManager_GetServesAutocertCertOnExactDomainSNI(t *testing.T) {
+	// PR 3: when an autocert provider is wired and the SNI
+	// matches the configured public domain exactly, the
+	// autocert cert wins — not the self-signed.
+	self := mintTestCert(t, []string{"host.local"})
+	acmeCert := mintTestCert(t, []string{"bridge.example.com"})
+	mgr := NewManager(self)
+	mgr.SetAutocertProvider(
+		"bridge.example.com",
+		func(hi *cryptotls.ClientHelloInfo) (*cryptotls.Certificate, error) {
+			return acmeCert, nil
+		},
+		[]string{"acme-tls/1"},
+	)
+
+	got, err := mgr.Get(&cryptotls.ClientHelloInfo{ServerName: "bridge.example.com"})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got != acmeCert {
+		t.Error("autocert path didn't win against exact-domain SNI")
+	}
+}
+
+func TestManager_GetNormalizesUppercaseAndTrailingDotSNI(t *testing.T) {
+	// SNI ClientHello can carry trailing dot + mixed case. The
+	// normalization at the top of Get must lowercase + strip the
+	// dot so the autocert comparison matches.
+	self := mintTestCert(t, []string{"host.local"})
+	acmeCert := mintTestCert(t, []string{"bridge.example.com"})
+	mgr := NewManager(self)
+	mgr.SetAutocertProvider(
+		"bridge.example.com",
+		func(hi *cryptotls.ClientHelloInfo) (*cryptotls.Certificate, error) {
+			return acmeCert, nil
+		},
+		nil,
+	)
+
+	for _, sni := range []string{"BRIDGE.EXAMPLE.COM", "bridge.example.com.", "Bridge.Example.Com.", "BRIDGE.EXAMPLE.COM."} {
+		got, err := mgr.Get(&cryptotls.ClientHelloInfo{ServerName: sni})
+		if err != nil {
+			t.Fatalf("Get(%q): %v", sni, err)
+		}
+		if got != acmeCert {
+			t.Errorf("SNI normalization missed %q (got self-signed instead of autocert)", sni)
+		}
+	}
+}
+
+func TestManager_GetFallsThroughToSelfSignedOnAutocertError(t *testing.T) {
+	// When autocert.GetCertificate errors (DNS not propagated,
+	// LE rate-limited, etc.), serve self-signed rather than
+	// 500'ing the TLS handshake. iOS clients on the LE path will
+	// see ATS rejection on the self-signed — observable, but no
+	// worse than a config-time refuse-to-start (which would lock
+	// the operator out completely while LE propagated).
+	self := mintTestCert(t, []string{"host.local"})
+	mgr := NewManager(self)
+	mgr.SetAutocertProvider(
+		"bridge.example.com",
+		func(hi *cryptotls.ClientHelloInfo) (*cryptotls.Certificate, error) {
+			return nil, errSentinel
+		},
+		nil,
+	)
+
+	got, err := mgr.Get(&cryptotls.ClientHelloInfo{ServerName: "bridge.example.com"})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got != self {
+		t.Errorf("autocert error: got %p, want self-signed %p", got, self)
+	}
+}
+
+func TestManager_GetIgnoresAutocertForMismatchedSNI(t *testing.T) {
+	// SNI doesn't match the configured autocert domain → fall
+	// through to Tailscale / self-signed routing (the autocert
+	// hook is NOT invoked).
+	self := mintTestCert(t, []string{"host.local"})
+	autocertCalled := false
+	mgr := NewManager(self)
+	mgr.SetAutocertProvider(
+		"bridge.example.com",
+		func(hi *cryptotls.ClientHelloInfo) (*cryptotls.Certificate, error) {
+			autocertCalled = true
+			return nil, nil
+		},
+		nil,
+	)
+	got, err := mgr.Get(&cryptotls.ClientHelloInfo{ServerName: "attacker.example"})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got != self {
+		t.Errorf("mismatched SNI: got %p, want self-signed %p", got, self)
+	}
+	if autocertCalled {
+		t.Error("autocert hook called for non-matching SNI — defense in depth violated")
+	}
+}
+
+func TestManager_SetAutocertProviderClearWithNilGetCert(t *testing.T) {
+	// SetAutocertProvider(..., nil, ...) clears the route — the
+	// hot path should behave as if autocert was never configured.
+	self := mintTestCert(t, []string{"host.local"})
+	mgr := NewManager(self)
+	mgr.SetAutocertProvider(
+		"bridge.example.com",
+		func(hi *cryptotls.ClientHelloInfo) (*cryptotls.Certificate, error) {
+			return mintTestCert(t, []string{"bridge.example.com"}), nil
+		},
+		nil,
+	)
+	mgr.SetAutocertProvider("", nil, nil)
+
+	got, err := mgr.Get(&cryptotls.ClientHelloInfo{ServerName: "bridge.example.com"})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got != self {
+		t.Error("after Clear, autocert SNI still routes to autocert cert")
+	}
+	if np := mgr.NextProtos(); len(np) != 0 {
+		t.Errorf("after Clear, NextProtos() = %v, want empty", np)
+	}
+}
+
+func TestManager_AdminTLSConfigMergesAutocertALPN(t *testing.T) {
+	// AdminTLSConfig must advertise both http/1.1 + h2 AND any
+	// autocert-required ALPN (acme-tls/1) so the same listener
+	// handles real admin traffic AND the TLS-ALPN-01 challenge.
+	self := mintTestCert(t, []string{"host.local"})
+	mgr := NewManager(self)
+	mgr.SetAutocertProvider(
+		"bridge.example.com",
+		func(*cryptotls.ClientHelloInfo) (*cryptotls.Certificate, error) {
+			return self, nil
+		},
+		[]string{"acme-tls/1"},
+	)
+	cfg := mgr.AdminTLSConfig()
+	if cfg == nil {
+		t.Fatal("AdminTLSConfig returned nil")
+	}
+	if cfg.GetCertificate == nil {
+		t.Error("AdminTLSConfig.GetCertificate is nil")
+	}
+	wantAny := map[string]bool{"h2": false, "http/1.1": false, "acme-tls/1": false}
+	for _, p := range cfg.NextProtos {
+		if _, ok := wantAny[p]; ok {
+			wantAny[p] = true
+		}
+	}
+	for p, found := range wantAny {
+		if !found {
+			t.Errorf("AdminTLSConfig.NextProtos missing %q (got %v)", p, cfg.NextProtos)
+		}
+	}
+}
+
+// errSentinel is a sentinel error for the autocert-error fall-through test.
+var errSentinel = errSentinelT{}
+
+type errSentinelT struct{}
+
+func (errSentinelT) Error() string { return "sentinel autocert error" }
