@@ -99,8 +99,13 @@ func TestAutocertStatusSurfacesLastError(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d, want 200", resp.StatusCode)
+	}
 	var snap AutocertStatusSnapshot
-	_ = json.NewDecoder(resp.Body).Decode(&snap)
+	if err := json.NewDecoder(resp.Body).Decode(&snap); err != nil {
+		t.Fatal(err)
+	}
 	if snap.LastError == "" {
 		t.Error("LastError should be populated")
 	}

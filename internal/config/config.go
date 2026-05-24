@@ -1024,6 +1024,16 @@ func (c *Config) resolvePaths(baseDir string) {
 	if c.TLSKeyPath != "" && !filepath.IsAbs(c.TLSKeyPath) {
 		c.TLSKeyPath = filepath.Join(baseDir, c.TLSKeyPath)
 	}
+	// Autocert cache dir follows the same config-relative path
+	// contract as the other on-disk paths above. Without this,
+	// a relative `autocert.cacheDir: "acme-cache"` would resolve
+	// against the process CWD, which (a) creates a different
+	// ACME cache location every time the bridge is launched
+	// from a different shell, and (b) forces LE to re-issue
+	// against rate-limit quota (CodeRabbit Major on PR #293).
+	if c.Autocert.CacheDir != "" && !filepath.IsAbs(c.Autocert.CacheDir) {
+		c.Autocert.CacheDir = filepath.Join(baseDir, c.Autocert.CacheDir)
+	}
 }
 
 // Validate checks invariants the server relies on. Called automatically by

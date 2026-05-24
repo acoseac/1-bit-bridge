@@ -440,13 +440,53 @@ func TestListenAddrIsPort443Forms(t *testing.T) {
 
 // TestEffectiveAutocertCacheDirDefault: when CacheDir is empty,
 // defaults to <dataDir>/acme. When set, used verbatim.
+//
+// Path construction uses filepath.Join so the test is OS-agnostic
+// — pre-fix the hardcoded "/srv/..." literals would fail on
+// Windows even though the helper itself works correctly there
+// (CodeRabbit Minor on PR #293).
 func TestEffectiveAutocertCacheDirDefault(t *testing.T) {
-	cfg := &Config{DataDir: "/srv/bridge/data"}
-	if got, want := cfg.EffectiveAutocertCacheDir(), "/srv/bridge/data/acme"; got != want {
+	base := t.TempDir()
+	cfg := &Config{DataDir: filepath.Join(base, "data")}
+	if got, want := cfg.EffectiveAutocertCacheDir(), filepath.Join(cfg.DataDir, "acme"); got != want {
 		t.Errorf("default: got %q, want %q", got, want)
 	}
-	cfg.Autocert.CacheDir = "/srv/letsencrypt"
-	if got, want := cfg.EffectiveAutocertCacheDir(), "/srv/letsencrypt"; got != want {
+	cfg.Autocert.CacheDir = filepath.Join(base, "letsencrypt")
+	if got, want := cfg.EffectiveAutocertCacheDir(), cfg.Autocert.CacheDir; got != want {
 		t.Errorf("explicit: got %q, want %q", got, want)
+	}
+}
+
+// TestLoadResolvesAutocertCacheDirRelative pins the
+// resolvePaths contract: a relative `autocert.cacheDir` in YAML
+// must resolve against the config file's directory (matching the
+// existing behaviour for libraryRoots / dataDir / TLS paths).
+// Pre-fix the relative path would have been used verbatim and
+// resolved against process CWD — different across operator
+// shells (CodeRabbit Major on PR #293).
+func TestLoadResolvesAutocertCacheDirRelative(t *testing.T) {
+	dir := t.TempDir()
+	libRoot := filepath.Join(dir, "Music")
+	if err := os.MkdirAll(libRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dir, "bridge.yaml")
+	yaml := "libraryRoots:\n  - " + libRoot + "\n" +
+		"listenAddress: \":443\"\n" +
+		"adminAddress: \"0.0.0.0:7789\"\n" +
+		"deployment:\n  mode: public\n" +
+		"autocert:\n  enabled: true\n  domain: bridge.example.com\n" +
+		"  email: ops@example.com\n  cacheDir: \"./acme-cache\"\n"
+	if err := os.WriteFile(configPath, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := filepath.Join(dir, "acme-cache")
+	if cfg.Autocert.CacheDir != want {
+		t.Errorf("Autocert.CacheDir = %q, want %q (must resolve against config-dir, not CWD)",
+			cfg.Autocert.CacheDir, want)
 	}
 }

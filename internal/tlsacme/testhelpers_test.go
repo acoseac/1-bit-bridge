@@ -24,7 +24,10 @@ func generateTestPEM(t *testing.T, host string) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	serial, _ := rand.Int(rand.Reader, big.NewInt(1<<62))
+	serial, err := rand.Int(rand.Reader, big.NewInt(1<<62))
+	if err != nil {
+		t.Fatal(err)
+	}
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,
 		Subject:      pkix.Name{CommonName: host},

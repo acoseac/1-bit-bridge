@@ -344,6 +344,15 @@ function bindTailscaleRefreshButton() {
   });
 }
 
+// autocertPollTimer holds the active setInterval handle so a
+// re-entrant `initSettings()` (SPA navigation re-fires init on
+// every page change back to Settings) clears the previous one
+// before starting the next. Without this, polling stacks across
+// every Settings visit and the bridge's /api/autocert/status
+// gets hammered with duplicate requests. CodeRabbit Major review
+// on PR #293.
+let autocertPollTimer = null;
+
 // refreshAutocertTile fetches /api/autocert/status and repaints
 // the autocert panel on the Settings page. Hides the panel when
 // Domain is empty (autocert.enabled=false or no autocert closure
@@ -1240,8 +1249,17 @@ function initSettings() {
   // by default; refreshAutocertTile reveals it when the closure
   // returns a non-empty Domain (= operator configured
   // `autocert.enabled: true`).
+  //
+  // Re-init guard: initSettings() is re-entrant on SPA navigation
+  // back to Settings; clear any previous timer before starting a
+  // fresh one to prevent poll stacking (CodeRabbit Major on PR
+  // #293).
   refreshAutocertTile();
-  setInterval(refreshAutocertTile, 60_000);
+  if (autocertPollTimer) {
+    clearInterval(autocertPollTimer);
+    autocertPollTimer = null;
+  }
+  autocertPollTimer = setInterval(refreshAutocertTile, 60_000);
 
   const form = document.getElementById("settings-form");
   const msg = document.getElementById("settings-msg");

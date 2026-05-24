@@ -109,6 +109,15 @@ func New(cfg Config) (*Manager, error) {
 	// against the same normalized form that `tls.Manager.Get`
 	// produces from the ClientHello.
 	cfg.Domain = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(cfg.Domain)), ".")
+	// Re-check post-normalization: whitespace-only or
+	// trailing-dot-only inputs (e.g. " . ", ".") pass the
+	// initial != "" check but normalize to "", which would
+	// pin autocert.HostWhitelist to an empty domain and
+	// silently break SNI routing (CodeRabbit Major on PR
+	// #293).
+	if cfg.Domain == "" {
+		return nil, errors.New("tlsacme: Domain must not be empty after normalization (lowercase + trim + strip trailing dot)")
+	}
 
 	if err := os.MkdirAll(cfg.CacheDir, 0o700); err != nil {
 		return nil, fmt.Errorf("tlsacme: mkdir cache dir: %w", err)

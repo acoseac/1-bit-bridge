@@ -2002,8 +2002,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// stay on plain HTTP (the proxy fronts TLS; the bridge
 	// serves on a private interface).
 	var adminTLSConfig *tls.Config
+	adminScheme := "http"
 	if cfg.IsPublic() && !cfg.Deployment.AdminTLSTerminatedByProxy {
 		adminTLSConfig = certManager.AdminTLSConfig()
+		adminScheme = "https"
 	}
 	// Autocert status closure for the admin tile / API endpoint.
 	// Nil-safe: when autocert isn't wired, returns the
@@ -2193,7 +2195,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		version.ServerVersion, version.ProtocolVersion, lis.Addr())
 	fmt.Fprintf(stdout, "Library: %q (roots: %v)\n", cfg.LibraryName, cfg.LibraryRoots)
 	fmt.Fprintf(stdout, "TLS fingerprint (pin this on the iOS side):\n  %s\n", fingerprint)
-	fmt.Fprintf(stdout, "Admin console: http://%s/ — add library folders, pair devices, view stats\n", cfg.AdminAddress)
+	fmt.Fprintf(stdout, "Admin console: %s://%s/ — add library folders, pair devices, view stats\n", adminScheme, cfg.AdminAddress)
 
 	// Advertise on mDNS so iOS clients on the same LAN auto-discover
 	// this server. Failures are non-fatal — mDNS is a nice-to-have,

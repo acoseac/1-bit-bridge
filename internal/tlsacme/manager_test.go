@@ -1,7 +1,6 @@
 package tlsacme
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -56,6 +55,30 @@ func TestNewCreatesCacheDirAt0o700(t *testing.T) {
 	}
 	if mode := info.Mode().Perm(); mode != 0o700 {
 		t.Errorf("cacheDir mode = %o, want 0o700", mode)
+	}
+}
+
+func TestNewRejectsWhitespaceOrDotOnlyDomain(t *testing.T) {
+	// CodeRabbit Major on PR #293: whitespace-only or single-
+	// trailing-dot inputs pass the initial != "" check but
+	// normalize to "", which would silently pin autocert to an
+	// empty HostWhitelist. The normalize chain strips only ONE
+	// trailing dot, so "..." stays non-empty post-normalize and
+	// is not in scope here (a HostPolicy mint attempt on ".."
+	// would refuse separately).
+	for _, in := range []string{" ", ".", "  .  ", "\t.\n"} {
+		t.Run(in, func(t *testing.T) {
+			_, err := New(Config{
+				Domain:   in,
+				Email:    "ops@x.com",
+				CacheDir: t.TempDir(),
+			})
+			if err == nil {
+				t.Errorf("expected error for domain %q, got nil", in)
+			} else if !strings.Contains(err.Error(), "Domain") {
+				t.Errorf("error %q should mention Domain", err.Error())
+			}
+		})
 	}
 }
 
@@ -247,9 +270,10 @@ func TestGetCertificateRecordsError(t *testing.T) {
 	if st.LastCheck.IsZero() {
 		t.Error("Status.LastCheck should be populated after any GetCertificate call")
 	}
-	// Sanity: the error path leaves the caller-visible error
-	// chain intact (not swallowed).
-	if !errors.Is(err, err) { // tautology — but pins that err is non-nil + propagated
-		t.Errorf("error chain broken: %v", err)
-	}
+	// err already asserted non-nil above; HostPolicy refusal
+	// is one of autocert's intentionally-unexported errors, so
+	// there's no sentinel to chain-check against — the non-nil
+	// + lastError-populated assertions above are the meaningful
+	// pins. (CodeRabbit Minor on PR #293 — pre-fix had a
+	// tautological `errors.Is(err, err)` that always passed.)
 }
