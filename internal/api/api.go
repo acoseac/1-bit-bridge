@@ -934,6 +934,17 @@ func (s *Server) reachableEndpoints() []string {
 	if err != nil || port <= 0 {
 		return nil
 	}
+	// **Public-mode short-circuit (PR 5)**: VPS deployments must
+	// not leak internal hostnames / LAN IPs / Tailscale URLs to
+	// iOS clients. The only endpoints the operator wants
+	// advertised are the customEndpoints they explicitly declared
+	// (operator's public domain via reverse proxy + optional
+	// alt routes) and the autocert public domain. Skip the host-
+	// interface walk + the Tailscale append entirely.
+	if cfg.IsPublic() {
+		eps := publicModeEndpoints(cfg, portStr)
+		return classStableUniqueURLs(eps)
+	}
 	eps := advertise.Endpoints(advertise.Params{
 		Port:            port,
 		CustomEndpoints: cfg.CustomEndpoints,
@@ -1022,6 +1033,40 @@ func (s *Server) appendTailscaleEndpoints(eps []advertise.Endpoint, portStr stri
 			URL:   fmt.Sprintf("https://%s", net.JoinHostPort(ipStr, portStr)),
 			Class: class,
 		})
+	}
+	return eps
+}
+
+// publicModeEndpoints returns the endpoint set for a public-mode
+// VPS deployment: the operator-declared customEndpoints and the
+// autocert public domain. LAN / mDNS / Tailscale enumeration is
+// intentionally skipped — those would leak VPS-internal
+// hostnames (private RFC 1918 addresses, the host's docker0
+// bridge, …) to iOS clients, and the operator's iOS app dials
+// only the public domain anyway.
+//
+// The autocert domain is synthesized as `https://<domain>` when
+// port is the https default (:443) or `https://<domain>:<port>`
+// otherwise. Matching the shape `cmd/bridge/init.go` writes into
+// the customEndpoints seed avoids near-duplicate entries when
+// the operator declares the same domain in both fields and the
+// dedupe downstream collapses the pair instead of admitting two
+// URLs that differ only by the implicit https default
+// (`https://h` vs `https://h:443` would otherwise be distinct
+// strings to classStableUniqueURLs — Gemini medium on PR #295).
+func publicModeEndpoints(cfg *config.Config, portStr string) []advertise.Endpoint {
+	var eps []advertise.Endpoint
+	for _, raw := range cfg.CustomEndpoints {
+		if raw = strings.TrimSpace(raw); raw != "" {
+			eps = append(eps, advertise.Endpoint{URL: raw, Class: advertise.ClassCustom})
+		}
+	}
+	if d := strings.TrimSpace(cfg.Autocert.Domain); d != "" {
+		u := "https://" + d
+		if portStr != "443" {
+			u += ":" + portStr
+		}
+		eps = append(eps, advertise.Endpoint{URL: u, Class: advertise.ClassCustom})
 	}
 	return eps
 }

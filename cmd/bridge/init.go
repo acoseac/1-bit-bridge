@@ -17,6 +17,9 @@ import (
 
 	"github.com/mattn/go-isatty"
 
+	"net"
+
+	"github.com/acoseac/1-bit-bridge/internal/adminauth"
 	"github.com/acoseac/1-bit-bridge/internal/advertise"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/doctor"
@@ -53,8 +56,28 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// rebuild a tempdir with `bridge init --yes` don't leave an orphan
 	// server behind.
 	startNow := fs.Bool("start-now", false, "Windows only: after install, spawn `bridge serve` detached so the admin console is reachable without a logout")
+	// PR 5: public-VPS deployment posture flags.
+	publicMode := fs.Bool("public", false, "configure as a public-VPS deployment (admin auth, no mDNS, no Tailscale by default)")
+	publicDomain := fs.String("domain", "", "public hostname iOS clients dial (required with --public)")
+	publicEmail := fs.String("email", "", "ACME contact email for Let's Encrypt (required with --public)")
+	publicAdminAddress := fs.String("admin-address", "", "with --public: bind address for the admin console (e.g. 0.0.0.0:7789)")
+	publicListenAddress := fs.String("listen-address", "", "with --public: bind for the iOS-facing API (default :443 for ACME)")
+	publicProxy := fs.Bool("admin-tls-proxy", false, "with --public: a reverse proxy (Caddy/nginx) fronts admin TLS — disables native ACME wrapping of the admin listener")
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+	if *publicMode {
+		if *publicDomain == "" {
+			fmt.Fprintf(stderr, "--public requires --domain <fqdn>\n")
+			return 2
+		}
+		if *publicEmail == "" && !*publicProxy {
+			// Email is required ONLY when the bridge will run
+			// autocert itself; reverse-proxy installs let the
+			// proxy own ACME entirely.
+			fmt.Fprintf(stderr, "--public requires --email <addr> (used for Let's Encrypt account registration)\n")
+			return 2
+		}
 	}
 
 	cfgDir := *cfgDirFlag
@@ -89,8 +112,18 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	in := bufio.NewReader(stdin)
 
 	// Collect the library root.
+	//
+	// Public mode (PR 5): library root is OPTIONAL. The
+	// realistic VPS flow is `bridge init --public ...` first,
+	// then the operator mounts their rclone B2 FUSE volume and
+	// adds the root via the admin console once it's up. Forcing
+	// the operator to pre-mount before init creates a chicken-
+	// and-egg: rclone systemd units commonly use `After=
+	// 1-bit-bridge.service` to read the bridge's config for
+	// mount points. Either order should work without manual
+	// gymnastics.
 	libRoot := *libraryRoot
-	if libRoot == "" {
+	if libRoot == "" && !*publicMode {
 		if *nonInteractive {
 			fmt.Fprintf(stderr, "--yes requires --library <path>\n")
 			return 2
@@ -101,19 +134,28 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return 2
 		}
 	}
-	abs, err := filepath.Abs(expandHome(libRoot))
-	if err != nil {
-		fmt.Fprintf(stderr, "resolve library path: %v\n", err)
-		return 1
-	}
-	info, err := os.Stat(abs)
-	if err != nil {
-		fmt.Fprintf(stderr, "library path: %v\n", err)
-		return 1
-	}
-	if !info.IsDir() {
-		fmt.Fprintf(stderr, "%q is not a directory\n", abs)
-		return 1
+	// abs is the resolved library root, or empty for public-mode
+	// installs that defer mount setup. Doctor preflight is
+	// skipped when there's no root to preflight against —
+	// public-mode operators run `bridge doctor` separately after
+	// mounting their storage.
+	var abs string
+	if libRoot != "" {
+		a, err := filepath.Abs(expandHome(libRoot))
+		if err != nil {
+			fmt.Fprintf(stderr, "resolve library path: %v\n", err)
+			return 1
+		}
+		info, err := os.Stat(a)
+		if err != nil {
+			fmt.Fprintf(stderr, "library path: %v\n", err)
+			return 1
+		}
+		if !info.IsDir() {
+			fmt.Fprintf(stderr, "%q is not a directory\n", a)
+			return 1
+		}
+		abs = a
 	}
 
 	// Preflight. Run after library-path resolution so doctor sees the
@@ -121,7 +163,7 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// for the rare case where the operator knows better than the check
 	// (say: doctor fails on port 7789 bound by an existing bridge and
 	// you're re-running init on purpose to rewrite config).
-	if !*skipDoctor {
+	if !*skipDoctor && abs != "" {
 		d := doctor.Deps{
 			ConfigDir:    cfgDir,
 			DataDir:      dataDir,
@@ -209,13 +251,57 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "warning: chmod data dir: %v\n", err)
 	}
 
+	var roots []string
+	if abs != "" {
+		roots = []string{abs}
+	}
 	cfg := &config.Config{
-		LibraryRoots:    []string{abs},
+		LibraryRoots:    roots,
 		ListenAddress:   config.DefaultListenAddress,
 		AdminAddress:    config.DefaultAdminAddress,
 		DataDir:         dataDir,
 		ScanIntervalSec: config.DefaultScanIntervalSec,
 		LibraryName:     name,
+	}
+	if *publicMode {
+		// Public-mode YAML shape (PR 5). Defaults:
+		//   listenAddress: :443       (ACME prerequisite — TLS-ALPN-01)
+		//   adminAddress:  :7789      (operator can override via --admin-address)
+		//   tailscale.mode: disabled  (applyDefaults sets this; explicit
+		//                              for readability of saved YAML)
+		//   mdns.enabled:   false     (no LAN to advertise on)
+		//   customEndpoints: [the autocert domain]
+		//   autocert: { enabled, domain, email } OR
+		//             { domain } + AdminTLSTerminatedByProxy when --admin-tls-proxy
+		cfg.Deployment.Mode = "public"
+		cfg.ListenAddress = ":443"
+		if *publicListenAddress != "" {
+			cfg.ListenAddress = *publicListenAddress
+		}
+		cfg.AdminAddress = "0.0.0.0:7789"
+		if *publicAdminAddress != "" {
+			cfg.AdminAddress = *publicAdminAddress
+		}
+		cfg.Autocert.Domain = *publicDomain
+		// customEndpoint: append the listen port unless it's
+		// :443 (port 443 is the https default — iOS dials
+		// "https://host" same as "https://host:443"). Keeps
+		// the saved YAML compact for the standard ACME case.
+		domainURL := "https://" + *publicDomain
+		_, port, splitErr := net.SplitHostPort(cfg.ListenAddress)
+		if splitErr == nil && port != "" && port != "443" {
+			domainURL = "https://" + *publicDomain + ":" + port
+		}
+		cfg.CustomEndpoints = []string{domainURL}
+		cfg.Tailscale.Mode = string(config.TailscaleModeDisabled)
+		falseVal := false
+		cfg.MDNS.Enabled = &falseVal
+		if *publicProxy {
+			cfg.Deployment.AdminTLSTerminatedByProxy = true
+		} else {
+			cfg.Autocert.Enabled = true
+			cfg.Autocert.Email = *publicEmail
+		}
 	}
 	if err := cfg.Validate(); err != nil {
 		fmt.Fprintf(stderr, "validate: %v\n", err)
@@ -245,7 +331,7 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if _, fp, err := servertls.LoadOrGenerateWithOptions(certPath, keyPath, opts); err != nil {
 		fmt.Fprintf(stderr, "TLS cert: %v\n", err)
 		return 1
-	} else {
+	} else if !*publicMode {
 		// Box the fingerprint so it stands out from the surrounding
 		// init narration. Operators have to copy this exact string
 		// to the iOS side at pairing time; framing it makes the
@@ -255,6 +341,11 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		// hex is 95 chars and operators copy it byte-for-byte to the
 		// iOS pin. splitFingerprint splits on a colon boundary so
 		// concatenating the halves yields the original verbatim.
+		//
+		// Public mode skips this entirely: iOS clients on the public
+		// path validate the publicly-trusted LE cert via standard
+		// ATS rather than pinning, so the fingerprint isn't load-
+		// bearing for the pairing flow.
 		first, second := splitFingerprint(fp)
 		fmt.Fprint(stdout, "\n")
 		fmt.Fprint(stdout, box("TLS fingerprint", []string{
@@ -262,6 +353,38 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			"",
 			"  " + first,
 			"  " + second,
+		}))
+	}
+
+	// PR 5: public-mode admin credentials. Mint the initial
+	// password + display it ONCE in a framed box. The
+	// adminauth.Store persists only the bcrypt hash; the
+	// plaintext is reachable nowhere else after this banner
+	// scrolls off-screen.
+	if *publicMode {
+		storePath := filepath.Join(dataDir, "adminauth.json")
+		store, err := adminauth.OpenStore(storePath)
+		if err != nil {
+			fmt.Fprintf(stderr, "adminauth: %v\n", err)
+			return 1
+		}
+		plaintext, err := store.MintInitial("admin")
+		if err != nil {
+			// ErrAlreadyInitialised: the operator re-ran init
+			// against an existing store. Tell them how to
+			// recover rather than continuing with stale creds.
+			fmt.Fprintf(stderr, "adminauth: %v\n", err)
+			fmt.Fprintf(stderr, "  (existing admin credentials found at %s; run `bridge admin reset-password` to rotate)\n", storePath)
+			return 1
+		}
+		fmt.Fprint(stdout, "\n")
+		fmt.Fprint(stdout, box("Admin credentials — shown ONCE", []string{
+			"Save these now. The plaintext is not stored anywhere.",
+			"",
+			"  Username:  admin",
+			"  Password:  " + plaintext,
+			"",
+			"Rotate with:  bridge admin reset-password",
 		}))
 	}
 

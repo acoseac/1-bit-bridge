@@ -375,3 +375,106 @@ func applyCustomEndpoints(cfg *config.Config, eps []string) *config.Config {
 	clone.CustomEndpoints = eps
 	return &clone
 }
+
+// TestReachableEndpoints_PublicModeOnlyCustomAndAutocert pins
+// the PR 5 short-circuit: public-mode deployments suppress all
+// auto-enumeration (LAN / mDNS / Tailscale) and advertise only
+// the operator-declared customEndpoints + the autocert public
+// domain. Without this gate, a VPS would leak its private RFC
+// 1918 LAN address (docker0 bridge, internal hostnames) on
+// /v1/health to every paired iOS client.
+func TestReachableEndpoints_PublicModeOnlyCustomAndAutocert(t *testing.T) {
+	cfg := &config.Config{
+		ListenAddress: ":443",
+		LibraryName:   "Public",
+		Deployment: config.DeploymentConfig{
+			Mode:                      "public",
+			AdminTLSTerminatedByProxy: true,
+		},
+		Autocert:        config.AutocertConfig{Domain: "bridge.example.com"},
+		CustomEndpoints: []string{"https://alt.example.com:443"},
+	}
+	s := &Server{cfgHolder: config.NewRuntimeConfig(cfg)}
+	// Wire a Tailscale provider with a populated MagicDNS state
+	// — public mode must NOT enumerate it.
+	s.tailscaleStatus = &fakeTailscaleProvider{
+		snap: admin.TailscaleStatus{
+			BackendState: "Running",
+			CertPresent:  true,
+			MagicDNSName: "bridge.example.ts.net",
+			TailscaleIPs: []string{"100.64.0.5"},
+		},
+	}
+	eps := s.reachableEndpoints()
+	if len(eps) == 0 {
+		t.Fatal("public-mode reachableEndpoints returned 0 URLs (want customEndpoints + autocert domain)")
+	}
+	for _, u := range eps {
+		if strings.Contains(u, ".ts.net") || strings.Contains(u, "100.64.") {
+			t.Errorf("public-mode leaked Tailscale URL %q", u)
+		}
+		if strings.Contains(u, ".local:") {
+			t.Errorf("public-mode leaked .local URL %q", u)
+		}
+	}
+	// Synthesized autocert URL omits :443 (https default) so it
+	// dedupes against a customEndpoint of bare "https://host"
+	// downstream — Gemini medium normalization on PR #295.
+	if !contains(eps, "https://bridge.example.com") {
+		t.Errorf("public-mode missing autocert domain URL (bare https://host shape, no :443); got %v", eps)
+	}
+	for _, u := range eps {
+		if u == "https://bridge.example.com:443" {
+			t.Errorf("public-mode synthesized URL should omit :443 for the https default; got %q", u)
+		}
+	}
+	if !contains(eps, "https://alt.example.com:443") {
+		t.Errorf("public-mode missing customEndpoint URL; got %v", eps)
+	}
+}
+
+// TestReachableEndpoints_PublicModeNon443IncludesPort pins the
+// inverse: when listenAddress is NOT on :443 (e.g. operator
+// running behind an external port-forward via
+// autocert.external443Mapping), the synthesized autocert URL
+// MUST include the port so iOS dials the right address.
+func TestReachableEndpoints_PublicModeNon443IncludesPort(t *testing.T) {
+	cfg := &config.Config{
+		ListenAddress: ":7788",
+		Deployment:    config.DeploymentConfig{Mode: "public", AdminTLSTerminatedByProxy: true},
+		Autocert:      config.AutocertConfig{Domain: "bridge.example.com"},
+	}
+	s := &Server{cfgHolder: config.NewRuntimeConfig(cfg)}
+	eps := s.reachableEndpoints()
+	if !contains(eps, "https://bridge.example.com:7788") {
+		t.Errorf("non-:443 listenAddress should keep the port in the synthesized URL; got %v", eps)
+	}
+}
+
+// TestReachableEndpoints_PublicModeDedupesAutocertAgainstCustom
+// pins the operator-workaround case: the operator declared the
+// autocert domain in BOTH customEndpoints (as `https://host`)
+// AND autocert.domain (= "host"). After the :443 normalization
+// the two URLs are byte-identical and classStableUniqueURLs
+// collapses them to a single entry.
+func TestReachableEndpoints_PublicModeDedupesAutocertAgainstCustom(t *testing.T) {
+	cfg := &config.Config{
+		ListenAddress: ":443",
+		Deployment:    config.DeploymentConfig{Mode: "public", AdminTLSTerminatedByProxy: true},
+		Autocert:      config.AutocertConfig{Domain: "bridge.example.com"},
+		// Operator declared the autocert domain in customEndpoints
+		// too (the realistic init-script shape).
+		CustomEndpoints: []string{"https://bridge.example.com"},
+	}
+	s := &Server{cfgHolder: config.NewRuntimeConfig(cfg)}
+	eps := s.reachableEndpoints()
+	count := 0
+	for _, u := range eps {
+		if u == "https://bridge.example.com" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("autocert + customEndpoint duplicate should dedupe to exactly 1; got %d (eps=%v)", count, eps)
+	}
+}
