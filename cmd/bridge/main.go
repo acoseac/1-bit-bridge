@@ -49,7 +49,6 @@ import (
 	// from the tsnet startup goroutine below. Without this import,
 	// /metrics would expose an empty registry and the log-event
 	// counter would stay at zero forever.
-	bridgemdns "github.com/acoseac/1-bit-bridge/internal/mdns"
 	"github.com/acoseac/1-bit-bridge/internal/metrics"
 	"github.com/acoseac/1-bit-bridge/internal/pairing"
 	"github.com/acoseac/1-bit-bridge/internal/supervision"
@@ -2029,17 +2028,27 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// these after persisting the new config so the runtime
 	// flips into the new posture without a restart.
 	//
-	// **Closure indirection** is load-bearing: `mdnsLife` is
-	// created AFTER `net.Listen` further below (we need the
-	// actual bound port), but `admin.New` is called here BEFORE
-	// the listener. The closure resolves the live pointer at
-	// invocation time — admin handler firings can't reach this
-	// path until well after the listener is up anyway. Same
-	// nil-safe shape for the Tailscale Disable callback.
-	var mdnsLife *mdnsLifecycle // populated post-listener below
+	// **atomic.Pointer indirection** is load-bearing on two
+	// fronts (Gemini High + CodeRabbit Major on PR #294):
+	//   1. Race-safe across the admin-Serve goroutine (which
+	//      may receive a PATCH before main reaches the
+	//      net.Listen step below) and the main goroutine
+	//      that populates the pointer post-listener.
+	//   2. **Catch-up apply**: if a PATCH arrives during the
+	//      startup window, the callback records the desired
+	//      state in `mdnsDesired` (atomic.Bool) — the
+	//      post-listener init reads this and applies the
+	//      latest desired state to the freshly-created
+	//      lifecycle, so config-on-disk and runtime stay in
+	//      lockstep.
+	var mdnsLife atomic.Pointer[mdnsLifecycle]
+	var mdnsDesired atomic.Pointer[bool] // nil = no override pending
 	mdnsToggleCallback := func(b bool) {
-		if mdnsLife != nil {
-			mdnsLife.Set(b)
+		// Capture desired state for the startup-window catch-up.
+		v := b
+		mdnsDesired.Store(&v)
+		if ml := mdnsLife.Load(); ml != nil {
+			ml.Set(b)
 		}
 	}
 	tailscaleDisableCallback := func() {
@@ -2235,20 +2244,35 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// service emitted briefly at boot.
 	boundAddr, _ := lis.Addr().(*net.TCPAddr)
 	if boundAddr != nil {
-		mdnsLife = newMDNSLifecycle(bridgemdns.Config{
-			InstanceName:    cfg.LibraryName,
-			Port:            boundAddr.Port,
-			ProtocolVersion: version.ProtocolVersion,
-			LibraryName:     cfg.LibraryName,
-		}, stdout, stderr)
-		if cfg.EffectiveMDNSEnabled() {
-			mdnsLife.Set(true)
+		// nameSource closure reads the LIVE library name on every
+		// Set(true) so a Settings PATCH that renamed the library
+		// before toggling mDNS off→on picks up the new name
+		// (Gemini medium on PR #294).
+		nameSource := func() string {
+			if live := cfgHolder.Load(); live != nil {
+				return live.LibraryName
+			}
+			return cfg.LibraryName
+		}
+		ml := newMDNSLifecycle(boundAddr.Port, version.ProtocolVersion, nameSource, stdout, stderr)
+		// Resolve the effective initial state. Catch-up apply:
+		// if an admin PATCH arrived during the pre-listener
+		// window, mdnsDesired carries its target value — that
+		// wins over the cfg-on-disk default (operator pressed
+		// the button; runtime should honour it).
+		want := cfg.EffectiveMDNSEnabled()
+		if d := mdnsDesired.Load(); d != nil {
+			want = *d
+		}
+		if want {
+			ml.Set(true)
 		} else if cfg.IsPublic() {
 			fmt.Fprintf(stdout, "mDNS: disabled by public-mode default\n")
 		}
+		mdnsLife.Store(ml)
 	}
-	if mdnsLife != nil {
-		defer mdnsLife.Close()
+	if ml := mdnsLife.Load(); ml != nil {
+		defer ml.Close()
 	}
 
 	var lanH3Srv *http3.Server

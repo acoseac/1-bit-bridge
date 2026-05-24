@@ -125,7 +125,7 @@
         <label for="settings-tailscale-mode">Tailscale mode</label>
         <select id="settings-tailscale-mode" name="tailscaleMode">
           <option value="cli" {{if eq .Data.TailscaleMode "cli"}}selected{{end}}>cli (host Tailscale.app / tailscaled)</option>
-          <option value="tsnet" {{if eq .Data.TailscaleMode "tsnet"}}selected{{end}}>tsnet (embedded Tailscale node) <span class="badge warn">restart</span></option>
+          <option value="tsnet" {{if eq .Data.TailscaleMode "tsnet"}}selected{{end}}>tsnet (embedded Tailscale node; restart required)</option>
           <option value="disabled" {{if eq .Data.TailscaleMode "disabled"}}selected{{end}}>disabled</option>
         </select>
         <small class="hint">

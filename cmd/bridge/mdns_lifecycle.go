@@ -6,7 +6,6 @@ import (
 	"sync"
 
 	bridgemdns "github.com/acoseac/1-bit-bridge/internal/mdns"
-	"github.com/acoseac/1-bit-bridge/internal/version"
 )
 
 // mdnsLifecycle owns the per-process Bonjour advertiser and
@@ -24,23 +23,39 @@ import (
 // no-op; Set(false) on a not-running advertiser is also a no-op.
 // The operator can hammer the checkbox without spawning leaked
 // advertiser instances.
+//
+// **Live config resolution** (Gemini medium on PR #294): the
+// instance + library name are read from `nameSource` at Set time
+// rather than captured at construction so a Settings PATCH that
+// renamed the library AND then toggled mDNS off→on picks up the
+// new name. Port + ProtocolVersion stay captured because they
+// don't change at runtime.
 type mdnsLifecycle struct {
-	cfg    bridgemdns.Config
-	stderr io.Writer
-	stdout io.Writer
+	port            int
+	protocolVersion int
+	// nameSource yields the current library name. Closure
+	// indirection (rather than a captured *config.Config)
+	// keeps this file from importing internal/config.
+	nameSource func() string
+	stderr     io.Writer
+	stdout     io.Writer
 
 	mu         sync.Mutex
 	advertiser *bridgemdns.Advertiser
 }
 
-// newMDNSLifecycle constructs the lifecycle helper with the
-// boot-time config (instance name, port, library name). The
-// config is captured once — changing the library name at
-// runtime would normally take effect on the next mDNS start; in
-// practice nothing else exercises that path today, so we let
-// the snapshot stand and revisit if needed.
-func newMDNSLifecycle(cfg bridgemdns.Config, stdout, stderr io.Writer) *mdnsLifecycle {
-	return &mdnsLifecycle{cfg: cfg, stdout: stdout, stderr: stderr}
+// newMDNSLifecycle constructs the lifecycle helper. The
+// `nameSource` closure is invoked at every Set(true) so a
+// hot-reloaded library name reaches the next Bonjour
+// advertisement without requiring a process restart.
+func newMDNSLifecycle(port, protocolVersion int, nameSource func() string, stdout, stderr io.Writer) *mdnsLifecycle {
+	return &mdnsLifecycle{
+		port:            port,
+		protocolVersion: protocolVersion,
+		nameSource:      nameSource,
+		stdout:          stdout,
+		stderr:          stderr,
+	}
 }
 
 // Set is the hot-reload entry point. `enabled=true` starts the
@@ -55,14 +70,31 @@ func (m *mdnsLifecycle) Set(enabled bool) {
 		if m.advertiser != nil {
 			return // already running
 		}
-		a, err := bridgemdns.Advertise(m.cfg)
+		name := "1-bit Bridge"
+		if m.nameSource != nil {
+			if n := m.nameSource(); n != "" {
+				name = n
+			}
+		}
+		a, err := bridgemdns.Advertise(bridgemdns.Config{
+			InstanceName:    name,
+			Port:            m.port,
+			ProtocolVersion: m.protocolVersion,
+			LibraryName:     name,
+		})
 		if err != nil {
 			fmt.Fprintf(m.stderr, "mDNS advertise failed (non-fatal): %v\n", err)
 			return
 		}
 		m.advertiser = a
+		// **Use the captured ProtocolVersion**, not the package-
+		// scope `version.ProtocolVersion`, so the log line
+		// reflects the value this lifecycle was constructed
+		// with (CodeRabbit Minor on PR #294 — the global
+		// could drift from the captured config in a future
+		// refactor that re-uses this helper across processes).
 		fmt.Fprintf(m.stdout, "mDNS: advertising as %q (protocol v%d)\n",
-			m.cfg.LibraryName, version.ProtocolVersion)
+			name, m.protocolVersion)
 		return
 	}
 	if m.advertiser == nil {

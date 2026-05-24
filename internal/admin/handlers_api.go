@@ -844,19 +844,45 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 	// below if user typoed).
 	tailscaleWasDisabled := false
 	tailscaleNowDisabled := false
+	tailscaleHotReload := false
 	if p.TailscaleMode != nil {
 		prevMode, _ := next.Tailscale.EffectiveMode()
 		tailscaleWasDisabled = prevMode == config.TailscaleModeDisabled
-		next.Tailscale.Mode = strings.TrimSpace(*p.TailscaleMode)
+		// Empty payload is ambiguous: EffectiveMode() resolves
+		// "" to "cli" (historical default), but applyDefaults
+		// sets it to "disabled" in public mode. The PATCH
+		// surface tolerates whitespace but rejects the bare-
+		// empty form so an operator who accidentally clears the
+		// dropdown doesn't silently flip into the wrong mode.
+		// (Gemini medium on PR #294 caught the divergence.)
+		trimmed := strings.TrimSpace(*p.TailscaleMode)
+		if trimmed == "" {
+			writeError(w, http.StatusBadRequest, "validate",
+				"tailscaleMode: must be one of cli|tsnet|disabled (empty payload not accepted — would silently differ between loopback and public defaults)")
+			return
+		}
+		next.Tailscale.Mode = trimmed
 		newMode, modeErr := next.Tailscale.EffectiveMode()
 		if modeErr != nil {
 			writeError(w, http.StatusBadRequest, "validate", modeErr.Error())
 			return
 		}
 		tailscaleNowDisabled = newMode == config.TailscaleModeDisabled
-		// Hot-reloadable: any→disabled. Restart-required: any
-		// transition that isn't into disabled.
-		if newMode != prevMode && !tailscaleNowDisabled {
+		// Hot-reload contract: only the cli → disabled
+		// transition fires the in-process Disable callback.
+		// All other transitions need a restart:
+		//   - disabled → cli|tsnet: auto-pilot + listener wiring
+		//     need a clean boot.
+		//   - cli ↔ tsnet:          same as above.
+		//   - tsnet → disabled:     the embedded tsnet.Server
+		//     and its listeners are wired at startup and can't
+		//     be torn down mid-process; without a restart they
+		//     would keep running until SIGINT (Gemini high on
+		//     PR #294).
+		tailscaleHotReload = newMode != prevMode &&
+			tailscaleNowDisabled &&
+			prevMode == config.TailscaleModeCLI
+		if newMode != prevMode && !tailscaleHotReload {
 			restart = true
 		}
 	}
@@ -884,7 +910,7 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 	// disable callbacks read the same RuntimeConfig (via cfgHolder)
 	// for their up-to-date view, and we want them to see the
 	// already-Store'd next snapshot.
-	if p.TailscaleMode != nil && tailscaleNowDisabled && !tailscaleWasDisabled && s.deps.TailscaleDisable != nil {
+	if p.TailscaleMode != nil && tailscaleHotReload && !tailscaleWasDisabled && s.deps.TailscaleDisable != nil {
 		s.deps.TailscaleDisable()
 	}
 	if p.MDNSEnabled != nil && mdnsNowEnabled != mdnsWasEnabled && s.deps.MDNSToggle != nil {

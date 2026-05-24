@@ -5,9 +5,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
-
-	bridgemdns "github.com/acoseac/1-bit-bridge/internal/mdns"
 )
+
+// fixedName returns a constant nameSource closure for tests.
+func fixedName(s string) func() string { return func() string { return s } }
 
 // TestMDNSLifecycleSetIsIdempotentOnRepeatedEnable: Set(true)
 // twice in a row must NOT spawn a second advertiser (would
@@ -15,16 +16,7 @@ import (
 // advertiser's goroutines).
 func TestMDNSLifecycleSetIsIdempotentOnRepeatedEnable(t *testing.T) {
 	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
-	// Port 0 is reserved + cheap — mDNS Advertise binds a UDP
-	// listener on this for the rebind goroutine. Real
-	// production has the bridge's listen port here.
-	cfg := bridgemdns.Config{
-		InstanceName:    "Test Lifecycle",
-		Port:            17788,
-		ProtocolVersion: 1,
-		LibraryName:     "Test Library",
-	}
-	m := newMDNSLifecycle(cfg, stdout, stderr)
+	m := newMDNSLifecycle(17788, 1, fixedName("Test Library"), stdout, stderr)
 	defer m.Close()
 
 	m.Set(true)
@@ -44,13 +36,7 @@ func TestMDNSLifecycleSetIsIdempotentOnRepeatedEnable(t *testing.T) {
 // TestMDNSLifecycleCloseIsSafeFromMultipleGoroutines: Close +
 // Set racing must not deadlock or double-close.
 func TestMDNSLifecycleCloseIsSafeFromMultipleGoroutines(t *testing.T) {
-	cfg := bridgemdns.Config{
-		InstanceName:    "Test",
-		Port:            17789,
-		ProtocolVersion: 1,
-		LibraryName:     "Test",
-	}
-	m := newMDNSLifecycle(cfg, &bytes.Buffer{}, &bytes.Buffer{})
+	m := newMDNSLifecycle(17789, 1, fixedName("Test"), &bytes.Buffer{}, &bytes.Buffer{})
 	m.Set(true)
 
 	var wg sync.WaitGroup
@@ -76,13 +62,7 @@ func TestMDNSLifecycleCloseIsSafeFromMultipleGoroutines(t *testing.T) {
 // state confirming their action landed.
 func TestMDNSLifecycleSetReportsViaStdout(t *testing.T) {
 	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
-	cfg := bridgemdns.Config{
-		InstanceName:    "Logged Lib",
-		Port:            17790,
-		ProtocolVersion: 1,
-		LibraryName:     "Logged Lib",
-	}
-	m := newMDNSLifecycle(cfg, stdout, stderr)
+	m := newMDNSLifecycle(17790, 1, fixedName("Logged Lib"), stdout, stderr)
 	defer m.Close()
 	m.Set(true)
 	if !strings.Contains(stdout.String(), "advertising") {
