@@ -34,15 +34,30 @@ libraryName: "My Music Library"
 # public: VPS deployment posture. Admin console accepts non-loopback
 #   binds and gates every request behind a session cookie
 #   (bcrypt-hashed credentials at <dataDir>/adminauth.json). REQUIRES:
-#     - autocert.domain   (the publicly-routable hostname iOS dials)
-#     - deployment.adminTLSTerminatedByProxy: true   (PR 2 scope; PR 3
-#       will add native ACME and relax this requirement)
+#     - autocert.domain                              (the publicly-routable hostname iOS dials)
+#     - ONE OF: autocert.enabled (bridge mints LE cert) OR
+#               deployment.adminTLSTerminatedByProxy (Caddy/nginx fronts TLS)
+#     - When autocert.enabled: listenAddress on :443 OR
+#       autocert.external443Mapping (operator runs an external
+#       port-forward mapping WAN:443 → bridge's listenAddress).
+#       LE's TLS-ALPN-01 challenge is only validated on TCP/443.
 #     - Run `bridge admin reset-password` (or `bridge init --public`)
 #       before `bridge serve` — refuses to start without credentials.
 #
+# === Variant A — bridge terminates TLS itself via autocert ===
+# deployment:
+#   mode: public
+# autocert:
+#   enabled: true
+#   domain: bridge.example.com
+#   email: ops@example.com
+#   # cacheDir: ""        # defaults to <dataDir>/acme
+#   # useStaging: false   # opt-in for LE staging during dev
+#   # external443Mapping: false  # set true if WAN:443 maps to a non-:443 listenAddress
+#
+# === Variant B — reverse proxy (Caddy / nginx) terminates TLS ===
 # deployment:
 #   mode: public
 #   adminTLSTerminatedByProxy: true
-#
 # autocert:
 #   domain: bridge.example.com

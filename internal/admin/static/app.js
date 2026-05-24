@@ -344,6 +344,71 @@ function bindTailscaleRefreshButton() {
   });
 }
 
+// refreshAutocertTile fetches /api/autocert/status and repaints
+// the autocert panel on the Settings page. Hides the panel when
+// Domain is empty (autocert.enabled=false or no autocert closure
+// wired) so loopback installs see zero clutter.
+//
+// State machine:
+//   • empty Domain               → tile hidden
+//   • LastError set              → "Error" badge + the LastError text
+//   • cert absent (no NotAfter)  → "Minting…" / "No cert yet"
+//   • cert present + fresh       → "✓ HTTPS cert active" + days remaining
+//   • cert present + expiring    → "expiring soon" badge alongside the days
+//
+// Only the Settings page hosts the autocert panel, so this is a
+// noop on other pages (the getElementById returns null).
+async function refreshAutocertTile() {
+  const panel = document.getElementById("autocert-panel");
+  if (!panel) return;
+  let snap;
+  try {
+    snap = await API.get("/api/autocert/status");
+  } catch {
+    panel.hidden = true;
+    return;
+  }
+  if (!snap || !snap.domain) {
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+
+  const statusEl = document.getElementById("autocert-status");
+  const domainEl = document.getElementById("autocert-domain");
+  const expiryEl = document.getElementById("autocert-expiry");
+
+  let badgeClass = "idle", badgeText = "Detecting…", suffix = "";
+  if (snap.lastError) {
+    badgeClass = "danger";
+    badgeText = "Error";
+    suffix = ` <span class="hint">${escapeHTML(snap.lastError)}</span>`;
+  } else if (snap.certPresent) {
+    badgeClass = "running";
+    badgeText = "HTTPS cert active";
+  } else {
+    badgeClass = "idle";
+    badgeText = "Minting…";
+  }
+  if (statusEl) {
+    statusEl.innerHTML = `<span class="badge ${badgeClass}">${escapeHTML(badgeText)}</span>${suffix}`;
+  }
+  if (domainEl) domainEl.textContent = snap.domain || "—";
+  if (expiryEl) {
+    if (!snap.certPresent || !snap.notAfter) {
+      expiryEl.textContent = "—";
+    } else {
+      const when = new Date(snap.notAfter);
+      const now = new Date();
+      const days = Math.max(0, Math.floor((when.getTime() - now.getTime()) / 86_400_000));
+      let badge = "";
+      if (days <= 7) badge = '<span class="badge danger">expiring soon</span> ';
+      else if (days <= 30) badge = '<span class="badge running">expiring</span> ';
+      expiryEl.innerHTML = `${badge}expires in ${days} day${days === 1 ? "" : "s"} (${when.toLocaleDateString()})`;
+    }
+  }
+}
+
 // bindInstallButton attaches the click handler to the Install &
 // restart button. No-op when btn is null (server didn't render the
 // button at first paint, e.g. the platform doesn't support install
@@ -1168,6 +1233,15 @@ function initSettings() {
   // node detection event; that handler is page-agnostic and finds
   // the element by id regardless of which page hosts it.
   bindTailscaleRefreshButton();
+
+  // Autocert (ACME / Let's Encrypt) panel (PR 3) — fetch once on
+  // page load + repaint on a slow tick (cert renewal is ~60 days,
+  // so a 60 s poll is well within the freshness window). Hidden
+  // by default; refreshAutocertTile reveals it when the closure
+  // returns a non-empty Domain (= operator configured
+  // `autocert.enabled: true`).
+  refreshAutocertTile();
+  setInterval(refreshAutocertTile, 60_000);
 
   const form = document.getElementById("settings-form");
   const msg = document.getElementById("settings-msg");

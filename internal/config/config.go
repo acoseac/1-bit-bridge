@@ -370,21 +370,102 @@ func (d DeploymentConfig) EffectiveMode() (DeploymentMode, error) {
 	return "", fmt.Errorf("deployment.mode: unknown value %q (want loopback|public)", d.Mode)
 }
 
-// AutocertConfig holds the operator's public-domain settings. In
-// PR 2 only the Domain field is consumed — by the admin Origin
-// allowlist (so cross-origin POSTs from anywhere but the operator's
-// domain are refused). PR 3 wires the full ACME / Let's Encrypt
-// pipeline (Enabled, Email, CacheDir, etc.). Both PRs share this
-// struct so the YAML schema is forward-compatible.
+// AutocertConfig wires native Let's Encrypt provisioning via
+// `golang.org/x/crypto/acme/autocert` (TLS-ALPN-01 challenge on the
+// same listener as the public API). When enabled in public mode, the
+// bridge auto-mints + auto-renews an LE cert for `Domain` and serves
+// it on matching SNI through the same `internal/tls.Manager` that
+// already fronts the Tailscale magic-DNS cert path.
+//
+// **Hard ACME constraint**: TLS-ALPN-01 is validated by LE *only*
+// on TCP/443. Either set `listenAddress: ":443"` directly OR
+// configure an external port-forward / load-balancer mapping
+// `WAN:443 → bridge:<listenPort>` and opt-in via
+// `external443Mapping: true`. Validate enforces this in public
+// mode + autocert.enabled.
 type AutocertConfig struct {
+	// Enabled toggles the autocert auto-pilot. False (default)
+	// means the bridge serves only the self-signed cert. True
+	// (in public mode + with a configured Domain + Email) means
+	// the bridge mints + serves an LE cert for Domain.
+	Enabled bool `yaml:"enabled,omitempty"`
+
 	// Domain is the publicly-routable hostname the operator's iOS
 	// clients (and the operator's browser) dial. Required when
 	// `deployment.mode: public` is set; ignored otherwise.
 	//
-	// PR 3 fills in: Enabled, Email, CacheDir, UseStaging, plus
-	// the External443Mapping flag for operators whose load
-	// balancer maps WAN:443 → bridge:7788.
+	// Consumed by:
+	//   - Admin Origin allowlist (PR 2)
+	//   - autocert.Manager.HostPolicy (PR 3) — only Domain is
+	//     accepted as a host for cert minting
+	//   - tls.Manager SNI gate (PR 3) — only requests whose SNI
+	//     matches Domain hit the autocert path
 	Domain string `yaml:"domain,omitempty"`
+
+	// Email is the operator's contact address registered with the
+	// ACME directory. LE uses this to send expiry warnings and
+	// service-disruption notices. Required when Enabled.
+	Email string `yaml:"email,omitempty"`
+
+	// CacheDir is the on-disk directory where autocert stores the
+	// account key, issued certs, and pending challenge state.
+	// Empty defaults to `<dataDir>/acme` at load time. Persistence
+	// across restarts is load-bearing: wiping this dir between
+	// restarts burns the LE duplicate-cert rate-limit budget
+	// (5/week per registered domain).
+	CacheDir string `yaml:"cacheDir,omitempty"`
+
+	// UseStaging routes the ACME client at LE's staging directory
+	// instead of production. Untrusted cert (browsers warn) but
+	// no rate limits — useful during deployment-tuning when the
+	// production rate limits would otherwise burn fast. Default
+	// false (production).
+	UseStaging bool `yaml:"useStaging,omitempty"`
+
+	// External443Mapping documents that the operator runs an
+	// external port-forward / load balancer that maps `WAN:443`
+	// to the bridge's `listenAddress`. Required when `Enabled`
+	// AND `listenAddress` doesn't already end in `:443` — without
+	// it, LE's TLS-ALPN-01 challenge cannot reach the bridge.
+	// True is the operator's promise that the mapping is in
+	// place; Validate cannot probe the WAN side.
+	External443Mapping bool `yaml:"external443Mapping,omitempty"`
+}
+
+// listenAddrIsPort443 reports whether the configured ListenAddress
+// binds TCP/443. Used by the autocert gate: LE's TLS-ALPN-01
+// validator connects to the SNI host on TCP/443 exclusively, so
+// either the bridge listens on :443 directly OR the operator has
+// promised an external port-forward (via
+// `autocert.external443Mapping: true`).
+//
+// Tolerant of the conventional bind shapes:
+//   - ":443"               (any-interface)
+//   - "0.0.0.0:443"        (explicit any-interface IPv4)
+//   - "[::]:443"           (IPv6 any)
+//   - "192.0.2.10:443"     (specific interface)
+//   - "[2001:db8::1]:443"  (IPv6 literal)
+func listenAddrIsPort443(addr string) bool {
+	if addr == "" {
+		return false
+	}
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	return port == "443"
+}
+
+// EffectiveAutocertCacheDir returns the autocert account + cert
+// cache directory. When Autocert.CacheDir is set, it's used
+// verbatim; when empty, defaults to <dataDir>/acme. Caller
+// resolves DataDir before consulting this so the default tracks
+// the actual data root across deployments.
+func (c *Config) EffectiveAutocertCacheDir() string {
+	if c.Autocert.CacheDir != "" {
+		return c.Autocert.CacheDir
+	}
+	return filepath.Join(c.DataDir, "acme")
 }
 
 // IsPublic reports whether the configured deployment mode is "public".
@@ -1005,17 +1086,30 @@ func (c *Config) Validate() error {
 		if c.Autocert.Domain == "" {
 			return errors.New("autocert.domain: must be set in public mode (the publicly-routable hostname iOS clients dial)")
 		}
-		// PR 2 scope: bridge serves the admin console over plain
-		// HTTP and relies on an external TLS-terminating reverse
-		// proxy (Caddy / nginx) for HTTPS. PR 3 adds native ACME
-		// + a tls.NewListener wrapper for the direct-TLS path,
-		// at which point AdminTLSTerminatedByProxy becomes optional.
-		// Until then, refuse public mode without the explicit
-		// proxy flag — the alternative is serving session cookies
-		// with the Secure attribute over plain HTTP, which
-		// browsers reject (login silently fails).
-		if !c.Deployment.AdminTLSTerminatedByProxy {
-			return errors.New("deployment.adminTLSTerminatedByProxy: must be true in public mode (PR 3 will add native TLS termination; until then run behind Caddy / nginx)")
+		// Admin-TLS gate: either the bridge terminates TLS itself
+		// (autocert.enabled, using the same cert via the SNI
+		// switcher), or an external reverse proxy terminates TLS
+		// and forwards plain HTTP to the bridge's admin listener.
+		// Serving the admin console over plain HTTP without a
+		// proxy in front would leak session cookies + credentials
+		// over the open internet — and `Secure` cookies (mandatory
+		// in public mode) would refuse to be sent over HTTP
+		// anyway, surfacing as a silent login failure.
+		if !c.Deployment.AdminTLSTerminatedByProxy && !c.Autocert.Enabled {
+			return errors.New("public mode requires either deployment.adminTLSTerminatedByProxy: true OR autocert.enabled: true — admin console cannot be served over plain HTTP")
+		}
+		// ACME / autocert prerequisites.
+		if c.Autocert.Enabled {
+			if c.Autocert.Email == "" {
+				return errors.New("autocert.email: must be set when autocert.enabled (LE registers the account key against this address)")
+			}
+			// TLS-ALPN-01 is validated by LE only on TCP/443.
+			// The operator must either bind :443 directly OR
+			// confirm an external port-forward maps WAN:443 →
+			// the bridge's listenAddress.
+			if !listenAddrIsPort443(c.ListenAddress) && !c.Autocert.External443Mapping {
+				return fmt.Errorf("autocert.enabled requires listenAddress on port :443 OR autocert.external443Mapping: true — got listenAddress %q (LE's TLS-ALPN-01 challenge is only validated on TCP/443)", c.ListenAddress)
+			}
 		}
 	} else if err := validateLoopbackAddress(c.AdminAddress); err != nil {
 		return fmt.Errorf("adminAddress %q: %w", c.AdminAddress, err)

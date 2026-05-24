@@ -19,6 +19,7 @@ package admin
 
 import (
 	"context"
+	"crypto/tls"
 	"embed"
 	"errors"
 	"fmt"
@@ -232,6 +233,38 @@ type Deps struct {
 	// limiter's own goroutine is managed by its NewRateLimiter /
 	// Stop API — admin doesn't own its lifecycle.
 	LoginLimiter *adminauth.RateLimiter
+
+	// TLSConfig, when non-nil, makes Serve wrap the underlying
+	// net.Listener in tls.NewListener using this config — i.e. the
+	// admin console serves HTTPS instead of plain HTTP. Required
+	// when the bridge terminates TLS for the admin console
+	// itself (public mode + autocert.enabled). Nil when:
+	//   - loopback mode (historical no-TLS contract); OR
+	//   - public mode with AdminTLSTerminatedByProxy=true
+	//     (reverse proxy fronts TLS, bridge serves plain HTTP on
+	//     a private interface).
+	//
+	// Wired in cmd/bridge/main.go via certManager.AdminTLSConfig().
+	TLSConfig *tls.Config
+
+	// AutocertStatus surfaces a per-request snapshot of the
+	// autocert.Manager's live state for the dashboard tile.
+	// Nil-safe — when absent the tile renders "not configured"
+	// and /api/autocert/status returns the same disabled shape.
+	// Wired via a closure in cmd/bridge/main.go so this package
+	// doesn't import internal/tlsacme.
+	AutocertStatus func() AutocertStatusSnapshot
+}
+
+// AutocertStatusSnapshot mirrors tlsacme.Status for the admin
+// surface, defined here so the admin package stays decoupled from
+// internal/tlsacme. Wired via the AutocertStatus closure.
+type AutocertStatusSnapshot struct {
+	Domain      string    `json:"domain,omitempty"`
+	CertPresent bool      `json:"certPresent"`
+	NotAfter    time.Time `json:"notAfter,omitempty"`
+	LastError   string    `json:"lastError,omitempty"`
+	LastCheck   time.Time `json:"lastCheck,omitempty"`
 }
 
 // AdminBatchCoordinator is the admin-side interface the Library
@@ -664,6 +697,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/cert", s.apiCertInfo)
 	mux.HandleFunc("GET /api/tailscale/status", s.apiTailscaleStatus)
 	mux.HandleFunc("POST /api/tailscale/refresh-cert", s.apiTailscaleRefreshCert)
+	mux.HandleFunc("GET /api/autocert/status", s.apiAutocertStatus)
 	mux.HandleFunc("GET /api/pairing", s.apiPairingList)
 	mux.HandleFunc("POST /api/pairing/{id}/approve", s.apiPairingApprove)
 	mux.HandleFunc("POST /api/pairing/{id}/decline", s.apiPairingDecline)
@@ -754,6 +788,19 @@ func (s *Server) Serve(ctx context.Context) error {
 		return fmt.Errorf("admin listen %s: %w", addr, err)
 	}
 	s.boundAdminAddr = lis.Addr().String()
+	// Public-mode direct-TLS path (PR 3): wrap the TCP listener
+	// in tls.NewListener using the cmd-side certManager's
+	// AdminTLSConfig. Same SNI switcher serves the public API,
+	// so the admin console gets the LE cert for the operator's
+	// domain SNI and the self-signed cert for direct-IP /
+	// unknown SNI. cmd-side wiring sets TLSConfig to nil for
+	// loopback mode and for public mode with
+	// AdminTLSTerminatedByProxy=true.
+	scheme := "http"
+	if s.deps.TLSConfig != nil {
+		lis = tls.NewListener(lis, s.deps.TLSConfig)
+		scheme = "https"
+	}
 	srv := &http.Server{
 		Handler: s.Handler(),
 		// BaseContext derives every request's r.Context() from the
@@ -793,7 +840,7 @@ func (s *Server) Serve(ctx context.Context) error {
 	}
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(lis) }()
-	logger.Info("console listening", "url", fmt.Sprintf("http://%s/", lis.Addr()))
+	logger.Info("console listening", "url", fmt.Sprintf("%s://%s/", scheme, lis.Addr()))
 	select {
 	case <-ctx.Done():
 		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
