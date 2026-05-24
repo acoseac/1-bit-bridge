@@ -112,8 +112,17 @@ func (s *Server) apiLogin(w http.ResponseWriter, r *http.Request) {
 		// learn they've been throttled. Sleep on the handler
 		// goroutine; net/http handles request cancellation via the
 		// goroutine returning normally.
+		//
+		// Use NewTimer + defer Stop instead of `time.After`
+		// (Gemini medium review on PR #290): `time.After` allocates
+		// a Timer that survives until fire even when the context
+		// cancels first. On an attacker-controlled, frequently-
+		// cancelled path the leaked timers accumulate ~5 s of
+		// memory + scheduling state per cancelled attempt.
+		timer := time.NewTimer(adminauth.RateLimitDelay)
+		defer timer.Stop()
 		select {
-		case <-time.After(adminauth.RateLimitDelay):
+		case <-timer.C:
 		case <-r.Context().Done():
 			return
 		}

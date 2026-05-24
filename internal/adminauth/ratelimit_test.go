@@ -1,6 +1,7 @@
 package adminauth
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
@@ -78,6 +79,46 @@ func TestRateLimiterRecordSuccessClearsBucket(t *testing.T) {
 	rl.RecordSuccess("1.2.3.4", "admin")
 	if !rl.Allow("1.2.3.4", "admin") {
 		t.Error("RecordSuccess should clear the failure history")
+	}
+}
+
+func TestRateLimiterCapsMapSizeUnderHighCardinality(t *testing.T) {
+	// Gemini-medium DoS-by-cardinality guard: an attacker spraying
+	// failed logins with random (IP, username) pairs MUST NOT grow
+	// the map without bound. At the cap, the limiter evicts older
+	// entries to make room for newer ones; total size stays
+	// ≤ maxBuckets regardless of input cardinality.
+	rl := NewRateLimiter()
+	defer rl.Stop()
+
+	// Inject a stepping clock so eviction's ordering by
+	// lastAttemptAt is deterministic (the older 1.2× of entries
+	// should be the eviction candidates after the cap fills).
+	tick := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	rl.now = func() time.Time { return tick }
+
+	// Seed 1.2× the cap so eviction definitely kicks in. Don't
+	// go 2× — the test would take a while at maxBuckets=10 000
+	// because evictOldestLocked is O(N) per overflow event.
+	inputCardinality := maxBuckets + maxBuckets/5
+	for i := 0; i < inputCardinality; i++ {
+		ip := fmt.Sprintf("203.0.113.%d", i%256)
+		user := fmt.Sprintf("u%d", i)
+		rl.RecordFailure(ip, user)
+		tick = tick.Add(time.Microsecond)
+	}
+
+	rl.mu.Lock()
+	size := len(rl.buckets)
+	rl.mu.Unlock()
+	if size > maxBuckets {
+		t.Errorf("len(buckets) = %d, want ≤ %d (cap)", size, maxBuckets)
+	}
+	// Loose lower bound — we should still hold near-cap entries
+	// (eviction is partial-batch, not wipe-everything).
+	if size < maxBuckets-evictBatch {
+		t.Errorf("len(buckets) = %d, want close to %d (evicting too aggressively)",
+			size, maxBuckets)
 	}
 }
 

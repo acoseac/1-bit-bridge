@@ -376,17 +376,30 @@ const passwordAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456
 
 // generatePassword returns a 16-character alphanumeric string
 // drawn from passwordAlphabet using crypto/rand. 16 chars from a
-// 56-character alphabet ≈ 92 bits of entropy — well above what
+// 55-character alphabet ≈ 92 bits of entropy — well above what
 // bcrypt's design comfortably handles.
+//
+// Uses rejection sampling to eliminate modulo bias (Gemini medium
+// review on PR #290). 256 % 55 = 36, so a naive `b[0] % 55` would
+// make the first 36 alphabet positions ~22 % more likely than the
+// last 19. We discard any byte ≥ 220 (the largest multiple of 55
+// below 256) and resample. Average rejection rate ≈ 14 % — cheap.
 func generatePassword() (string, error) {
 	const length = 16
+	alphabetLen := byte(len(passwordAlphabet))
+	// Largest multiple of alphabetLen that fits in a byte. Bytes
+	// in [limit, 256) are rejected and resampled.
+	limit := byte(256 - (256 % int(alphabetLen)))
 	out := make([]byte, length)
-	for i := range out {
+	for i := 0; i < length; {
 		var b [1]byte
 		if _, err := rand.Read(b[:]); err != nil {
 			return "", err
 		}
-		out[i] = passwordAlphabet[int(b[0])%len(passwordAlphabet)]
+		if b[0] < limit {
+			out[i] = passwordAlphabet[b[0]%alphabetLen]
+			i++
+		}
 	}
 	return string(out), nil
 }

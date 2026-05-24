@@ -19,30 +19,45 @@ import (
 // Callers should treat an empty return as "use a fallback key" or
 // simply log + skip (don't crash the request).
 //
-// When trustForwardedHeaders is true:
-//   - X-Forwarded-For: split on ",", trim whitespace, take the
-//     left-most non-empty + net.ParseIP-valid element. The
-//     left-most is the original client (Caddy/nginx default).
-//     Reject invalid IP strings — `X-Forwarded-For: garbage, 1.2.3.4`
-//     would otherwise key the bucket on "garbage".
-//   - X-Real-IP: single value, validated via net.ParseIP.
-//   - Fall through to r.RemoteAddr only when both headers are
-//     absent / invalid.
+// When trustForwardedHeaders is true, header preference order:
+//
+//  1. **X-Real-IP** — preferred. Caddy and nginx both set this to
+//     a single value: the immediate connecting client's IP, fresh
+//     on every request, overwriting any client-supplied value.
+//     If the proxy is correctly configured this is the most
+//     spoof-resistant signal.
+//  2. **X-Forwarded-For, right-most valid element** — fallback.
+//     XFF is a comma-separated chain where each proxy APPENDS the
+//     IP it saw on connect. The RIGHT-most entry is therefore the
+//     IP your trusted proxy saw (== the true client in a one-hop
+//     setup). The left-most is whatever the client claimed,
+//     including arbitrary attacker-forged values (Gemini High
+//     security review on PR #290). Taking the right-most defeats
+//     header injection regardless of whether the proxy strips
+//     client-supplied XFF on ingress.
+//  3. **r.RemoteAddr** — when neither header is set / valid.
 //
 // Documented proxy-config expectation: operator's Caddy/nginx MUST
-// strip client-supplied X-Forwarded-For / X-Real-IP on ingress
-// before injecting its own (Caddy default; nginx requires explicit
-// `proxy_set_header X-Forwarded-For $remote_addr` — the
-// append-default form would let the client poison the chain).
+// set X-Real-IP to the connecting client's IP on ingress (Caddy
+// default; nginx requires `proxy_set_header X-Real-IP $remote_addr`).
+// XFF append-or-overwrite either way works under the right-most
+// strategy.
+//
+// Single-proxy assumption: this code is correct for the common
+// `Caddy → bridge` and `nginx → bridge` shapes. Operators chaining
+// multiple proxies (CDN → load balancer → bridge) get the
+// load-balancer's IP, not the original client; a trusted-proxy-
+// count hop wouldn't be hard to add later, but the PR 2 scope
+// only documents single-proxy reverse-proxy deployments.
 func ExtractClientIP(r *http.Request, trustForwardedHeaders bool) string {
 	if trustForwardedHeaders {
-		if ip := firstValidForwardedFor(r.Header.Get("X-Forwarded-For")); ip != "" {
-			return ip
-		}
 		if ip := strings.TrimSpace(r.Header.Get("X-Real-IP")); ip != "" {
 			if net.ParseIP(ip) != nil {
 				return ip
 			}
+		}
+		if ip := rightmostValidForwardedFor(r.Header.Get("X-Forwarded-For")); ip != "" {
+			return ip
 		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
@@ -57,15 +72,22 @@ func ExtractClientIP(r *http.Request, trustForwardedHeaders bool) string {
 	return host
 }
 
-// firstValidForwardedFor returns the left-most non-empty,
+// rightmostValidForwardedFor returns the right-most non-empty,
 // net.ParseIP-valid element of an X-Forwarded-For header value.
 // Empty string if none found.
-func firstValidForwardedFor(raw string) string {
+//
+// Right-most is the spoof-resistant choice — see ExtractClientIP's
+// docstring for the threat model. An attacker who can append to
+// XFF (the realistic case where they control their own connection
+// to the reverse proxy) can spoof the LEFT entries but the proxy
+// will append its own (true-client) view as the rightmost.
+func rightmostValidForwardedFor(raw string) string {
 	if raw == "" {
 		return ""
 	}
-	for _, part := range strings.Split(raw, ",") {
-		candidate := strings.TrimSpace(part)
+	parts := strings.Split(raw, ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		candidate := strings.TrimSpace(parts[i])
 		if candidate == "" {
 			continue
 		}
