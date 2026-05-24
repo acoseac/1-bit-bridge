@@ -90,14 +90,17 @@ func (s *Server) sessionMiddleware(next http.Handler) http.Handler {
 		}
 		// Safe-by-construction redirect URL — IsSafeRelativePath
 		// rejects anything that could coerce to an off-origin URL.
-		next := r.URL.Path
+		// Renamed from `next` to `redirectTarget` to avoid
+		// shadowing the `next http.Handler` parameter at function
+		// head (CodeRabbit trivial review post-PR-#292).
+		redirectTarget := r.URL.Path
 		if r.URL.RawQuery != "" {
-			next += "?" + r.URL.RawQuery
+			redirectTarget += "?" + r.URL.RawQuery
 		}
-		if !adminauth.IsSafeRelativePath(next) {
-			next = "/"
+		if !adminauth.IsSafeRelativePath(redirectTarget) {
+			redirectTarget = "/"
 		}
-		loginURL := "/login?next=" + url.QueryEscape(next)
+		loginURL := "/login?next=" + url.QueryEscape(redirectTarget)
 		http.Redirect(w, r, loginURL, http.StatusFound)
 	})
 }

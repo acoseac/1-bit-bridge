@@ -30,7 +30,7 @@ The rest of the bridge — manifest scanner, MusicBrainz enricher, upscale pool,
 
 ## 1. Provision the rclone mount
 
-Tag `rclone config` to add a remote pointing at your B2 bucket. Then create a systemd unit (or launchd plist on macOS / Scheduled Task on Windows) that mounts the bucket at a stable path:
+Run `rclone config` to add a remote pointing at your B2 bucket. Then create a systemd unit (or launchd plist on macOS / Scheduled Task on Windows) that mounts the bucket at a stable path:
 
 ```ini
 # /etc/systemd/system/rclone-music.service
@@ -91,7 +91,7 @@ sudo bridge init \
 
 The init output ends in a one-time banner:
 
-```
+```text
 ┌─ Admin credentials — shown ONCE ────────────────────────┐
 │ Save these now. The plaintext is not stored anywhere.   │
 │                                                         │

@@ -64,8 +64,9 @@ func TestInitPublicHappyPath(t *testing.T) {
 	if len(loaded.LibraryRoots) != 0 {
 		t.Errorf("LibraryRoots should be empty in public init without --library; got %v", loaded.LibraryRoots)
 	}
-	if len(loaded.CustomEndpoints) == 0 {
-		t.Error("CustomEndpoints should be seeded with the autocert domain")
+	wantEndpoint := "https://bridge.example.com"
+	if len(loaded.CustomEndpoints) != 1 || loaded.CustomEndpoints[0] != wantEndpoint {
+		t.Errorf("CustomEndpoints = %v, want [%q]", loaded.CustomEndpoints, wantEndpoint)
 	}
 
 	// adminauth.json must exist and carry the bcrypt hash.
@@ -134,6 +135,100 @@ func TestInitPublicRequiresEmailUnlessProxy(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "--email") {
 		t.Errorf("stderr should mention --email: %s", stderr.String())
+	}
+}
+
+// TestInitPublicWithProxyDefaultsToLoopback pins the CodeRabbit
+// Major fix post-PR-#295: in --admin-tls-proxy mode the bridge
+// MUST NOT serve plain-HTTP admin on all interfaces. The
+// reverse proxy reaches the admin endpoint on loopback; binding
+// 0.0.0.0 in proxy mode is an unsafe default that leaks
+// credentials over the open internet if the firewall is misconfigured
+// or the proxy is briefly down.
+func TestInitPublicWithProxyDefaultsToLoopback(t *testing.T) {
+	tmp := t.TempDir()
+	cfgDir := filepath.Join(tmp, "cfg")
+	var stdout, stderr bytes.Buffer
+	code := initCmd([]string{
+		"--yes", "--no-service", "--skip-doctor",
+		"--public",
+		"--domain", "bridge.example.com",
+		"--admin-tls-proxy",
+		"--dir", cfgDir,
+	}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("init: code=%d stderr=%s", code, stderr.String())
+	}
+	cfg, err := config.Load(filepath.Join(cfgDir, "bridge.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AdminAddress != "127.0.0.1:7789" {
+		t.Errorf("AdminAddress = %q, want 127.0.0.1:7789 in --admin-tls-proxy mode (safe loopback default)",
+			cfg.AdminAddress)
+	}
+}
+
+// TestInitPublicDirectTLSDefaultsToAllInterfaces: the inverse —
+// autocert-direct-TLS mode wraps the admin listener in
+// tls.NewListener via certManager, so binding 0.0.0.0 is safe
+// (TLS is the trust boundary). The historical default.
+func TestInitPublicDirectTLSDefaultsToAllInterfaces(t *testing.T) {
+	tmp := t.TempDir()
+	cfgDir := filepath.Join(tmp, "cfg")
+	var stdout, stderr bytes.Buffer
+	code := initCmd([]string{
+		"--yes", "--no-service", "--skip-doctor",
+		"--public",
+		"--domain", "bridge.example.com",
+		"--email", "ops@example.com",
+		// No --admin-tls-proxy
+		"--dir", cfgDir,
+	}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("init: code=%d stderr=%s", code, stderr.String())
+	}
+	cfg, err := config.Load(filepath.Join(cfgDir, "bridge.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AdminAddress != "0.0.0.0:7789" {
+		t.Errorf("AdminAddress = %q, want 0.0.0.0:7789 (direct-TLS mode — TLS is the trust boundary)",
+			cfg.AdminAddress)
+	}
+}
+
+// TestInitPublicAdminAddressOverrideWinsInBothModes: explicit
+// --admin-address always wins over the posture-default.
+func TestInitPublicAdminAddressOverrideWinsInBothModes(t *testing.T) {
+	for _, proxyMode := range []bool{false, true} {
+		tmp := t.TempDir()
+		cfgDir := filepath.Join(tmp, "cfg")
+		var stdout, stderr bytes.Buffer
+		args := []string{
+			"--yes", "--no-service", "--skip-doctor",
+			"--public",
+			"--domain", "bridge.example.com",
+			"--admin-address", "10.0.0.5:8080",
+			"--dir", cfgDir,
+		}
+		if proxyMode {
+			args = append(args, "--admin-tls-proxy")
+		} else {
+			args = append(args, "--email", "ops@example.com")
+		}
+		code := initCmd(args, strings.NewReader(""), &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("proxy=%v: init code=%d stderr=%s", proxyMode, code, stderr.String())
+		}
+		cfg, err := config.Load(filepath.Join(cfgDir, "bridge.yaml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.AdminAddress != "10.0.0.5:8080" {
+			t.Errorf("proxy=%v: AdminAddress = %q, want 10.0.0.5:8080 (explicit --admin-address must win)",
+				proxyMode, cfg.AdminAddress)
+		}
 	}
 }
 

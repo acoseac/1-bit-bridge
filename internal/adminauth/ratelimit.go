@@ -69,11 +69,12 @@ type bucket struct {
 // a determined attacker willing to wait through restarts can be
 // blocked at the firewall layer.
 type RateLimiter struct {
-	mu      sync.Mutex
-	buckets map[string]*bucket
-	now     func() time.Time
-	stopCh  chan struct{}
-	done    chan struct{}
+	mu       sync.Mutex
+	buckets  map[string]*bucket
+	now      func() time.Time
+	stopCh   chan struct{}
+	done     chan struct{}
+	stopOnce sync.Once // gates the close(stopCh) — see Stop()
 }
 
 // NewRateLimiter creates a limiter and starts its janitor
@@ -90,14 +91,22 @@ func NewRateLimiter() *RateLimiter {
 }
 
 // Stop terminates the janitor goroutine. Safe to call multiple
-// times; subsequent calls are no-ops.
+// times from any number of goroutines — subsequent calls block
+// on the same `<-rl.done` receive until the janitor exits, then
+// return.
+//
+// Pre-fix used a select/default + bare close pattern that races:
+// two concurrent callers could both pass `default` then race on
+// `close(stopCh)` → panic. The doc-comment claimed concurrency
+// safety but the implementation didn't deliver. `sync.Once`
+// closes that hole — the first caller closes stopCh + waits for
+// done; subsequent callers wait on done directly (which is
+// already closed by the janitor's `defer close(rl.done)`).
+// CodeRabbit Major review post-PR-#292.
 func (rl *RateLimiter) Stop() {
-	select {
-	case <-rl.stopCh:
-		return
-	default:
-	}
-	close(rl.stopCh)
+	rl.stopOnce.Do(func() {
+		close(rl.stopCh)
+	})
 	<-rl.done
 }
 

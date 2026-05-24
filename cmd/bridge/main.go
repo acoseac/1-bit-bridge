@@ -2240,7 +2240,33 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		} else {
 			fmt.Fprintf(stdout, "Library: %q (roots: %v)\n", cfg.LibraryName, cfg.LibraryRoots)
 		}
-		fmt.Fprintf(stdout, "Admin console: %s://%s/ — log in with the credentials from `bridge admin reset-password`\n", adminScheme, cfg.AdminAddress)
+		// Operator-reachable URL — derived from the
+		// configured public domain, NOT cfg.AdminAddress
+		// (which is a bind target like 0.0.0.0:7789 or
+		// 127.0.0.1:7789 — neither helps an operator
+		// browsing from elsewhere). CodeRabbit Major review
+		// post-PR-#295.
+		//
+		// **Proxy-mode special case** (CodeRabbit Major
+		// review post-PR-#296): when admin TLS is terminated
+		// by a reverse proxy, the bridge's local transport
+		// is plain http on a private port (e.g.
+		// http://bridge.example.com:7789/) — but THAT is the
+		// backend, not the URL the operator visits. The
+		// reverse proxy fronts admin at https://<domain>/
+		// (or some operator-chosen path). The bridge can't
+		// know what the proxy maps externally, so we print
+		// the canonical assumption: https + domain, no port.
+		// Operators with a non-standard proxy mapping will
+		// recognise this is just the prompt and substitute
+		// their actual URL.
+		var adminURL string
+		if cfg.Deployment.AdminTLSTerminatedByProxy {
+			adminURL = "https://" + strings.TrimSuffix(cfg.Autocert.Domain, ".") + "/"
+		} else {
+			adminURL = banneradminURL(cfg.Autocert.Domain, cfg.AdminAddress, adminScheme)
+		}
+		fmt.Fprintf(stdout, "Admin console: %s — log in with the credentials from `bridge admin reset-password`\n", adminURL)
 	} else {
 		fmt.Fprintf(stdout, "Library: %q (roots: %v)\n", cfg.LibraryName, cfg.LibraryRoots)
 		fmt.Fprintf(stdout, "TLS fingerprint (pin this on the iOS side):\n  %s\n", fingerprint)

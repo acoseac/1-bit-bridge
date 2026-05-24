@@ -86,15 +86,10 @@ func TestExtractClientIPRejectsClientSpoofedLeftmost(t *testing.T) {
 	// Threat model: attacker controls their own connection and
 	// puts a forged value in XFF. Proxy appends its true-client
 	// view. With right-most strategy, the proxy's view wins; the
-	// attacker's forge is ignored.
+	// attacker's forge is ignored. Use realistic IP values so the
+	// walk's net.ParseIP check accepts both entries — the
+	// assertion below pins that we still take the right-most.
 	r := newReq("10.0.0.1:54321", map[string]string{
-		"X-Forwarded-For": "evil-spoofed-junk, real-client-from-proxy",
-	})
-	// Both entries are non-IP-parseable strings — the walk
-	// rejects "real-client-from-proxy" too, then falls through.
-	// Use realistic IP values instead to assert the right-most
-	// preference under attack.
-	r = newReq("10.0.0.1:54321", map[string]string{
 		"X-Forwarded-For": "1.1.1.1, 2.2.2.2",
 	})
 	got := ExtractClientIP(r, true)

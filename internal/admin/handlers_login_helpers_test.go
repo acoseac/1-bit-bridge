@@ -30,7 +30,10 @@ func readResponseSnippet(resp *http.Response) ([]byte, error) {
 
 func loginAndExpectOK(t *testing.T, client *http.Client, base, username, password string) {
 	t.Helper()
-	body, _ := json.Marshal(map[string]string{"username": username, "password": password})
+	body, err := json.Marshal(map[string]string{"username": username, "password": password})
+	if err != nil {
+		t.Fatal(err)
+	}
 	req, _ := http.NewRequest("POST", base+"/login", strings.NewReader(string(body)))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", "https://bridge.example.com")

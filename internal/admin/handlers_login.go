@@ -176,6 +176,18 @@ func (s *Server) apiLogout(w http.ResponseWriter, r *http.Request) {
 // the bridge thinks it's being served over HTTPS). HostOnly via no
 // Domain attribute. Path=/ so the cookie is sent to every admin
 // endpoint.
+//
+// **MaxAge is the SessionHardCap (7d), not SessionIdleTimeout
+// (24h)** (Gemini medium review post-PR-#292). The browser
+// deletes the cookie at MaxAge regardless of activity; setting
+// MaxAge to the idle timeout effectively makes 24h a hard cap
+// for the client side, with no way for the server's idle-bump
+// behaviour to extend it. Setting MaxAge to the hard cap lets the
+// server-side `ValidateSession` enforce the 24h idle window —
+// if the operator is active, LastUsedAt bumps; if they walk away
+// for >24h, the server returns ErrSessionExpired on the next
+// request and triggers a /login redirect. The cookie itself
+// survives a closed-tab + reopen within the 7d window.
 func (s *Server) setSessionCookie(w http.ResponseWriter, raw string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
@@ -184,7 +196,7 @@ func (s *Server) setSessionCookie(w http.ResponseWriter, raw string) {
 		HttpOnly: true,
 		Secure:   s.cookieSecure(),
 		SameSite: http.SameSiteStrictMode,
-		MaxAge:   int(adminauth.SessionIdleTimeout / time.Second),
+		MaxAge:   int(adminauth.SessionHardCap / time.Second),
 	})
 }
 

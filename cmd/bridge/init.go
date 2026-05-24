@@ -278,7 +278,26 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		if *publicListenAddress != "" {
 			cfg.ListenAddress = *publicListenAddress
 		}
-		cfg.AdminAddress = "0.0.0.0:7789"
+		// Admin bind default depends on TLS posture
+		// (CodeRabbit Major review post-PR-#295). Operator
+		// override via --admin-address ALWAYS wins.
+		//   - autocert-direct-TLS (no --admin-tls-proxy):
+		//     defaults 0.0.0.0:7789 so the operator's iOS
+		//     management surface can reach it from any
+		//     interface. The TLS wrap via certManager is the
+		//     trust boundary.
+		//   - --admin-tls-proxy: defaults 127.0.0.1:7789. The
+		//     reverse proxy talks to it on loopback; the
+		//     bridge MUST NOT serve plain-HTTP admin on
+		//     non-loopback interfaces (would leak session
+		//     cookies / login creds if firewall is mis-wired
+		//     or proxy is briefly down). The 0.0.0.0 default
+		//     pre-fix was an unsafe shape.
+		if *publicProxy {
+			cfg.AdminAddress = "127.0.0.1:7789"
+		} else {
+			cfg.AdminAddress = "0.0.0.0:7789"
+		}
 		if *publicAdminAddress != "" {
 			cfg.AdminAddress = *publicAdminAddress
 		}
