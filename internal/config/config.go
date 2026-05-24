@@ -1140,6 +1140,13 @@ func (c *Config) Validate() error {
 		if _, _, err := net.SplitHostPort(c.AdminAddress); err != nil {
 			return fmt.Errorf("adminAddress %q: %w", c.AdminAddress, err)
 		}
+		// Trim before the empty check so a whitespace-only
+		// value ("   ") fails fast with the same error message
+		// (CodeRabbit Minor review post-PR-#292). Persist the
+		// trimmed form back into the config so downstream
+		// consumers (tlsacme.New, the admin Origin allowlist,
+		// the SNI gate) all see the canonical value.
+		c.Autocert.Domain = strings.TrimSpace(c.Autocert.Domain)
 		if c.Autocert.Domain == "" {
 			return errors.New("autocert.domain: must be set in public mode (the publicly-routable hostname iOS clients dial)")
 		}

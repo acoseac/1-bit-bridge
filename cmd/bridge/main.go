@@ -2240,7 +2240,25 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		} else {
 			fmt.Fprintf(stdout, "Library: %q (roots: %v)\n", cfg.LibraryName, cfg.LibraryRoots)
 		}
-		fmt.Fprintf(stdout, "Admin console: %s://%s/ — log in with the credentials from `bridge admin reset-password`\n", adminScheme, cfg.AdminAddress)
+		// Operator-reachable URL — derived from the
+		// configured public domain, NOT cfg.AdminAddress
+		// (which is a bind target like 0.0.0.0:7789 or
+		// 127.0.0.1:7789 — neither helps an operator
+		// browsing from elsewhere). CodeRabbit Major review
+		// post-PR-#295. The displayed URL assumes:
+		//   - The operator's DNS A-record points at the VPS.
+		//   - In autocert-direct-TLS mode, the admin port is
+		//     reachable on the same domain.
+		//   - In reverse-proxy mode, the operator's proxy
+		//     fronts the admin path on the same domain (or
+		//     they've documented the alternate URL — we can't
+		//     know what they configured externally).
+		// Non-:443 admin port appended explicitly so the URL
+		// works for the autocert-direct-TLS shape; :443
+		// suppressed for the proxy / non-standard cases that
+		// likely don't bind the admin port directly.
+		adminURL := banneradminURL(cfg.Autocert.Domain, cfg.AdminAddress, adminScheme)
+		fmt.Fprintf(stdout, "Admin console: %s — log in with the credentials from `bridge admin reset-password`\n", adminURL)
 	} else {
 		fmt.Fprintf(stdout, "Library: %q (roots: %v)\n", cfg.LibraryName, cfg.LibraryRoots)
 		fmt.Fprintf(stdout, "TLS fingerprint (pin this on the iOS side):\n  %s\n", fingerprint)

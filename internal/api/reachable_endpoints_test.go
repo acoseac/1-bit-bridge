@@ -406,30 +406,31 @@ func TestReachableEndpoints_PublicModeOnlyCustomAndAutocert(t *testing.T) {
 		},
 	}
 	eps := s.reachableEndpoints()
-	if len(eps) == 0 {
-		t.Fatal("public-mode reachableEndpoints returned 0 URLs (want customEndpoints + autocert domain)")
+	// Exact-allowlist assertion (CodeRabbit Minor review
+	// post-PR-#295): pre-fix the test combined a "non-empty"
+	// length check with deny-rules for .ts.net / .local / 100.64
+	// — any unexpected endpoint that didn't happen to match
+	// those substrings would still pass. Asserting the precise
+	// expected set instead refuses any endpoint not in the
+	// allowlist, so a future leak path (e.g. a new cert SAN
+	// gather that creeps into reachableEndpoints) gets caught.
+	wantSet := map[string]bool{
+		"https://bridge.example.com":  false, // autocert domain (no :443)
+		"https://alt.example.com:443": false, // customEndpoint
 	}
 	for _, u := range eps {
-		if strings.Contains(u, ".ts.net") || strings.Contains(u, "100.64.") {
-			t.Errorf("public-mode leaked Tailscale URL %q", u)
+		if _, ok := wantSet[u]; !ok {
+			t.Errorf("public-mode emitted unexpected endpoint %q (allowlist=%v)", u, wantSet)
 		}
-		if strings.Contains(u, ".local:") {
-			t.Errorf("public-mode leaked .local URL %q", u)
-		}
+		wantSet[u] = true
 	}
-	// Synthesized autocert URL omits :443 (https default) so it
-	// dedupes against a customEndpoint of bare "https://host"
-	// downstream — Gemini medium normalization on PR #295.
-	if !contains(eps, "https://bridge.example.com") {
-		t.Errorf("public-mode missing autocert domain URL (bare https://host shape, no :443); got %v", eps)
-	}
-	for _, u := range eps {
-		if u == "https://bridge.example.com:443" {
-			t.Errorf("public-mode synthesized URL should omit :443 for the https default; got %q", u)
+	for u, seen := range wantSet {
+		if !seen {
+			t.Errorf("public-mode missing expected endpoint %q (got=%v)", u, eps)
 		}
 	}
-	if !contains(eps, "https://alt.example.com:443") {
-		t.Errorf("public-mode missing customEndpoint URL; got %v", eps)
+	if len(eps) != len(wantSet) {
+		t.Errorf("public-mode endpoint count = %d, want %d (eps=%v)", len(eps), len(wantSet), eps)
 	}
 }
 

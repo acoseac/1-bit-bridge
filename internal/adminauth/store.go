@@ -186,15 +186,41 @@ func (s *Store) ResetPassword(username, newPassword string) error {
 		return fmt.Errorf("bcrypt: %w", err)
 	}
 	now := s.now()
-	if s.user == nil {
-		s.user = &userRecord{
-			Username:  username,
-			CreatedAt: now,
-		}
+	// Build a FRESH userRecord pointer rather than mutating the
+	// existing one in place. Two reasons (CodeRabbit Critical +
+	// Major review post-PR-#292):
+	//
+	//  1. **Verify race**: Verify grabs `user := s.user` under
+	//     the lock then releases it for the (slow) bcrypt
+	//     compare. Pre-fix, ResetPassword mutating
+	//     `s.user.PasswordHash` raced the bcrypt read of the
+	//     same string. Pointer-swap is atomic at the language
+	//     level so the captured-and-released pointer in Verify
+	//     keeps observing the OLD record consistently.
+	//  2. **Persist-failure rollback**: pre-fix, a persist()
+	//     error returned with in-memory state already mutated
+	//     to the new hash but disk still carrying the old —
+	//     login would succeed against the new password until
+	//     the next restart silently reverted everything.
+	//     Now: snapshot prev, swap to fresh, persist; restore
+	//     prev on persist error.
+	prev := s.user
+	next := &userRecord{
+		Username:          username,
+		PasswordHash:      string(hash),
+		PasswordChangedAt: now,
 	}
-	s.user.PasswordHash = string(hash)
-	s.user.PasswordChangedAt = now
-	return s.persist()
+	if prev != nil {
+		next.CreatedAt = prev.CreatedAt
+	} else {
+		next.CreatedAt = now
+	}
+	s.user = next
+	if err := s.persist(); err != nil {
+		s.user = prev // restore in-memory to match disk
+		return err
+	}
+	return nil
 }
 
 // Verify checks the credentials and returns nil on match.

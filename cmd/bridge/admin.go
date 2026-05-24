@@ -50,6 +50,16 @@ func adminResetPasswordCmd(args []string, stdin io.Reader, stdout, stderr io.Wri
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	// Refuse unexpected positional args so a fat-fingered
+	// invocation like `bridge admin reset-password admin newpw`
+	// (where the operator forgot --username) doesn't silently
+	// proceed against the default admin user with the wrong
+	// shape (CodeRabbit Minor review post-PR-#292).
+	if fs.NArg() > 0 {
+		fmt.Fprintf(stderr, "unexpected arguments after flags: %v\n", fs.Args())
+		fmt.Fprintln(stderr, "all options must be passed as flags; use --username / --from-stdin")
+		return 2
+	}
 
 	cfg, _, err := loadConfigForAdminCmd(*configPath)
 	if err != nil {
