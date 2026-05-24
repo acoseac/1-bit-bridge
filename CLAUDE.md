@@ -190,6 +190,82 @@ ssh arsenie@192.168.0.158 \
 
 **Multiple desktop network categories on Windows**: `Get-NetConnectionProfile` may report multiple connections (Ethernet "ORBI16 2" → Public, Tailscale → Private). Firewall rules added via `firewall-bridge-windows.ps1` target ALL three profiles (`Domain,Private,Public`) by design — without `Public` the Ethernet LAN would still be blocked even though it's the active surface. Don't narrow the profile scope without checking `Get-NetConnectionProfile` first.
 
+### bridge.ars.md (Linux VPS, public mode, SSH `arsenie@bridge.ars.md`)
+
+Public-internet-reachable bridge running in `deployment.mode: public` against a Backblaze B2 bucket mounted via rclone. Stood up 2026-05-24 (steps 1–11 of the post-PR-#296 deployment plan — iOS pairing deferred until the iOS Mirror PR for `PinningDelegate.shouldSkipPinning` extension lands; see `~/Desktop/to-do/2026-05-24-ios-mirror-public-vps-pinning-exemption.md`).
+
+**Coordinates:**
+
+| Item | Value |
+|---|---|
+| SSH | `ssh -i ~/.ssh/1bitbridge_key arsenie@bridge.ars.md` (key was copied from `~/Downloads/1bitbridge_key.pem`, perms 0600) |
+| Default shell | bash (Linux) |
+| Service manager | systemd |
+| Binary path | `/usr/local/bin/bridge` (setcap `cap_net_bind_service=+ep` for non-root :443 bind) |
+| Config path | `/home/arsenie/bridge-data/bridge.yaml` (parent 0700, file 0600) |
+| Data dir | `/home/arsenie/bridge-data/data/` (adminauth.json, server.crt/.key, acme/, backups/) |
+| Library mount | `/mnt/music` (rclone B2 FUSE, `--read-only --vfs-cache-mode full --vfs-cache-max-size 5G`) |
+| Log | `journalctl -u 1-bit-bridge` (systemd journal — no separate file) |
+| Public endpoint | `https://bridge.ars.md/` (autocert direct-TLS on :443) |
+| Admin endpoint | `https://bridge.ars.md:7789/` (autocert + adminauth session cookie) |
+
+**systemd units:**
+
+| Unit | Notes |
+|---|---|
+| `rclone-music.service` | `Type=notify`, `User=arsenie`, mounts `b2-music:1bitbucket` → `/mnt/music`. Bridge `Requires=` this so a failed mount blocks the bridge from starting (avoids the FUSE-drop deletion-pass trap). |
+| `1-bit-bridge.service` | `Type=simple`, `User=arsenie`, `Requires=rclone-music.service`, `AmbientCapabilities=CAP_NET_BIND_SERVICE`, `ProtectSystem=strict` + `ReadOnlyPaths` + `ReadWritePaths=/home/arsenie/bridge-data`. |
+| `~/.config/rclone/rclone.conf` | `b2-music` backend defined as `s3` (NOT `b2` — bucket-scoped keys fail on the b2 backend); endpoint `s3.eu-central-003.backblazeb2.com`, `provider=Other`. Operator wrote it via `rclone config create` on the host — secrets never traverse this assistant or the local workstation. |
+
+**Firewall posture (ufw):**
+- `22/tcp` (SSH) — **whitelisted to operator's public IP only**.
+- `7789/tcp` (admin console) — **whitelisted to operator's public IP only**.
+- `443/tcp` + `443/udp` (HTTPS + HTTP/3) — open to the internet (the public API + autocert TLS-ALPN-01 challenge land here).
+
+**Connection-issues debugging hint**: if SSH or admin-console access starts failing intermittently, **check whether the operator's public IP has changed** (residential CGNAT rotation, switching networks, VPN flip). The 22/7789 whitelist is keyed on the IP at standup-time (2026-05-24). The fix is to update the ufw rules; the bridge itself doesn't care. Public-internet :443 access is unaffected by IP changes — if iOS clients can still reach `/v1/health` but you can't SSH, that's the whitelist class of issue.
+
+**Helper scripts**: none on the host today — operator runs setup commands directly during install. Update flow uses the cross-compile + `scp .new` + two-step rename + `systemctl restart` pattern from "Step 2 — Windows production bridge" below, adapted for Linux (see canonical deploy procedure below).
+
+**Canonical update procedure** (from operator's macOS workstation, on every merged runtime-behavior PR):
+
+```sh
+# 1. Cross-compile against current main.
+git checkout main && git pull --ff-only
+GOOS=linux GOARCH=amd64 go build \
+  -ldflags "-s -w -X github.com/acoseac/1-bit-bridge/internal/version.ServerVersion=$(git describe --tags --always)" \
+  -o dist/bridge-linux-amd64 ./cmd/bridge
+
+# 2. Upload as .new + verify SHA-256 BEFORE swap (so a truncated upload
+#    can't replace a working binary).
+scp -i ~/.ssh/1bitbridge_key dist/bridge-linux-amd64 \
+    arsenie@bridge.ars.md:/tmp/bridge.new
+shasum -a 256 dist/bridge-linux-amd64                                                                 # local
+ssh -i ~/.ssh/1bitbridge_key arsenie@bridge.ars.md 'sha256sum /tmp/bridge.new'                        # remote
+
+# 3. Two-step rename swap + restart (mirrors the Windows pattern;
+#    keeps the .old-<ts> backup for one-step rollback).
+ssh -i ~/.ssh/1bitbridge_key arsenie@bridge.ars.md "
+  TS=\$(date +%Y%m%d-%H%M%S)
+  sudo mv /usr/local/bin/bridge /usr/local/bin/bridge.old-\$TS
+  sudo mv /tmp/bridge.new /usr/local/bin/bridge
+  sudo setcap cap_net_bind_service=+ep /usr/local/bin/bridge
+  sudo systemctl restart 1-bit-bridge
+  sleep 2
+  systemctl is-active 1-bit-bridge
+"
+
+# 4. Verify version + LAN health (admin console requires the whitelisted IP).
+curl -s https://bridge.ars.md/v1/health | jq '.serverVersion, .leCertNotAfter'
+```
+
+**Leave the `bridge.old-<ts>` backup ~24h** so a regression caught later has one-step rollback (`sudo mv /usr/local/bin/bridge /usr/local/bin/bridge.broken && sudo mv /usr/local/bin/bridge.old-<ts> /usr/local/bin/bridge && sudo systemctl restart 1-bit-bridge`).
+
+**Don't `journalctl --vacuum-time` aggressively** during a debug loop — bridge logs are the only forensic surface (no separate log file path). 7-day default retention is fine; cut tighter only when disk pressure is real.
+
+**Cli-mode-only host.** Tailscale is NOT installed; `cfg.Tailscale.Mode` is `disabled`. The bridge advertises a single `https://bridge.ars.md/` endpoint and that's the only path iOS clients can use post-pairing. Adding Tailscale later is straightforward but currently out of scope.
+
+**Update reminder.** This host should be brought up to current `main` after every merged runtime-behavior PR (same as `home-pc`). Docs-only / test-only merges can skip. See [Post-merge deployment](#post-merge-deployment) for the umbrella rule — bridge.ars.md is **step 3** alongside the local fixture (step 1) and `home-pc` (step 2).
+
 ## Things that have bitten before
 
 - **Byte-by-byte async iteration kills throughput.** Early `BridgeSourceClient` on the iOS side used `URLSession.bytes(for:)` which yields one `UInt8` per async step — 20M yields for a 20 MB file stalled the pipeline and surfaced as "Network connection lost" even over localhost. Fixed by switching to `URLSession.download(for:)`. Don't regress the iOS side back to byte-wise async reads; and don't add a server-side chunked-encoding mode that assumes byte-wise client consumption.
@@ -648,6 +724,22 @@ Proven upgrade sequence (v0.1.3-9 → v0.1.3-11 swap, 2026-05-18):
 - Library DB (SQLite in `internal/manifest/`) — unchanged for bug-fix releases. Schema migrations are a separate deployment plan (out of scope for this section).
 
 **Cli-mode vs tsnet-mode caveat.** The home-pc bridge runs in default `cli` mode, so any tsnet-specific code path (e.g. the dual-stack HTTP/3 binding from PR #271) is dormant on it. The LAN HTTP/3 listener still serves QUIC over the LAN endpoint. If the host ever flips to `tailscale: { mode: tsnet }`, re-verify tsnet-specific behavior on a post-upgrade restart.
+
+### Step 3 — Linux VPS public-mode bridge (`bridge.ars.md`)
+
+Public-internet bridge running `deployment.mode: public` against rclone-mounted B2. Same cross-compile-then-swap pattern as Step 2, adapted for systemd + linux/amd64. Full coordinates + canonical update procedure live in the `bridge.ars.md` subsection under "Production deployments" above — don't duplicate the deploy commands here; consult that section directly.
+
+**One-line summary**: `GOOS=linux GOARCH=amd64 go build … -o dist/bridge-linux-amd64 ./cmd/bridge` → `scp -i ~/.ssh/1bitbridge_key … :/tmp/bridge.new` → SHA-256 verify → two-step `sudo mv` swap + `setcap cap_net_bind_service=+ep` + `systemctl restart 1-bit-bridge`.
+
+**Public-mode-specific verification** (extends Step 2's `/v1/health` check):
+
+```sh
+curl -s https://bridge.ars.md/v1/health | jq '.serverVersion, .certNotAfter, .leCertNotAfter'
+# Expect: ServerVersion string matches the build, certNotAfter ~397d out
+# (self-signed pinned cert), leCertNotAfter ~90d out (Let's Encrypt).
+```
+
+**Connection-issues hint** (re-stated for the post-merge loop): SSH and admin-port 7789 are whitelisted to the operator's public IP in ufw. A residential CGNAT rotation or VPN flip can make those fail while `/v1/health` over :443 still works — that's a whitelist class of issue, NOT a bridge bug. Update ufw rules from the new IP.
 
 ## Multi-PR batch workflow
 
