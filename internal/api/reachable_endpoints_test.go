@@ -417,10 +417,64 @@ func TestReachableEndpoints_PublicModeOnlyCustomAndAutocert(t *testing.T) {
 			t.Errorf("public-mode leaked .local URL %q", u)
 		}
 	}
-	if !contains(eps, "https://bridge.example.com:443") {
-		t.Errorf("public-mode missing autocert domain URL; got %v", eps)
+	// Synthesized autocert URL omits :443 (https default) so it
+	// dedupes against a customEndpoint of bare "https://host"
+	// downstream — Gemini medium normalization on PR #295.
+	if !contains(eps, "https://bridge.example.com") {
+		t.Errorf("public-mode missing autocert domain URL (bare https://host shape, no :443); got %v", eps)
+	}
+	for _, u := range eps {
+		if u == "https://bridge.example.com:443" {
+			t.Errorf("public-mode synthesized URL should omit :443 for the https default; got %q", u)
+		}
 	}
 	if !contains(eps, "https://alt.example.com:443") {
 		t.Errorf("public-mode missing customEndpoint URL; got %v", eps)
+	}
+}
+
+// TestReachableEndpoints_PublicModeNon443IncludesPort pins the
+// inverse: when listenAddress is NOT on :443 (e.g. operator
+// running behind an external port-forward via
+// autocert.external443Mapping), the synthesized autocert URL
+// MUST include the port so iOS dials the right address.
+func TestReachableEndpoints_PublicModeNon443IncludesPort(t *testing.T) {
+	cfg := &config.Config{
+		ListenAddress: ":7788",
+		Deployment:    config.DeploymentConfig{Mode: "public", AdminTLSTerminatedByProxy: true},
+		Autocert:      config.AutocertConfig{Domain: "bridge.example.com"},
+	}
+	s := &Server{cfgHolder: config.NewRuntimeConfig(cfg)}
+	eps := s.reachableEndpoints()
+	if !contains(eps, "https://bridge.example.com:7788") {
+		t.Errorf("non-:443 listenAddress should keep the port in the synthesized URL; got %v", eps)
+	}
+}
+
+// TestReachableEndpoints_PublicModeDedupesAutocertAgainstCustom
+// pins the operator-workaround case: the operator declared the
+// autocert domain in BOTH customEndpoints (as `https://host`)
+// AND autocert.domain (= "host"). After the :443 normalization
+// the two URLs are byte-identical and classStableUniqueURLs
+// collapses them to a single entry.
+func TestReachableEndpoints_PublicModeDedupesAutocertAgainstCustom(t *testing.T) {
+	cfg := &config.Config{
+		ListenAddress: ":443",
+		Deployment:    config.DeploymentConfig{Mode: "public", AdminTLSTerminatedByProxy: true},
+		Autocert:      config.AutocertConfig{Domain: "bridge.example.com"},
+		// Operator declared the autocert domain in customEndpoints
+		// too (the realistic init-script shape).
+		CustomEndpoints: []string{"https://bridge.example.com"},
+	}
+	s := &Server{cfgHolder: config.NewRuntimeConfig(cfg)}
+	eps := s.reachableEndpoints()
+	count := 0
+	for _, u := range eps {
+		if u == "https://bridge.example.com" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("autocert + customEndpoint duplicate should dedupe to exactly 1; got %d (eps=%v)", count, eps)
 	}
 }

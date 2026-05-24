@@ -77,14 +77,26 @@ func pairAlternates(primary string, cfg *config.Config) []string {
 	var urls []string
 	if cfg.IsPublic() {
 		// Public mode: operator-declared customEndpoints +
-		// the autocert public domain only.
+		// the autocert public domain only. Synthesize the
+		// autocert URL without `:443` when the listen port is
+		// the https default — matches the shape
+		// cmd/bridge/init.go writes into customEndpoints so
+		// the downstream dedupe in `ensurePrimaryFirst`
+		// collapses near-duplicate entries (Gemini medium on
+		// PR #295: pre-fix the synthesized URL always carried
+		// the port suffix and would differ from a
+		// customEndpoint of bare `https://host`).
 		for _, e := range cfg.CustomEndpoints {
 			if e = strings.TrimSpace(e); e != "" {
 				urls = append(urls, e)
 			}
 		}
 		if d := strings.TrimSpace(cfg.Autocert.Domain); d != "" {
-			urls = append(urls, "https://"+d+":"+portStr)
+			u := "https://" + d
+			if portStr != "443" {
+				u += ":" + portStr
+			}
+			urls = append(urls, u)
 		}
 	} else {
 		// Loopback mode (historical behaviour): the

@@ -120,6 +120,34 @@ func TestPairAlternatesPublicModeFiltersLANAndTailscale(t *testing.T) {
 	}
 }
 
+// TestPairAlternatesPublicModeOmits443Port pins the Gemini
+// medium normalization on PR #295: when the bridge listens on
+// :443 (the https default), the synthesized autocert URL is
+// `https://host` (no `:443` suffix) so an operator who also
+// declared `https://host` in customEndpoints sees one URL in
+// the QR, not two near-duplicates.
+func TestPairAlternatesPublicModeOmits443Port(t *testing.T) {
+	cfg := &config.Config{
+		ListenAddress:   ":443",
+		Deployment:      config.DeploymentConfig{Mode: "public", AdminTLSTerminatedByProxy: true},
+		Autocert:        config.AutocertConfig{Domain: "bridge.example.com"},
+		CustomEndpoints: []string{"https://bridge.example.com"},
+	}
+	got := pairAlternates("https://bridge.example.com", cfg)
+	count := 0
+	for _, u := range got {
+		if u == "https://bridge.example.com" {
+			count++
+		}
+		if u == "https://bridge.example.com:443" {
+			t.Errorf("synthesized URL must omit :443; got %q", u)
+		}
+	}
+	if count != 1 {
+		t.Errorf("autocert + customEndpoint duplicate should dedupe to exactly 1; got %d alternates=%v", count, got)
+	}
+}
+
 func TestEnsurePrimaryFirstHappyPathPassthrough(t *testing.T) {
 	primary := "https://primary:7788"
 	in := []string{primary, "https://b:7788", "https://c:7788"}

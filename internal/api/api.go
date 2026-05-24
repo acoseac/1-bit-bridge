@@ -942,7 +942,7 @@ func (s *Server) reachableEndpoints() []string {
 	// alt routes) and the autocert public domain. Skip the host-
 	// interface walk + the Tailscale append entirely.
 	if cfg.IsPublic() {
-		eps := publicModeEndpoints(cfg, port, portStr)
+		eps := publicModeEndpoints(cfg, portStr)
 		return classStableUniqueURLs(eps)
 	}
 	eps := advertise.Endpoints(advertise.Params{
@@ -1045,13 +1045,16 @@ func (s *Server) appendTailscaleEndpoints(eps []advertise.Endpoint, portStr stri
 // bridge, …) to iOS clients, and the operator's iOS app dials
 // only the public domain anyway.
 //
-// The autocert domain is synthesized as `https://<domain>:<port>`
-// — same shape as the customEndpoints entries — so iOS treats it
-// uniformly. When the customEndpoints already list the same
-// URL (operator typed the domain into customEndpoints AND set
-// autocert.domain to the same value), classStableUniqueURLs
-// dedupes downstream.
-func publicModeEndpoints(cfg *config.Config, port int, portStr string) []advertise.Endpoint {
+// The autocert domain is synthesized as `https://<domain>` when
+// port is the https default (:443) or `https://<domain>:<port>`
+// otherwise. Matching the shape `cmd/bridge/init.go` writes into
+// the customEndpoints seed avoids near-duplicate entries when
+// the operator declares the same domain in both fields and the
+// dedupe downstream collapses the pair instead of admitting two
+// URLs that differ only by the implicit https default
+// (`https://h` vs `https://h:443` would otherwise be distinct
+// strings to classStableUniqueURLs — Gemini medium on PR #295).
+func publicModeEndpoints(cfg *config.Config, portStr string) []advertise.Endpoint {
 	var eps []advertise.Endpoint
 	for _, raw := range cfg.CustomEndpoints {
 		if raw = strings.TrimSpace(raw); raw != "" {
@@ -1059,10 +1062,11 @@ func publicModeEndpoints(cfg *config.Config, port int, portStr string) []adverti
 		}
 	}
 	if d := strings.TrimSpace(cfg.Autocert.Domain); d != "" {
-		eps = append(eps, advertise.Endpoint{
-			URL:   "https://" + d + ":" + portStr,
-			Class: advertise.ClassCustom,
-		})
+		u := "https://" + d
+		if portStr != "443" {
+			u += ":" + portStr
+		}
+		eps = append(eps, advertise.Endpoint{URL: u, Class: advertise.ClassCustom})
 	}
 	return eps
 }
