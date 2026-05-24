@@ -112,6 +112,39 @@
         </small>
       </div>
 
+      {{/*
+        PR 4 — Tailscale mode dropdown + mDNS checkbox. Both are
+        scope-limited by deployment posture:
+          - mDNS: hidden in public mode (no LAN to advertise on;
+            Validate refuses public+true anyway).
+          - Tailscale: kept enabled in public mode (tailnet-routed
+            public bridges are legitimate) but with a caption
+            noting the default-disabled posture.
+      */}}
+      <div class="field">
+        <label for="settings-tailscale-mode">Tailscale mode</label>
+        <select id="settings-tailscale-mode" name="tailscaleMode">
+          <option value="cli" {{if eq .Data.TailscaleMode "cli"}}selected{{end}}>cli (host Tailscale.app / tailscaled)</option>
+          <option value="tsnet" {{if eq .Data.TailscaleMode "tsnet"}}selected{{end}}>tsnet (embedded Tailscale node) <span class="badge warn">restart</span></option>
+          <option value="disabled" {{if eq .Data.TailscaleMode "disabled"}}selected{{end}}>disabled</option>
+        </select>
+        <small class="hint">
+          {{if .Data.IsPublic}}Default <code>disabled</code> in public mode (VPS deployments rarely run Tailscale). {{end}}
+          Switching <em>away from disabled</em> requires a restart (auto-pilot + listener wiring need a clean boot). Switching <em>to disabled</em> hot-reloads — the auto-pilot stops and the LE cert is cleared from the SNI switcher.
+        </small>
+      </div>
+
+      <div class="field" {{if .Data.IsPublic}}hidden{{end}}>
+        <label>
+          <input type="checkbox" name="mdnsEnabled" {{if .Data.MDNSEnabled}}checked{{end}}>
+          Advertise on mDNS / Bonjour
+        </label>
+        <small class="hint">
+          iOS clients on the same LAN auto-discover the bridge via Bonjour. Loopback installs default to ON; toggling hot-reloads without restart.
+          {{if .Data.IsPublic}}<em>(Public mode: not applicable.)</em>{{end}}
+        </small>
+      </div>
+
       <div class="field">
         <label>Custom endpoints
           <textarea name="customEndpoints" rows="3"

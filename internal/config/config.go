@@ -70,6 +70,7 @@ type Config struct {
 	Integrity       IntegrityConfig    `yaml:"integrity,omitempty"`
 	Deployment      DeploymentConfig   `yaml:"deployment,omitempty"`
 	Autocert        AutocertConfig     `yaml:"autocert,omitempty"`
+	MDNS            MDNSConfig         `yaml:"mdns,omitempty"`
 
 	// DisableHTTP3 prevents the server from binding UDP ports and
 	// advertising Alt-Svc headers for HTTP/3 upgrades. Defaults to false.
@@ -466,6 +467,40 @@ func (c *Config) EffectiveAutocertCacheDir() string {
 		return c.Autocert.CacheDir
 	}
 	return filepath.Join(c.DataDir, "acme")
+}
+
+// MDNSConfig controls the Bonjour `_onebit-bridge._tcp` service
+// advertisement. Defaults differ by deployment posture:
+//
+//   - Loopback (default): mDNS is ON. Home LAN deployments rely on
+//     it for iOS auto-discovery — without mDNS, every new device
+//     would need a manual pair URL.
+//   - Public: mDNS is OFF. A VPS has no local LAN to advertise on
+//     (the bridge's interfaces are routable WAN addresses);
+//     emitting Bonjour records would be a no-op at best and a
+//     small attack-surface leak at worst (TXT records expose the
+//     bridge's protocol version + library name).
+//
+// `Enabled` is a pointer so applyDefaults can distinguish
+// "missing field, apply posture-default" from "explicit
+// operator override" — same shape `IntegrityConfig.VariantSweepIntervalSec`
+// uses for the same reason. Always read via `EffectiveMDNSEnabled()`;
+// never dereference Enabled directly (nil-deref hazard).
+type MDNSConfig struct {
+	Enabled *bool `yaml:"enabled,omitempty"`
+}
+
+// EffectiveMDNSEnabled returns the resolved mDNS posture: explicit
+// operator value when set, otherwise the deployment-mode default
+// (true for loopback, false for public).
+//
+// Tolerates either form at the YAML layer; the pointer indirection
+// is the single source of truth for missing-vs-explicit.
+func (c *Config) EffectiveMDNSEnabled() bool {
+	if c.MDNS.Enabled != nil {
+		return *c.MDNS.Enabled
+	}
+	return !c.IsPublic()
 }
 
 // IsPublic reports whether the configured deployment mode is "public".
@@ -979,6 +1014,18 @@ func (c *Config) applyDefaults() {
 	if c.AdminAddress == "" && !c.IsPublic() {
 		c.AdminAddress = DefaultAdminAddress
 	}
+	// Tailscale mode posture default: public-mode VPS deployments
+	// typically don't have Tailscale installed; defaulting to
+	// "cli" would spawn fork-execs of a missing binary every 30 s
+	// on the /v1/health hot path (see PR #95 cache). Default to
+	// "disabled" in public mode + warn at load so the operator
+	// sees the explicit-default-applied breadcrumb. Loopback
+	// installs keep the historical "cli" default (empty Mode
+	// resolves to TailscaleModeCLI in EffectiveMode).
+	if strings.TrimSpace(c.Tailscale.Mode) == "" && c.IsPublic() {
+		c.Tailscale.Mode = string(TailscaleModeDisabled)
+		validateLogger.Warn("tailscale.mode defaulted to disabled in public mode (no implicit CLI probe on the public bridge)")
+	}
 	if c.DataDir == "" {
 		c.DataDir = DefaultDataDir
 	}
@@ -1107,6 +1154,17 @@ func (c *Config) Validate() error {
 		// anyway, surfacing as a silent login failure.
 		if !c.Deployment.AdminTLSTerminatedByProxy && !c.Autocert.Enabled {
 			return errors.New("public mode requires either deployment.adminTLSTerminatedByProxy: true OR autocert.enabled: true — admin console cannot be served over plain HTTP")
+		}
+		// mDNS in public mode is a misconfiguration: a VPS has no
+		// LAN to advertise on (interfaces are routable WAN
+		// addresses), and the Bonjour TXT records leak the
+		// bridge's protocol version + library name to anyone
+		// scanning the local subnet at the VPS provider. The
+		// EffectiveMDNSEnabled default for public mode is false,
+		// so an operator who hasn't touched the field is fine;
+		// only an EXPLICIT `mdns.enabled: true` reaches here.
+		if c.MDNS.Enabled != nil && *c.MDNS.Enabled {
+			return errors.New("mdns.enabled: must be false in public mode (no LAN to advertise on; TXT records leak library metadata)")
 		}
 		// ACME / autocert prerequisites.
 		if c.Autocert.Enabled {

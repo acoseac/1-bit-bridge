@@ -2025,27 +2025,52 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		}
 	}
 
+	// PR 4 hot-reload callbacks. The Settings PATCH path fires
+	// these after persisting the new config so the runtime
+	// flips into the new posture without a restart.
+	//
+	// **Closure indirection** is load-bearing: `mdnsLife` is
+	// created AFTER `net.Listen` further below (we need the
+	// actual bound port), but `admin.New` is called here BEFORE
+	// the listener. The closure resolves the live pointer at
+	// invocation time — admin handler firings can't reach this
+	// path until well after the listener is up anyway. Same
+	// nil-safe shape for the Tailscale Disable callback.
+	var mdnsLife *mdnsLifecycle // populated post-listener below
+	mdnsToggleCallback := func(b bool) {
+		if mdnsLife != nil {
+			mdnsLife.Set(b)
+		}
+	}
+	tailscaleDisableCallback := func() {
+		if tailscaleAuto != nil {
+			tailscaleAuto.Disable()
+		}
+	}
+
 	adminSrv, err := admin.New(admin.Deps{
-		CfgHolder:       cfgHolder,
-		CfgPath:         absCfgPath,
-		Auth:            store,
-		Manifest:        manifestStore,
-		Scanner:         scanner,
-		Resolver:        apiSrv.Resolver(),
-		Fingerprint:     fingerprint,
-		AdminAuth:       adminAuthStore,
-		LoginLimiter:    loginLimiter,
-		TLSConfig:       adminTLSConfig,
-		AutocertStatus:  autocertStatusClosure,
-		StartedAt:       time.Now().UTC(),
-		ScanCtx:         scanCtx,
-		Restart:         cancel,
-		Updater:         updAdapter,
-		BackupSources:   backupSources,
-		Tailscale:       tailscaleAdminSrc,
-		Pairing:         pairingStore,
-		IsSupervised:    supervision.IsSupervised(),
-		UpscalePrecheck: transcode.PrecheckSox,
+		CfgHolder:        cfgHolder,
+		CfgPath:          absCfgPath,
+		Auth:             store,
+		Manifest:         manifestStore,
+		Scanner:          scanner,
+		Resolver:         apiSrv.Resolver(),
+		Fingerprint:      fingerprint,
+		AdminAuth:        adminAuthStore,
+		LoginLimiter:     loginLimiter,
+		TLSConfig:        adminTLSConfig,
+		AutocertStatus:   autocertStatusClosure,
+		MDNSToggle:       mdnsToggleCallback,
+		TailscaleDisable: tailscaleDisableCallback,
+		StartedAt:        time.Now().UTC(),
+		ScanCtx:          scanCtx,
+		Restart:          cancel,
+		Updater:          updAdapter,
+		BackupSources:    backupSources,
+		Tailscale:        tailscaleAdminSrc,
+		Pairing:          pairingStore,
+		IsSupervised:     supervision.IsSupervised(),
+		UpscalePrecheck:  transcode.PrecheckSox,
 		UpscaleStats: func() *admin.UpscalePoolStats {
 			// Snapshot the pool's live counters when the
 			// feature is active. Two off-paths return nil
@@ -2200,24 +2225,30 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// Advertise on mDNS so iOS clients on the same LAN auto-discover
 	// this server. Failures are non-fatal — mDNS is a nice-to-have,
 	// and the server runs fine without it (users connect by IP).
+	//
+	// PR 4 promotes the advertiser into a hot-reloadable
+	// lifecycle struct: the admin Settings PATCH path can flip
+	// mdns.enabled on/off without a restart by firing the
+	// `mdnsLife.Set(bool)` callback. Initial state is gated on
+	// `EffectiveMDNSEnabled()` so an operator who set
+	// `mdns.enabled: false` in YAML doesn't get a Bonjour
+	// service emitted briefly at boot.
 	boundAddr, _ := lis.Addr().(*net.TCPAddr)
-	var advertiser *bridgemdns.Advertiser
 	if boundAddr != nil {
-		a, err := bridgemdns.Advertise(bridgemdns.Config{
+		mdnsLife = newMDNSLifecycle(bridgemdns.Config{
 			InstanceName:    cfg.LibraryName,
 			Port:            boundAddr.Port,
 			ProtocolVersion: version.ProtocolVersion,
 			LibraryName:     cfg.LibraryName,
-		})
-		if err != nil {
-			fmt.Fprintf(stderr, "mDNS advertise failed (non-fatal): %v\n", err)
-		} else {
-			advertiser = a
-			fmt.Fprintf(stdout, "mDNS: advertising as %q on %s\n", cfg.LibraryName, bridgemdns.Service)
+		}, stdout, stderr)
+		if cfg.EffectiveMDNSEnabled() {
+			mdnsLife.Set(true)
+		} else if cfg.IsPublic() {
+			fmt.Fprintf(stdout, "mDNS: disabled by public-mode default\n")
 		}
 	}
-	if advertiser != nil {
-		defer advertiser.Close()
+	if mdnsLife != nil {
+		defer mdnsLife.Close()
 	}
 
 	var lanH3Srv *http3.Server

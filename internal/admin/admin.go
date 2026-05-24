@@ -254,6 +254,22 @@ type Deps struct {
 	// Wired via a closure in cmd/bridge/main.go so this package
 	// doesn't import internal/tlsacme.
 	AutocertStatus func() AutocertStatusSnapshot
+
+	// MDNSToggle is the hot-reload callback for the mDNS
+	// advertiser. The Settings PATCH handler fires it after
+	// persisting a `mdns.enabled` change, with the new resolved
+	// value. main.go wires it to its mdnsLifecycle.Set; nil
+	// (test wiring) means the change persists but the runtime
+	// state doesn't flip — operator restart picks it up.
+	MDNSToggle func(enabled bool)
+
+	// TailscaleDisable is the hot-reload callback for the
+	// Tailscale auto-pilot. The Settings PATCH handler fires it
+	// on the any→disabled transition so the running auto-pilot
+	// cancels its ctx + clears the LE cert from certManager.
+	// Transitions INTO cli/tsnet still require restart (auto-
+	// pilot + listener composition need a clean boot).
+	TailscaleDisable func()
 }
 
 // AutocertStatusSnapshot mirrors tlsacme.Status for the admin

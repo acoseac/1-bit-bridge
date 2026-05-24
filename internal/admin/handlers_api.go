@@ -119,6 +119,22 @@ type settingsResponse struct {
 	// `bridge serve` for the long-lived transcode.Pool to
 	// instantiate (or shut down).
 	UpscaleEnabled bool `json:"upscaleEnabled"`
+	// PR 4: tailscale + mDNS posture.
+	// TailscaleMode mirrors cfg.Tailscale.EffectiveMode (one of
+	// "cli", "tsnet", "disabled"). IsPublic flags the
+	// deployment posture so the UI can show a "default disabled
+	// in public mode" caption without re-querying.
+	TailscaleMode string `json:"tailscaleMode"`
+	// MDNSEnabled reflects EffectiveMDNSEnabled — the resolved
+	// posture-aware value, not the raw pointer. Loopback
+	// defaults true; public defaults false. Validate refuses
+	// the public+true combination.
+	MDNSEnabled bool `json:"mdnsEnabled"`
+	// IsPublic surfaces cfg.IsPublic() so the Settings UI can
+	// gate mDNS / Tailscale controls (e.g. hide the mDNS
+	// checkbox in public mode — Validate would refuse an
+	// enabled toggle anyway).
+	IsPublic bool `json:"isPublic"`
 	// UpscaleSoxAvailable reports whether `sox` is on PATH so
 	// the Settings UI can warn the operator before they
 	// enable the feature against a host that can't actually
@@ -649,6 +665,19 @@ func (s *Server) apiSettingsGet(w http.ResponseWriter, r *http.Request) {
 		// two handlers in lockstep. (CodeRabbit on PR #129.)
 		BackupIntervalHours: cfg.Backup.EffectiveIntervalHours(),
 		BackupKeep:          cfg.Backup.EffectiveKeep(),
+		// PR 4 — surface the resolved posture-aware values so
+		// the Settings UI doesn't have to re-derive them.
+		MDNSEnabled: cfg.EffectiveMDNSEnabled(),
+		IsPublic:    cfg.IsPublic(),
+	}
+	// Tailscale mode: tolerate an unknown YAML value by falling
+	// back to the effective default — the UI shows a recognizable
+	// selection even if Validate is currently rejecting the
+	// config (unlikely on the happy path; defensive).
+	if tm, err := cfg.Tailscale.EffectiveMode(); err == nil {
+		resp.TailscaleMode = string(tm)
+	} else {
+		resp.TailscaleMode = string(config.TailscaleModeCLI)
 	}
 	// Probe sox availability so the Settings UI can warn the
 	// operator before they enable the feature. Cheap (one
@@ -688,6 +717,23 @@ type settingsPatch struct {
 	// flag at runtime triggers a `RestartRequired: true`
 	// response.
 	UpscaleEnabled *bool `json:"upscaleEnabled,omitempty"`
+	// PR 4: TailscaleMode dropdown (cli|tsnet|disabled).
+	// Hot-reload matrix:
+	//   - any → disabled:    no restart (Deps.TailscaleDisable
+	//                        callback cancels auto-pilot + clears LE cert).
+	//   - disabled → cli:    RestartRequired:true (auto-pilot needs
+	//                        to spin up fresh + wire into certManager).
+	//   - disabled → tsnet:  RestartRequired:true (tsnet.Server is
+	//                        wired at startup; listener composition
+	//                        changes shape).
+	//   - cli ↔ tsnet:       RestartRequired:true (same rewiring as
+	//                        above; both modes are wired at startup).
+	TailscaleMode *string `json:"tailscaleMode,omitempty"`
+	// PR 4: MDNSEnabled checkbox. Hot-reloadable in BOTH
+	// directions — main.go's mdnsLifecycle.Set(enabled) starts
+	// or stops the Bonjour advertiser without a restart.
+	// Validate refuses public+true (no LAN to advertise on).
+	MDNSEnabled *bool `json:"mdnsEnabled,omitempty"`
 }
 
 type settingsPatchResponse struct {
@@ -786,6 +832,43 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		next.CustomEndpoints = splitCustomEndpointsText(*p.CustomEndpointsText)
 	}
 
+	// PR 4 — Tailscale mode dropdown. Hot-reload matrix:
+	//   any  → disabled:  no restart; cmd-side TailscaleDisable
+	//                     callback cancels the auto-pilot ctx +
+	//                     clears the LE cert from certManager.
+	//   any  → cli|tsnet: RestartRequired — auto-pilot + listener
+	//                     composition need a clean boot.
+	// Same posture-default rule from applyDefaults applies on
+	// validation: the new value is taken literally (empty string
+	// is rejected by EffectiveMode → caught by next.Validate
+	// below if user typoed).
+	tailscaleWasDisabled := false
+	tailscaleNowDisabled := false
+	if p.TailscaleMode != nil {
+		prevMode, _ := next.Tailscale.EffectiveMode()
+		tailscaleWasDisabled = prevMode == config.TailscaleModeDisabled
+		next.Tailscale.Mode = strings.TrimSpace(*p.TailscaleMode)
+		newMode, modeErr := next.Tailscale.EffectiveMode()
+		if modeErr != nil {
+			writeError(w, http.StatusBadRequest, "validate", modeErr.Error())
+			return
+		}
+		tailscaleNowDisabled = newMode == config.TailscaleModeDisabled
+		// Hot-reloadable: any→disabled. Restart-required: any
+		// transition that isn't into disabled.
+		if newMode != prevMode && !tailscaleNowDisabled {
+			restart = true
+		}
+	}
+	// PR 4 — mDNS toggle. Hot-reloadable in BOTH directions.
+	mdnsWasEnabled := next.EffectiveMDNSEnabled()
+	mdnsNowEnabled := mdnsWasEnabled
+	if p.MDNSEnabled != nil {
+		v := *p.MDNSEnabled
+		next.MDNS.Enabled = &v
+		mdnsNowEnabled = v
+	}
+
 	if err := next.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, "validate", err.Error())
 		return
@@ -795,6 +878,19 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.deps.CfgHolder.Store(next)
+
+	// Fire hot-reload side effects AFTER persisting + publishing
+	// the new config. Order matters: the mdns-toggle + tailscale-
+	// disable callbacks read the same RuntimeConfig (via cfgHolder)
+	// for their up-to-date view, and we want them to see the
+	// already-Store'd next snapshot.
+	if p.TailscaleMode != nil && tailscaleNowDisabled && !tailscaleWasDisabled && s.deps.TailscaleDisable != nil {
+		s.deps.TailscaleDisable()
+	}
+	if p.MDNSEnabled != nil && mdnsNowEnabled != mdnsWasEnabled && s.deps.MDNSToggle != nil {
+		s.deps.MDNSToggle(mdnsNowEnabled)
+	}
+
 	writeJSON(w, http.StatusOK, settingsPatchResponse{RestartRequired: restart})
 }
 

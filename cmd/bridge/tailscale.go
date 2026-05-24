@@ -78,6 +78,15 @@ type tailscaleAutoPilot struct {
 	// response within a couple of seconds when the node is fresh).
 	minMintInterval time.Duration
 
+	// cancelLocal is the cancel function for the per-auto-pilot
+	// context derived from the caller's Start ctx. Start replaces
+	// the bare `ctx` propagation with a child ctx so Disable() can
+	// stop ONLY the auto-pilot goroutines (startup + renewer)
+	// without affecting the shared scanCtx that drives the rest of
+	// the periodic workers. PR 4 hot-reload from the admin Settings
+	// `tailscale.mode: disabled` patch fires Disable.
+	cancelLocal context.CancelFunc
+
 	mu              sync.Mutex
 	lastMintAttempt time.Time
 	lastSnapshot    atomic.Pointer[tailscaleStatus]
@@ -119,9 +128,48 @@ func (a *tailscaleAutoPilot) magicDNSURL(magicDNS string) string {
 // Start kicks the initial detect+mint goroutine and the renewer
 // ticker. Both honour ctx.Done so SIGINT clears them out cleanly
 // alongside the rest of the periodic workers.
+//
+// PR 4: derives a child ctx so Disable() can cancel ONLY the
+// auto-pilot's two goroutines without affecting the caller's
+// shared scanCtx. The child ctx is also cancelled when the
+// parent fires (SIGINT path stays correct).
 func (a *tailscaleAutoPilot) Start(ctx context.Context) {
-	go a.runStartup(ctx)
-	go a.runRenewer(ctx)
+	childCtx, cancel := context.WithCancel(ctx)
+	a.mu.Lock()
+	a.cancelLocal = cancel
+	a.mu.Unlock()
+	go a.runStartup(childCtx)
+	go a.runRenewer(childCtx)
+}
+
+// Disable cancels the per-auto-pilot child ctx (stopping the
+// startup + renewer goroutines) and clears the Tailscale cert +
+// MagicDNS suffix from the certManager so the SNI switcher no
+// longer routes traffic through the LE cert. Idempotent — calling
+// twice is a cheap pair of no-ops.
+//
+// Used by the admin Settings hot-reload path
+// (tailscale.mode any→disabled). Restart-into-cli|tsnet is NOT
+// the inverse — it requires a fresh `bridge serve` start because
+// the listener composition + provider wiring need a clean boot.
+func (a *tailscaleAutoPilot) Disable() {
+	a.mu.Lock()
+	cancel := a.cancelLocal
+	a.cancelLocal = nil
+	a.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if a.certManager != nil {
+		a.certManager.SetTailscaleCert(nil)
+		a.certManager.SetMagicDNSSuffix("")
+	}
+	// Reset the snapshot so the admin tile reflects "disabled"
+	// instead of stale last-seen state.
+	a.lastSnapshot.Store(&tailscaleStatus{
+		CLIAvailable: false,
+		LastError:    "Tailscale integration disabled by operator (Settings → Networking → tailscale.mode)",
+	})
 }
 
 // runStartup performs the first detection + mint pass. Runs in a
