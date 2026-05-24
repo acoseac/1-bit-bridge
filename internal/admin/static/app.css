@@ -174,13 +174,15 @@ body.login-page {
 }
 
 .login-error {
-  /* Plain-rgba fallback so legacy webviews without color-mix() still get
-   * a tinted error background instead of IACVT-resolved transparency. */
+  /* Plain-rgba fallback before each color-mix() so legacy webviews
+   * without color-mix() still get a tinted error background AND a
+   * visible border instead of IACVT-resolved transparency. */
   background: rgba(225, 29, 72, 0.10);
   background: color-mix(in srgb, var(--danger) 12%, transparent);
   color: var(--danger);
   padding: 10px 12px;
   border-radius: var(--radius);
+  border: 1px solid rgba(225, 29, 72, 0.3);
   border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
   margin-top: 16px;
   font-size: 13px;
@@ -441,9 +443,13 @@ h2 {
   padding: 20px;
   margin-bottom: 20px;
   /* A faint inner border highlights the panel edge; layered with a soft
-   * exterior depth shadow for a modern card lift. The inset accent-colored
-   * line keeps the panel reading as part of the chassis. */
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 8%, transparent),
+   * exterior depth shadow for a modern card lift. The inset uses
+   * --accent-soft (a precomputed rgba(--accent, 8% light / 15% dark)
+   * token) instead of color-mix() so the entire multi-shadow declaration
+   * is parseable on legacy webviews without color-mix support — without
+   * this, IACVT would drop the entire box-shadow including the depth
+   * layers, leaving the panel flat. */
+  box-shadow: inset 0 0 0 1px var(--accent-soft),
               0 4px 6px -1px rgba(0, 0, 0, 0.05),
               0 2px 4px -1px rgba(0, 0, 0, 0.03);
 }
@@ -585,7 +591,14 @@ table.rows tbody tr:hover td { background: color-mix(in srgb, var(--accent) 4%, 
   cursor: pointer;
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  /* Explicit property list rather than `all` — `all` makes the browser
+   * watch every animatable property for changes, which is wasted work
+   * for a button that only animates the few listed below. The refined
+   * cubic-bezier curve is what we wanted from the modernization. */
+  transition: background 0.2s cubic-bezier(0.4, 0, 0.2, 1),
+              border-color 0.2s cubic-bezier(0.4, 0, 0.2, 1),
+              box-shadow 0.2s cubic-bezier(0.4, 0, 0.2, 1),
+              transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 .btn:hover {
   background: var(--bg-panel);
@@ -933,9 +946,13 @@ dialog h2 { font-size: 18px; color: var(--accent); }
 @media (prefers-reduced-motion: reduce) {
   .pairing-badge-pulse {
     /* No animation under reduced-motion. The brighter background
-     * already conveys "new request arrived" without movement. */
+     * already conveys "new request arrived" without movement.
+     * Use var(--warn) directly — color-mix(var --warn 100%, transparent)
+     * is mathematically equivalent but IACVT-invalid on legacy webviews
+     * (Chrome <111, Firefox <113, Safari <16.2), resolving to transparent
+     * and making the badge unreadable. */
     animation: none;
-    background: color-mix(in srgb, var(--warn) 100%, transparent);
+    background: var(--warn);
   }
 }
 .pairing-card-head {
