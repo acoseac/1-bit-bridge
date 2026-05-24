@@ -68,6 +68,7 @@ type Config struct {
 	Scanner         ScannerConfig      `yaml:"scanner,omitempty"`
 	Limits          LimitsConfig       `yaml:"limits,omitempty"`
 	Integrity       IntegrityConfig    `yaml:"integrity,omitempty"`
+	Deployment      DeploymentConfig   `yaml:"deployment,omitempty"`
 
 	// DisableHTTP3 prevents the server from binding UDP ports and
 	// advertising Alt-Svc headers for HTTP/3 upgrades. Defaults to false.
@@ -299,6 +300,85 @@ func (t TailscaleConfig) EffectiveMode() (TailscaleMode, error) {
 		return TailscaleModeDisabled, nil
 	}
 	return "", fmt.Errorf("tailscale.mode: unknown value %q (want cli|tsnet|disabled)", t.Mode)
+}
+
+// DeploymentConfig selects the overall deployment posture. `loopback`
+// (default) preserves the historical single-operator-on-trusted-LAN
+// shape: admin console is loopback-only with no auth, mDNS advertises
+// freely, Tailscale auto-pilot runs by default, the self-signed TLS
+// cert is the pinning anchor for iOS clients.
+//
+// `public` opts into the public-VPS posture: admin console can bind
+// non-loopback (auth-protected, see internal/adminauth — gated on
+// this flag), mDNS suppressed by default, Tailscale defaults to
+// disabled, the iOS pinning anchor shifts to a publicly-trusted LE
+// cert minted via autocert on the operator's domain.
+//
+// The flip is deliberately coarse — a single posture switch rather
+// than a cascade of independent knobs — and is RestartRequired (the
+// admin bind address, TLS listener composition, and auto-pilot
+// wiring all change shape; hot-applying mid-process is asking for
+// incidents).
+type DeploymentConfig struct {
+	// Mode selects the posture: "loopback" (default) or "public".
+	// Empty value falls back to "loopback" at load time.
+	Mode string `yaml:"mode,omitempty"`
+
+	// AdminTLSTerminatedByProxy lets operators run the bridge in
+	// public mode behind a TLS-terminating reverse proxy (Caddy /
+	// nginx) without having the bridge mint its own admin TLS cert.
+	// When true: the admin listener serves plain HTTP on its bind
+	// address (operator's responsibility to keep that bind on a
+	// private interface or restrict it via firewall); session
+	// cookies still carry Secure (so the operator's proxy MUST
+	// front them with HTTPS — browsers refuse to send Secure
+	// cookies over plain HTTP, surfacing a misconfigured setup as
+	// a visible login failure rather than a silent leak). When
+	// false (and Mode == public): the bridge wraps its admin
+	// listener in tls.NewListener against the same Manager that
+	// fronts the public API, so the admin console gets the LE
+	// cert for the operator's domain SNI and a self-signed cert
+	// for direct-IP / unknown SNI.
+	AdminTLSTerminatedByProxy bool `yaml:"adminTLSTerminatedByProxy,omitempty"`
+}
+
+// DeploymentMode is the typed representation of DeploymentConfig.Mode.
+type DeploymentMode string
+
+const (
+	DeploymentModeLoopback DeploymentMode = "loopback"
+	DeploymentModePublic   DeploymentMode = "public"
+)
+
+// EffectiveMode resolves the configured posture, applying the
+// "loopback" default for empty values. Returns one of the two known
+// modes or an error when the yaml carries something unrecognised —
+// surfaces the typo at config-load time rather than as silent
+// loopback-fallback that masks public-mode intent.
+//
+// Tolerant of leading/trailing whitespace and case differences in
+// the YAML value (mirrors TailscaleConfig.EffectiveMode).
+func (d DeploymentConfig) EffectiveMode() (DeploymentMode, error) {
+	mode := strings.ToLower(strings.TrimSpace(d.Mode))
+	switch mode {
+	case "", string(DeploymentModeLoopback):
+		return DeploymentModeLoopback, nil
+	case string(DeploymentModePublic):
+		return DeploymentModePublic, nil
+	}
+	return "", fmt.Errorf("deployment.mode: unknown value %q (want loopback|public)", d.Mode)
+}
+
+// IsPublic reports whether the configured deployment mode is "public".
+// Errors during EffectiveMode resolution (unknown values) are treated
+// as non-public — Validate surfaces the typo separately at load time,
+// and we don't want a typo to silently relax the loopback gate.
+func (c *Config) IsPublic() bool {
+	mode, err := c.Deployment.EffectiveMode()
+	if err != nil {
+		return false
+	}
+	return mode == DeploymentModePublic
 }
 
 // UpscaleConfig governs the optional offline PCM-upscaling feature
@@ -790,7 +870,14 @@ func (c *Config) applyDefaults() {
 	if c.ListenAddress == "" {
 		c.ListenAddress = DefaultListenAddress
 	}
-	if c.AdminAddress == "" {
+	// AdminAddress defaults to loopback ONLY in loopback mode. In
+	// public mode the operator must explicitly configure the bind
+	// (e.g. `0.0.0.0:7789` or a private-interface IP behind a
+	// reverse proxy) — silently defaulting to loopback in public
+	// mode would leave the admin console unreachable from outside
+	// the host and the operator would have a broken setup with no
+	// clear breadcrumb. Validate refuses public+empty-adminAddress.
+	if c.AdminAddress == "" && !c.IsPublic() {
 		c.AdminAddress = DefaultAdminAddress
 	}
 	if c.DataDir == "" {
@@ -843,8 +930,23 @@ func (c *Config) resolvePaths(baseDir string) {
 // Validate checks invariants the server relies on. Called automatically by
 // Load; exposed for tests and for callers that construct Config in memory.
 func (c *Config) Validate() error {
+	// Surface deployment.mode typos at load time rather than letting
+	// them silently fall through to "loopback" (IsPublic-returns-false
+	// on unknown values would mask public-mode intent).
+	if _, err := c.Deployment.EffectiveMode(); err != nil {
+		return err
+	}
+
+	// LibraryRoots: loopback installs require at least one root at
+	// load time. Public installs may legitimately boot with no roots
+	// (operator hasn't mounted the FUSE drive yet, will add via
+	// `bridge library add` after the bridge is up) — log a warn so
+	// the breadcrumb is visible without failing startup.
 	if len(c.LibraryRoots) == 0 {
-		return errors.New("libraryRoots: must have at least one entry")
+		if !c.IsPublic() {
+			return errors.New("libraryRoots: must have at least one entry")
+		}
+		validateLogger.Warn("no library roots configured — add via admin or `bridge library add`")
 	}
 	for _, r := range c.LibraryRoots {
 		if r == "" {
@@ -867,7 +969,22 @@ func (c *Config) Validate() error {
 	if _, _, err := net.SplitHostPort(c.ListenAddress); err != nil {
 		return fmt.Errorf("listenAddress %q: %w", c.ListenAddress, err)
 	}
-	if err := validateLoopbackAddress(c.AdminAddress); err != nil {
+	// AdminAddress: loopback installs enforce the historical loopback
+	// trust boundary (admin console has no auth in loopback mode, so
+	// loopback binding IS the security boundary). Public installs
+	// require a parseable host:port but allow non-loopback binds —
+	// the admin auth layer (gated on IsPublic) becomes the trust
+	// boundary instead. See internal/adminauth and the
+	// `deployment.adminTLSTerminatedByProxy` knob for the
+	// reverse-proxy posture.
+	if c.IsPublic() {
+		if c.AdminAddress == "" {
+			return errors.New("adminAddress: must not be empty in public mode")
+		}
+		if _, _, err := net.SplitHostPort(c.AdminAddress); err != nil {
+			return fmt.Errorf("adminAddress %q: %w", c.AdminAddress, err)
+		}
+	} else if err := validateLoopbackAddress(c.AdminAddress); err != nil {
 		return fmt.Errorf("adminAddress %q: %w", c.AdminAddress, err)
 	}
 	if c.Update.QuietHours != "" {

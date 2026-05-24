@@ -1572,6 +1572,33 @@ func (s *Store) EnrichmentCounts(ctx context.Context) (enriched int, lastEnriche
 	return enriched, lastEnrichedAt, nil
 }
 
+// CountTracksUnderRoot returns the number of track rows belonging to
+// the given library root. Used by the scanner's FUSE drop-mode guards
+// to distinguish "operator legitimately wiped the root" from "the
+// FUSE mount has dropped and the WalkDir came back empty for a root
+// the DB carries history for."
+//
+// Track paths in the DB use two distinct layouts depending on whether
+// the bridge is in single-root or multi-root mode (see CLAUDE.md
+// "Single ↔ multi-root storage form flips"):
+//   - Single-root mode: paths have no root prefix
+//     (e.g. "Artist/Album/Track.flac"). Count is the whole table.
+//   - Multi-root mode: paths are prefixed with the root's base
+//     directory name (e.g. "music/Artist/Album/Track.flac"). Count
+//     is the prefix-scoped subset.
+//
+// A multi-root miss in single-root mode (or vice-versa) returns 0
+// and silently bypasses the protective gate, so the bind value MUST
+// match the storage form. Callers pass `multiRoot = len(roots) > 1`
+// — the same boolean the scanner threads through walkRoot and
+// fillFromPath.
+func (s *Store) CountTracksUnderRoot(ctx context.Context, rootBase string, multiRoot bool) (int, error) {
+	if !multiRoot {
+		return s.CountTracks(ctx)
+	}
+	return s.CountTracksByPrefix(ctx, filepath.Base(rootBase)+"/")
+}
+
 // CountTracksByPrefix returns the number of track rows whose path begins
 // with prefix. In multi-root mode the admin console passes
 // "<rootBasename>/" to get a per-root count. prefix is matched literally —
