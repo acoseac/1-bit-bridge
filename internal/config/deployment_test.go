@@ -457,6 +457,122 @@ func TestEffectiveAutocertCacheDirDefault(t *testing.T) {
 	}
 }
 
+// TestEffectiveMDNSEnabledDefaultsByPosture pins the posture-
+// keyed default: loopback defaults to true (home LAN needs
+// auto-discovery), public defaults to false (no LAN to advertise
+// on; TXT records would leak library metadata).
+func TestEffectiveMDNSEnabledDefaultsByPosture(t *testing.T) {
+	// Loopback default: true.
+	cfg := &Config{}
+	if !cfg.EffectiveMDNSEnabled() {
+		t.Error("loopback default: EffectiveMDNSEnabled() = false, want true")
+	}
+	// Public default: false.
+	cfg2 := &Config{Deployment: DeploymentConfig{Mode: "public"}}
+	if cfg2.EffectiveMDNSEnabled() {
+		t.Error("public default: EffectiveMDNSEnabled() = true, want false")
+	}
+	// Explicit operator override wins in both directions.
+	tval := true
+	fval := false
+	cfg3 := &Config{MDNS: MDNSConfig{Enabled: &fval}}
+	if cfg3.EffectiveMDNSEnabled() {
+		t.Error("loopback + explicit false: got true, want false")
+	}
+	cfg4 := &Config{
+		Deployment: DeploymentConfig{Mode: "public"},
+		MDNS:       MDNSConfig{Enabled: &tval},
+	}
+	// Validate refuses the public+true combo separately; here we
+	// just pin that EffectiveMDNSEnabled mirrors the explicit
+	// value rather than overriding it.
+	if !cfg4.EffectiveMDNSEnabled() {
+		t.Error("public + explicit true: got false, want true (Validate refuses separately)")
+	}
+}
+
+// TestValidatePublicModeRejectsExplicitMDNSTrue pins the
+// security/correctness gate: explicit `mdns.enabled: true` in
+// public mode is a misconfiguration.
+func TestValidatePublicModeRejectsExplicitMDNSTrue(t *testing.T) {
+	dir := t.TempDir()
+	tval := true
+	cfg := &Config{
+		LibraryRoots:    []string{dir},
+		ListenAddress:   ":7788",
+		AdminAddress:    "0.0.0.0:7789",
+		ScanIntervalSec: 3600,
+		Deployment: DeploymentConfig{
+			Mode:                      "public",
+			AdminTLSTerminatedByProxy: true,
+		},
+		Autocert: AutocertConfig{Domain: "bridge.example.com"},
+		MDNS:     MDNSConfig{Enabled: &tval},
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "mdns.enabled") {
+		t.Errorf("error %q should mention mdns.enabled", err.Error())
+	}
+}
+
+// TestApplyDefaultsTailscaleDisabledInPublicMode pins the
+// posture-keyed default: empty `tailscale.mode` in public mode
+// resolves to "disabled" (not "cli") so the bridge doesn't
+// fork-exec a missing `tailscale` CLI every 30 s on the
+// /v1/health hot path.
+func TestApplyDefaultsTailscaleDisabledInPublicMode(t *testing.T) {
+	cfg := &Config{
+		Deployment: DeploymentConfig{Mode: "public"},
+	}
+	cfg.applyDefaults()
+	if cfg.Tailscale.Mode != string(TailscaleModeDisabled) {
+		t.Errorf("public + empty tailscale.mode: got %q, want %q",
+			cfg.Tailscale.Mode, TailscaleModeDisabled)
+	}
+}
+
+// TestApplyDefaultsTailscaleCLIInLoopbackMode regression-guards
+// the historical default: empty tailscale.mode in loopback mode
+// must still resolve to "cli" (so home-LAN installs keep their
+// implicit Tailscale auto-pilot behaviour).
+func TestApplyDefaultsTailscaleCLIInLoopbackMode(t *testing.T) {
+	cfg := &Config{}
+	cfg.applyDefaults()
+	// applyDefaults leaves Mode empty in loopback (the empty value
+	// resolves to "cli" via EffectiveMode, NOT via applyDefaults).
+	// Pin both shapes — Mode field stays empty AND
+	// EffectiveMode returns CLI.
+	if cfg.Tailscale.Mode != "" {
+		t.Errorf("loopback + empty tailscale.mode: applyDefaults set %q, want empty",
+			cfg.Tailscale.Mode)
+	}
+	mode, err := cfg.Tailscale.EffectiveMode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode != TailscaleModeCLI {
+		t.Errorf("loopback: EffectiveMode = %q, want %q", mode, TailscaleModeCLI)
+	}
+}
+
+// TestApplyDefaultsTailscaleExplicitOverrideUnchanged: an
+// operator who explicitly sets `tailscale.mode: cli` in a
+// public-mode bridge.yaml (legitimate — tailnet-routed public
+// bridge) must NOT have it silently flipped to "disabled".
+func TestApplyDefaultsTailscaleExplicitOverrideUnchanged(t *testing.T) {
+	cfg := &Config{
+		Deployment: DeploymentConfig{Mode: "public"},
+		Tailscale:  TailscaleConfig{Mode: "cli"},
+	}
+	cfg.applyDefaults()
+	if cfg.Tailscale.Mode != "cli" {
+		t.Errorf("explicit tailscale.mode=cli: got %q, want cli", cfg.Tailscale.Mode)
+	}
+}
+
 // TestLoadResolvesAutocertCacheDirRelative pins the
 // resolvePaths contract: a relative `autocert.cacheDir` in YAML
 // must resolve against the config file's directory (matching the

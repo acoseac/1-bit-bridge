@@ -78,5 +78,9 @@ func Clone(cfg *Config) *Config {
 		v := *cfg.Upscale.OptimizeEnabled
 		out.Upscale.OptimizeEnabled = &v
 	}
+	if cfg.MDNS.Enabled != nil {
+		v := *cfg.MDNS.Enabled
+		out.MDNS.Enabled = &v
+	}
 	return &out
 }

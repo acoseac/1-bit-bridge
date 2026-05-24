@@ -1319,6 +1319,16 @@ function initSettings() {
       // pattern as updateAutoInstall above so the server's
       // pointer-typed patch field always receives a real value.
       upscaleEnabled: fd.get("upscaleEnabled") === "on",
+      // PR 4 — Tailscale + mDNS hot-reload fields. Tailscale
+      // dropdown value is one of "cli" / "tsnet" / "disabled".
+      // mDNS checkbox is the FormData "on"/null shape — coerce
+      // to bool, with one caveat: in public mode the field is
+      // hidden, so fd.get returns null. Send a literal `false`
+      // in that case to keep the server's pointer-typed patch
+      // field happy (Validate refuses public+true anyway, so
+      // we never accidentally enable mDNS by sending false).
+      tailscaleMode: fd.get("tailscaleMode") || "",
+      mdnsEnabled: fd.get("mdnsEnabled") === "on",
     };
     try {
       const r = await API.patch("/api/settings", body);

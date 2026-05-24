@@ -78,6 +78,30 @@ type tailscaleAutoPilot struct {
 	// response within a couple of seconds when the node is fresh).
 	minMintInterval time.Duration
 
+	// cancelLocal is the cancel function for the per-auto-pilot
+	// context derived from the caller's Start ctx. Start replaces
+	// the bare `ctx` propagation with a child ctx so Disable() can
+	// stop ONLY the auto-pilot goroutines (startup + renewer)
+	// without affecting the shared scanCtx that drives the rest of
+	// the periodic workers. PR 4 hot-reload from the admin Settings
+	// `tailscale.mode: disabled` patch fires Disable.
+	cancelLocal context.CancelFunc
+
+	// disabled is the monotonic post-Disable gate. detectAndMint
+	// checks it at every cert-publish + snapshot-store site so an
+	// in-flight detection started before Disable() can't re-publish
+	// the LE cert + MagicDNS suffix after the operator turned
+	// Tailscale off (CodeRabbit Major race on PR #294).
+	//
+	// **Monotonic**: false→true only. Disable() sets it; no caller
+	// resets it back to false because re-enabling Tailscale at
+	// runtime is RestartRequired (the auto-pilot + listener
+	// composition need a clean boot). A future hot-reload of the
+	// disabled→cli|tsnet path would need a fresh auto-pilot
+	// instance anyway, so the flag's monotonicity is correct in
+	// the PR 4 + future scope.
+	disabled atomic.Bool
+
 	mu              sync.Mutex
 	lastMintAttempt time.Time
 	lastSnapshot    atomic.Pointer[tailscaleStatus]
@@ -119,9 +143,58 @@ func (a *tailscaleAutoPilot) magicDNSURL(magicDNS string) string {
 // Start kicks the initial detect+mint goroutine and the renewer
 // ticker. Both honour ctx.Done so SIGINT clears them out cleanly
 // alongside the rest of the periodic workers.
+//
+// PR 4: derives a child ctx so Disable() can cancel ONLY the
+// auto-pilot's two goroutines without affecting the caller's
+// shared scanCtx. The child ctx is also cancelled when the
+// parent fires (SIGINT path stays correct).
 func (a *tailscaleAutoPilot) Start(ctx context.Context) {
-	go a.runStartup(ctx)
-	go a.runRenewer(ctx)
+	childCtx, cancel := context.WithCancel(ctx)
+	a.mu.Lock()
+	a.cancelLocal = cancel
+	a.mu.Unlock()
+	go a.runStartup(childCtx)
+	go a.runRenewer(childCtx)
+}
+
+// Disable cancels the per-auto-pilot child ctx (stopping the
+// startup + renewer goroutines) and clears the Tailscale cert +
+// MagicDNS suffix from the certManager so the SNI switcher no
+// longer routes traffic through the LE cert. Idempotent — calling
+// twice is a cheap pair of no-ops.
+//
+// Used by the admin Settings hot-reload path
+// (tailscale.mode any→disabled). Restart-into-cli|tsnet is NOT
+// the inverse — it requires a fresh `bridge serve` start because
+// the listener composition + provider wiring need a clean boot.
+func (a *tailscaleAutoPilot) Disable() {
+	// **Set the gate FIRST**, before cancelling the ctx. Any
+	// detectAndMint pass that's already past the ctx check will
+	// see `disabled=true` at the publish check and return without
+	// re-installing the cert. Without this ordering, a concurrent
+	// detection could win the race after cancel() but before we
+	// clear the cert below, leaving us with cert installed AND
+	// auto-pilot ctx cancelled — the SNI switcher would keep
+	// serving stale LE state under the (now disabled) magic-DNS
+	// SNI (CodeRabbit Major on PR #294).
+	a.disabled.Store(true)
+	a.mu.Lock()
+	cancel := a.cancelLocal
+	a.cancelLocal = nil
+	a.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if a.certManager != nil {
+		a.certManager.SetTailscaleCert(nil)
+		a.certManager.SetMagicDNSSuffix("")
+	}
+	// Reset the snapshot so the admin tile reflects "disabled"
+	// instead of stale last-seen state.
+	a.lastSnapshot.Store(&tailscaleStatus{
+		CLIAvailable: false,
+		LastError:    "Tailscale integration disabled by operator (Settings → Networking → tailscale.mode)",
+	})
 }
 
 // runStartup performs the first detection + mint pass. Runs in a
@@ -157,6 +230,16 @@ func (a *tailscaleAutoPilot) runRenewer(ctx context.Context) {
 // Returns the resulting snapshot so the admin Re-mint handler can
 // reply with the post-action state synchronously.
 func (a *tailscaleAutoPilot) detectAndMint(ctx context.Context, trigger string) tailscaleStatus {
+	// Disable gate: short-circuit BEFORE touching the certManager
+	// or running any IO. Defense in depth against a detection
+	// started just before Disable() that would otherwise re-
+	// install the LE cert + MagicDNS suffix after the operator
+	// turned Tailscale off (CodeRabbit Major race on PR #294).
+	// The publish() helper has a matching gate so a slow code
+	// path can't slip a stale snapshot in either.
+	if a.disabled.Load() {
+		return a.Snapshot()
+	}
 	now := time.Now().UTC()
 	snap := tailscaleStatus{LastChecked: &now}
 
@@ -377,6 +460,16 @@ func (a *tailscaleAutoPilot) RefreshNow(ctx context.Context) tailscaleStatus {
 }
 
 func (a *tailscaleAutoPilot) publish(snap tailscaleStatus) {
+	// Disable gate: refuse stale publishes from in-flight
+	// detections that started before Disable(). The detectAndMint
+	// entrypoint already short-circuits, but cert-publish sites
+	// in the middle of the function aren't on a single linear
+	// path; this belt-and-braces check ensures any future detect
+	// branch that calls publish without re-checking the gate
+	// stays correct (CodeRabbit Major on PR #294).
+	if a.disabled.Load() {
+		return
+	}
 	a.lastSnapshot.Store(&snap)
 }
 

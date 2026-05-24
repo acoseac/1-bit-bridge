@@ -49,7 +49,6 @@ import (
 	// from the tsnet startup goroutine below. Without this import,
 	// /metrics would expose an empty registry and the log-event
 	// counter would stay at zero forever.
-	bridgemdns "github.com/acoseac/1-bit-bridge/internal/mdns"
 	"github.com/acoseac/1-bit-bridge/internal/metrics"
 	"github.com/acoseac/1-bit-bridge/internal/pairing"
 	"github.com/acoseac/1-bit-bridge/internal/supervision"
@@ -2025,27 +2024,62 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		}
 	}
 
+	// PR 4 hot-reload callbacks. The Settings PATCH path fires
+	// these after persisting the new config so the runtime
+	// flips into the new posture without a restart.
+	//
+	// **atomic.Pointer indirection** is load-bearing on two
+	// fronts (Gemini High + CodeRabbit Major on PR #294):
+	//   1. Race-safe across the admin-Serve goroutine (which
+	//      may receive a PATCH before main reaches the
+	//      net.Listen step below) and the main goroutine
+	//      that populates the pointer post-listener.
+	//   2. **Catch-up apply**: if a PATCH arrives during the
+	//      startup window, the callback records the desired
+	//      state in `mdnsDesired` (atomic.Bool) — the
+	//      post-listener init reads this and applies the
+	//      latest desired state to the freshly-created
+	//      lifecycle, so config-on-disk and runtime stay in
+	//      lockstep.
+	var mdnsLife atomic.Pointer[mdnsLifecycle]
+	var mdnsDesired atomic.Pointer[bool] // nil = no override pending
+	mdnsToggleCallback := func(b bool) {
+		// Capture desired state for the startup-window catch-up.
+		v := b
+		mdnsDesired.Store(&v)
+		if ml := mdnsLife.Load(); ml != nil {
+			ml.Set(b)
+		}
+	}
+	tailscaleDisableCallback := func() {
+		if tailscaleAuto != nil {
+			tailscaleAuto.Disable()
+		}
+	}
+
 	adminSrv, err := admin.New(admin.Deps{
-		CfgHolder:       cfgHolder,
-		CfgPath:         absCfgPath,
-		Auth:            store,
-		Manifest:        manifestStore,
-		Scanner:         scanner,
-		Resolver:        apiSrv.Resolver(),
-		Fingerprint:     fingerprint,
-		AdminAuth:       adminAuthStore,
-		LoginLimiter:    loginLimiter,
-		TLSConfig:       adminTLSConfig,
-		AutocertStatus:  autocertStatusClosure,
-		StartedAt:       time.Now().UTC(),
-		ScanCtx:         scanCtx,
-		Restart:         cancel,
-		Updater:         updAdapter,
-		BackupSources:   backupSources,
-		Tailscale:       tailscaleAdminSrc,
-		Pairing:         pairingStore,
-		IsSupervised:    supervision.IsSupervised(),
-		UpscalePrecheck: transcode.PrecheckSox,
+		CfgHolder:        cfgHolder,
+		CfgPath:          absCfgPath,
+		Auth:             store,
+		Manifest:         manifestStore,
+		Scanner:          scanner,
+		Resolver:         apiSrv.Resolver(),
+		Fingerprint:      fingerprint,
+		AdminAuth:        adminAuthStore,
+		LoginLimiter:     loginLimiter,
+		TLSConfig:        adminTLSConfig,
+		AutocertStatus:   autocertStatusClosure,
+		MDNSToggle:       mdnsToggleCallback,
+		TailscaleDisable: tailscaleDisableCallback,
+		StartedAt:        time.Now().UTC(),
+		ScanCtx:          scanCtx,
+		Restart:          cancel,
+		Updater:          updAdapter,
+		BackupSources:    backupSources,
+		Tailscale:        tailscaleAdminSrc,
+		Pairing:          pairingStore,
+		IsSupervised:     supervision.IsSupervised(),
+		UpscalePrecheck:  transcode.PrecheckSox,
 		UpscaleStats: func() *admin.UpscalePoolStats {
 			// Snapshot the pool's live counters when the
 			// feature is active. Two off-paths return nil
@@ -2200,24 +2234,45 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// Advertise on mDNS so iOS clients on the same LAN auto-discover
 	// this server. Failures are non-fatal — mDNS is a nice-to-have,
 	// and the server runs fine without it (users connect by IP).
+	//
+	// PR 4 promotes the advertiser into a hot-reloadable
+	// lifecycle struct: the admin Settings PATCH path can flip
+	// mdns.enabled on/off without a restart by firing the
+	// `mdnsLife.Set(bool)` callback. Initial state is gated on
+	// `EffectiveMDNSEnabled()` so an operator who set
+	// `mdns.enabled: false` in YAML doesn't get a Bonjour
+	// service emitted briefly at boot.
 	boundAddr, _ := lis.Addr().(*net.TCPAddr)
-	var advertiser *bridgemdns.Advertiser
 	if boundAddr != nil {
-		a, err := bridgemdns.Advertise(bridgemdns.Config{
-			InstanceName:    cfg.LibraryName,
-			Port:            boundAddr.Port,
-			ProtocolVersion: version.ProtocolVersion,
-			LibraryName:     cfg.LibraryName,
-		})
-		if err != nil {
-			fmt.Fprintf(stderr, "mDNS advertise failed (non-fatal): %v\n", err)
-		} else {
-			advertiser = a
-			fmt.Fprintf(stdout, "mDNS: advertising as %q on %s\n", cfg.LibraryName, bridgemdns.Service)
+		// nameSource closure reads the LIVE library name on every
+		// Set(true) so a Settings PATCH that renamed the library
+		// before toggling mDNS off→on picks up the new name
+		// (Gemini medium on PR #294).
+		nameSource := func() string {
+			if live := cfgHolder.Load(); live != nil {
+				return live.LibraryName
+			}
+			return cfg.LibraryName
 		}
+		ml := newMDNSLifecycle(boundAddr.Port, version.ProtocolVersion, nameSource, stdout, stderr)
+		// Resolve the effective initial state. Catch-up apply:
+		// if an admin PATCH arrived during the pre-listener
+		// window, mdnsDesired carries its target value — that
+		// wins over the cfg-on-disk default (operator pressed
+		// the button; runtime should honour it).
+		want := cfg.EffectiveMDNSEnabled()
+		if d := mdnsDesired.Load(); d != nil {
+			want = *d
+		}
+		if want {
+			ml.Set(true)
+		} else if cfg.IsPublic() {
+			fmt.Fprintf(stdout, "mDNS: disabled by public-mode default\n")
+		}
+		mdnsLife.Store(ml)
 	}
-	if advertiser != nil {
-		defer advertiser.Close()
+	if ml := mdnsLife.Load(); ml != nil {
+		defer ml.Close()
 	}
 
 	var lanH3Srv *http3.Server
