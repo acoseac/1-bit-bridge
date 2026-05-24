@@ -870,7 +870,14 @@ func (c *Config) applyDefaults() {
 	if c.ListenAddress == "" {
 		c.ListenAddress = DefaultListenAddress
 	}
-	if c.AdminAddress == "" {
+	// AdminAddress defaults to loopback ONLY in loopback mode. In
+	// public mode the operator must explicitly configure the bind
+	// (e.g. `0.0.0.0:7789` or a private-interface IP behind a
+	// reverse proxy) — silently defaulting to loopback in public
+	// mode would leave the admin console unreachable from outside
+	// the host and the operator would have a broken setup with no
+	// clear breadcrumb. Validate refuses public+empty-adminAddress.
+	if c.AdminAddress == "" && !c.IsPublic() {
 		c.AdminAddress = DefaultAdminAddress
 	}
 	if c.DataDir == "" {

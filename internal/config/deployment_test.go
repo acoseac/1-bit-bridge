@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -181,5 +183,62 @@ func TestValidateDeploymentModeTypo(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "deployment.mode") {
 		t.Errorf("error %q should mention deployment.mode", err.Error())
+	}
+}
+
+// TestLoadPublicModeRejectsEmptyAdminAddress pins the end-to-end
+// behaviour through Load() → applyDefaults() → Validate() for the
+// realistic operator misconfiguration: `deployment.mode: public` is
+// set in the YAML but `adminAddress` is omitted. CodeRabbit Major
+// review on PR #289 caught that the bare Validate() test didn't
+// exercise the Load() path — applyDefaults previously set
+// AdminAddress to the loopback default unconditionally, so the
+// "must not be empty in public mode" branch was unreachable
+// through Load(). Fix: applyDefaults now skips the loopback
+// default in public mode, surfacing the error here.
+func TestLoadPublicModeRejectsEmptyAdminAddress(t *testing.T) {
+	dir := t.TempDir()
+	libRoot := filepath.Join(dir, "Music")
+	if err := os.MkdirAll(libRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dir, "bridge.yaml")
+	yaml := "libraryRoots:\n  - " + libRoot + "\n" +
+		"listenAddress: \"0.0.0.0:7788\"\n" +
+		"deployment:\n  mode: public\n"
+	if err := os.WriteFile(configPath, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(configPath)
+	if err == nil {
+		t.Fatal("Load: expected error for public mode + omitted adminAddress, got nil")
+	}
+	if !strings.Contains(err.Error(), "adminAddress") {
+		t.Errorf("Load: error %q should mention adminAddress", err.Error())
+	}
+}
+
+// TestLoadLoopbackModeKeepsAdminAddressDefault: regression guard
+// that the loopback-mode applyDefaults path still applies the
+// historical "127.0.0.1:7789" default when adminAddress is
+// omitted. Without this, a CLAUDE.md "operator just runs the
+// bridge with a minimal YAML" flow would break.
+func TestLoadLoopbackModeKeepsAdminAddressDefault(t *testing.T) {
+	dir := t.TempDir()
+	libRoot := filepath.Join(dir, "Music")
+	if err := os.MkdirAll(libRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dir, "bridge.yaml")
+	yaml := "libraryRoots:\n  - " + libRoot + "\n"
+	if err := os.WriteFile(configPath, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AdminAddress != DefaultAdminAddress {
+		t.Errorf("AdminAddress = %q, want default %q", cfg.AdminAddress, DefaultAdminAddress)
 	}
 }

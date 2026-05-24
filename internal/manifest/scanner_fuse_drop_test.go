@@ -453,7 +453,10 @@ func TestCountTracksUnderRoot(t *testing.T) {
 // TestHasAllowEmptySentinelOnlyTrustsExplicitFile pins that any
 // os.Stat error (including permission errors masquerading as
 // "missing") returns false. Only an explicit, successfully-stat'd
-// file authorises the bypass.
+// REGULAR file authorises the bypass — directories or symlinks
+// with the sentinel name MUST NOT authorise (CodeRabbit Major
+// review on PR #289: an accidental `mkdir .bridge-allow-empty`
+// would otherwise bypass the deletion guard).
 func TestHasAllowEmptySentinelOnlyTrustsExplicitFile(t *testing.T) {
 	root := t.TempDir()
 	if hasAllowEmptySentinel(root) {
@@ -468,5 +471,18 @@ func TestHasAllowEmptySentinelOnlyTrustsExplicitFile(t *testing.T) {
 	// Nonexistent dir → false (os.Stat returns ErrNotExist).
 	if hasAllowEmptySentinel(filepath.Join(root, "absent")) {
 		t.Error("nonexistent directory returned true")
+	}
+
+	// Directory named like the sentinel MUST NOT authorise — pin
+	// the regular-file restriction. Operator who runs
+	// `mkdir .bridge-allow-empty` (typo, completed shell command
+	// for a different intent) should NOT silently disable the
+	// deletion guard.
+	dirSentinelRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dirSentinelRoot, allowEmptySentinelFilename), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if hasAllowEmptySentinel(dirSentinelRoot) {
+		t.Error("a directory named like the sentinel returned true — must be regular file only")
 	}
 }

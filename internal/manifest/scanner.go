@@ -364,22 +364,35 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	// mount.
 	var walkErr error
 	for _, root := range roots {
+		rootSentinel := relPath(root, root, multiRoot)
 		observed, err := s.walkRoot(ctx, root, multiRoot, seen, seenFolders, errorSubtrees, paths)
 		if err != nil {
 			walkErr = err
 			break
 		}
+		// Mode (a) already sentinel'd via walkRoot's upfront os.Stat;
+		// skip the (b) interrogation for roots already errored.
+		if _, errored := errorSubtrees[rootSentinel]; errored {
+			continue
+		}
 		if observed == 0 && !hasAllowEmptySentinel(root) {
 			n, countErr := s.store.CountTracksUnderRoot(ctx, root, multiRoot)
 			if countErr != nil {
-				scanLogger.Warn("count tracks under root", "root", root, "err", countErr)
+				// Fail closed: we can't audit, so sentinel the root
+				// rather than letting the deletion pass run on
+				// untrusted state. CodeRabbit Major + Gemini medium
+				// on PR #289 — pre-fix the .warn+continue silently
+				// disabled the safety gate.
+				scanLogger.Warn("count tracks under root; conservatively sparing deletion for root",
+					"root", root, "err", countErr)
+				errorSubtrees[rootSentinel] = struct{}{}
 				continue
 			}
 			if n > 0 {
 				scanLogger.Error("suspected clean-empty mount failure",
 					"root", root, "rows_in_db", n,
 					"hint", "place .bridge-allow-empty at the root to confirm intent")
-				errorSubtrees[relPath(root, root, multiRoot)] = struct{}{}
+				errorSubtrees[rootSentinel] = struct{}{}
 			}
 		}
 	}
@@ -1120,12 +1133,18 @@ const allowEmptySentinelFilename = ".bridge-allow-empty"
 // so a deliberate "I really did wipe this library" operation can
 // complete without manual sentinel cleanup.
 //
-// Any os.Stat error other than nil (including ErrNotExist and
-// permission errors) returns false — only an explicit, successfully-
-// stat'd sentinel file authorises the deletion pass to proceed.
+// MUST be a regular file — an accidental directory or symlink of
+// that name would otherwise authorise deletion silently
+// (CodeRabbit Major review on PR #289). Any os.Stat error or
+// non-regular shape returns false; only an explicit, successfully-
+// stat'd regular-file sentinel authorises the deletion pass to
+// proceed.
 func hasAllowEmptySentinel(root string) bool {
-	_, err := os.Stat(filepath.Join(root, allowEmptySentinelFilename))
-	return err == nil
+	info, err := os.Stat(filepath.Join(root, allowEmptySentinelFilename))
+	if err != nil {
+		return false
+	}
+	return info.Mode().IsRegular()
 }
 
 // auditOwningRootOnSubtreeMiss validates that a subtree walker's
@@ -1141,17 +1160,19 @@ func hasAllowEmptySentinel(root string) bool {
 //     ReadDir failure (permission drop, transient FUSE disruption)
 //     means we can't audit the root state, so the safe default is
 //     to refuse the deletion.
-//   - root exists AND has entries: trustworthy — fs.ErrNotExist on
-//     the subtree is a legitimate operator delete, return nil.
-//   - root exists AND is empty AND has .bridge-allow-empty sentinel:
-//     trustworthy — operator deliberately wiped the library.
-//   - root exists AND is empty AND no sentinel AND
-//     CountTracksUnderRoot > 0: untrusted — DB carries history but
-//     the root has nothing, this looks like a mount drop. Return a
-//     suspected-mount-drop error to abort the deletion pass.
-//   - root exists AND is empty AND no sentinel AND
-//     CountTracksUnderRoot == 0: trustworthy — fresh install or
-//     post-wipe state with no rows to protect.
+//   - root exists AND has entries (including the `.bridge-allow-empty`
+//     sentinel if present, since os.ReadDir surfaces it as a
+//     directory entry): trustworthy — fs.ErrNotExist on the subtree
+//     is a legitimate operator delete, return nil. Gemini medium
+//     review on PR #289 caught the redundant explicit-sentinel
+//     check that this branch already subsumes.
+//   - root exists AND is empty AND CountTracksUnderRoot > 0:
+//     untrusted — DB carries history but the root has nothing, this
+//     looks like a mount drop. Return a suspected-mount-drop error
+//     to abort the deletion pass.
+//   - root exists AND is empty AND CountTracksUnderRoot == 0:
+//     trustworthy — fresh install or post-wipe state with no rows
+//     to protect.
 func auditOwningRootOnSubtreeMiss(ctx context.Context, store *Store, owningRoot string, multiRoot bool) error {
 	if _, err := os.Stat(owningRoot); err != nil {
 		return fmt.Errorf("audit owning root: stat: %w", err)
@@ -1161,9 +1182,6 @@ func auditOwningRootOnSubtreeMiss(ctx context.Context, store *Store, owningRoot 
 		return fmt.Errorf("audit owning root: read dir: %w", err)
 	}
 	if len(entries) > 0 {
-		return nil
-	}
-	if hasAllowEmptySentinel(owningRoot) {
 		return nil
 	}
 	n, err := store.CountTracksUnderRoot(ctx, owningRoot, multiRoot)
