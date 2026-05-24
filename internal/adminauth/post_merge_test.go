@@ -123,12 +123,22 @@ func TestResetPasswordBuildsNewPointer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pw, _ := s.MintInitial("admin")
+	pw, err := s.MintInitial("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	const verifies = 16
 	const resets = 8
 	var verifiesDone, resetsDone atomic.Int32
 	stopVerify := make(chan struct{})
+	// Collect ResetPassword errors via a buffered channel so a
+	// race-window persist failure surfaces as a test failure
+	// rather than passing silently (CodeRabbit Minor review
+	// post-PR-#296 — the pre-fix `_ = s.ResetPassword(...)`
+	// would let a no-reset-succeeded run mark the test green
+	// while the pointer-swap contract was actually unexercised).
+	resetErrs := make(chan error, resets)
 
 	var wg sync.WaitGroup
 	// Resets first — bounded count, so we know when to stop the
@@ -138,7 +148,9 @@ func TestResetPasswordBuildsNewPointer(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			defer resetsDone.Add(1)
-			_ = s.ResetPassword("admin", "newpw-"+pw)
+			if err := s.ResetPassword("admin", "newpw-"+pw); err != nil {
+				resetErrs <- err
+			}
 		}()
 	}
 	// Verifies — run until all resets complete.
@@ -166,6 +178,10 @@ func TestResetPasswordBuildsNewPointer(t *testing.T) {
 	}
 	close(stopVerify)
 	wg.Wait()
+	close(resetErrs)
+	for err := range resetErrs {
+		t.Fatalf("ResetPassword failed during race-stress: %v", err)
+	}
 	if verifiesDone.Load() != verifies {
 		t.Errorf("verifies finished = %d, want %d", verifiesDone.Load(), verifies)
 	}

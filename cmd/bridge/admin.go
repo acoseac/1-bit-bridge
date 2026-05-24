@@ -55,8 +55,15 @@ func adminResetPasswordCmd(args []string, stdin io.Reader, stdout, stderr io.Wri
 	// (where the operator forgot --username) doesn't silently
 	// proceed against the default admin user with the wrong
 	// shape (CodeRabbit Minor review post-PR-#292).
+	//
+	// **Do NOT echo `fs.Args()` to stderr** (CodeRabbit Major
+	// review post-PR-#296): the realistic fat-finger is exactly
+	// the `bridge admin reset-password admin newpw` shape above,
+	// which would leak the plaintext password into stderr +
+	// every log / shell-transcript capturing it. Just say the
+	// count.
 	if fs.NArg() > 0 {
-		fmt.Fprintf(stderr, "unexpected arguments after flags: %v\n", fs.Args())
+		fmt.Fprintln(stderr, "unexpected positional arguments after flags")
 		fmt.Fprintln(stderr, "all options must be passed as flags; use --username / --from-stdin")
 		return 2
 	}

@@ -2245,19 +2245,27 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// (which is a bind target like 0.0.0.0:7789 or
 		// 127.0.0.1:7789 — neither helps an operator
 		// browsing from elsewhere). CodeRabbit Major review
-		// post-PR-#295. The displayed URL assumes:
-		//   - The operator's DNS A-record points at the VPS.
-		//   - In autocert-direct-TLS mode, the admin port is
-		//     reachable on the same domain.
-		//   - In reverse-proxy mode, the operator's proxy
-		//     fronts the admin path on the same domain (or
-		//     they've documented the alternate URL — we can't
-		//     know what they configured externally).
-		// Non-:443 admin port appended explicitly so the URL
-		// works for the autocert-direct-TLS shape; :443
-		// suppressed for the proxy / non-standard cases that
-		// likely don't bind the admin port directly.
-		adminURL := banneradminURL(cfg.Autocert.Domain, cfg.AdminAddress, adminScheme)
+		// post-PR-#295.
+		//
+		// **Proxy-mode special case** (CodeRabbit Major
+		// review post-PR-#296): when admin TLS is terminated
+		// by a reverse proxy, the bridge's local transport
+		// is plain http on a private port (e.g.
+		// http://bridge.example.com:7789/) — but THAT is the
+		// backend, not the URL the operator visits. The
+		// reverse proxy fronts admin at https://<domain>/
+		// (or some operator-chosen path). The bridge can't
+		// know what the proxy maps externally, so we print
+		// the canonical assumption: https + domain, no port.
+		// Operators with a non-standard proxy mapping will
+		// recognise this is just the prompt and substitute
+		// their actual URL.
+		var adminURL string
+		if cfg.Deployment.AdminTLSTerminatedByProxy {
+			adminURL = "https://" + strings.TrimSuffix(cfg.Autocert.Domain, ".") + "/"
+		} else {
+			adminURL = banneradminURL(cfg.Autocert.Domain, cfg.AdminAddress, adminScheme)
+		}
 		fmt.Fprintf(stdout, "Admin console: %s — log in with the credentials from `bridge admin reset-password`\n", adminURL)
 	} else {
 		fmt.Fprintf(stdout, "Library: %q (roots: %v)\n", cfg.LibraryName, cfg.LibraryRoots)
