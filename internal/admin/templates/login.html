@@ -1,0 +1,72 @@
+{{define "login"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="same-origin">
+<title>Sign in — 1-bit Bridge</title>
+<link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32.png?v=1">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="login-page">
+<main class="login-card">
+  <div class="login-brand">
+    <img class="brand-mark" src="/static/bridge-mark.png?v=1" alt="" width="40" height="40">
+    <span class="name">{{.LibraryName}}</span>
+  </div>
+  <h1>Sign in</h1>
+  <p class="login-hint">Admin console for 1-bit Bridge.</p>
+  <form id="login-form" method="post" action="/login">
+    <label for="username">Username</label>
+    <input id="username" name="username" type="text" autocomplete="username"
+           value="{{.Username}}" required>
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password"
+           autocomplete="current-password" required>
+    <input type="hidden" name="next" value="{{.Next}}">
+    <button type="submit">Sign in</button>
+    <p id="login-error" class="login-error" role="alert" aria-live="polite" hidden></p>
+  </form>
+  <p class="login-foot">bridge {{.ServerVersion}}</p>
+</main>
+<script>
+// Standalone login script — doesn't depend on app.js (the main bundle
+// includes admin nav + telemetry, neither relevant for an unauth
+// page). JSON-over-fetch keeps csrfGuard happy (Content-Type:
+// application/json) and avoids a full page reload.
+(function () {
+  var form = document.getElementById("login-form");
+  var err = document.getElementById("login-error");
+  form.addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    err.hidden = true;
+    var data = {
+      username: form.username.value,
+      password: form.password.value,
+      next: form.next.value
+    };
+    fetch("/login", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(data)
+    }).then(function (resp) {
+      if (resp.redirected) { window.location.href = resp.url; return; }
+      return resp.json().then(function (body) {
+        if (resp.ok && body && body.next) {
+          window.location.href = body.next;
+          return;
+        }
+        err.textContent = (body && body.error) || "Invalid credentials";
+        err.hidden = false;
+      });
+    }).catch(function (e) {
+      err.textContent = "Network error — try again";
+      err.hidden = false;
+    });
+  });
+})();
+</script>
+</body>
+</html>
+{{end}}

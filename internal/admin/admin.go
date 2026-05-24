@@ -33,6 +33,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/acoseac/1-bit-bridge/internal/adminauth"
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/backup"
 	"github.com/acoseac/1-bit-bridge/internal/config"
@@ -214,6 +215,23 @@ type Deps struct {
 	// test harnesses, which yields the conservative — never-
 	// promise-relaunch — UI wording, never the lying one.
 	IsSupervised bool
+
+	// AdminAuth is the admin credentials + session store. Required
+	// in public mode (the boundary middleware refuses to start
+	// without it); ignored in loopback mode where there's no auth
+	// layer at all. Wired in cmd/bridge/main.go.
+	//
+	// When non-nil AND IsPublic() is true, the session middleware
+	// is active: pages require a valid session cookie and the API
+	// returns JSON 401 on missing/invalid credentials. When nil,
+	// the historical loopback-only behaviour is preserved.
+	AdminAuth *adminauth.Store
+
+	// LoginLimiter is the failed-login rate limiter. Required
+	// alongside AdminAuth in public mode; ignored in loopback. The
+	// limiter's own goroutine is managed by its NewRateLimiter /
+	// Stop API — admin doesn't own its lifecycle.
+	LoginLimiter *adminauth.RateLimiter
 }
 
 // AdminBatchCoordinator is the admin-side interface the Library
@@ -515,6 +533,11 @@ type Server struct {
 	// ExecuteTemplate("layout", …) call.
 	pageTmpls map[string]*template.Template
 
+	// loginTmpl is the standalone login template — does NOT extend
+	// layout.html (the layout includes admin nav, which an unauthenticated
+	// visitor must not see). Parsed once in New().
+	loginTmpl *template.Template
+
 	// bgScans tracks every spawnBackgroundScan goroutine in flight so
 	// graceful shutdown waits for an admin-triggered scan to finish
 	// (or its context to cancel) instead of letting the process exit
@@ -577,7 +600,17 @@ func New(deps Deps) (*Server, error) {
 		}
 		tmpls[name] = t
 	}
-	return &Server{deps: deps, pageTmpls: tmpls}, nil
+	// login.html is standalone — must NOT include layout.html (which
+	// embeds the admin nav). Parsed into its own template object so
+	// an unauthenticated visitor never sees nav links to gated pages.
+	loginTmpl, err := template.New("").Funcs(tmplFuncs).ParseFS(
+		templateFS,
+		"templates/login.html",
+	)
+	if err != nil {
+		return nil, fmt.Errorf("admin: parse login.html: %w", err)
+	}
+	return &Server{deps: deps, pageTmpls: tmpls, loginTmpl: loginTmpl}, nil
 }
 
 // Handler returns the root http.Handler for the admin console. Exposed
@@ -646,13 +679,31 @@ func (s *Server) Handler() http.Handler {
 	// so we serve the fs directly — the request path already matches.
 	mux.Handle("GET /static/", http.FileServerFS(staticFS))
 
-	// Layer order: outer = loopbackOnly (drops non-loopback peers
-	// before we evaluate anything else); inner = csrfGuard (rejects
-	// drive-by browser cross-origin POSTs that the loopback bind
-	// can't catch on its own — a malicious page in the user's
-	// browser is on the same loopback as the user). The two layers
-	// defend different threats.
-	return loopbackOnly(s.csrfGuard(mux))
+	// Login routes. Registered on the same mux as the other pages —
+	// the sessionMiddleware's bypass list keeps /login reachable
+	// without a session.
+	mux.HandleFunc("GET /login", s.pageLogin)
+	mux.HandleFunc("POST /login", s.apiLogin)
+	mux.HandleFunc("POST /logout", s.apiLogout)
+
+	// Layer order (outer → inner):
+	//   1. boundaryMiddleware — applies loopbackOnly in loopback
+	//      mode; passthrough in public mode (the listener is
+	//      already exposed beyond loopback by design).
+	//   2. csrfGuard — Content-Type strict + Origin allowlist on
+	//      body-bearing mutations. Defends against drive-by
+	//      cross-origin browser POSTs.
+	//   3. sessionMiddleware — public-mode only: requires a valid
+	//      bridge_admin_session cookie. Loopback-mode passthrough.
+	//      Bypass list covers /login, /static/*, /favicon*.
+	//   4. mux — the actual handlers.
+	//
+	// The two layers defend different threats: boundary protects
+	// the network surface; sessionMiddleware authenticates the
+	// operator. csrfGuard sits between them so login POSTs get the
+	// strict Content-Type + Origin check before reaching the
+	// session-aware handler.
+	return s.boundaryMiddleware(s.csrfGuard(s.sessionMiddleware(mux)))
 }
 
 // scanCtx returns the parent context for admin-triggered scans.
@@ -856,14 +907,33 @@ func (s *Server) csrfGuard(next http.Handler) http.Handler {
 }
 
 // originMatchesAdmin compares an Origin header against the admin
-// listener's host:port. Tolerant of the listener binding 127.0.0.1
-// while the browser navigates via http://localhost — both resolve
-// to the same listener and `loopbackOnly` already enforces the IP
-// is loopback, so the only thing the Origin check adds is "did this
-// request originate from a page served by us, or from elsewhere".
+// listener's allowed origin set. Three branches by deployment
+// posture:
 //
-// Empty AdminAddress (test wiring) means "any same-loopback Origin
-// is fine" — the loopbackOnly outer layer is the actual gate.
+//  1. **Loopback mode** (historical): the admin listener binds
+//     a loopback address and the browser carries
+//     Origin: http://127.0.0.1:7789 (or http://localhost:7789).
+//     Both sides must resolve to the same loopback listener.
+//
+//  2. **Public mode + direct TLS** (bridge terminates TLS itself
+//     against the operator's domain): allowlist is the operator's
+//     domain + admin listen port.
+//
+//  3. **Public mode + reverse proxy** (Caddy / nginx terminates
+//     TLS, bridge serves plain HTTP on a private interface):
+//     allowlist is the operator's domain, HOST-MATCH ONLY (no
+//     port check). The bridge can't know which public port the
+//     operator chose on their proxy — the browser's
+//     Origin: https://bridge.example.com may resolve to :443 or
+//     :8443 depending on the reverse-proxy config.  The session
+//     cookie's SameSite=Strict + Secure attributes are the
+//     load-bearing defense against rogue cross-origin browsers;
+//     the host match is the additional pin.
+//
+// Empty Autocert.Domain in public mode falls back to the
+// listener-bound address (test wiring). SNI normalization on the
+// host comparison: case-insensitive + trailing-dot tolerant
+// (mirrors the TLS-side normalization in PR 3).
 func (s *Server) originMatchesAdmin(origin string) bool {
 	u, err := url.Parse(origin)
 	if err != nil || u.Host == "" {
@@ -881,7 +951,7 @@ func (s *Server) originMatchesAdmin(origin string) bool {
 	if originPort == "" {
 		// Default-port inference for origin scheme (port-elided
 		// origin → "http://localhost"). Only http/https are
-		// reasonable for a loopback admin console.
+		// reasonable.
 		switch strings.ToLower(u.Scheme) {
 		case "https":
 			originPort = "443"
@@ -891,11 +961,17 @@ func (s *Server) originMatchesAdmin(origin string) bool {
 			return false
 		}
 	}
-	// Use the address the listener was actually bound to so that a
-	// pending config change (AdminAddress PATCH before restart) does
-	// not shift the CSRF allowlist while the server is still on the
-	// old port. Fall back to the live config only if boundAdminAddr
-	// is not yet set (defensive; should not happen in practice).
+	cfg := s.deps.CfgHolder.Load()
+	if cfg != nil && cfg.IsPublic() {
+		return s.originMatchesPublicMode(originHost, originPort, cfg)
+	}
+	return s.originMatchesLoopbackMode(originHost, originPort)
+}
+
+// originMatchesLoopbackMode is the historical Origin allowlist:
+// host:port match against the admin listener with loopback-name
+// equivalence.
+func (s *Server) originMatchesLoopbackMode(originHost, originPort string) bool {
 	adminAddr := s.boundAdminAddr
 	if adminAddr == "" {
 		cfg := s.deps.CfgHolder.Load()
@@ -914,10 +990,50 @@ func (s *Server) originMatchesAdmin(origin string) bool {
 		return false
 	}
 	// Treat 127.0.0.1, ::1, and localhost as equivalent — they all
-	// resolve to the same loopback listener. `loopbackOnly` has
-	// already enforced the underlying IP is loopback, so this is
-	// just user-agent normalization.
+	// resolve to the same loopback listener.
 	return loopbackHostname(originHost) && loopbackHostname(adminHost)
+}
+
+// originMatchesPublicMode is the public-mode allowlist. Falls back
+// to the listener address when Autocert.Domain is unset (test
+// wiring); enforces host equality only behind a reverse proxy
+// (operator's public port is opaque to the bridge).
+func (s *Server) originMatchesPublicMode(originHost, originPort string, cfg *config.Config) bool {
+	expectedHost := strings.TrimSuffix(strings.ToLower(cfg.Autocert.Domain), ".")
+	if expectedHost == "" {
+		// No domain configured — fall back to listener address
+		// (test wiring; production should always set Autocert.Domain
+		// in public mode).
+		adminAddr := s.boundAdminAddr
+		if adminAddr == "" {
+			adminAddr = cfg.AdminAddress
+		}
+		h, _, err := net.SplitHostPort(adminAddr)
+		if err != nil {
+			return false
+		}
+		expectedHost = strings.ToLower(h)
+	}
+	originHostNorm := strings.TrimSuffix(strings.ToLower(originHost), ".")
+	if originHostNorm != expectedHost {
+		return false
+	}
+	if cfg.Deployment.AdminTLSTerminatedByProxy {
+		// Operator's reverse proxy chooses the public port;
+		// SameSite=Strict + Secure cookies are the load-bearing
+		// defense, host match is the pin.
+		return true
+	}
+	// Direct-TLS path: enforce the admin listener port.
+	adminAddr := s.boundAdminAddr
+	if adminAddr == "" {
+		adminAddr = cfg.AdminAddress
+	}
+	_, adminPort, err := net.SplitHostPort(adminAddr)
+	if err != nil {
+		return false
+	}
+	return originPort == adminPort
 }
 
 // loopbackHostname returns true if h is one of the conventional

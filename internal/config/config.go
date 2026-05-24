@@ -69,6 +69,7 @@ type Config struct {
 	Limits          LimitsConfig       `yaml:"limits,omitempty"`
 	Integrity       IntegrityConfig    `yaml:"integrity,omitempty"`
 	Deployment      DeploymentConfig   `yaml:"deployment,omitempty"`
+	Autocert        AutocertConfig     `yaml:"autocert,omitempty"`
 
 	// DisableHTTP3 prevents the server from binding UDP ports and
 	// advertising Alt-Svc headers for HTTP/3 upgrades. Defaults to false.
@@ -367,6 +368,23 @@ func (d DeploymentConfig) EffectiveMode() (DeploymentMode, error) {
 		return DeploymentModePublic, nil
 	}
 	return "", fmt.Errorf("deployment.mode: unknown value %q (want loopback|public)", d.Mode)
+}
+
+// AutocertConfig holds the operator's public-domain settings. In
+// PR 2 only the Domain field is consumed — by the admin Origin
+// allowlist (so cross-origin POSTs from anywhere but the operator's
+// domain are refused). PR 3 wires the full ACME / Let's Encrypt
+// pipeline (Enabled, Email, CacheDir, etc.). Both PRs share this
+// struct so the YAML schema is forward-compatible.
+type AutocertConfig struct {
+	// Domain is the publicly-routable hostname the operator's iOS
+	// clients (and the operator's browser) dial. Required when
+	// `deployment.mode: public` is set; ignored otherwise.
+	//
+	// PR 3 fills in: Enabled, Email, CacheDir, UseStaging, plus
+	// the External443Mapping flag for operators whose load
+	// balancer maps WAN:443 → bridge:7788.
+	Domain string `yaml:"domain,omitempty"`
 }
 
 // IsPublic reports whether the configured deployment mode is "public".
@@ -983,6 +1001,21 @@ func (c *Config) Validate() error {
 		}
 		if _, _, err := net.SplitHostPort(c.AdminAddress); err != nil {
 			return fmt.Errorf("adminAddress %q: %w", c.AdminAddress, err)
+		}
+		if c.Autocert.Domain == "" {
+			return errors.New("autocert.domain: must be set in public mode (the publicly-routable hostname iOS clients dial)")
+		}
+		// PR 2 scope: bridge serves the admin console over plain
+		// HTTP and relies on an external TLS-terminating reverse
+		// proxy (Caddy / nginx) for HTTPS. PR 3 adds native ACME
+		// + a tls.NewListener wrapper for the direct-TLS path,
+		// at which point AdminTLSTerminatedByProxy becomes optional.
+		// Until then, refuse public mode without the explicit
+		// proxy flag — the alternative is serving session cookies
+		// with the Secure attribute over plain HTTP, which
+		// browsers reject (login silently fails).
+		if !c.Deployment.AdminTLSTerminatedByProxy {
+			return errors.New("deployment.adminTLSTerminatedByProxy: must be true in public mode (PR 3 will add native TLS termination; until then run behind Caddy / nginx)")
 		}
 	} else if err := validateLoopbackAddress(c.AdminAddress); err != nil {
 		return fmt.Errorf("adminAddress %q: %w", c.AdminAddress, err)
