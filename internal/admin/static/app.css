@@ -1,42 +1,39 @@
-/* 1-bit bridge admin console — modern admin theme.
+/* 1-bit bridge admin console — modern premium theme.
  *
- * Sharp white-base palette with citrus accent (orange primary, yellow
- * warnings, green success, red danger). Replaces the prior warm-gold-on-
- * teal motif with a flatter, more conventional admin-UI look. Dark mode
- * mirrors the same accent set against a near-black surface so the
- * operator's preferred system theme stays consistent.
+ * Refined slate-base canvas with an elegant indigo accent. Replaces the flat
+ * citrus look with an enterprise-grade UI design. Dark mode shifts the same
+ * accent set against a near-black slate indigo void to preserve optimal
+ * operator contrast.
  *
- * Every class name and DOM shape from pre-refresh is preserved so the
- * JS in app.js (which reads no tokens, does no style) works unchanged.
- *
- * Colours are tokenised via CSS custom properties (--bg, --accent, etc.)
- * so the rest of the stylesheet reads through to the palette without
- * per-rule edits.
+ * All token NAMES are preserved (--bg, --accent, --accent-hot, --accent-warm,
+ * --danger, --warn, etc.) so every downstream rule reads through unchanged,
+ * and app.js (which toggles state via data-* attributes, not class names)
+ * keeps working without edits. Only token VALUES + the corner --radius move.
  */
 
 :root {
   /* Default = light theme. Operators with a system dark-mode preference
    * flip to the dark-on-near-black overrides via @media below. */
-  --bg: #fafafa;                     /* page background — almost white */
-  --bg-panel: #ffffff;               /* panel surface */
-  --bg-elev: #f4f4f5;                /* slight elevation tint (form-field bg) */
-  --fg: #18181b;                     /* near-black body text (Tailwind slate-900) */
-  --fg-muted: #71717a;               /* secondary text / hints (slate-500) */
-  --accent: #f97316;                 /* orange-500 — primary actions */
-  --accent-hot: #dc2626;             /* red-600 — destructive actions */
-  --accent-warm: #eab308;            /* yellow-500 — restart-required + warning badges */
+  --bg: #f8fafc;                     /* slate-50 canvas */
+  --bg-panel: #ffffff;               /* crisp panel surface */
+  --bg-elev: #f1f5f9;                /* slate-100 form fields & elevated tokens */
+  --fg: #0f172a;                     /* deep dark indigo-slate body text */
+  --fg-muted: #64748b;               /* refined slate text for descriptions */
+  --accent: #4f46e5;                 /* indigo-600 — primary interactions */
+  --accent-hot: #e11d48;             /* rose-600 — destructive actions */
+  --accent-warm: #d97706;            /* amber-600 — warning/restart indicators */
   /* Pre-computed amber tint for legacy webviews that don't honor
    * color-mix(). Modern browsers progressively enhance to color-mix
    * (the second `background:` declaration wins). Older enterprise
    * kiosk browsers see this pastel and the layout still works. */
-  --accent-warm-tint: #fdf6dc;
-  --accent-soft: rgba(249, 115, 22, 0.10);
-  --accent-glow-color: #f973164d;    /* ≈30% alpha — used by .brand-mark */
-  --danger: #dc2626;
-  --ok: #16a34a;                     /* green-600 — online / success */
-  --warn: #eab308;
-  --border: #e5e7eb;                 /* slate-200 */
-  --radius: 8px;                     /* slightly softer than the prior 6px for a fresher feel */
+  --accent-warm-tint: #fef3c7;
+  --accent-soft: rgba(79, 70, 229, 0.08);
+  --accent-glow-color: #4f46e540;    /* ≈25% alpha — used by .brand-mark */
+  --danger: #e11d48;                 /* matched to rose accent-hot */
+  --ok: #10b981;                     /* emerald — online / success */
+  --warn: #d97706;                   /* matched to amber accent-warm */
+  --border: #e2e8f0;                 /* slate-200 subtle separations */
+  --radius: 10px;                    /* smoother modern rounded corners (up from 8px) */
   --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", Segoe UI, Roboto, system-ui, sans-serif;
   /* Display stack used for titles — same system-only rationale as the
@@ -44,33 +41,33 @@
    * Condensed on macOS/iOS; Oswald on many Linux distros. */
   --display: "Bahnschrift", "Avenir Next Condensed", "Oswald", "Futura", Impact, var(--sans);
   --glow: 0 0 0 3px var(--accent-soft);  /* focus-ring style halo, not the prior blur */
-  --glow-hot: 0 0 0 3px rgba(220, 38, 38, 0.15);
+  --glow-hot: 0 0 0 3px rgba(225, 29, 72, 0.15);
   --scanline-color: transparent;     /* modern theme drops the retro scanline overlay */
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    /* Mirrored accent palette on a near-black surface; same orange/
-     * green/yellow accents shifted +2 lightness steps for AA contrast
-     * against bg-panel. */
-    --bg: #0a0a0b;
-    --bg-panel: #18181b;             /* slate-900 */
-    --bg-elev: #27272a;              /* slate-800 — form-field bg */
-    --fg: #fafafa;
-    --fg-muted: #a1a1aa;             /* slate-400 */
-    --accent: #fb923c;               /* orange-400 — readable on slate-900 */
-    --accent-hot: #ef4444;           /* red-500 */
-    --accent-warm: #facc15;          /* yellow-400 */
+    /* Mirrored accent palette on a near-black slate-indigo surface;
+     * accents shifted +2 lightness steps for AA contrast against the
+     * deep panel background. */
+    --bg: #0b0f19;                   /* premium deep slate-indigo void */
+    --bg-panel: #151f32;             /* dark-blue panel surface */
+    --bg-elev: #1e293b;              /* slate-800 — form-field bg */
+    --fg: #f8fafc;
+    --fg-muted: #94a3b8;             /* slate-400 */
+    --accent: #818cf8;               /* indigo-400 — readable on slate-900 */
+    --accent-hot: #fb7185;           /* rose-400 — soft destructive accent */
+    --accent-warm: #fbbf24;          /* amber-400 */
     /* Dark-mode equivalent of the pastel amber tint. */
-    --accent-warm-tint: #3a2f0a;
-    --accent-soft: rgba(251, 146, 60, 0.16);
-    --accent-glow-color: #fb923c59;
-    --danger: #ef4444;
-    --ok: #22c55e;                   /* green-500 — pops against slate-900 */
-    --warn: #facc15;
-    --border: #3f3f46;               /* slate-700 */
+    --accent-warm-tint: #2e2204;
+    --accent-soft: rgba(129, 140, 248, 0.15);
+    --accent-glow-color: rgba(129, 140, 248, 0.3);
+    --danger: #fb7185;
+    --ok: #34d399;                   /* emerald-400 — pops against slate-900 */
+    --warn: #fbbf24;
+    --border: #273549;               /* slate-700-ish */
     --glow: 0 0 0 3px var(--accent-soft);
-    --glow-hot: 0 0 0 3px rgba(239, 68, 68, 0.18);
+    --glow-hot: 0 0 0 3px rgba(251, 113, 133, 0.18);
     --scanline-color: transparent;
   }
 }
@@ -101,6 +98,124 @@ body::before {
     linear-gradient(to bottom, var(--scanline-color) 1px, transparent 1px),
     linear-gradient(to right, var(--scanline-color) 1px, transparent 1px);
   background-size: 40px 40px;
+}
+
+/* ===========================================================
+   Login screen & structural layout fallbacks
+   ===========================================================
+   Pre-existing templates (login.html, settings.html, devices.html) used
+   .login-page / .login-card / .login-brand / .login-hint / .login-error /
+   .login-foot, .actions, .field.read-only, .panel-actions(-row),
+   .btn.destructive — but none had matching CSS rules. The card stretched
+   edge-to-edge, the disabled fields inherited browser defaults, and the
+   alias-class buttons fell back to .btn baseline. These blocks close those
+   gaps without touching any HTML or JS. */
+
+body.login-page {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  background: linear-gradient(135deg, var(--bg), var(--bg-elev));
+  padding: 20px;
+}
+
+.login-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) * 1.5);
+  padding: 40px 32px;
+  width: 100%;
+  max-width: 420px;
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1),
+              0 10px 10px -5px rgba(0, 0, 0, 0.04);
+}
+
+.login-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 28px;
+}
+/* .login-brand .name typography is handled by the grouped selector at the
+ * .brand .name rule above — no restated declaration here. */
+
+.login-card h1 {
+  font-size: 24px;
+  margin-bottom: 6px;
+  text-transform: none;
+  letter-spacing: -0.02em;
+}
+
+.login-hint {
+  color: var(--fg-muted);
+  font-size: 14px;
+  margin-bottom: 24px;
+}
+
+#login-form button[type="submit"] {
+  width: 100%;
+  padding: 12px;
+  background: var(--accent);
+  color: white;
+  border: none;
+  border-radius: var(--radius);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.05s ease;
+}
+#login-form button[type="submit"]:hover {
+  background: color-mix(in srgb, var(--accent) 85%, #000);
+}
+#login-form button[type="submit"]:active {
+  transform: scale(0.98);
+}
+
+.login-error {
+  /* Plain-rgba fallback before each color-mix() so legacy webviews
+   * without color-mix() still get a tinted error background AND a
+   * visible border instead of IACVT-resolved transparency. */
+  background: rgba(225, 29, 72, 0.10);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: var(--danger);
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  border: 1px solid rgba(225, 29, 72, 0.3);
+  border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
+  margin-top: 16px;
+  font-size: 13px;
+}
+
+.login-foot {
+  margin-top: 32px;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+
+/* Read-only form fields — target the nested disabled input so the wrapper
+ * stays a plain layout container; otherwise the <label> + <small.hint>
+ * footer get visually trapped inside a card. The HTML uses `disabled`,
+ * not `readonly` — match what's actually in settings.html. */
+.field.read-only input[disabled] {
+  background: var(--bg-elev);
+  color: var(--fg-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  font-family: var(--mono);
+  cursor: not-allowed;
+}
+
+/* Inline action containers inside .panel-head — used across dashboard,
+ * settings, and library_inspector for restart / supervised / save buttons. */
+.panel-actions, .panel-actions-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
 }
 
 code {
@@ -158,7 +273,10 @@ header {
     border: 1px solid var(--border);
   }
 }
-.brand .name {
+/* Group .login-brand .name so the login page's brand wrapper (which uses
+ * .login-brand, not .brand) picks up the same display-font typography.
+ * Without this grouped selector the login title falls back to default body text. */
+.brand .name, .login-brand .name {
   font-weight: 500;
   color: var(--fg);
   font-family: var(--display);
@@ -324,9 +442,16 @@ h2 {
   border-radius: var(--radius);
   padding: 20px;
   margin-bottom: 20px;
-  /* A faint inner border highlights the panel edge without the heavy
-   * "card on a desk" shadow look. */
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 8%, transparent);
+  /* A faint inner border highlights the panel edge; layered with a soft
+   * exterior depth shadow for a modern card lift. The inset uses
+   * --accent-soft (a precomputed rgba(--accent, 8% light / 15% dark)
+   * token) instead of color-mix() so the entire multi-shadow declaration
+   * is parseable on legacy webviews without color-mix support — without
+   * this, IACVT would drop the entire box-shadow including the depth
+   * layers, leaving the panel flat. */
+  box-shadow: inset 0 0 0 1px var(--accent-soft),
+              0 4px 6px -1px rgba(0, 0, 0, 0.05),
+              0 2px 4px -1px rgba(0, 0, 0, 0.03);
 }
 .panel-head {
   display: flex;
@@ -450,6 +575,7 @@ table.rows th {
 }
 table.rows td.num, table.rows th.num { text-align: right; font-variant-numeric: tabular-nums; }
 table.rows tbody tr:last-child td { border-bottom: none; }
+table.rows tbody tr { transition: background-color 0.1s ease; }
 table.rows tbody tr:hover td { background: color-mix(in srgb, var(--accent) 4%, transparent); }
 
 .btn {
@@ -465,7 +591,14 @@ table.rows tbody tr:hover td { background: color-mix(in srgb, var(--accent) 4%, 
   cursor: pointer;
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  transition: background 0.12s, border-color 0.12s, box-shadow 0.12s, transform 0.05s;
+  /* Explicit property list rather than `all` — `all` makes the browser
+   * watch every animatable property for changes, which is wasted work
+   * for a button that only animates the few listed below. The refined
+   * cubic-bezier curve is what we wanted from the modernization. */
+  transition: background 0.2s cubic-bezier(0.4, 0, 0.2, 1),
+              border-color 0.2s cubic-bezier(0.4, 0, 0.2, 1),
+              box-shadow 0.2s cubic-bezier(0.4, 0, 0.2, 1),
+              transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 .btn:hover {
   background: var(--bg-panel);
@@ -482,18 +615,23 @@ table.rows tbody tr:hover td { background: color-mix(in srgb, var(--accent) 4%, 
   background: color-mix(in srgb, var(--accent) 12%, transparent);
   box-shadow: 0 0 0 1px var(--accent), var(--glow);
 }
-.btn.danger {
+/* .destructive is an alias used in settings.html for the same visual intent
+ * as .danger — group the selectors so neither path drifts. */
+.btn.danger, .btn.destructive {
   color: var(--danger);
   border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
 }
-.btn.danger:hover {
+.btn.danger:hover, .btn.destructive:hover {
   background: color-mix(in srgb, var(--danger) 12%, transparent);
   box-shadow: 0 0 10px color-mix(in srgb, var(--danger) 30%, transparent);
 }
 .btn:disabled { opacity: 0.5; cursor: default; }
 .btn:disabled:hover { background: var(--bg-elev); border-color: var(--border); box-shadow: none; }
 
-input[type=text], input[type=url], input[type=number], textarea {
+/* The login page's password input depends on [type=password] being in
+ * this list — without it the password field renders raw browser default
+ * next to a styled username field. */
+input[type=text], input[type=url], input[type=number], input[type=password], textarea {
   width: 100%;
   padding: 9px 12px;
   font-family: var(--mono);
@@ -516,7 +654,7 @@ textarea {
   resize: vertical;
   min-height: 84px;
 }
-input[type=text]:focus, input[type=url]:focus, input[type=number]:focus, textarea:focus {
+input[type=text]:focus, input[type=url]:focus, input[type=number]:focus, input[type=password]:focus, textarea:focus {
   outline: none;
   border-color: var(--accent);
   box-shadow: var(--glow);
@@ -533,7 +671,16 @@ form label {
 }
 
 form .field { margin-bottom: 18px; }
-form .actions { margin-top: 18px; display: flex; gap: 10px; }
+/* .actions is used both inside <form> (settings.html) and standalone
+ * (devices.html). Group the selectors so both forms get flex + right-align
+ * + wrap; only the form variant carries the top margin. */
+.actions, form .actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+form .actions { margin-top: 18px; }
 
 .status {
   padding: 10px 12px;
@@ -799,9 +946,13 @@ dialog h2 { font-size: 18px; color: var(--accent); }
 @media (prefers-reduced-motion: reduce) {
   .pairing-badge-pulse {
     /* No animation under reduced-motion. The brighter background
-     * already conveys "new request arrived" without movement. */
+     * already conveys "new request arrived" without movement.
+     * Use var(--warn) directly — color-mix(var --warn 100%, transparent)
+     * is mathematically equivalent but IACVT-invalid on legacy webviews
+     * (Chrome <111, Firefox <113, Safari <16.2), resolving to transparent
+     * and making the badge unreadable. */
     animation: none;
-    background: color-mix(in srgb, var(--warn) 100%, transparent);
+    background: var(--warn);
   }
 }
 .pairing-card-head {
@@ -2338,7 +2489,63 @@ section.library-inspector {
   text-decoration: underline;
 }
 
-/* ===== Mobile / narrow viewport adjustments ===== */
+/* ===== Mobile / narrow viewport adjustments =====
+ *
+ * Two layered breakpoints:
+ *   - 768px: unified general adaptation for header / nav / forms / main
+ *   - 600px: inspector-specific tweaks layered on top
+ *
+ * Order matters — the 600px block comes second so its rules win below
+ * 600px when both blocks match. */
+
+@media (max-width: 768px) {
+  /* Header collapses from 3-column grid to a single stacked column. */
+  header {
+    grid-template-columns: 1fr;
+    gap: 16px;
+    padding: 16px 20px;
+    align-items: stretch;
+  }
+  header .brand { justify-content: center; }
+
+  /* Nav becomes a horizontally-swipeable scroll-snap belt instead of
+   * wrapping or truncating. Hide the scrollbar in both Firefox + WebKit. */
+  header nav {
+    justify-content: flex-start;
+    overflow-x: auto;
+    white-space: nowrap;
+    padding: 0 20px 8px;
+    margin: 0 -20px;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  header nav::-webkit-scrollbar { display: none; }
+  header nav a { padding: 8px 14px; font-size: 13px; flex-shrink: 0; }
+  /* Match the new 14px horizontal padding — keeping the underline aligned
+   * with the text bounds, not the tap-target gutters. */
+  header nav a::after { left: 14px; right: 14px; }
+
+  header .meta {
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 12px;
+    border-top: 1px solid var(--border);
+    padding-top: 12px;
+  }
+
+  main { padding: 16px; }
+  h1 { font-size: 22px; }
+
+  /* Form action rows stack vertically with full-width tap targets on
+   * narrow viewports — preserves the right-aligned flex on desktop. */
+  .actions, form .actions { flex-direction: column; }
+  .actions .btn, form .actions .btn {
+    width: 100%;
+    text-align: center;
+    padding: 12px;
+  }
+}
+
 @media (max-width: 600px) {
   .inspector-grid {
     grid-template-columns: 1fr;
