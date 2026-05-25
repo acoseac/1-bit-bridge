@@ -2595,7 +2595,9 @@ section.library-inspector {
     border-radius: var(--radius);
     cursor: pointer;
     user-select: none;
-    min-height: 40px;
+    /* 44px is the WCAG / Apple HIG / Material minimum touch target.
+     * Matches the existing 44px floor used elsewhere in this file. */
+    min-height: 44px;
   }
   .nav-toggle:hover {
     background: var(--bg-panel);
@@ -2618,11 +2620,12 @@ section.library-inspector {
     margin-top: 4px;
   }
 
-  /* --- Nav collapsed by default; shown as dropdown when open. !important
-   *     overrides the 768px block's display: flex on header nav. */
-  header nav { display: none !important; }
+  /* --- Nav collapsed by default; the source order + equal/higher
+   *     specificity of these rules wins over the 768px block without
+   *     needing !important. */
+  header nav { display: none; }
   header[data-nav-open="true"] nav {
-    display: flex !important;
+    display: flex;
     flex-direction: column;
     position: absolute;
     top: 100%;
@@ -2651,16 +2654,16 @@ section.library-inspector {
   /* Detach the underline indicator — full-width dropdown rows don't
    * need a tab-bar accent and the absolute-positioned ::after would
    * draw at the wrong edge anyway. */
-  header[data-nav-open="true"] nav a::after { display: none !important; }
+  header[data-nav-open="true"] nav a::after { display: none; }
 
   /* --- Tables → card stack ------------------------------------------------
    * <thead> kept in the DOM for screen readers but visually hidden via
-   * a 1px clip rect. Each <tr> becomes a bordered card; each <td>
-   * becomes a two-column row with label-from-data-label on the left. */
+   * clip-path (clip is deprecated). Each <tr> becomes a bordered card;
+   * each <td> a two-column row with label-from-data-label on the left. */
   table.rows { display: block; width: 100%; }
   table.rows thead {
     position: absolute;
-    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
     width: 1px;
     height: 1px;
     margin: -1px;
@@ -2682,9 +2685,8 @@ section.library-inspector {
     grid-template-columns: 110px 1fr;
     gap: 12px;
     padding: 6px 0;
-    border-bottom: none !important;
+    border-bottom: none;
     align-items: center;
-    text-align: left !important;
   }
   table.rows td::before {
     content: attr(data-label);
@@ -2697,7 +2699,7 @@ section.library-inspector {
   }
   /* .num cells normally right-align — in card-stack mode the value lives
    * in the right grid column, so left-align reads better alongside its label. */
-  table.rows td.num { text-align: left !important; }
+  table.rows td.num { text-align: left; }
 
   /* --- colspan feedback rows (loading, empty, error, skipped) -------------
    * Forcing these into the 2-col grid would collapse them into the auto
@@ -2713,7 +2715,7 @@ section.library-inspector {
   }
   table.rows td[colspan] {
     display: block;
-    text-align: center !important;
+    text-align: center;
     padding: 10px 12px;
     width: 100%;
     box-sizing: border-box;
@@ -2726,8 +2728,10 @@ section.library-inspector {
     white-space: normal;
   }
 
-  /* --- Action cells stack their buttons full-width with a top divider --- */
-  table.rows td.row-actions {
+  /* --- Action cells stack their buttons full-width with a top divider.
+   * :not(:empty) suppresses the divider + padding on rows with no
+   * actions (e.g. completed batches don't get a Cancel button). */
+  table.rows td.row-actions:not(:empty) {
     display: flex;
     flex-direction: column;
     align-items: stretch;

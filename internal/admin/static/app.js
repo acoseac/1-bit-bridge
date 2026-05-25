@@ -4511,25 +4511,26 @@ function initMobileNav() {
   const nav = document.getElementById("primary-nav");
   if (!toggle || !header || !nav) return;
 
+  // `aria-expanded` stays on setAttribute — ARIA attrs aren't part of
+  // the data-* family that dataset projects.
+  const isOpen = () => header.dataset.navOpen === "true";
   function setOpen(open) {
-    header.setAttribute("data-nav-open", open ? "true" : "false");
+    header.dataset.navOpen = open ? "true" : "false";
     toggle.setAttribute("aria-expanded", open ? "true" : "false");
   }
 
   toggle.addEventListener("click", (e) => {
     e.stopPropagation();
-    setOpen(header.getAttribute("data-nav-open") !== "true");
+    setOpen(!isOpen());
   });
 
   document.addEventListener("click", (e) => {
-    if (header.getAttribute("data-nav-open") !== "true") return;
+    if (!isOpen()) return;
     if (!header.contains(e.target)) setOpen(false);
   });
 
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && header.getAttribute("data-nav-open") === "true") {
-      setOpen(false);
-    }
+    if (e.key === "Escape" && isOpen()) setOpen(false);
   });
 
   nav.querySelectorAll("a").forEach((link) => {
