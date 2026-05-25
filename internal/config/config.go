@@ -1108,14 +1108,21 @@ func (c *Config) Validate() error {
 		if r == "" {
 			return errors.New("libraryRoots: entries must not be empty")
 		}
-		info, err := os.Stat(r)
-		if err != nil {
-			return fmt.Errorf("libraryRoots[%q]: %w", r, err)
-		}
-		if !info.IsDir() {
-			return fmt.Errorf("libraryRoots[%q]: not a directory", r)
-		}
 	}
+	// NOTE: existence + is-directory checks for LibraryRoots have
+	// deliberately been pulled OUT of Validate() and into
+	// CheckLibraryRootsAccessible. Rationale (see CLAUDE.md "Things
+	// that have bitten before"): public-mode VPS deployments run the
+	// daemon as a non-root user against a FUSE-mounted library that
+	// only the daemon user can stat. `sudo bridge update` / `sudo
+	// bridge status` then run as root and the stat returns EACCES,
+	// taking down the entire CLI path including update + status
+	// regardless of whether those subcommands actually need the
+	// library. Validate() is now a pure shape check; runtime
+	// accessibility is the caller's decision — `bridge serve`
+	// invokes CheckLibraryRootsAccessible at startup with
+	// mode-dependent strictness, mutation paths (`bridge library
+	// add`, admin's apiRootsAdd) already stat independently.
 	if c.ScanIntervalSec < 1 {
 		return fmt.Errorf("scanIntervalSec: must be >= 1, got %d", c.ScanIntervalSec)
 	}
@@ -1474,6 +1481,61 @@ func validateLoopbackAddress(addr string) error {
 		return fmt.Errorf("host %q must be a loopback address (127.0.0.1, ::1, or localhost)", host)
 	}
 	return nil
+}
+
+// LibraryRootError pairs an inaccessible library-root path with the
+// underlying filesystem error. Returned by CheckLibraryRootsAccessible
+// so callers can distinguish "not a directory" from "permission
+// denied" from "no such file" without parsing error strings.
+type LibraryRootError struct {
+	Path string
+	Err  error
+}
+
+func (e *LibraryRootError) Error() string {
+	return fmt.Sprintf("libraryRoots[%q]: %v", e.Path, e.Err)
+}
+
+func (e *LibraryRootError) Unwrap() error { return e.Err }
+
+// CheckLibraryRootsAccessible stats every configured LibraryRoot
+// and returns one LibraryRootError per failing entry. Empty result
+// means all roots are present + are directories.
+//
+// Deliberately separate from Validate(): the stat call is what
+// trips public-mode deployments where the daemon user runs the
+// bridge against a FUSE-mounted library inaccessible to root, and
+// `sudo bridge update` / `sudo bridge status` / etc. would
+// otherwise refuse to load the config. Move-out predates the
+// runtime check; the runtime check is owned by `bridge serve`
+// (mode-dependent strictness) and the mutation handlers (`bridge
+// library add`, admin's apiRootsAdd) — both stat independently
+// before persisting.
+//
+// Callers should treat the returned slice as advisory and pick
+// their own response: loopback `bridge serve` refuses to start
+// when any root is unreachable (typo'd YAML protection); public
+// `bridge serve` logs warnings and continues (the bridge can
+// still come up serving cached state while a FUSE mount catches
+// up, and the scanner's PR-#74 error-subtree machinery prevents
+// the deletion pass from wiping the manifest of a momentarily-
+// unreadable root).
+func (c *Config) CheckLibraryRootsAccessible() []*LibraryRootError {
+	var errs []*LibraryRootError
+	for _, r := range c.LibraryRoots {
+		if r == "" {
+			continue // shape-checked in Validate; skip the noisy duplicate here
+		}
+		info, err := os.Stat(r)
+		if err != nil {
+			errs = append(errs, &LibraryRootError{Path: r, Err: err})
+			continue
+		}
+		if !info.IsDir() {
+			errs = append(errs, &LibraryRootError{Path: r, Err: errors.New("not a directory")})
+		}
+	}
+	return errs
 }
 
 // ScanInterval returns scanIntervalSec as a time.Duration.
