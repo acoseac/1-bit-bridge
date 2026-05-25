@@ -19,7 +19,7 @@ Companion server for the **[1-bit iOS music player](https://apps.apple.com/us/ap
 
 ## Status
 
-**v0.1.3** — wire protocol stays at [`PROTOCOL.md`](PROTOCOL.md) v1 (additive only since v0.1.2: classical-metadata fields on `Track`, `pushEventsSupported` / `pairingEventsSupported` on `/v1/health`, `upscale.complete` SSE event). macOS binaries are Developer-ID-signed and Apple-notarized; Windows binaries are unsigned for now (Authenticode signing via SignPath Foundation pending). See the [releases page](https://github.com/acoseac/1-bit-bridge/releases) for per-release notes.
+**v0.1.4** — wire protocol stays at [`PROTOCOL.md`](PROTOCOL.md) v1 (additive only since v0.1.3: HTTP/3 (QUIC) on the same port as HTTP/2, `GET /v1/diagnostics` for counter-only health telemetry, `optimize-*` variant class for CarPlay-routing). Operational additions: public-internet deployment mode with admin-console password login + native Let's Encrypt cert provisioning, Prometheus `/metrics` on the admin listener, Library Inspector tile grid in the admin console, indigo palette refresh with a phone-width responsive breakpoint. macOS binaries are Developer-ID-signed and Apple-notarized; Windows binaries are unsigned for now (Authenticode signing via SignPath Foundation pending). See the [releases page](https://github.com/acoseac/1-bit-bridge/releases) for per-release notes.
 
 ## Install
 
@@ -66,7 +66,7 @@ Before (or any time after) running `bridge init`, `bridge doctor` prints a punch
 
 `bridge init` runs doctor automatically and bails on `fail` (use `--skip-doctor` to override — not recommended).
 
-**Admin console** — [http://127.0.0.1:7789/](http://127.0.0.1:7789/). Add/remove library folders, pair iOS devices (QR + copy-buttons), revoke tokens, view scan state + stats. Loopback-only, no auth — anyone on the machine already has filesystem access to the token store.
+**Admin console** — [http://127.0.0.1:7789/](http://127.0.0.1:7789/). Add/remove library folders, pair iOS devices (QR + copy-buttons), revoke tokens, view scan state + stats. Loopback-only, no auth — anyone on the machine already has filesystem access to the token store. (For internet-exposed deployments, see `bridge init --public` in [docs/features.html#public-mode](https://acoseac.github.io/1-bit-bridge/features.html#public-mode) — that profile binds the admin console to a routable interface and adds a single-user password login.)
 
 **Pairing an iOS device**: on the Devices page, click _Pair new device_, give it a name, optionally edit the bridge URL (defaults to `https://<hostname>.local:7788`), then generate the token. The modal shows a QR encoding a `bridge://pair?...` URL — scan it in the 1-bit app, or copy the URL/token/fingerprint fields manually.
 
