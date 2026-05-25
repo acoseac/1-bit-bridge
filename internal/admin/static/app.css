@@ -288,6 +288,10 @@ header nav {
   display: flex;
   gap: 4px;
 }
+
+/* Hamburger toggle is phone-only — the @media (max-width: 640px) block
+ * below flips it to inline-flex. Hidden everywhere else. */
+.nav-toggle { display: none; }
 header nav a {
   color: var(--fg-muted);
   text-decoration: none;
@@ -2561,5 +2565,203 @@ section.library-inspector {
   }
   .panel-card .card-summary-hint {
     display: none;
+  }
+}
+
+/* ===== Phone-width adaptations (≤640px) =================================
+ *
+ * Layered below the 768px tablet rules. Two concerns:
+ *   1. Top nav becomes a hamburger overflow menu (the 768px scroll-belt
+ *      lacks a visual affordance — Settings was silently off-screen).
+ *   2. table.rows (Jobs, Devices) cards-stack so cells stop wrapping
+ *      character-by-character. <thead> hidden visually; per-cell label
+ *      injected from data-label="…". colspan feedback rows exempted.
+ *
+ * z-index = 50 on the open dropdown sits above the inspector search
+ * popovers (1–5) but below modals (100) and the floating toast (9999).
+ */
+@media (max-width: 640px) {
+  /* --- Hamburger button (hidden on desktop via base .nav-toggle below) --- */
+  .nav-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    color: var(--fg);
+    font-size: 18px;
+    line-height: 1;
+    padding: 6px 14px;
+    border-radius: var(--radius);
+    cursor: pointer;
+    user-select: none;
+    /* 44px is the WCAG / Apple HIG / Material minimum touch target.
+     * Matches the existing 44px floor used elsewhere in this file. */
+    min-height: 44px;
+  }
+  .nav-toggle:hover {
+    background: var(--bg-panel);
+    border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  }
+
+  /* --- Header restructure: brand + hamburger on row 1, meta on row 2.
+   *     position: relative anchors the absolute-positioned dropdown. */
+  header {
+    position: relative;
+    grid-template-columns: 1fr auto;
+    align-items: center;
+  }
+  header .brand { justify-content: flex-start; }
+  header .meta {
+    grid-column: 1 / -1;
+    justify-content: center;
+    border-top: 1px solid var(--border);
+    padding-top: 12px;
+    margin-top: 4px;
+  }
+
+  /* --- Nav collapsed by default; the source order + equal/higher
+   *     specificity of these rules wins over the 768px block without
+   *     needing !important. */
+  header nav { display: none; }
+  header[data-nav-open="true"] nav {
+    display: flex;
+    flex-direction: column;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    z-index: 50;
+    background: var(--bg-panel);
+    border-bottom: 1px solid var(--border);
+    box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.15);
+    padding: 8px 0;
+    margin: 0;
+    overflow: visible;
+    white-space: normal;
+  }
+  header[data-nav-open="true"] nav a {
+    padding: 14px 24px;
+    font-size: 14px;
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+    border-radius: 0;
+  }
+  header[data-nav-open="true"] nav a:hover {
+    background: var(--bg-elev);
+  }
+  /* Detach the underline indicator — full-width dropdown rows don't
+   * need a tab-bar accent and the absolute-positioned ::after would
+   * draw at the wrong edge anyway. */
+  header[data-nav-open="true"] nav a::after { display: none; }
+
+  /* --- Tables → card stack ------------------------------------------------
+   * <thead> kept in the DOM for screen readers but visually hidden via
+   * clip-path (clip is deprecated). Each <tr> becomes a bordered card;
+   * each <td> a two-column row with label-from-data-label on the left. */
+  table.rows { display: block; width: 100%; }
+  table.rows thead {
+    position: absolute;
+    clip-path: inset(50%);
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    border: 0;
+  }
+  table.rows tbody, table.rows tr { display: block; width: 100%; }
+  table.rows tr {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px;
+    margin-bottom: 16px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  }
+  table.rows td {
+    display: grid;
+    grid-template-columns: 110px 1fr;
+    gap: 12px;
+    padding: 6px 0;
+    border-bottom: none;
+    align-items: center;
+  }
+  table.rows td::before {
+    content: attr(data-label);
+    font-family: var(--display);
+    font-weight: 600;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--fg-muted);
+  }
+  /* .num cells normally right-align — in card-stack mode the value lives
+   * in the right grid column, so left-align reads better alongside its label. */
+  table.rows td.num { text-align: left; }
+
+  /* --- colspan feedback rows (loading, empty, disabled, error, skipped) ---
+   * Any TR carrying a colspan TD is a feedback banner, NOT a data row.
+   * Strip card chrome via :has() so all six row variants render as plain
+   * centred text — covers both the classed cases (.job-error-row /
+   * .job-skipped-row) and the unclassed ones (Loading…, "No batches yet",
+   * "Upscale is disabled", "No devices paired yet"). */
+  table.rows tr:has(td[colspan]) {
+    padding: 0;
+    border: none;
+    box-shadow: none;
+    background: transparent;
+  }
+  /* Error / skipped sub-lines sit RIGHT UNDER a data row, so they pull
+   * up against it to read as a continuation. Empty/loading banners stand
+   * alone so they don't need the negative margin. */
+  table.rows tr.job-error-row,
+  table.rows tr.job-skipped-row {
+    margin-top: -12px;
+    margin-bottom: 16px;
+  }
+  table.rows td[colspan] {
+    display: block;
+    text-align: center;
+    padding: 10px 12px;
+    width: 100%;
+    box-sizing: border-box;
+  }
+  table.rows td[colspan]::before { content: none; }
+
+  /* --- Long-hex IDs (devices) wrap as a block, not per-character --------- */
+  table.rows td code {
+    word-break: break-all;
+    white-space: normal;
+  }
+
+  /* --- Action cells stack their buttons full-width with a top divider.
+   * :not(:empty) suppresses the divider + padding on rows with no
+   * actions (e.g. completed batches don't get a Cancel button). */
+  table.rows td.row-actions:not(:empty) {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    padding-top: 14px;
+    margin-top: 8px;
+    border-top: 1px solid var(--border);
+  }
+  table.rows td.row-actions::before { display: none; }
+  table.rows td.row-actions .btn {
+    width: 100%;
+    text-align: center;
+  }
+
+  /* --- Inspector long folder names -----------------------------------------
+   * .tile-name has white-space: nowrap + overflow: hidden + ellipsis on
+   * desktop; reset all three so long names wrap across 2-3 lines on phone
+   * (vertical room is cheap here — the grid is already 1-column at 600px). */
+  .inspector-tile .tile-name {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    overflow-wrap: anywhere;
   }
 }

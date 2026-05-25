@@ -32,14 +32,14 @@
       <tbody id="tokens-body">
         {{range .Data.Tokens}}
         <tr data-id="{{.ID}}" data-name="{{.Name}}">
-          <td>{{.Name}}</td>
-          <td><code>{{.ID}}</code></td>
-          <td>{{timeAgo .CreatedAt}}</td>
-          <td>{{timeAgo .LastUsedAt}}</td>
-          <td class="expires-cell">
+          <td data-label="Name">{{.Name}}</td>
+          <td data-label="ID"><code>{{.ID}}</code></td>
+          <td data-label="Created">{{timeAgo .CreatedAt}}</td>
+          <td data-label="Last used">{{timeAgo .LastUsedAt}}</td>
+          <td class="expires-cell" data-label="Expires">
             {{if .ExpiresAt}}{{timeAgo .ExpiresAt}}{{else}}<em>never</em>{{end}}
           </td>
-          <td class="row-actions">
+          <td class="row-actions" data-label="Actions">
             <button type="button" class="btn rotate-token" title="Generate fresh raw bytes for this token (preserves ID + name; the device must re-scan a new pair QR)">Rotate</button>
             <button type="button" class="btn set-expiry-token" title="Set or clear an expiry time for this token">Expiry…</button>
             <button type="button" class="btn danger revoke-token" title="Permanently delete this token">Revoke</button>

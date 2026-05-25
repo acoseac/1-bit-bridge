@@ -4439,14 +4439,14 @@ function jobsRender(payload) {
     const updated = new Date(r.updatedAt).toLocaleString();
     const target = `${(r.targetRate / 1000).toFixed(1)} kHz · ${r.targetBits}-bit`;
     tr.innerHTML = `
-      <td><span class="status status-${r.status}">${r.status}</span></td>
-      <td><code>${escapeHTML(scopeLabel)}</code></td>
-      <td>${target}</td>
-      <td class="num">${r.processedFiles}</td>
-      <td class="num">${r.failedFiles}</td>
-      <td class="num">${r.totalFiles}</td>
-      <td><time>${escapeHTML(updated)}</time></td>
-      <td></td>
+      <td data-label="Status"><span class="status status-${r.status}">${r.status}</span></td>
+      <td data-label="Scope"><code>${escapeHTML(scopeLabel)}</code></td>
+      <td data-label="Target">${target}</td>
+      <td class="num" data-label="Done">${r.processedFiles}</td>
+      <td class="num" data-label="Failed">${r.failedFiles}</td>
+      <td class="num" data-label="Total">${r.totalFiles}</td>
+      <td data-label="Updated"><time>${escapeHTML(updated)}</time></td>
+      <td class="row-actions" data-label="Actions"></td>
     `;
     if (r.status === "pending" || r.status === "running") {
       const cancelBtn = document.createElement("button");
@@ -4500,9 +4500,56 @@ function formatDuration(seconds) {
   return `${(seconds / 3600).toFixed(1)} h`;
 }
 
+// Mobile hamburger nav. Toggles `data-nav-open` on the <header> + the
+// `aria-expanded` attr on the button. The CSS at <=640px reveals the
+// button, hides the nav by default, and renders an absolute-positioned
+// dropdown when data-nav-open=true. Closes on outside click, Escape,
+// or any link tap (the page is about to navigate anyway).
+function initMobileNav() {
+  const toggle = document.getElementById("nav-toggle");
+  const header = document.querySelector("header");
+  const nav = document.getElementById("primary-nav");
+  if (!toggle || !header || !nav) return;
+
+  // `aria-expanded` stays on setAttribute — ARIA attrs aren't part of
+  // the data-* family that dataset projects.
+  const isOpen = () => header.dataset.navOpen === "true";
+  function setOpen(open) {
+    header.dataset.navOpen = open ? "true" : "false";
+    toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    // ARIA disclosure pattern: move keyboard focus into the menu
+    // on open. Mouse users don't see the ring (:focus-visible).
+    if (open) nav.querySelector("a")?.focus();
+  }
+
+  toggle.addEventListener("click", (e) => {
+    e.stopPropagation();
+    setOpen(!isOpen());
+  });
+
+  document.addEventListener("click", (e) => {
+    if (!isOpen()) return;
+    if (!header.contains(e.target)) setOpen(false);
+  });
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && isOpen()) {
+      setOpen(false);
+      // Return focus to the toggle so a keyboard user can re-open
+      // without re-tabbing — completes the disclosure-pattern loop.
+      toggle.focus();
+    }
+  });
+
+  nav.querySelectorAll("a").forEach((link) => {
+    link.addEventListener("click", () => setOpen(false));
+  });
+}
+
 // --- boot ---
 
 document.addEventListener("DOMContentLoaded", () => {
+  initMobileNav();
   const active = document.body.dataset.active;
   switch (active) {
     case "dashboard": initDashboard(); break;
