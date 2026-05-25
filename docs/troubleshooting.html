@@ -194,6 +194,15 @@
     </div>
 
     <div class="symptom">
+      <strong><code>bridge update</code> refuses to install</strong> with <code>binary path not writable by this user (try sudo bridge update)</code>.
+    </div>
+    <div class="fix">
+      <p>This is a public-mode VPS layout where the daemon user owns <code>/usr/local/bin/bridge</code> but the parent directory <code>/usr/local/bin/</code> is root-owned. The bridge can't atomic-rename a new binary into a directory it can't write — so it surfaces the constraint up-front rather than corrupting the install. Run the update under <code>sudo</code>:</p>
+      <pre><code>sudo bridge update -config &lt;path/to/bridge.yaml&gt; -yes</code></pre>
+      <p>If you use a FUSE-mounted library that's only visible to the daemon user (a typical <code>rclone --vfs-cache-mode full</code> setup), root running this command would have historically failed at config-load time with <code>libraryRoots[...]: permission denied</code>. As of v0.1.5 the update path tolerates an inaccessible library root — accessibility is checked at <code>bridge serve</code> startup, not during the update flow, so <code>sudo bridge update</code> works regardless of who can read the library. Post-install, restart the bridge however your platform manages the service (<code>sudo systemctl restart 1-bit-bridge</code> for the canonical systemd layout).</p>
+    </div>
+
+    <div class="symptom">
       <strong>Let's Encrypt cert provisioning is failing</strong> — admin console shows a TLS error or repeated ACME retries in the logs.
     </div>
     <div class="fix">

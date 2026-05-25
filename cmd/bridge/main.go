@@ -1186,6 +1186,35 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		fmt.Fprintf(stderr, "config: %v\n", err)
 		return 2
 	}
+	// Runtime library-root accessibility check.
+	//
+	// The shape check in config.Validate() no longer stats individual
+	// roots (see CLAUDE.md "Things that have bitten before" — public-
+	// mode VPS deployments with FUSE-mounted libraries can't be
+	// stat'd by root, which would otherwise take down `sudo bridge
+	// update` and friends). Strictness is mode-dependent here:
+	//
+	//   - loopback: any unreachable root is a refuse-to-start, matches
+	//     the historical contract (typo'd YAML protection).
+	//
+	//   - public: log a warning per failing root and continue. The
+	//     scanner's PR-#74 error-subtree machinery prevents the
+	//     deletion pass from wiping the manifest of a momentarily-
+	//     unreadable root, so the bridge can come up serving cached
+	//     state while a slow FUSE mount catches up.
+	if rootErrs := cfg.CheckLibraryRootsAccessible(); len(rootErrs) > 0 {
+		if cfg.IsPublic() {
+			for _, e := range rootErrs {
+				logger.Warn("library root not accessible at startup — scan will retry, manifest will reflect what's currently visible",
+					"path", e.Path, "err", e.Err)
+			}
+		} else {
+			for _, e := range rootErrs {
+				fmt.Fprintf(stderr, "config: %v\n", e)
+			}
+			return 2
+		}
+	}
 	if *addrOverride != "" {
 		// Validate the override the same way config.Validate validates
 		// ListenAddress — otherwise an invalid value like "notaport"

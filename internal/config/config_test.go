@@ -159,24 +159,153 @@ func TestValidateEmptyLibraryRoots(t *testing.T) {
 	}
 }
 
-func TestValidateNonexistentLibraryRoot(t *testing.T) {
-	cfg := &Config{LibraryRoots: []string{"/nonexistent"}, ListenAddress: ":7788", ScanIntervalSec: 3600}
-	err := cfg.Validate()
-	if err == nil {
-		t.Error("expected error for nonexistent library root")
+// TestValidatePassesNonexistentLibraryRoot pins the post-A2-refactor
+// contract: Validate() is a pure shape check and no longer stats
+// individual library roots. Filesystem-accessibility is the
+// caller's decision via CheckLibraryRootsAccessible (the regression
+// target — bridge.ars.md's public-mode VPS layout where the daemon
+// runs against a FUSE mount root can't stat, so the stat-in-Validate
+// shape took down `sudo bridge update` even though update doesn't
+// need library access).
+func TestValidatePassesNonexistentLibraryRoot(t *testing.T) {
+	cfg := &Config{LibraryRoots: []string{"/nonexistent"}, ListenAddress: ":7788", AdminAddress: "127.0.0.1:7789", ScanIntervalSec: 3600}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("expected Validate() to ignore root existence, got %v", err)
 	}
 }
 
-func TestValidateLibraryRootIsAFile(t *testing.T) {
+func TestValidatePassesLibraryRootIsAFile(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "notadir.txt")
 	if err := os.WriteFile(file, []byte("hi"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfg := &Config{LibraryRoots: []string{file}, ListenAddress: ":7788", ScanIntervalSec: 3600}
-	err := cfg.Validate()
-	if err == nil || !strings.Contains(err.Error(), "not a directory") {
-		t.Errorf("expected 'not a directory' error, got %v", err)
+	cfg := &Config{LibraryRoots: []string{file}, ListenAddress: ":7788", AdminAddress: "127.0.0.1:7789", ScanIntervalSec: 3600}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("expected Validate() to ignore is-directory, got %v", err)
+	}
+}
+
+func TestCheckLibraryRootsAccessibleNonexistent(t *testing.T) {
+	cfg := &Config{LibraryRoots: []string{"/nonexistent"}}
+	errs := cfg.CheckLibraryRootsAccessible()
+	if len(errs) != 1 {
+		t.Fatalf("got %d errors, want 1: %v", len(errs), errs)
+	}
+	if errs[0].Path != "/nonexistent" {
+		t.Errorf("Path = %q, want %q", errs[0].Path, "/nonexistent")
+	}
+	if !errors.Is(errs[0].Err, os.ErrNotExist) {
+		t.Errorf("Err = %v, want os.ErrNotExist wrapping", errs[0].Err)
+	}
+}
+
+func TestCheckLibraryRootsAccessibleIsAFile(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "notadir.txt")
+	if err := os.WriteFile(file, []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &Config{LibraryRoots: []string{file}}
+	errs := cfg.CheckLibraryRootsAccessible()
+	if len(errs) != 1 || !strings.Contains(errs[0].Error(), "not a directory") {
+		t.Errorf("expected 'not a directory' error, got %v", errs)
+	}
+}
+
+func TestCheckLibraryRootsAccessibleAllPresent(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{LibraryRoots: []string{dir}}
+	if errs := cfg.CheckLibraryRootsAccessible(); len(errs) != 0 {
+		t.Errorf("expected no errors, got %v", errs)
+	}
+}
+
+// TestLoadSucceedsWithInaccessibleLibraryRoot is the
+// bridge.ars.md regression target at the Load() level (the
+// surface `bridge update` / `bridge status` actually invoke).
+// The YAML references a library root whose stat returns EACCES,
+// and Load() must succeed — otherwise public-mode operators
+// can't run `sudo bridge update` against a FUSE-mounted library
+// inaccessible to root.
+func TestLoadSucceedsWithInaccessibleLibraryRoot(t *testing.T) {
+	leaf := makeInaccessibleLibraryRoot(t)
+	dir := t.TempDir() // distinct from the leaf's tmpdir — holds the YAML
+
+	configPath := filepath.Join(dir, "bridge.yaml")
+	yaml := "libraryRoots:\n  - " + leaf + "\nlistenAddress: \":7788\"\ndataDir: " + dir + "\n"
+	if err := os.WriteFile(configPath, []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load failed against an inaccessible library root — `sudo bridge update` would break: %v", err)
+	}
+	// Confirm the fields `bridge update` reads are populated.
+	if cfg.DataDir == "" {
+		t.Error("DataDir empty — update would fail to locate the token store")
+	}
+	if cfg.ListenAddress == "" {
+		t.Error("ListenAddress empty — applyDefaults didn't run")
+	}
+	// And confirm the new method DOES catch the EACCES at runtime
+	// — startup decides whether that's fatal.
+	errs := cfg.CheckLibraryRootsAccessible()
+	if len(errs) != 1 {
+		t.Errorf("CheckLibraryRootsAccessible: got %d errors, want 1: %v", len(errs), errs)
+	}
+}
+
+// makeInaccessibleLibraryRoot returns a leaf directory whose
+// `os.Stat` produces EACCES — built by chmod 0o000'ing the leaf's
+// parent. Mirrors the FUSE-mount-without-allow_other shape the
+// bridge.ars.md regression target lives in. Skips the test on
+// platforms where POSIX directory modes don't apply (Windows) or
+// where the caller bypasses them (root on Unix); detected via a
+// behaviour probe after the chmod, not a static
+// `runtime.GOOS == "windows"` / `os.Getuid() == 0` gate. The
+// probe is robust to a runtime hardening change in either
+// direction (Gemini high on PR #302).
+func makeInaccessibleLibraryRoot(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	parent := filepath.Join(dir, "locked-parent")
+	leaf := filepath.Join(parent, "music")
+	if err := os.MkdirAll(leaf, 0o755); err != nil {
+		t.Fatalf("mkdir leaf: %v", err)
+	}
+	if err := os.Chmod(parent, 0o000); err != nil {
+		t.Fatalf("chmod parent: %v", err)
+	}
+	// Restore perms so t.TempDir cleanup can walk it after the test.
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o700) })
+	if _, err := os.Stat(leaf); err == nil {
+		t.Skip("filesystem permissions restriction not enforced (Windows, or running as root on Unix)")
+	}
+	return leaf
+}
+
+// TestCheckLibraryRootsAccessiblePermissionDenied is the
+// bridge.ars.md regression target: stat returns EACCES (the FUSE
+// mount with allow_other off, as seen by root). The check reports
+// ONE wrapped error per inaccessible root; Validate() on the same
+// input succeeds because library-root accessibility is no longer
+// part of the shape contract.
+func TestCheckLibraryRootsAccessiblePermissionDenied(t *testing.T) {
+	leaf := makeInaccessibleLibraryRoot(t)
+
+	cfg := &Config{LibraryRoots: []string{leaf}}
+	errs := cfg.CheckLibraryRootsAccessible()
+	if len(errs) != 1 {
+		t.Fatalf("got %d errors, want 1: %v", len(errs), errs)
+	}
+	if !errors.Is(errs[0].Err, os.ErrPermission) {
+		t.Errorf("Err = %v, want os.ErrPermission wrapping", errs[0].Err)
+	}
+	// Crucially: Validate() should NOT have failed on the same input.
+	loopback := &Config{LibraryRoots: []string{leaf}, ListenAddress: ":7788", AdminAddress: "127.0.0.1:7789", ScanIntervalSec: 3600}
+	if err := loopback.Validate(); err != nil {
+		t.Errorf("Validate() should not stat library roots; got %v", err)
 	}
 }
 
