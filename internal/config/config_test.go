@@ -228,10 +228,11 @@ func TestCheckLibraryRootsAccessibleAllPresent(t *testing.T) {
 // and Load() must succeed — otherwise public-mode operators
 // can't run `sudo bridge update` against a FUSE-mounted library
 // inaccessible to root.
+//
+// Skipped on platforms where POSIX directory modes don't apply
+// (Windows) or where the caller bypasses them (root on Unix) —
+// detected via a behaviour probe (Gemini high on PR #302).
 func TestLoadSucceedsWithInaccessibleLibraryRoot(t *testing.T) {
-	if os.Getuid() == 0 {
-		t.Skip("root bypasses POSIX file modes")
-	}
 	dir := t.TempDir()
 	parent := filepath.Join(dir, "locked-parent")
 	leaf := filepath.Join(parent, "music")
@@ -242,6 +243,9 @@ func TestLoadSucceedsWithInaccessibleLibraryRoot(t *testing.T) {
 		t.Fatalf("chmod parent: %v", err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(parent, 0o700) })
+	if _, err := os.Stat(leaf); err == nil {
+		t.Skip("filesystem permissions restriction not enforced (Windows, or running as root on Unix)")
+	}
 
 	configPath := filepath.Join(dir, "bridge.yaml")
 	yaml := "libraryRoots:\n  - " + leaf + "\nlistenAddress: \":7788\"\ndataDir: " + dir + "\n"
@@ -273,10 +277,14 @@ func TestLoadSucceedsWithInaccessibleLibraryRoot(t *testing.T) {
 // ONE wrapped error per inaccessible root; Validate() on the same
 // input succeeds because library-root accessibility is no longer
 // part of the shape contract.
+//
+// Skipped on platforms where POSIX directory modes don't apply
+// (Windows) or where the caller bypasses them (root on Unix) —
+// detected via a behaviour probe after the chmod, not a static
+// `runtime.GOOS == "windows"` / `os.Getuid() == 0` gate. The
+// probe is robust to a runtime hardening change in either
+// direction (Gemini high on PR #302).
 func TestCheckLibraryRootsAccessiblePermissionDenied(t *testing.T) {
-	if os.Getuid() == 0 {
-		t.Skip("root bypasses POSIX file modes; the EACCES regression target is for non-root callers")
-	}
 	dir := t.TempDir()
 	// Make the leaf's PARENT unreadable so os.Stat(leaf) returns
 	// EACCES — mirrors the FUSE-mount-without-allow_other shape
@@ -291,6 +299,9 @@ func TestCheckLibraryRootsAccessiblePermissionDenied(t *testing.T) {
 	}
 	// Restore perms so t.TempDir cleanup can walk it after the test.
 	t.Cleanup(func() { _ = os.Chmod(parent, 0o700) })
+	if _, err := os.Stat(leaf); err == nil {
+		t.Skip("filesystem permissions restriction not enforced (Windows, or running as root on Unix)")
+	}
 
 	cfg := &Config{LibraryRoots: []string{leaf}}
 	errs := cfg.CheckLibraryRootsAccessible()
