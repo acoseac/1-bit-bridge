@@ -182,6 +182,51 @@
       </ol>
     </div>
 
+    <h2 id="public-mode">Public mode</h2>
+
+    <div class="symptom">
+      <strong>Lost the admin password</strong> from a <code>bridge init --public</code> install.
+    </div>
+    <div class="fix">
+      <p>The init-time password is printed once and never persisted. Rotate it from a shell on the bridge host:</p>
+      <pre><code>./bridge admin reset-password</code></pre>
+      <p>The command prompts for a new password (twice for confirmation) and rewrites <code>&lt;dataDir&gt;/adminauth.json</code> with the new bcrypt hash. Active login sessions are invalidated immediately. No bridge restart required.</p>
+    </div>
+
+    <div class="symptom">
+      <strong>Let's Encrypt cert provisioning is failing</strong> — admin console shows a TLS error or repeated ACME retries in the logs.
+    </div>
+    <div class="fix">
+      <ol>
+        <li>Confirm the public DNS A/AAAA record for the bridge's domain resolves to the host's public IP. ACME challenge methods require that the LE servers can reach the host on either port 80 (HTTP-01) or the configured TLS port (TLS-ALPN-01).</li>
+        <li>Check the host firewall / cloud security group lets inbound traffic on whichever challenge port your config selected. The bridge log surfaces the LE-side error verbatim — typically <code>connection refused</code> or <code>no record</code>.</li>
+        <li>Let's Encrypt enforces aggressive per-domain rate limits. If you've been bouncing the bridge while debugging, switch to the LE staging directory by setting <code>autocert.useStaging: true</code> and watch certs flow without burning quota. Switch back when the config is stable.</li>
+        <li>The cert + account key live in <code>&lt;dataDir&gt;/acme/</code>. If that directory is somehow corrupt or unwritable, the bridge can't cache renewals; check permissions (the directory should be <code>0700</code> and owned by the bridge user).</li>
+      </ol>
+    </div>
+
+    <h2 id="http3">HTTP/3 (QUIC)</h2>
+
+    <div class="symptom">
+      <strong>"failed to increase receive buffer size"</strong> warning in the logs at startup on Linux.
+    </div>
+    <div class="fix">
+      <p>The quic-go library asks the kernel for a 7 MiB UDP receive + send buffer at bind time. Linux's default <code>net.core.rmem_max</code> / <code>wmem_max</code> caps that at 2 MiB and logs a one-line warning. The bridge keeps running — but HTTP/3 throughput over high-RTT cellular links benefits from the headroom.</p>
+      <p>Raise the caps via <code>/etc/sysctl.d/999-bridge-quic.conf</code> (the <code>999-</code> prefix wins over Ubuntu's cloud-image <code>99-cloudimg-udp.conf</code> drop-in, which would otherwise clobber the setting):</p>
+      <pre><code>net.core.rmem_max = 7340032
+net.core.wmem_max = 7340032</code></pre>
+      <p>Apply with <code>sudo sysctl --system</code>, verify with <code>sysctl net.core.rmem_max</code>, then <code>systemctl restart 1-bit-bridge</code> so the UDP socket re-reads the cap.</p>
+    </div>
+
+    <div class="symptom">
+      <strong>HTTP/3 is unreachable</strong> — iOS app works fine over Wi-Fi but stalls on cellular.
+    </div>
+    <div class="fix">
+      <p>Some carrier middleboxes silently drop UDP on port 443 or strip QUIC. The bridge advertises HTTP/3 alongside HTTP/2 — iOS should fall back to TCP automatically, but a partial failure (handshake succeeds, mid-stream UDP packets dropped) can hang. To rule it out, disable HTTP/3 on the bridge:</p>
+      <pre><code>disableHttp3: true</code></pre>
+      <p>in <code>bridge.yaml</code> (or export <code>BRIDGE_DISABLE_HTTP3=true</code>) and restart. If cellular playback recovers, the carrier path is at fault; leave HTTP/3 off for that deployment until the path improves.</p>
+    </div>
+
     <h2>Other</h2>
 
     <div class="symptom">
@@ -209,7 +254,7 @@
         <tr><td>Manual run</td><td>stdout / stderr of the <code>./bridge serve</code> process</td></tr>
         <tr><td>Docker</td><td><code>docker logs -f &lt;container&gt;</code></td></tr>
       </table>
-      <p>The admin console also has a <em>Logs</em> tab that tails the last 500 lines in the browser. For deeper history, use the platform tools above. Bearer tokens and IP addresses are never logged; library-relative file paths appear only in error lines.</p>
+      <p>The admin console also has a <em>Logs</em> tab that tails the last 500 lines in the browser. For deeper history, use the platform tools above. Bearer tokens are never logged; library-relative file paths appear only in error lines. Client IP addresses are not logged in loopback-mode deployments — in public-mode deployments the admin login handler logs the client IP on failed logins / rate-limit refusals so the operator can investigate brute-force attempts. See <a href="privacy.html#logs">privacy → logs</a>.</p>
     </div>
 
     <div class="symptom">

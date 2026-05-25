@@ -152,6 +152,19 @@ cd bridge</code></pre>
         </ul>
         <p>See <a href="features.html#tailscale">Features → Tailscale integration</a> for the full rundown — when to choose which mode, the macOS sandboxed-CLI gotcha, and how to verify Magic-DNS works end-to-end.</p>
       </li>
+
+      <li id="step-10">
+        <h3>Alternative: public-internet deployment (v0.1.4)</h3>
+        <p>If Tailscale isn't an option — you're standing up a small VPS for friends and family, or you want a fixed public hostname rather than a tailnet identity — initialise the bridge in <a href="features.html#public-mode">public mode</a> instead of the loopback default:</p>
+        <pre><code>./bridge init --public</code></pre>
+        <p>Public mode is identical to the LAN setup above, plus:</p>
+        <ul>
+          <li><strong>Admin console password.</strong> The init wizard generates a 16-character random password and prints it once. Copy it somewhere safe; rotate later with <code>./bridge admin reset-password</code>.</li>
+          <li><strong>Let's Encrypt cert.</strong> If you set <code>autocert.enabled: true</code> with a public domain pointed at the host, the bridge fetches a real TLS cert automatically. No reverse proxy needed.</li>
+          <li><strong>Reachable admin console.</strong> Bound to a routable interface (not <code>127.0.0.1</code>) so you can manage the bridge from another machine — over HTTPS, behind the password.</li>
+        </ul>
+        <p>Lock down what you expose: open only the bridge's TLS port (default <code>:443</code>) and, if you need remote admin, the admin port (default <code>:7789</code>) — and keep the admin port firewalled to the operator's IP via your VPS firewall / <code>ufw</code> / cloud security group.</p>
+      </li>
     </ol>
 
     <h2>Something not working?</h2>

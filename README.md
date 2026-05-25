@@ -19,7 +19,7 @@ Companion server for the **[1-bit iOS music player](https://apps.apple.com/us/ap
 
 ## Status
 
-**v0.1.3** — wire protocol stays at [`PROTOCOL.md`](PROTOCOL.md) v1 (additive only since v0.1.2: classical-metadata fields on `Track`, `pushEventsSupported` / `pairingEventsSupported` on `/v1/health`, `upscale.complete` SSE event). macOS binaries are Developer-ID-signed and Apple-notarized; Windows binaries are unsigned for now (Authenticode signing via SignPath Foundation pending). See the [releases page](https://github.com/acoseac/1-bit-bridge/releases) for per-release notes.
+**v0.1.4** — wire protocol stays at [`PROTOCOL.md`](PROTOCOL.md) v1 (additive only since v0.1.3: HTTP/3 (QUIC) on the same port as HTTP/2, `GET /v1/diagnostics` for counter-only health telemetry, `optimize-*` variant class for CarPlay-routing). Operational additions: public-internet deployment mode with admin-console password login + native Let's Encrypt cert provisioning, Prometheus `/metrics` on the admin listener, Library Inspector tile grid in the admin console, indigo palette refresh with a phone-width responsive breakpoint. macOS binaries are Developer-ID-signed and Apple-notarized; Windows binaries are unsigned for now (Authenticode signing via SignPath Foundation pending). See the [releases page](https://github.com/acoseac/1-bit-bridge/releases) for per-release notes.
 
 ## Install
 

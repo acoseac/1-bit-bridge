@@ -24,7 +24,7 @@
   <main>
     <a class="crumb" href="./">← 1-bit-bridge</a>
     <h1>Privacy</h1>
-    <p class="updated">Last updated: 8 May 2026</p>
+    <p class="updated">Last updated: 25 May 2026</p>
 
     <p class="lede">1-bit-bridge is a companion server you install on your own machine and pair with the 1-bit iOS music player. It does not phone home. It collects no analytics. It has no user account. This page explains what it stores on your machine, what it sends out, and what it doesn't.</p>
 
@@ -37,6 +37,7 @@
 
     <h2>What 1-bit-bridge is and where it runs</h2>
     <p>The bridge is a Go binary that runs as a background service on your machine — under <code>launchd</code> on macOS, <code>systemd</code> on Linux, or as a Windows Service. It indexes a music library you point it at, and serves it to a paired 1-bit iOS device over HTTPS. Everything happens between your machine and your phone; no acoseac-controlled server is involved.</p>
+    <p><strong>Deployment modes (v0.1.4).</strong> The bridge runs in one of two modes set by <code>deployment.mode</code> in <code>bridge.yaml</code>. <em>Loopback mode</em> (the default) binds the admin console to <code>127.0.0.1</code> and exposes the iOS-facing API over LAN / Tailscale only — anyone on the host machine implicitly has filesystem access to the data directory, so the admin console runs without authentication. <em>Public mode</em> (operator opt-in) is for bridges intentionally exposed to the public internet: the admin console binds a routable interface, gains a single-user password login, and the iOS-facing TLS certificate switches to a Let's Encrypt cert provisioned via the ACME protocol. Both modes preserve the same paired-token-authenticated wire protocol toward the iOS app.</p>
 
     <h2>Data stored on your machine</h2>
     <p>By default under <code>~/Library/Application Support/1-bit-bridge/</code> (macOS), <code>~/.config/1-bit-bridge/</code> (Linux), or <code>%LOCALAPPDATA%\1-bit-bridge\</code> (Windows):</p>
@@ -47,17 +48,23 @@
       <li><code>server.crt</code> / <code>server.key</code> — self-signed TLS keypair generated on first run. The certificate's SHA-256 fingerprint is what the iOS app pins.</li>
       <li><code>artwork/</code> — JPEG cache for album covers and artist photos fetched during enrichment.</li>
       <li><code>transcoded/</code> (v1.2, optional) — generated <code>.flac</code> sidecars for upscaled-PCM variants. Created only when the operator opts into <code>upscale.enabled: true</code> AND a paired iOS device requests a variant via <code>POST /v1/upscale</code>. The sidecars contain audio bytes derived from your own source files via a local <a href="https://sox.sourceforge.net">sox</a> resample — they never leave the bridge except over the same paired-token-authenticated channel as the originals. Removed when the source track is deleted, or in bulk via <code>bridge upscale --gc</code>.</li>
+      <li><code>adminauth.json</code> (v0.1.4, public-mode deployments only) — single-user admin credential store. <strong>Only a bcrypt hash is persisted</strong>; the plaintext password is shown once at <code>bridge init --public</code> time and never written to disk. Active login sessions are kept in memory only and cleared on restart. File mode <code>0600</code>.</li>
+      <li><code>acme/</code> (v0.1.4, public-mode deployments only) — autocert cache directory used by Go's <code>golang.org/x/crypto/acme/autocert</code>. Holds the Let's Encrypt account key, the issued certificate, and renewal state. The operator-supplied contact email is registered with Let's Encrypt as part of the ACME account. Directory mode <code>0700</code>.</li>
       <li><code>backups/&lt;timestamp&gt;/</code> — optional dated snapshots of the above. Operator-tunable in <code>bridge.yaml</code>; can be set to <code>0</code> to disable.</li>
     </ul>
 
     <h2 id="logs">Logs</h2>
     <p>The bridge writes structured logs to your platform's service manager — <code>journalctl</code> / <code>log show</code> / <code>%PROGRAMDATA%\1-bit-bridge\bridge.log</code> on Windows.</p>
-    <p><strong>Bearer tokens, client IP addresses, absolute filesystem paths, full HTTP request bodies, and contents of MusicBrainz / Deezer / iTunes lookup queries are not logged.</strong></p>
+    <p><strong>Bearer tokens, full HTTP request bodies, and contents of MusicBrainz / Deezer / iTunes lookup queries are not logged.</strong></p>
+    <p><strong>Client IP addresses</strong> are not logged in loopback-mode deployments. In public-mode deployments, the admin login handler logs the client IP alongside the attempted username when a login fails or hits the per-(IP, username) rate-limit threshold — these lines are necessary so the operator can investigate brute-force attempts and tune their reverse-proxy / firewall accordingly. If you ship bridge logs to a third-party log aggregator, treat these lines as PII.</p>
+    <p><strong>Absolute filesystem paths</strong> appear only when the optional <code>integrity.orphanSidecarSweepIntervalSec</code> background sweep is enabled (default disabled). In that case the bridge logs the absolute path of each orphan sidecar file it unlinks under <code>&lt;dataDir&gt;/transcoded/</code>; those basenames are content-hash-derived, not library track names.</p>
     <p>Library-relative file paths (e.g. <code>music/Diana Krall/Live in Paris/01.flac</code>) appear only in error lines — when a scan, upscale, or read operation fails on a specific file, the path is included so the operator has something to act on. These paths don't carry your home directory or username, but they do contain artist / album / track names by typical folder layout. If you ship bridge logs to a third-party log aggregator, treat them with the same care as the library metadata itself.</p>
 
     <h2>What the bridge sends to your iOS app</h2>
-    <p>Every <code>/v1/*</code> endpoint requires the bearer token issued at pairing, served over TLS pinned to the server's certificate fingerprint. The one exception is <code>/v1/health</code>, which is unauthenticated so the iOS app can probe it during pairing. The admin web console at <code>http://127.0.0.1:7789/</code> binds loopback-only — it is not reachable from the network.</p>
-    <p>On the wire to the iOS app: directory listings, file metadata (size, mtime), byte ranges of music files, the full manifest, and cached artwork. No transcoding — the bridge delivers bytes exactly as they sit on your disk.</p>
+    <p>Every <code>/v1/*</code> endpoint requires the bearer token issued at pairing, served over TLS pinned to the server's certificate fingerprint. The one exception is <code>/v1/health</code>, which is unauthenticated so the iOS app can probe it during pairing. In loopback-mode deployments the admin web console at <code>http://127.0.0.1:7789/</code> binds loopback-only — it is not reachable from the network. In public-mode deployments the admin console binds a routable interface and is gated by the single-user password login described above.</p>
+    <p>The iOS-facing API is served over HTTP/2 (TCP) and, when enabled, HTTP/3 (QUIC over UDP) on the same port — the client picks one transport per request. No additional data is exposed by the HTTP/3 path; the privacy posture is identical to HTTP/2.</p>
+    <p>On the wire to the iOS app: directory listings, file metadata (size, mtime), byte ranges of music files, the full manifest, cached artwork, and <code>GET /v1/diagnostics</code> (authenticated, counter-only — uptime, queue depths, MusicBrainz cache hit ratio, lock-wait quantiles; no log text, no paths, no IPs). No transcoding — the bridge delivers bytes exactly as they sit on your disk.</p>
+    <p>The admin listener additionally exposes a Prometheus-format <code>/metrics</code> endpoint for local observability tools. It is bound by the same gate as the rest of the admin console: loopback-only in loopback mode, session-authenticated in public mode. Like <code>/v1/diagnostics</code>, the metrics are integer counters and histograms only.</p>
 
     <h2>What the bridge sends to the internet</h2>
     <p>If you enable metadata enrichment, the bridge looks up missing album / artist information from public APIs. <strong>For each lookup, the bridge sends the artist name (or release MBID) only.</strong> No user identifier, no library inventory, no IP address you control — just the standard HTTPS request that any browser would make.</p>
@@ -69,9 +76,16 @@
     </ul>
     <p>All four are rate-limited server-side and can be disabled by removing the corresponding section from <code>bridge.yaml</code> (or by running with <code>--no-enrich</code>).</p>
 
+    <p><strong>Let's Encrypt (public-mode deployments only).</strong> When <code>autocert.enabled: true</code>, the bridge fetches and renews a TLS certificate from Let's Encrypt via the ACME v2 protocol (<code>https://acme-v02.api.letsencrypt.org/</code>). The handshake sends the configured public domain name, the operator-supplied contact email (which Let's Encrypt registers against the ACME account), and the standard challenge response (HTTP-01 or TLS-ALPN-01). No library data, device tokens, or usage statistics are sent. The cert + account key are cached locally under <code>&lt;dataDir&gt;/acme/</code>; renewal happens in-process roughly 30 days before expiry. Operators on loopback-only deployments do not need this path and should leave <code>autocert.enabled</code> at its default <code>false</code>.</p>
+
     <h2>Update check</h2>
     <p>The bridge polls <code>https://api.github.com/repos/acoseac/1-bit-bridge/releases/latest</code> every six hours to discover new releases. The poll is unauthenticated, sends no device identifier, no library statistics, no usage data — just a standard GET that any unauthenticated GitHub API client would make.</p>
     <p>As with any standard HTTPS request, GitHub will see the source IP address of the bridge machine. We do not see it, and the request carries no other identifier tying it to you. <code>update.checkIntervalHours</code> in <code>bridge.yaml</code> tunes the cadence (values below 1 hour are clamped at 1 hour; <code>0</code> resolves to the 6-hour default rather than disabling the poll). To stop the bridge from making any outbound requests at all, stop the service or block its egress at your firewall — operators running over Tor, a VPN, or Tailscale tend to do the latter for everything except their tunnel anyway.</p>
+
+    <h2>Admin authentication (public-mode deployments only)</h2>
+    <p>When <code>deployment.mode: public</code> is set, the admin console requires a username and password. <code>bridge init --public</code> generates a 16-character random password (~92 bits of entropy, drawn from an ambiguity-free alphabet) and prints it once to the operator's terminal; only its bcrypt hash is persisted to <code>adminauth.json</code>. The password can be rotated later with <code>bridge admin reset-password</code>.</p>
+    <p>Successful logins set a session cookie carrying a random 256-bit token (base64url-encoded). The server stores only the SHA-256 hash of that token in memory; sessions are cleared when the bridge restarts. Sessions are idle-expired after 24 hours and hard-expired after 7 days.</p>
+    <p>To resist brute-force attempts, the login handler rate-limits per <code>(client IP, username)</code> tuple. Failed attempts and rate-limit refusals are logged with the client IP (see <a href="#logs">Logs</a> above for the full disclosure). The IP-bucket state lives in memory only and is discarded on restart.</p>
 
     <h2>Pairing &amp; tokens</h2>
     <p>Pairing happens entirely between your machine and the iOS app. The admin console generates a 256-bit random token, shows it to you once (as a <code>bridge://pair?…</code> URL or QR code), and persists only its SHA-256 hash. The raw token never touches disk on the server. From the admin console you can rename, rotate, or revoke any paired device at any time; revoked tokens are hard-deleted from <code>tokens.json</code> on the next persist and fail the very next request — there is no tombstone, no audit log, and no orphan retention.</p>

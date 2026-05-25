@@ -31,12 +31,15 @@
       <div class="card"><h3><a href="#manifest">Library manifest</a></h3><p>SQLite-backed index served in one paginated request — replaces SMB walks.</p></div>
       <div class="card"><h3><a href="#pairing">Pairing</a></h3><p>Admin-approval (default) and manual-token flows.</p></div>
       <div class="card"><h3><a href="#tailscale">Tailscale</a></h3><p>Three modes: <code>cli</code>, <code>tsnet</code>, <code>disabled</code>.</p></div>
+      <div class="card"><h3><a href="#public-mode">Public deployment</a></h3><p>Internet-facing bridges with admin login + Let's Encrypt.</p></div>
+      <div class="card"><h3><a href="#http3">HTTP/3 (QUIC)</a></h3><p>Same port as HTTP/2; iOS picks the better transport.</p></div>
       <div class="card"><h3><a href="#upscale">Upscale variants</a></h3><p>Optional offline PCM resample for high-end DACs.</p></div>
       <div class="card"><h3><a href="#inspector">Library Inspector</a></h3><p>Folder-first admin UI for browsing, searching, and managing variants.</p></div>
       <div class="card"><h3><a href="#updates">Updates</a></h3><p>Opt-in auto-install with quiet hours.</p></div>
       <div class="card"><h3><a href="#backups">Backups</a></h3><p>Dated snapshots, CLI-only restore.</p></div>
       <div class="card"><h3><a href="#discovery">Bonjour discovery</a></h3><p>Auto-discovery on the LAN.</p></div>
-      <div class="card"><h3><a href="#admin">Admin console</a></h3><p>Loopback-only web UI for everything operational.</p></div>
+      <div class="card"><h3><a href="#admin">Admin console</a></h3><p>Loopback-only by default; password-protected in public mode.</p></div>
+      <div class="card"><h3><a href="#observability">Observability</a></h3><p>Prometheus <code>/metrics</code> + <code>GET /v1/diagnostics</code>.</p></div>
       <div class="card"><h3><a href="#logs">Logs</a></h3><p>Where they live, what's logged, what's deliberately not.</p></div>
       <div class="card"><h3><a href="#headless">Container & headless</a></h3><p>Env-var overrides for Docker / NAS deployments.</p></div>
     </div>
@@ -78,6 +81,19 @@
     </dl>
     <p>Mode changes require a bridge restart. Switching between modes never invalidates pairings — the iOS app pins the bridge's certificate fingerprint, which doesn't depend on the transport mode.</p>
     <p><strong>Cert expiry warning.</strong> When the magic-DNS Let's Encrypt cert is within 30 days of expiring, the bridge logs a structured warning at startup so the operator notices before tsnet's in-process renewal next runs. <code>tsnet</code> handles renewal automatically; the warning is a backstop for the rare case where renewal has been failing silently.</p>
+
+    <h2 id="public-mode">Public deployment mode <span style="font-weight: normal; color: var(--fg-muted); font-size: 0.85em;">(v0.1.4)</span></h2>
+    <p>For bridges intentionally exposed to the public internet — a VPS, a port-forwarded home server, or any deployment that lives outside a LAN / Tailscale tunnel — the bridge ships an opt-in <em>public mode</em> with the security pieces a real public host needs.</p>
+    <p><strong>Choose at install time.</strong> <code>bridge init --public</code> selects the public profile: it sets <code>deployment.mode: public</code>, switches the admin listener to a routable interface, generates a 16-character random password for the single admin user, and (if <code>autocert.enabled: true</code>) configures Let's Encrypt for the public TLS certificate. The initial password is printed once to the terminal — copy it before closing the shell, or rotate later with <code>bridge admin reset-password</code>.</p>
+    <p><strong>Native ACME / Let's Encrypt.</strong> Public-mode bridges fetch and renew their TLS certificate via the ACME v2 protocol — no Caddy / nginx / certbot sidecar needed. The cert + account key are cached under <code>&lt;dataDir&gt;/acme/</code>; renewal happens in-process. HTTP-01 needs port 80 reachable to the bridge; TLS-ALPN-01 needs only the public TLS port. Bring-your-own certs are still supported via the existing <code>tls.certFile</code> / <code>tls.keyFile</code> knobs.</p>
+    <p><strong>Admin login.</strong> A single-user form-login page lives at <code>/login</code>. Successful login sets a session cookie carrying a 256-bit token; the server stores only its SHA-256 hash in memory and clears every session on restart. Sessions idle-expire after 24 hours and hard-expire after 7 days. The login handler rate-limits per <code>(client IP, username)</code> tuple — failed attempts and rate-limit refusals are logged with the client IP (see <a href="#logs">Logs</a>).</p>
+    <p><strong>Reverse-proxy friendly.</strong> If you terminate TLS at a reverse proxy and forward to the bridge over plain HTTP, set <code>deployment.adminTLSTerminatedByProxy: true</code> so the admin login extracts the real client IP from the standard proxy headers instead of the proxy's loopback address.</p>
+    <p>Loopback-mode deployments are unchanged: no password, no session cookies, no ACME plumbing. The default for fresh installs without <code>--public</code> stays loopback-only.</p>
+
+    <h2 id="http3">HTTP/3 (QUIC) <span style="font-weight: normal; color: var(--fg-muted); font-size: 0.85em;">(v0.1.4)</span></h2>
+    <p>The iOS-facing API is served simultaneously over HTTP/2 (TCP) and HTTP/3 (QUIC over UDP) on the same port. The iOS app advertises support for both and the OS picks the better transport per request — typically a clear win on lossy cellular / Tailscale-relayed links where TCP head-of-line blocking compounds with high RTT.</p>
+    <p>No operator-side configuration is required; HTTP/3 is on by default. To turn it off on a host whose firewall blocks inbound UDP, set <code>disableHttp3: true</code> in <code>bridge.yaml</code> or export <code>BRIDGE_DISABLE_HTTP3=true</code> — the bridge falls back to TCP-only.</p>
+    <p>The QUIC listener uses the same TLS certificate as HTTP/2 and enforces TLS 1.3. In <code>tsnet</code> Tailscale mode the bridge binds a UDP listener inside the embedded tailnet node alongside the TCP one, so HTTP/3 is reachable over Tailscale too — useful when DERP-relayed connections benefit most from the loss-recovery improvements.</p>
 
     <h2 id="upscale">Upscale variants <span style="font-weight: normal; color: var(--fg-muted); font-size: 0.85em;">(v1.2, opt-in)</span></h2>
     <p><strong>What it does.</strong> The bridge can produce upscaled PCM "variants" of your tracks — typically 96 kHz / 24-bit FLAC sidecars derived from a 44.1 kHz / 16-bit source — using the local <a href="https://sox.sourceforge.net">sox</a> binary. The iOS app surfaces a wand icon next to each eligible track; tap to switch the playback source between the original and the upscaled variant.</p>
@@ -133,7 +149,8 @@
     <p>A dedicated <em>Jobs</em> page lists pending / in-flight / failed upscale jobs with their submission time and last-error string so the operator can see what's actually happening rather than guessing from the iOS app's wand state.</p>
 
     <h2 id="admin">Admin console tour</h2>
-    <p>Loopback-only at <code>http://127.0.0.1:7789/</code>. No login, by deliberate design — anyone with a shell on this machine already has filesystem access to the token store, so adding a password would be theatre.</p>
+    <p>In loopback-mode deployments (the default) the admin console binds <code>http://127.0.0.1:7789/</code> with no login — anyone with a shell on this machine already has filesystem access to the token store, so adding a password would be theatre. In <a href="#public-mode">public-mode deployments</a> the admin console binds a routable HTTPS interface and requires a password login; the rest of the tabs work the same way.</p>
+    <p>The admin UI ships an indigo palette refresh and a phone-width responsive breakpoint as of v0.1.4 — the previous grid + tables now collapse to a card stack at narrow widths, and the top-nav becomes a hamburger menu.</p>
     <table>
       <caption>Admin console tabs, what each manages, and what's reserved for the CLI</caption>
       <tr><th>Tab</th><th>Purpose</th><th>What's CLI-only</th></tr>
@@ -157,8 +174,19 @@
       <tr><td>Windows Service</td><td><code>%PROGRAMDATA%\1-bit-bridge\bridge.log</code></td></tr>
       <tr><td>Manual run</td><td>stdout / stderr of the <code>bridge serve</code> process</td></tr>
     </table>
-    <p><strong>What's deliberately not logged:</strong> bearer tokens (raw or hashed), client IP addresses, absolute filesystem paths, full HTTP request bodies, and contents of MusicBrainz / Deezer / iTunes lookups.</p>
-    <p><strong>What is logged in error paths:</strong> library-relative paths of files that failed a scan / upscale / read — e.g. <code>music/Diana Krall/Live in Paris/01.flac</code>. These appear only on errors so the operator can act on the failure. The path is library-relative (no <code>/Users/...</code> prefix), but it does contain artist / album / track names by typical folder layout. If you handle these logs, treat them with the same care as the library metadata itself. See <a href="privacy.html#logs">privacy → logs</a> for the full breakdown.</p>
+    <p><strong>What's deliberately not logged:</strong> bearer tokens (raw or hashed), full HTTP request bodies, and contents of MusicBrainz / Deezer / iTunes lookups.</p>
+    <p><strong>What is logged in error paths:</strong> library-relative paths of files that failed a scan / upscale / read — e.g. <code>music/Diana Krall/Live in Paris/01.flac</code>. These appear only on errors so the operator can act on the failure. The path is library-relative (no <code>/Users/...</code> prefix), but it does contain artist / album / track names by typical folder layout. If you handle these logs, treat them with the same care as the library metadata itself.</p>
+    <p><strong>Client IP addresses</strong> are not logged in loopback-mode deployments. In <a href="#public-mode">public-mode deployments</a>, the admin login handler logs the client IP alongside the attempted username on failed login or rate-limit refusal — this is necessary so the operator can investigate brute-force attempts. See <a href="privacy.html#logs">privacy → logs</a> for the full breakdown.</p>
+
+    <h2 id="observability">Observability <span style="font-weight: normal; color: var(--fg-muted); font-size: 0.85em;">(v0.1.4)</span></h2>
+    <p>Two complementary surfaces for monitoring a running bridge — both counter-only, both safe to scrape periodically.</p>
+    <dl>
+      <dt><code>GET /metrics</code> — Prometheus exposition on the admin listener</dt>
+      <dd>Standard Prometheus text format. Counters for HTTP requests, SQLite lock-wait quantiles, upscale pool depth, manifest-builder time-on-disk, log-event counts by level, MusicBrainz cache hit ratio, Tailscale peer counts. Loopback-only in loopback-mode deployments; session-authenticated in public mode (same gate as the rest of the admin console). Point a local Prometheus / Grafana Alloy / VictoriaMetrics at it; no separate sidecar is required.</dd>
+      <dt><code>GET /v1/diagnostics</code> — paired-iOS-visible counter snapshot</dt>
+      <dd>JSON payload with the same flavour of counters, served on the iOS-facing API behind the standard bearer-token auth. The iOS app's Diagnostics view consumes this so users on a paired device can see whether the bridge is healthy without needing to open the admin console. <strong>Counters and structured state only</strong> — no log text, no file paths, no IPs. Including recent log lines would force per-line privacy redaction and risk leaking PII into iOS-side diagnostic snapshots the operator might paste into a public issue.</dd>
+    </dl>
+    <p>Neither endpoint is part of the wire protocol the iOS app's <em>core</em> sync flow depends on; both are advertised as feature flags in <code>GET /v1/health.features</code> so older iOS builds simply ignore them.</p>
 
     <h2 id="headless">Container & headless deployments</h2>
     <p>The bridge runs cleanly under Docker, on a Synology / TrueNAS, or on any headless Linux box. Most config knobs that <code>bridge.yaml</code> exposes have an environment-variable equivalent for cases where editing YAML inside a container is awkward.</p>
@@ -178,6 +206,7 @@
     <h2 id="protocol">Protocol</h2>
     <p>Every endpoint, request shape, and error code lives in <a href="https://github.com/acoseac/1-bit-bridge/blob/main/PROTOCOL.md">PROTOCOL.md</a>. The wire-protocol version is currently <strong>1</strong>; additive fields ship without a version bump, breaking changes don't. The iOS app advertises support for protocol versions in the <code>X-Bridge-Protocol</code> header and refuses to talk to a server it doesn't understand.</p>
     <p>v0.1.3 ships several additive fields against protocol v1: <code>composer</code> / <code>conductor</code> / <code>work</code> / <code>originalYear</code> / <code>bpm</code> on <code>Track</code>; multi-value source-tag preservation joined as <code>; </code>-separated strings in the existing scalar <code>artist</code> / <code>albumArtist</code> fields; the <code>roots</code> structured-reachability array on <code>GET /v1/health</code>; <code>pushEventsSupported</code> and <code>pairingEventsSupported</code> capability flags on <code>GET /v1/health</code>; and a new <code>upscale.complete</code> event on the existing SSE stream. Older iOS app builds simply ignore the new fields; no Mirror-PR break.</p>
+    <p>v0.1.4 layers more additive fields: <code>GET /v1/diagnostics</code> (counter-only health snapshot), the <code>optimize-*</code> variant class (alongside the existing <code>upscale-*</code> class, routed onto a priority queue that lets CarPlay-Optimize jobs skip a backlog of pre-fetched upscales), and the <code>diagnosticsSummary</code> feature flag on <code>GET /v1/health.features</code>. HTTP/3 (QUIC) is purely transport — the JSON shapes are identical to HTTP/2. Pre-v0.1.4 iOS app builds ignore the new fields; protocol version stays at <code>1</code>.</p>
 
     <footer>
       <div>© 2026 Arsenie Coseac · MIT License</div>
