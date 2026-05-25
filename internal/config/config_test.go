@@ -228,24 +228,9 @@ func TestCheckLibraryRootsAccessibleAllPresent(t *testing.T) {
 // and Load() must succeed — otherwise public-mode operators
 // can't run `sudo bridge update` against a FUSE-mounted library
 // inaccessible to root.
-//
-// Skipped on platforms where POSIX directory modes don't apply
-// (Windows) or where the caller bypasses them (root on Unix) —
-// detected via a behaviour probe (Gemini high on PR #302).
 func TestLoadSucceedsWithInaccessibleLibraryRoot(t *testing.T) {
-	dir := t.TempDir()
-	parent := filepath.Join(dir, "locked-parent")
-	leaf := filepath.Join(parent, "music")
-	if err := os.MkdirAll(leaf, 0o755); err != nil {
-		t.Fatalf("mkdir leaf: %v", err)
-	}
-	if err := os.Chmod(parent, 0o000); err != nil {
-		t.Fatalf("chmod parent: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(parent, 0o700) })
-	if _, err := os.Stat(leaf); err == nil {
-		t.Skip("filesystem permissions restriction not enforced (Windows, or running as root on Unix)")
-	}
+	leaf := makeInaccessibleLibraryRoot(t)
+	dir := t.TempDir() // distinct from the leaf's tmpdir — holds the YAML
 
 	configPath := filepath.Join(dir, "bridge.yaml")
 	yaml := "libraryRoots:\n  - " + leaf + "\nlistenAddress: \":7788\"\ndataDir: " + dir + "\n"
@@ -271,24 +256,19 @@ func TestLoadSucceedsWithInaccessibleLibraryRoot(t *testing.T) {
 	}
 }
 
-// TestCheckLibraryRootsAccessiblePermissionDenied is the
-// bridge.ars.md regression target: stat returns EACCES (the FUSE
-// mount with allow_other off, as seen by root). The check reports
-// ONE wrapped error per inaccessible root; Validate() on the same
-// input succeeds because library-root accessibility is no longer
-// part of the shape contract.
-//
-// Skipped on platforms where POSIX directory modes don't apply
-// (Windows) or where the caller bypasses them (root on Unix) —
-// detected via a behaviour probe after the chmod, not a static
+// makeInaccessibleLibraryRoot returns a leaf directory whose
+// `os.Stat` produces EACCES — built by chmod 0o000'ing the leaf's
+// parent. Mirrors the FUSE-mount-without-allow_other shape the
+// bridge.ars.md regression target lives in. Skips the test on
+// platforms where POSIX directory modes don't apply (Windows) or
+// where the caller bypasses them (root on Unix); detected via a
+// behaviour probe after the chmod, not a static
 // `runtime.GOOS == "windows"` / `os.Getuid() == 0` gate. The
 // probe is robust to a runtime hardening change in either
 // direction (Gemini high on PR #302).
-func TestCheckLibraryRootsAccessiblePermissionDenied(t *testing.T) {
+func makeInaccessibleLibraryRoot(t *testing.T) string {
+	t.Helper()
 	dir := t.TempDir()
-	// Make the leaf's PARENT unreadable so os.Stat(leaf) returns
-	// EACCES — mirrors the FUSE-mount-without-allow_other shape
-	// the regression target lives in.
 	parent := filepath.Join(dir, "locked-parent")
 	leaf := filepath.Join(parent, "music")
 	if err := os.MkdirAll(leaf, 0o755); err != nil {
@@ -302,6 +282,17 @@ func TestCheckLibraryRootsAccessiblePermissionDenied(t *testing.T) {
 	if _, err := os.Stat(leaf); err == nil {
 		t.Skip("filesystem permissions restriction not enforced (Windows, or running as root on Unix)")
 	}
+	return leaf
+}
+
+// TestCheckLibraryRootsAccessiblePermissionDenied is the
+// bridge.ars.md regression target: stat returns EACCES (the FUSE
+// mount with allow_other off, as seen by root). The check reports
+// ONE wrapped error per inaccessible root; Validate() on the same
+// input succeeds because library-root accessibility is no longer
+// part of the shape contract.
+func TestCheckLibraryRootsAccessiblePermissionDenied(t *testing.T) {
+	leaf := makeInaccessibleLibraryRoot(t)
 
 	cfg := &Config{LibraryRoots: []string{leaf}}
 	errs := cfg.CheckLibraryRootsAccessible()
