@@ -7,12 +7,12 @@ import (
 
 func TestChunkSizeFor(t *testing.T) {
 	cases := []struct {
-		name     string
-		rtt      float64
-		jitter   float64
-		loss     float64
-		wantMin  int // inclusive lower bound on result
-		wantMax  int // inclusive upper bound on result
+		name    string
+		rtt     float64
+		jitter  float64
+		loss    float64
+		wantMin int // inclusive lower bound on result
+		wantMax int // inclusive upper bound on result
 	}{
 		// Nominal LAN — minimal jitter, no loss, low RTT
 		{"nominal_lan", 1.0, 0.5, 0.0, MinChunkSize, MinChunkSize},

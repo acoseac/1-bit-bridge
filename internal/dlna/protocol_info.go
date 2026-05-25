@@ -85,8 +85,9 @@ func ResolveMIMEType(userAgent, extension string) string {
 //
 // DLNA.ORG_OP=01 = range-request supported, time-seek not.
 // DLNA.ORG_CI=0  = content NOT transcoded — load-bearing for the
-//                  bit-exact contract; downstream renderers and audio
-//                  enthusiast tooling key off this flag.
+//
+//	bit-exact contract; downstream renderers and audio
+//	enthusiast tooling key off this flag.
 func ProtocolInfoFor(userAgent, extension string) string {
 	mime := ResolveMIMEType(userAgent, extension)
 	return fmt.Sprintf(
@@ -108,7 +109,7 @@ func ProtocolInfoFor(userAgent, extension string) string {
 // caller-site signature change. Current shape uses `*` (no PN) per the
 // "no standard PN for DSF" finding documented in the plan.
 func ContentFeaturesHeaderValue(userAgent, extension string) string {
-	_ = userAgent  // reserved for per-renderer DLNA.ORG_PN routing in v1.x
-	_ = extension  // reserved for codec-derived DLNA.ORG_PN routing in v1.x
+	_ = userAgent // reserved for per-renderer DLNA.ORG_PN routing in v1.x
+	_ = extension // reserved for codec-derived DLNA.ORG_PN routing in v1.x
 	return fmt.Sprintf("DLNA.ORG_PN=*;DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=%s", DLNAFlags)
 }
