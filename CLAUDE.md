@@ -190,6 +190,8 @@ ssh arsenie@192.168.0.52 \
 
 **Multiple desktop network categories on Windows**: `Get-NetConnectionProfile` may report multiple connections (Ethernet "ORBI16 2" → Public, Tailscale → Private). Firewall rules added via `firewall-bridge-windows.ps1` target ALL three profiles (`Domain,Private,Public`) by design — without `Public` the Ethernet LAN would still be blocked even though it's the active surface. Don't narrow the profile scope without checking `Get-NetConnectionProfile` first.
 
+**zsh `echo` mangles `\b` in PowerShell paths sent via `-EncodedCommand`.** When piping a PowerShell script to PowerShell `-EncodedCommand` over SSH (the only sane way to avoid layered single-/double-quote escaping between zsh → CMD → pwsh), the natural pipeline is `echo -n "$PS" | iconv -f UTF-8 -t UTF-16LE | base64 | tr -d '\n'`. **`echo -n` on macOS zsh processes backslash escapes by default** (POSIX-noncompliant, zsh-historical behaviour), so any Windows path with `\b` — `C:\1-bit-bridge\bin`, `\bridge.exe`, `\backups` — gets `\b` collapsed to a literal 0x08 byte (backspace) BEFORE the base64 layer. PowerShell then receives a string with embedded BS control characters and fails with a `Test-Path` / `Rename-Item` error like `missing C:\1-bit-bridge_x0008_in\bridge.exe.new` (PowerShell's error formatter renders the BS byte as `_x0008_`). The failure mode is invisible at the source — single-quoted PowerShell strings don't help because the mangling happens in zsh, not PowerShell. **Always use `printf '%s' "$PS"` instead of `echo -n "$PS"`** as the first stage of the pipeline. `printf '%s'` is POSIX-defined to emit bytes verbatim. Bash's `echo` happens to default to non-interpret on macOS, but zsh is the default Mac shell now — code for zsh. Burned 2026-05-22 during the post-PR-#285 home-pc deploy: the rename step silently truncated three different paths until I switched the pipeline to `printf`.
+
 ### bridge.ars.md (Linux VPS, public mode, SSH `arsenie@bridge.ars.md`)
 
 Public-internet-reachable bridge running in `deployment.mode: public` against a Backblaze B2 bucket mounted via rclone. Stood up 2026-05-24 (steps 1–11 of the post-PR-#296 deployment plan — iOS pairing deferred until the iOS Mirror PR for `PinningDelegate.shouldSkipPinning` extension lands; see `~/Desktop/to-do/2026-05-24-ios-mirror-public-vps-pinning-exemption.md`).
@@ -667,75 +669,24 @@ curl -sk https://127.0.0.1:7788/v1/health   # confirm new serverVersion
 
 Health-check tail: `tail -25 /tmp/bridge-live/serve.log` — look for the single-`v` banner and (on tsnet-mode bridges) the `tsnet HTTP/3 listeners bound count=N ipsReported=N port=...` INFO line.
 
-### Step 2 — Windows production bridge (`192.168.0.52`)
+### Step 2 — Windows production bridge (`home-pc`)
 
-Production host coordinates (verified 2026-05-18, [PR #271](https://github.com/acoseac/1-bit-bridge/pull/271) deploy):
+Full coordinates + canonical update procedure live in the `home-pc (Windows)` subsection under "Production deployments" above — don't duplicate the deploy commands here; consult that section directly. The host now runs the scheduled-task setup (binary at `C:\1-bit-bridge\bin\bridge.exe`, scheduled task `1-bit-bridge (home-pc)`); the older service-based flow with the desktop-resident exe is deprecated.
 
-| Item | Value |
-|---|---|
-| SSH | `ssh arsenie@192.168.0.52` (key auth, BatchMode-safe) |
-| Default shell | CMD (not PowerShell, not WSL — commands use CMD syntax: `&&` not `;`, `\` paths) |
-| Service name | `com.acoseac.1-bit-bridge` (LocalSystem, AUTO_START DELAYED) |
-| Binary path | `C:\Users\arsenie\Desktop\bridge-windows-amd64.exe` |
-| Config path | `C:\Users\arsenie\AppData\Local\1-bit-bridge\bridge.yaml` |
-| Data dir | `C:\Users\arsenie\AppData\Local\1-bit-bridge\data` |
-| Log file | `C:\ProgramData\1-bit-bridge\bridge.log` |
-| Library | `F:\Media\Music` (~18k tracks at last check) |
-| Tailscale mode | `cli` (host Tailscale.app, NOT tsnet) — tsnet-only fixes are dormant on this host |
-| iOS reachability | LAN: `https://192.168.0.52:7788`; Tailscale: CGNAT v4 + ULA v6 |
-
-Proven upgrade sequence (v0.1.3-9 → v0.1.3-11 swap, 2026-05-18):
-
-1. **Cross-compile** the Windows binary against current `main`:
-   ```sh
-   GOOS=windows GOARCH=amd64 go build \
-     -ldflags "-s -w -X github.com/acoseac/1-bit-bridge/internal/version.ServerVersion=$(git describe --tags --always)" \
-     -o dist/bridge-windows-amd64.exe ./cmd/bridge
-   ```
-2. **Upload as `.new` then verify SHA-256** — never overwrite the live binary directly. `scp` over Wi-Fi can silently truncate on connection drops; mismatched hashes mean retry the upload while the OLD binary keeps serving clients.
-   ```sh
-   scp dist/bridge-windows-amd64.exe arsenie@192.168.0.52:'C:/Users/arsenie/Desktop/bridge-windows-amd64.exe.new'
-   shasum -a 256 dist/bridge-windows-amd64.exe                                                              # local
-   ssh arsenie@192.168.0.52 'certutil -hashfile "C:\Users\arsenie\Desktop\bridge-windows-amd64.exe.new" SHA256'  # remote
-   ```
-3. **Stop the service + wait 8 seconds** (load-bearing — see gotcha below):
-   ```sh
-   ssh arsenie@192.168.0.52 'C:\Users\arsenie\Desktop\bridge-windows-amd64.exe stop'
-   # poll `sc query com.acoseac.1-bit-bridge` until STOPPED, then sleep 8s MORE
-   ```
-4. **Two-step rename swap** (NOT `move /Y` — see gotcha):
-   ```sh
-   TS=$(date +%Y%m%d-%H%M%S)
-   ssh arsenie@192.168.0.52 "ren \"C:\\Users\\arsenie\\Desktop\\bridge-windows-amd64.exe\" \"bridge-windows-amd64.exe.old-$TS\""
-   ssh arsenie@192.168.0.52 'ren "C:\Users\arsenie\Desktop\bridge-windows-amd64.exe.new" "bridge-windows-amd64.exe"'
-   ```
-5. **Start + verify version + LAN health**:
-   ```sh
-   ssh arsenie@192.168.0.52 'C:\Users\arsenie\Desktop\bridge-windows-amd64.exe start'
-   # poll until sc query shows RUNNING
-   ssh arsenie@192.168.0.52 'C:\Users\arsenie\Desktop\bridge-windows-amd64.exe status --config "C:\Users\arsenie\AppData\Local\1-bit-bridge\bridge.yaml"'
-   curl -sk https://192.168.0.52:7788/v1/health | python3 -m json.tool
-   ```
-6. **Leave the `.old-<ts>` backup in place ~24h** so a regression caught by an iOS client has a one-step rollback (`ren` the bad EXE aside, `ren` the .old- back). Don't delete proactively — only the user authorizes destructive cleanup on the production host.
-
-**Critical gotcha — `move /Y` fails after `sc stop`.** Direct `move /Y .new EXE` returns `Access is denied` even after `sc query` shows STOPPED. The Windows SCM holds a transient handle on the EXE for several seconds after the service stops (Windows Defender real-time protection scans the file too). **Two-step rename succeeds** where overwrite fails because Windows allows renaming directory entries independent of file-content locks. Don't reach for `taskkill` / `del` workarounds — they introduce their own failure modes (ungraceful exit corrupts the log file, accidental delete kills the rollback path).
-
-**Critical gotcha — zsh `echo` mangles `\b` in PowerShell paths sent via `-EncodedCommand`.** When piping a PowerShell script to PowerShell `-EncodedCommand` over SSH (the only sane way to avoid layered single-/double-quote escaping between zsh → CMD → pwsh), the natural pipeline is `echo -n "$PS" | iconv -f UTF-8 -t UTF-16LE | base64 | tr -d '\n'`. **`echo -n` on macOS zsh processes backslash escapes by default** (POSIX-noncompliant, zsh-historical behaviour), so any Windows path with `\b` — `C:\1-bit-bridge\bin`, `\bridge.exe`, `\backups` — gets `\b` collapsed to a literal 0x08 byte (backspace) BEFORE the base64 layer. PowerShell then receives a string with embedded BS control characters and fails with a `Test-Path` / `Rename-Item` error like `missing C:\1-bit-bridge_x0008_in\bridge.exe.new` (PowerShell's error formatter renders the BS byte as `_x0008_`). The failure mode is invisible at the source — single-quoted PowerShell strings don't help because the mangling happens in zsh, not PowerShell. **Always use `printf '%s' "$PS"` instead of `echo -n "$PS"`** as the first stage of the pipeline. `printf '%s'` is POSIX-defined to emit bytes verbatim. Bash's `echo` happens to default to non-interpret on macOS, but zsh is the default Mac shell now — code for zsh. Burned 2026-05-22 during the post-PR-#285 home-pc deploy: the rename step silently truncated three different paths until I switched the pipeline to `printf`.
+**One-line summary**: `scp` any changed helper scripts → `pwsh ... setup-bridge-windows.ps1` (pulls `main`, runs `go build` in-place on the Windows host, refreshes YAML) → `pwsh ... task-bridge-windows.ps1` (re-registers + starts the scheduled task) → `curl -sk https://<host>:7788/v1/health` to confirm `serverVersion`.
 
 **What's safe to skip across upgrades:**
 - TLS cert / fingerprint — unchanged, so paired iOS clients don't need re-pairing.
-- Config file — unchanged, so library / dataDir / tailscale-mode settings persist.
-- Library DB (SQLite in `internal/manifest/`) — unchanged for bug-fix releases. Schema migrations are a separate deployment plan (out of scope for this section).
-
-**Cli-mode vs tsnet-mode caveat.** The home-pc bridge runs in default `cli` mode, so any tsnet-specific code path (e.g. the dual-stack HTTP/3 binding from PR #271) is dormant on it. The LAN HTTP/3 listener still serves QUIC over the LAN endpoint. If the host ever flips to `tailscale: { mode: tsnet }`, re-verify tsnet-specific behavior on a post-upgrade restart.
+- Config file — `setup-bridge-windows.ps1` only injects missing `customEndpoints` + `upscale.variantsDir` keys; existing config preserved.
+- Library DB — schema migrations are append-only and idempotent; the same DB carries forward across releases.
 
 ### Step 3 — Linux VPS public-mode bridge (`bridge.ars.md`)
 
-Public-internet bridge running `deployment.mode: public` against rclone-mounted B2. Same cross-compile-then-swap pattern as Step 2, adapted for systemd + linux/amd64. Full coordinates + canonical update procedure live in the `bridge.ars.md` subsection under "Production deployments" above — don't duplicate the deploy commands here; consult that section directly.
+Public-internet bridge running `deployment.mode: public` against rclone-mounted B2. Cross-compile + scp + two-step swap pattern for linux/amd64 + systemd. Full coordinates + canonical update procedure live in the `bridge.ars.md` subsection under "Production deployments" above — don't duplicate the deploy commands here; consult that section directly.
 
 **One-line summary**: `GOOS=linux GOARCH=amd64 go build … -o dist/bridge-linux-amd64 ./cmd/bridge` → `scp -i ~/.ssh/1bitbridge_key … :/tmp/bridge.new` → SHA-256 verify → two-step `sudo mv` swap + `setcap cap_net_bind_service=+ep` + `systemctl restart 1-bit-bridge`.
 
-**Public-mode-specific verification** (extends Step 2's `/v1/health` check):
+**Public-mode-specific verification** (extends the `/v1/health` check):
 
 ```sh
 curl -s https://bridge.ars.md/v1/health | jq '.serverVersion, .certNotAfter, .leCertNotAfter'
