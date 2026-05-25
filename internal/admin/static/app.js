@@ -4446,7 +4446,7 @@ function jobsRender(payload) {
       <td class="num" data-label="Failed">${r.failedFiles}</td>
       <td class="num" data-label="Total">${r.totalFiles}</td>
       <td data-label="Updated"><time>${escapeHTML(updated)}</time></td>
-      <td data-label="Actions"></td>
+      <td class="row-actions" data-label="Actions"></td>
     `;
     if (r.status === "pending" || r.status === "running") {
       const cancelBtn = document.createElement("button");
@@ -4517,6 +4517,9 @@ function initMobileNav() {
   function setOpen(open) {
     header.dataset.navOpen = open ? "true" : "false";
     toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    // ARIA disclosure pattern: move keyboard focus into the menu
+    // on open. Mouse users don't see the ring (:focus-visible).
+    if (open) nav.querySelector("a")?.focus();
   }
 
   toggle.addEventListener("click", (e) => {
@@ -4530,7 +4533,12 @@ function initMobileNav() {
   });
 
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && isOpen()) setOpen(false);
+    if (e.key === "Escape" && isOpen()) {
+      setOpen(false);
+      // Return focus to the toggle so a keyboard user can re-open
+      // without re-tabbing — completes the disclosure-pattern loop.
+      toggle.focus();
+    }
   });
 
   nav.querySelectorAll("a").forEach((link) => {

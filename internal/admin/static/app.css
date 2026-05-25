@@ -2701,17 +2701,25 @@ section.library-inspector {
    * in the right grid column, so left-align reads better alongside its label. */
   table.rows td.num { text-align: left; }
 
-  /* --- colspan feedback rows (loading, empty, error, skipped) -------------
-   * Forcing these into the 2-col grid would collapse them into the auto
-   * track. Exempt them: full-width centered banners instead. */
-  table.rows tr.job-error-row,
-  table.rows tr.job-skipped-row {
+  /* --- colspan feedback rows (loading, empty, disabled, error, skipped) ---
+   * Any TR carrying a colspan TD is a feedback banner, NOT a data row.
+   * Strip card chrome via :has() so all six row variants render as plain
+   * centred text — covers both the classed cases (.job-error-row /
+   * .job-skipped-row) and the unclassed ones (Loading…, "No batches yet",
+   * "Upscale is disabled", "No devices paired yet"). */
+  table.rows tr:has(td[colspan]) {
     padding: 0;
     border: none;
     box-shadow: none;
+    background: transparent;
+  }
+  /* Error / skipped sub-lines sit RIGHT UNDER a data row, so they pull
+   * up against it to read as a continuation. Empty/loading banners stand
+   * alone so they don't need the negative margin. */
+  table.rows tr.job-error-row,
+  table.rows tr.job-skipped-row {
     margin-top: -12px;
     margin-bottom: 16px;
-    background: transparent;
   }
   table.rows td[colspan] {
     display: block;
