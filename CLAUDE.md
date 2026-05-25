@@ -101,7 +101,7 @@ The wipe survives the TLS fingerprint + tokens (different tables); iOS pairing s
 
 ## Production deployments
 
-### home-pc (Windows, SSH `arsenie@192.168.0.158`)
+### home-pc (Windows, SSH `arsenie@192.168.0.52`)
 
 Operator's home Windows machine. Reachable from the operator's macOS workstation via SSH (OpenSSH server, **session is auto-elevated to admin** — no UAC popup needed for `New-NetFirewallRule` etc.). PowerShell 7 (`pwsh`), Git, and Go are pre-installed. Tailscale runs in CLI mode (`tailscale.exe` on PATH).
 
@@ -127,12 +127,12 @@ Operator's home Windows machine. Reachable from the operator's macOS workstation
 All scoped to the exe path, NOT port-wide. Old rules at the legacy exe paths (`C:\users\arsenie\desktop\1-bit-bridge_0.1.2_windows_amd64\bridge.exe`, `C:\users\arsenie\src\1-bit-bridge\bridge.exe`, etc.) are still in the firewall — harmless but stale; nuke at the next cleanup pass.
 
 **Endpoints advertised in `/v1/health`** (six total, in registration order):
-- `https://192.168.0.158:7788` — LAN (Ethernet)
+- `https://192.168.0.52:7788` — LAN (Ethernet)
 - `https://home-pc.local:7788` — mDNS
 - `https://home-pc.sable-eagle.ts.net:7788` — **Tailscale magic-DNS** (Let's Encrypt cert via the SNI cert switcher + `*.ts.net` pinning bypass in `PinningDelegate.shouldSkipPinning`; this is the working remote-access path from iOS over cellular)
 - `https://100.91.73.88:7788` — Tailscale IPv4 (iOS skips per `isTailscaleCGNATURL` filter — expected, magic-DNS replaces it)
 - `https://[fd7a:115c:a1e0::6e39:4958]:7788` — Tailscale IPv6
-- `https://145.224.86.89:7788` — **WAN custom endpoint** (router port-forward 7788 → 192.168.0.158:7788). Configured via `customEndpoints:` top-level YAML field. Public IP is RIPE-allocated (NOT CGNAT), so iOS will probe it normally.
+- `https://145.224.86.89:7788` — **WAN custom endpoint** (router port-forward 7788 → 192.168.0.52:7788). Configured via `customEndpoints:` top-level YAML field. Public IP is RIPE-allocated (NOT CGNAT), so iOS will probe it normally.
 
 **Cert SAN gotcha (re-discovered 2026-05-19):** `bridge init` mints the TLS cert against the **config at that moment**. If you edit `customEndpoints:` in `bridge.yaml` AFTER `init`, the cert's SAN list is stale and the first `serve` logs `WARN cert SANs are stale — missing_ips=[...]`. Run `bridge cert rotate --config ...\bridge.yaml --yes` after any customEndpoints edit. The fresh-install script flow gets this right because it rotates after the YAML edit; manual edits in the field need the same follow-up.
 
@@ -155,32 +155,32 @@ scp /tmp/setup-bridge-windows.ps1 \
     /tmp/rotate-cert-windows.ps1 \
     /tmp/firewall-bridge-windows.ps1 \
     /tmp/task-bridge-windows.ps1 \
-    arsenie@192.168.0.158:C:/Users/arsenie/Desktop/
+    arsenie@192.168.0.52:C:/Users/arsenie/Desktop/
 
 # 2. Re-run setup (pulls latest origin/main, rebuilds, refreshes YAML — but
 #    does NOT touch the cert unless you also pass `-force` to bridge init).
-ssh arsenie@192.168.0.158 'pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass \
+ssh arsenie@192.168.0.52 'pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass \
     -File C:\Users\arsenie\Desktop\setup-bridge-windows.ps1'
 
 # 3. Restart via the scheduled task (already registered — this just kicks it).
-ssh arsenie@192.168.0.158 'pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass \
+ssh arsenie@192.168.0.52 'pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass \
     -File C:\Users\arsenie\Desktop\task-bridge-windows.ps1'
 
 # 4. Verify from LAN.
-curl -sS -k --max-time 10 https://192.168.0.158:7788/v1/health | jq .serverVersion
+curl -sS -k --max-time 10 https://192.168.0.52:7788/v1/health | jq .serverVersion
 ```
 
 **Just restart (no rebuild)** — after a YAML edit or to recover from a wedged process:
 
 ```sh
-ssh arsenie@192.168.0.158 'pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass \
+ssh arsenie@192.168.0.52 'pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass \
     -File C:\Users\arsenie\Desktop\restart-bridge-windows.ps1'
 ```
 
 Or inline without the script:
 
 ```sh
-ssh arsenie@192.168.0.158 \
+ssh arsenie@192.168.0.52 \
     'pwsh -Command "Stop-ScheduledTask -TaskName ''1-bit-bridge (home-pc)''; Start-Sleep 1; Start-ScheduledTask -TaskName ''1-bit-bridge (home-pc)''"'
 ```
 
@@ -667,13 +667,13 @@ curl -sk https://127.0.0.1:7788/v1/health   # confirm new serverVersion
 
 Health-check tail: `tail -25 /tmp/bridge-live/serve.log` — look for the single-`v` banner and (on tsnet-mode bridges) the `tsnet HTTP/3 listeners bound count=N ipsReported=N port=...` INFO line.
 
-### Step 2 — Windows production bridge (`192.168.0.158`)
+### Step 2 — Windows production bridge (`192.168.0.52`)
 
 Production host coordinates (verified 2026-05-18, [PR #271](https://github.com/acoseac/1-bit-bridge/pull/271) deploy):
 
 | Item | Value |
 |---|---|
-| SSH | `ssh arsenie@192.168.0.158` (key auth, BatchMode-safe) |
+| SSH | `ssh arsenie@192.168.0.52` (key auth, BatchMode-safe) |
 | Default shell | CMD (not PowerShell, not WSL — commands use CMD syntax: `&&` not `;`, `\` paths) |
 | Service name | `com.acoseac.1-bit-bridge` (LocalSystem, AUTO_START DELAYED) |
 | Binary path | `C:\Users\arsenie\Desktop\bridge-windows-amd64.exe` |
@@ -682,7 +682,7 @@ Production host coordinates (verified 2026-05-18, [PR #271](https://github.com/a
 | Log file | `C:\ProgramData\1-bit-bridge\bridge.log` |
 | Library | `F:\Media\Music` (~18k tracks at last check) |
 | Tailscale mode | `cli` (host Tailscale.app, NOT tsnet) — tsnet-only fixes are dormant on this host |
-| iOS reachability | LAN: `https://192.168.0.158:7788`; Tailscale: CGNAT v4 + ULA v6 |
+| iOS reachability | LAN: `https://192.168.0.52:7788`; Tailscale: CGNAT v4 + ULA v6 |
 
 Proven upgrade sequence (v0.1.3-9 → v0.1.3-11 swap, 2026-05-18):
 
@@ -694,27 +694,27 @@ Proven upgrade sequence (v0.1.3-9 → v0.1.3-11 swap, 2026-05-18):
    ```
 2. **Upload as `.new` then verify SHA-256** — never overwrite the live binary directly. `scp` over Wi-Fi can silently truncate on connection drops; mismatched hashes mean retry the upload while the OLD binary keeps serving clients.
    ```sh
-   scp dist/bridge-windows-amd64.exe arsenie@192.168.0.158:'C:/Users/arsenie/Desktop/bridge-windows-amd64.exe.new'
+   scp dist/bridge-windows-amd64.exe arsenie@192.168.0.52:'C:/Users/arsenie/Desktop/bridge-windows-amd64.exe.new'
    shasum -a 256 dist/bridge-windows-amd64.exe                                                              # local
-   ssh arsenie@192.168.0.158 'certutil -hashfile "C:\Users\arsenie\Desktop\bridge-windows-amd64.exe.new" SHA256'  # remote
+   ssh arsenie@192.168.0.52 'certutil -hashfile "C:\Users\arsenie\Desktop\bridge-windows-amd64.exe.new" SHA256'  # remote
    ```
 3. **Stop the service + wait 8 seconds** (load-bearing — see gotcha below):
    ```sh
-   ssh arsenie@192.168.0.158 'C:\Users\arsenie\Desktop\bridge-windows-amd64.exe stop'
+   ssh arsenie@192.168.0.52 'C:\Users\arsenie\Desktop\bridge-windows-amd64.exe stop'
    # poll `sc query com.acoseac.1-bit-bridge` until STOPPED, then sleep 8s MORE
    ```
 4. **Two-step rename swap** (NOT `move /Y` — see gotcha):
    ```sh
    TS=$(date +%Y%m%d-%H%M%S)
-   ssh arsenie@192.168.0.158 "ren \"C:\\Users\\arsenie\\Desktop\\bridge-windows-amd64.exe\" \"bridge-windows-amd64.exe.old-$TS\""
-   ssh arsenie@192.168.0.158 'ren "C:\Users\arsenie\Desktop\bridge-windows-amd64.exe.new" "bridge-windows-amd64.exe"'
+   ssh arsenie@192.168.0.52 "ren \"C:\\Users\\arsenie\\Desktop\\bridge-windows-amd64.exe\" \"bridge-windows-amd64.exe.old-$TS\""
+   ssh arsenie@192.168.0.52 'ren "C:\Users\arsenie\Desktop\bridge-windows-amd64.exe.new" "bridge-windows-amd64.exe"'
    ```
 5. **Start + verify version + LAN health**:
    ```sh
-   ssh arsenie@192.168.0.158 'C:\Users\arsenie\Desktop\bridge-windows-amd64.exe start'
+   ssh arsenie@192.168.0.52 'C:\Users\arsenie\Desktop\bridge-windows-amd64.exe start'
    # poll until sc query shows RUNNING
-   ssh arsenie@192.168.0.158 'C:\Users\arsenie\Desktop\bridge-windows-amd64.exe status --config "C:\Users\arsenie\AppData\Local\1-bit-bridge\bridge.yaml"'
-   curl -sk https://192.168.0.158:7788/v1/health | python3 -m json.tool
+   ssh arsenie@192.168.0.52 'C:\Users\arsenie\Desktop\bridge-windows-amd64.exe status --config "C:\Users\arsenie\AppData\Local\1-bit-bridge\bridge.yaml"'
+   curl -sk https://192.168.0.52:7788/v1/health | python3 -m json.tool
    ```
 6. **Leave the `.old-<ts>` backup in place ~24h** so a regression caught by an iOS client has a one-step rollback (`ren` the bad EXE aside, `ren` the .old- back). Don't delete proactively — only the user authorizes destructive cleanup on the production host.
 
