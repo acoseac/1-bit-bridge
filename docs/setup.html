@@ -153,19 +153,18 @@ cd bridge</code></pre>
         <p>See <a href="features.html#tailscale">Features → Tailscale integration</a> for the full rundown — when to choose which mode, the macOS sandboxed-CLI gotcha, and how to verify Magic-DNS works end-to-end.</p>
       </li>
 
-      <li id="step-10">
-        <h3>Alternative: public-internet deployment (v0.1.4)</h3>
-        <p>If Tailscale isn't an option — you're standing up a small VPS for friends and family, or you want a fixed public hostname rather than a tailnet identity — initialise the bridge in <a href="features.html#public-mode">public mode</a> instead of the loopback default:</p>
-        <pre><code>./bridge init --public</code></pre>
-        <p>Public mode is identical to the LAN setup above, plus:</p>
-        <ul>
-          <li><strong>Admin console password.</strong> The init wizard generates a 16-character random password and prints it once. Copy it somewhere safe; rotate later with <code>./bridge admin reset-password</code>.</li>
-          <li><strong>Let's Encrypt cert.</strong> If you set <code>autocert.enabled: true</code> with a public domain pointed at the host, the bridge fetches a real TLS cert automatically. No reverse proxy needed.</li>
-          <li><strong>Reachable admin console.</strong> Bound to a routable interface (not <code>127.0.0.1</code>) so you can manage the bridge from another machine — over HTTPS, behind the password.</li>
-        </ul>
-        <p>Lock down what you expose: open only the bridge's TLS port (default <code>:443</code>) and, if you need remote admin, the admin port (default <code>:7789</code>) — and keep the admin port firewalled to the operator's IP via your VPS firewall / <code>ufw</code> / cloud security group.</p>
-      </li>
     </ol>
+
+    <h2 id="step-10">Alternative: public-internet deployment (v0.1.4)</h2>
+    <p>If you'd rather expose the bridge directly on the public internet — a small VPS for friends and family, a fixed public hostname rather than a tailnet identity, or any setup where Tailscale isn't an option — substitute step 3 above with the public-mode initialiser:</p>
+    <pre><code>./bridge init --public</code></pre>
+    <p>Steps 1, 2, 5, 6, 7, and 8 above are unchanged. The public profile differs from the loopback default in three ways:</p>
+    <ul>
+      <li><strong>Admin console password.</strong> The init wizard generates a 16-character random password and prints it once. Copy it somewhere safe; rotate later with <code>./bridge admin reset-password</code>.</li>
+      <li><strong>Let's Encrypt cert.</strong> If you set <code>autocert.enabled: true</code> with a public domain pointed at the host, the bridge fetches a real TLS cert automatically. No reverse proxy needed.</li>
+      <li><strong>Reachable admin console + TLS-port shift.</strong> The admin listener binds a routable interface (not <code>127.0.0.1</code>) so you can manage the bridge from another machine, and the iOS-facing TLS listener defaults to <code>:443</code> instead of the loopback default <code>:7788</code> — Let's Encrypt's TLS-ALPN-01 challenge only validates on TCP/443.</li>
+    </ul>
+    <p>Lock down what you expose: open only the bridge's TLS port (<code>:443</code> with this profile, unless you overrode it with <code>--listen-address</code>) and, if you need remote admin, the admin port (default <code>:7789</code>) — keep the admin port firewalled to the operator's IP via your VPS firewall / <code>ufw</code> / cloud security group.</p>
 
     <h2>Something not working?</h2>
     <p>Check the <a href="troubleshooting.html">troubleshooting page</a> for common symptoms — bridge not appearing in Discover, "Server unreachable" errors, slow scans, certificate-rotation flow. If your problem isn't listed, <a href="https://github.com/acoseac/1-bit-bridge/issues">open an issue on GitHub</a>.</p>
