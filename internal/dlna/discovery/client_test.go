@@ -3,7 +3,6 @@ package discovery
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -49,7 +48,6 @@ func TestNewSSDPDiscoveryClient_RejectsNilInterface(t *testing.T) {
 	_, err := NewSSDPDiscoveryClient(
 		DiscoveryConfig{}, // nil Interface
 		NewRendererCache(),
-		slog.Default(),
 	)
 	if err == nil {
 		t.Fatal("expected error for nil Interface")
@@ -60,7 +58,6 @@ func TestNewSSDPDiscoveryClient_RejectsNilCache(t *testing.T) {
 	_, err := NewSSDPDiscoveryClient(
 		DiscoveryConfig{Interface: &net.Interface{}},
 		nil,
-		slog.Default(),
 	)
 	if err == nil {
 		t.Fatal("expected error for nil cache")
@@ -71,7 +68,6 @@ func TestNewSSDPDiscoveryClient_AppliesDefaults(t *testing.T) {
 	c, err := NewSSDPDiscoveryClient(
 		DiscoveryConfig{Interface: &net.Interface{}},
 		NewRendererCache(),
-		slog.Default(),
 	)
 	if err != nil {
 		t.Fatalf("construct: %v", err)
@@ -101,7 +97,7 @@ func newTestClient(t *testing.T, dispatcher SOAPDispatcher) *SSDPDiscoveryClient
 	cfg.NowFunc = func() time.Time {
 		return time.Date(2026, 5, 26, 12, 0, 0, 0, time.UTC)
 	}
-	c, err := NewSSDPDiscoveryClient(cfg, NewRendererCache(), slog.Default())
+	c, err := NewSSDPDiscoveryClient(cfg, NewRendererCache())
 	if err != nil {
 		t.Fatalf("construct: %v", err)
 	}
@@ -123,7 +119,7 @@ func TestHandlePacket_NotifyByeByeRemovesEntry(t *testing.T) {
 		"NTS: ssdp:byebye\r\n" +
 		"USN: uuid:bye-test::urn:schemas-upnp-org:device:MediaRenderer:1\r\n" +
 		"\r\n")
-	c.handlePacket(pkt, nil)
+	c.handlePacket(context.Background(), pkt, nil)
 	if _, ok := c.cache.Get("uuid:bye-test"); ok {
 		t.Error("ssdp:byebye should remove the entry")
 	}
@@ -139,7 +135,7 @@ func TestHandlePacket_FiltersNonMediaRendererTarget(t *testing.T) {
 		"USN: uuid:server::urn:schemas-upnp-org:device:MediaServer:1\r\n" +
 		"LOCATION: http://x/y\r\n" +
 		"\r\n")
-	c.handlePacket(pkt, nil)
+	c.handlePacket(context.Background(), pkt, nil)
 	if c.cache.Len() != 0 {
 		t.Errorf("MediaServer announcement should be ignored, got %d entries", c.cache.Len())
 	}
@@ -160,7 +156,7 @@ func TestHandlePacket_KnownUDNAliveRefreshesLastSeen(t *testing.T) {
 		"USN: uuid:known::urn:schemas-upnp-org:device:MediaRenderer:1\r\n" +
 		"LOCATION: http://x/y\r\n" +
 		"\r\n")
-	c.handlePacket(pkt, nil)
+	c.handlePacket(context.Background(), pkt, nil)
 	info, _ := c.cache.Get("uuid:known")
 	if info.FriendlyName != "Already Known" {
 		t.Errorf("FriendlyName dropped on refresh: %q", info.FriendlyName)
@@ -200,7 +196,7 @@ func TestHandlePacket_NewUDNTriggersDetailFetch(t *testing.T) {
 		"ST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n" +
 		"USN: uuid:abcd1234-5678-90ab-cdef-1234567890ab::urn:schemas-upnp-org:device:MediaRenderer:1\r\n" +
 		"\r\n")
-	c.handlePacket(pkt, nil)
+	c.handlePacket(context.Background(), pkt, nil)
 	info := waitForCacheEntry(t, c, "uuid:abcd1234-5678-90ab-cdef-1234567890ab", "Chord 2go", 2*time.Second)
 	if info.FriendlyName != "Chord 2go" {
 		t.Errorf("FriendlyName = %q", info.FriendlyName)
@@ -242,7 +238,7 @@ func TestHandlePacket_FetchFailureStillCachesStub(t *testing.T) {
 		"ST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n" +
 		"USN: uuid:offline::urn:schemas-upnp-org:device:MediaRenderer:1\r\n" +
 		"\r\n")
-	c.handlePacket(pkt, nil)
+	c.handlePacket(context.Background(), pkt, nil)
 	// Wait up to 1s for the goroutine to complete its failed fetch.
 	deadline := time.Now().Add(1 * time.Second)
 	for time.Now().Before(deadline) {
@@ -267,7 +263,7 @@ func TestHandlePacket_FetchFailureStillCachesStub(t *testing.T) {
 func TestHandlePacket_DropsMalformedPacketSilently(t *testing.T) {
 	c := newTestClient(t, &stubDispatcher{})
 	// Malformed — no LF in first line.
-	c.handlePacket([]byte("garbage"), nil)
+	c.handlePacket(context.Background(), []byte("garbage"), nil)
 	if c.cache.Len() != 0 {
 		t.Error("malformed packet should be silently dropped")
 	}
@@ -280,7 +276,7 @@ func TestHandlePacket_DropsEmptyUDN(t *testing.T) {
 		"ST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n" +
 		// USN missing entirely
 		"\r\n")
-	c.handlePacket(pkt, nil)
+	c.handlePacket(context.Background(), pkt, nil)
 	if c.cache.Len() != 0 {
 		t.Error("packet without USN should be dropped")
 	}

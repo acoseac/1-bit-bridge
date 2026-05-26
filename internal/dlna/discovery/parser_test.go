@@ -2,6 +2,7 @@ package discovery
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -336,6 +337,8 @@ func TestParseGetProtocolInfoResponse_ChordShape(t *testing.T) {
 }
 
 func TestParseGetProtocolInfoResponse_EmptySinkLegalEmpty(t *testing.T) {
+	// Renderer responded with a recognisable Response element +
+	// empty Sink — degenerate but legal per the UPnP spec.
 	xml := `<?xml version="1.0"?>
 <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
 <s:Body>
@@ -351,6 +354,44 @@ func TestParseGetProtocolInfoResponse_EmptySinkLegalEmpty(t *testing.T) {
 	}
 	if len(sinks) != 0 {
 		t.Errorf("empty Sink should yield empty slice, got %v", sinks)
+	}
+}
+
+// CodeRabbit MAJOR round-1 on PR #305: SOAP fault must NOT
+// silently mascarade as empty Sink list.
+func TestParseGetProtocolInfoResponse_SOAPFaultReturnsError(t *testing.T) {
+	xml := `<?xml version="1.0"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+<s:Body>
+<s:Fault>
+<faultcode>s:Client</faultcode>
+<faultstring>UPnPError</faultstring>
+</s:Fault>
+</s:Body>
+</s:Envelope>`
+	_, err := ParseGetProtocolInfoResponse([]byte(xml))
+	if err == nil {
+		t.Fatal("expected SOAP fault to surface as error, got nil")
+	}
+	if !errors.Is(err, ErrSOAPFault) {
+		t.Errorf("expected ErrSOAPFault, got %v", err)
+	}
+}
+
+// CodeRabbit MAJOR round-1 on PR #305: missing Response element
+// (bare `<Body/>` or unrelated element) must NOT silently
+// mascarade as empty Sink list.
+func TestParseGetProtocolInfoResponse_MissingResponseReturnsError(t *testing.T) {
+	xml := `<?xml version="1.0"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+<s:Body></s:Body>
+</s:Envelope>`
+	_, err := ParseGetProtocolInfoResponse([]byte(xml))
+	if err == nil {
+		t.Fatal("expected missing-response-element error, got nil")
+	}
+	if !errors.Is(err, ErrMissingResponseElement) {
+		t.Errorf("expected ErrMissingResponseElement, got %v", err)
 	}
 }
 

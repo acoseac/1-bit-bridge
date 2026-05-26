@@ -70,7 +70,7 @@ func startDLNADiscoveryIfEnabled(
 	discCfg.MSearchInterval = cfg.DLNA.Discovery.EffectiveMSearchInterval()
 	discCfg.RendererTTL = cfg.DLNA.Discovery.EffectiveRendererTTL()
 
-	client, err := discovery.NewSSDPDiscoveryClient(discCfg, cache, log)
+	client, err := discovery.NewSSDPDiscoveryClient(discCfg, cache)
 	if err != nil {
 		log.Warn("DLNA renderer discovery disabled — NewSSDPDiscoveryClient failed",
 			slog.String("err", err.Error()))

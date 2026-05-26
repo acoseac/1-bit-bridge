@@ -1278,6 +1278,23 @@ func (c *Config) Validate() error {
 	if c.ScanIntervalSec < 1 {
 		return fmt.Errorf("scanIntervalSec: must be >= 1, got %d", c.ScanIntervalSec)
 	}
+	// DLNA discovery: TTL must be strictly greater than the
+	// M-SEARCH interval — otherwise we'd evict still-online
+	// renderers between cycles (the M-SEARCH cycle is the only
+	// observation source per the discovery client's
+	// no-NOTIFY-listener design). Per CodeRabbit MAJOR round-1
+	// on PR #305 — the prior shape documented the invariant in
+	// the field docblock but didn't enforce it.
+	if c.DLNA.Discovery.Enabled {
+		ms := c.DLNA.Discovery.EffectiveMSearchInterval()
+		ttl := c.DLNA.Discovery.EffectiveRendererTTL()
+		if ttl <= ms {
+			return fmt.Errorf(
+				"dlna.discovery: rendererTTLSeconds (%v) must be > msearchIntervalSeconds (%v) — otherwise still-online renderers evict between cycles",
+				ttl, ms,
+			)
+		}
+	}
 	if (c.TLSCertPath == "") != (c.TLSKeyPath == "") {
 		return errors.New("tlsCertPath and tlsKeyPath: must be set together, or both empty")
 	}

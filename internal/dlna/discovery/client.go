@@ -4,40 +4,64 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net"
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/logging"
 )
 
+// packageLogger follows the repo convention — internal/* packages
+// declare a single package-scoped `logging.Component(...)` logger.
+// Per CodeRabbit Major round-1 on PR #305.
+var packageLogger = logging.Component("dlna-discovery")
+
 // SSDPDiscoveryClient is the orchestrator that drives SSDP M-SEARCH
-// + NOTIFY listening + per-renderer detail-fetch + cache lifecycle.
+// + per-renderer detail-fetch + cache lifecycle.
 //
-// **Lifecycle**: `Start(ctx)` binds the SSDP multicast UDP socket
-// (single socket on 0.0.0.0:0 joined to the multicast group on
-// `cfg.Interface`), fires the first M-SEARCH immediately, then
-// loops every `cfg.MSearchInterval` (default 30s) sending fresh
-// M-SEARCHes + periodically evicting stale cache entries.
-// `Stop()` cancels the run loop, closes the socket, and clears
-// the cache for clean teardown.
+// **Lifecycle**: `Start(ctx)` binds an ephemeral-port UDP socket
+// (wildcard 0.0.0.0:0) for sending M-SEARCH requests + receiving
+// unicast responses. Loops every `cfg.MSearchInterval` (default 30s)
+// sending fresh M-SEARCHes + periodically evicting stale cache
+// entries. `Stop()` cancels the run loop, closes the socket, and
+// clears the cache for clean teardown.
+//
+// **v1: M-SEARCH cycle only, no NOTIFY listening.** SSDP supports
+// renderers spontaneously announcing themselves via
+// `NOTIFY ssdp:alive` / `ssdp:byebye` packets to the well-known
+// multicast group + port (239.255.255.250:1900). Listening for
+// NOTIFY would require a SECOND socket bound to that well-known
+// port — and the bridge's own DLNA server-side advertiser
+// (`internal/dlna/ssdp.go`) is already bound there. Cross-process
+// SO_REUSEPORT semantics differ between Linux and macOS and even
+// when supported deliver packets to exactly one socket per packet,
+// which would split NOTIFY observations between the two sockets
+// unpredictably. v1 ships M-SEARCH-only — renderers that come +
+// go between cycles surface within `MSearchInterval` (30s) on
+// the next cycle; departures surface via `RendererTTL` (60s)
+// eviction. A future PR can add cross-package coupling with the
+// server-side advertiser to multiplex NOTIFY observations.
+//
+// **Linux/BSD socket correctness**: binding to wildcard
+// `0.0.0.0:0` (NOT `239.255.255.250:1900` via
+// `ListenMulticastUDP`) is load-bearing. A multicast-bound socket
+// on Linux delivers ONLY packets whose destination IP matches the
+// bound multicast address — unicast M-SEARCH responses from
+// renderers (sent to the host IP + the source port of our
+// M-SEARCH packet) would NOT land on the multicast-bound socket
+// and discovery would silently fail. macOS is more permissive
+// but the correct portable shape is wildcard + explicit
+// multicast-write outgoing. Per Gemini HIGH round-1 on PR #305.
 //
 // **Thread model**: the client owns ONE goroutine — `runLoop` —
-// that reads from the UDP socket, dispatches NOTIFY / M-SEARCH-
-// response packets to per-event handlers, and ticks the M-SEARCH
-// / eviction cadence. All cache mutations happen from this single
-// goroutine + the cache's own mutex serializes against the HTTP
-// handler's read path. No goroutine-per-renderer fanout — the
-// per-renderer detail fetches (DeviceDescription, GetProtocolInfo)
-// are dispatched as a small bounded worker pool to keep network
-// concurrency under control.
-//
-// **Why not goupnp's client**: same rationale as the server-side
-// PR 1 — goupnp's SSDP client is opinionated about goroutine
-// fanout + has historically been flaky in edge cases (multi-
-// interface hosts, IPv6 ambiguity). Hand-rolling against the
-// existing `internal/dlna` SSDP primitives keeps the surface
-// small + the failure modes inspectable.
+// that reads from the UDP socket + dispatches packets to per-event
+// handlers, AND a sibling `runTickLoop` that ticks the M-SEARCH /
+// eviction cadence. All cache mutations happen from these two
+// goroutines + the cache's own mutex serializes against the HTTP
+// handler's read path. Per-renderer detail fetches are dispatched
+// via a bounded worker semaphore (4) to keep network concurrency
+// under control.
 type SSDPDiscoveryClient struct {
 	cfg DiscoveryConfig
 
@@ -50,12 +74,13 @@ type SSDPDiscoveryClient struct {
 	// implementations injected via `cfg.Dispatcher` for tests.
 	dispatcher SOAPDispatcher
 
-	// log is the operator-visible breadcrumb sink.
-	log *slog.Logger
-
-	// runCtx + runCancel manage the run loop's lifecycle. Set on
-	// Start; cancelled on Stop. nil before first Start.
-	runMu     sync.Mutex
+	// runMu guards conn / runCtx / runCancel lifecycle. Writers
+	// (Start / Stop) take Lock; readers (runLoop / sendMSearch)
+	// take RLock to snapshot conn before each access. Per Gemini
+	// CRITICAL round-1 on PR #305 — the prior shape had runLoop
+	// dereferencing `c.conn` after Stop had already cleared it,
+	// risking a nil-pointer panic that would crash the bridge.
+	runMu     sync.RWMutex
 	runCtx    context.Context
 	runCancel context.CancelFunc
 	conn      *net.UDPConn
@@ -75,23 +100,22 @@ type SSDPDiscoveryClient struct {
 // All fields except `Interface` have sensible defaults; the zero-
 // value config + a nil interface is rejected by `NewSSDPDiscoveryClient`.
 type DiscoveryConfig struct {
-	// Interface is the LAN-eligible network interface to bind for
-	// multicast. Caller resolves via
+	// Interface is the LAN-eligible network interface to write
+	// M-SEARCH packets out on. Caller resolves via
 	// `internal/dlna.PickLANEligibleInterface` (the same picker
 	// the server-side advertiser uses).
 	Interface *net.Interface
 
 	// MSearchInterval is the cadence for sending fresh M-SEARCH
-	// requests. Default 30s. Each M-SEARCH lets us refresh entries
-	// for renderers that may have missed our earlier alive (e.g.
-	// renderer came online between cycles + only sends ssdp:alive
-	// on its own multicast schedule).
+	// requests. Default 30s. Tunable for operators whose
+	// renderers are slow to respond / whose LAN is saturated.
 	MSearchInterval time.Duration
 
 	// RendererTTL is the staleness window. Entries older than this
-	// (no observation within the window) get evicted on the next
-	// tick. Default 60s — comfortably above MSearchInterval so
-	// one missed observation cycle doesn't evict.
+	// (no M-SEARCH response observed within the window) get
+	// evicted on the next tick. Default 60s — must be greater
+	// than MSearchInterval so one missed cycle doesn't evict.
+	// Enforced in `internal/config.DLNAConfig.Validate`.
 	RendererTTL time.Duration
 
 	// DetailFetchTimeout caps a single per-renderer detail fetch
@@ -130,16 +154,12 @@ func DefaultDiscoveryConfig() DiscoveryConfig {
 func NewSSDPDiscoveryClient(
 	cfg DiscoveryConfig,
 	cache *RendererCache,
-	log *slog.Logger,
 ) (*SSDPDiscoveryClient, error) {
 	if cfg.Interface == nil {
 		return nil, errors.New("DiscoveryConfig.Interface is required")
 	}
 	if cache == nil {
 		return nil, errors.New("RendererCache is required")
-	}
-	if log == nil {
-		log = slog.Default()
 	}
 	// Apply defaults for unset durations / dispatcher.
 	if cfg.MSearchInterval <= 0 {
@@ -164,7 +184,6 @@ func NewSSDPDiscoveryClient(
 		cfg:            cfg,
 		cache:          cache,
 		dispatcher:     cfg.Dispatcher,
-		log:            log,
 		detailFetchSem: make(chan struct{}, 4), // see field docblock
 		nowFunc:        nowFunc,
 	}, nil
@@ -172,8 +191,7 @@ func NewSSDPDiscoveryClient(
 
 // Start binds the SSDP socket + spawns the run loop. Returns an
 // error when the bind fails. Caller MUST call Stop before
-// discarding the client (matches the `internal/dlna` server-side
-// lifecycle convention).
+// discarding the client.
 //
 // `parent` is the operator-supplied lifecycle context (e.g. from
 // `cmd/bridge`'s signal handler). The client derives its own
@@ -186,15 +204,20 @@ func (c *SSDPDiscoveryClient) Start(parent context.Context) error {
 		return errors.New("SSDPDiscoveryClient already started")
 	}
 
-	// Bind the SSDP multicast socket on the picked interface.
-	// Ephemeral local port — we're a client, not a server, so the
-	// fixed 1900 port is reserved for our M-SEARCH listener (the
-	// server-side `internal/dlna` advertiser). Multicast listens
-	// happen on the joined group, not the local port.
-	addr := &net.UDPAddr{IP: net.IPv4(239, 255, 255, 250), Port: 1900}
-	conn, err := net.ListenMulticastUDP("udp4", c.cfg.Interface, addr)
+	// Bind to wildcard 0.0.0.0:0 (OS picks ephemeral port). This
+	// socket:
+	//   - SENDS M-SEARCH requests via WriteToUDP to the SSDP
+	//     multicast address.
+	//   - RECEIVES unicast M-SEARCH responses from renderers
+	//     (sent back to our source IP + ephemeral port).
+	//
+	// We deliberately do NOT join the multicast group nor bind to
+	// the multicast IP — see the lifecycle docblock above for the
+	// rationale (Linux unicast-receive semantics + same-process
+	// port conflict with the server-side advertiser).
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
 	if err != nil {
-		return fmt.Errorf("ListenMulticastUDP on %s: %w", c.cfg.Interface.Name, err)
+		return fmt.Errorf("ListenUDP wildcard: %w", err)
 	}
 	c.conn = conn
 
@@ -205,10 +228,10 @@ func (c *SSDPDiscoveryClient) Start(parent context.Context) error {
 	go c.runLoop(runCtx)
 	go c.runTickLoop(runCtx)
 
-	c.log.Info("DLNA renderer discovery started",
-		slog.String("interface", c.cfg.Interface.Name),
-		slog.Duration("msearchInterval", c.cfg.MSearchInterval),
-		slog.Duration("rendererTTL", c.cfg.RendererTTL))
+	packageLogger.Info("DLNA renderer discovery started",
+		"interface", c.cfg.Interface.Name,
+		"msearchInterval", c.cfg.MSearchInterval,
+		"rendererTTL", c.cfg.RendererTTL)
 	return nil
 }
 
@@ -216,8 +239,8 @@ func (c *SSDPDiscoveryClient) Start(parent context.Context) error {
 // cache. Idempotent.
 func (c *SSDPDiscoveryClient) Stop() {
 	c.runMu.Lock()
-	defer c.runMu.Unlock()
 	if c.runCancel == nil {
+		c.runMu.Unlock()
 		return
 	}
 	c.runCancel()
@@ -227,15 +250,24 @@ func (c *SSDPDiscoveryClient) Stop() {
 	}
 	c.runCancel = nil
 	c.runCtx = nil
+	c.runMu.Unlock()
 	c.cache.Clear()
-	c.log.Info("DLNA renderer discovery stopped")
+	packageLogger.Info("DLNA renderer discovery stopped")
 }
 
-// runLoop reads SSDP packets from the multicast socket + dispatches
-// each into the per-NTS handler. Exits when ctx is cancelled OR the
-// socket is closed by Stop (in which case the read returns an error,
-// which we treat as "shutting down" rather than logging at error
-// level).
+// snapshotConn returns the live UDP connection under RLock. Returns
+// nil when the client is stopped. Per Gemini CRITICAL round-1 on
+// PR #305 — the prior shape read `c.conn` without synchronization
+// + risked a nil deref after Stop cleared it.
+func (c *SSDPDiscoveryClient) snapshotConn() *net.UDPConn {
+	c.runMu.RLock()
+	defer c.runMu.RUnlock()
+	return c.conn
+}
+
+// runLoop reads SSDP packets from the UDP socket + dispatches each
+// into the per-NTS handler. Exits when ctx is cancelled OR the
+// socket is closed by Stop.
 func (c *SSDPDiscoveryClient) runLoop(ctx context.Context) {
 	buf := make([]byte, 4096) // SSDP packets are always <2KB in practice
 	for {
@@ -244,13 +276,17 @@ func (c *SSDPDiscoveryClient) runLoop(ctx context.Context) {
 			return
 		default:
 		}
+		conn := c.snapshotConn()
+		if conn == nil {
+			return // Stop closed the socket
+		}
 		// Short read deadline so the loop wakes periodically to
 		// re-check ctx.Done() — without it, a quiet network could
 		// park us inside ReadFromUDP indefinitely after Stop()
 		// closed the socket, and we'd see the close error rather
 		// than a clean ctx-cancel exit.
-		_ = c.conn.SetReadDeadline(c.nowFunc().Add(500 * time.Millisecond))
-		n, src, err := c.conn.ReadFromUDP(buf)
+		_ = conn.SetReadDeadline(c.nowFunc().Add(500 * time.Millisecond))
+		n, src, err := conn.ReadFromUDP(buf)
 		if err != nil {
 			// Read timeout is the expected loop tick; anything
 			// else after a cancel is a closed-socket signal.
@@ -264,14 +300,13 @@ func (c *SSDPDiscoveryClient) runLoop(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			default:
-				c.log.Warn("SSDP read error",
-					slog.String("err", err.Error()))
+				packageLogger.Warn("SSDP read error", "err", err.Error())
 				return
 			}
 		}
 		packet := make([]byte, n)
 		copy(packet, buf[:n])
-		c.handlePacket(packet, src)
+		c.handlePacket(ctx, packet, src)
 	}
 }
 
@@ -299,14 +334,15 @@ func (c *SSDPDiscoveryClient) runTickLoop(ctx context.Context) {
 // devices. Renderer responses come back on the same socket as
 // unicast HTTP responses + are handled in runLoop.
 func (c *SSDPDiscoveryClient) sendMSearch() {
-	if c.conn == nil {
+	conn := c.snapshotConn()
+	if conn == nil {
 		return
 	}
 	target := "urn:schemas-upnp-org:device:MediaRenderer:1"
 	packet := buildMSearchRequest(target)
 	dst := &net.UDPAddr{IP: net.IPv4(239, 255, 255, 250), Port: 1900}
-	if _, err := c.conn.WriteToUDP(packet, dst); err != nil {
-		c.log.Warn("M-SEARCH send failed", slog.String("err", err.Error()))
+	if _, err := conn.WriteToUDP(packet, dst); err != nil {
+		packageLogger.Warn("M-SEARCH send failed", "err", err.Error())
 	}
 }
 
@@ -323,11 +359,17 @@ func buildMSearchRequest(searchTarget string) []byte {
 		"\r\n")
 }
 
-// handlePacket dispatches a single received UDP packet. The src
-// addr is unused today but plumbed so future debugging telemetry
-// can correlate packet-loss / out-of-order arrival per renderer
-// host.
-func (c *SSDPDiscoveryClient) handlePacket(packet []byte, _ *net.UDPAddr) {
+// handlePacket dispatches a single received UDP packet. `ctx` is
+// the run-loop's context, plumbed through so background detail
+// fetches get cancelled cleanly on Stop. Per Gemini HIGH round-1
+// on PR #305 — the prior shape used `context.Background()` for
+// the detail fetches, leaving in-flight fetches alive past Stop
+// and re-populating the cache after it was cleared.
+func (c *SSDPDiscoveryClient) handlePacket(
+	ctx context.Context,
+	packet []byte,
+	_ *net.UDPAddr,
+) {
 	hdr, err := ParseSSDPHeaders(packet)
 	if err != nil {
 		// Malformed packet on a multicast socket — likely a
@@ -351,10 +393,13 @@ func (c *SSDPDiscoveryClient) handlePacket(packet []byte, _ *net.UDPAddr) {
 	}
 
 	// NTS=ssdp:byebye → explicit departure; remove from cache.
+	// (v1 doesn't listen for spontaneous NOTIFY broadcasts on the
+	// multicast port — see lifecycle docblock — but a renderer
+	// COULD theoretically include NTS on an M-SEARCH response in
+	// some odd firmware, so we still handle the case defensively.)
 	if hdr.NTS == "ssdp:byebye" {
 		c.cache.Remove(udn)
-		c.log.Debug("renderer byebye",
-			slog.String("udn", udn))
+		packageLogger.Debug("renderer byebye", "udn", udn)
 		return
 	}
 
@@ -371,12 +416,12 @@ func (c *SSDPDiscoveryClient) handlePacket(packet []byte, _ *net.UDPAddr) {
 	}
 
 	// First-time UDN: kick a detail fetch. Bounded via the
-	// semaphore so a 100-renderer LAN doesn't spawn 100
-	// simultaneous outbound TCPs.
+	// semaphore so the run loop's NOTIFY storm during a LAN-wide
+	// event can't fanout unbounded TCP connections.
 	if hdr.Location == "" {
 		return // no location → can't fetch description; skip
 	}
-	go c.fetchAndCacheDetails(udn, hdr.Location, now)
+	go c.fetchAndCacheDetails(ctx, udn, hdr.Location, now)
 }
 
 // fetchAndCacheDetails dispatches the description + GetProtocolInfo
@@ -384,38 +429,41 @@ func (c *SSDPDiscoveryClient) handlePacket(packet []byte, _ *net.UDPAddr) {
 // Bounded via the semaphore so the run loop's NOTIFY storm during a
 // LAN-wide event (everyone powering up at once) can't fanout
 // unbounded TCP connections.
+//
+// `runCtx` is the discovery client's run-loop context — when Stop
+// cancels it, in-flight detail fetches return early without
+// touching the cache. Per Gemini HIGH round-1 on PR #305.
 func (c *SSDPDiscoveryClient) fetchAndCacheDetails(
+	runCtx context.Context,
 	udn, location string, lastSeenAt time.Time,
 ) {
 	// Acquire / release the semaphore — bounded concurrency.
-	c.detailFetchSem <- struct{}{}
+	select {
+	case c.detailFetchSem <- struct{}{}:
+	case <-runCtx.Done():
+		return
+	}
 	defer func() { <-c.detailFetchSem }()
 
-	// Race window: a concurrent ssdp:byebye may have just removed
-	// this UDN before we got here. Skip the fetch in that case —
-	// the next M-SEARCH cycle will pick the renderer up again if
-	// it's still online.
-	if _, evictedByBye := c.cache.Get(udn); !evictedByBye {
-		// Wait — we WANT to populate even if not in cache yet
-		// (this IS the first-time-discovery path). The check
-		// above is wrong; remove it.
-		//
-		// Actually: the byebye-during-fetch race is legitimate.
-		// But we can't distinguish "never inserted yet" from
-		// "byebye'd". The simplest safe shape: just proceed with
-		// the fetch + Upsert. If a byebye fires AFTER our Upsert
-		// here, its Remove call will fire from runLoop and drop
-		// us cleanly.
+	// Re-check cancellation post-acquire — a long queue ahead of
+	// us could mean ctx was cancelled while we waited.
+	if runCtx.Err() != nil {
+		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), c.cfg.DetailFetchTimeout)
+	ctx, cancel := context.WithTimeout(runCtx, c.cfg.DetailFetchTimeout)
 	defer cancel()
 	desc, err := FetchDeviceDescription(ctx, c.dispatcher, location)
 	if err != nil {
-		c.log.Debug("device description fetch failed",
-			slog.String("udn", udn),
-			slog.String("location", location),
-			slog.String("err", err.Error()))
+		// Stop cancelled us — drop the stub-write too so the
+		// cache stays clean.
+		if runCtx.Err() != nil {
+			return
+		}
+		packageLogger.Debug("device description fetch failed",
+			"udn", udn,
+			"location", location,
+			"err", err.Error())
 		// Cache a stub entry with just the UDN + lastSeenAt so
 		// the next M-SEARCH cycle's "exists?" check fires the
 		// refresh path (no second detail-fetch storm).
@@ -431,16 +479,22 @@ func (c *SSDPDiscoveryClient) fetchAndCacheDetails(
 	// iOS falls back to RendererProfile defaults).
 	var sinks []string
 	if cmSvc.ControlURL != "" {
-		piCtx, piCancel := context.WithTimeout(context.Background(), c.cfg.DetailFetchTimeout)
+		piCtx, piCancel := context.WithTimeout(runCtx, c.cfg.DetailFetchTimeout)
 		piSinks, piErr := FetchGetProtocolInfo(piCtx, c.dispatcher, cmSvc.ControlURL)
 		piCancel()
 		if piErr != nil {
-			c.log.Debug("GetProtocolInfo fetch failed",
-				slog.String("udn", udn),
-				slog.String("err", piErr.Error()))
+			packageLogger.Debug("GetProtocolInfo fetch failed",
+				"udn", udn,
+				"err", piErr.Error())
 		} else {
 			sinks = piSinks
 		}
+	}
+
+	// Final cancellation check before mutating the cache — Stop
+	// landing mid-fetch must NOT re-populate the cleared cache.
+	if runCtx.Err() != nil {
+		return
 	}
 
 	c.cache.Upsert(RendererInfo{
@@ -454,10 +508,10 @@ func (c *SSDPDiscoveryClient) fetchAndCacheDetails(
 		SinkProtocolInfos: sinks,
 		LastSeenAt:        lastSeenAt,
 	})
-	c.log.Info("renderer discovered",
-		slog.String("udn", udn),
-		slog.String("friendlyName", desc.FriendlyName),
-		slog.Int("sinkCount", len(sinks)))
+	packageLogger.Info("renderer discovered",
+		"udn", udn,
+		"friendlyName", desc.FriendlyName,
+		"sinkCount", len(sinks))
 }
 
 // Cache returns the underlying renderer cache for read access by

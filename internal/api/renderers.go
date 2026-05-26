@@ -25,7 +25,12 @@ import (
 // the flag + never call the endpoint.
 func (s *Server) renderers(w http.ResponseWriter, _ *http.Request) {
 	if s.rendererDiscovery == nil {
-		http.NotFound(w, nil)
+		// API-shaped JSON 404 (NOT http.NotFound's plain-text
+		// body) so iOS-side error parsing stays consistent with
+		// every other /v1 endpoint. Per CodeRabbit MINOR
+		// round-1 on PR #305 + Gemini MEDIUM on the same line.
+		writeError(w, http.StatusNotFound, "not_found",
+			"renderer discovery is not enabled on this bridge")
 		return
 	}
 	// Snapshot is a stable-sorted copy of the cache; cheap (RLock

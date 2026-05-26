@@ -10,17 +10,24 @@
 // (`interfaces.go`). Both are re-exported from `internal/dlna/` so
 // this package imports them without introducing a circular dep.
 //
-// **Lifecycle**: `SSDPDiscoveryClient.Start(ctx)` binds a multicast
-// UDP socket per LAN-eligible interface, fires an immediate M-SEARCH,
-// then loops every `MSearchInterval` (default 30s) plus listens
-// continuously for `ssdp:alive` / `ssdp:byebye` NOTIFY packets from
-// renderers announcing themselves between our M-SEARCH cycles. On
-// first discovery of a new UDN: fetches `/description.xml`
-// (unicast HTTP), parses the device + service list, fetches
-// `GetProtocolInfo` from the renderer's ConnectionManager, caches
-// the populated `RendererInfo` DTO. Cache evicts on explicit
-// `ssdp:byebye` OR staleness (no observation within `RendererTTL`,
+// **Lifecycle (v1, M-SEARCH-only)**: `SSDPDiscoveryClient.Start(ctx)`
+// binds a single UDP socket to wildcard `0.0.0.0:0` (ephemeral
+// port) for sending M-SEARCH packets + receiving unicast responses,
+// fires an immediate M-SEARCH, then loops every `MSearchInterval`
+// (default 30s). On first discovery of a new UDN: fetches
+// `/description.xml` (unicast HTTP), parses the device + service
+// list, fetches `GetProtocolInfo` from the renderer's
+// ConnectionManager, caches the populated `RendererInfo` DTO.
+// Cache evicts via staleness (no observation within `RendererTTL`,
 // default 60s).
+//
+// **v1 does NOT listen for spontaneous NOTIFY broadcasts** because
+// the well-known multicast port (1900) is already bound by the
+// bridge's own server-side advertiser in the same process.
+// Renderers that come or go between cycles surface within the
+// 30s M-SEARCH interval; explicit byebye fast-eviction is
+// deferred to a future PR (would need cross-package wiring to
+// the server-side advertiser to multiplex packet observation).
 //
 // **Bind to LAN-eligible interfaces only** — reuses
 // `internal/dlna.IsLANEligibleInterface`. SSDP multicast on a

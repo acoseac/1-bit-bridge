@@ -279,20 +279,58 @@ type rawSOAPEnvelope struct {
 		// Match any Response element via wildcard local name (the
 		// element is `<u:GetProtocolInfoResponse>` with a vendor-
 		// specific xmlns:u; xml.Unmarshal handles the namespace
-		// transparently with this wildcard tag).
+		// transparently with this wildcard tag). The wildcard ALSO
+		// matches `<s:Fault>` which is what we want for fault
+		// detection — see `Response.XMLName` consult below.
 		Response struct {
-			Sink string `xml:"Sink"`
+			XMLName xml.Name
+			Sink    string `xml:"Sink"`
 		} `xml:",any"`
 	} `xml:"Body"`
 }
+
+// ErrSOAPFault is returned by `ParseGetProtocolInfoResponse` when
+// the body carries a SOAP Fault element. Distinguishes "renderer
+// returned an error" from "renderer advertised an empty sink list"
+// — the prior shape conflated the two, masking SOAP faults +
+// malformed responses as legitimate empty-sink renderers. Per
+// CodeRabbit MAJOR round-1 on PR #305.
+var ErrSOAPFault = errors.New("SOAP fault in GetProtocolInfo response")
+
+// ErrMissingResponseElement is returned when the SOAP envelope
+// parses successfully but the Body contains no recognisable
+// Response element (vendor returned a bare `<Body/>` or some
+// other unexpected shape). Same rationale as ErrSOAPFault —
+// surface "renderer is broken" loudly, don't silently treat as
+// empty sink.
+var ErrMissingResponseElement = errors.New("SOAP body has no GetProtocolInfoResponse element")
 
 func ParseGetProtocolInfoResponse(body []byte) ([]string, error) {
 	var env rawSOAPEnvelope
 	if err := xml.Unmarshal(body, &env); err != nil {
 		return nil, fmt.Errorf("parse SOAP envelope: %w", err)
 	}
+	// Detect SOAP Fault — the inner element name is "Fault" in the
+	// SOAP envelope namespace. The xml package's `,any` wildcard
+	// captures the local name regardless of the xmlns:s prefix
+	// the responder used.
+	if env.Body.Response.XMLName.Local == "Fault" {
+		return nil, ErrSOAPFault
+	}
+	// Detect missing/empty Body element — a renderer returning a
+	// shape we don't recognise (e.g. `<Body></Body>` or an
+	// element name that doesn't carry a Sink field) should surface
+	// as an error rather than mascarading as a successful empty
+	// sink list. The wildcard `,any` leaves Response.XMLName.Local
+	// empty when no child element was matched.
+	if env.Body.Response.XMLName.Local == "" {
+		return nil, ErrMissingResponseElement
+	}
 	raw := strings.TrimSpace(env.Body.Response.Sink)
 	if raw == "" {
+		// Legitimately empty Sink — renderer responded but
+		// advertises no protocols. Degenerate but legal per the
+		// UPnP ConnectionManager spec.
 		return []string{}, nil
 	}
 	parts := strings.Split(raw, ",")

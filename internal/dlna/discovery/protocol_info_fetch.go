@@ -70,6 +70,14 @@ func FetchDeviceDescription(
 	dispatcher SOAPDispatcher,
 	url string,
 ) (DeviceDescription, error) {
+	// Defensive nil-guards per CodeRabbit MAJOR round-1 on PR
+	// #305 — production wiring always passes a non-nil dispatcher
+	// + the dispatcher never legitimately returns `(nil, nil)`,
+	// but test stubs could and a future refactor might. Catching
+	// here keeps the panic paths closed.
+	if dispatcher == nil {
+		return DeviceDescription{}, errors.New("nil dispatcher")
+	}
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return DeviceDescription{}, fmt.Errorf("build GET request: %w", err)
@@ -81,7 +89,13 @@ func FetchDeviceDescription(
 	if err != nil {
 		return DeviceDescription{}, fmt.Errorf("GET %s: %w", url, err)
 	}
+	if resp == nil {
+		return DeviceDescription{}, errors.New("dispatcher returned nil response without error")
+	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.Body == nil {
+		return DeviceDescription{}, errors.New("dispatcher returned response with nil Body")
+	}
 	if !IsHTTPStatusOK(resp.StatusCode) {
 		return DeviceDescription{}, fmt.Errorf("GET %s: status %d", url, resp.StatusCode)
 	}
@@ -108,6 +122,9 @@ func FetchGetProtocolInfo(
 	dispatcher SOAPDispatcher,
 	connectionManagerControlURL string,
 ) ([]string, error) {
+	if dispatcher == nil {
+		return nil, errors.New("nil dispatcher")
+	}
 	if connectionManagerControlURL == "" {
 		return nil, errors.New("empty ConnectionManager controlURL")
 	}
@@ -131,7 +148,13 @@ func FetchGetProtocolInfo(
 	if err != nil {
 		return nil, fmt.Errorf("POST %s: %w", connectionManagerControlURL, err)
 	}
+	if resp == nil {
+		return nil, errors.New("dispatcher returned nil response without error")
+	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.Body == nil {
+		return nil, errors.New("dispatcher returned response with nil Body")
+	}
 	if !IsHTTPStatusOK(resp.StatusCode) {
 		return nil, fmt.Errorf(
 			"POST %s: status %d",

@@ -179,12 +179,18 @@ func TestFetchGetProtocolInfo_PropagatesParseError(t *testing.T) {
 
 func TestHTTPClientDispatcher_NilFieldsError(t *testing.T) {
 	var d *HTTPClientDispatcher
-	_, err := d.Do(context.Background(), &http.Request{})
+	resp, err := d.Do(context.Background(), &http.Request{})
+	if resp != nil {
+		_ = resp.Body.Close() // bodyclose: defensive even on err path
+	}
 	if err == nil {
 		t.Fatal("expected error for nil receiver")
 	}
 	d2 := &HTTPClientDispatcher{Client: nil}
-	_, err = d2.Do(context.Background(), &http.Request{})
+	resp, err = d2.Do(context.Background(), &http.Request{})
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
 	if err == nil {
 		t.Fatal("expected error for nil Client")
 	}

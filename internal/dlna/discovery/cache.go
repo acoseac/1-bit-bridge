@@ -150,10 +150,8 @@ func (c *RendererCache) Snapshot() []RendererInfo {
 		out = append(out, info)
 	}
 	sort.SliceStable(out, func(i, j int) bool {
-		li := lowercase(out[i].FriendlyName)
-		lj := lowercase(out[j].FriendlyName)
-		if li != lj {
-			return li < lj
+		if cmp := lowercaseCompare(out[i].FriendlyName, out[j].FriendlyName); cmp != 0 {
+			return cmp < 0
 		}
 		return out[i].UDN < out[j].UDN
 	})
@@ -185,17 +183,38 @@ func (c *RendererCache) Clear() {
 	c.entries = make(map[string]RendererInfo)
 }
 
-// lowercase is a tiny ASCII-only helper for stable case-insensitive
-// sort. `strings.ToLower` would work but adds a Unicode normalization
-// layer that's unnecessary for the FriendlyName comparison.
-func lowercase(s string) string {
-	b := make([]byte, len(s))
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c >= 'A' && c <= 'Z' {
-			c += 32
-		}
-		b[i] = c
+// lowercaseCompare is an allocation-free ASCII case-insensitive
+// string comparator. Returns -1 / 0 / 1 like strings.Compare. Used
+// in `Snapshot()`'s sort closure — the prior `lowercase(s)` form
+// allocated a new string per side per comparison, an O(N log N)
+// allocation tax per snapshot call. Per Gemini MEDIUM round-1 on
+// PR #305.
+func lowercaseCompare(a, b string) int {
+	lenA, lenB := len(a), len(b)
+	minLen := lenA
+	if lenB < minLen {
+		minLen = lenB
 	}
-	return string(b)
+	for i := 0; i < minLen; i++ {
+		ca, cb := a[i], b[i]
+		if ca >= 'A' && ca <= 'Z' {
+			ca += 32
+		}
+		if cb >= 'A' && cb <= 'Z' {
+			cb += 32
+		}
+		if ca != cb {
+			if ca < cb {
+				return -1
+			}
+			return 1
+		}
+	}
+	if lenA == lenB {
+		return 0
+	}
+	if lenA < lenB {
+		return -1
+	}
+	return 1
 }
