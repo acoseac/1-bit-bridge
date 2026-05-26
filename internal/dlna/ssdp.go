@@ -9,7 +9,14 @@ import (
 	"time"
 
 	"golang.org/x/net/ipv4"
+
+	"github.com/acoseac/1-bit-bridge/internal/logging"
 )
+
+// ssdpLogger is the SSDP-specific package logger — distinct subcomponent
+// tag from `dlna` proper so operators grepping for the multicast /
+// NOTIFY path can filter narrowly. Per CodeRabbit Major on PR #303.
+var ssdpLogger = logging.Component("dlna-ssdp")
 
 // SSDPConfig configures the SSDP advertiser runtime — the goroutines
 // that send periodic NOTIFY ssdp:alive packets AND respond unicast to
@@ -135,7 +142,7 @@ func (s *SSDPAdvertiser) Start(ctx context.Context) error {
 	if s.log == nil {
 		s.log = s.cfg.Logger
 		if s.log == nil {
-			s.log = slog.Default().With(slog.String("component", "dlna-ssdp"))
+			s.log = ssdpLogger
 		}
 	}
 

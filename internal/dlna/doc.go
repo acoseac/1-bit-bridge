@@ -43,8 +43,16 @@
 // # Telemetry
 //
 // Per-connection request logging captures User-Agent, Accept, Range
-// patterns, response codes, byte volumes, and RTT samples in a bounded
-// ring buffer exposed via `/v1/admin/dlna/telemetry`. Forms the empirical
-// dataset for tuning the adaptive chunk allocator and populating the
-// per-renderer profile registry. Sub-millisecond overhead per request.
+// patterns, response codes, and byte volumes in a bounded ring buffer
+// (`TelemetryStore`, 1000-entry default). Forms the empirical dataset
+// for tuning the adaptive chunk allocator and populating the per-
+// renderer profile registry. Sub-millisecond overhead per request.
+//
+// **Wire-exposed admin endpoint deferred to v1.x.** Today the store
+// is reachable only via the bridge's internal goroutines. A
+// `/v1/admin/dlna/telemetry` admin endpoint that surfaces the
+// snapshot as JSON lands when the admin UI gains a corresponding
+// renderer-diagnostics tile — there's no operator pain today that
+// the bare in-memory access doesn't solve. Per CodeRabbit Major
+// follow-up on PR #303.
 package dlna

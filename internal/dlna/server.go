@@ -9,7 +9,18 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/logging"
 )
+
+// packageLogger is the package-scoped slog handler. Mirrors the
+// convention from `internal/admin`, `internal/api`, `internal/auth`,
+// `internal/config`, `internal/enrich`, `internal/integrity` (CLAUDE.md
+// logging-convention invariant) so log lines from the DLNA package
+// land under `component=dlna` regardless of whether the caller passed
+// a custom logger via `ServerConfig.Logger`. Per CodeRabbit Major on
+// PR #303.
+var packageLogger = logging.Component("dlna")
 
 // ServerConfig configures a DLNAServer. All fields are required EXCEPT
 // where noted. The caller (cmd/bridge/main.go via PR 1 task #12) is
@@ -114,7 +125,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	}
 	log := cfg.Logger
 	if log == nil {
-		log = slog.Default().With(slog.String("component", "dlna"))
+		log = packageLogger
 	}
 	return &Server{cfg: cfg, log: log}, nil
 }
