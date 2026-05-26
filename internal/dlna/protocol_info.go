@@ -1,9 +1,6 @@
 package dlna
 
-import (
-	"fmt"
-	"strings"
-)
+import "fmt"
 
 // DLNAFlags is the canonical 32-character hex DLNA.ORG_FLAGS value the
 // bridge advertises for every served file. The bit positions encode
@@ -59,55 +56,21 @@ const DLNAFlags = "01700000000000000000000000000000"
 // DSD" at the iOS picker stage (RendererCapability) rather than silently
 // transcoding away the bit-exact contract.
 func ResolveMIMEType(userAgent, extension string) string {
-	ext := strings.ToLower(extension)
-	ua := userAgent // do NOT lowercase — vendor strings are case-stable
-	switch ext {
-	case ".dsf":
-		// Vendor-specific override FIRST so Sony hardware that happens
-		// to use MPD or libavformat under the hood still hits the
-		// Sony-correct branch.
-		if strings.Contains(ua, "Sony") {
-			return "audio/dsd"
-		}
-		// Known vendor-aliases of the audio/x-dsf default — explicit
-		// branches for telemetry clarity and to allow per-vendor
-		// divergence as a one-line change in future.
-		if strings.Contains(ua, "Chord") || strings.Contains(ua, "2go") || strings.Contains(ua, "Poly") {
-			return "audio/x-dsf"
-		}
-		if strings.Contains(ua, "Integra") || strings.Contains(ua, "Onkyo") {
-			return "audio/x-dsf"
-		}
-		// Generic playback engines used by many renderers (MPD = Chord
-		// 2go, some Naim/Linn/Lumin) and many control points
-		// (libavformat/FFmpeg = mConnect / BubbleUPnP / Roon-bridge).
-		if strings.Contains(ua, "Music Player Daemon") {
-			return "audio/x-dsf"
-		}
-		if strings.Contains(ua, "Lavf") {
-			return "audio/x-dsf"
-		}
-		return "audio/x-dsf" // Phase-0-verified conservative default
-	case ".dff":
-		if strings.Contains(ua, "Sony") {
-			return "audio/dsd"
-		}
-		return "audio/x-dff"
-	case ".flac":
-		return "audio/x-flac"
-	case ".m4a", ".mp4":
-		return "audio/mp4"
-	case ".wav":
-		return "audio/wav"
-	case ".aiff", ".aif":
-		return "audio/aiff"
-	case ".mp3":
-		return "audio/mpeg"
-	case ".ogg":
-		return "audio/ogg"
-	default:
-		return "application/octet-stream"
-	}
+	// Delegates to the per-vendor `RendererProfileRegistry` (see
+	// `renderer_profile.go`). The branch ordering documented above is
+	// reproduced by the registry's `Profiles` slice order: Sony first
+	// (vendor override for `audio/dsd`), then Chord/2go/Poly, then
+	// Integra/Onkyo, then MPD-generic, then Lavf, then unknown
+	// (catch-all that falls through to `defaultMIMEForExtension`).
+	//
+	// **Adding a new known renderer or refining MIME preferences MUST
+	// go through `renderer_profile.go`'s `Profiles` slice, not by
+	// editing this function.** Per-vendor data is co-located with the
+	// rest of each profile's metadata (known bugs, max safe file size,
+	// etc.) so future per-renderer features can build on the same
+	// structured catalog without re-discovering vendor identity from
+	// scratch.
+	return PreferredMIMEFor(userAgent, extension)
 }
 
 // ProtocolInfoFor returns the full 4-param DIDL-Lite protocolInfo string
