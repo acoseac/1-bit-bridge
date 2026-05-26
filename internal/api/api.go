@@ -124,6 +124,7 @@ type Server struct {
 	inflightDropper        InflightDropper      // nil unless WithInflightDropper wired (transcode pool dedup)
 	upscaleEnabled         bool                 // mirrors cfg.Upscale.Enabled (and sox-probe outcome)
 	carPlayOptimizeEnabled bool                 // gated AND-wise on upscaleEnabled by the wiring layer
+	dlnaEnabled            bool                 // mirrors cfg.DLNA.Enabled AND shouldEnableDLNA(...) — opt-in LAN-only DLNA MediaServer
 	upscaleEnqueuer        UpscaleEnqueuer      // nil unless WithUpscaleEnqueuer wired (Phase 2.5)
 	upscaleStatsProvider   UpscaleStatsProvider // nil unless WithUpscaleStats wired (v1.2 management UI)
 	batchCoordinator       BatchCoordinator     // nil unless WithBatchCoordinator wired (v1.3 operator-driven upscale)
@@ -385,6 +386,25 @@ func (s *Server) WithUpscale(enabled bool, vs VariantStore) *Server {
 // has no meaning without it).
 func (s *Server) WithCarPlayOptimize(enabled bool) *Server {
 	s.carPlayOptimizeEnabled = enabled
+	return s
+}
+
+// WithDLNA toggles the `dlnaServer` advertisement in
+// /v1/health.features. The bridge's actual DLNA MediaServer runs on
+// its own parallel http.Server bound LAN-only (and optionally
+// tsnet-routed) — wired separately in `cmd/bridge/main.go`. This
+// option is the iOS-visible capability flag so the app's
+// `OutputPickerSheet` can surface DLNA-capable bridges as a
+// renderer-discovery source candidate.
+//
+// **Public-mode refusal applies upstream**: caller MUST consult
+// `dlna.ShouldEnableDLNA(cfg, deploymentMode)` before calling this
+// with `enabled = true`. Passing `true` from a public-mode deploy
+// would advertise a capability the actual server refuses to bind —
+// the upstream gate enforces the safety invariant; this method is
+// the bookkeeping for the capability advertisement.
+func (s *Server) WithDLNA(enabled bool) *Server {
+	s.dlnaEnabled = enabled
 	return s
 }
 
@@ -924,11 +944,11 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	//
 	// Alpha-sort stays correct by construction: each conditional
 	// appends in lex order, terminal `variantBumpsIndex` ends every
-	// path. Capacity 8 covers the current maximum (carPlayOptimize +
-	// deleteVariants + diagnosticsSummary + operatorDrivenUpscale +
-	// pairingEventsSupported + pushEventsSupported +
-	// upscaleCompleteEvents + variantBumpsIndex).
-	feats := make([]string, 0, 8)
+	// path. Capacity 9 covers the current maximum (carPlayOptimize +
+	// deleteVariants + diagnosticsSummary + dlnaServer +
+	// operatorDrivenUpscale + pairingEventsSupported +
+	// pushEventsSupported + upscaleCompleteEvents + variantBumpsIndex).
+	feats := make([]string, 0, 9)
 	if s.upscaleEnabled {
 		if s.carPlayOptimizeEnabled {
 			feats = append(feats, "carPlayOptimize")
@@ -939,10 +959,19 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	}
 	// `diagnosticsSummary` advertises `/v1/diagnostics`. Always-on in
 	// this build — the endpoint is unconditionally wired. Lexically
-	// lands between `deleteVariants` and `operatorDrivenUpscale`,
-	// which is why the upscale gate above is split into two blocks
-	// instead of a single contiguous one.
+	// lands between `deleteVariants` and `dlnaServer`, which is why
+	// the upscale gate above is split into two blocks instead of a
+	// single contiguous one.
 	feats = append(feats, "diagnosticsSummary")
+	// `dlnaServer` advertises the bridge's opt-in LAN-only DLNA
+	// MediaServer (`internal/dlna/` package, parallel http.Server bound
+	// LAN/Tailnet-only). iOS clients can use this to choose between
+	// SSDP-discovered renderers and bridge-routed DLNA delivery; the
+	// actual MediaServer binding lives in cmd/bridge/main.go and refuses
+	// to start in public deployment mode regardless of this flag.
+	if s.dlnaEnabled {
+		feats = append(feats, "dlnaServer")
+	}
 	if s.upscaleEnabled {
 		if s.batchCoordinator != nil {
 			feats = append(feats, "operatorDrivenUpscale")

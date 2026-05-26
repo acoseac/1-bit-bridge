@@ -82,5 +82,9 @@ func Clone(cfg *Config) *Config {
 		v := *cfg.MDNS.Enabled
 		out.MDNS.Enabled = &v
 	}
+	if cfg.DLNA.TelemetryEnabled != nil {
+		v := *cfg.DLNA.TelemetryEnabled
+		out.DLNA.TelemetryEnabled = &v
+	}
 	return &out
 }

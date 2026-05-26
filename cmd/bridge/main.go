@@ -1620,6 +1620,25 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		WithCarPlayOptimize(upscaleActive && cfg.Upscale.EffectiveOptimizeEnabled())
 	cfgHolder := apiSrv.ConfigHolder()
 
+	// DLNA MediaServer (opt-in, LAN-only). Starts a parallel
+	// http.Server on its own port + an SSDP advertiser so any DLNA
+	// renderer (Chord 2go, Lumin, Bluesound, etc.) on the LAN can
+	// browse the library and stream files. Refused in public
+	// deployment mode by `dlna.ShouldEnableDLNA` regardless of the
+	// operator's `cfg.DLNA.Enabled` value — the gate is non-
+	// overridable. nil-safe lifecycle: when disabled or setup fails,
+	// the returned wrapper's Stop is a no-op and `dlnaEnabled` is
+	// false. The `dlnaEnabled` flag flows into `apiSrv.WithDLNA(...)`
+	// below so /v1/health.features advertises `dlnaServer` in
+	// lockstep with the actual running listener.
+	dlnaLC, dlnaEnabled := startDLNAIfEnabled(ctx, cfg, manifestStore, apiSrv.Resolver(), logger)
+	defer func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+		defer cancel()
+		dlnaLC.Stop(stopCtx)
+	}()
+	apiSrv.WithDLNA(dlnaEnabled)
+
 	// Background sweep for the pairing rate-limiter's per-IP map.
 	// Hourly cadence drops limiters untouched for ≥ 6 h, keeping the
 	// map bounded under high churn (operator deep-links + diverse
