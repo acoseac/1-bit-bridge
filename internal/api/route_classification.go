@@ -203,6 +203,13 @@ func (s *Server) routeRegistry() []route {
 		{pattern: "DELETE /v1/upscale/batches/{id}", kind: boundedRoute, handler: s.authed(s.upscaleBatchCancel)},
 		{pattern: "DELETE /v1/upscale/variants", kind: boundedRoute, handler: s.authed(s.upscaleDelete)},
 
+		// DLNA renderer discovery — bounded JSON snapshot of the
+		// SSDP-discovered MediaRenderer cache. 2 s ctx-timeout
+		// matches the other fast-query routes; the handler is a
+		// single cache-snapshot RLock + JSON marshal, returns in
+		// <1 ms in steady state.
+		{pattern: "GET /v1/renderers", kind: boundedRoute, handler: withCtxTimeout(2*time.Second, s.authed(s.renderers))},
+
 		// SSE — long-lived per-connection write stream; MUST opt
 		// out of the per-route write deadline.
 		{pattern: "GET /v1/events", kind: streamingRoute, handler: s.authed(s.events)},
