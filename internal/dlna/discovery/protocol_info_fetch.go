@@ -92,10 +92,13 @@ func FetchDeviceDescription(
 	if resp == nil {
 		return DeviceDescription{}, errors.New("dispatcher returned nil response without error")
 	}
-	defer func() { _ = resp.Body.Close() }()
+	// Body-nil check BEFORE the defer — a nil resp.Body would
+	// panic on Close(). Order is load-bearing per CodeRabbit MAJOR
+	// round-2 on PR #305.
 	if resp.Body == nil {
 		return DeviceDescription{}, errors.New("dispatcher returned response with nil Body")
 	}
+	defer func() { _ = resp.Body.Close() }()
 	if !IsHTTPStatusOK(resp.StatusCode) {
 		return DeviceDescription{}, fmt.Errorf("GET %s: status %d", url, resp.StatusCode)
 	}
@@ -151,10 +154,12 @@ func FetchGetProtocolInfo(
 	if resp == nil {
 		return nil, errors.New("dispatcher returned nil response without error")
 	}
-	defer func() { _ = resp.Body.Close() }()
+	// Body-nil check BEFORE the defer — see FetchDeviceDescription
+	// for the rationale. Per CodeRabbit MAJOR round-2 on PR #305.
 	if resp.Body == nil {
 		return nil, errors.New("dispatcher returned response with nil Body")
 	}
+	defer func() { _ = resp.Body.Close() }()
 	if !IsHTTPStatusOK(resp.StatusCode) {
 		return nil, fmt.Errorf(
 			"POST %s: status %d",
