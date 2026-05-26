@@ -1639,6 +1639,19 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	}()
 	apiSrv.WithDLNA(dlnaEnabled)
 
+	// SSDP MediaRenderer discovery — opt-in via
+	// `dlna.discovery.enabled` in bridge.yaml. Gated AND-wise on
+	// the DLNA MediaServer being up (`dlnaEnabled` above) so the
+	// `rendererDiscovery` feature flag in /v1/health stays
+	// coherent. When disabled, the lifecycle is a no-op + the
+	// api.Server's `rendererDiscovery` slot stays nil + the
+	// `/v1/renderers` handler returns 404.
+	discLC := startDLNADiscoveryIfEnabled(ctx, cfg, dlnaEnabled, logger)
+	defer discLC.Stop()
+	if discLC.snapshotter != nil {
+		apiSrv.WithRendererDiscovery(discLC.snapshotter)
+	}
+
 	// Background sweep for the pairing rate-limiter's per-IP map.
 	// Hourly cadence drops limiters untouched for ≥ 6 h, keeping the
 	// map bounded under high churn (operator deep-links + diverse

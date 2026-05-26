@@ -41,6 +41,7 @@ func TestRouteRegistry_completeness(t *testing.T) {
 		"GET /v1/upscale/batches",
 		"DELETE /v1/upscale/batches/{id}",
 		"DELETE /v1/upscale/variants",
+		"GET /v1/renderers",
 		"GET /v1/events",
 		"GET /v1/pairing/{requestID}/events",
 		"POST /v1/pairing/requests",

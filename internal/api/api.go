@@ -117,20 +117,21 @@ type Server struct {
 	sessions               SessionTracker
 	pairing                *pairing.Store
 	pairingRateLimiter     *pairingRateLimiter
-	certNotAfter           time.Time            // zero when not wired (test harnesses)
-	leCertNotAfterProvider func() time.Time     // public-mode autocert; nil unless WithLECertExpiry wired
-	variantStore           VariantStore         // nil unless WithUpscale(true, vs) called
-	variantDeleter         VariantDeleter       // nil unless WithVariantDeleter wired (variant-lifecycle delete)
-	inflightDropper        InflightDropper      // nil unless WithInflightDropper wired (transcode pool dedup)
-	upscaleEnabled         bool                 // mirrors cfg.Upscale.Enabled (and sox-probe outcome)
-	carPlayOptimizeEnabled bool                 // gated AND-wise on upscaleEnabled by the wiring layer
-	dlnaEnabled            bool                 // mirrors cfg.DLNA.Enabled AND shouldEnableDLNA(...) — opt-in LAN-only DLNA MediaServer
-	upscaleEnqueuer        UpscaleEnqueuer      // nil unless WithUpscaleEnqueuer wired (Phase 2.5)
-	upscaleStatsProvider   UpscaleStatsProvider // nil unless WithUpscaleStats wired (v1.2 management UI)
-	batchCoordinator       BatchCoordinator     // nil unless WithBatchCoordinator wired (v1.3 operator-driven upscale)
-	eventBroker            *eventBroker         // nil disables /v1/events (back-compat for test harnesses)
-	manifestRateLimiter    *manifestRateLimiter // per-token-ID token-bucket for /v1/manifest
-	reachability           *reachabilityCache   // per-root probe TTL cache used by /v1/list, /v1/stat, /v1/health
+	certNotAfter           time.Time                    // zero when not wired (test harnesses)
+	leCertNotAfterProvider func() time.Time             // public-mode autocert; nil unless WithLECertExpiry wired
+	variantStore           VariantStore                 // nil unless WithUpscale(true, vs) called
+	variantDeleter         VariantDeleter               // nil unless WithVariantDeleter wired (variant-lifecycle delete)
+	inflightDropper        InflightDropper              // nil unless WithInflightDropper wired (transcode pool dedup)
+	upscaleEnabled         bool                         // mirrors cfg.Upscale.Enabled (and sox-probe outcome)
+	carPlayOptimizeEnabled bool                         // gated AND-wise on upscaleEnabled by the wiring layer
+	dlnaEnabled            bool                         // mirrors cfg.DLNA.Enabled AND shouldEnableDLNA(...) — opt-in LAN-only DLNA MediaServer
+	rendererDiscovery      RendererDiscoverySnapshotter // nil unless WithRendererDiscovery wired — opt-in SSDP MediaRenderer cache for /v1/renderers
+	upscaleEnqueuer        UpscaleEnqueuer              // nil unless WithUpscaleEnqueuer wired (Phase 2.5)
+	upscaleStatsProvider   UpscaleStatsProvider         // nil unless WithUpscaleStats wired (v1.2 management UI)
+	batchCoordinator       BatchCoordinator             // nil unless WithBatchCoordinator wired (v1.3 operator-driven upscale)
+	eventBroker            *eventBroker                 // nil disables /v1/events (back-compat for test harnesses)
+	manifestRateLimiter    *manifestRateLimiter         // per-token-ID token-bucket for /v1/manifest
+	reachability           *reachabilityCache           // per-root probe TTL cache used by /v1/list, /v1/stat, /v1/health
 	fingerprint            string
 	startedAt              time.Time
 
@@ -405,6 +406,71 @@ func (s *Server) WithCarPlayOptimize(enabled bool) *Server {
 // the bookkeeping for the capability advertisement.
 func (s *Server) WithDLNA(enabled bool) *Server {
 	s.dlnaEnabled = enabled
+	return s
+}
+
+// RendererDiscoverySnapshotter is the abstraction the api package
+// consumes for the renderer cache backing `GET /v1/renderers`. The
+// concrete implementation lives in `internal/dlna/discovery` — this
+// shape keeps the api package free of a hard dependency on the
+// discovery package (which transitively pulls in net.UDPConn etc.).
+//
+// Returning a `[]any`-shaped slice would force the handler to do
+// runtime type checks; returning a typed `[]discovery.RendererInfo`
+// would create the dependency we're avoiding. The third option —
+// re-declaring the wire DTO locally — duplicates the contract.
+// We accept the duplication risk via a structural contract:
+// `internal/dlna/discovery.RendererInfo` MUST stay structurally
+// assignable to the local `RendererInfo` type below. A compile-
+// time assertion in the wiring layer (`cmd/bridge/dlna_wiring.go`)
+// catches any drift.
+type RendererDiscoverySnapshotter interface {
+	// Snapshot returns the live cache contents as a slice of
+	// the api-local RendererInfo shape. Empty slice (NOT nil)
+	// when no renderers are cached.
+	Snapshot() []RendererInfo
+}
+
+// RendererInfo is the api-package-local wire shape for
+// `GET /v1/renderers`. Structurally mirrors
+// `internal/dlna/discovery.RendererInfo`; the wiring adapter in
+// `cmd/bridge/dlna_wiring.go` converts between the two via a
+// trivial value copy.
+//
+// **JSON encoding stability**: field names + tags pinned by
+// `renderer_dto_test.go` in the discovery package + the
+// `renderers_handler_test.go` in this package. Changes require
+// the Mirror-PR convention.
+type RendererInfo struct {
+	UDN               string    `json:"udn"`
+	FriendlyName      string    `json:"friendlyName"`
+	Manufacturer      string    `json:"manufacturer,omitempty"`
+	ModelDescription  string    `json:"modelDescription,omitempty"`
+	ModelName         string    `json:"modelName,omitempty"`
+	ControlURL        string    `json:"controlURL"`
+	EventURL          string    `json:"eventURL,omitempty"`
+	SinkProtocolInfos []string  `json:"sinkProtocolInfos,omitempty"`
+	LastSeenAt        time.Time `json:"lastSeenAt"`
+}
+
+// RenderersResponse is the top-level shape of `GET /v1/renderers`.
+type RenderersResponse struct {
+	Renderers []RendererInfo `json:"renderers"`
+}
+
+// WithRendererDiscovery wires the SSDP MediaRenderer cache that
+// backs `GET /v1/renderers` AND the `rendererDiscovery` flag in
+// `/v1/health.features`. Passing nil leaves the endpoint
+// unregistered (returns 404) and the flag absent.
+//
+// **Capability flag gating**: presence of the flag in
+// `/v1/health.features` is gated AND-wise on `s.dlnaEnabled`
+// (sibling DLNA MediaServer must be running) so iOS clients get
+// a consistent capability picture — running renderer discovery
+// without the MediaServer is a coherent operator choice but
+// outside the v1 supported surface.
+func (s *Server) WithRendererDiscovery(snap RendererDiscoverySnapshotter) *Server {
+	s.rendererDiscovery = snap
 	return s
 }
 
@@ -944,11 +1010,12 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	//
 	// Alpha-sort stays correct by construction: each conditional
 	// appends in lex order, terminal `variantBumpsIndex` ends every
-	// path. Capacity 9 covers the current maximum (carPlayOptimize +
+	// path. Capacity 10 covers the current maximum (carPlayOptimize +
 	// deleteVariants + diagnosticsSummary + dlnaServer +
 	// operatorDrivenUpscale + pairingEventsSupported +
-	// pushEventsSupported + upscaleCompleteEvents + variantBumpsIndex).
-	feats := make([]string, 0, 9)
+	// pushEventsSupported + rendererDiscovery +
+	// upscaleCompleteEvents + variantBumpsIndex).
+	feats := make([]string, 0, 10)
 	if s.upscaleEnabled {
 		if s.carPlayOptimizeEnabled {
 			feats = append(feats, "carPlayOptimize")
@@ -982,6 +1049,17 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 			feats = append(feats, "pairingEventsSupported")
 		}
 		feats = append(feats, "pushEventsSupported")
+	}
+	// `rendererDiscovery` advertises the bridge's SSDP MediaRenderer
+	// cache + `GET /v1/renderers` endpoint (PR 5). Gated AND-wise
+	// on `s.dlnaEnabled` (sibling DLNA MediaServer must be running
+	// so the UDN namespace stays coherent) AND `s.rendererDiscovery
+	// != nil` (operator opted in via `cfg.DLNA.Discovery.Enabled
+	// = true` AND the LAN-eligible interface picker succeeded).
+	// Alpha-sorted between `pushEventsSupported` and
+	// `upscaleCompleteEvents` (p < r < u).
+	if s.dlnaEnabled && s.rendererDiscovery != nil {
+		feats = append(feats, "rendererDiscovery")
 	}
 	if s.upscaleEnabled {
 		feats = append(feats, "upscaleCompleteEvents")

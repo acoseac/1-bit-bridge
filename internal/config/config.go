@@ -562,6 +562,74 @@ type DLNAConfig struct {
 	// network multiplier coefficients. Operators on resource-
 	// constrained deploys can opt out.
 	TelemetryEnabled *bool `yaml:"telemetryEnabled,omitempty"`
+
+	// Discovery configures the SSDP M-SEARCH client + renderer
+	// cache that powers `GET /v1/renderers`. Wired in PR 5 of the
+	// DLNA roadmap. Optional — defaults preserve the v1.4 behaviour
+	// of no renderer-discovery surface when the operator hasn't
+	// explicitly opted in.
+	Discovery DLNADiscoveryConfig `yaml:"discovery,omitempty"`
+}
+
+// DLNADiscoveryConfig governs the opt-in SSDP renderer discovery
+// surface — the bridge runs an M-SEARCH client on its LAN-eligible
+// interface, caches discovered MediaRenderers, and exposes the cache
+// via `GET /v1/renderers`. Companion to the DLNA MediaServer
+// (Enabled-gate above): both have to be on for iOS clients to use
+// bridge-mediated renderer discovery as a cross-network path.
+//
+// **Discovery is gated behind `DLNA.Enabled`** — running the
+// discovery client without the MediaServer is a coherent
+// configuration but not one we surface UX for (the
+// `rendererDiscovery` feature flag in /v1/health depends on the
+// DLNA package being initialized). Operators who want
+// discovery-only deployments are an edge case for a future PR.
+//
+// **Public-mode refusal applies upstream** at the same chokepoint
+// as the MediaServer — `dlna.ShouldEnableDLNA(...)` returning
+// false skips Discovery startup regardless of this field's value.
+type DLNADiscoveryConfig struct {
+	// Enabled flips renderer discovery on. Default false — the
+	// MediaServer can run without discovery, but discovery is
+	// noisier (periodic multicast) and operators may not want it
+	// surfaced when they're using SSDP-direct iOS pairing.
+	Enabled bool `yaml:"enabled,omitempty"`
+
+	// MSearchIntervalSeconds is the M-SEARCH cadence. Default
+	// 30s — matches the v1 plan. Tunable for operators whose
+	// renderers are slow to respond / whose LAN is saturated.
+	MSearchIntervalSeconds int `yaml:"msearchIntervalSeconds,omitempty"`
+
+	// RendererTTLSeconds is the staleness window. Default 60s —
+	// must be > MSearchIntervalSeconds so one missed cycle
+	// doesn't evict a still-online renderer.
+	RendererTTLSeconds int `yaml:"rendererTTLSeconds,omitempty"`
+}
+
+// DefaultDLNADiscoveryMSearchInterval is the cadence used when
+// DLNADiscoveryConfig leaves MSearchIntervalSeconds empty.
+const DefaultDLNADiscoveryMSearchInterval = 30 * time.Second
+
+// DefaultDLNADiscoveryRendererTTL is the staleness window used
+// when DLNADiscoveryConfig leaves RendererTTLSeconds empty.
+const DefaultDLNADiscoveryRendererTTL = 60 * time.Second
+
+// EffectiveMSearchInterval returns the operator value (as time.Duration)
+// when positive, otherwise the default.
+func (d DLNADiscoveryConfig) EffectiveMSearchInterval() time.Duration {
+	if d.MSearchIntervalSeconds > 0 {
+		return time.Duration(d.MSearchIntervalSeconds) * time.Second
+	}
+	return DefaultDLNADiscoveryMSearchInterval
+}
+
+// EffectiveRendererTTL returns the operator value (as time.Duration)
+// when positive, otherwise the default.
+func (d DLNADiscoveryConfig) EffectiveRendererTTL() time.Duration {
+	if d.RendererTTLSeconds > 0 {
+		return time.Duration(d.RendererTTLSeconds) * time.Second
+	}
+	return DefaultDLNADiscoveryRendererTTL
 }
 
 // DefaultDLNAListenAddress is the TCP bind used when DLNAConfig
@@ -1209,6 +1277,23 @@ func (c *Config) Validate() error {
 	// add`, admin's apiRootsAdd) already stat independently.
 	if c.ScanIntervalSec < 1 {
 		return fmt.Errorf("scanIntervalSec: must be >= 1, got %d", c.ScanIntervalSec)
+	}
+	// DLNA discovery: TTL must be strictly greater than the
+	// M-SEARCH interval — otherwise we'd evict still-online
+	// renderers between cycles (the M-SEARCH cycle is the only
+	// observation source per the discovery client's
+	// no-NOTIFY-listener design). Per CodeRabbit MAJOR round-1
+	// on PR #305 — the prior shape documented the invariant in
+	// the field docblock but didn't enforce it.
+	if c.DLNA.Discovery.Enabled {
+		ms := c.DLNA.Discovery.EffectiveMSearchInterval()
+		ttl := c.DLNA.Discovery.EffectiveRendererTTL()
+		if ttl <= ms {
+			return fmt.Errorf(
+				"dlna.discovery: rendererTTLSeconds (%v) must be > msearchIntervalSeconds (%v) — otherwise still-online renderers evict between cycles",
+				ttl, ms,
+			)
+		}
 	}
 	if (c.TLSCertPath == "") != (c.TLSKeyPath == "") {
 		return errors.New("tlsCertPath and tlsKeyPath: must be set together, or both empty")
