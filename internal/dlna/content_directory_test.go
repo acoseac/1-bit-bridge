@@ -1,7 +1,6 @@
 package dlna
 
 import (
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -360,12 +359,4 @@ func Test_CDS_Browse_FileURLContainsTrackID(t *testing.T) {
 	if !strings.Contains(body, "http://server:7790/dlna/file/xyz789") {
 		t.Errorf("file URL with trackID not in response body. Body: %s", body)
 	}
-}
-
-// -----------------------------------------------------------------------------
-// Helper: drain ioutil-style (avoids importing io.Discard alias)
-// -----------------------------------------------------------------------------
-
-func drainBody(body io.Reader) {
-	_, _ = io.Copy(io.Discard, body)
 }

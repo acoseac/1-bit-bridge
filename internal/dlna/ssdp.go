@@ -2,10 +2,13 @@ package dlna
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net"
 	"sync"
 	"time"
+
+	"golang.org/x/net/ipv4"
 )
 
 // SSDPConfig configures the SSDP advertiser runtime — the goroutines
@@ -77,6 +80,16 @@ type SSDPAdvertiser struct {
 	targets []NotifyTarget
 	log     *slog.Logger
 
+	// Lifecycle guards. `mu` serializes the Start / Stop pair so
+	// double-Start can't spawn duplicate goroutine pairs and so a
+	// concurrent Stop during a half-Start can't tear down state the
+	// other side hasn't published yet. `started` is the explicit
+	// state-machine flag (false → not running → Start allowed →
+	// true → running → Start refused). Stop clears it back to false.
+	// Per CodeRabbit Major on PR #303.
+	mu      sync.Mutex
+	started bool
+
 	// Runtime state — nil until Start() is called.
 	cancel   context.CancelFunc
 	wg       sync.WaitGroup
@@ -105,6 +118,20 @@ func NewSSDPAdvertiser(cfg SSDPConfig) *SSDPAdvertiser {
 // Returns an error if socket binding fails. On success, the
 // advertiser is running until Stop() is called.
 func (s *SSDPAdvertiser) Start(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Refuse double-Start. Without this guard, repeated calls would
+	// spawn additional listener / sender / goroutine pairs that
+	// each tried to bind the same multicast address — first call
+	// succeeds, subsequent calls error from socket binding, but the
+	// log line would be misleading ("SSDP advertiser started" with
+	// no indication that we're now on the second instance). Per
+	// CodeRabbit Major on PR #303.
+	if s.started {
+		return errors.New("dlna: SSDP advertiser already started")
+	}
+
 	if s.log == nil {
 		s.log = s.cfg.Logger
 		if s.log == nil {
@@ -123,11 +150,40 @@ func (s *SSDPAdvertiser) Start(ctx context.Context) error {
 		return err
 	}
 
-	// Unicast sender (dials the multicast address for outgoing NOTIFY)
+	// Unicast sender (dials the multicast address for outgoing NOTIFY).
+	// `net.DialUDP` alone doesn't bind the outgoing multicast interface —
+	// the OS routes via its default multicast interface, which may differ
+	// from `s.cfg.Interface` on a multi-homed host (LAN + Tailscale +
+	// Ethernet). When `s.cfg.Interface` is non-nil, we wrap the sender
+	// in `ipv4.PacketConn` and explicitly set the multicast interface
+	// so the NOTIFY ssdp:alive bursts land on the LAN where renderers
+	// live. Per Gemini Medium on PR #303.
 	sender, err := net.DialUDP("udp4", nil, addr)
 	if err != nil {
 		listener.Close()
 		return err
+	}
+	if s.cfg.Interface != nil {
+		// Pin outgoing multicast to the operator-chosen interface.
+		// `SetMulticastInterface` is a connection-level option set
+		// before any packets are sent; it applies to subsequent
+		// `WriteTo` / `Write` calls on the underlying socket. The
+		// `ipv4.NewPacketConn` wrap is non-destructive — the
+		// underlying `*net.UDPConn` continues to function for
+		// direct Write calls, which is how `sendAlive` / `sendByebye`
+		// use it.
+		if err := ipv4.NewPacketConn(sender).SetMulticastInterface(s.cfg.Interface); err != nil {
+			// Soft-fail: log + continue. A failure here means
+			// multicast goes via the OS default — degraded but
+			// not broken; renderers on that interface still
+			// discover us. Refusing to start over an unbindable
+			// multicast option would punish the typical happy
+			// path (single-NIC host where the OS default IS the
+			// LAN).
+			s.log.Warn("SSDP multicast interface bind failed (falling back to OS default)",
+				slog.String("interface", s.cfg.Interface.Name),
+				slog.String("err", err.Error()))
+		}
 	}
 
 	s.listener = listener
@@ -149,6 +205,12 @@ func (s *SSDPAdvertiser) Start(ctx context.Context) error {
 	s.wg.Add(1)
 	go s.runMSearchListener(innerCtx)
 
+	// Flip the state-machine flag AFTER all socket binds + goroutine
+	// spawns succeed. Set on the happy path only; a partial-init
+	// failure above returns early WITHOUT flipping the flag, so a
+	// subsequent retry call sees `started == false` and is allowed.
+	s.started = true
+
 	s.log.Info("SSDP advertiser started",
 		slog.String("location", s.cfg.Location),
 		slog.String("interface", interfaceName(s.cfg.Interface)),
@@ -165,8 +227,18 @@ func (s *SSDPAdvertiser) Start(ctx context.Context) error {
 // Safe to call exactly once after Start(). Calling Stop() before Start()
 // or twice is a no-op (defensive — won't panic).
 func (s *SSDPAdvertiser) Stop() {
-	if s.cancel == nil {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if !s.started {
 		return // never started, or already stopped
+	}
+	// Flip the flag early — even if subsequent teardown panics or
+	// hangs, a follow-up Start() call should see a fresh slate.
+	s.started = false
+
+	if s.cancel == nil {
+		return // defensive — shouldn't happen given the started flag
 	}
 
 	// Send byebye burst BEFORE cancelling so renderers see our farewell.

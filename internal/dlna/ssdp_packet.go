@@ -2,6 +2,7 @@ package dlna
 
 import (
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 )
@@ -121,8 +122,12 @@ func BuildNotifyByeBye(location, server string, target NotifyTarget) []byte {
 // BuildMSearchResponse returns the bytes of an SSDP M-SEARCH response
 // packet — sent UNICAST back to the source IP/port of an incoming
 // M-SEARCH multicast request whose ST matches one of our advertised
-// NotifyTargets. The DATE header is RFC1123-formatted current time
-// (passed in by the caller so tests can use a fixed timestamp).
+// NotifyTargets. The DATE header uses Go's `http.TimeFormat` — the
+// HTTP-compliant IMF-fixdate shape `"Mon, 02 Jan 2006 15:04:05 GMT"`
+// per RFC 7231 §7.1.1.1. Pre-fix this used `time.RFC1123` which
+// renders the TZ name (so a UTC-formatted time produces `"UTC"`
+// instead of the spec-required literal `"GMT"`); some strict
+// renderers reject the `UTC` form. Per CodeRabbit Major on PR #303.
 //
 // `st` is the response's ST header value — MUST match the ST from
 // the incoming M-SEARCH that triggered this response. `usn` is the
@@ -131,7 +136,7 @@ func BuildMSearchResponse(location, server, st, usn string, date time.Time) []by
 	return []byte(
 		"HTTP/1.1 200 OK\r\n" +
 			"CACHE-CONTROL: max-age=" + itoa(SSDPMaxAge) + "\r\n" +
-			"DATE: " + date.UTC().Format(time.RFC1123) + "\r\n" +
+			"DATE: " + date.UTC().Format(http.TimeFormat) + "\r\n" +
 			"EXT:\r\n" +
 			"LOCATION: " + location + "\r\n" +
 			"SERVER: " + server + "\r\n" +

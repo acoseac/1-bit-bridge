@@ -195,8 +195,16 @@ func ContentDirectoryHandler(lib LibrarySource, serverURLFunc func(r *http.Reque
 // are deferred to a v1.x follow-up — the "All Tracks" flat path is what
 // Phase 0 confirmed real renderers (Chord 2go via mConnect Lite) walk
 // by default, and serves as the minimum viable browse surface for v1.
+// maxSOAPBodyBytes caps the SOAP Browse / GetProtocolInfo / Search
+// envelope size we'll read into memory. 1 MB is two orders of
+// magnitude above any well-formed UPnP SOAP request (typical Browse
+// envelope is ~500 bytes); a body larger than that is either a
+// renderer bug or a DoS attempt. Without the cap, `io.ReadAll`
+// would OOM on a hostile payload.
+const maxSOAPBodyBytes = 1 << 20 // 1 MB
+
 func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, serverURL string) {
-	body, err := io.ReadAll(r.Body)
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxSOAPBodyBytes))
 	if err != nil {
 		writeSOAPFault(w, UPnPErrActionFailed)
 		return
@@ -247,20 +255,30 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, ser
 		// Apply pagination per the SOAP Browse arguments. A
 		// RequestedCount of 0 per UPnP convention means "return as
 		// many as you can"; we cap at len(tracks) - StartingIndex.
-		startIdx := int(browse.StartingIndex)
-		if startIdx < 0 {
-			startIdx = 0
+		//
+		// Bound arithmetic happens in uint64 to defend against the
+		// `int(uint32)` overflow that would surface on 32-bit builds:
+		// a renderer that sends `RequestedCount = 0xFFFFFFFF` would
+		// have `startIdx + int(browse.RequestedCount)` produce a
+		// negative endIdx and `tracks[startIdx:endIdx]` would panic.
+		// Clamp in uint64, then cast at the end where the result is
+		// guaranteed in [0, len(tracks)]. Per CodeRabbit Major on
+		// PR #303.
+		n := uint64(len(tracks))
+		startU := uint64(browse.StartingIndex)
+		if startU > n {
+			startU = n
 		}
-		if startIdx > len(tracks) {
-			startIdx = len(tracks)
-		}
-		endIdx := len(tracks)
+		endU := n
 		if browse.RequestedCount > 0 {
-			endIdx = startIdx + int(browse.RequestedCount)
-			if endIdx > len(tracks) {
-				endIdx = len(tracks)
+			reqU := uint64(browse.RequestedCount)
+			if reqU > n-startU {
+				reqU = n - startU
 			}
+			endU = startU + reqU
 		}
+		startIdx := int(startU)
+		endIdx := int(endU)
 		slice := tracks[startIdx:endIdx]
 		didlElements = make([]string, 0, len(slice))
 		for _, t := range slice {

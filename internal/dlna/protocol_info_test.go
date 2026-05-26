@@ -73,18 +73,25 @@ func TestResolveMIMEType(t *testing.T) {
 // match surface and risk false positives from unrelated UA substrings
 // (e.g. a "chord" appearing in a non-Chord renderer's model description).
 func TestResolveMIMEType_caseSensitiveUA(t *testing.T) {
-	// Lower-case "chord" must NOT match the "Chord" branch.
-	got := ResolveMIMEType("chord-clone/1.0", ".dsf")
-	if got != "audio/x-dsf" {
-		// Defaults to audio/x-dsf as conservative; confirms it did NOT
-		// hit the Chord-specific branch (which would also return
-		// audio/x-dsf — same value, but reached via the default arm).
-		t.Errorf("expected default branch for lowercase chord, got %q", got)
+	// Sony's branch is the canary for case-sensitivity because its
+	// MIME ("audio/dsd") is DISTINCT from the default ("audio/x-dsf").
+	// The original Chord-vs-default formulation of this test asserted
+	// the same MIME on both branches and so couldn't catch a
+	// regression that flipped the matcher to case-insensitive. Per
+	// CodeRabbit Minor on PR #303.
+	//
+	// Canonical case "Sony" → vendor MIME.
+	got := ResolveMIMEType("Sony SRS-HG1/3.2", ".dsf")
+	if got != "audio/dsd" {
+		t.Errorf("expected Sony vendor MIME (audio/dsd) for canonical case, got %q", got)
 	}
-	// Confirm the upper-case branch fires.
-	got = ResolveMIMEType("CHORD-VARIANT/1.0", ".dsf")
+	// Lower-case "sony" must NOT match the Sony branch — falls
+	// through to default "audio/x-dsf". If this assertion ever
+	// flips to audio/dsd, the matcher became case-insensitive and
+	// vendor classification is unreliable.
+	got = ResolveMIMEType("sony-clone/1.0", ".dsf")
 	if got != "audio/x-dsf" {
-		t.Errorf("expected default branch for all-caps CHORD, got %q", got)
+		t.Errorf("expected default branch (audio/x-dsf) for lowercase sony, got %q (matcher went case-insensitive?)", got)
 	}
 }
 

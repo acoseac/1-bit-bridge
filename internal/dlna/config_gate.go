@@ -53,8 +53,23 @@ type DLNAConfig struct {
 // surfaces requiring public-mode DLNA, the right shape is signed-URL
 // per-file authentication + IP allowlist, not flipping this gate.
 func ShouldEnableDLNA(cfg DLNAConfig, mode DeploymentMode) (enabled bool, reason string) {
-	if mode == DeploymentPublic {
+	// Default-deny gate. Only explicitly-allowed modes pass; any
+	// future / typo'd / corrupted DeploymentMode value falls
+	// through to the deny branch. Mirrors the project's
+	// "asymmetric safety budget" convention from elsewhere
+	// (CarPlay-DSD-exclusion, RendererTrackVisibility). Per
+	// CodeRabbit Major on PR #303 — the prior switch only rejected
+	// DeploymentPublic explicitly, so an unrecognised future
+	// `DeploymentMode(99)` value would have fallen through to
+	// `cfg.Enabled = true → enabled`. Listing every allowed mode
+	// here means new modes MUST explicitly opt in.
+	switch mode {
+	case DeploymentLoopback:
+		// Allowed — fall through.
+	case DeploymentPublic:
 		return false, "public deployment mode"
+	default:
+		return false, "unknown deployment mode (fail-closed)"
 	}
 	if !cfg.Enabled {
 		return false, "operator opt-out (cfg.DLNA.Enabled = false)"

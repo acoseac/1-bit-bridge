@@ -104,7 +104,19 @@ func startDLNAIfEnabled(
 
 	listenAddr := cfg.DLNA.EffectiveDLNAListenAddress()
 	port := portFromListenAddr(listenAddr)
-	serverURL := fmt.Sprintf("http://%s:%d", serverIP.String(), port)
+	// Resolve the host portion of serverURL with listenAddr
+	// preference: if the operator pinned `listenAddress` to a
+	// specific host (e.g. "192.168.1.42:7790"), advertise that host
+	// in SSDP so the URL we advertise is the URL we actually bind.
+	// Bare port forms (":7790" / "0.0.0.0:7790") fall back to the
+	// picked interface's IPv4 — that's the multi-interface case
+	// where the bind is wildcard but we still need to advertise a
+	// dialable host. Per CodeRabbit Major on PR #303.
+	host, _, splitErr := net.SplitHostPort(listenAddr)
+	if splitErr != nil || host == "" || host == "0.0.0.0" || host == "::" {
+		host = serverIP.String()
+	}
+	serverURL := fmt.Sprintf("http://%s:%d", host, port)
 
 	// UDN derived from a hash of (DataDir, FriendlyName) — stable
 	// across restarts so renderers don't re-add us, distinct between
@@ -143,6 +155,16 @@ func startDLNAIfEnabled(
 
 	if err := srv.Start(ctx); err != nil {
 		dlnaLog.Warn("DLNA disabled — Start failed", slog.String("err", err.Error()))
+		// Defensive teardown — `dlna.Server.Start` cleans up its own
+		// partial bind on failure (HTTP listener torn down if SSDP
+		// fails mid-init), but a future implementation might miss
+		// a step. Calling Stop on a partially-initialized server is
+		// a guaranteed no-op (Stop is idempotent + nil-safe), so
+		// the cost is zero and the safety net is real. Per
+		// CodeRabbit Major on PR #303.
+		stopCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+		_ = srv.Stop(stopCtx)
+		cancel()
 		return &dlnaLifecycle{log: dlnaLog}, false
 	}
 
@@ -255,10 +277,23 @@ type manifestLibraryAdapter struct {
 	libraryRoots []string
 	log          *slog.Logger
 
+	// `mu` guards the cached* slots for reads (Snapshot path) and the
+	// cachedAt timestamp. Brief — held only for the slot copy / read.
 	mu         sync.Mutex
 	cachedList []dlna.TrackInfo
 	cachedByID map[string]dlna.TrackInfo
 	cachedAt   time.Time
+
+	// `rebuildMu` serializes the rebuild path. Without it, a SOAP
+	// burst (Chord 2go opens 5+ concurrent SOAP connections on its
+	// initial Browse cycle) would have every caller race into
+	// `rebuild()` simultaneously and walk the full manifest in
+	// parallel — defeating the cache on exactly the workload the
+	// cache exists for. With it, exactly ONE goroutine does the
+	// walk; the others wait briefly on the mutex then short-circuit
+	// via the double-check at the top of rebuild(). Per Gemini
+	// Medium + CodeRabbit Nitpick on PR #303.
+	rebuildMu sync.Mutex
 }
 
 // cacheTTL is the freshness window for the TrackInfo cache. 30 s
@@ -319,6 +354,25 @@ func (a *manifestLibraryAdapter) refreshIfStale() {
 }
 
 func (a *manifestLibraryAdapter) rebuild() {
+	// Stampede defence: only one goroutine walks the manifest at a
+	// time. Concurrent callers serialize on rebuildMu; the
+	// double-check after acquiring the mutex detects the case where
+	// the previous rebuilder satisfied the freshness check before
+	// we got the lock, in which case we skip the redundant walk
+	// entirely. Per Gemini Medium + CodeRabbit Nitpick on PR #303.
+	a.rebuildMu.Lock()
+	defer a.rebuildMu.Unlock()
+
+	// Double-check: another rebuilder may have completed while we
+	// were parked on rebuildMu. Cheap read under the cache mutex —
+	// the slot is fresh enough, we just return.
+	a.mu.Lock()
+	fresh := a.cachedList != nil && time.Since(a.cachedAt) < cacheTTL
+	a.mu.Unlock()
+	if fresh {
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	tracks, err := a.store.ListTracks(ctx, nil)

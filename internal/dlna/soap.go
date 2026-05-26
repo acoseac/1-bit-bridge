@@ -63,7 +63,14 @@ func ParseSOAPAction(header string) (serviceType, actionName string) {
 	v := strings.TrimSpace(header)
 	v = strings.Trim(v, `"`) // strip surrounding quotes if present
 	hash := strings.LastIndexByte(v, '#')
-	if hash < 0 || hash == len(v)-1 {
+	// hash < 0: no separator at all (malformed).
+	// hash == 0: leading "#Action" with no service-type (e.g.
+	//            "#Browse" — a renderer surfacing the action without
+	//            the namespace URN). Reject per the malformed-header
+	//            contract — action-only dispatch shouldn't run on
+	//            invalid headers. Per CodeRabbit Major on PR #303.
+	// hash == len(v)-1: trailing "ServiceType#" with no action.
+	if hash <= 0 || hash == len(v)-1 {
 		return "", ""
 	}
 	return v[:hash], v[hash+1:]

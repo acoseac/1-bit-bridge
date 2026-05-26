@@ -1,6 +1,7 @@
 package dlna
 
 import (
+	"io"
 	"net/http"
 	"sync"
 	"time"
@@ -192,5 +193,54 @@ func (w *telemetryWriter) Write(p []byte) (int, error) {
 func (w *telemetryWriter) Flush() {
 	if f, ok := w.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
+	}
+}
+
+// ReadFrom preserves the zero-copy `sendfile(2)` fast path Go's
+// HTTP server uses when the underlying writer implements
+// `io.ReaderFrom`. `http.ServeContent` (used by the DLNA file
+// handler under AdaptiveResponseWriter — which buffers and so
+// blocks sendfile today) AND any future direct-io.Copy handler
+// will hit this path; the byte count is still accurately
+// captured for telemetry. If the underlying ResponseWriter
+// doesn't implement ReaderFrom (rare — net/http's default
+// response writer does), we fall back to `io.Copy` which
+// routes through our Write method and bumps bytesSent through
+// the normal path. Per Gemini Medium on PR #303.
+func (w *telemetryWriter) ReadFrom(r io.Reader) (int64, error) {
+	if rf, ok := w.ResponseWriter.(io.ReaderFrom); ok {
+		n, err := rf.ReadFrom(r)
+		w.bytesSent += n
+		return n, err
+	}
+	// Fallback: hand-rolled copy through our Write method so
+	// `bytesSent` is bumped correctly. Calling `io.Copy(w, r)`
+	// would recurse (io.Copy detects our ReadFrom and re-enters
+	// this method infinitely); calling `io.Copy(w.ResponseWriter, r)`
+	// would skip our Write and the byte count would be lost.
+	// 32 KiB matches Go's internal copyBuffer default — same
+	// chunk granularity as the non-ReaderFrom Write path so the
+	// downstream chunking layer (AdaptiveResponseWriter) sees the
+	// same shape regardless of which path landed bytes.
+	buf := make([]byte, 32*1024)
+	var total int64
+	for {
+		nr, er := r.Read(buf)
+		if nr > 0 {
+			nw, ew := w.Write(buf[:nr])
+			total += int64(nw)
+			if ew != nil {
+				return total, ew
+			}
+			if nw < nr {
+				return total, io.ErrShortWrite
+			}
+		}
+		if er == io.EOF {
+			return total, nil
+		}
+		if er != nil {
+			return total, er
+		}
 	}
 }

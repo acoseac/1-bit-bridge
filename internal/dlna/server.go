@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -93,6 +94,17 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	}
 	if cfg.UDN == "" {
 		return nil, errors.New("dlna: ServerConfig.UDN required")
+	}
+	// UPnP spec requires the UDN to carry the `uuid:` prefix. A bare
+	// hash without the prefix surfaces as an InvalidUDN error on
+	// strict renderers (Sony's older firmwares blacklist the device
+	// for the rest of the session on a single bad SUBSCRIBE / NOTIFY
+	// exchange). Per CodeRabbit Minor on PR #303 — the wiring layer
+	// in `cmd/bridge/dlna_wiring.go::deriveDLNAUDN` already produces
+	// the correct shape; this is defence-in-depth against any future
+	// caller passing a raw hash.
+	if !strings.HasPrefix(cfg.UDN, "uuid:") {
+		return nil, errors.New(`dlna: ServerConfig.UDN must carry the "uuid:" prefix (e.g. "uuid:f1b3a5c2-...")`)
 	}
 	if cfg.ListenAddress == "" {
 		return nil, errors.New("dlna: ServerConfig.ListenAddress required")

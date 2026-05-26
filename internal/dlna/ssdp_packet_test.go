@@ -181,7 +181,10 @@ func Test_BuildMSearchResponse_GoldenBytes(t *testing.T) {
 	)
 	want := "HTTP/1.1 200 OK\r\n" +
 		"CACHE-CONTROL: max-age=1800\r\n" +
-		"DATE: Tue, 26 May 2026 12:00:00 UTC\r\n" +
+		// HTTP-compliant IMF-fixdate format per RFC 7231 §7.1.1.1 —
+		// literal "GMT" instead of the TZ name "UTC" that
+		// time.RFC1123 produced pre-PR-303 fix.
+		"DATE: Tue, 26 May 2026 12:00:00 GMT\r\n" +
 		"EXT:\r\n" +
 		"LOCATION: http://192.168.0.14:7790/dlna/description.xml\r\n" +
 		"SERVER: Server/1.0\r\n" +

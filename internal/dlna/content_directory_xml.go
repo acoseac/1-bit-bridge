@@ -171,7 +171,13 @@ func DIDLForTrack(opts DIDLTrackOpts) string {
 	genre := escapeXMLText(opts.Genre)
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf(`<item id="%s" parentID="0" restricted="1">`, opts.TrackID))
+	// `opts.TrackID` is a SHA-256-derived hash (safe ASCII per the
+	// TrackID() helper), but defensive XML-attribute escape is cheap
+	// and protects against any future caller that passes a custom
+	// trackID with `"`/`&`/`<` characters. Same rationale as the
+	// container-attribute escape below. Per Gemini Medium-Security
+	// finding on PR #303.
+	sb.WriteString(fmt.Sprintf(`<item id="%s" parentID="0" restricted="1">`, escapeXMLText(opts.TrackID)))
 	sb.WriteString(`<dc:title>`)
 	sb.WriteString(title)
 	sb.WriteString(`</dc:title>`)
@@ -239,8 +245,15 @@ func DIDLForContainer(opts DIDLContainerOpts) string {
 		childCount = 0 // DLNA spec: 0 = "unknown / no advertised count"
 	}
 	var sb strings.Builder
+	// XML-attribute escape for caller-supplied ObjectID values.
+	// Today's call sites pass safe ASCII ("music", "all_tracks",
+	// "music/artists"), but the v1.x hierarchy expansion will
+	// produce hash-derived IDs that should be safe-by-construction
+	// and arbitrary-string-derived IDs that need defensive escape.
+	// Doing it now keeps the helper's invariant clean. Per Gemini
+	// Medium-Security finding on PR #303.
 	sb.WriteString(fmt.Sprintf(`<container id="%s" parentID="%s" restricted="1" childCount="%d">`,
-		opts.ID, opts.ParentID, childCount))
+		escapeXMLText(opts.ID), escapeXMLText(opts.ParentID), childCount))
 	sb.WriteString(`<dc:title>`)
 	sb.WriteString(escapeXMLText(opts.Title))
 	sb.WriteString(`</dc:title>`)

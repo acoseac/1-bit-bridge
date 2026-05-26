@@ -96,6 +96,14 @@ func (w *AdaptiveResponseWriter) Write(p []byte) (int, error) {
 // is going down anyway and downstream consumers (renderers) handle
 // transfer-failure transparently via TCP semantics.
 func (w *AdaptiveResponseWriter) Flush() {
+	// Sticky-error short-circuit: once flushBuffer has set w.err,
+	// further drain attempts can only re-fail on the same underlying
+	// writer and would obscure the original error. Per CodeRabbit
+	// Major on PR #303 — the prior shape would retry the buffer
+	// write on every Flush() call even after a sticky failure.
+	if w.err != nil {
+		return
+	}
 	_ = w.flushBuffer()
 	if f, ok := w.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
@@ -121,11 +129,26 @@ func (w *AdaptiveResponseWriter) ChunkSize() int {
 // resets the buffer length. On error, sets the sticky `w.err` field so
 // subsequent Write calls fast-path to the error.
 func (w *AdaptiveResponseWriter) flushBuffer() error {
+	// Sticky-error gate: once w.err is set, no more underlying-
+	// writer attempts. Repeated drain on a failed writer can both
+	// surface a different error on the retry path AND produce
+	// duplicate writes on the rare case where the underlying writer
+	// recovered between the two attempts (the latter is the more
+	// dangerous case — bit-exact contract forbids any duplicate
+	// byte). Per CodeRabbit Major on PR #303.
+	if w.err != nil {
+		return w.err
+	}
 	if len(w.buffer) == 0 {
 		return nil
 	}
 	if _, err := w.ResponseWriter.Write(w.buffer); err != nil {
 		w.err = err
+		// Clear the buffer even on failure so a later (incorrect)
+		// caller that bypasses the sticky-error gate can't replay
+		// the same bytes. Defensive — the gate above is the primary
+		// defence; this is belt-and-braces.
+		w.buffer = w.buffer[:0]
 		return err
 	}
 	w.buffer = w.buffer[:0]
