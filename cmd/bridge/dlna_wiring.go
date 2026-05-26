@@ -381,10 +381,27 @@ func (a *manifestLibraryAdapter) rebuild() {
 		return
 	}
 
+	// **Empty libraryRoot for DLNA TrackID hashing** — load-bearing
+	// agreement with iOS PR 4 follow-up's `DLNATrackIDHasher`.
+	// iOS doesn't know the operator's `cfg.LibraryRoots[0]` value
+	// and we don't want to plumb it through `/v1/health` just for
+	// trackID hashing. Both sides standardise on empty libraryRoot
+	// so they agree on the hash without iOS having to query bridge
+	// config. The trackID hash becomes `SHA256("\x00" + relativePath)`
+	// regardless of how many library roots the operator configures
+	// on the bridge side.
+	//
+	// **Trade-off**: trackID is no longer scoped by libraryRoot.
+	// Single-root bridges (the canonical case) are unaffected —
+	// every track has a unique relative path within the root.
+	// Multi-root bridges would have collision risk for tracks
+	// with identical relative paths under different roots — that
+	// configuration is rejected from the DLNA path entirely via
+	// the resolver: `a.resolver.Resolve(t.Path)` would surface
+	// ambiguous paths as resolution errors and those tracks would
+	// be skipped from the DLNA cache (existing `continue` on
+	// `resolveErr` above).
 	libraryRoot := ""
-	if len(a.libraryRoots) > 0 {
-		libraryRoot = a.libraryRoots[0]
-	}
 
 	list := make([]dlna.TrackInfo, 0, len(tracks))
 	byID := make(map[string]dlna.TrackInfo, len(tracks))
