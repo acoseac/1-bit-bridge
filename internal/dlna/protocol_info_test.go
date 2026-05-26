@@ -22,6 +22,16 @@ func TestResolveMIMEType(t *testing.T) {
 		{"unknown_dsf_default", "Generic-Renderer/1.0", ".dsf", "audio/x-dsf"},
 		{"empty_ua_dsf_default", "", ".dsf", "audio/x-dsf"},
 
+		// Phase 0 empirical findings (2026-05-26 spike against Chord 2go) —
+		// the load-bearing surprise: the 2go's playback engine identifies as
+		// MPD, not as Chord. A naive "Chord"-only matcher misses production
+		// traffic entirely; the explicit MPD + Lavf branches surface in code
+		// and tests so this lesson can't be lost.
+		{"chord_2go_actual_mpd_ua", "Music Player Daemon 0.21.26", ".dsf", "audio/x-dsf"},
+		{"libavformat_mconnect_probe", "Lavf/58.45.100", ".dsf", "audio/x-dsf"},
+		{"sony_uses_mpd_still_returns_dsd", "Sony Music Player Daemon 0.21", ".dsf", "audio/dsd"}, // vendor-first branch wins
+		{"sony_uses_libavformat_still_returns_dsd", "Sony Lavf/58", ".dsf", "audio/dsd"},          // vendor-first branch wins
+
 		// DFF — per-vendor matrix
 		{"sony_dff", "Sony SRS-HG1/3.2", ".dff", "audio/dsd"},
 		{"chord_dff", "Chord 2go/1.5.7", ".dff", "audio/x-dff"},

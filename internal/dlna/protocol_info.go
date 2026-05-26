@@ -31,10 +31,28 @@ const DLNAFlags = "01700000000000000000000000000000"
 // renderers append firmware versions / model suffixes to a stable vendor
 // prefix.
 //
-// Phase 0 spike script at ~/Desktop/to-do/2026-05-25-dlna-spike validates
-// the actual UA strings before PR 1 hardens this matcher. Defaults are
-// "highest-interop conservative" — the value most renderers in the field
-// accept.
+// **Phase 0 empirical findings (2026-05-26 spike against Chord 2go):**
+//   - The Chord 2go's playback engine sends User-Agent
+//     "Music Player Daemon 0.21.26" — NOT "Chord"/"2go"/"Poly".
+//     The 2go runs MPD internally and leaks MPD's identity verbatim.
+//     A naive "Chord"-only matcher would never fire in production for
+//     this device. Multiple Naim/Linn/Lumin models are also MPD-based.
+//   - Control-point libavformat (FFmpeg) probes ID3 tags BEFORE the
+//     renderer fetches with User-Agent "Lavf/<version>" — does
+//     head+tail Range reads that the matcher MUST handle correctly
+//     too (wrong MIME on the metadata probe can confuse mConnect
+//     before the actual renderer fetch even starts).
+//   - mConnect's own control-plane requests carry "mconnect Player"
+//     but those don't hit the file handler so don't need matching.
+//   - Both MPD and Lavf coincidentally want the same MIME as the
+//     default (`audio/x-dsf` for DSF). Explicit branches kept for
+//     telemetry clarity AND so future divergence (e.g. MPD ever
+//     wanting a different MIME) is a one-line change.
+//
+// **Branch ordering** is load-bearing: vendor-specific overrides
+// (Sony's "audio/dsd" demand) come FIRST, before generic-playback-
+// engine branches, so a Sony device that internally uses MPD still
+// gets the Sony-correct MIME if its UA prefix contains "Sony".
 //
 // **DO NOT** add lossy transcoding fallbacks here. If a renderer can't
 // consume DSF in any native form, surface as "this renderer cannot play
@@ -45,13 +63,28 @@ func ResolveMIMEType(userAgent, extension string) string {
 	ua := userAgent // do NOT lowercase — vendor strings are case-stable
 	switch ext {
 	case ".dsf":
-		if strings.Contains(ua, "Chord") || strings.Contains(ua, "2go") || strings.Contains(ua, "Poly") {
-			return "audio/x-dsf"
-		}
+		// Vendor-specific override FIRST so Sony hardware that happens
+		// to use MPD or libavformat under the hood still hits the
+		// Sony-correct branch.
 		if strings.Contains(ua, "Sony") {
 			return "audio/dsd"
 		}
+		// Known vendor-aliases of the audio/x-dsf default — explicit
+		// branches for telemetry clarity and to allow per-vendor
+		// divergence as a one-line change in future.
+		if strings.Contains(ua, "Chord") || strings.Contains(ua, "2go") || strings.Contains(ua, "Poly") {
+			return "audio/x-dsf"
+		}
 		if strings.Contains(ua, "Integra") || strings.Contains(ua, "Onkyo") {
+			return "audio/x-dsf"
+		}
+		// Generic playback engines used by many renderers (MPD = Chord
+		// 2go, some Naim/Linn/Lumin) and many control points
+		// (libavformat/FFmpeg = mConnect / BubbleUPnP / Roon-bridge).
+		if strings.Contains(ua, "Music Player Daemon") {
+			return "audio/x-dsf"
+		}
+		if strings.Contains(ua, "Lavf") {
 			return "audio/x-dsf"
 		}
 		return "audio/x-dsf" // Phase-0-verified conservative default
