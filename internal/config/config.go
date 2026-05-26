@@ -71,6 +71,7 @@ type Config struct {
 	Deployment      DeploymentConfig   `yaml:"deployment,omitempty"`
 	Autocert        AutocertConfig     `yaml:"autocert,omitempty"`
 	MDNS            MDNSConfig         `yaml:"mdns,omitempty"`
+	DLNA            DLNAConfig         `yaml:"dlna,omitempty"`
 
 	// DisableHTTP3 prevents the server from binding UDP ports and
 	// advertising Alt-Svc headers for HTTP/3 upgrades. Defaults to false.
@@ -513,6 +514,89 @@ func (c *Config) IsPublic() bool {
 		return false
 	}
 	return mode == DeploymentModePublic
+}
+
+// DLNAConfig governs the opt-in DLNA MediaServer the bridge exposes
+// on its own parallel http.Server bound LAN/Tailnet-only. Disabled
+// by default — operators who pair iOS with a DLNA renderer (Chord
+// 2go, Lumin, dCS Network Bridge, etc.) flip Enabled to advertise.
+//
+// **Public deployment refusal**: even when Enabled is true here, the
+// dlna.ShouldEnableDLNA gate in cmd/bridge/main.go REFUSES to bind
+// the listener when Config.IsPublic() is true. SSDP multicast on a
+// public-internet VPS subnet is undefined behaviour AND would
+// advertise the operator's library to the open internet — the gate
+// is non-negotiable. Document in operator-facing release notes.
+type DLNAConfig struct {
+	// Enabled flips the feature on. Default false.
+	Enabled bool `yaml:"enabled,omitempty"`
+
+	// ListenAddress is the TCP bind for the DLNA HTTP server.
+	// Default ":7790" — chosen to sit alongside the existing
+	// :7788 (API) / :7789 (admin) range without colliding with
+	// anything else the bridge binds.
+	ListenAddress string `yaml:"listenAddress,omitempty"`
+
+	// FriendlyName is the DLNA-advertised device name surfaced
+	// in renderer "select source" UIs. Defaults to "1-bit Bridge"
+	// when empty.
+	FriendlyName string `yaml:"friendlyName,omitempty"`
+
+	// AllowTsnet opts into binding the DLNA listener on the
+	// Tailscale interface alongside LAN. Default false because
+	// SSDP multicast doesn't traverse Tailscale's point-to-point
+	// tunnel (verified Phase 0 2026-05-26) — iOS clients on
+	// cellular must use manual renderer entry (PR 3) or the
+	// bridge-mediated discovery path (PR 5+6) for cross-network
+	// playback. Setting this true is only useful for the
+	// uncommon case where renderer + iOS are BOTH on the same
+	// tailnet (renderer published via subnet router with
+	// multicast forwarding hacks).
+	AllowTsnet bool `yaml:"allowTsnet,omitempty"`
+
+	// TelemetryEnabled wires the per-request middleware that
+	// captures User-Agent / Range / status / bytes per renderer
+	// connection into a bounded ring buffer. Default true —
+	// overhead is sub-millisecond per request and the data feeds
+	// vendor-profile refinement + the adaptive chunk allocator's
+	// network multiplier coefficients. Operators on resource-
+	// constrained deploys can opt out.
+	TelemetryEnabled *bool `yaml:"telemetryEnabled,omitempty"`
+}
+
+// DefaultDLNAListenAddress is the TCP bind used when DLNAConfig
+// leaves ListenAddress empty.
+const DefaultDLNAListenAddress = ":7790"
+
+// DefaultDLNAFriendlyName is the device name advertised when
+// DLNAConfig leaves FriendlyName empty.
+const DefaultDLNAFriendlyName = "1-bit Bridge"
+
+// EffectiveDLNAListenAddress returns the operator value when set,
+// otherwise DefaultDLNAListenAddress.
+func (d DLNAConfig) EffectiveDLNAListenAddress() string {
+	if a := strings.TrimSpace(d.ListenAddress); a != "" {
+		return a
+	}
+	return DefaultDLNAListenAddress
+}
+
+// EffectiveDLNAFriendlyName returns the operator value when set,
+// otherwise DefaultDLNAFriendlyName.
+func (d DLNAConfig) EffectiveDLNAFriendlyName() string {
+	if n := strings.TrimSpace(d.FriendlyName); n != "" {
+		return n
+	}
+	return DefaultDLNAFriendlyName
+}
+
+// EffectiveDLNATelemetryEnabled defaults true when the YAML omits
+// the field; explicit `false` honored.
+func (d DLNAConfig) EffectiveDLNATelemetryEnabled() bool {
+	if d.TelemetryEnabled == nil {
+		return true
+	}
+	return *d.TelemetryEnabled
 }
 
 // UpscaleConfig governs the optional offline PCM-upscaling feature
