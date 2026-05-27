@@ -98,6 +98,24 @@ type Config struct {
 	// LibraryName is advertised in the TXT record as "library=<name>"
 	// so the iOS picker can display it alongside the instance name.
 	LibraryName string
+
+	// Interface is the LAN-eligible network interface to bind the
+	// mDNS multicast listener to. When nil, hashicorp/mdns uses
+	// `net.ListenMulticastUDP` with a nil interface — which makes
+	// the OS pick the multicast interface by default-route / metric.
+	// On multi-homed Windows hosts with Tailscale (default tunnel
+	// interface metric 5 < Wi-Fi 30), the OS picks the Tailscale
+	// tunnel — which doesn't carry multicast — and the bridge's
+	// mDNS advertisement never reaches the LAN. The iPhone's
+	// Bonjour browser then never finds the bridge.
+	//
+	// Caller should resolve via `internal/dlna.PickLANEligibleInterface`
+	// (the same picker used by the SSDP advertiser at
+	// `internal/dlna/ssdp.go` and the SSDP discovery client at
+	// `internal/dlna/discovery/client.go`). When resolution fails,
+	// caller can pass nil here — production falls back to the
+	// OS-default selection (which works fine on single-NIC hosts).
+	Interface *net.Interface
 }
 
 // Advertise starts advertising Service with the given config. Returns
@@ -184,7 +202,19 @@ func (a *Advertiser) rebuildLocked(ips []net.IP) error {
 	if err != nil {
 		return fmt.Errorf("mdns: NewMDNSService: %w", err)
 	}
-	srv, err := hcmdns.NewServer(&hcmdns.Config{Zone: svc})
+	// Pin the multicast listener to the operator-chosen interface
+	// when available. Without `Iface`, hashicorp/mdns falls through
+	// to `net.ListenMulticastUDP(..., nil, ...)` which lets the OS
+	// pick a default multicast interface — broken on multi-homed
+	// Windows hosts with Tailscale (see Config.Interface docblock).
+	// `Iface == nil` is also a valid input to hashicorp/mdns (its
+	// own fallback to OS-default), so callers that can't resolve
+	// an interface here still get a working-enough advertiser on
+	// single-NIC hosts.
+	srv, err := hcmdns.NewServer(&hcmdns.Config{
+		Zone:  svc,
+		Iface: a.cfg.Interface,
+	})
 	if err != nil {
 		return fmt.Errorf("mdns: NewServer: %w", err)
 	}

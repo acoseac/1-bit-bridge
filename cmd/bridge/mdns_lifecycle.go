@@ -5,6 +5,7 @@ import (
 	"io"
 	"sync"
 
+	"github.com/acoseac/1-bit-bridge/internal/dlna"
 	bridgemdns "github.com/acoseac/1-bit-bridge/internal/mdns"
 )
 
@@ -76,11 +77,25 @@ func (m *mdnsLifecycle) Set(enabled bool) {
 				name = n
 			}
 		}
+		// Resolve the LAN-eligible interface and pin the mDNS
+		// listener to it. Without this, hashicorp/mdns falls through
+		// to OS-default multicast interface selection — broken on
+		// multi-homed Windows hosts where Tailscale's tunnel adapter
+		// has lower metric than the real LAN adapter. Soft-fail: if
+		// the picker errors (host with no LAN-eligible interface at
+		// all), pass nil and let hashicorp/mdns fall back to OS
+		// default. Mirrors the dlna_wiring.go / dlna_discovery_wiring.go
+		// pattern.
+		iface, ifaceErr := dlna.PickLANEligibleInterface(dlna.EligibilityOpts{})
+		if ifaceErr != nil {
+			fmt.Fprintf(m.stderr, "mDNS: LAN interface pick failed (advertise will use OS default): %v\n", ifaceErr)
+		}
 		a, err := bridgemdns.Advertise(bridgemdns.Config{
 			InstanceName:    name,
 			Port:            m.port,
 			ProtocolVersion: m.protocolVersion,
 			LibraryName:     name,
+			Interface:       iface,
 		})
 		if err != nil {
 			fmt.Fprintf(m.stderr, "mDNS advertise failed (non-fatal): %v\n", err)
