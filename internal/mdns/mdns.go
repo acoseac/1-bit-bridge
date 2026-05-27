@@ -98,6 +98,35 @@ type Config struct {
 	// LibraryName is advertised in the TXT record as "library=<name>"
 	// so the iOS picker can display it alongside the instance name.
 	LibraryName string
+
+	// InterfaceSource yields the LAN-eligible network interface to
+	// bind the mDNS multicast listener to. Called once per rebind
+	// (initial advertise + every IP-drift tick from the rebind
+	// loop), so a hotswap of the underlying LAN adapter (Wi-Fi →
+	// Ethernet handoff, dock plug-in, etc.) reaches the next
+	// rebind without restarting the bridge. Per CodeRabbit on PR #307
+	// round-1 — the prior shape captured a static `*net.Interface`
+	// at startup and let it go stale across rebinds.
+	//
+	// When the source returns nil, hashicorp/mdns falls through to
+	// `net.ListenMulticastUDP(network, nil, ...)` and the OS picks
+	// the multicast interface by default-route / metric. On
+	// multi-homed Windows hosts with Tailscale (tunnel adapter
+	// metric 5 < LAN adapter metric 30), the OS picks the Tailscale
+	// tunnel — which doesn't carry multicast — so the bridge's
+	// mDNS announcement never reaches the LAN and the iPhone's
+	// Bonjour browser never finds the bridge.
+	//
+	// Production callers should pass a closure that wraps
+	// `internal/dlna.PickLANEligibleInterface` (same picker used by
+	// the SSDP advertiser and discovery client). On picker error
+	// the closure returns nil — degrades to OS-default selection
+	// (works fine on single-NIC hosts).
+	//
+	// `nil` source is also a valid input (preserves the OS-default
+	// behavior end-to-end — useful for tests that don't care about
+	// the interface bind).
+	InterfaceSource func() *net.Interface
 }
 
 // Advertise starts advertising Service with the given config. Returns
@@ -180,11 +209,50 @@ func (a *Advertiser) rebuildLocked(ips []net.IP) error {
 	host := a.cfg.advertisedHost() + "."
 	info := buildTXTRecords(a.cfg)
 
-	svc, err := hcmdns.NewMDNSService(instance, Service, "", host, a.cfg.Port, ips, info)
+	// Resolve the LAN interface fresh on every rebuild. A static
+	// capture at advertise-time would let a Wi-Fi → Ethernet
+	// handoff (interface index changes) silently keep advertising
+	// against a now-down adapter. Source closure also returns nil
+	// when the operator hasn't passed one — preserves OS-default
+	// behavior for callers that don't care. Per CodeRabbit on PR
+	// #307 round-1.
+	var iface *net.Interface
+	if a.cfg.InterfaceSource != nil {
+		iface = a.cfg.InterfaceSource()
+	}
+
+	// Filter the advertised IP set to the pinned interface's IPs.
+	// Without this, mDNS A/AAAA records announce IPs that don't
+	// belong to the listener's interface — clients resolve to an
+	// IP we can't reply on. The picker validates that the chosen
+	// interface has at least one usable IP, so the filtered list
+	// should not be empty in practice; if it IS (race against
+	// adapter teardown), fall back to the unfiltered set so we
+	// still publish *something* the rebind loop can correct on
+	// the next tick. Per Gemini on PR #307 round-1.
+	advertisedIPs := ips
+	if iface != nil {
+		filtered := filterIPsToInterface(ips, iface)
+		if len(filtered) > 0 {
+			advertisedIPs = filtered
+		}
+	}
+
+	svc, err := hcmdns.NewMDNSService(instance, Service, "", host, a.cfg.Port, advertisedIPs, info)
 	if err != nil {
 		return fmt.Errorf("mdns: NewMDNSService: %w", err)
 	}
-	srv, err := hcmdns.NewServer(&hcmdns.Config{Zone: svc})
+	// Pin the multicast listener to the operator-chosen interface
+	// when available. Without `Iface`, hashicorp/mdns falls through
+	// to `net.ListenMulticastUDP(..., nil, ...)` which lets the OS
+	// pick a default multicast interface — broken on multi-homed
+	// Windows hosts with Tailscale (see Config.InterfaceSource
+	// docblock). `Iface == nil` is also a valid input to hashicorp/mdns
+	// (its own fallback to OS-default).
+	srv, err := hcmdns.NewServer(&hcmdns.Config{
+		Zone:  svc,
+		Iface: iface,
+	})
 	if err != nil {
 		return fmt.Errorf("mdns: NewServer: %w", err)
 	}
@@ -287,6 +355,41 @@ func ipsForLog(ips []net.IP) []string {
 		out = append(out, ip.String())
 	}
 	return out
+}
+
+// filterIPsToInterface returns the subset of `ips` that are bound
+// to `iface`. Used by rebuildLocked when the operator pinned a
+// specific LAN interface — without filtering, mDNS would advertise
+// A/AAAA records pointing at IPs the listener can't reply on (e.g.
+// a Tailscale IP from another adapter). Soft-fail on `iface.Addrs()`
+// error → return the original list (better to over-advertise than
+// to suppress everything). Returning empty is a valid result — the
+// caller must handle that case (rebuildLocked falls back to the
+// unfiltered set). Per Gemini on PR #307 round-1.
+func filterIPsToInterface(ips []net.IP, iface *net.Interface) []net.IP {
+	if iface == nil {
+		return ips
+	}
+	addrs, err := iface.Addrs()
+	if err != nil {
+		return ips
+	}
+	ifaceIPs := make(map[string]struct{}, len(addrs))
+	for _, addr := range addrs {
+		switch v := addr.(type) {
+		case *net.IPNet:
+			ifaceIPs[v.IP.String()] = struct{}{}
+		case *net.IPAddr:
+			ifaceIPs[v.IP.String()] = struct{}{}
+		}
+	}
+	filtered := make([]net.IP, 0, len(ips))
+	for _, ip := range ips {
+		if _, ok := ifaceIPs[ip.String()]; ok {
+			filtered = append(filtered, ip)
+		}
+	}
+	return filtered
 }
 
 // Close stops the advertisement and the rebind loop. Safe to call

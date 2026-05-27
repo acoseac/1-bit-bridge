@@ -330,3 +330,48 @@ func TestRebindAfterCloseIsNoop(t *testing.T) {
 		t.Errorf("server should be nil after Close; got %p", a.server)
 	}
 }
+
+func TestFilterIPsToInterface_NilInterfacePassthrough(t *testing.T) {
+	ips := []net.IP{net.ParseIP("192.168.0.208"), net.ParseIP("10.0.0.1")}
+	out := filterIPsToInterface(ips, nil)
+	if len(out) != 2 {
+		t.Fatalf("nil iface should be passthrough; got %d ips", len(out))
+	}
+}
+
+func TestFilterIPsToInterface_KeepsOnlyMatchingIPs(t *testing.T) {
+	// Resolve loopback (always present, predictable IP: 127.0.0.1).
+	// Use it as the "pinned" interface and pass a mixed-IP list.
+	// Result should keep 127.0.0.1 only.
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		t.Skipf("net.Interfaces unavailable: %v", err)
+	}
+	var loopback *net.Interface
+	for i := range ifaces {
+		if ifaces[i].Flags&net.FlagLoopback != 0 {
+			loopback = &ifaces[i]
+			break
+		}
+	}
+	if loopback == nil {
+		t.Skip("no loopback interface available in this environment")
+	}
+	ips := []net.IP{
+		net.ParseIP("127.0.0.1"),
+		net.ParseIP("192.168.0.208"),
+		net.ParseIP("10.0.0.1"),
+	}
+	out := filterIPsToInterface(ips, loopback)
+	// loopback should contain 127.0.0.1; the other two LAN IPs
+	// should NOT be on the loopback interface.
+	if len(out) == 0 {
+		t.Fatalf("expected at least 127.0.0.1 to survive the filter, got empty")
+	}
+	for _, ip := range out {
+		s := ip.String()
+		if s == "192.168.0.208" || s == "10.0.0.1" {
+			t.Errorf("non-loopback IP %s passed filter for loopback interface", s)
+		}
+	}
+}

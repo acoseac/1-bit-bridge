@@ -3,8 +3,10 @@ package main
 import (
 	"fmt"
 	"io"
+	"net"
 	"sync"
 
+	"github.com/acoseac/1-bit-bridge/internal/dlna"
 	bridgemdns "github.com/acoseac/1-bit-bridge/internal/mdns"
 )
 
@@ -76,11 +78,32 @@ func (m *mdnsLifecycle) Set(enabled bool) {
 				name = n
 			}
 		}
+		// `InterfaceSource` callback resolves the LAN-eligible
+		// interface fresh on every rebind. A static capture at
+		// startup would let a Wi-Fi → Ethernet handoff (interface
+		// index changes, original adapter goes down) keep the mDNS
+		// listener pinned to a now-dead adapter until the next
+		// process restart. The rebind loop in `internal/mdns`
+		// already polls `ipsForAdvertise` dynamically; this closes
+		// the asymmetry so Interface follows the same hot-resolve
+		// pattern. Soft-fail: if the picker errors (host with no
+		// LAN-eligible interface at all), return nil + log → mDNS
+		// falls back to OS-default selection. Per CodeRabbit on
+		// PR #307 round-1.
+		ifaceSource := func() *net.Interface {
+			iface, err := dlna.PickLANEligibleInterface(dlna.EligibilityOpts{})
+			if err != nil {
+				fmt.Fprintf(m.stderr, "mDNS: LAN interface pick failed (rebind will use OS default): %v\n", err)
+				return nil
+			}
+			return iface
+		}
 		a, err := bridgemdns.Advertise(bridgemdns.Config{
 			InstanceName:    name,
 			Port:            m.port,
 			ProtocolVersion: m.protocolVersion,
 			LibraryName:     name,
+			InterfaceSource: ifaceSource,
 		})
 		if err != nil {
 			fmt.Fprintf(m.stderr, "mDNS advertise failed (non-fatal): %v\n", err)
