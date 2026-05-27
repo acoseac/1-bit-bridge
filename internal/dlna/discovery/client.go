@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/logging"
+	"golang.org/x/net/ipv4"
 )
 
 // packageLogger follows the repo convention — internal/* packages
@@ -220,6 +221,33 @@ func (c *SSDPDiscoveryClient) Start(parent context.Context) error {
 		return fmt.Errorf("ListenUDP wildcard: %w", err)
 	}
 	c.conn = conn
+
+	// Pin outgoing M-SEARCH multicast to the operator-chosen
+	// interface. Without this, the kernel picks an outbound
+	// interface for `239.255.255.250` based on default routes /
+	// interface metrics — and on a multi-homed Windows host
+	// (LAN + Tailscale) Tailscale's default metric of 5 wins over
+	// Wi-Fi's 30. M-SEARCH then egresses via the Tailscale tunnel
+	// (which doesn't carry multicast); the LAN renderer never sees
+	// it; `/v1/renderers` stays empty forever. Confirmed
+	// 2026-05-27 on `home-pc` (Windows bridge + Tailscale): same-LAN
+	// 2go on `192.168.0.62` was reachable via direct HTTP but
+	// invisible to SSDP discovery until a wakeup window happened
+	// to hit the correct interface by chance.
+	//
+	// Mirrors the pattern already in `internal/dlna/ssdp.go` (the
+	// SSDP advertiser, PR #303). Soft-fail on bind error per that
+	// site's rationale: a failed bind degrades to OS-default
+	// multicast egress (works on single-NIC hosts where the OS
+	// default IS the LAN), but refusing to start would punish the
+	// happy path.
+	if c.cfg.Interface != nil {
+		if err := ipv4.NewPacketConn(conn).SetMulticastInterface(c.cfg.Interface); err != nil {
+			packageLogger.Warn("SSDP discovery multicast interface bind failed (falling back to OS default)",
+				"interface", c.cfg.Interface.Name,
+				"err", err.Error())
+		}
+	}
 
 	runCtx, runCancel := context.WithCancel(parent)
 	c.runCtx = runCtx
