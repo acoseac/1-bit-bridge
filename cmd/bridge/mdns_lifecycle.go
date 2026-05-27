@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"net"
 	"sync"
 
 	"github.com/acoseac/1-bit-bridge/internal/dlna"
@@ -77,25 +78,32 @@ func (m *mdnsLifecycle) Set(enabled bool) {
 				name = n
 			}
 		}
-		// Resolve the LAN-eligible interface and pin the mDNS
-		// listener to it. Without this, hashicorp/mdns falls through
-		// to OS-default multicast interface selection — broken on
-		// multi-homed Windows hosts where Tailscale's tunnel adapter
-		// has lower metric than the real LAN adapter. Soft-fail: if
-		// the picker errors (host with no LAN-eligible interface at
-		// all), pass nil and let hashicorp/mdns fall back to OS
-		// default. Mirrors the dlna_wiring.go / dlna_discovery_wiring.go
-		// pattern.
-		iface, ifaceErr := dlna.PickLANEligibleInterface(dlna.EligibilityOpts{})
-		if ifaceErr != nil {
-			fmt.Fprintf(m.stderr, "mDNS: LAN interface pick failed (advertise will use OS default): %v\n", ifaceErr)
+		// `InterfaceSource` callback resolves the LAN-eligible
+		// interface fresh on every rebind. A static capture at
+		// startup would let a Wi-Fi → Ethernet handoff (interface
+		// index changes, original adapter goes down) keep the mDNS
+		// listener pinned to a now-dead adapter until the next
+		// process restart. The rebind loop in `internal/mdns`
+		// already polls `ipsForAdvertise` dynamically; this closes
+		// the asymmetry so Interface follows the same hot-resolve
+		// pattern. Soft-fail: if the picker errors (host with no
+		// LAN-eligible interface at all), return nil + log → mDNS
+		// falls back to OS-default selection. Per CodeRabbit on
+		// PR #307 round-1.
+		ifaceSource := func() *net.Interface {
+			iface, err := dlna.PickLANEligibleInterface(dlna.EligibilityOpts{})
+			if err != nil {
+				fmt.Fprintf(m.stderr, "mDNS: LAN interface pick failed (rebind will use OS default): %v\n", err)
+				return nil
+			}
+			return iface
 		}
 		a, err := bridgemdns.Advertise(bridgemdns.Config{
 			InstanceName:    name,
 			Port:            m.port,
 			ProtocolVersion: m.protocolVersion,
 			LibraryName:     name,
-			Interface:       iface,
+			InterfaceSource: ifaceSource,
 		})
 		if err != nil {
 			fmt.Fprintf(m.stderr, "mDNS advertise failed (non-fatal): %v\n", err)
