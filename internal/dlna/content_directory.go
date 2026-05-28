@@ -56,6 +56,22 @@ type TrackInfo struct {
 	TrackID      string
 	AbsolutePath string
 
+	// RelativePath is the track's path relative to the library root,
+	// using forward-slash separators. Populated by the bridge-side
+	// adapter from `manifest.Track.Path` (which IS the relative
+	// path); tests inject it directly. Surface (vs deriving from
+	// `AbsolutePath` via LCP) is load-bearing for `BuildFolderIndex`
+	// because LCP detection silently strips a top-level folder when
+	// every track shares the same containing directory.
+	//
+	// Empty value MUST be tolerated — `BuildFolderIndex` falls back
+	// to LCP-derived relative paths for callers that haven't been
+	// updated yet (legacy test fixtures, future adapters that
+	// haven't plumbed it through). The fallback is correct in the
+	// common case (paths under distinct sub-folders) and degrades
+	// gracefully to a flat hierarchy in the single-folder case.
+	RelativePath string
+
 	Title       string
 	Artist      string
 	AlbumArtist string
@@ -370,7 +386,30 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, ser
 				// for the full reference-vs-ours diff rationale.
 				UPnPClass: "object.container.storageFolder",
 			})
+		case foldersRootObjectID:
+			// "Folders" root container — surfaced alongside All
+			// Tracks per PR #316's folder-hierarchy work. Lets users
+			// navigate the on-disk folder structure (Artist → Album
+			// → Track) rather than scrolling a flat list.
+			folderIndex := BuildFolderIndex(lib.ListTrackInfos())
+			selfDIDL = DIDLForContainer(DIDLContainerOpts{
+				ID: foldersRootObjectID, ParentID: "0", Title: "Folders",
+				ChildCount: len(folderIndex.TopLevelFolderIDs) + len(folderIndex.TopLevelTrackIDs),
+				UPnPClass:  "object.container.storageFolder",
+			})
 		default:
+			// Could be a hashed folder ObjectID. Build the folder
+			// index and look it up before falling through to
+			// NoSuchObject.
+			folderIndex := BuildFolderIndex(lib.ListTrackInfos())
+			if node, ok := folderIndex.Folders[browse.ObjectID]; ok {
+				selfDIDL = DIDLForContainer(DIDLContainerOpts{
+					ID: node.ObjectID, ParentID: node.ParentID, Title: node.Name,
+					ChildCount: len(node.ChildFolderIDs) + len(node.ChildTrackIDs),
+					UPnPClass:  "object.container.storageFolder",
+				})
+				break
+			}
 			// Unknown ObjectID under BrowseMetadata — same `NoSuchObject`
 			// signal the BrowseDirectChildren `default` arm produces.
 			// Strict controllers + lenient ones agree on this code.
@@ -393,9 +432,16 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, ser
 		return
 	}
 
+	// Build the folder index once per Browse call (cheap: O(N) over the
+	// cached TrackInfo slice, ~5 ms for a 24k-track library on typical
+	// host hardware). Used by the "Folders" root + hashed-folder cases
+	// below. Pre-computed here rather than inside each switch arm so
+	// the lookup is a free dictionary access in the hashed-folder arm.
+	folderIndex := BuildFolderIndex(lib.ListTrackInfos())
+
 	switch browse.ObjectID {
 	case "", "0":
-		// Root container — emit `all_tracks` only.
+		// Root container — emit `all_tracks` AND `folders`.
 		//
 		// **Music container removed** (PR #309): the previous root
 		// also exposed `Music` (`childCount=4`) but its `music`
@@ -419,7 +465,7 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, ser
 		didlElements = []string{
 			DIDLForContainer(DIDLContainerOpts{
 				ID: allTracksObjectID, ParentID: "0", Title: "All Tracks",
-				ChildCount: len(lib.ListTrackInfos()),
+				ChildCount: folderIndex.TrackCount(),
 				// `storageFolder` — reverting PR #313's playlist-
 				// Container change. PR #313 was driven by Gemini's
 				// round-3 hypothesis that mconnect filters out
@@ -472,9 +518,36 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, ser
 				// hypothesis detour from Gemini round-3.
 				UPnPClass: "object.container.storageFolder",
 			}),
+			// "Folders" sibling container — emitted alongside All
+			// Tracks per PR #316's folder-hierarchy work. Lets users
+			// navigate the on-disk folder structure rather than
+			// scrolling a flat list. ChildCount = top-level folder
+			// count + tracks-at-library-root count.
+			DIDLForContainer(DIDLContainerOpts{
+				ID: foldersRootObjectID, ParentID: "0", Title: "Folders",
+				ChildCount: len(folderIndex.TopLevelFolderIDs) + len(folderIndex.TopLevelTrackIDs),
+				UPnPClass:  "object.container.storageFolder",
+			}),
 		}
 		numberReturned = len(didlElements)
 		totalMatches = len(didlElements)
+
+	case foldersRootObjectID:
+		// "Folders" drill-down — emit top-level folder containers +
+		// any tracks that sit at the library root without a folder
+		// prefix. Both are immediate children of the synthetic Folders
+		// root container.
+		didlElements = browseFolderChildren(
+			folderIndex,
+			folderIndex.TopLevelFolderIDs,
+			folderIndex.TopLevelTrackIDs,
+			foldersRootObjectID,
+			browse,
+			serverURL,
+			ua,
+		)
+		numberReturned = len(didlElements)
+		totalMatches = len(folderIndex.TopLevelFolderIDs) + len(folderIndex.TopLevelTrackIDs)
 
 	case allTracksObjectID:
 		tracks := lib.ListTrackInfos()
@@ -524,6 +597,23 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, ser
 		totalMatches = len(tracks)
 
 	default:
+		// Could be a hashed folder ObjectID. Look it up in the
+		// folder index built earlier; if found, emit its immediate
+		// child folders + tracks.
+		if node, ok := folderIndex.Folders[browse.ObjectID]; ok {
+			didlElements = browseFolderChildren(
+				folderIndex,
+				node.ChildFolderIDs,
+				node.ChildTrackIDs,
+				node.ObjectID,
+				browse,
+				serverURL,
+				ua,
+			)
+			numberReturned = len(didlElements)
+			totalMatches = len(node.ChildFolderIDs) + len(node.ChildTrackIDs)
+			break
+		}
 		writeSOAPFault(w, UPnPErrNoSuchObject)
 		return
 	}
@@ -608,6 +698,81 @@ func logBrowseResponse(b browseAction, numberReturned, totalMatches, responseByt
 		slog.Int("totalMatches", totalMatches),
 		slog.Int("responseBytes", responseBytes),
 	)
+}
+
+// browseFolderChildren emits DIDL for the immediate children of a
+// folder-style container — sub-folder containers FIRST, then tracks
+// (every reference MediaServer we've inspected uses this ordering;
+// alphabetic mix would be acceptable too but would break browsing
+// muscle memory for users coming from MiniDLNA / MinimServer).
+//
+// Pagination is applied via the same uint64-clamp shape the
+// `all_tracks` case uses (defends against `RequestedCount = 0xFFFFFFFF`
+// overflow on 32-bit builds). `parentID` is the ObjectID of the
+// container these children are emitted UNDER — feeds the items' /
+// containers' `<parentID>` attribute for strict-controller
+// parent/child reconciliation.
+func browseFolderChildren(
+	folderIndex *FolderIndex,
+	childFolderIDs []string,
+	childTrackIDs []string,
+	parentID string,
+	browse browseAction,
+	serverURL string,
+	ua string,
+) []string {
+	total := len(childFolderIDs) + len(childTrackIDs)
+	if total == 0 {
+		return nil
+	}
+	// uint64 pagination math — see allTracksObjectID case for the
+	// rationale.
+	n := uint64(total)
+	startU := uint64(browse.StartingIndex)
+	if startU > n {
+		startU = n
+	}
+	endU := n
+	if browse.RequestedCount > 0 {
+		reqU := uint64(browse.RequestedCount)
+		if reqU > n-startU {
+			reqU = n - startU
+		}
+		endU = startU + reqU
+	}
+	startIdx := int(startU)
+	endIdx := int(endU)
+
+	// Emit folder containers first, then tracks. Iterate the combined
+	// index space directly so pagination cuts at the requested
+	// boundary regardless of which side (folders / tracks) it lands
+	// on.
+	out := make([]string, 0, endIdx-startIdx)
+	folderCount := len(childFolderIDs)
+	for i := startIdx; i < endIdx; i++ {
+		if i < folderCount {
+			id := childFolderIDs[i]
+			node, ok := folderIndex.Folders[id]
+			if !ok {
+				continue
+			}
+			out = append(out, DIDLForContainer(DIDLContainerOpts{
+				ID: node.ObjectID, ParentID: parentID, Title: node.Name,
+				ChildCount: len(node.ChildFolderIDs) + len(node.ChildTrackIDs),
+				UPnPClass:  "object.container.storageFolder",
+			}))
+			continue
+		}
+		// Track entry.
+		trackIdx := i - folderCount
+		id := childTrackIDs[trackIdx]
+		t, ok := folderIndex.LookupTrack(id)
+		if !ok {
+			continue
+		}
+		out = append(out, DIDLForTrack(t.toDIDLOpts(serverURL, ua, parentID)))
+	}
+	return out
 }
 
 // writeSOAPFault writes a SOAPFault response with the given UPnP error
