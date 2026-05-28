@@ -235,6 +235,7 @@ func (s *Server) Stop(ctx context.Context) error {
 //	POST /dlna/cds/control          ContentDirectory SOAP control
 //	POST /dlna/cm/control           ConnectionManager SOAP control
 //	GET/HEAD /dlna/file/{trackID}   file serve (with Range support)
+//	GET/HEAD /dlna/silence.wav      1s PCM silence asset (decoder-reset flush)
 //	SUBSCRIBE/UNSUBSCRIBE /dlna/cds/event  GENA stub (no-op success)
 //	SUBSCRIBE/UNSUBSCRIBE /dlna/cm/event   GENA stub (no-op success)
 //
@@ -269,6 +270,18 @@ func (s *Server) mountHandlers() {
 	s.mux.Handle("/dlna/cm/control", ConnectionManagerHandler())
 
 	s.mux.Handle("/dlna/file/", FileHandler(s.cfg.Library))
+
+	// Silence-flush asset: served as a static 1-second PCM WAV at
+	// `/dlna/silence.wav`. iOS dispatches `SetAVTransportURI(<base>
+	// /dlna/silence.wav)` between the post-pause Stop and the final
+	// Stop to force boutique DAC pipelines (Chord 2Go observed
+	// 2026-05-28) through a DSD→PCM clock relock — the relock
+	// flushes the FPGA delta-sigma accumulators, killing the
+	// residual ringing that a bare Stop leaves behind. Per Gemini
+	// consult 2026-05-28. Mounted under the public unauthed
+	// listener (same posture as `/dlna/file/`), serves regardless
+	// of whether SOAP control is wired.
+	s.mux.Handle(SilenceWAVPath, SilenceWAVHandler())
 
 	// GENA event stubs — accept SUBSCRIBE / UNSUBSCRIBE without
 	// actually delivering events. The HandlerFunc inspects r.Method
