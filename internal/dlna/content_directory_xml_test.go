@@ -514,7 +514,7 @@ func Test_DIDLForContainer_albumGolden(t *testing.T) {
 		ArtworkURL: "http://server/v1/artwork/album-mbid",
 	}
 	got := DIDLForContainer(opts)
-	want := `<container id="music/artists/abc/123" parentID="music/artists/abc" restricted="1" childCount="10">` +
+	want := `<container id="music/artists/abc/123" parentID="music/artists/abc" restricted="1" searchable="0" childCount="10">` +
 		`<dc:title>The Look of Love</dc:title>` +
 		`<upnp:class>object.container.album.musicAlbum</upnp:class>` +
 		`<upnp:albumArtURI>http://server/v1/artwork/album-mbid</upnp:albumArtURI>` +
@@ -538,6 +538,26 @@ func Test_DIDLForContainer_defaultsToObjectContainer(t *testing.T) {
 	got := DIDLForContainer(opts)
 	if !strings.Contains(got, `<upnp:class>object.container</upnp:class>`) {
 		t.Errorf("empty UPnPClass should default to object.container, got: %q", got)
+	}
+}
+
+// Test_DIDLForContainer_alwaysCarriesSearchableAttribute pins that
+// every container emission includes `searchable="0"`. Per UPnP CDS
+// spec, the attribute is REQUIRED on every `<container>` element;
+// strict third-party DLNA controllers (mconnect Lite, Linn Kazoo)
+// reject browse responses where it's missing. Per Gemini consult
+// 2026-05-28.
+func Test_DIDLForContainer_alwaysCarriesSearchableAttribute(t *testing.T) {
+	cases := []DIDLContainerOpts{
+		{ID: "0", ParentID: "-1", Title: "Root", ChildCount: 1, UPnPClass: "object.container"},
+		{ID: "all_tracks", ParentID: "0", Title: "All Tracks", ChildCount: 121, UPnPClass: "object.container.storageFolder"},
+		{ID: "x", ParentID: "0", Title: "Misc", ChildCount: 0}, // UPnPClass defaulted
+	}
+	for _, opts := range cases {
+		got := DIDLForContainer(opts)
+		if !strings.Contains(got, `searchable="0"`) {
+			t.Errorf("DIDLForContainer(%q) missing searchable=\"0\": %q", opts.ID, got)
+		}
 	}
 }
 

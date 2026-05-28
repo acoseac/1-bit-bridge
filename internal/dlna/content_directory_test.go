@@ -118,6 +118,13 @@ func Test_CDS_Browse_RootReturnsAllTracksOnly(t *testing.T) {
 		`&lt;dc:title&gt;All Tracks&lt;/dc:title&gt;`,
 		`<NumberReturned>1</NumberReturned>`,
 		`<TotalMatches>1</TotalMatches>`,
+		// PR-pending: storageFolder subtype + searchable="0" on the
+		// container — strict third-party DLNA controllers (mconnect
+		// Lite confirmed 2026-05-28) drop child rendering when the
+		// container is generic `object.container` OR when the
+		// `searchable` attribute is missing. Per Gemini consult.
+		`&lt;upnp:class&gt;object.container.storageFolder&lt;/upnp:class&gt;`,
+		`searchable=&quot;0&quot;`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("missing substring %q in response body: %s", want, body)
@@ -130,6 +137,68 @@ func Test_CDS_Browse_RootReturnsAllTracksOnly(t *testing.T) {
 	} {
 		if strings.Contains(body, notWant) {
 			t.Errorf("dropped substring %q should NOT appear in root response: %s", notWant, body)
+		}
+	}
+}
+
+// Test_CDS_Browse_BrowseMetadata_RootReturnsRootContainer pins the
+// PR-pending spec-compliance fix: BrowseMetadata on ObjectID "0" MUST
+// return a single DIDL element describing the root container itself
+// (NOT empty DIDL — strict controllers like mconnect Lite issue
+// BrowseMetadata as part of their drill-down handshake and bail to an
+// infinite spinner if the response is empty). Per Gemini consult
+// 2026-05-28.
+func Test_CDS_Browse_BrowseMetadata_RootReturnsRootContainer(t *testing.T) {
+	lib := newTestLib(testTrack("t1", "Hello"))
+	h := ContentDirectoryHandler(lib, staticServerURL("http://server"))
+	req := buildBrowseRequest(t, "0", "BrowseMetadata", 0, 0)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		`<NumberReturned>1</NumberReturned>`,
+		`<TotalMatches>1</TotalMatches>`,
+		`id=&quot;0&quot;`,
+		`parentID=&quot;-1&quot;`,
+		`&lt;dc:title&gt;1-bit Bridge&lt;/dc:title&gt;`,
+		`&lt;upnp:class&gt;object.container&lt;/upnp:class&gt;`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing substring %q in BrowseMetadata response: %s", want, body)
+		}
+	}
+}
+
+// Test_CDS_Browse_BrowseMetadata_AllTracksReturnsAllTracksContainer
+// pins that BrowseMetadata on `all_tracks` returns the storage-folder
+// container itself with its current child count. mconnect Lite reads
+// `<dc:title>` for the UI header title during drill-down — empty DIDL
+// here caused the post-PR-#309 infinite spinner symptom.
+func Test_CDS_Browse_BrowseMetadata_AllTracksReturnsAllTracksContainer(t *testing.T) {
+	lib := newTestLib(testTrack("t1", "First"), testTrack("t2", "Second"), testTrack("t3", "Third"))
+	h := ContentDirectoryHandler(lib, staticServerURL("http://server"))
+	req := buildBrowseRequest(t, "all_tracks", "BrowseMetadata", 0, 0)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		`<NumberReturned>1</NumberReturned>`,
+		`<TotalMatches>1</TotalMatches>`,
+		`id=&quot;all_tracks&quot;`,
+		`parentID=&quot;0&quot;`,
+		`&lt;dc:title&gt;All Tracks&lt;/dc:title&gt;`,
+		`&lt;upnp:class&gt;object.container.storageFolder&lt;/upnp:class&gt;`,
+		`childCount=&quot;3&quot;`,
+		`searchable=&quot;0&quot;`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing substring %q in BrowseMetadata response: %s", want, body)
 		}
 	}
 }
