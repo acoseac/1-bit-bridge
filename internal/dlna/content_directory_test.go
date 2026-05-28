@@ -512,3 +512,120 @@ func Test_CDS_Browse_FileURLContainsTrackID(t *testing.T) {
 		t.Errorf("file URL with trackID not in response body. Body: %s", body)
 	}
 }
+
+// -----------------------------------------------------------------------------
+// PR #316 — spec-mandatory CDS:1 introspection actions
+//
+// Empirically validated 2026-05-28 against mconnect Player via the
+// minimal Go-based test server at /tmp/upnp-test: when the SCPD declared
+// only `Browse`, mconnect rendered the root container (Browse(0) →
+// "All Tracks [121]") but tap-to-drill silently aborted. Adding the 3
+// spec-mandatory introspection actions made mconnect drill into the
+// child container successfully on the very next attempt.
+//
+// These tests pin the wire shape for each handler. The constants
+// `<SearchCaps></SearchCaps>` / `<SortCaps></SortCaps>` / `<Id>1</Id>`
+// are deliberately matched by literal substring so a future refactor
+// that changes the response shape surfaces here.
+// -----------------------------------------------------------------------------
+
+// buildCDSActionRequest constructs a SOAP request envelope + http.Request
+// for a CDS action that takes no input arguments (GetSearchCapabilities /
+// GetSortCapabilities / GetSystemUpdateID).
+func buildCDSActionRequest(t *testing.T, actionName string) *http.Request {
+	t.Helper()
+	body := `<?xml version="1.0" encoding="UTF-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+  <s:Body>
+    <u:` + actionName + ` xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1"/>
+  </s:Body>
+</s:Envelope>`
+	req := httptest.NewRequest(http.MethodPost, "/dlna/cds/control", strings.NewReader(body))
+	req.Header.Set("SOAPAction", `"urn:schemas-upnp-org:service:ContentDirectory:1#`+actionName+`"`)
+	req.Header.Set("Content-Type", "text/xml; charset=\"utf-8\"")
+	return req
+}
+
+func Test_CDS_GetSearchCapabilities_ReturnsEmptySearchCaps(t *testing.T) {
+	lib := newTestLib(testTrack("t1", "Hello"))
+	h := ContentDirectoryHandler(lib, staticServerURL("http://server"))
+	req := buildCDSActionRequest(t, "GetSearchCapabilities")
+	rec := httptest.NewRecorder()
+	h(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		`<u:GetSearchCapabilitiesResponse`,
+		`<SearchCaps></SearchCaps>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing substring %q in response body: %s", want, body)
+		}
+	}
+}
+
+func Test_CDS_GetSortCapabilities_ReturnsEmptySortCaps(t *testing.T) {
+	lib := newTestLib(testTrack("t1", "Hello"))
+	h := ContentDirectoryHandler(lib, staticServerURL("http://server"))
+	req := buildCDSActionRequest(t, "GetSortCapabilities")
+	rec := httptest.NewRecorder()
+	h(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		`<u:GetSortCapabilitiesResponse`,
+		`<SortCaps></SortCaps>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing substring %q in response body: %s", want, body)
+		}
+	}
+}
+
+func Test_CDS_GetSystemUpdateID_ReturnsStableID(t *testing.T) {
+	lib := newTestLib(testTrack("t1", "Hello"))
+	h := ContentDirectoryHandler(lib, staticServerURL("http://server"))
+	req := buildCDSActionRequest(t, "GetSystemUpdateID")
+	rec := httptest.NewRecorder()
+	h(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		`<u:GetSystemUpdateIDResponse`,
+		`<Id>1</Id>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing substring %q in response body: %s", want, body)
+		}
+	}
+}
+
+// Test_CDS_SCPD_AdvertisesSpecMandatoryActions pins the SCPD wire shape
+// so a future drop of any of the 3 introspection actions surfaces here
+// — that drop would re-open the mconnect-silent-drill-abort regression
+// PR #316 closes.
+func Test_CDS_SCPD_AdvertisesSpecMandatoryActions(t *testing.T) {
+	scpd := ContentDirectorySCPDXML
+	for _, want := range []string{
+		`<name>GetSearchCapabilities</name>`,
+		`<name>GetSortCapabilities</name>`,
+		`<name>GetSystemUpdateID</name>`,
+		`<name>Browse</name>`,
+		`<name>SearchCapabilities</name>`,
+		`<name>SortCapabilities</name>`,
+		`<name>SystemUpdateID</name>`,
+	} {
+		if !strings.Contains(scpd, want) {
+			t.Errorf("ContentDirectorySCPDXML missing %q — would re-open mconnect drill regression", want)
+		}
+	}
+}

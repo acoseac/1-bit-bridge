@@ -201,10 +201,71 @@ func ContentDirectoryHandler(lib LibrarySource, serverURLFunc func(r *http.Reque
 		switch actionName {
 		case "Browse":
 			handleBrowse(w, r, lib, serverURLFunc(r))
+		case "GetSearchCapabilities":
+			handleGetSearchCapabilities(w)
+		case "GetSortCapabilities":
+			handleGetSortCapabilities(w)
+		case "GetSystemUpdateID":
+			handleGetSystemUpdateID(w)
 		default:
 			writeSOAPFault(w, UPnPErrInvalidAction)
 		}
 	}
+}
+
+// handleGetSearchCapabilities responds to the spec-mandatory
+// CDS:1 GetSearchCapabilities action. Returns an empty SearchCaps
+// string — declares that we don't support the Search action (CDS
+// spec interprets empty SearchCaps as "Search is not supported";
+// non-empty would advertise searchable fields like "dc:title").
+//
+// Required regardless of whether Search itself is implemented —
+// see ContentDirectorySCPDXML docblock for the load-bearing
+// rationale (mconnect silent-drill-abort).
+func handleGetSearchCapabilities(w http.ResponseWriter) {
+	body := SOAPResponseEnvelope(
+		ContentDirectoryServiceType,
+		"GetSearchCapabilities",
+		`<SearchCaps></SearchCaps>`,
+	)
+	writeSOAPSuccess(w, body)
+}
+
+// handleGetSortCapabilities responds to the spec-mandatory
+// CDS:1 GetSortCapabilities action. Returns an empty SortCaps
+// string — declares that we don't support sortable fields (Browse
+// honours SortCriteria="" only; a non-empty SortCaps would list
+// sortable fields like "dc:title", "dc:date").
+func handleGetSortCapabilities(w http.ResponseWriter) {
+	body := SOAPResponseEnvelope(
+		ContentDirectoryServiceType,
+		"GetSortCapabilities",
+		`<SortCaps></SortCaps>`,
+	)
+	writeSOAPSuccess(w, body)
+}
+
+// handleGetSystemUpdateID responds to the spec-mandatory CDS:1
+// GetSystemUpdateID action. Returns a static "1" — controllers
+// poll this between navigation steps to detect manifest changes;
+// a stable "1" tells them "nothing has changed since last poll",
+// which matches our wire contract (manifest updates flow through
+// bridge sync + SSE, NOT through CDS UpdateID semantics — that
+// would require eventing infrastructure we don't have).
+//
+// Returning a stable value is the correct behaviour for a
+// best-effort CDS that doesn't maintain UpdateID state; the spec
+// allows it explicitly. The downside is controllers can't detect
+// our manifest changes via CDS poll alone — but the iOS client
+// is the only consumer that cares about manifest freshness, and
+// it has its own SSE path for that signal.
+func handleGetSystemUpdateID(w http.ResponseWriter) {
+	body := SOAPResponseEnvelope(
+		ContentDirectoryServiceType,
+		"GetSystemUpdateID",
+		`<Id>1</Id>`,
+	)
+	writeSOAPSuccess(w, body)
 }
 
 // handleBrowse processes a SOAP Browse request. ObjectID dispatch:
