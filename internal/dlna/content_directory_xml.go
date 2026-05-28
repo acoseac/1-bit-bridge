@@ -289,16 +289,38 @@ func DIDLForContainer(opts DIDLContainerOpts) string {
 	// and arbitrary-string-derived IDs that need defensive escape.
 	// Doing it now keeps the helper's invariant clean. Per Gemini
 	// Medium-Security finding on PR #303.
-	// `searchable="0"` is REQUIRED by the UPnP CDS spec on every
-	// `<container>` element — leaving it out emits malformed XML
-	// per strict schema validators. Lenient controllers (BubbleUPnP,
-	// the 1-bit iOS app via its own `/v1/list` endpoint) tolerate
-	// the omission; strict controllers (mconnect Lite confirmed
-	// 2026-05-28, Linn Kazoo per UPnP-tester reports) reject the
-	// browse response wholesale. Emit "0" — the bridge doesn't
-	// implement the Search action, so the container is not
-	// searchable by definition. Per Gemini consult 2026-05-28.
-	sb.WriteString(fmt.Sprintf(`<container id="%s" parentID="%s" restricted="1" searchable="0" childCount="%d">`,
+	// `searchable="1"` — empirical evidence from the Chord 2Go's
+	// own MPD-DLNA MediaServer (MiniDLNA, captured 2026-05-28 via
+	// direct SOAP curl) shows ALL containers it emits carry
+	// `searchable="1"`. mconnect Player drills into the 2Go's
+	// containers fine; mconnect REFUSED to drill into our previous
+	// `searchable="0"` emission. The pattern strongly suggests
+	// mconnect (and likely other music-centric controllers) filters
+	// out non-searchable containers from drill-down candidates —
+	// treating them as "data-only sources, not interactive
+	// browseables".
+	//
+	// We don't implement the Search action (returning UPnPErr-
+	// InvalidAction if called). The trade-off: false-advertise
+	// searchable=1, accepting a runtime error AT search-time over
+	// a structural drill-down block at browse-time. Per spec we
+	// SHOULD only advertise searchable=1 when we can answer
+	// Search requests, but the practical mconnect requirement
+	// pressures toward "advertise searchable=1, fail Search
+	// gracefully if called". Controllers that DO use the Search
+	// action are rare in audio (most use BrowseDirectChildren +
+	// SortCriteria for filtering).
+	//
+	// Per the Gemini PR #310 consult, the `searchable` attribute
+	// is REQUIRED on every container element per the UPnP CDS
+	// schema regardless of its value. We emit it unconditionally;
+	// the only question was the value (0 vs 1). The 2Go's
+	// reference resolves that to "1".
+	//
+	// **Don't revert searchable to "0"** at any new site —
+	// re-opens the mconnect-class-of-issue the 2Go reference
+	// (2026-05-28) proves.
+	sb.WriteString(fmt.Sprintf(`<container id="%s" parentID="%s" restricted="1" searchable="1" childCount="%d">`,
 		escapeXMLText(opts.ID), escapeXMLText(opts.ParentID), childCount))
 	sb.WriteString(`<dc:title>`)
 	sb.WriteString(escapeXMLText(opts.Title))
@@ -306,6 +328,28 @@ func DIDLForContainer(opts DIDLContainerOpts) string {
 	sb.WriteString(`<upnp:class>`)
 	sb.WriteString(upnpClass)
 	sb.WriteString(`</upnp:class>`)
+	// `<upnp:storageUsed>-1</upnp:storageUsed>` is REQUIRED for
+	// `object.container.storageFolder` containers AND its subtypes
+	// per the UPnP CDS spec. The value `-1` is the spec sentinel
+	// for "unknown storage used" — the bridge doesn't track
+	// per-container storage usage and shouldn't compute it on the
+	// fly. The 2Go's own MPD-DLNA reference emits exactly this
+	// shape (captured 2026-05-28). Strict controllers can refuse
+	// storageFolder containers that omit the field.
+	//
+	// `strings.HasPrefix` (NOT exact equality) so any future
+	// `object.container.storageFolder.*` subtype (e.g. a
+	// hypothetical `storageFolder.movies` or vendor-specific
+	// extension) also gets the required emission. No current
+	// caller emits a subtype, but the prefix form makes the
+	// helper forward-compatible with no downside. Per CodeRabbit
+	// + Gemini on PR #314 round-1. Emit only for the storageFolder
+	// hierarchy — other classes (musicAlbum, musicArtist,
+	// playlistContainer) have their own mandatory-attribute
+	// contracts that this helper doesn't touch.
+	if strings.HasPrefix(upnpClass, "object.container.storageFolder") {
+		sb.WriteString(`<upnp:storageUsed>-1</upnp:storageUsed>`)
+	}
 	if opts.ArtworkURL != "" {
 		sb.WriteString(`<upnp:albumArtURI>`)
 		sb.WriteString(escapeXMLText(opts.ArtworkURL))

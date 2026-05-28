@@ -514,7 +514,7 @@ func Test_DIDLForContainer_albumGolden(t *testing.T) {
 		ArtworkURL: "http://server/v1/artwork/album-mbid",
 	}
 	got := DIDLForContainer(opts)
-	want := `<container id="music/artists/abc/123" parentID="music/artists/abc" restricted="1" searchable="0" childCount="10">` +
+	want := `<container id="music/artists/abc/123" parentID="music/artists/abc" restricted="1" searchable="1" childCount="10">` +
 		`<dc:title>The Look of Love</dc:title>` +
 		`<upnp:class>object.container.album.musicAlbum</upnp:class>` +
 		`<upnp:albumArtURI>http://server/v1/artwork/album-mbid</upnp:albumArtURI>` +
@@ -541,13 +541,16 @@ func Test_DIDLForContainer_defaultsToObjectContainer(t *testing.T) {
 	}
 }
 
-// Test_DIDLForContainer_alwaysCarriesSearchableAttribute pins that
-// every container emission includes `searchable="0"`. Per UPnP CDS
-// spec, the attribute is REQUIRED on every `<container>` element;
-// strict third-party DLNA controllers (mconnect Lite, Linn Kazoo)
-// reject browse responses where it's missing. Per Gemini consult
-// 2026-05-28.
-func Test_DIDLForContainer_alwaysCarriesSearchableAttribute(t *testing.T) {
+// Test_DIDLForContainer_alwaysCarriesSearchableEqualsOne pins that
+// every container emission includes `searchable="1"`. The attribute
+// is REQUIRED on every `<container>` element per UPnP CDS spec; the
+// value "1" is what the Chord 2Go's own MPD-DLNA reference emits
+// (captured 2026-05-28). mconnect Player filters out non-searchable
+// containers from drill-down candidates — a `searchable="0"`
+// emission caused the symptom that PR #310's class change failed to
+// fix and PR #313's playlistContainer detour also failed to fix.
+// PR-pending corrective ships searchable="1" empirically grounded.
+func Test_DIDLForContainer_alwaysCarriesSearchableEqualsOne(t *testing.T) {
 	cases := []DIDLContainerOpts{
 		{ID: "0", ParentID: "-1", Title: "Root", ChildCount: 1, UPnPClass: "object.container"},
 		{ID: "all_tracks", ParentID: "0", Title: "All Tracks", ChildCount: 121, UPnPClass: "object.container.storageFolder"},
@@ -555,8 +558,69 @@ func Test_DIDLForContainer_alwaysCarriesSearchableAttribute(t *testing.T) {
 	}
 	for _, opts := range cases {
 		got := DIDLForContainer(opts)
-		if !strings.Contains(got, `searchable="0"`) {
-			t.Errorf("DIDLForContainer(%q) missing searchable=\"0\": %q", opts.ID, got)
+		if !strings.Contains(got, `searchable="1"`) {
+			t.Errorf("DIDLForContainer(%q) missing searchable=\"1\": %q", opts.ID, got)
+		}
+	}
+}
+
+// Test_DIDLForContainer_storageFolderClassEmitsStorageUsed pins
+// the mandatory `<upnp:storageUsed>-1</upnp:storageUsed>` emission
+// for `object.container.storageFolder` containers AND its subtypes.
+// The value `-1` is the UPnP CDS spec sentinel for "unknown storage
+// used"; the bridge doesn't track per-container storage usage. The
+// 2Go's own MPD-DLNA reference emits exactly this shape; strict
+// controllers can refuse storageFolder containers that omit the
+// field. Empirical evidence captured 2026-05-28.
+//
+// Per CodeRabbit + Gemini on PR #314 round-1, the production check
+// uses `strings.HasPrefix` to cover potential subtypes (e.g.
+// `object.container.storageFolder.movies` if a future class is
+// added) without code change. Both subcases exercise that contract.
+func Test_DIDLForContainer_storageFolderClassEmitsStorageUsed(t *testing.T) {
+	cases := []struct {
+		name      string
+		upnpClass string
+	}{
+		{"exact storageFolder", "object.container.storageFolder"},
+		// Hypothetical subtype — no current caller emits this, but
+		// the prefix check structurally covers it. Pinning the
+		// contract via a forward-compat test case prevents a
+		// regression where someone tightens the check back to
+		// exact equality.
+		{"hypothetical subtype", "object.container.storageFolder.movies"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := DIDLContainerOpts{
+				ID: "all_tracks", ParentID: "0", Title: "All Tracks",
+				ChildCount: 121, UPnPClass: tc.upnpClass,
+			}
+			got := DIDLForContainer(opts)
+			if !strings.Contains(got, `<upnp:storageUsed>-1</upnp:storageUsed>`) {
+				t.Errorf("class=%q missing <upnp:storageUsed>-1: %q", tc.upnpClass, got)
+			}
+		})
+	}
+}
+
+// Test_DIDLForContainer_nonStorageFolderClassOmitsStorageUsed pins
+// the negation: non-storageFolder classes (musicAlbum, musicArtist,
+// playlistContainer, generic object.container) MUST NOT emit the
+// storageUsed field — it's specifically defined for storageFolder
+// in the UPnP CDS spec. Emitting it on the wrong class would
+// confuse spec-strict validators.
+func Test_DIDLForContainer_nonStorageFolderClassOmitsStorageUsed(t *testing.T) {
+	cases := []DIDLContainerOpts{
+		{ID: "a", ParentID: "0", Title: "Album", ChildCount: 10, UPnPClass: "object.container.album.musicAlbum"},
+		{ID: "p", ParentID: "0", Title: "Playlist", ChildCount: 5, UPnPClass: "object.container.playlistContainer"},
+		{ID: "g", ParentID: "0", Title: "Generic", ChildCount: 0, UPnPClass: "object.container"},
+	}
+	for _, opts := range cases {
+		got := DIDLForContainer(opts)
+		if strings.Contains(got, `<upnp:storageUsed>`) {
+			t.Errorf("non-storageFolder container %q (class=%s) MUST NOT emit storageUsed: %q",
+				opts.ID, opts.UPnPClass, got)
 		}
 	}
 }
