@@ -275,7 +275,15 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, ser
 			selfDIDL = DIDLForContainer(DIDLContainerOpts{
 				ID: "all_tracks", ParentID: "0", Title: "All Tracks",
 				ChildCount: len(lib.ListTrackInfos()),
-				UPnPClass:  "object.container.storageFolder",
+				// `playlistContainer` matches the BrowseDirect-
+				// Children root-emission class. The two MUST stay
+				// in lockstep — a strict controller doing both
+				// BrowseMetadata + BrowseDirectChildren on the
+				// same ObjectID would otherwise see two different
+				// classes for the same container. See the
+				// BrowseDirectChildren root branch above for the
+				// per-Gemini-round-3 class-selection rationale.
+				UPnPClass: "object.container.playlistContainer",
 			})
 		default:
 			// Unknown ObjectID under BrowseMetadata — same `NoSuchObject`
@@ -327,15 +335,36 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, ser
 			DIDLForContainer(DIDLContainerOpts{
 				ID: "all_tracks", ParentID: "0", Title: "All Tracks",
 				ChildCount: len(lib.ListTrackInfos()),
-				// `storageFolder` (NOT generic `object.container`):
-				// primitive control points (mconnect Lite confirmed
-				// 2026-05-28, Linn Kazoo per UPnP-tester reports)
-				// drop or ignore container children unless the parent
-				// container maps to an explicit directory subtype.
-				// `storageFolder` is the canonical subtype for a flat
-				// browseable container of items — semantically a
-				// directory of tracks. Per Gemini consult 2026-05-28.
-				UPnPClass: "object.container.storageFolder",
+				// `playlistContainer` (NOT `object.container.storageFolder`
+				// despite Gemini's PR #310 recommendation). PR #310's
+				// storageFolder choice was driven by "strict controllers
+				// need explicit directory subtype to drill in"; empirical
+				// real-device verification via the PR #312 Browse-log
+				// diagnostics (2026-05-28) showed mconnect Player
+				// receives the storageFolder container at the root then
+				// REFUSES to drill in — its internal music-vs-filesystem
+				// classifier treats storageFolder as "filesystem,
+				// hide from music UI". The downstream
+				// `Browse(all_tracks, BrowseDirectChildren)` never
+				// fires; the user sees an empty All Tracks tap.
+				//
+				// `playlistContainer` is the semantically-accurate +
+				// cross-controller compatible subtype: music-centric
+				// controllers (mconnect, BluOS, Audirvana) recognize
+				// it as "appendable queue of audio items" and surface
+				// the drill-down affordance; strict structural
+				// controllers (Linn Kazoo, older Naim/Cyrus / OpenHome
+				// stacks) treat it as a first-class UPnP AV citizen
+				// for queue orchestration. Per Gemini consult round-3
+				// 2026-05-28.
+				//
+				// **Don't revert to `storageFolder`** — re-opens the
+				// mconnect empty-list class of issue. **Don't revert
+				// to generic `object.container`** either — pre-#310
+				// strict controllers had drill-in issues against the
+				// untyped container; playlistContainer satisfies both
+				// camps.
+				UPnPClass: "object.container.playlistContainer",
 			}),
 		}
 		numberReturned = len(didlElements)
