@@ -93,16 +93,18 @@ func testTrack(id, title string) TrackInfo {
 // ContentDirectoryHandler.Browse
 // -----------------------------------------------------------------------------
 
-// Test_CDS_Browse_RootReturnsAllTracksOnly pins the post-PR-#309
-// contract: the root container exposes ONLY `all_tracks`. The
-// `Music` container was removed because its `music` Browse case
-// returned 4 empty placeholder sub-containers with no real
-// hierarchy implementation — strict third-party DLNA controllers
-// (mconnect Lite 2026-05-28) refused to render the empty
-// placeholders AND occasionally bailed to a "Browse failed" state
-// that prevented navigation to `all_tracks` too. Music returns
-// once the by-Artist / by-Album / by-Genre indexes are real.
-func Test_CDS_Browse_RootReturnsAllTracksOnly(t *testing.T) {
+// Test_CDS_Browse_RootReturnsAllTracksAndFolders pins the post-PR-#316
+// contract: the root container exposes TWO siblings — `all_tracks`
+// (flat list, fast access) AND `folders` (disk-hierarchy drill-down).
+//
+// Pre-PR-#316 the root exposed only `all_tracks` (PR #309 having
+// removed the empty `Music` placeholder). PR #316 adds Folders as a
+// second root entry so users can browse the on-disk hierarchy
+// (Artist → Album → Track) rather than scrolling a 24k-row flat list.
+// Don't reintroduce the single-container root shape — would re-close
+// the navigation path operators expect from every reference
+// MediaServer (MiniDLNA, MinimServer, Asset UPnP).
+func Test_CDS_Browse_RootReturnsAllTracksAndFolders(t *testing.T) {
 	lib := newTestLib(testTrack("t1", "Hello"), testTrack("t2", "World"))
 	h := ContentDirectoryHandler(lib, staticServerURL("http://server:7790"))
 	req := buildBrowseRequest(t, "0", "BrowseDirectChildren", 0, 100)
@@ -114,25 +116,20 @@ func Test_CDS_Browse_RootReturnsAllTracksOnly(t *testing.T) {
 	}
 	body := rec.Body.String()
 	for _, want := range []string{
-		// Numeric ObjectID per the `allTracksObjectID` constant
-		// (PR-pending fix for mconnect Cling-style int-parse
-		// rejection). Literal "1" so a future change to the
-		// constant surfaces here.
+		// Numeric ObjectIDs per the `allTracksObjectID` ("1") and
+		// `foldersRootObjectID` ("2") constants (PR #315
+		// mconnect-Cling int-parse compat). Literal substrings so a
+		// future change to either constant surfaces here.
 		`id=&quot;1&quot;`,
 		`&lt;dc:title&gt;All Tracks&lt;/dc:title&gt;`,
-		`<NumberReturned>1</NumberReturned>`,
-		`<TotalMatches>1</TotalMatches>`,
-		// `storageFolder` subtype + `searchable="1"` on the
+		`id=&quot;2&quot;`,
+		`&lt;dc:title&gt;Folders&lt;/dc:title&gt;`,
+		`<NumberReturned>2</NumberReturned>`,
+		`<TotalMatches>2</TotalMatches>`,
+		// `storageFolder` subtype + `searchable="1"` on every
 		// container + `<upnp:storageUsed>-1</upnp:storageUsed>`.
-		// Empirical evidence from the Chord 2Go's own MPD-DLNA
-		// MediaServer (MiniDLNA, captured 2026-05-28 via direct
-		// SOAP curl) confirms this is the shape mconnect Player
-		// drills into successfully. PR #310's storageFolder choice
-		// was correct; PR #310's `searchable="0"` was the actual
-		// blocker (mconnect filters non-searchable containers from
-		// drill-down). PR #313's flip to playlistContainer was a
-		// wrong-hypothesis detour. PR-pending corrective fix
-		// reverts the class + flips searchable + adds storageUsed.
+		// Both containers share the same shape (the 2Go reference
+		// emits storageFolder for every top-level container too).
 		`&lt;upnp:class&gt;object.container.storageFolder&lt;/upnp:class&gt;`,
 		`searchable=&quot;1&quot;`,
 		`&lt;upnp:storageUsed&gt;-1&lt;/upnp:storageUsed&gt;`,
@@ -141,7 +138,24 @@ func Test_CDS_Browse_RootReturnsAllTracksOnly(t *testing.T) {
 			t.Errorf("missing substring %q in response body: %s", want, body)
 		}
 	}
-	// And specifically NOT the dropped `music` container.
+	// Strengthen container-shape assertions — exact count `2` so a
+	// regression affecting one container (e.g. dropped `searchable`
+	// from the Folders root) can't slip through with a single-presence
+	// check. Per CodeRabbit on PR #317.
+	for _, want := range []struct {
+		substr string
+		count  int
+	}{
+		{`&lt;upnp:class&gt;object.container.storageFolder&lt;/upnp:class&gt;`, 2},
+		{`searchable=&quot;1&quot;`, 2},
+		{`&lt;upnp:storageUsed&gt;-1&lt;/upnp:storageUsed&gt;`, 2},
+	} {
+		if got := strings.Count(body, want.substr); got != want.count {
+			t.Errorf("expected %d occurrences of %q in root response, got %d; body: %s",
+				want.count, want.substr, got, body)
+		}
+	}
+	// And specifically NOT the dropped `music` container (PR #309).
 	for _, notWant := range []string{
 		`id=&quot;music&quot;`,
 		`&lt;dc:title&gt;Music&lt;/dc:title&gt;`,
@@ -627,5 +641,164 @@ func Test_CDS_SCPD_AdvertisesSpecMandatoryActions(t *testing.T) {
 		if !strings.Contains(scpd, want) {
 			t.Errorf("ContentDirectorySCPDXML missing %q — would re-open mconnect drill regression", want)
 		}
+	}
+}
+
+// -----------------------------------------------------------------------------
+// PR #316 — folder hierarchy in CDS Browse
+//
+// Integration tests for the Browse handler's new dispatch arms:
+//   - Browse("2", BrowseDirectChildren) — the Folders root container
+//   - Browse(hashedFolderID, BrowseDirectChildren) — a specific folder
+//   - Browse(hashedFolderID, BrowseMetadata)       — folder metadata
+//
+// These tests use the live `ContentDirectoryHandler` + `StaticLibrary`
+// shape so the folder index → Browse → DIDL emission path is exercised
+// end-to-end. Unit tests for the FolderIndex shape itself live in
+// folder_index_test.go.
+// -----------------------------------------------------------------------------
+
+// folderTestLib returns a StaticLibrary with a small hierarchy:
+//
+//	/library/Artist A/Album X/track 01.flac
+//	/library/Artist A/Album X/track 02.flac
+//	/library/Artist B/track 01.flac
+//
+// Two top-level folders, one nested two levels deep, one flat.
+func folderTestLib() *StaticLibrary {
+	return newTestLib(
+		folderTrack("t1", "Artist A/Album X/track 01.flac"),
+		folderTrack("t2", "Artist A/Album X/track 02.flac"),
+		folderTrack("t3", "Artist B/track 01.flac"),
+	)
+}
+
+func Test_CDS_Browse_FoldersRoot_ReturnsTopLevelFolders(t *testing.T) {
+	lib := folderTestLib()
+	h := ContentDirectoryHandler(lib, staticServerURL("http://server:7790"))
+	req := buildBrowseRequest(t, foldersRootObjectID, "BrowseDirectChildren", 0, 100)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	// Two top-level folders surface as containers.
+	for _, want := range []string{
+		`&lt;dc:title&gt;Artist A&lt;/dc:title&gt;`,
+		`&lt;dc:title&gt;Artist B&lt;/dc:title&gt;`,
+		`<NumberReturned>2</NumberReturned>`,
+		`<TotalMatches>2</TotalMatches>`,
+		// Every container is a storageFolder with searchable=1 +
+		// storageUsed=-1 per the 2Go reference shape (PR #314).
+		`&lt;upnp:class&gt;object.container.storageFolder&lt;/upnp:class&gt;`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing substring %q in response body: %s", want, body)
+		}
+	}
+}
+
+func Test_CDS_Browse_SubFolder_ReturnsChildren(t *testing.T) {
+	lib := folderTestLib()
+	h := ContentDirectoryHandler(lib, staticServerURL("http://server:7790"))
+
+	// Resolve the Artist A folder ID via the same hash the handler
+	// produces.
+	artistAID := FolderObjectID("Artist A")
+
+	req := buildBrowseRequest(t, artistAID, "BrowseDirectChildren", 0, 100)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	// Artist A contains a single Album X sub-folder.
+	for _, want := range []string{
+		`&lt;dc:title&gt;Album X&lt;/dc:title&gt;`,
+		`<NumberReturned>1</NumberReturned>`,
+		`<TotalMatches>1</TotalMatches>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing substring %q in response body: %s", want, body)
+		}
+	}
+}
+
+func Test_CDS_Browse_DeepestFolder_ReturnsTrackItems(t *testing.T) {
+	lib := folderTestLib()
+	h := ContentDirectoryHandler(lib, staticServerURL("http://server:7790"))
+
+	// Album X is the deepest folder for Artist A — it contains the
+	// two tracks directly.
+	albumXID := FolderObjectID("Artist A/Album X")
+
+	req := buildBrowseRequest(t, albumXID, "BrowseDirectChildren", 0, 100)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	// Two tracks surface as items.
+	for _, want := range []string{
+		`<NumberReturned>2</NumberReturned>`,
+		`<TotalMatches>2</TotalMatches>`,
+		// Items reference their parent folder ID.
+		`parentID=&quot;` + albumXID + `&quot;`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing substring %q in response body: %s", want, body)
+		}
+	}
+}
+
+func Test_CDS_Browse_FolderMetadata_ReturnsContainerSelf(t *testing.T) {
+	lib := folderTestLib()
+	h := ContentDirectoryHandler(lib, staticServerURL("http://server:7790"))
+
+	artistAID := FolderObjectID("Artist A")
+	req := buildBrowseRequest(t, artistAID, "BrowseMetadata", 0, 0)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	// BrowseMetadata for a folder returns a single DIDL container
+	// element describing the folder itself.
+	for _, want := range []string{
+		`id=&quot;` + artistAID + `&quot;`,
+		`&lt;dc:title&gt;Artist A&lt;/dc:title&gt;`,
+		`<NumberReturned>1</NumberReturned>`,
+		`<TotalMatches>1</TotalMatches>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing substring %q in response body: %s", want, body)
+		}
+	}
+}
+
+func Test_CDS_Browse_UnknownFolderID_ReturnsNoSuchObject(t *testing.T) {
+	lib := folderTestLib()
+	h := ContentDirectoryHandler(lib, staticServerURL("http://server:7790"))
+
+	// ObjectID guaranteed not to match any folder hash — pure literal
+	// numeric outside the hash space.
+	req := buildBrowseRequest(t, "999999", "BrowseDirectChildren", 0, 100)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 (SOAPFault); body: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `<errorCode>701</errorCode>`) {
+		t.Errorf("body missing NoSuchObject (701) error code: %s", body)
 	}
 }

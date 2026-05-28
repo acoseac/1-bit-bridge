@@ -430,8 +430,17 @@ func (a *manifestLibraryAdapter) rebuild() {
 // short + easy to unit-test in isolation.
 func manifestTrackToDLNATrackInfo(t manifest.Track, absPath, libraryRoot string) dlna.TrackInfo {
 	ti := dlna.TrackInfo{
-		TrackID:       dlna.TrackID(libraryRoot, t.Path),
-		AbsolutePath:  absPath,
+		TrackID:      dlna.TrackID(libraryRoot, t.Path),
+		AbsolutePath: absPath,
+		// `t.Path` IS the library-root-relative path the bridge
+		// manifest stores (e.g. "Artist/Album/track.flac"). Surfaced
+		// to the DLNA layer for folder-hierarchy derivation in
+		// `BuildFolderIndex`. Distinct from `absPath` (which the
+		// resolver computed against the configured library root)
+		// because the DLNA layer doesn't know the library-root
+		// prefix and shouldn't have to compute LCP to recover it.
+		// Per PR #316.
+		RelativePath:  t.Path,
 		Title:         t.Title,
 		Artist:        t.Artist,
 		AlbumArtist:   t.AlbumArtist,
