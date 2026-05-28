@@ -432,16 +432,17 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, ser
 		return
 	}
 
-	// Build the folder index once per Browse call (cheap: O(N) over the
-	// cached TrackInfo slice, ~5 ms for a 24k-track library on typical
-	// host hardware). Used by the "Folders" root + hashed-folder cases
-	// below. Pre-computed here rather than inside each switch arm so
-	// the lookup is a free dictionary access in the hashed-folder arm.
-	folderIndex := BuildFolderIndex(lib.ListTrackInfos())
+	// Folder index is built ON DEMAND (lazy) inside each switch arm
+	// that needs it. The All Tracks case — the hot path under flat
+	// library access — doesn't need the folder hierarchy and would
+	// otherwise pay the O(N) build cost on every Browse. Per
+	// Gemini HIGH review on PR #317.
+	var folderIndex *FolderIndex
 
 	switch browse.ObjectID {
 	case "", "0":
 		// Root container — emit `all_tracks` AND `folders`.
+		folderIndex = BuildFolderIndex(lib.ListTrackInfos())
 		//
 		// **Music container removed** (PR #309): the previous root
 		// also exposed `Music` (`childCount=4`) but its `music`
@@ -537,6 +538,7 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, ser
 		// any tracks that sit at the library root without a folder
 		// prefix. Both are immediate children of the synthetic Folders
 		// root container.
+		folderIndex = BuildFolderIndex(lib.ListTrackInfos())
 		didlElements = browseFolderChildren(
 			folderIndex,
 			folderIndex.TopLevelFolderIDs,
@@ -597,9 +599,10 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, ser
 		totalMatches = len(tracks)
 
 	default:
-		// Could be a hashed folder ObjectID. Look it up in the
-		// folder index built earlier; if found, emit its immediate
-		// child folders + tracks.
+		// Could be a hashed folder ObjectID. Build the index now
+		// (deferred from the top of the function per Gemini HIGH on
+		// PR #317 — saves the O(N) walk on every All Tracks browse).
+		folderIndex = BuildFolderIndex(lib.ListTrackInfos())
 		if node, ok := folderIndex.Folders[browse.ObjectID]; ok {
 			didlElements = browseFolderChildren(
 				folderIndex,
@@ -747,6 +750,14 @@ func browseFolderChildren(
 	// index space directly so pagination cuts at the requested
 	// boundary regardless of which side (folders / tracks) it lands
 	// on.
+	//
+	// Lookup-failure handling (`continue` on `!ok`) is defensive-only —
+	// `childFolderIDs` / `childTrackIDs` are produced by the SAME
+	// `FolderIndex` instance passed in, so a missing entry would
+	// indicate a contract violation in `BuildFolderIndex`. Silent skip
+	// keeps the wire response well-formed under any such bug rather
+	// than emitting a partial DIDL element that strict controllers
+	// would refuse to parse. Per CodeRabbit on PR #317.
 	out := make([]string, 0, endIdx-startIdx)
 	folderCount := len(childFolderIDs)
 	for i := startIdx; i < endIdx; i++ {

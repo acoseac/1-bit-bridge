@@ -138,6 +138,23 @@ func Test_CDS_Browse_RootReturnsAllTracksAndFolders(t *testing.T) {
 			t.Errorf("missing substring %q in response body: %s", want, body)
 		}
 	}
+	// Strengthen container-shape assertions — exact count `2` so a
+	// regression affecting one container (e.g. dropped `searchable`
+	// from the Folders root) can't slip through with a single-presence
+	// check. Per CodeRabbit on PR #317.
+	for _, want := range []struct {
+		substr string
+		count  int
+	}{
+		{`&lt;upnp:class&gt;object.container.storageFolder&lt;/upnp:class&gt;`, 2},
+		{`searchable=&quot;1&quot;`, 2},
+		{`&lt;upnp:storageUsed&gt;-1&lt;/upnp:storageUsed&gt;`, 2},
+	} {
+		if got := strings.Count(body, want.substr); got != want.count {
+			t.Errorf("expected %d occurrences of %q in root response, got %d; body: %s",
+				want.count, want.substr, got, body)
+		}
+	}
 	// And specifically NOT the dropped `music` container (PR #309).
 	for _, notWant := range []string{
 		`id=&quot;music&quot;`,

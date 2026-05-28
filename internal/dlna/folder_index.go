@@ -240,10 +240,13 @@ func BuildFolderIndex(tracks []TrackInfo) *FolderIndex {
 
 	// Materialize every registered folder into a FolderNode with
 	// parent + name resolved. Children are filled in a second pass
-	// below.
+	// below. `FolderObjectID` (SHA-256) is computed ONCE per node and
+	// reused — pre-fix it was called twice (key + struct field).
+	// Per Gemini Medium on PR #317.
 	for folderRelPath := range seenFolders {
-		fi.Folders[FolderObjectID(folderRelPath)] = FolderNode{
-			ObjectID: FolderObjectID(folderRelPath),
+		objID := FolderObjectID(folderRelPath)
+		fi.Folders[objID] = FolderNode{
+			ObjectID: objID,
 			ParentID: parentObjectID(folderRelPath),
 			RelPath:  folderRelPath,
 			Name:     path.Base(folderRelPath),
