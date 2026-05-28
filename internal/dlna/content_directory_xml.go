@@ -146,7 +146,21 @@ func DIDLForTrack(opts DIDLTrackOpts) string {
 	if opts.SampleRateHz > 0 {
 		resAttrs = append(resAttrs, fmt.Sprintf(`sampleFrequency="%d"`, opts.SampleRateHz))
 	}
-	if opts.BitsPerSample > 0 {
+	// **Defense-in-depth `!opts.IsDSD` co-gate**: DSD tracks have an
+	// inherent bit depth of 1 by definition (DSD = 1-bit pulse
+	// density modulation), but the DLNA `<res bitsPerSample>`
+	// attribute is conventionally PCM-only — sending "1" causes
+	// renderer parsers that treat the field as PCM bit-depth to
+	// reject the dispatch as "1-bit PCM" (nonsense; observed silent-
+	// decline on Chord 2Go 2026-05-28 from the iOS-side equivalent
+	// before that side added an isDSD gate at its DIDL chokepoint).
+	// Companion Mirror-PR with iOS PR #564 — the bridge serves
+	// DIDL-Lite directly to third-party UPnP controllers browsing
+	// the CDS (e.g. mconnect, Kazoo) so the same protection must
+	// live here. Callers that set IsDSD=false while passing
+	// BitsPerSample > 0 (PCM tracks) emit the attribute unchanged.
+	// Per Gemini cross-codebase audit 2026-05-28.
+	if opts.BitsPerSample > 0 && !opts.IsDSD {
 		resAttrs = append(resAttrs, fmt.Sprintf(`bitsPerSample="%d"`, opts.BitsPerSample))
 	}
 	// Default to 2 channels (stereo) if unspecified — the bridge's audio

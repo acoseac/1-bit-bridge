@@ -131,6 +131,15 @@ func Test_TrackID_DifferentInputsProduceDifferentIDs(t *testing.T) {
 // Test_DIDLForTrack_dsf256_chord_2go uses the Phase-0-captured 2go
 // playback case as the canonical DSF golden: DSD256, ~3.5 min, real
 // Chord 2go UA (Music Player Daemon), expects audio/x-dsf MIME.
+//
+// **`bitsPerSample` deliberately absent from the `<res>` element**
+// even though the input opts carry `BitsPerSample: 1` (DSD's
+// inherent bit depth). The Mirror-PR companion to iOS PR #564 added
+// a `!opts.IsDSD` co-gate on the bitsPerSample emission — DSD's
+// "1" is misinterpreted as "1-bit PCM" by renderer parsers that
+// treat the attribute as PCM-only (Gemini cross-codebase audit
+// 2026-05-28). The golden updated to match. Linn Kazoo + BubbleUPnP
+// follow the same omit-for-DSD convention.
 func Test_DIDLForTrack_dsf256_chord_2go(t *testing.T) {
 	opts := DIDLTrackOpts{
 		TrackID:         "abc123def4567890",
@@ -154,10 +163,55 @@ func Test_DIDLForTrack_dsf256_chord_2go(t *testing.T) {
 		`<upnp:class>object.item.audioItem.musicTrack</upnp:class>` +
 		`<upnp:artist>Test Artist</upnp:artist>` +
 		`<upnp:album>Test Album</upnp:album>` +
-		`<res protocolInfo="http-get:*:audio/x-dsf:DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000" size="595999471" duration="0:03:30.799" sampleFrequency="11289600" bitsPerSample="1" nrAudioChannels="2">http://192.168.0.14:7790/dlna/file/abc123def4567890</res>` +
+		`<res protocolInfo="http-get:*:audio/x-dsf:DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000" size="595999471" duration="0:03:30.799" sampleFrequency="11289600" nrAudioChannels="2">http://192.168.0.14:7790/dlna/file/abc123def4567890</res>` +
 		`</item>`
 	if got != want {
 		t.Errorf("DSF golden mismatch:\ngot:  %q\nwant: %q", got, want)
+	}
+}
+
+// Test_DIDLForTrack_dsd_bitsPerSample_isDSDGate_omitsAttribute pins
+// the Mirror-PR defense-in-depth contract from iOS PR #564 finding
+// (2): when IsDSD=true, bitsPerSample MUST be omitted regardless of
+// the input value, so a future caller that bypasses the upstream
+// "make this 0 for DSD" chokepoints can't regress the DLNA decode
+// path on PCM-style-strict renderers. The corresponding iOS test
+// is `test_bitsPerSampleOne_withIsDSD_stillOmittedAtGenerator`.
+func Test_DIDLForTrack_dsd_bitsPerSample_isDSDGate_omitsAttribute(t *testing.T) {
+	opts := DIDLTrackOpts{
+		TrackID:       "dsd-isdsdgate",
+		Title:         "T",
+		Size:          1,
+		BitsPerSample: 1, // raw-parser value; gate MUST suppress
+		IsDSD:         true,
+		FileExtension: ".dsf",
+		ServerURL:     "http://server",
+		UserAgent:     "any-renderer",
+	}
+	got := DIDLForTrack(opts)
+	if strings.Contains(got, "bitsPerSample=") {
+		t.Errorf("IsDSD=true MUST suppress bitsPerSample regardless of input value, got: %q", got)
+	}
+}
+
+// Test_DIDLForTrack_pcm_bitsPerSample_stillEmitsWithoutIsDSD pins
+// the inverse contract: PCM tracks (IsDSD=false) MUST continue
+// emitting bitsPerSample as before — the gate is a DSD-specific
+// suppression, not a global change.
+func Test_DIDLForTrack_pcm_bitsPerSample_stillEmitsWithoutIsDSD(t *testing.T) {
+	opts := DIDLTrackOpts{
+		TrackID:       "pcm-keepsBits",
+		Title:         "T",
+		Size:          1,
+		BitsPerSample: 24,    // PCM 24-bit
+		IsDSD:         false, // PCM
+		FileExtension: ".flac",
+		ServerURL:     "http://server",
+		UserAgent:     "any-renderer",
+	}
+	got := DIDLForTrack(opts)
+	if !strings.Contains(got, `bitsPerSample="24"`) {
+		t.Errorf("IsDSD=false MUST emit bitsPerSample unchanged, got: %q", got)
 	}
 }
 
