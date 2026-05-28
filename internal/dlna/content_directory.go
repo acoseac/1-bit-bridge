@@ -4,6 +4,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 )
@@ -226,6 +227,17 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, ser
 	}
 	browse := env.Body.Browse
 	ua := r.Header.Get("User-Agent")
+	// Diagnostic logging for strict-controller investigations
+	// (mPlayer Lite "empty All Tracks list" symptom, 2026-05-28).
+	// Captures every Browse dispatch with enough detail to
+	// reconstruct what each controller asked for + what we
+	// returned. INFO level so it lands in `serve.log` by default
+	// without needing a debug-mode toggle. Logged at TWO sites:
+	// here (request) AND in the response-write path below
+	// (NumberReturned / TotalMatches). UA is truncated to 100
+	// chars defensively against pathological clients sending
+	// unbounded UA strings. Per Gemini consult 2026-05-28.
+	logBrowseRequest(r.RemoteAddr, browse, ua)
 
 	var didlElements []string
 	var numberReturned, totalMatches int
@@ -393,10 +405,72 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, ser
 	)
 	body2 := SOAPResponseEnvelope(ContentDirectoryServiceType, "Browse", innerXML)
 
+	// Diagnostic logging — response side. Logged alongside the
+	// request-side entry above so an operator scanning serve.log
+	// for a specific controller's behaviour can correlate
+	// (ObjectID, BrowseFlag) → (NumberReturned, TotalMatches,
+	// didlBytes) within ~adjacent lines. Per Gemini consult
+	// 2026-05-28.
+	logBrowseResponse(browse, numberReturned, totalMatches, len(body2))
+
 	w.Header().Set("Content-Type", SOAPContentType)
 	w.Header().Set(SOAPResponseHeader, "")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body2)
+}
+
+// logBrowseRequest emits an INFO-level structured log line at every
+// `Browse` SOAP dispatch. Surfaces the action shape (ObjectID,
+// BrowseFlag, pagination window, controller UA) so post-hoc analysis
+// of `serve.log` can reconstruct what each controller asked for —
+// load-bearing for diagnosing strict-controller behaviour (mPlayer
+// Lite, Linn Kazoo) where the rendering UI silently drops items the
+// CDS returns. Logged via the file-scope `packageLogger` (defined in
+// server.go); INFO level so it lands in `serve.log` by default
+// without requiring a debug-mode toggle.
+//
+// UA truncated at 100 runes defensively — pathological clients
+// sending unbounded UA strings would otherwise produce mile-long log
+// lines. 100 runes covers every real-world UA we've observed
+// (BubbleUPnP / 1-bit / Linn Kazoo / mPlayer Lite / Music Player
+// Daemon X.Y.Z all fit comfortably).
+//
+// Truncate by rune count (NOT bytes) so a multi-byte UTF-8 codepoint
+// in a hypothetical exotic UA string can't be cut mid-character,
+// which would corrupt the log line + produce invalid UTF-8 in
+// downstream JSON parsers consuming the slog handler's output. Per
+// CodeRabbit + Gemini on PR #312 round-1.
+func logBrowseRequest(remoteAddr string, b browseAction, ua string) {
+	uaTrim := ua
+	if runes := []rune(uaTrim); len(runes) > 100 {
+		uaTrim = string(runes[:100])
+	}
+	packageLogger.Info("Browse request",
+		slog.String("remoteAddr", remoteAddr),
+		slog.String("objectID", b.ObjectID),
+		slog.String("browseFlag", b.BrowseFlag),
+		slog.String("filter", b.Filter),
+		slog.Uint64("startingIndex", uint64(b.StartingIndex)),
+		slog.Uint64("requestedCount", uint64(b.RequestedCount)),
+		slog.String("sortCriteria", b.SortCriteria),
+		slog.String("userAgent", uaTrim),
+	)
+}
+
+// logBrowseResponse emits the response-side companion to
+// `logBrowseRequest`. Captures NumberReturned + TotalMatches (the
+// fields strict controllers consult for pagination) + the actual
+// response body size (so we can detect cases where mPlayer Lite
+// expects a chunked / size-capped response and our 100 KB+
+// envelope exceeds its parser threshold). Per Gemini consult.
+func logBrowseResponse(b browseAction, numberReturned, totalMatches, responseBytes int) {
+	packageLogger.Info("Browse response",
+		slog.String("objectID", b.ObjectID),
+		slog.String("browseFlag", b.BrowseFlag),
+		slog.Int("numberReturned", numberReturned),
+		slog.Int("totalMatches", totalMatches),
+		slog.Int("responseBytes", responseBytes),
+	)
 }
 
 // writeSOAPFault writes a SOAPFault response with the given UPnP error
