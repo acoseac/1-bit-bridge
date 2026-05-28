@@ -114,13 +114,55 @@ func DeviceDescriptionHandler(opts DeviceDescriptionOpts) http.HandlerFunc {
 // -----------------------------------------------------------------------------
 
 // ContentDirectorySCPDXML is the SCPD for the ContentDirectory:1
-// service. Declares the Browse action (the only one we implement).
-// Search / CreateObject / DestroyObject etc. are optional actions
-// per the spec and renderers tolerate their absence gracefully.
+// service. Declares Browse + the 3 spec-mandatory introspection
+// actions (GetSearchCapabilities, GetSortCapabilities, GetSystemUpdateID).
+//
+// The 3 introspection actions are REQUIRED per UPnP CDS:1 §2.3
+// regardless of whether Search is implemented. Empirically validated
+// 2026-05-28 against a minimal Go-based mconnect-compat test server
+// at /tmp/upnp-test: strict controllers (mconnect Player, BubbleUPnP-
+// flavoured stacks) silently abort container navigation when these
+// actions are absent from the SCPD. The user-visible symptom is
+// "All Tracks [N] shows in mconnect, but tap-to-drill does nothing" —
+// mconnect renders root via Browse(0) successfully, but never
+// dispatches the downstream Browse(child) because it polls
+// GetSystemUpdateID between every navigation step to verify directory
+// freshness, and abandons the drill when that call returns
+// InvalidAction (401). Adding the 3 actions (returning empty
+// SearchCaps + empty SortCaps + Id=1) unblocks mconnect end-to-end.
+//
+// Pre-fix this SCPD declared ONLY Browse on the strength of the
+// reasoning "renderers tolerate optional-action absence gracefully" —
+// that's TRUE for Search / CreateObject / DestroyObject (genuinely
+// optional per spec) but FALSE for the 3 introspection actions
+// (mandatory per spec, strictly required by some controllers). The
+// fix is additive — Browse argument list unchanged.
+//
+// Don't drop any of the 3 introspection actions at any future
+// refactor — would re-open the mconnect-silent-drill-abort
+// regression PR #316 closes.
 const ContentDirectorySCPDXML = `<?xml version="1.0" encoding="UTF-8"?>
 <scpd xmlns="urn:schemas-upnp-org:service-1-0">
   <specVersion><major>1</major><minor>0</minor></specVersion>
   <actionList>
+    <action>
+      <name>GetSearchCapabilities</name>
+      <argumentList>
+        <argument><name>SearchCaps</name><direction>out</direction><relatedStateVariable>SearchCapabilities</relatedStateVariable></argument>
+      </argumentList>
+    </action>
+    <action>
+      <name>GetSortCapabilities</name>
+      <argumentList>
+        <argument><name>SortCaps</name><direction>out</direction><relatedStateVariable>SortCapabilities</relatedStateVariable></argument>
+      </argumentList>
+    </action>
+    <action>
+      <name>GetSystemUpdateID</name>
+      <argumentList>
+        <argument><name>Id</name><direction>out</direction><relatedStateVariable>SystemUpdateID</relatedStateVariable></argument>
+      </argumentList>
+    </action>
     <action>
       <name>Browse</name>
       <argumentList>
@@ -139,13 +181,16 @@ const ContentDirectorySCPDXML = `<?xml version="1.0" encoding="UTF-8"?>
   </actionList>
   <serviceStateTable>
     <stateVariable sendEvents="no"><name>A_ARG_TYPE_ObjectID</name><dataType>string</dataType></stateVariable>
-    <stateVariable sendEvents="no"><name>A_ARG_TYPE_BrowseFlag</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>A_ARG_TYPE_BrowseFlag</name><dataType>string</dataType><allowedValueList><allowedValue>BrowseMetadata</allowedValue><allowedValue>BrowseDirectChildren</allowedValue></allowedValueList></stateVariable>
     <stateVariable sendEvents="no"><name>A_ARG_TYPE_Filter</name><dataType>string</dataType></stateVariable>
     <stateVariable sendEvents="no"><name>A_ARG_TYPE_Index</name><dataType>ui4</dataType></stateVariable>
     <stateVariable sendEvents="no"><name>A_ARG_TYPE_Count</name><dataType>ui4</dataType></stateVariable>
     <stateVariable sendEvents="no"><name>A_ARG_TYPE_SortCriteria</name><dataType>string</dataType></stateVariable>
     <stateVariable sendEvents="no"><name>A_ARG_TYPE_Result</name><dataType>string</dataType></stateVariable>
     <stateVariable sendEvents="no"><name>A_ARG_TYPE_UpdateID</name><dataType>ui4</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>SearchCapabilities</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>SortCapabilities</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="yes"><name>SystemUpdateID</name><dataType>ui4</dataType></stateVariable>
   </serviceStateTable>
 </scpd>`
 
