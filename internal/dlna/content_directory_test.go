@@ -215,6 +215,31 @@ func Test_CDS_Browse_BrowseMetadata_AllTracksReturnsAllTracksContainer(t *testin
 	}
 }
 
+// Test_CDS_Browse_LegacyAllTracksStringIDReturnsNoSuchObject pins
+// the PR-pending backward-compat contract: controllers that cached
+// the previous string ObjectID `"all_tracks"` (pre-PR-#315) MUST
+// receive a clean `NoSuchObject` SOAP fault when requesting the
+// legacy ID. Per UPnP convention this is the canonical signal for
+// "this object has been replaced / moved" — controllers re-browse
+// from root + pick up the new numeric `allTracksObjectID` ("1")
+// transparently. Without this pin, a future refactor that adds a
+// fall-through alias from "all_tracks" → "1" would silently break
+// the migration contract.
+func Test_CDS_Browse_LegacyAllTracksStringIDReturnsNoSuchObject(t *testing.T) {
+	lib := newTestLib(testTrack("t1", "Hello"))
+	h := ContentDirectoryHandler(lib, staticServerURL("http://server"))
+	req := buildBrowseRequest(t, "all_tracks", "BrowseDirectChildren", 0, 100)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 (SOAP fault) for legacy ObjectID; body: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `<errorCode>701</errorCode>`) {
+		t.Errorf("expected UPnP 701 NoSuchObject for legacy `all_tracks` ID, got body: %s", body)
+	}
+}
+
 // Test_CDS_Browse_MusicReturnsNoSuchObject pins that the dropped
 // `music` container is no longer browseable. Cached requests from
 // controllers that saw the stub IDs pre-PR-#309 get a clean
