@@ -281,7 +281,7 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, ser
 				// BrowseMetadata + BrowseDirectChildren on the
 				// same ObjectID would otherwise see two different
 				// classes for the same container. See the
-				// BrowseDirectChildren root branch above for the
+				// BrowseDirectChildren root branch below for the
 				// per-Gemini-round-3 class-selection rationale.
 				UPnPClass: "object.container.playlistContainer",
 			})
