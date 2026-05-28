@@ -329,19 +329,25 @@ func DIDLForContainer(opts DIDLContainerOpts) string {
 	sb.WriteString(upnpClass)
 	sb.WriteString(`</upnp:class>`)
 	// `<upnp:storageUsed>-1</upnp:storageUsed>` is REQUIRED for
-	// `object.container.storageFolder` containers per the UPnP CDS
-	// spec (and its subtypes, though no subtypes are emitted
-	// today). The value `-1` is the spec sentinel for "unknown
-	// storage used" — the bridge doesn't track per-container
-	// storage usage and shouldn't compute it on the fly. The 2Go's
-	// own MPD-DLNA reference emits exactly this shape (captured
-	// 2026-05-28). Strict controllers can refuse storageFolder
-	// containers that omit the field. Emit unconditionally for
-	// the storageFolder class only — other classes (e.g.
-	// musicAlbum / musicArtist / playlistContainer) have their
-	// own mandatory-attribute contracts that this helper doesn't
-	// touch.
-	if upnpClass == "object.container.storageFolder" {
+	// `object.container.storageFolder` containers AND its subtypes
+	// per the UPnP CDS spec. The value `-1` is the spec sentinel
+	// for "unknown storage used" — the bridge doesn't track
+	// per-container storage usage and shouldn't compute it on the
+	// fly. The 2Go's own MPD-DLNA reference emits exactly this
+	// shape (captured 2026-05-28). Strict controllers can refuse
+	// storageFolder containers that omit the field.
+	//
+	// `strings.HasPrefix` (NOT exact equality) so any future
+	// `object.container.storageFolder.*` subtype (e.g. a
+	// hypothetical `storageFolder.movies` or vendor-specific
+	// extension) also gets the required emission. No current
+	// caller emits a subtype, but the prefix form makes the
+	// helper forward-compatible with no downside. Per CodeRabbit
+	// + Gemini on PR #314 round-1. Emit only for the storageFolder
+	// hierarchy — other classes (musicAlbum, musicArtist,
+	// playlistContainer) have their own mandatory-attribute
+	// contracts that this helper doesn't touch.
+	if strings.HasPrefix(upnpClass, "object.container.storageFolder") {
 		sb.WriteString(`<upnp:storageUsed>-1</upnp:storageUsed>`)
 	}
 	if opts.ArtworkURL != "" {

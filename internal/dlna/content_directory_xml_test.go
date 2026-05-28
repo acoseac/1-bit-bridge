@@ -566,21 +566,41 @@ func Test_DIDLForContainer_alwaysCarriesSearchableEqualsOne(t *testing.T) {
 
 // Test_DIDLForContainer_storageFolderClassEmitsStorageUsed pins
 // the mandatory `<upnp:storageUsed>-1</upnp:storageUsed>` emission
-// for `object.container.storageFolder` containers (and its
-// subtypes, if any are added later). The value `-1` is the UPnP CDS
-// spec sentinel for "unknown storage used"; the bridge doesn't
-// track per-container storage usage. The 2Go's own MPD-DLNA
-// reference emits exactly this shape; strict controllers can
-// refuse storageFolder containers that omit the field. Empirical
-// evidence captured 2026-05-28.
+// for `object.container.storageFolder` containers AND its subtypes.
+// The value `-1` is the UPnP CDS spec sentinel for "unknown storage
+// used"; the bridge doesn't track per-container storage usage. The
+// 2Go's own MPD-DLNA reference emits exactly this shape; strict
+// controllers can refuse storageFolder containers that omit the
+// field. Empirical evidence captured 2026-05-28.
+//
+// Per CodeRabbit + Gemini on PR #314 round-1, the production check
+// uses `strings.HasPrefix` to cover potential subtypes (e.g.
+// `object.container.storageFolder.movies` if a future class is
+// added) without code change. Both subcases exercise that contract.
 func Test_DIDLForContainer_storageFolderClassEmitsStorageUsed(t *testing.T) {
-	opts := DIDLContainerOpts{
-		ID: "all_tracks", ParentID: "0", Title: "All Tracks",
-		ChildCount: 121, UPnPClass: "object.container.storageFolder",
+	cases := []struct {
+		name      string
+		upnpClass string
+	}{
+		{"exact storageFolder", "object.container.storageFolder"},
+		// Hypothetical subtype — no current caller emits this, but
+		// the prefix check structurally covers it. Pinning the
+		// contract via a forward-compat test case prevents a
+		// regression where someone tightens the check back to
+		// exact equality.
+		{"hypothetical subtype", "object.container.storageFolder.movies"},
 	}
-	got := DIDLForContainer(opts)
-	if !strings.Contains(got, `<upnp:storageUsed>-1</upnp:storageUsed>`) {
-		t.Errorf("storageFolder container missing <upnp:storageUsed>-1: %q", got)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := DIDLContainerOpts{
+				ID: "all_tracks", ParentID: "0", Title: "All Tracks",
+				ChildCount: 121, UPnPClass: tc.upnpClass,
+			}
+			got := DIDLForContainer(opts)
+			if !strings.Contains(got, `<upnp:storageUsed>-1</upnp:storageUsed>`) {
+				t.Errorf("class=%q missing <upnp:storageUsed>-1: %q", tc.upnpClass, got)
+			}
+		})
 	}
 }
 
