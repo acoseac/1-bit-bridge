@@ -114,7 +114,11 @@ func Test_CDS_Browse_RootReturnsAllTracksOnly(t *testing.T) {
 	}
 	body := rec.Body.String()
 	for _, want := range []string{
-		`id=&quot;all_tracks&quot;`,
+		// Numeric ObjectID per the `allTracksObjectID` constant
+		// (PR-pending fix for mconnect Cling-style int-parse
+		// rejection). Literal "1" so a future change to the
+		// constant surfaces here.
+		`id=&quot;1&quot;`,
 		`&lt;dc:title&gt;All Tracks&lt;/dc:title&gt;`,
 		`<NumberReturned>1</NumberReturned>`,
 		`<TotalMatches>1</TotalMatches>`,
@@ -187,7 +191,7 @@ func Test_CDS_Browse_BrowseMetadata_RootReturnsRootContainer(t *testing.T) {
 func Test_CDS_Browse_BrowseMetadata_AllTracksReturnsAllTracksContainer(t *testing.T) {
 	lib := newTestLib(testTrack("t1", "First"), testTrack("t2", "Second"), testTrack("t3", "Third"))
 	h := ContentDirectoryHandler(lib, staticServerURL("http://server"))
-	req := buildBrowseRequest(t, "all_tracks", "BrowseMetadata", 0, 0)
+	req := buildBrowseRequest(t, "1", "BrowseMetadata", 0, 0)
 	rec := httptest.NewRecorder()
 	h(rec, req)
 	if rec.Code != http.StatusOK {
@@ -197,7 +201,7 @@ func Test_CDS_Browse_BrowseMetadata_AllTracksReturnsAllTracksContainer(t *testin
 	for _, want := range []string{
 		`<NumberReturned>1</NumberReturned>`,
 		`<TotalMatches>1</TotalMatches>`,
-		`id=&quot;all_tracks&quot;`,
+		`id=&quot;1&quot;`,
 		`parentID=&quot;0&quot;`,
 		`&lt;dc:title&gt;All Tracks&lt;/dc:title&gt;`,
 		`&lt;upnp:class&gt;object.container.storageFolder&lt;/upnp:class&gt;`,
@@ -241,7 +245,7 @@ func Test_CDS_Browse_MusicReturnsNoSuchObject(t *testing.T) {
 func Test_CDS_Browse_AllTracksReturnsFlatList(t *testing.T) {
 	lib := newTestLib(testTrack("t1", "First"), testTrack("t2", "Second"), testTrack("t3", "Third"))
 	h := ContentDirectoryHandler(lib, staticServerURL("http://server"))
-	req := buildBrowseRequest(t, "all_tracks", "BrowseDirectChildren", 0, 100)
+	req := buildBrowseRequest(t, "1", "BrowseDirectChildren", 0, 100)
 	rec := httptest.NewRecorder()
 	h(rec, req)
 	if rec.Code != http.StatusOK {
@@ -269,22 +273,24 @@ func Test_CDS_Browse_AllTracksReturnsFlatList(t *testing.T) {
 	}
 }
 
-// Test_CDS_Browse_AllTracks_ItemsCarryAllTracksParentID pins the
-// PR #309 contract: items emitted from Browse(all_tracks) carry
-// `parentID="all_tracks"` (escaped as `parentID=&quot;all_tracks&quot;`
-// inside the SOAP envelope), NOT the legacy hardcoded `parentID="0"`.
-// Strict third-party DLNA controllers (mconnect Lite, Linn Kazoo)
-// reject items whose parentID doesn't match the ObjectID just
-// Browse'd; pre-PR they refused to render the children.
-func Test_CDS_Browse_AllTracks_ItemsCarryAllTracksParentID(t *testing.T) {
+// Test_CDS_Browse_AllTracks_ItemsCarryNumericParentID pins the
+// PR #309 contract (updated for the PR-pending numeric-ObjectID
+// fix): items emitted from Browse("1", BrowseDirectChildren) carry
+// `parentID="1"` (the numeric `allTracksObjectID`), NOT the legacy
+// hardcoded `parentID="0"`. Strict third-party DLNA controllers
+// (mconnect Lite, Linn Kazoo) reject items whose parentID doesn't
+// match the ObjectID just Browse'd; the numeric form also addresses
+// mconnect's Cling-style int-parse rejection that broke the string
+// form `"all_tracks"`.
+func Test_CDS_Browse_AllTracks_ItemsCarryNumericParentID(t *testing.T) {
 	lib := newTestLib(testTrack("t1", "First"))
 	h := ContentDirectoryHandler(lib, staticServerURL("http://server"))
-	req := buildBrowseRequest(t, "all_tracks", "BrowseDirectChildren", 0, 100)
+	req := buildBrowseRequest(t, "1", "BrowseDirectChildren", 0, 100)
 	rec := httptest.NewRecorder()
 	h(rec, req)
 	body := rec.Body.String()
-	if !strings.Contains(body, `parentID=&quot;all_tracks&quot;`) {
-		t.Errorf("expected items to carry parentID=\"all_tracks\" in response: %s", body)
+	if !strings.Contains(body, `parentID=&quot;1&quot;`) {
+		t.Errorf("expected items to carry parentID=\"1\" in response: %s", body)
 	}
 	// And specifically NOT the legacy `parentID="0"` anywhere in
 	// the response. BrowseDirectChildren returns only the children
@@ -308,7 +314,7 @@ func Test_CDS_Browse_AllTracksPaginationWindow(t *testing.T) {
 	h := ContentDirectoryHandler(lib, staticServerURL("http://x"))
 
 	// Request items 3..7 (StartingIndex=3, RequestedCount=4)
-	req := buildBrowseRequest(t, "all_tracks", "BrowseDirectChildren", 3, 4)
+	req := buildBrowseRequest(t, "1", "BrowseDirectChildren", 3, 4)
 	rec := httptest.NewRecorder()
 	h(rec, req)
 	body := rec.Body.String()
@@ -337,7 +343,7 @@ func Test_CDS_Browse_RequestedCountZeroMeansAll(t *testing.T) {
 	lib := newTestLib(tracks...)
 	h := ContentDirectoryHandler(lib, staticServerURL("http://x"))
 	// Per UPnP convention, RequestedCount=0 means "return as many as possible"
-	req := buildBrowseRequest(t, "all_tracks", "BrowseDirectChildren", 0, 0)
+	req := buildBrowseRequest(t, "1", "BrowseDirectChildren", 0, 0)
 	rec := httptest.NewRecorder()
 	h(rec, req)
 	if !strings.Contains(rec.Body.String(), `<NumberReturned>2</NumberReturned>`) {
@@ -456,10 +462,10 @@ func Test_TrackInfo_toDIDLOpts_PreservesFields(t *testing.T) {
 		Channels: 2, IsDSD: false, Codec: "FLAC", FileExtension: ".flac",
 		ArtworkURL: "http://art/x",
 	}
-	opts := track.toDIDLOpts("http://server", "TestUA", "all_tracks")
+	opts := track.toDIDLOpts("http://server", "TestUA", "1")
 	if opts.TrackID != "abc" || opts.Title != "T" || opts.Year != 1965 ||
 		opts.ServerURL != "http://server" || opts.UserAgent != "TestUA" ||
-		opts.ParentID != "all_tracks" {
+		opts.ParentID != "1" {
 		t.Errorf("toDIDLOpts dropped fields: %+v", opts)
 	}
 }
@@ -471,7 +477,7 @@ func Test_TrackInfo_toDIDLOpts_PreservesFields(t *testing.T) {
 func Test_CDS_Browse_FileURLContainsTrackID(t *testing.T) {
 	lib := newTestLib(testTrack("xyz789", "MyTrack"))
 	h := ContentDirectoryHandler(lib, staticServerURL("http://server:7790"))
-	req := buildBrowseRequest(t, "all_tracks", "BrowseDirectChildren", 0, 100)
+	req := buildBrowseRequest(t, "1", "BrowseDirectChildren", 0, 100)
 	rec := httptest.NewRecorder()
 	h(rec, req)
 	// The file URL is inside the DIDL-Lite which is escaped inside SOAP
