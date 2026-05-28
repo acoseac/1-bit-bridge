@@ -89,9 +89,10 @@ type TrackInfo struct {
 // DIDLTrackOpts shape that `DIDLForTrack` expects. Kept private
 // because it's a one-line struct copy plus the server URL / UA
 // fields — callers shouldn't need to do this themselves.
-func (t TrackInfo) toDIDLOpts(serverURL, userAgent string) DIDLTrackOpts {
+func (t TrackInfo) toDIDLOpts(serverURL, userAgent, parentID string) DIDLTrackOpts {
 	return DIDLTrackOpts{
 		TrackID:         t.TrackID,
+		ParentID:        parentID,
 		Title:           t.Title,
 		Artist:          t.Artist,
 		AlbumArtist:     t.AlbumArtist,
@@ -222,30 +223,33 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, ser
 
 	switch browse.ObjectID {
 	case "", "0":
-		// Root container — emit Music + All Tracks
+		// Root container — emit `all_tracks` only.
+		//
+		// **Music container removed** (PR #309): the previous root
+		// also exposed `Music` (`childCount=4`) but its `music`
+		// Browse case returned 4 empty placeholder sub-containers
+		// (Artists / Albums / Genres / Composers) with
+		// `childCount=0` — the Music hierarchy was never actually
+		// implemented (deferred as "v1.x scope" per the prior
+		// inline comment). Strict third-party DLNA controllers
+		// (mconnect Lite observed 2026-05-28) refused to render
+		// the empty placeholder hierarchy AND occasionally bailed
+		// to a "Browse failed" state that prevented navigation
+		// to `all_tracks` too. Surfacing only the populated
+		// `all_tracks` container keeps the CDS minimal-but-correct
+		// for strict controllers; the Music hierarchy returns
+		// once the by-Artist / by-Album / by-Genre indexes are
+		// real. Removing the `music` Browse case below routes any
+		// late-arriving cached request (controller cached the
+		// stub IDs) to the `default` `NoSuchObject` SOAP fault,
+		// which is the cleanest "this container is no longer
+		// available" signal.
 		didlElements = []string{
-			DIDLForContainer(DIDLContainerOpts{
-				ID: "music", ParentID: "0", Title: "Music",
-				ChildCount: 4, UPnPClass: "object.container",
-			}),
 			DIDLForContainer(DIDLContainerOpts{
 				ID: "all_tracks", ParentID: "0", Title: "All Tracks",
 				ChildCount: len(lib.ListTrackInfos()),
 				UPnPClass:  "object.container",
 			}),
-		}
-		numberReturned = len(didlElements)
-		totalMatches = len(didlElements)
-
-	case "music":
-		// Category placeholders — Artists / Albums / Genres / Composers.
-		// Deeper hierarchy under each is v1.x scope; for v1 these
-		// containers exist but resolve to empty when browsed-into.
-		didlElements = []string{
-			DIDLForContainer(DIDLContainerOpts{ID: "music/artists", ParentID: "music", Title: "Artists", ChildCount: 0, UPnPClass: "object.container"}),
-			DIDLForContainer(DIDLContainerOpts{ID: "music/albums", ParentID: "music", Title: "Albums", ChildCount: 0, UPnPClass: "object.container"}),
-			DIDLForContainer(DIDLContainerOpts{ID: "music/genres", ParentID: "music", Title: "Genres", ChildCount: 0, UPnPClass: "object.container"}),
-			DIDLForContainer(DIDLContainerOpts{ID: "music/composers", ParentID: "music", Title: "Composers", ChildCount: 0, UPnPClass: "object.container"}),
 		}
 		numberReturned = len(didlElements)
 		totalMatches = len(didlElements)
@@ -282,7 +286,15 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, ser
 		slice := tracks[startIdx:endIdx]
 		didlElements = make([]string, 0, len(slice))
 		for _, t := range slice {
-			didlElements = append(didlElements, DIDLForTrack(t.toDIDLOpts(serverURL, ua)))
+			// Pass "all_tracks" as the parentID so the emitted
+			// `<item parentID="all_tracks">` reflects the actual
+			// container the items live in (PR #309). Strict
+			// controllers use the parentID to resolve the
+			// container→item relationship; pre-PR the hardcoded
+			// "0" caused mconnect Lite to refuse to render the
+			// children even though Browse(all_tracks) returned
+			// 121 items.
+			didlElements = append(didlElements, DIDLForTrack(t.toDIDLOpts(serverURL, ua, "all_tracks")))
 		}
 		numberReturned = len(slice)
 		totalMatches = len(tracks)
