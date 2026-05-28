@@ -118,12 +118,19 @@ func Test_CDS_Browse_RootReturnsAllTracksOnly(t *testing.T) {
 		`&lt;dc:title&gt;All Tracks&lt;/dc:title&gt;`,
 		`<NumberReturned>1</NumberReturned>`,
 		`<TotalMatches>1</TotalMatches>`,
-		// PR-pending: storageFolder subtype + searchable="0" on the
-		// container — strict third-party DLNA controllers (mconnect
-		// Lite confirmed 2026-05-28) drop child rendering when the
-		// container is generic `object.container` OR when the
-		// `searchable` attribute is missing. Per Gemini consult.
-		`&lt;upnp:class&gt;object.container.storageFolder&lt;/upnp:class&gt;`,
+		// `playlistContainer` subtype + searchable="0" on the
+		// container. Strict structural controllers (Linn Kazoo,
+		// older Naim/Cyrus / OpenHome stacks) treat playlist-
+		// Container as a first-class queue-orchestration node;
+		// music-centric controllers (mconnect, BluOS, Audirvana)
+		// recognize it as "appendable audio collection" and
+		// surface the drill-down affordance. The previous PR #310
+		// choice of `storageFolder` was correct for Linn-class
+		// but failed mconnect (which treats storageFolder as
+		// filesystem-not-music). Per Gemini consult round-3
+		// 2026-05-28; empirical verification via PR #312 Browse-
+		// log diagnostics.
+		`&lt;upnp:class&gt;object.container.playlistContainer&lt;/upnp:class&gt;`,
 		`searchable=&quot;0&quot;`,
 	} {
 		if !strings.Contains(body, want) {
@@ -193,7 +200,7 @@ func Test_CDS_Browse_BrowseMetadata_AllTracksReturnsAllTracksContainer(t *testin
 		`id=&quot;all_tracks&quot;`,
 		`parentID=&quot;0&quot;`,
 		`&lt;dc:title&gt;All Tracks&lt;/dc:title&gt;`,
-		`&lt;upnp:class&gt;object.container.storageFolder&lt;/upnp:class&gt;`,
+		`&lt;upnp:class&gt;object.container.playlistContainer&lt;/upnp:class&gt;`,
 		`childCount=&quot;3&quot;`,
 		`searchable=&quot;0&quot;`,
 	} {
