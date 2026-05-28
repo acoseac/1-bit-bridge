@@ -118,20 +118,20 @@ func Test_CDS_Browse_RootReturnsAllTracksOnly(t *testing.T) {
 		`&lt;dc:title&gt;All Tracks&lt;/dc:title&gt;`,
 		`<NumberReturned>1</NumberReturned>`,
 		`<TotalMatches>1</TotalMatches>`,
-		// `playlistContainer` subtype + searchable="0" on the
-		// container. Strict structural controllers (Linn Kazoo,
-		// older Naim/Cyrus / OpenHome stacks) treat playlist-
-		// Container as a first-class queue-orchestration node;
-		// music-centric controllers (mconnect, BluOS, Audirvana)
-		// recognize it as "appendable audio collection" and
-		// surface the drill-down affordance. The previous PR #310
-		// choice of `storageFolder` was correct for Linn-class
-		// but failed mconnect (which treats storageFolder as
-		// filesystem-not-music). Per Gemini consult round-3
-		// 2026-05-28; empirical verification via PR #312 Browse-
-		// log diagnostics.
-		`&lt;upnp:class&gt;object.container.playlistContainer&lt;/upnp:class&gt;`,
-		`searchable=&quot;0&quot;`,
+		// `storageFolder` subtype + `searchable="1"` on the
+		// container + `<upnp:storageUsed>-1</upnp:storageUsed>`.
+		// Empirical evidence from the Chord 2Go's own MPD-DLNA
+		// MediaServer (MiniDLNA, captured 2026-05-28 via direct
+		// SOAP curl) confirms this is the shape mconnect Player
+		// drills into successfully. PR #310's storageFolder choice
+		// was correct; PR #310's `searchable="0"` was the actual
+		// blocker (mconnect filters non-searchable containers from
+		// drill-down). PR #313's flip to playlistContainer was a
+		// wrong-hypothesis detour. PR-pending corrective fix
+		// reverts the class + flips searchable + adds storageUsed.
+		`&lt;upnp:class&gt;object.container.storageFolder&lt;/upnp:class&gt;`,
+		`searchable=&quot;1&quot;`,
+		`&lt;upnp:storageUsed&gt;-1&lt;/upnp:storageUsed&gt;`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("missing substring %q in response body: %s", want, body)
@@ -200,9 +200,10 @@ func Test_CDS_Browse_BrowseMetadata_AllTracksReturnsAllTracksContainer(t *testin
 		`id=&quot;all_tracks&quot;`,
 		`parentID=&quot;0&quot;`,
 		`&lt;dc:title&gt;All Tracks&lt;/dc:title&gt;`,
-		`&lt;upnp:class&gt;object.container.playlistContainer&lt;/upnp:class&gt;`,
+		`&lt;upnp:class&gt;object.container.storageFolder&lt;/upnp:class&gt;`,
 		`childCount=&quot;3&quot;`,
-		`searchable=&quot;0&quot;`,
+		`searchable=&quot;1&quot;`,
+		`&lt;upnp:storageUsed&gt;-1&lt;/upnp:storageUsed&gt;`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("missing substring %q in BrowseMetadata response: %s", want, body)

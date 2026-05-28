@@ -275,15 +275,18 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, ser
 			selfDIDL = DIDLForContainer(DIDLContainerOpts{
 				ID: "all_tracks", ParentID: "0", Title: "All Tracks",
 				ChildCount: len(lib.ListTrackInfos()),
-				// `playlistContainer` matches the BrowseDirect-
-				// Children root-emission class. The two MUST stay
-				// in lockstep — a strict controller doing both
-				// BrowseMetadata + BrowseDirectChildren on the
-				// same ObjectID would otherwise see two different
-				// classes for the same container. See the
-				// BrowseDirectChildren root branch below for the
-				// per-Gemini-round-3 class-selection rationale.
-				UPnPClass: "object.container.playlistContainer",
+				// `storageFolder` (reverting PR #313's playlist-
+				// Container) — empirical evidence from the Chord
+				// 2Go's own MPD-DLNA MediaServer (MiniDLNA-based)
+				// captured 2026-05-28 shows storageFolder containers
+				// ARE accepted by mconnect Player. The actual
+				// blocker was `searchable="0"` (PR #310's choice);
+				// the 2Go's reference emits `searchable="1"` on
+				// every container + `<upnp:storageUsed>-1</upnp:
+				// storageUsed>` for storageFolder spec compliance.
+				// See the BrowseDirectChildren root branch below
+				// for the full reference-vs-ours diff rationale.
+				UPnPClass: "object.container.storageFolder",
 			})
 		default:
 			// Unknown ObjectID under BrowseMetadata — same `NoSuchObject`
@@ -335,36 +338,57 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, ser
 			DIDLForContainer(DIDLContainerOpts{
 				ID: "all_tracks", ParentID: "0", Title: "All Tracks",
 				ChildCount: len(lib.ListTrackInfos()),
-				// `playlistContainer` (NOT `object.container.storageFolder`
-				// despite Gemini's PR #310 recommendation). PR #310's
-				// storageFolder choice was driven by "strict controllers
-				// need explicit directory subtype to drill in"; empirical
-				// real-device verification via the PR #312 Browse-log
-				// diagnostics (2026-05-28) showed mconnect Player
-				// receives the storageFolder container at the root then
-				// REFUSES to drill in — its internal music-vs-filesystem
-				// classifier treats storageFolder as "filesystem,
-				// hide from music UI". The downstream
-				// `Browse(all_tracks, BrowseDirectChildren)` never
-				// fires; the user sees an empty All Tracks tap.
+				// `storageFolder` — reverting PR #313's playlist-
+				// Container change. PR #313 was driven by Gemini's
+				// round-3 hypothesis that mconnect filters out
+				// `object.container.storageFolder` from music-
+				// browse UI. Real-device verification AFTER PR
+				// #313 deployed showed mconnect STILL refused to
+				// drill in — Gemini's class-blocker hypothesis was
+				// wrong (twice across rounds 2 + 3).
 				//
-				// `playlistContainer` is the semantically-accurate +
-				// cross-controller compatible subtype: music-centric
-				// controllers (mconnect, BluOS, Audirvana) recognize
-				// it as "appendable queue of audio items" and surface
-				// the drill-down affordance; strict structural
-				// controllers (Linn Kazoo, older Naim/Cyrus / OpenHome
-				// stacks) treat it as a first-class UPnP AV citizen
-				// for queue orchestration. Per Gemini consult round-3
-				// 2026-05-28.
+				// Empirical evidence from the Chord 2Go's own MPD-
+				// DLNA MediaServer (MiniDLNA-based, captured 2026-
+				// 05-28 via direct SOAP `curl` against the 2Go's
+				// CDS at `http://<2go-ip>:8200/ctl/ContentDir`)
+				// confirms that:
 				//
-				// **Don't revert to `storageFolder`** — re-opens the
-				// mconnect empty-list class of issue. **Don't revert
-				// to generic `object.container`** either — pre-#310
-				// strict controllers had drill-in issues against the
-				// untyped container; playlistContainer satisfies both
-				// camps.
-				UPnPClass: "object.container.playlistContainer",
+				//   1. The 2Go itself emits `object.container.storage-
+				//      Folder` containers (Browse Folders / Music /
+				//      Pictures / Video). mconnect drills into them
+				//      fine. So storageFolder IS accepted by
+				//      mconnect — Gemini's class hypothesis was
+				//      wrong.
+				//
+				//   2. The 2Go's containers emit `searchable="1"`
+				//      (not "0"). mconnect almost certainly filters
+				//      out non-searchable containers from drill-
+				//      down candidates — THIS is the actual blocker
+				//      our pre-fix shape hit.
+				//
+				//   3. The 2Go's storageFolder containers emit
+				//      `<upnp:storageUsed>-1</upnp:storageUsed>`
+				//      per the UPnP CDS spec's mandatory-attribute
+				//      contract for storageFolder. We were missing
+				//      this; some controllers reject storage-class
+				//      containers without it.
+				//
+				// PR-pending corrective fix:
+				//   - Revert class to storageFolder (matches 2Go
+				//     reference)
+				//   - Flip `searchable` from "0" to "1" via
+				//     DIDLContainerOpts (separate field; default
+				//     was "0" since PR #310)
+				//   - Add `<upnp:storageUsed>-1</upnp:storage-
+				//     Used>` emission inside DIDLForContainer when
+				//     the class is a storageFolder subtype
+				//
+				// **Don't revert searchable to "0"** at any new
+				// site — re-opens the mconnect class of issue the
+				// 2Go reference proves. **Don't reintroduce
+				// `playlistContainer`** here — it was a wrong-
+				// hypothesis detour from Gemini round-3.
+				UPnPClass: "object.container.storageFolder",
 			}),
 		}
 		numberReturned = len(didlElements)
