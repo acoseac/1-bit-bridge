@@ -187,10 +187,19 @@ func ContentDirectoryHandler(lib LibrarySource, serverURLFunc func(r *http.Reque
 
 // handleBrowse processes a SOAP Browse request. ObjectID dispatch:
 //
-//   - "0"           → root: Music + All Tracks containers
-//   - "music"       → category placeholders (Artists/Albums/Genres/Composers)
+//   - "0"           → root: emits the `all_tracks` storage-folder container
 //   - "all_tracks"  → flat list of every track in the library
 //   - Anything else → SOAPFault with UPnPErrNoSuchObject
+//
+// `BrowseFlag == "BrowseMetadata"` returns a single DIDL element
+// describing the requested ObjectID itself (load-bearing for strict
+// controller drill-down handshakes — see the dedicated branch
+// below); `BrowseDirectChildren` returns the container's items.
+//
+// The dropped `music` ObjectID (PR #309) routes through the `default`
+// arm and surfaces as a NoSuchObject SOAP fault — the cleanest signal
+// to controllers that cached pre-PR stub IDs that the hierarchy is
+// no longer available.
 //
 // Deeper hierarchy paths (music/artists/{hash}, music/albums/{hash}, etc.)
 // are deferred to a v1.x follow-up — the "All Tracks" flat path is what
@@ -221,6 +230,64 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, ser
 	var didlElements []string
 	var numberReturned, totalMatches int
 
+	// `BrowseMetadata` short-circuit. Per UPnP CDS spec, this flag
+	// returns a SINGLE DIDL-Lite element describing the requested
+	// ObjectID itself — NOT its children. Strict UPnP controllers
+	// (mconnect Lite confirmed 2026-05-28) execute a sequential
+	// validation handshake before rendering a container: call
+	// BrowseMetadata to resolve parent mapping, permissions, and
+	// the UI header title; THEN fire BrowseDirectChildren for
+	// items. Empty DIDL here causes their XML parser to crash or
+	// stall waiting for missing structural elements — surfacing
+	// as an infinite "loading" spinner on the controller's UI
+	// even though BrowseDirectChildren on the same ObjectID
+	// returns items correctly. Per Gemini consult 2026-05-28.
+	//
+	// **Handled BEFORE the BrowseDirectChildren switch** so the
+	// `all_tracks` case below doesn't pay the cost of building a
+	// per-track DIDL slice only to have it discarded. Pre-fix the
+	// BrowseDirectChildren path always ran (O(n) XML allocations
+	// for n=121-track libraries; pure waste under metadata
+	// handshakes that happen on every drill-down). Per Gemini
+	// MAJOR + CodeRabbit MAJOR (outside-diff) on PR #310 round-1.
+	if browse.BrowseFlag == "BrowseMetadata" {
+		var selfDIDL string
+		switch browse.ObjectID {
+		case "", "0":
+			selfDIDL = DIDLForContainer(DIDLContainerOpts{
+				ID: "0", ParentID: "-1", Title: "1-bit Bridge",
+				ChildCount: 1, // one child: all_tracks
+				UPnPClass:  "object.container",
+			})
+		case "all_tracks":
+			selfDIDL = DIDLForContainer(DIDLContainerOpts{
+				ID: "all_tracks", ParentID: "0", Title: "All Tracks",
+				ChildCount: len(lib.ListTrackInfos()),
+				UPnPClass:  "object.container.storageFolder",
+			})
+		default:
+			// Unknown ObjectID under BrowseMetadata — same `NoSuchObject`
+			// signal the BrowseDirectChildren `default` arm produces.
+			// Strict controllers + lenient ones agree on this code.
+			writeSOAPFault(w, UPnPErrNoSuchObject)
+			return
+		}
+		didlElements = []string{selfDIDL}
+		numberReturned = 1
+		totalMatches = 1
+		didlLite := WrapDIDLLite(didlElements...)
+		innerXML := fmt.Sprintf(
+			`<Result>%s</Result><NumberReturned>%d</NumberReturned><TotalMatches>%d</TotalMatches><UpdateID>1</UpdateID>`,
+			escapeXMLText(didlLite), numberReturned, totalMatches,
+		)
+		body2 := SOAPResponseEnvelope(ContentDirectoryServiceType, "Browse", innerXML)
+		w.Header().Set("Content-Type", SOAPContentType)
+		w.Header().Set(SOAPResponseHeader, "")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body2)
+		return
+	}
+
 	switch browse.ObjectID {
 	case "", "0":
 		// Root container — emit `all_tracks` only.
@@ -248,7 +315,15 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, ser
 			DIDLForContainer(DIDLContainerOpts{
 				ID: "all_tracks", ParentID: "0", Title: "All Tracks",
 				ChildCount: len(lib.ListTrackInfos()),
-				UPnPClass:  "object.container",
+				// `storageFolder` (NOT generic `object.container`):
+				// primitive control points (mconnect Lite confirmed
+				// 2026-05-28, Linn Kazoo per UPnP-tester reports)
+				// drop or ignore container children unless the parent
+				// container maps to an explicit directory subtype.
+				// `storageFolder` is the canonical subtype for a flat
+				// browseable container of items — semantically a
+				// directory of tracks. Per Gemini consult 2026-05-28.
+				UPnPClass: "object.container.storageFolder",
 			}),
 		}
 		numberReturned = len(didlElements)
@@ -304,17 +379,12 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, ser
 		return
 	}
 
-	// `BrowseMetadata` flag returns the metadata of the ObjectID
-	// itself rather than its children. Spec-compliant but not
-	// exercised by mConnect / Kazoo / 8player in Phase 0 — implement
-	// the minimum (return the container's own metadata when known).
-	// For now, treat as "no metadata" and let renderers fall back.
-	if browse.BrowseFlag == "BrowseMetadata" {
-		// Empty DIDL-Lite is a valid response per spec
-		didlElements = nil
-		numberReturned = 0
-		totalMatches = 0
-	}
+	// (BrowseMetadata short-circuited above the BrowseDirectChildren
+	// switch — see the dedicated branch near the top of this
+	// function. Per Gemini MAJOR + CodeRabbit MAJOR on PR #310
+	// round-1, handling BrowseMetadata BEFORE the switch avoids
+	// building the per-track DIDL slice on every drill-down
+	// handshake.)
 
 	didlLite := WrapDIDLLite(didlElements...)
 	innerXML := fmt.Sprintf(

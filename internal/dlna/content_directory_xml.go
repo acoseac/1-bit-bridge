@@ -289,7 +289,16 @@ func DIDLForContainer(opts DIDLContainerOpts) string {
 	// and arbitrary-string-derived IDs that need defensive escape.
 	// Doing it now keeps the helper's invariant clean. Per Gemini
 	// Medium-Security finding on PR #303.
-	sb.WriteString(fmt.Sprintf(`<container id="%s" parentID="%s" restricted="1" childCount="%d">`,
+	// `searchable="0"` is REQUIRED by the UPnP CDS spec on every
+	// `<container>` element — leaving it out emits malformed XML
+	// per strict schema validators. Lenient controllers (BubbleUPnP,
+	// the 1-bit iOS app via its own `/v1/list` endpoint) tolerate
+	// the omission; strict controllers (mconnect Lite confirmed
+	// 2026-05-28, Linn Kazoo per UPnP-tester reports) reject the
+	// browse response wholesale. Emit "0" — the bridge doesn't
+	// implement the Search action, so the container is not
+	// searchable by definition. Per Gemini consult 2026-05-28.
+	sb.WriteString(fmt.Sprintf(`<container id="%s" parentID="%s" restricted="1" searchable="0" childCount="%d">`,
 		escapeXMLText(opts.ID), escapeXMLText(opts.ParentID), childCount))
 	sb.WriteString(`<dc:title>`)
 	sb.WriteString(escapeXMLText(opts.Title))
