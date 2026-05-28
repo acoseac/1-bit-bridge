@@ -93,7 +93,16 @@ func testTrack(id, title string) TrackInfo {
 // ContentDirectoryHandler.Browse
 // -----------------------------------------------------------------------------
 
-func Test_CDS_Browse_RootReturnsMusicAndAllTracks(t *testing.T) {
+// Test_CDS_Browse_RootReturnsAllTracksOnly pins the post-PR-#309
+// contract: the root container exposes ONLY `all_tracks`. The
+// `Music` container was removed because its `music` Browse case
+// returned 4 empty placeholder sub-containers with no real
+// hierarchy implementation — strict third-party DLNA controllers
+// (mconnect Lite 2026-05-28) refused to render the empty
+// placeholders AND occasionally bailed to a "Browse failed" state
+// that prevented navigation to `all_tracks` too. Music returns
+// once the by-Artist / by-Album / by-Genre indexes are real.
+func Test_CDS_Browse_RootReturnsAllTracksOnly(t *testing.T) {
 	lib := newTestLib(testTrack("t1", "Hello"), testTrack("t2", "World"))
 	h := ContentDirectoryHandler(lib, staticServerURL("http://server:7790"))
 	req := buildBrowseRequest(t, "0", "BrowseDirectChildren", 0, 100)
@@ -104,45 +113,50 @@ func Test_CDS_Browse_RootReturnsMusicAndAllTracks(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	// DIDL-Lite is XML-escaped inside SOAP; check for the escaped forms
-	// of attribute values and tag content.
 	for _, want := range []string{
-		`id=&quot;music&quot;`,
-		`&lt;dc:title&gt;Music&lt;/dc:title&gt;`,
 		`id=&quot;all_tracks&quot;`,
 		`&lt;dc:title&gt;All Tracks&lt;/dc:title&gt;`,
-		`<NumberReturned>2</NumberReturned>`,
-		`<TotalMatches>2</TotalMatches>`,
+		`<NumberReturned>1</NumberReturned>`,
+		`<TotalMatches>1</TotalMatches>`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("missing substring %q in response body: %s", want, body)
 		}
 	}
+	// And specifically NOT the dropped `music` container.
+	for _, notWant := range []string{
+		`id=&quot;music&quot;`,
+		`&lt;dc:title&gt;Music&lt;/dc:title&gt;`,
+	} {
+		if strings.Contains(body, notWant) {
+			t.Errorf("dropped substring %q should NOT appear in root response: %s", notWant, body)
+		}
+	}
 }
 
-func Test_CDS_Browse_MusicReturnsCategoryContainers(t *testing.T) {
+// Test_CDS_Browse_MusicReturnsNoSuchObject pins that the dropped
+// `music` container is no longer browseable. Cached requests from
+// controllers that saw the stub IDs pre-PR-#309 get a clean
+// `NoSuchObject` SOAP fault — the canonical UPnP signal for "this
+// container is no longer available."
+func Test_CDS_Browse_MusicReturnsNoSuchObject(t *testing.T) {
 	lib := newTestLib()
 	h := ContentDirectoryHandler(lib, staticServerURL("http://server"))
 	req := buildBrowseRequest(t, "music", "BrowseDirectChildren", 0, 100)
 	rec := httptest.NewRecorder()
 	h(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
+	// SOAP faults come back with HTTP 500 + a Fault envelope per spec.
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 (SOAP fault); body: %s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
+	// Verify the typed UPnP error code (701 NoSuchObject) surfaces.
 	for _, want := range []string{
-		`id=&quot;music/artists&quot;`,
-		`&lt;dc:title&gt;Artists&lt;/dc:title&gt;`,
-		`id=&quot;music/albums&quot;`,
-		`&lt;dc:title&gt;Albums&lt;/dc:title&gt;`,
-		`id=&quot;music/genres&quot;`,
-		`&lt;dc:title&gt;Genres&lt;/dc:title&gt;`,
-		`id=&quot;music/composers&quot;`,
-		`&lt;dc:title&gt;Composers&lt;/dc:title&gt;`,
-		`<NumberReturned>4</NumberReturned>`,
+		`<faultcode>`,
+		`<errorCode>701</errorCode>`,
 	} {
 		if !strings.Contains(body, want) {
-			t.Errorf("missing substring %q in response body: %s", want, body)
+			t.Errorf("missing substring %q in SOAP fault body: %s", want, body)
 		}
 	}
 }
@@ -175,6 +189,35 @@ func Test_CDS_Browse_AllTracksReturnsFlatList(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("missing substring %q in response body: %s", want, body)
 		}
+	}
+}
+
+// Test_CDS_Browse_AllTracks_ItemsCarryAllTracksParentID pins the
+// PR #309 contract: items emitted from Browse(all_tracks) carry
+// `parentID="all_tracks"` (escaped as `parentID=&quot;all_tracks&quot;`
+// inside the SOAP envelope), NOT the legacy hardcoded `parentID="0"`.
+// Strict third-party DLNA controllers (mconnect Lite, Linn Kazoo)
+// reject items whose parentID doesn't match the ObjectID just
+// Browse'd; pre-PR they refused to render the children.
+func Test_CDS_Browse_AllTracks_ItemsCarryAllTracksParentID(t *testing.T) {
+	lib := newTestLib(testTrack("t1", "First"))
+	h := ContentDirectoryHandler(lib, staticServerURL("http://server"))
+	req := buildBrowseRequest(t, "all_tracks", "BrowseDirectChildren", 0, 100)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	body := rec.Body.String()
+	if !strings.Contains(body, `parentID=&quot;all_tracks&quot;`) {
+		t.Errorf("expected items to carry parentID=\"all_tracks\" in response: %s", body)
+	}
+	// And specifically NOT the legacy `parentID="0"` anywhere in
+	// the response. BrowseDirectChildren returns only the children
+	// (NOT the container's own metadata), so there should be zero
+	// `parentID=&quot;0&quot;` matches — pre-PR, items hardcoded
+	// parentID="0" produced 1 match per item.
+	got := strings.Count(body, `parentID=&quot;0&quot;`)
+	if got != 0 {
+		t.Errorf("expected 0 occurrences of legacy parentID=\"0\", got %d in body: %s",
+			got, body)
 	}
 }
 
@@ -336,9 +379,10 @@ func Test_TrackInfo_toDIDLOpts_PreservesFields(t *testing.T) {
 		Channels: 2, IsDSD: false, Codec: "FLAC", FileExtension: ".flac",
 		ArtworkURL: "http://art/x",
 	}
-	opts := track.toDIDLOpts("http://server", "TestUA")
+	opts := track.toDIDLOpts("http://server", "TestUA", "all_tracks")
 	if opts.TrackID != "abc" || opts.Title != "T" || opts.Year != 1965 ||
-		opts.ServerURL != "http://server" || opts.UserAgent != "TestUA" {
+		opts.ServerURL != "http://server" || opts.UserAgent != "TestUA" ||
+		opts.ParentID != "all_tracks" {
 		t.Errorf("toDIDLOpts dropped fields: %+v", opts)
 	}
 }

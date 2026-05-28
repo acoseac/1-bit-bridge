@@ -67,7 +67,20 @@ func TrackID(libraryRoot, relativePath string) string {
 // The XML generator treats zero / empty values as "absent attribute or
 // element" (omits them from the output).
 type DIDLTrackOpts struct {
-	TrackID         string  // stable hash, see TrackID()
+	TrackID string // stable hash, see TrackID()
+	// ParentID is the ObjectID of the container the item lives
+	// in (e.g. "all_tracks", "music/albums/some-album-hash").
+	// Per UPnP CDS spec, each `<item>` MUST declare its parent's
+	// ObjectID. Strict third-party controllers (mconnect Lite
+	// observed 2026-05-28 + Linn Kazoo per UPnP-tester reports)
+	// reject Browse responses where the items' parentID doesn't
+	// match the ObjectID just Browse'd, treating the inconsistency
+	// as a malformed response and silently failing to render the
+	// children. Defaults to "0" if the caller leaves it empty so
+	// existing call sites that haven't been updated yet still
+	// emit valid (if slightly off-spec) DIDL — matches the
+	// pre-PR-#309 behavior verbatim.
+	ParentID        string  // parent container ObjectID
 	Title           string  // dc:title
 	Artist          string  // upnp:artist
 	AlbumArtist     string  // upnp:artist with role="AlbumArtist" if differs from Artist
@@ -177,7 +190,17 @@ func DIDLForTrack(opts DIDLTrackOpts) string {
 	// trackID with `"`/`&`/`<` characters. Same rationale as the
 	// container-attribute escape below. Per Gemini Medium-Security
 	// finding on PR #303.
-	sb.WriteString(fmt.Sprintf(`<item id="%s" parentID="0" restricted="1">`, escapeXMLText(opts.TrackID)))
+	// Default ParentID to "0" when caller leaves it empty —
+	// preserves pre-PR-#309 behavior for any call site we missed
+	// updating. Callers that emit items into a non-root container
+	// (e.g. "all_tracks") MUST set ParentID accordingly so strict
+	// controllers can resolve the container→item parent link.
+	parentID := opts.ParentID
+	if parentID == "" {
+		parentID = "0"
+	}
+	sb.WriteString(fmt.Sprintf(`<item id="%s" parentID="%s" restricted="1">`,
+		escapeXMLText(opts.TrackID), escapeXMLText(parentID)))
 	sb.WriteString(`<dc:title>`)
 	sb.WriteString(title)
 	sb.WriteString(`</dc:title>`)
