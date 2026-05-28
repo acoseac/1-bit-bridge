@@ -126,6 +126,27 @@ func (t TrackInfo) toDIDLOpts(serverURL, userAgent, parentID string) DIDLTrackOp
 // same value.
 const ContentDirectoryServiceType = "urn:schemas-upnp-org:service:ContentDirectory:1"
 
+// allTracksObjectID is the ObjectID for the single "All Tracks"
+// container at the root level. Numeric string value (NOT human-
+// readable like "all_tracks") to match the convention every other
+// MediaServer in the wild uses — empirical evidence captured 2026-
+// 05-28 against the Chord 2Go's own MPD-DLNA reference shows it
+// uses numeric IDs ("1", "2", "3", "64") on all containers.
+// mconnect Player (and similar music-centric controllers based on
+// the Cling Java UPnP library) historically parse ObjectID as an
+// integer internally; non-numeric strings like "all_tracks" caused
+// silent drill-down rejection (mconnect issued root Browse(0)
+// repeatedly but NEVER followed up with Browse(all_tracks, ...)
+// regardless of class, searchable, or storageUsed shape).
+// Per Gemini-rejected hypothesis batch + the 2Go reference shape
+// from PR #314's investigation.
+//
+// **Don't reintroduce a non-numeric string ObjectID** at any new
+// container site — re-opens the mconnect-class-of-issue PR #310
+// → #313 → #314 → this PR all chased. The empirical fix is the
+// numeric format.
+const allTracksObjectID = "1"
+
 // browseEnvelope is the input-side XML shape for a SOAP Browse request.
 // The XML walks Envelope → Body → Browse → {ObjectID, BrowseFlag, …}.
 // `xml:"Browse"` matches regardless of namespace prefix (Go's
@@ -189,7 +210,7 @@ func ContentDirectoryHandler(lib LibrarySource, serverURLFunc func(r *http.Reque
 // handleBrowse processes a SOAP Browse request. ObjectID dispatch:
 //
 //   - "0"           → root: emits the `all_tracks` storage-folder container
-//   - "all_tracks"  → flat list of every track in the library
+//   - `allTracksObjectID` ("1")  → flat list of every track in the library
 //   - Anything else → SOAPFault with UPnPErrNoSuchObject
 //
 // `BrowseFlag == "BrowseMetadata"` returns a single DIDL element
@@ -271,9 +292,9 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, ser
 				ChildCount: 1, // one child: all_tracks
 				UPnPClass:  "object.container",
 			})
-		case "all_tracks":
+		case allTracksObjectID:
 			selfDIDL = DIDLForContainer(DIDLContainerOpts{
-				ID: "all_tracks", ParentID: "0", Title: "All Tracks",
+				ID: allTracksObjectID, ParentID: "0", Title: "All Tracks",
 				ChildCount: len(lib.ListTrackInfos()),
 				// `storageFolder` (reverting PR #313's playlist-
 				// Container) — empirical evidence from the Chord
@@ -336,7 +357,7 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, ser
 		// available" signal.
 		didlElements = []string{
 			DIDLForContainer(DIDLContainerOpts{
-				ID: "all_tracks", ParentID: "0", Title: "All Tracks",
+				ID: allTracksObjectID, ParentID: "0", Title: "All Tracks",
 				ChildCount: len(lib.ListTrackInfos()),
 				// `storageFolder` — reverting PR #313's playlist-
 				// Container change. PR #313 was driven by Gemini's
@@ -394,7 +415,7 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, ser
 		numberReturned = len(didlElements)
 		totalMatches = len(didlElements)
 
-	case "all_tracks":
+	case allTracksObjectID:
 		tracks := lib.ListTrackInfos()
 		// Apply pagination per the SOAP Browse arguments. A
 		// RequestedCount of 0 per UPnP convention means "return as
@@ -426,15 +447,17 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, ser
 		slice := tracks[startIdx:endIdx]
 		didlElements = make([]string, 0, len(slice))
 		for _, t := range slice {
-			// Pass "all_tracks" as the parentID so the emitted
-			// `<item parentID="all_tracks">` reflects the actual
+			// Pass `allTracksObjectID` ("1") as the parentID so the
+			// emitted `<item parentID="1">` reflects the actual
 			// container the items live in (PR #309). Strict
 			// controllers use the parentID to resolve the
 			// container→item relationship; pre-PR the hardcoded
 			// "0" caused mconnect Lite to refuse to render the
-			// children even though Browse(all_tracks) returned
-			// 121 items.
-			didlElements = append(didlElements, DIDLForTrack(t.toDIDLOpts(serverURL, ua, "all_tracks")))
+			// children even though Browse returned 121 items. The
+			// PR-pending change to numeric ObjectID also flips
+			// this parentID in lockstep so the parent/child IDs
+			// remain consistent.
+			didlElements = append(didlElements, DIDLForTrack(t.toDIDLOpts(serverURL, ua, allTracksObjectID)))
 		}
 		numberReturned = len(slice)
 		totalMatches = len(tracks)
