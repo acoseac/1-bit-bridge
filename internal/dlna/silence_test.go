@@ -107,12 +107,26 @@ func Test_SilenceWAVHandler_GETReturnsPayload(t *testing.T) {
 	if tm := rec.Header().Get("transferMode.dlna.org"); tm != "Streaming" {
 		t.Errorf("transferMode.dlna.org = %q, want Streaming", tm)
 	}
+	// Cache-Control pin (PR #311 round-1 CodeRabbit): the handler
+	// deliberately sets `no-store` so a renderer can't cache the
+	// silence asset across bridge restarts. A future tweak to the
+	// silence parameters (duration / sample rate) requires the
+	// cached payload to invalidate — pin the header here so a
+	// regression doesn't silently drop the no-store.
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", cc)
+	}
 	if rec.Body.Len() != len(silenceWAVCache) {
 		t.Errorf("body length = %d, want %d", rec.Body.Len(), len(silenceWAVCache))
 	}
 	// Sanity: first 4 bytes must be "RIFF" (matches the header test).
+	// `len(got) < 4` short-circuit avoids a panic on `got[:4]` if a
+	// future regression returns a truncated body. Per CodeRabbit
+	// PR #311 round-1.
 	got := rec.Body.Bytes()
-	if len(got) < 4 || string(got[:4]) != "RIFF" {
+	if len(got) < 4 {
+		t.Errorf("body shorter than 4 bytes: got %d bytes, want RIFF prefix", len(got))
+	} else if string(got[:4]) != "RIFF" {
 		t.Errorf("body does not start with RIFF magic; first 4 bytes = %q", string(got[:4]))
 	}
 }
@@ -135,6 +149,15 @@ func Test_SilenceWAVHandler_HEADReturnsZeroLengthWithCorrectHeaders(t *testing.T
 	wantLen := strconv.Itoa(len(silenceWAVCache))
 	if cl := rec.Header().Get("Content-Length"); cl != wantLen {
 		t.Errorf("Content-Length = %q, want %q", cl, wantLen)
+	}
+	// Strict renderers probing via HEAD before fetching expect the
+	// same headers as the GET response — pin them here too. Per
+	// CodeRabbit PR #311 round-1.
+	if tm := rec.Header().Get("transferMode.dlna.org"); tm != "Streaming" {
+		t.Errorf("transferMode.dlna.org = %q, want Streaming", tm)
+	}
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", cc)
 	}
 	if rec.Body.Len() != 0 {
 		t.Errorf("HEAD body length = %d, want 0", rec.Body.Len())
