@@ -429,15 +429,21 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, ser
 // server.go); INFO level so it lands in `serve.log` by default
 // without requiring a debug-mode toggle.
 //
-// UA truncated at 100 chars defensively — pathological clients
+// UA truncated at 100 runes defensively — pathological clients
 // sending unbounded UA strings would otherwise produce mile-long log
-// lines. 100 chars covers every real-world UA we've observed
+// lines. 100 runes covers every real-world UA we've observed
 // (BubbleUPnP / 1-bit / Linn Kazoo / mPlayer Lite / Music Player
 // Daemon X.Y.Z all fit comfortably).
+//
+// Truncate by rune count (NOT bytes) so a multi-byte UTF-8 codepoint
+// in a hypothetical exotic UA string can't be cut mid-character,
+// which would corrupt the log line + produce invalid UTF-8 in
+// downstream JSON parsers consuming the slog handler's output. Per
+// CodeRabbit + Gemini on PR #312 round-1.
 func logBrowseRequest(remoteAddr string, b browseAction, ua string) {
 	uaTrim := ua
-	if len(uaTrim) > 100 {
-		uaTrim = uaTrim[:100]
+	if runes := []rune(uaTrim); len(runes) > 100 {
+		uaTrim = string(runes[:100])
 	}
 	packageLogger.Info("Browse request",
 		slog.String("remoteAddr", remoteAddr),
