@@ -339,6 +339,7 @@ func Test_callbackHostAllowed(t *testing.T) {
 		{"link_local", "169.254.1.1", "8.8.8.8:5", true},
 		{"public_rejected", "8.8.8.8", "192.168.0.5:1234", false},
 		{"public_but_matches_source", "8.8.8.8", "8.8.8.8:1234", true},
+		{"public_matches_source_no_port", "8.8.8.8", "8.8.8.8", true}, // bare-host fallback
 		{"hostname_rejected", "example.com", "192.168.0.5:1234", false},
 		{"bad_remote_addr", "8.8.8.8", "garbage", false},
 	}
