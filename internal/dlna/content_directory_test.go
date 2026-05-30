@@ -259,6 +259,35 @@ func Test_clampPage(t *testing.T) {
 	}
 }
 
+// Test_folderIndexCache_ReusesUntilGenerationBumps pins the B6 cache
+// contract: the folder index is reused across calls at a stable
+// generation and rebuilt exactly when the generation advances (a
+// manifest rescan). Verified via *FolderIndex pointer identity —
+// BuildFolderIndex allocates a fresh instance per build.
+func Test_folderIndexCache_ReusesUntilGenerationBumps(t *testing.T) {
+	lib := &StaticLibrary{Tracks: []TrackInfo{
+		{TrackID: "a", AbsolutePath: "/lib/A/x.dsf", RelativePath: "A/x.dsf"},
+	}}
+	fc := newFolderIndexCache(lib)
+
+	i1 := fc.get()
+	i2 := fc.get()
+	if i1 != i2 {
+		t.Fatalf("same generation must reuse the cached *FolderIndex")
+	}
+
+	lib.Gen++ // simulate a manifest rescan
+	i3 := fc.get()
+	if i3 == i1 {
+		t.Fatalf("generation bump must rebuild the *FolderIndex")
+	}
+
+	i4 := fc.get()
+	if i4 != i3 {
+		t.Fatalf("post-bump generation must reuse the rebuilt index")
+	}
+}
+
 // Test_CDS_Browse_BrowseMetadata_Track pins the B1 fix: BrowseMetadata
 // on an individual track ObjectID returns a DIDL <item> (not a 701
 // NoSuchObject). Strict control points (BubbleUPnP / Kazoo) query this
