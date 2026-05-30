@@ -173,6 +173,92 @@ func Test_CDS_Browse_RootReturnsAllTracksAndFolders(t *testing.T) {
 // BrowseMetadata as part of their drill-down handshake and bail to an
 // infinite spinner if the response is empty). Per Gemini consult
 // 2026-05-28.
+// Test_CDS_Browse_Root_RespectsPagination pins that the root container
+// honours StartingIndex / RequestedCount (PR-pending fix — pre-fix the
+// root always returned both children regardless of the pagination
+// arguments, which strict control points doing chunked validation scans
+// with RequestedCount=1 would reject).
+func Test_CDS_Browse_Root_RespectsPagination(t *testing.T) {
+	lib := newTestLib(testTrack("t1", "Hello"), testTrack("t2", "World"))
+	h := ContentDirectoryHandler(lib, staticServerURL("http://server:7790"))
+
+	// RequestedCount=1 from index 0 → only the first container (All
+	// Tracks), but TotalMatches still reports the full 2.
+	t.Run("first_page_of_one", func(t *testing.T) {
+		req := buildBrowseRequest(t, "0", "BrowseDirectChildren", 0, 1)
+		rec := httptest.NewRecorder()
+		h(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d; body: %s", rec.Code, rec.Body.String())
+		}
+		body := rec.Body.String()
+		for _, want := range []string{
+			`<NumberReturned>1</NumberReturned>`,
+			`<TotalMatches>2</TotalMatches>`,
+			`&lt;dc:title&gt;All Tracks&lt;/dc:title&gt;`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("missing %q in body: %s", want, body)
+			}
+		}
+		// Folders (the second container) must NOT appear in the first
+		// page of one.
+		if strings.Contains(body, `&lt;dc:title&gt;Folders&lt;/dc:title&gt;`) {
+			t.Errorf("Folders container should not appear in a RequestedCount=1 first page: %s", body)
+		}
+	})
+
+	// StartingIndex=1 → skip All Tracks, return only Folders.
+	t.Run("second_element_via_offset", func(t *testing.T) {
+		req := buildBrowseRequest(t, "0", "BrowseDirectChildren", 1, 100)
+		rec := httptest.NewRecorder()
+		h(rec, req)
+		body := rec.Body.String()
+		for _, want := range []string{
+			`<NumberReturned>1</NumberReturned>`,
+			`<TotalMatches>2</TotalMatches>`,
+			`&lt;dc:title&gt;Folders&lt;/dc:title&gt;`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("missing %q in body: %s", want, body)
+			}
+		}
+		if strings.Contains(body, `&lt;dc:title&gt;All Tracks&lt;/dc:title&gt;`) {
+			t.Errorf("All Tracks should be skipped at StartingIndex=1: %s", body)
+		}
+	})
+}
+
+// Test_clampPage pins the shared pagination clamp the root / All Tracks /
+// folder-children arms now share.
+func Test_clampPage(t *testing.T) {
+	cases := []struct {
+		name           string
+		total          int
+		start, count   uint32
+		wantLo, wantHi int
+	}{
+		{"zero_count_returns_all", 10, 0, 0, 0, 10},
+		{"count_within_range", 10, 0, 3, 0, 3},
+		{"offset_plus_count", 10, 2, 3, 2, 5},
+		{"count_exceeds_remaining_clamps", 10, 8, 100, 8, 10},
+		{"start_beyond_total_collapses", 10, 50, 5, 10, 10},
+		{"empty_total", 0, 0, 0, 0, 0},
+		{"max_uint32_count_no_overflow", 10, 0, 0xFFFFFFFF, 0, 10},
+		{"single_element_first_page", 2, 0, 1, 0, 1},
+		{"single_element_second_page", 2, 1, 1, 1, 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			lo, hi := clampPage(tc.total, tc.start, tc.count)
+			if lo != tc.wantLo || hi != tc.wantHi {
+				t.Errorf("clampPage(%d, %d, %d) = (%d, %d), want (%d, %d)",
+					tc.total, tc.start, tc.count, lo, hi, tc.wantLo, tc.wantHi)
+			}
+		})
+	}
+}
+
 func Test_CDS_Browse_BrowseMetadata_RootReturnsRootContainer(t *testing.T) {
 	lib := newTestLib(testTrack("t1", "Hello"))
 	h := ContentDirectoryHandler(lib, staticServerURL("http://server"))
