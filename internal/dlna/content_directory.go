@@ -398,9 +398,9 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, ser
 				UPnPClass:  "object.container.storageFolder",
 			})
 		default:
-			// Could be a hashed folder ObjectID. Build the folder
-			// index and look it up before falling through to
-			// NoSuchObject.
+			// Could be a hashed folder ObjectID OR an individual track
+			// ID. Build the index and try a folder match first, then a
+			// track match, before falling through to NoSuchObject.
 			folderIndex := BuildFolderIndex(lib.ListTrackInfos())
 			if node, ok := folderIndex.Folders[browse.ObjectID]; ok {
 				selfDIDL = DIDLForContainer(DIDLContainerOpts{
@@ -408,6 +408,22 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, ser
 					ChildCount: len(node.ChildFolderIDs) + len(node.ChildTrackIDs),
 					UPnPClass:  "object.container.storageFolder",
 				})
+				break
+			}
+			// Individual-track BrowseMetadata. Strict control points
+			// (BubbleUPnP / Kazoo) query a track's metadata before
+			// playback / during playlist sync to read its duration,
+			// resource constraints, and artwork URI; pre-fix this
+			// returned a 701 NoSuchObject for legitimate tracks, which
+			// made track details vanish or blocked playback on those
+			// controllers. Derive the track's deterministic folder
+			// parent so the emitted `<item parentID>` is consistent with
+			// the Folders browse axis — `FolderObjectID` collapses a
+			// top-level / empty-rel-path track to `foldersRootObjectID`
+			// ("2") automatically.
+			if t, ok := folderIndex.LookupTrack(browse.ObjectID); ok {
+				parentID := FolderObjectID(relParentDirFromRelPath(t.RelativePath))
+				selfDIDL = DIDLForTrack(t.toDIDLOpts(serverURL, ua, parentID))
 				break
 			}
 			// Unknown ObjectID under BrowseMetadata — same `NoSuchObject`
