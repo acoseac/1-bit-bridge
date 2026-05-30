@@ -343,6 +343,13 @@ func Test_ParseMSearchST(t *testing.T) {
 				"\r\n",
 			want: "urn:schemas-upnp-org:device:MediaServer:1",
 		},
+		{
+			name: "lf_only_line_endings",
+			packet: "M-SEARCH * HTTP/1.1\n" +
+				"HOST: 239.255.255.250:1900\n" +
+				"ST: upnp:rootdevice\n\n",
+			want: "upnp:rootdevice",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -407,6 +414,14 @@ func Test_ParseMSearchMX(t *testing.T) {
 			name:   "not_msearch_returns_zero",
 			packet: "NOTIFY * HTTP/1.1\r\nMX: 3\r\n\r\n",
 			want:   0,
+		},
+		{
+			name: "lf_only_line_endings",
+			packet: "M-SEARCH * HTTP/1.1\n" +
+				"HOST: 239.255.255.250:1900\n" +
+				"MX: 4\n" +
+				"ST: ssdp:all\n\n",
+			want: 4,
 		},
 	}
 	for _, tc := range cases {

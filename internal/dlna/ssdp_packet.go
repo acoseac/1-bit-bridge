@@ -201,7 +201,7 @@ func ParseMSearchST(packet []byte) string {
 	if !strings.HasPrefix(s, "M-SEARCH ") {
 		return ""
 	}
-	for _, line := range strings.Split(s, "\r\n") {
+	for _, line := range strings.Split(s, "\n") { // split on \n; TrimSpace below drops any trailing \r (tolerates bare-LF SSDP)
 		colon := strings.IndexByte(line, ':')
 		if colon < 0 {
 			continue
@@ -236,7 +236,7 @@ func ParseMSearchMX(packet []byte) int {
 	if !strings.HasPrefix(s, "M-SEARCH ") {
 		return 0
 	}
-	for _, line := range strings.Split(s, "\r\n") {
+	for _, line := range strings.Split(s, "\n") { // split on \n; TrimSpace below drops any trailing \r (tolerates bare-LF SSDP)
 		colon := strings.IndexByte(line, ':')
 		if colon < 0 {
 			continue
