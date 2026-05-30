@@ -463,7 +463,7 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, ser
 		// stub IDs) to the `default` `NoSuchObject` SOAP fault,
 		// which is the cleanest "this container is no longer
 		// available" signal.
-		didlElements = []string{
+		rootContainers := []string{
 			DIDLForContainer(DIDLContainerOpts{
 				ID: allTracksObjectID, ParentID: "0", Title: "All Tracks",
 				ChildCount: folderIndex.TrackCount(),
@@ -530,8 +530,14 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, ser
 				UPnPClass:  "object.container.storageFolder",
 			}),
 		}
+		// Honour StartingIndex / RequestedCount on the root too — strict
+		// control points that probe with RequestedCount=1 (chunked
+		// validation scans) would otherwise receive more elements than
+		// requested. Same clamp the other arms use.
+		lo, hi := clampPage(len(rootContainers), browse.StartingIndex, browse.RequestedCount)
+		didlElements = rootContainers[lo:hi]
 		numberReturned = len(didlElements)
-		totalMatches = len(didlElements)
+		totalMatches = len(rootContainers)
 
 	case foldersRootObjectID:
 		// "Folders" drill-down — emit top-level folder containers +
@@ -553,33 +559,10 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, ser
 
 	case allTracksObjectID:
 		tracks := lib.ListTrackInfos()
-		// Apply pagination per the SOAP Browse arguments. A
-		// RequestedCount of 0 per UPnP convention means "return as
-		// many as you can"; we cap at len(tracks) - StartingIndex.
-		//
-		// Bound arithmetic happens in uint64 to defend against the
-		// `int(uint32)` overflow that would surface on 32-bit builds:
-		// a renderer that sends `RequestedCount = 0xFFFFFFFF` would
-		// have `startIdx + int(browse.RequestedCount)` produce a
-		// negative endIdx and `tracks[startIdx:endIdx]` would panic.
-		// Clamp in uint64, then cast at the end where the result is
-		// guaranteed in [0, len(tracks)]. Per CodeRabbit Major on
-		// PR #303.
-		n := uint64(len(tracks))
-		startU := uint64(browse.StartingIndex)
-		if startU > n {
-			startU = n
-		}
-		endU := n
-		if browse.RequestedCount > 0 {
-			reqU := uint64(browse.RequestedCount)
-			if reqU > n-startU {
-				reqU = n - startU
-			}
-			endU = startU + reqU
-		}
-		startIdx := int(startU)
-		endIdx := int(endU)
+		// Apply pagination per the SOAP Browse arguments via the shared
+		// clamp (uint64-safe, RequestedCount==0 → "all"). See
+		// `clampPage`.
+		startIdx, endIdx := clampPage(len(tracks), browse.StartingIndex, browse.RequestedCount)
 		slice := tracks[startIdx:endIdx]
 		didlElements = make([]string, 0, len(slice))
 		for _, t := range slice {
@@ -728,23 +711,8 @@ func browseFolderChildren(
 	if total == 0 {
 		return nil
 	}
-	// uint64 pagination math — see allTracksObjectID case for the
-	// rationale.
-	n := uint64(total)
-	startU := uint64(browse.StartingIndex)
-	if startU > n {
-		startU = n
-	}
-	endU := n
-	if browse.RequestedCount > 0 {
-		reqU := uint64(browse.RequestedCount)
-		if reqU > n-startU {
-			reqU = n - startU
-		}
-		endU = startU + reqU
-	}
-	startIdx := int(startU)
-	endIdx := int(endU)
+	// Shared pagination clamp (uint64-safe; RequestedCount==0 → "all").
+	startIdx, endIdx := clampPage(total, browse.StartingIndex, browse.RequestedCount)
 
 	// Emit folder containers first, then tracks. Iterate the combined
 	// index space directly so pagination cuts at the requested
@@ -784,6 +752,34 @@ func browseFolderChildren(
 		out = append(out, DIDLForTrack(t.toDIDLOpts(serverURL, ua, parentID)))
 	}
 	return out
+}
+
+// clampPage computes the [lo, hi) slice window for a Browse response
+// honouring the SOAP StartingIndex / RequestedCount pagination
+// arguments. A RequestedCount of 0 means "return as many as possible"
+// (UPnP convention).
+//
+// Bound arithmetic runs in uint64 to defend against the int(uint32)
+// overflow a renderer could trigger with RequestedCount = 0xFFFFFFFF
+// (startIdx + int(count) → negative endIdx → slice panic on 32-bit
+// builds). The returned ints are guaranteed in [0, total]. Per
+// CodeRabbit Major on PR #303 — extracted so the root / All Tracks /
+// folder-children arms share ONE implementation and can't drift.
+func clampPage(total int, startingIndex, requestedCount uint32) (lo, hi int) {
+	n := uint64(total)
+	startU := uint64(startingIndex)
+	if startU > n {
+		startU = n
+	}
+	endU := n
+	if requestedCount > 0 {
+		reqU := uint64(requestedCount)
+		if reqU > n-startU {
+			reqU = n - startU
+		}
+		endU = startU + reqU
+	}
+	return int(startU), int(endU)
 }
 
 // writeSOAPFault writes a SOAPFault response with the given UPnP error
