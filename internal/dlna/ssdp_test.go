@@ -94,8 +94,15 @@ func Test_SSDPAdvertiser_StartStopRaceFree(t *testing.T) {
 		a.cfg.AdvertiseInterval = time.Millisecond
 
 		if err := a.Start(context.Background()); err != nil {
-			t.Skipf("multicast unavailable in this environment: %v", err)
-			return
+			// Skip ONLY if the very first Start fails (environment lacks
+			// multicast). A failure on a later iteration after a prior
+			// success indicates a teardown regression (e.g. a socket /
+			// port not released by Stop) and must FAIL, not skip.
+			if i == 0 {
+				t.Skipf("multicast unavailable in this environment: %v", err)
+				return
+			}
+			t.Fatalf("Start failed on iteration %d after a prior success: %v", i, err)
 		}
 		// Let the periodic goroutine tick a few times.
 		time.Sleep(10 * time.Millisecond)
