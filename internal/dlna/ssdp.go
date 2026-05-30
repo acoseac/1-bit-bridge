@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math/rand/v2"
 	"net"
 	"sync"
 	"time"
@@ -12,6 +13,19 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 )
+
+// maxConcurrentMSearchResponders bounds the number of in-flight M-SEARCH
+// responder goroutines. Each one may sleep up to `mxResponseCeilingSeconds`
+// (the spec-mandated randomized reply delay) before sending, so without a
+// cap a burst of `ssdp:all` searches — accidental or hostile — could spawn
+// unbounded goroutines. When the pool is full, additional searches are
+// dropped (the control point re-searches; SSDP discovery is best-effort).
+const maxConcurrentMSearchResponders = 16
+
+// defaultMSearchJitter is the reply spread applied when an M-SEARCH omits
+// MX (or sends MX:0). Still randomized so simultaneous searches don't
+// reply in a synchronized burst.
+const defaultMSearchJitter = 100 * time.Millisecond
 
 // ssdpLogger is the SSDP-specific package logger — distinct subcomponent
 // tag from `dlna` proper so operators grepping for the multicast /
@@ -107,6 +121,12 @@ type SSDPAdvertiser struct {
 	wg       sync.WaitGroup
 	listener *net.UDPConn // multicast listener for incoming M-SEARCH
 	sender   *net.UDPConn // unicast sender for outgoing NOTIFY
+
+	// searchSem bounds concurrent M-SEARCH responder goroutines (see
+	// `maxConcurrentMSearchResponders`). Allocated once in the
+	// constructor; immutable thereafter, so it's safe to read without
+	// the lock.
+	searchSem chan struct{}
 }
 
 // NewSSDPAdvertiser constructs an advertiser with the given config.
@@ -118,8 +138,9 @@ func NewSSDPAdvertiser(cfg SSDPConfig) *SSDPAdvertiser {
 		cfg.AdvertiseInterval = defaultAdvertiseInterval
 	}
 	return &SSDPAdvertiser{
-		cfg:     cfg,
-		targets: NotifyTargetsFor(cfg.UDN),
+		cfg:       cfg,
+		targets:   NotifyTargetsFor(cfg.UDN),
+		searchSem: make(chan struct{}, maxConcurrentMSearchResponders),
 	}
 }
 
@@ -336,15 +357,39 @@ func (s *SSDPAdvertiser) runMSearchListener(ctx context.Context, listener *net.U
 				slog.String("err", err.Error()))
 			continue
 		}
-		s.handleMSearch(buf[:n], src)
+		// Offload the response to a bounded worker goroutine so the
+		// listener returns to `ReadFromUDP` immediately — `handleMSearch`
+		// sleeps (the spec-mandated MX delay) and does blocking socket
+		// I/O, which must not stall the receive loop (a slow / full send
+		// buffer would otherwise drop concurrent searches from other
+		// renderers). `buf` is reused on the next iteration, so the
+		// packet MUST be copied before it crosses the goroutine boundary.
+		pkt := make([]byte, n)
+		copy(pkt, buf[:n])
+		select {
+		case s.searchSem <- struct{}{}:
+			s.wg.Add(1)
+			go func() {
+				defer s.wg.Done()
+				defer func() { <-s.searchSem }()
+				s.handleMSearch(ctx, pkt, src)
+			}()
+		default:
+			// Responder pool full — drop. The control point re-searches;
+			// SSDP discovery is best-effort by design.
+			s.log.Debug("M-SEARCH responder pool full; dropping",
+				slog.String("src", src.String()))
+		}
 	}
 }
 
-// handleMSearch parses an incoming packet for M-SEARCH and sends one
-// unicast response per matching NotifyTarget back to the source.
-// Pure routing logic; the packet builders + target matcher are tested
-// in isolation in ssdp_packet_test.go.
-func (s *SSDPAdvertiser) handleMSearch(packet []byte, src *net.UDPAddr) {
+// handleMSearch parses an incoming packet for M-SEARCH, waits the
+// spec-mandated random [0, MX] delay, then sends one unicast response
+// per matching NotifyTarget back to the source over a SINGLE transient
+// socket. Runs on a bounded worker goroutine (see `runMSearchListener`).
+// Pure routing logic; the packet builders + target matcher + MX parser
+// are tested in isolation in ssdp_packet_test.go.
+func (s *SSDPAdvertiser) handleMSearch(ctx context.Context, packet []byte, src *net.UDPAddr) {
 	st := ParseMSearchST(packet)
 	if st == "" {
 		return // not an M-SEARCH or missing ST — silently drop
@@ -353,26 +398,49 @@ func (s *SSDPAdvertiser) handleMSearch(packet []byte, src *net.UDPAddr) {
 	if len(matches) == 0 {
 		return // ST didn't match anything we advertise
 	}
+
+	// Spec-mandated randomized reply delay in [0, MX]. Missing/zero MX
+	// falls back to a small fixed jitter so simultaneous searches still
+	// don't reply in a synchronized burst. The sleep is `select`-
+	// cancellable so `Stop()` unparks a sleeping responder instantly
+	// rather than leaking it for up to MX seconds.
+	var window time.Duration
+	if mx := ParseMSearchMX(packet); mx > 0 {
+		window = time.Duration(mx) * time.Second
+	} else {
+		window = defaultMSearchJitter
+	}
+	delay := time.Duration(rand.Int64N(int64(window) + 1))
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return
+	case <-timer.C:
+	}
+
+	// Dial the transient unicast socket ONCE (not per target). An
+	// `ssdp:all` search matches every NotifyTarget; re-dialing the same
+	// `src` per match is pure socket churn. One datagram per target/USN
+	// is still correct UPnP — only the socket is shared.
+	conn, err := net.DialUDP("udp4", nil, src)
+	if err != nil {
+		s.log.Debug("M-SEARCH response dial failed",
+			slog.String("src", src.String()),
+			slog.String("err", err.Error()))
+		return
+	}
+	defer conn.Close()
+
 	now := time.Now()
 	for _, target := range matches {
 		response := BuildMSearchResponse(s.cfg.Location, s.cfg.ServerToken, target.NT, target.USN, now)
-		// Open a transient unicast socket for the response (we
-		// can't reuse the multicast listener for outbound unicast).
-		// Errors logged at Debug level; transient send failures are
-		// not actionable.
-		conn, err := net.DialUDP("udp4", nil, src)
-		if err != nil {
-			s.log.Debug("M-SEARCH response dial failed",
-				slog.String("src", src.String()),
-				slog.String("err", err.Error()))
-			continue
-		}
 		if _, err := conn.Write(response); err != nil {
 			s.log.Debug("M-SEARCH response write failed",
 				slog.String("src", src.String()),
+				slog.String("nt", target.NT),
 				slog.String("err", err.Error()))
 		}
-		_ = conn.Close()
 	}
 }
 
