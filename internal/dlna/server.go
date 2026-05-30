@@ -449,7 +449,10 @@ func callbackHostAllowed(host, remoteAddr string) bool {
 	}
 	srcHost, _, err := net.SplitHostPort(remoteAddr)
 	if err != nil {
-		return false
+		// remoteAddr may lack a port (a reverse proxy rewrote it, or a
+		// custom test setup) — fall back to treating it as a bare host.
+		// A non-IP value still fails the ParseIP check below.
+		srcHost = remoteAddr
 	}
 	srcIP := net.ParseIP(srcHost)
 	return srcIP != nil && srcIP.Equal(ip)
