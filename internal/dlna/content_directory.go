@@ -73,14 +73,38 @@ func newFolderIndexCache(lib LibrarySource) *folderIndexCache {
 
 // get returns the folder index for the current library generation,
 // rebuilding (and republishing) only when the generation has advanced.
+//
+// Concurrency: the publish uses a CAS loop that NEVER regresses the
+// cache to an older generation, so a slow builder for gen N can't clobber
+// a freshly-published gen N+1 (which would cause spurious cache misses
+// until the next rebuild). The generation is double-read around the
+// track snapshot so we never cache a track list under a generation it
+// doesn't match (a rescan landing between the two reads → retry).
 func (c *folderIndexCache) get() *FolderIndex {
-	gen := c.lib.Generation()
-	if cur := c.cached.Load(); cur != nil && cur.gen == gen {
-		return cur.idx
+	for {
+		gen := c.lib.Generation()
+		if cur := c.cached.Load(); cur != nil && cur.gen == gen {
+			return cur.idx
+		}
+		tracks := c.lib.ListTrackInfos()
+		if c.lib.Generation() != gen {
+			continue // library moved between the gen read and the snapshot
+		}
+		idx := BuildFolderIndex(tracks)
+		newVal := &cachedFolderIndex{gen: gen, idx: idx}
+		for {
+			cur := c.cached.Load()
+			if cur != nil && cur.gen >= gen {
+				if cur.gen == gen {
+					return cur.idx // someone published our generation
+				}
+				break // a newer generation is cached — re-read from the top
+			}
+			if c.cached.CompareAndSwap(cur, newVal) {
+				return idx
+			}
+		}
 	}
-	idx := BuildFolderIndex(c.lib.ListTrackInfos())
-	c.cached.Store(&cachedFolderIndex{gen: gen, idx: idx})
-	return idx
 }
 
 // TrackInfo is the bridge's adapter-layer Track shape. Mirrors the

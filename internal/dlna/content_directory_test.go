@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -285,6 +287,55 @@ func Test_folderIndexCache_ReusesUntilGenerationBumps(t *testing.T) {
 	i4 := fc.get()
 	if i4 != i3 {
 		t.Fatalf("post-bump generation must reuse the rebuilt index")
+	}
+}
+
+// genTestLib is a LibrarySource with an atomic generation, for the
+// concurrent cache test (StaticLibrary.Gen is a plain field and would
+// itself race under concurrent bump + read).
+type genTestLib struct {
+	tracks []TrackInfo
+	gen    atomic.Uint64
+}
+
+func (g *genTestLib) ListTrackInfos() []TrackInfo           { return g.tracks }
+func (g *genTestLib) GetTrackInfo(string) (TrackInfo, bool) { return TrackInfo{}, false }
+func (g *genTestLib) Generation() uint64                    { return g.gen.Load() }
+
+// Test_folderIndexCache_ConcurrentGetRaceFree hammers get() from many
+// goroutines while another bumps the generation. Run under -race, it
+// verifies the CAS publish path is race-free and the monotonic-store
+// loop terminates (never spins or regresses).
+func Test_folderIndexCache_ConcurrentGetRaceFree(t *testing.T) {
+	lib := &genTestLib{tracks: []TrackInfo{
+		{TrackID: "a", AbsolutePath: "/lib/A/x.dsf", RelativePath: "A/x.dsf"},
+	}}
+	fc := newFolderIndexCache(lib)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				if fc.get() == nil {
+					t.Errorf("get() returned nil index")
+					return
+				}
+			}
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for j := 0; j < 50; j++ {
+			lib.gen.Add(1)
+		}
+	}()
+	wg.Wait()
+
+	if fc.get() == nil {
+		t.Fatal("final get() returned nil index")
 	}
 }
 
