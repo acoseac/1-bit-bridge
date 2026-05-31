@@ -259,6 +259,73 @@ func Test_clampPage(t *testing.T) {
 	}
 }
 
+// Test_CDS_Browse_BrowseMetadata_Track pins the B1 fix: BrowseMetadata
+// on an individual track ObjectID returns a DIDL <item> (not a 701
+// NoSuchObject). Strict control points (BubbleUPnP / Kazoo) query this
+// before playback to read duration / resource constraints.
+func Test_CDS_Browse_BrowseMetadata_Track(t *testing.T) {
+	t.Run("top_level_track_parent_is_folders_root", func(t *testing.T) {
+		lib := newTestLib(testTrack("trk1", "Song"))
+		h := ContentDirectoryHandler(lib, staticServerURL("http://server:7790"))
+		req := buildBrowseRequest(t, "trk1", "BrowseMetadata", 0, 0)
+		rec := httptest.NewRecorder()
+		h(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d; body: %s", rec.Code, rec.Body.String())
+		}
+		body := rec.Body.String()
+		for _, want := range []string{
+			`<NumberReturned>1</NumberReturned>`,
+			`id=&quot;trk1&quot;`,
+			`parentID=&quot;2&quot;`, // top-level → foldersRootObjectID
+			`&lt;dc:title&gt;Song&lt;/dc:title&gt;`,
+			`&lt;item `, // an item, not a container
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("missing %q in body: %s", want, body)
+			}
+		}
+		if strings.Contains(body, `&lt;container `) {
+			t.Errorf("BrowseMetadata on a track must not emit a container: %s", body)
+		}
+	})
+
+	t.Run("nested_track_parent_is_folder_object_id", func(t *testing.T) {
+		nested := TrackInfo{
+			TrackID:       "trkN",
+			AbsolutePath:  "/library/Artist/Album/Deep.dsf",
+			RelativePath:  "Artist/Album/Deep.dsf",
+			Title:         "Deep",
+			FileExtension: ".dsf", Codec: "DSF", Size: 10, Channels: 2,
+		}
+		lib := newTestLib(nested)
+		h := ContentDirectoryHandler(lib, staticServerURL("http://server:7790"))
+		req := buildBrowseRequest(t, "trkN", "BrowseMetadata", 0, 0)
+		rec := httptest.NewRecorder()
+		h(rec, req)
+		body := rec.Body.String()
+		wantParent := FolderObjectID("Artist/Album")
+		if !strings.Contains(body, `parentID=&quot;`+wantParent+`&quot;`) {
+			t.Errorf("nested track parentID should be FolderObjectID(Artist/Album)=%s; body: %s", wantParent, body)
+		}
+		if !strings.Contains(body, `id=&quot;trkN&quot;`) {
+			t.Errorf("missing track id in body: %s", body)
+		}
+	})
+
+	t.Run("unknown_id_still_404", func(t *testing.T) {
+		lib := newTestLib(testTrack("trk1", "Song"))
+		h := ContentDirectoryHandler(lib, staticServerURL("http://server"))
+		req := buildBrowseRequest(t, "does-not-exist", "BrowseMetadata", 0, 0)
+		rec := httptest.NewRecorder()
+		h(rec, req)
+		if rec.Code != http.StatusInternalServerError {
+			t.Errorf("unknown ObjectID should still fault (NoSuchObject); got status %d, body %s",
+				rec.Code, rec.Body.String())
+		}
+	})
+}
+
 func Test_CDS_Browse_BrowseMetadata_RootReturnsRootContainer(t *testing.T) {
 	lib := newTestLib(testTrack("t1", "Hello"))
 	h := ContentDirectoryHandler(lib, staticServerURL("http://server"))

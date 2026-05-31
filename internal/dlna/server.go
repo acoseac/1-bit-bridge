@@ -7,11 +7,18 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 )
+
+// genaInitialNotifyTimeout bounds the single best-effort initial NOTIFY
+// POST sent to a control point's callback URL after a successful
+// SUBSCRIBE. One attempt, no retries.
+const genaInitialNotifyTimeout = 5 * time.Second
 
 // packageLogger is the package-scoped slog handler. Mirrors the
 // convention from `internal/admin`, `internal/api`, `internal/auth`,
@@ -94,6 +101,16 @@ type Server struct {
 	httpServer *http.Server
 	ssdp       *SSDPAdvertiser
 	log        *slog.Logger
+
+	// GENA initial-NOTIFY lifecycle. `notifyCtx` is cancelled by Stop so
+	// an in-flight best-effort NOTIFY POST can't outlive the server;
+	// `notifyWG` lets Stop drain in-flight notifies (Adds happen inside
+	// the SUBSCRIBE handler, which `httpServer.Shutdown` drains before
+	// the Wait). `notifyClient` is the shared timeout-bounded HTTP client.
+	notifyCtx    context.Context
+	notifyCancel context.CancelFunc
+	notifyWG     sync.WaitGroup
+	notifyClient *http.Client
 }
 
 // NewServer constructs a Server with the given config. Does NOT bind
@@ -139,6 +156,13 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 // runs independently via its own shutdown (Stop()) — ctx cancellation
 // alone doesn't stop the HTTP server, the caller must call Stop().
 func (s *Server) Start(ctx context.Context) error {
+	// GENA initial-NOTIFY lifecycle — derived from the caller's ctx so
+	// ctx cancellation OR Stop() both unpark in-flight notifies. Set up
+	// before mountHandlers so the GENA handlers (which read these lazily
+	// at request time) always observe non-nil state once serving begins.
+	s.notifyCtx, s.notifyCancel = context.WithCancel(ctx)
+	s.notifyClient = &http.Client{Timeout: genaInitialNotifyTimeout}
+
 	s.mux = http.NewServeMux()
 	s.mountHandlers()
 
@@ -209,7 +233,15 @@ func (s *Server) Stop(ctx context.Context) error {
 		s.ssdp.Stop()
 		s.ssdp = nil
 	}
+	// Cancel any in-flight GENA initial-NOTIFY POSTs so they don't
+	// outlive the server.
+	if s.notifyCancel != nil {
+		s.notifyCancel()
+	}
+
 	if s.httpServer == nil {
+		// Still drain any notify goroutines spawned before this point.
+		s.notifyWG.Wait()
 		return nil
 	}
 
@@ -222,6 +254,12 @@ func (s *Server) Stop(ctx context.Context) error {
 	}
 	err := s.httpServer.Shutdown(ctx)
 	s.httpServer = nil
+
+	// Shutdown drains in-flight SUBSCRIBE handlers — and each handler
+	// does its `notifyWG.Add(1)` BEFORE returning — so once Shutdown
+	// returns no new notify goroutines can be spawned. Now it's safe to
+	// wait for the already-spawned (cancelled) ones to finish.
+	s.notifyWG.Wait()
 	s.log.Info("DLNA server stopped")
 	return err
 }
@@ -239,10 +277,13 @@ func (s *Server) Stop(ctx context.Context) error {
 //	SUBSCRIBE/UNSUBSCRIBE /dlna/cds/event  GENA stub (no-op success)
 //	SUBSCRIBE/UNSUBSCRIBE /dlna/cm/event   GENA stub (no-op success)
 //
-// GENA event subscription is stubbed — we accept the subscription
-// (200 OK with synthesized SID) but never send NOTIFY events. Most
-// renderers tolerate this gracefully; the alternative (refusing
-// SUBSCRIBE with 404) makes some renderers blacklist the service.
+// GENA eventing is minimal: we accept the subscription (200 OK with a
+// synthesized SID + SERVER header) and send exactly ONE best-effort
+// initial NOTIFY so strict control points (Linn / Naim) see their
+// callback tested. No ongoing change-notifications are sent — the
+// evented state is intentionally static (SystemUpdateID = 1; fixed
+// *ProtocolInfo), so there's nothing to push. Refusing SUBSCRIBE with
+// 404 is NOT an option (some renderers blacklist the service).
 func (s *Server) mountHandlers() {
 	deviceOpts := DeviceDescriptionOpts{
 		UDN:              s.cfg.UDN,
@@ -283,40 +324,161 @@ func (s *Server) mountHandlers() {
 	// of whether SOAP control is wired.
 	s.mux.Handle(SilenceWAVPath, SilenceWAVHandler())
 
-	// GENA event stubs — accept SUBSCRIBE / UNSUBSCRIBE without
-	// actually delivering events. The HandlerFunc inspects r.Method
-	// rather than relying on the mux (which doesn't dispatch on
-	// SUBSCRIBE/UNSUBSCRIBE method names).
-	s.mux.HandleFunc("/dlna/cds/event", genaStubHandler("cds", s.log))
-	s.mux.HandleFunc("/dlna/cm/event", genaStubHandler("cm", s.log))
+	// GENA event handlers — accept SUBSCRIBE / UNSUBSCRIBE, set the
+	// SERVER header, and fire one best-effort initial NOTIFY. The
+	// HandlerFunc inspects r.Method rather than relying on the mux
+	// (which doesn't dispatch on SUBSCRIBE/UNSUBSCRIBE method names).
+	s.mux.HandleFunc("/dlna/cds/event", s.genaHandler("cds"))
+	s.mux.HandleFunc("/dlna/cm/event", s.genaHandler("cm"))
 }
 
-// genaStubHandler returns a no-op SUBSCRIBE/UNSUBSCRIBE handler that
-// accepts the subscription with a synthesized SID but never sends
-// NOTIFY events. The bridge has no state-change events to push (our
-// library is read-only from the renderer's perspective), so the
-// "subscription" is purely a courtesy to renderers that expect to
-// be able to subscribe.
-func genaStubHandler(label string, log *slog.Logger) http.HandlerFunc {
+// genaHandler returns the SUBSCRIBE/UNSUBSCRIBE handler for one GENA
+// service ("cds" or "cm"). It accepts the subscription with a
+// synthesized SID + the mandatory UPnP SERVER header, then sends a
+// single best-effort initial NOTIFY (see `fireInitialNotify`). No
+// ongoing eventing — the evented state is static by design.
+func (s *Server) genaHandler(label string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// SERVER header on EVERY GENA response — UPnP UDA mandates it,
+		// and Go's net/http doesn't set it. Strict renderers reject GENA
+		// responses lacking it.
+		w.Header().Set("Server", SSDPServerToken(s.cfg.ModelNumber))
 		switch r.Method {
 		case "SUBSCRIBE":
-			sid := fmt.Sprintf("uuid:dlna-%s-stub-%d", label, time.Now().UnixNano())
+			sid := fmt.Sprintf("uuid:dlna-%s-%d", label, time.Now().UnixNano())
 			w.Header().Set("SID", sid)
 			w.Header().Set("TIMEOUT", "Second-1800")
 			w.WriteHeader(http.StatusOK)
-			log.Debug("GENA SUBSCRIBE stubbed",
+			callback := r.Header.Get("CALLBACK")
+			s.log.Debug("GENA SUBSCRIBE accepted",
 				slog.String("service", label),
 				slog.String("sid", sid),
-				slog.String("callback", r.Header.Get("CALLBACK")))
+				slog.String("callback", callback))
+			// Best-effort initial NOTIFY AFTER the 200 response so the
+			// control point already has the SID when the NOTIFY lands.
+			s.fireInitialNotify(label, sid, callback, r.RemoteAddr)
 		case "UNSUBSCRIBE":
 			w.WriteHeader(http.StatusOK)
-			log.Debug("GENA UNSUBSCRIBE stubbed",
+			s.log.Debug("GENA UNSUBSCRIBE accepted",
 				slog.String("service", label),
 				slog.String("sid", r.Header.Get("SID")))
 		default:
 			http.Error(w, "SUBSCRIBE or UNSUBSCRIBE only", http.StatusMethodNotAllowed)
 		}
+	}
+}
+
+// fireInitialNotify sends a single best-effort GENA initial NOTIFY to
+// the control point's callback URL, carrying the service's evented
+// state. Guarded against being turned into an SSRF relay: the callback
+// host must be an on-LAN IP literal (loopback / RFC1918 / link-local) OR
+// match the SUBSCRIBE request's source IP; hostnames and arbitrary
+// public IPs are rejected (the NOTIFY is silently skipped — the
+// SUBSCRIBE already returned 200). Timeout-bounded, no retries, and
+// cancellable via the server's notify context so Stop() unparks it.
+func (s *Server) fireInitialNotify(service, sid, callbackHeader, remoteAddr string) {
+	target := firstCallbackURL(callbackHeader)
+	if target == "" {
+		return
+	}
+	u, err := url.Parse(target)
+	if err != nil || u.Scheme != "http" || u.Host == "" {
+		return
+	}
+	if !callbackHostAllowed(u.Hostname(), remoteAddr) {
+		s.log.Debug("GENA initial NOTIFY skipped — callback host not on LAN",
+			slog.String("service", service),
+			slog.String("callbackHost", u.Hostname()))
+		return
+	}
+
+	body := initialNotifyBody(service)
+	s.notifyWG.Add(1)
+	go func() {
+		defer s.notifyWG.Done()
+		req, err := http.NewRequestWithContext(s.notifyCtx, "NOTIFY", target, strings.NewReader(body))
+		if err != nil {
+			return
+		}
+		req.Header.Set("Content-Type", `text/xml; charset="utf-8"`)
+		req.Header.Set("NT", "upnp:event")
+		req.Header.Set("NTS", "upnp:propchange")
+		req.Header.Set("SID", sid)
+		req.Header.Set("SEQ", "0")
+		resp, err := s.notifyClient.Do(req)
+		if err != nil {
+			s.log.Debug("GENA initial NOTIFY failed",
+				slog.String("service", service),
+				slog.String("err", err.Error()))
+			return
+		}
+		_ = resp.Body.Close()
+	}()
+}
+
+// firstCallbackURL extracts the first `<...>`-delimited URL from a GENA
+// CALLBACK header. The header may carry multiple space-separated
+// `<url>` entries; we use the first. Returns "" if malformed.
+func firstCallbackURL(header string) string {
+	header = strings.TrimSpace(header)
+	start := strings.IndexByte(header, '<')
+	if start < 0 {
+		return ""
+	}
+	rest := header[start+1:]
+	end := strings.IndexByte(rest, '>')
+	if end < 0 {
+		return ""
+	}
+	return strings.TrimSpace(rest[:end])
+}
+
+// callbackHostAllowed is the SSRF guard for the initial NOTIFY. A
+// renderer's event sink is always on-LAN, so we allow only IP literals
+// that are loopback / RFC1918-private / link-local, OR that match the
+// SUBSCRIBE request's source IP (covers a CGNAT renderer whose callback
+// host equals its own source address). Hostnames and arbitrary public
+// IPs are rejected.
+func callbackHostAllowed(host, remoteAddr string) bool {
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false // reject hostnames outright
+	}
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+		return true
+	}
+	srcHost, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		// remoteAddr may lack a port (a reverse proxy rewrote it, or a
+		// custom test setup) — fall back to treating it as a bare host.
+		// A non-IP value still fails the ParseIP check below.
+		srcHost = remoteAddr
+	}
+	srcIP := net.ParseIP(srcHost)
+	return srcIP != nil && srcIP.Equal(ip)
+}
+
+// initialNotifyBody returns the GENA `<e:propertyset>` for a service's
+// evented state. Minimal but spec-valid: every `sendEvents="yes"` state
+// variable from the SCPD appears in its own `<e:property>`. The values
+// are intentionally static (the only purpose is to test the callback).
+func initialNotifyBody(service string) string {
+	const head = `<?xml version="1.0" encoding="utf-8"?>` +
+		`<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0">`
+	const tail = `</e:propertyset>`
+	switch service {
+	case "cm":
+		return head +
+			`<e:property><SourceProtocolInfo>` + escapeXMLText(SourceProtocolInfo) + `</SourceProtocolInfo></e:property>` +
+			`<e:property><SinkProtocolInfo>` + escapeXMLText(SinkProtocolInfo) + `</SinkProtocolInfo></e:property>` +
+			`<e:property><CurrentConnectionIDs>0</CurrentConnectionIDs></e:property>` +
+			tail
+	default: // "cds"
+		return head +
+			`<e:property><SystemUpdateID>1</SystemUpdateID></e:property>` +
+			`<e:property><ContainerUpdateIDs></ContainerUpdateIDs></e:property>` +
+			`<e:property><TransferIDs></TransferIDs></e:property>` +
+			tail
 	}
 }
 
