@@ -343,12 +343,92 @@ func Test_ParseMSearchST(t *testing.T) {
 				"\r\n",
 			want: "urn:schemas-upnp-org:device:MediaServer:1",
 		},
+		{
+			name: "lf_only_line_endings",
+			packet: "M-SEARCH * HTTP/1.1\n" +
+				"HOST: 239.255.255.250:1900\n" +
+				"ST: upnp:rootdevice\n\n",
+			want: "upnp:rootdevice",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := ParseMSearchST([]byte(tc.packet))
 			if got != tc.want {
 				t.Errorf("ParseMSearchST mismatch\n  packet: %q\n  got:    %q\n  want:   %q", tc.packet, got, tc.want)
+			}
+		})
+	}
+}
+
+func Test_ParseMSearchMX(t *testing.T) {
+	cases := []struct {
+		name   string
+		packet string
+		want   int
+	}{
+		{
+			name: "present_in_range",
+			packet: "M-SEARCH * HTTP/1.1\r\n" +
+				"HOST: 239.255.255.250:1900\r\n" +
+				"MX: 3\r\n" +
+				"ST: ssdp:all\r\n\r\n",
+			want: 3,
+		},
+		{
+			name:   "missing_mx_returns_zero",
+			packet: "M-SEARCH * HTTP/1.1\r\nST: ssdp:all\r\n\r\n",
+			want:   0,
+		},
+		{
+			name:   "mx_zero_returns_zero",
+			packet: "M-SEARCH * HTTP/1.1\r\nMX: 0\r\nST: ssdp:all\r\n\r\n",
+			want:   0,
+		},
+		{
+			name:   "non_numeric_returns_zero",
+			packet: "M-SEARCH * HTTP/1.1\r\nMX: abc\r\nST: ssdp:all\r\n\r\n",
+			want:   0,
+		},
+		{
+			name:   "large_value_clamps_to_ceiling",
+			packet: "M-SEARCH * HTTP/1.1\r\nMX: 120\r\nST: ssdp:all\r\n\r\n",
+			want:   mxResponseCeilingSeconds,
+		},
+		{
+			name:   "at_ceiling",
+			packet: "M-SEARCH * HTTP/1.1\r\nMX: 5\r\nST: ssdp:all\r\n\r\n",
+			want:   mxResponseCeilingSeconds,
+		},
+		{
+			name:   "mixed_case_header_name",
+			packet: "M-SEARCH * HTTP/1.1\r\nMx:  2  \r\nST: ssdp:all\r\n\r\n",
+			want:   2,
+		},
+		{
+			name:   "trailing_garbage_after_digits",
+			packet: "M-SEARCH * HTTP/1.1\r\nMX: 3xyz\r\nST: ssdp:all\r\n\r\n",
+			want:   3,
+		},
+		{
+			name:   "not_msearch_returns_zero",
+			packet: "NOTIFY * HTTP/1.1\r\nMX: 3\r\n\r\n",
+			want:   0,
+		},
+		{
+			name: "lf_only_line_endings",
+			packet: "M-SEARCH * HTTP/1.1\n" +
+				"HOST: 239.255.255.250:1900\n" +
+				"MX: 4\n" +
+				"ST: ssdp:all\n\n",
+			want: 4,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ParseMSearchMX([]byte(tc.packet))
+			if got != tc.want {
+				t.Errorf("ParseMSearchMX mismatch\n  packet: %q\n  got:    %d\n  want:   %d", tc.packet, got, tc.want)
 			}
 		})
 	}

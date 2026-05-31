@@ -191,18 +191,17 @@ func MSearchTargets(st string, allTargets []NotifyTarget) []NotifyTarget {
 // all three (and any variant) by uppercasing the header-name portion
 // before comparison.
 //
-// **Doesn't validate other M-SEARCH headers** (HOST, MAN, MX) — those
-// are required by spec but in practice we just need ST to know what
-// to respond with. Strict spec-compliance for incoming M-SEARCHes
-// would mean dropping any packet missing HOST / MAN; we accept any
-// packet that's RECOGNIZABLY an M-SEARCH (starts with "M-SEARCH ")
-// with an ST header.
+// **Doesn't validate HOST / MAN** — those are required by spec but in
+// practice we just need ST to know what to respond with. We accept any
+// packet that's RECOGNIZABLY an M-SEARCH (starts with "M-SEARCH ") with
+// an ST header. The MX header IS parsed separately via `ParseMSearchMX`
+// for the spec-mandated randomized response delay.
 func ParseMSearchST(packet []byte) string {
 	s := string(packet)
 	if !strings.HasPrefix(s, "M-SEARCH ") {
 		return ""
 	}
-	for _, line := range strings.Split(s, "\r\n") {
+	for _, line := range strings.Split(s, "\n") { // split on \n; TrimSpace below drops any trailing \r (tolerates bare-LF SSDP)
 		colon := strings.IndexByte(line, ':')
 		if colon < 0 {
 			continue
@@ -213,6 +212,53 @@ func ParseMSearchST(packet []byte) string {
 		}
 	}
 	return ""
+}
+
+// mxResponseCeilingSeconds clamps the parsed MX value. The UPnP UDA
+// caps MX at 120 s, but a responder that honours a 2-minute MX is a
+// liability (a hostile or buggy control point could park responders for
+// minutes); UPnP-AV practice clamps far lower. 5 s is comfortably above
+// any real control point's expectation while bounding the worst case.
+const mxResponseCeilingSeconds = 5
+
+// ParseMSearchMX extracts the MX header (maximum response delay, in
+// whole seconds) from a raw M-SEARCH packet. Per the UPnP UDA, a device
+// MUST wait a random interval in [0, MX] before unicasting its response,
+// spreading reply bursts across the LAN so a search matching many
+// targets can't overwhelm small switches / low-power renderers.
+//
+// Returns 0 when MX is absent, non-numeric, or zero — the caller
+// defaults that to a small fixed jitter. The value is clamped to
+// `mxResponseCeilingSeconds`. Only leading digits are read (stops at
+// the first non-digit), matching lenient real-world header parsing.
+func ParseMSearchMX(packet []byte) int {
+	s := string(packet)
+	if !strings.HasPrefix(s, "M-SEARCH ") {
+		return 0
+	}
+	for _, line := range strings.Split(s, "\n") { // split on \n; TrimSpace below drops any trailing \r (tolerates bare-LF SSDP)
+		colon := strings.IndexByte(line, ':')
+		if colon < 0 {
+			continue
+		}
+		name := strings.ToUpper(strings.TrimSpace(line[:colon]))
+		if name != "MX" {
+			continue
+		}
+		val := strings.TrimSpace(line[colon+1:])
+		n := 0
+		for _, c := range val {
+			if c < '0' || c > '9' {
+				break // leading-digits only
+			}
+			n = n*10 + int(c-'0')
+			if n >= mxResponseCeilingSeconds {
+				return mxResponseCeilingSeconds
+			}
+		}
+		return n
+	}
+	return 0
 }
 
 // itoa returns an integer formatted in base 10 without bringing in
