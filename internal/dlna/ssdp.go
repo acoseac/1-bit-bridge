@@ -97,7 +97,12 @@ type SSDPAdvertiser struct {
 	mu      sync.Mutex
 	started bool
 
-	// Runtime state — nil until Start() is called.
+	// Runtime state — nil until Start() is called. `listener` / `sender`
+	// are accessed ONLY under `s.mu` (Start writes them; Stop closes +
+	// nils them). The background goroutines + send helpers receive their
+	// own captured copies as parameters and never read these fields, so
+	// Stop's nil-set races nothing. Do NOT reintroduce a struct-field
+	// read on `s.listener`/`s.sender` from any goroutine.
 	cancel   context.CancelFunc
 	wg       sync.WaitGroup
 	listener *net.UDPConn // multicast listener for incoming M-SEARCH
@@ -201,16 +206,22 @@ func (s *SSDPAdvertiser) Start(ctx context.Context) error {
 	innerCtx, cancel := context.WithCancel(ctx)
 	s.cancel = cancel
 
-	// Initial NOTIFY ssdp:alive burst
-	s.sendAliveAll()
+	// Initial NOTIFY ssdp:alive burst. Pass the local `sender` (not
+	// `s.sender`) — the goroutines below capture their own socket
+	// copies too, so no background path reads the struct fields. This
+	// is what makes `Stop()` nil-ing `s.listener`/`s.sender` race-free:
+	// every concurrent reader holds a local copy, and the only struct-
+	// field access (Start write, Stop close+nil) is serialized under
+	// `s.mu`.
+	s.sendAliveAll(sender)
 
-	// Periodic NOTIFY goroutine
+	// Periodic NOTIFY goroutine — captures `sender` locally.
 	s.wg.Add(1)
-	go s.runPeriodicNotify(innerCtx)
+	go s.runPeriodicNotify(innerCtx, sender)
 
-	// M-SEARCH response goroutine
+	// M-SEARCH response goroutine — captures `listener` locally.
 	s.wg.Add(1)
-	go s.runMSearchListener(innerCtx)
+	go s.runMSearchListener(innerCtx, listener)
 
 	// Flip the state-machine flag AFTER all socket binds + goroutine
 	// spawns succeed. Set on the happy path only; a partial-init
@@ -249,16 +260,24 @@ func (s *SSDPAdvertiser) Stop() {
 	}
 
 	// Send byebye burst BEFORE cancelling so renderers see our farewell.
-	// If the sender is gone (listener already closed), the send is a
-	// no-op (best-effort cleanup).
-	s.sendByebyeAll()
+	// Pass `s.sender` explicitly (we hold `s.mu` and `started == true`,
+	// so it's non-nil here). Best-effort cleanup.
+	s.sendByebyeAll(s.sender)
 
 	s.cancel()
 	s.cancel = nil
 
-	// Close the listener to unblock ReadFromUDP in the M-SEARCH
-	// goroutine. Close errors are intentionally swallowed — we're
-	// tearing down; any error here is just noise.
+	// Close the listener + sender to unblock the goroutines' reads
+	// (ReadFromUDP / Write on a closed socket return an error, which
+	// the goroutines observe alongside the cancelled ctx and exit).
+	// Close errors are intentionally swallowed — we're tearing down.
+	//
+	// Nil-ing the struct fields here is race-free: the goroutines read
+	// their captured local copies, never `s.listener`/`s.sender`, so
+	// the only struct-field access is this lock-held Stop and the
+	// lock-held Start. We close-then-nil BEFORE `wg.Wait()` (closing
+	// is what unblocks the reads — waiting first would deadlock the
+	// M-SEARCH goroutine parked in `ReadFromUDP`).
 	if s.listener != nil {
 		_ = s.listener.Close()
 		s.listener = nil
@@ -273,8 +292,10 @@ func (s *SSDPAdvertiser) Stop() {
 }
 
 // runPeriodicNotify sends a NOTIFY ssdp:alive burst every
-// `cfg.AdvertiseInterval`, until context cancels.
-func (s *SSDPAdvertiser) runPeriodicNotify(ctx context.Context) {
+// `cfg.AdvertiseInterval`, until context cancels. Takes the `sender`
+// socket as a parameter (the local copy captured at Start) so it never
+// reads `s.sender` — that's what keeps `Stop()`'s nil-set race-free.
+func (s *SSDPAdvertiser) runPeriodicNotify(ctx context.Context, sender *net.UDPConn) {
 	defer s.wg.Done()
 	ticker := time.NewTicker(s.cfg.AdvertiseInterval)
 	defer ticker.Stop()
@@ -283,15 +304,17 @@ func (s *SSDPAdvertiser) runPeriodicNotify(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			s.sendAliveAll()
+			s.sendAliveAll(sender)
 		}
 	}
 }
 
 // runMSearchListener blocks on the multicast listener, parsing each
 // incoming packet for M-SEARCH and responding unicast if the ST
-// matches one of our NotifyTargets.
-func (s *SSDPAdvertiser) runMSearchListener(ctx context.Context) {
+// matches one of our NotifyTargets. Takes the `listener` socket as a
+// parameter (the local copy captured at Start) so it never reads
+// `s.listener` — that's what keeps `Stop()`'s nil-set race-free.
+func (s *SSDPAdvertiser) runMSearchListener(ctx context.Context, listener *net.UDPConn) {
 	defer s.wg.Done()
 	buf := make([]byte, 2048) // SSDP packets are small; 2KB is plenty
 	for {
@@ -302,7 +325,7 @@ func (s *SSDPAdvertiser) runMSearchListener(ctx context.Context) {
 		}
 		// ReadFromUDP blocks; the Stop() path closes the listener
 		// to wake us up. Read errors are expected at teardown time.
-		n, src, err := s.listener.ReadFromUDP(buf)
+		n, src, err := listener.ReadFromUDP(buf)
 		if err != nil {
 			select {
 			case <-ctx.Done():
@@ -354,15 +377,19 @@ func (s *SSDPAdvertiser) handleMSearch(packet []byte, src *net.UDPAddr) {
 }
 
 // sendAliveAll sends one NOTIFY ssdp:alive packet per NotifyTarget,
-// in order. Logs errors at Debug level (transient send failures are
-// not actionable; the next periodic tick retries).
-func (s *SSDPAdvertiser) sendAliveAll() {
-	if s.sender == nil {
+// in order. Takes the `sender` socket explicitly — callers pass their
+// thread-local copy so this never touches `s.sender` (race-free with
+// `Stop()`'s nil-set). Logs errors at Debug level (transient send
+// failures are not actionable; the next periodic tick retries). The
+// nil guard is on the PARAMETER (defensive — non-nil in practice on
+// every live caller).
+func (s *SSDPAdvertiser) sendAliveAll(sender *net.UDPConn) {
+	if sender == nil {
 		return
 	}
 	for _, target := range s.targets {
 		pkt := BuildNotifyAlive(s.cfg.Location, s.cfg.ServerToken, target)
-		if _, err := s.sender.Write(pkt); err != nil {
+		if _, err := sender.Write(pkt); err != nil {
 			s.log.Debug("NOTIFY alive send failed",
 				slog.String("nt", target.NT),
 				slog.String("err", err.Error()))
@@ -371,15 +398,15 @@ func (s *SSDPAdvertiser) sendAliveAll() {
 }
 
 // sendByebyeAll sends one NOTIFY ssdp:byebye packet per NotifyTarget.
-// Best-effort: nil-sender check guards the case where Stop() runs
-// after a partial Start failure left the sender unset.
-func (s *SSDPAdvertiser) sendByebyeAll() {
-	if s.sender == nil {
+// Takes the `sender` socket explicitly (parameter nil guard is
+// defensive — Stop() passes a non-nil `s.sender` under the lock).
+func (s *SSDPAdvertiser) sendByebyeAll(sender *net.UDPConn) {
+	if sender == nil {
 		return
 	}
 	for _, target := range s.targets {
 		pkt := BuildNotifyByeBye(s.cfg.Location, s.cfg.ServerToken, target)
-		_, _ = s.sender.Write(pkt) // best-effort; we're shutting down
+		_, _ = sender.Write(pkt) // best-effort; we're shutting down
 	}
 }
 

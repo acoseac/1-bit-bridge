@@ -1,6 +1,7 @@
 package dlna
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -67,4 +68,44 @@ func Test_SSDPAdvertiser_StopBeforeStartIsSafe(t *testing.T) {
 	a.Stop()
 	// Calling twice should also be safe
 	a.Stop()
+}
+
+// Test_SSDPAdvertiser_StartStopRaceFree exercises the teardown race the
+// capture-local fix closes: with a short advertise interval the periodic
+// NOTIFY goroutine fires `sendAliveAll` rapidly while the M-SEARCH
+// goroutine is parked in `ReadFromUDP`, and `Stop()` closes + nils the
+// socket fields concurrently. Run under `-race`, the OLD shape (helpers
+// reading `s.sender` / `s.listener` from the struct) trips the race
+// detector AND can nil-deref-panic; the fixed shape (goroutines hold
+// captured local copies) is clean.
+//
+// Skips when multicast binding is unavailable (sandboxed CI) — the
+// structural fix stands on its own; this is the on-hardware proof.
+func Test_SSDPAdvertiser_StartStopRaceFree(t *testing.T) {
+	for i := 0; i < 5; i++ {
+		a := NewSSDPAdvertiser(SSDPConfig{
+			UDN:         "uuid:f1b3a5c2-8e7d-4f3b-9c1a-0d2e3f4a5b6c",
+			Location:    "http://127.0.0.1:7790/dlna/description.xml",
+			ServerToken: "test",
+		})
+		// White-box: bypass the >=1min constructor clamp so the periodic
+		// NOTIFY goroutine actually ticks during the test window, putting
+		// `sendAliveAll` in flight against the concurrent Stop.
+		a.cfg.AdvertiseInterval = time.Millisecond
+
+		if err := a.Start(context.Background()); err != nil {
+			// Skip ONLY if the very first Start fails (environment lacks
+			// multicast). A failure on a later iteration after a prior
+			// success indicates a teardown regression (e.g. a socket /
+			// port not released by Stop) and must FAIL, not skip.
+			if i == 0 {
+				t.Skipf("multicast unavailable in this environment: %v", err)
+				return
+			}
+			t.Fatalf("Start failed on iteration %d after a prior success: %v", i, err)
+		}
+		// Let the periodic goroutine tick a few times.
+		time.Sleep(10 * time.Millisecond)
+		a.Stop()
+	}
 }
