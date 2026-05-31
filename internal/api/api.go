@@ -147,6 +147,12 @@ type Server struct {
 	deviceSeen      map[string]deviceSeenEntry
 	deviceInflight  map[deviceInflightKey]struct{} // (device,token) upserts in flight (stampede guard)
 
+	// playlistStore backs the /v1/playlists backup endpoints + the
+	// "playlistBackup" health-feature flag. Nil unless WithPlaylistStore
+	// is wired; when nil the routes return 404 (feature-off) and the flag
+	// is omitted. *manifest.Store satisfies it in production.
+	playlistStore PlaylistStore
+
 	// tailscaleStatus is the embedded-tsnet status provider used by
 	// `reachableEndpoints` to advertise the bridge's `*.ts.net` URL +
 	// tailnet IPs in tsnet mode. Nil unless `WithTailscaleStatus` or
@@ -1132,12 +1138,12 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	//
 	// Alpha-sort stays correct by construction: each conditional
 	// appends in lex order, terminal `variantBumpsIndex` ends every
-	// path. Capacity 10 covers the current maximum (carPlayOptimize +
+	// path. Capacity 12 covers the current maximum (carPlayOptimize +
 	// deleteVariants + diagnosticsSummary + dlnaServer +
-	// operatorDrivenUpscale + pairingEventsSupported +
-	// pushEventsSupported + rendererDiscovery +
+	// operatorDrivenUpscale + pairingEventsSupported + playbackHistory +
+	// playlistBackup + pushEventsSupported + rendererDiscovery +
 	// upscaleCompleteEvents + variantBumpsIndex).
-	feats := make([]string, 0, 10)
+	feats := make([]string, 0, 12)
 	if s.upscaleEnabled {
 		if s.carPlayOptimizeEnabled {
 			feats = append(feats, "carPlayOptimize")
@@ -1166,10 +1172,18 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 			feats = append(feats, "operatorDrivenUpscale")
 		}
 	}
+	if s.eventBroker != nil && s.pairing != nil {
+		feats = append(feats, "pairingEventsSupported")
+	}
+	// `playlistBackup` advertises the per-device /v1/playlists backup
+	// endpoints. Gated on `s.playlistStore != nil` so a deploy without
+	// the store advertises honestly and iOS hides the backup surface.
+	// Lexically between `pairingEventsSupported` and `pushEventsSupported`
+	// (pairing < playlist < push), so the alpha-sort split is required.
+	if s.playlistStore != nil {
+		feats = append(feats, "playlistBackup")
+	}
 	if s.eventBroker != nil {
-		if s.pairing != nil {
-			feats = append(feats, "pairingEventsSupported")
-		}
 		feats = append(feats, "pushEventsSupported")
 	}
 	// `rendererDiscovery` advertises the bridge's SSDP MediaRenderer
@@ -1667,20 +1681,23 @@ func (s *Server) authed(next http.HandlerFunc) http.HandlerFunc {
 		if cv := r.Header.Get("X-Client-Version"); cv != "" && cv != tok.LastClientVersion {
 			s.store.RecordClientVersion(tok.ID, cv)
 		}
-		// Bind the client's durable device-recovery token to this auth
-		// token (debounced in memory). Drives the per-device scoping for
-		// playlist backup + playback telemetry; self-heals across
-		// re-pairings. Nil-safe / skipped when the registrar isn't wired.
-		if s.deviceRegistrar != nil {
-			if dt := r.Header.Get("X-Device-Token"); validDeviceToken(dt) {
+		ctx := withTokenID(r.Context(), tok.ID)
+		// Extract + validate the durable device-recovery token once. It
+		// drives per-device scoping for playlist backup + playback
+		// telemetry and is threaded into the request context for those
+		// handlers. When present and the registrar is wired, also bind it
+		// to this auth token (debounced) — self-heals across re-pairings.
+		if dt := r.Header.Get("X-Device-Token"); validDeviceToken(dt) {
+			ctx = withDeviceToken(ctx, dt)
+			if s.deviceRegistrar != nil {
 				s.touchDevice(r.Context(), dt, tok.ID)
 			}
 		}
-		// Thread the validated token ID into the request context so
-		// downstream middleware (today: rateLimitManifest for keying
-		// the per-client manifest bucket) doesn't need to re-extract
-		// or re-validate. Unwrapped via tokenIDFromContext.
-		next(w, r.WithContext(withTokenID(r.Context(), tok.ID)))
+		// Thread the validated token ID + device token into the request
+		// context so downstream middleware (rateLimitManifest keys the
+		// per-client manifest bucket on tokenID) and the playlist/history
+		// handlers don't re-extract or re-validate.
+		next(w, r.WithContext(ctx))
 	}
 }
 
