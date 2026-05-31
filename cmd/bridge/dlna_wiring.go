@@ -332,10 +332,11 @@ type manifestLibraryAdapter struct {
 
 	// `mu` guards the cached* slots for reads (Snapshot path) and the
 	// cachedAt timestamp. Brief — held only for the slot copy / read.
-	mu         sync.Mutex
-	cachedList []dlna.TrackInfo
-	cachedByID map[string]dlna.TrackInfo
-	cachedAt   time.Time
+	mu           sync.Mutex
+	cachedList   []dlna.TrackInfo
+	cachedByID   map[string]dlna.TrackInfo
+	cachedByPath map[string]dlna.TrackInfo // keyed on RelativePath (manifest Track.Path) for Search hit resolution
+	cachedAt     time.Time
 	// generation bumps on every cache rebuild. The DLNA folder-index
 	// cache keys on it (via Generation()) so it rebuilds the folder tree
 	// at most once per cache refresh rather than per Browse request.
@@ -474,6 +475,7 @@ func (a *manifestLibraryAdapter) rebuild() {
 
 	list := make([]dlna.TrackInfo, 0, len(tracks))
 	byID := make(map[string]dlna.TrackInfo, len(tracks))
+	byPath := make(map[string]dlna.TrackInfo, len(tracks))
 	for _, t := range tracks {
 		absPath, resolveErr := a.resolver.Resolve(t.Path)
 		if resolveErr != nil {
@@ -482,14 +484,50 @@ func (a *manifestLibraryAdapter) rebuild() {
 		ti := manifestTrackToDLNATrackInfo(t, absPath, libraryRoot)
 		list = append(list, ti)
 		byID[ti.TrackID] = ti
+		// Key on RelativePath (== manifest Track.Path) so Search hits —
+		// which the FTS index returns as paths — resolve to full TrackInfo.
+		byPath[ti.RelativePath] = ti
 	}
 
 	a.mu.Lock()
 	a.cachedList = list
 	a.cachedByID = byID
+	a.cachedByPath = byPath
 	a.cachedAt = time.Now()
 	a.generation++ // signal the DLNA folder-index cache to rebuild
 	a.mu.Unlock()
+}
+
+// SearchTrackInfos runs the FTS5-backed library search and resolves each
+// ranked path hit to its full cached TrackInfo (so DIDL <res> elements
+// carry size / duration / sample-rate). Ranked order from the FTS query
+// is preserved. Unresolved hits (a path the cache doesn't carry — e.g. a
+// track whose resolver.Resolve failed during the last rebuild) are
+// skipped. Returns nil on FTS unavailability / store error (logged) so
+// the Search action degrades to "no matches" rather than faulting.
+func (a *manifestLibraryAdapter) SearchTrackInfos(ctx context.Context, query string) []dlna.TrackInfo {
+	a.refreshIfStale()
+	// Honour the caller's deadline / cancellation, but bound the query so
+	// a missing request deadline can't hang the rebuild lock indirectly.
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	// 500 = the store's hard cap; gives Browse-style pagination room to
+	// page deep into a large result set rather than the 50-row default
+	// (gemini-code-assist on PR #329).
+	hits, err := a.store.SearchTracks(ctx, query, 500)
+	if err != nil {
+		a.log.Warn("DLNA search failed", slog.String("err", err.Error()))
+		return nil
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := make([]dlna.TrackInfo, 0, len(hits))
+	for _, h := range hits {
+		if ti, ok := a.cachedByPath[h.Path]; ok {
+			out = append(out, ti)
+		}
+	}
+	return out
 }
 
 // Generation returns a counter that advances on every cache rebuild, so

@@ -1,6 +1,7 @@
 package dlna
 
 import (
+	"context"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -44,6 +45,20 @@ type LibrarySource interface {
 	// make this cheap (a cached slice length under a lock, NOT a fresh DB
 	// COUNT(*) per call and NOT a ListTrackInfos round-trip).
 	TrackCount() int
+
+	// SearchTrackInfos returns the tracks whose title / artist / album
+	// match the given free-text query, in best-match order, backing the
+	// ContentDirectory Search action. The FULL result set is returned
+	// (bounded by the implementation's own cap); the caller applies
+	// StartingIndex / RequestedCount pagination. The production adapter
+	// backs this with the SQLite FTS5 `tracks_fts` index; in-memory
+	// fixtures do a case-insensitive substring scan. An empty / all-
+	// punctuation query returns no matches.
+	//
+	// ctx carries the originating HTTP request's deadline / cancellation
+	// — the production adapter runs an I/O-bound FTS query, so honouring
+	// it lets a client-aborted Search stop the DB work early.
+	SearchTrackInfos(ctx context.Context, query string) []TrackInfo
 
 	// GetTrackInfo returns the track with the given TrackID, or
 	// (zero-value, false) if not found. Used by the file handler to
@@ -260,6 +275,27 @@ type browseAction struct {
 	SortCriteria   string `xml:"SortCriteria"`
 }
 
+// searchEnvelope is the input-side XML shape for a SOAP Search request.
+// Envelope → Body → Search → {ContainerID, SearchCriteria, …}. Same
+// namespace-permissive matching as browseEnvelope.
+type searchEnvelope struct {
+	XMLName xml.Name   `xml:"Envelope"`
+	Body    searchBody `xml:"Body"`
+}
+
+type searchBody struct {
+	Search searchAction `xml:"Search"`
+}
+
+type searchAction struct {
+	ContainerID    string `xml:"ContainerID"`
+	SearchCriteria string `xml:"SearchCriteria"`
+	Filter         string `xml:"Filter"`
+	StartingIndex  uint32 `xml:"StartingIndex"`
+	RequestedCount uint32 `xml:"RequestedCount"`
+	SortCriteria   string `xml:"SortCriteria"`
+}
+
 // ContentDirectoryHandler returns an http.HandlerFunc that dispatches
 // incoming SOAP requests against the ContentDirectory:1 service. The
 // handler:
@@ -296,6 +332,8 @@ func ContentDirectoryHandler(lib LibrarySource, serverURLFunc func(r *http.Reque
 		switch actionName {
 		case "Browse":
 			handleBrowse(w, r, lib, fc, serverURLFunc(r))
+		case "Search":
+			handleSearch(w, r, lib, serverURLFunc(r))
 		case "GetSearchCapabilities":
 			handleGetSearchCapabilities(w)
 		case "GetSortCapabilities":
@@ -308,20 +346,25 @@ func ContentDirectoryHandler(lib LibrarySource, serverURLFunc func(r *http.Reque
 	}
 }
 
+// searchCapsFields is the canonical SearchCaps value — the metadata
+// fields a control point may reference in a SearchCriteria expression.
+// We index title / artist / album (the fields mirrored into the SQLite
+// FTS5 `tracks_fts` table), so we advertise exactly those. A control
+// point reads this list to decide which fields it can build a Search
+// query against; advertising a field we don't actually index would
+// produce empty results for queries the controller believes are valid.
+const searchCapsFields = "dc:title,upnp:artist,upnp:album"
+
 // handleGetSearchCapabilities responds to the spec-mandatory
-// CDS:1 GetSearchCapabilities action. Returns an empty SearchCaps
-// string — declares that we don't support the Search action (CDS
-// spec interprets empty SearchCaps as "Search is not supported";
-// non-empty would advertise searchable fields like "dc:title").
-//
-// Required regardless of whether Search itself is implemented —
-// see ContentDirectorySCPDXML docblock for the load-bearing
-// rationale (mconnect silent-drill-abort).
+// CDS:1 GetSearchCapabilities action. Advertises the searchable fields
+// (title / artist / album) — the spec signal that flips the Search
+// action on in control points (BubbleUPnP, Linn Kazoo). An empty value
+// would declare Search unsupported; we DO support it (see handleSearch).
 func handleGetSearchCapabilities(w http.ResponseWriter) {
 	body := SOAPResponseEnvelope(
 		ContentDirectoryServiceType,
 		"GetSearchCapabilities",
-		`<SearchCaps></SearchCaps>`,
+		`<SearchCaps>`+searchCapsFields+`</SearchCaps>`,
 	)
 	writeSOAPSuccess(w, body)
 }
@@ -727,6 +770,175 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, fc 
 	_, _ = w.Write(body2)
 }
 
+// handleSearch processes a SOAP Search request — the CDS:1 action that
+// lets control points (BubbleUPnP, Linn Kazoo) run a free-text query
+// instead of fold-navigating. The SearchCriteria expression is parsed
+// for its quoted search term(s) (see searchCriteriaTerms), which feed
+// the library's FTS-backed SearchTrackInfos; the result set is paginated
+// via the same clampPage helper Browse uses and emitted as a DIDL-Lite
+// item list. ContainerID is accepted but ignored — we search the whole
+// library regardless of the container the controller scopes from (our
+// CDS surface is flat enough that container-scoped search would add
+// complexity for no user benefit).
+//
+// Degradation, never fault: an unparseable / empty / class-only
+// criteria yields zero matches (NumberReturned=0) rather than a SOAP
+// fault, so a controller that sends an exotic expression sees an empty
+// result rather than an error that might abort its session.
+func handleSearch(w http.ResponseWriter, r *http.Request, lib LibrarySource, serverURL string) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxSOAPBodyBytes))
+	if err != nil {
+		writeSOAPFault(w, UPnPErrActionFailed)
+		return
+	}
+	var env searchEnvelope
+	if err := xml.Unmarshal(body, &env); err != nil {
+		writeSOAPFault(w, UPnPErrInvalidArgs)
+		return
+	}
+	search := env.Body.Search
+	ua := r.Header.Get("User-Agent")
+	logSearchRequest(r.RemoteAddr, search, ua)
+
+	term := searchCriteriaTerms(search.SearchCriteria)
+	var matches []TrackInfo
+	if term != "" {
+		matches = lib.SearchTrackInfos(r.Context(), term)
+	}
+	total := len(matches)
+	startIdx, endIdx := clampPage(total, search.StartingIndex, search.RequestedCount)
+	slice := matches[startIdx:endIdx]
+
+	didlElements := make([]string, 0, len(slice))
+	for _, t := range slice {
+		// Emit each hit with a coherent parentID — the deterministic
+		// folder ObjectID of the track's parent directory, same shape as
+		// the BrowseMetadata track branch — so a controller can navigate
+		// from a search result back into the Folders hierarchy.
+		parentID := FolderObjectID(relParentDirFromRelPath(t.RelativePath))
+		didlElements = append(didlElements, DIDLForTrack(t.toDIDLOpts(serverURL, ua, parentID)))
+	}
+	numberReturned := len(slice)
+
+	didlLite := WrapDIDLLite(didlElements...)
+	innerXML := fmt.Sprintf(
+		`<Result>%s</Result><NumberReturned>%d</NumberReturned><TotalMatches>%d</TotalMatches><UpdateID>1</UpdateID>`,
+		escapeXMLText(didlLite), numberReturned, total,
+	)
+	body2 := SOAPResponseEnvelope(ContentDirectoryServiceType, "Search", innerXML)
+	logSearchResponse(search, numberReturned, total, len(body2))
+
+	w.Header().Set("Content-Type", SOAPContentType)
+	w.Header().Set(SOAPResponseHeader, "")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body2)
+}
+
+// searchCriteriaTerms extracts the free-text search term(s) from a UPnP
+// SearchCriteria expression. UPnP criteria look like:
+//
+//	dc:title contains "blue train"
+//	(upnp:class derivedfrom "object.item.audioItem") and (dc:title contains "miles")
+//	upnp:artist contains "davis" or dc:creator contains "davis"
+//	*                                  (everything — unsupported here)
+//
+// We pull every double-quoted literal that is NOT a UPnP class URN
+// (those carry "object." and are structural, not search text), join
+// them with spaces, and hand the result to the FTS layer — which does
+// its own tokenisation, metacharacter stripping, and quoted-phrase
+// construction (manifest.buildFTSMatchExpr). This deliberately ignores
+// the field names and boolean operators: our index is a single
+// title+artist+album FTS column, so "match any quoted text against the
+// track's metadata" is the honest behaviour. Bare "*" and criteria with
+// no usable quoted text return "" (→ zero matches, not a fault).
+func searchCriteriaTerms(criteria string) string {
+	criteria = strings.TrimSpace(criteria)
+	if criteria == "" || criteria == "*" {
+		return ""
+	}
+	quoted := extractQuotedStrings(criteria)
+	terms := make([]string, 0, len(quoted))
+	for _, q := range quoted {
+		// Skip UPnP class URNs (the RHS of `upnp:class derivedfrom
+		// "object.item..."`) — structural, not search text.
+		if strings.Contains(q, "object.") {
+			continue
+		}
+		if strings.TrimSpace(q) == "" {
+			continue
+		}
+		terms = append(terms, q)
+	}
+	return strings.Join(terms, " ")
+}
+
+// extractQuotedStrings returns the contents of every double-quoted
+// literal in s, honouring the UPnP backslash escape for an embedded
+// quote (\"). Unterminated final quote is ignored. Pure / no I/O.
+func extractQuotedStrings(s string) []string {
+	var out []string
+	var b strings.Builder
+	inQuote := false
+	escaped := false
+	for _, r := range s {
+		if !inQuote {
+			if r == '"' {
+				inQuote = true
+				b.Reset()
+			}
+			continue
+		}
+		if escaped {
+			b.WriteRune(r)
+			escaped = false
+			continue
+		}
+		switch r {
+		case '\\':
+			escaped = true
+		case '"':
+			out = append(out, b.String())
+			inQuote = false
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return out
+}
+
+// logSearchRequest mirrors logBrowseRequest for the Search action,
+// sharing identical attribute keys (remoteAddr, userAgent,
+// startingIndex, requestedCount) so log aggregation can process Browse
+// and Search dispatches uniformly. UA truncated at 100 runes, same as
+// the Browse path.
+func logSearchRequest(remoteAddr string, s searchAction, ua string) {
+	uaTrim := ua
+	if runes := []rune(uaTrim); len(runes) > 100 {
+		uaTrim = string(runes[:100])
+	}
+	packageLogger.Info("Search request",
+		slog.String("remoteAddr", remoteAddr),
+		slog.String("containerID", s.ContainerID),
+		slog.String("searchCriteria", s.SearchCriteria),
+		slog.String("filter", s.Filter),
+		slog.Uint64("startingIndex", uint64(s.StartingIndex)),
+		slog.Uint64("requestedCount", uint64(s.RequestedCount)),
+		slog.String("sortCriteria", s.SortCriteria),
+		slog.String("userAgent", uaTrim),
+	)
+}
+
+// logSearchResponse mirrors logBrowseResponse for the Search action.
+func logSearchResponse(s searchAction, numberReturned, totalMatches, responseBytes int) {
+	packageLogger.Info("Search response",
+		slog.String("containerID", s.ContainerID),
+		slog.String("searchCriteria", s.SearchCriteria),
+		slog.Int("numberReturned", numberReturned),
+		slog.Int("totalMatches", totalMatches),
+		slog.Int("responseBytes", responseBytes),
+	)
+}
+
 // logBrowseRequest emits an INFO-level structured log line at every
 // `Browse` SOAP dispatch. Surfaces the action shape (ObjectID,
 // BrowseFlag, pagination window, controller UA) so post-hoc analysis
@@ -920,6 +1132,34 @@ func (s *StaticLibrary) ListTrackInfos() []TrackInfo {
 
 // TrackCount returns the number of tracks without copying the slice.
 func (s *StaticLibrary) TrackCount() int { return len(s.Tracks) }
+
+// SearchTrackInfos does a case-insensitive substring scan over title /
+// artist / album. Fine for the in-memory fixture scale; the production
+// adapter uses the FTS5 index instead.
+func (s *StaticLibrary) SearchTrackInfos(_ context.Context, query string) []TrackInfo {
+	return filterTrackInfosBySubstring(s.Tracks, query)
+}
+
+// filterTrackInfosBySubstring returns the tracks whose title, artist, or
+// album contains the query as a case-insensitive substring, preserving
+// input order. An empty / whitespace query returns nil (no matches).
+// Shared by the in-memory LibrarySource fixtures; the production adapter
+// uses the SQLite FTS5 index rather than this linear scan.
+func filterTrackInfosBySubstring(tracks []TrackInfo, query string) []TrackInfo {
+	q := strings.ToLower(strings.TrimSpace(query))
+	if q == "" {
+		return nil
+	}
+	var out []TrackInfo
+	for _, t := range tracks {
+		if strings.Contains(strings.ToLower(t.Title), q) ||
+			strings.Contains(strings.ToLower(t.Artist), q) ||
+			strings.Contains(strings.ToLower(t.Album), q) {
+			out = append(out, t)
+		}
+	}
+	return out
+}
 
 // GetTrackInfo returns the track with the given TrackID, or
 // (zero-value, false) if not found. O(n) scan — acceptable at the
