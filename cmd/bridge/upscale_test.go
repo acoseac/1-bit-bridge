@@ -12,6 +12,60 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
+// TestBootstrapTranscodeCmdHonorsVariantsDir pins that the upscale /
+// optimize / --gc CLI writes sidecars to `upscale.variantsDir` when set
+// (so a host whose data disk is too small for the full variant set can
+// relocate them, e.g. onto a network mount), and falls back to the
+// historical `<dataDir>/transcoded/` when the field is empty. Both paths
+// flow through the shared bootstrapTranscodeCmd → r.outputDir, which is
+// also what `--gc` walks.
+func TestBootstrapTranscodeCmdHonorsVariantsDir(t *testing.T) {
+	dir := t.TempDir()
+	dataDir := filepath.Join(dir, "data")
+	libDir := filepath.Join(dir, "lib")
+	for _, d := range []string{dataDir, libDir} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeCfg := func(extra string) string {
+		p := filepath.Join(dir, "bridge.yaml")
+		body := "dataDir: " + dataDir + "\nlibraryRoots:\n    - " + libDir + "\n" + extra
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	t.Run("variantsDir set", func(t *testing.T) {
+		variantsDir := filepath.Join(dir, "elsewhere", "variants")
+		cfgPath := writeCfg("upscale:\n    enabled: true\n    variantsDir: " + variantsDir + "\n")
+		var stderr bytes.Buffer
+		r, code := bootstrapTranscodeCmd(&stderr, cfgPath, "very-high", false)
+		if r == nil {
+			t.Fatalf("bootstrap failed (code=%d): %s", code, stderr.String())
+		}
+		defer r.store.Close()
+		if r.outputDir != variantsDir {
+			t.Errorf("outputDir = %q, want variantsDir %q", r.outputDir, variantsDir)
+		}
+	})
+
+	t.Run("variantsDir unset falls back to dataDir/transcoded", func(t *testing.T) {
+		cfgPath := writeCfg("upscale:\n    enabled: true\n")
+		var stderr bytes.Buffer
+		r, code := bootstrapTranscodeCmd(&stderr, cfgPath, "very-high", false)
+		if r == nil {
+			t.Fatalf("bootstrap failed (code=%d): %s", code, stderr.String())
+		}
+		defer r.store.Close()
+		want := filepath.Join(dataDir, "transcoded")
+		if r.outputDir != want {
+			t.Errorf("outputDir = %q, want default %q", r.outputDir, want)
+		}
+	})
+}
+
 // TestRunGCReverseSweepRemovesOrphanRows pins the load-bearing fix:
 // a `track_variants` row whose `sidecar_path` is missing on disk
 // must be removed by `bridge upscale --gc`, AND the parent track's

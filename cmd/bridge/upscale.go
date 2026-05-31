@@ -1,8 +1,10 @@
 // `bridge upscale` CLI subcommand: walks the manifest store for
 // PCM tracks below the target rate and runs SoX to produce sidecar
-// FLACs cached under <dataDir>/transcoded/. Records each conversion
-// in `track_variants` so the manifest provider can advertise the
-// new variants on the next iOS sync.
+// FLACs cached under `upscale.variantsDir` (falling back to
+// <dataDir>/transcoded/ when that setting is empty — same resolution
+// the serve-side pool uses, via config.UpscaleConfig.EffectiveVariantsDir).
+// Records each conversion in `track_variants` so the manifest provider
+// can advertise the new variants on the next iOS sync.
 //
 // Two modes:
 //   - default: enqueue every eligible track (or filtered subset
@@ -11,7 +13,8 @@
 //
 // Maintenance modes:
 //   - `--gc`: symmetric garbage collection. Walks the on-disk
-//     `<dataDir>/transcoded/` directory and removes files with no
+//     variants directory (`upscale.variantsDir` or the default
+//     `<dataDir>/transcoded/`) and removes files with no
 //     matching DB row (forward sweep — orphan file recovery), AND
 //     walks `track_variants` rows and removes rows whose
 //     `sidecar_path` does not exist on disk (reverse sweep — orphan
@@ -49,12 +52,6 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
 )
-
-// transcodedDirName lives under cfg.DataDir. The literal name is
-// owned by `transcode.OutputDirSubdir` (single source of truth so
-// the CLI's `--gc` walker and the runtime pool's `OutputDir` can't
-// drift); the alias below stays for in-package readability.
-const transcodedDirName = transcode.OutputDirSubdir
 
 // gcInterruptedMessage is the stderr line printed when an upscale GC
 // pass is cancelled via ctx (Ctrl+C, parent shutdown). Three call sites
@@ -135,10 +132,18 @@ func bootstrapTranscodeCmd(stderr io.Writer, configPath, qualityFlag string, gcM
 	// "" for every track in single-root layouts (CodeRabbit
 	// second-pass on PR #108).
 	return &transcodeBootstrapResult{
-		cfg:       cfg,
-		store:     store,
-		quality:   q,
-		outputDir: filepath.Join(cfg.DataDir, transcodedDirName),
+		cfg:     cfg,
+		store:   store,
+		quality: q,
+		// Honor `upscale.variantsDir` so the CLI writes sidecars to the
+		// SAME location the serve-side pool uses (e.g. a relocated /
+		// network-mounted variants dir on a host whose data disk is too
+		// small for the full variant set). EffectiveVariantsDir falls
+		// through to `<dataDir>/transcoded/` when the field is unset, so
+		// installs without the setting are byte-for-byte unchanged. The
+		// `--gc` walker shares this outputDir too, so cleanup stays
+		// consistent with where conversions actually land.
+		outputDir: cfg.Upscale.EffectiveVariantsDir(cfg.DataDir),
 		resolver:  bridgefs.New(cfg.LibraryRoots),
 	}, 0
 }
