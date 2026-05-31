@@ -89,40 +89,29 @@ func startDLNAIfEnabled(
 		return &dlnaLifecycle{log: dlnaLog}, false
 	}
 
-	// Resolve the IP literal we'll advertise as ServerURL. Renderers
-	// dial this for `/dlna/file/{trackID}` AND for SOAP control; if
-	// we get this wrong, every Browse / Play action surfaces a dead
-	// URL on the renderer. Use the first IPv4 address on the picked
-	// interface — DLNA renderers on the home LAN are universally IPv4.
-	serverIP, ipErr := firstIPv4OnInterface(iface)
-	if ipErr != nil {
-		dlnaLog.Warn("DLNA disabled — couldn't resolve interface IP",
-			slog.String("iface", iface.Name),
-			slog.String("err", ipErr.Error()))
-		return &dlnaLifecycle{log: dlnaLog}, false
-	}
-
 	listenAddr := cfg.DLNA.EffectiveDLNAListenAddress()
 	port := portFromListenAddr(listenAddr)
-	// Resolve the host portion of serverURL with listenAddr
-	// preference: if the operator pinned `listenAddress` to a
-	// specific host (e.g. "192.168.1.42:7790"), advertise that host
-	// in SSDP so the URL we advertise is the URL we actually bind.
-	// Bare port forms (":7790" / "0.0.0.0:7790") fall back to the
-	// picked interface's IPv4 — that's the multi-interface case
-	// where the bind is wildcard but we still need to advertise a
-	// dialable host. Per CodeRabbit Major on PR #303.
 	rawHost, _, splitErr := net.SplitHostPort(listenAddr)
 	bindWildcard := splitErr != nil || rawHost == "" || rawHost == "0.0.0.0" || rawHost == "::"
-	host := rawHost
-	if bindWildcard {
-		host = serverIP.String()
-	}
-	serverURL := fmt.Sprintf("http://%s:%d", host, port)
 
-	// Multi-interface SSDP advertise set (extracted to keep this
-	// function's cognitive complexity in check — Sonar S3776 on PR #328).
+	// Multi-interface SSDP advertise set (wildcard bind only; extracted
+	// to keep this function's cognitive complexity in check — Sonar S3776
+	// on PR #328). Gathered BEFORE the fallback ServerURL so an IPv6-only
+	// FIRST interface can't false-bail startup when a LATER interface has
+	// a usable IPv4 (CodeRabbit on PR #328).
 	endpoints := gatherAdvertiseEndpoints(bindWildcard, port, dlnaLog)
+
+	// Resolve the fallback ServerURL renderers dial for /dlna/file/ + SOAP
+	// control. Prefer a gathered endpoint's IP (any interface with IPv4),
+	// then a pinned bind host, then the picked interface's IPv4 as a last
+	// resort. DLNA disables only when NONE yield a dialable host.
+	serverURL, urlErr := deriveServerURL(rawHost, bindWildcard, port, endpoints, iface)
+	if urlErr != nil {
+		dlnaLog.Warn("DLNA disabled — couldn't resolve a dialable server URL",
+			slog.String("iface", iface.Name),
+			slog.String("err", urlErr.Error()))
+		return &dlnaLifecycle{log: dlnaLog}, false
+	}
 
 	// UDN derived from a hash of (DataDir, FriendlyName) — stable
 	// across restarts so renderers don't re-add us, distinct between
@@ -228,6 +217,30 @@ func gatherAdvertiseEndpoints(bindWildcard bool, port int, log *slog.Logger) []d
 		})
 	}
 	return endpoints
+}
+
+// deriveServerURL resolves the fallback ServerURL the bridge advertises
+// (LOCATION's host on the single-advertiser path, and the serverURLFunc
+// fallback when a renderer's Host header is empty). Priority:
+//
+//  1. Pinned bind host ("192.168.1.42:7790") → advertise exactly that.
+//  2. Wildcard bind with ≥1 gathered endpoint → the first endpoint's URL
+//     (its IP is already a usable LAN IPv4; this is what lets an IPv6-only
+//     FIRST interface not block startup — CodeRabbit on PR #328).
+//  3. Wildcard bind, no endpoints → the picked interface's IPv4 as a last
+//     resort; errors only when even that has no usable IPv4.
+func deriveServerURL(rawHost string, bindWildcard bool, port int, endpoints []dlna.AdvertiseEndpoint, iface *net.Interface) (string, error) {
+	if !bindWildcard {
+		return fmt.Sprintf("http://%s:%d", rawHost, port), nil
+	}
+	if len(endpoints) > 0 {
+		return endpoints[0].ServerURL, nil
+	}
+	ip, err := firstIPv4OnInterface(iface)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("http://%s:%d", ip.String(), port), nil
 }
 
 // firstIPv4OnInterface returns the first IPv4 address bound to iface
