@@ -77,7 +77,25 @@ type ServerConfig struct {
 	// (joined to 239.255.255.250:1900). nil = OS picks (works on
 	// single-interface hosts). Multi-interface hosts should pick via
 	// `IsLANEligibleInterface`.
+	//
+	// Used only for the single-advertiser fallback path — when
+	// AdvertiseEndpoints is non-empty, the per-endpoint Interface wins
+	// and this field is ignored.
 	Interface *net.Interface
+
+	// AdvertiseEndpoints, when non-empty, makes the server start ONE SSDP
+	// advertiser per listed endpoint — each binding the multicast
+	// listener on its own interface and announcing a per-interface
+	// LOCATION URL. This is the multi-interface path: a renderer on any
+	// LAN subnet receives a description URL reachable from its own subnet
+	// (a single static LOCATION would hand secondary-subnet renderers a
+	// URL on the primary interface's IP, which fails when cross-subnet
+	// routing is restricted).
+	//
+	// When empty, the server falls back to a single advertiser using
+	// Interface + ServerURL — the original single-interface behaviour,
+	// preserved for callers that pin a specific bind host.
+	AdvertiseEndpoints []AdvertiseEndpoint
 
 	// TelemetryStore receives per-request entries via the telemetry
 	// middleware. nil = telemetry disabled (middleware passes
@@ -91,6 +109,16 @@ type ServerConfig struct {
 	Logger *slog.Logger
 }
 
+// AdvertiseEndpoint pairs a LAN interface with the absolute base URL
+// (scheme+host+port, NO trailing path) that the SSDP advertiser on that
+// interface announces as its LOCATION. The host MUST be reachable by
+// renderers on that interface's subnet — typically the interface's own
+// IPv4 literal.
+type AdvertiseEndpoint struct {
+	Interface *net.Interface
+	ServerURL string
+}
+
 // Server is the DLNA MediaServer runtime — orchestrates the HTTP
 // listener (DLNA endpoints) + SSDP advertiser + telemetry under one
 // start/stop unit. Wraps the project's standard goroutine-and-
@@ -99,7 +127,7 @@ type Server struct {
 	cfg        ServerConfig
 	mux        *http.ServeMux
 	httpServer *http.Server
-	ssdp       *SSDPAdvertiser
+	ssdps      []*SSDPAdvertiser // one per advertise endpoint (≥1 once started)
 	log        *slog.Logger
 
 	// GENA initial-NOTIFY lifecycle. `notifyCtx` is cancelled by Stop so
@@ -194,30 +222,66 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}()
 
-	// Start the SSDP advertiser. If it fails, tear down the HTTP
-	// listener so we don't leak the bind.
-	s.ssdp = NewSSDPAdvertiser(SSDPConfig{
-		UDN:         s.cfg.UDN,
-		Location:    s.cfg.ServerURL + "/dlna/description.xml",
-		ServerToken: SSDPServerToken(s.cfg.ModelNumber),
-		Interface:   s.cfg.Interface,
-		Logger:      s.log,
-	})
-	if err := s.ssdp.Start(ctx); err != nil {
+	// Start one SSDP advertiser per advertise endpoint. On a
+	// multi-interface host each interface gets its own multicast
+	// listener + per-interface LOCATION; single-interface (or
+	// pinned-bind) hosts fall back to one advertiser.
+	//
+	// Failure policy: a per-interface bind failure (no multicast
+	// permission on that NIC, transient flap) is logged and skipped —
+	// the bridge keeps advertising on whatever interfaces DID bind. Only
+	// if EVERY advertiser fails do we treat SSDP as down: tear the HTTP
+	// listener back down and return an error (preserves the
+	// single-interface "SSDP failed → Start fails" contract, since that
+	// case has exactly one endpoint).
+	endpoints := s.advertiseEndpoints()
+	for _, ep := range endpoints {
+		adv := NewSSDPAdvertiser(SSDPConfig{
+			UDN:         s.cfg.UDN,
+			Location:    ep.ServerURL + "/dlna/description.xml",
+			ServerToken: SSDPServerToken(s.cfg.ModelNumber),
+			Interface:   ep.Interface,
+			Logger:      s.log,
+		})
+		if err := adv.Start(ctx); err != nil {
+			ifaceName := "default"
+			if ep.Interface != nil {
+				ifaceName = ep.Interface.Name
+			}
+			s.log.Warn("DLNA SSDP advertiser failed on interface — skipping",
+				slog.String("interface", ifaceName),
+				slog.String("location", ep.ServerURL),
+				slog.String("err", err.Error()))
+			continue
+		}
+		s.ssdps = append(s.ssdps, adv)
+	}
+	if len(s.ssdps) == 0 {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = s.httpServer.Shutdown(shutdownCtx)
-		return fmt.Errorf("dlna: SSDP start: %w", err)
+		return fmt.Errorf("dlna: SSDP start: no advertiser could bind (tried %d endpoint(s))", len(endpoints))
 	}
 
 	s.log.Info("DLNA server started",
 		slog.String("listenAddress", s.cfg.ListenAddress),
 		slog.String("serverURL", s.cfg.ServerURL),
+		slog.Int("ssdpInterfaces", len(s.ssdps)),
 		slog.String("udn", s.cfg.UDN),
 		slog.String("friendlyName", s.cfg.FriendlyName),
 		slog.Bool("telemetryEnabled", s.cfg.TelemetryStore != nil),
 	)
 	return nil
+}
+
+// advertiseEndpoints returns the SSDP advertise set: the configured
+// per-interface endpoints when present, else a single fallback derived
+// from Interface + ServerURL (the original single-advertiser behaviour).
+func (s *Server) advertiseEndpoints() []AdvertiseEndpoint {
+	if len(s.cfg.AdvertiseEndpoints) > 0 {
+		return s.cfg.AdvertiseEndpoints
+	}
+	return []AdvertiseEndpoint{{Interface: s.cfg.Interface, ServerURL: s.cfg.ServerURL}}
 }
 
 // Stop gracefully shuts down both subsystems. The SSDP advertiser
@@ -229,10 +293,10 @@ func (s *Server) Start(ctx context.Context) error {
 // Safe to call exactly once after Start(). Calling before Start()
 // or twice is a no-op (defensive — won't panic).
 func (s *Server) Stop(ctx context.Context) error {
-	if s.ssdp != nil {
-		s.ssdp.Stop()
-		s.ssdp = nil
+	for _, adv := range s.ssdps {
+		adv.Stop()
 	}
+	s.ssdps = nil
 	// Cancel any in-flight GENA initial-NOTIFY POSTs so they don't
 	// outlive the server.
 	if s.notifyCancel != nil {
@@ -299,13 +363,25 @@ func (s *Server) mountHandlers() {
 	s.mux.Handle("/dlna/cm.xml", SCPDHandler(ConnectionManagerSCPDXML))
 
 	cdsHandler := ContentDirectoryHandler(s.cfg.Library, func(r *http.Request) string {
-		// Per-request serverURL — prefer the static ServerURL config
-		// (matches the SSDP LOCATION renderers cached), fall back to
-		// the request's Host header for non-LAN-IP-bound deployments.
-		if s.cfg.ServerURL != "" {
-			return s.cfg.ServerURL
+		// Per-request serverURL — PREFER the request's Host header so the
+		// DIDL <res> file URLs are reachable from whichever interface /
+		// subnet the renderer actually used to reach us. On a
+		// multi-interface host the SSDP LOCATION is now per-interface
+		// (each advertiser announces its own IP), so the renderer's
+		// subsequent SOAP request carries that same host — echoing it
+		// back keeps every <res> URL self-consistent with the discovery
+		// path. A static ServerURL would hand a secondary-subnet renderer
+		// URLs pointing at the primary interface's IP, which fails when
+		// cross-subnet routing is restricted. Fall back to the static
+		// ServerURL only when Host is empty OR carries characters that
+		// would corrupt the constructed URL (path / query / fragment
+		// separators — a Host-header-injection guard; net/http normally
+		// rejects these, but defense-in-depth is cheap on a URL we embed
+		// verbatim in every <res>). Per gemini-code-assist on PR #328.
+		if r.Host != "" && !strings.ContainsAny(r.Host, "/\\?#") {
+			return "http://" + r.Host
 		}
-		return "http://" + r.Host
+		return s.cfg.ServerURL
 	})
 	s.mux.Handle("/dlna/cds/control", cdsHandler)
 	s.mux.Handle("/dlna/cm/control", ConnectionManagerHandler())
@@ -506,4 +582,39 @@ func PickLANEligibleInterface(opts EligibilityOpts) (*net.Interface, error) {
 		}
 	}
 	return nil, errors.New("no LAN-eligible interface found")
+}
+
+// PickAllLANEligibleInterfaces walks the host's interfaces and returns
+// EVERY one that passes `IsLANEligibleInterface`, in OS enumeration
+// order. This is the multi-interface counterpart to
+// PickLANEligibleInterface: on a host with both Ethernet and Wi-Fi (or a
+// bridged setup) renderers on each subnet need an advertiser bound to
+// their interface, otherwise the unselected adapter's renderers never
+// see the server.
+//
+// Returns an empty slice (never errors) when no eligible interface
+// exists — the caller decides whether to fall back to an OS-pick / single
+// advertiser or skip DLNA entirely.
+func PickAllLANEligibleInterfaces(opts EligibilityOpts) []*net.Interface {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	var out []*net.Interface
+	for i := range ifaces {
+		iface := ifaces[i]
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		if IsLANEligibleInterface(iface, addrs, opts) {
+			// Append the address of the slice element (not &iface, the
+			// loop-local copy) to avoid a per-eligible-interface heap
+			// escape. `ifaces` outlives this function via the returned
+			// pointers, so element addresses stay valid. Per
+			// gemini-code-assist on PR #328.
+			out = append(out, &ifaces[i])
+		}
+	}
+	return out
 }

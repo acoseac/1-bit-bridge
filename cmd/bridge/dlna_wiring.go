@@ -89,34 +89,29 @@ func startDLNAIfEnabled(
 		return &dlnaLifecycle{log: dlnaLog}, false
 	}
 
-	// Resolve the IP literal we'll advertise as ServerURL. Renderers
-	// dial this for `/dlna/file/{trackID}` AND for SOAP control; if
-	// we get this wrong, every Browse / Play action surfaces a dead
-	// URL on the renderer. Use the first IPv4 address on the picked
-	// interface — DLNA renderers on the home LAN are universally IPv4.
-	serverIP, ipErr := firstIPv4OnInterface(iface)
-	if ipErr != nil {
-		dlnaLog.Warn("DLNA disabled — couldn't resolve interface IP",
-			slog.String("iface", iface.Name),
-			slog.String("err", ipErr.Error()))
-		return &dlnaLifecycle{log: dlnaLog}, false
-	}
-
 	listenAddr := cfg.DLNA.EffectiveDLNAListenAddress()
 	port := portFromListenAddr(listenAddr)
-	// Resolve the host portion of serverURL with listenAddr
-	// preference: if the operator pinned `listenAddress` to a
-	// specific host (e.g. "192.168.1.42:7790"), advertise that host
-	// in SSDP so the URL we advertise is the URL we actually bind.
-	// Bare port forms (":7790" / "0.0.0.0:7790") fall back to the
-	// picked interface's IPv4 — that's the multi-interface case
-	// where the bind is wildcard but we still need to advertise a
-	// dialable host. Per CodeRabbit Major on PR #303.
-	host, _, splitErr := net.SplitHostPort(listenAddr)
-	if splitErr != nil || host == "" || host == "0.0.0.0" || host == "::" {
-		host = serverIP.String()
+	rawHost, _, splitErr := net.SplitHostPort(listenAddr)
+	bindWildcard := splitErr != nil || rawHost == "" || rawHost == "0.0.0.0" || rawHost == "::"
+
+	// Multi-interface SSDP advertise set (wildcard bind only; extracted
+	// to keep this function's cognitive complexity in check — Sonar S3776
+	// on PR #328). Gathered BEFORE the fallback ServerURL so an IPv6-only
+	// FIRST interface can't false-bail startup when a LATER interface has
+	// a usable IPv4 (CodeRabbit on PR #328).
+	endpoints := gatherAdvertiseEndpoints(bindWildcard, port, dlnaLog)
+
+	// Resolve the fallback ServerURL renderers dial for /dlna/file/ + SOAP
+	// control. Prefer a gathered endpoint's IP (any interface with IPv4),
+	// then a pinned bind host, then the picked interface's IPv4 as a last
+	// resort. DLNA disables only when NONE yield a dialable host.
+	serverURL, urlErr := deriveServerURL(rawHost, bindWildcard, port, endpoints, iface)
+	if urlErr != nil {
+		dlnaLog.Warn("DLNA disabled — couldn't resolve a dialable server URL",
+			slog.String("iface", iface.Name),
+			slog.String("err", urlErr.Error()))
+		return &dlnaLifecycle{log: dlnaLog}, false
 	}
-	serverURL := fmt.Sprintf("http://%s:%d", host, port)
 
 	// UDN derived from a hash of (DataDir, FriendlyName) — stable
 	// across restarts so renderers don't re-add us, distinct between
@@ -134,19 +129,20 @@ func startDLNAIfEnabled(
 	library := newManifestLibraryAdapter(store, resolver, cfg.LibraryRoots, dlnaLog)
 
 	srv, err := dlna.NewServer(dlna.ServerConfig{
-		Library:          library,
-		UDN:              udn,
-		FriendlyName:     cfg.DLNA.EffectiveDLNAFriendlyName(),
-		Manufacturer:     "1-bit",
-		ManufacturerURL:  "https://1-bit.app",
-		ModelDescription: "1-bit Bridge DLNA MediaServer",
-		ModelName:        "1-bit-bridge",
-		ModelNumber:      version.ServerVersion,
-		ListenAddress:    listenAddr,
-		ServerURL:        serverURL,
-		Interface:        iface,
-		TelemetryStore:   telemetry,
-		Logger:           dlnaLog,
+		Library:            library,
+		UDN:                udn,
+		FriendlyName:       cfg.DLNA.EffectiveDLNAFriendlyName(),
+		Manufacturer:       "1-bit",
+		ManufacturerURL:    "https://1-bit.app",
+		ModelDescription:   "1-bit Bridge DLNA MediaServer",
+		ModelName:          "1-bit-bridge",
+		ModelNumber:        version.ServerVersion,
+		ListenAddress:      listenAddr,
+		ServerURL:          serverURL,
+		Interface:          iface,
+		AdvertiseEndpoints: endpoints,
+		TelemetryStore:     telemetry,
+		Logger:             dlnaLog,
 	})
 	if err != nil {
 		dlnaLog.Warn("DLNA disabled — NewServer failed", slog.String("err", err.Error()))
@@ -188,6 +184,63 @@ func (d *dlnaLifecycle) Stop(ctx context.Context) {
 	if err := d.server.Stop(ctx); err != nil {
 		d.log.Warn("DLNA shutdown error", slog.String("err", err.Error()))
 	}
+}
+
+// gatherAdvertiseEndpoints builds the per-interface SSDP advertise set.
+// When the HTTP listener binds wildcard (the common ":7790" /
+// "0.0.0.0:7790" case) it announces on EVERY LAN-eligible interface with
+// a per-interface LOCATION URL so a renderer on a secondary subnet
+// (Ethernet + Wi-Fi, bridged hosts) can both discover us AND reach the
+// description / file URLs from its own subnet. A pinned bind host targets
+// a single interface by definition, so it returns nil and the server
+// falls back to its single-advertiser path (Interface + ServerURL).
+//
+// Interfaces that are LAN-eligible but carry no usable unicast IPv4
+// (IPv6-only, or link-local-only at this instant) are skipped rather than
+// advertised with an unreachable "http://<nil>:port" LOCATION.
+func gatherAdvertiseEndpoints(bindWildcard bool, port int, log *slog.Logger) []dlna.AdvertiseEndpoint {
+	if !bindWildcard {
+		return nil
+	}
+	var endpoints []dlna.AdvertiseEndpoint
+	for _, ai := range dlna.PickAllLANEligibleInterfaces(dlna.EligibilityOpts{}) {
+		ip, ipErr := firstIPv4OnInterface(ai)
+		if ipErr != nil {
+			log.Debug("DLNA SSDP: skipping interface with no usable IPv4",
+				slog.String("iface", ai.Name),
+				slog.String("err", ipErr.Error()))
+			continue
+		}
+		endpoints = append(endpoints, dlna.AdvertiseEndpoint{
+			Interface: ai,
+			ServerURL: fmt.Sprintf("http://%s:%d", ip.String(), port),
+		})
+	}
+	return endpoints
+}
+
+// deriveServerURL resolves the fallback ServerURL the bridge advertises
+// (LOCATION's host on the single-advertiser path, and the serverURLFunc
+// fallback when a renderer's Host header is empty). Priority:
+//
+//  1. Pinned bind host ("192.168.1.42:7790") → advertise exactly that.
+//  2. Wildcard bind with ≥1 gathered endpoint → the first endpoint's URL
+//     (its IP is already a usable LAN IPv4; this is what lets an IPv6-only
+//     FIRST interface not block startup — CodeRabbit on PR #328).
+//  3. Wildcard bind, no endpoints → the picked interface's IPv4 as a last
+//     resort; errors only when even that has no usable IPv4.
+func deriveServerURL(rawHost string, bindWildcard bool, port int, endpoints []dlna.AdvertiseEndpoint, iface *net.Interface) (string, error) {
+	if !bindWildcard {
+		return fmt.Sprintf("http://%s:%d", rawHost, port), nil
+	}
+	if len(endpoints) > 0 {
+		return endpoints[0].ServerURL, nil
+	}
+	ip, err := firstIPv4OnInterface(iface)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("http://%s:%d", ip.String(), port), nil
 }
 
 // firstIPv4OnInterface returns the first IPv4 address bound to iface

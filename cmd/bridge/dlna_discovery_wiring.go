@@ -15,7 +15,7 @@ import (
 // shape. Nil-safe — disabled / setup-failed paths return a
 // lifecycle whose Stop is a no-op and whose `snapshotter` is nil.
 type dlnaDiscoveryLifecycle struct {
-	client      *discovery.SSDPDiscoveryClient
+	clients     []*discovery.SSDPDiscoveryClient // one per LAN-eligible interface
 	snapshotter api.RendererDiscoverySnapshotter
 	log         *slog.Logger
 }
@@ -53,40 +53,51 @@ func startDLNADiscoveryIfEnabled(
 		return &dlnaDiscoveryLifecycle{log: log}
 	}
 
-	// LAN-eligible interface pick — same picker the server-side
-	// SSDP advertiser uses. Reusing it keeps the SSDP socket on a
-	// consistent interface (a future PR threading tsnet would
-	// extend `EligibilityOpts` for both call sites in lockstep).
-	iface, ifaceErr := dlna.PickLANEligibleInterface(dlna.EligibilityOpts{})
-	if ifaceErr != nil {
-		log.Warn("DLNA renderer discovery disabled — no LAN-eligible interface",
-			slog.String("err", ifaceErr.Error()))
+	// LAN-eligible interface set — symmetric with the server-side SSDP
+	// advertiser (PickAllLANEligibleInterfaces). If the server can
+	// advertise across multiple subnets, the discovery client should
+	// listen for control points across those same subnets. One client
+	// per interface, all writing into ONE shared (RWMutex-safe) cache.
+	ifaces := dlna.PickAllLANEligibleInterfaces(dlna.EligibilityOpts{})
+	if len(ifaces) == 0 {
+		log.Warn("DLNA renderer discovery disabled — no LAN-eligible interface")
 		return &dlnaDiscoveryLifecycle{log: log}
 	}
 
 	cache := discovery.NewRendererCache()
-	discCfg := discovery.DefaultDiscoveryConfig()
-	discCfg.Interface = iface
-	discCfg.MSearchInterval = cfg.DLNA.Discovery.EffectiveMSearchInterval()
-	discCfg.RendererTTL = cfg.DLNA.Discovery.EffectiveRendererTTL()
+	msearchInterval := cfg.DLNA.Discovery.EffectiveMSearchInterval()
+	rendererTTL := cfg.DLNA.Discovery.EffectiveRendererTTL()
 
-	client, err := discovery.NewSSDPDiscoveryClient(discCfg, cache)
-	if err != nil {
-		log.Warn("DLNA renderer discovery disabled — NewSSDPDiscoveryClient failed",
-			slog.String("err", err.Error()))
-		return &dlnaDiscoveryLifecycle{log: log}
+	var clients []*discovery.SSDPDiscoveryClient
+	for _, iface := range ifaces {
+		discCfg := discovery.DefaultDiscoveryConfig()
+		discCfg.Interface = iface
+		discCfg.MSearchInterval = msearchInterval
+		discCfg.RendererTTL = rendererTTL
+
+		client, err := discovery.NewSSDPDiscoveryClient(discCfg, cache)
+		if err != nil {
+			log.Warn("DLNA renderer discovery: client construct failed on interface — skipping",
+				slog.String("iface", iface.Name), slog.String("err", err.Error()))
+			continue
+		}
+		if startErr := client.Start(ctx); startErr != nil {
+			log.Warn("DLNA renderer discovery: Start failed on interface — skipping",
+				slog.String("iface", iface.Name), slog.String("err", startErr.Error()))
+			continue
+		}
+		clients = append(clients, client)
 	}
-	if startErr := client.Start(ctx); startErr != nil {
-		log.Warn("DLNA renderer discovery disabled — Start failed",
-			slog.String("err", startErr.Error()))
+	if len(clients) == 0 {
+		log.Warn("DLNA renderer discovery disabled — no interface could bind")
 		return &dlnaDiscoveryLifecycle{log: log}
 	}
 	log.Info("DLNA renderer discovery started",
-		slog.String("interface", iface.Name),
-		slog.Duration("msearchInterval", discCfg.MSearchInterval),
-		slog.Duration("rendererTTL", discCfg.RendererTTL))
+		slog.Int("interfaces", len(clients)),
+		slog.Duration("msearchInterval", msearchInterval),
+		slog.Duration("rendererTTL", rendererTTL))
 	return &dlnaDiscoveryLifecycle{
-		client:      client,
+		clients:     clients,
 		snapshotter: &rendererCacheAdapter{cache: cache},
 		log:         log,
 	}
@@ -96,10 +107,12 @@ func startDLNADiscoveryIfEnabled(
 // lifecycle (disabled / failed-to-start paths return a zero-value
 // lifecycle).
 func (d *dlnaDiscoveryLifecycle) Stop() {
-	if d == nil || d.client == nil {
+	if d == nil {
 		return
 	}
-	d.client.Stop()
+	for _, c := range d.clients {
+		c.Stop()
+	}
 }
 
 // rendererCacheAdapter satisfies `api.RendererDiscoverySnapshotter`

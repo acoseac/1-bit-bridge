@@ -384,6 +384,64 @@ func Test_PickLANEligibleInterface_DoesNotPanic(t *testing.T) {
 	}
 }
 
+// Test_PickAllLANEligibleInterfaces_Coherent verifies the multi-interface
+// picker (a) never returns nil entries, (b) every returned interface
+// independently passes IsLANEligibleInterface, and (c) agrees with the
+// single picker — the single picker errors iff the multi set is empty.
+func Test_PickAllLANEligibleInterfaces_Coherent(t *testing.T) {
+	all := PickAllLANEligibleInterfaces(EligibilityOpts{})
+	for _, iface := range all {
+		if iface == nil {
+			t.Fatal("nil interface in PickAll result set")
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue // transient Addrs() failure — can't re-verify this one
+		}
+		if !IsLANEligibleInterface(*iface, addrs, EligibilityOpts{}) {
+			t.Errorf("interface %s in PickAll set but fails IsLANEligibleInterface", iface.Name)
+		}
+	}
+	one, err := PickLANEligibleInterface(EligibilityOpts{})
+	if err == nil && len(all) == 0 {
+		t.Errorf("single picker found %s but PickAll returned empty", one.Name)
+	}
+	if err != nil && len(all) != 0 {
+		t.Errorf("single picker errored (%v) but PickAll returned %d", err, len(all))
+	}
+}
+
+// Test_advertiseEndpoints_FallbackAndPassthrough pins the multi-interface
+// advertise-set selection: an empty AdvertiseEndpoints collapses to a
+// single fallback derived from Interface + ServerURL (original
+// single-advertiser behaviour), and a populated AdvertiseEndpoints passes
+// through verbatim in order.
+func Test_advertiseEndpoints_FallbackAndPassthrough(t *testing.T) {
+	s := &Server{cfg: ServerConfig{ServerURL: "http://10.0.0.1:7790"}}
+	eps := s.advertiseEndpoints()
+	if len(eps) != 1 {
+		t.Fatalf("empty AdvertiseEndpoints should yield 1 fallback endpoint, got %d", len(eps))
+	}
+	if eps[0].ServerURL != "http://10.0.0.1:7790" {
+		t.Errorf("fallback ServerURL = %q, want http://10.0.0.1:7790", eps[0].ServerURL)
+	}
+
+	s2 := &Server{cfg: ServerConfig{
+		ServerURL: "http://10.0.0.1:7790",
+		AdvertiseEndpoints: []AdvertiseEndpoint{
+			{ServerURL: "http://10.0.0.1:7790"},
+			{ServerURL: "http://192.168.1.5:7790"},
+		},
+	}}
+	eps2 := s2.advertiseEndpoints()
+	if len(eps2) != 2 {
+		t.Fatalf("populated AdvertiseEndpoints should pass through 2 endpoints, got %d", len(eps2))
+	}
+	if eps2[1].ServerURL != "http://192.168.1.5:7790" {
+		t.Errorf("passthrough[1] ServerURL = %q, want http://192.168.1.5:7790", eps2[1].ServerURL)
+	}
+}
+
 // -----------------------------------------------------------------------------
 // Test helpers (minimal recording http.ResponseWriter + logger)
 // -----------------------------------------------------------------------------
