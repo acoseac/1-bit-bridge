@@ -229,3 +229,112 @@ func Test_FileHandler_EmptyTrackIDInURL_Returns404(t *testing.T) {
 		t.Errorf("/dlna/file/ (no trackID) should return 404, got %d", rec.Code)
 	}
 }
+
+// -----------------------------------------------------------------------------
+// PR4 — offline-variant <res> serving
+// -----------------------------------------------------------------------------
+
+func Test_extractVariantID(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"/dlna/file/abc123", ""}, // source request, no segment
+		{"/dlna/file/abc123/variant-upscaled-v2-176400-24.flac", "upscaled-v2-176400-24"},
+		{"/dlna/file/abc123/variant-optimized-v2-48000-16.flac", "optimized-v2-48000-16"},
+		{"/dlna/file/abc123/notavariant.flac", ""},     // second segment not a variant
+		{"/dlna/file/abc123/variant-x-y/extra", "x-y"}, // ignore further segments (no ext here)
+		{"/wrong/prefix/x", ""}, // wrong prefix
+	}
+	for _, tc := range cases {
+		if got := extractVariantID(tc.in); got != tc.want {
+			t.Errorf("extractVariantID(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// Test_FileHandler_ServesVariantSidecar pins that a valid variant path
+// serves the sidecar bytes and reports the variant's own MIME (the .flac
+// sidecar of a .dsf source must NOT broadcast the source's audio/x-dsf).
+func Test_FileHandler_ServesVariantSidecar(t *testing.T) {
+	srcPath := createTempFile(t, ".dsf", "SOURCE DSF BYTES")
+	sidecarPath := createTempFile(t, ".flac", "UPSCALED FLAC BYTES")
+	lib := newTestLib(TrackInfo{
+		TrackID: "trk", AbsolutePath: srcPath, FileExtension: ".dsf", Size: 16,
+		Variants: []VariantInfo{{
+			VariantID: "upscaled-v2-176400-24", AbsolutePath: sidecarPath,
+			FileExtension: ".flac", Size: 19, BitDepth: 24, SampleRate: 176400,
+		}},
+	})
+	h := FileHandler(lib)
+	req := httptest.NewRequest(http.MethodGet, "/dlna/file/trk/variant-upscaled-v2-176400-24.flac", nil)
+	req.Header.Set("User-Agent", "Music Player Daemon 0.21.26")
+	rec := httptest.NewRecorder()
+	h(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Body.String(); got != "UPSCALED FLAC BYTES" {
+		t.Errorf("body = %q, want the sidecar bytes", got)
+	}
+	if got := rec.Header().Get("Content-Type"); !strings.Contains(got, "flac") {
+		t.Errorf("Content-Type = %q, want a flac MIME (variant ext), not the source .dsf MIME", got)
+	}
+}
+
+// Test_FileHandler_VariantSidecarMissing_Returns410 pins the 410 Gone
+// contract when the DB-known sidecar is no longer on disk (distinct from
+// the 404 used for an unknown track / source-missing).
+func Test_FileHandler_VariantSidecarMissing_Returns410(t *testing.T) {
+	srcPath := createTempFile(t, ".dsf", "SOURCE")
+	lib := newTestLib(TrackInfo{
+		TrackID: "trk", AbsolutePath: srcPath, FileExtension: ".dsf", Size: 6,
+		Variants: []VariantInfo{{
+			VariantID: "upscaled-v2-176400-24", AbsolutePath: "/no/such/sidecar.flac",
+			FileExtension: ".flac",
+		}},
+	})
+	h := FileHandler(lib)
+	req := httptest.NewRequest(http.MethodGet, "/dlna/file/trk/variant-upscaled-v2-176400-24.flac", nil)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusGone {
+		t.Errorf("missing sidecar should return 410 Gone, got %d", rec.Code)
+	}
+}
+
+// Test_FileHandler_UnknownVariantID_Returns404 pins that a variant ID the
+// track doesn't carry is a 404, not a 410.
+func Test_FileHandler_UnknownVariantID_Returns404(t *testing.T) {
+	srcPath := createTempFile(t, ".dsf", "SOURCE")
+	lib := newTestLib(TrackInfo{
+		TrackID: "trk", AbsolutePath: srcPath, FileExtension: ".dsf", Size: 6,
+	})
+	h := FileHandler(lib)
+	req := httptest.NewRequest(http.MethodGet, "/dlna/file/trk/variant-does-not-exist.flac", nil)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("unknown variant ID should return 404, got %d", rec.Code)
+	}
+}
+
+// Test_FileHandler_NoVariantSegmentServesSource pins the source fallback
+// when the URL carries no variant segment.
+func Test_FileHandler_NoVariantSegmentServesSource(t *testing.T) {
+	srcPath := createTempFile(t, ".flac", "SOURCE FLAC")
+	lib := newTestLib(TrackInfo{
+		TrackID: "trk", AbsolutePath: srcPath, FileExtension: ".flac", Size: 11,
+		Variants: []VariantInfo{{VariantID: "upscaled-v2-176400-24", AbsolutePath: "/unused.flac", FileExtension: ".flac"}},
+	})
+	h := FileHandler(lib)
+	req := httptest.NewRequest(http.MethodGet, "/dlna/file/trk", nil)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Body.String(); got != "SOURCE FLAC" {
+		t.Errorf("body = %q, want the source bytes", got)
+	}
+}
