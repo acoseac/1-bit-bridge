@@ -114,8 +114,15 @@ func DeviceDescriptionHandler(opts DeviceDescriptionOpts) http.HandlerFunc {
 // -----------------------------------------------------------------------------
 
 // ContentDirectorySCPDXML is the SCPD for the ContentDirectory:1
-// service. Declares Browse + the 3 spec-mandatory introspection
+// service. Declares Browse + Search + the 3 spec-mandatory introspection
 // actions (GetSearchCapabilities, GetSortCapabilities, GetSystemUpdateID).
+//
+// Search is genuinely optional per spec, but we DO implement it
+// (FTS5-backed free-text query — see handleSearch), so it MUST be
+// declared here: a control point reads the SCPD action list to decide
+// which actions to offer, and an undeclared Search action means the
+// search UI never appears even though GetSearchCapabilities advertises
+// searchable fields.
 //
 // The 3 introspection actions are REQUIRED per UPnP CDS:1 §2.3
 // regardless of whether Search is implemented. Empirically validated
@@ -178,6 +185,21 @@ const ContentDirectorySCPDXML = `<?xml version="1.0" encoding="UTF-8"?>
         <argument><name>UpdateID</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_UpdateID</relatedStateVariable></argument>
       </argumentList>
     </action>
+    <action>
+      <name>Search</name>
+      <argumentList>
+        <argument><name>ContainerID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_ObjectID</relatedStateVariable></argument>
+        <argument><name>SearchCriteria</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_SearchCriteria</relatedStateVariable></argument>
+        <argument><name>Filter</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_Filter</relatedStateVariable></argument>
+        <argument><name>StartingIndex</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_Index</relatedStateVariable></argument>
+        <argument><name>RequestedCount</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_Count</relatedStateVariable></argument>
+        <argument><name>SortCriteria</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_SortCriteria</relatedStateVariable></argument>
+        <argument><name>Result</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_Result</relatedStateVariable></argument>
+        <argument><name>NumberReturned</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_Count</relatedStateVariable></argument>
+        <argument><name>TotalMatches</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_Count</relatedStateVariable></argument>
+        <argument><name>UpdateID</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_UpdateID</relatedStateVariable></argument>
+      </argumentList>
+    </action>
   </actionList>
   <serviceStateTable>
     <stateVariable sendEvents="no"><name>A_ARG_TYPE_ObjectID</name><dataType>string</dataType></stateVariable>
@@ -186,6 +208,7 @@ const ContentDirectorySCPDXML = `<?xml version="1.0" encoding="UTF-8"?>
     <stateVariable sendEvents="no"><name>A_ARG_TYPE_Index</name><dataType>ui4</dataType></stateVariable>
     <stateVariable sendEvents="no"><name>A_ARG_TYPE_Count</name><dataType>ui4</dataType></stateVariable>
     <stateVariable sendEvents="no"><name>A_ARG_TYPE_SortCriteria</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>A_ARG_TYPE_SearchCriteria</name><dataType>string</dataType></stateVariable>
     <stateVariable sendEvents="no"><name>A_ARG_TYPE_Result</name><dataType>string</dataType></stateVariable>
     <stateVariable sendEvents="no"><name>A_ARG_TYPE_UpdateID</name><dataType>ui4</dataType></stateVariable>
     <stateVariable sendEvents="no"><name>SearchCapabilities</name><dataType>string</dataType></stateVariable>

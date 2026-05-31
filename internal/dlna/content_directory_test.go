@@ -298,10 +298,15 @@ type genTestLib struct {
 	gen    atomic.Uint64
 }
 
-func (g *genTestLib) ListTrackInfos() []TrackInfo           { return g.tracks }
-func (g *genTestLib) TrackCount() int                       { return len(g.tracks) }
-func (g *genTestLib) GetTrackInfo(string) (TrackInfo, bool) { return TrackInfo{}, false }
-func (g *genTestLib) Generation() uint64                    { return g.gen.Load() }
+func (g *genTestLib) ListTrackInfos() []TrackInfo { return g.tracks }
+func (g *genTestLib) TrackCount() int             { return len(g.tracks) }
+func (g *genTestLib) GetTrackInfo(string) (TrackInfo, bool) {
+	return TrackInfo{}, false
+}
+func (g *genTestLib) SearchTrackInfos(q string) []TrackInfo {
+	return filterTrackInfosBySubstring(g.tracks, q)
+}
+func (g *genTestLib) Generation() uint64 { return g.gen.Load() }
 
 // Test_folderIndexCache_ConcurrentGetRaceFree hammers get() from many
 // goroutines while another bumps the generation. Run under -race, it
@@ -480,6 +485,9 @@ func (c *countingLib) ListTrackInfos() []TrackInfo {
 	return out
 }
 func (c *countingLib) TrackCount() int { c.tcCalls.Add(1); return len(c.tracks) }
+func (c *countingLib) SearchTrackInfos(q string) []TrackInfo {
+	return filterTrackInfosBySubstring(c.tracks, q)
+}
 func (c *countingLib) GetTrackInfo(id string) (TrackInfo, bool) {
 	for _, t := range c.tracks {
 		if t.TrackID == id {
@@ -849,7 +857,13 @@ func buildCDSActionRequest(t *testing.T, actionName string) *http.Request {
 	return req
 }
 
-func Test_CDS_GetSearchCapabilities_ReturnsEmptySearchCaps(t *testing.T) {
+// Test_CDS_GetSearchCapabilities_AdvertisesSearchableFields pins that
+// GetSearchCapabilities now advertises the searchable metadata fields
+// (title / artist / album) rather than an empty SearchCaps. This is the
+// spec signal that flips the Search action on in control points; an
+// empty value would declare Search unsupported, but we DO implement it
+// (see Test_CDS_Search_*).
+func Test_CDS_GetSearchCapabilities_AdvertisesSearchableFields(t *testing.T) {
 	lib := newTestLib(testTrack("t1", "Hello"))
 	h := ContentDirectoryHandler(lib, staticServerURL("http://server"))
 	req := buildCDSActionRequest(t, "GetSearchCapabilities")
@@ -862,7 +876,7 @@ func Test_CDS_GetSearchCapabilities_ReturnsEmptySearchCaps(t *testing.T) {
 	body := rec.Body.String()
 	for _, want := range []string{
 		`<u:GetSearchCapabilitiesResponse`,
-		`<SearchCaps></SearchCaps>`,
+		`<SearchCaps>dc:title,upnp:artist,upnp:album</SearchCaps>`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("missing substring %q in response body: %s", want, body)
@@ -912,6 +926,156 @@ func Test_CDS_GetSystemUpdateID_ReturnsStableID(t *testing.T) {
 	}
 }
 
+// buildSearchRequest constructs a SOAP Search request with the canonical
+// SOAPAction header.
+func buildSearchRequest(t *testing.T, containerID, criteria string, startIdx, count uint32) *http.Request {
+	t.Helper()
+	body := `<?xml version="1.0" encoding="UTF-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+  <s:Body>
+    <u:Search xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1">
+      <ContainerID>` + containerID + `</ContainerID>
+      <SearchCriteria>` + criteria + `</SearchCriteria>
+      <Filter>*</Filter>
+      <StartingIndex>` + uint32ToString(startIdx) + `</StartingIndex>
+      <RequestedCount>` + uint32ToString(count) + `</RequestedCount>
+      <SortCriteria></SortCriteria>
+    </u:Search>
+  </s:Body>
+</s:Envelope>`
+	req := httptest.NewRequest(http.MethodPost, "/dlna/cds/control", strings.NewReader(body))
+	req.Header.Set("SOAPAction", `"urn:schemas-upnp-org:service:ContentDirectory:1#Search"`)
+	req.Header.Set("Content-Type", "text/xml; charset=\"utf-8\"")
+	return req
+}
+
+// Test_CDS_Search_ReturnsMatchingItems pins the happy path: a Search with
+// a `dc:title contains "..."` criteria returns the matching tracks as
+// DIDL items with correct NumberReturned / TotalMatches.
+func Test_CDS_Search_ReturnsMatchingItems(t *testing.T) {
+	lib := newTestLib(
+		testTrack("t1", "Blue Train"),
+		testTrack("t2", "Red Car"),
+		testTrack("t3", "Blue Moon"),
+	)
+	h := ContentDirectoryHandler(lib, staticServerURL("http://server"))
+	req := buildSearchRequest(t, "0", `dc:title contains "blue"`, 0, 0)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		`<u:SearchResponse`,
+		`<NumberReturned>2</NumberReturned>`,
+		`<TotalMatches>2</TotalMatches>`,
+		`&lt;dc:title&gt;Blue Train&lt;/dc:title&gt;`,
+		`&lt;dc:title&gt;Blue Moon&lt;/dc:title&gt;`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing %q in Search response: %s", want, body)
+		}
+	}
+	if strings.Contains(body, "Red Car") {
+		t.Errorf("non-matching track leaked into Search response: %s", body)
+	}
+}
+
+// Test_CDS_Search_RespectsPagination pins StartingIndex / RequestedCount.
+func Test_CDS_Search_RespectsPagination(t *testing.T) {
+	lib := newTestLib(
+		testTrack("t1", "Blue Train"),
+		testTrack("t2", "Blue Moon"),
+		testTrack("t3", "Blue Note"),
+	)
+	h := ContentDirectoryHandler(lib, staticServerURL("http://server"))
+	req := buildSearchRequest(t, "0", `dc:title contains "blue"`, 0, 1)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; body: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `<NumberReturned>1</NumberReturned>`) {
+		t.Errorf("RequestedCount=1 should return 1 item: %s", body)
+	}
+	if !strings.Contains(body, `<TotalMatches>3</TotalMatches>`) {
+		t.Errorf("TotalMatches should report full match count 3: %s", body)
+	}
+}
+
+// Test_CDS_Search_DegradesNotFaults pins that an empty / bare-"*" /
+// class-only criteria yields zero matches with a 200 OK, never a SOAP
+// fault.
+func Test_CDS_Search_DegradesNotFaults(t *testing.T) {
+	lib := newTestLib(testTrack("t1", "Blue Train"))
+	h := ContentDirectoryHandler(lib, staticServerURL("http://server"))
+	for _, criteria := range []string{
+		`*`,
+		``,
+		`upnp:class derivedfrom "object.item.audioItem"`,
+	} {
+		req := buildSearchRequest(t, "0", criteria, 0, 0)
+		rec := httptest.NewRecorder()
+		h(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Errorf("criteria %q: status = %d, want 200 (degrade, not fault)", criteria, rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), `<NumberReturned>0</NumberReturned>`) {
+			t.Errorf("criteria %q: expected 0 matches; body: %s", criteria, rec.Body.String())
+		}
+	}
+}
+
+// Test_searchCriteriaTerms pins the UPnP-SearchCriteria → free-text
+// extraction, including the class-URN skip and multi-clause join.
+func Test_searchCriteriaTerms(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{`dc:title contains "blue train"`, "blue train"},
+		{`upnp:artist contains "davis"`, "davis"},
+		{`(upnp:class derivedfrom "object.item.audioItem") and (dc:title contains "miles")`, "miles"},
+		{`upnp:artist contains "davis" or dc:album contains "kind"`, "davis kind"},
+		{`*`, ""},
+		{``, ""},
+		{`dc:title contains ""`, ""},
+		{`upnp:class derivedfrom "object.container"`, ""},
+	}
+	for _, tc := range cases {
+		if got := searchCriteriaTerms(tc.in); got != tc.want {
+			t.Errorf("searchCriteriaTerms(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// Test_extractQuotedStrings pins the quoted-literal scanner including the
+// backslash-escape and unterminated-final-quote handling.
+func Test_extractQuotedStrings(t *testing.T) {
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{`a "one" b "two"`, []string{"one", "two"}},
+		{`"esc \" inside"`, []string{`esc " inside`}},
+		{`"unterminated`, nil},
+		{`no quotes`, nil},
+	}
+	for _, tc := range cases {
+		got := extractQuotedStrings(tc.in)
+		if len(got) != len(tc.want) {
+			t.Errorf("extractQuotedStrings(%q) = %v, want %v", tc.in, got, tc.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != tc.want[i] {
+				t.Errorf("extractQuotedStrings(%q)[%d] = %q, want %q", tc.in, i, got[i], tc.want[i])
+			}
+		}
+	}
+}
+
 // Test_CDS_SCPD_AdvertisesSpecMandatoryActions pins the SCPD wire shape
 // so a future drop of any of the 3 introspection actions surfaces here
 // — that drop would re-open the mconnect-silent-drill-abort regression
@@ -923,6 +1087,7 @@ func Test_CDS_SCPD_AdvertisesSpecMandatoryActions(t *testing.T) {
 		`<name>GetSortCapabilities</name>`,
 		`<name>GetSystemUpdateID</name>`,
 		`<name>Browse</name>`,
+		`<name>Search</name>`,
 		`<name>SearchCapabilities</name>`,
 		`<name>SortCapabilities</name>`,
 		`<name>SystemUpdateID</name>`,
