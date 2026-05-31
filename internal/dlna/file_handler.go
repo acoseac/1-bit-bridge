@@ -62,13 +62,41 @@ func FileHandler(lib LibrarySource) http.HandlerFunc {
 			return
 		}
 
-		f, err := os.Open(info.AbsolutePath)
+		// Resolve which file to serve: the source, or an offline variant
+		// addressed via the trailing `/variant-{id}{ext}` path segment.
+		servePath := info.AbsolutePath
+		ext := info.FileExtension
+		isVariant := false
+		if variantID := extractVariantID(r.URL.Path); variantID != "" {
+			v, found := findVariant(info.Variants, variantID)
+			if !found {
+				// Unknown variant ID — to the renderer this is the same
+				// as "no such object".
+				http.NotFound(w, r)
+				return
+			}
+			servePath = v.AbsolutePath
+			if v.FileExtension != "" {
+				// Use the VARIANT's extension so MIME / contentFeatures
+				// describe the sidecar (.flac), not the source (.dsf).
+				ext = v.FileExtension
+			}
+			isVariant = true
+		}
+
+		f, err := os.Open(servePath)
 		if err != nil {
-			// Either the file vanished between scan and serve, or
-			// permissions changed. Log via the telemetry middleware
-			// (which records the eventual 500 status); return 404
-			// rather than 500 because to the renderer this is
-			// indistinguishable from "track doesn't exist".
+			if isVariant {
+				// The DB row pointed at a sidecar that's no longer on
+				// disk (GC'd, manually deleted). Mirror the api
+				// /v1/download?variant= contract: 410 Gone, distinct from
+				// a 404 "unknown object".
+				http.Error(w, "variant sidecar missing", http.StatusGone)
+				return
+			}
+			// Source file vanished between scan and serve, or permissions
+			// changed. Return 404 — indistinguishable to the renderer from
+			// "track doesn't exist".
 			http.NotFound(w, r)
 			return
 		}
@@ -81,10 +109,9 @@ func FileHandler(lib LibrarySource) http.HandlerFunc {
 		}
 
 		ua := r.Header.Get("User-Agent")
-		ext := info.FileExtension
 		if ext == "" {
 			// Defensive — derive from path if the adapter didn't pre-fill.
-			ext = strings.ToLower(filepath.Ext(info.AbsolutePath))
+			ext = strings.ToLower(filepath.Ext(servePath))
 		}
 
 		w.Header().Set("Content-Type", PreferredMIMEFor(ua, ext))
@@ -107,7 +134,7 @@ func FileHandler(lib LibrarySource) http.HandlerFunc {
 		// + Content-Length. The wrapper passes status / headers through
 		// to the underlying ResponseWriter; ServeContent's writes go
 		// through the wrapper's buffer.
-		http.ServeContent(aw, r, filepath.Base(info.AbsolutePath), stat.ModTime(), f)
+		http.ServeContent(aw, r, filepath.Base(servePath), stat.ModTime(), f)
 	}
 }
 
@@ -133,6 +160,43 @@ func extractTrackID(urlPath string) string {
 		return rest[:idx]
 	}
 	return rest
+}
+
+// variantPathPrefix is the marker that introduces the variant segment in
+// a `/dlna/file/{trackID}/variant-{variantID}{ext}` URL.
+const variantPathPrefix = "variant-"
+
+// extractVariantID recovers the variant ID from a variant file URL of
+// the form `/dlna/file/{trackID}/variant-{variantID}{ext}`. Returns ""
+// when the path has no second segment (a plain source request) or the
+// second segment isn't a `variant-` segment.
+//
+// The variant ID itself never contains a '.', so the trailing file
+// extension is stripped at the LAST dot. Pure helper — tested in
+// isolation.
+func extractVariantID(urlPath string) string {
+	if !strings.HasPrefix(urlPath, FilePathPrefix) {
+		return ""
+	}
+	rest := urlPath[len(FilePathPrefix):]
+	idx := strings.IndexByte(rest, '/')
+	if idx < 0 {
+		return "" // no second segment → source request
+	}
+	seg := rest[idx+1:]
+	// Ignore any further segments after the variant one.
+	if j := strings.IndexByte(seg, '/'); j >= 0 {
+		seg = seg[:j]
+	}
+	if !strings.HasPrefix(seg, variantPathPrefix) {
+		return ""
+	}
+	seg = seg[len(variantPathPrefix):]
+	// Strip the trailing file extension (variant IDs carry no '.').
+	if dot := strings.LastIndexByte(seg, '.'); dot >= 0 {
+		seg = seg[:dot]
+	}
+	return seg
 }
 
 // Avoid `path` import being flagged if a future refactor uses

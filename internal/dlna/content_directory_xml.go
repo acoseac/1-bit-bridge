@@ -100,6 +100,11 @@ type DIDLTrackOpts struct {
 	FileExtension   string  // ".dsf", ".flac", etc. (lowercase with leading dot)
 	ArtworkURL      string  // absolute URL for <upnp:albumArtURI>; emitted only if non-empty
 
+	// Variants are offline-cached alternate renderings emitted as
+	// additional <res> elements after the source <res>. Empty =
+	// source-only (the common case).
+	Variants []VariantInfo
+
 	ServerURL string // base URL for constructing the absolute file URL
 	UserAgent string // for per-vendor MIME selection
 }
@@ -265,7 +270,93 @@ func DIDLForTrack(opts DIDLTrackOpts) string {
 	sb.WriteString(`>`)
 	sb.WriteString(escapeXMLText(fileURL))
 	sb.WriteString(`</res>`)
+
+	// Additional <res> elements for offline-cached variants, AFTER the
+	// source <res> so the bit-exact original stays the default pick.
+	// Ordered optimized → upscaled so a picky / entry-level renderer that
+	// rejects a hi-res or DSD source finds the broadly-playable 16-bit
+	// FLAC option immediately next.
+	for _, v := range orderedVariants(opts.Variants) {
+		sb.WriteString(variantResElement(opts, v))
+	}
+
 	sb.WriteString(`</item>`)
+	return sb.String()
+}
+
+// orderedVariants returns the variants in DIDL <res> emission order:
+// optimized (the universal 16-bit compatibility floor) first, then
+// upscaled (hi-res), then any future kinds — each group preserving input
+// order. Two-pass partition (no sort import; the variant count per track
+// is tiny).
+func orderedVariants(vs []VariantInfo) []VariantInfo {
+	if len(vs) <= 1 {
+		return vs
+	}
+	out := make([]VariantInfo, 0, len(vs))
+	for _, v := range vs {
+		if strings.HasPrefix(v.VariantID, "optimized") {
+			out = append(out, v)
+		}
+	}
+	for _, v := range vs {
+		if strings.HasPrefix(v.VariantID, "upscaled") {
+			out = append(out, v)
+		}
+	}
+	for _, v := range vs {
+		if !strings.HasPrefix(v.VariantID, "optimized") && !strings.HasPrefix(v.VariantID, "upscaled") {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// variantResElement builds the DIDL-Lite <res> for one offline variant.
+// Variants are always lossless PCM FLAC, so (unlike the source path)
+// there's no DSD bit-depth gate — bitsPerSample is emitted whenever > 0.
+// The URL uses a clean PATH SEGMENT (NOT a query string):
+//
+//	<base>/dlna/file/{trackID}/variant-{variantID}{ext}
+//
+// Many boutique / legacy UPnP renderers strip query strings before
+// handing the URL to their decode buffer; a path segment survives. The
+// file handler's extractTrackID already splits on the first '/', so the
+// trackID still resolves, and extractVariantID recovers the variant.
+func variantResElement(opts DIDLTrackOpts, v VariantInfo) string {
+	mime := PreferredMIMEFor(opts.UserAgent, v.FileExtension)
+	protocolInfo := fmt.Sprintf(
+		"http-get:*:%s:DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=%s",
+		mime, DLNAFlags,
+	)
+	attrs := []string{
+		fmt.Sprintf(`protocolInfo=%q`, protocolInfo),
+		fmt.Sprintf(`size="%d"`, v.Size),
+	}
+	if opts.DurationSeconds > 0 {
+		attrs = append(attrs, fmt.Sprintf(`duration=%q`, formatDLNADuration(opts.DurationSeconds)))
+	}
+	if v.SampleRate > 0 {
+		attrs = append(attrs, fmt.Sprintf(`sampleFrequency="%d"`, v.SampleRate))
+	}
+	if v.BitDepth > 0 {
+		attrs = append(attrs, fmt.Sprintf(`bitsPerSample="%d"`, v.BitDepth))
+	}
+	channels := opts.Channels
+	if channels <= 0 {
+		channels = 2
+	}
+	attrs = append(attrs, fmt.Sprintf(`nrAudioChannels="%d"`, channels))
+
+	variantURL := strings.TrimRight(opts.ServerURL, "/") +
+		"/dlna/file/" + opts.TrackID + "/variant-" + v.VariantID + v.FileExtension
+
+	var sb strings.Builder
+	sb.WriteString(`<res `)
+	sb.WriteString(strings.Join(attrs, " "))
+	sb.WriteString(`>`)
+	sb.WriteString(escapeXMLText(variantURL))
+	sb.WriteString(`</res>`)
 	return sb.String()
 }
 

@@ -711,3 +711,68 @@ func Test_ExtensionFromPath(t *testing.T) {
 		}
 	}
 }
+
+// -----------------------------------------------------------------------------
+// PR4 — offline-variant <res> emission
+// -----------------------------------------------------------------------------
+
+func countResElements(didl string) int { return strings.Count(didl, "<res ") }
+
+// Test_DIDLForTrack_NoVariants_SingleRes pins that a track with no
+// variants emits exactly one <res> (the source) — unchanged behaviour.
+func Test_DIDLForTrack_NoVariants_SingleRes(t *testing.T) {
+	opts := DIDLTrackOpts{
+		TrackID: "t1", Title: "X", Size: 1, FileExtension: ".flac",
+		ServerURL: "http://h:7790", UserAgent: "Lavf",
+	}
+	got := DIDLForTrack(opts)
+	if n := countResElements(got); n != 1 {
+		t.Errorf("no-variant track should emit 1 <res>, got %d: %s", n, got)
+	}
+}
+
+// Test_DIDLForTrack_Variants_EmitsExtraResInOrder pins that N variants
+// produce N+1 <res> elements, source first, then optimized before
+// upscaled, each with a clean path-segment variant URL carrying the
+// variant's own metadata.
+func Test_DIDLForTrack_Variants_EmitsExtraResInOrder(t *testing.T) {
+	opts := DIDLTrackOpts{
+		TrackID: "t1", Title: "X", Size: 100, FileExtension: ".dsf",
+		DurationSeconds: 60, IsDSD: true, Channels: 2,
+		ServerURL: "http://h:7790", UserAgent: "Music Player Daemon 0.21.26",
+		Variants: []VariantInfo{
+			// Deliberately out of desired emission order to prove sorting.
+			{VariantID: "upscaled-v2-176400-24", FileExtension: ".flac", Size: 900, BitDepth: 24, SampleRate: 176400},
+			{VariantID: "optimized-v2-48000-16", FileExtension: ".flac", Size: 300, BitDepth: 16, SampleRate: 48000},
+		},
+	}
+	got := DIDLForTrack(opts)
+
+	if n := countResElements(got); n != 3 {
+		t.Fatalf("2 variants should emit 3 <res> (source + 2), got %d: %s", n, got)
+	}
+	// Path-segment URLs (NOT query strings).
+	for _, want := range []string{
+		`http://h:7790/dlna/file/t1</res>`, // source <res> URL
+		`http://h:7790/dlna/file/t1/variant-optimized-v2-48000-16.flac</res>`,
+		`http://h:7790/dlna/file/t1/variant-upscaled-v2-176400-24.flac</res>`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in DIDL: %s", want, got)
+		}
+	}
+	if strings.Contains(got, "?variant=") {
+		t.Errorf("variant URL must be a path segment, not a query string: %s", got)
+	}
+	// Ordering: source, then optimized, then upscaled.
+	srcIdx := strings.Index(got, "/dlna/file/t1</res>")
+	optIdx := strings.Index(got, "variant-optimized-")
+	upIdx := strings.Index(got, "variant-upscaled-")
+	if !(srcIdx < optIdx && optIdx < upIdx) {
+		t.Errorf("expected order source < optimized < upscaled; got idx src=%d opt=%d up=%d", srcIdx, optIdx, upIdx)
+	}
+	// Variant <res> carries PCM bitsPerSample (no DSD gate) + its own rate.
+	if !strings.Contains(got, `sampleFrequency="48000"`) || !strings.Contains(got, `bitsPerSample="16"`) {
+		t.Errorf("optimized variant <res> missing its 16/48k attrs: %s", got)
+	}
+}

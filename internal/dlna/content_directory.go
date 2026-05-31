@@ -190,6 +190,41 @@ type TrackInfo struct {
 	// bridge-side adapter constructs this from manifest.Track's
 	// ArtworkMBID + the request's server URL.
 	ArtworkURL string
+
+	// Variants are the offline-cached alternate renderings of this
+	// track (upscaled hi-res FLAC and/or CarPlay/cellular-optimized
+	// 16-bit FLAC). Each becomes an additional DIDL-Lite <res> element
+	// so a renderer can pick a compatible rendering. Empty = source-only.
+	// The bridge-side adapter pre-resolves each variant's on-disk
+	// AbsolutePath here so the file handler never has to touch the
+	// manifest DB. The DLNA package never imports manifest — this is
+	// the decoupling boundary.
+	Variants []VariantInfo
+}
+
+// VariantInfo describes one offline-cached alternate rendering of a
+// track, surfaced as an additional DIDL-Lite <res>. The adapter
+// pre-resolves AbsolutePath (the sidecar's on-disk path, authoritative
+// from the track_variants DB row) so the file handler can serve it with
+// the same security / freshness checks as the source without a DB query.
+type VariantInfo struct {
+	VariantID     string // e.g. "upscaled-v2-176400-24" / "optimized-v2-48000-16"
+	AbsolutePath  string // sidecar path on disk (from the DB row, never reconstructed)
+	FileExtension string // ".flac" (variants are always lossless FLAC today)
+	Size          int64  // sidecar size in bytes
+	BitDepth      int    // PCM bit depth (16/24/32) — variants are never DSD
+	SampleRate    int    // Hz
+}
+
+// findVariant returns the VariantInfo with the given ID, or (zero,
+// false). Linear scan — a track has at most a handful of variants.
+func findVariant(variants []VariantInfo, variantID string) (VariantInfo, bool) {
+	for _, v := range variants {
+		if v.VariantID == variantID {
+			return v, true
+		}
+	}
+	return VariantInfo{}, false
 }
 
 // toDIDLOpts converts a TrackInfo + per-request fields into the
@@ -217,6 +252,7 @@ func (t TrackInfo) toDIDLOpts(serverURL, userAgent, parentID string) DIDLTrackOp
 		Codec:           t.Codec,
 		FileExtension:   t.FileExtension,
 		ArtworkURL:      t.ArtworkURL,
+		Variants:        t.Variants,
 		ServerURL:       serverURL,
 		UserAgent:       userAgent,
 	}

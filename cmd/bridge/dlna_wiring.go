@@ -420,6 +420,20 @@ func (a *manifestLibraryAdapter) rebuild() {
 	// `resolveErr` above).
 	libraryRoot := ""
 
+	// One bulk read of every offline variant row (sidecar paths +
+	// metadata), grouped by source path. Cheaper than an N+1 LookupVariant
+	// per track, and runs at most once per cache TTL. Failure is non-fatal:
+	// we log and proceed with source-only DIDL (the feature degrades, the
+	// CDS still serves originals).
+	variantsBySource := map[string][]manifest.VariantRow{}
+	if rows, vErr := a.store.AllVariants(ctx); vErr != nil {
+		a.log.Warn("manifest variant list failed — DLNA serves source-only", slog.String("err", vErr.Error()))
+	} else {
+		for _, vr := range rows {
+			variantsBySource[vr.SourcePath] = append(variantsBySource[vr.SourcePath], vr)
+		}
+	}
+
 	list := make([]dlna.TrackInfo, 0, len(tracks))
 	byID := make(map[string]dlna.TrackInfo, len(tracks))
 	byPath := make(map[string]dlna.TrackInfo, len(tracks))
@@ -429,6 +443,7 @@ func (a *manifestLibraryAdapter) rebuild() {
 			continue
 		}
 		ti := manifestTrackToDLNATrackInfo(t, absPath, libraryRoot)
+		ti.Variants = dlnaVariantsFromRows(variantsBySource[t.Path])
 		list = append(list, ti)
 		byID[ti.TrackID] = ti
 		// Key on RelativePath (== manifest Track.Path) so Search hits —
@@ -539,6 +554,36 @@ func manifestTrackToDLNATrackInfo(t manifest.Track, absPath, libraryRoot string)
 	// Channels not surfaced by manifest.Track today — left as 0;
 	// DIDLForTrack treats 0 as "unknown" and omits the attribute.
 	return ti
+}
+
+// dlnaVariantsFromRows converts manifest variant rows into the DLNA-local
+// VariantInfo shape, pre-resolving the on-disk sidecar path (SidecarPath
+// is authoritative — never reconstructed from a filename pattern) so the
+// file handler serves the variant without a manifest DB query. The
+// extension is derived from the recorded Format (variants are FLAC today),
+// falling back to the sidecar path's extension.
+func dlnaVariantsFromRows(rows []manifest.VariantRow) []dlna.VariantInfo {
+	if len(rows) == 0 {
+		return nil
+	}
+	out := make([]dlna.VariantInfo, 0, len(rows))
+	for _, r := range rows {
+		ext := ""
+		if r.Format != "" {
+			ext = "." + strings.ToLower(r.Format)
+		} else {
+			ext = strings.ToLower(filepath.Ext(r.SidecarPath))
+		}
+		out = append(out, dlna.VariantInfo{
+			VariantID:     r.VariantID,
+			AbsolutePath:  r.SidecarPath,
+			FileExtension: ext,
+			Size:          r.SizeBytes,
+			BitDepth:      r.BitsPerSample,
+			SampleRate:    r.SampleRate,
+		})
+	}
+	return out
 }
 
 // Compile-time interface assertion.
