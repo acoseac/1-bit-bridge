@@ -1,6 +1,7 @@
 package dlna
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -303,7 +304,7 @@ func (g *genTestLib) TrackCount() int             { return len(g.tracks) }
 func (g *genTestLib) GetTrackInfo(string) (TrackInfo, bool) {
 	return TrackInfo{}, false
 }
-func (g *genTestLib) SearchTrackInfos(q string) []TrackInfo {
+func (g *genTestLib) SearchTrackInfos(_ context.Context, q string) []TrackInfo {
 	return filterTrackInfosBySubstring(g.tracks, q)
 }
 func (g *genTestLib) Generation() uint64 { return g.gen.Load() }
@@ -485,7 +486,7 @@ func (c *countingLib) ListTrackInfos() []TrackInfo {
 	return out
 }
 func (c *countingLib) TrackCount() int { c.tcCalls.Add(1); return len(c.tracks) }
-func (c *countingLib) SearchTrackInfos(q string) []TrackInfo {
+func (c *countingLib) SearchTrackInfos(_ context.Context, q string) []TrackInfo {
 	return filterTrackInfosBySubstring(c.tracks, q)
 }
 func (c *countingLib) GetTrackInfo(id string) (TrackInfo, bool) {
