@@ -84,6 +84,18 @@ func ResolveMIMEType(userAgent, extension string) string {
 //
 //	bit-exact contract; downstream renderers and audio
 //	enthusiast tooling key off this flag.
+//
+// The missing time-seek bit (and the absence of any
+// `TimeSeekRange.dlna.org` request-header handling in the file handler)
+// is INTENTIONAL, not a gap. We serve bit-exact audio files via
+// http.ServeContent, which honours HTTP byte Range requests (206 Partial
+// Content). Byte-range seeking is the universal mechanism for static
+// audio; OP=01 advertises exactly that, so a spec-compliant control point
+// seeks via Range and never assumes seeking is disabled. Time-seek
+// matters for transcoded / live streams where byte offsets don't map to
+// time — not our case, and computing a byte↔time map for VBR / DSD would
+// be fragile for zero benefit. Verified against an external review
+// (2026-05-31).
 func ProtocolInfoFor(userAgent, extension string) string {
 	mime := ResolveMIMEType(userAgent, extension)
 	return fmt.Sprintf(

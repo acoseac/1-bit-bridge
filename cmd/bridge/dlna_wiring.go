@@ -112,11 +112,42 @@ func startDLNAIfEnabled(
 	// picked interface's IPv4 — that's the multi-interface case
 	// where the bind is wildcard but we still need to advertise a
 	// dialable host. Per CodeRabbit Major on PR #303.
-	host, _, splitErr := net.SplitHostPort(listenAddr)
-	if splitErr != nil || host == "" || host == "0.0.0.0" || host == "::" {
+	rawHost, _, splitErr := net.SplitHostPort(listenAddr)
+	bindWildcard := splitErr != nil || rawHost == "" || rawHost == "0.0.0.0" || rawHost == "::"
+	host := rawHost
+	if bindWildcard {
 		host = serverIP.String()
 	}
 	serverURL := fmt.Sprintf("http://%s:%d", host, port)
+
+	// Multi-interface SSDP advertise set. When the HTTP listener binds
+	// wildcard (the common ":7790" / "0.0.0.0:7790" case), announce on
+	// EVERY LAN-eligible interface with a per-interface LOCATION URL so a
+	// renderer on a secondary subnet (Ethernet + Wi-Fi, bridged hosts)
+	// can both discover us AND reach the description / file URLs from its
+	// own subnet. A pinned bind host targets a single interface by
+	// definition, so we leave the set empty and let the server fall back
+	// to its single-advertiser path (Interface + ServerURL below).
+	var endpoints []dlna.AdvertiseEndpoint
+	if bindWildcard {
+		for _, ai := range dlna.PickAllLANEligibleInterfaces(dlna.EligibilityOpts{}) {
+			ip, ipErr := firstIPv4OnInterface(ai)
+			if ipErr != nil {
+				// Interface is up + LAN-eligible but carries no usable
+				// unicast IPv4 (e.g. IPv6-only, or link-local-only at this
+				// instant). Skip it rather than emit an unreachable
+				// "http://<nil>:port" LOCATION.
+				dlnaLog.Debug("DLNA SSDP: skipping interface with no usable IPv4",
+					slog.String("iface", ai.Name),
+					slog.String("err", ipErr.Error()))
+				continue
+			}
+			endpoints = append(endpoints, dlna.AdvertiseEndpoint{
+				Interface: ai,
+				ServerURL: fmt.Sprintf("http://%s:%d", ip.String(), port),
+			})
+		}
+	}
 
 	// UDN derived from a hash of (DataDir, FriendlyName) — stable
 	// across restarts so renderers don't re-add us, distinct between
@@ -134,19 +165,20 @@ func startDLNAIfEnabled(
 	library := newManifestLibraryAdapter(store, resolver, cfg.LibraryRoots, dlnaLog)
 
 	srv, err := dlna.NewServer(dlna.ServerConfig{
-		Library:          library,
-		UDN:              udn,
-		FriendlyName:     cfg.DLNA.EffectiveDLNAFriendlyName(),
-		Manufacturer:     "1-bit",
-		ManufacturerURL:  "https://1-bit.app",
-		ModelDescription: "1-bit Bridge DLNA MediaServer",
-		ModelName:        "1-bit-bridge",
-		ModelNumber:      version.ServerVersion,
-		ListenAddress:    listenAddr,
-		ServerURL:        serverURL,
-		Interface:        iface,
-		TelemetryStore:   telemetry,
-		Logger:           dlnaLog,
+		Library:            library,
+		UDN:                udn,
+		FriendlyName:       cfg.DLNA.EffectiveDLNAFriendlyName(),
+		Manufacturer:       "1-bit",
+		ManufacturerURL:    "https://1-bit.app",
+		ModelDescription:   "1-bit Bridge DLNA MediaServer",
+		ModelName:          "1-bit-bridge",
+		ModelNumber:        version.ServerVersion,
+		ListenAddress:      listenAddr,
+		ServerURL:          serverURL,
+		Interface:          iface,
+		AdvertiseEndpoints: endpoints,
+		TelemetryStore:     telemetry,
+		Logger:             dlnaLog,
 	})
 	if err != nil {
 		dlnaLog.Warn("DLNA disabled — NewServer failed", slog.String("err", err.Error()))

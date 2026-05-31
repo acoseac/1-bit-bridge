@@ -368,6 +368,20 @@ func (s *SSDPAdvertiser) runMSearchListener(ctx context.Context, listener *net.U
 		copy(pkt, buf[:n])
 		select {
 		case s.searchSem <- struct{}{}:
+			// This inner s.wg.Add(1) is safe to run concurrently with
+			// Stop()'s s.wg.Wait(), and does NOT risk the "WaitGroup
+			// misuse: Add called concurrently with Wait" panic. The panic
+			// only fires when a positive Add raises the counter UP FROM
+			// ZERO while a Wait is in progress. That can't happen here:
+			// this listener goroutine holds its OWN wg slot (the
+			// `defer s.wg.Done()` at the top of runMSearchListener) for
+			// its entire loop lifetime, so the counter is always ≥1 at
+			// this point — this Add takes it ≥1→≥2, never 0→1. And
+			// Stop()'s Wait() cannot return until this listener returns
+			// (after the socket is closed and the loop exits), by which
+			// time no further Adds are issued. Verified false-positive
+			// against an external review (2026-05-31); do not "fix" by
+			// moving the Add under s.mu or behind an atomic gate.
 			s.wg.Add(1)
 			go func() {
 				defer s.wg.Done()
