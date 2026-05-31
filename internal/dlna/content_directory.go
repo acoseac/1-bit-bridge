@@ -1,6 +1,7 @@
 package dlna
 
 import (
+	"context"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -53,7 +54,11 @@ type LibrarySource interface {
 	// backs this with the SQLite FTS5 `tracks_fts` index; in-memory
 	// fixtures do a case-insensitive substring scan. An empty / all-
 	// punctuation query returns no matches.
-	SearchTrackInfos(query string) []TrackInfo
+	//
+	// ctx carries the originating HTTP request's deadline / cancellation
+	// — the production adapter runs an I/O-bound FTS query, so honouring
+	// it lets a client-aborted Search stop the DB work early.
+	SearchTrackInfos(ctx context.Context, query string) []TrackInfo
 
 	// GetTrackInfo returns the track with the given TrackID, or
 	// (zero-value, false) if not found. Used by the file handler to
@@ -798,7 +803,7 @@ func handleSearch(w http.ResponseWriter, r *http.Request, lib LibrarySource, ser
 	term := searchCriteriaTerms(search.SearchCriteria)
 	var matches []TrackInfo
 	if term != "" {
-		matches = lib.SearchTrackInfos(term)
+		matches = lib.SearchTrackInfos(r.Context(), term)
 	}
 	total := len(matches)
 	startIdx, endIdx := clampPage(total, search.StartingIndex, search.RequestedCount)
@@ -1131,7 +1136,7 @@ func (s *StaticLibrary) TrackCount() int { return len(s.Tracks) }
 // SearchTrackInfos does a case-insensitive substring scan over title /
 // artist / album. Fine for the in-memory fixture scale; the production
 // adapter uses the FTS5 index instead.
-func (s *StaticLibrary) SearchTrackInfos(query string) []TrackInfo {
+func (s *StaticLibrary) SearchTrackInfos(_ context.Context, query string) []TrackInfo {
 	return filterTrackInfosBySubstring(s.Tracks, query)
 }
 

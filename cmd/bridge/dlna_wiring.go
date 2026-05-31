@@ -452,11 +452,16 @@ func (a *manifestLibraryAdapter) rebuild() {
 // track whose resolver.Resolve failed during the last rebuild) are
 // skipped. Returns nil on FTS unavailability / store error (logged) so
 // the Search action degrades to "no matches" rather than faulting.
-func (a *manifestLibraryAdapter) SearchTrackInfos(query string) []dlna.TrackInfo {
+func (a *manifestLibraryAdapter) SearchTrackInfos(ctx context.Context, query string) []dlna.TrackInfo {
 	a.refreshIfStale()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// Honour the caller's deadline / cancellation, but bound the query so
+	// a missing request deadline can't hang the rebuild lock indirectly.
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	hits, err := a.store.SearchTracks(ctx, query, 0) // 0 → store default limit
+	// 500 = the store's hard cap; gives Browse-style pagination room to
+	// page deep into a large result set rather than the 50-row default
+	// (gemini-code-assist on PR #329).
+	hits, err := a.store.SearchTracks(ctx, query, 500)
 	if err != nil {
 		a.log.Warn("DLNA search failed", slog.String("err", err.Error()))
 		return nil
