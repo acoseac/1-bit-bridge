@@ -133,6 +133,55 @@ type DIDLContainerOpts struct {
 	ArtworkURL string // optional <upnp:albumArtURI> (e.g. album cover for an album container)
 }
 
+// sourceResAttrs builds the conditional `<res>` attribute list for a
+// track's SOURCE rendering. Extracted from DIDLForTrack to keep that
+// function's cognitive complexity under the threshold (SonarCloud S3776
+// on PR #330). Strict renderers reject zero / missing values for some
+// attributes (e.g. sampleFrequency=0), so attributes are omitted
+// entirely rather than emitted as a literal zero.
+func sourceResAttrs(opts DIDLTrackOpts) []string {
+	mime := PreferredMIMEFor(opts.UserAgent, opts.FileExtension)
+	protocolInfo := fmt.Sprintf(
+		"http-get:*:%s:DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=%s",
+		mime, DLNAFlags,
+	)
+	attrs := []string{
+		fmt.Sprintf(`protocolInfo=%q`, protocolInfo),
+		fmt.Sprintf(`size="%d"`, opts.Size),
+	}
+	if opts.DurationSeconds > 0 {
+		attrs = append(attrs, fmt.Sprintf(`duration=%q`, formatDLNADuration(opts.DurationSeconds)))
+	}
+	if opts.SampleRateHz > 0 {
+		attrs = append(attrs, fmt.Sprintf(`sampleFrequency="%d"`, opts.SampleRateHz))
+	}
+	// **Defense-in-depth `!opts.IsDSD` co-gate**: DSD tracks have an
+	// inherent bit depth of 1 by definition (DSD = 1-bit pulse density
+	// modulation), but the DLNA `<res bitsPerSample>` attribute is
+	// conventionally PCM-only — sending "1" causes renderer parsers that
+	// treat the field as PCM bit-depth to reject the dispatch as "1-bit
+	// PCM" (nonsense; observed silent-decline on Chord 2Go 2026-05-28
+	// from the iOS-side equivalent before that side added an isDSD gate
+	// at its DIDL chokepoint). Companion Mirror-PR with iOS PR #564 — the
+	// bridge serves DIDL-Lite directly to third-party UPnP controllers
+	// browsing the CDS (e.g. mconnect, Kazoo) so the same protection must
+	// live here. Callers that set IsDSD=false while passing
+	// BitsPerSample > 0 (PCM tracks) emit the attribute unchanged. Per
+	// Gemini cross-codebase audit 2026-05-28.
+	if opts.BitsPerSample > 0 && !opts.IsDSD {
+		attrs = append(attrs, fmt.Sprintf(`bitsPerSample="%d"`, opts.BitsPerSample))
+	}
+	// Default to 2 channels (stereo) if unspecified — the bridge's audio
+	// focus is stereo content and a missing nrAudioChannels attribute can
+	// confuse some renderers.
+	channels := opts.Channels
+	if channels <= 0 {
+		channels = 2
+	}
+	attrs = append(attrs, fmt.Sprintf(`nrAudioChannels="%d"`, channels))
+	return attrs
+}
+
 // DIDLForTrack returns the DIDL-Lite `<item>` XML for the given track,
 // formatted as a single line with NO surrounding whitespace inside any
 // text node. Single-line emission is load-bearing: Phase 0 spike confirmed
@@ -144,51 +193,7 @@ type DIDLContainerOpts struct {
 // `<DIDL-Lite>` wrapper. Callers (SOAP Browse handler, task #9) wrap
 // in the appropriate DIDL-Lite namespaces + Result element.
 func DIDLForTrack(opts DIDLTrackOpts) string {
-	mime := PreferredMIMEFor(opts.UserAgent, opts.FileExtension)
-	protocolInfo := fmt.Sprintf(
-		"http-get:*:%s:DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=%s",
-		mime, DLNAFlags,
-	)
-
-	// Build the <res> attribute set conditionally — strict renderers
-	// reject zero / missing values for some attributes (e.g.,
-	// sampleFrequency=0), so we omit attributes entirely rather than
-	// emit a literal zero.
-	resAttrs := []string{
-		fmt.Sprintf(`protocolInfo=%q`, protocolInfo),
-		fmt.Sprintf(`size="%d"`, opts.Size),
-	}
-	if opts.DurationSeconds > 0 {
-		resAttrs = append(resAttrs, fmt.Sprintf(`duration=%q`, formatDLNADuration(opts.DurationSeconds)))
-	}
-	if opts.SampleRateHz > 0 {
-		resAttrs = append(resAttrs, fmt.Sprintf(`sampleFrequency="%d"`, opts.SampleRateHz))
-	}
-	// **Defense-in-depth `!opts.IsDSD` co-gate**: DSD tracks have an
-	// inherent bit depth of 1 by definition (DSD = 1-bit pulse
-	// density modulation), but the DLNA `<res bitsPerSample>`
-	// attribute is conventionally PCM-only — sending "1" causes
-	// renderer parsers that treat the field as PCM bit-depth to
-	// reject the dispatch as "1-bit PCM" (nonsense; observed silent-
-	// decline on Chord 2Go 2026-05-28 from the iOS-side equivalent
-	// before that side added an isDSD gate at its DIDL chokepoint).
-	// Companion Mirror-PR with iOS PR #564 — the bridge serves
-	// DIDL-Lite directly to third-party UPnP controllers browsing
-	// the CDS (e.g. mconnect, Kazoo) so the same protection must
-	// live here. Callers that set IsDSD=false while passing
-	// BitsPerSample > 0 (PCM tracks) emit the attribute unchanged.
-	// Per Gemini cross-codebase audit 2026-05-28.
-	if opts.BitsPerSample > 0 && !opts.IsDSD {
-		resAttrs = append(resAttrs, fmt.Sprintf(`bitsPerSample="%d"`, opts.BitsPerSample))
-	}
-	// Default to 2 channels (stereo) if unspecified — the bridge's audio
-	// focus is stereo content and a missing nrAudioChannels attribute
-	// can confuse some renderers.
-	channels := opts.Channels
-	if channels <= 0 {
-		channels = 2
-	}
-	resAttrs = append(resAttrs, fmt.Sprintf(`nrAudioChannels="%d"`, channels))
+	resAttrs := sourceResAttrs(opts)
 
 	fileURL := strings.TrimRight(opts.ServerURL, "/") + "/dlna/file/" + opts.TrackID
 

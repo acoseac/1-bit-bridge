@@ -64,24 +64,12 @@ func FileHandler(lib LibrarySource) http.HandlerFunc {
 
 		// Resolve which file to serve: the source, or an offline variant
 		// addressed via the trailing `/variant-{id}{ext}` path segment.
-		servePath := info.AbsolutePath
-		ext := info.FileExtension
-		isVariant := false
-		if variantID := extractVariantID(r.URL.Path); variantID != "" {
-			v, found := findVariant(info.Variants, variantID)
-			if !found {
-				// Unknown variant ID — to the renderer this is the same
-				// as "no such object".
-				http.NotFound(w, r)
-				return
-			}
-			servePath = v.AbsolutePath
-			if v.FileExtension != "" {
-				// Use the VARIANT's extension so MIME / contentFeatures
-				// describe the sidecar (.flac), not the source (.dsf).
-				ext = v.FileExtension
-			}
-			isVariant = true
+		servePath, ext, isVariant, known := resolveServeTarget(info, r.URL.Path)
+		if !known {
+			// A variant segment was present but the ID isn't one this
+			// track carries — to the renderer this is "no such object".
+			http.NotFound(w, r)
+			return
 		}
 
 		f, err := os.Open(servePath)
@@ -136,6 +124,33 @@ func FileHandler(lib LibrarySource) http.HandlerFunc {
 		// through the wrapper's buffer.
 		http.ServeContent(aw, r, filepath.Base(servePath), stat.ModTime(), f)
 	}
+}
+
+// resolveServeTarget decides which file a /dlna/file/ request addresses:
+// the source, or an offline variant named by the trailing
+// `/variant-{id}{ext}` segment. Returns the path to serve, the extension
+// to drive MIME / contentFeatures, whether the target is a variant (so
+// the caller maps a missing file to 410 Gone rather than 404), and
+// `known` — false ONLY when a variant segment was present but its ID
+// isn't one this track carries (caller → 404).
+//
+// `ext` is assigned the variant's FileExtension UNCONDITIONALLY: if a
+// variant somehow records an empty extension, leaving it as the source's
+// (.dsf) would mis-describe a .flac sidecar; an empty value instead falls
+// through to the caller's derive-from-path fallback. Per
+// gemini-code-assist (HIGH) on PR #330.
+func resolveServeTarget(info TrackInfo, urlPath string) (servePath, ext string, isVariant, known bool) {
+	servePath = info.AbsolutePath
+	ext = info.FileExtension
+	variantID := extractVariantID(urlPath)
+	if variantID == "" {
+		return servePath, ext, false, true
+	}
+	v, found := findVariant(info.Variants, variantID)
+	if !found {
+		return "", "", true, false
+	}
+	return v.AbsolutePath, v.FileExtension, true, true
 }
 
 // extractTrackID extracts the trackID component from a path matching
