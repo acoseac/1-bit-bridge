@@ -299,6 +299,7 @@ type genTestLib struct {
 }
 
 func (g *genTestLib) ListTrackInfos() []TrackInfo           { return g.tracks }
+func (g *genTestLib) TrackCount() int                       { return len(g.tracks) }
 func (g *genTestLib) GetTrackInfo(string) (TrackInfo, bool) { return TrackInfo{}, false }
 func (g *genTestLib) Generation() uint64                    { return g.gen.Load() }
 
@@ -459,6 +460,61 @@ func Test_CDS_Browse_BrowseMetadata_AllTracksReturnsAllTracksContainer(t *testin
 		if !strings.Contains(body, want) {
 			t.Errorf("missing substring %q in BrowseMetadata response: %s", want, body)
 		}
+	}
+}
+
+// countingLib counts how often each LibrarySource read method is
+// invoked, so a test can prove the BrowseMetadata ChildCount path goes
+// through the cheap scalar TrackCount() and never the O(N) ListTrackInfos
+// deep-copy (the pre-fix hot-path waste on 50k-track libraries).
+type countingLib struct {
+	tracks    []TrackInfo
+	listCalls atomic.Int64
+	tcCalls   atomic.Int64
+}
+
+func (c *countingLib) ListTrackInfos() []TrackInfo {
+	c.listCalls.Add(1)
+	out := make([]TrackInfo, len(c.tracks))
+	copy(out, c.tracks)
+	return out
+}
+func (c *countingLib) TrackCount() int { c.tcCalls.Add(1); return len(c.tracks) }
+func (c *countingLib) GetTrackInfo(id string) (TrackInfo, bool) {
+	for _, t := range c.tracks {
+		if t.TrackID == id {
+			return t, true
+		}
+	}
+	return TrackInfo{}, false
+}
+func (c *countingLib) Generation() uint64 { return 0 }
+
+// Test_CDS_BrowseMetadata_AllTracks_UsesScalarTrackCount pins F2: the
+// All Tracks BrowseMetadata ChildCount MUST be read via the scalar
+// TrackCount() and MUST NOT invoke ListTrackInfos() (which deep-copies
+// every TrackInfo). Asserting only the ChildCount value would let a
+// regression that merely MOVES the copy back slip through — so we assert
+// the call counts directly.
+func Test_CDS_BrowseMetadata_AllTracks_UsesScalarTrackCount(t *testing.T) {
+	lib := &countingLib{tracks: []TrackInfo{
+		testTrack("t1", "First"), testTrack("t2", "Second"), testTrack("t3", "Third"),
+	}}
+	h := ContentDirectoryHandler(lib, staticServerURL("http://server"))
+	req := buildBrowseRequest(t, "1", "BrowseMetadata", 0, 0)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `childCount=&quot;3&quot;`) {
+		t.Errorf("expected childCount=3: %s", rec.Body.String())
+	}
+	if got := lib.tcCalls.Load(); got < 1 {
+		t.Errorf("TrackCount() should be called for ChildCount; got %d", got)
+	}
+	if got := lib.listCalls.Load(); got != 0 {
+		t.Errorf("ListTrackInfos() must NOT run on the BrowseMetadata ChildCount path; got %d (the O(N) deep-copy is back)", got)
 	}
 }
 

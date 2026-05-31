@@ -333,6 +333,18 @@ func (a *manifestLibraryAdapter) ListTrackInfos() []dlna.TrackInfo {
 	return out
 }
 
+// TrackCount returns the number of tracks in the cached manifest view
+// without copying the slice (cf. ListTrackInfos). Refreshes the cache on
+// the same TTL as the other readers, then returns the cached slice length
+// under the lock — never a DB COUNT(*) per call, never a ListTrackInfos
+// round-trip.
+func (a *manifestLibraryAdapter) TrackCount() int {
+	a.refreshIfStale()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.cachedList)
+}
+
 // GetTrackInfo resolves a TrackID back to its TrackInfo for the file
 // handler. Returns (zero-value, false) when the ID isn't known.
 func (a *manifestLibraryAdapter) GetTrackInfo(trackID string) (dlna.TrackInfo, bool) {
