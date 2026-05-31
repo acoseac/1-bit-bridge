@@ -373,8 +373,12 @@ func (s *Server) mountHandlers() {
 		// path. A static ServerURL would hand a secondary-subnet renderer
 		// URLs pointing at the primary interface's IP, which fails when
 		// cross-subnet routing is restricted. Fall back to the static
-		// ServerURL only when Host is somehow empty.
-		if r.Host != "" {
+		// ServerURL only when Host is empty OR carries characters that
+		// would corrupt the constructed URL (path / query / fragment
+		// separators — a Host-header-injection guard; net/http normally
+		// rejects these, but defense-in-depth is cheap on a URL we embed
+		// verbatim in every <res>). Per gemini-code-assist on PR #328.
+		if r.Host != "" && !strings.ContainsAny(r.Host, "/\\?#") {
 			return "http://" + r.Host
 		}
 		return s.cfg.ServerURL
@@ -604,7 +608,12 @@ func PickAllLANEligibleInterfaces(opts EligibilityOpts) []*net.Interface {
 			continue
 		}
 		if IsLANEligibleInterface(iface, addrs, opts) {
-			out = append(out, &iface)
+			// Append the address of the slice element (not &iface, the
+			// loop-local copy) to avoid a per-eligible-interface heap
+			// escape. `ifaces` outlives this function via the returned
+			// pointers, so element addresses stay valid. Per
+			// gemini-code-assist on PR #328.
+			out = append(out, &ifaces[i])
 		}
 	}
 	return out

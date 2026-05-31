@@ -120,34 +120,9 @@ func startDLNAIfEnabled(
 	}
 	serverURL := fmt.Sprintf("http://%s:%d", host, port)
 
-	// Multi-interface SSDP advertise set. When the HTTP listener binds
-	// wildcard (the common ":7790" / "0.0.0.0:7790" case), announce on
-	// EVERY LAN-eligible interface with a per-interface LOCATION URL so a
-	// renderer on a secondary subnet (Ethernet + Wi-Fi, bridged hosts)
-	// can both discover us AND reach the description / file URLs from its
-	// own subnet. A pinned bind host targets a single interface by
-	// definition, so we leave the set empty and let the server fall back
-	// to its single-advertiser path (Interface + ServerURL below).
-	var endpoints []dlna.AdvertiseEndpoint
-	if bindWildcard {
-		for _, ai := range dlna.PickAllLANEligibleInterfaces(dlna.EligibilityOpts{}) {
-			ip, ipErr := firstIPv4OnInterface(ai)
-			if ipErr != nil {
-				// Interface is up + LAN-eligible but carries no usable
-				// unicast IPv4 (e.g. IPv6-only, or link-local-only at this
-				// instant). Skip it rather than emit an unreachable
-				// "http://<nil>:port" LOCATION.
-				dlnaLog.Debug("DLNA SSDP: skipping interface with no usable IPv4",
-					slog.String("iface", ai.Name),
-					slog.String("err", ipErr.Error()))
-				continue
-			}
-			endpoints = append(endpoints, dlna.AdvertiseEndpoint{
-				Interface: ai,
-				ServerURL: fmt.Sprintf("http://%s:%d", ip.String(), port),
-			})
-		}
-	}
+	// Multi-interface SSDP advertise set (extracted to keep this
+	// function's cognitive complexity in check — Sonar S3776 on PR #328).
+	endpoints := gatherAdvertiseEndpoints(bindWildcard, port, dlnaLog)
 
 	// UDN derived from a hash of (DataDir, FriendlyName) — stable
 	// across restarts so renderers don't re-add us, distinct between
@@ -220,6 +195,39 @@ func (d *dlnaLifecycle) Stop(ctx context.Context) {
 	if err := d.server.Stop(ctx); err != nil {
 		d.log.Warn("DLNA shutdown error", slog.String("err", err.Error()))
 	}
+}
+
+// gatherAdvertiseEndpoints builds the per-interface SSDP advertise set.
+// When the HTTP listener binds wildcard (the common ":7790" /
+// "0.0.0.0:7790" case) it announces on EVERY LAN-eligible interface with
+// a per-interface LOCATION URL so a renderer on a secondary subnet
+// (Ethernet + Wi-Fi, bridged hosts) can both discover us AND reach the
+// description / file URLs from its own subnet. A pinned bind host targets
+// a single interface by definition, so it returns nil and the server
+// falls back to its single-advertiser path (Interface + ServerURL).
+//
+// Interfaces that are LAN-eligible but carry no usable unicast IPv4
+// (IPv6-only, or link-local-only at this instant) are skipped rather than
+// advertised with an unreachable "http://<nil>:port" LOCATION.
+func gatherAdvertiseEndpoints(bindWildcard bool, port int, log *slog.Logger) []dlna.AdvertiseEndpoint {
+	if !bindWildcard {
+		return nil
+	}
+	var endpoints []dlna.AdvertiseEndpoint
+	for _, ai := range dlna.PickAllLANEligibleInterfaces(dlna.EligibilityOpts{}) {
+		ip, ipErr := firstIPv4OnInterface(ai)
+		if ipErr != nil {
+			log.Debug("DLNA SSDP: skipping interface with no usable IPv4",
+				slog.String("iface", ai.Name),
+				slog.String("err", ipErr.Error()))
+			continue
+		}
+		endpoints = append(endpoints, dlna.AdvertiseEndpoint{
+			Interface: ai,
+			ServerURL: fmt.Sprintf("http://%s:%d", ip.String(), port),
+		})
+	}
+	return endpoints
 }
 
 // firstIPv4OnInterface returns the first IPv4 address bound to iface
