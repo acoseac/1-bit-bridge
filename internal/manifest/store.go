@@ -602,6 +602,33 @@ var migrations = []migration{
 			return nil
 		},
 	},
+	{
+		version: 10,
+		name:    "device_registrations (cross-bridge backup/telemetry foundation)",
+		// Per-device identity table backing playlist backup + playback
+		// telemetry (both keyed on the client's durable, device-local
+		// recovery token — NOT the ephemeral auth.Token.ID, which is
+		// re-minted on every re-pairing). `device_token` is the iOS
+		// Keychain recovery token (high-entropy hex, kSecAttrSynchronizable
+		// =false). `token_id` is the auth token currently presenting that
+		// device_token — updated on every authed request (self-healing
+		// rebind) so a re-pair re-attaches prior backups without operator
+		// intervention. `device_name` is best-effort: empty on the
+		// header-path upsert (regular requests carry no name), populated
+		// at pairing-approval time from the join request's deviceName.
+		//
+		// Append-only / idempotent per the ladder contract.
+		sql: `
+		CREATE TABLE IF NOT EXISTS device_registrations (
+			device_token  TEXT PRIMARY KEY,
+			token_id      TEXT NOT NULL,
+			device_name   TEXT NOT NULL DEFAULT '',
+			first_seen_at INTEGER NOT NULL,
+			last_seen_at  INTEGER NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_device_reg_token_id ON device_registrations(token_id);
+		`,
+	},
 }
 
 // normalizePathForLookup folds an iOS-shaped track path back toward

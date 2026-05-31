@@ -23,6 +23,12 @@ type pairingCreateRequest struct {
 	DeviceName     string `json:"deviceName"`
 	ClientVersion  string `json:"clientVersion,omitempty"`
 	PollSecretHash string `json:"pollSecretHash"` // hex SHA-256 of the iOS-generated 32-byte secret
+	// DeviceToken is the iOS client's durable recovery token (Keychain,
+	// device-local). Optional / additive — pre-feature clients omit it.
+	// Lets the admin bind the device_registrations row (with a real
+	// device name) at approval time. Capped by pairingMaxBodyBytes along
+	// with the rest of the body.
+	DeviceToken string `json:"deviceToken,omitempty"`
 }
 
 // pairingCreateResponse is the 201 body returned to iOS.
@@ -112,6 +118,7 @@ func (s *Server) pairingRequest(w http.ResponseWriter, r *http.Request) {
 		req.PollSecretHash,
 		ip,
 		s.fingerprint,
+		req.DeviceToken,
 	)
 	switch {
 	case errors.Is(err, pairing.ErrBadHash):

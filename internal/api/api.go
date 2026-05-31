@@ -135,6 +135,17 @@ type Server struct {
 	fingerprint            string
 	startedAt              time.Time
 
+	// deviceRegistrar binds the client's durable X-Device-Token recovery
+	// token to the auth token currently presenting it. Nil unless
+	// WithDeviceRegistrar is wired (test harnesses leave it nil). The
+	// authed wrapper calls it at most once per (device,token) per
+	// deviceRegistrarTTL via the in-memory debounce below, so the
+	// single-row SQLite upsert stays off the per-request hot path in the
+	// steady state. *manifest.Store satisfies the interface in production.
+	deviceRegistrar DeviceRegistrar
+	deviceSeenMu    sync.Mutex
+	deviceSeen      map[string]deviceSeenEntry
+
 	// tailscaleStatus is the embedded-tsnet status provider used by
 	// `reachableEndpoints` to advertise the bridge's `*.ts.net` URL +
 	// tailnet IPs in tsnet mode. Nil unless `WithTailscaleStatus` or
@@ -354,6 +365,81 @@ func (s *Server) WithUpdater(u UpdaterStatus) *Server {
 func (s *Server) WithSessionTracker(t SessionTracker) *Server {
 	s.sessions = t
 	return s
+}
+
+// DeviceRegistrar binds a client's durable device-recovery token (the
+// X-Device-Token header) to the auth token currently presenting it.
+// Optional / nil-safe — when unwired, the authed path skips the bind
+// entirely. *manifest.Store satisfies this in production.
+type DeviceRegistrar interface {
+	UpsertDeviceRegistration(ctx context.Context, deviceToken, tokenID, name string) error
+}
+
+// deviceSeenEntry is one in-memory debounce record: the last auth token
+// we observed presenting a given device token, and when. Lets the authed
+// path skip the SQLite upsert when neither the binding nor the TTL window
+// has changed.
+type deviceSeenEntry struct {
+	tokenID string
+	at      time.Time
+}
+
+// deviceRegistrarTTL bounds how often the authed path re-touches the
+// device_registrations row for an unchanged (device,token) pair. A bind
+// change (re-pairing → new auth token for the same device token) always
+// writes immediately regardless of the TTL.
+const deviceRegistrarTTL = 5 * time.Minute
+
+// maxDeviceTokenLen caps the accepted X-Device-Token length. iOS emits a
+// 32-byte hex token (64 chars); anything longer is rejected as garbage so
+// a malicious client can't seed oversized rows.
+const maxDeviceTokenLen = 128
+
+// WithDeviceRegistrar wires the per-device recovery-token binding used by
+// playlist backup + playback telemetry. Returns the receiver for chaining.
+func (s *Server) WithDeviceRegistrar(r DeviceRegistrar) *Server {
+	s.deviceRegistrar = r
+	s.deviceSeen = make(map[string]deviceSeenEntry)
+	return s
+}
+
+// validDeviceToken accepts a non-empty, bounded, lowercase-hex token. The
+// hex constraint matches hex.EncodeToString output from the iOS Keychain
+// generator and keeps the value safe to log / store / use as a SQL bind.
+func validDeviceToken(t string) bool {
+	if len(t) == 0 || len(t) > maxDeviceTokenLen {
+		return false
+	}
+	for i := 0; i < len(t); i++ {
+		c := t[i]
+		if !(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// touchDevice records the (device,token) binding, debounced in memory so
+// the SQLite upsert only fires on first-seen, a binding change, or after
+// deviceRegistrarTTL elapses. Best-effort: a write error is logged, not
+// surfaced to the request (the binding self-heals on the next request).
+func (s *Server) touchDevice(ctx context.Context, deviceToken, tokenID string) {
+	now := time.Now()
+	s.deviceSeenMu.Lock()
+	prev, ok := s.deviceSeen[deviceToken]
+	fresh := ok && prev.tokenID == tokenID && now.Sub(prev.at) < deviceRegistrarTTL
+	if !fresh {
+		s.deviceSeen[deviceToken] = deviceSeenEntry{tokenID: tokenID, at: now}
+	}
+	s.deviceSeenMu.Unlock()
+	if fresh {
+		return
+	}
+	// name="" on the header path — UpsertDeviceRegistration preserves any
+	// name the pairing-approval path already captured.
+	if err := s.deviceRegistrar.UpsertDeviceRegistration(ctx, deviceToken, tokenID, ""); err != nil {
+		httpLogger.Warn("device registration upsert failed", "err", err)
+	}
 }
 
 // WithUpscale wires the v1.2 PCM-upscaling feature into the
@@ -1544,6 +1630,15 @@ func (s *Server) authed(next http.HandlerFunc) http.HandlerFunc {
 		}
 		if cv := r.Header.Get("X-Client-Version"); cv != "" && cv != tok.LastClientVersion {
 			s.store.RecordClientVersion(tok.ID, cv)
+		}
+		// Bind the client's durable device-recovery token to this auth
+		// token (debounced in memory). Drives the per-device scoping for
+		// playlist backup + playback telemetry; self-heals across
+		// re-pairings. Nil-safe / skipped when the registrar isn't wired.
+		if s.deviceRegistrar != nil {
+			if dt := r.Header.Get("X-Device-Token"); validDeviceToken(dt) {
+				s.touchDevice(r.Context(), dt, tok.ID)
+			}
 		}
 		// Thread the validated token ID into the request context so
 		// downstream middleware (today: rateLimitManifest for keying

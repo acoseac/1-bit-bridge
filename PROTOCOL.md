@@ -485,9 +485,12 @@ Submit a join request that surfaces in the bridge admin web console as a pending
 {
   "deviceName": "Arseni's iPhone",
   "clientVersion": "1.4.0",
-  "pollSecretHash": "<64-char lowercase hex SHA-256 of the base64url-encoded pollSecret>"
+  "pollSecretHash": "<64-char lowercase hex SHA-256 of the base64url-encoded pollSecret>",
+  "deviceToken": "<optional: client's durable recovery token, lowercase hex>"
 }
 ```
+
+`deviceToken` (additive, optional) is the iOS client's durable, device-local recovery token (stored in the Keychain, NOT iCloud-synced, surviving app reinstall). Supplying it at join time lets the bridge bind the device's registration — and reattach any prior playlist backups / playback history scoped to that token — the instant the operator approves, with the real device name attached. Pre-feature clients omit it; the binding then forms on the device's first authed request via the `X-Device-Token` header (below). The bridge never echoes it back on the wire.
 
 **Response** (`201 Created`):
 ```json
@@ -651,6 +654,20 @@ X-Client-Version: <CFBundleShortVersionString>
 Example: `X-Client-Version: 1.2`. The bridge persists the most recent value per token (`auth.Token.LastClientVersion` in `<dataDir>/tokens.json`) so the updater can later refuse an auto-install whose `MinClientVersion` would orphan a still-active iOS build that hasn't shipped through the App Store yet.
 
 The header is optional — older iOS clients that don't send it continue to authenticate normally. Bridges record nothing for those tokens, and the compat gate skips "version unknown" tokens rather than blocking on their behalf (see the **MinClientVersion compat gate** subsection above).
+
+### Device recovery token (additive, since v1.6)
+
+The iOS app sends a second additive header on every authenticated request:
+
+```http
+X-Device-Token: <lowercase-hex recovery token>
+```
+
+This is the client's durable, device-local recovery token (generated once and held in the Keychain with `kSecAttrSynchronizable=false`, so it survives an app reinstall but does not sync across devices via iCloud). It is the stable identity that per-device state — **playlist backups** and **playback history** — is scoped to, distinct from the bearer token (which is re-minted on every re-pairing).
+
+On each authed request the bridge binds the presented `X-Device-Token` to the current bearer token's ID in its `device_registrations` table (debounced — at most one write per device/token pair per 5 minutes, and immediately on a binding change). The binding self-heals across re-pairings: a device presenting the same recovery token with a freshly minted bearer reattaches to its prior backups automatically.
+
+The header is optional and validated as bounded lowercase hex (≤128 chars); malformed or absent values are ignored and simply skip the binding. The token is never echoed on the wire.
 
 ## Operator: TLS cert rotation
 

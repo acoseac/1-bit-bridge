@@ -93,7 +93,7 @@ func seedPending(t *testing.T, ps *pairing.Store, deviceName, fp string) (id, ra
 	raw = "secret-" + deviceName
 	sum := sha256.Sum256([]byte(raw))
 	hashHex := hex.EncodeToString(sum[:])
-	req, err := ps.CreateRequest(deviceName, "1.4.0", hashHex, "10.0.0.5", fp)
+	req, err := ps.CreateRequest(deviceName, "1.4.0", hashHex, "10.0.0.5", fp, "")
 	if err != nil {
 		t.Fatal(err)
 	}
