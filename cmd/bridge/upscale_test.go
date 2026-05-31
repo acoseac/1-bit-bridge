@@ -41,7 +41,7 @@ func TestBootstrapTranscodeCmdHonorsVariantsDir(t *testing.T) {
 		variantsDir := filepath.Join(dir, "elsewhere", "variants")
 		cfgPath := writeCfg("upscale:\n    enabled: true\n    variantsDir: " + variantsDir + "\n")
 		var stderr bytes.Buffer
-		r, code := bootstrapTranscodeCmd(&stderr, cfgPath, "very-high", false)
+		r, code := bootstrapTranscodeCmd(&stderr, cfgPath, "very-high", true /* gcMode: skip the sox precheck so the test runs on sox-less CI; outputDir resolves identically */)
 		if r == nil {
 			t.Fatalf("bootstrap failed (code=%d): %s", code, stderr.String())
 		}
@@ -54,7 +54,7 @@ func TestBootstrapTranscodeCmdHonorsVariantsDir(t *testing.T) {
 	t.Run("variantsDir unset falls back to dataDir/transcoded", func(t *testing.T) {
 		cfgPath := writeCfg("upscale:\n    enabled: true\n")
 		var stderr bytes.Buffer
-		r, code := bootstrapTranscodeCmd(&stderr, cfgPath, "very-high", false)
+		r, code := bootstrapTranscodeCmd(&stderr, cfgPath, "very-high", true /* gcMode: skip the sox precheck so the test runs on sox-less CI; outputDir resolves identically */)
 		if r == nil {
 			t.Fatalf("bootstrap failed (code=%d): %s", code, stderr.String())
 		}
