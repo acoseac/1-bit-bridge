@@ -36,6 +36,15 @@ type LibrarySource interface {
 	// pagination correctness once it lands — see comment above.
 	ListTrackInfos() []TrackInfo
 
+	// TrackCount returns the number of tracks in the library. It exists
+	// so metadata-only handlers (BrowseMetadata's ChildCount) can read a
+	// scalar count WITHOUT going through ListTrackInfos, which returns a
+	// full O(N) defensive copy of every TrackInfo — pure waste on a hot,
+	// repeatedly-polled path for a 50k-track library. Implementations MUST
+	// make this cheap (a cached slice length under a lock, NOT a fresh DB
+	// COUNT(*) per call and NOT a ListTrackInfos round-trip).
+	TrackCount() int
+
 	// GetTrackInfo returns the track with the given TrackID, or
 	// (zero-value, false) if not found. Used by the file handler to
 	// resolve `/dlna/file/{trackID}` URLs back to absolute paths.
@@ -442,7 +451,7 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, fc 
 		case allTracksObjectID:
 			selfDIDL = DIDLForContainer(DIDLContainerOpts{
 				ID: allTracksObjectID, ParentID: "0", Title: "All Tracks",
-				ChildCount: len(lib.ListTrackInfos()),
+				ChildCount: lib.TrackCount(),
 				// `storageFolder` (reverting PR #313's playlist-
 				// Container) — empirical evidence from the Chord
 				// 2Go's own MPD-DLNA MediaServer (MiniDLNA-based)
@@ -908,6 +917,9 @@ func (s *StaticLibrary) ListTrackInfos() []TrackInfo {
 	copy(out, s.Tracks)
 	return out
 }
+
+// TrackCount returns the number of tracks without copying the slice.
+func (s *StaticLibrary) TrackCount() int { return len(s.Tracks) }
 
 // GetTrackInfo returns the track with the given TrackID, or
 // (zero-value, false) if not found. O(n) scan — acceptable at the
