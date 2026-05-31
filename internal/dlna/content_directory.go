@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync/atomic"
 )
 
 // -----------------------------------------------------------------------------
@@ -39,6 +40,71 @@ type LibrarySource interface {
 	// (zero-value, false) if not found. Used by the file handler to
 	// resolve `/dlna/file/{trackID}` URLs back to absolute paths.
 	GetTrackInfo(trackID string) (TrackInfo, bool)
+
+	// Generation returns a value that CHANGES whenever the track list
+	// might have changed (e.g. a manifest rescan replaced the cache).
+	// The folder-index cache keys on it so a Browse can reuse a prior
+	// `BuildFolderIndex` result across drill-down requests and only
+	// rebuild when the library actually moves. A stable value across
+	// calls means "nothing changed — reuse is safe".
+	Generation() uint64
+}
+
+// folderIndexCache memoizes `BuildFolderIndex` across Browse requests,
+// keyed on the library's `Generation()`. On a 50k-track library the
+// index walk is O(N·log N) (~5 ms + heavy allocation) and pre-cache ran
+// on every folder drill-down; this collapses it to once per generation
+// (i.e. once per library change / TTL window). Lock-free read path: a
+// concurrent miss may rebuild redundantly (last store wins), which is
+// cheap and rare versus the per-request cost it removes.
+type folderIndexCache struct {
+	lib    LibrarySource
+	cached atomic.Pointer[cachedFolderIndex]
+}
+
+type cachedFolderIndex struct {
+	gen uint64
+	idx *FolderIndex
+}
+
+func newFolderIndexCache(lib LibrarySource) *folderIndexCache {
+	return &folderIndexCache{lib: lib}
+}
+
+// get returns the folder index for the current library generation,
+// rebuilding (and republishing) only when the generation has advanced.
+//
+// Concurrency: the publish uses a CAS loop that NEVER regresses the
+// cache to an older generation, so a slow builder for gen N can't clobber
+// a freshly-published gen N+1 (which would cause spurious cache misses
+// until the next rebuild). The generation is double-read around the
+// track snapshot so we never cache a track list under a generation it
+// doesn't match (a rescan landing between the two reads → retry).
+func (c *folderIndexCache) get() *FolderIndex {
+	for {
+		gen := c.lib.Generation()
+		if cur := c.cached.Load(); cur != nil && cur.gen == gen {
+			return cur.idx
+		}
+		tracks := c.lib.ListTrackInfos()
+		if c.lib.Generation() != gen {
+			continue // library moved between the gen read and the snapshot
+		}
+		idx := BuildFolderIndex(tracks)
+		newVal := &cachedFolderIndex{gen: gen, idx: idx}
+		for {
+			cur := c.cached.Load()
+			if cur != nil && cur.gen >= gen {
+				if cur.gen == gen {
+					return cur.idx // someone published our generation
+				}
+				break // a newer generation is cached — re-read from the top
+			}
+			if c.cached.CompareAndSwap(cur, newVal) {
+				return idx
+			}
+		}
+	}
 }
 
 // TrackInfo is the bridge's adapter-layer Track shape. Mirrors the
@@ -207,6 +273,10 @@ type browseAction struct {
 // adapts to multi-interface deployments (the renderer might dial us
 // via a Tailscale IP on one request and the LAN IP on another).
 func ContentDirectoryHandler(lib LibrarySource, serverURLFunc func(r *http.Request) string) http.HandlerFunc {
+	// One folder-index cache per handler (i.e. per server lifetime),
+	// shared across all Browse requests. Generation-keyed, so it rebuilds
+	// only when the library moves.
+	fc := newFolderIndexCache(lib)
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
@@ -216,7 +286,7 @@ func ContentDirectoryHandler(lib LibrarySource, serverURLFunc func(r *http.Reque
 		_, actionName := ParseSOAPAction(r.Header.Get("SOAPAction"))
 		switch actionName {
 		case "Browse":
-			handleBrowse(w, r, lib, serverURLFunc(r))
+			handleBrowse(w, r, lib, fc, serverURLFunc(r))
 		case "GetSearchCapabilities":
 			handleGetSearchCapabilities(w)
 		case "GetSortCapabilities":
@@ -312,7 +382,7 @@ func handleGetSystemUpdateID(w http.ResponseWriter) {
 // would OOM on a hostile payload.
 const maxSOAPBodyBytes = 1 << 20 // 1 MB
 
-func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, serverURL string) {
+func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, fc *folderIndexCache, serverURL string) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxSOAPBodyBytes))
 	if err != nil {
 		writeSOAPFault(w, UPnPErrActionFailed)
@@ -391,7 +461,7 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, ser
 			// Tracks per PR #316's folder-hierarchy work. Lets users
 			// navigate the on-disk folder structure (Artist → Album
 			// → Track) rather than scrolling a flat list.
-			folderIndex := BuildFolderIndex(lib.ListTrackInfos())
+			folderIndex := fc.get()
 			selfDIDL = DIDLForContainer(DIDLContainerOpts{
 				ID: foldersRootObjectID, ParentID: "0", Title: "Folders",
 				ChildCount: len(folderIndex.TopLevelFolderIDs) + len(folderIndex.TopLevelTrackIDs),
@@ -401,7 +471,7 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, ser
 			// Could be a hashed folder ObjectID OR an individual track
 			// ID. Build the index and try a folder match first, then a
 			// track match, before falling through to NoSuchObject.
-			folderIndex := BuildFolderIndex(lib.ListTrackInfos())
+			folderIndex := fc.get()
 			if node, ok := folderIndex.Folders[browse.ObjectID]; ok {
 				selfDIDL = DIDLForContainer(DIDLContainerOpts{
 					ID: node.ObjectID, ParentID: node.ParentID, Title: node.Name,
@@ -458,7 +528,7 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, ser
 	switch browse.ObjectID {
 	case "", "0":
 		// Root container — emit `all_tracks` AND `folders`.
-		folderIndex = BuildFolderIndex(lib.ListTrackInfos())
+		folderIndex = fc.get()
 		//
 		// **Music container removed** (PR #309): the previous root
 		// also exposed `Music` (`childCount=4`) but its `music`
@@ -560,7 +630,7 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, ser
 		// any tracks that sit at the library root without a folder
 		// prefix. Both are immediate children of the synthetic Folders
 		// root container.
-		folderIndex = BuildFolderIndex(lib.ListTrackInfos())
+		folderIndex = fc.get()
 		didlElements = browseFolderChildren(
 			folderIndex,
 			folderIndex.TopLevelFolderIDs,
@@ -601,7 +671,7 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, ser
 		// Could be a hashed folder ObjectID. Build the index now
 		// (deferred from the top of the function per Gemini HIGH on
 		// PR #317 — saves the O(N) walk on every All Tracks browse).
-		folderIndex = BuildFolderIndex(lib.ListTrackInfos())
+		folderIndex = fc.get()
 		if node, ok := folderIndex.Folders[browse.ObjectID]; ok {
 			didlElements = browseFolderChildren(
 				folderIndex,
@@ -821,7 +891,15 @@ func writeSOAPFault(w http.ResponseWriter, code int) {
 // LibrarySource per call site.
 type StaticLibrary struct {
 	Tracks []TrackInfo
+	// Gen is the library generation surfaced via `Generation()`. A
+	// StaticLibrary is immutable in normal use, so the default 0 is
+	// fine (the folder-index cache builds once and reuses); tests that
+	// mutate `Tracks` to simulate a rescan bump `Gen` to invalidate.
+	Gen uint64
 }
+
+// Generation returns the static library's generation counter.
+func (s *StaticLibrary) Generation() uint64 { return s.Gen }
 
 // ListTrackInfos returns a stable-order slice of all tracks. Returns
 // a defensive copy so callers can't mutate the internal slice.

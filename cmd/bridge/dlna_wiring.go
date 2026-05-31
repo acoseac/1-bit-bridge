@@ -283,6 +283,10 @@ type manifestLibraryAdapter struct {
 	cachedList []dlna.TrackInfo
 	cachedByID map[string]dlna.TrackInfo
 	cachedAt   time.Time
+	// generation bumps on every cache rebuild. The DLNA folder-index
+	// cache keys on it (via Generation()) so it rebuilds the folder tree
+	// at most once per cache refresh rather than per Browse request.
+	generation uint64
 
 	// `rebuildMu` serializes the rebuild path. Without it, a SOAP
 	// burst (Chord 2go opens 5+ concurrent SOAP connections on its
@@ -419,7 +423,20 @@ func (a *manifestLibraryAdapter) rebuild() {
 	a.cachedList = list
 	a.cachedByID = byID
 	a.cachedAt = time.Now()
+	a.generation++ // signal the DLNA folder-index cache to rebuild
 	a.mu.Unlock()
+}
+
+// Generation returns a counter that advances on every cache rebuild, so
+// the DLNA folder-index cache can detect when the track list has moved.
+// Triggers a stale-refresh first so the returned value reflects the
+// freshest state (a stale value would let the folder cache serve a
+// pre-rescan tree).
+func (a *manifestLibraryAdapter) Generation() uint64 {
+	a.refreshIfStale()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.generation
 }
 
 // manifestTrackToDLNATrackInfo flattens the pointer-typed manifest.Track
