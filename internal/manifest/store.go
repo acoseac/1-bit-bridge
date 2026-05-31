@@ -629,6 +629,52 @@ var migrations = []migration{
 		CREATE INDEX IF NOT EXISTS idx_device_reg_token_id ON device_registrations(token_id);
 		`,
 	},
+	{
+		version: 11,
+		name:    "playlists + playlist_items (cross-bridge backup safe)",
+		// Per-device playlist backups. The bridge is a safe, NOT a player:
+		// a playlist may mix tracks from several bridges + local/SMB, and
+		// foreign items are stored as OPAQUE references the bridge never
+		// resolves or serves — iOS re-resolves them locally on restore.
+		//
+		// `playlists.id` is the client's own stable UUID (lowercased),
+		// scoped per device_token. `last_modified_at` is the client's
+		// wall-clock UnixNano, used only as a backup-hygiene LWW guard (a
+		// strictly-older PUT is bounced 409 with the server copy).
+		// `deleted` is a tombstone so a delete propagates instead of a
+		// silent reappear on the next backup sweep.
+		//
+		// playlist_items: each row is EITHER local (`path` set, resolvable
+		// on this bridge) OR foreign (`origin_fingerprint`+`origin_path`,
+		// where origin_fingerprint is the owning bridge's cert fp or a
+		// 'local'/'smb' sentinel). `title`/`artist` are render fallback for
+		// the admin surface. `position` is the authoritative 0-based order.
+		//
+		// Append-only / idempotent per the ladder contract.
+		sql: `
+		CREATE TABLE IF NOT EXISTS playlists (
+			id               TEXT PRIMARY KEY,
+			device_token     TEXT NOT NULL,
+			name             TEXT NOT NULL,
+			last_modified_at INTEGER NOT NULL,
+			updated_at       INTEGER NOT NULL,
+			deleted          INTEGER NOT NULL DEFAULT 0
+		);
+		CREATE INDEX IF NOT EXISTS idx_playlists_device ON playlists(device_token);
+
+		CREATE TABLE IF NOT EXISTS playlist_items (
+			playlist_id        TEXT NOT NULL,
+			position           INTEGER NOT NULL,
+			path               TEXT,
+			origin_fingerprint TEXT,
+			origin_path        TEXT,
+			title              TEXT,
+			artist             TEXT,
+			PRIMARY KEY (playlist_id, position),
+			FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE
+		);
+		`,
+	},
 }
 
 // normalizePathForLookup folds an iOS-shaped track path back toward

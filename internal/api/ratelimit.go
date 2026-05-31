@@ -18,6 +18,7 @@ type rateLimitKey int
 
 const (
 	ctxKeyTokenID rateLimitKey = iota
+	ctxKeyDeviceToken
 )
 
 // withTokenID returns a child context carrying tokenID. authed() calls
@@ -34,6 +35,22 @@ func withTokenID(ctx context.Context, tokenID string) context.Context {
 // on empty IDs — see rateLimitManifest's docblock for the rationale.
 func tokenIDFromContext(ctx context.Context) string {
 	if v, ok := ctx.Value(ctxKeyTokenID).(string); ok {
+		return v
+	}
+	return ""
+}
+
+// withDeviceToken / deviceTokenFromContext thread the validated
+// X-Device-Token header (the client's durable recovery token) from
+// authed() into the playlist + history handlers, which scope per-device
+// state by it. "" when the header was absent or malformed; those handlers
+// then reject with a 400 since per-device endpoints require it.
+func withDeviceToken(ctx context.Context, deviceToken string) context.Context {
+	return context.WithValue(ctx, ctxKeyDeviceToken, deviceToken)
+}
+
+func deviceTokenFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(ctxKeyDeviceToken).(string); ok {
 		return v
 	}
 	return ""

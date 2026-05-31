@@ -474,6 +474,46 @@ The schema version (`v1`) bumps only when the on-disk sidecar layout or the SoX 
 - `upscale.enabled: true` AND `sox` on PATH: full feature operates as documented.
 - `upscale.enabled: true` AND `sox` MISSING from PATH: bridge logs `.error` at startup, in-memory disables the feature, advertises `upscaleEnabled: false`. The rest of the server keeps running.
 
+### Playlist backup (additive, since v1.6)
+
+Per-device playlist backup. The bridge is a **safe, not a player**: a playlist may mix tracks from several bridges plus local/SMB sources. Items owned by this bridge are stored as resolvable `path`s; items owned by another bridge (or device-local / SMB) are stored as **opaque references** the bridge never resolves or serves — iOS re-resolves them locally on restore against its own shares.
+
+All four routes require the `X-Device-Token` header (the durable recovery token); state is scoped to it, so one device never sees another's backups. Advertised via the `playlistBackup` flag in `/v1/health.features`; pre-feature bridges return `404` from these routes.
+
+**`PUT /v1/playlists/{id}`** — upsert. `{id}` is the client's stable lowercase UUID. Body:
+
+```json
+{
+  "id": "5d9a2f4c-8e21-4c3a-9b77-0f1e2d3c4b5a",
+  "name": "High-Res Favorites",
+  "lastModifiedAt": 1730000000000000000,
+  "items": [
+    { "position": 0, "path": "Pink Floyd/Dark Side/Money.flac" },
+    { "position": 1, "originFingerprint": "AB:CD:…:FF", "originPath": "Diana Krall/Live/01 Romance.flac", "title": "Isn't It Romantic", "artist": "Diana Krall" },
+    { "position": 2, "originFingerprint": "local", "originPath": "<opaque iOS reference>", "title": "…", "artist": "…" }
+  ]
+}
+```
+
+`lastModifiedAt` is the client's wall-clock **UnixNano (UTC) integer** — the LWW guard key (never a float/string round-trip). Each item sets **either** `path` (local, resolvable) **or** `originFingerprint`+`originPath` (foreign/opaque) — never both, never neither (`400 bad_request` otherwise). `originFingerprint` is the owning bridge's colon-hex cert fingerprint, or the sentinel `"local"` / `"smb"`. `position` is the authoritative 0-based order. Body capped at 16 MiB.
+
+- **`200`** `{ "id": "…", "stored": true }` — accepted (inbound `lastModifiedAt` ≥ stored, or new).
+- **`409`** `stale` — inbound strictly older than the server copy; body carries the full server playlist so iOS can reconcile in one round-trip:
+  ```json
+  { "error": "stale", "message": "server copy is newer", "server": { "id": "…", "name": "…", "lastModifiedAt": 1730000000000000001, "items": [ … ] } }
+  ```
+- **`409`** `playlist_conflict` — the id exists under a different device (practically impossible with UUIDs; guards against a guessed-id overwrite).
+
+**`GET /v1/playlists`** — summaries for the caller's device:
+
+```json
+{ "playlists": [ { "id": "5d9a…", "name": "High-Res Favorites", "trackCount": 42, "lastModifiedAt": 1730000000000000000 } ] }
+```
+
+**`GET /v1/playlists/{id}`** — the full playlist (same shape as the `PUT` body) for restore. `404 not_found` if the id isn't owned by the caller's device (or was deleted).
+
+**`DELETE /v1/playlists/{id}`** — tombstone. `200 { "id": "…", "deleted": true }`, or `404 not_found` if no live row matched.
+
 ### `POST /v1/pairing/requests` (additive, since v1.2)
 
 Submit a join request that surfaces in the bridge admin web console as a pending entry. The admin reads the verification code off the iOS device's waiting screen, then approves or declines. iOS polls `/v1/pairing/{requestId}` for the verdict.
