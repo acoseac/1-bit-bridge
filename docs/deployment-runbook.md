@@ -45,7 +45,7 @@ All scoped to the exe path, NOT port-wide. Old rules at the legacy exe paths (`C
 
 | Script | Purpose |
 |---|---|
-| `setup-bridge-windows.ps1` | full fresh install: clone/pull → `go build` → `bridge init` → inject `customEndpoints` + `upscale.variantsDir` into the generated YAML → print cert info |
+| `setup-bridge-windows.ps1` | clone/pull → `go build` → **`bridge init` ONLY on a fresh install (no existing config)** → inject `customEndpoints` + `upscale.variantsDir` into the YAML → print cert info. **On an existing install it preserves the cert + config (no re-init)** — so a routine binary update does NOT re-mint the TLS cert and does NOT invalidate paired iOS devices. (Fixed 2026-06-01 — the prior version re-ran `init -force` on every run, silently re-minting the cert and breaking every pairing on what looked like a plain update.) |
 | `rotate-cert-windows.ps1` | `bridge cert rotate` then restart (use after any `customEndpoints` edit to refresh SANs; **invalidates every paired iOS device's pinned fingerprint** — every device must re-pair) |
 | `firewall-bridge-windows.ps1` | install the 3 inbound rules above (idempotent — removes pre-existing rules with the same DisplayName first) |
 | `task-bridge-windows.ps1` | register the scheduled task + start it now; survives SSH disconnect / logout / reboot |
@@ -202,7 +202,7 @@ Full coordinates + canonical update procedure live in the `home-pc (Windows)` su
 **One-line summary**: `scp` any changed helper scripts → `pwsh ... setup-bridge-windows.ps1` (pulls `main`, runs `go build` in-place on the Windows host, refreshes YAML) → `pwsh ... task-bridge-windows.ps1` (re-registers + starts the scheduled task) → `curl -sk https://<host>:7788/v1/health` to confirm `serverVersion`.
 
 **What's safe to skip across upgrades:**
-- TLS cert / fingerprint — unchanged, so paired iOS clients don't need re-pairing.
+- TLS cert / fingerprint — unchanged on an update, so paired iOS clients don't need re-pairing. **This is only true because `setup-bridge-windows.ps1` skips `bridge init` when a config already exists** (fixed 2026-06-01). To deliberately re-mint the cert (then every device must re-pair), run `rotate-cert-windows.ps1` — never `init -force`. If you ever see "config exists -- re-running init with -force" in the setup output, you're on the OLD script and it's about to break every pairing; abort and re-pull the fixed script.
 - Config file — `setup-bridge-windows.ps1` only injects missing `customEndpoints` + `upscale.variantsDir` keys; existing config preserved.
 - Library DB — schema migrations are append-only and idempotent; the same DB carries forward across releases.
 
