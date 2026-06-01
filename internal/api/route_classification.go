@@ -210,6 +210,13 @@ func (s *Server) routeRegistry() []route {
 		// <1 ms in steady state.
 		{pattern: "GET /v1/renderers", kind: boundedRoute, handler: withCtxTimeout(2*time.Second, s.authed(s.renderers))},
 
+		// Playlists — per-device backup safe. Small JSON on list /
+		// delete; PUT carries a (capped) playlist body. All bounded.
+		{pattern: "GET /v1/playlists", kind: boundedRoute, handler: s.authed(s.listPlaylists)},
+		{pattern: "GET /v1/playlists/{id}", kind: boundedRoute, handler: s.authed(s.getPlaylist)},
+		{pattern: "PUT /v1/playlists/{id}", kind: boundedRoute, handler: s.authed(s.putPlaylist)},
+		{pattern: "DELETE /v1/playlists/{id}", kind: boundedRoute, handler: s.authed(s.deletePlaylist)},
+
 		// SSE — long-lived per-connection write stream; MUST opt
 		// out of the per-route write deadline.
 		{pattern: "GET /v1/events", kind: streamingRoute, handler: s.authed(s.events)},
