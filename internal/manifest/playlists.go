@@ -78,6 +78,9 @@ func (s *Store) UpsertPlaylist(ctx context.Context, deviceToken string, p Playli
 	if deviceToken == "" {
 		return errors.New("manifest: UpsertPlaylist requires a device token")
 	}
+	if p.ID == "" {
+		return errors.New("manifest: UpsertPlaylist requires a playlist id")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

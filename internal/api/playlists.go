@@ -34,6 +34,14 @@ func (s *Server) WithPlaylistStore(ps PlaylistStore) *Server {
 // far too tight here.
 const playlistMaxBodyBytes = 16 << 20
 
+// Per-field bounds, enforced after the body-size cap. A well-formed payload
+// can still be abusive (a 1-char-name playlist with 10M items), so bound the
+// name length and item count explicitly.
+const (
+	maxPlaylistNameLen = 1024
+	maxPlaylistItems   = 50000
+)
+
 // --- wire DTOs (the playlists contract; see PROTOCOL.md Appendix A.2/A.3) ---
 
 type playlistItemDTO struct {
@@ -187,16 +195,45 @@ func (s *Server) putPlaylist(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "playlist name is required")
 		return
 	}
+	// Defensive bounds against oversized / malformed payloads (Gemini on
+	// PR #335). The 16 MiB body cap is the outer guard; these keep a
+	// well-formed-but-abusive payload bounded too.
+	if len(body.Name) > maxPlaylistNameLen {
+		writeError(w, http.StatusBadRequest, "bad_request", "playlist name is too long")
+		return
+	}
+	if body.LastModifiedAt <= 0 {
+		writeError(w, http.StatusBadRequest, "bad_request", "lastModifiedAt must be a positive UnixNano value")
+		return
+	}
+	if len(body.Items) > maxPlaylistItems {
+		writeError(w, http.StatusBadRequest, "bad_request", "playlist has too many items")
+		return
+	}
 
 	items := make([]manifest.PlaylistItemRow, 0, len(body.Items))
+	seenPositions := make(map[int]struct{}, len(body.Items))
 	for _, it := range body.Items {
-		hasLocal := it.Path != ""
-		hasForeign := it.OriginFingerprint != "" || it.OriginPath != ""
-		if hasLocal == hasForeign {
-			// Each item is EITHER local (path) XOR foreign
-			// (originFingerprint+originPath) — never both, never neither.
+		// Position must be non-negative and unique — a duplicate position
+		// would otherwise hit the (playlist_id, position) PK and surface as
+		// a 500 instead of a clean 400 (Gemini HIGH on PR #335).
+		if it.Position < 0 {
+			writeError(w, http.StatusBadRequest, "bad_request", "playlist item position must be non-negative")
+			return
+		}
+		if _, dup := seenPositions[it.Position]; dup {
+			writeError(w, http.StatusBadRequest, "bad_request", "duplicate playlist item position")
+			return
+		}
+		seenPositions[it.Position] = struct{}{}
+		// Strict local-XOR-foreign: a local item has ONLY path; a foreign
+		// item has BOTH originFingerprint AND originPath. Partially-filled
+		// items (e.g. fingerprint without path) are rejected.
+		isLocal := it.Path != "" && it.OriginFingerprint == "" && it.OriginPath == ""
+		isForeign := it.Path == "" && it.OriginFingerprint != "" && it.OriginPath != ""
+		if !isLocal && !isForeign {
 			writeError(w, http.StatusBadRequest, "bad_request",
-				"each playlist item must set either path or originFingerprint+originPath, not both")
+				"each playlist item must set either path (local) or both originFingerprint and originPath (foreign), and not mix them")
 			return
 		}
 		items = append(items, manifest.PlaylistItemRow{

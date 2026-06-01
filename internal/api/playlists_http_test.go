@@ -162,6 +162,29 @@ func TestPlaylistHTTPLocalXorForeign400(t *testing.T) {
 	resp.Body.Close()
 }
 
+func TestPlaylistHTTPDuplicatePosition400(t *testing.T) {
+	token, dt, srv := newPlaylistTestServer(t)
+	id := "cccccccc-0000-0000-0000-000000000003"
+	body := `{"id":"` + id + `","name":"x","lastModifiedAt":1,"items":[{"position":0,"path":"a.flac"},{"position":0,"path":"b.flac"}]}`
+	resp := doReq(t, srv, http.MethodPut, "/v1/playlists/"+id, token, dt, body)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("duplicate position = %d, want 400", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestPlaylistHTTPPartialForeign400(t *testing.T) {
+	token, dt, srv := newPlaylistTestServer(t)
+	id := "dddddddd-0000-0000-0000-000000000004"
+	// Foreign item with originFingerprint but no originPath → 400.
+	body := `{"id":"` + id + `","name":"x","lastModifiedAt":1,"items":[{"position":0,"originFingerprint":"AB"}]}`
+	resp := doReq(t, srv, http.MethodPut, "/v1/playlists/"+id, token, dt, body)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("partial-foreign item = %d, want 400", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
 func TestPlaylistHTTPDeviceTokenRequired(t *testing.T) {
 	token, _, srv := newPlaylistTestServer(t)
 	// No X-Device-Token header → 400.
