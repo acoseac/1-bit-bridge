@@ -3,6 +3,8 @@ package admin
 import (
 	"net/http"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
 // Admin device + playlist-backup surfaces. Loopback-only, owner-visible,
@@ -89,4 +91,48 @@ func (s *Server) apiPlaylistsList(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"playlists": out})
+}
+
+// historyBucketRow is the admin-wire DTO for a (label, count) aggregate.
+type historyBucketRow struct {
+	Label string `json:"label"`
+	Count int64  `json:"count"`
+}
+
+// apiHistorySummary handles GET /api/history — owner-visible playback
+// telemetry overview: total event count + codec / route histograms + top
+// tracks (all aggregated across devices). Loopback-only, read-only.
+func (s *Server) apiHistorySummary(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Manifest == nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"totalEvents": 0,
+			"codecs":      []historyBucketRow{},
+			"routes":      []historyBucketRow{},
+			"topTracks":   []historyBucketRow{},
+		})
+		return
+	}
+	ctx := r.Context()
+	total, err := s.deps.Manifest.HistoryEventCount(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	codecs, _ := s.deps.Manifest.CodecHistogram(ctx, "")
+	routes, _ := s.deps.Manifest.RouteHistogram(ctx, "")
+	top, _ := s.deps.Manifest.TopTracks(ctx, 20)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"totalEvents": total,
+		"codecs":      toBucketRows(codecs),
+		"routes":      toBucketRows(routes),
+		"topTracks":   toBucketRows(top),
+	})
+}
+
+func toBucketRows(in []manifest.HistoryBucket) []historyBucketRow {
+	out := make([]historyBucketRow, 0, len(in))
+	for _, b := range in {
+		out = append(out, historyBucketRow{Label: b.Label, Count: b.Count})
+	}
+	return out
 }

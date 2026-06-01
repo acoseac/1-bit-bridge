@@ -689,6 +689,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/roots", s.apiRootsRemove)
 	mux.HandleFunc("GET /api/devices", s.apiDevicesList)
 	mux.HandleFunc("GET /api/playlists", s.apiPlaylistsList)
+	mux.HandleFunc("GET /api/history", s.apiHistorySummary)
 	mux.HandleFunc("GET /api/tokens", s.apiTokensList)
 	mux.HandleFunc("POST /api/tokens", s.apiTokensMint)
 	mux.HandleFunc("DELETE /api/tokens/{id}", s.apiTokensRevoke)

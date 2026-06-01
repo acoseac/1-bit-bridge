@@ -675,6 +675,39 @@ var migrations = []migration{
 		);
 		`,
 	},
+	{
+		version: 12,
+		name:    "playback_history (opt-in, owner-visible telemetry)",
+		// Per-device playback telemetry, scoped to the device_token. Owner-
+		// visible only (loopback admin) — never exposed off-host. Opt-in on
+		// the iOS side; events queue offline-first there and drain in
+		// batches to POST /v1/history/batch.
+		//
+		// `duration_used` is REAL (seconds actually listened) — scanned into
+		// a Go float64, never an int, so fractional skip seconds survive.
+		// `started_at` / `received_at` are UnixNano. `is_dop` is 0/1.
+		// AUTOINCREMENT id keeps a stable cursor for paginated admin reads.
+		//
+		// Append-only / idempotent per the ladder contract.
+		sql: `
+		CREATE TABLE IF NOT EXISTS playback_history (
+			id             INTEGER PRIMARY KEY AUTOINCREMENT,
+			device_token   TEXT NOT NULL,
+			path           TEXT NOT NULL,
+			started_at     INTEGER NOT NULL,
+			duration_used  REAL    NOT NULL,
+			codec          TEXT,
+			variant_id     TEXT,
+			iface_type     TEXT,
+			device_name    TEXT,
+			output_rate    INTEGER,
+			is_dop         INTEGER NOT NULL DEFAULT 0,
+			received_at    INTEGER NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_history_device_started ON playback_history(device_token, started_at DESC);
+		CREATE INDEX IF NOT EXISTS idx_history_path ON playback_history(path);
+		`,
+	},
 }
 
 // normalizePathForLookup folds an iOS-shaped track path back toward

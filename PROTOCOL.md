@@ -514,6 +514,42 @@ All four routes require the `X-Device-Token` header (the durable recovery token)
 
 **`DELETE /v1/playlists/{id}`** — tombstone. `200 { "id": "…", "deleted": true }`, or `404 not_found` if no live row matched.
 
+### Playback history (additive, since v1.6)
+
+Opt-in, owner-visible playback telemetry. Requires the `X-Device-Token` header; events are scoped to it and surfaced only in the loopback admin console (never off-host). Advertised via the `playbackHistory` flag in `/v1/health.features`; pre-feature bridges return `404`. iOS queues events offline-first and drains them in batches.
+
+**`POST /v1/history/batch`** — bulk-insert events:
+
+```json
+{
+  "events": [
+    {
+      "path": "Diana Krall/Live/01 Romance.flac",
+      "startedAt": 1730000000000000000,
+      "durationUsed": 184.5,
+      "codec": "FLAC",
+      "variantId": "upscaled-v2-176400-24",
+      "outputTarget": {
+        "interfaceType": "USB-DAC",
+        "deviceName": "Chord Mojo 2",
+        "outputRate": 176400,
+        "isDoP": true
+      }
+    }
+  ]
+}
+```
+
+`path` is the file path on this bridge (the original-case `bridgeOriginalPath`); required. `startedAt` is **UnixNano (UTC) integer**. `durationUsed` is seconds actually listened (a JSON number / float — fractional skip seconds are preserved server-side). `codec` / `variantId` / `outputTarget` are optional; `interfaceType` ∈ `CarPlay` / `USB-DAC` / `Bluetooth` / `BuiltInSpeakers` / `Unknown`. Body capped at 4 MiB.
+
+**Response** `202 Accepted`:
+
+```json
+{ "accepted": 11, "dropped": 1 }
+```
+
+The handler **drops, never faults,** events with an empty `path`, a non-positive `startedAt`, or a non-finite / negative `durationUsed` — one corrupt event never rolls back the rest of the device's stats. `dropped` counts them.
+
 ### `POST /v1/pairing/requests` (additive, since v1.2)
 
 Submit a join request that surfaces in the bridge admin web console as a pending entry. The admin reads the verification code off the iOS device's waiting screen, then approves or declines. iOS polls `/v1/pairing/{requestId}` for the verdict.

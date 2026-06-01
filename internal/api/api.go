@@ -153,6 +153,11 @@ type Server struct {
 	// is omitted. *manifest.Store satisfies it in production.
 	playlistStore PlaylistStore
 
+	// historyStore backs POST /v1/history/batch + the "playbackHistory"
+	// health-feature flag. Nil unless WithHistoryStore is wired. Same
+	// feature-off shape as playlistStore. *manifest.Store satisfies it.
+	historyStore HistoryStore
+
 	// tailscaleStatus is the embedded-tsnet status provider used by
 	// `reachableEndpoints` to advertise the bridge's `*.ts.net` URL +
 	// tailnet IPs in tsnet mode. Nil unless `WithTailscaleStatus` or
@@ -1174,6 +1179,12 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.eventBroker != nil && s.pairing != nil {
 		feats = append(feats, "pairingEventsSupported")
+	}
+	// `playbackHistory` advertises POST /v1/history/batch. Gated on the
+	// history store being wired. Lexically before `playlistBackup`
+	// (playb < playl), so it appends first.
+	if s.historyStore != nil {
+		feats = append(feats, "playbackHistory")
 	}
 	// `playlistBackup` advertises the per-device /v1/playlists backup
 	// endpoints. Gated on `s.playlistStore != nil` so a deploy without
