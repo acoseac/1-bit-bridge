@@ -58,7 +58,7 @@ func (s *Server) apiTokensRotate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.URL == "" {
-		req.URL = defaultBridgeURL(cfg.ListenAddress)
+		req.URL = defaultBridgeURL(cfg)
 	}
 
 	s.mu.Lock()
@@ -74,8 +74,12 @@ func (s *Server) apiTokensRotate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Bake the fingerprint the device will actually capture when it dials
+	// req.URL (public-domain LE cert for a public dial URL, self-signed
+	// otherwise) so the iOS first-contact pin check can't reject pairing.
+	fp := pairFingerprint(req.URL, s.deps.Fingerprint, s.deps.FingerprintForHost)
 	alternates := ensurePrimaryFirst(req.URL, pairAlternates(req.URL, cfg))
-	pairURL := buildPairURL(req.URL, rawToken, s.deps.Fingerprint, cfg.LibraryName, alternates)
+	pairURL := buildPairURL(req.URL, rawToken, fp, cfg.LibraryName, alternates)
 	qrData, err := qrDataURL(pairURL)
 	if err != nil {
 		// QR render failures don't block the rotate — operator can
@@ -86,7 +90,7 @@ func (s *Server) apiTokensRotate(w http.ResponseWriter, r *http.Request) {
 		RawToken:    rawToken,
 		ID:          tok.ID,
 		Name:        tok.Name,
-		Fingerprint: s.deps.Fingerprint,
+		Fingerprint: fp,
 		URL:         req.URL,
 		PairURL:     pairURL,
 		Alternates:  alternates,

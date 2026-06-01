@@ -123,7 +123,7 @@ func (s *Server) pageDevices(w http.ResponseWriter, r *http.Request) {
 	}
 	data := map[string]any{
 		"Tokens":     rows,
-		"DefaultURL": defaultBridgeURL(cfg.ListenAddress),
+		"DefaultURL": defaultBridgeURL(cfg),
 	}
 	s.renderPage(w, "devices", data)
 }

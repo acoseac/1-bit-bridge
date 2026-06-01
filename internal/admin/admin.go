@@ -72,9 +72,22 @@ type Deps struct {
 	Scanner   *manifest.Scanner
 	Resolver  *bridgefs.Resolver
 
-	// Fingerprint is the TLS cert SHA-256 in colon-hex form. Shown in the
-	// pairing modal and the dashboard.
+	// Fingerprint is the self-signed TLS cert SHA-256 in colon-hex form.
+	// Shown in the dashboard cert tile (the LAN pin operators verify) and
+	// used as the pairing-QR fallback fingerprint.
 	Fingerprint string
+
+	// FingerprintForHost returns the cert fingerprint a device will capture
+	// when it dials the given hostname (SNI), routed through the same SNI
+	// cert switcher the listener serves with. The pairing-QR baker uses it
+	// so the QR advertises the cert the device ACTUALLY sees — the public
+	// domain's autocert/LE fingerprint for a public dial URL, the
+	// self-signed LAN fingerprint otherwise. Pre-fix the QR always baked
+	// the self-signed fingerprint, which a public-mode device (connecting
+	// over the LE-served public endpoint) could never match. Wired in
+	// cmd/bridge/main.go to certManager.FingerprintForServerName. Nil in
+	// loopback wiring / tests — callers fall back to Fingerprint.
+	FingerprintForHost func(host string) string
 
 	// StartedAt is used to render uptime. Typically time.Now().UTC() at
 	// the moment the serve command completes its init.

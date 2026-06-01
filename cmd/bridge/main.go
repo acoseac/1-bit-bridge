@@ -2136,28 +2136,33 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	}
 
 	adminSrv, err := admin.New(admin.Deps{
-		CfgHolder:        cfgHolder,
-		CfgPath:          absCfgPath,
-		Auth:             store,
-		Manifest:         manifestStore,
-		Scanner:          scanner,
-		Resolver:         apiSrv.Resolver(),
-		Fingerprint:      fingerprint,
-		AdminAuth:        adminAuthStore,
-		LoginLimiter:     loginLimiter,
-		TLSConfig:        adminTLSConfig,
-		AutocertStatus:   autocertStatusClosure,
-		MDNSToggle:       mdnsToggleCallback,
-		TailscaleDisable: tailscaleDisableCallback,
-		StartedAt:        time.Now().UTC(),
-		ScanCtx:          scanCtx,
-		Restart:          cancel,
-		Updater:          updAdapter,
-		BackupSources:    backupSources,
-		Tailscale:        tailscaleAdminSrc,
-		Pairing:          pairingStore,
-		IsSupervised:     supervision.IsSupervised(),
-		UpscalePrecheck:  transcode.PrecheckSox,
+		CfgHolder:   cfgHolder,
+		CfgPath:     absCfgPath,
+		Auth:        store,
+		Manifest:    manifestStore,
+		Scanner:     scanner,
+		Resolver:    apiSrv.Resolver(),
+		Fingerprint: fingerprint,
+		// Pairing-QR baker asks the SNI cert switcher what fingerprint a
+		// device will capture when it dials a given host, so a public-mode
+		// QR advertises the autocert LE fingerprint (what the device sees)
+		// instead of the self-signed LAN pin (which it never would).
+		FingerprintForHost: certManager.FingerprintForServerName,
+		AdminAuth:          adminAuthStore,
+		LoginLimiter:       loginLimiter,
+		TLSConfig:          adminTLSConfig,
+		AutocertStatus:     autocertStatusClosure,
+		MDNSToggle:         mdnsToggleCallback,
+		TailscaleDisable:   tailscaleDisableCallback,
+		StartedAt:          time.Now().UTC(),
+		ScanCtx:            scanCtx,
+		Restart:            cancel,
+		Updater:            updAdapter,
+		BackupSources:      backupSources,
+		Tailscale:          tailscaleAdminSrc,
+		Pairing:            pairingStore,
+		IsSupervised:       supervision.IsSupervised(),
+		UpscalePrecheck:    transcode.PrecheckSox,
 		UpscaleStats: func() *admin.UpscalePoolStats {
 			// Snapshot the pool's live counters when the
 			// feature is active. Two off-paths return nil

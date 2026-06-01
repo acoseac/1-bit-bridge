@@ -363,6 +363,95 @@ func TestManager_SetAutocertProviderClearWithNilGetCert(t *testing.T) {
 	}
 }
 
+// --- FingerprintForServerName ---
+
+func TestManager_FingerprintForServerName_SelfSignedForLANHost(t *testing.T) {
+	// A LAN / IP / .local host gets the self-signed cert, so its
+	// fingerprint MUST be the self-signed cert's — the pairing-QR baker
+	// relies on this for the loopback-mode default dial URL.
+	self := mintTestCert(t, []string{"host.local"})
+	mgr := NewManager(self)
+
+	got := mgr.FingerprintForServerName("home-pc.local")
+	want := FingerprintFromDER(self.Certificate[0])
+	if got != want {
+		t.Errorf("LAN host fingerprint = %q, want self-signed %q", got, want)
+	}
+}
+
+func TestManager_FingerprintForServerName_AutocertForPublicDomain(t *testing.T) {
+	// THE fix: a device dialing the public domain receives the autocert
+	// LE cert, so the QR must advertise THAT fingerprint — not the
+	// self-signed LAN pin (which the device would never see, making the
+	// iOS first-contact pin check fail).
+	self := mintTestCert(t, []string{"host.local"})
+	acmeCert := mintTestCert(t, []string{"bridge.example.com"})
+	mgr := NewManager(self)
+	mgr.SetAutocertProvider(
+		"bridge.example.com",
+		func(*cryptotls.ClientHelloInfo) (*cryptotls.Certificate, error) { return acmeCert, nil },
+		nil,
+	)
+
+	got := mgr.FingerprintForServerName("bridge.example.com")
+	want := FingerprintFromDER(acmeCert.Certificate[0])
+	if got != want {
+		t.Errorf("public-domain fingerprint = %q, want autocert %q", got, want)
+	}
+	if got == FingerprintFromDER(self.Certificate[0]) {
+		t.Error("public-domain host resolved to the self-signed fingerprint — the bug this fix closes")
+	}
+}
+
+func TestManager_FingerprintForServerName_NormalizesSNI(t *testing.T) {
+	// Mirrors Get's normalization: mixed case + trailing dot still
+	// resolve to the autocert cert (operators may type the URL host in
+	// any case).
+	self := mintTestCert(t, []string{"host.local"})
+	acmeCert := mintTestCert(t, []string{"bridge.example.com"})
+	mgr := NewManager(self)
+	mgr.SetAutocertProvider(
+		"bridge.example.com",
+		func(*cryptotls.ClientHelloInfo) (*cryptotls.Certificate, error) { return acmeCert, nil },
+		nil,
+	)
+
+	want := FingerprintFromDER(acmeCert.Certificate[0])
+	for _, sni := range []string{"BRIDGE.EXAMPLE.COM", "bridge.example.com.", "Bridge.Example.Com."} {
+		if got := mgr.FingerprintForServerName(sni); got != want {
+			t.Errorf("FingerprintForServerName(%q) = %q, want autocert %q", sni, got, want)
+		}
+	}
+}
+
+func TestManager_FingerprintForServerName_FallsBackToSelfSignedOnAutocertError(t *testing.T) {
+	// Autocert error → Get falls through to self-signed, so the
+	// fingerprint helper returns the self-signed fingerprint (no worse
+	// than the pre-fix behaviour; the common case has the cert warm).
+	self := mintTestCert(t, []string{"host.local"})
+	mgr := NewManager(self)
+	mgr.SetAutocertProvider(
+		"bridge.example.com",
+		func(*cryptotls.ClientHelloInfo) (*cryptotls.Certificate, error) { return nil, errSentinel },
+		nil,
+	)
+
+	got := mgr.FingerprintForServerName("bridge.example.com")
+	want := FingerprintFromDER(self.Certificate[0])
+	if got != want {
+		t.Errorf("autocert-error fingerprint = %q, want self-signed fallback %q", got, want)
+	}
+}
+
+func TestManager_FingerprintForServerName_EmptyHostIsSelfSigned(t *testing.T) {
+	self := mintTestCert(t, []string{"host.local"})
+	mgr := NewManager(self)
+	got := mgr.FingerprintForServerName("")
+	if want := FingerprintFromDER(self.Certificate[0]); got != want {
+		t.Errorf("empty-SNI fingerprint = %q, want self-signed %q", got, want)
+	}
+}
+
 func TestManager_AdminTLSConfigMergesAutocertALPN(t *testing.T) {
 	// AdminTLSConfig must advertise both http/1.1 + h2 AND any
 	// autocert-required ALPN (acme-tls/1) so the same listener

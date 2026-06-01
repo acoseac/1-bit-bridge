@@ -262,6 +262,28 @@ func (m *Manager) Get(hello *cryptotls.ClientHelloInfo) (*cryptotls.Certificate,
 	return leCert, nil
 }
 
+// FingerprintForServerName returns the SHA-256 fingerprint (canonical
+// colon-hex, matching FingerprintFromDER) of the certificate
+// Manager.Get would serve for a TLS handshake carrying serverName as
+// SNI. This lets the pairing-QR baker advertise the fingerprint the
+// device will ACTUALLY capture on connect — the public-domain (autocert)
+// or Tailscale magic-DNS LE fingerprint for those SNIs, the self-signed
+// LAN fingerprint otherwise. Routing is delegated to Get so it can never
+// drift from what the listener serves.
+//
+// Returns "" only when the resolved cert carries no leaf DER (never the
+// case for the self-signed fallback). For the autocert SNI this calls
+// the autocert hook's GetCertificate, which returns the already-cached
+// cert without blocking once provisioned — the pairing flow runs against
+// a bridge already serving public traffic, so the cert is warm.
+func (m *Manager) FingerprintForServerName(serverName string) string {
+	cert, err := m.Get(&cryptotls.ClientHelloInfo{ServerName: serverName})
+	if err != nil || cert == nil || len(cert.Certificate) == 0 {
+		return ""
+	}
+	return FingerprintFromDER(cert.Certificate[0])
+}
+
 // CertNotAfter parses the leaf cert from a `tls.Certificate` and
 // returns its NotAfter timestamp. **`tls.LoadX509KeyPair` does NOT
 // populate `cert.Leaf`** — reading `cert.Leaf.NotAfter` directly is
