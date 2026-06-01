@@ -4,6 +4,15 @@ Extracted from CLAUDE.md to keep it out of always-loaded context. **Read this
 before any production deploy** — covers the two live bridges (home-pc Windows,
 bridge.ars.md Linux VPS) and the post-merge 3-step deploy flow.
 
+**Deploy scripts are git-tracked in [`deploy/`](../deploy/) — that is the source
+of truth.** The copies on the hosts (home-pc Desktop) and in `/tmp` on the
+workstation are synced FROM there, never edited in place (the 2026-06-01
+cert-re-mint bug existed because the only copy lived on the host and drifted).
+See [`deploy/README.md`](../deploy/README.md) for the script index + sync
+contract. Routine update one-liners:
+- **home-pc**: `ssh arsenie@192.168.0.208 'pwsh -NoProfile -Command -' < deploy/windows/update-bridge-windows.ps1` (cert-preserving; never re-mints)
+- **bridge.ars.md**: `./deploy/linux/deploy-bridge-vps.sh`
+
 ## Production deployments
 
 ### home-pc (Windows, SSH `arsenie@192.168.0.208`)
@@ -43,8 +52,11 @@ All scoped to the exe path, NOT port-wide. Old rules at the legacy exe paths (`C
 
 **Helper scripts on `C:\Users\arsenie\Desktop\`** (idempotent — re-runnable for updates):
 
+Canonical source: [`deploy/windows/`](../deploy/windows/) — `scp deploy/windows/*.ps1 arsenie@192.168.0.208:C:/Users/arsenie/Desktop/` to sync before running.
+
 | Script | Purpose |
 |---|---|
+| `update-bridge-windows.ps1` | **routine code update (use this for every merge)**: fast-forward `src` → `go build` → restart the scheduled task. **No `bridge init`, so cert + config + pairings are preserved.** |
 | `setup-bridge-windows.ps1` | clone/pull → `go build` → **`bridge init` ONLY on a fresh install (no existing config)** → inject `customEndpoints` + `upscale.variantsDir` into the YAML → print cert info. **On an existing install it preserves the cert + config (no re-init)** — so a routine binary update does NOT re-mint the TLS cert and does NOT invalidate paired iOS devices. (Fixed 2026-06-01 — the prior version re-ran `init -force` on every run, silently re-minting the cert and breaking every pairing on what looked like a plain update.) |
 | `rotate-cert-windows.ps1` | `bridge cert rotate` then restart (use after any `customEndpoints` edit to refresh SANs; **invalidates every paired iOS device's pinned fingerprint** — every device must re-pair) |
 | `firewall-bridge-windows.ps1` | install the 3 inbound rules above (idempotent — removes pre-existing rules with the same DisplayName first) |
@@ -133,7 +145,7 @@ Public-internet-reachable bridge running in `deployment.mode: public` against a 
 
 **Helper scripts**: none on the host today — operator runs setup commands directly during install. Update flow uses the cross-compile + `scp .new` + two-step rename + `systemctl restart` pattern from "Step 2 — Windows production bridge" below, adapted for Linux (see canonical deploy procedure below).
 
-**Canonical update procedure** (from operator's macOS workstation, on every merged runtime-behavior PR):
+**Canonical update procedure** (from operator's macOS workstation, on every merged runtime-behavior PR). The scripted form is [`deploy/linux/deploy-bridge-vps.sh`](../deploy/linux/deploy-bridge-vps.sh) (cross-compile → SHA-gated upload → two-step swap → `setcap` → restart → verify); the manual steps below are what it runs:
 
 ```sh
 # 1. Cross-compile against current main.
