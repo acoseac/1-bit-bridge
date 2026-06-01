@@ -1617,7 +1617,8 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		WithCertExpiry(certNotAfter).
 		WithLECertExpiry(leCertExpiry).
 		WithUpscale(upscaleActive, &variantStoreAdapter{provider: provider}).
-		WithCarPlayOptimize(upscaleActive && cfg.Upscale.EffectiveOptimizeEnabled())
+		WithCarPlayOptimize(upscaleActive && cfg.Upscale.EffectiveOptimizeEnabled()).
+		WithDeviceRegistrar(manifestStore)
 	cfgHolder := apiSrv.ConfigHolder()
 
 	// DLNA MediaServer (opt-in, LAN-only). Starts a parallel

@@ -23,6 +23,12 @@ type pairingCreateRequest struct {
 	DeviceName     string `json:"deviceName"`
 	ClientVersion  string `json:"clientVersion,omitempty"`
 	PollSecretHash string `json:"pollSecretHash"` // hex SHA-256 of the iOS-generated 32-byte secret
+	// DeviceToken is the iOS client's durable recovery token (Keychain,
+	// device-local). Optional / additive — pre-feature clients omit it.
+	// Lets the admin bind the device_registrations row (with a real
+	// device name) at approval time. Capped by pairingMaxBodyBytes along
+	// with the rest of the body.
+	DeviceToken string `json:"deviceToken,omitempty"`
 }
 
 // pairingCreateResponse is the 201 body returned to iOS.
@@ -106,12 +112,23 @@ func (s *Server) pairingRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate the optional device token at the boundary, reusing the same
+	// lowercase-hex/length rule the authed X-Device-Token path enforces. A
+	// malformed value can't match a later authed request, so it would only
+	// store an orphan registration on approve — drop it to "" (the binding
+	// then forms cleanly on the device's first authed request) rather than
+	// failing the whole pairing over an optional field. (Gemini on PR #334.)
+	deviceToken := req.DeviceToken
+	if deviceToken != "" && !validDeviceToken(deviceToken) {
+		deviceToken = ""
+	}
 	out, err := s.pairing.CreateRequest(
 		req.DeviceName,
 		req.ClientVersion,
 		req.PollSecretHash,
 		ip,
 		s.fingerprint,
+		deviceToken,
 	)
 	switch {
 	case errors.Is(err, pairing.ErrBadHash):

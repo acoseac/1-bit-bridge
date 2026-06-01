@@ -86,7 +86,7 @@ func quickStore(t *testing.T, ttl, grace time.Duration, revoke func(string) erro
 func TestCreateAndPollPending(t *testing.T) {
 	s := quickStore(t, 1*time.Second, 1*time.Second, nil)
 	raw, hashHex := makePollPair(t, "a")
-	req, err := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "AB:CD")
+	req, err := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "AB:CD", "")
 	if err != nil {
 		t.Fatalf("CreateRequest: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestCreateAndPollPending(t *testing.T) {
 func TestPollRejectsWrongSecret(t *testing.T) {
 	s := quickStore(t, time.Second, time.Second, nil)
 	_, hashHex := makePollPair(t, "a")
-	req, _ := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "AB:CD")
+	req, _ := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "AB:CD", "")
 	if _, err := s.Poll(req.ID, "wrong-secret"); !errors.Is(err, ErrUnauthorized) {
 		t.Errorf("Poll wrong secret: err = %v, want ErrUnauthorized", err)
 	}
@@ -138,7 +138,7 @@ func TestApproveProducesTokenOnEveryAuthorizedPoll(t *testing.T) {
 	mint := &stubMint{}
 	s := quickStore(t, 1*time.Second, 1*time.Second, nil)
 	raw, hashHex := makePollPair(t, "a")
-	req, _ := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP")
+	req, _ := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP", "")
 
 	if _, err := s.Approve(req.ID, "FP", mint.fn); err != nil {
 		t.Fatalf("Approve: %v", err)
@@ -168,7 +168,7 @@ func TestApproveRejectsNonPending(t *testing.T) {
 	mint := &stubMint{}
 	s := quickStore(t, time.Second, time.Second, nil)
 	_, hashHex := makePollPair(t, "a")
-	req, _ := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP")
+	req, _ := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP", "")
 	if _, err := s.Approve(req.ID, "FP", mint.fn); err != nil {
 		t.Fatalf("first Approve: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestApproveCertRotationGuard(t *testing.T) {
 	mint := &stubMint{}
 	s := quickStore(t, time.Second, time.Second, nil)
 	_, hashHex := makePollPair(t, "a")
-	req, _ := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "OLD-FP")
+	req, _ := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "OLD-FP", "")
 
 	snap, err := s.Approve(req.ID, "NEW-FP", mint.fn)
 	if !errors.Is(err, ErrCertRotated) {
@@ -208,7 +208,7 @@ func TestApproveCertRotationGuardFailsClosedOnEmptyCurrent(t *testing.T) {
 	mint := &stubMint{}
 	s := quickStore(t, time.Second, time.Second, nil)
 	_, hashHex := makePollPair(t, "fail-closed")
-	req, _ := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "CAPTURED-FP")
+	req, _ := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "CAPTURED-FP", "")
 
 	snap, err := s.Approve(req.ID, "" /* missing/lookup-failed */, mint.fn)
 	if !errors.Is(err, ErrCertRotated) {
@@ -226,7 +226,7 @@ func TestDeclineTransitionsAndRevokesNothing(t *testing.T) {
 	revoke := &stubRevoke{}
 	s := quickStore(t, time.Second, 50*time.Millisecond, revoke.fn)
 	_, hashHex := makePollPair(t, "a")
-	req, _ := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP")
+	req, _ := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP", "")
 
 	snap, err := s.Decline(req.ID)
 	if err != nil {
@@ -250,7 +250,7 @@ func TestDeclineTransitionsAndRevokesNothing(t *testing.T) {
 func TestPendingExpiresAfterTTL(t *testing.T) {
 	s := quickStore(t, 50*time.Millisecond, 200*time.Millisecond, nil)
 	raw, hashHex := makePollPair(t, "a")
-	req, _ := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP")
+	req, _ := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP", "")
 	time.Sleep(120 * time.Millisecond)
 	res, err := s.Poll(req.ID, raw)
 	if err != nil {
@@ -266,7 +266,7 @@ func TestApprovedUndeliveredRevokesAtTTLPlusGrace(t *testing.T) {
 	mint := &stubMint{}
 	s := quickStore(t, 50*time.Millisecond, 50*time.Millisecond, revoke.fn)
 	_, hashHex := makePollPair(t, "a")
-	req, _ := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP")
+	req, _ := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP", "")
 	if _, err := s.Approve(req.ID, "FP", mint.fn); err != nil {
 		t.Fatalf("Approve: %v", err)
 	}
@@ -294,7 +294,7 @@ func TestDeleteAfterApprovePreventsRevoke(t *testing.T) {
 	mint := &stubMint{}
 	s := quickStore(t, 50*time.Millisecond, 50*time.Millisecond, revoke.fn)
 	raw, hashHex := makePollPair(t, "a")
-	req, _ := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP")
+	req, _ := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP", "")
 	if _, err := s.Approve(req.ID, "FP", mint.fn); err != nil {
 		t.Fatalf("Approve: %v", err)
 	}
@@ -313,7 +313,7 @@ func TestDeleteAfterApprovePreventsRevoke(t *testing.T) {
 func TestDeleteAuthAndIdempotency(t *testing.T) {
 	s := quickStore(t, time.Second, time.Second, nil)
 	raw, hashHex := makePollPair(t, "a")
-	req, _ := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP")
+	req, _ := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP", "")
 
 	if err := s.Delete(req.ID, "wrong"); !errors.Is(err, ErrUnauthorized) {
 		t.Errorf("Delete wrong secret: err = %v, want ErrUnauthorized", err)
@@ -334,12 +334,12 @@ func TestMaxPendingCap(t *testing.T) {
 	t.Cleanup(s.Close)
 	for i := 0; i < 3; i++ {
 		_, hashHex := makePollPair(t, fmt.Sprintf("k%d", i))
-		if _, err := s.CreateRequest("d", "v", hashHex, "1.1.1.1", ""); err != nil {
+		if _, err := s.CreateRequest("d", "v", hashHex, "1.1.1.1", "", ""); err != nil {
 			t.Fatalf("CreateRequest #%d: %v", i, err)
 		}
 	}
 	_, hashHex := makePollPair(t, "overflow")
-	if _, err := s.CreateRequest("d", "v", hashHex, "1.1.1.1", ""); !errors.Is(err, ErrQueueFull) {
+	if _, err := s.CreateRequest("d", "v", hashHex, "1.1.1.1", "", ""); !errors.Is(err, ErrQueueFull) {
 		t.Errorf("4th CreateRequest: err = %v, want ErrQueueFull", err)
 	}
 }
@@ -348,15 +348,15 @@ func TestMaxPendingDoesNotCountTerminal(t *testing.T) {
 	s := NewStore(Options{TTL: time.Minute, Grace: time.Minute, MaxPending: 2})
 	t.Cleanup(s.Close)
 	_, h1 := makePollPair(t, "1")
-	r1, _ := s.CreateRequest("d", "v", h1, "1.1.1.1", "")
+	r1, _ := s.CreateRequest("d", "v", h1, "1.1.1.1", "", "")
 	_, h2 := makePollPair(t, "2")
-	r2, _ := s.CreateRequest("d", "v", h2, "1.1.1.1", "")
+	r2, _ := s.CreateRequest("d", "v", h2, "1.1.1.1", "", "")
 	if _, err := s.Decline(r1.ID); err != nil {
 		t.Fatal(err)
 	}
 	// After Decline of r1, only r2 is Pending — should be able to add another.
 	_, h3 := makePollPair(t, "3")
-	if _, err := s.CreateRequest("d", "v", h3, "1.1.1.1", ""); err != nil {
+	if _, err := s.CreateRequest("d", "v", h3, "1.1.1.1", "", ""); err != nil {
 		t.Errorf("CreateRequest after Decline freed a slot: %v", err)
 	}
 	_ = r2
@@ -383,7 +383,7 @@ func TestConcurrentApproveExpire(t *testing.T) {
 	var approveOK atomic.Int32
 	for i := 0; i < 50; i++ {
 		_, hashHex := makePollPair(t, fmt.Sprintf("c%d", i))
-		req, err := s.CreateRequest("d", "v", hashHex, "1.1.1.1", "FP")
+		req, err := s.CreateRequest("d", "v", hashHex, "1.1.1.1", "FP", "")
 		if err != nil {
 			t.Fatalf("CreateRequest #%d: %v", i, err)
 		}
@@ -415,7 +415,7 @@ func TestCreateRejectsBadHash(t *testing.T) {
 	s := quickStore(t, time.Second, time.Second, nil)
 	cases := []string{"", "notlongenough", "ZZ" + makeHexLen(62)}
 	for _, c := range cases {
-		if _, err := s.CreateRequest("d", "v", c, "1.1.1.1", ""); !errors.Is(err, ErrBadHash) {
+		if _, err := s.CreateRequest("d", "v", c, "1.1.1.1", "", ""); !errors.Is(err, ErrBadHash) {
 			t.Errorf("hash %q: err = %v, want ErrBadHash", c, err)
 		}
 	}
@@ -478,7 +478,7 @@ func TestApproveRefusesPastWallClockTTL(t *testing.T) {
 	t.Cleanup(s.Close)
 
 	_, hashHex := makePollPair(t, "wall")
-	req, err := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP")
+	req, err := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -510,7 +510,7 @@ func TestDeclineRefusesPastWallClockTTL(t *testing.T) {
 	})
 	t.Cleanup(s.Close)
 	_, hashHex := makePollPair(t, "wall-decline")
-	req, _ := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP")
+	req, _ := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP", "")
 	now = now.Add(100 * time.Millisecond)
 	snap, err := s.Decline(req.ID)
 	if !errors.Is(err, ErrAlreadyDecided) {
@@ -537,7 +537,7 @@ func TestStaleTimerCallbackIsNoOp(t *testing.T) {
 	mint := &stubMint{}
 	s := quickStore(t, time.Hour, time.Hour, revoke.fn)
 	_, hashHex := makePollPair(t, "stale")
-	req, err := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP")
+	req, err := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -569,7 +569,7 @@ func TestStaleTimerCallbackIsNoOp(t *testing.T) {
 func TestSnapshotHasNoLiveTimer(t *testing.T) {
 	s := quickStore(t, time.Second, time.Second, nil)
 	_, hashHex := makePollPair(t, "a")
-	req, _ := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP")
+	req, _ := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP", "")
 	if req.expiryTimer != nil {
 		t.Error("snapshot leaks live expiryTimer pointer")
 	}
@@ -584,7 +584,7 @@ func TestSnapshotRedactsSecretMaterial(t *testing.T) {
 	mint := &stubMint{}
 	s := quickStore(t, time.Second, time.Second, nil)
 	raw, hashHex := makePollPair(t, "redact")
-	req, err := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP")
+	req, err := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -656,7 +656,7 @@ func TestRevokeRetryOnFailure(t *testing.T) {
 	})
 	t.Cleanup(s.Close)
 	_, hashHex := makePollPair(t, "retry")
-	req, _ := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP")
+	req, _ := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP", "")
 	if _, err := s.Approve(req.ID, "FP", mint.fn); err != nil {
 		t.Fatal(err)
 	}
@@ -692,7 +692,7 @@ func TestRevokeRetryGivesUpAfterMaxAttempts(t *testing.T) {
 	})
 	t.Cleanup(s.Close)
 	_, hashHex := makePollPair(t, "giveup")
-	req, _ := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP")
+	req, _ := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP", "")
 	if _, err := s.Approve(req.ID, "FP", mint.fn); err != nil {
 		t.Fatal(err)
 	}
@@ -757,7 +757,7 @@ func TestApproveFiresOnStateChange(t *testing.T) {
 	s.SetOnStateChange(rec.fn)
 
 	_, hashHex := makePollPair(t, "approve-event")
-	req, err := s.CreateRequest("Phone", "1.4", hashHex, "10.0.0.1", "AB:CD")
+	req, err := s.CreateRequest("Phone", "1.4", hashHex, "10.0.0.1", "AB:CD", "")
 	if err != nil {
 		t.Fatalf("CreateRequest: %v", err)
 	}
@@ -792,7 +792,7 @@ func TestDeclineFiresOnStateChange(t *testing.T) {
 	s.SetOnStateChange(rec.fn)
 
 	_, hashHex := makePollPair(t, "decline-event")
-	req, _ := s.CreateRequest("Phone", "1.4", hashHex, "10.0.0.1", "AB:CD")
+	req, _ := s.CreateRequest("Phone", "1.4", hashHex, "10.0.0.1", "AB:CD", "")
 	if _, err := s.Decline(req.ID); err != nil {
 		t.Fatalf("Decline: %v", err)
 	}
@@ -812,7 +812,7 @@ func TestPendingExpiresFiresOnStateChange(t *testing.T) {
 	s.SetOnStateChange(rec.fn)
 
 	_, hashHex := makePollPair(t, "expire-event")
-	_, _ = s.CreateRequest("Phone", "1.4", hashHex, "10.0.0.1", "AB:CD")
+	_, _ = s.CreateRequest("Phone", "1.4", hashHex, "10.0.0.1", "AB:CD", "")
 
 	// Wait for the TTL timer to fire + onStateChange to be invoked.
 	deadline := time.Now().Add(2 * time.Second)
@@ -840,7 +840,7 @@ func TestNilOnStateChangeIsNoOp(t *testing.T) {
 	// Deliberately do NOT call SetOnStateChange.
 
 	_, hashHex := makePollPair(t, "nil-callback")
-	req, _ := s.CreateRequest("Phone", "1.4", hashHex, "10.0.0.1", "AB:CD")
+	req, _ := s.CreateRequest("Phone", "1.4", hashHex, "10.0.0.1", "AB:CD", "")
 	if _, err := s.Approve(req.ID, "AB:CD", mint.fn); err != nil {
 		t.Fatalf("Approve: %v", err)
 	}
@@ -873,11 +873,26 @@ func TestSetOnStateChangeIsRaceSafe(t *testing.T) {
 	// Drive a sequence of Approves to exercise the fire path.
 	for i := 0; i < 8; i++ {
 		_, hashHex := makePollPair(t, "race-"+strconv.Itoa(i))
-		req, _ := s.CreateRequest("Phone", "1.4", hashHex, "10.0.0.1", "AB:CD")
+		req, _ := s.CreateRequest("Phone", "1.4", hashHex, "10.0.0.1", "AB:CD", "")
 		_, _ = s.Approve(req.ID, "AB:CD", mint.fn)
 	}
 
 	close(stop)
 	wg.Wait()
 	// No-panic + no race-detector flag = pass.
+}
+
+// TestCreateRequestStoresDeviceToken verifies the durable recovery token
+// supplied in the join request is preserved on the snapshot the admin
+// approve path reads (it is NOT one of the snapshot-redacted fields).
+func TestCreateRequestStoresDeviceToken(t *testing.T) {
+	s := quickStore(t, 1*time.Second, 1*time.Second, nil)
+	_, hashHex := makePollPair(t, "dt")
+	snap, err := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "AB:CD", "9f3ce1")
+	if err != nil {
+		t.Fatalf("CreateRequest: %v", err)
+	}
+	if snap.DeviceToken != "9f3ce1" {
+		t.Errorf("DeviceToken = %q, want 9f3ce1", snap.DeviceToken)
+	}
 }

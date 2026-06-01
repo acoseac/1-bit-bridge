@@ -149,6 +149,16 @@ func (s *Server) apiPairingApprove(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "approve_failed", err.Error())
 		return
 	}
+	// Bind the device's durable recovery token to the freshly minted auth
+	// token, capturing the real device name now (the header path can only
+	// supply an empty name on regular requests). Best-effort: a write
+	// failure is logged, not fatal — the binding self-heals on the
+	// device's first authed request via the X-Device-Token header path.
+	if snap.DeviceToken != "" && s.deps.Manifest != nil {
+		if err := s.deps.Manifest.UpsertDeviceRegistration(r.Context(), snap.DeviceToken, snap.TokenID, snap.DeviceName); err != nil {
+			logger.Warn("device registration bind on approve failed", "err", err)
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":      snap.ID,
 		"tokenId": snap.TokenID,

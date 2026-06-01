@@ -170,12 +170,25 @@ type Request struct {
 	CertFingerprint string
 	// SourceIP is the request's RemoteAddr host. Display-only — the
 	// admin UI shows it so the operator can spot LAN spam patterns.
-	SourceIP  string
-	State     State
-	TokenID   string // populated on Approve; tied to auth.Store.Mint return
-	RawToken  string // populated on Approve; returned on every authorized poll until DELETE
-	CreatedAt time.Time
-	DecidedAt time.Time
+	SourceIP string
+	// DeviceToken is the iOS client's durable, device-local recovery
+	// token (the Keychain identity that survives app reinstall). Optional
+	// — empty for pre-feature clients. Carried through so the admin
+	// approve path can bind/refresh the device_registrations row (with a
+	// real device name) the instant a pairing is approved, rather than
+	// waiting for the first authed request's X-Device-Token header.
+	//
+	// SECRET: this is the client's own recovery token. It is preserved by
+	// snapshot() (the admin approve handler needs it to rebind) but MUST
+	// NOT be serialized into any wire DTO — the pairing poll / SSE event
+	// (PairingStateEvent) and the admin pending-pairing row deliberately
+	// omit it.
+	DeviceToken string
+	State       State
+	TokenID     string // populated on Approve; tied to auth.Store.Mint return
+	RawToken    string // populated on Approve; returned on every authorized poll until DELETE
+	CreatedAt   time.Time
+	DecidedAt   time.Time
 
 	// expiryTimer is the per-request deadline. Reused across transitions:
 	// Pending → fires at TTL → Expired; Approved → fires at TTL+grace
@@ -338,7 +351,7 @@ type MintFunc func(name string) (rawToken, tokenID string, err error)
 // CreateRequest stores a new Pending request and returns its snapshot
 // (verification code + ID for the iOS POST response). Called from the
 // /v1/pairing/requests handler.
-func (s *Store) CreateRequest(deviceName, clientVersion, pollSecretHashHex, sourceIP, certFingerprint string) (Request, error) {
+func (s *Store) CreateRequest(deviceName, clientVersion, pollSecretHashHex, sourceIP, certFingerprint, deviceToken string) (Request, error) {
 	if deviceName == "" {
 		return Request{}, errors.New("pairing: deviceName must not be empty")
 	}
@@ -400,6 +413,7 @@ func (s *Store) CreateRequest(deviceName, clientVersion, pollSecretHashHex, sour
 		PollHash:         pollHash,
 		CertFingerprint:  certFingerprint,
 		SourceIP:         sourceIP,
+		DeviceToken:      deviceToken,
 		State:            StatePending,
 		CreatedAt:        now,
 	}
