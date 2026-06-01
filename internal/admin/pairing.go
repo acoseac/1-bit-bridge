@@ -148,14 +148,36 @@ func ensurePrimaryFirst(primary string, alternates []string) []string {
 }
 
 // defaultBridgeURL is the best-guess URL the admin UI pre-fills in the
-// pairing modal — `https://<hostname>.local:<port>`. Users on networks
-// where mDNS is flaky can override in the modal input to use a LAN IP
-// literal. Falls back to "localhost" if os.Hostname errors, which still
-// works for same-machine simulator pairing.
-func defaultBridgeURL(listenAddress string) string {
-	_, port, err := net.SplitHostPort(listenAddress)
+// pairing modal.
+//
+// **Public mode**: the device dials the public endpoint from off-network,
+// so a `<hostname>.local` mDNS default is useless (it only resolves on
+// the bridge's own LAN). Prefer the operator's configured autocert domain,
+// then the first customEndpoint. Synthesize the autocert URL without
+// `:443` when the listen port is the https default — mirrors the shape
+// `pairAlternates` builds so downstream dedupe collapses near-duplicates.
+//
+// **Loopback / LAN mode** (historical): `https://<hostname>.local:<port>`.
+// Users on networks where mDNS is flaky override in the modal input.
+// Falls back to "localhost" if os.Hostname errors, which still works for
+// same-machine simulator pairing.
+func defaultBridgeURL(cfg *config.Config) string {
+	_, port, err := net.SplitHostPort(cfg.ListenAddress)
 	if err != nil || port == "" {
 		port = "7788"
+	}
+	if cfg.IsPublic() {
+		if d := strings.TrimSpace(cfg.Autocert.Domain); d != "" {
+			if port == "443" {
+				return "https://" + d
+			}
+			return "https://" + d + ":" + port
+		}
+		for _, e := range cfg.CustomEndpoints {
+			if e = strings.TrimSpace(e); e != "" {
+				return e
+			}
+		}
 	}
 	host, err := os.Hostname()
 	if err != nil || host == "" {
@@ -166,6 +188,42 @@ func defaultBridgeURL(listenAddress string) string {
 	// on `.local` would be wrong for non-mDNS networks, so only append
 	// if the hostname doesn't already contain a dot.
 	return fmt.Sprintf("https://%s:%s", ensureMDNSHost(host), port)
+}
+
+// pairFingerprint resolves the cert fingerprint to bake into the pairing
+// QR for a given dial URL. The QR MUST carry the fingerprint the device
+// will actually capture when it dials bridgeURL: in public mode a device
+// connecting to the public domain receives the autocert LE cert, whose
+// fingerprint differs from the self-signed LAN pin — baking the
+// self-signed value makes the iOS first-contact MITM check reject the
+// pairing ("TLS fingerprint doesn't match the pairing link"). `resolve`
+// (certManager.FingerprintForServerName) answers using the same SNI cert
+// switcher the listener serves with, so the QR can't drift from reality.
+// Falls back to the self-signed fingerprint when the resolver is absent
+// (loopback wiring / tests) or returns "" for the host.
+func pairFingerprint(bridgeURL, selfSigned string, resolve func(string) string) string {
+	if resolve == nil {
+		return selfSigned
+	}
+	host := pairURLHost(bridgeURL)
+	if host == "" {
+		return selfSigned
+	}
+	if fp := resolve(host); fp != "" {
+		return fp
+	}
+	return selfSigned
+}
+
+// pairURLHost extracts the bare hostname (no port) from a dial URL, for
+// use as the SNI key into the fingerprint resolver. Returns "" on a URL
+// that doesn't parse or carries no host.
+func pairURLHost(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil || u == nil {
+		return ""
+	}
+	return u.Hostname()
 }
 
 func ensureMDNSHost(host string) string {

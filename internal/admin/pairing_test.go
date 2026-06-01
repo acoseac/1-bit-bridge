@@ -225,3 +225,122 @@ func TestEnsurePrimaryFirstEmptyInputYieldsPrimaryOnly(t *testing.T) {
 		t.Errorf("ensurePrimaryFirst on nil input = %v, want [%q]", got, primary)
 	}
 }
+
+// --- defaultBridgeURL: public mode prefers the public endpoint ---
+
+func TestDefaultBridgeURLPublicModePrefersAutocertDomain(t *testing.T) {
+	// THE fix (half 1): a public-mode bridge must pre-fill the dial URL
+	// with the public domain the device can reach off-network, NOT a
+	// `<hostname>.local` mDNS name that only resolves on the bridge's LAN.
+	cfg := &config.Config{
+		ListenAddress: "0.0.0.0:443",
+		Deployment:    config.DeploymentConfig{Mode: "public"},
+		Autocert:      config.AutocertConfig{Domain: "bridge.ars.md"},
+	}
+	got := defaultBridgeURL(cfg)
+	if got != "https://bridge.ars.md" {
+		t.Errorf("public-mode default URL = %q, want https://bridge.ars.md (no :443)", got)
+	}
+}
+
+func TestDefaultBridgeURLPublicModeKeepsNonDefaultPort(t *testing.T) {
+	cfg := &config.Config{
+		ListenAddress: "0.0.0.0:8443",
+		Deployment:    config.DeploymentConfig{Mode: "public"},
+		Autocert:      config.AutocertConfig{Domain: "bridge.ars.md"},
+	}
+	if got := defaultBridgeURL(cfg); got != "https://bridge.ars.md:8443" {
+		t.Errorf("public-mode default URL = %q, want https://bridge.ars.md:8443", got)
+	}
+}
+
+func TestDefaultBridgeURLPublicModeFallsBackToCustomEndpoint(t *testing.T) {
+	// No autocert domain (TLS-terminated by a reverse proxy) → use the
+	// first declared customEndpoint rather than .local.
+	cfg := &config.Config{
+		ListenAddress:   "0.0.0.0:443",
+		Deployment:      config.DeploymentConfig{Mode: "public", AdminTLSTerminatedByProxy: true},
+		CustomEndpoints: []string{"https://bridge.ars.md", "https://alt.example"},
+	}
+	if got := defaultBridgeURL(cfg); got != "https://bridge.ars.md" {
+		t.Errorf("public-mode default URL = %q, want first customEndpoint https://bridge.ars.md", got)
+	}
+}
+
+func TestDefaultBridgeURLLoopbackUsesMDNS(t *testing.T) {
+	// Loopback mode keeps the historical `https://<host>.local:<port>`
+	// shape (exact host depends on os.Hostname, so assert the envelope).
+	cfg := &config.Config{ListenAddress: "0.0.0.0:7788"}
+	got := defaultBridgeURL(cfg)
+	if !strings.HasPrefix(got, "https://") || !strings.HasSuffix(got, ":7788") {
+		t.Errorf("loopback default URL = %q, want https://<host>:7788", got)
+	}
+	if strings.Contains(got, "bridge.ars.md") {
+		t.Errorf("loopback default URL leaked a public domain: %q", got)
+	}
+}
+
+// --- pairFingerprint: bake the cert the device will actually see ---
+
+func TestPairFingerprintUsesResolverForPublicHost(t *testing.T) {
+	// THE fix (half 2): the QR must carry the fingerprint the device
+	// captures when it dials the URL — here the resolver's value, not
+	// the self-signed fallback.
+	resolve := func(host string) string {
+		if host == "bridge.ars.md" {
+			return "7E:E2:40:LE"
+		}
+		return ""
+	}
+	got := pairFingerprint("https://bridge.ars.md", "34:7E:SELF", resolve)
+	if got != "7E:E2:40:LE" {
+		t.Errorf("pairFingerprint = %q, want resolver value 7E:E2:40:LE", got)
+	}
+}
+
+func TestPairFingerprintStripsPortBeforeResolving(t *testing.T) {
+	resolve := func(host string) string {
+		if host == "bridge.ars.md" {
+			return "LE"
+		}
+		return "WRONG-" + host
+	}
+	if got := pairFingerprint("https://bridge.ars.md:8443", "SELF", resolve); got != "LE" {
+		t.Errorf("pairFingerprint with port = %q, want LE (port stripped before resolve)", got)
+	}
+}
+
+func TestPairFingerprintFallsBackWhenResolverNil(t *testing.T) {
+	if got := pairFingerprint("https://bridge.ars.md", "SELF", nil); got != "SELF" {
+		t.Errorf("pairFingerprint with nil resolver = %q, want self-signed SELF", got)
+	}
+}
+
+func TestPairFingerprintFallsBackWhenResolverEmpty(t *testing.T) {
+	resolve := func(string) string { return "" }
+	if got := pairFingerprint("https://bridge.ars.md", "SELF", resolve); got != "SELF" {
+		t.Errorf("pairFingerprint with empty resolve = %q, want self-signed SELF", got)
+	}
+}
+
+func TestPairFingerprintFallsBackWhenURLHasNoHost(t *testing.T) {
+	resolve := func(string) string { return "SHOULD-NOT-BE-USED" }
+	if got := pairFingerprint("::not a url::", "SELF", resolve); got != "SELF" {
+		t.Errorf("pairFingerprint on hostless URL = %q, want self-signed SELF", got)
+	}
+}
+
+func TestPairURLHost(t *testing.T) {
+	cases := map[string]string{
+		"https://bridge.ars.md":        "bridge.ars.md",
+		"https://bridge.ars.md:8443":   "bridge.ars.md",
+		"https://1bitbridge.local:443": "1bitbridge.local",
+		"https://192.168.0.14:7788":    "192.168.0.14",
+		"":                             "",
+	}
+	for in, want := range cases {
+		if got := pairURLHost(in); got != want {
+			t.Errorf("pairURLHost(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
