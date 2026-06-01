@@ -15,6 +15,12 @@ import (
 	qrcode "github.com/skip2/go-qrcode"
 )
 
+// httpsScheme is the URL scheme prefix every bridge dial URL carries.
+// Factored out so the public-mode endpoint synthesis (pairAlternates,
+// defaultBridgeURL) and the scheme-less-host fallback (pairURLHost)
+// share one literal.
+const httpsScheme = "https://"
+
 // buildPairURL composes the bridge://pair?... URL that the iOS app
 // consumes via its onOpenURL handler. Shape is deliberately flat and
 // additive so the iOS side can tolerate future fields by ignoring them.
@@ -92,7 +98,7 @@ func pairAlternates(primary string, cfg *config.Config) []string {
 			}
 		}
 		if d := strings.TrimSpace(cfg.Autocert.Domain); d != "" {
-			u := "https://" + d
+			u := httpsScheme + d
 			if portStr != "443" {
 				u += ":" + portStr
 			}
@@ -169,9 +175,9 @@ func defaultBridgeURL(cfg *config.Config) string {
 	if cfg.IsPublic() {
 		if d := strings.TrimSpace(cfg.Autocert.Domain); d != "" {
 			if port == "443" {
-				return "https://" + d
+				return httpsScheme + d
 			}
-			return "https://" + d + ":" + port
+			return httpsScheme + d + ":" + port
 		}
 		for _, e := range cfg.CustomEndpoints {
 			if e = strings.TrimSpace(e); e != "" {
@@ -219,6 +225,17 @@ func pairFingerprint(bridgeURL, selfSigned string, resolve func(string) string) 
 // use as the SNI key into the fingerprint resolver. Returns "" on a URL
 // that doesn't parse or carries no host.
 func pairURLHost(rawURL string) string {
+	if rawURL == "" {
+		return ""
+	}
+	// Operators may type a scheme-less host:port (e.g. "bridge.ars.md:8443")
+	// in the admin dial-URL field. url.Parse would read the host as the
+	// scheme and return an empty Hostname(), silently falling the
+	// fingerprint resolver back to self-signed — reintroducing the exact
+	// mismatch this fix closes. Prepend the scheme when none is present.
+	if !strings.Contains(rawURL, "://") {
+		rawURL = httpsScheme + rawURL
+	}
 	u, err := url.Parse(rawURL)
 	if err != nil || u == nil {
 		return ""

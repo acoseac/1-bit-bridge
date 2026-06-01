@@ -336,7 +336,13 @@ func TestPairURLHost(t *testing.T) {
 		"https://bridge.ars.md:8443":   "bridge.ars.md",
 		"https://1bitbridge.local:443": "1bitbridge.local",
 		"https://192.168.0.14:7788":    "192.168.0.14",
-		"":                             "",
+		// Scheme-less operator input (admin dial-URL field) must still
+		// resolve a host so the fingerprint doesn't fall back to
+		// self-signed. (Gemini MEDIUM on PR #338.)
+		"bridge.ars.md":      "bridge.ars.md",
+		"bridge.ars.md:8443": "bridge.ars.md",
+		"192.168.0.14:7788":  "192.168.0.14",
+		"":                   "",
 	}
 	for in, want := range cases {
 		if got := pairURLHost(in); got != want {
