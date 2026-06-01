@@ -92,6 +92,11 @@ func (s *Server) historyBatch(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		path := strings.ReplaceAll(strings.TrimSpace(e.Path), `\`, "/")
+		// Strip a leading slash: iOS normalizes bridge-source paths with a
+		// leading "/", but the scanner stores track paths without one, so
+		// the verbatim form wouldn't join against the tracks table for the
+		// admin top-tracks aggregation (Gemini HIGH on PR #336).
+		path = strings.TrimPrefix(path, "/")
 		// Drop (don't fault) malformed events.
 		if path == "" || e.StartedAt <= 0 ||
 			math.IsNaN(e.DurationUsed) || math.IsInf(e.DurationUsed, 0) || e.DurationUsed < 0 {

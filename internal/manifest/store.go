@@ -704,7 +704,10 @@ var migrations = []migration{
 			is_dop         INTEGER NOT NULL DEFAULT 0,
 			received_at    INTEGER NOT NULL
 		);
-		CREATE INDEX IF NOT EXISTS idx_history_device_started ON playback_history(device_token, started_at DESC);
+		-- Index matches ListHistory's WHERE device_token = ? ORDER BY id DESC
+		-- cursor paging (id is monotonic with insert order); a started_at
+		-- index would force a filesort there (Gemini on PR #336).
+		CREATE INDEX IF NOT EXISTS idx_history_device_id ON playback_history(device_token, id DESC);
 		CREATE INDEX IF NOT EXISTS idx_history_path ON playback_history(path);
 		`,
 	},
