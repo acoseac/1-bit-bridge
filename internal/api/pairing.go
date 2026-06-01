@@ -112,13 +112,23 @@ func (s *Server) pairingRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate the optional device token at the boundary, reusing the same
+	// lowercase-hex/length rule the authed X-Device-Token path enforces. A
+	// malformed value can't match a later authed request, so it would only
+	// store an orphan registration on approve — drop it to "" (the binding
+	// then forms cleanly on the device's first authed request) rather than
+	// failing the whole pairing over an optional field. (Gemini on PR #334.)
+	deviceToken := req.DeviceToken
+	if deviceToken != "" && !validDeviceToken(deviceToken) {
+		deviceToken = ""
+	}
 	out, err := s.pairing.CreateRequest(
 		req.DeviceName,
 		req.ClientVersion,
 		req.PollSecretHash,
 		ip,
 		s.fingerprint,
-		req.DeviceToken,
+		deviceToken,
 	)
 	switch {
 	case errors.Is(err, pairing.ErrBadHash):

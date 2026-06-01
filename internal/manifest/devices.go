@@ -49,6 +49,11 @@ func (s *Store) UpsertDeviceRegistration(ctx context.Context, deviceToken, token
 	if deviceToken == "" {
 		return errors.New("manifest: UpsertDeviceRegistration requires a non-empty device token")
 	}
+	// token_id is TEXT NOT NULL but SQLite accepts "" for NOT NULL columns;
+	// a registration must always bind to a real auth token (Gemini on PR #334).
+	if tokenID == "" {
+		return errors.New("manifest: UpsertDeviceRegistration requires a non-empty token id")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now().UnixNano()

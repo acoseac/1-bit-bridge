@@ -428,18 +428,25 @@ func (s *Server) touchDevice(ctx context.Context, deviceToken, tokenID string) {
 	s.deviceSeenMu.Lock()
 	prev, ok := s.deviceSeen[deviceToken]
 	fresh := ok && prev.tokenID == tokenID && now.Sub(prev.at) < deviceRegistrarTTL
-	if !fresh {
-		s.deviceSeen[deviceToken] = deviceSeenEntry{tokenID: tokenID, at: now}
-	}
 	s.deviceSeenMu.Unlock()
 	if fresh {
 		return
 	}
 	// name="" on the header path — UpsertDeviceRegistration preserves any
 	// name the pairing-approval path already captured.
+	//
+	// Record the debounce entry ONLY after a successful upsert. Stamping it
+	// before the write would let a transient failure (SQLite lock, ctx
+	// cancel on client disconnect) suppress the retry for the full TTL —
+	// the binding would then only self-heal after deviceRegistrarTTL rather
+	// than on the next request (Gemini HIGH + CodeRabbit Major on PR #334).
 	if err := s.deviceRegistrar.UpsertDeviceRegistration(ctx, deviceToken, tokenID, ""); err != nil {
 		httpLogger.Warn("device registration upsert failed", "err", err)
+		return
 	}
+	s.deviceSeenMu.Lock()
+	s.deviceSeen[deviceToken] = deviceSeenEntry{tokenID: tokenID, at: now}
+	s.deviceSeenMu.Unlock()
 }
 
 // WithUpscale wires the v1.2 PCM-upscaling feature into the

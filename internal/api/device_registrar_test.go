@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 
@@ -12,12 +13,17 @@ import (
 type fakeRegistrar struct {
 	mu    sync.Mutex
 	calls [][3]string // {deviceToken, tokenID, name}
+	failN int         // fail the next N calls (transient-error simulation)
 }
 
 func (f *fakeRegistrar) UpsertDeviceRegistration(_ context.Context, deviceToken, tokenID, name string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, [3]string{deviceToken, tokenID, name})
+	if f.failN > 0 {
+		f.failN--
+		return errors.New("transient")
+	}
 	return nil
 }
 
@@ -84,5 +90,26 @@ func TestTouchDeviceDebounce(t *testing.T) {
 		if c[2] != "" {
 			t.Errorf("header-path upsert sent non-empty name %q", c[2])
 		}
+	}
+}
+
+// TestTouchDeviceRetriesAfterTransientFailure pins the debounce-on-success
+// contract: a failed upsert must NOT be cached, so the very next request
+// retries (rather than waiting out the 5-minute TTL).
+func TestTouchDeviceRetriesAfterTransientFailure(t *testing.T) {
+	fr := &fakeRegistrar{failN: 1} // first call fails, second succeeds
+	cfg := &config.Config{LibraryRoots: []string{t.TempDir()}, ListenAddress: ":7788", LibraryName: "T"}
+	s := New(cfg, nil, nil, "fp").WithDeviceRegistrar(fr)
+	ctx := context.Background()
+
+	s.touchDevice(ctx, "dev1", "tok-a") // fails — must not cache
+	s.touchDevice(ctx, "dev1", "tok-a") // retries immediately
+	if got := fr.count(); got != 2 {
+		t.Fatalf("after transient failure want 2 upserts (retry), got %d", got)
+	}
+	// Third call (now cached after success) is debounced.
+	s.touchDevice(ctx, "dev1", "tok-a")
+	if got := fr.count(); got != 2 {
+		t.Fatalf("after success want debounce (still 2), got %d", got)
 	}
 }
