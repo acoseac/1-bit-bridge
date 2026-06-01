@@ -145,7 +145,7 @@ type Server struct {
 	deviceRegistrar DeviceRegistrar
 	deviceSeenMu    sync.Mutex
 	deviceSeen      map[string]deviceSeenEntry
-	deviceInflight  map[string]struct{} // device tokens with an upsert in flight (stampede guard)
+	deviceInflight  map[deviceInflightKey]struct{} // (device,token) upserts in flight (stampede guard)
 
 	// tailscaleStatus is the embedded-tsnet status provider used by
 	// `reachableEndpoints` to advertise the bridge's `*.ts.net` URL +
@@ -385,6 +385,15 @@ type deviceSeenEntry struct {
 	at      time.Time
 }
 
+// deviceInflightKey scopes the stampede guard to (deviceToken, tokenID), NOT
+// deviceToken alone: a concurrent rebind — (dev, tokA) in flight, then
+// (dev, tokB) — must still write tokB immediately rather than skip and defer
+// the bind change to a later request (CodeRabbit Major, round 3 on PR #334).
+type deviceInflightKey struct {
+	deviceToken string
+	tokenID     string
+}
+
 // deviceRegistrarTTL bounds how often the authed path re-touches the
 // device_registrations row for an unchanged (device,token) pair. A bind
 // change (re-pairing → new auth token for the same device token) always
@@ -401,7 +410,7 @@ const maxDeviceTokenLen = 128
 func (s *Server) WithDeviceRegistrar(r DeviceRegistrar) *Server {
 	s.deviceRegistrar = r
 	s.deviceSeen = make(map[string]deviceSeenEntry)
-	s.deviceInflight = make(map[string]struct{})
+	s.deviceInflight = make(map[deviceInflightKey]struct{})
 	return s
 }
 
@@ -427,6 +436,7 @@ func validDeviceToken(t string) bool {
 // surfaced to the request (the binding self-heals on the next request).
 func (s *Server) touchDevice(ctx context.Context, deviceToken, tokenID string) {
 	now := time.Now()
+	key := deviceInflightKey{deviceToken: deviceToken, tokenID: tokenID}
 	s.deviceSeenMu.Lock()
 	prev, ok := s.deviceSeen[deviceToken]
 	fresh := ok && prev.tokenID == tokenID && now.Sub(prev.at) < deviceRegistrarTTL
@@ -434,17 +444,19 @@ func (s *Server) touchDevice(ctx context.Context, deviceToken, tokenID string) {
 		s.deviceSeenMu.Unlock()
 		return
 	}
-	// Reserve the key while an upsert is in flight. Without this, a cold-start
-	// burst of concurrent requests from the same device would all see
-	// fresh==false and each fire a (redundant, idempotent) upsert, defeating
-	// the debounce exactly when the device first connects (CodeRabbit Major,
-	// round 2 on PR #334). A different goroutine already writing → skip; the
-	// binding it commits covers us.
-	if _, inflight := s.deviceInflight[deviceToken]; inflight {
+	// Reserve the (device,token) key while an upsert is in flight. Without
+	// this, a cold-start burst of concurrent same-(device,token) requests
+	// would all see fresh==false and each fire a (redundant, idempotent)
+	// upsert, defeating the debounce exactly when the device first connects
+	// (CodeRabbit Major, round 2). Scoping the key to (device,token) — not
+	// device alone — keeps a concurrent rebind (dev,tokB while dev,tokA is in
+	// flight) from being skipped, so a bind change still persists immediately
+	// (CodeRabbit Major, round 3).
+	if _, inflight := s.deviceInflight[key]; inflight {
 		s.deviceSeenMu.Unlock()
 		return
 	}
-	s.deviceInflight[deviceToken] = struct{}{}
+	s.deviceInflight[key] = struct{}{}
 	s.deviceSeenMu.Unlock()
 
 	// name="" on the header path — UpsertDeviceRegistration preserves any
@@ -452,7 +464,7 @@ func (s *Server) touchDevice(ctx context.Context, deviceToken, tokenID string) {
 	err := s.deviceRegistrar.UpsertDeviceRegistration(ctx, deviceToken, tokenID, "")
 
 	s.deviceSeenMu.Lock()
-	delete(s.deviceInflight, deviceToken)
+	delete(s.deviceInflight, key)
 	if err == nil {
 		// Record the debounce entry ONLY after a successful upsert. On
 		// failure leave deviceSeen untouched so the next request retries

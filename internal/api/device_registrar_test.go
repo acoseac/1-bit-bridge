@@ -12,14 +12,14 @@ import (
 // fakeRegistrar records UpsertDeviceRegistration calls for assertions.
 type fakeRegistrar struct {
 	mu    sync.Mutex
-	calls [][3]string // {deviceToken, tokenID, name}
-	failN int         // fail the next N calls (transient-error simulation)
-	hook  func()      // invoked at the top of each call (concurrency tests)
+	calls [][3]string                       // {deviceToken, tokenID, name}
+	failN int                               // fail the next N calls (transient-error simulation)
+	hook  func(deviceToken, tokenID string) // invoked at the top of each call (concurrency tests)
 }
 
 func (f *fakeRegistrar) UpsertDeviceRegistration(_ context.Context, deviceToken, tokenID, name string) error {
 	if f.hook != nil {
-		f.hook()
+		f.hook(deviceToken, tokenID)
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -125,7 +125,7 @@ func TestTouchDeviceConcurrentStampedeGuard(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	var once sync.Once
-	fr := &fakeRegistrar{hook: func() {
+	fr := &fakeRegistrar{hook: func(_, _ string) {
 		// Only the first (reserving) call reaches the registrar; signal it
 		// has entered the upsert, then block until the test releases it.
 		once.Do(func() { close(started) })
@@ -144,5 +144,35 @@ func TestTouchDeviceConcurrentStampedeGuard(t *testing.T) {
 
 	if got := fr.count(); got != 1 {
 		t.Fatalf("stampede guard: want exactly 1 upsert, got %d", got)
+	}
+}
+
+// TestTouchDeviceConcurrentRebindNotSkipped pins that a concurrent rebind
+// (same device, NEW token) is NOT swallowed by the in-flight guard while the
+// old token's upsert is in flight — the bind change must still persist.
+func TestTouchDeviceConcurrentRebindNotSkipped(t *testing.T) {
+	startedA := make(chan struct{})
+	releaseA := make(chan struct{})
+	var onceA sync.Once
+	fr := &fakeRegistrar{hook: func(_, tokenID string) {
+		// Block only the first token's call; the rebind token passes through.
+		if tokenID == "tok-a" {
+			onceA.Do(func() { close(startedA) })
+			<-releaseA
+		}
+	}}
+	cfg := &config.Config{LibraryRoots: []string{t.TempDir()}, ListenAddress: ":7788", LibraryName: "T"}
+	s := New(cfg, nil, nil, "fp").WithDeviceRegistrar(fr)
+	ctx := context.Background()
+
+	done := make(chan struct{})
+	go func() { s.touchDevice(ctx, "dev1", "tok-a"); close(done) }() // (dev1,tok-a) reserved + blocked
+	<-startedA
+	s.touchDevice(ctx, "dev1", "tok-b") // different key → must proceed, not skip
+	close(releaseA)
+	<-done
+
+	if got := fr.count(); got != 2 {
+		t.Fatalf("concurrent rebind: want 2 upserts (both tokens), got %d", got)
 	}
 }
