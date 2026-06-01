@@ -217,6 +217,9 @@ func (s *Server) routeRegistry() []route {
 		{pattern: "PUT /v1/playlists/{id}", kind: boundedRoute, handler: s.authed(s.putPlaylist)},
 		{pattern: "DELETE /v1/playlists/{id}", kind: boundedRoute, handler: s.authed(s.deletePlaylist)},
 
+		// Playback telemetry — bulk insert from the iOS offline queue.
+		{pattern: "POST /v1/history/batch", kind: boundedRoute, handler: s.authed(s.historyBatch)},
+
 		// SSE — long-lived per-connection write stream; MUST opt
 		// out of the per-route write deadline.
 		{pattern: "GET /v1/events", kind: streamingRoute, handler: s.authed(s.events)},
