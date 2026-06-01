@@ -145,6 +145,7 @@ type Server struct {
 	deviceRegistrar DeviceRegistrar
 	deviceSeenMu    sync.Mutex
 	deviceSeen      map[string]deviceSeenEntry
+	deviceInflight  map[string]struct{} // device tokens with an upsert in flight (stampede guard)
 
 	// tailscaleStatus is the embedded-tsnet status provider used by
 	// `reachableEndpoints` to advertise the bridge's `*.ts.net` URL +
@@ -400,6 +401,7 @@ const maxDeviceTokenLen = 128
 func (s *Server) WithDeviceRegistrar(r DeviceRegistrar) *Server {
 	s.deviceRegistrar = r
 	s.deviceSeen = make(map[string]deviceSeenEntry)
+	s.deviceInflight = make(map[string]struct{})
 	return s
 }
 
@@ -428,25 +430,40 @@ func (s *Server) touchDevice(ctx context.Context, deviceToken, tokenID string) {
 	s.deviceSeenMu.Lock()
 	prev, ok := s.deviceSeen[deviceToken]
 	fresh := ok && prev.tokenID == tokenID && now.Sub(prev.at) < deviceRegistrarTTL
-	s.deviceSeenMu.Unlock()
 	if fresh {
+		s.deviceSeenMu.Unlock()
 		return
 	}
+	// Reserve the key while an upsert is in flight. Without this, a cold-start
+	// burst of concurrent requests from the same device would all see
+	// fresh==false and each fire a (redundant, idempotent) upsert, defeating
+	// the debounce exactly when the device first connects (CodeRabbit Major,
+	// round 2 on PR #334). A different goroutine already writing → skip; the
+	// binding it commits covers us.
+	if _, inflight := s.deviceInflight[deviceToken]; inflight {
+		s.deviceSeenMu.Unlock()
+		return
+	}
+	s.deviceInflight[deviceToken] = struct{}{}
+	s.deviceSeenMu.Unlock()
+
 	// name="" on the header path — UpsertDeviceRegistration preserves any
 	// name the pairing-approval path already captured.
-	//
-	// Record the debounce entry ONLY after a successful upsert. Stamping it
-	// before the write would let a transient failure (SQLite lock, ctx
-	// cancel on client disconnect) suppress the retry for the full TTL —
-	// the binding would then only self-heal after deviceRegistrarTTL rather
-	// than on the next request (Gemini HIGH + CodeRabbit Major on PR #334).
-	if err := s.deviceRegistrar.UpsertDeviceRegistration(ctx, deviceToken, tokenID, ""); err != nil {
-		httpLogger.Warn("device registration upsert failed", "err", err)
-		return
-	}
+	err := s.deviceRegistrar.UpsertDeviceRegistration(ctx, deviceToken, tokenID, "")
+
 	s.deviceSeenMu.Lock()
-	s.deviceSeen[deviceToken] = deviceSeenEntry{tokenID: tokenID, at: now}
+	delete(s.deviceInflight, deviceToken)
+	if err == nil {
+		// Record the debounce entry ONLY after a successful upsert. On
+		// failure leave deviceSeen untouched so the next request retries
+		// immediately rather than waiting out deviceRegistrarTTL (Gemini
+		// HIGH + CodeRabbit Major round 1).
+		s.deviceSeen[deviceToken] = deviceSeenEntry{tokenID: tokenID, at: now}
+	}
 	s.deviceSeenMu.Unlock()
+	if err != nil {
+		httpLogger.Warn("device registration upsert failed", "err", err)
+	}
 }
 
 // WithUpscale wires the v1.2 PCM-upscaling feature into the

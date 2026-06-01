@@ -14,9 +14,13 @@ type fakeRegistrar struct {
 	mu    sync.Mutex
 	calls [][3]string // {deviceToken, tokenID, name}
 	failN int         // fail the next N calls (transient-error simulation)
+	hook  func()      // invoked at the top of each call (concurrency tests)
 }
 
 func (f *fakeRegistrar) UpsertDeviceRegistration(_ context.Context, deviceToken, tokenID, name string) error {
+	if f.hook != nil {
+		f.hook()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, [3]string{deviceToken, tokenID, name})
@@ -111,5 +115,34 @@ func TestTouchDeviceRetriesAfterTransientFailure(t *testing.T) {
 	s.touchDevice(ctx, "dev1", "tok-a")
 	if got := fr.count(); got != 2 {
 		t.Fatalf("after success want debounce (still 2), got %d", got)
+	}
+}
+
+// TestTouchDeviceConcurrentStampedeGuard pins that concurrent first-hit
+// requests for the same device fire the upsert exactly once: the first
+// reserves the in-flight slot, the second observes it and skips.
+func TestTouchDeviceConcurrentStampedeGuard(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	fr := &fakeRegistrar{hook: func() {
+		// Only the first (reserving) call reaches the registrar; signal it
+		// has entered the upsert, then block until the test releases it.
+		once.Do(func() { close(started) })
+		<-release
+	}}
+	cfg := &config.Config{LibraryRoots: []string{t.TempDir()}, ListenAddress: ":7788", LibraryName: "T"}
+	s := New(cfg, nil, nil, "fp").WithDeviceRegistrar(fr)
+	ctx := context.Background()
+
+	done := make(chan struct{})
+	go func() { s.touchDevice(ctx, "dev1", "tok-a"); close(done) }() // reserves inflight, blocks in hook
+	<-started                                                        // first call is now inside the upsert
+	s.touchDevice(ctx, "dev1", "tok-a")                              // sees inflight → returns without calling
+	close(release)                                                   // let the first call finish
+	<-done                                                           // first call recorded its single upsert
+
+	if got := fr.count(); got != 1 {
+		t.Fatalf("stampede guard: want exactly 1 upsert, got %d", got)
 	}
 }
