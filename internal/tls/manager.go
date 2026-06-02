@@ -320,31 +320,45 @@ func (m *Manager) FingerprintForServerName(serverName string) string {
 	// different leaf for a hello that lacks real cipher-suite / sig-alg
 	// negotiation, so a synthetic-hello fingerprint would advertise a
 	// cert the iOS client never captures (the cause of the first
-	// public-pairing fix's residual mismatch).
+	// public-pairing fix's residual mismatch). No cached cert yet → fall
+	// through to self-signed rather than to a synthetic-hello mint.
 	if domain, _ := m.autocertDomain.Load().(string); domain != "" && sni == domain {
 		if p := m.autocertCachedCert.Load(); p != nil && p.fn != nil {
-			if cert := p.fn(); cert != nil && len(cert.Certificate) > 0 {
-				return FingerprintFromDER(cert.Certificate[0])
+			if fp := fingerprintLeaf(p.fn()); fp != "" {
+				return fp
 			}
 		}
-		// No cached cert yet — fall through to self-signed rather than
-		// to a synthetic-hello mint.
 	}
 
 	// (2) Tailscale magic-DNS → the loaded LE cert (the leaf Get serves
-	// for that SNI). Mirrors Get's suffix match.
-	if suffix, _ := m.magicDNSSuffix.Load().(string); suffix != "" &&
-		(sni == suffix || strings.HasSuffix(sni, "."+suffix)) {
-		if le := m.tailscaleCert.Load(); le != nil && len(le.Certificate) > 0 {
-			return FingerprintFromDER(le.Certificate[0])
+	// for that SNI).
+	if m.sniMatchesTailscale(sni) {
+		if fp := fingerprintLeaf(m.tailscaleCert.Load()); fp != "" {
+			return fp
 		}
 	}
 
 	// (3) Fallback: self-signed.
-	if len(m.selfSigned.Certificate) > 0 {
-		return FingerprintFromDER(m.selfSigned.Certificate[0])
+	return fingerprintLeaf(m.selfSigned)
+}
+
+// sniMatchesTailscale reports whether sni (already normalized) falls
+// under the configured MagicDNS suffix — mirrors Get's Tailscale branch.
+func (m *Manager) sniMatchesTailscale(sni string) bool {
+	suffix, _ := m.magicDNSSuffix.Load().(string)
+	if suffix == "" {
+		return false
 	}
-	return ""
+	return sni == suffix || strings.HasSuffix(sni, "."+suffix)
+}
+
+// fingerprintLeaf returns the canonical SHA-256 fingerprint of a cert's
+// leaf DER, or "" when the cert is nil / carries no DER blocks.
+func fingerprintLeaf(cert *cryptotls.Certificate) string {
+	if cert == nil || len(cert.Certificate) == 0 {
+		return ""
+	}
+	return FingerprintFromDER(cert.Certificate[0])
 }
 
 // CertNotAfter parses the leaf cert from a `tls.Certificate` and
