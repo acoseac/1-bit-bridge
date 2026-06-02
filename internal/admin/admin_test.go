@@ -742,6 +742,58 @@ func TestUpscaleStatsDisabledWithHistory(t *testing.T) {
 	}
 }
 
+// TestUpscaleStatsSplitsByKind pins the honest per-kind breakdown:
+// an upscaled + an optimized variant must surface in their own fields
+// AND sum into the combined CachedVariants/CachedBytes totals. Guards
+// the regression where the Settings tile lumped optimize into upscale.
+func TestUpscaleStatsSplitsByKind(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	h := srv.Handler()
+	ctx := context.Background()
+
+	for _, p := range []string{"Music/A/01.flac", "Music/B/01.flac"} {
+		if err := srv.deps.Manifest.UpsertTrack(ctx, &manifest.Track{Path: p, Size: 100, ModTime: time.Now()}); err != nil {
+			t.Fatalf("UpsertTrack %q: %v", p, err)
+		}
+	}
+	mk := func(src, id string, bytes int64) manifest.VariantRow {
+		return manifest.VariantRow{SourcePath: src, VariantID: id, SidecarPath: "/dev/null/" + id, Format: "flac", SampleRate: 96000, BitsPerSample: 24, SizeBytes: bytes, SourceMTimeNS: 1, SourceSize: 1, SoxSettings: "{}", CreatedAt: 1}
+	}
+	if err := srv.deps.Manifest.UpsertVariant(ctx, mk("Music/A/01.flac", "upscaled-v2-192000-24", 2000)); err != nil {
+		t.Fatalf("UpsertVariant upscaled: %v", err)
+	}
+	if err := srv.deps.Manifest.UpsertVariant(ctx, mk("Music/B/01.flac", "optimized-v2-44100-16", 500)); err != nil {
+		t.Fatalf("UpsertVariant optimized: %v", err)
+	}
+
+	var got upscaleStatsResponse
+	if code := doJSON(t, h, "GET", "/api/upscale/stats", nil, &got); code != 200 {
+		t.Fatalf("stats: %d", code)
+	}
+	if got.UpscaledVariants != 1 || got.UpscaledBytes != 2000 {
+		t.Errorf("upscaled = (%d,%d), want (1,2000)", got.UpscaledVariants, got.UpscaledBytes)
+	}
+	if got.OptimizedVariants != 1 || got.OptimizedBytes != 500 {
+		t.Errorf("optimized = (%d,%d), want (1,500)", got.OptimizedVariants, got.OptimizedBytes)
+	}
+	if got.CachedVariants != 2 || got.CachedBytes != 2500 {
+		t.Errorf("combined = (%d,%d), want (2,2500)", got.CachedVariants, got.CachedBytes)
+	}
+
+	// Dashboard composition fields surface the same data: 2 originals,
+	// 1 track with an upscaled variant, 1 with optimized, 2 variant files.
+	var stats statsResponse
+	if code := doJSON(t, h, "GET", "/api/stats", nil, &stats); code != 200 {
+		t.Fatalf("stats endpoint: %d", code)
+	}
+	if stats.TracksWithUpscaled != 1 || stats.TracksWithOptimized != 1 {
+		t.Errorf("composition tracks = (%d,%d), want (1,1)", stats.TracksWithUpscaled, stats.TracksWithOptimized)
+	}
+	if stats.VariantFiles != 2 || stats.VariantBytes != 2500 {
+		t.Errorf("composition variants = (%d,%d), want (2,2500)", stats.VariantFiles, stats.VariantBytes)
+	}
+}
+
 // TestUpscaleSoxAvailabilityCached pins the TTL cache (CodeRabbit
 // major on PR #110): the precheck closure shells out to sox and
 // can wait up to 2 s, so polling at 5 s would 12×/min spend that

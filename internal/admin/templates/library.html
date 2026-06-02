@@ -10,18 +10,53 @@
     <h2>Configured roots</h2>
     <table class="rows">
       <thead>
-        <tr><th>Path</th><th class="num">Tracks</th><th></th></tr>
+        <tr>
+          <th>Path</th>
+          <th class="num">Originals</th>
+          <th class="num">Upscaled</th>
+          <th class="num">Optimized</th>
+          <th></th>
+        </tr>
       </thead>
       <tbody id="roots-body">
-        {{range .Data}}
+        {{range .Data.Roots}}
         <tr data-path="{{.Path}}">
           <td><code>{{.Path}}</code></td>
           <td class="num">{{.Tracks}}</td>
+          <td class="num">{{.UpscaledTracks}}{{if .UpscaledBytes}} <span class="muted">({{bytesHuman .UpscaledBytes}})</span>{{end}}</td>
+          <td class="num">{{.OptimizedTracks}}{{if .OptimizedBytes}} <span class="muted">({{bytesHuman .OptimizedBytes}})</span>{{end}}</td>
           <td><button type="button" class="btn danger remove-root">Remove</button></td>
         </tr>
         {{else}}
-        <tr><td colspan="3"><em>No roots configured.</em></td></tr>
+        <tr><td colspan="5"><em>No roots configured.</em></td></tr>
         {{end}}
+      </tbody>
+    </table>
+    <p class="hint">
+      <strong>Originals</strong> are the source tracks the bridge indexed.
+      <strong>Upscaled</strong> / <strong>Optimized</strong> count the source
+      tracks that have at least one hi-res or CarPlay variant — they don't
+      inflate the original count (variants live in the transcoded cache below).
+    </p>
+  </div>
+
+  <div class="panel">
+    <h2>Transcoded cache</h2>
+    <p class="lede">
+      Where the bridge stores generated variant sidecars (upscaled + optimized
+      FLACs). These are separate from your originals and never counted as library tracks.
+    </p>
+    <table class="rows">
+      <tbody>
+        <tr><th>Stored at</th><td><code>{{.Data.VariantsDir}}</code></td></tr>
+        <tr>
+          <th>Upscaled</th>
+          <td>{{.Data.UpscaledVariants}} file{{if ne .Data.UpscaledVariants 1}}s{{end}} · {{bytesHuman .Data.UpscaledBytes}}</td>
+        </tr>
+        <tr>
+          <th>Optimized</th>
+          <td>{{.Data.OptimizedVariants}} file{{if ne .Data.OptimizedVariants 1}}s{{end}} · {{bytesHuman .Data.OptimizedBytes}}</td>
+        </tr>
       </tbody>
     </table>
   </div>

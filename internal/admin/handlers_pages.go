@@ -60,17 +60,33 @@ func (s *Server) pageDashboard(w http.ResponseWriter, r *http.Request) {
 	cfg := s.deps.CfgHolder.Load()
 	tracks, _ := s.deps.Manifest.CountTracks(r.Context())
 	dbBytes := dbSize(filepath.Join(cfg.DataDir, "bridge.db"))
+	// Library composition for first paint (live updates come from the
+	// SSE stats frame via app.js applyStats). Best-effort — a SQL
+	// hiccup leaves the breakdown zeroed.
+	rollup, _ := s.deps.Manifest.RollupByPrefix(r.Context(), "")
+	var variantFiles int
+	var variantBytes int64
+	if byKind, err := s.deps.Manifest.VariantStatsByKind(r.Context()); err == nil {
+		for _, st := range byKind {
+			variantFiles += st.Files
+			variantBytes += st.Bytes
+		}
+	}
 	data := map[string]any{
-		"Uptime":        time.Since(s.deps.StartedAt),
-		"StartedAt":     s.deps.StartedAt,
-		"TracksIndexed": tracks,
-		"IsScanning":    s.deps.Scanner.IsScanning(),
-		"ScanProgress":  s.deps.Scanner.ScanProgress(),
-		"LastFullScan":  s.deps.Scanner.LastFullScan(),
-		"DBBytes":       dbBytes,
-		"DeviceCount":   len(s.deps.Auth.List()),
-		"Roots":         s.deps.Scanner.Roots(),
-		"Update":        s.dashboardUpdateStatus(),
+		"Uptime":              time.Since(s.deps.StartedAt),
+		"StartedAt":           s.deps.StartedAt,
+		"TracksIndexed":       tracks,
+		"TracksWithUpscaled":  rollup.UpscaledTrackCount,
+		"TracksWithOptimized": rollup.OptimizedTrackCount,
+		"VariantFiles":        variantFiles,
+		"VariantBytes":        variantBytes,
+		"IsScanning":          s.deps.Scanner.IsScanning(),
+		"ScanProgress":        s.deps.Scanner.ScanProgress(),
+		"LastFullScan":        s.deps.Scanner.LastFullScan(),
+		"DBBytes":             dbBytes,
+		"DeviceCount":         len(s.deps.Auth.List()),
+		"Roots":               s.deps.Scanner.Roots(),
+		"Update":              s.dashboardUpdateStatus(),
 		// The Update tile's "Install & restart" button POSTs
 		// /api/restart after install, then auto-reloads the page
 		// after 2.5 s assuming the service manager will respawn.
@@ -96,19 +112,47 @@ func (s *Server) dashboardUpdateStatus() UpdateStatus {
 }
 
 func (s *Server) pageLibrary(w http.ResponseWriter, r *http.Request) {
+	cfg := s.deps.CfgHolder.Load()
 	roots := s.deps.Scanner.Roots()
 	multi := len(roots) > 1
 	rows := make([]rootRow, 0, len(roots))
 	for _, root := range roots {
-		var n int
+		// Single-root scans store paths WITHOUT the root-basename
+		// prefix, so RollupByPrefix("") gives the whole library; the
+		// multi-root form prefixes every path with the basename.
+		prefix := ""
 		if multi {
-			n, _ = s.deps.Manifest.CountTracksByPrefix(r.Context(), filepath.Base(root)+"/")
-		} else {
-			n, _ = s.deps.Manifest.CountTracks(r.Context())
+			prefix = filepath.Base(root) + "/"
 		}
-		rows = append(rows, rootRow{Path: root, Tracks: n})
+		ru, err := s.deps.Manifest.RollupByPrefix(r.Context(), prefix)
+		if err != nil {
+			logger.Warn("library page: rollup", "root", root, "err", err)
+		}
+		rows = append(rows, rootRow{
+			Path:            root,
+			Tracks:          ru.TrackCount,
+			UpscaledTracks:  ru.UpscaledTrackCount,
+			OptimizedTracks: ru.OptimizedTrackCount,
+			UpscaledBytes:   ru.UpscaledSizeBytes,
+			OptimizedBytes:  ru.OptimizedSizeBytes,
+		})
 	}
-	s.renderPage(w, "library", rows)
+	data := libraryPageData{
+		Roots:       rows,
+		VariantsDir: cfg.Upscale.EffectiveVariantsDir(cfg.DataDir),
+	}
+	// Global per-kind cache summary for the "Transcoded cache" header.
+	if byKind, err := s.deps.Manifest.VariantStatsByKind(r.Context()); err != nil {
+		logger.Warn("library page: variant stats", "err", err)
+	} else {
+		up := byKind["upscale"]
+		opt := byKind["optimize"]
+		data.UpscaledVariants = up.Files
+		data.OptimizedVariants = opt.Files
+		data.UpscaledBytes = up.Bytes
+		data.OptimizedBytes = opt.Bytes
+	}
+	s.renderPage(w, "library", data)
 }
 
 func (s *Server) pageDevices(w http.ResponseWriter, r *http.Request) {
