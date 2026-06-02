@@ -109,9 +109,14 @@ func newTsnetServer(cfg *config.Config, stderr io.Writer) (*tsnet.Server, error)
 // for the disabled case is deferred — for now we ship a clear
 // short string the operator can read.
 type tailscaleAdminSource struct {
-	cli        *tailscaleAutoPilot // nil unless mode=cli
-	tsnet      *tsnet.Server       // nil unless mode=tsnet
-	configPath string              // absolute path of the runtime config
+	cli   *tailscaleAutoPilot   // nil unless mode=cli
+	tsnet *tsnet.Server         // nil unless mode=tsnet
+	cfg   *config.RuntimeConfig // live config — source of Mode + PublicMode
+	// stamped onto every snapshot so the admin tile can distinguish
+	// "operator set mode=disabled" from "mode=cli but tailscale CLI
+	// missing" and hide itself in public mode (where the auto-pilot
+	// doesn't apply). Nil-safe in stamp().
+	configPath string // absolute path of the runtime config
 	// file (post-filepath.Abs); surfaced in the disabled-mode recovery
 	// message so operators running with --config <other> see the actual
 	// file to edit instead of the hardcoded default. Callers MUST pass
@@ -130,8 +135,28 @@ type tailscaleAdminSource struct {
 // sentinel — the canonical form admin.Cfg already uses, so the
 // message points operators at the same file the bridge is
 // operating on regardless of CWD changes post-boot.
-func newTailscaleAdminSource(cli *tailscaleAutoPilot, ts *tsnet.Server, configPath string) tailscaleAdminSource {
-	return tailscaleAdminSource{cli: cli, tsnet: ts, configPath: configPath}
+func newTailscaleAdminSource(cli *tailscaleAutoPilot, ts *tsnet.Server, configPath string, cfg *config.RuntimeConfig) tailscaleAdminSource {
+	return tailscaleAdminSource{cli: cli, tsnet: ts, configPath: configPath, cfg: cfg}
+}
+
+// stamp annotates a computed snapshot with the configured Tailscale mode
+// and the public-mode posture, both read live from cfg. This is the
+// single source of truth that lets the admin tile tell apart
+// "operator-disabled" from "cli-mode-but-no-CLI" and grey itself out in
+// public mode. Nil-safe so test wiring without a cfgHolder still works.
+func (s tailscaleAdminSource) stamp(out admin.TailscaleStatus) admin.TailscaleStatus {
+	if s.cfg == nil {
+		return out
+	}
+	cfg := s.cfg.Load()
+	if cfg == nil {
+		return out
+	}
+	if mode, err := cfg.Tailscale.EffectiveMode(); err == nil {
+		out.Mode = string(mode)
+	}
+	out.PublicMode = cfg.IsPublic()
+	return out
 }
 
 // displayConfigPath returns the operator-facing config-file reference.
@@ -155,36 +180,51 @@ const adminStatusTimeout = 5 * time.Second
 
 func (s tailscaleAdminSource) Status() admin.TailscaleStatus {
 	if s.cli != nil {
-		return toAdminStatus(s.cli.Snapshot())
+		return s.stamp(toAdminStatus(s.cli.Snapshot()))
 	}
 	if s.tsnet != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), adminStatusTimeout)
 		defer cancel()
-		return tsnetAdminStatus(ctx, s.tsnet)
+		return s.stamp(tsnetAdminStatus(ctx, s.tsnet))
 	}
-	return admin.TailscaleStatus{
-		// Empty CLIAvailable + "tailscale disabled" message lets the
-		// admin tile render a one-line explanation instead of an
-		// empty card. Operators who want LAN-only deploys see this
-		// and don't go hunting for misconfig.
-		//
-		// The message names the config knob and the actual runtime
-		// config path (via displayConfigPath) so an operator who
-		// DIDN'T mean to disable Tailscale can recover without
-		// grepping the source. %q (not %s) for the config path:
-		// paths can contain spaces, and matching the visual
-		// treatment of "cli" / "tsnet" keeps the rendered sentence
-		// unambiguous.
-		LastError: fmt.Sprintf(
+	// Both backends nil. This is the genuine mode=disabled case OR the
+	// "operator changed mode to cli/tsnet in Settings but hasn't
+	// restarted yet" case (the auto-pilot is wired once at startup, so
+	// the running process is still disabled while cfg already reads the
+	// new mode). Make the message honest about which it is — the prior
+	// fixed "set tailscale.mode to cli or tsnet" text was actively
+	// misleading when cfg already said cli (the operator's screenshot:
+	// dropdown shows cli, tile says "set mode to cli").
+	out := admin.TailscaleStatus{}
+	mode := ""
+	if s.cfg != nil {
+		if c := s.cfg.Load(); c != nil {
+			if m, err := c.Tailscale.EffectiveMode(); err == nil {
+				mode = string(m)
+			}
+		}
+	}
+	switch mode {
+	case "cli", "tsnet":
+		out.LastError = fmt.Sprintf(
+			"Tailscale mode is %q but the auto-pilot isn't running — restart the bridge to apply (or, for cli mode, install the tailscale CLI on this host). Config: %q.",
+			mode, s.displayConfigPath(),
+		)
+	default:
+		// %q (not %s) for the config path: paths can contain spaces,
+		// and matching the visual treatment of "cli" / "tsnet" keeps
+		// the rendered sentence unambiguous.
+		out.LastError = fmt.Sprintf(
 			"Tailscale integration disabled. To enable, set tailscale.mode to %q or %q in %q and restart the bridge.",
 			"cli", "tsnet", s.displayConfigPath(),
-		),
+		)
 	}
+	return s.stamp(out)
 }
 
 func (s tailscaleAdminSource) RefreshNow(ctx context.Context) admin.TailscaleStatus {
 	if s.cli != nil {
-		return toAdminStatus(s.cli.RefreshNow(ctx))
+		return s.stamp(toAdminStatus(s.cli.RefreshNow(ctx)))
 	}
 	if s.tsnet != nil {
 		// Honour the caller's context (Gemini medium on PR #139:
@@ -195,10 +235,10 @@ func (s tailscaleAdminSource) RefreshNow(ctx context.Context) admin.TailscaleSta
 		// caller passed a longer ctx.
 		bounded, cancel := context.WithTimeout(ctx, adminStatusTimeout)
 		defer cancel()
-		return tsnetAdminStatus(bounded, s.tsnet)
+		return s.stamp(tsnetAdminStatus(bounded, s.tsnet))
 	}
 	// Disabled mode: no live state to refresh. Return the same
-	// sentinel Status() returns.
+	// (already-stamped) sentinel Status() returns.
 	return s.Status()
 }
 

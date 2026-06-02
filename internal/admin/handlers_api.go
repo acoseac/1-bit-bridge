@@ -135,6 +135,21 @@ type settingsResponse struct {
 	// checkbox in public mode — Validate would refuse an
 	// enabled toggle anyway).
 	IsPublic bool `json:"isPublic"`
+	// DLNAEnabled is the persisted cfg.DLNA.Enabled flag — the
+	// operator opt-in for the UPnP/DLNA server. Restart-required
+	// to take effect (the listener + SSDP advertisers are wired
+	// at startup, same as upscaleEnabled).
+	DLNAEnabled bool `json:"dlnaEnabled"`
+	// DLNAListenAddress is the resolved TCP bind for the DLNA
+	// HTTP server (default :7790), shown next to the toggle.
+	DLNAListenAddress string `json:"dlnaListenAddress,omitempty"`
+	// DLNABlockedByPublic is true when the deployment is in public
+	// mode, where ShouldEnableDLNA force-disables the feature
+	// regardless of the toggle (SSDP multicast has no meaning on a
+	// public VPS). The UI shows a "not applicable in public mode"
+	// caption so the operator isn't misled by a toggle that won't
+	// take effect.
+	DLNABlockedByPublic bool `json:"dlnaBlockedByPublic"`
 	// UpscaleSoxAvailable reports whether `sox` is on PATH so
 	// the Settings UI can warn the operator before they
 	// enable the feature against a host that can't actually
@@ -673,6 +688,10 @@ func (s *Server) apiSettingsGet(w http.ResponseWriter, r *http.Request) {
 		// the Settings UI doesn't have to re-derive them.
 		MDNSEnabled: cfg.EffectiveMDNSEnabled(),
 		IsPublic:    cfg.IsPublic(),
+		// DLNA toggle posture.
+		DLNAEnabled:         cfg.DLNA.Enabled,
+		DLNAListenAddress:   cfg.DLNA.EffectiveDLNAListenAddress(),
+		DLNABlockedByPublic: cfg.IsPublic(),
 	}
 	// Tailscale mode: tolerate an unknown YAML value by falling
 	// back to the effective default — the UI shows a recognizable
@@ -738,6 +757,10 @@ type settingsPatch struct {
 	// or stops the Bonjour advertiser without a restart.
 	// Validate refuses public+true (no LAN to advertise on).
 	MDNSEnabled *bool `json:"mdnsEnabled,omitempty"`
+	// DLNAEnabled toggles the UPnP/DLNA server. Restart-required:
+	// the listener + SSDP advertisers are wired once at `bridge
+	// serve` startup (same rationale as UpscaleEnabled).
+	DLNAEnabled *bool `json:"dlnaEnabled,omitempty"`
 }
 
 type settingsPatchResponse struct {
@@ -887,6 +910,18 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 			tailscaleNowDisabled &&
 			prevMode == config.TailscaleModeCLI
 		if newMode != prevMode && !tailscaleHotReload {
+			restart = true
+		}
+	}
+	if p.DLNAEnabled != nil {
+		if *p.DLNAEnabled != next.DLNA.Enabled {
+			next.DLNA.Enabled = *p.DLNAEnabled
+			// The DLNA HTTP listener + SSDP advertisers bind once at
+			// `bridge serve` startup (dlna_wiring.startDLNAIfEnabled).
+			// A live flip would have to spin up / tear down the
+			// listener and the per-interface SSDP advertisers — same
+			// startup-wired shape as upscaleEnabled, so restart-required
+			// is the honest answer rather than a partial hot-apply.
 			restart = true
 		}
 	}

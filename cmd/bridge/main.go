@@ -2043,7 +2043,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// tailnet IPs (5s TTL cached at the api boundary). Constructed
 	// once so the per-source state (rare LastError stickiness, etc.)
 	// stays consistent across both consumers.
-	tailscaleAdminSrc := newTailscaleAdminSource(tailscaleAuto, tsnetServer, absCfgPath)
+	tailscaleAdminSrc := newTailscaleAdminSource(tailscaleAuto, tsnetServer, absCfgPath, cfgHolder)
 	apiSrv.SetTailscaleStatus(tailscaleAdminSrc)
 
 	// Admin auth (public mode only). adminauth.Store holds the

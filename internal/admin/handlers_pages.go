@@ -148,6 +148,10 @@ func (s *Server) pageSettings(w http.ResponseWriter, r *http.Request) {
 		IsSupervised:             s.deps.IsSupervised,
 		BackupIntervalHours:      cfg.Backup.EffectiveIntervalHours(),
 		BackupKeep:               cfg.Backup.EffectiveKeep(),
+		IsPublic:                 cfg.IsPublic(),
+		DLNAEnabled:              cfg.DLNA.Enabled,
+		DLNAListenAddress:        cfg.DLNA.EffectiveDLNAListenAddress(),
+		DLNABlockedByPublic:      cfg.IsPublic(),
 	}
 	// v1.2 Audio quality section: pre-compute the boolean +
 	// install hint so the template doesn't need a `deref`

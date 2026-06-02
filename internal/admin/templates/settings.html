@@ -146,6 +146,20 @@
       </div>
 
       <div class="field">
+        <label>
+          <input type="checkbox" name="dlnaEnabled" {{if .Data.DLNAEnabled}}checked{{end}} {{if .Data.DLNABlockedByPublic}}disabled{{end}}>
+          Enable UPnP/DLNA server <span class="badge warn">restart</span>
+        </label>
+        <small class="hint">
+          Lets UPnP/DLNA renderers on the LAN (TVs, network players) discover and
+          stream from the bridge. Binds <code>{{.Data.DLNAListenAddress}}</code> plus
+          SSDP multicast. Off by default; the listener is wired at startup, so a
+          change takes effect after a restart.
+          {{if .Data.DLNABlockedByPublic}}<br><em>Not applicable in public mode — SSDP multicast has no meaning on a public VPS, so the bridge force-disables DLNA regardless of this toggle.</em>{{end}}
+        </small>
+      </div>
+
+      <div class="field">
         <label>Custom endpoints
           <textarea name="customEndpoints" rows="3"
                     placeholder="https://bridge.example.com:7788">{{.Data.CustomEndpointsText}}</textarea>

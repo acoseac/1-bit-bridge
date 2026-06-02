@@ -17,6 +17,48 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/config"
 )
 
+// TestTailscaleAdminSourceStampsModeAndPublic verifies the snapshot
+// carries the configured mode + public posture, and that the disabled-
+// branch message is mode-aware: when cfg already reads cli/tsnet but the
+// auto-pilot isn't running (both backends nil — e.g. a Settings mode
+// change awaiting restart), the message must NOT tell the operator to
+// "set tailscale.mode to cli" (which is already set). This is the
+// operator-screenshot bug.
+func TestTailscaleAdminSourceStampsModeAndPublic(t *testing.T) {
+	cfg := &config.Config{LibraryRoots: []string{t.TempDir()}}
+	cfg.Tailscale.Mode = "cli"
+	holder := config.NewRuntimeConfig(cfg)
+	src := newTailscaleAdminSource(nil, nil, "/etc/onebit/bridge.yaml", holder)
+
+	st := src.Status()
+	if st.Mode != "cli" {
+		t.Errorf("Mode = %q, want cli", st.Mode)
+	}
+	if st.PublicMode {
+		t.Errorf("PublicMode = true for a loopback config")
+	}
+	// Mode-aware message: must reference the configured mode and NOT
+	// instruct setting a mode that's already set.
+	if !strings.Contains(st.LastError, "cli") {
+		t.Errorf("message should mention the configured cli mode, got %q", st.LastError)
+	}
+	if strings.Contains(st.LastError, "set tailscale.mode to") {
+		t.Errorf("message must not tell the operator to set a mode that's already cli, got %q", st.LastError)
+	}
+
+	// Genuine disabled mode keeps the original recovery hint.
+	cfg2 := &config.Config{LibraryRoots: []string{t.TempDir()}}
+	cfg2.Tailscale.Mode = "disabled"
+	src2 := newTailscaleAdminSource(nil, nil, "/etc/onebit/bridge.yaml", config.NewRuntimeConfig(cfg2))
+	st2 := src2.Status()
+	if st2.Mode != "disabled" {
+		t.Errorf("Mode = %q, want disabled", st2.Mode)
+	}
+	if !strings.Contains(st2.LastError, "set tailscale.mode to") {
+		t.Errorf("disabled mode should keep the recovery hint, got %q", st2.LastError)
+	}
+}
+
 // TestTsnetCmdDispatchUnknown — `bridge tsnet zzz` must return a
 // usage-error exit code instead of crashing or silently exiting 0.
 // Same shape as the parent dispatcher's unknown-subcommand handler.
@@ -248,7 +290,7 @@ func TestTailscaleAdminSourceDisabledReturnsSentinel(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			src := newTailscaleAdminSource(nil, nil, c.configPath)
+			src := newTailscaleAdminSource(nil, nil, c.configPath, nil)
 			st := src.Status()
 			if st.LastError == "" {
 				t.Fatalf("disabled mode should populate LastError, got %+v", st)
@@ -291,7 +333,7 @@ func TestTailscaleAdminSourceDisabledReturnsSentinel(t *testing.T) {
 // Asserts the quoted form (`"bridge.yaml"`) so the same %q visual
 // contract from the main test holds for the fallback case too.
 func TestTailscaleAdminSourceDisabled_FallsBackToDefaultConfigName(t *testing.T) {
-	src := newTailscaleAdminSource(nil, nil, "")
+	src := newTailscaleAdminSource(nil, nil, "", nil)
 	st := src.Status()
 	if st.LastError == "" {
 		t.Fatalf("disabled mode should populate LastError, got %+v", st)
@@ -306,7 +348,7 @@ func TestTailscaleAdminSourceDisabled_FallsBackToDefaultConfigName(t *testing.T)
 // all-nil source returns the same sentinel as Status (no panic, no
 // crash).
 func TestTailscaleAdminSourceRefreshNowOnDisabled(t *testing.T) {
-	src := newTailscaleAdminSource(nil, nil, "/etc/onebit/test.yaml")
+	src := newTailscaleAdminSource(nil, nil, "/etc/onebit/test.yaml", nil)
 	st := src.RefreshNow(context.Background())
 	if st.LastError == "" {
 		t.Errorf("RefreshNow on disabled should populate LastError, got %+v", st)
