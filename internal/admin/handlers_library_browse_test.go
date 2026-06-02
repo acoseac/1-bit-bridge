@@ -140,10 +140,23 @@ func TestApiLibraryBrowse_SubtreeRollupIsPageIndependent(t *testing.T) {
 	// A nested node scopes correctly: MusicA = 3 tracks / 2 upscaled / 1000 B.
 	wantSubtree("MusicA", browse("browse MusicA", "/api/library/browse?path=MusicA"), 3, 2, 0, 1000)
 
-	// Follow-up (load-more) page: subtree fields are omitted (zero) — the
-	// client reads them only from the cached first page, so re-walking the
-	// subtree per page is skipped (Gemini + CodeRabbit on PR #343).
-	wantSubtree("load-more", browse("browse load-more", "/api/library/browse?afterFolder=MusicA&limit=1"), 0, 0, 0, 0)
+	// Follow-up (load-more) page: the subtree fields must be OMITTED from the
+	// JSON (not present as 0). The frontend's `subtree* ?? fallback` relies on
+	// undefined-vs-0 to fall back to the page sum, and decoding into a struct
+	// can't tell omission from zero — so assert against the raw body
+	// (CodeRabbit on PR #343).
+	req := httptest.NewRequest("GET", "/api/library/browse?afterFolder=MusicA&limit=1", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	rw := httptest.NewRecorder()
+	h.ServeHTTP(rw, req)
+	if rw.Code != http.StatusOK {
+		t.Fatalf("browse load-more: %d", rw.Code)
+	}
+	for _, k := range []string{"subtreeTracks", "subtreeUpscaled", "subtreeOptimized", "subtreeSizeBytes"} {
+		if strings.Contains(rw.Body.String(), k) {
+			t.Errorf("load-more body must omit %q (rollup is first-page only): %s", k, rw.Body.String())
+		}
+	}
 }
 
 // TestApiLibraryBrowse_NestedFolderReturnsChildrenAndTracks
