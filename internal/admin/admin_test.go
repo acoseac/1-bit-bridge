@@ -742,15 +742,13 @@ func TestUpscaleStatsDisabledWithHistory(t *testing.T) {
 	}
 }
 
-// TestUpscaleStatsSplitsByKind pins the honest per-kind breakdown:
-// an upscaled + an optimized variant must surface in their own fields
-// AND sum into the combined CachedVariants/CachedBytes totals. Guards
-// the regression where the Settings tile lumped optimize into upscale.
-func TestUpscaleStatsSplitsByKind(t *testing.T) {
-	srv, _, _ := newTestServer(t)
-	h := srv.Handler()
+// seedSplitVariantFixture seeds two source tracks: A/01.flac with TWO
+// upscaled targets (so file counts diverge from distinct-track counts)
+// and B/01.flac with one optimized target. Totals: upscaled 2 files /
+// 3500 B across 1 track; optimized 1 file / 500 B across 1 track.
+func seedSplitVariantFixture(t *testing.T, srv *Server) {
+	t.Helper()
 	ctx := context.Background()
-
 	for _, p := range []string{"Music/A/01.flac", "Music/B/01.flac"} {
 		if err := srv.deps.Manifest.UpsertTrack(ctx, &manifest.Track{Path: p, Size: 100, ModTime: time.Now()}); err != nil {
 			t.Fatalf("UpsertTrack %q: %v", p, err)
@@ -759,22 +757,27 @@ func TestUpscaleStatsSplitsByKind(t *testing.T) {
 	mk := func(src, id string, bytes int64) manifest.VariantRow {
 		return manifest.VariantRow{SourcePath: src, VariantID: id, SidecarPath: "/dev/null/" + id, Format: "flac", SampleRate: 96000, BitsPerSample: 24, SizeBytes: bytes, SourceMTimeNS: 1, SourceSize: 1, SoxSettings: "{}", CreatedAt: 1}
 	}
-	if err := srv.deps.Manifest.UpsertVariant(ctx, mk("Music/A/01.flac", "upscaled-v2-192000-24", 2000)); err != nil {
-		t.Fatalf("UpsertVariant upscaled: %v", err)
+	for _, v := range []manifest.VariantRow{
+		mk("Music/A/01.flac", "upscaled-v2-192000-24", 2000),
+		mk("Music/A/01.flac", "upscaled-v2-176400-24", 1500), // 2nd target, same source
+		mk("Music/B/01.flac", "optimized-v2-44100-16", 500),
+	} {
+		if err := srv.deps.Manifest.UpsertVariant(ctx, v); err != nil {
+			t.Fatalf("UpsertVariant %q: %v", v.VariantID, err)
+		}
 	}
-	// Second upscaled target on the SAME source so the file counters
-	// (raw sidecar rows) diverge from the distinct-track counts: a
-	// regression that counts distinct tracks instead of files would
-	// report UpscaledVariants/VariantFiles too low here.
-	if err := srv.deps.Manifest.UpsertVariant(ctx, mk("Music/A/01.flac", "upscaled-v2-176400-24", 1500)); err != nil {
-		t.Fatalf("UpsertVariant upscaled #2: %v", err)
-	}
-	if err := srv.deps.Manifest.UpsertVariant(ctx, mk("Music/B/01.flac", "optimized-v2-44100-16", 500)); err != nil {
-		t.Fatalf("UpsertVariant optimized: %v", err)
-	}
+}
+
+// TestUpscaleStatsSplitsByKind pins the honest per-kind breakdown:
+// upscaled + optimized variants surface in their own fields AND sum into
+// the combined CachedVariants/CachedBytes totals. Guards the regression
+// where the Settings tile lumped optimize into upscale.
+func TestUpscaleStatsSplitsByKind(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	seedSplitVariantFixture(t, srv)
 
 	var got upscaleStatsResponse
-	if code := doJSON(t, h, "GET", "/api/upscale/stats", nil, &got); code != 200 {
+	if code := doJSON(t, srv.Handler(), "GET", "/api/upscale/stats", nil, &got); code != 200 {
 		t.Fatalf("stats: %d", code)
 	}
 	if got.UpscaledVariants != 2 || got.UpscaledBytes != 3500 {
@@ -786,12 +789,17 @@ func TestUpscaleStatsSplitsByKind(t *testing.T) {
 	if got.CachedVariants != 3 || got.CachedBytes != 4000 {
 		t.Errorf("combined = (%d,%d), want (3,4000)", got.CachedVariants, got.CachedBytes)
 	}
+}
 
-	// Dashboard composition fields: 1 track with an upscaled variant
-	// (DISTINCT source, despite 2 sidecars), 1 with optimized, 3 variant
-	// files total.
+// TestStatsCompositionFields pins the dashboard "Library composition"
+// fields: 1 track with an upscaled variant (DISTINCT source, despite 2
+// sidecars), 1 with optimized, 3 variant files total.
+func TestStatsCompositionFields(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	seedSplitVariantFixture(t, srv)
+
 	var stats statsResponse
-	if code := doJSON(t, h, "GET", "/api/stats", nil, &stats); code != 200 {
+	if code := doJSON(t, srv.Handler(), "GET", "/api/stats", nil, &stats); code != 200 {
 		t.Fatalf("stats endpoint: %d", code)
 	}
 	if stats.TracksWithUpscaled != 1 || stats.TracksWithOptimized != 1 {
