@@ -13,6 +13,13 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
+// Shared error code / message literals for this surface (SonarCloud
+// go:S1192 — these recur across the playlist/history handlers).
+const (
+	errCodeNotFound        = "not-found"
+	errMsgManifestNotWired = "manifest not wired"
+)
+
 // Library-data admin surfaces: playlist-backup detail + export and the
 // playback-history event log + export. Loopback-only, owner-visible,
 // read-only — same trust model as handlers_devices.go. Device tokens are
@@ -103,14 +110,14 @@ type playlistDetailDTO struct {
 // — full ordered contents of one backed-up playlist.
 func (s *Server) apiPlaylistDetail(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Manifest == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "manifest not wired")
+		writeError(w, http.StatusServiceUnavailable, "unavailable", errMsgManifestNotWired)
 		return
 	}
 	prefix := r.URL.Query().Get("device")
 	id := r.URL.Query().Get("id")
 	token, ok := s.resolvePlaylistDeviceToken(r, prefix, id)
 	if !ok {
-		writeError(w, http.StatusNotFound, "not-found", "no matching playlist for that device")
+		writeError(w, http.StatusNotFound, errCodeNotFound, "no matching playlist for that device")
 		return
 	}
 	row, items, err := s.deps.Manifest.GetPlaylist(r.Context(), token, id)
@@ -119,7 +126,7 @@ func (s *Server) apiPlaylistDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if row == nil {
-		writeError(w, http.StatusNotFound, "not-found", "playlist not found")
+		writeError(w, http.StatusNotFound, errCodeNotFound, "playlist not found")
 		return
 	}
 	writeJSON(w, http.StatusOK, playlistToDetailDTO(row.ID, row.Name, prefix, row.LastModifiedAt, row.UpdatedAt, items))
@@ -153,14 +160,14 @@ func playlistToDetailDTO(id, name, prefix string, lastModNS, updatedNS int64, it
 // — a downloadable copy of one playlist in the requested format.
 func (s *Server) apiPlaylistExport(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Manifest == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "manifest not wired")
+		writeError(w, http.StatusServiceUnavailable, "unavailable", errMsgManifestNotWired)
 		return
 	}
 	q := r.URL.Query()
 	prefix, id, format := q.Get("device"), q.Get("id"), strings.ToLower(q.Get("format"))
 	token, ok := s.resolvePlaylistDeviceToken(r, prefix, id)
 	if !ok {
-		writeError(w, http.StatusNotFound, "not-found", "no matching playlist for that device")
+		writeError(w, http.StatusNotFound, errCodeNotFound, "no matching playlist for that device")
 		return
 	}
 	row, items, err := s.deps.Manifest.GetPlaylist(r.Context(), token, id)
@@ -169,7 +176,7 @@ func (s *Server) apiPlaylistExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if row == nil {
-		writeError(w, http.StatusNotFound, "not-found", "playlist not found")
+		writeError(w, http.StatusNotFound, errCodeNotFound, "playlist not found")
 		return
 	}
 	base := "playlist-" + safeFilename(row.Name)
@@ -259,7 +266,7 @@ func (s *Server) apiHistoryEvents(w http.ResponseWriter, r *http.Request) {
 	if prefix := q.Get("device"); prefix != "" {
 		t, ok := s.resolveDeviceTokenByPrefix(r, prefix)
 		if !ok {
-			writeError(w, http.StatusNotFound, "not-found", "no matching device")
+			writeError(w, http.StatusNotFound, errCodeNotFound, "no matching device")
 			return
 		}
 		token = t
@@ -293,7 +300,7 @@ func (s *Server) apiHistoryEvents(w http.ResponseWriter, r *http.Request) {
 // Capped at a generous bound so a huge table doesn't blow up the response.
 func (s *Server) apiHistoryExport(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Manifest == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "manifest not wired")
+		writeError(w, http.StatusServiceUnavailable, "unavailable", errMsgManifestNotWired)
 		return
 	}
 	q := r.URL.Query()
@@ -302,17 +309,40 @@ func (s *Server) apiHistoryExport(w http.ResponseWriter, r *http.Request) {
 	if prefix := q.Get("device"); prefix != "" {
 		t, ok := s.resolveDeviceTokenByPrefix(r, prefix)
 		if !ok {
-			writeError(w, http.StatusNotFound, "not-found", "no matching device")
+			writeError(w, http.StatusNotFound, errCodeNotFound, "no matching device")
 			return
 		}
 		token = t
 		suffix = strings.TrimSuffix(prefix, "…")
 	}
-	// Page through with the cursor: ListHistory caps a single call at
-	// 1000 rows (passing exportCap directly would be silently clamped
-	// back to the 200 default and truncate the export — Gemini on PR
-	// #341). exportCap bounds the total so a huge table can't blow up
-	// the response.
+	events, err := s.collectHistoryForExport(r, token)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	base := "history-" + safeFilename(suffix)
+	switch strings.ToLower(q.Get("format")) {
+	case "json":
+		out := make([]historyEventDTO, 0, len(events))
+		for _, e := range events {
+			out = append(out, historyToDTO(e))
+		}
+		setDownloadHeaders(w, "application/json", base+".json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"events": out})
+	case "csv":
+		setDownloadHeaders(w, "text/csv; charset=utf-8", base+".csv")
+		writeHistoryCSV(w, events)
+	default:
+		writeError(w, http.StatusBadRequest, "bad-format", "format must be one of json, csv")
+	}
+}
+
+// collectHistoryForExport pages through ListHistory with the cursor.
+// ListHistory caps a single call at 1000 rows (passing the total cap
+// directly would be silently clamped back to the 200 default and
+// truncate the export — Gemini on PR #341); exportCap bounds the grand
+// total so a huge table can't blow up the response.
+func (s *Server) collectHistoryForExport(r *http.Request, token string) ([]manifest.HistoryEventOut, error) {
 	const (
 		pageSize  = 1000
 		exportCap = 100000
@@ -322,8 +352,7 @@ func (s *Server) apiHistoryExport(w http.ResponseWriter, r *http.Request) {
 	for len(events) < exportCap {
 		page, err := s.deps.Manifest.ListHistory(r.Context(), token, pageSize, after)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal", err.Error())
-			return
+			return nil, err
 		}
 		if len(page) == 0 {
 			break
@@ -337,30 +366,22 @@ func (s *Server) apiHistoryExport(w http.ResponseWriter, r *http.Request) {
 	if len(events) > exportCap {
 		events = events[:exportCap]
 	}
-	base := "history-" + safeFilename(suffix)
-	switch strings.ToLower(q.Get("format")) {
-	case "json":
-		out := make([]historyEventDTO, 0, len(events))
-		for _, e := range events {
-			out = append(out, historyToDTO(e))
-		}
-		setDownloadHeaders(w, "application/json", base+".json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"events": out})
-	case "csv":
-		setDownloadHeaders(w, "text/csv; charset=utf-8", base+".csv")
-		cw := csv.NewWriter(w)
-		_ = cw.Write([]string{"started_at", "path", "codec", "iface_type", "output_rate", "duration_used", "is_dop", "variant_id", "device_name"})
-		for _, e := range events {
-			_ = cw.Write([]string{
-				nsToRFC3339(e.StartedAt), e.Path, e.Codec, e.IfaceType,
-				strconv.Itoa(e.OutputRate), strconv.FormatFloat(e.DurationUsed, 'f', -1, 64),
-				strconv.FormatBool(e.IsDoP), e.VariantID, e.DeviceName,
-			})
-		}
-		cw.Flush()
-	default:
-		writeError(w, http.StatusBadRequest, "bad-format", "format must be one of json, csv")
+	return events, nil
+}
+
+// writeHistoryCSV streams the history events as CSV (header + one row
+// per event). Caller has already set the download headers.
+func writeHistoryCSV(w http.ResponseWriter, events []manifest.HistoryEventOut) {
+	cw := csv.NewWriter(w)
+	_ = cw.Write([]string{"started_at", "path", "codec", "iface_type", "output_rate", "duration_used", "is_dop", "variant_id", "device_name"})
+	for _, e := range events {
+		_ = cw.Write([]string{
+			nsToRFC3339(e.StartedAt), e.Path, e.Codec, e.IfaceType,
+			strconv.Itoa(e.OutputRate), strconv.FormatFloat(e.DurationUsed, 'f', -1, 64),
+			strconv.FormatBool(e.IsDoP), e.VariantID, e.DeviceName,
+		})
 	}
+	cw.Flush()
 }
 
 func historyToDTO(e manifest.HistoryEventOut) historyEventDTO {
