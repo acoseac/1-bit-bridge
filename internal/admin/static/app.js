@@ -417,7 +417,7 @@ async function refreshAutocertTile() {
     badgeClass = "running";
     badgeText = "HTTPS cert active";
   } else {
-    badgeClass = "idle";
+    // badgeClass stays "idle" (the default) — no need to re-assign (S4165).
     badgeText = "Minting…";
   }
   if (statusEl) {
