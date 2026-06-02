@@ -107,58 +107,43 @@ func TestApiLibraryBrowse_RootListsTopLevelFolders(t *testing.T) {
 func TestApiLibraryBrowse_SubtreeRollupIsPageIndependent(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	browseTestSeed(t, srv)
+	h := srv.Handler()
+
+	browse := func(name, url string) browseResponse {
+		t.Helper()
+		var resp browseResponse
+		if code := doJSON(t, h, "GET", url, nil, &resp); code != http.StatusOK {
+			t.Fatalf("%s: %d", name, code)
+		}
+		return resp
+	}
+	wantSubtree := func(name string, r browseResponse, tracks, upscaled, optimized int, bytes int64) {
+		t.Helper()
+		got := [4]int64{int64(r.SubtreeTracks), int64(r.SubtreeUpscaled), int64(r.SubtreeOptimized), r.SubtreeSizeBytes}
+		want := [4]int64{int64(tracks), int64(upscaled), int64(optimized), bytes}
+		if got != want {
+			t.Errorf("%s subtree (tracks,upscaled,optimized,bytes) = %v, want %v", name, got, want)
+		}
+	}
 
 	// Full root: 4 tracks, 2 upscaled, 0 optimized, 1700 bytes.
-	var full browseResponse
-	if code := doJSON(t, srv.Handler(), "GET", "/api/library/browse", nil, &full); code != http.StatusOK {
-		t.Fatalf("browse root: %d", code)
-	}
-	if full.SubtreeTracks != 4 || full.SubtreeUpscaled != 2 || full.SubtreeOptimized != 0 {
-		t.Errorf("root subtree = (t%d u%d o%d), want (4 2 0)", full.SubtreeTracks, full.SubtreeUpscaled, full.SubtreeOptimized)
-	}
-	if full.SubtreeSizeBytes != 1700 {
-		t.Errorf("root SubtreeSizeBytes = %d, want 1700", full.SubtreeSizeBytes)
-	}
+	wantSubtree("root", browse("browse root", "/api/library/browse"), 4, 2, 0, 1700)
 
-	// limit=1 truncates the folder page to one folder, but the subtree
-	// rollup must be unchanged — this is the regression the bug produced.
-	var paged browseResponse
-	if code := doJSON(t, srv.Handler(), "GET", "/api/library/browse?limit=1", nil, &paged); code != http.StatusOK {
-		t.Fatalf("browse root limit=1: %d", code)
-	}
+	// limit=1 truncates the folder page to one folder, but the subtree rollup
+	// must be unchanged — this is the regression the bug produced.
+	paged := browse("browse root limit=1", "/api/library/browse?limit=1")
 	if len(paged.Folders) != 1 {
 		t.Fatalf("limit=1 should return 1 folder, got %d", len(paged.Folders))
 	}
-	if paged.SubtreeTracks != 4 || paged.SubtreeUpscaled != 2 {
-		t.Errorf("paged subtree = (t%d u%d), want (4 2) — must NOT shrink with the page", paged.SubtreeTracks, paged.SubtreeUpscaled)
-	}
-	if paged.SubtreeOptimized != 0 || paged.SubtreeSizeBytes != 1700 {
-		t.Errorf("paged subtree = (o%d b%d), want (0 1700)", paged.SubtreeOptimized, paged.SubtreeSizeBytes)
-	}
+	wantSubtree("paged", paged, 4, 2, 0, 1700)
 
-	// A nested node scopes correctly: MusicA subtree is 3 tracks / 2 upscaled
-	// / 1000 bytes (200+300+500).
-	var nested browseResponse
-	if code := doJSON(t, srv.Handler(), "GET", "/api/library/browse?path=MusicA", nil, &nested); code != http.StatusOK {
-		t.Fatalf("browse MusicA: %d", code)
-	}
-	if nested.SubtreeTracks != 3 || nested.SubtreeUpscaled != 2 {
-		t.Errorf("MusicA subtree = (t%d u%d), want (3 2)", nested.SubtreeTracks, nested.SubtreeUpscaled)
-	}
-	if nested.SubtreeOptimized != 0 || nested.SubtreeSizeBytes != 1000 {
-		t.Errorf("MusicA subtree = (o%d b%d), want (0 1000)", nested.SubtreeOptimized, nested.SubtreeSizeBytes)
-	}
+	// A nested node scopes correctly: MusicA = 3 tracks / 2 upscaled / 1000 B.
+	wantSubtree("MusicA", browse("browse MusicA", "/api/library/browse?path=MusicA"), 3, 2, 0, 1000)
 
 	// Follow-up (load-more) page: subtree fields are omitted (zero) — the
 	// client reads them only from the cached first page, so re-walking the
 	// subtree per page is skipped (Gemini + CodeRabbit on PR #343).
-	var more browseResponse
-	if code := doJSON(t, srv.Handler(), "GET", "/api/library/browse?afterFolder=MusicA&limit=1", nil, &more); code != http.StatusOK {
-		t.Fatalf("browse load-more: %d", code)
-	}
-	if more.SubtreeTracks != 0 || more.SubtreeUpscaled != 0 || more.SubtreeSizeBytes != 0 {
-		t.Errorf("load-more subtree = (t%d u%d b%d), want all 0 (computed on first page only)", more.SubtreeTracks, more.SubtreeUpscaled, more.SubtreeSizeBytes)
-	}
+	wantSubtree("load-more", browse("browse load-more", "/api/library/browse?afterFolder=MusicA&limit=1"), 0, 0, 0, 0)
 }
 
 // TestApiLibraryBrowse_NestedFolderReturnsChildrenAndTracks
