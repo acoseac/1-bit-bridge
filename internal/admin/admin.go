@@ -488,7 +488,19 @@ type TailscaleProvider interface {
 // `:7788` — operators using non-default `cfg.ListenAddress` need the
 // right URL surfaced for manual recovery, CodeRabbit on PR #102).
 type TailscaleStatus struct {
-	CLIAvailable      bool       `json:"cliAvailable"`
+	CLIAvailable bool `json:"cliAvailable"`
+	// Mode is the configured tailscale.mode ("cli" / "tsnet" /
+	// "disabled"). Threaded into the snapshot so the admin tile can
+	// distinguish "operator set mode=disabled" from "mode=cli but the
+	// tailscale CLI isn't on this host" — the two used to collapse into
+	// an identical misleading "Disabled" badge because the tile read
+	// only runtime CLI detection. Empty only in legacy snapshots.
+	Mode string `json:"mode,omitempty"`
+	// PublicMode reports whether the bridge is in public/autocert mode,
+	// where the Tailscale auto-pilot doesn't apply at all. The tile
+	// greys out / hides itself in that case rather than showing a
+	// "Disabled" badge that reads as a misconfiguration.
+	PublicMode        bool       `json:"publicMode"`
 	NodeName          string     `json:"nodeName,omitempty"`
 	MagicDNSName      string     `json:"magicDNSName,omitempty"`
 	HTTPSCertsEnabled bool       `json:"httpsCertsEnabled"`

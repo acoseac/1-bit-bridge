@@ -317,6 +317,10 @@ func vacuumInto(ctx context.Context, srcDB, dstDB string) error {
 	// suffix paths) doesn't bail. The parent dir is already 0700.
 	_ = os.Remove(dstDB)
 	if _, err := db.ExecContext(ctx, "VACUUM INTO ?", dstDB); err != nil {
+		// A failed VACUUM INTO can leave a partial/corrupt fragment on
+		// disk. Remove it so the snapshot dir doesn't accumulate broken
+		// DB files (and a later reader can't mistake one for a good copy).
+		_ = os.Remove(dstDB)
 		return err
 	}
 	// VACUUM INTO writes the destination at the umask-default mode
@@ -325,6 +329,9 @@ func vacuumInto(ctx context.Context, srcDB, dstDB string) error {
 	// the snapshot uses. Chmod after the write so a tester reading
 	// `ls -l` sees consistent perms across the bundle.
 	if err := os.Chmod(dstDB, 0o600); err != nil {
+		// Don't leave a 0644 copy of token-hash data behind if we
+		// couldn't lock it down — unlink it and surface the error.
+		_ = os.Remove(dstDB)
 		return err
 	}
 	return nil

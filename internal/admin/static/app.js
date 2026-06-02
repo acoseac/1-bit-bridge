@@ -252,6 +252,15 @@ async function refreshCertInfo() {
 function renderTailscaleTile(s) {
   const panel = document.getElementById("tailscale-panel");
   if (!panel) return;
+  // Public/autocert mode: the Tailscale auto-pilot doesn't apply at all
+  // (the bridge serves an LE cert on its public domain, not a tailnet
+  // magic-DNS cert). Hide the tile entirely so it can never render a
+  // misleading "Disabled" badge on a VPS where Tailscale was never the
+  // point.
+  if (s?.publicMode) {
+    panel.hidden = true;
+    return;
+  }
   if (!s || (!s.cliAvailable && !s.lastError)) {
     panel.hidden = true;
     return;
@@ -272,10 +281,22 @@ function renderTailscaleTile(s) {
   // tailscaleAdminSource.Status() in disabled mode (cli/tsnet
   // success paths set cliAvailable=true; cli/tsnet failure paths
   // set cliAvailable=true with an error suffix).
+  // The configured mode (s.mode) disambiguates two states that used to
+  // collapse into an identical misleading "Disabled" badge:
+  //   - mode === "disabled": the operator genuinely turned it off.
+  //   - mode === "cli"/"tsnet" but !cliAvailable: the mode is set but the
+  //     auto-pilot isn't running (tailscale CLI missing on this host, or
+  //     a mode change in Settings that needs a restart to apply). The
+  //     server's lastError now spells out which — show it, but don't call
+  //     it "Disabled" (it isn't), which sent operators chasing the wrong fix.
   let badgeClass = "idle", badgeText = "Detecting…", suffix = "";
-  if (!s.cliAvailable && s.lastError) {
+  if (s.mode === "disabled") {
     badgeClass = "idle";
     badgeText = "Disabled";
+    if (s.lastError) suffix = ` <span class="hint">${escapeHTML(s.lastError)}</span>`;
+  } else if (!s.cliAvailable && s.lastError) {
+    badgeClass = "idle";
+    badgeText = "Inactive";
     suffix = ` <span class="hint">${escapeHTML(s.lastError)}</span>`;
   } else if (s.lastError) {
     badgeClass = "danger";
@@ -402,7 +423,7 @@ async function refreshAutocertTile() {
     badgeClass = "running";
     badgeText = "HTTPS cert active";
   } else {
-    badgeClass = "idle";
+    // badgeClass stays "idle" (the default) — no need to re-assign (S4165).
     badgeText = "Minting…";
   }
   if (statusEl) {
@@ -1335,6 +1356,15 @@ function initSettings() {
       // we never accidentally enable mDNS by sending false).
       tailscaleMode: fd.get("tailscaleMode") || "",
       mdnsEnabled: fd.get("mdnsEnabled") === "on",
+      // UPnP/DLNA toggle (restart-required). In public mode the checkbox
+      // is rendered `disabled`, so omit the field entirely there (undefined
+      // → dropped by JSON.stringify → server's pointer stays nil → no
+      // change). Coercing a disabled checkbox to false would silently
+      // overwrite a stored dlnaEnabled=true and trigger a spurious
+      // restartRequired (Gemini on PR #342).
+      dlnaEnabled: form.querySelector('input[name="dlnaEnabled"]')?.disabled
+        ? undefined
+        : fd.get("dlnaEnabled") === "on",
     };
     try {
       const r = await API.patch("/api/settings", body);
