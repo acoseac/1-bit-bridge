@@ -67,21 +67,27 @@ type statsResponse struct {
 type rootRow struct {
 	Path   string `json:"path"`
 	Tracks int    `json:"tracks"`
-	// Per-kind variant coverage for this root (DISTINCT source tracks
-	// that have at least one variant of each kind, + the summed sidecar
-	// bytes). Lets the Library page show how much of each root has been
-	// upscaled / CarPlay-optimized without opening the Inspector.
-	UpscaledTracks  int   `json:"upscaledTracks"`
-	OptimizedTracks int   `json:"optimizedTracks"`
-	UpscaledBytes   int64 `json:"upscaledBytes"`
-	OptimizedBytes  int64 `json:"optimizedBytes"`
+}
+
+// libraryRootRow is the Library *page* (HTML template) per-root row. It
+// carries per-kind variant coverage that the JSON `/api/roots` shape
+// (rootRow) deliberately does NOT — keeping the two separate so the
+// roots API never emits zero-valued upscaled/optimized fields it doesn't
+// populate (CodeRabbit on PR #340).
+type libraryRootRow struct {
+	Path            string
+	Tracks          int
+	UpscaledTracks  int
+	OptimizedTracks int
+	UpscaledBytes   int64
+	OptimizedBytes  int64
 }
 
 // libraryPageData is the template payload for the Library page: the
 // per-root rows plus a "Transcoded cache" summary (where variant
 // sidecars live on disk + the global per-kind file count and size).
 type libraryPageData struct {
-	Roots             []rootRow
+	Roots             []libraryRootRow
 	VariantsDir       string
 	UpscaledVariants  int
 	OptimizedVariants int

@@ -3196,25 +3196,25 @@ func (s *Store) RollupByPrefix(ctx context.Context, prefix string) (FolderRollup
 	// needless O(N) scan. Run the aggregates with no WHERE clause
 	// instead — SQLite can satisfy the COUNT/SUM directly.
 	if prefix == "" {
+		// One round-trip: two scalar subqueries cover `tracks`, and the
+		// conditional aggregation scans `track_variants` exactly once
+		// instead of twice (Gemini on PR #340).
 		var out FolderRollup
 		if err := s.db.QueryRowContext(ctx, `
-			SELECT COUNT(*), COALESCE(SUM(size), 0) FROM tracks
-		`).Scan(&out.TrackCount, &out.TotalSizeBytes); err != nil {
-			return FolderRollup{}, fmt.Errorf("rollup global tracks: %w", err)
-		}
-		if err := s.db.QueryRowContext(ctx, `
-			SELECT COUNT(DISTINCT source_path), COALESCE(SUM(size_bytes), 0)
-			  FROM track_variants
-			 WHERE variant_id LIKE 'upscaled-%'
-		`).Scan(&out.UpscaledTrackCount, &out.UpscaledSizeBytes); err != nil {
-			return FolderRollup{}, fmt.Errorf("rollup global upscale variants: %w", err)
-		}
-		if err := s.db.QueryRowContext(ctx, `
-			SELECT COUNT(DISTINCT source_path), COALESCE(SUM(size_bytes), 0)
-			  FROM track_variants
-			 WHERE variant_id LIKE 'optimized-%'
-		`).Scan(&out.OptimizedTrackCount, &out.OptimizedSizeBytes); err != nil {
-			return FolderRollup{}, fmt.Errorf("rollup global optimize variants: %w", err)
+			SELECT
+			  (SELECT COUNT(*) FROM tracks),
+			  (SELECT COALESCE(SUM(size), 0) FROM tracks),
+			  COUNT(DISTINCT CASE WHEN variant_id LIKE 'upscaled-%'  THEN source_path END),
+			  COALESCE(SUM(CASE WHEN variant_id LIKE 'upscaled-%'  THEN size_bytes END), 0),
+			  COUNT(DISTINCT CASE WHEN variant_id LIKE 'optimized-%' THEN source_path END),
+			  COALESCE(SUM(CASE WHEN variant_id LIKE 'optimized-%' THEN size_bytes END), 0)
+			FROM track_variants
+		`).Scan(
+			&out.TrackCount, &out.TotalSizeBytes,
+			&out.UpscaledTrackCount, &out.UpscaledSizeBytes,
+			&out.OptimizedTrackCount, &out.OptimizedSizeBytes,
+		); err != nil {
+			return FolderRollup{}, fmt.Errorf("rollup global stats: %w", err)
 		}
 		return out, nil
 	}

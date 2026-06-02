@@ -115,20 +115,23 @@ func (s *Server) pageLibrary(w http.ResponseWriter, r *http.Request) {
 	cfg := s.deps.CfgHolder.Load()
 	roots := s.deps.Scanner.Roots()
 	multi := len(roots) > 1
-	rows := make([]rootRow, 0, len(roots))
+	rows := make([]libraryRootRow, 0, len(roots))
 	for _, root := range roots {
 		// Single-root scans store paths WITHOUT the root-basename
 		// prefix, so RollupByPrefix("") gives the whole library; the
 		// multi-root form prefixes every path with the basename.
+		// RollupByPrefix appends the "/%" LIKE suffix itself, so pass
+		// the bare basename — basename+"/" would build a "<base>//%"
+		// pattern that matches nothing (CodeRabbit on PR #340).
 		prefix := ""
 		if multi {
-			prefix = filepath.Base(root) + "/"
+			prefix = filepath.Base(root)
 		}
 		ru, err := s.deps.Manifest.RollupByPrefix(r.Context(), prefix)
 		if err != nil {
-			logger.Warn("library page: rollup", "root", root, "err", err)
+			logger.Warn("library page: rollup", "path", root, "err", err)
 		}
-		rows = append(rows, rootRow{
+		rows = append(rows, libraryRootRow{
 			Path:            root,
 			Tracks:          ru.TrackCount,
 			UpscaledTracks:  ru.UpscaledTrackCount,

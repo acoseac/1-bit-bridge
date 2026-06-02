@@ -762,6 +762,13 @@ func TestUpscaleStatsSplitsByKind(t *testing.T) {
 	if err := srv.deps.Manifest.UpsertVariant(ctx, mk("Music/A/01.flac", "upscaled-v2-192000-24", 2000)); err != nil {
 		t.Fatalf("UpsertVariant upscaled: %v", err)
 	}
+	// Second upscaled target on the SAME source so the file counters
+	// (raw sidecar rows) diverge from the distinct-track counts: a
+	// regression that counts distinct tracks instead of files would
+	// report UpscaledVariants/VariantFiles too low here.
+	if err := srv.deps.Manifest.UpsertVariant(ctx, mk("Music/A/01.flac", "upscaled-v2-176400-24", 1500)); err != nil {
+		t.Fatalf("UpsertVariant upscaled #2: %v", err)
+	}
 	if err := srv.deps.Manifest.UpsertVariant(ctx, mk("Music/B/01.flac", "optimized-v2-44100-16", 500)); err != nil {
 		t.Fatalf("UpsertVariant optimized: %v", err)
 	}
@@ -770,18 +777,19 @@ func TestUpscaleStatsSplitsByKind(t *testing.T) {
 	if code := doJSON(t, h, "GET", "/api/upscale/stats", nil, &got); code != 200 {
 		t.Fatalf("stats: %d", code)
 	}
-	if got.UpscaledVariants != 1 || got.UpscaledBytes != 2000 {
-		t.Errorf("upscaled = (%d,%d), want (1,2000)", got.UpscaledVariants, got.UpscaledBytes)
+	if got.UpscaledVariants != 2 || got.UpscaledBytes != 3500 {
+		t.Errorf("upscaled = (%d,%d), want (2,3500)", got.UpscaledVariants, got.UpscaledBytes)
 	}
 	if got.OptimizedVariants != 1 || got.OptimizedBytes != 500 {
 		t.Errorf("optimized = (%d,%d), want (1,500)", got.OptimizedVariants, got.OptimizedBytes)
 	}
-	if got.CachedVariants != 2 || got.CachedBytes != 2500 {
-		t.Errorf("combined = (%d,%d), want (2,2500)", got.CachedVariants, got.CachedBytes)
+	if got.CachedVariants != 3 || got.CachedBytes != 4000 {
+		t.Errorf("combined = (%d,%d), want (3,4000)", got.CachedVariants, got.CachedBytes)
 	}
 
-	// Dashboard composition fields surface the same data: 2 originals,
-	// 1 track with an upscaled variant, 1 with optimized, 2 variant files.
+	// Dashboard composition fields: 1 track with an upscaled variant
+	// (DISTINCT source, despite 2 sidecars), 1 with optimized, 3 variant
+	// files total.
 	var stats statsResponse
 	if code := doJSON(t, h, "GET", "/api/stats", nil, &stats); code != 200 {
 		t.Fatalf("stats endpoint: %d", code)
@@ -789,8 +797,8 @@ func TestUpscaleStatsSplitsByKind(t *testing.T) {
 	if stats.TracksWithUpscaled != 1 || stats.TracksWithOptimized != 1 {
 		t.Errorf("composition tracks = (%d,%d), want (1,1)", stats.TracksWithUpscaled, stats.TracksWithOptimized)
 	}
-	if stats.VariantFiles != 2 || stats.VariantBytes != 2500 {
-		t.Errorf("composition variants = (%d,%d), want (2,2500)", stats.VariantFiles, stats.VariantBytes)
+	if stats.VariantFiles != 3 || stats.VariantBytes != 4000 {
+		t.Errorf("composition variants = (%d,%d), want (3,4000)", stats.VariantFiles, stats.VariantBytes)
 	}
 }
 

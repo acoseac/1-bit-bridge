@@ -89,6 +89,11 @@ func TestRollupByPrefix_GlobalFastPathMatchesPrefixForm(t *testing.T) {
 
 	seedKindVariants(t, s, []VariantRow{
 		{SourcePath: "A/01.flac", VariantID: "upscaled-v2-192000-24", SidecarPath: "/tmp/a1.flac", Format: "flac", SampleRate: 192000, BitsPerSample: 24, SizeBytes: 1000, SourceMTimeNS: 1, SourceSize: 100, SoxSettings: "{}", CreatedAt: 1},
+		// Second upscaled target on the SAME source — pins that the
+		// per-kind track count uses COUNT(DISTINCT source_path) (still 1
+		// track) while the byte sum adds up (1000+600). A regression to
+		// COUNT(*) would surface as UpscaledTrackCount==2 here.
+		{SourcePath: "A/01.flac", VariantID: "upscaled-v2-176400-24", SidecarPath: "/tmp/a1b.flac", Format: "flac", SampleRate: 176400, BitsPerSample: 24, SizeBytes: 600, SourceMTimeNS: 1, SourceSize: 100, SoxSettings: "{}", CreatedAt: 1},
 		{SourcePath: "A/02.flac", VariantID: "optimized-v2-44100-16", SidecarPath: "/tmp/a2.flac", Format: "flac", SampleRate: 44100, BitsPerSample: 16, SizeBytes: 400, SourceMTimeNS: 1, SourceSize: 100, SoxSettings: "{}", CreatedAt: 1},
 	})
 
@@ -99,8 +104,8 @@ func TestRollupByPrefix_GlobalFastPathMatchesPrefixForm(t *testing.T) {
 	if r.TrackCount != 2 {
 		t.Errorf("TrackCount = %d, want 2", r.TrackCount)
 	}
-	if r.UpscaledTrackCount != 1 || r.UpscaledSizeBytes != 1000 {
-		t.Errorf("upscaled = (%d,%d), want (1,1000)", r.UpscaledTrackCount, r.UpscaledSizeBytes)
+	if r.UpscaledTrackCount != 1 || r.UpscaledSizeBytes != 1600 {
+		t.Errorf("upscaled = (%d,%d), want (1,1600)", r.UpscaledTrackCount, r.UpscaledSizeBytes)
 	}
 	if r.OptimizedTrackCount != 1 || r.OptimizedSizeBytes != 400 {
 		t.Errorf("optimized = (%d,%d), want (1,400)", r.OptimizedTrackCount, r.OptimizedSizeBytes)
