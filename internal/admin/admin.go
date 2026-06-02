@@ -649,6 +649,7 @@ var pages = map[string]string{
 	"library_inspector": "library_inspector.html",
 	"jobs":              "jobs.html",
 	"devices":           "devices.html",
+	"data":              "data.html",
 	"settings":          "settings.html",
 }
 
@@ -698,6 +699,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /library/inspector", s.pageLibraryInspector)
 	mux.HandleFunc("GET /jobs", s.pageJobs)
 	mux.HandleFunc("GET /devices", s.pageDevices)
+	mux.HandleFunc("GET /data", s.pageData)
 	mux.HandleFunc("GET /settings", s.pageSettings)
 
 	// JSON API.
@@ -714,7 +716,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/roots", s.apiRootsRemove)
 	mux.HandleFunc("GET /api/devices", s.apiDevicesList)
 	mux.HandleFunc("GET /api/playlists", s.apiPlaylistsList)
+	mux.HandleFunc("GET /api/playlists/detail", s.apiPlaylistDetail)
+	mux.HandleFunc("GET /api/playlists/export", s.apiPlaylistExport)
 	mux.HandleFunc("GET /api/history", s.apiHistorySummary)
+	mux.HandleFunc("GET /api/history/events", s.apiHistoryEvents)
+	mux.HandleFunc("GET /api/history/export", s.apiHistoryExport)
 	mux.HandleFunc("GET /api/tokens", s.apiTokensList)
 	mux.HandleFunc("POST /api/tokens", s.apiTokensMint)
 	mux.HandleFunc("DELETE /api/tokens/{id}", s.apiTokensRevoke)

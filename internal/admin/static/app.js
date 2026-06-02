@@ -4591,6 +4591,181 @@ function initMobileNav() {
 
 // --- boot ---
 
+// ---- Data page (playlists + listening history) ----
+
+// History paging cursor state (module-scoped for the "Load more" button).
+let historyCursor = 0;
+let historyLoading = false;
+
+function initData() {
+  loadPlaylists();
+  loadHistorySummary();
+  historyCursor = 0;
+  loadHistoryEvents(true);
+
+  const closeBtn = document.getElementById("playlist-detail-close");
+  if (closeBtn) {
+    closeBtn.addEventListener("click", () => {
+      const panel = document.getElementById("playlist-detail-panel");
+      if (panel) panel.hidden = true;
+    });
+  }
+  // Playlist export buttons read the currently-open playlist from the
+  // detail panel's dataset (set when a row is opened).
+  document.querySelectorAll(".export-playlist").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const panel = document.getElementById("playlist-detail-panel");
+      if (!panel?.dataset.device || !panel?.dataset.id) return;
+      const q = new URLSearchParams({
+        device: panel.dataset.device,
+        id: panel.dataset.id,
+        format: btn.dataset.format,
+      });
+      globalThis.location = `/api/playlists/export?${q.toString()}`;
+    });
+  });
+  document.querySelectorAll(".export-history").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      globalThis.location = `/api/history/export?format=${encodeURIComponent(btn.dataset.format)}`;
+    });
+  });
+  const moreBtn = document.getElementById("history-load-more");
+  if (moreBtn) moreBtn.addEventListener("click", () => loadHistoryEvents(false));
+}
+
+async function loadPlaylists() {
+  const body = document.getElementById("playlists-body");
+  if (!body) return;
+  try {
+    const data = await API.get("/api/playlists");
+    const rows = data.playlists || [];
+    if (rows.length === 0) {
+      body.innerHTML = `<tr><td colspan="5"><em>No playlist backups yet.</em></td></tr>`;
+      return;
+    }
+    body.innerHTML = rows.map((p) => `
+      <tr class="playlist-row" data-device="${escapeHTML(p.deviceTokenPrefix)}" data-id="${escapeHTML(p.id)}">
+        <td>${escapeHTML(p.name)}</td>
+        <td><code>${escapeHTML(p.deviceTokenPrefix)}</code></td>
+        <td class="num">${p.trackCount}</td>
+        <td>${p.updatedAt ? formatTimeAgo(new Date(p.updatedAt)) : "—"}</td>
+        <td><button type="button" class="btn open-playlist">View</button></td>
+      </tr>`).join("");
+    body.querySelectorAll(".playlist-row").forEach((tr) => {
+      tr.querySelector(".open-playlist").addEventListener("click", () =>
+        openPlaylistDetail(tr.dataset.device, tr.dataset.id));
+    });
+  } catch (err) {
+    body.innerHTML = `<tr><td colspan="5" class="error">Failed to load playlists: ${escapeHTML(String(err.message || err))}</td></tr>`;
+  }
+}
+
+async function openPlaylistDetail(device, id) {
+  const panel = document.getElementById("playlist-detail-panel");
+  const tbody = document.getElementById("playlist-detail-body");
+  if (!panel || !tbody) return;
+  try {
+    const q = new URLSearchParams({ device, id });
+    const pl = await API.get(`/api/playlists/detail?${q.toString()}`);
+    panel.dataset.device = device;
+    panel.dataset.id = id;
+    setText("playlist-detail-title", pl.name || "Playlist");
+    const items = pl.items || [];
+    tbody.innerHTML = items.length === 0
+      ? `<tr><td colspan="4"><em>Empty playlist.</em></td></tr>`
+      : items.map((it) => `
+        <tr>
+          <td class="num">${it.position + 1}</td>
+          <td>${escapeHTML(it.title || "—")}</td>
+          <td>${escapeHTML(it.artist || "—")}</td>
+          <td>${it.foreign
+            ? `<span class="badge idle" title="${escapeHTML(it.originPath || "")}">foreign</span>`
+            : `<code>${escapeHTML(it.path || "")}</code>`}</td>
+        </tr>`).join("");
+    panel.hidden = false;
+    panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="4" class="error">Failed to load: ${escapeHTML(String(err.message || err))}</td></tr>`;
+    panel.hidden = false;
+  }
+}
+
+async function loadHistorySummary() {
+  try {
+    const data = await API.get("/api/history");
+    setText("history-summary", `${data.totalEvents} play${data.totalEvents === 1 ? "" : "s"} recorded across all devices.`);
+    renderHistogram("history-codecs", data.codecs);
+    renderHistogram("history-routes", data.routes);
+    renderHistogram("history-top", data.topTracks, true);
+  } catch (err) {
+    setText("history-summary", "Failed to load history summary.");
+    console.warn("history summary:", err);
+  }
+}
+
+function renderHistogram(id, buckets, basename) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const rows = buckets || [];
+  if (rows.length === 0) {
+    el.innerHTML = `<li class="muted">No data yet.</li>`;
+    return;
+  }
+  const max = Math.max(...rows.map((b) => b.count), 1);
+  el.innerHTML = rows.slice(0, 12).map((b) => {
+    let label = b.label || "(unknown)";
+    if (basename) label = label.split("/").pop();
+    const pct = Math.round((b.count / max) * 100);
+    return `<li title="${escapeHTML(b.label || "")}">
+      <span class="histogram-bar" style="width:${pct}%"></span>
+      <span class="histogram-label">${escapeHTML(label)}</span>
+      <span class="histogram-count">${b.count}</span>
+    </li>`;
+  }).join("");
+}
+
+async function loadHistoryEvents(reset) {
+  const body = document.getElementById("history-events-body");
+  const moreBtn = document.getElementById("history-load-more");
+  if (!body || historyLoading) return;
+  historyLoading = true;
+  try {
+    const q = new URLSearchParams({ limit: "50" });
+    if (!reset && historyCursor > 0) q.set("after", String(historyCursor));
+    const data = await API.get(`/api/history/events?${q.toString()}`);
+    const events = data.events || [];
+    const rowsHTML = events.map((e) => `
+      <tr>
+        <td>${e.startedAt ? formatTimeAgo(new Date(e.startedAt)) : "—"}</td>
+        <td><code>${escapeHTML((e.path || "").split("/").pop())}</code></td>
+        <td>${escapeHTML(e.codec || "—")}</td>
+        <td>${escapeHTML(e.route || "—")}</td>
+        <td class="num">${e.outputRate ? (e.outputRate / 1000).toFixed(1) + "k" : "—"}</td>
+        <td class="num">${Math.round(e.durationUsed || 0)}s</td>
+      </tr>`).join("");
+    if (reset) {
+      body.innerHTML = events.length === 0
+        ? `<tr><td colspan="6"><em>No plays recorded yet.</em></td></tr>`
+        : rowsHTML;
+    } else if (events.length > 0) {
+      body.insertAdjacentHTML("beforeend", rowsHTML);
+    }
+    if (data.nextCursor && events.length > 0) {
+      historyCursor = data.nextCursor;
+    }
+    // Show "Load more" only when the server handed back a cursor AND a
+    // full page — guards the exact-page-boundary case where 50 events
+    // come back with no nextCursor (the next click would re-send the
+    // same cursor). CodeRabbit on PR #341.
+    if (moreBtn) moreBtn.hidden = !(data.nextCursor && events.length >= 50);
+  } catch (err) {
+    if (reset) body.innerHTML = `<tr><td colspan="6" class="error">Failed to load history.</td></tr>`;
+    console.warn("history events:", err);
+  } finally {
+    historyLoading = false;
+  }
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   initMobileNav();
   const active = document.body.dataset.active;
@@ -4600,6 +4775,7 @@ document.addEventListener("DOMContentLoaded", () => {
     case "library_inspector": initLibraryInspector(); break;
     case "jobs": initJobs(); break;
     case "devices": initDevices(); break;
+    case "data": initData(); break;
     case "settings": initSettings(); break;
   }
   // Start the SSE stream after page-init so the initial snapshot

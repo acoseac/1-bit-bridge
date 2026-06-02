@@ -54,6 +54,37 @@ func TestInsertHistoryBatchAndList(t *testing.T) {
 	}
 }
 
+// TestListHistoryGlobalFeed pins the empty-token branch: an admin
+// caller passing "" gets a unified all-devices feed (newest-id first),
+// not the pre-fix WHERE device_token = ” empty result.
+func TestListHistoryGlobalFeed(t *testing.T) {
+	s := newDeviceTestStore(t)
+	ctx := context.Background()
+	if err := s.InsertHistoryBatch(ctx, []PlaybackHistoryRow{
+		histEvent("devA", "A/1.flac", 100, 30, "FLAC", "USB-DAC"),
+		histEvent("devA", "A/2.dsf", 200, 60, "DSF", "CarPlay"),
+		histEvent("devB", "B/1.flac", 150, 10, "FLAC", "Bluetooth"),
+	}); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	all, err := s.ListHistory(ctx, "", 100, 0)
+	if err != nil {
+		t.Fatalf("global list: %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("global feed want 3 events across devices, got %d", len(all))
+	}
+	// Cursor paging on the global feed: first page of 2, then the rest.
+	page1, _ := s.ListHistory(ctx, "", 2, 0)
+	if len(page1) != 2 {
+		t.Fatalf("page1 want 2, got %d", len(page1))
+	}
+	page2, _ := s.ListHistory(ctx, "", 2, page1[1].ID)
+	if len(page2) != 1 || page2[0].ID >= page1[1].ID {
+		t.Errorf("global cursor paging wrong: page2=%+v", page2)
+	}
+}
+
 func TestHistoryEmptyBatchIsNoOp(t *testing.T) {
 	s := newDeviceTestStore(t)
 	if err := s.InsertHistoryBatch(context.Background(), nil); err != nil {
