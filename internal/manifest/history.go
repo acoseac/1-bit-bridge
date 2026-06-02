@@ -84,22 +84,30 @@ type HistoryEventOut struct {
 	IsDoP        bool
 }
 
-// ListHistory returns a device's events, newest-started first, paged by an
-// opaque cursor (the last id of the prior page; "" / 0 for the first page).
-// Read path — no s.mu.
+// ListHistory returns events newest-started first, paged by an opaque
+// cursor (the last id of the prior page; "" / 0 for the first page).
+// An empty deviceToken returns a GLOBAL all-devices feed (mirroring the
+// histogram/TopTracks empty-token convention) — used by the loopback
+// admin console's owner-visible history log; a non-empty token scopes to
+// one device. Read path — no s.mu.
 func (s *Store) ListHistory(ctx context.Context, deviceToken string, limit int, afterID int64) ([]HistoryEventOut, error) {
 	if limit <= 0 || limit > 1000 {
 		limit = 200
 	}
 	// afterID paging walks DESC by started_at; for a stable cursor we page
-	// by id (monotonic with insert order) when afterID > 0.
+	// by id (monotonic with insert order) when afterID > 0. The `WHERE 1=1`
+	// base lets the device-token and cursor clauses append uniformly.
 	q := `
 		SELECT id, path, started_at, duration_used,
 		       COALESCE(codec,''), COALESCE(variant_id,''), COALESCE(iface_type,''),
 		       COALESCE(device_name,''), COALESCE(output_rate,0), is_dop
 		  FROM playback_history
-		 WHERE device_token = ?`
-	args := []any{deviceToken}
+		 WHERE 1=1`
+	var args []any
+	if deviceToken != "" {
+		q += ` AND device_token = ?`
+		args = append(args, deviceToken)
+	}
 	if afterID > 0 {
 		q += ` AND id < ?`
 		args = append(args, afterID)

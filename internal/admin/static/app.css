@@ -2765,3 +2765,41 @@ section.library-inspector {
     overflow-wrap: anywhere;
   }
 }
+
+/* ---- Data page (playlists + listening history) ---- */
+.page.data .export-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.histogram-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1.25rem;
+  margin: 1rem 0 1.5rem;
+}
+.histogram-grid h3 { margin: 0 0 0.5rem; font-size: 0.85rem; color: var(--fg-muted); }
+ul.histogram { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.35rem; }
+ul.histogram li {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.2rem 0.5rem;
+  border-radius: var(--radius);
+  overflow: hidden;
+  font-size: 0.85rem;
+}
+.histogram-bar {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: var(--accent-soft);
+  z-index: 0;
+  border-radius: var(--radius);
+}
+.histogram-label, .histogram-count { position: relative; z-index: 1; }
+.histogram-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.histogram-count { font-variant-numeric: tabular-nums; color: var(--fg-muted); }
+.load-more-row { margin-top: 0.75rem; text-align: center; }
