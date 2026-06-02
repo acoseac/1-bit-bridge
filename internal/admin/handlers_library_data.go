@@ -205,8 +205,18 @@ func (s *Server) writeM3U8(w http.ResponseWriter, name string, items []manifest.
 	fmt.Fprintln(w, "#EXTM3U")
 	fmt.Fprintf(w, "#PLAYLIST:%s\n", name)
 	for _, it := range items {
-		title := strings.TrimSpace(strings.Join([]string{it.Artist, it.Title}, " - "))
-		title = strings.Trim(title, " -")
+		// Trim the fields individually then join only when both are
+		// present — joining-then-trimming would corrupt legit names that
+		// begin/end with a hyphen (e.g. the artist "-M-"). Gemini on PR #341.
+		artist := strings.TrimSpace(it.Artist)
+		songTitle := strings.TrimSpace(it.Title)
+		title := songTitle
+		switch {
+		case artist != "" && songTitle != "":
+			title = artist + " - " + songTitle
+		case artist != "":
+			title = artist
+		}
 		if it.OriginFingerprint != "" || it.OriginPath != "" {
 			// Foreign item — opaque to this bridge, not locally playable.
 			fmt.Fprintf(w, "# foreign (%s): %s\n", it.OriginFingerprint, it.OriginPath)
@@ -298,11 +308,34 @@ func (s *Server) apiHistoryExport(w http.ResponseWriter, r *http.Request) {
 		token = t
 		suffix = strings.TrimSuffix(prefix, "…")
 	}
-	const exportCap = 100000
-	events, err := s.deps.Manifest.ListHistory(r.Context(), token, exportCap, 0)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
-		return
+	// Page through with the cursor: ListHistory caps a single call at
+	// 1000 rows (passing exportCap directly would be silently clamped
+	// back to the 200 default and truncate the export — Gemini on PR
+	// #341). exportCap bounds the total so a huge table can't blow up
+	// the response.
+	const (
+		pageSize  = 1000
+		exportCap = 100000
+	)
+	var events []manifest.HistoryEventOut
+	var after int64
+	for len(events) < exportCap {
+		page, err := s.deps.Manifest.ListHistory(r.Context(), token, pageSize, after)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal", err.Error())
+			return
+		}
+		if len(page) == 0 {
+			break
+		}
+		events = append(events, page...)
+		after = page[len(page)-1].ID // DESC by id → next page is older
+		if len(page) < pageSize {
+			break
+		}
+	}
+	if len(events) > exportCap {
+		events = events[:exportCap]
 	}
 	base := "history-" + safeFilename(suffix)
 	switch strings.ToLower(q.Get("format")) {

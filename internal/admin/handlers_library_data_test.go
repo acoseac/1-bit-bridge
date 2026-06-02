@@ -146,6 +146,37 @@ func TestHistoryEventsAndExport(t *testing.T) {
 	}
 }
 
+// TestHistoryExportPagesPastStoreLimit pins the cursor-paging fix: an
+// export of more than the store's 1000-per-call cap must return every
+// event, not silently truncate to the 200 default (Gemini on PR #341).
+func TestHistoryExportPagesPastStoreLimit(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	h := srv.Handler()
+	ctx := context.Background()
+
+	const n = 1500
+	batch := make([]manifest.PlaybackHistoryRow, 0, n)
+	for i := 0; i < n; i++ {
+		batch = append(batch, manifest.PlaybackHistoryRow{
+			DeviceToken: testDeviceToken, Path: "Artist/Album/t.flac",
+			StartedAt: int64(i + 1), DurationUsed: 1, Codec: "FLAC", IfaceType: "USB-DAC",
+		})
+	}
+	if err := srv.deps.Manifest.InsertHistoryBatch(ctx, batch); err != nil {
+		t.Fatalf("InsertHistoryBatch: %v", err)
+	}
+
+	rec := doExport(t, h, "/api/history/export?format=csv")
+	if rec.Code != 200 {
+		t.Fatalf("export: %d", rec.Code)
+	}
+	// CSV = 1 header line + n data lines.
+	lines := strings.Split(strings.TrimRight(rec.Body.String(), "\n"), "\n")
+	if got := len(lines) - 1; got != n { // minus header
+		t.Errorf("export rows = %d, want %d (truncated at store cap?)", got, n)
+	}
+}
+
 // doExport fires a GET and returns the raw recorder (exports aren't JSON).
 func doExport(t *testing.T, h http.Handler, path string) *httptest.ResponseRecorder {
 	t.Helper()

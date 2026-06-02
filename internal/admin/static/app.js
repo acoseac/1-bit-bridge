@@ -4572,18 +4572,18 @@ function initData() {
   document.querySelectorAll(".export-playlist").forEach((btn) => {
     btn.addEventListener("click", () => {
       const panel = document.getElementById("playlist-detail-panel");
-      if (!panel || !panel.dataset.device || !panel.dataset.id) return;
+      if (!panel?.dataset.device || !panel?.dataset.id) return;
       const q = new URLSearchParams({
         device: panel.dataset.device,
         id: panel.dataset.id,
         format: btn.dataset.format,
       });
-      window.location = `/api/playlists/export?${q.toString()}`;
+      globalThis.location = `/api/playlists/export?${q.toString()}`;
     });
   });
   document.querySelectorAll(".export-history").forEach((btn) => {
     btn.addEventListener("click", () => {
-      window.location = `/api/history/export?format=${encodeURIComponent(btn.dataset.format)}`;
+      globalThis.location = `/api/history/export?format=${encodeURIComponent(btn.dataset.format)}`;
     });
   });
   const moreBtn = document.getElementById("history-load-more");
@@ -4710,7 +4710,11 @@ async function loadHistoryEvents(reset) {
     if (data.nextCursor && events.length > 0) {
       historyCursor = data.nextCursor;
     }
-    if (moreBtn) moreBtn.hidden = events.length < 50;
+    // Show "Load more" only when the server handed back a cursor AND a
+    // full page — guards the exact-page-boundary case where 50 events
+    // come back with no nextCursor (the next click would re-send the
+    // same cursor). CodeRabbit on PR #341.
+    if (moreBtn) moreBtn.hidden = !(data.nextCursor && events.length >= 50);
   } catch (err) {
     if (reset) body.innerHTML = `<tr><td colspan="6" class="error">Failed to load history.</td></tr>`;
     console.warn("history events:", err);
