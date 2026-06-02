@@ -50,6 +50,9 @@ func TestSettingsPatchDLNAEnabled(t *testing.T) {
 	}
 	got = settingsResponse{}
 	doJSON(t, h, "GET", "/api/settings", nil, &got)
+	if got.LibraryName != "Renamed" {
+		t.Error("the partial patch did not persist libraryName — test can't prove a real update happened")
+	}
 	if !got.DLNAEnabled {
 		t.Error("omitting dlnaEnabled cleared the stored value — pointer-nil semantics broken")
 	}
