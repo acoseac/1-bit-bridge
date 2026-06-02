@@ -236,6 +236,28 @@ net.core.wmem_max = 7340032</code></pre>
       <p>in <code>bridge.yaml</code> (or export <code>BRIDGE_DISABLE_HTTP3=true</code>) and restart. If cellular playback recovers, the carrier path is at fault; leave HTTP/3 off for that deployment until the path improves.</p>
     </div>
 
+    <h2 id="dlna">DLNA / UPnP</h2>
+
+    <div class="symptom">
+      <strong>My UPnP renderer (Chord 2Go, mconnect, …) doesn't see the bridge.</strong>
+    </div>
+    <div class="fix">
+      <ol>
+        <li><strong>Confirm DLNA is enabled.</strong> It's off by default. Admin console → Settings → DLNA toggle on, or set <code>dlna.enabled: true</code> in <code>bridge.yaml</code>, then <em>restart the bridge</em> — the MediaServer is wired at startup, so the toggle needs a restart to take effect.</li>
+        <li><strong>Same LAN, no client isolation.</strong> The renderer and the bridge must be on the same subnet. SSDP is multicast; a "guest" Wi-Fi that isolates clients, or a router that doesn't forward multicast, will block discovery.</li>
+        <li><strong>Public mode disables it.</strong> A bridge running in <code>deployment.mode: public</code> refuses to start the DLNA MediaServer on purpose — an internet-facing host must not expose an unauthenticated library browser. DLNA is for LAN-only deployments.</li>
+        <li><strong>Tailscale won't carry it.</strong> DLNA is advertised only on private / link-local interfaces; multicast doesn't traverse Tailscale, so a renderer on a remote tailnet node can't discover the bridge this way.</li>
+        <li>Check the bridge log around startup for the DLNA listener line — it reports the interface(s) it advertised on and the port (default <code>:7790</code>).</li>
+      </ol>
+    </div>
+
+    <div class="symptom">
+      <strong>Should I enable DLNA on a shared / untrusted network?</strong>
+    </div>
+    <div class="fix">
+      <p>No. UPnP has no authentication — while DLNA is enabled, <em>any device on the same LAN can browse and stream your library over the DLNA port without a token</em>. That's inherent to the protocol; the LAN bind is the only gate. Enable it on a network you trust (your home LAN), and leave it off on shared / public Wi-Fi. The iOS-facing <code>/v1/*</code> API is unaffected — it always requires a bearer token. See <a href="privacy.html#dlna">privacy → DLNA</a> for the full posture.</p>
+    </div>
+
     <h2>Other</h2>
 
     <div class="symptom">
