@@ -33,10 +33,10 @@
     </div>
 
     <h2>Regulatory note</h2>
-    <p>1-bit-bridge has no acoseac-operated backend: we run no server, receive no data, and have no account system. The bridge does process some data that can identify a person — a paired device's name, an opt-in listening history, the durable device token, and IP-bearing log lines (all detailed below) — but every byte of it stays on the machine <em>you</em> run the bridge on, under your control. Because nothing is ever transmitted to acoseac, there is no data-controller relationship with us to which a GDPR (EU), Swiss FADP, or CCPA (California) data-subject request could be directed. If you run a bridge that other people use, you are the controller of the data on your own host, and these disclosures are written to help you understand exactly what that is.</p>
+    <p>1-bit-bridge has no ars.md-operated backend: we run no server, receive no data, and have no account system. The bridge does process some data that can identify a person — a paired device's name, an opt-in listening history, the durable device token, and IP-bearing log lines (all detailed below) — but every byte of it stays on the machine <em>you</em> run the bridge on, under your control. Because nothing is ever transmitted to ars.md, there is no data-controller relationship with us to which a GDPR (EU), Swiss FADP, or CCPA (California) data-subject request could be directed. If you run a bridge that other people use, you are the controller of the data on your own host, and these disclosures are written to help you understand exactly what that is.</p>
 
     <h2>What 1-bit-bridge is and where it runs</h2>
-    <p>The bridge is a Go binary that runs as a background service on your machine — under <code>launchd</code> on macOS, <code>systemd</code> on Linux, or as a Windows Service. It indexes a music library you point it at, and serves it to a paired 1-bit iOS device over HTTPS. Everything happens between your machine and your phone; no acoseac-controlled server is involved.</p>
+    <p>The bridge is a Go binary that runs as a background service on your machine — under <code>launchd</code> on macOS, <code>systemd</code> on Linux, or as a Windows Service. It indexes a music library you point it at, and serves it to a paired 1-bit iOS device over HTTPS. Everything happens between your machine and your phone; no ars.md-controlled server is involved.</p>
     <p><strong>Deployment modes (v0.1.4).</strong> The bridge runs in one of two modes set by <code>deployment.mode</code> in <code>bridge.yaml</code>. <em>Loopback mode</em> (the default) binds the admin console to <code>127.0.0.1</code> and exposes the iOS-facing API over LAN / Tailscale only — anyone on the host machine implicitly has filesystem access to the data directory, so the admin console runs without authentication. <em>Public mode</em> (operator opt-in) is for bridges intentionally exposed to the public internet: the admin console binds a routable interface, gains a single-user password login, and the iOS-facing TLS certificate switches to a Let's Encrypt cert provisioned via the ACME protocol. Both modes preserve the same paired-token-authenticated wire protocol toward the iOS app.</p>
 
     <h2>Data stored on your machine</h2>
@@ -77,7 +77,7 @@
     <p>A related opt-in, <code>dlna.discovery.enabled: true</code> (default off), lets the bridge scan the LAN for renderers (SSDP M-SEARCH) so the iOS app can offer them as playback targets via the authenticated <code>GET /v1/renderers</code> endpoint. The discovered list is renderer names + addresses on your own network; nothing is sent off-host.</p>
 
     <h2 id="per-device">Per-device data: device identity, playlist backup, listening history (v0.1.5)</h2>
-    <p>As of v0.1.5 the bridge can hold a small amount of per-device state to back up your playlists and (optionally) your listening history. All of it lives in <code>bridge.db</code> on your machine, is scoped to the device that produced it, and is visible to you in the admin console's <strong>Data</strong> page. None of it is ever sent to acoseac or any third party.</p>
+    <p>As of v0.1.5 the bridge can hold a small amount of per-device state to back up your playlists and (optionally) your listening history. All of it lives in <code>bridge.db</code> on your machine, is scoped to the device that produced it, and is visible to you in the admin console's <strong>Data</strong> page. None of it is ever sent to ars.md or any third party.</p>
     <ul>
       <li><strong>Device identity (<code>device_registrations</code>).</strong> So your backups survive a re-pair or app reinstall, the iOS app generates a durable random per-device token (kept in the iOS Keychain, <em>not</em> iCloud-synced) and sends it as an <code>X-Device-Token</code> header. The bridge records that token, the auth token it is currently bound to, the device name, and first/last-seen timestamps. The device token is the recovery key for that device's backups; it is stored as the bridge receives it.</li>
       <li><strong>Playlist backup (<code>playlists</code> / <code>playlist_items</code>).</strong> When the bridge advertises the <code>playlistBackup</code> capability, the iOS app can back up its playlists here so they survive a reinstall. Each backup is scoped to the device token. A playlist may reference tracks that live on a <em>different</em> bridge or on local/SMB storage — those items are stored only as opaque references (an origin fingerprint + an origin path); <strong>the bridge never resolves, opens, or serves another source's files.</strong> Your iOS app re-resolves those references locally when you restore.</li>
@@ -113,16 +113,16 @@
     <h2>What we do not do</h2>
     <ul>
       <li>No telemetry, no analytics, no usage reporting.</li>
-      <li>No crash reporting to acoseac infrastructure.</li>
+      <li>No crash reporting to ars.md infrastructure.</li>
       <li>No advertising, no third-party trackers, no ad identifiers.</li>
       <li>No transcoding (the bridge is bit-exact by mission).</li>
-      <li>No user account; no acoseac-operated server you connect to.</li>
+      <li>No user account; no ars.md-operated server you connect to.</li>
       <li>No data sold, shared, or disclosed to third parties.</li>
       <li>No knowingly-collected data from children.</li>
     </ul>
 
     <h2>Your rights</h2>
-    <p>acoseac holds none of your data, so there is nothing for us to access, correct, or delete. The data the bridge stores is entirely under your control on your own host: to remove all of it, stop the service and delete the data directory listed above.</p>
+    <p>ars.md holds none of your data, so there is nothing for us to access, correct, or delete. The data the bridge stores is entirely under your control on your own host: to remove all of it, stop the service and delete the data directory listed above.</p>
 
     <h2>Security</h2>
     <p>Vulnerabilities go through the process documented in <a href="https://github.com/acoseac/1-bit-bridge/blob/main/SECURITY.md">SECURITY.md</a> — GitHub's private security advisory flow, or <a href="mailto:support@ars.md?subject=%5B1-bit-bridge-security%5D">support@ars.md</a> with <code>[1-bit-bridge-security]</code> in the subject.</p>
