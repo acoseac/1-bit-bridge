@@ -82,27 +82,24 @@ func pairAlternates(primary string, cfg *config.Config) []string {
 
 	var urls []string
 	if cfg.IsPublic() {
-		// Public mode: operator-declared customEndpoints +
-		// the autocert public domain only. Synthesize the
-		// autocert URL without `:443` when the listen port is
-		// the https default — matches the shape
-		// cmd/bridge/init.go writes into customEndpoints so
-		// the downstream dedupe in `ensurePrimaryFirst`
-		// collapses near-duplicate entries (Gemini medium on
-		// PR #295: pre-fix the synthesized URL always carried
-		// the port suffix and would differ from a
-		// customEndpoint of bare `https://host`).
+		// Public mode: operator-declared customEndpoints + the autocert
+		// public domain only. The synthesized autocert URL names its
+		// port EXPLICITLY (incl. :443) — a port-less dial URL trips the
+		// iOS 7788-default bug on shipped builds (see defaultBridgeURL).
+		// customEndpoints are passed through verbatim (operator's values);
+		// the explicit-port primary from defaultBridgeURL is what the
+		// device dials first, so a bare-host customEndpoint only ever
+		// shows up as a lower-priority failover entry.
 		for _, e := range cfg.CustomEndpoints {
 			if e = strings.TrimSpace(e); e != "" {
 				urls = append(urls, e)
 			}
 		}
 		if d := strings.TrimSpace(cfg.Autocert.Domain); d != "" {
-			u := httpsScheme + d
-			if portStr != "443" {
-				u += ":" + portStr
-			}
-			urls = append(urls, u)
+			// Explicit port (incl. :443) — see defaultBridgeURL: a
+			// port-less URL trips the iOS 7788-default bug on shipped
+			// builds, so every dial URL the QR carries names its port.
+			urls = append(urls, httpsScheme+d+":"+portStr)
 		}
 	} else {
 		// Loopback mode (historical behaviour): the
@@ -174,9 +171,12 @@ func defaultBridgeURL(cfg *config.Config) string {
 	}
 	if cfg.IsPublic() {
 		if d := strings.TrimSpace(cfg.Autocert.Domain); d != "" {
-			if port == "443" {
-				return httpsScheme + d
-			}
+			// Emit the port EXPLICITLY, including :443. The iOS app
+			// (≤ the build that fixes this) defaults a port-less bridge
+			// URL to 7788 (the LAN listenAddress default), which dials
+			// the wrong port on a public bridge and times out. Baking
+			// the real port into the dial URL + QR sidesteps that on
+			// already-shipped apps; newer apps keep working too.
 			return httpsScheme + d + ":" + port
 		}
 		for _, e := range cfg.CustomEndpoints {
