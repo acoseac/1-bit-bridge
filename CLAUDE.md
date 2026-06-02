@@ -447,6 +447,8 @@ Releases *are* wired up: `.github/workflows/release.yml` runs goreleaser on tag 
 ## Documentation refresh on each release
 
 **See `docs/release-process.md`** — which docs to update per release, which NOT to touch, the process, gotchas, after-the-tag steps.
+
+**Public-facing prose names the project entity as `ars.md`, not `acoseac`** (set 2026-06-02, PR #344). In any reader-facing text — `docs/*.html`, README prose, GitHub release notes, the App Store description — refer to the entity that runs no backend / receives no data as **ars.md** (matching the `support@ars.md` contact). `acoseac` is reserved for things that are genuine identifiers and MUST stay verbatim: GitHub repo URLs (`github.com/acoseac/…`), the `acoseac.github.io` Pages domain, shields.io badge URLs, and the launchd / log / bundle identifiers (`com.acoseac.*`). The author's personal name "Arsenie Coseac" in footers also stays. Don't sweep-rename `acoseac` blindly — distinguish prose from identifiers.
 ## External consultation (Gemini)
 
 When you hit a non-obvious decision — Go concurrency subtleties, tsnet integration nuances, framework version-specific behaviors, algorithm tradeoffs that aren't covered in this CLAUDE.md or visible in the code — **formulate a focused question and share it with the user before implementing**. The user routes high-leverage queries through Gemini and relays the response back. The cost of one extra round-trip is small; the cost of shipping wrong is bot reviews, follow-up PRs, regressions visible to operators running the bridge.
