@@ -77,6 +77,16 @@ type Manager struct {
 	// TLS-ALPN-01 challenge handshake. Read by AdminTLSConfig +
 	// the public-API tlsConfig.
 	nextProtos atomic.Value
+
+	// autocertCachedCert returns the LE leaf the listener actually
+	// serves for the autocert domain, read passively from the autocert
+	// cache. Set via SetAutocertCachedCertFn (wired alongside
+	// SetAutocertProvider). Read ONLY by FingerprintForServerName so the
+	// pairing QR advertises the cert iOS will capture — NOT via a
+	// synthetic-hello GetCertificate, which returns a different leaf.
+	// nil pointer = not wired (FingerprintForServerName falls back to
+	// self-signed for the autocert domain).
+	autocertCachedCert atomic.Pointer[servedCertProvider]
 }
 
 // autocertHook is the interface tlsacme.Manager satisfies; the tls
@@ -86,6 +96,14 @@ type Manager struct {
 type autocertHook struct {
 	GetCert    func(*cryptotls.ClientHelloInfo) (*cryptotls.Certificate, error)
 	NextProtos []string
+}
+
+// servedCertProvider wraps the func that returns the LE leaf the
+// listener actually serves for the autocert domain (read passively from
+// the autocert cache). Held in an atomic.Pointer so the value type is
+// fixed for atomic storage. Used ONLY by FingerprintForServerName.
+type servedCertProvider struct {
+	fn func() *cryptotls.Certificate
 }
 
 // NewManager constructs a Manager with the self-signed cert as the
@@ -125,6 +143,7 @@ func (m *Manager) SetAutocertProvider(domain string, getCert func(*cryptotls.Cli
 		m.autocertProvider.Store(nil)
 		m.autocertDomain.Store("")
 		m.nextProtos.Store([]string(nil))
+		m.autocertCachedCert.Store(nil)
 		return
 	}
 	hook := &autocertHook{
@@ -134,6 +153,19 @@ func (m *Manager) SetAutocertProvider(domain string, getCert func(*cryptotls.Cli
 	m.autocertProvider.Store(hook)
 	m.autocertDomain.Store(domain)
 	m.nextProtos.Store(append([]string(nil), nextProtos...))
+}
+
+// SetAutocertCachedCertFn wires the passive accessor for the LE leaf the
+// autocert provider serves on the configured domain (typically
+// tlsacme.Manager.CachedCert). FingerprintForServerName uses it so the
+// pairing QR advertises the exact cert iOS captures. Pass nil to clear.
+// Wired alongside SetAutocertProvider in cmd/bridge/main.go.
+func (m *Manager) SetAutocertCachedCertFn(fn func() *cryptotls.Certificate) {
+	if fn == nil {
+		m.autocertCachedCert.Store(nil)
+		return
+	}
+	m.autocertCachedCert.Store(&servedCertProvider{fn: fn})
 }
 
 // NextProtos returns the ALPN proto-ids the wired providers need
@@ -263,22 +295,67 @@ func (m *Manager) Get(hello *cryptotls.ClientHelloInfo) (*cryptotls.Certificate,
 }
 
 // FingerprintForServerName returns the SHA-256 fingerprint (canonical
-// colon-hex, matching FingerprintFromDER) of the certificate
-// Manager.Get would serve for a TLS handshake carrying serverName as
+// colon-hex, matching FingerprintFromDER) of the certificate the
+// listener actually serves for a TLS handshake carrying serverName as
 // SNI. This lets the pairing-QR baker advertise the fingerprint the
 // device will ACTUALLY capture on connect — the public-domain (autocert)
 // or Tailscale magic-DNS LE fingerprint for those SNIs, the self-signed
-// LAN fingerprint otherwise. Routing is delegated to Get so it can never
-// drift from what the listener serves.
+// LAN fingerprint otherwise.
 //
-// Returns "" only when the resolved cert carries no leaf DER (never the
-// case for the self-signed fallback). For the autocert SNI this calls
-// the autocert hook's GetCertificate, which returns the already-cached
-// cert without blocking once provisioned — the pairing flow runs against
-// a bridge already serving public traffic, so the cert is warm.
+// Routing MIRRORS Get's SNI precedence but reads the STORED served cert
+// for each branch rather than calling Get(syntheticHello): autocert's
+// GetCertificate returns a different leaf for a hello that lacks real
+// cipher-suite / sig-alg negotiation, so a synthetic-hello fingerprint
+// would advertise a cert the iOS client never captures. Autocert →
+// CachedCert() (the on-disk issued leaf); Tailscale → the loaded LE
+// cert; else → self-signed. Returns "" only when the matched branch has
+// no cert yet AND the self-signed leaf is somehow empty (never in
+// practice — self-signed is loaded before NewManager).
 func (m *Manager) FingerprintForServerName(serverName string) string {
-	cert, err := m.Get(&cryptotls.ClientHelloInfo{ServerName: serverName})
-	if err != nil || cert == nil || len(cert.Certificate) == 0 {
+	sni := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(serverName)), ".")
+
+	// (1) Autocert domain → the LE leaf the listener actually serves,
+	// read from the autocert cache. Deliberately NOT via
+	// Get(syntheticHello): autocert.Manager.GetCertificate returns a
+	// different leaf for a hello that lacks real cipher-suite / sig-alg
+	// negotiation, so a synthetic-hello fingerprint would advertise a
+	// cert the iOS client never captures (the cause of the first
+	// public-pairing fix's residual mismatch). No cached cert yet → fall
+	// through to self-signed rather than to a synthetic-hello mint.
+	if domain, _ := m.autocertDomain.Load().(string); domain != "" && sni == domain {
+		if p := m.autocertCachedCert.Load(); p != nil && p.fn != nil {
+			if fp := fingerprintLeaf(p.fn()); fp != "" {
+				return fp
+			}
+		}
+	}
+
+	// (2) Tailscale magic-DNS → the loaded LE cert (the leaf Get serves
+	// for that SNI).
+	if m.sniMatchesTailscale(sni) {
+		if fp := fingerprintLeaf(m.tailscaleCert.Load()); fp != "" {
+			return fp
+		}
+	}
+
+	// (3) Fallback: self-signed.
+	return fingerprintLeaf(m.selfSigned)
+}
+
+// sniMatchesTailscale reports whether sni (already normalized) falls
+// under the configured MagicDNS suffix — mirrors Get's Tailscale branch.
+func (m *Manager) sniMatchesTailscale(sni string) bool {
+	suffix, _ := m.magicDNSSuffix.Load().(string)
+	if suffix == "" {
+		return false
+	}
+	return sni == suffix || strings.HasSuffix(sni, "."+suffix)
+}
+
+// fingerprintLeaf returns the canonical SHA-256 fingerprint of a cert's
+// leaf DER, or "" when the cert is nil / carries no DER blocks.
+func fingerprintLeaf(cert *cryptotls.Certificate) string {
+	if cert == nil || len(cert.Certificate) == 0 {
 		return ""
 	}
 	return FingerprintFromDER(cert.Certificate[0])

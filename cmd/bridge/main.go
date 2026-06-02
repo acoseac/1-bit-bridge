@@ -1309,6 +1309,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		}
 		acmeManager = am
 		certManager.SetAutocertProvider(am.Domain(), am.GetCertificate, am.NextProtos())
+		// Pairing-QR fingerprint reads the SERVED leaf from the autocert
+		// cache (not a synthetic-hello GetCertificate, which returns a
+		// different leaf) so the QR advertises the cert iOS captures.
+		certManager.SetAutocertCachedCertFn(am.CachedCert)
 		fmt.Fprintf(stdout, "autocert: ACME provisioning enabled for %q (cache: %s)\n",
 			am.Domain(), cfg.EffectiveAutocertCacheDir())
 		if cfg.Autocert.UseStaging {

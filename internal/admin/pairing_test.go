@@ -120,31 +120,28 @@ func TestPairAlternatesPublicModeFiltersLANAndTailscale(t *testing.T) {
 	}
 }
 
-// TestPairAlternatesPublicModeOmits443Port pins the Gemini
-// medium normalization on PR #295: when the bridge listens on
-// :443 (the https default), the synthesized autocert URL is
-// `https://host` (no `:443` suffix) so an operator who also
-// declared `https://host` in customEndpoints sees one URL in
-// the QR, not two near-duplicates.
-func TestPairAlternatesPublicModeOmits443Port(t *testing.T) {
+// TestPairAlternatesPublicModeIncludesExplicitPort pins the
+// fix that supersedes PR #295's omit-443 normalization: the
+// synthesized autocert URL now ALWAYS names its port (incl. :443),
+// because a port-less dial URL trips the iOS 7788-default bug on
+// shipped builds. The bare-host customEndpoint is passed through
+// verbatim as a separate, lower-priority entry.
+func TestPairAlternatesPublicModeIncludesExplicitPort(t *testing.T) {
 	cfg := &config.Config{
 		ListenAddress:   ":443",
 		Deployment:      config.DeploymentConfig{Mode: "public", AdminTLSTerminatedByProxy: true},
 		Autocert:        config.AutocertConfig{Domain: "bridge.example.com"},
 		CustomEndpoints: []string{"https://bridge.example.com"},
 	}
-	got := pairAlternates("https://bridge.example.com", cfg)
-	count := 0
+	got := pairAlternates("https://bridge.example.com:443", cfg)
+	foundExplicit := false
 	for _, u := range got {
-		if u == "https://bridge.example.com" {
-			count++
-		}
 		if u == "https://bridge.example.com:443" {
-			t.Errorf("synthesized URL must omit :443; got %q", u)
+			foundExplicit = true
 		}
 	}
-	if count != 1 {
-		t.Errorf("autocert + customEndpoint duplicate should dedupe to exactly 1; got %d alternates=%v", count, got)
+	if !foundExplicit {
+		t.Errorf("synthesized autocert URL must carry the explicit port :443; got %v", got)
 	}
 }
 
@@ -238,8 +235,8 @@ func TestDefaultBridgeURLPublicModePrefersAutocertDomain(t *testing.T) {
 		Autocert:      config.AutocertConfig{Domain: "bridge.ars.md"},
 	}
 	got := defaultBridgeURL(cfg)
-	if got != "https://bridge.ars.md" {
-		t.Errorf("public-mode default URL = %q, want https://bridge.ars.md (no :443)", got)
+	if got != "https://bridge.ars.md:443" {
+		t.Errorf("public-mode default URL = %q, want https://bridge.ars.md:443 (explicit port dodges the iOS 7788-default bug)", got)
 	}
 }
 

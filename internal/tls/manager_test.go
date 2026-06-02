@@ -392,11 +392,15 @@ func TestManager_FingerprintForServerName_AutocertForPublicDomain(t *testing.T) 
 		func(*cryptotls.ClientHelloInfo) (*cryptotls.Certificate, error) { return acmeCert, nil },
 		nil,
 	)
+	// Served-cert accessor: the fingerprint MUST come from the cert the
+	// listener actually serves (read passively), NOT from GetCertificate
+	// with a synthetic hello (which returns a different leaf).
+	mgr.SetAutocertCachedCertFn(func() *cryptotls.Certificate { return acmeCert })
 
 	got := mgr.FingerprintForServerName("bridge.example.com")
 	want := FingerprintFromDER(acmeCert.Certificate[0])
 	if got != want {
-		t.Errorf("public-domain fingerprint = %q, want autocert %q", got, want)
+		t.Errorf("public-domain fingerprint = %q, want served autocert %q", got, want)
 	}
 	if got == FingerprintFromDER(self.Certificate[0]) {
 		t.Error("public-domain host resolved to the self-signed fingerprint — the bug this fix closes")
@@ -415,6 +419,7 @@ func TestManager_FingerprintForServerName_NormalizesSNI(t *testing.T) {
 		func(*cryptotls.ClientHelloInfo) (*cryptotls.Certificate, error) { return acmeCert, nil },
 		nil,
 	)
+	mgr.SetAutocertCachedCertFn(func() *cryptotls.Certificate { return acmeCert })
 
 	want := FingerprintFromDER(acmeCert.Certificate[0])
 	for _, sni := range []string{"BRIDGE.EXAMPLE.COM", "bridge.example.com.", "Bridge.Example.Com."} {
@@ -424,10 +429,10 @@ func TestManager_FingerprintForServerName_NormalizesSNI(t *testing.T) {
 	}
 }
 
-func TestManager_FingerprintForServerName_FallsBackToSelfSignedOnAutocertError(t *testing.T) {
-	// Autocert error → Get falls through to self-signed, so the
-	// fingerprint helper returns the self-signed fingerprint (no worse
-	// than the pre-fix behaviour; the common case has the cert warm).
+func TestManager_FingerprintForServerName_FallsBackToSelfSignedWhenNoServedCert(t *testing.T) {
+	// Autocert domain configured but the served-cert accessor is unset
+	// (cert not minted yet / older wiring) OR returns nil → fall back to
+	// the self-signed fingerprint rather than a synthetic-hello mint.
 	self := mintTestCert(t, []string{"host.local"})
 	mgr := NewManager(self)
 	mgr.SetAutocertProvider(
@@ -435,11 +440,16 @@ func TestManager_FingerprintForServerName_FallsBackToSelfSignedOnAutocertError(t
 		func(*cryptotls.ClientHelloInfo) (*cryptotls.Certificate, error) { return nil, errSentinel },
 		nil,
 	)
-
-	got := mgr.FingerprintForServerName("bridge.example.com")
 	want := FingerprintFromDER(self.Certificate[0])
-	if got != want {
-		t.Errorf("autocert-error fingerprint = %q, want self-signed fallback %q", got, want)
+
+	// (a) accessor never wired
+	if got := mgr.FingerprintForServerName("bridge.example.com"); got != want {
+		t.Errorf("no-accessor fingerprint = %q, want self-signed fallback %q", got, want)
+	}
+	// (b) accessor wired but returns nil (cert not minted yet)
+	mgr.SetAutocertCachedCertFn(func() *cryptotls.Certificate { return nil })
+	if got := mgr.FingerprintForServerName("bridge.example.com"); got != want {
+		t.Errorf("nil-served-cert fingerprint = %q, want self-signed fallback %q", got, want)
 	}
 }
 

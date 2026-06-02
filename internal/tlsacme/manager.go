@@ -234,6 +234,17 @@ func (m *Manager) Status() Status {
 	return st
 }
 
+// CachedCert exposes the passively-read issued cert (see cachedCert).
+// Used by the pairing-QR baker to fingerprint the EXACT leaf the
+// listener serves on real handshakes — reading it from the autocert
+// cache rather than via GetCertificate(syntheticHello), which returns
+// a different leaf for a hello lacking real cipher-suite / sig-alg
+// negotiation (so the QR would advertise a cert the iOS client never
+// captures). Returns nil when no cert has been minted yet.
+func (m *Manager) CachedCert() *cryptotls.Certificate {
+	return m.cachedCert()
+}
+
 // cachedCert returns the issued cert from the on-disk cache, or
 // nil when nothing has been minted yet. **Passive lookup** —
 // reads the autocert.Cache directly, never triggers a mint
