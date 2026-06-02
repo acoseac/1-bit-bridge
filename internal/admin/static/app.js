@@ -251,7 +251,7 @@ function renderTailscaleTile(s) {
   // magic-DNS cert). Hide the tile entirely so it can never render a
   // misleading "Disabled" badge on a VPS where Tailscale was never the
   // point.
-  if (s && s.publicMode) {
+  if (s?.publicMode) {
     panel.hidden = true;
     return;
   }
@@ -1350,11 +1350,15 @@ function initSettings() {
       // we never accidentally enable mDNS by sending false).
       tailscaleMode: fd.get("tailscaleMode") || "",
       mdnsEnabled: fd.get("mdnsEnabled") === "on",
-      // UPnP/DLNA toggle (restart-required). Disabled in public mode,
-      // where the checkbox is rendered `disabled` so fd.get returns null
-      // — coerce to false so the server's pointer field gets a real
-      // value (the public-mode gate force-disables DLNA regardless).
-      dlnaEnabled: fd.get("dlnaEnabled") === "on",
+      // UPnP/DLNA toggle (restart-required). In public mode the checkbox
+      // is rendered `disabled`, so omit the field entirely there (undefined
+      // → dropped by JSON.stringify → server's pointer stays nil → no
+      // change). Coercing a disabled checkbox to false would silently
+      // overwrite a stored dlnaEnabled=true and trigger a spurious
+      // restartRequired (Gemini on PR #342).
+      dlnaEnabled: form.querySelector('input[name="dlnaEnabled"]')?.disabled
+        ? undefined
+        : fd.get("dlnaEnabled") === "on",
     };
     try {
       const r = await API.patch("/api/settings", body);

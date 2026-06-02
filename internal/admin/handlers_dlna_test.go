@@ -37,4 +37,20 @@ func TestSettingsPatchDLNAEnabled(t *testing.T) {
 	if resp.RestartRequired {
 		t.Error("idempotent dlnaEnabled submission must NOT mark RestartRequired")
 	}
+
+	// Omitting dlnaEnabled (what the JS sends in public mode, where the
+	// checkbox is disabled) must leave the stored value untouched and not
+	// trigger a restart — the contract the Gemini fix on PR #342 relies on.
+	resp = settingsPatchResponse{}
+	if code := doJSON(t, h, "PATCH", "/api/settings", map[string]any{"libraryName": "Renamed"}, &resp); code != 200 {
+		t.Fatalf("patch other field: %d", code)
+	}
+	if resp.RestartRequired {
+		t.Error("a patch that omits dlnaEnabled must not mark RestartRequired for DLNA")
+	}
+	got = settingsResponse{}
+	doJSON(t, h, "GET", "/api/settings", nil, &got)
+	if !got.DLNAEnabled {
+		t.Error("omitting dlnaEnabled cleared the stored value — pointer-nil semantics broken")
+	}
 }
