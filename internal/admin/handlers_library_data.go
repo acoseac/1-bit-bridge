@@ -165,6 +165,11 @@ func (s *Server) apiPlaylistExport(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 	prefix, id, format := q.Get("device"), q.Get("id"), strings.ToLower(q.Get("format"))
+	// Reject an unsupported format before the playlist lookup.
+	if format != "json" && format != "csv" && format != "m3u8" {
+		writeError(w, http.StatusBadRequest, "bad-format", "format must be one of json, csv, m3u8")
+		return
+	}
 	token, ok := s.resolvePlaylistDeviceToken(r, prefix, id)
 	if !ok {
 		writeError(w, http.StatusNotFound, errCodeNotFound, "no matching playlist for that device")
@@ -304,6 +309,13 @@ func (s *Server) apiHistoryExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
+	// Validate the format BEFORE the expensive paged scan so a bad value
+	// returns 400 without hitting the DB (CodeRabbit on PR #341).
+	format := strings.ToLower(q.Get("format"))
+	if format != "json" && format != "csv" {
+		writeError(w, http.StatusBadRequest, "bad-format", "format must be one of json, csv")
+		return
+	}
 	token := ""
 	suffix := "all"
 	if prefix := q.Get("device"); prefix != "" {
@@ -321,20 +333,17 @@ func (s *Server) apiHistoryExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	base := "history-" + safeFilename(suffix)
-	switch strings.ToLower(q.Get("format")) {
-	case "json":
+	if format == "json" {
 		out := make([]historyEventDTO, 0, len(events))
 		for _, e := range events {
 			out = append(out, historyToDTO(e))
 		}
 		setDownloadHeaders(w, "application/json", base+".json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"events": out})
-	case "csv":
-		setDownloadHeaders(w, "text/csv; charset=utf-8", base+".csv")
-		writeHistoryCSV(w, events)
-	default:
-		writeError(w, http.StatusBadRequest, "bad-format", "format must be one of json, csv")
+		return
 	}
+	setDownloadHeaders(w, "text/csv; charset=utf-8", base+".csv")
+	writeHistoryCSV(w, events)
 }
 
 // collectHistoryForExport pages through ListHistory with the cursor.
