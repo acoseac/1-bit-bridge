@@ -160,6 +160,12 @@ function applyStats(s) {
   if (!s) return;
   setText("tracks-indexed", s.tracksIndexed);
   setText("device-count", s.deviceCount);
+  // Library composition tiles (dashboard only; no-op elsewhere).
+  setText("comp-originals", s.tracksIndexed);
+  setText("comp-upscaled", s.tracksWithUpscaled ?? 0);
+  setText("comp-optimized", s.tracksWithOptimized ?? 0);
+  setText("comp-variant-files", s.variantFiles ?? 0);
+  setText("comp-variant-bytes", humanBytes(s.variantBytes ?? 0));
   const scanStatus = document.getElementById("scan-status");
   if (scanStatus) {
     scanStatus.innerHTML = s.isScanning
@@ -1512,6 +1518,13 @@ async function refreshUpscaleStats(tile) {
       return;
     }
     tile.hidden = false;
+    // Honest per-kind split — the combined "cached variants" line used
+    // to lump upscaled + optimized together, so an all-optimize library
+    // read as if it had upscaled work it never did.
+    const upN = r.upscaledVariants ?? 0;
+    const optN = r.optimizedVariants ?? 0;
+    setText("upscale-upscaled", `${upN} file${upN === 1 ? "" : "s"} · ${formatBytes(r.upscaledBytes ?? 0)}`);
+    setText("upscale-optimized", `${optN} file${optN === 1 ? "" : "s"} · ${formatBytes(r.optimizedBytes ?? 0)}`);
     setText("upscale-cached-count", r.cachedVariants ?? 0);
     setText("upscale-cached-bytes", formatBytes(r.cachedBytes ?? 0));
     if (r.pool) {

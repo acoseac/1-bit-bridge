@@ -4,8 +4,9 @@
 
   <div class="cards">
     <div class="card">
-      <div class="card-label">Tracks indexed</div>
+      <div class="card-label">Original tracks</div>
       <div class="card-value" id="tracks-indexed">{{.Data.TracksIndexed}}</div>
+      <div class="card-foot">source files (excludes variants)</div>
     </div>
     <div class="card">
       <div class="card-label">Paired devices</div>
@@ -21,6 +22,21 @@
       <div class="card-value">{{bytesHuman .Data.DBBytes}}</div>
       <div class="card-foot">bridge.db</div>
     </div>
+  </div>
+
+  <div class="panel">
+    <h2>Library composition</h2>
+    <p class="hint">An honest breakdown of what the bridge holds. Variants are generated copies stored in the transcoded cache — they're never counted as original tracks.</p>
+    <dl class="composition">
+      <dt>Originals</dt>
+      <dd><span id="comp-originals">{{.Data.TracksIndexed}}</span> tracks</dd>
+      <dt>Upscaled</dt>
+      <dd><span id="comp-upscaled">{{.Data.TracksWithUpscaled}}</span> tracks have a hi-res variant</dd>
+      <dt>Optimized</dt>
+      <dd><span id="comp-optimized">{{.Data.TracksWithOptimized}}</span> tracks have a CarPlay variant</dd>
+      <dt>Variant files</dt>
+      <dd><span id="comp-variant-files">{{.Data.VariantFiles}}</span> files · <span id="comp-variant-bytes">{{bytesHuman .Data.VariantBytes}}</span> on disk</dd>
+    </dl>
   </div>
 
   <div class="panel">

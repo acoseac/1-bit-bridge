@@ -44,16 +44,55 @@ type statsResponse struct {
 	IsScanning      bool      `json:"isScanning"`
 	ScanProgress    int64     `json:"scanProgress"`
 	LastFullScan    time.Time `json:"lastFullScan,omitempty"`
-	DBBytes         int64     `json:"dbBytes"`
-	Fingerprint     string    `json:"fingerprint"`
-	DeviceCount     int       `json:"deviceCount"`
-	ListenAddress   string    `json:"listenAddress"`
-	AdminAddress    string    `json:"adminAddress"`
+	// Library composition — an honest breakdown of what the bridge
+	// holds. TracksIndexed above is originals-only (the `tracks`
+	// table never includes variants); these surface the variant
+	// coverage so the dashboard can show Originals vs Upscaled vs
+	// Optimized vs total variant files instead of a single ambiguous
+	// "total tracks". TracksWith* are DISTINCT source-track counts
+	// (a track with several upscaled targets counts once); VariantFiles
+	// is the raw sidecar-file count. Populated from RollupByPrefix("")
+	// + VariantStatsByKind.
+	TracksWithUpscaled  int    `json:"tracksWithUpscaled"`
+	TracksWithOptimized int    `json:"tracksWithOptimized"`
+	VariantFiles        int    `json:"variantFiles"`
+	VariantBytes        int64  `json:"variantBytes"`
+	DBBytes             int64  `json:"dbBytes"`
+	Fingerprint         string `json:"fingerprint"`
+	DeviceCount         int    `json:"deviceCount"`
+	ListenAddress       string `json:"listenAddress"`
+	AdminAddress        string `json:"adminAddress"`
 }
 
 type rootRow struct {
 	Path   string `json:"path"`
 	Tracks int    `json:"tracks"`
+}
+
+// libraryRootRow is the Library *page* (HTML template) per-root row. It
+// carries per-kind variant coverage that the JSON `/api/roots` shape
+// (rootRow) deliberately does NOT — keeping the two separate so the
+// roots API never emits zero-valued upscaled/optimized fields it doesn't
+// populate (CodeRabbit on PR #340).
+type libraryRootRow struct {
+	Path            string
+	Tracks          int
+	UpscaledTracks  int
+	OptimizedTracks int
+	UpscaledBytes   int64
+	OptimizedBytes  int64
+}
+
+// libraryPageData is the template payload for the Library page: the
+// per-root rows plus a "Transcoded cache" summary (where variant
+// sidecars live on disk + the global per-kind file count and size).
+type libraryPageData struct {
+	Roots             []libraryRootRow
+	VariantsDir       string
+	UpscaledVariants  int
+	OptimizedVariants int
+	UpscaledBytes     int64
+	OptimizedBytes    int64
 }
 
 type tokenRow struct {
@@ -209,21 +248,42 @@ func (s *Server) getStatsSnapshot() statsResponse {
 	// effort and not user-cancellable anyway.
 	tracks, _ := s.deps.Manifest.CountTracks(context.Background())
 	dbBytes := dbSize(filepath.Join(cfg.DataDir, "bridge.db"))
+	// Library composition — best-effort; a SQL hiccup leaves the
+	// breakdown zeroed rather than failing the whole stats payload.
+	rollup, err := s.deps.Manifest.RollupByPrefix(context.Background(), "")
+	if err != nil {
+		logger.Warn("stats: library rollup", "err", err)
+	}
+	byKind, err := s.deps.Manifest.VariantStatsByKind(context.Background())
+	if err != nil {
+		logger.Warn("stats: variant stats by kind", "err", err)
+		byKind = map[string]manifest.VariantKindStat{}
+	}
+	var variantFiles int
+	var variantBytes int64
+	for _, st := range byKind {
+		variantFiles += st.Files
+		variantBytes += st.Bytes
+	}
 	return statsResponse{
-		LibraryName:     cfg.LibraryName,
-		ProtocolVersion: version.ProtocolVersion,
-		ServerVersion:   version.ServerVersion,
-		UptimeSec:       int64(now.Sub(s.deps.StartedAt).Seconds()),
-		StartedAt:       s.deps.StartedAt,
-		TracksIndexed:   tracks,
-		IsScanning:      s.deps.Scanner.IsScanning(),
-		ScanProgress:    s.deps.Scanner.ScanProgress(),
-		LastFullScan:    s.deps.Scanner.LastFullScan(),
-		DBBytes:         dbBytes,
-		Fingerprint:     s.deps.Fingerprint,
-		DeviceCount:     len(s.deps.Auth.List()),
-		ListenAddress:   cfg.ListenAddress,
-		AdminAddress:    cfg.AdminAddress,
+		LibraryName:         cfg.LibraryName,
+		ProtocolVersion:     version.ProtocolVersion,
+		ServerVersion:       version.ServerVersion,
+		UptimeSec:           int64(now.Sub(s.deps.StartedAt).Seconds()),
+		StartedAt:           s.deps.StartedAt,
+		TracksIndexed:       tracks,
+		IsScanning:          s.deps.Scanner.IsScanning(),
+		ScanProgress:        s.deps.Scanner.ScanProgress(),
+		LastFullScan:        s.deps.Scanner.LastFullScan(),
+		TracksWithUpscaled:  rollup.UpscaledTrackCount,
+		TracksWithOptimized: rollup.OptimizedTrackCount,
+		VariantFiles:        variantFiles,
+		VariantBytes:        variantBytes,
+		DBBytes:             dbBytes,
+		Fingerprint:         s.deps.Fingerprint,
+		DeviceCount:         len(s.deps.Auth.List()),
+		ListenAddress:       cfg.ListenAddress,
+		AdminAddress:        cfg.AdminAddress,
 	}
 }
 
@@ -961,6 +1021,17 @@ type upscaleStatsResponse struct {
 	// operator gauge disk usage before deciding to re-enable
 	// or `--gc`.
 	CachedBytes int64 `json:"cachedBytes"`
+	// Per-kind split of CachedVariants / CachedBytes. The combined
+	// totals above conflated upscale + optimize variants — a library
+	// with only CarPlay-optimize sidecars still showed them all under
+	// "cached variants", reading as upscaled work that never happened.
+	// These four fields let the Settings → Audio quality tile show
+	// "Upscaled: N (X)" and "Optimized: M (Y)" honestly; they sum to
+	// the combined totals. Populated from `Store.VariantStatsByKind`.
+	UpscaledVariants  int   `json:"upscaledVariants"`
+	UpscaledBytes     int64 `json:"upscaledBytes"`
+	OptimizedVariants int   `json:"optimizedVariants"`
+	OptimizedBytes    int64 `json:"optimizedBytes"`
 	// StoragePath is the absolute on-disk directory the
 	// runtime pool writes converted sidecars to. Same value
 	// surfaced on /api/settings.upscaleStoragePath; included
@@ -1006,16 +1077,30 @@ func (s *Server) apiUpscaleStats(w http.ResponseWriter, r *http.Request) {
 	}
 	resp.Enabled = (resp.Pool != nil)
 	if s.deps.Manifest != nil {
-		count, bytes, err := s.deps.Manifest.CountVariants(r.Context())
+		// Per-kind split drives both the combined totals (back-compat)
+		// and the honest "Upscaled / Optimized" breakdown. One query
+		// instead of the prior kind-agnostic CountVariants.
+		byKind, err := s.deps.Manifest.VariantStatsByKind(r.Context())
 		if err != nil {
 			// Log + degrade: caller still gets the live
 			// fields. A SQL failure here is the kind of
 			// thing that should be visible in logs but not
 			// turn the whole tile into an error state.
-			logger.Warn("upscale stats: count variants", "err", err)
+			logger.Warn("upscale stats: variant stats by kind", "err", err)
 		} else {
-			resp.CachedVariants = count
-			resp.CachedBytes = bytes
+			up := byKind["upscale"]
+			opt := byKind["optimize"]
+			resp.UpscaledVariants = up.Files
+			resp.UpscaledBytes = up.Bytes
+			resp.OptimizedVariants = opt.Files
+			resp.OptimizedBytes = opt.Bytes
+			// Combined totals sum every kind (including a stray
+			// "unknown" bucket) so the back-compat fields still
+			// account for all rows the way CountVariants did.
+			for _, st := range byKind {
+				resp.CachedVariants += st.Files
+				resp.CachedBytes += st.Bytes
+			}
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)

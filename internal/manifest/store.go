@@ -3187,13 +3187,39 @@ func (s *Store) CountChildTracks(ctx context.Context, parent string) (int, error
 // size. Indexes on `tracks(path)` and `track_variants(source_path)`
 // make these O(matched rows) lookups.
 func (s *Store) RollupByPrefix(ctx context.Context, prefix string) (FolderRollup, error) {
-	var pattern string
+	// Global fast path: the empty prefix means "the whole library".
+	// The general path below builds a `%`-pattern and runs
+	// `WHERE path LIKE '%'`, which forces SQLite to evaluate the LIKE
+	// against every row and forfeits index-only counting. The
+	// dashboard's "Library composition" tile calls this per page load,
+	// so on a 50k+ track library the unconstrained-LIKE form is a
+	// needless O(N) scan. Run the aggregates with no WHERE clause
+	// instead — SQLite can satisfy the COUNT/SUM directly.
 	if prefix == "" {
-		pattern = `%` // match all rows
-	} else {
-		escaped := likeEscape(prefix)
-		pattern = escaped + `/%`
+		// One round-trip: two scalar subqueries cover `tracks`, and the
+		// conditional aggregation scans `track_variants` exactly once
+		// instead of twice (Gemini on PR #340).
+		var out FolderRollup
+		if err := s.db.QueryRowContext(ctx, `
+			SELECT
+			  (SELECT COUNT(*) FROM tracks),
+			  (SELECT COALESCE(SUM(size), 0) FROM tracks),
+			  COUNT(DISTINCT CASE WHEN variant_id LIKE 'upscaled-%'  THEN source_path END),
+			  COALESCE(SUM(CASE WHEN variant_id LIKE 'upscaled-%'  THEN size_bytes END), 0),
+			  COUNT(DISTINCT CASE WHEN variant_id LIKE 'optimized-%' THEN source_path END),
+			  COALESCE(SUM(CASE WHEN variant_id LIKE 'optimized-%' THEN size_bytes END), 0)
+			FROM track_variants
+		`).Scan(
+			&out.TrackCount, &out.TotalSizeBytes,
+			&out.UpscaledTrackCount, &out.UpscaledSizeBytes,
+			&out.OptimizedTrackCount, &out.OptimizedSizeBytes,
+		); err != nil {
+			return FolderRollup{}, fmt.Errorf("rollup global stats: %w", err)
+		}
+		return out, nil
 	}
+	escaped := likeEscape(prefix)
+	pattern := escaped + `/%`
 	var out FolderRollup
 	if err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*), COALESCE(SUM(size), 0)
@@ -3274,6 +3300,68 @@ func (s *Store) CountVariantsByKind(ctx context.Context) (map[string]int64, erro
 			return nil, err
 		}
 		out[kind] = total
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// VariantKindStat is the per-kind file count + combined byte size for
+// one `track_variants` prefix grouping ("upscale" / "optimize"). Used
+// by the admin dashboard's "Library composition" tile and the Settings
+// → Audio quality stats card, which need the *file* count (a single
+// source track may carry several upscaled targets, so file count ≠ the
+// DISTINCT-source counts `RollupByPrefix` returns).
+type VariantKindStat struct {
+	Files int   `json:"files"`
+	Bytes int64 `json:"bytes"`
+}
+
+// VariantStatsByKind returns per-kind file counts and combined byte
+// sizes, keyed "upscale" / "optimize" (and "unknown" only when that
+// bucket is non-empty — defensive, should stay empty in practice).
+//
+// Sibling of `CountVariantsByKind` (which returns bytes only): this one
+// also carries `COUNT(*)` so the admin surfaces can render
+// "Upscaled: N files (X)" / "Optimized: M files (Y)" honestly instead
+// of the conflated all-variants total the Settings tile showed before.
+//
+// The result map is **pre-seeded** with zero-valued "upscale" +
+// "optimize" entries, because a `GROUP BY` over an empty
+// `track_variants` returns zero rows — pre-seeding keeps the JSON
+// payload shape stable so the frontend never reads `undefined`.
+//
+// Single SQL round-trip; the GROUP BY is planned against the
+// `(source_path, variant_id)` primary key — no extra index needed.
+func (s *Store) VariantStatsByKind(ctx context.Context) (map[string]VariantKindStat, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT
+		  CASE
+		    WHEN variant_id LIKE 'upscaled-%'  THEN 'upscale'
+		    WHEN variant_id LIKE 'optimized-%' THEN 'optimize'
+		    ELSE 'unknown'
+		  END AS kind,
+		  COUNT(*) AS files,
+		  COALESCE(SUM(size_bytes), 0) AS total_bytes
+		FROM track_variants
+		GROUP BY kind
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("variant stats by kind: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]VariantKindStat{
+		"upscale":  {},
+		"optimize": {},
+	}
+	for rows.Next() {
+		var kind string
+		var stat VariantKindStat
+		if err := rows.Scan(&kind, &stat.Files, &stat.Bytes); err != nil {
+			return nil, err
+		}
+		out[kind] = stat
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
