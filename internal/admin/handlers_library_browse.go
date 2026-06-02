@@ -110,6 +110,18 @@ type browseResponse struct {
 	NextFolderCursor string            `json:"nextFolderCursor,omitempty"`
 	NextTrackCursor  string            `json:"nextTrackCursor,omitempty"`
 	Limit            int               `json:"limit"`
+	// Recursive subtree rollup for the ENTIRE node — every track under
+	// `path`, not just the paginated folder/track page in Folders/Tracks.
+	// TotalTracks above is immediate loose tracks only; these are the
+	// numbers the action-panel coverage header must use. Summing the
+	// returned page client-side under-counts whenever a node has more
+	// children than one page (e.g. a 647-folder root showed ~13k of 25k
+	// tracks). Computed via RollupByPrefix — same source as the Dashboard's
+	// "Library composition" tile, so the two always agree.
+	SubtreeTracks    int   `json:"subtreeTracks"`
+	SubtreeUpscaled  int   `json:"subtreeUpscaled"`
+	SubtreeOptimized int   `json:"subtreeOptimized"`
+	SubtreeSizeBytes int64 `json:"subtreeSizeBytes"`
 }
 
 // browseProjectionResponse is the JSON envelope returned by
@@ -204,13 +216,24 @@ func (s *Server) apiLibraryBrowse(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "count-tracks", err.Error())
 		return
 	}
+	// Recursive rollup for the whole subtree (NOT just the paginated page)
+	// so the action-panel coverage header has the true node totals.
+	rollup, err := s.deps.Manifest.RollupByPrefix(r.Context(), normalised)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "browse-rollup", err.Error())
+		return
+	}
 	resp := browseResponse{
-		Path:         normalised,
-		Folders:      make([]browseFolderRow, 0, len(folders)),
-		Tracks:       make([]browseTrackRow, 0, len(tracks)),
-		TotalFolders: totalFolders,
-		TotalTracks:  totalTracks,
-		Limit:        limit,
+		Path:             normalised,
+		Folders:          make([]browseFolderRow, 0, len(folders)),
+		Tracks:           make([]browseTrackRow, 0, len(tracks)),
+		TotalFolders:     totalFolders,
+		TotalTracks:      totalTracks,
+		Limit:            limit,
+		SubtreeTracks:    rollup.TrackCount,
+		SubtreeUpscaled:  rollup.UpscaledTrackCount,
+		SubtreeOptimized: rollup.OptimizedTrackCount,
+		SubtreeSizeBytes: rollup.TotalSizeBytes,
 	}
 	for _, f := range folders {
 		resp.Folders = append(resp.Folders, browseFolderRow{

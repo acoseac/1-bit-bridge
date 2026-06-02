@@ -99,6 +99,50 @@ func TestApiLibraryBrowse_RootListsTopLevelFolders(t *testing.T) {
 	}
 }
 
+// TestApiLibraryBrowse_SubtreeRollupIsPageIndependent pins the fix for
+// the inspector under-count bug: the recursive subtree rollup must reflect
+// the WHOLE node, not just the paginated folder/track page. With limit=1
+// the root browse returns only one of the two top-level folders, but
+// SubtreeTracks must still be 4 (the full library), not 3 (MusicA only).
+func TestApiLibraryBrowse_SubtreeRollupIsPageIndependent(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	browseTestSeed(t, srv)
+
+	// Full root: 4 tracks, 2 upscaled, 0 optimized, 1700 bytes.
+	var full browseResponse
+	if code := doJSON(t, srv.Handler(), "GET", "/api/library/browse", nil, &full); code != http.StatusOK {
+		t.Fatalf("browse root: %d", code)
+	}
+	if full.SubtreeTracks != 4 || full.SubtreeUpscaled != 2 || full.SubtreeOptimized != 0 {
+		t.Errorf("root subtree = (t%d u%d o%d), want (4 2 0)", full.SubtreeTracks, full.SubtreeUpscaled, full.SubtreeOptimized)
+	}
+	if full.SubtreeSizeBytes != 1700 {
+		t.Errorf("root SubtreeSizeBytes = %d, want 1700", full.SubtreeSizeBytes)
+	}
+
+	// limit=1 truncates the folder page to one folder, but the subtree
+	// rollup must be unchanged — this is the regression the bug produced.
+	var paged browseResponse
+	if code := doJSON(t, srv.Handler(), "GET", "/api/library/browse?limit=1", nil, &paged); code != http.StatusOK {
+		t.Fatalf("browse root limit=1: %d", code)
+	}
+	if len(paged.Folders) != 1 {
+		t.Fatalf("limit=1 should return 1 folder, got %d", len(paged.Folders))
+	}
+	if paged.SubtreeTracks != 4 || paged.SubtreeUpscaled != 2 {
+		t.Errorf("paged subtree = (t%d u%d), want (4 2) — must NOT shrink with the page", paged.SubtreeTracks, paged.SubtreeUpscaled)
+	}
+
+	// A nested node scopes correctly: MusicA subtree is 3 tracks / 2 upscaled.
+	var nested browseResponse
+	if code := doJSON(t, srv.Handler(), "GET", "/api/library/browse?path=MusicA", nil, &nested); code != http.StatusOK {
+		t.Fatalf("browse MusicA: %d", code)
+	}
+	if nested.SubtreeTracks != 3 || nested.SubtreeUpscaled != 2 {
+		t.Errorf("MusicA subtree = (t%d u%d), want (3 2)", nested.SubtreeTracks, nested.SubtreeUpscaled)
+	}
+}
+
 // TestApiLibraryBrowse_NestedFolderReturnsChildrenAndTracks
 // covers the typical browse-into-album call.
 func TestApiLibraryBrowse_NestedFolderReturnsChildrenAndTracks(t *testing.T) {
