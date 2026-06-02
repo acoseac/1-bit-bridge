@@ -99,6 +99,66 @@ func TestApiLibraryBrowse_RootListsTopLevelFolders(t *testing.T) {
 	}
 }
 
+// TestApiLibraryBrowse_SubtreeRollupIsPageIndependent pins the fix for
+// the inspector under-count bug: the recursive subtree rollup must reflect
+// the WHOLE node, not just the paginated folder/track page. With limit=1
+// the root browse returns only one of the two top-level folders, but
+// SubtreeTracks must still be 4 (the full library), not 3 (MusicA only).
+func TestApiLibraryBrowse_SubtreeRollupIsPageIndependent(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	browseTestSeed(t, srv)
+	h := srv.Handler()
+
+	browse := func(name, url string) browseResponse {
+		t.Helper()
+		var resp browseResponse
+		if code := doJSON(t, h, "GET", url, nil, &resp); code != http.StatusOK {
+			t.Fatalf("%s: %d", name, code)
+		}
+		return resp
+	}
+	wantSubtree := func(name string, r browseResponse, tracks, upscaled, optimized int, bytes int64) {
+		t.Helper()
+		got := [4]int64{int64(r.SubtreeTracks), int64(r.SubtreeUpscaled), int64(r.SubtreeOptimized), r.SubtreeSizeBytes}
+		want := [4]int64{int64(tracks), int64(upscaled), int64(optimized), bytes}
+		if got != want {
+			t.Errorf("%s subtree (tracks,upscaled,optimized,bytes) = %v, want %v", name, got, want)
+		}
+	}
+
+	// Full root: 4 tracks, 2 upscaled, 0 optimized, 1700 bytes.
+	wantSubtree("root", browse("browse root", "/api/library/browse"), 4, 2, 0, 1700)
+
+	// limit=1 truncates the folder page to one folder, but the subtree rollup
+	// must be unchanged — this is the regression the bug produced.
+	paged := browse("browse root limit=1", "/api/library/browse?limit=1")
+	if len(paged.Folders) != 1 {
+		t.Fatalf("limit=1 should return 1 folder, got %d", len(paged.Folders))
+	}
+	wantSubtree("paged", paged, 4, 2, 0, 1700)
+
+	// A nested node scopes correctly: MusicA = 3 tracks / 2 upscaled / 1000 B.
+	wantSubtree("MusicA", browse("browse MusicA", "/api/library/browse?path=MusicA"), 3, 2, 0, 1000)
+
+	// Follow-up (load-more) page: the subtree fields must be OMITTED from the
+	// JSON (not present as 0). The frontend's `subtree* ?? fallback` relies on
+	// undefined-vs-0 to fall back to the page sum, and decoding into a struct
+	// can't tell omission from zero — so assert against the raw body
+	// (CodeRabbit on PR #343).
+	req := httptest.NewRequest("GET", "/api/library/browse?afterFolder=MusicA&limit=1", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	rw := httptest.NewRecorder()
+	h.ServeHTTP(rw, req)
+	if rw.Code != http.StatusOK {
+		t.Fatalf("browse load-more: %d", rw.Code)
+	}
+	for _, k := range []string{"subtreeTracks", "subtreeUpscaled", "subtreeOptimized", "subtreeSizeBytes"} {
+		if strings.Contains(rw.Body.String(), k) {
+			t.Errorf("load-more body must omit %q (rollup is first-page only): %s", k, rw.Body.String())
+		}
+	}
+}
+
 // TestApiLibraryBrowse_NestedFolderReturnsChildrenAndTracks
 // covers the typical browse-into-album call.
 func TestApiLibraryBrowse_NestedFolderReturnsChildrenAndTracks(t *testing.T) {

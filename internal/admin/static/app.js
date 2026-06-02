@@ -2326,14 +2326,18 @@ function inspectorUpdateToolbarState(path) {
 function inspectorOpenProjectionForCurrent() {
   const data = inspectorState.lastBrowseData;
   if (!data) return; // toolbar button is disabled in this state, defensive
-  const rollup = inspectorBrowseRollup(data);
+  // Prefer the server's recursive subtree rollup over a client-side sum of
+  // the returned page — the latter under-counts whenever the node has more
+  // folders/tracks than one page (the 647-folder root showed ~13k of 25k).
+  // Fall back to the page sum only if an older bridge omits the field.
+  const fallback = inspectorBrowseRollup(data);
   const folder = {
     name: inspectorState.path || "Library root",
     path: inspectorState.path,
-    trackCount: rollup.trackCount,
-    upscaledCount: rollup.upscaledCount,
-    optimizedCount: rollup.optimizedCount,
-    totalSizeBytes: rollup.totalSizeBytes,
+    trackCount: data.subtreeTracks ?? fallback.trackCount,
+    upscaledCount: data.subtreeUpscaled ?? fallback.upscaledCount,
+    optimizedCount: data.subtreeOptimized ?? fallback.optimizedCount,
+    totalSizeBytes: data.subtreeSizeBytes ?? fallback.totalSizeBytes,
   };
   inspectorOpenPanelSingle(folder);
 }
@@ -2444,7 +2448,7 @@ async function inspectorRender(data) {
 
   const folders = data.folders || [];
   const tracks = data.tracks || [];
-  const hasAnyTracks = (data.totalTracks || 0) > 0
+  const hasAnyTracks = (data.subtreeTracks ?? data.totalTracks ?? 0) > 0
     || inspectorBrowseRollup(data).trackCount > 0;
   const currentInfoBtn = document.getElementById("inspector-current-info");
   if (currentInfoBtn) currentInfoBtn.disabled = !hasAnyTracks;
