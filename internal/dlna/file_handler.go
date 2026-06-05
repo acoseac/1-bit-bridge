@@ -107,6 +107,15 @@ func FileHandler(lib LibrarySource) http.HandlerFunc {
 		w.Header().Set("contentFeatures.dlna.org", ContentFeaturesHeaderValue(ua, ext))
 		w.Header().Set("Accept-Ranges", "bytes")
 
+		// Phase 0 diagnostic tracing (OFF unless BRIDGE_DLNA_TRACE is set).
+		// The trace wrapper sits BELOW the adaptive writer so it times the
+		// real flush-to-socket calls (the ones that block under renderer
+		// back-pressure) and watches the request Context for peer-close —
+		// distinguishing a STALLED UPnP pause from a closed socket. Zero-cost
+		// passthrough when disabled. See file_trace.go.
+		dst, finishTrace := newFileTrace(w, r, trackID)
+		defer finishTrace()
+
 		// Wrap in AdaptiveResponseWriter. Default chunk size today;
 		// task #11 wires per-connection RTT/jitter telemetry into
 		// `ChunkSizeFor` so the wrapper adapts to observed network
@@ -115,7 +124,7 @@ func FileHandler(lib LibrarySource) http.HandlerFunc {
 		// `http.ServeContent`'s 32KB internal loop would otherwise
 		// leave in our buffer.
 		chunkSize := ChunkSizeFor(0, 0, 0) // (rtt, jitter, loss) — placeholder until task #11
-		aw := NewAdaptiveResponseWriter(w, chunkSize)
+		aw := NewAdaptiveResponseWriter(dst, chunkSize)
 		defer aw.Flush()
 
 		// http.ServeContent handles Range + 206 + If-Modified-Since
