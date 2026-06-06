@@ -526,15 +526,16 @@ func (c *SSDPDiscoveryClient) fetchAndCacheDetails(
 	}
 
 	c.cache.Upsert(RendererInfo{
-		UDN:               udn,
-		FriendlyName:      desc.FriendlyName,
-		Manufacturer:      desc.Manufacturer,
-		ModelDescription:  desc.ModelDescription,
-		ModelName:         desc.ModelName,
-		ControlURL:        avSvc.ControlURL,
-		EventURL:          avSvc.EventSubURL,
-		SinkProtocolInfos: sinks,
-		LastSeenAt:        lastSeenAt,
+		UDN:                 udn,
+		FriendlyName:        desc.FriendlyName,
+		Manufacturer:        desc.Manufacturer,
+		ModelDescription:    desc.ModelDescription,
+		ModelName:           desc.ModelName,
+		ControlURL:          avSvc.ControlURL,
+		EventURL:            avSvc.EventSubURL,
+		RenderingControlURL: desc.Services[ServiceRenderingControl].ControlURL,
+		SinkProtocolInfos:   sinks,
+		LastSeenAt:          lastSeenAt,
 	})
 	packageLogger.Info("renderer discovered",
 		"udn", udn,

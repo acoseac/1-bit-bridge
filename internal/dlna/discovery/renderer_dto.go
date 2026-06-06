@@ -47,6 +47,16 @@ type RendererInfo struct {
 	// updates (PR 4's predictive GENA failover would consume this).
 	EventURL string `json:"eventURL,omitempty"`
 
+	// RenderingControlURL — absolute URL of the RenderingControl
+	// service's SOAP control endpoint, when the renderer advertises
+	// it (already parsed by ParseDeviceDescription into
+	// Services[ServiceRenderingControl]). iOS dispatches SetMute /
+	// SetVolume here. Empty when the renderer has no RenderingControl
+	// service (iOS skips the renderer-volume slider AND the DSD-pause
+	// SetMute ring-suppression for that renderer). Additive field —
+	// pre-existing clients ignore it.
+	RenderingControlURL string `json:"renderingControlURL,omitempty"`
+
 	// SinkProtocolInfos — the renderer's advertised
 	// `GetProtocolInfo` Sink list, raw strings as the renderer
 	// returned them. iOS's `RendererCapability` consumes these
