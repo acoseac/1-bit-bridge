@@ -51,6 +51,21 @@
       </tbody>
     </table>
   </div>
+
+  <!-- UPnP upstream MediaServers (Bridge PR E). Hidden when the
+       upnpUpstream feature is disabled; JS hides this panel after the
+       /api/upnp/servers probe returns enabled=false. -->
+  <div class="panel" id="upnp-upstream-panel" hidden>
+    <div class="panel-head">
+      <h2>UPnP upstream servers</h2>
+    </div>
+    <p class="muted">
+      Configured upstream MediaServers (e.g. a Chord 2Go) whose tracks the
+      bridge ingests into its manifest and proxies to iOS bit-exact. Click
+      <strong>Rescan</strong> to force-walk a server now.
+    </p>
+    <div id="upnp-upstream-list"></div>
+  </div>
 </section>
 
 <dialog id="pair-modal">

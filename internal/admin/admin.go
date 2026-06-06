@@ -283,6 +283,16 @@ type Deps struct {
 	// Transitions INTO cli/tsnet still require restart (auto-
 	// pilot + listener composition need a clean boot).
 	TailscaleDisable func()
+
+	// UPnPUpstream is the admin-side gateway to the upstream
+	// MediaServer feature (bridge PR E). Wired to an adapter around
+	// the cmd/bridge upnpUpstreamLifecycle so the Devices page can
+	// surface per-server discovery state + ingest stats + a
+	// force-rescan button. Nil-safe — when absent (operator hasn't
+	// enabled `upnpUpstream.enabled` in bridge.yaml), the relevant
+	// admin endpoints return a stable error envelope the frontend
+	// uses to hide the UPnP card.
+	UPnPUpstream UPnPUpstreamProvider
 }
 
 // AutocertStatusSnapshot mirrors tlsacme.Status for the admin
@@ -740,6 +750,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PATCH /api/upscale/target", s.apiUpscaleTargetPatch)
 	mux.HandleFunc("GET /api/upscale/variants-dir", s.apiVariantsDirGet)
 	mux.HandleFunc("POST /api/upscale/variants-dir", s.apiVariantsDirPatch)
+	mux.HandleFunc("GET /api/upnp/servers", s.apiUPnPServers)
+	mux.HandleFunc("POST /api/upnp/rescan", s.apiUPnPRescan)
 	mux.HandleFunc("POST /api/restart", s.apiRestart)
 	mux.HandleFunc("GET /api/pair-qr", s.apiPairQR)
 	mux.HandleFunc("GET /api/backups", s.apiBackupsList)

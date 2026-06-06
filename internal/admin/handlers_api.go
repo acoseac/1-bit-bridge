@@ -53,15 +53,20 @@ type statsResponse struct {
 	// (a track with several upscaled targets counts once); VariantFiles
 	// is the raw sidecar-file count. Populated from RollupByPrefix("")
 	// + VariantStatsByKind.
-	TracksWithUpscaled  int    `json:"tracksWithUpscaled"`
-	TracksWithOptimized int    `json:"tracksWithOptimized"`
-	VariantFiles        int    `json:"variantFiles"`
-	VariantBytes        int64  `json:"variantBytes"`
-	DBBytes             int64  `json:"dbBytes"`
-	Fingerprint         string `json:"fingerprint"`
-	DeviceCount         int    `json:"deviceCount"`
-	ListenAddress       string `json:"listenAddress"`
-	AdminAddress        string `json:"adminAddress"`
+	TracksWithUpscaled  int   `json:"tracksWithUpscaled"`
+	TracksWithOptimized int   `json:"tracksWithOptimized"`
+	VariantFiles        int   `json:"variantFiles"`
+	VariantBytes        int64 `json:"variantBytes"`
+	// UPnPRoutedTracks is the count of tracks in the manifest whose
+	// bytes the bridge proxies from an upstream UPnP MediaServer (PR
+	// #353 admin surface). Always emitted; zero when the feature
+	// isn't enabled.
+	UPnPRoutedTracks int    `json:"upnpRoutedTracks"`
+	DBBytes          int64  `json:"dbBytes"`
+	Fingerprint      string `json:"fingerprint"`
+	DeviceCount      int    `json:"deviceCount"`
+	ListenAddress    string `json:"listenAddress"`
+	AdminAddress     string `json:"adminAddress"`
 }
 
 type rootRow struct {
@@ -280,6 +285,10 @@ func (s *Server) getStatsSnapshot() statsResponse {
 		variantFiles += st.Files
 		variantBytes += st.Bytes
 	}
+	upnpRouted, err := s.deps.Manifest.CountUPnPRoutingTotal(context.Background())
+	if err != nil {
+		logger.Warn("stats: upnp routing count", "err", err)
+	}
 	return statsResponse{
 		LibraryName:         cfg.LibraryName,
 		ProtocolVersion:     version.ProtocolVersion,
@@ -294,6 +303,7 @@ func (s *Server) getStatsSnapshot() statsResponse {
 		TracksWithOptimized: rollup.OptimizedTrackCount,
 		VariantFiles:        variantFiles,
 		VariantBytes:        variantBytes,
+		UPnPRoutedTracks:    upnpRouted,
 		DBBytes:             dbBytes,
 		Fingerprint:         s.deps.Fingerprint,
 		DeviceCount:         len(s.deps.Auth.List()),
