@@ -1156,10 +1156,12 @@ func (s *Store) DeleteTracksBatch(ctx context.Context, paths []string) error {
 		chunk := paths[start:end]
 
 		// Enumerate sidecars for THIS chunk before the DELETE so the
-		// FK CASCADE doesn't yank rows out from under us.
-		placeholders, args := makeINClause(chunk)
-		rows, err := s.db.QueryContext(ctx,
-			`SELECT sidecar_path FROM track_variants WHERE source_path IN (`+placeholders+`)`, args...)
+		// FK CASCADE doesn't yank rows out from under us. The SQL is
+		// built by buildPathInQuery (placeholders only — no caller
+		// string ever reaches the query body, so the dynamic '?,?,?'
+		// list is injection-safe by construction).
+		selectSQL, args := buildPathInQuery("SELECT sidecar_path FROM track_variants WHERE source_path", chunk)
+		rows, err := s.db.QueryContext(ctx, selectSQL, args...)
 		var sidecars []string
 		if err == nil {
 			for rows.Next() {
@@ -1185,8 +1187,8 @@ func (s *Store) DeleteTracksBatch(ctx context.Context, paths []string) error {
 		if err != nil {
 			return fmt.Errorf("manifest: DeleteTracksBatch begin tx: %w", err)
 		}
-		_, err = tx.ExecContext(ctx,
-			`DELETE FROM tracks WHERE path IN (`+placeholders+`)`, args...)
+		deleteSQL, args := buildPathInQuery("DELETE FROM tracks WHERE path", chunk)
+		_, err = tx.ExecContext(ctx, deleteSQL, args...)
 		if err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("manifest: DeleteTracksBatch exec: %w", err)
@@ -1201,16 +1203,23 @@ func (s *Store) DeleteTracksBatch(ctx context.Context, paths []string) error {
 	return nil
 }
 
-// makeINClause builds a comma-separated placeholder list and the
-// matching []any args for `column IN (?, ?, ...)`. Caller must inline
-// the returned string into its own SQL.
-func makeINClause(paths []string) (string, []any) {
+// buildPathInQuery returns a complete SQL string of the form
+// `<prefix> IN (?,?,...)` plus the matching []any args, suitable for
+// passing straight to QueryContext / ExecContext. `prefix` is a
+// caller-side compile-time literal (e.g. "DELETE FROM tracks WHERE
+// path"); the dynamic suffix is ONLY placeholders + a deterministic
+// length derived from len(paths). No caller-supplied string ever
+// reaches the SQL body — both inputs are either a literal or a count.
+// Injection-safe by construction.
+func buildPathInQuery(prefix string, paths []string) (string, []any) {
 	if len(paths) == 0 {
-		return "", nil
+		return prefix + " IN ()", nil
 	}
 	args := make([]any, len(paths))
 	var b strings.Builder
-	b.Grow(2 * len(paths))
+	b.Grow(len(prefix) + 5 + 2*len(paths))
+	b.WriteString(prefix)
+	b.WriteString(" IN (")
 	for i, p := range paths {
 		if i > 0 {
 			b.WriteByte(',')
@@ -1218,6 +1227,7 @@ func makeINClause(paths []string) (string, []any) {
 		b.WriteByte('?')
 		args[i] = p
 	}
+	b.WriteByte(')')
 	return b.String(), args
 }
 
