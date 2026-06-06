@@ -202,11 +202,19 @@ func (u UPnPUpstreamConfig) Validate() error {
 	if !u.Enabled {
 		return nil
 	}
-	if u.ServerTTLSeconds > 0 && u.MSearchIntervalSeconds > 0 &&
-		u.ServerTTLSeconds <= u.MSearchIntervalSeconds {
+	// Compare EFFECTIVE durations — raw-field comparison would falsely
+	// pass when one side is 0 (which silently falls back to the default),
+	// e.g. raw {MS: 120, TTL: 0} satisfies "0 <= 120" yet the effective
+	// {MS: 120s, TTL: 180s} pair is in fact valid. The effective-pair
+	// form also surfaces an *inconsistent* operator-supplied pair like
+	// raw {MS: 240, TTL: 0} → effective MS=240s, TTL=180s as the
+	// genuine misconfiguration it is.
+	ms := u.EffectiveMSearchInterval()
+	ttl := u.EffectiveServerTTL()
+	if ttl <= ms {
 		return fmt.Errorf(
-			"upnpUpstream: serverTTLSeconds (%d) must be > msearchIntervalSeconds (%d)",
-			u.ServerTTLSeconds, u.MSearchIntervalSeconds)
+			"upnpUpstream: serverTTLSeconds (%v) must be > msearchIntervalSeconds (%v) — otherwise still-online servers evict between cycles",
+			ttl, ms)
 	}
 	seenPrefix := make(map[string]int, len(u.Servers))
 	seenUDN := make(map[string]int, len(u.Servers))
@@ -221,9 +229,12 @@ func (u UPnPUpstreamConfig) Validate() error {
 				"upnpUpstream.servers[%d] (%q): either udn or manualDescriptionURL is required",
 				i, s.Name)
 		}
-		prefix := strings.TrimSpace(s.PathPrefix)
+		// Normalize the way the walker does: trim spaces AND surrounding
+		// slashes. Otherwise "Chord 2Go" and "Chord 2Go/" would slip past
+		// this check yet collide at walk time.
+		prefix := strings.Trim(strings.TrimSpace(s.PathPrefix), "/")
 		if prefix == "" {
-			prefix = strings.TrimSpace(s.Name)
+			prefix = strings.Trim(strings.TrimSpace(s.Name), "/")
 		}
 		if other, dup := seenPrefix[strings.ToLower(prefix)]; dup {
 			return fmt.Errorf(

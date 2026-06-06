@@ -314,7 +314,10 @@ func (c *MediaServerDiscoveryClient) runLoop(ctx context.Context) {
 			return
 		}
 		// Short read deadline so an idle socket still hears ctx cancel.
-		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		// Route through nowFunc so tests with an injected clock can
+		// reason about timeouts deterministically (matches
+		// internal/dlna/discovery's convention).
+		_ = conn.SetReadDeadline(c.nowFunc().Add(2 * time.Second))
 		n, addr, err := conn.ReadFromUDP(buf)
 		if err != nil {
 			// Read deadline / Stop'd socket — both expected.

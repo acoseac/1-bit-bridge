@@ -117,6 +117,47 @@ func TestUPnPUpstreamConfig_Validate_DuplicatePathPrefix(t *testing.T) {
 	}
 }
 
+func TestUPnPUpstreamConfig_Validate_EffectiveDurations_NotRaw(t *testing.T) {
+	// Raw {MS:240, TTL:0} would falsely pass a raw-field comparison
+	// (0 <= 240 yields "valid"), but the EFFECTIVE pair is {MS:240s,
+	// TTL:180s default} — which IS misconfigured. Validate must catch
+	// it via the effective comparison.
+	u := UPnPUpstreamConfig{
+		Enabled:                true,
+		MSearchIntervalSeconds: 240, // > default TTL of 180s
+		ServerTTLSeconds:       0,   // falls back to default 180s
+		Servers:                []UPnPUpstreamServerConfig{{Name: "x", UDN: "uuid:1"}},
+	}
+	err := u.Validate()
+	if err == nil || !strings.Contains(err.Error(), "must be >") {
+		t.Fatalf("err = %v; want effective-duration mismatch", err)
+	}
+	// Inverse: raw {MS:0, TTL:0} falls back to default {60s, 180s} — VALID.
+	ok := UPnPUpstreamConfig{
+		Enabled: true,
+		Servers: []UPnPUpstreamServerConfig{{Name: "x", UDN: "uuid:1"}},
+	}
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("default-pair should validate: %v", err)
+	}
+}
+
+func TestUPnPUpstreamConfig_Validate_PathPrefixCollidesAcrossSlashTrim(t *testing.T) {
+	// "Chord 2Go" and "Chord 2Go/" must be treated as the same prefix
+	// (the walker strips slashes; the validator must do the same so
+	// collisions don't bypass it).
+	u := UPnPUpstreamConfig{
+		Enabled: true,
+		Servers: []UPnPUpstreamServerConfig{
+			{Name: "A", UDN: "uuid:1", PathPrefix: "Chord 2Go"},
+			{Name: "B", UDN: "uuid:2", PathPrefix: "Chord 2Go/"},
+		},
+	}
+	if err := u.Validate(); err == nil || !strings.Contains(err.Error(), "pathPrefix") {
+		t.Fatalf("err = %v; want pathPrefix collision after slash-trim", err)
+	}
+}
+
 func TestUPnPUpstreamConfig_Validate_DuplicateUDN(t *testing.T) {
 	u := UPnPUpstreamConfig{
 		Enabled: true,
