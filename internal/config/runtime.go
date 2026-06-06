@@ -86,5 +86,17 @@ func Clone(cfg *Config) *Config {
 		v := *cfg.DLNA.TelemetryEnabled
 		out.DLNA.TelemetryEnabled = &v
 	}
+	// UPnPUpstream: the Servers slice + its per-element SkipTopLevelContainers
+	// slice both need deep copies so mutations on the clone don't leak back.
+	if cfg.UPnPUpstream.Servers != nil {
+		out.UPnPUpstream.Servers = make([]UPnPUpstreamServerConfig, len(cfg.UPnPUpstream.Servers))
+		for i, s := range cfg.UPnPUpstream.Servers {
+			cp := s
+			if s.SkipTopLevelContainers != nil {
+				cp.SkipTopLevelContainers = append([]string(nil), s.SkipTopLevelContainers...)
+			}
+			out.UPnPUpstream.Servers[i] = cp
+		}
+	}
 	return &out
 }

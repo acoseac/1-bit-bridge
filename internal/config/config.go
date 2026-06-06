@@ -72,10 +72,187 @@ type Config struct {
 	Autocert        AutocertConfig     `yaml:"autocert,omitempty"`
 	MDNS            MDNSConfig         `yaml:"mdns,omitempty"`
 	DLNA            DLNAConfig         `yaml:"dlna,omitempty"`
+	UPnPUpstream    UPnPUpstreamConfig `yaml:"upnpUpstream,omitempty"`
 
 	// DisableHTTP3 prevents the server from binding UDP ports and
 	// advertising Alt-Svc headers for HTTP/3 upgrades. Defaults to false.
 	DisableHTTP3 bool `yaml:"disableHttp3,omitempty"`
+}
+
+// UPnPUpstreamConfig governs the opt-in "ingest an upstream UPnP/DLNA
+// MediaServer" feature — the bridge runs an SSDP M-SEARCH client for
+// `device:MediaServer:1`, walks the discovered server's "Browse Folders"
+// view into its own manifest, and proxies file reads to iOS over the
+// bridge's authed/pinned HTTP transport. Companion to the DLNA
+// MediaServer + Discovery sections — this one points OUTWARD, those
+// inward (server self + renderer discovery).
+//
+// **LAN-only** by design: SSDP multicast can't traverse Tailscale. The
+// upstream MediaServer must live on the same network segment as the
+// bridge; the iOS client reaches the bridge over any transport (LAN /
+// Tailscale / public mode) since the bridge proxies the file bytes.
+//
+// **Source-of-truth for identity is the upstream's filesystem-tree
+// view** ("Browse Folders" on MiniDLNA, container id "64"). The bridge
+// reconstructs a stable path (`<prefix>/Artist/Album/NN - Title.ext`)
+// from the directory chain, hashes that to the trackID iOS persists,
+// and re-resolves the volatile <res> URL at fetch time.
+type UPnPUpstreamConfig struct {
+	// Enabled flips the feature on. Default false — discovery only
+	// runs when an operator opts in (the M-SEARCH cadence is mild
+	// but the feature is meaningless without at least one Server
+	// entry, and we don't want to invite questions from users who
+	// only have a single-direction DLNA setup).
+	Enabled bool `yaml:"enabled,omitempty"`
+
+	// Servers configures the upstream MediaServers the bridge should
+	// ingest. Empty list means "discovery only, log what we find but
+	// don't walk anything" — useful for an operator to learn the
+	// UDN of their 2Go before adding a per-server entry.
+	Servers []UPnPUpstreamServerConfig `yaml:"servers,omitempty"`
+
+	// MSearchIntervalSeconds is the discovery cadence. Default 60s —
+	// twice the renderer side's 30s because MediaServers are
+	// always-on devices, not phones that flap online/offline.
+	MSearchIntervalSeconds int `yaml:"msearchIntervalSeconds,omitempty"`
+
+	// ServerTTLSeconds is the staleness window. Default 180s — ~3
+	// missed M-SEARCH cycles of grace, strict enough that a server
+	// gone for a few minutes drops from the live host:port
+	// resolver. MUST be > MSearchIntervalSeconds (Validate
+	// enforces).
+	ServerTTLSeconds int `yaml:"serverTTLSeconds,omitempty"`
+}
+
+// UPnPUpstreamServerConfig is one per-upstream entry under
+// UPnPUpstream.Servers.
+type UPnPUpstreamServerConfig struct {
+	// Name is the operator-visible label (logs, admin console). Required.
+	Name string `yaml:"name"`
+
+	// UDN matches the upstream's `uuid:<uuid>` so SSDP-discovered
+	// host:port + control URL flow to this entry. Either UDN or
+	// ManualDescriptionURL is required.
+	UDN string `yaml:"udn,omitempty"`
+
+	// ManualDescriptionURL is a fallback for networks where SSDP
+	// multicast doesn't reach the bridge (operator pastes the
+	// /rootDesc.xml URL from the upstream's admin page). Either
+	// UDN or this is required.
+	ManualDescriptionURL string `yaml:"manualDescriptionURL,omitempty"`
+
+	// PathPrefix is prepended to every track's manifest Path so
+	// multi-upstream setups can't collide. Defaults to a sanitized
+	// form of Name when omitted. The trackID hashes on this prefix
+	// — changing it after a scan re-keys every track.
+	PathPrefix string `yaml:"pathPrefix,omitempty"`
+
+	// RootObjectID is the ContentDirectory id whose subtree the
+	// walker traverses. Defaults to "64" (MiniDLNA's Browse Folders
+	// — the real filesystem view, the stable-identity source). Set
+	// explicitly for non-MiniDLNA servers that expose the
+	// filesystem view under a different id.
+	RootObjectID string `yaml:"rootObjectID,omitempty"`
+
+	// SkipTopLevelContainers is a case-insensitive list of folder
+	// titles to skip at the root of the walk (e.g. "System Volume
+	// Information" on the 2Go's FAT card).
+	SkipTopLevelContainers []string `yaml:"skipTopLevelContainers,omitempty"`
+}
+
+// Default-rooting constants for UPnPUpstreamConfig — exported so the
+// scanner/ingest layer reads the same constants the validator enforces.
+const (
+	DefaultUPnPUpstreamMSearchInterval = 60 * time.Second
+	DefaultUPnPUpstreamServerTTL       = 180 * time.Second
+	DefaultUPnPUpstreamRootObjectID    = "64"
+)
+
+// EffectiveMSearchInterval returns the operator value when positive,
+// otherwise the default.
+func (u UPnPUpstreamConfig) EffectiveMSearchInterval() time.Duration {
+	if u.MSearchIntervalSeconds > 0 {
+		return time.Duration(u.MSearchIntervalSeconds) * time.Second
+	}
+	return DefaultUPnPUpstreamMSearchInterval
+}
+
+// EffectiveServerTTL returns the operator value when positive,
+// otherwise the default.
+func (u UPnPUpstreamConfig) EffectiveServerTTL() time.Duration {
+	if u.ServerTTLSeconds > 0 {
+		return time.Duration(u.ServerTTLSeconds) * time.Second
+	}
+	return DefaultUPnPUpstreamServerTTL
+}
+
+// EffectiveRootObjectID returns the configured id or the MiniDLNA
+// default ("64", Browse Folders).
+func (s UPnPUpstreamServerConfig) EffectiveRootObjectID() string {
+	if id := strings.TrimSpace(s.RootObjectID); id != "" {
+		return id
+	}
+	return DefaultUPnPUpstreamRootObjectID
+}
+
+// Validate the upnpUpstream block. Called from Config.Validate. Returns
+// nil when the block is disabled or empty so an off-by-default operator
+// pays no cost.
+func (u UPnPUpstreamConfig) Validate() error {
+	if !u.Enabled {
+		return nil
+	}
+	// Compare EFFECTIVE durations — raw-field comparison would falsely
+	// pass when one side is 0 (which silently falls back to the default),
+	// e.g. raw {MS: 120, TTL: 0} satisfies "0 <= 120" yet the effective
+	// {MS: 120s, TTL: 180s} pair is in fact valid. The effective-pair
+	// form also surfaces an *inconsistent* operator-supplied pair like
+	// raw {MS: 240, TTL: 0} → effective MS=240s, TTL=180s as the
+	// genuine misconfiguration it is.
+	ms := u.EffectiveMSearchInterval()
+	ttl := u.EffectiveServerTTL()
+	if ttl <= ms {
+		return fmt.Errorf(
+			"upnpUpstream: serverTTLSeconds (%v) must be > msearchIntervalSeconds (%v) — otherwise still-online servers evict between cycles",
+			ttl, ms)
+	}
+	seenPrefix := make(map[string]int, len(u.Servers))
+	seenUDN := make(map[string]int, len(u.Servers))
+	for i, s := range u.Servers {
+		if strings.TrimSpace(s.Name) == "" {
+			return fmt.Errorf("upnpUpstream.servers[%d]: name is required", i)
+		}
+		hasUDN := strings.TrimSpace(s.UDN) != ""
+		hasURL := strings.TrimSpace(s.ManualDescriptionURL) != ""
+		if !hasUDN && !hasURL {
+			return fmt.Errorf(
+				"upnpUpstream.servers[%d] (%q): either udn or manualDescriptionURL is required",
+				i, s.Name)
+		}
+		// Normalize the way the walker does: trim spaces AND surrounding
+		// slashes. Otherwise "Chord 2Go" and "Chord 2Go/" would slip past
+		// this check yet collide at walk time.
+		prefix := strings.Trim(strings.TrimSpace(s.PathPrefix), "/")
+		if prefix == "" {
+			prefix = strings.Trim(strings.TrimSpace(s.Name), "/")
+		}
+		if other, dup := seenPrefix[strings.ToLower(prefix)]; dup {
+			return fmt.Errorf(
+				"upnpUpstream.servers[%d] (%q): pathPrefix %q collides with servers[%d]",
+				i, s.Name, prefix, other)
+		}
+		seenPrefix[strings.ToLower(prefix)] = i
+		if hasUDN {
+			udn := strings.ToLower(strings.TrimSpace(s.UDN))
+			if other, dup := seenUDN[udn]; dup {
+				return fmt.Errorf(
+					"upnpUpstream.servers[%d] (%q): udn duplicates servers[%d]",
+					i, s.Name, other)
+			}
+			seenUDN[udn] = i
+		}
+	}
+	return nil
 }
 
 // IntegrityConfig controls the proactive consistency watchers
@@ -1294,6 +1471,9 @@ func (c *Config) Validate() error {
 				ttl, ms,
 			)
 		}
+	}
+	if err := c.UPnPUpstream.Validate(); err != nil {
+		return err
 	}
 	if (c.TLSCertPath == "") != (c.TLSKeyPath == "") {
 		return errors.New("tlsCertPath and tlsKeyPath: must be set together, or both empty")
