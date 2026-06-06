@@ -747,13 +747,19 @@ func (s *stubUPnPPublicProvider) PublicServers(ctx context.Context) []UPnPUpstre
 	return s.servers
 }
 
-// TestHealth_UPnPUpstreamServers_OmittedWithoutProvider pins the
-// pre-feature wire-shape: a Server without WithUPnPUpstreamPublicProvider
-// MUST omit `upnpUpstreamServers` entirely so pre-feature iOS sees the
-// same shape it did before the field landed. Asserts on raw JSON
-// bytes (omitempty on a `[]Type` field only fires for nil-not-empty;
-// the absence-on-wire is the load-bearing guarantee).
-func TestHealth_UPnPUpstreamServers_OmittedWithoutProvider(t *testing.T) {
+// newUPnPHealthTestServer spins up an httptest.Server with the api
+// Handler and (optionally) a wired UPnPUpstreamPublicProvider —
+// shared by the three /v1/health UPnP wire-shape cases below. Returns
+// the server (caller defers Close), and the provider so the
+// EmittedFromProvider case can assert ctx propagation post-hit.
+//
+// Centralizes the tmp / cfg / auth.OpenStore / httptest.NewServer
+// boilerplate the three cases were duplicating. Doesn't extend to the
+// existing `newTestServer` helper because that one doesn't expose the
+// UPnP-provider wiring point (and rewiring it would expand this PR's
+// scope beyond the UPnP feature).
+func newUPnPHealthTestServer(t *testing.T, provider UPnPUpstreamPublicProvider) (hs *httptest.Server, p *stubUPnPPublicProvider) {
+	t.Helper()
 	tmp := t.TempDir()
 	cfg := &config.Config{
 		LibraryRoots:  []string{tmp},
@@ -764,9 +770,21 @@ func TestHealth_UPnPUpstreamServers_OmittedWithoutProvider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hs := httptest.NewServer(New(cfg, store, nil, "fp").Handler())
-	defer hs.Close()
+	srv := New(cfg, store, nil, "fp")
+	if provider != nil {
+		srv = srv.WithUPnPUpstreamPublicProvider(provider)
+		if stub, ok := provider.(*stubUPnPPublicProvider); ok {
+			p = stub
+		}
+	}
+	return httptest.NewServer(srv.Handler()), p
+}
 
+// fetchUPnPHealthBody hits /v1/health on the supplied test server and
+// returns the raw response body. Centralizes the GET + defer + read
+// boilerplate the three cases were duplicating.
+func fetchUPnPHealthBody(t *testing.T, hs *httptest.Server) []byte {
+	t.Helper()
 	resp, err := http.Get(hs.URL + "/v1/health")
 	if err != nil {
 		t.Fatal(err)
@@ -776,6 +794,19 @@ func TestHealth_UPnPUpstreamServers_OmittedWithoutProvider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return body
+}
+
+// TestHealth_UPnPUpstreamServers_OmittedWithoutProvider pins the
+// pre-feature wire-shape: a Server without WithUPnPUpstreamPublicProvider
+// MUST omit `upnpUpstreamServers` entirely so pre-feature iOS sees the
+// same shape it did before the field landed. Asserts on raw JSON
+// bytes (omitempty on a `[]Type` field only fires for nil-not-empty;
+// the absence-on-wire is the load-bearing guarantee).
+func TestHealth_UPnPUpstreamServers_OmittedWithoutProvider(t *testing.T) {
+	hs, _ := newUPnPHealthTestServer(t, nil)
+	defer hs.Close()
+	body := fetchUPnPHealthBody(t, hs)
 	if strings.Contains(string(body), "upnpUpstreamServers") {
 		t.Errorf("upnpUpstreamServers should be omitted when provider is unwired, got: %s", body)
 	}
@@ -787,16 +818,6 @@ func TestHealth_UPnPUpstreamServers_OmittedWithoutProvider(t *testing.T) {
 // the provider's slice order, which iOS uses for deterministic
 // sub-source row ordering).
 func TestHealth_UPnPUpstreamServers_EmittedFromProvider(t *testing.T) {
-	tmp := t.TempDir()
-	cfg := &config.Config{
-		LibraryRoots:  []string{tmp},
-		ListenAddress: ":0",
-		LibraryName:   "X",
-	}
-	store, err := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
 	provider := &stubUPnPPublicProvider{
 		servers: []UPnPUpstreamPublicServer{
 			{
@@ -815,17 +836,11 @@ func TestHealth_UPnPUpstreamServers_EmittedFromProvider(t *testing.T) {
 			},
 		},
 	}
-	srv := New(cfg, store, nil, "fp").WithUPnPUpstreamPublicProvider(provider)
-	hs := httptest.NewServer(srv.Handler())
+	hs, p := newUPnPHealthTestServer(t, provider)
 	defer hs.Close()
-
-	resp, err := http.Get(hs.URL + "/v1/health")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
+	body := fetchUPnPHealthBody(t, hs)
 	var got HealthResponse
-	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+	if err := json.Unmarshal(body, &got); err != nil {
 		t.Fatal(err)
 	}
 	if len(got.UPnPUpstreamServers) != 2 {
@@ -854,8 +869,10 @@ func TestHealth_UPnPUpstreamServers_EmittedFromProvider(t *testing.T) {
 	// queries. A regression that swaps in a synthetic background
 	// context would silently disable query cancellation. The stub's
 	// witness is a boolean (not a stored ctx) so the assertion lives
-	// on a copyable, non-lifecycle-bearing primitive.
-	if !provider.nonNilCtxObserved {
+	// on a copyable, non-lifecycle-bearing primitive. `p` is the
+	// same `*stubUPnPPublicProvider` the helper returned at the top
+	// of the test (typed-assert back from the interface argument).
+	if !p.nonNilCtxObserved {
 		t.Errorf("nonNilCtxObserved is false — handler didn't propagate context")
 	}
 }
@@ -869,30 +886,9 @@ func TestHealth_UPnPUpstreamServers_EmittedFromProvider(t *testing.T) {
 // This test pins that contract by passing a nil-returning provider
 // and asserting absence on the wire.
 func TestHealth_UPnPUpstreamServers_EmptyProviderResultOmitted(t *testing.T) {
-	tmp := t.TempDir()
-	cfg := &config.Config{
-		LibraryRoots:  []string{tmp},
-		ListenAddress: ":0",
-		LibraryName:   "X",
-	}
-	store, err := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	provider := &stubUPnPPublicProvider{servers: nil}
-	srv := New(cfg, store, nil, "fp").WithUPnPUpstreamPublicProvider(provider)
-	hs := httptest.NewServer(srv.Handler())
+	hs, _ := newUPnPHealthTestServer(t, &stubUPnPPublicProvider{servers: nil})
 	defer hs.Close()
-
-	resp, err := http.Get(hs.URL + "/v1/health")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
+	body := fetchUPnPHealthBody(t, hs)
 	if strings.Contains(string(body), "upnpUpstreamServers") {
 		t.Errorf("upnpUpstreamServers should be omitted when provider returns nil, got: %s", body)
 	}
