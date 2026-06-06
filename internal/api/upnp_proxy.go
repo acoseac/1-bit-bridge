@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -145,6 +146,14 @@ func (s *Server) proxyUPnP(w http.ResponseWriter, r *http.Request, rt *manifest.
 // upstream is documented to cause socket timeouts in real DLNA traffic.
 var upnpProxyClientShared = &http.Client{
 	Transport: &http.Transport{
+		// Explicit DialContext with a 5 s connect timeout — without
+		// it the zero-value net.Dialer waits forever on a firewalled
+		// or offline upstream, which would leak goroutines for every
+		// request that lands while the 2Go is asleep. Per Gemini on PR #352.
+		DialContext: (&net.Dialer{
+			Timeout:   5 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
 		MaxIdleConns:          8,
 		MaxIdleConnsPerHost:   4,
 		MaxConnsPerHost:       4, // matches MiniDLNA's typical concurrent-stream ceiling

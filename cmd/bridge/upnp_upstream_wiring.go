@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"sync"
@@ -69,25 +70,7 @@ func startUPnPUpstreamIfEnabled(
 		return &upnpUpstreamLifecycle{log: log}
 	}
 	cache := upnp.NewServerCache()
-	var clients []*upnp.MediaServerDiscoveryClient
-	for _, iface := range ifaces {
-		discCfg := upnp.DefaultDiscoveryConfig()
-		discCfg.Interface = iface
-		discCfg.MSearchInterval = cfg.UPnPUpstream.EffectiveMSearchInterval()
-		discCfg.ServerTTL = cfg.UPnPUpstream.EffectiveServerTTL()
-		client, err := upnp.NewMediaServerDiscoveryClient(discCfg, cache)
-		if err != nil {
-			log.Warn("UPnP upstream discovery construct failed on interface — skipping",
-				slog.String("iface", iface.Name), slog.String("err", err.Error()))
-			continue
-		}
-		if startErr := client.Start(ctx); startErr != nil {
-			log.Warn("UPnP upstream discovery Start failed on interface — skipping",
-				slog.String("iface", iface.Name), slog.String("err", startErr.Error()))
-			continue
-		}
-		clients = append(clients, client)
-	}
+	clients := startUPnPDiscoveryAcrossInterfaces(ctx, cfg.UPnPUpstream, cache, ifaces, log)
 	if len(clients) == 0 {
 		log.Warn("UPnP upstream disabled — no interface could bind")
 		return &upnpUpstreamLifecycle{log: log}
@@ -258,4 +241,38 @@ func hostPortFromURL(s string) (string, bool) {
 		return "", false
 	}
 	return u.Host, true
+}
+
+// startUPnPDiscoveryAcrossInterfaces spins up one
+// MediaServerDiscoveryClient per LAN-eligible interface, writing into
+// the shared cache. Skip-and-warn on per-interface construct / Start
+// failures (additive-features-fail-open). Extracted as its own helper
+// to keep the per-interface loop's failure-handling pattern in a single
+// site instead of repeating it inline + duplicating
+// dlna_discovery_wiring's shape.
+func startUPnPDiscoveryAcrossInterfaces(
+	ctx context.Context,
+	upCfg config.UPnPUpstreamConfig,
+	cache *upnp.ServerCache,
+	ifaces []*net.Interface,
+	log *slog.Logger,
+) []*upnp.MediaServerDiscoveryClient {
+	clients := make([]*upnp.MediaServerDiscoveryClient, 0, len(ifaces))
+	for _, iface := range ifaces {
+		discCfg := upnp.DefaultDiscoveryConfig()
+		discCfg.Interface = iface
+		discCfg.MSearchInterval = upCfg.EffectiveMSearchInterval()
+		discCfg.ServerTTL = upCfg.EffectiveServerTTL()
+		client, cerr := upnp.NewMediaServerDiscoveryClient(discCfg, cache)
+		if cerr == nil {
+			cerr = client.Start(ctx)
+		}
+		if cerr != nil {
+			log.Warn("UPnP upstream discovery start skipped on interface",
+				slog.String("iface", iface.Name), slog.String("err", cerr.Error()))
+			continue
+		}
+		clients = append(clients, client)
+	}
+	return clients
 }
