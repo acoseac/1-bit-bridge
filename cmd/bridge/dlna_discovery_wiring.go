@@ -139,15 +139,16 @@ func (a *rendererCacheAdapter) Snapshot() []api.RendererInfo {
 	out := make([]api.RendererInfo, len(src))
 	for i, e := range src {
 		out[i] = api.RendererInfo{
-			UDN:               e.UDN,
-			FriendlyName:      e.FriendlyName,
-			Manufacturer:      e.Manufacturer,
-			ModelDescription:  e.ModelDescription,
-			ModelName:         e.ModelName,
-			ControlURL:        e.ControlURL,
-			EventURL:          e.EventURL,
-			SinkProtocolInfos: e.SinkProtocolInfos,
-			LastSeenAt:        e.LastSeenAt,
+			UDN:                 e.UDN,
+			FriendlyName:        e.FriendlyName,
+			Manufacturer:        e.Manufacturer,
+			ModelDescription:    e.ModelDescription,
+			ModelName:           e.ModelName,
+			ControlURL:          e.ControlURL,
+			EventURL:            e.EventURL,
+			RenderingControlURL: e.RenderingControlURL,
+			SinkProtocolInfos:   e.SinkProtocolInfos,
+			LastSeenAt:          e.LastSeenAt,
 		}
 	}
 	return out

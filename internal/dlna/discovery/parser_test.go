@@ -242,6 +242,18 @@ func TestParseDeviceDescription_ChordShape(t *testing.T) {
 	if av.EventSubURL != "http://192.168.1.42:8080/avtransport/event" {
 		t.Errorf("AVTransport.EventSubURL = %q", av.EventSubURL)
 	}
+	// RenderingControl controlURL must be parsed + resolved too — iOS
+	// dispatches SetMute / SetVolume here, and the discovery DTO now
+	// surfaces it (RendererInfo.RenderingControlURL) so the renderer-volume
+	// slider AND the DSD-pause ring-suppression mute work over the
+	// bridge-mediated path.
+	rc, ok := desc.Services[ServiceRenderingControl]
+	if !ok {
+		t.Fatalf("RenderingControl service missing")
+	}
+	if rc.ControlURL != "http://192.168.1.42:8080/rc/control" {
+		t.Errorf("RenderingControl.ControlURL = %q", rc.ControlURL)
+	}
 }
 
 func TestParseDeviceDescription_RejectsMissingAVTransport(t *testing.T) {

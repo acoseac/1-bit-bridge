@@ -575,15 +575,16 @@ type RendererDiscoverySnapshotter interface {
 // `renderers_handler_test.go` in this package. Changes require
 // the Mirror-PR convention.
 type RendererInfo struct {
-	UDN               string    `json:"udn"`
-	FriendlyName      string    `json:"friendlyName"`
-	Manufacturer      string    `json:"manufacturer,omitempty"`
-	ModelDescription  string    `json:"modelDescription,omitempty"`
-	ModelName         string    `json:"modelName,omitempty"`
-	ControlURL        string    `json:"controlURL"`
-	EventURL          string    `json:"eventURL,omitempty"`
-	SinkProtocolInfos []string  `json:"sinkProtocolInfos,omitempty"`
-	LastSeenAt        time.Time `json:"lastSeenAt"`
+	UDN                 string    `json:"udn"`
+	FriendlyName        string    `json:"friendlyName"`
+	Manufacturer        string    `json:"manufacturer,omitempty"`
+	ModelDescription    string    `json:"modelDescription,omitempty"`
+	ModelName           string    `json:"modelName,omitempty"`
+	ControlURL          string    `json:"controlURL"`
+	EventURL            string    `json:"eventURL,omitempty"`
+	RenderingControlURL string    `json:"renderingControlURL,omitempty"`
+	SinkProtocolInfos   []string  `json:"sinkProtocolInfos,omitempty"`
+	LastSeenAt          time.Time `json:"lastSeenAt"`
 }
 
 // RenderersResponse is the top-level shape of `GET /v1/renderers`.
