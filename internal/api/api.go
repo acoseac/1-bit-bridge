@@ -1102,7 +1102,15 @@ type UPnPUpstreamPublicProvider interface {
 	// merged. Called once per /v1/health request — keep the work
 	// proportional to len(cfg.UPnPUpstream.Servers) (single-digit in
 	// practice).
-	PublicServers() []UPnPUpstreamPublicServer
+	//
+	// `ctx` is the inbound HTTP request's context. Implementations
+	// SHOULD propagate it through to any downstream database query
+	// (e.g. the per-server `COUNT(*)` on the routing table) so a
+	// client disconnect mid-/v1/health cancels the work rather than
+	// letting it run to completion against a now-dead connection.
+	// Mirrors how `probeAllRoots` receives `r.Context()` from the
+	// health handler.
+	PublicServers(ctx context.Context) []UPnPUpstreamPublicServer
 }
 
 // RootStatus reports the reachability of a single library root. Wire-DTO
@@ -1307,7 +1315,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// minimal public DTO; see UPnPUpstreamPublicServer for the field
 	// rationale.
 	if s.upnpPublicProvider != nil {
-		resp.UPnPUpstreamServers = s.upnpPublicProvider.PublicServers()
+		resp.UPnPUpstreamServers = s.upnpPublicProvider.PublicServers(r.Context())
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

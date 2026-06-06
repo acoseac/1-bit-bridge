@@ -732,9 +732,16 @@ func TestHealthOverTLSWithPinnedCert(t *testing.T) {
 // production bridge-side adapter lives in cmd/bridge.
 type stubUPnPPublicProvider struct {
 	servers []UPnPUpstreamPublicServer
+	// lastCtx records the most recent context the handler passed,
+	// so a test can assert ctx propagation (the real adapter
+	// forwards `r.Context()` to the manifest's `CountUPnPRoutingForServer`
+	// — a regression here would silently break query cancellation
+	// on client disconnect).
+	lastCtx context.Context
 }
 
-func (s *stubUPnPPublicProvider) PublicServers() []UPnPUpstreamPublicServer {
+func (s *stubUPnPPublicProvider) PublicServers(ctx context.Context) []UPnPUpstreamPublicServer {
+	s.lastCtx = ctx
 	return s.servers
 }
 
@@ -839,6 +846,13 @@ func TestHealth_UPnPUpstreamServers_EmittedFromProvider(t *testing.T) {
 	}
 	if got.UPnPUpstreamServers[1].Name != "Manual MiniDLNA" {
 		t.Errorf("row 1 Name = %q; want %q", got.UPnPUpstreamServers[1].Name, "Manual MiniDLNA")
+	}
+	// Context propagation: the handler MUST pass `r.Context()` so a
+	// client disconnect mid-/v1/health cancels downstream SQLite
+	// queries. A regression that swaps in `context.Background()` /
+	// `context.TODO()` would silently disable query cancellation.
+	if provider.lastCtx == nil {
+		t.Errorf("provider.lastCtx is nil — handler didn't propagate context")
 	}
 }
 

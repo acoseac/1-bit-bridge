@@ -46,7 +46,7 @@ func TestPublic_ConfiguredServers_PreservesYAMLOrder(t *testing.T) {
 		cache:     upnp.NewServerCache(),
 		store:     openPublicTestStore(t),
 	}
-	got := a.PublicServers()
+	got := a.PublicServers(context.Background())
 	if len(got) != 3 {
 		t.Fatalf("got %d rows; want 3", len(got))
 	}
@@ -89,7 +89,7 @@ func TestPublic_FriendlyName_FromDiscoveryCache(t *testing.T) {
 		cache:     cache,
 		store:     openPublicTestStore(t),
 	}
-	got := a.PublicServers()
+	got := a.PublicServers(context.Background())
 	if len(got) != 1 {
 		t.Fatalf("got %d rows; want 1", len(got))
 	}
@@ -125,7 +125,7 @@ func TestPublic_FriendlyName_EmptyWhenUndiscovered(t *testing.T) {
 		cache:     upnp.NewServerCache(), // empty
 		store:     openPublicTestStore(t),
 	}
-	got := a.PublicServers()
+	got := a.PublicServers(context.Background())
 	if got[0].FriendlyName != "" {
 		t.Errorf("FriendlyName = %q; want \"\" (pre-discovery)", got[0].FriendlyName)
 	}
@@ -154,7 +154,7 @@ func TestPublic_ManualURLServer_OmitsConfiguredUDN(t *testing.T) {
 		cache:     upnp.NewServerCache(),
 		store:     openPublicTestStore(t),
 	}
-	got := a.PublicServers()
+	got := a.PublicServers(context.Background())
 	if got[0].ConfiguredUDN != "" {
 		t.Errorf("ConfiguredUDN = %q; want \"\" for manual entry", got[0].ConfiguredUDN)
 	}
@@ -210,7 +210,7 @@ func TestPublic_RoutedTracks_KeyedOnStableServerKey(t *testing.T) {
 		cache:     upnp.NewServerCache(),
 		store:     store,
 	}
-	got := a.PublicServers()
+	got := a.PublicServers(context.Background())
 	if got[0].RoutedTracks != 3 {
 		t.Errorf("UDN row RoutedTracks = %d; want 3", got[0].RoutedTracks)
 	}
@@ -241,7 +241,7 @@ func TestPublic_RoutedTracks_ZeroWhenNoIngest(t *testing.T) {
 		cache:     upnp.NewServerCache(),
 		store:     openPublicTestStore(t),
 	}
-	got := a.PublicServers()
+	got := a.PublicServers(context.Background())
 	if got[0].RoutedTracks != 0 {
 		t.Errorf("RoutedTracks = %d; want 0", got[0].RoutedTracks)
 	}
@@ -257,7 +257,7 @@ func TestPublic_NilCfg_ReturnsNil(t *testing.T) {
 		cache:     upnp.NewServerCache(),
 		store:     openPublicTestStore(t),
 	}
-	if got := a.PublicServers(); got != nil {
+	if got := a.PublicServers(context.Background()); got != nil {
 		t.Errorf("got %v; want nil for nil cfg", got)
 	}
 }
@@ -284,9 +284,81 @@ func TestPublic_NilStore_RoutedTracksZero(t *testing.T) {
 		cache:     upnp.NewServerCache(),
 		store:     nil,
 	}
-	got := a.PublicServers()
+	got := a.PublicServers(context.Background())
 	if got[0].RoutedTracks != 0 {
 		t.Errorf("RoutedTracks = %d; want 0 with nil store", got[0].RoutedTracks)
+	}
+}
+
+func TestPublic_NilCfgHolder_ReturnsNil(t *testing.T) {
+	// Defensive: a torn-down adapter (cfgHolder nil — shouldn't reach
+	// production, but a future test seam or partial-construct path
+	// could land here) MUST return nil rather than panic the
+	// /v1/health handler. Mirrors the existing nil-cfg.Load() branch.
+	a := &upnpPublicAdapter{
+		cfgHolder: nil,
+		cache:     upnp.NewServerCache(),
+		store:     openPublicTestStore(t),
+	}
+	if got := a.PublicServers(context.Background()); got != nil {
+		t.Errorf("got %v; want nil for nil cfgHolder", got)
+	}
+}
+
+func TestPublic_CancelledContext_SurfacesAsZeroRoutedTracks(t *testing.T) {
+	// Context propagation contract: passing a pre-cancelled ctx
+	// cancels the underlying CountUPnPRoutingForServer query.
+	// SQLite reports the error, the helper swallows it (caller's
+	// surface contract is "absent = warm-up window, not failure")
+	// and RoutedTracks defaults to 0. The test exercises the full
+	// adapter path with a real store + a seeded routing row so
+	// success would otherwise return non-zero — if the helper
+	// dropped ctx and used Background() instead, this assertion
+	// would fail.
+	cfg := &config.Config{
+		LibraryRoots:    []string{t.TempDir()},
+		ListenAddress:   ":7788",
+		AdminAddress:    "127.0.0.1:7789",
+		ScanIntervalSec: 3600,
+		UPnPUpstream: config.UPnPUpstreamConfig{
+			Enabled: true,
+			Servers: []config.UPnPUpstreamServerConfig{
+				{Name: "Cancel-test", UDN: "uuid:c", PathPrefix: "c"},
+			},
+		},
+	}
+	store := openPublicTestStore(t)
+	key := upnpingest.StableServerKey(cfg.UPnPUpstream.Servers[0])
+	if err := store.UpsertTrack(context.Background(), &manifest.Track{Path: "c/a.flac", Size: 1, ModTime: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertUPnPRouting(context.Background(), &manifest.UPnPRouting{
+		SourcePath: "c/a.flac", ServerUDN: key, ObjectID: "x",
+		ResURL: "http://h/x.flac", LastSeenAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Sanity baseline: non-cancelled ctx returns the expected count.
+	a := &upnpPublicAdapter{
+		cfgHolder: config.NewRuntimeConfig(cfg),
+		cache:     upnp.NewServerCache(),
+		store:     store,
+	}
+	if got := a.PublicServers(context.Background()); got[0].RoutedTracks != 1 {
+		t.Fatalf("baseline RoutedTracks = %d; want 1 (helper not running successfully)", got[0].RoutedTracks)
+	}
+
+	// Pre-cancelled ctx: query fails, count surfaces as 0. If a
+	// future refactor drops ctx propagation and substitutes
+	// Background() at the COUNT call site, this assertion would
+	// regress to 1 — that's the regression this test exists to
+	// catch.
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	got := a.PublicServers(cancelled)
+	if got[0].RoutedTracks != 0 {
+		t.Errorf("RoutedTracks under cancelled ctx = %d; want 0 (ctx not propagated to CountUPnPRoutingForServer)", got[0].RoutedTracks)
 	}
 }
 
