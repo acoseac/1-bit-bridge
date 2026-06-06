@@ -395,7 +395,10 @@ func Test_SilenceDSFHandler_HEADReturnsZeroLength(t *testing.T) {
 	}
 }
 
-// Test_SilenceDSFHandler_RejectsPOST pins 405 for non-GET/HEAD methods.
+// Test_SilenceDSFHandler_RejectsPOST pins 405 for non-GET/HEAD methods,
+// AND that the response carries the `Allow: GET, HEAD` header per
+// RFC 7231 §6.5.5 (a 405 MUST list supported methods). Per Gemini
+// Medium on PR #347.
 func Test_SilenceDSFHandler_RejectsPOST(t *testing.T) {
 	h := SilenceDSFHandler(DSDRate64)
 	req := httptest.NewRequest(http.MethodPost, SilenceDSF64Path, nil)
@@ -403,6 +406,9 @@ func Test_SilenceDSFHandler_RejectsPOST(t *testing.T) {
 	h(rec, req)
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("POST status = %d, want 405", rec.Code)
+	}
+	if got := rec.Header().Get("Allow"); got != "GET, HEAD" {
+		t.Errorf("Allow header = %q, want %q (RFC 7231 §6.5.5)", got, "GET, HEAD")
 	}
 }
 

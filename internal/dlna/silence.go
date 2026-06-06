@@ -308,6 +308,9 @@ func SilenceDSFHandler(rate DSDRate) http.HandlerFunc {
 	contentLen := strconv.Itoa(len(payload))
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			// RFC 7231 §6.5.5: a 405 response MUST include an `Allow` header
+			// listing the supported methods. Per Gemini Medium on PR #347.
+			w.Header().Set("Allow", "GET, HEAD")
 			http.Error(w, "GET or HEAD only", http.StatusMethodNotAllowed)
 			return
 		}
