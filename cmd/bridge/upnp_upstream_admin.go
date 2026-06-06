@@ -91,26 +91,36 @@ func (a *upnpAdminAdapter) ConfiguredServers() []admin.UPnPUpstreamServerState {
 			ConfiguredUDN: srv.UDN,
 			ManualURL:     srv.ManualDescriptionURL,
 		}
-		// SSDP-keyed lookup applies only to servers configured with a
-		// UDN — manual-URL servers don't get into the discovery cache
-		// (SSDP M-SEARCH responses are matched by UDN, and a manual
-		// entry pre-discovery has none).
-		if srv.UDN != "" {
+		// Per-server runtime state (FriendlyName + RoutedTracks)
+		// routes through the shared helper so the admin row and the
+		// public /v1/health row can't diverge on the cache lookup
+		// gate (UDN-only — manual entries don't get into the cache)
+		// AND the StableServerKey count keying (UDN OR manual hash —
+		// both routed through one column). The admin path passes
+		// `context.Background()` because admin polling is operator-
+		// driven (no inbound HTTP request context to thread — the
+		// prior implementation used Background here for the same
+		// reason); the public path propagates `r.Context()` so a
+		// client disconnect cancels.
+		row.FriendlyName, row.RoutedTracks = lookupUPnPServerRuntime(context.Background(), srv, a.cache, a.store)
+		// The admin DTO carries operator-internal fields the public
+		// DTO deliberately omits (Discovered / ResolvedUDN /
+		// Manufacturer / ControlURL / LastSeenAt). FriendlyName is
+		// already populated by the shared helper above — don't
+		// overwrite it here.
+		if srv.UDN != "" && a.cache != nil {
 			if info, ok := a.cache.Get(srv.UDN); ok {
 				row.Discovered = true
 				row.ResolvedUDN = info.UDN
-				row.FriendlyName = info.FriendlyName
 				row.Manufacturer = info.Manufacturer
 				row.ControlURL = info.ContentDirectoryControlURL
 				row.LastSeenAt = info.LastSeenAt
 			}
 		}
-		// The ingester's keying is the SAME for UDN and manual servers
-		// — upnpingest.StableServerKey(srv) returns the lowercased UDN OR the
-		// SHA-256-hashed ManualDescriptionURL (the "manual:..." form).
-		// Using it here means manual servers DO surface their last-walk
-		// result + routed-track count, fixing the gap Gemini caught on
-		// PR #353.
+		// Last-walk telemetry stays admin-only — the public DTO
+		// deliberately excludes operator-internal walk error strings
+		// + timing. Keyed on the SAME StableServerKey the routed-
+		// track lookup inside the shared helper uses.
 		key := upnpingest.StableServerKey(srv)
 		if pr, ok := last[key]; ok {
 			row.LastWalkStarted = pr.WalkStartedAt
@@ -119,11 +129,6 @@ func (a *upnpAdminAdapter) ConfiguredServers() []admin.UPnPUpstreamServerState {
 			row.LastReaped = pr.Reaped
 			if pr.Err != nil {
 				row.LastWalkErr = pr.Err.Error()
-			}
-		}
-		if a.store != nil {
-			if n, err := a.store.CountUPnPRoutingForServer(context.Background(), key); err == nil {
-				row.RoutedTracks = n
 			}
 		}
 		out = append(out, row)

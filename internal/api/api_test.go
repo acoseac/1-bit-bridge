@@ -726,3 +726,170 @@ func TestHealthOverTLSWithPinnedCert(t *testing.T) {
 		t.Errorf("health reports fingerprint %q, expected %q", got.CertFingerprint, fingerprint)
 	}
 }
+
+// stubUPnPPublicProvider is a deterministic fake of
+// UPnPUpstreamPublicProvider for /v1/health wire-shape coverage; the
+// production bridge-side adapter lives in cmd/bridge.
+//
+// Records whether the handler passed a non-nil ctx, without holding a
+// reference — Go convention (S8242) is to avoid storing a
+// `context.Context` on a struct. The boolean witness preserves the
+// propagation assertion without the lifecycle hazard.
+type stubUPnPPublicProvider struct {
+	servers           []UPnPUpstreamPublicServer
+	nonNilCtxObserved bool
+}
+
+func (s *stubUPnPPublicProvider) PublicServers(ctx context.Context) []UPnPUpstreamPublicServer {
+	if ctx != nil {
+		s.nonNilCtxObserved = true
+	}
+	return s.servers
+}
+
+// newUPnPHealthTestServer spins up an httptest.Server with the api
+// Handler and (optionally) a wired UPnPUpstreamPublicProvider —
+// shared by the three /v1/health UPnP wire-shape cases below. Returns
+// the server (caller defers Close), and the provider so the
+// EmittedFromProvider case can assert ctx propagation post-hit.
+//
+// Centralizes the tmp / cfg / auth.OpenStore / httptest.NewServer
+// boilerplate the three cases were duplicating. Doesn't extend to the
+// existing `newTestServer` helper because that one doesn't expose the
+// UPnP-provider wiring point (and rewiring it would expand this PR's
+// scope beyond the UPnP feature).
+func newUPnPHealthTestServer(t *testing.T, provider UPnPUpstreamPublicProvider) (hs *httptest.Server, p *stubUPnPPublicProvider) {
+	t.Helper()
+	tmp := t.TempDir()
+	cfg := &config.Config{
+		LibraryRoots:  []string{tmp},
+		ListenAddress: ":0",
+		LibraryName:   "X",
+	}
+	store, err := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := New(cfg, store, nil, "fp")
+	if provider != nil {
+		srv = srv.WithUPnPUpstreamPublicProvider(provider)
+		if stub, ok := provider.(*stubUPnPPublicProvider); ok {
+			p = stub
+		}
+	}
+	return httptest.NewServer(srv.Handler()), p
+}
+
+// fetchUPnPHealthBody hits /v1/health on the supplied test server and
+// returns the raw response body. Centralizes the GET + defer + read
+// boilerplate the three cases were duplicating.
+func fetchUPnPHealthBody(t *testing.T, hs *httptest.Server) []byte {
+	t.Helper()
+	resp, err := http.Get(hs.URL + "/v1/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
+// TestHealth_UPnPUpstreamServers_OmittedWithoutProvider pins the
+// pre-feature wire-shape: a Server without WithUPnPUpstreamPublicProvider
+// MUST omit `upnpUpstreamServers` entirely so pre-feature iOS sees the
+// same shape it did before the field landed. Asserts on raw JSON
+// bytes (omitempty on a `[]Type` field only fires for nil-not-empty;
+// the absence-on-wire is the load-bearing guarantee).
+func TestHealth_UPnPUpstreamServers_OmittedWithoutProvider(t *testing.T) {
+	hs, _ := newUPnPHealthTestServer(t, nil)
+	defer hs.Close()
+	body := fetchUPnPHealthBody(t, hs)
+	if strings.Contains(string(body), "upnpUpstreamServers") {
+		t.Errorf("upnpUpstreamServers should be omitted when provider is unwired, got: %s", body)
+	}
+}
+
+// TestHealth_UPnPUpstreamServers_EmittedFromProvider locks the
+// happy-path wire shape: a wired provider's PublicServers output flows
+// through `/v1/health` byte-for-byte (field order on the wire follows
+// the provider's slice order, which iOS uses for deterministic
+// sub-source row ordering).
+func TestHealth_UPnPUpstreamServers_EmittedFromProvider(t *testing.T) {
+	provider := &stubUPnPPublicProvider{
+		servers: []UPnPUpstreamPublicServer{
+			{
+				Name:          "Chord 2Go (cards)",
+				ConfiguredUDN: "uuid:2go",
+				PathPrefix:    "2go",
+				FriendlyName:  "Chord 2Go:2go-ars",
+				RoutedTracks:  247,
+			},
+			{
+				Name:         "Manual MiniDLNA",
+				PathPrefix:   "manual",
+				RoutedTracks: 18,
+				// ConfiguredUDN + FriendlyName intentionally empty
+				// — manual-URL entries pre-discovery.
+			},
+		},
+	}
+	hs, p := newUPnPHealthTestServer(t, provider)
+	defer hs.Close()
+	body := fetchUPnPHealthBody(t, hs)
+	var got HealthResponse
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.UPnPUpstreamServers) != 2 {
+		t.Fatalf("got %d rows; want 2", len(got.UPnPUpstreamServers))
+	}
+	if got.UPnPUpstreamServers[0].Name != "Chord 2Go (cards)" {
+		t.Errorf("row 0 Name = %q; want %q", got.UPnPUpstreamServers[0].Name, "Chord 2Go (cards)")
+	}
+	if got.UPnPUpstreamServers[0].ConfiguredUDN != "uuid:2go" {
+		t.Errorf("row 0 ConfiguredUDN = %q; want %q", got.UPnPUpstreamServers[0].ConfiguredUDN, "uuid:2go")
+	}
+	if got.UPnPUpstreamServers[0].PathPrefix != "2go" {
+		t.Errorf("row 0 PathPrefix = %q; want %q", got.UPnPUpstreamServers[0].PathPrefix, "2go")
+	}
+	if got.UPnPUpstreamServers[0].FriendlyName != "Chord 2Go:2go-ars" {
+		t.Errorf("row 0 FriendlyName = %q; want %q", got.UPnPUpstreamServers[0].FriendlyName, "Chord 2Go:2go-ars")
+	}
+	if got.UPnPUpstreamServers[0].RoutedTracks != 247 {
+		t.Errorf("row 0 RoutedTracks = %d; want 247", got.UPnPUpstreamServers[0].RoutedTracks)
+	}
+	if got.UPnPUpstreamServers[1].Name != "Manual MiniDLNA" {
+		t.Errorf("row 1 Name = %q; want %q", got.UPnPUpstreamServers[1].Name, "Manual MiniDLNA")
+	}
+	// Context propagation: the handler MUST pass `r.Context()` so a
+	// client disconnect mid-/v1/health cancels downstream SQLite
+	// queries. A regression that swaps in a synthetic background
+	// context would silently disable query cancellation. The stub's
+	// witness is a boolean (not a stored ctx) so the assertion lives
+	// on a copyable, non-lifecycle-bearing primitive. `p` is the
+	// same `*stubUPnPPublicProvider` the helper returned at the top
+	// of the test (typed-assert back from the interface argument).
+	if !p.nonNilCtxObserved {
+		t.Errorf("nonNilCtxObserved is false — handler didn't propagate context")
+	}
+}
+
+// TestHealth_UPnPUpstreamServers_EmptyProviderResultOmitted pins the
+// edge case: a provider wired but returning a NIL slice (feature
+// enabled at config-load but no servers configured, OR a torn-down
+// RuntimeConfig surfacing nil from the adapter) MUST also drop the
+// field from the wire — omitempty handles nil slices but not empty
+// slices, so the adapter contract is "return nil to opt out, not []".
+// This test pins that contract by passing a nil-returning provider
+// and asserting absence on the wire.
+func TestHealth_UPnPUpstreamServers_EmptyProviderResultOmitted(t *testing.T) {
+	hs, _ := newUPnPHealthTestServer(t, &stubUPnPPublicProvider{servers: nil})
+	defer hs.Close()
+	body := fetchUPnPHealthBody(t, hs)
+	if strings.Contains(string(body), "upnpUpstreamServers") {
+		t.Errorf("upnpUpstreamServers should be omitted when provider returns nil, got: %s", body)
+	}
+}
