@@ -175,7 +175,11 @@ func parseDIDL(didl string) (BrowseResult, error) {
 		return BrowseResult{Containers: []Container{}, Items: []Object{}}, nil
 	}
 	var doc didlLite
-	if err := xml.Unmarshal([]byte(didl), &doc); err != nil {
+	// Decode straight from the string via strings.NewReader to avoid a
+	// []byte(didl) copy — a Browse page can run up to browseResponseMaxBytes
+	// (8 MiB), so duplicating the full payload would burn allocator time
+	// on every ingest sweep.
+	if err := xml.NewDecoder(strings.NewReader(didl)).Decode(&doc); err != nil {
 		return BrowseResult{}, fmt.Errorf("upnp: parse DIDL-Lite: %w", err)
 	}
 	out := BrowseResult{
@@ -227,8 +231,14 @@ func parseSystemUpdateID(body []byte) (string, error) {
 	if err := xml.Unmarshal(body, &env); err != nil {
 		return "", fmt.Errorf("upnp: parse GetSystemUpdateID: %w", err)
 	}
-	if env.Body.Response.XMLName.Local == "Fault" {
+	// Match ParseBrowseResponse's response-discrimination: surface a
+	// broken server (no Fault, no Response element) loudly instead of
+	// returning "" as if it were a valid "unknown ID".
+	switch env.Body.Response.XMLName.Local {
+	case "Fault":
 		return "", ErrSOAPFault
+	case "":
+		return "", ErrMissingResponseElement
 	}
 	return strings.TrimSpace(env.Body.Response.ID), nil
 }

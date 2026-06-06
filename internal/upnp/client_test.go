@@ -207,3 +207,69 @@ func TestBrowse_EmptyControlURL_Errors(t *testing.T) {
 		t.Fatal("expected error on empty controlURL")
 	}
 }
+
+func TestInvoke_BindsContextOnRequest(t *testing.T) {
+	// http.NewRequestWithContext must bind ctx to req.Context() so any
+	// downstream middleware honors cancellation/deadlines. The stub
+	// records the actual req we built.
+	stub := &stubDispatcher{queue: []stubResp{{status: 200, body: string(wrapBrowse(`<DIDL-Lite></DIDL-Lite>`, 0, 0))}}}
+	c := NewContentDirectoryClient(stub)
+	type ctxKey struct{}
+	ctx := context.WithValue(context.Background(), ctxKey{}, "marker")
+	if _, err := c.Browse(ctx, testControlURL, "0", "BrowseDirectChildren", "*", 0, 1, ""); err != nil {
+		t.Fatalf("Browse: %v", err)
+	}
+	if got := stub.reqs[0].Context().Value(ctxKey{}); got != "marker" {
+		t.Fatalf("req.Context() lost the caller's ctx value (= %v); want %q", got, "marker")
+	}
+}
+
+func TestBrowseAll_ReturnsErrBrowseLimitOnTruncation(t *testing.T) {
+	// Stub returns a single item per page and reports TotalMatches well
+	// past MaxBrowseAllItems — the loop must surface ErrBrowseLimit
+	// rather than silently truncating (which a sync-style ingest would
+	// misread as "everything past N was deleted on the server").
+	prev := maxBrowseAllItemsForTesting
+	maxBrowseAllItemsForTesting = 5
+	defer func() { maxBrowseAllItemsForTesting = prev }()
+
+	item := func(i int) string {
+		return `<item id="x` + itoa(i) + `" parentID="0"><dc:title>T` + itoa(i) + `</dc:title></item>`
+	}
+	stub := &stubDispatcher{}
+	for i := 0; i < 10; i++ {
+		stub.queue = append(stub.queue, stubResp{status: 200,
+			body: string(wrapBrowse(`<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/">`+item(i)+`</DIDL-Lite>`, 1, 99999))})
+	}
+	c := NewContentDirectoryClient(stub)
+	_, items, err := c.BrowseAll(context.Background(), testControlURL, "0")
+	if !errors.Is(err, ErrBrowseLimit) {
+		t.Fatalf("err = %v; want ErrBrowseLimit", err)
+	}
+	if len(items) < 5 {
+		t.Fatalf("items = %d; want >= 5 (partial results returned alongside the sentinel)", len(items))
+	}
+}
+
+func TestGetSystemUpdateID_MissingResponse_SurfacesError(t *testing.T) {
+	// A server returning <Body/> with no recognizable response element
+	// must surface ErrMissingResponseElement, matching ParseBrowseResponse.
+	stub := &stubDispatcher{queue: []stubResp{{status: 200,
+		body: `<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body></s:Body></s:Envelope>`}}}
+	c := NewContentDirectoryClient(stub)
+	if _, err := c.GetSystemUpdateID(context.Background(), testControlURL); !errors.Is(err, ErrMissingResponseElement) {
+		t.Fatalf("err = %v; want ErrMissingResponseElement", err)
+	}
+}
+
+func itoa(i int) string {
+	if i == 0 {
+		return "0"
+	}
+	var s []byte
+	for i > 0 {
+		s = append([]byte{byte('0' + i%10)}, s...)
+		i /= 10
+	}
+	return string(s)
+}

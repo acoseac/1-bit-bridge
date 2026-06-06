@@ -96,10 +96,13 @@ func (c *ContentDirectoryClient) BrowseAll(
 		}
 		containers = append(containers, page.Containers...)
 		items = append(items, page.Items...)
-		if len(containers)+len(items) >= MaxBrowseAllItems {
-			break
-		}
 		next, more := NextStartingIndex(start, page.NumberReturned, page.TotalMatches)
+		// Distinguish "natural EOF" from "hit our safety ceiling": only
+		// the latter is a truncation the caller must not trust as the
+		// complete view of the container.
+		if len(containers)+len(items) >= maxBrowseAllItemsForTesting && more {
+			return containers, items, ErrBrowseLimit
+		}
 		if !more {
 			break
 		}
@@ -133,7 +136,11 @@ func (c *ContentDirectoryClient) invoke(ctx context.Context, controlURL, action 
 	if strings.TrimSpace(controlURL) == "" {
 		return nil, errors.New("upnp: empty ContentDirectory controlURL")
 	}
-	req, err := http.NewRequest(http.MethodPost, controlURL, bytes.NewReader(soapBody))
+	// NewRequestWithContext so cancellation/deadlines propagate via
+	// req.Context() too — the dispatcher path already passes ctx, but
+	// binding it on the request is the idiomatic Go shape and protects
+	// any downstream middleware that consults req.Context().
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, controlURL, bytes.NewReader(soapBody))
 	if err != nil {
 		return nil, fmt.Errorf("upnp: build POST request: %w", err)
 	}
