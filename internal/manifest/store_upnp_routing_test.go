@@ -2,6 +2,7 @@ package manifest
 
 import (
 	"context"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -184,6 +185,74 @@ func TestUPnPRouting_FKCascadeDeletesOnTrackDelete(t *testing.T) {
 	}
 	if got != nil {
 		t.Fatalf("FK CASCADE failed: routing row still present after track delete: %+v", got)
+	}
+}
+
+func TestDeleteTracksBatch_RemovesAllAndCascadesRouting(t *testing.T) {
+	// Reaping the per-server reconcile sweep must drop every doomed
+	// track AND its routing row in one transaction + lock acquisition.
+	s := openTestStore(t)
+	defer s.Close()
+	ctx := context.Background()
+
+	paths := []string{"A/1.flac", "A/2.flac", "A/3.flac"}
+	for _, p := range paths {
+		seedUPnPTrack(t, s, p)
+		_ = s.UpsertUPnPRouting(ctx, &UPnPRouting{
+			SourcePath: p, ServerUDN: "uuid:1", ObjectID: "x",
+			ResURL: "http://h/x.flac", LastSeenAt: time.Unix(1, 0).UTC(),
+		})
+	}
+	// Also keep a sibling track that must SURVIVE the batch.
+	seedUPnPTrack(t, s, "B/keep.flac")
+	_ = s.UpsertUPnPRouting(ctx, &UPnPRouting{
+		SourcePath: "B/keep.flac", ServerUDN: "uuid:2", ObjectID: "y",
+		ResURL: "http://h/y.flac", LastSeenAt: time.Unix(1, 0).UTC(),
+	})
+
+	if err := s.DeleteTracksBatch(ctx, paths); err != nil {
+		t.Fatalf("DeleteTracksBatch: %v", err)
+	}
+	for _, p := range paths {
+		if got, _ := s.GetTrack(ctx, p); got != nil {
+			t.Errorf("track %q not removed", p)
+		}
+		if r, _ := s.GetUPnPRouting(ctx, p); r != nil {
+			t.Errorf("routing for %q not cascaded", p)
+		}
+	}
+	if got, _ := s.GetTrack(ctx, "B/keep.flac"); got == nil {
+		t.Errorf("sibling track was incorrectly reaped")
+	}
+}
+
+func TestDeleteTracksBatch_EmptyIsNoop(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+	if err := s.DeleteTracksBatch(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDeleteTracksBatch_LargeChunkBoundary(t *testing.T) {
+	// 250 rows > the 200-chunk so we exercise the multi-chunk loop.
+	s := openTestStore(t)
+	defer s.Close()
+	ctx := context.Background()
+	var paths []string
+	for i := 0; i < 250; i++ {
+		p := "X/" + strconv.Itoa(i) + ".flac"
+		seedUPnPTrack(t, s, p)
+		paths = append(paths, p)
+	}
+	if err := s.DeleteTracksBatch(ctx, paths); err != nil {
+		t.Fatalf("DeleteTracksBatch: %v", err)
+	}
+	for _, p := range paths {
+		if got, _ := s.GetTrack(ctx, p); got != nil {
+			t.Errorf("track %q not removed", p)
+			break
+		}
 	}
 }
 

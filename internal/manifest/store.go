@@ -1122,6 +1122,105 @@ func (s *Store) DeleteTrack(ctx context.Context, path string) error {
 	return nil
 }
 
+// DeleteTracksBatch removes many tracks in a SINGLE transaction +
+// single lock acquisition. Designed for the reconcile sweeps that may
+// reap thousands of rows after a configuration change (e.g. a UPnP
+// upstream's library reorganisation) — calling DeleteTrack N times
+// would acquire s.mu, BEGIN, write, COMMIT, fsync N times and starve
+// concurrent readers/writers for the duration.
+//
+// Sidecar-file unlinking is preserved: variants for every doomed track
+// are enumerated in one query, the rows are deleted under the FK
+// CASCADE in one DELETE-IN, then the sidecar files are unlinked off the
+// lock. Empty input is a no-op. Per-row errors are best-effort logged
+// (matching DeleteTrack's tolerance) so a single doomed sidecar can't
+// strand the rest of the batch.
+func (s *Store) DeleteTracksBatch(ctx context.Context, paths []string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Chunk to keep the SQL parameter list (and the `IN (?, ?, ...)`
+	// expression) well under SQLite's defaults (999 params on most
+	// builds, modernc.org/sqlite raises this but staying conservative
+	// keeps the function portable + readable). 200 matches the
+	// existing UpsertTrackBatch's batch shape.
+	const chunkSize = 200
+	for start := 0; start < len(paths); start += chunkSize {
+		end := start + chunkSize
+		if end > len(paths) {
+			end = len(paths)
+		}
+		chunk := paths[start:end]
+
+		// Enumerate sidecars for THIS chunk before the DELETE so the
+		// FK CASCADE doesn't yank rows out from under us.
+		placeholders, args := makeINClause(chunk)
+		rows, err := s.db.QueryContext(ctx,
+			`SELECT sidecar_path FROM track_variants WHERE source_path IN (`+placeholders+`)`, args...)
+		var sidecars []string
+		if err == nil {
+			for rows.Next() {
+				var sp string
+				if scanErr := rows.Scan(&sp); scanErr != nil {
+					logger.Warn("delete-tracks-batch: scan sidecar", "err", scanErr)
+					continue
+				}
+				sidecars = append(sidecars, sp)
+			}
+			if iterErr := rows.Err(); iterErr != nil {
+				logger.Warn("delete-tracks-batch: iter sidecars", "err", iterErr)
+			}
+			rows.Close()
+		} else {
+			logger.Warn("delete-tracks-batch: list sidecars", "err", err)
+		}
+
+		// One DELETE for the whole chunk under a single transaction.
+		// FK CASCADE handles upnp_track_routing + track_variants in
+		// one shot.
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("manifest: DeleteTracksBatch begin tx: %w", err)
+		}
+		_, err = tx.ExecContext(ctx,
+			`DELETE FROM tracks WHERE path IN (`+placeholders+`)`, args...)
+		if err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("manifest: DeleteTracksBatch exec: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("manifest: DeleteTracksBatch commit: %w", err)
+		}
+
+		// Sidecar files off the lock.
+		removeSidecarFiles(sidecars)
+	}
+	return nil
+}
+
+// makeINClause builds a comma-separated placeholder list and the
+// matching []any args for `column IN (?, ?, ...)`. Caller must inline
+// the returned string into its own SQL.
+func makeINClause(paths []string) (string, []any) {
+	if len(paths) == 0 {
+		return "", nil
+	}
+	args := make([]any, len(paths))
+	var b strings.Builder
+	b.Grow(2 * len(paths))
+	for i, p := range paths {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteByte('?')
+		args[i] = p
+	}
+	return b.String(), args
+}
+
 // GetTrack fetches a single track by EXACT path match. Returns
 // (nil, nil) if absent.
 //

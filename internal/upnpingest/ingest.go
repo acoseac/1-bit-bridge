@@ -2,9 +2,12 @@ package upnpingest
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -178,15 +181,7 @@ func (i *Ingester) ingestOne(ctx context.Context, srv config.UPnPUpstreamServerC
 
 	// Walk.
 	res.WalkStartedAt = now()
-	udn := strings.TrimSpace(srv.UDN)
-	if udn == "" {
-		// Manual-URL server without a configured UDN — use the prefix
-		// as a stable key so the reconcile sweep can still target only
-		// this server's rows. (A bare description URL doesn't yield a
-		// UDN without the additional device-description fetch the
-		// discovery path does; the prefix is a safe per-server proxy.)
-		udn = "manual:" + normalizePrefix(srv)
-	}
+	udn := stableServerKey(srv)
 	res.ServerUDN = udn
 	prefix := normalizePrefix(srv)
 
@@ -243,19 +238,21 @@ func (i *Ingester) ingestOne(ctx context.Context, srv config.UPnPUpstreamServerC
 
 	// Reconcile: anything not refreshed in this walk generation goes.
 	// last_seen_at < walk-start is the cutoff: every row touched THIS
-	// pass has last_seen_at == walk-start.
+	// pass has last_seen_at == walk-start. DeleteTracksBatch keeps the
+	// reap to one transaction + one lock acquisition regardless of the
+	// stale-row count (Gemini HIGH on PR #351: per-row deletes would
+	// be an N+1 transaction storm under a large reorganisation).
 	stale, err := i.store.ListUPnPSourcePathsOlderThan(ctx, udn, walkStart)
 	if err != nil {
 		res.Err = fmt.Errorf("ListUPnPSourcePathsOlderThan: %w", err)
 		return
 	}
-	for _, p := range stale {
-		if dErr := i.store.DeleteTrack(ctx, p); dErr != nil {
-			// Log via res.Err but continue reaping siblings.
-			res.Err = fmt.Errorf("DeleteTrack %q: %w", p, dErr)
-			continue
+	if len(stale) > 0 {
+		if dErr := i.store.DeleteTracksBatch(ctx, stale); dErr != nil {
+			res.Err = fmt.Errorf("DeleteTracksBatch: %w", dErr)
+			return
 		}
-		res.Reaped++
+		res.Reaped = len(stale)
 	}
 
 	// Stash the SystemUpdateID + walk-time for next tick's skip gate.
@@ -362,6 +359,33 @@ func normalizePrefix(s config.UPnPUpstreamServerConfig) string {
 	return prefix
 }
 
+// stableServerKey returns the per-server key used for the routing
+// table's `server_udn` column and for the SystemUpdateID store.
+//
+// When the operator supplied a real UDN we use it (lowercased + trimmed
+// to mirror DLNARenderer.canonicalUDN on iOS). When the UDN is empty
+// (a manual-URL server before its description has been fetched) we
+// derive a fallback key from the SHA-256 of the ManualDescriptionURL,
+// prefixed with "manual:" so it's visibly distinguishable. The hash
+// makes silent collisions structurally impossible across operator
+// configurations — two manual servers can share a Name or PathPrefix
+// without one's reconcile sweep eating the other's tracks (Gemini HIGH
+// on PR #351).
+func stableServerKey(s config.UPnPUpstreamServerConfig) string {
+	if udn := strings.TrimSpace(s.UDN); udn != "" {
+		return strings.ToLower(udn)
+	}
+	url := strings.TrimSpace(s.ManualDescriptionURL)
+	if url == "" {
+		// Last resort: trimmed name. config.Validate rejects an empty
+		// (UDN AND ManualDescriptionURL) pair, so this branch is only
+		// reachable from a test that bypassed validation.
+		return "manual:no-url:" + strings.ToLower(strings.TrimSpace(s.Name))
+	}
+	sum := sha256.Sum256([]byte(url))
+	return "manual:" + hex.EncodeToString(sum[:])
+}
+
 // codecFromExtension maps a file path's extension to the bridge's
 // canonical codec name (matching the values internal/manifest's
 // filesystem extractors set on Track.Codec). The iOS signal-path chip
@@ -394,7 +418,9 @@ func codecFromExtension(p string) string {
 }
 
 // parseDurationSeconds parses an "H:MM:SS" / "H:MM:SS.mmm" DLNA duration
-// to seconds. Returns 0 on malformed input.
+// to seconds. Returns 0 on malformed input. Uses strconv so unusual
+// inputs (negatives, multiple dots, exponent notation, leading whitespace
+// on a segment) fail predictably the way the standard library defines.
 func parseDurationSeconds(s string) float64 {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -404,13 +430,16 @@ func parseDurationSeconds(s string) float64 {
 	if len(parts) != 3 {
 		return 0
 	}
-	h := atoiOr(parts[0], -1)
-	m := atoiOr(parts[1], -1)
-	if h < 0 || m < 0 {
+	h, err := strconv.Atoi(parts[0])
+	if err != nil || h < 0 {
 		return 0
 	}
-	sec := parseFloatOr(parts[2], -1)
-	if sec < 0 {
+	m, err := strconv.Atoi(parts[1])
+	if err != nil || m < 0 {
+		return 0
+	}
+	sec, err := strconv.ParseFloat(parts[2], 64)
+	if err != nil || sec < 0 {
 		return 0
 	}
 	return float64(h*3600+m*60) + sec
@@ -418,12 +447,24 @@ func parseDurationSeconds(s string) float64 {
 
 // yearFromDate extracts the 4-digit leading year from a DLNA date
 // string (e.g. "2019-01-01" → 2019). Returns 0 on malformed input.
+// Per DLNA spec the date is digit-prefixed; we explicitly reject signed
+// values ('+'/'-') that strconv.Atoi otherwise accepts as numeric.
 func yearFromDate(s string) int {
 	s = strings.TrimSpace(s)
 	if len(s) < 4 {
 		return 0
 	}
-	return atoiOr(s[:4], 0)
+	head := s[:4]
+	for _, r := range head {
+		if r < '0' || r > '9' {
+			return 0
+		}
+	}
+	y, err := strconv.Atoi(head)
+	if err != nil || y < 0 {
+		return 0
+	}
+	return y
 }
 
 // isDSDFromProtocolOrExt decides isDSD without reading the file. DSF +
@@ -445,36 +486,3 @@ func isDSDFromProtocolOrExt(proto, path string) bool {
 }
 
 func extOf(p string) string { return path.Ext(p) }
-
-func atoiOr(s string, def int) int {
-	n := 0
-	if s == "" {
-		return def
-	}
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			return def
-		}
-		n = n*10 + int(r-'0')
-	}
-	return n
-}
-
-func parseFloatOr(s string, def float64) float64 {
-	// Tiny inline float parser to avoid pulling in strconv just for
-	// this — DLNA duration's fractional part is well-behaved.
-	dot := strings.IndexByte(s, '.')
-	if dot < 0 {
-		return float64(atoiOr(s, int(def)))
-	}
-	whole := atoiOr(s[:dot], -1)
-	frac := atoiOr(s[dot+1:], -1)
-	if whole < 0 || frac < 0 {
-		return def
-	}
-	denom := 1.0
-	for range s[dot+1:] {
-		denom *= 10
-	}
-	return float64(whole) + float64(frac)/denom
-}

@@ -27,14 +27,14 @@ type UPnPRouting struct {
 }
 
 // UpsertUPnPRouting inserts or replaces a routing row. Called once per
-// track per walk by the upnpingest layer, BEFORE the matching
-// UpsertTrack/UpsertTrackBatch so the FK never trips.
+// track per walk by the upnpingest layer, AFTER the matching
+// UpsertTrack/UpsertTrackBatch so the FK constraint is satisfied.
 //
-// The reverse order would fail when SQLite's ON DELETE CASCADE chases
-// a missing parent; in practice we order routing -> tracks at the
-// caller. Both orderings would technically work because routing
-// references tracks via FK (not the other way), but documenting the
-// chosen order keeps a future maintainer honest.
+// Since upnp_track_routing references tracks(path) via a foreign key,
+// the parent track row MUST exist in the database before the routing
+// row can be inserted — inserting routing first would draw an
+// SQLITE_CONSTRAINT_FOREIGNKEY error. The ingest layer's tracks-then-
+// routing ordering is the load-bearing contract.
 func (s *Store) UpsertUPnPRouting(ctx context.Context, r *UPnPRouting) error {
 	if r == nil {
 		return errors.New("manifest: nil UPnPRouting")

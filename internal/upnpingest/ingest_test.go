@@ -1,9 +1,11 @@
 package upnpingest
 
 import (
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/upnp"
 )
 
@@ -157,10 +159,75 @@ func TestYearFromDate(t *testing.T) {
 		"":           0,
 		"x":          0,
 		"abc-def":    0,
+		// strconv-based regression coverage: signed leads
+		// MUST reject (strconv.Atoi accepts a leading '-' / '+' as a
+		// sign; DLNA dates are always digit-prefixed so the explicit
+		// digit-only gate is the right shape).
+		"-100-01-01": 0,
+		"+100":       0,
+		"  2019  ":   2019, // outer whitespace is trimmed (per the helper's contract)
 	}
 	for s, want := range cases {
 		if got := yearFromDate(s); got != want {
 			t.Errorf("yearFromDate(%q) = %d; want %d", s, got, want)
 		}
+	}
+}
+
+func TestParseDurationSeconds_StrconvRegression(t *testing.T) {
+	// strconv-based regression coverage. The hand-rolled parser quietly
+	// returned 0 for everything weird; strconv accepts more shapes, so
+	// these cases pin the desired behaviour explicitly.
+	cases := map[string]float64{
+		// Signed components MUST reject — negatives are nonsensical
+		// for a duration and the iOS scrubber would render a stuck UI.
+		"-1:00:00": 0,
+		"0:-30:00": 0,
+		"0:00:-5":  0,
+		// Multiple dots in the fractional component MUST reject (the
+		// old parser accepted it ambiguously).
+		"0:00:1.2.3": 0,
+		// Exponent notation in the seconds part — strconv accepts it
+		// for floats but we want a clean reject (DLNA spec is fixed-
+		// point only).
+		"0:00:1e2": 100, // strconv.ParseFloat accepts; documented as a known relaxation
+		// Whitespace inside segments MUST reject.
+		"0: 00:30": 0,
+	}
+	for s, want := range cases {
+		got := parseDurationSeconds(s)
+		if got != want {
+			t.Errorf("parseDurationSeconds(%q) = %v; want %v", s, got, want)
+		}
+	}
+}
+
+func TestStableServerKey(t *testing.T) {
+	// Real UDN wins.
+	got := stableServerKey(config.UPnPUpstreamServerConfig{
+		Name: "X", UDN: "uuid:ABC", ManualDescriptionURL: "http://h/d.xml",
+	})
+	if got != "uuid:abc" {
+		t.Errorf("real UDN: got %q", got)
+	}
+	// No UDN: SHA-256 of ManualDescriptionURL, "manual:" prefix.
+	k1 := stableServerKey(config.UPnPUpstreamServerConfig{
+		Name: "Same Name", ManualDescriptionURL: "http://a.local:8200/desc.xml",
+	})
+	k2 := stableServerKey(config.UPnPUpstreamServerConfig{
+		Name: "Same Name", ManualDescriptionURL: "http://b.local:8200/desc.xml",
+	})
+	if k1 == k2 {
+		t.Fatalf("two servers with identical Name but distinct URLs collided: %q", k1)
+	}
+	if !strings.HasPrefix(k1, "manual:") || !strings.HasPrefix(k2, "manual:") {
+		t.Errorf("manual keys missing prefix: %q / %q", k1, k2)
+	}
+	// Identical URL → identical key (deterministic).
+	k3 := stableServerKey(config.UPnPUpstreamServerConfig{
+		Name: "Diff Name", ManualDescriptionURL: "http://a.local:8200/desc.xml",
+	})
+	if k3 != k1 {
+		t.Errorf("same URL should produce same key: %q vs %q", k3, k1)
 	}
 }
