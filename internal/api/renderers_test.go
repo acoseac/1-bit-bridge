@@ -119,9 +119,14 @@ func TestHealthFeatures_RendererDiscoveryAlphaSort(t *testing.T) {
 			want:  []string{"diagnosticsSummary", "variantBumpsIndex"},
 		},
 		{
-			name:  "dlnaServer alone",
+			name:  "dlnaServer alone (also surfaces rateMatchedDSDSilence)",
 			gates: []string{"dlna"},
-			want:  []string{"diagnosticsSummary", "dlnaServer", "variantBumpsIndex"},
+			want: []string{
+				"diagnosticsSummary",
+				"dlnaServer",
+				"rateMatchedDSDSilence",
+				"variantBumpsIndex",
+			},
 		},
 		{
 			name:  "dlnaServer + rendererDiscovery",
@@ -129,6 +134,7 @@ func TestHealthFeatures_RendererDiscoveryAlphaSort(t *testing.T) {
 			want: []string{
 				"diagnosticsSummary",
 				"dlnaServer",
+				"rateMatchedDSDSilence",
 				"rendererDiscovery",
 				"variantBumpsIndex",
 			},
@@ -140,6 +146,7 @@ func TestHealthFeatures_RendererDiscoveryAlphaSort(t *testing.T) {
 				"diagnosticsSummary",
 				"dlnaServer",
 				"pushEventsSupported",
+				"rateMatchedDSDSilence",
 				"rendererDiscovery",
 				"variantBumpsIndex",
 			},
@@ -151,6 +158,7 @@ func TestHealthFeatures_RendererDiscoveryAlphaSort(t *testing.T) {
 				"diagnosticsSummary",
 				"dlnaServer",
 				"pushEventsSupported",
+				"rateMatchedDSDSilence",
 				"rendererDiscovery",
 				"upscaleCompleteEvents",
 				"variantBumpsIndex",
@@ -213,6 +221,7 @@ func simulateFeaturesList(gates []string) []string {
 	}
 	feats = appendUpscaleMidFeatures(feats, g)
 	feats = appendEventFeatures(feats, g)
+	feats = appendRateMatchedDSDSilenceFeature(feats, g)
 	feats = appendRendererDiscoveryFeature(feats, g)
 	if g("upscale") {
 		feats = append(feats, "upscaleCompleteEvents")
@@ -260,6 +269,13 @@ func appendEventFeatures(feats []string, g func(string) bool) []string {
 		feats = append(feats, "pairingEventsSupported")
 	}
 	feats = append(feats, "pushEventsSupported")
+	return feats
+}
+
+func appendRateMatchedDSDSilenceFeature(feats []string, g func(string) bool) []string {
+	if g("dlna") {
+		feats = append(feats, "rateMatchedDSDSilence")
+	}
 	return feats
 }
 
