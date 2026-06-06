@@ -49,6 +49,22 @@ func (s *Server) WithUPnPHostResolver(r UPnPServerHostResolver) *Server {
 	return s
 }
 
+// WithUPnPUpstreamPublicProvider wires the read-only "public" view of
+// the upstream-MediaServer feature for advertisement on `/v1/health`.
+// Independent of WithUPnPRouting / WithUPnPHostResolver: the proxy
+// wiring is OPTIONAL on the advertisement path (a bridge could
+// theoretically advertise upstreams without proxying their bytes —
+// though in practice cmd/bridge wires all three together).
+//
+// Passing nil omits the `upnpUpstreamServers` field from the wire shape
+// (so pre-feature behaviour is preserved on disabled deploys). The
+// provider is consulted on every /v1/health call — implementations
+// should keep the work proportional to the configured-server count.
+func (s *Server) WithUPnPUpstreamPublicProvider(p UPnPUpstreamPublicProvider) *Server {
+	s.upnpPublicProvider = p
+	return s
+}
+
 // upnpProxyEnabled returns true when both halves are wired. The
 // serveFile fast-path checks this before any database hit, so a deploy
 // that hasn't opted into the upstream-MediaServer feature pays nothing.

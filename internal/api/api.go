@@ -122,6 +122,7 @@ type Server struct {
 	variantStore           VariantStore                 // nil unless WithUpscale(true, vs) called
 	upnpRouting            UPnPRoutingLookup            // nil unless WithUPnPRouting wired (UPnP upstream feature)
 	upnpHostResolver       UPnPServerHostResolver       // nil unless WithUPnPHostResolver wired (UPnP upstream feature)
+	upnpPublicProvider     UPnPUpstreamPublicProvider   // nil unless WithUPnPUpstreamPublicProvider wired (UPnP upstream advertisement on /v1/health)
 	variantDeleter         VariantDeleter               // nil unless WithVariantDeleter wired (variant-lifecycle delete)
 	inflightDropper        InflightDropper              // nil unless WithInflightDropper wired (transcode pool dedup)
 	upscaleEnabled         bool                         // mirrors cfg.Upscale.Enabled (and sox-probe outcome)
@@ -1028,6 +1029,80 @@ type HealthResponse struct {
 	// Pre-1.2 iOS ignores the field. iOS 1.2+ uses Reason as a stable
 	// machine-readable code mapped to a localized UI string.
 	Roots []RootStatus `json:"roots,omitempty"`
+
+	// UPnPUpstreamServers advertises operator-configured upstream
+	// MediaServers (e.g. a Chord 2Go) whose tracks the bridge ingests
+	// into its manifest and proxies to iOS bit-exact. Lets iOS surface
+	// a sub-source row per upstream inside the bridge's Library view
+	// + a per-upstream filter in the source picker (Track.path
+	// starts_with(pathPrefix) is the membership test).
+	//
+	// Populated only when the upstream feature is wired (operator set
+	// `upnpUpstream.enabled = true` in bridge.yaml). Omitted entirely
+	// on bridges where the feature is disabled, so pre-feature iOS
+	// rejects nothing. Order matches the YAML config order so the iOS
+	// UI is deterministic across health probes.
+	//
+	// Wire shape is the **public subset** — operator-internal fields
+	// (control URL, manufacturer, raw manualDescriptionURL, per-walk
+	// telemetry, error strings) stay on the admin surface
+	// (`/api/upnp/servers`). iOS only needs name + identity +
+	// pathPrefix membership key + display label + track count.
+	UPnPUpstreamServers []UPnPUpstreamPublicServer `json:"upnpUpstreamServers,omitempty"`
+}
+
+// UPnPUpstreamPublicServer is the minimal per-upstream entry the bridge
+// advertises on `/v1/health` for iOS UI consumption. See the field on
+// HealthResponse for the rationale on the public-vs-admin split.
+type UPnPUpstreamPublicServer struct {
+	// Name is the operator-configured label (e.g. "Chord 2Go (cards)").
+	// Always populated — `name` is YAML-required.
+	Name string `json:"name"`
+
+	// ConfiguredUDN is the canonical UPnP identity (`uuid:...`) the
+	// operator pinned this entry to. Empty for manual-URL entries
+	// (the bridge keys them on a hashed manualDescriptionURL
+	// internally; iOS doesn't need that hash).
+	ConfiguredUDN string `json:"configuredUDN,omitempty"`
+
+	// PathPrefix is what the bridge prepends to every ingested
+	// track's manifest Path so multi-upstream setups don't collide.
+	// iOS uses this as the membership key for sub-source filtering:
+	// `Track.path.starts_with(prefix)` identifies tracks routed via
+	// this upstream. Always populated (defaults to a sanitized form
+	// of Name when omitted in YAML; the validator fills the default).
+	PathPrefix string `json:"pathPrefix"`
+
+	// FriendlyName is the discovery-time display label from the
+	// upstream's `<device><friendlyName>` (SSDP/description.xml). The
+	// operator may know only the UDN — friendlyName lets iOS show the
+	// device's own name (e.g. "Chord 2Go:2go-ars") instead of just
+	// the operator's terse label. Empty when the upstream hasn't been
+	// seen yet on the LAN; iOS falls back to Name in that case.
+	FriendlyName string `json:"friendlyName,omitempty"`
+
+	// RoutedTracks is the count of manifest tracks routed via this
+	// upstream (`COUNT(*) FROM upnp_track_routing WHERE server_udn = ?`).
+	// Lets iOS render a "(N tracks via 2Go)" subtitle without an
+	// extra round-trip. Always populated; zero means the feature is
+	// wired but no ingest has landed yet (warm-up window or per-server
+	// error).
+	RoutedTracks int `json:"routedTracks"`
+}
+
+// UPnPUpstreamPublicProvider is the read interface the api.Server uses
+// to populate HealthResponse.UPnPUpstreamServers. Production wiring is
+// the bridge's upnpUpstreamLifecycle (which already exposes the
+// equivalent admin-side data); tests pass a stub. Nil-safe — when the
+// provider isn't wired (operator hasn't enabled the feature) the field
+// is omitted entirely so the wire shape matches pre-feature bridges.
+type UPnPUpstreamPublicProvider interface {
+	// PublicServers returns the operator-configured servers in
+	// config-declared order, with discovery state + routed-track count
+	// merged. Called once per /v1/health request — keep the work
+	// proportional to len(cfg.UPnPUpstream.Servers) (single-digit in
+	// practice).
+	PublicServers() []UPnPUpstreamPublicServer
 }
 
 // RootStatus reports the reachability of a single library root. Wire-DTO
@@ -1222,6 +1297,17 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// omitempty) on bridges with no configured roots — test harness shape.
 	if s.reachability != nil {
 		resp.Roots = s.probeAllRoots(r.Context())
+	}
+	// UPnP upstream advertisement (additive, no protocol bump). Populated
+	// only when the operator opted into `upnpUpstream.enabled = true` AND
+	// cmd/bridge wired the public provider — pre-feature deploys serve
+	// the same wire shape as before (`omitempty` drops the empty slice).
+	// The provider is the chokepoint that translates configured-server
+	// rows + discovery cache + manifest routed-track count into the
+	// minimal public DTO; see UPnPUpstreamPublicServer for the field
+	// rationale.
+	if s.upnpPublicProvider != nil {
+		resp.UPnPUpstreamServers = s.upnpPublicProvider.PublicServers()
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

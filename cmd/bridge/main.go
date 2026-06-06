@@ -1669,6 +1669,14 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	upnpLC := startUPnPUpstreamIfEnabled(ctx, cfg, manifestStore, apiSrv, logger)
 	defer upnpLC.Stop()
 
+	// Public advertisement of upstream MediaServers on `/v1/health` —
+	// nil-safe (returns nil when the feature is disabled, so the
+	// `upnpUpstreamServers` field stays off the wire on pre-feature
+	// deploys). iOS uses the published rows for sub-source filtering
+	// inside the bridge's Library view (Track.path starts_with
+	// pathPrefix).
+	apiSrv.WithUPnPUpstreamPublicProvider(upnpLC.installPublicProvider(cfgHolder, manifestStore))
+
 	// Background sweep for the pairing rate-limiter's per-IP map.
 	// Hourly cadence drops limiters untouched for ≥ 6 h, keeping the
 	// map bounded under high churn (operator deep-links + diverse

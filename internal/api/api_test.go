@@ -726,3 +726,156 @@ func TestHealthOverTLSWithPinnedCert(t *testing.T) {
 		t.Errorf("health reports fingerprint %q, expected %q", got.CertFingerprint, fingerprint)
 	}
 }
+
+// stubUPnPPublicProvider is a deterministic fake of
+// UPnPUpstreamPublicProvider for /v1/health wire-shape coverage; the
+// production bridge-side adapter lives in cmd/bridge.
+type stubUPnPPublicProvider struct {
+	servers []UPnPUpstreamPublicServer
+}
+
+func (s *stubUPnPPublicProvider) PublicServers() []UPnPUpstreamPublicServer {
+	return s.servers
+}
+
+// TestHealth_UPnPUpstreamServers_OmittedWithoutProvider pins the
+// pre-feature wire-shape: a Server without WithUPnPUpstreamPublicProvider
+// MUST omit `upnpUpstreamServers` entirely so pre-feature iOS sees the
+// same shape it did before the field landed. Asserts on raw JSON
+// bytes (omitempty on a `[]Type` field only fires for nil-not-empty;
+// the absence-on-wire is the load-bearing guarantee).
+func TestHealth_UPnPUpstreamServers_OmittedWithoutProvider(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := &config.Config{
+		LibraryRoots:  []string{tmp},
+		ListenAddress: ":0",
+		LibraryName:   "X",
+	}
+	store, err := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hs := httptest.NewServer(New(cfg, store, nil, "fp").Handler())
+	defer hs.Close()
+
+	resp, err := http.Get(hs.URL + "/v1/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "upnpUpstreamServers") {
+		t.Errorf("upnpUpstreamServers should be omitted when provider is unwired, got: %s", body)
+	}
+}
+
+// TestHealth_UPnPUpstreamServers_EmittedFromProvider locks the
+// happy-path wire shape: a wired provider's PublicServers output flows
+// through `/v1/health` byte-for-byte (field order on the wire follows
+// the provider's slice order, which iOS uses for deterministic
+// sub-source row ordering).
+func TestHealth_UPnPUpstreamServers_EmittedFromProvider(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := &config.Config{
+		LibraryRoots:  []string{tmp},
+		ListenAddress: ":0",
+		LibraryName:   "X",
+	}
+	store, err := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := &stubUPnPPublicProvider{
+		servers: []UPnPUpstreamPublicServer{
+			{
+				Name:          "Chord 2Go (cards)",
+				ConfiguredUDN: "uuid:2go",
+				PathPrefix:    "2go",
+				FriendlyName:  "Chord 2Go:2go-ars",
+				RoutedTracks:  247,
+			},
+			{
+				Name:         "Manual MiniDLNA",
+				PathPrefix:   "manual",
+				RoutedTracks: 18,
+				// ConfiguredUDN + FriendlyName intentionally empty
+				// — manual-URL entries pre-discovery.
+			},
+		},
+	}
+	srv := New(cfg, store, nil, "fp").WithUPnPUpstreamPublicProvider(provider)
+	hs := httptest.NewServer(srv.Handler())
+	defer hs.Close()
+
+	resp, err := http.Get(hs.URL + "/v1/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var got HealthResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.UPnPUpstreamServers) != 2 {
+		t.Fatalf("got %d rows; want 2", len(got.UPnPUpstreamServers))
+	}
+	if got.UPnPUpstreamServers[0].Name != "Chord 2Go (cards)" {
+		t.Errorf("row 0 Name = %q; want %q", got.UPnPUpstreamServers[0].Name, "Chord 2Go (cards)")
+	}
+	if got.UPnPUpstreamServers[0].ConfiguredUDN != "uuid:2go" {
+		t.Errorf("row 0 ConfiguredUDN = %q; want %q", got.UPnPUpstreamServers[0].ConfiguredUDN, "uuid:2go")
+	}
+	if got.UPnPUpstreamServers[0].PathPrefix != "2go" {
+		t.Errorf("row 0 PathPrefix = %q; want %q", got.UPnPUpstreamServers[0].PathPrefix, "2go")
+	}
+	if got.UPnPUpstreamServers[0].FriendlyName != "Chord 2Go:2go-ars" {
+		t.Errorf("row 0 FriendlyName = %q; want %q", got.UPnPUpstreamServers[0].FriendlyName, "Chord 2Go:2go-ars")
+	}
+	if got.UPnPUpstreamServers[0].RoutedTracks != 247 {
+		t.Errorf("row 0 RoutedTracks = %d; want 247", got.UPnPUpstreamServers[0].RoutedTracks)
+	}
+	if got.UPnPUpstreamServers[1].Name != "Manual MiniDLNA" {
+		t.Errorf("row 1 Name = %q; want %q", got.UPnPUpstreamServers[1].Name, "Manual MiniDLNA")
+	}
+}
+
+// TestHealth_UPnPUpstreamServers_EmptyProviderResultOmitted pins the
+// edge case: a provider wired but returning a NIL slice (feature
+// enabled at config-load but no servers configured, OR a torn-down
+// RuntimeConfig surfacing nil from the adapter) MUST also drop the
+// field from the wire — omitempty handles nil slices but not empty
+// slices, so the adapter contract is "return nil to opt out, not []".
+// This test pins that contract by passing a nil-returning provider
+// and asserting absence on the wire.
+func TestHealth_UPnPUpstreamServers_EmptyProviderResultOmitted(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := &config.Config{
+		LibraryRoots:  []string{tmp},
+		ListenAddress: ":0",
+		LibraryName:   "X",
+	}
+	store, err := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := &stubUPnPPublicProvider{servers: nil}
+	srv := New(cfg, store, nil, "fp").WithUPnPUpstreamPublicProvider(provider)
+	hs := httptest.NewServer(srv.Handler())
+	defer hs.Close()
+
+	resp, err := http.Get(hs.URL + "/v1/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "upnpUpstreamServers") {
+		t.Errorf("upnpUpstreamServers should be omitted when provider returns nil, got: %s", body)
+	}
+}
