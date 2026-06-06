@@ -125,32 +125,41 @@ func serverWithProxy(t *testing.T, routing *stubRoutingLookup, host *stubHostRes
 	return s
 }
 
+// proxyFixture is the shared scaffold every TestProxyUPnP_* test uses:
+// stub upstream + routing row + server-with-proxy + a default request.
+// Extracted so each test stays focused on its own assertions instead of
+// repeating the 6-line setup boilerplate (4.9% → 3.1% → ≤3% SonarCloud
+// duplication on PR #352).
+type proxyFixture struct {
+	server   *Server
+	upstream *httptest.Server
+	records  *[]upstreamRecord
+	routing  *manifest.UPnPRouting
+}
+
+func newProxyFixture(t *testing.T, status int, body []byte, headers map[string]string) *proxyFixture {
+	t.Helper()
+	upstream, records := newStubUpstream(t, status, body, headers)
+	uURL, _ := url.Parse(upstream.URL)
+	rt := &manifest.UPnPRouting{
+		SourcePath: "p", ServerUDN: "uuid:test", ObjectID: "x",
+		ResURL: "http://stored-host:8200/MediaItems/1.flac",
+	}
+	s := serverWithProxy(t,
+		&stubRoutingLookup{m: map[string]*manifest.UPnPRouting{"p": rt}},
+		&stubHostResolver{host: uURL.Host, ok: true})
+	return &proxyFixture{server: s, upstream: upstream, records: records, routing: rt}
+}
+
 func TestProxyUPnP_PassesThroughBitExact(t *testing.T) {
 	body := []byte{0x66, 0x4c, 0x61, 0x43, 0xDE, 0xAD, 0xBE, 0xEF} // "fLaC" + raw
-	upstream, records := newStubUpstream(t, http.StatusOK, body, map[string]string{
+	f := newProxyFixture(t, http.StatusOK, body, map[string]string{
 		"Content-Type":   "audio/x-flac",
 		"Content-Length": "8",
 		"Accept-Ranges":  "bytes",
 	})
-	uURL, _ := url.Parse(upstream.URL)
-
-	routing := &stubRoutingLookup{m: map[string]*manifest.UPnPRouting{
-		"2Go/Music/Track.flac": {
-			SourcePath: "2Go/Music/Track.flac",
-			ServerUDN:  "uuid:test",
-			ObjectID:   "abc",
-			ResURL:     "http://stale-host:8200/MediaItems/1.flac",
-		},
-	}}
-	host := &stubHostResolver{host: uURL.Host, ok: true}
-	s := serverWithProxy(t, routing, host)
-
-	req := httptest.NewRequest(http.MethodGet, "/x", nil)
-	s.proxyUPnP(httptest.NewRecorder(), req, routing.m["2Go/Music/Track.flac"])
-
-	// Now exercise the bit-exact + header round-trip via a real recorder.
 	w := httptest.NewRecorder()
-	s.proxyUPnP(w, req, routing.m["2Go/Music/Track.flac"])
+	f.server.proxyUPnP(w, httptest.NewRequest(http.MethodGet, "/x", nil), f.routing)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d; want 200", w.Code)
@@ -158,40 +167,29 @@ func TestProxyUPnP_PassesThroughBitExact(t *testing.T) {
 	if ct := w.Header().Get("Content-Type"); ct != "audio/x-flac" {
 		t.Errorf("Content-Type = %q", ct)
 	}
-	got := w.Body.Bytes()
-	if string(got) != string(body) {
+	if got := w.Body.Bytes(); string(got) != string(body) {
 		t.Errorf("body mismatch:\n got=% x\nwant=% x", got, body)
 	}
-	if len(*records) < 1 {
+	if len(*f.records) < 1 {
 		t.Fatalf("upstream never called")
 	}
 	// The proxy rebuilt host:port from the live resolver, not the stored URL.
-	if !strings.HasSuffix((*records)[len(*records)-1].url, "/MediaItems/1.flac") {
-		t.Errorf("upstream URL = %q", (*records)[len(*records)-1].url)
+	if !strings.HasSuffix((*f.records)[len(*f.records)-1].url, "/MediaItems/1.flac") {
+		t.Errorf("upstream URL = %q", (*f.records)[len(*f.records)-1].url)
 	}
 }
 
 func TestProxyUPnP_ForwardsRangeHeader(t *testing.T) {
-	upstream, records := newStubUpstream(t, http.StatusPartialContent,
-		[]byte("partial"),
+	f := newProxyFixture(t, http.StatusPartialContent, []byte("partial"),
 		map[string]string{
 			"Content-Type":  "audio/x-flac",
 			"Content-Range": "bytes 0-6/8",
 			"Accept-Ranges": "bytes",
 		})
-	uURL, _ := url.Parse(upstream.URL)
-	rt := &manifest.UPnPRouting{
-		SourcePath: "p", ServerUDN: "uuid:test", ObjectID: "x",
-		ResURL: "http://upstream/MediaItems/1.flac",
-	}
-	s := serverWithProxy(t,
-		&stubRoutingLookup{m: map[string]*manifest.UPnPRouting{"p": rt}},
-		&stubHostResolver{host: uURL.Host, ok: true})
-
 	req := httptest.NewRequest(http.MethodGet, "/x", nil)
 	req.Header.Set("Range", "bytes=0-6")
 	w := httptest.NewRecorder()
-	s.proxyUPnP(w, req, rt)
+	f.server.proxyUPnP(w, req, f.routing)
 
 	if w.Code != http.StatusPartialContent {
 		t.Fatalf("status = %d; want 206", w.Code)
@@ -199,31 +197,19 @@ func TestProxyUPnP_ForwardsRangeHeader(t *testing.T) {
 	if cr := w.Header().Get("Content-Range"); cr != "bytes 0-6/8" {
 		t.Errorf("Content-Range = %q", cr)
 	}
-	// Upstream MUST have seen the Range header.
-	gotRange := (*records)[len(*records)-1].headers.Get("Range")
-	if gotRange != "bytes=0-6" {
-		t.Errorf("upstream Range = %q; want %q", gotRange, "bytes=0-6")
+	if got := (*f.records)[len(*f.records)-1].headers.Get("Range"); got != "bytes=0-6" {
+		t.Errorf("upstream Range = %q; want %q", got, "bytes=0-6")
 	}
 }
 
 func TestProxyUPnP_HEADReturnsHeadersOnly(t *testing.T) {
-	upstream, _ := newStubUpstream(t, http.StatusOK, []byte("payload"), map[string]string{
+	f := newProxyFixture(t, http.StatusOK, []byte("payload"), map[string]string{
 		"Content-Type":   "audio/x-flac",
 		"Content-Length": "7",
 		"Accept-Ranges":  "bytes",
 	})
-	uURL, _ := url.Parse(upstream.URL)
-	rt := &manifest.UPnPRouting{
-		SourcePath: "p", ServerUDN: "uuid:test", ObjectID: "x",
-		ResURL: "http://upstream/MediaItems/1.flac",
-	}
-	s := serverWithProxy(t,
-		&stubRoutingLookup{m: map[string]*manifest.UPnPRouting{"p": rt}},
-		&stubHostResolver{host: uURL.Host, ok: true})
-
-	req := httptest.NewRequest(http.MethodHead, "/x", nil)
 	w := httptest.NewRecorder()
-	s.proxyUPnP(w, req, rt)
+	f.server.proxyUPnP(w, httptest.NewRequest(http.MethodHead, "/x", nil), f.routing)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d; want 200", w.Code)
@@ -270,21 +256,14 @@ func TestProxyUPnP_UpstreamErrorReturns502(t *testing.T) {
 }
 
 func TestProxyUPnP_StripsHopByHopHeaders(t *testing.T) {
-	upstream, _ := newStubUpstream(t, http.StatusOK, []byte("ok"), map[string]string{
+	f := newProxyFixture(t, http.StatusOK, []byte("ok"), map[string]string{
 		"Content-Type":      "audio/x-flac",
 		"Connection":        "keep-alive", // hop-by-hop, must NOT relay
 		"Transfer-Encoding": "chunked",    // hop-by-hop, must NOT relay
 	})
-	uURL, _ := url.Parse(upstream.URL)
-	rt := &manifest.UPnPRouting{
-		SourcePath: "p", ServerUDN: "uuid:test", ObjectID: "x",
-		ResURL: "http://upstream/x.flac",
-	}
-	s := serverWithProxy(t,
-		&stubRoutingLookup{m: map[string]*manifest.UPnPRouting{"p": rt}},
-		&stubHostResolver{host: uURL.Host, ok: true})
 	w := httptest.NewRecorder()
-	s.proxyUPnP(w, httptest.NewRequest(http.MethodGet, "/x", nil), rt)
+	f.server.proxyUPnP(w, httptest.NewRequest(http.MethodGet, "/x", nil), f.routing)
+
 	if v := w.Header().Get("Connection"); v != "" {
 		t.Errorf("Connection should be stripped; got %q", v)
 	}
