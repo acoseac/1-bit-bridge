@@ -249,6 +249,25 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request) {
 
 	q := safeQuery(r)
 	clientPath := q.Get("path")
+
+	// UPnP upstream proxy fast-path: if the requested path matches a
+	// row in upnp_track_routing, the bytes don't live on this
+	// bridge's filesystem — they live on an upstream UPnP MediaServer
+	// (e.g. a Chord 2Go's microSD card). Proxy the request via a
+	// range-preserving GET to the upstream and stream bytes
+	// bit-exact. NOT GATED on a variant query — variants are bridge-
+	// minted sidecars by definition; an upstream-sourced track has
+	// no variants today.
+	if s.upnpProxyEnabled() && q.Get("variant") == "" {
+		if rt, err := s.upnpRouting.GetUPnPRouting(r.Context(), clientPath); err == nil && rt != nil {
+			s.proxyUPnP(w, r, rt)
+			return
+		}
+		// (err is logged inside the lookup if it's a real DB fault; a
+		// (nil, nil) "no such row" answer means filesystem track —
+		// fall through to ResolveChecked.)
+	}
+
 	abs, info, err := s.resolver.ResolveChecked(clientPath)
 	if ok := writeResolveError(w, r, err); ok {
 		return
