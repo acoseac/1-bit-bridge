@@ -711,6 +711,45 @@ var migrations = []migration{
 		CREATE INDEX IF NOT EXISTS idx_history_path ON playback_history(path);
 		`,
 	},
+	{
+		version: 13,
+		name:    "upnp_track_routing (upstream MediaServer ingestion sidecar)",
+		// Routing sidecar for tracks ingested from an upstream UPnP
+		// MediaServer (e.g. the Chord 2Go's MiniDLNA). The wire `Track`
+		// row in `tracks` is unchanged — its `path` is the LOAD-BEARING
+		// STABLE identity derived from the upstream's filesystem-tree
+		// view (Browse Folders), and trackID hashes on that. This
+		// sidecar carries the VOLATILE locators the file proxy uses to
+		// re-resolve bytes at fetch time: the server UDN, the
+		// ContentDirectory ObjectID, and the last-known <res> URL.
+		//
+		// `source_path` PRIMARY KEY matches `tracks.path` exactly. The
+		// FK ON DELETE CASCADE lets DeleteTrack / DeleteTracksByPrefix
+		// reap the routing row alongside the track without an explicit
+		// orphan-sweep. (SQLite enforces FKs only when
+		// `PRAGMA foreign_keys = ON` — the bridge already runs with
+		// foreign_keys enabled in store.go's OpenStore.)
+		//
+		// Index on (server_udn, last_seen_at) powers the per-server
+		// reconcile sweep (tracks no longer seen in the current walk
+		// generation drop from the manifest).
+		//
+		// Append-only / idempotent per the ladder contract.
+		sql: `
+		CREATE TABLE IF NOT EXISTS upnp_track_routing (
+			source_path       TEXT PRIMARY KEY,
+			server_udn        TEXT NOT NULL,
+			object_id         TEXT NOT NULL,
+			parent_object_id  TEXT NOT NULL DEFAULT '',
+			res_url           TEXT NOT NULL,
+			protocol_info     TEXT NOT NULL DEFAULT '',
+			last_seen_at      INTEGER NOT NULL,
+			FOREIGN KEY (source_path) REFERENCES tracks(path) ON DELETE CASCADE
+		);
+		CREATE INDEX IF NOT EXISTS idx_upnp_routing_server_seen
+			ON upnp_track_routing(server_udn, last_seen_at);
+		`,
+	},
 }
 
 // normalizePathForLookup folds an iOS-shaped track path back toward
