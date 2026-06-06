@@ -1108,6 +1108,103 @@ function initDevices() {
       }
     });
   });
+
+  // UPnP upstream MediaServers card (Bridge PR E). Loads /api/upnp/servers
+  // on devices-page open; hides the panel when the feature is disabled
+  // so operators who haven't enabled it never see an empty card.
+  loadUpnpUpstreamCard();
+}
+
+// loadUpnpUpstreamCard fetches /api/upnp/servers and renders the per-server
+// status rows into #upnp-upstream-list. Toggles the parent panel's
+// `hidden` attribute based on Enabled — a disabled bridge hides the card
+// entirely.
+async function loadUpnpUpstreamCard() {
+  const panel = document.getElementById("upnp-upstream-panel");
+  const list = document.getElementById("upnp-upstream-list");
+  if (!panel || !list) return;
+  try {
+    const r = await API.get("/api/upnp/servers");
+    if (!r.enabled) {
+      panel.hidden = true;
+      return;
+    }
+    panel.hidden = false;
+    renderUpnpUpstreamList(list, r.servers || []);
+  } catch (err) {
+    panel.hidden = false;
+    list.innerHTML = `<p class="muted">UPnP upstream status unavailable: ${escapeHTML(err.message || String(err))}</p>`;
+  }
+}
+
+// renderUpnpUpstreamList paints one row per configured server. Empty
+// config list = an explicit "no servers configured" hint so the
+// operator can see that the feature is enabled but unconfigured.
+function renderUpnpUpstreamList(list, servers) {
+  if (!servers.length) {
+    list.innerHTML = `<p class="muted"><em>No upstream servers configured. Add them under <code>upnpUpstream.servers</code> in bridge.yaml.</em></p>`;
+    return;
+  }
+  const rows = servers.map((s) => upnpUpstreamRowHTML(s)).join("");
+  list.innerHTML = `<div class="upnp-upstream-rows">${rows}</div>`;
+  list.querySelectorAll("[data-upnp-rescan]").forEach((btn) => {
+    btn.addEventListener("click", () => onUpnpRescanClick(btn));
+  });
+}
+
+// upnpUpstreamRowHTML renders one server row. Status pill reflects
+// discovery state; the metadata block shows the FriendlyName +
+// last-walk counts + routed-track total.
+function upnpUpstreamRowHTML(s) {
+  const statusClass = s.discovered ? "ok" : "warn";
+  const statusText = s.discovered ? "Discovered" : "Not seen yet";
+  const friendly = s.friendlyName ? escapeHTML(s.friendlyName) : "<em class=\"muted\">unresolved</em>";
+  const routed = s.routedTracks || 0;
+  // Go's time.Time zero value serializes to "0001-01-01T00:00:00Z" — JS
+  // parses that as a real year-1 date. Guard explicitly so we render
+  // "never" instead of "1/1/0001, 12:00:00 AM".
+  const lastWalk = (s.lastWalkFinishedAt && !s.lastWalkFinishedAt.startsWith("0001-01-01"))
+    ? new Date(s.lastWalkFinishedAt).toLocaleString()
+    : "never";
+  const lastWalked = s.lastWalkedCount || 0;
+  const lastReaped = s.lastReapedCount || 0;
+  const errLine = s.lastWalkErr
+    ? `<div class="upnp-upstream-err">${escapeHTML(s.lastWalkErr)}</div>`
+    : "";
+  return `
+    <div class="upnp-upstream-row" data-name="${escapeHTML(s.name)}">
+      <div class="upnp-upstream-head">
+        <strong>${escapeHTML(s.name)}</strong>
+        <span class="pill ${statusClass}">${statusText}</span>
+      </div>
+      <div class="upnp-upstream-meta">
+        <div>Friendly name: ${friendly}</div>
+        <div>Routed tracks: <strong>${routed.toLocaleString()}</strong></div>
+        <div>Last walk: ${lastWalk} (walked ${lastWalked.toLocaleString()}, reaped ${lastReaped.toLocaleString()})</div>
+        ${errLine}
+      </div>
+      <div class="upnp-upstream-actions">
+        <button type="button" class="btn" data-upnp-rescan data-udn="${escapeHTML(s.configuredUDN || "")}">Rescan</button>
+      </div>
+    </div>`;
+}
+
+async function onUpnpRescanClick(btn) {
+  const udn = btn.dataset.udn || "";
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = "Rescanning…";
+  try {
+    const q = udn ? "?udn=" + encodeURIComponent(udn) : "";
+    await API.post("/api/upnp/rescan" + q);
+    // Refresh the whole card so post-walk stats land in the UI.
+    setTimeout(() => loadUpnpUpstreamCard(), 1500);
+  } catch (err) {
+    alert("Rescan failed: " + (err.message || err));
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
+  }
 }
 
 // renderPairAlternates populates the Pair-modal "Other URLs the

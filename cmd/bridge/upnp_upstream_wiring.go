@@ -25,8 +25,10 @@ import (
 type upnpUpstreamLifecycle struct {
 	discoveryClients []*upnp.MediaServerDiscoveryClient
 	cache            *upnp.ServerCache
+	ingester         *upnpingest.Ingester // exposed so the admin adapter can ForceRescan
 	tickerCancel     context.CancelFunc
 	ingestWg         sync.WaitGroup
+	adminState       *upnpAdminState // populated lazily on installAdminAdapter
 	log              *slog.Logger
 }
 
@@ -54,6 +56,16 @@ func startUPnPUpstreamIfEnabled(
 ) *upnpUpstreamLifecycle {
 	log := logger.With(slog.String("component", "upnp-upstream"))
 	if !cfg.UPnPUpstream.Enabled {
+		return &upnpUpstreamLifecycle{log: log}
+	}
+	// Public-mode runtime guard. Config.Validate already refuses the
+	// public+enabled combination — this is defense-in-depth against a
+	// future code path that constructs a Config without going through
+	// Validate (e.g. hot-reload via the admin console editing the YAML
+	// and bypassing the validate pass). Log loudly so the operator
+	// sees the breadcrumb in the bridge log + admin events.
+	if cfg.IsPublic() {
+		log.Warn("UPnP upstream refused — public-mode bridge cannot reach the upstream's LAN-only multicast and RFC1918 byte URLs")
 		return &upnpUpstreamLifecycle{log: log}
 	}
 	if store == nil {
@@ -116,6 +128,7 @@ func startUPnPUpstreamIfEnabled(
 	life := &upnpUpstreamLifecycle{
 		discoveryClients: clients,
 		cache:            cache,
+		ingester:         ingester,
 		tickerCancel:     cancel,
 		log:              log,
 	}
@@ -176,6 +189,10 @@ func (l *upnpUpstreamLifecycle) runOneIngest(ctx context.Context, ingester *upnp
 		}
 		return
 	}
+	// Stash the result on the admin state (no-op when no admin adapter
+	// has been installed yet — happens during the very-first warm-up
+	// tick before cmd/bridge wires the admin Deps).
+	l.recordIngestResult(res)
 	for _, pr := range res.PerServer {
 		switch {
 		case pr.Skipped:

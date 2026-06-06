@@ -2805,3 +2805,20 @@ ul.histogram li {
 .histogram-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .histogram-count { font-variant-numeric: tabular-nums; color: var(--fg-muted); }
 .load-more-row { margin-top: 0.75rem; text-align: center; }
+
+/* UPnP upstream MediaServer card (Bridge PR E). One row per configured
+   server with a status pill, metadata block, and Rescan button. */
+.upnp-upstream-rows { display: flex; flex-direction: column; gap: 0.75rem; }
+.upnp-upstream-row {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  background: var(--bg-panel);
+}
+.upnp-upstream-head {
+  display: flex; align-items: center; gap: 0.75rem;
+  margin-bottom: 0.4rem;
+}
+.upnp-upstream-meta { color: var(--fg-muted); font-size: 13px; line-height: 1.5; }
+.upnp-upstream-err { color: var(--err); margin-top: 0.2rem; font-size: 12px; }
+.upnp-upstream-actions { margin-top: 0.6rem; }

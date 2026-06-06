@@ -204,17 +204,17 @@ func TestParseDurationSeconds_StrconvRegression(t *testing.T) {
 
 func TestStableServerKey(t *testing.T) {
 	// Real UDN wins.
-	got := stableServerKey(config.UPnPUpstreamServerConfig{
+	got := StableServerKey(config.UPnPUpstreamServerConfig{
 		Name: "X", UDN: "uuid:ABC", ManualDescriptionURL: "http://h/d.xml",
 	})
 	if got != "uuid:abc" {
 		t.Errorf("real UDN: got %q", got)
 	}
 	// No UDN: SHA-256 of ManualDescriptionURL, "manual:" prefix.
-	k1 := stableServerKey(config.UPnPUpstreamServerConfig{
+	k1 := StableServerKey(config.UPnPUpstreamServerConfig{
 		Name: "Same Name", ManualDescriptionURL: "http://a.local:8200/desc.xml",
 	})
-	k2 := stableServerKey(config.UPnPUpstreamServerConfig{
+	k2 := StableServerKey(config.UPnPUpstreamServerConfig{
 		Name: "Same Name", ManualDescriptionURL: "http://b.local:8200/desc.xml",
 	})
 	if k1 == k2 {
@@ -224,7 +224,7 @@ func TestStableServerKey(t *testing.T) {
 		t.Errorf("manual keys missing prefix: %q / %q", k1, k2)
 	}
 	// Identical URL → identical key (deterministic).
-	k3 := stableServerKey(config.UPnPUpstreamServerConfig{
+	k3 := StableServerKey(config.UPnPUpstreamServerConfig{
 		Name: "Diff Name", ManualDescriptionURL: "http://a.local:8200/desc.xml",
 	})
 	if k3 != k1 {

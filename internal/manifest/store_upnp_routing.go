@@ -195,3 +195,14 @@ func (s *Store) CountUPnPRoutingForServer(ctx context.Context, serverUDN string)
 	}
 	return n, nil
 }
+
+// CountUPnPRoutingTotal returns the total count of routing rows across
+// every server. Powers the admin dashboard's "N UPnP-routed tracks" tile.
+func (s *Store) CountUPnPRoutingTotal(ctx context.Context) (int, error) {
+	var n int
+	row := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM upnp_track_routing`)
+	if err := row.Scan(&n); err != nil {
+		return 0, fmt.Errorf("manifest: CountUPnPRoutingTotal: %w", err)
+	}
+	return n, nil
+}

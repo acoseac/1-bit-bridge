@@ -2171,12 +2171,19 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		StartedAt:          time.Now().UTC(),
 		ScanCtx:            scanCtx,
 		Restart:            cancel,
-		Updater:            updAdapter,
-		BackupSources:      backupSources,
-		Tailscale:          tailscaleAdminSrc,
-		Pairing:            pairingStore,
-		IsSupervised:       supervision.IsSupervised(),
-		UpscalePrecheck:    transcode.PrecheckSox,
+		// UPnP upstream admin surface (Bridge PR E). Nil when the
+		// feature is disabled — admin handlers return a clean 404 +
+		// the Devices page hides the card. ctx is passed so async
+		// rescans inherit the bridge's run-scope (a request-context
+		// would cancel the walk when the operator's browser
+		// disconnects).
+		UPnPUpstream:    upnpLC.installAdminAdapter(ctx, cfgHolder, manifestStore, upnpLC.ingester),
+		Updater:         updAdapter,
+		BackupSources:   backupSources,
+		Tailscale:       tailscaleAdminSrc,
+		Pairing:         pairingStore,
+		IsSupervised:    supervision.IsSupervised(),
+		UpscalePrecheck: transcode.PrecheckSox,
 		UpscaleStats: func() *admin.UpscalePoolStats {
 			// Snapshot the pool's live counters when the
 			// feature is active. Two off-paths return nil
