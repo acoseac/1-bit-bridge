@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
-	"sync"
 	"testing"
 	"time"
 
@@ -119,22 +118,17 @@ func TestAdmin_ForceRescan_AsyncDoesNotBlockHandler(t *testing.T) {
 	rt := runtimeCfgFor(t, cfg)
 	store := openAdminTestStore(t)
 
-	// Slow ingester: blocks on a sync.Mutex held by the test until the
-	// test signals it can finish. If ForceRescan ever runs synchronously
-	// it'll block on the same mutex and the test deadline will fire.
-	slow := &slowIngester{started: make(chan struct{}, 1), finish: make(chan struct{})}
 	a := &upnpAdminAdapter{
 		cfgHolder: rt, cache: upnp.NewServerCache(), store: store,
 		state: newUPnPAdminState(), bgCtx: context.Background(),
 	}
-	// Inject the slow ingester via the new test seam.
-	a.ingester = nil // sanity check; we use the slow interface below
-	_ = slow
 
-	// Manually wire what installAdminAdapter does, substituting our slow runner.
-	// We can't pass slow into ingester (it's typed *upnpingest.Ingester),
-	// so we instead test the async-spawn semantics directly via the
-	// state.inFlight latch.
+	// We can't inject a swappable Ingester today (the field is typed
+	// *upnpingest.Ingester), so we test the async-spawn semantics
+	// directly via the state.inFlight latch: a pre-held latch means a
+	// second request returns ErrUPnPRescanInFlight WITHOUT touching
+	// the ingester or spawning a goroutine. A future async-test-seam
+	// refactor can exercise the goroutine-spawn path with a stub.
 
 	// Start: take in_flight by hand to model "first call returns 202".
 	a.state.mu.Lock()
@@ -166,19 +160,4 @@ func TestAdmin_ForceRescan_RejectsUnknownUDN(t *testing.T) {
 	if !errors.Is(err, admin.ErrUPnPNoSuchServer) {
 		t.Fatalf("err = %v; want ErrUPnPNoSuchServer", err)
 	}
-}
-
-// slowIngester is a placeholder for a future async test seam (today the
-// ForceRescan tests above exercise the gating logic without a real
-// Ingester — adding a swappable runner is intentionally deferred).
-type slowIngester struct {
-	mu      sync.Mutex
-	started chan struct{}
-	finish  chan struct{}
-}
-
-func (s *slowIngester) Run(_ context.Context, _ upnpingest.Options) (upnpingest.IngestResult, error) {
-	s.started <- struct{}{}
-	<-s.finish
-	return upnpingest.IngestResult{}, nil
 }
