@@ -711,6 +711,45 @@ var migrations = []migration{
 		CREATE INDEX IF NOT EXISTS idx_history_path ON playback_history(path);
 		`,
 	},
+	{
+		version: 13,
+		name:    "upnp_track_routing (upstream MediaServer ingestion sidecar)",
+		// Routing sidecar for tracks ingested from an upstream UPnP
+		// MediaServer (e.g. the Chord 2Go's MiniDLNA). The wire `Track`
+		// row in `tracks` is unchanged — its `path` is the LOAD-BEARING
+		// STABLE identity derived from the upstream's filesystem-tree
+		// view (Browse Folders), and trackID hashes on that. This
+		// sidecar carries the VOLATILE locators the file proxy uses to
+		// re-resolve bytes at fetch time: the server UDN, the
+		// ContentDirectory ObjectID, and the last-known <res> URL.
+		//
+		// `source_path` PRIMARY KEY matches `tracks.path` exactly. The
+		// FK ON DELETE CASCADE lets DeleteTrack / DeleteTracksByPrefix
+		// reap the routing row alongside the track without an explicit
+		// orphan-sweep. (SQLite enforces FKs only when
+		// `PRAGMA foreign_keys = ON` — the bridge already runs with
+		// foreign_keys enabled in store.go's OpenStore.)
+		//
+		// Index on (server_udn, last_seen_at) powers the per-server
+		// reconcile sweep (tracks no longer seen in the current walk
+		// generation drop from the manifest).
+		//
+		// Append-only / idempotent per the ladder contract.
+		sql: `
+		CREATE TABLE IF NOT EXISTS upnp_track_routing (
+			source_path       TEXT PRIMARY KEY,
+			server_udn        TEXT NOT NULL,
+			object_id         TEXT NOT NULL,
+			parent_object_id  TEXT NOT NULL DEFAULT '',
+			res_url           TEXT NOT NULL,
+			protocol_info     TEXT NOT NULL DEFAULT '',
+			last_seen_at      INTEGER NOT NULL,
+			FOREIGN KEY (source_path) REFERENCES tracks(path) ON DELETE CASCADE
+		);
+		CREATE INDEX IF NOT EXISTS idx_upnp_routing_server_seen
+			ON upnp_track_routing(server_udn, last_seen_at);
+		`,
+	},
 }
 
 // normalizePathForLookup folds an iOS-shaped track path back toward
@@ -1081,6 +1120,115 @@ func (s *Store) DeleteTrack(ctx context.Context, path string) error {
 	// bulk-delete paths.
 	removeSidecarFiles(sidecars)
 	return nil
+}
+
+// DeleteTracksBatch removes many tracks in a SINGLE transaction +
+// single lock acquisition. Designed for the reconcile sweeps that may
+// reap thousands of rows after a configuration change (e.g. a UPnP
+// upstream's library reorganisation) — calling DeleteTrack N times
+// would acquire s.mu, BEGIN, write, COMMIT, fsync N times and starve
+// concurrent readers/writers for the duration.
+//
+// Sidecar-file unlinking is preserved: variants for every doomed track
+// are enumerated in one query, the rows are deleted under the FK
+// CASCADE in one DELETE-IN, then the sidecar files are unlinked off the
+// lock. Empty input is a no-op. Per-row errors are best-effort logged
+// (matching DeleteTrack's tolerance) so a single doomed sidecar can't
+// strand the rest of the batch.
+func (s *Store) DeleteTracksBatch(ctx context.Context, paths []string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Chunk to keep the SQL parameter list (and the `IN (?, ?, ...)`
+	// expression) well under SQLite's defaults (999 params on most
+	// builds, modernc.org/sqlite raises this but staying conservative
+	// keeps the function portable + readable). 200 matches the
+	// existing UpsertTrackBatch's batch shape.
+	const chunkSize = 200
+	for start := 0; start < len(paths); start += chunkSize {
+		end := start + chunkSize
+		if end > len(paths) {
+			end = len(paths)
+		}
+		chunk := paths[start:end]
+
+		// Enumerate sidecars for THIS chunk before the DELETE so the
+		// FK CASCADE doesn't yank rows out from under us. The SQL is
+		// built by buildPathInQuery (placeholders only — no caller
+		// string ever reaches the query body, so the dynamic '?,?,?'
+		// list is injection-safe by construction).
+		selectSQL, args := buildPathInQuery("SELECT sidecar_path FROM track_variants WHERE source_path", chunk)
+		rows, err := s.db.QueryContext(ctx, selectSQL, args...)
+		var sidecars []string
+		if err == nil {
+			for rows.Next() {
+				var sp string
+				if scanErr := rows.Scan(&sp); scanErr != nil {
+					logger.Warn("delete-tracks-batch: scan sidecar", "err", scanErr)
+					continue
+				}
+				sidecars = append(sidecars, sp)
+			}
+			if iterErr := rows.Err(); iterErr != nil {
+				logger.Warn("delete-tracks-batch: iter sidecars", "err", iterErr)
+			}
+			rows.Close()
+		} else {
+			logger.Warn("delete-tracks-batch: list sidecars", "err", err)
+		}
+
+		// One DELETE for the whole chunk under a single transaction.
+		// FK CASCADE handles upnp_track_routing + track_variants in
+		// one shot.
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("manifest: DeleteTracksBatch begin tx: %w", err)
+		}
+		deleteSQL, args := buildPathInQuery("DELETE FROM tracks WHERE path", chunk)
+		_, err = tx.ExecContext(ctx, deleteSQL, args...)
+		if err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("manifest: DeleteTracksBatch exec: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("manifest: DeleteTracksBatch commit: %w", err)
+		}
+
+		// Sidecar files off the lock.
+		removeSidecarFiles(sidecars)
+	}
+	return nil
+}
+
+// buildPathInQuery returns a complete SQL string of the form
+// `<prefix> IN (?,?,...)` plus the matching []any args, suitable for
+// passing straight to QueryContext / ExecContext. `prefix` is a
+// caller-side compile-time literal (e.g. "DELETE FROM tracks WHERE
+// path"); the dynamic suffix is ONLY placeholders + a deterministic
+// length derived from len(paths). No caller-supplied string ever
+// reaches the SQL body — both inputs are either a literal or a count.
+// Injection-safe by construction.
+func buildPathInQuery(prefix string, paths []string) (string, []any) {
+	if len(paths) == 0 {
+		return prefix + " IN ()", nil
+	}
+	args := make([]any, len(paths))
+	var b strings.Builder
+	b.Grow(len(prefix) + 5 + 2*len(paths))
+	b.WriteString(prefix)
+	b.WriteString(" IN (")
+	for i, p := range paths {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteByte('?')
+		args[i] = p
+	}
+	b.WriteByte(')')
+	return b.String(), args
 }
 
 // GetTrack fetches a single track by EXACT path match. Returns
