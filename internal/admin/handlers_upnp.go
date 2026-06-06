@@ -70,8 +70,9 @@ func (s *Server) apiUPnPServers(w http.ResponseWriter, _ *http.Request) {
 
 // apiUPnPRescan serves POST /api/upnp/rescan?udn=<UDN>. An empty udn
 // triggers a force-rescan across every configured server. Returns
-// 202 Accepted on success; 404 when the feature isn't wired; 503 when
-// no server matches the requested UDN.
+// 202 Accepted on success; 404 when the feature isn't wired OR when no
+// server matches the requested UDN; 409 when a rescan is already in
+// flight; 500 on any other failure.
 func (s *Server) apiUPnPRescan(w http.ResponseWriter, r *http.Request) {
 	if s.deps.UPnPUpstream == nil {
 		writeError(w, http.StatusNotFound, "upnp_disabled",

@@ -1160,7 +1160,10 @@ function upnpUpstreamRowHTML(s) {
   const statusText = s.discovered ? "Discovered" : "Not seen yet";
   const friendly = s.friendlyName ? escapeHTML(s.friendlyName) : "<em class=\"muted\">unresolved</em>";
   const routed = s.routedTracks || 0;
-  const lastWalk = s.lastWalkFinishedAt
+  // Go's time.Time zero value serializes to "0001-01-01T00:00:00Z" — JS
+  // parses that as a real year-1 date. Guard explicitly so we render
+  // "never" instead of "1/1/0001, 12:00:00 AM".
+  const lastWalk = (s.lastWalkFinishedAt && !s.lastWalkFinishedAt.startsWith("0001-01-01"))
     ? new Date(s.lastWalkFinishedAt).toLocaleString()
     : "never";
   const lastWalked = s.lastWalkedCount || 0;

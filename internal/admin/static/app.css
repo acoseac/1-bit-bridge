@@ -2813,7 +2813,7 @@ ul.histogram li {
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 0.75rem 1rem;
-  background: var(--panel-soft, var(--panel-bg));
+  background: var(--bg-panel);
 }
 .upnp-upstream-head {
   display: flex; align-items: center; gap: 0.75rem;

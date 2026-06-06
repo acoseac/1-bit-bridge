@@ -27,6 +27,11 @@ type upnpAdminAdapter struct {
 	ingester  *upnpingest.Ingester
 	store     *manifest.Store
 	state     *upnpAdminState
+	// bgCtx is the lifecycle's run context. ForceRescan dispatches its
+	// Ingester.Run on it (NOT the admin handler's request ctx) so a
+	// client disconnect can't abort a multi-second walk. Cancelled by
+	// the lifecycle's Stop during graceful shutdown.
+	bgCtx context.Context //nolint:containedctx // intentional: ctx is the run-scope for spawned scans
 }
 
 // upnpAdminState is the small in-memory store of last-run results,
@@ -86,6 +91,10 @@ func (a *upnpAdminAdapter) ConfiguredServers() []admin.UPnPUpstreamServerState {
 			ConfiguredUDN: srv.UDN,
 			ManualURL:     srv.ManualDescriptionURL,
 		}
+		// SSDP-keyed lookup applies only to servers configured with a
+		// UDN — manual-URL servers don't get into the discovery cache
+		// (SSDP M-SEARCH responses are matched by UDN, and a manual
+		// entry pre-discovery has none).
 		if srv.UDN != "" {
 			if info, ok := a.cache.Get(srv.UDN); ok {
 				row.Discovered = true
@@ -95,19 +104,26 @@ func (a *upnpAdminAdapter) ConfiguredServers() []admin.UPnPUpstreamServerState {
 				row.ControlURL = info.ContentDirectoryControlURL
 				row.LastSeenAt = info.LastSeenAt
 			}
-			if pr, ok := last[srv.UDN]; ok {
-				row.LastWalkStarted = pr.WalkStartedAt
-				row.LastWalkFinished = pr.WalkCompletedAt
-				row.LastWalked = pr.Walked
-				row.LastReaped = pr.Reaped
-				if pr.Err != nil {
-					row.LastWalkErr = pr.Err.Error()
-				}
+		}
+		// The ingester's keying is the SAME for UDN and manual servers
+		// — upnpingest.StableServerKey(srv) returns the lowercased UDN OR the
+		// SHA-256-hashed ManualDescriptionURL (the "manual:..." form).
+		// Using it here means manual servers DO surface their last-walk
+		// result + routed-track count, fixing the gap Gemini caught on
+		// PR #353.
+		key := upnpingest.StableServerKey(srv)
+		if pr, ok := last[key]; ok {
+			row.LastWalkStarted = pr.WalkStartedAt
+			row.LastWalkFinished = pr.WalkCompletedAt
+			row.LastWalked = pr.Walked
+			row.LastReaped = pr.Reaped
+			if pr.Err != nil {
+				row.LastWalkErr = pr.Err.Error()
 			}
-			if a.store != nil {
-				if n, err := a.store.CountUPnPRoutingForServer(context.Background(), srv.UDN); err == nil {
-					row.RoutedTracks = n
-				}
+		}
+		if a.store != nil {
+			if n, err := a.store.CountUPnPRoutingForServer(context.Background(), key); err == nil {
+				row.RoutedTracks = n
 			}
 		}
 		out = append(out, row)
@@ -115,31 +131,28 @@ func (a *upnpAdminAdapter) ConfiguredServers() []admin.UPnPUpstreamServerState {
 	return out
 }
 
-// ForceRescan triggers a single rescan. udn=="" forces every server;
-// any other value matches the configured UDN exactly. Concurrent calls
-// are rejected with ErrUPnPRescanInFlight so we don't overlap with the
-// ticker's own goroutine.
-func (a *upnpAdminAdapter) ForceRescan(ctx context.Context, udn string) error {
-	a.state.mu.Lock()
-	if a.state.inFlight {
-		a.state.mu.Unlock()
-		return admin.ErrUPnPRescanInFlight
-	}
-	a.state.inFlight = true
-	a.state.mu.Unlock()
-	defer func() {
-		a.state.mu.Lock()
-		a.state.inFlight = false
-		a.state.mu.Unlock()
-	}()
-
+// ForceRescan validates the request synchronously (config gate +
+// optional UDN match) then SPAWNS the actual walk in a background
+// goroutine. The handler returns 202 Accepted before the walk starts —
+// a UPnP walk over a 4 TB library can take tens of seconds, so a
+// synchronous call would (a) block the admin HTTP connection past a
+// reverse-proxy's idle timeout and (b) abort mid-walk if the operator
+// closes their browser (the request ctx would cancel). Gemini HIGH on
+// PR #353.
+//
+// `inFlight` is the debounce: a second click while the first walk is
+// still running returns ErrUPnPRescanInFlight (409). Validation errors
+// (disabled feature, unknown UDN) are returned synchronously so the
+// handler still maps them to the right status code; only the actual
+// Ingester.Run is offloaded.
+func (a *upnpAdminAdapter) ForceRescan(_ context.Context, udn string) error {
 	cfg := a.cfgHolder.Load()
 	if cfg == nil || !cfg.UPnPUpstream.Enabled {
 		return admin.ErrUPnPNoSuchServer
 	}
 	if udn != "" {
-		// Match a configured server before we run; otherwise return
-		// the typed 404 the handler maps to.
+		// Match a configured server before we accept the request;
+		// otherwise return the typed 404 the handler maps to.
 		match := false
 		for _, srv := range cfg.UPnPUpstream.Servers {
 			if srv.UDN == udn {
@@ -151,11 +164,37 @@ func (a *upnpAdminAdapter) ForceRescan(ctx context.Context, udn string) error {
 			return admin.ErrUPnPNoSuchServer
 		}
 	}
-	res, err := a.ingester.Run(ctx, upnpingest.Options{ForceWalk: true})
-	if err != nil {
-		return err
+	// Race-free acquire of the in-flight slot.
+	a.state.mu.Lock()
+	if a.state.inFlight {
+		a.state.mu.Unlock()
+		return admin.ErrUPnPRescanInFlight
 	}
-	a.state.record(res)
+	a.state.inFlight = true
+	a.state.mu.Unlock()
+
+	// Spawn the walk under the lifecycle's bgCtx (NOT the request ctx)
+	// so a client disconnect / reverse-proxy timeout can't abort the
+	// scan mid-tree. The lifecycle's Stop cancels bgCtx during
+	// graceful shutdown, so this goroutine still drains cleanly.
+	bgCtx := a.bgCtx
+	if bgCtx == nil {
+		bgCtx = context.Background()
+	}
+	go func() {
+		defer func() {
+			a.state.mu.Lock()
+			a.state.inFlight = false
+			a.state.mu.Unlock()
+		}()
+		res, err := a.ingester.Run(bgCtx, upnpingest.Options{ForceWalk: true})
+		if err != nil {
+			// Per-server errors are inside res; this only catches a
+			// truly fatal Run-level error (ctx cancelled = shutdown).
+			return
+		}
+		a.state.record(res)
+	}()
 	return nil
 }
 
@@ -173,8 +212,10 @@ func (l *upnpUpstreamLifecycle) recordIngestResult(res upnpingest.IngestResult) 
 }
 
 // installAdminAdapter constructs the adapter once and stashes it on the
-// lifecycle so the cmd/bridge wiring can pass it into admin.Deps.
-func (l *upnpUpstreamLifecycle) installAdminAdapter(cfgHolder *config.RuntimeConfig, store *manifest.Store, ingester *upnpingest.Ingester) admin.UPnPUpstreamProvider {
+// lifecycle so the cmd/bridge wiring can pass it into admin.Deps. `ctx`
+// is the lifecycle's run context (canceled by Stop); ForceRescan
+// dispatches its async Ingester.Run on it.
+func (l *upnpUpstreamLifecycle) installAdminAdapter(ctx context.Context, cfgHolder *config.RuntimeConfig, store *manifest.Store, ingester *upnpingest.Ingester) admin.UPnPUpstreamProvider {
 	if l == nil || l.cache == nil || ingester == nil {
 		return nil
 	}
@@ -187,6 +228,7 @@ func (l *upnpUpstreamLifecycle) installAdminAdapter(cfgHolder *config.RuntimeCon
 		ingester:  ingester,
 		store:     store,
 		state:     l.adminState,
+		bgCtx:     ctx,
 	}
 }
 

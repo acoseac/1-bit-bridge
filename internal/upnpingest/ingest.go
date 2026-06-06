@@ -181,7 +181,7 @@ func (i *Ingester) ingestOne(ctx context.Context, srv config.UPnPUpstreamServerC
 
 	// Walk.
 	res.WalkStartedAt = now()
-	udn := stableServerKey(srv)
+	udn := StableServerKey(srv)
 	res.ServerUDN = udn
 	prefix := normalizePrefix(srv)
 
@@ -359,7 +359,7 @@ func normalizePrefix(s config.UPnPUpstreamServerConfig) string {
 	return prefix
 }
 
-// stableServerKey returns the per-server key used for the routing
+// StableServerKey returns the per-server key used for the routing
 // table's `server_udn` column and for the SystemUpdateID store.
 //
 // When the operator supplied a real UDN we use it (lowercased + trimmed
@@ -371,7 +371,11 @@ func normalizePrefix(s config.UPnPUpstreamServerConfig) string {
 // configurations — two manual servers can share a Name or PathPrefix
 // without one's reconcile sweep eating the other's tracks (Gemini HIGH
 // on PR #351).
-func stableServerKey(s config.UPnPUpstreamServerConfig) string {
+//
+// Exported so the cmd/bridge admin adapter can compute the same key
+// when surfacing manual-URL servers in /api/upnp/servers (Gemini HIGH
+// on PR #353 — the prior srv.UDN-only gate silently excluded them).
+func StableServerKey(s config.UPnPUpstreamServerConfig) string {
 	if udn := strings.TrimSpace(s.UDN); udn != "" {
 		return strings.ToLower(udn)
 	}
