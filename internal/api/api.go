@@ -1147,9 +1147,9 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// path. Capacity 12 covers the current maximum (carPlayOptimize +
 	// deleteVariants + diagnosticsSummary + dlnaServer +
 	// operatorDrivenUpscale + pairingEventsSupported + playbackHistory +
-	// playlistBackup + pushEventsSupported + rateMatchedDSDSilence +
-	// rendererDiscovery + upscaleCompleteEvents + variantBumpsIndex).
-	feats := make([]string, 0, 13)
+	// playlistBackup + pushEventsSupported + rendererDiscovery +
+	// upscaleCompleteEvents + variantBumpsIndex).
+	feats := make([]string, 0, 12)
 	if s.upscaleEnabled {
 		if s.carPlayOptimizeEnabled {
 			feats = append(feats, "carPlayOptimize")
@@ -1197,19 +1197,6 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.eventBroker != nil {
 		feats = append(feats, "pushEventsSupported")
-	}
-	// `rateMatchedDSDSilence` advertises the rate-matched DSF silence assets
-	// at /dlna/silence-dsd{64,128,256}.dsf. iOS uses these for the DSD pause
-	// flush — dispatching a same-rate DSF silence track keeps the renderer
-	// locked in DSD-N mode (no DSD→PCM mode switch), avoiding the
-	// digital-filter limit-cycle oscillation that produces the persistent
-	// high-pitched ring on Chord 2Go + Hugo 2 at DSD256. Gated on
-	// `s.dlnaEnabled` because the assets are served by the DLNA HTTP
-	// listener — without DLNA the URLs would 404. Alpha-sorted between
-	// `pushEventsSupported` and `rendererDiscovery`
-	// (push < rateM < rendD; `p` < `r`, then `a` < `e`).
-	if s.dlnaEnabled {
-		feats = append(feats, "rateMatchedDSDSilence")
 	}
 	// `rendererDiscovery` advertises the bridge's SSDP MediaRenderer
 	// cache + `GET /v1/renderers` endpoint (PR 5). Gated AND-wise

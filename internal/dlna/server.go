@@ -337,11 +337,7 @@ func (s *Server) Stop(ctx context.Context) error {
 //	POST /dlna/cds/control          ContentDirectory SOAP control
 //	POST /dlna/cm/control           ConnectionManager SOAP control
 //	GET/HEAD /dlna/file/{trackID}   file serve (with Range support)
-//	GET/HEAD /dlna/silence.wav      1s PCM silence asset (legacy decoder-reset flush)
-//	GET/HEAD /dlna/silence-dsd{64,128,256}.dsf
-//	                                ~2s rate-matched DSD silence (DSD pause flush —
-//	                                keeps the renderer locked in DSD-N mode, avoids
-//	                                the DSD→PCM mode-switch ring on Chord 2Go DSD256)
+//	GET/HEAD /dlna/silence.wav      1s PCM silence asset (decoder-reset flush)
 //	SUBSCRIBE/UNSUBSCRIBE /dlna/cds/event  GENA stub (no-op success)
 //	SUBSCRIBE/UNSUBSCRIBE /dlna/cm/event   GENA stub (no-op success)
 //
@@ -403,18 +399,6 @@ func (s *Server) mountHandlers() {
 	// listener (same posture as `/dlna/file/`), serves regardless
 	// of whether SOAP control is wired.
 	s.mux.Handle(SilenceWAVPath, SilenceWAVHandler())
-
-	// Rate-matched DSD silence assets — solves the DSD256 pause ring on
-	// Chord 2Go + Hugo 2. Dispatching a same-rate DSF silence track keeps
-	// the renderer locked in DSD-N mode (no DSD→PCM mode switch, no FPGA
-	// limit-cycle oscillation), and the 0x69-bit-density payload drives the
-	// pulse-array DAC's accumulators to true digital zero before the
-	// trailing Stop. See `silence.go` rate-matched section docblock; iOS
-	// resolves the right URL per pause via `rateMatchedDSDSilence` feature
-	// flag in /v1/health.features.
-	s.mux.Handle(SilenceDSF64Path, SilenceDSFHandler(DSDRate64))
-	s.mux.Handle(SilenceDSF128Path, SilenceDSFHandler(DSDRate128))
-	s.mux.Handle(SilenceDSF256Path, SilenceDSFHandler(DSDRate256))
 
 	// GENA event handlers — accept SUBSCRIBE / UNSUBSCRIBE, set the
 	// SERVER header, and fire one best-effort initial NOTIFY. The
