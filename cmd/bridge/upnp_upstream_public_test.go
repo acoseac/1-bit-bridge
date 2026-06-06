@@ -31,6 +31,25 @@ func newUPnPTestCfg(t *testing.T, servers ...config.UPnPUpstreamServerConfig) *c
 	}
 }
 
+// seedRoutedTrack inserts ONE track + its matching upnp_track_routing
+// row into the store for testing. Tracks first, then routing (FK
+// dependency from upnp_track_routing.source_path → tracks.path). The
+// non-source-path fields are stable test defaults the per-server-count
+// + per-server-ctx-cancellation cases don't care about — what they
+// vary is the (path, serverKey) pair.
+func seedRoutedTrack(t *testing.T, store *manifest.Store, path, serverKey string) {
+	t.Helper()
+	if err := store.UpsertTrack(context.Background(), &manifest.Track{Path: path, Size: 1, ModTime: time.Now()}); err != nil {
+		t.Fatalf("UpsertTrack(%q): %v", path, err)
+	}
+	if err := store.UpsertUPnPRouting(context.Background(), &manifest.UPnPRouting{
+		SourcePath: path, ServerUDN: serverKey, ObjectID: "x",
+		ResURL: "http://h/x.flac", LastSeenAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("UpsertUPnPRouting(%q): %v", path, err)
+	}
+}
+
 func TestPublic_ConfiguredServers_PreservesYAMLOrder(t *testing.T) {
 	// iOS expects a deterministic per-server order so the rendered
 	// sub-source list doesn't churn between health probes. The adapter
@@ -151,22 +170,16 @@ func TestPublic_RoutedTracks_KeyedOnStableServerKey(t *testing.T) {
 	udnKey := upnpingest.StableServerKey(cfg.UPnPUpstream.Servers[0])
 	manualKey := upnpingest.StableServerKey(cfg.UPnPUpstream.Servers[1])
 
-	// Seed 3 udn-routed tracks + 5 manual-routed tracks. Tracks first
-	// (FK), then routing rows.
+	// Seed 3 udn-routed tracks + 5 manual-routed tracks via the
+	// shared `seedRoutedTrack` helper — tracks-then-routing FK order
+	// lives inside the helper so this site stays focused on the
+	// (path, key) distribution under test.
 	for _, p := range []struct{ key, path string }{
 		{udnKey, "udn/a.flac"}, {udnKey, "udn/b.flac"}, {udnKey, "udn/c.flac"},
 		{manualKey, "manual/a.flac"}, {manualKey, "manual/b.flac"}, {manualKey, "manual/c.flac"},
 		{manualKey, "manual/d.flac"}, {manualKey, "manual/e.flac"},
 	} {
-		if err := store.UpsertTrack(context.Background(), &manifest.Track{Path: p.path, Size: 1, ModTime: time.Now()}); err != nil {
-			t.Fatal(err)
-		}
-		if err := store.UpsertUPnPRouting(context.Background(), &manifest.UPnPRouting{
-			SourcePath: p.path, ServerUDN: p.key, ObjectID: "x",
-			ResURL: "http://h/x.flac", LastSeenAt: time.Now(),
-		}); err != nil {
-			t.Fatal(err)
-		}
+		seedRoutedTrack(t, store, p.path, p.key)
 	}
 
 	a := &upnpPublicAdapter{
@@ -266,15 +279,7 @@ func TestPublic_CancelledContext_SurfacesAsZeroRoutedTracks(t *testing.T) {
 	)
 	store := openUPnPTestStore(t)
 	key := upnpingest.StableServerKey(cfg.UPnPUpstream.Servers[0])
-	if err := store.UpsertTrack(context.Background(), &manifest.Track{Path: "c/a.flac", Size: 1, ModTime: time.Now()}); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.UpsertUPnPRouting(context.Background(), &manifest.UPnPRouting{
-		SourcePath: "c/a.flac", ServerUDN: key, ObjectID: "x",
-		ResURL: "http://h/x.flac", LastSeenAt: time.Now(),
-	}); err != nil {
-		t.Fatal(err)
-	}
+	seedRoutedTrack(t, store, "c/a.flac", key)
 
 	// Sanity baseline: non-cancelled ctx returns the expected count.
 	a := &upnpPublicAdapter{
