@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -234,7 +235,7 @@ func TestBrowseAll_ReturnsErrBrowseLimitOnTruncation(t *testing.T) {
 	defer func() { maxBrowseAllItemsForTesting = prev }()
 
 	item := func(i int) string {
-		return `<item id="x` + itoa(i) + `" parentID="0"><dc:title>T` + itoa(i) + `</dc:title></item>`
+		return `<item id="x` + strconv.Itoa(i) + `" parentID="0"><dc:title>T` + strconv.Itoa(i) + `</dc:title></item>`
 	}
 	stub := &stubDispatcher{}
 	for i := 0; i < 10; i++ {
@@ -260,16 +261,4 @@ func TestGetSystemUpdateID_MissingResponse_SurfacesError(t *testing.T) {
 	if _, err := c.GetSystemUpdateID(context.Background(), testControlURL); !errors.Is(err, ErrMissingResponseElement) {
 		t.Fatalf("err = %v; want ErrMissingResponseElement", err)
 	}
-}
-
-func itoa(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	var s []byte
-	for i > 0 {
-		s = append([]byte{byte('0' + i%10)}, s...)
-		i /= 10
-	}
-	return string(s)
 }
