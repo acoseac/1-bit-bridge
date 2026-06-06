@@ -170,3 +170,54 @@ func TestUPnPUpstreamConfig_Validate_DuplicateUDN(t *testing.T) {
 		t.Fatalf("err = %v; want UDN collision", err)
 	}
 }
+
+// TestValidate_PublicModeRefusesUPnPUpstream pins the public-mode
+// refusal at the Config.Validate top-level (not on the UPnPUpstreamConfig
+// itself — the refusal needs cfg.IsPublic() context). A public-mode
+// VPS bridge can't reach the upstream's LAN-only SSDP multicast NOR its
+// RFC1918 byte URLs, so the feature is structurally meaningless and
+// must refuse early instead of burning CPU on a multicast loop that
+// never hears anything.
+func TestValidate_PublicModeRefusesUPnPUpstream(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{
+		LibraryRoots:    []string{dir},
+		ListenAddress:   ":7788",
+		AdminAddress:    "0.0.0.0:7789",
+		ScanIntervalSec: 3600,
+		Deployment:      DeploymentConfig{Mode: "public", AdminTLSTerminatedByProxy: true},
+		Autocert:        AutocertConfig{Domain: "bridge.example.com"},
+		UPnPUpstream: UPnPUpstreamConfig{
+			Enabled: true,
+			Servers: []UPnPUpstreamServerConfig{
+				{Name: "2Go", UDN: "uuid:abc"},
+			},
+		},
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "upnpUpstream") || !strings.Contains(err.Error(), "public mode") {
+		t.Errorf("error %q should mention upnpUpstream + public mode", err.Error())
+	}
+}
+
+// TestValidate_PublicModeAllowsDisabledUPnPUpstream confirms the gate
+// is enabled-only: the default (Enabled=false) MUST validate cleanly in
+// public mode so VPS deployments aren't burdened with config noise.
+func TestValidate_PublicModeAllowsDisabledUPnPUpstream(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{
+		LibraryRoots:    []string{dir},
+		ListenAddress:   ":7788",
+		AdminAddress:    "0.0.0.0:7789",
+		ScanIntervalSec: 3600,
+		Deployment:      DeploymentConfig{Mode: "public", AdminTLSTerminatedByProxy: true},
+		Autocert:        AutocertConfig{Domain: "bridge.example.com"},
+		// UPnPUpstream zero-value: Enabled=false, no servers.
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("disabled upnpUpstream should validate in public mode: %v", err)
+	}
+}

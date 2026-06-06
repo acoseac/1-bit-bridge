@@ -58,6 +58,16 @@ func startUPnPUpstreamIfEnabled(
 	if !cfg.UPnPUpstream.Enabled {
 		return &upnpUpstreamLifecycle{log: log}
 	}
+	// Public-mode runtime guard. Config.Validate already refuses the
+	// public+enabled combination — this is defense-in-depth against a
+	// future code path that constructs a Config without going through
+	// Validate (e.g. hot-reload via the admin console editing the YAML
+	// and bypassing the validate pass). Log loudly so the operator
+	// sees the breadcrumb in the bridge log + admin events.
+	if cfg.IsPublic() {
+		log.Warn("UPnP upstream refused — public-mode bridge cannot reach the upstream's LAN-only multicast and RFC1918 byte URLs")
+		return &upnpUpstreamLifecycle{log: log}
+	}
 	if store == nil {
 		log.Warn("UPnP upstream refused — nil manifest store")
 		return &upnpUpstreamLifecycle{log: log}

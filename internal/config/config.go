@@ -92,6 +92,12 @@ type Config struct {
 // bridge; the iOS client reaches the bridge over any transport (LAN /
 // Tailscale / public mode) since the bridge proxies the file bytes.
 //
+// **Public-mode refusal**: Config.Validate refuses Enabled=true on a
+// public bridge — SSDP multicast (LAN-only by spec) AND the upstream's
+// RFC1918 byte URLs (e.g. http://192.168.0.62:8200/...) are both
+// unreachable from a public VPS. Same gate class as mdns.enabled and
+// DLNA.Enabled — see Validate() for the error string.
+//
 // **Source-of-truth for identity is the upstream's filesystem-tree
 // view** ("Browse Folders" on MiniDLNA, container id "64"). The bridge
 // reconstructs a stable path (`<prefix>/Artist/Album/NN - Title.ext`)
@@ -1474,6 +1480,16 @@ func (c *Config) Validate() error {
 	}
 	if err := c.UPnPUpstream.Validate(); err != nil {
 		return err
+	}
+	// Public-mode refusal for upnpUpstream. The feature relies on SSDP
+	// multicast (LAN-only by spec) AND a route to the upstream's
+	// RFC1918 byte URLs (e.g. http://192.168.0.62:8200/MediaItems/...
+	// — unreachable from a public VPS). Enabling it on a public bridge
+	// would burn CPU on a multicast loop that hears nothing AND fail
+	// every proxy fetch. Refuse loudly at load time, matching the
+	// mdns.enabled / DLNA.Enabled patterns above.
+	if c.IsPublic() && c.UPnPUpstream.Enabled {
+		return errors.New("upnpUpstream.enabled: must be false in public mode (SSDP multicast is LAN-only AND the upstream's RFC1918 byte URLs are unreachable from a public VPS)")
 	}
 	if (c.TLSCertPath == "") != (c.TLSKeyPath == "") {
 		return errors.New("tlsCertPath and tlsKeyPath: must be set together, or both empty")
