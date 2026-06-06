@@ -31,6 +31,21 @@ func newUPnPTestCfg(t *testing.T, servers ...config.UPnPUpstreamServerConfig) *c
 	}
 }
 
+// newPublicAdapterForTest constructs the standard adapter shape used
+// by most cases in this file — fresh RuntimeConfig wrapping `cfg`,
+// fresh ServerCache, store from the supplied fixture. The cache-
+// preloaded + nil-store cases construct manually (different fields
+// vary). Centralizing this 5-line constructor here keeps the per-
+// test body focused on the assertion.
+func newPublicAdapterForTest(t *testing.T, cfg *config.Config, store *manifest.Store) *upnpPublicAdapter {
+	t.Helper()
+	return &upnpPublicAdapter{
+		cfgHolder: config.NewRuntimeConfig(cfg),
+		cache:     upnp.NewServerCache(),
+		store:     store,
+	}
+}
+
 // seedRoutedTrack inserts ONE track + its matching upnp_track_routing
 // row into the store for testing. Tracks first, then routing (FK
 // dependency from upnp_track_routing.source_path → tracks.path). The
@@ -60,11 +75,7 @@ func TestPublic_ConfiguredServers_PreservesYAMLOrder(t *testing.T) {
 		config.UPnPUpstreamServerConfig{Name: "Bravo", UDN: "uuid:bravo", PathPrefix: "bravo"},
 		config.UPnPUpstreamServerConfig{Name: "Charlie", UDN: "uuid:charlie", PathPrefix: "charlie"},
 	)
-	a := &upnpPublicAdapter{
-		cfgHolder: config.NewRuntimeConfig(cfg),
-		cache:     upnp.NewServerCache(),
-		store:     openUPnPTestStore(t),
-	}
+	a := newPublicAdapterForTest(t, cfg, openUPnPTestStore(t))
 	got := a.PublicServers(context.Background())
 	if len(got) != 3 {
 		t.Fatalf("got %d rows; want 3", len(got))
@@ -121,11 +132,7 @@ func TestPublic_FriendlyName_EmptyWhenUndiscovered(t *testing.T) {
 	cfg := newUPnPTestCfg(t,
 		config.UPnPUpstreamServerConfig{Name: "Cold-start 2Go", UDN: "uuid:cold", PathPrefix: "cold"},
 	)
-	a := &upnpPublicAdapter{
-		cfgHolder: config.NewRuntimeConfig(cfg),
-		cache:     upnp.NewServerCache(), // empty
-		store:     openUPnPTestStore(t),
-	}
+	a := newPublicAdapterForTest(t, cfg, openUPnPTestStore(t))
 	got := a.PublicServers(context.Background())
 	if got[0].FriendlyName != "" {
 		t.Errorf("FriendlyName = %q; want \"\" (pre-discovery)", got[0].FriendlyName)
@@ -141,11 +148,7 @@ func TestPublic_ManualURLServer_OmitsConfiguredUDN(t *testing.T) {
 	cfg := newUPnPTestCfg(t,
 		config.UPnPUpstreamServerConfig{Name: "Manual", ManualDescriptionURL: "http://manual:8200/desc.xml", PathPrefix: "manual"},
 	)
-	a := &upnpPublicAdapter{
-		cfgHolder: config.NewRuntimeConfig(cfg),
-		cache:     upnp.NewServerCache(),
-		store:     openUPnPTestStore(t),
-	}
+	a := newPublicAdapterForTest(t, cfg, openUPnPTestStore(t))
 	got := a.PublicServers(context.Background())
 	if got[0].ConfiguredUDN != "" {
 		t.Errorf("ConfiguredUDN = %q; want \"\" for manual entry", got[0].ConfiguredUDN)
@@ -182,11 +185,7 @@ func TestPublic_RoutedTracks_KeyedOnStableServerKey(t *testing.T) {
 		seedRoutedTrack(t, store, p.path, p.key)
 	}
 
-	a := &upnpPublicAdapter{
-		cfgHolder: config.NewRuntimeConfig(cfg),
-		cache:     upnp.NewServerCache(),
-		store:     store,
-	}
+	a := newPublicAdapterForTest(t, cfg, store)
 	got := a.PublicServers(context.Background())
 	if got[0].RoutedTracks != 3 {
 		t.Errorf("UDN row RoutedTracks = %d; want 3", got[0].RoutedTracks)
@@ -204,11 +203,7 @@ func TestPublic_RoutedTracks_ZeroWhenNoIngest(t *testing.T) {
 	cfg := newUPnPTestCfg(t,
 		config.UPnPUpstreamServerConfig{Name: "Fresh", UDN: "uuid:fresh", PathPrefix: "fresh"},
 	)
-	a := &upnpPublicAdapter{
-		cfgHolder: config.NewRuntimeConfig(cfg),
-		cache:     upnp.NewServerCache(),
-		store:     openUPnPTestStore(t),
-	}
+	a := newPublicAdapterForTest(t, cfg, openUPnPTestStore(t))
 	got := a.PublicServers(context.Background())
 	if got[0].RoutedTracks != 0 {
 		t.Errorf("RoutedTracks = %d; want 0", got[0].RoutedTracks)
@@ -282,11 +277,7 @@ func TestPublic_CancelledContext_SurfacesAsZeroRoutedTracks(t *testing.T) {
 	seedRoutedTrack(t, store, "c/a.flac", key)
 
 	// Sanity baseline: non-cancelled ctx returns the expected count.
-	a := &upnpPublicAdapter{
-		cfgHolder: config.NewRuntimeConfig(cfg),
-		cache:     upnp.NewServerCache(),
-		store:     store,
-	}
+	a := newPublicAdapterForTest(t, cfg, store)
 	if got := a.PublicServers(context.Background()); got[0].RoutedTracks != 1 {
 		t.Fatalf("baseline RoutedTracks = %d; want 1 (helper not running successfully)", got[0].RoutedTracks)
 	}
