@@ -1659,6 +1659,16 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		apiSrv.WithRendererDiscovery(discLC.snapshotter)
 	}
 
+	// UPnP UPSTREAM ingestion + file-serving proxy. Opt-in via
+	// `upnpUpstream.enabled` in bridge.yaml. Walks each configured
+	// MediaServer's "Browse Folders" tree into the manifest at the
+	// scan-interval cadence + proxies /v1/download for any path whose
+	// row carries a upnp_track_routing entry. When disabled the
+	// lifecycle is a no-op + the proxy hooks stay nil + the filesystem
+	// path serves every track.
+	upnpLC := startUPnPUpstreamIfEnabled(ctx, cfg, manifestStore, apiSrv, logger)
+	defer upnpLC.Stop()
+
 	// Background sweep for the pairing rate-limiter's per-IP map.
 	// Hourly cadence drops limiters untouched for ≥ 6 h, keeping the
 	// map bounded under high churn (operator deep-links + diverse

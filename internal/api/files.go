@@ -249,6 +249,32 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request) {
 
 	q := safeQuery(r)
 	clientPath := q.Get("path")
+
+	// UPnP upstream proxy fast-path: if the requested path matches a
+	// row in upnp_track_routing, the bytes don't live on this
+	// bridge's filesystem — they live on an upstream UPnP MediaServer
+	// (e.g. a Chord 2Go's microSD card). Proxy the request via a
+	// range-preserving GET to the upstream and stream bytes
+	// bit-exact. NOT GATED on a variant query — variants are bridge-
+	// minted sidecars by definition; an upstream-sourced track has
+	// no variants today.
+	if s.upnpProxyEnabled() && q.Get("variant") == "" {
+		rt, lookupErr := s.upnpRouting.GetUPnPRouting(r.Context(), clientPath)
+		if lookupErr != nil {
+			// Surface DB faults loudly — silently falling through to
+			// ResolveChecked would have a real database error masquerade
+			// as "filesystem track" and produce a confusing 400/404.
+			// Per Gemini on PR #352.
+			LoggerFromContext(r.Context()).Error(
+				"upnp routing lookup failed",
+				"path", clientPath, "err", lookupErr)
+		} else if rt != nil {
+			s.proxyUPnP(w, r, rt)
+			return
+		}
+		// (nil, nil) — no routing row → filesystem track → fall through.
+	}
+
 	abs, info, err := s.resolver.ResolveChecked(clientPath)
 	if ok := writeResolveError(w, r, err); ok {
 		return

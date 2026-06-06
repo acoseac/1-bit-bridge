@@ -120,6 +120,8 @@ type Server struct {
 	certNotAfter           time.Time                    // zero when not wired (test harnesses)
 	leCertNotAfterProvider func() time.Time             // public-mode autocert; nil unless WithLECertExpiry wired
 	variantStore           VariantStore                 // nil unless WithUpscale(true, vs) called
+	upnpRouting            UPnPRoutingLookup            // nil unless WithUPnPRouting wired (UPnP upstream feature)
+	upnpHostResolver       UPnPServerHostResolver       // nil unless WithUPnPHostResolver wired (UPnP upstream feature)
 	variantDeleter         VariantDeleter               // nil unless WithVariantDeleter wired (variant-lifecycle delete)
 	inflightDropper        InflightDropper              // nil unless WithInflightDropper wired (transcode pool dedup)
 	upscaleEnabled         bool                         // mirrors cfg.Upscale.Enabled (and sox-probe outcome)
