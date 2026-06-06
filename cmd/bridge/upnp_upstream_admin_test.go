@@ -22,7 +22,7 @@ func runtimeCfgFor(t *testing.T, cfg *config.Config) *config.RuntimeConfig {
 	return config.NewRuntimeConfig(cfg)
 }
 
-func openAdminTestStore(t *testing.T) *manifest.Store {
+func openUPnPTestStore(t *testing.T) *manifest.Store {
 	t.Helper()
 	s, err := manifest.OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
 	if err != nil {
@@ -39,21 +39,12 @@ func TestAdmin_ConfiguredServers_IncludesManualURLServers(t *testing.T) {
 	// != "" which silently excluded manual servers entirely (Gemini
 	// HIGH on PR #353). The adapter now uses upnpingest.StableServerKey so manual
 	// servers DO surface their state.
-	cfg := &config.Config{
-		LibraryRoots:    []string{t.TempDir()},
-		ListenAddress:   ":7788",
-		AdminAddress:    "127.0.0.1:7789",
-		ScanIntervalSec: 3600,
-		UPnPUpstream: config.UPnPUpstreamConfig{
-			Enabled: true,
-			Servers: []config.UPnPUpstreamServerConfig{
-				{Name: "Manual Server", ManualDescriptionURL: "http://manual:8200/desc.xml"},
-				{Name: "UDN Server", UDN: "uuid:abc"},
-			},
-		},
-	}
+	cfg := newUPnPTestCfg(t,
+		config.UPnPUpstreamServerConfig{Name: "Manual Server", ManualDescriptionURL: "http://manual:8200/desc.xml"},
+		config.UPnPUpstreamServerConfig{Name: "UDN Server", UDN: "uuid:abc"},
+	)
 	rt := runtimeCfgFor(t, cfg)
-	store := openAdminTestStore(t)
+	store := openUPnPTestStore(t)
 	cache := upnp.NewServerCache()
 
 	// Pre-seed manifest routing rows for BOTH servers — including the
@@ -105,18 +96,11 @@ func TestAdmin_ForceRescan_AsyncDoesNotBlockHandler(t *testing.T) {
 	// any client disconnect. Now the call returns 202 immediately and
 	// the walk runs on a background goroutine using the lifecycle's
 	// ctx (not the request ctx). Gemini HIGH on PR #353.
-	cfg := &config.Config{
-		LibraryRoots:    []string{t.TempDir()},
-		ListenAddress:   ":7788",
-		AdminAddress:    "127.0.0.1:7789",
-		ScanIntervalSec: 3600,
-		UPnPUpstream: config.UPnPUpstreamConfig{
-			Enabled: true,
-			Servers: []config.UPnPUpstreamServerConfig{{Name: "S", UDN: "uuid:abc"}},
-		},
-	}
+	cfg := newUPnPTestCfg(t,
+		config.UPnPUpstreamServerConfig{Name: "S", UDN: "uuid:abc"},
+	)
 	rt := runtimeCfgFor(t, cfg)
-	store := openAdminTestStore(t)
+	store := openUPnPTestStore(t)
 
 	a := &upnpAdminAdapter{
 		cfgHolder: rt, cache: upnp.NewServerCache(), store: store,
@@ -141,16 +125,9 @@ func TestAdmin_ForceRescan_AsyncDoesNotBlockHandler(t *testing.T) {
 }
 
 func TestAdmin_ForceRescan_RejectsUnknownUDN(t *testing.T) {
-	cfg := &config.Config{
-		LibraryRoots:    []string{t.TempDir()},
-		ListenAddress:   ":7788",
-		AdminAddress:    "127.0.0.1:7789",
-		ScanIntervalSec: 3600,
-		UPnPUpstream: config.UPnPUpstreamConfig{
-			Enabled: true,
-			Servers: []config.UPnPUpstreamServerConfig{{Name: "S", UDN: "uuid:known"}},
-		},
-	}
+	cfg := newUPnPTestCfg(t,
+		config.UPnPUpstreamServerConfig{Name: "S", UDN: "uuid:known"},
+	)
 	rt := runtimeCfgFor(t, cfg)
 	a := &upnpAdminAdapter{
 		cfgHolder: rt, cache: upnp.NewServerCache(),

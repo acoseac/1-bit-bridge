@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -12,14 +11,24 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/upnpingest"
 )
 
-func openPublicTestStore(t *testing.T) *manifest.Store {
+// newUPnPTestCfg builds a Config tuned for the UPnP upstream test
+// suite — same `LibraryRoots` / listen addresses / ScanIntervalSec
+// boilerplate every test would otherwise repeat, with the supplied
+// per-server entries plugged in. Shared across this file's cases so
+// the per-test boilerplate stays focused on what's actually under
+// assertion (fresh-cfg builder, no shared state across calls).
+func newUPnPTestCfg(t *testing.T, servers ...config.UPnPUpstreamServerConfig) *config.Config {
 	t.Helper()
-	s, err := manifest.OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
-	if err != nil {
-		t.Fatalf("OpenStore: %v", err)
+	return &config.Config{
+		LibraryRoots:    []string{t.TempDir()},
+		ListenAddress:   ":7788",
+		AdminAddress:    "127.0.0.1:7789",
+		ScanIntervalSec: 3600,
+		UPnPUpstream: config.UPnPUpstreamConfig{
+			Enabled: true,
+			Servers: servers,
+		},
 	}
-	t.Cleanup(func() { _ = s.Close() })
-	return s
 }
 
 func TestPublic_ConfiguredServers_PreservesYAMLOrder(t *testing.T) {
@@ -27,24 +36,15 @@ func TestPublic_ConfiguredServers_PreservesYAMLOrder(t *testing.T) {
 	// sub-source list doesn't churn between health probes. The adapter
 	// MUST emit servers in YAML config order — the same invariant the
 	// admin adapter holds.
-	cfg := &config.Config{
-		LibraryRoots:    []string{t.TempDir()},
-		ListenAddress:   ":7788",
-		AdminAddress:    "127.0.0.1:7789",
-		ScanIntervalSec: 3600,
-		UPnPUpstream: config.UPnPUpstreamConfig{
-			Enabled: true,
-			Servers: []config.UPnPUpstreamServerConfig{
-				{Name: "Alpha", UDN: "uuid:alpha", PathPrefix: "alpha"},
-				{Name: "Bravo", UDN: "uuid:bravo", PathPrefix: "bravo"},
-				{Name: "Charlie", UDN: "uuid:charlie", PathPrefix: "charlie"},
-			},
-		},
-	}
+	cfg := newUPnPTestCfg(t,
+		config.UPnPUpstreamServerConfig{Name: "Alpha", UDN: "uuid:alpha", PathPrefix: "alpha"},
+		config.UPnPUpstreamServerConfig{Name: "Bravo", UDN: "uuid:bravo", PathPrefix: "bravo"},
+		config.UPnPUpstreamServerConfig{Name: "Charlie", UDN: "uuid:charlie", PathPrefix: "charlie"},
+	)
 	a := &upnpPublicAdapter{
 		cfgHolder: config.NewRuntimeConfig(cfg),
 		cache:     upnp.NewServerCache(),
-		store:     openPublicTestStore(t),
+		store:     openUPnPTestStore(t),
 	}
 	got := a.PublicServers(context.Background())
 	if len(got) != 3 {
@@ -65,18 +65,9 @@ func TestPublic_FriendlyName_FromDiscoveryCache(t *testing.T) {
 	// adapter MUST publish that label so iOS shows the device's own
 	// name (e.g. "Chord 2Go:2go-ars") instead of just the operator's
 	// terse YAML `Name` field.
-	cfg := &config.Config{
-		LibraryRoots:    []string{t.TempDir()},
-		ListenAddress:   ":7788",
-		AdminAddress:    "127.0.0.1:7789",
-		ScanIntervalSec: 3600,
-		UPnPUpstream: config.UPnPUpstreamConfig{
-			Enabled: true,
-			Servers: []config.UPnPUpstreamServerConfig{
-				{Name: "Chord", UDN: "uuid:2go", PathPrefix: "chord"},
-			},
-		},
-	}
+	cfg := newUPnPTestCfg(t,
+		config.UPnPUpstreamServerConfig{Name: "Chord", UDN: "uuid:2go", PathPrefix: "chord"},
+	)
 	cache := upnp.NewServerCache()
 	cache.Upsert(upnp.ServerInfo{
 		UDN:                        "uuid:2go",
@@ -87,7 +78,7 @@ func TestPublic_FriendlyName_FromDiscoveryCache(t *testing.T) {
 	a := &upnpPublicAdapter{
 		cfgHolder: config.NewRuntimeConfig(cfg),
 		cache:     cache,
-		store:     openPublicTestStore(t),
+		store:     openUPnPTestStore(t),
 	}
 	got := a.PublicServers(context.Background())
 	if len(got) != 1 {
@@ -108,22 +99,13 @@ func TestPublic_FriendlyName_EmptyWhenUndiscovered(t *testing.T) {
 	// Pre-discovery (bridge just started, SSDP cache empty for this
 	// UDN) the FriendlyName field MUST be empty on the wire — iOS
 	// falls back to Name. NOT a stale placeholder like the UDN string.
-	cfg := &config.Config{
-		LibraryRoots:    []string{t.TempDir()},
-		ListenAddress:   ":7788",
-		AdminAddress:    "127.0.0.1:7789",
-		ScanIntervalSec: 3600,
-		UPnPUpstream: config.UPnPUpstreamConfig{
-			Enabled: true,
-			Servers: []config.UPnPUpstreamServerConfig{
-				{Name: "Cold-start 2Go", UDN: "uuid:cold", PathPrefix: "cold"},
-			},
-		},
-	}
+	cfg := newUPnPTestCfg(t,
+		config.UPnPUpstreamServerConfig{Name: "Cold-start 2Go", UDN: "uuid:cold", PathPrefix: "cold"},
+	)
 	a := &upnpPublicAdapter{
 		cfgHolder: config.NewRuntimeConfig(cfg),
 		cache:     upnp.NewServerCache(), // empty
-		store:     openPublicTestStore(t),
+		store:     openUPnPTestStore(t),
 	}
 	got := a.PublicServers(context.Background())
 	if got[0].FriendlyName != "" {
@@ -137,22 +119,13 @@ func TestPublic_ManualURLServer_OmitsConfiguredUDN(t *testing.T) {
 	// (e.g. "manual:abc123..."). The wire shape MUST emit an empty
 	// ConfiguredUDN (which omitempty drops) so iOS doesn't try to
 	// persist it.
-	cfg := &config.Config{
-		LibraryRoots:    []string{t.TempDir()},
-		ListenAddress:   ":7788",
-		AdminAddress:    "127.0.0.1:7789",
-		ScanIntervalSec: 3600,
-		UPnPUpstream: config.UPnPUpstreamConfig{
-			Enabled: true,
-			Servers: []config.UPnPUpstreamServerConfig{
-				{Name: "Manual", ManualDescriptionURL: "http://manual:8200/desc.xml", PathPrefix: "manual"},
-			},
-		},
-	}
+	cfg := newUPnPTestCfg(t,
+		config.UPnPUpstreamServerConfig{Name: "Manual", ManualDescriptionURL: "http://manual:8200/desc.xml", PathPrefix: "manual"},
+	)
 	a := &upnpPublicAdapter{
 		cfgHolder: config.NewRuntimeConfig(cfg),
 		cache:     upnp.NewServerCache(),
-		store:     openPublicTestStore(t),
+		store:     openUPnPTestStore(t),
 	}
 	got := a.PublicServers(context.Background())
 	if got[0].ConfiguredUDN != "" {
@@ -169,20 +142,11 @@ func TestPublic_RoutedTracks_KeyedOnStableServerKey(t *testing.T) {
 	// Pre-fix the admin adapter gated this on `srv.UDN != ""` which
 	// silently excluded manual servers — same hazard here. The public
 	// adapter takes that lesson via the StableServerKey call.
-	cfg := &config.Config{
-		LibraryRoots:    []string{t.TempDir()},
-		ListenAddress:   ":7788",
-		AdminAddress:    "127.0.0.1:7789",
-		ScanIntervalSec: 3600,
-		UPnPUpstream: config.UPnPUpstreamConfig{
-			Enabled: true,
-			Servers: []config.UPnPUpstreamServerConfig{
-				{Name: "UDN", UDN: "uuid:udn", PathPrefix: "udn"},
-				{Name: "Manual", ManualDescriptionURL: "http://manual:8200/desc.xml", PathPrefix: "manual"},
-			},
-		},
-	}
-	store := openPublicTestStore(t)
+	cfg := newUPnPTestCfg(t,
+		config.UPnPUpstreamServerConfig{Name: "UDN", UDN: "uuid:udn", PathPrefix: "udn"},
+		config.UPnPUpstreamServerConfig{Name: "Manual", ManualDescriptionURL: "http://manual:8200/desc.xml", PathPrefix: "manual"},
+	)
+	store := openUPnPTestStore(t)
 
 	udnKey := upnpingest.StableServerKey(cfg.UPnPUpstream.Servers[0])
 	manualKey := upnpingest.StableServerKey(cfg.UPnPUpstream.Servers[1])
@@ -224,22 +188,13 @@ func TestPublic_RoutedTracks_ZeroWhenNoIngest(t *testing.T) {
 	// → RoutedTracks emits 0 (NOT a stale carry-over). The field is
 	// NOT omitempty on the wire, so iOS sees the literal 0 and can
 	// render "(0 tracks via …)" or hide the chip.
-	cfg := &config.Config{
-		LibraryRoots:    []string{t.TempDir()},
-		ListenAddress:   ":7788",
-		AdminAddress:    "127.0.0.1:7789",
-		ScanIntervalSec: 3600,
-		UPnPUpstream: config.UPnPUpstreamConfig{
-			Enabled: true,
-			Servers: []config.UPnPUpstreamServerConfig{
-				{Name: "Fresh", UDN: "uuid:fresh", PathPrefix: "fresh"},
-			},
-		},
-	}
+	cfg := newUPnPTestCfg(t,
+		config.UPnPUpstreamServerConfig{Name: "Fresh", UDN: "uuid:fresh", PathPrefix: "fresh"},
+	)
 	a := &upnpPublicAdapter{
 		cfgHolder: config.NewRuntimeConfig(cfg),
 		cache:     upnp.NewServerCache(),
-		store:     openPublicTestStore(t),
+		store:     openUPnPTestStore(t),
 	}
 	got := a.PublicServers(context.Background())
 	if got[0].RoutedTracks != 0 {
@@ -255,7 +210,7 @@ func TestPublic_NilCfg_ReturnsNil(t *testing.T) {
 	a := &upnpPublicAdapter{
 		cfgHolder: rt,
 		cache:     upnp.NewServerCache(),
-		store:     openPublicTestStore(t),
+		store:     openUPnPTestStore(t),
 	}
 	if got := a.PublicServers(context.Background()); got != nil {
 		t.Errorf("got %v; want nil for nil cfg", got)
@@ -267,18 +222,9 @@ func TestPublic_NilStore_RoutedTracksZero(t *testing.T) {
 	// shouldn't happen in production, but the adapter MUST stay
 	// crash-free regardless), RoutedTracks defaults to 0 rather than
 	// panicking.
-	cfg := &config.Config{
-		LibraryRoots:    []string{t.TempDir()},
-		ListenAddress:   ":7788",
-		AdminAddress:    "127.0.0.1:7789",
-		ScanIntervalSec: 3600,
-		UPnPUpstream: config.UPnPUpstreamConfig{
-			Enabled: true,
-			Servers: []config.UPnPUpstreamServerConfig{
-				{Name: "No store", UDN: "uuid:n", PathPrefix: "n"},
-			},
-		},
-	}
+	cfg := newUPnPTestCfg(t,
+		config.UPnPUpstreamServerConfig{Name: "No store", UDN: "uuid:n", PathPrefix: "n"},
+	)
 	a := &upnpPublicAdapter{
 		cfgHolder: config.NewRuntimeConfig(cfg),
 		cache:     upnp.NewServerCache(),
@@ -298,7 +244,7 @@ func TestPublic_NilCfgHolder_ReturnsNil(t *testing.T) {
 	a := &upnpPublicAdapter{
 		cfgHolder: nil,
 		cache:     upnp.NewServerCache(),
-		store:     openPublicTestStore(t),
+		store:     openUPnPTestStore(t),
 	}
 	if got := a.PublicServers(context.Background()); got != nil {
 		t.Errorf("got %v; want nil for nil cfgHolder", got)
@@ -315,19 +261,10 @@ func TestPublic_CancelledContext_SurfacesAsZeroRoutedTracks(t *testing.T) {
 	// success would otherwise return non-zero — if the helper
 	// dropped ctx and used Background() instead, this assertion
 	// would fail.
-	cfg := &config.Config{
-		LibraryRoots:    []string{t.TempDir()},
-		ListenAddress:   ":7788",
-		AdminAddress:    "127.0.0.1:7789",
-		ScanIntervalSec: 3600,
-		UPnPUpstream: config.UPnPUpstreamConfig{
-			Enabled: true,
-			Servers: []config.UPnPUpstreamServerConfig{
-				{Name: "Cancel-test", UDN: "uuid:c", PathPrefix: "c"},
-			},
-		},
-	}
-	store := openPublicTestStore(t)
+	cfg := newUPnPTestCfg(t,
+		config.UPnPUpstreamServerConfig{Name: "Cancel-test", UDN: "uuid:c", PathPrefix: "c"},
+	)
+	store := openUPnPTestStore(t)
 	key := upnpingest.StableServerKey(cfg.UPnPUpstream.Servers[0])
 	if err := store.UpsertTrack(context.Background(), &manifest.Track{Path: "c/a.flac", Size: 1, ModTime: time.Now()}); err != nil {
 		t.Fatal(err)

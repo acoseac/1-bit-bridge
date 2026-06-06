@@ -730,18 +730,20 @@ func TestHealthOverTLSWithPinnedCert(t *testing.T) {
 // stubUPnPPublicProvider is a deterministic fake of
 // UPnPUpstreamPublicProvider for /v1/health wire-shape coverage; the
 // production bridge-side adapter lives in cmd/bridge.
+//
+// Records whether the handler passed a non-nil ctx, without holding a
+// reference — Go convention (S8242) is to avoid storing a
+// `context.Context` on a struct. The boolean witness preserves the
+// propagation assertion without the lifecycle hazard.
 type stubUPnPPublicProvider struct {
-	servers []UPnPUpstreamPublicServer
-	// lastCtx records the most recent context the handler passed,
-	// so a test can assert ctx propagation (the real adapter
-	// forwards `r.Context()` to the manifest's `CountUPnPRoutingForServer`
-	// — a regression here would silently break query cancellation
-	// on client disconnect).
-	lastCtx context.Context
+	servers           []UPnPUpstreamPublicServer
+	nonNilCtxObserved bool
 }
 
 func (s *stubUPnPPublicProvider) PublicServers(ctx context.Context) []UPnPUpstreamPublicServer {
-	s.lastCtx = ctx
+	if ctx != nil {
+		s.nonNilCtxObserved = true
+	}
 	return s.servers
 }
 
@@ -849,10 +851,12 @@ func TestHealth_UPnPUpstreamServers_EmittedFromProvider(t *testing.T) {
 	}
 	// Context propagation: the handler MUST pass `r.Context()` so a
 	// client disconnect mid-/v1/health cancels downstream SQLite
-	// queries. A regression that swaps in `context.Background()` /
-	// `context.TODO()` would silently disable query cancellation.
-	if provider.lastCtx == nil {
-		t.Errorf("provider.lastCtx is nil — handler didn't propagate context")
+	// queries. A regression that swaps in a synthetic background
+	// context would silently disable query cancellation. The stub's
+	// witness is a boolean (not a stored ctx) so the assertion lives
+	// on a copyable, non-lifecycle-bearing primitive.
+	if !provider.nonNilCtxObserved {
+		t.Errorf("nonNilCtxObserved is false — handler didn't propagate context")
 	}
 }
 
