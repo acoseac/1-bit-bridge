@@ -502,43 +502,8 @@ func (a *manifestLibraryAdapter) rebuild() {
 	// `resolveErr` above).
 	libraryRoot := ""
 
-	// One bulk read of every offline variant row (sidecar paths +
-	// metadata), grouped by source path. Cheaper than an N+1 LookupVariant
-	// per track, and runs at most once per cache TTL. Failure is non-fatal:
-	// we log and proceed with source-only DIDL (the feature degrades, the
-	// CDS still serves originals).
-	variantsBySource := map[string][]manifest.VariantRow{}
-	if rows, vErr := a.store.AllVariants(ctx); vErr != nil {
-		a.log.Warn("manifest variant list failed — DLNA serves source-only", slog.String("err", vErr.Error()))
-	} else {
-		for _, vr := range rows {
-			variantsBySource[vr.SourcePath] = append(variantsBySource[vr.SourcePath], vr)
-		}
-	}
-
-	// One bulk read of the upnp_track_routing path set. Pre-fix this was
-	// a per-track `GetUPnPRouting` point query INSIDE the rebuild loop
-	// (one round-trip per filesystem-miss track) — an N+1 under the
-	// 10 s context deadline that reliably tripped the timeout on a 15k+
-	// routed library, after which every subsequent lookup returned the
-	// `ctx.DeadlineExceeded` error path and silently dropped the
-	// remainder of the routed tracks from the cache. Now: one SELECT,
-	// one map, O(1) per-track check downstream. Mirrors `AllVariants`
-	// above and the variant-by-source map pattern. Failure is
-	// non-fatal: we log, leave the set empty, and the rebuild proceeds
-	// as if no routing exists (every routed track is then skipped at
-	// the resolver-miss branch — same fallback the pre-fix
-	// `isUPnPRouted` returning false produced on store error). Per
-	// Gemini HIGH on PR #356.
-	routedPaths := map[string]struct{}{}
-	if paths, rErr := a.store.AllUPnPRoutingPaths(ctx); rErr != nil {
-		a.log.Warn("manifest UPnP routing list failed — routed tracks skipped this rebuild",
-			slog.String("err", rErr.Error()))
-	} else {
-		for _, p := range paths {
-			routedPaths[p] = struct{}{}
-		}
-	}
+	variantsBySource := a.loadVariantsBySource(ctx)
+	routedPaths := a.loadRoutedPathSet(ctx)
 
 	list := make([]dlna.TrackInfo, 0, len(tracks))
 	byID := make(map[string]dlna.TrackInfo, len(tracks))
@@ -624,13 +589,81 @@ func (a *manifestLibraryAdapter) Generation() uint64 {
 	return a.generation
 }
 
+// loadVariantsBySource bulk-reads every offline variant row (sidecar
+// paths + metadata) and groups by source path. Cheaper than an N+1
+// LookupVariant per track during the rebuild loop, runs at most once
+// per cache TTL. Failure is non-fatal: we log and return an empty map
+// (DIDL renders source-only for this rebuild; CDS still serves
+// originals). Extracted from `rebuild()` to keep its cognitive
+// complexity below the SonarCloud S3776 threshold (Sonar CRITICAL on
+// PR #356 round-2).
+func (a *manifestLibraryAdapter) loadVariantsBySource(ctx context.Context) map[string][]manifest.VariantRow {
+	out := map[string][]manifest.VariantRow{}
+	rows, err := a.store.AllVariants(ctx)
+	if err != nil {
+		a.log.Warn("manifest variant list failed — DLNA serves source-only", slog.String("err", err.Error()))
+		return out
+	}
+	for _, vr := range rows {
+		out[vr.SourcePath] = append(out[vr.SourcePath], vr)
+	}
+	return out
+}
+
+// loadRoutedPathSet bulk-reads every `upnp_track_routing.source_path`
+// into a set keyed for O(1) lookup in the rebuild loop.
+//
+// Pre-fix this was a per-track `GetUPnPRouting` point query INSIDE the
+// rebuild loop (one round-trip per filesystem-miss track) — an N+1
+// under the 10 s context deadline that reliably tripped the timeout
+// on a 15k+ routed library, after which every subsequent lookup
+// returned `ctx.DeadlineExceeded` and silently dropped the remainder
+// of the routed tracks from the cache. Now: one SELECT, one map.
+//
+// Failure is non-fatal: we log and return an empty map. The rebuild
+// then skips every routed track at the resolver-miss branch — same
+// fallback the pre-fix `isUPnPRouted` returning false produced on
+// store error.
+//
+// Per Gemini HIGH on PR #356; extracted from `rebuild()` for cognitive
+// complexity on PR #356 round-2.
+func (a *manifestLibraryAdapter) loadRoutedPathSet(ctx context.Context) map[string]struct{} {
+	out := map[string]struct{}{}
+	paths, err := a.store.AllUPnPRoutingPaths(ctx)
+	if err != nil {
+		a.log.Warn("manifest UPnP routing list failed — routed tracks skipped this rebuild",
+			slog.String("err", err.Error()))
+		return out
+	}
+	for _, p := range paths {
+		out[p] = struct{}{}
+	}
+	return out
+}
+
 // manifestTrackToDLNATrackInfo flattens the pointer-typed manifest.Track
 // optionals into the value-typed dlna.TrackInfo fields, computes the
 // stable TrackID, and derives the file extension.
 //
 // Pure-helper-style — extracted so the adapter's rebuild path is
 // short + easy to unit-test in isolation.
+//
+// **FileExtension derivation falls back to `t.Path` when `absPath` is
+// empty.** UPnP-routed tracks reach this function with `absPath = ""`
+// (the resolver-miss sentinel from rebuild's routing fast-path); pre-
+// fix `filepath.Ext("")` returned `""`, dropping the extension on
+// every routed track and leaving DIDL `<res protocolInfo>` MIME
+// resolution + the file handler's variant-segment regex unable to key
+// off the codec. The bridge manifest's `Path` always carries the real
+// extension (e.g. `2go/.../01 - Hells Bells.flac`), so the fallback is
+// always correct — and a no-op for filesystem-backed tracks where
+// `absPath` already carries the same extension. Per CodeRabbit minor
+// on PR #356.
 func manifestTrackToDLNATrackInfo(t manifest.Track, absPath, libraryRoot string) dlna.TrackInfo {
+	extSource := absPath
+	if extSource == "" {
+		extSource = t.Path
+	}
 	ti := dlna.TrackInfo{
 		TrackID:      dlna.TrackID(libraryRoot, t.Path),
 		AbsolutePath: absPath,
@@ -650,7 +683,7 @@ func manifestTrackToDLNATrackInfo(t manifest.Track, absPath, libraryRoot string)
 		Composer:      t.Composer,
 		Genre:         t.Genre,
 		Codec:         t.Codec,
-		FileExtension: strings.ToLower(filepath.Ext(absPath)),
+		FileExtension: strings.ToLower(filepath.Ext(extSource)),
 		Size:          t.Size,
 	}
 	if t.Duration != nil {

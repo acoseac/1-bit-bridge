@@ -42,39 +42,51 @@ func (s *stubHostResolver) LiveHost(_ string) (string, bool) {
 // DLNA renderer via the bridge → renderer GETs
 // `/dlna/file/{trackID}` → pre-fix the handler returned 404 → silent
 // decline at the renderer.
-func Test_FileHandler_UPnPRoutedTrack_ProxiesUpstreamBytes(t *testing.T) {
-	// Spin up a stub "2Go" upstream that returns FLAC magic + a few bytes.
-	upstreamBody := "fLaC\x00\x01\x02\x03"
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Echo the Range header back in Content-Range so the test can
-		// confirm the header flowed through.
-		if rng := r.Header.Get("Range"); rng != "" {
+// upstreamFixture spins up a stub "2Go" upstream that returns FLAC
+// magic + a few bytes, mirroring how the real 2Go's MiniDLNA serves
+// `/MediaItems/<id>.flac`. Pulled out as a helper so the per-method
+// regression tests below each focus on one wire-axis assertion (and
+// stay under the SonarCloud cognitive-complexity threshold). Returns
+// the upstream's `host:port` so the host-resolver stub can hand it
+// back as the "live host" for the proxied request.
+//
+// The handler echoes a `Range` header back in `Content-Range` so the
+// 206 test can confirm the header actually flowed through the proxy
+// (the bit-exact verification on real hardware checks the bytes; the
+// header check is what this unit test adds beyond a hash comparison).
+func upstreamFixture(t *testing.T) (host, body string, cleanup func()) {
+	t.Helper()
+	body = "fLaC\x00\x01\x02\x03"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") != "" {
 			w.Header().Set("Content-Range", "bytes 0-7/8")
 			w.Header().Set("Content-Type", "audio/x-flac")
 			w.WriteHeader(http.StatusPartialContent)
-			_, _ = w.Write([]byte(upstreamBody))
+			_, _ = w.Write([]byte(body))
 			return
 		}
 		w.Header().Set("Content-Type", "audio/x-flac")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(upstreamBody))
+		_, _ = w.Write([]byte(body))
 	}))
-	defer upstream.Close()
-	upstreamHost := strings.TrimPrefix(upstream.URL, "http://")
+	return strings.TrimPrefix(srv.URL, "http://"), body, srv.Close
+}
 
-	// Library has the track with RelativePath populated — the routing
-	// lookup keys on it.
+// routedHandlerFixture wires the dlna FileHandler with a routing
+// lookup + a host resolver pointing at the upstream stub from
+// upstreamFixture. Returns the handler ready to invoke + the upstream
+// body the handler should pass through unchanged.
+func routedHandlerFixture(t *testing.T) (handler http.HandlerFunc, upstreamBody string, cleanup func()) {
+	t.Helper()
+	host, body, closeFn := upstreamFixture(t)
 	const relPath = "2go/Music/Test Artist/Test Album/Test Track.flac"
 	lib := newTestLib(TrackInfo{
 		TrackID:       "abc123",
 		RelativePath:  relPath,
 		AbsolutePath:  "/non/existent/path", // would 404 if the fast-path didn't take
 		FileExtension: ".flac",
-		Size:          int64(len(upstreamBody)),
+		Size:          int64(len(body)),
 	})
-
-	// Routing lookup says this track lives on the upstream + we know
-	// the live host.
 	routing := &stubRoutingLookup{m: map[string]*manifest.UPnPRouting{
 		relPath: {
 			SourcePath: relPath,
@@ -83,48 +95,73 @@ func Test_FileHandler_UPnPRoutedTrack_ProxiesUpstreamBytes(t *testing.T) {
 			ResURL:     "/MediaItems/5.flac",
 		},
 	}}
-	proxy := upnpproxy.New(&stubHostResolver{host: upstreamHost}, nil)
-	h := FileHandler(lib, routing, proxy)
+	proxy := upnpproxy.New(&stubHostResolver{host: host}, nil)
+	return FileHandler(lib, routing, proxy), body, closeFn
+}
 
-	t.Run("GET returns upstream bytes bit-exact", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/dlna/file/abc123", nil)
-		rec := httptest.NewRecorder()
-		h(rec, req)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("status = %d; want 200", rec.Code)
-		}
-		if got := rec.Body.String(); got != upstreamBody {
-			t.Errorf("body = %q; want %q", got, upstreamBody)
-		}
-		if got := rec.Header().Get("Content-Type"); got != "audio/x-flac" {
-			t.Errorf("Content-Type = %q; want audio/x-flac", got)
-		}
-	})
+// Test_FileHandler_UPnPRoutedTrack_GET — bit-exact upstream bytes
+// surface on a vanilla GET (no Range header). Replaces the prior
+// `t.Run("GET returns upstream bytes bit-exact", ...)` sub-test of a
+// monolithic `Test_FileHandler_UPnPRoutedTrack_ProxiesUpstreamBytes`
+// to keep cognitive complexity below SonarCloud's S3776 threshold —
+// each per-method axis is now its own top-level test.
+func Test_FileHandler_UPnPRoutedTrack_GET(t *testing.T) {
+	h, body, cleanup := routedHandlerFixture(t)
+	defer cleanup()
 
-	t.Run("Range header flows through to upstream", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/dlna/file/abc123", nil)
-		req.Header.Set("Range", "bytes=0-7")
-		rec := httptest.NewRecorder()
-		h(rec, req)
-		if rec.Code != http.StatusPartialContent {
-			t.Fatalf("status = %d; want 206", rec.Code)
-		}
-		if got := rec.Header().Get("Content-Range"); got != "bytes 0-7/8" {
-			t.Errorf("Content-Range = %q; want bytes 0-7/8", got)
-		}
-	})
+	req := httptest.NewRequest(http.MethodGet, "/dlna/file/abc123", nil)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200", rec.Code)
+	}
+	if got := rec.Body.String(); got != body {
+		t.Errorf("body = %q; want %q", got, body)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "audio/x-flac" {
+		t.Errorf("Content-Type = %q; want audio/x-flac", got)
+	}
+}
 
-	t.Run("HEAD skips body", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodHead, "/dlna/file/abc123", nil)
-		rec := httptest.NewRecorder()
-		h(rec, req)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("status = %d; want 200", rec.Code)
-		}
-		if rec.Body.Len() != 0 {
-			t.Errorf("HEAD response should have empty body, got %d bytes", rec.Body.Len())
-		}
-	})
+// Test_FileHandler_UPnPRoutedTrack_RangeHeader — Range header flows
+// through to the upstream MediaServer; the response carries the
+// upstream's 206 + Content-Range. Without this the renderer's
+// readRange (DSF mid-file seek; FLAC stream start) would fall back to
+// a full-body GET and the bit-exact contract over a marginal LAN
+// would suffer.
+func Test_FileHandler_UPnPRoutedTrack_RangeHeader(t *testing.T) {
+	h, _, cleanup := routedHandlerFixture(t)
+	defer cleanup()
+
+	req := httptest.NewRequest(http.MethodGet, "/dlna/file/abc123", nil)
+	req.Header.Set("Range", "bytes=0-7")
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusPartialContent {
+		t.Fatalf("status = %d; want 206", rec.Code)
+	}
+	if got := rec.Header().Get("Content-Range"); got != "bytes 0-7/8" {
+		t.Errorf("Content-Range = %q; want bytes 0-7/8", got)
+	}
+}
+
+// Test_FileHandler_UPnPRoutedTrack_HEAD — HEAD returns the upstream's
+// 200 + headers with an empty body. Renderers frequently HEAD a track
+// to probe size + DLNA flags before issuing the actual GET; the proxy
+// must not stream bytes back on HEAD.
+func Test_FileHandler_UPnPRoutedTrack_HEAD(t *testing.T) {
+	h, _, cleanup := routedHandlerFixture(t)
+	defer cleanup()
+
+	req := httptest.NewRequest(http.MethodHead, "/dlna/file/abc123", nil)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200", rec.Code)
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("HEAD response should have empty body, got %d bytes", rec.Body.Len())
+	}
 }
 
 // Test_FileHandler_UpstreamOffline_503 — when SSDP hasn't discovered

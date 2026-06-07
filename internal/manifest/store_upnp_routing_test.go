@@ -274,43 +274,31 @@ func TestUpsertUPnPRouting_RequiresIdentityFields(t *testing.T) {
 	}
 }
 
-// TestAllUPnPRoutingPaths is the regression guard for the Gemini HIGH on
-// PR #356 — the dlna library-adapter rebuild used to issue an N+1
-// `GetUPnPRouting` per filesystem-miss track and reliably tripped the
-// 10 s context deadline at 15k+ routed tracks. The fix is one
+// The following Test* functions collectively guard the bulk-read
+// regression that motivates `Store.AllUPnPRoutingPaths` — the Gemini
+// HIGH on PR #356. Pre-fix the dlna library-adapter rebuild issued an
+// N+1 `GetUPnPRouting` per filesystem-miss track and reliably tripped
+// the 10 s context deadline at 15k+ routed tracks. Fix: one
 // AllUPnPRoutingPaths SELECT + a `map[string]struct{}` lookup downstream.
 //
-// Pins the contract: (a) every inserted routing path appears in the
-// returned slice; (b) tracks with no routing row are omitted (the
-// adapter's resolver-miss branch must continue as before for them);
-// (c) ordering is `source_path` ASC for deterministic test output;
-// (d) empty store returns `(nil, nil)` — caller treats as empty set;
-// (e) a closed context surfaces an error rather than silently
-// returning a partial slice (so the dlna adapter logs + skips routed
-// tracks this rebuild instead of silently dropping them).
-func TestAllUPnPRoutingPaths(t *testing.T) {
-	s := openTestStore(t)
-	defer s.Close()
-	ctx := context.Background()
+// Split across multiple Test functions (not one big Test*+t.Run tree)
+// so each contract maps to a focused failure message and each function
+// stays below the SonarCloud cognitive-complexity threshold (S3776).
+//
+// Contract surface:
+//   - empty store returns empty slice
+//   - returns every routed path, omits non-routed (rebuild keeps the
+//     adapter's resolver-miss branch correct for non-routed tracks)
+//   - ordering is `source_path` ASC (deterministic test output)
+//   - cancelled context surfaces an error rather than silently
+//     returning a partial slice (so the dlna adapter logs + skips
+//     routed tracks this rebuild instead of silently dropping them)
+//   - bulk-scale completes well within the dlna rebuild's 10 s
+//     deadline (pins the "bulk read, not N+1" guarantee)
 
-	t.Run("empty store returns empty slice", func(t *testing.T) {
-		got, err := s.AllUPnPRoutingPaths(ctx)
-		if err != nil {
-			t.Fatalf("unexpected err: %v", err)
-		}
-		if len(got) != 0 {
-			t.Errorf("want empty, got %d paths: %v", len(got), got)
-		}
-	})
-
-	// Seed 3 routed tracks + 1 non-routed track. The non-routed one
-	// confirms the adapter's miss path stays correct.
-	routed := []string{
-		"2go/Music/AC-DC/01.flac",
-		"2go/Music/AC-DC/02.flac",
-		"2go/Music/4 Non Blondes/01.flac",
-	}
-	for _, p := range routed {
+func seedRoutedFixture(t *testing.T, s *Store, ctx context.Context, paths ...string) {
+	t.Helper()
+	for _, p := range paths {
 		seedUPnPTrack(t, s, p)
 		r := &UPnPRouting{
 			SourcePath: p,
@@ -320,84 +308,118 @@ func TestAllUPnPRoutingPaths(t *testing.T) {
 			LastSeenAt: time.Unix(1, 0).UTC(),
 		}
 		if err := s.UpsertUPnPRouting(ctx, r); err != nil {
-			t.Fatalf("seed routing: %v", err)
+			t.Fatalf("seed routing %q: %v", p, err)
 		}
 	}
+}
+
+func TestAllUPnPRoutingPaths_EmptyStoreReturnsEmptySlice(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+	got, err := s.AllUPnPRoutingPaths(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("want empty, got %d paths: %v", len(got), got)
+	}
+}
+
+func TestAllUPnPRoutingPaths_ReturnsRoutedPathsOmitsLocal(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+	ctx := context.Background()
+
+	routed := []string{
+		"2go/Music/AC-DC/01.flac",
+		"2go/Music/AC-DC/02.flac",
+		"2go/Music/4 Non Blondes/01.flac",
+	}
+	seedRoutedFixture(t, s, ctx, routed...)
 	// A local track WITHOUT a routing row.
 	seedUPnPTrack(t, s, "Music/Local/01.flac")
 
-	t.Run("returns every routed path, omits non-routed", func(t *testing.T) {
-		got, err := s.AllUPnPRoutingPaths(ctx)
-		if err != nil {
-			t.Fatalf("unexpected err: %v", err)
+	got, err := s.AllUPnPRoutingPaths(ctx)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if len(got) != len(routed) {
+		t.Fatalf("got %d paths; want %d. got=%v", len(got), len(routed), got)
+	}
+	gotSet := make(map[string]struct{}, len(got))
+	for _, p := range got {
+		gotSet[p] = struct{}{}
+	}
+	for _, want := range routed {
+		if _, ok := gotSet[want]; !ok {
+			t.Errorf("missing routed path %q in result %v", want, got)
 		}
-		if len(got) != len(routed) {
-			t.Fatalf("got %d paths; want %d. got=%v", len(got), len(routed), got)
-		}
-		// Build a set for membership check (order is asserted below).
-		gotSet := make(map[string]struct{}, len(got))
-		for _, p := range got {
-			gotSet[p] = struct{}{}
-		}
-		for _, want := range routed {
-			if _, ok := gotSet[want]; !ok {
-				t.Errorf("missing routed path %q in result %v", want, got)
-			}
-		}
-		if _, leaked := gotSet["Music/Local/01.flac"]; leaked {
-			t.Error("non-routed local track leaked into result")
-		}
-	})
+	}
+	if _, leaked := gotSet["Music/Local/01.flac"]; leaked {
+		t.Error("non-routed local track leaked into result")
+	}
+}
 
-	t.Run("ordering is source_path ASC", func(t *testing.T) {
-		got, err := s.AllUPnPRoutingPaths(ctx)
-		if err != nil {
-			t.Fatalf("unexpected err: %v", err)
-		}
-		for i := 1; i < len(got); i++ {
-			if got[i-1] > got[i] {
-				t.Errorf("not sorted at index %d: %q > %q", i, got[i-1], got[i])
-			}
-		}
-	})
+func TestAllUPnPRoutingPaths_OrderingIsAscending(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+	ctx := context.Background()
+	// Seed deliberately out-of-order to confirm the ORDER BY in the query.
+	seedRoutedFixture(t, s, ctx,
+		"z/track.flac",
+		"a/track.flac",
+		"m/track.flac",
+	)
 
-	t.Run("cancelled context surfaces error", func(t *testing.T) {
-		cctx, cancel := context.WithCancel(context.Background())
-		cancel()
-		_, err := s.AllUPnPRoutingPaths(cctx)
-		if err == nil {
-			t.Error("expected error from cancelled context, got nil — dlna rebuild relies on this to log + skip rather than silently include partial results")
+	got, err := s.AllUPnPRoutingPaths(ctx)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	for i := 1; i < len(got); i++ {
+		if got[i-1] > got[i] {
+			t.Errorf("not sorted at index %d: %q > %q", i, got[i-1], got[i])
 		}
-	})
+	}
+}
 
-	// Bulk-scale smoke — confirms the helper completes well within the
-	// dlna rebuild's 10 s context deadline on a large library. Pins the
-	// "bulk read, not N+1" guarantee that motivates the helper.
-	t.Run("bulk-scale completes within 1s", func(t *testing.T) {
-		const N = 5000
-		for i := 0; i < N; i++ {
-			p := "bulk/" + strconv.Itoa(i) + ".flac"
-			seedUPnPTrack(t, s, p)
-			r := &UPnPRouting{
-				SourcePath: p,
-				ServerUDN:  "uuid:bulk",
-				ObjectID:   strconv.Itoa(i),
-				ResURL:     "http://h/" + strconv.Itoa(i),
-				LastSeenAt: time.Unix(1, 0).UTC(),
-			}
-			if err := s.UpsertUPnPRouting(ctx, r); err != nil {
-				t.Fatalf("seed bulk %d: %v", i, err)
-			}
+func TestAllUPnPRoutingPaths_CancelledContextSurfacesError(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+	cctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := s.AllUPnPRoutingPaths(cctx)
+	if err == nil {
+		t.Error("expected error from cancelled context, got nil — dlna rebuild relies on this to log + skip rather than silently include partial results")
+	}
+}
+
+func TestAllUPnPRoutingPaths_BulkScaleCompletesQuickly(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+	ctx := context.Background()
+
+	const N = 5000
+	for i := 0; i < N; i++ {
+		p := "bulk/" + strconv.Itoa(i) + ".flac"
+		seedUPnPTrack(t, s, p)
+		r := &UPnPRouting{
+			SourcePath: p,
+			ServerUDN:  "uuid:bulk",
+			ObjectID:   strconv.Itoa(i),
+			ResURL:     "http://h/" + strconv.Itoa(i),
+			LastSeenAt: time.Unix(1, 0).UTC(),
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		got, err := s.AllUPnPRoutingPaths(ctx)
-		if err != nil {
-			t.Fatalf("AllUPnPRoutingPaths: %v", err)
+		if err := s.UpsertUPnPRouting(ctx, r); err != nil {
+			t.Fatalf("seed bulk %d: %v", i, err)
 		}
-		// 3 from the earlier sub-tests + N bulk
-		if want := 3 + N; len(got) != want {
-			t.Errorf("got %d paths; want %d", len(got), want)
-		}
-	})
+	}
+	queryCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	got, err := s.AllUPnPRoutingPaths(queryCtx)
+	if err != nil {
+		t.Fatalf("AllUPnPRoutingPaths: %v", err)
+	}
+	if len(got) != N {
+		t.Errorf("got %d paths; want %d", len(got), N)
+	}
 }
