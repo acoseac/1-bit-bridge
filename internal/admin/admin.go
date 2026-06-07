@@ -709,6 +709,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /library/inspector", s.pageLibraryInspector)
 	mux.HandleFunc("GET /jobs", s.pageJobs)
 	mux.HandleFunc("GET /devices", s.pageDevices)
+	mux.HandleFunc("GET /upnp", s.pageUPnP)
 	mux.HandleFunc("GET /data", s.pageData)
 	mux.HandleFunc("GET /settings", s.pageSettings)
 
@@ -751,6 +752,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/upscale/variants-dir", s.apiVariantsDirGet)
 	mux.HandleFunc("POST /api/upscale/variants-dir", s.apiVariantsDirPatch)
 	mux.HandleFunc("GET /api/upnp/servers", s.apiUPnPServers)
+	mux.HandleFunc("GET /api/upnp/discovered", s.apiUPnPDiscovered)
+	mux.HandleFunc("POST /api/upnp/servers", s.apiUPnPServerAdd)
+	mux.HandleFunc("DELETE /api/upnp/servers/{udn}", s.apiUPnPServerRemove)
+	mux.HandleFunc("PATCH /api/upnp/servers/{udn}", s.apiUPnPServerUpdate)
 	mux.HandleFunc("POST /api/upnp/rescan", s.apiUPnPRescan)
 	mux.HandleFunc("POST /api/restart", s.apiRestart)
 	mux.HandleFunc("GET /api/pair-qr", s.apiPairQR)

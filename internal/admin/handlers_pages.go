@@ -175,6 +175,33 @@ func (s *Server) pageDevices(w http.ResponseWriter, r *http.Request) {
 	s.renderPage(w, "devices", data)
 }
 
+// pageUPnP serves the dedicated /upnp page (Configured / Discovered /
+// Add manually sections). The template is hidden behind a feature-
+// disabled empty state when the operator hasn't set
+// `upnpUpstream.enabled = true` in bridge.yaml; the JS detects this
+// from the `/api/upnp/servers` probe (returns enabled=false) and
+// renders an informational placeholder.
+//
+// **Why a dedicated page** (vs the legacy embedded panel in
+// `/devices`): the v1 surface was a read-only telemetry block;
+// adding discovery + CRUD inflates it into a page-sized concern.
+// Splitting the concerns gives Devices a single purpose (paired iOS
+// clients) and UPnP its own page with room to grow (future:
+// per-server diagnostics, advanced container picker, walk progress).
+func (s *Server) pageUPnP(w http.ResponseWriter, r *http.Request) {
+	cfg := s.deps.CfgHolder.Load()
+	// Surface the operator-side feature flag so the template can
+	// render a one-line "enable upnpUpstream.enabled in bridge.yaml"
+	// hint when the flag is false. The JS probe still drives the
+	// dynamic empty state (enabled = wired-up-on-the-server-side),
+	// but this snapshot lets the SSR-rendered page already carry the
+	// right initial copy.
+	data := map[string]any{
+		"FeatureEnabled": cfg != nil && cfg.UPnPUpstream.Enabled,
+	}
+	s.renderPage(w, "upnp", data)
+}
+
 func (s *Server) pageSettings(w http.ResponseWriter, r *http.Request) {
 	cfg := s.deps.CfgHolder.Load()
 	data := settingsResponse{

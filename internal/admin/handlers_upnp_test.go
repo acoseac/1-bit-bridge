@@ -16,19 +16,56 @@ import (
 // standing up the real cmd/bridge lifecycle.
 type stubUPnPProvider struct {
 	servers       []UPnPUpstreamServerState
+	discovered    []UPnPDiscoveredServer
 	rescanCalls   atomic.Int32
 	rescanLastUDN atomic.Value // string
 	rescanErr     error
+
+	// CRUD spy fields — tests assert the last call's payload + can
+	// inject the next return value for each verb.
+	addCalls    atomic.Int32
+	addLastReq  UPnPServerAddRequest
+	addErr      error
+	removeCalls atomic.Int32
+	removeLast  atomic.Value // string (last UDN)
+	removeErr   error
+	updateCalls atomic.Int32
+	updateLast  UPnPServerUpdateRequest
+	updateLstID atomic.Value // string (last UDN)
+	updateErr   error
 }
 
 func (s *stubUPnPProvider) ConfiguredServers() []UPnPUpstreamServerState {
 	return s.servers
 }
 
+func (s *stubUPnPProvider) DiscoveredServers() []UPnPDiscoveredServer {
+	return s.discovered
+}
+
 func (s *stubUPnPProvider) ForceRescan(_ context.Context, udn string) error {
 	s.rescanCalls.Add(1)
 	s.rescanLastUDN.Store(udn)
 	return s.rescanErr
+}
+
+func (s *stubUPnPProvider) AddServer(_ context.Context, req UPnPServerAddRequest) error {
+	s.addCalls.Add(1)
+	s.addLastReq = req
+	return s.addErr
+}
+
+func (s *stubUPnPProvider) RemoveServer(_ context.Context, udn string) error {
+	s.removeCalls.Add(1)
+	s.removeLast.Store(udn)
+	return s.removeErr
+}
+
+func (s *stubUPnPProvider) UpdateServer(_ context.Context, udn string, req UPnPServerUpdateRequest) error {
+	s.updateCalls.Add(1)
+	s.updateLast = req
+	s.updateLstID.Store(udn)
+	return s.updateErr
 }
 
 func newTestUPnPHandler(t *testing.T, provider UPnPUpstreamProvider) *Server {
@@ -181,5 +218,215 @@ func TestApiUPnPRescan_GenericErrorMapsTo500(t *testing.T) {
 	s.apiUPnPRescan(w, httptest.NewRequest(http.MethodPost, "/api/upnp/rescan", nil))
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d; want 500", w.Code)
+	}
+}
+
+// --- GET /api/upnp/discovered ---
+
+func TestApiUPnPDiscovered_NotWiredReturnsEnabledFalseEmpty(t *testing.T) {
+	s := newTestUPnPHandler(t, nil)
+	w := httptest.NewRecorder()
+	s.apiUPnPDiscovered(w, httptest.NewRequest(http.MethodGet, "/api/upnp/discovered", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200", w.Code)
+	}
+	var resp upnpDiscoveredResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.Enabled {
+		t.Errorf("Enabled = true; want false (no provider wired)")
+	}
+	if len(resp.Servers) != 0 {
+		t.Errorf("Servers len = %d; want 0", len(resp.Servers))
+	}
+}
+
+func TestApiUPnPDiscovered_WiredEmitsRows(t *testing.T) {
+	provider := &stubUPnPProvider{discovered: []UPnPDiscoveredServer{
+		{UDN: "uuid:server-a", FriendlyName: "A", LastSeenAt: time.Unix(1700, 0)},
+		{UDN: "uuid:server-b", FriendlyName: "B", LastSeenAt: time.Unix(1701, 0)},
+	}}
+	s := newTestUPnPHandler(t, provider)
+	w := httptest.NewRecorder()
+	s.apiUPnPDiscovered(w, httptest.NewRequest(http.MethodGet, "/api/upnp/discovered", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200", w.Code)
+	}
+	var resp upnpDiscoveredResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !resp.Enabled || len(resp.Servers) != 2 {
+		t.Errorf("Enabled/Servers mismatch: %+v", resp)
+	}
+}
+
+// --- POST /api/upnp/servers ---
+
+func TestApiUPnPServerAdd_NotWiredReturns404(t *testing.T) {
+	s := newTestUPnPHandler(t, nil)
+	w := httptest.NewRecorder()
+	body := strings.NewReader(`{"name":"X","udn":"uuid:abc"}`)
+	s.apiUPnPServerAdd(w, httptest.NewRequest(http.MethodPost, "/api/upnp/servers", body))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d; want 404", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "upnp_disabled") {
+		t.Errorf("body missing upnp_disabled: %q", w.Body.String())
+	}
+}
+
+func TestApiUPnPServerAdd_HappyPath(t *testing.T) {
+	provider := &stubUPnPProvider{}
+	s := newTestUPnPHandler(t, provider)
+	w := httptest.NewRecorder()
+	body := strings.NewReader(`{"name":"Chord 2Go","udn":"uuid:abc","pathPrefix":"2go"}`)
+	s.apiUPnPServerAdd(w, httptest.NewRequest(http.MethodPost, "/api/upnp/servers", body))
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d; want 201; body=%s", w.Code, w.Body.String())
+	}
+	if provider.addCalls.Load() != 1 {
+		t.Errorf("AddServer called %d times; want 1", provider.addCalls.Load())
+	}
+	if provider.addLastReq.Name != "Chord 2Go" || provider.addLastReq.UDN != "uuid:abc" || provider.addLastReq.PathPrefix != "2go" {
+		t.Errorf("payload mismatch: %+v", provider.addLastReq)
+	}
+	// Response carries restartRequired:true (load-bearing for the UI).
+	if !strings.Contains(w.Body.String(), `"restartRequired":true`) {
+		t.Errorf("response missing restartRequired:true: %q", w.Body.String())
+	}
+}
+
+func TestApiUPnPServerAdd_DuplicateMapsTo409(t *testing.T) {
+	provider := &stubUPnPProvider{addErr: ErrUPnPDuplicateUDN}
+	s := newTestUPnPHandler(t, provider)
+	w := httptest.NewRecorder()
+	body := strings.NewReader(`{"name":"X","udn":"uuid:exists"}`)
+	s.apiUPnPServerAdd(w, httptest.NewRequest(http.MethodPost, "/api/upnp/servers", body))
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d; want 409", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "duplicate") {
+		t.Errorf("body missing duplicate code: %q", w.Body.String())
+	}
+}
+
+func TestApiUPnPServerAdd_ValidationMapsTo400(t *testing.T) {
+	provider := &stubUPnPProvider{addErr: ErrUPnPValidation}
+	s := newTestUPnPHandler(t, provider)
+	w := httptest.NewRecorder()
+	body := strings.NewReader(`{"name":""}`)
+	s.apiUPnPServerAdd(w, httptest.NewRequest(http.MethodPost, "/api/upnp/servers", body))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d; want 400", w.Code)
+	}
+}
+
+func TestApiUPnPServerAdd_BadJSONMapsTo400(t *testing.T) {
+	provider := &stubUPnPProvider{}
+	s := newTestUPnPHandler(t, provider)
+	w := httptest.NewRecorder()
+	body := strings.NewReader(`{`) // invalid JSON
+	s.apiUPnPServerAdd(w, httptest.NewRequest(http.MethodPost, "/api/upnp/servers", body))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d; want 400", w.Code)
+	}
+}
+
+// --- DELETE /api/upnp/servers/{udn} ---
+
+func TestApiUPnPServerRemove_HappyPath(t *testing.T) {
+	provider := &stubUPnPProvider{}
+	s := newTestUPnPHandler(t, provider)
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/api/upnp/servers/uuid:abc", nil)
+	req.SetPathValue("udn", "uuid:abc")
+	s.apiUPnPServerRemove(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200; body=%s", w.Code, w.Body.String())
+	}
+	if provider.removeCalls.Load() != 1 {
+		t.Errorf("RemoveServer not called")
+	}
+	if got, _ := provider.removeLast.Load().(string); got != "uuid:abc" {
+		t.Errorf("removed UDN = %q; want uuid:abc", got)
+	}
+}
+
+func TestApiUPnPServerRemove_MissingUDNMapsTo400(t *testing.T) {
+	provider := &stubUPnPProvider{}
+	s := newTestUPnPHandler(t, provider)
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/api/upnp/servers/", nil)
+	// Don't SetPathValue — simulates a route mismatch.
+	s.apiUPnPServerRemove(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d; want 400", w.Code)
+	}
+}
+
+func TestApiUPnPServerRemove_NoSuchMapsTo404(t *testing.T) {
+	provider := &stubUPnPProvider{removeErr: ErrUPnPNoSuchServer}
+	s := newTestUPnPHandler(t, provider)
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/api/upnp/servers/uuid:nope", nil)
+	req.SetPathValue("udn", "uuid:nope")
+	s.apiUPnPServerRemove(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d; want 404", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "no_such_server") {
+		t.Errorf("body missing no_such_server: %q", w.Body.String())
+	}
+}
+
+// --- PATCH /api/upnp/servers/{udn} ---
+
+func TestApiUPnPServerUpdate_HappyPath(t *testing.T) {
+	provider := &stubUPnPProvider{}
+	s := newTestUPnPHandler(t, provider)
+	w := httptest.NewRecorder()
+	body := strings.NewReader(`{"name":"Renamed","pathPrefix":"renamed"}`)
+	req := httptest.NewRequest(http.MethodPatch, "/api/upnp/servers/uuid:abc", body)
+	req.SetPathValue("udn", "uuid:abc")
+	s.apiUPnPServerUpdate(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200; body=%s", w.Code, w.Body.String())
+	}
+	if provider.updateCalls.Load() != 1 {
+		t.Errorf("UpdateServer not called")
+	}
+	if got, _ := provider.updateLstID.Load().(string); got != "uuid:abc" {
+		t.Errorf("updated UDN = %q; want uuid:abc", got)
+	}
+	if provider.updateLast.Name == nil || *provider.updateLast.Name != "Renamed" {
+		t.Errorf("Name payload mismatch: %+v", provider.updateLast.Name)
+	}
+}
+
+func TestApiUPnPServerUpdate_ValidationMapsTo400(t *testing.T) {
+	provider := &stubUPnPProvider{updateErr: ErrUPnPValidation}
+	s := newTestUPnPHandler(t, provider)
+	w := httptest.NewRecorder()
+	body := strings.NewReader(`{"name":""}`)
+	req := httptest.NewRequest(http.MethodPatch, "/api/upnp/servers/uuid:abc", body)
+	req.SetPathValue("udn", "uuid:abc")
+	s.apiUPnPServerUpdate(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d; want 400", w.Code)
+	}
+}
+
+func TestApiUPnPServerUpdate_NoSuchMapsTo404(t *testing.T) {
+	provider := &stubUPnPProvider{updateErr: ErrUPnPNoSuchServer}
+	s := newTestUPnPHandler(t, provider)
+	w := httptest.NewRecorder()
+	body := strings.NewReader(`{"name":"X"}`)
+	req := httptest.NewRequest(http.MethodPatch, "/api/upnp/servers/uuid:nope", body)
+	req.SetPathValue("udn", "uuid:nope")
+	s.apiUPnPServerUpdate(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d; want 404", w.Code)
 	}
 }
