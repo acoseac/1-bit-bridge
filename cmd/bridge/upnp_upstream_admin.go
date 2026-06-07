@@ -168,17 +168,19 @@ func (a *upnpAdminAdapter) ForceRescan(_ context.Context, udn string) error {
 	if cfg == nil || !cfg.UPnPUpstream.Enabled {
 		return admin.ErrUPnPNoSuchServer
 	}
+	// Trim first, matching RemoveServer/UpdateServer — findConfiguredIdx
+	// compares against trimmed server fields, so an untrimmed identity
+	// with surrounding whitespace would spuriously 404 (Gemini on PR #358).
+	udn = strings.TrimSpace(udn)
 	if udn != "" {
 		// Match a configured server before we accept the request;
-		// otherwise return the typed 404 the handler maps to.
-		match := false
-		for _, srv := range cfg.UPnPUpstream.Servers {
-			if srv.UDN == udn {
-				match = true
-				break
-			}
-		}
-		if !match {
+		// otherwise return the typed 404 the handler maps to. Use the
+		// same UDN-or-ManualDescriptionURL identity lookup as
+		// RemoveServer/UpdateServer — a srv.UDN-only loop 404s a
+		// manual-URL-only server (empty UDN) the operator can otherwise
+		// remove/update (Gemini HIGH on PR #353 fixed the sibling gates;
+		// ForceRescan was the residual miss).
+		if findConfiguredIdx(cfg, udn) < 0 {
 			return admin.ErrUPnPNoSuchServer
 		}
 	}
