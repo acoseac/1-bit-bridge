@@ -1,0 +1,138 @@
+{{define "content"}}
+<section class="page upnp">
+  <h1>UPnP upstream servers</h1>
+  <p class="lede">
+    Upstream UPnP/DLNA MediaServers (e.g. a Chord 2Go's microSD cards) whose
+    tracks the bridge ingests into its manifest and proxies to iOS bit-exact.
+    Configure them here, then iOS sees them as normal bridge content.
+  </p>
+
+  {{- /* Feature-disabled empty state. The JS probe also detects this case
+       and rewrites the panel when the feature is enabled at runtime;
+       the SSR hint just gives users a faster first-paint message. */ -}}
+  {{if not .FeatureEnabled}}
+  <div class="panel" id="upnp-disabled-panel">
+    <div class="panel-head"><h2>Feature disabled</h2></div>
+    <p class="muted">
+      The upstream-UPnP feature is off. Enable it in <code>bridge.yaml</code>:
+    </p>
+    <pre class="code-block">upnpUpstream:
+    enabled: true</pre>
+    <p class="muted">
+      Then restart the bridge and return to this page.
+    </p>
+  </div>
+  {{end}}
+
+  <!-- Section 1: Configured servers (formerly the embedded panel in
+       devices.html). Each row carries Rescan + Edit + Remove actions. -->
+  <div class="panel" id="upnp-configured-panel" hidden>
+    <div class="panel-head">
+      <h2>Configured</h2>
+    </div>
+    <p class="muted">
+      Servers the bridge actively ingests + proxies. Click <strong>Rescan</strong>
+      to force-walk one now (e.g. after adding new music to the upstream),
+      <strong>Edit</strong> to change the friendly name or path prefix, or
+      <strong>Remove</strong> to drop it from the config.
+    </p>
+    <div id="upnp-configured-list"></div>
+  </div>
+
+  <!-- Section 2: Discovered on LAN. Lists SSDP-cached MediaServers that
+       are NOT yet in the configured list — one-click "Configure…" pre-
+       fills the add form with the discovered UDN + friendly name. -->
+  <div class="panel" id="upnp-discovered-panel" hidden>
+    <div class="panel-head">
+      <h2>Discovered on LAN</h2>
+    </div>
+    <p class="muted">
+      MediaServers the bridge has seen via SSDP but isn't yet configured to
+      ingest. Click <strong>Configure…</strong> to add one — the UDN +
+      friendly name pre-fill in the add form.
+    </p>
+    <div id="upnp-discovered-list"></div>
+  </div>
+
+  <!-- Section 3: Add manually. Useful when SSDP doesn't reach the bridge
+       (multicast-blocked router, separate subnet) — the operator pastes
+       the server's /rootDesc.xml URL instead. -->
+  <div class="panel" id="upnp-add-manual-panel" hidden>
+    <div class="panel-head">
+      <h2>Add manually</h2>
+      <button type="button" id="upnp-add-open" class="btn primary">Add server…</button>
+    </div>
+    <p class="muted">
+      For servers SSDP didn't surface (e.g. multicast-blocked routers, separate
+      subnets). Paste the upstream's <code>/rootDesc.xml</code> URL instead of
+      its UDN; the bridge resolves the rest at scan time.
+    </p>
+  </div>
+</section>
+
+<!-- Add / Edit modal. Same dialog reused for both verbs — JS rewires
+     the submit handler + the title + the prefilled fields. -->
+<dialog id="upnp-edit-modal">
+  <section>
+    <h2 id="upnp-edit-title">Add UPnP server</h2>
+    <form id="upnp-edit-form">
+      <label>
+        Display name
+        <input name="name" type="text" placeholder="Chord 2Go (cards)" required>
+      </label>
+      <label>
+        UDN
+        <input name="udn" type="text" placeholder="uuid:4d696e69-...">
+        <small class="muted">
+          Server's unique device identifier. Auto-fills when you click
+          <em>Configure…</em> on a discovered row. Either UDN or the
+          manual description URL is required.
+        </small>
+      </label>
+      <label>
+        Manual description URL <small class="muted">(optional)</small>
+        <input name="manualDescriptionURL" type="url" placeholder="http://192.168.0.62:8200/rootDesc.xml">
+        <small class="muted">
+          Use this when SSDP doesn't reach the bridge — the upstream's
+          <code>/rootDesc.xml</code> URL is what you'd paste into a
+          web-browser address bar.
+        </small>
+      </label>
+      <label>
+        Path prefix <small class="muted">(optional)</small>
+        <input name="pathPrefix" type="text" placeholder="2go">
+        <small class="muted">
+          Prepended to every track's manifest path so multi-upstream setups
+          can't collide. Defaults to a sanitized form of the display name.
+        </small>
+      </label>
+      <label>
+        Root object ID <small class="muted">(optional, default <code>64</code>)</small>
+        <input name="rootObjectID" type="text" placeholder="64">
+        <small class="muted">
+          The ContentDirectory id whose subtree the walker traverses. Leave
+          blank for MiniDLNA-based servers (Chord 2Go, ReadyMedia, etc).
+        </small>
+      </label>
+      <label>
+        Skip top-level containers <small class="muted">(optional, one per line)</small>
+        <textarea name="skipTopLevelContainers" rows="3" placeholder="System Volume Information
+$RECYCLE.BIN"></textarea>
+        <small class="muted">
+          Container titles to skip at the root of the walk (e.g. FAT-card
+          junk folders on the 2Go's microSD).
+        </small>
+      </label>
+      <p id="upnp-edit-error" class="form-error" hidden></p>
+      <p class="muted">
+        <strong>Restart required</strong> — changes take effect on the next
+        bridge restart. You'll see a banner after saving.
+      </p>
+      <menu>
+        <button type="button" value="cancel" id="upnp-edit-cancel">Cancel</button>
+        <button type="submit" class="btn primary" id="upnp-edit-submit">Save</button>
+      </menu>
+    </form>
+  </section>
+</dialog>
+{{end}}

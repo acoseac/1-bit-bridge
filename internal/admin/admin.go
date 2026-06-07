@@ -659,6 +659,7 @@ var pages = map[string]string{
 	"library_inspector": "library_inspector.html",
 	"jobs":              "jobs.html",
 	"devices":           "devices.html",
+	"upnp":              "upnp.html",
 	"data":              "data.html",
 	"settings":          "settings.html",
 }
