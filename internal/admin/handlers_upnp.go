@@ -163,7 +163,7 @@ func (s *Server) apiUPnPServers(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) apiUPnPRescan(w http.ResponseWriter, r *http.Request) {
 	if s.deps.UPnPUpstream == nil {
 		writeError(w, http.StatusNotFound, "upnp_disabled",
-			"the upstream UPnP feature isn't enabled on this bridge")
+			upnpDisabledMsg)
 		return
 	}
 	udn := strings.TrimSpace(r.URL.Query().Get("udn"))
@@ -171,7 +171,7 @@ func (s *Server) apiUPnPRescan(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, ErrUPnPNoSuchServer):
 			writeError(w, http.StatusNotFound, "no_such_server",
-				"no configured upstream server matches the requested UDN")
+				upnpNoSuchServerMsg)
 		case errors.Is(err, ErrUPnPRescanInFlight):
 			writeError(w, http.StatusConflict, "rescan_in_flight",
 				"an ingest run is already in flight; try again shortly")
@@ -183,6 +183,15 @@ func (s *Server) apiUPnPRescan(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusAccepted, map[string]bool{"started": true})
 }
+
+// Wire-error message constants. Extracted because each one appears in
+// 3-4 handler 404/400 paths and SonarCloud S1192 flags the
+// duplication. Kept lowercase to match the existing handler-side
+// envelope-message convention.
+const (
+	upnpDisabledMsg     = "the upstream UPnP feature isn't enabled on this bridge"
+	upnpNoSuchServerMsg = "no configured upstream server matches the requested UDN"
+)
 
 // ErrUPnPNoSuchServer is returned by ForceRescan / RemoveServer /
 // UpdateServer when the caller passed a UDN that doesn't match any
@@ -244,7 +253,7 @@ type upnpServerCRUDResponse struct {
 func (s *Server) apiUPnPServerAdd(w http.ResponseWriter, r *http.Request) {
 	if s.deps.UPnPUpstream == nil {
 		writeError(w, http.StatusNotFound, "upnp_disabled",
-			"the upstream UPnP feature isn't enabled on this bridge")
+			upnpDisabledMsg)
 		return
 	}
 	var req UPnPServerAddRequest
@@ -280,7 +289,7 @@ func (s *Server) apiUPnPServerAdd(w http.ResponseWriter, r *http.Request) {
 func (s *Server) apiUPnPServerRemove(w http.ResponseWriter, r *http.Request) {
 	if s.deps.UPnPUpstream == nil {
 		writeError(w, http.StatusNotFound, "upnp_disabled",
-			"the upstream UPnP feature isn't enabled on this bridge")
+			upnpDisabledMsg)
 		return
 	}
 	udn := strings.TrimSpace(r.URL.Query().Get("udn"))
@@ -293,7 +302,7 @@ func (s *Server) apiUPnPServerRemove(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, ErrUPnPNoSuchServer):
 			writeError(w, http.StatusNotFound, "no_such_server",
-				"no configured upstream server matches the requested UDN")
+				upnpNoSuchServerMsg)
 		default:
 			writeError(w, http.StatusInternalServerError, errCodeSaveConfig, err.Error())
 		}
@@ -314,7 +323,7 @@ func (s *Server) apiUPnPServerRemove(w http.ResponseWriter, r *http.Request) {
 func (s *Server) apiUPnPServerUpdate(w http.ResponseWriter, r *http.Request) {
 	if s.deps.UPnPUpstream == nil {
 		writeError(w, http.StatusNotFound, "upnp_disabled",
-			"the upstream UPnP feature isn't enabled on this bridge")
+			upnpDisabledMsg)
 		return
 	}
 	udn := strings.TrimSpace(r.URL.Query().Get("udn"))
@@ -333,7 +342,7 @@ func (s *Server) apiUPnPServerUpdate(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "validate", err.Error())
 		case errors.Is(err, ErrUPnPNoSuchServer):
 			writeError(w, http.StatusNotFound, "no_such_server",
-				"no configured upstream server matches the requested UDN")
+				upnpNoSuchServerMsg)
 		default:
 			writeError(w, http.StatusInternalServerError, errCodeSaveConfig, err.Error())
 		}
