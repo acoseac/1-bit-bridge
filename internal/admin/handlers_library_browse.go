@@ -165,6 +165,10 @@ func (s *Server) apiLibraryBrowse(w http.ResponseWriter, r *http.Request) {
 			"path contains traversal segments or is otherwise invalid")
 		return
 	}
+	if s.deps.Manifest == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "manifest store not wired")
+		return
+	}
 	// Cursor-based pagination (PR C). Folders and tracks paginate
 	// INDEPENDENTLY — each has its own ordering scope on the
 	// underlying table, so the client passes a separate cursor per
@@ -321,6 +325,10 @@ func (s *Server) apiLibraryBrowseProjection(w http.ResponseWriter, r *http.Reque
 			"path contains traversal segments or is otherwise invalid")
 		return
 	}
+	if s.deps.Manifest == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "manifest store not wired")
+		return
+	}
 	if s.deps.ProjectedSize == nil || s.deps.AvailableDiskSpace == nil {
 		// Closures not wired (test harness, or upscale feature off
 		// at boot). Surface a clean 503 rather than a typed-nil
@@ -452,7 +460,18 @@ func (s *Server) apiLibraryBrowseProjection(w http.ResponseWriter, r *http.Reque
 	// Mirrors transcode.DiskHasHeadroom's math, kept in lockstep
 	// at the wire boundary so the UI's "X GB needed" copy matches
 	// what the coordinator will refuse at Submit time.
-	required := int64(float64(totalProjected) * 1.10)
+	// Integer arithmetic, not a float64 round-trip: near MaxInt64 the
+	// float conversion could overflow to a negative "required" and
+	// falsely report headroom. Latent today (exabyte scale) but the
+	// integer form is strictly safer. (DeepSeek review.)
+	required := totalProjected + totalProjected/10
+	// Signed-int addition still wraps on overflow; totalProjected/10 is
+	// non-negative, so a sum < totalProjected can only mean it wrapped —
+	// clamp to MaxInt64 so "required <= free" can't falsely pass on a
+	// negative value (Gemini on PR #360).
+	if required < totalProjected {
+		required = 1<<63 - 1 // math.MaxInt64
+	}
 	// For kind=optimize, surface TargetBits=16 (always) but
 	// TargetRate=0 to signal "per-track family-preserved" — the UI
 	// renders "Target: 16-bit / 44.1k or 48k (family-preserved)"
