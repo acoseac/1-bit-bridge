@@ -2,6 +2,7 @@ package dlna
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,10 +16,14 @@ import (
 // based fixtures the legacy filesystem tests share.
 
 type stubRoutingLookup struct {
-	m map[string]*manifest.UPnPRouting
+	m   map[string]*manifest.UPnPRouting
+	err error // if non-nil, every lookup returns (nil, err) — for the transient-DB-error tests
 }
 
 func (s *stubRoutingLookup) GetUPnPRouting(_ context.Context, p string) (*manifest.UPnPRouting, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
 	return s.m[p], nil
 }
 
@@ -46,19 +51,22 @@ func (s *stubHostResolver) LiveHost(_ string) (string, bool) {
 // magic + a few bytes, mirroring how the real 2Go's MiniDLNA serves
 // `/MediaItems/<id>.flac`. Pulled out as a helper so the per-method
 // regression tests below each focus on one wire-axis assertion (and
-// stay under the SonarCloud cognitive-complexity threshold). Returns
-// the upstream's `host:port` so the host-resolver stub can hand it
-// back as the "live host" for the proxied request.
+// stay under the SonarCloud cognitive-complexity threshold).
 //
 // The handler echoes a `Range` header back in `Content-Range` so the
-// 206 test can confirm the header actually flowed through the proxy
-// (the bit-exact verification on real hardware checks the bytes; the
-// header check is what this unit test adds beyond a hash comparison).
-func upstreamFixture(t *testing.T) (host, body string, cleanup func()) {
+// 206 test can confirm the header actually flowed through the proxy.
+// The returned `*string` carries the verbatim `Range` header the
+// upstream observed — assertable in the test body so a proxy that
+// forwarded the WRONG byte range would be caught at the upstream-
+// observed side, not just at the response-header echo (CodeRabbit
+// MINOR on PR #356 round-3).
+func upstreamFixture(t *testing.T) (host, body string, observedRange *string, cleanup func()) {
 	t.Helper()
 	body = "fLaC\x00\x01\x02\x03"
+	var seenRange string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Range") != "" {
+		seenRange = r.Header.Get("Range")
+		if seenRange != "" {
 			w.Header().Set("Content-Range", "bytes 0-7/8")
 			w.Header().Set("Content-Type", "audio/x-flac")
 			w.WriteHeader(http.StatusPartialContent)
@@ -69,16 +77,18 @@ func upstreamFixture(t *testing.T) (host, body string, cleanup func()) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(body))
 	}))
-	return strings.TrimPrefix(srv.URL, "http://"), body, srv.Close
+	return strings.TrimPrefix(srv.URL, "http://"), body, &seenRange, srv.Close
 }
 
 // routedHandlerFixture wires the dlna FileHandler with a routing
 // lookup + a host resolver pointing at the upstream stub from
-// upstreamFixture. Returns the handler ready to invoke + the upstream
-// body the handler should pass through unchanged.
-func routedHandlerFixture(t *testing.T) (handler http.HandlerFunc, upstreamBody string, cleanup func()) {
+// upstreamFixture. Returns the handler ready to invoke, the upstream
+// body the handler should pass through unchanged, and the
+// upstream-observed Range header pointer so test bodies can assert
+// the exact byte range forwarded.
+func routedHandlerFixture(t *testing.T) (handler http.HandlerFunc, upstreamBody string, observedRange *string, cleanup func()) {
 	t.Helper()
-	host, body, closeFn := upstreamFixture(t)
+	host, body, seenRange, closeFn := upstreamFixture(t)
 	const relPath = "2go/Music/Test Artist/Test Album/Test Track.flac"
 	lib := newTestLib(TrackInfo{
 		TrackID:       "abc123",
@@ -96,7 +106,7 @@ func routedHandlerFixture(t *testing.T) (handler http.HandlerFunc, upstreamBody 
 		},
 	}}
 	proxy := upnpproxy.New(&stubHostResolver{host: host}, nil)
-	return FileHandler(lib, routing, proxy), body, closeFn
+	return FileHandler(lib, routing, proxy), body, seenRange, closeFn
 }
 
 // Test_FileHandler_UPnPRoutedTrack_GET — bit-exact upstream bytes
@@ -106,7 +116,7 @@ func routedHandlerFixture(t *testing.T) (handler http.HandlerFunc, upstreamBody 
 // to keep cognitive complexity below SonarCloud's S3776 threshold —
 // each per-method axis is now its own top-level test.
 func Test_FileHandler_UPnPRoutedTrack_GET(t *testing.T) {
-	h, body, cleanup := routedHandlerFixture(t)
+	h, body, _, cleanup := routedHandlerFixture(t)
 	defer cleanup()
 
 	req := httptest.NewRequest(http.MethodGet, "/dlna/file/abc123", nil)
@@ -124,13 +134,18 @@ func Test_FileHandler_UPnPRoutedTrack_GET(t *testing.T) {
 }
 
 // Test_FileHandler_UPnPRoutedTrack_RangeHeader — Range header flows
-// through to the upstream MediaServer; the response carries the
-// upstream's 206 + Content-Range. Without this the renderer's
-// readRange (DSF mid-file seek; FLAC stream start) would fall back to
-// a full-body GET and the bit-exact contract over a marginal LAN
-// would suffer.
+// through to the upstream MediaServer verbatim; the response carries
+// the upstream's 206 + Content-Range. The upstream-observed Range
+// assertion is what makes this test actually catch a proxy that
+// forwarded the WRONG byte range (CodeRabbit MINOR on PR #356
+// round-3 — the original `Content-Range = "bytes 0-7/8"` check
+// passed even when the fixture echoed a fixed Content-Range
+// regardless of the byte range it received). Without this, the
+// renderer's readRange (DSF mid-file seek; FLAC stream start) would
+// fall back to a full-body GET and the bit-exact contract over a
+// marginal LAN would suffer.
 func Test_FileHandler_UPnPRoutedTrack_RangeHeader(t *testing.T) {
-	h, _, cleanup := routedHandlerFixture(t)
+	h, _, observedRange, cleanup := routedHandlerFixture(t)
 	defer cleanup()
 
 	req := httptest.NewRequest(http.MethodGet, "/dlna/file/abc123", nil)
@@ -143,6 +158,10 @@ func Test_FileHandler_UPnPRoutedTrack_RangeHeader(t *testing.T) {
 	if got := rec.Header().Get("Content-Range"); got != "bytes 0-7/8" {
 		t.Errorf("Content-Range = %q; want bytes 0-7/8", got)
 	}
+	if *observedRange != "bytes=0-7" {
+		t.Errorf("upstream-observed Range = %q; want bytes=0-7 — bit-exact contract requires verbatim byte-range passthrough, NOT just a non-empty Range that defaults to a hardcoded Content-Range echo",
+			*observedRange)
+	}
 }
 
 // Test_FileHandler_UPnPRoutedTrack_HEAD — HEAD returns the upstream's
@@ -150,7 +169,7 @@ func Test_FileHandler_UPnPRoutedTrack_RangeHeader(t *testing.T) {
 // to probe size + DLNA flags before issuing the actual GET; the proxy
 // must not stream bytes back on HEAD.
 func Test_FileHandler_UPnPRoutedTrack_HEAD(t *testing.T) {
-	h, _, cleanup := routedHandlerFixture(t)
+	h, _, _, cleanup := routedHandlerFixture(t)
 	defer cleanup()
 
 	req := httptest.NewRequest(http.MethodHead, "/dlna/file/abc123", nil)
@@ -242,6 +261,81 @@ func Test_FileHandler_RoutingMissForFilesystemTrack_StillServesLocally(t *testin
 	}
 	if got := rec.Body.String(); got != "local-fs" {
 		t.Errorf("body = %q; want %q", got, "local-fs")
+	}
+}
+
+// Test_FileHandler_RoutingLookupError_OnRoutedTrack_Returns500 — the
+// load-bearing CodeRabbit MAJOR fix from PR #356 round-4: for a track
+// that was persisted by the manifest as routed (AbsolutePath == ""
+// sentinel from rebuild's routing-fast-path), a transient
+// routing-lookup error MUST NOT fall through to `os.Open("")` (which
+// would surface as a false 404 → iOS caches as `lastErrorRescanShareID`
+// → surfaces a "rescan share?" affordance the user didn't actually
+// need). Instead the handler returns 500 so iOS retries on the next
+// play tap.
+func Test_FileHandler_RoutingLookupError_OnRoutedTrack_Returns500(t *testing.T) {
+	const relPath = "2go/Music/x.flac"
+	// Routed track per the manifest convention: AbsolutePath empty,
+	// RelativePath populated → the file-handler's pre-fix fallback
+	// would do `os.Open("")` and 404.
+	lib := newTestLib(TrackInfo{
+		TrackID:       "routed-err",
+		RelativePath:  relPath,
+		AbsolutePath:  "",
+		FileExtension: ".flac",
+		Size:          1,
+	})
+	// Routing lookup returns (nil, err) — simulates transient SQLite
+	// failure, connection reset, etc.
+	routing := &stubRoutingLookup{err: errors.New("simulated transient DB error")}
+	proxy := upnpproxy.New(&stubHostResolver{host: "127.0.0.1:1"}, nil)
+	h := FileHandler(lib, routing, proxy)
+
+	req := httptest.NewRequest(http.MethodGet, "/dlna/file/routed-err", nil)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d; want 500 — routed sentinel + transient DB error MUST surface as 5xx so iOS retries, NOT fall through to os.Open(\"\") which 404s and triggers a false rescan affordance",
+			rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Errorf("Content-Type = %q; want text/plain (renderers expect plain-text errors)", ct)
+	}
+}
+
+// Test_FileHandler_RoutingLookupError_OnFilesystemTrack_FallsThrough —
+// the orthogonal half of the round-4 fix: for a track with a real
+// filesystem AbsolutePath, the lookup is purely informational, and a
+// transient DB error must NOT block the legitimate filesystem serve.
+// The handler falls through and the file's bytes are served as
+// normal. Without this branch's surgical use of `info.AbsolutePath ==
+// ""` to differentiate, the round-4 fix would regress every
+// filesystem track on a transient routing DB error.
+func Test_FileHandler_RoutingLookupError_OnFilesystemTrack_FallsThrough(t *testing.T) {
+	path := createTempFile(t, ".flac", "local-fs-bytes")
+	const relPath = "Music/local.flac"
+	lib := newTestLib(TrackInfo{
+		TrackID:       "fs-err",
+		RelativePath:  relPath,
+		AbsolutePath:  path, // ← filesystem track: non-empty absPath
+		FileExtension: ".flac",
+		Size:          int64(len("local-fs-bytes")),
+	})
+	routing := &stubRoutingLookup{err: errors.New("simulated transient DB error")}
+	proxy := upnpproxy.New(&stubHostResolver{host: "127.0.0.1:1"}, nil)
+	h := FileHandler(lib, routing, proxy)
+
+	req := httptest.NewRequest(http.MethodGet, "/dlna/file/fs-err", nil)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200 — filesystem track + transient DB error must fall through to os.Open(realPath) and serve normally; body=%s",
+			rec.Code, rec.Body.String())
+	}
+	if got := rec.Body.String(); got != "local-fs-bytes" {
+		t.Errorf("body = %q; want %q", got, "local-fs-bytes")
 	}
 }
 

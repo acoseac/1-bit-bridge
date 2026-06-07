@@ -102,9 +102,26 @@ func FileHandler(lib LibrarySource, routing upnpproxy.RoutingLookup, proxy *upnp
 //   - manifest path empty (defensive);
 //   - variant segment present (sidecar, never routed);
 //   - routing lookup returned (nil, nil) — not a routed track;
-//   - routing lookup returned (nil, err) — same loud-log-then-fall-
-//     through as the api `serveFile` path; worst case the caller
-//     then 404s, which IS the pre-fix legacy behaviour.
+//   - routing lookup returned (nil, err) AND the track has a
+//     filesystem path (`AbsolutePath != ""`) — safe to fall through,
+//     filesystem serves the bytes regardless of routing-row state.
+//
+// **Routed track + transient lookup error → 500, NOT fall-through**
+// (CodeRabbit MAJOR on PR #356). By `manifestLibraryAdapter.rebuild`
+// convention, a track with `AbsolutePath == ""` is the routed
+// sentinel — `bridgefs.Resolver.Resolve` failed AND the path is in
+// `upnp_track_routing`. For that track a transient routing-lookup
+// error MUST NOT fall through to `os.Open("")`: the filesystem path
+// would surface as a false 404, which iOS caches as
+// `lastErrorRescanShareID` and surfaces as the "track is missing,
+// rescan share?" affordance — wrong for a transient DB error. Serving
+// 500 lets iOS retry on the next play tap.
+//
+// For a filesystem-backed track (`AbsolutePath != ""`) a transient
+// routing-lookup error is benign: the lookup is purely informational
+// for filesystem paths, and the os.Open would succeed against the
+// real file. Falling through preserves playback under the same
+// transient DB error condition.
 //
 // Extracted from `FileHandler` to drop its cognitive complexity
 // (SonarCloud S3776 on PR #356; this branch carried the deepest
@@ -126,12 +143,22 @@ func tryServeViaUPnPProxy(
 		return false
 	}
 	rt, lookupErr := routing.GetUPnPRouting(r.Context(), info.RelativePath)
-	if lookupErr != nil || rt == nil {
-		// (nil, nil) → not routed → fall through to filesystem.
-		// (nil, err) → fall through (worst case 404; this is the
-		// pre-fix legacy behaviour for routed tracks AND the correct
-		// behaviour for filesystem tracks — same shape as the api
-		// `serveFile`'s loud-log-then-fall-through approach).
+	if lookupErr != nil {
+		if info.AbsolutePath == "" {
+			// Routed sentinel + transient DB error → 500 (renderer
+			// retries) instead of falling through to `os.Open("")`
+			// which would surface as a false 404 (CodeRabbit MAJOR on
+			// PR #356 round-3).
+			http.Error(w, "UPnP routing lookup failed", http.StatusInternalServerError)
+			return true
+		}
+		// Filesystem-backed track + transient lookup error → fall
+		// through; the filesystem serves bytes regardless. Same shape
+		// as the api `serveFile`'s loud-log-then-fall-through.
+		return false
+	}
+	if rt == nil {
+		// Not routed → fall through to filesystem.
 		return false
 	}
 	perr := proxy.Serve(r.Context(), w, r.Method, r.Header, rt)
