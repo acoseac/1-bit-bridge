@@ -24,6 +24,13 @@
     <a href="/library/inspector" data-tab="library_inspector">Inspector</a>
     <a href="/jobs" data-tab="jobs">Jobs</a>
     <a href="/devices" data-tab="devices">Devices</a>
+    {{- /* UPnP upstream ingest is config-Validate-rejected in public
+        mode (SSDP is LAN-only, upstream byte URLs are RFC1918
+        unreachable from a public VPS). Hide the nav entry so public
+        operators don't see a feature they can't enable. The /upnp
+        route itself still serves an explanatory page for bookmarked
+        URLs. */ -}}
+    {{if not .IsPublic}}<a href="/upnp" data-tab="upnp">UPnP</a>{{end}}
     <a href="/data" data-tab="data">Data</a>
     <a href="/settings" data-tab="settings">Settings</a>
   </nav>

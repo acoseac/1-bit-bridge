@@ -659,6 +659,7 @@ var pages = map[string]string{
 	"library_inspector": "library_inspector.html",
 	"jobs":              "jobs.html",
 	"devices":           "devices.html",
+	"upnp":              "upnp.html",
 	"data":              "data.html",
 	"settings":          "settings.html",
 }
@@ -709,6 +710,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /library/inspector", s.pageLibraryInspector)
 	mux.HandleFunc("GET /jobs", s.pageJobs)
 	mux.HandleFunc("GET /devices", s.pageDevices)
+	mux.HandleFunc("GET /upnp", s.pageUPnP)
 	mux.HandleFunc("GET /data", s.pageData)
 	mux.HandleFunc("GET /settings", s.pageSettings)
 
@@ -751,6 +753,18 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/upscale/variants-dir", s.apiVariantsDirGet)
 	mux.HandleFunc("POST /api/upscale/variants-dir", s.apiVariantsDirPatch)
 	mux.HandleFunc("GET /api/upnp/servers", s.apiUPnPServers)
+	mux.HandleFunc("GET /api/upnp/discovered", s.apiUPnPDiscovered)
+	mux.HandleFunc("POST /api/upnp/servers", s.apiUPnPServerAdd)
+	// UDN identity rides on the QUERY STRING, NOT a path segment. The
+	// adapter accepts UDN OR ManualDescriptionURL as identity (the
+	// fallback for SSDP-unreachable servers), and a manual URL like
+	// `http://192.168.0.62:8200/rootDesc.xml` would never match a
+	// single-segment `{udn}` wildcard — Go's net/http multiplexer
+	// unescapes `%2F` to `/` and path-cleans before matching, so the
+	// encoded URL splits into multiple segments. Query strings bypass
+	// the cleaning entirely. Per Gemini HIGH on PR #357 round-2.
+	mux.HandleFunc("DELETE /api/upnp/servers", s.apiUPnPServerRemove)
+	mux.HandleFunc("PATCH /api/upnp/servers", s.apiUPnPServerUpdate)
 	mux.HandleFunc("POST /api/upnp/rescan", s.apiUPnPRescan)
 	mux.HandleFunc("POST /api/restart", s.apiRestart)
 	mux.HandleFunc("GET /api/pair-qr", s.apiPairQR)

@@ -1109,19 +1109,26 @@ function initDevices() {
     });
   });
 
-  // UPnP upstream MediaServers card (Bridge PR E). Loads /api/upnp/servers
-  // on devices-page open; hides the panel when the feature is disabled
-  // so operators who haven't enabled it never see an empty card.
-  loadUpnpUpstreamCard();
+  // UPnP upstream card moved to its dedicated /upnp page. Devices is
+  // now strictly for paired iOS clients.
 }
 
-// loadUpnpUpstreamCard fetches /api/upnp/servers and renders the per-server
-// status rows into #upnp-upstream-list. Toggles the parent panel's
-// `hidden` attribute based on Enabled — a disabled bridge hides the card
-// entirely.
-async function loadUpnpUpstreamCard() {
-  const panel = document.getElementById("upnp-upstream-panel");
-  const list = document.getElementById("upnp-upstream-list");
+// initUPnP wires the /upnp page (Configured / Discovered / Add manually
+// sections + the shared add/edit modal). Mounted from the
+// DOMContentLoaded dispatcher below.
+function initUPnP() {
+  loadUpnpConfigured();
+  loadUpnpDiscovered();
+  wireUpnpAddManualButton();
+  wireUpnpEditModal();
+}
+
+// loadUpnpConfigured fetches /api/upnp/servers and renders the
+// "Configured" section. Disabled-feature state hides the section so
+// the SSR-rendered feature-disabled panel is the only visible content.
+async function loadUpnpConfigured() {
+  const panel = document.getElementById("upnp-configured-panel");
+  const list = document.getElementById("upnp-configured-list");
   if (!panel || !list) return;
   try {
     const r = await API.get("/api/upnp/servers");
@@ -1130,32 +1137,40 @@ async function loadUpnpUpstreamCard() {
       return;
     }
     panel.hidden = false;
-    renderUpnpUpstreamList(list, r.servers || []);
+    renderUpnpConfiguredList(list, r.servers || []);
+    // The add-manual panel mirrors the configured-panel visibility:
+    // enabled feature → both visible.
+    const addPanel = document.getElementById("upnp-add-manual-panel");
+    if (addPanel) addPanel.hidden = false;
   } catch (err) {
     panel.hidden = false;
     list.innerHTML = `<p class="muted">UPnP upstream status unavailable: ${escapeHTML(err.message || String(err))}</p>`;
   }
 }
 
-// renderUpnpUpstreamList paints one row per configured server. Empty
-// config list = an explicit "no servers configured" hint so the
-// operator can see that the feature is enabled but unconfigured.
-function renderUpnpUpstreamList(list, servers) {
+// renderUpnpConfiguredList paints one row per configured server. Empty
+// config list = a friendly empty state directing the operator to the
+// Discovered section.
+function renderUpnpConfiguredList(list, servers) {
   if (!servers.length) {
-    list.innerHTML = `<p class="muted"><em>No upstream servers configured. Add them under <code>upnpUpstream.servers</code> in bridge.yaml.</em></p>`;
+    list.innerHTML = `<p class="muted"><em>No upstream servers configured yet. Look in the <strong>Discovered on LAN</strong> section below, or use <strong>Add manually</strong>.</em></p>`;
     return;
   }
-  const rows = servers.map((s) => upnpUpstreamRowHTML(s)).join("");
+  const rows = servers.map((s) => upnpConfiguredRowHTML(s)).join("");
   list.innerHTML = `<div class="upnp-upstream-rows">${rows}</div>`;
   list.querySelectorAll("[data-upnp-rescan]").forEach((btn) => {
     btn.addEventListener("click", () => onUpnpRescanClick(btn));
   });
+  list.querySelectorAll("[data-upnp-edit]").forEach((btn) => {
+    btn.addEventListener("click", () => openUpnpEditModal(JSON.parse(btn.dataset.upnpEdit)));
+  });
+  list.querySelectorAll("[data-upnp-remove]").forEach((btn) => {
+    btn.addEventListener("click", () => onUpnpRemoveClick(btn));
+  });
 }
 
-// upnpUpstreamRowHTML renders one server row. Status pill reflects
-// discovery state; the metadata block shows the FriendlyName +
-// last-walk counts + routed-track total.
-function upnpUpstreamRowHTML(s) {
+// upnpConfiguredRowHTML renders one configured-server row.
+function upnpConfiguredRowHTML(s) {
   const statusClass = s.discovered ? "ok" : "warn";
   const statusText = s.discovered ? "Discovered" : "Not seen yet";
   const friendly = s.friendlyName ? escapeHTML(s.friendlyName) : "<em class=\"muted\">unresolved</em>";
@@ -1171,6 +1186,22 @@ function upnpUpstreamRowHTML(s) {
   const errLine = s.lastWalkErr
     ? `<div class="upnp-upstream-err">${escapeHTML(s.lastWalkErr)}</div>`
     : "";
+  const udn = s.configuredUDN || "";
+  const manualURL = s.manualDescriptionURL || "";
+  // Identity for DELETE / PATCH endpoints — prefer UDN when present, fall
+  // back to manualDescriptionURL for SSDP-unreachable entries.
+  const identity = udn || manualURL;
+  // Edit payload — stashed on the button's data attr so the modal
+  // can prefill without a second fetch.
+  const editPayload = JSON.stringify({
+    identity, name: s.name, udn, manualURL,
+    pathPrefix: "", rootObjectID: "", skipTopLevelContainers: [],
+    // ↑ PathPrefix/RootObjectID/SkipTopLevelContainers aren't in the
+    // GET /api/upnp/servers response shape (they're internal to the
+    // YAML row). The modal renders them blank and the PATCH only sends
+    // the fields the operator actually edits, so leaving them blank
+    // here doesn't accidentally clear them on save.
+  });
   return `
     <div class="upnp-upstream-row" data-name="${escapeHTML(s.name)}">
       <div class="upnp-upstream-head">
@@ -1184,9 +1215,180 @@ function upnpUpstreamRowHTML(s) {
         ${errLine}
       </div>
       <div class="upnp-upstream-actions">
-        <button type="button" class="btn" data-upnp-rescan data-udn="${escapeHTML(s.configuredUDN || "")}">Rescan</button>
+        <button type="button" class="btn" data-upnp-rescan data-udn="${escapeHTML(udn)}">Rescan</button>
+        <button type="button" class="btn" data-upnp-edit='${escapeHTML(editPayload)}'>Edit</button>
+        <button type="button" class="btn danger" data-upnp-remove data-identity="${escapeHTML(identity)}" data-name="${escapeHTML(s.name)}">Remove</button>
       </div>
     </div>`;
+}
+
+// loadUpnpDiscovered fetches /api/upnp/discovered and renders the
+// "Discovered on LAN" section. Each row has a "Configure…" button that
+// opens the add-modal pre-filled with the discovered UDN + friendly
+// name.
+async function loadUpnpDiscovered() {
+  const panel = document.getElementById("upnp-discovered-panel");
+  const list = document.getElementById("upnp-discovered-list");
+  if (!panel || !list) return;
+  try {
+    const r = await API.get("/api/upnp/discovered");
+    if (!r.enabled) {
+      panel.hidden = true;
+      return;
+    }
+    panel.hidden = false;
+    renderUpnpDiscoveredList(list, r.servers || []);
+  } catch (err) {
+    panel.hidden = false;
+    list.innerHTML = `<p class="muted">UPnP discovery status unavailable: ${escapeHTML(err.message || String(err))}</p>`;
+  }
+}
+
+function renderUpnpDiscoveredList(list, servers) {
+  if (!servers.length) {
+    list.innerHTML = `<p class="muted"><em>No new MediaServers seen on the LAN. The bridge sweeps every 60s by default — if a server you expect isn't here, check that it's powered on, on the same subnet, and that the router isn't blocking SSDP multicast.</em></p>`;
+    return;
+  }
+  const rows = servers.map((s) => upnpDiscoveredRowHTML(s)).join("");
+  list.innerHTML = `<div class="upnp-upstream-rows">${rows}</div>`;
+  list.querySelectorAll("[data-upnp-configure]").forEach((btn) => {
+    btn.addEventListener("click", () => openUpnpEditModal(JSON.parse(btn.dataset.upnpConfigure)));
+  });
+}
+
+function upnpDiscoveredRowHTML(s) {
+  // Pre-escape EITHER the user-supplied friendlyName OR the literal
+  // fallback markup — never escape the assembled string downstream,
+  // since `escapeHTML('<em ...>')` would render literal angle-bracket
+  // text in place of the muted-italic placeholder. Per CodeRabbit
+  // minor on PR #357 round-2.
+  const friendly = s.friendlyName
+    ? escapeHTML(s.friendlyName)
+    : '<em class="muted">no friendly name</em>';
+  const model = s.modelName || s.modelDescription || "";
+  const mfr = s.manufacturer || "";
+  const subtitle = [mfr, model].filter(Boolean).join(" · ");
+  const seen = s.lastSeenAt ? new Date(s.lastSeenAt).toLocaleString() : "—";
+  // Configure-form prefill payload. PathPrefix defaults to a sanitized
+  // form of the friendly name (lowercase, alphanumeric); the operator
+  // can edit before saving.
+  const prefill = JSON.stringify({
+    identity: "", // add-mode
+    name: s.friendlyName || "",
+    udn: s.udn,
+    manualURL: "",
+    pathPrefix: defaultPathPrefix(s.friendlyName || ""),
+    rootObjectID: "",
+    skipTopLevelContainers: [],
+  });
+  return `
+    <div class="upnp-upstream-row" data-udn="${escapeHTML(s.udn)}">
+      <div class="upnp-upstream-head">
+        <strong>${friendly}</strong>
+        <span class="pill ok">${escapeHTML(s.udn)}</span>
+      </div>
+      <div class="upnp-upstream-meta">
+        ${subtitle ? `<div>${escapeHTML(subtitle)}</div>` : ""}
+        <div>Last seen: ${escapeHTML(seen)}</div>
+      </div>
+      <div class="upnp-upstream-actions">
+        <button type="button" class="btn primary" data-upnp-configure='${escapeHTML(prefill)}'>Configure…</button>
+      </div>
+    </div>`;
+}
+
+// defaultPathPrefix produces a YAML-loader-equivalent sanitized prefix:
+// lowercase, alphanumeric only. Mirrors the bridge's UPnPUpstreamServerConfig
+// fallback so the operator sees the same default the server would compute.
+function defaultPathPrefix(name) {
+  return (name || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "")
+    .slice(0, 32);
+}
+
+function wireUpnpAddManualButton() {
+  const btn = document.getElementById("upnp-add-open");
+  if (!btn) return;
+  btn.addEventListener("click", () => openUpnpEditModal({
+    identity: "", name: "", udn: "", manualURL: "",
+    pathPrefix: "", rootObjectID: "", skipTopLevelContainers: [],
+  }));
+}
+
+// openUpnpEditModal opens the add/edit dialog pre-filled with the
+// supplied payload. `identity` === "" means add-mode (POST); non-empty
+// means edit-mode (PATCH on that identity).
+function openUpnpEditModal(payload) {
+  const modal = document.getElementById("upnp-edit-modal");
+  const form = document.getElementById("upnp-edit-form");
+  const title = document.getElementById("upnp-edit-title");
+  const errBox = document.getElementById("upnp-edit-error");
+  if (!modal || !form || !title) return;
+  title.textContent = payload.identity ? "Edit UPnP server" : "Add UPnP server";
+  form.elements.name.value = payload.name || "";
+  form.elements.udn.value = payload.udn || "";
+  form.elements.manualDescriptionURL.value = payload.manualURL || "";
+  form.elements.pathPrefix.value = payload.pathPrefix || "";
+  form.elements.rootObjectID.value = payload.rootObjectID || "";
+  form.elements.skipTopLevelContainers.value = (payload.skipTopLevelContainers || []).join("\n");
+  // UDN + manualURL are identity in edit-mode; lock them so the
+  // operator can't accidentally rename the row out from under the
+  // PATCH endpoint (which keys on the URL path UDN, not the payload).
+  form.elements.udn.readOnly = !!payload.identity;
+  form.elements.manualDescriptionURL.readOnly = !!payload.identity;
+  form.dataset.editIdentity = payload.identity || "";
+  if (errBox) { errBox.hidden = true; errBox.textContent = ""; }
+  modal.showModal();
+}
+
+function wireUpnpEditModal() {
+  const modal = document.getElementById("upnp-edit-modal");
+  const form = document.getElementById("upnp-edit-form");
+  const cancelBtn = document.getElementById("upnp-edit-cancel");
+  if (!modal || !form || !cancelBtn) return;
+  cancelBtn.addEventListener("click", () => modal.close());
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const identity = form.dataset.editIdentity || "";
+    const body = {
+      name: form.elements.name.value.trim(),
+      udn: form.elements.udn.value.trim(),
+      manualDescriptionURL: form.elements.manualDescriptionURL.value.trim(),
+      pathPrefix: form.elements.pathPrefix.value.trim(),
+      rootObjectID: form.elements.rootObjectID.value.trim(),
+      skipTopLevelContainers: form.elements.skipTopLevelContainers.value
+        .split(/\r?\n/)
+        .map((s) => s.trim())
+        .filter(Boolean),
+    };
+    const errBox = document.getElementById("upnp-edit-error");
+    try {
+      if (identity) {
+        // Edit mode: PATCH only the editable fields (Name + PathPrefix +
+        // RootObjectID + SkipTopLevelContainers). UDN + ManualURL are
+        // identity, not editable.
+        const patch = {
+          name: body.name,
+          pathPrefix: body.pathPrefix,
+          rootObjectID: body.rootObjectID,
+          skipTopLevelContainers: body.skipTopLevelContainers,
+        };
+        await API.patch("/api/upnp/servers?udn=" + encodeURIComponent(identity), patch);
+      } else {
+        await API.post("/api/upnp/servers", body);
+      }
+      modal.close();
+      showUpnpRestartBanner();
+      loadUpnpConfigured();
+      loadUpnpDiscovered();
+    } catch (err) {
+      if (errBox) {
+        errBox.hidden = false;
+        errBox.textContent = err.message || String(err);
+      }
+    }
+  });
 }
 
 async function onUpnpRescanClick(btn) {
@@ -1198,12 +1400,60 @@ async function onUpnpRescanClick(btn) {
     const q = udn ? "?udn=" + encodeURIComponent(udn) : "";
     await API.post("/api/upnp/rescan" + q);
     // Refresh the whole card so post-walk stats land in the UI.
-    setTimeout(() => loadUpnpUpstreamCard(), 1500);
+    setTimeout(() => loadUpnpConfigured(), 1500);
   } catch (err) {
     alert("Rescan failed: " + (err.message || err));
   } finally {
     btn.disabled = false;
     btn.textContent = original;
+  }
+}
+
+// onUpnpRemoveClick handles the Remove button on a configured-server
+// row. Confirms with the operator (server name → simple confirm
+// dialog; this is a destructive action that drops manifest tracks on
+// the next restart), then DELETE /api/upnp/servers?udn={identity}.
+async function onUpnpRemoveClick(btn) {
+  const identity = btn.dataset.identity || "";
+  const name = btn.dataset.name || identity;
+  if (!identity) return;
+  if (!confirm(`Remove "${name}" from the configured UPnP servers? Its routed tracks will drop from the manifest on the next restart.`)) {
+    return;
+  }
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = "Removing…";
+  try {
+    await API.delete("/api/upnp/servers?udn=" + encodeURIComponent(identity));
+    showUpnpRestartBanner();
+    loadUpnpConfigured();
+    loadUpnpDiscovered();
+  } catch (err) {
+    alert("Remove failed: " + (err.message || err));
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
+  }
+}
+
+// showUpnpRestartBanner injects (or refreshes) a one-time "Restart
+// required" banner above the configured panel so the operator knows
+// their CRUD action won't take effect until the next bridge restart.
+// Idempotent — calling it twice doesn't stack banners.
+function showUpnpRestartBanner() {
+  const host = document.querySelector(".page.upnp");
+  if (!host) return;
+  let banner = document.getElementById("upnp-restart-banner");
+  if (!banner) {
+    banner = document.createElement("div");
+    banner.id = "upnp-restart-banner";
+    banner.className = "panel banner-warn";
+    banner.innerHTML = `
+      <strong>Restart required</strong> — changes to the upstream
+      server list don't take effect until the bridge restarts.
+      Use the <a href="/settings#danger">Restart</a> button on the
+      Settings page when you're ready.`;
+    host.insertBefore(banner, host.firstChild.nextSibling); // after h1
   }
 }
 
@@ -4876,6 +5126,7 @@ document.addEventListener("DOMContentLoaded", () => {
     case "library_inspector": initLibraryInspector(); break;
     case "jobs": initJobs(); break;
     case "devices": initDevices(); break;
+    case "upnp": initUPnP(); break;
     case "data": initData(); break;
     case "settings": initSettings(); break;
   }

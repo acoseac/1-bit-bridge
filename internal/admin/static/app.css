@@ -313,6 +313,7 @@ body[data-active="library"] nav a[data-tab="library"],
 body[data-active="library_inspector"] nav a[data-tab="library_inspector"],
 body[data-active="jobs"] nav a[data-tab="jobs"],
 body[data-active="devices"] nav a[data-tab="devices"],
+body[data-active="upnp"] nav a[data-tab="upnp"],
 body[data-active="data"] nav a[data-tab="data"],
 body[data-active="settings"] nav a[data-tab="settings"] {
   color: var(--accent);
@@ -322,6 +323,7 @@ body[data-active="library"] nav a[data-tab="library"]::after,
 body[data-active="library_inspector"] nav a[data-tab="library_inspector"]::after,
 body[data-active="jobs"] nav a[data-tab="jobs"]::after,
 body[data-active="devices"] nav a[data-tab="devices"]::after,
+body[data-active="upnp"] nav a[data-tab="upnp"]::after,
 body[data-active="data"] nav a[data-tab="data"]::after,
 body[data-active="settings"] nav a[data-tab="settings"]::after {
   content: "";
@@ -2820,5 +2822,37 @@ ul.histogram li {
   margin-bottom: 0.4rem;
 }
 .upnp-upstream-meta { color: var(--fg-muted); font-size: 13px; line-height: 1.5; }
-.upnp-upstream-err { color: var(--err); margin-top: 0.2rem; font-size: 12px; }
-.upnp-upstream-actions { margin-top: 0.6rem; }
+.upnp-upstream-err { color: var(--err, var(--danger)); margin-top: 0.2rem; font-size: 12px; }
+.upnp-upstream-actions {
+  margin-top: 0.6rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+/* --- /upnp page styles (PR-pending: discovery + CRUD) --- */
+.page.upnp .panel + .panel { margin-top: 1.25rem; }
+.page.upnp .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.page.upnp .pill { font-family: var(--mono, monospace); font-size: 11px; }
+.page.upnp .code-block {
+  background: var(--surface-2, rgba(0,0,0,0.05));
+  border-radius: 6px;
+  padding: 0.6rem 0.8rem;
+  font-family: var(--mono, monospace);
+  font-size: 13px;
+  margin: 0.5rem 0;
+  white-space: pre-wrap;
+}
+.page.upnp .form-error {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  padding: 0.5rem 0.7rem;
+  border-radius: 6px;
+  margin: 0.4rem 0;
+}
+.banner-warn {
+  background: color-mix(in srgb, var(--warn) 14%, var(--surface, transparent));
+  border-left: 3px solid var(--warn);
+  padding: 0.8rem 1rem;
+  margin: 1rem 0;
+}

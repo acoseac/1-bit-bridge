@@ -2196,7 +2196,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// rescans inherit the bridge's run-scope (a request-context
 		// would cancel the walk when the operator's browser
 		// disconnects).
-		UPnPUpstream:    upnpLC.installAdminAdapter(ctx, cfgHolder, manifestStore, upnpLC.ingester),
+		UPnPUpstream:    upnpLC.installAdminAdapter(ctx, cfgHolder, absCfgPath, manifestStore, upnpLC.ingester),
 		Updater:         updAdapter,
 		BackupSources:   backupSources,
 		Tailscale:       tailscaleAdminSrc,

@@ -860,7 +860,7 @@ func TestUpscaleSoxAvailabilityCached(t *testing.T) {
 func TestPagesRenderWithoutError(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	h := srv.Handler()
-	for _, path := range []string{"/", "/library", "/devices", "/settings"} {
+	for _, path := range []string{"/", "/library", "/devices", "/upnp", "/settings"} {
 		req := httptest.NewRequest("GET", path, nil)
 		req.RemoteAddr = "127.0.0.1:54321"
 		rw := httptest.NewRecorder()
@@ -875,6 +875,92 @@ func TestPagesRenderWithoutError(t *testing.T) {
 		if !strings.Contains(rw.Body.String(), "1-bit") {
 			t.Errorf("%s: body missing brand", path)
 		}
+	}
+}
+
+// TestUPnPPage_PublicModeShowsExplanationPanel pins the public-mode
+// gate on the /upnp page (PR-pending follow-up to the discovery+CRUD
+// feature, addressing the user's request to hide the page in public
+// deployments).
+//
+// In public mode, `Config.Validate` refuses `upnpUpstream.enabled =
+// true` (SSDP multicast is LAN-only AND the upstream's RFC1918 byte
+// URLs are unreachable from a public VPS). The /upnp page MUST surface
+// that explicitly via the public-mode panel rather than misleadingly
+// inviting the operator to "enable it in bridge.yaml" (which would
+// fail validation). The nav entry is also hidden in layout.html
+// when IsPublic — pinned by the dashboard-page assertion below.
+//
+// The test invokes the page handler + the dashboard page handler
+// DIRECTLY (bypassing the auth middleware) — public mode requires
+// AdminAuth wiring that's orthogonal to the gate we're verifying,
+// and the renderPage flow is the actual contract under test.
+func TestUPnPPage_PublicModeShowsExplanationPanel(t *testing.T) {
+	srv, cfg, _ := newTestServer(t)
+	cfg.Deployment.Mode = "public"
+	cfg.Deployment.AdminTLSTerminatedByProxy = true
+	cfg.Autocert.Domain = "bridge.example.com"
+	srv.deps.CfgHolder.Store(cfg)
+
+	// /upnp content
+	rw := httptest.NewRecorder()
+	srv.pageUPnP(rw, httptest.NewRequest("GET", "/upnp", nil))
+	if rw.Code != 200 {
+		t.Fatalf("/upnp status = %d; want 200", rw.Code)
+	}
+	body := rw.Body.String()
+	if !strings.Contains(body, "upnp-public-mode-panel") {
+		t.Errorf("public-mode /upnp page MUST surface the explanation panel; body did not contain `upnp-public-mode-panel`")
+	}
+	// The action panels (Configured / Discovered / Add manually) MUST
+	// NOT render in public mode — they're useless without the feature.
+	for _, hiddenID := range []string{"upnp-configured-panel", "upnp-discovered-panel", "upnp-add-manual-panel", "upnp-edit-modal"} {
+		if strings.Contains(body, hiddenID) {
+			t.Errorf("public-mode /upnp page MUST hide the action panel %q; body contains it", hiddenID)
+		}
+	}
+
+	// Nav-link suppression: layout.html `{{if not .IsPublic}}` wrap
+	// MUST omit the UPnP link. Asserted via the rendered /upnp body
+	// itself (layout.html is part of every page render, so the nav
+	// markup is in every body).
+	if strings.Contains(body, `data-tab="upnp"`) {
+		t.Errorf("public-mode nav MUST omit the UPnP link; body contains `data-tab=\"upnp\"`")
+	}
+}
+
+// TestUPnPPage_LoopbackModeShowsActionPanels is the loopback-side
+// regression guard for the public-mode gate above: in the default
+// loopback deploy, the action panels MUST render AND the nav link
+// MUST be present. Without this assertion a future refactor could
+// flip the IsPublic gate the wrong way and the public-mode test
+// alone wouldn't catch it.
+func TestUPnPPage_LoopbackModeShowsActionPanels(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	h := srv.Handler()
+	req := httptest.NewRequest("GET", "/upnp", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	rw := httptest.NewRecorder()
+	h.ServeHTTP(rw, req)
+	if rw.Code != 200 {
+		t.Fatalf("status = %d; want 200", rw.Code)
+	}
+	body := rw.Body.String()
+	for _, requiredID := range []string{"upnp-configured-panel", "upnp-discovered-panel", "upnp-add-manual-panel", "upnp-edit-modal"} {
+		if !strings.Contains(body, requiredID) {
+			t.Errorf("loopback-mode /upnp page MUST render action panel %q; body missing it", requiredID)
+		}
+	}
+	if strings.Contains(body, "upnp-public-mode-panel") {
+		t.Errorf("loopback-mode /upnp page MUST NOT render the public-mode panel")
+	}
+	// Nav link present.
+	req2 := httptest.NewRequest("GET", "/", nil)
+	req2.RemoteAddr = "127.0.0.1:54321"
+	rw2 := httptest.NewRecorder()
+	h.ServeHTTP(rw2, req2)
+	if !strings.Contains(rw2.Body.String(), `data-tab="upnp"`) {
+		t.Errorf("loopback-mode nav MUST include the UPnP link")
 	}
 }
 
