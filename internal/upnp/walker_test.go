@@ -242,6 +242,11 @@ func TestSanitizePathComponent_StripsSlashAndControls(t *testing.T) {
 	if got := sanitizePathComponent(".."); got != "_" {
 		t.Errorf(`dotdot: got %q, want "_"`, got)
 	}
+	// Backslashes are stripped too (Windows path separator) — a "..\.."
+	// title becomes "..-..", not a traversal segment.
+	if got := sanitizePathComponent("..\\.."); got != "..-.." {
+		t.Errorf(`backslash traversal: got %q, want "..-.."`, got)
+	}
 	// A legit title containing dots is preserved (not all-dots).
 	if got := sanitizePathComponent("Vol.1"); got != "Vol.1" {
 		t.Errorf(`dotted title: got %q, want "Vol.1"`, got)
