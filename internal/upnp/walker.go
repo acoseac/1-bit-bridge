@@ -127,6 +127,9 @@ func BrowseFoldersWalk(
 	if opts.RootObjectID == "" {
 		return WalkStats{}, errors.New("upnp: RootObjectID is required")
 	}
+	if yield == nil {
+		return WalkStats{}, errors.New("upnp: yield function is required")
+	}
 	if opts.MaxItems <= 0 {
 		opts.MaxItems = 50_000
 	}
@@ -135,7 +138,13 @@ func BrowseFoldersWalk(
 	}
 	skip := make(map[string]struct{}, len(opts.SkipContainerTitles))
 	for _, t := range opts.SkipContainerTitles {
-		skip[strings.ToLower(strings.TrimSpace(t))] = struct{}{}
+		// Drop empty/whitespace-only entries — an empty key would skip
+		// any container whose title trims to "". The admin API sanitises
+		// this list, but a hand-edited bridge.yaml reaches the walker raw
+		// (ingest passes srv.SkipTopLevelContainers directly).
+		if key := strings.ToLower(strings.TrimSpace(t)); key != "" {
+			skip[key] = struct{}{}
+		}
 	}
 	prefix := strings.Trim(strings.TrimSpace(opts.PathPrefix), "/")
 
@@ -297,10 +306,11 @@ func dotIfExt(ext string) string {
 	return "." + ext
 }
 
-// sanitizePathComponent strips '/' (path separator) + control chars from
-// a directory or filename component so the joined Path never breaks the
-// path.Clean invariant we rely on. ASCII-conservative: anything else
-// (Unicode letters, spaces, punctuation in titles) is preserved.
+// sanitizePathComponent strips '/' and '\\' (path separators on POSIX +
+// Windows) + control chars from a directory or filename component so the
+// joined Path never breaks the path.Clean invariant we rely on.
+// ASCII-conservative: anything else (Unicode letters, spaces, punctuation
+// in titles) is preserved.
 func sanitizePathComponent(s string) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -310,7 +320,11 @@ func sanitizePathComponent(s string) string {
 	b.Grow(len(s))
 	for _, r := range s {
 		switch {
-		case r == '/':
+		case r == '/' || r == '\\':
+			// '\\' too: the bridge ships for Windows, where a backslash
+			// is a path separator — a "..\\.." title would otherwise
+			// survive the "."/".." check below and traverse (Gemini
+			// security-high on PR #359).
 			b.WriteByte('-')
 		case r == 0x00 || r < 0x20:
 			// drop control chars silently
@@ -318,7 +332,16 @@ func sanitizePathComponent(s string) string {
 			b.WriteRune(r)
 		}
 	}
-	return strings.TrimSpace(b.String())
+	out := strings.TrimSpace(b.String())
+	// Neutralize the two segments path.Clean treats specially: a
+	// container title of "." or ".." is attacker-controllable (a
+	// malicious or misconfigured upstream MediaServer) and would
+	// otherwise survive into the joined Path as a traversal segment,
+	// breaking the path.Clean invariant this sanitizer exists to protect.
+	if out == "." || out == ".." {
+		return "_"
+	}
+	return out
 }
 
 // joinPath joins path components with '/'. Empty components are skipped.

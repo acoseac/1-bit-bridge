@@ -112,6 +112,16 @@ func TestCountVariantsNotUnderPrefix(t *testing.T) {
 	if count != 2 || bytes != 300 {
 		t.Errorf("not under /tmp/old/: got (%d, %d), want (2, 300)", count, bytes)
 	}
+
+	// Empty prefix → total (every variant is "not under empty"), per the
+	// documented contract. (DeepSeek review — impl previously returned 0.)
+	count, bytes, err = s.CountVariantsNotUnderPrefix(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 3 || bytes != 350 {
+		t.Errorf("empty prefix: got (%d, %d), want (3, 350)", count, bytes)
+	}
 }
 
 // TestUpdateVariantSidecarPathMissingRow returns sql.ErrNoRows

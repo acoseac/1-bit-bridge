@@ -235,6 +235,52 @@ func TestSanitizePathComponent_StripsSlashAndControls(t *testing.T) {
 	if got := sanitizePathComponent("  trimmed  "); got != "trimmed" {
 		t.Errorf("trim: %q", got)
 	}
+	// path.Clean-significant segments are neutralized (traversal guard).
+	if got := sanitizePathComponent("."); got != "_" {
+		t.Errorf(`dot: got %q, want "_"`, got)
+	}
+	if got := sanitizePathComponent(".."); got != "_" {
+		t.Errorf(`dotdot: got %q, want "_"`, got)
+	}
+	// Backslashes are stripped too (Windows path separator) — a "..\.."
+	// title becomes "..-..", not a traversal segment.
+	if got := sanitizePathComponent("..\\.."); got != "..-.." {
+		t.Errorf(`backslash traversal: got %q, want "..-.."`, got)
+	}
+	// A legit title containing dots is preserved (not all-dots).
+	if got := sanitizePathComponent("Vol.1"); got != "Vol.1" {
+		t.Errorf(`dotted title: got %q, want "Vol.1"`, got)
+	}
+}
+
+func TestBrowseFoldersWalk_NilYieldReturnsError(t *testing.T) {
+	c := setupWalk(t, [][2]string{{"root", browsePage(xmlnsHeader+`</DIDL-Lite>`, 0, 0)}})
+	if _, err := BrowseFoldersWalk(context.Background(), c, testControlURL,
+		WalkOptions{RootObjectID: "64"}, nil); err == nil {
+		t.Fatal("expected error for nil yield function")
+	}
+}
+
+func TestBrowseFoldersWalk_EmptySkipEntryDoesNotSkipUntitledContainer(t *testing.T) {
+	// A stray empty/whitespace SkipContainerTitles entry (hand-edited
+	// bridge.yaml; ingest passes the list to the walker raw) must NOT skip
+	// a container whose title trims to "".
+	root := browsePage(xmlnsHeader+ct("64$0", "64", "")+`</DIDL-Lite>`, 1, 1)
+	folder := browsePage(xmlnsHeader+
+		it(itemSpec{id: "x1", parentID: "64$0", title: "T", artist: "A", trackNo: 1})+
+		`</DIDL-Lite>`, 1, 1)
+	c := setupWalk(t, [][2]string{{"root", root}, {"folder", folder}})
+
+	var yielded []Walked
+	_, err := BrowseFoldersWalk(context.Background(), c, testControlURL,
+		WalkOptions{RootObjectID: "64", SkipContainerTitles: []string{"", "  "}},
+		func(w Walked) error { yielded = append(yielded, w); return nil })
+	if err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+	if len(yielded) != 1 {
+		t.Fatalf("yielded %d; want 1 (empty skip entry must not skip the untitled container)", len(yielded))
+	}
 }
 
 func TestSynthesizeFilename_FallbacksAndExtensions(t *testing.T) {
