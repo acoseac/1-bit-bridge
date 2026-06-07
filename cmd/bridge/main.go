@@ -1638,7 +1638,24 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// false. The `dlnaEnabled` flag flows into `apiSrv.WithDLNA(...)`
 	// below so /v1/health.features advertises `dlnaServer` in
 	// lockstep with the actual running listener.
-	dlnaLC, dlnaEnabled := startDLNAIfEnabled(ctx, cfg, manifestStore, apiSrv.Resolver(), logger)
+	// UPnP UPSTREAM ingestion + file-serving proxy. Opt-in via
+	// `upnpUpstream.enabled` in bridge.yaml. Walks each configured
+	// MediaServer's "Browse Folders" tree into the manifest at the
+	// scan-interval cadence + proxies /v1/download for any path whose
+	// row carries a upnp_track_routing entry. When disabled the
+	// lifecycle is a no-op + the proxy hooks stay nil + the filesystem
+	// path serves every track.
+	//
+	// **Started BEFORE the DLNA MediaServer** so the DLNA file
+	// handler can pick up `upnpLC.HostResolver()` and pass the proxy
+	// + routing lookup into the dlna ServerConfig. Pre-this-reorder
+	// the DLNA `/dlna/file/{trackID}` handler returned 404 for any
+	// UPnP-routed track (silent decline on cast), since it only knew
+	// the local filesystem resolver.
+	upnpLC := startUPnPUpstreamIfEnabled(ctx, cfg, manifestStore, apiSrv, logger)
+	defer upnpLC.Stop()
+
+	dlnaLC, dlnaEnabled := startDLNAIfEnabled(ctx, cfg, manifestStore, apiSrv.Resolver(), upnpLC, logger)
 	defer func() {
 		stopCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
 		defer cancel()
@@ -1659,15 +1676,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		apiSrv.WithRendererDiscovery(discLC.snapshotter)
 	}
 
-	// UPnP UPSTREAM ingestion + file-serving proxy. Opt-in via
-	// `upnpUpstream.enabled` in bridge.yaml. Walks each configured
-	// MediaServer's "Browse Folders" tree into the manifest at the
-	// scan-interval cadence + proxies /v1/download for any path whose
-	// row carries a upnp_track_routing entry. When disabled the
-	// lifecycle is a no-op + the proxy hooks stay nil + the filesystem
-	// path serves every track.
-	upnpLC := startUPnPUpstreamIfEnabled(ctx, cfg, manifestStore, apiSrv, logger)
-	defer upnpLC.Stop()
+	// (UPnP upstream wiring moved above the DLNA wiring so the DLNA
+	// file handler can pick up the proxy + routing lookup — see the
+	// new location.)
 
 	// Public advertisement of upstream MediaServers on `/v1/health` —
 	// nil-safe (returns nil when the feature is disabled, so the

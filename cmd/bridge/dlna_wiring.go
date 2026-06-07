@@ -17,6 +17,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/dlna"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
+	"github.com/acoseac/1-bit-bridge/internal/upnpproxy"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
 
@@ -49,6 +50,7 @@ func startDLNAIfEnabled(
 	cfg *config.Config,
 	store *manifest.Store,
 	resolver *bridgefs.Resolver,
+	upnpLC *upnpUpstreamLifecycle,
 	logger *slog.Logger,
 ) (lc *dlnaLifecycle, enabled bool) {
 	// Deployment posture → typed mode.
@@ -128,8 +130,27 @@ func startDLNAIfEnabled(
 
 	library := newManifestLibraryAdapter(store, resolver, cfg.LibraryRoots, dlnaLog)
 
+	// UPnP-routed file-handler fast-path: when the upnpUpstream feature is
+	// wired AND its SSDP discovery has a host resolver to hand out, the
+	// dlna file handler proxies upstream bytes (e.g. from a Chord 2Go)
+	// instead of 404'ing on a non-existent local file. The `manifestStore`
+	// implements `upnpproxy.RoutingLookup` via its `GetUPnPRouting`; we
+	// pair that with a `*upnpproxy.Proxy` constructed from the upstream
+	// lifecycle's host resolver. Both nil → legacy filesystem-only
+	// behaviour. Per the post-pair-A operator verification of PR #732.
+	var dlnaUPnPRouting upnpproxy.RoutingLookup
+	var dlnaUPnPProxy *upnpproxy.Proxy
+	if upnpLC != nil {
+		if hr := upnpLC.HostResolver(); hr != nil {
+			dlnaUPnPRouting = store
+			dlnaUPnPProxy = upnpproxy.New(hr, dlnaLog)
+		}
+	}
+
 	srv, err := dlna.NewServer(dlna.ServerConfig{
 		Library:            library,
+		UPnPRouting:        dlnaUPnPRouting,
+		UPnPProxy:          dlnaUPnPProxy,
 		UDN:                udn,
 		FriendlyName:       cfg.DLNA.EffectiveDLNAFriendlyName(),
 		Manufacturer:       "1-bit",
@@ -328,7 +349,15 @@ type manifestLibraryAdapter struct {
 	store        *manifest.Store
 	resolver     *bridgefs.Resolver
 	libraryRoots []string
-	log          *slog.Logger
+	// Resolver-miss tracks backed by an upstream UPnP MediaServer (e.g.
+	// a Chord 2Go's microSD card) are kept in the cache with an empty
+	// `AbsolutePath` sentinel — the dlna file handler's upnp fast-path
+	// proxies the bytes BEFORE `os.Open(servePath)` runs. Membership
+	// resolved per rebuild from a single `AllUPnPRoutingPaths` bulk
+	// read (previously a per-track `GetUPnPRouting` point query that
+	// N+1'd under the 10 s rebuild context deadline — Gemini HIGH on
+	// PR #356).
+	log *slog.Logger
 
 	// `mu` guards the cached* slots for reads (Snapshot path) and the
 	// cachedAt timestamp. Brief — held only for the slot copy / read.
@@ -473,19 +502,8 @@ func (a *manifestLibraryAdapter) rebuild() {
 	// `resolveErr` above).
 	libraryRoot := ""
 
-	// One bulk read of every offline variant row (sidecar paths +
-	// metadata), grouped by source path. Cheaper than an N+1 LookupVariant
-	// per track, and runs at most once per cache TTL. Failure is non-fatal:
-	// we log and proceed with source-only DIDL (the feature degrades, the
-	// CDS still serves originals).
-	variantsBySource := map[string][]manifest.VariantRow{}
-	if rows, vErr := a.store.AllVariants(ctx); vErr != nil {
-		a.log.Warn("manifest variant list failed — DLNA serves source-only", slog.String("err", vErr.Error()))
-	} else {
-		for _, vr := range rows {
-			variantsBySource[vr.SourcePath] = append(variantsBySource[vr.SourcePath], vr)
-		}
-	}
+	variantsBySource := a.loadVariantsBySource(ctx)
+	routedPaths := a.loadRoutedPathSet(ctx)
 
 	list := make([]dlna.TrackInfo, 0, len(tracks))
 	byID := make(map[string]dlna.TrackInfo, len(tracks))
@@ -493,7 +511,21 @@ func (a *manifestLibraryAdapter) rebuild() {
 	for _, t := range tracks {
 		absPath, resolveErr := a.resolver.Resolve(t.Path)
 		if resolveErr != nil {
-			continue
+			// Filesystem resolver miss. If this track is backed by
+			// an upstream UPnP MediaServer (upnp_track_routing has a
+			// row, looked up via the pre-built routedPaths map),
+			// include it with an empty `AbsolutePath` so the dlna
+			// file handler's upnp fast-path can take over. `os.Open("")`
+			// would never be reached for these tracks because the
+			// fast-path returns before the filesystem-serve branch.
+			// Without this, casting a 2Go-routed track to any DLNA
+			// renderer silently 404'd (bug surfaced by the post-pair-A
+			// operator verification of PR #732 — see internal/upnpproxy
+			// package docblock).
+			if _, routed := routedPaths[t.Path]; !routed {
+				continue
+			}
+			absPath = ""
 		}
 		ti := manifestTrackToDLNATrackInfo(t, absPath, libraryRoot)
 		ti.Variants = dlnaVariantsFromRows(variantsBySource[t.Path])
@@ -557,13 +589,81 @@ func (a *manifestLibraryAdapter) Generation() uint64 {
 	return a.generation
 }
 
+// loadVariantsBySource bulk-reads every offline variant row (sidecar
+// paths + metadata) and groups by source path. Cheaper than an N+1
+// LookupVariant per track during the rebuild loop, runs at most once
+// per cache TTL. Failure is non-fatal: we log and return an empty map
+// (DIDL renders source-only for this rebuild; CDS still serves
+// originals). Extracted from `rebuild()` to keep its cognitive
+// complexity below the SonarCloud S3776 threshold (Sonar CRITICAL on
+// PR #356 round-2).
+func (a *manifestLibraryAdapter) loadVariantsBySource(ctx context.Context) map[string][]manifest.VariantRow {
+	out := map[string][]manifest.VariantRow{}
+	rows, err := a.store.AllVariants(ctx)
+	if err != nil {
+		a.log.Warn("manifest variant list failed — DLNA serves source-only", slog.String("err", err.Error()))
+		return out
+	}
+	for _, vr := range rows {
+		out[vr.SourcePath] = append(out[vr.SourcePath], vr)
+	}
+	return out
+}
+
+// loadRoutedPathSet bulk-reads every `upnp_track_routing.source_path`
+// into a set keyed for O(1) lookup in the rebuild loop.
+//
+// Pre-fix this was a per-track `GetUPnPRouting` point query INSIDE the
+// rebuild loop (one round-trip per filesystem-miss track) — an N+1
+// under the 10 s context deadline that reliably tripped the timeout
+// on a 15k+ routed library, after which every subsequent lookup
+// returned `ctx.DeadlineExceeded` and silently dropped the remainder
+// of the routed tracks from the cache. Now: one SELECT, one map.
+//
+// Failure is non-fatal: we log and return an empty map. The rebuild
+// then skips every routed track at the resolver-miss branch — same
+// fallback the pre-fix `isUPnPRouted` returning false produced on
+// store error.
+//
+// Per Gemini HIGH on PR #356; extracted from `rebuild()` for cognitive
+// complexity on PR #356 round-2.
+func (a *manifestLibraryAdapter) loadRoutedPathSet(ctx context.Context) map[string]struct{} {
+	out := map[string]struct{}{}
+	paths, err := a.store.AllUPnPRoutingPaths(ctx)
+	if err != nil {
+		a.log.Warn("manifest UPnP routing list failed — routed tracks skipped this rebuild",
+			slog.String("err", err.Error()))
+		return out
+	}
+	for _, p := range paths {
+		out[p] = struct{}{}
+	}
+	return out
+}
+
 // manifestTrackToDLNATrackInfo flattens the pointer-typed manifest.Track
 // optionals into the value-typed dlna.TrackInfo fields, computes the
 // stable TrackID, and derives the file extension.
 //
 // Pure-helper-style — extracted so the adapter's rebuild path is
 // short + easy to unit-test in isolation.
+//
+// **FileExtension derivation falls back to `t.Path` when `absPath` is
+// empty.** UPnP-routed tracks reach this function with `absPath = ""`
+// (the resolver-miss sentinel from rebuild's routing fast-path); pre-
+// fix `filepath.Ext("")` returned `""`, dropping the extension on
+// every routed track and leaving DIDL `<res protocolInfo>` MIME
+// resolution + the file handler's variant-segment regex unable to key
+// off the codec. The bridge manifest's `Path` always carries the real
+// extension (e.g. `2go/.../01 - Hells Bells.flac`), so the fallback is
+// always correct — and a no-op for filesystem-backed tracks where
+// `absPath` already carries the same extension. Per CodeRabbit minor
+// on PR #356.
 func manifestTrackToDLNATrackInfo(t manifest.Track, absPath, libraryRoot string) dlna.TrackInfo {
+	extSource := absPath
+	if extSource == "" {
+		extSource = t.Path
+	}
 	ti := dlna.TrackInfo{
 		TrackID:      dlna.TrackID(libraryRoot, t.Path),
 		AbsolutePath: absPath,
@@ -583,7 +683,7 @@ func manifestTrackToDLNATrackInfo(t manifest.Track, absPath, libraryRoot string)
 		Composer:      t.Composer,
 		Genre:         t.Genre,
 		Codec:         t.Codec,
-		FileExtension: strings.ToLower(filepath.Ext(absPath)),
+		FileExtension: strings.ToLower(filepath.Ext(extSource)),
 		Size:          t.Size,
 	}
 	if t.Duration != nil {

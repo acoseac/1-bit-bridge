@@ -66,7 +66,7 @@ func Test_FileHandler_ServesKnownTrack(t *testing.T) {
 		TrackID: "abc123", AbsolutePath: path,
 		FileExtension: ".dsf", Size: 16,
 	})
-	h := FileHandler(lib)
+	h := FileHandler(lib, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/dlna/file/abc123", nil)
 	req.Header.Set("User-Agent", "Music Player Daemon 0.21.26")
@@ -97,7 +97,7 @@ func Test_FileHandler_ServesKnownTrack(t *testing.T) {
 func Test_FileHandler_PerUserAgentMIME_Sony(t *testing.T) {
 	path := createTempFile(t, ".dsf", "x")
 	lib := newTestLib(TrackInfo{TrackID: "sony", AbsolutePath: path, FileExtension: ".dsf", Size: 1})
-	h := FileHandler(lib)
+	h := FileHandler(lib, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/dlna/file/sony", nil)
 	req.Header.Set("User-Agent", "Sony SRS-HG1/3.2")
@@ -113,7 +113,7 @@ func Test_FileHandler_PerUserAgentMIME_Sony(t *testing.T) {
 func Test_FileHandler_PerUserAgentMIME_Chord(t *testing.T) {
 	path := createTempFile(t, ".dsf", "x")
 	lib := newTestLib(TrackInfo{TrackID: "chord", AbsolutePath: path, FileExtension: ".dsf", Size: 1})
-	h := FileHandler(lib)
+	h := FileHandler(lib, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/dlna/file/chord", nil)
 	req.Header.Set("User-Agent", "Chord 2go/1.5.7")
@@ -129,7 +129,7 @@ func Test_FileHandler_RangeRequestReturns206(t *testing.T) {
 	const contents = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 	path := createTempFile(t, ".flac", contents)
 	lib := newTestLib(TrackInfo{TrackID: "rng", AbsolutePath: path, FileExtension: ".flac", Size: int64(len(contents))})
-	h := FileHandler(lib)
+	h := FileHandler(lib, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/dlna/file/rng", nil)
 	req.Header.Set("Range", "bytes=5-9")
@@ -149,7 +149,7 @@ func Test_FileHandler_RangeRequestReturns206(t *testing.T) {
 
 func Test_FileHandler_UnknownTrackID_Returns404(t *testing.T) {
 	lib := newTestLib()
-	h := FileHandler(lib)
+	h := FileHandler(lib, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/dlna/file/nonexistent", nil)
 	rec := httptest.NewRecorder()
 	h(rec, req)
@@ -160,7 +160,7 @@ func Test_FileHandler_UnknownTrackID_Returns404(t *testing.T) {
 
 func Test_FileHandler_FileMissingOnDisk_Returns404(t *testing.T) {
 	lib := newTestLib(TrackInfo{TrackID: "missing", AbsolutePath: "/this/path/does/not/exist.dsf", FileExtension: ".dsf", Size: 1})
-	h := FileHandler(lib)
+	h := FileHandler(lib, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/dlna/file/missing", nil)
 	rec := httptest.NewRecorder()
 	h(rec, req)
@@ -171,7 +171,7 @@ func Test_FileHandler_FileMissingOnDisk_Returns404(t *testing.T) {
 
 func Test_FileHandler_NonGETOrHEAD_Returns405(t *testing.T) {
 	lib := newTestLib()
-	h := FileHandler(lib)
+	h := FileHandler(lib, nil, nil)
 	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete} {
 		req := httptest.NewRequest(method, "/dlna/file/anything", nil)
 		rec := httptest.NewRecorder()
@@ -186,7 +186,7 @@ func Test_FileHandler_HEAD_ReturnsHeadersWithoutBody(t *testing.T) {
 	const contents = "1234567890"
 	path := createTempFile(t, ".flac", contents)
 	lib := newTestLib(TrackInfo{TrackID: "headtest", AbsolutePath: path, FileExtension: ".flac", Size: int64(len(contents))})
-	h := FileHandler(lib)
+	h := FileHandler(lib, nil, nil)
 
 	req := httptest.NewRequest(http.MethodHead, "/dlna/file/headtest", nil)
 	rec := httptest.NewRecorder()
@@ -210,7 +210,7 @@ func Test_FileHandler_FileExtensionInferredFromPathIfBlank(t *testing.T) {
 	// the handler should derive it from the AbsolutePath defensively.
 	path := createTempFile(t, ".flac", "x")
 	lib := newTestLib(TrackInfo{TrackID: "inferred", AbsolutePath: path, FileExtension: "", Size: 1})
-	h := FileHandler(lib)
+	h := FileHandler(lib, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/dlna/file/inferred", nil)
 	rec := httptest.NewRecorder()
 	h(rec, req)
@@ -221,7 +221,7 @@ func Test_FileHandler_FileExtensionInferredFromPathIfBlank(t *testing.T) {
 
 func Test_FileHandler_EmptyTrackIDInURL_Returns404(t *testing.T) {
 	lib := newTestLib()
-	h := FileHandler(lib)
+	h := FileHandler(lib, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/dlna/file/", nil)
 	rec := httptest.NewRecorder()
 	h(rec, req)
@@ -265,7 +265,7 @@ func Test_FileHandler_ServesVariantSidecar(t *testing.T) {
 			FileExtension: ".flac", Size: 19, BitDepth: 24, SampleRate: 176400,
 		}},
 	})
-	h := FileHandler(lib)
+	h := FileHandler(lib, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/dlna/file/trk/variant-upscaled-v2-176400-24.flac", nil)
 	req.Header.Set("User-Agent", "Music Player Daemon 0.21.26")
 	rec := httptest.NewRecorder()
@@ -294,7 +294,7 @@ func Test_FileHandler_VariantSidecarMissing_Returns410(t *testing.T) {
 			FileExtension: ".flac",
 		}},
 	})
-	h := FileHandler(lib)
+	h := FileHandler(lib, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/dlna/file/trk/variant-upscaled-v2-176400-24.flac", nil)
 	rec := httptest.NewRecorder()
 	h(rec, req)
@@ -310,7 +310,7 @@ func Test_FileHandler_UnknownVariantID_Returns404(t *testing.T) {
 	lib := newTestLib(TrackInfo{
 		TrackID: "trk", AbsolutePath: srcPath, FileExtension: ".dsf", Size: 6,
 	})
-	h := FileHandler(lib)
+	h := FileHandler(lib, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/dlna/file/trk/variant-does-not-exist.flac", nil)
 	rec := httptest.NewRecorder()
 	h(rec, req)
@@ -327,7 +327,7 @@ func Test_FileHandler_NoVariantSegmentServesSource(t *testing.T) {
 		TrackID: "trk", AbsolutePath: srcPath, FileExtension: ".flac", Size: 11,
 		Variants: []VariantInfo{{VariantID: "upscaled-v2-176400-24", AbsolutePath: "/unused.flac", FileExtension: ".flac"}},
 	})
-	h := FileHandler(lib)
+	h := FileHandler(lib, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/dlna/file/trk", nil)
 	rec := httptest.NewRecorder()
 	h(rec, req)

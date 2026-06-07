@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/logging"
+	"github.com/acoseac/1-bit-bridge/internal/upnpproxy"
 )
 
 // genaInitialNotifyTimeout bounds the single best-effort initial NOTIFY
@@ -38,6 +39,19 @@ type ServerConfig struct {
 	// Library is the data source the ContentDirectory + file handlers
 	// query. Required.
 	Library LibrarySource
+
+	// UPnPRouting + UPnPProxy wire the UPnP-routed file handler
+	// fast-path — when both are non-nil, the file handler proxies
+	// upstream MediaServer bytes (e.g. a Chord 2Go's microSD card)
+	// instead of trying to open a non-existent local file. Pre-this-
+	// pkg the `/dlna/file/{trackID}` path returned 404 for UPnP-
+	// routed tracks, so a user casting a 2Go-sourced track to any
+	// DLNA renderer through the bridge got a silent decline. Pair
+	// these two fields together — wiring just one disables the
+	// fast-path. Both `nil` keeps the legacy filesystem-only
+	// behaviour.
+	UPnPRouting upnpproxy.RoutingLookup
+	UPnPProxy   *upnpproxy.Proxy
 
 	// UDN is the device's stable unique identifier WITH the `uuid:`
 	// prefix (e.g. "uuid:f1b3a5c2-..."). Required. Should remain stable
@@ -386,7 +400,7 @@ func (s *Server) mountHandlers() {
 	s.mux.Handle("/dlna/cds/control", cdsHandler)
 	s.mux.Handle("/dlna/cm/control", ConnectionManagerHandler())
 
-	s.mux.Handle("/dlna/file/", FileHandler(s.cfg.Library))
+	s.mux.Handle("/dlna/file/", FileHandler(s.cfg.Library, s.cfg.UPnPRouting, s.cfg.UPnPProxy))
 
 	// Silence-flush asset: served as a static 1-second PCM WAV at
 	// `/dlna/silence.wav`. iOS dispatches `SetAVTransportURI(<base>
