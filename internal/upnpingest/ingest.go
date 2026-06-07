@@ -171,8 +171,16 @@ func (i *Ingester) ingestOne(ctx context.Context, srv config.UPnPUpstreamServerC
 		// reject GetSystemUpdateID under load. Fall through to a walk.
 		currentID = ""
 	}
-	stored, _ := i.idStore.Get(srv.UDN)
-	lastWalkedAt, _ := i.idStore.LastWalkedAt(srv.UDN)
+	// Key the idStore skip-gate on the StableServerKey, NOT raw srv.UDN:
+	// srv.UDN is "" for every UDN-less manual server, so a raw-UDN key
+	// collides all manual servers' SystemUpdateID + lastWalkedAt into one
+	// shared slot — one manual server's update-ID match then suppresses
+	// the others' walks. The walk/reap below already use StableServerKey
+	// (lines that pass `udn`); this aligns the skip-gate with them. Same
+	// class as PR #353's admin-gate fix; this was the residual ingest miss.
+	udn := StableServerKey(srv)
+	stored, _ := i.idStore.Get(udn)
+	lastWalkedAt, _ := i.idStore.LastWalkedAt(udn)
 	if decideSkipWalk(currentID, stored, lastWalkedAt, now(), backstop, forceWalk) {
 		res.Skipped = true
 		res.SkipReason = "SystemUpdateID matched stored value AND within backstop"
@@ -181,7 +189,6 @@ func (i *Ingester) ingestOne(ctx context.Context, srv config.UPnPUpstreamServerC
 
 	// Walk.
 	res.WalkStartedAt = now()
-	udn := StableServerKey(srv)
 	res.ServerUDN = udn
 	prefix := normalizePrefix(srv)
 
@@ -256,7 +263,8 @@ func (i *Ingester) ingestOne(ctx context.Context, srv config.UPnPUpstreamServerC
 	}
 
 	// Stash the SystemUpdateID + walk-time for next tick's skip gate.
-	i.idStore.Set(srv.UDN, currentID, walkStart)
+	// Same StableServerKey (`udn`) the Get/LastWalkedAt above use.
+	i.idStore.Set(udn, currentID, walkStart)
 }
 
 // buildTrackAndRouting converts one Walked record into the matched

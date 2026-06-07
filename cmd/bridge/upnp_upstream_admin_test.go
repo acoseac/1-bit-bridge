@@ -138,3 +138,29 @@ func TestAdmin_ForceRescan_RejectsUnknownUDN(t *testing.T) {
 		t.Fatalf("err = %v; want ErrUPnPNoSuchServer", err)
 	}
 }
+
+func TestAdmin_ForceRescan_AcceptsManualURLServer(t *testing.T) {
+	// A server configured with ONLY a ManualDescriptionURL (empty UDN)
+	// must be force-rescannable by that URL — RemoveServer/UpdateServer
+	// already accept it via findConfiguredIdx; pre-fix ForceRescan's
+	// srv.UDN-only loop 404'd it (residual miss of PR #353's sibling-gate
+	// fix). Pre-hold the in-flight latch so a PASSING identity check
+	// surfaces as ErrUPnPRescanInFlight (reached only AFTER the identity
+	// gate) rather than ErrUPnPNoSuchServer — and without spawning the
+	// background ingester goroutine (nil in this adapter).
+	const manualURL = "http://manual:8200/desc.xml"
+	cfg := newUPnPTestCfg(t,
+		config.UPnPUpstreamServerConfig{Name: "Manual", ManualDescriptionURL: manualURL, PathPrefix: "manual"},
+	)
+	rt := runtimeCfgFor(t, cfg)
+	a := &upnpAdminAdapter{
+		cfgHolder: rt, cache: upnp.NewServerCache(),
+		state: newUPnPAdminState(), bgCtx: context.Background(),
+	}
+	a.state.mu.Lock()
+	a.state.inFlight = true
+	a.state.mu.Unlock()
+	if err := a.ForceRescan(context.Background(), manualURL); !errors.Is(err, admin.ErrUPnPRescanInFlight) {
+		t.Fatalf("err = %v; want ErrUPnPRescanInFlight (identity gate must accept the manual URL)", err)
+	}
+}
