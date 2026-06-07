@@ -127,6 +127,9 @@ func BrowseFoldersWalk(
 	if opts.RootObjectID == "" {
 		return WalkStats{}, errors.New("upnp: RootObjectID is required")
 	}
+	if yield == nil {
+		return WalkStats{}, errors.New("upnp: yield function is required")
+	}
 	if opts.MaxItems <= 0 {
 		opts.MaxItems = 50_000
 	}
@@ -135,7 +138,13 @@ func BrowseFoldersWalk(
 	}
 	skip := make(map[string]struct{}, len(opts.SkipContainerTitles))
 	for _, t := range opts.SkipContainerTitles {
-		skip[strings.ToLower(strings.TrimSpace(t))] = struct{}{}
+		// Drop empty/whitespace-only entries — an empty key would skip
+		// any container whose title trims to "". The admin API sanitises
+		// this list, but a hand-edited bridge.yaml reaches the walker raw
+		// (ingest passes srv.SkipTopLevelContainers directly).
+		if key := strings.ToLower(strings.TrimSpace(t)); key != "" {
+			skip[key] = struct{}{}
+		}
 	}
 	prefix := strings.Trim(strings.TrimSpace(opts.PathPrefix), "/")
 
@@ -318,7 +327,16 @@ func sanitizePathComponent(s string) string {
 			b.WriteRune(r)
 		}
 	}
-	return strings.TrimSpace(b.String())
+	out := strings.TrimSpace(b.String())
+	// Neutralize the two segments path.Clean treats specially: a
+	// container title of "." or ".." is attacker-controllable (a
+	// malicious or misconfigured upstream MediaServer) and would
+	// otherwise survive into the joined Path as a traversal segment,
+	// breaking the path.Clean invariant this sanitizer exists to protect.
+	if out == "." || out == ".." {
+		return "_"
+	}
+	return out
 }
 
 // joinPath joins path components with '/'. Empty components are skipped.

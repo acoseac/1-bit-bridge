@@ -1345,6 +1345,13 @@ func (s *Store) lookupTrackByLowerCase(ctx context.Context, cleaned string) (*Tr
 	}
 	defer rows.Close()
 	if !rows.Next() {
+		// rows.Err() distinguishes a genuine empty result from an
+		// iteration error (transient SQLite I/O / malformed index); a
+		// missing check silently misreads a real error as "track not
+		// found". (DeepSeek review.)
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
 		return nil, nil
 	}
 	var raw []byte
@@ -1354,6 +1361,9 @@ func (s *Store) lookupTrackByLowerCase(ctx context.Context, cleaned string) (*Tr
 	if rows.Next() {
 		logger.Warn("LookupTrack: case-folded fallback is ambiguous, refusing to pick a row", "path", cleaned)
 		return nil, nil
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	var t Track
 	if err := json.Unmarshal(raw, &t); err != nil {
@@ -3799,6 +3809,13 @@ func (s *Store) lookupVariantByLowerCase(ctx context.Context, cleanedSourcePath,
 	}
 	defer rows.Close()
 	if !rows.Next() {
+		// rows.Err() distinguishes a genuine empty result from an
+		// iteration error (transient SQLite I/O / malformed index); a
+		// missing check silently misreads a real error as "no variant",
+		// failing the download or re-creating the sidecar. (DeepSeek review.)
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
 		return nil, nil
 	}
 	var v VariantRow
@@ -3813,6 +3830,9 @@ func (s *Store) lookupVariantByLowerCase(ctx context.Context, cleanedSourcePath,
 		logger.Warn("LookupVariant: case-folded fallback is ambiguous, refusing to pick a row",
 			"sourcePath", cleanedSourcePath, "variantID", variantID)
 		return nil, nil
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return &v, nil
 }
@@ -4090,15 +4110,28 @@ func (s *Store) UpdateVariantSidecarPath(ctx context.Context, sourcePath, varian
 // allocated every VariantRow into the admin handler's working set
 // while holding `s.mu`. Gemini medium on PR D2.
 func (s *Store) CountVariantsNotUnderPrefix(ctx context.Context, prefix string) (int, int64, error) {
+	var (
+		count int
+		bytes sql.NullInt64
+	)
+	// Empty prefix → every variant is "not under empty" (documented
+	// contract above). The NOT LIKE path below would build pattern `%`,
+	// match every row, and return 0 — contradicting the doc. The sole
+	// production caller (countLegacyVariants) guards "" today; this
+	// honours the contract for any future caller. (DeepSeek review.)
+	if prefix == "" {
+		row := s.db.QueryRowContext(ctx,
+			`SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM track_variants`)
+		if err := row.Scan(&count, &bytes); err != nil {
+			return 0, 0, fmt.Errorf("count variants (empty prefix): %w", err)
+		}
+		return count, bytes.Int64, nil
+	}
 	// Escape LIKE metacharacters (% and _) in the prefix so a literal
 	// underscore in the operator's path doesn't false-match. The
 	// existing `likeEscape` helper handles the prefix sanitisation
 	// the rest of the manifest already uses.
 	pattern := likeEscape(prefix) + `%`
-	var (
-		count int
-		bytes sql.NullInt64
-	)
 	row := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*), COALESCE(SUM(size_bytes), 0)
 		  FROM track_variants
