@@ -351,17 +351,7 @@ func (a *upnpAdminAdapter) AddServer(_ context.Context, req admin.UPnPServerAddR
 		RootObjectID:           strings.TrimSpace(req.RootObjectID),
 		SkipTopLevelContainers: sanitizeSkipList(req.SkipTopLevelContainers),
 	})
-	if err := next.Validate(); err != nil {
-		return fmt.Errorf("%w: %v", admin.ErrUPnPValidation, err)
-	}
-	if a.cfgPath == "" {
-		return fmt.Errorf("save bridge.yaml: cfgPath not wired")
-	}
-	if err := next.Save(a.cfgPath); err != nil {
-		return fmt.Errorf("save bridge.yaml: %w", err)
-	}
-	a.cfgHolder.Store(next)
-	return nil
+	return a.persistCfg(next)
 }
 
 // RemoveServer drops the configured entry matching the UDN. Match is
@@ -380,20 +370,11 @@ func (a *upnpAdminAdapter) RemoveServer(_ context.Context, udn string) error {
 	a.crudMu.Lock()
 	defer a.crudMu.Unlock()
 	cfg := a.cfgHolder.Load()
-	if cfg == nil {
-		return admin.ErrUPnPNoSuchServer
-	}
 	udn = strings.TrimSpace(udn)
-	if udn == "" {
+	if cfg == nil || udn == "" {
 		return admin.ErrUPnPNoSuchServer
 	}
-	idx := -1
-	for i, srv := range cfg.UPnPUpstream.Servers {
-		if strings.TrimSpace(srv.UDN) == udn || strings.TrimSpace(srv.ManualDescriptionURL) == udn {
-			idx = i
-			break
-		}
-	}
+	idx := findConfiguredIdx(cfg, udn)
 	if idx < 0 {
 		return admin.ErrUPnPNoSuchServer
 	}
@@ -402,17 +383,7 @@ func (a *upnpAdminAdapter) RemoveServer(_ context.Context, udn string) error {
 		next.UPnPUpstream.Servers[:idx],
 		next.UPnPUpstream.Servers[idx+1:]...,
 	)
-	if err := next.Validate(); err != nil {
-		return fmt.Errorf("%w: %v", admin.ErrUPnPValidation, err)
-	}
-	if a.cfgPath == "" {
-		return fmt.Errorf("save bridge.yaml: cfgPath not wired")
-	}
-	if err := next.Save(a.cfgPath); err != nil {
-		return fmt.Errorf("save bridge.yaml: %w", err)
-	}
-	a.cfgHolder.Store(next)
-	return nil
+	return a.persistCfg(next)
 }
 
 // UpdateServer edits the operator-visible fields of an existing row.
@@ -428,20 +399,11 @@ func (a *upnpAdminAdapter) UpdateServer(_ context.Context, udn string, req admin
 	a.crudMu.Lock()
 	defer a.crudMu.Unlock()
 	cfg := a.cfgHolder.Load()
-	if cfg == nil {
-		return admin.ErrUPnPNoSuchServer
-	}
 	udn = strings.TrimSpace(udn)
-	if udn == "" {
+	if cfg == nil || udn == "" {
 		return admin.ErrUPnPNoSuchServer
 	}
-	idx := -1
-	for i, srv := range cfg.UPnPUpstream.Servers {
-		if strings.TrimSpace(srv.UDN) == udn || strings.TrimSpace(srv.ManualDescriptionURL) == udn {
-			idx = i
-			break
-		}
-	}
+	idx := findConfiguredIdx(cfg, udn)
 	if idx < 0 {
 		return admin.ErrUPnPNoSuchServer
 	}
@@ -463,6 +425,19 @@ func (a *upnpAdminAdapter) UpdateServer(_ context.Context, udn string, req admin
 	if req.SkipTopLevelContainers != nil {
 		row.SkipTopLevelContainers = sanitizeSkipList(*req.SkipTopLevelContainers)
 	}
+	return a.persistCfg(next)
+}
+
+// persistCfg is the shared validate→save→store tail used by every
+// CRUD path (AddServer / RemoveServer / UpdateServer). Validates
+// against the cross-section rules in `Config.Validate`, persists via
+// `Config.Save`, atomically swaps the live snapshot via
+// `CfgHolder.Store`. Extracted to drop SonarCloud duplication on
+// PR #357 round-2 — the tail was ~14 lines repeated in each method.
+//
+// Caller MUST hold `a.crudMu` (the CRUD-write serializer) before
+// invoking this helper. Helper does NOT re-acquire it.
+func (a *upnpAdminAdapter) persistCfg(next *config.Config) error {
 	if err := next.Validate(); err != nil {
 		return fmt.Errorf("%w: %v", admin.ErrUPnPValidation, err)
 	}
@@ -474,6 +449,19 @@ func (a *upnpAdminAdapter) UpdateServer(_ context.Context, udn string, req admin
 	}
 	a.cfgHolder.Store(next)
 	return nil
+}
+
+// findConfiguredIdx scans `cfg.UPnPUpstream.Servers` for a row whose
+// UDN OR ManualDescriptionURL matches the supplied identity (trimmed
+// exact). Returns -1 when no row matches. Extracted to drop
+// duplication between RemoveServer + UpdateServer.
+func findConfiguredIdx(cfg *config.Config, identity string) int {
+	for i, srv := range cfg.UPnPUpstream.Servers {
+		if strings.TrimSpace(srv.UDN) == identity || strings.TrimSpace(srv.ManualDescriptionURL) == identity {
+			return i
+		}
+	}
+	return -1
 }
 
 // sanitizeSkipList trims whitespace + drops empty entries from a

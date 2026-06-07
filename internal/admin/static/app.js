@@ -1257,7 +1257,14 @@ function renderUpnpDiscoveredList(list, servers) {
 }
 
 function upnpDiscoveredRowHTML(s) {
-  const friendly = s.friendlyName || "<em class=\"muted\">no friendly name</em>";
+  // Pre-escape EITHER the user-supplied friendlyName OR the literal
+  // fallback markup — never escape the assembled string downstream,
+  // since `escapeHTML('<em ...>')` would render literal angle-bracket
+  // text in place of the muted-italic placeholder. Per CodeRabbit
+  // minor on PR #357 round-2.
+  const friendly = s.friendlyName
+    ? escapeHTML(s.friendlyName)
+    : '<em class="muted">no friendly name</em>';
   const model = s.modelName || s.modelDescription || "";
   const mfr = s.manufacturer || "";
   const subtitle = [mfr, model].filter(Boolean).join(" · ");
@@ -1277,7 +1284,7 @@ function upnpDiscoveredRowHTML(s) {
   return `
     <div class="upnp-upstream-row" data-udn="${escapeHTML(s.udn)}">
       <div class="upnp-upstream-head">
-        <strong>${escapeHTML(friendly)}</strong>
+        <strong>${friendly}</strong>
         <span class="pill ok">${escapeHTML(s.udn)}</span>
       </div>
       <div class="upnp-upstream-meta">
@@ -1367,7 +1374,7 @@ function wireUpnpEditModal() {
           rootObjectID: body.rootObjectID,
           skipTopLevelContainers: body.skipTopLevelContainers,
         };
-        await API.patch("/api/upnp/servers/" + encodeURIComponent(identity), patch);
+        await API.patch("/api/upnp/servers?udn=" + encodeURIComponent(identity), patch);
       } else {
         await API.post("/api/upnp/servers", body);
       }
@@ -1405,7 +1412,7 @@ async function onUpnpRescanClick(btn) {
 // onUpnpRemoveClick handles the Remove button on a configured-server
 // row. Confirms with the operator (server name → simple confirm
 // dialog; this is a destructive action that drops manifest tracks on
-// the next restart), then DELETE /api/upnp/servers/{identity}.
+// the next restart), then DELETE /api/upnp/servers?udn={identity}.
 async function onUpnpRemoveClick(btn) {
   const identity = btn.dataset.identity || "";
   const name = btn.dataset.name || identity;
@@ -1417,7 +1424,7 @@ async function onUpnpRemoveClick(btn) {
   const original = btn.textContent;
   btn.textContent = "Removing…";
   try {
-    await API.delete("/api/upnp/servers/" + encodeURIComponent(identity));
+    await API.delete("/api/upnp/servers?udn=" + encodeURIComponent(identity));
     showUpnpRestartBanner();
     loadUpnpConfigured();
     loadUpnpDiscovered();

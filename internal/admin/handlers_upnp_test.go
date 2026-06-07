@@ -334,14 +334,13 @@ func TestApiUPnPServerAdd_BadJSONMapsTo400(t *testing.T) {
 	}
 }
 
-// --- DELETE /api/upnp/servers/{udn} ---
+// --- DELETE /api/upnp/servers?udn=<UDN> ---
 
 func TestApiUPnPServerRemove_HappyPath(t *testing.T) {
 	provider := &stubUPnPProvider{}
 	s := newTestUPnPHandler(t, provider)
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodDelete, "/api/upnp/servers/uuid:abc", nil)
-	req.SetPathValue("udn", "uuid:abc")
+	req := httptest.NewRequest(http.MethodDelete, "/api/upnp/servers?udn=uuid%3Aabc", nil)
 	s.apiUPnPServerRemove(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d; want 200; body=%s", w.Code, w.Body.String())
@@ -358,8 +357,7 @@ func TestApiUPnPServerRemove_MissingUDNMapsTo400(t *testing.T) {
 	provider := &stubUPnPProvider{}
 	s := newTestUPnPHandler(t, provider)
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodDelete, "/api/upnp/servers/", nil)
-	// Don't SetPathValue — simulates a route mismatch.
+	req := httptest.NewRequest(http.MethodDelete, "/api/upnp/servers", nil)
 	s.apiUPnPServerRemove(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d; want 400", w.Code)
@@ -370,8 +368,7 @@ func TestApiUPnPServerRemove_NoSuchMapsTo404(t *testing.T) {
 	provider := &stubUPnPProvider{removeErr: ErrUPnPNoSuchServer}
 	s := newTestUPnPHandler(t, provider)
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodDelete, "/api/upnp/servers/uuid:nope", nil)
-	req.SetPathValue("udn", "uuid:nope")
+	req := httptest.NewRequest(http.MethodDelete, "/api/upnp/servers?udn=uuid%3Anope", nil)
 	s.apiUPnPServerRemove(w, req)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d; want 404", w.Code)
@@ -381,15 +378,37 @@ func TestApiUPnPServerRemove_NoSuchMapsTo404(t *testing.T) {
 	}
 }
 
-// --- PATCH /api/upnp/servers/{udn} ---
+// TestApiUPnPServerRemove_ManualURLAsIdentity is the Gemini HIGH
+// regression guard on PR #357 round-2: the adapter accepts UDN OR
+// ManualDescriptionURL as identity (the SSDP-unreachable fallback).
+// With a URL-shaped identity containing `/` and `:`, a single-segment
+// `{udn}` path wildcard would NEVER match after Go's net/http
+// `%2F`→`/` unescape + path-clean. Query strings bypass the cleaning.
+func TestApiUPnPServerRemove_ManualURLAsIdentity(t *testing.T) {
+	provider := &stubUPnPProvider{}
+	s := newTestUPnPHandler(t, provider)
+	w := httptest.NewRecorder()
+	// The manual URL flavor — URL-encode the whole thing so the
+	// `:` and `/` round-trip through the query parser cleanly.
+	const manualURL = "http://192.168.0.62:8200/rootDesc.xml"
+	req := httptest.NewRequest(http.MethodDelete, "/api/upnp/servers?udn=http%3A%2F%2F192.168.0.62%3A8200%2FrootDesc.xml", nil)
+	s.apiUPnPServerRemove(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200 (manual URL must work as identity); body=%s", w.Code, w.Body.String())
+	}
+	if got, _ := provider.removeLast.Load().(string); got != manualURL {
+		t.Errorf("removed identity = %q; want %q", got, manualURL)
+	}
+}
+
+// --- PATCH /api/upnp/servers?udn=<UDN> ---
 
 func TestApiUPnPServerUpdate_HappyPath(t *testing.T) {
 	provider := &stubUPnPProvider{}
 	s := newTestUPnPHandler(t, provider)
 	w := httptest.NewRecorder()
 	body := strings.NewReader(`{"name":"Renamed","pathPrefix":"renamed"}`)
-	req := httptest.NewRequest(http.MethodPatch, "/api/upnp/servers/uuid:abc", body)
-	req.SetPathValue("udn", "uuid:abc")
+	req := httptest.NewRequest(http.MethodPatch, "/api/upnp/servers?udn=uuid%3Aabc", body)
 	s.apiUPnPServerUpdate(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d; want 200; body=%s", w.Code, w.Body.String())
@@ -410,8 +429,7 @@ func TestApiUPnPServerUpdate_ValidationMapsTo400(t *testing.T) {
 	s := newTestUPnPHandler(t, provider)
 	w := httptest.NewRecorder()
 	body := strings.NewReader(`{"name":""}`)
-	req := httptest.NewRequest(http.MethodPatch, "/api/upnp/servers/uuid:abc", body)
-	req.SetPathValue("udn", "uuid:abc")
+	req := httptest.NewRequest(http.MethodPatch, "/api/upnp/servers?udn=uuid%3Aabc", body)
 	s.apiUPnPServerUpdate(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d; want 400", w.Code)
@@ -423,8 +441,7 @@ func TestApiUPnPServerUpdate_NoSuchMapsTo404(t *testing.T) {
 	s := newTestUPnPHandler(t, provider)
 	w := httptest.NewRecorder()
 	body := strings.NewReader(`{"name":"X"}`)
-	req := httptest.NewRequest(http.MethodPatch, "/api/upnp/servers/uuid:nope", body)
-	req.SetPathValue("udn", "uuid:nope")
+	req := httptest.NewRequest(http.MethodPatch, "/api/upnp/servers?udn=uuid%3Anope", body)
 	s.apiUPnPServerUpdate(w, req)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d; want 404", w.Code)

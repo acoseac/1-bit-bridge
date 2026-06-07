@@ -313,6 +313,7 @@ body[data-active="library"] nav a[data-tab="library"],
 body[data-active="library_inspector"] nav a[data-tab="library_inspector"],
 body[data-active="jobs"] nav a[data-tab="jobs"],
 body[data-active="devices"] nav a[data-tab="devices"],
+body[data-active="upnp"] nav a[data-tab="upnp"],
 body[data-active="data"] nav a[data-tab="data"],
 body[data-active="settings"] nav a[data-tab="settings"] {
   color: var(--accent);
@@ -322,6 +323,7 @@ body[data-active="library"] nav a[data-tab="library"]::after,
 body[data-active="library_inspector"] nav a[data-tab="library_inspector"]::after,
 body[data-active="jobs"] nav a[data-tab="jobs"]::after,
 body[data-active="devices"] nav a[data-tab="devices"]::after,
+body[data-active="upnp"] nav a[data-tab="upnp"]::after,
 body[data-active="data"] nav a[data-tab="data"]::after,
 body[data-active="settings"] nav a[data-tab="settings"]::after {
   content: "";

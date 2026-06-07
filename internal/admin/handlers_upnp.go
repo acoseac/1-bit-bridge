@@ -268,19 +268,25 @@ func (s *Server) apiUPnPServerAdd(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// apiUPnPServerRemove serves DELETE /api/upnp/servers/{udn}. Returns
-// 200 + restartRequired:true on success, 404 when no row matches OR
-// the feature isn't wired, 500 on save failure.
+// apiUPnPServerRemove serves DELETE /api/upnp/servers?udn=<UDN>.
+// Returns 200 + restartRequired:true on success, 404 when no row
+// matches OR the feature isn't wired, 500 on save failure.
+//
+// Identity rides on the query string, not a path segment — `udn` MAY
+// be a ManualDescriptionURL containing `/` for SSDP-unreachable
+// servers, which would never match a single-segment path wildcard
+// after Go's net/http multiplexer's `%2F`→`/` unescaping + path-
+// cleaning. Per Gemini HIGH on PR #357 round-2.
 func (s *Server) apiUPnPServerRemove(w http.ResponseWriter, r *http.Request) {
 	if s.deps.UPnPUpstream == nil {
 		writeError(w, http.StatusNotFound, "upnp_disabled",
 			"the upstream UPnP feature isn't enabled on this bridge")
 		return
 	}
-	udn := strings.TrimSpace(r.PathValue("udn"))
+	udn := strings.TrimSpace(r.URL.Query().Get("udn"))
 	if udn == "" {
 		writeError(w, http.StatusBadRequest, "validate",
-			"missing UDN path component")
+			"missing `udn` query parameter")
 		return
 	}
 	if err := s.deps.UPnPUpstream.RemoveServer(r.Context(), udn); err != nil {
@@ -298,21 +304,23 @@ func (s *Server) apiUPnPServerRemove(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// apiUPnPServerUpdate serves PATCH /api/upnp/servers/{udn}. Body is
-// UPnPServerUpdateRequest (pointer-discriminator partial update; UDN
-// is identity, NOT editable). Returns 200 + restartRequired:true on
-// success, 400 on validation, 404 when no row matches OR feature
-// isn't wired, 500 on save failure.
+// apiUPnPServerUpdate serves PATCH /api/upnp/servers?udn=<UDN>. Body
+// is UPnPServerUpdateRequest (pointer-discriminator partial update;
+// UDN is identity, NOT editable). Returns 200 + restartRequired:true
+// on success, 400 on validation, 404 when no row matches OR feature
+// isn't wired, 500 on save failure. Identity is on the query string —
+// see `apiUPnPServerRemove` for the rationale (ManualDescriptionURL
+// fallback breaks single-segment path wildcards).
 func (s *Server) apiUPnPServerUpdate(w http.ResponseWriter, r *http.Request) {
 	if s.deps.UPnPUpstream == nil {
 		writeError(w, http.StatusNotFound, "upnp_disabled",
 			"the upstream UPnP feature isn't enabled on this bridge")
 		return
 	}
-	udn := strings.TrimSpace(r.PathValue("udn"))
+	udn := strings.TrimSpace(r.URL.Query().Get("udn"))
 	if udn == "" {
 		writeError(w, http.StatusBadRequest, "validate",
-			"missing UDN path component")
+			"missing `udn` query parameter")
 		return
 	}
 	var req UPnPServerUpdateRequest

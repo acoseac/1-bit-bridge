@@ -755,8 +755,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/upnp/servers", s.apiUPnPServers)
 	mux.HandleFunc("GET /api/upnp/discovered", s.apiUPnPDiscovered)
 	mux.HandleFunc("POST /api/upnp/servers", s.apiUPnPServerAdd)
-	mux.HandleFunc("DELETE /api/upnp/servers/{udn}", s.apiUPnPServerRemove)
-	mux.HandleFunc("PATCH /api/upnp/servers/{udn}", s.apiUPnPServerUpdate)
+	// UDN identity rides on the QUERY STRING, NOT a path segment. The
+	// adapter accepts UDN OR ManualDescriptionURL as identity (the
+	// fallback for SSDP-unreachable servers), and a manual URL like
+	// `http://192.168.0.62:8200/rootDesc.xml` would never match a
+	// single-segment `{udn}` wildcard — Go's net/http multiplexer
+	// unescapes `%2F` to `/` and path-cleans before matching, so the
+	// encoded URL splits into multiple segments. Query strings bypass
+	// the cleaning entirely. Per Gemini HIGH on PR #357 round-2.
+	mux.HandleFunc("DELETE /api/upnp/servers", s.apiUPnPServerRemove)
+	mux.HandleFunc("PATCH /api/upnp/servers", s.apiUPnPServerUpdate)
 	mux.HandleFunc("POST /api/upnp/rescan", s.apiUPnPRescan)
 	mux.HandleFunc("POST /api/restart", s.apiRestart)
 	mux.HandleFunc("GET /api/pair-qr", s.apiPairQR)
