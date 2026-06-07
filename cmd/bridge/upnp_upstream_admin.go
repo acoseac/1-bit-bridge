@@ -168,6 +168,10 @@ func (a *upnpAdminAdapter) ForceRescan(_ context.Context, udn string) error {
 	if cfg == nil || !cfg.UPnPUpstream.Enabled {
 		return admin.ErrUPnPNoSuchServer
 	}
+	// Trim first, matching RemoveServer/UpdateServer — findConfiguredIdx
+	// compares against trimmed server fields, so an untrimmed identity
+	// with surrounding whitespace would spuriously 404 (Gemini on PR #358).
+	udn = strings.TrimSpace(udn)
 	if udn != "" {
 		// Match a configured server before we accept the request;
 		// otherwise return the typed 404 the handler maps to. Use the
