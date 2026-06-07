@@ -349,16 +349,14 @@ type manifestLibraryAdapter struct {
 	store        *manifest.Store
 	resolver     *bridgefs.Resolver
 	libraryRoots []string
-	// upnpRouted is the set of manifest paths backed by an upstream
-	// UPnP MediaServer (e.g. a Chord 2Go's microSD card). Populated
-	// from `upnp_track_routing` at every rebuild. The adapter's
-	// resolver short-circuit can't map these to a local file (they
-	// don't exist on disk) — pre-fix we silently `continue`d, which
-	// kept routed tracks out of `cachedByID` and the dlna file
-	// handler's `GetTrackInfo` lookup returned `(zero, false)` →
-	// 404. Now we include them with an empty `AbsolutePath`
-	// sentinel — the file handler's upnp fast-path takes over
-	// BEFORE `os.Open(servePath)` runs.
+	// Resolver-miss tracks backed by an upstream UPnP MediaServer (e.g.
+	// a Chord 2Go's microSD card) are kept in the cache with an empty
+	// `AbsolutePath` sentinel — the dlna file handler's upnp fast-path
+	// proxies the bytes BEFORE `os.Open(servePath)` runs. Membership
+	// resolved per rebuild from a single `AllUPnPRoutingPaths` bulk
+	// read (previously a per-track `GetUPnPRouting` point query that
+	// N+1'd under the 10 s rebuild context deadline — Gemini HIGH on
+	// PR #356).
 	log *slog.Logger
 
 	// `mu` guards the cached* slots for reads (Snapshot path) and the
@@ -443,29 +441,6 @@ func (a *manifestLibraryAdapter) GetTrackInfo(trackID string) (dlna.TrackInfo, b
 	return ti, ok
 }
 
-// isUPnPRouted reports whether the manifest path has a row in
-// `upnp_track_routing` — i.e. the track's bytes live on an upstream
-// MediaServer rather than the local filesystem. Called from the
-// rebuild loop when `a.resolver.Resolve` fails so we can keep
-// UPnP-routed tracks visible in the DLNA TrackInfo cache (with an
-// empty sentinel AbsolutePath; the file handler's upnp fast-path
-// fetches bytes via the proxy).
-//
-// Errors are NOT distinguished from "not routed" — a transient
-// store error falls through to the legacy `continue` behaviour
-// (track is silently dropped from the cache for this rebuild). The
-// next rebuild will retry. Logged at debug so a sustained outage
-// produces a trail.
-func (a *manifestLibraryAdapter) isUPnPRouted(ctx context.Context, path string) bool {
-	rt, err := a.store.GetUPnPRouting(ctx, path)
-	if err != nil {
-		a.log.Debug("upnp_track_routing lookup failed during DLNA rebuild",
-			slog.String("path", path), slog.String("err", err.Error()))
-		return false
-	}
-	return rt != nil
-}
-
 // refreshIfStale rebuilds the cache when the TTL has expired.
 func (a *manifestLibraryAdapter) refreshIfStale() {
 	a.mu.Lock()
@@ -541,6 +516,30 @@ func (a *manifestLibraryAdapter) rebuild() {
 		}
 	}
 
+	// One bulk read of the upnp_track_routing path set. Pre-fix this was
+	// a per-track `GetUPnPRouting` point query INSIDE the rebuild loop
+	// (one round-trip per filesystem-miss track) — an N+1 under the
+	// 10 s context deadline that reliably tripped the timeout on a 15k+
+	// routed library, after which every subsequent lookup returned the
+	// `ctx.DeadlineExceeded` error path and silently dropped the
+	// remainder of the routed tracks from the cache. Now: one SELECT,
+	// one map, O(1) per-track check downstream. Mirrors `AllVariants`
+	// above and the variant-by-source map pattern. Failure is
+	// non-fatal: we log, leave the set empty, and the rebuild proceeds
+	// as if no routing exists (every routed track is then skipped at
+	// the resolver-miss branch — same fallback the pre-fix
+	// `isUPnPRouted` returning false produced on store error). Per
+	// Gemini HIGH on PR #356.
+	routedPaths := map[string]struct{}{}
+	if paths, rErr := a.store.AllUPnPRoutingPaths(ctx); rErr != nil {
+		a.log.Warn("manifest UPnP routing list failed — routed tracks skipped this rebuild",
+			slog.String("err", rErr.Error()))
+	} else {
+		for _, p := range paths {
+			routedPaths[p] = struct{}{}
+		}
+	}
+
 	list := make([]dlna.TrackInfo, 0, len(tracks))
 	byID := make(map[string]dlna.TrackInfo, len(tracks))
 	byPath := make(map[string]dlna.TrackInfo, len(tracks))
@@ -549,15 +548,16 @@ func (a *manifestLibraryAdapter) rebuild() {
 		if resolveErr != nil {
 			// Filesystem resolver miss. If this track is backed by
 			// an upstream UPnP MediaServer (upnp_track_routing has a
-			// row), include it with an empty `AbsolutePath` so the
-			// dlna file handler's upnp fast-path can take over.
-			// `os.Open("")` would never be reached for these tracks
-			// because the fast-path returns before the
-			// filesystem-serve branch. Without this, casting a 2Go-
-			// routed track to any DLNA renderer silently 404'd (bug
-			// surfaced by the post-pair-A operator verification of
-			// PR #732 — see internal/upnpproxy package docblock).
-			if !a.isUPnPRouted(ctx, t.Path) {
+			// row, looked up via the pre-built routedPaths map),
+			// include it with an empty `AbsolutePath` so the dlna
+			// file handler's upnp fast-path can take over. `os.Open("")`
+			// would never be reached for these tracks because the
+			// fast-path returns before the filesystem-serve branch.
+			// Without this, casting a 2Go-routed track to any DLNA
+			// renderer silently 404'd (bug surfaced by the post-pair-A
+			// operator verification of PR #732 — see internal/upnpproxy
+			// package docblock).
+			if _, routed := routedPaths[t.Path]; !routed {
 				continue
 			}
 			absPath = ""

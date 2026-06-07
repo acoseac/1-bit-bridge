@@ -206,3 +206,47 @@ func (s *Store) CountUPnPRoutingTotal(ctx context.Context) (int, error) {
 	}
 	return n, nil
 }
+
+// AllUPnPRoutingPaths returns every `source_path` in `upnp_track_routing`
+// — i.e. the set of manifest tracks whose bytes live on an upstream UPnP
+// MediaServer rather than the local filesystem.
+//
+// Why a separate bulk-read API instead of calling `GetUPnPRouting` per
+// track: the DLNA library-adapter rebuild iterates every manifest track
+// (15k+ on the live test bridge with the 2Go ingested) and needs an
+// "is this path routed?" check per row when `bridgefs.Resolver.Resolve`
+// fails. A per-track point query inside that loop is an **N+1** under a
+// strict 10 s context deadline — at 15k routed tracks the rebuild
+// reliably tripped the timeout and silently dropped the remainder. This
+// bulk read is one SELECT + one in-memory scan; caller builds a
+// `map[string]struct{}` for O(1) lookup in the rebuild loop. Mirrors
+// the existing `AllVariants` bulk-read pattern. Per Gemini HIGH on
+// PR #356.
+//
+// Returns paths in `source_path` ASC for stable ordering — the caller
+// (the dlna rebuild loop) is set-keyed, so any order works, but the
+// ORDER BY makes the test fixture deterministic at trivial cost on
+// SQLite (the table's PRIMARY KEY).
+func (s *Store) AllUPnPRoutingPaths(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT source_path
+		  FROM upnp_track_routing
+		 ORDER BY source_path
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("manifest: AllUPnPRoutingPaths: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, fmt.Errorf("manifest: scan AllUPnPRoutingPaths: %w", err)
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("manifest: iterate AllUPnPRoutingPaths: %w", err)
+	}
+	return out, nil
+}
