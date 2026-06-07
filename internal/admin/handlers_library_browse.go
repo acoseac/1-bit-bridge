@@ -465,6 +465,13 @@ func (s *Server) apiLibraryBrowseProjection(w http.ResponseWriter, r *http.Reque
 	// falsely report headroom. Latent today (exabyte scale) but the
 	// integer form is strictly safer. (DeepSeek review.)
 	required := totalProjected + totalProjected/10
+	// Signed-int addition still wraps on overflow; totalProjected/10 is
+	// non-negative, so a sum < totalProjected can only mean it wrapped —
+	// clamp to MaxInt64 so "required <= free" can't falsely pass on a
+	// negative value (Gemini on PR #360).
+	if required < totalProjected {
+		required = 1<<63 - 1 // math.MaxInt64
+	}
 	// For kind=optimize, surface TargetBits=16 (always) but
 	// TargetRate=0 to signal "per-track family-preserved" — the UI
 	// renders "Target: 16-bit / 44.1k or 48k (family-preserved)"
