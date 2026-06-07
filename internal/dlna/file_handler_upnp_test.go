@@ -213,28 +213,46 @@ func Test_FileHandler_UPnPRoutedTrack_UpstreamOffline_Returns503(t *testing.T) {
 	}
 }
 
+// filesystemTrackLib creates a temp file + library carrying one track
+// pointing at it. Shared by the three fall-through-to-filesystem
+// tests below so the file + library boilerplate doesn't repeat
+// (SonarCloud duplicated-lines reduction on PR #356 round-5).
+func filesystemTrackLib(t *testing.T, trackID, body string) LibrarySource {
+	t.Helper()
+	path := createTempFile(t, ".flac", body)
+	return newTestLib(TrackInfo{
+		TrackID:       trackID,
+		RelativePath:  "Music/" + trackID + ".flac",
+		AbsolutePath:  path,
+		FileExtension: ".flac",
+		Size:          int64(len(body)),
+	})
+}
+
+// expectFilesystemServeOK invokes `h` with GET /dlna/file/{trackID}
+// and asserts 200 + body == wantBody. Shared assertion for the three
+// filesystem-fallthrough tests so the request/recorder/assert
+// pattern doesn't repeat.
+func expectFilesystemServeOK(t *testing.T, h http.HandlerFunc, trackID, wantBody string) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/dlna/file/"+trackID, nil)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Body.String(); got != wantBody {
+		t.Errorf("body = %q; want %q", got, wantBody)
+	}
+}
+
 // Test_FileHandler_NoRoutingLookup_FallsThroughToFilesystem confirms
 // the legacy filesystem path still works when the proxy isn't wired
 // (mirrors how a pre-feature bridge behaves; `FileHandler(lib, nil, nil)`
 // is the documented zero-config call from `internal/dlna/server.go`).
 func Test_FileHandler_NoRoutingLookup_FallsThroughToFilesystem(t *testing.T) {
-	path := createTempFile(t, ".flac", "fLaC local content")
-	lib := newTestLib(TrackInfo{
-		TrackID: "local", RelativePath: "Music/local.flac",
-		AbsolutePath: path, FileExtension: ".flac", Size: 18,
-	})
-	h := FileHandler(lib, nil, nil)
-
-	req := httptest.NewRequest(http.MethodGet, "/dlna/file/local", nil)
-	rec := httptest.NewRecorder()
-	h(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	if got := rec.Body.String(); got != "fLaC local content" {
-		t.Errorf("body = %q; want %q", got, "fLaC local content")
-	}
+	lib := filesystemTrackLib(t, "local", "fLaC local content")
+	expectFilesystemServeOK(t, FileHandler(lib, nil, nil), "local", "fLaC local content")
 }
 
 // Test_FileHandler_RoutingWithNilMatch_FallsThroughToFilesystem — the
@@ -242,26 +260,11 @@ func Test_FileHandler_NoRoutingLookup_FallsThroughToFilesystem(t *testing.T) {
 // path (it's a filesystem track, not an upstream-routed one). The
 // handler must serve from the local filesystem AbsolutePath.
 func Test_FileHandler_RoutingMissForFilesystemTrack_StillServesLocally(t *testing.T) {
-	path := createTempFile(t, ".flac", "local-fs")
-	lib := newTestLib(TrackInfo{
-		TrackID: "fs", RelativePath: "Music/fs.flac",
-		AbsolutePath: path, FileExtension: ".flac", Size: 8,
-	})
+	lib := filesystemTrackLib(t, "fs", "local-fs")
 	// Routing lookup is wired but the path isn't mapped → (nil, nil).
 	routing := &stubRoutingLookup{m: map[string]*manifest.UPnPRouting{}}
 	proxy := upnpproxy.New(&stubHostResolver{host: "127.0.0.1:9"}, nil)
-	h := FileHandler(lib, routing, proxy)
-
-	req := httptest.NewRequest(http.MethodGet, "/dlna/file/fs", nil)
-	rec := httptest.NewRecorder()
-	h(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	if got := rec.Body.String(); got != "local-fs" {
-		t.Errorf("body = %q; want %q", got, "local-fs")
-	}
+	expectFilesystemServeOK(t, FileHandler(lib, routing, proxy), "fs", "local-fs")
 }
 
 // Test_FileHandler_RoutingLookupError_OnRoutedTrack_Returns500 — the
@@ -313,30 +316,10 @@ func Test_FileHandler_RoutingLookupError_OnRoutedTrack_Returns500(t *testing.T) 
 // ""` to differentiate, the round-4 fix would regress every
 // filesystem track on a transient routing DB error.
 func Test_FileHandler_RoutingLookupError_OnFilesystemTrack_FallsThrough(t *testing.T) {
-	path := createTempFile(t, ".flac", "local-fs-bytes")
-	const relPath = "Music/local.flac"
-	lib := newTestLib(TrackInfo{
-		TrackID:       "fs-err",
-		RelativePath:  relPath,
-		AbsolutePath:  path, // ← filesystem track: non-empty absPath
-		FileExtension: ".flac",
-		Size:          int64(len("local-fs-bytes")),
-	})
+	lib := filesystemTrackLib(t, "fs-err", "local-fs-bytes")
 	routing := &stubRoutingLookup{err: errors.New("simulated transient DB error")}
 	proxy := upnpproxy.New(&stubHostResolver{host: "127.0.0.1:1"}, nil)
-	h := FileHandler(lib, routing, proxy)
-
-	req := httptest.NewRequest(http.MethodGet, "/dlna/file/fs-err", nil)
-	rec := httptest.NewRecorder()
-	h(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d; want 200 — filesystem track + transient DB error must fall through to os.Open(realPath) and serve normally; body=%s",
-			rec.Code, rec.Body.String())
-	}
-	if got := rec.Body.String(); got != "local-fs-bytes" {
-		t.Errorf("body = %q; want %q", got, "local-fs-bytes")
-	}
+	expectFilesystemServeOK(t, FileHandler(lib, routing, proxy), "fs-err", "local-fs-bytes")
 }
 
 // Test_FileHandler_VariantTrailingSegment_BypassesProxy — a request

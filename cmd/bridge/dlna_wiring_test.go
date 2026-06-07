@@ -21,64 +21,34 @@ import (
 // Pre-PR-#356 (filesystem-only deploys) is unchanged because the
 // fallback is a no-op when absPath is non-empty.
 func Test_manifestTrackToDLNATrackInfo_FileExtensionFallback(t *testing.T) {
+	// Four orthogonal cases — covering filesystem (absPath wins), the
+	// routed-sentinel fallback to t.Path, case-folding on uppercase
+	// extensions (one case suffices; the helper applies ToLower to
+	// whichever source it picked, so testing both absPath and t.Path
+	// flavors would be redundant), and the defensive both-empty edge
+	// case. Earlier drafts tested the routed fallback separately for
+	// .flac / .dsf / .dff / .mp3; collapsed because `filepath.Ext`
+	// doesn't care about the extension's letters — the fallback
+	// either works for all extensions or none. Per SonarCloud
+	// duplicated-lines reduction on PR #356 round-5.
 	cases := []struct {
-		name        string
-		trackPath   string
-		absPath     string
-		libraryRoot string
-		wantExt     string
+		name      string
+		trackPath string
+		absPath   string
+		wantExt   string
 	}{
-		{
-			name:      "filesystem-backed track: derives from absPath (unchanged)",
-			trackPath: "Artist/Album/01 - Song.flac",
-			absPath:   "/srv/library/Artist/Album/01 - Song.flac",
-			wantExt:   ".flac",
-		},
-		{
-			name:      "UPnP-routed track: absPath empty, falls back to t.Path",
-			trackPath: "2go/Music/AC-DC/[M] Back In Black [35986104] [1980]/01 - Hells Bells.flac",
-			absPath:   "",
-			wantExt:   ".flac",
-		},
-		{
-			name:      "UPnP-routed DSF track: falls back, preserves dsf extension",
-			trackPath: "2go/Music/DSD64-Album/01 - Track.dsf",
-			absPath:   "",
-			wantExt:   ".dsf",
-		},
-		{
-			name:      "UPnP-routed DFF track: falls back",
-			trackPath: "2go/Music/DSD-Album/01 - Track.dff",
-			absPath:   "",
-			wantExt:   ".dff",
-		},
-		{
-			name:      "UPnP-routed MP3 track: case-folded lowercase output",
-			trackPath: "2go/Music/Old/01 - Track.MP3",
-			absPath:   "",
-			wantExt:   ".mp3",
-		},
-		{
-			name:      "Filesystem-backed track with uppercase ext: case-folded",
-			trackPath: "Artist/Album/01.FLAC",
-			absPath:   "/srv/library/Artist/Album/01.FLAC",
-			wantExt:   ".flac",
-		},
-		{
-			name:      "Both empty: returns empty extension (defensive — never reached in production)",
-			trackPath: "no-extension",
-			absPath:   "",
-			wantExt:   "",
-		},
+		{"filesystem-backed: derives from absPath", "Artist/Album/01.flac", "/srv/library/01.flac", ".flac"},
+		{"routed sentinel: falls back to t.Path", "2go/Music/AC-DC/01 - Hells Bells.flac", "", ".flac"},
+		{"case-fold: uppercase extension → lowercase", "2go/Music/Old/01.MP3", "", ".mp3"},
+		{"defensive: no extension at all → empty", "no-extension", "", ""},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			tr := manifest.Track{Path: tc.trackPath, Title: "T", Artist: "A", Album: "Alb"}
-			got := manifestTrackToDLNATrackInfo(tr, tc.absPath, tc.libraryRoot)
+			got := manifestTrackToDLNATrackInfo(tr, tc.absPath, "")
 			if got.FileExtension != tc.wantExt {
-				t.Errorf("FileExtension = %q; want %q (trackPath=%q, absPath=%q)",
-					got.FileExtension, tc.wantExt, tc.trackPath, tc.absPath)
+				t.Errorf("FileExtension = %q; want %q", got.FileExtension, tc.wantExt)
 			}
 			// AbsolutePath plumbed through unchanged regardless of the
 			// extension-fallback path — the fallback ONLY affects
