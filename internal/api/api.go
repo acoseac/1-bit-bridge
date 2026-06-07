@@ -45,6 +45,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/pairing"
+	"github.com/acoseac/1-bit-bridge/internal/upnpproxy"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
 
@@ -122,6 +123,7 @@ type Server struct {
 	variantStore           VariantStore                 // nil unless WithUpscale(true, vs) called
 	upnpRouting            UPnPRoutingLookup            // nil unless WithUPnPRouting wired (UPnP upstream feature)
 	upnpHostResolver       UPnPServerHostResolver       // nil unless WithUPnPHostResolver wired (UPnP upstream feature)
+	upnpProxy              *upnpproxy.Proxy             // cached after both halves are wired; nil otherwise. See refreshUPnPProxy.
 	upnpPublicProvider     UPnPUpstreamPublicProvider   // nil unless WithUPnPUpstreamPublicProvider wired (UPnP upstream advertisement on /v1/health)
 	variantDeleter         VariantDeleter               // nil unless WithVariantDeleter wired (variant-lifecycle delete)
 	inflightDropper        InflightDropper              // nil unless WithInflightDropper wired (transcode pool dedup)

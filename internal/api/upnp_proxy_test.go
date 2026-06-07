@@ -12,61 +12,11 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
-// --- pure helper tests (no upstream) ---
-
-func TestBuildProxyURL(t *testing.T) {
-	cases := []struct {
-		name, host, res, want string
-		wantErr               bool
-	}{
-		{"full URL stored; host swaps in", "192.168.0.62:8200",
-			"http://oldhost:8200/MediaItems/5.flac",
-			"http://192.168.0.62:8200/MediaItems/5.flac", false},
-		{"path-only stored", "192.168.0.62:8200",
-			"/MediaItems/5.flac",
-			"http://192.168.0.62:8200/MediaItems/5.flac", false},
-		{"bare relative (no leading slash) → treated as absolute", "192.168.0.62:8200",
-			"MediaItems/5.flac",
-			"http://192.168.0.62:8200/MediaItems/5.flac", false},
-		{"empty hostport", "", "/x.flac", "", true},
-		{"empty res", "h:8200", "", "", true},
-		{"query preserved from full URL", "192.168.0.62:8200",
-			"http://oldhost:8200/get?id=5&fmt=flac",
-			"http://192.168.0.62:8200/get?id=5&fmt=flac", false},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			got, err := buildProxyURL(c.host, c.res)
-			if (err != nil) != c.wantErr {
-				t.Fatalf("err = %v; wantErr=%v", err, c.wantErr)
-			}
-			if got != c.want {
-				t.Errorf("got %q; want %q", got, c.want)
-			}
-		})
-	}
-}
-
-func TestIsHopByHopHeader(t *testing.T) {
-	hopByHop := []string{
-		"Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization",
-		"TE", "Trailer", "Transfer-Encoding", "Upgrade",
-	}
-	for _, h := range hopByHop {
-		if !isHopByHopHeader(h) {
-			t.Errorf("%q should be hop-by-hop", h)
-		}
-	}
-	endToEnd := []string{
-		"Content-Type", "Content-Length", "Content-Range", "Accept-Ranges",
-		"Range", "If-Range", "X-Custom",
-	}
-	for _, h := range endToEnd {
-		if isHopByHopHeader(h) {
-			t.Errorf("%q should NOT be hop-by-hop", h)
-		}
-	}
-}
+// Pure helper tests (TestBuildProxyURL / TestIsHopByHopHeader) moved
+// to `internal/upnpproxy` alongside the extracted helpers (PR-pending).
+// The end-to-end integration tests below exercise the api Server's
+// `proxyUPnP` shim — which now delegates to `*upnpproxy.Proxy.Serve`
+// and translates `*PreStreamError` into the api's JSON envelope.
 
 // --- end-to-end proxy tests using a stub upstream + the Server's hook ---
 
@@ -122,6 +72,10 @@ func serverWithProxy(t *testing.T, routing *stubRoutingLookup, host *stubHostRes
 		upnpRouting:      routing,
 		upnpHostResolver: host,
 	}
+	// The shim's proxy cache is normally populated by `WithUPnPHostResolver`
+	// in production; tests construct the Server directly so we wire the
+	// cache by hand here. Same effect, one fewer t.Helper() round-trip.
+	s.refreshUPnPProxy()
 	return s
 }
 

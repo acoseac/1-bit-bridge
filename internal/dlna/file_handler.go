@@ -6,6 +6,8 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+
+	"github.com/acoseac/1-bit-bridge/internal/upnpproxy"
 )
 
 // FilePathPrefix is the URL prefix the file handler is mounted under.
@@ -18,21 +20,27 @@ const FilePathPrefix = "/dlna/file/"
 //
 //  1. Extract trackID from URL path (after /dlna/file/ prefix).
 //  2. Lookup via `LibrarySource.GetTrackInfo(trackID)`. Unknown ID → 404.
-//  3. Open the resolved `AbsolutePath`. Open failure → 500.
-//  4. Set DLNA-required response headers:
-//     - Content-Type via PreferredMIMEFor(UA, ext) — per-vendor
-//     - transferMode.dlna.org: Streaming
-//     - contentFeatures.dlna.org: full DLNA.ORG_OP/CI/FLAGS string
-//     - Accept-Ranges: bytes (advertises Range support)
-//  5. Wrap the ResponseWriter in `AdaptiveResponseWriter` so the
-//     chunk size adapts to (RTT/jitter/loss) — today the chunk-size
-//     selector uses static defaults; PR 1 task #11 will wire live
-//     network telemetry from the listener once that's available.
-//  6. Defer `aw.Flush()` to drain trailing bytes after ServeContent.
-//  7. Call `http.ServeContent` which owns Range / 206 Partial Content
-//     handling — the wrapper composes WITH ServeContent rather than
-//     replacing it (CLAUDE.md "AdaptiveResponseWriter — wraps
-//     http.ServeContent without losing Range" invariant).
+//  3. **UPnP-routed fast-path**: if `routing` is wired and the
+//     track's manifest path has a routing row, proxy the upstream's
+//     bytes bit-exact via `proxy.Serve`. The DLNA renderer never
+//     learns the bytes live elsewhere — to it this is just a normal
+//     bridge file fetch.
+//  4. Otherwise: open the resolved `AbsolutePath`. Open failure → 500.
+//  5. Set DLNA-required response headers (Content-Type via
+//     PreferredMIMEFor, transferMode.dlna.org: Streaming,
+//     contentFeatures.dlna.org, Accept-Ranges: bytes).
+//  6. Wrap the ResponseWriter in `AdaptiveResponseWriter` (chunk
+//     size adapts to RTT/jitter/loss — placeholder until task #11
+//     wires live network telemetry from the listener).
+//  7. `http.ServeContent` owns Range / 206 Partial Content handling.
+//
+// `routing` + `proxy` are OPTIONAL. Pass `nil` for both to disable
+// the UPnP-routed fast-path entirely (legacy behaviour — every
+// request goes through the filesystem resolver). When `routing` is
+// wired but `proxy` is nil (shouldn't reach production — the
+// wiring layer ensures pairing), the fast-path silently falls
+// through to the filesystem so the worst case is the pre-fix 404
+// rather than a panic.
 //
 // **Auth bypass is by design.** The DLNA listener binds LAN-only
 // (per `IsLANEligibleInterface` in PR 1 task #11); DLNA renderers
@@ -41,8 +49,9 @@ const FilePathPrefix = "/dlna/file/"
 //
 // **HEAD requests are supported** via http.ServeContent's native
 // behavior — useful for libavformat / mConnect probes that test
-// reachability before issuing the full GET.
-func FileHandler(lib LibrarySource) http.HandlerFunc {
+// reachability before issuing the full GET. The UPnP proxy's
+// `Serve` also honours HEAD by skipping the body copy.
+func FileHandler(lib LibrarySource, routing upnpproxy.RoutingLookup, proxy *upnpproxy.Proxy) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Accept GET + HEAD; reject everything else.
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -60,6 +69,37 @@ func FileHandler(lib LibrarySource) http.HandlerFunc {
 		if !ok {
 			http.NotFound(w, r)
 			return
+		}
+
+		// UPnP-routed fast-path: track lives on an upstream
+		// MediaServer (e.g. a Chord 2Go's microSD card), not the local
+		// filesystem. Proxy bytes bit-exact via the upnpproxy package
+		// — same logic the `/v1/download` path uses (PR-pending,
+		// post-pair-A operator verification of PR #732).
+		//
+		// Variant query (`/variant-{id}{ext}` trailing segment) is
+		// NEVER routed: variants are bridge-minted sidecars, an
+		// upstream track has no variants today. So we only consult
+		// the routing table when the resolved trailing segment is
+		// the SOURCE path, not a variant.
+		if routing != nil && proxy != nil && info.RelativePath != "" && extractVariantID(r.URL.Path) == "" {
+			rt, lookupErr := routing.GetUPnPRouting(r.Context(), info.RelativePath)
+			if lookupErr == nil && rt != nil {
+				perr := proxy.Serve(r.Context(), w, r.Method, r.Header, rt)
+				if perr != nil {
+					// DLNA renderers expect plain-text HTTP errors,
+					// not structured JSON (cf. api's writeError
+					// envelope). `http.Error` emits text/plain.
+					http.Error(w, perr.Message, perr.Status)
+				}
+				return
+			}
+			// (nil, nil) → not routed → fall through to filesystem.
+			// (nil, err) → log + fall through (worst case 404; this
+			// is the pre-fix legacy behaviour for routed tracks AND
+			// the correct behaviour for filesystem tracks — same
+			// shape as the api `serveFile`'s loud-log-then-fall-
+			// through approach).
 		}
 
 		// Resolve which file to serve: the source, or an offline variant

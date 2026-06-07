@@ -249,6 +249,27 @@ func (r *serverCacheHostResolver) LiveHost(udn string) (string, bool) {
 	return hostport, true
 }
 
+// HostResolver returns the live-host lookup wired into this
+// lifecycle's SSDP discovery cache — or nil when the feature is
+// disabled (no servers configured / no LAN-eligible interface bound /
+// cmd/bridge constructed a no-op lifecycle). Consumers that want to
+// proxy upstream bytes (both the api `/v1/download` path AND the
+// dlna `/dlna/file/{trackID}` path) call this to construct a
+// `*upnpproxy.Proxy`. Sharing the resolver across both surfaces means
+// they observe the SAME SSDP cache; constructing distinct proxies
+// (per-surface HTTP clients) is acceptable at the operator scale.
+//
+// Idempotent — safe to call from cmd/bridge wiring during startup
+// even before discovery has its first M-SEARCH response (the
+// resolver's `LiveHost` returns ("", false) until the cache fills,
+// which is the documented "warm-up window" path).
+func (l *upnpUpstreamLifecycle) HostResolver() *serverCacheHostResolver {
+	if l == nil || l.cache == nil {
+		return nil
+	}
+	return &serverCacheHostResolver{cache: l.cache}
+}
+
 // hostPortFromURL extracts the host:port from a control URL. The host
 // field of net/url.URL carries the port when one is present (the
 // upstream's libmicrohttpd typically advertises :8200), which is
