@@ -160,16 +160,7 @@ func (p *Proxy) Serve(ctx context.Context, w http.ResponseWriter, method string,
 			Cause:   err,
 		}
 	}
-	// Forward the Range / If-Range / If-Modified-Since headers
-	// verbatim — these drive 206 / 304 semantics on the upstream side.
-	for _, h := range []string{"Range", "If-Range", "If-Modified-Since"} {
-		if v := header.Get(h); v != "" {
-			req.Header.Set(h, v)
-		}
-	}
-	// User-Agent tags the bridge so a remote operator inspecting the
-	// upstream's access log can tell the request came from us.
-	req.Header.Set("User-Agent", "1-bit-bridge/upnp-proxy")
+	forwardRequestHeaders(req, header)
 
 	resp, err := p.client.Do(req)
 	if err != nil {
@@ -184,7 +175,42 @@ func (p *Proxy) Serve(ctx context.Context, w http.ResponseWriter, method string,
 
 	// From here on every error must be communicated via the response
 	// stream itself — we've already committed to writing a response.
-	// Copy headers, then status, then body via io.Copy.
+	relayResponseHeaders(w, resp)
+	w.WriteHeader(resp.StatusCode)
+	if method == http.MethodHead {
+		return nil
+	}
+	p.copyResponseBody(w, resp, rt)
+	return nil
+}
+
+// forwardRequestHeaders copies the Range / If-Range / If-Modified-Since
+// headers from the inbound request to the upstream proxy request. These
+// drive 206 / 304 semantics on the upstream side — the bit-exact
+// contract requires they flow through unchanged. Also tags the outbound
+// User-Agent so a remote operator inspecting the upstream's access log
+// can tell the request came from the bridge.
+//
+// Extracted from `Proxy.Serve` to drop its cognitive complexity (Sonar
+// S3776 on PR #356). Behavior unchanged.
+func forwardRequestHeaders(req *http.Request, src http.Header) {
+	for _, h := range []string{"Range", "If-Range", "If-Modified-Since"} {
+		if v := src.Get(h); v != "" {
+			req.Header.Set(h, v)
+		}
+	}
+	req.Header.Set("User-Agent", "1-bit-bridge/upnp-proxy")
+}
+
+// relayResponseHeaders copies the upstream's response headers onto the
+// caller's ResponseWriter, dropping hop-by-hop entries (RFC 7230 §6.1).
+// The bit-exact contract requires Content-Type / Content-Length /
+// Content-Range / Accept-Ranges flow back unchanged — this loop is the
+// chokepoint that enforces it.
+//
+// Extracted from `Proxy.Serve` to drop its cognitive complexity (Sonar
+// S3776 on PR #356). Behavior unchanged.
+func relayResponseHeaders(w http.ResponseWriter, resp *http.Response) {
 	for k, vs := range resp.Header {
 		if isHopByHopHeader(k) {
 			continue
@@ -193,20 +219,24 @@ func (p *Proxy) Serve(ctx context.Context, w http.ResponseWriter, method string,
 			w.Header().Add(k, v)
 		}
 	}
-	w.WriteHeader(resp.StatusCode)
-	if method == http.MethodHead {
-		return nil
-	}
+}
+
+// copyResponseBody streams the upstream's body to the caller via
+// io.Copy + logs (but does not propagate) mid-stream copy errors —
+// they're typically client-side disconnects (iOS scrubber drag, app
+// close) and `Serve` has no way to surface a clean error after
+// WriteHeader has gone out.
+//
+// Extracted from `Proxy.Serve` so the error-handling depth doesn't
+// inflate the parent function's cognitive complexity (Sonar S3776 on
+// PR #356). Behavior unchanged.
+func (p *Proxy) copyResponseBody(w http.ResponseWriter, resp *http.Response, rt *manifest.UPnPRouting) {
 	if _, copyErr := io.Copy(w, resp.Body); copyErr != nil {
-		// Mid-stream copy errors are typically client-side disconnects
-		// (iOS scrubber drag, app close). Log at debug; nothing
-		// user-actionable.
 		if !errors.Is(copyErr, context.Canceled) {
 			p.log.Debug("upnp proxy: mid-stream copy error",
 				"err", copyErr, "udn", rt.ServerUDN, "objectID", rt.ObjectID)
 		}
 	}
-	return nil
 }
 
 // defaultClient returns the streaming-tuned HTTP client used for

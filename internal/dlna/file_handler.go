@@ -71,108 +71,159 @@ func FileHandler(lib LibrarySource, routing upnpproxy.RoutingLookup, proxy *upnp
 			return
 		}
 
-		// UPnP-routed fast-path: track lives on an upstream
-		// MediaServer (e.g. a Chord 2Go's microSD card), not the local
-		// filesystem. Proxy bytes bit-exact via the upnpproxy package
-		// — same logic the `/v1/download` path uses (PR-pending,
-		// post-pair-A operator verification of PR #732).
-		//
-		// Variant query (`/variant-{id}{ext}` trailing segment) is
-		// NEVER routed: variants are bridge-minted sidecars, an
-		// upstream track has no variants today. So we only consult
-		// the routing table when the resolved trailing segment is
-		// the SOURCE path, not a variant.
-		if routing != nil && proxy != nil && info.RelativePath != "" && extractVariantID(r.URL.Path) == "" {
-			rt, lookupErr := routing.GetUPnPRouting(r.Context(), info.RelativePath)
-			if lookupErr == nil && rt != nil {
-				perr := proxy.Serve(r.Context(), w, r.Method, r.Header, rt)
-				if perr != nil {
-					// DLNA renderers expect plain-text HTTP errors,
-					// not structured JSON (cf. api's writeError
-					// envelope). `http.Error` emits text/plain.
-					http.Error(w, perr.Message, perr.Status)
-				}
-				return
-			}
-			// (nil, nil) → not routed → fall through to filesystem.
-			// (nil, err) → log + fall through (worst case 404; this
-			// is the pre-fix legacy behaviour for routed tracks AND
-			// the correct behaviour for filesystem tracks — same
-			// shape as the api `serveFile`'s loud-log-then-fall-
-			// through approach).
-		}
-
-		// Resolve which file to serve: the source, or an offline variant
-		// addressed via the trailing `/variant-{id}{ext}` path segment.
-		servePath, ext, isVariant, known := resolveServeTarget(info, r.URL.Path)
-		if !known {
-			// A variant segment was present but the ID isn't one this
-			// track carries — to the renderer this is "no such object".
-			http.NotFound(w, r)
+		// Try the UPnP-routed fast-path. Returns true when the track
+		// was served (or a real error written) via the proxy; false
+		// when we should fall through to the legacy filesystem path.
+		if tryServeViaUPnPProxy(w, r, info, routing, proxy) {
 			return
 		}
 
-		f, err := os.Open(servePath)
-		if err != nil {
-			if isVariant {
-				// The DB row pointed at a sidecar that's no longer on
-				// disk (GC'd, manually deleted). Mirror the api
-				// /v1/download?variant= contract: 410 Gone, distinct from
-				// a 404 "unknown object".
-				http.Error(w, "variant sidecar missing", http.StatusGone)
-				return
-			}
-			// Source file vanished between scan and serve, or permissions
-			// changed. Return 404 — indistinguishable to the renderer from
-			// "track doesn't exist".
-			http.NotFound(w, r)
-			return
-		}
-		defer f.Close()
-
-		stat, err := f.Stat()
-		if err != nil {
-			http.Error(w, "stat failed", http.StatusInternalServerError)
-			return
-		}
-
-		ua := r.Header.Get("User-Agent")
-		if ext == "" {
-			// Defensive — derive from path if the adapter didn't pre-fill.
-			ext = strings.ToLower(filepath.Ext(servePath))
-		}
-
-		w.Header().Set("Content-Type", PreferredMIMEFor(ua, ext))
-		w.Header().Set("transferMode.dlna.org", "Streaming")
-		w.Header().Set("contentFeatures.dlna.org", ContentFeaturesHeaderValue(ua, ext))
-		w.Header().Set("Accept-Ranges", "bytes")
-
-		// Phase 0 diagnostic tracing (OFF unless BRIDGE_DLNA_TRACE is set).
-		// The trace wrapper sits BELOW the adaptive writer so it times the
-		// real flush-to-socket calls (the ones that block under renderer
-		// back-pressure) and watches the request Context for peer-close —
-		// distinguishing a STALLED UPnP pause from a closed socket. Zero-cost
-		// passthrough when disabled. See file_trace.go.
-		dst, finishTrace := newFileTrace(w, r, trackID)
-		defer finishTrace()
-
-		// Wrap in AdaptiveResponseWriter. Default chunk size today;
-		// task #11 wires per-connection RTT/jitter telemetry into
-		// `ChunkSizeFor` so the wrapper adapts to observed network
-		// conditions. The wrap is structural even at the default
-		// chunk size — defer-Flush drains trailing bytes that
-		// `http.ServeContent`'s 32KB internal loop would otherwise
-		// leave in our buffer.
-		chunkSize := ChunkSizeFor(0, 0, 0) // (rtt, jitter, loss) — placeholder until task #11
-		aw := NewAdaptiveResponseWriter(dst, chunkSize)
-		defer aw.Flush()
-
-		// http.ServeContent handles Range + 206 + If-Modified-Since
-		// + Content-Length. The wrapper passes status / headers through
-		// to the underlying ResponseWriter; ServeContent's writes go
-		// through the wrapper's buffer.
-		http.ServeContent(aw, r, filepath.Base(servePath), stat.ModTime(), f)
+		serveFromFilesystem(w, r, info, trackID)
 	}
+}
+
+// tryServeViaUPnPProxy is the UPnP-routed fast-path. When the track
+// lives on an upstream MediaServer (e.g. a Chord 2Go's microSD card)
+// — same logic the `/v1/download` path uses — proxy bytes bit-exact
+// via the upnpproxy package and report `true` so the caller short-
+// circuits without touching the filesystem.
+//
+// Variant queries (`/variant-{id}{ext}` trailing segment) are NEVER
+// routed: variants are bridge-minted sidecars, an upstream track has
+// no variants today. So we only consult the routing table when the
+// resolved trailing segment is the SOURCE path, not a variant.
+//
+// **Return semantics**:
+//   - `true` + no further action by caller: proxy handled the request
+//     (success, mid-stream failure already on wire, OR a
+//     PreStreamError surfaced as a plain-text http.Error).
+//   - `false`: caller falls through to the filesystem path. Reasons:
+//   - routing or proxy not wired (legacy deploy path);
+//   - manifest path empty (defensive);
+//   - variant segment present (sidecar, never routed);
+//   - routing lookup returned (nil, nil) — not a routed track;
+//   - routing lookup returned (nil, err) — same loud-log-then-fall-
+//     through as the api `serveFile` path; worst case the caller
+//     then 404s, which IS the pre-fix legacy behaviour.
+//
+// Extracted from `FileHandler` to drop its cognitive complexity
+// (SonarCloud S3776 on PR #356; this branch carried the deepest
+// nesting depth in the function).
+func tryServeViaUPnPProxy(
+	w http.ResponseWriter,
+	r *http.Request,
+	info TrackInfo,
+	routing upnpproxy.RoutingLookup,
+	proxy *upnpproxy.Proxy,
+) bool {
+	if routing == nil || proxy == nil {
+		return false
+	}
+	if info.RelativePath == "" {
+		return false
+	}
+	if extractVariantID(r.URL.Path) != "" {
+		return false
+	}
+	rt, lookupErr := routing.GetUPnPRouting(r.Context(), info.RelativePath)
+	if lookupErr != nil || rt == nil {
+		// (nil, nil) → not routed → fall through to filesystem.
+		// (nil, err) → fall through (worst case 404; this is the
+		// pre-fix legacy behaviour for routed tracks AND the correct
+		// behaviour for filesystem tracks — same shape as the api
+		// `serveFile`'s loud-log-then-fall-through approach).
+		return false
+	}
+	perr := proxy.Serve(r.Context(), w, r.Method, r.Header, rt)
+	if perr != nil {
+		// DLNA renderers expect plain-text HTTP errors, not
+		// structured JSON (cf. api's writeError envelope).
+		// `http.Error` emits text/plain.
+		http.Error(w, perr.Message, perr.Status)
+	}
+	return true
+}
+
+// serveFromFilesystem handles the legacy filesystem-serve path: open
+// the resolved source / variant path on disk, set the DLNA response
+// headers, and hand off to `http.ServeContent` for Range / 206 /
+// If-Modified-Since logic.
+//
+// Extracted from `FileHandler` to keep its cognitive complexity below
+// SonarCloud's S3776 threshold (PR #356). Behavior unchanged — every
+// branch lifted verbatim from the inline shape, just behind a
+// function boundary.
+func serveFromFilesystem(w http.ResponseWriter, r *http.Request, info TrackInfo, trackID string) {
+	// Resolve which file to serve: the source, or an offline variant
+	// addressed via the trailing `/variant-{id}{ext}` path segment.
+	servePath, ext, isVariant, known := resolveServeTarget(info, r.URL.Path)
+	if !known {
+		// A variant segment was present but the ID isn't one this
+		// track carries — to the renderer this is "no such object".
+		http.NotFound(w, r)
+		return
+	}
+
+	f, err := os.Open(servePath)
+	if err != nil {
+		if isVariant {
+			// The DB row pointed at a sidecar that's no longer on
+			// disk (GC'd, manually deleted). Mirror the api
+			// /v1/download?variant= contract: 410 Gone, distinct from
+			// a 404 "unknown object".
+			http.Error(w, "variant sidecar missing", http.StatusGone)
+			return
+		}
+		// Source file vanished between scan and serve, or permissions
+		// changed. Return 404 — indistinguishable to the renderer from
+		// "track doesn't exist".
+		http.NotFound(w, r)
+		return
+	}
+	defer f.Close()
+
+	stat, err := f.Stat()
+	if err != nil {
+		http.Error(w, "stat failed", http.StatusInternalServerError)
+		return
+	}
+
+	ua := r.Header.Get("User-Agent")
+	if ext == "" {
+		// Defensive — derive from path if the adapter didn't pre-fill.
+		ext = strings.ToLower(filepath.Ext(servePath))
+	}
+
+	w.Header().Set("Content-Type", PreferredMIMEFor(ua, ext))
+	w.Header().Set("transferMode.dlna.org", "Streaming")
+	w.Header().Set("contentFeatures.dlna.org", ContentFeaturesHeaderValue(ua, ext))
+	w.Header().Set("Accept-Ranges", "bytes")
+
+	// Phase 0 diagnostic tracing (OFF unless BRIDGE_DLNA_TRACE is set).
+	// The trace wrapper sits BELOW the adaptive writer so it times the
+	// real flush-to-socket calls (the ones that block under renderer
+	// back-pressure) and watches the request Context for peer-close —
+	// distinguishing a STALLED UPnP pause from a closed socket. Zero-cost
+	// passthrough when disabled. See file_trace.go.
+	dst, finishTrace := newFileTrace(w, r, trackID)
+	defer finishTrace()
+
+	// Wrap in AdaptiveResponseWriter. Default chunk size today;
+	// task #11 wires per-connection RTT/jitter telemetry into
+	// `ChunkSizeFor` so the wrapper adapts to observed network
+	// conditions. The wrap is structural even at the default
+	// chunk size — defer-Flush drains trailing bytes that
+	// `http.ServeContent`'s 32KB internal loop would otherwise
+	// leave in our buffer.
+	chunkSize := ChunkSizeFor(0, 0, 0) // (rtt, jitter, loss) — placeholder until task #11
+	aw := NewAdaptiveResponseWriter(dst, chunkSize)
+	defer aw.Flush()
+
+	// http.ServeContent handles Range + 206 + If-Modified-Since
+	// + Content-Length. The wrapper passes status / headers through
+	// to the underlying ResponseWriter; ServeContent's writes go
+	// through the wrapper's buffer.
+	http.ServeContent(aw, r, filepath.Base(servePath), stat.ModTime(), f)
 }
 
 // resolveServeTarget decides which file a /dlna/file/ request addresses:
