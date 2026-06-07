@@ -25,12 +25,22 @@ var tmplFuncs = template.FuncMap{
 // pageData is the common envelope every template receives. Page-specific
 // data lives under Data so the layout.html can pull nav-relevant bits
 // (active tab, library name) from the outer struct.
+//
+// **`IsPublic`** flags the bridge's deployment posture so templates can
+// hide nav entries / chrome that don't apply to a public deployment.
+// Today: layout.html uses it to suppress the UPnP nav link (the
+// upnpUpstream feature is `Config.Validate`-rejected in public mode
+// because SSDP multicast is LAN-only AND the upstream's RFC1918 byte
+// URLs are unreachable from a public VPS). upnp.html uses it to render
+// a "Not available on public deployments" panel for the case where
+// the operator bookmarked the URL directly.
 type pageData struct {
 	ActiveTab       string
 	LibraryName     string
 	Fingerprint     string
 	ServerVersion   string
 	ProtocolVersion int
+	IsPublic        bool
 	Data            any
 }
 
@@ -49,6 +59,7 @@ func (s *Server) renderPage(w http.ResponseWriter, active string, data any) {
 		Fingerprint:     s.deps.Fingerprint,
 		ServerVersion:   version.ServerVersion,
 		ProtocolVersion: version.ProtocolVersion,
+		IsPublic:        cfg.IsPublic(),
 		Data:            data,
 	}
 	if err := t.ExecuteTemplate(w, "layout", envelope); err != nil {
@@ -196,6 +207,11 @@ func (s *Server) pageUPnP(w http.ResponseWriter, r *http.Request) {
 	// dynamic empty state (enabled = wired-up-on-the-server-side),
 	// but this snapshot lets the SSR-rendered page already carry the
 	// right initial copy.
+	//
+	// **`IsPublic`** flows in via the layout envelope (`pageData`) so
+	// the template can pivot between "enable it in YAML" (loopback
+	// deploy) and "feature not available on public deployments"
+	// (public deploy — Config.Validate rejects the enable bit).
 	data := map[string]any{
 		"FeatureEnabled": cfg != nil && cfg.UPnPUpstream.Enabled,
 	}
