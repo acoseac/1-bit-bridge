@@ -123,12 +123,19 @@ func FetchDeviceDescription(
 	if err != nil {
 		return DeviceDescription{}, fmt.Errorf("read body: %w", err)
 	}
-	// A parse failure / missing AVTransport service is structural — the
-	// description is malformed or it isn't a renderer we can drive;
-	// re-fetching the same bytes won't help.
+	// A parse failure / missing-AVTransport / no-control-URL is structural
+	// — the description is malformed or it isn't a renderer we can drive;
+	// re-fetching the same bytes won't help. Return the PARTIAL `desc`
+	// (not DeviceDescription{}) so the upstream MediaServer discovery
+	// (internal/upnp/discovery.go), which deliberately tolerates the
+	// "no AVTransport" error and reads desc.Services for the
+	// ContentDirectory URL, still works — an empty desc here would break
+	// all upstream-server discovery. The renderer caller ignores desc on
+	// error, so the structural sentinel still drives its no-retry stub.
+	// (CodeRabbit MAJOR on PR #361.)
 	desc, err := ParseDeviceDescription(body, url)
 	if err != nil {
-		return DeviceDescription{}, fmt.Errorf("parse description %s: %w: %w", url, err, errStructuralDescription)
+		return desc, fmt.Errorf("parse description %s: %w: %w", url, err, errStructuralDescription)
 	}
 	return desc, nil
 }

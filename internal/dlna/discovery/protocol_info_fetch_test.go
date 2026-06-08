@@ -153,6 +153,47 @@ func TestFetchDeviceDescription_NetworkErrorIsNotStructural(t *testing.T) {
 	}
 }
 
+func TestFetchDeviceDescription_EmptyAVTransportControlURLIsStructural(t *testing.T) {
+	// AVTransport service present but no control URL → undrivable →
+	// structural (no retry). (Gemini HIGH / PR #361.)
+	disp := &stubDispatcher{handler: func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `<?xml version="1.0"?><root><device>`+
+			`<friendlyName>Broken AVT</friendlyName><UDN>uuid:e</UDN><serviceList>`+
+			`<service><serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>`+
+			`<controlURL></controlURL></service></serviceList></device></root>`)
+	}}
+	_, err := FetchDeviceDescription(context.Background(), disp, "http://x/d.xml")
+	if !errors.Is(err, errStructuralDescription) {
+		t.Errorf("AVTransport with empty control URL should be structural; got err=%v", err)
+	}
+}
+
+func TestFetchDeviceDescription_PreservesPartialServicesOnNoAVTransport(t *testing.T) {
+	// A MediaServer (ContentDirectory, no AVTransport) errors, but
+	// FetchDeviceDescription MUST return the partial desc.Services — the
+	// upstream MediaServer discovery tolerates the error and reads it for
+	// the ContentDirectory URL. An empty desc here would break ALL
+	// upstream-server discovery (the regression CodeRabbit caught). (PR #361.)
+	disp := &stubDispatcher{handler: func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `<?xml version="1.0"?><root><device>`+
+			`<friendlyName>2Go MediaServer</friendlyName><UDN>uuid:ms</UDN><serviceList>`+
+			`<service><serviceType>urn:schemas-upnp-org:service:ContentDirectory:1</serviceType>`+
+			`<controlURL>/cds/control</controlURL></service></serviceList></device></root>`)
+	}}
+	desc, err := FetchDeviceDescription(context.Background(), disp, "http://x/d.xml")
+	if err == nil {
+		t.Fatal("expected the no-AVTransport error")
+	}
+	if len(desc.Services) == 0 {
+		t.Fatal("partial desc.Services dropped — would break upstream MediaServer discovery")
+	}
+	if _, ok := desc.Services["urn:schemas-upnp-org:service:ContentDirectory:1"]; !ok {
+		t.Error("ContentDirectory service missing from partial desc")
+	}
+}
+
 // -----------------------------------------------------------------------------
 // FetchGetProtocolInfo
 // -----------------------------------------------------------------------------

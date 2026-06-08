@@ -202,10 +202,13 @@ type rawService struct {
 // service entries; absolute is what the SOAP / GENA dispatcher
 // actually dials.
 //
-// Returns an error when the XML is malformed OR no AVTransport
-// service is present (a renderer without AVTransport can't be
-// driven as an audio target — surfacing it would mislead the
-// user). ConnectionManager / RenderingControl absence is
+// Returns an error when the XML is malformed, when no AVTransport
+// service is present, OR when the AVTransport service has no control
+// URL (a renderer that can't be SetAVTransportURI-driven can't be an
+// audio target — surfacing it would mislead the user). The partial
+// `desc` is returned WITH the error so a caller that tolerates "not a
+// renderer" (upstream MediaServer discovery) can still read
+// desc.Services. ConnectionManager / RenderingControl absence is
 // non-fatal (Sink list resolution would silently degrade, but
 // the renderer is still SetAVTransportURI-drivable).
 func ParseDeviceDescription(body []byte, baseURL string) (DeviceDescription, error) {
@@ -240,8 +243,19 @@ func ParseDeviceDescription(body []byte, baseURL string) (DeviceDescription, err
 			EventSubURL: ev,
 		}
 	}
-	if _, ok := desc.Services[ServiceAVTransport]; !ok {
+	av, ok := desc.Services[ServiceAVTransport]
+	if !ok {
 		return desc, fmt.Errorf("device %q has no AVTransport service", desc.FriendlyName)
+	}
+	// AVTransport present but with no resolvable control URL is just as
+	// undrivable as no AVTransport at all — SetAVTransportURI has nowhere
+	// to go. Treat it as a parse failure so the discovery layer marks the
+	// renderer structurally unusable rather than caching a stub it can
+	// never drive (which would otherwise retry forever). The partial
+	// `desc` is still returned so error-tolerating callers keep
+	// desc.Services. (Gemini HIGH on PR #361.)
+	if av.ControlURL == "" {
+		return desc, fmt.Errorf("device %q AVTransport service has no control URL", desc.FriendlyName)
 	}
 	return desc, nil
 }

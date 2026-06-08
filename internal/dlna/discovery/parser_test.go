@@ -270,12 +270,43 @@ func TestParseDeviceDescription_RejectsMissingAVTransport(t *testing.T) {
     </service>
   </serviceList>
 </device></root>`
-	_, err := ParseDeviceDescription([]byte(xml), "http://x/y")
+	desc, err := ParseDeviceDescription([]byte(xml), "http://x/y")
 	if err == nil {
 		t.Fatal("expected error for missing AVTransport, got nil")
 	}
 	if !strings.Contains(err.Error(), "AVTransport") {
 		t.Errorf("error should mention AVTransport: %v", err)
+	}
+	// The PARTIAL desc MUST still carry the services it DID find — the
+	// upstream MediaServer discovery tolerates this error and reads
+	// desc.Services for the ContentDirectory URL. (CodeRabbit MAJOR / PR #361.)
+	if _, ok := desc.Services["urn:schemas-upnp-org:service:ConnectionManager:1"]; !ok {
+		t.Error("partial desc dropped its parsed services on the no-AVTransport error")
+	}
+}
+
+func TestParseDeviceDescription_RejectsEmptyAVTransportControlURL(t *testing.T) {
+	// AVTransport present but with no control URL is undrivable —
+	// SetAVTransportURI has nowhere to go — so it must error (the
+	// discovery layer then treats the renderer as structurally unusable
+	// rather than caching a stub that retries forever). (Gemini HIGH / PR #361.)
+	xml := `<?xml version="1.0"?>
+<root><device>
+  <friendlyName>Broken AVT</friendlyName>
+  <UDN>uuid:emptyctrl</UDN>
+  <serviceList>
+    <service>
+      <serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>
+      <controlURL></controlURL>
+    </service>
+  </serviceList>
+</device></root>`
+	_, err := ParseDeviceDescription([]byte(xml), "http://x/y")
+	if err == nil {
+		t.Fatal("expected error for AVTransport with empty control URL, got nil")
+	}
+	if !strings.Contains(err.Error(), "control URL") {
+		t.Errorf("error should mention the missing control URL: %v", err)
 	}
 }
 
