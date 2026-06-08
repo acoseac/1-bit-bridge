@@ -67,6 +67,28 @@ func newRequestID() string {
 	return hex.EncodeToString(b[:])
 }
 
+// downloadThroughputMinBytes is the floor below which a /v1/download or
+// /v1/read response is NOT recorded into the download-throughput
+// telemetry. Tiny range probes (the hybrid-precache waiter, a seek that
+// reads a few KB) would otherwise dominate the distribution with
+// meaningless ratios. 2 MiB is comfortably above any metadata-shaped
+// range read but well below a real track transfer.
+const downloadThroughputMinBytes int64 = 2 * 1024 * 1024
+
+// transportProto returns a short, bounded protocol label for telemetry:
+// "h3" / "h2" / "http/1.1". It prefers the negotiated ALPN string — the
+// canonical signal, and the one quic-go synthesizes onto r.TLS as "h3"
+// for HTTP/3 requests — falling back to r.Proto only if TLS is somehow
+// absent (impossible on the HTTPS-only bridge, but the guard is free and
+// keeps the label non-empty). Bounded cardinality makes it safe as a
+// Prometheus label.
+func transportProto(r *http.Request) string {
+	if r.TLS != nil && r.TLS.NegotiatedProtocol != "" {
+		return r.TLS.NegotiatedProtocol
+	}
+	return r.Proto
+}
+
 // statusWriter wraps an http.ResponseWriter to capture the response
 // status code and byte count for the logging middleware. Implements
 // http.Flusher (SSE / chunked streaming need it) and Unwrap (Go 1.20+
@@ -165,10 +187,12 @@ func requestLogging(next http.Handler) http.Handler {
 			level = slog.LevelWarn
 		}
 		duration := time.Since(start)
+		proto := transportProto(r)
 		reqLogger.LogAttrs(ctx, level, "http",
 			slog.Int("status", status),
 			slog.Int64("duration_ms", duration.Milliseconds()),
 			slog.Int64("bytes", sw.bytes),
+			slog.String("proto", proto),
 		)
 		// Prometheus mirrors. Pattern (route template) over the raw
 		// path so cardinality stays bounded — `/v1/list?path=...` is
@@ -189,8 +213,38 @@ func requestLogging(next http.Handler) http.Handler {
 		metrics.HTTPRequestsTotal.WithLabelValues(
 			labelPath,
 			fmt.Sprintf("%d", status),
+			proto,
 		).Inc()
 		metrics.HTTPRequestDurationHist.WithLabelValues(labelPath).Observe(duration.Seconds())
+
+		// Download-throughput telemetry — the signal that answers "does
+		// HTTP/3 actually beat HTTP/2 on our links?". Strictly gated to
+		// the two file-delivery endpoints: the broad `streamingRoute`
+		// kind also covers /v1/manifest and the long-lived SSE routes
+		// (/v1/events, /v1/pairing/{id}/events), and an SSE channel held
+		// open for hours with a handful of heartbeat bytes would poison
+		// the distribution with a near-zero ratio. 206 is accepted
+		// alongside 200 because /v1/read always serves a range and a
+		// ranged /v1/download is partial-content too. The byte floor
+		// drops tiny range probes; the duration guard keeps a +Inf
+		// (zero-duration division) out of the histogram.
+		//
+		// NEVER log the file path here: it lives in the query string the
+		// middleware deliberately omits as PII. request_id (already bound
+		// on reqLogger) correlates this line with the `http` line above.
+		if (labelPath == "GET /v1/download" || labelPath == "GET /v1/read") &&
+			(status == http.StatusOK || status == http.StatusPartialContent) &&
+			sw.bytes >= downloadThroughputMinBytes && duration > 0 {
+			mbps := float64(sw.bytes) * 8 / (duration.Seconds() * 1024 * 1024)
+			reqLogger.LogAttrs(ctx, slog.LevelInfo, "download_complete",
+				slog.String("proto", proto),
+				slog.Int64("bytes_sent", sw.bytes),
+				slog.Int64("duration_ms", duration.Milliseconds()),
+				slog.Float64("throughput_mbps", mbps),
+				slog.Int("status", status),
+			)
+			metrics.HTTPDownloadThroughputMbps.WithLabelValues(proto).Observe(mbps)
+		}
 	})
 }
 
