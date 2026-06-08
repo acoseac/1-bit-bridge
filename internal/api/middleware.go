@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/logging"
@@ -75,18 +76,32 @@ func newRequestID() string {
 // range read but well below a real track transfer.
 const downloadThroughputMinBytes int64 = 2 * 1024 * 1024
 
-// transportProto returns a short, bounded protocol label for telemetry:
-// "h3" / "h2" / "http/1.1". It prefers the negotiated ALPN string — the
-// canonical signal, and the one quic-go synthesizes onto r.TLS as "h3"
-// for HTTP/3 requests — falling back to r.Proto only if TLS is somehow
-// absent (impossible on the HTTPS-only bridge, but the guard is free and
-// keeps the label non-empty). Bounded cardinality makes it safe as a
-// Prometheus label.
+// transportProto returns a short, bounded, CANONICAL protocol label for
+// telemetry: "h3" / "h2" / "http/1.1". It prefers the negotiated ALPN
+// (quic-go sets "h3"; the stdlib sets "h2"), tolerating any "h3-NN" draft
+// suffix, and otherwise falls back to the request's major version. BOTH
+// paths normalize to the same label set so a series never splits across
+// "h2" (from ALPN) and "HTTP/2.0" (from r.Proto). The bridge is HTTPS-only,
+// so the fallback is effectively tests / impossible plaintext — but keeping
+// the labels canonical there too keeps logs + Prometheus clean. Bounded
+// cardinality makes it safe as a Prometheus label.
 func transportProto(r *http.Request) string {
-	if r.TLS != nil && r.TLS.NegotiatedProtocol != "" {
-		return r.TLS.NegotiatedProtocol
+	if r.TLS != nil {
+		switch alpn := strings.ToLower(r.TLS.NegotiatedProtocol); {
+		case strings.HasPrefix(alpn, "h3"):
+			return "h3"
+		case alpn == "h2":
+			return "h2"
+		}
 	}
-	return r.Proto
+	switch r.ProtoMajor {
+	case 3:
+		return "h3"
+	case 2:
+		return "h2"
+	default:
+		return "http/1.1"
+	}
 }
 
 // statusWriter wraps an http.ResponseWriter to capture the response

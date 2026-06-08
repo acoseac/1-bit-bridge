@@ -302,11 +302,11 @@ func TestLogging_IncludesNegotiatedProtocol(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	rr := httptest.NewRecorder()
-	// httptest.NewRequest leaves r.TLS nil, so transportProto falls back
-	// to r.Proto ("HTTP/1.1") — a stable, assertable value.
+	// httptest.NewRequest leaves r.TLS nil with ProtoMajor=1, so
+	// transportProto normalizes to the canonical "http/1.1" label.
 	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/v1/health", nil))
-	if !strings.Contains(buf.String(), "proto=HTTP/1.1") {
-		t.Errorf("expected proto=HTTP/1.1 in log line, got %q", buf.String())
+	if !strings.Contains(buf.String(), "proto=http/1.1") {
+		t.Errorf("expected proto=http/1.1 in log line, got %q", buf.String())
 	}
 }
 
