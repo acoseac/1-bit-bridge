@@ -123,6 +123,35 @@ func TestPublic_FriendlyName_FromDiscoveryCache(t *testing.T) {
 	if got[0].PathPrefix != "chord" {
 		t.Errorf("PathPrefix = %q; want %q", got[0].PathPrefix, "chord")
 	}
+	if !got[0].Online {
+		t.Error("Online = false; want true (UDN present in discovery cache)")
+	}
+}
+
+func TestLookupUPnPServerRuntime_TrimsWhitespaceUDN(t *testing.T) {
+	// A config UDN with surrounding whitespace must trim before the
+	// cache lookup so it still matches the (clean) discovery-cache key —
+	// otherwise it false-reports offline + drops the friendly name.
+	// Calls the helper directly so config validation can't pre-trim the
+	// UDN and mask the runtime behavior. (Gemini on PR #362.)
+	cache := upnp.NewServerCache()
+	cache.Upsert(upnp.ServerInfo{
+		UDN:                        "uuid:wsp",
+		FriendlyName:               "Padded 2Go",
+		ContentDirectoryControlURL: "http://192.0.2.9:8200/ctl",
+		LastSeenAt:                 time.Now(),
+	})
+	friendly, _, online := lookupUPnPServerRuntime(
+		context.Background(),
+		config.UPnPUpstreamServerConfig{Name: "Padded", UDN: "  uuid:wsp  ", PathPrefix: "wsp"},
+		cache, openUPnPTestStore(t),
+	)
+	if !online {
+		t.Error("online = false; want true (whitespace UDN should trim + match the cache)")
+	}
+	if friendly != "Padded 2Go" {
+		t.Errorf("friendlyName = %q; want resolved via the trimmed cache lookup", friendly)
+	}
 }
 
 func TestPublic_FriendlyName_EmptyWhenUndiscovered(t *testing.T) {
@@ -136,6 +165,13 @@ func TestPublic_FriendlyName_EmptyWhenUndiscovered(t *testing.T) {
 	got := a.PublicServers(context.Background())
 	if got[0].FriendlyName != "" {
 		t.Errorf("FriendlyName = %q; want \"\" (pre-discovery)", got[0].FriendlyName)
+	}
+	// A UDN entry NOT in the discovery cache (here: pre-discovery; in
+	// production also: the upstream powered off + evicted at ServerTTL) is
+	// reported offline — this is the signal iOS uses to stop offering its
+	// tracks. (Issue A — 2Go off / bridge on.)
+	if got[0].Online {
+		t.Error("Online = true; want false (UDN not in discovery cache)")
 	}
 }
 
@@ -155,6 +191,12 @@ func TestPublic_ManualURLServer_OmitsConfiguredUDN(t *testing.T) {
 	}
 	if got[0].Name != "Manual" {
 		t.Errorf("Name = %q; want %q", got[0].Name, "Manual")
+	}
+	// Manual-URL entries aren't in the SSDP cache, so liveness can't be
+	// observed here — they default online (a real outage surfaces as a
+	// 503 upnp_server_offline on fetch, not a false offline flag).
+	if !got[0].Online {
+		t.Error("Online = false; want true (manual-URL entry defaults online)")
 	}
 }
 

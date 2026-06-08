@@ -1090,6 +1090,20 @@ type UPnPUpstreamPublicServer struct {
 	// wired but no ingest has landed yet (warm-up window or per-server
 	// error).
 	RoutedTracks int `json:"routedTracks"`
+
+	// Online reports whether this upstream is currently reachable from
+	// the bridge. For a UDN-configured upstream it's true iff the device
+	// is presently in the SSDP discovery cache (refreshed every M-SEARCH,
+	// evicted after ServerTTL ≈ 180s) — so when the operator powers the
+	// upstream (e.g. a Chord 2Go) OFF, this flips false within the TTL
+	// window even though the BRIDGE itself stays reachable. Manual-URL
+	// upstreams aren't in the SSDP cache, so they report true here (their
+	// real reachability surfaces as a 503 `upnp_server_offline` on fetch).
+	// iOS uses this to stop offering tracks whose upstream is down instead
+	// of letting the fetch 503 on tap. ALWAYS emitted (not omitempty —
+	// `false` is the load-bearing value); a pre-feature bridge omits the
+	// field, and iOS defaults a missing value to `true` (assume online).
+	Online bool `json:"online"`
 }
 
 // UPnPUpstreamPublicProvider is the read interface the api.Server uses

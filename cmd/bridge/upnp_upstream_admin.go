@@ -115,7 +115,10 @@ func (a *upnpAdminAdapter) ConfiguredServers() []admin.UPnPUpstreamServerState {
 		// prior implementation used Background here for the same
 		// reason); the public path propagates `r.Context()` so a
 		// client disconnect cancels.
-		row.FriendlyName, row.RoutedTracks = lookupUPnPServerRuntime(context.Background(), srv, a.cache, a.store)
+		// The admin DTO surfaces liveness via its own `Discovered` field
+		// (cache.Get below), so the shared helper's `online` is discarded
+		// here — only the public /v1/health DTO carries `online`.
+		row.FriendlyName, row.RoutedTracks, _ = lookupUPnPServerRuntime(context.Background(), srv, a.cache, a.store)
 		// The admin DTO carries operator-internal fields the public
 		// DTO deliberately omits (Discovered / ResolvedUDN /
 		// Manufacturer / ControlURL / LastSeenAt). FriendlyName is
