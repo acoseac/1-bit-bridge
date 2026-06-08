@@ -371,6 +371,13 @@ func ReadResponseBodyCapped(r io.Reader, maxBytes int64) ([]byte, error) {
 	if maxBytes <= 0 {
 		return nil, errors.New("maxBytes must be > 0")
 	}
+	// Overflow guard: the maxBytes+1 peek below wraps to a negative value at
+	// maxBytes == math.MaxInt64. io.LimitReader returns EOF immediately on a
+	// negative N, so an overflowed cap would silently yield an EMPTY body
+	// instead of the data. Unreachable today (callers pass small constants).
+	if maxBytes >= 1<<63-1 {
+		return nil, errors.New("maxBytes too large")
+	}
 	// LimitReader + a peek-past trick: read maxBytes+1; if we got
 	// maxBytes+1 bytes, body exceeds the cap.
 	lr := io.LimitReader(r, maxBytes+1)

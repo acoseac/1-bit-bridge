@@ -218,7 +218,7 @@ func (s *Server) routeRegistry() []route {
 		{pattern: "DELETE /v1/playlists/{id}", kind: boundedRoute, handler: s.authed(s.deletePlaylist)},
 
 		// Playback telemetry — bulk insert from the iOS offline queue.
-		{pattern: "POST /v1/history/batch", kind: boundedRoute, handler: s.authed(s.historyBatch)},
+		{pattern: "POST /v1/history/batch", kind: boundedRoute, handler: withCtxTimeout(60*time.Second, s.authed(s.historyBatch))},
 
 		// SSE — long-lived per-connection write stream; MUST opt
 		// out of the per-route write deadline.

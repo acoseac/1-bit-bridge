@@ -1012,10 +1012,11 @@ func (u UpscaleConfig) EffectiveTargetRate() string {
 // upscale_target_hz row, seed it via Store.SetUpscaleTarget(this,
 // EffectiveBootstrapTargetBits()).
 func (u UpscaleConfig) EffectiveBootstrapTargetRate() int {
-	if u.TargetRate == "" || u.TargetRate == "auto" {
+	target := strings.TrimSpace(u.TargetRate)
+	if target == "" || target == "auto" {
 		return DefaultBootstrapTargetRate
 	}
-	if n, err := strconv.Atoi(u.TargetRate); err == nil && n > 0 {
+	if n, err := strconv.Atoi(target); err == nil && n > 0 {
 		return n
 	}
 	return DefaultBootstrapTargetRate

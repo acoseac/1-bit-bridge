@@ -511,3 +511,14 @@ func TestReadResponseBodyCapped_RejectsZeroCap(t *testing.T) {
 		t.Fatal("expected error for cap=0")
 	}
 }
+
+func TestReadResponseBodyCapped_RejectsOverflowCap(t *testing.T) {
+	// maxBytes == MaxInt64 would wrap the internal maxBytes+1 peek to a
+	// negative io.LimitReader N (which returns EOF immediately → a silent
+	// empty body). The overflow guard must reject it instead.
+	body := bytes.NewReader([]byte("data"))
+	_, err := ReadResponseBodyCapped(body, 1<<63-1)
+	if err == nil {
+		t.Fatal("expected error for cap=MaxInt64 (overflow)")
+	}
+}

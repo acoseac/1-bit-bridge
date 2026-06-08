@@ -169,6 +169,12 @@ func (s *Server) probeUsedByKind(ctx context.Context) map[string]int64 {
 		"upscale":  0,
 		"optimize": 0,
 	}
+	// Degrade to zeros when the manifest store isn't wired (e.g. upscaling
+	// disabled) rather than panicking — mirrors every sibling admin
+	// handler's `s.deps.Manifest == nil` guard (apiDevicesList et al.).
+	if s.deps.Manifest == nil {
+		return out
+	}
 	got, err := s.deps.Manifest.CountVariantsByKind(ctx)
 	if err != nil {
 		return out
@@ -222,9 +228,13 @@ func assertNotUnderLibraryRoots(candidate string, roots []string) error {
 // load-bearing operation; if the operator can't see disk numbers
 // they can still type a path AND save it.
 func (s *Server) probeVariantsDirUsage(ctx context.Context, dir string) (int64, int64) {
-	_, used, err := s.deps.Manifest.CountVariants(ctx)
-	if err != nil {
-		used = 0
+	var used int64
+	// Guard the manifest deref — nil when upscaling is disabled. The free-
+	// space probe below is independent of the manifest, so it still runs.
+	if s.deps.Manifest != nil {
+		if _, u, err := s.deps.Manifest.CountVariants(ctx); err == nil {
+			used = u
+		}
 	}
 	var free int64
 	if s.deps.AvailableDiskSpace != nil {
@@ -249,7 +259,7 @@ func (s *Server) probeVariantsDirUsage(ctx context.Context, dir string) (int64, 
 // on PR D2). The SQL path is bounded to a single index range scan +
 // aggregate.
 func (s *Server) countLegacyVariants(ctx context.Context, currentDir string) (int, int64) {
-	if currentDir == "" {
+	if currentDir == "" || s.deps.Manifest == nil {
 		return 0, 0
 	}
 	// Pattern: descendants of `currentDir` start with `currentDir + sep`.
