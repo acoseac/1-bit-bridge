@@ -147,6 +147,15 @@ func (c *RendererCache) Snapshot() []RendererInfo {
 	}
 	out := make([]RendererInfo, 0, len(c.entries))
 	for _, info := range c.entries {
+		// Skip incomplete stubs — a cached entry with no AVTransport
+		// ControlURL is the residue of a failed (or in-flight) detail
+		// fetch and is unusable: iOS can't dispatch SetAVTransportURI to
+		// it. Surfacing it would show a nameless, undrivable row in the
+		// output picker. (Transient stubs age out + retry; structural
+		// ones persist suppressed — see SSDPDiscoveryClient.) (bridge-12.)
+		if info.ControlURL == "" {
+			continue
+		}
 		out = append(out, info)
 	}
 	sort.SliceStable(out, func(i, j int) bool {

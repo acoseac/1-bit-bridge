@@ -20,6 +20,17 @@ const DefaultDescriptionMaxBytes int64 = 256 * 1024
 // renderer's Sink list (typically <2 KB).
 const DefaultSOAPMaxBytes int64 = 64 * 1024
 
+// errStructuralDescription marks a device-description fetch failure that
+// re-fetching CANNOT fix: a 4xx HTTP status (no description served at
+// that URL) or a parse failure / missing AVTransport service (the
+// renderer's description is malformed, or it isn't a renderer we can
+// drive). Transient failures (timeout, dial error, 5xx) are deliberately
+// NOT wrapped with this, so the discovery loop retries those but
+// suppresses retries for a structurally-broken renderer. Callers test
+// via `errors.Is(err, errStructuralDescription)`. (Gemini consult —
+// bridge-12: stub-on-fetch-fail must distinguish transient vs structural.)
+var errStructuralDescription = errors.New("renderer description structurally unusable")
+
 // SOAPDispatcher is the abstraction over `http.Client` used by the
 // fetchers. The default implementation wraps `http.DefaultClient`;
 // tests inject a stub that returns canned responses without standing
@@ -100,13 +111,33 @@ func FetchDeviceDescription(
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if !IsHTTPStatusOK(resp.StatusCode) {
+		// 4xx → the description isn't served at that URL; re-fetching
+		// won't fix it (structural). 5xx → the renderer is transiently
+		// busy; let the discovery loop retry it.
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			return DeviceDescription{}, fmt.Errorf("GET %s: status %d: %w", url, resp.StatusCode, errStructuralDescription)
+		}
 		return DeviceDescription{}, fmt.Errorf("GET %s: status %d", url, resp.StatusCode)
 	}
 	body, err := ReadResponseBodyCapped(resp.Body, DefaultDescriptionMaxBytes)
 	if err != nil {
 		return DeviceDescription{}, fmt.Errorf("read body: %w", err)
 	}
-	return ParseDeviceDescription(body, url)
+	// A parse failure / missing-AVTransport / no-control-URL is structural
+	// — the description is malformed or it isn't a renderer we can drive;
+	// re-fetching the same bytes won't help. Return the PARTIAL `desc`
+	// (not DeviceDescription{}) so the upstream MediaServer discovery
+	// (internal/upnp/discovery.go), which deliberately tolerates the
+	// "no AVTransport" error and reads desc.Services for the
+	// ContentDirectory URL, still works — an empty desc here would break
+	// all upstream-server discovery. The renderer caller ignores desc on
+	// error, so the structural sentinel still drives its no-retry stub.
+	// (CodeRabbit MAJOR on PR #361.)
+	desc, err := ParseDeviceDescription(body, url)
+	if err != nil {
+		return desc, fmt.Errorf("parse description %s: %w: %w", url, err, errStructuralDescription)
+	}
+	return desc, nil
 }
 
 // FetchGetProtocolInfo dispatches a SOAP `GetProtocolInfo` call to
