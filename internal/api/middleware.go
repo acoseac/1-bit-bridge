@@ -171,6 +171,16 @@ func (s *statusWriter) Unwrap() http.ResponseWriter {
 //
 // X-Request-ID is echoed in the response header so users can include it
 // in bug reports and operators can correlate against server logs.
+//
+// ORDERING INVARIANT: this middleware reads the matched route Pattern back
+// from the request COPY it forwards (`rc`, below) — that is the request the
+// downstream http.ServeMux stamps Pattern onto. Any middleware inserted
+// between requestLogging and the ServeMux MUST forward that same
+// *http.Request unchanged; a further `r.WithContext(...)` copy would make
+// the mux stamp Pattern on the newer copy, silently reverting
+// HTTPRequestsTotal to "_unmatched" and disabling the download-throughput
+// telemetry. `recoverer` — the only middleware between here and the mux
+// today — forwards the request as-is, so the chain is correct.
 func requestLogging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		reqID := newRequestID()
