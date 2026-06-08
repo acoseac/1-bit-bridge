@@ -6,17 +6,26 @@ after-the-tag steps.
 
 ## Documentation refresh on each release
 
-Every release tag is accompanied by a doc-site refresh PR — `README.md` status line bump plus whatever updates the new version's user-facing surface needs. Blueprint hardened across PR #185 (v0.1.2) where four rounds of bot review surfaced privacy, link-rendering, and anchor-target issues that this checklist now covers up-front.
+> **User-facing docs moved (2026-06-09).** The overview / setup / features / troubleshooting /
+> privacy pages now live in the **`acoseac/1bitapp`** repo (local `~/Desktop/1bitapp`) and are
+> published at **`1-bit.app/bridge/*`**. Update them THERE, following that repo's `CLAUDE.md` →
+> "Adding a release". The `docs/*.html` files in *this* repo are now **redirect stubs** pointing at
+> 1-bit.app — do not edit them. The only per-release doc touch in this repo is the `README.md`
+> status line.
 
-### Files to update per release
+The blueprint below was hardened across PR #185 (v0.1.2), where four rounds of bot review surfaced
+privacy, link-rendering, and anchor-target issues. The HTML-rendering items now apply to the
+`1bitapp` Astro site; the privacy / logging-audit items are cross-repo and still start here.
+
+### Files to update per release (this repo)
 
 - **`README.md`** — bump line ~22 status (`**v0.1.x** — wire protocol frozen…`). Always.
-- **`docs/index.html`** — refresh hero feature bullets if any new capability shipped, and the "Quick start" three-step panel if the install flow changed.
-- **`docs/setup.html`** — beginner walkthrough. Update per-OS install panels if archive-naming or unpack steps changed; refresh scan-time table if perf shifted; update pairing methods if iOS app added/removed a flow.
-- **`docs/features.html`** — feature deep-dive index. Add a new `<h2 id="...">` section for any new capability (mirror the existing pattern: short paragraph + 3–5 bullets/dl). The "Container & headless deployments" section's env-var table mirrors `internal/config/config.go` — keep in sync when new env-var overrides land.
-- **`docs/troubleshooting.html`** — add a `.symptom` / `.fix` pair for any new known operational issue. Cross-page deep links (`setup.html#step-N`, `features.html#tailscale`, etc.) need their target ids to exist; see "Gotchas" below.
-- **`docs/privacy.html`** — verify against the *current* logging / storage / lookup-data shape. Bump "Last updated" date **only** if content changed; bumping for every release without a content change is misleading.
-- **`docs/assets/site.css`** — only when adding new component styles. Existing palette / typography / button / nav classes are stable.
+- **Privacy policy (cross-repo).** If logging / storage / lookup-data behaviour changed this
+  release, run the logging audit below, then reflect the result in the `1bitapp` repo's
+  `src/pages/bridge/privacy.astro` — bump its "Last updated" date **only** on a real content change.
+- **`docs/docker.md`, `docs/deployment/*`** — operator/dev docs that stayed here; update if the
+  container or VPS flow changed. The env-var table on `1-bit.app/bridge/features/` mirrors
+  `internal/config/config.go` — keep them in sync when new env-var overrides land.
 
 ### Files NOT to touch per release
 
@@ -24,13 +33,14 @@ Every release tag is accompanied by a doc-site refresh PR — `README.md` status
 - `.goreleaser.yaml`, `.github/workflows/release.yml` — pipeline is mature; only touch for genuine pipeline changes (a new platform, signing-cert rotation, etc.).
 - `PROTOCOL.md` — only on a wire-protocol break (which also bumps `ProtocolVersion` and triggers the Mirror-PR rule).
 - `CONTRIBUTING.md`, `SECURITY.md`, `LICENSE` — stable.
-- `docs/docker.md` — kept as markdown so the GitHub-rendered view + raw-repo-browse view both work; HTML pages link at the GitHub blob URL (see Gotchas).
+- `docs/*.html` — **redirect stubs** to `1-bit.app/bridge/*`; the real content lives in the `1bitapp` repo. Don't edit (other than to repoint a redirect target if a 1-bit.app URL ever changes).
+- `docs/docker.md` — kept as markdown so the GitHub-rendered view + raw-repo-browse view both work; the 1-bit.app docs link to it at the GitHub blob URL (see Gotchas).
 
 ### Process
 
 1. **Logging audit before drafting privacy copy.** Grep `internal/pairing/`, `internal/transcode/`, `internal/api/upscale.go`, `internal/api/events.go`, and `internal/admin/handlers_events.go` for `slog.` / `Error(` / `logger.` calls and confirm no formatter feeds raw bearer tokens, client IPs (`r.RemoteAddr`, `RealIP`), or absolute filesystem paths into log lines or `writeError` responses. Privacy-policy claims must hold against the *current* surface, not the v1.0 paths the policy was originally written against. Anything found gets fixed in the same PR — `redactWalkErr` in [internal/api/upscale.go](internal/api/upscale.go) is the canonical helper for `*os.PathError` unwrapping (covers both log AND wire egress channels).
-2. **Edit the docs.** Order that works: `docs/assets/site.css` (if needed) → new pages or new sections in existing pages → `index.html` cross-links → `privacy.html` verification → `README.md` status bump.
-3. **Local site preview.** `cd docs && python3 -m http.server 8765`, then open in a browser and click through every nav link, every cross-page link, every external link, every anchor (`#section`) link. **Do not trust `curl -sf` / 200-status checks alone** — they don't catch raw-text rendering issues for `.md` files (PR #185 round 3) or broken anchors that scroll nowhere (round 4).
+2. **Edit the docs.** In *this* repo, bump the `README.md` status line. Any user-facing doc change happens in the `1bitapp` repo under `src/pages/bridge/*` (overview / setup / features / download / troubleshooting / privacy).
+3. **Preview the 1bitapp site.** In the `1bitapp` repo, `npm run build` (fails on broken internal links / TS errors) then `npm run preview`, clicking every nav link, cross-page link, external link, and `#anchor`. Anchors that scroll nowhere don't fail the build — verify them by eye.
 4. **Local goreleaser dry-run** (per the v0.1.1 release-pipeline notes — APPLE_TEAM_ID + release-meta.json hooks):
    ```sh
    rm -rf dist release-meta.json
@@ -49,9 +59,7 @@ Every release tag is accompanied by a doc-site refresh PR — `README.md` status
 
 ### Gotchas (proven on PR #185)
 
-- **`<pre><code>` blocks inside `<li>` render with light-on-light text** (post-merge regression on the live site, fix `18c010c` on main). `docs/assets/site.css`'s `p code, li code, td code, dd code` selector paints inline `<code>` with a light `--bg-soft` background; when a `<pre><code>…</code></pre>` block lives inside a `<li>` (any `ol.steps` step, the install-panel cards in `setup.html`, the upscale-enable steps), `li code` matches the inner `<code>` and overrides the `<pre>`'s dark background — but the foreground stays inherited at `--code-fg` (light), so the code text is invisible. Fix is the explicit `pre code { background: transparent; padding: 0; border: 0; font-size: inherit; color: inherit; }` reset that's now in `site.css`. Don't reintroduce that styling at any new site; verify in the local-preview pass that any new `<pre><code>` block under `<li>` renders dark with light text. The site's pre-PR-#185 inline styles had the same `li code` rule but never tripped because `<pre><code>` blocks lived in plain `<div>` install panels, not under `<li>`.
-- **`docs/.nojekyll` makes GH Pages serve `.md` as raw text.** Any `<a href="*.md">` link from an HTML page renders as plain markdown source, not formatted HTML. Either rename `.md` → `.html` (and convert), or point the link at the GitHub blob URL (`https://github.com/acoseac/1-bit-bridge/blob/main/docs/<file>.md`) so GitHub's own renderer handles it. We use the blob-URL form for `docker.md` (Greptile round 3).
-- **`<ol class="steps">` items use CSS `counter-increment` for visible numbers.** The `<li>` elements have no `id` attribute by default — cross-page deep links like `setup.html#step-6` would scroll nowhere. Every step `<li>` in `setup.html` carries `id="step-N"` so any future cross-page anchor lands; keep that pattern when adding steps (Greptile round 4).
+- **HTML-site rendering gotchas moved to the `1bitapp` repo.** The old GitHub Pages site's hand-rolled traps — `<pre><code>` inside `<li>` rendering light-on-light, `ol.steps` items needing `id="step-N"` for cross-page anchors — were specific to that HTML/CSS. The 1-bit.app docs are Astro; their conventions live in the `1bitapp` repo's `CLAUDE.md`. What survives here: `docs/.nojekyll` **stays** (it lets Pages serve the redirect stubs and `docker.md` without Jekyll), and the 1-bit.app docs link to `docs/docker.md` at the **GitHub blob URL** (`https://github.com/acoseac/1-bit-bridge/blob/main/docs/docker.md`) so GitHub renders the markdown rather than serving it raw.
 - **`./bridge stop` and `./bridge start` are NOT real subcommands.** The bridge is started/stopped via the platform service manager: `launchctl load/unload …plist` on macOS, `systemctl --user start/stop 1-bit-bridge` on Linux, `sc.exe start/stop 1-bit-bridge` on Windows. Don't reintroduce the bogus subcommands in restore / troubleshooting docs (Gemini medium PR #185).
 - **`*os.PathError`'s `.Error()` string embeds the absolute filesystem path.** `filepath.WalkDir` propagates these for permission-denied / file-not-found failures. Privacy commitment ("absolute filesystem paths are not logged AND not sent over the wire") requires unwrapping for **both** `logger.Error("err", …)` (slog will format the value) AND any `writeError` body. `redactWalkErr` in [internal/api/upscale.go](internal/api/upscale.go) is the canonical helper; reuse it at any new walk-error site (Greptile rounds 1 + 2).
 - **iOS 26.4+ ATS lower-layer enforces 825-day cert validity** independently of `NSAllowsLocalNetworking`. This is real, not a typo for iOS 16.4 — Gemini's training cutoff predates iOS 26 and may flag it. Keep the version as written.

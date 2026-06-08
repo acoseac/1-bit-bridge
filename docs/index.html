@@ -1,161 +1,20 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
+  <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>1-bit bridge — open-source HTTPS music server for the 1-bit iOS app (DSD, FLAC, ALAC, MP3)</title>
-  <meta name="description" content="Open-source Go server that streams DSF, FLAC, ALAC, MP3, and DSD libraries to the 1-bit iOS music player over HTTPS — faster than SMB, with QR-code pairing, TLS fingerprint pinning, and a pre-built library manifest. Runs on macOS, Windows, Linux, and Raspberry Pi.">
-  <meta name="keywords" content="1-bit, 1-bit bridge, DSD streaming, DSF server, FLAC HTTPS, music server iOS, NAS music player iOS, SMB alternative, audiophile streaming, MIT open source, TLS pinning music, Tailscale music streaming">
-  <meta name="author" content="Arsenie Coseac">
-  <meta name="robots" content="index, follow, max-image-preview:large">
-  <meta name="theme-color" content="#0a84ff">
-  <meta property="og:type" content="website">
-  <meta property="og:url" content="https://acoseac.github.io/1-bit-bridge/">
-  <meta property="og:site_name" content="1-bit bridge">
-  <meta property="og:title" content="1-bit bridge — open-source HTTPS music server for the 1-bit iOS app">
-  <meta property="og:description" content="Open-source Go server that streams DSF, FLAC, ALAC, MP3, and DSD libraries to the 1-bit iOS music player over HTTPS — faster than SMB, with QR-code pairing and TLS pinning. macOS, Windows, Linux, Raspberry Pi.">
-  <meta property="og:locale" content="en_US">
-  <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="1-bit bridge — open-source music server for 1-bit iOS">
-  <meta name="twitter:description" content="HTTPS streaming for DSF, FLAC, ALAC, MP3 libraries. QR-code pairing, TLS fingerprint pinning, pre-built manifest. MIT-licensed Go.">
-  <link rel="canonical" href="https://acoseac.github.io/1-bit-bridge/">
-  <script type="application/ld+json">
-  {
-    "@context": "https://schema.org",
-    "@graph": [
-      {
-        "@type": "SoftwareApplication",
-        "@id": "https://acoseac.github.io/1-bit-bridge/#software",
-        "name": "1-bit bridge",
-        "description": "Open-source companion server for the 1-bit iOS music player. Streams DSF, FLAC, ALAC, MP3, and other libraries over HTTPS — faster than SMB, with QR-code pairing and TLS fingerprint pinning.",
-        "applicationCategory": "MultimediaApplication",
-        "applicationSubCategory": "Music server",
-        "operatingSystem": ["macOS", "Windows", "Linux", "Raspberry Pi"],
-        "softwareRequirements": "1-bit iOS app (App Store)",
-        "url": "https://acoseac.github.io/1-bit-bridge/",
-        "downloadUrl": "https://github.com/acoseac/1-bit-bridge/releases/latest",
-        "license": "https://github.com/acoseac/1-bit-bridge/blob/main/LICENSE",
-        "isAccessibleForFree": true,
-        "offers": {
-          "@type": "Offer",
-          "price": "0",
-          "priceCurrency": "USD"
-        },
-        "author": {
-          "@type": "Person",
-          "name": "Arsenie Coseac",
-          "url": "https://github.com/acoseac"
-        }
-      },
-      {
-        "@type": "SoftwareSourceCode",
-        "@id": "https://acoseac.github.io/1-bit-bridge/#source",
-        "name": "1-bit bridge",
-        "codeRepository": "https://github.com/acoseac/1-bit-bridge",
-        "programmingLanguage": "Go",
-        "license": "https://opensource.org/licenses/MIT",
-        "about": {
-          "@id": "https://acoseac.github.io/1-bit-bridge/#software"
-        }
-      }
-    ]
-  }
-  </script>
-  <link rel="stylesheet" href="assets/site.css">
+  <title>1-bit bridge docs have moved to 1-bit.app</title>
+  <link rel="canonical" href="https://1-bit.app/bridge/">
+  <script>location.replace("https://1-bit.app/bridge/" + location.hash);</script>
+  <style>
+    html { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; color: #1c1c1e; background: #fff; }
+    body { max-width: 34rem; margin: 18vh auto; padding: 0 1.5rem; }
+    a { color: #0a84ff; }
+  </style>
 </head>
 <body>
-  <nav class="site-nav" aria-label="Site">
-    <a class="brand" href="./" aria-current="page">1-bit-bridge</a>
-    <a href="setup.html">Setup</a>
-    <a href="features.html">Features</a>
-    <a href="troubleshooting.html">Troubleshooting</a>
-    <a href="privacy.html">Privacy</a>
-    <a href="https://github.com/acoseac/1-bit-bridge">GitHub</a>
-  </nav>
-  <main>
-    <h1>1-bit-bridge</h1>
-    <p class="lede">Companion server for the <a href="https://apps.apple.com/us/app/1-bit/id6762529497">1-bit iOS music player</a>. Reach your home music library from anywhere — over Tailscale, a VPN, or a direct connection — without SMB's round-trip penalty.</p>
-
-    <div class="hero-links">
-      <a class="btn btn-primary" href="https://github.com/acoseac/1-bit-bridge/releases/latest">Download latest release</a>
-      <a class="btn" href="setup.html">Setup walkthrough</a>
-      <a class="btn" href="https://github.com/acoseac/1-bit-bridge">GitHub</a>
-      <a class="btn" href="https://apps.apple.com/us/app/1-bit/id6762529497">iOS app</a>
-    </div>
-
-    <h2>Quick start</h2>
-    <ol class="steps">
-      <li>
-        <h3>Download for your platform</h3>
-        <p>Pre-built archives for macOS / Linux / Windows × amd64 / arm64 on the <a href="https://github.com/acoseac/1-bit-bridge/releases/latest">releases page</a>. No Go toolchain required.</p>
-      </li>
-      <li>
-        <h3>Run <code>bridge init</code></h3>
-        <p>The init wizard asks for your library path, a friendly name, and a listen address — defaults are sane. Installs as a system service so the bridge starts on boot.</p>
-        <pre><code>./bridge init</code></pre>
-      </li>
-      <li>
-        <h3>Pair your iPhone</h3>
-        <p>Open <a href="http://127.0.0.1:7789/">the admin console</a>, install the <a href="https://apps.apple.com/us/app/1-bit/id6762529497">1-bit iOS app</a>, and tap-to-pair from the iPhone's Discover sheet. Approve the request on the admin console — done.</p>
-      </li>
-    </ol>
-    <p>For the full step-by-step including platform notes, the admin console tour, and what to do when something goes wrong: <a href="setup.html">setup walkthrough</a>.</p>
-
-    <h2>Why</h2>
-    <p>1-bit's built-in SMB transport is great on LAN but painful over high-latency links. Every <code>pread</code> on a remote share costs a round trip, so a library scan that finishes in seconds at home can take minutes over Tailscale's relay. <strong>1-bit-bridge</strong> replaces SMB with an HTTP/2 protocol purpose-built for the app, plus a pre-built library manifest that lets the iOS side skip its two-phase scan entirely.</p>
-
-    <h2>What you get</h2>
-    <ul class="features">
-      <li><strong>Pre-built library manifest</strong> served from SQLite — iOS fetches the full library (or a delta) in a single request, no walking. 50,000-track libraries sync in milliseconds. Classical metadata (composer / conductor / work / BPM) and multi-value artist credits ride along.</li>
-      <li><strong>Bit-exact, no transcoding ever.</strong> FLAC, ALAC, WAV, AIFF, MP3, AAC, DSF, DFF — served as-is. iOS still pre-caches the full DSF / DFF before playback so the DAC's DoP lock isn't at risk.</li>
-      <li><strong>Tap-to-pair from iOS</strong> with admin approval, or generate-token-and-scan-QR for power users. Bearer tokens per device, rotatable, revocable.</li>
-      <li><strong>Tailscale-ready</strong> with three integration modes — embedded tailnet node (zero CLI dependency), system-CLI passthrough, or LAN-only.</li>
-      <li><strong>Optional offline PCM upscaling</strong> via <code>sox</code> for high-end DACs that benefit from upsampled material — opt-in, off by default. Variants are managed from a folder-first Library Inspector in the admin console.</li>
-      <li><strong>HTTP/3 (QUIC) on the same port as HTTP/2</strong> — iOS picks the better transport on lossy cellular links, no operator-side configuration needed.</li>
-      <li><strong>Public-internet deployment mode</strong> (v0.1.4) for bridges intentionally exposed beyond the LAN — adds a password-protected admin console and native Let's Encrypt cert provisioning via ACME, on top of the same paired-token-authenticated iOS API.</li>
-      <li><strong>DLNA / UPnP MediaServer, playlist backup, and opt-in listening history</strong> (v0.1.5) — optionally serve your library to LAN renderers like the Chord 2Go, back up your iOS playlists so they survive a reinstall, and keep a private listening log that stays on your own machine. All off or opt-in by default.</li>
-    </ul>
-    <p>Detailed feature list with config snippets and design rationale: <a href="features.html">features deep-dive</a>.</p>
-
-    <h2>Learn more</h2>
-    <div class="grid-2">
-      <div class="card">
-        <h3><a href="setup.html">Setup walkthrough →</a></h3>
-        <p>From a blank machine to a paired iPhone in ten minutes. Beginner-friendly, covers macOS, Linux, and Windows.</p>
-      </div>
-      <div class="card">
-        <h3><a href="features.html">Features →</a></h3>
-        <p>Pairing models, Tailscale modes, upscale variants, updates, backups, admin console tour.</p>
-      </div>
-      <div class="card">
-        <h3><a href="troubleshooting.html">Troubleshooting →</a></h3>
-        <p>Symptom-to-fix list. Discover not finding the bridge, slow scans, Tailscale gotchas, log locations.</p>
-      </div>
-      <div class="card">
-        <h3><a href="https://github.com/acoseac/1-bit-bridge/blob/main/docs/docker.md">Docker deployment →</a></h3>
-        <p>Multi-arch container build, docker-compose recipe, env-var configuration for headless deployments.</p>
-      </div>
-      <div class="card">
-        <h3><a href="https://github.com/acoseac/1-bit-bridge/blob/main/PROTOCOL.md">Wire protocol →</a></h3>
-        <p>Every endpoint, request shape, and error code. Versioned <code>X-Bridge-Protocol: 1</code>.</p>
-      </div>
-      <div class="card">
-        <h3><a href="privacy.html">Privacy →</a></h3>
-        <p>What's stored, what's sent, what's deliberately not logged. No telemetry, no analytics.</p>
-      </div>
-    </div>
-
-    <div class="note">
-      <strong>Windows note:</strong> current Windows binaries are unsigned. First launch will show SmartScreen's "unrecognized app" — click <em>More info</em> → <em>Run anyway</em>. Authenticode signing is pending SignPath Foundation review. macOS and Linux binaries are signed and notarized (macOS) or static (Linux).
-    </div>
-
-    <h2>Open source</h2>
-    <p><strong>MIT-licensed</strong>. Source at <a href="https://github.com/acoseac/1-bit-bridge">github.com/acoseac/1-bit-bridge</a>: the Go server, the embedded admin console, the protocol spec, and the release pipeline. Issues and PRs welcome — see <a href="https://github.com/acoseac/1-bit-bridge/blob/main/CONTRIBUTING.md">CONTRIBUTING.md</a>. Security reports via <a href="https://github.com/acoseac/1-bit-bridge/security/advisories/new">GitHub's private advisory flow</a>.</p>
-
-    <footer>
-      <div>© 2026 Arsenie Coseac · MIT License</div>
-      <div><a href="https://github.com/acoseac/1-bit-bridge">Source</a> · <a href="https://apps.apple.com/us/app/1-bit/id6762529497">iOS app</a> · <a href="privacy.html">Privacy</a></div>
-    </footer>
-  </main>
+  <h1>The bridge docs have moved</h1>
+  <p>The 1-bit bridge documentation now lives at
+    <a href="https://1-bit.app/bridge/">1-bit.app/bridge</a>. You’ll be redirected automatically — if not, follow the link.</p>
 </body>
 </html>

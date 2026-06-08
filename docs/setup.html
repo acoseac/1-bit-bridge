@@ -1,186 +1,20 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
+  <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Setup walkthrough — 1-bit-bridge</title>
-  <meta name="description" content="Step-by-step setup for 1-bit-bridge — download, run the init wizard, open the admin console, add your library, and pair your iPhone. Beginner-friendly walk-through covering macOS, Linux, and Windows.">
-  <meta name="theme-color" content="#0a84ff">
-  <meta property="og:type" content="article">
-  <meta property="og:url" content="https://acoseac.github.io/1-bit-bridge/setup.html">
-  <meta property="og:title" content="Setup walkthrough — 1-bit-bridge">
-  <meta property="og:description" content="Step-by-step setup for 1-bit-bridge: download → init → admin console → pair your iPhone. Covers macOS, Linux, and Windows.">
-  <link rel="canonical" href="https://acoseac.github.io/1-bit-bridge/setup.html">
-  <link rel="stylesheet" href="assets/site.css">
+  <title>Setup walkthrough has moved to 1-bit.app</title>
+  <link rel="canonical" href="https://1-bit.app/bridge/setup/">
+  <script>location.replace("https://1-bit.app/bridge/setup/" + location.hash);</script>
+  <style>
+    html { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; color: #1c1c1e; background: #fff; }
+    body { max-width: 34rem; margin: 18vh auto; padding: 0 1.5rem; }
+    a { color: #0a84ff; }
+  </style>
 </head>
 <body>
-  <nav class="site-nav" aria-label="Site">
-    <a class="brand" href="./">1-bit-bridge</a>
-    <a href="setup.html" aria-current="page">Setup</a>
-    <a href="features.html">Features</a>
-    <a href="troubleshooting.html">Troubleshooting</a>
-    <a href="privacy.html">Privacy</a>
-    <a href="https://github.com/acoseac/1-bit-bridge">GitHub</a>
-  </nav>
-  <main class="wide">
-    <a class="crumb" href="./">← 1-bit-bridge</a>
-    <h1>Setup walkthrough</h1>
-    <p class="lede">From a blank machine to a paired iPhone in about ten minutes. No Go toolchain, no Docker — just a pre-built binary, a config wizard, and a quick QR scan. Pick your platform and follow the steps.</p>
-
-    <h2>Before you start</h2>
-    <p>You'll need:</p>
-    <ul>
-      <li>A computer that stays on while you listen — Mac, Linux box, Raspberry Pi 4+ (arm64), or Windows 10/11 PC. A modern NAS that runs containers also works (see <a href="https://github.com/acoseac/1-bit-bridge/blob/main/docs/docker.md">Docker guide</a>).</li>
-      <li>Your music library on a disk that machine can read — a folder of <code>.flac</code>, <code>.dsf</code>, <code>.alac</code>, <code>.m4a</code>, <code>.mp3</code>, and friends. Tags can be missing; the bridge enriches what it can.</li>
-      <li>The <a href="https://apps.apple.com/us/app/1-bit/id6762529497">1-bit iOS app</a> installed on your iPhone or iPad (iOS 18.6 or newer).</li>
-      <li>About 10 minutes the first time. Future updates take seconds.</li>
-    </ul>
-
-    <ol class="steps">
-      <li id="step-1">
-        <h3>Download for your platform</h3>
-        <p>Grab the archive matching your OS and CPU from the <a href="https://github.com/acoseac/1-bit-bridge/releases/latest">latest release page</a>. No installer — just unpack.</p>
-        <div class="grid-2">
-          <div class="card">
-            <h3>macOS</h3>
-            <pre><code>tar -xzf 1-bit-bridge_*_macos_arm64.tar.gz
-cd 1-bit-bridge_*_macos_arm64</code></pre>
-            <p>Apple Silicon → <code>arm64</code>. Intel Mac → <code>amd64</code>. Signed and notarized; Gatekeeper is happy on first run.</p>
-          </div>
-          <div class="card">
-            <h3>Linux / Raspberry Pi</h3>
-            <pre><code>tar -xzf 1-bit-bridge_*_linux_arm64.tar.gz
-cd 1-bit-bridge_*_linux_arm64</code></pre>
-            <p>Pi 4 / Pi 5 → <code>arm64</code>. x86_64 server → <code>amd64</code>. Static binary — no glibc gymnastics.</p>
-          </div>
-          <div class="card">
-            <h3>Windows</h3>
-            <pre><code>Expand-Archive -Path 1-bit-bridge_*_windows_amd64.zip -DestinationPath bridge
-cd bridge</code></pre>
-            <p>SmartScreen will warn "unrecognized app" on first run — click <em>More info</em> → <em>Run anyway</em>. Authenticode signing is in progress.</p>
-          </div>
-        </div>
-      </li>
-
-      <li id="step-2">
-        <h3>Run a preflight check (optional)</h3>
-        <p><code>bridge doctor</code> prints a punch list of what's wrong with your environment before you commit to a config. It's safe — it makes no changes.</p>
-        <pre><code>./bridge doctor</code></pre>
-        <p>You're aiming for all green. The most common red is <strong>port already in use</strong> on <code>:7788</code> or <code>:7789</code> — close whatever owns those ports, or pick different ones in the next step.</p>
-      </li>
-
-      <li id="step-3">
-        <h3>Run <code>bridge init</code></h3>
-        <p>The init wizard walks you through the minimum you need to start serving music: a library path, a bridge name (shows up on your iPhone), and an HTTPS listen address. Defaults are sane — pressing return is usually fine.</p>
-        <pre><code>./bridge init</code></pre>
-        <p>It will ask for:</p>
-        <ul>
-          <li><strong>Library path</strong> — the top-level folder containing your music. Use an absolute path. Multiple roots can be added later from the admin console.</li>
-          <li><strong>Library name</strong> — what your phone shows in the Sources list. <em>"Home library"</em> is fine.</li>
-          <li><strong>Listen address</strong> — accept the default <code>:7788</code> unless that port is taken.</li>
-          <li><strong>Service install</strong> — yes, install as a launchd / systemd / Windows Service. The bridge starts on boot and keeps running across logouts.</li>
-        </ul>
-        <div class="note">If you'd rather not install a service yet, run <code>./bridge init --no-service --yes</code> and start the bridge manually with <code>./bridge serve</code>. Quit-on-close, keep-it-simple — recommended for first-time exploration.</div>
-      </li>
-
-      <li id="step-4">
-        <h3>Open the admin console</h3>
-        <p>Once <code>bridge init</code> reports success, open <a href="http://127.0.0.1:7789/">http://127.0.0.1:7789/</a> in any browser on the same machine.</p>
-        <p>The admin console is loopback-only — it answers exclusively on <code>127.0.0.1</code>, never on your LAN or Tailscale IP. There's no login because anyone with a shell on this machine already has access to the data the console manages. From here you can:</p>
-        <ul>
-          <li><strong>Library</strong> — add or remove root folders, kick off a re-scan, watch progress.</li>
-          <li><strong>Devices</strong> — pair iPhones, rotate or revoke tokens, approve pending pair requests.</li>
-          <li><strong>Settings</strong> — Tailscale mode, auto-update, quiet hours, backup rotation, optional upscale.</li>
-          <li><strong>Updates</strong> — check for new bridge releases, see what's installed, opt in to auto-install.</li>
-        </ul>
-      </li>
-
-      <li id="step-5">
-        <h3>Wait for the first scan</h3>
-        <p>The bridge starts scanning your library the moment it's pointed at a folder. The Library tab shows live progress: total files found, tagged so far, artwork fetched.</p>
-        <p>What "first scan" looks like for typical libraries:</p>
-        <table>
-          <caption>Approximate first-scan and re-scan durations by library size</caption>
-          <tr><th>Library size</th><th>Approx. first scan</th><th>Subsequent re-scans</th></tr>
-          <tr><td>2,000 tracks</td><td>30 seconds</td><td>under 5 seconds</td></tr>
-          <tr><td>10,000 tracks</td><td>2 minutes</td><td>10–20 seconds</td></tr>
-          <tr><td>50,000 tracks</td><td>5–15 minutes</td><td>30–60 seconds</td></tr>
-        </table>
-        <p>Times depend on disk speed and how much enrichment (MusicBrainz lookups, artwork downloads) the bridge has to do. The first scan is the slow one because every track gets enriched; later scans only enrich what's new.</p>
-        <div class="note note-ok"><strong>You can pair your iPhone before the scan finishes.</strong> The app will stream what's already indexed and pick up the rest as it lands.</div>
-      </li>
-
-      <li id="step-6">
-        <h3>Pair your iPhone — Method A: tap-to-pair (recommended)</h3>
-        <p>This is the easiest path on iOS 1.2 and newer. Both devices must be on the same Wi-Fi.</p>
-        <ol>
-          <li>Open the 1-bit app.</li>
-          <li>Tap <strong>+</strong> in the Sources list, then <em>Add 1-bit Bridge…</em> → <em>Discover on network</em>.</li>
-          <li>Your bridge appears in a list — tap it. The app shows a 6-digit verification code.</li>
-          <li>Switch to the admin console — a yellow <em>Pending pair request</em> banner appears at the top of every page. Click into it.</li>
-          <li>Confirm the 6-digit code matches what's on your phone, give the device a friendly name (e.g. <em>"My iPhone"</em>), and click <strong>Approve</strong>.</li>
-          <li>Your phone's Sources list now shows the bridge as a paired source. Tap into it.</li>
-        </ol>
-        <p>The verification code prevents an attacker on your network from MITM'ing the pair — only the device that actually holds the matching code is talking to your bridge.</p>
-      </li>
-
-      <li id="step-7">
-        <h3>Pair your iPhone — Method B: QR / manual entry</h3>
-        <p>If you'd rather pair from the admin side first (e.g. you're configuring a phone for someone else), use the legacy flow.</p>
-        <ol>
-          <li>In the admin console, open the <em>Devices</em> tab and click <em>Pair new device</em>.</li>
-          <li>Give it a name and click <strong>Generate token</strong>. The console shows a QR code encoding a <code>bridge://pair?...</code> URL.</li>
-          <li>On the iPhone: 1-bit → <strong>+</strong> → <em>Add 1-bit Bridge…</em> → <em>Scan QR code</em>. Point the camera at the QR.</li>
-          <li>Or paste the URL, token, and TLS fingerprint manually via <em>Add 1-bit Bridge…</em> → <em>Enter manually</em>.</li>
-        </ol>
-        <p>Either method ends with the bridge appearing as a paired source in 1-bit. Every subsequent request from the iPhone is bearer-token-authenticated and TLS-fingerprint-pinned.</p>
-      </li>
-
-      <li id="step-8">
-        <h3>Test playback</h3>
-        <p>From the iPhone's Sources list, tap into the bridge. Browse to an album. Tap a track. You should hear it within a second or two.</p>
-        <p>Check the bottom-of-screen mini-player chip — it should read <strong>BIT-EXACT</strong> green for FLAC / ALAC / DSF playback. If it shows orange (resampling), iOS hit a sample-rate ceiling on the route — usually means an AirPlay or BT speaker is in the path. Tap the chip for details.</p>
-      </li>
-
-      <li id="step-9">
-        <h3>Optional: enable remote access via Tailscale</h3>
-        <p>If you want to listen to your library from outside your home network, the cleanest answer is <a href="https://tailscale.com/">Tailscale</a> — a free, peer-to-peer VPN. The bridge has built-in support for it.</p>
-        <p>Two integration modes are available:</p>
-        <ul>
-          <li><strong><code>tsnet</code> mode (recommended for new installs).</strong> The bridge embeds a tailnet node directly in its own process. No system Tailscale install needed; HTTPS certs renew automatically. Authenticate once with <code>./bridge tsnet auth</code>.</li>
-          <li><strong><code>cli</code> mode.</strong> If you already have Tailscale running on the host (typical desktop setup), this delegates to the system <code>tailscale</code> binary.</li>
-        </ul>
-        <p>See <a href="features.html#tailscale">Features → Tailscale integration</a> for the full rundown — when to choose which mode, the macOS sandboxed-CLI gotcha, and how to verify Magic-DNS works end-to-end.</p>
-      </li>
-
-    </ol>
-
-    <h2 id="step-10">Alternative: public-internet deployment (v0.1.4)</h2>
-    <p>If you'd rather expose the bridge directly on the public internet — a small VPS for friends and family, a fixed public hostname rather than a tailnet identity, or any setup where Tailscale isn't an option — substitute step 3 above with the public-mode initialiser:</p>
-    <pre><code>./bridge init --public</code></pre>
-    <p>Steps 1, 2, 5, 6, 7, and 8 above are unchanged. The public profile differs from the loopback default in three ways:</p>
-    <ul>
-      <li><strong>Admin console password.</strong> The init wizard generates a 16-character random password and prints it once. Copy it somewhere safe; rotate later with <code>./bridge admin reset-password</code>.</li>
-      <li><strong>Let's Encrypt cert.</strong> If you set <code>autocert.enabled: true</code> with a public domain pointed at the host, the bridge fetches a real TLS cert automatically. No reverse proxy needed.</li>
-      <li><strong>Reachable admin console + TLS-port shift.</strong> The admin listener binds a routable interface (not <code>127.0.0.1</code>) so you can manage the bridge from another machine, and the iOS-facing TLS listener defaults to <code>:443</code> instead of the loopback default <code>:7788</code> — Let's Encrypt's TLS-ALPN-01 challenge only validates on TCP/443.</li>
-    </ul>
-    <p>Lock down what you expose: open only the bridge's TLS port (<code>:443</code> with this profile, unless you overrode it with <code>--listen-address</code>) and, if you need remote admin, the admin port (default <code>:7789</code>) — keep the admin port firewalled to the operator's IP via your VPS firewall / <code>ufw</code> / cloud security group.</p>
-
-    <h2>Something not working?</h2>
-    <p>Check the <a href="troubleshooting.html">troubleshooting page</a> for common symptoms — bridge not appearing in Discover, "Server unreachable" errors, slow scans, certificate-rotation flow. If your problem isn't listed, <a href="https://github.com/acoseac/1-bit-bridge/issues">open an issue on GitHub</a>.</p>
-
-    <h2>Next steps</h2>
-    <p>Once you have playback working:</p>
-    <ul>
-      <li><a href="features.html">Browse the full feature set</a> — admin-approval pairing, upscale variants, the folder-first <a href="features.html#inspector">Library Inspector</a>, Tailscale modes, auto-updates, backups.</li>
-      <li><a href="https://github.com/acoseac/1-bit-bridge/blob/main/PROTOCOL.md">Read the wire protocol</a> if you want to write your own client.</li>
-      <li><a href="privacy.html">Read the privacy policy</a> — what's stored, what's sent out, what's deliberately not logged.</li>
-    </ul>
-
-    <footer>
-      <div>© 2026 Arsenie Coseac · MIT License</div>
-      <div><a href="https://github.com/acoseac/1-bit-bridge">Source</a> · <a href="https://apps.apple.com/us/app/1-bit/id6762529497">iOS app</a> · <a href="privacy.html">Privacy</a></div>
-    </footer>
-  </main>
+  <h1>This page has moved</h1>
+  <p>The bridge setup walkthrough now lives at
+    <a href="https://1-bit.app/bridge/setup/">1-bit.app/bridge/setup</a>. You’ll be redirected automatically — if not, follow the link.</p>
 </body>
 </html>
