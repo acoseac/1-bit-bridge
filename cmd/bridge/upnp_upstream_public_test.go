@@ -128,6 +128,32 @@ func TestPublic_FriendlyName_FromDiscoveryCache(t *testing.T) {
 	}
 }
 
+func TestLookupUPnPServerRuntime_TrimsWhitespaceUDN(t *testing.T) {
+	// A config UDN with surrounding whitespace must trim before the
+	// cache lookup so it still matches the (clean) discovery-cache key —
+	// otherwise it false-reports offline + drops the friendly name.
+	// Calls the helper directly so config validation can't pre-trim the
+	// UDN and mask the runtime behavior. (Gemini on PR #362.)
+	cache := upnp.NewServerCache()
+	cache.Upsert(upnp.ServerInfo{
+		UDN:                        "uuid:wsp",
+		FriendlyName:               "Padded 2Go",
+		ContentDirectoryControlURL: "http://192.0.2.9:8200/ctl",
+		LastSeenAt:                 time.Now(),
+	})
+	friendly, _, online := lookupUPnPServerRuntime(
+		context.Background(),
+		config.UPnPUpstreamServerConfig{Name: "Padded", UDN: "  uuid:wsp  ", PathPrefix: "wsp"},
+		cache, openUPnPTestStore(t),
+	)
+	if !online {
+		t.Error("online = false; want true (whitespace UDN should trim + match the cache)")
+	}
+	if friendly != "Padded 2Go" {
+		t.Errorf("friendlyName = %q; want resolved via the trimmed cache lookup", friendly)
+	}
+}
+
 func TestPublic_FriendlyName_EmptyWhenUndiscovered(t *testing.T) {
 	// Pre-discovery (bridge just started, SSDP cache empty for this
 	// UDN) the FriendlyName field MUST be empty on the wire — iOS

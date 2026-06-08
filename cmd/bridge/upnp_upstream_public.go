@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"strings"
 
 	"github.com/acoseac/1-bit-bridge/internal/api"
 	"github.com/acoseac/1-bit-bridge/internal/config"
@@ -115,9 +116,14 @@ func lookupUPnPServerRuntime(
 	// OFF flips online false within the TTL window even while the bridge
 	// stays reachable. The nil-cache guard matches PublicAdapter's
 	// defensive posture above.
-	online = srv.UDN == ""
-	if srv.UDN != "" && cache != nil {
-		if info, ok := cache.Get(srv.UDN); ok {
+	// Trim before the empty-check + cache lookup so a config UDN with
+	// surrounding whitespace (" uuid:123 ") doesn't miss the cache and
+	// false-report offline — matches the trim StableServerKey already
+	// does for the routed-track key. (Gemini on PR #362.)
+	udn := strings.TrimSpace(srv.UDN)
+	online = udn == ""
+	if udn != "" && cache != nil {
+		if info, ok := cache.Get(udn); ok {
 			friendlyName = info.FriendlyName
 			online = true
 		}
