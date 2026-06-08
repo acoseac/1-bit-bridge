@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
@@ -391,6 +392,11 @@ func writeHistoryCSV(w http.ResponseWriter, events []manifest.HistoryEventOut) {
 		})
 	}
 	cw.Flush()
+	if err := cw.Error(); err != nil {
+		// The client likely sees a truncated CSV; surface it so a
+		// disconnected-client / full-disk export failure isn't silent.
+		logging.Component("admin.history").Warn("history CSV export write error", "err", err)
+	}
 }
 
 func historyToDTO(e manifest.HistoryEventOut) historyEventDTO {

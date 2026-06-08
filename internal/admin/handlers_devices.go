@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
@@ -118,9 +119,18 @@ func (s *Server) apiHistorySummary(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
-	codecs, _ := s.deps.Manifest.CodecHistogram(ctx, "")
-	routes, _ := s.deps.Manifest.RouteHistogram(ctx, "")
-	top, _ := s.deps.Manifest.TopTracks(ctx, 20)
+	codecs, err := s.deps.Manifest.CodecHistogram(ctx, "")
+	if err != nil {
+		logging.Component("admin.devices").Warn("CodecHistogram failed", "err", err)
+	}
+	routes, err := s.deps.Manifest.RouteHistogram(ctx, "")
+	if err != nil {
+		logging.Component("admin.devices").Warn("RouteHistogram failed", "err", err)
+	}
+	top, err := s.deps.Manifest.TopTracks(ctx, 20)
+	if err != nil {
+		logging.Component("admin.devices").Warn("TopTracks failed", "err", err)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"totalEvents": total,
 		"codecs":      toBucketRows(codecs),
