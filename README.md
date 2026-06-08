@@ -7,7 +7,7 @@
 
 Companion server for the **[1-bit iOS music player](https://apps.apple.com/us/app/1-bit/id6762529497)** — bit-exact playback of your own music library, including DSD, from anywhere. The bridge runs on a home server (Windows / Linux / macOS / NAS) and exposes your library over HTTPS + bearer-token auth with a pre-built manifest endpoint, so the iOS app syncs its whole library in a single request instead of walking a slow SMB tree.
 
-👉 **[acoseac.github.io/1-bit-bridge](https://acoseac.github.io/1-bit-bridge/)** for the landing page with install walk-through.
+👉 **[1-bit.app/bridge](https://1-bit.app/bridge/)** for the landing page, setup walkthrough, feature reference, troubleshooting, and privacy policy.
 
 ## Why
 
@@ -66,7 +66,7 @@ Before (or any time after) running `bridge init`, `bridge doctor` prints a punch
 
 `bridge init` runs doctor automatically and bails on `fail` (use `--skip-doctor` to override — not recommended).
 
-**Admin console** — [http://127.0.0.1:7789/](http://127.0.0.1:7789/). Add/remove library folders, pair iOS devices (QR + copy-buttons), revoke tokens, view scan state + stats. Loopback-only, no auth — anyone on the machine already has filesystem access to the token store. (For internet-exposed deployments, see `bridge init --public` in [docs/features.html#public-mode](https://acoseac.github.io/1-bit-bridge/features.html#public-mode) — that profile binds the admin console to a routable interface and adds a single-user password login.)
+**Admin console** — [http://127.0.0.1:7789/](http://127.0.0.1:7789/). Add/remove library folders, pair iOS devices (QR + copy-buttons), revoke tokens, view scan state + stats. Loopback-only, no auth — anyone on the machine already has filesystem access to the token store. (For internet-exposed deployments, see `bridge init --public` in [the public-deployment docs](https://1-bit.app/bridge/features/#public-mode) — that profile binds the admin console to a routable interface and adds a single-user password login.)
 
 **Pairing an iOS device**: on the Devices page, click _Pair new device_, give it a name, optionally edit the bridge URL (defaults to `https://<hostname>.local:7788`), then generate the token. The modal shows a QR encoding a `bridge://pair?...` URL — scan it in the 1-bit app, or copy the URL/token/fingerprint fields manually.
 
