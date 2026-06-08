@@ -68,13 +68,14 @@ func (a *upnpPublicAdapter) PublicServers(ctx context.Context) []api.UPnPUpstrea
 	}
 	out := make([]api.UPnPUpstreamPublicServer, 0, len(cfg.UPnPUpstream.Servers))
 	for _, srv := range cfg.UPnPUpstream.Servers {
-		friendly, routed := lookupUPnPServerRuntime(ctx, srv, a.cache, a.store)
+		friendly, routed, online := lookupUPnPServerRuntime(ctx, srv, a.cache, a.store)
 		out = append(out, api.UPnPUpstreamPublicServer{
 			Name:          srv.Name,
 			ConfiguredUDN: srv.UDN,
 			PathPrefix:    srv.PathPrefix,
 			FriendlyName:  friendly,
 			RoutedTracks:  routed,
+			Online:        online,
 		})
 	}
 	return out
@@ -102,17 +103,23 @@ func lookupUPnPServerRuntime(
 	srv config.UPnPUpstreamServerConfig,
 	cache *upnp.ServerCache,
 	store *manifest.Store,
-) (friendlyName string, routedTracks int) {
-	// SSDP-keyed friendly-name lookup applies only to servers
+) (friendlyName string, routedTracks int, online bool) {
+	// SSDP-keyed friendly-name + liveness lookup applies only to servers
 	// configured with a UDN — manual-URL entries don't get into the
 	// discovery cache (the M-SEARCH responder matches by UDN, and a
 	// manual entry pre-discovery has none). Manual entries surface
-	// FriendlyName == "" on the wire; iOS / admin UI fall back to
-	// Name. The nil-cache guard matches PublicAdapter's defensive
-	// posture above.
+	// FriendlyName == "" and online == true (their real reachability
+	// surfaces as a 503 upnp_server_offline on fetch). A UDN entry is
+	// online iff it's currently in the discovery cache — refreshed every
+	// M-SEARCH, evicted at ServerTTL (≈180s) — so powering the upstream
+	// OFF flips online false within the TTL window even while the bridge
+	// stays reachable. The nil-cache guard matches PublicAdapter's
+	// defensive posture above.
+	online = srv.UDN == ""
 	if srv.UDN != "" && cache != nil {
 		if info, ok := cache.Get(srv.UDN); ok {
 			friendlyName = info.FriendlyName
+			online = true
 		}
 	}
 	// Routed-track count keyed on the SAME stable key the ingester
@@ -128,7 +135,7 @@ func lookupUPnPServerRuntime(
 			routedTracks = n
 		}
 	}
-	return friendlyName, routedTracks
+	return friendlyName, routedTracks, online
 }
 
 // installPublicProvider builds the public-surface adapter for the

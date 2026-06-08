@@ -123,6 +123,9 @@ func TestPublic_FriendlyName_FromDiscoveryCache(t *testing.T) {
 	if got[0].PathPrefix != "chord" {
 		t.Errorf("PathPrefix = %q; want %q", got[0].PathPrefix, "chord")
 	}
+	if !got[0].Online {
+		t.Error("Online = false; want true (UDN present in discovery cache)")
+	}
 }
 
 func TestPublic_FriendlyName_EmptyWhenUndiscovered(t *testing.T) {
@@ -136,6 +139,13 @@ func TestPublic_FriendlyName_EmptyWhenUndiscovered(t *testing.T) {
 	got := a.PublicServers(context.Background())
 	if got[0].FriendlyName != "" {
 		t.Errorf("FriendlyName = %q; want \"\" (pre-discovery)", got[0].FriendlyName)
+	}
+	// A UDN entry NOT in the discovery cache (here: pre-discovery; in
+	// production also: the upstream powered off + evicted at ServerTTL) is
+	// reported offline — this is the signal iOS uses to stop offering its
+	// tracks. (Issue A — 2Go off / bridge on.)
+	if got[0].Online {
+		t.Error("Online = true; want false (UDN not in discovery cache)")
 	}
 }
 
@@ -155,6 +165,12 @@ func TestPublic_ManualURLServer_OmitsConfiguredUDN(t *testing.T) {
 	}
 	if got[0].Name != "Manual" {
 		t.Errorf("Name = %q; want %q", got[0].Name, "Manual")
+	}
+	// Manual-URL entries aren't in the SSDP cache, so liveness can't be
+	// observed here — they default online (a real outage surfaces as a
+	// 503 upnp_server_offline on fetch, not a false offline flag).
+	if !got[0].Online {
+		t.Error("Online = false; want true (manual-URL entry defaults online)")
 	}
 }
 
