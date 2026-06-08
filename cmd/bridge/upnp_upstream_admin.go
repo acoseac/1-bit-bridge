@@ -124,8 +124,14 @@ func (a *upnpAdminAdapter) ConfiguredServers() []admin.UPnPUpstreamServerState {
 		// Manufacturer / ControlURL / LastSeenAt). FriendlyName is
 		// already populated by the shared helper above — don't
 		// overwrite it here.
-		if srv.UDN != "" && a.cache != nil {
-			if info, ok := a.cache.Get(srv.UDN); ok {
+		// Trim before the cache lookup so a config UDN with surrounding
+		// whitespace (" uuid:123 ") doesn't miss the SSDP-clean cache key
+		// and false-report Discovered=false. Mirrors the same trim
+		// lookupUPnPServerRuntime already applies for the public
+		// /v1/health row (Gemini on PR #362) — the admin path's parallel
+		// cache.Get was missed by that fix.
+		if trimmedUDN := strings.TrimSpace(srv.UDN); trimmedUDN != "" && a.cache != nil {
+			if info, ok := a.cache.Get(trimmedUDN); ok {
 				row.Discovered = true
 				row.ResolvedUDN = info.UDN
 				row.Manufacturer = info.Manufacturer

@@ -316,6 +316,82 @@ func TestIngester_Run_ReapsStaleRowsAfterSuccessfulWalk(t *testing.T) {
 	}
 }
 
+func TestIngester_Run_TruncatedWalk_DoesNotReap(t *testing.T) {
+	// A MaxItems-truncated walk only visits a PREFIX of the library, so
+	// its results are not authoritative — the reconcile sweep MUST be
+	// skipped or it would delete every track past the ceiling that the
+	// walk never reached. Regression for the data-loss bug where
+	// ErrWalkTruncated fell through to the reap (the walker's own
+	// ErrWalkTruncated contract warns against exactly this).
+	store := openIngestTestStore(t)
+	const oldPath = "Chord 2Go/Music/Old.flac"
+	tOld := time.Now().UTC().Add(-1 * time.Hour)
+	if err := store.UpsertTrack(context.Background(), &manifest.Track{Path: oldPath, Size: 1, ModTime: tOld}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertUPnPRouting(context.Background(), &manifest.UPnPRouting{
+		SourcePath: oldPath, ServerUDN: "uuid:test", ObjectID: "x",
+		ResURL: "http://h/x.flac", LastSeenAt: tOld,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	stub := newStubSOAP()
+	stub.addRoute("GetSystemUpdateID", wrapSystemUpdateID("0"))
+	stub.addRoute("Browse", wrapBrowse(
+		`<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">`+
+			`<container id="64$0" parentID="64"><dc:title>Music</dc:title><upnp:class>object.container.storageFolder</upnp:class></container>`+
+			`</DIDL-Lite>`, 1, 1))
+	stub.addRoute("Browse", wrapBrowse(
+		`<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">`+
+			`<container id="64$0$0" parentID="64$0"><dc:title>Artist</dc:title><upnp:class>object.container.storageFolder</upnp:class></container>`+
+			`</DIDL-Lite>`, 1, 1))
+	stub.addRoute("Browse", wrapBrowse(
+		`<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">`+
+			`<container id="64$0$0$0" parentID="64$0$0"><dc:title>Album</dc:title><upnp:class>object.container.storageFolder</upnp:class></container>`+
+			`</DIDL-Lite>`, 1, 1))
+	// Album holds TWO tracks; with MaxItems=1 the walker yields the first
+	// then truncates on the second, returning ErrWalkTruncated.
+	stub.addRoute("Browse", wrapBrowse(
+		`<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">`+
+			`<item id="x1" parentID="64$0$0$0"><dc:title>One</dc:title><upnp:class>object.item.audioItem.musicTrack</upnp:class>`+
+			`<upnp:artist>Artist</upnp:artist><upnp:album>Album</upnp:album><upnp:originalTrackNumber>1</upnp:originalTrackNumber>`+
+			`<res protocolInfo="http-get:*:audio/x-flac:*" size="1">http://h/MediaItems/1.flac</res></item>`+
+			`<item id="x2" parentID="64$0$0$0"><dc:title>Two</dc:title><upnp:class>object.item.audioItem.musicTrack</upnp:class>`+
+			`<upnp:artist>Artist</upnp:artist><upnp:album>Album</upnp:album><upnp:originalTrackNumber>2</upnp:originalTrackNumber>`+
+			`<res protocolInfo="http-get:*:audio/x-flac:*" size="1">http://h/MediaItems/2.flac</res></item>`+
+			`</DIDL-Lite>`, 2, 2))
+
+	client := upnp.NewContentDirectoryClient(stub)
+	cfg := config.UPnPUpstreamConfig{
+		Enabled: true,
+		Servers: []config.UPnPUpstreamServerConfig{
+			{Name: "2Go", UDN: "uuid:test", PathPrefix: "Chord 2Go"},
+		},
+	}
+	ing, err := NewIngester(cfg, client, &stubResolver{controlURL: "http://h:8200/ctl/CD"}, store, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := ing.Run(context.Background(), Options{MaxItems: 1})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	pr := res.PerServer[0]
+	if !errors.Is(pr.Err, upnp.ErrWalkTruncated) {
+		t.Fatalf("per-server err = %v; want ErrWalkTruncated", pr.Err)
+	}
+	if pr.Reaped != 0 {
+		t.Fatalf("reaped = %d; want 0 — a truncated walk must NOT reap", pr.Reaped)
+	}
+	// The pre-existing track the truncated walk never reached MUST
+	// survive; reaping it would be the data-loss regression.
+	if got, _ := store.GetTrack(context.Background(), oldPath); got == nil {
+		t.Errorf("pre-existing track was reaped after a TRUNCATED walk (data loss)")
+	}
+}
+
 // --- test infra helpers ---
 
 // openStoreFromExisting is a no-op shim so the test can pass the
