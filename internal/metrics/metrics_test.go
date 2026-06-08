@@ -82,8 +82,9 @@ func Test_MetricsEndpointExposes_BridgeMetricFamilies(t *testing.T) {
 	RecordMBCache("artist", true)
 	SQLiteLockWaitHist.WithLabelValues("test_op").Observe(0.001)
 	UpscaleJobsCompletedTotal.WithLabelValues("success").Inc()
-	HTTPRequestsTotal.WithLabelValues("/test", "200").Inc()
+	HTTPRequestsTotal.WithLabelValues("/test", "200", "h2").Inc()
 	HTTPRequestDurationHist.WithLabelValues("/test").Observe(0.005)
+	HTTPDownloadThroughputMbps.WithLabelValues("h3").Observe(123.4)
 	UpscaleDurationHist.Observe(1.0)
 
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
@@ -100,6 +101,7 @@ func Test_MetricsEndpointExposes_BridgeMetricFamilies(t *testing.T) {
 		"bridge_tsnet_node_state",
 		"bridge_upscale_jobs_completed_total",
 		"bridge_http_requests_total",
+		"bridge_http_download_throughput_mbps",
 	} {
 		if !strings.Contains(body, name) {
 			t.Errorf("/metrics missing expected family %q", name)

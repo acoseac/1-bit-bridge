@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/logging"
@@ -65,6 +66,42 @@ func newRequestID() string {
 		return fmt.Sprintf("t%016x", time.Now().UnixNano())
 	}
 	return hex.EncodeToString(b[:])
+}
+
+// downloadThroughputMinBytes is the floor below which a /v1/download or
+// /v1/read response is NOT recorded into the download-throughput
+// telemetry. Tiny range probes (the hybrid-precache waiter, a seek that
+// reads a few KB) would otherwise dominate the distribution with
+// meaningless ratios. 2 MiB is comfortably above any metadata-shaped
+// range read but well below a real track transfer.
+const downloadThroughputMinBytes int64 = 2 * 1024 * 1024
+
+// transportProto returns a short, bounded, CANONICAL protocol label for
+// telemetry: "h3" / "h2" / "http/1.1". It prefers the negotiated ALPN
+// (quic-go sets "h3"; the stdlib sets "h2"), tolerating any "h3-NN" draft
+// suffix, and otherwise falls back to the request's major version. BOTH
+// paths normalize to the same label set so a series never splits across
+// "h2" (from ALPN) and "HTTP/2.0" (from r.Proto). The bridge is HTTPS-only,
+// so the fallback is effectively tests / impossible plaintext — but keeping
+// the labels canonical there too keeps logs + Prometheus clean. Bounded
+// cardinality makes it safe as a Prometheus label.
+func transportProto(r *http.Request) string {
+	if r.TLS != nil {
+		switch alpn := strings.ToLower(r.TLS.NegotiatedProtocol); {
+		case strings.HasPrefix(alpn, "h3"):
+			return "h3"
+		case alpn == "h2":
+			return "h2"
+		}
+	}
+	switch r.ProtoMajor {
+	case 3:
+		return "h3"
+	case 2:
+		return "h2"
+	default:
+		return "http/1.1"
+	}
 }
 
 // statusWriter wraps an http.ResponseWriter to capture the response
@@ -165,10 +202,12 @@ func requestLogging(next http.Handler) http.Handler {
 			level = slog.LevelWarn
 		}
 		duration := time.Since(start)
+		proto := transportProto(r)
 		reqLogger.LogAttrs(ctx, level, "http",
 			slog.Int("status", status),
 			slog.Int64("duration_ms", duration.Milliseconds()),
 			slog.Int64("bytes", sw.bytes),
+			slog.String("proto", proto),
 		)
 		// Prometheus mirrors. Pattern (route template) over the raw
 		// path so cardinality stays bounded — `/v1/list?path=...` is
@@ -189,8 +228,41 @@ func requestLogging(next http.Handler) http.Handler {
 		metrics.HTTPRequestsTotal.WithLabelValues(
 			labelPath,
 			fmt.Sprintf("%d", status),
+			proto,
 		).Inc()
 		metrics.HTTPRequestDurationHist.WithLabelValues(labelPath).Observe(duration.Seconds())
+
+		// Download-throughput telemetry — the signal that answers "does
+		// HTTP/3 actually beat HTTP/2 on our links?". Strictly gated to
+		// the two file-delivery endpoints: the broad `streamingRoute`
+		// kind also covers /v1/manifest and the long-lived SSE routes
+		// (/v1/events, /v1/pairing/{id}/events), and an SSE channel held
+		// open for hours with a handful of heartbeat bytes would poison
+		// the distribution with a near-zero ratio. 206 is accepted
+		// alongside 200 because /v1/read always serves a range and a
+		// ranged /v1/download is partial-content too. The byte floor
+		// drops tiny range probes; the duration guard keeps a +Inf
+		// (zero-duration division) out of the histogram.
+		//
+		// NEVER log the file path here: it lives in the query string the
+		// middleware deliberately omits as PII. request_id (already bound
+		// on reqLogger) correlates this line with the `http` line above.
+		if (labelPath == "GET /v1/download" || labelPath == "GET /v1/read") &&
+			(status == http.StatusOK || status == http.StatusPartialContent) &&
+			sw.bytes >= downloadThroughputMinBytes && duration > 0 {
+			// Mbit/s is decimal megabits (10^6 bits/s) by network-telemetry
+			// convention — NOT mebibits (2^20). Keep 1_000_000 so the value
+			// matches the metric's "Mbit/s" help text and standard tooling.
+			mbps := float64(sw.bytes) * 8 / (duration.Seconds() * 1_000_000)
+			reqLogger.LogAttrs(ctx, slog.LevelInfo, "download_complete",
+				slog.String("proto", proto),
+				slog.Int64("bytes_sent", sw.bytes),
+				slog.Int64("duration_ms", duration.Milliseconds()),
+				slog.Float64("throughput_mbps", mbps),
+				slog.Int("status", status),
+			)
+			metrics.HTTPDownloadThroughputMbps.WithLabelValues(proto).Observe(mbps)
+		}
 	})
 }
 

@@ -284,3 +284,99 @@ func (f flushNotifier) Header() http.Header         { return f.recorder.Header()
 func (f flushNotifier) Write(b []byte) (int, error) { return f.recorder.Write(b) }
 func (f flushNotifier) WriteHeader(c int)           { f.recorder.WriteHeader(c) }
 func (f flushNotifier) Flush()                      { f.onFlush() }
+
+// routedRequest builds a request whose Pattern is stamped as a ServeMux
+// would after routing (Go 1.23+ exposes r.Pattern). The requestLogging
+// middleware reads r.Pattern for its metric label AND for the
+// download-throughput gate, so tests that invoke the middleware without
+// a real mux must set it explicitly.
+func routedRequest(method, target, pattern string) *http.Request {
+	r := httptest.NewRequest(method, target, nil)
+	r.Pattern = pattern
+	return r
+}
+
+func TestLogging_IncludesNegotiatedProtocol(t *testing.T) {
+	buf := withTestSlog(t)
+	h := requestLogging(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	rr := httptest.NewRecorder()
+	// httptest.NewRequest leaves r.TLS nil with ProtoMajor=1, so
+	// transportProto normalizes to the canonical "http/1.1" label.
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/v1/health", nil))
+	if !strings.Contains(buf.String(), "proto=http/1.1") {
+		t.Errorf("expected proto=http/1.1 in log line, got %q", buf.String())
+	}
+}
+
+func TestLogging_DownloadThroughputRecordedForLargeTransfer(t *testing.T) {
+	// Both file-delivery endpoints, including the /v1/read range case
+	// which returns 206 — the gate must accept 206 alongside 200.
+	cases := []struct {
+		name    string
+		pattern string
+		status  int
+	}{
+		{"download_full_200", "GET /v1/download", http.StatusOK},
+		{"read_range_206", "GET /v1/read", http.StatusPartialContent},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := withTestSlog(t)
+			body := make([]byte, downloadThroughputMinBytes) // exactly at the floor (>=)
+			h := requestLogging(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write(body)
+			}))
+			rr := httptest.NewRecorder()
+			// Query string carries a (fake) sensitive file path; it must
+			// never reach the telemetry line.
+			h.ServeHTTP(rr, routedRequest(http.MethodGet, "/v1/x?path=/Music/secret.flac", tc.pattern))
+
+			line := buf.String()
+			if !strings.Contains(line, "msg=download_complete") {
+				t.Fatalf("expected download_complete line, got %q", line)
+			}
+			for _, field := range []string{"throughput_mbps=", "proto=", "bytes_sent="} {
+				if !strings.Contains(line, field) {
+					t.Errorf("download_complete missing %q, got %q", field, line)
+				}
+			}
+			if strings.Contains(line, "secret") {
+				t.Errorf("file path leaked into telemetry: %q", line)
+			}
+		})
+	}
+}
+
+func TestLogging_DownloadThroughputSkippedForSSEAndSmall(t *testing.T) {
+	cases := []struct {
+		name    string
+		pattern string
+		nbytes  int64
+	}{
+		// Right size, wrong endpoint: SSE is also a streamingRoute but
+		// must NOT be measured as a download (the key gating catch).
+		{"sse_large", "GET /v1/events", downloadThroughputMinBytes + 1024},
+		// Right endpoint, below the byte floor: a tiny range probe.
+		{"download_tiny", "GET /v1/download", 1024},
+		// Manifest is a streamingRoute too — also excluded.
+		{"manifest_large", "GET /v1/manifest", downloadThroughputMinBytes + 1024},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := withTestSlog(t)
+			body := make([]byte, tc.nbytes)
+			h := requestLogging(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(body)
+			}))
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, routedRequest(http.MethodGet, "/v1/x", tc.pattern))
+			if strings.Contains(buf.String(), "download_complete") {
+				t.Errorf("%s: download_complete should not be emitted, got %q", tc.name, buf.String())
+			}
+		})
+	}
+}

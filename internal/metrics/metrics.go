@@ -120,17 +120,20 @@ var MBCacheLookups = promauto.NewCounterVec(
 	[]string{"kind", "result"},
 )
 
-// HTTPRequestsTotal labels every HTTP response by path + status.
-// Wired in the existing `requestLogging` middleware tail — no
-// dedicated metrics middleware needed.
+// HTTPRequestsTotal labels every HTTP response by path + status + the
+// negotiated transport protocol (h2 / h3 / http/1.1). Wired in the
+// existing `requestLogging` middleware tail — no dedicated metrics
+// middleware needed. The `proto` label is bounded (≤3 values) so
+// cardinality stays safe; it lets us answer "does HTTP/3 actually carry
+// the traffic we think it does?" without log scraping.
 var HTTPRequestsTotal = promauto.NewCounterVec(
 	prometheus.CounterOpts{
 		Namespace: "bridge",
 		Subsystem: "http",
 		Name:      "requests_total",
-		Help:      "Total HTTP requests, partitioned by path and status code.",
+		Help:      "Total HTTP requests, partitioned by path, status code, and transport protocol.",
 	},
-	[]string{"path", "code"},
+	[]string{"path", "code", "proto"},
 )
 
 // HTTPRequestDurationHist captures wall-clock latency per HTTP
@@ -144,6 +147,33 @@ var HTTPRequestDurationHist = promauto.NewHistogramVec(
 		Buckets:   prometheus.DefBuckets,
 	},
 	[]string{"path"},
+)
+
+// HTTPDownloadThroughputMbps records the *effective delivery speed*
+// (Mbit/s) of completed large file transfers on /v1/download and
+// /v1/read, partitioned by negotiated transport protocol (h2 / h3).
+// This is the metric that answers "does HTTP/3 actually beat HTTP/2 on
+// our links?" — group by the `proto` label and compare distributions.
+//
+// "Effective" is load-bearing: the value is a composite of network
+// capacity AND the iOS client's read pacing / disk I/O. When the client
+// paces its reads, QUIC/TCP flow control backpressures `http.ServeContent`
+// and stretches the measured duration, so a low number is not necessarily
+// a slow network. The h2-vs-h3 comparison stays valid (identical client
+// behavior on both); absolute numbers are delivered throughput, not raw
+// link capacity. Only large transfers are observed (see the >= a few MiB
+// gate in the requestLogging middleware) so tiny range probes don't skew
+// the distribution. Buckets span slow DERP-relay single digits up to
+// multi-gigabit LAN.
+var HTTPDownloadThroughputMbps = promauto.NewHistogramVec(
+	prometheus.HistogramOpts{
+		Namespace: "bridge",
+		Subsystem: "http",
+		Name:      "download_throughput_mbps",
+		Help:      "Effective download throughput in Mbit/s for /v1/download and /v1/read, partitioned by transport protocol.",
+		Buckets:   []float64{1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500},
+	},
+	[]string{"proto"},
 )
 
 func init() {
