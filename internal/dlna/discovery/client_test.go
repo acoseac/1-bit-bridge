@@ -147,6 +147,7 @@ func TestHandlePacket_KnownUDNAliveRefreshesLastSeen(t *testing.T) {
 	c.cache.Upsert(RendererInfo{
 		UDN:          "uuid:known",
 		FriendlyName: "Already Known",
+		ControlURL:   "http://192.0.2.7/ctrl", // complete entry → refresh path
 		LastSeenAt:   earlier,
 	})
 	pkt := []byte("NOTIFY * HTTP/1.1\r\n" +
@@ -257,6 +258,99 @@ func TestHandlePacket_FetchFailureStillCachesStub(t *testing.T) {
 	}
 	if info.LastSeenAt.IsZero() {
 		t.Error("stub entry should carry LastSeenAt")
+	}
+}
+
+// waitForStub polls for ANY cached entry with the given UDN (unlike
+// waitForCacheEntry, it doesn't require a populated FriendlyName) — used
+// to observe the stub the detail-fetch failure path writes.
+func waitForStub(t *testing.T, c *SSDPDiscoveryClient, udn string, timeout time.Duration) RendererInfo {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if info, ok := c.cache.Get(udn); ok {
+			return info
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("stub entry for %s not cached within %v", udn, timeout)
+	return RendererInfo{}
+}
+
+func TestHandlePacket_IncompleteStubNotRefreshedOrRetried(t *testing.T) {
+	// A cached INCOMPLETE stub (no ControlURL) must NOT have its LastSeenAt
+	// refreshed on a later alive packet, and must NOT trigger a re-fetch in
+	// the same cycle — so transient stubs can age out + retry. (bridge-12:
+	// pre-fix the exists-branch refreshed LastSeenAt forever, so the stub
+	// never aged out and the renderer stayed nameless until restart.) The
+	// boomDispatcher would error if a fetch were wrongly attempted; the
+	// frozen LastSeenAt is the real assertion (no Upsert ran).
+	earlier := time.Date(2026, 5, 26, 11, 0, 0, 0, time.UTC)
+	c := newTestClient(t, &boomDispatcher{err: errors.New("must not be called")})
+	c.cache.Upsert(RendererInfo{UDN: "uuid:stub", LastSeenAt: earlier}) // no ControlURL
+	pkt := []byte("NOTIFY * HTTP/1.1\r\n" +
+		"HOST: 239.255.255.250:1900\r\n" +
+		"NT: urn:schemas-upnp-org:device:MediaRenderer:1\r\n" +
+		"NTS: ssdp:alive\r\n" +
+		"USN: uuid:stub::urn:schemas-upnp-org:device:MediaRenderer:1\r\n" +
+		"LOCATION: http://x/y\r\n" +
+		"\r\n")
+	c.handlePacket(context.Background(), pkt, nil)
+	info, ok := c.cache.Get("uuid:stub")
+	if !ok {
+		t.Fatal("stub should remain cached")
+	}
+	if !info.LastSeenAt.Equal(earlier) {
+		t.Errorf("incomplete stub LastSeenAt advanced to %v; want frozen at %v", info.LastSeenAt, earlier)
+	}
+}
+
+func TestHandlePacket_TransientFailureStubAgesOut(t *testing.T) {
+	// A transient detail-fetch failure (network error) caches a stub with
+	// the real fail-time LastSeenAt, so EvictStale ages it out → a later
+	// M-SEARCH re-discovers it as new and retries. (bridge-12.)
+	c := newTestClient(t, &boomDispatcher{err: errors.New("connection refused")})
+	now := time.Date(2026, 5, 26, 12, 0, 0, 0, time.UTC)
+	pkt := []byte("HTTP/1.1 200 OK\r\n" +
+		"LOCATION: http://offline/desc.xml\r\n" +
+		"ST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n" +
+		"USN: uuid:transient::urn:schemas-upnp-org:device:MediaRenderer:1\r\n" +
+		"\r\n")
+	c.handlePacket(context.Background(), pkt, nil)
+	info := waitForStub(t, c, "uuid:transient", 1*time.Second)
+	if !info.LastSeenAt.Equal(now) {
+		t.Errorf("transient stub LastSeenAt = %v, want now %v (so it ages out)", info.LastSeenAt, now)
+	}
+	if evicted := c.cache.EvictStale(now.Add(2*time.Minute), 60*time.Second); evicted != 1 {
+		t.Errorf("transient stub should age out; evicted=%d want 1", evicted)
+	}
+}
+
+func TestHandlePacket_StructuralFailureStubPersistsAndIsHidden(t *testing.T) {
+	// A structural failure (HTTP 404 — no description at that URL) caches a
+	// stub with the far-future sentinel LastSeenAt, so EvictStale never
+	// ages it out → it never retries (no storm) — and it stays hidden from
+	// /v1/renderers. (bridge-12.)
+	disp := &stubDispatcher{handler: func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}}
+	c := newTestClient(t, disp)
+	now := time.Date(2026, 5, 26, 12, 0, 0, 0, time.UTC)
+	pkt := []byte("HTTP/1.1 200 OK\r\n" +
+		"LOCATION: http://broken/desc.xml\r\n" +
+		"ST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n" +
+		"USN: uuid:structural::urn:schemas-upnp-org:device:MediaRenderer:1\r\n" +
+		"\r\n")
+	c.handlePacket(context.Background(), pkt, nil)
+	info := waitForStub(t, c, "uuid:structural", 1*time.Second)
+	if !info.LastSeenAt.Equal(structuralStubLastSeen) {
+		t.Errorf("structural stub LastSeenAt = %v, want far-future sentinel %v", info.LastSeenAt, structuralStubLastSeen)
+	}
+	if evicted := c.cache.EvictStale(now.Add(10*time.Minute), 60*time.Second); evicted != 0 {
+		t.Errorf("structural stub must NOT age out; evicted=%d want 0", evicted)
+	}
+	if n := len(c.cache.Snapshot()); n != 0 {
+		t.Errorf("structural stub must be hidden from Snapshot; got %d", n)
 	}
 }
 

@@ -106,6 +106,53 @@ func TestFetchDeviceDescription_BodyExceedsCap(t *testing.T) {
 	}
 }
 
+// errStructuralDescription classification (bridge-12): a failure that
+// re-fetching can't fix (4xx / unparseable) is marked structural so the
+// discovery loop suppresses retries; transient failures (5xx / network)
+// are NOT, so they retry.
+
+func TestFetchDeviceDescription_404IsStructural(t *testing.T) {
+	disp := &stubDispatcher{handler: func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}}
+	_, err := FetchDeviceDescription(context.Background(), disp, "http://x/d.xml")
+	if !errors.Is(err, errStructuralDescription) {
+		t.Errorf("404 should be structural; got err=%v", err)
+	}
+}
+
+func TestFetchDeviceDescription_500IsNotStructural(t *testing.T) {
+	disp := &stubDispatcher{handler: func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}}
+	_, err := FetchDeviceDescription(context.Background(), disp, "http://x/d.xml")
+	if err == nil {
+		t.Fatal("expected error for 500")
+	}
+	if errors.Is(err, errStructuralDescription) {
+		t.Error("500 is transient — must NOT be marked structural")
+	}
+}
+
+func TestFetchDeviceDescription_ParseFailureIsStructural(t *testing.T) {
+	disp := &stubDispatcher{handler: func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "<<< not valid device-description xml")
+	}}
+	_, err := FetchDeviceDescription(context.Background(), disp, "http://x/d.xml")
+	if !errors.Is(err, errStructuralDescription) {
+		t.Errorf("parse failure should be structural; got err=%v", err)
+	}
+}
+
+func TestFetchDeviceDescription_NetworkErrorIsNotStructural(t *testing.T) {
+	disp := &boomDispatcher{err: errors.New("connection refused")}
+	_, err := FetchDeviceDescription(context.Background(), disp, "http://x/d.xml")
+	if errors.Is(err, errStructuralDescription) {
+		t.Error("network error is transient — must NOT be marked structural")
+	}
+}
+
 // -----------------------------------------------------------------------------
 // FetchGetProtocolInfo
 // -----------------------------------------------------------------------------

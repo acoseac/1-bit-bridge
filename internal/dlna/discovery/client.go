@@ -18,6 +18,19 @@ import (
 // Per CodeRabbit Major round-1 on PR #305.
 var packageLogger = logging.Component("dlna-discovery")
 
+// structuralStubLastSeen is the sentinel LastSeenAt stamped on a
+// STRUCTURALLY-failed renderer stub (4xx / unparseable description / no
+// AVTransport — see errStructuralDescription). Because EvictStale treats
+// a future timestamp as never-stale (IsStaleRenderer's interval<0 branch),
+// the stub persists indefinitely; combined with the exists-branch's
+// "incomplete stub → don't refresh, don't re-fetch" rule, that suppresses
+// the retry storm for a permanently-broken renderer until it sends
+// ssdp:byebye (Remove) or the bridge restarts. A TRANSIENT-failure stub
+// instead keeps its real fail-time LastSeenAt so it ages out + retries.
+// Both are hidden from /v1/renderers by Snapshot's ControlURL=="" gate.
+// (Gemini consult — bridge-12.)
+var structuralStubLastSeen = time.Date(2999, time.January, 1, 0, 0, 0, 0, time.UTC)
+
 // SSDPDiscoveryClient is the orchestrator that drives SSDP M-SEARCH
 // + per-renderer detail-fetch + cache lifecycle.
 //
@@ -435,7 +448,20 @@ func (c *SSDPDiscoveryClient) handlePacket(
 	// ssdp:alive) refreshes the cache. New UDNs trigger a detail
 	// fetch; known UDNs just refresh lastSeenAt.
 	now := c.nowFunc()
-	if _, exists := c.cache.Get(udn); exists {
+	if existing, exists := c.cache.Get(udn); exists {
+		// Incomplete stub (no AVTransport ControlURL) = residue of a
+		// failed detail fetch. Do NOT refresh its LastSeenAt and do NOT
+		// re-fetch here: a transient-failure stub then ages out via
+		// EvictStale and is re-discovered as new on a later cycle (which
+		// retries the fetch); a structural-failure stub carries the
+		// far-future LastSeenAt sentinel so it never ages out (no retry
+		// storm). Both stay hidden from /v1/renderers via Snapshot's
+		// ControlURL gate. (Gemini consult — bridge-12: pre-fix this branch
+		// refreshed LastSeenAt forever, so a stub never aged out and never
+		// retried → the renderer was stuck nameless until restart.)
+		if existing.ControlURL == "" {
+			return
+		}
 		c.cache.Upsert(RendererInfo{
 			UDN:        udn,
 			LastSeenAt: now,
@@ -488,14 +514,28 @@ func (c *SSDPDiscoveryClient) fetchAndCacheDetails(
 		if runCtx.Err() != nil {
 			return
 		}
+		// Classify the failure. A STRUCTURAL failure (4xx / unparseable
+		// description / no AVTransport — see errStructuralDescription)
+		// can't be fixed by re-fetching, so stamp the stub with the
+		// far-future sentinel → EvictStale never ages it out → the
+		// exists-branch never retries it (no storm). A TRANSIENT failure
+		// (timeout / dial / 5xx) keeps the real fail-time LastSeenAt → the
+		// stub ages out + is re-discovered + retried on a later cycle.
+		// Both stubs stay hidden from /v1/renderers (no ControlURL).
+		// (Gemini consult — bridge-12.)
+		structural := errors.Is(err, errStructuralDescription)
+		stubLastSeen := lastSeenAt
+		if structural {
+			stubLastSeen = structuralStubLastSeen
+		}
 		packageLogger.Debug("device description fetch failed",
 			"udn", udn,
 			"location", location,
+			"structural", structural,
 			"err", err.Error())
-		// Cache a stub entry with just the UDN + lastSeenAt so
-		// the next M-SEARCH cycle's "exists?" check fires the
-		// refresh path (no second detail-fetch storm).
-		c.cache.Upsert(RendererInfo{UDN: udn, LastSeenAt: lastSeenAt})
+		// Cache a stub (UDN + lastSeenAt only) so duplicate packets in
+		// THIS M-SEARCH cycle hit the exists-branch and don't re-fetch.
+		c.cache.Upsert(RendererInfo{UDN: udn, LastSeenAt: stubLastSeen})
 		return
 	}
 

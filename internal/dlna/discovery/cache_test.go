@@ -12,11 +12,13 @@ func TestRendererCache_UpsertAndSnapshot(t *testing.T) {
 	c.Upsert(RendererInfo{
 		UDN:          "uuid:bbb",
 		FriendlyName: "Bluesound Node",
+		ControlURL:   "http://192.0.2.2/ctrl",
 		LastSeenAt:   now,
 	})
 	c.Upsert(RendererInfo{
 		UDN:          "uuid:aaa",
 		FriendlyName: "Apple TV",
+		ControlURL:   "http://192.0.2.1/ctrl",
 		LastSeenAt:   now,
 	})
 	snap := c.Snapshot()
@@ -26,6 +28,31 @@ func TestRendererCache_UpsertAndSnapshot(t *testing.T) {
 	// Sort by FriendlyName (case-insensitive) → Apple TV first.
 	if snap[0].UDN != "uuid:aaa" {
 		t.Errorf("snap[0] = %q, want uuid:aaa (Apple TV sorts first)", snap[0].UDN)
+	}
+}
+
+func TestRendererCache_Snapshot_SkipsIncompleteStubs(t *testing.T) {
+	// A stub with no AVTransport ControlURL (residue of a failed or
+	// in-flight detail fetch) must NOT surface in /v1/renderers — it's an
+	// undrivable, nameless row. Only Snapshot hides it; the entry stays in
+	// the cache so the discovery loop's exists-branch can manage it.
+	// (bridge-12.)
+	c := NewRendererCache()
+	now := time.Date(2026, 5, 26, 12, 0, 0, 0, time.UTC)
+	c.Upsert(RendererInfo{UDN: "uuid:stub", LastSeenAt: now}) // no ControlURL
+	c.Upsert(RendererInfo{
+		UDN: "uuid:real", FriendlyName: "Real Renderer",
+		ControlURL: "http://192.0.2.5/ctrl", LastSeenAt: now,
+	})
+	snap := c.Snapshot()
+	if len(snap) != 1 {
+		t.Fatalf("snap len = %d, want 1 (stub filtered)", len(snap))
+	}
+	if snap[0].UDN != "uuid:real" {
+		t.Errorf("snap[0] = %q, want uuid:real", snap[0].UDN)
+	}
+	if _, ok := c.Get("uuid:stub"); !ok {
+		t.Error("stub should remain in the cache (Get), only filtered from Snapshot")
 	}
 }
 
@@ -41,7 +68,8 @@ func TestRendererCache_Snapshot_StableSortAcrossInsertOrder(t *testing.T) {
 		}
 		for _, udn := range order {
 			c.Upsert(RendererInfo{
-				UDN: udn, FriendlyName: nameByUDN[udn], LastSeenAt: now,
+				UDN: udn, FriendlyName: nameByUDN[udn],
+				ControlURL: "http://192.0.2.9/ctrl", LastSeenAt: now,
 			})
 		}
 		return c.Snapshot()
