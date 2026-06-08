@@ -380,3 +380,29 @@ func TestLogging_DownloadThroughputSkippedForSSEAndSmall(t *testing.T) {
 		})
 	}
 }
+
+// TestLogging_DownloadThroughput_PatternFromRealMux is the production-flow
+// regression guard. requestLogging passes r.WithContext(ctx) — a shallow
+// COPY — to the next handler, and http.ServeMux records the matched route
+// Pattern on that copy, NOT on the original request. The gate must read
+// Pattern back from the copy; reading the original r.Pattern leaves every
+// route "_unmatched" and the download telemetry never fires. The other
+// download tests pre-stamp Pattern on the request, so only a real mux
+// exercises this propagation.
+func TestLogging_DownloadThroughput_PatternFromRealMux(t *testing.T) {
+	buf := withTestSlog(t)
+	mux := http.NewServeMux()
+	body := make([]byte, downloadThroughputMinBytes)
+	mux.HandleFunc("GET /v1/download", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+	})
+	h := requestLogging(mux)
+	rr := httptest.NewRecorder()
+	// Pattern is deliberately NOT pre-set — the ServeMux must populate it
+	// on the downstream request copy.
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/v1/download?path=/Music/x.flac", nil))
+	if !strings.Contains(buf.String(), "msg=download_complete") {
+		t.Fatalf("download_complete must fire when a real mux sets Pattern on the request copy; got %q", buf.String())
+	}
+}

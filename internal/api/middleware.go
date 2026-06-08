@@ -186,8 +186,15 @@ func requestLogging(next http.Handler) http.Handler {
 		ctx := context.WithValue(r.Context(), ctxKeyRequestID, reqID)
 		ctx = context.WithValue(ctx, ctxKeyLogger, reqLogger)
 
+		// r.WithContext returns a shallow COPY of the request; the
+		// downstream http.ServeMux records the matched route Pattern on
+		// THAT copy, not on the original r. Hold the copy so we can read
+		// Pattern back after routing — reading r.Pattern here would always
+		// be "" (every route mislabeled "_unmatched" in HTTPRequestsTotal,
+		// and the download-throughput gate below would never match).
+		rc := r.WithContext(ctx)
 		start := time.Now()
-		next.ServeHTTP(sw, r.WithContext(ctx))
+		next.ServeHTTP(sw, rc)
 
 		// If the handler returned without ever calling Write or
 		// WriteHeader (rare — typically only for handlers that hijack
@@ -221,7 +228,7 @@ func requestLogging(next http.Handler) http.Handler {
 		// label cardinality stays bounded by the route count + 1
 		// rather than the request-path cardinality (which can be
 		// arbitrary attacker-controlled garbage).
-		labelPath := r.Pattern
+		labelPath := rc.Pattern
 		if labelPath == "" {
 			labelPath = "_unmatched"
 		}
