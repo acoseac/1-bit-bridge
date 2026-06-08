@@ -171,6 +171,16 @@ func (s *statusWriter) Unwrap() http.ResponseWriter {
 //
 // X-Request-ID is echoed in the response header so users can include it
 // in bug reports and operators can correlate against server logs.
+//
+// ORDERING INVARIANT: this middleware reads the matched route Pattern back
+// from the request COPY it forwards (`rc`, below) — that is the request the
+// downstream http.ServeMux stamps Pattern onto. Any middleware inserted
+// between requestLogging and the ServeMux MUST forward that same
+// *http.Request unchanged; a further `r.WithContext(...)` copy would make
+// the mux stamp Pattern on the newer copy, silently reverting
+// HTTPRequestsTotal to "_unmatched" and disabling the download-throughput
+// telemetry. `recoverer` — the only middleware between here and the mux
+// today — forwards the request as-is, so the chain is correct.
 func requestLogging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		reqID := newRequestID()
@@ -186,8 +196,15 @@ func requestLogging(next http.Handler) http.Handler {
 		ctx := context.WithValue(r.Context(), ctxKeyRequestID, reqID)
 		ctx = context.WithValue(ctx, ctxKeyLogger, reqLogger)
 
+		// r.WithContext returns a shallow COPY of the request; the
+		// downstream http.ServeMux records the matched route Pattern on
+		// THAT copy, not on the original r. Hold the copy so we can read
+		// Pattern back after routing — reading r.Pattern here would always
+		// be "" (every route mislabeled "_unmatched" in HTTPRequestsTotal,
+		// and the download-throughput gate below would never match).
+		rc := r.WithContext(ctx)
 		start := time.Now()
-		next.ServeHTTP(sw, r.WithContext(ctx))
+		next.ServeHTTP(sw, rc)
 
 		// If the handler returned without ever calling Write or
 		// WriteHeader (rare — typically only for handlers that hijack
@@ -221,7 +238,7 @@ func requestLogging(next http.Handler) http.Handler {
 		// label cardinality stays bounded by the route count + 1
 		// rather than the request-path cardinality (which can be
 		// arbitrary attacker-controlled garbage).
-		labelPath := r.Pattern
+		labelPath := rc.Pattern
 		if labelPath == "" {
 			labelPath = "_unmatched"
 		}
