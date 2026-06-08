@@ -235,7 +235,10 @@ func requestLogging(next http.Handler) http.Handler {
 		if (labelPath == "GET /v1/download" || labelPath == "GET /v1/read") &&
 			(status == http.StatusOK || status == http.StatusPartialContent) &&
 			sw.bytes >= downloadThroughputMinBytes && duration > 0 {
-			mbps := float64(sw.bytes) * 8 / (duration.Seconds() * 1024 * 1024)
+			// Mbit/s is decimal megabits (10^6 bits/s) by network-telemetry
+			// convention — NOT mebibits (2^20). Keep 1_000_000 so the value
+			// matches the metric's "Mbit/s" help text and standard tooling.
+			mbps := float64(sw.bytes) * 8 / (duration.Seconds() * 1_000_000)
 			reqLogger.LogAttrs(ctx, slog.LevelInfo, "download_complete",
 				slog.String("proto", proto),
 				slog.Int64("bytes_sent", sw.bytes),
