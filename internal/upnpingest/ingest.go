@@ -76,9 +76,10 @@ type Options struct {
 
 	// MaxItems caps the total tracks the walker yields per server before
 	// it returns ErrWalkTruncated. Zero falls back to the walker's
-	// built-in default (50k). Primarily a test seam to exercise the
-	// truncation path cheaply; also lets an operator bound a
-	// pathologically large server.
+	// built-in default (50k). This is currently a TEST SEAM ONLY — it
+	// exercises the truncation path cheaply. It is NOT yet surfaced in
+	// config (UPnPUpstreamConfig), so production Run() calls always pass
+	// 0 (= the 50k default); wiring it to config is a separate follow-up.
 	MaxItems int
 }
 
