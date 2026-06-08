@@ -73,6 +73,14 @@ type Options struct {
 
 	// Now overrides the wall clock (tests).
 	Now func() time.Time
+
+	// MaxItems caps the total tracks the walker yields per server before
+	// it returns ErrWalkTruncated. Zero falls back to the walker's
+	// built-in default (50k). This is currently a TEST SEAM ONLY — it
+	// exercises the truncation path cheaply. It is NOT yet surfaced in
+	// config (UPnPUpstreamConfig), so production Run() calls always pass
+	// 0 (= the 50k default); wiring it to config is a separate follow-up.
+	MaxItems int
 }
 
 const defaultTimeBackstop = 24 * time.Hour
@@ -141,7 +149,7 @@ func (i *Ingester) Run(ctx context.Context, opts Options) (IngestResult, error) 
 	for idx := range i.cfg.Servers {
 		srv := i.cfg.Servers[idx]
 		res := ServerIngestResult{Name: srv.Name}
-		i.ingestOne(ctx, srv, opts.ForceWalk, backstop, now, &res)
+		i.ingestOne(ctx, srv, opts.ForceWalk, backstop, opts.MaxItems, now, &res)
 		out.PerServer = append(out.PerServer, res)
 	}
 	return out, nil
@@ -150,7 +158,7 @@ func (i *Ingester) Run(ctx context.Context, opts Options) (IngestResult, error) 
 // ingestOne handles a single server: resolve controlURL, gate on
 // GetSystemUpdateID + time backstop, walk, reconcile.
 func (i *Ingester) ingestOne(ctx context.Context, srv config.UPnPUpstreamServerConfig,
-	forceWalk bool, backstop time.Duration, now func() time.Time, res *ServerIngestResult,
+	forceWalk bool, backstop time.Duration, maxItems int, now func() time.Time, res *ServerIngestResult,
 ) {
 	controlURL, err := i.resolver.ResolveControlURL(ctx, srv)
 	if err != nil {
@@ -219,6 +227,7 @@ func (i *Ingester) ingestOne(ctx context.Context, srv config.UPnPUpstreamServerC
 			RootObjectID:        srv.EffectiveRootObjectID(),
 			PathPrefix:          prefix,
 			SkipContainerTitles: srv.SkipTopLevelContainers,
+			MaxItems:            maxItems, // 0 → walker's built-in 50k default
 		},
 		func(w upnp.Walked) error {
 			tr, rt := buildTrackAndRouting(w, udn, walkStart)
@@ -234,12 +243,21 @@ func (i *Ingester) ingestOne(ctx context.Context, srv config.UPnPUpstreamServerC
 		walkErr = flushErr
 	}
 	res.WalkCompletedAt = now()
-	if walkErr != nil && !errors.Is(walkErr, upnp.ErrWalkTruncated) {
+	if walkErr != nil {
 		res.Err = walkErr
-		// Do NOT reap on a failed walk — a transient error mid-tree
-		// would otherwise delete legitimate rows on the server side
-		// (the same class of bug as the filesystem scanner's
-		// errorSubtrees sentinel).
+		// Do NOT reap on a failed OR TRUNCATED walk — partial results
+		// are not authoritative. A transient error mid-tree would
+		// otherwise delete legitimate rows on the server side (the same
+		// class of bug as the filesystem scanner's errorSubtrees
+		// sentinel). A MaxItems-TRUNCATED walk (ErrWalkTruncated) only
+		// visited a PREFIX of the library, so reaping would delete every
+		// track past the ceiling that the walk never reached — exactly
+		// the data loss the walker's ErrWalkTruncated contract warns
+		// against ("partial results MUST NOT be treated as
+		// authoritative"). ErrWalkTruncated was previously (incorrectly)
+		// excluded from this guard, so a truncated walk fell through to
+		// the reconcile sweep below. Skipping idStore.Set here too is
+		// correct: a truncated tick must re-walk next time, not settle.
 		return
 	}
 
