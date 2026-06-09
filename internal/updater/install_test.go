@@ -544,3 +544,43 @@ func TestInstall_NoReleaseMetaIsNoFloor(t *testing.T) {
 		t.Fatalf("Install (no release-meta) should succeed: %v", err)
 	}
 }
+
+// Test_sanitizeAssetName pins the path-component sanitiser the Install download
+// path relies on: filepath.Base must strip directory + traversal segments, and
+// the "."/".." residue (which would escape the scratch dir on Join) must be
+// rejected with an error. Gemini security-MEDIUM on PR #368.
+func Test_sanitizeAssetName(t *testing.T) {
+	cases := []struct {
+		name    string
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{"plain_asset", "bridge-linux-amd64.tar.gz", "bridge-linux-amd64.tar.gz", false},
+		{"strips_traversal_prefix", "../../etc/passwd", "passwd", false},
+		{"strips_dir_prefix", "dir/sub/asset.zip", "asset.zip", false},
+		{"strips_absolute_prefix", "/var/tmp/asset.tar", "asset.tar", false},
+		{"dotdot_rejected", "..", "", true},
+		{"dot_rejected", ".", "", true},
+		{"empty_rejected", "", "", true}, // filepath.Base("") == "."
+		{"trailing_dotdot_rejected", "foo/..", "", true},
+		{"trailing_dot_rejected", "foo/.", "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := sanitizeAssetName(tc.in)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("sanitizeAssetName(%q) = %q, want error", tc.in, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("sanitizeAssetName(%q) unexpected error: %v", tc.in, err)
+			}
+			if got != tc.want {
+				t.Errorf("sanitizeAssetName(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}

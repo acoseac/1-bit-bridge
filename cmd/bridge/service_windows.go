@@ -78,8 +78,10 @@ func (h *windowsServiceHandler) Execute(args []string, r <-chan svc.ChangeReques
 		// and unable to shut down. Convert the panic to an error so Stop drains
 		// cleanly. DeepSeek review.
 		defer func() {
-			if r := recover(); r != nil {
-				serveErr <- fmt.Errorf("serve panicked: %v", r)
+			// `rec`, not `r` — the outer `r <-chan svc.ChangeRequest` parameter
+			// is in scope here; avoid shadowing it. CodeRabbit on PR #368.
+			if rec := recover(); rec != nil {
+				serveErr <- fmt.Errorf("serve panicked: %v", rec)
 			}
 		}()
 		serveErr <- h.serve(ctx)

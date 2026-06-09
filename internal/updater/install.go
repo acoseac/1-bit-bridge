@@ -154,9 +154,12 @@ func (u *Updater) Install(ctx context.Context, opts InstallOptions) (Status, err
 	// Sanitise the release asset name before using it as a path component.
 	// `archive.Name` comes from the GitHub Releases API; a `../../../`-style
 	// name (a compromised release) would otherwise let the download write
-	// outside `scratch` (CWE-22 path traversal). `filepath.Base` forces the
-	// file to land directly inside `scratch`. DeepSeek review.
-	safeName := filepath.Base(archive.Name)
+	// outside `scratch` (CWE-22 path traversal). DeepSeek review; the "."/".."
+	// residue reject added per Gemini security-MEDIUM on PR #368.
+	safeName, err := sanitizeAssetName(archive.Name)
+	if err != nil {
+		return status, err
+	}
 	archivePath := filepath.Join(scratch, safeName)
 	if _, err := downloadVerified(ctx, u.client.http,
 		archive.BrowserDownloadURL, safeName,
@@ -266,6 +269,22 @@ func preflightWritable(binaryPath string) error {
 // disk doesn't accumulate failed-download leftovers.
 func cleanScratch(scratch string) {
 	_ = os.RemoveAll(scratch)
+}
+
+// sanitizeAssetName reduces a GitHub release asset name to a single safe path
+// component for joining into the scratch dir, and rejects the residue
+// filepath.Base can't make safe. filepath.Base strips directory + traversal
+// segments (so "../../etc/passwd" → "passwd") but still returns "." for an
+// empty / dot name and ".." for a name that is exactly ".." or ends "/.." —
+// joining ".." onto scratch would escape to its parent. Pure helper so the
+// reject is unit-testable without driving the whole Install network flow.
+// DeepSeek review + Gemini security-MEDIUM on PR #368.
+func sanitizeAssetName(name string) (string, error) {
+	base := filepath.Base(name)
+	if base == "." || base == ".." {
+		return "", fmt.Errorf("invalid release asset name: %q", name)
+	}
+	return base, nil
 }
 
 // isWindows is the runtime check for the swap path's

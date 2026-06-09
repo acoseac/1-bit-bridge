@@ -191,8 +191,16 @@ type telemetryWriter struct {
 }
 
 func (w *telemetryWriter) WriteHeader(code int) {
-	// Record only the FIRST status. net/http honours the first WriteHeader and
-	// logs "superfluous WriteHeader" for later ones (they don't change the
+	// 1xx informational responses (e.g. 100 Continue) are NOT the final status —
+	// net/http allows a later WriteHeader with the real status after one, so
+	// don't latch on them or we'd mis-report the final status the client got.
+	// Gemini MEDIUM on PR #368.
+	if code >= 100 && code < 200 {
+		w.ResponseWriter.WriteHeader(code)
+		return
+	}
+	// Record only the FIRST final status. net/http honours the first WriteHeader
+	// and logs "superfluous WriteHeader" for later ones (they don't change the
 	// response), so capturing the last would mis-report the status the client
 	// actually received. DeepSeek review.
 	if !w.wroteHeader {
@@ -203,6 +211,11 @@ func (w *telemetryWriter) WriteHeader(code int) {
 }
 
 func (w *telemetryWriter) Write(p []byte) (int, error) {
+	// A Write with no prior WriteHeader implicitly commits 200 OK; mark the
+	// header written (statusCode stays at the http.StatusOK default) so a later
+	// superfluous WriteHeader can't overwrite the status the client actually
+	// received. Gemini MEDIUM on PR #368.
+	w.wroteHeader = true
 	n, err := w.ResponseWriter.Write(p)
 	w.bytesSent += int64(n)
 	return n, err
@@ -226,6 +239,10 @@ func (w *telemetryWriter) Flush() {
 // routes through our Write method and bumps bytesSent through
 // the normal path. Per Gemini Medium on PR #303.
 func (w *telemetryWriter) ReadFrom(r io.Reader) (int64, error) {
+	// ReadFrom commits the response body, implicitly 200 OK if no WriteHeader
+	// preceded it — mark the header written for the same reason as Write.
+	// Gemini MEDIUM on PR #368.
+	w.wroteHeader = true
 	if rf, ok := w.ResponseWriter.(io.ReaderFrom); ok {
 		n, err := rf.ReadFrom(r)
 		w.bytesSent += n
