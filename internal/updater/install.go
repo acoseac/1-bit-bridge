@@ -151,9 +151,15 @@ func (u *Updater) Install(ctx context.Context, opts InstallOptions) (Status, err
 	}
 	defer cleanScratch(scratch)
 
-	archivePath := filepath.Join(scratch, archive.Name)
+	// Sanitise the release asset name before using it as a path component.
+	// `archive.Name` comes from the GitHub Releases API; a `../../../`-style
+	// name (a compromised release) would otherwise let the download write
+	// outside `scratch` (CWE-22 path traversal). `filepath.Base` forces the
+	// file to land directly inside `scratch`. DeepSeek review.
+	safeName := filepath.Base(archive.Name)
+	archivePath := filepath.Join(scratch, safeName)
 	if _, err := downloadVerified(ctx, u.client.http,
-		archive.BrowserDownloadURL, archive.Name,
+		archive.BrowserDownloadURL, safeName,
 		checksums.BrowserDownloadURL, archivePath); err != nil {
 		return status, fmt.Errorf("download: %w", err)
 	}

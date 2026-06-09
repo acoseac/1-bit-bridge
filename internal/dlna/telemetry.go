@@ -152,20 +152,30 @@ func TelemetryMiddleware(store *TelemetryStore, next http.Handler) http.Handler 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		recw := &telemetryWriter{ResponseWriter: w, statusCode: http.StatusOK}
+		// Record in a defer so a panicking handler still produces a telemetry
+		// entry (the inline Record after ServeHTTP would be skipped on panic,
+		// losing exactly the request that failed dramatically). Re-panic
+		// afterwards to preserve net/http's per-request panic recovery.
+		// DeepSeek review.
+		defer func() {
+			store.Record(TelemetryEntry{
+				Timestamp:             start,
+				Method:                r.Method,
+				Path:                  r.URL.Path,
+				UserAgent:             r.Header.Get("User-Agent"),
+				AcceptHeader:          r.Header.Get("Accept"),
+				RangeHeader:           r.Header.Get("Range"),
+				ContentFeaturesAccept: r.Header.Get("getContentFeatures.dlna.org"),
+				StatusCode:            recw.statusCode,
+				BytesServed:           recw.bytesSent,
+				DurationMS:            time.Since(start).Milliseconds(),
+				RemoteAddr:            r.RemoteAddr,
+			})
+			if rec := recover(); rec != nil {
+				panic(rec)
+			}
+		}()
 		next.ServeHTTP(recw, r)
-		store.Record(TelemetryEntry{
-			Timestamp:             start,
-			Method:                r.Method,
-			Path:                  r.URL.Path,
-			UserAgent:             r.Header.Get("User-Agent"),
-			AcceptHeader:          r.Header.Get("Accept"),
-			RangeHeader:           r.Header.Get("Range"),
-			ContentFeaturesAccept: r.Header.Get("getContentFeatures.dlna.org"),
-			StatusCode:            recw.statusCode,
-			BytesServed:           recw.bytesSent,
-			DurationMS:            time.Since(start).Milliseconds(),
-			RemoteAddr:            r.RemoteAddr,
-		})
 	})
 }
 
@@ -175,12 +185,20 @@ func TelemetryMiddleware(store *TelemetryStore, next http.Handler) http.Handler 
 // handler relies on Flush forwarding).
 type telemetryWriter struct {
 	http.ResponseWriter
-	statusCode int
-	bytesSent  int64
+	statusCode  int
+	bytesSent   int64
+	wroteHeader bool
 }
 
 func (w *telemetryWriter) WriteHeader(code int) {
-	w.statusCode = code
+	// Record only the FIRST status. net/http honours the first WriteHeader and
+	// logs "superfluous WriteHeader" for later ones (they don't change the
+	// response), so capturing the last would mis-report the status the client
+	// actually received. DeepSeek review.
+	if !w.wroteHeader {
+		w.statusCode = code
+		w.wroteHeader = true
+	}
 	w.ResponseWriter.WriteHeader(code)
 }
 

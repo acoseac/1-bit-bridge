@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -121,7 +122,19 @@ func cachedTailscaleStatus() (tailscaleStatus, error) {
 	tailscaleStatusInflight = ch
 	tailscaleStatusMu.Unlock()
 
-	st, err := tailscaleStatusJSONFunc()
+	// Recover a panic in the fetch so the cleanup below (clearing
+	// `tailscaleStatusInflight` + `close(ch)`) always runs — a panic would
+	// otherwise leave the singleflight latch set and the channel unclosed,
+	// hanging every future caller (/v1/health, cert rotation) forever. Convert
+	// to an error so waiters wake with a failure instead of a crash. DeepSeek review.
+	st, err := func() (st tailscaleStatus, err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				err = fmt.Errorf("tailscale status fetch panicked: %v", r)
+			}
+		}()
+		return tailscaleStatusJSONFunc()
+	}()
 
 	tailscaleStatusMu.Lock()
 	tailscaleStatusCached = st

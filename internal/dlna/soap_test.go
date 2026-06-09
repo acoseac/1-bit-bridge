@@ -60,6 +60,40 @@ func Test_ParseSOAPAction(t *testing.T) {
 			wantServiceType: "a#b",
 			wantActionName:  "c",
 		},
+		// XML-injection guards (DeepSeek review): actionName must be a valid
+		// NCName, serviceType must carry no XML metacharacters — else the
+		// SOAPAction is rejected as malformed so the crafted bytes never reach
+		// the response envelope's element name / xmlns attr.
+		{
+			name:            "actionname_with_xml_injection_rejected",
+			header:          `"urn:schemas-upnp-org:service:ContentDirectory:1#Browse><x"`,
+			wantServiceType: "",
+			wantActionName:  "",
+		},
+		{
+			name:            "actionname_with_space_rejected",
+			header:          `"urn:foo:1#Get Protocol"`,
+			wantServiceType: "",
+			wantActionName:  "",
+		},
+		{
+			name:            "actionname_starting_with_digit_rejected",
+			header:          `"urn:foo:1#1Browse"`,
+			wantServiceType: "",
+			wantActionName:  "",
+		},
+		{
+			name:            "servicetype_with_quote_injection_rejected",
+			header:          `urn:foo:1"><x#Browse`,
+			wantServiceType: "",
+			wantActionName:  "",
+		},
+		{
+			name:            "vendor_xprefixed_action_accepted",
+			header:          `"urn:schemas-upnp-org:service:ContentDirectory:1#X_GetFeatureList"`,
+			wantServiceType: "urn:schemas-upnp-org:service:ContentDirectory:1",
+			wantActionName:  "X_GetFeatureList",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

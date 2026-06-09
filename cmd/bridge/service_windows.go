@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 
 	"golang.org/x/sys/windows/svc"
@@ -71,7 +72,18 @@ func (h *windowsServiceHandler) Execute(args []string, r <-chan svc.ChangeReques
 	ctx, cancel := context.WithCancel(h.ctx)
 	defer cancel()
 	serveErr := make(chan error, 1)
-	go func() { serveErr <- h.serve(ctx) }()
+	go func() {
+		// Recover a panic in serve so the SCM Stop branch's `<-serveErr` can't
+		// hang forever — a dead goroutine never sends, leaving the service stuck
+		// and unable to shut down. Convert the panic to an error so Stop drains
+		// cleanly. DeepSeek review.
+		defer func() {
+			if r := recover(); r != nil {
+				serveErr <- fmt.Errorf("serve panicked: %v", r)
+			}
+		}()
+		serveErr <- h.serve(ctx)
+	}()
 
 	// Declare ourselves Running once the listener is up. We can't
 	// actually observe the listen-ready moment from here without
