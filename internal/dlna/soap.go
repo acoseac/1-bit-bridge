@@ -73,7 +73,49 @@ func ParseSOAPAction(header string) (serviceType, actionName string) {
 	if hash <= 0 || hash == len(v)-1 {
 		return "", ""
 	}
-	return v[:hash], v[hash+1:]
+	st, action := v[:hash], v[hash+1:]
+	// Reject values that would break / inject into the SOAP response XML when
+	// echoed back by SOAPResponseEnvelope (actionName → the element name,
+	// serviceType → the `xmlns:u` attribute value). actionName must be a valid
+	// XML NCName; serviceType (a URN) must carry no XML metacharacters or
+	// whitespace. A crafted SOAPAction header from a LAN control point would
+	// otherwise produce malformed / element-injected response XML (CWE-91).
+	// DeepSeek review.
+	if !isValidSOAPActionName(action) || !isSafeSOAPServiceType(st) {
+		return "", ""
+	}
+	return st, action
+}
+
+// isValidSOAPActionName reports whether s is a valid XML NCName — i.e. safe to
+// interpolate into an XML element name. ASCII-only (sufficient for UPnP action
+// names like Browse / Search / X_GetFeatureList): letter or `_` to start;
+// letter / digit / `.` / `-` / `_` thereafter; no colon.
+func isValidSOAPActionName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		switch {
+		case r == '_' || (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z'):
+			// letter or underscore — valid in any position
+		case r == '.' || r == '-' || (r >= '0' && r <= '9'):
+			if i == 0 {
+				return false // an NCName can't start with a digit / `.` / `-`
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// isSafeSOAPServiceType reports whether s is safe to interpolate into the
+// response's `xmlns:u="..."` attribute value — no XML-breaking characters or
+// whitespace. A real UPnP serviceType URN (`urn:schemas-upnp-org:service:…:1`)
+// never contains these; colons are fine inside an attribute value.
+func isSafeSOAPServiceType(s string) bool {
+	return s != "" && !strings.ContainsAny(s, "<>\"&'\r\n\t ")
 }
 
 // SOAPResponseEnvelope returns the bytes of a SOAP response envelope
