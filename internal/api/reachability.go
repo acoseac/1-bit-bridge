@@ -123,9 +123,16 @@ func (c *reachabilityCache) probe(ctx context.Context, absRoot string) reachabil
 
 // probeLocked is the actual stat-and-classify body. Runs inside the
 // singleflight closure so only one copy runs per (absRoot, stale-window).
-// Reads no shared state besides the per-call ctx.
+//
+// The probe deliberately DETACHES from the caller's ctx
+// (context.WithoutCancel): the singleflight result is shared by every
+// caller that joined the flight, so the first caller hanging up
+// mid-probe must not turn into a synthesized "offline" verdict handed
+// to the healthy callers that are still waiting. The 2 s probe timeout
+// alone bounds the work; a timeout-fired "offline" IS the root's real
+// state and is cached as such.
 func (c *reachabilityCache) probeLocked(ctx context.Context, absRoot string) reachabilityStatus {
-	probeCtx, cancel := context.WithTimeout(ctx, reachabilityProbeTimeout)
+	probeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), reachabilityProbeTimeout)
 	defer cancel()
 
 	type probeResult struct {
@@ -138,27 +145,17 @@ func (c *reachabilityCache) probeLocked(ctx context.Context, absRoot string) rea
 		resultCh <- probeResult{info: info, err: err}
 	}()
 
-	var (
-		status     reachabilityStatus
-		fromCancel bool
-	)
+	var status reachabilityStatus
 	select {
 	case pr := <-resultCh:
 		status = classifyProbeResult(pr.info, pr.err)
 	case <-probeCtx.Done():
+		// Only the probe timeout can fire here (the parent's cancel no
+		// longer propagates) — a >2 s stat IS an offline-class verdict
+		// for a network mount, so caching it is correct.
 		status = reachabilityStatus{Reachable: false, Reason: "offline", checkedAt: time.Now()}
-		// Distinguish probe-timeout from upstream client cancel: only
-		// cache the result when the timeout actually fired (deadline
-		// exceeded). Caller's parent ctx cancel may have nothing to
-		// do with the root's actual health.
-		if ctx.Err() != nil {
-			fromCancel = true
-		}
 	}
 
-	if fromCancel {
-		return status
-	}
 	c.mu.Lock()
 	c.entries[absRoot] = status
 	c.mu.Unlock()

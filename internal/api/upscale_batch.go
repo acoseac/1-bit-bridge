@@ -148,7 +148,9 @@ func (s *Server) upscaleBatchSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close()
 	var req BatchRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	// Same 64 KiB cap rationale as upscaleRequest — tiny shape, capped
+	// like every other body-bearing public handler.
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, upscaleMaxBodyBytes)).Decode(&req); err != nil {
 		writeErrorLog(w, r, http.StatusBadRequest, "bad_request",
 			"request body must be JSON", err)
 		return

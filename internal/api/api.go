@@ -866,7 +866,11 @@ func (s *Server) Handler() http.Handler {
 	for _, rt := range s.routeRegistry() {
 		h := rt.handler
 		if rt.kind == boundedRoute {
-			h = boundedHandler(h)
+			d := rt.writeDeadline
+			if d == 0 {
+				d = boundedRouteWriteDeadline
+			}
+			h = boundedHandlerWithDeadline(h, d)
 		}
 		mux.HandleFunc(rt.pattern, h)
 	}
@@ -1714,7 +1718,12 @@ func (s *Server) manifestHandler(w http.ResponseWriter, r *http.Request) {
 			// silently retry, masking the real DB failure).
 			w.Header().Del(headerContentEncoding)
 			w.Header().Del("Vary")
-			writeError(w, http.StatusInternalServerError, "internal", writeErr.Error())
+			// writeErrorLog, not writeError(err.Error()): the wrapped
+			// SQLite error can embed driver detail / DB-file path
+			// fragments, and the 5xx contract keeps those out of wire
+			// bodies (they land in the server log instead).
+			writeErrorLog(w, r, http.StatusInternalServerError, "internal",
+				"the bridge couldn't build the manifest", writeErr)
 			return
 		}
 		// Demote client-disconnect errors to debug — context.Canceled

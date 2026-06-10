@@ -175,3 +175,26 @@ func newRouteRegistryTestServer(t *testing.T) *Server {
 	store, _ := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
 	return New(cfg, store, nil, "fp")
 }
+
+// TestRouteRegistry_writeDeadlineOverrides pins the per-route deadline
+// override set: exactly the two long-op upscale routes carry the
+// 15-minute budget (their synchronous server-side work scales with
+// library size — folder walk / per-variant delete loop), and every
+// other bounded route stays on the 60 s default. A new override is a
+// deliberate decision that must surface here.
+func TestRouteRegistry_writeDeadlineOverrides(t *testing.T) {
+	wantLong := map[string]struct{}{
+		"POST /v1/upscale":            {},
+		"DELETE /v1/upscale/variants": {},
+	}
+	s := newRouteRegistryTestServer(t)
+	for _, rt := range s.routeRegistry() {
+		_, long := wantLong[rt.pattern]
+		switch {
+		case long && rt.writeDeadline != upscaleLongOpWriteDeadline:
+			t.Errorf("route %q writeDeadline = %v, want %v", rt.pattern, rt.writeDeadline, upscaleLongOpWriteDeadline)
+		case !long && rt.writeDeadline != 0:
+			t.Errorf("route %q carries an unexpected writeDeadline override %v", rt.pattern, rt.writeDeadline)
+		}
+	}
+}

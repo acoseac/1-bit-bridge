@@ -362,10 +362,10 @@ func (s *Server) pairingEvents(w http.ResponseWriter, r *http.Request) {
 // pairingDelete handles DELETE /v1/pairing/{requestID}. Used by iOS for
 // both user-cancel and acknowledgment-of-token-receipt. Same auth as Poll.
 //
-// Idempotent: a second DELETE for the same id returns 200 (the first one
+// Idempotent: a second DELETE for the same id returns 204 (the first one
 // already removed it). Maps both ErrNotFound (truly gone or already
-// cleaned up) and the success path to 200; only auth failures surface as
-// 401.
+// cleaned up) and the success path to 204 No Content; only auth failures
+// surface as 401.
 func (s *Server) pairingDelete(w http.ResponseWriter, r *http.Request) {
 	if s.pairing == nil {
 		writeError(w, http.StatusNotFound, "pairing_not_supported", errMsgPairingNotSupported)

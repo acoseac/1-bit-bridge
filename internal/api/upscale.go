@@ -128,6 +128,13 @@ type UpscaleResponse struct {
 	QueueFull bool `json:"queueFull,omitempty"`
 }
 
+// upscaleMaxBodyBytes caps the POST /v1/upscale and POST
+// /v1/upscale/batch request bodies. Both are tiny {path, kind} shapes;
+// 64 KiB leaves generous headroom for any future field while keeping a
+// runaway client bounded (every other body-bearing public handler is
+// capped the same way).
+const upscaleMaxBodyBytes = 64 << 10
+
 func (s *Server) upscaleRequest(w http.ResponseWriter, r *http.Request) {
 	if s.upscaleEnqueuer == nil {
 		// Feature off (config flag false) OR sox precheck
@@ -139,7 +146,11 @@ func (s *Server) upscaleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close()
 	var req UpscaleRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	// 64 KiB cap: the body is a tiny {path, kind} shape; every other
+	// body-bearing public handler is capped, and an authed-but-
+	// misbehaving client shouldn't be able to stream arbitrary bytes
+	// into server memory.
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, upscaleMaxBodyBytes)).Decode(&req); err != nil {
 		writeErrorLog(w, r, http.StatusBadRequest, "bad_request",
 			"request body must be JSON", err)
 		return

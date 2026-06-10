@@ -165,7 +165,12 @@ func (s *Server) upscaleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	q := r.URL.Query()
+	// safeQuery, not r.URL.Query(): `prefix`/`path` carry library paths,
+	// and iOS leaves `+` literal in the query component — the stdlib
+	// form-decode turns it into a space and the delete silently no-ops
+	// (200 with deletedCount 0). Same hazard the other path-bearing
+	// query consumers (serveFile / list / stat / manifest) already guard.
+	q := safeQuery(r)
 	req, errCode, errMsg := parseVariantDeleteQuery(q)
 	if errCode != "" {
 		writeError(w, http.StatusBadRequest, errCode, errMsg)

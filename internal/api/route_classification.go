@@ -72,6 +72,14 @@ const (
 // the conservative middle.
 const boundedRouteWriteDeadline = 60 * time.Second
 
+// upscaleLongOpWriteDeadline is the per-route override for the two
+// upscale endpoints whose synchronous server-side work scales with
+// library size (POST /v1/upscale's folder walk; DELETE
+// /v1/upscale/variants' per-variant fsync'd delete loop). 15 min is
+// sized for a 50k-track library on a slow NAS; both routes are authed,
+// so the relaxed slow-loris posture is acceptable.
+const upscaleLongOpWriteDeadline = 15 * time.Minute
+
 // boundedHandler wraps a handler with `SetWriteDeadline(now + d)`.
 // Uses `http.ResponseController` (Go 1.20+) so the deadline travels
 // through middleware that wraps the `ResponseWriter` (e.g. our
@@ -86,9 +94,15 @@ const boundedRouteWriteDeadline = 60 * time.Second
 // design: a bounded route running without a deadline is a
 // pre-this-PR-state functional regression, NOT an outage.
 func boundedHandler(h http.HandlerFunc) http.HandlerFunc {
+	return boundedHandlerWithDeadline(h, boundedRouteWriteDeadline)
+}
+
+// boundedHandlerWithDeadline is the parameterized form backing both the
+// 60 s default and the per-route `writeDeadline` overrides.
+func boundedHandlerWithDeadline(h http.HandlerFunc, d time.Duration) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		rc := http.NewResponseController(w)
-		if err := rc.SetWriteDeadline(time.Now().Add(boundedRouteWriteDeadline)); err != nil {
+		if err := rc.SetWriteDeadline(time.Now().Add(d)); err != nil {
 			logger.Debug("boundedHandler: SetWriteDeadline failed; route runs unbounded",
 				"err", err, "path", r.URL.Path)
 		}
@@ -136,6 +150,15 @@ type route struct {
 	pattern string
 	kind    routeKind
 	handler http.HandlerFunc
+	// writeDeadline overrides boundedRouteWriteDeadline for this route
+	// (zero = the 60 s default). ONLY for bounded routes whose
+	// server-side compute can legitimately exceed the default — the
+	// deadline clock starts BEFORE the handler runs, so a synchronous
+	// whole-library walk or per-variant delete loop would otherwise
+	// finish its work server-side and then fail the response write,
+	// which the client reads as a transport error and retries (re-running
+	// the whole operation). Ignored on streaming routes.
+	writeDeadline time.Duration
 }
 
 // routeRegistry returns the complete route table for this Server.
@@ -186,7 +209,11 @@ func (s *Server) routeRegistry() []route {
 
 		// Upscale — small JSON responses on every endpoint
 		// (stats / batches / variants — never streams).
-		{pattern: "POST /v1/upscale", kind: boundedRoute, handler: s.authed(s.upscaleRequest)},
+		// POST /v1/upscale runs a SYNCHRONOUS filepath.WalkDir over the
+		// requested folder before responding — a whole-library enqueue
+		// on a big SMB/FUSE-mounted root takes minutes, so it gets the
+		// long-op write deadline instead of the 60 s default.
+		{pattern: "POST /v1/upscale", kind: boundedRoute, handler: s.authed(s.upscaleRequest), writeDeadline: upscaleLongOpWriteDeadline},
 		// 2 s ctx-timeout: /v1/upscale/stats is iOS's
 		// management-section poller — a wedged CountVariants
 		// query backs up at scary rates under high-frequency
@@ -201,7 +228,10 @@ func (s *Server) routeRegistry() []route {
 		{pattern: "POST /v1/upscale/batch", kind: boundedRoute, handler: s.authed(s.upscaleBatchSubmit)},
 		{pattern: "GET /v1/upscale/batches", kind: boundedRoute, handler: s.authed(s.upscaleBatchList)},
 		{pattern: "DELETE /v1/upscale/batches/{id}", kind: boundedRoute, handler: s.authed(s.upscaleBatchCancel)},
-		{pattern: "DELETE /v1/upscale/variants", kind: boundedRoute, handler: s.authed(s.upscaleDelete)},
+		// The ?confirm=true all-variants shape deletes one fsync'd
+		// row + file per variant — tens of thousands of cached
+		// variants exceed the 60 s default, so long-op deadline.
+		{pattern: "DELETE /v1/upscale/variants", kind: boundedRoute, handler: s.authed(s.upscaleDelete), writeDeadline: upscaleLongOpWriteDeadline},
 
 		// DLNA renderer discovery — bounded JSON snapshot of the
 		// SSDP-discovered MediaRenderer cache. 2 s ctx-timeout
