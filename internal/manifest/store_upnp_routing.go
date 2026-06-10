@@ -3,6 +3,7 @@ package manifest
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -249,4 +250,47 @@ func (s *Store) AllUPnPRoutingPaths(ctx context.Context) ([]string, error) {
 		return nil, fmt.Errorf("manifest: iterate AllUPnPRoutingPaths: %w", err)
 	}
 	return out, nil
+}
+
+// ListUPnPTracksByServer returns the stored manifest Track for every
+// path currently routed via serverUDN, keyed by Track.Path. The ingest
+// layer loads this ONCE per walk as the skip-if-unchanged baseline: a
+// walked track whose walk-authoritative fields match the stored row
+// skips its UpsertTrack entirely, preserving `indexed_at` (so iOS
+// delta-sync doesn't re-receive the whole routed library every walk)
+// AND `enriched_at` (so the enricher doesn't re-process unchanged
+// tracks — UpsertTrack resets it to 0 by design "on track change",
+// and an unconditional re-upsert violated that contract for UPnP
+// rows; see internal/upnpingest.walkFieldsEqual).
+//
+// Read-only — no s.mu, matching ListUPnPSourcePathsOlderThan /
+// UnenrichedTracks. A ~15k-track upstream (Chord 2Go class) decodes
+// in well under a second and the map lives only for the walk.
+func (s *Store) ListUPnPTracksByServer(ctx context.Context, serverUDN string) (map[string]*Track, error) {
+	if serverUDN == "" {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT t.tags_json
+		  FROM tracks t
+		  JOIN upnp_track_routing r ON r.source_path = t.path
+		 WHERE r.server_udn = ?
+	`, serverUDN)
+	if err != nil {
+		return nil, fmt.Errorf("manifest: ListUPnPTracksByServer: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := make(map[string]*Track)
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return nil, fmt.Errorf("manifest: scan UPnP track row: %w", err)
+		}
+		var t Track
+		if err := json.Unmarshal(raw, &t); err != nil {
+			return nil, fmt.Errorf("manifest: decode UPnP track row: %w", err)
+		}
+		out[t.Path] = &t
+	}
+	return out, rows.Err()
 }

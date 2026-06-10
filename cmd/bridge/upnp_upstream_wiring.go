@@ -205,7 +205,8 @@ func (l *upnpUpstreamLifecycle) runOneIngest(ctx context.Context, ingester *upnp
 		default:
 			l.log.Info("UPnP upstream: ingest complete",
 				slog.String("server", pr.Name), slog.String("udn", pr.ServerUDN),
-				slog.Int("walked", pr.Walked), slog.Int("reaped", pr.Reaped))
+				slog.Int("walked", pr.Walked), slog.Int("unchanged", pr.Unchanged),
+				slog.Int("reaped", pr.Reaped))
 		}
 	}
 }
