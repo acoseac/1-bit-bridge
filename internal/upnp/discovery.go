@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -395,7 +396,20 @@ func (c *MediaServerDiscoveryClient) handlePacket(ctx context.Context, packet []
 		return
 	}
 	now := c.nowFunc()
-	if _, exists := c.cache.Get(udn); exists {
+	if existing, exists := c.cache.Get(udn); exists {
+		// Known UDN announcing from a NEW host:port (DHCP renew, Wi-Fi
+		// ↔ Ethernet move): the cached controlURL points at the old
+		// address, so the bare LastSeenAt refresh would keep a dead URL
+		// alive forever (TTL eviction never fires while the server keeps
+		// answering M-SEARCH). Re-fetch the description instead — the
+		// fetch upserts the fresh controlURL + LastSeenAt on success;
+		// on failure the entry ages out via the staleness window, which
+		// is correct for a server that moved somewhere unreachable.
+		if hdr.Location != "" &&
+			!sameURLHost(hdr.Location, existing.ContentDirectoryControlURL) {
+			go c.fetchAndCacheDetails(ctx, udn, hdr.Location, now)
+			return
+		}
 		c.cache.Upsert(ServerInfo{UDN: udn, LastSeenAt: now})
 		return
 	}
@@ -403,6 +417,18 @@ func (c *MediaServerDiscoveryClient) handlePacket(ctx context.Context, packet []
 		return
 	}
 	go c.fetchAndCacheDetails(ctx, udn, hdr.Location, now)
+}
+
+// sameURLHost reports whether two URLs share the same host:port.
+// Unparseable input compares as "same" so a malformed SSDP Location
+// can't trigger description re-fetch storms against a healthy entry.
+func sameURLHost(a, b string) bool {
+	ua, errA := url.Parse(a)
+	ub, errB := url.Parse(b)
+	if errA != nil || errB != nil {
+		return true
+	}
+	return ua.Host == ub.Host
 }
 
 // fetchAndCacheDetails downloads + parses the device description for a

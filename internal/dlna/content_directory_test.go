@@ -428,6 +428,10 @@ func Test_CDS_Browse_BrowseMetadata_RootReturnsRootContainer(t *testing.T) {
 		`<TotalMatches>1</TotalMatches>`,
 		`id=&quot;0&quot;`,
 		`parentID=&quot;-1&quot;`,
+		// childCount MUST equal the container count BrowseDirectChildren("0")
+		// emits (All Tracks + Folders) — strict controllers validate the
+		// two against each other; the stale "1" pre-dated Folders.
+		`childCount=&quot;2&quot;`,
 		`&lt;dc:title&gt;1-bit Bridge&lt;/dc:title&gt;`,
 		`&lt;upnp:class&gt;object.container&lt;/upnp:class&gt;`,
 	} {

@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -194,6 +195,15 @@ func (l *upnpUpstreamLifecycle) runOneIngest(ctx context.Context, ingester *upnp
 	// has been installed yet — happens during the very-first warm-up
 	// tick before cmd/bridge wires the admin Deps).
 	l.recordIngestResult(res)
+	if res.OrphanSweepErr != nil {
+		l.log.Warn("UPnP upstream: orphan sweep failed (retries next tick)",
+			slog.String("err", res.OrphanSweepErr.Error()))
+	}
+	if res.OrphanServersReaped > 0 {
+		l.log.Info("UPnP upstream: reaped removed servers' rows",
+			slog.Int("servers", res.OrphanServersReaped),
+			slog.Int("tracks", res.OrphanTracksReaped))
+	}
 	for _, pr := range res.PerServer {
 		switch {
 		case pr.Skipped:
@@ -218,7 +228,11 @@ func (l *upnpUpstreamLifecycle) runOneIngest(ctx context.Context, ingester *upnp
 type discoveryServerResolver struct{ cache *upnp.ServerCache }
 
 func (r *discoveryServerResolver) ResolveControlURL(_ context.Context, srv config.UPnPUpstreamServerConfig) (string, error) {
-	if udn := srv.UDN; udn != "" {
+	// Trim mirrors lookupUPnPServerRuntime + ConfiguredServers (Gemini on
+	// PR #362) — a hand-edited bridge.yaml UDN with stray whitespace
+	// otherwise splits the brain: admin/health report the server online
+	// (trimmed lookups hit) while the ingest misses the cache every tick.
+	if udn := strings.TrimSpace(srv.UDN); udn != "" {
 		if info, ok := r.cache.Get(udn); ok {
 			return info.ContentDirectoryControlURL, nil
 		}

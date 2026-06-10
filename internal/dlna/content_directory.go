@@ -524,7 +524,13 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, fc 
 		case "", "0":
 			selfDIDL = DIDLForContainer(DIDLContainerOpts{
 				ID: "0", ParentID: "-1", Title: "1-bit Bridge",
-				ChildCount: 1, // one child: all_tracks
+				// MUST match the container count BrowseDirectChildren("0")
+				// emits (All Tracks + Folders, PR #317) — strict
+				// controllers (mconnect/Cling class) validate metadata
+				// childCount against the children they fetch and can
+				// abandon the drill-down on a mismatch. The stale "1"
+				// pre-dated the Folders container.
+				ChildCount: 2,
 				UPnPClass:  "object.container",
 			})
 		case allTracksObjectID:

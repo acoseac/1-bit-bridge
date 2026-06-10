@@ -372,11 +372,11 @@ func (a *upnpAdminAdapter) AddServer(_ context.Context, req admin.UPnPServerAddR
 // to find the matching row.
 //
 // **Manifest tracks the removed server contributed are NOT swept**
-// here. The next restart's reconcile sweep handles them (the
-// upnpUpstreamLifecycle starts up with a fresh server list and the
-// ingester's reaper drops tracks whose ServerUDN isn't in the
-// configured set). Doing the sweep here would tie up the admin
-// goroutine on a manifest write that may be holding other work.
+// here. The ingester's orphan sweep (`reapOrphanServers`, run at the
+// top of every ingest tick — hourly plus on startup) reaps every
+// routing row whose server_udn no longer matches a configured server.
+// Doing the sweep here would tie up the admin goroutine on a manifest
+// write that may be holding other work.
 func (a *upnpAdminAdapter) RemoveServer(_ context.Context, udn string) error {
 	a.crudMu.Lock()
 	defer a.crudMu.Unlock()
