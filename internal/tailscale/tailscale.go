@@ -22,6 +22,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 )
@@ -314,7 +315,14 @@ func trimErr(stderr string, runErr error) string {
 	}
 	const maxLen = 240
 	if len(s) > maxLen {
-		s = s[:maxLen] + "…"
+		s = s[:maxLen]
+		// Byte-slicing can land mid-rune; trim back to the last valid
+		// boundary so the JSON body never carries malformed UTF-8 (same
+		// shape as auth.RecordClientVersion, PR #75).
+		for !utf8.ValidString(s) && len(s) > 0 {
+			s = s[:len(s)-1]
+		}
+		s += "…"
 	}
 	return s
 }

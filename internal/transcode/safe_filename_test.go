@@ -178,6 +178,36 @@ func TestSafeVariantFilenameOverLength(t *testing.T) {
 	}
 }
 
+// TestSafeVariantFilenameReservesTmpSuffix pins the temp-file budget:
+// the output basename plus sidecarTmpSuffix must fit the 255-byte
+// filesystem cap, because sox writes to `<sidecar>.tmp` before the
+// atomic rename. Pre-fix the budget was a bare 255, so an input that
+// produced a 255-byte name made the temp target 259 bytes —
+// ENAMETOOLONG on every common filesystem, exactly for the
+// long-classical-filename inputs the sanitizer exists to handle.
+func TestSafeVariantFilenameReservesTmpSuffix(t *testing.T) {
+	const variantID = "upscaled-v2-176400-24"
+	cases := []struct {
+		name    string
+		srcBase string
+	}{
+		// Clean name sized so the candidate landed at exactly 255
+		// bytes under the pre-fix budget: len(srcBase) + len(".") +
+		// len(variantID) + len(".flac") = 228 + 1 + 21 + 5 = 255.
+		{"exact-pre-fix-cap", strings.Repeat("x", 223) + ".flac"},
+		{"well-over-cap", strings.Repeat("x", 300) + ".flac"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := safeVariantFilename(c.srcBase, variantID)
+			if len(got)+len(sidecarTmpSuffix) > 255 {
+				t.Errorf("len(%q) = %d; +%q overflows the 255-byte basename cap",
+					got, len(got), sidecarTmpSuffix)
+			}
+		})
+	}
+}
+
 // TestSafeVariantFilenameOverLengthDeterministic confirms two
 // identical over-length inputs produce the same output (SHA8 of the
 // original basename is deterministic).

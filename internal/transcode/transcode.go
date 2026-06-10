@@ -65,6 +65,13 @@ var logger = logging.Component("transcode")
 // `bridge upscale --gc` pass cleans them up.
 const VariantSchemaVersion = "v2"
 
+// sidecarTmpSuffix is appended to the sidecar path for the
+// atomic-rename temp file sox writes (SoxArgs output argument +
+// RunSox's rename source). safeVariantFilename reserves these bytes
+// in its basename budget so the TEMP name fits the 255-byte
+// filesystem cap too — keep all three sites on this constant.
+const sidecarTmpSuffix = ".tmp"
+
 // Variant ID prefixes. Two transcode classes coexist today:
 //
 //   - "upscaled-" — render a hi-res target (e.g. 192/24) FROM a
@@ -356,7 +363,13 @@ func (j JobSpec) SidecarPath() string {
 //
 // Pure helper — testable in isolation; table-tested across cases.
 func safeVariantFilename(srcBase, variantID string) string {
-	const fsBasenameCap = 255
+	// 255 is the ext4 / NTFS / exFAT basename limit — minus the
+	// atomic-rename temp suffix RunSox appends (sidecarTmpSuffix).
+	// Without the reserve, a basename at exactly 255 bytes makes the
+	// `<sidecar>.flac.tmp` write target 259 bytes and sox fails with
+	// ENAMETOOLONG — precisely for the long-classical-filename inputs
+	// this sanitizer exists to handle.
+	const fsBasenameCap = 255 - len(sidecarTmpSuffix)
 	raw := srcBase
 	sanitized := sanitiseForFAT(srcBase)
 
@@ -543,7 +556,7 @@ func (j JobSpec) SoxArgs() ([]string, string) {
 		j.SourceAbsPath,
 		"-b", strconv.Itoa(j.TargetBits),
 		"-t", "flac",
-		j.SidecarPath() + ".tmp",
+		j.SidecarPath() + sidecarTmpSuffix,
 		"rate", rateFlag, strconv.Itoa(j.TargetSampleRate),
 		"dither", "-s",
 	}
@@ -729,7 +742,7 @@ func RunSox(ctx context.Context, j JobSpec) (int64, error) {
 	if err := os.MkdirAll(filepath.Dir(finalPath), 0o755); err != nil {
 		return 0, fmt.Errorf("mkdir sidecar dir: %w", err)
 	}
-	tmpPath := finalPath + ".tmp"
+	tmpPath := finalPath + sidecarTmpSuffix
 	// Defensive: clear any stale .tmp from a previous interrupted
 	// run so SoX's open(O_CREAT) doesn't trip on prior crash debris.
 	_ = os.Remove(tmpPath)

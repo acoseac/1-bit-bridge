@@ -1,6 +1,7 @@
 package backup_test
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"os"
@@ -98,6 +99,34 @@ func TestSnapshotPreservesManifestDBContents(t *testing.T) {
 	}
 	if v != "round-trip-me" {
 		t.Errorf("snapshot lost canary row: got %q", v)
+	}
+}
+
+// A failed (here: cancelled) Snapshot must reap its partial snapshot
+// dir. List skips manifest-less dirs, so a leaked partial — which
+// contains a full DB copy — would be invisible to Prune forever and
+// accumulate unbounded across failures.
+func TestSnapshotFailureReapsPartialDir(t *testing.T) {
+	dataDir := t.TempDir()
+	src := primeLiveState(t, dataDir)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // VACUUM INTO observes the cancellation and fails
+
+	if _, err := backup.Snapshot(ctx, src); err == nil {
+		t.Fatalf("Snapshot with cancelled ctx should fail")
+	}
+
+	backupsRoot := filepath.Join(dataDir, backup.BackupsDirName)
+	entries, err := os.ReadDir(backupsRoot)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return // root never created — also fine, nothing leaked
+		}
+		t.Fatalf("read backups root: %v", err)
+	}
+	for _, e := range entries {
+		t.Errorf("failed snapshot leaked %q under backups root", e.Name())
 	}
 }
 

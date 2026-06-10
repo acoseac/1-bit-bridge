@@ -1680,6 +1680,10 @@ func validateVariantsDir(variantsDir string, libraryRoots []string) error {
 // fallback is lexical-only — symlink bypass is theoretically
 // possible on a non-existent target, but a missing path can't be
 // a real attack surface today (no file would land there).
+//
+// `internal/admin` carries a byte-for-byte twin (handlers_variants_dir.go)
+// so the admin's pre-save check matches what this package enforces at
+// the next config load — keep the two in lockstep.
 func evalSymlinksOrClean(p string) string {
 	if resolved, err := filepath.EvalSymlinks(p); err == nil {
 		return resolved

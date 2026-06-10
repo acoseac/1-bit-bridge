@@ -103,6 +103,49 @@ func TestPlaylistDetailAndExport(t *testing.T) {
 	}
 }
 
+// TestM3U8ExportSanitizesNewlineInjection pins the line-injection fix:
+// device-supplied playlist names / tags / paths containing CR/LF must
+// not be able to start a new playlist line. A bare injected line is a
+// media LOCATION in M3U — pre-fix, a hostile value like
+// "Song\nhttp://evil/beacon" turned the export into a network beacon
+// the moment the operator opened it in a player.
+func TestM3U8ExportSanitizesNewlineInjection(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	ctx := context.Background()
+	if err := srv.deps.Manifest.UpsertDeviceRegistration(ctx, testDeviceToken, "tok-1", "Test iPhone"); err != nil {
+		t.Fatalf("UpsertDeviceRegistration: %v", err)
+	}
+	pl := manifest.PlaylistRow{ID: "pl-evil", Name: "Road Trip\nEVIL-NAME", LastModifiedAt: 1_700_000_000_000_000_000}
+	items := []manifest.PlaylistItemRow{
+		// Local item: injection via title + artist.
+		{Position: 0, Path: "Artist/Album/01.flac", Title: "First\nEVIL-TITLE", Artist: "A\r\nEVIL-ARTIST"},
+		// Foreign item: injection via both origin fields.
+		{Position: 1, OriginFingerprint: "AA:BB\nEVIL-FP", OriginPath: "Other/02.flac\nEVIL-OP"},
+		// Unresolvable local item: injection via the path echoed in
+		// the "# unresolved:" comment.
+		{Position: 2, Path: "../escape\nEVIL-PATH"},
+	}
+	if err := srv.deps.Manifest.UpsertPlaylist(ctx, testDeviceToken, pl, items); err != nil {
+		t.Fatalf("UpsertPlaylist: %v", err)
+	}
+
+	rec := doExport(t, srv.Handler(), "/api/playlists/export?device=abcdef01&id=pl-evil&format=m3u8")
+	if rec.Code != 200 {
+		t.Fatalf("export: %d", rec.Code)
+	}
+	body := rec.Body.String()
+	for i, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(line, "EVIL") {
+			t.Errorf("line %d starts with injected payload %q — newline sanitization regressed:\n%s", i, line, body)
+		}
+	}
+	// The flattened values must still be present (replaced with a
+	// space, not dropped).
+	if !strings.Contains(body, "#PLAYLIST:Road Trip EVIL-NAME") {
+		t.Errorf("playlist name not flattened-in-place:\n%s", body)
+	}
+}
+
 func TestHistoryEventsAndExport(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	seedDataFixture(t, srv)

@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
 )
@@ -99,17 +100,17 @@ func (s *Server) apiVariantsDirPatch(w http.ResponseWriter, r *http.Request) {
 	// be absolute AND not under any library root. Validation reads
 	// the live config snapshot WITHOUT holding the mutex —
 	// CfgHolder is atomic-pointer-backed (PR #234) so the read is
-	// race-free. The mutex is acquired ONLY for the save+publish
-	// pair below, narrowing the contended region from
+	// race-free. The mutex is acquired ONLY for the load+clone+save+
+	// publish sequence below, narrowing the contended region from
 	// "validation + disk save + DB probes" down to "save + publish."
 	// CodeRabbit Major on PR #245.
-	cfg := s.deps.CfgHolder.Load()
 	if req.Path != "" {
 		if !filepath.IsAbs(req.Path) {
 			writeError(w, http.StatusBadRequest, "not-absolute",
 				"variants directory must be an absolute path")
 			return
 		}
+		cfg := s.deps.CfgHolder.Load()
 		if err := assertNotUnderLibraryRoots(req.Path, cfg.LibraryRoots); err != nil {
 			writeError(w, http.StatusBadRequest, "under-library-root", err.Error())
 			return
@@ -122,9 +123,17 @@ func (s *Server) apiVariantsDirPatch(w http.ResponseWriter, r *http.Request) {
 	// backstop). The disk-snapshot + DB-count probes below run
 	// OUTSIDE the mutex so a slow filesystem stat can't serialise
 	// unrelated admin work.
-	next := *cfg // shallow copy is fine; UpscaleConfig is all value types.
-	next.Upscale.VariantsDir = req.Path
+	//
+	// The holder is RE-loaded INSIDE the mutex and the mutation built
+	// on a deep config.Clone — same shape as apiSettingsPatch /
+	// apiRootsAdd. Cloning a pre-mutex snapshot would silently revert
+	// any config write (settings PATCH, roots add) that committed
+	// between the validation read above and the lock; a shallow
+	// `next := *cfg` would additionally alias pointer fields
+	// (Upscale.OptimizeEnabled is *bool) with the live snapshot.
 	s.mu.Lock()
+	next := config.Clone(s.deps.CfgHolder.Load())
+	next.Upscale.VariantsDir = req.Path
 	if err := next.Save(s.deps.CfgPath); err != nil {
 		s.mu.Unlock()
 		writeError(w, http.StatusInternalServerError, "save-config", err.Error())
@@ -132,7 +141,7 @@ func (s *Server) apiVariantsDirPatch(w http.ResponseWriter, r *http.Request) {
 	}
 	// Reload via the holder so subsequent reads (including the
 	// transcode pool's next OutputDir computation) see the new value.
-	s.deps.CfgHolder.Store(&next)
+	s.deps.CfgHolder.Store(next)
 	s.mu.Unlock()
 
 	// Return the refreshed snapshot. Disk + DB probes run unlocked —
@@ -195,18 +204,22 @@ func (s *Server) probeUsedByKind(ctx context.Context) map[string]int64 {
 }
 
 // assertNotUnderLibraryRoots mirrors `config.validateVariantsDir`'s
-// containment check. Duplicated here (rather than exported from
-// config) so the admin handler can produce its own error
-// formatting without a config-package round-trip. Both paths MUST
-// stay in lockstep — a test in `internal/admin` pins the contract
-// via a sibling-path acceptance + under-root rejection pair.
+// containment check, INCLUDING its symlink resolution — a lexical-only
+// check here would let the admin accept a symlinked path that
+// `config.Load`'s validation rejects on the next boot (bridge fails to
+// start over a value the UI said was fine). Duplicated here (rather
+// than exported from config) so the admin handler can produce its own
+// error formatting without a config-package round-trip. Both paths
+// MUST stay in lockstep — a test in `internal/admin` pins the contract
+// via a sibling-path acceptance + under-root rejection pair plus a
+// symlink-resolution case.
 func assertNotUnderLibraryRoots(candidate string, roots []string) error {
-	cleaned := filepath.Clean(candidate)
+	cleaned := evalSymlinksOrClean(candidate)
 	for _, root := range roots {
 		if root == "" {
 			continue
 		}
-		cleanedRoot := filepath.Clean(root)
+		cleanedRoot := evalSymlinksOrClean(root)
 		rel, err := filepath.Rel(cleanedRoot, cleaned)
 		if err != nil {
 			continue
@@ -216,6 +229,20 @@ func assertNotUnderLibraryRoots(candidate string, roots []string) error {
 		}
 	}
 	return nil
+}
+
+// evalSymlinksOrClean is a byte-for-byte twin of
+// `config.evalSymlinksOrClean`: EvalSymlinks when the path exists,
+// lexical Clean fallback when it doesn't (a brand-new variants dir is
+// created on first upscale; an unmounted library root is typed but
+// absent). MUST stay in lockstep with the config twin — divergence
+// re-opens the accept-here / reject-at-boot mismatch documented on
+// assertNotUnderLibraryRoots.
+func evalSymlinksOrClean(p string) string {
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
+	}
+	return filepath.Clean(p)
 }
 
 // probeVariantsDirUsage returns (usedBytes, freeBytes) for the

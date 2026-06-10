@@ -214,15 +214,21 @@ func (s *Server) apiPlaylistExport(w http.ResponseWriter, r *http.Request) {
 // absolute filesystem path (playable by a player on the bridge host, e.g.
 // VLC opened on this machine); items that don't resolve and foreign items
 // are emitted as comments so the file stays valid and self-documenting.
+//
+// Every device-supplied value interpolated into a line goes through
+// m3uLine first — M3U is a line-oriented format, so an embedded newline
+// in a playlist name / tag / path would inject arbitrary playlist lines
+// (a bare non-comment line is a media LOCATION; an exported playlist
+// opened by the operator would beacon to an attacker-chosen URL).
 func (s *Server) writeM3U8(w http.ResponseWriter, name string, items []manifest.PlaylistItemRow) {
 	fmt.Fprintln(w, "#EXTM3U")
-	fmt.Fprintf(w, "#PLAYLIST:%s\n", name)
+	fmt.Fprintf(w, "#PLAYLIST:%s\n", m3uLine(name))
 	for _, it := range items {
 		// Trim the fields individually then join only when both are
 		// present — joining-then-trimming would corrupt legit names that
 		// begin/end with a hyphen (e.g. the artist "-M-"). Gemini on PR #341.
-		artist := strings.TrimSpace(it.Artist)
-		songTitle := strings.TrimSpace(it.Title)
+		artist := m3uLine(strings.TrimSpace(it.Artist))
+		songTitle := m3uLine(strings.TrimSpace(it.Title))
 		title := songTitle
 		switch {
 		case artist != "" && songTitle != "":
@@ -232,16 +238,27 @@ func (s *Server) writeM3U8(w http.ResponseWriter, name string, items []manifest.
 		}
 		if it.OriginFingerprint != "" || it.OriginPath != "" {
 			// Foreign item — opaque to this bridge, not locally playable.
-			fmt.Fprintf(w, "# foreign (%s): %s\n", it.OriginFingerprint, it.OriginPath)
+			fmt.Fprintf(w, "# foreign (%s): %s\n", m3uLine(it.OriginFingerprint), m3uLine(it.OriginPath))
 			continue
 		}
 		abs, err := s.deps.Resolver.Resolve(it.Path)
 		if err != nil {
-			fmt.Fprintf(w, "# unresolved: %s\n", it.Path)
+			fmt.Fprintf(w, "# unresolved: %s\n", m3uLine(it.Path))
 			continue
 		}
-		fmt.Fprintf(w, "#EXTINF:-1,%s\n%s\n", title, abs)
+		// The location line derives from the device-supplied path too;
+		// a path with an embedded newline can't be represented as one
+		// M3U location anyway, so flattening it is strictly no worse.
+		fmt.Fprintf(w, "#EXTINF:-1,%s\n%s\n", title, m3uLine(abs))
 	}
+}
+
+// m3uLine flattens CR/LF (to a space) in a device-supplied value before
+// it lands inside a single M3U line. See writeM3U8's docblock for the
+// injection vector this closes.
+func m3uLine(s string) string {
+	s = strings.ReplaceAll(s, "\r", " ")
+	return strings.ReplaceAll(s, "\n", " ")
 }
 
 // --- history events ---

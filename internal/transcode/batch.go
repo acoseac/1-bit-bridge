@@ -1086,13 +1086,19 @@ func (c *Coordinator) publishProgress(batchID uuid.UUID) {
 }
 
 // publishProgressRow is the publish helper that takes a row copy
-// (already snapshot under c.mu) so it doesn't have to re-lock for
-// the SSE emit.
+// (already snapshot under c.mu, released by the caller — every call
+// site MUST drop the lock first). The publish func itself is
+// re-snapshotted under c.mu here because SetPublish writes it under
+// the same mutex; an unlocked read would race a post-construction
+// rewire. The emit then runs outside the lock.
 func (c *Coordinator) publishProgressRow(row manifest.UpscaleBatchRow) {
-	if c.publish == nil {
+	c.mu.Lock()
+	publish := c.publish
+	c.mu.Unlock()
+	if publish == nil {
 		return
 	}
-	c.publish(BatchProgressEvent{
+	publish(BatchProgressEvent{
 		BatchID:        row.ID.String(),
 		Path:           row.Path,
 		Status:         row.Status,

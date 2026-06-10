@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/metrics"
@@ -1181,7 +1182,14 @@ func redactSoxErr(s string, spec JobSpec) string {
 	}
 	const maxErrBytes = 4096
 	if len(s) > maxErrBytes {
-		s = s[:maxErrBytes] + "…(truncated)"
+		s = s[:maxErrBytes]
+		// Byte-slicing can land mid-rune; trim back to the last valid
+		// boundary so the persisted row is never malformed UTF-8 (same
+		// shape as auth.RecordClientVersion, PR #75).
+		for !utf8.ValidString(s) && len(s) > 0 {
+			s = s[:len(s)-1]
+		}
+		s += "…(truncated)"
 	}
 	return s
 }
