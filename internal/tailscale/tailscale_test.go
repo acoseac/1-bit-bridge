@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // fakeCmd builds an exec.Cmd that runs `/bin/sh -c <script>` so tests
@@ -296,5 +297,34 @@ func TestEnsureCertDir_CreatesIdempotent(t *testing.T) {
 	}
 	if !info.IsDir() {
 		t.Errorf("tls path = %v, want a directory", info.Mode())
+	}
+}
+
+// TestTrimErr_TruncatesAtUTF8Boundary pins the rune-boundary trim on
+// the 240-byte cap: a multi-byte rune straddling the cut must be
+// dropped entirely, never surfaced to the admin tile's JSON body as a
+// half-encoded sequence (same invariant auth.RecordClientVersion
+// carries, PR #75).
+func TestTrimErr_TruncatesAtUTF8Boundary(t *testing.T) {
+	// 239 ASCII bytes + a 3-byte rune whose bytes occupy 239..241 —
+	// the cut at 240 lands mid-rune.
+	in := strings.Repeat("a", 239) + "世" + strings.Repeat("b", 50)
+	got := trimErr(in, nil)
+	if !utf8.ValidString(got) {
+		t.Errorf("trimmed output is not valid UTF-8: %q", got)
+	}
+	if want := strings.Repeat("a", 239) + "…"; got != want {
+		t.Errorf("expected the straddling rune dropped to the boundary; got len %d: %q", len(got), got[230:])
+	}
+}
+
+// TestTrimErr_ASCIIBoundaryUnchanged is the regression guard for the
+// UTF-8-safe path: pure-ASCII input must truncate at exactly the cap,
+// not over-trim.
+func TestTrimErr_ASCIIBoundaryUnchanged(t *testing.T) {
+	in := strings.Repeat("a", 300)
+	got := trimErr(in, nil)
+	if want := strings.Repeat("a", 240) + "…"; got != want {
+		t.Errorf("ASCII truncation changed: len %d, want %d", len(got), len(want))
 	}
 }

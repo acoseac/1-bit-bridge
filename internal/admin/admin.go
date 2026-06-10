@@ -845,7 +845,7 @@ func (s *Server) spawnBackgroundScan(label string) {
 	go func() {
 		defer s.bgScans.Done()
 		if _, err := s.deps.Scanner.Scan(ctx); err != nil && !errors.Is(err, ctx.Err()) {
-			fmt.Fprintf(os.Stderr, "admin: %s: %v\n", label, err)
+			logger.Error("background scan failed", "label", label, "err", err)
 		}
 	}()
 }

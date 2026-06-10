@@ -1,6 +1,9 @@
 // Package fs resolves client-supplied relative paths against a configured
-// library root and rejects traversal (`..`, absolute paths, symlink
-// escapes).
+// library root and rejects LEXICAL traversal (`..`, absolute paths, NUL
+// bytes). Resolution does not follow symlinks: a symlink the operator
+// planted inside a root is trusted content and IS served (see
+// TestResolveStillStopsSymlinkEscape) — the guarantee is that a client
+// path can never escape a root without the server's help.
 //
 // Wire convention (see PROTOCOL.md): client paths are always forward-slash
 // separated regardless of the server OS. The resolver maps to the native

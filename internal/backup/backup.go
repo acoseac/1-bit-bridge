@@ -109,7 +109,7 @@ type Targets struct {
 // `ctx` is forwarded to the SQLite VACUUM INTO step so the periodic
 // ticker can cancel an in-flight snapshot on bridge shutdown. Pass
 // `context.Background()` if you don't have a richer scope.
-func Snapshot(ctx context.Context, src Sources) (string, error) {
+func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
 	if src.DataDir == "" {
 		return "", errors.New("backup: DataDir is required")
 	}
@@ -121,6 +121,16 @@ func Snapshot(ctx context.Context, src Sources) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("create snapshot dir: %w", err)
 	}
+	// Reap the partial dir on any failure past this point. A failed /
+	// cancelled snapshot never wrote `manifest.json`, and `List` skips
+	// manifest-less dirs — so without this cleanup the partial dir
+	// (containing a full DB copy) would be invisible to Prune forever
+	// and accumulate unbounded across failures.
+	defer func() {
+		if retErr != nil {
+			_ = os.RemoveAll(dst)
+		}
+	}()
 
 	var captured []string
 

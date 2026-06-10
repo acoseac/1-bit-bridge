@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/google/uuid"
@@ -352,6 +353,26 @@ func TestRedactSoxErr_DropsPrefixesAndCaps(t *testing.T) {
 	}
 }
 
+// TestRedactSoxErr_TruncatesAtUTF8Boundary pins the rune-boundary
+// trim on the 4 KiB cap: a multi-byte rune straddling the cut must be
+// dropped entirely, never persisted as a half-encoded sequence (same
+// invariant auth.RecordClientVersion carries, PR #75).
+func TestRedactSoxErr_TruncatesAtUTF8Boundary(t *testing.T) {
+	// 4095 ASCII bytes + a 3-byte rune whose bytes occupy 4095..4097 —
+	// the cut at 4096 lands mid-rune.
+	in := strings.Repeat("a", 4095) + "世" + strings.Repeat("b", 100)
+	got := redactSoxErr(in, JobSpec{})
+	if !utf8.ValidString(got) {
+		t.Errorf("truncated output is not valid UTF-8: %q", got[4080:])
+	}
+	if !strings.HasSuffix(got, "…(truncated)") {
+		t.Errorf("long input not marked truncated: %q", got[len(got)-30:])
+	}
+	if want := strings.Repeat("a", 4095) + "…(truncated)"; got != want {
+		t.Errorf("expected the straddling rune dropped to the boundary; got len %d", len(got))
+	}
+}
+
 // TestRedactSoxErr_ScrubsAbsolutePath locks the path-redaction
 // contract: when the JobSpec carries SourceAbsPath, every occurrence
 // of that absolute path in stderr is replaced with the library-
@@ -400,5 +421,21 @@ func TestErrInsufficientDiskSpaceTypedShape(t *testing.T) {
 	}
 	if got.ProjectedBytes != 1_000_000 {
 		t.Errorf("ProjectedBytes = %d", got.ProjectedBytes)
+	}
+}
+
+// TestRedactSoxErr_InteriorGarbagePreservesMessage pins the O(1)
+// trim posture: an invalid byte EARLY in an over-limit string must not
+// discard the rest of the message (a validate-the-whole-string loop
+// would trim everything after the first bad byte — Gemini HIGH on
+// PR #375).
+func TestRedactSoxErr_InteriorGarbagePreservesMessage(t *testing.T) {
+	in := "sox FAIL formats: \xff " + strings.Repeat("x", 5000)
+	got := redactSoxErr(in, JobSpec{})
+	if len(got) < 4000 {
+		t.Fatalf("interior invalid byte collapsed the message: len=%d", len(got))
+	}
+	if !strings.HasSuffix(got, "…(truncated)") {
+		t.Errorf("missing truncation marker: %q", got[len(got)-30:])
 	}
 }
