@@ -195,6 +195,72 @@ func TestPlaylistHTTPDeviceTokenRequired(t *testing.T) {
 	resp.Body.Close()
 }
 
+// TestPlaylistHTTPCrossDeviceRestore pins the user-wide wire contract:
+// a playlist backed up by one device is listable, restorable, updatable
+// and deletable from a different device (different X-Device-Token).
+func TestPlaylistHTTPCrossDeviceRestore(t *testing.T) {
+	token, dtA, srv := newPlaylistTestServer(t)
+	dtB := "beefbeef" // a second device of the same user
+	id := "eeeeeeee-0000-0000-0000-000000000005"
+	body := `{"id":"` + id + `","name":"A's Favs","lastModifiedAt":100,"items":[{"position":0,"path":"A/B/c.flac"}]}`
+
+	// Device A backs up.
+	resp := doReq(t, srv, http.MethodPut, "/v1/playlists/"+id, token, dtA, body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("PUT from devA = %d, want 200", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Device B sees it in the list…
+	resp = doReq(t, srv, http.MethodGet, "/v1/playlists", token, dtB, "")
+	var list playlistsListResponse
+	json.NewDecoder(resp.Body).Decode(&list)
+	resp.Body.Close()
+	if len(list.Playlists) != 1 || list.Playlists[0].ID != id {
+		t.Fatalf("devB list mismatch: %+v", list)
+	}
+
+	// …restores the full playlist…
+	resp = doReq(t, srv, http.MethodGet, "/v1/playlists/"+id, token, dtB, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("devB GET = %d, want 200", resp.StatusCode)
+	}
+	var got playlistDTO
+	json.NewDecoder(resp.Body).Decode(&got)
+	resp.Body.Close()
+	if got.Name != "A's Favs" || len(got.Items) != 1 {
+		t.Errorf("devB restore mismatch: %+v", got)
+	}
+
+	// …updates it with a newer clock (no playlist_conflict 409 anymore)…
+	newer := `{"id":"` + id + `","name":"B's edit","lastModifiedAt":200,"items":[{"position":0,"path":"X/y.flac"}]}`
+	resp = doReq(t, srv, http.MethodPut, "/v1/playlists/"+id, token, dtB, newer)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("devB PUT = %d, want 200 (cross-device writes allowed)", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// …a STALE cross-device write still 409s (LWW is the only guard)…
+	older := `{"id":"` + id + `","name":"stale","lastModifiedAt":50,"items":[]}`
+	resp = doReq(t, srv, http.MethodPut, "/v1/playlists/"+id, token, dtA, older)
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("stale cross-device PUT = %d, want 409", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// …and deletes it.
+	resp = doReq(t, srv, http.MethodDelete, "/v1/playlists/"+id, token, dtB, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("devB DELETE = %d, want 200", resp.StatusCode)
+	}
+	resp.Body.Close()
+	resp = doReq(t, srv, http.MethodGet, "/v1/playlists/"+id, token, dtA, "")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("GET after cross-device delete = %d, want 404", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
 func TestPlaylistHTTPFeatureOff404(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &config.Config{LibraryRoots: []string{t.TempDir()}, ListenAddress: ":7788", LibraryName: "T"}

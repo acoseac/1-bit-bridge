@@ -2,19 +2,27 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
-// HistoryStore is the optional backing store for POST /v1/history/batch.
-// Nil-safe — when unwired the route returns 404 (feature-off).
-// *manifest.Store satisfies it in production.
+// HistoryStore is the optional backing store for POST /v1/history/batch
+// and the GET /v1/history all-devices read feed. Nil-safe — when unwired
+// the routes return 404 (feature-off). *manifest.Store satisfies it in
+// production.
 type HistoryStore interface {
 	InsertHistoryBatch(ctx context.Context, events []manifest.PlaybackHistoryRow) error
+	// ListHistory pages events newest-first; deviceToken "" is the global
+	// all-devices feed (the only form the public read endpoint uses —
+	// listening history is user-wide across every paired device).
+	ListHistory(ctx context.Context, deviceToken string, limit int, afterID int64) ([]manifest.HistoryEventOut, error)
 }
 
 // WithHistoryStore wires the playback-telemetry feature. Advertises the
@@ -126,4 +134,112 @@ func (s *Server) historyBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, historyBatchResponse{Accepted: len(clean), Dropped: dropped})
+}
+
+// --- GET /v1/history — all-devices read feed (additive, see PROTOCOL.md) ---
+
+// historyReadEventDTO is one event on the read feed. DeviceID/DeviceName
+// attribute the event to the PLAYING device; outputTarget.deviceName is
+// the OUTPUT hardware (the DAC), as on the upload shape.
+type historyReadEventDTO struct {
+	Path         string             `json:"path"`
+	StartedAt    int64              `json:"startedAt"`    // UnixNano UTC
+	DurationUsed float64            `json:"durationUsed"` // seconds listened
+	Codec        string             `json:"codec,omitempty"`
+	VariantID    string             `json:"variantId,omitempty"`
+	OutputTarget *hardwareTargetDTO `json:"outputTarget,omitempty"`
+	DeviceID     string             `json:"deviceId,omitempty"`
+	DeviceName   string             `json:"deviceName,omitempty"`
+}
+
+type historyListResponse struct {
+	Events     []historyReadEventDTO `json:"events"`
+	NextCursor int64                 `json:"nextCursor"` // 0 = no further pages
+}
+
+// historyDeviceIDLen is the length of the wire `deviceId` — the first 16
+// hex chars of SHA-256(deviceToken). The raw recovery token is a secret
+// and MUST NOT appear on the wire; the hash prefix is a stable, non-
+// reversible display id a client can also derive for its own token to
+// mark "this device".
+const historyDeviceIDLen = 16
+
+func historyDeviceID(deviceToken string) string {
+	if deviceToken == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(deviceToken))
+	return hex.EncodeToString(sum[:])[:historyDeviceIDLen]
+}
+
+// historyList handles GET /v1/history?limit=&after= — the authenticated,
+// cursor-paged listening-history feed across ALL of the user's devices
+// (single-user model: every paired device belongs to the bridge operator,
+// so the feed is user-wide by design; a future multi-user mode would
+// re-scope it). Advertised via the `playbackHistoryRead` feature flag.
+func (s *Server) historyList(w http.ResponseWriter, r *http.Request) {
+	if s.historyStore == nil {
+		writeError(w, http.StatusNotFound, "playback_history_not_supported",
+			"this bridge does not record playback history")
+		return
+	}
+	q := safeQuery(r)
+	// Default/cap mirror the store's own clamp; resolving them here too
+	// lets the short-page check below emit a definitive nextCursor=0 on
+	// the last non-empty page (saves the client one empty-page fetch).
+	limit := 200
+	if v := q.Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			writeError(w, http.StatusBadRequest, "bad_request", "limit must be a positive integer")
+			return
+		}
+		if n > 1000 {
+			n = 1000
+		}
+		limit = n
+	}
+	var after int64
+	if v := q.Get("after"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n < 0 {
+			writeError(w, http.StatusBadRequest, "bad_request", "after must be a non-negative integer cursor")
+			return
+		}
+		after = n
+	}
+
+	events, err := s.historyStore.ListHistory(r.Context(), "", limit, after)
+	if err != nil {
+		writeErrorLog(w, r, http.StatusInternalServerError, "internal",
+			"failed to list playback history", err)
+		return
+	}
+	resp := historyListResponse{Events: make([]historyReadEventDTO, 0, len(events))}
+	for _, e := range events {
+		dto := historyReadEventDTO{
+			Path:         e.Path,
+			StartedAt:    e.StartedAt,
+			DurationUsed: e.DurationUsed,
+			Codec:        e.Codec,
+			VariantID:    e.VariantID,
+			DeviceID:     historyDeviceID(e.SourceDeviceToken),
+			DeviceName:   e.SourceDeviceName,
+		}
+		if e.IfaceType != "" || e.DeviceName != "" || e.OutputRate != 0 || e.IsDoP {
+			dto.OutputTarget = &hardwareTargetDTO{
+				InterfaceType: e.IfaceType,
+				DeviceName:    e.DeviceName,
+				OutputRate:    e.OutputRate,
+				IsDoP:         e.IsDoP,
+			}
+		}
+		resp.Events = append(resp.Events, dto)
+	}
+	// A full page may have more behind it; a short (or empty) page is
+	// definitively the last — signal that with nextCursor=0.
+	if len(events) == limit {
+		resp.NextCursor = events[len(events)-1].ID // ListHistory is DESC by id
+	}
+	writeJSON(w, http.StatusOK, resp)
 }

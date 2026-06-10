@@ -1249,12 +1249,13 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	//
 	// Alpha-sort stays correct by construction: each conditional
 	// appends in lex order, terminal `variantBumpsIndex` ends every
-	// path. Capacity 12 covers the current maximum (carPlayOptimize +
+	// path. Capacity 14 covers the current maximum (carPlayOptimize +
 	// deleteVariants + diagnosticsSummary + dlnaServer +
 	// operatorDrivenUpscale + pairingEventsSupported + playbackHistory +
-	// playlistBackup + pushEventsSupported + rendererDiscovery +
-	// upscaleCompleteEvents + variantBumpsIndex).
-	feats := make([]string, 0, 12)
+	// playbackHistoryRead + playlistBackup + playlistsCrossDevice +
+	// pushEventsSupported + rendererDiscovery + upscaleCompleteEvents +
+	// variantBumpsIndex).
+	feats := make([]string, 0, 14)
 	if s.upscaleEnabled {
 		if s.carPlayOptimizeEnabled {
 			feats = append(feats, "carPlayOptimize")
@@ -1286,19 +1287,26 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	if s.eventBroker != nil && s.pairing != nil {
 		feats = append(feats, "pairingEventsSupported")
 	}
-	// `playbackHistory` advertises POST /v1/history/batch. Gated on the
-	// history store being wired. Lexically before `playlistBackup`
-	// (playb < playl), so it appends first.
+	// `playbackHistory` advertises POST /v1/history/batch;
+	// `playbackHistoryRead` advertises the GET /v1/history all-devices
+	// read feed (user-wide listening history). Both gated on the history
+	// store being wired (one wiring backs both routes). Lexically
+	// playbackHistory < playbackHistoryRead (prefix) < playlistBackup
+	// (playb < playl), so they append in this order.
 	if s.historyStore != nil {
-		feats = append(feats, "playbackHistory")
+		feats = append(feats, "playbackHistory", "playbackHistoryRead")
 	}
-	// `playlistBackup` advertises the per-device /v1/playlists backup
-	// endpoints. Gated on `s.playlistStore != nil` so a deploy without
-	// the store advertises honestly and iOS hides the backup surface.
-	// Lexically between `pairingEventsSupported` and `pushEventsSupported`
-	// (pairing < playlist < push), so the alpha-sort split is required.
+	// `playlistBackup` advertises the /v1/playlists backup endpoints;
+	// `playlistsCrossDevice` advertises that backups are USER-WIDE on
+	// this bridge — any paired device can list/restore/update/delete any
+	// playlist (restore is initiable from any device), and the
+	// `playlist_conflict` 409 is never emitted. Both gated on
+	// `s.playlistStore != nil` so a deploy without the store advertises
+	// honestly and iOS hides the backup surface. Lexically
+	// pairingEventsSupported < playlistBackup < playlistsCrossDevice
+	// ('B' < 's') < pushEventsSupported, so the alpha-sort split holds.
 	if s.playlistStore != nil {
-		feats = append(feats, "playlistBackup")
+		feats = append(feats, "playlistBackup", "playlistsCrossDevice")
 	}
 	if s.eventBroker != nil {
 		feats = append(feats, "pushEventsSupported")

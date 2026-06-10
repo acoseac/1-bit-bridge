@@ -70,26 +70,39 @@ func (s *Store) InsertHistoryBatch(ctx context.Context, events []PlaybackHistory
 }
 
 // HistoryEventOut is a read-path event row (carries the AUTOINCREMENT id
-// for cursor paging). No json tags — admin wraps it.
+// for cursor paging). No json tags — admin and the /v1/history handler
+// wrap it in their own DTOs.
+//
+// SourceDeviceToken / SourceDeviceName attribute the event to the PLAYING
+// device (the latter resolved from device_registrations at read time) —
+// distinct from DeviceName, which is the OUTPUT hardware (e.g. the USB
+// DAC). SourceDeviceToken is a recovery secret: wire DTOs MUST NOT expose
+// it verbatim (the /v1/history handler derives a SHA-256-based display id;
+// the admin surface keeps its 8-char-prefix convention).
 type HistoryEventOut struct {
-	ID           int64
-	Path         string
-	StartedAt    int64
-	DurationUsed float64
-	Codec        string
-	VariantID    string
-	IfaceType    string
-	DeviceName   string
-	OutputRate   int
-	IsDoP        bool
+	ID                int64
+	Path              string
+	StartedAt         int64
+	DurationUsed      float64
+	Codec             string
+	VariantID         string
+	IfaceType         string
+	DeviceName        string
+	OutputRate        int
+	IsDoP             bool
+	SourceDeviceToken string
+	SourceDeviceName  string
 }
 
 // ListHistory returns events newest-started first, paged by an opaque
 // cursor (the last id of the prior page; "" / 0 for the first page).
 // An empty deviceToken returns a GLOBAL all-devices feed (mirroring the
 // histogram/TopTracks empty-token convention) — used by the loopback
-// admin console's owner-visible history log; a non-empty token scopes to
-// one device. Read path — no s.mu.
+// admin console's owner-visible history log AND the authenticated
+// GET /v1/history all-devices feed; a non-empty token scopes to one
+// device. Each row carries source-device attribution via a LEFT JOIN on
+// device_registrations (events from a device whose registration was
+// never formed resolve to an empty name). Read path — no s.mu.
 func (s *Store) ListHistory(ctx context.Context, deviceToken string, limit int, afterID int64) ([]HistoryEventOut, error) {
 	if limit <= 0 || limit > 1000 {
 		limit = 200
@@ -98,21 +111,23 @@ func (s *Store) ListHistory(ctx context.Context, deviceToken string, limit int, 
 	// by id (monotonic with insert order) when afterID > 0. The `WHERE 1=1`
 	// base lets the device-token and cursor clauses append uniformly.
 	q := `
-		SELECT id, path, started_at, duration_used,
-		       COALESCE(codec,''), COALESCE(variant_id,''), COALESCE(iface_type,''),
-		       COALESCE(device_name,''), COALESCE(output_rate,0), is_dop
-		  FROM playback_history
+		SELECT h.id, h.path, h.started_at, h.duration_used,
+		       COALESCE(h.codec,''), COALESCE(h.variant_id,''), COALESCE(h.iface_type,''),
+		       COALESCE(h.device_name,''), COALESCE(h.output_rate,0), h.is_dop,
+		       h.device_token, COALESCE(d.device_name,'')
+		  FROM playback_history h
+		  LEFT JOIN device_registrations d ON d.device_token = h.device_token
 		 WHERE 1=1`
 	var args []any
 	if deviceToken != "" {
-		q += ` AND device_token = ?`
+		q += ` AND h.device_token = ?`
 		args = append(args, deviceToken)
 	}
 	if afterID > 0 {
-		q += ` AND id < ?`
+		q += ` AND h.id < ?`
 		args = append(args, afterID)
 	}
-	q += ` ORDER BY id DESC LIMIT ?`
+	q += ` ORDER BY h.id DESC LIMIT ?`
 	args = append(args, limit)
 
 	rows, err := s.db.QueryContext(ctx, q, args...)
@@ -125,7 +140,8 @@ func (s *Store) ListHistory(ctx context.Context, deviceToken string, limit int, 
 		var e HistoryEventOut
 		var dop int
 		if err := rows.Scan(&e.ID, &e.Path, &e.StartedAt, &e.DurationUsed,
-			&e.Codec, &e.VariantID, &e.IfaceType, &e.DeviceName, &e.OutputRate, &dop); err != nil {
+			&e.Codec, &e.VariantID, &e.IfaceType, &e.DeviceName, &e.OutputRate, &dop,
+			&e.SourceDeviceToken, &e.SourceDeviceName); err != nil {
 			return nil, err
 		}
 		e.IsDoP = dop != 0

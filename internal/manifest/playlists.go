@@ -13,17 +13,18 @@ var (
 	// re-reads the server copy and returns it in a 409 body so iOS can
 	// reconcile. Backup hygiene only — single-device backup rarely hits it.
 	ErrPlaylistStale = errors.New("manifest: playlist is stale (server copy is newer)")
-	// ErrPlaylistOwnedByOther signals a PUT/DELETE for a playlist id that
-	// already exists under a different device token. UUID collisions across
-	// devices are practically impossible; this guards a malicious client
-	// from overwriting another device's backup by guessing its id.
-	ErrPlaylistOwnedByOther = errors.New("manifest: playlist is owned by another device")
 )
 
 // PlaylistRow is the playlists-table row shape. No json tags (wire-type
 // discipline): the API wraps it in a DTO. Timestamps are UnixNano integers
 // (the wire form for last_modified_at is an integer too — no time.Time
 // round-trip, no truncation risk on the LWW-critical field).
+//
+// DeviceToken records the device that LAST WROTE the playlist (provenance
+// for the admin surface), not an access scope: every paired device belongs
+// to the bridge operator, so playlists are user-wide — readable, writable
+// and deletable from any device. A future multi-user mode would re-scope
+// by a user id grouping several device tokens; the column stays for that.
 type PlaylistRow struct {
 	ID             string
 	DeviceToken    string
@@ -45,7 +46,7 @@ type PlaylistItemRow struct {
 	Artist            string
 }
 
-// PlaylistSummary is the per-device list row (no items).
+// PlaylistSummary is the list row (no items).
 type PlaylistSummary struct {
 	ID             string
 	Name           string
@@ -63,17 +64,18 @@ func nullable(s string) any {
 	return s
 }
 
-// UpsertPlaylist stores (or replaces) a playlist + its items for a device,
-// atomically. It enforces two guards inside the transaction so there is no
-// TOCTOU gap against a concurrent writer:
+// UpsertPlaylist stores (or replaces) a playlist + its items, atomically.
+// Playlists are user-wide: any paired device may overwrite any playlist
+// (all devices belong to the bridge operator), so there is no ownership
+// guard — the LWW check is the only gate, enforced inside the transaction
+// so there is no TOCTOU gap against a concurrent writer:
 //
-//   - ownership: an existing row under a different device token rejects
-//     with ErrPlaylistOwnedByOther;
 //   - LWW: an existing row with a strictly-newer last_modified_at rejects
 //     with ErrPlaylistStale (the handler re-reads + 409s the server copy).
 //
-// On success the row is (re)written with deleted=0 and updated_at=now, and
-// its items are fully replaced. Holds s.mu; timestamps via s.now().
+// On success the row is (re)written with deleted=0, updated_at=now and
+// device_token=the writing device (last-writer provenance), and its items
+// are fully replaced. Holds s.mu; timestamps via s.now().
 func (s *Store) UpsertPlaylist(ctx context.Context, deviceToken string, p PlaylistRow, items []PlaylistItemRow) error {
 	if deviceToken == "" {
 		return errors.New("manifest: UpsertPlaylist requires a device token")
@@ -90,18 +92,14 @@ func (s *Store) UpsertPlaylist(ctx context.Context, deviceToken string, p Playli
 	}
 	defer tx.Rollback() //nolint:errcheck // no-op after Commit; unwind guard otherwise
 
-	var existingOwner string
 	var existingLMA int64
-	row := tx.QueryRowContext(ctx, `SELECT device_token, last_modified_at FROM playlists WHERE id = ?`, p.ID)
-	switch err := row.Scan(&existingOwner, &existingLMA); {
+	row := tx.QueryRowContext(ctx, `SELECT last_modified_at FROM playlists WHERE id = ?`, p.ID)
+	switch err := row.Scan(&existingLMA); {
 	case errors.Is(err, sql.ErrNoRows):
 		// fresh insert — fall through
 	case err != nil:
 		return err
 	default:
-		if existingOwner != deviceToken {
-			return ErrPlaylistOwnedByOther
-		}
 		if existingLMA > p.LastModifiedAt {
 			return ErrPlaylistStale
 		}
@@ -112,6 +110,7 @@ func (s *Store) UpsertPlaylist(ctx context.Context, deviceToken string, p Playli
 		INSERT INTO playlists (id, device_token, name, last_modified_at, updated_at, deleted)
 		VALUES (?, ?, ?, ?, ?, 0)
 		ON CONFLICT(id) DO UPDATE SET
+			device_token     = excluded.device_token,
 			name             = excluded.name,
 			last_modified_at = excluded.last_modified_at,
 			updated_at       = excluded.updated_at,
@@ -123,29 +122,39 @@ func (s *Store) UpsertPlaylist(ctx context.Context, deviceToken string, p Playli
 	if _, err := tx.ExecContext(ctx, `DELETE FROM playlist_items WHERE playlist_id = ?`, p.ID); err != nil {
 		return err
 	}
+	// One prepared statement reused across the item loop (same shape as
+	// InsertHistoryBatch) — per-item ExecContext re-prepares the SQL on
+	// every row, which is measurable at the 50k-item cap.
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO playlist_items
+			(playlist_id, position, path, origin_fingerprint, origin_path, title, artist)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
 	for _, it := range items {
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO playlist_items
-				(playlist_id, position, path, origin_fingerprint, origin_path, title, artist)
-			VALUES (?, ?, ?, ?, ?, ?, ?)
-		`, p.ID, it.Position, nullable(it.Path), nullable(it.OriginFingerprint),
-			nullable(it.OriginPath), nullable(it.Title), nullable(it.Artist)); err != nil {
+		if _, err := stmt.ExecContext(ctx, p.ID, it.Position, nullable(it.Path),
+			nullable(it.OriginFingerprint), nullable(it.OriginPath),
+			nullable(it.Title), nullable(it.Artist)); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
 }
 
-// GetPlaylist returns a device's playlist + ordered items, or (nil, nil,
-// nil) when the id is unknown, tombstoned, or owned by another device
-// (scoping makes other devices' rows invisible). Read path — no s.mu.
-func (s *Store) GetPlaylist(ctx context.Context, deviceToken, id string) (*PlaylistRow, []PlaylistItemRow, error) {
+// GetPlaylist returns a playlist + ordered items, or (nil, nil, nil) when
+// the id is unknown or tombstoned. User-wide: any paired device can read
+// any playlist (restore is initiable from any of the operator's devices).
+// Read path — no s.mu.
+func (s *Store) GetPlaylist(ctx context.Context, id string) (*PlaylistRow, []PlaylistItemRow, error) {
 	var p PlaylistRow
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, device_token, name, last_modified_at, updated_at
 		  FROM playlists
-		 WHERE id = ? AND device_token = ? AND deleted = 0
-	`, id, deviceToken).Scan(&p.ID, &p.DeviceToken, &p.Name, &p.LastModifiedAt, &p.UpdatedAt)
+		 WHERE id = ? AND deleted = 0
+	`, id).Scan(&p.ID, &p.DeviceToken, &p.Name, &p.LastModifiedAt, &p.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil, nil
 	}
@@ -180,16 +189,17 @@ func (s *Store) GetPlaylist(ctx context.Context, deviceToken, id string) (*Playl
 	return &p, items, nil
 }
 
-// ListPlaylists returns a device's live (non-tombstoned) playlist
-// summaries, newest-modified first. Read path — no s.mu.
-func (s *Store) ListPlaylists(ctx context.Context, deviceToken string) ([]PlaylistSummary, error) {
+// ListPlaylists returns every live (non-tombstoned) playlist summary,
+// newest-modified first, across ALL devices — playlists are user-wide.
+// Read path — no s.mu.
+func (s *Store) ListPlaylists(ctx context.Context) ([]PlaylistSummary, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT p.id, p.name, p.last_modified_at,
 		       (SELECT COUNT(*) FROM playlist_items i WHERE i.playlist_id = p.id) AS track_count
 		  FROM playlists p
-		 WHERE p.device_token = ? AND p.deleted = 0
+		 WHERE p.deleted = 0
 		 ORDER BY p.last_modified_at DESC
-	`, deviceToken)
+	`)
 	if err != nil {
 		return nil, err
 	}
@@ -205,17 +215,18 @@ func (s *Store) ListPlaylists(ctx context.Context, deviceToken string) ([]Playli
 	return out, rows.Err()
 }
 
-// TombstonePlaylist marks a device's playlist deleted (so the delete
-// propagates instead of the row reappearing on the next backup sweep).
-// Returns false when no live row matched (unknown / already-deleted /
-// owned by another device). Holds s.mu; updated_at via s.now().
-func (s *Store) TombstonePlaylist(ctx context.Context, deviceToken, id string) (bool, error) {
+// TombstonePlaylist marks a playlist deleted (so the delete propagates
+// instead of the row reappearing on the next backup sweep). User-wide:
+// any paired device can delete any playlist. Returns false when no live
+// row matched (unknown / already-deleted). Holds s.mu; updated_at via
+// s.now().
+func (s *Store) TombstonePlaylist(ctx context.Context, id string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE playlists SET deleted = 1, updated_at = ?
-		 WHERE id = ? AND device_token = ? AND deleted = 0
-	`, s.now().UnixNano(), id, deviceToken)
+		 WHERE id = ? AND deleted = 0
+	`, s.now().UnixNano(), id)
 	if err != nil {
 		return false, err
 	}
@@ -223,8 +234,8 @@ func (s *Store) TombstonePlaylist(ctx context.Context, deviceToken, id string) (
 	return n > 0, err
 }
 
-// ListAllPlaylistsForAdmin returns every device's live playlist summary
-// for the loopback admin surface, paired with the owning device token.
+// ListAllPlaylistsForAdmin returns every live playlist summary for the
+// loopback admin surface, paired with the device token that last wrote it.
 // Read path — no s.mu. Admin-only; never exposed on /v1.
 func (s *Store) ListAllPlaylistsForAdmin(ctx context.Context) ([]AdminPlaylistSummary, error) {
 	rows, err := s.db.QueryContext(ctx, `
@@ -249,8 +260,8 @@ func (s *Store) ListAllPlaylistsForAdmin(ctx context.Context) ([]AdminPlaylistSu
 	return out, rows.Err()
 }
 
-// AdminPlaylistSummary is the admin-surface row (carries the owning device
-// token, unlike the per-device wire summary). No json tags — admin wraps it.
+// AdminPlaylistSummary is the admin-surface row (carries the last-writer
+// device token, unlike the wire summary). No json tags — admin wraps it.
 type AdminPlaylistSummary struct {
 	ID             string
 	DeviceToken    string
