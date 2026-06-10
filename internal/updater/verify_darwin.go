@@ -45,8 +45,12 @@ func verifyBinary(ctx context.Context, newBinary string) error {
 		"--check-notarization", newBinary); err != nil {
 		// --check-notarization isn't accepted on older macOS — fall
 		// back to the minimal --strict-only form before giving up.
+		// Surface the FALLBACK's error: when both fail, err2 is the
+		// actual signature verdict while err may just be the
+		// flag-unsupported complaint (Gemini HIGH on PR #374 — masking
+		// it made real signature failures undiagnosable on old macOS).
 		if err2 := runVerifyTool(ctx, "codesign", "--verify", "--strict", newBinary); err2 != nil {
-			return fmt.Errorf("codesign verify: %w", err)
+			return fmt.Errorf("codesign verify: %w", err2)
 		}
 	}
 
