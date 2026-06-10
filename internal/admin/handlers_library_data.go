@@ -253,12 +253,16 @@ func (s *Server) writeM3U8(w http.ResponseWriter, name string, items []manifest.
 	}
 }
 
+// m3uReplacer flattens line breaks to a single space — CRLF first so a
+// Windows-style ending collapses to ONE space, then the lone forms.
+// One pass, one allocation (Gemini on PR #375).
+var m3uReplacer = strings.NewReplacer("\r\n", " ", "\r", " ", "\n", " ")
+
 // m3uLine flattens CR/LF (to a space) in a device-supplied value before
 // it lands inside a single M3U line. See writeM3U8's docblock for the
 // injection vector this closes.
 func m3uLine(s string) string {
-	s = strings.ReplaceAll(s, "\r", " ")
-	return strings.ReplaceAll(s, "\n", " ")
+	return m3uReplacer.Replace(s)
 }
 
 // --- history events ---

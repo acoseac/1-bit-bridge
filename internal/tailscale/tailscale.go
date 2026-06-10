@@ -315,14 +315,29 @@ func trimErr(stderr string, runErr error) string {
 	}
 	const maxLen = 240
 	if len(s) > maxLen {
-		s = s[:maxLen]
-		// Byte-slicing can land mid-rune; trim back to the last valid
-		// boundary so the JSON body never carries malformed UTF-8 (same
-		// shape as auth.RecordClientVersion, PR #75).
-		for !utf8.ValidString(s) && len(s) > 0 {
-			s = s[:len(s)-1]
-		}
+		// Trim at most a partial trailing rune after the cut — NOT
+		// "until the whole string validates": localized CLI output can
+		// carry interior invalid bytes, and a validate-the-world loop
+		// would discard everything after the first bad byte (plus
+		// rescan O(N²)). Gemini HIGH on PR #375; lockstep twin of
+		// transcode's trimPartialTrailingRune.
+		s = trimPartialTrailingRune(s[:maxLen])
 		s += "…"
+	}
+	return s
+}
+
+// trimPartialTrailingRune removes at most utf8.UTFMax-1 trailing bytes
+// when a byte-slice cut split a multi-byte rune, in O(1). A string
+// that still ends with genuinely invalid bytes after that is returned
+// as-is (same posture as interior garbage).
+func trimPartialTrailingRune(s string) string {
+	for i := 0; i < utf8.UTFMax-1 && len(s) > 0; i++ {
+		r, size := utf8.DecodeLastRuneInString(s)
+		if r != utf8.RuneError || size != 1 {
+			return s
+		}
+		s = s[:len(s)-1]
 	}
 	return s
 }

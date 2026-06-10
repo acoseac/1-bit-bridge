@@ -423,3 +423,19 @@ func TestErrInsufficientDiskSpaceTypedShape(t *testing.T) {
 		t.Errorf("ProjectedBytes = %d", got.ProjectedBytes)
 	}
 }
+
+// TestRedactSoxErr_InteriorGarbagePreservesMessage pins the O(1)
+// trim posture: an invalid byte EARLY in an over-limit string must not
+// discard the rest of the message (a validate-the-whole-string loop
+// would trim everything after the first bad byte — Gemini HIGH on
+// PR #375).
+func TestRedactSoxErr_InteriorGarbagePreservesMessage(t *testing.T) {
+	in := "sox FAIL formats: \xff " + strings.Repeat("x", 5000)
+	got := redactSoxErr(in, JobSpec{})
+	if len(got) < 4000 {
+		t.Fatalf("interior invalid byte collapsed the message: len=%d", len(got))
+	}
+	if !strings.HasSuffix(got, "…(truncated)") {
+		t.Errorf("missing truncation marker: %q", got[len(got)-30:])
+	}
+}
