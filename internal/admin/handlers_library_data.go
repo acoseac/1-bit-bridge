@@ -116,12 +116,15 @@ func (s *Server) apiPlaylistDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	prefix := r.URL.Query().Get("device")
 	id := r.URL.Query().Get("id")
-	token, ok := s.resolvePlaylistDeviceToken(r, prefix, id)
-	if !ok {
+	// The prefix→token resolution stays as a consistency check (the row
+	// the UI clicked must still exist under that last-writer prefix);
+	// the store read itself is id-scoped now that playlists are
+	// user-wide rather than device-scoped.
+	if _, ok := s.resolvePlaylistDeviceToken(r, prefix, id); !ok {
 		writeError(w, http.StatusNotFound, errCodeNotFound, "no matching playlist for that device")
 		return
 	}
-	row, items, err := s.deps.Manifest.GetPlaylist(r.Context(), token, id)
+	row, items, err := s.deps.Manifest.GetPlaylist(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
@@ -171,12 +174,11 @@ func (s *Server) apiPlaylistExport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad-format", "format must be one of json, csv, m3u8")
 		return
 	}
-	token, ok := s.resolvePlaylistDeviceToken(r, prefix, id)
-	if !ok {
+	if _, ok := s.resolvePlaylistDeviceToken(r, prefix, id); !ok {
 		writeError(w, http.StatusNotFound, errCodeNotFound, "no matching playlist for that device")
 		return
 	}
-	row, items, err := s.deps.Manifest.GetPlaylist(r.Context(), token, id)
+	row, items, err := s.deps.Manifest.GetPlaylist(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return

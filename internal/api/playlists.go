@@ -13,11 +13,17 @@ import (
 // PlaylistStore is the optional backing store for the /v1/playlists
 // backup endpoints. Nil-safe — when unwired the routes return 404
 // (feature-off). *manifest.Store satisfies it in production.
+//
+// Playlists are USER-WIDE: every paired device belongs to the bridge
+// operator, so reads/writes/deletes are id-scoped, not device-scoped —
+// restore is initiable from any device (advertised via the
+// `playlistsCrossDevice` health feature flag). The deviceToken on the
+// upsert records last-writer provenance only.
 type PlaylistStore interface {
 	UpsertPlaylist(ctx context.Context, deviceToken string, p manifest.PlaylistRow, items []manifest.PlaylistItemRow) error
-	GetPlaylist(ctx context.Context, deviceToken, id string) (*manifest.PlaylistRow, []manifest.PlaylistItemRow, error)
-	ListPlaylists(ctx context.Context, deviceToken string) ([]manifest.PlaylistSummary, error)
-	TombstonePlaylist(ctx context.Context, deviceToken, id string) (bool, error)
+	GetPlaylist(ctx context.Context, id string) (*manifest.PlaylistRow, []manifest.PlaylistItemRow, error)
+	ListPlaylists(ctx context.Context) ([]manifest.PlaylistSummary, error)
+	TombstonePlaylist(ctx context.Context, id string) (bool, error)
 }
 
 // WithPlaylistStore wires the playlist-backup feature. Advertises the
@@ -36,10 +42,13 @@ const playlistMaxBodyBytes = 16 << 20
 
 // Per-field bounds, enforced after the body-size cap. A well-formed payload
 // can still be abusive (a 1-char-name playlist with 10M items), so bound the
-// name length and item count explicitly.
+// name length, item count, and id length explicitly. Clients send lowercase
+// UUIDs (36 chars); 128 leaves headroom for any future id scheme while
+// keeping a multi-KB id out of the TEXT PRIMARY KEY.
 const (
 	maxPlaylistNameLen = 1024
 	maxPlaylistItems   = 50000
+	maxPlaylistIDLen   = 128
 )
 
 // --- wire DTOs (the playlists contract; see PROTOCOL.md Appendix A.2/A.3) ---
@@ -107,7 +116,10 @@ func toPlaylistDTO(p *manifest.PlaylistRow, items []manifest.PlaylistItemRow) pl
 
 // requirePlaylistFeature returns the device token, or writes the
 // appropriate error and returns ("", false). Used at the top of every
-// playlist handler.
+// playlist handler. The header stays REQUIRED on all four routes even
+// though reads are now user-wide — it identifies the writer on PUT
+// (last-writer provenance) and keeps the device-registration binding
+// fresh on every call; the documented contract is unchanged.
 func (s *Server) requirePlaylistFeature(w http.ResponseWriter, r *http.Request) (string, bool) {
 	if s.playlistStore == nil {
 		writeError(w, http.StatusNotFound, "playlist_backup_not_supported",
@@ -123,14 +135,13 @@ func (s *Server) requirePlaylistFeature(w http.ResponseWriter, r *http.Request) 
 	return dt, true
 }
 
-// listPlaylists handles GET /v1/playlists — summaries for the caller's
-// device token.
+// listPlaylists handles GET /v1/playlists — summaries across ALL of the
+// user's devices (user-wide backups; restore from any device).
 func (s *Server) listPlaylists(w http.ResponseWriter, r *http.Request) {
-	dt, ok := s.requirePlaylistFeature(w, r)
-	if !ok {
+	if _, ok := s.requirePlaylistFeature(w, r); !ok {
 		return
 	}
-	rows, err := s.playlistStore.ListPlaylists(r.Context(), dt)
+	rows, err := s.playlistStore.ListPlaylists(r.Context())
 	if err != nil {
 		writeErrorLog(w, r, http.StatusInternalServerError, "internal",
 			"failed to list playlists", err)
@@ -145,10 +156,10 @@ func (s *Server) listPlaylists(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// getPlaylist handles GET /v1/playlists/{id} — full playlist for restore.
+// getPlaylist handles GET /v1/playlists/{id} — full playlist for restore,
+// regardless of which device backed it up.
 func (s *Server) getPlaylist(w http.ResponseWriter, r *http.Request) {
-	dt, ok := s.requirePlaylistFeature(w, r)
-	if !ok {
+	if _, ok := s.requirePlaylistFeature(w, r); !ok {
 		return
 	}
 	id := strings.ToLower(strings.TrimSpace(r.PathValue("id")))
@@ -156,7 +167,7 @@ func (s *Server) getPlaylist(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "playlist id is required")
 		return
 	}
-	p, items, err := s.playlistStore.GetPlaylist(r.Context(), dt, id)
+	p, items, err := s.playlistStore.GetPlaylist(r.Context(), id)
 	if err != nil {
 		writeErrorLog(w, r, http.StatusInternalServerError, "internal",
 			"failed to read playlist", err)
@@ -179,6 +190,10 @@ func (s *Server) putPlaylist(w http.ResponseWriter, r *http.Request) {
 	pathID := strings.ToLower(strings.TrimSpace(r.PathValue("id")))
 	if pathID == "" {
 		writeError(w, http.StatusBadRequest, "bad_request", "playlist id is required")
+		return
+	}
+	if len(pathID) > maxPlaylistIDLen {
+		writeError(w, http.StatusBadRequest, "bad_request", "playlist id is too long")
 		return
 	}
 
@@ -250,7 +265,7 @@ func (s *Server) putPlaylist(w http.ResponseWriter, r *http.Request) {
 	switch err := s.playlistStore.UpsertPlaylist(r.Context(), dt, row, items); {
 	case errors.Is(err, manifest.ErrPlaylistStale):
 		// Re-read the server copy so iOS can reconcile in one round-trip.
-		sp, sItems, gerr := s.playlistStore.GetPlaylist(r.Context(), dt, id)
+		sp, sItems, gerr := s.playlistStore.GetPlaylist(r.Context(), id)
 		if gerr != nil || sp == nil {
 			writeError(w, http.StatusConflict, "stale", "server copy is newer")
 			return
@@ -258,10 +273,6 @@ func (s *Server) putPlaylist(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, playlistStaleResponse{
 			Error: "stale", Message: "server copy is newer", Server: toPlaylistDTO(sp, sItems),
 		})
-		return
-	case errors.Is(err, manifest.ErrPlaylistOwnedByOther):
-		writeError(w, http.StatusConflict, "playlist_conflict",
-			"a playlist with this id belongs to another device")
 		return
 	case err != nil:
 		writeErrorLog(w, r, http.StatusInternalServerError, "internal",
@@ -271,10 +282,11 @@ func (s *Server) putPlaylist(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, playlistStoredResponse{ID: id, Stored: true})
 }
 
-// deletePlaylist handles DELETE /v1/playlists/{id} — tombstone.
+// deletePlaylist handles DELETE /v1/playlists/{id} — tombstone. User-wide:
+// any paired device can delete any playlist (the delete then propagates
+// to the user's other devices on their next sweep).
 func (s *Server) deletePlaylist(w http.ResponseWriter, r *http.Request) {
-	dt, ok := s.requirePlaylistFeature(w, r)
-	if !ok {
+	if _, ok := s.requirePlaylistFeature(w, r); !ok {
 		return
 	}
 	id := strings.ToLower(strings.TrimSpace(r.PathValue("id")))
@@ -282,7 +294,7 @@ func (s *Server) deletePlaylist(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "playlist id is required")
 		return
 	}
-	deleted, err := s.playlistStore.TombstonePlaylist(r.Context(), dt, id)
+	deleted, err := s.playlistStore.TombstonePlaylist(r.Context(), id)
 	if err != nil {
 		writeErrorLog(w, r, http.StatusInternalServerError, "internal",
 			"failed to delete playlist", err)

@@ -210,15 +210,20 @@ func (s *Server) routeRegistry() []route {
 		// <1 ms in steady state.
 		{pattern: "GET /v1/renderers", kind: boundedRoute, handler: withCtxTimeout(2*time.Second, s.authed(s.renderers))},
 
-		// Playlists — per-device backup safe. Small JSON on list /
+		// Playlists — user-wide backup safe (any paired device can
+		// list / restore / update / delete). Small JSON on list /
 		// delete; PUT carries a (capped) playlist body. All bounded.
 		{pattern: "GET /v1/playlists", kind: boundedRoute, handler: s.authed(s.listPlaylists)},
 		{pattern: "GET /v1/playlists/{id}", kind: boundedRoute, handler: s.authed(s.getPlaylist)},
 		{pattern: "PUT /v1/playlists/{id}", kind: boundedRoute, handler: s.authed(s.putPlaylist)},
 		{pattern: "DELETE /v1/playlists/{id}", kind: boundedRoute, handler: s.authed(s.deletePlaylist)},
 
-		// Playback telemetry — bulk insert from the iOS offline queue.
+		// Playback telemetry — bulk insert from the iOS offline queue,
+		// plus the cursor-paged all-devices read feed (user-wide
+		// listening history; 2 s ctx-timeout matches the other
+		// fast-query routes).
 		{pattern: "POST /v1/history/batch", kind: boundedRoute, handler: withCtxTimeout(60*time.Second, s.authed(s.historyBatch))},
+		{pattern: "GET /v1/history", kind: boundedRoute, handler: withCtxTimeout(2*time.Second, s.authed(s.historyList))},
 
 		// SSE — long-lived per-connection write stream; MUST opt
 		// out of the per-route write deadline.

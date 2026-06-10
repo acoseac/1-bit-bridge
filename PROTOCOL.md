@@ -474,11 +474,13 @@ The schema version (`v1`) bumps only when the on-disk sidecar layout or the SoX 
 - `upscale.enabled: true` AND `sox` on PATH: full feature operates as documented.
 - `upscale.enabled: true` AND `sox` MISSING from PATH: bridge logs `.error` at startup, in-memory disables the feature, advertises `upscaleEnabled: false`. The rest of the server keeps running.
 
-### Playlist backup (additive, since v1.6)
+### Playlist backup (additive, since v1.6; user-wide since v1.7)
 
-Per-device playlist backup. The bridge is a **safe, not a player**: a playlist may mix tracks from several bridges plus local/SMB sources. Items owned by this bridge are stored as resolvable `path`s; items owned by another bridge (or device-local / SMB) are stored as **opaque references** the bridge never resolves or serves — iOS re-resolves them locally on restore against its own shares.
+Playlist backup. The bridge is a **safe, not a player**: a playlist may mix tracks from several bridges plus local/SMB sources. Items owned by this bridge are stored as resolvable `path`s; items owned by another bridge (or device-local / SMB) are stored as **opaque references** the bridge never resolves or serves — iOS re-resolves them locally on restore against its own shares.
 
-All four routes require the `X-Device-Token` header (the durable recovery token); state is scoped to it, so one device never sees another's backups. Advertised via the `playlistBackup` flag in `/v1/health.features`; pre-feature bridges return `404` from these routes.
+All four routes require the `X-Device-Token` header (the durable recovery token). Advertised via the `playlistBackup` flag in `/v1/health.features`; pre-feature bridges return `404` from these routes.
+
+**Scoping.** Backups are **user-wide**: every paired device belongs to the bridge operator, so any device can list, restore, update, or delete any playlist — recovery is initiable from any of the user's devices, not just the one that backed the playlist up. Bridges with this behaviour additionally advertise the `playlistsCrossDevice` flag in `/v1/health.features` and never emit the `playlist_conflict` 409 described below; pre-flag (v1.6) bridges scope each route to the calling `X-Device-Token` instead (one device never sees another's backups) and may emit it. The device token on a write records **last-writer provenance** (shown in the bridge admin console); a future multi-user mode would re-scope visibility by user.
 
 **`PUT /v1/playlists/{id}`** — upsert. `{id}` is the client's stable lowercase UUID. Body:
 
@@ -502,21 +504,21 @@ All four routes require the `X-Device-Token` header (the durable recovery token)
   ```json
   { "error": "stale", "message": "server copy is newer", "server": { "id": "…", "name": "…", "lastModifiedAt": 1730000000000000001, "items": [ … ] } }
   ```
-- **`409`** `playlist_conflict` — the id exists under a different device (practically impossible with UUIDs; guards against a guessed-id overwrite).
+- **`409`** `playlist_conflict` — *(v1.6 device-scoped bridges only; never emitted by bridges advertising `playlistsCrossDevice`)* the id exists under a different device (practically impossible with UUIDs; guards against a guessed-id overwrite).
 
-**`GET /v1/playlists`** — summaries for the caller's device:
+**`GET /v1/playlists`** — summaries across all of the user's devices (caller-scoped on pre-`playlistsCrossDevice` bridges):
 
 ```json
 { "playlists": [ { "id": "5d9a…", "name": "High-Res Favorites", "trackCount": 42, "lastModifiedAt": 1730000000000000000 } ] }
 ```
 
-**`GET /v1/playlists/{id}`** — the full playlist (same shape as the `PUT` body) for restore. `404 not_found` if the id isn't owned by the caller's device (or was deleted).
+**`GET /v1/playlists/{id}`** — the full playlist (same shape as the `PUT` body) for restore, regardless of which device backed it up. `404 not_found` if the id is unknown or was deleted (on pre-`playlistsCrossDevice` bridges, also when it's owned by another device).
 
-**`DELETE /v1/playlists/{id}`** — tombstone. `200 { "id": "…", "deleted": true }`, or `404 not_found` if no live row matched.
+**`DELETE /v1/playlists/{id}`** — tombstone; propagates the delete to the user's other devices on their next sweep. `200 { "id": "…", "deleted": true }`, or `404 not_found` if no live row matched.
 
-### Playback history (additive, since v1.6)
+### Playback history (additive, since v1.6; readable feed since v1.7)
 
-Opt-in, owner-visible playback telemetry. Requires the `X-Device-Token` header; events are scoped to it and surfaced only in the loopback admin console (never off-host). Advertised via the `playbackHistory` flag in `/v1/health.features`; pre-feature bridges return `404`. iOS queues events offline-first and drains them in batches.
+Opt-in, owner-visible playback telemetry. Uploads require the `X-Device-Token` header; each event is attributed to the uploading device. History is **user-wide**: it aggregates listening across every paired device and is surfaced in the loopback admin console plus — on bridges advertising the `playbackHistoryRead` flag — the authenticated `GET /v1/history` feed below, so any of the user's devices can read the combined history. It never leaves the operator's host except to the operator's own paired devices. Upload is advertised via the `playbackHistory` flag in `/v1/health.features`; pre-feature bridges return `404`. iOS queues events offline-first and drains them in batches.
 
 **`POST /v1/history/batch`** — bulk-insert events:
 
@@ -549,6 +551,30 @@ Opt-in, owner-visible playback telemetry. Requires the `X-Device-Token` header; 
 ```
 
 The handler **drops, never faults,** events with an empty `path`, a non-positive `startedAt`, or a non-finite / negative `durationUsed` — one corrupt event never rolls back the rest of the device's stats. `dropped` counts them.
+
+**`GET /v1/history?limit=&after=`** *(additive, since v1.7; advertised via the `playbackHistoryRead` flag)* — the cursor-paged, all-devices listening-history feed, newest first. Bearer-authenticated; the `X-Device-Token` header is **not** required (the feed is user-wide by design — every paired device belongs to the operator). `limit` defaults to 200, max 1000; `after` is the `nextCursor` from the prior page (omit for the first page).
+
+**Response** `200`:
+
+```json
+{
+  "events": [
+    {
+      "path": "Diana Krall/Live/01 Romance.flac",
+      "startedAt": 1730000000000000000,
+      "durationUsed": 184.5,
+      "codec": "FLAC",
+      "variantId": "upscaled-v2-176400-24",
+      "outputTarget": { "interfaceType": "USB-DAC", "deviceName": "Chord Mojo 2", "outputRate": 176400, "isDoP": true },
+      "deviceId": "9f86d081884c7d65",
+      "deviceName": "Arseni's iPhone"
+    }
+  ],
+  "nextCursor": 1841
+}
+```
+
+`deviceId` / `deviceName` attribute the event to the **playing device** (`outputTarget.deviceName` remains the output hardware). `deviceId` is the first 16 lowercase-hex chars of `SHA-256(deviceToken)` — a stable, non-reversible display id; the raw recovery token never appears on the wire. A client can hash its own token the same way to mark "this device". `deviceName` is the registered display name, empty if the device never registered one. `nextCursor` is non-zero while more pages may follow (pass it back as `after`); a short or empty page returns `0`, meaning the feed is exhausted. `400 bad_request` on a non-positive `limit` or negative/non-integer `after`; `404 playback_history_not_supported` when the feature is off.
 
 ### `POST /v1/pairing/requests` (additive, since v1.2)
 

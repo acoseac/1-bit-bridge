@@ -144,3 +144,37 @@ func TestListHistoryCursorPaging(t *testing.T) {
 		t.Errorf("cursor paging not strictly descending: %d then %d", page1[1].ID, page2[0].ID)
 	}
 }
+
+// TestListHistoryDeviceAttribution pins the LEFT JOIN against
+// device_registrations: each event carries the playing device's token +
+// registered display name, and an unregistered token degrades to an
+// empty name (LEFT JOIN, not INNER — events must never drop because a
+// registration is missing).
+func TestListHistoryDeviceAttribution(t *testing.T) {
+	s := newDeviceTestStore(t)
+	ctx := context.Background()
+	if err := s.UpsertDeviceRegistration(ctx, "devA", "tok-1", "iPhone 17"); err != nil {
+		t.Fatal(err)
+	}
+	events := []PlaybackHistoryRow{
+		histEvent("devA", "A/1.flac", 100, 30, "FLAC", "USB-DAC"),
+		histEvent("devGhost", "G/1.flac", 200, 5, "FLAC", "Bluetooth"),
+	}
+	if err := s.InsertHistoryBatch(ctx, events); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	list, err := s.ListHistory(ctx, "", 100, 0)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("want 2 events, got %d", len(list))
+	}
+	// Newest first: devGhost (id 2), then devA (id 1).
+	if list[0].SourceDeviceToken != "devGhost" || list[0].SourceDeviceName != "" {
+		t.Errorf("unregistered device attribution wrong: %+v", list[0])
+	}
+	if list[1].SourceDeviceToken != "devA" || list[1].SourceDeviceName != "iPhone 17" {
+		t.Errorf("registered device attribution wrong: %+v", list[1])
+	}
+}
