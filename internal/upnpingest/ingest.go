@@ -50,7 +50,8 @@ type ServerIngestResult struct {
 	ServerUDN       string // resolved at run time (empty when unresolved)
 	Skipped         bool   // true when GetSystemUpdateID matched + within backstop window
 	SkipReason      string // human-readable hint when Skipped is true
-	Walked          int    // tracks yielded by the walker (= upserted)
+	Walked          int    // tracks yielded by the walker
+	Unchanged       int    // of Walked: skip-if-unchanged hits (track upsert skipped; routing still refreshed)
 	Reaped          int    // tracks deleted by the reconcile sweep
 	Err             error  // non-nil aborts JUST this server; siblings still run
 	WalkStartedAt   time.Time
@@ -200,16 +201,39 @@ func (i *Ingester) ingestOne(ctx context.Context, srv config.UPnPUpstreamServerC
 	res.ServerUDN = udn
 	prefix := normalizePrefix(srv)
 
+	// Skip-if-unchanged baseline: the stored manifest rows currently
+	// routed via this server. A walked track whose walk-authoritative
+	// fields match its baseline row skips the Track upsert entirely —
+	// preserving `indexed_at` (iOS delta-sync stops re-receiving the
+	// whole routed library after every walk) and `enriched_at` (the
+	// enricher stops re-processing 15k unchanged tracks per walk; the
+	// `enriched_at = 0` reset in UpsertTrack is contractually "on
+	// track change"). This is the UPnP analog of the filesystem
+	// scanner's size+mtime early-skip (scanner.go) — the walker has no
+	// upstream mtime to compare, so it compares the walked metadata
+	// fields instead (walkFieldsEqual).
+	//
+	// A baseline load failure degrades to nil (= no skips, the legacy
+	// rewrite-everything behaviour) rather than failing the server —
+	// upserts are ON CONFLICT keyed so correctness is unaffected.
+	baseline, baselineErr := i.store.ListUPnPTracksByServer(ctx, udn)
+	if baselineErr != nil {
+		baseline = nil
+	}
+
 	var pendingTracks []*manifest.Track
 	var pendingRouting []*manifest.UPnPRouting
 	const flushEvery = 200
 
 	flush := func() error {
-		if len(pendingTracks) == 0 {
+		if len(pendingTracks) == 0 && len(pendingRouting) == 0 {
 			return nil
 		}
 		// Track rows MUST go in BEFORE the routing rows because the
-		// routing table's FK references tracks(path).
+		// routing table's FK references tracks(path). Unchanged-skipped
+		// tracks have no pending Track row — their parent row already
+		// exists in the DB, so the routing upsert's FK is satisfied.
+		// UpsertTrackBatch no-ops on an empty slice.
 		if err := i.store.UpsertTrackBatch(ctx, pendingTracks); err != nil {
 			return fmt.Errorf("UpsertTrackBatch: %w", err)
 		}
@@ -231,10 +255,21 @@ func (i *Ingester) ingestOne(ctx context.Context, srv config.UPnPUpstreamServerC
 		},
 		func(w upnp.Walked) error {
 			tr, rt := buildTrackAndRouting(w, udn, walkStart)
-			pendingTracks = append(pendingTracks, tr)
+			// The routing row is ALWAYS refreshed — its last_seen_at
+			// drives the reconcile sweep below, and res_url / object_id
+			// legitimately float across upstream restarts (DHCP, port
+			// changes) without the track content changing.
+			if existing, ok := baseline[tr.Path]; ok && walkFieldsEqual(existing, tr) {
+				res.Unchanged++
+			} else {
+				pendingTracks = append(pendingTracks, tr)
+			}
 			pendingRouting = append(pendingRouting, rt)
 			res.Walked++
-			if len(pendingTracks) >= flushEvery {
+			// Flush keyed on the routing slice — it grows on EVERY
+			// walked item (tracks only on changed ones), so it alone
+			// bounds the batch size.
+			if len(pendingRouting) >= flushEvery {
 				return flush()
 			}
 			return nil
@@ -343,6 +378,52 @@ func buildTrackAndRouting(w upnp.Walked, serverUDN string, walkStart time.Time) 
 		LastSeenAt:     walkStart,
 	}
 	return tr, rt
+}
+
+// walkFieldsEqual reports whether the walk-derived fields of `fresh`
+// match the stored baseline row — the skip-if-unchanged decision.
+//
+// ONLY fields buildTrackAndRouting actually sets participate. Two
+// deliberate exclusions, both load-bearing:
+//   - ModTime: buildTrackAndRouting stamps it with walkStart, so it
+//     differs on every walk by construction — including it would
+//     defeat the skip entirely.
+//   - Enricher-owned fields (MusicBrainzTrackID / MusicBrainzAlbumID /
+//     ArtworkMBID / ArtistMBID): the enricher adds these to the stored
+//     row via MarkEnriched, and a fresh walk row never carries them —
+//     including them would mark every ENRICHED row as changed forever,
+//     re-running the UpsertTrack that resets enriched_at = 0: an
+//     enrich → walk → wipe → re-enrich loop (the exact churn this
+//     helper exists to stop).
+//
+// Genre / DiscNumber / ReplayGain* are excluded for the same reason in
+// the other direction: the walker never sets them, so any stored value
+// (from a future enricher addition) must not read as a walk change.
+func walkFieldsEqual(existing, fresh *manifest.Track) bool {
+	if existing == nil || fresh == nil {
+		return false
+	}
+	return existing.Size == fresh.Size &&
+		existing.Title == fresh.Title &&
+		existing.Artist == fresh.Artist &&
+		existing.AlbumArtist == fresh.AlbumArtist &&
+		existing.Album == fresh.Album &&
+		existing.Codec == fresh.Codec &&
+		ptrEqual(existing.TrackNumber, fresh.TrackNumber) &&
+		ptrEqual(existing.Year, fresh.Year) &&
+		ptrEqual(existing.Duration, fresh.Duration) &&
+		ptrEqual(existing.SampleRate, fresh.SampleRate) &&
+		ptrEqual(existing.BitsPerSample, fresh.BitsPerSample) &&
+		ptrEqual(existing.IsDSD, fresh.IsDSD)
+}
+
+// ptrEqual compares two optional values: both nil, or both non-nil and
+// pointee-equal.
+func ptrEqual[T comparable](a, b *T) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 // decideSkipWalk is the pure skip-gate decision. It returns true ONLY
