@@ -387,6 +387,51 @@ func TestPickUpExternalMintSameMtime(t *testing.T) {
 	}
 }
 
+func TestFlushLastUsedPreservesExternalMint(t *testing.T) {
+	// Shutdown calls FlushLastUsed to land any debounced LastUsedAt
+	// updates. If a sibling `bridge pair` process minted a token since
+	// this process last loaded tokens.json and NO authenticated request
+	// followed (Validate is what routinely triggers reloadIfStale), the
+	// pre-fix persist rewrote the file from the stale in-memory slice
+	// and silently deleted the fresh token. FlushLastUsed must reload
+	// before persisting. The s2 Mint grows the file, so the size
+	// tiebreaker makes the staleness check deterministic even under
+	// coarse filesystem mtime.
+	s1, path := newTmpStore(t)
+	if _, _, err := s1.Mint("serve-process"); err != nil {
+		t.Fatalf("s1 Mint: %v", err)
+	}
+
+	s2, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s2.Mint("external-pair"); err != nil {
+		t.Fatalf("s2 Mint: %v", err)
+	}
+
+	if err := s1.FlushLastUsed(); err != nil {
+		t.Fatalf("FlushLastUsed: %v", err)
+	}
+
+	// Re-read the file through a fresh store — the assertion is about
+	// what FlushLastUsed left ON DISK, not s1's in-memory view.
+	s3, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, tok := range s3.List() {
+		got[tok.Name] = true
+	}
+	if !got["external-pair"] {
+		t.Error("FlushLastUsed deleted the externally-minted token from tokens.json")
+	}
+	if !got["serve-process"] {
+		t.Error("FlushLastUsed lost s1's own token")
+	}
+}
+
 func TestAtomicPersistNoPartialState(t *testing.T) {
 	// If persist fails (e.g. dir is read-only), the in-memory tokens list
 	// must be rolled back so the store stays consistent with disk.

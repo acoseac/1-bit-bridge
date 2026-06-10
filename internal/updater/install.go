@@ -11,6 +11,15 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
 
+// downloadTimeout bounds the archive + checksums download phase of an
+// Install. Generous on purpose: the archive is tens of MiB and must
+// survive a ~30 KB/s worst-case residential link, so the only job of
+// this deadline is to keep a wedged CDN connection from parking the
+// install forever — NOT to enforce a throughput floor. The download
+// http.Client itself carries no overall Timeout (see Client doc in
+// github.go).
+const downloadTimeout = 15 * time.Minute
+
 // InstallOptions configures one Install attempt.
 type InstallOptions struct {
 	// DataDir is the bridge's working data directory; the install
@@ -130,6 +139,9 @@ func (u *Updater) Install(ctx context.Context, opts InstallOptions) (Status, err
 	// "no floor" — the gate is permissive when the asset is
 	// absent so we don't block legitimate older releases.
 	if !opts.OverrideCompatGate && u.tokenSnapshot != nil {
+		// release-meta.json is a tiny JSON sidecar — the API client's
+		// short poll Timeout is the right bound here, unlike the
+		// archive download below.
 		meta, err := releaseMetaFor(ctx, u.client.http, rel)
 		if err != nil && !errors.Is(err, ErrReleaseMetaMissing) {
 			return status, fmt.Errorf("fetch release-meta.json: %w", err)
@@ -161,7 +173,13 @@ func (u *Updater) Install(ctx context.Context, opts InstallOptions) (Status, err
 		return status, err
 	}
 	archivePath := filepath.Join(scratch, safeName)
-	if _, err := downloadVerified(ctx, u.client.http,
+	// Asset fetches ride the timeout-free download client — the API
+	// client's overall Timeout caps the body read and would kill a
+	// multi-MiB archive mid-stream on a slow link. A hung CDN
+	// connection is bounded by this per-phase deadline instead.
+	dlCtx, cancelDL := context.WithTimeout(ctx, downloadTimeout)
+	defer cancelDL()
+	if _, err := downloadVerified(dlCtx, u.client.downloadClient(),
 		archive.BrowserDownloadURL, safeName,
 		checksums.BrowserDownloadURL, archivePath); err != nil {
 		return status, fmt.Errorf("download: %w", err)

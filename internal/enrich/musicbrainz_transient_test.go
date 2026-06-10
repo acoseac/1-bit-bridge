@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"syscall"
 	"testing"
 )
@@ -56,6 +57,27 @@ func TestIsTransient_PinsClassification(t *testing.T) {
 		{"ECONNABORTED", syscall.ECONNABORTED, true},
 		{"EPIPE", syscall.EPIPE, true},
 		{"ETIMEDOUT", syscall.ETIMEDOUT, true},
+
+		// Connection-refused / route-unreachable are transient too: a
+		// MusicBrainz restart (refused) or a boot-before-network /
+		// route-flap window (unreachable) clears in seconds. Classified
+		// persistent pre-fix, they markSkipped-stamped every in-flight
+		// track — the exact PR #74 poisoning class. Wrapped in
+		// net.OpError → os.SyscallError as net/http delivers them in
+		// production, so the rows pin errors.Is unwrap-survival, not
+		// just the bare-errno match.
+		{"ECONNREFUSED via dial OpError",
+			&net.OpError{Op: "dial", Net: "tcp",
+				Err: &os.SyscallError{Syscall: "connect", Err: syscall.ECONNREFUSED}},
+			true},
+		{"ENETUNREACH via dial OpError",
+			&net.OpError{Op: "dial", Net: "tcp",
+				Err: &os.SyscallError{Syscall: "connect", Err: syscall.ENETUNREACH}},
+			true},
+		{"EHOSTUNREACH via dial OpError",
+			&net.OpError{Op: "dial", Net: "tcp",
+				Err: &os.SyscallError{Syscall: "connect", Err: syscall.EHOSTUNREACH}},
+			true},
 
 		// HTTP status codes flow through the typed `*httpError` returned
 		// by `MusicBrainzClient.get` and are matched via `errors.As`.

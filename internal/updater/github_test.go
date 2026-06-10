@@ -68,3 +68,43 @@ func TestLatestRelease_200OKStillWorks(t *testing.T) {
 		t.Errorf("Release = %+v, want TagName=v1.2.3", rel)
 	}
 }
+
+// TestNewClient_DownloadClientHasNoOverallTimeout structurally pins the
+// split-client contract: the API client keeps the short poll Timeout
+// (small JSON responses; a hung GitHub API call should fail fast), and
+// the download client must carry NO overall Timeout — http.Client.Timeout
+// caps the entire exchange including the body read, so a multi-MiB
+// release archive on a link slower than ~1.5 MB/s blew past the 10 s poll
+// budget mid-stream and permanently broke `bridge update` + the serve
+// auto-installer. The download phase is bounded by a context deadline at
+// the Install call site (downloadTimeout) instead.
+//
+// Pinned structurally rather than behaviourally because the behavioural
+// form — an httptest server dripping an archive for longer than the poll
+// timeout — needs a >10 s wall-clock sleep, too slow for CI.
+func TestNewClient_DownloadClientHasNoOverallTimeout(t *testing.T) {
+	c := NewClient("fake/repo", 10*time.Second)
+	if got := c.http.Timeout; got != 10*time.Second {
+		t.Errorf("API client Timeout = %v, want 10s", got)
+	}
+	if c.download == nil {
+		t.Fatal("download client not constructed by NewClient")
+	}
+	if got := c.download.Timeout; got != 0 {
+		t.Errorf("download client Timeout = %v, want 0 (no overall cap)", got)
+	}
+	if got := c.downloadClient(); got != c.download {
+		t.Error("downloadClient() did not return the dedicated download client")
+	}
+}
+
+// TestDownloadClientFallsBackWhenUnset pins downloadClient's nil-safety
+// for bare struct literals (no production path builds one; the fallback
+// exists so a future test-only literal can't nil-pointer inside
+// http.Client.Do).
+func TestDownloadClientFallsBackWhenUnset(t *testing.T) {
+	c := &Client{http: &http.Client{Timeout: time.Second}}
+	if got := c.downloadClient(); got != c.http {
+		t.Error("downloadClient() on a literal without download must fall back to the API client")
+	}
+}

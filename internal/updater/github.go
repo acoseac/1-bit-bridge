@@ -18,23 +18,51 @@ import (
 //
 // The default endpoint is https://api.github.com; tests override
 // `baseURL` to point at an httptest.Server.
+//
+// Two http.Clients, deliberately: `http` carries the short poll
+// Timeout and serves the small JSON fetches (LatestRelease,
+// release-meta.json); `download` carries NO overall Timeout and
+// serves the release-archive + checksums.txt asset fetches.
+// http.Client.Timeout caps the ENTIRE exchange including the body
+// read, so routing a multi-MiB archive through the 10 s poll client
+// killed the download mid-stream on any link slower than ~1.5 MB/s —
+// `bridge update` and the serve auto-installer then failed forever.
+// The download phase is bounded by a generous context deadline at the
+// Install call site (downloadTimeout) instead, so a hung CDN
+// connection still can't wedge; transport-level dial/TLS limits come
+// from http.DefaultTransport.
 type Client struct {
-	repo    string
-	baseURL string
-	http    *http.Client
+	repo     string
+	baseURL  string
+	http     *http.Client
+	download *http.Client
 }
 
-// NewClient builds a Client targeting api.github.com with the given
-// per-request timeout. Use Client.WithBaseURL in tests.
+// NewClient builds a Client targeting api.github.com. timeout applies
+// to the JSON API polls only — asset downloads use the separate
+// timeout-free client (see the Client doc). Use Client.WithBaseURL in
+// tests.
 func NewClient(repo string, timeout time.Duration) *Client {
 	if timeout <= 0 {
 		timeout = 10 * time.Second
 	}
 	return &Client{
-		repo:    repo,
-		baseURL: "https://api.github.com",
-		http:    &http.Client{Timeout: timeout},
+		repo:     repo,
+		baseURL:  "https://api.github.com",
+		http:     &http.Client{Timeout: timeout},
+		download: &http.Client{},
 	}
+}
+
+// downloadClient returns the timeout-free client for asset fetches,
+// falling back to the API client when the Client was built as a bare
+// struct literal (no production path does; symmetric defence so a
+// future test-only literal can't nil-pointer inside http.Client.Do).
+func (c *Client) downloadClient() *http.Client {
+	if c.download != nil {
+		return c.download
+	}
+	return c.http
 }
 
 // WithBaseURL overrides the API host. Test-only; production should use

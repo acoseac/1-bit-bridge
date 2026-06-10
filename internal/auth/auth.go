@@ -410,9 +410,23 @@ func (s *Store) Validate(rawToken string) (Token, bool) {
 // that the debounce in Validate has not yet written. Call on clean
 // shutdown so a just-before-exit validate doesn't lose its timestamp.
 // persist() itself updates `lastUsedFlush`, so nothing else to do here.
+//
+// Cross-process safety: a sibling `bridge pair` / `bridge revoke` may
+// have rewritten tokens.json since this process last loaded it. If no
+// authenticated request followed (Validate is what triggers the routine
+// reloadIfStale), persisting the stale in-memory slice here would
+// silently delete the freshly-minted token (or resurrect a revoked
+// one) at shutdown. reload's per-token merge preserves the in-memory
+// LastUsedAt / LastClientVersion bumps this flush exists to land, so
+// the reload can't lose them. A reload failure aborts the flush —
+// dropping a debounced timestamp is recoverable; an overwrite that
+// deletes a sibling's token is not.
 func (s *Store) FlushLastUsed() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.reloadIfStale(); err != nil {
+		return fmt.Errorf("reload before flush: %w", err)
+	}
 	return s.persist()
 }
 

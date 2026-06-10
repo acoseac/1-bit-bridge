@@ -38,10 +38,13 @@ var appleTeamIDOverride = "" // override via ldflags at link time
 // checks immediately. A locally-built binary or a tampered one
 // fails one or the other.
 func verifyBinary(ctx context.Context, newBinary string) error {
-	if err := runVerifyTool(ctx, "codesign", "--verify", "--strict", "--no-strict",
+	// codesign honours the LAST strictness flag on the command line —
+	// the prior "--strict --no-strict" pair therefore disabled strict
+	// validation on every run. --strict must stand alone.
+	if err := runVerifyTool(ctx, "codesign", "--verify", "--strict",
 		"--check-notarization", newBinary); err != nil {
-		// Different macOS versions accept different flag combos —
-		// fall back to the older minimal form before giving up.
+		// --check-notarization isn't accepted on older macOS — fall
+		// back to the minimal --strict-only form before giving up.
 		if err2 := runVerifyTool(ctx, "codesign", "--verify", "--strict", newBinary); err2 != nil {
 			return fmt.Errorf("codesign verify: %w", err)
 		}
