@@ -2387,7 +2387,18 @@ func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(ctx context.Context, 
 		}
 	}
 	stmt.Close()
-	res, err := tx.ExecContext(ctx, `DELETE FROM tracks WHERE missing_count >= ?`, threshold)
+	// The threshold delete SPARES UPnP-routed rows regardless of their
+	// accumulated counter — defense-in-depth behind the scanner-side
+	// exclusion (see UPnPRoutedSourcePaths): rows that pre-date the
+	// exclusion may carry stale increments, and no caller may ever
+	// threshold-delete a routed row (its lifecycle is the ingest's
+	// last_seen_at reap, which has its own offline / truncated-walk
+	// protections).
+	res, err := tx.ExecContext(ctx, `
+		DELETE FROM tracks
+		 WHERE missing_count >= ?
+		   AND path NOT IN (SELECT source_path FROM upnp_track_routing)
+	`, threshold)
 	if err != nil {
 		return 0, err
 	}
