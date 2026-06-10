@@ -252,6 +252,36 @@ func (s *Store) AllUPnPRoutingPaths(ctx context.Context) ([]string, error) {
 	return out, nil
 }
 
+// UPnPRoutedSourcePaths returns every source_path currently present in
+// the routing table, across all servers. The filesystem scanner's
+// missing-tracks pass consumes it as an EXCLUSION set: routed rows are
+// not filesystem-owned (they never appear in a disk walk by
+// construction), so counting them "missing" every scan would march
+// their missing_count to the threshold and mass-delete the routed
+// catalog — exactly what happened once the ingest's skip-if-unchanged
+// (PR #369) stopped resetting the counter via unconditional re-upserts
+// (and what already happened pre-#369 whenever the upstream was offline
+// for `threshold` consecutive filesystem scans). Routed-row lifecycle
+// belongs to the ingest's own last_seen_at reconcile sweep.
+//
+// Read-only — no s.mu, matching the sibling routing readers.
+func (s *Store) UPnPRoutedSourcePaths(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT source_path FROM upnp_track_routing`)
+	if err != nil {
+		return nil, fmt.Errorf("manifest: UPnPRoutedSourcePaths: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, fmt.Errorf("manifest: scan routed source path: %w", err)
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
 // ListUPnPTracksByServer returns the stored manifest Track for every
 // path currently routed via serverUDN, keyed by Track.Path. The ingest
 // layer loads this ONCE per walk as the skip-if-unchanged baseline: a

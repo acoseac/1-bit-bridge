@@ -421,10 +421,29 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	// `missing_count` migration doc for the silent-empty-enumeration
 	// rationale.
 	threshold := s.effectiveDeleteThreshold()
+	// UPnP-routed rows are NOT filesystem-owned — they never appear in
+	// a disk walk, so without this exclusion every scan would bump
+	// their missing_count and the threshold pass would mass-delete the
+	// routed catalog (15k rows for a Chord 2Go upstream) after
+	// `threshold` scans. Their lifecycle belongs to the upstream
+	// ingest's last_seen_at reconcile. A fetch failure degrades to an
+	// empty set — the store-side NOT-IN guard on the threshold DELETE
+	// is the backstop that keeps routed rows undeletable regardless.
+	routedSet := make(map[string]struct{})
+	if routed, err := s.store.UPnPRoutedSourcePaths(ctx); err != nil {
+		scanLogger.Warn("routed-paths fetch for missing pass failed", "err", err)
+	} else {
+		for _, p := range routed {
+			routedSet[p] = struct{}{}
+		}
+	}
 	missingTracks := make([]string, 0)
 	spared := 0
 	for p := range beforeSet {
 		if _, ok := seen[p]; ok {
+			continue
+		}
+		if _, routed := routedSet[p]; routed {
 			continue
 		}
 		if isUnderErroredSubtree(p, errorSubtrees) {
