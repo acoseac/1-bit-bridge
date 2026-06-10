@@ -71,16 +71,33 @@ func TestHistoryBatchDeviceTokenRequired(t *testing.T) {
 	resp.Body.Close()
 }
 
-func TestHealthAdvertisesPlaybackHistoryAndPlaylistBackupAlphaSorted(t *testing.T) {
+// newBothStoresTestServer wires history + playlist stores behind a
+// real manifest.Store — the shape every feature-flag health test needs.
+func newBothStoresTestServer(t *testing.T) (token string, srv *Server) {
+	t.Helper()
 	dir := t.TempDir()
 	cfg := &config.Config{LibraryRoots: []string{t.TempDir()}, ListenAddress: ":7788", LibraryName: "T"}
 	authStore, _ := auth.OpenStore(filepath.Join(dir, "tokens.json"))
 	raw, _, _ := authStore.Mint("test")
 	mstore, _ := manifest.OpenStore(filepath.Join(dir, "bridge.db"))
 	t.Cleanup(func() { _ = mstore.Close() })
-	// Wire both stores: playbackHistory + playlistBackup should both show,
-	// in alpha order (playb < playl).
-	srv := New(cfg, authStore, nil, "fp").WithHistoryStore(mstore).WithPlaylistStore(mstore)
+	return raw, New(cfg, authStore, nil, "fp").WithHistoryStore(mstore).WithPlaylistStore(mstore)
+}
+
+// newBareTestServer wires NO optional stores — the feature-off shape.
+func newBareTestServer(t *testing.T) (token string, srv *Server) {
+	t.Helper()
+	dir := t.TempDir()
+	cfg := &config.Config{LibraryRoots: []string{t.TempDir()}, ListenAddress: ":7788", LibraryName: "T"}
+	authStore, _ := auth.OpenStore(filepath.Join(dir, "tokens.json"))
+	raw, _, _ := authStore.Mint("test")
+	return raw, New(cfg, authStore, nil, "fp")
+}
+
+func TestHealthAdvertisesPlaybackHistoryAndPlaylistBackupAlphaSorted(t *testing.T) {
+	// Both stores wired: playbackHistory + playlistBackup should both
+	// show, in alpha order (playb < playl).
+	raw, srv := newBothStoresTestServer(t)
 	resp := doReq(t, srv, http.MethodGet, "/v1/health", raw, "deadbeef", "")
 	var hr HealthResponse
 	json.NewDecoder(resp.Body).Decode(&hr)
@@ -110,11 +127,7 @@ func TestHealthAdvertisesPlaybackHistoryAndPlaylistBackupAlphaSorted(t *testing.
 }
 
 func TestHistoryBatchFeatureOff404(t *testing.T) {
-	dir := t.TempDir()
-	cfg := &config.Config{LibraryRoots: []string{t.TempDir()}, ListenAddress: ":7788", LibraryName: "T"}
-	authStore, _ := auth.OpenStore(filepath.Join(dir, "tokens.json"))
-	raw, _, _ := authStore.Mint("test")
-	srv := New(cfg, authStore, nil, "fp") // no WithHistoryStore
+	raw, srv := newBareTestServer(t) // no WithHistoryStore
 	resp := doReq(t, srv, http.MethodPost, "/v1/history/batch", raw, "deadbeef",
 		`{"events":[]}`)
 	if resp.StatusCode != http.StatusNotFound {
@@ -128,13 +141,7 @@ func TestHistoryBatchFeatureOff404(t *testing.T) {
 // (id-scoped playlist routes), each gated on the same store wiring as
 // its sibling base flag.
 func TestHealthAdvertisesCrossDeviceFlags(t *testing.T) {
-	dir := t.TempDir()
-	cfg := &config.Config{LibraryRoots: []string{t.TempDir()}, ListenAddress: ":7788", LibraryName: "T"}
-	authStore, _ := auth.OpenStore(filepath.Join(dir, "tokens.json"))
-	raw, _, _ := authStore.Mint("test")
-	mstore, _ := manifest.OpenStore(filepath.Join(dir, "bridge.db"))
-	t.Cleanup(func() { _ = mstore.Close() })
-	srv := New(cfg, authStore, nil, "fp").WithHistoryStore(mstore).WithPlaylistStore(mstore)
+	raw, srv := newBothStoresTestServer(t)
 	resp := doReq(t, srv, http.MethodGet, "/v1/health", raw, "deadbeef", "")
 	var hr HealthResponse
 	json.NewDecoder(resp.Body).Decode(&hr)
@@ -153,8 +160,8 @@ func TestHealthAdvertisesCrossDeviceFlags(t *testing.T) {
 	}
 
 	// Without the stores, neither flag appears.
-	bare := New(cfg, authStore, nil, "fp")
-	resp = doReq(t, bare, http.MethodGet, "/v1/health", raw, "deadbeef", "")
+	bareRaw, bare := newBareTestServer(t)
+	resp = doReq(t, bare, http.MethodGet, "/v1/health", bareRaw, "deadbeef", "")
 	var hrBare HealthResponse
 	json.NewDecoder(resp.Body).Decode(&hrBare)
 	resp.Body.Close()
@@ -268,11 +275,7 @@ func TestHistoryReadBadParams400(t *testing.T) {
 }
 
 func TestHistoryReadFeatureOff404(t *testing.T) {
-	dir := t.TempDir()
-	cfg := &config.Config{LibraryRoots: []string{t.TempDir()}, ListenAddress: ":7788", LibraryName: "T"}
-	authStore, _ := auth.OpenStore(filepath.Join(dir, "tokens.json"))
-	raw, _, _ := authStore.Mint("test")
-	srv := New(cfg, authStore, nil, "fp") // no WithHistoryStore
+	raw, srv := newBareTestServer(t) // no WithHistoryStore
 	resp := doReq(t, srv, http.MethodGet, "/v1/history", raw, "", "")
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("feature-off = %d, want 404", resp.StatusCode)
