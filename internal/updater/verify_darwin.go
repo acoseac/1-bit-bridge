@@ -38,12 +38,27 @@ var appleTeamIDOverride = "" // override via ldflags at link time
 // checks immediately. A locally-built binary or a tampered one
 // fails one or the other.
 func verifyBinary(ctx context.Context, newBinary string) error {
-	if err := runVerifyTool(ctx, "codesign", "--verify", "--strict", "--no-strict",
+	// codesign honours the LAST strictness flag on the command line —
+	// the prior "--strict --no-strict" pair therefore disabled strict
+	// validation on every run. --strict must stand alone.
+	if err := runVerifyTool(ctx, "codesign", "--verify", "--strict",
 		"--check-notarization", newBinary); err != nil {
-		// Different macOS versions accept different flag combos —
-		// fall back to the older minimal form before giving up.
-		if err2 := runVerifyTool(ctx, "codesign", "--verify", "--strict", newBinary); err2 != nil {
+		// Fall back to the --strict-only form ONLY when codesign
+		// rejected the --check-notarization flag itself (older macOS).
+		// An unconditional fallback would silently bypass the
+		// notarization requirement on modern systems — a signed-but-
+		// not-notarized binary (or an attacker degrading the
+		// notarization check) would fail the first invocation and pass
+		// the second (Gemini security-high on PR #374). A genuine
+		// verification failure surfaces as-is.
+		if !notarizationFlagUnsupported(err) {
 			return fmt.Errorf("codesign verify: %w", err)
+		}
+		// Surface the FALLBACK's error when it fails too: err2 is the
+		// actual signature verdict; err is just the flag-unsupported
+		// complaint.
+		if err2 := runVerifyTool(ctx, "codesign", "--verify", "--strict", newBinary); err2 != nil {
+			return fmt.Errorf("codesign verify: %w", err2)
 		}
 	}
 
@@ -65,6 +80,30 @@ func verifyBinary(ctx context.Context, newBinary string) error {
 			gotTeam, appleTeamIDOverride)
 	}
 	return nil
+}
+
+// notarizationFlagUnsupported reports whether a runVerifyTool error
+// (which embeds codesign's combined output) indicates the
+// --check-notarization OPTION itself was rejected — the only case the
+// --strict-only fallback is legitimate. Case-insensitive substrings so
+// a codesign rewording doesn't silently demote a real verification
+// failure into a fallback (same posture as tailscale's
+// classifyMintError); the "notarization" anchor keeps an unrelated
+// "invalid option" from matching. Pinned by table test.
+func notarizationFlagUnsupported(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if !strings.Contains(msg, "check-notarization") {
+		return false
+	}
+	for _, marker := range []string{"unrecognized option", "invalid option", "unknown option", "unsupported option", "illegal option"} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // runVerifyTool runs a verify command and converts non-zero exit to

@@ -287,7 +287,10 @@ func IsNotFound(err error) bool { return errors.Is(err, errNotFound) }
 //   - net.Error.Timeout() (connect timeout, read timeout)
 //   - context.DeadlineExceeded (per-request deadline; distinct from
 //     ctx.Err() cancellation which is handled separately)
-//   - syscall.ECONNRESET / ECONNABORTED / EPIPE (TCP-level resets)
+//   - syscall.ECONNRESET / ECONNABORTED / EPIPE / ETIMEDOUT (TCP-level
+//     resets)
+//   - syscall.ECONNREFUSED / ENETUNREACH / EHOSTUNREACH (MB restart
+//     window, boot-before-network, route flap — all clear in seconds)
 //
 // Persistent (NOT transient):
 //   - errNotFound (HTTP 404 — the album genuinely isn't on MB)
@@ -309,11 +312,20 @@ func IsTransient(err error) bool {
 	if errors.As(err, &ne) && ne.Timeout() {
 		return true
 	}
-	// TCP-level resets surface as wrapped syscall errnos.
+	// TCP/route-level failures surface as wrapped syscall errnos
+	// (net.OpError → os.SyscallError → errno; errors.Is unwraps the
+	// chain). ECONNREFUSED / ENETUNREACH / EHOSTUNREACH belong here:
+	// a MusicBrainz restart (refused) or a boot-before-network window
+	// (unreachable) clears in seconds, and classifying them persistent
+	// markSkipped-stamps every in-flight track — the exact PR #74
+	// poisoning class.
 	if errors.Is(err, syscall.ECONNRESET) ||
 		errors.Is(err, syscall.ECONNABORTED) ||
 		errors.Is(err, syscall.EPIPE) ||
-		errors.Is(err, syscall.ETIMEDOUT) {
+		errors.Is(err, syscall.ETIMEDOUT) ||
+		errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.ENETUNREACH) ||
+		errors.Is(err, syscall.EHOSTUNREACH) {
 		return true
 	}
 	// HTTP status is consulted via the typed `httpError` carried by
