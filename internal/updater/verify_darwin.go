@@ -43,12 +43,20 @@ func verifyBinary(ctx context.Context, newBinary string) error {
 	// validation on every run. --strict must stand alone.
 	if err := runVerifyTool(ctx, "codesign", "--verify", "--strict",
 		"--check-notarization", newBinary); err != nil {
-		// --check-notarization isn't accepted on older macOS — fall
-		// back to the minimal --strict-only form before giving up.
-		// Surface the FALLBACK's error: when both fail, err2 is the
-		// actual signature verdict while err may just be the
-		// flag-unsupported complaint (Gemini HIGH on PR #374 — masking
-		// it made real signature failures undiagnosable on old macOS).
+		// Fall back to the --strict-only form ONLY when codesign
+		// rejected the --check-notarization flag itself (older macOS).
+		// An unconditional fallback would silently bypass the
+		// notarization requirement on modern systems — a signed-but-
+		// not-notarized binary (or an attacker degrading the
+		// notarization check) would fail the first invocation and pass
+		// the second (Gemini security-high on PR #374). A genuine
+		// verification failure surfaces as-is.
+		if !notarizationFlagUnsupported(err) {
+			return fmt.Errorf("codesign verify: %w", err)
+		}
+		// Surface the FALLBACK's error when it fails too: err2 is the
+		// actual signature verdict; err is just the flag-unsupported
+		// complaint.
 		if err2 := runVerifyTool(ctx, "codesign", "--verify", "--strict", newBinary); err2 != nil {
 			return fmt.Errorf("codesign verify: %w", err2)
 		}
@@ -72,6 +80,30 @@ func verifyBinary(ctx context.Context, newBinary string) error {
 			gotTeam, appleTeamIDOverride)
 	}
 	return nil
+}
+
+// notarizationFlagUnsupported reports whether a runVerifyTool error
+// (which embeds codesign's combined output) indicates the
+// --check-notarization OPTION itself was rejected — the only case the
+// --strict-only fallback is legitimate. Case-insensitive substrings so
+// a codesign rewording doesn't silently demote a real verification
+// failure into a fallback (same posture as tailscale's
+// classifyMintError); the "notarization" anchor keeps an unrelated
+// "invalid option" from matching. Pinned by table test.
+func notarizationFlagUnsupported(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if !strings.Contains(msg, "check-notarization") {
+		return false
+	}
+	for _, marker := range []string{"unrecognized option", "invalid option", "unknown option", "unsupported option", "illegal option"} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // runVerifyTool runs a verify command and converts non-zero exit to
