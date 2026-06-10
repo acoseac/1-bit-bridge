@@ -9,6 +9,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
@@ -106,6 +107,15 @@ type Ingester struct {
 	resolver  ServerResolver
 	store     *manifest.Store
 	idStore   UpdateIDStore
+
+	// runMu serialises Run: the periodic lifecycle tick and the admin
+	// ForceRescan goroutine share one Ingester, and two overlapping
+	// walks of the same server race their reconcile sweeps — the walk
+	// with the later walkStart can reap rows the earlier walk wrote
+	// after the later walk passed that path (last_seen_at < the later
+	// cutoff). A queued second run is cheap: the SystemUpdateID skip
+	// gate short-circuits it unless the upstream actually changed.
+	runMu sync.Mutex
 }
 
 // NewIngester wires the orchestrator. None of the args may be nil
@@ -143,6 +153,8 @@ func NewIngester(
 // called from a scan-tick loop in cmd/bridge — wiring is the file
 // proxy PR's job, not this one.
 func (i *Ingester) Run(ctx context.Context, opts Options) (IngestResult, error) {
+	i.runMu.Lock()
+	defer i.runMu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return IngestResult{}, err
 	}
@@ -193,21 +205,26 @@ func (i *Ingester) reapOrphanServers(ctx context.Context, out *IngestResult) {
 	for idx := range i.cfg.Servers {
 		configured[StableServerKey(i.cfg.Servers[idx])] = struct{}{}
 	}
+	// Per-orphan failures accumulate (errors.Join) instead of aborting
+	// the sweep — one failing server must not block the cleanup of its
+	// siblings; the next tick retries whatever failed.
 	for _, udn := range routed {
 		if _, ok := configured[udn]; ok {
 			continue
 		}
 		paths, err := i.store.ListUPnPSourcePathsByServer(ctx, udn)
 		if err != nil {
-			out.OrphanSweepErr = fmt.Errorf("ListUPnPSourcePathsByServer(%s): %w", udn, err)
-			return
+			out.OrphanSweepErr = errors.Join(out.OrphanSweepErr,
+				fmt.Errorf("ListUPnPSourcePathsByServer(%s): %w", udn, err))
+			continue
 		}
 		if len(paths) == 0 {
 			continue
 		}
 		if err := i.store.DeleteTracksBatch(ctx, paths); err != nil {
-			out.OrphanSweepErr = fmt.Errorf("DeleteTracksBatch(orphan %s): %w", udn, err)
-			return
+			out.OrphanSweepErr = errors.Join(out.OrphanSweepErr,
+				fmt.Errorf("DeleteTracksBatch(orphan %s): %w", udn, err))
+			continue
 		}
 		out.OrphanServersReaped++
 		out.OrphanTracksReaped += len(paths)
