@@ -88,6 +88,8 @@ func TestWalkFieldsEqual_ChangedFieldsDetected(t *testing.T) {
 		"sampleRate":      func(x *manifest.Track) { x.SampleRate = nil },
 		"year←val":        func(x *manifest.Track) { y := 2020; x.Year = &y },
 		"isDSD":           func(x *manifest.Track) { b := true; x.IsDSD = &b },
+		"albumArtist":     func(x *manifest.Track) { x.AlbumArtist = "B" },
+		"bitsPerSample":   func(x *manifest.Track) { b := 24; x.BitsPerSample = &b },
 	}
 	for name, mutate := range cases {
 		if walkFieldsEqual(mkTrack(), mkTrack(mutate)) {
