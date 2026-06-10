@@ -185,6 +185,62 @@ func (s *Store) ListUPnPSourcePathsOlderThan(ctx context.Context, serverUDN stri
 	return out, rows.Err()
 }
 
+// ListUPnPRoutedServerUDNs returns the distinct server_udn values that
+// currently have routing rows. Used by the ingest orphan sweep: a UDN
+// present here but absent from the configured server set belongs to a
+// server the operator removed, and its rows would otherwise live
+// forever (the fs scanner's missing pass deliberately spares routed
+// rows — PR #370 — so the ingest is their ONLY lifecycle owner).
+// Read path — no s.mu.
+func (s *Store) ListUPnPRoutedServerUDNs(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT DISTINCT server_udn FROM upnp_track_routing ORDER BY server_udn
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("manifest: ListUPnPRoutedServerUDNs: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var u string
+		if err := rows.Scan(&u); err != nil {
+			return nil, fmt.Errorf("manifest: scan UPnP routed server UDN: %w", err)
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+// ListUPnPSourcePathsByServer returns every source_path routed via the
+// given server, regardless of last_seen_at. Used by the ingest orphan
+// sweep to reap ALL of a removed server's rows (the OlderThan variant
+// above serves the per-walk reconcile, where the cutoff matters).
+// Read path — no s.mu.
+func (s *Store) ListUPnPSourcePathsByServer(ctx context.Context, serverUDN string) ([]string, error) {
+	if serverUDN == "" {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT source_path
+		  FROM upnp_track_routing
+		 WHERE server_udn = ?
+		 ORDER BY source_path
+	`, serverUDN)
+	if err != nil {
+		return nil, fmt.Errorf("manifest: ListUPnPSourcePathsByServer: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, fmt.Errorf("manifest: scan UPnP routing path: %w", err)
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
 // CountUPnPRoutingForServer returns the number of routing rows for the
 // given server UDN. Cheap aggregate used by the admin "library" surface
 // + by ingest telemetry.

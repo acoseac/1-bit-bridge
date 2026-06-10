@@ -9,6 +9,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
@@ -42,6 +43,18 @@ type UpdateIDStore interface {
 // in the top-level fields.
 type IngestResult struct {
 	PerServer []ServerIngestResult
+
+	// OrphanServersReaped / OrphanTracksReaped count the removed-server
+	// sweep: routing rows whose server_udn no longer matches any
+	// configured server (the operator removed the upstream). Routed
+	// rows are invisible to the fs scanner's missing pass (PR #370),
+	// so without this sweep a removed server's tracks would stay in
+	// the manifest forever, syncing to iOS and 503ing on every play.
+	OrphanServersReaped int
+	OrphanTracksReaped  int
+	// OrphanSweepErr carries a sweep failure without failing the whole
+	// Run — the per-server ingest still proceeds; the next tick retries.
+	OrphanSweepErr error
 }
 
 // ServerIngestResult is the per-server outcome.
@@ -94,6 +107,15 @@ type Ingester struct {
 	resolver  ServerResolver
 	store     *manifest.Store
 	idStore   UpdateIDStore
+
+	// runMu serialises Run: the periodic lifecycle tick and the admin
+	// ForceRescan goroutine share one Ingester, and two overlapping
+	// walks of the same server race their reconcile sweeps — the walk
+	// with the later walkStart can reap rows the earlier walk wrote
+	// after the later walk passed that path (last_seen_at < the later
+	// cutoff). A queued second run is cheap: the SystemUpdateID skip
+	// gate short-circuits it unless the upstream actually changed.
+	runMu sync.Mutex
 }
 
 // NewIngester wires the orchestrator. None of the args may be nil
@@ -131,6 +153,8 @@ func NewIngester(
 // called from a scan-tick loop in cmd/bridge — wiring is the file
 // proxy PR's job, not this one.
 func (i *Ingester) Run(ctx context.Context, opts Options) (IngestResult, error) {
+	i.runMu.Lock()
+	defer i.runMu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return IngestResult{}, err
 	}
@@ -147,6 +171,11 @@ func (i *Ingester) Run(ctx context.Context, opts Options) (IngestResult, error) 
 	}
 
 	var out IngestResult
+	// Orphan sweep BEFORE the per-server pass: reap rows belonging to
+	// servers the operator removed from config. Runs only while the
+	// feature is enabled (a temporary feature-off toggle must not wipe
+	// routed state) and never aborts the per-server ingest on failure.
+	i.reapOrphanServers(ctx, &out)
 	for idx := range i.cfg.Servers {
 		srv := i.cfg.Servers[idx]
 		res := ServerIngestResult{Name: srv.Name}
@@ -154,6 +183,52 @@ func (i *Ingester) Run(ctx context.Context, opts Options) (IngestResult, error) 
 		out.PerServer = append(out.PerServer, res)
 	}
 	return out, nil
+}
+
+// reapOrphanServers deletes the manifest tracks (and, via FK CASCADE,
+// the routing rows) of every server_udn present in upnp_track_routing
+// but absent from the configured server set. This is the ONLY lifecycle
+// path for a removed server's rows: the per-server reconcile in
+// ingestOne never sees an unconfigured UDN, and the fs scanner's
+// missing pass deliberately spares routed rows (PR #370). Keyed on
+// StableServerKey to match what ingestOne stamps into server_udn.
+func (i *Ingester) reapOrphanServers(ctx context.Context, out *IngestResult) {
+	routed, err := i.store.ListUPnPRoutedServerUDNs(ctx)
+	if err != nil {
+		out.OrphanSweepErr = fmt.Errorf("ListUPnPRoutedServerUDNs: %w", err)
+		return
+	}
+	if len(routed) == 0 {
+		return
+	}
+	configured := make(map[string]struct{}, len(i.cfg.Servers))
+	for idx := range i.cfg.Servers {
+		configured[StableServerKey(i.cfg.Servers[idx])] = struct{}{}
+	}
+	// Per-orphan failures accumulate (errors.Join) instead of aborting
+	// the sweep — one failing server must not block the cleanup of its
+	// siblings; the next tick retries whatever failed.
+	for _, udn := range routed {
+		if _, ok := configured[udn]; ok {
+			continue
+		}
+		paths, err := i.store.ListUPnPSourcePathsByServer(ctx, udn)
+		if err != nil {
+			out.OrphanSweepErr = errors.Join(out.OrphanSweepErr,
+				fmt.Errorf("ListUPnPSourcePathsByServer(%s): %w", udn, err))
+			continue
+		}
+		if len(paths) == 0 {
+			continue
+		}
+		if err := i.store.DeleteTracksBatch(ctx, paths); err != nil {
+			out.OrphanSweepErr = errors.Join(out.OrphanSweepErr,
+				fmt.Errorf("DeleteTracksBatch(orphan %s): %w", udn, err))
+			continue
+		}
+		out.OrphanServersReaped++
+		out.OrphanTracksReaped += len(paths)
+	}
 }
 
 // ingestOne handles a single server: resolve controlURL, gate on
@@ -246,7 +321,7 @@ func (i *Ingester) ingestOne(ctx context.Context, srv config.UPnPUpstreamServerC
 	}
 
 	walkStart := res.WalkStartedAt
-	_, walkErr := upnp.BrowseFoldersWalk(ctx, i.cdsClient, controlURL,
+	walkStats, walkErr := upnp.BrowseFoldersWalk(ctx, i.cdsClient, controlURL,
 		upnp.WalkOptions{
 			RootObjectID:        srv.EffectiveRootObjectID(),
 			PathPrefix:          prefix,
@@ -277,6 +352,7 @@ func (i *Ingester) ingestOne(ctx context.Context, srv config.UPnPUpstreamServerC
 	if flushErr := flush(); flushErr != nil && walkErr == nil {
 		walkErr = flushErr
 	}
+	walkErr = effectiveWalkErr(walkStats, walkErr)
 	res.WalkCompletedAt = now()
 	if walkErr != nil {
 		res.Err = walkErr
@@ -318,6 +394,21 @@ func (i *Ingester) ingestOne(ctx context.Context, srv config.UPnPUpstreamServerC
 	// Stash the SystemUpdateID + walk-time for next tick's skip gate.
 	// Same StableServerKey (`udn`) the Get/LastWalkedAt above use.
 	i.idStore.Set(udn, currentID, walkStart)
+}
+
+// effectiveWalkErr folds the walker's stats into the walk error. A
+// per-container ErrBrowseLimit is non-fatal to the walker (it keeps
+// walking siblings, sets stats.Truncated, and returns nil) — but the
+// result is still a PARTIAL view of the library, so it MUST route
+// through the same no-reap + no-idStore.Set guard as ErrWalkTruncated.
+// Pre-fix the stats were discarded and this truncation flavour fell
+// straight through to the reconcile sweep, deleting every row the
+// truncated walk never reached. Pure helper — table-tested.
+func effectiveWalkErr(stats upnp.WalkStats, walkErr error) error {
+	if walkErr == nil && stats.Truncated {
+		return fmt.Errorf("upnpingest: walk truncated by per-container browse limit: %w", upnp.ErrWalkTruncated)
+	}
+	return walkErr
 }
 
 // buildTrackAndRouting converts one Walked record into the matched

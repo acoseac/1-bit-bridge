@@ -1,6 +1,11 @@
 package upnp
 
 import (
+	"context"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -142,4 +147,133 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// ---- handlePacket location-change refresh (drives the cache directly) ----
+
+// recordingDispatcher serves a MediaServer description whose
+// ContentDirectory controlURL is derived from the requested location's
+// host, and counts fetches.
+type recordingDispatcher struct {
+	mu      sync.Mutex
+	fetches int
+}
+
+func (d *recordingDispatcher) Do(_ context.Context, req *http.Request) (*http.Response, error) {
+	d.mu.Lock()
+	d.fetches++
+	d.mu.Unlock()
+	xml := `<?xml version="1.0"?><root><device>` +
+		`<friendlyName>Test MS</friendlyName><UDN>uuid:ms</UDN><serviceList>` +
+		`<service><serviceType>urn:schemas-upnp-org:service:ContentDirectory:1</serviceType>` +
+		`<controlURL>http://` + req.URL.Host + `/ctl/ContentDir</controlURL></service>` +
+		`</serviceList></device></root>`
+	rec := httptest.NewRecorder()
+	rec.WriteHeader(http.StatusOK)
+	_, _ = rec.WriteString(xml)
+	return rec.Result(), nil
+}
+
+func (d *recordingDispatcher) fetchCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.fetches
+}
+
+func newServerDiscoveryTestClient(t *testing.T, disp discovery.SOAPDispatcher, cache *ServerCache) *MediaServerDiscoveryClient {
+	t.Helper()
+	cfg := DiscoveryConfig{
+		Interface:  &net.Interface{},
+		Dispatcher: disp,
+	}
+	c, err := NewMediaServerDiscoveryClient(cfg, cache)
+	if err != nil {
+		t.Fatalf("construct: %v", err)
+	}
+	return c
+}
+
+func alivePacket(udn, location string) []byte {
+	return []byte("NOTIFY * HTTP/1.1\r\n" +
+		"HOST: 239.255.255.250:1900\r\n" +
+		"NT: urn:schemas-upnp-org:device:MediaServer:1\r\n" +
+		"NTS: ssdp:alive\r\n" +
+		"USN: " + udn + "::urn:schemas-upnp-org:device:MediaServer:1\r\n" +
+		"LOCATION: " + location + "\r\n" +
+		"\r\n")
+}
+
+// TestHandlePacket_KnownUDNSameHostRefreshesWithoutFetch pins the cheap
+// path: an alive from the host the cached controlURL already points at
+// refreshes LastSeenAt and does NOT re-fetch the description.
+func TestHandlePacket_KnownUDNSameHostRefreshesWithoutFetch(t *testing.T) {
+	disp := &recordingDispatcher{}
+	cache := NewServerCache()
+	earlier := time.Now().Add(-time.Hour)
+	cache.Upsert(ServerInfo{
+		UDN:                        "uuid:ms",
+		FriendlyName:               "Test MS",
+		ContentDirectoryControlURL: "http://192.0.2.7:8200/ctl/ContentDir",
+		LastSeenAt:                 earlier,
+	})
+	c := newServerDiscoveryTestClient(t, disp, cache)
+	c.handlePacket(context.Background(), alivePacket("uuid:ms", "http://192.0.2.7:8200/desc.xml"), nil)
+	if got := disp.fetchCount(); got != 0 {
+		t.Errorf("same-host alive triggered %d description fetches, want 0", got)
+	}
+	info, _ := cache.Get("uuid:ms")
+	if !info.LastSeenAt.After(earlier) {
+		t.Error("LastSeenAt not refreshed on same-host alive")
+	}
+}
+
+// TestHandlePacket_KnownUDNNewHostRefetchesControlURL pins the
+// location-change path: a known UDN announcing from a NEW host (DHCP
+// renew / interface move) re-fetches the description so the cached
+// controlURL follows the server — pre-fix the bare LastSeenAt refresh
+// kept the dead URL alive forever (TTL eviction never fired while the
+// server kept answering M-SEARCH).
+func TestHandlePacket_KnownUDNNewHostRefetchesControlURL(t *testing.T) {
+	disp := &recordingDispatcher{}
+	cache := NewServerCache()
+	cache.Upsert(ServerInfo{
+		UDN:                        "uuid:ms",
+		FriendlyName:               "Test MS",
+		ContentDirectoryControlURL: "http://192.0.2.7:8200/ctl/ContentDir",
+		LastSeenAt:                 time.Now().Add(-time.Hour),
+	})
+	c := newServerDiscoveryTestClient(t, disp, cache)
+	c.handlePacket(context.Background(), alivePacket("uuid:ms", "http://192.0.2.99:8200/desc.xml"), nil)
+
+	// The re-fetch runs on a goroutine — poll briefly.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if info, _ := cache.Get("uuid:ms"); info.ContentDirectoryControlURL == "http://192.0.2.99:8200/ctl/ContentDir" {
+			return // refreshed to the new host — done
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	info, _ := cache.Get("uuid:ms")
+	t.Errorf("controlURL not refreshed after location change: %q (fetches=%d)",
+		info.ContentDirectoryControlURL, disp.fetchCount())
+}
+
+// TestSameURLHost pins the comparator, including the fail-same posture
+// on unparseable input (a malformed SSDP Location must not trigger
+// refetch storms).
+func TestSameURLHost(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		{"http://h:8200/desc.xml", "http://h:8200/ctl", true},
+		{"http://h:8200/desc.xml", "http://other:8200/ctl", false},
+		{"http://h:8200/x", "http://h:9000/x", false},
+		{"://bad", "http://h:8200/ctl", true},
+	}
+	for _, c := range cases {
+		if got := sameURLHost(c.a, c.b); got != c.want {
+			t.Errorf("sameURLHost(%q, %q) = %v, want %v", c.a, c.b, got, c.want)
+		}
+	}
 }

@@ -406,3 +406,120 @@ func mustReplaceStore(i *Ingester, s *manifest.Store) *Ingester {
 	i.store = s
 	return i
 }
+
+// TestEffectiveWalkErr pins the stats→error fold: a per-container
+// browse-limit truncation (stats.Truncated, nil error) MUST surface as
+// an ErrWalkTruncated-class error so the no-reap guard fires; real
+// errors pass through; a clean walk stays nil.
+func TestEffectiveWalkErr(t *testing.T) {
+	if err := effectiveWalkErr(upnp.WalkStats{}, nil); err != nil {
+		t.Errorf("clean walk: got %v, want nil", err)
+	}
+	err := effectiveWalkErr(upnp.WalkStats{Truncated: true}, nil)
+	if !errors.Is(err, upnp.ErrWalkTruncated) {
+		t.Errorf("truncated stats: got %v, want ErrWalkTruncated", err)
+	}
+	sentinel := errors.New("boom")
+	if err := effectiveWalkErr(upnp.WalkStats{Truncated: true}, sentinel); !errors.Is(err, sentinel) {
+		t.Errorf("real error must pass through, got %v", err)
+	}
+}
+
+// TestIngester_Run_ReapsOrphanServerRows pins the removed-server sweep:
+// routing rows whose server_udn is no longer configured are deleted at
+// the top of Run; rows of a still-configured server are untouched. This
+// is the ONLY lifecycle for a removed server's rows — the fs scanner's
+// missing pass deliberately spares routed rows (PR #370) and the
+// per-server reconcile never sees an unconfigured UDN.
+func TestIngester_Run_ReapsOrphanServerRows(t *testing.T) {
+	store := openIngestTestStore(t)
+	ctx := context.Background()
+	tOld := time.Now().UTC().Add(-1 * time.Hour)
+	const keptPath = "Kept/Music/a.flac"
+	const gonePath1 = "Gone/Music/b.flac"
+	const gonePath2 = "Gone/Music/c.flac"
+	seed := []struct{ path, udn string }{
+		{keptPath, "uuid:kept"}, {gonePath1, "uuid:gone"}, {gonePath2, "uuid:gone"},
+	}
+	for _, s := range seed {
+		if err := store.UpsertTrack(ctx, &manifest.Track{Path: s.path, Size: 1, ModTime: tOld}); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.UpsertUPnPRouting(ctx, &manifest.UPnPRouting{
+			SourcePath: s.path, ServerUDN: s.udn, ObjectID: "x",
+			ResURL: "http://h/x.flac", LastSeenAt: tOld,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// The kept server's tick SKIPS the walk via the SystemUpdateID gate
+	// (preloaded idStore + matching ID) so the stub needs no Browse
+	// routes — this test is about the sweep, not the walk.
+	stub := newStubSOAP()
+	stub.addRoute("GetSystemUpdateID", wrapSystemUpdateID("42"))
+	ids := newMemoryUpdateIDStore()
+	ids.Set("uuid:kept", "42", time.Now().UTC())
+
+	cfg := config.UPnPUpstreamConfig{
+		Enabled: true,
+		Servers: []config.UPnPUpstreamServerConfig{
+			{Name: "Kept", UDN: "uuid:kept", PathPrefix: "Kept"},
+		},
+	}
+	ing, err := NewIngester(cfg, upnp.NewContentDirectoryClient(stub),
+		&stubResolver{controlURL: "http://h:8200/ctl/CD"}, store, ids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := ing.Run(ctx, Options{})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.OrphanSweepErr != nil {
+		t.Fatalf("orphan sweep err: %v", res.OrphanSweepErr)
+	}
+	if res.OrphanServersReaped != 1 || res.OrphanTracksReaped != 2 {
+		t.Errorf("orphan counts = %d servers / %d tracks; want 1/2",
+			res.OrphanServersReaped, res.OrphanTracksReaped)
+	}
+	for _, p := range []string{gonePath1, gonePath2} {
+		if got, _ := store.GetTrack(ctx, p); got != nil {
+			t.Errorf("orphan track %q survived the sweep", p)
+		}
+	}
+	if got, _ := store.GetTrack(ctx, keptPath); got == nil {
+		t.Error("configured server's track was wrongly reaped")
+	}
+}
+
+// TestIngester_Run_DisabledLeavesOrphanRows pins the conservative
+// counterpart: a feature-off toggle must NOT wipe routed state (the
+// operator may be toggling temporarily; re-ingest would lose cached
+// enrichment in tags_json).
+func TestIngester_Run_DisabledLeavesOrphanRows(t *testing.T) {
+	store := openIngestTestStore(t)
+	ctx := context.Background()
+	const p = "Gone/Music/b.flac"
+	if err := store.UpsertTrack(ctx, &manifest.Track{Path: p, Size: 1, ModTime: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertUPnPRouting(ctx, &manifest.UPnPRouting{
+		SourcePath: p, ServerUDN: "uuid:gone", ObjectID: "x",
+		ResURL: "http://h/x.flac", LastSeenAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.UPnPUpstreamConfig{Enabled: false}
+	ing, err := NewIngester(cfg, upnp.NewContentDirectoryClient(newStubSOAP()),
+		&stubResolver{controlURL: "http://h"}, store, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ing.Run(ctx, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := store.GetTrack(ctx, p); got == nil {
+		t.Error("disabled run must not reap routed rows")
+	}
+}
