@@ -16,6 +16,32 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
+// startEnricherForTest launches e.Run on its own goroutine with a
+// timeout-bounded ctx and returns a join func the caller MUST defer at
+// the call site (`defer startEnricherForTest(e, …)()`). The join
+// cancels the ctx and BLOCKS until Run has fully returned.
+//
+// The defer ordering is load-bearing: registering the join AFTER the
+// test's `defer store.Close()` / server-close defers means it runs
+// BEFORE them (LIFO) — and before t.TempDir()'s cleanup — so the
+// worker can't race teardown. Pre-helper, tests fired `go e.Run(ctx)`
+// with only a `defer cancel()` and never joined; a Run iteration
+// in-flight at test return kept writing artwork into the TempDir while
+// RemoveAll walked it, failing the suite with "directory not empty"
+// (flaky under -race full-suite runs, 2026-06-10).
+func startEnricherForTest(e *Enricher, timeout time.Duration) (join func()) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.Run(ctx)
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
 // --- MusicBrainz client ---
 
 func TestMusicBrainzSearchReleaseHappyPath(t *testing.T) {
@@ -601,9 +627,7 @@ func TestEnricherProcessesTracksEndToEnd(t *testing.T) {
 	e.CAAMinInterval = 0
 	e.PollInterval = 5 * time.Millisecond
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	go e.Run(ctx)
+	defer startEnricherForTest(e, 3*time.Second)()
 
 	// Wait for both to be enriched.
 	deadline := time.Now().Add(2 * time.Second)
@@ -673,9 +697,7 @@ func TestEnricherDeduplicatesAlbumLookups(t *testing.T) {
 	e.MBMinInterval = 0
 	e.CAAMinInterval = 0
 	e.PollInterval = 5 * time.Millisecond
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	go e.Run(ctx)
+	defer startEnricherForTest(e, 3*time.Second)()
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) && e.Done() < 3 {
@@ -709,9 +731,7 @@ func TestEnricherSkipsUnsearchableTracks(t *testing.T) {
 		NewCoverArtClient(caaSrv.URL, "t", nil), nil, filepath.Join(dir, "artwork"))
 	e.MBMinInterval = 0
 	e.PollInterval = 5 * time.Millisecond
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	go e.Run(ctx)
+	defer startEnricherForTest(e, 2*time.Second)()
 
 	deadline := time.Now().Add(1500 * time.Millisecond)
 	for time.Now().Before(deadline) && e.skipped.Load() == 0 {
@@ -756,9 +776,7 @@ func TestEnricherSkipsNetworkCallIfCoverAlreadyCached(t *testing.T) {
 	e.MBMinInterval = 0
 	e.CAAMinInterval = 0
 	e.PollInterval = 5 * time.Millisecond
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	go e.Run(ctx)
+	defer startEnricherForTest(e, 2*time.Second)()
 
 	deadline := time.Now().Add(1500 * time.Millisecond)
 	for time.Now().Before(deadline) && e.Done() == 0 {
@@ -853,9 +871,7 @@ func TestEnricherSkipsArtworkFetchForLocalMBID(t *testing.T) {
 	e.MBMinInterval = 0
 	e.CAAMinInterval = 0
 	e.PollInterval = 5 * time.Millisecond
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	go e.Run(ctx)
+	defer startEnricherForTest(e, 2*time.Second)()
 
 	deadline := time.Now().Add(1500 * time.Millisecond)
 	for time.Now().Before(deadline) && e.Done() == 0 {
@@ -933,9 +949,7 @@ func TestEnricherFallthroughForLocalPrefixWithoutMBMatch(t *testing.T) {
 	e.MBMinInterval = 0
 	e.CAAMinInterval = 0
 	e.PollInterval = 5 * time.Millisecond
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	go e.Run(ctx)
+	defer startEnricherForTest(e, 2*time.Second)()
 
 	deadline := time.Now().Add(1500 * time.Millisecond)
 	for time.Now().Before(deadline) && e.Done() == 0 {
