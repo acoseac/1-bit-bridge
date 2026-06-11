@@ -16,6 +16,52 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
+// startEnricherForTest launches e.Run on its own goroutine with a
+// timeout-bounded ctx and returns a join func the caller MUST defer at
+// the call site (`defer startEnricherForTest(e, …)()`). The join
+// cancels the ctx and BLOCKS until Run has fully returned.
+//
+// The defer ordering is load-bearing: registering the join AFTER the
+// test's `defer store.Close()` / server-close defers means it runs
+// BEFORE them (LIFO) — and before t.TempDir()'s cleanup — so the
+// worker can't race teardown. Pre-helper, tests fired `go e.Run(ctx)`
+// with only a `defer cancel()` and never joined; a Run iteration
+// in-flight at test return kept writing artwork into the TempDir while
+// RemoveAll walked it, failing the suite with "directory not empty"
+// (flaky under -race full-suite runs, 2026-06-10).
+func startEnricherForTest(e *Enricher, timeout time.Duration) (join func()) {
+	// Every test wants the same pacing posture: no upstream-politeness
+	// gaps (the upstreams are local httptest servers) and a fast poll
+	// so the worker picks up the fixture rows promptly. Centralised
+	// here so the per-test fixture blocks stay distinct (SonarCloud
+	// CPD flagged the repeated tuning+launch tails on PR #376).
+	e.MBMinInterval = 0
+	e.CAAMinInterval = 0
+	e.DeezerMinInterval = 0
+	e.PollInterval = 5 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.Run(ctx)
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
+// waitEnricherDone polls until e.Done() reaches want or the timeout
+// elapses, returning the final count — the shared shape of every
+// "did the worker get to my fixture rows" wait in this package.
+func waitEnricherDone(e *Enricher, want int64, timeout time.Duration) int64 {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) && e.Done() < want {
+		time.Sleep(10 * time.Millisecond)
+	}
+	return e.Done()
+}
+
 // --- MusicBrainz client ---
 
 func TestMusicBrainzSearchReleaseHappyPath(t *testing.T) {
@@ -597,24 +643,10 @@ func TestEnricherProcessesTracksEndToEnd(t *testing.T) {
 		nil, // no Deezer in this test — artist-image fallback path tested separately
 		filepath.Join(dir, "artwork"),
 	)
-	e.MBMinInterval = 0 // no pacing in tests
-	e.CAAMinInterval = 0
-	e.PollInterval = 5 * time.Millisecond
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	go e.Run(ctx)
+	defer startEnricherForTest(e, 3*time.Second)()
 
 	// Wait for both to be enriched.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if e.Done() >= 2 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	if got := e.Done(); got < 2 {
+	if got := waitEnricherDone(e, 2, 2*time.Second); got < 2 {
 		t.Fatalf("enriched %d, want 2 (skipped=%d)", got, e.skipped.Load())
 	}
 
@@ -670,19 +702,10 @@ func TestEnricherDeduplicatesAlbumLookups(t *testing.T) {
 
 	e := NewEnricher(store, NewMusicBrainzClient(mbSrv.URL, "t", nil),
 		NewCoverArtClient(caaSrv.URL, "t", nil), nil, filepath.Join(dir, "artwork"))
-	e.MBMinInterval = 0
-	e.CAAMinInterval = 0
-	e.PollInterval = 5 * time.Millisecond
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	go e.Run(ctx)
+	defer startEnricherForTest(e, 3*time.Second)()
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && e.Done() < 3 {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if e.Done() < 3 {
-		t.Fatalf("only enriched %d of 3", e.Done())
+	if got := waitEnricherDone(e, 3, 2*time.Second); got < 3 {
+		t.Fatalf("only enriched %d of 3", got)
 	}
 	if mbReleaseCalls != 1 {
 		t.Errorf("MB /release/ called %d times, want 1 (sibling-track dedup broken)", mbReleaseCalls)
@@ -707,11 +730,7 @@ func TestEnricherSkipsUnsearchableTracks(t *testing.T) {
 
 	e := NewEnricher(store, NewMusicBrainzClient(mbSrv.URL, "t", nil),
 		NewCoverArtClient(caaSrv.URL, "t", nil), nil, filepath.Join(dir, "artwork"))
-	e.MBMinInterval = 0
-	e.PollInterval = 5 * time.Millisecond
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	go e.Run(ctx)
+	defer startEnricherForTest(e, 2*time.Second)()
 
 	deadline := time.Now().Add(1500 * time.Millisecond)
 	for time.Now().Before(deadline) && e.skipped.Load() == 0 {
@@ -753,18 +772,9 @@ func TestEnricherSkipsNetworkCallIfCoverAlreadyCached(t *testing.T) {
 
 	e := NewEnricher(store, NewMusicBrainzClient(mbSrv.URL, "t", nil),
 		NewCoverArtClient(caaSrv.URL, "t", nil), nil, artDir)
-	e.MBMinInterval = 0
-	e.CAAMinInterval = 0
-	e.PollInterval = 5 * time.Millisecond
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	go e.Run(ctx)
+	defer startEnricherForTest(e, 2*time.Second)()
 
-	deadline := time.Now().Add(1500 * time.Millisecond)
-	for time.Now().Before(deadline) && e.Done() == 0 {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if e.Done() == 0 {
+	if waitEnricherDone(e, 1, 1500*time.Millisecond) == 0 {
 		t.Fatal("track never enriched")
 	}
 	if caaCalls != 0 {
@@ -850,18 +860,9 @@ func TestEnricherSkipsArtworkFetchForLocalMBID(t *testing.T) {
 		NewCoverArtClient(caaSrv.URL, "t", nil),
 		nil, artDir,
 	).WithITunes(NewITunesClient(itunesSrv.URL, "t", nil))
-	e.MBMinInterval = 0
-	e.CAAMinInterval = 0
-	e.PollInterval = 5 * time.Millisecond
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	go e.Run(ctx)
+	defer startEnricherForTest(e, 2*time.Second)()
 
-	deadline := time.Now().Add(1500 * time.Millisecond)
-	for time.Now().Before(deadline) && e.Done() == 0 {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if e.Done() == 0 {
+	if waitEnricherDone(e, 1, 1500*time.Millisecond) == 0 {
 		t.Fatal("track never enriched (the bypass should still mark it done)")
 	}
 	if got := caaCalls.Load(); got != 0 {
@@ -930,18 +931,9 @@ func TestEnricherFallthroughForLocalPrefixWithoutMBMatch(t *testing.T) {
 		NewCoverArtClient(caaSrv.URL, "t", nil),
 		nil, artDir,
 	)
-	e.MBMinInterval = 0
-	e.CAAMinInterval = 0
-	e.PollInterval = 5 * time.Millisecond
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	go e.Run(ctx)
+	defer startEnricherForTest(e, 2*time.Second)()
 
-	deadline := time.Now().Add(1500 * time.Millisecond)
-	for time.Now().Before(deadline) && e.Done() == 0 {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if e.Done() == 0 {
+	if waitEnricherDone(e, 1, 1500*time.Millisecond) == 0 {
 		t.Fatal("local-prefix track without MB match was never enriched (bailout regression)")
 	}
 	if got := caaCalls.Load(); got != 0 {

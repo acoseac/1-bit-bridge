@@ -164,14 +164,7 @@ func TestEnricherFetchesAndCachesArtistImage(t *testing.T) {
 		NewCoverArtClient(caaSrv.URL, "t", nil),
 		deezerClient,
 		filepath.Join(dir, "artwork"))
-	e.MBMinInterval = 0
-	e.CAAMinInterval = 0
-	e.DeezerMinInterval = 0
-	e.PollInterval = 5 * time.Millisecond
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	go e.Run(ctx)
+	defer startEnricherForTest(e, 3*time.Second)()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) && e.Done() == 0 {
 		time.Sleep(10 * time.Millisecond)
@@ -286,14 +279,7 @@ func TestEnricherDeduplicatesArtistLookups(t *testing.T) {
 		NewCoverArtClient(caaSrv.URL, "t", nil),
 		deezerClient,
 		filepath.Join(dir, "artwork"))
-	e.MBMinInterval = 0
-	e.CAAMinInterval = 0
-	e.DeezerMinInterval = 0
-	e.PollInterval = 5 * time.Millisecond
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	go e.Run(ctx)
+	defer startEnricherForTest(e, 3*time.Second)()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) && e.Done() < 3 {
 		time.Sleep(10 * time.Millisecond)
@@ -445,13 +431,7 @@ func TestCAAReleaseGroupFallbackSalvagesArtwork(t *testing.T) {
 		NewCoverArtClient(caaSrv.URL, "t", nil),
 		nil, // no Deezer — artist-image path not exercised here
 		filepath.Join(dir, "artwork"))
-	e.MBMinInterval = 0
-	e.CAAMinInterval = 0
-	e.PollInterval = 5 * time.Millisecond
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	go e.Run(ctx)
+	defer startEnricherForTest(e, 3*time.Second)()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) && e.Done() == 0 {
 		time.Sleep(10 * time.Millisecond)
