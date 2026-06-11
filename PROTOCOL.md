@@ -104,7 +104,7 @@ The four `latestServerVersion` / `updateAvailable` / `updateReleaseNotesURL` / `
 
 `certNotAfter` (additive since v1.2, `*time.Time` with `omitempty`) is the **on-disk self-signed** TLS certificate's `NotAfter` (UTC) — i.e. the cert iOS captures + pins at pairing time and uses for LAN, mDNS, IP-literal, and Tailscale-IP SNI handshakes. iOS uses it to surface a "Bridge cert expires in X days — re-pair to refresh" warning before the cert actually expires and TLS handshakes start failing at Apple's ATS layer (Apple's 397-day cap means operators must re-pair roughly annually). Pre-v1.2 bridges and bridges where cert parsing failed at startup omit the field; iOS treats absence as "no expiry info, never warn".
 
-`leCertNotAfter` (additive in the v0.1.3 followup, `*time.Time` with `omitempty`) is the **public-domain Let's Encrypt** certificate's `NotAfter` (UTC) — i.e. the cert served on the operator's autocert domain when iOS dials `https://<autocert.domain>/`. Populated only in public mode (autocert enabled + cert minted on disk); loopback bridges and pre-autocert servers omit the field. Distinct from `certNotAfter` because the two certs follow different rotation schedules (self-signed: Apple's ~397-day cap; LE: ~90 days) and the operator needs both expiries to plan correctly. iOS / operator tooling reads this field live per probe (so background autocert renewals surface without restart) and treats absence as "no LE cert" (= LAN-only bridge).
+`leCertNotAfter` (additive in the v0.1.3 follow-up, `*time.Time` with `omitempty`) is the **public-domain Let's Encrypt** certificate's `NotAfter` (UTC) — i.e. the cert served on the operator's autocert domain when iOS dials `https://<autocert.domain>/`. Populated only in public mode (autocert enabled + cert minted on disk); loopback bridges and pre-autocert servers omit the field. Distinct from `certNotAfter` because the two certs follow different rotation schedules (self-signed: Apple's ~397-day cap; LE: ~90 days) and the operator needs both expiries to plan correctly. iOS / operator tooling reads this field live per probe (so background autocert renewals surface without restart) and treats absence as "no LE cert" (= LAN-only bridge).
 
 `minClientVersion` advertises the iOS app version *this bridge* needs from its clients (build-time-injected via `-ldflags -X .../version.MinClientVersion=…`). iOS uses it to surface "your app may be too old for this bridge" hints. It is NOT the floor a *candidate update* would require — that's a Phase B install-side concern and is delivered through admin-console / CLI surfaces, not `/v1/health`.
 
@@ -342,7 +342,7 @@ data: {"enabled":true,"pool":{"queueLen":12,"inflight":4,"done":126,"failed":0},
 
 id: 43
 event: upscale.complete
-data: {"path":"Music/Diana Krall/Live in Paris/01.flac","variantID":"upscaled-v1-176400-24","sampleRate":176400,"bitsPerSample":24,"completedAt":"2026-05-15T11:40:12Z"}
+data: {"path":"Music/Diana Krall/Live in Paris/01.flac","variantId":"upscaled-v1-176400-24","sampleRate":176400,"bitsPerSample":24,"completedAt":"2026-05-15T11:40:12Z"}
 
 event: pairing.abc123-def456
 data: {"state":"approved","verificationCode":"412 593"}
@@ -356,7 +356,7 @@ data: {"missed":3}
 
 **Topics**:
 - `upscale.stats` — fires whenever the bridge's upscale state changes (job queued, completed, failed). Payload matches `/v1/upscale/stats`.
-- `upscale.complete` (additive, since v1.3) — fires once per successful variant generation, immediately after the bridge has `UpsertVariant`-committed the row. Payload carries the library-relative source `path`, the resulting `variantID`, the variant's `sampleRate` + `bitsPerSample`, and a `completedAt` UTC timestamp. iOS uses this to reconcile in-flight wand state within ~1 s of the variant landing on disk instead of waiting for the next manifest poll. Failure paths still fire `upscale.stats` (the `failed` counter bumps); `upscale.complete` is success-only by design — `upscale.failed` is a deliberate follow-up.
+- `upscale.complete` (additive, since v1.3) — fires once per successful variant generation, immediately after the bridge has `UpsertVariant`-committed the row. Payload carries the library-relative source `path`, the resulting `variantId`, the variant's `sampleRate` + `bitsPerSample`, and a `completedAt` UTC timestamp. iOS uses this to reconcile in-flight wand state within ~1 s of the variant landing on disk instead of waiting for the next manifest poll. Failure paths still fire `upscale.stats` (the `failed` counter bumps); `upscale.complete` is success-only by design — `upscale.failed` is a deliberate follow-up.
 - `pairing.<requestID>` — fires on `Approve` or `Decline` of the named request. Payload matches `/v1/pairing/<requestID>` for the relevant state.
 - `heartbeat` — every 15s; payload `{}`. iOS uses missing heartbeats as a "connection dead" signal that triggers reconnect with backoff. Bridge-internal — iOS parsers swallow this at the transport layer.
 - `dropped` — synthetic notice fired when the server's per-subscriber buffer evicted events under back-pressure (slow client, network blip). Payload `{"missed":N}`. iOS treats this as "I missed state — refetch via the polling endpoint to reconcile."
