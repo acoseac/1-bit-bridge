@@ -455,8 +455,9 @@ func pickBestArtist(candidates []artistCandidate, artist string) *artistCandidat
 }
 
 func caseInsensitiveMatch(a, b string) bool {
-	return strings.Contains(strings.ToLower(a), strings.ToLower(b)) ||
-		strings.Contains(strings.ToLower(b), strings.ToLower(a))
+	// Lowercase each operand once (4 ToLower allocations → 2).
+	la, lb := strings.ToLower(a), strings.ToLower(b)
+	return strings.Contains(la, lb) || strings.Contains(lb, la)
 }
 
 func anyArtistMatches(credits []artistCredit, artist string) bool {

@@ -96,7 +96,13 @@ func extractAIFFWithContext(absPath string, t *Track, ec *ExtractContext) error 
 					"path", absPath, "err", err)
 				continue
 			}
-			idTagMetadata = m
+			// First-wins for the artwork carrier too. populateFromTagMetadata
+			// is first-wins for text, but idTagMetadata (read by
+			// extractLocalArtwork after the loop) was last-wins — so a later
+			// text-only ID3 chunk could drop an earlier chunk's APIC artwork.
+			if idTagMetadata == nil {
+				idTagMetadata = m
+			}
 			populateFromTagMetadata(m, t)
 			// Continue walking — operators occasionally embed both an
 			// ID3 chunk AND a duplicate; first-wins via the empty-field
@@ -193,7 +199,12 @@ func extractWAVWithContext(absPath string, t *Track, ec *ExtractContext) error {
 					"path", absPath, "err", err)
 				continue
 			}
-			idTagMetadata = m
+			// First-wins (see extractAIFFWithContext): keep the earliest
+			// ID3 chunk's metadata so a later text-only chunk can't drop
+			// its APIC artwork.
+			if idTagMetadata == nil {
+				idTagMetadata = m
+			}
 			populateFromTagMetadata(m, t)
 		case fourcc == "LIST":
 			// RIFF LIST chunks come in many flavours — only LIST/INFO

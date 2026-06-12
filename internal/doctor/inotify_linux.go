@@ -3,6 +3,7 @@
 package doctor
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -10,6 +11,11 @@ import (
 	"strconv"
 	"strings"
 )
+
+// errCountCapReached is the internal sentinel countDirs uses to stop the
+// walk once it has counted enough directories to answer the caller's
+// only question ("more than the threshold?").
+var errCountCapReached = errors.New("countDirs: cap reached")
 
 // checkNameInotifyWatchLimit is the slug for the Linux-only inotify
 // budget check. Six call sites in this file across the ok/warn paths.
@@ -42,16 +48,19 @@ func checkInotifyLimit(d Deps) Check {
 			fmt.Sprintf("could not read /proc/sys/fs/inotify/max_user_watches: %v", err),
 			"falling back to runtime detection — watcher will log a clear error if the budget is exceeded.")
 	}
-	dirs, err := countDirs(d.LibraryRoots)
+	threshold := int(float64(limit) * 0.8)
+	// Cap the walk at threshold+1: the check only needs to know whether the
+	// directory count EXCEEDS the threshold, so there's no point
+	// enumerating every directory on a multi-TB NAS just to over-count.
+	dirs, err := countDirs(d.LibraryRoots, threshold+1)
 	if err != nil {
 		return warn(checkNameInotifyWatchLimit,
 			fmt.Sprintf("could not enumerate library directories: %v", err),
 			"check failed; runtime detection still applies.")
 	}
-	threshold := int(float64(limit) * 0.8)
 	if dirs > threshold {
 		return warn(checkNameInotifyWatchLimit,
-			fmt.Sprintf("%d directories vs limit %d (>80%%) — watcher may exhaust kernel budget", dirs, limit),
+			fmt.Sprintf("more than %d directories (>80%% of limit %d) — watcher may exhaust kernel budget", threshold, limit),
 			"raise the limit: `echo fs.inotify.max_user_watches=524288 | sudo tee -a /etc/sysctl.d/99-bridge.conf && sudo sysctl -p`")
 	}
 	return ok(checkNameInotifyWatchLimit,
@@ -80,10 +89,14 @@ func readInotifyLimit() (int, error) {
 // itself can't be opened) propagates so the doctor check warns
 // rather than reporting a false OK with zero count (CodeRabbit
 // Major post-merge on PR #83).
-func countDirs(roots []string) (int, error) {
+// countDirs walks the roots counting directories. When stopAt > 0 it
+// stops early once the running total reaches stopAt (the caller only
+// needs a "> threshold?" verdict), bounding the walk's cost on huge
+// libraries.
+func countDirs(roots []string, stopAt int) (int, error) {
 	total := 0
 	for _, root := range roots {
-		if err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				if path == root {
 					// Root unreadable — bubble up so checkInotifyLimit's
@@ -101,8 +114,15 @@ func countDirs(roots []string) (int, error) {
 				return filepath.SkipDir
 			}
 			total++
+			if stopAt > 0 && total >= stopAt {
+				return errCountCapReached
+			}
 			return nil
-		}); err != nil {
+		})
+		if errors.Is(err, errCountCapReached) {
+			return total, nil
+		}
+		if err != nil {
 			return total, err
 		}
 	}

@@ -186,6 +186,37 @@ func TestValidatePassesLibraryRootIsAFile(t *testing.T) {
 	}
 }
 
+// TestValidate_RejectsNegativeSweepIntervals pins the standardized
+// negative-interval handling (r1 review): the sweep intervals are
+// *int (nil=default, 0=disabled), and a negative is a misconfiguration
+// that must fail loudly — matching update.checkIntervalHours /
+// backup.intervalHours — rather than silently clamp to disabled.
+func TestValidate_RejectsNegativeSweepIntervals(t *testing.T) {
+	neg := -5
+	base := func() *Config {
+		return &Config{LibraryRoots: []string{"/nonexistent"}, ListenAddress: ":7788", AdminAddress: "127.0.0.1:7789", ScanIntervalSec: 3600}
+	}
+	// Sanity: the base config validates cleanly so the negative is the
+	// only thing under test.
+	if err := base().Validate(); err != nil {
+		t.Fatalf("base config should validate, got %v", err)
+	}
+	t.Run("variantSweepIntervalSec", func(t *testing.T) {
+		cfg := base()
+		cfg.Integrity.VariantSweepIntervalSec = &neg
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "variantSweepIntervalSec") {
+			t.Fatalf("expected variantSweepIntervalSec error, got %v", err)
+		}
+	})
+	t.Run("orphanSidecarSweepIntervalSec", func(t *testing.T) {
+		cfg := base()
+		cfg.Integrity.OrphanSidecarSweepIntervalSec = &neg
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "orphanSidecarSweepIntervalSec") {
+			t.Fatalf("expected orphanSidecarSweepIntervalSec error, got %v", err)
+		}
+	})
+}
+
 func TestCheckLibraryRootsAccessibleNonexistent(t *testing.T) {
 	cfg := &Config{LibraryRoots: []string{"/nonexistent"}}
 	errs := cfg.CheckLibraryRootsAccessible()

@@ -144,10 +144,17 @@ func (r *Resolver) Resolve(clientPath string) (string, error) {
 	// Reject any ".." segment in the raw input *before* canonicalizing.
 	// path.Clean("/../x") would silently collapse to "/x", hiding the
 	// escape attempt from downstream checks. Walking the raw segments is
-	// the only way to see what the client actually asked for.
-	for _, seg := range strings.Split(clientPath, "/") {
-		if seg == ".." {
-			return "", ErrBadPath
+	// the only way to see what the client actually asked for. Done as a
+	// zero-alloc byte scan rather than strings.Split (which would allocate
+	// a slice + substrings on every served path) — equivalent: it checks
+	// the exact same '/'-delimited segments, including the empty-string
+	// and leading/trailing-slash cases.
+	for start, i := 0, 0; i <= len(clientPath); i++ {
+		if i == len(clientPath) || clientPath[i] == '/' {
+			if clientPath[start:i] == ".." {
+				return "", ErrBadPath
+			}
+			start = i + 1
 		}
 	}
 
@@ -180,9 +187,8 @@ func (r *Resolver) Resolve(clientPath string) (string, error) {
 	r.mu.RUnlock()
 
 	var (
-		root     string
-		suffix   string
-		segments = strings.SplitN(clean, "/", 2)
+		root   string
+		suffix string
 	)
 	switch {
 	case len(roots) == 1:
@@ -192,15 +198,19 @@ func (r *Resolver) Resolve(clientPath string) (string, error) {
 		// Multi-root with an empty path — ambiguous. Refuse.
 		return "", ErrUnknownRoot
 	default:
-		head := segments[0]
+		// Split off the first path segment (the root basename) without
+		// strings.SplitN's slice allocation. Equivalent to
+		// SplitN(clean, "/", 2): no '/' → head=clean, suffix="".
+		head := clean
+		if idx := strings.IndexByte(clean, '/'); idx >= 0 {
+			head = clean[:idx]
+			suffix = clean[idx+1:]
+		}
 		full, ok := basenameIndex[head]
 		if !ok {
 			return "", ErrUnknownRoot
 		}
 		root = full
-		if len(segments) == 2 {
-			suffix = segments[1]
-		}
 	}
 
 	// rootAbs + prefix are precomputed per root in setRootsLocked (pure

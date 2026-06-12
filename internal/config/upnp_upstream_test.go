@@ -221,3 +221,43 @@ func TestValidate_PublicModeAllowsDisabledUPnPUpstream(t *testing.T) {
 		t.Errorf("disabled upnpUpstream should validate in public mode: %v", err)
 	}
 }
+
+// TestUPnPUpstreamValidate_RejectsEmptyResolvedPrefix pins the r1-review
+// guard: a server Name/pathPrefix that's only slashes/whitespace resolves
+// to an empty prefix, which would route the upstream's tracks at the
+// library root. Reject it loudly instead.
+func TestUPnPUpstreamValidate_RejectsEmptyResolvedPrefix(t *testing.T) {
+	u := UPnPUpstreamConfig{
+		Enabled: true,
+		Servers: []UPnPUpstreamServerConfig{
+			{Name: "///", UDN: "uuid:abc"}, // non-blank, but trims to empty prefix
+		},
+	}
+	err := u.Validate()
+	if err == nil {
+		t.Fatal("expected error for empty resolved path prefix, got nil")
+	}
+	if !strings.Contains(err.Error(), "prefix") {
+		t.Errorf("error %q should mention 'prefix'", err.Error())
+	}
+}
+
+// TestUPnPUpstreamValidate_RejectsNegativeMSearch pins the standardized
+// negative-interval handling: a negative cadence is a typo and must fail
+// loudly rather than silently fall back to the default.
+func TestUPnPUpstreamValidate_RejectsNegativeMSearch(t *testing.T) {
+	u := UPnPUpstreamConfig{
+		Enabled:                true,
+		MSearchIntervalSeconds: -60,
+		Servers: []UPnPUpstreamServerConfig{
+			{Name: "2Go", UDN: "uuid:abc"},
+		},
+	}
+	err := u.Validate()
+	if err == nil {
+		t.Fatal("expected error for negative msearchIntervalSeconds, got nil")
+	}
+	if !strings.Contains(err.Error(), "msearchIntervalSeconds") {
+		t.Errorf("error %q should mention msearchIntervalSeconds", err.Error())
+	}
+}

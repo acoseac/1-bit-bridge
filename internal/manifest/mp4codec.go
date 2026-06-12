@@ -77,8 +77,15 @@ func extractMP4Codec(r io.ReadSeeker) (string, error) {
 	//   then for each entry:
 	//     4 bytes: size (uint32)
 	//     4 bytes: format (FourCC)  ← the codec id
-	_ = stsdSize // bounds checking lives in extractALACBitDepth's inner walk
-	if _, err := r.Seek(int64(stsdStart+stsdHdr+8), io.SeekStart); err != nil {
+	// Bounds guard mirroring extractALACBitDepth: refuse to read the entry
+	// header if the declared stsd box is too short to hold it. Without this,
+	// a truncated/malformed .m4a surfaces io.EOF / parse errors to the
+	// scanner loop instead of a clean "" fallback to extension classification.
+	entryStart := stsdStart + stsdHdr + 8
+	if entryStart+8 > stsdStart+stsdSize {
+		return "", nil
+	}
+	if _, err := r.Seek(int64(entryStart), io.SeekStart); err != nil {
 		return "", err
 	}
 	var entrySize uint32

@@ -210,6 +210,12 @@ func (u UPnPUpstreamConfig) Validate() error {
 	if !u.Enabled {
 		return nil
 	}
+	// A negative cadence is always a typo — reject it loudly instead of
+	// letting EffectiveMSearchInterval's `> 0` guard silently substitute
+	// the default (the standardized negative-handling from the r1 review).
+	if u.MSearchIntervalSeconds < 0 {
+		return fmt.Errorf("upnpUpstream.msearchIntervalSeconds: must be >= 0 (0 uses the default), got %d", u.MSearchIntervalSeconds)
+	}
 	// Compare EFFECTIVE durations — raw-field comparison would falsely
 	// pass when one side is 0 (which silently falls back to the default),
 	// e.g. raw {MS: 120, TTL: 0} satisfies "0 <= 120" yet the effective
@@ -243,6 +249,14 @@ func (u UPnPUpstreamConfig) Validate() error {
 		prefix := strings.Trim(strings.TrimSpace(s.PathPrefix), "/")
 		if prefix == "" {
 			prefix = strings.Trim(strings.TrimSpace(s.Name), "/")
+		}
+		if prefix == "" {
+			// Name/pathPrefix were only slashes/whitespace (e.g. "///").
+			// An empty prefix would route this upstream's tracks at the
+			// library root, tangling them with local paths — reject loudly.
+			return fmt.Errorf(
+				"upnpUpstream.servers[%d] (%q): resolved path prefix is empty (name and pathPrefix are only slashes/whitespace)",
+				i, s.Name)
 		}
 		if other, dup := seenPrefix[strings.ToLower(prefix)]; dup {
 			return fmt.Errorf(
@@ -1577,6 +1591,17 @@ func (c *Config) Validate() error {
 	}
 	if c.Backup.IntervalHours != nil && *c.Backup.IntervalHours < 0 {
 		return fmt.Errorf("backup.intervalHours: must be >= 0 (0 disables, omit for default), got %d", *c.Backup.IntervalHours)
+	}
+	// Standardize negative-interval handling: reject loudly rather than
+	// silently clamp-to-disabled (the EffectiveX helpers still clamp as
+	// defense-in-depth, but a negative is always a misconfiguration the
+	// operator should hear about — matching CheckIntervalHours /
+	// IntervalHours above). 0 = "disabled", nil/omitted = "use default".
+	if c.Integrity.VariantSweepIntervalSec != nil && *c.Integrity.VariantSweepIntervalSec < 0 {
+		return fmt.Errorf("integrity.variantSweepIntervalSec: must be >= 0 (0 disables, omit for default), got %d", *c.Integrity.VariantSweepIntervalSec)
+	}
+	if c.Integrity.OrphanSidecarSweepIntervalSec != nil && *c.Integrity.OrphanSidecarSweepIntervalSec < 0 {
+		return fmt.Errorf("integrity.orphanSidecarSweepIntervalSec: must be >= 0 (0 disables, omit for default), got %d", *c.Integrity.OrphanSidecarSweepIntervalSec)
 	}
 	// backup.Keep: any non-positive value disables pruning. No
 	// upper-bound check — an operator who wants 1000 retained
