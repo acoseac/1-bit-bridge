@@ -90,20 +90,7 @@ func extractAIFFWithContext(absPath string, t *Track, ec *ExtractContext) error 
 					return fmt.Errorf("aiff: ID3 pad seek: %w", err)
 				}
 			}
-			m, err := tag.ReadID3v2Tags(bytes.NewReader(body))
-			if err != nil {
-				scanLogger.Warn("aiff: embedded ID3v2 parse failed",
-					"path", absPath, "err", err)
-				continue
-			}
-			// First-wins for the artwork carrier too. populateFromTagMetadata
-			// is first-wins for text, but idTagMetadata (read by
-			// extractLocalArtwork after the loop) was last-wins — so a later
-			// text-only ID3 chunk could drop an earlier chunk's APIC artwork.
-			if idTagMetadata == nil {
-				idTagMetadata = m
-			}
-			populateFromTagMetadata(m, t)
+			idTagMetadata = applyEmbeddedID3(body, t, idTagMetadata, absPath, "aiff")
 			// Continue walking — operators occasionally embed both an
 			// ID3 chunk AND a duplicate; first-wins via the empty-field
 			// guards inside populateFromTagMetadata.
@@ -193,19 +180,7 @@ func extractWAVWithContext(absPath string, t *Track, ec *ExtractContext) error {
 					return fmt.Errorf("wav: ID3 pad seek: %w", err)
 				}
 			}
-			m, err := tag.ReadID3v2Tags(bytes.NewReader(body))
-			if err != nil {
-				scanLogger.Warn("wav: embedded ID3v2 parse failed",
-					"path", absPath, "err", err)
-				continue
-			}
-			// First-wins (see extractAIFFWithContext): keep the earliest
-			// ID3 chunk's metadata so a later text-only chunk can't drop
-			// its APIC artwork.
-			if idTagMetadata == nil {
-				idTagMetadata = m
-			}
-			populateFromTagMetadata(m, t)
+			idTagMetadata = applyEmbeddedID3(body, t, idTagMetadata, absPath, "wav")
 		case fourcc == "LIST":
 			// RIFF LIST chunks come in many flavours — only LIST/INFO
 			// carries tag fields. Read the 4-byte form-type plus the
@@ -325,6 +300,30 @@ func parseWAVINFOBlock(body []byte, t *Track) {
 		}
 		body = body[advance:]
 	}
+}
+
+// applyEmbeddedID3 parses an embedded ID3v2 chunk body, merges its tags
+// into t (populateFromTagMetadata is first-wins per field), and returns
+// the metadata carrier extractLocalArtwork should use after the walk.
+// That carrier is ALSO first-wins: the EARLIEST ID3 chunk's metadata is
+// kept, so a later text-only chunk can't drop an earlier chunk's APIC
+// artwork. On a parse failure it logs (logPrefix names the AIFF / WAV
+// caller) and returns `existing` unchanged. Centralised because the AIFF
+// and WAV walkers' ID3 handling is otherwise byte-identical — keeping it
+// inline duplicated the parse + first-wins + populate sequence across
+// both functions.
+func applyEmbeddedID3(body []byte, t *Track, existing tag.Metadata, absPath, logPrefix string) tag.Metadata {
+	m, err := tag.ReadID3v2Tags(bytes.NewReader(body))
+	if err != nil {
+		scanLogger.Warn(logPrefix+": embedded ID3v2 parse failed",
+			"path", absPath, "err", err)
+		return existing
+	}
+	populateFromTagMetadata(m, t)
+	if existing == nil {
+		return m
+	}
+	return existing
 }
 
 // seekPastChunk advances the file cursor past `size` bytes plus
