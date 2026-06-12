@@ -192,6 +192,34 @@ func releaseGate(ctx context.Context, release <-chan struct{}) error {
 	}
 }
 
+// awaitClose fails the test if ch isn't closed within the standard 5s
+// budget — used to wait for a firstFireLatch channel before triggering
+// the next event.
+func awaitClose(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+	}
+}
+
+// awaitAtLeast polls (5s budget) until `fires` reaches n, then asserts it —
+// the "≥ n onStateChange fires" check the pool de-flakes share.
+func awaitAtLeast(t *testing.T, fires *atomic.Int64, n int64, what string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if fires.Load() >= n {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := fires.Load(); got < n {
+		t.Errorf("onStateChange fires = %d, want ≥ %d (%s)", got, n, what)
+	}
+}
+
 // TestPoolFiresOnStateChangeAfterEnqueueAndCompletion is the headline
 // contract for the SSE upstream-publisher wiring (PR following #135):
 // every observable pool state transition fires the registered
@@ -243,23 +271,9 @@ func TestPoolFiresOnStateChangeAfterEnqueueAndCompletion(t *testing.T) {
 
 	// Observe the enqueue fire, THEN let the job complete → a separate
 	// completion fire (the publisher has already drained the first).
-	select {
-	case <-enqueueFired:
-	case <-time.After(5 * time.Second):
-		t.Fatal("enqueue state-change never fired")
-	}
+	awaitClose(t, enqueueFired, "enqueue state-change")
 	close(release)
-
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if fires.Load() >= 2 {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	if got := fires.Load(); got < 2 {
-		t.Errorf("onStateChange fires = %d, want ≥ 2 (enqueue + completion)", got)
-	}
+	awaitAtLeast(t, &fires, 2, "enqueue + completion")
 }
 
 // TestPoolNilOnStateChangeDoesNotPanic locks in the back-compat
@@ -560,11 +574,7 @@ func TestPoolPanicInRunnerReleasesDedup(t *testing.T) {
 	}
 	// Observe (and drain) the enqueue fire, THEN release the panic so its
 	// recovery fire lands as a separate, non-coalesced callback.
-	select {
-	case <-enqueueFired:
-	case <-time.After(5 * time.Second):
-		t.Fatal("enqueue state-change never fired")
-	}
+	awaitClose(t, enqueueFired, "enqueue state-change")
 	close(releasePanic)
 	select {
 	case <-panicked:
@@ -634,16 +644,7 @@ func TestPoolPanicInRunnerReleasesDedup(t *testing.T) {
 	// flaked because the cap-1 stateChangeChan coalesces by design; the
 	// worker-survival coverage is the survivorRan + Inflight==0 assertions
 	// above, not the fire count.
-	deadline = time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if fires.Load() >= 2 {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	if got := fires.Load(); got < 2 {
-		t.Errorf("onStateChange fires = %d, want ≥ 2 (panic-enqueue + panic-recovery, both distinct)", got)
-	}
+	awaitAtLeast(t, &fires, 2, "panic-enqueue + panic-recovery, both distinct")
 }
 
 // TestPoolFiresOnJobCompleteAfterUpsertVariant pins the headline
@@ -807,27 +808,12 @@ func TestPoolDoesNotFireOnJobCompleteOnFailure(t *testing.T) {
 
 	// Observe the enqueue fire, then let the job fail → a separate
 	// completion fire (publisher already drained the first).
-	select {
-	case <-enqueueFired:
-	case <-time.After(5 * time.Second):
-		t.Fatal("enqueue state-change never fired")
-	}
+	awaitClose(t, enqueueFired, "enqueue state-change")
 	close(release)
-
-	// Bounded poll for the failure-completion state-change to land.
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if p.Stats().Failed >= 1 && stateFires.Load() >= 2 {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	awaitAtLeast(t, &stateFires, 2, "failure path must still notify state listeners")
 
 	if got := jobFires.Load(); got != 0 {
 		t.Errorf("onJobComplete fires on failure = %d, want 0 (success-only contract)", got)
-	}
-	if got := stateFires.Load(); got < 2 {
-		t.Errorf("onStateChange fires = %d, want ≥ 2 — failure path must still notify state listeners", got)
 	}
 }
 
