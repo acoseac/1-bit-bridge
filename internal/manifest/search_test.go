@@ -3,6 +3,7 @@ package manifest
 import (
 	"context"
 	"path"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -57,9 +58,9 @@ func TestSearchTracksLimitHardCapped(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	for i := 0; i < 510; i++ {
 		tk := Track{
-			Path: path.Join("Album", "Foo", "track-"+itoaN(i)+".flac"),
+			Path: path.Join("Album", "Foo", "track-"+strconv.Itoa(i)+".flac"),
 			Size: 100, ModTime: now,
-			Title:  "Foo " + itoaN(i),
+			Title:  "Foo " + strconv.Itoa(i),
 			Artist: "Foo Artist",
 			Album:  "Foo Album",
 		}
@@ -74,21 +75,6 @@ func TestSearchTracksLimitHardCapped(t *testing.T) {
 	if len(hits) != 500 {
 		t.Errorf("limit cap: got %d hits, want exactly 500", len(hits))
 	}
-}
-
-// itoaN is a tiny non-allocating integer→string for test fixture
-// names. strconv.Itoa pulls in the strconv import just for one
-// per-test loop, and the test only needs ASCII digits.
-func itoaN(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	out := make([]byte, 0, 4)
-	for n > 0 {
-		out = append([]byte{byte('0' + n%10)}, out...)
-		n /= 10
-	}
-	return string(out)
 }
 
 // TestSplitFTSTokens covers the lower-level tokeniser independently

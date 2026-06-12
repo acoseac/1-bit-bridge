@@ -54,15 +54,7 @@ type PlaylistSummary struct {
 	LastModifiedAt int64
 }
 
-// nullable returns a *string for SQL binding: nil for "" (stored as NULL,
-// so a local item's empty origin columns and a foreign item's empty path
-// stay distinguishable), the value otherwise.
-func nullable(s string) any {
-	if s == "" {
-		return nil
-	}
-	return s
-}
+// (nullable moved to sqlhelpers.go — shared by playlists.go + history.go.)
 
 // UpsertPlaylist stores (or replaces) a playlist + its items, atomically.
 // Playlists are user-wide: any paired device may overwrite any playlist
@@ -193,11 +185,17 @@ func (s *Store) GetPlaylist(ctx context.Context, id string) (*PlaylistRow, []Pla
 // newest-modified first, across ALL devices — playlists are user-wide.
 // Read path — no s.mu.
 func (s *Store) ListPlaylists(ctx context.Context) ([]PlaylistSummary, error) {
+	// LEFT JOIN + GROUP BY rather than a correlated COUNT subquery per row:
+	// the subquery form ran one playlist_items B-tree lookup per returned
+	// playlist (N+1). COUNT(i.position) is 0 for an item-less playlist (the
+	// LEFT JOIN yields a single all-NULL row; COUNT ignores NULLs), matching
+	// the old COUNT(*) semantics.
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT p.id, p.name, p.last_modified_at,
-		       (SELECT COUNT(*) FROM playlist_items i WHERE i.playlist_id = p.id) AS track_count
+		SELECT p.id, p.name, p.last_modified_at, COUNT(i.position) AS track_count
 		  FROM playlists p
+		  LEFT JOIN playlist_items i ON i.playlist_id = p.id
 		 WHERE p.deleted = 0
+		 GROUP BY p.id
 		 ORDER BY p.last_modified_at DESC
 	`)
 	if err != nil {
@@ -238,11 +236,14 @@ func (s *Store) TombstonePlaylist(ctx context.Context, id string) (bool, error) 
 // loopback admin surface, paired with the device token that last wrote it.
 // Read path — no s.mu. Admin-only; never exposed on /v1.
 func (s *Store) ListAllPlaylistsForAdmin(ctx context.Context) ([]AdminPlaylistSummary, error) {
+	// LEFT JOIN + GROUP BY (see ListPlaylists) to avoid the per-row
+	// correlated-subquery N+1.
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT p.id, p.device_token, p.name, p.last_modified_at, p.updated_at,
-		       (SELECT COUNT(*) FROM playlist_items i WHERE i.playlist_id = p.id) AS track_count
+		SELECT p.id, p.device_token, p.name, p.last_modified_at, p.updated_at, COUNT(i.position) AS track_count
 		  FROM playlists p
+		  LEFT JOIN playlist_items i ON i.playlist_id = p.id
 		 WHERE p.deleted = 0
+		 GROUP BY p.id
 		 ORDER BY p.updated_at DESC
 	`)
 	if err != nil {

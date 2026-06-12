@@ -146,8 +146,9 @@ func checkConfigDir(d Deps) Check {
 	}
 	// Ensure it exists (create if missing — init() does this anyway,
 	// but doctor running standalone should report the same outcome
-	// whether or not init has been attempted).
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// whether or not init has been attempted). 0o700 matches init.go's
+	// owner-only hardening so doctor doesn't leave a wider-mode dir.
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fail(checkNameConfigDir, dir, "can't create: "+err.Error())
 	}
 	// Touch a temp file to verify write access — MkdirAll's success
@@ -377,13 +378,20 @@ func probeWritable(dir string) error {
 	return nil
 }
 
-// windowsStartupDir resolves the per-user Startup folder. Returns ""
-// when the relevant env vars are unset. The path is:
+// windowsStartupDir resolves the per-user Startup folder. It first asks
+// the SHGetKnownFolderPath API (FOLDERID_Startup, via knownStartupDir),
+// which is robust against roaming / redirected enterprise profiles; on
+// any failure (or off Windows) it falls back to the canonical
+// %APPDATA%-relative path:
 //
 //	%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup
 //
-// which every supported Windows version uses.
+// Returns "" only when both the known-folder API and %APPDATA% are
+// unavailable.
 func windowsStartupDir() string {
+	if p, ok := knownStartupDir(); ok {
+		return p
+	}
 	appdata := os.Getenv("APPDATA")
 	if appdata == "" {
 		return ""

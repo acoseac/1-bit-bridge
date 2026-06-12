@@ -110,7 +110,10 @@ func (s *Store) ListDeviceRegistrations(ctx context.Context) ([]DeviceRegistrati
 		return nil, err
 	}
 	defer rows.Close()
-	var out []DeviceRegistration
+	// Pre-size to a small cap: device registrations are low-cardinality
+	// (one row per paired device), so 8 covers the common case without a
+	// realloc and is cheap when the table is empty.
+	out := make([]DeviceRegistration, 0, 8)
 	for rows.Next() {
 		var (
 			d               DeviceRegistration

@@ -784,6 +784,15 @@ var migrations = []migration{
 	},
 }
 
+// NOTE (r1 review #49, dropped): a covering index on
+// track_variants(variant_id, source_path, size_bytes) was considered to
+// speed up RollupByPrefix("")'s full-table aggregate. It was dropped
+// because SQLite's planner then prefers it for the variant-LOOKUP hot
+// path (/v1/download?variant=, which filters variant_id=?) over the
+// more-selective unicode_lower(source_path) index — a net regression on
+// the media-serving path for a marginal gain on a loopback-admin
+// dashboard query. Pinned by TestUnicodeLowerVariantIndexIsSelected.
+
 // normalizePathForLookup folds an iOS-shaped track path back toward
 // the form Store.GetTrack / GetVariant can compare with manifest's
 // canonical (case-preserved) PRIMARY KEY. Three transformations:
