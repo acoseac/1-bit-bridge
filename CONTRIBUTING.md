@@ -22,16 +22,27 @@ This rule is enforced by review convention, not CI. If you find yourself wanting
 
 ## Pre-push checklist
 
-There is no PR-check workflow today — local-green is the gate. Every PR author runs these commands locally before pushing and pastes the result into the PR body:
+CI now runs the full gate per PR (`.github/workflows/gofmt.yml` = the
+`fmt` check, `.github/workflows/gate.yml` = `vet` + `test` + `build-all`),
+so a red check blocks a careless merge. Still run it locally first — the
+fast feedback loop is local, and a green paste-in keeps reviewers from
+waiting on the runner:
 
 ```sh
-make fmt
-make vet
-make test          # race-enabled; runs on cmd/bridge and any package with _test.go
+make check         # fmt + vet + test (race) — the per-change loop; skips build-all
 make build-all     # cross-compile sanity check for darwin/linux/windows × amd64/arm64
 ```
 
-If any step fails, fix it on the branch before requesting review. A green paste-in substitutes for CI.
+`make check` is the inner-loop gate; run the full `make fmt vet test
+build-all` once before pushing (it's what CI reproduces). While iterating
+on one package, `go test ./internal/<pkg>/` (or `make test-fast`, no race
+detector) is seconds.
+
+**On a RAM-constrained machine** the `-race` + 6-target cross-compile peak
+can OOM. The Makefile caps build/test parallelism via `P` (default 4);
+lower it (`make test P=2`) if builds still thrash, or raise it on a roomy
+box (`make test P=$(sysctl -n hw.ncpu)`). If any step fails, fix it on the
+branch before requesting review.
 
 ## Go style
 
