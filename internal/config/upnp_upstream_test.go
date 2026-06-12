@@ -222,42 +222,38 @@ func TestValidate_PublicModeAllowsDisabledUPnPUpstream(t *testing.T) {
 	}
 }
 
-// TestUPnPUpstreamValidate_RejectsEmptyResolvedPrefix pins the r1-review
-// guard: a server Name/pathPrefix that's only slashes/whitespace resolves
-// to an empty prefix, which would route the upstream's tracks at the
-// library root. Reject it loudly instead.
-func TestUPnPUpstreamValidate_RejectsEmptyResolvedPrefix(t *testing.T) {
-	u := UPnPUpstreamConfig{
-		Enabled: true,
-		Servers: []UPnPUpstreamServerConfig{
-			{Name: "///", UDN: "uuid:abc"}, // non-blank, but trims to empty prefix
+// TestUPnPUpstreamValidate_RejectsBadFields pins the r1-review guards on
+// the upnpUpstream block:
+//   - an all-slashes/whitespace Name/pathPrefix resolves to an empty
+//     prefix (would route the upstream's tracks at the library root);
+//   - a negative msearch cadence is a typo that must fail loudly rather
+//     than silently fall back to the default.
+func TestUPnPUpstreamValidate_RejectsBadFields(t *testing.T) {
+	cases := []struct {
+		name    string
+		cfg     UPnPUpstreamConfig
+		wantSub string // substring the error must mention
+	}{
+		{
+			name:    "empty resolved prefix",
+			cfg:     UPnPUpstreamConfig{Enabled: true, Servers: []UPnPUpstreamServerConfig{{Name: "///", UDN: "uuid:abc"}}},
+			wantSub: "prefix",
+		},
+		{
+			name:    "negative msearch interval",
+			cfg:     UPnPUpstreamConfig{Enabled: true, MSearchIntervalSeconds: -60, Servers: []UPnPUpstreamServerConfig{{Name: "2Go", UDN: "uuid:abc"}}},
+			wantSub: "msearchIntervalSeconds",
 		},
 	}
-	err := u.Validate()
-	if err == nil {
-		t.Fatal("expected error for empty resolved path prefix, got nil")
-	}
-	if !strings.Contains(err.Error(), "prefix") {
-		t.Errorf("error %q should mention 'prefix'", err.Error())
-	}
-}
-
-// TestUPnPUpstreamValidate_RejectsNegativeMSearch pins the standardized
-// negative-interval handling: a negative cadence is a typo and must fail
-// loudly rather than silently fall back to the default.
-func TestUPnPUpstreamValidate_RejectsNegativeMSearch(t *testing.T) {
-	u := UPnPUpstreamConfig{
-		Enabled:                true,
-		MSearchIntervalSeconds: -60,
-		Servers: []UPnPUpstreamServerConfig{
-			{Name: "2Go", UDN: "uuid:abc"},
-		},
-	}
-	err := u.Validate()
-	if err == nil {
-		t.Fatal("expected error for negative msearchIntervalSeconds, got nil")
-	}
-	if !strings.Contains(err.Error(), "msearchIntervalSeconds") {
-		t.Errorf("error %q should mention msearchIntervalSeconds", err.Error())
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := c.cfg.Validate()
+			if err == nil {
+				t.Fatalf("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), c.wantSub) {
+				t.Errorf("error %q should mention %q", err.Error(), c.wantSub)
+			}
+		})
 	}
 }
