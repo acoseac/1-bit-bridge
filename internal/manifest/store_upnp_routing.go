@@ -163,12 +163,16 @@ func (s *Store) ListUPnPSourcePathsOlderThan(ctx context.Context, serverUDN stri
 	if serverUDN == "" {
 		return nil, nil
 	}
+	// No ORDER BY: the composite index idx_upnp_routing_server_seen is
+	// (server_udn, last_seen_at), so an ORDER BY source_path would force
+	// a temp-B-tree filesort. The sole consumer is the reconcile sweep,
+	// which feeds the paths into a delete batch (order-independent), so
+	// the index's natural order is fine.
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT source_path
 		  FROM upnp_track_routing
 		 WHERE server_udn = ?
 		   AND last_seen_at < ?
-		 ORDER BY source_path
 	`, serverUDN, cutoff.UnixNano())
 	if err != nil {
 		return nil, fmt.Errorf("manifest: ListUPnPSourcePathsOlderThan: %w", err)
