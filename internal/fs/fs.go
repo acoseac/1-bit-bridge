@@ -33,6 +33,17 @@ var ErrNotFound = errors.New("path not found")
 // segment doesn't match any configured root basename.
 var ErrUnknownRoot = errors.New("unknown library root")
 
+// rootInfo holds the precomputed absolute path + containment prefix for
+// one configured root. Both are pure functions of the root path, which
+// only changes under setRootsLocked — so computing them once there keeps
+// filepath.Abs + the prefix string-build off the per-request Resolve hot
+// path (every served track goes through Resolve).
+type rootInfo struct {
+	abs    string // filepath.Abs(root)
+	prefix string // abs + separator (TrimSuffix-corrected): the containment prefix
+	absErr error  // error from filepath.Abs (≈never for absolute roots)
+}
+
 // Resolver maps a client path to an absolute on-disk path, enforcing
 // root-scoping. Safe for concurrent use; roots can be hot-swapped at runtime
 // via SetRoots so the admin console can add or remove a library root without
@@ -46,6 +57,12 @@ type Resolver struct {
 	// basenameIndex maps root basename → full root path, for the multi-root
 	// routing rule. Empty when len(roots) == 1.
 	basenameIndex map[string]string
+
+	// info maps each root path → its precomputed abs + containment prefix,
+	// rebuilt alongside roots in setRootsLocked. Replaced (never mutated in
+	// place) atomically with roots/basenameIndex, so a single Resolve
+	// snapshot stays consistent. Read-only after publish.
+	info map[string]rootInfo
 }
 
 // New returns a Resolver for the given library roots. The roots must be
@@ -74,6 +91,18 @@ func (r *Resolver) SetRoots(roots []string) {
 func (r *Resolver) setRootsLocked(roots []string) {
 	r.roots = append([]string(nil), roots...)
 	r.basenameIndex = nil
+	r.info = make(map[string]rootInfo, len(roots))
+	for _, root := range roots {
+		abs, err := filepath.Abs(root)
+		ri := rootInfo{abs: abs, absErr: err}
+		if err == nil {
+			// TrimSuffix handles the filesystem-root case (abs == "/" on
+			// Unix or "C:\" on Windows): without it the prefix would be
+			// "//" / "C:\\" and never match a real path. See Resolve.
+			ri.prefix = strings.TrimSuffix(abs, string(filepath.Separator)) + string(filepath.Separator)
+		}
+		r.info[root] = ri
+	}
 	if len(roots) > 1 {
 		r.basenameIndex = make(map[string]string, len(roots))
 		for _, root := range roots {
@@ -142,10 +171,12 @@ func (r *Resolver) Resolve(clientPath string) (string, error) {
 	clean = strings.TrimPrefix(clean, "/")
 
 	// Pick a root. Snapshot under the read lock so a concurrent SetRoots
-	// can't swap roots mid-pick.
+	// can't swap roots mid-pick. `info` is replaced atomically alongside
+	// roots/basenameIndex in setRootsLocked, so one snapshot is consistent.
 	r.mu.RLock()
 	roots := r.roots
 	basenameIndex := r.basenameIndex
+	info := r.info
 	r.mu.RUnlock()
 
 	var (
@@ -172,26 +203,37 @@ func (r *Resolver) Resolve(clientPath string) (string, error) {
 		}
 	}
 
+	// rootAbs + prefix are precomputed per root in setRootsLocked (pure
+	// functions of the root path), so the per-request cost here is just the
+	// suffix Join + the final containment check. `root` came from the same
+	// snapshot `info` was built from, so the lookup hits; the recompute
+	// branch is a defensive fallback for an impossible miss.
+	ri, ok := info[root]
+	if !ok {
+		var err error
+		ri.abs, err = filepath.Abs(root)
+		if err != nil {
+			return "", err
+		}
+		ri.prefix = strings.TrimSuffix(ri.abs, string(filepath.Separator)) + string(filepath.Separator)
+	} else if ri.absErr != nil {
+		return "", ri.absErr
+	}
+
 	// Join via filepath.Join which also does final cleaning with native
 	// separators. The final check compares against the absolute root to
 	// catch any residual "../" that slipped through (shouldn't happen
 	// given path.Clean above, but belt-and-braces against Go version drift).
 	abs := filepath.Join(root, filepath.FromSlash(suffix))
-	rootAbs, err := filepath.Abs(root)
-	if err != nil {
-		return "", err
-	}
 	absAbs, err := filepath.Abs(abs)
 	if err != nil {
 		return "", err
 	}
-	// TrimSuffix handles the filesystem-root case (rootAbs == "/" on Unix or
-	// "C:\" on Windows). Without the trim, the prefix check builds "//" or
-	// "C:\\" — which never matches a real absolute path, so every request
-	// against a root-mounted library would 400. Operators with Docker mounts
-	// directly to / hit this.
-	prefix := strings.TrimSuffix(rootAbs, string(filepath.Separator)) + string(filepath.Separator)
-	if absAbs != rootAbs && !strings.HasPrefix(absAbs, prefix) {
+	// ri.prefix's TrimSuffix handles the filesystem-root case (rootAbs ==
+	// "/" on Unix or "C:\" on Windows): without it the prefix would be
+	// "//" / "C:\\" and never match, 400-ing every request against a
+	// root-mounted library (Docker mount directly to /).
+	if absAbs != ri.abs && !strings.HasPrefix(absAbs, ri.prefix) {
 		return "", ErrBadPath
 	}
 	return absAbs, nil
