@@ -275,10 +275,18 @@ func parseWAVINFOBlock(body []byte, t *Track) {
 			break
 		}
 		payload := body[8 : 8+size]
-		// Strip trailing nulls and whitespace — INFO chunks often
-		// pad to a c-string null terminator inside the declared size.
-		text := strings.TrimRight(strings.TrimSpace(string(payload)), "\x00")
-		text = strings.TrimSpace(text)
+		// RIFF INFO values are null-terminated C-strings. Truncate at
+		// the FIRST NUL before converting — some encoders pad the
+		// declared size with non-NUL junk after the terminator
+		// (e.g. ['H','i',0x00,0xAA,0xBB,0x00]), and a trailing-only
+		// TrimRight("\x00") would leave that interior garbage embedded
+		// in the string, corrupting the Track field (and downstream
+		// JSON / iOS rendering). Cutting at the first NUL drops
+		// everything past the terminator in one pass.
+		if i := bytes.IndexByte(payload, 0); i >= 0 {
+			payload = payload[:i]
+		}
+		text := strings.TrimSpace(string(payload))
 		switch id {
 		case "INAM":
 			if text != "" && t.Title == "" {

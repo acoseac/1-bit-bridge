@@ -12,6 +12,13 @@ import (
 // claiming a giant size would silently convert to a negative int64
 // and cause a backward seek, locking the walker in a loop.
 // (CodeRabbit Major on PR #223.)
+//
+// safeSeekSkip now also applies the odd-byte IFF pad internally and in
+// uint64, so the boundary moved: math.MaxInt64 is ODD, and padding it
+// would overflow int64 (MaxInt64+1 → MinInt64) — so it MUST be
+// rejected, not returned. The largest accepted value is the largest
+// EVEN number that fits int64 (MaxInt64-1). Odd inputs below that pad
+// up to the next even value. (Overflow-pad fix from the r1 review.)
 func TestSafeSeekSkip_TruthTable(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -20,9 +27,11 @@ func TestSafeSeekSkip_TruthTable(t *testing.T) {
 		wantErr bool
 	}{
 		{"zero", 0, 0, false},
-		{"small", 4, 4, false},
+		{"small even", 4, 4, false},
+		{"small odd pads to even", 3, 4, false},
 		{"realistic DSD audio chunk (~4 GiB)", 4 << 30, 4 << 30, false},
-		{"int64 max", math.MaxInt64, math.MaxInt64, false},
+		{"largest even fits int64", math.MaxInt64 - 1, math.MaxInt64 - 1, false},
+		{"int64 max (odd — pad would overflow)", math.MaxInt64, 0, true},
 		{"int64 max + 1 (uint64-only)", uint64(math.MaxInt64) + 1, 0, true},
 		{"uint64 max (malformed)", math.MaxUint64, 0, true},
 	}
@@ -44,14 +53,11 @@ func TestSafeSeekSkip_TruthTable(t *testing.T) {
 	}
 }
 
-// TestExtractDFF_OversizedChunkRejected verifies the overflow guard
-// fires end-to-end: a DSDIFF file with a chunk declaring a uint64
-// size beyond int64 max must error rather than seek backward and
-// loop. The DSDIFF chunk-size field is BE64 (full uint64 range), so
-// a malicious file can trigger this.
-func TestExtractDFF_OversizedChunkRejected(t *testing.T) {
-	// Build a minimal valid PROP/SND chunk, then append a hostile
-	// chunk with size = 0xFFFFFFFFFFFFFFFF after it.
+// buildDFFWithHostileTrailingChunk builds a minimal valid DSDIFF
+// (FRM8/DSD + PROP{FS,CMPR}) followed by a single trailing chunk whose
+// declared BE64 size is `badSize`. Shared by the overflow-guard tests so
+// the boundary value is the only thing that varies between them.
+func buildDFFWithHostileTrailingChunk(badSize uint64) []byte {
 	prop := []byte("SND ")
 	fs := []byte("FS  ")
 	var fsSize [8]byte
@@ -75,11 +81,10 @@ func TestExtractDFF_OversizedChunkRejected(t *testing.T) {
 	propWithHeader = append(propWithHeader, propSize[:]...)
 	propWithHeader = append(propWithHeader, prop...)
 
-	// Hostile chunk: FOURCC + uint64-max size.
 	bad := []byte("XXXX")
-	var badSize [8]byte
-	binary.BigEndian.PutUint64(badSize[:], math.MaxUint64)
-	bad = append(bad, badSize[:]...)
+	var badSizeBuf [8]byte
+	binary.BigEndian.PutUint64(badSizeBuf[:], badSize)
+	bad = append(bad, badSizeBuf[:]...)
 
 	body := []byte("DSD ")
 	body = append(body, propWithHeader...)
@@ -90,15 +95,41 @@ func TestExtractDFF_OversizedChunkRejected(t *testing.T) {
 	binary.BigEndian.PutUint64(size[:], uint64(len(body)))
 	out = append(out, size[:]...)
 	out = append(out, body...)
+	return out
+}
 
-	path := writeTempDFF(t, out)
+// TestExtractDFF_OversizedChunkRejected verifies the overflow guard
+// fires end-to-end: a DSDIFF file with a chunk declaring a uint64
+// size beyond int64 max must error rather than seek backward and
+// loop. The DSDIFF chunk-size field is BE64 (full uint64 range), so
+// a malicious file can trigger this.
+func TestExtractDFF_OversizedChunkRejected(t *testing.T) {
+	path := writeTempDFF(t, buildDFFWithHostileTrailingChunk(math.MaxUint64))
 	track := &Track{}
-	err := extractDFFWithContext(path, track, nil)
-	if err == nil {
+	if err := extractDFFWithContext(path, track, nil); err == nil {
 		t.Fatalf("extractDFFWithContext: want error on uint64-max chunk size, got nil")
 	}
 	// Codec was stamped before the walk so the manifest row still
 	// classifies as DFF even on a malformed file.
+	if track.Codec != "DFF" {
+		t.Errorf("Codec = %q, want %q (must stamp before walk)", track.Codec, "DFF")
+	}
+}
+
+// TestExtractDFF_OddMaxInt64ChunkRejected covers the exact boundary the
+// pre-fix guard missed: a chunk size of math.MaxInt64. MaxUint64 was
+// already rejected (it exceeds int64), but MaxInt64 (odd) PASSED the old
+// `size > math.MaxInt64` check, then the caller's `skip++` odd-pad
+// overflowed int64 to math.MinInt64 and seeked ~9.2 EiB backward —
+// re-reading the same chunk forever. With the pad moved into
+// safeSeekSkip (uint64, before the `>=` cap) the file is rejected
+// cleanly instead. (r1 review overflow-pad fix.)
+func TestExtractDFF_OddMaxInt64ChunkRejected(t *testing.T) {
+	path := writeTempDFF(t, buildDFFWithHostileTrailingChunk(math.MaxInt64))
+	track := &Track{}
+	if err := extractDFFWithContext(path, track, nil); err == nil {
+		t.Fatalf("extractDFFWithContext: want error on MaxInt64 (odd) chunk size, got nil")
+	}
 	if track.Codec != "DFF" {
 		t.Errorf("Codec = %q, want %q (must stamp before walk)", track.Codec, "DFF")
 	}

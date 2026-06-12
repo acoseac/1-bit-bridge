@@ -1312,9 +1312,7 @@ func extractDFFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 				if err != nil {
 					return fmt.Errorf("dff: oversized DIIN unsafe to skip: %w", err)
 				}
-				if skip%2 == 1 {
-					skip++
-				}
+				// safeSeekSkip already applied the odd-byte pad.
 				if _, err := f.Seek(skip, io.SeekCurrent); err != nil {
 					return fmt.Errorf("dff: seek past oversized DIIN: %w", err)
 				}
@@ -1342,9 +1340,7 @@ func extractDFFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 			if err != nil {
 				return fmt.Errorf("dff: chunk %q unsafe to skip: %w", fourcc, err)
 			}
-			if skip%2 == 1 {
-				skip++
-			}
+			// safeSeekSkip already applied the odd-byte pad.
 			if _, err := f.Seek(skip, io.SeekCurrent); err != nil {
 				return fmt.Errorf("dff: seek past %q: %w", fourcc, err)
 			}
@@ -1357,19 +1353,35 @@ func extractDFFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 	}
 }
 
-// safeSeekSkip converts a `uint64` chunk size to the `int64` form
-// `os.File.Seek` requires, refusing the conversion when `size`
-// exceeds `math.MaxInt64`. Without this guard, a malformed DSDIFF
-// header declaring `size = 0xFFFFFFFFFFFFFFFF` would convert to
-// `int64(-1)` and seek BACKWARD by one byte instead of skipping
-// the chunk — the next iteration would re-read the same chunk
-// header in an infinite loop. Real DSD audio chunks (single-digit
-// GB at DSD512+) sit comfortably below `int64` max (~9.2 EiB), so
-// this guard never fires for well-formed files. CodeRabbit Major
-// on PR #223.
+// safeSeekSkip converts a `uint64` chunk size to the even-aligned
+// `int64` byte-count `os.File.Seek` requires, applying the IFF/DSDIFF
+// odd-byte pad itself and refusing the conversion when the result
+// wouldn't fit `int64`. Without this guard, a malformed DSDIFF header
+// declaring `size = 0xFFFFFFFFFFFFFFFF` would convert to `int64(-1)`
+// and seek BACKWARD by one byte instead of skipping the chunk — the
+// next iteration would re-read the same chunk header in an infinite
+// loop.
+//
+// The pad MUST happen here, in `uint64`, BEFORE the `int64` check, and
+// the reject MUST use `>=` not `>`: a caller that took `int64(size)`
+// first and then did `skip++` would overflow when `size == MaxInt64`
+// (odd) — `MaxInt64 + 1` wraps to `MinInt64` and seeks ~9.2 EiB
+// backward (the exact bug this rewrite closes). Rejecting `size >=
+// MaxInt64` up front means `size + 1` can never overflow `int64` and
+// never wraps `uint64` (`MaxUint64 + 1 == 0`, which would otherwise
+// pass as a bogus 0-skip). Callers therefore MUST NOT re-pad the
+// returned value — it is already even.
+//
+// Real DSD audio chunks (single-digit GB at DSD512+) sit comfortably
+// below `int64` max (~9.2 EiB), so this guard never fires for
+// well-formed files. CodeRabbit Major on PR #223.
 func safeSeekSkip(size uint64) (int64, error) {
-	if size > math.MaxInt64 {
+	if size >= math.MaxInt64 {
 		return 0, fmt.Errorf("chunk size %d exceeds int64 seek limit", size)
+	}
+	// size < MaxInt64 here, so size+1 fits int64 and can't wrap uint64.
+	if size%2 == 1 {
+		size++
 	}
 	return int64(size), nil
 }

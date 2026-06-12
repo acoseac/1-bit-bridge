@@ -269,6 +269,47 @@ func TestExtractWAV_ListInfoBlockSurfacesFields(t *testing.T) {
 	}
 }
 
+// TestExtractWAV_INFOInteriorNullTruncatedAtFirstNul pins the C-string
+// truncation fix: a RIFF INFO value with junk AFTER its terminating NUL
+// (e.g. ['H','i',0x00,0xAA,0xBB]) must be cut at the FIRST NUL. The
+// pre-fix TrimRight("\x00") only stripped a trailing run of NULs and
+// would leave the interior 0xAA 0xBB embedded in the Track field,
+// corrupting downstream JSON / iOS rendering. (r1 review fix.)
+func TestExtractWAV_INFOInteriorNullTruncatedAtFirstNul(t *testing.T) {
+	infoBody := []byte("INFO")
+	payload := []byte{'H', 'i', 0x00, 0xAA, 0xBB} // "Hi" + NUL + junk
+	infoBody = append(infoBody, []byte("INAM")...)
+	var sz [4]byte
+	binary.LittleEndian.PutUint32(sz[:], uint32(len(payload)))
+	infoBody = append(infoBody, sz[:]...)
+	infoBody = append(infoBody, payload...)
+	if len(payload)%2 == 1 {
+		infoBody = append(infoBody, 0x00) // IFF odd-byte chunk pad
+	}
+
+	body := []byte("WAVE")
+	var listSub [8]byte
+	copy(listSub[0:4], []byte("LIST"))
+	binary.LittleEndian.PutUint32(listSub[4:8], uint32(len(infoBody)))
+	body = append(body, listSub[:]...)
+	body = append(body, infoBody...)
+
+	out := []byte("RIFF")
+	var rsz [4]byte
+	binary.LittleEndian.PutUint32(rsz[:], uint32(len(body)))
+	out = append(out, rsz[:]...)
+	out = append(out, body...)
+
+	path := writeTempWAV(t, out)
+	track := &Track{}
+	if err := extractWAVWithContext(path, track, nil); err != nil {
+		t.Fatalf("extractWAVWithContext: %v", err)
+	}
+	if track.Title != "Hi" {
+		t.Errorf("Title = %q (% x), want %q — must truncate at first NUL, not keep interior junk", track.Title, track.Title, "Hi")
+	}
+}
+
 func TestExtractWAV_ID3WinsOverLISTInfo(t *testing.T) {
 	// Both ID3 and LIST/INFO present — ID3 fields must NOT be
 	// overwritten by LIST/INFO. populateFromTagMetadata's empty-
