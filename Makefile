@@ -54,7 +54,16 @@ test-fast:
 # Per-change gate: format + vet + race tests, WITHOUT the 6-target
 # build-all (the dominant cost). Run the full `make fmt vet test build-all`
 # once before pushing; CI (.github/workflows) runs the same gate per PR.
-check: fmt vet test
+#
+# Sequential $(MAKE) sub-invocations rather than `check: fmt vet test`
+# prerequisites: under parallel make (`make -j check` / a -j in MAKEFLAGS)
+# prerequisites run concurrently, and `fmt` rewrites .go files while
+# `vet`/`test` are compiling them — a flaky-failure race. Recipe lines
+# always run in order and fail-fast.
+check:
+	$(MAKE) fmt
+	$(MAKE) vet
+	$(MAKE) test
 
 fmt:
 	go fmt ./...
