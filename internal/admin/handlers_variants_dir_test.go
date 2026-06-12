@@ -51,12 +51,11 @@ func TestAssertNotUnderLibraryRootsResolvesSymlinks(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink test requires unix-style symlinks")
 	}
-	// Every path here is created on disk: evalSymlinksOrClean falls
-	// back to a lexical Clean for non-existent paths (same documented
-	// trade-off as the config twin), so the resolution under test only
-	// engages on real directory trees. t.TempDir() itself may sit under
-	// a symlink (/var → /private/var on macOS), which the resolution
-	// handles for free.
+	// evalSymlinksOrClean resolves symlinks in the nearest EXISTING
+	// ancestor, so both an existing leaf and a not-yet-created leaf under
+	// a symlinked parent resolve correctly (the latter exercised below).
+	// t.TempDir() itself may sit under a symlink (/var → /private/var on
+	// macOS), which the resolution handles for free.
 	tmp := t.TempDir()
 	root := filepath.Join(tmp, "lib")
 	if err := os.MkdirAll(filepath.Join(root, "variants"), 0o755); err != nil {
@@ -72,6 +71,14 @@ func TestAssertNotUnderLibraryRootsResolvesSymlinks(t *testing.T) {
 	candidate := filepath.Join(link, "variants")
 	if err := assertNotUnderLibraryRoots(candidate, []string{root}); err == nil {
 		t.Errorf("symlinked path resolving under library root was accepted; lexical-only check regressed")
+	}
+
+	// Not-yet-created leaf under a symlinked parent: EvalSymlinks fails on
+	// the full path, so the ancestor walk must resolve `link` → root and
+	// reject. Pre-fix this slipped through the lexical Clean fallback.
+	notYetCreated := filepath.Join(link, "transcoded")
+	if err := assertNotUnderLibraryRoots(notYetCreated, []string{root}); err == nil {
+		t.Errorf("not-yet-created path under symlinked parent was accepted; ancestor-walk resolution regressed")
 	}
 
 	// Inverse direction: the ROOT is configured via a symlink and the

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -92,5 +93,49 @@ func TestValidateVariantsDirAcceptsSiblingPath(t *testing.T) {
 func TestValidateVariantsDirHandlesTrailingSlashes(t *testing.T) {
 	if err := validateVariantsDir("/lib/transcoded/", []string{"/lib/"}); err == nil {
 		t.Errorf("trailing-slash variant of 'under library root' should still reject")
+	}
+}
+
+// TestValidateVariantsDirRejectsSymlinkedParentIntoRoot pins the
+// symlink-traversal fix: a variantsDir whose leaf doesn't exist yet but
+// whose PARENT component symlinks into a library root must be rejected.
+// Pre-fix, EvalSymlinks failed on the non-existent leaf and the lexical
+// Clean fallback left the symlinked parent unresolved, so the
+// containment check passed — and os.MkdirAll on first upscale would
+// write variant files THROUGH the symlink into the read-only root.
+// (r1 review fix.)
+func TestValidateVariantsDirRejectsSymlinkedParentIntoRoot(t *testing.T) {
+	root := t.TempDir()
+	// A symlink whose target is the library root, living OUTSIDE it.
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(root, link); err != nil {
+		t.Skipf("symlink unsupported on this host: %v", err)
+	}
+	// "transcoded" does NOT exist yet, so EvalSymlinks on the full path
+	// fails and the ancestor-walk fallback must resolve `link` → root.
+	variantsDir := filepath.Join(link, "transcoded")
+	err := validateVariantsDir(variantsDir, []string{root})
+	if err == nil {
+		t.Fatalf("variantsDir %q resolves via symlinked parent under root %q; want rejection", variantsDir, root)
+	}
+	if !strings.Contains(err.Error(), "library root") {
+		t.Errorf("error should mention 'library root', got %q", err)
+	}
+}
+
+// TestValidateVariantsDirAcceptsSymlinkOutsideRoots is the negative
+// control for the ancestor walk: a symlinked parent that resolves to a
+// location NOT under any library root must still be accepted (the walk
+// must not over-reject brand-new dirs).
+func TestValidateVariantsDirAcceptsSymlinkOutsideRoots(t *testing.T) {
+	root := t.TempDir()
+	target := t.TempDir() // unrelated to root
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unsupported on this host: %v", err)
+	}
+	variantsDir := filepath.Join(link, "transcoded") // resolves under target, not root
+	if err := validateVariantsDir(variantsDir, []string{root}); err != nil {
+		t.Errorf("symlinked variantsDir outside all roots should be accepted, got: %v", err)
 	}
 }
