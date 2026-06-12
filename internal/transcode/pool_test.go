@@ -163,6 +163,35 @@ func TestPoolEnqueueAfterStopReturnsErrPoolClosed(t *testing.T) {
 	}
 }
 
+// firstFireLatch returns an onStateChange callback that counts fires into
+// `fires` and closes the returned channel on the FIRST fire. Tests use it
+// to observe (and let the publisher drain) the enqueue state-change before
+// triggering completion, so the two don't COALESCE in the cap-1
+// stateChangeChan — the flaky shape these pool tests share. See
+// TestPoolFiresOnStateChangeAfterEnqueueAndCompletion.
+func firstFireLatch(fires *atomic.Int64) (cb func(), fired <-chan struct{}) {
+	ch := make(chan struct{})
+	var once sync.Once
+	return func() {
+		if fires.Add(1) == 1 {
+			once.Do(func() { close(ch) })
+		}
+	}, ch
+}
+
+// releaseGate blocks a fake runner until `release` closes (returning nil),
+// or returns ctx.Err() if the pool is Stopped first — so t.Cleanup(p.Stop)
+// can't deadlock on a parked worker. Lets a test hold a job open until it
+// has observed the enqueue state-change.
+func releaseGate(ctx context.Context, release <-chan struct{}) error {
+	select {
+	case <-release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 // TestPoolFiresOnStateChangeAfterEnqueueAndCompletion is the headline
 // contract for the SSE upstream-publisher wiring (PR following #135):
 // every observable pool state transition fires the registered
@@ -186,29 +215,18 @@ func TestPoolFiresOnStateChangeAfterEnqueueAndCompletion(t *testing.T) {
 	t.Cleanup(p.Stop)
 
 	var fires atomic.Int64
-	enqueueFired := make(chan struct{})
-	var once sync.Once
-	p.SetOnStateChange(func() {
-		if fires.Add(1) == 1 {
-			once.Do(func() { close(enqueueFired) })
-		}
-	})
+	onStateChange, enqueueFired := firstFireLatch(&fires)
+	p.SetOnStateChange(onStateChange)
 
-	// Block the job until the enqueue-triggered state-change has been
-	// OBSERVED, so the completion state-change can't COALESCE with it. The
-	// cap-1 stateChangeChan coalesces by design, which on a slow / -race
-	// runner merges enqueue+completion into a single fire — the real flake
-	// this de-flakes. The fake runner also drops the real-sox dependency;
-	// the ctx.Done() arm prevents t.Cleanup(p.Stop) from deadlocking if the
-	// test fails before releasing.
+	// Block the job until the enqueue fire has been observed so the
+	// completion fire can't coalesce with it (see firstFireLatch /
+	// releaseGate). The fake runner also drops the real-sox dependency.
 	release := make(chan struct{})
 	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
-		select {
-		case <-release:
-			return 0, errors.New("synthetic failure")
-		case <-ctx.Done():
-			return 0, ctx.Err()
+		if err := releaseGate(ctx, release); err != nil {
+			return 0, err
 		}
+		return 0, errors.New("synthetic failure")
 	}
 
 	spec := JobSpec{
@@ -498,13 +516,8 @@ func TestPoolPanicInRunnerReleasesDedup(t *testing.T) {
 	// (otherwise SSE clients wouldn't see the failure tick until the
 	// next unrelated event lands).
 	var fires atomic.Int64
-	enqueueFired := make(chan struct{})
-	var once sync.Once
-	p.SetOnStateChange(func() {
-		if fires.Add(1) == 1 {
-			once.Do(func() { close(enqueueFired) })
-		}
-	})
+	onStateChange, enqueueFired := firstFireLatch(&fires)
+	p.SetOnStateChange(onStateChange)
 
 	panicked := make(chan struct{})
 	survivorRan := make(chan struct{})
@@ -513,16 +526,11 @@ func TestPoolPanicInRunnerReleasesDedup(t *testing.T) {
 	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
 		switch spec.SourceLibraryRel {
 		case "Music/Album/panic.flac":
-			// Block until the enqueue state-change has been observed so the
-			// panic-recovery fire below lands as a SEPARATE callback (the
-			// cap-1 stateChangeChan coalesces by design — without this the
-			// recovery fire merges into the enqueue one and the count flakes
-			// below 4 on a slow / -race runner). ctx.Done() arm keeps
-			// t.Cleanup(p.Stop) from deadlocking on early failure.
-			select {
-			case <-releasePanic:
-			case <-ctx.Done():
-				return 0, ctx.Err()
+			// Block until the enqueue fire is observed so the panic-recovery
+			// fire below lands as a SEPARATE callback (see firstFireLatch /
+			// releaseGate) — otherwise it coalesces and the count flakes.
+			if err := releaseGate(ctx, releasePanic); err != nil {
+				return 0, err
 			}
 			close(panicked)
 			panic("synthetic transcode panic for slot-reclaim test")
@@ -767,19 +775,14 @@ func TestPoolDoesNotFireOnJobCompleteOnFailure(t *testing.T) {
 
 	soxErr := errors.New("sox synthetic failure")
 	p.fsyncFn = noopFsync
-	// Block the job until the enqueue state-change has been observed so the
-	// failure-completion fire can't COALESCE with it (the cap-1
-	// stateChangeChan coalesces by design — see
-	// TestPoolFiresOnStateChangeAfterEnqueueAndCompletion). ctx.Done() arm
-	// keeps t.Cleanup(p.Stop) from deadlocking if the test fails early.
+	// Block until the enqueue fire is observed so the failure-completion
+	// fire can't coalesce with it (see firstFireLatch / releaseGate).
 	release := make(chan struct{})
 	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
-		select {
-		case <-release:
-			return 0, soxErr
-		case <-ctx.Done():
-			return 0, ctx.Err()
+		if err := releaseGate(ctx, release); err != nil {
+			return 0, err
 		}
+		return 0, soxErr
 	}
 
 	var jobFires atomic.Int64
@@ -787,13 +790,8 @@ func TestPoolDoesNotFireOnJobCompleteOnFailure(t *testing.T) {
 		jobFires.Add(1)
 	})
 	var stateFires atomic.Int64
-	enqueueFired := make(chan struct{})
-	var once sync.Once
-	p.SetOnStateChange(func() {
-		if stateFires.Add(1) == 1 {
-			once.Do(func() { close(enqueueFired) })
-		}
-	})
+	onStateChange, enqueueFired := firstFireLatch(&stateFires)
+	p.SetOnStateChange(onStateChange)
 
 	spec := JobSpec{
 		SourceLibraryRel: "Music/Album/fail.flac",
