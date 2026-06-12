@@ -498,16 +498,32 @@ func TestPoolPanicInRunnerReleasesDedup(t *testing.T) {
 	// (otherwise SSE clients wouldn't see the failure tick until the
 	// next unrelated event lands).
 	var fires atomic.Int64
+	enqueueFired := make(chan struct{})
+	var once sync.Once
 	p.SetOnStateChange(func() {
-		fires.Add(1)
+		if fires.Add(1) == 1 {
+			once.Do(func() { close(enqueueFired) })
+		}
 	})
 
 	panicked := make(chan struct{})
 	survivorRan := make(chan struct{})
+	releasePanic := make(chan struct{})
 	p.fsyncFn = noopFsync
 	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
 		switch spec.SourceLibraryRel {
 		case "Music/Album/panic.flac":
+			// Block until the enqueue state-change has been observed so the
+			// panic-recovery fire below lands as a SEPARATE callback (the
+			// cap-1 stateChangeChan coalesces by design — without this the
+			// recovery fire merges into the enqueue one and the count flakes
+			// below 4 on a slow / -race runner). ctx.Done() arm keeps
+			// t.Cleanup(p.Stop) from deadlocking on early failure.
+			select {
+			case <-releasePanic:
+			case <-ctx.Done():
+				return 0, ctx.Err()
+			}
 			close(panicked)
 			panic("synthetic transcode panic for slot-reclaim test")
 		case "Music/Album/survivor.flac":
@@ -534,6 +550,14 @@ func TestPoolPanicInRunnerReleasesDedup(t *testing.T) {
 	if err := p.Enqueue(panicSpec); err != nil {
 		t.Fatalf("Enqueue panic: %v", err)
 	}
+	// Observe (and drain) the enqueue fire, THEN release the panic so its
+	// recovery fire lands as a separate, non-coalesced callback.
+	select {
+	case <-enqueueFired:
+	case <-time.After(5 * time.Second):
+		t.Fatal("enqueue state-change never fired")
+	}
+	close(releasePanic)
 	select {
 	case <-panicked:
 	case <-time.After(2 * time.Second):
@@ -594,24 +618,23 @@ func TestPoolPanicInRunnerReleasesDedup(t *testing.T) {
 		t.Errorf("expected Stats.Inflight == 0 after panic + survivor, got %d (a job slot leaked)", got)
 	}
 
-	// Assert the panic-recovery defer fires the onStateChange
-	// callback alongside the synchronous error branches. Expected
-	// fires: panic-job enqueue + panic-recovery + survivor-job
-	// enqueue + survivor runner-error = 4. We loosen to ≥ 4 so a
-	// future addition of an extra fire doesn't trip a brittle
-	// equality check; the load-bearing assertion is "the panic
-	// branch did NOT silently skip the fire" — without the fix
-	// fires would land at 3 (one fire missing from the panic
-	// branch).
-	deadline = time.Now().Add(2 * time.Second)
+	// Assert the panic-recovery defer fires onStateChange. The runner
+	// blocked until the enqueue fire was observed+drained, so the recovery
+	// fire CANNOT coalesce into it — fires ≥ 2 (enqueue + recovery, both
+	// distinct) deterministically proves "the panic branch did NOT silently
+	// skip the fire." The earlier ≥ 4 (counting the survivor's fires too)
+	// flaked because the cap-1 stateChangeChan coalesces by design; the
+	// worker-survival coverage is the survivorRan + Inflight==0 assertions
+	// above, not the fire count.
+	deadline = time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if fires.Load() >= 4 {
+		if fires.Load() >= 2 {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if got := fires.Load(); got < 4 {
-		t.Errorf("onStateChange fires = %d, want ≥ 4 (panic-enqueue + panic-recovery + survivor-enqueue + survivor-fail)", got)
+	if got := fires.Load(); got < 2 {
+		t.Errorf("onStateChange fires = %d, want ≥ 2 (panic-enqueue + panic-recovery, both distinct)", got)
 	}
 }
 
