@@ -182,16 +182,38 @@ func TestPoolFiresOnStateChangeAfterEnqueueAndCompletion(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 
 	p := NewPool(store, 1, 4)
+	p.fsyncFn = noopFsync
 	t.Cleanup(p.Stop)
 
 	var fires atomic.Int64
+	enqueueFired := make(chan struct{})
+	var once sync.Once
 	p.SetOnStateChange(func() {
-		fires.Add(1)
+		if fires.Add(1) == 1 {
+			once.Do(func() { close(enqueueFired) })
+		}
 	})
+
+	// Block the job until the enqueue-triggered state-change has been
+	// OBSERVED, so the completion state-change can't COALESCE with it. The
+	// cap-1 stateChangeChan coalesces by design, which on a slow / -race
+	// runner merges enqueue+completion into a single fire — the real flake
+	// this de-flakes. The fake runner also drops the real-sox dependency;
+	// the ctx.Done() arm prevents t.Cleanup(p.Stop) from deadlocking if the
+	// test fails before releasing.
+	release := make(chan struct{})
+	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
+		select {
+		case <-release:
+			return 0, errors.New("synthetic failure")
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		}
+	}
 
 	spec := JobSpec{
 		SourceLibraryRel: "Music/Album/01.flac",
-		SourceAbsPath:    "/dev/null/missing", // RunSox fails fast
+		SourceAbsPath:    "/dev/null/missing",
 		TargetSampleRate: 176400,
 		TargetBits:       24,
 		Quality:          QualityVeryHigh,
@@ -201,19 +223,23 @@ func TestPoolFiresOnStateChangeAfterEnqueueAndCompletion(t *testing.T) {
 		t.Fatalf("Enqueue: %v", err)
 	}
 
-	// Wait up to 2s for the worker to dispatch the job, run sox
-	// (fail fast), and bump failedCnt. Bounded poll instead of a
-	// fixed sleep avoids flakiness in slow CI.
-	deadline := time.Now().Add(2 * time.Second)
+	// Observe the enqueue fire, THEN let the job complete → a separate
+	// completion fire (the publisher has already drained the first).
+	select {
+	case <-enqueueFired:
+	case <-time.After(5 * time.Second):
+		t.Fatal("enqueue state-change never fired")
+	}
+	close(release)
+
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if p.Stats().Failed >= 1 {
+		if fires.Load() >= 2 {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-
-	got := fires.Load()
-	if got < 2 {
+	if got := fires.Load(); got < 2 {
 		t.Errorf("onStateChange fires = %d, want ≥ 2 (enqueue + completion)", got)
 	}
 }
@@ -718,8 +744,19 @@ func TestPoolDoesNotFireOnJobCompleteOnFailure(t *testing.T) {
 
 	soxErr := errors.New("sox synthetic failure")
 	p.fsyncFn = noopFsync
+	// Block the job until the enqueue state-change has been observed so the
+	// failure-completion fire can't COALESCE with it (the cap-1
+	// stateChangeChan coalesces by design — see
+	// TestPoolFiresOnStateChangeAfterEnqueueAndCompletion). ctx.Done() arm
+	// keeps t.Cleanup(p.Stop) from deadlocking if the test fails early.
+	release := make(chan struct{})
 	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
-		return 0, soxErr
+		select {
+		case <-release:
+			return 0, soxErr
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		}
 	}
 
 	var jobFires atomic.Int64
@@ -727,8 +764,12 @@ func TestPoolDoesNotFireOnJobCompleteOnFailure(t *testing.T) {
 		jobFires.Add(1)
 	})
 	var stateFires atomic.Int64
+	enqueueFired := make(chan struct{})
+	var once sync.Once
 	p.SetOnStateChange(func() {
-		stateFires.Add(1)
+		if stateFires.Add(1) == 1 {
+			once.Do(func() { close(enqueueFired) })
+		}
 	})
 
 	spec := JobSpec{
@@ -743,12 +784,17 @@ func TestPoolDoesNotFireOnJobCompleteOnFailure(t *testing.T) {
 		t.Fatalf("Enqueue: %v", err)
 	}
 
-	// Bounded poll for the deferred `go fire()` goroutine to schedule
-	// after failedCnt.Add(1). A fixed sleep (greptile P2 on PR #187)
-	// could race on a loaded CI runner where the goroutine takes longer
-	// than 50 ms to be picked up by the scheduler. Same deadline shape
-	// the test's other poll uses.
-	deadline := time.Now().Add(2 * time.Second)
+	// Observe the enqueue fire, then let the job fail → a separate
+	// completion fire (publisher already drained the first).
+	select {
+	case <-enqueueFired:
+	case <-time.After(5 * time.Second):
+		t.Fatal("enqueue state-change never fired")
+	}
+	close(release)
+
+	// Bounded poll for the failure-completion state-change to land.
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if p.Stats().Failed >= 1 && stateFires.Load() >= 2 {
 			break
