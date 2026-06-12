@@ -12,6 +12,13 @@ import (
 // claiming a giant size would silently convert to a negative int64
 // and cause a backward seek, locking the walker in a loop.
 // (CodeRabbit Major on PR #223.)
+//
+// safeSeekSkip now also applies the odd-byte IFF pad internally and in
+// uint64, so the boundary moved: math.MaxInt64 is ODD, and padding it
+// would overflow int64 (MaxInt64+1 → MinInt64) — so it MUST be
+// rejected, not returned. The largest accepted value is the largest
+// EVEN number that fits int64 (MaxInt64-1). Odd inputs below that pad
+// up to the next even value. (Overflow-pad fix from the r1 review.)
 func TestSafeSeekSkip_TruthTable(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -20,9 +27,11 @@ func TestSafeSeekSkip_TruthTable(t *testing.T) {
 		wantErr bool
 	}{
 		{"zero", 0, 0, false},
-		{"small", 4, 4, false},
+		{"small even", 4, 4, false},
+		{"small odd pads to even", 3, 4, false},
 		{"realistic DSD audio chunk (~4 GiB)", 4 << 30, 4 << 30, false},
-		{"int64 max", math.MaxInt64, math.MaxInt64, false},
+		{"largest even fits int64", math.MaxInt64 - 1, math.MaxInt64 - 1, false},
+		{"int64 max (odd — pad would overflow)", math.MaxInt64, 0, true},
 		{"int64 max + 1 (uint64-only)", uint64(math.MaxInt64) + 1, 0, true},
 		{"uint64 max (malformed)", math.MaxUint64, 0, true},
 	}
@@ -99,6 +108,58 @@ func TestExtractDFF_OversizedChunkRejected(t *testing.T) {
 	}
 	// Codec was stamped before the walk so the manifest row still
 	// classifies as DFF even on a malformed file.
+	if track.Codec != "DFF" {
+		t.Errorf("Codec = %q, want %q (must stamp before walk)", track.Codec, "DFF")
+	}
+}
+
+// TestExtractDFF_OddMaxInt64ChunkRejected covers the exact boundary the
+// pre-fix guard missed: a chunk size of math.MaxInt64. MaxUint64 was
+// already rejected (it exceeds int64), but MaxInt64 (odd) PASSED the old
+// `size > math.MaxInt64` check, then the caller's `skip++` odd-pad
+// overflowed int64 to math.MinInt64 and seeked ~9.2 EiB backward —
+// re-reading the same chunk forever. With the pad moved into
+// safeSeekSkip (uint64, before the `>=` cap) the file is rejected
+// cleanly instead. (r1 review overflow-pad fix.)
+func TestExtractDFF_OddMaxInt64ChunkRejected(t *testing.T) {
+	prop := []byte("SND ")
+	fs := []byte("FS  ")
+	var fsSize [8]byte
+	binary.BigEndian.PutUint64(fsSize[:], 4)
+	fs = append(fs, fsSize[:]...)
+	var rate [4]byte
+	binary.BigEndian.PutUint32(rate[:], 2_822_400)
+	fs = append(fs, rate[:]...)
+	prop = append(prop, fs...)
+
+	propWithHeader := []byte("PROP")
+	var propSize [8]byte
+	binary.BigEndian.PutUint64(propSize[:], uint64(len(prop)))
+	propWithHeader = append(propWithHeader, propSize[:]...)
+	propWithHeader = append(propWithHeader, prop...)
+
+	// Hostile chunk: FOURCC + size = math.MaxInt64 (odd). The pre-fix
+	// odd-pad would wrap this to a negative seek.
+	bad := []byte("XXXX")
+	var badSize [8]byte
+	binary.BigEndian.PutUint64(badSize[:], math.MaxInt64)
+	bad = append(bad, badSize[:]...)
+
+	body := []byte("DSD ")
+	body = append(body, propWithHeader...)
+	body = append(body, bad...)
+
+	out := []byte("FRM8")
+	var size [8]byte
+	binary.BigEndian.PutUint64(size[:], uint64(len(body)))
+	out = append(out, size[:]...)
+	out = append(out, body...)
+
+	path := writeTempDFF(t, out)
+	track := &Track{}
+	if err := extractDFFWithContext(path, track, nil); err == nil {
+		t.Fatalf("extractDFFWithContext: want error on MaxInt64 (odd) chunk size, got nil")
+	}
 	if track.Codec != "DFF" {
 		t.Errorf("Codec = %q, want %q (must stamp before walk)", track.Codec, "DFF")
 	}
