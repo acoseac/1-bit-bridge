@@ -274,8 +274,18 @@ func TestPoolStopDrainsBothChannels(t *testing.T) {
 	p.fsyncFn = noopFsync
 
 	var processed atomic.Uint32
+	// firstProcessed fires once a worker has actually run a job. Waiting
+	// on it before Stop() makes the "workers ran" assertion deterministic:
+	// without it, on a slow / heavily-scheduled runner (CI under -race)
+	// Stop() can drain both channels before any worker goroutine is even
+	// scheduled, leaving processed==0 — a real flake observed on CI.
+	firstProcessed := make(chan struct{}, 1)
 	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
 		processed.Add(1)
+		select {
+		case firstProcessed <- struct{}{}:
+		default:
+		}
 		return 0, nil
 	}
 
@@ -295,6 +305,15 @@ func TestPoolStopDrainsBothChannels(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		_ = p.Enqueue(mkSpec(i, JobKindOptimize))
 		_ = p.Enqueue(mkSpec(i, JobKindUpscale))
+	}
+
+	// Wait until a worker has run ≥1 job (several still queued across both
+	// channels) before stopping — that's the populated-pool state this
+	// test is about, and it removes the race in the processed-count check.
+	select {
+	case <-firstProcessed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no job processed within 5s — workers not draining the queue?")
 	}
 
 	stopDone := make(chan struct{})
