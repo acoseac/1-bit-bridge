@@ -24,9 +24,11 @@ import (
 )
 
 // numCPUMinusOne is the worker-pool size hint used by EffectiveWorkers.
-// Extracted as a function so tests can override behaviour without
-// touching the runtime package directly.
-func numCPUMinusOne() int { return runtime.NumCPU() - 1 }
+// A package-level var (not a func declaration) so tests CAN swap it out
+// without touching the runtime package directly — a func decl can't be
+// reassigned, which made the original "so tests can override" rationale
+// impossible to honor. Production code MUST NOT mutate it.
+var numCPUMinusOne = func() int { return runtime.NumCPU() - 1 }
 
 // validateLogger surfaces non-fatal config-validation warnings to the
 // operator. Used today by `Validate()` to emit one entry per dropped
@@ -1673,13 +1675,20 @@ func validateVariantsDir(variantsDir string, libraryRoots []string) error {
 }
 
 // evalSymlinksOrClean returns `filepath.EvalSymlinks(p)` when it
-// succeeds, falling back to `filepath.Clean(p)` when the path
-// doesn't exist (typical for a brand-new install where
-// variants_dir hasn't been created yet, or for a library root that
-// the operator typed into bridge.yaml but hasn't mounted). The
-// fallback is lexical-only — symlink bypass is theoretically
-// possible on a non-existent target, but a missing path can't be
-// a real attack surface today (no file would land there).
+// succeeds. When the leaf doesn't exist yet (typical for a brand-new
+// install where variants_dir is created on first upscale, or for a
+// library root the operator typed into bridge.yaml but hasn't mounted),
+// it resolves symlinks in the NEAREST EXISTING ANCESTOR and re-appends
+// the missing trailing components.
+//
+// The ancestor walk is load-bearing, not cosmetic: a plain
+// `filepath.Clean` fallback leaves a symlinked PARENT component
+// unresolved, so a variants_dir like `/data/link/transcoded` (where
+// `/data/link` → a library root and `transcoded` doesn't exist yet)
+// passes the lexical containment check — and then `os.MkdirAll` on first
+// upscale writes THROUGH the symlink, dumping variant files into the
+// read-only library root. Resolving the existing-ancestor prefix closes
+// that bypass while still validating brand-new paths.
 //
 // `internal/admin` carries a byte-for-byte twin (handlers_variants_dir.go)
 // so the admin's pre-save check matches what this package enforces at
@@ -1688,7 +1697,21 @@ func evalSymlinksOrClean(p string) string {
 	if resolved, err := filepath.EvalSymlinks(p); err == nil {
 		return resolved
 	}
-	return filepath.Clean(p)
+	p = filepath.Clean(p)
+	missing := ""
+	for cur := p; ; {
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			// Reached the filesystem / volume root without finding an
+			// existing ancestor — fall back to the lexical clean.
+			return p
+		}
+		missing = filepath.Join(filepath.Base(cur), missing)
+		if resolved, err := filepath.EvalSymlinks(parent); err == nil {
+			return filepath.Join(resolved, missing)
+		}
+		cur = parent
+	}
 }
 
 // maxCustomEndpointHostLen caps the per-entry hostname at the RFC 1035
@@ -1739,12 +1762,18 @@ func ValidateCustomEndpoints(in []string) (kept []string, warnings []error) {
 			warnings = append(warnings, fmt.Errorf("customEndpoints[%q]: hostname is %d characters, exceeds %d-character limit", raw, hostLen, maxCustomEndpointHostLen))
 			continue
 		}
-		// Dedupe on the canonical URL string so two paste-friendly
-		// equivalents (with vs without trailing slash) don't double
-		// up the advertised list. URL.String() canonicalises a few
-		// shapes for us; we preserve the operator's input form for
-		// anything else (no path-normalisation, no port-normalisation).
-		canonical := u.String()
+		// Dedupe on a canonical form so two paste-friendly equivalents
+		// collapse. url.String() does NOT treat an empty path
+		// ("https://host") and a root path ("https://host/") as equal,
+		// so normalise a bare "/" path to "" before building the key —
+		// that's the common trailing-slash paste case. Deeper paths are
+		// compared verbatim (no further path/port normalisation); the
+		// operator's exact input form is what we keep in `kept`.
+		cu := *u
+		if cu.Path == "/" {
+			cu.Path = ""
+		}
+		canonical := cu.String()
 		if seen[canonical] {
 			continue
 		}

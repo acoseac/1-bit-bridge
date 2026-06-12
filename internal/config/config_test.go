@@ -833,6 +833,22 @@ func TestValidateCustomEndpoints_Dedupes(t *testing.T) {
 	}
 }
 
+// TestValidateCustomEndpoints_DedupesTrailingSlash pins the
+// trailing-slash dedup that url.String() alone misses: it treats an
+// empty path ("https://h:7788") and a root path ("https://h:7788/") as
+// distinct, so both paste-friendly variants would otherwise survive.
+// (r1 review fix — the dedup key normalises a bare "/" path to "".)
+func TestValidateCustomEndpoints_DedupesTrailingSlash(t *testing.T) {
+	in := []string{
+		"https://a.example.com:7788",
+		"https://a.example.com:7788/", // same endpoint, trailing slash
+	}
+	kept, _ := ValidateCustomEndpoints(in)
+	if len(kept) != 1 {
+		t.Errorf("kept = %v, want 1 (trailing-slash variant should dedupe)", kept)
+	}
+}
+
 // TestValidateCustomEndpoints_RejectsOversizedHost verifies the SAN-bloat
 // guard: each accepted hostname is added to the generated TLS cert's
 // SAN list, so a hostile / typo'd entry with a multi-kilobyte hostname

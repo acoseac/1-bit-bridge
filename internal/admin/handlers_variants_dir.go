@@ -233,16 +233,34 @@ func assertNotUnderLibraryRoots(candidate string, roots []string) error {
 
 // evalSymlinksOrClean is a byte-for-byte twin of
 // `config.evalSymlinksOrClean`: EvalSymlinks when the path exists,
-// lexical Clean fallback when it doesn't (a brand-new variants dir is
-// created on first upscale; an unmounted library root is typed but
-// absent). MUST stay in lockstep with the config twin — divergence
-// re-opens the accept-here / reject-at-boot mismatch documented on
-// assertNotUnderLibraryRoots.
+// otherwise resolve symlinks in the nearest EXISTING ancestor and
+// re-append the missing tail (a brand-new variants dir is created on
+// first upscale; an unmounted library root is typed but absent). The
+// ancestor walk closes the symlinked-parent bypass: a plain Clean
+// fallback would let a variants_dir whose parent symlinks into a
+// library root pass this check, then os.MkdirAll would write through
+// the symlink into the read-only root. MUST stay in lockstep with the
+// config twin — divergence re-opens the accept-here / reject-at-boot
+// mismatch documented on assertNotUnderLibraryRoots.
 func evalSymlinksOrClean(p string) string {
 	if resolved, err := filepath.EvalSymlinks(p); err == nil {
 		return resolved
 	}
-	return filepath.Clean(p)
+	p = filepath.Clean(p)
+	missing := ""
+	for cur := p; ; {
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			// Reached the filesystem / volume root without finding an
+			// existing ancestor — fall back to the lexical clean.
+			return p
+		}
+		missing = filepath.Join(filepath.Base(cur), missing)
+		if resolved, err := filepath.EvalSymlinks(parent); err == nil {
+			return filepath.Join(resolved, missing)
+		}
+		cur = parent
+	}
 }
 
 // probeVariantsDirUsage returns (usedBytes, freeBytes) for the

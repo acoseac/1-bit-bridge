@@ -3,6 +3,7 @@ package doctor
 import (
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -103,6 +104,12 @@ func TestPortCheck_OwnPIDMatches(t *testing.T) {
 	// our PID as the listener, which works on darwin/linux.
 	if runtime.GOOS == "windows" {
 		t.Skip("pidListening uses lsof — not available on Windows (PR-2 wires WMI)")
+	}
+	// pidListening shells out to lsof; on a minimal CI host without it,
+	// the helper returns -1, checkPort falls to Fail, and this test would
+	// fail deterministically. Skip rather than flake.
+	if _, err := exec.LookPath("lsof"); err != nil {
+		t.Skip("pidListening requires lsof, which isn't on PATH here")
 	}
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

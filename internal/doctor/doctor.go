@@ -192,11 +192,17 @@ func checkAdminPort(d Deps) Check {
 	return checkPort("port-admin", d.AdminPort, d.OwnPIDFile)
 }
 
-// checkPort probes a single port on 127.0.0.1 and on the machine's
-// default IPv4 bind. If a bind succeeds the port is free. If it fails
-// with "address already in use" and the holding PID matches our
-// OwnPIDFile, we report ok — doctor is idempotent while the server is
-// running. Any other binder is a fail.
+// checkPort probes `port` on 127.0.0.1. If the bind succeeds the port is
+// reported free; if it fails with "address already in use" and the
+// holding PID matches our OwnPIDFile, we report ok — doctor is
+// idempotent while the server is running. Any other binder is a fail.
+//
+// Limitation: this probes loopback ONLY, so a conflict bound to a
+// specific non-loopback interface (e.g. 192.168.1.5:port) isn't detected
+// here and would surface later as EADDRINUSE from `bridge serve`'s
+// wildcard bind. The loopback-only probe is deliberate: the admin port
+// binds loopback, so a wildcard probe here would false-fail it whenever
+// any unrelated service holds the same port on another interface.
 func checkPort(name string, port int, ownPIDFile string) Check {
 	if port == 0 {
 		return warn(name, "no port set", "pass Deps."+name+"Port")
