@@ -53,14 +53,11 @@ func TestSafeSeekSkip_TruthTable(t *testing.T) {
 	}
 }
 
-// TestExtractDFF_OversizedChunkRejected verifies the overflow guard
-// fires end-to-end: a DSDIFF file with a chunk declaring a uint64
-// size beyond int64 max must error rather than seek backward and
-// loop. The DSDIFF chunk-size field is BE64 (full uint64 range), so
-// a malicious file can trigger this.
-func TestExtractDFF_OversizedChunkRejected(t *testing.T) {
-	// Build a minimal valid PROP/SND chunk, then append a hostile
-	// chunk with size = 0xFFFFFFFFFFFFFFFF after it.
+// buildDFFWithHostileTrailingChunk builds a minimal valid DSDIFF
+// (FRM8/DSD + PROP{FS,CMPR}) followed by a single trailing chunk whose
+// declared BE64 size is `badSize`. Shared by the overflow-guard tests so
+// the boundary value is the only thing that varies between them.
+func buildDFFWithHostileTrailingChunk(badSize uint64) []byte {
 	prop := []byte("SND ")
 	fs := []byte("FS  ")
 	var fsSize [8]byte
@@ -84,11 +81,10 @@ func TestExtractDFF_OversizedChunkRejected(t *testing.T) {
 	propWithHeader = append(propWithHeader, propSize[:]...)
 	propWithHeader = append(propWithHeader, prop...)
 
-	// Hostile chunk: FOURCC + uint64-max size.
 	bad := []byte("XXXX")
-	var badSize [8]byte
-	binary.BigEndian.PutUint64(badSize[:], math.MaxUint64)
-	bad = append(bad, badSize[:]...)
+	var badSizeBuf [8]byte
+	binary.BigEndian.PutUint64(badSizeBuf[:], badSize)
+	bad = append(bad, badSizeBuf[:]...)
 
 	body := []byte("DSD ")
 	body = append(body, propWithHeader...)
@@ -99,11 +95,18 @@ func TestExtractDFF_OversizedChunkRejected(t *testing.T) {
 	binary.BigEndian.PutUint64(size[:], uint64(len(body)))
 	out = append(out, size[:]...)
 	out = append(out, body...)
+	return out
+}
 
-	path := writeTempDFF(t, out)
+// TestExtractDFF_OversizedChunkRejected verifies the overflow guard
+// fires end-to-end: a DSDIFF file with a chunk declaring a uint64
+// size beyond int64 max must error rather than seek backward and
+// loop. The DSDIFF chunk-size field is BE64 (full uint64 range), so
+// a malicious file can trigger this.
+func TestExtractDFF_OversizedChunkRejected(t *testing.T) {
+	path := writeTempDFF(t, buildDFFWithHostileTrailingChunk(math.MaxUint64))
 	track := &Track{}
-	err := extractDFFWithContext(path, track, nil)
-	if err == nil {
+	if err := extractDFFWithContext(path, track, nil); err == nil {
 		t.Fatalf("extractDFFWithContext: want error on uint64-max chunk size, got nil")
 	}
 	// Codec was stamped before the walk so the manifest row still
@@ -122,40 +125,7 @@ func TestExtractDFF_OversizedChunkRejected(t *testing.T) {
 // safeSeekSkip (uint64, before the `>=` cap) the file is rejected
 // cleanly instead. (r1 review overflow-pad fix.)
 func TestExtractDFF_OddMaxInt64ChunkRejected(t *testing.T) {
-	prop := []byte("SND ")
-	fs := []byte("FS  ")
-	var fsSize [8]byte
-	binary.BigEndian.PutUint64(fsSize[:], 4)
-	fs = append(fs, fsSize[:]...)
-	var rate [4]byte
-	binary.BigEndian.PutUint32(rate[:], 2_822_400)
-	fs = append(fs, rate[:]...)
-	prop = append(prop, fs...)
-
-	propWithHeader := []byte("PROP")
-	var propSize [8]byte
-	binary.BigEndian.PutUint64(propSize[:], uint64(len(prop)))
-	propWithHeader = append(propWithHeader, propSize[:]...)
-	propWithHeader = append(propWithHeader, prop...)
-
-	// Hostile chunk: FOURCC + size = math.MaxInt64 (odd). The pre-fix
-	// odd-pad would wrap this to a negative seek.
-	bad := []byte("XXXX")
-	var badSize [8]byte
-	binary.BigEndian.PutUint64(badSize[:], math.MaxInt64)
-	bad = append(bad, badSize[:]...)
-
-	body := []byte("DSD ")
-	body = append(body, propWithHeader...)
-	body = append(body, bad...)
-
-	out := []byte("FRM8")
-	var size [8]byte
-	binary.BigEndian.PutUint64(size[:], uint64(len(body)))
-	out = append(out, size[:]...)
-	out = append(out, body...)
-
-	path := writeTempDFF(t, out)
+	path := writeTempDFF(t, buildDFFWithHostileTrailingChunk(math.MaxInt64))
 	track := &Track{}
 	if err := extractDFFWithContext(path, track, nil); err == nil {
 		t.Fatalf("extractDFFWithContext: want error on MaxInt64 (odd) chunk size, got nil")
