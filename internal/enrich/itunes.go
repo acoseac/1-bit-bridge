@@ -196,9 +196,10 @@ func (c *ITunesClient) FetchArtwork(ctx context.Context, a *ITunesAlbum) (io.Rea
 	// HTTP paths keeps the bridge well-behaved.
 	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
 		if delay := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()); delay > 0 {
-			select {
-			case <-time.After(delay):
-			case <-ctx.Done():
+			// sleepCtx (time.NewTimer + Stop) avoids leaking the timer in
+			// the runtime heap on a cancel mid-Retry-After — see the note
+			// in MusicBrainzClient.get.
+			if !sleepCtx(ctx, delay) {
 				resp.Body.Close()
 				return nil, ctx.Err()
 			}
@@ -229,9 +230,10 @@ func (c *ITunesClient) get(ctx context.Context, u string, out any) error {
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
 		if delay := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()); delay > 0 {
-			select {
-			case <-time.After(delay):
-			case <-ctx.Done():
+			// sleepCtx (time.NewTimer + Stop) avoids leaking the timer in
+			// the runtime heap on a cancel mid-Retry-After — see the note
+			// in MusicBrainzClient.get.
+			if !sleepCtx(ctx, delay) {
 				return ctx.Err()
 			}
 		}
