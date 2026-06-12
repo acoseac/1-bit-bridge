@@ -2,6 +2,7 @@ package enrich
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -122,6 +123,31 @@ func TestFetchImage_FollowsRedirectWithinAllowlist(t *testing.T) {
 	}
 	if string(buf) != "ok" {
 		t.Fatalf("unexpected body %q", string(buf))
+	}
+}
+
+// TestFetchImage_RejectsEmptyBody pins the zero-byte cache-poisoning
+// guard: a 200 OK with an empty body must surface as errNotFound rather
+// than an empty buffer. Without the guard the caller would write a
+// 0-byte file to the artwork cache, and because existence is checked via
+// os.Stat (size-blind) it would become a permanent broken cache hit the
+// enricher never retries.
+func TestFetchImage_RejectsEmptyBody(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK) // 200 with no body
+	}))
+	defer srv.Close()
+
+	c := NewDeezerClient("", "test-agent", &http.Client{Timeout: 2 * time.Second})
+	c.SetAllowedImageHostsForTest([]string{"127.0.0.1"})
+
+	buf, err := c.FetchImage(context.Background(), srv.URL+"/picture.jpg")
+	if buf != nil {
+		t.Fatalf("expected nil buffer on empty body, got %d bytes", len(buf))
+	}
+	if !errors.Is(err, errNotFound) {
+		t.Fatalf("expected errNotFound on empty body, got %v", err)
 	}
 }
 

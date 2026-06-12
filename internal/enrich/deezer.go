@@ -194,6 +194,15 @@ func (c *DeezerClient) FetchImage(ctx context.Context, u string) ([]byte, error)
 	if len(buf) > maxDeezerImageBytes {
 		return nil, fmt.Errorf("deezer: image exceeds %d-byte limit", maxDeezerImageBytes)
 	}
+	// A 200 OK with an empty body must NOT be written to disk: existence
+	// is checked via os.Stat (size-blind), so a 0-byte file becomes a
+	// permanent broken cache hit that the enricher never retries. Treat
+	// an empty body as "no image" — the same outcome as a 404 — so the
+	// next enrich pass can try again. The CAA/iTunes streaming path has
+	// the equivalent n==0 guard; this is the buffered path's version.
+	if len(buf) == 0 {
+		return nil, errNotFound
+	}
 	return buf, nil
 }
 

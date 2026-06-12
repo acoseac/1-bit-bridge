@@ -174,9 +174,12 @@ func (c *MusicBrainzClient) get(ctx context.Context, u string, out any) error {
 	// advisory window — well-meaning but rude.
 	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
 		if delay := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()); delay > 0 {
-			select {
-			case <-time.After(delay):
-			case <-ctx.Done():
+			// Use sleepCtx (time.NewTimer + Stop) rather than a bare
+			// time.After select: a long Retry-After (capped at 1h via
+			// maxRetryAfter) plus a SIGTERM would otherwise leave the
+			// time.After timer in the runtime heap until the full delay
+			// elapsed — the same leak the enricher's pacing loops avoid.
+			if !sleepCtx(ctx, delay) {
 				return ctx.Err()
 			}
 		}
