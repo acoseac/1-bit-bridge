@@ -7,7 +7,7 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
 - `make build` — builds `./bin/bridge` for the host OS.
 - `make build-all` — cross-compiles to `dist/bridge-<os>-<arch>{.exe}`.
 - `make test` — pure-Go race-enabled suite; ~150 tests across 10 packages.
-- `make fmt vet test build-all` is the pre-push gate — there's no PR-check workflow today, so local-green is load-bearing. See `CONTRIBUTING.md`.
+- `make fmt vet test build-all` is the pre-push gate, now mirrored by CI (`.github/workflows/gofmt.yml` = the fmt check, `gate.yml` = vet + test + build-all). Run `make check` (fmt + vet + race test, skips build-all) in the inner loop; `make build-all` once before pushing. On a RAM-constrained box the `-race` + 6-target cross-compile peak can OOM — the Makefile caps Go's `-p` parallelism via `P` (default 4; `make test P=2` to go lower, `P=$(sysctl -n hw.ncpu)` for a roomy box). See `CONTRIBUTING.md`.
 - Pure-Go stack: `modernc.org/sqlite` (no cgo), `github.com/mewkiz/flac`, `github.com/dhowden/tag`, `github.com/hashicorp/mdns`. One static binary, no runtime deps.
 
 ## Architecture at a glance
@@ -474,7 +474,7 @@ Pre-push:
 make fmt vet test build-all
 ```
 
-No PR-check CI workflow today — local `make fmt vet test build-all` is the gate. Paste the clean output into the PR body. If a CI workflow is ever re-added, the expectation is that it matches the local gate (same four commands) rather than drift.
+CI now runs the gate on every PR (`.github/workflows/gofmt.yml` = the fmt check, `gate.yml` = vet + test + build-all on a runner that doesn't OOM under the `-race` peak). Still run `make fmt vet test build-all` (or `make check` in the inner loop) locally first and paste the clean output into the PR body — local-green keeps reviewers off the runner's critical path, and the CI check backstops it. The CI workflows deliberately mirror the local gate command-for-command; keep them in lockstep if either changes.
 
 Releases *are* wired up: `.github/workflows/release.yml` runs goreleaser on tag push (`git tag v0.1.0 && git push --tags`), producing signed+notarized darwin archives and unsigned linux / windows archives as a draft GitHub Release. Windows Authenticode signing is pending — tracked against the next release once SignPath Foundation approval lands. Edit the auto-generated release notes and publish; the `README.md` install recipe works for end users from that point.
 

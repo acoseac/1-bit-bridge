@@ -163,6 +163,63 @@ func TestPoolEnqueueAfterStopReturnsErrPoolClosed(t *testing.T) {
 	}
 }
 
+// firstFireLatch returns an onStateChange callback that counts fires into
+// `fires` and closes the returned channel on the FIRST fire. Tests use it
+// to observe (and let the publisher drain) the enqueue state-change before
+// triggering completion, so the two don't COALESCE in the cap-1
+// stateChangeChan — the flaky shape these pool tests share. See
+// TestPoolFiresOnStateChangeAfterEnqueueAndCompletion.
+func firstFireLatch(fires *atomic.Int64) (cb func(), fired <-chan struct{}) {
+	ch := make(chan struct{})
+	var once sync.Once
+	return func() {
+		if fires.Add(1) == 1 {
+			once.Do(func() { close(ch) })
+		}
+	}, ch
+}
+
+// releaseGate blocks a fake runner until `release` closes (returning nil),
+// or returns ctx.Err() if the pool is Stopped first — so t.Cleanup(p.Stop)
+// can't deadlock on a parked worker. Lets a test hold a job open until it
+// has observed the enqueue state-change.
+func releaseGate(ctx context.Context, release <-chan struct{}) error {
+	select {
+	case <-release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// awaitClose fails the test if ch isn't closed within the standard 5s
+// budget — used to wait for a firstFireLatch channel before triggering
+// the next event.
+func awaitClose(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+	}
+}
+
+// awaitAtLeast polls (5s budget) until `fires` reaches n, then asserts it —
+// the "≥ n onStateChange fires" check the pool de-flakes share.
+func awaitAtLeast(t *testing.T, fires *atomic.Int64, n int64, what string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if fires.Load() >= n {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := fires.Load(); got < n {
+		t.Errorf("onStateChange fires = %d, want ≥ %d (%s)", got, n, what)
+	}
+}
+
 // TestPoolFiresOnStateChangeAfterEnqueueAndCompletion is the headline
 // contract for the SSE upstream-publisher wiring (PR following #135):
 // every observable pool state transition fires the registered
@@ -182,16 +239,27 @@ func TestPoolFiresOnStateChangeAfterEnqueueAndCompletion(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 
 	p := NewPool(store, 1, 4)
+	p.fsyncFn = noopFsync
 	t.Cleanup(p.Stop)
 
 	var fires atomic.Int64
-	p.SetOnStateChange(func() {
-		fires.Add(1)
-	})
+	onStateChange, enqueueFired := firstFireLatch(&fires)
+	p.SetOnStateChange(onStateChange)
+
+	// Block the job until the enqueue fire has been observed so the
+	// completion fire can't coalesce with it (see firstFireLatch /
+	// releaseGate). The fake runner also drops the real-sox dependency.
+	release := make(chan struct{})
+	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
+		if err := releaseGate(ctx, release); err != nil {
+			return 0, err
+		}
+		return 0, errors.New("synthetic failure")
+	}
 
 	spec := JobSpec{
 		SourceLibraryRel: "Music/Album/01.flac",
-		SourceAbsPath:    "/dev/null/missing", // RunSox fails fast
+		SourceAbsPath:    "/dev/null/missing",
 		TargetSampleRate: 176400,
 		TargetBits:       24,
 		Quality:          QualityVeryHigh,
@@ -201,21 +269,11 @@ func TestPoolFiresOnStateChangeAfterEnqueueAndCompletion(t *testing.T) {
 		t.Fatalf("Enqueue: %v", err)
 	}
 
-	// Wait up to 2s for the worker to dispatch the job, run sox
-	// (fail fast), and bump failedCnt. Bounded poll instead of a
-	// fixed sleep avoids flakiness in slow CI.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if p.Stats().Failed >= 1 {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-
-	got := fires.Load()
-	if got < 2 {
-		t.Errorf("onStateChange fires = %d, want ≥ 2 (enqueue + completion)", got)
-	}
+	// Observe the enqueue fire, THEN let the job complete → a separate
+	// completion fire (the publisher has already drained the first).
+	awaitClose(t, enqueueFired, "enqueue state-change")
+	close(release)
+	awaitAtLeast(t, &fires, 2, "enqueue + completion")
 }
 
 // TestPoolNilOnStateChangeDoesNotPanic locks in the back-compat
@@ -472,16 +530,22 @@ func TestPoolPanicInRunnerReleasesDedup(t *testing.T) {
 	// (otherwise SSE clients wouldn't see the failure tick until the
 	// next unrelated event lands).
 	var fires atomic.Int64
-	p.SetOnStateChange(func() {
-		fires.Add(1)
-	})
+	onStateChange, enqueueFired := firstFireLatch(&fires)
+	p.SetOnStateChange(onStateChange)
 
 	panicked := make(chan struct{})
 	survivorRan := make(chan struct{})
+	releasePanic := make(chan struct{})
 	p.fsyncFn = noopFsync
 	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
 		switch spec.SourceLibraryRel {
 		case "Music/Album/panic.flac":
+			// Block until the enqueue fire is observed so the panic-recovery
+			// fire below lands as a SEPARATE callback (see firstFireLatch /
+			// releaseGate) — otherwise it coalesces and the count flakes.
+			if err := releaseGate(ctx, releasePanic); err != nil {
+				return 0, err
+			}
 			close(panicked)
 			panic("synthetic transcode panic for slot-reclaim test")
 		case "Music/Album/survivor.flac":
@@ -508,6 +572,10 @@ func TestPoolPanicInRunnerReleasesDedup(t *testing.T) {
 	if err := p.Enqueue(panicSpec); err != nil {
 		t.Fatalf("Enqueue panic: %v", err)
 	}
+	// Observe (and drain) the enqueue fire, THEN release the panic so its
+	// recovery fire lands as a separate, non-coalesced callback.
+	awaitClose(t, enqueueFired, "enqueue state-change")
+	close(releasePanic)
 	select {
 	case <-panicked:
 	case <-time.After(2 * time.Second):
@@ -568,25 +636,15 @@ func TestPoolPanicInRunnerReleasesDedup(t *testing.T) {
 		t.Errorf("expected Stats.Inflight == 0 after panic + survivor, got %d (a job slot leaked)", got)
 	}
 
-	// Assert the panic-recovery defer fires the onStateChange
-	// callback alongside the synchronous error branches. Expected
-	// fires: panic-job enqueue + panic-recovery + survivor-job
-	// enqueue + survivor runner-error = 4. We loosen to ≥ 4 so a
-	// future addition of an extra fire doesn't trip a brittle
-	// equality check; the load-bearing assertion is "the panic
-	// branch did NOT silently skip the fire" — without the fix
-	// fires would land at 3 (one fire missing from the panic
-	// branch).
-	deadline = time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if fires.Load() >= 4 {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	if got := fires.Load(); got < 4 {
-		t.Errorf("onStateChange fires = %d, want ≥ 4 (panic-enqueue + panic-recovery + survivor-enqueue + survivor-fail)", got)
-	}
+	// Assert the panic-recovery defer fires onStateChange. The runner
+	// blocked until the enqueue fire was observed+drained, so the recovery
+	// fire CANNOT coalesce into it — fires ≥ 2 (enqueue + recovery, both
+	// distinct) deterministically proves "the panic branch did NOT silently
+	// skip the fire." The earlier ≥ 4 (counting the survivor's fires too)
+	// flaked because the cap-1 stateChangeChan coalesces by design; the
+	// worker-survival coverage is the survivorRan + Inflight==0 assertions
+	// above, not the fire count.
+	awaitAtLeast(t, &fires, 2, "panic-enqueue + panic-recovery, both distinct")
 }
 
 // TestPoolFiresOnJobCompleteAfterUpsertVariant pins the headline
@@ -718,7 +776,13 @@ func TestPoolDoesNotFireOnJobCompleteOnFailure(t *testing.T) {
 
 	soxErr := errors.New("sox synthetic failure")
 	p.fsyncFn = noopFsync
+	// Block until the enqueue fire is observed so the failure-completion
+	// fire can't coalesce with it (see firstFireLatch / releaseGate).
+	release := make(chan struct{})
 	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
+		if err := releaseGate(ctx, release); err != nil {
+			return 0, err
+		}
 		return 0, soxErr
 	}
 
@@ -727,9 +791,8 @@ func TestPoolDoesNotFireOnJobCompleteOnFailure(t *testing.T) {
 		jobFires.Add(1)
 	})
 	var stateFires atomic.Int64
-	p.SetOnStateChange(func() {
-		stateFires.Add(1)
-	})
+	onStateChange, enqueueFired := firstFireLatch(&stateFires)
+	p.SetOnStateChange(onStateChange)
 
 	spec := JobSpec{
 		SourceLibraryRel: "Music/Album/fail.flac",
@@ -743,24 +806,14 @@ func TestPoolDoesNotFireOnJobCompleteOnFailure(t *testing.T) {
 		t.Fatalf("Enqueue: %v", err)
 	}
 
-	// Bounded poll for the deferred `go fire()` goroutine to schedule
-	// after failedCnt.Add(1). A fixed sleep (greptile P2 on PR #187)
-	// could race on a loaded CI runner where the goroutine takes longer
-	// than 50 ms to be picked up by the scheduler. Same deadline shape
-	// the test's other poll uses.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if p.Stats().Failed >= 1 && stateFires.Load() >= 2 {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	// Observe the enqueue fire, then let the job fail → a separate
+	// completion fire (publisher already drained the first).
+	awaitClose(t, enqueueFired, "enqueue state-change")
+	close(release)
+	awaitAtLeast(t, &stateFires, 2, "failure path must still notify state listeners")
 
 	if got := jobFires.Load(); got != 0 {
 		t.Errorf("onJobComplete fires on failure = %d, want 0 (success-only contract)", got)
-	}
-	if got := stateFires.Load(); got < 2 {
-		t.Errorf("onStateChange fires = %d, want ≥ 2 — failure path must still notify state listeners", got)
 	}
 }
 
