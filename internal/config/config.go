@@ -216,6 +216,9 @@ func (u UPnPUpstreamConfig) Validate() error {
 	if u.MSearchIntervalSeconds < 0 {
 		return fmt.Errorf("upnpUpstream.msearchIntervalSeconds: must be >= 0 (0 uses the default), got %d", u.MSearchIntervalSeconds)
 	}
+	if u.ServerTTLSeconds < 0 {
+		return fmt.Errorf("upnpUpstream.serverTTLSeconds: must be >= 0 (0 uses the default), got %d", u.ServerTTLSeconds)
+	}
 	// Compare EFFECTIVE durations — raw-field comparison would falsely
 	// pass when one side is 0 (which silently falls back to the default),
 	// e.g. raw {MS: 120, TTL: 0} satisfies "0 <= 120" yet the effective
@@ -1486,6 +1489,17 @@ func (c *Config) Validate() error {
 	// on PR #305 — the prior shape documented the invariant in
 	// the field docblock but didn't enforce it.
 	if c.DLNA.Discovery.Enabled {
+		// Standardized negative-interval handling (r1 review): reject a
+		// negative cadence/TTL loudly rather than letting EffectiveX's
+		// `> 0` guards silently substitute the default. Co-located with
+		// the existing TTL-vs-interval check + gated on Enabled, matching
+		// the upnpUpstream block's pattern.
+		if c.DLNA.Discovery.MSearchIntervalSeconds < 0 {
+			return fmt.Errorf("dlna.discovery.msearchIntervalSeconds: must be >= 0 (0 uses the default), got %d", c.DLNA.Discovery.MSearchIntervalSeconds)
+		}
+		if c.DLNA.Discovery.RendererTTLSeconds < 0 {
+			return fmt.Errorf("dlna.discovery.rendererTTLSeconds: must be >= 0 (0 uses the default), got %d", c.DLNA.Discovery.RendererTTLSeconds)
+		}
 		ms := c.DLNA.Discovery.EffectiveMSearchInterval()
 		ttl := c.DLNA.Discovery.EffectiveRendererTTL()
 		if ttl <= ms {

@@ -244,6 +244,11 @@ func TestUPnPUpstreamValidate_RejectsBadFields(t *testing.T) {
 			cfg:     UPnPUpstreamConfig{Enabled: true, MSearchIntervalSeconds: -60, Servers: []UPnPUpstreamServerConfig{{Name: "2Go", UDN: "uuid:abc"}}},
 			wantSub: "msearchIntervalSeconds",
 		},
+		{
+			name:    "negative server TTL",
+			cfg:     UPnPUpstreamConfig{Enabled: true, ServerTTLSeconds: -5, Servers: []UPnPUpstreamServerConfig{{Name: "2Go", UDN: "uuid:abc"}}},
+			wantSub: "serverTTLSeconds",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
