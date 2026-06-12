@@ -123,28 +123,6 @@ func TestSplitFTSTokens(t *testing.T) {
 	}
 }
 
-// TestUtf8RuneLen ensures the prefix-threshold check counts Unicode
-// code points, not UTF-8 bytes. A single Chinese character (3 bytes)
-// is structurally one token and should NOT cross the 3-char prefix
-// threshold.
-func TestUtf8RuneLen(t *testing.T) {
-	cases := []struct {
-		in   string
-		want int
-	}{
-		{"", 0},
-		{"abc", 3},
-		{"Dvořák", 6}, // 6 runes (one with combining diacritic? No — single codepoint)
-		{"中", 1},      // single CJK ideograph
-		{"中国", 2},
-	}
-	for _, c := range cases {
-		if got := utf8RuneLen(c.in); got != c.want {
-			t.Errorf("utf8RuneLen(%q): got %d, want %d", c.in, got, c.want)
-		}
-	}
-}
-
 // TestSearchAvailableMigratedDB exercises the happy path: after a
 // fresh OpenStore the FTS5 migration has landed and `tracks_fts`
 // exists. SearchAvailable returns true.

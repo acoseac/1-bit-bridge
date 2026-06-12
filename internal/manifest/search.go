@@ -30,6 +30,7 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // TrackHit is one row in the SearchTracks result. ParentPath is
@@ -62,15 +63,14 @@ var ErrSearchUnavailable = errors.New("manifest: FTS5 library search not availab
 // exists. Used by the admin search handler at request time so a
 // bridge whose FTS5 probe failed at migration time can return a
 // clean 503 rather than a confusing "no such table" surface.
-func (s *Store) SearchAvailable(ctx context.Context) (bool, error) {
-	var n int
-	err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tracks_fts'`,
-	).Scan(&n)
-	if err != nil {
-		return false, fmt.Errorf("probe tracks_fts existence: %w", err)
-	}
-	return n > 0, nil
+//
+// The answer is probed once in OpenStore (after migrate) and cached on
+// the Store — the FTS5 module is compiled in or not for the process
+// lifetime and the schema is fixed after migrate, so this is a field
+// read, cheap enough for the per-keystroke search path. The ctx is
+// retained for API compatibility and is unused.
+func (s *Store) SearchAvailable(_ context.Context) (bool, error) {
+	return s.ftsAvailable, nil
 }
 
 // SearchTracks runs an FTS5 MATCH query against the tracks_fts
@@ -216,8 +216,10 @@ func buildFTSMatchExpr(raw string) string {
 		// case a future caller passes pre-quoted input.
 		quoted := `"` + t + `"`
 		// Prefix-expand only on ≥3-char tokens. `"a"*` / `"in"*` would
-		// scan a huge fraction of the FTS vocabulary.
-		if utf8RuneLen(t) >= 3 {
+		// scan a huge fraction of the FTS vocabulary. Count runes (not
+		// bytes) so a single CJK ideograph (3 UTF-8 bytes) reads as one
+		// token, not "long enough".
+		if utf8.RuneCountInString(t) >= 3 {
 			quoted += "*"
 		}
 		parts = append(parts, quoted)
@@ -234,28 +236,11 @@ func splitFTSTokens(raw string) []string {
 	if raw == "" {
 		return nil
 	}
-	fields := strings.FieldsFunc(raw, func(r rune) bool {
+	// strings.FieldsFunc collapses runs of separators and never returns
+	// empty substrings, so no post-filter is needed.
+	return strings.FieldsFunc(raw, func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 	})
-	out := fields[:0]
-	for _, f := range fields {
-		if f != "" {
-			out = append(out, f)
-		}
-	}
-	return out
-}
-
-// utf8RuneLen returns the number of Unicode code points in s. Used
-// for the ≥3-char prefix-expansion threshold — byte length would
-// false-classify a single Chinese character (3 UTF-8 bytes) as
-// "long enough" when it's structurally a single token.
-func utf8RuneLen(s string) int {
-	n := 0
-	for range s {
-		n++
-	}
-	return n
 }
 
 // sortFolderHits orders by HitCount desc, then path length asc, then

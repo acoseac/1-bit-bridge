@@ -66,6 +66,15 @@ type Store struct {
 	// indexed_at across UpsertTrack / UpsertVariant in one transaction
 	// can do so without racing the wall clock.
 	now func() time.Time
+
+	// ftsAvailable caches whether the `tracks_fts` virtual table exists,
+	// probed once in OpenStore after migrate(). The FTS5 module is either
+	// compiled into the driver or not for the process lifetime, and the
+	// schema is fixed after migrate, so the answer can't change — yet
+	// SearchAvailable was re-querying sqlite_master on every SearchTracks
+	// call (once per admin-search keystroke). Set once before the Store
+	// is published to any caller, so it's safe to read without s.mu.
+	ftsAvailable bool
 }
 
 // OpenStore opens (or creates) a SQLite DB at path and applies the schema.
@@ -90,7 +99,30 @@ func OpenStore(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	// Probe FTS5 availability once. migrate() has created tracks_fts iff
+	// FTS5 is compiled in; the result is fixed for the process lifetime,
+	// so SearchAvailable reads this cached bool instead of hitting
+	// sqlite_master on every search. A probe failure degrades to
+	// "search unavailable" (503 at the handler) rather than failing
+	// startup over an optional feature.
+	if err := s.probeFTSAvailable(); err != nil {
+		logger.Warn("fts availability probe failed; library search disabled", "err", err)
+		s.ftsAvailable = false
+	}
 	return s, nil
+}
+
+// probeFTSAvailable resolves whether the tracks_fts virtual table exists
+// and caches it on the Store. Called once from OpenStore after migrate.
+func (s *Store) probeFTSAvailable() error {
+	var n int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tracks_fts'`,
+	).Scan(&n); err != nil {
+		return fmt.Errorf("probe tracks_fts existence: %w", err)
+	}
+	s.ftsAvailable = n > 0
+	return nil
 }
 
 // Close releases the underlying DB handle.
@@ -1053,7 +1085,7 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 	defer stmt.Close()
 	now := s.now().UnixNano()
 	for _, r := range rows {
-		if _, err := stmt.Exec(r.path, r.size, r.mtime, r.tagsRaw, now); err != nil {
+		if _, err := stmt.ExecContext(ctx, r.path, r.size, r.mtime, r.tagsRaw, now); err != nil {
 			return err
 		}
 	}
@@ -2365,10 +2397,12 @@ func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(ctx context.Context, 
 	if err != nil {
 		return 0, err
 	}
+	defer stmt.Close()
 	for _, p := range missingPaths {
-		res, err := stmt.Exec(p)
+		// ExecContext (not Exec) so a cancelled / timed-out scan stops
+		// the per-row loop instead of running to completion ctx-blind.
+		res, err := stmt.ExecContext(ctx, p)
 		if err != nil {
-			stmt.Close()
 			return 0, err
 		}
 		// Diagnostic: a missingPaths entry that doesn't match any
@@ -2386,7 +2420,6 @@ func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(ctx context.Context, 
 			)
 		}
 	}
-	stmt.Close()
 	// The threshold delete SPARES UPnP-routed rows regardless of their
 	// accumulated counter — defense-in-depth behind the scanner-side
 	// exclusion (see UPnPRoutedSourcePaths): rows that pre-date the
@@ -2431,10 +2464,12 @@ func (s *Store) IncrementMissingFoldersAndDeleteAtThreshold(ctx context.Context,
 	if err != nil {
 		return 0, err
 	}
+	defer stmt.Close()
 	for _, p := range missingPaths {
-		res, err := stmt.Exec(p)
+		// ExecContext (not Exec) so a cancelled / timed-out scan stops
+		// the per-row loop instead of running to completion ctx-blind.
+		res, err := stmt.ExecContext(ctx, p)
 		if err != nil {
-			stmt.Close()
 			return 0, err
 		}
 		// Mirror IncrementMissingTracks: a zero-rows-affected
@@ -2446,7 +2481,6 @@ func (s *Store) IncrementMissingFoldersAndDeleteAtThreshold(ctx context.Context,
 			)
 		}
 	}
-	stmt.Close()
 	res, err := tx.ExecContext(ctx, `DELETE FROM folders WHERE missing_count >= ?`, threshold)
 	if err != nil {
 		return 0, err

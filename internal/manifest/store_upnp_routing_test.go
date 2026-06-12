@@ -2,6 +2,7 @@ package manifest
 
 import (
 	"context"
+	"sort"
 	"strconv"
 	"testing"
 	"time"
@@ -158,6 +159,10 @@ func TestListUPnPSourcePathsOlderThan_FiltersByServerAndCutoff(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
+	// The query is intentionally unordered (no ORDER BY — the reconcile
+	// sweep that consumes it deletes order-independently), so sort before
+	// comparing rather than asserting a specific row order.
+	sort.Strings(got)
 	if len(got) != 2 || got[0] != "A/old1.flac" || got[1] != "A/old2.flac" {
 		t.Fatalf("got %v; want [A/old1.flac A/old2.flac]", got)
 	}
