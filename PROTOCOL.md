@@ -536,6 +536,21 @@ The same offline pass also measures **EBU R128 / ITU‑R BS.1770‑4 integrated 
 
 Advertised via the `loudness` flag in `/v1/health.features`, present alongside `waveform` when analysis is active. Loudness is computed in the same decode as the waveform, so a track gains its `replayGainTrackDB` when it is (re)analyzed; the write bumps the parent track's `indexed_at` so the value surfaces on the next `/v1/manifest?since=` delta (only when it actually changed). It is **skipped — and the field left tag-only —** for silent programs and for sources whose channel layout `sox` can't report. A bridge upgraded to v1.8 re-analyzes its existing waveform cache once to backfill loudness; because the peak envelope is byte-identical to the prior decode, `waveformTag` is unchanged and clients re-fetch no sidecars — only the new scalar syncs.
 
+#### Estimated key + tempo — `keyRoot` / `keyMode` / `bpm` (additive, since v1.8)
+
+The same offline decode also estimates the **musical key** (Krumhansl-Schmuckler correlation over a midrange chroma) and the **tempo** (spectral-flux onset envelope → autocorrelation, with a perceptual prior that suppresses octave errors). Both are **best-effort estimates** — the client should label them "estimated".
+
+Two new `Track` fields carry the key:
+
+```json
+{ "path": "Music/Album/01.flac", "size": 12345678, "mtime": "…", "keyRoot": 7, "keyMode": "major", "bpm": 120 }
+```
+
+- `keyRoot` is the tonic as an integer **0–11 with C=0** (0=C, 1=C♯/D♭, … 9=A, 11=B); `keyMode` is `"major"` or `"minor"`. There is no curated key tag today, so these are **analysis-only** — present only when the bridge estimated a key, absent (`omitempty`) otherwise.
+- `bpm` is the **existing** tempo field. It stays tag-first: a curated TBPM / BPM / `tmpo` tag always wins; the estimated tempo is spliced in **only when the source has no BPM tag**. A present value is therefore tag-curated *or* estimated, indistinguishable on the wire (same contract as `replayGainTrackDB`).
+
+Advertised via the `keyTempo` flag in `/v1/health.features`, present alongside `waveform`/`loudness` when analysis is active. Key + tempo are computed in the same decode as the waveform + loudness; a track gains them when (re)analyzed, and the write bumps `indexed_at` so they surface on the next delta (only when changed). Both are **skipped** for inputs with too little signal (very short, atonal, or arrhythmic) rather than guessed. A bridge upgraded to v1.8 backfills key/tempo on the same one-time re-analysis as loudness — the waveform bytes and loudness are unchanged, so clients re-fetch no sidecars and only the new scalars sync. `ProtocolVersion` stays `1`.
+
 #### `GET /v1/analysis/stats` (bearer-authenticated)
 
 Authenticated read-only snapshot of the analysis feature, mirroring the admin tile. Cheap (one SQL `COUNT` + a TTL-cached sox precheck).
@@ -548,9 +563,9 @@ Authenticated read-only snapshot of the analysis feature, mirroring the admin ti
 
 #### Feature gate semantics
 
-- `analysis.enabled: false` (default): `/v1/health.features` omits `waveform` and `loudness`; manifest emits no `waveformTag` and no analysis-derived `replayGainTrackDB`; `/v1/waveform` returns `404`.
-- `analysis.enabled: true` AND `sox` on PATH: full feature operates as documented (`waveform` + `loudness`).
-- `analysis.enabled: true` AND `sox` MISSING from PATH: bridge logs `.error` at startup, in-memory disables the feature, omits the `waveform` and `loudness` flags. The rest of the server keeps running.
+- `analysis.enabled: false` (default): `/v1/health.features` omits `waveform`, `loudness`, and `keyTempo`; manifest emits no `waveformTag`, no analysis-derived `replayGainTrackDB`, and no `keyRoot`/`keyMode`/estimated `bpm`; `/v1/waveform` returns `404`.
+- `analysis.enabled: true` AND `sox` on PATH: full feature operates as documented (`waveform` + `loudness` + `keyTempo`).
+- `analysis.enabled: true` AND `sox` MISSING from PATH: bridge logs `.error` at startup, in-memory disables the feature, omits the `waveform`, `loudness`, and `keyTempo` flags. The rest of the server keeps running.
 
 ### Playlist backup (additive, since v1.6; user-wide since v1.7)
 

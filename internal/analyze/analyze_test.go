@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -95,9 +96,10 @@ func TestRunAnalysisComputesLoudness(t *testing.T) {
 	requireSox(t)
 	dir := t.TempDir()
 	src := filepath.Join(dir, "tone.wav")
-	// 2 s so several 400 ms R128 blocks survive the gating.
+	// 3 s so several 400 ms R128 blocks survive the gating AND the key
+	// estimator clears its window gate comfortably.
 	if out, err := exec.Command("sox", "-n", "-r", "48000", "-c", "2", src,
-		"synth", "2", "sine", "440", "sine", "440").CombinedOutput(); err != nil {
+		"synth", "3", "sine", "440", "sine", "440").CombinedOutput(); err != nil {
 		t.Fatalf("sox synth: %v\n%s", err, out)
 	}
 	res, err := RunAnalysis(context.Background(), AnalyzeSpec{
@@ -112,6 +114,15 @@ func TestRunAnalysisComputesLoudness(t *testing.T) {
 	}
 	if res.ReplayGainTrackDB < -25 || res.ReplayGainTrackDB > -2 {
 		t.Fatalf("ReplayGainTrackDB = %.2f dB, outside the plausible [-25,-2] band", res.ReplayGainTrackDB)
+	}
+	// A sustained tone is tonal (a key estimate is produced end-to-end via
+	// RunAnalysis) but steady (no onsets → no tempo). This pins the
+	// RunAnalysis → key wiring on real audio.
+	if res.KeyRoot == nil || (res.KeyMode != "major" && res.KeyMode != "minor") {
+		t.Fatalf("KeyRoot/KeyMode = (%v,%q), want a key estimate from a sustained tone", res.KeyRoot, res.KeyMode)
+	}
+	if res.BPM != nil {
+		t.Fatalf("BPM = %v, want nil (a steady tone has no rhythm)", *res.BPM)
 	}
 }
 
@@ -149,6 +160,42 @@ func TestDownmixMatchesMonoDecode(t *testing.T) {
 	if !bytes.Equal(mono, stereo) {
 		t.Fatalf("waveform bytes diverge: mono `-c 1` (%d B) vs downmixed source-channel (%d B) — wf1→wf2 would churn iOS sidecars",
 			len(mono), len(stereo))
+	}
+}
+
+// TestChromaExtractionFromRealChord drives the chroma extractor on real
+// audio: a sustained C-major triad (C4/E4/G4) decoded through sox must
+// concentrate the 12-bin chroma at exactly C(0), E(4), G(7) — verifying
+// the FFT-bin → pitch-class mapping on a real spectrum. (The K-S key
+// RESOLUTION is unit-tested deterministically in keytempo_test.go; a pure
+// harmonics-free triad is too degenerate to pin a final key, which is why
+// this asserts the extraction, not the verdict.)
+func TestChromaExtractionFromRealChord(t *testing.T) {
+	requireSox(t)
+	dir := t.TempDir()
+	src := filepath.Join(dir, "cmaj.wav")
+	// sox sums multiple `sine` voices into the single mono channel.
+	if out, err := exec.Command("sox", "-n", "-r", "48000", "-c", "1", src,
+		"synth", "4", "sine", "261.63", "sine", "329.63", "sine", "392.00").CombinedOutput(); err != nil {
+		t.Fatalf("sox synth chord: %v\n%s", err, out)
+	}
+	a := newKeyTempoAnalyzer()
+	if _, err := decodeFrames(context.Background(), src, 1, func(frame []float64) {
+		a.add(downmixFrame(frame))
+	}); err != nil {
+		t.Fatalf("decodeFrames: %v", err)
+	}
+	if a.windows < minWindowsForKey {
+		t.Fatalf("only %d windows from a 4 s chord, want >= %d", a.windows, minWindowsForKey)
+	}
+	// Each chord tone must dominate clean non-chord, non-adjacent classes
+	// (D and A are neither chord tones nor semitone neighbours of C/E/G).
+	ref := math.Max(a.chroma[2], a.chroma[9]) // D, A
+	for _, pc := range []int{0, 4, 7} {       // C, E, G
+		if a.chroma[pc] < 2*ref {
+			t.Fatalf("chroma[%d]=%.1f not >= 2× non-chord ref %.1f — extraction smeared",
+				pc, a.chroma[pc], ref)
+		}
 	}
 }
 
