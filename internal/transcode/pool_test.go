@@ -28,26 +28,52 @@ func TestPoolEnqueueDeduplicates(t *testing.T) {
 	store := openTempStoreForPool(t)
 	t.Cleanup(func() { _ = store.Close() })
 
-	// Use a tiny worker count so jobs queue rather than start
-	// immediately — keeps the dedup window observable.
+	// Single worker, and a runner stub that signals it started then
+	// blocks until the job context is cancelled — so the first job sits
+	// IN the runner (its (source, variant) slot held in `inflight`) for
+	// the whole assertion, making the dedup window deterministic.
+	//
+	// The prior version relied on the first job NOT draining before the
+	// second Enqueue: it used a `/dev/null/missing` spec so the real
+	// RunSox failed fast. On CI (no `sox` on PATH) the single worker
+	// drained + failed + released the dedup slot almost instantly —
+	// frequently BEFORE the second Enqueue ran, so the second enqueue
+	// wasn't a dup and `Enqueued` reached 2 (flaky "got 2, want 1").
+	// Holding the job in the runner removes the timing dependence.
 	p := NewPool(store, 1, 16)
-	t.Cleanup(p.Stop)
+	t.Cleanup(p.Stop) // cancels stopCtx → jobCtx.Done() → runner returns → worker exits
+
+	var startedOnce sync.Once
+	started := make(chan struct{})
+	p.runner = func(ctx context.Context, _ JobSpec) (int64, error) {
+		startedOnce.Do(func() { close(started) })
+		<-ctx.Done() // hold the job in-flight until Stop()
+		return 0, ctx.Err()
+	}
 
 	spec := JobSpec{
 		SourceLibraryRel: "Music/Album/01.flac",
-		SourceAbsPath:    "/dev/null/missing", // will fail RunSox, that's fine
+		SourceAbsPath:    "/dev/null/missing",
 		TargetSampleRate: 176400,
 		TargetBits:       24,
 		Quality:          QualityVeryHigh,
 		OutputDir:        t.TempDir(),
 	}
 
-	// First enqueue lands.
+	// First enqueue lands and the worker picks it up.
 	if err := p.Enqueue(spec); err != nil {
 		t.Fatalf("first Enqueue: %v", err)
 	}
-	// Second enqueue with identical (source, variant) is a
-	// silent no-op — returns nil, doesn't take a slot.
+	// Wait until the worker is actually inside the runner — guarantees
+	// the (source, variant) slot is in `inflight` for the next Enqueue.
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runner stub never invoked — pool dispatch broken?")
+	}
+
+	// Second enqueue with identical (source, variant) is a silent no-op
+	// while the first is still in-flight — returns nil, doesn't take a slot.
 	if err := p.Enqueue(spec); err != nil {
 		t.Fatalf("dedup Enqueue: %v", err)
 	}
