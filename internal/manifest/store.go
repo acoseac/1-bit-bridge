@@ -839,6 +839,36 @@ var migrations = []migration{
 			ON track_analysis(unicode_lower(source_path));
 		`,
 	},
+	{
+		version: 16,
+		name:    "track_analysis.replaygain_track_db (signal-derived loudness)",
+		// First of the v14-anticipated signal-derived scalars: the EBU
+		// R128 / ReplayGain 2.0 track gain (dB to the -18 LUFS reference)
+		// computed by `bridge analyze` from a channel-aware decode.
+		//
+		// **NULLABLE on purpose** — NULL means "loudness not yet computed
+		// for this row", DISTINCT from a real 0.0 dB gain. That sentinel
+		// is load-bearing: the scan-skip gate re-analyzes a waveform-fresh
+		// row whose loudness IS NULL (rows that predate this column), so
+		// the existing 25k+ analyzed library backfills loudness on the
+		// next pass without invalidating its waveforms. A NOT NULL DEFAULT
+		// would erase that distinction and the backfill would never fire.
+		//
+		// Spliced onto Track.ReplayGainTrackDB at read time ONLY when the
+		// source carries no ReplayGain tag (curated tags always win).
+		//
+		// **Idempotency: ALTER lives in post(), not in `sql`.** Same
+		// rationale as the v9 docblock — a crash after the column commits
+		// but before the user_version bump retries on next boot, and a
+		// bare `ALTER ... ADD COLUMN` errors "duplicate column name".
+		// post() with error-tolerant `_, _ = db.Exec(...)` makes the step
+		// re-runnable.
+		sql: `-- column added in post() for idempotency; see migration v9 docblock`,
+		post: func(db *sql.DB) error {
+			_, _ = db.Exec(`ALTER TABLE track_analysis ADD COLUMN replaygain_track_db REAL`)
+			return nil
+		},
+	},
 }
 
 // NOTE (r1 review #49, dropped): a covering index on
@@ -1534,6 +1564,29 @@ const variantsAggSQL = `
 const waveformTagSQL = `(SELECT NULLIF(waveform_tag, '')
 	 FROM track_analysis WHERE source_path = tracks.path) AS waveform_tag`
 
+// replayGainSQL is the correlated-subquery suffix that splices the
+// offline-analysis ReplayGain track gain (dB) onto each row, or NULL when
+// no analysis row exists / loudness wasn't computed. The splice is
+// tag-absent-ONLY: each read site fills Track.ReplayGainTrackDB from this
+// column only when the value decoded from tags_json is nil, so a curated
+// ReplayGain tag always wins. One more indexed PK point-lookup on
+// track_analysis per row, alongside waveformTagSQL.
+const replayGainSQL = `(SELECT replaygain_track_db
+	 FROM track_analysis WHERE source_path = tracks.path) AS analysis_replaygain_track_db`
+
+// spliceAnalysisReplayGain fills Track.ReplayGainTrackDB from the
+// offline-analysis value (scanned via replayGainSQL) ONLY when the track
+// carries no ReplayGain from its own tags — curated tags always win.
+// A no-op when the analysis value is NULL or a tag value is already
+// present. The three manifest read paths share it so the tag-absent-only
+// contract lives in one place.
+func spliceAnalysisReplayGain(t *Track, rg sql.NullFloat64) {
+	if t.ReplayGainTrackDB == nil && rg.Valid {
+		v := rg.Float64
+		t.ReplayGainTrackDB = &v
+	}
+}
+
 // scanTrackVariants decodes the JSON aggregation column produced
 // by variantsAggSQL into Track.Variants. Empty / `null` / `[]`
 // payloads land as nil so `omitempty` drops the field on the
@@ -1638,7 +1691,7 @@ func formatSampleRateLabel(hz float64) string {
 // require re-marshalling every track on each `MarkEnriched` write
 // just to flip a bool, which is what the column is for.
 func (s *Store) ListTracks(ctx context.Context, since *time.Time) ([]Track, error) {
-	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + ` FROM tracks`
+	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + ` FROM tracks`
 	args := []any{}
 	if since != nil {
 		q += ` WHERE indexed_at > ?`
@@ -1656,7 +1709,8 @@ func (s *Store) ListTracks(ctx context.Context, since *time.Time) ([]Track, erro
 		var enrichedAt int64
 		var variantsRaw []byte
 		var wfTag sql.NullString
-		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw, &wfTag); err != nil {
+		var rg sql.NullFloat64
+		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw, &wfTag, &rg); err != nil {
 			return nil, err
 		}
 		var t Track
@@ -1666,6 +1720,7 @@ func (s *Store) ListTracks(ctx context.Context, since *time.Time) ([]Track, erro
 		scanTrackVariants(&t, variantsRaw)
 		t.Enriched = boolPtr(enrichedAt != 0)
 		t.WaveformTag = wfTag.String
+		spliceAnalysisReplayGain(&t, rg)
 		out = append(out, t)
 	}
 	return out, rows.Err()
@@ -1694,7 +1749,7 @@ func (s *Store) StreamTracks(ctx context.Context, sp *time.Time, fn func(*Track)
 		// production crash deep in the streaming-manifest path.
 		return errors.New("StreamTracks: nil callback")
 	}
-	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + ` FROM tracks`
+	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + ` FROM tracks`
 	args := []any{}
 	if sp != nil {
 		q += ` WHERE indexed_at > ?`
@@ -1725,7 +1780,8 @@ func (s *Store) StreamTracks(ctx context.Context, sp *time.Time, fn func(*Track)
 		var enrichedAt int64
 		var variantsRaw []byte
 		var wfTag sql.NullString
-		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw, &wfTag); err != nil {
+		var rg sql.NullFloat64
+		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw, &wfTag, &rg); err != nil {
 			return err
 		}
 		t = Track{}
@@ -1735,6 +1791,7 @@ func (s *Store) StreamTracks(ctx context.Context, sp *time.Time, fn func(*Track)
 		t.Enriched = boolPtr(enrichedAt != 0)
 		scanTrackVariants(&t, variantsRaw)
 		t.WaveformTag = wfTag.String
+		spliceAnalysisReplayGain(&t, rg)
 		if err := fn(&t); err != nil {
 			return err
 		}
@@ -1763,7 +1820,7 @@ func (s *Store) ListTracksPage(ctx context.Context, afterPath string, limit int)
 		limit = 1000
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT tags_json, enriched_at, `+variantsAggSQL+`, `+waveformTagSQL+` FROM tracks
+		SELECT tags_json, enriched_at, `+variantsAggSQL+`, `+waveformTagSQL+`, `+replayGainSQL+` FROM tracks
 		WHERE path > ?
 		ORDER BY path ASC
 		LIMIT ?
@@ -1778,7 +1835,8 @@ func (s *Store) ListTracksPage(ctx context.Context, afterPath string, limit int)
 		var enrichedAt int64
 		var variantsRaw []byte
 		var wfTag sql.NullString
-		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw, &wfTag); err != nil {
+		var rg sql.NullFloat64
+		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw, &wfTag, &rg); err != nil {
 			return nil, err
 		}
 		var t Track
@@ -1788,6 +1846,7 @@ func (s *Store) ListTracksPage(ctx context.Context, afterPath string, limit int)
 		scanTrackVariants(&t, variantsRaw)
 		t.Enriched = boolPtr(enrichedAt != 0)
 		t.WaveformTag = wfTag.String
+		spliceAnalysisReplayGain(&t, rg)
 		out = append(out, t)
 	}
 	return out, rows.Err()
@@ -4364,22 +4423,56 @@ type AnalysisRow struct {
 	SourceSize    int64
 	SchemaVersion string
 	CreatedAt     int64
+
+	// ReplayGainTrackDB is the EBU R128 / ReplayGain 2.0 track gain in dB
+	// (gain to the -18 LUFS reference), or nil when loudness hasn't been
+	// computed for this row. nil is load-bearing: the scan-skip gate
+	// re-analyzes a waveform-fresh row whose loudness is nil, so a library
+	// analyzed before the loudness column existed backfills on the next
+	// pass. Spliced onto Track.ReplayGainTrackDB at read time only when
+	// the source carries no ReplayGain tag.
+	ReplayGainTrackDB *float64
+}
+
+// float64PtrEqual compares two optional float64s by value: both nil is
+// equal, one nil is not, otherwise an exact value compare. Exact (no
+// tolerance) is correct here because the same source file decodes
+// deterministically to the same loudness, so an identical recompute
+// yields the identical float.
+func float64PtrEqual(a, b *float64) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+// nullFloatPtr lifts a scanned nullable REAL into the *float64 the
+// AnalysisRow carries: NULL → nil, present → a fresh pointer.
+func nullFloatPtr(n sql.NullFloat64) *float64 {
+	if !n.Valid {
+		return nil
+	}
+	v := n.Float64
+	return &v
 }
 
 // analysisRowsEqual reports whether the analysis already on disk is
 // identical to a freshly-computed one — same source freshness, same
-// waveform sidecar, same schema. Used by UpsertAnalysis to skip the
-// `tracks.indexed_at` bump (and the write entirely) on an identical
-// recompute, so a `bridge analyze --gc` / forced re-run can't trigger a
-// 50k-track iOS delta-sync storm for no actual change (the PR #369
-// walkFieldsEqual lesson, applied to analysis).
+// waveform sidecar, same schema, same loudness. Used by UpsertAnalysis to
+// skip the `tracks.indexed_at` bump (and the write entirely) on an
+// identical recompute, so a `bridge analyze --gc` / forced re-run can't
+// trigger a 50k-track iOS delta-sync storm for no actual change (the PR
+// #369 walkFieldsEqual lesson, applied to analysis). Loudness is part of
+// the comparison so a loudness backfill (nil → value) on a waveform-fresh
+// row still bumps indexed_at exactly once.
 func analysisRowsEqual(a, b *AnalysisRow) bool {
 	return a.WaveformPath == b.WaveformPath &&
 		a.WaveformTag == b.WaveformTag &&
 		a.WaveformSize == b.WaveformSize &&
 		a.SourceMTimeNS == b.SourceMTimeNS &&
 		a.SourceSize == b.SourceSize &&
-		a.SchemaVersion == b.SchemaVersion
+		a.SchemaVersion == b.SchemaVersion &&
+		float64PtrEqual(a.ReplayGainTrackDB, b.ReplayGainTrackDB)
 }
 
 // UpsertAnalysis writes (or replaces) one `track_analysis` row AND
@@ -4405,6 +4498,13 @@ func (s *Store) UpsertAnalysis(ctx context.Context, a AnalysisRow) error {
 		return nil // identical — no write, no indexed_at bump.
 	}
 
+	// Bind the optional loudness as NULL when absent. database/sql's
+	// pointer handling is driver-dependent, so convert explicitly.
+	var rgArg interface{}
+	if a.ReplayGainTrackDB != nil {
+		rgArg = *a.ReplayGainTrackDB
+	}
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -4413,18 +4513,21 @@ func (s *Store) UpsertAnalysis(ctx context.Context, a AnalysisRow) error {
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO track_analysis
 			(source_path, waveform_path, waveform_tag, waveform_size,
-			 source_mtime_ns, source_size, schema_version, created_at)
-		VALUES (?,?,?,?,?,?,?,?)
+			 source_mtime_ns, source_size, schema_version, created_at,
+			 replaygain_track_db)
+		VALUES (?,?,?,?,?,?,?,?,?)
 		ON CONFLICT (source_path) DO UPDATE SET
-			waveform_path   = excluded.waveform_path,
-			waveform_tag    = excluded.waveform_tag,
-			waveform_size   = excluded.waveform_size,
-			source_mtime_ns = excluded.source_mtime_ns,
-			source_size     = excluded.source_size,
-			schema_version  = excluded.schema_version,
-			created_at      = excluded.created_at
+			waveform_path       = excluded.waveform_path,
+			waveform_tag        = excluded.waveform_tag,
+			waveform_size       = excluded.waveform_size,
+			source_mtime_ns     = excluded.source_mtime_ns,
+			source_size         = excluded.source_size,
+			schema_version      = excluded.schema_version,
+			created_at          = excluded.created_at,
+			replaygain_track_db = excluded.replaygain_track_db
 	`, a.SourcePath, a.WaveformPath, a.WaveformTag, a.WaveformSize,
-		a.SourceMTimeNS, a.SourceSize, a.SchemaVersion, a.CreatedAt); err != nil {
+		a.SourceMTimeNS, a.SourceSize, a.SchemaVersion, a.CreatedAt,
+		rgArg); err != nil {
 		return err
 	}
 	now := s.now().UnixNano()
@@ -4453,20 +4556,23 @@ func (s *Store) GetAnalysis(ctx context.Context, sourcePath string) (*AnalysisRo
 // only a SELECT, so it's safe to call whether or not s.mu is held.
 func (s *Store) getAnalysisLocked(ctx context.Context, sourcePath string) (*AnalysisRow, error) {
 	var a AnalysisRow
+	var rg sql.NullFloat64
 	err := s.db.QueryRowContext(ctx, `
 		SELECT source_path, waveform_path, waveform_tag, waveform_size,
-		       source_mtime_ns, source_size, schema_version, created_at
+		       source_mtime_ns, source_size, schema_version, created_at,
+		       replaygain_track_db
 		FROM track_analysis
 		WHERE source_path = ?
 	`, sourcePath).Scan(
 		&a.SourcePath, &a.WaveformPath, &a.WaveformTag, &a.WaveformSize,
-		&a.SourceMTimeNS, &a.SourceSize, &a.SchemaVersion, &a.CreatedAt)
+		&a.SourceMTimeNS, &a.SourceSize, &a.SchemaVersion, &a.CreatedAt, &rg)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	a.ReplayGainTrackDB = nullFloatPtr(rg)
 	return &a, nil
 }
 
@@ -4489,7 +4595,8 @@ func (s *Store) LookupAnalysis(ctx context.Context, sourcePath string) (*Analysi
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT source_path, waveform_path, waveform_tag, waveform_size,
-		       source_mtime_ns, source_size, schema_version, created_at
+		       source_mtime_ns, source_size, schema_version, created_at,
+		       replaygain_track_db
 		FROM track_analysis
 		WHERE unicode_lower(source_path) = unicode_lower(?)
 		LIMIT 2
@@ -4505,11 +4612,13 @@ func (s *Store) LookupAnalysis(ctx context.Context, sourcePath string) (*Analysi
 		return nil, nil
 	}
 	var a AnalysisRow
+	var rg sql.NullFloat64
 	if err := rows.Scan(
 		&a.SourcePath, &a.WaveformPath, &a.WaveformTag, &a.WaveformSize,
-		&a.SourceMTimeNS, &a.SourceSize, &a.SchemaVersion, &a.CreatedAt); err != nil {
+		&a.SourceMTimeNS, &a.SourceSize, &a.SchemaVersion, &a.CreatedAt, &rg); err != nil {
 		return nil, err
 	}
+	a.ReplayGainTrackDB = nullFloatPtr(rg)
 	if rows.Next() {
 		// Ambiguous case-fold — refuse to pick a row rather than serve
 		// the wrong sidecar. Mirrors lookupVariantByLowerCase.
@@ -4532,7 +4641,8 @@ func (s *Store) LookupAnalysis(ctx context.Context, sourcePath string) (*Analysi
 func (s *Store) AllAnalysisRows(ctx context.Context) ([]AnalysisRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT source_path, waveform_path, waveform_tag, waveform_size,
-		       source_mtime_ns, source_size, schema_version, created_at
+		       source_mtime_ns, source_size, schema_version, created_at,
+		       replaygain_track_db
 		FROM track_analysis
 	`)
 	if err != nil {
@@ -4542,11 +4652,13 @@ func (s *Store) AllAnalysisRows(ctx context.Context) ([]AnalysisRow, error) {
 	out := []AnalysisRow{}
 	for rows.Next() {
 		var a AnalysisRow
+		var rg sql.NullFloat64
 		if err := rows.Scan(
 			&a.SourcePath, &a.WaveformPath, &a.WaveformTag, &a.WaveformSize,
-			&a.SourceMTimeNS, &a.SourceSize, &a.SchemaVersion, &a.CreatedAt); err != nil {
+			&a.SourceMTimeNS, &a.SourceSize, &a.SchemaVersion, &a.CreatedAt, &rg); err != nil {
 			return nil, err
 		}
+		a.ReplayGainTrackDB = nullFloatPtr(rg)
 		out = append(out, a)
 	}
 	return out, rows.Err()

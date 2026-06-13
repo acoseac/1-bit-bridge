@@ -11,13 +11,16 @@
 // of the server runs unchanged).
 //
 // **Bit-exact mission preserved**: analysis only READS samples to derive
-// metadata (a waveform sidecar today; loudness / key / tempo in a later
-// phase). It never alters what /v1/download serves — the original file
-// streams byte-for-byte as before.
+// metadata (a waveform sidecar + EBU R128 loudness today; key / tempo in
+// a later phase). It never alters what /v1/download serves — the
+// original file streams byte-for-byte as before.
 //
-// Phase 1 computes the waveform only. The decode target is 48 kHz mono
-// (load-bearing for the Phase-2 loudness path: BS.1770 K-weighting
-// coefficients are defined for 48 kHz; harmless for peaks).
+// One decode per track at 48 kHz and the SOURCE channel count feeds both
+// the peak envelope (mono downmix) and the loudness meter (channel-aware
+// R128). 48 kHz is load-bearing for loudness — the BS.1770 K-weighting
+// coefficients are defined for 48 kHz — and decoding at the source
+// channel count avoids the +3..+6 dB bias a mono downmix imposes on
+// multichannel loudness.
 package analyze
 
 import (
@@ -42,8 +45,20 @@ const (
 
 	// WaveformSchemaVersion stamps the analysis row. Bump when the
 	// decode params or the sidecar binary format change so a prior
-	// sidecar is recognised as stale (re-analyzed) without a migration.
-	WaveformSchemaVersion = "wf1"
+	// sidecar is recognised as stale (re-analyzed) without a migration —
+	// the scan-skip gate re-enqueues any row whose stamp differs.
+	//
+	// wf1 → wf2: the decode moved from forced mono (`-c 1`) to the source
+	// channel count so EBU R128 loudness is measured channel-aware (a
+	// mono downmix reads several dB hot). The 1BWF sidecar BYTES are
+	// unchanged — the peak envelope still downmixes to mono, byte-
+	// identical to wf1 for mono/stereo sources — so iOS keeps the same
+	// `waveformTag` and does NOT re-fetch the sidecar; the bump exists
+	// only to trigger the one-time loudness backfill on already-analyzed
+	// libraries (a row re-analyzes once, gains its ReplayGain scalar, and
+	// stamps wf2 so it isn't re-enqueued even when loudness is
+	// unavailable — silence / unprobeable channel layout).
+	WaveformSchemaVersion = "wf2"
 
 	// WaveformDirSubdir is the fixed subdir under cfg.DataDir where
 	// waveform sidecars land (source-path-mirrored beneath it).
@@ -92,25 +107,35 @@ func (s AnalyzeSpec) SidecarPath() string {
 
 // Result is the outcome of a completed analysis job — the written
 // sidecar's path, content tag (8 hex of its SHA-256, the iOS cache
-// key), size, and the schema version that produced it.
+// key), size, the schema version that produced it, and the signal-
+// derived loudness.
 type Result struct {
 	WaveformPath  string
 	WaveformTag   string
 	WaveformSize  int64
 	SchemaVersion string
+
+	// ReplayGainTrackDB is the EBU R128 / ReplayGain 2.0 track gain in dB
+	// (the gain that brings the program to the -18 LUFS reference). Valid
+	// only when HasLoudness is true — set when sox reported the channel
+	// layout (so loudness wasn't measured off a biased mono downmix) and
+	// the program wasn't silence. The caller surfaces it on the wire only
+	// when the source carries no ReplayGain tag.
+	ReplayGainTrackDB float64
+	HasLoudness       bool
 }
 
-// RunAnalysis decodes the source via sox, computes the peak waveform,
-// and writes the sidecar atomically (tmp + rename), returning its path,
-// content tag, and size. The pool fsyncs the sidecar before committing
-// the DB row.
+// RunAnalysis decodes the source via sox, computes the peak waveform +
+// EBU R128 loudness, and writes the sidecar atomically (tmp + rename),
+// returning its path, content tag, size, and loudness. The pool fsyncs
+// the sidecar before committing the DB row.
 //
 // **Commit only on clean decode**: a truncated / corrupt file makes sox
-// exit non-zero mid-stream; decodePCM surfaces that as an error and
+// exit non-zero mid-stream; decodeFrames surfaces that as an error and
 // RunAnalysis writes nothing (the cleanup defer reaps the tmp on every
 // non-success path), so the caller never persists a waveform covering
 // only the first N seconds. Cancellation flows via ctx →
-// exec.CommandContext (decodePCM kills + reaps sox).
+// exec.CommandContext (decodeFrames kills + reaps sox).
 func RunAnalysis(ctx context.Context, spec AnalyzeSpec) (Result, error) {
 	finalPath := spec.SidecarPath()
 	if err := os.MkdirAll(filepath.Dir(finalPath), 0o700); err != nil {
@@ -126,8 +151,18 @@ func RunAnalysis(ctx context.Context, spec AnalyzeSpec) (Result, error) {
 		}
 	}()
 
+	// One decode at the source channel count feeds both consumers: the
+	// peaker (mono downmix — a visual envelope) and the loudness meter
+	// (full interleaved frame — channel-aware R128). channelsOK is false
+	// when sox couldn't report the layout; we still decode (mono) for the
+	// waveform but skip loudness so a biased value is never stored.
+	channels, channelsOK := probeChannels(ctx, spec.SourceAbsPath)
 	pk := newPeaker(waveformBucketSamples)
-	total, err := decodePCM(ctx, spec.SourceAbsPath, pk.add)
+	meter := newLoudnessMeter(channels)
+	total, err := decodeFrames(ctx, spec.SourceAbsPath, channels, func(frame []float64) {
+		pk.add(downmixFrame(frame))
+		meter.addFrame(frame)
+	})
 	if err != nil {
 		return Result{}, err
 	}
@@ -141,14 +176,40 @@ func RunAnalysis(ctx context.Context, spec AnalyzeSpec) (Result, error) {
 		return Result{}, fmt.Errorf("rename waveform: %w", err)
 	}
 	cleanup = false
-	logger.Debug("analyze ok",
-		"path", spec.SourceLibraryRel,
-		"buckets", pk.count(),
-		"bytes", len(data))
-	return Result{
+
+	res := Result{
 		WaveformPath:  finalPath,
 		WaveformTag:   waveformTag(data),
 		WaveformSize:  int64(len(data)),
 		SchemaVersion: WaveformSchemaVersion,
-	}, nil
+	}
+	if channelsOK {
+		if rg, ok := replayGainFromLUFS(meter.integratedLUFS()); ok {
+			res.ReplayGainTrackDB = rg
+			res.HasLoudness = true
+		}
+	}
+	logger.Debug("analyze ok",
+		"path", spec.SourceLibraryRel,
+		"buckets", pk.count(),
+		"bytes", len(data),
+		"channels", channels,
+		"loudness", res.HasLoudness)
+	return res, nil
+}
+
+// downmixFrame averages an interleaved frame to one mono sample for the
+// peak envelope. Mono passes through; stereo is (L+R)/2, matching sox's
+// default stereo→mono mix so the waveform bytes stay stable vs the prior
+// mono `-c 1` decode (verified byte-identical in
+// TestDownmixMatchesMonoDecode).
+func downmixFrame(frame []float64) float32 {
+	if len(frame) == 1 {
+		return float32(frame[0])
+	}
+	var sum float64
+	for _, s := range frame {
+		sum += s
+	}
+	return float32(sum / float64(len(frame)))
 }

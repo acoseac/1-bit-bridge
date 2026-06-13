@@ -490,9 +490,9 @@ The schema version (`v1`) bumps only when the on-disk sidecar layout or the SoX 
 
 ### Waveform (offline audio analysis, additive since v1.8)
 
-An opt-in offline analysis feature that pre-computes a compact **peak-envelope waveform** per track so the iOS player can render a scrubber waveform without decoding the file on-device. Disabled by default; operators enable it via `analysis.enabled: true` in `bridge.yaml` and run `bridge analyze` on the server to populate the cache. Like upscaling, analysis decodes through `sox(1)` and is always offline — it only **reads** samples to derive the envelope and never alters what `/v1/download` serves (the original streams byte-for-byte). DSD sources (`.dsf` / `.dff`) are skipped (sox can't decode 1-bit DSD).
+An opt-in offline analysis feature that pre-computes a compact **peak-envelope waveform** per track (so the iOS player can render a scrubber waveform without decoding the file on-device) and, since v1.8, a **signal-derived loudness** value. Disabled by default; operators enable it via `analysis.enabled: true` in `bridge.yaml` and run `bridge analyze` on the server to populate the cache. Like upscaling, analysis decodes through `sox(1)` and is always offline — it only **reads** samples to derive metadata and never alters what `/v1/download` serves (the original streams byte-for-byte). DSD sources (`.dsf` / `.dff`) are skipped (sox can't decode 1-bit DSD).
 
-Advertised via the `waveform` flag in `/v1/health.features`. Pre-feature bridges omit the flag, omit `Track.waveformTag`, and return `404` from `/v1/waveform` — iOS treats all three identically (no scrubber waveform; falls back to a plain seek bar).
+Advertised via the `waveform` flag in `/v1/health.features` (plus `loudness` when loudness measurement is active — see below). Pre-feature bridges omit the flags, omit `Track.waveformTag`, and return `404` from `/v1/waveform` — iOS treats all of these identically (no scrubber waveform; falls back to a plain seek bar).
 
 #### `Track.waveformTag` (manifest)
 
@@ -530,6 +530,12 @@ A 22‑byte little-endian header followed by `count` × `[int8 min, int8 max]` p
 
 Buckets are fixed-width in time (0.1 s); map bucket `i` to time `(i / N) × duration`. Peaks are decoded at 48 kHz mono and quantised symmetrically to `int8`. A typical 4-minute track is ~5 KB. The format version in the header bumps if the layout changes; a client that doesn't recognise the version should ignore the sidecar.
 
+#### Signal-derived loudness — `replayGainTrackDB` (additive, since v1.8)
+
+The same offline pass also measures **EBU R128 / ITU‑R BS.1770‑4 integrated loudness** — channel-aware (decoded at the source channel count, not a mono downmix, which would read several dB hot) — and converts it to a **ReplayGain 2.0 track gain** in dB (the gain that brings the program to the −18 LUFS reference). The bridge surfaces it in the **existing** `Track.replayGainTrackDB` manifest field (no new field, no `ProtocolVersion` bump) — populated from analysis **only when the source file carries no ReplayGain tag of its own**, so curated tags always win. A value present in the manifest is therefore either tag-curated or analysis-derived; the two are indistinguishable on the wire by design. The client applies it as playback gain exactly as it always has — never a bit change to the served file.
+
+Advertised via the `loudness` flag in `/v1/health.features`, present alongside `waveform` when analysis is active. Loudness is computed in the same decode as the waveform, so a track gains its `replayGainTrackDB` when it is (re)analyzed; the write bumps the parent track's `indexed_at` so the value surfaces on the next `/v1/manifest?since=` delta (only when it actually changed). It is **skipped — and the field left tag-only —** for silent programs and for sources whose channel layout `sox` can't report. A bridge upgraded to v1.8 re-analyzes its existing waveform cache once to backfill loudness; because the peak envelope is byte-identical to the prior decode, `waveformTag` is unchanged and clients re-fetch no sidecars — only the new scalar syncs.
+
 #### `GET /v1/analysis/stats` (bearer-authenticated)
 
 Authenticated read-only snapshot of the analysis feature, mirroring the admin tile. Cheap (one SQL `COUNT` + a TTL-cached sox precheck).
@@ -542,9 +548,9 @@ Authenticated read-only snapshot of the analysis feature, mirroring the admin ti
 
 #### Feature gate semantics
 
-- `analysis.enabled: false` (default): `/v1/health.features` omits `waveform`; manifest emits no `waveformTag`; `/v1/waveform` returns `404`.
-- `analysis.enabled: true` AND `sox` on PATH: full feature operates as documented.
-- `analysis.enabled: true` AND `sox` MISSING from PATH: bridge logs `.error` at startup, in-memory disables the feature, omits the `waveform` flag. The rest of the server keeps running.
+- `analysis.enabled: false` (default): `/v1/health.features` omits `waveform` and `loudness`; manifest emits no `waveformTag` and no analysis-derived `replayGainTrackDB`; `/v1/waveform` returns `404`.
+- `analysis.enabled: true` AND `sox` on PATH: full feature operates as documented (`waveform` + `loudness`).
+- `analysis.enabled: true` AND `sox` MISSING from PATH: bridge logs `.error` at startup, in-memory disables the feature, omits the `waveform` and `loudness` flags. The rest of the server keeps running.
 
 ### Playlist backup (additive, since v1.6; user-wide since v1.7)
 

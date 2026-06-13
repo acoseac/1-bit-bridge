@@ -344,6 +344,10 @@ func (p *Pool) processJob(job poolJob) {
 		SchemaVersion: res.SchemaVersion,
 		CreatedAt:     p.now().UnixNano(),
 	}
+	if res.HasLoudness {
+		rg := res.ReplayGainTrackDB
+		row.ReplayGainTrackDB = &rg
+	}
 	if err := p.store.UpsertAnalysis(jobCtx, row); err != nil {
 		// Same as the fsync branch: don't remove the sidecar (path is
 		// reused per source, so a prior row could already point at it);
