@@ -908,13 +908,10 @@ func (c *Coordinator) transitionStatus(batchID uuid.UUID, status, errMsg string,
 	// No caller ctx for the internal callback-driven path, but this runs
 	// on the single long-lived publisher goroutine — an unbounded SQLite
 	// stall here would wedge every subsequent SSE state/complete event.
-	// Bound it with the same 5 s timeout the Submit-truncation persist
-	// uses (cancel immediately after the write so timers don't pile up
-	// under a completion burst). Gemini r4.
-	persistCtx, cancelPersist := context.WithTimeout(context.Background(), 5*time.Second)
-	err := c.store.UpdateUpscaleBatchStatus(persistCtx, rowCopy)
-	cancelPersist()
-	if err != nil {
+	// persistBounded applies the shared 5 s timeout. Gemini r4.
+	if err := persistBounded(func(ctx context.Context) error {
+		return c.store.UpdateUpscaleBatchStatus(ctx, rowCopy)
+	}); err != nil {
 		return fmt.Errorf("transition %s -> %s: %w", batchID, status, err)
 	}
 	c.publishProgressRow(rowCopy)
@@ -972,17 +969,16 @@ func (c *Coordinator) OnJobComplete(path, variantID string, sampleRate, bitsPerS
 	}
 	c.mu.Unlock()
 
-	// Bound the persist: this runs on the long-lived publisher goroutine,
-	// so an unbounded SQLite stall would wedge all later SSE events.
-	// Cancel immediately after the write so timers don't pile up under a
-	// completion burst. Gemini r4.
-	persistCtx, cancelPersist := context.WithTimeout(context.Background(), 5*time.Second)
-	if err := c.store.UpdateUpscaleBatchProgress(persistCtx, rowCopy); err != nil {
+	// Bound the persist (publisher-goroutine path) via the shared
+	// 5 s-timeout helper so a stalled SQLite write can't wedge later SSE
+	// events. Gemini r4.
+	if err := persistBounded(func(ctx context.Context) error {
+		return c.store.UpdateUpscaleBatchProgress(ctx, rowCopy)
+	}); err != nil {
 		c.logger.Warn("OnJobComplete: update progress",
 			"batchID", batchID.String(),
 			"err", err)
 	}
-	cancelPersist()
 	c.publishProgressRow(rowCopy)
 }
 
@@ -1024,13 +1020,13 @@ func (c *Coordinator) OnJobFailed(path, variantID, errMsg string, durationSecond
 	c.mu.Unlock()
 
 	// Bound the persist (publisher-goroutine path) — see OnJobComplete.
-	persistCtx, cancelPersist := context.WithTimeout(context.Background(), 5*time.Second)
-	if err := c.store.UpdateUpscaleBatchProgress(persistCtx, rowCopy); err != nil {
+	if err := persistBounded(func(ctx context.Context) error {
+		return c.store.UpdateUpscaleBatchProgress(ctx, rowCopy)
+	}); err != nil {
 		c.logger.Warn("OnJobFailed: update progress",
 			"batchID", batchID.String(),
 			"err", err)
 	}
-	cancelPersist()
 	c.publishProgressRow(rowCopy)
 }
 
@@ -1137,6 +1133,21 @@ func (c *Coordinator) publishProgressRow(row manifest.UpscaleBatchRow) {
 		Error:          row.Error,
 		UpdatedAt:      time.Unix(0, row.UpdatedAt).UTC(),
 	})
+}
+
+// persistBounded runs a callback-path DB write under a 5 s timeout.
+// These writes fire on the long-lived publisher goroutine with no
+// caller ctx, so an unbounded SQLite stall would wedge every later SSE
+// event; the deferred cancel releases the timer the instant the write
+// returns (no timer pile-up under a completion burst). Shared by
+// transitionStatus / OnJobComplete / OnJobFailed so the timeout
+// boilerplate isn't copy-pasted three times (Gemini r4 defer-cancel +
+// Sonar new-code-duplication). The two Submit-path persists keep their
+// inline form — different row snapshot + gating shape.
+func persistBounded(write func(context.Context) error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return write(ctx)
 }
 
 // isTerminalStatus reports whether the given status indicates the
