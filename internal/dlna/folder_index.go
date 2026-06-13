@@ -357,6 +357,25 @@ func relParentDir(absPath, libRoot string) string {
 // BuildFolderIndex to detect the library-root prefix without needing
 // it plumbed through the LibrarySource interface.
 //
+// lexBoundsNormalized returns the lexicographically smallest and largest of
+// `paths` with separators normalized to '/'. Callers guarantee len(paths) >= 1.
+// Extracted from longestCommonPathPrefix so the separator normalization +
+// min/max scan don't inflate that function's cognitive complexity.
+func lexBoundsNormalized(paths []string) (lo, hi string) {
+	lo = strings.ReplaceAll(paths[0], "\\", "/")
+	hi = lo
+	for _, p := range paths[1:] {
+		n := strings.ReplaceAll(p, "\\", "/")
+		if n < lo {
+			lo = n
+		}
+		if n > hi {
+			hi = n
+		}
+	}
+	return lo, hi
+}
+
 // Empty input or single-entry input behaves naturally: empty input
 // returns ""; a single entry returns its directory plus separator.
 func longestCommonPathPrefix(paths []string) string {
@@ -373,22 +392,11 @@ func longestCommonPathPrefix(paths []string) string {
 	}
 	// LCP is bounded by the lexicographically smallest + largest entries, so
 	// a single O(N) min/max pass replaces the prior O(N log N) sort (it only
-	// ever needed the two extremes). Normalize separators inline — the same
-	// ReplaceAll the old per-entry `norm` slice applied, now without the
-	// intermediate allocation. len(paths) >= 2 here (the len 0/1 cases
-	// returned above), so paths[0] is safe; the component-wise comparison
+	// ever needed the two extremes). The scan is extracted to lexBoundsNormalized
+	// to keep this function's cognitive complexity in check. len(paths) >= 2
+	// here (the len 0/1 cases returned above); the component-wise comparison
 	// below is unchanged. (external review r3)
-	a := strings.ReplaceAll(paths[0], "\\", "/")
-	b := a
-	for _, p := range paths[1:] {
-		n := strings.ReplaceAll(p, "\\", "/")
-		if n < a {
-			a = n
-		}
-		if n > b {
-			b = n
-		}
-	}
+	a, b := lexBoundsNormalized(paths)
 	// Walk component-by-component, NOT character-by-character — a
 	// character walk would produce mid-component prefixes (e.g.
 	// "/lib/Artist" vs "/lib/Artists" sharing "/lib/Artist" as a
