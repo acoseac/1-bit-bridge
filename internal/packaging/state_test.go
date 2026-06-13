@@ -1,6 +1,8 @@
 package packaging
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -54,6 +56,47 @@ func TestIsInitialized(t *testing.T) {
 	}
 	if cfgPath != "" && !strings.HasSuffix(cfgPath, "bridge.yaml") {
 		t.Errorf("IsInitialized cfgPath %q; expected suffix bridge.yaml", cfgPath)
+	}
+}
+
+// TestConfigFileExists covers the stat helper IsInitialized delegates to,
+// including the permission-error branch the bare `err != nil` check used to
+// swallow. A non-ErrNotExist stat error must still report "not present"
+// (false) rather than panic or be misread as "present".
+func TestConfigFileExists(t *testing.T) {
+	dir := t.TempDir()
+
+	// Missing file → false.
+	if configFileExists(filepath.Join(dir, "nope.yaml")) {
+		t.Errorf("configFileExists(missing) = true, want false")
+	}
+
+	// Present file → true.
+	present := filepath.Join(dir, "bridge.yaml")
+	if err := os.WriteFile(present, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !configFileExists(present) {
+		t.Errorf("configFileExists(present) = false, want true")
+	}
+
+	// Permission error: an untraversable parent makes os.Stat on the leaf
+	// return EACCES (not ErrNotExist). Must still return false. chmod-0 on
+	// a dir doesn't deny traversal for root, so skip there. (On Windows the
+	// mode is advisory and the leaf simply doesn't exist → also false.)
+	if os.Geteuid() == 0 {
+		t.Skip("running as root; chmod-0 parent does not deny traversal")
+	}
+	locked := filepath.Join(dir, "locked")
+	if err := os.Mkdir(locked, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) }) // so t.TempDir cleanup can recurse
+	if configFileExists(filepath.Join(locked, "bridge.yaml")) {
+		t.Errorf("configFileExists(permission-denied) = true, want false")
 	}
 }
 

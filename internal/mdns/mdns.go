@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -173,17 +172,17 @@ func advertiseInternal(cfg Config, ipSource func() []net.IP, interval time.Durat
 		rebindInterval: interval,
 		done:           make(chan struct{}),
 	}
-	// Initial rebuild runs WITHOUT taking a.rebindMu. Safe because
-	// `a` was just allocated and no goroutine has a reference to it
-	// yet — `rebindLoop()` is the only other writer of
-	// `a.server` / `a.cachedIPs` / `a.closed`, and we don't spawn it
-	// until below (after this returns successfully). `Close()` is
-	// the only other lock-acquiring caller, and it can't race a
-	// pre-publication Advertiser either. The rebindMu contract from
-	// `rebuildLocked`'s doc applies to every subsequent invocation
-	// from `maybeRebind`, where contention with `Close` is real
-	// (CodeRabbit on PR #112).
-	if err := a.rebuildLocked(a.ipSource()); err != nil {
+	// Hold rebindMu for the initial rebuild too. `a` isn't published
+	// yet so there's no real contention (rebindLoop isn't spawned
+	// until below; Close can't reach a pre-publication Advertiser),
+	// but taking the lock honors rebuildLocked's "caller MUST hold
+	// a.rebindMu" contract unconditionally — a future refactor that
+	// moves the goroutine spawn earlier can't silently turn this into
+	// a race (the `*Locked` naming stays truthful).
+	a.rebindMu.Lock()
+	err := a.rebuildLocked(a.ipSource())
+	a.rebindMu.Unlock()
+	if err != nil {
 		return nil, err
 	}
 	if spawnLoop {
@@ -323,24 +322,31 @@ func (a *Advertiser) maybeRebind() {
 
 // ipSetEqual returns true when a and b cover the same IPs, ignoring
 // order. Both inputs are typically small (<10 entries on a dev
-// machine), so the sorted-string compare is fine — no need for a
-// per-entry hash map.
+// machine), so an O(N²) matched-tracking compare beats sorting and
+// drops the per-IP String() + slice churn on the 60s rebind tick.
+//
+// A []bool matched-tracker, NOT a uint64 bitmask: Go masks 1<<j to
+// j%64, so on a host with >64 advertise IPs (IPv6 privacy extensions
+// / Docker bridge spam) a bitmask would alias index 64+ onto 0+ and
+// report two different sets as equal — a *missed* network change, the
+// dangerous direction. A false negative only costs a harmless extra
+// rebuild. The []bool has no ceiling; one small slice per minute is
+// negligible.
 func ipSetEqual(a, b []net.IP) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	as := make([]string, len(a))
-	bs := make([]string, len(b))
-	for i, ip := range a {
-		as[i] = ip.String()
-	}
-	for i, ip := range b {
-		bs[i] = ip.String()
-	}
-	sort.Strings(as)
-	sort.Strings(bs)
-	for i := range as {
-		if as[i] != bs[i] {
+	matched := make([]bool, len(b))
+	for _, ipA := range a {
+		found := false
+		for j, ipB := range b {
+			if !matched[j] && ipA.Equal(ipB) {
+				matched[j] = true
+				found = true
+				break
+			}
+		}
+		if !found {
 			return false
 		}
 	}

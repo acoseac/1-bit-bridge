@@ -34,7 +34,6 @@ import (
 	cryptotls "crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -396,10 +395,14 @@ func mergeIPs(extras []net.IP) []net.IP {
 		seen[string(ip.To16())] = true
 	}
 	for _, ip := range extras {
-		if ip == nil {
+		b16 := ip.To16()
+		if b16 == nil {
+			// nil IP, or malformed (wrong byte length) — To16 returns
+			// nil, whose string key would alias every such entry to ""
+			// and collapse them into one map slot. Skip outright.
 			continue
 		}
-		key := string(ip.To16())
+		key := string(b16)
 		if seen[key] {
 			continue
 		}
@@ -541,14 +544,15 @@ func fingerprintFromPEM(path string) (string, error) {
 // so users can verify by eye during pairing.
 func FingerprintFromDER(der []byte) string {
 	h := sha256.Sum256(der)
-	hexStr := strings.ToUpper(hex.EncodeToString(h[:]))
+	const hexChars = "0123456789ABCDEF"
 	var b strings.Builder
-	b.Grow(len(hexStr) + len(hexStr)/2)
-	for i := 0; i < len(hexStr); i += 2 {
+	b.Grow(95) // 32 hex pairs + 31 colons; no mid-loop reallocation
+	for i, c := range h {
 		if i > 0 {
 			b.WriteByte(':')
 		}
-		b.WriteString(hexStr[i : i+2])
+		b.WriteByte(hexChars[c>>4])
+		b.WriteByte(hexChars[c&0x0F])
 	}
 	return b.String()
 }

@@ -6,10 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
-	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 
@@ -105,26 +103,13 @@ func swapBinary(dst, newBinary, backupExt string) error {
 		return fmt.Errorf("install %s -> %s: %w (rolled back)", newBinary, dst, err)
 	}
 
-	// Durability hint via the parent directory. Windows doesn't have
-	// a direct "fsync this directory" API; FlushFileBuffers on the
-	// dir handle is the closest equivalent. **Requires GENERIC_WRITE**
-	// — without it, FlushFileBuffers fails with ERROR_ACCESS_DENIED
-	// and the durability hint is silently a no-op (Gemini flagged on
-	// PR #48). Best-effort overall; even a failed flush isn't fatal,
-	// the new binary is on disk via os.Rename's own buffering.
-	if h, err := windows.CreateFile(
-		windows.StringToUTF16Ptr(filepath.Dir(dst)),
-		windows.GENERIC_READ|windows.GENERIC_WRITE,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
-		nil,
-		windows.OPEN_EXISTING,
-		windows.FILE_FLAG_BACKUP_SEMANTICS, // required for directory handles
-		0,
-	); err == nil {
-		_ = windows.FlushFileBuffers(h)
-		_ = windows.CloseHandle(h)
-	}
-
+	// No directory fsync on Windows: FlushFileBuffers rejects directory
+	// handles (ERROR_ACCESS_DENIED / ERROR_INVALID_HANDLE) regardless of
+	// the access right requested, so the old CreateFile + FlushFileBuffers
+	// block was a dead no-op. Durability of the rename is already
+	// guaranteed by os.Rename (MoveFileEx) + NTFS metadata journaling
+	// ($LogFile). (Gemini r2 review; supersedes the PR #48 GENERIC_WRITE
+	// note.)
 	return nil
 }
 

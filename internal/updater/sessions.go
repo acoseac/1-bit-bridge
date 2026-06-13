@@ -52,25 +52,36 @@ func (t *Tracker) Begin() {
 // underflow (defensive — should never happen, but a leak the wrong
 // direction here lets Install run during a download).
 //
-// The clamp uses CompareAndSwap rather than Store because a
-// concurrent Begin() between our Add(-1) and the reset would
-// otherwise be silently lost: Begin's Add(+1) takes us from -1 to
-// 0 (or beyond), and a naive Store(0) clobbers that legitimate
-// increment, leaving Inflight()==0 while a download is genuinely
-// active. With CAS, the reset only fires if the counter is still
-// at the underflow value; otherwise some other goroutine has
-// already mutated it (Begin or another End) and we leave the
-// counter alone. Caught in PR #42 review (Gemini).
+// Implemented as a load-then-CAS loop, NOT a bare Add(-1) + fix-up.
+// A bare Add(-1) drives the counter transiently negative on a
+// spurious End(), and a concurrent Begin() racing that window gets
+// swallowed when the fix-up CAS fails (Begin's Add(+1) already moved
+// the counter off the underflow value), leaving Inflight()==0 while a
+// download is genuinely active — the exact gate-bypass this guards.
+// The loop only decrements when it observes a positive count, so it
+// never goes negative and a concurrent Begin() is never lost. Matched
+// callers always observe ≥1 (their own Begin), so the underflow
+// branch is reached only on a real Begin/End mismatch. PR #42 review
+// (Gemini); refined to a load-then-CAS loop per the r2 review.
 func (t *Tracker) End() {
-	if n := t.count.Add(-1); n < 0 {
-		t.count.CompareAndSwap(n, 0)
-		t.mu.Lock()
-		first := !t.loggedUnderflow
-		t.loggedUnderflow = true
-		t.mu.Unlock()
-		if first {
-			logger.Warn("sessions tracker underflow — Begin/End mismatch (clamping to 0)")
+	for {
+		cur := t.count.Load()
+		if cur <= 0 {
+			// Spurious End() with no live Begin(). Do NOT decrement —
+			// log once and leave the counter untouched.
+			t.mu.Lock()
+			first := !t.loggedUnderflow
+			t.loggedUnderflow = true
+			t.mu.Unlock()
+			if first {
+				logger.Warn("sessions tracker underflow — Begin/End mismatch (ignored)")
+			}
+			return
 		}
+		if t.count.CompareAndSwap(cur, cur-1) {
+			return
+		}
+		// Lost a race with a concurrent Begin/End; reload and retry.
 	}
 }
 

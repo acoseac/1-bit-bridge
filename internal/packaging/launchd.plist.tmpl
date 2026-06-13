@@ -25,6 +25,12 @@
         <false/>
     </dict>
 
+    <!-- Both streams intentionally point at one log file. launchd opens
+         it with two independent FDs (separate write offsets), but the
+         bridge logs only to stderr in serve mode (slog -> os.Stderr; see
+         logging.Init in cmd/bridge/main.go), so the two never interleave
+         or clobber. If serve-mode ever starts writing to stdout, split
+         these into distinct paths to avoid corrupting the log. -->
     <key>StandardOutPath</key>
     <string>{{.LogPath | xmlEscape}}</string>
 

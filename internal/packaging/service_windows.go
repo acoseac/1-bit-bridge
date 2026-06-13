@@ -45,7 +45,7 @@ func InstallWindowsService(p Params) (string, error) {
 	// until the service finally stops (which it won't, because nothing
 	// asked it to). The Control(svc.Stop) + poll-for-stopped fixes it.
 	if s, err := m.OpenService(ServiceLabel); err == nil {
-		_, _ = s.Control(svc.Stop)
+		sendStopIfRunning(s)
 		if werr := waitForServiceStopped(s, 10*time.Second); werr != nil {
 			// Can't proceed to Delete without a clean stop — the
 			// service would stay in "marked for delete" limbo until
@@ -123,7 +123,7 @@ func UninstallWindowsService() error {
 	// PARAMCHANGE instead, which is a no-op for a service that
 	// doesn't handle it — Delete then deferred, uninstall effectively
 	// silently no-oped until the next reboot.
-	_, _ = s.Control(svc.Stop)
+	sendStopIfRunning(s)
 	if werr := waitForServiceStopped(s, 10*time.Second); werr != nil {
 		// Same rationale as install: Delete waits for Stopped, so a
 		// failed-to-stop service will reproduce the marked-for-delete
@@ -178,6 +178,19 @@ func waitForServiceStopped(s *mgr.Service, timeout time.Duration) error {
 		time.Sleep(100 * time.Millisecond)
 	}
 	return fmt.Errorf("timeout waiting for service to stop after %s", timeout)
+}
+
+// sendStopIfRunning sends SERVICE_CONTROL_STOP only when the service
+// isn't already Stopped, so an idempotent reinstall/uninstall over an
+// already-stopped service doesn't spam ERROR_SERVICE_NOT_ACTIVE into
+// the Windows Event Log. A Query error falls back to sending Stop
+// (prior behaviour); waitForServiceStopped is the authoritative gate
+// either way.
+func sendStopIfRunning(s *mgr.Service) {
+	if status, err := s.Query(); err == nil && status.State == svc.Stopped {
+		return
+	}
+	_, _ = s.Control(svc.Stop)
 }
 
 // tryInstallWindowsService is the SCM-or-fallback entry point used

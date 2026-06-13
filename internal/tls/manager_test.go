@@ -142,6 +142,27 @@ func TestManager_GetReturnsLECertOnMagicDNSSNI(t *testing.T) {
 	}
 }
 
+func TestManager_SetMagicDNSSuffixTrailingDot(t *testing.T) {
+	// A suffix stored with a trailing dot (FQDN form from some config
+	// lookups) must still match a normalized SNI — Get strips the trailing
+	// dot from the SNI, so SetMagicDNSSuffix must strip it from the stored
+	// suffix too, else every Tailscale handshake falls through to
+	// self-signed.
+	self := mintTestCert(t, []string{"host.local"})
+	le := mintTestCert(t, []string{"home-pc.sable-eagle.ts.net"})
+	mgr := NewManager(self)
+	mgr.SetMagicDNSSuffix("sable-eagle.ts.net.") // trailing dot
+	mgr.SetTailscaleCert(le)
+
+	got, err := mgr.Get(&cryptotls.ClientHelloInfo{ServerName: "home-pc.sable-eagle.ts.net"})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got != le {
+		t.Errorf("trailing-dot suffix should still route the magic-DNS SNI to the LE cert")
+	}
+}
+
 func TestManager_GetFallsThroughToSelfSignedWhenLECertMissing(t *testing.T) {
 	// LE cert not loaded yet (auto-pilot still detecting / mint
 	// failed). Manager must fall through to self-signed for the
