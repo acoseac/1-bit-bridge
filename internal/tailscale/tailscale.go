@@ -138,6 +138,9 @@ func Detect(ctx context.Context) (NodeInfo, error) {
 	info.NodeName = strings.TrimSpace(raw.Self.HostName)
 	info.TailnetSuffix = strings.TrimSpace(raw.MagicDNSSuffix)
 	info.MagicDNSName = strings.TrimSuffix(strings.TrimSpace(raw.Self.DNSName), ".")
+	if len(raw.Self.TailscaleIPs) > 0 {
+		info.TailscaleIPs = make([]string, 0, len(raw.Self.TailscaleIPs))
+	}
 	for _, ip := range raw.Self.TailscaleIPs {
 		if ip = strings.TrimSpace(ip); ip != "" {
 			info.TailscaleIPs = append(info.TailscaleIPs, ip)

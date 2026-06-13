@@ -428,18 +428,49 @@ func (s *Server) userLogf() func(string, ...any) {
 func noisyLogfFromSlog(log *slog.Logger) func(string, ...any) {
 	return func(format string, args ...any) {
 		msg := fmt.Sprintf(format, args...)
-		lower := strings.ToLower(msg)
+		// Match case-insensitively WITHOUT allocating a lowercased copy
+		// of every line — >90% of these are dropped, so the prior
+		// unconditional strings.ToLower(msg) was pure waste on the common
+		// path. containsFold folds only the haystack's ASCII A-Z against
+		// our all-lowercase sentinels; matching semantics are identical
+		// to the prior ToLower+Contains form. Gemini r4.
 		switch {
-		case strings.Contains(lower, "panic"),
-			strings.Contains(lower, "fatal"):
+		case containsFold(msg, "panic"), containsFold(msg, "fatal"):
 			log.Error(msg, slog.String("source", "tsnet.backend"))
-		case strings.Contains(lower, "error"),
-			strings.Contains(lower, "failed"):
+		case containsFold(msg, "error"), containsFold(msg, "failed"):
 			log.Warn(msg, slog.String("source", "tsnet.backend"))
 		default:
 			// Drop on floor. 90%+ of tsnet's backend logs land here.
 		}
 	}
+}
+
+// containsFold reports whether s contains substr case-insensitively,
+// WITHOUT allocating. substr MUST be lowercase ASCII (the sentinels in
+// noisyLogfFromSlog are); only s's A-Z bytes are folded down. This is
+// the 0-alloc replacement for `strings.Contains(strings.ToLower(s), substr)`
+// on the tsnet log firehose. Gemini r4.
+func containsFold(s, substr string) bool {
+	if len(substr) == 0 {
+		return true
+	}
+	for i := 0; i+len(substr) <= len(s); i++ {
+		ok := true
+		for j := 0; j < len(substr); j++ {
+			c := s[i+j]
+			if c >= 'A' && c <= 'Z' {
+				c += 'a' - 'A'
+			}
+			if c != substr[j] {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return true
+		}
+	}
+	return false
 }
 
 // extractTailscaleAuthURL returns the AuthURL embedded in a tsnet
@@ -458,15 +489,11 @@ func extractTailscaleAuthURL(msg string) string {
 		return ""
 	}
 	tail := msg[idx:]
-	// URL ends at the first whitespace / control char.
-	end := len(tail)
-	for i, r := range tail {
-		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
-			end = i
-			break
-		}
+	// URL ends at the first whitespace / control char. Gemini r4.
+	if end := strings.IndexAny(tail, " \t\n\r"); end >= 0 {
+		return tail[:end]
 	}
-	return tail[:end]
+	return tail
 }
 
 // hasPersistedTsnetState reports whether the state dir holds an
