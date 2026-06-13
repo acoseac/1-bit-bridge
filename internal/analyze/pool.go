@@ -314,11 +314,14 @@ func (p *Pool) processJob(job poolJob) {
 	// dir on POSIX) BEFORE committing the row that points at it, so a
 	// delta-sync client never races a non-durable file.
 	if err := p.fsyncFn(res.WaveformPath); err != nil {
+		// Remove the un-committed sidecar unconditionally (even when the
+		// pool is closing) so a shutdown-time fsync failure can't strand
+		// an orphan file with no DB row pointing at it. Gemini on #395.
+		_ = os.Remove(res.WaveformPath)
 		if !p.closed.Load() {
 			p.failedCnt.Add(1)
 			logger.Error("analyze: fsync sidecar",
 				"path", job.spec.SourceLibraryRel, "err", err)
-			_ = os.Remove(res.WaveformPath) // best-effort: clean slate for retry
 		}
 		p.releaseDedup(job.dedup)
 		released = true
@@ -339,11 +342,14 @@ func (p *Pool) processJob(job poolJob) {
 		CreatedAt:     p.now().UnixNano(),
 	}
 	if err := p.store.UpsertAnalysis(jobCtx, row); err != nil {
+		// Unconditional orphan cleanup, same rationale as the fsync
+		// branch above — the sidecar exists on disk but no row points at
+		// it, so reap it regardless of shutdown state. Gemini on #395.
+		_ = os.Remove(res.WaveformPath)
 		if !p.closed.Load() {
 			p.failedCnt.Add(1)
 			logger.Error("analyze: store analysis",
 				"path", job.spec.SourceLibraryRel, "err", err)
-			_ = os.Remove(res.WaveformPath)
 		}
 		p.releaseDedup(job.dedup)
 		released = true

@@ -187,10 +187,15 @@ func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 		fmt.Fprintf(stderr, "list analysis rows: %v\n", err)
 		return 1
 	}
+	// Key on the lowercased clean path so a case difference between the
+	// DB-recorded path and the on-disk path (case-insensitive macOS /
+	// Windows filesystems) can't make `--gc` delete a live waveform.
+	// On case-sensitive Linux the worst case is a false-keep of a rare
+	// same-name-different-case orphan — safe (no data loss). Gemini on #395.
 	known := make(map[string]bool, len(rows))
 	for _, r := range rows {
 		if r.WaveformPath != "" {
-			known[filepath.Clean(r.WaveformPath)] = true
+			known[strings.ToLower(filepath.Clean(r.WaveformPath))] = true
 		}
 	}
 
@@ -218,7 +223,7 @@ func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 		if !isWaveform && !isTmp {
 			return nil
 		}
-		if isWaveform && known[filepath.Clean(path)] {
+		if isWaveform && known[strings.ToLower(filepath.Clean(path))] {
 			kept++
 			return nil
 		}

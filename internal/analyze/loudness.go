@@ -130,6 +130,17 @@ func (m *loudnessMeter) addFrame(frame []float64) {
 	m.pos++
 	if m.pos == r128BlockSamples {
 		m.pos = 0
+		// Recompute the running square-sum from the ring once per block
+		// to clear float64 roundoff accumulated by the incremental
+		// add/subtract over a long track (this lands on a block-emit
+		// boundary, so the emitted energy below is exact). Gemini on #395.
+		for ch := 0; ch < m.channels; ch++ {
+			var sum float64
+			for _, v := range m.ringSq[ch] {
+				sum += v
+			}
+			m.sumSq[ch] = sum
+		}
 	}
 	m.total++
 	// Emit a block once the window is full, then every hop.

@@ -30,6 +30,12 @@ func newPeaker(bucketSamples int) *peaker {
 // add folds one sample into the current bucket, flushing when the
 // bucket fills.
 func (p *peaker) add(s float32) {
+	// A NaN sample (corrupt decode) would poison the whole bucket: it
+	// propagates through min/max and `int(NaN)` in quantizeSample is
+	// undefined. Treat it as silence. Gemini on #395.
+	if math.IsNaN(float64(s)) {
+		s = 0
+	}
 	if p.n == 0 {
 		p.curMin, p.curMax = s, s
 	} else {
@@ -70,6 +76,12 @@ func (p *peaker) count() int { return len(p.mins) }
 // peak in [-127, 127]. Out-of-range inputs (intersample peaks above
 // 0 dBFS, or a decoder emitting slightly >1.0) clamp rather than wrap.
 func quantizeSample(v float32) int8 {
+	// Belt-and-braces NaN guard: `int(math.Round(NaN))` is undefined in
+	// Go. The peaker already maps NaN→0 on input, but a direct caller
+	// shouldn't hit UB either.
+	if math.IsNaN(float64(v)) {
+		return 0
+	}
 	if v > 1 {
 		v = 1
 	} else if v < -1 {
