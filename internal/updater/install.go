@@ -294,8 +294,12 @@ func preflightWritable(binaryPath string) error {
 	// transiently locks a freshly-closed file (the AV-flakiness class
 	// behind renameWithRetry, PR #100); a genuine permission gap still
 	// surfaces after the budget.
+	// ~1s total budget: a Defender oplock on a freshly-closed temp can
+	// persist for several hundred ms under load / in a VM, so a 100ms
+	// budget would false-fail the preflight there (Gemini on PR #385).
+	// The instant success path (first Remove succeeds) pays nothing.
 	var rmErr error
-	for _, backoff := range []time.Duration{0, 10 * time.Millisecond, 30 * time.Millisecond, 60 * time.Millisecond} {
+	for _, backoff := range []time.Duration{0, 10 * time.Millisecond, 50 * time.Millisecond, 150 * time.Millisecond, 300 * time.Millisecond, 500 * time.Millisecond} {
 		if backoff > 0 {
 			time.Sleep(backoff)
 		}
@@ -326,19 +330,26 @@ func cleanScratch(scratch string) {
 // filepath.Join on Windows → traversal. Gemini's literal path.Base suggestion
 // from the r2 review is declined for this reason.)
 //
-// Two residue classes are rejected: "."/".." (which would escape scratch on
-// Join) and any leftover separator — on non-Windows hosts filepath.Base
-// leaves a backslash in place, so a "..\\..\\x" payload is refused outright
-// rather than written as a weird filename, making the behaviour uniform
-// across OSes. Pure helper so the reject is unit-testable without driving the
-// whole Install network flow. DeepSeek review + Gemini security-MEDIUM on
-// PR #368; cross-platform separator reject per the r2 review.
+// Three checks, in order: (1) reject any backslash on the RAW name up front
+// — a "\" never appears in a legit forward-slash GitHub name, and rejecting
+// it before filepath.Base makes behaviour uniform across OSes (non-Windows
+// filepath.Base leaves "\" intact; Windows strips it to a basename — the
+// same input must not take two different paths); (2) reject the "."/".."
+// residue (which would escape scratch on Join); (3) reject a residual "/"
+// in the basename (filepath.Base returns "/" for a bare root path — neither
+// "." nor ".." but not a filename). Pure helper so the rejects are
+// unit-testable without driving the whole Install network flow. DeepSeek
+// review + Gemini security-MEDIUM on PR #368; cross-platform reject per the
+// r2 review + CodeRabbit on PR #385.
 func sanitizeAssetName(name string) (string, error) {
+	if strings.ContainsRune(name, '\\') {
+		return "", fmt.Errorf("invalid release asset name: %q", name)
+	}
 	base := filepath.Base(name)
 	if base == "." || base == ".." {
 		return "", fmt.Errorf("invalid release asset name: %q", name)
 	}
-	if strings.ContainsAny(base, `/\`) {
+	if strings.ContainsRune(base, '/') {
 		return "", fmt.Errorf("invalid release asset name: %q", name)
 	}
 	return base, nil
