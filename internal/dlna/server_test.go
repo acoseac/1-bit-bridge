@@ -315,7 +315,8 @@ func Test_firstCallbackURL(t *testing.T) {
 		{"<http://192.168.0.5:55555/evt>", "http://192.168.0.5:55555/evt"},
 		{"<http://a/1> <http://b/2>", "http://a/1"}, // first of multiple
 		{"  <http://x/>  ", "http://x/"},
-		{"no-brackets", ""},
+		{"http://192.168.0.9/evt", "http://192.168.0.9/evt"}, // bracket-less fallback (review r3)
+		{"no-brackets", "no-brackets"},                       // returned verbatim; fails downstream url.Parse scheme check
 		{"<unterminated", ""},
 		{"", ""},
 	}

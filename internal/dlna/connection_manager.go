@@ -3,6 +3,7 @@ package dlna
 import (
 	"fmt"
 	"net/http"
+	"strings"
 )
 
 // ConnectionManagerServiceType is the canonical UPnP service type for
@@ -59,14 +60,7 @@ func buildSourceProtocolInfo() string {
 		mkEntry("audio/mpeg"), // MP3
 		mkEntry("audio/ogg"),
 	}
-	out := ""
-	for i, e := range entries {
-		if i > 0 {
-			out += ","
-		}
-		out += e
-	}
-	return out
+	return strings.Join(entries, ",")
 }
 
 // mkEntry builds one `protocolInfo` CSV entry with the standard

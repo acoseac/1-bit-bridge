@@ -208,6 +208,10 @@ func DIDLForTrack(opts DIDLTrackOpts) string {
 	genre := escapeXMLText(opts.Genre)
 
 	var sb strings.Builder
+	// A populated <item> (id/parentID/title/artist/album/<res>/artwork URI)
+	// runs ~500-700 bytes; pre-size to skip the builder's early geometric
+	// regrowths during a Browse window. (external review r3)
+	sb.Grow(640)
 	// `opts.TrackID` is a SHA-256-derived hash (safe ASCII per the
 	// TrackID() helper), but defensive XML-attribute escape is cheap
 	// and protects against any future caller that passes a custom
@@ -498,6 +502,19 @@ func formatDLNADuration(seconds float64) string {
 // minimal-escape pattern; using encoding/xml's `xml.EscapeText` would
 // add an io.Writer round-trip for what is fundamentally a string
 // transformation.
+// xmlTextReplacer escapes the five XML metacharacters. Package-level and
+// reused across calls: strings.Replacer is safe for concurrent use and builds
+// its lookup trie once at init, so DIDLForTrack's ~9 escapeXMLText calls per
+// track (× a 1000-item Browse window) no longer each allocate a fresh
+// replacer + trie. (external review r3)
+var xmlTextReplacer = strings.NewReplacer(
+	"&", "&amp;",
+	"<", "&lt;",
+	">", "&gt;",
+	`"`, "&quot;",
+	"'", "&apos;",
+)
+
 func escapeXMLText(s string) string {
 	if s == "" {
 		return ""
@@ -506,14 +523,7 @@ func escapeXMLText(s string) string {
 	if !strings.ContainsAny(s, `&<>"'`) {
 		return s
 	}
-	r := strings.NewReplacer(
-		"&", "&amp;",
-		"<", "&lt;",
-		">", "&gt;",
-		`"`, "&quot;",
-		"'", "&apos;",
-	)
-	return r.Replace(s)
+	return xmlTextReplacer.Replace(s)
 }
 
 // ExtensionFromPath returns the lowercase file extension (with leading

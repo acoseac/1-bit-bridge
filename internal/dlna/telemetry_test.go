@@ -210,7 +210,10 @@ func Test_TelemetryMiddleware_CapturesNonDefaultStatusCode(t *testing.T) {
 func Test_TelemetryMiddleware_CapturesDuration(t *testing.T) {
 	store := NewTelemetryStore(10)
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(2 * time.Millisecond)
+		// 20ms (not 2ms) so the assertion below keeps a wide margin against
+		// coarse OS timer granularity (notably Windows) — a 2ms sleep could
+		// measure just under 2ms and truncate to 1, flaking `>= 2`.
+		time.Sleep(20 * time.Millisecond)
 		w.WriteHeader(http.StatusOK)
 	})
 	h := TelemetryMiddleware(store, inner)
@@ -222,8 +225,8 @@ func Test_TelemetryMiddleware_CapturesDuration(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("expected 1 entry, got %d", len(got))
 	}
-	if got[0].DurationMS < 2 {
-		t.Errorf("DurationMS = %d, expected >= 2 (handler slept 2ms)", got[0].DurationMS)
+	if got[0].DurationMS < 5 {
+		t.Errorf("DurationMS = %d, expected >= 5 (handler slept 20ms)", got[0].DurationMS)
 	}
 }
 

@@ -224,7 +224,7 @@ func BuildFolderIndex(tracks []TrackInfo) *FolderIndex {
 	// Both must terminate the walk WITHOUT being registered as a
 	// folder — otherwise "." leaks into the index and surfaces as a
 	// phantom top-level entry.
-	seenFolders := make(map[string]bool)
+	seenFolders := make(map[string]bool, len(tracksByFolder))
 	for folderRelPath := range tracksByFolder {
 		if folderRelPath == "" {
 			// Top-level tracks — handled below via TopLevelTrackIDs.
@@ -357,6 +357,25 @@ func relParentDir(absPath, libRoot string) string {
 // BuildFolderIndex to detect the library-root prefix without needing
 // it plumbed through the LibrarySource interface.
 //
+// lexBoundsNormalized returns the lexicographically smallest and largest of
+// `paths` with separators normalized to '/'. Callers guarantee len(paths) >= 1.
+// Extracted from longestCommonPathPrefix so the separator normalization +
+// min/max scan don't inflate that function's cognitive complexity.
+func lexBoundsNormalized(paths []string) (lo, hi string) {
+	lo = strings.ReplaceAll(paths[0], "\\", "/")
+	hi = lo
+	for _, p := range paths[1:] {
+		n := strings.ReplaceAll(p, "\\", "/")
+		if n < lo {
+			lo = n
+		}
+		if n > hi {
+			hi = n
+		}
+	}
+	return lo, hi
+}
+
 // Empty input or single-entry input behaves naturally: empty input
 // returns ""; a single entry returns its directory plus separator.
 func longestCommonPathPrefix(paths []string) string {
@@ -371,16 +390,13 @@ func longestCommonPathPrefix(paths []string) string {
 		}
 		return d + "/"
 	}
-	// Normalize separators so the comparison works on Windows-built
-	// bridges too.
-	norm := make([]string, len(paths))
-	for i, p := range paths {
-		norm[i] = strings.ReplaceAll(p, "\\", "/")
-	}
-	// Sort: longest common prefix is bounded by the lexicographically
-	// smallest + largest entries.
-	sort.Strings(norm)
-	a, b := norm[0], norm[len(norm)-1]
+	// LCP is bounded by the lexicographically smallest + largest entries, so
+	// a single O(N) min/max pass replaces the prior O(N log N) sort (it only
+	// ever needed the two extremes). The scan is extracted to lexBoundsNormalized
+	// to keep this function's cognitive complexity in check. len(paths) >= 2
+	// here (the len 0/1 cases returned above); the component-wise comparison
+	// below is unchanged. (external review r3)
+	a, b := lexBoundsNormalized(paths)
 	// Walk component-by-component, NOT character-by-character — a
 	// character walk would produce mid-component prefixes (e.g.
 	// "/lib/Artist" vs "/lib/Artists" sharing "/lib/Artist" as a

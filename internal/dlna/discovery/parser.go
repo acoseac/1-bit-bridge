@@ -235,6 +235,13 @@ func ParseDeviceDescription(body []byte, baseURL string) (DeviceDescription, err
 		}
 		ctrl, ctrlErr := resolveServiceURL(base, s.ControlURL)
 		if ctrlErr != nil {
+			// Silently dropping the service marks an otherwise-usable renderer
+			// structurally broken with no breadcrumb. Log it so a malformed
+			// controlURL (e.g. unescaped spaces from older hardware) is
+			// diagnosable. (external review r3 — observability only; no
+			// speculative sanitization here.)
+			packageLogger.Debug("discovery: dropping service with unresolvable controlURL",
+				"serviceType", stype, "controlURL", s.ControlURL, "err", ctrlErr.Error())
 			continue
 		}
 		ev, _ := resolveServiceURL(base, s.EventSubURL) // eventSubURL is optional; ignore error
