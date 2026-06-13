@@ -37,6 +37,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/google/uuid"
 )
@@ -371,7 +372,7 @@ func safeVariantFilename(srcBase, variantID string) string {
 	// this sanitizer exists to handle.
 	const fsBasenameCap = 255 - len(sidecarTmpSuffix)
 	raw := srcBase
-	sanitized := sanitiseForFAT(srcBase)
+	sanitized := fsutil.SanitiseForFAT(srcBase)
 
 	// Clean path: name didn't trip FAT sanitization AND fits the cap.
 	// Pre-fix this branch ran even when sanitization rewrote the name,
@@ -425,101 +426,16 @@ func safeVariantFilename(srcBase, variantID string) string {
 	// rune boundaries up to the byte budget.
 	half := (budget - 2) / 2
 	if half < 1 {
-		return truncateUTF8AtMost(sanitized, budget) + suffix
+		return fsutil.TruncateUTF8AtMost(sanitized, budget) + suffix
 	}
-	head := truncateUTF8AtMost(sanitized, half)
-	tail := truncateUTF8FromEnd(sanitized, half)
+	head := fsutil.TruncateUTF8AtMost(sanitized, half)
+	tail := fsutil.TruncateUTF8FromEnd(sanitized, half)
 	return head + ".." + tail + suffix
 }
 
-// truncateUTF8AtMost returns the longest prefix of `s` whose byte
-// length is ≤ `maxBytes`, ending on a rune boundary. Safe against
-// multi-byte characters; never slices mid-rune.
-func truncateUTF8AtMost(s string, maxBytes int) string {
-	if maxBytes <= 0 {
-		return ""
-	}
-	if len(s) <= maxBytes {
-		return s
-	}
-	// Walk rune boundaries; the largest i such that s[:i] is ≤
-	// maxBytes AND ends on a rune boundary.
-	end := 0
-	for i := range s {
-		if i > maxBytes {
-			break
-		}
-		end = i
-	}
-	return s[:end]
-}
-
-// truncateUTF8FromEnd returns the longest suffix of `s` whose byte
-// length is ≤ `maxBytes`, starting on a rune boundary. Mirrors
-// truncateUTF8AtMost for the tail-keep case.
-func truncateUTF8FromEnd(s string, maxBytes int) string {
-	if maxBytes <= 0 {
-		return ""
-	}
-	if len(s) <= maxBytes {
-		return s
-	}
-	// Walk rune boundaries from the end; the smallest start such that
-	// s[start:] fits in maxBytes.
-	start := len(s)
-	for i := range s {
-		if len(s)-i <= maxBytes {
-			start = i
-			break
-		}
-	}
-	return s[start:]
-}
-
-// sanitiseForFAT replaces characters that FAT-family filesystems
-// (FAT32 / exFAT / NTFS) reject in filenames with `_`. The
-// substitution is deterministic so re-runs of the same source
-// produce identical output — the DB lookup contract depends on it.
-//
-// Forward slash isn't included: the caller has already split the
-// path; this operates on a basename only. Backslash (`\`) IS
-// included because some sources have it embedded in a single path
-// segment (rare; cross-OS rip tools sometimes do this) and FAT
-// rejects it.
-func sanitiseForFAT(s string) string {
-	// Direct byte-level check beats `strings.ContainsRune` per
-	// iteration — the bad set is all ASCII (each char fits in one
-	// byte). UTF-8 multi-byte runes start with a high-bit byte
-	// (>= 0x80) and never collide with the ASCII bad chars, so the
-	// byte loop is safe even on Unicode input. Gemini Medium on
-	// PR D1 flagged the prior `strings.ContainsRune` form as
-	// converting the byte to a rune + scanning the string on every
-	// iteration.
-	//
-	// Lazy allocation: scan read-only first and return `s` unchanged
-	// when no bad char is present — clean basenames (>95% of a typical
-	// library) stay allocation-free, which is what keeps the
-	// `sanitized == raw` fast-path in safeVariantFilename actually free
-	// (the prior unconditional `[]byte(s)` + `string(out)` cost two
-	// heap allocs per call regardless). Only on the first illegal byte
-	// do we materialise a mutable copy and finish the substitution from
-	// that index forward. Gemini r4.
-	for i := 0; i < len(s); i++ {
-		switch s[i] {
-		case ':', '*', '?', '"', '<', '>', '|', '\\':
-			out := []byte(s)
-			out[i] = '_'
-			for j := i + 1; j < len(out); j++ {
-				switch out[j] {
-				case ':', '*', '?', '"', '<', '>', '|', '\\':
-					out[j] = '_'
-				}
-			}
-			return string(out)
-		}
-	}
-	return s
-}
+// The FAT-sanitize + UTF-8-truncate primitives this file used to define
+// (sanitiseForFAT / truncateUTF8AtMost / truncateUTF8FromEnd) now live in
+// internal/fsutil, shared with internal/analyze's waveform sidecars.
 
 // SoxArgs builds the argv for the sox invocation. Returns the
 // exact slice exec.Command will receive (including the leading

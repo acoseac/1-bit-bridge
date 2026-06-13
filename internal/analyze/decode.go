@@ -10,7 +10,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"unicode/utf8"
+
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 // decodeArgs builds the sox argv that decodes any supported source to
@@ -138,22 +139,7 @@ func redactSoxErr(s, srcAbs string) string {
 	}
 	const maxErrBytes = 4096
 	if len(s) > maxErrBytes {
-		s = trimPartialTrailingRune(s[:maxErrBytes]) + "…(truncated)"
-	}
-	return s
-}
-
-// trimPartialTrailingRune removes at most utf8.UTFMax-1 trailing bytes
-// when a byte-slice cut split a multi-byte rune, in O(1). Interior
-// invalid bytes are left as-is (encoded as U+FFFD downstream). Twin of
-// internal/transcode.trimPartialTrailingRune.
-func trimPartialTrailingRune(s string) string {
-	for i := 0; i < utf8.UTFMax-1 && len(s) > 0; i++ {
-		r, size := utf8.DecodeLastRuneInString(s)
-		if r != utf8.RuneError || size != 1 {
-			return s
-		}
-		s = s[:len(s)-1]
+		s = fsutil.TrimPartialTrailingRune(s[:maxErrBytes]) + "…(truncated)"
 	}
 	return s
 }
