@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"embed"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -135,8 +136,16 @@ func Uninstall() (string, error) {
 		// the Startup shortcut avoids a brief window where the
 		// service tries to start a binary the operator is still
 		// removing.
-		_ = tryUninstallWindowsService()
-		return uninstallWindowsStartup()
+		//
+		// The SCM error is surfaced (joined with the Startup result)
+		// rather than swallowed: tryUninstallWindowsService already
+		// returns nil for the benign cases (no admin, not registered),
+		// so a non-nil here is a genuine failure (stuck stop, SCM down)
+		// that would otherwise leave a zombie service reported as a
+		// clean uninstall.
+		scmErr := tryUninstallWindowsService()
+		path, startupErr := uninstallWindowsStartup()
+		return path, errors.Join(scmErr, startupErr)
 	default:
 		return "", nil
 	}

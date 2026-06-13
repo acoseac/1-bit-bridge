@@ -1,6 +1,7 @@
 package packaging
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -57,7 +58,7 @@ func uninstallWindowsStartup() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return path, err
 	}
 	return path, nil

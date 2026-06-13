@@ -234,8 +234,14 @@ func extractZipBinary(archivePath, binaryName, dst string) error {
 // produces (bare basename, sometimes nested under a release
 // directory) while rejecting traversal attempts.
 func isBinaryEntry(entry, binaryName string) bool {
-	clean := path.Clean("/" + entry)
-	if strings.Contains(clean, "/..") {
+	// Reject traversal on the RAW entry. The prior post-Clean check
+	// (`strings.Contains(path.Clean("/"+entry), "/..")`) was dead code —
+	// path.Clean resolves ".." away, so the cleaned form can never
+	// contain "/..". path.Base below is the load-bearing guard (a
+	// basename is never ".." and can't contain a separator), but a raw
+	// reject fails fast and documents the intent. goreleaser archive
+	// names never contain "..", so this can't false-reject a real asset.
+	if strings.Contains(entry, "..") {
 		return false
 	}
 	return path.Base(entry) == binaryName

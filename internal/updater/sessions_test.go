@@ -99,3 +99,22 @@ func TestTrackerConcurrentBeginEnd(t *testing.T) {
 		t.Errorf("Inflight = %d after balanced concurrent ops, want 0", got)
 	}
 }
+
+func TestTrackerSpuriousEndDoesNotSwallowLaterBegin(t *testing.T) {
+	// Sequential pin of the load-then-CAS contract: a spurious End()
+	// observing count<=0 must NOT decrement (no transient negative), so
+	// a subsequent Begin() is fully counted. The concurrent no-clobber
+	// property the fix really delivers can't be pinned deterministically
+	// with raw atomics (TestTrackerUnderflowDoesNotClobberLegitimateBegins
+	// is the -race stress guard); this locks the observable behaviour so a
+	// future rewrite of End() can't regress even the sequential case.
+	tr := NewTracker()
+	tr.End() // spurious — count must stay 0, never transiently -1
+	if got := tr.Inflight(); got != 0 {
+		t.Fatalf("after spurious End: Inflight = %d, want 0", got)
+	}
+	tr.Begin()
+	if got := tr.Inflight(); got != 1 {
+		t.Fatalf("Begin after spurious End: Inflight = %d, want 1 (must not be swallowed)", got)
+	}
+}

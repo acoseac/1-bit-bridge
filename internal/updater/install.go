@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/version"
@@ -267,10 +268,17 @@ func (u *Updater) Rollback(opts InstallOptions) error {
 	return nil
 }
 
-// preflightWritable checks the directory the binary lives in is
-// writable by this process. Better-message-than-permission-denied:
-// we ask the operator to run sudo / re-install in user mode, with a
-// concrete remediation path.
+// removeFunc indirects os.Remove for preflightWritable's
+// delete-permission probe. Production = os.Remove; tests override it to
+// exercise the retry/fail path without a real restrictive ACL.
+// Test-only seam — production code MUST NOT mutate it (same convention
+// as renameFunc in internal/manifest/extractors.go).
+var removeFunc = os.Remove
+
+// preflightWritable checks the directory the binary lives in is both
+// writable AND deletable by this process. Better-message-than-
+// permission-denied: we ask the operator to run sudo / re-install in
+// user mode, with a concrete remediation path.
 func preflightWritable(binaryPath string) error {
 	dir := filepath.Dir(binaryPath)
 	tmp, err := os.CreateTemp(dir, ".bridge-write-test-*")
@@ -279,8 +287,24 @@ func preflightWritable(binaryPath string) error {
 	}
 	name := tmp.Name()
 	tmp.Close()
-	_ = os.Remove(name)
-	return nil
+	// Verify we can DELETE here too, not just create — a "create file
+	// but not delete child" ACL (Windows) or a sticky-bit dir (POSIX)
+	// lets CreateTemp succeed while the real binary swap later fails.
+	// Retry briefly to absorb the Windows Defender oplock window that
+	// transiently locks a freshly-closed file (the AV-flakiness class
+	// behind renameWithRetry, PR #100); a genuine permission gap still
+	// surfaces after the budget.
+	var rmErr error
+	for _, backoff := range []time.Duration{0, 10 * time.Millisecond, 30 * time.Millisecond, 60 * time.Millisecond} {
+		if backoff > 0 {
+			time.Sleep(backoff)
+		}
+		rmErr = removeFunc(name)
+		if rmErr == nil || errors.Is(rmErr, os.ErrNotExist) {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w (path=%s, cannot delete scratch file: %v)", ErrPathNotWritable, dir, rmErr)
 }
 
 // cleanScratch wipes the updates/ scratch dir between attempts so
@@ -290,16 +314,31 @@ func cleanScratch(scratch string) {
 }
 
 // sanitizeAssetName reduces a GitHub release asset name to a single safe path
-// component for joining into the scratch dir, and rejects the residue
-// filepath.Base can't make safe. filepath.Base strips directory + traversal
-// segments (so "../../etc/passwd" → "passwd") but still returns "." for an
-// empty / dot name and ".." for a name that is exactly ".." or ends "/.." —
-// joining ".." onto scratch would escape to its parent. Pure helper so the
-// reject is unit-testable without driving the whole Install network flow.
-// DeepSeek review + Gemini security-MEDIUM on PR #368.
+// component for joining into the scratch dir, and rejects anything that isn't
+// a plain filename. filepath.Base strips directory + traversal segments (so
+// "../../etc/passwd" → "passwd") using the SAME separator semantics
+// filepath.Join later uses to place the file — that pairing is what keeps the
+// result inside scratch on every OS.
+//
+// (A path.Base here would be WRONG, despite GitHub names being forward-slash
+// strings: path.Base only treats "/" as a separator, so a Windows-style
+// "..\\..\\x" payload would survive Base intact and then get split by
+// filepath.Join on Windows → traversal. Gemini's literal path.Base suggestion
+// from the r2 review is declined for this reason.)
+//
+// Two residue classes are rejected: "."/".." (which would escape scratch on
+// Join) and any leftover separator — on non-Windows hosts filepath.Base
+// leaves a backslash in place, so a "..\\..\\x" payload is refused outright
+// rather than written as a weird filename, making the behaviour uniform
+// across OSes. Pure helper so the reject is unit-testable without driving the
+// whole Install network flow. DeepSeek review + Gemini security-MEDIUM on
+// PR #368; cross-platform separator reject per the r2 review.
 func sanitizeAssetName(name string) (string, error) {
 	base := filepath.Base(name)
 	if base == "." || base == ".." {
+		return "", fmt.Errorf("invalid release asset name: %q", name)
+	}
+	if strings.ContainsAny(base, `/\`) {
 		return "", fmt.Errorf("invalid release asset name: %q", name)
 	}
 	return base, nil

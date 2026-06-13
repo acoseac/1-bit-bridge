@@ -547,8 +547,10 @@ func TestInstall_NoReleaseMetaIsNoFloor(t *testing.T) {
 
 // Test_sanitizeAssetName pins the path-component sanitiser the Install download
 // path relies on: filepath.Base must strip directory + traversal segments, and
-// the "."/".." residue (which would escape the scratch dir on Join) must be
-// rejected with an error. Gemini security-MEDIUM on PR #368.
+// the "."/".." residue plus any leftover path separator (which would escape the
+// scratch dir on Join — including a Windows "\" that survives filepath.Base on
+// non-Windows hosts) must be rejected with an error. Gemini security-MEDIUM on
+// PR #368; cross-platform separator reject per the r2 review.
 func Test_sanitizeAssetName(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -565,6 +567,7 @@ func Test_sanitizeAssetName(t *testing.T) {
 		{"empty_rejected", "", "", true}, // filepath.Base("") == "."
 		{"trailing_dotdot_rejected", "foo/..", "", true},
 		{"trailing_dot_rejected", "foo/.", "", true},
+		{"backslash_segments_rejected", "..\\..\\x", "", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -582,5 +585,73 @@ func Test_sanitizeAssetName(t *testing.T) {
 				t.Errorf("sanitizeAssetName(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+// Test_isBinaryEntry pins the archive-entry matcher: bare basename or a
+// nested-under-release-dir layout matches, traversal is rejected on the
+// RAW entry (the prior post-Clean check was dead code), and basename
+// mismatches are skipped.
+func Test_isBinaryEntry(t *testing.T) {
+	const bin = "bridge"
+	cases := []struct {
+		entry string
+		want  bool
+	}{
+		{"bridge", true},
+		{"dist/bridge", true},
+		{"bridge_1.2.3_linux_amd64/bridge", true},
+		{"bridge.exe", false},       // wrong basename for a unix binary
+		{"notbridge", false},        // basename mismatch
+		{"../bridge", false},        // traversal rejected
+		{"../../etc/bridge", false}, // traversal rejected
+		{"foo/../bridge", false},    // raw ".." rejected (stricter than pre-fix)
+	}
+	for _, c := range cases {
+		if got := isBinaryEntry(c.entry, bin); got != c.want {
+			t.Errorf("isBinaryEntry(%q, %q) = %v, want %v", c.entry, bin, got, c.want)
+		}
+	}
+}
+
+// Test_preflightWritable_FailsWhenCannotDelete pins the delete-permission
+// probe: if the scratch file can't be removed (a "create but not delete"
+// ACL), preflight must fail with ErrPathNotWritable rather than passing and
+// letting the later binary swap fail.
+func Test_preflightWritable_FailsWhenCannotDelete(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bridge")
+	orig := removeFunc
+	t.Cleanup(func() { removeFunc = orig })
+	removeFunc = func(string) error { return os.ErrPermission } // always fail
+
+	err := preflightWritable(bin)
+	if !errors.Is(err, ErrPathNotWritable) {
+		t.Errorf("preflightWritable with un-deletable scratch = %v, want ErrPathNotWritable", err)
+	}
+}
+
+// Test_preflightWritable_SucceedsAfterTransientRemoveFailure pins the retry
+// backoff that absorbs a transient AV oplock on a freshly-closed temp file:
+// a first-attempt failure followed by success must NOT fail the preflight.
+func Test_preflightWritable_SucceedsAfterTransientRemoveFailure(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bridge")
+	orig := removeFunc
+	t.Cleanup(func() { removeFunc = orig })
+	calls := 0
+	removeFunc = func(name string) error {
+		calls++
+		if calls == 1 {
+			return os.ErrPermission // transient on first try
+		}
+		return orig(name) // real removal on retry
+	}
+
+	if err := preflightWritable(bin); err != nil {
+		t.Errorf("preflightWritable should succeed after a transient remove failure, got %v", err)
+	}
+	if calls < 2 {
+		t.Errorf("expected a retry after the first failure, got %d call(s)", calls)
 	}
 }

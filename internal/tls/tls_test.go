@@ -203,6 +203,17 @@ func TestFingerprintFromDERDeterministic(t *testing.T) {
 	}
 }
 
+func TestFingerprintFromDER_KnownVector(t *testing.T) {
+	// SHA-256 of empty input is a well-known constant; pin the exact
+	// colon-uppercase-hex output so a nibble-math regression in the
+	// byte-iteration formatter is caught (the format-only test passes on
+	// any well-formed hex, even wrong values).
+	const want = "E3:B0:C4:42:98:FC:1C:14:9A:FB:F4:C8:99:6F:B9:24:27:AE:41:E4:64:9B:93:4C:A4:95:99:1B:78:52:B8:55"
+	if got := FingerprintFromDER(nil); got != want {
+		t.Errorf("FingerprintFromDER(nil) = %q, want %q", got, want)
+	}
+}
+
 // TestHandshakeWithPinnedFingerprint proves the generated cert actually works
 // in a live TLS handshake — spin up an httptest server with it, then connect
 // a client that pins to the reported fingerprint and verifies the body arrives.
@@ -422,6 +433,21 @@ func TestMergeIPs_DedupesByCanonicalForm(t *testing.T) {
 	})
 	if len(got) != 4 { // 127.0.0.1, ::1, 0.0.0.0, 10.0.0.5
 		t.Errorf("merged IPs = %v, want 4 deduped entries", got)
+	}
+}
+
+func TestMergeIPs_DropsMalformedIP(t *testing.T) {
+	// A non-nil but wrong-length net.IP has To16()==nil; it must be
+	// dropped, not collapsed into the "" map key (which would alias every
+	// malformed entry into one slot).
+	got := mergeIPs([]net.IP{
+		{1, 2, 3},               // 3 bytes — To16()==nil
+		{4, 5, 6, 7, 8},         // 5 bytes — To16()==nil
+		net.ParseIP("10.0.0.9"), // kept
+	})
+	// defaults: 127.0.0.1, ::1, 0.0.0.0 (3) + 10.0.0.9 (1) = 4
+	if len(got) != 4 {
+		t.Errorf("merged = %v (len %d), want 4 (malformed dropped, no '' collision)", got, len(got))
 	}
 }
 

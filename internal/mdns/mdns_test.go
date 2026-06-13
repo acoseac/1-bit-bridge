@@ -201,6 +201,23 @@ func TestIpSetEqualDetectsAdditionAndRemoval(t *testing.T) {
 	}
 }
 
+func TestIpSetEqualHandlesDuplicates(t *testing.T) {
+	// Same multiset (with a repeated IP) in different order → equal.
+	a := []net.IP{net.ParseIP("10.0.0.1"), net.ParseIP("10.0.0.1"), net.ParseIP("10.0.0.2")}
+	b := []net.IP{net.ParseIP("10.0.0.2"), net.ParseIP("10.0.0.1"), net.ParseIP("10.0.0.1")}
+	if !ipSetEqual(a, b) {
+		t.Errorf("equal multisets in different order should compare equal")
+	}
+	// Same distinct set, different multiplicity → NOT equal. The
+	// matched-tracking compare must not let one b-entry satisfy two
+	// a-entries.
+	c := []net.IP{net.ParseIP("10.0.0.1"), net.ParseIP("10.0.0.1")}
+	d := []net.IP{net.ParseIP("10.0.0.1"), net.ParseIP("10.0.0.2")}
+	if ipSetEqual(c, d) {
+		t.Errorf("[1,1] vs [1,2] should NOT compare equal (multiplicity differs)")
+	}
+}
+
 // TestRebindFiresOnIPChange — drives the loop with an injected
 // ipSource that flips between two IP sets. Verifies that the
 // underlying mDNS server is rebuilt (new pointer) when the IP

@@ -1,9 +1,14 @@
 package packaging
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+
+	"github.com/acoseac/1-bit-bridge/internal/logging"
 )
+
+var logger = logging.Component("packaging")
 
 // ServiceKind identifies which service-manager artifact is installed
 // for the bridge on the current host. The user/system split matters
@@ -90,8 +95,22 @@ func IsInitialized() (cfgPath string, ok bool) {
 		return "", false
 	}
 	cfgPath = filepath.Join(dir, "bridge.yaml")
+	return cfgPath, configFileExists(cfgPath)
+}
+
+// configFileExists reports whether cfgPath exists. A stat error that is
+// NOT "does not exist" (permission, unreadable parent dir) is logged as a
+// breadcrumb and still reported as not-present: the launcher's
+// (string, bool) contract is unchanged, but the operator gets a hint
+// instead of the silent "looks uninitialized" the bare `err != nil` check
+// used to produce — which would have the launcher offer to re-init over a
+// config it simply couldn't read.
+func configFileExists(cfgPath string) bool {
 	if _, err := os.Stat(cfgPath); err != nil {
-		return cfgPath, false
+		if !errors.Is(err, os.ErrNotExist) {
+			logger.Warn("cannot stat config file", "path", cfgPath, "err", err)
+		}
+		return false
 	}
-	return cfgPath, true
+	return true
 }

@@ -1,6 +1,7 @@
 package adminauth
 
 import (
+	"slices"
 	"sync"
 	"time"
 )
@@ -177,10 +178,10 @@ func (rl *RateLimiter) evictOldestLocked(n int) {
 	if n <= 0 || len(rl.buckets) == 0 {
 		return
 	}
-	// Find the n oldest lastAttemptAt timestamps. Single pass
-	// gathering the candidates; for n much smaller than N, a
-	// partial-sort approach would be cheaper, but at our scale
-	// (n=100, N≤10 000) a simple sort of all entries is fine.
+	// Gather all entries, sort oldest-first, drop the first n.
+	// slices.SortFunc is O(N log N) vs. the prior manual O(n·N)
+	// selection loop, with a smaller algorithmic surface. Still
+	// amortised over evictBatch RecordFailure calls (see doc above).
 	type kv struct {
 		key string
 		at  time.Time
@@ -189,22 +190,12 @@ func (rl *RateLimiter) evictOldestLocked(n int) {
 	for k, b := range rl.buckets {
 		all = append(all, kv{k, b.lastAttemptAt})
 	}
-	// Partial sort: bubble the n smallest to the front. Avoids
-	// pulling in sort package for this single use. n is bounded
-	// by evictBatch=100, so this is at most 100 × len(all)
-	// comparisons — ≤ 1M comparisons at the cap; cheap.
 	if n > len(all) {
 		n = len(all)
 	}
-	for i := 0; i < n; i++ {
-		minIdx := i
-		for j := i + 1; j < len(all); j++ {
-			if all[j].at.Before(all[minIdx].at) {
-				minIdx = j
-			}
-		}
-		all[i], all[minIdx] = all[minIdx], all[i]
-	}
+	slices.SortFunc(all, func(a, b kv) int {
+		return a.at.Compare(b.at)
+	})
 	for i := 0; i < n; i++ {
 		delete(rl.buckets, all[i].key)
 	}

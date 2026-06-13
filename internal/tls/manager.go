@@ -223,7 +223,11 @@ func (m *Manager) TailscaleCert() *cryptotls.Certificate {
 // not detected" — Get falls through to self-signed for every
 // connection, same as if the LE cert weren't loaded.
 func (m *Manager) SetMagicDNSSuffix(suffix string) {
-	m.magicDNSSuffix.Store(strings.ToLower(strings.TrimSpace(suffix)))
+	// Strip a trailing dot to mirror Get's SNI normalization. A suffix
+	// stored as "foo.ts.net." would otherwise never match a normalized
+	// (trailing-dot-stripped, lowercased) SNI, falling every Tailscale
+	// handshake through to the self-signed cert.
+	m.magicDNSSuffix.Store(strings.TrimSuffix(strings.ToLower(strings.TrimSpace(suffix)), "."))
 }
 
 // Get is the `tls.Config.GetCertificate` callback. SNI precedence:
