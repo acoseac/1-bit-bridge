@@ -1693,6 +1693,7 @@ function initSettings() {
       // pattern as updateAutoInstall above so the server's
       // pointer-typed patch field always receives a real value.
       upscaleEnabled: fd.get("upscaleEnabled") === "on",
+      analysisEnabled: fd.get("analysisEnabled") === "on",
       // PR 4 — Tailscale + mDNS hot-reload fields. Tailscale
       // dropdown value is one of "cli" / "tsnet" / "disabled".
       // mDNS checkbox is the FormData "on"/null shape — coerce
@@ -1775,6 +1776,9 @@ function initSettings() {
   // feature is off) keeps the dashboard quiet for operators
   // who never enabled upscaling.
   startUpscaleStatsPoller();
+  // Audio analysis stats poller — same cadence/visibility shape as
+  // the upscale tile, minus the live pool (generation is CLI-driven).
+  startAnalysisStatsPoller();
   // Typed-phrase clear-all-variants modal wiring. Lives in
   // initSettings because the button + dialog are on this page.
   initUpscaleClearAllModal();
@@ -1933,6 +1937,40 @@ async function refreshUpscaleStats(tile) {
     // console so a developer debugging on the page can see it,
     // but don't disrupt the rest of the Settings UI.
     console.warn("upscale stats fetch failed:", err);
+  }
+}
+
+const analysisStatsPollMs = 5000;
+let analysisStatsTimer = null;
+
+function startAnalysisStatsPoller() {
+  if (analysisStatsTimer) {
+    clearInterval(analysisStatsTimer);
+    analysisStatsTimer = null;
+  }
+  const tile = document.getElementById("analysis-stats");
+  if (!tile) return; // not on the settings page
+  refreshAnalysisStats(tile);
+  analysisStatsTimer = setInterval(() => refreshAnalysisStats(tile), analysisStatsPollMs);
+}
+
+async function refreshAnalysisStats(tile) {
+  try {
+    const r = await API.get("/api/analysis/stats");
+    // Hide the tile when the feature has never been used (no cached
+    // waveforms AND currently off). A disabled feature with cached
+    // files keeps the tile up so the operator sees historical state.
+    const hasHistory = (r.cachedWaveforms ?? 0) > 0;
+    if (!r.enabled && !hasHistory) {
+      tile.hidden = true;
+      return;
+    }
+    tile.hidden = false;
+    setText("analysis-cached-count", r.cachedWaveforms ?? 0);
+    setText("analysis-cached-bytes", formatBytes(r.cachedBytes ?? 0));
+    setText("analysis-storage-path", r.storagePath ?? "—");
+  } catch (err) {
+    console.warn("analysis stats fetch failed:", err);
   }
 }
 

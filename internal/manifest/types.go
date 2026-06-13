@@ -158,6 +158,21 @@ type Track struct {
 	// surface since dhowden picks it up via TBPM / BPM / tmpo.
 	// Pointer + omitempty; presence-gated.
 	BPM *int `json:"bpm,omitempty"`
+
+	// WaveformTag signals that an offline-computed peak/RMS waveform
+	// sidecar is available for this track (the audio-analysis feature,
+	// `bridge analyze`). Non-empty ⇒ iOS can fetch
+	// `GET /v1/waveform?path=<path>` to render a scrubber waveform; the
+	// value is a short content tag (8 lowercase hex of the sidecar
+	// bytes' SHA-256) iOS uses as the cache key — a regenerated waveform
+	// (source edited) gets a new tag so an immutable client cache
+	// re-fetches.
+	//
+	// Column-derived like `Enriched` / `Variants`: spliced from
+	// `track_analysis.waveform_tag` at read time, NEVER persisted into
+	// `tags_json` (see `marshalForStorage`). Additive + omitempty —
+	// ProtocolVersion stays 1; pre-feature iOS ignores the unknown key.
+	WaveformTag string `json:"waveformTag,omitempty"`
 }
 
 // Variant is one cached alternate rendering of a Track's source. The

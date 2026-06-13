@@ -66,6 +66,7 @@ type Config struct {
 	Backup          BackupConfig       `yaml:"backup,omitempty"`
 	LibraryWatch    LibraryWatchConfig `yaml:"libraryWatch,omitempty"`
 	Upscale         UpscaleConfig      `yaml:"upscale,omitempty"`
+	Analysis        AnalysisConfig     `yaml:"analysis,omitempty"`
 	Tailscale       TailscaleConfig    `yaml:"tailscale,omitempty"`
 	Scanner         ScannerConfig      `yaml:"scanner,omitempty"`
 	Limits          LimitsConfig       `yaml:"limits,omitempty"`
@@ -1076,6 +1077,52 @@ func (u UpscaleConfig) EffectiveVariantsDir(dataDir string) string {
 	return filepath.Join(dataDir, defaultVariantsSubdir)
 }
 
+// AnalysisConfig governs the optional offline audio-analysis feature
+// (`bridge analyze`) — Phase 1 computes a peak waveform sidecar per
+// track for the iOS scrubber. Disabled by default; opt in here AND
+// install sox (the same dependency upscaling uses — analysis decodes
+// through it). A `true` config with sox missing degrades to feature-off
+// in-memory at startup, like upscaling.
+type AnalysisConfig struct {
+	// Enabled is the master toggle. Default false.
+	Enabled bool `yaml:"enabled,omitempty"`
+
+	// Workers is the size of the long-lived analysis worker pool.
+	// Zero (the default) resolves to max(1, NumCPU/2) — half the cores,
+	// because each decoder streams a multi-MB PCM buffer and we leave
+	// headroom for media streaming on Pi/NAS-class hosts.
+	Workers int `yaml:"workers,omitempty"`
+
+	// QueueCap bounds the pending-job channel; enqueues past it are
+	// rejected (ErrQueueFull) rather than blocking. Zero resolves to
+	// DefaultAnalysisQueueCap.
+	QueueCap int `yaml:"queueCap,omitempty"`
+}
+
+// EffectiveWorkers resolves the analysis worker count: explicit YAML
+// value wins; zero defaults to max(1, NumCPU/2). Lower than upscaling's
+// floor by design — analysis is heavier per job (full decode) and runs
+// as a background batch.
+func (a AnalysisConfig) EffectiveWorkers() int {
+	if a.Workers > 0 {
+		return a.Workers
+	}
+	n := runtime.NumCPU() / 2
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
+
+// EffectiveQueueCap resolves the pending-job channel cap, defaulting to
+// DefaultAnalysisQueueCap when the YAML field is zero.
+func (a AnalysisConfig) EffectiveQueueCap() int {
+	if a.QueueCap > 0 {
+		return a.QueueCap
+	}
+	return DefaultAnalysisQueueCap
+}
+
 // defaultVariantsSubdir mirrors transcode.OutputDirSubdir. Kept as
 // a duplicated constant to avoid a config → transcode import; both
 // values MUST stay in lockstep. Validated by a same-package test
@@ -1248,6 +1295,11 @@ const (
 	// well under the cap, the user-spam-the-button case bounces
 	// against a clean 503 instead of exhausting memory.
 	DefaultUpscaleQueueCap = 5000
+	// DefaultAnalysisQueueCap bounds the pending-job channel of the
+	// offline audio-analysis worker pool. Same shape + rationale as
+	// DefaultUpscaleQueueCap — a whole-library `bridge analyze` enqueue
+	// bounces against a clean rejection rather than exhausting memory.
+	DefaultAnalysisQueueCap = 5000
 	// DefaultBootstrapTargetRate is the integer Hz value used to seed
 	// scan_state.upscale_target_hz on first run when the YAML field
 	// is unset or "auto". 192000 covers most 44.1- and 48-family

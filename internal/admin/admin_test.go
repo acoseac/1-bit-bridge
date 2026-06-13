@@ -624,6 +624,90 @@ func TestSettingsPatchUpscaleEnabled(t *testing.T) {
 	}
 }
 
+// TestSettingsPatchAnalysisEnabled mirrors the upscale toggle: flip
+// on/off marks restart-required + persists; idempotent re-submit does
+// not. Analysis serve wiring is decided once at startup.
+func TestSettingsPatchAnalysisEnabled(t *testing.T) {
+	srv, _, cfgPath := newTestServer(t)
+	h := srv.Handler()
+
+	var resp settingsPatchResponse
+	code := doJSON(t, h, "PATCH", "/api/settings",
+		map[string]any{"analysisEnabled": true}, &resp)
+	if code != 200 {
+		t.Fatalf("patch analysis on: %d", code)
+	}
+	if !resp.RestartRequired {
+		t.Error("analysisEnabled change must mark restart required")
+	}
+	if !srv.deps.CfgHolder.Load().Analysis.Enabled {
+		t.Error("in-memory cfg did not reflect analysis.enabled=true")
+	}
+	reloaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reloaded.Analysis.Enabled {
+		t.Error("analysis.enabled did not persist to disk")
+	}
+
+	// Idempotent re-submit → no restart banner.
+	resp = settingsPatchResponse{}
+	code = doJSON(t, h, "PATCH", "/api/settings",
+		map[string]any{"analysisEnabled": true}, &resp)
+	if code != 200 {
+		t.Fatalf("patch idempotent: %d", code)
+	}
+	if resp.RestartRequired {
+		t.Error("idempotent analysisEnabled patch must not require restart")
+	}
+}
+
+// TestAnalysisStatsHandler covers GET /api/analysis/stats. No
+// serve-side pool (generation is CLI-driven), so the response carries
+// no Pool — just enabled / sox / cached counts / storage path.
+func TestAnalysisStatsHandler(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	h := srv.Handler()
+
+	// Default: feature off, no precheck wired.
+	var got analysisStatsResponse
+	code := doJSON(t, h, "GET", "/api/analysis/stats", nil, &got)
+	if code != 200 {
+		t.Fatalf("stats: %d", code)
+	}
+	if got.Enabled {
+		t.Error("Enabled should be false by default")
+	}
+	if got.SoxAvailable != nil {
+		t.Errorf("SoxAvailable should be nil without precheck; got %v", *got.SoxAvailable)
+	}
+	if got.CachedWaveforms != 0 || got.CachedBytes != 0 {
+		t.Errorf("default cached counters non-zero: %+v", got)
+	}
+	if got.StoragePath == "" {
+		t.Error("StoragePath should always be populated")
+	}
+
+	// Wire sox precheck (available) + enable the flag → enabled true.
+	srv.deps.UpscalePrecheck = func() error { return nil }
+	next := config.Clone(srv.deps.CfgHolder.Load())
+	next.Analysis.Enabled = true
+	srv.deps.CfgHolder.Store(next)
+
+	got = analysisStatsResponse{}
+	code = doJSON(t, h, "GET", "/api/analysis/stats", nil, &got)
+	if code != 200 {
+		t.Fatalf("stats wired: %d", code)
+	}
+	if !got.Enabled {
+		t.Error("Enabled should be true when flag on AND sox available")
+	}
+	if got.SoxAvailable == nil || !*got.SoxAvailable {
+		t.Error("SoxAvailable should be true when precheck reports nil")
+	}
+}
+
 // TestUpscaleStatsHandler covers the GET /api/upscale/stats
 // shape across three states: feature off + no cached variants
 // (fields default-zero, no Pool); feature off + history (Pool

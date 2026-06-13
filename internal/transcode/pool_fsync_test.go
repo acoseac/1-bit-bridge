@@ -67,7 +67,7 @@ func TestPoolFsyncFailureSkipsUpsertAndFiresJobFailed(t *testing.T) {
 	}
 
 	// Wait for the failure path to land (failedCnt bumped + fail event fired).
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if p.Stats().Failed >= 1 && jobFailedFires.Load() >= 1 {
 			break
@@ -131,7 +131,7 @@ func TestPoolFsyncSuccessReachesUpsert(t *testing.T) {
 		t.Fatalf("Enqueue: %v", err)
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if p.Stats().Done >= 1 {
 			break

@@ -488,6 +488,64 @@ The schema version (`v1`) bumps only when the on-disk sidecar layout or the SoX 
 - `upscale.enabled: true` AND `sox` on PATH: full feature operates as documented.
 - `upscale.enabled: true` AND `sox` MISSING from PATH: bridge logs `.error` at startup, in-memory disables the feature, advertises `upscaleEnabled: false`. The rest of the server keeps running.
 
+### Waveform (offline audio analysis, additive since v1.8)
+
+An opt-in offline analysis feature that pre-computes a compact **peak-envelope waveform** per track so the iOS player can render a scrubber waveform without decoding the file on-device. Disabled by default; operators enable it via `analysis.enabled: true` in `bridge.yaml` and run `bridge analyze` on the server to populate the cache. Like upscaling, analysis decodes through `sox(1)` and is always offline — it only **reads** samples to derive the envelope and never alters what `/v1/download` serves (the original streams byte-for-byte). DSD sources (`.dsf` / `.dff`) are skipped (sox can't decode 1-bit DSD).
+
+Advertised via the `waveform` flag in `/v1/health.features`. Pre-feature bridges omit the flag, omit `Track.waveformTag`, and return `404` from `/v1/waveform` — iOS treats all three identically (no scrubber waveform; falls back to a plain seek bar).
+
+#### `Track.waveformTag` (manifest)
+
+When the feature is enabled AND the bridge has a cached waveform for a track, that track's `Track` entry in `/v1/manifest` carries an additional string field:
+
+```json
+{ "path": "Music/Album/01.flac", "size": 12345678, "mtime": "…", "waveformTag": "3b42801f" }
+```
+
+`waveformTag` is `omitempty` (absent when no waveform is cached, or the feature is off). Its value is a short **content tag** — the first 8 lowercase hex of the sidecar bytes' SHA‑256. iOS uses it as the cache key when fetching `/v1/waveform`: a regenerated waveform (the source file was edited) yields a new tag, so a client caching by tag re-fetches automatically. Writing a waveform bumps the parent track's `indexed_at`, so the new `waveformTag` surfaces on the next `/v1/manifest?since=` delta sync (only when the value actually changed — an identical recompute is a no-op).
+
+#### `GET /v1/waveform?path=<rel>` (bearer-authenticated)
+
+Returns the binary waveform sidecar for the track at `path` (the same library-relative form `/v1/download` accepts; iOS-shaped lowercase/leading-slash paths resolve case-insensitively).
+
+- `200 OK`, `Content-Type: application/octet-stream`, `ETag: "<waveformTag>"`, `Cache-Control: public, max-age=31536000, immutable`. The response is content-addressed by tag (the client only ever requests a tag it learned from the manifest), so immutable caching is safe — the client downloads each distinct waveform exactly once.
+- `400 bad_request` — missing/invalid `path`.
+- `404 waveform_not_found` — analysis disabled, or no waveform cached for this track yet.
+- `410 waveform_stale` — the source file drifted (mtime beyond a 2 s tolerance, or size changed) since the waveform was computed; the client should fall back to a plain seek bar until re-analysis catches up. `410 waveform_missing_on_disk` — the row exists but the sidecar file is gone (manual wipe / partial GC); same client handling.
+
+##### Sidecar binary format (`1BWF`)
+
+A 22‑byte little-endian header followed by `count` × `[int8 min, int8 max]` peak pairs:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 4 | magic `"1BWF"` |
+| 4 | 1 | format version (`1`) |
+| 5 | 1 | flags (`0`) |
+| 6 | 4 | `uint32` sample rate (Hz; `48000`) |
+| 10 | 4 | `uint32` samples per bucket (`4800` = 0.1 s) |
+| 14 | 4 | `uint32` bucket count `N` |
+| 18 | 4 | `uint32` duration (ms) |
+| 22 | 2·N | `N` pairs of `int8` (min, max), each in `[-127, 127]` |
+
+Buckets are fixed-width in time (0.1 s); map bucket `i` to time `(i / N) × duration`. Peaks are decoded at 48 kHz mono and quantised symmetrically to `int8`. A typical 4-minute track is ~5 KB. The format version in the header bumps if the layout changes; a client that doesn't recognise the version should ignore the sidecar.
+
+#### `GET /v1/analysis/stats` (bearer-authenticated)
+
+Authenticated read-only snapshot of the analysis feature, mirroring the admin tile. Cheap (one SQL `COUNT` + a TTL-cached sox precheck).
+
+```json
+{ "enabled": true, "soxAvailable": true, "cachedWaveforms": 24518, "cachedBytes": 124857600 }
+```
+
+`enabled` reflects live runtime state (config flag AND sox available); `soxAvailable` is omitted when no precheck is wired. There is no live `pool` field — the snapshot surfaces cached totals only. Generation runs via the `bridge analyze` CLI and an automatic serve-side background sweep that picks up newly-scanned tracks on a settle-delay-then-scan-interval cadence. Pre-feature bridges return `404` (the route is unregistered); iOS treats that identically to `{enabled: false}`.
+
+#### Feature gate semantics
+
+- `analysis.enabled: false` (default): `/v1/health.features` omits `waveform`; manifest emits no `waveformTag`; `/v1/waveform` returns `404`.
+- `analysis.enabled: true` AND `sox` on PATH: full feature operates as documented.
+- `analysis.enabled: true` AND `sox` MISSING from PATH: bridge logs `.error` at startup, in-memory disables the feature, omits the `waveform` flag. The rest of the server keeps running.
+
 ### Playlist backup (additive, since v1.6; user-wide since v1.7)
 
 Playlist backup. The bridge is a **safe, not a player**: a playlist may mix tracks from several bridges plus local/SMB sources. Items owned by this bridge are stored as resolvable `path`s; items owned by another bridge (or device-local / SMB) are stored as **opaque references** the bridge never resolves or serves — iOS re-resolves them locally on restore against its own shares.

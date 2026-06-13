@@ -782,6 +782,63 @@ var migrations = []migration{
 			ON upnp_track_routing(server_udn, last_seen_at);
 		`,
 	},
+	{
+		version: 14,
+		name:    "track_analysis (offline audio analysis sidecars)",
+		// Per-track offline audio-analysis results produced by
+		// `bridge analyze`. Phase 1 carries only the waveform sidecar
+		// pointer + content tag; a later phase ALTERs this table to add
+		// signal-derived scalars (integrated LUFS / ReplayGain / key /
+		// tempo) — keep new columns additive with DEFAULTs so the ladder
+		// stays append-only and idempotent.
+		//
+		// `source_path` PRIMARY KEY matches `tracks.path` exactly. FK ON
+		// DELETE CASCADE reaps the row when the parent track is deleted;
+		// the on-disk waveform FILE is unlinked explicitly by DeleteTrack
+		// / DeleteTracksByPrefix / WipeAllTracks (CASCADE drops the row
+		// but not the sidecar — same contract as track_variants).
+		//
+		// `waveform_path` is the absolute on-disk path (authoritative;
+		// never recomputed at read time, so operators can relocate
+		// <dataDir>/waveforms/). `waveform_tag` is 8 hex of the sidecar
+		// bytes' SHA-256 — spliced onto Track.WaveformTag and used by iOS
+		// as an immutable-cache key. `source_mtime_ns` + `source_size`
+		// drive the scan-skip gate and the serving-time freshness check.
+		// `schema_version` lets a future waveform-format change
+		// invalidate prior sidecars without a migration.
+		//
+		// Append-only / idempotent per the ladder contract.
+		sql: `
+		CREATE TABLE IF NOT EXISTS track_analysis (
+			source_path      TEXT PRIMARY KEY,
+			waveform_path    TEXT NOT NULL DEFAULT '',
+			waveform_tag     TEXT NOT NULL DEFAULT '',
+			waveform_size    INTEGER NOT NULL DEFAULT 0,
+			source_mtime_ns  INTEGER NOT NULL,
+			source_size      INTEGER NOT NULL,
+			schema_version   TEXT NOT NULL DEFAULT '',
+			created_at       INTEGER NOT NULL,
+			FOREIGN KEY (source_path) REFERENCES tracks(path) ON DELETE CASCADE
+		);
+		`,
+	},
+	{
+		version: 15,
+		name:    "track_analysis unicode-lower lookup index",
+		// LookupAnalysis falls back to
+		// `unicode_lower(source_path) = unicode_lower(?)` for iOS-shaped
+		// lowercase paths; v14 only has the PRIMARY KEY on source_path, so
+		// that fold degrades to a table scan as analysis rows grow (25k+
+		// on a large library). This functional index mirrors the v4
+		// `idx_track_variants_source_path_unicode_lower` exactly — same
+		// Go-registered deterministic `unicode_lower` scalar, same
+		// build-once-on-first-query cost. Appended per the ladder
+		// convention (v14 already shipped). (CodeRabbit on #395.)
+		sql: `
+		CREATE INDEX IF NOT EXISTS idx_track_analysis_source_path_unicode_lower
+			ON track_analysis(unicode_lower(source_path));
+		`,
+	},
 }
 
 // NOTE (r1 review #49, dropped): a covering index on
@@ -918,6 +975,14 @@ func (s *Store) UnenrichedTracks(ctx context.Context, limit int) ([]Track, error
 func marshalForStorage(t *Track) ([]byte, error) {
 	clone := *t
 	clone.Enriched = nil
+	// WaveformTag is column-derived (spliced from track_analysis at
+	// read time, same as Enriched / Variants). Zero it before the
+	// blob marshal so a caller that round-trips a read Track back
+	// through a write path can't leak the spliced value into
+	// tags_json, where the JSON-only readers (GetTrack /
+	// UnenrichedTracks) would then return a stale tag contradicting
+	// the track_analysis column.
+	clone.WaveformTag = ""
 	return json.Marshal(&clone)
 }
 
@@ -1151,6 +1216,8 @@ func (s *Store) DeleteTrack(ctx context.Context, path string) error {
 		// leave a stale row in the manifest.
 		logger.Warn("delete-track: list sidecars", "track", path, "err", err)
 	}
+	// Also enumerate this track's waveform sidecar (track_analysis).
+	sidecars = append(sidecars, s.listWaveformSidecars(ctx, "source_path = ?", path)...)
 	// Step 2: parent delete. CASCADE clears `track_variants`
 	// rows; sidecar files we just enumerated will be unlinked
 	// next.
@@ -1220,6 +1287,9 @@ func (s *Store) DeleteTracksBatch(ctx context.Context, paths []string) error {
 		} else {
 			logger.Warn("delete-tracks-batch: list sidecars", "err", err)
 		}
+		// Waveform sidecars for the same chunk (track_analysis).
+		wfIn, wfArgs := buildPathInQuery("source_path", chunk)
+		sidecars = append(sidecars, s.listWaveformSidecars(ctx, wfIn, wfArgs...)...)
 
 		// One DELETE for the whole chunk under a single transaction.
 		// FK CASCADE handles upnp_track_routing + track_variants in
@@ -1451,6 +1521,19 @@ const variantsAggSQL = `
 	 FROM track_variants v
 	 WHERE v.source_path = tracks.path) AS variants_json`
 
+// waveformTagSQL is the correlated-subquery suffix that splices the
+// offline-analysis waveform content tag onto each row. Returns the
+// `track_analysis.waveform_tag` for the track, or NULL when no
+// analysis row exists (or the tag is empty). Spliced onto
+// Track.WaveformTag at read time — column-derived, never persisted in
+// tags_json (same discipline as Enriched / Variants). One indexed
+// point-lookup on the track_analysis PRIMARY KEY per row; the
+// NULLIF keeps a defensively-empty tag from surfacing as a present
+// field on the wire. Appended after variantsAggSQL in the manifest
+// read paths.
+const waveformTagSQL = `(SELECT NULLIF(waveform_tag, '')
+	 FROM track_analysis WHERE source_path = tracks.path) AS waveform_tag`
+
 // scanTrackVariants decodes the JSON aggregation column produced
 // by variantsAggSQL into Track.Variants. Empty / `null` / `[]`
 // payloads land as nil so `omitempty` drops the field on the
@@ -1555,7 +1638,7 @@ func formatSampleRateLabel(hz float64) string {
 // require re-marshalling every track on each `MarkEnriched` write
 // just to flip a bool, which is what the column is for.
 func (s *Store) ListTracks(ctx context.Context, since *time.Time) ([]Track, error) {
-	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + ` FROM tracks`
+	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + ` FROM tracks`
 	args := []any{}
 	if since != nil {
 		q += ` WHERE indexed_at > ?`
@@ -1572,7 +1655,8 @@ func (s *Store) ListTracks(ctx context.Context, since *time.Time) ([]Track, erro
 		var raw []byte
 		var enrichedAt int64
 		var variantsRaw []byte
-		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw); err != nil {
+		var wfTag sql.NullString
+		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw, &wfTag); err != nil {
 			return nil, err
 		}
 		var t Track
@@ -1581,6 +1665,7 @@ func (s *Store) ListTracks(ctx context.Context, since *time.Time) ([]Track, erro
 		}
 		scanTrackVariants(&t, variantsRaw)
 		t.Enriched = boolPtr(enrichedAt != 0)
+		t.WaveformTag = wfTag.String
 		out = append(out, t)
 	}
 	return out, rows.Err()
@@ -1609,7 +1694,7 @@ func (s *Store) StreamTracks(ctx context.Context, sp *time.Time, fn func(*Track)
 		// production crash deep in the streaming-manifest path.
 		return errors.New("StreamTracks: nil callback")
 	}
-	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + ` FROM tracks`
+	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + ` FROM tracks`
 	args := []any{}
 	if sp != nil {
 		q += ` WHERE indexed_at > ?`
@@ -1639,7 +1724,8 @@ func (s *Store) StreamTracks(ctx context.Context, sp *time.Time, fn func(*Track)
 		var raw []byte
 		var enrichedAt int64
 		var variantsRaw []byte
-		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw); err != nil {
+		var wfTag sql.NullString
+		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw, &wfTag); err != nil {
 			return err
 		}
 		t = Track{}
@@ -1648,6 +1734,7 @@ func (s *Store) StreamTracks(ctx context.Context, sp *time.Time, fn func(*Track)
 		}
 		t.Enriched = boolPtr(enrichedAt != 0)
 		scanTrackVariants(&t, variantsRaw)
+		t.WaveformTag = wfTag.String
 		if err := fn(&t); err != nil {
 			return err
 		}
@@ -1676,7 +1763,7 @@ func (s *Store) ListTracksPage(ctx context.Context, afterPath string, limit int)
 		limit = 1000
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT tags_json, enriched_at, `+variantsAggSQL+` FROM tracks
+		SELECT tags_json, enriched_at, `+variantsAggSQL+`, `+waveformTagSQL+` FROM tracks
 		WHERE path > ?
 		ORDER BY path ASC
 		LIMIT ?
@@ -1690,7 +1777,8 @@ func (s *Store) ListTracksPage(ctx context.Context, afterPath string, limit int)
 		var raw []byte
 		var enrichedAt int64
 		var variantsRaw []byte
-		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw); err != nil {
+		var wfTag sql.NullString
+		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw, &wfTag); err != nil {
 			return nil, err
 		}
 		var t Track
@@ -1699,6 +1787,7 @@ func (s *Store) ListTracksPage(ctx context.Context, afterPath string, limit int)
 		}
 		scanTrackVariants(&t, variantsRaw)
 		t.Enriched = boolPtr(enrichedAt != 0)
+		t.WaveformTag = wfTag.String
 		out = append(out, t)
 	}
 	return out, rows.Err()
@@ -1965,6 +2054,11 @@ func (s *Store) DeleteTracksByPrefix(ctx context.Context, prefix string) (int64,
 	if err != nil {
 		return 0, err
 	}
+	// Waveform sidecars under the same prefix (track_analysis). Best-
+	// effort like the rest of the analysis cleanup; an orphan is a
+	// `bridge analyze --gc` problem, not a reason to fail the delete.
+	doomedSidecars = append(doomedSidecars,
+		s.listWaveformSidecars(ctx, `source_path LIKE ? ESCAPE '\'`, escaped+"%")...)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
@@ -2071,6 +2165,39 @@ func removeSidecarFiles(paths []string) {
 	}
 }
 
+// listWaveformSidecars returns the non-empty `track_analysis.waveform_path`
+// values matching the given WHERE clause, for the delete paths to unlink
+// alongside variant sidecars (CASCADE drops the row but not the on-disk
+// file — same contract as track_variants). Best-effort: enumeration
+// failure logs and returns what it has, so a waveform orphan becomes
+// `bridge analyze --gc`'s problem and never blocks the parent delete.
+// The `where` argument is a caller-side compile-time literal (e.g.
+// "source_path = ?") — never caller text — so the concatenation is
+// injection-safe; all values flow through `args` placeholders. Caller
+// holds s.mu (writer-serialization contract).
+func (s *Store) listWaveformSidecars(ctx context.Context, where string, args ...any) []string {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT waveform_path FROM track_analysis WHERE waveform_path != '' AND (`+where+`)`, args...)
+	if err != nil {
+		logger.Warn("list waveform sidecars", "err", err)
+		return nil
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var wp string
+		if scanErr := rows.Scan(&wp); scanErr != nil {
+			logger.Warn("scan waveform sidecar", "err", scanErr)
+			continue
+		}
+		out = append(out, wp)
+	}
+	if iterErr := rows.Err(); iterErr != nil {
+		logger.Warn("iter waveform sidecars", "err", iterErr)
+	}
+	return out
+}
+
 // WipeAllTracks drops every track and folder row. Used by the admin
 // console on a single-root ↔ multi-root transition, where stored paths
 // change form (bare "Artist/…" vs "RootBasename/Artist/…") and the cheap
@@ -2097,6 +2224,10 @@ func (s *Store) WipeAllTracks(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// All waveform sidecars too (track_analysis). CASCADE clears the
+	// rows on the tracks-wipe; the files are unlinked alongside the
+	// variant sidecars below.
+	doomedSidecars = append(doomedSidecars, s.listWaveformSidecars(ctx, "1=1")...)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -4211,6 +4342,265 @@ func (s *Store) CountVariants(ctx context.Context) (int, int64, error) {
 		bytes sql.NullInt64
 	)
 	row := s.db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM track_variants`)
+	if err := row.Scan(&count, &bytes); err != nil {
+		return 0, 0, err
+	}
+	return count, bytes.Int64, nil
+}
+
+// AnalysisRow is the on-disk record for one track's offline audio
+// analysis (the `track_analysis` table). Phase 1 carries the waveform
+// sidecar pointer + content tag + freshness fields; a later phase adds
+// the signal-derived scalar columns. Constructed by the analyze
+// package when a `bridge analyze` job completes; read by the
+// `/v1/waveform` handler, the manifest read-splice (waveform_tag only),
+// and `bridge analyze --gc`.
+type AnalysisRow struct {
+	SourcePath    string
+	WaveformPath  string // absolute on-disk sidecar path (authoritative)
+	WaveformTag   string // 8 hex of sidecar bytes' SHA-256 (iOS cache key)
+	WaveformSize  int64
+	SourceMTimeNS int64
+	SourceSize    int64
+	SchemaVersion string
+	CreatedAt     int64
+}
+
+// analysisRowsEqual reports whether the analysis already on disk is
+// identical to a freshly-computed one — same source freshness, same
+// waveform sidecar, same schema. Used by UpsertAnalysis to skip the
+// `tracks.indexed_at` bump (and the write entirely) on an identical
+// recompute, so a `bridge analyze --gc` / forced re-run can't trigger a
+// 50k-track iOS delta-sync storm for no actual change (the PR #369
+// walkFieldsEqual lesson, applied to analysis).
+func analysisRowsEqual(a, b *AnalysisRow) bool {
+	return a.WaveformPath == b.WaveformPath &&
+		a.WaveformTag == b.WaveformTag &&
+		a.WaveformSize == b.WaveformSize &&
+		a.SourceMTimeNS == b.SourceMTimeNS &&
+		a.SourceSize == b.SourceSize &&
+		a.SchemaVersion == b.SchemaVersion
+}
+
+// UpsertAnalysis writes (or replaces) one `track_analysis` row AND
+// bumps the parent track's `indexed_at` so iOS delta-sync surfaces the
+// new `waveformTag` — BUT only when the computed values actually differ
+// from what's stored. An identical recompute is a complete no-op (no
+// write, no bump), so re-running analysis over an unchanged library
+// doesn't churn the manifest. Both the row write and the bump run in
+// one transaction under `s.mu` per the writer contract; the bump uses
+// the same strictly-advancing CASE-WHEN form as UpsertVariant.
+func (s *Store) UpsertAnalysis(ctx context.Context, a AnalysisRow) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Read the existing row inside the lock so the equality check and
+	// the write are atomic vs. any concurrent writer (all serialised by
+	// s.mu anyway, but the read-then-write stays consistent).
+	existing, err := s.getAnalysisLocked(ctx, a.SourcePath)
+	if err != nil {
+		return err
+	}
+	if existing != nil && analysisRowsEqual(existing, &a) {
+		return nil // identical — no write, no indexed_at bump.
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() // no-op after Commit; structural rollback guarantee.
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO track_analysis
+			(source_path, waveform_path, waveform_tag, waveform_size,
+			 source_mtime_ns, source_size, schema_version, created_at)
+		VALUES (?,?,?,?,?,?,?,?)
+		ON CONFLICT (source_path) DO UPDATE SET
+			waveform_path   = excluded.waveform_path,
+			waveform_tag    = excluded.waveform_tag,
+			waveform_size   = excluded.waveform_size,
+			source_mtime_ns = excluded.source_mtime_ns,
+			source_size     = excluded.source_size,
+			schema_version  = excluded.schema_version,
+			created_at      = excluded.created_at
+	`, a.SourcePath, a.WaveformPath, a.WaveformTag, a.WaveformSize,
+		a.SourceMTimeNS, a.SourceSize, a.SchemaVersion, a.CreatedAt); err != nil {
+		return err
+	}
+	now := s.now().UnixNano()
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE tracks SET indexed_at = CASE
+			WHEN indexed_at >= ? THEN indexed_at + 1
+			ELSE ?
+		END
+		WHERE path = ?
+	`, now, now, a.SourcePath); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// GetAnalysis fetches one analysis row by exact source_path. Returns
+// (nil, nil) when absent — same convention as GetVariant. Does NOT
+// hold s.mu (reads are un-mutexed per the Store contract; WAL handles
+// concurrent readers).
+func (s *Store) GetAnalysis(ctx context.Context, sourcePath string) (*AnalysisRow, error) {
+	return s.getAnalysisLocked(ctx, sourcePath)
+}
+
+// getAnalysisLocked is the shared row-fetch used by both the public
+// GetAnalysis and the under-lock read inside UpsertAnalysis. It issues
+// only a SELECT, so it's safe to call whether or not s.mu is held.
+func (s *Store) getAnalysisLocked(ctx context.Context, sourcePath string) (*AnalysisRow, error) {
+	var a AnalysisRow
+	err := s.db.QueryRowContext(ctx, `
+		SELECT source_path, waveform_path, waveform_tag, waveform_size,
+		       source_mtime_ns, source_size, schema_version, created_at
+		FROM track_analysis
+		WHERE source_path = ?
+	`, sourcePath).Scan(
+		&a.SourcePath, &a.WaveformPath, &a.WaveformTag, &a.WaveformSize,
+		&a.SourceMTimeNS, &a.SourceSize, &a.SchemaVersion, &a.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &a, nil
+}
+
+// LookupAnalysis resolves an iOS-shaped source path (lowercase +
+// leading slash from `share.normalize`) against the manifest's
+// case-preserved `track_analysis.source_path`. Same two-stage shape as
+// LookupVariant: exact first, then path-cleaned exact, then a
+// fail-closed `unicode_lower` fold. The `/v1/waveform` handler is the
+// canonical caller — it must agree with LookupTrack on which row it's
+// inspecting.
+func (s *Store) LookupAnalysis(ctx context.Context, sourcePath string) (*AnalysisRow, error) {
+	if a, err := s.GetAnalysis(ctx, sourcePath); err != nil || a != nil {
+		return a, err
+	}
+	cleaned := normalizePathForLookup(sourcePath)
+	if cleaned != sourcePath {
+		if a, err := s.GetAnalysis(ctx, cleaned); err != nil || a != nil {
+			return a, err
+		}
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT source_path, waveform_path, waveform_tag, waveform_size,
+		       source_mtime_ns, source_size, schema_version, created_at
+		FROM track_analysis
+		WHERE unicode_lower(source_path) = unicode_lower(?)
+		LIMIT 2
+	`, cleaned)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+	var a AnalysisRow
+	if err := rows.Scan(
+		&a.SourcePath, &a.WaveformPath, &a.WaveformTag, &a.WaveformSize,
+		&a.SourceMTimeNS, &a.SourceSize, &a.SchemaVersion, &a.CreatedAt); err != nil {
+		return nil, err
+	}
+	if rows.Next() {
+		// Ambiguous case-fold — refuse to pick a row rather than serve
+		// the wrong sidecar. Mirrors lookupVariantByLowerCase.
+		logger.Warn("LookupAnalysis: case-folded fallback is ambiguous, refusing to pick a row",
+			"path", sourcePath)
+		return nil, nil
+	}
+	// A driver/I-O error during the ambiguity rows.Next() surfaces here,
+	// not as a scan error — propagate it so a transient fault can't be
+	// misread as "unambiguous row found". (CodeRabbit on #395.)
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return &a, nil
+}
+
+// AllAnalysisRows returns every analysis row. Used by `bridge analyze
+// --gc` to reconcile the on-disk waveform tree against the DB
+// (mark-and-sweep of orphan sidecars). Reads are un-mutexed.
+func (s *Store) AllAnalysisRows(ctx context.Context) ([]AnalysisRow, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT source_path, waveform_path, waveform_tag, waveform_size,
+		       source_mtime_ns, source_size, schema_version, created_at
+		FROM track_analysis
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []AnalysisRow{}
+	for rows.Next() {
+		var a AnalysisRow
+		if err := rows.Scan(
+			&a.SourcePath, &a.WaveformPath, &a.WaveformTag, &a.WaveformSize,
+			&a.SourceMTimeNS, &a.SourceSize, &a.SchemaVersion, &a.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// DeleteAnalysis removes one analysis row and bumps the parent track's
+// `indexed_at` so iOS drops the now-absent `waveformTag` on its next
+// delta sync. Best-effort sidecar-file unlink is the caller's job (the
+// row only stores the path). No-op (no bump) when the row is absent, so
+// a `--gc` pass that finds nothing to delete doesn't churn the
+// manifest. Holds `s.mu` per the writer contract.
+func (s *Store) DeleteAnalysis(ctx context.Context, sourcePath string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `DELETE FROM track_analysis WHERE source_path = ?`, sourcePath)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err // don't silently treat a driver fault as "nothing deleted" (CodeRabbit #395)
+	}
+	if n == 0 {
+		return tx.Commit() // nothing deleted → no bump.
+	}
+	now := s.now().UnixNano()
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE tracks SET indexed_at = CASE
+			WHEN indexed_at >= ? THEN indexed_at + 1
+			ELSE ?
+		END
+		WHERE path = ?
+	`, now, now, sourcePath); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// CountAnalysis returns (rows-with-a-waveform, total waveform bytes)
+// for the analysis stats tile. Mirrors CountVariants' shape; degrades
+// to "stats unavailable" on error at the handler. Reads un-mutexed.
+func (s *Store) CountAnalysis(ctx context.Context) (int, int64, error) {
+	var (
+		count int
+		bytes sql.NullInt64
+	)
+	row := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*), COALESCE(SUM(waveform_size), 0)
+		FROM track_analysis WHERE waveform_tag != ''`)
 	if err := row.Scan(&count, &bytes); err != nil {
 		return 0, 0, err
 	}

@@ -35,6 +35,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/admin"
 	"github.com/acoseac/1-bit-bridge/internal/adminauth"
 	"github.com/acoseac/1-bit-bridge/internal/advertise"
+	"github.com/acoseac/1-bit-bridge/internal/analyze"
 	"github.com/acoseac/1-bit-bridge/internal/api"
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
@@ -119,6 +120,32 @@ func (a *variantStoreAdapter) LookupVariant(ctx context.Context, sourcePath, var
 		SidecarPath:   v.SidecarPath,
 		SourceMTimeNS: v.SourceMTimeNS,
 		SourceSize:    v.SourceSize,
+	}, nil
+}
+
+// analysisStoreAdapter implements api.AnalysisStore on top of a
+// manifest.Provider — the /v1/waveform handler's lookup. Same
+// upward-cycle-avoidance pattern as variantStoreAdapter.
+type analysisStoreAdapter struct {
+	provider *manifest.Provider
+}
+
+func (a *analysisStoreAdapter) LookupAnalysis(ctx context.Context, sourcePath string) (*api.AnalysisRecord, error) {
+	al, err := a.provider.LookupAnalysis(ctx, sourcePath)
+	if err != nil {
+		return nil, err
+	}
+	if al == nil {
+		return nil, nil
+	}
+	return &api.AnalysisRecord{
+		// Canonical row values — the case-insensitive lookup may have
+		// resolved a folded request against the canonical-case row.
+		SourcePath:    al.SourcePath,
+		WaveformPath:  al.WaveformPath,
+		WaveformTag:   al.WaveformTag,
+		SourceMTimeNS: al.SourceMTimeNS,
+		SourceSize:    al.SourceSize,
 	}, nil
 }
 
@@ -792,6 +819,55 @@ func (a *upscaleStatsAdapter) cachedSoxOK() bool {
 	return a.soxOK
 }
 
+// analysisStatsAdapter implements api.AnalysisStatsProvider. Mirrors
+// upscaleStatsAdapter, minus the live pool: serve-side analysis
+// generation is CLI-driven (`bridge analyze`), so there's no long-lived
+// serve pool to snapshot — `Enabled` reflects the config+sox gate
+// directly (not pool presence), and Pool stays nil. Counts come from
+// CountAnalysis; sox precheck shares the same 30 s TTL cache shape.
+type analysisStatsAdapter struct {
+	enabled func() bool
+	store   *manifest.Store
+
+	soxMu sync.Mutex
+	soxAt time.Time
+	soxOK bool
+}
+
+func (a *analysisStatsAdapter) AnalysisStatsSnapshot(ctx context.Context) (api.AnalysisStats, error) {
+	var snap api.AnalysisStats
+	snap.Enabled = a.enabled()
+	soxOK := a.cachedSoxOK()
+	snap.SoxAvailable = &soxOK
+	if a.store != nil {
+		count, bytes, err := a.store.CountAnalysis(ctx)
+		if err != nil {
+			// Same two-shape treatment as upscaleStatsAdapter: ctx
+			// cancellation/timeout surfaces as a 5xx; genuine SQL
+			// faults degrade to logged + zero counts.
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return snap, err
+			}
+			logger.Warn("analysis stats: count analysis", "err", err)
+		} else {
+			snap.CachedWaveforms = count
+			snap.CachedBytes = bytes
+		}
+	}
+	return snap, nil
+}
+
+func (a *analysisStatsAdapter) cachedSoxOK() bool {
+	a.soxMu.Lock()
+	defer a.soxMu.Unlock()
+	if !a.soxAt.IsZero() && time.Since(a.soxAt) < upscaleStatsSoxTTL {
+		return a.soxOK
+	}
+	a.soxOK = (transcode.PrecheckSox() == nil)
+	a.soxAt = time.Now()
+	return a.soxOK
+}
+
 // updateInfoAdapter bridges *updater.Updater to api.UpdaterStatus +
 // admin's read-side without coupling those packages to the updater
 // type. Trivial; lives here at the wiring point so the api / admin
@@ -1053,6 +1129,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return scanCmd(args[1:], stdout, stderr)
 	case "upscale":
 		return upscaleCmd(ctx, args[1:], stdout, stderr)
+	case "analyze":
+		return analyzeCmd(ctx, args[1:], stdout, stderr)
 	case "optimize":
 		return optimizeCmd(ctx, args[1:], stdout, stderr)
 	case "variants":
@@ -1120,6 +1198,8 @@ Subcommands:
   admin    Manage admin console credentials (public-mode deployments).
   pair     Generate a new bearer token for an iOS client.
   scan     Force a full library rescan.
+  analyze  Generate peak-envelope waveform sidecars for the iOS scrubber (requires sox +
+           opt-in flag). bridge analyze --gc removes orphan sidecars.
   upscale  Generate high-rate FLAC sidecars from PCM sources (requires sox + opt-in flag).
   optimize Generate CarPlay-targeted 16-bit / 44.1k or 48k FLAC sidecars from hi-res PCM
            sources (requires sox + opt-in flag). Family-preserving downsample: 88.2/176.4k
@@ -1599,6 +1679,19 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	}
 	provider.SetUpscaleEnabled(upscaleActive)
 
+	// Analysis feature gate: same shape as upscale — config flag AND a
+	// working sox in PATH (analysis decodes through sox). A missing sox
+	// with the flag on degrades to "feature off" in-memory. Serve-side
+	// generation is CLI-driven (`bridge analyze`); serve only advertises
+	// the `waveform` flag + serves /v1/waveform from cached sidecars.
+	analysisActive := cfg.Analysis.Enabled
+	if analysisActive {
+		if err := transcode.PrecheckSox(); err != nil {
+			fmt.Fprintf(stderr, "analysis: feature is enabled in bridge.yaml but sox is not available — disabling: %v\n", err)
+			analysisActive = false
+		}
+	}
+
 	// LE-cert expiry provider for /v1/health (public mode). Live
 	// closure so background autocert renewals surface on the next
 	// health probe without a restart; same backing source as the
@@ -1622,6 +1715,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		WithLECertExpiry(leCertExpiry).
 		WithUpscale(upscaleActive, &variantStoreAdapter{provider: provider}).
 		WithCarPlayOptimize(upscaleActive && cfg.Upscale.EffectiveOptimizeEnabled()).
+		WithAnalysis(analysisActive, &analysisStoreAdapter{provider: provider}).
+		WithAnalysisStats(&analysisStatsAdapter{
+			enabled: func() bool { return analysisActive },
+			store:   manifestStore,
+		}).
 		WithDeviceRegistrar(manifestStore).
 		WithPlaylistStore(manifestStore).
 		WithHistoryStore(manifestStore)
@@ -1738,6 +1836,21 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// via `transcode.Pool.stopCtx`). The defer fires AFTER
 	// httpSrv.Shutdown completes, so accepting POST /v1/upscale
 	// can't race the pool teardown.
+	// Auto-analysis: when the feature is active, run a long-lived
+	// analyze pool + a background sweeper that enqueues tracks missing a
+	// fresh waveform on a settle-delay-then-scan-interval cadence.
+	// Generation also stays available via `bridge analyze`. The pool's
+	// deferred Stop drains in-flight decodes during graceful shutdown
+	// (shares scanCtx with the other periodic workers). apiSrv.Resolver()
+	// is the hot-reloading resolver so a runtime root add/remove is
+	// reflected without restart (same rationale as the upscale enqueuer).
+	if analysisActive {
+		analysisPool := analyze.NewPool(manifestStore, cfg.Analysis.EffectiveWorkers(), cfg.Analysis.EffectiveQueueCap())
+		defer analysisPool.Stop()
+		go runAnalysisSweeper(scanCtx, manifestStore, apiSrv.Resolver(),
+			analyze.WaveformDirFor(cfg.DataDir), analysisPool, cfg.ScanInterval())
+	}
+
 	var upscalePool *transcode.Pool
 	var upscaleCoordinator *transcode.Coordinator
 	if upscaleActive {
@@ -2203,6 +2316,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		Pairing:         pairingStore,
 		IsSupervised:    supervision.IsSupervised(),
 		UpscalePrecheck: transcode.PrecheckSox,
+		// Live runtime state of audio analysis (startup-computed gate),
+		// so the admin tile's `enabled` matches /v1/health's `waveform`
+		// flag rather than the persisted config flag.
+		AnalysisActive: func() bool { return analysisActive },
 		UpscaleStats: func() *admin.UpscalePoolStats {
 			// Snapshot the pool's live counters when the
 			// feature is active. Two off-paths return nil

@@ -382,6 +382,45 @@
           </p>
         </div>
       </div>
+
+      <h2 class="section-head">Audio analysis</h2>
+      <p class="lede">
+        Offline analysis pre-computes a peak <strong>waveform</strong> per track
+        via <code>sox(1)</code> so the iOS player can render a scrubber waveform.
+        Disabled by default — opt in below, then run <code>bridge analyze</code>
+        on the server to populate the cache.
+      </p>
+
+      <div class="field">
+        <label class="checkbox">
+          <input name="analysisEnabled" type="checkbox" {{if .Data.AnalysisEnabled}}checked{{end}}>
+          Enable audio analysis <span class="badge warn">restart</span>
+        </label>
+        <small class="hint">
+          When enabled, the bridge advertises <code>waveform</code> on
+          <code>/v1/health</code> and serves <code>GET /v1/waveform</code> from
+          cached sidecars. Generation runs on the server via
+          <code>bridge analyze</code>; sidecars survive across toggles.
+        </small>
+        {{if .Data.UpscaleSoxMissing}}
+          <p class="warn-banner">
+            <strong>sox is not on PATH.</strong> Audio analysis decodes through
+            sox; enabling here writes the flag, but the bridge will degrade to
+            feature-off at startup until sox is installed on the bridge host:
+          </p>
+          <pre class="install-hint">{{.Data.UpscaleSoxInstallHint}}</pre>
+        {{end}}
+      </div>
+
+      <div id="analysis-stats" class="upscale-stats analysis-stats" hidden>
+        <h3>Analysis stats</h3>
+        <dl class="status-grid">
+          <dt>Cached waveforms</dt><dd id="analysis-cached-count">…</dd>
+          <dt>Cached on disk</dt><dd id="analysis-cached-bytes">…</dd>
+          <dt>Stored at</dt><dd><code class="storage-path" id="analysis-storage-path">…</code></dd>
+        </dl>
+        <p class="panel-note">Refreshes every 5 s while this page is open. Run <code>bridge analyze</code> on the server to generate waveforms.</p>
+      </div>
     </div>
 
     {{/*

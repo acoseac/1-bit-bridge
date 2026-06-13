@@ -161,6 +161,19 @@ type Deps struct {
 	// semantically wrong).
 	UpscaleStats func() *UpscalePoolStats
 
+	// AnalysisActive reports the LIVE runtime state of the audio-
+	// analysis feature — i.e. the startup-computed `analysisActive`
+	// (config flag AND sox-precheck outcome), NOT the persisted config
+	// flag. The two diverge after a restart-required PATCH: the config
+	// holder reflects the new value immediately, but the runtime stays
+	// at its startup value until restart. Wiring this lets
+	// /api/analysis/stats.enabled agree with /v1/health's `waveform`
+	// flag (also startup-wired). Nil-safe: when absent the handler
+	// falls back to the persisted config + sox derivation (test
+	// harnesses). Mirrors the intent of the upscale tile's pool-derived
+	// `enabled`. Wired in cmd/bridge/main.go.
+	AnalysisActive func() bool
+
 	// ProjectedSize estimates the on-disk size of a FLAC
 	// variant produced from (sourceSize, sourceRate, sourceBits)
 	// at (targetRate, targetBits). Wired to
@@ -741,6 +754,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/settings", s.apiSettingsGet)
 	mux.HandleFunc("PATCH /api/settings", s.apiSettingsPatch)
 	mux.HandleFunc("GET /api/upscale/stats", s.apiUpscaleStats)
+	mux.HandleFunc("GET /api/analysis/stats", s.apiAnalysisStats)
 	mux.HandleFunc("GET /api/library/browse", s.apiLibraryBrowse)
 	mux.HandleFunc("GET /api/library/browse-projection", s.apiLibraryBrowseProjection)
 	mux.HandleFunc("GET /api/library/search", s.apiLibrarySearch)

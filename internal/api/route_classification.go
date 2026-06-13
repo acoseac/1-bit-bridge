@@ -207,6 +207,14 @@ func (s *Server) routeRegistry() []route {
 		{pattern: "GET /v1/artwork/{mbid}", kind: boundedRoute, handler: s.authed(s.artwork)},
 		{pattern: "GET /v1/artist-image/{mbid}", kind: boundedRoute, handler: s.authed(s.artistImage)},
 
+		// Waveform — tiny binary peak-envelope sidecar (~1-25 KB).
+		// boundedRoute: it's a small file, no streaming exemption
+		// needed. /v1/analysis/stats is the management-section poller —
+		// 2 s ctx-timeout like /v1/upscale/stats so a wedged
+		// CountAnalysis query surfaces as 5xx fast.
+		{pattern: "GET /v1/waveform", kind: boundedRoute, handler: s.authed(s.waveform)},
+		{pattern: "GET /v1/analysis/stats", kind: boundedRoute, handler: withCtxTimeout(2*time.Second, s.authed(s.analysisStats))},
+
 		// Upscale — small JSON responses on every endpoint
 		// (stats / batches / variants — never streams).
 		// POST /v1/upscale runs a SYNCHRONOUS filepath.WalkDir over the
