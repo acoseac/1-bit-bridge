@@ -861,11 +861,20 @@ var migrations = []migration{
 		// rationale as the v9 docblock — a crash after the column commits
 		// but before the user_version bump retries on next boot, and a
 		// bare `ALTER ... ADD COLUMN` errors "duplicate column name".
-		// post() with error-tolerant `_, _ = db.Exec(...)` makes the step
-		// re-runnable.
+		//
+		// Swallow ONLY that specific error (the idempotent re-run) and
+		// surface everything else: a lock / I/O / disk-full during the
+		// ALTER must NOT be masked behind a bumped user_version + a
+		// missing column (which would break every later query referencing
+		// the column). This is the precise form of the bare
+		// `_, _ = db.Exec(...)` used by v5/v9 — prefer it for new
+		// migrations. (Gemini on #396.)
 		sql: `-- column added in post() for idempotency; see migration v9 docblock`,
 		post: func(db *sql.DB) error {
-			_, _ = db.Exec(`ALTER TABLE track_analysis ADD COLUMN replaygain_track_db REAL`)
+			if _, err := db.Exec(`ALTER TABLE track_analysis ADD COLUMN replaygain_track_db REAL`); err != nil &&
+				!strings.Contains(err.Error(), "duplicate column name") {
+				return err
+			}
 			return nil
 		},
 	},
@@ -1013,6 +1022,16 @@ func marshalForStorage(t *Track) ([]byte, error) {
 	// UnenrichedTracks) would then return a stale tag contradicting
 	// the track_analysis column.
 	clone.WaveformTag = ""
+	// ReplayGainTrackDB is DUAL-source: a curated tag (the scanner
+	// extracted it — must persist) OR an analysis splice (must NOT
+	// persist, else a round-tripped read Track freezes the analysis value
+	// into tags_json as a faux curated tag that wins over future analysis
+	// recomputes/deletes). Scrub ONLY the analysis-derived case, flagged
+	// by spliceAnalysisReplayGain. Unlike Enriched / WaveformTag (always
+	// column-derived, zeroed unconditionally), this one is conditional.
+	if clone.replayGainFromAnalysis {
+		clone.ReplayGainTrackDB = nil
+	}
 	return json.Marshal(&clone)
 }
 
@@ -1584,6 +1603,10 @@ func spliceAnalysisReplayGain(t *Track, rg sql.NullFloat64) {
 	if t.ReplayGainTrackDB == nil && rg.Valid {
 		v := rg.Float64
 		t.ReplayGainTrackDB = &v
+		// Mark provenance so marshalForStorage scrubs this (analysis-
+		// derived) value on any write-back, never freezing it into
+		// tags_json as a faux curated tag. (CodeRabbit on #396.)
+		t.replayGainFromAnalysis = true
 	}
 }
 
