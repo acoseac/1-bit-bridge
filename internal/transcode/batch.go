@@ -334,7 +334,14 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 
 	// Insert the batch row first so any pool callback that races
 	// with the enqueue finds a row to attribute to.
-	batchID := uuid.Must(uuid.NewRandom())
+	//
+	// Propagate the (vanishingly rare) entropy failure instead of
+	// uuid.Must's panic — this runs on the API submission path and a
+	// transient CSPRNG error shouldn't crash the bridge. Gemini r4.
+	batchID, err := uuid.NewRandom()
+	if err != nil {
+		return nil, fmt.Errorf("generate batch uuid: %w", err)
+	}
 	now := c.clock().UnixNano()
 	// Skip count = projected − enqueued − already-covered. Captures
 	// every `continue` arm of the loop above (rate>target, bits>target,
@@ -725,7 +732,12 @@ func (c *Coordinator) buildOptimizeCandidates(batchPath string, projections []ma
 // in-memory `liveBatches` entry. Returns the freshly-minted batch ID.
 // Caller transitions status separately.
 func (c *Coordinator) initOptimizeBatchState(ctx context.Context, batchPath string, cands []optimizeCandidate, skipped int) (uuid.UUID, error) {
-	batchID := uuid.Must(uuid.NewRandom())
+	// Propagate entropy failure instead of uuid.Must's panic (API
+	// submission path; a transient CSPRNG error must not crash). Gemini r4.
+	batchID, err := uuid.NewRandom()
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("generate optimize batch uuid: %w", err)
+	}
 	now := c.clock().UnixNano()
 	row := manifest.UpscaleBatchRow{
 		ID:             batchID,
@@ -893,10 +905,13 @@ func (c *Coordinator) transitionStatus(batchID uuid.UUID, status, errMsg string,
 	}
 	c.mu.Unlock()
 
-	// No caller ctx for the internal callback-driven path; use
-	// Background. Future enhancement could thread ctx through the
-	// Coordinator's public API but that's out of scope here.
-	if err := c.store.UpdateUpscaleBatchStatus(context.Background(), rowCopy); err != nil {
+	// No caller ctx for the internal callback-driven path, but this runs
+	// on the single long-lived publisher goroutine — an unbounded SQLite
+	// stall here would wedge every subsequent SSE state/complete event.
+	// persistBounded applies the shared 5 s timeout. Gemini r4.
+	if err := persistBounded(func(ctx context.Context) error {
+		return c.store.UpdateUpscaleBatchStatus(ctx, rowCopy)
+	}); err != nil {
 		return fmt.Errorf("transition %s -> %s: %w", batchID, status, err)
 	}
 	c.publishProgressRow(rowCopy)
@@ -954,7 +969,12 @@ func (c *Coordinator) OnJobComplete(path, variantID string, sampleRate, bitsPerS
 	}
 	c.mu.Unlock()
 
-	if err := c.store.UpdateUpscaleBatchProgress(context.Background(), rowCopy); err != nil {
+	// Bound the persist (publisher-goroutine path) via the shared
+	// 5 s-timeout helper so a stalled SQLite write can't wedge later SSE
+	// events. Gemini r4.
+	if err := persistBounded(func(ctx context.Context) error {
+		return c.store.UpdateUpscaleBatchProgress(ctx, rowCopy)
+	}); err != nil {
 		c.logger.Warn("OnJobComplete: update progress",
 			"batchID", batchID.String(),
 			"err", err)
@@ -999,7 +1019,10 @@ func (c *Coordinator) OnJobFailed(path, variantID, errMsg string, durationSecond
 	}
 	c.mu.Unlock()
 
-	if err := c.store.UpdateUpscaleBatchProgress(context.Background(), rowCopy); err != nil {
+	// Bound the persist (publisher-goroutine path) — see OnJobComplete.
+	if err := persistBounded(func(ctx context.Context) error {
+		return c.store.UpdateUpscaleBatchProgress(ctx, rowCopy)
+	}); err != nil {
 		c.logger.Warn("OnJobFailed: update progress",
 			"batchID", batchID.String(),
 			"err", err)
@@ -1110,6 +1133,21 @@ func (c *Coordinator) publishProgressRow(row manifest.UpscaleBatchRow) {
 		Error:          row.Error,
 		UpdatedAt:      time.Unix(0, row.UpdatedAt).UTC(),
 	})
+}
+
+// persistBounded runs a callback-path DB write under a 5 s timeout.
+// These writes fire on the long-lived publisher goroutine with no
+// caller ctx, so an unbounded SQLite stall would wedge every later SSE
+// event; the deferred cancel releases the timer the instant the write
+// returns (no timer pile-up under a completion burst). Shared by
+// transitionStatus / OnJobComplete / OnJobFailed so the timeout
+// boilerplate isn't copy-pasted three times (Gemini r4 defer-cancel +
+// Sonar new-code-duplication). The two Submit-path persists keep their
+// inline form — different row snapshot + gating shape.
+func persistBounded(write func(context.Context) error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return write(ctx)
 }
 
 // isTerminalStatus reports whether the given status indicates the

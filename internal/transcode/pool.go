@@ -3,6 +3,7 @@ package transcode
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -598,6 +599,25 @@ func (p *Pool) fireJobFailed(evt jobFailedEvent) {
 	p.jobFailedChan <- evt
 }
 
+// fireJobFailedFor builds + emits a jobFailedEvent for job with errMsg,
+// stamping failedAt ONCE and deriving the duration from that single
+// clock read (timestamp/duration parity — Gemini r4 F28). Centralises
+// the event construction the sox / fsync / store / panic-recovery
+// branches share so it isn't copy-pasted four times (Sonar new-code
+// duplication). Each branch's differing surrounding logic (dedup
+// release, state-change fire, logging, return) stays at the call site.
+func (p *Pool) fireJobFailedFor(job poolJob, errMsg string, startedAt time.Time) {
+	failedAt := time.Now().UTC()
+	p.fireJobFailed(jobFailedEvent{
+		path:            job.spec.SourceLibraryRel,
+		variantID:       job.spec.VariantID(),
+		errMsg:          errMsg,
+		durationSeconds: failedAt.Sub(startedAt).Seconds(),
+		failedAt:        failedAt,
+		batchID:         job.spec.BatchID,
+	})
+}
+
 // runPublisher is the single long-lived goroutine that consumes
 // stateChangeChan + jobCompleteChan and invokes the wired callbacks
 // synchronously. Replaces the prior pattern of one ephemeral
@@ -881,11 +901,12 @@ func (p *Pool) processJob(job poolJob) {
 	// admin UI; the worker stays alive to handle the next job.
 	released := false
 	defer func() {
-		if r := recover(); r != nil {
+		panicVal := recover()
+		if panicVal != nil {
 			logger.Error("pool: recovered panic in job",
 				"path", job.spec.SourceLibraryRel,
 				"variantID", job.spec.VariantID(),
-				"panic", r)
+				"panic", panicVal)
 			if !p.closed.Load() {
 				p.failedCnt.Add(1)
 				metrics.UpscaleJobsCompletedTotal.WithLabelValues("failure").Inc()
@@ -908,15 +929,16 @@ func (p *Pool) processJob(job poolJob) {
 				// recovered panic to the Coordinator so the
 				// containing batch's `failed_files` advances and
 				// the admin Jobs page renders the same outcome
-				// it does for sox / store failures.
-				p.fireJobFailed(jobFailedEvent{
-					path:            job.spec.SourceLibraryRel,
-					variantID:       job.spec.VariantID(),
-					errMsg:          "panic recovered in worker",
-					durationSeconds: time.Since(startedAt).Seconds(),
-					failedAt:        time.Now().UTC(),
-					batchID:         job.spec.BatchID,
-				})
+				// it does for sox / store failures. Inject the
+				// recovered panic value into errMsg so the admin
+				// Jobs page shows the root cause instead of a
+				// generic string (already logged above; panic
+				// strings are short). Gemini r4.
+				errMsg := "panic recovered in worker"
+				if panicVal != nil {
+					errMsg = fmt.Sprintf("panic recovered in worker: %v", panicVal)
+				}
+				p.fireJobFailedFor(job, errMsg, startedAt)
 				p.fireStateChange()
 			}
 		}
@@ -964,14 +986,7 @@ func (p *Pool) processJob(job poolJob) {
 			if errors.Is(jobCtx.Err(), context.DeadlineExceeded) {
 				errMsg = "sox timed out after " + p.jobTimeout.String()
 			}
-			p.fireJobFailed(jobFailedEvent{
-				path:            job.spec.SourceLibraryRel,
-				variantID:       job.spec.VariantID(),
-				errMsg:          errMsg,
-				durationSeconds: time.Since(startedAt).Seconds(),
-				failedAt:        time.Now().UTC(),
-				batchID:         job.spec.BatchID,
-			})
+			p.fireJobFailedFor(job, errMsg, startedAt)
 			p.fireStateChange()
 		}
 		return
@@ -999,14 +1014,7 @@ func (p *Pool) processJob(job poolJob) {
 			metrics.UpscaleJobsCompletedTotal.WithLabelValues("failure").Inc()
 			logger.Error("pool: fsync sidecar", "path", job.spec.SourceLibraryRel, "err", err)
 			_ = os.Remove(sidecarPath)
-			p.fireJobFailed(jobFailedEvent{
-				path:            job.spec.SourceLibraryRel,
-				variantID:       job.spec.VariantID(),
-				errMsg:          "fsync sidecar: " + err.Error(),
-				durationSeconds: time.Since(startedAt).Seconds(),
-				failedAt:        time.Now().UTC(),
-				batchID:         job.spec.BatchID,
-			})
+			p.fireJobFailedFor(job, "fsync sidecar: "+err.Error(), startedAt)
 		}
 		p.releaseDedup(job.dedup)
 		released = true
@@ -1072,14 +1080,7 @@ func (p *Pool) processJob(job poolJob) {
 			// Surface store-side failures to the Coordinator
 			// too — admin Jobs page distinguishes them from
 			// sox failures via the errMsg prefix.
-			p.fireJobFailed(jobFailedEvent{
-				path:            job.spec.SourceLibraryRel,
-				variantID:       job.spec.VariantID(),
-				errMsg:          "store variant: " + err.Error(),
-				durationSeconds: time.Since(startedAt).Seconds(),
-				failedAt:        time.Now().UTC(),
-				batchID:         job.spec.BatchID,
-			})
+			p.fireJobFailedFor(job, "store variant: "+err.Error(), startedAt)
 		}
 		// Release the dedup slot BEFORE publishing the state change
 		// so the publisher's snapshot reflects the post-failure

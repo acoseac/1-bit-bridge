@@ -22,7 +22,7 @@ import (
 // the path didn't exist. Same for filesystems where dir-fsync is
 // a documented no-op (procfs, sysfs); the call returns nil per
 // POSIX semantics.
-func syncDir(filePath string) error {
+func syncDir(filePath string) (err error) {
 	dir := filepath.Dir(filePath)
 	if dir == "" {
 		// `filepath.Dir("")` returns "." per the stdlib contract, so
@@ -34,13 +34,22 @@ func syncDir(filePath string) error {
 		// PR #251.
 		dir = "."
 	}
-	d, err := os.Open(dir)
+	// Named return + deferred Close so a panic in d.Sync() (or any
+	// future code added before the return) can't leak the fd. Explicit
+	// `=` (NOT `:=`) so we assign the named `err`, not a shadow — the
+	// defer must observe the same variable. Gemini r4.
+	var d *os.File
+	d, err = os.Open(dir)
 	if err != nil {
 		return fmt.Errorf("open dir %q: %w", dir, err)
 	}
+	defer func() {
+		if cerr := d.Close(); err == nil && cerr != nil {
+			err = fmt.Errorf("close dir %q: %w", dir, cerr)
+		}
+	}()
 	if syncErr := d.Sync(); syncErr != nil {
-		_ = d.Close()
 		return fmt.Errorf("sync dir %q: %w", dir, syncErr)
 	}
-	return d.Close()
+	return nil
 }

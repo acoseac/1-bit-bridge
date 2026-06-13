@@ -495,14 +495,30 @@ func sanitiseForFAT(s string) string {
 	// PR D1 flagged the prior `strings.ContainsRune` form as
 	// converting the byte to a rune + scanning the string on every
 	// iteration.
-	out := []byte(s)
-	for i, b := range out {
-		switch b {
+	//
+	// Lazy allocation: scan read-only first and return `s` unchanged
+	// when no bad char is present — clean basenames (>95% of a typical
+	// library) stay allocation-free, which is what keeps the
+	// `sanitized == raw` fast-path in safeVariantFilename actually free
+	// (the prior unconditional `[]byte(s)` + `string(out)` cost two
+	// heap allocs per call regardless). Only on the first illegal byte
+	// do we materialise a mutable copy and finish the substitution from
+	// that index forward. Gemini r4.
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
 		case ':', '*', '?', '"', '<', '>', '|', '\\':
+			out := []byte(s)
 			out[i] = '_'
+			for j := i + 1; j < len(out); j++ {
+				switch out[j] {
+				case ':', '*', '?', '"', '<', '>', '|', '\\':
+					out[j] = '_'
+				}
+			}
+			return string(out)
 		}
 	}
-	return string(out)
+	return s
 }
 
 // SoxArgs builds the argv for the sox invocation. Returns the
