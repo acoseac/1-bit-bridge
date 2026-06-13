@@ -177,3 +177,43 @@ func (p *Provider) LookupVariant(ctx context.Context, sourcePath, variantID stri
 		SourceSize:    v.SourceSize,
 	}, nil
 }
+
+// AnalysisLookup is the manifest-package-local projection of one
+// track_analysis row that the /v1/waveform handler needs: where the
+// sidecar lives, its content tag (served as the ETag / used by iOS as
+// the immutable-cache key), and the source freshness fields for the
+// drift check. The cmd/bridge serve wiring wraps this into the
+// api.AnalysisStore interface so the api package doesn't import the
+// manifest package (mirrors VariantLookup / api.VariantStore).
+type AnalysisLookup struct {
+	// SourcePath is the CANONICAL row value (case-preserved);
+	// LookupAnalysis matches case-insensitively but downstream
+	// consumers want the canonical form. Mirrors VariantLookup.
+	SourcePath    string
+	WaveformPath  string
+	WaveformTag   string
+	SourceMTimeNS int64
+	SourceSize    int64
+}
+
+// LookupAnalysis returns the cached waveform metadata for one source
+// path, or nil if no analysis row exists. Routes through
+// Store.LookupAnalysis (case-insensitive) so iOS-shaped lowercased
+// paths from /v1/waveform resolve against the case-preserved rows —
+// same shape + rationale as LookupVariant.
+func (p *Provider) LookupAnalysis(ctx context.Context, sourcePath string) (*AnalysisLookup, error) {
+	a, err := p.store.LookupAnalysis(ctx, sourcePath)
+	if err != nil {
+		return nil, err
+	}
+	if a == nil {
+		return nil, nil
+	}
+	return &AnalysisLookup{
+		SourcePath:    a.SourcePath,
+		WaveformPath:  a.WaveformPath,
+		WaveformTag:   a.WaveformTag,
+		SourceMTimeNS: a.SourceMTimeNS,
+		SourceSize:    a.SourceSize,
+	}, nil
+}

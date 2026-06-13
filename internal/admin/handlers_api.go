@@ -163,6 +163,10 @@ type settingsResponse struct {
 	// `bridge serve` for the long-lived transcode.Pool to
 	// instantiate (or shut down).
 	UpscaleEnabled bool `json:"upscaleEnabled"`
+	// Audio analysis opt-in (waveform sidecars for the iOS scrubber).
+	// Same restart-required contract as upscale. Shares the sox-missing
+	// warning fields above (both features decode through sox).
+	AnalysisEnabled bool `json:"analysisEnabled"`
 	// PR 4: tailscale + mDNS posture.
 	// TailscaleMode mirrors cfg.Tailscale.EffectiveMode (one of
 	// "cli", "tsnet", "disabled"). IsPublic flags the
@@ -744,6 +748,7 @@ func (s *Server) apiSettingsGet(w http.ResponseWriter, r *http.Request) {
 		UpdateQuietHours:         cfg.Update.QuietHours,
 		UpdateCheckIntervalHours: cfg.Update.CheckIntervalHours,
 		UpscaleEnabled:           cfg.Upscale.Enabled,
+		AnalysisEnabled:          cfg.Analysis.Enabled,
 		UpscaleStoragePath:       cfg.Upscale.EffectiveVariantsDir(cfg.DataDir),
 		IsSupervised:             s.deps.IsSupervised,
 		// Same backup fields the page-template handler emits
@@ -810,6 +815,10 @@ type settingsPatch struct {
 	// flag at runtime triggers a `RestartRequired: true`
 	// response.
 	UpscaleEnabled *bool `json:"upscaleEnabled,omitempty"`
+	// Audio analysis opt-in. Same restart-required contract as
+	// upscale — the serve-side `waveform` health flag + /v1/waveform
+	// wiring are decided once at startup.
+	AnalysisEnabled *bool `json:"analysisEnabled,omitempty"`
 	// PR 4: TailscaleMode dropdown (cli|tsnet|disabled).
 	// Hot-reload matrix:
 	//   - any → disabled:    no restart (Deps.TailscaleDisable
@@ -920,6 +929,16 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 			// runtime hook, but the operator-friction gain
 			// isn't worth the rewiring complexity until a
 			// user requests it.
+			restart = true
+		}
+	}
+	if p.AnalysisEnabled != nil {
+		if *p.AnalysisEnabled != next.Analysis.Enabled {
+			next.Analysis.Enabled = *p.AnalysisEnabled
+			// Same rationale as upscale: the serve-side `waveform`
+			// health flag + /v1/waveform wiring are decided once at
+			// startup, so a runtime flip needs a restart to take
+			// effect. Idempotent same-value submissions skip the banner.
 			restart = true
 		}
 	}
@@ -1179,6 +1198,49 @@ func (s *Server) cachedSoxAvailability() *bool {
 	s.soxAvailability = v
 	s.soxAvailabilityAt = now
 	return &v
+}
+
+// analysisStatsResponse is the JSON shape /api/analysis/stats returns.
+// Simpler than upscaleStatsResponse: audio-analysis generation is
+// CLI-driven (`bridge analyze`), so there's no long-lived serve-side
+// pool to snapshot — just the enabled gate, sox availability, and the
+// on-disk cached-waveform totals. Field-compatible with the iOS-facing
+// /v1/analysis/stats shape (minus the pool).
+type analysisStatsResponse struct {
+	Enabled         bool   `json:"enabled"`
+	SoxAvailable    *bool  `json:"soxAvailable,omitempty"`
+	CachedWaveforms int    `json:"cachedWaveforms"`
+	CachedBytes     int64  `json:"cachedBytes"`
+	StoragePath     string `json:"storagePath,omitempty"`
+}
+
+// apiAnalysisStats: GET /api/analysis/stats — the admin tile's data
+// source for the Audio analysis section. Cheap (one SQL COUNT + the
+// TTL-cached sox precheck).
+func (s *Server) apiAnalysisStats(w http.ResponseWriter, r *http.Request) {
+	cfg := s.deps.CfgHolder.Load()
+	var resp analysisStatsResponse
+	// Tracks analyze.WaveformDirSubdir ("waveforms"); inlined to avoid
+	// an admin → analyze import (config does the same for transcode).
+	resp.StoragePath = filepath.Join(cfg.DataDir, "waveforms")
+	avail := s.cachedSoxAvailability()
+	if avail != nil {
+		resp.SoxAvailable = avail
+	}
+	// Enabled mirrors the persisted flag AND live sox availability —
+	// the same gate the serve-side `analysisActive` uses, so the admin
+	// tile and /v1/health agree on what "active" means.
+	resp.Enabled = cfg.Analysis.Enabled && avail != nil && *avail
+	if s.deps.Manifest != nil {
+		count, bytes, err := s.deps.Manifest.CountAnalysis(r.Context())
+		if err != nil {
+			logger.Warn("analysis stats: count analysis", "err", err)
+		} else {
+			resp.CachedWaveforms = count
+			resp.CachedBytes = bytes
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // splitCustomEndpointsText parses the textarea form of the custom-

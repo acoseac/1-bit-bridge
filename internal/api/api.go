@@ -133,6 +133,9 @@ type Server struct {
 	rendererDiscovery      RendererDiscoverySnapshotter // nil unless WithRendererDiscovery wired — opt-in SSDP MediaRenderer cache for /v1/renderers
 	upscaleEnqueuer        UpscaleEnqueuer              // nil unless WithUpscaleEnqueuer wired (Phase 2.5)
 	upscaleStatsProvider   UpscaleStatsProvider         // nil unless WithUpscaleStats wired (v1.2 management UI)
+	analysisStore          AnalysisStore                // nil unless WithAnalysis(true, as) called — /v1/waveform lookup
+	analysisEnabled        bool                         // mirrors cfg.Analysis.Enabled (and sox-probe outcome) — gates the "waveform" health feature flag
+	analysisStatsProvider  AnalysisStatsProvider        // nil unless WithAnalysisStats wired — /v1/analysis/stats
 	batchCoordinator       BatchCoordinator             // nil unless WithBatchCoordinator wired (v1.3 operator-driven upscale)
 	eventBroker            *eventBroker                 // nil disables /v1/events (back-compat for test harnesses)
 	manifestRateLimiter    *manifestRateLimiter         // per-token-ID token-bucket for /v1/manifest
@@ -514,6 +517,31 @@ func (s *Server) WithUpscale(enabled bool, vs VariantStore) *Server {
 	if enabled {
 		s.variantStore = vs
 	}
+	return s
+}
+
+// WithAnalysis wires the offline audio-analysis feature. `enabled`
+// mirrors `cfg.Analysis.Enabled` AND the sox-on-PATH probe outcome
+// (a true config whose probe failed lands here as false — graceful
+// degradation). `as` may be nil when enabled=false; when enabled=true
+// it MUST be the AnalysisStore the /v1/waveform handler reads.
+//
+// Effect on the wire:
+//   - /v1/health advertises the `waveform` feature flag iff `enabled`.
+//   - /v1/waveform serves sidecars iff `as != nil`; 404 otherwise.
+func (s *Server) WithAnalysis(enabled bool, as AnalysisStore) *Server {
+	s.analysisEnabled = enabled
+	if enabled {
+		s.analysisStore = as
+	}
+	return s
+}
+
+// WithAnalysisStats attaches the GET /v1/analysis/stats provider.
+// Optional — when nil the endpoint returns the zero-value AnalysisStats
+// (`enabled=false`). Mirrors WithUpscaleStats.
+func (s *Server) WithAnalysisStats(p AnalysisStatsProvider) *Server {
+	s.analysisStatsProvider = p
 	return s
 }
 
@@ -1255,7 +1283,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// playbackHistoryRead + playlistBackup + playlistsCrossDevice +
 	// pushEventsSupported + rendererDiscovery + upscaleCompleteEvents +
 	// variantBumpsIndex).
-	feats := make([]string, 0, 14)
+	feats := make([]string, 0, 15)
 	if s.upscaleEnabled {
 		if s.carPlayOptimizeEnabled {
 			feats = append(feats, "carPlayOptimize")
@@ -1326,6 +1354,12 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		feats = append(feats, "upscaleCompleteEvents")
 	}
 	feats = append(feats, "variantBumpsIndex")
+	if s.analysisEnabled {
+		// Offline audio analysis is active — iOS may fetch
+		// `GET /v1/waveform?path=…` for any track whose manifest row
+		// carries a `waveformTag`. Alpha-sorted last (`w` > `v`).
+		feats = append(feats, "waveform")
+	}
 	resp.Features = feats
 	// Per-root reachability (v1.2 additive). Probed through the same TTL
 	// cache the list/stat handlers use, so a 1Hz iOS /v1/health poll

@@ -235,6 +235,7 @@ func (s *Server) pageSettings(w http.ResponseWriter, r *http.Request) {
 		UpdateCheckIntervalHours: cfg.Update.CheckIntervalHours,
 		UpscaleEnabled:           cfg.Upscale.Enabled,
 		UpscaleStoragePath:       cfg.Upscale.EffectiveVariantsDir(cfg.DataDir),
+		AnalysisEnabled:          cfg.Analysis.Enabled,
 		IsSupervised:             s.deps.IsSupervised,
 		BackupIntervalHours:      cfg.Backup.EffectiveIntervalHours(),
 		BackupKeep:               cfg.Backup.EffectiveKeep(),
