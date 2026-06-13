@@ -60,6 +60,28 @@ func seedTestSidecarTree(t *testing.T, outputDir, prefix string, n int) []string
 	return paths
 }
 
+// seedSidecarAlbum writes n `.flac` files into outputDir/<album>/, named
+// 0i.flac, and returns their absolute paths. Companion to seedTestSidecarTree
+// for NESTED-tree tests (the flat helper can't exercise directory SkipDir).
+// Extracted from the SkipDir test to keep that test's cognitive complexity
+// under the gate.
+func seedSidecarAlbum(t *testing.T, outputDir, album string, n int) []string {
+	t.Helper()
+	dir := filepath.Join(outputDir, album)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	out := make([]string, n)
+	for i := 0; i < n; i++ {
+		p := filepath.Join(dir, "0"+strconv.Itoa(i)+".flac")
+		if err := os.WriteFile(p, []byte{0}, 0o644); err != nil {
+			t.Fatalf("write %s: %v", p, err)
+		}
+		out[i] = p
+	}
+	return out
+}
+
 // TestShouldConsiderSidecarFile pins the pure file-type predicate.
 // `.flac` is the only extension considered today; mismatched
 // extensions (incl. case variation) are skipped.
@@ -382,6 +404,8 @@ func TestDirEntirelyBehindCursor(t *testing.T) {
 		{"later sibling not behind", "C", "B" + sep + "c.flac", false},
 		{"earlier sibling fully behind", "AlbumA", "AlbumB" + sep + "01.flac", true},
 		{"root dir is ancestor of in-tree cursor", "out", "out" + sep + "A" + sep + "x.flac", false},
+		{"volume/filesystem root is ancestor of in-tree cursor", sep, sep + "A" + sep + "x.flac", false},
+		{"trailing-separator dir is ancestor of in-tree cursor", "out" + sep, "out" + sep + "A" + sep + "x.flac", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -404,24 +428,9 @@ func TestDirEntirelyBehindCursor(t *testing.T) {
 func TestOrphanSidecarSweeperSkipDirResumesWithoutMissingOrphans(t *testing.T) {
 	outputDir := t.TempDir()
 	// Lexical full-path order: AlbumA/00,01  AlbumB/00,01  AlbumC/00
-	mkAlbum := func(album string, n int) []string {
-		dir := filepath.Join(outputDir, album)
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatalf("mkdir %s: %v", dir, err)
-		}
-		out := make([]string, n)
-		for i := 0; i < n; i++ {
-			p := filepath.Join(dir, "0"+strconv.Itoa(i)+".flac")
-			if err := os.WriteFile(p, []byte{0}, 0o644); err != nil {
-				t.Fatalf("write %s: %v", p, err)
-			}
-			out[i] = p
-		}
-		return out
-	}
-	a := mkAlbum("AlbumA", 2)
-	b := mkAlbum("AlbumB", 2)
-	c := mkAlbum("AlbumC", 1) // the orphan album
+	a := seedSidecarAlbum(t, outputDir, "AlbumA", 2)
+	b := seedSidecarAlbum(t, outputDir, "AlbumB", 2)
+	c := seedSidecarAlbum(t, outputDir, "AlbumC", 1) // the orphan album
 
 	// AlbumA + AlbumB known; AlbumC's lone file is the orphan.
 	known := map[string]struct{}{a[0]: {}, a[1]: {}, b[0]: {}, b[1]: {}}

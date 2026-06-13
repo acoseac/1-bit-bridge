@@ -512,6 +512,15 @@ func dirEntirelyBehindCursor(dirPath, cursor string) bool {
 	if cursor == "" {
 		return false
 	}
-	withSep := dirPath + string(filepath.Separator)
+	// Append the separator to compare the directory's NAMESPACE — UNLESS
+	// dirPath already ends with one. A filesystem/volume root ("/", "C:\")
+	// or a trailing-slash outputDir would otherwise become "//" / "C:\\",
+	// which no in-tree cursor is a prefix of, so the walk root itself would
+	// be wrongly SkipDir'd and the entire sweep would halt. (Gemini HIGH, r3)
+	sep := string(filepath.Separator)
+	withSep := dirPath
+	if !strings.HasSuffix(withSep, sep) {
+		withSep += sep
+	}
 	return withSep < cursor && !strings.HasPrefix(cursor, withSep)
 }
