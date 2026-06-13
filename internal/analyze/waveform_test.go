@@ -77,13 +77,17 @@ func TestEncodeWaveformHeader(t *testing.T) {
 
 func TestWaveformTagStableAndContentSensitive(t *testing.T) {
 	a := []byte("alpha")
-	if waveformTag(a) != waveformTag(a) {
+	// Separate results (not `waveformTag(a) != waveformTag(a)`) so the
+	// stability check isn't a staticcheck SA4000 no-op. (CodeRabbit #395)
+	tag1 := waveformTag(a)
+	tag2 := waveformTag(a)
+	if tag1 != tag2 {
 		t.Fatal("tag not stable for identical bytes")
 	}
-	if len(waveformTag(a)) != 8 {
-		t.Fatalf("tag length = %d, want 8", len(waveformTag(a)))
+	if len(tag1) != 8 {
+		t.Fatalf("tag length = %d, want 8", len(tag1))
 	}
-	if waveformTag(a) == waveformTag([]byte("beta")) {
+	if tag1 == waveformTag([]byte("beta")) {
 		t.Fatal("tag collision across different content")
 	}
 }

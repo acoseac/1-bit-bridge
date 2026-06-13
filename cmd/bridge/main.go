@@ -1198,6 +1198,8 @@ Subcommands:
   admin    Manage admin console credentials (public-mode deployments).
   pair     Generate a new bearer token for an iOS client.
   scan     Force a full library rescan.
+  analyze  Generate peak-envelope waveform sidecars for the iOS scrubber (requires sox +
+           opt-in flag). bridge analyze --gc removes orphan sidecars.
   upscale  Generate high-rate FLAC sidecars from PCM sources (requires sox + opt-in flag).
   optimize Generate CarPlay-targeted 16-bit / 44.1k or 48k FLAC sidecars from hi-res PCM
            sources (requires sox + opt-in flag). Family-preserving downsample: 88.2/176.4k
@@ -2314,6 +2316,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		Pairing:         pairingStore,
 		IsSupervised:    supervision.IsSupervised(),
 		UpscalePrecheck: transcode.PrecheckSox,
+		// Live runtime state of audio analysis (startup-computed gate),
+		// so the admin tile's `enabled` matches /v1/health's `waveform`
+		// flag rather than the persisted config flag.
+		AnalysisActive: func() bool { return analysisActive },
 		UpscaleStats: func() *admin.UpscalePoolStats {
 			// Snapshot the pool's live counters when the
 			// feature is active. Two off-paths return nil

@@ -3,7 +3,6 @@ package analyze
 import (
 	"context"
 	"errors"
-	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -314,10 +313,14 @@ func (p *Pool) processJob(job poolJob) {
 	// dir on POSIX) BEFORE committing the row that points at it, so a
 	// delta-sync client never races a non-durable file.
 	if err := p.fsyncFn(res.WaveformPath); err != nil {
-		// Remove the un-committed sidecar unconditionally (even when the
-		// pool is closing) so a shutdown-time fsync failure can't strand
-		// an orphan file with no DB row pointing at it. Gemini on #395.
-		_ = os.Remove(res.WaveformPath)
+		// Deliberately do NOT remove res.WaveformPath. The sidecar path
+		// is deterministic per source (reused across re-analyses), so a
+		// prior committed row may already point at this exact path —
+		// deleting the file on a transient failure would leave that row
+		// dangling (serve → 410). A genuinely-orphan sidecar (first
+		// analysis, no row) is reaped by `bridge analyze --gc`'s
+		// mark-and-sweep instead. (CodeRabbit on #395, correcting the
+		// round-1 unconditional-remove.)
 		if !p.closed.Load() {
 			p.failedCnt.Add(1)
 			logger.Error("analyze: fsync sidecar",
@@ -342,10 +345,9 @@ func (p *Pool) processJob(job poolJob) {
 		CreatedAt:     p.now().UnixNano(),
 	}
 	if err := p.store.UpsertAnalysis(jobCtx, row); err != nil {
-		// Unconditional orphan cleanup, same rationale as the fsync
-		// branch above — the sidecar exists on disk but no row points at
-		// it, so reap it regardless of shutdown state. Gemini on #395.
-		_ = os.Remove(res.WaveformPath)
+		// Same as the fsync branch: don't remove the sidecar (path is
+		// reused per source, so a prior row could already point at it);
+		// `--gc` reconciles a true first-analysis orphan. (CodeRabbit #395.)
 		if !p.closed.Load() {
 			p.failedCnt.Add(1)
 			logger.Error("analyze: store analysis",

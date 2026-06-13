@@ -822,6 +822,23 @@ var migrations = []migration{
 		);
 		`,
 	},
+	{
+		version: 15,
+		name:    "track_analysis unicode-lower lookup index",
+		// LookupAnalysis falls back to
+		// `unicode_lower(source_path) = unicode_lower(?)` for iOS-shaped
+		// lowercase paths; v14 only has the PRIMARY KEY on source_path, so
+		// that fold degrades to a table scan as analysis rows grow (25k+
+		// on a large library). This functional index mirrors the v4
+		// `idx_track_variants_source_path_unicode_lower` exactly — same
+		// Go-registered deterministic `unicode_lower` scalar, same
+		// build-once-on-first-query cost. Appended per the ladder
+		// convention (v14 already shipped). (CodeRabbit on #395.)
+		sql: `
+		CREATE INDEX IF NOT EXISTS idx_track_analysis_source_path_unicode_lower
+			ON track_analysis(unicode_lower(source_path));
+		`,
+	},
 }
 
 // NOTE (r1 review #49, dropped): a covering index on
@@ -4500,6 +4517,12 @@ func (s *Store) LookupAnalysis(ctx context.Context, sourcePath string) (*Analysi
 			"path", sourcePath)
 		return nil, nil
 	}
+	// A driver/I-O error during the ambiguity rows.Next() surfaces here,
+	// not as a scan error — propagate it so a transient fault can't be
+	// misread as "unambiguous row found". (CodeRabbit on #395.)
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return &a, nil
 }
 
@@ -4547,7 +4570,11 @@ func (s *Store) DeleteAnalysis(ctx context.Context, sourcePath string) error {
 	if err != nil {
 		return err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err // don't silently treat a driver fault as "nothing deleted" (CodeRabbit #395)
+	}
+	if n == 0 {
 		return tx.Commit() // nothing deleted → no bump.
 	}
 	now := s.now().UnixNano()

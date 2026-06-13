@@ -1227,10 +1227,16 @@ func (s *Server) apiAnalysisStats(w http.ResponseWriter, r *http.Request) {
 	if avail != nil {
 		resp.SoxAvailable = avail
 	}
-	// Enabled mirrors the persisted flag AND live sox availability —
-	// the same gate the serve-side `analysisActive` uses, so the admin
-	// tile and /v1/health agree on what "active" means.
-	resp.Enabled = cfg.Analysis.Enabled && avail != nil && *avail
+	// Enabled mirrors the LIVE runtime state (startup-computed
+	// `analysisActive`) so the tile agrees with /v1/health's `waveform`
+	// flag even between a restart-required PATCH and the actual restart.
+	// Falls back to the persisted-config + sox derivation when the
+	// closure isn't wired (test harnesses). (CodeRabbit on #395.)
+	if a := s.deps.AnalysisActive; a != nil {
+		resp.Enabled = a()
+	} else {
+		resp.Enabled = cfg.Analysis.Enabled && avail != nil && *avail
+	}
 	if s.deps.Manifest != nil {
 		count, bytes, err := s.deps.Manifest.CountAnalysis(r.Context())
 		if err != nil {
