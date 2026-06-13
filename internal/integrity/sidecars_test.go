@@ -60,6 +60,28 @@ func seedTestSidecarTree(t *testing.T, outputDir, prefix string, n int) []string
 	return paths
 }
 
+// seedSidecarAlbum writes n `.flac` files into outputDir/<album>/, named
+// 0i.flac, and returns their absolute paths. Companion to seedTestSidecarTree
+// for NESTED-tree tests (the flat helper can't exercise directory SkipDir).
+// Extracted from the SkipDir test to keep that test's cognitive complexity
+// under the gate.
+func seedSidecarAlbum(t *testing.T, outputDir, album string, n int) []string {
+	t.Helper()
+	dir := filepath.Join(outputDir, album)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	out := make([]string, n)
+	for i := 0; i < n; i++ {
+		p := filepath.Join(dir, "0"+strconv.Itoa(i)+".flac")
+		if err := os.WriteFile(p, []byte{0}, 0o644); err != nil {
+			t.Fatalf("write %s: %v", p, err)
+		}
+		out[i] = p
+	}
+	return out
+}
+
 // TestShouldConsiderSidecarFile pins the pure file-type predicate.
 // `.flac` is the only extension considered today; mismatched
 // extensions (incl. case variation) are skipped.
@@ -360,6 +382,84 @@ func TestOrphanSidecarSweeperGracePeriodProtectsConcurrentWrites(t *testing.T) {
 	if _, err := os.Stat(flacFile); !os.IsNotExist(err) {
 		t.Errorf("backdated orphan %q was NOT unlinked: stat err=%v",
 			flacFile, err)
+	}
+}
+
+// TestDirEntirelyBehindCursor pins the chunk-resume SkipDir predicate,
+// including the '.'-vs-separator collation gotcha that a bare-name compare
+// would get wrong. Native separators throughout (portable across POSIX/Windows
+// because '/' and '\' both sort after '.').
+func TestDirEntirelyBehindCursor(t *testing.T) {
+	sep := string(filepath.Separator)
+	cases := []struct {
+		name   string
+		dir    string
+		cursor string
+		want   bool
+	}{
+		{"empty cursor never skips", "A", "", false},
+		{"straddling sibling fully behind", "A", "B" + sep + "c.flac", true},
+		{"ancestor of cursor must descend", "A" + sep + "B", "A" + sep + "B" + sep + "c.flac", false},
+		{"dot-vs-sep: dir A/B with cursor A/B.flac must descend", "A" + sep + "B", "A" + sep + "B.flac", false},
+		{"later sibling not behind", "C", "B" + sep + "c.flac", false},
+		{"earlier sibling fully behind", "AlbumA", "AlbumB" + sep + "01.flac", true},
+		{"root dir is ancestor of in-tree cursor", "out", "out" + sep + "A" + sep + "x.flac", false},
+		{"volume/filesystem root is ancestor of in-tree cursor", sep, sep + "A" + sep + "x.flac", false},
+		{"trailing-separator dir is ancestor of in-tree cursor", "out" + sep, "out" + sep + "A" + sep + "x.flac", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := dirEntirelyBehindCursor(c.dir, c.cursor); got != c.want {
+				t.Errorf("dirEntirelyBehindCursor(%q, %q) = %v, want %v", c.dir, c.cursor, got, c.want)
+			}
+		})
+	}
+}
+
+// TestOrphanSidecarSweeperSkipDirResumesWithoutMissingOrphans is the headline
+// PR D contract: across a chunk-split sweep of a NESTED tree, (a) an orphan in
+// a not-yet-covered subtree is still found and unlinked — proving SkipDir never
+// prunes a live branch (under-sweep guard) — and (b) SkipDir actually fires on a
+// fully-behind-cursor subtree on a resume tick (the O(N²) short-circuit engaged).
+//
+// The existing chunk-cap test uses a FLAT tree, where the only directory is the
+// root (always an ancestor of the cursor → never pruned), so it can't exercise
+// SkipDir at all. This test uses album subdirectories.
+func TestOrphanSidecarSweeperSkipDirResumesWithoutMissingOrphans(t *testing.T) {
+	outputDir := t.TempDir()
+	// Lexical full-path order: AlbumA/00,01  AlbumB/00,01  AlbumC/00
+	a := seedSidecarAlbum(t, outputDir, "AlbumA", 2)
+	b := seedSidecarAlbum(t, outputDir, "AlbumB", 2)
+	c := seedSidecarAlbum(t, outputDir, "AlbumC", 1) // the orphan album
+
+	// AlbumA + AlbumB known; AlbumC's lone file is the orphan.
+	known := map[string]struct{}{a[0]: {}, a[1]: {}, b[0]: {}, b[1]: {}}
+	lister := &fakeSidecarLister{known: known}
+	s := NewOrphanSidecarSweeper(lister, outputDir, 1*time.Hour)
+	s.chunkSizeForTest = 2 // forces 3 ticks: A/* | B/* | C/*
+	s.gracePeriodForTest = 1 * time.Nanosecond
+
+	total := 0
+	for i := 0; i < 10; i++ { // bounded; sweep completes in 3
+		total += s.tick(context.Background())
+		if s.lastProcessedPath == "" {
+			break // cursor reset → full tree covered
+		}
+	}
+
+	if total != 1 {
+		t.Errorf("total unlinked across sweep = %d, want 1 (only the AlbumC orphan)", total)
+	}
+	if _, err := os.Stat(c[0]); !os.IsNotExist(err) {
+		t.Errorf("orphan %q survived the chunked sweep — SkipDir wrongly pruned a live subtree (under-swept): err=%v", c[0], err)
+	}
+	for _, p := range append(append([]string{}, a...), b...) {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("known sidecar %q was unlinked (should have survived): %v", p, err)
+		}
+	}
+	if got := s.skippedDirsForTest.Load(); got < 1 {
+		t.Errorf("skippedDirsForTest = %d, want >= 1 (SkipDir short-circuit never engaged across the resume ticks)", got)
 	}
 }
 
