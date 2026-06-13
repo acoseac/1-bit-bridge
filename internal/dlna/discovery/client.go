@@ -304,8 +304,6 @@ func (c *SSDPDiscoveryClient) Stop() {
 		_ = c.conn.Close()
 		c.conn = nil
 	}
-	c.runCancel = nil
-	c.runCtx = nil
 	c.runMu.Unlock()
 	// Wait for runLoop, runTickLoop, and any in-flight detail fetches to
 	// exit BEFORE clearing the cache — otherwise a fetch that already
@@ -316,6 +314,17 @@ func (c *SSDPDiscoveryClient) Stop() {
 	// runMu.RLock via snapshotConn on their way out, so holding the lock
 	// here would deadlock.
 	c.wg.Wait()
+	// Clear runCancel/runCtx only AFTER Wait() returns. Keeping runCancel
+	// non-nil across the Wait window is load-bearing: it makes a concurrent
+	// Start() fail its `runCancel != nil` guard and refuse — rather than
+	// slipping past it to call wg.Add(2) while this Wait is in progress,
+	// which panics ("WaitGroup misuse: Add called concurrently with Wait").
+	// Re-acquire runMu for the writes (snapshotConn readers take RLock during
+	// the Wait). (Gemini HIGH + CodeRabbit CRITICAL, r3 round 1.)
+	c.runMu.Lock()
+	c.runCancel = nil
+	c.runCtx = nil
+	c.runMu.Unlock()
 	c.cache.Clear()
 	packageLogger.Info("DLNA renderer discovery stopped")
 }

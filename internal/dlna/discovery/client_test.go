@@ -468,6 +468,22 @@ func TestStopWaitsForInFlightFetch(t *testing.T) {
 	if err := c.Start(parent); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
+	// Failure-path teardown: the stub blocks on `release` IGNORING ctx, so
+	// neither cancelParent nor c.Stop can unblock the in-flight fetch — only
+	// closing `release` does. Register an idempotent closer so a t.Fatal
+	// before the happy-path release still drains the fetch (and the Stop
+	// goroutine waiting on it) instead of hanging cleanup. (Adapts
+	// CodeRabbit's t.Cleanup(c.Stop) suggestion, which would itself hang on
+	// this ctx-ignoring stub.) Test body + cleanup run sequentially on the
+	// same goroutine, so the bool needs no lock.
+	releaseClosed := false
+	releaseFetch := func() {
+		if !releaseClosed {
+			releaseClosed = true
+			close(disp.release)
+		}
+	}
+	t.Cleanup(releaseFetch)
 
 	// Snapshot the live runCtx (the one Stop cancels) under the lock so the
 	// fetch's cancellation guards observe Stop()'s runCancel().
@@ -505,7 +521,7 @@ func TestStopWaitsForInFlightFetch(t *testing.T) {
 	}
 
 	// Release the fetch; it returns an error, sees runCtx cancelled, exits without Upsert.
-	close(disp.release)
+	releaseFetch()
 
 	select {
 	case <-stopReturned:
