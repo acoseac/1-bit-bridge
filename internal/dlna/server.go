@@ -508,12 +508,18 @@ func (s *Server) fireInitialNotify(service, sid, callbackHeader, remoteAddr stri
 
 // firstCallbackURL extracts the first `<...>`-delimited URL from a GENA
 // CALLBACK header. The header may carry multiple space-separated
-// `<url>` entries; we use the first. Returns "" if malformed.
+// `<url>` entries; we use the first.
 func firstCallbackURL(header string) string {
 	header = strings.TrimSpace(header)
 	start := strings.IndexByte(header, '<')
 	if start < 0 {
-		return ""
+		// UPnP requires <...> delimiters, but some cheap IoT control points
+		// omit the opening bracket. Fall back to the trimmed header so a
+		// bracket-less but otherwise-valid callback still reaches url.Parse +
+		// the callbackHostAllowed SSRF guard rather than being silently
+		// dropped. Safe: downstream scheme/host validation can't be bypassed
+		// — a non-URL like "no-brackets" still fails there. (review r3)
+		return header
 	}
 	rest := header[start+1:]
 	end := strings.IndexByte(rest, '>')

@@ -1,6 +1,8 @@
 package dlna
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"os"
 	"sync"
@@ -113,30 +115,20 @@ func newFileTrace(w http.ResponseWriter, r *http.Request, trackID string) (http.
 
 	tw := &traceResponseWriter{ResponseWriter: w}
 
-	// Watch the request context: the net/http server cancels it when the peer
-	// closes the connection. This is how we tell "renderer closed the socket"
-	// (ctx cancelled) apart from "renderer stalled but held the socket open"
-	// (ctx alive, write blocked).
-	var closedByPeer bool
-	var closedMu sync.Mutex
-	done := make(chan struct{})
-	ctx := r.Context()
-	go func() {
-		select {
-		case <-ctx.Done():
-			closedMu.Lock()
-			closedByPeer = true
-			closedMu.Unlock()
-		case <-done:
-		}
-	}()
-
 	finish := func() {
-		close(done)
 		bytes, writes, bytesAtMaxBlock, maxBlock := tw.snapshot()
-		closedMu.Lock()
-		closed := closedByPeer
-		closedMu.Unlock()
+		// finish() runs deferred on the handler goroutine, so the request
+		// context's state here is authoritative for "did the peer go away":
+		// net/http cancels r.Context() when the client closes the connection.
+		// errors.Is(..., context.Canceled) — NOT a bare != nil — so a handler
+		// deadline (context.DeadlineExceeded) is never mislabeled a peer close.
+		// (net/http also cancels on graceful server shutdown, so this reads as
+		// "peer disconnected OR server shutting down" — fine for a diagnostic
+		// trace; just don't read it as "client abort" exclusively.) Replaces
+		// the prior per-request goroutine + mutex + done channel, which only
+		// ever set this one bool — the byte-counter snapshot has its own
+		// traceResponseWriter.mu. (external review r3)
+		closed := errors.Is(r.Context().Err(), context.Canceled)
 
 		packageLogger.Info("dlna file trace: request end",
 			"trackID", trackID,
