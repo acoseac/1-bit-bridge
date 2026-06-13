@@ -42,6 +42,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"slices"
 	"sync"
 	"sync/atomic"
 )
@@ -221,15 +222,19 @@ func (h *dynamicHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	merged := make([]slog.Attr, 0, len(h.attrs)+len(attrs))
 	merged = append(merged, h.attrs...)
 	merged = append(merged, attrs...)
-	groups := append([]string(nil), h.groups...)
-	return &dynamicHandler{groups: groups, attrs: merged}
+	// h.groups is read-only — WithGroup clones it before appending and
+	// WithAttrs never touches it — so share the header directly instead
+	// of allocating a throwaway clone here. Gemini r4.
+	return &dynamicHandler{groups: h.groups, attrs: merged}
 }
 
 func (h *dynamicHandler) WithGroup(name string) slog.Handler {
 	if name == "" {
 		return h
 	}
-	groups := append(append([]string(nil), h.groups...), name)
-	attrs := append([]slog.Attr(nil), h.attrs...)
-	return &dynamicHandler{groups: groups, attrs: attrs}
+	// Clone-then-append so the parent's backing array is never mutated.
+	// h.attrs is read-only (WithAttrs always builds a fresh slice), so
+	// share its header directly. Gemini r4.
+	groups := append(slices.Clone(h.groups), name)
+	return &dynamicHandler{groups: groups, attrs: h.attrs}
 }

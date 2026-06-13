@@ -146,10 +146,41 @@ func TestStatusOnFreshManagerReportsNoCert(t *testing.T) {
 }
 
 func TestStatusReflectsCachedCert(t *testing.T) {
-	// Seed the autocert.DirCache with a self-signed test cert
-	// pretending to be the LE-issued one. Status() must report
-	// CertPresent=true + NotAfter populated, exercising the
-	// passive cache-lookup path WITHOUT triggering an LE mint.
+	// A cert already on disk at construction time (left by a prior run)
+	// must be reflected by Status() — New() seeds the cached cert-status
+	// fields from disk. Write the synthetic PEM at the autocert.DirCache
+	// path (bare domain name as filename) BEFORE New() so the seed picks
+	// it up — Status() itself no longer reads disk (Gemini r4).
+	dir := t.TempDir()
+	pem := generateTestPEM(t, "x.com")
+	if err := os.WriteFile(filepath.Join(dir, "x.com"), pem, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m, err := New(Config{
+		Domain:   "x.com",
+		Email:    "ops@x.com",
+		CacheDir: dir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := m.Status()
+	if !st.CertPresent {
+		t.Error("CertPresent should be true after seeding cache")
+	}
+	if st.NotAfter.IsZero() {
+		t.Error("NotAfter should be populated after seeding cache")
+	}
+}
+
+func TestStatusDoesNotReReadDiskAfterInit(t *testing.T) {
+	// Status() reads the cached cert-status fields, NOT the disk cache,
+	// so a dashboard poll doesn't pay a PEM read + X509KeyPair parse
+	// every few seconds. A cert appearing on disk AFTER construction is
+	// therefore not reflected by Status() until a GetCertificate call
+	// updates the fields — and in production a cert only ever appears
+	// via GetCertificate (which does update them). This pins the
+	// no-disk-read-on-poll contract. Gemini r4.
 	dir := t.TempDir()
 	m, err := New(Config{
 		Domain:   "x.com",
@@ -159,19 +190,22 @@ func TestStatusReflectsCachedCert(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	// Write a synthetic PEM (key + cert) at the cache path autocert
-	// uses (bare domain name as filename).
+	if m.Status().CertPresent {
+		t.Fatal("precondition: a fresh manager must report no cert")
+	}
+	// Drop a cert on disk out-of-band — what a re-reading Status() would
+	// have picked up.
 	pem := generateTestPEM(t, "x.com")
 	if err := os.WriteFile(filepath.Join(dir, "x.com"), pem, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	st := m.Status()
-	if !st.CertPresent {
-		t.Error("CertPresent should be true after seeding cache")
+	if m.Status().CertPresent {
+		t.Error("Status() re-read disk after init; expected cached no-cert state to hold until GetCertificate")
 	}
-	if st.NotAfter.IsZero() {
-		t.Error("NotAfter should be populated after seeding cache")
+	// The exported CachedCert() DOES still read disk — the pairing-QR
+	// baker depends on fingerprinting the live on-disk leaf.
+	if m.CachedCert() == nil {
+		t.Error("CachedCert() should still read the freshly-written cert from disk")
 	}
 }
 

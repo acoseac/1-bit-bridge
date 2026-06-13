@@ -88,6 +88,15 @@ type Manager struct {
 	mu        sync.RWMutex
 	lastError string
 	lastCheck time.Time
+	// certPresent + notAfter are the cached cert-status fields the admin
+	// tile reads via Status(). Seeded once from disk in New() and
+	// refreshed reactively in GetCertificate after a successful
+	// (non-challenge) handshake — so Status() never re-reads the PEM +
+	// re-parses keys on every dashboard poll (autocert only writes its
+	// disk cache during GetCertificate, so there's nothing else to
+	// observe). Gemini r4.
+	certPresent bool
+	notAfter    time.Time
 }
 
 // New constructs a wired-up Manager. Creates the cache directory
@@ -153,6 +162,19 @@ func New(cfg Config) (*Manager, error) {
 	}
 
 	m.am = am
+
+	// Seed the cached cert-status fields once from disk so Status()
+	// doesn't read + parse the PEM on every admin poll. A cert left by a
+	// prior run is reflected immediately; a fresh install reports "no
+	// cert yet" until the first successful handshake updates the fields
+	// in GetCertificate. Safe to set without the lock — no other
+	// goroutine holds the Manager yet. Gemini r4.
+	if cert := m.cachedCert(); cert != nil {
+		m.certPresent = true
+		if na, err := servertls.CertNotAfter(cert); err == nil {
+			m.notAfter = na
+		}
+	}
 	return m, nil
 }
 
@@ -172,9 +194,36 @@ func (m *Manager) GetCertificate(hello *cryptotls.ClientHelloInfo) (*cryptotls.C
 		m.lastError = err.Error()
 	} else {
 		m.lastError = ""
+		// Refresh the cached cert-status fields so Status() never has to
+		// hit disk + parse keys. Skip ACME TLS-ALPN-01 challenge
+		// handshakes — autocert returns a short-lived self-signed
+		// challenge cert for those, NOT the domain cert, which would
+		// poison notAfter with a near-term expiry. Gemini r4.
+		if cert != nil && !isACMEChallengeHello(hello) {
+			m.certPresent = true
+			if na, cerr := servertls.CertNotAfter(cert); cerr == nil {
+				m.notAfter = na
+			}
+		}
 	}
 	m.mu.Unlock()
 	return cert, err
+}
+
+// isACMEChallengeHello reports whether the ClientHello is for a
+// TLS-ALPN-01 challenge (SupportedProtos carries acme-tls/1). autocert
+// answers those with a transient self-signed challenge cert that must
+// not update the cached domain-cert status.
+func isACMEChallengeHello(hello *cryptotls.ClientHelloInfo) bool {
+	if hello == nil {
+		return false
+	}
+	for _, p := range hello.SupportedProtos {
+		if p == acme.ALPNProto {
+			return true
+		}
+	}
+	return false
 }
 
 // NextProtos returns the ALPN proto-id the autocert TLS-ALPN-01
@@ -210,28 +259,23 @@ type Status struct {
 
 // Status returns a copy-safe snapshot. Reads under RLock so a
 // renewal-in-progress can't tear the response.
+//
+// Reads the cached cert-status fields (seeded in New, refreshed in
+// GetCertificate) — NOT the disk cache — so a dashboard polling every
+// few seconds doesn't pay a PEM read + X509KeyPair ASN.1 parse on every
+// call. autocert only mutates its disk cache during GetCertificate, so
+// the cached fields can't drift from what a fresh read would report.
+// Gemini r4.
 func (m *Manager) Status() Status {
 	m.mu.RLock()
-	st := Status{
-		Domain:    m.cfg.Domain,
-		LastError: m.lastError,
-		LastCheck: m.lastCheck,
+	defer m.mu.RUnlock()
+	return Status{
+		Domain:      m.cfg.Domain,
+		CertPresent: m.certPresent,
+		NotAfter:    m.notAfter,
+		LastError:   m.lastError,
+		LastCheck:   m.lastCheck,
 	}
-	m.mu.RUnlock()
-
-	// Cache lookup is via the autocert.Cache interface;
-	// autocert.DirCache stores the issued cert under the domain
-	// name. A nil/missing return means autocert hasn't minted
-	// yet (or never has). NotAfter parsing reuses servertls'
-	// helper so the gotcha-handling stays in one place.
-	cert := m.cachedCert()
-	if cert != nil {
-		st.CertPresent = true
-		if notAfter, err := servertls.CertNotAfter(cert); err == nil {
-			st.NotAfter = notAfter
-		}
-	}
-	return st
 }
 
 // CachedCert exposes the passively-read issued cert (see cachedCert).
