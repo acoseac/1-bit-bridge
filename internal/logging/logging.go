@@ -42,7 +42,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"slices"
 	"sync"
 	"sync/atomic"
 )
@@ -232,9 +231,13 @@ func (h *dynamicHandler) WithGroup(name string) slog.Handler {
 	if name == "" {
 		return h
 	}
-	// Clone-then-append so the parent's backing array is never mutated.
-	// h.attrs is read-only (WithAttrs always builds a fresh slice), so
-	// share its header directly. Gemini r4.
-	groups := append(slices.Clone(h.groups), name)
+	// Build groups in a single allocation: slices.Clone + append would
+	// double-allocate (Clone gives cap==len, so the append reallocs).
+	// Pre-size to len+1 and copy once. Never mutates the parent's backing
+	// array; h.attrs is read-only (WithAttrs always builds a fresh
+	// slice), so share its header directly. Gemini r4 (round 1).
+	groups := make([]string, 0, len(h.groups)+1)
+	groups = append(groups, h.groups...)
+	groups = append(groups, name)
 	return &dynamicHandler{groups: groups, attrs: h.attrs}
 }
