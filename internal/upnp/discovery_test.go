@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -134,19 +135,10 @@ func TestBuildMSearchPacket_ShapeAndST(t *testing.T) {
 		"MX: 3\r\n",
 		"ST: urn:schemas-upnp-org:device:MediaServer:1\r\n",
 	} {
-		if !contains(pkt, want) {
+		if !strings.Contains(pkt, want) {
 			t.Errorf("packet missing %q\n%s", want, pkt)
 		}
 	}
-}
-
-func contains(s, sub string) bool {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
 }
 
 // ---- handlePacket location-change refresh (drives the cache directly) ----

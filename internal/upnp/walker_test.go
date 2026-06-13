@@ -3,6 +3,7 @@ package upnp
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -50,11 +51,11 @@ func it(s itemSpec) string {
 	url := "http://h:8200/MediaItems/x." + ext
 	tn := ""
 	if s.trackNo > 0 {
-		tn = `<upnp:originalTrackNumber>` + itoa(s.trackNo) + `</upnp:originalTrackNumber>`
+		tn = `<upnp:originalTrackNumber>` + strconv.Itoa(s.trackNo) + `</upnp:originalTrackNumber>`
 	}
 	szAttr := ""
 	if s.size > 0 {
-		szAttr = ` size="` + itoa64(s.size) + `"`
+		szAttr = ` size="` + strconv.FormatInt(s.size, 10) + `"`
 	}
 	return `<item id="` + s.id + `" parentID="` + s.parentID + `">` +
 		`<dc:title>` + s.title + `</dc:title>` +
@@ -64,37 +65,6 @@ func it(s itemSpec) string {
 		tn +
 		`<res protocolInfo="` + proto + `"` + szAttr + `>` + url + `</res>` +
 		`</item>`
-}
-
-func itoa(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	neg := i < 0
-	if neg {
-		i = -i
-	}
-	var s []byte
-	for i > 0 {
-		s = append([]byte{byte('0' + i%10)}, s...)
-		i /= 10
-	}
-	if neg {
-		s = append([]byte{'-'}, s...)
-	}
-	return string(s)
-}
-
-func itoa64(i int64) string {
-	if i == 0 {
-		return "0"
-	}
-	var s []byte
-	for i > 0 {
-		s = append([]byte{byte('0' + i%10)}, s...)
-		i /= 10
-	}
-	return string(s)
 }
 
 const xmlnsHeader = `<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">`
