@@ -1,6 +1,7 @@
 package analyze
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"os"
@@ -64,6 +65,90 @@ func TestRunAnalysisEndToEnd(t *testing.T) {
 	// silence. (sox `synth` defaults to ≈-3 dB, so don't assert full-scale.)
 	if max0 := int8(data[waveformHeaderLen+1]); max0 < 40 {
 		t.Fatalf("first bucket max = %d, want a substantial positive peak", max0)
+	}
+}
+
+func TestDownmixFrame(t *testing.T) {
+	cases := []struct {
+		name  string
+		frame []float64
+		want  float32
+	}{
+		{"mono passthrough", []float64{0.5}, 0.5},
+		{"stereo average", []float64{0.4, 0.6}, 0.5},
+		{"stereo cancel", []float64{0.5, -0.5}, 0.0},
+		{"quad average", []float64{1, 0, -1, 0}, 0.0},
+	}
+	for _, c := range cases {
+		if got := downmixFrame(c.frame); got != c.want {
+			t.Errorf("%s: downmixFrame(%v) = %v, want %v", c.name, c.frame, got, c.want)
+		}
+	}
+}
+
+// TestRunAnalysisComputesLoudness: a real (non-silent) decode populates a
+// plausible ReplayGain. The exact value is pinned by loudness_test.go's
+// ffmpeg cross-check; here we only assert the WIRING delivers a finite,
+// sane gain for a full-scale-ish tone (a -3 dB sine integrates near
+// -6 LUFS → RG ≈ -12 dB; the band is wide to absorb sox's synth level).
+func TestRunAnalysisComputesLoudness(t *testing.T) {
+	requireSox(t)
+	dir := t.TempDir()
+	src := filepath.Join(dir, "tone.wav")
+	// 2 s so several 400 ms R128 blocks survive the gating.
+	if out, err := exec.Command("sox", "-n", "-r", "48000", "-c", "2", src,
+		"synth", "2", "sine", "440", "sine", "440").CombinedOutput(); err != nil {
+		t.Fatalf("sox synth: %v\n%s", err, out)
+	}
+	res, err := RunAnalysis(context.Background(), AnalyzeSpec{
+		SourceAbsPath: src, SourceLibraryRel: "tone.wav",
+		OutputDir: filepath.Join(dir, "waveforms"),
+	})
+	if err != nil {
+		t.Fatalf("RunAnalysis: %v", err)
+	}
+	if !res.HasLoudness {
+		t.Fatal("HasLoudness = false, want loudness computed for a non-silent stereo tone")
+	}
+	if res.ReplayGainTrackDB < -25 || res.ReplayGainTrackDB > -2 {
+		t.Fatalf("ReplayGainTrackDB = %.2f dB, outside the plausible [-25,-2] band", res.ReplayGainTrackDB)
+	}
+}
+
+// TestDownmixMatchesMonoDecode is the churn-safety pin for the wf1→wf2
+// bump: the peak envelope from the new source-channel decode (per-frame
+// downmix) must be BYTE-IDENTICAL to the prior mono `-c 1` decode for a
+// stereo source, so already-analyzed libraries keep the same waveformTag
+// and iOS never re-fetches a sidecar — only the new loudness scalar syncs.
+func TestDownmixMatchesMonoDecode(t *testing.T) {
+	requireSox(t)
+	dir := t.TempDir()
+	src := filepath.Join(dir, "stereo.wav")
+	// Distinct L/R content so a downmix that didn't average both channels
+	// would diverge.
+	if out, err := exec.Command("sox", "-n", "-r", "48000", "-c", "2", src,
+		"synth", "1.5", "sine", "330", "sine", "550").CombinedOutput(); err != nil {
+		t.Fatalf("sox synth: %v\n%s", err, out)
+	}
+	ctx := context.Background()
+
+	waveformVia := func(channels int) []byte {
+		pk := newPeaker(waveformBucketSamples)
+		total, err := decodeFrames(ctx, src, channels, func(frame []float64) {
+			pk.add(downmixFrame(frame))
+		})
+		if err != nil {
+			t.Fatalf("decodeFrames(c=%d): %v", channels, err)
+		}
+		pk.finish()
+		return encodeWaveform(pk, AnalysisSampleRate, waveformBucketSamples, total)
+	}
+
+	mono := waveformVia(1)   // sox's own stereo→mono mix (the prior wf1 path)
+	stereo := waveformVia(2) // source-channel decode + Go (L+R)/2 downmix
+	if !bytes.Equal(mono, stereo) {
+		t.Fatalf("waveform bytes diverge: mono `-c 1` (%d B) vs downmixed source-channel (%d B) — wf1→wf2 would churn iOS sidecars",
+			len(mono), len(stereo))
 	}
 }
 

@@ -1276,14 +1276,13 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	//     of whether the transcode pool exists.
 	//
 	// Alpha-sort stays correct by construction: each conditional
-	// appends in lex order, terminal `variantBumpsIndex` ends every
-	// path. Capacity 14 covers the current maximum (carPlayOptimize +
-	// deleteVariants + diagnosticsSummary + dlnaServer +
-	// operatorDrivenUpscale + pairingEventsSupported + playbackHistory +
-	// playbackHistoryRead + playlistBackup + playlistsCrossDevice +
-	// pushEventsSupported + rendererDiscovery + upscaleCompleteEvents +
-	// variantBumpsIndex).
-	feats := make([]string, 0, 15)
+	// appends in lex order. Capacity 16 covers the current maximum
+	// (carPlayOptimize + deleteVariants + diagnosticsSummary + dlnaServer +
+	// loudness + operatorDrivenUpscale + pairingEventsSupported +
+	// playbackHistory + playbackHistoryRead + playlistBackup +
+	// playlistsCrossDevice + pushEventsSupported + rendererDiscovery +
+	// upscaleCompleteEvents + variantBumpsIndex + waveform).
+	feats := make([]string, 0, 16)
 	if s.upscaleEnabled {
 		if s.carPlayOptimizeEnabled {
 			feats = append(feats, "carPlayOptimize")
@@ -1306,6 +1305,15 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// to start in public deployment mode regardless of this flag.
 	if s.dlnaEnabled {
 		feats = append(feats, "dlnaServer")
+	}
+	if s.analysisEnabled {
+		// `loudness` advertises that this bridge populates
+		// Track.replayGainTrackDB from offline EBU R128 analysis when the
+		// source carries no ReplayGain tag, so iOS can trust a present
+		// value as either tag-curated or analysis-derived. Same
+		// analysis-active gate as `waveform`. Alpha-sorted between
+		// `dlnaServer` and `operatorDrivenUpscale` (d < l < o).
+		feats = append(feats, "loudness")
 	}
 	if s.upscaleEnabled {
 		if s.batchCoordinator != nil {

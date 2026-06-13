@@ -175,3 +175,216 @@ func TestLookupAnalysisCaseInsensitive(t *testing.T) {
 		t.Fatalf("lookup mismatch: %+v", row)
 	}
 }
+
+func f64ptr(v float64) *float64 { return &v }
+
+// TestUpsertAnalysisPersistsLoudness: the nullable replaygain_track_db
+// column round-trips — a present value reads back, nil reads back nil.
+func TestUpsertAnalysisPersistsLoudness(t *testing.T) {
+	s := openTempStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	upsertParent(t, s, "A/1.flac")
+	upsertParent(t, s, "A/2.flac")
+
+	if err := s.UpsertAnalysis(ctx, AnalysisRow{
+		SourcePath: "A/1.flac", WaveformPath: "/w/a.bin", WaveformTag: "t1",
+		SourceMTimeNS: 1, SourceSize: 2, SchemaVersion: "wf2", CreatedAt: 1,
+		ReplayGainTrackDB: f64ptr(-7.25),
+	}); err != nil {
+		t.Fatalf("UpsertAnalysis (with loudness): %v", err)
+	}
+	if err := s.UpsertAnalysis(ctx, AnalysisRow{
+		SourcePath: "A/2.flac", WaveformPath: "/w/b.bin", WaveformTag: "t2",
+		SourceMTimeNS: 1, SourceSize: 2, SchemaVersion: "wf2", CreatedAt: 1,
+		ReplayGainTrackDB: nil,
+	}); err != nil {
+		t.Fatalf("UpsertAnalysis (nil loudness): %v", err)
+	}
+
+	got1, err := s.GetAnalysis(ctx, "A/1.flac")
+	if err != nil {
+		t.Fatalf("GetAnalysis A/1: %v", err)
+	}
+	if got1.ReplayGainTrackDB == nil || *got1.ReplayGainTrackDB != -7.25 {
+		t.Fatalf("A/1 loudness = %v, want -7.25", got1.ReplayGainTrackDB)
+	}
+	got2, err := s.GetAnalysis(ctx, "A/2.flac")
+	if err != nil {
+		t.Fatalf("GetAnalysis A/2: %v", err)
+	}
+	if got2.ReplayGainTrackDB != nil {
+		t.Fatalf("A/2 loudness = %v, want nil", *got2.ReplayGainTrackDB)
+	}
+}
+
+// TestUpsertAnalysisLoudnessBackfillBumps: a loudness backfill (nil →
+// value) on an otherwise-identical waveform-fresh row MUST bump
+// indexed_at exactly once (so iOS delta-sync picks up the new
+// replayGainTrackDB), and a re-run with the SAME loudness is a no-op.
+// This is the v14→v16 backfill path: a wf1-era row gains its scalar.
+func TestUpsertAnalysisLoudnessBackfillBumps(t *testing.T) {
+	s := openTempStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	upsertParent(t, s, "A/1.flac")
+
+	base := AnalysisRow{
+		SourcePath: "A/1.flac", WaveformPath: "/w/a.bin", WaveformTag: "t1",
+		WaveformSize: 10, SourceMTimeNS: 1, SourceSize: 2,
+		SchemaVersion: "wf2", CreatedAt: 1,
+	}
+	t1 := readIndexedAt(t, s, "A/1.flac") + (1 * time.Hour).Nanoseconds()
+	s.now = func() time.Time { return time.Unix(0, t1) }
+	if err := s.UpsertAnalysis(ctx, base); err != nil { // loudness nil
+		t.Fatalf("first UpsertAnalysis: %v", err)
+	}
+
+	// Backfill loudness (nil → -8.0) → must bump.
+	t2 := t1 + (1 * time.Hour).Nanoseconds()
+	s.now = func() time.Time { return time.Unix(0, t2) }
+	withLoud := base
+	withLoud.ReplayGainTrackDB = f64ptr(-8.0)
+	if err := s.UpsertAnalysis(ctx, withLoud); err != nil {
+		t.Fatalf("backfill UpsertAnalysis: %v", err)
+	}
+	if got := readIndexedAt(t, s, "A/1.flac"); got != t2 {
+		t.Fatalf("loudness backfill did not bump: got %d want %d", got, t2)
+	}
+
+	// Same loudness again → no-op.
+	s.now = func() time.Time { return time.Unix(0, t2+(1*time.Hour).Nanoseconds()) }
+	again := base
+	again.ReplayGainTrackDB = f64ptr(-8.0)
+	again.CreatedAt = 999
+	if err := s.UpsertAnalysis(ctx, again); err != nil {
+		t.Fatalf("idempotent UpsertAnalysis: %v", err)
+	}
+	if got := readIndexedAt(t, s, "A/1.flac"); got != t2 {
+		t.Fatalf("identical loudness recompute bumped: got %d want %d", got, t2)
+	}
+}
+
+// TestManifestSplicesReplayGainTagAbsentOnly is the wire contract: the
+// analysis loudness fills Track.ReplayGainTrackDB ONLY when the source's
+// own tags carry none — a curated tag always wins. Three tracks cover
+// the matrix: tag-absent + analysis present (→ analysis), tag present +
+// analysis present (→ tag), neither (→ nil).
+func TestManifestSplicesReplayGainTagAbsentOnly(t *testing.T) {
+	s := openTempStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+
+	// A/1: no tag — analysis should fill it.
+	upsertParent(t, s, "A/1.flac")
+	// A/2: curated ReplayGain tag of -5.0 baked into tags_json.
+	if err := s.UpsertTrack(ctx, &Track{
+		Path: "A/2.flac", Size: 100, ModTime: time.Now(),
+		ReplayGainTrackDB: f64ptr(-5.0),
+	}); err != nil {
+		t.Fatalf("UpsertTrack A/2: %v", err)
+	}
+	// A/3: no tag, no analysis row.
+	upsertParent(t, s, "A/3.flac")
+
+	for _, p := range []string{"A/1.flac", "A/2.flac"} {
+		if err := s.UpsertAnalysis(ctx, AnalysisRow{
+			SourcePath: p, WaveformPath: "/w/" + p, WaveformTag: "tag-" + p,
+			SourceMTimeNS: 1, SourceSize: 2, SchemaVersion: "wf2", CreatedAt: 1,
+			ReplayGainTrackDB: f64ptr(-9.0),
+		}); err != nil {
+			t.Fatalf("UpsertAnalysis %s: %v", p, err)
+		}
+	}
+
+	tracks, err := s.ListTracks(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTracks: %v", err)
+	}
+	got := map[string]*float64{}
+	for i := range tracks {
+		got[tracks[i].Path] = tracks[i].ReplayGainTrackDB
+	}
+	if got["A/1.flac"] == nil || *got["A/1.flac"] != -9.0 {
+		t.Fatalf("A/1 (tag-absent) = %v, want analysis -9.0", got["A/1.flac"])
+	}
+	if got["A/2.flac"] == nil || *got["A/2.flac"] != -5.0 {
+		t.Fatalf("A/2 (tag-present) = %v, want curated tag -5.0", got["A/2.flac"])
+	}
+	if got["A/3.flac"] != nil {
+		t.Fatalf("A/3 (neither) = %v, want nil", *got["A/3.flac"])
+	}
+}
+
+// TestSplicedReplayGainNotPersistedOnRoundTrip pins the marshalForStorage
+// scrub: a Track read with an ANALYSIS-derived replayGainTrackDB, then fed
+// back through a write path, must NOT freeze that value into tags_json (it
+// would become a faux curated tag that wins over future analysis). A
+// genuinely CURATED tag on the same field must survive the round-trip.
+// Same class as TestUpsertTrackDoesNotPersistEnrichedField. (CodeRabbit #396.)
+func TestSplicedReplayGainNotPersistedOnRoundTrip(t *testing.T) {
+	s := openTempStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+
+	upsertParent(t, s, "A/1.flac")       // no tag → analysis fills it
+	if err := s.UpsertTrack(ctx, &Track{ // curated -5.0 baked into tags_json
+		Path: "A/2.flac", Size: 100, ModTime: time.Now(),
+		ReplayGainTrackDB: f64ptr(-5.0),
+	}); err != nil {
+		t.Fatalf("UpsertTrack A/2: %v", err)
+	}
+	for _, p := range []string{"A/1.flac", "A/2.flac"} {
+		if err := s.UpsertAnalysis(ctx, AnalysisRow{
+			SourcePath: p, WaveformPath: "/w/" + p, WaveformTag: "tag-" + p,
+			SourceMTimeNS: 1, SourceSize: 2, SchemaVersion: "wf2", CreatedAt: 1,
+			ReplayGainTrackDB: f64ptr(-9.0),
+		}); err != nil {
+			t.Fatalf("UpsertAnalysis %s: %v", p, err)
+		}
+	}
+
+	// Read (splices analysis into A/1), then round-trip BOTH back through
+	// the write path — exactly the footgun the marker guards against.
+	tracks, err := s.ListTracks(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTracks: %v", err)
+	}
+	for i := range tracks {
+		tr := tracks[i]
+		if err := s.UpsertTrack(ctx, &tr); err != nil {
+			t.Fatalf("round-trip UpsertTrack %s: %v", tr.Path, err)
+		}
+	}
+
+	// GetTrack reads tags_json ONLY (no splice): the analysis value must be
+	// gone for A/1, the curated tag must remain for A/2.
+	a1, err := s.GetTrack(ctx, "A/1.flac")
+	if err != nil {
+		t.Fatalf("GetTrack A/1: %v", err)
+	}
+	if a1.ReplayGainTrackDB != nil {
+		t.Fatalf("A/1 tags_json leaked analysis value %v, want nil (scrubbed)", *a1.ReplayGainTrackDB)
+	}
+	a2, err := s.GetTrack(ctx, "A/2.flac")
+	if err != nil {
+		t.Fatalf("GetTrack A/2: %v", err)
+	}
+	if a2.ReplayGainTrackDB == nil || *a2.ReplayGainTrackDB != -5.0 {
+		t.Fatalf("A/2 curated tag = %v, want -5.0 (preserved)", a2.ReplayGainTrackDB)
+	}
+
+	// And the live analysis column must still re-splice for A/1 — the
+	// scrub removed the frozen copy, not the source of truth.
+	tracks2, err := s.ListTracks(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTracks (re-read): %v", err)
+	}
+	for i := range tracks2 {
+		if tracks2[i].Path == "A/1.flac" {
+			if tracks2[i].ReplayGainTrackDB == nil || *tracks2[i].ReplayGainTrackDB != -9.0 {
+				t.Fatalf("A/1 re-splice = %v, want analysis -9.0", tracks2[i].ReplayGainTrackDB)
+			}
+		}
+	}
+}

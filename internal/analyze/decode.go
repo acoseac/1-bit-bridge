@@ -9,33 +9,71 @@ import (
 	"math"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
+// maxAnalysisChannels bounds the channel count probeChannels will trust.
+// Music is overwhelmingly mono/stereo; 8 covers 7.1 without letting a
+// malformed header drive an absurd per-frame allocation.
+const maxAnalysisChannels = 8
+
 // decodeArgs builds the sox argv that decodes any supported source to
-// headerless mono 48 kHz little-endian float32 PCM on stdout.
+// headerless `channels`-channel 48 kHz little-endian float32 PCM on
+// stdout.
 //
-//   - 48 kHz mono is the uniform analysis target (load-bearing for the
-//     Phase-2 BS.1770 loudness path; fine for peaks). sox inserts the
-//     rate + channel-mix effects automatically when the source differs.
+//   - 48 kHz is the uniform analysis target and is load-bearing for the
+//     BS.1770 loudness path: the K-weighting coefficients are the spec's
+//     48 kHz values. sox inserts the rate effect automatically when the
+//     source differs.
+//   - Decoding at the SOURCE channel count (not a mono downmix) is
+//     load-bearing for loudness: a mono downmix reads +3..+6 dB vs proper
+//     multichannel R128. The peak envelope downmixes to mono separately
+//     (downmixFrame), which is fine for a visual waveform.
 //   - `-L` forces little-endian so the Go reader is deterministic across
 //     architectures (ARM/Pi vs Intel).
 //   - No `-G` (gain-guard): float output can't clip, and a guard pass
 //     would shrink the displayed envelope.
-func decodeArgs(srcAbs string) []string {
+func decodeArgs(srcAbs string, channels int) []string {
 	return []string{
 		srcAbs,
 		"-t", "raw", "-e", "float", "-b", "32", "-L",
-		"-c", "1", "-r", "48000",
+		"-c", strconv.Itoa(channels), "-r", "48000",
 		"-",
 	}
 }
 
-// decodePCM runs sox to decode srcAbs, streaming each float32 sample to
-// onSample, and returns the total sample count. PCM is processed in
-// blocks (never buffered whole), so memory stays flat for long tracks.
+// probeChannels reads the source channel count via `sox --i -c`. It
+// returns (channels, true) for a sane 1..maxAnalysisChannels value, or
+// (1, false) when sox can't report it — the caller then decodes mono and
+// SKIPS loudness rather than trusting a guessed channel layout (a wrong
+// guess would silently store a biased ReplayGain). The probe is a cheap
+// metadata read; the streaming decode is the expensive part.
+func probeChannels(ctx context.Context, srcAbs string) (int, bool) {
+	out, err := exec.CommandContext(ctx, "sox", "--i", "-c", srcAbs).Output()
+	if err != nil {
+		return 1, false
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil || n < 1 || n > maxAnalysisChannels {
+		return 1, false
+	}
+	return n, true
+}
+
+// decodeFrames runs sox to decode srcAbs to `channels`-channel 48 kHz
+// float PCM, grouping the interleaved stream into frames (one sample per
+// channel) and calling onFrame for each, returning the total frame count
+// (= per-channel sample count, the value the waveform duration math
+// wants). PCM is processed in blocks (never buffered whole), so memory
+// stays flat for long tracks.
+//
+// **The frame slice passed to onFrame is REUSED across calls** — callers
+// must read it immediately and not retain it (the loudness meter copies
+// into its ring; the peaker downmix reads in place). This mirrors the
+// one-allocation budget StreamTracks holds on the read path.
 //
 // **Process reaping**: the sox process is killed + reaped on any early
 // return / panic via the processReleased guard — an undrained stdout
@@ -43,8 +81,11 @@ func decodeArgs(srcAbs string) []string {
 // process (a worker-slot leak in the pool). A non-zero sox exit
 // (truncated / corrupt file) returns an error with redacted stderr so
 // the caller commits nothing.
-func decodePCM(ctx context.Context, srcAbs string, onSample func(float32)) (totalSamples int64, err error) {
-	cmd := exec.CommandContext(ctx, "sox", decodeArgs(srcAbs)...)
+func decodeFrames(ctx context.Context, srcAbs string, channels int, onFrame func(frame []float64)) (totalFrames int64, err error) {
+	if channels < 1 {
+		channels = 1
+	}
+	cmd := exec.CommandContext(ctx, "sox", decodeArgs(srcAbs, channels)...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	stdout, err := cmd.StdoutPipe()
@@ -62,19 +103,26 @@ func decodePCM(ctx context.Context, srcAbs string, onSample func(float32)) (tota
 		}
 	}()
 
+	frame := make([]float64, channels)
+	fi := 0
 	if serr := streamFloat32LE(stdout, func(s float32) {
-		onSample(s)
-		totalSamples++
+		frame[fi] = float64(s)
+		fi++
+		if fi == channels {
+			onFrame(frame)
+			totalFrames++
+			fi = 0
+		}
 	}); serr != nil {
-		return totalSamples, fmt.Errorf("read pcm: %w", serr)
+		return totalFrames, fmt.Errorf("read pcm: %w", serr)
 	}
 	if werr := cmd.Wait(); werr != nil {
 		processReleased = true
-		return totalSamples, fmt.Errorf("sox: %w (stderr: %s)",
+		return totalFrames, fmt.Errorf("sox: %w (stderr: %s)",
 			werr, redactSoxErr(strings.TrimSpace(stderr.String()), srcAbs))
 	}
 	processReleased = true
-	return totalSamples, nil
+	return totalFrames, nil
 }
 
 // streamFloat32LE reads little-endian float32 samples from r and calls

@@ -173,6 +173,19 @@ type Track struct {
 	// `tags_json` (see `marshalForStorage`). Additive + omitempty —
 	// ProtocolVersion stays 1; pre-feature iOS ignores the unknown key.
 	WaveformTag string `json:"waveformTag,omitempty"`
+
+	// replayGainFromAnalysis is an internal, NON-WIRE marker (unexported ⇒
+	// json ignores it) set by spliceAnalysisReplayGain when it fills
+	// ReplayGainTrackDB from `track_analysis` because the source carried
+	// no ReplayGain tag. marshalForStorage scrubs ReplayGainTrackDB ONLY
+	// when this is true, so a caller round-tripping a read Track back
+	// through a write path can't freeze an analysis-derived value into
+	// `tags_json` as a faux curated tag (which would then win over future
+	// analysis recomputes/deletes). A genuinely tag-curated ReplayGain
+	// leaves this false and survives the write unchanged. Go struct copy
+	// preserves unexported fields across packages, so the guard holds even
+	// for an external round-trip. (CodeRabbit on #396.)
+	replayGainFromAnalysis bool
 }
 
 // Variant is one cached alternate rendering of a Track's source. The
