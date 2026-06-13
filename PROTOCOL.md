@@ -17,6 +17,20 @@ This is the **source of truth** for the wire contract between the `1-bit-bridge`
 - **HTTP/3 Discovery**: Server advertises HTTP/3 capability via the `Alt-Svc` header on HTTP/1.1 and HTTP/2 responses. Clients supporting QUIC should upgrade future connections to the advertised UDP port.
 - Path segment: all endpoints are prefixed `/v1/`.
 
+## Discovery (mDNS / Bonjour)
+
+The bridge advertises on the local network as `_onebit-bridge._tcp` (DNS-SD / Bonjour) so clients auto-discover it on a LAN. The advertisement carries A/AAAA + SRV records plus a TXT record with these keys:
+
+| Key | Since | Meaning |
+|---|---|---|
+| `pv` | v1 | Advertised `ProtocolVersion` (decimal). Clients may refuse an incompatible value before attempting a TLS handshake. |
+| `host` | v1 | The `<short-hostname>.local` SRV target; lets the client build `https://<host>:<port>` directly without a separate Bonjour hostport resolution. |
+| `port` | v1 | TCP port the v1 API listens on (decimal, 1–65535). |
+| `library` | v1 | Operator-set library name (omitted when blank). |
+| `ips` | v1 (additive) | Comma-separated routable IP literals — the same interface-filtered set the A/AAAA records carry, **minus link-local** (IPv6 `fe80::/10` needs a zone index the client can't map; IPv4 `169.254.0.0/16` is an APIPA fallback). Lets the client race direct `https://<ip>:<port>` connections at discovery time and skip slow/flaky `.local` resolution, falling back to `host` when the key is absent. Capped to fit the 255-byte TXT-string limit, so a client MUST tolerate a truncated or absent list. |
+
+mDNS is a LAN convenience only — once paired, the client stores a durable endpoint (Tailscale IP or public hostname) for remote access. Discovery-time connections still pin the TLS fingerprint captured at pairing; the `ips=` literals present the same leaf certificate, so pinning is transport-agnostic.
+
 ## Authentication
 
 - The default rule: every request must carry `Authorization: Bearer <token>` where `<token>` is a minted bearer.
