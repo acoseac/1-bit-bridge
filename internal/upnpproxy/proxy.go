@@ -301,10 +301,24 @@ func buildProxyURL(liveHostPort, storedRes string) (string, error) {
 // RFC 7230 §6.1 plus the WebSocket trio. We don't relay any of them
 // — the upstream's per-connection state isn't the caller's concern.
 func isHopByHopHeader(h string) bool {
-	switch strings.ToLower(h) {
-	case "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
-		"te", "trailer", "transfer-encoding", "upgrade":
-		return true
+	// Route on length first (a 0-alloc bloom filter), then EqualFold
+	// within the matching bucket — avoids the strings.ToLower heap copy
+	// the prior switch paid for every header on every proxied stream.
+	// EqualFold keeps the match correct for non-canonical keys too.
+	// Gemini r4.
+	switch len(h) {
+	case 2:
+		return strings.EqualFold(h, "TE")
+	case 7:
+		return strings.EqualFold(h, "Trailer") || strings.EqualFold(h, "Upgrade")
+	case 10:
+		return strings.EqualFold(h, "Connection") || strings.EqualFold(h, "Keep-Alive")
+	case 17:
+		return strings.EqualFold(h, "Transfer-Encoding")
+	case 18:
+		return strings.EqualFold(h, "Proxy-Authenticate")
+	case 19:
+		return strings.EqualFold(h, "Proxy-Authorization")
 	}
 	return false
 }

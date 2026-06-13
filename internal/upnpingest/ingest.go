@@ -628,19 +628,28 @@ func parseDurationSeconds(s string) float64 {
 	if s == "" {
 		return 0
 	}
-	parts := strings.Split(s, ":")
-	if len(parts) != 3 {
+	// Allocation-free split on ':' — strings.Split allocated a 3-element
+	// slice (+ 3 substring headers) per track across a full UPnP sync.
+	// Equivalent to the prior `len(parts) != 3` gate: a third colon lands
+	// in the seconds segment and fails ParseFloat the same way. Gemini r4.
+	i1 := strings.IndexByte(s, ':')
+	if i1 < 0 {
 		return 0
 	}
-	h, err := strconv.Atoi(parts[0])
+	i2rel := strings.IndexByte(s[i1+1:], ':')
+	if i2rel < 0 {
+		return 0
+	}
+	i2 := i1 + 1 + i2rel
+	h, err := strconv.Atoi(s[:i1])
 	if err != nil || h < 0 {
 		return 0
 	}
-	m, err := strconv.Atoi(parts[1])
+	m, err := strconv.Atoi(s[i1+1 : i2])
 	if err != nil || m < 0 {
 		return 0
 	}
-	sec, err := strconv.ParseFloat(parts[2], 64)
+	sec, err := strconv.ParseFloat(s[i2+1:], 64)
 	if err != nil || sec < 0 {
 		return 0
 	}

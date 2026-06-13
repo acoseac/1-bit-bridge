@@ -266,13 +266,41 @@ func looksLikeAudioItem(it Object) bool {
 	if it.Res == "" {
 		return false
 	}
-	if strings.HasPrefix(strings.ToLower(it.Class), "object.item.audioitem") {
+	// class / protocolInfo are overwhelmingly already-lowercase in the
+	// wild, so match the raw string first and only pay the
+	// strings.ToLower allocation on a miss — this runs per item across
+	// the whole walk. Gemini r4.
+	if classIsAudioItem(it.Class) {
 		return true
 	}
-	if strings.Contains(strings.ToLower(it.ProtocolInfo), ":audio/") {
+	if protocolInfoIsAudio(it.ProtocolInfo) {
 		return true
 	}
 	return isKnownAudioExt(extFromURL(it.Res))
+}
+
+// classIsAudioItem reports whether class names an audioItem
+// (case-insensitive), allocation-free for ALL inputs: strings.EqualFold
+// on the leading len(want) bytes avoids the strings.ToLower copy a
+// mixed-case input would otherwise trigger (Gemini r4 round 1). `want`
+// is pure ASCII, so the byte-length prefix slice is rune-safe — a
+// multi-byte rune in those bytes can't equal-fold the ASCII target and
+// correctly returns false.
+func classIsAudioItem(class string) bool {
+	const want = "object.item.audioitem"
+	if len(class) < len(want) {
+		return false
+	}
+	return strings.EqualFold(class[:len(want)], want)
+}
+
+// protocolInfoIsAudio reports whether pi carries an ":audio/" MIME token
+// (case-insensitive), allocation-free on the common all-lowercase input.
+func protocolInfoIsAudio(pi string) bool {
+	if strings.Contains(pi, ":audio/") {
+		return true
+	}
+	return strings.Contains(strings.ToLower(pi), ":audio/")
 }
 
 // synthesizeFilename builds the leaf component of a track's stable Path.
@@ -306,6 +334,21 @@ func dotIfExt(ext string) string {
 	return "." + ext
 }
 
+// pathComponentNeedsSanitize reports whether s carries a byte that
+// sanitizePathComponent must rewrite: a path separator ('/' or '\\') or
+// a control char (< 0x20). Allocation-free; safe on UTF-8 because
+// multi-byte runes are all >= 0x80 and never collide with these ASCII
+// targets. Extracted from sanitizePathComponent to keep that function
+// under the cognitive-complexity ceiling (Sonar S3776).
+func pathComponentNeedsSanitize(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if b := s[i]; b == '/' || b == '\\' || b < 0x20 {
+			return true
+		}
+	}
+	return false
+}
+
 // sanitizePathComponent strips '/' and '\\' (path separators on POSIX +
 // Windows) + control chars from a directory or filename component so the
 // joined Path never breaks the path.Clean invariant we rely on.
@@ -316,6 +359,19 @@ func sanitizePathComponent(s string) string {
 	if s == "" {
 		return ""
 	}
+	// Fast path: clean components — the overwhelming majority across a
+	// full library walk — return the (already-trimmed) string without
+	// allocating a Builder. The dirty-byte scan lives in a helper so
+	// this function stays under the cognitive-complexity ceiling
+	// (Gemini r4 fast-path; Sonar S3776 round 1).
+	if !pathComponentNeedsSanitize(s) {
+		// Still neutralize the two path.Clean-special segments (see below).
+		if s == "." || s == ".." {
+			return "_"
+		}
+		return s
+	}
+
 	var b strings.Builder
 	b.Grow(len(s))
 	for _, r := range s {
@@ -374,7 +430,16 @@ func extFromURL(u string) string {
 // where the upstream's URL omits the extension (rare with MiniDLNA, but
 // observed on other servers).
 func extFromProtocolInfo(pi string) string {
-	pi = strings.ToLower(pi)
+	// protocolInfo MIME tokens are overwhelmingly already lowercase;
+	// match the raw string first and only pay the strings.ToLower
+	// allocation on a miss. Gemini r4.
+	if ext := matchProtocolInfoExt(pi); ext != "" {
+		return ext
+	}
+	return matchProtocolInfoExt(strings.ToLower(pi))
+}
+
+func matchProtocolInfoExt(pi string) string {
 	switch {
 	case strings.Contains(pi, "audio/x-flac"), strings.Contains(pi, "audio/flac"):
 		return "flac"

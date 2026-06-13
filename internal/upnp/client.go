@@ -231,6 +231,12 @@ func writeArg(b *bytes.Buffer, name, val string) {
 // the named `&quot;` returns results (A/B-confirmed against the live
 // device). Mirrors the iOS SOAPEnvelopeBuilder.escapeXML named-entity set.
 func escapeXMLArg(s string) string {
+	// Fast path: the vast majority of titles/artists/IDs carry none of
+	// the five escapable runes, so skip the Builder allocation + copy
+	// entirely and return the input unchanged. Gemini r4.
+	if !strings.ContainsAny(s, "&<>\"'") {
+		return s
+	}
 	var b strings.Builder
 	b.Grow(len(s))
 	for _, r := range s {
