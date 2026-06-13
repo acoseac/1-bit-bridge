@@ -108,6 +108,16 @@ type SSDPDiscoveryClient struct {
 	// nowFunc returns the current time. Injected via cfg.NowFunc
 	// for tests. Default: time.Now.
 	nowFunc func() time.Time
+
+	// wg tracks the two run-loop goroutines (runLoop, runTickLoop)
+	// AND every in-flight per-renderer detail fetch, so Stop() can
+	// block until the cache can no longer be mutated BEFORE it calls
+	// cache.Clear(). Without it, a fetch that already passed its
+	// runCtx.Err() guard could Upsert into the freshly-cleared cache
+	// (the Stop()/Upsert race, external review r3). Mirrors the
+	// documented bgScans WaitGroup invariant ("graceful shutdown
+	// triggers full cleanup").
+	wg sync.WaitGroup
 }
 
 // DiscoveryConfig captures the SSDPDiscoveryClient's tunables.
@@ -266,6 +276,11 @@ func (c *SSDPDiscoveryClient) Start(parent context.Context) error {
 	c.runCtx = runCtx
 	c.runCancel = runCancel
 
+	// Add(2) here (under runMu, before the spawns) pairs with the
+	// deferred Done() at the top of each loop. Start + Stop serialize
+	// on runMu and Stop's Wait() runs AFTER it releases runMu, so this
+	// Add never races a concurrent Wait.
+	c.wg.Add(2)
 	go c.runLoop(runCtx)
 	go c.runTickLoop(runCtx)
 
@@ -292,6 +307,15 @@ func (c *SSDPDiscoveryClient) Stop() {
 	c.runCancel = nil
 	c.runCtx = nil
 	c.runMu.Unlock()
+	// Wait for runLoop, runTickLoop, and any in-flight detail fetches to
+	// exit BEFORE clearing the cache — otherwise a fetch that already
+	// passed its runCtx.Err() guard could Upsert into the cleared cache.
+	// runCancel() above cancels every fetch's derived context, so this is
+	// bounded by in-flight HTTP cancellation latency, not DetailFetchTimeout.
+	// Wait() runs OUTSIDE runMu (load-bearing): runLoop/sendMSearch take
+	// runMu.RLock via snapshotConn on their way out, so holding the lock
+	// here would deadlock.
+	c.wg.Wait()
 	c.cache.Clear()
 	packageLogger.Info("DLNA renderer discovery stopped")
 }
@@ -310,6 +334,7 @@ func (c *SSDPDiscoveryClient) snapshotConn() *net.UDPConn {
 // into the per-NTS handler. Exits when ctx is cancelled OR the
 // socket is closed by Stop.
 func (c *SSDPDiscoveryClient) runLoop(ctx context.Context) {
+	defer c.wg.Done()
 	buf := make([]byte, 4096) // SSDP packets are always <2KB in practice
 	for {
 		select {
@@ -322,11 +347,17 @@ func (c *SSDPDiscoveryClient) runLoop(ctx context.Context) {
 			return // Stop closed the socket
 		}
 		// Short read deadline so the loop wakes periodically to
-		// re-check ctx.Done() — without it, a quiet network could
-		// park us inside ReadFromUDP indefinitely after Stop()
-		// closed the socket, and we'd see the close error rather
-		// than a clean ctx-cancel exit.
-		_ = conn.SetReadDeadline(c.nowFunc().Add(500 * time.Millisecond))
+		// re-check ctx.Done() — without it, a parent-ctx cancel that
+		// doesn't go through Stop() (which closes the socket) could
+		// park us inside ReadFromUDP indefinitely on a quiet network.
+		//
+		// Wall-clock (time.Now), NOT c.nowFunc(): net.Conn deadlines are
+		// always evaluated against the real OS clock, so feeding the
+		// injectable logical clock here would instant-timeout every read
+		// under a test that pins nowFunc to a past date. nowFunc stays
+		// for the TTL/staleness domain (EvictStale), where logical time
+		// is the right reference.
+		_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 		n, src, err := conn.ReadFromUDP(buf)
 		if err != nil {
 			// Read timeout is the expected loop tick; anything
@@ -355,6 +386,7 @@ func (c *SSDPDiscoveryClient) runLoop(ctx context.Context) {
 // pass. Fires immediately on entry so a fresh start doesn't wait
 // the full interval before the first M-SEARCH.
 func (c *SSDPDiscoveryClient) runTickLoop(ctx context.Context) {
+	defer c.wg.Done()
 	// Initial M-SEARCH + eviction pass.
 	c.sendMSearch()
 	c.cache.EvictStale(c.nowFunc(), c.cfg.RendererTTL)
@@ -475,6 +507,15 @@ func (c *SSDPDiscoveryClient) handlePacket(
 	if hdr.Location == "" {
 		return // no location → can't fetch description; skip
 	}
+	// wg.Add(1) here (not inside fetchAndCacheDetails) is safe to run
+	// concurrently with Stop()'s wg.Wait(): in production handlePacket runs
+	// ON the runLoop goroutine, which holds its OWN wg slot for its entire
+	// lifetime, so the counter is always ≥1 here — this Add takes it ≥1→≥2,
+	// never 0→1 (the only shape that panics under a concurrent Wait). And
+	// Stop()'s Wait can't return until runLoop returns, by which time no
+	// further fetch Adds are issued. Mirrors the Add-under-live-parent
+	// pattern in internal/dlna/ssdp.go's runMSearchListener.
+	c.wg.Add(1)
 	go c.fetchAndCacheDetails(ctx, udn, hdr.Location, now)
 }
 
@@ -491,6 +532,10 @@ func (c *SSDPDiscoveryClient) fetchAndCacheDetails(
 	runCtx context.Context,
 	udn, location string, lastSeenAt time.Time,
 ) {
+	// Paired with the wg.Add(1) in handlePacket. Deferred at the very top
+	// so it fires on EVERY return path (including the semaphore-acquire
+	// ctx.Done bail below), letting Stop()'s Wait() observe completion.
+	defer c.wg.Done()
 	// Acquire / release the semaphore — bounded concurrency.
 	select {
 	case c.detailFetchSem <- struct{}{}:
