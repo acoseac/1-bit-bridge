@@ -348,6 +348,9 @@ func (p *Pool) processJob(job poolJob) {
 		rg := res.ReplayGainTrackDB
 		row.ReplayGainTrackDB = &rg
 	}
+	row.KeyRoot = res.KeyRoot
+	row.KeyMode = res.KeyMode
+	row.BPM = res.BPM
 	if err := p.store.UpsertAnalysis(jobCtx, row); err != nil {
 		// Same as the fsync branch: don't remove the sidecar (path is
 		// reused per source, so a prior row could already point at it);

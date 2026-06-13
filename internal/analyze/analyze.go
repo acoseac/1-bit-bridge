@@ -11,9 +11,9 @@
 // of the server runs unchanged).
 //
 // **Bit-exact mission preserved**: analysis only READS samples to derive
-// metadata (a waveform sidecar + EBU R128 loudness today; key / tempo in
-// a later phase). It never alters what /v1/download serves — the
-// original file streams byte-for-byte as before.
+// metadata (a waveform sidecar, EBU R128 loudness, and estimated key +
+// tempo). It never alters what /v1/download serves — the original file
+// streams byte-for-byte as before.
 //
 // One decode per track at 48 kHz and the SOURCE channel count feeds both
 // the peak envelope (mono downmix) and the loudness meter (channel-aware
@@ -58,7 +58,15 @@ const (
 	// libraries (a row re-analyzes once, gains its ReplayGain scalar, and
 	// stamps wf2 so it isn't re-enqueued even when loudness is
 	// unavailable — silence / unprobeable channel layout).
-	WaveformSchemaVersion = "wf2"
+	//
+	// wf2 → wf3: the same decode now also estimates musical key
+	// (Krumhansl-Schmuckler) + tempo (onset autocorrelation) off the mono
+	// downmix. The waveform bytes AND the loudness value are unchanged
+	// (key/tempo only ADD consumption of the existing mono stream), so
+	// again iOS re-fetches no sidecars and existing rows re-analyze once
+	// to backfill key/tempo — stamping wf3 so an un-estimable track (too
+	// short / atonal / arrhythmic) isn't re-enqueued forever.
+	WaveformSchemaVersion = "wf3"
 
 	// WaveformDirSubdir is the fixed subdir under cfg.DataDir where
 	// waveform sidecars land (source-path-mirrored beneath it).
@@ -123,6 +131,17 @@ type Result struct {
 	// when the source carries no ReplayGain tag.
 	ReplayGainTrackDB float64
 	HasLoudness       bool
+
+	// KeyRoot / KeyMode are the estimated musical key (Krumhansl-
+	// Schmuckler): KeyRoot is the tonic 0..11 (C=0), KeyMode is
+	// "major"/"minor". Both nil/"" when the estimator saw too little
+	// signal. Best-effort — surfaced as an "estimated" key.
+	KeyRoot *int
+	KeyMode string
+
+	// BPM is the estimated tempo (onset autocorrelation), or nil when no
+	// confident estimate. Surfaced only when the source has no BPM tag.
+	BPM *int
 }
 
 // RunAnalysis decodes the source via sox, computes the peak waveform +
@@ -159,9 +178,12 @@ func RunAnalysis(ctx context.Context, spec AnalyzeSpec) (Result, error) {
 	channels, channelsOK := probeChannels(ctx, spec.SourceAbsPath)
 	pk := newPeaker(waveformBucketSamples)
 	meter := newLoudnessMeter(channels)
+	kt := newKeyTempoAnalyzer()
 	total, err := decodeFrames(ctx, spec.SourceAbsPath, channels, func(frame []float64) {
-		pk.add(downmixFrame(frame))
+		mono := downmixFrame(frame)
+		pk.add(mono)
 		meter.addFrame(frame)
+		kt.add(mono)
 	})
 	if err != nil {
 		return Result{}, err
@@ -189,12 +211,24 @@ func RunAnalysis(ctx context.Context, spec AnalyzeSpec) (Result, error) {
 			res.HasLoudness = true
 		}
 	}
+	// Key + tempo are channel-agnostic (estimated off the mono downmix),
+	// so they run regardless of channelsOK. Each gates internally and
+	// returns ok=false rather than guess from too little signal.
+	if root, mode, ok := kt.estimateKey(); ok {
+		res.KeyRoot = &root
+		res.KeyMode = mode
+	}
+	if bpm, ok := kt.estimateTempo(); ok {
+		res.BPM = &bpm
+	}
 	logger.Debug("analyze ok",
 		"path", spec.SourceLibraryRel,
 		"buckets", pk.count(),
 		"bytes", len(data),
 		"channels", channels,
-		"loudness", res.HasLoudness)
+		"loudness", res.HasLoudness,
+		"hasKey", res.KeyRoot != nil,
+		"hasTempo", res.BPM != nil)
 	return res, nil
 }
 

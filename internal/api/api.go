@@ -1276,13 +1276,13 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	//     of whether the transcode pool exists.
 	//
 	// Alpha-sort stays correct by construction: each conditional
-	// appends in lex order. Capacity 16 covers the current maximum
+	// appends in lex order. Capacity 17 covers the current maximum
 	// (carPlayOptimize + deleteVariants + diagnosticsSummary + dlnaServer +
-	// loudness + operatorDrivenUpscale + pairingEventsSupported +
+	// keyTempo + loudness + operatorDrivenUpscale + pairingEventsSupported +
 	// playbackHistory + playbackHistoryRead + playlistBackup +
 	// playlistsCrossDevice + pushEventsSupported + rendererDiscovery +
 	// upscaleCompleteEvents + variantBumpsIndex + waveform).
-	feats := make([]string, 0, 16)
+	feats := make([]string, 0, 17)
 	if s.upscaleEnabled {
 		if s.carPlayOptimizeEnabled {
 			feats = append(feats, "carPlayOptimize")
@@ -1307,12 +1307,18 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		feats = append(feats, "dlnaServer")
 	}
 	if s.analysisEnabled {
+		// `keyTempo` advertises that this bridge fills Track.keyRoot /
+		// keyMode (estimated musical key) and Track.bpm (when the source
+		// has no BPM tag) from offline analysis. Same analysis-active gate
+		// as `waveform`/`loudness`. Alpha-sorted between `dlnaServer` and
+		// `loudness` (d < k < l).
+		feats = append(feats, "keyTempo")
 		// `loudness` advertises that this bridge populates
 		// Track.replayGainTrackDB from offline EBU R128 analysis when the
 		// source carries no ReplayGain tag, so iOS can trust a present
 		// value as either tag-curated or analysis-derived. Same
 		// analysis-active gate as `waveform`. Alpha-sorted between
-		// `dlnaServer` and `operatorDrivenUpscale` (d < l < o).
+		// `keyTempo` and `operatorDrivenUpscale` (k < l < o).
 		feats = append(feats, "loudness")
 	}
 	if s.upscaleEnabled {

@@ -878,6 +878,37 @@ var migrations = []migration{
 			return nil
 		},
 	},
+	{
+		version: 17,
+		name:    "track_analysis.key_root/key_mode/bpm (signal-derived key + tempo)",
+		// Estimated musical key (Krumhansl-Schmuckler) + tempo (onset
+		// autocorrelation), the second batch of v14-anticipated signal-
+		// derived scalars. All three NULLABLE — NULL = "not estimated"
+		// (too little signal / pre-column row), the same backfill sentinel
+		// as replaygain_track_db. key_root is 0..11 (C=0), key_mode is
+		// "major"/"minor", bpm is integer. Spliced onto Track at read
+		// time: key always (no tag source today), bpm only when the source
+		// has no BPM tag.
+		//
+		// **Idempotency: ALTERs live in post()** with the same precise
+		// "duplicate column name"-only swallow as v16 — each column is
+		// independent, so a crash partway re-applies cleanly and a real
+		// lock / I/O error surfaces instead of being masked.
+		sql: `-- columns added in post() for idempotency; see migration v9/v16 docblock`,
+		post: func(db *sql.DB) error {
+			for _, stmt := range []string{
+				`ALTER TABLE track_analysis ADD COLUMN key_root INTEGER`,
+				`ALTER TABLE track_analysis ADD COLUMN key_mode TEXT`,
+				`ALTER TABLE track_analysis ADD COLUMN bpm INTEGER`,
+			} {
+				if _, err := db.Exec(stmt); err != nil &&
+					!strings.Contains(err.Error(), "duplicate column name") {
+					return err
+				}
+			}
+			return nil
+		},
+	},
 }
 
 // NOTE (r1 review #49, dropped): a covering index on
@@ -1031,6 +1062,15 @@ func marshalForStorage(t *Track) ([]byte, error) {
 	// column-derived, zeroed unconditionally), this one is conditional.
 	if clone.replayGainFromAnalysis {
 		clone.ReplayGainTrackDB = nil
+	}
+	// KeyRoot/KeyMode are analysis-only (no curated tag source today), so
+	// — like WaveformTag — zero them unconditionally so a round-tripped
+	// read Track never freezes them into tags_json. BPM is dual-source
+	// like ReplayGain: scrub ONLY the analysis-derived case.
+	clone.KeyRoot = nil
+	clone.KeyMode = ""
+	if clone.bpmFromAnalysis {
+		clone.BPM = nil
 	}
 	return json.Marshal(&clone)
 }
@@ -1610,6 +1650,50 @@ func spliceAnalysisReplayGain(t *Track, rg sql.NullFloat64) {
 	}
 }
 
+// keyTempoSQL splices the estimated key + tempo onto each row as ONE
+// json_object (vs three scalar subqueries — same single indexed PK
+// lookup on track_analysis the waveform/replaygain splices use). NULL
+// when no analysis row exists; `{"root":null,...}` when the row exists
+// but the estimate is absent. Decoded + spliced by spliceAnalysisKeyTempo.
+const keyTempoSQL = `(SELECT json_object('root', key_root, 'mode', key_mode, 'bpm', bpm)
+	 FROM track_analysis WHERE source_path = tracks.path) AS analysis_keytempo`
+
+// analysisKeyTempo is the decode target for keyTempoSQL's json_object.
+type analysisKeyTempo struct {
+	Root *int    `json:"root"`
+	Mode *string `json:"mode"`
+	BPM  *int    `json:"bpm"`
+}
+
+// spliceAnalysisKeyTempo fills Track.KeyRoot/KeyMode (always — no tag
+// source today) and Track.BPM (tag-absent-only — a curated TBPM/BPM tag
+// always wins) from the analysis json_object. Malformed JSON is ignored
+// (the track stays playable without the estimate). Like ReplayGain, the
+// BPM splice marks provenance so marshalForStorage scrubs only the
+// analysis-derived value on write-back; KeyRoot/KeyMode have no tag
+// source, so marshalForStorage zeroes them unconditionally.
+func spliceAnalysisKeyTempo(t *Track, raw sql.NullString) {
+	if !raw.Valid || raw.String == "" {
+		return
+	}
+	var kt analysisKeyTempo
+	if err := json.Unmarshal([]byte(raw.String), &kt); err != nil {
+		return
+	}
+	if kt.Root != nil {
+		r := *kt.Root
+		t.KeyRoot = &r
+	}
+	if kt.Mode != nil {
+		t.KeyMode = *kt.Mode
+	}
+	if t.BPM == nil && kt.BPM != nil {
+		b := *kt.BPM
+		t.BPM = &b
+		t.bpmFromAnalysis = true
+	}
+}
+
 // scanTrackVariants decodes the JSON aggregation column produced
 // by variantsAggSQL into Track.Variants. Empty / `null` / `[]`
 // payloads land as nil so `omitempty` drops the field on the
@@ -1714,7 +1798,7 @@ func formatSampleRateLabel(hz float64) string {
 // require re-marshalling every track on each `MarkEnriched` write
 // just to flip a bool, which is what the column is for.
 func (s *Store) ListTracks(ctx context.Context, since *time.Time) ([]Track, error) {
-	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + ` FROM tracks`
+	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + keyTempoSQL + ` FROM tracks`
 	args := []any{}
 	if since != nil {
 		q += ` WHERE indexed_at > ?`
@@ -1733,7 +1817,8 @@ func (s *Store) ListTracks(ctx context.Context, since *time.Time) ([]Track, erro
 		var variantsRaw []byte
 		var wfTag sql.NullString
 		var rg sql.NullFloat64
-		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw, &wfTag, &rg); err != nil {
+		var ktRaw sql.NullString
+		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw); err != nil {
 			return nil, err
 		}
 		var t Track
@@ -1744,6 +1829,7 @@ func (s *Store) ListTracks(ctx context.Context, since *time.Time) ([]Track, erro
 		t.Enriched = boolPtr(enrichedAt != 0)
 		t.WaveformTag = wfTag.String
 		spliceAnalysisReplayGain(&t, rg)
+		spliceAnalysisKeyTempo(&t, ktRaw)
 		out = append(out, t)
 	}
 	return out, rows.Err()
@@ -1772,7 +1858,7 @@ func (s *Store) StreamTracks(ctx context.Context, sp *time.Time, fn func(*Track)
 		// production crash deep in the streaming-manifest path.
 		return errors.New("StreamTracks: nil callback")
 	}
-	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + ` FROM tracks`
+	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + keyTempoSQL + ` FROM tracks`
 	args := []any{}
 	if sp != nil {
 		q += ` WHERE indexed_at > ?`
@@ -1804,7 +1890,8 @@ func (s *Store) StreamTracks(ctx context.Context, sp *time.Time, fn func(*Track)
 		var variantsRaw []byte
 		var wfTag sql.NullString
 		var rg sql.NullFloat64
-		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw, &wfTag, &rg); err != nil {
+		var ktRaw sql.NullString
+		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw); err != nil {
 			return err
 		}
 		t = Track{}
@@ -1815,6 +1902,7 @@ func (s *Store) StreamTracks(ctx context.Context, sp *time.Time, fn func(*Track)
 		scanTrackVariants(&t, variantsRaw)
 		t.WaveformTag = wfTag.String
 		spliceAnalysisReplayGain(&t, rg)
+		spliceAnalysisKeyTempo(&t, ktRaw)
 		if err := fn(&t); err != nil {
 			return err
 		}
@@ -1843,7 +1931,7 @@ func (s *Store) ListTracksPage(ctx context.Context, afterPath string, limit int)
 		limit = 1000
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT tags_json, enriched_at, `+variantsAggSQL+`, `+waveformTagSQL+`, `+replayGainSQL+` FROM tracks
+		SELECT tags_json, enriched_at, `+variantsAggSQL+`, `+waveformTagSQL+`, `+replayGainSQL+`, `+keyTempoSQL+` FROM tracks
 		WHERE path > ?
 		ORDER BY path ASC
 		LIMIT ?
@@ -1859,7 +1947,8 @@ func (s *Store) ListTracksPage(ctx context.Context, afterPath string, limit int)
 		var variantsRaw []byte
 		var wfTag sql.NullString
 		var rg sql.NullFloat64
-		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw, &wfTag, &rg); err != nil {
+		var ktRaw sql.NullString
+		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw); err != nil {
 			return nil, err
 		}
 		var t Track
@@ -1870,6 +1959,7 @@ func (s *Store) ListTracksPage(ctx context.Context, afterPath string, limit int)
 		t.Enriched = boolPtr(enrichedAt != 0)
 		t.WaveformTag = wfTag.String
 		spliceAnalysisReplayGain(&t, rg)
+		spliceAnalysisKeyTempo(&t, ktRaw)
 		out = append(out, t)
 	}
 	return out, rows.Err()
@@ -4455,6 +4545,52 @@ type AnalysisRow struct {
 	// pass. Spliced onto Track.ReplayGainTrackDB at read time only when
 	// the source carries no ReplayGain tag.
 	ReplayGainTrackDB *float64
+
+	// KeyRoot (tonic 0..11, C=0) + KeyMode ("major"/"minor") are the
+	// estimated musical key; BPM is the estimated tempo. All nil/"" when
+	// not estimated. Spliced at read time: KeyRoot/KeyMode always (no tag
+	// source today), BPM only when the source has no BPM tag.
+	KeyRoot *int
+	KeyMode string
+	BPM     *int
+}
+
+// intPtrEqual compares two optional ints by value (both nil equal, one nil
+// not, else value compare) — the *int twin of float64PtrEqual.
+func intPtrEqual(a, b *int) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+// nullIntPtr lifts a scanned nullable INTEGER into the *int an AnalysisRow
+// carries: NULL → nil, present → a fresh pointer.
+func nullIntPtr(n sql.NullInt64) *int {
+	if !n.Valid {
+		return nil
+	}
+	v := int(n.Int64)
+	return &v
+}
+
+// analysisScalarScan holds the nullable signal-derived columns
+// (replaygain / key / bpm) for the three AnalysisRow read sites, so the
+// NULL→pointer lifting lives in one place. Its four fields are passed to
+// Scan in SELECT column order (replaygain_track_db, key_root, key_mode,
+// bpm), then applyTo lifts them onto the row.
+type analysisScalarScan struct {
+	rg      sql.NullFloat64
+	keyRoot sql.NullInt64
+	keyMode sql.NullString
+	bpm     sql.NullInt64
+}
+
+func (n *analysisScalarScan) applyTo(a *AnalysisRow) {
+	a.ReplayGainTrackDB = nullFloatPtr(n.rg)
+	a.KeyRoot = nullIntPtr(n.keyRoot)
+	a.KeyMode = n.keyMode.String
+	a.BPM = nullIntPtr(n.bpm)
 }
 
 // float64PtrEqual compares two optional float64s by value: both nil is
@@ -4495,7 +4631,10 @@ func analysisRowsEqual(a, b *AnalysisRow) bool {
 		a.SourceMTimeNS == b.SourceMTimeNS &&
 		a.SourceSize == b.SourceSize &&
 		a.SchemaVersion == b.SchemaVersion &&
-		float64PtrEqual(a.ReplayGainTrackDB, b.ReplayGainTrackDB)
+		float64PtrEqual(a.ReplayGainTrackDB, b.ReplayGainTrackDB) &&
+		intPtrEqual(a.KeyRoot, b.KeyRoot) &&
+		a.KeyMode == b.KeyMode &&
+		intPtrEqual(a.BPM, b.BPM)
 }
 
 // UpsertAnalysis writes (or replaces) one `track_analysis` row AND
@@ -4521,11 +4660,20 @@ func (s *Store) UpsertAnalysis(ctx context.Context, a AnalysisRow) error {
 		return nil // identical — no write, no indexed_at bump.
 	}
 
-	// Bind the optional loudness as NULL when absent. database/sql's
+	// Bind the optional scalars as NULL when absent. database/sql's
 	// pointer handling is driver-dependent, so convert explicitly.
-	var rgArg interface{}
+	var rgArg, keyRootArg, keyModeArg, bpmArg interface{}
 	if a.ReplayGainTrackDB != nil {
 		rgArg = *a.ReplayGainTrackDB
+	}
+	if a.KeyRoot != nil {
+		keyRootArg = *a.KeyRoot
+	}
+	if a.KeyMode != "" {
+		keyModeArg = a.KeyMode
+	}
+	if a.BPM != nil {
+		bpmArg = *a.BPM
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -4537,8 +4685,8 @@ func (s *Store) UpsertAnalysis(ctx context.Context, a AnalysisRow) error {
 		INSERT INTO track_analysis
 			(source_path, waveform_path, waveform_tag, waveform_size,
 			 source_mtime_ns, source_size, schema_version, created_at,
-			 replaygain_track_db)
-		VALUES (?,?,?,?,?,?,?,?,?)
+			 replaygain_track_db, key_root, key_mode, bpm)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT (source_path) DO UPDATE SET
 			waveform_path       = excluded.waveform_path,
 			waveform_tag        = excluded.waveform_tag,
@@ -4547,10 +4695,13 @@ func (s *Store) UpsertAnalysis(ctx context.Context, a AnalysisRow) error {
 			source_size         = excluded.source_size,
 			schema_version      = excluded.schema_version,
 			created_at          = excluded.created_at,
-			replaygain_track_db = excluded.replaygain_track_db
+			replaygain_track_db = excluded.replaygain_track_db,
+			key_root            = excluded.key_root,
+			key_mode            = excluded.key_mode,
+			bpm                 = excluded.bpm
 	`, a.SourcePath, a.WaveformPath, a.WaveformTag, a.WaveformSize,
 		a.SourceMTimeNS, a.SourceSize, a.SchemaVersion, a.CreatedAt,
-		rgArg); err != nil {
+		rgArg, keyRootArg, keyModeArg, bpmArg); err != nil {
 		return err
 	}
 	now := s.now().UnixNano()
@@ -4579,23 +4730,24 @@ func (s *Store) GetAnalysis(ctx context.Context, sourcePath string) (*AnalysisRo
 // only a SELECT, so it's safe to call whether or not s.mu is held.
 func (s *Store) getAnalysisLocked(ctx context.Context, sourcePath string) (*AnalysisRow, error) {
 	var a AnalysisRow
-	var rg sql.NullFloat64
+	var sc analysisScalarScan
 	err := s.db.QueryRowContext(ctx, `
 		SELECT source_path, waveform_path, waveform_tag, waveform_size,
 		       source_mtime_ns, source_size, schema_version, created_at,
-		       replaygain_track_db
+		       replaygain_track_db, key_root, key_mode, bpm
 		FROM track_analysis
 		WHERE source_path = ?
 	`, sourcePath).Scan(
 		&a.SourcePath, &a.WaveformPath, &a.WaveformTag, &a.WaveformSize,
-		&a.SourceMTimeNS, &a.SourceSize, &a.SchemaVersion, &a.CreatedAt, &rg)
+		&a.SourceMTimeNS, &a.SourceSize, &a.SchemaVersion, &a.CreatedAt,
+		&sc.rg, &sc.keyRoot, &sc.keyMode, &sc.bpm)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	a.ReplayGainTrackDB = nullFloatPtr(rg)
+	sc.applyTo(&a)
 	return &a, nil
 }
 
@@ -4619,7 +4771,7 @@ func (s *Store) LookupAnalysis(ctx context.Context, sourcePath string) (*Analysi
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT source_path, waveform_path, waveform_tag, waveform_size,
 		       source_mtime_ns, source_size, schema_version, created_at,
-		       replaygain_track_db
+		       replaygain_track_db, key_root, key_mode, bpm
 		FROM track_analysis
 		WHERE unicode_lower(source_path) = unicode_lower(?)
 		LIMIT 2
@@ -4635,13 +4787,14 @@ func (s *Store) LookupAnalysis(ctx context.Context, sourcePath string) (*Analysi
 		return nil, nil
 	}
 	var a AnalysisRow
-	var rg sql.NullFloat64
+	var sc analysisScalarScan
 	if err := rows.Scan(
 		&a.SourcePath, &a.WaveformPath, &a.WaveformTag, &a.WaveformSize,
-		&a.SourceMTimeNS, &a.SourceSize, &a.SchemaVersion, &a.CreatedAt, &rg); err != nil {
+		&a.SourceMTimeNS, &a.SourceSize, &a.SchemaVersion, &a.CreatedAt,
+		&sc.rg, &sc.keyRoot, &sc.keyMode, &sc.bpm); err != nil {
 		return nil, err
 	}
-	a.ReplayGainTrackDB = nullFloatPtr(rg)
+	sc.applyTo(&a)
 	if rows.Next() {
 		// Ambiguous case-fold — refuse to pick a row rather than serve
 		// the wrong sidecar. Mirrors lookupVariantByLowerCase.
@@ -4665,7 +4818,7 @@ func (s *Store) AllAnalysisRows(ctx context.Context) ([]AnalysisRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT source_path, waveform_path, waveform_tag, waveform_size,
 		       source_mtime_ns, source_size, schema_version, created_at,
-		       replaygain_track_db
+		       replaygain_track_db, key_root, key_mode, bpm
 		FROM track_analysis
 	`)
 	if err != nil {
@@ -4675,13 +4828,14 @@ func (s *Store) AllAnalysisRows(ctx context.Context) ([]AnalysisRow, error) {
 	out := []AnalysisRow{}
 	for rows.Next() {
 		var a AnalysisRow
-		var rg sql.NullFloat64
+		var sc analysisScalarScan
 		if err := rows.Scan(
 			&a.SourcePath, &a.WaveformPath, &a.WaveformTag, &a.WaveformSize,
-			&a.SourceMTimeNS, &a.SourceSize, &a.SchemaVersion, &a.CreatedAt, &rg); err != nil {
+			&a.SourceMTimeNS, &a.SourceSize, &a.SchemaVersion, &a.CreatedAt,
+			&sc.rg, &sc.keyRoot, &sc.keyMode, &sc.bpm); err != nil {
 			return nil, err
 		}
-		a.ReplayGainTrackDB = nullFloatPtr(rg)
+		sc.applyTo(&a)
 		out = append(out, a)
 	}
 	return out, rows.Err()

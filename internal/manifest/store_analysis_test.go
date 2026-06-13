@@ -177,6 +177,151 @@ func TestLookupAnalysisCaseInsensitive(t *testing.T) {
 }
 
 func f64ptr(v float64) *float64 { return &v }
+func intptr(v int) *int         { return &v }
+
+// TestUpsertAnalysisPersistsKeyTempo: the nullable key_root/key_mode/bpm
+// columns round-trip — present values read back, absent read back nil/"".
+func TestUpsertAnalysisPersistsKeyTempo(t *testing.T) {
+	s := openTempStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	upsertParent(t, s, "A/1.flac")
+	upsertParent(t, s, "A/2.flac")
+
+	if err := s.UpsertAnalysis(ctx, AnalysisRow{
+		SourcePath: "A/1.flac", WaveformPath: "/w/a", WaveformTag: "t1",
+		SourceMTimeNS: 1, SourceSize: 2, SchemaVersion: "wf3", CreatedAt: 1,
+		KeyRoot: intptr(7), KeyMode: "major", BPM: intptr(128),
+	}); err != nil {
+		t.Fatalf("UpsertAnalysis (with key/tempo): %v", err)
+	}
+	if err := s.UpsertAnalysis(ctx, AnalysisRow{
+		SourcePath: "A/2.flac", WaveformPath: "/w/b", WaveformTag: "t2",
+		SourceMTimeNS: 1, SourceSize: 2, SchemaVersion: "wf3", CreatedAt: 1,
+	}); err != nil {
+		t.Fatalf("UpsertAnalysis (nil key/tempo): %v", err)
+	}
+
+	got, err := s.GetAnalysis(ctx, "A/1.flac")
+	if err != nil {
+		t.Fatalf("GetAnalysis A/1: %v", err)
+	}
+	if got.KeyRoot == nil || *got.KeyRoot != 7 || got.KeyMode != "major" || got.BPM == nil || *got.BPM != 128 {
+		t.Fatalf("A/1 key/tempo = (%v,%q,%v), want (7, major, 128)", got.KeyRoot, got.KeyMode, got.BPM)
+	}
+	got2, err := s.GetAnalysis(ctx, "A/2.flac")
+	if err != nil {
+		t.Fatalf("GetAnalysis A/2: %v", err)
+	}
+	if got2.KeyRoot != nil || got2.KeyMode != "" || got2.BPM != nil {
+		t.Fatalf("A/2 key/tempo = (%v,%q,%v), want all empty", got2.KeyRoot, got2.KeyMode, got2.BPM)
+	}
+}
+
+// TestManifestSplicesKeyTempo: ListTracks splices KeyRoot/KeyMode always
+// (no tag source) and BPM tag-absent-only (a curated BPM tag wins).
+func TestManifestSplicesKeyTempo(t *testing.T) {
+	s := openTempStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+
+	upsertParent(t, s, "A/1.flac")       // no tags
+	if err := s.UpsertTrack(ctx, &Track{ // curated BPM tag of 90
+		Path: "A/2.flac", Size: 100, ModTime: time.Now(), BPM: intptr(90),
+	}); err != nil {
+		t.Fatalf("UpsertTrack A/2: %v", err)
+	}
+	upsertParent(t, s, "A/3.flac") // no analysis row
+
+	for _, p := range []string{"A/1.flac", "A/2.flac"} {
+		if err := s.UpsertAnalysis(ctx, AnalysisRow{
+			SourcePath: p, WaveformPath: "/w/" + p, WaveformTag: "tag-" + p,
+			SourceMTimeNS: 1, SourceSize: 2, SchemaVersion: "wf3", CreatedAt: 1,
+			KeyRoot: intptr(2), KeyMode: "minor", BPM: intptr(140),
+		}); err != nil {
+			t.Fatalf("UpsertAnalysis %s: %v", p, err)
+		}
+	}
+
+	tracks, err := s.ListTracks(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTracks: %v", err)
+	}
+	by := map[string]Track{}
+	for _, tr := range tracks {
+		by[tr.Path] = tr
+	}
+	// A/1: key + tempo both from analysis.
+	if a1 := by["A/1.flac"]; a1.KeyRoot == nil || *a1.KeyRoot != 2 || a1.KeyMode != "minor" || a1.BPM == nil || *a1.BPM != 140 {
+		t.Fatalf("A/1 = (%v,%q,%v), want analysis (2, minor, 140)", a1.KeyRoot, a1.KeyMode, a1.BPM)
+	}
+	// A/2: curated BPM tag wins; key still from analysis (no key tag).
+	if a2 := by["A/2.flac"]; a2.BPM == nil || *a2.BPM != 90 || a2.KeyRoot == nil || *a2.KeyRoot != 2 {
+		t.Fatalf("A/2 = (key=%v, bpm=%v), want curated bpm 90 + analysis key 2", a2.KeyRoot, a2.BPM)
+	}
+	// A/3: nothing.
+	if a3 := by["A/3.flac"]; a3.KeyRoot != nil || a3.KeyMode != "" || a3.BPM != nil {
+		t.Fatalf("A/3 = (%v,%q,%v), want all empty", a3.KeyRoot, a3.KeyMode, a3.BPM)
+	}
+}
+
+// TestSplicedKeyTempoNotPersistedOnRoundTrip: KeyRoot/KeyMode are scrubbed
+// unconditionally on write-back (analysis-only); BPM is scrubbed only when
+// analysis-derived, so a curated BPM tag survives a round-trip.
+func TestSplicedKeyTempoNotPersistedOnRoundTrip(t *testing.T) {
+	s := openTempStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+
+	upsertParent(t, s, "A/1.flac")       // no tags → all analysis-derived
+	if err := s.UpsertTrack(ctx, &Track{ // curated BPM 90
+		Path: "A/2.flac", Size: 100, ModTime: time.Now(), BPM: intptr(90),
+	}); err != nil {
+		t.Fatalf("UpsertTrack A/2: %v", err)
+	}
+	for _, p := range []string{"A/1.flac", "A/2.flac"} {
+		if err := s.UpsertAnalysis(ctx, AnalysisRow{
+			SourcePath: p, WaveformPath: "/w/" + p, WaveformTag: "tag-" + p,
+			SourceMTimeNS: 1, SourceSize: 2, SchemaVersion: "wf3", CreatedAt: 1,
+			KeyRoot: intptr(5), KeyMode: "major", BPM: intptr(140),
+		}); err != nil {
+			t.Fatalf("UpsertAnalysis %s: %v", p, err)
+		}
+	}
+
+	tracks, err := s.ListTracks(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTracks: %v", err)
+	}
+	for i := range tracks {
+		tr := tracks[i]
+		if err := s.UpsertTrack(ctx, &tr); err != nil { // round-trip
+			t.Fatalf("round-trip UpsertTrack %s: %v", tr.Path, err)
+		}
+	}
+
+	// GetTrack reads tags_json only: key always gone; A/1 analysis-BPM gone,
+	// A/2 curated BPM preserved.
+	a1, _ := s.GetTrack(ctx, "A/1.flac")
+	if a1.KeyRoot != nil || a1.KeyMode != "" || a1.BPM != nil {
+		t.Fatalf("A/1 leaked analysis values: key=(%v,%q) bpm=%v, want all nil", a1.KeyRoot, a1.KeyMode, a1.BPM)
+	}
+	a2, _ := s.GetTrack(ctx, "A/2.flac")
+	if a2.KeyRoot != nil || a2.KeyMode != "" {
+		t.Fatalf("A/2 leaked analysis key: (%v,%q), want nil", a2.KeyRoot, a2.KeyMode)
+	}
+	if a2.BPM == nil || *a2.BPM != 90 {
+		t.Fatalf("A/2 curated BPM = %v, want 90 (preserved)", a2.BPM)
+	}
+
+	// Live column still re-splices key for A/1.
+	tracks2, _ := s.ListTracks(ctx, nil)
+	for _, tr := range tracks2 {
+		if tr.Path == "A/1.flac" && (tr.KeyRoot == nil || *tr.KeyRoot != 5) {
+			t.Fatalf("A/1 key re-splice = %v, want 5", tr.KeyRoot)
+		}
+	}
+}
 
 // TestUpsertAnalysisPersistsLoudness: the nullable replaygain_track_db
 // column round-trips — a present value reads back, nil reads back nil.

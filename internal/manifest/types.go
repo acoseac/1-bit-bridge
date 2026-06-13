@@ -154,10 +154,23 @@ type Track struct {
 	// as present; only absence drops to nil).
 	OriginalYear *int `json:"originalYear,omitempty"`
 
-	// BPM (beats per minute) — niche for DSD libraries but free to
-	// surface since dhowden picks it up via TBPM / BPM / tmpo.
+	// BPM (beats per minute). Tag-sourced (dhowden picks up TBPM / BPM /
+	// tmpo); when the source has no BPM tag, the offline analyzer's
+	// estimated tempo is spliced in (tag-absent-only, like
+	// ReplayGainTrackDB — see spliceAnalysisKeyTempo + bpmFromAnalysis).
 	// Pointer + omitempty; presence-gated.
 	BPM *int `json:"bpm,omitempty"`
+
+	// KeyRoot / KeyMode are the estimated musical key from offline
+	// analysis (additive since v1.8): KeyRoot is the tonic 0..11 (C=0),
+	// KeyMode is "major"/"minor". There's no curated key tag today, so
+	// these are analysis-only — spliced from `track_analysis` at read time
+	// (always, when present) and NEVER persisted into `tags_json`
+	// (marshalForStorage zeroes them unconditionally, like WaveformTag).
+	// Both omitempty so pre-feature iOS / un-estimated tracks ignore them;
+	// ProtocolVersion stays 1.
+	KeyRoot *int   `json:"keyRoot,omitempty"`
+	KeyMode string `json:"keyMode,omitempty"`
 
 	// WaveformTag signals that an offline-computed peak/RMS waveform
 	// sidecar is available for this track (the audio-analysis feature,
@@ -186,6 +199,14 @@ type Track struct {
 	// preserves unexported fields across packages, so the guard holds even
 	// for an external round-trip. (CodeRabbit on #396.)
 	replayGainFromAnalysis bool
+
+	// bpmFromAnalysis is the BPM twin of replayGainFromAnalysis: set by
+	// spliceAnalysisKeyTempo when it fills BPM from the analyzer's estimate
+	// (source had no BPM tag), so marshalForStorage scrubs only the
+	// analysis-derived BPM on write-back and a curated TBPM tag survives.
+	// KeyRoot/KeyMode need no such marker — they have no tag source, so
+	// marshalForStorage zeroes them unconditionally.
+	bpmFromAnalysis bool
 }
 
 // Variant is one cached alternate rendering of a Track's source. The
