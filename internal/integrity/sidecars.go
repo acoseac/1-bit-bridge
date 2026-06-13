@@ -6,7 +6,9 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -147,6 +149,12 @@ type OrphanSidecarSweeper struct {
 	// production chunk size (5000) of files. Production leaves it
 	// zero.
 	chunkSizeForTest int
+
+	// skippedDirsForTest counts directory subtrees short-circuited via
+	// filepath.SkipDir during chunk resumption (see dirEntirelyBehindCursor).
+	// Diagnostic only — read by the SkipDir-fires regression test; the
+	// unconditional atomic Add is negligible against the walk's I/O.
+	skippedDirsForTest atomic.Int64
 
 	startOnce sync.Once
 	stopOnce  sync.Once
@@ -341,7 +349,22 @@ func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 		// + non-FLAC entries skip without touching the filesystem.
 		// This is the load-bearing reason WalkDir wins over Walk on a
 		// 100k-variant library: most entries don't need ModTime.
-		if d.IsDir() || !shouldConsiderSidecarFile(path) {
+		if d.IsDir() {
+			// Chunk-resume short-circuit: when resuming after a prior
+			// tick's chunk cap, prune whole subtrees already lexically
+			// behind the cursor instead of re-descending them. Without
+			// this, tick N re-ReadDir's every directory covered by ticks
+			// 1..N-1 only to `return nil` on each file below — O(N²) walk
+			// I/O over a full sweep on a large variant tree (external
+			// review r3; predicate via Gemini consult, see
+			// dirEntirelyBehindCursor for the .-vs-/ collation gotcha).
+			if dirEntirelyBehindCursor(path, walkStartCursor) {
+				s.skippedDirsForTest.Add(1)
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !shouldConsiderSidecarFile(path) {
 			return nil
 		}
 		// Skip past the cursor: only process entries whose lexical
@@ -462,4 +485,33 @@ func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 // place.
 func shouldConsiderSidecarFile(path string) bool {
 	return filepath.Ext(path) == ".flac"
+}
+
+// dirEntirelyBehindCursor reports whether the directory `dirPath` — and
+// therefore its entire subtree — is lexically behind `cursor` and can be
+// pruned with filepath.SkipDir during a chunk-resumed walk. `cursor` is the
+// last path processed by the prior tick (empty on a fresh, from-the-top pass).
+//
+// Skip iff the directory's NAMESPACE (`dirPath` + separator) is strictly less
+// than the cursor AND the directory is not an ancestor of the cursor:
+//
+//   - Comparing `dirPath + sep` (not the bare `dirPath`) is load-bearing. The
+//     separator '/'(0x2F) and '\'(0x5C) both sort AFTER '.'(0x2E), so a bare
+//     compare would rank "A/B" < "A/B.flac" and wrongly skip the "A/B/"
+//     subtree when the cursor is the sibling FILE "A/B.flac" — missing the
+//     still-unprocessed "A/B/02.flac" (sorts after the cursor). Appending the
+//     separator compares "A/B/" vs "A/B.flac" → "A/B/" > "A/B.flac" → no skip.
+//   - The HasPrefix guard keeps an ANCESTOR of the cursor (e.g. dir "A/B",
+//     cursor "A/B/c.flac") descended so the walk can reach the resume point.
+//   - An empty cursor (fresh pass) never skips. The root output dir is always
+//     an ancestor of any in-tree cursor, so it's never pruned.
+//
+// Predicate confirmed via Gemini consult (2026-06-13); native separators
+// throughout, matching the rest of the sweep's path comparisons.
+func dirEntirelyBehindCursor(dirPath, cursor string) bool {
+	if cursor == "" {
+		return false
+	}
+	withSep := dirPath + string(filepath.Separator)
+	return withSep < cursor && !strings.HasPrefix(cursor, withSep)
 }
