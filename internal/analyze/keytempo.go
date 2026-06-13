@@ -44,6 +44,15 @@ const (
 	// several of the slowest beat periods for tempo.
 	minWindowsForKey = 180
 
+	// maxAnalyzeWindows caps STFT processing at ~30 min of audio (at the
+	// 512-sample hop). Key + tempo are stable estimates well before then,
+	// so processing the tail of a multi-hour input (a DJ set, an
+	// audiobook, a corrupt header claiming a vast length) only burns CPU
+	// and grows the onset envelope unboundedly. Past the cap, add() is a
+	// no-op — chroma + onset are frozen at a representative prefix. Mirrors
+	// the waveform peaker's maxWaveformBuckets guard.
+	maxAnalyzeWindows = 30 * 60 * AnalysisSampleRate / stftHop // ~168750
+
 	// Tempo search range + the lag window it implies at the onset frame
 	// rate. lag = 60 · frameRate / bpm.
 	minTempoBPM = 50.0
@@ -128,8 +137,13 @@ func newKeyTempoAnalyzer() *keyTempoAnalyzer {
 }
 
 // add folds one mono sample into the sliding STFT. A window is processed
-// each time stftHop new samples have arrived (after the first full window).
+// each time stftHop new samples have arrived (after the first full
+// window). Once maxAnalyzeWindows have been processed it becomes a no-op,
+// freezing the estimate at a representative prefix (bounds memory + CPU).
 func (a *keyTempoAnalyzer) add(s float32) {
+	if a.windows >= maxAnalyzeWindows {
+		return
+	}
 	a.buf[a.bufLen] = float64(s)
 	a.bufLen++
 	if a.bufLen == stftWindow {

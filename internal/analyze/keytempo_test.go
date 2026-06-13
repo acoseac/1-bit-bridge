@@ -107,3 +107,25 @@ func TestEstimateTempo_GatesOnShortOnset(t *testing.T) {
 		t.Error("estimateTempo should refuse a too-short onset envelope")
 	}
 }
+
+// TestKeyTempoAnalyzer_ProcessingCap: once maxAnalyzeWindows is reached,
+// add() is a no-op — neither the window counter, the onset envelope, nor
+// the sample buffer advance, so memory + CPU stay bounded on a
+// pathologically long input.
+func TestKeyTempoAnalyzer_ProcessingCap(t *testing.T) {
+	a := newKeyTempoAnalyzer()
+	a.windows = maxAnalyzeWindows
+	onsetLen, bufLen := len(a.onset), a.bufLen
+	for i := 0; i < 20000; i++ {
+		a.add(0.5)
+	}
+	if a.windows != maxAnalyzeWindows {
+		t.Errorf("windows advanced past cap: %d, want %d", a.windows, maxAnalyzeWindows)
+	}
+	if len(a.onset) != onsetLen {
+		t.Errorf("onset grew past cap: %d → %d", onsetLen, len(a.onset))
+	}
+	if a.bufLen != bufLen {
+		t.Errorf("buffer advanced past cap: %d → %d", bufLen, a.bufLen)
+	}
+}
