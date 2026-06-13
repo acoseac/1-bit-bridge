@@ -39,6 +39,12 @@ type SlidingHistogram struct {
 	mu      sync.Mutex
 	samples [1024]Sample
 	cursor  uint64 // monotonically incrementing; idx = cursor % 1024
+	// scratch is the reused valid-sample buffer for SnapshotWithin —
+	// avoids an 8 KiB allocation on every /v1/diagnostics poll. Guarded
+	// by mu (SnapshotWithin holds it for the buffer's whole lifetime, so
+	// reuse can't race a concurrent snapshot); caps at len(samples)
+	// (8 KiB) resident. Gemini r4.
+	scratch []uint64
 }
 
 // Sample pairs a timing observation (µs) with the wall-clock instant
@@ -95,7 +101,9 @@ func (h *SlidingHistogram) SnapshotWithin(window time.Duration) (p50Seconds, p99
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	cutoff := time.Now().Add(-window)
-	valid := make([]uint64, 0, len(h.samples))
+	// Reuse the scratch buffer (reset to zero length, keep capacity) so
+	// the common /v1/diagnostics poll path is allocation-free. Gemini r4.
+	h.scratch = h.scratch[:0]
 	for i := range h.samples {
 		s := h.samples[i]
 		// Zero-valued slots (never written) have a zero Timestamp,
@@ -103,9 +111,10 @@ func (h *SlidingHistogram) SnapshotWithin(window time.Duration) (p50Seconds, p99
 		// observations (a 0-µs operation, vanishingly rare) carry
 		// a non-zero Timestamp; we include them.
 		if !s.Timestamp.IsZero() && s.Timestamp.After(cutoff) {
-			valid = append(valid, s.Value)
+			h.scratch = append(h.scratch, s.Value)
 		}
 	}
+	valid := h.scratch
 	if len(valid) == 0 {
 		return 0, 0
 	}
