@@ -10,7 +10,7 @@ import (
 )
 
 func TestBuildTXTRecordsIncludesProtocolAndLibrary(t *testing.T) {
-	got := buildTXTRecords(Config{ProtocolVersion: 1, Port: 7788, LibraryName: "My Music"})
+	got := buildTXTRecords(Config{ProtocolVersion: 1, Port: 7788, LibraryName: "My Music"}, nil)
 	joined := strings.Join(got, "|")
 	if !strings.Contains(joined, "pv=1") {
 		t.Errorf("missing pv: %v", got)
@@ -21,7 +21,7 @@ func TestBuildTXTRecordsIncludesProtocolAndLibrary(t *testing.T) {
 }
 
 func TestBuildTXTRecordsOmitsEmptyLibrary(t *testing.T) {
-	got := buildTXTRecords(Config{ProtocolVersion: 1, Port: 7788})
+	got := buildTXTRecords(Config{ProtocolVersion: 1, Port: 7788}, nil)
 	for _, r := range got {
 		if strings.HasPrefix(r, "library=") {
 			t.Errorf("library should not be present when empty: %q", r)
@@ -39,7 +39,7 @@ func TestBuildTXTRecordsIncludesHostAndPort(t *testing.T) {
 		ProtocolVersion: 1,
 		Port:            7788,
 		Hostname:        "test-mac",
-	})
+	}, nil)
 	joined := strings.Join(got, "|")
 	if !strings.Contains(joined, "host=test-mac.local") {
 		t.Errorf("missing or wrong host TXT: %v", got)
@@ -55,7 +55,7 @@ func TestBuildTXTRecordsIncludesHostAndPort(t *testing.T) {
 // derived host comes through `os.Hostname` here; the only check we
 // can make portably is that the record has the `.local` suffix.
 func TestBuildTXTRecordsHostFromOSWhenBlank(t *testing.T) {
-	got := buildTXTRecords(Config{ProtocolVersion: 1, Port: 7788})
+	got := buildTXTRecords(Config{ProtocolVersion: 1, Port: 7788}, nil)
 	for _, r := range got {
 		if strings.HasPrefix(r, "host=") {
 			if !strings.HasSuffix(r, ".local") {
@@ -65,6 +65,71 @@ func TestBuildTXTRecordsHostFromOSWhenBlank(t *testing.T) {
 		}
 	}
 	t.Error("no host= record in TXT")
+}
+
+func TestTxtIPsValue_FiltersLinkLocalAndJoins(t *testing.T) {
+	ips := []net.IP{
+		net.ParseIP("192.168.1.10"), // private IPv4 — keep
+		net.ParseIP("fe80::1"),      // IPv6 link-local — drop (needs zone index)
+		net.ParseIP("169.254.5.5"),  // IPv4 link-local / APIPA — drop
+		net.ParseIP("fd12:3456::1"), // ULA — keep
+		net.ParseIP("2001:db8::1"),  // global IPv6 — keep
+		nil,                         // drop
+	}
+	got, dropped := txtIPsValue(ips, maxTXTIPsValueLen)
+	if dropped != 0 {
+		t.Errorf("dropped = %d, want 0 (nothing should be budget-dropped here)", dropped)
+	}
+	for _, want := range []string{"192.168.1.10", "fd12:3456::1", "2001:db8::1"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("ips value %q missing routable %q", got, want)
+		}
+	}
+	for _, bad := range []string{"fe80::1", "169.254.5.5"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("ips value %q must not contain link-local %q", got, bad)
+		}
+	}
+}
+
+func TestTxtIPsValue_CapsAtMaxLen(t *testing.T) {
+	var ips []net.IP
+	for i := 0; i < 20; i++ {
+		ips = append(ips, net.IPv4(10, 0, 0, byte(i+1)))
+	}
+	const small = 30
+	got, dropped := txtIPsValue(ips, small)
+	if len(got) > small {
+		t.Errorf("value len %d exceeds cap %d: %q", len(got), small, got)
+	}
+	if dropped == 0 {
+		t.Errorf("expected some IPs dropped at cap %d (value %q)", small, got)
+	}
+}
+
+func TestBuildTXTRecordsIncludesIPs(t *testing.T) {
+	got := buildTXTRecords(
+		Config{ProtocolVersion: 1, Port: 7788, Hostname: "test-mac"},
+		[]net.IP{net.ParseIP("192.168.1.10"), net.ParseIP("fe80::1")},
+	)
+	joined := strings.Join(got, "|")
+	if !strings.Contains(joined, "ips=192.168.1.10") {
+		t.Errorf("expected ips= with the routable IP: %v", got)
+	}
+	if strings.Contains(joined, "fe80::1") {
+		t.Errorf("ips= must not include link-local: %v", got)
+	}
+}
+
+func TestBuildTXTRecordsOmitsIPsWhenNoneRoutable(t *testing.T) {
+	for _, ips := range [][]net.IP{nil, {net.ParseIP("fe80::1"), net.ParseIP("169.254.1.1")}} {
+		got := buildTXTRecords(Config{ProtocolVersion: 1, Port: 7788}, ips)
+		for _, r := range got {
+			if strings.HasPrefix(r, "ips=") {
+				t.Errorf("ips= should be omitted for %v, got record %q", ips, r)
+			}
+		}
+	}
 }
 
 func TestSanitizeInstanceStripsDotsAndControlChars(t *testing.T) {

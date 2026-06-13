@@ -206,7 +206,6 @@ func (a *Advertiser) rebuildLocked(ips []net.IP) error {
 	// returns the bare ".local" form (matching what iOS reads from
 	// the TXT record), so we re-append it here.
 	host := a.cfg.advertisedHost() + "."
-	info := buildTXTRecords(a.cfg)
 
 	// Resolve the LAN interface fresh on every rebuild. A static
 	// capture at advertise-time would let a Wi-Fi → Ethernet
@@ -236,6 +235,11 @@ func (a *Advertiser) rebuildLocked(ips []net.IP) error {
 			advertisedIPs = filtered
 		}
 	}
+
+	// Build the TXT record from the same interface-filtered set the
+	// A/AAAA records use, so the `ips=` hint matches what the client
+	// would resolve anyway.
+	info := buildTXTRecords(a.cfg, advertisedIPs)
 
 	svc, err := hcmdns.NewMDNSService(instance, Service, "", host, a.cfg.Port, advertisedIPs, info)
 	if err != nil {
@@ -438,7 +442,13 @@ func (a *Advertiser) Close() error {
 // problem — DNS-SD has already resolved the SRV record to host+port
 // by the time the browser hands us a result, so we're just exposing
 // what's already known.
-func buildTXTRecords(cfg Config) []string {
+//
+// `ips` lists the routable IP literals (the same interface-filtered
+// set the A/AAAA records carry, minus link-local) so the client can
+// race direct `https://<ip>:<port>` connections at discovery time and
+// skip slow/flaky `.local` resolution, falling back to `host` when
+// absent. See txtIPsValue for the filter + size cap.
+func buildTXTRecords(cfg Config, ips []net.IP) []string {
 	hostBare := strings.TrimSuffix(cfg.advertisedHost(), ".")
 	out := []string{
 		fmt.Sprintf("pv=%d", cfg.ProtocolVersion),
@@ -448,7 +458,56 @@ func buildTXTRecords(cfg Config) []string {
 	if cfg.LibraryName != "" {
 		out = append(out, "library="+cfg.LibraryName)
 	}
+	if v, dropped := txtIPsValue(ips, maxTXTIPsValueLen); v != "" {
+		out = append(out, "ips="+v)
+		if dropped > 0 {
+			logger.Info("mdns: ips= TXT truncated to fit", "dropped", dropped)
+		}
+	}
 	return out
+}
+
+// maxTXTIPsValueLen caps the comma-joined value of the `ips=` TXT key.
+// A single DNS-SD TXT string is limited to 255 bytes; the "ips=" key
+// prefix eats 4, so 240 leaves comfortable headroom. On the rare host
+// with many addresses the list is truncated (clients tolerate a short
+// or absent list and fall back to `.local`).
+const maxTXTIPsValueLen = 240
+
+// txtIPsValue builds the `ips=` value from the advertised IP set:
+// global-unicast IPv4/IPv6 only, via net.IP.IsGlobalUnicast — which in a
+// single idiom excludes link-local, loopback, unspecified, and multicast
+// while keeping private IPv4 (10/8, 192.168/16, …) and IPv6 ULA
+// (fc00::/7). This matches the global-unicast-only filtering of the
+// /v1/health `endpoints` list and guarantees the documented contract at
+// the emission boundary even if the input set ever broadens. Link-local
+// matters most to exclude: IPv6 fe80::/10 needs a zone index the client
+// can't map (an unscoped dial fails instantly with EINVAL); the A/AAAA
+// records still carry link-local for standard mDNS resolution. The value
+// is capped at maxLen bytes; `dropped` counts addresses skipped for the
+// budget so the caller can log truncation. Returns "" when nothing
+// qualifies.
+func txtIPsValue(ips []net.IP, maxLen int) (value string, dropped int) {
+	var b strings.Builder
+	for _, ip := range ips {
+		if ip == nil || !ip.IsGlobalUnicast() {
+			continue
+		}
+		s := ip.String()
+		need := len(s)
+		if b.Len() > 0 {
+			need++ // separating comma
+		}
+		if b.Len()+need > maxLen {
+			dropped++
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(s)
+	}
+	return b.String(), dropped
 }
 
 // advertisedHost returns the hostname that the SRV record will use,
