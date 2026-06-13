@@ -334,7 +334,14 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 
 	// Insert the batch row first so any pool callback that races
 	// with the enqueue finds a row to attribute to.
-	batchID := uuid.Must(uuid.NewRandom())
+	//
+	// Propagate the (vanishingly rare) entropy failure instead of
+	// uuid.Must's panic — this runs on the API submission path and a
+	// transient CSPRNG error shouldn't crash the bridge. Gemini r4.
+	batchID, err := uuid.NewRandom()
+	if err != nil {
+		return nil, fmt.Errorf("generate batch uuid: %w", err)
+	}
 	now := c.clock().UnixNano()
 	// Skip count = projected − enqueued − already-covered. Captures
 	// every `continue` arm of the loop above (rate>target, bits>target,
@@ -725,7 +732,12 @@ func (c *Coordinator) buildOptimizeCandidates(batchPath string, projections []ma
 // in-memory `liveBatches` entry. Returns the freshly-minted batch ID.
 // Caller transitions status separately.
 func (c *Coordinator) initOptimizeBatchState(ctx context.Context, batchPath string, cands []optimizeCandidate, skipped int) (uuid.UUID, error) {
-	batchID := uuid.Must(uuid.NewRandom())
+	// Propagate entropy failure instead of uuid.Must's panic (API
+	// submission path; a transient CSPRNG error must not crash). Gemini r4.
+	batchID, err := uuid.NewRandom()
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("generate optimize batch uuid: %w", err)
+	}
 	now := c.clock().UnixNano()
 	row := manifest.UpscaleBatchRow{
 		ID:             batchID,
@@ -893,10 +905,16 @@ func (c *Coordinator) transitionStatus(batchID uuid.UUID, status, errMsg string,
 	}
 	c.mu.Unlock()
 
-	// No caller ctx for the internal callback-driven path; use
-	// Background. Future enhancement could thread ctx through the
-	// Coordinator's public API but that's out of scope here.
-	if err := c.store.UpdateUpscaleBatchStatus(context.Background(), rowCopy); err != nil {
+	// No caller ctx for the internal callback-driven path, but this runs
+	// on the single long-lived publisher goroutine — an unbounded SQLite
+	// stall here would wedge every subsequent SSE state/complete event.
+	// Bound it with the same 5 s timeout the Submit-truncation persist
+	// uses (cancel immediately after the write so timers don't pile up
+	// under a completion burst). Gemini r4.
+	persistCtx, cancelPersist := context.WithTimeout(context.Background(), 5*time.Second)
+	err := c.store.UpdateUpscaleBatchStatus(persistCtx, rowCopy)
+	cancelPersist()
+	if err != nil {
 		return fmt.Errorf("transition %s -> %s: %w", batchID, status, err)
 	}
 	c.publishProgressRow(rowCopy)
@@ -954,11 +972,17 @@ func (c *Coordinator) OnJobComplete(path, variantID string, sampleRate, bitsPerS
 	}
 	c.mu.Unlock()
 
-	if err := c.store.UpdateUpscaleBatchProgress(context.Background(), rowCopy); err != nil {
+	// Bound the persist: this runs on the long-lived publisher goroutine,
+	// so an unbounded SQLite stall would wedge all later SSE events.
+	// Cancel immediately after the write so timers don't pile up under a
+	// completion burst. Gemini r4.
+	persistCtx, cancelPersist := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := c.store.UpdateUpscaleBatchProgress(persistCtx, rowCopy); err != nil {
 		c.logger.Warn("OnJobComplete: update progress",
 			"batchID", batchID.String(),
 			"err", err)
 	}
+	cancelPersist()
 	c.publishProgressRow(rowCopy)
 }
 
@@ -999,11 +1023,14 @@ func (c *Coordinator) OnJobFailed(path, variantID, errMsg string, durationSecond
 	}
 	c.mu.Unlock()
 
-	if err := c.store.UpdateUpscaleBatchProgress(context.Background(), rowCopy); err != nil {
+	// Bound the persist (publisher-goroutine path) — see OnJobComplete.
+	persistCtx, cancelPersist := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := c.store.UpdateUpscaleBatchProgress(persistCtx, rowCopy); err != nil {
 		c.logger.Warn("OnJobFailed: update progress",
 			"batchID", batchID.String(),
 			"err", err)
 	}
+	cancelPersist()
 	c.publishProgressRow(rowCopy)
 }
 

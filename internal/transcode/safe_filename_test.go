@@ -323,3 +323,29 @@ func TestSidecarPathPreservesOriginalExtension(t *testing.T) {
 			flac.SidecarPath())
 	}
 }
+
+// sanitiseForFATSink defeats dead-store elimination so the alloc guard
+// below actually exercises sanitiseForFAT.
+var sanitiseForFATSink string
+
+// TestSanitiseForFATCleanInputZeroAlloc pins the F34 fast-path: a
+// basename with no FAT-illegal bytes returns the original string with
+// ZERO heap allocations. The prior unconditional `[]byte(s)` +
+// `string(out)` round-trip cost two allocs per call regardless of
+// input, which silently defeated the `sanitized == raw` fast-path in
+// safeVariantFilename across a full 50k-track scan. Gemini r4.
+func TestSanitiseForFATCleanInputZeroAlloc(t *testing.T) {
+	const clean = "01 Love Letters - Diana Krall.flac"
+	if got := sanitiseForFAT(clean); got != clean {
+		t.Fatalf("clean input mutated: got %q want %q", got, clean)
+	}
+	if allocs := testing.AllocsPerRun(100, func() {
+		sanitiseForFATSink = sanitiseForFAT(clean)
+	}); allocs != 0 {
+		t.Errorf("sanitiseForFAT(clean) allocated %.0f times, want 0", allocs)
+	}
+	// Dirty input still substitutes every FAT-illegal byte to '_'.
+	if got := sanitiseForFAT(`a:b*c?.flac`); got != "a_b_c_.flac" {
+		t.Errorf("dirty input: got %q want %q", got, "a_b_c_.flac")
+	}
+}

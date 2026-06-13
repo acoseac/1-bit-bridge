@@ -3,6 +3,7 @@ package transcode
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -881,11 +882,12 @@ func (p *Pool) processJob(job poolJob) {
 	// admin UI; the worker stays alive to handle the next job.
 	released := false
 	defer func() {
-		if r := recover(); r != nil {
+		panicVal := recover()
+		if panicVal != nil {
 			logger.Error("pool: recovered panic in job",
 				"path", job.spec.SourceLibraryRel,
 				"variantID", job.spec.VariantID(),
-				"panic", r)
+				"panic", panicVal)
 			if !p.closed.Load() {
 				p.failedCnt.Add(1)
 				metrics.UpscaleJobsCompletedTotal.WithLabelValues("failure").Inc()
@@ -908,13 +910,22 @@ func (p *Pool) processJob(job poolJob) {
 				// recovered panic to the Coordinator so the
 				// containing batch's `failed_files` advances and
 				// the admin Jobs page renders the same outcome
-				// it does for sox / store failures.
+				// it does for sox / store failures. Inject the
+				// recovered panic value into errMsg so the admin
+				// Jobs page shows the root cause instead of a
+				// generic string (already logged above; panic
+				// strings are short). Gemini r4.
+				errMsg := "panic recovered in worker"
+				if panicVal != nil {
+					errMsg = fmt.Sprintf("panic recovered in worker: %v", panicVal)
+				}
+				failedAt := time.Now().UTC()
 				p.fireJobFailed(jobFailedEvent{
 					path:            job.spec.SourceLibraryRel,
 					variantID:       job.spec.VariantID(),
-					errMsg:          "panic recovered in worker",
-					durationSeconds: time.Since(startedAt).Seconds(),
-					failedAt:        time.Now().UTC(),
+					errMsg:          errMsg,
+					durationSeconds: failedAt.Sub(startedAt).Seconds(),
+					failedAt:        failedAt,
 					batchID:         job.spec.BatchID,
 				})
 				p.fireStateChange()
@@ -964,12 +975,13 @@ func (p *Pool) processJob(job poolJob) {
 			if errors.Is(jobCtx.Err(), context.DeadlineExceeded) {
 				errMsg = "sox timed out after " + p.jobTimeout.String()
 			}
+			failedAt := time.Now().UTC()
 			p.fireJobFailed(jobFailedEvent{
 				path:            job.spec.SourceLibraryRel,
 				variantID:       job.spec.VariantID(),
 				errMsg:          errMsg,
-				durationSeconds: time.Since(startedAt).Seconds(),
-				failedAt:        time.Now().UTC(),
+				durationSeconds: failedAt.Sub(startedAt).Seconds(),
+				failedAt:        failedAt,
 				batchID:         job.spec.BatchID,
 			})
 			p.fireStateChange()
@@ -999,12 +1011,13 @@ func (p *Pool) processJob(job poolJob) {
 			metrics.UpscaleJobsCompletedTotal.WithLabelValues("failure").Inc()
 			logger.Error("pool: fsync sidecar", "path", job.spec.SourceLibraryRel, "err", err)
 			_ = os.Remove(sidecarPath)
+			failedAt := time.Now().UTC()
 			p.fireJobFailed(jobFailedEvent{
 				path:            job.spec.SourceLibraryRel,
 				variantID:       job.spec.VariantID(),
 				errMsg:          "fsync sidecar: " + err.Error(),
-				durationSeconds: time.Since(startedAt).Seconds(),
-				failedAt:        time.Now().UTC(),
+				durationSeconds: failedAt.Sub(startedAt).Seconds(),
+				failedAt:        failedAt,
 				batchID:         job.spec.BatchID,
 			})
 		}
@@ -1072,12 +1085,13 @@ func (p *Pool) processJob(job poolJob) {
 			// Surface store-side failures to the Coordinator
 			// too — admin Jobs page distinguishes them from
 			// sox failures via the errMsg prefix.
+			failedAt := time.Now().UTC()
 			p.fireJobFailed(jobFailedEvent{
 				path:            job.spec.SourceLibraryRel,
 				variantID:       job.spec.VariantID(),
 				errMsg:          "store variant: " + err.Error(),
-				durationSeconds: time.Since(startedAt).Seconds(),
-				failedAt:        time.Now().UTC(),
+				durationSeconds: failedAt.Sub(startedAt).Seconds(),
+				failedAt:        failedAt,
 				batchID:         job.spec.BatchID,
 			})
 		}

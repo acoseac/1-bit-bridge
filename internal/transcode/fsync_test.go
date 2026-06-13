@@ -1,9 +1,9 @@
 package transcode
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -49,8 +49,11 @@ func TestFsyncFileAndParent_MissingFileSurfacesError(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error for missing file, got nil")
 	}
-	if !strings.Contains(err.Error(), "open for fsync") {
-		t.Errorf("error should mention 'open for fsync', got %v", err)
+	// Assert the actual OS condition via the wrapped error chain
+	// (fsync.go wraps the os.OpenFile error with %w), not a fragile
+	// substring match on the message prefix. Gemini r4.
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("error should wrap os.ErrNotExist, got %v", err)
 	}
 }
 
