@@ -475,20 +475,22 @@ func buildTXTRecords(cfg Config, ips []net.IP) []string {
 const maxTXTIPsValueLen = 240
 
 // txtIPsValue builds the `ips=` value from the advertised IP set:
-// global-unicast IPv4/IPv6 only. Link-local is excluded — IPv6
-// link-local (fe80::/10) needs a zone index the client can't map to
-// its own interface (an unscoped dial fails instantly with EINVAL),
-// and IPv4 link-local (169.254.0.0/16) is an APIPA fallback that's
-// rarely the real address; this matches the global-unicast-only
-// filtering of the /v1/health `endpoints` list. The A/AAAA records
-// still carry link-local for standard mDNS resolution. The value is
-// capped at maxLen bytes; `dropped` counts addresses skipped for the
+// global-unicast IPv4/IPv6 only, via net.IP.IsGlobalUnicast — which in a
+// single idiom excludes link-local, loopback, unspecified, and multicast
+// while keeping private IPv4 (10/8, 192.168/16, …) and IPv6 ULA
+// (fc00::/7). This matches the global-unicast-only filtering of the
+// /v1/health `endpoints` list and guarantees the documented contract at
+// the emission boundary even if the input set ever broadens. Link-local
+// matters most to exclude: IPv6 fe80::/10 needs a zone index the client
+// can't map (an unscoped dial fails instantly with EINVAL); the A/AAAA
+// records still carry link-local for standard mDNS resolution. The value
+// is capped at maxLen bytes; `dropped` counts addresses skipped for the
 // budget so the caller can log truncation. Returns "" when nothing
 // qualifies.
 func txtIPsValue(ips []net.IP, maxLen int) (value string, dropped int) {
 	var b strings.Builder
 	for _, ip := range ips {
-		if ip == nil || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		if ip == nil || !ip.IsGlobalUnicast() {
 			continue
 		}
 		s := ip.String()
