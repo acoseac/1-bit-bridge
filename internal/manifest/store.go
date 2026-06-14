@@ -1045,6 +1045,13 @@ func (s *Store) UnenrichedTracks(ctx context.Context, limit int) ([]Track, error
 func marshalForStorage(t *Track) ([]byte, error) {
 	clone := *t
 	clone.Enriched = nil
+	// Variants are column-derived (spliced from the variants table at
+	// read time via scanTrackVariants, same as Enriched). Zero them so a
+	// caller that round-trips a ListTracks Track back through a write
+	// path — e.g. ApplyAlbumArtistReconciliation — can't freeze stale
+	// variants into tags_json, where the JSON-only readers (GetTrack /
+	// UnenrichedTracks) would then return them.
+	clone.Variants = nil
 	// WaveformTag is column-derived (spliced from track_analysis at
 	// read time, same as Enriched / Variants). Zero it before the
 	// blob marshal so a caller that round-trips a read Track back
@@ -1115,6 +1122,65 @@ func (s *Store) MarkEnriched(ctx context.Context, t *Track) error {
 		WHERE path = ?
 	`, raw, now, now, now, t.Path)
 	return err
+}
+
+// ApplyAlbumArtistReconciliation rewrites tags_json for each supplied
+// track (its AlbumArtist already set to the reconciled value) and bumps
+// indexed_at so iOS delta-sync surfaces the change. enriched_at is
+// deliberately LEFT UNTOUCHED — reconciliation is a metadata-consistency
+// pass, NOT (re-)enrichment, so it must neither reset the enricher's
+// progress (which would re-trigger MusicBrainz lookups) nor mark
+// unenriched rows done. DB-only; no network.
+//
+// One transaction + one reused prepared statement, mirroring
+// UpsertTrackBatch. Holds s.mu for the writer contract. indexed_at uses
+// the same strict-advance CASE WHEN form as MarkEnriched so a
+// same-nanosecond clock still produces a strictly-greater value, keeping
+// delta-sync's `> since` boundary correct. Returns the number of rows
+// actually updated.
+func (s *Store) ApplyAlbumArtistReconciliation(ctx context.Context, changed []Track) (int, error) {
+	if len(changed) == 0 {
+		return 0, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	stmt, err := tx.PrepareContext(ctx, `
+		UPDATE tracks
+		SET tags_json = ?,
+		    indexed_at = CASE
+		        WHEN indexed_at >= ? THEN indexed_at + 1
+		        ELSE ?
+		    END
+		WHERE path = ?
+	`)
+	if err != nil {
+		return 0, err
+	}
+	defer stmt.Close()
+	now := s.now().UnixNano()
+	n := 0
+	for i := range changed {
+		raw, err := marshalForStorage(&changed[i])
+		if err != nil {
+			return n, err
+		}
+		res, err := stmt.ExecContext(ctx, raw, now, now, changed[i].Path)
+		if err != nil {
+			return n, err
+		}
+		if affected, _ := res.RowsAffected(); affected > 0 {
+			n++
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return n, err
+	}
+	return n, nil
 }
 
 // ----- tracks -----

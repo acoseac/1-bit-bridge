@@ -501,7 +501,36 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 
 	s.lastFull.Store(time.Now().UTC().UnixNano())
 	_ = s.store.SetScanState(ctx, "last_full_scan", time.Now().UTC().Format(time.RFC3339Nano))
+
+	// Reconcile AlbumArtist inconsistencies within each directory so one
+	// physical album yields one consistent AlbumArtist (and therefore one
+	// album identity on iOS). DB-only — no MusicBrainz; leaves
+	// enriched_at untouched. Non-fatal: a reconciliation error must not
+	// fail an otherwise-successful scan.
+	if n, rErr := s.runAlbumArtistReconciliation(ctx); rErr != nil {
+		scanLogger.Error("album-artist reconciliation", "err", rErr)
+	} else if n > 0 {
+		scanLogger.Info("album-artist reconciliation unified split albums", "tracks", n)
+	}
+
 	return count, nil
+}
+
+// runAlbumArtistReconciliation runs the post-scan AlbumArtist
+// consistency pass over the whole library: load all tracks, compute the
+// directory-scoped dominant-value fixes (see reconcileAlbumArtists), and
+// persist them (indexed_at bumped, enriched_at untouched). Returns the
+// number of tracks unified. DB-only — no network.
+func (s *Scanner) runAlbumArtistReconciliation(ctx context.Context) (int, error) {
+	all, err := s.store.ListTracks(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("list tracks: %w", err)
+	}
+	changed := reconcileAlbumArtists(all)
+	if len(changed) == 0 {
+		return 0, nil
+	}
+	return s.store.ApplyAlbumArtistReconciliation(ctx, changed)
 }
 
 // runScanWorker is one of NumCPU workers reading walker-supplied paths
