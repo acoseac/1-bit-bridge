@@ -746,6 +746,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/history", s.apiHistorySummary)
 	mux.HandleFunc("GET /api/history/events", s.apiHistoryEvents)
 	mux.HandleFunc("GET /api/history/export", s.apiHistoryExport)
+	mux.HandleFunc("GET /api/smart-playlists", s.apiSmartPlaylistsList)
+	mux.HandleFunc("POST /api/smart-playlists/regenerate", s.apiSmartPlaylistsRegenerate)
 	mux.HandleFunc("GET /api/tokens", s.apiTokensList)
 	mux.HandleFunc("POST /api/tokens", s.apiTokensMint)
 	mux.HandleFunc("DELETE /api/tokens/{id}", s.apiTokensRevoke)
