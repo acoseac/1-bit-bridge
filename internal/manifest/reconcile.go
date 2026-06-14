@@ -5,6 +5,18 @@ import (
 	"strings"
 )
 
+// ReconcileTarget is the lightweight projection the reconciliation pass
+// operates on — just the three fields it needs. The scanner streams the
+// whole library into `[]ReconcileTarget` (instead of materializing every
+// full `Track`, which would spike memory / risk OOM on low-memory hosts
+// like a Raspberry Pi), then loads the full `Track` only for the handful
+// of rows that actually need rewriting.
+type ReconcileTarget struct {
+	Path        string
+	Album       string
+	AlbumArtist string
+}
+
 // reconcileAlbumArtists finds physical albums — tracks that share a
 // directory AND an album title — whose AlbumArtist tags DISAGREE, and
 // returns a copy of each outlier track with its AlbumArtist rewritten to
@@ -31,9 +43,9 @@ import (
 //   - DISAGREEMENT-DRIVEN: a group whose AlbumArtist values already
 //     agree is left untouched (do no harm).
 //
-// Returns only the tracks that need changing, sorted by path for
+// Returns only the targets that need changing, sorted by path for
 // deterministic output (tests + stable logs). Pure — no I/O.
-func reconcileAlbumArtists(tracks []Track) []Track {
+func reconcileAlbumArtists(tracks []ReconcileTarget) []ReconcileTarget {
 	groups := map[string][]int{}
 	for i := range tracks {
 		key, ok := albumArtistGroupKey(tracks[i].Path, tracks[i].Album)
@@ -43,7 +55,7 @@ func reconcileAlbumArtists(tracks []Track) []Track {
 		groups[key] = append(groups[key], i)
 	}
 
-	var changed []Track
+	var changed []ReconcileTarget
 	for _, idxs := range groups {
 		if len(idxs) < 2 {
 			continue // a lone track can't disagree with itself

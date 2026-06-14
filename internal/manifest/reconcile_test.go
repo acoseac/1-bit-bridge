@@ -3,10 +3,10 @@ package manifest
 import "testing"
 
 func TestReconcileAlbumArtists(t *testing.T) {
-	mk := func(path, album, aa string) Track {
-		return Track{Path: path, Album: album, AlbumArtist: aa}
+	mk := func(path, album, aa string) ReconcileTarget {
+		return ReconcileTarget{Path: path, Album: album, AlbumArtist: aa}
 	}
-	fixes := func(changed []Track) map[string]string {
+	fixes := func(changed []ReconcileTarget) map[string]string {
 		m := map[string]string{}
 		for _, tr := range changed {
 			m[tr.Path] = tr.AlbumArtist
@@ -16,12 +16,12 @@ func TestReconcileAlbumArtists(t *testing.T) {
 
 	cases := []struct {
 		name string
-		in   []Track
+		in   []ReconcileTarget
 		want map[string]string // path -> reconciled AlbumArtist (changed rows only)
 	}{
 		{
 			name: "consistent group is untouched",
-			in: []Track{
+			in: []ReconcileTarget{
 				mk("A/Alb/1.flac", "Alb", "X"),
 				mk("A/Alb/2.flac", "Alb", "X"),
 			},
@@ -29,7 +29,7 @@ func TestReconcileAlbumArtists(t *testing.T) {
 		},
 		{
 			name: "dominant wins, minority fixed",
-			in: []Track{
+			in: []ReconcileTarget{
 				mk("A/Alb/1.flac", "Alb", "Aspiration"),
 				mk("A/Alb/2.flac", "Alb", "Aspiration"),
 				mk("A/Alb/3.flac", "Alb", "Aspiration"),
@@ -39,7 +39,7 @@ func TestReconcileAlbumArtists(t *testing.T) {
 		},
 		{
 			name: "comma vs semicolon separator unified to dominant",
-			in: []Track{
+			in: []ReconcileTarget{
 				mk("A/Alb/1.flac", "Alb", "Peter, Paul & Mary; Chad Mitchell Trio"),
 				mk("A/Alb/2.flac", "Alb", "Peter, Paul & Mary; Chad Mitchell Trio"),
 				mk("A/Alb/3.flac", "Alb", "Peter, Paul & Mary, Chad Mitchell Trio"),
@@ -48,7 +48,7 @@ func TestReconcileAlbumArtists(t *testing.T) {
 		},
 		{
 			name: "blank album-artist filled from dominant (compilation hole)",
-			in: []Track{
+			in: []ReconcileTarget{
 				mk("A/Comp/1.flac", "Comp", "Various Artists"),
 				mk("A/Comp/2.flac", "Comp", "Various Artists"),
 				mk("A/Comp/3.flac", "Comp", ""),
@@ -57,7 +57,7 @@ func TestReconcileAlbumArtists(t *testing.T) {
 		},
 		{
 			name: "all blank: nothing to reconcile to",
-			in: []Track{
+			in: []ReconcileTarget{
 				mk("A/Alb/1.flac", "Alb", ""),
 				mk("A/Alb/2.flac", "Alb", ""),
 			},
@@ -65,7 +65,7 @@ func TestReconcileAlbumArtists(t *testing.T) {
 		},
 		{
 			name: "different directories are NEVER merged",
-			in: []Track{
+			in: []ReconcileTarget{
 				mk("CopyA/Alb/1.flac", "Alb", "X"),
 				mk("CopyB/Alb/1.flac", "Alb", "Y"),
 			},
@@ -73,7 +73,7 @@ func TestReconcileAlbumArtists(t *testing.T) {
 		},
 		{
 			name: "box-set per-disc performers stay separate (different dirs)",
-			in: []Track{
+			in: []ReconcileTarget{
 				mk("Box/Disc 1/1.flac", "Box", "Soloist A"),
 				mk("Box/Disc 1/2.flac", "Box", "Soloist A"),
 				mk("Box/Disc 2/1.flac", "Box", "Soloist B"),
@@ -83,14 +83,14 @@ func TestReconcileAlbumArtists(t *testing.T) {
 		},
 		{
 			name: "single-track group untouched",
-			in: []Track{
+			in: []ReconcileTarget{
 				mk("A/Alb/1.flac", "Alb", "X"),
 			},
 			want: map[string]string{},
 		},
 		{
 			name: "loose tracks without album are skipped",
-			in: []Track{
+			in: []ReconcileTarget{
 				mk("A/1.flac", "", "X"),
 				mk("A/2.flac", "", "Y"),
 			},
@@ -98,7 +98,7 @@ func TestReconcileAlbumArtists(t *testing.T) {
 		},
 		{
 			name: "album title case/space differences group together",
-			in: []Track{
+			in: []ReconcileTarget{
 				mk("A/Alb/1.flac", "All My Septembers", "Aspiration"),
 				mk("A/Alb/2.flac", "all my septembers ", "Aspiration"),
 				mk("A/Alb/3.flac", "All My Septembers", "Peter Asplund; Aspiration"),
@@ -107,7 +107,7 @@ func TestReconcileAlbumArtists(t *testing.T) {
 		},
 		{
 			name: "tie breaks toward the longer (more complete) credit",
-			in: []Track{
+			in: []ReconcileTarget{
 				mk("A/Alb/1.flac", "Alb", "Short"),
 				mk("A/Alb/2.flac", "Alb", "A Longer Credit"),
 			},
@@ -131,7 +131,7 @@ func TestReconcileAlbumArtists(t *testing.T) {
 }
 
 func TestReconcileAlbumArtistsWindowsPaths(t *testing.T) {
-	in := []Track{
+	in := []ReconcileTarget{
 		{Path: `A\Alb\1.flac`, Album: "Alb", AlbumArtist: "X"},
 		{Path: `A\Alb\2.flac`, Album: "Alb", AlbumArtist: "X"},
 		{Path: `A\Alb\3.flac`, Album: "Alb", AlbumArtist: "Y"},

@@ -522,15 +522,40 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 // persist them (indexed_at bumped, enriched_at untouched). Returns the
 // number of tracks unified. DB-only — no network.
 func (s *Scanner) runAlbumArtistReconciliation(ctx context.Context) (int, error) {
-	all, err := s.store.ListTracks(ctx, nil)
-	if err != nil {
-		return 0, fmt.Errorf("list tracks: %w", err)
+	// Stream the whole library into lightweight targets — never
+	// materialize every full Track (OOM risk on low-memory hosts; the
+	// codebase streams everywhere else for the same reason).
+	var targets []ReconcileTarget
+	if err := s.store.StreamTracks(ctx, nil, func(t *Track) error {
+		targets = append(targets, ReconcileTarget{Path: t.Path, Album: t.Album, AlbumArtist: t.AlbumArtist})
+		return nil
+	}); err != nil {
+		return 0, fmt.Errorf("stream tracks: %w", err)
 	}
-	changed := reconcileAlbumArtists(all)
+	changed := reconcileAlbumArtists(targets)
 	if len(changed) == 0 {
 		return 0, nil
 	}
-	return s.store.ApplyAlbumArtistReconciliation(ctx, changed)
+	// Load the full Track only for the rows that actually need rewriting,
+	// stamp the reconciled AlbumArtist, and hand them to the store. A row
+	// deleted between the stream and the get is SKIPPED (not fatal) — a
+	// concurrent delete must not fail an otherwise-clean pass.
+	tracks := make([]Track, 0, len(changed))
+	for _, c := range changed {
+		t, err := s.store.GetTrack(ctx, c.Path)
+		if err != nil {
+			return 0, fmt.Errorf("get track %q: %w", c.Path, err)
+		}
+		if t == nil {
+			continue
+		}
+		t.AlbumArtist = c.AlbumArtist
+		tracks = append(tracks, *t)
+	}
+	if len(tracks) == 0 {
+		return 0, nil
+	}
+	return s.store.ApplyAlbumArtistReconciliation(ctx, tracks)
 }
 
 // runScanWorker is one of NumCPU workers reading walker-supplied paths
