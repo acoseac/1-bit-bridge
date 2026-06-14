@@ -1692,6 +1692,12 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		}
 	}
 
+	// Smart playlists read precomputed analysis + history (no decode), so
+	// there's no sox precheck. The harmonic Auto Mix + Daily Mix discovery
+	// self-omit when analysis isn't active; the listening families work from
+	// history alone.
+	smartPlaylistsActive := cfg.SmartPlaylists.Enabled
+
 	// LE-cert expiry provider for /v1/health (public mode). Live
 	// closure so background autocert renewals surface on the next
 	// health probe without a restart; same backing source as the
@@ -1723,6 +1729,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		WithDeviceRegistrar(manifestStore).
 		WithPlaylistStore(manifestStore).
 		WithHistoryStore(manifestStore)
+	// Conditionally wire the smart-playlist feed so the health flag + the
+	// 404-when-off shape stay honest when cfg.SmartPlaylists.Enabled is false.
+	if smartPlaylistsActive {
+		apiSrv.WithSmartPlaylistStore(manifestStore)
+	}
 	cfgHolder := apiSrv.ConfigHolder()
 
 	// DLNA MediaServer (opt-in, LAN-only). Starts a parallel
@@ -1849,6 +1860,12 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		defer analysisPool.Stop()
 		go runAnalysisSweeper(scanCtx, manifestStore, apiSrv.Resolver(),
 			analyze.WaveformDirFor(cfg.DataDir), analysisPool, cfg.ScanInterval())
+	}
+
+	// Smart-playlist regenerator (shares scanCtx). analysisActive (the
+	// sox-resolved flag) gates the harmonic/discovery families.
+	if smartPlaylistsActive {
+		go runSmartPlaylistRegenerator(scanCtx, manifestStore, analysisActive, cfg.SmartPlaylists.EffectiveRegenerateInterval())
 	}
 
 	var upscalePool *transcode.Pool

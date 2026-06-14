@@ -61,21 +61,22 @@ type Config struct {
 	// SAN gather (PR feat/tls-broader-sans) so that adding a new
 	// custom DNS hostname here, then rotating the cert, makes that
 	// URL TLS-handshake-compatible from iOS.
-	CustomEndpoints []string           `yaml:"customEndpoints,omitempty"`
-	Update          UpdateConfig       `yaml:"update,omitempty"`
-	Backup          BackupConfig       `yaml:"backup,omitempty"`
-	LibraryWatch    LibraryWatchConfig `yaml:"libraryWatch,omitempty"`
-	Upscale         UpscaleConfig      `yaml:"upscale,omitempty"`
-	Analysis        AnalysisConfig     `yaml:"analysis,omitempty"`
-	Tailscale       TailscaleConfig    `yaml:"tailscale,omitempty"`
-	Scanner         ScannerConfig      `yaml:"scanner,omitempty"`
-	Limits          LimitsConfig       `yaml:"limits,omitempty"`
-	Integrity       IntegrityConfig    `yaml:"integrity,omitempty"`
-	Deployment      DeploymentConfig   `yaml:"deployment,omitempty"`
-	Autocert        AutocertConfig     `yaml:"autocert,omitempty"`
-	MDNS            MDNSConfig         `yaml:"mdns,omitempty"`
-	DLNA            DLNAConfig         `yaml:"dlna,omitempty"`
-	UPnPUpstream    UPnPUpstreamConfig `yaml:"upnpUpstream,omitempty"`
+	CustomEndpoints []string             `yaml:"customEndpoints,omitempty"`
+	Update          UpdateConfig         `yaml:"update,omitempty"`
+	Backup          BackupConfig         `yaml:"backup,omitempty"`
+	LibraryWatch    LibraryWatchConfig   `yaml:"libraryWatch,omitempty"`
+	Upscale         UpscaleConfig        `yaml:"upscale,omitempty"`
+	Analysis        AnalysisConfig       `yaml:"analysis,omitempty"`
+	SmartPlaylists  SmartPlaylistsConfig `yaml:"smartPlaylists,omitempty"`
+	Tailscale       TailscaleConfig      `yaml:"tailscale,omitempty"`
+	Scanner         ScannerConfig        `yaml:"scanner,omitempty"`
+	Limits          LimitsConfig         `yaml:"limits,omitempty"`
+	Integrity       IntegrityConfig      `yaml:"integrity,omitempty"`
+	Deployment      DeploymentConfig     `yaml:"deployment,omitempty"`
+	Autocert        AutocertConfig       `yaml:"autocert,omitempty"`
+	MDNS            MDNSConfig           `yaml:"mdns,omitempty"`
+	DLNA            DLNAConfig           `yaml:"dlna,omitempty"`
+	UPnPUpstream    UPnPUpstreamConfig   `yaml:"upnpUpstream,omitempty"`
 
 	// DisableHTTP3 prevents the server from binding UDP ports and
 	// advertising Alt-Svc headers for HTTP/3 upgrades. Defaults to false.
@@ -1121,6 +1122,36 @@ func (a AnalysisConfig) EffectiveQueueCap() int {
 		return a.QueueCap
 	}
 	return DefaultAnalysisQueueCap
+}
+
+// SmartPlaylistsConfig governs the optional server-side smart/dynamic
+// playlist generator (Heavy Rotation, Auto Mix, Forgotten Favorites,
+// time-of-day, Daily Mix, The Finish Line). Disabled by default; opt in
+// here. Composes with the analysis + history features it draws from: the
+// listening families work from playback history alone, while the harmonic
+// Auto Mix + Daily Mix discovery self-omit unless `analysis.enabled` is on
+// (the generator gates them internally). Results are precomputed on a daily
+// cadence into the `smart_playlists` cache table and served by
+// GET /v1/smart-playlists.
+type SmartPlaylistsConfig struct {
+	// Enabled is the master toggle. Default false.
+	Enabled bool `yaml:"enabled,omitempty"`
+
+	// RegenerateIntervalSec is the background-regeneration cadence. Zero
+	// (the default) resolves to 24h — these families move on a daily scale
+	// (Heavy Rotation / Daily Mix are day-cadence concepts), and a daily
+	// snapshot keeps GET /v1/smart-playlists a single fast cache read while
+	// staying stable within the day so the homepage doesn't reshuffle.
+	RegenerateIntervalSec int `yaml:"regenerateIntervalSec,omitempty"`
+}
+
+// EffectiveRegenerateInterval resolves the regeneration cadence, defaulting
+// to 24h when the YAML field is zero.
+func (c SmartPlaylistsConfig) EffectiveRegenerateInterval() time.Duration {
+	if c.RegenerateIntervalSec > 0 {
+		return time.Duration(c.RegenerateIntervalSec) * time.Second
+	}
+	return 24 * time.Hour
 }
 
 // defaultVariantsSubdir mirrors transcode.OutputDirSubdir. Kept as

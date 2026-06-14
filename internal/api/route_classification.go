@@ -263,6 +263,10 @@ func (s *Server) routeRegistry() []route {
 		{pattern: "POST /v1/history/batch", kind: boundedRoute, handler: withCtxTimeout(60*time.Second, s.authed(s.historyBatch))},
 		{pattern: "GET /v1/history", kind: boundedRoute, handler: withCtxTimeout(2*time.Second, s.authed(s.historyList))},
 
+		// Server-generated smart playlists — a single fast cache read
+		// (bounded; generation is background/admin, never in-request).
+		{pattern: "GET /v1/smart-playlists", kind: boundedRoute, handler: withCtxTimeout(10*time.Second, s.authed(s.smartPlaylists))},
+
 		// SSE — long-lived per-connection write stream; MUST opt
 		// out of the per-route write deadline.
 		{pattern: "GET /v1/events", kind: streamingRoute, handler: s.authed(s.events)},

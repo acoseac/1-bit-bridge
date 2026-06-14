@@ -33,6 +33,14 @@ type SmartPlaylistItem struct {
 	Artist   string `json:"artist,omitempty"`
 }
 
+// SmartPlaylistHourlyBlob is the items_json shape for the time-of-day family:
+// per-UTC-hour item pools the /v1/smart-playlists handler shifts to the
+// device's local hour at request time. (Every other family stores a flat
+// []SmartPlaylistItem.) Go (un)marshals the int map keys as JSON strings.
+type SmartPlaylistHourlyBlob struct {
+	Hourly map[int][]SmartPlaylistItem `json:"hourly"`
+}
+
 // StoredSmartPlaylist is one cached generated-playlist row. No json tags
 // (wire-type discipline) — ItemsJSON carries the serialized
 // []SmartPlaylistItem (or, for the time-of-day family, an hour-keyed blob

@@ -669,6 +669,46 @@ The handler **drops, never faults,** events with an empty `path`, a non-positive
 
 `deviceId` / `deviceName` attribute the event to the **playing device** (`outputTarget.deviceName` remains the output hardware). `deviceId` is the first 16 lowercase-hex chars of `SHA-256(deviceToken)` — a stable, non-reversible display id; the raw recovery token never appears on the wire. A client can hash its own token the same way to mark "this device". `deviceName` is the registered display name, empty if the device never registered one. `nextCursor` is non-zero while more pages may follow (pass it back as `after`); a short or empty page returns `0`, meaning the feed is exhausted. `400 bad_request` on a non-positive `limit` or negative/non-integer `after`; `404 playback_history_not_supported` when the feature is off.
 
+### Smart playlists (additive, since v1.9)
+
+Server-generated dynamic "smart" playlists derived **entirely on the operator's own host** from the playback history + offline analysis already described above — no transcoding, no external service, nothing leaves the box. Opt-in (`smartPlaylists.enabled` in `bridge.yaml`); advertised via the `smartPlaylists` flag in `/v1/health.features`. Pre-feature (or feature-off) bridges return `404` from the route. `ProtocolVersion` stays `1` (a new endpoint + a new health flag, no change to any existing shape).
+
+The bridge regenerates the families on a daily cadence into a server-side cache **distinct from the `/v1/playlists` backup store** (these are ephemeral/derived, never device-authored, no LWW). Only **populated** families appear — a family below its minimum-track threshold is omitted, so a brand-new library or one with analysis disabled simply returns fewer (or zero) playlists. Families:
+
+| `kind` | Source | Notes |
+|---|---|---|
+| `heavyRotation` | history (last ~14d) | most-played, qualifying plays only (≥ 30s listened) |
+| `forgottenFavorites` | history | loved long ago, untouched in the last ~30d |
+| `recentlyPlayed` | history | distinct tracks, newest first |
+| `autoMix` | analysis (key + tempo) | Camelot-wheel harmonic flow, level-matched via ReplayGain; **requires `analysis.enabled`** |
+| `dailyMix` | history + analysis | ~70% familiar + ~30% discovery; discovery leg requires `analysis.enabled` |
+| `timeOfDay` | history (by hour) | the device's current-local-hour habit (see `local_hour` below) |
+| `finishLine` | history (sessions) | tracks chained to the user's average listening-session length |
+
+**`GET /v1/smart-playlists?local_hour=<0-23>`** — the populated families, served from the cache. Bearer-authenticated; the `X-Device-Token` header is **not** required (user-wide, like `GET /v1/history`). The optional `local_hour` is the device's current local hour, used **only to title** the `timeOfDay` family (the bucket itself is the server's current UTC hour — the same instant); omit it and the stored title is kept. A `timeOfDay` family with no listening habit around the current hour is omitted from that response.
+
+**Response** `200`:
+
+```json
+{
+  "refreshedAt": 1730000000000000000,
+  "playlists": [
+    {
+      "slug": "heavy-rotation",
+      "kind": "heavyRotation",
+      "title": "Heavy Rotation",
+      "subtitle": "Your most-played lately",
+      "refreshedAt": 1730000000000000000,
+      "items": [
+        { "position": 0, "path": "Diana Krall/Live/01 Romance.flac", "title": "Romance", "artist": "Diana Krall" }
+      ]
+    }
+  ]
+}
+```
+
+`slug` is the stable per-family id a client binds a homepage row to. `items` reuse the playlist-backup item shape (`position` + `path` + render-fallback `title`/`artist`); the client resolves `path` to its local library track exactly as it does for a restored backup. Top-level `refreshedAt` is the newest family's generating-run timestamp (UnixNano). Unknown future `kind` values should be tolerated (rendered generically) so older clients survive added families. `404 smart_playlists_not_supported` when the feature is off.
+
 ### `POST /v1/pairing/requests` (additive, since v1.2)
 
 Submit a join request that surfaces in the bridge admin web console as a pending entry. The admin reads the verification code off the iOS device's waiting screen, then approves or declines. iOS polls `/v1/pairing/{requestId}` for the verdict.
