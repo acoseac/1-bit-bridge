@@ -158,7 +158,8 @@ func TestRegenerate_PipelineEndToEnd(t *testing.T) {
 func TestToStored_BlobShapes(t *testing.T) {
 	gen := []smartplaylist.GeneratedPlaylist{
 		{Slug: "heavy-rotation", Kind: smartplaylist.KindHeavyRotation, Title: "Heavy Rotation",
-			Items: []smartplaylist.Item{{Position: 0, Path: "/a.flac", Title: "A", Artist: "X"}}},
+			Items:  []smartplaylist.Item{{Position: 0, Path: "/a.flac", Title: "A", Artist: "X"}},
+			Energy: []float64{0.1, 0.9}, ModalRateHz: 96000},
 		{Slug: "time-of-day", Kind: smartplaylist.KindTimeOfDay, Title: "For Right Now",
 			HourlyItems: map[int][]smartplaylist.Item{8: {{Position: 0, Path: "/b.flac"}}}},
 	}
@@ -173,6 +174,19 @@ func TestToStored_BlobShapes(t *testing.T) {
 	var flat []manifest.SmartPlaylistItem
 	if err := json.Unmarshal(rows[0].ItemsJSON, &flat); err != nil || len(flat) != 1 || flat[0].Path != "/a.flac" {
 		t.Fatalf("flat blob: %v / %+v", err, flat)
+	}
+
+	// Energy serializes to energy_json; modal rate copies through.
+	var energy []float64
+	if err := json.Unmarshal(rows[0].EnergyJSON, &energy); err != nil || len(energy) != 2 || energy[1] != 0.9 {
+		t.Fatalf("energy blob: %v / %+v", err, energy)
+	}
+	if rows[0].ModalRateHz != 96000 {
+		t.Errorf("modal rate not copied: %d", rows[0].ModalRateHz)
+	}
+	// A family with no Energy leaves energy_json nil (iOS seeded fallback).
+	if rows[1].EnergyJSON != nil {
+		t.Errorf("absent energy should serialize to nil, got %s", rows[1].EnergyJSON)
 	}
 
 	var hb manifest.SmartPlaylistHourlyBlob

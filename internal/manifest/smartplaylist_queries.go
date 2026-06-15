@@ -53,6 +53,15 @@ type StoredSmartPlaylist struct {
 	Position    int
 	RefreshedAt int64 // UnixNano of the generating run
 	ItemsJSON   []byte
+	// EnergyJSON is the JSON-encoded []float64 energy envelope (normalized
+	// 0..1 loudness contour across member tracks) the iOS waveform-signed
+	// cover halo renders. Nil/empty for a family with no analyzed members
+	// (the client falls back to a seeded waveform). Migration v20.
+	EnergyJSON []byte
+	// ModalRateHz is the mix's modal sample rate (tie-break → highest),
+	// driving the halo glow color via the Hugo-2 rate-LED palette. 0 =
+	// unknown. Migration v20.
+	ModalRateHz int
 }
 
 // ReplaceSmartPlaylists atomically replaces the entire smart-playlist cache
@@ -78,8 +87,8 @@ func (s *Store) ReplaceSmartPlaylists(ctx context.Context, snapshot []StoredSmar
 	if len(snapshot) > 0 {
 		stmt, err := tx.PrepareContext(ctx, `
 			INSERT INTO smart_playlists
-				(slug, kind, title, subtitle, position, refreshed_at, items_json)
-			VALUES (?, ?, ?, ?, ?, ?, ?)
+				(slug, kind, title, subtitle, position, refreshed_at, items_json, energy_json, modal_rate_hz)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`)
 		if err != nil {
 			return err
@@ -90,7 +99,8 @@ func (s *Store) ReplaceSmartPlaylists(ctx context.Context, snapshot []StoredSmar
 				return errors.New("manifest: ReplaceSmartPlaylists received a row with an empty slug")
 			}
 			if _, err := stmt.ExecContext(ctx,
-				p.Slug, p.Kind, p.Title, p.Subtitle, p.Position, p.RefreshedAt, p.ItemsJSON); err != nil {
+				p.Slug, p.Kind, p.Title, p.Subtitle, p.Position, p.RefreshedAt, p.ItemsJSON,
+				p.EnergyJSON, p.ModalRateHz); err != nil {
 				return err
 			}
 		}
@@ -103,7 +113,7 @@ func (s *Store) ReplaceSmartPlaylists(ctx context.Context, snapshot []StoredSmar
 // regeneration) is not an error.
 func (s *Store) LoadSmartPlaylists(ctx context.Context) ([]StoredSmartPlaylist, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT slug, kind, title, subtitle, position, refreshed_at, items_json
+		SELECT slug, kind, title, subtitle, position, refreshed_at, items_json, energy_json, modal_rate_hz
 		  FROM smart_playlists
 		 ORDER BY position ASC, slug ASC
 	`)
@@ -115,7 +125,7 @@ func (s *Store) LoadSmartPlaylists(ctx context.Context) ([]StoredSmartPlaylist, 
 	for rows.Next() {
 		var p StoredSmartPlaylist
 		if err := rows.Scan(&p.Slug, &p.Kind, &p.Title, &p.Subtitle,
-			&p.Position, &p.RefreshedAt, &p.ItemsJSON); err != nil {
+			&p.Position, &p.RefreshedAt, &p.ItemsJSON, &p.EnergyJSON, &p.ModalRateHz); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
@@ -332,6 +342,7 @@ type TrackFeatureRow struct {
 	KeyRoot           *int     // 0..11, analysis-only
 	KeyMode           string   // "major" / "minor"
 	ReplayGainTrackDB *float64 // effective (tag wins, else analysis)
+	SampleRate        *int     // Hz from tags_json (drives the per-mix modal-rate glow color)
 }
 
 // trackFeatureSelect is the shared projection: metadata from tags_json,
@@ -349,7 +360,8 @@ const trackFeatureSelect = `
 	       COALESCE(json_extract(t.tags_json, '$.bpm'), ta.bpm) AS bpm,
 	       ta.key_root AS key_root,
 	       COALESCE(ta.key_mode, '') AS key_mode,
-	       COALESCE(json_extract(t.tags_json, '$.replayGainTrackDB'), ta.replaygain_track_db) AS replaygain
+	       COALESCE(json_extract(t.tags_json, '$.replayGainTrackDB'), ta.replaygain_track_db) AS replaygain,
+	       CAST(json_extract(t.tags_json, '$.sampleRate') AS INTEGER) AS sample_rate
 	  FROM tracks t
 	  LEFT JOIN track_analysis ta ON ta.source_path = t.path`
 
@@ -414,9 +426,9 @@ func scanTrackFeatures(rows *sql.Rows) ([]TrackFeatureRow, error) {
 	for rows.Next() {
 		var r TrackFeatureRow
 		var dur, rg sql.NullFloat64
-		var bpm, keyRoot sql.NullInt64
+		var bpm, keyRoot, sampleRate sql.NullInt64
 		if err := rows.Scan(&r.Path, &r.Title, &r.Artist, &r.Album, &r.Genre,
-			&dur, &bpm, &keyRoot, &r.KeyMode, &rg); err != nil {
+			&dur, &bpm, &keyRoot, &r.KeyMode, &rg, &sampleRate); err != nil {
 			return nil, err
 		}
 		if dur.Valid {
@@ -434,6 +446,10 @@ func scanTrackFeatures(rows *sql.Rows) ([]TrackFeatureRow, error) {
 		if rg.Valid {
 			v := rg.Float64
 			r.ReplayGainTrackDB = &v
+		}
+		if sampleRate.Valid {
+			v := int(sampleRate.Int64)
+			r.SampleRate = &v
 		}
 		out = append(out, r)
 	}

@@ -57,6 +57,15 @@ type smartPlaylistDTO struct {
 	// set — iOS falls back to the auto-mosaic. Additive (no ProtocolVersion
 	// bump).
 	ImageHash string `json:"imageHash,omitempty"`
+	// Energy is the per-mix normalized 0..1 loudness contour (one element per
+	// member track, downsampled) the iOS waveform-signed cover renders as its
+	// halo spline. Omitted when the family has no analyzed members (iOS falls
+	// back to a seeded waveform). Additive (no ProtocolVersion bump).
+	Energy []float64 `json:"energy,omitempty"`
+	// ModalRateHz is the mix's modal sample rate (tie-break → highest),
+	// driving the halo glow color via the iOS Hugo-2 rate-LED palette.
+	// Omitted (0) when no member rate is known. Additive.
+	ModalRateHz int `json:"modalRateHz,omitempty"`
 }
 
 type smartPlaylistsResponse struct {
@@ -111,6 +120,12 @@ func buildSmartPlaylistDTO(row manifest.StoredSmartPlaylist, nowUTCHour, localHo
 	dto := smartPlaylistDTO{
 		Slug: row.Slug, Kind: row.Kind, Title: row.Title,
 		Subtitle: row.Subtitle, RefreshedAt: row.RefreshedAt,
+		ModalRateHz: row.ModalRateHz,
+	}
+	// Energy is decorative — a malformed blob must not drop the family, so
+	// decode best-effort and leave Energy nil on error (iOS seeded fallback).
+	if len(row.EnergyJSON) > 0 {
+		_ = json.Unmarshal(row.EnergyJSON, &dto.Energy)
 	}
 
 	if row.Kind == string(timeOfDayKind) {

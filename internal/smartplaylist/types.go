@@ -39,6 +39,7 @@ type TrackFeature struct {
 	KeyRoot           *int    // 0..11, C=0
 	KeyMode           string  // "major" / "minor"
 	ReplayGainTrackDB *float64
+	SampleRate        *int // Hz (drives the per-mix modal-rate glow color)
 }
 
 // PlayStat is aggregated play data for one track path (from one of the
@@ -84,6 +85,15 @@ type GeneratedPlaylist struct {
 	Subtitle    string
 	Items       []Item
 	HourlyItems map[int][]Item
+
+	// Energy is the normalized 0..1 loudness contour across this family's
+	// members (one element per track, downsampled), driving the iOS
+	// "waveform-signed cover" halo spline. ModalRateHz is the mix's modal
+	// sample rate (tie-break → highest) for the halo glow color. Both are
+	// stamped by Generate's post-pass (signEnergy); nil/0 = no analyzed
+	// members (iOS falls back to a seeded waveform / fixed family color).
+	Energy      []float64
+	ModalRateHz int
 }
 
 // Inputs is the data snapshot the engine generates from, assembled by the

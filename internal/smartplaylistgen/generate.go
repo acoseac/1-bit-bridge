@@ -176,6 +176,15 @@ func toStored(gen []smartplaylist.GeneratedPlaylist, nowNS int64) ([]manifest.St
 		if err != nil {
 			return nil, err
 		}
+		// Serialize the energy envelope only when non-empty; an absent blob
+		// tells the wire handler (and iOS) to fall back to the seeded
+		// waveform rather than render a degenerate flat halo.
+		var energyJSON []byte
+		if len(g.Energy) > 0 {
+			if energyJSON, err = json.Marshal(g.Energy); err != nil {
+				return nil, err
+			}
+		}
 		out = append(out, manifest.StoredSmartPlaylist{
 			Slug:        g.Slug,
 			Kind:        string(g.Kind),
@@ -184,6 +193,8 @@ func toStored(gen []smartplaylist.GeneratedPlaylist, nowNS int64) ([]manifest.St
 			Position:    i,
 			RefreshedAt: nowNS,
 			ItemsJSON:   blob,
+			EnergyJSON:  energyJSON,
+			ModalRateHz: g.ModalRateHz,
 		})
 	}
 	return out, nil
@@ -219,6 +230,7 @@ func toFeature(r manifest.TrackFeatureRow) smartplaylist.TrackFeature {
 	f := smartplaylist.TrackFeature{
 		Path: r.Path, Title: r.Title, Artist: r.Artist, Album: r.Album, Genre: r.Genre,
 		KeyRoot: r.KeyRoot, KeyMode: r.KeyMode, BPM: r.BPM, ReplayGainTrackDB: r.ReplayGainTrackDB,
+		SampleRate: r.SampleRate,
 	}
 	if r.Duration != nil {
 		f.Duration = *r.Duration

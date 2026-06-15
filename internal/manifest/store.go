@@ -966,6 +966,35 @@ var migrations = []migration{
 		);
 		`,
 	},
+	{
+		version: 20,
+		name:    "smart_playlists.energy_json/modal_rate_hz (waveform-signed-cover halo data)",
+		// Per-family energy envelope (a normalized 0..1 loudness contour
+		// across member tracks) + the mix's modal sample rate, derived by the
+		// regenerator and served on GET /v1/smart-playlists so iOS renders the
+		// "waveform-signed cover" halo — a spline drawn from the mix's own
+		// audio energy, glowing in its modal-rate Hugo-2 LED color — without a
+		// second round-trip. energy_json is the JSON-encoded []float64 (read
+		// whole, replaced whole, like items_json); an absent/empty value tells
+		// the wire handler to fall back to the iOS seeded waveform.
+		// modal_rate_hz 0 = "unknown rate" (fixed family color).
+		//
+		// **Idempotency: ALTERs live in post()** with the same precise
+		// "duplicate column name"-only swallow as v16/v17.
+		sql: `-- columns added in post() for idempotency; see migration v9/v16 docblock`,
+		post: func(db *sql.DB) error {
+			for _, stmt := range []string{
+				`ALTER TABLE smart_playlists ADD COLUMN energy_json BLOB`,
+				`ALTER TABLE smart_playlists ADD COLUMN modal_rate_hz INTEGER NOT NULL DEFAULT 0`,
+			} {
+				if _, err := db.Exec(stmt); err != nil &&
+					!strings.Contains(err.Error(), "duplicate column name") {
+					return err
+				}
+			}
+			return nil
+		},
+	},
 }
 
 // NOTE (r1 review #49, dropped): a covering index on

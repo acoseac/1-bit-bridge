@@ -698,6 +698,8 @@ The bridge regenerates the families on a daily cadence into a server-side cache 
       "kind": "heavyRotation",
       "title": "Heavy Rotation",
       "subtitle": "Your most-played lately",
+      "modalRateHz": 96000,
+      "energy": [0.31, 0.62, 0.88, 0.54, 0.41],
       "refreshedAt": 1730000000000000000,
       "items": [
         { "position": 0, "path": "Diana Krall/Live/01 Romance.flac", "title": "Romance", "artist": "Diana Krall" }
@@ -710,6 +712,8 @@ The bridge regenerates the families on a daily cadence into a server-side cache 
 `slug` is the stable per-family id a client binds a homepage row to. `items` reuse the playlist-backup item shape (`position` + `path` + render-fallback `title`/`artist`); the client resolves `path` to its local library track exactly as it does for a restored backup. Top-level `refreshedAt` is the newest family's generating-run timestamp (UnixNano). Unknown future `kind` values should be tolerated (rendered generically) so older clients survive added families. `404 smart_playlists_not_supported` when the feature is off.
 
 Each family MAY carry **`imageHash`** (additive, omitted when absent) — the SHA-256 hex of an operator-uploaded custom cover, served at **`GET /v1/smart-playlist-image/{slug}`** (bearer-authed, `image/jpeg`, `404` when none). The client prefers the custom cover and falls back to its auto-generated mosaic when `imageHash` is absent; treat the hash as an opaque cache key (a re-upload changes it). The same `imageHash` field + a parallel **`GET /v1/playlist-image/{id}`** endpoint are additive on the playlist-backup DTOs (`GET /v1/playlists` summaries + `GET /v1/playlists/{id}`). Operators set/replace/remove covers via the loopback admin API (`POST`/`DELETE /api/smart-playlists/{slug}/cover` and `/api/playlists/{id}/cover`, base64-JSON body). Covers are normalized server-side to ≤600 px JPEG; a deleted playlist's cover is pruned automatically. **Additive — no `ProtocolVersion` bump.**
+
+Each family MAY also carry **`energy`** + **`modalRateHz`** (both additive, omitted when absent) — the server-derived inputs for a client's "waveform-signed cover" halo. `energy` is the mix's normalized **0…1** loudness contour: one element per member track (down-sampled to ≤48), mapped **linearly** from each track's ReplayGain across a clamped `[−24 dB, 0 dB]` window (`−12 dB → 0.5`); it is omitted when fewer than half the members are analyzed (the client renders its own seeded waveform instead). `modalRateHz` is the mix's modal sample rate (ties broken toward the **highest** rate, biasing the halo's glow color toward high-res); `0`/absent means "unknown — use a fixed family color". Both are decorative — a client that ignores them renders a plain cover. **Additive — no `ProtocolVersion` bump.**
 
 ### `POST /v1/pairing/requests` (additive, since v1.2)
 
