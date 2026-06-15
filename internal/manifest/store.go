@@ -2570,6 +2570,63 @@ func (s *Store) WipeAllTracks(ctx context.Context) error {
 	return nil
 }
 
+// WipeFilesystemTracks drops every FILESYSTEM-sourced track plus all
+// folder rows, but SPARES UPnP-routed tracks (rows whose path is
+// registered in `upnp_track_routing`). This is the correct primitive for
+// the library-root add/remove storage-form flip: changing the FS root
+// count rewrites every filesystem track's stored path form (bare
+// "Artist/…" ↔ "<basename>/Artist/…"), so those rows must be wiped and
+// re-scanned — but a UPnP-routed row carries the "<server>/…" form
+// independent of the FS root count, and its lifecycle belongs solely to
+// the upstream-ingest reconcile (the PR #370 "scanner spares routed rows"
+// invariant). `WipeAllTracks` here would CASCADE-delete the entire
+// upstream library + its cached enrichment (`tags_json` MBIDs), forcing a
+// full re-ingest + re-enrich of every routed track — a severe,
+// user-surprising side effect when a hybrid library (local roots + a
+// Chord/MinimServer/… upstream) merely toggles its FS root count.
+//
+// Folder rows are filesystem-only (UPnP ingest never writes the `folders`
+// table) AND their paths flip form with the root count, so ALL folder
+// rows are wiped — the rescan rebuilds them. Spared UPnP tracks never
+// carry variant or waveform sidecars (they're remote — there is no local
+// file for the sox upscale/analysis pipelines to read), so listing every
+// sidecar for removal can't orphan a spared row's cache. Same writer-lock
+// + transaction + sidecar-cleanup contract as `WipeAllTracks`.
+func (s *Store) WipeFilesystemTracks(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// UPnP-routed tracks can't be transcoded/analyzed, so every cached
+	// sidecar belongs to a filesystem track being wiped here. Refuse a
+	// truncated enumeration for the same reason WipeAllTracks does.
+	doomedSidecars, err := s.listAllSidecars(ctx)
+	if err != nil {
+		return err
+	}
+	doomedSidecars = append(doomedSidecars, s.listWaveformSidecars(ctx, "1=1")...)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	// The NOT IN sub-select is keyed on the `upnp_track_routing` PRIMARY
+	// KEY (`source_path`), so the anti-join is index-backed even on a
+	// 15k-row upstream.
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM tracks
+		 WHERE path NOT IN (SELECT source_path FROM upnp_track_routing)
+	`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM folders`); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	removeSidecarFiles(doomedSidecars)
+	return nil
+}
+
 // likeEscape prepares a literal string for LIKE pattern matching. Escapes
 // "%", "_", and "\" with a leading backslash. Caller must use
 // `ESCAPE '\'` in the SQL.
@@ -3506,12 +3563,41 @@ type ChildTrack struct {
 	IsOptimized   bool
 }
 
+// topLevelFSFolderSource is the row-source for the empty-parent ("library
+// root") browse: the DISTINCT first path segment of every FILESYSTEM
+// track, exposed as column `path` so it drops into childFolderRollupSelect's
+// `f.path` correlated rollups unchanged (and into `SELECT COUNT(*) FROM …`
+// for the count path).
+//
+// Derived from `tracks` rather than the `folders` table because that table
+// has two blind spots at the root level: (1) in MULTI-ROOT mode the scanner
+// records each root's contents under "<basename>/…" but never inserts a
+// bare "<basename>" folder row, so the old `WHERE instr(path,'/')=0` match
+// found nothing and the inspector root rendered empty; (2) UPnP-upstream
+// ingest never writes the folders table at all. Deriving from track paths
+// fixes (1) — single-root album folders and multi-root basenames both fall
+// out as the first segment. The `NOT IN (upnp_track_routing)` anti-join
+// (keyed on that table's PRIMARY KEY, so it's index-backed) deliberately
+// keeps (2) hidden: UPnP-routed tracks are remote and can't be
+// upscaled/optimized, so the inspector — a variant-generation surface —
+// intentionally lists only filesystem roots. `instr(path,'/')>0` skips
+// loose root-level files, which surface via the empty-parent
+// ListChildTracks* path instead.
+const topLevelFSFolderSource = `(
+		SELECT DISTINCT substr(t.path, 1, instr(t.path, '/') - 1) AS path
+		  FROM tracks t
+		 WHERE instr(t.path, '/') > 0
+		   AND t.path NOT IN (SELECT source_path FROM upnp_track_routing)
+	) f`
+
 // ListChildFolders returns the immediate-child folders of `parent`,
 // each carrying rollup counters for its subtree (tracks + upscaled
 // variants). `parent` is the library-relative folder path — no
 // leading slash, no trailing slash. Empty string means "the library
-// root" and returns folders whose path contains no slash (matches
-// both single-root album folders and multi-root basename folders).
+// root" and returns the filesystem roots (multi-root basenames or
+// single-root album folders), derived from track paths via
+// topLevelFSFolderSource so multi-root + UPnP-hybrid libraries render
+// correctly.
 //
 // The rollup is computed via correlated subqueries against `tracks`
 // and `track_variants`. Loopback admin-only callers; no rate limit
@@ -3530,10 +3616,7 @@ func (s *Store) ListChildFolders(ctx context.Context, parent string) ([]ChildFol
 		// per-kind variant_id LIKE split + the range-comparison
 		// rationale.
 		rows, err = s.db.QueryContext(ctx, childFolderRollupSelect+`
-			  FROM folders f
-			 WHERE instr(f.path, '/') = 0
-			   AND f.path != ''
-			   AND f.path != '.'
+			  FROM `+topLevelFSFolderSource+`
 			 ORDER BY f.path ASC
 		`)
 	} else {
@@ -3547,6 +3630,7 @@ func (s *Store) ListChildFolders(ctx context.Context, parent string) ([]ChildFol
 			  FROM folders f
 			 WHERE f.path LIKE ? ESCAPE '\'
 			   AND instr(substr(f.path, length(?) + 2), '/') = 0
+			   AND f.path NOT LIKE '%/.'
 			 ORDER BY f.path ASC
 		`, likePat, parent)
 	}
@@ -3677,11 +3761,8 @@ func (s *Store) ListChildFoldersPage(ctx context.Context, parent, after string, 
 	)
 	if parent == "" {
 		rows, err = s.db.QueryContext(ctx, childFolderRollupSelect+`
-			  FROM folders f
-			 WHERE instr(f.path, '/') = 0
-			   AND f.path != ''
-			   AND f.path != '.'
-			   AND f.path > ?
+			  FROM `+topLevelFSFolderSource+`
+			 WHERE f.path > ?
 			 ORDER BY f.path ASC
 			 LIMIT ?
 		`, after, limit)
@@ -3691,6 +3772,7 @@ func (s *Store) ListChildFoldersPage(ctx context.Context, parent, after string, 
 			  FROM folders f
 			 WHERE f.path LIKE ? ESCAPE '\'
 			   AND instr(substr(f.path, length(?) + 2), '/') = 0
+			   AND f.path NOT LIKE '%/.'
 			   AND f.path > ?
 			 ORDER BY f.path ASC
 			 LIMIT ?
@@ -3797,9 +3879,11 @@ func (s *Store) CountChildFolders(ctx context.Context, parent string) (int, erro
 	var n int
 	var err error
 	if parent == "" {
+		// Top-level FS roots, derived from track paths (see
+		// topLevelFSFolderSource) so multi-root + UPnP-hybrid libraries
+		// count correctly. COUNT(*) over the DISTINCT-segment subquery.
 		err = s.db.QueryRowContext(ctx, `
-			SELECT COUNT(*) FROM folders
-			 WHERE instr(path, '/') = 0 AND path != '' AND path != '.'
+			SELECT COUNT(*) FROM `+topLevelFSFolderSource+`
 		`).Scan(&n)
 	} else {
 		likePat := likeEscape(parent) + `/%`
@@ -3807,6 +3891,7 @@ func (s *Store) CountChildFolders(ctx context.Context, parent string) (int, erro
 			SELECT COUNT(*) FROM folders
 			 WHERE path LIKE ? ESCAPE '\'
 			   AND instr(substr(path, length(?) + 2), '/') = 0
+			   AND path NOT LIKE '%/.'
 		`, likePat, parent).Scan(&n)
 	}
 	if err != nil {

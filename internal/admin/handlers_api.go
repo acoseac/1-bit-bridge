@@ -509,8 +509,12 @@ func (s *Server) apiRootsAdd(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Apply: a single↔multi transition changes the stored path form
-	// (bare "Artist/…" vs "<basename>/Artist/…"), so the manifest has
-	// to be wiped and re-populated from a fresh scan.
+	// (bare "Artist/…" vs "<basename>/Artist/…"), so filesystem tracks
+	// have to be wiped and re-populated from a fresh scan.
+	// WipeFilesystemTracks SPARES UPnP-routed rows — their "<server>/…"
+	// form is independent of the FS root count, and a bare WipeAllTracks
+	// here would CASCADE-destroy the entire upstream library + its cached
+	// enrichment, forcing a full re-ingest.
 	//
 	// Commit order matches apiRootsRemove: run the destructive
 	// manifest op FIRST, persist the root list only after it succeeds.
@@ -523,7 +527,7 @@ func (s *Server) apiRootsAdd(w http.ResponseWriter, r *http.Request) {
 	// every failure window lands in a state the scanner can heal.
 	willTransition := len(current) == 1 // 1 → N: storage form flips
 	if willTransition {
-		if err := s.deps.Manifest.WipeAllTracks(r.Context()); err != nil {
+		if err := s.deps.Manifest.WipeFilesystemTracks(r.Context()); err != nil {
 			writeError(w, http.StatusInternalServerError, "wipe-tracks", err.Error())
 			return
 		}
@@ -536,9 +540,10 @@ func (s *Server) apiRootsAdd(w http.ResponseWriter, r *http.Request) {
 	next.LibraryRoots = newList
 	if err := next.Save(s.deps.CfgPath); err != nil {
 		// Compensating scan: if we reached here via the transition
-		// branch, WipeAllTracks has already emptied the manifest but
-		// the config was never persisted — /v1/manifest will serve
-		// zero tracks until the next scheduled/manual scan. Kick off
+		// branch, WipeFilesystemTracks has already cleared the
+		// filesystem rows (UPnP-routed rows were spared) but the config
+		// was never persisted — /v1/manifest will serve only the
+		// upstream tracks until the next scheduled/manual scan. Kick off
 		// a best-effort scan against the RESTORED (previous) roots
 		// so the outage is bounded by one scan-duration rather than
 		// one scan-interval. The 500 the user sees is the real
@@ -589,7 +594,9 @@ func (s *Server) apiRootsRemove(w http.ResponseWriter, r *http.Request) {
 
 	// Drop tracks under the removed root so /v1/manifest stops advertising
 	// paths that will never resolve. If the removal takes us back to
-	// single-root, wipe instead (storage form flips again).
+	// single-root, the storage form flips again so EVERY filesystem row
+	// must be re-derived — use WipeFilesystemTracks (which spares
+	// UPnP-routed rows) rather than a prefix delete.
 	willCollapse := len(newList) == 1
 	removedBasename := filepath.Base(current[idx])
 
@@ -603,7 +610,7 @@ func (s *Server) apiRootsRemove(w http.ResponseWriter, r *http.Request) {
 	// successful wipe means the next scan simply re-populates — every
 	// failure window lands in a state the scanner can heal.
 	if willCollapse {
-		if err := s.deps.Manifest.WipeAllTracks(r.Context()); err != nil {
+		if err := s.deps.Manifest.WipeFilesystemTracks(r.Context()); err != nil {
 			writeError(w, http.StatusInternalServerError, "wipe-tracks", err.Error())
 			return
 		}

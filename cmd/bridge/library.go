@@ -159,7 +159,10 @@ func libraryRemoveCmd(ctx context.Context, args []string, stdout, stderr io.Writ
 	defer store.Close()
 
 	if willCollapse {
-		if err := store.WipeAllTracks(ctx); err != nil {
+		// Spare UPnP-routed rows: only filesystem tracks change path
+		// form on the multi→single flip; the upstream library's
+		// lifecycle belongs to the ingest reconcile, not this wipe.
+		if err := store.WipeFilesystemTracks(ctx); err != nil {
 			fmt.Fprintf(stderr, "library remove: wipe manifest: %v\n", err)
 			return 1
 		}
@@ -283,15 +286,16 @@ func tryLibraryViaAdmin(ctx context.Context, cfg *config.Config, method, path st
 	return true, 0
 }
 
-// wipeManifest opens the manifest store, wipes it, and closes.
-// Used by the offline library-add path on a 1→N transition.
+// wipeManifest opens the manifest store, wipes the filesystem tracks
+// (sparing UPnP-routed rows), and closes. Used by the offline library-add
+// path on a 1→N transition, where only filesystem rows change path form.
 func wipeManifest(ctx context.Context, cfg *config.Config) error {
 	store, err := openManifestStore(cfg)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
-	return store.WipeAllTracks(ctx)
+	return store.WipeFilesystemTracks(ctx)
 }
 
 // openManifestStore resolves the manifest DB path the same way
