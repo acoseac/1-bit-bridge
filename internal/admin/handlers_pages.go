@@ -36,12 +36,28 @@ var tmplFuncs = template.FuncMap{
 // the operator bookmarked the URL directly.
 type pageData struct {
 	ActiveTab       string
+	ActiveSection   string
 	LibraryName     string
 	Fingerprint     string
 	ServerVersion   string
 	ProtocolVersion int
 	IsPublic        bool
 	Data            any
+}
+
+// sectionForTab maps a page's ActiveTab to its top-level nav SECTION so the
+// header highlights the parent entry while the in-page sub-tab bar tracks the
+// specific page. Library groups Browse / Inspector / Jobs; Listening groups
+// Playlists & history / Smart mixes. Standalone pages are their own section.
+func sectionForTab(tab string) string {
+	switch tab {
+	case "library", "library_inspector", "jobs":
+		return "library"
+	case "data", "smartmixes":
+		return "listening"
+	default:
+		return tab
+	}
 }
 
 func (s *Server) renderPage(w http.ResponseWriter, active string, data any) {
@@ -55,6 +71,7 @@ func (s *Server) renderPage(w http.ResponseWriter, active string, data any) {
 	w.Header().Set("Cache-Control", "no-store")
 	envelope := pageData{
 		ActiveTab:       active,
+		ActiveSection:   sectionForTab(active),
 		LibraryName:     cfg.LibraryName,
 		Fingerprint:     s.deps.Fingerprint,
 		ServerVersion:   version.ServerVersion,

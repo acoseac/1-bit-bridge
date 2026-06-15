@@ -59,7 +59,7 @@
               aria-selected="false">Updates</button>
       <button id="settings-tab-audio" type="button" class="tab-btn" role="tab"
               data-tab="audio" aria-controls="settings-panel-audio"
-              aria-selected="false">Audio quality</button>
+              aria-selected="false">Audio</button>
       <button id="settings-tab-backups" type="button" class="tab-btn" role="tab"
               data-tab="backups" aria-controls="settings-panel-backups"
               aria-selected="false">Backups</button>
@@ -438,9 +438,19 @@
           <code>/v1/health</code> and serves <code>GET /v1/smart-playlists</code>.
           A daily regenerator rebuilds the mixes — see the
           <a href="/smartmixes">Smart mixes</a> page to inspect them and regenerate
-          on demand. Listening families need playback history; Auto&nbsp;Mix needs
-          audio analysis (above).
+          on demand. History-based families (Heavy&nbsp;Rotation, Forgotten
+          Favorites) need only playback history; the harmonic
+          <strong>Auto&nbsp;Mix</strong> needs <strong>Audio analysis</strong>
+          (above), which decodes through <code>sox(1)</code>.
         </small>
+        {{if .Data.UpscaleSoxMissing}}
+          <p class="warn-banner">
+            <strong>sox is not on PATH.</strong> Smart mixes generate without
+            it, but the harmonic Auto&nbsp;Mix stays empty until both Audio
+            analysis is enabled and sox is installed on the bridge host:
+          </p>
+          <pre class="install-hint">{{.Data.UpscaleSoxInstallHint}}</pre>
+        {{end}}
       </div>
     </div>
 
