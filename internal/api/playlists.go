@@ -67,6 +67,10 @@ type playlistDTO struct {
 	Name           string            `json:"name"`
 	LastModifiedAt int64             `json:"lastModifiedAt"` // UnixNano UTC (LWW guard key)
 	Items          []playlistItemDTO `json:"items"`
+	// ImageHash — SHA-256 hex of the operator-uploaded custom cover (scope
+	// 'playlist', key = id), served at GET /v1/playlist-image/{id}. Omitted
+	// when none (iOS uses the auto-mosaic). Additive (no ProtocolVersion bump).
+	ImageHash string `json:"imageHash,omitempty"`
 }
 
 type playlistSummaryDTO struct {
@@ -74,6 +78,7 @@ type playlistSummaryDTO struct {
 	Name           string `json:"name"`
 	TrackCount     int    `json:"trackCount"`
 	LastModifiedAt int64  `json:"lastModifiedAt"`
+	ImageHash      string `json:"imageHash,omitempty"`
 }
 
 type playlistsListResponse struct {
@@ -147,10 +152,12 @@ func (s *Server) listPlaylists(w http.ResponseWriter, r *http.Request) {
 			"failed to list playlists", err)
 		return
 	}
+	covers := s.coverHashesForScope(r.Context(), manifest.CoverScopePlaylist)
 	resp := playlistsListResponse{Playlists: make([]playlistSummaryDTO, 0, len(rows))}
 	for _, p := range rows {
 		resp.Playlists = append(resp.Playlists, playlistSummaryDTO{
 			ID: p.ID, Name: p.Name, TrackCount: p.TrackCount, LastModifiedAt: p.LastModifiedAt,
+			ImageHash: covers[p.ID],
 		})
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -177,7 +184,9 @@ func (s *Server) getPlaylist(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "no such playlist")
 		return
 	}
-	writeJSON(w, http.StatusOK, toPlaylistDTO(p, items))
+	dto := toPlaylistDTO(p, items)
+	dto.ImageHash = s.coverHashesForScope(r.Context(), manifest.CoverScopePlaylist)[id]
+	writeJSON(w, http.StatusOK, dto)
 }
 
 // putPlaylist handles PUT /v1/playlists/{id} — upsert with the backup-
@@ -304,5 +313,8 @@ func (s *Server) deletePlaylist(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "no such playlist")
 		return
 	}
+	// Orphan cleanup: drop any custom cover for this playlist so its JPEG
+	// doesn't linger on disk after the playlist is gone (best-effort).
+	s.pruneCover(r.Context(), manifest.CoverScopePlaylist, id)
 	writeJSON(w, http.StatusOK, playlistDeletedResponse{ID: id, Deleted: true})
 }

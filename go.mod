@@ -14,6 +14,7 @@ require (
 	github.com/quic-go/quic-go v0.59.1
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	golang.org/x/crypto v0.52.0
+	golang.org/x/image v0.27.0
 	golang.org/x/mod v0.35.0
 	golang.org/x/net v0.55.0
 	golang.org/x/sync v0.20.0

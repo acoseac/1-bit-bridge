@@ -5156,26 +5156,78 @@ async function loadHistoryEvents(reset) {
   }
 }
 
-// Smart mixes page: wire the "Regenerate now" button to the loopback
-// admin endpoint, then reload so the freshly-generated families render.
+// Read a File as a base64 data URL (data:<mime>;base64,...). The bridge's
+// cover-upload handler strips the data: prefix.
+function readFileAsDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error("could not read file"));
+    reader.readAsDataURL(file);
+  });
+}
+
+// Smart mixes page: wire the "Regenerate now" button + per-family custom-cover
+// upload/remove controls, reloading so the freshly-rendered state shows.
 function initSmartMixes() {
   const btn = document.getElementById("smartmix-regen");
-  if (!btn) return;
-  const status = document.getElementById("smartmix-regen-status");
-  btn.addEventListener("click", async () => {
-    btn.disabled = true;
-    const old = btn.textContent;
-    btn.textContent = "Regenerating…";
-    if (status) status.textContent = "";
-    try {
-      const r = await API.post("/api/smart-playlists/regenerate");
-      const n = r && r.families != null ? r.families : "?";
-      btn.textContent = `Generated ${n} — reloading…`;
-      setTimeout(() => location.reload(), 700);
-    } catch (e) {
-      btn.disabled = false;
-      btn.textContent = old;
-      if (status) status.textContent = e && e.message ? e.message : "Regeneration failed.";
+  if (btn) {
+    const status = document.getElementById("smartmix-regen-status");
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      const old = btn.textContent;
+      btn.textContent = "Regenerating…";
+      if (status) status.textContent = "";
+      try {
+        const r = await API.post("/api/smart-playlists/regenerate");
+        const n = r && r.families != null ? r.families : "?";
+        btn.textContent = `Generated ${n} — reloading…`;
+        setTimeout(() => location.reload(), 700);
+      } catch (e) {
+        btn.disabled = false;
+        btn.textContent = old;
+        if (status) status.textContent = e && e.message ? e.message : "Regeneration failed.";
+      }
+    });
+  }
+
+  document.querySelectorAll(".smartmix-cover-control").forEach((ctrl) => {
+    const slug = ctrl.dataset.slug;
+    const status = ctrl.querySelector(".smartmix-cover-status");
+    const setStatus = (t) => { if (status) status.textContent = t; };
+    const base = `/api/smart-playlists/${encodeURIComponent(slug)}/cover`;
+
+    const input = ctrl.querySelector(".smartmix-cover-input");
+    if (input) {
+      input.addEventListener("change", async () => {
+        const file = input.files && input.files[0];
+        if (!file) return;
+        setStatus("Uploading…");
+        try {
+          const dataURL = await readFileAsDataURL(file);
+          await API.post(base, { image: dataURL });
+          setStatus("Saved — reloading…");
+          setTimeout(() => location.reload(), 600);
+        } catch (e) {
+          setStatus(e && e.message ? e.message : "Upload failed.");
+        } finally {
+          input.value = "";
+        }
+      });
+    }
+
+    const remove = ctrl.querySelector(".smartmix-cover-remove");
+    if (remove) {
+      remove.addEventListener("click", async () => {
+        setStatus("Removing…");
+        try {
+          await API.delete(base);
+          setStatus("Removed — reloading…");
+          setTimeout(() => location.reload(), 600);
+        } catch (e) {
+          setStatus(e && e.message ? e.message : "Remove failed.");
+        }
+      });
     }
   });
 }

@@ -34,6 +34,8 @@ func TestRouteRegistry_completeness(t *testing.T) {
 		"GET /v1/manifest",
 		"GET /v1/artwork/{mbid}",
 		"GET /v1/artist-image/{mbid}",
+		"GET /v1/smart-playlist-image/{slug}",
+		"GET /v1/playlist-image/{id}",
 		"GET /v1/waveform",
 		"GET /v1/analysis/stats",
 		"POST /v1/upscale",
