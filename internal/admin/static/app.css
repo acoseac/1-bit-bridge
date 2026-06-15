@@ -1190,7 +1190,14 @@ dialog h2 { font-size: 18px; color: var(--accent); }
  * `<h2 class="section-head">` visible — the long-scroll fallback
  * Qodo on PR #129 asked for, so a JS regression can't lock
  * operators out of any Settings section. */
-.settings.tabs-enabled .tab-nav ~ .tab-pane > .section-head {
+/* Hide only the FIRST section-head per pane — it's redundant with the tab
+ * button's label. Subsequent section-heads are genuine sub-sections within
+ * a pane (the "Audio" tab houses Audio quality + Audio analysis + Smart
+ * mixes) and MUST stay visible, or those sections run together with no
+ * separation (Gemini on PR #405). `:first-of-type` keys on the <h2> type;
+ * every pane opens with its section-head as the first h2, so single-section
+ * panes still hide their one heading exactly as before. */
+.settings.tabs-enabled .tab-nav ~ .tab-pane > .section-head:first-of-type {
   position: absolute;
   width: 1px;
   height: 1px;
