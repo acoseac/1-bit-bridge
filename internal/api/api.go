@@ -166,6 +166,12 @@ type Server struct {
 	// feature-off shape as playlistStore. *manifest.Store satisfies it.
 	historyStore HistoryStore
 
+	// smartPlaylistStore backs GET /v1/smart-playlists + the "smartPlaylists"
+	// health-feature flag. Nil unless WithSmartPlaylistStore is wired (gated
+	// on cfg.SmartPlaylists.Enabled). Same feature-off shape as the others;
+	// read-only on the request path. *manifest.Store satisfies it.
+	smartPlaylistStore SmartPlaylistStore
+
 	// tailscaleStatus is the embedded-tsnet status provider used by
 	// `reachableEndpoints` to advertise the bridge's `*.ts.net` URL +
 	// tailnet IPs in tsnet mode. Nil unless `WithTailscaleStatus` or
@@ -1276,13 +1282,13 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	//     of whether the transcode pool exists.
 	//
 	// Alpha-sort stays correct by construction: each conditional
-	// appends in lex order. Capacity 17 covers the current maximum
+	// appends in lex order. Capacity 18 covers the current maximum
 	// (carPlayOptimize + deleteVariants + diagnosticsSummary + dlnaServer +
 	// keyTempo + loudness + operatorDrivenUpscale + pairingEventsSupported +
 	// playbackHistory + playbackHistoryRead + playlistBackup +
 	// playlistsCrossDevice + pushEventsSupported + rendererDiscovery +
-	// upscaleCompleteEvents + variantBumpsIndex + waveform).
-	feats := make([]string, 0, 17)
+	// smartPlaylists + upscaleCompleteEvents + variantBumpsIndex + waveform).
+	feats := make([]string, 0, 18)
 	if s.upscaleEnabled {
 		if s.carPlayOptimizeEnabled {
 			feats = append(feats, "carPlayOptimize")
@@ -1363,6 +1369,13 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// `upscaleCompleteEvents` (p < r < u).
 	if s.dlnaEnabled && s.rendererDiscovery != nil {
 		feats = append(feats, "rendererDiscovery")
+	}
+	// `smartPlaylists` advertises GET /v1/smart-playlists (server-generated
+	// dynamic feeds). Gated on the store being wired (cfg.SmartPlaylists
+	// .Enabled). Alpha-sorted between rendererDiscovery and
+	// upscaleCompleteEvents (r < s < u).
+	if s.smartPlaylistStore != nil {
+		feats = append(feats, "smartPlaylists")
 	}
 	if s.upscaleEnabled {
 		feats = append(feats, "upscaleCompleteEvents")

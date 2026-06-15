@@ -909,6 +909,40 @@ var migrations = []migration{
 			return nil
 		},
 	},
+	{
+		version: 18,
+		name:    "smart_playlists (generated dynamic-feed cache)",
+		// Precomputed cache of server-generated smart/dynamic playlists
+		// (Heavy Rotation, Auto Mix, Forgotten Favorites, …), rebuilt by
+		// the daily runSmartPlaylistRegenerator and served verbatim by
+		// GET /v1/smart-playlists. **DISTINCT from the `playlists` table**:
+		// that one is the LWW user-backup store (device-authored,
+		// restore-on-reinstall, last-write-wins guard); this one is
+		// ephemeral, derived, and REPLACED WHOLESALE each regeneration —
+		// never device-authored, no LWW. Keeping them separate avoids
+		// polluting the backup store with generated feeds.
+		//
+		// `slug` is the stable per-family id the homepage binds rows to.
+		// `items_json` is the ordered item list — or, for the time-of-day
+		// family, the per-UTC-hour pools the handler shifts to the
+		// device's local hour — as a JSON blob: read whole, replaced
+		// whole, never queried by item, so a blob (not a child table) is
+		// the right shape (same rationale as tags_json). The table holds
+		// only a handful of families so no index is needed.
+		//
+		// Append-only / idempotent per the ladder contract.
+		sql: `
+		CREATE TABLE IF NOT EXISTS smart_playlists (
+			slug         TEXT    PRIMARY KEY,
+			kind         TEXT    NOT NULL,
+			title        TEXT    NOT NULL,
+			subtitle     TEXT    NOT NULL DEFAULT '',
+			position     INTEGER NOT NULL DEFAULT 0,
+			refreshed_at INTEGER NOT NULL,
+			items_json   BLOB    NOT NULL
+		);
+		`,
+	},
 }
 
 // NOTE (r1 review #49, dropped): a covering index on
