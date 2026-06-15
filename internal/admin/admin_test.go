@@ -1215,7 +1215,7 @@ func TestPageSmartMixes(t *testing.T) {
 		t.Error("feature-off /smartmixes MUST surface the disabled panel")
 	}
 
-	// Enable + seed two families (one flat, one time-of-day).
+	// Enable + seed families (flat, time-of-day, and a never-refreshed one).
 	cfg.SmartPlaylists.Enabled = true
 	srv.deps.CfgHolder.Store(cfg)
 	flat := []byte(`[{"position":0,"path":"/Abdullah/Water/01.flac","title":"Song For Sathima","artist":"Abdullah Ibrahim"}]`)
@@ -1223,6 +1223,9 @@ func TestPageSmartMixes(t *testing.T) {
 	if err := srv.deps.Manifest.ReplaceSmartPlaylists(context.Background(), []manifest.StoredSmartPlaylist{
 		{Slug: "heavy-rotation", Kind: "heavyRotation", Title: "Heavy Rotation", Subtitle: "most played this fortnight", Position: 0, RefreshedAt: time.Now().UnixNano(), ItemsJSON: flat},
 		{Slug: "time-of-day", Kind: "timeOfDay", Title: "Morning Commute", Position: 1, RefreshedAt: time.Now().UnixNano(), ItemsJSON: hourly},
+		// RefreshedAt == 0 must render "not yet refreshed", NOT a 1970-epoch
+		// relative time (Gemini MEDIUM on PR #401).
+		{Slug: "never-run", Kind: "recentlyPlayed", Title: "Never Run", Position: 2, RefreshedAt: 0, ItemsJSON: []byte(`[{"position":0,"path":"/y/z.flac","title":"Z"}]`)},
 	}); err != nil {
 		t.Fatalf("seed smart playlists: %v", err)
 	}
@@ -1236,7 +1239,7 @@ func TestPageSmartMixes(t *testing.T) {
 	if strings.Contains(body, "smartmix-disabled-panel") {
 		t.Error("enabled /smartmixes MUST NOT show the disabled panel")
 	}
-	for _, want := range []string{"Heavy Rotation", "Song For Sathima", "smartmix-regen", "Morning Commute", "Morning Drive"} {
+	for _, want := range []string{"Heavy Rotation", "Song For Sathima", "smartmix-regen", "Morning Commute", "Morning Drive", "Never Run", "not yet refreshed"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("/smartmixes body missing %q", want)
 		}

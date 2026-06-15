@@ -36,7 +36,7 @@
       <div class="smartmix-family-head">
         <h3>{{.Title}}</h3>
         <span class="badge">{{.Kind}}</span>
-        <span class="muted">{{.ItemCount}} tracks · refreshed {{timeAgo .RefreshedAt}}</span>
+        <span class="muted">{{.ItemCount}} tracks · {{if .RefreshedAt.IsZero}}not yet refreshed{{else}}refreshed {{timeAgo .RefreshedAt}}{{end}}</span>
       </div>
       {{if .Subtitle}}<p class="muted smartmix-subtitle">{{.Subtitle}}</p>{{end}}
       <ol class="smartmix-tracks">

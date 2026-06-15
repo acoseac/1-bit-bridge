@@ -126,12 +126,20 @@ func (s *Server) pageSmartMixes(w http.ResponseWriter, r *http.Request) {
 	} else {
 		fams = make([]smartMixFamilyView, 0, len(rows))
 		for _, row := range rows {
+			// Leave RefreshedAt as the zero Time when never refreshed
+			// (RefreshedAt == 0) so the template renders "not yet refreshed"
+			// rather than "55 years ago" — time.Unix(0, 0) is the 1970 epoch
+			// (Gemini MEDIUM on PR #401).
+			var refreshed time.Time
+			if row.RefreshedAt > 0 {
+				refreshed = time.Unix(0, row.RefreshedAt)
+			}
 			fams = append(fams, smartMixFamilyView{
 				Slug:        row.Slug,
 				Kind:        row.Kind,
 				Title:       row.Title,
 				Subtitle:    row.Subtitle,
-				RefreshedAt: time.Unix(0, row.RefreshedAt),
+				RefreshedAt: refreshed,
 				ItemCount:   smartPlaylistItemCount(row),
 				Tracks:      smartMixTracksForView(row),
 			})
