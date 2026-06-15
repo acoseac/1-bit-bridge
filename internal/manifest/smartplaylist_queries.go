@@ -452,12 +452,12 @@ func placeholders(n int) string {
 }
 
 // clampLimit applies a default (when limit <= 0) and a hard ceiling.
-func clampLimit(limit, def, max int) int {
+func clampLimit(limit, def, ceiling int) int {
 	if limit <= 0 {
 		return def
 	}
-	if limit > max {
-		return max
+	if limit > ceiling {
+		return ceiling
 	}
 	return limit
 }

@@ -94,7 +94,10 @@ func TestSmartPlaylistCacheRoundTrip(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("ReplaceSmartPlaylists (replace): %v", err)
 	}
-	got, _ = s.LoadSmartPlaylists(ctx)
+	got, err = s.LoadSmartPlaylists(ctx)
+	if err != nil {
+		t.Fatalf("LoadSmartPlaylists: %v", err)
+	}
 	if len(got) != 1 || got[0].Slug != "recently-played" {
 		t.Fatalf("wholesale replace failed: %+v", got)
 	}
@@ -103,7 +106,10 @@ func TestSmartPlaylistCacheRoundTrip(t *testing.T) {
 	if err := s.ReplaceSmartPlaylists(ctx, nil); err != nil {
 		t.Fatalf("ReplaceSmartPlaylists (clear): %v", err)
 	}
-	got, _ = s.LoadSmartPlaylists(ctx)
+	got, err = s.LoadSmartPlaylists(ctx)
+	if err != nil {
+		t.Fatalf("LoadSmartPlaylists: %v", err)
+	}
 	if len(got) != 0 {
 		t.Fatalf("empty replace should clear cache, got %d rows", len(got))
 	}
@@ -144,7 +150,10 @@ func TestPlayStats_30sRuleAndWindow(t *testing.T) {
 	}
 
 	// 30-day window: both, /a.flac first (3 > 1).
-	rows, _ = s.PlayStatsInWindow(ctx, now-30*day, 0, 30.0, 50)
+	rows, err = s.PlayStatsInWindow(ctx, now-30*day, 0, 30.0, 50)
+	if err != nil {
+		t.Fatalf("PlayStatsInWindow (30d): %v", err)
+	}
 	if len(rows) != 2 || rows[0].Path != "/a.flac" || rows[1].Path != "/b.flac" {
 		t.Fatalf("30d window ordering: %+v", rows)
 	}
@@ -243,7 +252,10 @@ func TestPlayCountsByHourPath(t *testing.T) {
 	}
 
 	// CarPlay-only: /b.flac (BuiltInSpeakers) excluded.
-	car, _ := s.PlayCountsByHourPath(ctx, 0, 30.0, []string{"CarPlay"})
+	car, err := s.PlayCountsByHourPath(ctx, 0, 30.0, []string{"CarPlay"})
+	if err != nil {
+		t.Fatalf("PlayCountsByHourPath (CarPlay): %v", err)
+	}
 	for _, r := range car {
 		if r.Path == "/b.flac" {
 			t.Errorf("CarPlay filter leaked BuiltInSpeakers track: %+v", r)
@@ -361,7 +373,10 @@ func TestAnalyzedTrackFeatures_PoolAndGenreFilter(t *testing.T) {
 		t.Fatalf("pool should exclude key-less rows: want 2, got %d (%+v)", len(all), all)
 	}
 
-	jazz, _ := s.AnalyzedTrackFeatures(ctx, "Jazz", 100)
+	jazz, err := s.AnalyzedTrackFeatures(ctx, "Jazz", 100)
+	if err != nil {
+		t.Fatalf("AnalyzedTrackFeatures (Jazz): %v", err)
+	}
 	if len(jazz) != 1 || jazz[0].Path != "/jazz1.flac" {
 		t.Fatalf("genre filter: want [/jazz1.flac], got %+v", jazz)
 	}

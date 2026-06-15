@@ -138,7 +138,7 @@ const timeOfDayKind = "timeOfDay"
 
 // resolveTimeOfDayItems unions the hour pools in [utcHour-window, utcHour+window]
 // (mod 24), center first then outward, deduping by path and capping at max.
-func resolveTimeOfDayItems(hourly map[int][]manifest.SmartPlaylistItem, utcHour, window, max int) []smartPlaylistItemDTO {
+func resolveTimeOfDayItems(hourly map[int][]manifest.SmartPlaylistItem, utcHour, window, maxItems int) []smartPlaylistItemDTO {
 	if len(hourly) == 0 {
 		return nil
 	}
@@ -158,7 +158,7 @@ func resolveTimeOfDayItems(hourly map[int][]manifest.SmartPlaylistItem, utcHour,
 			out = append(out, smartPlaylistItemDTO{
 				Position: len(out), Path: it.Path, Title: it.Title, Artist: it.Artist,
 			})
-			if len(out) >= max {
+			if len(out) >= maxItems {
 				return out
 			}
 		}

@@ -799,6 +799,7 @@ All errors are JSON:
 |    404 | `unknown_request`        | Pairing request ID unknown / cleaned up           |
 |    404 | `pairing_not_supported`  | Bridge build doesn't expose tap-to-pair           |
 |    404 | `events_not_supported`   | Bridge build doesn't expose `/v1/events` (pre-v1.2; iOS falls back to polling) |
+|    404 | `smart_playlists_not_supported` | `smartPlaylists.enabled` is off (or pre-v1.9 build) — no `/v1/smart-playlists` |
 |    429 | `rate_limited`           | Per-IP pairing-create rate-limit OR per-token `/v1/manifest` rate-limit tripped |
 |    500 | `internal`               | Server-side failure                               |
 |    503 | `scan_in_progress`       | Manifest requested while an initial scan is busy  |

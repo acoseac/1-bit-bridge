@@ -6,8 +6,7 @@ import (
 	"time"
 )
 
-func iptr(v int) *int         { return &v }
-func fptr(v float64) *float64 { return &v }
+func iptr(v int) *int { return &v }
 
 func feat(path, genre string, bpm, keyRoot int, mode string, dur float64) TrackFeature {
 	f := TrackFeature{Path: path, Title: "T-" + path, Artist: "A-" + path, Genre: genre, Duration: dur}

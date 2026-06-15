@@ -17,8 +17,8 @@ func pathsOf(stats []PlayStat) []string {
 }
 
 // itemsFromPaths hydrates paths into items via the feature map, dropping
-// paths that no longer resolve (a since-deleted track), capped at max.
-func itemsFromPaths(paths []string, features map[string]TrackFeature, max int) []Item {
+// paths that no longer resolve (a since-deleted track), capped at maxItems.
+func itemsFromPaths(paths []string, features map[string]TrackFeature, maxItems int) []Item {
 	var items []Item
 	for _, p := range paths {
 		f, ok := features[p]
@@ -26,18 +26,18 @@ func itemsFromPaths(paths []string, features map[string]TrackFeature, max int) [
 			continue
 		}
 		items = append(items, Item{Position: len(items), Path: p, Title: f.Title, Artist: f.Artist})
-		if len(items) >= max {
+		if len(items) >= maxItems {
 			break
 		}
 	}
 	return items
 }
 
-func itemsFromFeatures(feats []TrackFeature, max int) []Item {
+func itemsFromFeatures(feats []TrackFeature, maxItems int) []Item {
 	var items []Item
 	for _, f := range feats {
 		items = append(items, Item{Position: len(items), Path: f.Path, Title: f.Title, Artist: f.Artist})
-		if len(items) >= max {
+		if len(items) >= maxItems {
 			break
 		}
 	}

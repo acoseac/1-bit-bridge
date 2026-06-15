@@ -7,6 +7,15 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
+func mustMarshal(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return b
+}
+
 func TestParseLocalHour(t *testing.T) {
 	cases := []struct {
 		in   string
@@ -74,7 +83,7 @@ func TestResolveTimeOfDayItems_WindowUnionDedupWrap(t *testing.T) {
 
 func TestBuildSmartPlaylistDTO_FlatFamily(t *testing.T) {
 	items := []manifest.SmartPlaylistItem{{Position: 0, Path: "/a.flac", Title: "A", Artist: "X"}, {Position: 1, Path: "/b.flac"}}
-	blob, _ := json.Marshal(items)
+	blob := mustMarshal(t, items)
 	row := manifest.StoredSmartPlaylist{Slug: "heavy-rotation", Kind: "heavyRotation", Title: "Heavy Rotation", Subtitle: "sub", RefreshedAt: 99, ItemsJSON: blob}
 
 	dto, ok := buildSmartPlaylistDTO(row, 8, 0, false)
@@ -90,7 +99,7 @@ func TestBuildSmartPlaylistDTO_FlatFamily(t *testing.T) {
 }
 
 func TestBuildSmartPlaylistDTO_TimeOfDay(t *testing.T) {
-	blob, _ := json.Marshal(manifest.SmartPlaylistHourlyBlob{Hourly: map[int][]manifest.SmartPlaylistItem{
+	blob := mustMarshal(t, manifest.SmartPlaylistHourlyBlob{Hourly: map[int][]manifest.SmartPlaylistItem{
 		8: {{Path: "/a.flac", Title: "A"}},
 	}})
 	row := manifest.StoredSmartPlaylist{Slug: "time-of-day", Kind: "timeOfDay", Title: "For Right Now", RefreshedAt: 5, ItemsJSON: blob}

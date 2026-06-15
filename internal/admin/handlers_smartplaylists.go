@@ -50,7 +50,11 @@ func (s *Server) apiSmartPlaylistsRegenerate(w http.ResponseWriter, r *http.Requ
 			"smart playlists are not enabled in bridge.yaml")
 		return
 	}
-	opts := smartplaylistgen.DefaultOptions(time.Now().UnixNano(), cfg.Analysis.Enabled)
+	// Use the LIVE runtime analysis gate (matches the scheduled ticker, which
+	// passes the sox-resolved analysisActive) rather than cfg.Analysis.Enabled,
+	// which diverges when sox is missing. nil-safe for tests that omit it.
+	analysisOn := s.deps.AnalysisActive != nil && s.deps.AnalysisActive()
+	opts := smartplaylistgen.DefaultOptions(time.Now().UnixNano(), analysisOn)
 	n, err := smartplaylistgen.Regenerate(r.Context(), s.deps.Manifest, opts)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())

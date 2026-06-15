@@ -42,7 +42,7 @@ type harmonicCand struct {
 // compatible frontier is exhausted before reaching max, it makes ONE
 // nearest-BPM "reset" jump and continues. Fully deterministic given a stable
 // pool (final tie-break by path), so the daily Auto Mix doesn't reshuffle.
-func sequenceHarmonic(seed TrackFeature, pool []TrackFeature, max int) []TrackFeature {
+func sequenceHarmonic(seed TrackFeature, pool []TrackFeature, maxItems int) []TrackFeature {
 	// Keep only key-bearing tracks (others can't be harmonically sequenced).
 	var cands []harmonicCand
 	for _, f := range pool {
@@ -73,7 +73,7 @@ func sequenceHarmonic(seed TrackFeature, pool []TrackFeature, max int) []TrackFe
 	result := []TrackFeature{seed}
 	prev, prevC := seed, seedC
 
-	for len(result) < max {
+	for len(result) < maxItems {
 		bestIdx := -1
 		bestCost := math.MaxFloat64
 		for i := range cands {

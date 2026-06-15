@@ -1595,6 +1595,13 @@ func (c *Config) Validate() error {
 	if err := c.UPnPUpstream.Validate(); err != nil {
 		return err
 	}
+	// A negative regeneration cadence is always a typo — reject it loudly
+	// instead of letting EffectiveRegenerateInterval's `> 0` guard silently
+	// substitute the 24h default (same standardized handling as the
+	// upnpUpstream cadences above).
+	if c.SmartPlaylists.RegenerateIntervalSec < 0 {
+		return fmt.Errorf("smartPlaylists.regenerateIntervalSec: must be >= 0 (0 uses the default 24h), got %d", c.SmartPlaylists.RegenerateIntervalSec)
+	}
 	// Public-mode refusal for upnpUpstream. The feature relies on SSDP
 	// multicast (LAN-only by spec) AND a route to the upstream's
 	// RFC1918 byte URLs (e.g. http://192.168.0.62:8200/MediaItems/...
