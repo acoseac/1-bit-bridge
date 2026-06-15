@@ -86,3 +86,94 @@ func smartPlaylistItemCount(row manifest.StoredSmartPlaylist) int {
 	}
 	return len(items)
 }
+
+// --- /smartmixes admin page (read-only render of the cached families) ---
+
+type smartMixTrackView struct {
+	Position int
+	Title    string
+	Artist   string
+	Path     string
+}
+
+type smartMixFamilyView struct {
+	Slug        string
+	Kind        string
+	Title       string
+	Subtitle    string
+	RefreshedAt time.Time
+	ItemCount   int
+	Tracks      []smartMixTrackView
+}
+
+type smartMixPageData struct {
+	Enabled  bool
+	Families []smartMixFamilyView
+}
+
+// pageSmartMixes renders the cached smart-playlist families (slug / kind /
+// title / refreshed-at / member tracks) with a "Regenerate now" affordance.
+// Read-only: the regenerate POST + the (PR-pending) cover upload run through
+// the JSON admin API, not this page handler.
+func (s *Server) pageSmartMixes(w http.ResponseWriter, r *http.Request) {
+	cfg := s.deps.CfgHolder.Load()
+	enabled := cfg != nil && cfg.SmartPlaylists.Enabled
+
+	var fams []smartMixFamilyView
+	rows, err := s.deps.Manifest.LoadSmartPlaylists(r.Context())
+	if err != nil {
+		logger.Error("pageSmartMixes: load", "err", err)
+	} else {
+		fams = make([]smartMixFamilyView, 0, len(rows))
+		for _, row := range rows {
+			// Leave RefreshedAt as the zero Time when never refreshed
+			// (RefreshedAt == 0) so the template renders "not yet refreshed"
+			// rather than "55 years ago" — time.Unix(0, 0) is the 1970 epoch
+			// (Gemini MEDIUM on PR #401).
+			var refreshed time.Time
+			if row.RefreshedAt > 0 {
+				refreshed = time.Unix(0, row.RefreshedAt)
+			}
+			fams = append(fams, smartMixFamilyView{
+				Slug:        row.Slug,
+				Kind:        row.Kind,
+				Title:       row.Title,
+				Subtitle:    row.Subtitle,
+				RefreshedAt: refreshed,
+				ItemCount:   smartPlaylistItemCount(row),
+				Tracks:      smartMixTracksForView(row),
+			})
+		}
+	}
+	s.renderPage(w, "smartmixes", smartMixPageData{Enabled: enabled, Families: fams})
+}
+
+// smartMixTracksForView decodes a cached row into display rows. The
+// time-of-day family stores per-UTC-hour pools; flatten to distinct tracks in
+// hour order so the page shows a stable representative list.
+func smartMixTracksForView(row manifest.StoredSmartPlaylist) []smartMixTrackView {
+	var items []manifest.SmartPlaylistItem
+	if row.Kind == "timeOfDay" {
+		var hb manifest.SmartPlaylistHourlyBlob
+		if json.Unmarshal(row.ItemsJSON, &hb) != nil {
+			return nil
+		}
+		seen := map[string]struct{}{}
+		for h := 0; h < 24; h++ {
+			for _, it := range hb.Hourly[h] {
+				if _, ok := seen[it.Path]; ok {
+					continue
+				}
+				seen[it.Path] = struct{}{}
+				items = append(items, it)
+			}
+		}
+	} else if json.Unmarshal(row.ItemsJSON, &items) != nil {
+		return nil
+	}
+	out := make([]smartMixTrackView, 0, len(items))
+	for _, it := range items {
+		out = append(out, smartMixTrackView{Position: it.Position, Title: it.Title, Artist: it.Artist, Path: it.Path})
+	}
+	return out
+}

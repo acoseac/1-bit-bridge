@@ -675,6 +675,7 @@ var pages = map[string]string{
 	"upnp":              "upnp.html",
 	"data":              "data.html",
 	"settings":          "settings.html",
+	"smartmixes":        "smartmixes.html",
 }
 
 // New constructs an admin Server. Call Handler to get the http.Handler for
@@ -725,6 +726,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /devices", s.pageDevices)
 	mux.HandleFunc("GET /upnp", s.pageUPnP)
 	mux.HandleFunc("GET /data", s.pageData)
+	mux.HandleFunc("GET /smartmixes", s.pageSmartMixes)
 	mux.HandleFunc("GET /settings", s.pageSettings)
 
 	// JSON API.

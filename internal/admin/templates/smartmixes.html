@@ -1,0 +1,56 @@
+{{define "content"}}
+<section class="page smartmixes">
+  <h1>Smart mixes</h1>
+  <p class="lede">
+    Auto-generated playlists built from playback history + audio analysis,
+    served at <code>GET /v1/smart-playlists</code> and surfaced on the iOS
+    Home tab. Regenerated daily; force a rebuild below.
+  </p>
+
+  {{if not .Data.Enabled}}
+  <div class="panel" id="smartmix-disabled-panel">
+    <div class="panel-head"><h2>Feature disabled</h2></div>
+    <p class="muted">
+      Smart mixes are off. Enable them on the <a href="/settings">Settings</a>
+      page (Smart mixes section), then restart the bridge and return here.
+    </p>
+  </div>
+  {{else}}
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Generated families</h2>
+      <button type="button" id="smartmix-regen" class="btn primary">Regenerate now</button>
+    </div>
+    <p class="muted" id="smartmix-regen-status"></p>
+
+    {{if not .Data.Families}}
+    <p class="muted">
+      No mixes generated yet. Listening families (Heavy Rotation, Forgotten
+      Favorites, Recently Played) need playback history; Auto&nbsp;Mix /
+      Daily&nbsp;Mix need audio analysis. Click <strong>Regenerate now</strong>
+      or wait for the daily run.
+    </p>
+    {{else}}
+    {{range .Data.Families}}
+    <div class="smartmix-family">
+      <div class="smartmix-family-head">
+        <h3>{{.Title}}</h3>
+        <span class="badge">{{.Kind}}</span>
+        <span class="muted">{{.ItemCount}} tracks · {{if .RefreshedAt.IsZero}}not yet refreshed{{else}}refreshed {{timeAgo .RefreshedAt}}{{end}}</span>
+      </div>
+      {{if .Subtitle}}<p class="muted smartmix-subtitle">{{.Subtitle}}</p>{{end}}
+      <ol class="smartmix-tracks">
+        {{range .Tracks}}
+        <li>
+          <span class="smartmix-track-title">{{if .Title}}{{.Title}}{{else}}{{.Path}}{{end}}</span>
+          {{if .Artist}}<span class="muted"> — {{.Artist}}</span>{{end}}
+        </li>
+        {{end}}
+      </ol>
+    </div>
+    {{end}}
+    {{end}}
+  </div>
+  {{end}}
+</section>
+{{end}}

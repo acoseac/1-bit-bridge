@@ -1694,6 +1694,7 @@ function initSettings() {
       // pointer-typed patch field always receives a real value.
       upscaleEnabled: fd.get("upscaleEnabled") === "on",
       analysisEnabled: fd.get("analysisEnabled") === "on",
+      smartPlaylistsEnabled: fd.get("smartPlaylistsEnabled") === "on",
       // PR 4 — Tailscale + mDNS hot-reload fields. Tailscale
       // dropdown value is one of "cli" / "tsnet" / "disabled".
       // mDNS checkbox is the FormData "on"/null shape — coerce
@@ -5155,6 +5156,30 @@ async function loadHistoryEvents(reset) {
   }
 }
 
+// Smart mixes page: wire the "Regenerate now" button to the loopback
+// admin endpoint, then reload so the freshly-generated families render.
+function initSmartMixes() {
+  const btn = document.getElementById("smartmix-regen");
+  if (!btn) return;
+  const status = document.getElementById("smartmix-regen-status");
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    const old = btn.textContent;
+    btn.textContent = "Regenerating…";
+    if (status) status.textContent = "";
+    try {
+      const r = await API.post("/api/smart-playlists/regenerate");
+      const n = r && r.families != null ? r.families : "?";
+      btn.textContent = `Generated ${n} — reloading…`;
+      setTimeout(() => location.reload(), 700);
+    } catch (e) {
+      btn.disabled = false;
+      btn.textContent = old;
+      if (status) status.textContent = e && e.message ? e.message : "Regeneration failed.";
+    }
+  });
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   initMobileNav();
   const active = document.body.dataset.active;
@@ -5166,6 +5191,7 @@ document.addEventListener("DOMContentLoaded", () => {
     case "devices": initDevices(); break;
     case "upnp": initUPnP(); break;
     case "data": initData(); break;
+    case "smartmixes": initSmartMixes(); break;
     case "settings": initSettings(); break;
   }
   // Start the SSE stream after page-init so the initial snapshot
