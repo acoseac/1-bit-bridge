@@ -943,6 +943,29 @@ var migrations = []migration{
 		);
 		`,
 	},
+	{
+		version: 19,
+		name:    "playlist_covers (operator-uploaded custom cover art)",
+		// Operator-uploaded cover images for smart-mix families
+		// (scope 'smartmix', key = family slug) and backed-up user
+		// playlists (scope 'playlist', key = playlist id). The resized
+		// JPEG bytes live on disk under <DataDir>/playlist-covers/; this
+		// table maps a (scope,key) to the stored image's content hash +
+		// extension so the wire DTO can advertise `imageHash` and iOS can
+		// cache-bust on re-upload. Pruned per-row on playlist delete /
+		// family retirement (no orphaned mappings — the on-disk JPEG is
+		// removed alongside). Append-only / idempotent per the ladder.
+		sql: `
+		CREATE TABLE IF NOT EXISTS playlist_covers (
+			scope      TEXT    NOT NULL,
+			key        TEXT    NOT NULL,
+			image_hash TEXT    NOT NULL,
+			ext        TEXT    NOT NULL DEFAULT 'jpg',
+			updated_at INTEGER NOT NULL,
+			PRIMARY KEY (scope, key)
+		);
+		`,
+	},
 }
 
 // NOTE (r1 review #49, dropped): a covering index on
