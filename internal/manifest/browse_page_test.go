@@ -123,12 +123,12 @@ func TestListChildTracksPageCursorAdvance(t *testing.T) {
 	}
 }
 
-// TestCountChildFoldersSkipsRollup confirms the count surface
-// returns the immediate-child count without invoking the rollup
-// subqueries that ListChildFolders runs per row. We assert on the
-// count value AND keep the test simple (timing assertions would be
-// flaky); the rollup-skip is an observable contract via the
-// implementation (no rollup SQL in the count path).
+// TestCountChildFolders confirms the count surface returns the
+// immediate-child count without invoking the rollup subqueries that
+// ListChildFolders runs per row. The empty-parent (root) count derives
+// the top-level filesystem folders from track paths (see
+// topLevelFSFolderSource), so each top-level folder is seeded WITH a
+// track under it.
 func TestCountChildFolders(t *testing.T) {
 	s := openTestStore(t)
 	defer s.Close()
@@ -137,6 +137,11 @@ func TestCountChildFolders(t *testing.T) {
 	for i := 0; i < 7; i++ {
 		name := fmt.Sprintf("Album%02d", i)
 		if err := s.UpsertFolder(ctx, &Folder{Path: name, ModTime: now}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.UpsertTrack(ctx, &Track{
+			Path: path.Join(name, "01.flac"), Size: 1, ModTime: now,
+		}); err != nil {
 			t.Fatal(err)
 		}
 	}
