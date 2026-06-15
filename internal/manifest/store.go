@@ -2608,12 +2608,15 @@ func (s *Store) WipeFilesystemTracks(ctx context.Context) error {
 		return err
 	}
 	defer tx.Rollback()
-	// The NOT IN sub-select is keyed on the `upnp_track_routing` PRIMARY
-	// KEY (`source_path`), so the anti-join is index-backed even on a
-	// 15k-row upstream.
+	// NOT EXISTS anti-join, keyed on the `upnp_track_routing` PRIMARY KEY
+	// (`source_path`) so it stays index-backed even on a 15k-row upstream.
+	// NOT EXISTS over NOT IN: idiomatic + NULL-safe should a future schema
+	// change ever make source_path nullable (Gemini on PR #404).
 	if _, err := tx.ExecContext(ctx, `
 		DELETE FROM tracks
-		 WHERE path NOT IN (SELECT source_path FROM upnp_track_routing)
+		 WHERE NOT EXISTS (
+			SELECT 1 FROM upnp_track_routing r WHERE r.source_path = tracks.path
+		 )
 	`); err != nil {
 		return err
 	}
@@ -3587,7 +3590,9 @@ const topLevelFSFolderSource = `(
 		SELECT DISTINCT substr(t.path, 1, instr(t.path, '/') - 1) AS path
 		  FROM tracks t
 		 WHERE instr(t.path, '/') > 0
-		   AND t.path NOT IN (SELECT source_path FROM upnp_track_routing)
+		   AND NOT EXISTS (
+			SELECT 1 FROM upnp_track_routing r WHERE r.source_path = t.path
+		   )
 	) f`
 
 // ListChildFolders returns the immediate-child folders of `parent`,
