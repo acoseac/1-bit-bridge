@@ -61,6 +61,11 @@ func processCoverImage(raw []byte) (out []byte, hash string, err error) {
 	}
 	b := src.Bounds()
 	w, h := b.Dx(), b.Dy()
+	if w <= 0 || h <= 0 {
+		// Defensive: a malformed image / custom decoder could yield empty
+		// bounds even after DecodeConfig passed (Gemini MEDIUM on PR #402).
+		return nil, "", errors.New("decoded image has no pixels")
+	}
 	nw, nh := w, h
 	if w > coverMaxDim || h > coverMaxDim {
 		if w >= h {
@@ -146,6 +151,11 @@ func (s *Server) uploadCover(w http.ResponseWriter, r *http.Request, scope, key 
 		Scope: scope, Key: key, ImageHash: hash, Ext: "jpg", UpdatedAt: time.Now().UnixNano(),
 	}); err != nil {
 		logger.Error("uploadCover: set mapping", "err", err)
+		// Don't leave a JPEG on disk with no DB mapping (an unreferenced
+		// orphan) — unlink the file we just wrote (Gemini MEDIUM on PR #402).
+		if rmErr := os.Remove(path); rmErr != nil && !os.IsNotExist(rmErr) {
+			logger.Warn("uploadCover: cleanup orphaned file", "err", rmErr)
+		}
 		writeError(w, http.StatusInternalServerError, "internal", "could not record cover")
 		return
 	}

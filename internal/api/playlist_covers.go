@@ -14,6 +14,7 @@ import (
 // *manifest.Store satisfies it.
 type PlaylistCoverStore interface {
 	PlaylistCoversByScope(ctx context.Context, scope string) (map[string]manifest.PlaylistCover, error)
+	GetPlaylistCover(ctx context.Context, scope, key string) (manifest.PlaylistCover, bool, error)
 	DeletePlaylistCover(ctx context.Context, scope, key string) (hash, ext string, ok bool, err error)
 }
 
@@ -40,6 +41,24 @@ func (s *Server) coverHashesForScope(ctx context.Context, scope string) map[stri
 		out[k] = c.ImageHash
 	}
 	return out
+}
+
+// coverHashForKey returns the imageHash for a single (scope,key) — a single
+// indexed lookup, not a whole-scope scan (Gemini MEDIUM on PR #402). Empty on
+// nil store / miss / error (best-effort).
+func (s *Server) coverHashForKey(ctx context.Context, scope, key string) string {
+	if s.coverStore == nil {
+		return ""
+	}
+	c, ok, err := s.coverStore.GetPlaylistCover(ctx, scope, key)
+	if err != nil {
+		logger.Warn("cover hash lookup", "scope", scope, "err", err)
+		return ""
+	}
+	if !ok {
+		return ""
+	}
+	return c.ImageHash
 }
 
 // pruneCover removes a cover mapping + its on-disk JPEG (orphan cleanup on

@@ -160,7 +160,7 @@ func (s *Store) PrunePlaylistCoversExcept(ctx context.Context, scope string, kee
 	if err != nil {
 		return nil, err
 	}
-	var removed []PlaylistCover
+	var candidates []PlaylistCover
 	for rows.Next() {
 		var c PlaylistCover
 		if err := rows.Scan(&c.Scope, &c.Key, &c.ImageHash, &c.Ext, &c.UpdatedAt); err != nil {
@@ -168,18 +168,23 @@ func (s *Store) PrunePlaylistCoversExcept(ctx context.Context, scope string, kee
 			return nil, err
 		}
 		if _, ok := keep[c.Key]; !ok {
-			removed = append(removed, c)
+			candidates = append(candidates, c)
 		}
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	for _, c := range removed {
+	// Append to `removed` only AFTER the row is actually deleted, so a
+	// mid-loop failure returns exactly the rows the caller may safely unlink —
+	// never one still present in the DB (Gemini HIGH on PR #402).
+	var removed []PlaylistCover
+	for _, c := range candidates {
 		if _, err := s.db.ExecContext(ctx,
 			`DELETE FROM playlist_covers WHERE scope = ? AND key = ?`, c.Scope, c.Key); err != nil {
 			return removed, err
 		}
+		removed = append(removed, c)
 	}
 	return removed, nil
 }

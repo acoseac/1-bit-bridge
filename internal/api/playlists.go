@@ -185,7 +185,7 @@ func (s *Server) getPlaylist(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	dto := toPlaylistDTO(p, items)
-	dto.ImageHash = s.coverHashesForScope(r.Context(), manifest.CoverScopePlaylist)[id]
+	dto.ImageHash = s.coverHashForKey(r.Context(), manifest.CoverScopePlaylist, id)
 	writeJSON(w, http.StatusOK, dto)
 }
 
