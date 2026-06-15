@@ -68,7 +68,7 @@ func TestSmartPlaylistCacheRoundTrip(t *testing.T) {
 	ctx := context.Background()
 
 	if err := s.ReplaceSmartPlaylists(ctx, []StoredSmartPlaylist{
-		{Slug: "heavy-rotation", Kind: "heavyRotation", Title: "Heavy Rotation", Subtitle: "most played", Position: 0, RefreshedAt: 100, ItemsJSON: []byte(`[{"position":0,"path":"/a.flac"}]`)},
+		{Slug: "heavy-rotation", Kind: "heavyRotation", Title: "Heavy Rotation", Subtitle: "most played", Position: 0, RefreshedAt: 100, ItemsJSON: []byte(`[{"position":0,"path":"/a.flac"}]`), EnergyJSON: []byte(`[0.25,0.75]`), ModalRateHz: 96000},
 		{Slug: "auto-mix", Kind: "autoMix", Title: "Auto Mix", Position: 1, RefreshedAt: 100, ItemsJSON: []byte(`[]`)},
 	}); err != nil {
 		t.Fatalf("ReplaceSmartPlaylists: %v", err)
@@ -86,6 +86,14 @@ func TestSmartPlaylistCacheRoundTrip(t *testing.T) {
 	}
 	if string(got[0].ItemsJSON) != `[{"position":0,"path":"/a.flac"}]` {
 		t.Errorf("items_json round-trip mismatch: %s", got[0].ItemsJSON)
+	}
+	// energy_json + modal_rate_hz round-trip (migration v20).
+	if string(got[0].EnergyJSON) != `[0.25,0.75]` || got[0].ModalRateHz != 96000 {
+		t.Errorf("energy/modal round-trip mismatch: energy=%s modal=%d", got[0].EnergyJSON, got[0].ModalRateHz)
+	}
+	// A row written with no energy/rate reads back nil/0 (NULL BLOB, DEFAULT 0).
+	if got[1].EnergyJSON != nil || got[1].ModalRateHz != 0 {
+		t.Errorf("absent energy/modal should be nil/0: energy=%v modal=%d", got[1].EnergyJSON, got[1].ModalRateHz)
 	}
 
 	// Wholesale replace drops stale families.
@@ -298,7 +306,7 @@ func TestTrackFeatures_EffectiveValuesAndTagWins(t *testing.T) {
 	// /tagged: curated BPM + RG present; analysis disagrees → tag wins. Key
 	// is analysis-only.
 	mustUpsertTrack(t, s, &Track{Path: "/tagged.flac", Title: "Tagged", Artist: "Art", Album: "Alb", Genre: "Jazz",
-		Duration: spFloat(180.5), BPM: spInt(120), ReplayGainTrackDB: spFloat(-6.0)})
+		Duration: spFloat(180.5), BPM: spInt(120), ReplayGainTrackDB: spFloat(-6.0), SampleRate: spFloat(96000)})
 	mustUpsertAnalysis(t, s, AnalysisRow{SourcePath: "/tagged.flac",
 		BPM: spInt(130), ReplayGainTrackDB: spFloat(-9.0), KeyRoot: spInt(9), KeyMode: "minor"})
 
@@ -337,6 +345,9 @@ func TestTrackFeatures_EffectiveValuesAndTagWins(t *testing.T) {
 	}
 	if tg.Artist != "Art" || tg.Album != "Alb" || tg.Genre != "Jazz" {
 		t.Errorf("tagged metadata mismatch: %+v", tg)
+	}
+	if tg.SampleRate == nil || *tg.SampleRate != 96000 {
+		t.Errorf("tagged sample rate: want 96000 (from tags_json), got %v", tg.SampleRate)
 	}
 
 	ao := byPath["/analysisonly.flac"]

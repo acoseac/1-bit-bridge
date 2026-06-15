@@ -98,6 +98,40 @@ func TestBuildSmartPlaylistDTO_FlatFamily(t *testing.T) {
 	}
 }
 
+func TestBuildSmartPlaylistDTO_EnergyAndModalRate(t *testing.T) {
+	items := []manifest.SmartPlaylistItem{{Position: 0, Path: "/a.flac"}}
+	blob := mustMarshal(t, items)
+	energy := mustMarshal(t, []float64{0.25, 0.75, 0.5})
+	row := manifest.StoredSmartPlaylist{
+		Slug: "heavy-rotation", Kind: "heavyRotation", Title: "Heavy Rotation",
+		RefreshedAt: 1, ItemsJSON: blob, EnergyJSON: energy, ModalRateHz: 96000,
+	}
+	dto, ok := buildSmartPlaylistDTO(row, 8, 0, false)
+	if !ok {
+		t.Fatal("family should build")
+	}
+	if dto.ModalRateHz != 96000 {
+		t.Errorf("modal rate = %d want 96000", dto.ModalRateHz)
+	}
+	if len(dto.Energy) != 3 || dto.Energy[1] != 0.75 {
+		t.Errorf("energy decode wrong: %+v", dto.Energy)
+	}
+
+	// Malformed energy must not drop the family (decorative, best-effort).
+	bad := row
+	bad.EnergyJSON = []byte("{not json")
+	dto2, ok := buildSmartPlaylistDTO(bad, 8, 0, false)
+	if !ok {
+		t.Fatal("malformed energy should not drop the family")
+	}
+	if dto2.Energy != nil {
+		t.Errorf("malformed energy should yield nil, got %+v", dto2.Energy)
+	}
+	if dto2.ModalRateHz != 96000 {
+		t.Errorf("modal rate should survive malformed energy, got %d", dto2.ModalRateHz)
+	}
+}
+
 func TestBuildSmartPlaylistDTO_TimeOfDay(t *testing.T) {
 	blob := mustMarshal(t, manifest.SmartPlaylistHourlyBlob{Hourly: map[int][]manifest.SmartPlaylistItem{
 		8: {{Path: "/a.flac", Title: "A"}},
