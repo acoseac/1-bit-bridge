@@ -1161,3 +1161,84 @@ func TestSetLifecycleSetsAndClearsExpiry(t *testing.T) {
 		t.Errorf("PATCH clear: ExpiresAt should be nil, got %v", cleared.ExpiresAt)
 	}
 }
+
+// TestSettingsPatchSmartPlaylistsEnabled mirrors the analysis toggle:
+// flipping smartPlaylists on marks restart-required + persists; an
+// idempotent re-submit does not. The regenerator is wired once at startup.
+func TestSettingsPatchSmartPlaylistsEnabled(t *testing.T) {
+	srv, _, cfgPath := newTestServer(t)
+	h := srv.Handler()
+
+	var resp settingsPatchResponse
+	code := doJSON(t, h, "PATCH", "/api/settings",
+		map[string]any{"smartPlaylistsEnabled": true}, &resp)
+	if code != 200 {
+		t.Fatalf("patch smartPlaylists on: %d", code)
+	}
+	if !resp.RestartRequired {
+		t.Error("smartPlaylistsEnabled change must mark restart required")
+	}
+	if !srv.deps.CfgHolder.Load().SmartPlaylists.Enabled {
+		t.Error("in-memory cfg did not reflect smartPlaylists.enabled=true")
+	}
+	reloaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reloaded.SmartPlaylists.Enabled {
+		t.Error("smartPlaylists.enabled did not persist to disk")
+	}
+
+	resp = settingsPatchResponse{}
+	code = doJSON(t, h, "PATCH", "/api/settings",
+		map[string]any{"smartPlaylistsEnabled": true}, &resp)
+	if code != 200 {
+		t.Fatalf("patch idempotent: %d", code)
+	}
+	if resp.RestartRequired {
+		t.Error("idempotent smartPlaylistsEnabled patch must not require restart")
+	}
+}
+
+// TestPageSmartMixes covers the /smartmixes render: a "Feature disabled"
+// state when off, and the seeded families + their member tracks when on.
+func TestPageSmartMixes(t *testing.T) {
+	srv, cfg, _ := newTestServer(t)
+
+	// Feature off (default) → disabled panel, no family content.
+	rw := httptest.NewRecorder()
+	srv.pageSmartMixes(rw, httptest.NewRequest("GET", "/smartmixes", nil))
+	if rw.Code != 200 {
+		t.Fatalf("/smartmixes status = %d; want 200", rw.Code)
+	}
+	if !strings.Contains(rw.Body.String(), "smartmix-disabled-panel") {
+		t.Error("feature-off /smartmixes MUST surface the disabled panel")
+	}
+
+	// Enable + seed two families (one flat, one time-of-day).
+	cfg.SmartPlaylists.Enabled = true
+	srv.deps.CfgHolder.Store(cfg)
+	flat := []byte(`[{"position":0,"path":"/Abdullah/Water/01.flac","title":"Song For Sathima","artist":"Abdullah Ibrahim"}]`)
+	hourly := []byte(`{"hourly":{"8":[{"position":0,"path":"/x/commute.flac","title":"Morning Drive","artist":"AM"}]}}`)
+	if err := srv.deps.Manifest.ReplaceSmartPlaylists(context.Background(), []manifest.StoredSmartPlaylist{
+		{Slug: "heavy-rotation", Kind: "heavyRotation", Title: "Heavy Rotation", Subtitle: "most played this fortnight", Position: 0, RefreshedAt: time.Now().UnixNano(), ItemsJSON: flat},
+		{Slug: "time-of-day", Kind: "timeOfDay", Title: "Morning Commute", Position: 1, RefreshedAt: time.Now().UnixNano(), ItemsJSON: hourly},
+	}); err != nil {
+		t.Fatalf("seed smart playlists: %v", err)
+	}
+
+	rw = httptest.NewRecorder()
+	srv.pageSmartMixes(rw, httptest.NewRequest("GET", "/smartmixes", nil))
+	if rw.Code != 200 {
+		t.Fatalf("/smartmixes (enabled) status = %d; want 200", rw.Code)
+	}
+	body := rw.Body.String()
+	if strings.Contains(body, "smartmix-disabled-panel") {
+		t.Error("enabled /smartmixes MUST NOT show the disabled panel")
+	}
+	for _, want := range []string{"Heavy Rotation", "Song For Sathima", "smartmix-regen", "Morning Commute", "Morning Drive"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/smartmixes body missing %q", want)
+		}
+	}
+}

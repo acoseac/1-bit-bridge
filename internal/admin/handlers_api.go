@@ -167,6 +167,10 @@ type settingsResponse struct {
 	// Same restart-required contract as upscale. Shares the sox-missing
 	// warning fields above (both features decode through sox).
 	AnalysisEnabled bool `json:"analysisEnabled"`
+	// Smart-playlist generation opt-in (the iOS Home tab's mixes). Same
+	// restart-required contract — the daily regenerator is wired at
+	// `bridge serve` startup.
+	SmartPlaylistsEnabled bool `json:"smartPlaylistsEnabled"`
 	// PR 4: tailscale + mDNS posture.
 	// TailscaleMode mirrors cfg.Tailscale.EffectiveMode (one of
 	// "cli", "tsnet", "disabled"). IsPublic flags the
@@ -749,6 +753,7 @@ func (s *Server) apiSettingsGet(w http.ResponseWriter, r *http.Request) {
 		UpdateCheckIntervalHours: cfg.Update.CheckIntervalHours,
 		UpscaleEnabled:           cfg.Upscale.Enabled,
 		AnalysisEnabled:          cfg.Analysis.Enabled,
+		SmartPlaylistsEnabled:    cfg.SmartPlaylists.Enabled,
 		UpscaleStoragePath:       cfg.Upscale.EffectiveVariantsDir(cfg.DataDir),
 		IsSupervised:             s.deps.IsSupervised,
 		// Same backup fields the page-template handler emits
@@ -819,6 +824,10 @@ type settingsPatch struct {
 	// upscale — the serve-side `waveform` health flag + /v1/waveform
 	// wiring are decided once at startup.
 	AnalysisEnabled *bool `json:"analysisEnabled,omitempty"`
+	// Smart-playlist generation opt-in. Restart-required: the daily
+	// regenerator goroutine is launched once at `bridge serve` startup
+	// (same rationale as UpscaleEnabled / AnalysisEnabled).
+	SmartPlaylistsEnabled *bool `json:"smartPlaylistsEnabled,omitempty"`
 	// PR 4: TailscaleMode dropdown (cli|tsnet|disabled).
 	// Hot-reload matrix:
 	//   - any → disabled:    no restart (Deps.TailscaleDisable
@@ -939,6 +948,16 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 			// health flag + /v1/waveform wiring are decided once at
 			// startup, so a runtime flip needs a restart to take
 			// effect. Idempotent same-value submissions skip the banner.
+			restart = true
+		}
+	}
+	if p.SmartPlaylistsEnabled != nil {
+		if *p.SmartPlaylistsEnabled != next.SmartPlaylists.Enabled {
+			next.SmartPlaylists.Enabled = *p.SmartPlaylistsEnabled
+			// The daily smart-playlist regenerator goroutine is launched
+			// once at startup (cmd/bridge/main.go), so a runtime flip
+			// needs a restart. Idempotent same-value submissions skip the
+			// banner.
 			restart = true
 		}
 	}

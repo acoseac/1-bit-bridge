@@ -2856,3 +2856,27 @@ ul.histogram li {
   padding: 0.8rem 1rem;
   margin: 1rem 0;
 }
+
+/* Smart mixes page — generated-family cards + member-track lists. */
+.smartmix-family {
+  padding: 0.9rem 0;
+  border-top: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+}
+.smartmix-family:first-of-type { border-top: none; }
+.smartmix-family-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.smartmix-family-head h3 { margin: 0; }
+.smartmix-subtitle { margin: 0.2rem 0 0.4rem; }
+.smartmix-tracks {
+  margin: 0.4rem 0 0;
+  padding-left: 1.5rem;
+  max-height: 16rem;
+  overflow-y: auto;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+.smartmix-tracks li { padding: 0.05rem 0; }
