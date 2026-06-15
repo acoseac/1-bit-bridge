@@ -308,24 +308,23 @@ header nav a:hover { color: var(--fg); }
 /* Active-tab indicator is a 2px gradient bar under the link instead
  * of a plain background, so the nav reads as a set of tuning-panel
  * tabs rather than a row of buttons. */
-body[data-active="dashboard"] nav a[data-tab="dashboard"],
-body[data-active="library"] nav a[data-tab="library"],
-body[data-active="library_inspector"] nav a[data-tab="library_inspector"],
-body[data-active="jobs"] nav a[data-tab="jobs"],
-body[data-active="devices"] nav a[data-tab="devices"],
-body[data-active="upnp"] nav a[data-tab="upnp"],
-body[data-active="data"] nav a[data-tab="data"],
-body[data-active="settings"] nav a[data-tab="settings"] {
+/* Highlight the top-level nav entry by SECTION (body[data-section]),
+ * so Library stays lit across Browse/Inspector/Jobs and Listening across
+ * Playlists/Smart mixes. Each link's data-tab IS its section key. */
+body[data-section="dashboard"] #primary-nav a[data-tab="dashboard"],
+body[data-section="library"] #primary-nav a[data-tab="library"],
+body[data-section="devices"] #primary-nav a[data-tab="devices"],
+body[data-section="upnp"] #primary-nav a[data-tab="upnp"],
+body[data-section="listening"] #primary-nav a[data-tab="listening"],
+body[data-section="settings"] #primary-nav a[data-tab="settings"] {
   color: var(--accent);
 }
-body[data-active="dashboard"] nav a[data-tab="dashboard"]::after,
-body[data-active="library"] nav a[data-tab="library"]::after,
-body[data-active="library_inspector"] nav a[data-tab="library_inspector"]::after,
-body[data-active="jobs"] nav a[data-tab="jobs"]::after,
-body[data-active="devices"] nav a[data-tab="devices"]::after,
-body[data-active="upnp"] nav a[data-tab="upnp"]::after,
-body[data-active="data"] nav a[data-tab="data"]::after,
-body[data-active="settings"] nav a[data-tab="settings"]::after {
+body[data-section="dashboard"] #primary-nav a[data-tab="dashboard"]::after,
+body[data-section="library"] #primary-nav a[data-tab="library"]::after,
+body[data-section="devices"] #primary-nav a[data-tab="devices"]::after,
+body[data-section="upnp"] #primary-nav a[data-tab="upnp"]::after,
+body[data-section="listening"] #primary-nav a[data-tab="listening"]::after,
+body[data-section="settings"] #primary-nav a[data-tab="settings"]::after {
   content: "";
   position: absolute;
   left: 12px;
@@ -335,6 +334,38 @@ body[data-active="settings"] nav a[data-tab="settings"]::after {
   background: linear-gradient(to right, var(--accent), var(--accent-hot));
   box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 50%, transparent);
   border-radius: 2px;
+}
+
+/* Secondary tab bar for grouped sections (Library → Browse / Inspector /
+ * Jobs; Listening → Playlists & history / Smart mixes). Sits at the top of
+ * the page content, under the global header. Real <a> links (separate
+ * pages, no JS); visual language mirrors the Settings .tab-nav. */
+.subnav {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin: 0 0 24px;
+  border-bottom: 1px solid var(--border);
+}
+.subnav a {
+  color: var(--fg-muted);
+  text-decoration: none;
+  font-weight: 500;
+  font-size: 14px;
+  padding: 10px 14px;
+  margin-bottom: -1px;
+  border-bottom: 2px solid transparent;
+  border-radius: var(--radius) var(--radius) 0 0;
+  transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+}
+.subnav a:hover { color: var(--fg); background: var(--accent-soft); }
+.subnav a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.subnav a.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
 }
 
 .meta {
@@ -1159,7 +1190,14 @@ dialog h2 { font-size: 18px; color: var(--accent); }
  * `<h2 class="section-head">` visible — the long-scroll fallback
  * Qodo on PR #129 asked for, so a JS regression can't lock
  * operators out of any Settings section. */
-.settings.tabs-enabled .tab-nav ~ .tab-pane > .section-head {
+/* Hide only the FIRST section-head per pane — it's redundant with the tab
+ * button's label. Subsequent section-heads are genuine sub-sections within
+ * a pane (the "Audio" tab houses Audio quality + Audio analysis + Smart
+ * mixes) and MUST stay visible, or those sections run together with no
+ * separation (Gemini on PR #405). `:first-of-type` keys on the <h2> type;
+ * every pane opens with its section-head as the first h2, so single-section
+ * panes still hide their one heading exactly as before. */
+.settings.tabs-enabled .tab-nav ~ .tab-pane > .section-head:first-of-type {
   position: absolute;
   width: 1px;
   height: 1px;
