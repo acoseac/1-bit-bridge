@@ -157,10 +157,11 @@ func TestModalRateHz(t *testing.T) {
 }
 
 func TestSeedFromSlug_StableAndDistinct(t *testing.T) {
-	if SeedFromSlug("heavy-rotation") != SeedFromSlug("heavy-rotation") {
+	seed := SeedFromSlug("heavy-rotation")
+	if seed != SeedFromSlug("heavy-rotation") {
 		t.Error("seed not stable for the same slug")
 	}
-	if SeedFromSlug("heavy-rotation") == SeedFromSlug("auto-mix") {
+	if seed == SeedFromSlug("auto-mix") {
 		t.Error("distinct slugs collided")
 	}
 }
