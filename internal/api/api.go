@@ -172,6 +172,12 @@ type Server struct {
 	// read-only on the request path. *manifest.Store satisfies it.
 	smartPlaylistStore SmartPlaylistStore
 
+	// coverStore resolves operator-uploaded custom cover hashes for the
+	// smart-mix + playlist wire DTOs (the imageHash advertisement). Nil →
+	// no imageHash advertised (iOS uses the auto-mosaic). Wired via
+	// WithPlaylistCoverStore; *manifest.Store satisfies it.
+	coverStore PlaylistCoverStore
+
 	// tailscaleStatus is the embedded-tsnet status provider used by
 	// `reachableEndpoints` to advertise the bridge's `*.ts.net` URL +
 	// tailnet IPs in tsnet mode. Nil unless `WithTailscaleStatus` or

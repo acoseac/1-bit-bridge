@@ -207,6 +207,11 @@ func (s *Server) routeRegistry() []route {
 		{pattern: "GET /v1/artwork/{mbid}", kind: boundedRoute, handler: s.authed(s.artwork)},
 		{pattern: "GET /v1/artist-image/{mbid}", kind: boundedRoute, handler: s.authed(s.artistImage)},
 
+		// Custom playlist / smart-mix cover art — operator-uploaded JPEGs
+		// (~600 px). 404 when none (iOS falls back to the auto-mosaic).
+		{pattern: "GET /v1/smart-playlist-image/{slug}", kind: boundedRoute, handler: s.authed(s.smartMixCover)},
+		{pattern: "GET /v1/playlist-image/{id}", kind: boundedRoute, handler: s.authed(s.playlistCover)},
+
 		// Waveform — tiny binary peak-envelope sidecar (~1-25 KB).
 		// boundedRoute: it's a small file, no streaming exemption
 		// needed. /v1/analysis/stats is the management-section poller —

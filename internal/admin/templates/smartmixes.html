@@ -39,6 +39,14 @@
         <span class="muted">{{.ItemCount}} tracks · {{if .RefreshedAt.IsZero}}not yet refreshed{{else}}refreshed {{timeAgo .RefreshedAt}}{{end}}</span>
       </div>
       {{if .Subtitle}}<p class="muted smartmix-subtitle">{{.Subtitle}}</p>{{end}}
+      <div class="smartmix-cover-control" data-slug="{{.Slug}}">
+        <label class="btn">
+          <input type="file" accept="image/jpeg,image/png" hidden class="smartmix-cover-input">
+          {{if .HasCover}}Replace cover…{{else}}Set custom cover…{{end}}
+        </label>
+        {{if .HasCover}}<button type="button" class="btn danger smartmix-cover-remove">Remove cover</button>{{end}}
+        <span class="smartmix-cover-status muted"></span>
+      </div>
       <ol class="smartmix-tracks">
         {{range .Tracks}}
         <li>

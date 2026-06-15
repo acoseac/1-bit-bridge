@@ -51,6 +51,12 @@ type smartPlaylistDTO struct {
 	Subtitle    string                 `json:"subtitle,omitempty"`
 	RefreshedAt int64                  `json:"refreshedAt"` // UnixNano of the generating run
 	Items       []smartPlaylistItemDTO `json:"items"`
+	// ImageHash is the SHA-256 hex of the operator-uploaded custom cover for
+	// this family (scope 'smartmix', key = slug), served at
+	// GET /v1/smart-playlist-image/{slug}. Omitted when no custom cover is
+	// set — iOS falls back to the auto-mosaic. Additive (no ProtocolVersion
+	// bump).
+	ImageHash string `json:"imageHash,omitempty"`
 }
 
 type smartPlaylistsResponse struct {
@@ -79,12 +85,16 @@ func (s *Server) smartPlaylists(w http.ResponseWriter, r *http.Request) {
 	localHour, hasLocal := parseLocalHour(r.URL.Query().Get("local_hour"))
 	nowUTCHour := time.Now().UTC().Hour()
 
+	// Operator-uploaded custom covers, keyed by family slug (best-effort).
+	covers := s.coverHashesForScope(r.Context(), manifest.CoverScopeSmartMix)
+
 	resp := smartPlaylistsResponse{Playlists: make([]smartPlaylistDTO, 0, len(rows))}
 	for _, row := range rows {
 		dto, ok := buildSmartPlaylistDTO(row, nowUTCHour, localHour, hasLocal)
 		if !ok {
 			continue // e.g. time-of-day with no habit at the current hour
 		}
+		dto.ImageHash = covers[dto.Slug]
 		resp.Playlists = append(resp.Playlists, dto)
 		if row.RefreshedAt > resp.RefreshedAt {
 			resp.RefreshedAt = row.RefreshedAt

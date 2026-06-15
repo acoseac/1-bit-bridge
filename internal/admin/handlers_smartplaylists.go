@@ -103,6 +103,7 @@ type smartMixFamilyView struct {
 	Subtitle    string
 	RefreshedAt time.Time
 	ItemCount   int
+	HasCover    bool
 	Tracks      []smartMixTrackView
 }
 
@@ -119,6 +120,9 @@ func (s *Server) pageSmartMixes(w http.ResponseWriter, r *http.Request) {
 	cfg := s.deps.CfgHolder.Load()
 	enabled := cfg != nil && cfg.SmartPlaylists.Enabled
 
+	// Which families already have an operator-uploaded cover (best-effort).
+	covers, _ := s.deps.Manifest.PlaylistCoversByScope(r.Context(), manifest.CoverScopeSmartMix)
+
 	var fams []smartMixFamilyView
 	rows, err := s.deps.Manifest.LoadSmartPlaylists(r.Context())
 	if err != nil {
@@ -126,6 +130,7 @@ func (s *Server) pageSmartMixes(w http.ResponseWriter, r *http.Request) {
 	} else {
 		fams = make([]smartMixFamilyView, 0, len(rows))
 		for _, row := range rows {
+			_, hasCover := covers[row.Slug]
 			// Leave RefreshedAt as the zero Time when never refreshed
 			// (RefreshedAt == 0) so the template renders "not yet refreshed"
 			// rather than "55 years ago" — time.Unix(0, 0) is the 1970 epoch
@@ -141,6 +146,7 @@ func (s *Server) pageSmartMixes(w http.ResponseWriter, r *http.Request) {
 				Subtitle:    row.Subtitle,
 				RefreshedAt: refreshed,
 				ItemCount:   smartPlaylistItemCount(row),
+				HasCover:    hasCover,
 				Tracks:      smartMixTracksForView(row),
 			})
 		}
