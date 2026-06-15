@@ -41,8 +41,14 @@ build-all:
 	GOOS=windows GOARCH=arm64 go build -p $(P) -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-windows-arm64.exe $(PKG)
 
 # Full pre-push gate's test step: race-enabled, parallelism-capped (see P).
+# -timeout 30m (not the default 10m/package): internal/adminauth's suite pays
+# real bcrypt cost-12 per simulated login across its rate-limit tests, which
+# cumulatively exceeds 10m under -race on slower CI runners (TestPersistedHash
+# IsBcryptShape was the recurring timeout victim — it's just where the package
+# timeout goroutine-dump landed, not a hang). The race detector still catches a
+# genuine deadlock at the 30m ceiling.
 test:
-	go test -p $(P) -race ./...
+	go test -p $(P) -race -timeout 30m ./...
 
 # Fast inner-loop tests: no race detector — much faster to build and a
 # fraction of the RAM, so it won't thrash on a loaded machine. Use while
