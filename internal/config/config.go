@@ -77,6 +77,7 @@ type Config struct {
 	MDNS            MDNSConfig           `yaml:"mdns,omitempty"`
 	DLNA            DLNAConfig           `yaml:"dlna,omitempty"`
 	UPnPUpstream    UPnPUpstreamConfig   `yaml:"upnpUpstream,omitempty"`
+	Enrich          EnrichConfig         `yaml:"enrich,omitempty"`
 
 	// DisableHTTP3 prevents the server from binding UDP ports and
 	// advertising Alt-Svc headers for HTTP/3 upgrades. Defaults to false.
@@ -289,6 +290,24 @@ func (u UPnPUpstreamConfig) Validate() error {
 // orthogonal integrity surfaces (artwork-cache reconcile, sidecar
 // freshness re-validate) can join the same YAML node without
 // scattering top-level fields.
+// EnrichConfig overrides the upstream sources the background enricher
+// queries. Empty fields fall back to the public services (MusicBrainz /
+// Cover Art Archive). Point them at a self-hosted 1-bit-atlas mirror to
+// keep enrichment on your own network: set musicbrainzBaseURL to
+// "https://<atlas-host>/ws/2" and coverArtBaseURL to "https://<atlas-host>"
+// — atlas implements exactly the release/artist search + lookup and the
+// /release/{mbid}/front-{250,500,1200} cover endpoints the enricher uses,
+// so no other change is needed. Env: BRIDGE_MUSICBRAINZ_BASE_URL /
+// BRIDGE_COVERART_BASE_URL.
+type EnrichConfig struct {
+	// MusicBrainzBaseURL overrides the MusicBrainz ws/2 API root.
+	// Default (empty): https://musicbrainz.org/ws/2.
+	MusicBrainzBaseURL string `yaml:"musicbrainzBaseURL,omitempty"`
+	// CoverArtBaseURL overrides the Cover Art Archive root.
+	// Default (empty): https://coverartarchive.org.
+	CoverArtBaseURL string `yaml:"coverArtBaseURL,omitempty"`
+}
+
 type IntegrityConfig struct {
 	// VariantSweepIntervalSec controls how often the
 	// integrity.VariantWatcher walks `track_variants` and
@@ -1387,6 +1406,8 @@ func Load(path string) (*Config, error) {
 //	BRIDGE_ADMIN_ADDRESS   — overrides AdminAddress
 //	BRIDGE_DATA_DIR        — overrides DataDir
 //	BRIDGE_LIBRARY_NAME    — overrides LibraryName
+//	BRIDGE_MUSICBRAINZ_BASE_URL — overrides Enrich.MusicBrainzBaseURL
+//	BRIDGE_COVERART_BASE_URL    — overrides Enrich.CoverArtBaseURL
 //	BRIDGE_LIBRARY_ROOTS   — OS-native-PATH-separated; overrides
 //	                         LibraryRoots. POSIX uses `:`,
 //	                         Windows uses `;` so drive-letter
@@ -1407,6 +1428,12 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if v := os.Getenv("BRIDGE_LIBRARY_NAME"); v != "" {
 		c.LibraryName = v
+	}
+	if v := os.Getenv("BRIDGE_MUSICBRAINZ_BASE_URL"); v != "" {
+		c.Enrich.MusicBrainzBaseURL = v
+	}
+	if v := os.Getenv("BRIDGE_COVERART_BASE_URL"); v != "" {
+		c.Enrich.CoverArtBaseURL = v
 	}
 	if v := os.Getenv("BRIDGE_DISABLE_HTTP3"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
@@ -1523,6 +1550,24 @@ func (c *Config) resolvePaths(baseDir string) {
 
 // Validate checks invariants the server relies on. Called automatically by
 // Load; exposed for tests and for callers that construct Config in memory.
+// normalizeBaseURL trims surrounding whitespace and any trailing slash from
+// an optional enrich override base URL, and validates that a non-empty value
+// is an absolute http(s) URL. Empty stays empty (the enrich client falls back
+// to its public default). Trimming the trailing slash prevents double-slash
+// request paths (e.g. "https://host/ws/2/" + "/release/..." → "...//release").
+func normalizeBaseURL(field, raw string) (string, error) {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return "", nil
+	}
+	v = strings.TrimRight(v, "/")
+	u, err := url.Parse(v)
+	if err != nil || !u.IsAbs() || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return "", fmt.Errorf("%s: must be an absolute http(s) URL, got %q", field, raw)
+	}
+	return v, nil
+}
+
 func (c *Config) Validate() error {
 	// Surface deployment.mode typos at load time rather than letting
 	// them silently fall through to "loopback" (IsPublic-returns-false
@@ -1564,6 +1609,20 @@ func (c *Config) Validate() error {
 	if c.ScanIntervalSec < 1 {
 		return fmt.Errorf("scanIntervalSec: must be >= 1, got %d", c.ScanIntervalSec)
 	}
+	// Enrich upstream base URLs: normalize (trim whitespace + trailing
+	// slash) and require an absolute http(s) URL — surfaces typos at load
+	// time instead of as silent runtime enrichment failures, and prevents
+	// double-slash request paths against a self-hosted mirror.
+	mbBase, err := normalizeBaseURL("enrich.musicbrainzBaseURL", c.Enrich.MusicBrainzBaseURL)
+	if err != nil {
+		return err
+	}
+	c.Enrich.MusicBrainzBaseURL = mbBase
+	caaBase, err := normalizeBaseURL("enrich.coverArtBaseURL", c.Enrich.CoverArtBaseURL)
+	if err != nil {
+		return err
+	}
+	c.Enrich.CoverArtBaseURL = caaBase
 	// DLNA discovery: TTL must be strictly greater than the
 	// M-SEARCH interval — otherwise we'd evict still-online
 	// renderers between cycles (the M-SEARCH cycle is the only

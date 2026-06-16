@@ -1534,8 +1534,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		"%s/%s (+https://github.com/acoseac/1-bit-bridge)",
 		"1-bit-bridge", version.ServerVersion,
 	)
-	mbClient := enrich.NewMusicBrainzClient("", userAgent, nil)
-	caaClient := enrich.NewCoverArtClient("", userAgent, nil)
+	// Upstream metadata/cover-art roots are configurable (default public
+	// MusicBrainz / Cover Art Archive). Point cfg.Enrich.* at a self-hosted
+	// 1-bit-atlas mirror to keep enrichment on your own network.
+	mbClient := enrich.NewMusicBrainzClient(cfg.Enrich.MusicBrainzBaseURL, userAgent, nil)
+	caaClient := enrich.NewCoverArtClient(cfg.Enrich.CoverArtBaseURL, userAgent, nil)
 	deezerClient := enrich.NewDeezerClient("", userAgent, nil)
 	// artworkDir is defined above (single source of truth) and shared
 	// with the scanner so scanner-side `local-*` files and enricher-
