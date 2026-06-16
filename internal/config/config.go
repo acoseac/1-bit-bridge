@@ -77,6 +77,7 @@ type Config struct {
 	MDNS            MDNSConfig           `yaml:"mdns,omitempty"`
 	DLNA            DLNAConfig           `yaml:"dlna,omitempty"`
 	UPnPUpstream    UPnPUpstreamConfig   `yaml:"upnpUpstream,omitempty"`
+	Enrich          EnrichConfig         `yaml:"enrich,omitempty"`
 
 	// DisableHTTP3 prevents the server from binding UDP ports and
 	// advertising Alt-Svc headers for HTTP/3 upgrades. Defaults to false.
@@ -289,6 +290,24 @@ func (u UPnPUpstreamConfig) Validate() error {
 // orthogonal integrity surfaces (artwork-cache reconcile, sidecar
 // freshness re-validate) can join the same YAML node without
 // scattering top-level fields.
+// EnrichConfig overrides the upstream sources the background enricher
+// queries. Empty fields fall back to the public services (MusicBrainz /
+// Cover Art Archive). Point them at a self-hosted 1-bit-atlas mirror to
+// keep enrichment on your own network: set musicbrainzBaseURL to
+// "https://<atlas-host>/ws/2" and coverArtBaseURL to "https://<atlas-host>"
+// — atlas implements exactly the release/artist search + lookup and the
+// /release/{mbid}/front-{250,500,1200} cover endpoints the enricher uses,
+// so no other change is needed. Env: BRIDGE_MUSICBRAINZ_BASE_URL /
+// BRIDGE_COVERART_BASE_URL.
+type EnrichConfig struct {
+	// MusicBrainzBaseURL overrides the MusicBrainz ws/2 API root.
+	// Default (empty): https://musicbrainz.org/ws/2.
+	MusicBrainzBaseURL string `yaml:"musicbrainzBaseURL,omitempty"`
+	// CoverArtBaseURL overrides the Cover Art Archive root.
+	// Default (empty): https://coverartarchive.org.
+	CoverArtBaseURL string `yaml:"coverArtBaseURL,omitempty"`
+}
+
 type IntegrityConfig struct {
 	// VariantSweepIntervalSec controls how often the
 	// integrity.VariantWatcher walks `track_variants` and
@@ -1387,6 +1406,8 @@ func Load(path string) (*Config, error) {
 //	BRIDGE_ADMIN_ADDRESS   — overrides AdminAddress
 //	BRIDGE_DATA_DIR        — overrides DataDir
 //	BRIDGE_LIBRARY_NAME    — overrides LibraryName
+//	BRIDGE_MUSICBRAINZ_BASE_URL — overrides Enrich.MusicBrainzBaseURL
+//	BRIDGE_COVERART_BASE_URL    — overrides Enrich.CoverArtBaseURL
 //	BRIDGE_LIBRARY_ROOTS   — OS-native-PATH-separated; overrides
 //	                         LibraryRoots. POSIX uses `:`,
 //	                         Windows uses `;` so drive-letter
@@ -1407,6 +1428,12 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if v := os.Getenv("BRIDGE_LIBRARY_NAME"); v != "" {
 		c.LibraryName = v
+	}
+	if v := os.Getenv("BRIDGE_MUSICBRAINZ_BASE_URL"); v != "" {
+		c.Enrich.MusicBrainzBaseURL = v
+	}
+	if v := os.Getenv("BRIDGE_COVERART_BASE_URL"); v != "" {
+		c.Enrich.CoverArtBaseURL = v
 	}
 	if v := os.Getenv("BRIDGE_DISABLE_HTTP3"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
