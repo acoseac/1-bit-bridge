@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -77,5 +78,46 @@ func TestEnrichBaseURLs_EnvOverrides(t *testing.T) {
 	}
 	if cfg.Enrich.CoverArtBaseURL != "https://atlas.ars.md" {
 		t.Errorf("CoverArtBaseURL = %q, want https://atlas.ars.md", cfg.Enrich.CoverArtBaseURL)
+	}
+}
+
+// TestEnrichBaseURLs_Normalized: Validate() trims a trailing slash (so
+// requests don't get a double slash) and surrounding whitespace, for both
+// the YAML and the env paths.
+func TestEnrichBaseURLs_Normalized(t *testing.T) {
+	cfgPath := writeEnrichTestConfig(t,
+		"enrich:\n"+
+			"  musicbrainzBaseURL: \"https://atlas.ars.md/ws/2/\"\n"+ // trailing slash
+			"  coverArtBaseURL: \"https://atlas.ars.md/\"\n") // trailing slash
+	// env value padded with whitespace + trailing slash for the MB field.
+	t.Setenv("BRIDGE_MUSICBRAINZ_BASE_URL", "  https://atlas.ars.md/ws/2/  ")
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Enrich.MusicBrainzBaseURL != "https://atlas.ars.md/ws/2" {
+		t.Errorf("MusicBrainzBaseURL = %q, want https://atlas.ars.md/ws/2 (trimmed)", cfg.Enrich.MusicBrainzBaseURL)
+	}
+	if cfg.Enrich.CoverArtBaseURL != "https://atlas.ars.md" {
+		t.Errorf("CoverArtBaseURL = %q, want https://atlas.ars.md (trimmed)", cfg.Enrich.CoverArtBaseURL)
+	}
+}
+
+// TestEnrichBaseURLs_RejectsMalformed: a non-absolute / non-http(s) value
+// fails Load with a clear error instead of silently breaking enrichment at
+// runtime.
+func TestEnrichBaseURLs_RejectsMalformed(t *testing.T) {
+	for _, bad := range []string{"not-a-url", "ftp://atlas.ars.md", "://nohost", "http://"} {
+		cfgPath := writeEnrichTestConfig(t,
+			"enrich:\n  musicbrainzBaseURL: \""+bad+"\"\n")
+		_, err := Load(cfgPath)
+		if err == nil {
+			t.Errorf("Load accepted malformed musicbrainzBaseURL %q, want error", bad)
+			continue
+		}
+		if !strings.Contains(err.Error(), "musicbrainzBaseURL") {
+			t.Errorf("error for %q = %q, want it to mention the field", bad, err.Error())
+		}
 	}
 }

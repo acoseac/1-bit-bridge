@@ -1550,6 +1550,24 @@ func (c *Config) resolvePaths(baseDir string) {
 
 // Validate checks invariants the server relies on. Called automatically by
 // Load; exposed for tests and for callers that construct Config in memory.
+// normalizeBaseURL trims surrounding whitespace and any trailing slash from
+// an optional enrich override base URL, and validates that a non-empty value
+// is an absolute http(s) URL. Empty stays empty (the enrich client falls back
+// to its public default). Trimming the trailing slash prevents double-slash
+// request paths (e.g. "https://host/ws/2/" + "/release/..." → "...//release").
+func normalizeBaseURL(field, raw string) (string, error) {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return "", nil
+	}
+	v = strings.TrimRight(v, "/")
+	u, err := url.Parse(v)
+	if err != nil || !u.IsAbs() || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return "", fmt.Errorf("%s: must be an absolute http(s) URL, got %q", field, raw)
+	}
+	return v, nil
+}
+
 func (c *Config) Validate() error {
 	// Surface deployment.mode typos at load time rather than letting
 	// them silently fall through to "loopback" (IsPublic-returns-false
@@ -1591,6 +1609,20 @@ func (c *Config) Validate() error {
 	if c.ScanIntervalSec < 1 {
 		return fmt.Errorf("scanIntervalSec: must be >= 1, got %d", c.ScanIntervalSec)
 	}
+	// Enrich upstream base URLs: normalize (trim whitespace + trailing
+	// slash) and require an absolute http(s) URL — surfaces typos at load
+	// time instead of as silent runtime enrichment failures, and prevents
+	// double-slash request paths against a self-hosted mirror.
+	mbBase, err := normalizeBaseURL("enrich.musicbrainzBaseURL", c.Enrich.MusicBrainzBaseURL)
+	if err != nil {
+		return err
+	}
+	c.Enrich.MusicBrainzBaseURL = mbBase
+	caaBase, err := normalizeBaseURL("enrich.coverArtBaseURL", c.Enrich.CoverArtBaseURL)
+	if err != nil {
+		return err
+	}
+	c.Enrich.CoverArtBaseURL = caaBase
 	// DLNA discovery: TTL must be strictly greater than the
 	// M-SEARCH interval — otherwise we'd evict still-online
 	// renderers between cycles (the M-SEARCH cycle is the only
