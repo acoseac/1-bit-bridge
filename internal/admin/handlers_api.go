@@ -177,6 +177,10 @@ type settingsResponse struct {
 	// Restart-required.
 	EnrichMusicBrainzBaseURL string `json:"enrichMusicBrainzBaseURL"`
 	EnrichCoverArtBaseURL    string `json:"enrichCoverArtBaseURL"`
+	// AtlasEnabled is the rich-tier Atlas metadata opt-in (bios / descriptions
+	// / genres via the app ferry — distinct from the Enrich base URLs above,
+	// which are the artwork + MusicBrainz source). Restart-required.
+	AtlasEnabled bool `json:"atlasEnabled"`
 	// PR 4: tailscale + mDNS posture.
 	// TailscaleMode mirrors cfg.Tailscale.EffectiveMode (one of
 	// "cli", "tsnet", "disabled"). IsPublic flags the
@@ -769,6 +773,7 @@ func (s *Server) apiSettingsGet(w http.ResponseWriter, r *http.Request) {
 		SmartPlaylistsEnabled:    cfg.SmartPlaylists.Enabled,
 		EnrichMusicBrainzBaseURL: cfg.Enrich.MusicBrainzBaseURL,
 		EnrichCoverArtBaseURL:    cfg.Enrich.CoverArtBaseURL,
+		AtlasEnabled:             cfg.Atlas.Enabled,
 		UpscaleStoragePath:       cfg.Upscale.EffectiveVariantsDir(cfg.DataDir),
 		IsSupervised:             s.deps.IsSupervised,
 		// Same backup fields the page-template handler emits
@@ -849,6 +854,10 @@ type settingsPatch struct {
 	// http/https) these before save.
 	EnrichMusicBrainzBaseURL *string `json:"enrichMusicBrainzBaseURL,omitempty"`
 	EnrichCoverArtBaseURL    *string `json:"enrichCoverArtBaseURL,omitempty"`
+	// AtlasEnabled is the rich-tier Atlas metadata opt-in. Restart-required:
+	// the /v1/atlas-ingest + /v1/atlas-meta routes and the atlasEnrichment
+	// health flag are wired once at `bridge serve` startup.
+	AtlasEnabled *bool `json:"atlasEnabled,omitempty"`
 	// PR 4: TailscaleMode dropdown (cli|tsnet|disabled).
 	// Hot-reload matrix:
 	//   - any → disabled:    no restart (Deps.TailscaleDisable
@@ -997,6 +1006,15 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 	}
 	applyEnrichBase(p.EnrichMusicBrainzBaseURL, &next.Enrich.MusicBrainzBaseURL)
 	applyEnrichBase(p.EnrichCoverArtBaseURL, &next.Enrich.CoverArtBaseURL)
+	if p.AtlasEnabled != nil {
+		if *p.AtlasEnabled != next.Atlas.Enabled {
+			next.Atlas.Enabled = *p.AtlasEnabled
+			// Restart-required: the /v1/atlas-ingest + /v1/atlas-meta routes
+			// and the atlasEnrichment health flag are wired once at startup.
+			// Idempotent same-value submits skip the banner.
+			restart = true
+		}
+	}
 	if p.CustomEndpoints != nil {
 		next.CustomEndpoints = *p.CustomEndpoints
 	} else if p.CustomEndpointsText != nil {

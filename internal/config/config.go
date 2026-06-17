@@ -78,6 +78,7 @@ type Config struct {
 	DLNA            DLNAConfig           `yaml:"dlna,omitempty"`
 	UPnPUpstream    UPnPUpstreamConfig   `yaml:"upnpUpstream,omitempty"`
 	Enrich          EnrichConfig         `yaml:"enrich,omitempty"`
+	Atlas           AtlasConfig          `yaml:"atlas,omitempty"`
 
 	// DisableHTTP3 prevents the server from binding UDP ports and
 	// advertising Alt-Svc headers for HTTP/3 upgrades. Defaults to false.
@@ -306,6 +307,42 @@ type EnrichConfig struct {
 	// CoverArtBaseURL overrides the Cover Art Archive root.
 	// Default (empty): https://coverartarchive.org.
 	CoverArtBaseURL string `yaml:"coverArtBaseURL,omitempty"`
+}
+
+// AtlasConfig governs the optional rich-tier Atlas metadata integration
+// (Phase 2). When Enabled, the bridge accepts metadata pushed by the
+// closed-source iOS app via POST /v1/atlas-ingest (the app holds the Atlas
+// read:bridge credential; the open-source bridge never does) and serves it
+// back via GET /v1/atlas-meta/{release,artist}/{mbid} to all the user's
+// devices. Disabled by default; restart-required (the endpoints + the
+// `atlasEnrichment` health flag are wired once at `bridge serve` startup).
+//
+// Distinct from the `enrich` block: that points the artwork / MusicBrainz
+// clients at an Atlas mirror (where cover art + MBIDs come from); `atlas`
+// is the rich-tier ingest/meta surface (bios, descriptions, genres).
+type AtlasConfig struct {
+	// Enabled is the master toggle. Default false.
+	Enabled bool `yaml:"enabled,omitempty"`
+	// MetaTTLHours is the freshness window the bridge advertises for cached
+	// metadata (as `ttlSeconds` in the /v1/atlas-meta response). The iOS app
+	// re-fetches from Atlas + re-ingests once a cached entity is older than
+	// this. Zero defaults to DefaultAtlasMetaTTLHours (720 h = 30 days).
+	MetaTTLHours int `yaml:"metaTtlHours,omitempty"`
+}
+
+// DefaultAtlasMetaTTLHours is the metadata freshness window applied when
+// AtlasConfig.MetaTTLHours is unset (30 days — editorial metadata is slow-
+// moving, so re-fetches are rare).
+const DefaultAtlasMetaTTLHours = 720
+
+// EffectiveMetaTTL resolves the metadata freshness window. A non-positive
+// MetaTTLHours falls back to DefaultAtlasMetaTTLHours.
+func (a AtlasConfig) EffectiveMetaTTL() time.Duration {
+	h := a.MetaTTLHours
+	if h <= 0 {
+		h = DefaultAtlasMetaTTLHours
+	}
+	return time.Duration(h) * time.Hour
 }
 
 type IntegrityConfig struct {

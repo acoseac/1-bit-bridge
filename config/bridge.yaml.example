@@ -71,3 +71,14 @@ libraryName: "My Music Library"
 # enrich:
 #   musicbrainzBaseURL: "https://atlas.example.com/ws/2"
 #   coverArtBaseURL: "https://atlas.example.com"
+
+# atlas: optional RICH-tier metadata (artist bios, album descriptions, genres).
+#   Disabled by default. Distinct from `enrich` above (artwork + MusicBrainz
+#   source): when enabled, the bridge accepts metadata pushed by the 1-bit app
+#   (which holds the Atlas access key — the open-source bridge never does) via
+#   POST /v1/atlas-ingest and serves it back via GET /v1/atlas-meta/* to all
+#   your devices. Also toggleable in the admin console (Settings -> General ->
+#   Metadata enrichment). metaTtlHours is the freshness window (default 720).
+# atlas:
+#   enabled: true
+#   metaTtlHours: 720

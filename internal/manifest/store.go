@@ -995,6 +995,38 @@ var migrations = []migration{
 			return nil
 		},
 	},
+	{
+		version: 21,
+		name:    "release_atlas + artist_atlas (Phase 2 rich-tier metadata cache)",
+		// MBID-keyed caches for Atlas-sourced rich metadata pushed by the
+		// closed-source iOS app via POST /v1/atlas-ingest and served back via
+		// GET /v1/atlas-meta/{release,artist}/{mbid}. Standalone (NOT spliced
+		// into tracks/tags_json) so a re-scan never wipes them and the streamed
+		// manifest stays lean. found=0 is a TOMBSTONE (the app checked Atlas and
+		// it had nothing) so obscure releases aren't re-queried every view.
+		// genres_json is a JSON []string. ingested_at is UnixNano, bridge-
+		// stamped on every upsert.
+		sql: `
+		CREATE TABLE IF NOT EXISTS release_atlas (
+			release_mbid TEXT PRIMARY KEY,
+			description  TEXT NOT NULL DEFAULT '',
+			record_label TEXT NOT NULL DEFAULT '',
+			genres_json  TEXT NOT NULL DEFAULT '[]',
+			found        INTEGER NOT NULL DEFAULT 0,
+			atlas_etag   TEXT NOT NULL DEFAULT '',
+			ingested_at  INTEGER NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS artist_atlas (
+			artist_mbid TEXT PRIMARY KEY,
+			bio         TEXT NOT NULL DEFAULT '',
+			bio_summary TEXT NOT NULL DEFAULT '',
+			genres_json TEXT NOT NULL DEFAULT '[]',
+			found       INTEGER NOT NULL DEFAULT 0,
+			atlas_etag  TEXT NOT NULL DEFAULT '',
+			ingested_at INTEGER NOT NULL
+		);
+		`,
+	},
 }
 
 // NOTE (r1 review #49, dropped): a covering index on

@@ -166,6 +166,14 @@ type Server struct {
 	// feature-off shape as playlistStore. *manifest.Store satisfies it.
 	historyStore HistoryStore
 
+	// atlasMetaStore backs GET /v1/atlas-meta/{release,artist}/{mbid} +
+	// POST /v1/atlas-ingest + the "atlasEnrichment" health-feature flag. Nil
+	// unless WithAtlasMeta is wired (gated on cfg.Atlas.Enabled). Same
+	// feature-off shape as the others. *manifest.Store satisfies it.
+	atlasMetaStore   AtlasMetaStore
+	atlasMetaEnabled bool          // mirrors cfg.Atlas.Enabled
+	atlasMetaTTL     time.Duration // served as ttlSeconds in the meta response
+
 	// smartPlaylistStore backs GET /v1/smart-playlists + the "smartPlaylists"
 	// health-feature flag. Nil unless WithSmartPlaylistStore is wired (gated
 	// on cfg.SmartPlaylists.Enabled). Same feature-off shape as the others;
@@ -1288,13 +1296,22 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	//     of whether the transcode pool exists.
 	//
 	// Alpha-sort stays correct by construction: each conditional
-	// appends in lex order. Capacity 18 covers the current maximum
-	// (carPlayOptimize + deleteVariants + diagnosticsSummary + dlnaServer +
-	// keyTempo + loudness + operatorDrivenUpscale + pairingEventsSupported +
-	// playbackHistory + playbackHistoryRead + playlistBackup +
-	// playlistsCrossDevice + pushEventsSupported + rendererDiscovery +
-	// smartPlaylists + upscaleCompleteEvents + variantBumpsIndex + waveform).
-	feats := make([]string, 0, 18)
+	// appends in lex order. Capacity 19 covers the current maximum
+	// (atlasEnrichment + carPlayOptimize + deleteVariants + diagnosticsSummary +
+	// dlnaServer + keyTempo + loudness + operatorDrivenUpscale +
+	// pairingEventsSupported + playbackHistory + playbackHistoryRead +
+	// playlistBackup + playlistsCrossDevice + pushEventsSupported +
+	// rendererDiscovery + smartPlaylists + upscaleCompleteEvents +
+	// variantBumpsIndex + waveform).
+	feats := make([]string, 0, 19)
+	// `atlasEnrichment` advertises the rich-tier Atlas metadata surface
+	// (cfg.Atlas.Enabled): the bridge accepts POST /v1/atlas-ingest from the
+	// closed-source app and serves GET /v1/atlas-meta/{release,artist}/{mbid}.
+	// iOS gates its bio/description fetch-and-ferry flow on this. Alpha-sorts
+	// first (`a` < `c`).
+	if s.atlasMetaEnabled && s.atlasMetaStore != nil {
+		feats = append(feats, "atlasEnrichment")
+	}
 	if s.upscaleEnabled {
 		if s.carPlayOptimizeEnabled {
 			feats = append(feats, "carPlayOptimize")

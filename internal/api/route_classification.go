@@ -268,6 +268,15 @@ func (s *Server) routeRegistry() []route {
 		{pattern: "POST /v1/history/batch", kind: boundedRoute, handler: withCtxTimeout(60*time.Second, s.authed(s.historyBatch))},
 		{pattern: "GET /v1/history", kind: boundedRoute, handler: withCtxTimeout(2*time.Second, s.authed(s.historyList))},
 
+		// Atlas rich-tier metadata (Phase 2) — the iOS app (holding the Atlas
+		// credential) ferries bios / descriptions / genres in via POST; the
+		// bridge caches them + serves them back to all the user's devices.
+		// Small JSON, single-row DB ops. 2 s ctx-timeout on the reads matches
+		// the other fast-query routes; 10 s on the ingest's couple of UPSERTs.
+		{pattern: "GET /v1/atlas-meta/release/{mbid}", kind: boundedRoute, handler: withCtxTimeout(2*time.Second, s.authed(s.atlasMetaRelease))},
+		{pattern: "GET /v1/atlas-meta/artist/{mbid}", kind: boundedRoute, handler: withCtxTimeout(2*time.Second, s.authed(s.atlasMetaArtist))},
+		{pattern: "POST /v1/atlas-ingest", kind: boundedRoute, handler: withCtxTimeout(10*time.Second, s.authed(s.atlasIngest))},
+
 		// Server-generated smart playlists — a single fast cache read
 		// (bounded; generation is background/admin, never in-request).
 		{pattern: "GET /v1/smart-playlists", kind: boundedRoute, handler: withCtxTimeout(10*time.Second, s.authed(s.smartPlaylists))},
