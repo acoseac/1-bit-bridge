@@ -89,6 +89,30 @@
         </label>
         <small class="hint">Set at <code>bridge init</code> time; not editable here.</small>
       </div>
+
+      <h2 class="section-head">Metadata enrichment</h2>
+      <p class="hint">
+        The background enricher fills in cover art + MusicBrainz IDs. By
+        default it queries public MusicBrainz + Cover Art Archive. Point these
+        at a self-hosted <a href="https://github.com/acoseac/1-bit-atlas">Atlas</a>
+        mirror to keep enrichment on your own network — set MusicBrainz to
+        <code>https://&lt;atlas-host&gt;/ws/2</code> and Cover Art to
+        <code>https://&lt;atlas-host&gt;</code>. Leave blank for the public defaults.
+      </p>
+
+      <div class="field">
+        <label>MusicBrainz base URL <span class="badge warn">restart</span>
+          <input name="enrichMusicBrainzBaseURL" type="url" value="{{.Data.EnrichMusicBrainzBaseURL}}"
+                 placeholder="https://musicbrainz.org/ws/2">
+        </label>
+      </div>
+
+      <div class="field">
+        <label>Cover Art base URL <span class="badge warn">restart</span>
+          <input name="enrichCoverArtBaseURL" type="url" value="{{.Data.EnrichCoverArtBaseURL}}"
+                 placeholder="https://coverartarchive.org">
+        </label>
+      </div>
     </div>
 
     <div id="settings-panel-networking" class="tab-pane" data-tab="networking"
