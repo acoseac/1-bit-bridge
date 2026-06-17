@@ -1695,6 +1695,11 @@ function initSettings() {
       upscaleEnabled: fd.get("upscaleEnabled") === "on",
       analysisEnabled: fd.get("analysisEnabled") === "on",
       smartPlaylistsEnabled: fd.get("smartPlaylistsEnabled") === "on",
+      // Enrich upstream base URLs (blank = public MusicBrainz / Cover Art
+      // defaults; point at a self-hosted Atlas mirror). Server validates +
+      // normalizes; restart-required.
+      enrichMusicBrainzBaseURL: fd.get("enrichMusicBrainzBaseURL") || "",
+      enrichCoverArtBaseURL: fd.get("enrichCoverArtBaseURL") || "",
       // PR 4 — Tailscale + mDNS hot-reload fields. Tailscale
       // dropdown value is one of "cli" / "tsnet" / "disabled".
       // mDNS checkbox is the FormData "on"/null shape — coerce

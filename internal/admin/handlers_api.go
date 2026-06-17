@@ -171,6 +171,12 @@ type settingsResponse struct {
 	// restart-required contract — the daily regenerator is wired at
 	// `bridge serve` startup.
 	SmartPlaylistsEnabled bool `json:"smartPlaylistsEnabled"`
+	// Enrich upstream base-URL overrides (from the `enrich` config block).
+	// Empty = public MusicBrainz / Cover Art Archive defaults; point both at
+	// a self-hosted Atlas mirror to keep enrichment on-network.
+	// Restart-required.
+	EnrichMusicBrainzBaseURL string `json:"enrichMusicBrainzBaseURL"`
+	EnrichCoverArtBaseURL    string `json:"enrichCoverArtBaseURL"`
 	// PR 4: tailscale + mDNS posture.
 	// TailscaleMode mirrors cfg.Tailscale.EffectiveMode (one of
 	// "cli", "tsnet", "disabled"). IsPublic flags the
@@ -761,6 +767,8 @@ func (s *Server) apiSettingsGet(w http.ResponseWriter, r *http.Request) {
 		UpscaleEnabled:           cfg.Upscale.Enabled,
 		AnalysisEnabled:          cfg.Analysis.Enabled,
 		SmartPlaylistsEnabled:    cfg.SmartPlaylists.Enabled,
+		EnrichMusicBrainzBaseURL: cfg.Enrich.MusicBrainzBaseURL,
+		EnrichCoverArtBaseURL:    cfg.Enrich.CoverArtBaseURL,
 		UpscaleStoragePath:       cfg.Upscale.EffectiveVariantsDir(cfg.DataDir),
 		IsSupervised:             s.deps.IsSupervised,
 		// Same backup fields the page-template handler emits
@@ -835,6 +843,12 @@ type settingsPatch struct {
 	// regenerator goroutine is launched once at `bridge serve` startup
 	// (same rationale as UpscaleEnabled / AnalysisEnabled).
 	SmartPlaylistsEnabled *bool `json:"smartPlaylistsEnabled,omitempty"`
+	// Enrich upstream base-URL overrides. Restart-required: the enricher's
+	// MB / Cover Art clients are constructed once at `bridge serve` startup.
+	// Config.Validate normalizes (trailing slash) + validates (absolute
+	// http/https) these before save.
+	EnrichMusicBrainzBaseURL *string `json:"enrichMusicBrainzBaseURL,omitempty"`
+	EnrichCoverArtBaseURL    *string `json:"enrichCoverArtBaseURL,omitempty"`
 	// PR 4: TailscaleMode dropdown (cli|tsnet|disabled).
 	// Hot-reload matrix:
 	//   - any → disabled:    no restart (Deps.TailscaleDisable
@@ -968,6 +982,21 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 			restart = true
 		}
 	}
+	// Enrich upstream base URLs (#406's config). Trim to match
+	// normalizeBaseURL so a re-submit of the stored value doesn't spuriously
+	// flag a restart; Config.Validate() below does the authoritative
+	// normalize + http(s) validation. Restart-required (clients wired once).
+	applyEnrichBase := func(in *string, dst *string) {
+		if in == nil {
+			return
+		}
+		if v := strings.TrimRight(strings.TrimSpace(*in), "/"); v != *dst {
+			*dst = v
+			restart = true
+		}
+	}
+	applyEnrichBase(p.EnrichMusicBrainzBaseURL, &next.Enrich.MusicBrainzBaseURL)
+	applyEnrichBase(p.EnrichCoverArtBaseURL, &next.Enrich.CoverArtBaseURL)
 	if p.CustomEndpoints != nil {
 		next.CustomEndpoints = *p.CustomEndpoints
 	} else if p.CustomEndpointsText != nil {

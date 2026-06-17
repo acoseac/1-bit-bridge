@@ -61,3 +61,13 @@ libraryName: "My Music Library"
 #   adminTLSTerminatedByProxy: true
 # autocert:
 #   domain: bridge.example.com
+
+# enrich: override where the background enricher fetches cover art +
+#   MusicBrainz IDs. Both empty by default (public MusicBrainz + Cover Art
+#   Archive). Point them at a self-hosted Atlas mirror
+#   (github.com/acoseac/1-bit-atlas) to keep enrichment on your own network.
+#   Also settable in the admin console (Settings -> General -> Metadata
+#   enrichment) and via BRIDGE_MUSICBRAINZ_BASE_URL / BRIDGE_COVERART_BASE_URL.
+# enrich:
+#   musicbrainzBaseURL: "https://atlas.example.com/ws/2"
+#   coverArtBaseURL: "https://atlas.example.com"
