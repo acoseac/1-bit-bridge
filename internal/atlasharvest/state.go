@@ -13,6 +13,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -70,6 +71,9 @@ func (s *StateStore) Snapshot() State {
 // position). Resets LastSubmitAt to zero ONLY when the Atlas base URL changes —
 // a different Atlas means a fresh library scope.
 func (s *StateStore) SetCredential(token, baseURL string, expiresAt time.Time) error {
+	// Trim a trailing slash so https://atlas/ and https://atlas compare equal —
+	// defensive; the API handler already canonicalizes to scheme://host.
+	baseURL = strings.TrimRight(baseURL, "/")
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.st.AtlasBaseURL != baseURL {

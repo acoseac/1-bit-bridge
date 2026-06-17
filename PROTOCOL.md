@@ -598,7 +598,7 @@ Serves the cached metadata. This is the iOS **Read-Before-Write gate**: the app 
 
 #### `POST /v1/atlas-harvest/credential` (bearer-authenticated — additive, Phase H)
 
-Provisions the bridge-driven **bulk harvest**. The iOS app (which alone holds an App-Attest identity) mints a device-bound `bulk_harvest` token at Atlas and hands it to the bridge here; the bridge persists it locally (0600, never in the manifest DB) and its background harvest client submits the library's artist GIDs to Atlas, delta-syncs the harvested Tier-1 bios, and caches them in the same `artist_atlas` overlay `GET /v1/atlas-meta/artist/{mbid}` serves. The open-source bridge thus never carries a long-lived Atlas secret of its own — the credential is the user's attested device's, revocable at Atlas.
+Provisions the bridge-driven **bulk harvest**. The iOS app (which alone holds an App-Attest identity) mints a device-bound `bulk_harvest` token at Atlas and hands it to the bridge here; the bridge persists it locally (0600, never in the manifest DB) and its background harvest client submits the library's artist MBIDs to Atlas, delta-syncs the harvested Tier-1 bios, and caches them in the same `artist_atlas` overlay `GET /v1/atlas-meta/artist/{mbid}` serves. The open-source bridge thus never carries a long-lived Atlas secret of its own — the credential is the user's attested device's, revocable at Atlas.
 
 ```json
 { "token": "<atlas bulk_harvest bearer>", "atlasBaseUrl": "https://atlas.example", "expiresInSeconds": 2592000 }

@@ -10,9 +10,24 @@ import (
 	"time"
 )
 
-type fakeMBIDs struct{ ids []string }
+type fakeMBIDs struct {
+	ids   []string
+	calls int
+}
 
-func (f fakeMBIDs) DistinctArtistMBIDs(context.Context) ([]string, error) { return f.ids, nil }
+func (f *fakeMBIDs) DistinctArtistMBIDs(context.Context) ([]string, error) {
+	f.calls++
+	return f.ids, nil
+}
+
+func mustOpenState(t *testing.T, path string) *StateStore {
+	t.Helper()
+	s, err := OpenStateStore(path)
+	if err != nil {
+		t.Fatalf("OpenStateStore: %v", err)
+	}
+	return s
+}
 
 type fakeSink struct{ stored []ArtistMeta }
 
@@ -63,11 +78,11 @@ func TestClientSubmitAndPoll(t *testing.T) {
 	}
 
 	sink := &fakeSink{}
-	c := &Client{State: state, MBIDs: fakeMBIDs{ids: []string{"a1", "a2"}}, Sink: sink}
+	c := &Client{State: state, MBIDs: &fakeMBIDs{ids: []string{"a1", "a2"}}, Sink: sink}
 	c.tick(context.Background())
 
 	if len(gotSubmit) != 2 {
-		t.Fatalf("submitted %d artist GIDs, want 2", len(gotSubmit))
+		t.Fatalf("submitted %d artist MBIDs, want 2", len(gotSubmit))
 	}
 	if len(sink.stored) != 2 {
 		t.Fatalf("stored %d results, want 2", len(sink.stored))
@@ -90,9 +105,9 @@ func TestClientTokenRejectedClearsCredential(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	state, _ := OpenStateStore(filepath.Join(t.TempDir(), "s.json"))
+	state := mustOpenState(t, filepath.Join(t.TempDir(), "s.json"))
 	_ = state.SetCredential("dead-token", srv.URL, time.Now().Add(time.Hour))
-	c := &Client{State: state, MBIDs: fakeMBIDs{ids: []string{"a1"}}, Sink: &fakeSink{}}
+	c := &Client{State: state, MBIDs: &fakeMBIDs{ids: []string{"a1"}}, Sink: &fakeSink{}}
 
 	c.tick(context.Background())
 
@@ -103,20 +118,24 @@ func TestClientTokenRejectedClearsCredential(t *testing.T) {
 
 // A no-credential tick is a cheap no-op (doesn't call the sources or sink).
 func TestClientNoCredentialIsNoOp(t *testing.T) {
-	state, _ := OpenStateStore(filepath.Join(t.TempDir(), "s.json"))
+	state := mustOpenState(t, filepath.Join(t.TempDir(), "s.json"))
 	sink := &fakeSink{}
-	c := &Client{State: state, MBIDs: fakeMBIDs{ids: []string{"a1"}}, Sink: sink}
+	source := &fakeMBIDs{ids: []string{"a1"}}
+	c := &Client{State: state, MBIDs: source, Sink: sink}
 
 	c.tick(context.Background())
 
 	if len(sink.stored) != 0 {
 		t.Errorf("stored %d with no credential, want 0", len(sink.stored))
 	}
+	if source.calls != 0 {
+		t.Errorf("MBID source called %d times with no credential, want 0", source.calls)
+	}
 }
 
 func TestStateRoundTrip(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "s.json")
-	s, _ := OpenStateStore(p)
+	s := mustOpenState(t, p)
 	if err := s.SetCredential("tok", "https://atlas.example", time.Unix(100, 0).UTC()); err != nil {
 		t.Fatalf("SetCredential: %v", err)
 	}
@@ -136,7 +155,7 @@ func TestStateRoundTrip(t *testing.T) {
 
 // Re-provisioning a DIFFERENT Atlas resets the sync position (fresh library scope).
 func TestStateCredentialChangeResetsCursorOnNewAtlas(t *testing.T) {
-	s, _ := OpenStateStore(filepath.Join(t.TempDir(), "s.json"))
+	s := mustOpenState(t, filepath.Join(t.TempDir(), "s.json"))
 	_ = s.SetCredential("t1", "https://atlas-a", time.Time{})
 	_ = s.SetCursor(9)
 	_ = s.SetCredential("t2", "https://atlas-b", time.Time{}) // different host

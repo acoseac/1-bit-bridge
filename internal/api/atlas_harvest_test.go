@@ -26,8 +26,14 @@ func newHarvestCredTestServer(t *testing.T, sink AtlasHarvestCredentialSink) (st
 	t.Helper()
 	dir := t.TempDir()
 	cfg := &config.Config{LibraryRoots: []string{t.TempDir()}, ListenAddress: ":7788", LibraryName: "T"}
-	authStore, _ := auth.OpenStore(filepath.Join(dir, "tokens.json"))
-	raw, _, _ := authStore.Mint("test")
+	authStore, err := auth.OpenStore(filepath.Join(dir, "tokens.json"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	raw, _, err := authStore.Mint("test")
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
 	srv := New(cfg, authStore, nil, "fp")
 	if sink != nil {
 		srv.WithAtlasHarvest(sink)
@@ -67,6 +73,19 @@ func TestAtlasHarvestCredentialStoresAndValidates(t *testing.T) {
 		t.Errorf("http url status = %d, want 400", r3.StatusCode)
 	}
 	r3.Body.Close()
+
+	// A base URL with a path is rejected (the client appends /v1/... paths).
+	r4 := doReq(t, srv, http.MethodPost, "/v1/atlas-harvest/credential", token, "",
+		`{"token":"t","atlasBaseUrl":"https://atlas.example/some/path"}`)
+	if r4.StatusCode != http.StatusBadRequest {
+		t.Errorf("path-bearing url status = %d, want 400", r4.StatusCode)
+	}
+	r4.Body.Close()
+
+	// None of the rejected payloads should have reached the sink.
+	if sink.called != 1 {
+		t.Errorf("sink called %d times, want 1 (rejected payloads must not persist)", sink.called)
+	}
 }
 
 // With the feature unwired the route still exists but the handler 404s, matching

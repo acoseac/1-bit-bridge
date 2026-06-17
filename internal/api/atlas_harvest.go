@@ -54,19 +54,24 @@ func (s *Server) atlasHarvestCredential(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "bad_request", "token is required")
 		return
 	}
-	// Require an https base URL: the bridge dials it with the bearer token, and
-	// Atlas magic-DNS / public deployments are https. Rejecting http avoids
-	// shipping the token in cleartext.
+	// Require a plain https base URL (https://host[:port]): the bridge dials it
+	// with the bearer token, and the harvest client appends `/v1/atlas/...`
+	// paths. Rejecting http avoids cleartext token transport; rejecting
+	// userinfo/query/fragment/path avoids persisting a credential that would
+	// always dial the wrong endpoint. The canonical scheme://host form is stored
+	// so equivalent inputs (trailing slash) don't churn the sync state.
 	u, perr := url.Parse(req.AtlasBaseURL)
-	if perr != nil || u.Scheme != "https" || u.Host == "" {
-		writeError(w, http.StatusBadRequest, "bad_request", "atlasBaseUrl must be an https URL")
+	if perr != nil || u.Scheme != "https" || u.Host == "" || u.User != nil ||
+		u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+		writeError(w, http.StatusBadRequest, "bad_request", "atlasBaseUrl must be a plain https base URL (https://host[:port])")
 		return
 	}
+	canonicalBase := u.Scheme + "://" + u.Host
 	var expiresAt time.Time
 	if req.ExpiresInSeconds > 0 {
 		expiresAt = time.Now().Add(time.Duration(req.ExpiresInSeconds) * time.Second)
 	}
-	if err := s.atlasHarvestCred.SetCredential(req.Token, req.AtlasBaseURL, expiresAt); err != nil {
+	if err := s.atlasHarvestCred.SetCredential(req.Token, canonicalBase, expiresAt); err != nil {
 		writeErrorLog(w, r, http.StatusInternalServerError, "persist_failed", "failed to store harvest credential", err)
 		return
 	}

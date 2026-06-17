@@ -75,11 +75,15 @@ func (c *Client) log() *slog.Logger {
 	return slog.Default()
 }
 
+// defaultHarvestHTTPClient carries a finite timeout so the background harvester
+// can't hang forever on an unresponsive Atlas (http.DefaultClient has none).
+var defaultHarvestHTTPClient = &http.Client{Timeout: 30 * time.Second}
+
 func (c *Client) httpClient() *http.Client {
 	if c.HTTP != nil {
 		return c.HTTP
 	}
-	return http.DefaultClient
+	return defaultHarvestHTTPClient
 }
 
 func (c *Client) submitInterval() time.Duration {
@@ -243,13 +247,19 @@ func (c *Client) pollResults(ctx context.Context) error {
 				return fmt.Errorf("store %s: %w", it.MBID, err)
 			}
 		}
-		if resp.NextCursor > st.ResultCursor {
+		advanced := resp.NextCursor > st.ResultCursor
+		if advanced {
 			if err := c.State.SetCursor(resp.NextCursor); err != nil {
 				return fmt.Errorf("advance cursor: %w", err)
 			}
 		}
 		if len(resp.Results) < limit {
 			return nil // drained
+		}
+		// A full page that didn't advance the cursor would re-request the same
+		// page forever — stop rather than hammer Atlas in a tight loop.
+		if !advanced {
+			return fmt.Errorf("harvest results cursor stuck at %d on a full page", st.ResultCursor)
 		}
 	}
 }

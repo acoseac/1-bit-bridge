@@ -1759,11 +1759,17 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 
 	// Phase-H bulk harvest (opt-in via cfg.Atlas.HarvestEnabled). The iOS app
 	// provisions a bulk_harvest credential to POST /v1/atlas-harvest/credential;
-	// the client below submits the library's artist GIDs to Atlas + delta-syncs
+	// the client below submits the library's artist MBIDs to Atlas + delta-syncs
 	// the harvested bios into the artist_atlas overlay served by /v1/atlas-meta.
 	// Dormant (cheap idle ticks) until a credential lands.
 	var harvestClient *atlasharvest.Client
-	if cfg.Atlas.HarvestEnabled {
+	// Harvest requires Atlas enrichment: the harvested bios land in artist_atlas,
+	// which is only SERVED (GET /v1/atlas-meta) when cfg.Atlas.Enabled wires
+	// WithAtlasMeta above. Harvesting without it would write bios nothing serves.
+	if cfg.Atlas.HarvestEnabled && !cfg.Atlas.Enabled {
+		fmt.Fprintln(stderr, "atlas harvest: harvestEnabled requires atlas.enabled (bios are served via /v1/atlas-meta) — harvest disabled")
+	}
+	if cfg.Atlas.HarvestEnabled && cfg.Atlas.Enabled {
 		harvestState, herr := atlasharvest.OpenStateStore(filepath.Join(cfg.DataDir, "atlas-harvest.json"))
 		if herr != nil {
 			fmt.Fprintf(stderr, "atlas harvest: open state: %v (feature disabled)\n", herr)
