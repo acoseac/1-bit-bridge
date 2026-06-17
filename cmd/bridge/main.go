@@ -37,6 +37,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/advertise"
 	"github.com/acoseac/1-bit-bridge/internal/analyze"
 	"github.com/acoseac/1-bit-bridge/internal/api"
+	"github.com/acoseac/1-bit-bridge/internal/atlasharvest"
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/enrich"
@@ -121,6 +122,22 @@ func (a *variantStoreAdapter) LookupVariant(ctx context.Context, sourcePath, var
 		SourceMTimeNS: v.SourceMTimeNS,
 		SourceSize:    v.SourceSize,
 	}, nil
+}
+
+// atlasHarvestSink adapts the manifest store to the Phase-H harvest client's
+// MetaSink. Source/SourceURL attribution from the harvest result is dropped for
+// v1 — the Last.fm bio carries its own inline "Read more on Last.fm" link;
+// explicit attribution columns on artist_atlas are a follow-up.
+type atlasHarvestSink struct{ store *manifest.Store }
+
+func (a atlasHarvestSink) UpsertArtistMeta(ctx context.Context, m atlasharvest.ArtistMeta) error {
+	return a.store.UpsertArtistAtlasMeta(ctx, manifest.ArtistAtlasMeta{
+		ArtistMBID: m.MBID,
+		Found:      m.Found,
+		Bio:        m.Bio,
+		BioSummary: m.BioSummary,
+		Genres:     m.Genres,
+	})
 }
 
 // analysisStoreAdapter implements api.AnalysisStore on top of a
@@ -1739,6 +1756,31 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	if smartPlaylistsActive {
 		apiSrv.WithSmartPlaylistStore(manifestStore)
 	}
+
+	// Phase-H bulk harvest (opt-in via cfg.Atlas.HarvestEnabled). The iOS app
+	// provisions a bulk_harvest credential to POST /v1/atlas-harvest/credential;
+	// the client below submits the library's artist GIDs to Atlas + delta-syncs
+	// the harvested bios into the artist_atlas overlay served by /v1/atlas-meta.
+	// Dormant (cheap idle ticks) until a credential lands.
+	var harvestClient *atlasharvest.Client
+	if cfg.Atlas.HarvestEnabled {
+		harvestState, herr := atlasharvest.OpenStateStore(filepath.Join(cfg.DataDir, "atlas-harvest.json"))
+		if herr != nil {
+			fmt.Fprintf(stderr, "atlas harvest: open state: %v (feature disabled)\n", herr)
+		} else {
+			apiSrv.WithAtlasHarvest(harvestState)
+			harvestClient = &atlasharvest.Client{
+				State: harvestState,
+				MBIDs: manifestStore,
+				Sink:  atlasHarvestSink{store: manifestStore},
+				Log:   logging.Component("atlasharvest"),
+			}
+		}
+	}
+	if harvestClient != nil {
+		go harvestClient.Run(scanCtx)
+	}
+
 	cfgHolder := apiSrv.ConfigHolder()
 
 	// DLNA MediaServer (opt-in, LAN-only). Starts a parallel

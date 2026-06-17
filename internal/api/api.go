@@ -174,6 +174,11 @@ type Server struct {
 	atlasMetaEnabled bool          // mirrors cfg.Atlas.Enabled
 	atlasMetaTTL     time.Duration // served as ttlSeconds in the meta response
 
+	// atlasHarvestCred backs POST /v1/atlas-harvest/credential — the iOS app
+	// hands the bridge an App-Attest-minted bulk_harvest token here. Nil unless
+	// WithAtlasHarvest is wired (gated on cfg.Atlas.HarvestEnabled).
+	atlasHarvestCred AtlasHarvestCredentialSink
+
 	// smartPlaylistStore backs GET /v1/smart-playlists + the "smartPlaylists"
 	// health-feature flag. Nil unless WithSmartPlaylistStore is wired (gated
 	// on cfg.SmartPlaylists.Enabled). Same feature-off shape as the others;
