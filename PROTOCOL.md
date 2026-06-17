@@ -567,6 +567,35 @@ Authenticated read-only snapshot of the analysis feature, mirroring the admin ti
 - `analysis.enabled: true` AND `sox` on PATH: full feature operates as documented (`waveform` + `loudness` + `keyTempo`).
 - `analysis.enabled: true` AND `sox` MISSING from PATH: bridge logs `.error` at startup, in-memory disables the feature, omits the `waveform`, `loudness`, and `keyTempo` flags. The rest of the server keeps running.
 
+### Atlas rich-tier metadata (additive — Phase 2)
+
+Optional artist-bio / album-description / genre enrichment from a self-hosted **Atlas** service (`github.com/acoseac/1-bit-atlas`), enabled via `atlas.enabled: true` in `bridge.yaml`. Disabled by default. **The open-source bridge never holds an Atlas credential.** The closed-source 1-bit app holds the Atlas `read:bridge` key, fetches per-entity rich metadata from Atlas, and **ferries it into the bridge**, which caches it (in standalone `release_atlas` / `artist_atlas` SQLite tables, MBID-keyed, never spliced into the manifest) and serves it back to all the user's devices. `ProtocolVersion` stays `1`.
+
+Advertised via the `atlasEnrichment` flag in `/v1/health.features`. Pre-feature bridges omit the flag and return `404` from the routes below.
+
+#### `POST /v1/atlas-ingest` (bearer-authenticated)
+
+The app pushes per-entity metadata. Body carries an optional `release` and/or `artist` object (at least one required):
+
+```json
+{
+  "release": { "mbid": "<uuid>", "found": true, "description": "…", "recordLabel": "…", "genres": ["…"], "atlasEtag": "…" },
+  "artist":  { "mbid": "<uuid>", "found": true, "bio": "…", "bioSummary": "…", "genres": ["…"], "atlasEtag": "…" }
+}
+```
+
+`found: false` with empty fields writes a **tombstone** (Atlas was checked and had nothing) so the entity isn't re-queried on every view. Validation: `mbid` must be a UUID; `description`/`bio`/`bioSummary` ≤ 16 KiB, `recordLabel` ≤ 1 KiB, ≤ 32 genres of ≤ 256 B each; whole body ≤ 256 KiB. **`ingested_at` is stamped bridge-side** (never taken from the body — the bridge owns its cache-freshness clock). Returns `200 {releaseIngested, artistIngested}`.
+
+#### `GET /v1/atlas-meta/{release|artist}/{mbid}` (bearer-authenticated)
+
+Serves the cached metadata. This is the iOS **Read-Before-Write gate**: the app asks the bridge first and only fetches from Atlas on a miss/stale entity.
+
+```json
+{ "found": true, "ingestedAt": "<RFC3339>", "ttlSeconds": 2592000, "description": "…", "recordLabel": "…", "genres": ["…"] }
+```
+
+(artist responses carry `bio`/`bioSummary` instead of `description`/`recordLabel`.) `ttlSeconds` is the operator's freshness window (`atlas.metaTtlHours`, default 720 h) — the client treats the row as stale once `now − ingestedAt > ttlSeconds` and re-fetches. **`404`** means the entity was **never checked** (the client then queries Atlas); a **tombstone** returns `200` with `found: false` (checked, nothing — don't re-query until the TTL elapses).
+
 ### Playlist backup (additive, since v1.6; user-wide since v1.7)
 
 Playlist backup. The bridge is a **safe, not a player**: a playlist may mix tracks from several bridges plus local/SMB sources. Items owned by this bridge are stored as resolvable `path`s; items owned by another bridge (or device-local / SMB) are stored as **opaque references** the bridge never resolves or serves — iOS re-resolves them locally on restore against its own shares.

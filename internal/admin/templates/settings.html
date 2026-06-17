@@ -113,6 +113,20 @@
                  placeholder="https://coverartarchive.org">
         </label>
       </div>
+
+      <div class="field">
+        <label class="checkbox">
+          <input name="atlasEnabled" type="checkbox" {{if .Data.AtlasEnabled}}checked{{end}}>
+          Rich metadata: bios, descriptions, genres <span class="badge warn">restart</span>
+        </label>
+        <small class="hint">
+          When enabled, the bridge accepts artist bios + album descriptions
+          pushed by the 1-bit app (which holds the Atlas access key — the
+          open-source bridge never sees it) and serves them back to all your
+          devices via <code>/v1/atlas-meta</code>. Advertises
+          <code>atlasEnrichment</code> on <code>/v1/health</code>; off by default.
+        </small>
+      </div>
     </div>
 
     <div id="settings-panel-networking" class="tab-pane" data-tab="networking"

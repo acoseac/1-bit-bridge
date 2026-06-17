@@ -1700,6 +1700,9 @@ function initSettings() {
       // normalizes; restart-required.
       enrichMusicBrainzBaseURL: fd.get("enrichMusicBrainzBaseURL") || "",
       enrichCoverArtBaseURL: fd.get("enrichCoverArtBaseURL") || "",
+      // Rich-tier Atlas metadata opt-in (bios/descriptions via the app
+      // ferry). Restart-required; same checkbox-coerce pattern.
+      atlasEnabled: fd.get("atlasEnabled") === "on",
       // PR 4 — Tailscale + mDNS hot-reload fields. Tailscale
       // dropdown value is one of "cli" / "tsnet" / "disabled".
       // mDNS checkbox is the FormData "on"/null shape — coerce

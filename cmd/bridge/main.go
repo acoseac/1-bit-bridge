@@ -1732,6 +1732,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		WithDeviceRegistrar(manifestStore).
 		WithPlaylistStore(manifestStore).
 		WithHistoryStore(manifestStore).
+		WithAtlasMeta(cfg.Atlas.Enabled, cfg.Atlas.EffectiveMetaTTL(), manifestStore).
 		WithPlaylistCoverStore(manifestStore)
 	// Conditionally wire the smart-playlist feed so the health flag + the
 	// 404-when-off shape stay honest when cfg.SmartPlaylists.Enabled is false.
