@@ -328,6 +328,12 @@ type AtlasConfig struct {
 	// re-fetches from Atlas + re-ingests once a cached entity is older than
 	// this. Zero defaults to DefaultAtlasMetaTTLHours (720 h = 30 days).
 	MetaTTLHours int `yaml:"metaTtlHours,omitempty"`
+	// HarvestEnabled turns on the Phase-H bridge-driven bulk harvest: the bridge
+	// accepts an iOS-provisioned bulk_harvest credential (POST
+	// /v1/atlas-harvest/credential), submits the library's artist GIDs to Atlas,
+	// and delta-syncs the harvested bios into the artist_atlas overlay. Default
+	// false; the feature stays dormant until a credential is provisioned.
+	HarvestEnabled bool `yaml:"harvestEnabled,omitempty"`
 }
 
 // DefaultAtlasMetaTTLHours is the metadata freshness window applied when

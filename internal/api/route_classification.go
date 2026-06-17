@@ -276,6 +276,9 @@ func (s *Server) routeRegistry() []route {
 		{pattern: "GET /v1/atlas-meta/release/{mbid}", kind: boundedRoute, handler: withCtxTimeout(2*time.Second, s.authed(s.atlasMetaRelease))},
 		{pattern: "GET /v1/atlas-meta/artist/{mbid}", kind: boundedRoute, handler: withCtxTimeout(2*time.Second, s.authed(s.atlasMetaArtist))},
 		{pattern: "POST /v1/atlas-ingest", kind: boundedRoute, handler: withCtxTimeout(10*time.Second, s.authed(s.atlasIngest))},
+		// Phase-H bulk-harvest credential handoff from the iOS app — a single
+		// small atomic file write.
+		{pattern: "POST /v1/atlas-harvest/credential", kind: boundedRoute, handler: withCtxTimeout(5*time.Second, s.authed(s.atlasHarvestCredential))},
 
 		// Server-generated smart playlists — a single fast cache read
 		// (bounded; generation is background/admin, never in-request).

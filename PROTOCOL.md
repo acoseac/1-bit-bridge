@@ -596,6 +596,16 @@ Serves the cached metadata. This is the iOS **Read-Before-Write gate**: the app 
 
 (artist responses carry `bio`/`bioSummary` instead of `description`/`recordLabel`.) `ttlSeconds` is the operator's freshness window (`atlas.metaTtlHours`, default 720 h) — the client treats the row as stale once `now − ingestedAt > ttlSeconds` and re-fetches. **`404`** means the entity was **never checked** (the client then queries Atlas); a **tombstone** returns `200` with `found: false` (checked, nothing — don't re-query until the TTL elapses).
 
+#### `POST /v1/atlas-harvest/credential` (bearer-authenticated — additive, Phase H)
+
+Provisions the bridge-driven **bulk harvest**. The iOS app (which alone holds an App-Attest identity) mints a device-bound `bulk_harvest` token at Atlas and hands it to the bridge here; the bridge persists it locally (0600, never in the manifest DB) and its background harvest client submits the library's artist MBIDs to Atlas, delta-syncs the harvested Tier-1 bios, and caches them in the same `artist_atlas` overlay `GET /v1/atlas-meta/artist/{mbid}` serves. The open-source bridge thus never carries a long-lived Atlas secret of its own — the credential is the user's attested device's, revocable at Atlas.
+
+```json
+{ "token": "<atlas bulk_harvest bearer>", "atlasBaseUrl": "https://atlas.example", "expiresInSeconds": 2592000 }
+```
+
+`token` is required; `atlasBaseUrl` MUST be an `https` URL (the bridge dials it with the bearer — http is rejected to avoid cleartext token transport); `expiresInSeconds` ≤ 0 (or omitted) means "unknown expiry". **`200`** `{ "ok": true }` on success. Advertised by the bridge accepting the route; gated on `atlas.harvestEnabled` (a bridge with the feature off returns `404 harvest_not_supported`). The harvest client is dormant (cheap idle ticks) until a credential is provisioned.
+
 ### Playlist backup (additive, since v1.6; user-wide since v1.7)
 
 Playlist backup. The bridge is a **safe, not a player**: a playlist may mix tracks from several bridges plus local/SMB sources. Items owned by this bridge are stored as resolvable `path`s; items owned by another bridge (or device-local / SMB) are stored as **opaque references** the bridge never resolves or serves — iOS re-resolves them locally on restore against its own shares.

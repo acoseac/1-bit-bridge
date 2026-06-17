@@ -2177,6 +2177,34 @@ func (s *Store) HasTrackWithArtistMBID(ctx context.Context, mbid string) bool {
 	return s.hasTrackWithJSONField(ctx, artistMBIDField, mbid)
 }
 
+// DistinctArtistMBIDs returns every distinct, non-empty MusicBrainz artist GID
+// present in the library — the set the Atlas bulk-harvest client submits for
+// enrichment. Reads are un-mutexed (WAL handles concurrent readers). The artist
+// GID lives in the per-track tags_json blob under `$.artistMBID`, so this is a
+// full-table json_extract scan; it runs on a slow cadence (harvest submit), not
+// a request hot path.
+func (s *Store) DistinctArtistMBIDs(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT DISTINCT json_extract(tags_json, '$.artistMBID')
+		  FROM tracks
+		 WHERE json_extract(tags_json, '$.artistMBID') IS NOT NULL
+		   AND json_extract(tags_json, '$.artistMBID') != ''
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var mbid string
+		if err := rows.Scan(&mbid); err != nil {
+			return nil, err
+		}
+		out = append(out, mbid)
+	}
+	return out, rows.Err()
+}
+
 // Field names for the JSON-extract lookup. Declared as constants
 // (not parameters passed by callers) so `hasTrackWithJSONField` can
 // enforce a whitelist — the function used to take an arbitrary
