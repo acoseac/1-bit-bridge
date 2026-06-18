@@ -50,6 +50,13 @@ type ArtistAtlasMeta struct {
 // ingests of the same MBID from two devices can't violate the PK (UPSERT).
 // Holds Store.mu like every writer.
 func (s *Store) UpsertReleaseAtlasMeta(ctx context.Context, m ReleaseAtlasMeta) error {
+	// A tombstone (Found=false) carries no attribution — enforce the documented
+	// "source/sourceUrl omitted on a tombstone" contract at the write boundary so
+	// a malformed/stale client value can't leak onto a tombstone read. Covers
+	// both the ferry ingest and the harvest sink (CodeRabbit on PR #410).
+	if !m.Found {
+		m.Source, m.SourceURL = "", ""
+	}
 	genres, err := marshalGenres(m.Genres)
 	if err != nil {
 		return err
@@ -74,6 +81,10 @@ func (s *Store) UpsertReleaseAtlasMeta(ctx context.Context, m ReleaseAtlasMeta) 
 
 // UpsertArtistAtlasMeta is the artist analogue of UpsertReleaseAtlasMeta.
 func (s *Store) UpsertArtistAtlasMeta(ctx context.Context, m ArtistAtlasMeta) error {
+	// Tombstone carries no attribution — see UpsertReleaseAtlasMeta.
+	if !m.Found {
+		m.Source, m.SourceURL = "", ""
+	}
 	genres, err := marshalGenres(m.Genres)
 	if err != nil {
 		return err

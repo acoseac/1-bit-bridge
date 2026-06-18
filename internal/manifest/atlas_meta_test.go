@@ -84,6 +84,27 @@ func TestReleaseAtlasMetaTombstone(t *testing.T) {
 	}
 }
 
+func TestAtlasMetaTombstoneDropsAttribution(t *testing.T) {
+	s := openAtlasTestStore(t)
+	ctx := context.Background()
+	const mbid = "ffffffff-ffff-4fff-8fff-ffffffffffff"
+	// A malformed/stale client sends found=false but with source values — the
+	// store must drop them so the tombstone read carries no attribution (the
+	// documented "source omitted on a tombstone" contract).
+	if err := s.UpsertReleaseAtlasMeta(ctx, ReleaseAtlasMeta{
+		ReleaseMBID: mbid, Found: false, Source: "bandcamp", SourceURL: "https://x",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := s.GetReleaseAtlasMeta(ctx, mbid)
+	if got == nil || got.Found {
+		t.Fatalf("expected tombstone row, got %+v", got)
+	}
+	if got.Source != "" || got.SourceURL != "" {
+		t.Errorf("tombstone carried attribution: (%q, %q)", got.Source, got.SourceURL)
+	}
+}
+
 func TestReleaseAtlasMetaAbsentReturnsNil(t *testing.T) {
 	s := openAtlasTestStore(t)
 	got, err := s.GetReleaseAtlasMeta(context.Background(), "dddddddd-dddd-4ddd-8ddd-dddddddddddd")
