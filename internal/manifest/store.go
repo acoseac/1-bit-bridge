@@ -2259,25 +2259,12 @@ func (s *Store) HasTrackWithArtistMBID(ctx context.Context, mbid string) bool {
 // full-table json_extract scan; it runs on a slow cadence (harvest submit), not
 // a request hot path.
 func (s *Store) DistinctArtistMBIDs(ctx context.Context) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	return collectStringColumn(s.db.QueryContext(ctx, `
 		SELECT DISTINCT json_extract(tags_json, '$.artistMBID')
 		  FROM tracks
 		 WHERE json_extract(tags_json, '$.artistMBID') IS NOT NULL
 		   AND json_extract(tags_json, '$.artistMBID') != ''
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var mbid string
-		if err := rows.Scan(&mbid); err != nil {
-			return nil, err
-		}
-		out = append(out, mbid)
-	}
-	return out, rows.Err()
+	`))
 }
 
 // DistinctReleaseMBIDs returns every distinct MusicBrainz release GID the
@@ -2289,24 +2276,30 @@ func (s *Store) DistinctArtistMBIDs(ctx context.Context) ([]string, error) {
 // `/release/{mbid}` both key on it. Un-mutexed read; slow cadence (harvest), not
 // a hot path.
 func (s *Store) DistinctReleaseMBIDs(ctx context.Context) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	return collectStringColumn(s.db.QueryContext(ctx, `
 		SELECT DISTINCT json_extract(tags_json, '$.artworkMBID')
 		  FROM tracks
 		 WHERE json_extract(tags_json, '$.artworkMBID') IS NOT NULL
 		   AND json_extract(tags_json, '$.artworkMBID') != ''
 		   AND json_extract(tags_json, '$.artworkMBID') NOT LIKE 'local-%'
-	`)
+	`))
+}
+
+// collectStringColumn drains a single-text-column query into a []string,
+// closing the rows. Shared by the Distinct*MBIDs enumerators. Takes the
+// (rows, err) pair directly so callers stay one-liners.
+func collectStringColumn(rows *sql.Rows, err error) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []string
 	for rows.Next() {
-		var mbid string
-		if err := rows.Scan(&mbid); err != nil {
+		var v string
+		if err := rows.Scan(&v); err != nil {
 			return nil, err
 		}
-		out = append(out, mbid)
+		out = append(out, v)
 	}
 	return out, rows.Err()
 }

@@ -153,44 +153,40 @@ func TestAtlasPremiumFetcher_RefetchPremium(t *testing.T) {
 	const mbid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 	premiumBytes := append([]byte{0xFF, 0xD8, 0xFF, 0xE0}, []byte("PREMIUM")...)
 
-	t.Run("premium source overwrites the cache", func(t *testing.T) {
+	// fixture spins a server replying with the given source header + premiumBytes,
+	// seeds the cache with `existing`, and returns the fetcher + cache path.
+	fixture := func(t *testing.T, source, existing string) (PremiumCoverFetcher, string) {
+		t.Helper()
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("X-Atlas-Asset-Source", "tidal")
+			w.Header().Set("X-Atlas-Asset-Source", source)
 			_, _ = w.Write(premiumBytes)
 		}))
-		defer srv.Close()
-		f := NewAtlasPremiumFetcher(fakeCred{token: "t", base: srv.URL, ok: true}, "ua", srv.Client())
+		t.Cleanup(srv.Close)
 		path := filepath.Join(t.TempDir(), mbid+"-500.jpg")
-		if err := os.WriteFile(path, []byte("OLD-CAA-COVER"), 0o644); err != nil {
+		if err := os.WriteFile(path, []byte(existing), 0o644); err != nil {
 			t.Fatal(err)
 		}
+		return NewAtlasPremiumFetcher(fakeCred{token: "t", base: srv.URL, ok: true}, "ua", srv.Client()), path
+	}
+
+	t.Run("premium source overwrites the cache", func(t *testing.T) {
+		f, path := fixture(t, "tidal", "OLD-CAA-COVER")
 		got, err := f.RefetchPremium(context.Background(), path, mbid, 500)
 		if err != nil || !got {
 			t.Fatalf("got=%v err=%v, want true,nil", got, err)
 		}
-		b, _ := os.ReadFile(path)
-		if !bytes.Equal(b, premiumBytes) {
+		if b, _ := os.ReadFile(path); !bytes.Equal(b, premiumBytes) {
 			t.Errorf("cache not overwritten with the premium bytes")
 		}
 	})
 
 	t.Run("caa source leaves the cache untouched", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("X-Atlas-Asset-Source", "caa")
-			_, _ = w.Write(premiumBytes)
-		}))
-		defer srv.Close()
-		f := NewAtlasPremiumFetcher(fakeCred{token: "t", base: srv.URL, ok: true}, "ua", srv.Client())
-		path := filepath.Join(t.TempDir(), mbid+"-500.jpg")
-		if err := os.WriteFile(path, []byte("EXISTING"), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		f, path := fixture(t, "caa", "EXISTING")
 		got, err := f.RefetchPremium(context.Background(), path, mbid, 500)
 		if err != nil || got {
 			t.Fatalf("got=%v err=%v, want false,nil for a caa source", got, err)
 		}
-		b, _ := os.ReadFile(path)
-		if string(b) != "EXISTING" {
+		if b, _ := os.ReadFile(path); string(b) != "EXISTING" {
 			t.Errorf("cache overwritten on a caa source: %q", b)
 		}
 	})
@@ -199,7 +195,7 @@ func TestAtlasPremiumFetcher_RefetchPremium(t *testing.T) {
 		f := NewAtlasPremiumFetcher(fakeCred{ok: false}, "ua", nil)
 		got, err := f.RefetchPremium(context.Background(), filepath.Join(t.TempDir(), "x.jpg"), mbid, 500)
 		if got || !errors.Is(err, ErrNoCredential) {
-			t.Errorf("got=%v err=%v, want false + ErrNoCredential with no credential", got, err)
+			t.Errorf("got=%v err=%v, want false + ErrNoCredential", got, err)
 		}
 	})
 
