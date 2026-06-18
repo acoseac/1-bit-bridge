@@ -19,6 +19,19 @@ type fakeCred struct {
 
 func (f fakeCred) AtlasCredential() (string, string, bool) { return f.token, f.base, f.ok }
 
+// fakeClearableCred adds the optional Clear() the fetcher type-asserts for on a
+// token-rejected (401/403) response — *atlasharvest.StateStore implements it in
+// production.
+type fakeClearableCred struct {
+	fakeCred
+	cleared bool
+}
+
+func (f *fakeClearableCred) Clear() error {
+	f.cleared = true
+	return nil
+}
+
 // jpeg is a tiny valid-enough JPEG-ish blob (SOI marker + payload). The
 // premium fetcher streams bytes verbatim; content is opaque to it.
 var premiumJPEG = append([]byte{0xFF, 0xD8, 0xFF, 0xE0}, []byte("ATLAS-PREMIUM")...)
@@ -71,15 +84,49 @@ func TestAtlasPremiumFetcher_TryCache(t *testing.T) {
 		}
 	})
 
-	t.Run("401 returns false (token rejected → CAA fallback)", func(t *testing.T) {
+	t.Run("401 returns false and clears the credential", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusUnauthorized)
 		}))
 		defer srv.Close()
-		f := NewAtlasPremiumFetcher(fakeCred{token: "stale", base: srv.URL, ok: true}, "ua", srv.Client())
+		cred := &fakeClearableCred{fakeCred: fakeCred{token: "stale", base: srv.URL, ok: true}}
+		f := NewAtlasPremiumFetcher(cred, "ua", srv.Client())
 		path := filepath.Join(t.TempDir(), mbid+"-500.jpg")
 		if f.TryCache(context.Background(), path, mbid, 500) {
 			t.Error("TryCache returned true on a 401")
+		}
+		if !cred.cleared {
+			t.Error("credential was not cleared on 401")
+		}
+	})
+
+	t.Run("403 returns false and clears the credential", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+		}))
+		defer srv.Close()
+		cred := &fakeClearableCred{fakeCred: fakeCred{token: "wrongscope", base: srv.URL, ok: true}}
+		f := NewAtlasPremiumFetcher(cred, "ua", srv.Client())
+		path := filepath.Join(t.TempDir(), mbid+"-500.jpg")
+		if f.TryCache(context.Background(), path, mbid, 500) {
+			t.Error("TryCache returned true on a 403")
+		}
+		if !cred.cleared {
+			t.Error("credential was not cleared on 403")
+		}
+	})
+
+	t.Run("404 does not clear the credential", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.NotFound(w, r)
+		}))
+		defer srv.Close()
+		cred := &fakeClearableCred{fakeCred: fakeCred{token: "good", base: srv.URL, ok: true}}
+		f := NewAtlasPremiumFetcher(cred, "ua", srv.Client())
+		path := filepath.Join(t.TempDir(), mbid+"-500.jpg")
+		_ = f.TryCache(context.Background(), path, mbid, 500)
+		if cred.cleared {
+			t.Error("credential cleared on a 404 (no cover) — should only clear on 401/403")
 		}
 	})
 

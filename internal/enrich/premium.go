@@ -81,10 +81,23 @@ func (f *atlasPremiumFetcher) TryCache(ctx context.Context, path, mbid string, s
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		// 404 = no cover at Atlas (normal — fall through to CAA rg + iTunes);
-		// 401/403 = token rejected (the harvest client owns clearing the
-		// credential); 5xx = Atlas hiccup. In every case fall through rather
-		// than failing enrichment; only 5xx is noisy enough to log.
-		if resp.StatusCode >= 500 {
+		// 5xx = Atlas hiccup. The PUBLIC artwork proxy doesn't 401/403 a bad
+		// bearer — it silently serves CAA — so in normal operation those never
+		// arrive here. Defense-in-depth (Gemini HIGH on PR #413): if a fronting
+		// proxy or a future Atlas change ever DOES reject the token, clear the
+		// credential so we stop retrying a dead token on every subsequent
+		// enriched track rather than waiting for the harvest client's next poll
+		// to clear it. AtlasCredential then returns ok=false and the premium
+		// path goes dormant until the iOS app re-provisions. Clear is safe to
+		// call concurrently with the harvest client (StateStore.Clear holds its
+		// own mutex; both setting Token="" is idempotent).
+		switch {
+		case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+			logger.Warn("atlas premium cover: credential rejected, clearing", "status", resp.StatusCode)
+			if clearable, ok := f.cred.(interface{ Clear() error }); ok {
+				_ = clearable.Clear()
+			}
+		case resp.StatusCode >= 500:
 			logger.Warn("atlas premium cover fetch", "mbid", mbid, "size", size, "status", resp.StatusCode)
 		}
 		return false
