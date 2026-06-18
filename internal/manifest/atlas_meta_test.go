@@ -28,6 +28,7 @@ func TestReleaseAtlasMetaRoundTrip(t *testing.T) {
 		ReleaseMBID: mbid, Found: true,
 		Description: "A great album.", RecordLabel: "Blue Note",
 		Genres: []string{"Jazz", "Bebop"}, AtlasETag: "etag1",
+		Source: "bandcamp", SourceURL: "https://x.bandcamp.com/album/y",
 	}
 	if err := s.UpsertReleaseAtlasMeta(ctx, in); err != nil {
 		t.Fatal(err)
@@ -38,6 +39,9 @@ func TestReleaseAtlasMetaRoundTrip(t *testing.T) {
 	}
 	if !got.Found || got.Description != in.Description || got.RecordLabel != in.RecordLabel || got.AtlasETag != "etag1" {
 		t.Errorf("round-trip mismatch: %+v", got)
+	}
+	if got.Source != "bandcamp" || got.SourceURL != "https://x.bandcamp.com/album/y" {
+		t.Errorf("attribution round-trip = (%q, %q), want (bandcamp, …)", got.Source, got.SourceURL)
 	}
 	if len(got.Genres) != 2 || got.Genres[0] != "Jazz" || got.Genres[1] != "Bebop" {
 		t.Errorf("genres = %v", got.Genres)
@@ -80,6 +84,27 @@ func TestReleaseAtlasMetaTombstone(t *testing.T) {
 	}
 }
 
+func TestAtlasMetaTombstoneDropsAttribution(t *testing.T) {
+	s := openAtlasTestStore(t)
+	ctx := context.Background()
+	const mbid = "ffffffff-ffff-4fff-8fff-ffffffffffff"
+	// A malformed/stale client sends found=false but with source values — the
+	// store must drop them so the tombstone read carries no attribution (the
+	// documented "source omitted on a tombstone" contract).
+	if err := s.UpsertReleaseAtlasMeta(ctx, ReleaseAtlasMeta{
+		ReleaseMBID: mbid, Found: false, Source: "bandcamp", SourceURL: "https://x",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := s.GetReleaseAtlasMeta(ctx, mbid)
+	if got == nil || got.Found {
+		t.Fatalf("expected tombstone row, got %+v", got)
+	}
+	if got.Source != "" || got.SourceURL != "" {
+		t.Errorf("tombstone carried attribution: (%q, %q)", got.Source, got.SourceURL)
+	}
+}
+
 func TestReleaseAtlasMetaAbsentReturnsNil(t *testing.T) {
 	s := openAtlasTestStore(t)
 	got, err := s.GetReleaseAtlasMeta(context.Background(), "dddddddd-dddd-4ddd-8ddd-dddddddddddd")
@@ -92,12 +117,15 @@ func TestArtistAtlasMetaRoundTrip(t *testing.T) {
 	s := openAtlasTestStore(t)
 	ctx := context.Background()
 	const mbid = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
-	in := ArtistAtlasMeta{ArtistMBID: mbid, Found: true, Bio: "Long bio.", BioSummary: "Short.", Genres: []string{"Rock"}}
+	in := ArtistAtlasMeta{ArtistMBID: mbid, Found: true, Bio: "Long bio.", BioSummary: "Short.", Genres: []string{"Rock"}, Source: "wiki", SourceURL: "https://en.wikipedia.org/wiki/Z"}
 	if err := s.UpsertArtistAtlasMeta(ctx, in); err != nil {
 		t.Fatal(err)
 	}
 	got, err := s.GetArtistAtlasMeta(ctx, mbid)
 	if err != nil || got == nil || got.Bio != "Long bio." || got.BioSummary != "Short." || len(got.Genres) != 1 {
 		t.Errorf("artist round-trip mismatch: %+v (err %v)", got, err)
+	}
+	if got.Source != "wiki" || got.SourceURL != "https://en.wikipedia.org/wiki/Z" {
+		t.Errorf("attribution round-trip = (%q, %q), want (wiki, …)", got.Source, got.SourceURL)
 	}
 }

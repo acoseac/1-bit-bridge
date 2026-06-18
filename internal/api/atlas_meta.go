@@ -42,6 +42,8 @@ const (
 	atlasMaxLabelLen        = 1 << 10   // 1 KiB: record label
 	atlasMaxGenres          = 32        // entries
 	atlasMaxGenreLen        = 256       // bytes per genre
+	atlasMaxSourceLen       = 64        // bytes: attribution source name ("wiki", …)
+	atlasMaxSourceURLLen    = 2 << 10   // 2 KiB: attribution URL
 )
 
 // --- wire DTOs (see PROTOCOL.md) ---
@@ -49,21 +51,25 @@ const (
 // atlasReleaseDTO is the release half of an ingest body. found distinguishes a
 // real hit from a tombstone (the app checked Atlas and it had nothing).
 type atlasReleaseDTO struct {
-	MBID        string   `json:"mbid"`
-	Found       bool     `json:"found"`
-	Description string   `json:"description,omitempty"`
-	RecordLabel string   `json:"recordLabel,omitempty"`
-	Genres      []string `json:"genres,omitempty"`
-	AtlasETag   string   `json:"atlasEtag,omitempty"`
+	MBID                 string   `json:"mbid"`
+	Found                bool     `json:"found"`
+	Description          string   `json:"description,omitempty"`
+	RecordLabel          string   `json:"recordLabel,omitempty"`
+	Genres               []string `json:"genres,omitempty"`
+	DescriptionSource    string   `json:"descriptionSource,omitempty"`    // attribution provenance
+	DescriptionSourceURL string   `json:"descriptionSourceUrl,omitempty"` // attribution link
+	AtlasETag            string   `json:"atlasEtag,omitempty"`
 }
 
 type atlasArtistDTO struct {
-	MBID       string   `json:"mbid"`
-	Found      bool     `json:"found"`
-	Bio        string   `json:"bio,omitempty"`
-	BioSummary string   `json:"bioSummary,omitempty"`
-	Genres     []string `json:"genres,omitempty"`
-	AtlasETag  string   `json:"atlasEtag,omitempty"`
+	MBID         string   `json:"mbid"`
+	Found        bool     `json:"found"`
+	Bio          string   `json:"bio,omitempty"`
+	BioSummary   string   `json:"bioSummary,omitempty"`
+	Genres       []string `json:"genres,omitempty"`
+	BioSource    string   `json:"bioSource,omitempty"`    // attribution provenance
+	BioSourceURL string   `json:"bioSourceUrl,omitempty"` // attribution link
+	AtlasETag    string   `json:"atlasEtag,omitempty"`
 }
 
 type atlasIngestRequest struct {
@@ -90,6 +96,11 @@ type atlasMetaResponse struct {
 	Bio         string   `json:"bio,omitempty"`         // artist
 	BioSummary  string   `json:"bioSummary,omitempty"`  // artist
 	Genres      []string `json:"genres,omitempty"`
+	// Source + SourceURL attribute the primary text (description for a release,
+	// bio for an artist) so iOS renders "Read more on <source>". Empty for a
+	// tombstone or when no source contributed.
+	Source    string `json:"source,omitempty"`
+	SourceURL string `json:"sourceUrl,omitempty"`
 }
 
 // atlasIngest handles POST /v1/atlas-ingest. The iOS app (which holds the
@@ -132,6 +143,8 @@ func (s *Server) atlasIngest(w http.ResponseWriter, r *http.Request) {
 			Description: req.Release.Description,
 			RecordLabel: req.Release.RecordLabel,
 			Genres:      req.Release.Genres,
+			Source:      req.Release.DescriptionSource,
+			SourceURL:   req.Release.DescriptionSourceURL,
 			AtlasETag:   req.Release.AtlasETag,
 		}); err != nil {
 			writeErrorLog(w, r, http.StatusInternalServerError, "internal", "failed to store release metadata", err)
@@ -146,6 +159,8 @@ func (s *Server) atlasIngest(w http.ResponseWriter, r *http.Request) {
 			Bio:        req.Artist.Bio,
 			BioSummary: req.Artist.BioSummary,
 			Genres:     req.Artist.Genres,
+			Source:     req.Artist.BioSource,
+			SourceURL:  req.Artist.BioSourceURL,
 			AtlasETag:  req.Artist.AtlasETag,
 		}); err != nil {
 			writeErrorLog(w, r, http.StatusInternalServerError, "internal", "failed to store artist metadata", err)
@@ -183,6 +198,8 @@ func (s *Server) atlasMetaRelease(w http.ResponseWriter, r *http.Request) {
 		Description: m.Description,
 		RecordLabel: m.RecordLabel,
 		Genres:      m.Genres,
+		Source:      m.Source,
+		SourceURL:   m.SourceURL,
 	})
 }
 
@@ -213,6 +230,8 @@ func (s *Server) atlasMetaArtist(w http.ResponseWriter, r *http.Request) {
 		Bio:        m.Bio,
 		BioSummary: m.BioSummary,
 		Genres:     m.Genres,
+		Source:     m.Source,
+		SourceURL:  m.SourceURL,
 	})
 }
 
@@ -230,6 +249,9 @@ func validateReleaseDTO(d *atlasReleaseDTO) error {
 	if len(d.RecordLabel) > atlasMaxLabelLen {
 		return fmt.Errorf("release.recordLabel exceeds %d bytes", atlasMaxLabelLen)
 	}
+	if err := validateSource("release.descriptionSource", d.DescriptionSource, d.DescriptionSourceURL); err != nil {
+		return err
+	}
 	return validateGenres("release.genres", d.Genres)
 }
 
@@ -243,7 +265,22 @@ func validateArtistDTO(d *atlasArtistDTO) error {
 	if len(d.BioSummary) > atlasMaxTextLen {
 		return fmt.Errorf("artist.bioSummary exceeds %d bytes", atlasMaxTextLen)
 	}
+	if err := validateSource("artist.bioSource", d.BioSource, d.BioSourceURL); err != nil {
+		return err
+	}
 	return validateGenres("artist.genres", d.Genres)
+}
+
+// validateSource caps the attribution source name + URL. Both are optional; an
+// empty pair is fine. Bounds a malformed/compromised client ballooning bridge.db.
+func validateSource(field, source, sourceURL string) error {
+	if len(source) > atlasMaxSourceLen {
+		return fmt.Errorf("%s exceeds %d bytes", field, atlasMaxSourceLen)
+	}
+	if len(sourceURL) > atlasMaxSourceURLLen {
+		return fmt.Errorf("%sUrl exceeds %d bytes", field, atlasMaxSourceURLLen)
+	}
+	return nil
 }
 
 func validateGenres(field string, g []string) error {

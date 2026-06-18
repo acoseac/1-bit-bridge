@@ -579,22 +579,22 @@ The app pushes per-entity metadata. Body carries an optional `release` and/or `a
 
 ```json
 {
-  "release": { "mbid": "<uuid>", "found": true, "description": "…", "recordLabel": "…", "genres": ["…"], "atlasEtag": "…" },
-  "artist":  { "mbid": "<uuid>", "found": true, "bio": "…", "bioSummary": "…", "genres": ["…"], "atlasEtag": "…" }
+  "release": { "mbid": "<uuid>", "found": true, "description": "…", "recordLabel": "…", "genres": ["…"], "descriptionSource": "bandcamp", "descriptionSourceUrl": "https://…", "atlasEtag": "…" },
+  "artist":  { "mbid": "<uuid>", "found": true, "bio": "…", "bioSummary": "…", "genres": ["…"], "bioSource": "wiki", "bioSourceUrl": "https://…", "atlasEtag": "…" }
 }
 ```
 
-`found: false` with empty fields writes a **tombstone** (Atlas was checked and had nothing) so the entity isn't re-queried on every view. Validation: `mbid` must be a UUID; `description`/`bio`/`bioSummary` ≤ 16 KiB, `recordLabel` ≤ 1 KiB, ≤ 32 genres of ≤ 256 B each; whole body ≤ 256 KiB. **`ingested_at` is stamped bridge-side** (never taken from the body — the bridge owns its cache-freshness clock). Returns `200 {releaseIngested, artistIngested}`.
+`found: false` with empty fields writes a **tombstone** (Atlas was checked and had nothing) so the entity isn't re-queried on every view. The optional **`descriptionSource`/`descriptionSourceUrl`** (release) and **`bioSource`/`bioSourceUrl`** (artist) attribute the winning text to its origin (`wiki` / `bandcamp` / `lastfm` / `tadb` / `qobuz`) so the client can render "Read more on \<source\>" for CC-BY-SA / ToS compliance — additive, older clients omit them. Validation: `mbid` must be a UUID; `description`/`bio`/`bioSummary` ≤ 16 KiB, `recordLabel` ≤ 1 KiB, source name ≤ 64 B, source URL ≤ 2 KiB, ≤ 32 genres of ≤ 256 B each; whole body ≤ 256 KiB. **`ingested_at` is stamped bridge-side** (never taken from the body — the bridge owns its cache-freshness clock). Returns `200 {releaseIngested, artistIngested}`.
 
 #### `GET /v1/atlas-meta/{release|artist}/{mbid}` (bearer-authenticated)
 
 Serves the cached metadata. This is the iOS **Read-Before-Write gate**: the app asks the bridge first and only fetches from Atlas on a miss/stale entity.
 
 ```json
-{ "found": true, "ingestedAt": "<RFC3339>", "ttlSeconds": 2592000, "description": "…", "recordLabel": "…", "genres": ["…"] }
+{ "found": true, "ingestedAt": "<RFC3339>", "ttlSeconds": 2592000, "description": "…", "recordLabel": "…", "genres": ["…"], "source": "bandcamp", "sourceUrl": "https://…" }
 ```
 
-(artist responses carry `bio`/`bioSummary` instead of `description`/`recordLabel`.) `ttlSeconds` is the operator's freshness window (`atlas.metaTtlHours`, default 720 h) — the client treats the row as stale once `now − ingestedAt > ttlSeconds` and re-fetches. **`404`** means the entity was **never checked** (the client then queries Atlas); a **tombstone** returns `200` with `found: false` (checked, nothing — don't re-query until the TTL elapses).
+(artist responses carry `bio`/`bioSummary` instead of `description`/`recordLabel`.) **`source`/`sourceUrl`** attribute the primary text (the description for a release, the bio for an artist) to its origin — present only when a source contributed; both omitted on a tombstone. `ttlSeconds` is the operator's freshness window (`atlas.metaTtlHours`, default 720 h) — the client treats the row as stale once `now − ingestedAt > ttlSeconds` and re-fetches. **`404`** means the entity was **never checked** (the client then queries Atlas); a **tombstone** returns `200` with `found: false` (checked, nothing — don't re-query until the TTL elapses).
 
 #### `POST /v1/atlas-harvest/credential` (bearer-authenticated — additive, Phase H)
 

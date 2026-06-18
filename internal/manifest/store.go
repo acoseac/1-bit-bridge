@@ -1027,6 +1027,81 @@ var migrations = []migration{
 		);
 		`,
 	},
+	{
+		version: 22,
+		name:    "attribution columns on release_atlas + artist_atlas (Phase A4)",
+		// Per-field attribution for the multi-source Atlas convergence: the
+		// winning album description / artist bio carries the SOURCE it came from
+		// (wiki / bandcamp / lastfm / tadb / qobuz) + that source's canonical URL,
+		// so iOS can render "Read more on <source>" for CC-BY-SA / ToS compliance.
+		// release: description_source(_url); artist: bio_source(_url). Both the
+		// harvest sink (atlasHarvestSink → UpsertArtistAtlasMeta) and the ferry
+		// ingest (POST /v1/atlas-ingest) populate them.
+		//
+		// **Idempotency: ALL ALTERs live in post(), not `sql`** — same contract as
+		// migration v5: migrate() short-circuits on the first `sql` ExecContext
+		// error, so a partial-apply (some columns committed, restart) must not
+		// hit a non-swallowed "duplicate column". `sql` is a harmless comment;
+		// post() does the real ALTERs with error-tolerant `_, _ = db.Exec(...)`.
+		sql: `-- columns added in post() for idempotency; see migration v22 docblock`,
+		post: func(db *sql.DB) error {
+			// Idempotent AND error-surfacing — unlike the older swallow-all v5
+			// form, add each column only when PRAGMA table_info shows it absent,
+			// and propagate a real ALTER failure so migrate() does NOT advance
+			// user_version over a partial schema (Gemini HIGH + CodeRabbit on PR
+			// #410). The column-check form matters MORE here than for v5: the v5
+			// scanner columns are written every pass (a missing one surfaces at
+			// once), but these atlas columns are written only on a (possibly rare)
+			// Atlas ingest, so a partial migration could sit silent for a long
+			// time then break the first ingest with "no such column".
+			for _, a := range []struct{ table, col string }{
+				{"release_atlas", "description_source"},
+				{"release_atlas", "description_source_url"},
+				{"artist_atlas", "bio_source"},
+				{"artist_atlas", "bio_source_url"},
+			} {
+				exists, err := atlasColumnExists(db, a.table, a.col)
+				if err != nil {
+					return fmt.Errorf("inspect %s.%s: %w", a.table, a.col, err)
+				}
+				if exists {
+					continue
+				}
+				// Table/column names are compile-time constants — PRAGMA / ALTER
+				// don't accept a bound identifier, so they're formatted in; no
+				// user input reaches this path.
+				if _, err := db.Exec("ALTER TABLE " + a.table + " ADD COLUMN " + a.col + " TEXT NOT NULL DEFAULT ''"); err != nil {
+					return fmt.Errorf("add %s.%s: %w", a.table, a.col, err)
+				}
+			}
+			return nil
+		},
+	},
+}
+
+// atlasColumnExists reports whether `table` already has a column named `col`,
+// via PRAGMA table_info. The v22 migration uses it to make its ADD COLUMNs
+// idempotent WITHOUT swallowing non-duplicate ALTER errors (a real failure must
+// not let migrate() advance user_version over a partial schema). `table` is a
+// compile-time constant — PRAGMA doesn't accept a bound identifier.
+func atlasColumnExists(db *sql.DB, table, col string) (bool, error) {
+	rows, err := db.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, ctype string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return false, err
+		}
+		if name == col {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 // NOTE (r1 review #49, dropped): a covering index on
