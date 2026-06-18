@@ -42,8 +42,11 @@ func TestDecodeCommand_SelectsBinary(t *testing.T) {
 	if name, _ := decodeCommand(decoderSox, "/lib/a.flac", 2); name != "sox" {
 		t.Errorf("decoderSox → %q, want sox", name)
 	}
-	if name, args := decodeCommand(decoderFFmpeg, "/lib/a.m4a", 2); name != "ffmpeg" || args[0] != "-nostdin" {
-		t.Errorf("decoderFFmpeg → (%q, %v), want ffmpeg argv", name, args)
+	// The ffmpeg binary is resolved through the seam, so the exec'd path is the
+	// one the availability check found (not a re-PATH-resolved bare name).
+	forceFFmpeg(t, true) // seam resolves to /usr/bin/ffmpeg
+	if name, args := decodeCommand(decoderFFmpeg, "/lib/a.m4a", 2); name != "/usr/bin/ffmpeg" || args[0] != "-nostdin" {
+		t.Errorf("decoderFFmpeg → (%q, %v), want resolved /usr/bin/ffmpeg + argv", name, args)
 	}
 }
 

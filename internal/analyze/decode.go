@@ -61,6 +61,18 @@ func ffmpegToolsAvailable() bool {
 	return err == nil
 }
 
+// resolveBin returns the absolute path the seam resolved (so the binary that
+// gets EXEC'd is exactly the one the availability check found — no second PATH
+// lookup, no check-vs-exec TOCTOU, and the test seam fully controls the binary
+// rather than only gating availability). Falls back to the bare name when the
+// lookup fails (exec.CommandContext then PATH-resolves it, as before).
+func resolveBin(look func() (string, error), fallback string) string {
+	if p, err := look(); err == nil && p != "" {
+		return p
+	}
+	return fallback
+}
+
 // ffmpegDecodeArgs builds the ffmpeg argv that decodes srcAbs to the SAME
 // headerless little-endian float32 48 kHz `channels`-channel PCM on stdout that
 // decodeArgs (sox) produces — so streamFloat32LE reads either identically.
@@ -90,7 +102,7 @@ func ffmpegDecodeArgs(srcAbs string, channels int) []string {
 // outside 1..maxAnalysisChannels (or any probe failure) yields (1, false) so
 // the caller decodes mono and SKIPS loudness rather than trusting a guess.
 func ffprobeChannels(ctx context.Context, srcAbs string) (int, bool) {
-	out, err := exec.CommandContext(ctx, "ffprobe",
+	out, err := exec.CommandContext(ctx, resolveBin(ffprobeLookPath, "ffprobe"),
 		"-v", "error", "-select_streams", "a:0",
 		"-show_entries", "stream=channels",
 		"-of", "default=nw=1:nk=1", srcAbs).Output()
@@ -107,7 +119,7 @@ func ffprobeChannels(ctx context.Context, srcAbs string) (int, bool) {
 // decodeCommand returns the binary + argv for the chosen decoder.
 func decodeCommand(tool decoderTool, srcAbs string, channels int) (string, []string) {
 	if tool == decoderFFmpeg {
-		return "ffmpeg", ffmpegDecodeArgs(srcAbs, channels)
+		return resolveBin(ffmpegLookPath, "ffmpeg"), ffmpegDecodeArgs(srcAbs, channels)
 	}
 	return "sox", decodeArgs(srcAbs, channels)
 }
