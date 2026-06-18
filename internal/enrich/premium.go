@@ -2,11 +2,17 @@ package enrich
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
 )
+
+// ErrNoCredential is returned by RefetchPremium when no usable Atlas credential
+// is provisioned — distinct from a genuine "premium not ready" (CAA) miss so the
+// cover-harvest sweep doesn't burn a retry attempt on it.
+var ErrNoCredential = errors.New("enrich: no usable atlas credential")
 
 // AtlasCredentialSource supplies the bridge's runtime bulk_harvest credential
 // for authenticated premium-cover fetches: the Atlas bearer token + base URL,
@@ -64,44 +70,21 @@ func NewAtlasPremiumFetcher(cred AtlasCredentialSource, userAgent string, httpCl
 // 200 returns true. Never propagates an error — a premium miss must not fail
 // the whole artwork-caching step.
 func (f *atlasPremiumFetcher) TryCache(ctx context.Context, path, mbid string, size int) bool {
-	token, baseURL, ok := f.cred.AtlasCredential()
-	if !ok {
-		return false // no usable credential → CAA path
-	}
-	url := strings.TrimRight(baseURL, "/") + fmt.Sprintf("/release/%s/front-%d", mbid, size)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	resp, err := f.authedCoverGet(ctx, mbid, size)
 	if err != nil {
-		return false
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	if f.userAgent != "" {
-		req.Header.Set("User-Agent", f.userAgent)
-	}
-	resp, err := f.http.Do(req)
-	if err != nil {
-		logger.Warn("atlas premium cover fetch", "mbid", mbid, "size", size, "err", err)
-		return false
+		if !errors.Is(err, ErrNoCredential) {
+			logger.Warn("atlas premium cover fetch", "mbid", mbid, "size", size, "err", err)
+		}
+		return false // no credential / transport error → CAA path
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		// 404 = no cover at Atlas (normal — fall through to CAA rg + iTunes);
-		// 5xx = Atlas hiccup. The PUBLIC artwork proxy doesn't 401/403 a bad
-		// bearer — it silently serves CAA — so in normal operation those never
-		// arrive here. Defense-in-depth (Gemini HIGH on PR #413): if a fronting
-		// proxy or a future Atlas change ever DOES reject the token, clear the
-		// credential so we stop retrying a dead token on every subsequent
-		// enriched track rather than waiting for the harvest client's next poll
-		// to clear it. AtlasCredential then returns ok=false and the premium
-		// path goes dormant until the iOS app re-provisions. Clear is safe to
-		// call concurrently with the harvest client (StateStore.Clear holds its
-		// own mutex; both setting Token="" is idempotent).
-		switch {
-		case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
-			logger.Warn("atlas premium cover: credential rejected, clearing", "status", resp.StatusCode)
-			if clearable, ok := f.cred.(interface{ Clear() error }); ok {
-				_ = clearable.Clear()
-			}
-		case resp.StatusCode >= 500:
+		// 5xx = Atlas hiccup. The public artwork proxy doesn't 401/403 a bad
+		// bearer (it serves CAA), so those are defense-in-depth — see
+		// clearOnAuthReject.
+		f.clearOnAuthReject(resp.StatusCode)
+		if resp.StatusCode >= 500 {
 			logger.Warn("atlas premium cover fetch", "mbid", mbid, "size", size, "status", resp.StatusCode)
 		}
 		return false
@@ -114,6 +97,43 @@ func (f *atlasPremiumFetcher) TryCache(ctx context.Context, path, mbid string, s
 	return true
 }
 
+// authedCoverGet builds + sends the authenticated cover GET for (mbid, size).
+// Shared by TryCache + RefetchPremium. Returns ErrNoCredential when no usable
+// credential is provisioned (no request is made). The caller owns the response
+// body + status handling.
+func (f *atlasPremiumFetcher) authedCoverGet(ctx context.Context, mbid string, size int) (*http.Response, error) {
+	token, baseURL, ok := f.cred.AtlasCredential()
+	if !ok {
+		return nil, ErrNoCredential
+	}
+	url := strings.TrimRight(baseURL, "/") + fmt.Sprintf("/release/%s/front-%d", mbid, size)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	if f.userAgent != "" {
+		req.Header.Set("User-Agent", f.userAgent)
+	}
+	return f.http.Do(req)
+}
+
+// clearOnAuthReject clears the credential on a 401/403 (token rejected) so a
+// dead token isn't retried on every subsequent fetch — it goes dormant until
+// the iOS app re-provisions. Defense-in-depth: the public artwork proxy doesn't
+// actually 401/403 a bad bearer (it serves CAA), but a fronting proxy or a
+// future Atlas change might. Safe to call concurrently with the harvest client
+// (StateStore.Clear holds its own mutex; both setting Token="" is idempotent).
+func (f *atlasPremiumFetcher) clearOnAuthReject(status int) {
+	if status != http.StatusUnauthorized && status != http.StatusForbidden {
+		return
+	}
+	logger.Warn("atlas premium cover: credential rejected, clearing", "status", status)
+	if clearable, ok := f.cred.(interface{ Clear() error }); ok {
+		_ = clearable.Clear()
+	}
+}
+
 // RefetchPremium re-fetches the authenticated Atlas cover for (mbid, size) and
 // OVERWRITES the cache at path ONLY when Atlas now serves a premium (non-CAA)
 // cover — used by the cover bulk-harvest to upgrade an already-cached CAA cover
@@ -124,35 +144,31 @@ func (f *atlasPremiumFetcher) TryCache(ctx context.Context, path, mbid string, s
 // for a "not premium yet" miss; only for a write/transport failure worth
 // surfacing.
 func (f *atlasPremiumFetcher) RefetchPremium(ctx context.Context, path, mbid string, size int) (bool, error) {
-	token, baseURL, ok := f.cred.AtlasCredential()
-	if !ok {
-		return false, nil
-	}
-	url := strings.TrimRight(baseURL, "/") + fmt.Sprintf("/release/%s/front-%d", mbid, size)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	resp, err := f.authedCoverGet(ctx, mbid, size)
 	if err != nil {
-		return false, err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	if f.userAgent != "" {
-		req.Header.Set("User-Agent", f.userAgent)
-	}
-	resp, err := f.http.Do(req)
-	if err != nil {
+		// ErrNoCredential or a transport error — the sweep leaves the cover
+		// pending WITHOUT burning an attempt (these are transient, not a genuine
+		// "premium not ready" miss).
 		return false, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-			if clearable, ok := f.cred.(interface{ Clear() error }); ok {
-				_ = clearable.Clear()
-			}
+		f.clearOnAuthReject(resp.StatusCode)
+		switch {
+		case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+			// Token rejected (now cleared) — surface as ErrNoCredential so the
+			// sweep stops this tick rather than counting it as a miss.
+			return false, ErrNoCredential
+		case resp.StatusCode >= 500:
+			return false, fmt.Errorf("atlas premium cover: http %d", resp.StatusCode)
+		default:
+			return false, nil // 404 etc → no cover at Atlas; nothing to retry
 		}
-		return false, nil
 	}
 	if !isPremiumSource(resp.Header.Get("X-Atlas-Asset-Source")) {
 		// Atlas hasn't reverse-resolved a premium cover yet (still CAA) — leave
-		// the existing cache; the caller retries on a later sweep.
+		// the existing cache. This IS a genuine "not ready" miss (it counts
+		// toward the attempt cap), distinct from the transient errors above.
 		return false, nil
 	}
 	if err := writeArtworkAtomicStream(path, resp.Body, MaxCoverArtBytes); err != nil {

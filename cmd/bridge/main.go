@@ -153,9 +153,15 @@ type atlasCoverRefetcher struct {
 
 func (a atlasCoverRefetcher) RefetchPremium(ctx context.Context, releaseMBID string) (bool, error) {
 	if a.premium == nil {
-		return false, nil
+		return false, atlasharvest.ErrNoCredential
 	}
-	return a.premium.RefetchPremium(ctx, enrich.ArtworkCachePath(a.artworkDir, releaseMBID, 500), releaseMBID, 500)
+	got, err := a.premium.RefetchPremium(ctx, enrich.ArtworkCachePath(a.artworkDir, releaseMBID, 500), releaseMBID, 500)
+	if errors.Is(err, enrich.ErrNoCredential) {
+		// Translate the enrich-layer sentinel to the harvest client's contract
+		// sentinel (this adapter is the bridge between the two packages).
+		return got, atlasharvest.ErrNoCredential
+	}
+	return got, err
 }
 
 // analysisStoreAdapter implements api.AnalysisStore on top of a

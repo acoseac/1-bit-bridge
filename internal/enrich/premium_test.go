@@ -3,6 +3,7 @@ package enrich
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -194,11 +195,23 @@ func TestAtlasPremiumFetcher_RefetchPremium(t *testing.T) {
 		}
 	})
 
-	t.Run("no credential is a no-op", func(t *testing.T) {
+	t.Run("no credential returns ErrNoCredential", func(t *testing.T) {
 		f := NewAtlasPremiumFetcher(fakeCred{ok: false}, "ua", nil)
 		got, err := f.RefetchPremium(context.Background(), filepath.Join(t.TempDir(), "x.jpg"), mbid, 500)
-		if err != nil || got {
-			t.Errorf("got=%v err=%v, want false,nil with no credential", got, err)
+		if got || !errors.Is(err, ErrNoCredential) {
+			t.Errorf("got=%v err=%v, want false + ErrNoCredential with no credential", got, err)
+		}
+	})
+
+	t.Run("5xx returns an error (transient, not a miss)", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusBadGateway)
+		}))
+		defer srv.Close()
+		f := NewAtlasPremiumFetcher(fakeCred{token: "t", base: srv.URL, ok: true}, "ua", srv.Client())
+		got, err := f.RefetchPremium(context.Background(), filepath.Join(t.TempDir(), "x.jpg"), mbid, 500)
+		if got || err == nil {
+			t.Errorf("got=%v err=%v, want false + error on 5xx", got, err)
 		}
 	})
 }

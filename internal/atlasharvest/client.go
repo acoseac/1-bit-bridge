@@ -37,9 +37,19 @@ type MBIDSource interface {
 // the local cache ONLY when Atlas now serves a premium (non-CAA) one. Returns
 // true when a premium cover was written. Satisfied by a thin adapter over the
 // enricher's authenticated premium-cover fetcher. Nil disables cover harvest.
+//
+// Error contract: (false, nil) is a genuine "premium not ready yet" miss (it
+// counts toward the attempt cap). A non-nil error is transient (the cover stays
+// pending, attempt NOT burned) — the adapter MUST return ErrNoCredential when no
+// usable credential is available so the sweep stops the whole tick.
 type CoverRefetcher interface {
 	RefetchPremium(ctx context.Context, releaseMBID string) (bool, error)
 }
+
+// ErrNoCredential signals a CoverRefetcher had no usable Atlas credential — the
+// refresh sweep stops the tick on it (every remaining release would fail the
+// same way) rather than spamming the log.
+var ErrNoCredential = errors.New("atlasharvest: refetcher has no usable credential")
 
 // MetaSink caches a harvested (or tombstoned) artist bio. manifest.Store
 // satisfies this via a thin adapter in the wiring.
@@ -191,8 +201,15 @@ func (c *Client) refreshCovers(ctx context.Context) {
 		processed++
 		got, err := c.Refetcher.RefetchPremium(ctx, mbid)
 		if err != nil {
+			// Transient: leave the cover pending WITHOUT burning an attempt. No
+			// credential means every remaining release fails the same way, so
+			// stop the tick rather than spam; other errors (5xx) just skip this
+			// one and try the rest.
+			if errors.Is(err, ErrNoCredential) {
+				break
+			}
 			c.log().WarnContext(ctx, "atlasharvest.cover_refetch_failed", "mbid", mbid, "error", err.Error())
-			continue // leave pending unchanged; retry next tick
+			continue
 		}
 		if got {
 			resolved = append(resolved, mbid)
