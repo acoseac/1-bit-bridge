@@ -125,9 +125,9 @@ func (a *variantStoreAdapter) LookupVariant(ctx context.Context, sourcePath, var
 }
 
 // atlasHarvestSink adapts the manifest store to the Phase-H harvest client's
-// MetaSink. Source/SourceURL attribution from the harvest result is dropped for
-// v1 — the Last.fm bio carries its own inline "Read more on Last.fm" link;
-// explicit attribution columns on artist_atlas are a follow-up.
+// MetaSink. The harvest result's Source/SourceURL (the winning bio's provenance
+// — wiki / lastfm / tadb + its URL) is persisted into artist_atlas so iOS can
+// render "Read more on <source>" (Phase A4).
 type atlasHarvestSink struct{ store *manifest.Store }
 
 func (a atlasHarvestSink) UpsertArtistMeta(ctx context.Context, m atlasharvest.ArtistMeta) error {
@@ -137,6 +137,8 @@ func (a atlasHarvestSink) UpsertArtistMeta(ctx context.Context, m atlasharvest.A
 		Bio:        m.Bio,
 		BioSummary: m.BioSummary,
 		Genres:     m.Genres,
+		Source:     m.Source,
+		SourceURL:  m.SourceURL,
 	})
 }
 

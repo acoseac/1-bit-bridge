@@ -1027,6 +1027,34 @@ var migrations = []migration{
 		);
 		`,
 	},
+	{
+		version: 22,
+		name:    "attribution columns on release_atlas + artist_atlas (Phase A4)",
+		// Per-field attribution for the multi-source Atlas convergence: the
+		// winning album description / artist bio carries the SOURCE it came from
+		// (wiki / bandcamp / lastfm / tadb / qobuz) + that source's canonical URL,
+		// so iOS can render "Read more on <source>" for CC-BY-SA / ToS compliance.
+		// release: description_source(_url); artist: bio_source(_url). Both the
+		// harvest sink (atlasHarvestSink → UpsertArtistAtlasMeta) and the ferry
+		// ingest (POST /v1/atlas-ingest) populate them.
+		//
+		// **Idempotency: ALL ALTERs live in post(), not `sql`** — same contract as
+		// migration v5: migrate() short-circuits on the first `sql` ExecContext
+		// error, so a partial-apply (some columns committed, restart) must not
+		// hit a non-swallowed "duplicate column". `sql` is a harmless comment;
+		// post() does the real ALTERs with error-tolerant `_, _ = db.Exec(...)`.
+		sql: `-- columns added in post() for idempotency; see migration v22 docblock`,
+		post: func(db *sql.DB) error {
+			// Idempotent ALTERs — "duplicate column" is the expected no-op when a
+			// prior run already committed the column. Errors swallowed by
+			// convention; a persistent failure surfaces at the next real write.
+			_, _ = db.Exec(`ALTER TABLE release_atlas ADD COLUMN description_source TEXT NOT NULL DEFAULT ''`)
+			_, _ = db.Exec(`ALTER TABLE release_atlas ADD COLUMN description_source_url TEXT NOT NULL DEFAULT ''`)
+			_, _ = db.Exec(`ALTER TABLE artist_atlas ADD COLUMN bio_source TEXT NOT NULL DEFAULT ''`)
+			_, _ = db.Exec(`ALTER TABLE artist_atlas ADD COLUMN bio_source_url TEXT NOT NULL DEFAULT ''`)
+			return nil
+		},
+	},
 }
 
 // NOTE (r1 review #49, dropped): a covering index on

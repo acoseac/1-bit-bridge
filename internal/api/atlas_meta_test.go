@@ -40,8 +40,8 @@ func featuresContain(feats []string, want string) bool {
 
 func TestAtlasIngestAndMetaRoundTrip(t *testing.T) {
 	token, srv := newAtlasMetaTestServer(t, true)
-	body := `{"release":{"mbid":"` + atlasTestRelMBID + `","found":true,"description":"D","recordLabel":"L","genres":["Jazz"]},` +
-		`"artist":{"mbid":"` + atlasTestArtMBID + `","found":true,"bio":"B","bioSummary":"S"}}`
+	body := `{"release":{"mbid":"` + atlasTestRelMBID + `","found":true,"description":"D","recordLabel":"L","genres":["Jazz"],"descriptionSource":"bandcamp","descriptionSourceUrl":"https://x.bandcamp.com/album/y"},` +
+		`"artist":{"mbid":"` + atlasTestArtMBID + `","found":true,"bio":"B","bioSummary":"S","bioSource":"wiki","bioSourceUrl":"https://en.wikipedia.org/wiki/Z"}}`
 	resp := doReq(t, srv, http.MethodPost, "/v1/atlas-ingest", token, "", body)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("ingest status = %d, want 200", resp.StatusCode)
@@ -63,6 +63,9 @@ func TestAtlasIngestAndMetaRoundTrip(t *testing.T) {
 	if !mr.Found || mr.Description != "D" || mr.RecordLabel != "L" || len(mr.Genres) != 1 || mr.TTLSeconds <= 0 {
 		t.Errorf("meta release = %+v", mr)
 	}
+	if mr.Source != "bandcamp" || mr.SourceURL != "https://x.bandcamp.com/album/y" {
+		t.Errorf("release attribution = (%q, %q), want (bandcamp, …)", mr.Source, mr.SourceURL)
+	}
 
 	aresp := doReq(t, srv, http.MethodGet, "/v1/atlas-meta/artist/"+atlasTestArtMBID, token, "", "")
 	var ar atlasMetaResponse
@@ -70,6 +73,9 @@ func TestAtlasIngestAndMetaRoundTrip(t *testing.T) {
 	aresp.Body.Close()
 	if !ar.Found || ar.Bio != "B" || ar.BioSummary != "S" {
 		t.Errorf("meta artist = %+v", ar)
+	}
+	if ar.Source != "wiki" || ar.SourceURL != "https://en.wikipedia.org/wiki/Z" {
+		t.Errorf("artist attribution = (%q, %q), want (wiki, …)", ar.Source, ar.SourceURL)
 	}
 }
 
