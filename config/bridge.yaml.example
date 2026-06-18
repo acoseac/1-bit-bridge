@@ -82,3 +82,13 @@ libraryName: "My Music Library"
 # atlas:
 #   enabled: true
 #   metaTtlHours: 720
+
+# artwork: bound the on-disk artwork cache at <dataDir>/artwork/ (scanner
+#   embedded/folder art + enricher cover art + Atlas premium hi-res covers).
+#   cacheMaxBytes is the total-size cap in bytes; 0 (the default) is unbounded.
+#   When exceeded, a background sweeper evicts the least-recently-modified
+#   cached covers back under the cap. A normal library's covers are naturally
+#   bounded, so a cap is rarely needed — set one once premium hi-res covers
+#   are enabled, where whole-library 1200px covers can fill a small host disk.
+# artwork:
+#   cacheMaxBytes: 2147483648   # 2 GiB

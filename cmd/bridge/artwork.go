@@ -34,7 +34,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
@@ -195,4 +197,183 @@ func runArtworkGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 		return 1
 	}
 	return 0
+}
+
+// artworkCacheSweepInterval is how often runArtworkCacheSweeper re-checks
+// the cache size when a cap is configured. A constant (not config-exposed)
+// to keep the artwork config surface to the single cap knob. 15 min bounds
+// the over-cap overshoot during a bulk premium-cover harvest (rate-limited
+// upstream to ~1 cover/s) to a few hundred MB, while keeping the directory
+// walk — O(files), a few thousand entries on a real library — negligible.
+const artworkCacheSweepInterval = 15 * time.Minute
+
+// artworkCacheSweepSettleDelay defers the first sweep after startup so it
+// doesn't compete with the initial scan + enrichment I/O. Mirrors the
+// analysis sweeper's settle pattern.
+const artworkCacheSweepSettleDelay = 90 * time.Second
+
+// runArtworkCacheSweeper enforces config.ArtworkConfig.CacheMaxBytes by
+// periodically evicting the least-recently-modified files from the artwork
+// cache. It is a no-op (and never spawned by runServe) when capBytes <= 0 —
+// the historical "unbounded" default. Lives off the shared scanCtx so a
+// SIGINT cancels it alongside the other periodic workers.
+//
+// Recency is the file mtime, NOT atime: atime needs per-OS syscall code and
+// is frozen on noatime mounts, while mtime is portable and meaningful (it's
+// when the cover entered / was last rewritten in the cache). The sweeper
+// only READS timestamps — it never bumps mtime on serve, which would break
+// http.ServeContent's Last-Modified / 304 conditional caching.
+//
+// Eviction caveat: a still-referenced cover that gets evicted makes
+// /v1/artwork/{mbid} answer 202-pending (the track still references the
+// MBID) until a later re-enrichment re-caches it; iOS renders a placeholder
+// on 202. That's the accepted tradeoff of a disk-pressure valve — the
+// alternative (a full disk) is worse. Eviction is oldest-first, so an
+// actively-served (recently re-written) cover is the last to go.
+func runArtworkCacheSweeper(ctx context.Context, artworkDir string, capBytes int64, interval time.Duration) {
+	if capBytes <= 0 {
+		return
+	}
+	sweep := func() {
+		evicted, freed, err := sweepArtworkCache(ctx, artworkDir, capBytes)
+		if err != nil {
+			// A ctx cancel mid-sweep is a clean shutdown, not a fault.
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return
+			}
+			logger.Warn("artwork cache sweep", "err", err, "dir", artworkDir)
+			return
+		}
+		if evicted > 0 {
+			logger.Info("artwork cache LRU eviction",
+				"evicted", evicted, "freedBytes", freed, "capBytes", capBytes)
+		}
+	}
+
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(artworkCacheSweepSettleDelay):
+	}
+	sweep()
+	if interval <= 0 {
+		return
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			sweep()
+		}
+	}
+}
+
+// sweepArtworkCache enforces the artwork-cache size cap via
+// least-recently-modified eviction. It walks artworkDir, sums the size of
+// every cache file (final `*.jpg`; in-flight `*.jpg.tmp` atomic-write temps
+// and any non-cache stray are ignored), and — if the total exceeds capBytes
+// — removes files oldest-mtime-first until the total is back under a 90%
+// low-water mark. Returns the count of files evicted and the bytes freed.
+//
+// capBytes <= 0 is a no-op (unbounded). A missing cache dir (no scan has run
+// yet) is not an error. Pure except for the os.Remove side effect, so it's
+// unit-testable with a real temp dir.
+func sweepArtworkCache(ctx context.Context, artworkDir string, capBytes int64) (evicted int, freed int64, err error) {
+	if capBytes <= 0 {
+		return 0, 0, nil
+	}
+	type cacheFile struct {
+		path string
+		size int64
+		mod  time.Time
+	}
+	var files []cacheFile
+	var total int64
+	walkErr := filepath.WalkDir(artworkDir, func(path string, d os.DirEntry, walkErr error) error {
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
+		}
+		if walkErr != nil {
+			// Cache dir absent (no scan/enrich has run yet) — treat as empty.
+			if errors.Is(walkErr, os.ErrNotExist) {
+				return filepath.SkipDir
+			}
+			return walkErr
+		}
+		if d.IsDir() {
+			return nil
+		}
+		// Only final cache files count. Every cached cover ends in `.jpg`;
+		// the atomic-write temp files end in `.jpg.tmp` (excluded) and any
+		// stray non-cache file is left alone — same scoping rationale as the
+		// GC's suffix gate. Match on the full path (a separator can't appear
+		// in the `.jpg` suffix) to skip a filepath.Base alloc per file.
+		if !strings.HasSuffix(path, ".jpg") {
+			return nil
+		}
+		info, ierr := d.Info()
+		if ierr != nil {
+			// File vanished mid-walk (concurrent eviction / rename) — skip
+			// that one entry. Any OTHER stat error (permission, I/O) would
+			// silently undercount the cache and let the sweep report success
+			// while still over cap, so surface it and let the next tick
+			// retry rather than swallowing it.
+			if errors.Is(ierr, os.ErrNotExist) {
+				return nil
+			}
+			return ierr
+		}
+		files = append(files, cacheFile{path: path, size: info.Size(), mod: info.ModTime()})
+		total += info.Size()
+		return nil
+	})
+	if walkErr != nil {
+		if errors.Is(walkErr, os.ErrNotExist) {
+			return 0, 0, nil
+		}
+		return evicted, freed, walkErr
+	}
+	if total <= capBytes {
+		return 0, 0, nil
+	}
+
+	// Oldest first. Evict down to a 90% low-water mark so the next cover
+	// write doesn't immediately re-trip the cap (batches the work). Tie-break
+	// on path so the order is deterministic when two files share an mtime.
+	sort.Slice(files, func(i, j int) bool {
+		if files[i].mod.Equal(files[j].mod) {
+			return files[i].path < files[j].path
+		}
+		return files[i].mod.Before(files[j].mod)
+	})
+	lowWater := capBytes - capBytes/10
+	for _, f := range files {
+		if total <= lowWater {
+			break
+		}
+		if cerr := ctx.Err(); cerr != nil {
+			return evicted, freed, cerr
+		}
+		if rmErr := os.Remove(f.path); rmErr != nil {
+			if errors.Is(rmErr, os.ErrNotExist) {
+				// Already removed concurrently (e.g. an operator-run
+				// `bridge artwork --gc`): the bytes are gone, so keep the
+				// running total accurate to avoid over-evicting live entries
+				// to reach the low-water mark. Not counted as our eviction.
+				total -= f.size
+				continue
+			}
+			// Best-effort: a file held open by an in-flight serve (Windows)
+			// is non-fatal — leave it for the next pass.
+			logger.Warn("artwork cache evict", "path", f.path, "err", rmErr)
+			continue
+		}
+		total -= f.size
+		freed += f.size
+		evicted++
+	}
+	return evicted, freed, nil
 }

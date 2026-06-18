@@ -1565,6 +1565,16 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	enricher := enrich.NewEnricher(manifestStore, mbClient, caaClient, deezerClient, artworkDir)
 	go enricher.Run(scanCtx)
 
+	// Artwork-cache LRU eviction. Bounds the on-disk size of the shared
+	// <dataDir>/artwork/ cache (scanner local-* + enricher <mbid>-* + Atlas
+	// premium covers) at cfg.Artwork.CacheMaxBytes. Off by default
+	// (cap <= 0 = unbounded, the historical behaviour) — only spawned when a
+	// cap is configured, where it becomes the prerequisite for whole-library
+	// hi-res covers not filling a small host disk.
+	if cfg.Artwork.CacheMaxBytes > 0 {
+		go runArtworkCacheSweeper(scanCtx, artworkDir, cfg.Artwork.CacheMaxBytes, artworkCacheSweepInterval)
+	}
+
 	// Periodic state-snapshot ticker. Captures bridge.db / tokens.json /
 	// cert / key / config into <dataDir>/backups/<timestamp>/ at the
 	// configured cadence (default 24h). Uses the same scanCtx as the
