@@ -20,6 +20,110 @@ import (
 // malformed header drive an absurd per-frame allocation.
 const maxAnalysisChannels = 8
 
+// decoderTool selects which external program decodes the source to raw PCM.
+// sox is the primary decoder on every host; ffmpeg is the fallback for
+// containers sox can't read (notably AAC/m4a — Debian/Ubuntu sox ships no AAC
+// handler, so a Linux bridge fails every .m4a with "no handler for file
+// extension `m4a'"). Both produce byte-identical little-endian float32 48 kHz
+// interleaved PCM, so the streaming reader is decoder-agnostic.
+type decoderTool int
+
+const (
+	decoderSox decoderTool = iota
+	decoderFFmpeg
+)
+
+func (d decoderTool) String() string {
+	if d == decoderFFmpeg {
+		return "ffmpeg"
+	}
+	return "sox"
+}
+
+// ffmpegLookPath / ffprobeLookPath are the seams tests override to force the
+// ffmpeg toolchain present/absent without depending on the host having it
+// installed. Production resolves the real binaries on PATH. (Same DI shape as
+// renameFunc / commandContext elsewhere — production MUST NOT mutate them.)
+var (
+	ffmpegLookPath  = func() (string, error) { return exec.LookPath("ffmpeg") }
+	ffprobeLookPath = func() (string, error) { return exec.LookPath("ffprobe") }
+)
+
+// ffmpegToolsAvailable reports whether BOTH ffmpeg (decode) and ffprobe
+// (channel probe) are on PATH — the fallback needs both. Cheap (two PATH
+// stats) and only called when sox has already failed to probe a file, so the
+// common all-sox path pays nothing.
+func ffmpegToolsAvailable() bool {
+	if _, err := ffmpegLookPath(); err != nil {
+		return false
+	}
+	_, err := ffprobeLookPath()
+	return err == nil
+}
+
+// resolveBin returns the absolute path the seam resolved (so the binary that
+// gets EXEC'd is exactly the one the availability check found — no second PATH
+// lookup, no check-vs-exec TOCTOU, and the test seam fully controls the binary
+// rather than only gating availability). Falls back to the bare name when the
+// lookup fails (exec.CommandContext then PATH-resolves it, as before).
+func resolveBin(look func() (string, error), fallback string) string {
+	if p, err := look(); err == nil && p != "" {
+		return p
+	}
+	return fallback
+}
+
+// ffmpegDecodeArgs builds the ffmpeg argv that decodes srcAbs to the SAME
+// headerless little-endian float32 48 kHz `channels`-channel PCM on stdout that
+// decodeArgs (sox) produces — so streamFloat32LE reads either identically.
+//
+//   - `-map 0:a:0` takes the first AUDIO stream only: m4a/mp4 frequently embeds
+//     a cover image as a video stream, and without the map ffmpeg would try to
+//     encode that into the raw-PCM output and fail.
+//   - `-f f32le` is the raw little-endian float32 format (codec pcm_f32le) —
+//     the exact wire sox emits with `-t raw -e float -b 32 -L`.
+//   - `-ac/-ar` pin the source channel count + the 48 kHz analysis target
+//     (load-bearing for the BS.1770 K-weighting), matching sox's `-c/-r`.
+//   - `-nostdin` so ffmpeg never blocks reading the controlling terminal;
+//     `-loglevel error` keeps stderr to real failures for redaction.
+func ffmpegDecodeArgs(srcAbs string, channels int) []string {
+	return []string{
+		"-nostdin", "-hide_banner", "-loglevel", "error",
+		"-i", srcAbs,
+		"-map", "0:a:0",
+		"-ac", strconv.Itoa(channels), "-ar", "48000",
+		"-f", "f32le",
+		"-",
+	}
+}
+
+// ffprobeChannels reads the source channel count via ffprobe's first audio
+// stream. Same (channels, ok) contract as probeChannels' sox path: a value
+// outside 1..maxAnalysisChannels (or any probe failure) yields (1, false) so
+// the caller decodes mono and SKIPS loudness rather than trusting a guess.
+func ffprobeChannels(ctx context.Context, srcAbs string) (int, bool) {
+	out, err := exec.CommandContext(ctx, resolveBin(ffprobeLookPath, "ffprobe"),
+		"-v", "error", "-select_streams", "a:0",
+		"-show_entries", "stream=channels",
+		"-of", "default=nw=1:nk=1", srcAbs).Output()
+	if err != nil {
+		return 1, false
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil || n < 1 || n > maxAnalysisChannels {
+		return 1, false
+	}
+	return n, true
+}
+
+// decodeCommand returns the binary + argv for the chosen decoder.
+func decodeCommand(tool decoderTool, srcAbs string, channels int) (string, []string) {
+	if tool == decoderFFmpeg {
+		return resolveBin(ffmpegLookPath, "ffmpeg"), ffmpegDecodeArgs(srcAbs, channels)
+	}
+	return "sox", decodeArgs(srcAbs, channels)
+}
+
 // decodeArgs builds the sox argv that decodes any supported source to
 // headerless `channels`-channel 48 kHz little-endian float32 PCM on
 // stdout.
@@ -45,22 +149,36 @@ func decodeArgs(srcAbs string, channels int) []string {
 	}
 }
 
-// probeChannels reads the source channel count via `sox --i -c`. It
-// returns (channels, true) for a sane 1..maxAnalysisChannels value, or
-// (1, false) when sox can't report it — the caller then decodes mono and
-// SKIPS loudness rather than trusting a guessed channel layout (a wrong
-// guess would silently store a biased ReplayGain). The probe is a cheap
-// metadata read; the streaming decode is the expensive part.
-func probeChannels(ctx context.Context, srcAbs string) (int, bool) {
-	out, err := exec.CommandContext(ctx, "sox", "--i", "-c", srcAbs).Output()
-	if err != nil {
-		return 1, false
+// probeChannels reads the source channel count AND picks the decoder for the
+// streaming decode that follows. sox is tried first (the primary decoder on
+// every host); when sox can't report the layout — which on a Linux bridge
+// includes every AAC/m4a file (no sox AAC handler) — and the ffmpeg toolchain
+// is present, it re-probes via ffprobe and selects ffmpeg for the decode.
+//
+// Returns (channels, ok, tool): ok==false means the channel count is unknown,
+// so the caller decodes mono and SKIPS loudness rather than trusting a guessed
+// layout (a wrong guess would silently store a biased ReplayGain). The decision
+// is made HERE, off the cheap probe, so the expensive streaming decode never
+// has to fail-and-retry. With no ffmpeg fallback available the behaviour is
+// exactly as before: tool==decoderSox, and an unreadable format fails the
+// downstream sox decode (the file is skipped, nothing committed).
+func probeChannels(ctx context.Context, srcAbs string) (int, bool, decoderTool) {
+	if out, err := exec.CommandContext(ctx, "sox", "--i", "-c", srcAbs).Output(); err == nil {
+		if n, perr := strconv.Atoi(strings.TrimSpace(string(out))); perr == nil && n >= 1 && n <= maxAnalysisChannels {
+			return n, true, decoderSox
+		}
+		// sox answered but with an unparseable / out-of-range count — fall
+		// through to the ffmpeg path (it may still decode cleanly).
 	}
-	n, err := strconv.Atoi(strings.TrimSpace(string(out)))
-	if err != nil || n < 1 || n > maxAnalysisChannels {
-		return 1, false
+	if ffmpegToolsAvailable() {
+		if n, ok := ffprobeChannels(ctx, srcAbs); ok {
+			return n, true, decoderFFmpeg
+		}
+		// ffmpeg present but the channel probe failed: decode mono via ffmpeg
+		// + skip loudness (same contract as the sox channelsOK=false path).
+		return 1, false, decoderFFmpeg
 	}
-	return n, true
+	return 1, false, decoderSox
 }
 
 // decodeFrames runs sox to decode srcAbs to `channels`-channel 48 kHz
@@ -81,11 +199,12 @@ func probeChannels(ctx context.Context, srcAbs string) (int, bool) {
 // process (a worker-slot leak in the pool). A non-zero sox exit
 // (truncated / corrupt file) returns an error with redacted stderr so
 // the caller commits nothing.
-func decodeFrames(ctx context.Context, srcAbs string, channels int, onFrame func(frame []float64)) (totalFrames int64, err error) {
+func decodeFrames(ctx context.Context, srcAbs string, channels int, tool decoderTool, onFrame func(frame []float64)) (totalFrames int64, err error) {
 	if channels < 1 {
 		channels = 1
 	}
-	cmd := exec.CommandContext(ctx, "sox", decodeArgs(srcAbs, channels)...)
+	name, args := decodeCommand(tool, srcAbs, channels)
+	cmd := exec.CommandContext(ctx, name, args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	stdout, err := cmd.StdoutPipe()
@@ -93,7 +212,7 @@ func decodeFrames(ctx context.Context, srcAbs string, channels int, onFrame func
 		return 0, fmt.Errorf("stdout pipe: %w", err)
 	}
 	if err := cmd.Start(); err != nil {
-		return 0, fmt.Errorf("start sox: %w", err)
+		return 0, fmt.Errorf("start %s: %w", name, err)
 	}
 	processReleased := false
 	defer func() {
@@ -118,8 +237,10 @@ func decodeFrames(ctx context.Context, srcAbs string, channels int, onFrame func
 	}
 	if werr := cmd.Wait(); werr != nil {
 		processReleased = true
-		return totalFrames, fmt.Errorf("sox: %w (stderr: %s)",
-			werr, redactSoxErr(strings.TrimSpace(stderr.String()), srcAbs))
+		// redactSoxErr strips the absolute path (the privacy-load-bearing part);
+		// its sox-prefix trimming is a harmless no-op on ffmpeg stderr.
+		return totalFrames, fmt.Errorf("%s: %w (stderr: %s)",
+			tool, werr, redactSoxErr(strings.TrimSpace(stderr.String()), srcAbs))
 	}
 	processReleased = true
 	return totalFrames, nil
