@@ -66,6 +66,23 @@ func (s *StateStore) Snapshot() State {
 	return s.st
 }
 
+// AtlasCredential returns the provisioned bulk_harvest bearer + Atlas base URL
+// for authenticated premium-cover fetches (Phase B). ok=false when no
+// credential is provisioned, or when the token is locally known to be expired
+// (skip a guaranteed-401 request — the harvest client owns clearing it). The
+// signature matches enrich.AtlasCredentialSource so *StateStore satisfies it
+// without either package importing the other.
+func (s *StateStore) AtlasCredential() (token, baseURL string, ok bool) {
+	snap := s.Snapshot()
+	if snap.Token == "" || snap.AtlasBaseURL == "" {
+		return "", "", false
+	}
+	if !snap.ExpiresAt.IsZero() && time.Now().After(snap.ExpiresAt) {
+		return "", "", false
+	}
+	return snap.Token, snap.AtlasBaseURL, true
+}
+
 // SetCredential records a freshly-provisioned credential, leaving the cursor +
 // last-submit untouched (a re-provision of the same library keeps its sync
 // position). Resets LastSubmitAt to zero ONLY when the Atlas base URL changes —

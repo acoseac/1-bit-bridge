@@ -35,6 +35,15 @@ type Enricher struct {
 	itunes *ITunesClient // optional; nil disables the iTunes fallback
 	deezer *DeezerClient
 
+	// premiumCovers, when set, is tried BEFORE the CAA chain in
+	// ensureArtworkCached — an authenticated Atlas fetch that yields the
+	// cross-source premium canonical (Qobuz/Tidal-grade) when one exists,
+	// caching it under the same path the CAA chain would use so /v1/artwork
+	// serves it with zero iOS change. Wired at startup (cmd/bridge) only when
+	// the Phase-H harvest credential store is available; nil = CAA-only
+	// enrichment (the default).
+	premiumCovers PremiumCoverFetcher
+
 	// CacheDir is the root where the cached JPEGs live. Album covers go
 	// in <CacheDir>/<mbid>-<size>.jpg (see ArtworkCachePath); artist
 	// images go in <CacheDir>/artist-<mbid>.jpg (see ArtistImagePath).
@@ -178,6 +187,17 @@ func NewEnricher(store *manifest.Store, mb *MusicBrainzClient, caa *CoverArtClie
 // fluent setup: `NewEnricher(...).WithITunes(itc)`.
 func (e *Enricher) WithITunes(itc *ITunesClient) *Enricher {
 	e.itunes = itc
+	return e
+}
+
+// WithPremiumCovers attaches an authenticated Atlas premium-cover fetcher
+// (Phase B). When set, ensureArtworkCached tries it BEFORE the CAA chain, so a
+// release with a cross-source premium canonical (Qobuz/Tidal) caches the
+// hi-res cover under the same MBID-keyed path /v1/artwork already serves —
+// zero iOS change. Leave unset for CAA-only enrichment (the default). Returns
+// the receiver for fluent setup.
+func (e *Enricher) WithPremiumCovers(f PremiumCoverFetcher) *Enricher {
+	e.premiumCovers = f
 	return e
 }
 
@@ -572,6 +592,17 @@ func (e *Enricher) markSkipped(ctx context.Context, t *manifest.Track, reason st
 func (e *Enricher) ensureArtworkCached(ctx context.Context, mbid, rgMBID, artist, album string, size int) (bool, error) {
 	path := ArtworkCachePath(e.CacheDir, mbid, size)
 	if _, err := os.Stat(path); err == nil {
+		return true, nil
+	}
+	// Phase B: try the authenticated Atlas premium cover first. A hit caches
+	// the cross-source premium canonical (Qobuz/Tidal-grade) under the same
+	// path the CAA chain would use, so /v1/artwork serves it with zero iOS
+	// change. A miss (no credential / 404 / token rejected / Atlas hiccup)
+	// falls through to the public CAA chain below. No extra pacing here — the
+	// per-track MB cadence already spaces these calls, and TryCache replaces
+	// (not adds to) the CAA request on a hit. premiumCovers is nil unless the
+	// harvest credential store was wired at startup.
+	if e.premiumCovers != nil && e.premiumCovers.TryCache(ctx, path, mbid, size) {
 		return true, nil
 	}
 	if !sleepCtx(ctx, e.CAAMinInterval) { // pace
