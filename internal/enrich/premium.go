@@ -26,6 +26,10 @@ type AtlasCredentialSource interface {
 // configured (CAA-only enrichment, the default).
 type PremiumCoverFetcher interface {
 	TryCache(ctx context.Context, path, mbid string, size int) bool
+	// RefetchPremium OVERWRITES the cache at path only when Atlas now serves a
+	// premium (non-CAA) cover — the cover bulk-harvest's upgrade path. Returns
+	// true when a premium cover was written.
+	RefetchPremium(ctx context.Context, path, mbid string, size int) (bool, error)
 }
 
 // atlasPremiumFetcher implements PremiumCoverFetcher against Atlas's
@@ -108,4 +112,64 @@ func (f *atlasPremiumFetcher) TryCache(ctx context.Context, path, mbid string, s
 	}
 	logger.Debug("atlas premium cover cached", "mbid", mbid, "size", size)
 	return true
+}
+
+// RefetchPremium re-fetches the authenticated Atlas cover for (mbid, size) and
+// OVERWRITES the cache at path ONLY when Atlas now serves a premium (non-CAA)
+// cover — used by the cover bulk-harvest to upgrade an already-cached CAA cover
+// once Atlas has reverse-resolved a premium one. Unlike TryCache (which writes
+// any 200), this gates on the `X-Atlas-Asset-Source` header, so a release Atlas
+// is still serving CAA for leaves the existing cache untouched and the caller
+// retries later. Returns true when a premium cover was written. Never an error
+// for a "not premium yet" miss; only for a write/transport failure worth
+// surfacing.
+func (f *atlasPremiumFetcher) RefetchPremium(ctx context.Context, path, mbid string, size int) (bool, error) {
+	token, baseURL, ok := f.cred.AtlasCredential()
+	if !ok {
+		return false, nil
+	}
+	url := strings.TrimRight(baseURL, "/") + fmt.Sprintf("/release/%s/front-%d", mbid, size)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	if f.userAgent != "" {
+		req.Header.Set("User-Agent", f.userAgent)
+	}
+	resp, err := f.http.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			if clearable, ok := f.cred.(interface{ Clear() error }); ok {
+				_ = clearable.Clear()
+			}
+		}
+		return false, nil
+	}
+	if !isPremiumSource(resp.Header.Get("X-Atlas-Asset-Source")) {
+		// Atlas hasn't reverse-resolved a premium cover yet (still CAA) — leave
+		// the existing cache; the caller retries on a later sweep.
+		return false, nil
+	}
+	if err := writeArtworkAtomicStream(path, resp.Body, MaxCoverArtBytes); err != nil {
+		return false, err
+	}
+	logger.Info("atlas premium cover upgraded", "mbid", mbid, "size", size)
+	return true, nil
+}
+
+// isPremiumSource reports whether the X-Atlas-Asset-Source header names a
+// premium (non-CAA) source. Empty / "caa" → false; "tidal" / "qobuz" / etc.
+// → true. Atlas sets this header on the cover proxy response.
+func isPremiumSource(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "caa":
+		return false
+	default:
+		return true
+	}
 }

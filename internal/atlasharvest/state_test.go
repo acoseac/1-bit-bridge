@@ -77,3 +77,52 @@ func TestStateStore_AtlasCredential(t *testing.T) {
 		}
 	})
 }
+
+// TestStateStore_PendingCovers pins the cover-harvest pending set: add starts at
+// 0 attempts + dedups, a re-add doesn't reset progress, a resolved entry is
+// removed, and a miss increments + drops at the cap. Persists across reopen.
+func TestStateStore_PendingCovers(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "h.json")
+	s, err := OpenStateStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddPendingCovers([]string{"a", "b", "a", ""}); err != nil {
+		t.Fatal(err)
+	}
+	snap := s.PendingCoversSnapshot()
+	if len(snap) != 2 || snap["a"] != 0 || snap["b"] != 0 {
+		t.Fatalf("snapshot=%v, want {a:0,b:0}", snap)
+	}
+	// A miss bumps b; a re-add must not reset it.
+	if err := s.SettlePendingCovers(nil, []string{"b"}, 6); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.PendingCoversSnapshot()["b"]; got != 1 {
+		t.Fatalf("b attempts=%d, want 1", got)
+	}
+	_ = s.AddPendingCovers([]string{"b"})
+	if got := s.PendingCoversSnapshot()["b"]; got != 1 {
+		t.Errorf("re-add reset b's attempts to %d", got)
+	}
+	// A premium hit removes a.
+	_ = s.SettlePendingCovers([]string{"a"}, nil, 6)
+	if _, ok := s.PendingCoversSnapshot()["a"]; ok {
+		t.Errorf("a not removed after a premium hit")
+	}
+	// Repeated misses drop b at the cap.
+	for i := 0; i < 6; i++ {
+		_ = s.SettlePendingCovers(nil, []string{"b"}, 6)
+	}
+	if _, ok := s.PendingCoversSnapshot()["b"]; ok {
+		t.Errorf("b not dropped at the attempt cap")
+	}
+	// Persisted: reopen sees the (now empty) set.
+	s2, err := OpenStateStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(s2.PendingCoversSnapshot()); n != 0 {
+		t.Errorf("reopened pending set has %d entries, want 0", n)
+	}
+}

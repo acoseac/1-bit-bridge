@@ -2280,6 +2280,37 @@ func (s *Store) DistinctArtistMBIDs(ctx context.Context) ([]string, error) {
 	return out, rows.Err()
 }
 
+// DistinctReleaseMBIDs returns every distinct MusicBrainz release GID the
+// library has a cached cover for — the UUID-form `$.artworkMBID` values
+// (excluding the `local-<hash>` curated-art sentinels). This is the set the
+// Atlas cover bulk-harvest submits (kind=release) and re-fetches premium covers
+// for. The enricher sets ArtworkMBID to the release MBID after a CoverArt fetch,
+// so a UUID artworkMBID IS the release GID; `/v1/artwork/{mbid}` and Atlas's
+// `/release/{mbid}` both key on it. Un-mutexed read; slow cadence (harvest), not
+// a hot path.
+func (s *Store) DistinctReleaseMBIDs(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT DISTINCT json_extract(tags_json, '$.artworkMBID')
+		  FROM tracks
+		 WHERE json_extract(tags_json, '$.artworkMBID') IS NOT NULL
+		   AND json_extract(tags_json, '$.artworkMBID') != ''
+		   AND json_extract(tags_json, '$.artworkMBID') NOT LIKE 'local-%'
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var mbid string
+		if err := rows.Scan(&mbid); err != nil {
+			return nil, err
+		}
+		out = append(out, mbid)
+	}
+	return out, rows.Err()
+}
+
 // Field names for the JSON-extract lookup. Declared as constants
 // (not parameters passed by callers) so `hasTrackWithJSONField` can
 // enforce a whitelist — the function used to take an arbitrary

@@ -11,13 +11,18 @@ import (
 )
 
 type fakeMBIDs struct {
-	ids   []string
-	calls int
+	ids        []string
+	releaseIDs []string
+	calls      int
 }
 
 func (f *fakeMBIDs) DistinctArtistMBIDs(context.Context) ([]string, error) {
 	f.calls++
 	return f.ids, nil
+}
+
+func (f *fakeMBIDs) DistinctReleaseMBIDs(context.Context) ([]string, error) {
+	return f.releaseIDs, nil
 }
 
 func mustOpenState(t *testing.T, path string) *StateStore {

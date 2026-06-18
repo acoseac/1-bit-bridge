@@ -30,6 +30,12 @@ type State struct {
 	ExpiresAt    time.Time `json:"expiresAt"`    // token expiry (zero = unknown)
 	ResultCursor int64     `json:"resultCursor"` // delta-sync cursor
 	LastSubmitAt time.Time `json:"lastSubmitAt"` // last full library submit
+	// PendingCovers maps a release MBID Atlas reported "resolved" (a cover
+	// reverse-resolve was enqueued) to the number of premium re-fetch attempts
+	// that have come back CAA (premium not ready yet). The refresh sweep drains
+	// this: a premium hit removes the entry; a capped miss count drops it (Tidal
+	// likely lacks the release). Keyed map = natural dedup + idempotent re-adds.
+	PendingCovers map[string]int `json:"pendingCovers,omitempty"`
 }
 
 // StateStore persists State atomically. All mutators serialize on mu and
@@ -130,6 +136,71 @@ func (s *StateStore) Clear() error {
 	defer s.mu.Unlock()
 	s.st.Token = ""
 	s.st.ExpiresAt = time.Time{}
+	return s.persistLocked()
+}
+
+// AddPendingCovers records release MBIDs Atlas reported resolved, so the
+// refresh sweep re-fetches their (now premium) covers. New entries start at 0
+// attempts; an already-pending MBID is left at its current attempt count (a
+// re-report shouldn't reset its progress). One persist for the whole batch.
+func (s *StateStore) AddPendingCovers(mbids []string) error {
+	if len(mbids) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.st.PendingCovers == nil {
+		s.st.PendingCovers = make(map[string]int, len(mbids))
+	}
+	changed := false
+	for _, m := range mbids {
+		if m == "" {
+			continue
+		}
+		if _, ok := s.st.PendingCovers[m]; !ok {
+			s.st.PendingCovers[m] = 0
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return s.persistLocked()
+}
+
+// PendingCoversSnapshot returns a copy of the pending-cover attempt map.
+func (s *StateStore) PendingCoversSnapshot() map[string]int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]int, len(s.st.PendingCovers))
+	for k, v := range s.st.PendingCovers {
+		out[k] = v
+	}
+	return out
+}
+
+// SettlePendingCovers finalizes a refresh-sweep pass: resolved MBIDs (premium
+// fetched) are removed; missed MBIDs have their attempt count incremented and
+// are dropped once they reach maxAttempts (Tidal likely lacks the release —
+// stop re-fetching it forever). One persist for the whole batch.
+func (s *StateStore) SettlePendingCovers(resolved, missed []string, maxAttempts int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.st.PendingCovers == nil {
+		return nil
+	}
+	for _, m := range resolved {
+		delete(s.st.PendingCovers, m)
+	}
+	for _, m := range missed {
+		if _, ok := s.st.PendingCovers[m]; !ok {
+			continue
+		}
+		s.st.PendingCovers[m]++
+		if s.st.PendingCovers[m] >= maxAttempts {
+			delete(s.st.PendingCovers, m)
+		}
+	}
 	return s.persistLocked()
 }
 
