@@ -309,14 +309,22 @@ func sweepArtworkCache(ctx context.Context, artworkDir string, capBytes int64) (
 		// Only final cache files count. Every cached cover ends in `.jpg`;
 		// the atomic-write temp files end in `.jpg.tmp` (excluded) and any
 		// stray non-cache file is left alone — same scoping rationale as the
-		// GC's suffix gate.
-		if !strings.HasSuffix(filepath.Base(path), ".jpg") {
+		// GC's suffix gate. Match on the full path (a separator can't appear
+		// in the `.jpg` suffix) to skip a filepath.Base alloc per file.
+		if !strings.HasSuffix(path, ".jpg") {
 			return nil
 		}
 		info, ierr := d.Info()
 		if ierr != nil {
-			// File vanished mid-walk (concurrent eviction / rename) — skip.
-			return nil
+			// File vanished mid-walk (concurrent eviction / rename) — skip
+			// that one entry. Any OTHER stat error (permission, I/O) would
+			// silently undercount the cache and let the sweep report success
+			// while still over cap, so surface it and let the next tick
+			// retry rather than swallowing it.
+			if errors.Is(ierr, os.ErrNotExist) {
+				return nil
+			}
+			return ierr
 		}
 		files = append(files, cacheFile{path: path, size: info.Size(), mod: info.ModTime()})
 		total += info.Size()
@@ -350,9 +358,16 @@ func sweepArtworkCache(ctx context.Context, artworkDir string, capBytes int64) (
 			return evicted, freed, cerr
 		}
 		if rmErr := os.Remove(f.path); rmErr != nil {
+			if errors.Is(rmErr, os.ErrNotExist) {
+				// Already removed concurrently (e.g. an operator-run
+				// `bridge artwork --gc`): the bytes are gone, so keep the
+				// running total accurate to avoid over-evicting live entries
+				// to reach the low-water mark. Not counted as our eviction.
+				total -= f.size
+				continue
+			}
 			// Best-effort: a file held open by an in-flight serve (Windows)
-			// or already removed by a sibling sweep is non-fatal — leave it
-			// for the next pass.
+			// is non-fatal — leave it for the next pass.
 			logger.Warn("artwork cache evict", "path", f.path, "err", rmErr)
 			continue
 		}
