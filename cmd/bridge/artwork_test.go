@@ -262,3 +262,158 @@ func TestArtworkMBIDsInUseDistinctFiltering(t *testing.T) {
 		}
 	}
 }
+
+// writeArtFile stages a cache file of the given byte size with an explicit
+// mtime so LRU ordering is deterministic regardless of filesystem timestamp
+// resolution. Returns the absolute path.
+func writeArtFile(t *testing.T, dir, name string, size int, mod time.Time) string {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, bytes.Repeat([]byte("x"), size), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(p, mod, mod); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func mustExist(t *testing.T, p string) {
+	t.Helper()
+	if _, err := os.Stat(p); err != nil {
+		t.Errorf("expected %s to survive: %v", p, err)
+	}
+}
+
+func mustGone(t *testing.T, p string) {
+	t.Helper()
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		t.Errorf("expected %s to be evicted: %v", p, err)
+	}
+}
+
+// TestSweepArtworkCacheNoOpUnderCap — a cache below the cap is untouched.
+func TestSweepArtworkCacheNoOpUnderCap(t *testing.T) {
+	dir := t.TempDir()
+	base := time.Now().Add(-10 * time.Hour)
+	a := writeArtFile(t, dir, "00000000-0000-4000-8000-000000000000-500.jpg", 30, base)
+	b := writeArtFile(t, dir, "local-deadbeef-500.jpg", 30, base.Add(time.Hour))
+
+	evicted, freed, err := sweepArtworkCache(context.Background(), dir, 1000)
+	if err != nil {
+		t.Fatalf("sweep err: %v", err)
+	}
+	if evicted != 0 || freed != 0 {
+		t.Errorf("expected no eviction under cap, got evicted=%d freed=%d", evicted, freed)
+	}
+	mustExist(t, a)
+	mustExist(t, b)
+}
+
+// TestSweepArtworkCacheEvictsOldestFirst is the load-bearing case: over the
+// cap, the oldest-mtime files are removed first, down to the 90% low-water
+// mark; the newest survive; the post-sweep total is back under the cap.
+func TestSweepArtworkCacheEvictsOldestFirst(t *testing.T) {
+	dir := t.TempDir()
+	base := time.Now().Add(-10 * time.Hour)
+	// 5 × 30B = 150B total; cap 100 → lowWater 90. Oldest two (60B) evicted
+	// to reach 90, leaving the three newest (90B).
+	f1 := writeArtFile(t, dir, "11111111-1111-4111-8111-111111111111-500.jpg", 30, base)
+	f2 := writeArtFile(t, dir, "22222222-2222-4222-8222-222222222222-500.jpg", 30, base.Add(1*time.Hour))
+	f3 := writeArtFile(t, dir, "33333333-3333-4333-8333-333333333333-500.jpg", 30, base.Add(2*time.Hour))
+	f4 := writeArtFile(t, dir, "44444444-4444-4444-8444-444444444444-500.jpg", 30, base.Add(3*time.Hour))
+	f5 := writeArtFile(t, dir, "local-newest-500.jpg", 30, base.Add(4*time.Hour))
+
+	evicted, freed, err := sweepArtworkCache(context.Background(), dir, 100)
+	if err != nil {
+		t.Fatalf("sweep err: %v", err)
+	}
+	if evicted != 2 || freed != 60 {
+		t.Errorf("expected evicted=2 freed=60, got evicted=%d freed=%d", evicted, freed)
+	}
+	mustGone(t, f1)
+	mustGone(t, f2)
+	mustExist(t, f3)
+	mustExist(t, f4)
+	mustExist(t, f5)
+
+	// Post-sweep total must be at or under the cap.
+	var total int64
+	ents, _ := os.ReadDir(dir)
+	for _, e := range ents {
+		info, _ := e.Info()
+		total += info.Size()
+	}
+	if total > 100 {
+		t.Errorf("post-sweep total %d exceeds cap 100", total)
+	}
+}
+
+// TestSweepArtworkCacheUnboundedCapNoOp — cap <= 0 is the unbounded default
+// and must never evict, even when files are present.
+func TestSweepArtworkCacheUnboundedCapNoOp(t *testing.T) {
+	for _, capBytes := range []int64{0, -1} {
+		dir := t.TempDir()
+		f := writeArtFile(t, dir, "local-keep-500.jpg", 5_000_000, time.Now().Add(-time.Hour))
+		evicted, freed, err := sweepArtworkCache(context.Background(), dir, capBytes)
+		if err != nil {
+			t.Fatalf("cap=%d sweep err: %v", capBytes, err)
+		}
+		if evicted != 0 || freed != 0 {
+			t.Errorf("cap=%d: expected no-op, got evicted=%d freed=%d", capBytes, evicted, freed)
+		}
+		mustExist(t, f)
+	}
+}
+
+// TestSweepArtworkCacheSkipsTmpAndNonJpg — in-flight atomic-write temp files
+// (`*.jpg.tmp`) and non-cache strays are neither counted toward the cap nor
+// evicted. Without this, evicting a half-written tmp would corrupt the
+// in-flight write's rename target.
+func TestSweepArtworkCacheSkipsTmpAndNonJpg(t *testing.T) {
+	dir := t.TempDir()
+	base := time.Now().Add(-time.Hour)
+	// Counted .jpg files stay under the cap on their own (60B < 100).
+	a := writeArtFile(t, dir, "local-a-500.jpg", 30, base)
+	b := writeArtFile(t, dir, "local-b-500.jpg", 30, base.Add(time.Minute))
+	// A giant in-flight temp + a giant stray would blow the cap if counted.
+	tmp := writeArtFile(t, dir, ".caa-12345.jpg.tmp", 10_000, base.Add(-time.Hour))
+	stray := writeArtFile(t, dir, "README.txt", 10_000, base.Add(-time.Hour))
+
+	evicted, freed, err := sweepArtworkCache(context.Background(), dir, 100)
+	if err != nil {
+		t.Fatalf("sweep err: %v", err)
+	}
+	if evicted != 0 || freed != 0 {
+		t.Errorf("expected no-op (only 60B of cache files), got evicted=%d freed=%d", evicted, freed)
+	}
+	mustExist(t, a)
+	mustExist(t, b)
+	mustExist(t, tmp)
+	mustExist(t, stray)
+}
+
+// TestSweepArtworkCacheMissingDir — a bridge that has never scanned has no
+// cache dir; the sweep treats that as empty, not an error.
+func TestSweepArtworkCacheMissingDir(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "artwork-not-yet")
+	evicted, freed, err := sweepArtworkCache(context.Background(), dir, 100)
+	if err != nil {
+		t.Errorf("missing dir should not error, got %v", err)
+	}
+	if evicted != 0 || freed != 0 {
+		t.Errorf("missing dir: expected no-op, got evicted=%d freed=%d", evicted, freed)
+	}
+}
+
+// TestRunArtworkCacheSweeperDisabledWhenCapZero — the periodic runner must
+// return immediately (never start its settle/tick loop) when the cap is
+// unbounded, so runServe pays zero cost for the default config. A direct
+// synchronous call that returns proves the guard; without it the call would
+// block on the 90s settle delay and the test would time out.
+func TestRunArtworkCacheSweeperDisabledWhenCapZero(t *testing.T) {
+	dir := t.TempDir()
+	f := writeArtFile(t, dir, "local-keep-500.jpg", 10, time.Now())
+	runArtworkCacheSweeper(context.Background(), dir, 0, time.Minute)
+	mustExist(t, f)
+}

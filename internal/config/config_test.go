@@ -217,6 +217,36 @@ func TestValidate_RejectsNegativeSweepIntervals(t *testing.T) {
 	})
 }
 
+// TestValidate_ArtworkCacheMaxBytes pins the artwork-cache cap shape check:
+// zero is the valid unbounded default, a positive byte cap validates, a
+// negative value is rejected as a typo.
+func TestValidate_ArtworkCacheMaxBytes(t *testing.T) {
+	base := func() *Config {
+		return &Config{LibraryRoots: []string{"/nonexistent"}, ListenAddress: ":7788", AdminAddress: "127.0.0.1:7789", ScanIntervalSec: 3600}
+	}
+	t.Run("zero is unbounded default", func(t *testing.T) {
+		cfg := base()
+		cfg.Artwork.CacheMaxBytes = 0
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("zero cap should validate, got %v", err)
+		}
+	})
+	t.Run("positive cap validates", func(t *testing.T) {
+		cfg := base()
+		cfg.Artwork.CacheMaxBytes = 2 << 30 // 2 GiB
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("positive cap should validate, got %v", err)
+		}
+	})
+	t.Run("negative rejected", func(t *testing.T) {
+		cfg := base()
+		cfg.Artwork.CacheMaxBytes = -1
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "artwork.cacheMaxBytes") {
+			t.Fatalf("expected artwork.cacheMaxBytes error, got %v", err)
+		}
+	})
+}
+
 // TestValidate_RejectsNegativeDLNADiscoveryIntervals pins the r1-review
 // negative-interval standardization for the dlna.discovery block (gated
 // on Discovery.Enabled, alongside the existing TTL-vs-interval check).

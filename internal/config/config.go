@@ -79,6 +79,7 @@ type Config struct {
 	UPnPUpstream    UPnPUpstreamConfig   `yaml:"upnpUpstream,omitempty"`
 	Enrich          EnrichConfig         `yaml:"enrich,omitempty"`
 	Atlas           AtlasConfig          `yaml:"atlas,omitempty"`
+	Artwork         ArtworkConfig        `yaml:"artwork,omitempty"`
 
 	// DisableHTTP3 prevents the server from binding UDP ports and
 	// advertising Alt-Svc headers for HTTP/3 upgrades. Defaults to false.
@@ -349,6 +350,24 @@ func (a AtlasConfig) EffectiveMetaTTL() time.Duration {
 		h = DefaultAtlasMetaTTLHours
 	}
 	return time.Duration(h) * time.Hour
+}
+
+// ArtworkConfig governs the on-disk artwork cache at <dataDir>/artwork/ —
+// the shared directory where the scanner writes local- embedded/folder art,
+// the enricher writes MusicBrainz / Cover Art Archive / iTunes covers, and
+// (Atlas Phase 2) premium hi-res covers land. Distinct from `enrich` /
+// `atlas`, which decide WHERE artwork is fetched from; this block bounds how
+// much of it is kept on disk.
+type ArtworkConfig struct {
+	// CacheMaxBytes caps the total on-disk size of the artwork cache. When
+	// the cache exceeds this, a periodic background sweeper evicts the
+	// least-recently-modified cached covers until it is back under the cap.
+	// Zero (the default) means unbounded — no eviction, the historical
+	// behaviour. A library's covers are naturally bounded (one per album, a
+	// few sizes) so a cap is rarely needed; it becomes advisable once premium
+	// hi-res (1200px) covers are enabled, where whole-library covers can fill
+	// a small host disk. A negative value is rejected by Validate.
+	CacheMaxBytes int64 `yaml:"cacheMaxBytes,omitempty"`
 }
 
 type IntegrityConfig struct {
@@ -1666,6 +1685,13 @@ func (c *Config) Validate() error {
 		return err
 	}
 	c.Enrich.CoverArtBaseURL = caaBase
+	// Artwork cache cap: a negative value is almost certainly a typo. Zero
+	// is the valid "unbounded" sentinel; positive is a byte cap. Surface a
+	// negative at load time rather than letting the sweeper silently treat
+	// it as unbounded.
+	if c.Artwork.CacheMaxBytes < 0 {
+		return fmt.Errorf("artwork.cacheMaxBytes: must be >= 0 (0 = unbounded), got %d", c.Artwork.CacheMaxBytes)
+	}
 	// DLNA discovery: TTL must be strictly greater than the
 	// M-SEARCH interval — otherwise we'd evict still-online
 	// renderers between cycles (the M-SEARCH cycle is the only
