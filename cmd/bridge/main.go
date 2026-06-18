@@ -1559,10 +1559,35 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	mbClient := enrich.NewMusicBrainzClient(cfg.Enrich.MusicBrainzBaseURL, userAgent, nil)
 	caaClient := enrich.NewCoverArtClient(cfg.Enrich.CoverArtBaseURL, userAgent, nil)
 	deezerClient := enrich.NewDeezerClient("", userAgent, nil)
+	// Phase-H harvest credential store, opened early so the enricher can wire
+	// the Phase-B authenticated premium-cover fetcher BEFORE its worker
+	// goroutine starts (avoids a field-write/read race). The same store is
+	// reused by the bulk-harvest client below. Gated identically to that
+	// client: harvest requires atlas.enabled (the bios it pulls are only
+	// served when WithAtlasMeta is wired). nil = feature off, or the state
+	// file failed to open.
+	var harvestState *atlasharvest.StateStore
+	if cfg.Atlas.HarvestEnabled && cfg.Atlas.Enabled {
+		hs, herr := atlasharvest.OpenStateStore(filepath.Join(cfg.DataDir, "atlas-harvest.json"))
+		if herr != nil {
+			fmt.Fprintf(stderr, "atlas harvest: open state: %v (feature disabled)\n", herr)
+		} else {
+			harvestState = hs
+		}
+	}
+
 	// artworkDir is defined above (single source of truth) and shared
 	// with the scanner so scanner-side `local-*` files and enricher-
 	// side `<mbid>-*` files cohabit one directory.
 	enricher := enrich.NewEnricher(manifestStore, mbClient, caaClient, deezerClient, artworkDir)
+	// Phase B: when the harvest credential store is available, fetch the
+	// cross-source premium canonical (Qobuz/Tidal) from Atlas ahead of CAA,
+	// caching it under the MBID path /v1/artwork already serves — premium
+	// covers with zero iOS change. The bulk_harvest bearer is read from the
+	// store at request time (never baked into the open-source binary).
+	if harvestState != nil {
+		enricher.WithPremiumCovers(enrich.NewAtlasPremiumFetcher(harvestState, userAgent, nil))
+	}
 	go enricher.Run(scanCtx)
 
 	// Artwork-cache LRU eviction. Bounds the on-disk size of the shared
@@ -1781,18 +1806,16 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	if cfg.Atlas.HarvestEnabled && !cfg.Atlas.Enabled {
 		fmt.Fprintln(stderr, "atlas harvest: harvestEnabled requires atlas.enabled (bios are served via /v1/atlas-meta) — harvest disabled")
 	}
-	if cfg.Atlas.HarvestEnabled && cfg.Atlas.Enabled {
-		harvestState, herr := atlasharvest.OpenStateStore(filepath.Join(cfg.DataDir, "atlas-harvest.json"))
-		if herr != nil {
-			fmt.Fprintf(stderr, "atlas harvest: open state: %v (feature disabled)\n", herr)
-		} else {
-			apiSrv.WithAtlasHarvest(harvestState)
-			harvestClient = &atlasharvest.Client{
-				State: harvestState,
-				MBIDs: manifestStore,
-				Sink:  atlasHarvestSink{store: manifestStore},
-				Log:   logging.Component("atlasharvest"),
-			}
+	// harvestState was opened earlier (so the enricher could wire the premium-
+	// cover fetcher before its worker started). Reuse it for the bulk-harvest
+	// client; nil = feature off or the state file failed to open.
+	if harvestState != nil {
+		apiSrv.WithAtlasHarvest(harvestState)
+		harvestClient = &atlasharvest.Client{
+			State: harvestState,
+			MBIDs: manifestStore,
+			Sink:  atlasHarvestSink{store: manifestStore},
+			Log:   logging.Component("atlasharvest"),
 		}
 	}
 	if harvestClient != nil {
