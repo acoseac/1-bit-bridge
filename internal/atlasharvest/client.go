@@ -27,10 +27,29 @@ type ArtistMeta struct {
 	SourceURL  string
 }
 
-// MBIDSource enumerates the library's distinct artist GIDs to submit.
+// MBIDSource enumerates the library's distinct artist + release GIDs to submit.
 type MBIDSource interface {
 	DistinctArtistMBIDs(ctx context.Context) ([]string, error)
+	DistinctReleaseMBIDs(ctx context.Context) ([]string, error)
 }
+
+// CoverRefetcher re-fetches a release's premium cover from Atlas, overwriting
+// the local cache ONLY when Atlas now serves a premium (non-CAA) one. Returns
+// true when a premium cover was written. Satisfied by a thin adapter over the
+// enricher's authenticated premium-cover fetcher. Nil disables cover harvest.
+//
+// Error contract: (false, nil) is a genuine "premium not ready yet" miss (it
+// counts toward the attempt cap). A non-nil error is transient (the cover stays
+// pending, attempt NOT burned) — the adapter MUST return ErrNoCredential when no
+// usable credential is available so the sweep stops the whole tick.
+type CoverRefetcher interface {
+	RefetchPremium(ctx context.Context, releaseMBID string) (bool, error)
+}
+
+// ErrNoCredential signals a CoverRefetcher had no usable Atlas credential — the
+// refresh sweep stops the tick on it (every remaining release would fail the
+// same way) rather than spamming the log.
+var ErrNoCredential = errors.New("atlasharvest: refetcher has no usable credential")
 
 // MetaSink caches a harvested (or tombstoned) artist bio. manifest.Store
 // satisfies this via a thin adapter in the wiring.
@@ -46,12 +65,13 @@ var errUnauthorized = errors.New("atlasharvest: token rejected by atlas")
 // delta-sync the harvested bios into the overlay. One long-lived goroutine; all
 // pacing is interval-based + bounded by Atlas's own per-source rate limits.
 type Client struct {
-	State *StateStore
-	MBIDs MBIDSource
-	Sink  MetaSink
-	HTTP  *http.Client
-	Log   *slog.Logger
-	Now   func() time.Time
+	State     *StateStore
+	MBIDs     MBIDSource
+	Sink      MetaSink
+	Refetcher CoverRefetcher // optional; nil = artist-bio harvest only (no cover harvest)
+	HTTP      *http.Client
+	Log       *slog.Logger
+	Now       func() time.Time
 
 	// SubmitInterval is the re-submit cadence (re-submitting is idempotent at
 	// Atlas, but cheap to skip) — catches artists added since the last submit.
@@ -146,6 +166,66 @@ func (c *Client) tick(ctx context.Context) {
 	if err := c.pollResults(ctx); err != nil {
 		c.handleErr(ctx, "poll", err)
 	}
+	c.refreshCovers(ctx)
+}
+
+const (
+	// maxCoverRefetchAttempts is how many CAA misses a pending release tolerates
+	// before it's dropped — Tidal likely has no album for that barcode, so the
+	// cover will never go premium and re-fetching it forever is waste.
+	maxCoverRefetchAttempts = 6
+	// coverRefreshPerTick bounds how many pending covers a single tick re-fetches
+	// so a large backlog paces against Atlas's public-tier rate limit over ticks
+	// rather than bursting.
+	coverRefreshPerTick = 100
+)
+
+// refreshCovers re-fetches a bounded batch of pending release covers from Atlas
+// (premium-gated): a premium hit settles the entry (the local cache is upgraded);
+// a CAA miss increments its attempt count and drops it at the cap. No-op without
+// a wired refetcher or pending entries.
+func (c *Client) refreshCovers(ctx context.Context) {
+	if c.Refetcher == nil {
+		return
+	}
+	pending := c.State.PendingCoversSnapshot()
+	if len(pending) == 0 {
+		return
+	}
+	var resolved, missed []string
+	processed := 0
+	for mbid := range pending {
+		if processed >= coverRefreshPerTick || ctx.Err() != nil {
+			break
+		}
+		processed++
+		got, err := c.Refetcher.RefetchPremium(ctx, mbid)
+		if err != nil {
+			// Transient: leave the cover pending WITHOUT burning an attempt. No
+			// credential means every remaining release fails the same way, so
+			// stop the tick rather than spam; other errors (5xx) just skip this
+			// one and try the rest.
+			if errors.Is(err, ErrNoCredential) {
+				break
+			}
+			c.log().WarnContext(ctx, "atlasharvest.cover_refetch_failed", "mbid", mbid, "error", err.Error())
+			continue
+		}
+		if got {
+			resolved = append(resolved, mbid)
+		} else {
+			missed = append(missed, mbid)
+		}
+	}
+	if len(resolved) == 0 && len(missed) == 0 {
+		return
+	}
+	if err := c.State.SettlePendingCovers(resolved, missed, maxCoverRefetchAttempts); err != nil {
+		c.log().WarnContext(ctx, "atlasharvest.pending_covers.settle_failed", "error", err)
+	}
+	if len(resolved) > 0 {
+		c.log().InfoContext(ctx, "atlasharvest.covers_upgraded", "count", len(resolved))
+	}
 }
 
 func credentialUsable(st State, now time.Time) bool {
@@ -173,7 +253,8 @@ func (c *Client) handleErr(ctx context.Context, phase string, err error) {
 }
 
 type submitRequest struct {
-	MBIDs []string `json:"mbids"`
+	MBIDs        []string `json:"mbids"`
+	ReleaseMBIDs []string `json:"releaseMbids,omitempty"`
 }
 
 type submitResponse struct {
@@ -182,32 +263,55 @@ type submitResponse struct {
 }
 
 func (c *Client) submitAll(ctx context.Context, st State) error {
-	mbids, err := c.MBIDs.DistinctArtistMBIDs(ctx)
+	artists, err := c.MBIDs.DistinctArtistMBIDs(ctx)
 	if err != nil {
 		return fmt.Errorf("enumerate artist mbids: %w", err)
 	}
-	if len(mbids) == 0 {
+	// Release covers are only submitted when a refetcher is wired — otherwise
+	// Atlas would resolve covers the bridge never picks up locally.
+	var releases []string
+	if c.Refetcher != nil {
+		releases, err = c.MBIDs.DistinctReleaseMBIDs(ctx)
+		if err != nil {
+			return fmt.Errorf("enumerate release mbids: %w", err)
+		}
+	}
+	if len(artists) == 0 && len(releases) == 0 {
 		return nil
 	}
 	chunk := c.submitChunk()
-	var totalAccepted int
-	for i := 0; i < len(mbids); i += chunk {
-		end := i + chunk
-		if end > len(mbids) {
-			end = len(mbids)
+	postChunks := func(mbids []string, asRelease bool) error {
+		for i := 0; i < len(mbids); i += chunk {
+			end := i + chunk
+			if end > len(mbids) {
+				end = len(mbids)
+			}
+			req := submitRequest{}
+			if asRelease {
+				req.ReleaseMBIDs = mbids[i:end]
+			} else {
+				req.MBIDs = mbids[i:end]
+			}
+			var resp submitResponse
+			if err := c.postJSON(ctx, st, "/v1/atlas/harvest/submit", req, &resp); err != nil {
+				return err
+			}
 		}
-		var resp submitResponse
-		if err := c.postJSON(ctx, st, "/v1/atlas/harvest/submit", submitRequest{MBIDs: mbids[i:end]}, &resp); err != nil {
-			return err
-		}
-		totalAccepted += resp.Accepted
+		return nil
 	}
-	c.log().InfoContext(ctx, "atlasharvest.submitted", "artists", len(mbids), "accepted", totalAccepted)
+	if err := postChunks(artists, false); err != nil {
+		return err
+	}
+	if err := postChunks(releases, true); err != nil {
+		return err
+	}
+	c.log().InfoContext(ctx, "atlasharvest.submitted", "artists", len(artists), "releases", len(releases))
 	return nil
 }
 
 type resultItem struct {
 	MBID       string   `json:"mbid"`
+	Kind       string   `json:"kind"` // "artist" | "release" (older atlas omits → "")
 	Status     string   `json:"status"`
 	Found      bool     `json:"found"`
 	Bio        string   `json:"bio"`
@@ -234,7 +338,18 @@ func (c *Client) pollResults(ctx context.Context) error {
 		if err := c.getJSON(ctx, st, "/v1/atlas/harvest/results?"+q.Encode(), &resp); err != nil {
 			return err
 		}
+		var pendingReleases []string
 		for _, it := range resp.Results {
+			if it.Kind == "release" {
+				// Cover reverse-resolve result: "done" means Atlas enqueued the
+				// resolve, so record it for the refresh sweep to re-fetch the
+				// (now premium) cover. "exhausted" (no barcode / not mirrored) →
+				// nothing to fetch.
+				if it.Found {
+					pendingReleases = append(pendingReleases, it.MBID)
+				}
+				continue
+			}
 			if err := c.Sink.UpsertArtistMeta(ctx, ArtistMeta{
 				MBID:       it.MBID,
 				Found:      it.Found,
@@ -246,6 +361,9 @@ func (c *Client) pollResults(ctx context.Context) error {
 			}); err != nil {
 				return fmt.Errorf("store %s: %w", it.MBID, err)
 			}
+		}
+		if err := c.State.AddPendingCovers(pendingReleases); err != nil {
+			c.log().WarnContext(ctx, "atlasharvest.pending_covers.persist_failed", "error", err)
 		}
 		advanced := resp.NextCursor > st.ResultCursor
 		if advanced {

@@ -142,6 +142,28 @@ func (a atlasHarvestSink) UpsertArtistMeta(ctx context.Context, m atlasharvest.A
 	})
 }
 
+// atlasCoverRefetcher adapts the enricher's authenticated premium-cover fetcher
+// to the harvest client's CoverRefetcher: it upgrades a release's cached cover
+// (<artworkDir>/<mbid>-500.jpg) to premium once Atlas has reverse-resolved one.
+// Size 500 matches what the enricher caches + what iOS requests.
+type atlasCoverRefetcher struct {
+	premium    enrich.PremiumCoverFetcher
+	artworkDir string
+}
+
+func (a atlasCoverRefetcher) RefetchPremium(ctx context.Context, releaseMBID string) (bool, error) {
+	if a.premium == nil {
+		return false, atlasharvest.ErrNoCredential
+	}
+	got, err := a.premium.RefetchPremium(ctx, enrich.ArtworkCachePath(a.artworkDir, releaseMBID, 500), releaseMBID, 500)
+	if errors.Is(err, enrich.ErrNoCredential) {
+		// Translate the enrich-layer sentinel to the harvest client's contract
+		// sentinel (this adapter is the bridge between the two packages).
+		return got, atlasharvest.ErrNoCredential
+	}
+	return got, err
+}
+
 // analysisStoreAdapter implements api.AnalysisStore on top of a
 // manifest.Provider — the /v1/waveform handler's lookup. Same
 // upward-cycle-avoidance pattern as variantStoreAdapter.
@@ -1585,8 +1607,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// caching it under the MBID path /v1/artwork already serves — premium
 	// covers with zero iOS change. The bulk_harvest bearer is read from the
 	// store at request time (never baked into the open-source binary).
+	var premiumCovers enrich.PremiumCoverFetcher
 	if harvestState != nil {
-		enricher.WithPremiumCovers(enrich.NewAtlasPremiumFetcher(harvestState, userAgent, nil))
+		premiumCovers = enrich.NewAtlasPremiumFetcher(harvestState, userAgent, nil)
+		enricher.WithPremiumCovers(premiumCovers)
 	}
 	go enricher.Run(scanCtx)
 
@@ -1815,7 +1839,12 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			State: harvestState,
 			MBIDs: manifestStore,
 			Sink:  atlasHarvestSink{store: manifestStore},
-			Log:   logging.Component("atlasharvest"),
+			// Cover bulk-harvest: submit the library's release MBIDs + upgrade
+			// their cached covers to premium once Atlas resolves them. Reuses
+			// the enricher's authenticated premium fetcher (premiumCovers is
+			// non-nil whenever harvestState is, both gated on atlas.enabled).
+			Refetcher: atlasCoverRefetcher{premium: premiumCovers, artworkDir: artworkDir},
+			Log:       logging.Component("atlasharvest"),
 		}
 	}
 	if harvestClient != nil {

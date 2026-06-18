@@ -3,6 +3,7 @@ package enrich
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -141,6 +142,72 @@ func TestAtlasPremiumFetcher_TryCache(t *testing.T) {
 		}
 		if want := "/release/" + mbid + "/front-1200"; gotPath != want {
 			t.Errorf("request path = %q, want %q", gotPath, want)
+		}
+	})
+}
+
+// TestAtlasPremiumFetcher_RefetchPremium pins the cover-upgrade gate: a premium
+// X-Atlas-Asset-Source overwrites the cache; a "caa" source leaves it untouched
+// (Atlas hasn't reverse-resolved a premium cover yet) and returns false.
+func TestAtlasPremiumFetcher_RefetchPremium(t *testing.T) {
+	const mbid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+	premiumBytes := append([]byte{0xFF, 0xD8, 0xFF, 0xE0}, []byte("PREMIUM")...)
+
+	// fixture spins a server replying with the given source header + premiumBytes,
+	// seeds the cache with `existing`, and returns the fetcher + cache path.
+	fixture := func(t *testing.T, source, existing string) (PremiumCoverFetcher, string) {
+		t.Helper()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("X-Atlas-Asset-Source", source)
+			_, _ = w.Write(premiumBytes)
+		}))
+		t.Cleanup(srv.Close)
+		path := filepath.Join(t.TempDir(), mbid+"-500.jpg")
+		if err := os.WriteFile(path, []byte(existing), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return NewAtlasPremiumFetcher(fakeCred{token: "t", base: srv.URL, ok: true}, "ua", srv.Client()), path
+	}
+
+	t.Run("premium source overwrites the cache", func(t *testing.T) {
+		f, path := fixture(t, "tidal", "OLD-CAA-COVER")
+		got, err := f.RefetchPremium(context.Background(), path, mbid, 500)
+		if err != nil || !got {
+			t.Fatalf("got=%v err=%v, want true,nil", got, err)
+		}
+		if b, _ := os.ReadFile(path); !bytes.Equal(b, premiumBytes) {
+			t.Errorf("cache not overwritten with the premium bytes")
+		}
+	})
+
+	t.Run("caa source leaves the cache untouched", func(t *testing.T) {
+		f, path := fixture(t, "caa", "EXISTING")
+		got, err := f.RefetchPremium(context.Background(), path, mbid, 500)
+		if err != nil || got {
+			t.Fatalf("got=%v err=%v, want false,nil for a caa source", got, err)
+		}
+		if b, _ := os.ReadFile(path); string(b) != "EXISTING" {
+			t.Errorf("cache overwritten on a caa source: %q", b)
+		}
+	})
+
+	t.Run("no credential returns ErrNoCredential", func(t *testing.T) {
+		f := NewAtlasPremiumFetcher(fakeCred{ok: false}, "ua", nil)
+		got, err := f.RefetchPremium(context.Background(), filepath.Join(t.TempDir(), "x.jpg"), mbid, 500)
+		if got || !errors.Is(err, ErrNoCredential) {
+			t.Errorf("got=%v err=%v, want false + ErrNoCredential", got, err)
+		}
+	})
+
+	t.Run("5xx returns an error (transient, not a miss)", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusBadGateway)
+		}))
+		defer srv.Close()
+		f := NewAtlasPremiumFetcher(fakeCred{token: "t", base: srv.URL, ok: true}, "ua", srv.Client())
+		got, err := f.RefetchPremium(context.Background(), filepath.Join(t.TempDir(), "x.jpg"), mbid, 500)
+		if got || err == nil {
+			t.Errorf("got=%v err=%v, want false + error on 5xx", got, err)
 		}
 	})
 }
