@@ -69,64 +69,40 @@ func TestAtlasPremiumFetcher_TryCache(t *testing.T) {
 		}
 	})
 
-	t.Run("404 returns false and writes no file", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			http.NotFound(w, r)
-		}))
-		defer srv.Close()
-		f := NewAtlasPremiumFetcher(fakeCred{token: "tok", base: srv.URL, ok: true}, "ua", srv.Client())
-		path := filepath.Join(t.TempDir(), mbid+"-500.jpg")
-		if f.TryCache(context.Background(), path, mbid, 500) {
-			t.Error("TryCache returned true on a 404 (should fall through to CAA)")
+	// Non-200 statuses all fall through to CAA (return false, write no file);
+	// only a token-rejection (401/403) clears the credential — a missing cover
+	// (404) must not. Table-driven so the near-identical cases stay DRY.
+	t.Run("non-200 falls through; only 401/403 clear the credential", func(t *testing.T) {
+		cases := []struct {
+			name        string
+			status      int
+			wantCleared bool
+		}{
+			{"404 no cover", http.StatusNotFound, false},
+			{"401 token rejected", http.StatusUnauthorized, true},
+			{"403 forbidden", http.StatusForbidden, true},
+			{"500 atlas hiccup", http.StatusInternalServerError, false},
 		}
-		if _, err := os.Stat(path); !os.IsNotExist(err) {
-			t.Errorf("a file was written on a 404: %v", err)
-		}
-	})
-
-	t.Run("401 returns false and clears the credential", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusUnauthorized)
-		}))
-		defer srv.Close()
-		cred := &fakeClearableCred{fakeCred: fakeCred{token: "stale", base: srv.URL, ok: true}}
-		f := NewAtlasPremiumFetcher(cred, "ua", srv.Client())
-		path := filepath.Join(t.TempDir(), mbid+"-500.jpg")
-		if f.TryCache(context.Background(), path, mbid, 500) {
-			t.Error("TryCache returned true on a 401")
-		}
-		if !cred.cleared {
-			t.Error("credential was not cleared on 401")
-		}
-	})
-
-	t.Run("403 returns false and clears the credential", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusForbidden)
-		}))
-		defer srv.Close()
-		cred := &fakeClearableCred{fakeCred: fakeCred{token: "wrongscope", base: srv.URL, ok: true}}
-		f := NewAtlasPremiumFetcher(cred, "ua", srv.Client())
-		path := filepath.Join(t.TempDir(), mbid+"-500.jpg")
-		if f.TryCache(context.Background(), path, mbid, 500) {
-			t.Error("TryCache returned true on a 403")
-		}
-		if !cred.cleared {
-			t.Error("credential was not cleared on 403")
-		}
-	})
-
-	t.Run("404 does not clear the credential", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			http.NotFound(w, r)
-		}))
-		defer srv.Close()
-		cred := &fakeClearableCred{fakeCred: fakeCred{token: "good", base: srv.URL, ok: true}}
-		f := NewAtlasPremiumFetcher(cred, "ua", srv.Client())
-		path := filepath.Join(t.TempDir(), mbid+"-500.jpg")
-		_ = f.TryCache(context.Background(), path, mbid, 500)
-		if cred.cleared {
-			t.Error("credential cleared on a 404 (no cover) — should only clear on 401/403")
+		for _, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				status := c.status
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(status)
+				}))
+				defer srv.Close()
+				cred := &fakeClearableCred{fakeCred: fakeCred{token: "tok", base: srv.URL, ok: true}}
+				f := NewAtlasPremiumFetcher(cred, "ua", srv.Client())
+				path := filepath.Join(t.TempDir(), mbid+"-500.jpg")
+				if f.TryCache(context.Background(), path, mbid, 500) {
+					t.Errorf("TryCache returned true on %d", status)
+				}
+				if _, err := os.Stat(path); !os.IsNotExist(err) {
+					t.Errorf("status %d: a file was written: %v", status, err)
+				}
+				if cred.cleared != c.wantCleared {
+					t.Errorf("status %d: cleared=%v want %v", status, cred.cleared, c.wantCleared)
+				}
+			})
 		}
 	})
 
