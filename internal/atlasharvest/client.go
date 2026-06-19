@@ -370,7 +370,7 @@ func (c *Client) pollResults(ctx context.Context) error {
 				// resolved something (description / label / genre). Empty → no row,
 				// so the on-demand resolver can still fill it on view and a later
 				// harvest cycle stores it once a CC source has the text.
-				if it.Description != "" || it.RecordLabel != "" || len(it.Genres) > 0 {
+				if it.MBID != "" && (it.Description != "" || it.RecordLabel != "" || len(it.Genres) > 0) {
 					if err := c.Sink.UpsertReleaseMeta(ctx, ReleaseMeta{
 						MBID:        it.MBID,
 						Found:       true,
