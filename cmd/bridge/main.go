@@ -142,6 +142,22 @@ func (a atlasHarvestSink) UpsertArtistMeta(ctx context.Context, m atlasharvest.A
 	})
 }
 
+// UpsertReleaseMeta persists harvested album text (description / record label /
+// genre) into release_atlas — the same overlay the iOS ferry writes via
+// /v1/atlas-ingest — so the bulk harvest fills "About this album" the way it
+// fills artist bios (Phase D).
+func (a atlasHarvestSink) UpsertReleaseMeta(ctx context.Context, m atlasharvest.ReleaseMeta) error {
+	return a.store.UpsertReleaseAtlasMeta(ctx, manifest.ReleaseAtlasMeta{
+		ReleaseMBID: m.MBID,
+		Found:       m.Found,
+		Description: m.Description,
+		RecordLabel: m.RecordLabel,
+		Genres:      m.Genres,
+		Source:      m.Source,
+		SourceURL:   m.SourceURL,
+	})
+}
+
 // atlasCoverRefetcher adapts the enricher's authenticated premium-cover fetcher
 // to the harvest client's CoverRefetcher: it upgrades a release's cached cover
 // (<artworkDir>/<mbid>-500.jpg) to premium once Atlas has reverse-resolved one.

@@ -34,10 +34,18 @@ func mustOpenState(t *testing.T, path string) *StateStore {
 	return s
 }
 
-type fakeSink struct{ stored []ArtistMeta }
+type fakeSink struct {
+	stored         []ArtistMeta
+	storedReleases []ReleaseMeta
+}
 
 func (f *fakeSink) UpsertArtistMeta(_ context.Context, m ArtistMeta) error {
 	f.stored = append(f.stored, m)
+	return nil
+}
+
+func (f *fakeSink) UpsertReleaseMeta(_ context.Context, m ReleaseMeta) error {
+	f.storedReleases = append(f.storedReleases, m)
 	return nil
 }
 
@@ -62,8 +70,10 @@ func TestClientSubmitAndPoll(t *testing.T) {
 					Results: []resultItem{
 						{MBID: "a1", Status: "done", Found: true, Bio: "Bio A", Genres: []string{"jazz"}, Source: "lastfm", SourceURL: "https://last.fm/a", Cursor: 1},
 						{MBID: "a2", Status: "exhausted", Found: false, Cursor: 2},
+						{MBID: "r1", Kind: "release", Status: "done", Found: true, Description: "About this album", RecordLabel: "Blue Note", Genres: []string{"jazz"}, Source: "wikipedia", SourceURL: "https://en.wikipedia.org/wiki/x", Cursor: 3},
+						{MBID: "r2", Kind: "release", Status: "done", Found: true, Cursor: 4}, // cover-only (no text) → must NOT be stored
 					},
-					NextCursor: 2,
+					NextCursor: 4,
 				})
 				return
 			}
@@ -98,8 +108,17 @@ func TestClientSubmitAndPoll(t *testing.T) {
 	if got := sink.stored[1]; got.MBID != "a2" || got.Found {
 		t.Errorf("result[1] = %+v, want a2 tombstone (found=false)", got)
 	}
-	if c := state.Snapshot().ResultCursor; c != 2 {
-		t.Errorf("cursor = %d, want 2", c)
+	// Album text (Phase D): only the release WITH text (r1) is stored; the
+	// cover-only release (r2, no description/label/genre) leaves no overlay row.
+	if len(sink.storedReleases) != 1 {
+		t.Fatalf("stored %d release metas, want 1 (cover-only r2 must be skipped)", len(sink.storedReleases))
+	}
+	if got := sink.storedReleases[0]; got.MBID != "r1" || !got.Found || got.Description != "About this album" ||
+		got.RecordLabel != "Blue Note" || got.Source != "wikipedia" {
+		t.Errorf("release meta = %+v", got)
+	}
+	if c := state.Snapshot().ResultCursor; c != 4 {
+		t.Errorf("cursor = %d, want 4", c)
 	}
 }
 
