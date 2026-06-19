@@ -233,6 +233,7 @@ Pagination semantics:
       "musicBrainzTrackID": "...",
       "musicBrainzAlbumID": "...",
       "artworkMBID": "...",
+      "artworkVersion": "...",
       "artistMBID": "...",
       "enriched": true,
       "composer": "Ludwig van Beethoven",
