@@ -73,6 +73,17 @@ type Track struct {
 	// deliberate sentinel hijack to keep the protocol additive (no
 	// ProtocolVersion bump and no iOS / wire change for v1.2).
 	ArtworkMBID string `json:"artworkMBID,omitempty"`
+	// ArtworkVersion is a content marker for the cover served at
+	// /v1/artwork/{ArtworkMBID}. It's COLUMN-derived (spliced from the
+	// artwork_version column at read time, never persisted into tags_json)
+	// and set ONLY when a premium cover is (re)fetched for a UUID ArtworkMBID
+	// — whose URL is stable while its bytes change (CAA → premium upgrade), so
+	// iOS otherwise can't tell the cover changed. local-<sha256> ArtworkMBIDs
+	// already encode their content, so they leave this empty and iOS versions
+	// them by the MBID itself. iOS treats `artworkVersion ?? artworkMBID` as the
+	// cover identity and re-fetches when it changes. Additive (omitempty); no
+	// ProtocolVersion bump.
+	ArtworkVersion string `json:"artworkVersion,omitempty"`
 	// ArtistMBID is set by the enricher when a matching MusicBrainz artist
 	// was found. Used for artist-image endpoints (PR #9).
 	ArtistMBID string `json:"artistMBID,omitempty"`

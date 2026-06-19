@@ -654,3 +654,88 @@ func upsertParent(t *testing.T, s *Store, path string) {
 		t.Fatalf("UpsertTrack(%q): %v", path, err)
 	}
 }
+
+// TestSetArtworkVersionAndBumpIndex pins the cover cache-bust contract: setting
+// a new artwork_version writes the column, strictly advances indexed_at (so the
+// iOS delta-sync re-receives the track), surfaces ArtworkVersion in the manifest
+// read paths, and does NOT leak into tags_json. Re-setting the same version is a
+// no-op (no bump); a changed version bumps again.
+func TestSetArtworkVersionAndBumpIndex(t *testing.T) {
+	s := openTempStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+
+	const path = "Music/Arcade Fire/Everything Now/01.flac"
+	const mbid = "12aae8a7-e814-4c46-94d7-5c9e053bda5b"
+	if err := s.UpsertTrack(context.Background(), &Track{
+		Path: path, Size: 1, ModTime: time.Unix(1, 0), ArtworkMBID: mbid,
+	}); err != nil {
+		t.Fatalf("UpsertTrack: %v", err)
+	}
+
+	// Stepping clock seeded past the parent's UpsertTrack indexed_at so each
+	// step is unambiguously in the future (mirrors the variant-bump tests).
+	var step int64
+	if err := s.db.QueryRow(`SELECT indexed_at FROM tracks WHERE path = ?`, path).Scan(&step); err != nil {
+		t.Fatalf("seed clock: %v", err)
+	}
+	beforeIdx := step
+	step += time.Hour.Nanoseconds()
+	s.now = func() time.Time { step += 1_000_000_000; return time.Unix(0, step) }
+
+	// First set: writes version + bumps indexed_at.
+	n, err := s.SetArtworkVersionAndBumpIndex(context.Background(), mbid, "abc123def4567890")
+	if err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("rows updated = %d, want 1", n)
+	}
+	var afterIdx int64
+	if err := s.db.QueryRow(`SELECT indexed_at FROM tracks WHERE path = ?`, path).Scan(&afterIdx); err != nil {
+		t.Fatalf("read indexed_at: %v", err)
+	}
+	if afterIdx <= beforeIdx {
+		t.Errorf("indexed_at %d did not advance past %d", afterIdx, beforeIdx)
+	}
+
+	// ArtworkVersion surfaces in the manifest read path.
+	tracks, err := s.ListTracks(context.Background(), nil)
+	if err != nil || len(tracks) != 1 {
+		t.Fatalf("ListTracks: %v len=%d", err, len(tracks))
+	}
+	if got := tracks[0].ArtworkVersion; got != "abc123def4567890" {
+		t.Errorf("ListTracks ArtworkVersion = %q, want abc123def4567890", got)
+	}
+
+	// MUST NOT leak into tags_json — GetTrack reads tags_json only.
+	gt, err := s.GetTrack(context.Background(), path)
+	if err != nil || gt == nil {
+		t.Fatalf("GetTrack: %v", err)
+	}
+	if gt.ArtworkVersion != "" {
+		t.Errorf("ArtworkVersion leaked into tags_json: %q", gt.ArtworkVersion)
+	}
+
+	// Idempotent: same version → no bump.
+	n, err = s.SetArtworkVersionAndBumpIndex(context.Background(), mbid, "abc123def4567890")
+	if err != nil {
+		t.Fatalf("Set idempotent: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("idempotent rows updated = %d, want 0", n)
+	}
+	var idxAfterNoop int64
+	_ = s.db.QueryRow(`SELECT indexed_at FROM tracks WHERE path = ?`, path).Scan(&idxAfterNoop)
+	if idxAfterNoop != afterIdx {
+		t.Errorf("idempotent set bumped indexed_at %d -> %d", afterIdx, idxAfterNoop)
+	}
+
+	// Changed version → bump again.
+	n, err = s.SetArtworkVersionAndBumpIndex(context.Background(), mbid, "fed987cba6543210")
+	if err != nil {
+		t.Fatalf("Set changed: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("changed-version rows updated = %d, want 1", n)
+	}
+}

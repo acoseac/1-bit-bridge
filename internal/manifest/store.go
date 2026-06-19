@@ -1077,6 +1077,32 @@ var migrations = []migration{
 			return nil
 		},
 	},
+	{
+		version: 23,
+		name:    "artwork_version column on tracks (cover cache-bust)",
+		// A content marker for the cover served at /v1/artwork/{artworkMBID},
+		// set when a premium cover is (re)fetched for a UUID MBID — whose URL
+		// is stable while its bytes change (CAA → premium). The manifest
+		// surfaces it (Track.ArtworkVersion) so iOS can invalidate its
+		// albumID-keyed artwork cache when a cover upgrades; local-<sha256>
+		// MBIDs already encode content so they leave it NULL. Column-only
+		// (spliced at read, never in tags_json). Idempotent via post() + the
+		// table_info check — same no-swallowed-ALTER contract as v22.
+		sql: `-- column added in post() for idempotency; see migration v23 docblock`,
+		post: func(db *sql.DB) error {
+			exists, err := atlasColumnExists(db, "tracks", "artwork_version")
+			if err != nil {
+				return fmt.Errorf("inspect tracks.artwork_version: %w", err)
+			}
+			if exists {
+				return nil
+			}
+			if _, err := db.Exec("ALTER TABLE tracks ADD COLUMN artwork_version TEXT"); err != nil {
+				return fmt.Errorf("add tracks.artwork_version: %w", err)
+			}
+			return nil
+		},
+	},
 }
 
 // atlasColumnExists reports whether `table` already has a column named `col`,
@@ -1253,6 +1279,13 @@ func marshalForStorage(t *Track) ([]byte, error) {
 	// UnenrichedTracks) would then return a stale tag contradicting
 	// the track_analysis column.
 	clone.WaveformTag = ""
+	// ArtworkVersion is column-derived (spliced from the artwork_version column
+	// at read time, same as Enriched / WaveformTag) and set ONLY by the
+	// premium-cover refetch path. Zero it before the blob marshal so a caller
+	// that round-trips a read Track back through a write path can't freeze the
+	// spliced value into tags_json (where the JSON-only readers would surface a
+	// stale version) AND can't have UpsertTrack's tags_json clobber the column.
+	clone.ArtworkVersion = ""
 	// ReplayGainTrackDB is DUAL-source: a curated tag (the scanner
 	// extracted it — must persist) OR an analysis splice (must NOT
 	// persist, else a round-tripped read Track freezes the analysis value
@@ -2057,7 +2090,7 @@ func formatSampleRateLabel(hz float64) string {
 // require re-marshalling every track on each `MarkEnriched` write
 // just to flip a bool, which is what the column is for.
 func (s *Store) ListTracks(ctx context.Context, since *time.Time) ([]Track, error) {
-	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + keyTempoSQL + ` FROM tracks`
+	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + keyTempoSQL + `, artwork_version FROM tracks`
 	args := []any{}
 	if since != nil {
 		q += ` WHERE indexed_at > ?`
@@ -2077,7 +2110,8 @@ func (s *Store) ListTracks(ctx context.Context, since *time.Time) ([]Track, erro
 		var wfTag sql.NullString
 		var rg sql.NullFloat64
 		var ktRaw sql.NullString
-		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw); err != nil {
+		var artVer sql.NullString
+		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw, &artVer); err != nil {
 			return nil, err
 		}
 		var t Track
@@ -2087,6 +2121,7 @@ func (s *Store) ListTracks(ctx context.Context, since *time.Time) ([]Track, erro
 		scanTrackVariants(&t, variantsRaw)
 		t.Enriched = boolPtr(enrichedAt != 0)
 		t.WaveformTag = wfTag.String
+		t.ArtworkVersion = artVer.String
 		spliceAnalysisReplayGain(&t, rg)
 		spliceAnalysisKeyTempo(&t, ktRaw)
 		out = append(out, t)
@@ -2117,7 +2152,7 @@ func (s *Store) StreamTracks(ctx context.Context, sp *time.Time, fn func(*Track)
 		// production crash deep in the streaming-manifest path.
 		return errors.New("StreamTracks: nil callback")
 	}
-	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + keyTempoSQL + ` FROM tracks`
+	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + keyTempoSQL + `, artwork_version FROM tracks`
 	args := []any{}
 	if sp != nil {
 		q += ` WHERE indexed_at > ?`
@@ -2150,7 +2185,8 @@ func (s *Store) StreamTracks(ctx context.Context, sp *time.Time, fn func(*Track)
 		var wfTag sql.NullString
 		var rg sql.NullFloat64
 		var ktRaw sql.NullString
-		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw); err != nil {
+		var artVer sql.NullString
+		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw, &artVer); err != nil {
 			return err
 		}
 		t = Track{}
@@ -2160,6 +2196,7 @@ func (s *Store) StreamTracks(ctx context.Context, sp *time.Time, fn func(*Track)
 		t.Enriched = boolPtr(enrichedAt != 0)
 		scanTrackVariants(&t, variantsRaw)
 		t.WaveformTag = wfTag.String
+		t.ArtworkVersion = artVer.String
 		spliceAnalysisReplayGain(&t, rg)
 		spliceAnalysisKeyTempo(&t, ktRaw)
 		if err := fn(&t); err != nil {
@@ -2190,7 +2227,7 @@ func (s *Store) ListTracksPage(ctx context.Context, afterPath string, limit int)
 		limit = 1000
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT tags_json, enriched_at, `+variantsAggSQL+`, `+waveformTagSQL+`, `+replayGainSQL+`, `+keyTempoSQL+` FROM tracks
+		SELECT tags_json, enriched_at, `+variantsAggSQL+`, `+waveformTagSQL+`, `+replayGainSQL+`, `+keyTempoSQL+`, artwork_version FROM tracks
 		WHERE path > ?
 		ORDER BY path ASC
 		LIMIT ?
@@ -2207,7 +2244,8 @@ func (s *Store) ListTracksPage(ctx context.Context, afterPath string, limit int)
 		var wfTag sql.NullString
 		var rg sql.NullFloat64
 		var ktRaw sql.NullString
-		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw); err != nil {
+		var artVer sql.NullString
+		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw, &artVer); err != nil {
 			return nil, err
 		}
 		var t Track
@@ -2217,6 +2255,7 @@ func (s *Store) ListTracksPage(ctx context.Context, afterPath string, limit int)
 		scanTrackVariants(&t, variantsRaw)
 		t.Enriched = boolPtr(enrichedAt != 0)
 		t.WaveformTag = wfTag.String
+		t.ArtworkVersion = artVer.String
 		spliceAnalysisReplayGain(&t, rg)
 		spliceAnalysisKeyTempo(&t, ktRaw)
 		out = append(out, t)
@@ -4512,6 +4551,46 @@ func (s *Store) UpsertVariant(ctx context.Context, v VariantRow) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// SetArtworkVersionAndBumpIndex records the content version of a freshly
+// (re)fetched premium cover for every track whose artworkMBID matches, and
+// STRICTLY advances those tracks' indexed_at so the iOS delta-sync re-receives
+// them and picks up the new ArtworkVersion — the cover cache-bust signal. The
+// /v1/artwork/{mbid} URL is stable while the bytes change on a CAA→premium
+// upgrade, so without this iOS keeps its cached cover (albumID-keyed, not
+// URL-keyed) until a manual cache clear.
+//
+// Idempotent: the `artwork_version <> ?` guard means re-fetching the SAME
+// premium bytes (same hash) is a no-op — no version write, no index bump, no
+// manifest churn. The indexed_at form mirrors UpsertVariant (PR #156):
+// monotonic + strictly-advancing even under a rewound clock; it does NOT touch
+// enriched_at (a cover upgrade is not re-enrichment — touching it would re-arm
+// the MB/CAA/Deezer treadmill). The WHERE is backed by the functional index on
+// json_extract(tags_json,'$.artworkMBID'). Returns the number of track rows
+// updated (0 when unchanged or no track carries the MBID). Holds s.mu (SQLite
+// single-writer contract).
+func (s *Store) SetArtworkVersionAndBumpIndex(ctx context.Context, artworkMBID, version string) (int64, error) {
+	if artworkMBID == "" || version == "" {
+		return 0, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now().UnixNano()
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE tracks SET
+			artwork_version = ?,
+			indexed_at = CASE
+				WHEN indexed_at >= ? THEN indexed_at + 1
+				ELSE ?
+			END
+		WHERE json_extract(tags_json, '$.artworkMBID') = ?
+		  AND COALESCE(artwork_version, '') <> ?
+	`, version, now, now, artworkMBID, version)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // GetVariant fetches one row by (source_path, variant_id). Returns

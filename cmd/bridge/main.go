@@ -12,7 +12,9 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -165,19 +167,50 @@ func (a atlasHarvestSink) UpsertReleaseMeta(ctx context.Context, m atlasharvest.
 type atlasCoverRefetcher struct {
 	premium    enrich.PremiumCoverFetcher
 	artworkDir string
+	store      *manifest.Store
 }
 
 func (a atlasCoverRefetcher) RefetchPremium(ctx context.Context, releaseMBID string) (bool, error) {
 	if a.premium == nil {
 		return false, atlasharvest.ErrNoCredential
 	}
-	got, err := a.premium.RefetchPremium(ctx, enrich.ArtworkCachePath(a.artworkDir, releaseMBID, 500), releaseMBID, 500)
+	path := enrich.ArtworkCachePath(a.artworkDir, releaseMBID, 500)
+	got, err := a.premium.RefetchPremium(ctx, path, releaseMBID, 500)
 	if errors.Is(err, enrich.ErrNoCredential) {
 		// Translate the enrich-layer sentinel to the harvest client's contract
 		// sentinel (this adapter is the bridge between the two packages).
 		return got, atlasharvest.ErrNoCredential
 	}
+	if got && a.store != nil {
+		// The cover file was just overwritten with premium bytes. Record its
+		// content version + bump indexed_at so the iOS delta-sync re-receives
+		// these tracks and invalidates its (albumID-keyed, not URL-keyed) cover
+		// cache — the /v1/artwork/{mbid} URL is stable while the bytes changed.
+		// Idempotent (the store guards on a version change), so a re-fetch of the
+		// same premium bytes is a no-op. Best-effort: a hash/DB hiccup leaves the
+		// cover served correctly (just not auto-refreshed on iOS until the manual
+		// Clear-caches or a periodic full sync) — never fail the refetch over it.
+		if ver, herr := hashFileShort(path); herr == nil && ver != "" {
+			_, _ = a.store.SetArtworkVersionAndBumpIndex(ctx, releaseMBID, ver)
+		}
+	}
 	return got, err
+}
+
+// hashFileShort returns a short hex SHA-256 (16 chars / 64 bits — ample for a
+// cover-change marker) of the file at path. Used as the artwork content version
+// so the manifest signals a cover upgrade to iOS without ferrying the bytes.
+func hashFileShort(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = f.Close() }()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16], nil
 }
 
 // analysisStoreAdapter implements api.AnalysisStore on top of a
@@ -1859,7 +1892,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			// their cached covers to premium once Atlas resolves them. Reuses
 			// the enricher's authenticated premium fetcher (premiumCovers is
 			// non-nil whenever harvestState is, both gated on atlas.enabled).
-			Refetcher: atlasCoverRefetcher{premium: premiumCovers, artworkDir: artworkDir},
+			Refetcher: atlasCoverRefetcher{premium: premiumCovers, artworkDir: artworkDir, store: manifestStore},
 			Log:       logging.Component("atlasharvest"),
 		}
 	}
