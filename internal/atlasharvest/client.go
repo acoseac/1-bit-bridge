@@ -291,8 +291,6 @@ func (c *Client) submitAll(ctx context.Context, st State) error {
 	}
 	// Release covers are only submitted when a refetcher is wired — otherwise
 	// Atlas would resolve covers the bridge never picks up locally.
-	// Release COVERS are only submitted when a refetcher is wired — otherwise
-	// Atlas would resolve covers the bridge never picks up locally.
 	var releases []string
 	if c.Refetcher != nil {
 		releases, err = c.MBIDs.DistinctReleaseMBIDs(ctx)
