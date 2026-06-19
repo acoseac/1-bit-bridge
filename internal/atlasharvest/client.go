@@ -27,6 +27,21 @@ type ArtistMeta struct {
 	SourceURL  string
 }
 
+// ReleaseMeta is the harvested album text (description / record label / genre)
+// the client hands to the sink (Phase D). Unlike ArtistMeta, it is emitted ONLY
+// when the harvest actually resolved something — an empty release leaves no
+// overlay row, so the on-demand resolver can still fill it when the album is
+// viewed, and the next harvest cycle stores it once a CC source has the text.
+type ReleaseMeta struct {
+	MBID        string
+	Found       bool
+	Description string
+	RecordLabel string
+	Genres      []string
+	Source      string // description attribution: wikipedia|bandcamp|lastfm|qobuz
+	SourceURL   string
+}
+
 // MBIDSource enumerates the library's distinct artist + release GIDs to submit.
 type MBIDSource interface {
 	DistinctArtistMBIDs(ctx context.Context) ([]string, error)
@@ -55,6 +70,7 @@ var ErrNoCredential = errors.New("atlasharvest: refetcher has no usable credenti
 // satisfies this via a thin adapter in the wiring.
 type MetaSink interface {
 	UpsertArtistMeta(ctx context.Context, m ArtistMeta) error
+	UpsertReleaseMeta(ctx context.Context, m ReleaseMeta) error
 }
 
 // errUnauthorized signals Atlas rejected the token (401/403) — the client wipes
@@ -310,16 +326,18 @@ func (c *Client) submitAll(ctx context.Context, st State) error {
 }
 
 type resultItem struct {
-	MBID       string   `json:"mbid"`
-	Kind       string   `json:"kind"` // "artist" | "release" (older atlas omits → "")
-	Status     string   `json:"status"`
-	Found      bool     `json:"found"`
-	Bio        string   `json:"bio"`
-	BioSummary string   `json:"bioSummary"`
-	Genres     []string `json:"genres"`
-	Source     string   `json:"source"`
-	SourceURL  string   `json:"sourceUrl"`
-	Cursor     int64    `json:"cursor"`
+	MBID        string   `json:"mbid"`
+	Kind        string   `json:"kind"` // "artist" | "release" (older atlas omits → "")
+	Status      string   `json:"status"`
+	Found       bool     `json:"found"`
+	Bio         string   `json:"bio"`
+	BioSummary  string   `json:"bioSummary"`
+	Description string   `json:"description"` // release album description (Phase D)
+	RecordLabel string   `json:"recordLabel"` // release record label (Phase D)
+	Genres      []string `json:"genres"`
+	Source      string   `json:"source"`
+	SourceURL   string   `json:"sourceUrl"`
+	Cursor      int64    `json:"cursor"`
 }
 
 type resultsResponse struct {
@@ -347,6 +365,23 @@ func (c *Client) pollResults(ctx context.Context) error {
 				// nothing to fetch.
 				if it.Found {
 					pendingReleases = append(pendingReleases, it.MBID)
+				}
+				// Album text overlay (Phase D): store only when the harvest actually
+				// resolved something (description / label / genre). Empty → no row,
+				// so the on-demand resolver can still fill it on view and a later
+				// harvest cycle stores it once a CC source has the text.
+				if it.MBID != "" && (it.Description != "" || it.RecordLabel != "" || len(it.Genres) > 0) {
+					if err := c.Sink.UpsertReleaseMeta(ctx, ReleaseMeta{
+						MBID:        it.MBID,
+						Found:       true,
+						Description: it.Description,
+						RecordLabel: it.RecordLabel,
+						Genres:      it.Genres,
+						Source:      it.Source,
+						SourceURL:   it.SourceURL,
+					}); err != nil {
+						return fmt.Errorf("store release meta %s: %w", it.MBID, err)
+					}
 				}
 				continue
 			}
