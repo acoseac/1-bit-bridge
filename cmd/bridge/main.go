@@ -189,9 +189,14 @@ func (a atlasCoverRefetcher) RefetchPremium(ctx context.Context, releaseMBID str
 		// Idempotent (the store guards on a version change), so a re-fetch of the
 		// same premium bytes is a no-op. Best-effort: a hash/DB hiccup leaves the
 		// cover served correctly (just not auto-refreshed on iOS until the manual
-		// Clear-caches or a periodic full sync) — never fail the refetch over it.
-		if ver, herr := hashFileShort(path); herr == nil && ver != "" {
-			_, _ = a.store.SetArtworkVersionAndBumpIndex(ctx, releaseMBID, ver)
+		// Clear-caches or a periodic full sync) — never fail the refetch over it,
+		// but log at warn so a persistent permission / DB-lock issue is visible.
+		if ver, herr := hashFileShort(path); herr != nil {
+			logging.Component("atlasharvest").Warn("artwork version: hash cover", "mbid", releaseMBID, "err", herr)
+		} else if ver != "" {
+			if _, serr := a.store.SetArtworkVersionAndBumpIndex(ctx, releaseMBID, ver); serr != nil {
+				logging.Component("atlasharvest").Warn("artwork version: record", "mbid", releaseMBID, "err", serr)
+			}
 		}
 	}
 	return got, err

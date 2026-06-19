@@ -1449,7 +1449,18 @@ func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
 			-- mtime-equal path that skipped the reset would leak
 			-- counter increments across scans and cause spurious
 			-- deletes on long-stable libraries. See migration v5 doc.
-			missing_count = 0
+			missing_count = 0,
+			-- A re-scan whose artworkMBID CHANGED can't keep the old premium
+			-- cover version (it belonged to the previous MBID) — clear it so the
+			-- manifest falls back to the new MBID and the refetch re-establishes
+			-- a version. An UNCHANGED MBID keeps it so a tag-only re-tag doesn't
+			-- needlessly re-fetch. SET RHS reads the pre-update row (tracks.* is
+			-- the OLD value); IS is NULL-safe.
+			artwork_version = CASE
+				WHEN json_extract(excluded.tags_json, '$.artworkMBID')
+				     IS json_extract(tracks.tags_json, '$.artworkMBID')
+				THEN tracks.artwork_version ELSE NULL
+			END
 	`, t.Path, t.Size, t.ModTime.UnixNano(), raw, s.now().UnixNano())
 	return err
 }
@@ -1532,7 +1543,15 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 			-- See UpsertTrack: missing_count reset is unconditional on
 			-- every confirm so a stable library can't accumulate stale
 			-- counter increments across scans.
-			missing_count = 0
+			missing_count = 0,
+			-- Clear the premium-cover version when the artworkMBID changes (it
+			-- belonged to the prior MBID); keep it when unchanged. Mirrors
+			-- UpsertTrack — see its docblock. SET RHS reads the pre-update row.
+			artwork_version = CASE
+				WHEN json_extract(excluded.tags_json, '$.artworkMBID')
+				     IS json_extract(tracks.tags_json, '$.artworkMBID')
+				THEN tracks.artwork_version ELSE NULL
+			END
 	`)
 	if err != nil {
 		return err
