@@ -46,6 +46,11 @@ type ReleaseMeta struct {
 type MBIDSource interface {
 	DistinctArtistMBIDs(ctx context.Context) ([]string, error)
 	DistinctReleaseMBIDs(ctx context.Context) ([]string, error)
+	// DistinctReleaseTextMBIDs are release MBIDs needing TEXT only (album
+	// description) — MB-matched albums that kept local artwork, so they aren't
+	// in the cover (DistinctReleaseMBIDs) set but iOS still reads their "About
+	// this album" by release MBID. Submitted as text-only release subs (Phase D).
+	DistinctReleaseTextMBIDs(ctx context.Context) ([]string, error)
 }
 
 // CoverRefetcher re-fetches a release's premium cover from Atlas, overwriting
@@ -269,8 +274,9 @@ func (c *Client) handleErr(ctx context.Context, phase string, err error) {
 }
 
 type submitRequest struct {
-	MBIDs        []string `json:"mbids"`
-	ReleaseMBIDs []string `json:"releaseMbids,omitempty"`
+	MBIDs            []string `json:"mbids"`
+	ReleaseMBIDs     []string `json:"releaseMbids,omitempty"`
+	TextReleaseMBIDs []string `json:"textReleaseMbids,omitempty"`
 }
 
 type submitResponse struct {
@@ -292,20 +298,35 @@ func (c *Client) submitAll(ctx context.Context, st State) error {
 			return fmt.Errorf("enumerate release mbids: %w", err)
 		}
 	}
-	if len(artists) == 0 && len(releases) == 0 {
+	// Album TEXT is submitted regardless of the refetcher — it needs no cover,
+	// just the description overlay iOS reads by release MBID. These are the
+	// MB-matched-but-local-artwork albums the cover set misses.
+	textReleases, err := c.MBIDs.DistinctReleaseTextMBIDs(ctx)
+	if err != nil {
+		return fmt.Errorf("enumerate text release mbids: %w", err)
+	}
+	if len(artists) == 0 && len(releases) == 0 && len(textReleases) == 0 {
 		return nil
 	}
 	chunk := c.submitChunk()
-	postChunks := func(mbids []string, asRelease bool) error {
+	const (
+		kindArtist      = "artist"
+		kindRelease     = "release"
+		kindTextRelease = "textRelease"
+	)
+	postChunks := func(mbids []string, kind string) error {
 		for i := 0; i < len(mbids); i += chunk {
 			end := i + chunk
 			if end > len(mbids) {
 				end = len(mbids)
 			}
 			req := submitRequest{}
-			if asRelease {
+			switch kind {
+			case kindRelease:
 				req.ReleaseMBIDs = mbids[i:end]
-			} else {
+			case kindTextRelease:
+				req.TextReleaseMBIDs = mbids[i:end]
+			default:
 				req.MBIDs = mbids[i:end]
 			}
 			var resp submitResponse
@@ -315,13 +336,16 @@ func (c *Client) submitAll(ctx context.Context, st State) error {
 		}
 		return nil
 	}
-	if err := postChunks(artists, false); err != nil {
+	if err := postChunks(artists, kindArtist); err != nil {
 		return err
 	}
-	if err := postChunks(releases, true); err != nil {
+	if err := postChunks(releases, kindRelease); err != nil {
 		return err
 	}
-	c.log().InfoContext(ctx, "atlasharvest.submitted", "artists", len(artists), "releases", len(releases))
+	if err := postChunks(textReleases, kindTextRelease); err != nil {
+		return err
+	}
+	c.log().InfoContext(ctx, "atlasharvest.submitted", "artists", len(artists), "releases", len(releases), "textReleases", len(textReleases))
 	return nil
 }
 
@@ -358,12 +382,13 @@ func (c *Client) pollResults(ctx context.Context) error {
 		}
 		var pendingReleases []string
 		for _, it := range resp.Results {
-			if it.Kind == "release" {
-				// Cover reverse-resolve result: "done" means Atlas enqueued the
-				// resolve, so record it for the refresh sweep to re-fetch the
-				// (now premium) cover. "exhausted" (no barcode / not mirrored) →
-				// nothing to fetch.
-				if it.Found {
+			if it.Kind == "release" || it.Kind == "release_text" {
+				// "release" carries a cover reverse-resolve: "done" means Atlas
+				// enqueued the resolve, so record it for the refresh sweep to
+				// re-fetch the (now premium) cover. "release_text" is text-only
+				// (the album's cover is served from local artwork), so it never
+				// feeds the cover sweep.
+				if it.Kind == "release" && it.Found {
 					pendingReleases = append(pendingReleases, it.MBID)
 				}
 				// Album text overlay (Phase D): store only when the harvest actually

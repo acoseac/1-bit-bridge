@@ -11,9 +11,10 @@ import (
 )
 
 type fakeMBIDs struct {
-	ids        []string
-	releaseIDs []string
-	calls      int
+	ids            []string
+	releaseIDs     []string
+	textReleaseIDs []string
+	calls          int
 }
 
 func (f *fakeMBIDs) DistinctArtistMBIDs(context.Context) ([]string, error) {
@@ -23,6 +24,10 @@ func (f *fakeMBIDs) DistinctArtistMBIDs(context.Context) ([]string, error) {
 
 func (f *fakeMBIDs) DistinctReleaseMBIDs(context.Context) ([]string, error) {
 	return f.releaseIDs, nil
+}
+
+func (f *fakeMBIDs) DistinctReleaseTextMBIDs(context.Context) ([]string, error) {
+	return f.textReleaseIDs, nil
 }
 
 func mustOpenState(t *testing.T, path string) *StateStore {
@@ -71,9 +76,10 @@ func TestClientSubmitAndPoll(t *testing.T) {
 						{MBID: "a1", Status: "done", Found: true, Bio: "Bio A", Genres: []string{"jazz"}, Source: "lastfm", SourceURL: "https://last.fm/a", Cursor: 1},
 						{MBID: "a2", Status: "exhausted", Found: false, Cursor: 2},
 						{MBID: "r1", Kind: "release", Status: "done", Found: true, Description: "About this album", RecordLabel: "Blue Note", Genres: []string{"jazz"}, Source: "wikipedia", SourceURL: "https://en.wikipedia.org/wiki/x", Cursor: 3},
-						{MBID: "r2", Kind: "release", Status: "done", Found: true, Cursor: 4}, // cover-only (no text) → must NOT be stored
+						{MBID: "r2", Kind: "release", Status: "done", Found: true, Cursor: 4},                                                                                         // cover-only (no text) → must NOT be stored
+						{MBID: "r3", Kind: "release_text", Status: "done", Found: true, Description: "Local-art album", Source: "lastfm", SourceURL: "https://last.fm/r3", Cursor: 5}, // text-only → stored, but NOT cover-pending
 					},
-					NextCursor: 4,
+					NextCursor: 5,
 				})
 				return
 			}
@@ -108,17 +114,32 @@ func TestClientSubmitAndPoll(t *testing.T) {
 	if got := sink.stored[1]; got.MBID != "a2" || got.Found {
 		t.Errorf("result[1] = %+v, want a2 tombstone (found=false)", got)
 	}
-	// Album text (Phase D): only the release WITH text (r1) is stored; the
-	// cover-only release (r2, no description/label/genre) leaves no overlay row.
-	if len(sink.storedReleases) != 1 {
-		t.Fatalf("stored %d release metas, want 1 (cover-only r2 must be skipped)", len(sink.storedReleases))
+	// Album text (Phase D): r1 (release, has text) + r3 (release_text) are stored;
+	// the cover-only release (r2, no description/label/genre) leaves no overlay row.
+	storedByMBID := map[string]ReleaseMeta{}
+	for _, m := range sink.storedReleases {
+		storedByMBID[m.MBID] = m
 	}
-	if got := sink.storedReleases[0]; got.MBID != "r1" || !got.Found || got.Description != "About this album" ||
-		got.RecordLabel != "Blue Note" || got.Source != "wikipedia" {
-		t.Errorf("release meta = %+v", got)
+	if len(sink.storedReleases) != 2 {
+		t.Fatalf("stored %d release metas, want 2 (r1 + r3; cover-only r2 skipped)", len(sink.storedReleases))
 	}
-	if c := state.Snapshot().ResultCursor; c != 4 {
-		t.Errorf("cursor = %d, want 4", c)
+	if got := storedByMBID["r1"]; got.Description != "About this album" || got.RecordLabel != "Blue Note" || got.Source != "wikipedia" {
+		t.Errorf("r1 release meta = %+v", got)
+	}
+	if got := storedByMBID["r3"]; got.Description != "Local-art album" || got.Source != "lastfm" {
+		t.Errorf("r3 (release_text) meta = %+v", got)
+	}
+	// Only cover-bearing "release" results feed the cover sweep; the text-only
+	// "release_text" (r3) must NOT be queued for a cover refetch.
+	pending := state.PendingCoversSnapshot()
+	if _, ok := pending["r3"]; ok {
+		t.Error("release_text r3 must NOT be added to pending covers")
+	}
+	if _, ok := pending["r1"]; !ok {
+		t.Error("release r1 should be queued for cover refetch")
+	}
+	if c := state.Snapshot().ResultCursor; c != 5 {
+		t.Errorf("cursor = %d, want 5", c)
 	}
 }
 
