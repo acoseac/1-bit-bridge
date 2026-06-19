@@ -2285,6 +2285,30 @@ func (s *Store) DistinctReleaseMBIDs(ctx context.Context) ([]string, error) {
 	`))
 }
 
+// DistinctReleaseTextMBIDs enumerates the library's distinct musicBrainzAlbumID
+// release UUIDs that DistinctReleaseMBIDs does NOT already cover (i.e. not in the
+// artworkMBID set). These are MB-matched albums that kept LOCAL artwork
+// (artworkMBID=local-…): iOS reads their "About this album" by the release MBID,
+// but the cover harvest never submitted them, so their descriptions never got
+// resolved. They're submitted as TEXT-ONLY release subscriptions (Phase D) so
+// the album text is harvested without a wasted cover reverse-resolve.
+func (s *Store) DistinctReleaseTextMBIDs(ctx context.Context) ([]string, error) {
+	return collectStringColumn(s.db.QueryContext(ctx, `
+		SELECT DISTINCT json_extract(tags_json, '$.musicBrainzAlbumID')
+		  FROM tracks
+		 WHERE json_extract(tags_json, '$.musicBrainzAlbumID') IS NOT NULL
+		   AND json_extract(tags_json, '$.musicBrainzAlbumID') != ''
+		   AND json_extract(tags_json, '$.musicBrainzAlbumID') NOT LIKE 'local-%'
+		   AND json_extract(tags_json, '$.musicBrainzAlbumID') NOT IN (
+		       SELECT json_extract(tags_json, '$.artworkMBID')
+		         FROM tracks
+		        WHERE json_extract(tags_json, '$.artworkMBID') IS NOT NULL
+		          AND json_extract(tags_json, '$.artworkMBID') != ''
+		          AND json_extract(tags_json, '$.artworkMBID') NOT LIKE 'local-%'
+		   )
+	`))
+}
+
 // collectStringColumn drains a single-text-column query into a []string,
 // closing the rows. Shared by the Distinct*MBIDs enumerators. Takes the
 // (rows, err) pair directly so callers stay one-liners.
