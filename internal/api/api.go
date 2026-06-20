@@ -138,6 +138,7 @@ type Server struct {
 	analysisStatsProvider  AnalysisStatsProvider        // nil unless WithAnalysisStats wired — /v1/analysis/stats
 	batchCoordinator       BatchCoordinator             // nil unless WithBatchCoordinator wired (v1.3 operator-driven upscale)
 	eventBroker            *eventBroker                 // nil disables /v1/events (back-compat for test harnesses)
+	eventBrokerOnce        sync.Once                    // guards StartEventBroker's lazy init against concurrent callers
 	manifestRateLimiter    *manifestRateLimiter         // per-token-ID token-bucket for /v1/manifest
 	reachability           *reachabilityCache           // per-root probe TTL cache used by /v1/list, /v1/stat, /v1/health
 	fingerprint            string
@@ -846,9 +847,16 @@ func (s *Server) EventPublisher() EventPublisher {
 // returns a stopFn that drains the broker on shutdown. Wired from
 // cmd/bridge after `apiSrv := api.New(...)`.
 func (s *Server) StartEventBroker() (stopFn func()) {
-	if s.eventBroker == nil {
-		s.eventBroker = newEventBroker()
-	}
+	// sync.Once guards the lazy init. StartEventBroker is wired exactly
+	// once at startup today, but the bare check-then-assign would be a
+	// data race (duplicate broker / torn pointer) if a future caller ever
+	// invoked it concurrently — cheap defense-in-depth matching the rest
+	// of the Server's posture.
+	s.eventBrokerOnce.Do(func() {
+		if s.eventBroker == nil {
+			s.eventBroker = newEventBroker()
+		}
+	})
 	return s.eventBroker.Start()
 }
 

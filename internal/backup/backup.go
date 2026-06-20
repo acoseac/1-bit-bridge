@@ -259,14 +259,21 @@ func Prune(backupsRoot string, keep int) (int, error) {
 	// dedup suffix from `uniqueDir` is preserved (rebuilding from
 	// CreatedAt would miss "<stamp>-1" / "<stamp>-2" collisions).
 	deleted := 0
+	var errs []error
 	for _, m := range manifests[keep:] {
 		full := filepath.Join(backupsRoot, m.DirName)
 		if err := os.RemoveAll(full); err != nil {
-			return deleted, fmt.Errorf("remove %s: %w", full, err)
+			// Best-effort: a single locked / permission-drifted snapshot
+			// dir must not block reclaiming the older ones behind it, or
+			// disk usage grows unbounded on a long-running bridge (a
+			// fail-fast return left every snapshot past the first failure
+			// un-pruned forever). Collect and keep going.
+			errs = append(errs, fmt.Errorf("remove %s: %w", full, err))
+			continue
 		}
 		deleted++
 	}
-	return deleted, nil
+	return deleted, errors.Join(errs...)
 }
 
 // snapshotEntry is List's return shape — Manifest plus the on-disk
