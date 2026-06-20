@@ -132,7 +132,134 @@ func Extract(absPath string, t *Track) error {
 	return ExtractWithContext(absPath, t, nil)
 }
 
-// ExtractWithContext is the context-aware variant of Extract. When ec
+// ExtractWithContext extracts tags for absPath into t (format-dispatched via
+// extractByFormat), then backfills a MISSING track number from the filename's
+// leading "NN" (e.g. ".../06. Congeniality.flac" → 6). Many files carry the
+// number in the name but no track-number tag, which leaves them unordered on
+// iOS (album order is disc+track). The backfill fires ONLY when the tag is
+// absent — it never overrides a real tag — and parseLeadingTrackNumber's
+// bounded, punctuation-anchored pattern keeps a year/title prefix from being
+// misread. Bit-exact: a manifest-level fill, not a file edit.
+func ExtractWithContext(absPath string, t *Track, ec *ExtractContext) error {
+	if err := extractByFormat(absPath, t, ec); err != nil {
+		return err
+	}
+	fillTrackNumberFromFilename(absPath, t)
+	return nil
+}
+
+// parseLeadingTrackNumber extracts a leading 1–3 digit track number from a
+// filename stem (extension already stripped). The digits must be followed by
+// a punctuation separator — '.', '-', '_', or ')' — optionally spaced
+// ("06. Title", "06 - Title", "06_Title"). Requiring punctuation (not a bare
+// space) keeps a numeric title ("12 Monkeys") from being misread; the
+// >3-digit guard rejects a bare year prefix ("1984 - …"). Returns (n, true)
+// for 1..999, else (0, false).
+func parseLeadingTrackNumber(stem string) (int, bool) {
+	i := 0
+	for i < len(stem) && i < 3 && stem[i] >= '0' && stem[i] <= '9' {
+		i++
+	}
+	if i == 0 {
+		return 0, false // no leading digit
+	}
+	if i < len(stem) && stem[i] >= '0' && stem[i] <= '9' {
+		return 0, false // >3-digit run (e.g. a "1984" year) — not a track
+	}
+	j := i
+	for j < len(stem) && stem[j] == ' ' {
+		j++
+	}
+	if j >= len(stem) {
+		return 0, false // digits with no following title — too ambiguous
+	}
+	switch stem[j] {
+	case '.', '-', '_', ')':
+		// punctuation separator — looks like a track prefix
+	default:
+		return 0, false
+	}
+	n, err := strconv.Atoi(stem[:i])
+	if err != nil || n < 1 || n > 999 {
+		return 0, false
+	}
+	return n, true
+}
+
+// fillTrackNumberFromFilename backfills t.TrackNumber from the filename's
+// leading "NN" when the tag-derived value is ABSENT (nil, or the 0 sentinel
+// the dhowden fallback writes for "no tag"). A real (>0) tag value is never
+// overridden.
+func fillTrackNumberFromFilename(absPath string, t *Track) {
+	if t.TrackNumber != nil && *t.TrackNumber > 0 {
+		return
+	}
+	stem := filepath.Base(absPath)
+	stem = strings.TrimSuffix(stem, filepath.Ext(stem))
+	if n, ok := parseLeadingTrackNumber(stem); ok {
+		t.TrackNumber = &n
+	}
+}
+
+// extractMP4WithContext handles the MP4 container family (.m4a/.mp4/.m4b/.m4p):
+// distinguish ALAC from AAC, capture ALAC source bit depth, then hand the
+// rewound reader to dhowden for tags. Split out of extractByFormat so that
+// dispatcher's cognitive complexity stays in budget (SonarCloud go:S3776) —
+// the logic is unchanged from the inlined case.
+func extractMP4WithContext(absPath string, t *Track, ec *ExtractContext) error {
+	// MP4 container — distinguish ALAC from AAC via the sample-
+	// description box (`tag.FileType()` doesn't actually do this
+	// for MP4 in dhowden/tag, despite the documented promise; their
+	// source carries a `FIXME: actually detect this` for the
+	// ALAC FileType constant). Open the file once for the codec
+	// walk + tag read; rewind in between. Per Gemini A1 / iOS
+	// bug review #1.
+	f, err := os.Open(absPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	// Log walker errors at Warn so a corrupted container, truncated
+	// atom tree, or NFS glitch mid-seek surfaces in the operator's
+	// scanner log instead of being silently swallowed. Per
+	// CodeRabbit Trivial round-1 on PR #168 — degraded-but-functional
+	// outcomes use Warn per the project logging convention. Codec
+	// stays unset on failure so downstream classification falls
+	// through to the extension-derived name.
+	if codec, err := extractMP4Codec(f); err != nil {
+		scanLogger.Warn("mp4 codec walk failed; falling back to extension classification",
+			"path", absPath, "err", err)
+	} else if codec != "" {
+		t.Codec = codec
+	}
+	// When the codec walk identified ALAC, descend one level into
+	// the inner `alac` config atom to capture the source bit depth
+	// from ALACSpecificConfig (the `dhowden/tag` MP4 path does NOT
+	// surface it). `canSetBitsPerSample` keeps the gate aligned
+	// with the wider lossless set; for MP4 today that's effectively
+	// ALAC only — `mp4a` paths fall through. Logged at Warn on
+	// walker failure with manifest carrying nil bits (consistent
+	// with the codec-walk Warn path above).
+	if canSetBitsPerSample(t.Codec) {
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
+		if bits, err := extractALACBitDepth(f); err != nil {
+			scanLogger.Warn("mp4 ALAC bit-depth walk failed; manifest will carry nil bits",
+				"path", absPath, "err", err)
+		} else if bits > 0 {
+			t.BitsPerSample = &bits
+		}
+	}
+	// Seek to head before handing the reader to dhowden/tag —
+	// extractMP4Codec and extractALACBitDepth both consumed bytes.
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	return extractViaDhowdenFromReader(f, absPath, t, ec)
+}
+
+// extractByFormat is the context-aware variant of Extract. When ec
 // is non-nil and ec.ArtworkCacheDir is non-empty, after tag extraction
 // the local-artwork pipeline runs: an embedded ID3 APIC picture (or a
 // directory-level cover.jpg / folder.jpg) is hashed (SHA-256), atomic-
@@ -146,7 +273,7 @@ func Extract(absPath string, t *Track) error {
 // and `folder.jpg` (case-insensitive). PNG support would require
 // path-scheme + Content-Type changes done together; that's a follow-
 // up, not V1 scope. See folderArtCandidates and looksLikeJPEG.
-func ExtractWithContext(absPath string, t *Track, ec *ExtractContext) error {
+func extractByFormat(absPath string, t *Track, ec *ExtractContext) error {
 	ext := strings.ToLower(filepath.Ext(absPath))
 	switch ext {
 	case ".dsf":
@@ -158,56 +285,7 @@ func ExtractWithContext(absPath string, t *Track, ec *ExtractContext) error {
 	case ".wav":
 		return extractWAVWithContext(absPath, t, ec)
 	case ".m4a", ".mp4", ".m4b", ".m4p":
-		// MP4 container — distinguish ALAC from AAC via the sample-
-		// description box (`tag.FileType()` doesn't actually do this
-		// for MP4 in dhowden/tag, despite the documented promise; their
-		// source carries a `FIXME: actually detect this` for the
-		// ALAC FileType constant). Open the file once for the codec
-		// walk + tag read; rewind in between. Per Gemini A1 / iOS
-		// bug review #1.
-		f, err := os.Open(absPath)
-		if err != nil {
-			return err
-		}
-		defer f.Close()
-		// Log walker errors at Warn so a corrupted container, truncated
-		// atom tree, or NFS glitch mid-seek surfaces in the operator's
-		// scanner log instead of being silently swallowed. Per
-		// CodeRabbit Trivial round-1 on PR #168 — degraded-but-functional
-		// outcomes use Warn per the project logging convention. Codec
-		// stays unset on failure so downstream classification falls
-		// through to the extension-derived name.
-		if codec, err := extractMP4Codec(f); err != nil {
-			scanLogger.Warn("mp4 codec walk failed; falling back to extension classification",
-				"path", absPath, "err", err)
-		} else if codec != "" {
-			t.Codec = codec
-		}
-		// When the codec walk identified ALAC, descend one level into
-		// the inner `alac` config atom to capture the source bit depth
-		// from ALACSpecificConfig (the `dhowden/tag` MP4 path does NOT
-		// surface it). `canSetBitsPerSample` keeps the gate aligned
-		// with the wider lossless set; for MP4 today that's effectively
-		// ALAC only — `mp4a` paths fall through. Logged at Warn on
-		// walker failure with manifest carrying nil bits (consistent
-		// with the codec-walk Warn path above).
-		if canSetBitsPerSample(t.Codec) {
-			if _, err := f.Seek(0, io.SeekStart); err != nil {
-				return err
-			}
-			if bits, err := extractALACBitDepth(f); err != nil {
-				scanLogger.Warn("mp4 ALAC bit-depth walk failed; manifest will carry nil bits",
-					"path", absPath, "err", err)
-			} else if bits > 0 {
-				t.BitsPerSample = &bits
-			}
-		}
-		// Seek to head before handing the reader to dhowden/tag —
-		// extractMP4Codec and extractALACBitDepth both consumed bytes.
-		if _, err := f.Seek(0, io.SeekStart); err != nil {
-			return err
-		}
-		return extractViaDhowdenFromReader(f, absPath, t, ec)
+		return extractMP4WithContext(absPath, t, ec)
 	case ".mp3":
 		// MP3 is unambiguous; stamp the codec at the path level so
 		// the iOS `Track.codec` filter matches "MP3" without
