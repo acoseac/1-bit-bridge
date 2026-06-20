@@ -505,6 +505,20 @@ var luceneSpecials = func() [256]bool {
 // escapeLucene escapes the small set of characters that MusicBrainz's
 // Lucene-style query parser treats as special in text field values.
 func escapeLucene(s string) string {
+	// Fast path: the vast majority of artist / album names carry no Lucene
+	// specials, so a single scan lets the common case return the input
+	// verbatim — zero alloc, zero copy (gemini-code-assist on PR #424).
+	needEscape := false
+	for i := 0; i < len(s); i++ {
+		if luceneSpecials[s[i]] {
+			needEscape = true
+			break
+		}
+	}
+	if !needEscape {
+		return s
+	}
+
 	var b strings.Builder
 	b.Grow(len(s))
 	for i := 0; i < len(s); i++ {
