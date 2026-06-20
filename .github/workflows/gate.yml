@@ -8,6 +8,21 @@ name: gate
 #   make fmt vet test build-all
 # (gofmt.yml = the `fmt` check; this workflow = vet + test + build-all).
 #
+# Structure: vet / test-race / build-all run as THREE PARALLEL JOBS (they
+# share no state) so wall time is the slowest single step (~test-race),
+# not the sum — the prior single sequential job ran ~20 min. A tiny `gate`
+# job fans them back into one green signal (convenient if `main` ever gains
+# a required-status-check rule; today it has none).
+#
+# Cache: each job manages its own Go cache explicitly via actions/cache
+# rather than setup-go's built-in `cache: true`. The built-in cache keys
+# on go.sum alone (stable here) and only SAVES on a miss, so a one-time
+# near-empty save froze in — every run restored ~7 KB and recompiled the
+# whole tree (incl. the huge modernc.org/sqlite) from scratch under -race
+# AND for each cross target. The explicit key carries a `**/*.go` source
+# hash so it rotates whenever code changes (always a fresh warm save),
+# with restore-keys giving the warmest compatible fallback in between.
+#
 # Action references are commit-pinned (not tag-pinned) so a hijacked
 # upstream can't silently alter what runs here — matches gofmt.yml and
 # codeql.yml. Version comments are what Dependabot reads to bump the SHAs.
@@ -28,28 +43,95 @@ permissions:
   contents: read
 
 jobs:
-  gate:
-    name: vet · test -race · build-all
+  vet:
+    name: vet
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           # No step pushes to the repo; drop the ambient GITHUB_TOKEN.
           persist-credentials: false
-
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
           go-version-file: go.mod
-          cache: true
-
-      # The runner has ample RAM, so the Makefile's conservative default
-      # P (parallelism cap, for memory-constrained laptops) would only
-      # slow CI down — let it use all the runner's cores.
+          # Disabled: we manage the cache explicitly below (see header).
+          cache: false
+      - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-gobuild-vet-${{ hashFiles('**/go.sum') }}-${{ hashFiles('**/*.go') }}
+          restore-keys: |
+            ${{ runner.os }}-gobuild-vet-${{ hashFiles('**/go.sum') }}-
+            ${{ runner.os }}-gobuild-vet-
       - name: vet
         run: make vet
 
+  test:
+    name: test -race
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-gobuild-test-${{ hashFiles('**/go.sum') }}-${{ hashFiles('**/*.go') }}
+          restore-keys: |
+            ${{ runner.os }}-gobuild-test-${{ hashFiles('**/go.sum') }}-
+            ${{ runner.os }}-gobuild-test-
+      # The runner has ample RAM, so the Makefile's conservative default
+      # P (parallelism cap, for memory-constrained laptops) would only
+      # slow CI down — let it use all the runner's cores.
       - name: test (race)
         run: make test P=$(nproc)
 
+  build-all:
+    name: build-all
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-gobuild-cross-${{ hashFiles('**/go.sum') }}-${{ hashFiles('**/*.go') }}
+          restore-keys: |
+            ${{ runner.os }}-gobuild-cross-${{ hashFiles('**/go.sum') }}-
+            ${{ runner.os }}-gobuild-cross-
       - name: build-all (cross-compile)
         run: make build-all P=$(nproc)
+
+  # Single green signal that fans in the three parallel jobs. `if: always()`
+  # + the explicit result check means a failed (or cancelled) dependency
+  # fails the gate rather than letting a SKIP read as success.
+  gate:
+    name: gate
+    needs: [vet, test, build-all]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all gate jobs passed
+        run: |
+          if [ "${{ needs.vet.result }}" != "success" ] \
+            || [ "${{ needs.test.result }}" != "success" ] \
+            || [ "${{ needs.build-all.result }}" != "success" ]; then
+            echo "::error::gate failed (vet=${{ needs.vet.result }} test=${{ needs.test.result }} build-all=${{ needs.build-all.result }})"
+            exit 1
+          fi
+          echo "gate passed: vet, test -race, build-all all green"
