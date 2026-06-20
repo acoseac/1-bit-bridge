@@ -5,8 +5,8 @@ import (
 	"strings"
 )
 
-// ReconcileTarget is the lightweight projection the reconciliation pass
-// operates on — just the three fields it needs. The scanner streams the
+// ReconcileTarget is the lightweight projection the reconciliation passes
+// operate on — just the few fields they need. The scanner streams the
 // whole library into `[]ReconcileTarget` (instead of materializing every
 // full `Track`, which would spike memory / risk OOM on low-memory hosts
 // like a Raspberry Pi), then loads the full `Track` only for the handful
@@ -16,6 +16,7 @@ type ReconcileTarget struct {
 	Album       string
 	AlbumArtist string
 	Year        *int
+	TrackNumber *int
 }
 
 // reconcileAlbumArtists finds physical albums — tracks that share a
@@ -184,6 +185,62 @@ func dominantYear(years []*int) (int, bool) {
 		}
 	}
 	return best, true
+}
+
+// backfillTrackNumbersFromPath fills a MISSING track number (nil or the 0
+// "tag absent" sentinel) from the track's filename — the leading "NN" of the
+// basename, e.g. ".../06. Congeniality.flac" → 6 (see parseLeadingTrackNumber).
+//
+// This is the post-scan MIGRATION twin of the extractor-level backfill in
+// fillTrackNumberFromFilename: the extractor only runs on (re-)extraction, and
+// the scanner skips unchanged files by mtime, so a library indexed before that
+// backfill would keep its untagged-track-number rows unordered on iOS forever.
+// Running every scan, this fills them once (a clean library then produces zero
+// writes).
+//
+// Unlike reconcileAlbumArtists / reconcileYears this is purely PER-FILE — no
+// directory grouping, no dominant vote — because a numbered filename is self-
+// describing. The caller excludes UPnP-routed rows (their track numbers belong
+// to the upstream DIDL metadata, not bridge-side filename parsing).
+//
+// Returns only the targets needing a fill (TrackNumber set to the parsed
+// value), sorted by path for deterministic output. Pure — no I/O.
+func backfillTrackNumbersFromPath(tracks []ReconcileTarget) []ReconcileTarget {
+	var changed []ReconcileTarget
+	for _, t := range tracks {
+		if hasTrackNumber(t.TrackNumber) {
+			continue // already has a usable number — do no harm
+		}
+		n, ok := parseLeadingTrackNumber(pathStem(t.Path))
+		if !ok {
+			continue // filename carries no leading "NN" prefix
+		}
+		fix := t
+		v := n // fresh per fix; never alias the loop variable
+		fix.TrackNumber = &v
+		changed = append(changed, fix)
+	}
+	sort.Slice(changed, func(a, b int) bool { return changed[a].Path < changed[b].Path })
+	return changed
+}
+
+// hasTrackNumber reports whether a track-number pointer holds a usable (>0)
+// value. nil and the 0 "tag absent" sentinel both count as missing. Mirrors
+// hasYear.
+func hasTrackNumber(n *int) bool { return n != nil && *n > 0 }
+
+// pathStem returns the filename stem of a relative track path: the segment
+// after the last "/" or "\" separator, with its extension removed. Separator-
+// agnostic (matching trackDir) so it works for both POSIX and Windows stored
+// path forms. A leading-dot or extension-less basename is returned as-is.
+func pathStem(p string) string {
+	if i := strings.LastIndexAny(p, `/\`); i >= 0 {
+		p = p[i+1:]
+	}
+	if dot := strings.LastIndex(p, "."); dot > 0 {
+		p = p[:dot]
+	}
+	return p
 }
 
 // albumArtistGroupKey returns the (directory + normalized-album) grouping
