@@ -678,15 +678,7 @@ func applyMultiValueArtistsFromRaw(m tag.Metadata, t *Track) {
 func extractMultiValueTagFromRaw(raw map[string]any, keys ...string) []string {
 	var best []string
 	for rawKey, v := range raw {
-		norm := normaliseRawTagKey(rawKey)
-		matched := false
-		for _, k := range keys {
-			if norm == k {
-				matched = true
-				break
-			}
-		}
-		if !matched {
+		if !rawKeyMatches(normaliseRawTagKey(rawKey), keys) {
 			continue
 		}
 		var candidate []string
@@ -698,25 +690,44 @@ func extractMultiValueTagFromRaw(raw map[string]any, keys ...string) []string {
 		case []string:
 			candidate = trimNonEmpty(s)
 		}
-		// Deterministic tie-break: longest wins, and on a length tie the
-		// lexicographically-smaller slice wins so the result is independent
-		// of Go's randomised map iteration order (honouring the "regardless
-		// of map order" contract documented above). Element-wise compare —
-		// no joined-string allocation on this hot path.
-		if len(candidate) > len(best) {
+		if multiValueCandidateWins(candidate, best) {
 			best = candidate
-		} else if len(candidate) == len(best) && len(candidate) > 0 {
-			for i := range candidate {
-				if candidate[i] != best[i] {
-					if candidate[i] < best[i] {
-						best = candidate
-					}
-					break
-				}
-			}
 		}
 	}
 	return best
+}
+
+// rawKeyMatches reports whether a normalised raw-tag key equals any of the
+// wanted aliases. Extracted so extractMultiValueTagFromRaw stays within the
+// cognitive-complexity budget (the inline match loop plus the tie-break
+// pushed it over).
+func rawKeyMatches(norm string, keys []string) bool {
+	for _, k := range keys {
+		if norm == k {
+			return true
+		}
+	}
+	return false
+}
+
+// multiValueCandidateWins reports whether `candidate` should replace `best`
+// as the chosen multi-value result: a longer slice wins, and on a length
+// tie the lexicographically-smaller slice wins so the choice is
+// deterministic regardless of Go's randomised map iteration order
+// (honouring the "regardless of map order" contract documented on
+// extractMultiValueTagFromRaw). Inputs are already trimmed to non-empty
+// entries by the caller; equal-length equal-content (or both empty) keeps
+// `best`.
+func multiValueCandidateWins(candidate, best []string) bool {
+	if len(candidate) != len(best) {
+		return len(candidate) > len(best)
+	}
+	for i := range candidate {
+		if candidate[i] != best[i] {
+			return candidate[i] < best[i]
+		}
+	}
+	return false
 }
 
 // trimNonEmpty trims whitespace from each entry and drops empties.
