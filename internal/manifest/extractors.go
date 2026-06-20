@@ -132,7 +132,76 @@ func Extract(absPath string, t *Track) error {
 	return ExtractWithContext(absPath, t, nil)
 }
 
-// ExtractWithContext is the context-aware variant of Extract. When ec
+// ExtractWithContext extracts tags for absPath into t (format-dispatched via
+// extractByFormat), then backfills a MISSING track number from the filename's
+// leading "NN" (e.g. ".../06. Congeniality.flac" → 6). Many files carry the
+// number in the name but no track-number tag, which leaves them unordered on
+// iOS (album order is disc+track). The backfill fires ONLY when the tag is
+// absent — it never overrides a real tag — and parseLeadingTrackNumber's
+// bounded, punctuation-anchored pattern keeps a year/title prefix from being
+// misread. Bit-exact: a manifest-level fill, not a file edit.
+func ExtractWithContext(absPath string, t *Track, ec *ExtractContext) error {
+	if err := extractByFormat(absPath, t, ec); err != nil {
+		return err
+	}
+	fillTrackNumberFromFilename(absPath, t)
+	return nil
+}
+
+// parseLeadingTrackNumber extracts a leading 1–3 digit track number from a
+// filename stem (extension already stripped). The digits must be followed by
+// a punctuation separator — '.', '-', '_', or ')' — optionally spaced
+// ("06. Title", "06 - Title", "06_Title"). Requiring punctuation (not a bare
+// space) keeps a numeric title ("12 Monkeys") from being misread; the
+// >3-digit guard rejects a bare year prefix ("1984 - …"). Returns (n, true)
+// for 1..999, else (0, false).
+func parseLeadingTrackNumber(stem string) (int, bool) {
+	i := 0
+	for i < len(stem) && i < 3 && stem[i] >= '0' && stem[i] <= '9' {
+		i++
+	}
+	if i == 0 {
+		return 0, false // no leading digit
+	}
+	if i < len(stem) && stem[i] >= '0' && stem[i] <= '9' {
+		return 0, false // >3-digit run (e.g. a "1984" year) — not a track
+	}
+	j := i
+	for j < len(stem) && stem[j] == ' ' {
+		j++
+	}
+	if j >= len(stem) {
+		return 0, false // digits with no following title — too ambiguous
+	}
+	switch stem[j] {
+	case '.', '-', '_', ')':
+		// punctuation separator — looks like a track prefix
+	default:
+		return 0, false
+	}
+	n, err := strconv.Atoi(stem[:i])
+	if err != nil || n < 1 || n > 999 {
+		return 0, false
+	}
+	return n, true
+}
+
+// fillTrackNumberFromFilename backfills t.TrackNumber from the filename's
+// leading "NN" when the tag-derived value is ABSENT (nil, or the 0 sentinel
+// the dhowden fallback writes for "no tag"). A real (>0) tag value is never
+// overridden.
+func fillTrackNumberFromFilename(absPath string, t *Track) {
+	if t.TrackNumber != nil && *t.TrackNumber > 0 {
+		return
+	}
+	stem := filepath.Base(absPath)
+	stem = strings.TrimSuffix(stem, filepath.Ext(stem))
+	if n, ok := parseLeadingTrackNumber(stem); ok {
+		t.TrackNumber = &n
+	}
+}
+
+// extractByFormat is the context-aware variant of Extract. When ec
 // is non-nil and ec.ArtworkCacheDir is non-empty, after tag extraction
 // the local-artwork pipeline runs: an embedded ID3 APIC picture (or a
 // directory-level cover.jpg / folder.jpg) is hashed (SHA-256), atomic-
@@ -146,7 +215,7 @@ func Extract(absPath string, t *Track) error {
 // and `folder.jpg` (case-insensitive). PNG support would require
 // path-scheme + Content-Type changes done together; that's a follow-
 // up, not V1 scope. See folderArtCandidates and looksLikeJPEG.
-func ExtractWithContext(absPath string, t *Track, ec *ExtractContext) error {
+func extractByFormat(absPath string, t *Track, ec *ExtractContext) error {
 	ext := strings.ToLower(filepath.Ext(absPath))
 	switch ext {
 	case ".dsf":
