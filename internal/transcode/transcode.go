@@ -428,7 +428,10 @@ func safeVariantFilename(srcBase, variantID string) string {
 	if half < 1 {
 		return fsutil.TruncateUTF8AtMost(sanitized, budget) + suffix
 	}
-	head := fsutil.TruncateUTF8AtMost(sanitized, half)
+	// On an odd budget, give the leftover byte to the head so
+	// `head + ".." + tail` uses the full budget instead of dropping a
+	// byte of naming context (matters for long classical filenames).
+	head := fsutil.TruncateUTF8AtMost(sanitized, budget-2-half)
 	tail := fsutil.TruncateUTF8FromEnd(sanitized, half)
 	return head + ".." + tail + suffix
 }

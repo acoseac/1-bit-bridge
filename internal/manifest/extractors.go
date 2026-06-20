@@ -698,8 +698,22 @@ func extractMultiValueTagFromRaw(raw map[string]any, keys ...string) []string {
 		case []string:
 			candidate = trimNonEmpty(s)
 		}
+		// Deterministic tie-break: longest wins, and on a length tie the
+		// lexicographically-smaller slice wins so the result is independent
+		// of Go's randomised map iteration order (honouring the "regardless
+		// of map order" contract documented above). Element-wise compare —
+		// no joined-string allocation on this hot path.
 		if len(candidate) > len(best) {
 			best = candidate
+		} else if len(candidate) == len(best) && len(candidate) > 0 {
+			for i := range candidate {
+				if candidate[i] != best[i] {
+					if candidate[i] < best[i] {
+						best = candidate
+					}
+					break
+				}
+			}
 		}
 	}
 	return best
@@ -1660,12 +1674,13 @@ func extractLocalArtwork(absPath string, t *Track, m tag.Metadata, ec *ExtractCo
 	//    didn't surface a picture frame — both safe to skip.
 	//
 	//    JPEG-only by design (PR #98 follow-up): MIME `image/jpeg`
-	//    or `image/jpg` (some taggers emit the variant), AND the
-	//    bytes must start with the JPEG SOI marker so an APIC frame
-	//    that misdeclares its MIME doesn't smuggle PNG/GIF bytes
-	//    into a `*-500.jpg` cache file. See folderArtCandidates and
-	//    looksLikeJPEG for the matching contract on the folder-level
-	//    branch.
+	//    or `image/jpg` (some taggers emit the variant), matched
+	//    case-insensitively (a non-standard `image/JPEG` is still a
+	//    JPEG label), AND the bytes must start with the JPEG SOI
+	//    marker so an APIC frame that misdeclares its MIME doesn't
+	//    smuggle PNG/GIF bytes into a `*-500.jpg` cache file. See
+	//    folderArtCandidates and looksLikeJPEG for the matching
+	//    contract on the folder-level branch.
 	if m != nil {
 		if pic := m.Picture(); pic != nil {
 			switch {
@@ -1674,7 +1689,7 @@ func extractLocalArtwork(absPath string, t *Track, m tag.Metadata, ec *ExtractCo
 					"path", absPath, "bytes", len(pic.Data), "cap", maxArtworkBytes)
 			case len(pic.Data) == 0:
 				// nothing to stamp
-			case pic.MIMEType != "image/jpeg" && pic.MIMEType != "image/jpg":
+			case !strings.EqualFold(pic.MIMEType, "image/jpeg") && !strings.EqualFold(pic.MIMEType, "image/jpg"):
 				scanLogger.Debug("embedded artwork non-JPEG MIME; skipping",
 					"path", absPath, "mime", pic.MIMEType)
 			case !looksLikeJPEG(pic.Data):

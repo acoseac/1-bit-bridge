@@ -2433,24 +2433,23 @@ func (s *Store) hasTrackWithJSONField(ctx context.Context, field jsonField, valu
 	var q string
 	switch field {
 	case artworkMBIDField:
-		q = `SELECT 1 FROM tracks WHERE json_extract(tags_json, '$.artworkMBID') = ? LIMIT 1`
+		q = `SELECT EXISTS(SELECT 1 FROM tracks WHERE json_extract(tags_json, '$.artworkMBID') = ?)`
 	case artistMBIDField:
-		q = `SELECT 1 FROM tracks WHERE json_extract(tags_json, '$.artistMBID') = ? LIMIT 1`
+		q = `SELECT EXISTS(SELECT 1 FROM tracks WHERE json_extract(tags_json, '$.artistMBID') = ?)`
 	default:
 		// Unknown field — by construction unreachable, but refusing
 		// quietly is safer than compiling a bogus query.
 		return false
 	}
-	var found int
-	err := s.db.QueryRowContext(ctx, q, value).Scan(&found)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		// Genuine database errors (disk I/O, connection closed,
-		// migration mid-flight) get logged. `sql.ErrNoRows` is the
-		// expected "no such MBID" outcome and stays quiet.
+	// SELECT EXISTS(...) always yields exactly one row (0 or 1), so there's
+	// no sql.ErrNoRows outcome to special-case — any error here is a genuine
+	// database fault (disk I/O, connection closed, migration mid-flight).
+	var found bool
+	if err := s.db.QueryRowContext(ctx, q, value).Scan(&found); err != nil {
 		logger.Error("hasTrackWithJSONField", "field", field, "err", err)
 		return false
 	}
-	return found == 1
+	return found
 }
 
 // CountTracks returns the total number of track rows. /v1/health polls
