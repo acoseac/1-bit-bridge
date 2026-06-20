@@ -61,44 +61,41 @@ func TestPathStem(t *testing.T) {
 	}
 }
 
-// TestRunTrackNumberReconciliation_FillsFSSparesRoutedKeepsEnriched is the
-// end-to-end migration test: a filesystem row with a numbered filename but no
-// track-number tag gets its number filled; a UPnP-routed row (whose track
-// number belongs to the upstream ingest) is SPARED; enriched_at is left
-// untouched so the backfill never re-triggers the enricher; and a second pass
-// over the now-clean library writes nothing.
-func TestRunTrackNumberReconciliation_FillsFSSparesRoutedKeepsEnriched(t *testing.T) {
+// tnFSPath is a filesystem track with a numbered filename but no track-number
+// tag; tnRoutedPath is a UPnP-routed track (also numbered) that must be spared.
+const (
+	tnFSPath     = "Ornette Coleman/Shape of Jazz/06. Congeniality.flac"
+	tnRoutedPath = "2go/Music/Pat Metheny/Bright Size Life/03. Phase Dance.flac"
+)
+
+// setupTrackNumberReconcile builds a store seeded with one filesystem track
+// (tnFSPath) and one UPnP-routed track (tnRoutedPath), plus a Scanner, for the
+// backfill end-to-end tests.
+func setupTrackNumberReconcile(t *testing.T) (*Store, *Scanner, context.Context) {
+	t.Helper()
 	ctx := context.Background()
 	dir := t.TempDir()
 	store, err := OpenStore(filepath.Join(dir, "bridge.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
-
-	// Filesystem track: numbered filename, no track-number tag.
-	const fsPath = "Ornette Coleman/Shape of Jazz/06. Congeniality.flac"
+	t.Cleanup(func() { _ = store.Close() })
 	if err := store.UpsertTrack(ctx, &Track{
-		Path: fsPath, Size: 10, ModTime: time.Unix(100, 0),
+		Path: tnFSPath, Size: 10, ModTime: time.Unix(100, 0),
 		Title: "Congeniality", Artist: "Ornette Coleman", Album: "Shape of Jazz",
 	}); err != nil {
 		t.Fatalf("UpsertTrack fs: %v", err)
 	}
-	// Mark it enriched so we can prove the backfill leaves enriched_at alone
-	// (touching it would re-trigger the MB/CAA/Deezer treadmill).
-	fsBefore, err := store.GetTrack(ctx, fsPath)
-	if err != nil || fsBefore == nil {
-		t.Fatalf("GetTrack fs (pre): %v / nil=%v", err, fsBefore == nil)
-	}
-	if err := store.MarkEnriched(ctx, fsBefore); err != nil {
-		t.Fatalf("MarkEnriched: %v", err)
-	}
+	seedRoutedTrack(t, store, tnRoutedPath)
+	return store, NewScanner([]string{dir}, store, ""), ctx
+}
 
-	// UPnP-routed track: also numbered + untagged — must be SPARED.
-	const routedPath = "2go/Music/Pat Metheny/Bright Size Life/03. Phase Dance.flac"
-	seedRoutedTrack(t, store, routedPath)
+// The filesystem row gets its number from the filename; the UPnP-routed row is
+// SPARED (its number belongs to the upstream ingest); and a second pass over
+// the now-clean library writes nothing.
+func TestRunTrackNumberReconciliation_FillsFSSparesRouted(t *testing.T) {
+	store, s, ctx := setupTrackNumberReconcile(t)
 
-	s := NewScanner([]string{dir}, store, "")
 	n, err := s.runTrackNumberReconciliation(ctx)
 	if err != nil {
 		t.Fatalf("runTrackNumberReconciliation: %v", err)
@@ -107,39 +104,44 @@ func TestRunTrackNumberReconciliation_FillsFSSparesRoutedKeepsEnriched(t *testin
 		t.Fatalf("filled %d tracks, want 1 (fs only; routed spared)", n)
 	}
 
-	// fs row got its number from the filename.
-	fs, _ := store.GetTrack(ctx, fsPath)
-	if fs == nil {
-		t.Fatal("fs track vanished")
+	fs, _ := store.GetTrack(ctx, tnFSPath)
+	if fs == nil || fs.TrackNumber == nil || *fs.TrackNumber != 6 {
+		t.Errorf("fs track not filled to 6: %+v", fs)
 	}
-	if fs.TrackNumber == nil {
-		t.Error("fs track: track number not filled (nil), want 6")
-	} else if *fs.TrackNumber != 6 {
-		t.Errorf("fs track: got %d, want 6", *fs.TrackNumber)
-	}
-
-	// routed row spared (number is the upstream ingest's domain).
-	routed, _ := store.GetTrack(ctx, routedPath)
-	if routed == nil {
-		t.Fatal("routed track vanished")
-	}
-	if routed.TrackNumber != nil {
-		t.Errorf("routed track should keep nil track number, got %d", *routed.TrackNumber)
-	}
-
-	// enriched_at untouched — the fs row must NOT reappear as unenriched.
-	un, err := store.UnenrichedTracks(ctx, 100)
-	if err != nil {
-		t.Fatalf("UnenrichedTracks: %v", err)
-	}
-	for _, u := range un {
-		if u.Path == fsPath {
-			t.Errorf("backfill reset enriched_at on %q — re-triggers the enricher", fsPath)
-		}
+	routed, _ := store.GetTrack(ctx, tnRoutedPath)
+	if routed == nil || routed.TrackNumber != nil {
+		t.Errorf("routed track should keep a nil track number")
 	}
 
 	// Idempotent: a clean library produces zero writes on the next pass.
 	if n2, err := s.runTrackNumberReconciliation(ctx); err != nil || n2 != 0 {
 		t.Errorf("second pass: n=%d err=%v, want 0/nil", n2, err)
+	}
+}
+
+// The backfill must leave enriched_at untouched — touching it would re-trigger
+// the MB/CAA/Deezer enricher treadmill. Proven by marking the fs row enriched,
+// then asserting it does NOT reappear in UnenrichedTracks after the pass.
+func TestRunTrackNumberReconciliation_LeavesEnrichedAtUntouched(t *testing.T) {
+	store, s, ctx := setupTrackNumberReconcile(t)
+
+	fsBefore, err := store.GetTrack(ctx, tnFSPath)
+	if err != nil || fsBefore == nil {
+		t.Fatalf("GetTrack fs (pre): %v", err)
+	}
+	if err := store.MarkEnriched(ctx, fsBefore); err != nil {
+		t.Fatalf("MarkEnriched: %v", err)
+	}
+	if _, err := s.runTrackNumberReconciliation(ctx); err != nil {
+		t.Fatalf("runTrackNumberReconciliation: %v", err)
+	}
+	un, err := store.UnenrichedTracks(ctx, 100)
+	if err != nil {
+		t.Fatalf("UnenrichedTracks: %v", err)
+	}
+	for _, u := range un {
+		if u.Path == tnFSPath {
+			t.Errorf("backfill reset enriched_at on %q — re-triggers the enricher", tnFSPath)
+		}
 	}
 }

@@ -552,29 +552,9 @@ func (s *Scanner) runAlbumArtistReconciliation(ctx context.Context) (int, error)
 		return 0, fmt.Errorf("stream tracks: %w", err)
 	}
 	changed := reconcileAlbumArtists(targets)
-	if len(changed) == 0 {
-		return 0, nil
-	}
-	// Load the full Track only for the rows that actually need rewriting,
-	// stamp the reconciled AlbumArtist, and hand them to the store. A row
-	// deleted between the stream and the get is SKIPPED (not fatal) — a
-	// concurrent delete must not fail an otherwise-clean pass.
-	tracks := make([]Track, 0, len(changed))
-	for _, c := range changed {
-		t, err := s.store.GetTrack(ctx, c.Path)
-		if err != nil {
-			return 0, fmt.Errorf("get track %q: %w", c.Path, err)
-		}
-		if t == nil {
-			continue
-		}
-		t.AlbumArtist = c.AlbumArtist
-		tracks = append(tracks, *t)
-	}
-	if len(tracks) == 0 {
-		return 0, nil
-	}
-	return s.store.ApplyAlbumArtistReconciliation(ctx, tracks)
+	return s.loadAndApplyReconciled(ctx, changed,
+		func(t *Track, c ReconcileTarget) { t.AlbumArtist = c.AlbumArtist },
+		s.store.ApplyAlbumArtistReconciliation)
 }
 
 // runYearReconciliation runs the post-scan year fill-missing pass: it
@@ -601,25 +581,9 @@ func (s *Scanner) runYearReconciliation(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("stream tracks: %w", err)
 	}
 	changed := reconcileYears(targets)
-	if len(changed) == 0 {
-		return 0, nil
-	}
-	tracks := make([]Track, 0, len(changed))
-	for _, c := range changed {
-		t, err := s.store.GetTrack(ctx, c.Path)
-		if err != nil {
-			return 0, fmt.Errorf("get track %q: %w", c.Path, err)
-		}
-		if t == nil {
-			continue
-		}
-		t.Year = c.Year
-		tracks = append(tracks, *t)
-	}
-	if len(tracks) == 0 {
-		return 0, nil
-	}
-	return s.store.ApplyYearReconciliation(ctx, tracks)
+	return s.loadAndApplyReconciled(ctx, changed,
+		func(t *Track, c ReconcileTarget) { t.Year = c.Year },
+		s.store.ApplyYearReconciliation)
 }
 
 // runTrackNumberReconciliation runs the post-scan track-number backfill pass:
@@ -635,20 +599,24 @@ func (s *Scanner) runTrackNumberReconciliation(ctx context.Context) (int, error)
 	// Exclude UPnP-routed rows: their track numbers belong to the upstream
 	// DIDL metadata (the ingest's domain), not bridge-side filename parsing,
 	// and writing them here would fight the ingest's skip-if-unchanged
-	// reconcile. Mirrors the missing-pass's routed-row sparing (PR #370). A
-	// fetch failure degrades to an empty set — filesystem-only libraries (the
-	// common case) are unaffected.
-	routedSet := make(map[string]struct{})
-	if routed, err := s.store.UPnPRoutedSourcePaths(ctx); err != nil {
-		scanLogger.Warn("routed-paths fetch for track-number pass failed", "err", err)
-	} else {
-		for _, p := range routed {
-			routedSet[p] = struct{}{}
-		}
+	// reconcile (mirrors the missing-pass's routed-row sparing, PR #370). FAIL
+	// CLOSED on a fetch error: unlike the missing pass (which has a store-side
+	// NOT-IN backstop on its DELETE), this pass has no such guard, so
+	// continuing with an empty exclusion set would backfill routed rows.
+	// Aborting is safe — the Scan tail logs + continues (non-fatal) and the
+	// next scan retries. A filesystem-only library returns an empty set with
+	// no error and proceeds normally.
+	routed, err := s.store.UPnPRoutedSourcePaths(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("routed source paths: %w", err)
+	}
+	routedSet := make(map[string]struct{}, len(routed))
+	for _, p := range routed {
+		routedSet[p] = struct{}{}
 	}
 	var targets []ReconcileTarget
 	if err := s.store.StreamTracks(ctx, nil, func(t *Track) error {
-		if _, routed := routedSet[t.Path]; routed {
+		if _, isRouted := routedSet[t.Path]; isRouted {
 			return nil
 		}
 		// Deep-copy the pointer value: StreamTracks reuses one Track
@@ -665,6 +633,22 @@ func (s *Scanner) runTrackNumberReconciliation(ctx context.Context) (int, error)
 		return 0, fmt.Errorf("stream tracks: %w", err)
 	}
 	changed := backfillTrackNumbersFromPath(targets)
+	return s.loadAndApplyReconciled(ctx, changed,
+		func(t *Track, c ReconcileTarget) { t.TrackNumber = c.TrackNumber },
+		s.store.ApplyTrackNumberReconciliation)
+}
+
+// loadAndApplyReconciled loads the full Track for each changed target, stamps
+// the reconciled value via set, skips rows deleted since the stream (not
+// fatal), and persists the batch via apply. Shared by the three post-scan
+// reconciliation passes (AlbumArtist / Year / TrackNumber); apply bumps
+// indexed_at and leaves enriched_at untouched (see applyReconciledTracks).
+func (s *Scanner) loadAndApplyReconciled(
+	ctx context.Context,
+	changed []ReconcileTarget,
+	set func(t *Track, c ReconcileTarget),
+	apply func(context.Context, []Track) (int, error),
+) (int, error) {
 	if len(changed) == 0 {
 		return 0, nil
 	}
@@ -675,15 +659,15 @@ func (s *Scanner) runTrackNumberReconciliation(ctx context.Context) (int, error)
 			return 0, fmt.Errorf("get track %q: %w", c.Path, err)
 		}
 		if t == nil {
-			continue
+			continue // deleted between the stream and the get — skip, not fatal
 		}
-		t.TrackNumber = c.TrackNumber
+		set(t, c)
 		tracks = append(tracks, *t)
 	}
 	if len(tracks) == 0 {
 		return 0, nil
 	}
-	return s.store.ApplyTrackNumberReconciliation(ctx, tracks)
+	return apply(ctx, tracks)
 }
 
 // runScanWorker is one of NumCPU workers reading walker-supplied paths
