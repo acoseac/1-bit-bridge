@@ -90,6 +90,21 @@ func setupTrackNumberReconcile(t *testing.T) (*Store, *Scanner, context.Context)
 	return store, NewScanner([]string{dir}, store, ""), ctx
 }
 
+// trackNumberOf fetches a track and returns its TrackNumber, failing the test
+// on a store error or a missing row — so a DB fault surfaces as the real error
+// instead of masquerading as a wrong-track-number assertion failure.
+func trackNumberOf(t *testing.T, ctx context.Context, store *Store, path string) *int {
+	t.Helper()
+	tr, err := store.GetTrack(ctx, path)
+	if err != nil {
+		t.Fatalf("GetTrack %q: %v", path, err)
+	}
+	if tr == nil {
+		t.Fatalf("track %q vanished", path)
+	}
+	return tr.TrackNumber
+}
+
 // The filesystem row gets its number from the filename; the UPnP-routed row is
 // SPARED (its number belongs to the upstream ingest); and a second pass over
 // the now-clean library writes nothing.
@@ -104,13 +119,13 @@ func TestRunTrackNumberReconciliation_FillsFSSparesRouted(t *testing.T) {
 		t.Fatalf("filled %d tracks, want 1 (fs only; routed spared)", n)
 	}
 
-	fs, _ := store.GetTrack(ctx, tnFSPath)
-	if fs == nil || fs.TrackNumber == nil || *fs.TrackNumber != 6 {
-		t.Errorf("fs track not filled to 6: %+v", fs)
+	if got := trackNumberOf(t, ctx, store, tnFSPath); got == nil {
+		t.Error("fs track: track number not filled (nil), want 6")
+	} else if *got != 6 {
+		t.Errorf("fs track: got %d, want 6", *got)
 	}
-	routed, _ := store.GetTrack(ctx, tnRoutedPath)
-	if routed == nil || routed.TrackNumber != nil {
-		t.Errorf("routed track should keep a nil track number")
+	if got := trackNumberOf(t, ctx, store, tnRoutedPath); got != nil {
+		t.Errorf("routed track should keep a nil track number, got %d", *got)
 	}
 
 	// Idempotent: a clean library produces zero writes on the next pass.
