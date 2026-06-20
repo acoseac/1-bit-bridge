@@ -15,6 +15,7 @@ type ReconcileTarget struct {
 	Path        string
 	Album       string
 	AlbumArtist string
+	Year        *int
 }
 
 // reconcileAlbumArtists finds physical albums — tracks that share a
@@ -87,6 +88,102 @@ func reconcileAlbumArtists(tracks []ReconcileTarget) []ReconcileTarget {
 
 	sort.Slice(changed, func(a, b int) bool { return changed[a].Path < changed[b].Path })
 	return changed
+}
+
+// reconcileYears finds physical albums — tracks that share a directory AND
+// an album title — where some tracks carry a year and others are MISSING
+// one, and fills the missing years from the group's dominant year. One
+// untagged track (no year) otherwise splits into its own album row on iOS
+// (album identity = `normalize(albumArtist)|normalize(album)|year`), exactly
+// the field-reported Alphaville "[A] Eternally Yours Bonus-EP" case where a
+// single bonus track lost its year tag.
+//
+// Conservative by design, mirroring reconcileAlbumArtists:
+//   - DIRECTORY-scoped: the same (directory, normalized album) grouping —
+//     NEVER crosses directories (classical box-set + distinct-same-name
+//     protection).
+//   - FILL-MISSING only: a present-but-DIFFERENT year is LEFT ALONE. It may
+//     be a deliberate per-track value, and overwriting it is a sharper,
+//     riskier call than filling an absent one. We only fill years that are
+//     absent (nil) or non-positive (the bridge's year=0 "tag absent"
+//     sentinel, which iOS already treats as nil).
+//   - DOMINANT existing value, not MusicBrainz — preserve the user's tags.
+//
+// Returns only the targets needing a fill (Year set to the dominant value),
+// sorted by path for deterministic output. Pure — no I/O.
+func reconcileYears(tracks []ReconcileTarget) []ReconcileTarget {
+	groups := map[string][]int{}
+	for i := range tracks {
+		key, ok := albumArtistGroupKey(tracks[i].Path, tracks[i].Album)
+		if !ok {
+			continue
+		}
+		groups[key] = append(groups[key], i)
+	}
+
+	var changed []ReconcileTarget
+	for _, idxs := range groups {
+		if len(idxs) < 2 {
+			continue // a lone track can't borrow a year from a sibling
+		}
+		years := make([]*int, len(idxs))
+		anyMissing := false
+		for n, i := range idxs {
+			years[n] = tracks[i].Year
+			if !hasYear(tracks[i].Year) {
+				anyMissing = true
+			}
+		}
+		if !anyMissing {
+			continue // every track already has a year — do no harm
+		}
+		dom, ok := dominantYear(years)
+		if !ok {
+			continue // no present year to fill from
+		}
+		for _, i := range idxs {
+			if hasYear(tracks[i].Year) {
+				continue
+			}
+			fix := tracks[i]
+			y := dom // fresh per fix; never alias the loop/group value
+			fix.Year = &y
+			changed = append(changed, fix)
+		}
+	}
+
+	sort.Slice(changed, func(a, b int) bool { return changed[a].Path < changed[b].Path })
+	return changed
+}
+
+// hasYear reports whether a year pointer holds a usable (>0) value. nil and
+// the year=0 "tag absent" sentinel both count as missing.
+func hasYear(y *int) bool { return y != nil && *y > 0 }
+
+// dominantYear returns the most-frequent present (>0) year and true, or
+// (0, false) when none is present. Ties break toward the LARGER (more
+// recent) year — the likelier release year for the physical album — keeping
+// the result deterministic regardless of map-iteration order.
+func dominantYear(years []*int) (int, bool) {
+	counts := map[int]int{}
+	for _, y := range years {
+		if hasYear(y) {
+			counts[*y]++
+		}
+	}
+	if len(counts) == 0 {
+		return 0, false
+	}
+	best, bestCount := 0, -1
+	for y, c := range counts {
+		switch {
+		case c > bestCount:
+			best, bestCount = y, c
+		case c == bestCount && y > best:
+			best = y
+		}
+	}
+	return best, true
 }
 
 // albumArtistGroupKey returns the (directory + normalized-album) grouping

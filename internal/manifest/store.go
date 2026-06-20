@@ -1365,6 +1365,23 @@ func (s *Store) MarkEnriched(ctx context.Context, t *Track) error {
 // delta-sync's `> since` boundary correct. Returns the number of rows
 // actually updated.
 func (s *Store) ApplyAlbumArtistReconciliation(ctx context.Context, changed []Track) (int, error) {
+	return s.applyReconciledTracks(ctx, changed)
+}
+
+// ApplyYearReconciliation persists year-reconciled tracks (the fill-missing
+// pass in reconcileYears). Identical contract to
+// ApplyAlbumArtistReconciliation: rewrites tags_json, strict-advances
+// indexed_at so iOS delta-sync surfaces the change, and leaves enriched_at
+// untouched (reconciliation is a metadata-consistency pass, not
+// re-enrichment).
+func (s *Store) ApplyYearReconciliation(ctx context.Context, changed []Track) (int, error) {
+	return s.applyReconciledTracks(ctx, changed)
+}
+
+// applyReconciledTracks is the shared writer behind the post-scan
+// metadata-reconciliation passes (AlbumArtist, Year). See
+// ApplyAlbumArtistReconciliation's docblock above for the full invariants.
+func (s *Store) applyReconciledTracks(ctx context.Context, changed []Track) (int, error) {
 	if len(changed) == 0 {
 		return 0, nil
 	}
