@@ -481,6 +481,25 @@ func Test_DIDLForTrack_optionalMetadataFields(t *testing.T) {
 	}
 }
 
+// Test_DIDLForTrack_shortYearZeroPadded pins that a malformed 2/3-digit
+// year zero-pads to a valid 4-digit ISO 8601 date (0099-01-01) rather
+// than emitting `99-01-01`, which strict legacy renderer parsers reject.
+// Mirror-PR with iOS DLNADIDLLiteGenerator (same %04d emission).
+func Test_DIDLForTrack_shortYearZeroPadded(t *testing.T) {
+	opts := DIDLTrackOpts{
+		TrackID:       "id",
+		Title:         "T",
+		Year:          99,
+		Size:          1,
+		FileExtension: ".flac",
+		ServerURL:     "http://x",
+	}
+	got := DIDLForTrack(opts)
+	if !strings.Contains(got, `<dc:date>0099-01-01</dc:date>`) {
+		t.Errorf("a 2-digit year must zero-pad to 4-digit ISO (0099-01-01), got: %q", got)
+	}
+}
+
 // Test_DIDLForTrack_serverURLTrailingSlashHandled pins that the file URL
 // has exactly one `/` between ServerURL and the path component, even if
 // ServerURL is passed in with a trailing slash.

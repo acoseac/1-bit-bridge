@@ -262,7 +262,11 @@ func DIDLForTrack(opts DIDLTrackOpts) string {
 		// dc:date format per DLNA: "YYYY-MM-DD". We only have the
 		// year; emit January 1 as a placeholder month-day (matches
 		// what most other DLNA MediaServers do for year-only metadata).
-		sb.WriteString(fmt.Sprintf(`<dc:date>%d-01-01</dc:date>`, opts.Year))
+		// Zero-pad the year to 4 digits so a malformed 2/3-digit year
+		// (e.g. 99) emits valid ISO 8601 `0099-01-01` rather than
+		// `99-01-01`, which strict legacy renderer parsers reject.
+		// Mirror-PR with iOS DLNADIDLLiteGenerator (same %04d).
+		sb.WriteString(fmt.Sprintf(`<dc:date>%04d-01-01</dc:date>`, opts.Year))
 	}
 	if opts.TrackNumber > 0 {
 		sb.WriteString(fmt.Sprintf(`<upnp:originalTrackNumber>%d</upnp:originalTrackNumber>`, opts.TrackNumber))
