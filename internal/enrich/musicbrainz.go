@@ -243,6 +243,19 @@ func parseRetryAfter(header string, now time.Time) time.Duration {
 	// 0, which would defeat the cap entirely for hostile or
 	// misconfigured upstreams. Negative-overflow ("-9999...") still
 	// falls through to 0 like other malformed inputs.
+	//
+	// A non-compliant upstream may send a fractional delta-seconds
+	// ("86400.5"). RFC 9110 mandates an integer, so ParseInt would reject
+	// the whole string with a *syntax* error (not ErrRange) — without
+	// trimming, it then falls through http.ParseTime, fails again, and
+	// returns 0, silently dropping the backoff. Strip at the first '.' so
+	// the integer prefix is honoured (and the ErrRange cap below still
+	// fires for a giant fractional value). Guarded on -1 so a header with
+	// no '.' — including every HTTP-date form, none of which contain one —
+	// is left untouched and never mis-sliced.
+	if idx := strings.IndexByte(header, '.'); idx != -1 {
+		header = header[:idx]
+	}
 	secs, err := strconv.ParseInt(header, 10, 64)
 	if err == nil && secs >= 0 {
 		maxSecs := int64(maxRetryAfter / time.Second)
@@ -470,16 +483,36 @@ func anyArtistMatches(credits []artistCredit, artist string) bool {
 	return false
 }
 
+// luceneSpecialChars are the characters MusicBrainz's Lucene-style query
+// parser treats as special in text field values. All single-byte ASCII.
+const luceneSpecialChars = `+-&|!(){}[]^"~*?:\/`
+
+// luceneSpecials is the byte-indexed lookup table for escapeLucene. A
+// [256]bool indexed by a raw byte is both complete (every special is ASCII)
+// and impossible to index out of bounds — which is why escapeLucene scans
+// bytes rather than runes (a [128]bool indexed by a non-ASCII rune like
+// 'é'/CJK would panic). The lead/continuation bytes of a multi-byte rune
+// are all >=0x80 and never set here, so byte-scanning is exactly equivalent
+// to the old rune scan but skips the O(len(specials)) ContainsRune probe.
+var luceneSpecials = func() [256]bool {
+	var t [256]bool
+	for i := 0; i < len(luceneSpecialChars); i++ {
+		t[luceneSpecialChars[i]] = true
+	}
+	return t
+}()
+
 // escapeLucene escapes the small set of characters that MusicBrainz's
 // Lucene-style query parser treats as special in text field values.
 func escapeLucene(s string) string {
-	specials := `+-&|!(){}[]^"~*?:\/`
 	var b strings.Builder
-	for _, r := range s {
-		if strings.ContainsRune(specials, r) {
-			b.WriteRune('\\')
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if luceneSpecials[c] {
+			b.WriteByte('\\')
 		}
-		b.WriteRune(r)
+		b.WriteByte(c)
 	}
 	return b.String()
 }

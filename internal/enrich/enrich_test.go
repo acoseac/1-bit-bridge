@@ -231,9 +231,40 @@ func TestParseRetryAfterPastDateReturnsZero(t *testing.T) {
 
 func TestParseRetryAfterMalformedReturnsZero(t *testing.T) {
 	now := time.Date(2026, 4, 25, 12, 0, 0, 0, time.UTC)
-	for _, h := range []string{"", "garbage", "-5", "2.5", "soon"} {
+	// "." and ".5" exercise the leading-/only-dot anti-panic path: the
+	// fractional strip leaves an empty string, which falls through to 0.
+	// ("2.5" is NO LONGER a zero case — it now honours its integer part;
+	// see TestParseRetryAfterFractionalSecondsHonorsIntegerPart.)
+	for _, h := range []string{"", "garbage", "-5", "soon", ".", ".5"} {
 		if got := parseRetryAfter(h, now); got != 0 {
 			t.Errorf("parseRetryAfter(%q) = %v, want 0", h, got)
+		}
+	}
+}
+
+// TestParseRetryAfterFractionalSecondsHonorsIntegerPart pins the
+// float-tolerance fix. RFC 9110 mandates an integer delta-seconds, but a
+// non-compliant upstream sometimes sends a fractional value ("86400.5").
+// Pre-fix, ParseInt rejected the whole string with a syntax error and the
+// header fell through to 0 — silently dropping the backoff and letting the
+// enricher keep hammering the upstream. Now the integer PREFIX is honoured
+// (fraction truncated), and the existing maxRetryAfter cap + ErrRange
+// overflow clamp still apply after stripping.
+func TestParseRetryAfterFractionalSecondsHonorsIntegerPart(t *testing.T) {
+	now := time.Date(2026, 4, 25, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		header string
+		want   time.Duration
+	}{
+		{"2.5", 2 * time.Second},              // truncated to 2s, not dropped to 0
+		{"30.9", 30 * time.Second},            // fraction discarded
+		{"86400.5", time.Hour},                // 86400s → capped at 1h
+		{"99999999999999999999.5", time.Hour}, // strip → ErrRange → cap (not 0)
+		{"0.5", 0},                            // integer part is 0 → no backoff
+	}
+	for _, c := range cases {
+		if got := parseRetryAfter(c.header, now); got != c.want {
+			t.Errorf("parseRetryAfter(%q) = %v, want %v", c.header, got, c.want)
 		}
 	}
 }
@@ -950,6 +981,26 @@ func TestEscapeLucene(t *testing.T) {
 	for _, want := range []string{`\"`, `\[`, `\]`} {
 		if !strings.Contains(got, want) {
 			t.Errorf("escaped %q missing %q", got, want)
+		}
+	}
+}
+
+// TestEscapeLuceneMultiByteRunesUnharmed locks the byte-iteration
+// implementation: multi-byte UTF-8 runes (none of which are Lucene
+// specials) must pass through unescaped and byte-intact. A [128]bool
+// indexed by a non-ASCII rune would panic; a correct byte scan leaves
+// lead/continuation bytes (>=0x80) untouched while still escaping the
+// ASCII specials interleaved around them.
+func TestEscapeLuceneMultiByteRunesUnharmed(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"Café", "Café"}, // 2-byte é, no specials
+		{"日本語", "日本語"},   // 3-byte CJK, no specials
+		{"plain text", "plain text"},
+		{"Sigur Rós (untitled)", `Sigur Rós \(untitled\)`}, // specials around multibyte
+	}
+	for _, c := range cases {
+		if got := escapeLucene(c.in); got != c.want {
+			t.Errorf("escapeLucene(%q) = %q, want %q", c.in, got, c.want)
 		}
 	}
 }
