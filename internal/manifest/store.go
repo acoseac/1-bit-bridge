@@ -1378,8 +1378,17 @@ func (s *Store) ApplyYearReconciliation(ctx context.Context, changed []Track) (i
 	return s.applyReconciledTracks(ctx, changed)
 }
 
+// ApplyTrackNumberReconciliation persists track-number-backfilled tracks (the
+// per-file fill in backfillTrackNumbersFromPath). Identical contract to
+// ApplyYearReconciliation: rewrites tags_json, strict-advances indexed_at so
+// iOS delta-sync surfaces the new track number, and leaves enriched_at
+// untouched (a metadata-consistency pass, not re-enrichment).
+func (s *Store) ApplyTrackNumberReconciliation(ctx context.Context, changed []Track) (int, error) {
+	return s.applyReconciledTracks(ctx, changed)
+}
+
 // applyReconciledTracks is the shared writer behind the post-scan
-// metadata-reconciliation passes (AlbumArtist, Year). See
+// metadata-reconciliation passes (AlbumArtist, Year, TrackNumber). See
 // ApplyAlbumArtistReconciliation's docblock above for the full invariants.
 func (s *Store) applyReconciledTracks(ctx context.Context, changed []Track) (int, error) {
 	if len(changed) == 0 {

@@ -521,6 +521,16 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	} else if n > 0 {
 		scanLogger.Info("year reconciliation filled missing album years", "tracks", n)
 	}
+	// Track-number backfill: fill a MISSING track number from the filename's
+	// leading "NN" so albums indexed before the extractor-level backfill (the
+	// scanner skips unchanged files by mtime, so they never re-extract) still
+	// order correctly on iOS. Same DB-only, enriched_at-untouched contract;
+	// routed UPnP rows excluded. Non-fatal.
+	if n, rErr := s.runTrackNumberReconciliation(ctx); rErr != nil {
+		scanLogger.Error("track-number reconciliation", "err", rErr)
+	} else if n > 0 {
+		scanLogger.Info("track-number reconciliation filled missing track numbers", "tracks", n)
+	}
 
 	return count, nil
 }
@@ -610,6 +620,70 @@ func (s *Scanner) runYearReconciliation(ctx context.Context) (int, error) {
 		return 0, nil
 	}
 	return s.store.ApplyYearReconciliation(ctx, tracks)
+}
+
+// runTrackNumberReconciliation runs the post-scan track-number backfill pass:
+// it streams the library into lightweight targets (never materializing every
+// full Track — OOM discipline), fills a MISSING track number from the filename
+// (see backfillTrackNumbersFromPath), loads the full Track only for the changed
+// rows, and persists via ApplyTrackNumberReconciliation (bumps indexed_at,
+// leaves enriched_at untouched). This is the migration path for tracks indexed
+// before the extractor-level backfill — the scanner skips unchanged files, so
+// they never re-extract. A row deleted between the stream and the get is
+// SKIPPED, not fatal.
+func (s *Scanner) runTrackNumberReconciliation(ctx context.Context) (int, error) {
+	// Exclude UPnP-routed rows: their track numbers belong to the upstream
+	// DIDL metadata (the ingest's domain), not bridge-side filename parsing,
+	// and writing them here would fight the ingest's skip-if-unchanged
+	// reconcile. Mirrors the missing-pass's routed-row sparing (PR #370). A
+	// fetch failure degrades to an empty set — filesystem-only libraries (the
+	// common case) are unaffected.
+	routedSet := make(map[string]struct{})
+	if routed, err := s.store.UPnPRoutedSourcePaths(ctx); err != nil {
+		scanLogger.Warn("routed-paths fetch for track-number pass failed", "err", err)
+	} else {
+		for _, p := range routed {
+			routedSet[p] = struct{}{}
+		}
+	}
+	var targets []ReconcileTarget
+	if err := s.store.StreamTracks(ctx, nil, func(t *Track) error {
+		if _, routed := routedSet[t.Path]; routed {
+			return nil
+		}
+		// Deep-copy the pointer value: StreamTracks reuses one Track
+		// allocation across rows, so the callback must not retain its
+		// pointers. A plain value copy keeps the target independent.
+		var tn *int
+		if t.TrackNumber != nil {
+			v := *t.TrackNumber
+			tn = &v
+		}
+		targets = append(targets, ReconcileTarget{Path: t.Path, TrackNumber: tn})
+		return nil
+	}); err != nil {
+		return 0, fmt.Errorf("stream tracks: %w", err)
+	}
+	changed := backfillTrackNumbersFromPath(targets)
+	if len(changed) == 0 {
+		return 0, nil
+	}
+	tracks := make([]Track, 0, len(changed))
+	for _, c := range changed {
+		t, err := s.store.GetTrack(ctx, c.Path)
+		if err != nil {
+			return 0, fmt.Errorf("get track %q: %w", c.Path, err)
+		}
+		if t == nil {
+			continue
+		}
+		t.TrackNumber = c.TrackNumber
+		tracks = append(tracks, *t)
+	}
+	if len(tracks) == 0 {
+		return 0, nil
+	}
+	return s.store.ApplyTrackNumberReconciliation(ctx, tracks)
 }
 
 // runScanWorker is one of NumCPU workers reading walker-supplied paths
