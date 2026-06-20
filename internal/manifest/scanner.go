@@ -512,6 +512,15 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	} else if n > 0 {
 		scanLogger.Info("album-artist reconciliation unified split albums", "tracks", n)
 	}
+	// Year reconciliation: fill a MISSING album year from the album's
+	// dominant year, so a single untagged track doesn't split off into its
+	// own album row on iOS. Same DB-only, enriched_at-untouched contract as
+	// the AlbumArtist pass. Non-fatal.
+	if n, rErr := s.runYearReconciliation(ctx); rErr != nil {
+		scanLogger.Error("year reconciliation", "err", rErr)
+	} else if n > 0 {
+		scanLogger.Info("year reconciliation filled missing album years", "tracks", n)
+	}
 
 	return count, nil
 }
@@ -556,6 +565,51 @@ func (s *Scanner) runAlbumArtistReconciliation(ctx context.Context) (int, error)
 		return 0, nil
 	}
 	return s.store.ApplyAlbumArtistReconciliation(ctx, tracks)
+}
+
+// runYearReconciliation runs the post-scan year fill-missing pass: it
+// streams the library into lightweight targets (never materializing every
+// full Track — OOM discipline, same as the AlbumArtist pass), fills a
+// MISSING album year from the album's dominant year (see reconcileYears),
+// loads the full Track only for the changed rows, and persists via
+// ApplyYearReconciliation (bumps indexed_at, leaves enriched_at untouched).
+// A row deleted between the stream and the get is SKIPPED, not fatal.
+func (s *Scanner) runYearReconciliation(ctx context.Context) (int, error) {
+	var targets []ReconcileTarget
+	if err := s.store.StreamTracks(ctx, nil, func(t *Track) error {
+		// Deep-copy the year value: StreamTracks reuses one Track
+		// allocation across rows, so the callback must not retain its
+		// pointers. A plain value copy keeps the target independent.
+		var yr *int
+		if t.Year != nil {
+			v := *t.Year
+			yr = &v
+		}
+		targets = append(targets, ReconcileTarget{Path: t.Path, Album: t.Album, Year: yr})
+		return nil
+	}); err != nil {
+		return 0, fmt.Errorf("stream tracks: %w", err)
+	}
+	changed := reconcileYears(targets)
+	if len(changed) == 0 {
+		return 0, nil
+	}
+	tracks := make([]Track, 0, len(changed))
+	for _, c := range changed {
+		t, err := s.store.GetTrack(ctx, c.Path)
+		if err != nil {
+			return 0, fmt.Errorf("get track %q: %w", c.Path, err)
+		}
+		if t == nil {
+			continue
+		}
+		t.Year = c.Year
+		tracks = append(tracks, *t)
+	}
+	if len(tracks) == 0 {
+		return 0, nil
+	}
+	return s.store.ApplyYearReconciliation(ctx, tracks)
 }
 
 // runScanWorker is one of NumCPU workers reading walker-supplied paths

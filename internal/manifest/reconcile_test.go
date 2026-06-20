@@ -183,3 +183,123 @@ func TestTrackDir(t *testing.T) {
 		}
 	}
 }
+
+func TestReconcileYears(t *testing.T) {
+	yp := func(y int) *int { return &y }
+	mk := func(path, album string, year *int) ReconcileTarget {
+		return ReconcileTarget{Path: path, Album: album, Year: year}
+	}
+	fixes := func(changed []ReconcileTarget) map[string]int {
+		m := map[string]int{}
+		for _, tr := range changed {
+			if tr.Year != nil {
+				m[tr.Path] = *tr.Year
+			}
+		}
+		return m
+	}
+
+	cases := []struct {
+		name string
+		in   []ReconcileTarget
+		want map[string]int // path -> filled year (changed rows only)
+	}{
+		{
+			name: "all have year — untouched",
+			in: []ReconcileTarget{
+				mk("A/Alb/1.flac", "Alb", yp(2023)),
+				mk("A/Alb/2.flac", "Alb", yp(2023)),
+			},
+			want: map[string]int{},
+		},
+		{
+			name: "missing year filled from dominant (Alphaville bonus track)",
+			in: []ReconcileTarget{
+				mk("A/EP/1.flac", "EP", yp(2023)),
+				mk("A/EP/2.flac", "EP", yp(2023)),
+				mk("A/EP/3.flac", "EP", nil),
+			},
+			want: map[string]int{"A/EP/3.flac": 2023},
+		},
+		{
+			name: "year=0 sentinel treated as missing",
+			in: []ReconcileTarget{
+				mk("A/EP/1.flac", "EP", yp(2023)),
+				mk("A/EP/2.flac", "EP", yp(0)),
+			},
+			want: map[string]int{"A/EP/2.flac": 2023},
+		},
+		{
+			name: "present-but-different year LEFT ALONE (no overwrite)",
+			in: []ReconcileTarget{
+				mk("A/Alb/1.flac", "Alb", yp(2023)),
+				mk("A/Alb/2.flac", "Alb", yp(2023)),
+				mk("A/Alb/3.flac", "Alb", yp(1999)),
+			},
+			want: map[string]int{},
+		},
+		{
+			name: "fills missing AND leaves present-different alone",
+			in: []ReconcileTarget{
+				mk("A/Alb/1.flac", "Alb", yp(2023)),
+				mk("A/Alb/2.flac", "Alb", yp(2023)),
+				mk("A/Alb/3.flac", "Alb", nil),
+				mk("A/Alb/4.flac", "Alb", yp(1999)),
+			},
+			want: map[string]int{"A/Alb/3.flac": 2023},
+		},
+		{
+			name: "cross-directory NOT reconciled",
+			in: []ReconcileTarget{
+				mk("A/Alb/1.flac", "Alb", yp(2023)),
+				mk("B/Alb/2.flac", "Alb", nil),
+			},
+			want: map[string]int{},
+		},
+		{
+			name: "all missing — nothing to fill",
+			in: []ReconcileTarget{
+				mk("A/Alb/1.flac", "Alb", nil),
+				mk("A/Alb/2.flac", "Alb", yp(0)),
+			},
+			want: map[string]int{},
+		},
+		{
+			name: "dominant tie breaks to larger year",
+			in: []ReconcileTarget{
+				mk("A/Alb/1.flac", "Alb", yp(2002)),
+				mk("A/Alb/2.flac", "Alb", yp(2003)),
+				mk("A/Alb/3.flac", "Alb", nil),
+			},
+			want: map[string]int{"A/Alb/3.flac": 2003},
+		},
+		{
+			name: "lone track untouched",
+			in: []ReconcileTarget{
+				mk("A/Alb/1.flac", "Alb", nil),
+			},
+			want: map[string]int{},
+		},
+		{
+			name: "empty album never grouped",
+			in: []ReconcileTarget{
+				mk("A/1.flac", "", yp(2023)),
+				mk("A/2.flac", "", nil),
+			},
+			want: map[string]int{},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := fixes(reconcileYears(c.in))
+			if len(got) != len(c.want) {
+				t.Fatalf("got %v, want %v", got, c.want)
+			}
+			for p, y := range c.want {
+				if got[p] != y {
+					t.Fatalf("path %s: got %d, want %d (full: %v)", p, got[p], y, got)
+				}
+			}
+		})
+	}
+}
