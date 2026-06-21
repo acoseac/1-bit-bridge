@@ -61,7 +61,10 @@ func (sub *subscriber) matches(topic string) bool {
 		if topic == allowed {
 			return true
 		}
-		if len(topic) > len(allowed) && topic[:len(allowed)+1] == allowed+"." {
+		// Prefix match: "pairing" matches "pairing.x" but not "pairingX".
+		// Direct slice/byte compares avoid the `allowed+"."` string this
+		// fanout-loop hot path otherwise allocated on every event.
+		if len(topic) > len(allowed) && topic[len(allowed)] == '.' && topic[:len(allowed)] == allowed {
 			return true
 		}
 	}
