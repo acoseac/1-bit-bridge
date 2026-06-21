@@ -174,6 +174,12 @@ func (s *Server) apiVariantsDirPatch(w http.ResponseWriter, r *http.Request) {
 // `upscaled-%` nor `optimized-%`) gets logged at notice level so
 // operators see drift in production; the UI ignores the bucket.
 func (s *Server) probeUsedByKind(ctx context.Context) map[string]int64 {
+	// These bucket keys MUST stay in lockstep with the SQL CASE labels in
+	// manifest.CountVariantsByKind ("upscale" / "optimize" / "unknown") —
+	// that query is the producer of these names; drift here silently zeroes
+	// a dashboard tile. (Deliberately NOT tied to the transcode.JobKind enum:
+	// the labels are SQL-derived from the variant_id prefix, not the
+	// enqueue-time kind, so the coupling that matters is to the store.)
 	out := map[string]int64{
 		"upscale":  0,
 		"optimize": 0,
