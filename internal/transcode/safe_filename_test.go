@@ -220,6 +220,30 @@ func TestSafeVariantFilenameOverLengthDeterministic(t *testing.T) {
 	}
 }
 
+// TestSafeVariantFilenameOverLengthUsesFullBudget pins the odd-budget
+// fix: middle-truncation must consume the ENTIRE basename budget rather
+// than discarding the leftover byte on an odd split (`(budget-2)/2`
+// integer division dropped one byte of naming context pre-fix). For a
+// pure-ASCII over-length input (no rune-boundary slack) the result
+// basename must therefore land at exactly fsBasenameCap.
+//
+// Two variantIDs differing by one byte guarantee at least one produces
+// an ODD truncation budget — the exact case the pre-fix bisection left a
+// byte short. Both must fill the budget regardless, because the result
+// is always `(head + ".." + tail) + suffix == budget + len(suffix) ==
+// fsBasenameCap` once the head absorbs the odd byte.
+func TestSafeVariantFilenameOverLengthUsesFullBudget(t *testing.T) {
+	fsBasenameCap := 255 - len(sidecarTmpSuffix)
+	long := strings.Repeat("x", 400) + ".flac" // pure ASCII, far over the cap
+	for _, vid := range []string{"upscaled-v2-176400-24", "upscaled-v2-176400-241"} {
+		got := safeVariantFilename(long, vid)
+		if len(got) != fsBasenameCap {
+			t.Errorf("variantID %q: len = %d, want exactly %d (full budget used; odd byte must not be dropped)",
+				vid, len(got), fsBasenameCap)
+		}
+	}
+}
+
 // TestSafeVariantFilenameOverLengthUTF8Safe pins the rune-boundary
 // invariant. Byte-level slicing in middle-truncate could land
 // between bytes of a multi-byte rune ("Dvořák" mid-truncated at

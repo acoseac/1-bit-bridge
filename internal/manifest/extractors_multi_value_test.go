@@ -71,6 +71,32 @@ func TestExtractMultiValueTagFromRaw_LongestWinsAcrossAliases(t *testing.T) {
 	}
 }
 
+// TestExtractMultiValueTagFromRaw_EqualLengthTieBreakIsDeterministic
+// pins the deterministic tie-break for the equal-length case. Before
+// the fix, two matching aliases whose values were the same LENGTH but
+// different CONTENT resolved by Go's randomised map iteration order —
+// so the manifest value flip-flopped between scans, churning
+// tracks.indexed_at and forcing needless iOS delta re-syncs. The fix
+// breaks the tie on the lexicographically-smaller slice, so the result
+// is stable regardless of map order. 50 iterations amortise away the
+// chance of one iteration order happening to win every time.
+func TestExtractMultiValueTagFromRaw_EqualLengthTieBreakIsDeterministic(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		raw := map[string]any{
+			"tpe1": []string{"Beta", "Two"},  // length 2
+			"©art": []string{"Alpha", "One"}, // length 2, lexically smaller
+		}
+		got := extractMultiValueTagFromRaw(raw, "tpe1", "©art")
+		if len(got) != 2 {
+			t.Fatalf("iter %d: got %v, want 2-element slice", i, got)
+		}
+		// "Alpha" < "Beta", so the ©art slice wins every iteration.
+		if got[0] != "Alpha" || got[1] != "One" {
+			t.Fatalf("iter %d: got %v, want [Alpha One] (lexicographically-smaller slice must win deterministically)", i, got)
+		}
+	}
+}
+
 // TestApplyMultiValueArtistsFromRaw_TrailingNullDropped: ID3v2.4
 // taggers sometimes emit a trailing NULL after the last value as
 // a frame terminator. The trimNonEmpty pass should drop it so the
