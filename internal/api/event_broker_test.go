@@ -139,15 +139,26 @@ func TestEventBroker_SlowConsumerDropsOldest(t *testing.T) {
 		b.Publish("upscale.stats", i)
 	}
 
-	// Wait for the broker goroutine to process the publish queue
-	// and record at least one drop. Bounded poll instead of a
-	// fixed sleep so slow CI doesn't flake.
+	// Wait for the broker goroutine to record at least one drop, proving
+	// the slow-consumer eviction fired. Bounded poll instead of a fixed
+	// sleep so slow CI doesn't flake.
 	awaitTrue(t, 500*time.Millisecond,
 		"dropped counter never incremented (slow-consumer policy didn't evict)",
 		func() bool { return sub.dropped.Load() > 0 })
 
-	// Drain whatever the subscriber actually has — must not exceed
-	// buffer size.
+	// Quiesce the broker BEFORE draining. Otherwise its fan-out goroutine
+	// keeps delivering the still-queued publishes into sub.ch while the
+	// non-blocking drain below frees a slot on every receive that the
+	// broker immediately refills — under CPU saturation (e.g. the full
+	// `make` gate's parallel packages + cross-compile) the broker outruns
+	// the drain and `drained` overshoots the buffer cap, flaking the test.
+	// Stop() waits for the goroutine to exit and does NOT close sub.ch, so
+	// the drain reads a stable buffered snapshot; the deferred stop() is
+	// then an idempotent no-op.
+	stop()
+
+	// A buffered channel holds at most its capacity, so once the broker is
+	// stopped the drained count is a hard, race-free ≤ buffer size.
 	drained := 0
 loop:
 	for {
@@ -158,9 +169,8 @@ loop:
 			break loop
 		}
 	}
-	if drained > subscriberChannelBufferLen+1 {
-		// +1 because a heartbeat may have landed between fills
-		t.Errorf("drained %d events; expected ≤ %d", drained, subscriberChannelBufferLen+1)
+	if drained > subscriberChannelBufferLen {
+		t.Errorf("drained %d events; expected ≤ %d (buffer cap)", drained, subscriberChannelBufferLen)
 	}
 }
 
