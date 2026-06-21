@@ -21,10 +21,18 @@ const SSDPMulticastAddr = "239.255.255.250:1900"
 const SSDPMaxAge = 1800
 
 // ssdpCacheControlLine is the full CACHE-CONTROL header line (CRLF
-// included) emitted in every NOTIFY / M-SEARCH-RESPONSE packet. SSDPMaxAge
-// is a compile-time constant, so the value is invariant — building it once
-// here keeps the per-packet builders from re-running itoa's fmt.Sprintf on
-// every multicast announce. (goreview F6)
+// included) emitted in every NOTIFY / M-SEARCH-RESPONSE packet. Building it
+// once here keeps the per-packet builders from re-running itoa's
+// fmt.Sprintf on every multicast announce. (goreview F6)
+//
+// Deliberately a `var` derived from SSDPMaxAge, NOT a `const
+// "max-age=1800"`: SSDPMaxAge is the single source of truth for the cache
+// lifetime and is ALSO consumed by the re-announce timer in ssdp.go
+// (SSDPMaxAge/2), so hardcoding the literal would let the advertised
+// max-age silently drift from the re-announce cadence if the const were
+// ever tuned. The cost is one fmt.Sprintf at package init for an
+// unexported, never-mutated value. (Declined Gemini's const suggestion on
+// PR #429 for this reason.)
 var ssdpCacheControlLine = "CACHE-CONTROL: max-age=" + itoa(SSDPMaxAge) + "\r\n"
 
 // SSDPServerToken returns the canonical SSDP `SERVER` header value the

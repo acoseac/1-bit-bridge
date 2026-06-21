@@ -416,13 +416,16 @@ func windowsStartupDir() string {
 // us?" branch of checkPort — a wrong answer here degrades to a fail,
 // which is the safe direction.
 func pidListening(port int) int {
-	// Use `lsof -nP -iTCP:<port> -sTCP:LISTEN -t` on unix. Windows uses
-	// a different probe (netstat); for now, return -1 there and let the
-	// caller take the fail branch. PR-2 will wire Windows via WMI.
-	if runtime.GOOS == "windows" {
+	// `lsof -nP -iTCP:<port> -sTCP:LISTEN -t` on unix. lsofPath is "" on
+	// Windows (no probe yet — netstat/WMI is future work) and whenever lsof
+	// can't be resolved to a safe absolute path, so this one guard covers
+	// both. Exec'ing the resolved absolute path (not the bare "lsof" name)
+	// defends against a PATH-injected binary; a wrong answer degrades to a
+	// fail, the safe direction.
+	if lsofPath == "" {
 		return -1
 	}
-	out, err := exec.Command("lsof", "-nP", "-iTCP:"+strconv.Itoa(port), "-sTCP:LISTEN", "-t").Output()
+	out, err := exec.Command(lsofPath, "-nP", "-iTCP:"+strconv.Itoa(port), "-sTCP:LISTEN", "-t").Output()
 	if err != nil {
 		return -1
 	}
@@ -438,19 +441,38 @@ func pidListening(port int) int {
 	return n
 }
 
-// portProbeAvailable reports whether pidListening can actually identify
-// the owner of a bound port on THIS host. It mirrors pidListening's own
-// preconditions: there is no probe on Windows yet, and the unix probe
-// shells out to lsof. When it returns false, checkPort can't tell a port
-// bound by our own bridge apart from a real conflict, so it degrades to
-// Warn rather than a hard Fail. Package var so tests can stub it.
-var portProbeAvailable = func() bool {
+// lsofPath is the absolute path to lsof, resolved ONCE at package init.
+// "" means lsof is unavailable on this host: Windows (no probe yet), not
+// installed, or — defending against PATH injection — the PATH lookup
+// returned a relative path. Both portProbeAvailable and pidListening key
+// off it, so the bridge never execs an attacker-staged lsof off a
+// writable CWD / PATH entry. Mirrors the exec.LookPath + filepath.IsAbs
+// hardening used for the Tailscale CLI (PR #95). (CodeRabbit MAJOR on PR #429.)
+var lsofPath = resolveLsof()
+
+func resolveLsof() string {
 	if runtime.GOOS == "windows" {
-		return false
+		return "" // no lsof on Windows; pidListening returns -1 there
 	}
-	_, err := exec.LookPath("lsof")
-	return err == nil
+	if p, err := exec.LookPath("lsof"); err == nil && filepath.IsAbs(p) {
+		return p
+	}
+	// PATH lookup failed or returned a relative (injection-unsafe) path —
+	// fall back to the canonical absolute locations before giving up.
+	for _, p := range []string{"/usr/sbin/lsof", "/usr/bin/lsof", "/bin/lsof"} {
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+			return p
+		}
+	}
+	return ""
 }
+
+// portProbeAvailable reports whether pidListening can actually identify
+// the owner of a bound port on THIS host — i.e. lsof resolved to a usable
+// absolute path. When false, checkPort can't tell a port bound by our own
+// bridge apart from a real conflict, so it degrades to Warn rather than a
+// hard Fail. Package var so tests can stub it.
+var portProbeAvailable = func() bool { return lsofPath != "" }
 
 // ErrHasFail is returned by Run when the caller passes StopOnFail.
 var ErrHasFail = errors.New("doctor reports one or more failing checks")

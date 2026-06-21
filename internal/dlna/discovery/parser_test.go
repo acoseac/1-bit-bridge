@@ -421,6 +421,29 @@ func TestParseGetProtocolInfoResponse_SOAPFaultReturnsError(t *testing.T) {
 	}
 }
 
+// Loose renderers sometimes emit a lowercase <s:fault>; F10 made the
+// detection case-insensitive (strings.EqualFold), so it must still surface
+// as ErrSOAPFault rather than masquerading as an empty Sink list. (Gemini
+// regression-test request on PR #429.)
+func TestParseGetProtocolInfoResponse_SOAPFaultLowercaseReturnsError(t *testing.T) {
+	xml := `<?xml version="1.0"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+<s:Body>
+<s:fault>
+<faultcode>s:Client</faultcode>
+<faultstring>UPnPError</faultstring>
+</s:fault>
+</s:Body>
+</s:Envelope>`
+	_, err := ParseGetProtocolInfoResponse([]byte(xml))
+	if err == nil {
+		t.Fatal("expected lowercase SOAP fault to surface as error, got nil")
+	}
+	if !errors.Is(err, ErrSOAPFault) {
+		t.Errorf("expected ErrSOAPFault, got %v", err)
+	}
+}
+
 // CodeRabbit MAJOR round-1 on PR #305: missing Response element
 // (bare `<Body/>` or unrelated element) must NOT silently
 // mascarade as empty Sink list.
