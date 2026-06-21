@@ -85,7 +85,10 @@ func TestPortCheck_FreePasses(t *testing.T) {
 
 func TestPortCheck_BusyFailsWithoutOwnPID(t *testing.T) {
 	// Bind the port from the test, then ask doctor about it. With no
-	// OwnPIDFile the binder is "someone else" and doctor fails.
+	// OwnPIDFile the binder is "someone else" and — when the owner probe
+	// IS available (forced here so the verdict doesn't depend on whether
+	// lsof happens to be installed on this host) — doctor fails.
+	withPortProbe(t, true)
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -94,7 +97,35 @@ func TestPortCheck_BusyFailsWithoutOwnPID(t *testing.T) {
 	addr := lis.Addr().(*net.TCPAddr)
 	c := checkPort("port-test", addr.Port, "")
 	if c.Status != Fail {
-		t.Errorf("bound port %d without own-pidfile: got %v, want fail", addr.Port, c.Status)
+		t.Errorf("bound port %d without own-pidfile (probe available): got %v, want fail", addr.Port, c.Status)
+	}
+}
+
+// withPortProbe forces portProbeAvailable for the duration of a test so
+// checkPort's probe-available vs probe-unavailable branches can be
+// asserted deterministically regardless of whether lsof is installed.
+func withPortProbe(t *testing.T, available bool) {
+	t.Helper()
+	orig := portProbeAvailable
+	t.Cleanup(func() { portProbeAvailable = orig })
+	portProbeAvailable = func() bool { return available }
+}
+
+// TestPortCheck_BusyProbeUnavailableWarns pins F9: a bound port the owner
+// probe can't attribute (no lsof / Windows) degrades to Warn rather than a
+// hard Fail, so `bridge doctor` on a live install doesn't cry wolf about
+// the bridge's own port.
+func TestPortCheck_BusyProbeUnavailableWarns(t *testing.T) {
+	withPortProbe(t, false)
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lis.Close()
+	addr := lis.Addr().(*net.TCPAddr)
+	c := checkPort("port-test", addr.Port, "")
+	if c.Status != Warn {
+		t.Errorf("bound port %d with probe unavailable: got %v, want warn", addr.Port, c.Status)
 	}
 }
 
