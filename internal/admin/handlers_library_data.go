@@ -233,7 +233,13 @@ func (s *Server) writeM3U8(w http.ResponseWriter, name string, items []manifest.
 	// chain (same streaming philosophy as /v1/manifest). Headers are set
 	// by the caller before this runs, so the deferred flush is safe.
 	bw := bufio.NewWriter(w)
-	defer func() { _ = bw.Flush() }()
+	defer func() {
+		// Surface a broken-pipe / full-disk failure rather than silently
+		// shipping a truncated playlist — parity with the CSV export path.
+		if err := bw.Flush(); err != nil {
+			logging.Component("admin.playlist").Warn("playlist M3U8 export write error", "err", err)
+		}
+	}()
 	fmt.Fprintln(bw, "#EXTM3U")
 	fmt.Fprintf(bw, "#PLAYLIST:%s\n", m3uLine(name))
 	for _, it := range items {
