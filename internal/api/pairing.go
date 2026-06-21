@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 
 	"github.com/acoseac/1-bit-bridge/internal/pairing"
 )
@@ -91,8 +92,9 @@ func (s *Server) pairingRequest(w http.ResponseWriter, r *http.Request) {
 	// Per-IP rate limit (burst=5, ~1 req / 5 s steady). The pairing
 	// flow is unauthenticated, so an unauthenticated rate limit at the
 	// entry point is the right shape — a noisy LAN attacker can't
-	// burn through the operator's 16-pending admin queue alone. Empty
-	// IP (RemoteAddr parse failure) falls open; see allow().
+	// burn through the operator's 16-pending admin queue alone. A
+	// portless RemoteAddr keys on the raw host (see clientIP); only a
+	// genuinely empty RemoteAddr yields "" and falls open (see allow()).
 	ip := clientIP(r)
 	if !s.pairingRateLimiter.allow(ip) {
 		w.Header().Set("Retry-After", "5")
@@ -390,14 +392,21 @@ func (s *Server) pairingDelete(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// clientIP extracts the request's source IP for display in the admin
-// pending-requests panel. Strips port and bracket notation. Returns ""
-// if the RemoteAddr is unparseable — the field is display-only so an
-// empty value just means "unknown".
+// clientIP extracts the request's source IP. It is used BOTH as the
+// pairing rate-limiter key (pairingRateLimiter.allow) and for display in
+// the admin pending-requests panel, so it must not collapse distinct
+// hosts onto one key. Strips the port and IPv6 brackets.
+//
+// On a RemoteAddr with no port (a test harness, or an exotic proxy that
+// rewrites it) SplitHostPort errors; we fall back to the raw address with
+// brackets trimmed rather than "" so the limiter still keys on a stable
+// per-host value instead of the empty-key fall-open bucket. A genuinely
+// empty RemoteAddr still yields "" (the limiter falls open on that — see
+// allow()), which is the right behaviour when the source is truly unknown.
 func clientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return ""
+		return strings.Trim(r.RemoteAddr, "[]")
 	}
 	return host
 }
