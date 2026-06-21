@@ -157,8 +157,13 @@ func TestEventBroker_SlowConsumerDropsOldest(t *testing.T) {
 	// then an idempotent no-op.
 	stop()
 
-	// A buffered channel holds at most its capacity, so once the broker is
-	// stopped the drained count is a hard, race-free ≤ buffer size.
+	// Once the broker is stopped the channel content is stable. The buffer
+	// filled to capacity before the first drop (awaitTrue confirmed a drop
+	// happened, which can't occur until the buffer is full), and drop-oldest
+	// keeps it full thereafter — so the drained count is a hard, race-free
+	// EXACT buffer capacity. Asserting equality (not just an upper bound)
+	// also catches a regression that under-delivers / loses events. (Gemini
+	// on PR #430.)
 	drained := 0
 loop:
 	for {
@@ -169,8 +174,8 @@ loop:
 			break loop
 		}
 	}
-	if drained > subscriberChannelBufferLen {
-		t.Errorf("drained %d events; expected ≤ %d (buffer cap)", drained, subscriberChannelBufferLen)
+	if drained != subscriberChannelBufferLen {
+		t.Errorf("drained %d events; expected exactly %d (full buffer)", drained, subscriberChannelBufferLen)
 	}
 }
 
