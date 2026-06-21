@@ -137,7 +137,7 @@ type Server struct {
 	analysisEnabled        bool                         // mirrors cfg.Analysis.Enabled (and sox-probe outcome) — gates the "waveform" health feature flag
 	analysisStatsProvider  AnalysisStatsProvider        // nil unless WithAnalysisStats wired — /v1/analysis/stats
 	batchCoordinator       BatchCoordinator             // nil unless WithBatchCoordinator wired (v1.3 operator-driven upscale)
-	eventBroker            *eventBroker                 // nil disables /v1/events (back-compat for test harnesses)
+	eventBroker            *eventBroker                 // nil disables /v1/events (back-compat for test harnesses); wired once at startup, see StartEventBroker
 	manifestRateLimiter    *manifestRateLimiter         // per-token-ID token-bucket for /v1/manifest
 	reachability           *reachabilityCache           // per-root probe TTL cache used by /v1/list, /v1/stat, /v1/health
 	fingerprint            string
@@ -845,6 +845,17 @@ func (s *Server) EventPublisher() EventPublisher {
 // backs GET /v1/events. Same pattern as `StartPairingRateLimitGC` —
 // returns a stopFn that drains the broker on shutdown. Wired from
 // cmd/bridge after `apiSrv := api.New(...)`.
+//
+// Called exactly once during `bridge serve` startup, BEFORE the HTTP
+// server begins accepting connections — so the write to s.eventBroker
+// here happens-before every handler read of it (EventPublisher, the
+// /v1/health feature probe). That is the same wired-once-at-startup,
+// read-only-during-serving contract every other Server field follows
+// (pairing, historyStore, batchCoordinator, …); none of them — nor this
+// one — needs per-field synchronization. A sync.Once / atomic.Pointer
+// here would only half-guard (the reads stay unsynchronized either way)
+// and would be inconsistent with the rest of the struct, so we keep the
+// plain assignment.
 func (s *Server) StartEventBroker() (stopFn func()) {
 	if s.eventBroker == nil {
 		s.eventBroker = newEventBroker()

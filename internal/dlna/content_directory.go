@@ -467,11 +467,16 @@ func handleGetSystemUpdateID(w http.ResponseWriter) {
 // magnitude above any well-formed UPnP SOAP request (typical Browse
 // envelope is ~500 bytes); a body larger than that is either a
 // renderer bug or a DoS attempt. Without the cap, `io.ReadAll`
-// would OOM on a hostile payload.
+// would OOM on a hostile payload. The handlers wrap r.Body in
+// http.MaxBytesReader (not a bare io.LimitReader) so an over-limit body
+// also tears down the TCP connection instead of being silently drained
+// for keep-alive — matching the admin handlers' discipline on this
+// LAN-exposed surface.
 const maxSOAPBodyBytes = 1 << 20 // 1 MB
 
 func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, fc *folderIndexCache, serverURL string) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxSOAPBodyBytes))
+	r.Body = http.MaxBytesReader(w, r.Body, maxSOAPBodyBytes)
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeSOAPFault(w, UPnPErrActionFailed)
 		return
@@ -828,7 +833,8 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, fc 
 // fault, so a controller that sends an exotic expression sees an empty
 // result rather than an error that might abort its session.
 func handleSearch(w http.ResponseWriter, r *http.Request, lib LibrarySource, serverURL string) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxSOAPBodyBytes))
+	r.Body = http.MaxBytesReader(w, r.Body, maxSOAPBodyBytes)
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeSOAPFault(w, UPnPErrActionFailed)
 		return

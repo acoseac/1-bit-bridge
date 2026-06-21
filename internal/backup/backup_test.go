@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -260,6 +261,66 @@ func TestPruneNonPositiveKeepIsNoOp(t *testing.T) {
 		if deleted != 0 {
 			t.Errorf("Prune(keep=%d) deleted %d, want 0", keep, deleted)
 		}
+	}
+}
+
+// TestPruneIsBestEffortPastALockedDir locks the best-effort contract:
+// if one eligible snapshot dir can't be removed (a lock, a permission
+// drift), Prune must still reclaim the OTHER eligible dirs and surface
+// the failure via a non-nil (joined) error. A fail-fast return left every
+// snapshot behind the first failure un-pruned forever → unbounded disk
+// growth on a long-running bridge.
+func TestPruneIsBestEffortPastALockedDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod-based unremovable-dir injection is POSIX-only")
+	}
+	dataDir := t.TempDir()
+	src := primeLiveState(t, dataDir)
+	backupsRoot := filepath.Join(dataDir, backup.BackupsDirName)
+
+	// Three snapshots in distinct seconds; keep=1 makes the two oldest
+	// eligible for pruning.
+	dirs := make([]string, 0, 3)
+	for i := 0; i < 3; i++ {
+		dst, err := backup.Snapshot(t.Context(), src)
+		if err != nil {
+			t.Fatalf("Snapshot %d: %v", i, err)
+		}
+		dirs = append(dirs, dst)
+		time.Sleep(1100 * time.Millisecond)
+	}
+
+	// Make the oldest dir unremovable by dropping write permission so its
+	// contents can't be unlinked. Restore immediately via Cleanup so the
+	// t.TempDir teardown can still walk it.
+	locked := dirs[0]
+	if err := os.Chmod(locked, 0o500); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+
+	deleted, err := backup.Prune(backupsRoot, 1)
+
+	// Root bypasses the perm bits — if the removal succeeded anyway the
+	// failure injection didn't take; skip rather than assert falsely (same
+	// posture as the atomic-persist permission test).
+	if err == nil {
+		t.Skip("os.RemoveAll succeeded despite 0o500 (running as root / perms-ignoring FS)")
+	}
+
+	// Best-effort: the other eligible dir was still reclaimed even though
+	// the locked one failed.
+	if deleted != 1 {
+		t.Errorf("Prune deleted %d, want 1 (the removable old dir)", deleted)
+	}
+	if !pathExists(t, locked) {
+		t.Errorf("locked dir %q should have survived the failed removal", locked)
+	}
+	if pathExists(t, dirs[1]) {
+		t.Errorf("second-oldest dir %q should have been pruned despite the locked sibling", dirs[1])
+	}
+	if !pathExists(t, dirs[2]) {
+		t.Errorf("newest (kept) dir %q must remain", dirs[2])
 	}
 }
 
