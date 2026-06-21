@@ -1,11 +1,11 @@
 package admin
 
 import (
+	"bufio"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -204,6 +204,11 @@ func (s *Server) apiPlaylistExport(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 		cw.Flush()
+		if err := cw.Error(); err != nil {
+			// Mirror writeHistoryCSV — surface a disconnected-client /
+			// full-disk failure instead of shipping a silent truncated CSV.
+			logging.Component("admin.playlist").Warn("playlist CSV export write error", "err", err)
+		}
 	case "m3u8":
 		setDownloadHeaders(w, "audio/x-mpegurl", base+".m3u8")
 		s.writeM3U8(w, row.Name, items)
@@ -223,8 +228,20 @@ func (s *Server) apiPlaylistExport(w http.ResponseWriter, r *http.Request) {
 // (a bare non-comment line is a media LOCATION; an exported playlist
 // opened by the operator would beacon to an attacker-chosen URL).
 func (s *Server) writeM3U8(w http.ResponseWriter, name string, items []manifest.PlaylistItemRow) {
-	fmt.Fprintln(w, "#EXTM3U")
-	fmt.Fprintf(w, "#PLAYLIST:%s\n", m3uLine(name))
+	// Buffer the per-item writes — a playlist near the 50k-item cap would
+	// otherwise push tens of thousands of tiny writes down the response
+	// chain (same streaming philosophy as /v1/manifest). Headers are set
+	// by the caller before this runs, so the deferred flush is safe.
+	bw := bufio.NewWriter(w)
+	defer func() {
+		// Surface a broken-pipe / full-disk failure rather than silently
+		// shipping a truncated playlist — parity with the CSV export path.
+		if err := bw.Flush(); err != nil {
+			logging.Component("admin.playlist").Warn("playlist M3U8 export write error", "err", err)
+		}
+	}()
+	fmt.Fprintln(bw, "#EXTM3U")
+	fmt.Fprintf(bw, "#PLAYLIST:%s\n", m3uLine(name))
 	for _, it := range items {
 		// Trim the fields individually then join only when both are
 		// present — joining-then-trimming would corrupt legit names that
@@ -240,18 +257,18 @@ func (s *Server) writeM3U8(w http.ResponseWriter, name string, items []manifest.
 		}
 		if it.OriginFingerprint != "" || it.OriginPath != "" {
 			// Foreign item — opaque to this bridge, not locally playable.
-			fmt.Fprintf(w, "# foreign (%s): %s\n", m3uLine(it.OriginFingerprint), m3uLine(it.OriginPath))
+			fmt.Fprintf(bw, "# foreign (%s): %s\n", m3uLine(it.OriginFingerprint), m3uLine(it.OriginPath))
 			continue
 		}
 		abs, err := s.deps.Resolver.Resolve(it.Path)
 		if err != nil {
-			fmt.Fprintf(w, "# unresolved: %s\n", m3uLine(it.Path))
+			fmt.Fprintf(bw, "# unresolved: %s\n", m3uLine(it.Path))
 			continue
 		}
 		// The location line derives from the device-supplied path too;
 		// a path with an embedded newline can't be represented as one
 		// M3U location anyway, so flattening it is strictly no worse.
-		fmt.Fprintf(w, "#EXTINF:-1,%s\n%s\n", title, m3uLine(abs))
+		fmt.Fprintf(bw, "#EXTINF:-1,%s\n%s\n", title, m3uLine(abs))
 	}
 }
 
@@ -380,7 +397,7 @@ func (s *Server) collectHistoryForExport(r *http.Request, token string) ([]manif
 		pageSize  = 1000
 		exportCap = 100000
 	)
-	var events []manifest.HistoryEventOut
+	events := make([]manifest.HistoryEventOut, 0, pageSize)
 	var after int64
 	for len(events) < exportCap {
 		page, err := s.deps.Manifest.ListHistory(r.Context(), token, pageSize, after)
@@ -464,8 +481,9 @@ func safeFilename(s string) string {
 	if out == "" {
 		return "export"
 	}
-	// Guard against a pathological all-symbol name producing a huge run.
-	out = path.Base(out)
+	// Cap the length. The char filter above already replaced every path
+	// separator with a dash, so out is a single clean token — path.Base
+	// here was a no-op.
 	if len(out) > 80 {
 		out = out[:80]
 	}
