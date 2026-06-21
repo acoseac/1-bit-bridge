@@ -39,13 +39,15 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-permissions:
-  contents: read
-
+# Permissions are declared per-job (least privilege, githubactions:S8264)
+# rather than workflow-wide: the build jobs need contents:read for
+# checkout; the gate fan-in job touches nothing.
 jobs:
   vet:
     name: vet
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -71,6 +73,8 @@ jobs:
   test:
     name: test -race
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -97,6 +101,8 @@ jobs:
   build-all:
     name: build-all
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -125,6 +131,7 @@ jobs:
     needs: [vet, test, build-all]
     if: always()
     runs-on: ubuntu-latest
+    permissions: {}
     steps:
       - name: Verify all gate jobs passed
         run: |
