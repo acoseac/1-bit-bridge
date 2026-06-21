@@ -333,9 +333,11 @@ func ParseGetProtocolInfoResponse(body []byte) ([]string, error) {
 	}
 	// Detect SOAP Fault — the inner element name is "Fault" in the
 	// SOAP envelope namespace. The xml package's `,any` wildcard
-	// captures the local name regardless of the xmlns:s prefix
-	// the responder used.
-	if env.Body.Response.XMLName.Local == "Fault" {
+	// captures the local name regardless of the xmlns:s prefix the
+	// responder used; EqualFold so a loose renderer that emits a
+	// lowercase <s:fault> is still caught rather than masquerading as
+	// an empty sink list. (goreview F10)
+	if strings.EqualFold(env.Body.Response.XMLName.Local, "Fault") {
 		return nil, ErrSOAPFault
 	}
 	// Detect missing/empty Body element — a renderer returning a

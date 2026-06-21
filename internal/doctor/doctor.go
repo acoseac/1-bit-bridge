@@ -222,6 +222,17 @@ func checkPort(name string, port int, ownPIDFile string) Check {
 			}
 		}
 	}
+	// Couldn't attribute the bound port to our own bridge. If the owner
+	// probe isn't available on this host, we genuinely can't tell "our
+	// running bridge" apart from a real conflict — Warn instead of a hard
+	// Fail that cries wolf on every `bridge doctor` run on a live install
+	// (notably Windows, which has no probe yet). (goreview F9)
+	if !portProbeAvailable() {
+		return warn(name, fmt.Sprintf(":%d in use", port),
+			"port is bound but the owner couldn't be identified on this host; "+
+				"if it's your running bridge this is expected, otherwise stop the "+
+				"other process or change the address in bridge.yaml")
+	}
 	return fail(name, fmt.Sprintf(":%d in use", port),
 		"another process owns this port; stop it or pick a different address in bridge.yaml")
 }
@@ -425,6 +436,20 @@ func pidListening(port int) int {
 		return -1
 	}
 	return n
+}
+
+// portProbeAvailable reports whether pidListening can actually identify
+// the owner of a bound port on THIS host. It mirrors pidListening's own
+// preconditions: there is no probe on Windows yet, and the unix probe
+// shells out to lsof. When it returns false, checkPort can't tell a port
+// bound by our own bridge apart from a real conflict, so it degrades to
+// Warn rather than a hard Fail. Package var so tests can stub it.
+var portProbeAvailable = func() bool {
+	if runtime.GOOS == "windows" {
+		return false
+	}
+	_, err := exec.LookPath("lsof")
+	return err == nil
 }
 
 // ErrHasFail is returned by Run when the caller passes StopOnFail.

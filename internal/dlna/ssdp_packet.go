@@ -20,6 +20,13 @@ const SSDPMulticastAddr = "239.255.255.250:1900"
 // 1800s (30 min) matches the conventional UPnP MediaServer default.
 const SSDPMaxAge = 1800
 
+// ssdpCacheControlLine is the full CACHE-CONTROL header line (CRLF
+// included) emitted in every NOTIFY / M-SEARCH-RESPONSE packet. SSDPMaxAge
+// is a compile-time constant, so the value is invariant — building it once
+// here keeps the per-packet builders from re-running itoa's fmt.Sprintf on
+// every multicast announce. (goreview F6)
+var ssdpCacheControlLine = "CACHE-CONTROL: max-age=" + itoa(SSDPMaxAge) + "\r\n"
+
 // SSDPServerToken returns the canonical SSDP `SERVER` header value the
 // bridge uses in NOTIFY and M-SEARCH-RESPONSE packets. Format per
 // UDA spec: `<os>/<osver> UPnP/1.0 <productname>/<productver>`. The
@@ -86,7 +93,7 @@ func BuildNotifyAlive(location, server string, target NotifyTarget) []byte {
 	return []byte(
 		"NOTIFY * HTTP/1.1\r\n" +
 			"HOST: " + SSDPMulticastAddr + "\r\n" +
-			"CACHE-CONTROL: max-age=" + itoa(SSDPMaxAge) + "\r\n" +
+			ssdpCacheControlLine +
 			"LOCATION: " + location + "\r\n" +
 			"SERVER: " + server + "\r\n" +
 			"NT: " + target.NT + "\r\n" +
@@ -135,7 +142,7 @@ func BuildNotifyByeBye(location, server string, target NotifyTarget) []byte {
 func BuildMSearchResponse(location, server, st, usn string, date time.Time) []byte {
 	return []byte(
 		"HTTP/1.1 200 OK\r\n" +
-			"CACHE-CONTROL: max-age=" + itoa(SSDPMaxAge) + "\r\n" +
+			ssdpCacheControlLine +
 			"DATE: " + date.UTC().Format(http.TimeFormat) + "\r\n" +
 			"EXT:\r\n" +
 			"LOCATION: " + location + "\r\n" +
