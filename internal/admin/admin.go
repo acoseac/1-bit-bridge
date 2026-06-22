@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/acoseac/1-bit-bridge/internal/adminauth"
 	"github.com/acoseac/1-bit-bridge/internal/auth"
@@ -667,6 +668,17 @@ type Server struct {
 	soxAvailabilityMu sync.Mutex
 	soxAvailability   bool
 	soxAvailabilityAt time.Time
+
+	// composition cache (dashboard master-quality breakdown).
+	// Manifest.FormatDistribution does a full-table json_extract scan,
+	// far too expensive for the SSE hot path — cache the bucketed
+	// snapshot for compositionCacheTTL. compositionSF single-flights the
+	// recompute so the 30s SSE tick / initial-emit across N open tabs
+	// collapses to one scan after expiry, not N concurrent scans.
+	compositionMu sync.Mutex
+	composition   compositionResponse
+	compositionAt time.Time
+	compositionSF singleflight.Group
 
 	// boundAdminAddr is the address the TCP listener was actually
 	// bound to, recorded in Serve() once net.Listen succeeds. It is

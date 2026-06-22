@@ -2039,6 +2039,98 @@ section.library-inspector {
   border-radius: 3px;
 }
 
+/* Master-quality distribution bars (dashboard "Library composition").
+   Proportional stacked segments painted by app.js renderDistBar; the
+   segment palette is derived from data-kind + the per-segment --i index
+   so the colours stay stable frame-to-frame. */
+.master-quality {
+  margin-top: 18px;
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+}
+.dist-heading {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-muted);
+  margin: 0 0 12px;
+}
+.dist-section {
+  margin-bottom: 14px;
+}
+.dist-section:last-child {
+  margin-bottom: 0;
+}
+.dist-section .dist-title {
+  font-size: 12px;
+  color: var(--fg-muted);
+  margin-bottom: 5px;
+}
+.dist-bar {
+  display: flex;
+  width: 100%;
+  height: 16px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--border);
+}
+.dist-seg {
+  height: 100%;
+  min-width: 2px;
+  transition: opacity 0.15s ease;
+}
+.dist-seg:hover {
+  opacity: 0.8;
+}
+.dist-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin-top: 7px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.dist-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.dist-legend-item b {
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+.dist-swatch {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  display: inline-block;
+  flex: none;
+}
+/* Per-kind palettes — hue ramps over the --i segment index. PCM shifts
+   blue→teal with rising sampling density; DSD is a violet family; codecs
+   spread across a warm-to-green wheel. */
+.dist-seg[data-kind="pcm"],
+.dist-legend-item[data-kind="pcm"] .dist-swatch {
+  background: hsl(calc((210 - var(--i) * 26) * 1deg) 62% 52%);
+}
+.dist-seg[data-kind="dsd"],
+.dist-legend-item[data-kind="dsd"] .dist-swatch {
+  background: hsl(calc((280 + var(--i) * 12) * 1deg) 55% 58%);
+}
+.dist-seg[data-kind="codec"],
+.dist-legend-item[data-kind="codec"] .dist-swatch {
+  background: hsl(calc((150 + var(--i) * 43) * 1deg) 50% 50%);
+}
+/* "Unknown" (codec known, PCM geometry not extracted) reads neutral —
+   wins over the per-kind hue regardless of source order. */
+.dist-seg.is-unknown,
+.dist-legend-item.is-unknown .dist-swatch {
+  background: var(--fg-muted) !important;
+}
+.dist-legend-item.is-unknown {
+  opacity: 0.75;
+}
+
 /* Track tiles use the same shell but a compact `.tile-track-dots`
    row in place of the coverage block (per-track is binary, so the
    bars would always be 0/1 or 1/1). */

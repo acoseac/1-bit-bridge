@@ -185,6 +185,65 @@ function applyStats(s) {
   }
 }
 
+// applyComposition renders the dashboard "Master quality" distribution
+// bars from the SSE `composition` event (PCM sampling density, DSD
+// streams, codec layout). No-op on pages without the container. The DSD
+// section hides when the library has no DSD; the whole block hides on an
+// empty/zero-total snapshot.
+function applyComposition(c) {
+  const root = document.getElementById("master-quality");
+  if (!root || !c) return;
+  const total = c.total || 0;
+  renderDistBar("comp-pcm-bar", "comp-pcm-legend", c.pcm || [], total, "pcm");
+  renderDistBar("comp-codec-bar", "comp-codec-legend", c.codecs || [], total, "codec");
+  const dsd = c.dsd || [];
+  const dsdSection = document.getElementById("comp-dsd-section");
+  if (dsdSection) dsdSection.hidden = dsd.length === 0;
+  renderDistBar("comp-dsd-bar", "comp-dsd-legend", dsd, total, "dsd");
+  root.hidden = total === 0;
+}
+
+// renderDistBar paints one proportional stacked bar + legend from a set
+// of {label,count} segments. Built via createElement/textContent (never
+// innerHTML) so codec/tier labels can't inject markup. Segment colour is
+// derived in CSS from data-kind + the --i index (stable palette).
+function renderDistBar(barId, legendId, segs, total, kind) {
+  const bar = document.getElementById(barId);
+  const legend = document.getElementById(legendId);
+  if (!bar || !legend) return;
+  bar.textContent = "";
+  legend.textContent = "";
+  const denom = total > 0 ? total : 1;
+  segs.forEach((seg, i) => {
+    const pct = (seg.count / denom) * 100;
+    // "Unknown" = the bridge knows the codec but not the PCM geometry
+    // (it stream-parses rate/bits for FLAC + DSD only; the tag-library
+    // path for MP3/M4A/WAV/AIFF doesn't expose them). Render it neutral
+    // grey so it reads as "unanalysed", not a quality tier.
+    const unknown = seg.label === "Unknown";
+    const span = document.createElement("span");
+    span.className = unknown ? "dist-seg is-unknown" : "dist-seg";
+    span.style.width = pct.toFixed(2) + "%";
+    span.style.setProperty("--i", String(i));
+    span.dataset.kind = kind;
+    span.title = `${seg.label}: ${seg.count} (${pct.toFixed(1)}%)`;
+    bar.appendChild(span);
+
+    const item = document.createElement("span");
+    item.className = unknown ? "dist-legend-item is-unknown" : "dist-legend-item";
+    item.dataset.kind = kind;
+    item.style.setProperty("--i", String(i));
+    const swatch = document.createElement("i");
+    swatch.className = "dist-swatch";
+    item.appendChild(swatch);
+    item.appendChild(document.createTextNode(`${seg.label} `));
+    const b = document.createElement("b");
+    b.textContent = String(seg.count);
+    item.appendChild(b);
+    legend.appendChild(item);
+  });
+}
+
 // refreshBackups fetches /api/backups and renders the latest count +
 // most-recent timestamp into the dashboard's Backups panel. Errors
 // degrade gracefully — the panel just shows the placeholder dashes.
@@ -2087,11 +2146,12 @@ function startEventStream() {
   // and the visibility-restore handler doesn't mis-classify it as
   // idle when the user briefly switches tabs.
   const seen = (fn) => (e) => { lastEventSourceSeenAt = Date.now(); fn(e); };
-  es.addEventListener("stats",     seen((e) => safeApply("stats",     e.data, applyStats)));
-  es.addEventListener("endpoints", seen((e) => safeApply("endpoints", e.data, applyEndpoints)));
-  es.addEventListener("pairing",   seen((e) => safeApply("pairing",   e.data, applyPairing)));
-  es.addEventListener("updates",   seen((e) => safeApply("updates",   e.data, renderUpdateTile)));
-  es.addEventListener("tailscale", seen((e) => safeApply("tailscale", e.data, renderTailscaleTile)));
+  es.addEventListener("stats",       seen((e) => safeApply("stats",       e.data, applyStats)));
+  es.addEventListener("composition", seen((e) => safeApply("composition", e.data, applyComposition)));
+  es.addEventListener("endpoints",   seen((e) => safeApply("endpoints",   e.data, applyEndpoints)));
+  es.addEventListener("pairing",     seen((e) => safeApply("pairing",     e.data, applyPairing)));
+  es.addEventListener("updates",     seen((e) => safeApply("updates",     e.data, renderUpdateTile)));
+  es.addEventListener("tailscale",   seen((e) => safeApply("tailscale",   e.data, renderTailscaleTile)));
 
   es.onopen = () => {
     lastEventSourceSeenAt = Date.now();

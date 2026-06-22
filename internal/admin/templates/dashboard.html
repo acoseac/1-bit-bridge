@@ -37,6 +37,30 @@
       <dt>Variant files</dt>
       <dd><span id="comp-variant-files">{{.Data.VariantFiles}}</span> files · <span id="comp-variant-bytes">{{bytesHuman .Data.VariantBytes}}</span> on disk</dd>
     </dl>
+
+    {{/* Master-quality breakdown — proportional bars painted by
+         app.js applyComposition from the SSE `composition` event
+         (initial-emit fires on connect, so the wait is sub-second).
+         Hidden until the first frame lands so an empty library / cold
+         cache shows nothing rather than empty bars. */}}
+    <div class="master-quality" id="master-quality" hidden>
+      <h3 class="dist-heading">Master quality</h3>
+      <div class="dist-section">
+        <div class="dist-title">PCM sampling density</div>
+        <div class="dist-bar" id="comp-pcm-bar" role="img" aria-label="PCM sampling-density distribution"></div>
+        <div class="dist-legend" id="comp-pcm-legend"></div>
+      </div>
+      <div class="dist-section" id="comp-dsd-section" hidden>
+        <div class="dist-title">DSD streams</div>
+        <div class="dist-bar" id="comp-dsd-bar" role="img" aria-label="DSD stream distribution"></div>
+        <div class="dist-legend" id="comp-dsd-legend"></div>
+      </div>
+      <div class="dist-section">
+        <div class="dist-title">Codec layout</div>
+        <div class="dist-bar" id="comp-codec-bar" role="img" aria-label="Codec distribution"></div>
+        <div class="dist-legend" id="comp-codec-legend"></div>
+      </div>
+    </div>
   </div>
 
   <div class="panel">

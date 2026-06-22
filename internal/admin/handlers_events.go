@@ -94,11 +94,12 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 	// (zero value) is "never sent" — the initial snapshot below
 	// always emits regardless of cache state.
 	var (
-		lastStats     []byte
-		lastEndpoints []byte
-		lastPairing   []byte
-		lastUpdates   []byte
-		lastTailscale []byte
+		lastStats       []byte
+		lastEndpoints   []byte
+		lastPairing     []byte
+		lastUpdates     []byte
+		lastTailscale   []byte
+		lastComposition []byte
 	)
 
 	// publish writes one named SSE frame and flushes. Returns the
@@ -177,6 +178,13 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 		return marshalAndPublish("tailscale", s.getTailscaleSnapshot(), &lastTailscale)
 	}
 
+	// composition (dashboard master-quality breakdown) is TTL-cached +
+	// single-flighted in getCompositionSnapshot, so this stays cheap even
+	// though the underlying scan is a full-table json_extract.
+	publishComposition := func() error {
+		return marshalAndPublish("composition", s.getCompositionSnapshot(), &lastComposition)
+	}
+
 	// Initial snapshot — fires synchronously after headers so the
 	// page hydrates on connect without waiting for the first tick.
 	// Without this the dashboard would rely on its server-rendered
@@ -184,7 +192,7 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 	// (pairing, endpoints) that don't have server-rendered first
 	// paint at all. Bail on any write error: client already gone.
 	for _, f := range []func() error{
-		publishStats, publishPairing, publishEndpoints, publishUpdates, publishTailscale,
+		publishStats, publishPairing, publishEndpoints, publishUpdates, publishTailscale, publishComposition,
 	} {
 		if err := f(); err != nil {
 			return
@@ -240,6 +248,11 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if err := publishTailscale(); err != nil {
+				return
+			}
+			// Composition rides the slow tick — format only changes
+			// after a scan; the snapshot is TTL-cached + diff-suppressed.
+			if err := publishComposition(); err != nil {
 				return
 			}
 		case <-heartbeatTk.C:
