@@ -392,3 +392,283 @@ func TestAnalyzedTrackFeatures_PoolAndGenreFilter(t *testing.T) {
 		t.Fatalf("genre filter: want [/jazz1.flac], got %+v", jazz)
 	}
 }
+
+// --- Drive Mix (CarPlay-only) ---
+
+func TestPlayStatsByInterfaceInWindow_CarPlayOnly(t *testing.T) {
+	s := newSPStore(t)
+	ctx := context.Background()
+	mustUpsertTrack(t, s, &Track{Path: "/car.flac"})
+	mustUpsertTrack(t, s, &Track{Path: "/home.flac"})
+
+	now := utcNS(2026, 1, 20, 12, 0)
+	day := int64(24 * time.Hour)
+	mustInsertHistory(t, s,
+		// CarPlay plays — should be the only ones counted.
+		PlaybackHistoryRow{Path: "/car.flac", StartedAt: now - 1*day, DurationUsed: 120, IfaceType: "CarPlay"},
+		PlaybackHistoryRow{Path: "/car.flac", StartedAt: now - 2*day, DurationUsed: 120, IfaceType: "CarPlay"},
+		PlaybackHistoryRow{Path: "/car.flac", StartedAt: now - 3*day, DurationUsed: 120, IfaceType: "CarPlay"},
+		// A CarPlay skip (<30 s) — excluded.
+		PlaybackHistoryRow{Path: "/car.flac", StartedAt: now - 4*day, DurationUsed: 5, IfaceType: "CarPlay"},
+		// Non-CarPlay plays — must be excluded.
+		PlaybackHistoryRow{Path: "/home.flac", StartedAt: now - 1*day, DurationUsed: 300, IfaceType: "USB-DAC"},
+		PlaybackHistoryRow{Path: "/home.flac", StartedAt: now - 2*day, DurationUsed: 300, IfaceType: "Bluetooth"},
+		PlaybackHistoryRow{Path: "/home.flac", StartedAt: now - 3*day, DurationUsed: 300, IfaceType: ""},
+	)
+
+	rows, err := s.PlayStatsByInterfaceInWindow(ctx, now-60*day, "CarPlay", 30.0, 50)
+	if err != nil {
+		t.Fatalf("PlayStatsByInterfaceInWindow: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Path != "/car.flac" || rows[0].Plays != 3 {
+		t.Fatalf("CarPlay filter + 30s rule: want [/car.flac x3], got %+v", rows)
+	}
+}
+
+// --- On Repeat (two-level aggregation + hysteresis-callable contract) ---
+
+func TestOnRepeatCandidates_DailyRepeatsCountedPerDevice(t *testing.T) {
+	s := newSPStore(t)
+	ctx := context.Background()
+	mustUpsertTrack(t, s, &Track{Path: "/obsession.flac"})    // qualifies
+	mustUpsertTrack(t, s, &Track{Path: "/once-per-day.flac"}) // never ≥2 per day → fails repeat_days
+	mustUpsertTrack(t, s, &Track{Path: "/one-day-binge.flac"})
+
+	now := utcNS(2026, 1, 20, 12, 0)
+	day := int64(24 * time.Hour)
+	// /obsession.flac: 3 days × 2+ plays/day (passes both thresholds).
+	mustInsertHistory(t, s,
+		PlaybackHistoryRow{Path: "/obsession.flac", StartedAt: now - 1*day, DurationUsed: 200},
+		PlaybackHistoryRow{Path: "/obsession.flac", StartedAt: now - 1*day - 600*int64(time.Second), DurationUsed: 200},
+		PlaybackHistoryRow{Path: "/obsession.flac", StartedAt: now - 2*day, DurationUsed: 200},
+		PlaybackHistoryRow{Path: "/obsession.flac", StartedAt: now - 2*day - 600*int64(time.Second), DurationUsed: 200},
+		PlaybackHistoryRow{Path: "/obsession.flac", StartedAt: now - 3*day, DurationUsed: 200},
+		PlaybackHistoryRow{Path: "/obsession.flac", StartedAt: now - 3*day - 600*int64(time.Second), DurationUsed: 200},
+	)
+	// /once-per-day.flac: 5 days × 1 play/day (no per-day repeat → fails repeat_days).
+	for d := int64(1); d <= 5; d++ {
+		mustInsertHistory(t, s, PlaybackHistoryRow{Path: "/once-per-day.flac", StartedAt: now - d*day, DurationUsed: 200})
+	}
+	// /one-day-binge.flac: 8 plays in one day (passes total_plays but fails repeat_days=3).
+	for i := int64(0); i < 8; i++ {
+		mustInsertHistory(t, s, PlaybackHistoryRow{Path: "/one-day-binge.flac", StartedAt: now - 1*day - i*600*int64(time.Second), DurationUsed: 200})
+	}
+	// A skip event must NOT count toward daily plays (the 30s rule).
+	mustInsertHistory(t, s, PlaybackHistoryRow{Path: "/obsession.flac", StartedAt: now - 1*day, DurationUsed: 5})
+
+	rows, err := s.OnRepeatCandidates(ctx, now-30*day, 30.0, 4, 3, 50)
+	if err != nil {
+		t.Fatalf("OnRepeatCandidates: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Path != "/obsession.flac" || rows[0].Plays != 6 {
+		t.Fatalf("repeat threshold: want [/obsession.flac x6], got %+v", rows)
+	}
+}
+
+func TestOnRepeatCandidates_DevicesAggregateAcrossPath(t *testing.T) {
+	s := newSPStore(t)
+	ctx := context.Background()
+	mustUpsertTrack(t, s, &Track{Path: "/shared.flac"})
+
+	now := utcNS(2026, 1, 20, 12, 0)
+	day := int64(24 * time.Hour)
+	// iPhone: 3 days × 2 plays.
+	for d := int64(1); d <= 3; d++ {
+		mustInsertHistory(t, s,
+			PlaybackHistoryRow{DeviceToken: "iphone", Path: "/shared.flac", StartedAt: now - d*day, DurationUsed: 200},
+			PlaybackHistoryRow{DeviceToken: "iphone", Path: "/shared.flac", StartedAt: now - d*day - 600*int64(time.Second), DurationUsed: 200},
+		)
+	}
+	// iPad: same days, 2 plays each — adds to total_plays + repeat_days.
+	for d := int64(1); d <= 3; d++ {
+		mustInsertHistory(t, s,
+			PlaybackHistoryRow{DeviceToken: "ipad", Path: "/shared.flac", StartedAt: now - d*day, DurationUsed: 200},
+			PlaybackHistoryRow{DeviceToken: "ipad", Path: "/shared.flac", StartedAt: now - d*day - 600*int64(time.Second), DurationUsed: 200},
+		)
+	}
+
+	rows, err := s.OnRepeatCandidates(ctx, now-30*day, 30.0, 4, 3, 50)
+	if err != nil {
+		t.Fatalf("OnRepeatCandidates: %v", err)
+	}
+	// Sum-across-devices: 3+3 device-days each with 2 plays = total 12 plays, 6 repeat_days.
+	if len(rows) != 1 || rows[0].Path != "/shared.flac" || rows[0].Plays != 12 {
+		t.Fatalf("cross-device aggregation: want [/shared.flac x12], got %+v", rows)
+	}
+}
+
+// --- From Artists You Love (artist-graph + ROW_NUMBER per-artist cap) ---
+
+func TestLovedArtistDeepCuts_PerArtistCapAndRecentExclusion(t *testing.T) {
+	s := newSPStore(t)
+	ctx := context.Background()
+
+	// Two loved artists (≥3 plays in window) and one indifferent artist.
+	mustUpsertTrack(t, s, &Track{Path: "/loved-a/played-1.flac", Artist: "LovedA"})
+	mustUpsertTrack(t, s, &Track{Path: "/loved-a/deep-1.flac", Artist: "LovedA"})
+	mustUpsertTrack(t, s, &Track{Path: "/loved-a/deep-2.flac", Artist: "LovedA"})
+	mustUpsertTrack(t, s, &Track{Path: "/loved-a/deep-3.flac", Artist: "LovedA"})
+	mustUpsertTrack(t, s, &Track{Path: "/loved-a/deep-4.flac", Artist: "LovedA"}) // 5th — exceeds per-artist cap
+	mustUpsertTrack(t, s, &Track{Path: "/loved-b/deep-1.flac", Artist: "LovedB"})
+	mustUpsertTrack(t, s, &Track{Path: "/loved-b/deep-2.flac", Artist: "LovedB"})
+	mustUpsertTrack(t, s, &Track{Path: "/loved-b/deep-3.flac", Artist: "LovedB"})
+	mustUpsertTrack(t, s, &Track{Path: "/cold/track-1.flac", Artist: "ColdC"}) // never played by user
+	mustUpsertTrack(t, s, &Track{Path: "/cold/track-2.flac", Artist: "ColdC"})
+
+	now := utcNS(2026, 1, 20, 12, 0)
+	day := int64(24 * time.Hour)
+	// LovedA: 3 qualifying plays of /played-1.flac in last 30 days.
+	for d := int64(1); d <= 3; d++ {
+		mustInsertHistory(t, s, PlaybackHistoryRow{Path: "/loved-a/played-1.flac", StartedAt: now - d*day, DurationUsed: 200})
+	}
+	// LovedB: 4 qualifying plays of /loved-b/deep-1.flac — but that means it counts as "recently played" and SHOULD be excluded.
+	for d := int64(1); d <= 4; d++ {
+		mustInsertHistory(t, s, PlaybackHistoryRow{Path: "/loved-b/deep-1.flac", StartedAt: now - d*day, DurationUsed: 200})
+	}
+	// ColdC: no plays at all.
+
+	rows, err := s.LovedArtistDeepCuts(ctx,
+		now-30*day, 3, // lovedSinceNS, lovedMinPlays
+		now-90*day, // deepCutCutoffNS — exclude anything played in last 90d
+		30.0,
+		3,  // perArtistCap
+		50, // limit
+	)
+	if err != nil {
+		t.Fatalf("LovedArtistDeepCuts: %v", err)
+	}
+
+	pathSet := map[string]bool{}
+	artistCounts := map[string]int{}
+	for _, r := range rows {
+		pathSet[r.Path] = true
+	}
+	for _, p := range []string{
+		"/loved-a/deep-1.flac", "/loved-a/deep-2.flac", "/loved-a/deep-3.flac",
+		"/loved-b/deep-2.flac", "/loved-b/deep-3.flac",
+	} {
+		if !pathSet[p] {
+			t.Errorf("eligible deep cut missing: %s", p)
+		}
+	}
+	// Recently-played should be excluded.
+	if pathSet["/loved-a/played-1.flac"] {
+		t.Error("recently played track must be excluded")
+	}
+	if pathSet["/loved-b/deep-1.flac"] {
+		t.Error("track recently played by loved artist must be excluded")
+	}
+	// Cold artist contributes nothing.
+	if pathSet["/cold/track-1.flac"] || pathSet["/cold/track-2.flac"] {
+		t.Error("non-loved artist must contribute zero tracks")
+	}
+	// Per-artist cap: LovedA had 4 deep-cut tracks but only 3 must appear.
+	for _, r := range rows {
+		if r.Path == "/loved-a/deep-1.flac" || r.Path == "/loved-a/deep-2.flac" ||
+			r.Path == "/loved-a/deep-3.flac" || r.Path == "/loved-a/deep-4.flac" {
+			artistCounts["LovedA"]++
+		}
+		if r.Path == "/loved-b/deep-2.flac" || r.Path == "/loved-b/deep-3.flac" {
+			artistCounts["LovedB"]++
+		}
+	}
+	if artistCounts["LovedA"] != 3 {
+		t.Errorf("LovedA per-artist cap: want 3, got %d", artistCounts["LovedA"])
+	}
+	if artistCounts["LovedB"] != 2 {
+		t.Errorf("LovedB eligible count: want 2, got %d", artistCounts["LovedB"])
+	}
+}
+
+// --- Mood bands (BPM + ReplayGain, effective tag-wins-over-analysis) ---
+
+func TestQuietSlowTrackFeatures_BoundariesAndTagWins(t *testing.T) {
+	s := newSPStore(t)
+	ctx := context.Background()
+
+	// Wind Down qualifier: bpm ≤ 90 AND RG > -6 (less-negative = quieter).
+	mustUpsertTrack(t, s, &Track{Path: "/quiet-slow.flac"})
+	mustUpsertAnalysis(t, s, AnalysisRow{SourcePath: "/quiet-slow.flac", BPM: spInt(80), ReplayGainTrackDB: spFloat(-4.0)})
+	// Tag wins over analysis: tag bpm 60, analysis bpm 200 → effective bpm 60.
+	mustUpsertTrack(t, s, &Track{
+		Path: "/tag-overrides.flac", BPM: spInt(60), ReplayGainTrackDB: spFloat(-3.0),
+	})
+	mustUpsertAnalysis(t, s, AnalysisRow{SourcePath: "/tag-overrides.flac", BPM: spInt(200), ReplayGainTrackDB: spFloat(-20.0)})
+	// Boundary EXCLUSIONS: bpm=91 (above); rg=-6 (not > -6); rg=-7 (below).
+	mustUpsertTrack(t, s, &Track{Path: "/above-bpm.flac"})
+	mustUpsertAnalysis(t, s, AnalysisRow{SourcePath: "/above-bpm.flac", BPM: spInt(91), ReplayGainTrackDB: spFloat(-3.0)})
+	mustUpsertTrack(t, s, &Track{Path: "/equal-rg.flac"})
+	mustUpsertAnalysis(t, s, AnalysisRow{SourcePath: "/equal-rg.flac", BPM: spInt(80), ReplayGainTrackDB: spFloat(-6.0)})
+	mustUpsertTrack(t, s, &Track{Path: "/too-loud.flac"})
+	mustUpsertAnalysis(t, s, AnalysisRow{SourcePath: "/too-loud.flac", BPM: spInt(80), ReplayGainTrackDB: spFloat(-9.0)})
+	// NULL BPM and NULL RG both exclude.
+	mustUpsertTrack(t, s, &Track{Path: "/null-bpm.flac"})
+	mustUpsertAnalysis(t, s, AnalysisRow{SourcePath: "/null-bpm.flac", ReplayGainTrackDB: spFloat(-3.0)})
+	mustUpsertTrack(t, s, &Track{Path: "/null-rg.flac"})
+	mustUpsertAnalysis(t, s, AnalysisRow{SourcePath: "/null-rg.flac", BPM: spInt(80)})
+
+	rows, err := s.QuietSlowTrackFeatures(ctx, 90, -6.0)
+	if err != nil {
+		t.Fatalf("QuietSlowTrackFeatures: %v", err)
+	}
+	gotPaths := map[string]bool{}
+	for _, r := range rows {
+		gotPaths[r.Path] = true
+	}
+	wantIn := []string{"/quiet-slow.flac", "/tag-overrides.flac"}
+	wantOut := []string{"/above-bpm.flac", "/equal-rg.flac", "/too-loud.flac", "/null-bpm.flac", "/null-rg.flac"}
+	for _, p := range wantIn {
+		if !gotPaths[p] {
+			t.Errorf("should qualify: %s", p)
+		}
+	}
+	for _, p := range wantOut {
+		if gotPaths[p] {
+			t.Errorf("must NOT qualify: %s", p)
+		}
+	}
+}
+
+func TestLoudFastTrackFeatures_BoundariesAndTagWins(t *testing.T) {
+	s := newSPStore(t)
+	ctx := context.Background()
+
+	// Lift Off qualifier: bpm ≥ 120 AND RG ≤ -8 (more-negative = louder).
+	mustUpsertTrack(t, s, &Track{Path: "/loud-fast.flac"})
+	mustUpsertAnalysis(t, s, AnalysisRow{SourcePath: "/loud-fast.flac", BPM: spInt(140), ReplayGainTrackDB: spFloat(-10.0)})
+	mustUpsertTrack(t, s, &Track{Path: "/tag-overrides.flac", BPM: spInt(160), ReplayGainTrackDB: spFloat(-12.0)})
+	mustUpsertAnalysis(t, s, AnalysisRow{SourcePath: "/tag-overrides.flac", BPM: spInt(60), ReplayGainTrackDB: spFloat(-1.0)})
+	// Boundary EXCLUSIONS.
+	mustUpsertTrack(t, s, &Track{Path: "/below-bpm.flac"})
+	mustUpsertAnalysis(t, s, AnalysisRow{SourcePath: "/below-bpm.flac", BPM: spInt(119), ReplayGainTrackDB: spFloat(-10.0)})
+	mustUpsertTrack(t, s, &Track{Path: "/not-loud-enough.flac"})
+	mustUpsertAnalysis(t, s, AnalysisRow{SourcePath: "/not-loud-enough.flac", BPM: spInt(140), ReplayGainTrackDB: spFloat(-7.9)})
+	mustUpsertTrack(t, s, &Track{Path: "/equal-rg.flac"}) // -8 is INclusive (≤), so this qualifies — sanity check.
+	mustUpsertAnalysis(t, s, AnalysisRow{SourcePath: "/equal-rg.flac", BPM: spInt(140), ReplayGainTrackDB: spFloat(-8.0)})
+	// NULL exclusions.
+	mustUpsertTrack(t, s, &Track{Path: "/null-bpm.flac"})
+	mustUpsertAnalysis(t, s, AnalysisRow{SourcePath: "/null-bpm.flac", ReplayGainTrackDB: spFloat(-10.0)})
+	mustUpsertTrack(t, s, &Track{Path: "/null-rg.flac"})
+	mustUpsertAnalysis(t, s, AnalysisRow{SourcePath: "/null-rg.flac", BPM: spInt(140)})
+
+	rows, err := s.LoudFastTrackFeatures(ctx, 120, -8.0)
+	if err != nil {
+		t.Fatalf("LoudFastTrackFeatures: %v", err)
+	}
+	gotPaths := map[string]bool{}
+	for _, r := range rows {
+		gotPaths[r.Path] = true
+	}
+	wantIn := []string{"/loud-fast.flac", "/tag-overrides.flac", "/equal-rg.flac"}
+	wantOut := []string{"/below-bpm.flac", "/not-loud-enough.flac", "/null-bpm.flac", "/null-rg.flac"}
+	for _, p := range wantIn {
+		if !gotPaths[p] {
+			t.Errorf("should qualify: %s", p)
+		}
+	}
+	for _, p := range wantOut {
+		if gotPaths[p] {
+			t.Errorf("must NOT qualify: %s", p)
+		}
+	}
+}

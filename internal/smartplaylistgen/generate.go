@@ -32,6 +32,36 @@ type Options struct {
 	SessionWindow     time.Duration // Finish Line events lookback (90d)
 	PoolLimit         int           // analyzed-pool cap (5000)
 
+	// Drive Mix lookback (CarPlay-only plays). 60d default — wider than the
+	// 14d Heavy Rotation window so commutes that don't include daily-driver
+	// listening still populate the family.
+	DriveWindow time.Duration
+
+	// On Repeat window — only days inside this look-back contribute to the
+	// repeat-day count.
+	OnRepeatWindow time.Duration
+	// OnRepeat thresholds (passed through to the manifest query).
+	OnRepeatMinTotalPlays int
+	OnRepeatMinRepeatDays int
+
+	// From Artists You Love — "loved" cohort window + "deep cut" exclusion
+	// window. A loved artist is one with ≥ LovedMinPlays qualifying plays in
+	// [now - LovedWindow, now); a deep cut is a track by such an artist with
+	// NO qualifying play in [now - DeepCutsCutoff, now).
+	LovedWindow             time.Duration
+	LovedMinPlays           int
+	DeepCutsCutoff          time.Duration
+	ArtistDeepCutsPerArtist int
+
+	// Mood band BPM + ReplayGain thresholds. Wind Down: bpm ≤ WindDownBPMMax
+	// AND replaygain > WindDownLoudnessMin (less-negative = quieter). Lift
+	// Off: bpm ≥ LiftOffBPMMin AND replaygain ≤ LiftOffLoudnessMax (more-
+	// negative = louder). Mid-band gap is deliberate.
+	WindDownBPMMax      int
+	WindDownLoudnessMin float64
+	LiftOffBPMMin       int
+	LiftOffLoudnessMax  float64
+
 	Engine smartplaylist.Options
 }
 
@@ -49,7 +79,26 @@ func DefaultOptions(nowNS int64, analysisEnabled bool) Options {
 		HourWindow:        90 * day,
 		SessionWindow:     90 * day,
 		PoolLimit:         5000,
-		Engine:            smartplaylist.DefaultOptions(analysisEnabled),
+		// Drive Mix: 60d CarPlay-only window (Heavy Rotation pattern).
+		DriveWindow: 60 * day,
+		// On Repeat: 30d window. ≥ 4 total plays AND ≥ 3 distinct days with
+		// ≥ 2 plays each = "sustained obsession" (per the plan).
+		OnRepeatWindow:        30 * day,
+		OnRepeatMinTotalPlays: 4,
+		OnRepeatMinRepeatDays: 3,
+		// From Artists You Love: 30d loved cohort window, 90d deep-cut
+		// exclusion. ≥ 3 plays in window = loved artist; per-artist cap 3.
+		LovedWindow:             30 * day,
+		LovedMinPlays:           3,
+		DeepCutsCutoff:          90 * day,
+		ArtistDeepCutsPerArtist: 3,
+		// Mood bands — see CLAUDE.md / plan: less-negative ReplayGain = quieter
+		// master; more-negative = louder. Mid-band gap (-8, -6] is deliberate.
+		WindDownBPMMax:      90,
+		WindDownLoudnessMin: -6.0,
+		LiftOffBPMMin:       120,
+		LiftOffLoudnessMax:  -8.0,
+		Engine:              smartplaylist.DefaultOptions(analysisEnabled),
 	}
 }
 
@@ -104,6 +153,68 @@ func assembleInputs(ctx context.Context, store *manifest.Store, opts Options) (s
 		return smartplaylist.Inputs{}, err
 	}
 
+	// Drive Mix: CarPlay-only heavy rotation.
+	drive, err := store.PlayStatsByInterfaceInWindow(ctx, now-opts.DriveWindow.Nanoseconds(), "CarPlay", opts.MinPlaySeconds, eng.MaxItems)
+	if err != nil {
+		return smartplaylist.Inputs{}, err
+	}
+
+	// On Repeat: two-level per-day repeat aggregation.
+	onRepeat, err := store.OnRepeatCandidates(ctx,
+		now-opts.OnRepeatWindow.Nanoseconds(),
+		opts.MinPlaySeconds,
+		opts.OnRepeatMinTotalPlays,
+		opts.OnRepeatMinRepeatDays,
+		eng.MaxItems,
+	)
+	if err != nil {
+		return smartplaylist.Inputs{}, err
+	}
+
+	// From Artists You Love: per-artist-capped deep cuts.
+	deepCuts, err := store.LovedArtistDeepCuts(ctx,
+		now-opts.LovedWindow.Nanoseconds(),
+		opts.LovedMinPlays,
+		now-opts.DeepCutsCutoff.Nanoseconds(),
+		opts.MinPlaySeconds,
+		opts.ArtistDeepCutsPerArtist,
+		eng.MaxItems,
+	)
+	if err != nil {
+		return smartplaylist.Inputs{}, err
+	}
+
+	// Mood bands. Gated on AnalysisEnabled — without analysis the BPM /
+	// loudness signals aren't populated, so the bands would always be empty.
+	var quietPool, loudPool []manifest.TrackFeatureRow
+	if opts.AnalysisEnabled {
+		if quietPool, err = store.QuietSlowTrackFeatures(ctx, opts.WindDownBPMMax, opts.WindDownLoudnessMin); err != nil {
+			return smartplaylist.Inputs{}, err
+		}
+		if loudPool, err = store.LoudFastTrackFeatures(ctx, opts.LiftOffBPMMin, opts.LiftOffLoudnessMax); err != nil {
+			return smartplaylist.Inputs{}, err
+		}
+	}
+
+	// Hysteresis: load the prior cache and build the "was visible last
+	// regeneration" map. The regenerator only writes populated families, so
+	// presence in the cache (slug exists) = visible last run. Hysteresis-
+	// capable builders (On Repeat) read this through Inputs.PreviouslyVisible.
+	priorCache, err := store.LoadSmartPlaylists(ctx)
+	if err != nil {
+		return smartplaylist.Inputs{}, err
+	}
+	previouslyVisible := make(map[string]bool, len(priorCache))
+	for _, p := range priorCache {
+		previouslyVisible[p.Slug] = true
+	}
+
+	// Week seed — UTC ISO week, so the deterministic weekly shuffle for
+	// Artist Deep Cuts + the mood bands rotates on Monday-UTC and is stable
+	// across a 7-day window.
+	yr, wk := time.Unix(0, opts.NowNS).UTC().ISOWeek()
+	weekSeed := smartplaylist.SeedFromISOWeek(yr, wk)
+
 	var pool []manifest.TrackFeatureRow
 	if opts.AnalysisEnabled {
 		if pool, err = store.AnalyzedTrackFeatures(ctx, "", opts.PoolLimit); err != nil {
@@ -112,9 +223,10 @@ func assembleInputs(ctx context.Context, store *manifest.Store, opts Options) (s
 	}
 
 	// Hydrate features for every candidate path (listening lists + hour
-	// buckets), then fold in the analyzed pool's own features.
+	// buckets + the new families' paths), then fold in the analyzed pool's
+	// own features.
 	pathSet := map[string]struct{}{}
-	for _, lst := range [][]manifest.PlayStatRow{heavy, familiar, forgotten, recent} {
+	for _, lst := range [][]manifest.PlayStatRow{heavy, familiar, forgotten, recent, drive, onRepeat, deepCuts} {
 		for _, s := range lst {
 			pathSet[s.Path] = struct{}{}
 		}
@@ -130,7 +242,7 @@ func assembleInputs(ctx context.Context, store *manifest.Store, opts Options) (s
 	if err != nil {
 		return smartplaylist.Inputs{}, err
 	}
-	features := make(map[string]smartplaylist.TrackFeature, len(featRows)+len(pool))
+	features := make(map[string]smartplaylist.TrackFeature, len(featRows)+len(pool)+len(quietPool)+len(loudPool))
 	for _, r := range featRows {
 		features[r.Path] = toFeature(r)
 	}
@@ -142,17 +254,43 @@ func assembleInputs(ctx context.Context, store *manifest.Store, opts Options) (s
 			features[r.Path] = f
 		}
 	}
+	// Mood-band rows come back fully hydrated; map them and add to Features
+	// (so signEnergy's post-pass can find their loudness when stamping the
+	// halo envelope on the mood-band families).
+	quietPoolFeats := make([]smartplaylist.TrackFeature, 0, len(quietPool))
+	for _, r := range quietPool {
+		f := toFeature(r)
+		quietPoolFeats = append(quietPoolFeats, f)
+		if _, ok := features[r.Path]; !ok {
+			features[r.Path] = f
+		}
+	}
+	loudPoolFeats := make([]smartplaylist.TrackFeature, 0, len(loudPool))
+	for _, r := range loudPool {
+		f := toFeature(r)
+		loudPoolFeats = append(loudPoolFeats, f)
+		if _, ok := features[r.Path]; !ok {
+			features[r.Path] = f
+		}
+	}
 
 	return smartplaylist.Inputs{
-		HeavyRotation: toStats(heavy),
-		Familiar:      toStats(familiar),
-		Forgotten:     toStats(forgotten),
-		Recent:        toStats(recent),
-		HourBuckets:   toHourPaths(hourBuckets),
-		Events:        toEvents(events),
-		AnalyzedPool:  poolFeats,
-		PlayedPaths:   toBoolSet(played),
-		Features:      features,
+		HeavyRotation:     toStats(heavy),
+		Familiar:          toStats(familiar),
+		Forgotten:         toStats(forgotten),
+		Recent:            toStats(recent),
+		HourBuckets:       toHourPaths(hourBuckets),
+		Events:            toEvents(events),
+		AnalyzedPool:      poolFeats,
+		Drive:             toStats(drive),
+		OnRepeat:          toStats(onRepeat),
+		ArtistDeepCuts:    toStats(deepCuts),
+		QuietSlowPool:     quietPoolFeats,
+		LoudFastPool:      loudPoolFeats,
+		PlayedPaths:       toBoolSet(played),
+		Features:          features,
+		PreviouslyVisible: previouslyVisible,
+		WeekSeed:          weekSeed,
 	}, nil
 }
 

@@ -214,6 +214,14 @@ func testOpts(analysis bool) Options {
 		MinHeavyRotation: 2, MinRecentlyPlayed: 2, MinForgotten: 2,
 		MinAutoMixPool: 3, MinTimeOfDayPlays: 2, MinDailyFamiliar: 2, MinSessions: 2,
 		SessionGapSeconds: 3600, DailyDiscoveryRatio: 0.30,
+		// New families' thresholds — kept ≥ 1 so an unpopulated fixture (empty
+		// Drive / OnRepeat / ArtistDeepCuts / QuietSlowPool / LoudFastPool)
+		// doesn't trip the family-emits-with-zero-items edge. Per-family
+		// fixture-driven tests live in families_new_test.go.
+		MinDriveMix: 2, MaxDriveMixItems: 10,
+		OnRepeatEnterFloor: 12, OnRepeatExitFloor: 8, MaxOnRepeatItems: 10,
+		MinArtistDeepCuts: 2, MaxArtistDeepCutsItems: 10,
+		MinMoodBand: 2, MaxMoodBandItems: 10,
 	}
 }
 

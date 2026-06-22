@@ -397,6 +397,187 @@ func (s *Store) TrackFeaturesForPaths(ctx context.Context, paths []string) ([]Tr
 	return out, nil
 }
 
+// PlayStatsByInterfaceInWindow returns the most-played track paths in
+// [sinceNS, now) filtered to a SPECIFIC iface_type (e.g. "CarPlay" for the
+// Drive Mix family). Same "30s rule" + plays-desc / last-played-tiebreak shape
+// as PlayStatsInWindow — this is a deliberately separate signature so the
+// existing PlayStatsInWindow callers (Heavy Rotation / Familiar / Forgotten)
+// aren't widened to take an iface filter. Read path — no s.mu.
+func (s *Store) PlayStatsByInterfaceInWindow(ctx context.Context, sinceNS int64, ifaceType string, minDuration float64, limit int) ([]PlayStatRow, error) {
+	limit = clampLimit(limit, 100, 5000)
+	q := `
+		SELECT path, COUNT(*) AS n, MAX(started_at) AS last, MIN(started_at) AS first
+		  FROM playback_history
+		 WHERE duration_used >= ? AND started_at >= ? AND iface_type = ?
+		 GROUP BY path ORDER BY n DESC, last DESC LIMIT ?`
+	return s.scanPlayStats(ctx, q, minDuration, sinceNS, ifaceType, limit)
+}
+
+// OnRepeatCandidates returns track paths whose per-day repeat behaviour
+// suggests sustained obsession — for the "On Repeat" family. A track qualifies
+// when, in [sinceNS, now), it has:
+//   - at least `minTotalPlays` total qualifying plays (sum across all
+//     device-day buckets), AND
+//   - at least `minRepeatDays` distinct device-day buckets in which the path
+//     was played ≥ 2 times.
+//
+// The query is TWO-LEVEL because a single GROUP BY (path, device_token) with
+// HAVING ≥ 2 plays-per-day is structurally impossible — HAVING would evaluate
+// the total count, not the per-day count. The inner CTE groups by
+// (path, device_token, daily_date) to isolate daily counts; the outer
+// aggregation sums totals and counts daily buckets that crossed the threshold,
+// then collapses to one row per path (summing across the user's paired
+// devices). Returns PlayStatRow with Plays = total qualifying plays,
+// LastPlayed = max day_last_played, FirstPlayed = min day_first_played.
+// Read path — no s.mu.
+func (s *Store) OnRepeatCandidates(ctx context.Context, sinceNS int64, minDuration float64, minTotalPlays, minRepeatDays, limit int) ([]PlayStatRow, error) {
+	limit = clampLimit(limit, 100, 5000)
+	if minTotalPlays < 1 {
+		minTotalPlays = 1
+	}
+	if minRepeatDays < 1 {
+		minRepeatDays = 1
+	}
+	q := `
+		WITH daily_plays AS (
+			SELECT path,
+			       device_token,
+			       date(started_at / 1000000000, 'unixepoch') AS day,
+			       COUNT(*)            AS plays_that_day,
+			       MAX(started_at)     AS day_last_played,
+			       MIN(started_at)     AS day_first_played
+			  FROM playback_history
+			 WHERE duration_used >= ? AND started_at >= ?
+			 GROUP BY path, device_token, day
+		),
+		per_path AS (
+			SELECT path,
+			       SUM(plays_that_day)                                AS total_plays,
+			       SUM(CASE WHEN plays_that_day >= 2 THEN 1 ELSE 0 END) AS repeat_days,
+			       MAX(day_last_played)                               AS last_played,
+			       MIN(day_first_played)                              AS first_played
+			  FROM daily_plays
+			 GROUP BY path
+		)
+		SELECT path, total_plays, last_played, first_played
+		  FROM per_path
+		 WHERE total_plays >= ? AND repeat_days >= ?
+		 ORDER BY total_plays DESC, repeat_days DESC, last_played DESC
+		 LIMIT ?`
+	return s.scanPlayStats(ctx, q, minDuration, sinceNS, minTotalPlays, minRepeatDays, limit)
+}
+
+// LovedArtistDeepCuts returns library tracks by "loved" artists (≥ lovedMinPlays
+// qualifying plays in [lovedSinceNS, now)) that have NO qualifying play in
+// [deepCutCutoffNS, now) — for the "From Artists You Love" family. Per-artist
+// cap is enforced in SQL via a window function (`ROW_NUMBER() OVER (PARTITION
+// BY artist ORDER BY t.path)`), not by a Go-side scan, so a single high-volume
+// catalog can't dominate the list.
+//
+// The returned rows are unplayed-or-stale tracks; Plays/LastPlayed/FirstPlayed
+// carry placeholder values (the engine shuffles deterministically by week and
+// doesn't read those fields for this family). Path is the sole load-bearing
+// column. Read path — no s.mu.
+func (s *Store) LovedArtistDeepCuts(ctx context.Context, lovedSinceNS int64, lovedMinPlays int, deepCutCutoffNS int64, minDuration float64, perArtistCap, limit int) ([]PlayStatRow, error) {
+	limit = clampLimit(limit, 100, 5000)
+	if perArtistCap < 1 {
+		perArtistCap = 3
+	}
+	if lovedMinPlays < 1 {
+		lovedMinPlays = 3
+	}
+	q := `
+		WITH loved_artists AS (
+			SELECT COALESCE(json_extract(t.tags_json, '$.artist'), '') AS artist,
+			       COUNT(*) AS plays_in_window
+			  FROM playback_history ph
+			  JOIN tracks t ON t.path = ph.path
+			 WHERE ph.duration_used >= ?
+			   AND ph.started_at  >= ?
+			   AND COALESCE(json_extract(t.tags_json, '$.artist'), '') != ''
+			 GROUP BY artist
+			HAVING plays_in_window >= ?
+		),
+		recently_played AS (
+			SELECT DISTINCT path
+			  FROM playback_history
+			 WHERE duration_used >= ?
+			   AND started_at  >= ?
+		),
+		eligible AS (
+			SELECT t.path,
+			       COALESCE(json_extract(t.tags_json, '$.artist'), '') AS artist,
+			       ROW_NUMBER() OVER (
+			         PARTITION BY COALESCE(json_extract(t.tags_json, '$.artist'), '')
+			         ORDER BY t.path
+			       ) AS rn
+			  FROM tracks t
+			  JOIN loved_artists la
+			    ON la.artist = COALESCE(json_extract(t.tags_json, '$.artist'), '')
+			 WHERE t.path NOT IN (SELECT path FROM recently_played)
+		)
+		SELECT path, 1 AS plays, 0 AS last_played, 0 AS first_played
+		  FROM eligible
+		 WHERE rn <= ?
+		 ORDER BY artist ASC, rn ASC
+		 LIMIT ?`
+	return s.scanPlayStats(ctx, q,
+		minDuration, lovedSinceNS, lovedMinPlays,
+		minDuration, deepCutCutoffNS,
+		perArtistCap, limit)
+}
+
+// QuietSlowTrackFeatures returns the candidate pool for the "Wind Down" mood
+// band: tracks whose EFFECTIVE BPM (curated tag wins over analysis) is ≤
+// bpmMax AND whose EFFECTIVE ReplayGain is > loudnessMin (less-negative
+// ReplayGain = quieter master at -18 LUFS). NULL on either field excludes the
+// track.
+//
+// IMPORTANT — NO restrictive caller `limit`. The engine performs a
+// deterministic weekly shuffle over the WHOLE matching cohort and then caps
+// the result; if SQL returned only the first N rows by physical scan order,
+// tracks past position N would be permanently invisible to the band's
+// rotation. A safety-rail LIMIT (`smartPlaylistPoolSafetyLimit`) bounds the
+// pool against pathological libraries. Read path — no s.mu.
+func (s *Store) QuietSlowTrackFeatures(ctx context.Context, bpmMax int, loudnessMin float64) ([]TrackFeatureRow, error) {
+	q := trackFeatureSelect + `
+		 WHERE COALESCE(json_extract(t.tags_json, '$.bpm'),                ta.bpm)                 IS NOT NULL
+		   AND COALESCE(json_extract(t.tags_json, '$.bpm'),                ta.bpm)                 <= ?
+		   AND COALESCE(json_extract(t.tags_json, '$.replayGainTrackDB'),  ta.replaygain_track_db) IS NOT NULL
+		   AND COALESCE(json_extract(t.tags_json, '$.replayGainTrackDB'),  ta.replaygain_track_db) > ?
+		 ORDER BY t.path ASC
+		 LIMIT ?`
+	rows, err := s.db.QueryContext(ctx, q, bpmMax, loudnessMin, smartPlaylistPoolSafetyLimit)
+	if err != nil {
+		return nil, err
+	}
+	return scanTrackFeatures(rows)
+}
+
+// LoudFastTrackFeatures is the symmetric pool for the "Lift Off" mood band:
+// EFFECTIVE BPM ≥ bpmMin AND EFFECTIVE ReplayGain ≤ loudnessMax (more-negative
+// = louder master). Same NULL handling + safety-limit rationale as
+// QuietSlowTrackFeatures. Read path — no s.mu.
+func (s *Store) LoudFastTrackFeatures(ctx context.Context, bpmMin int, loudnessMax float64) ([]TrackFeatureRow, error) {
+	q := trackFeatureSelect + `
+		 WHERE COALESCE(json_extract(t.tags_json, '$.bpm'),                ta.bpm)                 IS NOT NULL
+		   AND COALESCE(json_extract(t.tags_json, '$.bpm'),                ta.bpm)                 >= ?
+		   AND COALESCE(json_extract(t.tags_json, '$.replayGainTrackDB'),  ta.replaygain_track_db) IS NOT NULL
+		   AND COALESCE(json_extract(t.tags_json, '$.replayGainTrackDB'),  ta.replaygain_track_db) <= ?
+		 ORDER BY t.path ASC
+		 LIMIT ?`
+	rows, err := s.db.QueryContext(ctx, q, bpmMin, loudnessMax, smartPlaylistPoolSafetyLimit)
+	if err != nil {
+		return nil, err
+	}
+	return scanTrackFeatures(rows)
+}
+
+// smartPlaylistPoolSafetyLimit guards mood-band selectors against a
+// pathological library size. Current realistic libraries are well below;
+// pools larger than this are silently truncated (the safety-rail tradeoff).
+const smartPlaylistPoolSafetyLimit = 50_000
+
 // AnalyzedTrackFeatures returns the candidate pool for harmonic sequencing +
 // Daily Mix discovery: tracks WITH an estimated key (key_root NOT NULL).
 // Optional exact genre filter. Ordered by path (deterministic, so the daily
