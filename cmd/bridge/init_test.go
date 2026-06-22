@@ -116,6 +116,95 @@ func TestInitYesWithoutLibrary(t *testing.T) {
 	}
 }
 
+func TestResolveLibraryDir(t *testing.T) {
+	dir := t.TempDir()
+	if got, err := resolveLibraryDir(dir); err != nil || got != dir {
+		t.Errorf("valid dir: got (%q, %v), want (%q, nil)", got, err, dir)
+	}
+	if _, err := resolveLibraryDir(filepath.Join(dir, "missing")); err == nil {
+		t.Errorf("nonexistent path should error")
+	}
+	file := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveLibraryDir(file); err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Errorf("file-as-library should error 'not a directory', got %v", err)
+	}
+}
+
+// TestPromptLibraryDirReprompts is the core of the lightweight init UX fix:
+// an invalid path re-prompts (with a reason) instead of aborting, and a
+// subsequent valid path is accepted.
+func TestPromptLibraryDirReprompts(t *testing.T) {
+	dir := t.TempDir()
+	// Derive the invalid path from a temp dir so the "missing" branch is
+	// guaranteed in every environment (not reliant on /no/such/path).
+	missing := filepath.Join(t.TempDir(), "missing")
+	in := bufio.NewReader(strings.NewReader(missing + "\n" + dir + "\n"))
+	var stdout, stderr bytes.Buffer
+	abs, code := promptLibraryDir(in, &stdout, &stderr)
+	if code != 0 || abs != dir {
+		t.Fatalf("got (%q, %d), want (%q, 0)", abs, code, dir)
+	}
+	if !strings.Contains(stderr.String(), "✗") {
+		t.Errorf("stderr should show the re-prompt reason marker, got %q", stderr.String())
+	}
+	// The prompt should have been printed at least twice (initial + re-prompt).
+	if n := strings.Count(stdout.String(), "Library folder"); n < 2 {
+		t.Errorf("expected >=2 prompts, got %d in %q", n, stdout.String())
+	}
+}
+
+func TestPromptLibraryDirEmptyAndEOF(t *testing.T) {
+	// Empty Enter → "library path is required", exit 2.
+	in := bufio.NewReader(strings.NewReader("\n"))
+	var out, errb bytes.Buffer
+	if abs, code := promptLibraryDir(in, &out, &errb); code != 2 || abs != "" {
+		t.Errorf("empty line: got (%q, %d), want (\"\", 2)", abs, code)
+	}
+	if !strings.Contains(errb.String(), "required") {
+		t.Errorf("empty line stderr: %q", errb.String())
+	}
+
+	// Closed stdin (Ctrl+D) with no input → "input closed", exit 2, and it
+	// must NOT spin through the retry cap.
+	in = bufio.NewReader(strings.NewReader(""))
+	out.Reset()
+	errb.Reset()
+	if abs, code := promptLibraryDir(in, &out, &errb); code != 2 || abs != "" {
+		t.Errorf("EOF: got (%q, %d), want (\"\", 2)", abs, code)
+	}
+	if !strings.Contains(errb.String(), "input closed") {
+		t.Errorf("EOF stderr: %q", errb.String())
+	}
+}
+
+// TestPromptLibraryDirEOFWithData covers a valid path typed then Ctrl+D with
+// no trailing newline — ReadString returns the data alongside io.EOF, and
+// the path must still be accepted.
+func TestPromptLibraryDirEOFWithData(t *testing.T) {
+	dir := t.TempDir()
+	in := bufio.NewReader(strings.NewReader(dir)) // no trailing newline
+	var out, errb bytes.Buffer
+	if abs, code := promptLibraryDir(in, &out, &errb); code != 0 || abs != dir {
+		t.Errorf("EOF-with-valid-data: got (%q, %d), want (%q, 0)", abs, code, dir)
+	}
+}
+
+func TestPromptLibraryDirExhaustion(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing")
+	in := bufio.NewReader(strings.NewReader(strings.Repeat(missing+"\n", maxLibraryPrompts)))
+	var out, errb bytes.Buffer
+	abs, code := promptLibraryDir(in, &out, &errb)
+	if code != 2 || abs != "" {
+		t.Errorf("exhaustion: got (%q, %d), want (\"\", 2)", abs, code)
+	}
+	if !strings.Contains(errb.String(), "Too many invalid attempts") {
+		t.Errorf("exhaustion stderr: %q", errb.String())
+	}
+}
+
 func TestInitRespectsTildeExpansion(t *testing.T) {
 	// We can't easily plant a real library under $HOME in a test, but
 	// the expansion itself is pure — verify the helper.
