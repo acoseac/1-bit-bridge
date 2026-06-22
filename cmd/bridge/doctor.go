@@ -209,6 +209,8 @@ func buildDoctorDeps(cfgPath string) doctor.Deps {
 			d.DataDir = cfg.DataDir
 			d.LibraryRoots = cfg.LibraryRoots
 			d.LibraryWatchEnabled = cfg.LibraryWatch.Enabled
+			d.UpscaleEnabled = cfg.Upscale.Enabled
+			d.AnalysisEnabled = cfg.Analysis.Enabled
 			if host, port, ok := splitHostPort(cfg.ListenAddress); ok {
 				_ = host
 				d.APIPort = port

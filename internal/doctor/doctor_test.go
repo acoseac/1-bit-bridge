@@ -197,6 +197,40 @@ func TestLibraryRootsCheck_SkipsWhenEmpty(t *testing.T) {
 	}
 }
 
+// TestCheckAudioToolchain_NotEnabled pins the no-nag contract: with neither
+// upscale nor analysis enabled (the default + every `bridge init` preflight),
+// the check is a quiet OK and never probes for sox. This is the load-bearing
+// guarantee that a minimal install isn't told to install an optional dep.
+func TestCheckAudioToolchain_NotEnabled(t *testing.T) {
+	c := checkAudioToolchain(Deps{})
+	if c.Status != OK {
+		t.Errorf("disabled features should be ok, got %v: %s", c.Status, c.Summary)
+	}
+	if c.Name != checkNameAudioToolchain {
+		t.Errorf("name = %q, want %q", c.Name, checkNameAudioToolchain)
+	}
+	if !strings.Contains(c.Summary, "not enabled") {
+		t.Errorf("summary should say not enabled, got %q", c.Summary)
+	}
+}
+
+// TestCheckAudioToolchain_EnabledReflectsHostSox is tolerant of the host: it
+// only asserts that enabling a feature flips the check away from the
+// "not enabled" no-op into a real verdict against the host's sox. The
+// parse/probe logic itself is pinned deterministically in
+// internal/transcode (probe_sox_test.go).
+func TestCheckAudioToolchain_EnabledReflectsHostSox(t *testing.T) {
+	c := checkAudioToolchain(Deps{UpscaleEnabled: true})
+	if strings.Contains(c.Summary, "not enabled") {
+		t.Errorf("enabled feature must produce a real verdict, got no-op: %q", c.Summary)
+	}
+	if _, err := exec.LookPath("sox"); err != nil {
+		if c.Status != Fail || !strings.Contains(c.Summary, "not found") {
+			t.Errorf("no sox on PATH: want fail/'not found', got %v: %s", c.Status, c.Summary)
+		}
+	}
+}
+
 // TestRun_FullReportShape exercises the whole pipeline and asserts the
 // report carries one entry per check with the right names.
 func TestRun_FullReportShape(t *testing.T) {
@@ -217,7 +251,7 @@ func TestRun_FullReportShape(t *testing.T) {
 		"platform", "config-dir", "tls-cert",
 		"port-api", "port-admin",
 		"library-roots", "service-manager", "browser-opener",
-		"inotify-watch-limit",
+		"inotify-watch-limit", "audio-toolchain",
 	}
 	if len(r.Checks) != len(wantNames) {
 		t.Fatalf("check count: got %d, want %d", len(r.Checks), len(wantNames))

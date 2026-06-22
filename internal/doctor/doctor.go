@@ -8,6 +8,7 @@
 package doctor
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -19,6 +20,7 @@ import (
 	"strings"
 
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
+	"github.com/acoseac/1-bit-bridge/internal/transcode"
 )
 
 // Status is the outcome of a single check.
@@ -40,6 +42,7 @@ const (
 	checkNameTLSCert        = "tls-cert"
 	checkNameLibraryRoots   = "library-roots"
 	checkNameServiceManager = "service-manager"
+	checkNameAudioToolchain = "audio-toolchain"
 )
 
 // Check is one line of the doctor report.
@@ -78,6 +81,13 @@ type Deps struct {
 	// budget would be exhausted by the configured roots before
 	// the bridge tries to register watches at runtime.
 	LibraryWatchEnabled bool
+	// UpscaleEnabled / AnalysisEnabled mirror cfg.Upscale.Enabled /
+	// cfg.Analysis.Enabled. When either is true, checkAudioToolchain
+	// verifies sox is present AND its build has FLAC support (the
+	// bridge forces `-t flac`, so a FLAC-less sox would fail every
+	// job at runtime). Both false → the check is a no-op "not enabled".
+	UpscaleEnabled  bool
+	AnalysisEnabled bool
 }
 
 // Report is the collection of checks from a single doctor run.
@@ -117,6 +127,7 @@ func Run(d Deps) Report {
 		checkServiceManager,
 		checkBrowserOpener,
 		checkInotifyLimit,
+		checkAudioToolchain,
 	}
 	out := make([]Check, 0, len(checks))
 	for _, fn := range checks {
@@ -340,6 +351,41 @@ func checkBrowserOpener(d Deps) Check {
 	}
 	return warn("browser-opener", "no opener found",
 		"install missing; bridge will still print the admin URL for you to paste manually")
+}
+
+// checkAudioToolchain verifies the sox dependency for the offline-decode
+// features (upscaling / audio analysis). It is a no-op "not enabled" when
+// neither feature is on — doctor must not nag about an optional dependency
+// a minimal install never uses (and `bridge init` preflight, which doesn't
+// set the flags, always sees "not enabled").
+//
+// When a feature IS enabled it checks more than presence: the bridge forces
+// `-t flac` for every conversion, so a sox built WITHOUT FLAC passes the
+// bare runnable check but fails every job at runtime — a silent,
+// hard-to-diagnose failure. ProbeSox's FormatsKnown lets us stay
+// conservative: a confirmed FLAC-absence fails the check; an unparseable
+// `sox --help` is treated as "FLAC present" rather than crying wolf.
+func checkAudioToolchain(d Deps) Check {
+	if !d.UpscaleEnabled && !d.AnalysisEnabled {
+		return ok(checkNameAudioToolchain, "not enabled (sox not required)")
+	}
+	info, err := transcode.ProbeSox(context.Background())
+	if err != nil {
+		if errors.Is(err, transcode.ErrSoxMissing) {
+			return fail(checkNameAudioToolchain, "sox not found",
+				"upscaling/analysis is enabled but sox isn't on PATH; install it (e.g. `brew install sox`, `sudo apt install sox`) or disable the feature in bridge.yaml")
+		}
+		return fail(checkNameAudioToolchain, "sox not runnable",
+			"sox is on PATH but failed to run: "+err.Error())
+	}
+	if info.FormatsKnown && !info.HasFLAC {
+		return fail(checkNameAudioToolchain, "sox lacks FLAC support",
+			"the installed sox build can't handle FLAC, which the bridge's internal pipeline requires; Debian/Ubuntu: `sudo apt install libsox-fmt-all`, elsewhere reinstall sox with FLAC")
+	}
+	if info.Version != "" {
+		return ok(checkNameAudioToolchain, fmt.Sprintf("sox %s, FLAC supported", info.Version))
+	}
+	return ok(checkNameAudioToolchain, "sox present, FLAC supported")
 }
 
 // --- helpers ---

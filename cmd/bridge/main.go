@@ -963,6 +963,49 @@ func (a *analysisStatsAdapter) cachedSoxOK() bool {
 	return a.soxOK
 }
 
+// soxToolchainCache memoizes one transcode.ProbeSox result for adminSoxTTL
+// so the admin Settings page (which probes sox on every load) doesn't
+// fork-exec sox per request. Both the availability closure (precheck, the
+// admin.Deps.UpscalePrecheck contract) and the FLAC closure
+// (admin.Deps.UpscaleSoxFLAC) read the SAME snapshot, so wiring both costs
+// at most one probe per TTL window.
+type soxToolchainCache struct {
+	mu   sync.Mutex
+	at   time.Time
+	info transcode.SoxInfo
+	err  error
+}
+
+const adminSoxTTL = 30 * time.Second
+
+func (c *soxToolchainCache) snapshot() (transcode.SoxInfo, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.at.IsZero() && time.Since(c.at) < adminSoxTTL {
+		return c.info, c.err
+	}
+	c.info, c.err = transcode.ProbeSox(context.Background())
+	c.at = time.Now()
+	return c.info, c.err
+}
+
+// precheck satisfies admin.Deps.UpscalePrecheck (nil == sox runnable).
+func (c *soxToolchainCache) precheck() error {
+	_, err := c.snapshot()
+	return err
+}
+
+// flac satisfies admin.Deps.UpscaleSoxFLAC. known is false when the probe
+// errored or `sox --help` couldn't be parsed — the admin then omits the
+// FLAC field rather than asserting a guess.
+func (c *soxToolchainCache) flac() (hasFLAC, known bool) {
+	info, err := c.snapshot()
+	if err != nil {
+		return false, false
+	}
+	return info.HasFLAC, info.FormatsKnown
+}
+
 // updateInfoAdapter bridges *updater.Updater to api.UpdaterStatus +
 // admin's read-side without coupling those packages to the updater
 // type. Trivial; lives here at the wiring point so the api / admin
@@ -1806,11 +1849,8 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// iOS sees `upscaleEnabled: false` on /v1/health in either
 	// disabled case.
 	upscaleActive := cfg.Upscale.Enabled
-	if upscaleActive {
-		if err := transcode.PrecheckSox(); err != nil {
-			fmt.Fprintf(stderr, "upscale: feature is enabled in bridge.yaml but sox is not available — disabling: %v\n", err)
-			upscaleActive = false
-		}
+	if upscaleActive && !soxFeatureReady("upscale", stderr) {
+		upscaleActive = false
 	}
 	provider.SetUpscaleEnabled(upscaleActive)
 
@@ -1820,11 +1860,8 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// generation is CLI-driven (`bridge analyze`); serve only advertises
 	// the `waveform` flag + serves /v1/waveform from cached sidecars.
 	analysisActive := cfg.Analysis.Enabled
-	if analysisActive {
-		if err := transcode.PrecheckSox(); err != nil {
-			fmt.Fprintf(stderr, "analysis: feature is enabled in bridge.yaml but sox is not available — disabling: %v\n", err)
-			analysisActive = false
-		}
+	if analysisActive && !soxFeatureReady("analysis", stderr) {
+		analysisActive = false
 	}
 
 	// Smart playlists read precomputed analysis + history (no decode), so
@@ -2469,6 +2506,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		}
 	}
 
+	// One TTL-cached sox probe shared by the admin's availability +
+	// FLAC closures so the Settings page does at most one fork-exec of
+	// sox per 30 s window regardless of how many tiles read it.
+	soxCache := &soxToolchainCache{}
+
 	adminSrv, err := admin.New(admin.Deps{
 		CfgHolder:   cfgHolder,
 		CfgPath:     absCfgPath,
@@ -2503,7 +2545,8 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		Tailscale:       tailscaleAdminSrc,
 		Pairing:         pairingStore,
 		IsSupervised:    supervision.IsSupervised(),
-		UpscalePrecheck: transcode.PrecheckSox,
+		UpscalePrecheck: soxCache.precheck,
+		UpscaleSoxFLAC:  soxCache.flac,
 		// Live runtime state of audio analysis (startup-computed gate),
 		// so the admin tile's `enabled` matches /v1/health's `waveform`
 		// flag rather than the persisted config flag.

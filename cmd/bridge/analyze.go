@@ -53,13 +53,19 @@ func analyzeCmd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	}
 	// sox is only needed to actually decode; --gc is a pure DB+FS sweep.
 	if !*gc {
-		if err := transcode.PrecheckSox(); err != nil {
+		info, err := transcode.ProbeSox(context.Background())
+		if err != nil {
 			if errors.Is(err, transcode.ErrSoxMissing) {
 				fmt.Fprintf(stderr, "%v\n\nInstall sox:\n", err)
 				printSoxInstallHint(stderr)
 			} else {
 				fmt.Fprintf(stderr, "sox precheck: %v\n", err)
 			}
+			return 1
+		}
+		if info.FormatsKnown && !info.HasFLAC {
+			fmt.Fprintf(stderr, "sox is installed but its build lacks FLAC support, which audio analysis needs to decode tracks.\n\nFix:\n")
+			printSoxFormatHint(stderr)
 			return 1
 		}
 	}

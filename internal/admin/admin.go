@@ -149,6 +149,18 @@ type Deps struct {
 	// field and the UI hides the warning banner.
 	UpscalePrecheck func() error
 
+	// UpscaleSoxFLAC reports whether the host sox build has FLAC
+	// support (hasFLAC) and whether that could be determined at all
+	// (known). The bridge forces `-t flac` for every conversion, so a
+	// sox WITHOUT FLAC passes UpscalePrecheck but fails every job at
+	// runtime — this lets the Settings tile warn about that narrower
+	// case. Wired to a transcode.ProbeSox closure in cmd/bridge/main.go
+	// (same decoupling as UpscalePrecheck). Nil-safe: absent → the
+	// FLAC field is omitted and no FLAC warning renders. known=false
+	// (closure absent, or `sox --help` unparseable) is treated
+	// conservatively as "don't assert" rather than "FLAC missing".
+	UpscaleSoxFLAC func() (hasFLAC, known bool)
+
 	// UpscaleStats returns a snapshot of the long-lived
 	// transcode pool's counters (workers, queue length, in-
 	// flight jobs, lifetime totals). Wired via a closure in
