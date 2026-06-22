@@ -17,6 +17,26 @@
     </p>
   </div>
   {{else}}
+  {{/* Harmonic-coverage Camelot wheel. Painted by app.js
+       initCamelotWheel from the embedded key-coverage JSON (key data
+       only changes after analysis runs → one-shot first-paint render, no
+       SSE). Hover highlights a key's harmonic neighbours. */}}
+  <div class="panel" id="harmonic-coverage-panel">
+    <div class="panel-head"><h2>Harmonic coverage</h2></div>
+    <p class="muted">
+      Where your analyzed library sits on the Camelot wheel — brighter
+      segments hold more tracks. Hover a key to highlight its harmonic
+      neighbours (the relative, adjacent, and energy moves Auto&nbsp;Mix
+      prefers when sequencing).
+    </p>
+    <div class="camelot-wrap">
+      <div class="camelot-wheel" id="camelot-wheel" role="img"
+           aria-label="Camelot wheel — analyzed-track key distribution"></div>
+      <div class="camelot-readout" id="camelot-readout" aria-live="polite"></div>
+    </div>
+    <script type="application/json" id="key-coverage-data">{{json .Data.KeyCoverage}}</script>
+  </div>
+
   <div class="panel">
     <div class="panel-head">
       <h2>Generated families</h2>

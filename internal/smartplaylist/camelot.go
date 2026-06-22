@@ -23,10 +23,12 @@ type Camelot struct {
 var camelotMajor = [12]int{8, 3, 10, 5, 12, 7, 2, 9, 4, 11, 6, 1}
 var camelotMinor = [12]int{5, 12, 7, 2, 9, 4, 11, 6, 1, 8, 3, 10}
 
-// toCamelot resolves a (keyRoot, mode) into a wheel position. ok=false for an
+// ToCamelot resolves a (keyRoot, mode) into a wheel position. ok=false for an
 // out-of-range root or an unrecognised mode (the track can't be sequenced
-// harmonically and is dropped from the Auto Mix pool).
-func toCamelot(keyRoot int, mode string) (Camelot, bool) {
+// harmonically and is dropped from the Auto Mix pool). Exported so the admin
+// console's harmonic-coverage wheel maps the same (root, mode) → wheel code
+// the sequencer uses — single source of truth.
+func ToCamelot(keyRoot int, mode string) (Camelot, bool) {
 	if keyRoot < 0 || keyRoot > 11 {
 		return Camelot{}, false
 	}

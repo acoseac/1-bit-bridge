@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"encoding/json"
 	"html/template"
 	"net/http"
 	"path/filepath"
@@ -20,6 +21,17 @@ var tmplFuncs = template.FuncMap{
 	"timeAgo":     timeAgo,
 	"formatTime":  func(t time.Time) string { return t.Format("2006-01-02 15:04:05 MST") },
 	"basename":    filepath.Base,
+	// json embeds a value as a JSON literal inside a <script
+	// type="application/json"> block for client-side hydration. Returns
+	// template.JS so html/template inserts it verbatim; json.Marshal
+	// HTML-escapes <>& so there's no </script> breakout.
+	"json": func(v any) (template.JS, error) {
+		b, err := json.Marshal(v)
+		if err != nil {
+			return "", err
+		}
+		return template.JS(b), nil
+	},
 }
 
 // pageData is the common envelope every template receives. Page-specific

@@ -3,9 +3,11 @@ package admin
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
+	"github.com/acoseac/1-bit-bridge/internal/smartplaylist"
 	"github.com/acoseac/1-bit-bridge/internal/smartplaylistgen"
 )
 
@@ -110,6 +112,20 @@ type smartMixFamilyView struct {
 type smartMixPageData struct {
 	Enabled  bool
 	Families []smartMixFamilyView
+	// KeyCoverage maps each Camelot wheel code ("8A" / "11B") to the
+	// number of analyzed tracks in that key — the harmonic-coverage wheel.
+	// Empty when analysis hasn't run or the query failed.
+	KeyCoverage map[string]int
+}
+
+// camelotCode renders a Camelot wheel position as its canonical code,
+// e.g. {Num:8, Minor:true} → "8A", {Num:11, Minor:false} → "11B".
+func camelotCode(c smartplaylist.Camelot) string {
+	letter := "B"
+	if c.Minor {
+		letter = "A"
+	}
+	return strconv.Itoa(c.Num) + letter
 }
 
 // pageSmartMixes renders the cached smart-playlist families (slug / kind /
@@ -151,7 +167,22 @@ func (s *Server) pageSmartMixes(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	}
-	s.renderPage(w, "smartmixes", smartMixPageData{Enabled: enabled, Families: fams})
+	// Harmonic coverage for the Camelot wheel — count analyzed tracks per
+	// wheel code, reusing smartplaylist.ToCamelot (the sequencer's own
+	// mapping, single source of truth). Best-effort: a query error leaves
+	// the wheel empty rather than failing the page.
+	keyCoverage := map[string]int{}
+	if kd, kdErr := s.deps.Manifest.KeyDistribution(r.Context()); kdErr != nil {
+		logger.Warn("pageSmartMixes: key distribution", "err", kdErr)
+	} else {
+		for _, kc := range kd {
+			if c, ok := smartplaylist.ToCamelot(kc.KeyRoot, kc.KeyMode); ok {
+				keyCoverage[camelotCode(c)] += kc.Count
+			}
+		}
+	}
+
+	s.renderPage(w, "smartmixes", smartMixPageData{Enabled: enabled, Families: fams, KeyCoverage: keyCoverage})
 }
 
 // smartMixTracksForView decodes a cached row into display rows. The

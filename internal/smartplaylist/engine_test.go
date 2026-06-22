@@ -40,9 +40,9 @@ func TestToCamelot(t *testing.T) {
 		{0, "", Camelot{}, false},              // unknown mode
 	}
 	for _, c := range cases {
-		got, ok := toCamelot(c.root, c.mode)
+		got, ok := ToCamelot(c.root, c.mode)
 		if ok != c.ok || (ok && got != c.want) {
-			t.Errorf("toCamelot(%d,%q) = %v,%v want %v,%v", c.root, c.mode, got, ok, c.want, c.ok)
+			t.Errorf("ToCamelot(%d,%q) = %v,%v want %v,%v", c.root, c.mode, got, ok, c.want, c.ok)
 		}
 	}
 }

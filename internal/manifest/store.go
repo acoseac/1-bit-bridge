@@ -4451,6 +4451,44 @@ func (s *Store) FormatDistribution(ctx context.Context) ([]FormatGroup, error) {
 	return out, rows.Err()
 }
 
+// KeyCount is one (key_root, key_mode) group from KeyDistribution: the
+// number of analyzed tracks in that musical key. key_root is 0..11 (C=0);
+// key_mode is "major" / "minor".
+type KeyCount struct {
+	KeyRoot int
+	KeyMode string
+	Count   int
+}
+
+// KeyDistribution returns the count of analyzed tracks per musical key,
+// grouped by (key_root, key_mode). Only rows WITH an estimated key are
+// counted (key_root / key_mode NOT NULL) — tracks the analyzer couldn't
+// key are excluded. Naturally local-only: track_analysis holds only
+// locally analyzed files (UPnP-routed remote tracks are never analyzed).
+// Cheap GROUP BY on real columns (no json_extract); the admin Camelot
+// wheel maps each (root, mode) to a wheel code. Read-only, no s.mu.
+func (s *Store) KeyDistribution(ctx context.Context) ([]KeyCount, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT key_root, key_mode, COUNT(*) AS n
+		  FROM track_analysis
+		 WHERE key_root IS NOT NULL AND key_mode IS NOT NULL AND key_mode <> ''
+		 GROUP BY key_root, key_mode
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("key distribution: %w", err)
+	}
+	defer rows.Close()
+	out := []KeyCount{}
+	for rows.Next() {
+		var k KeyCount
+		if err := rows.Scan(&k.KeyRoot, &k.KeyMode, &k.Count); err != nil {
+			return nil, err
+		}
+		out = append(out, k)
+	}
+	return out, rows.Err()
+}
+
 // TrackProjection carries the per-track fields the operator pre-
 // flight (apiLibraryBrowseProjection) needs to call ProjectedSize.
 // Slim shape so listing every track under a path doesn't pay the

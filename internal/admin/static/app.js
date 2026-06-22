@@ -5332,7 +5332,148 @@ function readFileAsDataURL(file) {
 
 // Smart mixes page: wire the "Regenerate now" button + per-family custom-cover
 // upload/remove controls, reloading so the freshly-rendered state shows.
+// =============================================================
+// Camelot wheel — harmonic key-coverage (Smart Mixes page)
+// =============================================================
+
+const CAMELOT_NS = "http://www.w3.org/2000/svg";
+
+// initCamelotWheel builds the 24-segment Camelot wheel from the embedded
+// key-coverage JSON: inner ring = minor (A), outer ring = major (B), 1 at
+// 12 o'clock going clockwise. Segments shade by track count; hovering a
+// key highlights its harmonic neighbours. No-op off the Smart Mixes page
+// (or when the feature is disabled — the container isn't rendered).
+function initCamelotWheel() {
+  const host = document.getElementById("camelot-wheel");
+  const dataEl = document.getElementById("key-coverage-data");
+  if (!host || !dataEl) return;
+  let coverage = {};
+  try {
+    coverage = JSON.parse(dataEl.textContent) || {};
+  } catch {
+    coverage = {};
+  }
+
+  const cx = 200, cy = 200;
+  const rings = {
+    A: { rInner: 62, rOuter: 116, hue: 174 }, // minor (inner) — teal
+    B: { rInner: 120, rOuter: 182, hue: 255 }, // major (outer) — indigo
+  };
+  let maxCount = 0;
+  for (const n of Object.values(coverage)) if (n > maxCount) maxCount = n;
+
+  const svg = document.createElementNS(CAMELOT_NS, "svg");
+  svg.setAttribute("viewBox", "0 0 400 400"); // responsive — no fixed px
+  svg.setAttribute("class", "camelot-svg");
+
+  const segByCode = new Map();
+  for (let num = 1; num <= 12; num++) {
+    const centerDeg = -90 + (num - 1) * 30; // 1 at top, clockwise
+    const a0 = centerDeg - 15, a1 = centerDeg + 15;
+    for (const letter of ["B", "A"]) {
+      const ring = rings[letter];
+      const code = `${num}${letter}`;
+      const count = coverage[code] || 0;
+      const intensity = maxCount > 0 ? count / maxCount : 0;
+
+      const seg = document.createElementNS(CAMELOT_NS, "path");
+      seg.setAttribute("d", camelotWedge(cx, cy, ring.rInner, ring.rOuter, a0, a1));
+      seg.setAttribute("class", count > 0 ? "camelot-seg" : "camelot-seg empty");
+      seg.style.fill = `hsl(${ring.hue} 60% 55%)`;
+      seg.style.fillOpacity = count > 0 ? (0.18 + 0.82 * intensity).toFixed(3) : "0.06";
+      seg.dataset.code = code;
+      const title = document.createElementNS(CAMELOT_NS, "title");
+      title.textContent = `${code} — ${count} track${count === 1 ? "" : "s"}`;
+      seg.appendChild(title);
+      seg.addEventListener("mouseenter", () => highlightCamelot(code, segByCode, coverage));
+      seg.addEventListener("mouseleave", () => clearCamelot(segByCode));
+      svg.appendChild(seg);
+      segByCode.set(code, seg);
+
+      const midR = (ring.rInner + ring.rOuter) / 2;
+      const [lx, ly] = camelotPolar(cx, cy, midR, centerDeg);
+      const label = document.createElementNS(CAMELOT_NS, "text");
+      label.setAttribute("x", lx.toFixed(1));
+      label.setAttribute("y", ly.toFixed(1));
+      label.setAttribute("class", "camelot-label");
+      label.textContent = code;
+      svg.appendChild(label);
+    }
+  }
+  host.textContent = "";
+  host.appendChild(svg);
+
+  const total = Object.values(coverage).reduce((a, b) => a + b, 0);
+  const readout = document.getElementById("camelot-readout");
+  if (readout) {
+    const summary = total > 0
+      ? `${total} analysed track${total === 1 ? "" : "s"} keyed across ${Object.keys(coverage).length} of 24 wheel positions. Hover a key for its harmonic neighbours.`
+      : "No analysed keys yet — enable Audio analysis and run it to populate the wheel.";
+    readout.dataset.summary = summary;
+    readout.textContent = summary;
+  }
+}
+
+// camelotCompatible returns the harmonically-compatible codes for a wheel
+// code: relative (same number, opposite letter) + adjacent (±1, same
+// letter). The ±1 uses a SAFE cyclic wrap because JS `%` is remainder,
+// not modulo — a bare (n-1)%12 underflows at the 12↔1 seam.
+function camelotCompatible(code) {
+  const m = /^(\d+)([AB])$/.exec(code);
+  if (!m) return [];
+  const n = parseInt(m[1], 10);
+  const letter = m[2];
+  const other = letter === "A" ? "B" : "A";
+  const prev = ((n - 2 + 12) % 12) + 1; // n-1 with wrap (prev(1)=12)
+  const next = (n % 12) + 1; // n+1 with wrap (next(12)=1)
+  return [`${n}${other}`, `${prev}${letter}`, `${next}${letter}`];
+}
+
+function highlightCamelot(code, segByCode, coverage) {
+  const compat = new Set(camelotCompatible(code));
+  segByCode.forEach((seg, c) => {
+    seg.classList.remove("is-hover", "is-compat", "is-dim");
+    if (c === code) seg.classList.add("is-hover");
+    else if (compat.has(c)) seg.classList.add("is-compat");
+    else seg.classList.add("is-dim");
+  });
+  const readout = document.getElementById("camelot-readout");
+  if (readout) {
+    const cnt = coverage[code] || 0;
+    const compatList = [...compat].map((c) => `${c} (${coverage[c] || 0})`).join(", ");
+    readout.textContent = `${code}: ${cnt} track${cnt === 1 ? "" : "s"} · harmonic neighbours → ${compatList}`;
+  }
+}
+
+function clearCamelot(segByCode) {
+  segByCode.forEach((seg) => seg.classList.remove("is-hover", "is-compat", "is-dim"));
+  const readout = document.getElementById("camelot-readout");
+  if (readout && readout.dataset.summary) readout.textContent = readout.dataset.summary;
+}
+
+function camelotPolar(cx, cy, r, deg) {
+  const rad = (deg * Math.PI) / 180;
+  return [cx + r * Math.cos(rad), cy + r * Math.sin(rad)];
+}
+
+// camelotWedge builds the SVG path for one annular wedge (a ring segment).
+function camelotWedge(cx, cy, rInner, rOuter, a0, a1) {
+  const [ox0, oy0] = camelotPolar(cx, cy, rOuter, a0);
+  const [ox1, oy1] = camelotPolar(cx, cy, rOuter, a1);
+  const [ix1, iy1] = camelotPolar(cx, cy, rInner, a1);
+  const [ix0, iy0] = camelotPolar(cx, cy, rInner, a0);
+  const large = Math.abs(a1 - a0) > 180 ? 1 : 0;
+  return [
+    `M ${ox0.toFixed(2)} ${oy0.toFixed(2)}`,
+    `A ${rOuter} ${rOuter} 0 ${large} 1 ${ox1.toFixed(2)} ${oy1.toFixed(2)}`,
+    `L ${ix1.toFixed(2)} ${iy1.toFixed(2)}`,
+    `A ${rInner} ${rInner} 0 ${large} 0 ${ix0.toFixed(2)} ${iy0.toFixed(2)}`,
+    "Z",
+  ].join(" ");
+}
+
 function initSmartMixes() {
+  initCamelotWheel(); // harmonic-coverage wheel (no-op when feature off)
   const btn = document.getElementById("smartmix-regen");
   if (btn) {
     const status = document.getElementById("smartmix-regen-status");
