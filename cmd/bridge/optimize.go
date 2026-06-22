@@ -52,7 +52,7 @@ func optimizeCmd(ctx context.Context, args []string, stdout, stderr io.Writer) i
 	// Pre-load the config just to read the gate; the rest of the
 	// bootstrap re-loads via the same helper — cheap (single YAML
 	// file decode) and keeps the shared helper signature simple.
-	r, exitCode := bootstrapTranscodeCmd(stderr, *configPath, *quality, *gc)
+	r, exitCode := bootstrapTranscodeCmd(ctx, stderr, *configPath, *quality, *gc)
 	if r == nil {
 		return exitCode
 	}

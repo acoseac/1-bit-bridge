@@ -753,6 +753,13 @@ var (
 // later sections).
 var soxSectionHeaderRE = regexp.MustCompile(`^[A-Z][A-Z0-9 /]*:`)
 
+// soxAudioFileFormatsRE locates the start of the formats block. Matching the
+// ORIGINAL text case-insensitively (rather than strings.ToUpper(text) +
+// Index) avoids a full-output allocation per call AND is byte-accurate: a
+// non-ASCII char before the header whose uppercase form differs in byte
+// length would shift a ToUpper-derived index and corrupt the slice.
+var soxAudioFileFormatsRE = regexp.MustCompile(`(?i)AUDIO FILE FORMATS:`)
+
 // ProbeSox locates sox on PATH and inspects it with a SINGLE `sox --help`
 // spawn — the help output carries both the version banner and the
 // "AUDIO FILE FORMATS:" block, so one process call yields everything. The
@@ -848,14 +855,11 @@ func parseSoxVersion(text string) string {
 // next section's name. Returns (formats, true) when the block is found;
 // (nil, false) otherwise (callers then conservatively assume FLAC present).
 func parseSoxFileFormats(text string) ([]string, bool) {
-	const header = "AUDIO FILE FORMATS:"
-	// ASCII-only header; ToUpper is byte-length-preserving so the index
-	// into the uppercased copy maps 1:1 onto the original.
-	hi := strings.Index(strings.ToUpper(text), header)
-	if hi < 0 {
+	loc := soxAudioFileFormatsRE.FindStringIndex(text)
+	if loc == nil {
 		return nil, false
 	}
-	rest := text[hi+len(header):] // remainder of the header line + everything after
+	rest := text[loc[1]:] // remainder of the header line + everything after
 	var formats []string
 	for _, line := range strings.Split(rest, "\n") {
 		line = strings.TrimRight(line, "\r")

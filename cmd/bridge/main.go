@@ -1849,7 +1849,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// iOS sees `upscaleEnabled: false` on /v1/health in either
 	// disabled case.
 	upscaleActive := cfg.Upscale.Enabled
-	if upscaleActive && !soxFeatureReady("upscale", stderr) {
+	if upscaleActive && !soxFeatureReady(ctx, "upscale", stderr) {
 		upscaleActive = false
 	}
 	provider.SetUpscaleEnabled(upscaleActive)
@@ -1860,7 +1860,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// generation is CLI-driven (`bridge analyze`); serve only advertises
 	// the `waveform` flag + serves /v1/waveform from cached sidecars.
 	analysisActive := cfg.Analysis.Enabled
-	if analysisActive && !soxFeatureReady("analysis", stderr) {
+	if analysisActive && !soxFeatureReady(ctx, "analysis", stderr) {
 		analysisActive = false
 	}
 

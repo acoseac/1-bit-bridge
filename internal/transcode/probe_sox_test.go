@@ -83,20 +83,28 @@ func TestParseSoxFileFormats(t *testing.T) {
 			if known != tc.wantKnown {
 				t.Fatalf("FormatsKnown = %v, want %v (formats=%v)", known, tc.wantKnown, formats)
 			}
-			hasFLAC := false
-			for _, f := range formats {
-				if f == "flac" {
-					hasFLAC = true
-				}
-				if tc.mustExclude != "" && f == tc.mustExclude {
-					t.Errorf("token %q from the next section leaked into the format set: %v", tc.mustExclude, formats)
-				}
-			}
-			if hasFLAC != tc.wantFLAC {
-				t.Errorf("hasFLAC = %v, want %v (formats=%v)", hasFLAC, tc.wantFLAC, formats)
+			if got := hasFormat(t, formats, "flac", tc.mustExclude); got != tc.wantFLAC {
+				t.Errorf("hasFLAC = %v, want %v (formats=%v)", got, tc.wantFLAC, formats)
 			}
 		})
 	}
+}
+
+// hasFormat reports whether want is in formats, and (when mustExclude != "")
+// fails the test if a token from the next section leaked into the set —
+// extracted so the table loop stays under the cognitive-complexity budget.
+func hasFormat(t *testing.T, formats []string, want, mustExclude string) bool {
+	t.Helper()
+	found := false
+	for _, f := range formats {
+		if f == want {
+			found = true
+		}
+		if mustExclude != "" && f == mustExclude {
+			t.Errorf("token %q from the next section leaked into the format set: %v", mustExclude, formats)
+		}
+	}
+	return found
 }
 
 func TestParseSoxVersion(t *testing.T) {
