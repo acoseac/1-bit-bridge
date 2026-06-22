@@ -33,13 +33,14 @@ func isPIDListeningOnPort(port, targetPID int) (bool, error) {
 	}
 	out, err := exec.Command(lsofPath, "-nP", "-iTCP:"+strconv.Itoa(port), "-sTCP:LISTEN", "-t").Output()
 	if err != nil {
-		// A non-zero exit means lsof RAN but matched nothing (the common
+		// lsof exit code 1 means it ran but matched nothing (the common
 		// case when the port's owner isn't visible to us) — that's "not
-		// us", not a mechanism failure. Only a genuine can't-start error
-		// (binary vanished, permission) surfaces as an error so checkPort
-		// degrades to Warn.
+		// us", not a mechanism failure. ANY OTHER outcome (a different
+		// non-zero exit, or a genuine can't-start error like the binary
+		// vanishing / permission) surfaces as an error so checkPort
+		// degrades to Warn rather than a false Fail.
 		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
 			return false, nil
 		}
 		return false, err

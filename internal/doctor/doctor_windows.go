@@ -100,6 +100,14 @@ func pidOwnsPortV4(port, targetPID int) (bool, error) {
 		return false, nil
 	}
 	t := (*mibTCPTableOwnerPID)(unsafe.Pointer(&buf[0]))
+	// Bounds-check the buffer against the entry count it declares BEFORE
+	// unsafe.Slice — a short/corrupt buffer would otherwise produce a slice
+	// that reads out of bounds. Offsetof/Sizeof are compile-time (no deref),
+	// so they're safe to evaluate before the size check.
+	hdr := int(unsafe.Offsetof(t.Table))
+	if len(buf) < hdr || len(buf) < hdr+int(t.NumEntries)*int(unsafe.Sizeof(t.Table[0])) {
+		return false, fmt.Errorf("GetExtendedTcpTable(af=INET): buffer too small for %d entries (%d bytes)", t.NumEntries, len(buf))
+	}
 	rows := unsafe.Slice(&t.Table[0], t.NumEntries)
 	for i := range rows {
 		if ntohsPort(rows[i].LocalPort) == port && int(rows[i].OwningPID) == targetPID {
@@ -118,6 +126,10 @@ func pidOwnsPortV6(port, targetPID int) (bool, error) {
 		return false, nil
 	}
 	t := (*mibTCP6TableOwnerPID)(unsafe.Pointer(&buf[0]))
+	hdr := int(unsafe.Offsetof(t.Table))
+	if len(buf) < hdr || len(buf) < hdr+int(t.NumEntries)*int(unsafe.Sizeof(t.Table[0])) {
+		return false, fmt.Errorf("GetExtendedTcpTable(af=INET6): buffer too small for %d entries (%d bytes)", t.NumEntries, len(buf))
+	}
 	rows := unsafe.Slice(&t.Table[0], t.NumEntries)
 	for i := range rows {
 		if ntohsPort(rows[i].LocalPort) == port && int(rows[i].OwningPID) == targetPID {
@@ -162,8 +174,8 @@ func extendedTCPTable(family int) ([]byte, error) {
 }
 
 // ntohsPort converts a MIB row's LocalPort (the port in network byte order
-// stored in the low 16 bits of a DWORD) to a host-order port number.
+// stored in the low 16 bits of a DWORD) to a host-order port number, via the
+// stdlib-provided windows.Ntohs rather than a hand-rolled byteswap.
 func ntohsPort(localPort uint32) int {
-	b := uint16(localPort)
-	return int(b>>8 | b<<8)
+	return int(windows.Ntohs(uint16(localPort)))
 }
