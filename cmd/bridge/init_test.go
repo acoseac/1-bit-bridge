@@ -138,7 +138,10 @@ func TestResolveLibraryDir(t *testing.T) {
 // subsequent valid path is accepted.
 func TestPromptLibraryDirReprompts(t *testing.T) {
 	dir := t.TempDir()
-	in := bufio.NewReader(strings.NewReader("/no/such/path\n" + dir + "\n"))
+	// Derive the invalid path from a temp dir so the "missing" branch is
+	// guaranteed in every environment (not reliant on /no/such/path).
+	missing := filepath.Join(t.TempDir(), "missing")
+	in := bufio.NewReader(strings.NewReader(missing + "\n" + dir + "\n"))
 	var stdout, stderr bytes.Buffer
 	abs, code := promptLibraryDir(in, &stdout, &stderr)
 	if code != 0 || abs != dir {
@@ -190,7 +193,8 @@ func TestPromptLibraryDirEOFWithData(t *testing.T) {
 }
 
 func TestPromptLibraryDirExhaustion(t *testing.T) {
-	in := bufio.NewReader(strings.NewReader(strings.Repeat("/no/such/path\n", maxLibraryPrompts)))
+	missing := filepath.Join(t.TempDir(), "missing")
+	in := bufio.NewReader(strings.NewReader(strings.Repeat(missing+"\n", maxLibraryPrompts)))
 	var out, errb bytes.Buffer
 	abs, code := promptLibraryDir(in, &out, &errb)
 	if code != 2 || abs != "" {

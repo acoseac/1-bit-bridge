@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -862,18 +861,22 @@ func askLine(r *bufio.Reader, w io.Writer, prompt string) (string, error) {
 // piped-stdin run fails identically whether or not --yes is set:
 //
 //   - empty Enter: "library path is required".
-//   - Ctrl+D / closed stdin with no input: "input closed; aborting." —
-//     returned immediately, never spinning to the retry cap.
-//   - a non-empty path that arrived with EOF (typed then Ctrl+D, no newline)
-//     is still validated; only if it's also invalid do we abort (no more
-//     input to retry with).
+//   - closed / unreadable stdin with no input (Ctrl+D, or any other read
+//     error): "input closed; aborting." — returned immediately, never
+//     spinning to the retry cap.
+//   - a non-empty path that arrived together with a read error (typed then
+//     Ctrl+D, no newline) is still validated; only if it's also invalid do
+//     we abort (no more input to retry with).
 //   - exhausted after maxLibraryPrompts invalid tries.
 func promptLibraryDir(in *bufio.Reader, stdout, stderr io.Writer) (string, int) {
 	for attempt := 0; attempt < maxLibraryPrompts; attempt++ {
 		line, err := askLine(in, stdout, "Library folder to expose (absolute path)")
-		eof := errors.Is(err, io.EOF)
+		// Any non-nil error (io.EOF on a closed pipe, or a genuine read
+		// fault) means the stream won't yield more — treat it as terminal so
+		// a broken reader can't spin the loop to its cap.
+		noMoreInput := err != nil
 		if line == "" {
-			if eof {
+			if noMoreInput {
 				fmt.Fprintf(stderr, "\ninput closed; aborting.\n")
 			} else {
 				fmt.Fprintf(stderr, "library path is required\n")
@@ -885,9 +888,9 @@ func promptLibraryDir(in *bufio.Reader, stdout, stderr io.Writer) (string, int) 
 			return abs, 0
 		}
 		fmt.Fprintln(stderr, paint(ansiRed, "✗ "+verr.Error()))
-		if eof {
-			// The bad path came with a closed stream — no more input to
-			// retry with, so abort rather than spin to the cap.
+		if noMoreInput {
+			// The bad path came with a closed/broken stream — no more input
+			// to retry with, so abort rather than spin to the cap.
 			return "", 2
 		}
 	}
