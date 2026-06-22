@@ -217,16 +217,29 @@ func checkPort(name string, port int, ownPIDFile string) Check {
 	// Port is bound. Is it us?
 	if ownPIDFile != "" {
 		if ownPID, readErr := readPID(ownPIDFile); readErr == nil && ownPID > 0 {
-			if pidListening(port) == ownPID {
+			found, probeErr := isPIDListeningOnPort(port, ownPID)
+			switch {
+			case probeErr != nil:
+				// The probe MECHANISM failed (e.g. an antivirus blocked
+				// the iphlpapi.dll load on Windows, or lsof errored). We
+				// genuinely can't attribute the port, so degrade to Warn
+				// rather than a hard Fail that would cry wolf about the
+				// bridge's own port on a live install. (Fail-safe: a broken
+				// probe must never break a healthy install.)
+				return warn(name, fmt.Sprintf(":%d in use", port),
+					"port is bound but the owner probe failed on this host; "+
+						"if it's your running bridge this is expected, otherwise "+
+						"stop the other process or change the address in bridge.yaml")
+			case found:
 				return ok(name, fmt.Sprintf("bound by our own bridge (pid %d)", ownPID))
 			}
 		}
 	}
 	// Couldn't attribute the bound port to our own bridge. If the owner
-	// probe isn't available on this host, we genuinely can't tell "our
-	// running bridge" apart from a real conflict — Warn instead of a hard
-	// Fail that cries wolf on every `bridge doctor` run on a live install
-	// (notably Windows, which has no probe yet). (goreview F9)
+	// probe isn't available on this host at all, we genuinely can't tell
+	// "our running bridge" apart from a real conflict — Warn instead of a
+	// hard Fail that cries wolf on every `bridge doctor` run on a live
+	// install (a host with no lsof and no native probe). (goreview F9)
 	if !portProbeAvailable() {
 		return warn(name, fmt.Sprintf(":%d in use", port),
 			"port is bound but the owner couldn't be identified on this host; "+
@@ -410,69 +423,11 @@ func windowsStartupDir() string {
 	return filepath.Join(appdata, "Microsoft", "Windows", "Start Menu", "Programs", "Startup")
 }
 
-// pidListening returns the PID of the process bound to the given local
-// port, or -1 if it can't tell (permission denied, platform doesn't
-// support the probe, etc). This is a best-effort helper for the "is it
-// us?" branch of checkPort — a wrong answer here degrades to a fail,
-// which is the safe direction.
-func pidListening(port int) int {
-	// `lsof -nP -iTCP:<port> -sTCP:LISTEN -t` on unix. lsofPath is "" on
-	// Windows (no probe yet — netstat/WMI is future work) and whenever lsof
-	// can't be resolved to a safe absolute path, so this one guard covers
-	// both. Exec'ing the resolved absolute path (not the bare "lsof" name)
-	// defends against a PATH-injected binary; a wrong answer degrades to a
-	// fail, the safe direction.
-	if lsofPath == "" {
-		return -1
-	}
-	out, err := exec.Command(lsofPath, "-nP", "-iTCP:"+strconv.Itoa(port), "-sTCP:LISTEN", "-t").Output()
-	if err != nil {
-		return -1
-	}
-	// lsof -t prints one pid per line. Take the first.
-	fields := strings.Fields(string(out))
-	if len(fields) == 0 {
-		return -1
-	}
-	n, err := strconv.Atoi(fields[0])
-	if err != nil {
-		return -1
-	}
-	return n
-}
-
-// lsofPath is the absolute path to lsof, resolved ONCE at package init.
-// "" means lsof is unavailable on this host: Windows (no probe yet), not
-// installed, or — defending against PATH injection — the PATH lookup
-// returned a relative path. Both portProbeAvailable and pidListening key
-// off it, so the bridge never execs an attacker-staged lsof off a
-// writable CWD / PATH entry. Mirrors the exec.LookPath + filepath.IsAbs
-// hardening used for the Tailscale CLI (PR #95). (CodeRabbit MAJOR on PR #429.)
-var lsofPath = resolveLsof()
-
-func resolveLsof() string {
-	if runtime.GOOS == "windows" {
-		return "" // no lsof on Windows; pidListening returns -1 there
-	}
-	if p, err := exec.LookPath("lsof"); err == nil && filepath.IsAbs(p) {
-		return p
-	}
-	// PATH lookup failed or returned a relative (injection-unsafe) path —
-	// fall back to the canonical absolute locations before giving up.
-	for _, p := range []string{"/usr/sbin/lsof", "/usr/bin/lsof", "/bin/lsof"} {
-		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
-			return p
-		}
-	}
-	return ""
-}
-
-// portProbeAvailable reports whether pidListening can actually identify
-// the owner of a bound port on THIS host — i.e. lsof resolved to a usable
-// absolute path. When false, checkPort can't tell a port bound by our own
-// bridge apart from a real conflict, so it degrades to Warn rather than a
-// hard Fail. Package var so tests can stub it.
-var portProbeAvailable = func() bool { return lsofPath != "" }
+// isPIDListeningOnPort and portProbeAvailable are platform-provided —
+// the lsof-backed unix implementation lives in doctor_notwindows.go and
+// the native iphlpapi.dll implementation in doctor_windows.go. The "is it
+// us?" branch of checkPort calls them; see their per-platform docs for the
+// (found, error) contract.
 
 // ErrHasFail is returned by Run when the caller passes StopOnFail.
 var ErrHasFail = errors.New("doctor reports one or more failing checks")

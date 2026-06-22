@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/doctor"
@@ -78,11 +80,19 @@ func doctorCmd(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// doctorJSONSchemaVersion versions the `bridge doctor --json` envelope so
+// orchestrators / CI consumers can branch on shape changes. Bump it only
+// when a field is renamed/removed or its meaning changes (additive,
+// omitempty-gated fields don't need a bump). Independent of the v1 wire
+// protocol — this is a CLI report, not a paired-client surface.
+const doctorJSONSchemaVersion = 1
+
 // jsonDoctorReport is the wire shape of `bridge doctor --json`. The
-// envelope is intentionally simple — flat list of checks plus
-// summary counts — so jq-style scripting is one filter away. The
-// per-check fields mirror doctor.Check exactly so a future
-// admin-API surface can re-use the same shape without translation.
+// envelope is intentionally simple — self-describing metadata, a flat list
+// of checks, plus summary counts — so jq-style scripting and container
+// health-probes are one filter away. The per-check fields mirror
+// doctor.Check exactly so a future admin-API surface can re-use the same
+// shape without translation.
 type jsonDoctorCheck struct {
 	Name    string `json:"name"`
 	Status  string `json:"status"`
@@ -91,18 +101,26 @@ type jsonDoctorCheck struct {
 }
 
 type jsonDoctorReport struct {
-	Checks []jsonDoctorCheck `json:"checks"`
-	OK     int               `json:"ok"`
-	Warn   int               `json:"warn"`
-	Fail   int               `json:"fail"`
+	SchemaVersion int               `json:"schemaVersion"`
+	GeneratedAt   string            `json:"generatedAt"` // RFC3339, UTC
+	Platform      string            `json:"platform"`    // runtime.GOOS
+	Arch          string            `json:"arch"`        // runtime.GOARCH
+	Checks        []jsonDoctorCheck `json:"checks"`
+	OK            int               `json:"ok"`
+	Warn          int               `json:"warn"`
+	Fail          int               `json:"fail"`
 }
 
 func jsonReportEnvelope(r doctor.Report) jsonDoctorReport {
 	out := jsonDoctorReport{
-		Checks: make([]jsonDoctorCheck, 0, len(r.Checks)),
-		OK:     r.OKCount(),
-		Warn:   r.WarnCount(),
-		Fail:   r.FailCount(),
+		SchemaVersion: doctorJSONSchemaVersion,
+		GeneratedAt:   time.Now().UTC().Format(time.RFC3339),
+		Platform:      runtime.GOOS,
+		Arch:          runtime.GOARCH,
+		Checks:        make([]jsonDoctorCheck, 0, len(r.Checks)),
+		OK:            r.OKCount(),
+		Warn:          r.WarnCount(),
+		Fail:          r.FailCount(),
 	}
 	for _, c := range r.Checks {
 		out.Checks = append(out.Checks, jsonDoctorCheck{

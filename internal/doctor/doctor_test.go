@@ -134,11 +134,11 @@ func TestPortCheck_OwnPIDMatches(t *testing.T) {
 	// assert doctor treats the bind as "us" → ok. lsof needs to see
 	// our PID as the listener, which works on darwin/linux.
 	if runtime.GOOS == "windows" {
-		t.Skip("pidListening uses lsof — not available on Windows (PR-2 wires WMI)")
+		t.Skip("isPIDListeningOnPort uses lsof here — Windows has its own native probe + doctor_windows_test.go")
 	}
-	// pidListening shells out to lsof; on a minimal CI host without it,
-	// the helper returns -1, checkPort falls to Fail, and this test would
-	// fail deterministically. Skip rather than flake.
+	// isPIDListeningOnPort shells out to lsof; on a minimal CI host without
+	// it, the predicate returns (false, nil), checkPort falls to Fail, and
+	// this test would fail deterministically. Skip rather than flake.
 	if _, err := exec.LookPath("lsof"); err != nil {
 		t.Skip("pidListening requires lsof, which isn't on PATH here")
 	}
