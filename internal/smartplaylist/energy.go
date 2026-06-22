@@ -174,3 +174,17 @@ func SeedFromSlug(slug string) uint64 {
 	_, _ = h.Write([]byte(slug))
 	return h.Sum64()
 }
+
+// SeedFromISOWeek returns a deterministic seed for a UTC ISO year-week pair.
+// The regenerator computes (year, week) via time.Unix(0, nowNS).UTC().ISOWeek()
+// and passes them in — keeping the engine package clock-free (no `time`
+// import). Stable for a 7-day window, rotates on Monday-UTC. Used by the
+// deterministic weekly shuffle for Artist Deep Cuts + the two mood bands.
+func SeedFromISOWeek(year, week int) uint64 {
+	h := fnv.New64a()
+	var buf [16]byte
+	putUint64(buf[0:8], uint64(year))
+	putUint64(buf[8:16], uint64(week))
+	_, _ = h.Write(buf[:])
+	return h.Sum64()
+}

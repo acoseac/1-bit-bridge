@@ -13,10 +13,18 @@ func Generate(in Inputs, opts Options) []GeneratedPlaylist {
 		}
 	}
 	// Homepage order: the marquee mixes first, then the listening shelves.
+	// New families (Drive / On Repeat / Artist Deep Cuts / Lift Off / Wind
+	// Down) are interleaved per the plan in
+	// ~/.claude/plans/we-now-have-some-playful-sedgewick.md.
 	add(buildHeavyRotation(in, opts))
+	add(buildDriveMix(in, opts))
+	add(buildOnRepeat(in, opts))
 	add(buildAutoMix(in, opts))
 	add(buildDailyMix(in, opts))
 	add(buildTimeOfDay(in, opts))
+	add(buildArtistDeepCuts(in, opts))
+	add(buildLiftOff(in, opts))
+	add(buildWindDown(in, opts))
 	add(buildRecentlyPlayed(in, opts))
 	add(buildForgotten(in, opts))
 	add(buildFinishLine(in, opts))

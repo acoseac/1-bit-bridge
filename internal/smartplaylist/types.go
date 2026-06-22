@@ -22,6 +22,14 @@ const (
 	KindDailyMix           Kind = "dailyMix"
 	KindTimeOfDay          Kind = "timeOfDay"
 	KindFinishLine         Kind = "finishLine"
+	// New families (additive — old iOS builds map unknown wire strings to
+	// `.other(raw)` and render generic chrome). Plan in
+	// ~/.claude/plans/we-now-have-some-playful-sedgewick.md.
+	KindDriveMix       Kind = "driveMix"
+	KindOnRepeat       Kind = "onRepeat"
+	KindArtistDeepCuts Kind = "artistDeepCuts"
+	KindWindDown       Kind = "windDown"
+	KindLiftOff        Kind = "liftOff"
 )
 
 // TrackFeature is the metadata + analysis a track contributes to generation.
@@ -107,6 +115,23 @@ type Inputs struct {
 	Events        []Event        // chronological qualifying events (Finish Line)
 	AnalyzedPool  []TrackFeature // tracks WITH an estimated key (harmonic + discovery)
 
+	// Drive Mix: CarPlay-only plays, plays-desc.
+	Drive []PlayStat
+
+	// On Repeat: paths whose per-day repeat behaviour qualifies them as
+	// "sustained obsessions" — the manifest query enforces the total-plays +
+	// repeat-days thresholds. The builder applies the hysteresis floor.
+	OnRepeat []PlayStat
+
+	// From Artists You Love: per-artist-capped deep cuts from currently-loved
+	// artists, NOT played in the deep-cut cutoff window.
+	ArtistDeepCuts []PlayStat
+
+	// Mood bands: BPM + ReplayGain band pools (full library cohorts; the
+	// engine shuffles deterministically by WeekSeed and caps the result).
+	QuietSlowPool []TrackFeature
+	LoudFastPool  []TrackFeature
+
 	// PlayedPaths is the set of paths with any qualifying play (Daily Mix
 	// discovery anti-join).
 	PlayedPaths map[string]bool
@@ -114,6 +139,22 @@ type Inputs struct {
 	// Features maps every candidate path (PlayStat lists + hour buckets) to
 	// its hydrated feature, for item building + harmonic sort.
 	Features map[string]TrackFeature
+
+	// PreviouslyVisible maps a family slug (e.g. "on-repeat") to true if the
+	// last regeneration emitted that family with at least one item. Populated
+	// by the regenerator from the existing smart_playlists cache (presence in
+	// the cache = was visible, since the regenerator only writes populated
+	// families). Hysteresis-capable builders (currently On Repeat) read this
+	// to apply a lower exit floor when the family was already visible — so a
+	// borderline week doesn't flicker it on and off. Empty/nil = cold cache.
+	PreviouslyVisible map[string]bool
+
+	// WeekSeed is a deterministic seed derived from the UTC ISO week of the
+	// generating run (regenerator computes it via SeedFromISOWeek). Drives the
+	// deterministic weekly shuffle for Artist Deep Cuts + the two mood bands —
+	// stable for a 7-day window, rotates on Monday-UTC. Same input → same
+	// output, keeping the engine pure (no clock read inside).
+	WeekSeed uint64
 }
 
 // Options carries tunable thresholds + the analysis gate. The engine is pure
@@ -132,6 +173,26 @@ type Options struct {
 
 	SessionGapSeconds   float64 // idle gap that ends a session (Gemini: 60 min)
 	DailyDiscoveryRatio float64 // fraction of the Daily Mix that is discovery
+
+	// Drive Mix thresholds.
+	MinDriveMix      int
+	MaxDriveMixItems int
+
+	// On Repeat hysteresis floors. A track is "visible" when the count is
+	// >= OnRepeatEnterFloor; once visible the family stays until the count
+	// drops below OnRepeatExitFloor. Without hysteresis a borderline week
+	// would flicker the family on and off.
+	OnRepeatEnterFloor int
+	OnRepeatExitFloor  int
+	MaxOnRepeatItems   int
+
+	// Artist Deep Cuts thresholds.
+	MinArtistDeepCuts      int
+	MaxArtistDeepCutsItems int
+
+	// Mood band thresholds (Wind Down + Lift Off share both).
+	MinMoodBand      int
+	MaxMoodBandItems int
 }
 
 // DefaultOptions returns the tuned production thresholds. These are the
@@ -149,5 +210,18 @@ func DefaultOptions(analysisEnabled bool) Options {
 		MinSessions:         20,
 		SessionGapSeconds:   60 * 60, // 60-min idle = new session (Gemini 2026-06-14)
 		DailyDiscoveryRatio: 0.30,
+		// Drive Mix.
+		MinDriveMix:      10,
+		MaxDriveMixItems: 30,
+		// On Repeat hysteresis (12 enter / 8 exit).
+		OnRepeatEnterFloor: 12,
+		OnRepeatExitFloor:  8,
+		MaxOnRepeatItems:   25,
+		// Artist Deep Cuts.
+		MinArtistDeepCuts:      9,
+		MaxArtistDeepCutsItems: 20,
+		// Mood bands.
+		MinMoodBand:      15,
+		MaxMoodBandItems: 25,
 	}
 }

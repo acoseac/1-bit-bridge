@@ -718,11 +718,16 @@ The bridge regenerates the families on a daily cadence into a server-side cache 
 | `kind` | Source | Notes |
 |---|---|---|
 | `heavyRotation` | history (last ~14d) | most-played, qualifying plays only (≥ 30s listened) |
+| `driveMix` | history (CarPlay-only, last ~60d) | most-played over CarPlay (`iface_type = "CarPlay"`); a wider window than Heavy Rotation so occasional drives still populate it |
+| `onRepeat` | history (last ~30d) | "sustained obsession" — paths with ≥ 4 qualifying plays AND ≥ 3 distinct days carrying ≥ 2 plays/day; **carries hysteresis** (surfaces at ≥ 12 tracks, stays visible while ≥ 8) |
 | `forgottenFavorites` | history | loved long ago, untouched in the last ~30d |
 | `recentlyPlayed` | history | distinct tracks, newest first |
 | `autoMix` | analysis (key + tempo) | Camelot-wheel harmonic flow, level-matched via ReplayGain; **requires `analysis.enabled`** |
 | `dailyMix` | history + analysis | ~70% familiar + ~30% discovery; discovery leg requires `analysis.enabled` |
 | `timeOfDay` | history (by hour) | the device's current-local-hour habit (see `local_hour` below) |
+| `artistDeepCuts` | history + library | tracks by artists with ≥ 3 plays in the last 30d that have NOT been played in 90d+ (per-artist cap 3); rotates weekly by UTC ISO week |
+| `liftOff` | analysis | bpm ≥ 120 AND replaygain ≤ -8 dB (loud, fast mood band); rotates weekly; **requires `analysis.enabled`** |
+| `windDown` | analysis | bpm ≤ 90 AND replaygain > -6 dB (quiet, slow mood band); rotates weekly; **requires `analysis.enabled`** |
 | `finishLine` | history (sessions) | tracks chained to the user's average listening-session length |
 
 **`GET /v1/smart-playlists?local_hour=<0-23>`** — the populated families, served from the cache. Bearer-authenticated; the `X-Device-Token` header is **not** required (user-wide, like `GET /v1/history`). The optional `local_hour` is the device's current local hour, used **only to title** the `timeOfDay` family (the bucket itself is the server's current UTC hour — the same instant); omit it and the stored title is kept. A `timeOfDay` family with no listening habit around the current hour is omitted from that response.

@@ -348,6 +348,219 @@ func buildFinishLine(in Inputs, opts Options) (GeneratedPlaylist, bool) {
 	}, true
 }
 
+// --- Drive Mix (CarPlay-only Heavy Rotation) ---
+
+func buildDriveMix(in Inputs, opts Options) (GeneratedPlaylist, bool) {
+	cap := opts.MaxDriveMixItems
+	if cap <= 0 {
+		cap = opts.MaxItems
+	}
+	items := itemsFromPaths(pathsOf(in.Drive), in.Features, cap)
+	if len(items) < opts.MinDriveMix {
+		return GeneratedPlaylist{}, false
+	}
+	return GeneratedPlaylist{
+		Slug: "drive-mix", Kind: KindDriveMix,
+		Title: "Drive Mix", Subtitle: "Your road favorites",
+		Items: items,
+	}, true
+}
+
+// --- On Repeat (per-day repeat behaviour, with hysteresis) ---
+
+// onRepeatSlug is the cache-cached slug for the On Repeat family AND the key
+// `Inputs.PreviouslyVisible` looks up when applying the hysteresis floor. The
+// bridge persists by slug (StoredSmartPlaylist.Slug) so the regenerator's
+// "was visible last run" map is naturally keyed by this kebab-case string —
+// NOT the camelCase wire `Kind`. Don't fork: route every read through this
+// constant so a future rename can't desync.
+const onRepeatSlug = "on-repeat"
+
+func buildOnRepeat(in Inputs, opts Options) (GeneratedPlaylist, bool) {
+	cap := opts.MaxOnRepeatItems
+	if cap <= 0 {
+		cap = opts.MaxItems
+	}
+	items := itemsFromPaths(pathsOf(in.OnRepeat), in.Features, cap)
+
+	enterFloor := opts.OnRepeatEnterFloor
+	if enterFloor <= 0 {
+		enterFloor = 12
+	}
+	exitFloor := opts.OnRepeatExitFloor
+	if exitFloor <= 0 {
+		exitFloor = 8
+	}
+	if exitFloor > enterFloor {
+		exitFloor = enterFloor
+	}
+
+	qualifies := len(items) >= enterFloor ||
+		(in.PreviouslyVisible[onRepeatSlug] && len(items) >= exitFloor)
+	if !qualifies {
+		return GeneratedPlaylist{}, false
+	}
+	return GeneratedPlaylist{
+		Slug: onRepeatSlug, Kind: KindOnRepeat,
+		Title: "On Repeat", Subtitle: "Tracks you couldn't stop playing",
+		Items: items,
+	}, true
+}
+
+// --- From Artists You Love (per-artist-capped library deep cuts) ---
+
+func buildArtistDeepCuts(in Inputs, opts Options) (GeneratedPlaylist, bool) {
+	// The manifest query already balanced per-artist via ROW_NUMBER PARTITION
+	// + ordered (artist, rn). Re-order via a deterministic weekly shuffle so
+	// the visible window rotates Monday-to-Monday without churning daily.
+	paths := shufflePathsByWeek(pathsOf(in.ArtistDeepCuts), in.WeekSeed)
+
+	cap := opts.MaxArtistDeepCutsItems
+	if cap <= 0 {
+		cap = opts.MaxItems
+	}
+	items := itemsFromPaths(paths, in.Features, cap)
+	if len(items) < opts.MinArtistDeepCuts {
+		return GeneratedPlaylist{}, false
+	}
+	return GeneratedPlaylist{
+		Slug: "artist-deep-cuts", Kind: KindArtistDeepCuts,
+		Title: "From Artists You Love", Subtitle: "Hidden gems by artists in your rotation",
+		Items: items,
+	}, true
+}
+
+// --- Mood bands (Wind Down / Lift Off) ---
+
+// Per-family seed offsets so Wind Down and Lift Off shuffle independently of
+// each other (otherwise both families with overlapping tracks would carry the
+// same relative ordering). Pure constants — XORed with WeekSeed before hashing.
+const (
+	moodSeedOffsetWindDown uint64 = 0x57494e44_5f44574e // "WIND_DWN"
+	moodSeedOffsetLiftOff  uint64 = 0x4c494654_5f4f4646 // "LIFT_OFF"
+)
+
+func buildWindDown(in Inputs, opts Options) (GeneratedPlaylist, bool) {
+	if len(in.QuietSlowPool) < opts.MinMoodBand {
+		return GeneratedPlaylist{}, false
+	}
+	shuffled := shuffleFeaturesByWeek(in.QuietSlowPool, in.WeekSeed^moodSeedOffsetWindDown)
+	cap := opts.MaxMoodBandItems
+	if cap <= 0 {
+		cap = opts.MaxItems
+	}
+	items := itemsFromFeatures(shuffled, cap)
+	if len(items) < opts.MinMoodBand {
+		return GeneratedPlaylist{}, false
+	}
+	return GeneratedPlaylist{
+		Slug: "wind-down", Kind: KindWindDown,
+		Title: "Wind Down", Subtitle: "Calm music for slow moments",
+		Items: items,
+	}, true
+}
+
+func buildLiftOff(in Inputs, opts Options) (GeneratedPlaylist, bool) {
+	if len(in.LoudFastPool) < opts.MinMoodBand {
+		return GeneratedPlaylist{}, false
+	}
+	shuffled := shuffleFeaturesByWeek(in.LoudFastPool, in.WeekSeed^moodSeedOffsetLiftOff)
+	cap := opts.MaxMoodBandItems
+	if cap <= 0 {
+		cap = opts.MaxItems
+	}
+	items := itemsFromFeatures(shuffled, cap)
+	if len(items) < opts.MinMoodBand {
+		return GeneratedPlaylist{}, false
+	}
+	return GeneratedPlaylist{
+		Slug: "lift-off", Kind: KindLiftOff,
+		Title: "Lift Off", Subtitle: "Tracks to get moving",
+		Items: items,
+	}, true
+}
+
+// --- shared deterministic shuffle helpers ---
+
+// shufflePathsByWeek returns a stable shuffle of paths keyed by the (seed,
+// path) pair so the order is stable for a given seed and rotates when the
+// seed changes (the regenerator computes the seed from the UTC ISO week).
+// Pure; same input always returns the same output. Path tie-break preserves
+// determinism when two paths hash to the same score.
+func shufflePathsByWeek(paths []string, seed uint64) []string {
+	type scored struct {
+		index int
+		score uint64
+	}
+	arr := make([]scored, len(paths))
+	for i, p := range paths {
+		arr[i] = scored{index: i, score: hashSeedPath(seed, p)}
+	}
+	sort.SliceStable(arr, func(i, j int) bool {
+		if arr[i].score != arr[j].score {
+			return arr[i].score < arr[j].score
+		}
+		return paths[arr[i].index] < paths[arr[j].index]
+	})
+	out := make([]string, len(arr))
+	for i, s := range arr {
+		out[i] = paths[s.index]
+	}
+	return out
+}
+
+// shuffleFeaturesByWeek is the TrackFeature-typed analogue used by the mood
+// bands' Feature pool flow. Sorts by INDEX into the pool (16 bytes per scored
+// element) rather than carrying the 120-byte TrackFeature through the swap
+// loop — meaningful for the mood-band pools, which can run to several thousand
+// rows per regeneration (Gemini bot review on PR #431).
+func shuffleFeaturesByWeek(pool []TrackFeature, seed uint64) []TrackFeature {
+	type scored struct {
+		index int
+		score uint64
+	}
+	arr := make([]scored, len(pool))
+	for i, f := range pool {
+		arr[i] = scored{index: i, score: hashSeedPath(seed, f.Path)}
+	}
+	sort.SliceStable(arr, func(i, j int) bool {
+		if arr[i].score != arr[j].score {
+			return arr[i].score < arr[j].score
+		}
+		return pool[arr[i].index].Path < pool[arr[j].index].Path
+	})
+	out := make([]TrackFeature, len(arr))
+	for i, s := range arr {
+		out[i] = pool[s.index]
+	}
+	return out
+}
+
+// hashSeedPath produces a 64-bit shuffle score from (seed, path) via INLINED
+// FNV-1a (RFC-aligned constants — offset basis 14695981039346656037, prime
+// 1099511628211). Inlined rather than `fnv.New64a()`-per-call because the
+// hot path runs this up to 50_000× per mood-band regeneration and the per-
+// call hasher allocation was visible GC pressure (Gemini bot review on PR
+// #431). Functionally identical to the prior `hash/fnv` implementation.
+func hashSeedPath(seed uint64, path string) uint64 {
+	const (
+		fnvOffsetBasis uint64 = 14695981039346656037
+		fnvPrime       uint64 = 1099511628211
+	)
+	hash := fnvOffsetBasis
+	var buf [8]byte
+	putUint64(buf[:], seed)
+	for _, b := range buf {
+		hash ^= uint64(b)
+		hash *= fnvPrime
+	}
+	for i := 0; i < len(path); i++ {
+		hash ^= uint64(path[i])
+		hash *= fnvPrime
+	}
+	return hash
+}
+
 // averageSessionDuration segments chronological events into listening
 // sessions — a gap from the previous event's END to the next event's START
 // greater than gapSeconds starts a new session — and returns the mean
