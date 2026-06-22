@@ -174,6 +174,14 @@ type Deps struct {
 	// semantically wrong).
 	UpscaleStats func() *UpscalePoolStats
 
+	// UpscaleBusy is a CHEAP "is the pool actively processing" probe
+	// (inflight or queued > 0) — atomic counters + a map-len, NO DB. The
+	// SSE loop uses it to gate the live worker grid onto the fast (500 ms)
+	// tick WHILE a batch runs, so sub-5s jobs are visible at per-second
+	// resolution; idle bridges fall back to the 5 s medium tick (no cost).
+	// Nil-safe: absent → never fast-tick the upscale frame.
+	UpscaleBusy func() bool
+
 	// AnalysisActive reports the LIVE runtime state of the audio-
 	// analysis feature — i.e. the startup-computed `analysisActive`
 	// (config flag AND sox-precheck outcome), NOT the persisted config
@@ -496,6 +504,30 @@ type UpscalePoolStats struct {
 	Enqueued uint64 `json:"enqueued"`
 	Done     uint64 `json:"done"`
 	Failed   uint64 `json:"failed"`
+	// ActiveWorkers is the live per-worker grid (one entry per worker
+	// slot, Busy=false for idle). Drives the Jobs page's "Workers" panel.
+	// Carries StartedAtUnixMs (not a ticking elapsed) so the SSE upscale
+	// frame stays diff-stable while a job runs — the browser ticks the
+	// elapsed display locally.
+	ActiveWorkers []ActiveWorkerView `json:"activeWorkers,omitempty"`
+}
+
+// ActiveWorkerView is one worker's live slot in the upscale pool — the
+// SSE worker grid on the Jobs page renders one row per entry. Mirror of
+// transcode.ActiveJobView; cmd/bridge maps between the two so
+// internal/admin doesn't import internal/transcode (same decoupling as
+// the UpscaleStats closure).
+type ActiveWorkerView struct {
+	WorkerID         int    `json:"workerId"`
+	Busy             bool   `json:"busy"`
+	SourceRel        string `json:"sourceRel,omitempty"`
+	SourceSampleRate int    `json:"sourceSampleRate,omitempty"`
+	SourceBits       int    `json:"sourceBits,omitempty"`
+	TargetSampleRate int    `json:"targetSampleRate,omitempty"`
+	TargetBits       int    `json:"targetBits,omitempty"`
+	Quality          string `json:"quality,omitempty"`
+	Kind             string `json:"kind,omitempty"`
+	StartedAtUnixMs  int64  `json:"startedAtUnixMs,omitempty"`
 }
 
 // TailscaleProvider is the read+refresh side of the Tailscale auto-pilot

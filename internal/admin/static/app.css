@@ -2131,6 +2131,60 @@ section.library-inspector {
   opacity: 0.75;
 }
 
+/* Live SoX worker grid (Jobs page "Workers" panel). One card per worker
+   slot; busy workers carry a signal chain + a locally-ticked elapsed. */
+.workers-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 10px;
+}
+.worker-row {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  background: var(--bg-panel);
+}
+.worker-row.idle {
+  opacity: 0.6;
+}
+.worker-row.busy {
+  border-left: 3px solid var(--accent);
+}
+.worker-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.worker-id {
+  font-weight: 600;
+  font-size: 13px;
+  white-space: nowrap;
+}
+.worker-status {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--fg);
+}
+.worker-row.idle .worker-status {
+  color: var(--fg-muted);
+}
+.worker-elapsed {
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  color: var(--fg-muted);
+  white-space: nowrap;
+}
+.worker-chain {
+  margin-top: 5px;
+  font-size: 12px;
+  color: var(--fg-muted);
+  font-variant-numeric: tabular-nums;
+}
+
 /* Track tiles use the same shell but a compact `.tile-track-dots`
    row in place of the coverage block (per-track is binary, so the
    bars would always be 0/1 or 1/1). */

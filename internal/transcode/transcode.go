@@ -152,6 +152,10 @@ type JobSpec struct {
 	SourceMTimeNS    int64
 	SourceSize       int64
 	SourceSampleRate int // Hz; 0 if unknown (won't be used in target-rate selection)
+	// SourceBits is the source bit depth (16/24/32), 0 if unknown.
+	// Display-only — feeds the live worker grid's signal-chain string
+	// ("44.1/16 ➔ 176.4/24"); never used in target-rate/bits selection.
+	SourceBits       int
 	TargetSampleRate int // Hz; e.g. 176400 / 192000
 	TargetBits       int // 16/24/32
 	Quality          Quality
