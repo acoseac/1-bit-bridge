@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -122,38 +123,35 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// 1-bit-bridge.service` to read the bridge's config for
 	// mount points. Either order should work without manual
 	// gymnastics.
-	libRoot := *libraryRoot
-	if libRoot == "" && !*publicMode {
-		if *nonInteractive {
-			fmt.Fprintf(stderr, "--yes requires --library <path>\n")
-			return 2
-		}
-		libRoot = ask(in, stdout, "Library folder to expose (absolute path)", "")
-		if libRoot == "" {
-			fmt.Fprintf(stderr, "library path is required\n")
-			return 2
-		}
-	}
 	// abs is the resolved library root, or empty for public-mode
 	// installs that defer mount setup. Doctor preflight is
 	// skipped when there's no root to preflight against —
 	// public-mode operators run `bridge doctor` separately after
 	// mounting their storage.
 	var abs string
-	if libRoot != "" {
-		a, err := filepath.Abs(expandHome(libRoot))
-		if err != nil {
-			fmt.Fprintf(stderr, "resolve library path: %v\n", err)
+	switch {
+	case *libraryRoot != "":
+		// Value supplied via --library (interactive or --yes): validate
+		// once and hard-error on a bad path (exit 1). Automation must pass
+		// a real directory — re-prompting wouldn't help a non-interactive
+		// caller.
+		a, verr := resolveLibraryDir(*libraryRoot)
+		if verr != nil {
+			fmt.Fprintf(stderr, "%v\n", verr)
 			return 1
 		}
-		info, err := os.Stat(a)
-		if err != nil {
-			fmt.Fprintf(stderr, "library path: %v\n", err)
-			return 1
-		}
-		if !info.IsDir() {
-			fmt.Fprintf(stderr, "%q is not a directory\n", a)
-			return 1
+		abs = a
+	case *publicMode:
+		// Public-mode installs defer mount setup — no library root now.
+	case *nonInteractive:
+		fmt.Fprintf(stderr, "--yes requires --library <path>\n")
+		return 2
+	default:
+		// Interactive: prompt with a bounded re-prompt loop so a single
+		// paste typo doesn't abort the whole init (the operator retypes).
+		a, code := promptLibraryDir(in, stdout, stderr)
+		if code != 0 {
+			return code
 		}
 		abs = a
 	}
@@ -820,6 +818,81 @@ func confirm(r *bufio.Reader, w io.Writer, prompt string, defYes bool) bool {
 		return defYes
 	}
 	return line == "y" || line == "yes"
+}
+
+// maxLibraryPrompts bounds the interactive library-path re-prompt loop so a
+// non-TTY stdin that slipped past the menu's TTY gate can't spin forever.
+const maxLibraryPrompts = 5
+
+// resolveLibraryDir expands a leading ~, makes the path absolute, and
+// verifies it's an existing directory. Returns the absolute path or an
+// error describing why the path is unusable. Shared by the --library flag's
+// single-shot validation and the interactive re-prompt loop.
+func resolveLibraryDir(libRoot string) (string, error) {
+	a, err := filepath.Abs(expandHome(libRoot))
+	if err != nil {
+		return "", fmt.Errorf("resolve library path: %v", err)
+	}
+	info, err := os.Stat(a)
+	if err != nil {
+		return "", fmt.Errorf("library path: %v", err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("%q is not a directory", a)
+	}
+	return a, nil
+}
+
+// askLine is an EOF-aware single-line prompt. Unlike ask(), it surfaces
+// io.EOF (alongside any data read so far) so the caller's re-prompt loop can
+// tell "user closed stdin" (Ctrl+D) from "user pressed Enter on an empty
+// line" — conflating them would let a closed pipe spin the retry loop. No
+// default value: the loop decides what an empty line means.
+func askLine(r *bufio.Reader, w io.Writer, prompt string) (string, error) {
+	fmt.Fprintf(w, "%s: ", prompt)
+	line, err := r.ReadString('\n')
+	return strings.TrimSpace(line), err
+}
+
+// promptLibraryDir interactively asks for the library folder, re-prompting
+// on an invalid path instead of aborting the whole init — a paste typo is
+// the common failure and forcing a full re-run for it is a papercut. Returns
+// (abs, 0) on success, or ("", code) to abort. Every abort uses exit 2 (the
+// same code as the non-interactive "--yes requires --library" failure) so a
+// piped-stdin run fails identically whether or not --yes is set:
+//
+//   - empty Enter: "library path is required".
+//   - Ctrl+D / closed stdin with no input: "input closed; aborting." —
+//     returned immediately, never spinning to the retry cap.
+//   - a non-empty path that arrived with EOF (typed then Ctrl+D, no newline)
+//     is still validated; only if it's also invalid do we abort (no more
+//     input to retry with).
+//   - exhausted after maxLibraryPrompts invalid tries.
+func promptLibraryDir(in *bufio.Reader, stdout, stderr io.Writer) (string, int) {
+	for attempt := 0; attempt < maxLibraryPrompts; attempt++ {
+		line, err := askLine(in, stdout, "Library folder to expose (absolute path)")
+		eof := errors.Is(err, io.EOF)
+		if line == "" {
+			if eof {
+				fmt.Fprintf(stderr, "\ninput closed; aborting.\n")
+			} else {
+				fmt.Fprintf(stderr, "library path is required\n")
+			}
+			return "", 2
+		}
+		abs, verr := resolveLibraryDir(line)
+		if verr == nil {
+			return abs, 0
+		}
+		fmt.Fprintln(stderr, paint(ansiRed, "✗ "+verr.Error()))
+		if eof {
+			// The bad path came with a closed stream — no more input to
+			// retry with, so abort rather than spin to the cap.
+			return "", 2
+		}
+	}
+	fmt.Fprintf(stderr, "Too many invalid attempts. Aborting.\n")
+	return "", 2
 }
 
 // expandHome expands a leading "~" to $HOME, because operators paste
