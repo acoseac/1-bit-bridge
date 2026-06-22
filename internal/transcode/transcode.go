@@ -32,6 +32,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -719,34 +720,157 @@ func RunSox(ctx context.Context, j JobSpec) (int64, error) {
 	return info.Size(), nil
 }
 
-// PrecheckSox returns nil if the `sox` binary is on PATH and
-// reports a non-error stderr to `--version`. Returns ErrSoxMissing
-// if the binary can't be located, or a generic error if invocation
-// fails for any other reason. Called by both `bridge upscale` (CLI
-// entry point) and the `bridge serve` startup gate (Phase 2.5).
+// SoxInfo is the result of ProbeSox: where sox lives, its version, and —
+// crucially for the bridge's pipeline — whether the build has FLAC support.
+// The bridge forces `-t flac` for every conversion (see SoxArgs), so a
+// FLAC-less sox passes the bare runnable check but fails EVERY job at
+// runtime. FormatsKnown lets callers stay conservative: act on a confirmed
+// FLAC-absence only, never on an unparseable help output.
+type SoxInfo struct {
+	Path         string
+	Version      string   // e.g. "v14.4.2"; "" if the banner couldn't be parsed
+	Formats      []string // lowercased AUDIO FILE FORMATS tokens
+	FormatsKnown bool     // true iff the format block was found+parsed
+	HasFLAC      bool     // Formats contains "flac"
+}
+
+// soxLookPath / soxProbeCommand are the test seams for ProbeSox —
+// production points them at exec.LookPath / exec.CommandContext; tests
+// inject a fake binary path + canned `sox --help` output so the full probe
+// flow runs deterministically WITHOUT a real sox on the host (mirrors
+// tailscale.commandContext, manifest.renameFunc). Tests MUST restore both
+// via t.Cleanup; production code MUST NOT mutate them.
+var (
+	soxLookPath     = exec.LookPath
+	soxProbeCommand = exec.CommandContext
+)
+
+// soxSectionHeaderRE matches a sox --help section header line —
+// "AUDIO FILE FORMATS:", "AUDIO DEVICE DRIVERS:", "EFFECTS:", etc. Headers
+// are an ALL-CAPS word group ending in a colon at column 0; the lowercase
+// format tokens never match, so we terminate the format block on the NEXT
+// header regardless of its name (robust to sox builds that reorder or omit
+// later sections).
+var soxSectionHeaderRE = regexp.MustCompile(`^[A-Z][A-Z0-9 /]*:`)
+
+// soxAudioFileFormatsRE locates the start of the formats block. Matching the
+// ORIGINAL text case-insensitively (rather than strings.ToUpper(text) +
+// Index) avoids a full-output allocation per call AND is byte-accurate: a
+// non-ASCII char before the header whose uppercase form differs in byte
+// length would shift a ToUpper-derived index and corrupt the slice.
+var soxAudioFileFormatsRE = regexp.MustCompile(`(?i)AUDIO FILE FORMATS:`)
+
+// ProbeSox locates sox on PATH and inspects it with a SINGLE `sox --help`
+// spawn — the help output carries both the version banner and the
+// "AUDIO FILE FORMATS:" block, so one process call yields everything. The
+// error contract matches the old PrecheckSox exactly (ErrSoxMissing when
+// the binary is absent; a wrapped error on timeout / can't-start) so all
+// existing callers' errors.Is checks keep working.
 //
-// **Bounded by a 2 s timeout** (CodeRabbit second-pass on PR
-// #108) so a wedge from a broken PATH wrapper or a hung sox
-// process can't deadlock startup. `bridge serve` runs this
-// before opening the listen socket; without the timeout, every
-// service-manager restart with a misbehaving sox installation
-// would block forever instead of degrading cleanly.
-func PrecheckSox() error {
-	path, err := exec.LookPath("sox")
+// **Bounded by a 2 s timeout** (PR #108) wrapped around the INCOMING ctx:
+// a parent cancellation (CLI ^C, server shutdown) aborts the spawn early,
+// while the 2 s cap still applies when called via PrecheckSox(Background())
+// so a wedged PATH wrapper / hung sox can't deadlock startup.
+//
+// **Locale-pinned** (LC_ALL/LANG/LANGUAGE=C) so a translated help text
+// can't defeat the header match; CombinedOutput because some builds print
+// --help to stderr. A non-zero --help exit is NOT treated as failure (sox
+// --help legitimately exits non-zero on some builds) — only an empty
+// result or a timeout is.
+func ProbeSox(ctx context.Context) (SoxInfo, error) {
+	var info SoxInfo
+	path, err := soxLookPath("sox")
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrSoxMissing, err)
+		return info, fmt.Errorf("%w: %v", ErrSoxMissing, err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	info.Path = path
+
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, path, "--version")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return fmt.Errorf("sox --version timed out after 2s; broken PATH wrapper or hung process")
-		}
-		return fmt.Errorf("sox --version failed: %w (output: %s)", err, strings.TrimSpace(string(out)))
+	cmd := soxProbeCommand(ctx, path, "--help")
+	cmd.Env = append(os.Environ(), "LC_ALL=C", "LANG=C", "LANGUAGE=C")
+	out, runErr := cmd.CombinedOutput()
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return info, fmt.Errorf("sox --help timed out after 2s; broken PATH wrapper or hung process")
 	}
-	return nil
+	text := string(out)
+	if strings.TrimSpace(text) == "" {
+		// No output at all — couldn't actually run sox. Surface the
+		// underlying error (matches the old --version failure path).
+		if runErr != nil {
+			return info, fmt.Errorf("sox --help failed: %w", runErr)
+		}
+		return info, fmt.Errorf("sox --help produced no output")
+	}
+	info.Version = parseSoxVersion(text)
+	info.Formats, info.FormatsKnown = parseSoxFileFormats(text)
+	for _, f := range info.Formats {
+		if f == "flac" {
+			info.HasFLAC = true
+			break
+		}
+	}
+	return info, nil
+}
+
+// PrecheckSox returns nil if `sox` is on PATH and runnable. It is a thin
+// wrapper over ProbeSox (one probe implementation, no duplication); the
+// FLAC-aware callers use ProbeSox directly while the boolean-only sites
+// (e.g. the public /v1/upscale/stats adapter) keep this signature.
+func PrecheckSox() error {
+	_, err := ProbeSox(context.Background())
+	return err
+}
+
+// parseSoxVersion extracts the sox version token ("v14.4.2") from the
+// "sox: SoX v14.4.2" banner present in --help / --version output.
+// Best-effort and cosmetic. Returns "" when absent OR when the token has no
+// digit — some builds (notably Homebrew HEAD) print a bare "SoX v" with no
+// number, which is not a useful version to surface.
+func parseSoxVersion(text string) string {
+	const marker = "SoX "
+	i := strings.Index(text, marker)
+	if i < 0 {
+		return ""
+	}
+	rest := text[i+len(marker):]
+	end := strings.IndexFunc(rest, func(r rune) bool {
+		return r == ' ' || r == '\t' || r == '\n' || r == '\r'
+	})
+	tok := rest
+	if end >= 0 {
+		tok = rest[:end]
+	}
+	tok = strings.TrimSpace(tok)
+	if strings.IndexFunc(tok, func(r rune) bool { return r >= '0' && r <= '9' }) < 0 {
+		return "" // no digit (e.g. bare "v") — not a usable version
+	}
+	return tok
+}
+
+// parseSoxFileFormats extracts the audio file-format tokens from sox --help.
+// The block starts at "AUDIO FILE FORMATS:" and runs until the next ALL-CAPS
+// section header (soxSectionHeaderRE) or EOF — so it survives single-line,
+// flush-left-wrapped, and indented-wrapped layouts without depending on the
+// next section's name. Returns (formats, true) when the block is found;
+// (nil, false) otherwise (callers then conservatively assume FLAC present).
+func parseSoxFileFormats(text string) ([]string, bool) {
+	loc := soxAudioFileFormatsRE.FindStringIndex(text)
+	if loc == nil {
+		return nil, false
+	}
+	rest := text[loc[1]:] // remainder of the header line + everything after
+	var formats []string
+	for _, line := range strings.Split(rest, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if soxSectionHeaderRE.MatchString(strings.TrimSpace(line)) {
+			break // next section header terminates the format block
+		}
+		for _, tok := range strings.Fields(line) {
+			formats = append(formats, strings.ToLower(tok))
+		}
+	}
+	return formats, true
 }
 
 // ErrSoxMissing is returned by PrecheckSox when `sox` isn't on

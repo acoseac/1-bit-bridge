@@ -378,6 +378,13 @@
             installed on the bridge host:
           </p>
           <pre class="install-hint">{{.Data.UpscaleSoxInstallHint}}</pre>
+        {{else if .Data.UpscaleSoxFLACMissing}}
+          <p class="warn-banner">
+            <strong>sox lacks FLAC support.</strong> The upscaler's pipeline writes
+            FLAC, so the feature will degrade to off at startup until you reinstall
+            sox with FLAC on the bridge host:
+          </p>
+          <pre class="install-hint">{{.Data.UpscaleSoxFormatHint}}</pre>
         {{end}}
       </div>
 
@@ -447,6 +454,13 @@
             feature-off at startup until sox is installed on the bridge host:
           </p>
           <pre class="install-hint">{{.Data.UpscaleSoxInstallHint}}</pre>
+        {{else if .Data.UpscaleSoxFLACMissing}}
+          <p class="warn-banner">
+            <strong>sox lacks FLAC support.</strong> Audio analysis decodes FLAC
+            through sox; the feature will degrade to off at startup until you
+            reinstall sox with FLAC on the bridge host:
+          </p>
+          <pre class="install-hint">{{.Data.UpscaleSoxFormatHint}}</pre>
         {{end}}
       </div>
 

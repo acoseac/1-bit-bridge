@@ -236,6 +236,22 @@ type settingsResponse struct {
 	// Multi-line strings work via the template's `pre`
 	// rendering. Empty when sox is already available.
 	UpscaleSoxInstallHint string `json:"-"`
+	// UpscaleSoxHasFLAC reports whether the host sox build has FLAC
+	// support. The bridge forces `-t flac` for every conversion, so a
+	// sox WITHOUT FLAC passes the availability check but fails every
+	// job at runtime. nil when not wired OR `sox --help` couldn't be
+	// parsed (conservative — the UI doesn't assert a guess). Admin-only;
+	// deliberately NOT on the public /v1/upscale/stats wire.
+	UpscaleSoxHasFLAC *bool `json:"upscaleSoxHasFLAC,omitempty"`
+	// UpscaleSoxFLACMissing is the template-only convenience boolean:
+	// sox IS present but lacks FLAC (so the tile shows the format-fix
+	// hint instead of the install hint). json:"-" keeps the JSON API's
+	// FLAC signal on the UpscaleSoxHasFLAC tri-state.
+	UpscaleSoxFLACMissing bool `json:"-"`
+	// UpscaleSoxFormatHint is the OS-appropriate "reinstall sox with
+	// FLAC" one-liner (runtime.GOOS resolves on the bridge host).
+	// Empty unless UpscaleSoxFLACMissing. Template-only.
+	UpscaleSoxFormatHint string `json:"-"`
 	// UpscaleStoragePath is the absolute on-disk directory the
 	// long-lived transcode pool writes converted sidecar files
 	// to. Surfaced to the operator on the Settings → Audio tab
@@ -813,7 +829,21 @@ func (s *Server) apiSettingsGet(w http.ResponseWriter, r *http.Request) {
 		ok := s.deps.UpscalePrecheck() == nil
 		resp.UpscaleSoxAvailable = &ok
 	}
+	if hasFLAC, known := s.soxFLACStatus(); known {
+		resp.UpscaleSoxHasFLAC = &hasFLAC
+	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// soxFLACStatus returns whether the host sox build has FLAC support via the
+// nil-safe UpscaleSoxFLAC closure. known is false when the closure isn't
+// wired (test harness) OR `sox --help` couldn't be parsed — callers then
+// omit the FLAC field rather than asserting a guess.
+func (s *Server) soxFLACStatus() (hasFLAC, known bool) {
+	if s.deps.UpscaleSoxFLAC == nil {
+		return false, false
+	}
+	return s.deps.UpscaleSoxFLAC()
 }
 
 // --- PATCH /api/settings ---

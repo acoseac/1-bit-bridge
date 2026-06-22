@@ -80,7 +80,7 @@ type transcodeBootstrapResult struct {
 //
 // `gcMode == true` skips the sox precheck — GC sweeps only consult
 // the DB and the filesystem, no sox required.
-func bootstrapTranscodeCmd(stderr io.Writer, configPath, qualityFlag string, gcMode bool) (*transcodeBootstrapResult, int) {
+func bootstrapTranscodeCmd(ctx context.Context, stderr io.Writer, configPath, qualityFlag string, gcMode bool) (*transcodeBootstrapResult, int) {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "config load: %v\n", err)
@@ -96,19 +96,11 @@ func bootstrapTranscodeCmd(stderr io.Writer, configPath, qualityFlag string, gcM
 		return nil, 2
 	}
 
-	// SoX-on-PATH probe. The pure-function part of the feature
-	// (manifest queries, GC) doesn't need sox, so we defer this
-	// check until just before a conversion would actually fire.
-	if !gcMode {
-		if err := transcode.PrecheckSox(); err != nil {
-			if errors.Is(err, transcode.ErrSoxMissing) {
-				fmt.Fprintf(stderr, "%v\n\nInstall sox:\n", err)
-				printSoxInstallHint(stderr)
-			} else {
-				fmt.Fprintf(stderr, "sox precheck: %v\n", err)
-			}
-			return nil, 1
-		}
+	// SoX-on-PATH + FLAC probe. The pure-function part of the feature
+	// (manifest queries, GC) doesn't need sox, so we defer this check
+	// until just before a conversion would actually fire.
+	if !gcMode && !soxCLIReady(ctx, stderr, "the upscaler needs for its internal pipeline") {
+		return nil, 1
 	}
 
 	q := transcode.Quality(qualityFlag)
@@ -168,7 +160,7 @@ func upscaleCmd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		return 2
 	}
 
-	r, exitCode := bootstrapTranscodeCmd(stderr, *configPath, *quality, *gc)
+	r, exitCode := bootstrapTranscodeCmd(ctx, stderr, *configPath, *quality, *gc)
 	if r == nil {
 		return exitCode
 	}
@@ -851,4 +843,77 @@ func printSoxInstallHint(w io.Writer) {
 	default:
 		fmt.Fprint(w, "  Install `sox` via your platform's package manager, or see https://sox.sourceforge.net\n")
 	}
+}
+
+// printSoxFormatHint surfaces per-OS one-liners for the narrower failure
+// where sox IS installed but its build lacks FLAC support — the bridge
+// forces `-t flac` for every conversion, so a FLAC-less sox fails at
+// runtime. On Debian/Ubuntu FLAC ships in a separate plugin package
+// (libsox-fmt-all); Fedora/Arch/brew/choco bundle it, so the fix there is a
+// reinstall. Mirror of soxFormatHintForCurrentOS in internal/admin — keep
+// the two in sync.
+func printSoxFormatHint(w io.Writer) {
+	switch runtime.GOOS {
+	case "darwin":
+		fmt.Fprint(w, "  brew reinstall sox   # the Homebrew bottle includes FLAC\n")
+	case "linux":
+		fmt.Fprint(w, "  Debian/Ubuntu:  sudo apt install libsox-fmt-all\n")
+		fmt.Fprint(w, "  Fedora:         sudo dnf install sox        # bundles FLAC\n")
+		fmt.Fprint(w, "  Arch:           sudo pacman -S sox          # bundles FLAC\n")
+	case "windows":
+		fmt.Fprint(w, "  choco install sox.portable\n")
+		fmt.Fprint(w, "  (or download a full build from https://sourceforge.net/projects/sox/)\n")
+	default:
+		fmt.Fprint(w, "  Reinstall `sox` with FLAC support, or see https://sox.sourceforge.net\n")
+	}
+}
+
+// soxFeatureReady reports whether sox is usable for an offline-decode
+// feature (upscale / analysis) at `bridge serve` startup: present on PATH
+// AND its build has FLAC support (the bridge forces `-t flac`, so a
+// FLAC-less sox would fail every job at runtime). On any disqualifying
+// condition it writes an operator-facing reason to stderr and returns false
+// so the caller degrades the feature to "off" in-memory — the rest of the
+// server keeps running. An unparseable `sox --help` is treated
+// conservatively as "FLAC present": never disable a working install over a
+// help-output reword. ctx is propagated so a SIGINT during startup aborts
+// the probe; the 2 s cap lives inside ProbeSox regardless.
+func soxFeatureReady(ctx context.Context, feature string, stderr io.Writer) bool {
+	info, err := transcode.ProbeSox(ctx)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: feature is enabled in bridge.yaml but sox is not available — disabling: %v\n", feature, err)
+		return false
+	}
+	if info.FormatsKnown && !info.HasFLAC {
+		fmt.Fprintf(stderr, "%s: feature is enabled in bridge.yaml but the installed sox build lacks FLAC support (needed for the internal pipeline) — disabling\n", feature)
+		return false
+	}
+	return true
+}
+
+// soxCLIReady is the CLI-side sox preflight shared by `bridge upscale`,
+// `bridge optimize`, and `bridge analyze`: it checks sox is present AND its
+// build has FLAC support, printing the appropriate install / format hint to
+// stderr on failure and returning false so the caller can exit. featureNeed
+// completes the sentence "…lacks FLAC support, which <featureNeed>." The
+// conservative FormatsKnown gate matches soxFeatureReady. Extracted so the
+// per-subcommand call sites stay one line (and keeps analyzeCmd under the
+// cognitive-complexity budget).
+func soxCLIReady(ctx context.Context, stderr io.Writer, featureNeed string) bool {
+	info, err := transcode.ProbeSox(ctx)
+	if err != nil {
+		if errors.Is(err, transcode.ErrSoxMissing) {
+			fmt.Fprintf(stderr, "%v\n\nInstall sox:\n", err)
+			printSoxInstallHint(stderr)
+		} else {
+			fmt.Fprintf(stderr, "sox precheck: %v\n", err)
+		}
+		return false
+	}
+	if info.FormatsKnown && !info.HasFLAC {
+		fmt.Fprintf(stderr, "sox is installed but its build lacks FLAC support, which %s.\n\nFix:\n", featureNeed)
+		printSoxFormatHint(stderr)
+		return false
+	}
+	return true
 }

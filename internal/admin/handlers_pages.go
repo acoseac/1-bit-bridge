@@ -279,6 +279,17 @@ func (s *Server) pageSettings(w http.ResponseWriter, r *http.Request) {
 			data.UpscaleSoxInstallHint = soxInstallHintForCurrentOS()
 		}
 	}
+	// FLAC sub-check: the bridge forces `-t flac`, so a sox WITHOUT FLAC
+	// passes the availability check above but fails every job at runtime.
+	// Only flag it when sox itself IS present — a missing sox is already
+	// covered by the install-hint block above (the template uses else-if).
+	if hasFLAC, known := s.soxFLACStatus(); known {
+		data.UpscaleSoxHasFLAC = &hasFLAC
+		if !data.UpscaleSoxMissing && !hasFLAC {
+			data.UpscaleSoxFLACMissing = true
+			data.UpscaleSoxFormatHint = soxFormatHintForCurrentOS()
+		}
+	}
 	s.renderPage(w, "settings", data)
 }
 
@@ -301,6 +312,28 @@ func soxInstallHintForCurrentOS() string {
 			"(or download from https://sourceforge.net/projects/sox/)"
 	default:
 		return "Install sox via your platform's package manager, or see https://sox.sourceforge.net"
+	}
+}
+
+// soxFormatHintForCurrentOS returns the per-OS one-liner for the narrower
+// case where sox IS installed but its build lacks FLAC support — the bridge
+// forces `-t flac`, so a FLAC-less sox fails at runtime. On Debian/Ubuntu
+// FLAC ships in a separate plugin package (libsox-fmt-all); Fedora/Arch/
+// brew/choco bundle it, so the fix there is a reinstall. Mirrors the CLI's
+// `printSoxFormatHint` in cmd/bridge/upscale.go — keep the two in sync.
+func soxFormatHintForCurrentOS() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return "brew reinstall sox   # the Homebrew bottle includes FLAC"
+	case "linux":
+		return "Debian/Ubuntu:  sudo apt install libsox-fmt-all\n" +
+			"Fedora:         sudo dnf install sox        # bundles FLAC\n" +
+			"Arch:           sudo pacman -S sox          # bundles FLAC"
+	case "windows":
+		return "choco install sox.portable\n" +
+			"(or download a full build from https://sourceforge.net/projects/sox/)"
+	default:
+		return "Reinstall sox with FLAC support, or see https://sox.sourceforge.net"
 	}
 }
 
