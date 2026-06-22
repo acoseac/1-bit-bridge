@@ -1837,18 +1837,12 @@ function initSettings() {
     }
   });
 
-  // v1.2 Audio quality stats poller. Refreshes the upscale tile
-  // every 5 s while the Settings page is the active tab. Cheap
-  // (single SQL COUNT + a mutex-protected pool snapshot in the
-  // handler); the visibility check (the tile is hidden when the
-  // feature is off) keeps the dashboard quiet for operators
-  // who never enabled upscaling.
-  startUpscaleStatsPoller();
-  // Audio analysis stats poller — same cadence/visibility shape as
-  // the upscale tile, minus the live pool (generation is CLI-driven).
-  startAnalysisStatsPoller();
-  // Typed-phrase clear-all-variants modal wiring. Lives in
-  // initSettings because the button + dialog are on this page.
+  // Audio-quality + audio-analysis tiles are driven by the SSE
+  // `upscale` / `analysis` events (applyUpscaleStats / applyAnalysisStats)
+  // — the initial-emit hydrates them on page load and the 5 s medium tick
+  // refreshes them, diff-suppressed. No per-tab 5 s pollers. The
+  // clear-all-variants modal still does a one-shot refresh for immediate
+  // post-delete feedback.
   initUpscaleClearAllModal();
 }
 
@@ -1921,11 +1915,10 @@ function initUpscaleClearAllModal() {
         `Done · deleted ${data.deletedCount} variants, ` +
         `freed ${formatBytes(data.freedBytes ?? 0)}.`;
       // Refresh stats so the "Cached variants" / "Cached on disk"
-      // counters reflect the post-delete state. The poller would
-      // catch up within 5 s anyway, but the immediate refresh
-      // closes the visual loop on the operator's action.
-      const tile = document.getElementById("upscale-stats");
-      if (tile) refreshUpscaleStats(tile);
+      // counters reflect the post-delete state. The SSE `upscale` frame
+      // would catch up within 5 s anyway, but this one-shot fetch closes
+      // the visual loop on the operator's action immediately.
+      refreshUpscaleStats();
       // Auto-close after a short readback window so the operator
       // sees the result before the modal disappears.
       setTimeout(() => {
@@ -1938,108 +1931,83 @@ function initUpscaleClearAllModal() {
   });
 }
 
-const upscaleStatsPollMs = 5000;
-let upscaleStatsTimer = null;
-
-function startUpscaleStatsPoller() {
-  // Defensive: clear any prior timer when re-entering the
-  // Settings page (single-page navigation reuses initSettings).
-  if (upscaleStatsTimer) {
-    clearInterval(upscaleStatsTimer);
-    upscaleStatsTimer = null;
-  }
+// applyUpscaleStats renders the Settings "Audio quality" tile from an
+// /api/upscale/stats payload. Driven by the SSE `upscale` event (and the
+// clear-all modal's one-shot refreshUpscaleStats). Looks up the tile
+// itself, so it's a no-op on every page except Settings.
+function applyUpscaleStats(r) {
   const tile = document.getElementById("upscale-stats");
-  if (!tile) return; // not on the settings page
-  refreshUpscaleStats(tile);
-  upscaleStatsTimer = setInterval(() => refreshUpscaleStats(tile), upscaleStatsPollMs);
+  if (!tile || !r) return;
+  // Hide the whole tile when the feature has never been used (no cached
+  // variants AND feature is currently off). A disabled feature with
+  // cached files keeps the tile up so the operator sees historical state
+  // and disk usage.
+  const hasHistory = r.cachedVariants > 0;
+  if (!r.enabled && !hasHistory) {
+    tile.hidden = true;
+    return;
+  }
+  tile.hidden = false;
+  // Honest per-kind split — the combined "cached variants" line used
+  // to lump upscaled + optimized together, so an all-optimize library
+  // read as if it had upscaled work it never did.
+  const upN = r.upscaledVariants ?? 0;
+  const optN = r.optimizedVariants ?? 0;
+  setText("upscale-upscaled", `${upN} file${upN === 1 ? "" : "s"} · ${formatBytes(r.upscaledBytes ?? 0)}`);
+  setText("upscale-optimized", `${optN} file${optN === 1 ? "" : "s"} · ${formatBytes(r.optimizedBytes ?? 0)}`);
+  setText("upscale-cached-count", r.cachedVariants ?? 0);
+  setText("upscale-cached-bytes", formatBytes(r.cachedBytes ?? 0));
+  if (r.pool) {
+    setText("upscale-workers", r.pool.workers);
+    setText("upscale-queue", r.pool.queueLen + " / " + r.pool.queueCap);
+    setText("upscale-inflight", r.pool.inflight);
+    setText("upscale-done", r.pool.done);
+    setText("upscale-failed", r.pool.failed);
+  } else {
+    // Feature is off but we have cached variants — show the historical
+    // fields, em-dash the live ones to communicate "no live pool".
+    setText("upscale-workers", "—");
+    setText("upscale-queue", "—");
+    setText("upscale-inflight", "—");
+    setText("upscale-done", "—");
+    setText("upscale-failed", "—");
+  }
+  // Toggle the "Clear all upscaled variants" button: nothing to clear
+  // when the cache is empty, so disable to communicate that visually.
+  const clearBtn = document.getElementById("upscale-clear-all-btn");
+  if (clearBtn) {
+    clearBtn.disabled = !(r.cachedVariants > 0);
+  }
 }
 
-async function refreshUpscaleStats(tile) {
+// refreshUpscaleStats does a one-shot fetch + render — used by the
+// clear-all modal to close the visual loop immediately (the SSE `upscale`
+// frame would otherwise catch up within 5 s).
+async function refreshUpscaleStats() {
   try {
-    const r = await API.get("/api/upscale/stats");
-    // Hide the whole tile when the feature has never been used
-    // (no cached variants AND feature is currently off). A
-    // disabled feature with cached files keeps the tile up so
-    // the operator sees historical state and disk usage.
-    const hasHistory = r.cachedVariants > 0;
-    if (!r.enabled && !hasHistory) {
-      tile.hidden = true;
-      return;
-    }
-    tile.hidden = false;
-    // Honest per-kind split — the combined "cached variants" line used
-    // to lump upscaled + optimized together, so an all-optimize library
-    // read as if it had upscaled work it never did.
-    const upN = r.upscaledVariants ?? 0;
-    const optN = r.optimizedVariants ?? 0;
-    setText("upscale-upscaled", `${upN} file${upN === 1 ? "" : "s"} · ${formatBytes(r.upscaledBytes ?? 0)}`);
-    setText("upscale-optimized", `${optN} file${optN === 1 ? "" : "s"} · ${formatBytes(r.optimizedBytes ?? 0)}`);
-    setText("upscale-cached-count", r.cachedVariants ?? 0);
-    setText("upscale-cached-bytes", formatBytes(r.cachedBytes ?? 0));
-    if (r.pool) {
-      setText("upscale-workers", r.pool.workers);
-      setText("upscale-queue", r.pool.queueLen + " / " + r.pool.queueCap);
-      setText("upscale-inflight", r.pool.inflight);
-      setText("upscale-done", r.pool.done);
-      setText("upscale-failed", r.pool.failed);
-    } else {
-      // Feature is off but we have cached variants — show the
-      // historical fields, em-dash the live ones to communicate
-      // "no live pool right now".
-      setText("upscale-workers", "—");
-      setText("upscale-queue", "—");
-      setText("upscale-inflight", "—");
-      setText("upscale-done", "—");
-      setText("upscale-failed", "—");
-    }
-    // Toggle the "Clear all upscaled variants" button: nothing to
-    // clear when the cache is empty, so disable to communicate
-    // that visually. Re-enables on the next stats tick if a fresh
-    // batch lands cached variants while this page is open.
-    const clearBtn = document.getElementById("upscale-clear-all-btn");
-    if (clearBtn) {
-      clearBtn.disabled = !(r.cachedVariants > 0);
-    }
+    applyUpscaleStats(await API.get("/api/upscale/stats"));
   } catch (err) {
-    // Stats endpoint failure isn't user-visible — log to
-    // console so a developer debugging on the page can see it,
-    // but don't disrupt the rest of the Settings UI.
     console.warn("upscale stats fetch failed:", err);
   }
 }
 
-const analysisStatsPollMs = 5000;
-let analysisStatsTimer = null;
-
-function startAnalysisStatsPoller() {
-  if (analysisStatsTimer) {
-    clearInterval(analysisStatsTimer);
-    analysisStatsTimer = null;
-  }
+// applyAnalysisStats renders the Settings "Audio analysis" tile from an
+// /api/analysis/stats payload (SSE `analysis` event). No-op off Settings.
+function applyAnalysisStats(r) {
   const tile = document.getElementById("analysis-stats");
-  if (!tile) return; // not on the settings page
-  refreshAnalysisStats(tile);
-  analysisStatsTimer = setInterval(() => refreshAnalysisStats(tile), analysisStatsPollMs);
-}
-
-async function refreshAnalysisStats(tile) {
-  try {
-    const r = await API.get("/api/analysis/stats");
-    // Hide the tile when the feature has never been used (no cached
-    // waveforms AND currently off). A disabled feature with cached
-    // files keeps the tile up so the operator sees historical state.
-    const hasHistory = (r.cachedWaveforms ?? 0) > 0;
-    if (!r.enabled && !hasHistory) {
-      tile.hidden = true;
-      return;
-    }
-    tile.hidden = false;
-    setText("analysis-cached-count", r.cachedWaveforms ?? 0);
-    setText("analysis-cached-bytes", formatBytes(r.cachedBytes ?? 0));
-    setText("analysis-storage-path", r.storagePath ?? "—");
-  } catch (err) {
-    console.warn("analysis stats fetch failed:", err);
+  if (!tile || !r) return;
+  // Hide the tile when the feature has never been used (no cached
+  // waveforms AND currently off). A disabled feature with cached files
+  // keeps the tile up so the operator sees historical state.
+  const hasHistory = (r.cachedWaveforms ?? 0) > 0;
+  if (!r.enabled && !hasHistory) {
+    tile.hidden = true;
+    return;
   }
+  tile.hidden = false;
+  setText("analysis-cached-count", r.cachedWaveforms ?? 0);
+  setText("analysis-cached-bytes", formatBytes(r.cachedBytes ?? 0));
+  setText("analysis-storage-path", r.storagePath ?? "—");
 }
 
 function setText(id, value) {
@@ -2152,6 +2120,8 @@ function startEventStream() {
   es.addEventListener("pairing",     seen((e) => safeApply("pairing",     e.data, applyPairing)));
   es.addEventListener("updates",     seen((e) => safeApply("updates",     e.data, renderUpdateTile)));
   es.addEventListener("tailscale",   seen((e) => safeApply("tailscale",   e.data, renderTailscaleTile)));
+  es.addEventListener("upscale",     seen((e) => safeApply("upscale",     e.data, applyUpscaleStats)));
+  es.addEventListener("analysis",    seen((e) => safeApply("analysis",    e.data, applyAnalysisStats)));
 
   es.onopen = () => {
     lastEventSourceSeenAt = Date.now();

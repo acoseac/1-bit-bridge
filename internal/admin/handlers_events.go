@@ -2,6 +2,7 @@ package admin
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -100,6 +101,8 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 		lastUpdates     []byte
 		lastTailscale   []byte
 		lastComposition []byte
+		lastUpscale     []byte
+		lastAnalysis    []byte
 	)
 
 	// publish writes one named SSE frame and flushes. Returns the
@@ -185,6 +188,18 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 		return marshalAndPublish("composition", s.getCompositionSnapshot(), &lastComposition)
 	}
 
+	// upscale + analysis telemetry — these replace the Settings page's
+	// former /api/upscale/stats and /api/analysis/stats 5 s pollers (one
+	// HTTP request per open tab). Same snapshot the REST endpoints serve
+	// (kept as thin wrappers + first-paint fallback). Background ctx — the
+	// publisher isn't request-scoped.
+	publishUpscale := func() error {
+		return marshalAndPublish("upscale", s.getUpscaleStatsSnapshot(context.Background()), &lastUpscale)
+	}
+	publishAnalysis := func() error {
+		return marshalAndPublish("analysis", s.getAnalysisStatsSnapshot(context.Background()), &lastAnalysis)
+	}
+
 	// Initial snapshot — fires synchronously after headers so the
 	// page hydrates on connect without waiting for the first tick.
 	// Without this the dashboard would rely on its server-rendered
@@ -192,7 +207,8 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 	// (pairing, endpoints) that don't have server-rendered first
 	// paint at all. Bail on any write error: client already gone.
 	for _, f := range []func() error{
-		publishStats, publishPairing, publishEndpoints, publishUpdates, publishTailscale, publishComposition,
+		publishStats, publishPairing, publishEndpoints, publishUpdates, publishTailscale,
+		publishComposition, publishUpscale, publishAnalysis,
 	} {
 		if err := f(); err != nil {
 			return
@@ -241,6 +257,14 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if err := publishEndpoints(); err != nil {
+				return
+			}
+			// Settings-page telemetry (replaces the former 5 s pollers).
+			// Diff-suppressed: idle bridges emit nothing between heartbeats.
+			if err := publishUpscale(); err != nil {
+				return
+			}
+			if err := publishAnalysis(); err != nil {
 				return
 			}
 		case <-slowTk.C:
