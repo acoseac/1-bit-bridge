@@ -284,8 +284,14 @@ func TestShufflePathsByWeek_DeterministicAndSeedSensitive(t *testing.T) {
 }
 
 func TestSeedFromISOWeek_StableAcrossCalls(t *testing.T) {
-	if SeedFromISOWeek(2026, 25) != SeedFromISOWeek(2026, 25) {
-		t.Fatal("SeedFromISOWeek must be deterministic for the same input")
+	// Store-then-compare so a static-analyzer (SA4000) doesn't fold the two
+	// calls into the same expression — and the test actually exercises
+	// determinism instead of comparing a value to itself (CodeRabbit / Sonar
+	// on PR #431).
+	first := SeedFromISOWeek(2026, 25)
+	second := SeedFromISOWeek(2026, 25)
+	if first != second {
+		t.Fatalf("SeedFromISOWeek must be deterministic for the same input: %d != %d", first, second)
 	}
 	if SeedFromISOWeek(2026, 25) == SeedFromISOWeek(2026, 26) {
 		t.Fatal("adjacent weeks must produce distinct seeds")

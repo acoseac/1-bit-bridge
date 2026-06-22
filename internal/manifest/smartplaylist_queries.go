@@ -416,20 +416,26 @@ func (s *Store) PlayStatsByInterfaceInWindow(ctx context.Context, sinceNS int64,
 // OnRepeatCandidates returns track paths whose per-day repeat behaviour
 // suggests sustained obsession — for the "On Repeat" family. A track qualifies
 // when, in [sinceNS, now), it has:
-//   - at least `minTotalPlays` total qualifying plays (sum across all
-//     device-day buckets), AND
-//   - at least `minRepeatDays` distinct device-day buckets in which the path
-//     was played ≥ 2 times.
+//   - at least `minTotalPlays` total qualifying plays (summed across all
+//     the user's paired devices), AND
+//   - at least `minRepeatDays` distinct CALENDAR DAYS on which the path
+//     was played ≥ 2 times (devices aggregated within the day — playing
+//     once on iPhone + once on iPad on Monday counts as 2 plays on Monday,
+//     and that day contributes to `repeat_days`).
 //
-// The query is TWO-LEVEL because a single GROUP BY (path, device_token) with
-// HAVING ≥ 2 plays-per-day is structurally impossible — HAVING would evaluate
-// the total count, not the per-day count. The inner CTE groups by
-// (path, device_token, daily_date) to isolate daily counts; the outer
-// aggregation sums totals and counts daily buckets that crossed the threshold,
-// then collapses to one row per path (summing across the user's paired
-// devices). Returns PlayStatRow with Plays = total qualifying plays,
-// LastPlayed = max day_last_played, FirstPlayed = min day_first_played.
-// Read path — no s.mu.
+// The query is TWO-LEVEL because a single GROUP BY (path, day) with HAVING
+// ≥ 2 plays-per-day on a flat path-level aggregate is structurally
+// impossible — HAVING would evaluate the total count, not the per-day count.
+// The inner CTE groups by (path, day) to isolate daily counts (collapsing
+// across devices — the user is one human); the outer aggregation sums total
+// plays and counts daily buckets that crossed the threshold.
+//
+// Important: device_token is NOT in the inner GROUP BY. An earlier version
+// included it and double-counted single calendar days with ≥ 2 plays per
+// device-day bucket (e.g. iPhone 2 + iPad 2 on Monday surfaced as 2 repeat
+// days instead of 1) — CodeRabbit caught it on PR #431. Returns PlayStatRow
+// with Plays = total qualifying plays, LastPlayed = max day_last_played,
+// FirstPlayed = min day_first_played. Read path — no s.mu.
 func (s *Store) OnRepeatCandidates(ctx context.Context, sinceNS int64, minDuration float64, minTotalPlays, minRepeatDays, limit int) ([]PlayStatRow, error) {
 	limit = clampLimit(limit, 100, 5000)
 	if minTotalPlays < 1 {
@@ -439,16 +445,15 @@ func (s *Store) OnRepeatCandidates(ctx context.Context, sinceNS int64, minDurati
 		minRepeatDays = 1
 	}
 	q := `
-		WITH daily_plays AS (
+		WITH per_day AS (
 			SELECT path,
-			       device_token,
 			       date(started_at / 1000000000, 'unixepoch') AS day,
-			       COUNT(*)            AS plays_that_day,
-			       MAX(started_at)     AS day_last_played,
-			       MIN(started_at)     AS day_first_played
+			       COUNT(*)        AS plays_that_day,
+			       MAX(started_at) AS day_last_played,
+			       MIN(started_at) AS day_first_played
 			  FROM playback_history
 			 WHERE duration_used >= ? AND started_at >= ?
-			 GROUP BY path, device_token, day
+			 GROUP BY path, day
 		),
 		per_path AS (
 			SELECT path,
@@ -456,7 +461,7 @@ func (s *Store) OnRepeatCandidates(ctx context.Context, sinceNS int64, minDurati
 			       SUM(CASE WHEN plays_that_day >= 2 THEN 1 ELSE 0 END) AS repeat_days,
 			       MAX(day_last_played)                               AS last_played,
 			       MIN(day_first_played)                              AS first_played
-			  FROM daily_plays
+			  FROM per_day
 			 GROUP BY path
 		)
 		SELECT path, total_plays, last_played, first_played
@@ -486,15 +491,20 @@ func (s *Store) LovedArtistDeepCuts(ctx context.Context, lovedSinceNS int64, lov
 	if lovedMinPlays < 1 {
 		lovedMinPlays = 3
 	}
+	// COALESCE on the JOIN/PARTITION key blocks SQLite from using any index
+	// on json_extract(tags_json, '$.artist'); bare json_extract evaluates to
+	// NULL for missing artists and `NULL != ''` is falsy, so the empty-string
+	// filter is preserved without the COALESCE wrapper (Gemini bot review on
+	// PR #431).
 	q := `
 		WITH loved_artists AS (
-			SELECT COALESCE(json_extract(t.tags_json, '$.artist'), '') AS artist,
+			SELECT json_extract(t.tags_json, '$.artist') AS artist,
 			       COUNT(*) AS plays_in_window
 			  FROM playback_history ph
 			  JOIN tracks t ON t.path = ph.path
 			 WHERE ph.duration_used >= ?
 			   AND ph.started_at  >= ?
-			   AND COALESCE(json_extract(t.tags_json, '$.artist'), '') != ''
+			   AND json_extract(t.tags_json, '$.artist') != ''
 			 GROUP BY artist
 			HAVING plays_in_window >= ?
 		),
@@ -506,14 +516,14 @@ func (s *Store) LovedArtistDeepCuts(ctx context.Context, lovedSinceNS int64, lov
 		),
 		eligible AS (
 			SELECT t.path,
-			       COALESCE(json_extract(t.tags_json, '$.artist'), '') AS artist,
+			       la.artist AS artist,
 			       ROW_NUMBER() OVER (
-			         PARTITION BY COALESCE(json_extract(t.tags_json, '$.artist'), '')
+			         PARTITION BY la.artist
 			         ORDER BY t.path
 			       ) AS rn
 			  FROM tracks t
 			  JOIN loved_artists la
-			    ON la.artist = COALESCE(json_extract(t.tags_json, '$.artist'), '')
+			    ON la.artist = json_extract(t.tags_json, '$.artist')
 			 WHERE t.path NOT IN (SELECT path FROM recently_played)
 		)
 		SELECT path, 1 AS plays, 0 AS last_played, 0 AS first_played

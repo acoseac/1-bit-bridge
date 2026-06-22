@@ -469,6 +469,13 @@ func TestOnRepeatCandidates_DevicesAggregateAcrossPath(t *testing.T) {
 	s := newSPStore(t)
 	ctx := context.Background()
 	mustUpsertTrack(t, s, &Track{Path: "/shared.flac"})
+	// Negative case: /split-day.flac is played 2× iPhone + 2× iPad on only TWO
+	// calendar days. An earlier device-day-counting implementation would
+	// register repeat_days = 4 (2 device-day buckets per day × 2 days) and
+	// SURFACE the track at minRepeatDays=3 — but the user only listened on 2
+	// distinct days, so the family must NOT include it. Locks in the
+	// "distinct calendar days, devices collapsed" contract.
+	mustUpsertTrack(t, s, &Track{Path: "/split-day.flac"})
 
 	now := utcNS(2026, 1, 20, 12, 0)
 	day := int64(24 * time.Hour)
@@ -479,11 +486,22 @@ func TestOnRepeatCandidates_DevicesAggregateAcrossPath(t *testing.T) {
 			PlaybackHistoryRow{DeviceToken: "iphone", Path: "/shared.flac", StartedAt: now - d*day - 600*int64(time.Second), DurationUsed: 200},
 		)
 	}
-	// iPad: same days, 2 plays each — adds to total_plays + repeat_days.
+	// iPad: same days, 2 plays each — adds to total_plays. Must NOT inflate
+	// repeat_days (each calendar day still counts ONCE regardless of how many
+	// devices crossed the per-day-≥-2 threshold on it).
 	for d := int64(1); d <= 3; d++ {
 		mustInsertHistory(t, s,
 			PlaybackHistoryRow{DeviceToken: "ipad", Path: "/shared.flac", StartedAt: now - d*day, DurationUsed: 200},
 			PlaybackHistoryRow{DeviceToken: "ipad", Path: "/shared.flac", StartedAt: now - d*day - 600*int64(time.Second), DurationUsed: 200},
+		)
+	}
+	// /split-day.flac negative case: only 2 calendar days, 8 total plays.
+	for d := int64(1); d <= 2; d++ {
+		mustInsertHistory(t, s,
+			PlaybackHistoryRow{DeviceToken: "iphone", Path: "/split-day.flac", StartedAt: now - d*day, DurationUsed: 200},
+			PlaybackHistoryRow{DeviceToken: "iphone", Path: "/split-day.flac", StartedAt: now - d*day - 600*int64(time.Second), DurationUsed: 200},
+			PlaybackHistoryRow{DeviceToken: "ipad", Path: "/split-day.flac", StartedAt: now - d*day - 1200*int64(time.Second), DurationUsed: 200},
+			PlaybackHistoryRow{DeviceToken: "ipad", Path: "/split-day.flac", StartedAt: now - d*day - 1800*int64(time.Second), DurationUsed: 200},
 		)
 	}
 
@@ -491,9 +509,21 @@ func TestOnRepeatCandidates_DevicesAggregateAcrossPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OnRepeatCandidates: %v", err)
 	}
-	// Sum-across-devices: 3+3 device-days each with 2 plays = total 12 plays, 6 repeat_days.
-	if len(rows) != 1 || rows[0].Path != "/shared.flac" || rows[0].Plays != 12 {
+	// Sum-across-devices: 3 calendar days × 4 plays each (iPhone 2 + iPad 2)
+	// = total 12 plays, 3 repeat_days. /split-day.flac has only 2 distinct
+	// days so it must NOT surface.
+	if len(rows) != 1 {
+		t.Fatalf("expected exactly /shared.flac, got %+v", rows)
+	}
+	if rows[0].Path != "/shared.flac" || rows[0].Plays != 12 {
 		t.Fatalf("cross-device aggregation: want [/shared.flac x12], got %+v", rows)
+	}
+	// Defense in depth — make the failure mode obvious if the query reverts
+	// to device-day counting (which would surface /split-day.flac).
+	for _, r := range rows {
+		if r.Path == "/split-day.flac" {
+			t.Fatalf("/split-day.flac must NOT qualify (only 2 calendar days × ≥2 plays); got %+v", r)
+		}
 	}
 }
 

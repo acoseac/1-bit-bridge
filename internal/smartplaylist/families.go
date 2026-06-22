@@ -2,7 +2,6 @@ package smartplaylist
 
 import (
 	"fmt"
-	"hash/fnv"
 	"math"
 	"sort"
 )
@@ -490,59 +489,76 @@ func buildLiftOff(in Inputs, opts Options) (GeneratedPlaylist, bool) {
 // determinism when two paths hash to the same score.
 func shufflePathsByWeek(paths []string, seed uint64) []string {
 	type scored struct {
-		path  string
+		index int
 		score uint64
 	}
 	arr := make([]scored, len(paths))
 	for i, p := range paths {
-		arr[i] = scored{path: p, score: hashSeedPath(seed, p)}
+		arr[i] = scored{index: i, score: hashSeedPath(seed, p)}
 	}
 	sort.SliceStable(arr, func(i, j int) bool {
 		if arr[i].score != arr[j].score {
 			return arr[i].score < arr[j].score
 		}
-		return arr[i].path < arr[j].path
+		return paths[arr[i].index] < paths[arr[j].index]
 	})
 	out := make([]string, len(arr))
 	for i, s := range arr {
-		out[i] = s.path
+		out[i] = paths[s.index]
 	}
 	return out
 }
 
 // shuffleFeaturesByWeek is the TrackFeature-typed analogue used by the mood
-// bands' Feature pool flow.
+// bands' Feature pool flow. Sorts by INDEX into the pool (16 bytes per scored
+// element) rather than carrying the 120-byte TrackFeature through the swap
+// loop — meaningful for the mood-band pools, which can run to several thousand
+// rows per regeneration (Gemini bot review on PR #431).
 func shuffleFeaturesByWeek(pool []TrackFeature, seed uint64) []TrackFeature {
 	type scored struct {
-		feat  TrackFeature
+		index int
 		score uint64
 	}
 	arr := make([]scored, len(pool))
 	for i, f := range pool {
-		arr[i] = scored{feat: f, score: hashSeedPath(seed, f.Path)}
+		arr[i] = scored{index: i, score: hashSeedPath(seed, f.Path)}
 	}
 	sort.SliceStable(arr, func(i, j int) bool {
 		if arr[i].score != arr[j].score {
 			return arr[i].score < arr[j].score
 		}
-		return arr[i].feat.Path < arr[j].feat.Path
+		return pool[arr[i].index].Path < pool[arr[j].index].Path
 	})
 	out := make([]TrackFeature, len(arr))
 	for i, s := range arr {
-		out[i] = s.feat
+		out[i] = pool[s.index]
 	}
 	return out
 }
 
-// hashSeedPath produces a 64-bit shuffle score from (seed, path) via fnv-1a,
-// the same primitive `applySeededNoise` uses for energy-noise.
+// hashSeedPath produces a 64-bit shuffle score from (seed, path) via INLINED
+// FNV-1a (RFC-aligned constants — offset basis 14695981039346656037, prime
+// 1099511628211). Inlined rather than `fnv.New64a()`-per-call because the
+// hot path runs this up to 50_000× per mood-band regeneration and the per-
+// call hasher allocation was visible GC pressure (Gemini bot review on PR
+// #431). Functionally identical to the prior `hash/fnv` implementation.
 func hashSeedPath(seed uint64, path string) uint64 {
-	h := fnv.New64a()
+	const (
+		fnvOffsetBasis uint64 = 14695981039346656037
+		fnvPrime       uint64 = 1099511628211
+	)
+	hash := fnvOffsetBasis
 	var buf [8]byte
 	putUint64(buf[:], seed)
-	_, _ = h.Write(buf[:])
-	_, _ = h.Write([]byte(path))
-	return h.Sum64()
+	for _, b := range buf {
+		hash ^= uint64(b)
+		hash *= fnvPrime
+	}
+	for i := 0; i < len(path); i++ {
+		hash ^= uint64(path[i])
+		hash *= fnvPrime
+	}
+	return hash
 }
 
 // averageSessionDuration segments chronological events into listening

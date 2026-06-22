@@ -52,6 +52,14 @@ type Options struct {
 	LovedMinPlays           int
 	DeepCutsCutoff          time.Duration
 	ArtistDeepCutsPerArtist int
+	// Candidate pool size handed to LovedArtistDeepCuts. Must be > the engine's
+	// display cap (`Engine.MaxArtistDeepCutsItems`) for the weekly shuffle to
+	// have meaningful rotation — passing the display cap directly to the SQL
+	// LIMIT would always return the same first-N rows (sorted by artist+rn),
+	// and the shuffle would rotate within that static subset every week. Sized
+	// to ~10× the display cap so a library with 60+ loved artists still
+	// rotates cleanly week to week.
+	ArtistDeepCutsPoolLimit int
 
 	// Mood band BPM + ReplayGain thresholds. Wind Down: bpm ≤ WindDownBPMMax
 	// AND replaygain > WindDownLoudnessMin (less-negative = quieter). Lift
@@ -92,6 +100,7 @@ func DefaultOptions(nowNS int64, analysisEnabled bool) Options {
 		LovedMinPlays:           3,
 		DeepCutsCutoff:          90 * day,
 		ArtistDeepCutsPerArtist: 3,
+		ArtistDeepCutsPoolLimit: 200,
 		// Mood bands — see CLAUDE.md / plan: less-negative ReplayGain = quieter
 		// master; more-negative = louder. Mid-band gap (-8, -6] is deliberate.
 		WindDownBPMMax:      90,
@@ -171,14 +180,20 @@ func assembleInputs(ctx context.Context, store *manifest.Store, opts Options) (s
 		return smartplaylist.Inputs{}, err
 	}
 
-	// From Artists You Love: per-artist-capped deep cuts.
+	// From Artists You Love: per-artist-capped deep cuts. Pass the dedicated
+	// `ArtistDeepCutsPoolLimit` (200) instead of the engine's display cap
+	// (`Engine.MaxItems` = 50) — passing the display cap to the SQL LIMIT
+	// would always return the same first-50 rows (sorted by artist + rn), and
+	// `buildArtistDeepCuts`'s weekly shuffle would rotate within that static
+	// subset every week. A larger candidate pool gives the shuffle real
+	// rotation surface (Gemini + CodeRabbit on PR #431).
 	deepCuts, err := store.LovedArtistDeepCuts(ctx,
 		now-opts.LovedWindow.Nanoseconds(),
 		opts.LovedMinPlays,
 		now-opts.DeepCutsCutoff.Nanoseconds(),
 		opts.MinPlaySeconds,
 		opts.ArtistDeepCutsPerArtist,
-		eng.MaxItems,
+		opts.ArtistDeepCutsPoolLimit,
 	)
 	if err != nil {
 		return smartplaylist.Inputs{}, err
