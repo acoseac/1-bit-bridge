@@ -2243,6 +2243,26 @@ section.library-inspector {
   font-variant-numeric: tabular-nums;
 }
 
+/* Per-track skip badge on inspector track tiles — flags tracks that
+   can't be upscaled/optimized (DSD / lossy / unknown format). Amber
+   "caution", not red "error": the track is fine, just not processable.
+   Uses the precomputed --accent-warm-tint (no color-mix dependency). */
+.skip-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 2px 0 0;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 999px;
+  color: var(--warn);
+  background: var(--accent-warm-tint);
+  border: 1px solid var(--warn);
+  width: fit-content;
+  max-width: 100%;
+}
+
 /* Track tiles use the same shell but a compact `.tile-track-dots`
    row in place of the coverage block (per-track is binary, so the
    bars would always be 0/1 or 1/1). */

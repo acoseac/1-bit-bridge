@@ -86,6 +86,11 @@ type browseTrackRow struct {
 	IsUpscaled    bool     `json:"isUpscaled"`
 	IsOptimized   bool     `json:"isOptimized"`
 	PathHash      string   `json:"pathHash"`
+	// SkipReason is the kind-agnostic, target-independent reason this
+	// track can never be upscaled/optimized (dsd_bitstream / lossy_source
+	// / unknown_format), or "" when it has no hard block. The inspector
+	// badges each tile with it inline — see fundamentalSkipReason.
+	SkipReason string `json:"skipReason,omitempty"`
 }
 
 // browseResponse is the JSON envelope returned by
@@ -149,6 +154,43 @@ type browseProjectionResponse struct {
 	TargetBits              int    `json:"targetBits"`
 	UnknownFormatFiles      int    `json:"unknownFormatFiles"`
 	RequiredBytesWithMargin int64  `json:"requiredBytesWithMargin"`
+}
+
+// lossyCodecLabels are the codec strings the scanner stamps for lossy
+// sources. Used ONLY for the per-track skip LABEL (lossy_source vs the
+// generic unknown_format) — the eligibility gate elsewhere is a PCM
+// allowlist. codec "" is unknown, NOT lossy, so it stays unknown_format.
+var lossyCodecLabels = map[string]bool{
+	"MP3": true, "AAC": true, "OGG": true, "OPUS": true, "WMA": true,
+}
+
+func isLossyCodecLabel(codec string) bool {
+	return lossyCodecLabels[strings.ToUpper(strings.TrimSpace(codec))]
+}
+
+// fundamentalSkipReason returns the kind-agnostic, target-independent
+// reason a track can NEVER be upscaled or optimized — or "" when it has
+// no such hard block (it may still be a soft, kind-specific skip like
+// "already at target", which only the per-kind projection can decide).
+// These are the cases that make an operator think the bridge is
+// malfunctioning ("why are these tracks missing?!"), so the inspector
+// badges them inline on every track tile, straight from the row's own
+// data — no projection round-trip. Pure + table-tested.
+//
+//   - dsd_bitstream  : DSD (1-bit) — the SoX PCM pipeline rejects it
+//   - lossy_source   : a known lossy codec (MP3/AAC/OGG/OPUS/WMA)
+//   - unknown_format : extractor couldn't determine sample rate / bit depth
+func fundamentalSkipReason(isDSD bool, codec string, sampleRate *float64, bitsPerSample *int) string {
+	switch {
+	case isDSD:
+		return "dsd_bitstream"
+	case isLossyCodecLabel(codec):
+		return "lossy_source"
+	case sampleRate == nil || *sampleRate <= 0 || bitsPerSample == nil || *bitsPerSample <= 0:
+		return "unknown_format"
+	default:
+		return ""
+	}
 }
 
 // --- handlers ---
@@ -273,6 +315,7 @@ func (s *Server) apiLibraryBrowse(w http.ResponseWriter, r *http.Request) {
 			IsUpscaled:    t.IsUpscaled,
 			IsOptimized:   t.IsOptimized,
 			PathHash:      pathHash(t.Path),
+			SkipReason:    fundamentalSkipReason(t.IsDSD != nil && *t.IsDSD, t.Codec, t.SampleRate, t.BitsPerSample),
 		})
 	}
 	// Next-page cursors: a "full page" (len == limit) MIGHT have
