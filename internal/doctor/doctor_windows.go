@@ -40,15 +40,11 @@ type mibTCPRowOwnerPID struct {
 	OwningPID  uint32
 }
 
-type mibTCPTableOwnerPID struct {
-	NumEntries uint32
-	Table      [1]mibTCPRowOwnerPID
-}
-
 // mibTCP6RowOwnerPID mirrors MIB_TCP6ROW_OWNER_PID (IPv6). The row layout
-// differs from the v4 row (16-byte addresses + scope IDs), so the two
-// families MUST be parsed with their own typed views — never a shared
-// parser.
+// differs from the v4 row (16-byte addresses + scope IDs); tcpTableEntries
+// is instantiated separately per family, so each family gets its own typed,
+// correctly-strided view of the buffer (the table-header shape lives in
+// tcpTableEntries' local type).
 type mibTCP6RowOwnerPID struct {
 	LocalAddr     [16]byte
 	LocalScopeID  uint32
@@ -58,11 +54,6 @@ type mibTCP6RowOwnerPID struct {
 	RemotePort    uint32
 	State         uint32
 	OwningPID     uint32
-}
-
-type mibTCP6TableOwnerPID struct {
-	NumEntries uint32
-	Table      [1]mibTCP6RowOwnerPID
 }
 
 var (
@@ -81,62 +72,61 @@ func isPIDListeningOnPort(port, targetPID int) (bool, error) {
 	if err := procGetExtendedTcp.Find(); err != nil {
 		return false, fmt.Errorf("iphlpapi GetExtendedTcpTable unavailable: %w", err)
 	}
-	v4, err := pidOwnsPortV4(port, targetPID)
-	if err != nil {
-		return false, err
+	// The two families share one scan (pidOwnsPortFamily); only the row type
+	// and the field-access closure differ. The closure captures port/targetPID.
+	v4, err := pidOwnsPortFamily(windows.AF_INET, "INET", func(r mibTCPRowOwnerPID) bool {
+		return ntohsPort(r.LocalPort) == port && int(r.OwningPID) == targetPID
+	})
+	if err != nil || v4 {
+		return v4, err
 	}
-	if v4 {
-		return true, nil
-	}
-	return pidOwnsPortV6(port, targetPID)
+	return pidOwnsPortFamily(windows.AF_INET6, "INET6", func(r mibTCP6RowOwnerPID) bool {
+		return ntohsPort(r.LocalPort) == port && int(r.OwningPID) == targetPID
+	})
 }
 
-func pidOwnsPortV4(port, targetPID int) (bool, error) {
-	buf, err := extendedTCPTable(windows.AF_INET)
+// pidOwnsPortFamily fetches the owner-PID LISTENER table for one address
+// family and reports whether any row satisfies match. Generic over the row
+// type T so the IPv4 and IPv6 scans share one implementation — the row
+// layouts differ, but the fetch + bounds-check + iterate shape is identical.
+func pidOwnsPortFamily[T any](family int, af string, match func(T) bool) (bool, error) {
+	buf, err := extendedTCPTable(family)
 	if err != nil {
 		return false, err
 	}
-	if len(buf) == 0 {
-		return false, nil
+	rows, err := tcpTableEntries[T](buf, af)
+	if err != nil {
+		return false, err
 	}
-	t := (*mibTCPTableOwnerPID)(unsafe.Pointer(&buf[0]))
-	// Bounds-check the buffer against the entry count it declares BEFORE
-	// unsafe.Slice — a short/corrupt buffer would otherwise produce a slice
-	// that reads out of bounds. Offsetof/Sizeof are compile-time (no deref),
-	// so they're safe to evaluate before the size check.
-	hdr := int(unsafe.Offsetof(t.Table))
-	if len(buf) < hdr || len(buf) < hdr+int(t.NumEntries)*int(unsafe.Sizeof(t.Table[0])) {
-		return false, fmt.Errorf("GetExtendedTcpTable(af=INET): buffer too small for %d entries (%d bytes)", t.NumEntries, len(buf))
-	}
-	rows := unsafe.Slice(&t.Table[0], t.NumEntries)
 	for i := range rows {
-		if ntohsPort(rows[i].LocalPort) == port && int(rows[i].OwningPID) == targetPID {
+		if match(rows[i]) {
 			return true, nil
 		}
 	}
 	return false, nil
 }
 
-func pidOwnsPortV6(port, targetPID int) (bool, error) {
-	buf, err := extendedTCPTable(windows.AF_INET6)
-	if err != nil {
-		return false, err
-	}
+// tcpTableEntries reinterprets a GetExtendedTcpTable buffer as the typed
+// MIB_*TABLE_OWNER_PID for row type T — { DWORD NumEntries; T rows[…] } — and
+// returns its rows. It bounds-checks the buffer against the entry count it
+// declares BEFORE unsafe.Slice, so a short/corrupt buffer can't produce an
+// out-of-bounds view (Offsetof/Sizeof are compile-time, no deref). The local
+// table type carries the exact header shape per instantiation, so the v4 and
+// v6 strides are honoured without a per-family wrapper struct.
+func tcpTableEntries[T any](buf []byte, af string) ([]T, error) {
 	if len(buf) == 0 {
-		return false, nil
+		return nil, nil
 	}
-	t := (*mibTCP6TableOwnerPID)(unsafe.Pointer(&buf[0]))
-	hdr := int(unsafe.Offsetof(t.Table))
-	if len(buf) < hdr || len(buf) < hdr+int(t.NumEntries)*int(unsafe.Sizeof(t.Table[0])) {
-		return false, fmt.Errorf("GetExtendedTcpTable(af=INET6): buffer too small for %d entries (%d bytes)", t.NumEntries, len(buf))
+	type table struct {
+		numEntries uint32
+		rows       [1]T
 	}
-	rows := unsafe.Slice(&t.Table[0], t.NumEntries)
-	for i := range rows {
-		if ntohsPort(rows[i].LocalPort) == port && int(rows[i].OwningPID) == targetPID {
-			return true, nil
-		}
+	t := (*table)(unsafe.Pointer(&buf[0]))
+	hdr := int(unsafe.Offsetof(t.rows))
+	if len(buf) < hdr || len(buf) < hdr+int(t.numEntries)*int(unsafe.Sizeof(t.rows[0])) {
+		return nil, fmt.Errorf("GetExtendedTcpTable(af=%s): buffer too small for %d entries (%d bytes)", af, t.numEntries, len(buf))
 	}
-	return false, nil
+	return unsafe.Slice(&t.rows[0], t.numEntries), nil
 }
 
 // extendedTCPTable returns the raw GetExtendedTcpTable buffer for the given
