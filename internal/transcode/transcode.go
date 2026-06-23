@@ -474,6 +474,18 @@ func safeVariantFilename(srcBase, variantID string) string {
 // inaudible — and only fires when the source has the headroom
 // problem. Cost is one extra peak-scan pass; invisible against
 // the rate-conversion CPU dominating the run.
+//
+// `rate … -L` pins LINEAR phase response on the resampler. This is
+// already sox's default for the `rate` effect, so the pinned form is
+// byte-identical to the prior unpinned `rate -v <Hz>` output — verified
+// with deterministic `sox -R` runs (the signal-path md5 matches; only
+// the always-present dither PRNG differs run-to-run). Pinning it is pure
+// defense: a future sox release that changed the default phase could
+// otherwise silently flip our cached variants to minimum/intermediate
+// phase, and it lets the admin worker grid label the chain "linear
+// phase" truthfully. Because the deterministic output is unchanged, NO
+// VariantSchemaVersion bump / regeneration is required — existing
+// sidecars stay valid.
 func (j JobSpec) SoxArgs() ([]string, string) {
 	rateFlag := "-v"
 	switch j.Quality {
@@ -497,11 +509,11 @@ func (j JobSpec) SoxArgs() ([]string, string) {
 		"-b", strconv.Itoa(j.TargetBits),
 		"-t", "flac",
 		j.SidecarPath() + sidecarTmpSuffix,
-		"rate", rateFlag, strconv.Itoa(j.TargetSampleRate),
+		"rate", rateFlag, "-L", strconv.Itoa(j.TargetSampleRate),
 		"dither", "-s",
 	}
 	settings := fmt.Sprintf(
-		`{"resampler":"sox","quality":%q,"rateFlag":%q,"targetRate":%d,"targetBits":%d,"guard":true,"schemaVersion":%q}`,
+		`{"resampler":"sox","quality":%q,"rateFlag":%q,"phase":"linear","targetRate":%d,"targetBits":%d,"guard":true,"schemaVersion":%q}`,
 		j.Quality, rateFlag, j.TargetSampleRate, j.TargetBits, VariantSchemaVersion)
 	return args, settings
 }

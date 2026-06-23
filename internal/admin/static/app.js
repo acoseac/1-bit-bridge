@@ -2071,14 +2071,23 @@ function renderWorkerGrid(r) {
 
 // signalChain renders an audiophile signal-chain string for a busy
 // worker, e.g. "Upscale: 44.1 kHz/16-bit ➔ 176.4 kHz/24-bit · SoX
-// very-high". Source bit depth is shown only when known (the bridge
-// extracts it for FLAC/DSD; 0 = unknown is omitted).
+// very-high · linear phase · clip-guarded". Source bit depth is shown
+// only when known (the bridge extracts it for FLAC/DSD; 0 = unknown is
+// omitted). The "linear phase" + "clip-guarded" labels are truthful
+// build-constants: every conversion pins `rate … -L` (linear phase) and
+// `-G` (gain-guard) — see JobSpec.SoxArgs in internal/transcode. They're
+// rendered as static labels rather than per-job fields because they
+// don't vary; if the phase/guard ever becomes per-job, promote them to
+// ActiveJob fields so the label can't drift from the actual command.
 function signalChain(w) {
   const src = fmtRate(w.sourceSampleRate) + (w.sourceBits ? `/${w.sourceBits}-bit` : "");
   const tgt = fmtRate(w.targetSampleRate) + (w.targetBits ? `/${w.targetBits}-bit` : "");
   const kind = w.kind === "optimize" ? "Optimize" : "Upscale";
   const q = w.quality ? ` · SoX ${w.quality}` : "";
-  return `${kind}: ${src} ➔ ${tgt}${q}`;
+  // Gate the DSP labels on the same signal (a real sox conversion) that
+  // gates the quality preset, so a placeholder/idle row stays terse.
+  const dsp = w.quality ? " · linear phase · clip-guarded" : "";
+  return `${kind}: ${src} ➔ ${tgt}${q}${dsp}`;
 }
 
 function fmtRate(hz) {
