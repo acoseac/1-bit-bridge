@@ -4152,6 +4152,22 @@ func scanChildTrackRows(rows *sql.Rows) ([]ChildTrack, error) {
 	return out, rows.Err()
 }
 
+// tracksByKeyQuery is childTrackRowSelect + the harmonic-key FROM/WHERE,
+// assembled as a compile-time CONSTANT so ListTracksByKeyPage hands a
+// constant string to QueryContext rather than an inline concatenation at
+// the sink. go:S2077 flags `db.Query(prefix + "...")` as "dynamically
+// formatted SQL" even when both operands are constants; a single const
+// identifier is the canonical safe form. Every dynamic value — keyRoot,
+// keyMode, the path cursor, the limit — is a bound ? parameter, so no
+// user-controlled text ever reaches the SQL string.
+const tracksByKeyQuery = childTrackRowSelect + `
+	  FROM tracks t
+	  JOIN track_analysis ta ON ta.source_path = t.path
+	 WHERE ta.key_root = ? AND ta.key_mode = ?
+	   AND t.path > ?
+	 ORDER BY t.path ASC
+	 LIMIT ?`
+
 // ListTracksByKeyPage returns tracks whose analysis key matches
 // (keyRoot, keyMode), library-wide, cursor-paginated by path ASC. Backs the
 // admin Library Inspector's harmonic-key filter (the coverage wheel's
@@ -4163,14 +4179,7 @@ func (s *Store) ListTracksByKeyPage(ctx context.Context, keyRoot int, keyMode, a
 	if limit <= 0 {
 		limit = 500
 	}
-	rows, err := s.db.QueryContext(ctx, childTrackRowSelect+`
-		  FROM tracks t
-		  JOIN track_analysis ta ON ta.source_path = t.path
-		 WHERE ta.key_root = ? AND ta.key_mode = ?
-		   AND t.path > ?
-		 ORDER BY t.path ASC
-		 LIMIT ?
-	`, keyRoot, keyMode, after, limit)
+	rows, err := s.db.QueryContext(ctx, tracksByKeyQuery, keyRoot, keyMode, after, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list tracks by key (%d,%s): %w", keyRoot, keyMode, err)
 	}
