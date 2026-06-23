@@ -521,3 +521,362 @@ func TestExtractWAV_RoutedFromExtractWithContext(t *testing.T) {
 		t.Errorf("Title = %q, want %q", track.Title, "RoutedWAV")
 	}
 }
+
+// --- PCM geometry (sampleRate / bitsPerSample) ---
+
+// wrapChunkLE / wrapChunkBE wrap a payload as a complete IFF/RIFF
+// sub-chunk: FOURCC + 32-bit size + payload + odd-byte pad. LE is RIFF
+// (WAV), BE is IFF (AIFF).
+func wrapChunkLE(fourcc string, payload []byte) []byte {
+	out := []byte(fourcc)
+	var sz [4]byte
+	binary.LittleEndian.PutUint32(sz[:], uint32(len(payload)))
+	out = append(out, sz[:]...)
+	out = append(out, payload...)
+	if len(payload)%2 == 1 {
+		out = append(out, 0x00)
+	}
+	return out
+}
+
+func wrapChunkBE(fourcc string, payload []byte) []byte {
+	out := []byte(fourcc)
+	var sz [4]byte
+	binary.BigEndian.PutUint32(sz[:], uint32(len(payload)))
+	out = append(out, sz[:]...)
+	out = append(out, payload...)
+	if len(payload)%2 == 1 {
+		out = append(out, 0x00)
+	}
+	return out
+}
+
+// buildWAVFmtChunk builds a 16-byte WAVEFORMAT `fmt ` chunk for the
+// given format tag (1=PCM, 3=IEEE float, 6=A-law, …), channels, sample
+// rate, and bit depth.
+func buildWAVFmtChunk(formatTag, channels uint16, sampleRate uint32, bits uint16) []byte {
+	payload := make([]byte, 16)
+	binary.LittleEndian.PutUint16(payload[0:2], formatTag)
+	binary.LittleEndian.PutUint16(payload[2:4], channels)
+	binary.LittleEndian.PutUint32(payload[4:8], sampleRate)
+	binary.LittleEndian.PutUint32(payload[8:12], sampleRate*uint32(channels)*uint32(bits)/8) // byte rate
+	binary.LittleEndian.PutUint16(payload[12:14], channels*bits/8)                           // block align
+	binary.LittleEndian.PutUint16(payload[14:16], bits)
+	return wrapChunkLE("fmt ", payload)
+}
+
+// buildWAVFmtChunkExtensible builds a 40-byte WAVE_FORMAT_EXTENSIBLE
+// `fmt ` chunk whose SubFormat GUID begins with subFormat (1=PCM,
+// 3=float). The extractor reads the container bit depth at [14:16] and
+// the real format from the SubFormat's first 2 bytes.
+func buildWAVFmtChunkExtensible(channels uint16, sampleRate uint32, containerBits, validBits, subFormat uint16) []byte {
+	payload := make([]byte, 40)
+	binary.LittleEndian.PutUint16(payload[0:2], 0xFFFE) // WAVE_FORMAT_EXTENSIBLE
+	binary.LittleEndian.PutUint16(payload[2:4], channels)
+	binary.LittleEndian.PutUint32(payload[4:8], sampleRate)
+	binary.LittleEndian.PutUint32(payload[8:12], sampleRate*uint32(channels)*uint32(containerBits)/8)
+	binary.LittleEndian.PutUint16(payload[12:14], channels*containerBits/8)
+	binary.LittleEndian.PutUint16(payload[14:16], containerBits)
+	binary.LittleEndian.PutUint16(payload[16:18], 22) // cbSize
+	binary.LittleEndian.PutUint16(payload[18:20], validBits)
+	binary.LittleEndian.PutUint32(payload[20:24], 0x3)       // channel mask FL|FR
+	binary.LittleEndian.PutUint16(payload[24:26], subFormat) // SubFormat GUID first 2 bytes
+	return wrapChunkLE("fmt ", payload)
+}
+
+// encodeAIFFExtendedInt encodes an integer sample rate as a 10-byte
+// 80-bit IEEE-754 extended float — the inverse of parseAIFFExtended,
+// used to synthesise AIFF COMM chunks.
+func encodeAIFFExtendedInt(rate uint32) [10]byte {
+	var out [10]byte
+	if rate == 0 {
+		return out
+	}
+	mantissa := uint64(rate)
+	exponent := 16383 + 63
+	for mantissa&(1<<63) == 0 {
+		mantissa <<= 1
+		exponent--
+	}
+	out[0] = byte(exponent >> 8)
+	out[1] = byte(exponent)
+	binary.BigEndian.PutUint64(out[2:10], mantissa)
+	return out
+}
+
+// buildAIFFCOMMChunk builds an 18-byte AIFF COMM chunk. extraTrailer
+// (e.g. an AIFC compressionType FOURCC + pstring) is appended after the
+// 80-bit sample rate so AIFC-shaped COMM chunks can be exercised too.
+func buildAIFFCOMMChunk(channels int16, numFrames uint32, sampleSize int16, sampleRate uint32, extraTrailer ...byte) []byte {
+	payload := make([]byte, 18+len(extraTrailer))
+	binary.BigEndian.PutUint16(payload[0:2], uint16(channels))
+	binary.BigEndian.PutUint32(payload[2:6], numFrames)
+	binary.BigEndian.PutUint16(payload[6:8], uint16(sampleSize))
+	ext := encodeAIFFExtendedInt(sampleRate)
+	copy(payload[8:18], ext[:])
+	copy(payload[18:], extraTrailer)
+	return wrapChunkBE("COMM", payload)
+}
+
+func TestExtractWAV_FmtChunkPCM(t *testing.T) {
+	// PCM 96 kHz / 24-bit. fmt chunk only, no tags.
+	path := writeTempWAV(t, buildWAVWithID3(t, nil, buildWAVFmtChunk(1, 2, 96000, 24)))
+	track := &Track{}
+	if err := extractWAVWithContext(path, track, nil); err != nil {
+		t.Fatalf("extractWAVWithContext: %v", err)
+	}
+	if track.SampleRate == nil || *track.SampleRate != 96000 {
+		t.Errorf("SampleRate = %v, want 96000", track.SampleRate)
+	}
+	if track.BitsPerSample == nil || *track.BitsPerSample != 24 {
+		t.Errorf("BitsPerSample = %v, want 24", track.BitsPerSample)
+	}
+}
+
+func TestExtractWAV_FmtChunkIEEEFloat32(t *testing.T) {
+	// IEEE float (format tag 3), 192 kHz / 32-bit.
+	path := writeTempWAV(t, buildWAVWithID3(t, nil, buildWAVFmtChunk(3, 2, 192000, 32)))
+	track := &Track{}
+	if err := extractWAVWithContext(path, track, nil); err != nil {
+		t.Fatalf("extractWAVWithContext: %v", err)
+	}
+	if track.SampleRate == nil || *track.SampleRate != 192000 {
+		t.Errorf("SampleRate = %v, want 192000", track.SampleRate)
+	}
+	if track.BitsPerSample == nil || *track.BitsPerSample != 32 {
+		t.Errorf("BitsPerSample = %v, want 32 (float is PCM-like)", track.BitsPerSample)
+	}
+}
+
+func TestExtractWAV_FmtChunkExtensiblePCM(t *testing.T) {
+	// WAVE_FORMAT_EXTENSIBLE wrapping PCM — the bits gate must read the
+	// real format from the SubFormat GUID, not bail on the 0xFFFE tag.
+	path := writeTempWAV(t, buildWAVWithID3(t, nil, buildWAVFmtChunkExtensible(2, 88200, 24, 24, 1)))
+	track := &Track{}
+	if err := extractWAVWithContext(path, track, nil); err != nil {
+		t.Fatalf("extractWAVWithContext: %v", err)
+	}
+	if track.SampleRate == nil || *track.SampleRate != 88200 {
+		t.Errorf("SampleRate = %v, want 88200", track.SampleRate)
+	}
+	if track.BitsPerSample == nil || *track.BitsPerSample != 24 {
+		t.Errorf("BitsPerSample = %v, want 24 (extensible PCM SubFormat)", track.BitsPerSample)
+	}
+}
+
+func TestExtractWAV_FmtChunkLossyKeepsBitsNil(t *testing.T) {
+	// A-law (format tag 6) is lossy/compressed: sampleRate is meaningful
+	// but bitsPerSample is a container artefact and must stay nil.
+	path := writeTempWAV(t, buildWAVWithID3(t, nil, buildWAVFmtChunk(6, 1, 8000, 8)))
+	track := &Track{}
+	if err := extractWAVWithContext(path, track, nil); err != nil {
+		t.Fatalf("extractWAVWithContext: %v", err)
+	}
+	if track.SampleRate == nil || *track.SampleRate != 8000 {
+		t.Errorf("SampleRate = %v, want 8000", track.SampleRate)
+	}
+	if track.BitsPerSample != nil {
+		t.Errorf("BitsPerSample = %v, want nil for lossy A-law", *track.BitsPerSample)
+	}
+}
+
+func TestExtractWAV_FmtChunkCoexistsWithID3(t *testing.T) {
+	// Real WAVs carry fmt BEFORE the tags; format + tags both surface.
+	id3 := buildID3v2_3(map[string]string{"title": "Both", "artist": "Geometry"})
+	path := writeTempWAV(t, buildWAVWithID3(t, id3, buildWAVFmtChunk(1, 2, 44100, 16)))
+	track := &Track{}
+	if err := extractWAVWithContext(path, track, nil); err != nil {
+		t.Fatalf("extractWAVWithContext: %v", err)
+	}
+	if track.Title != "Both" {
+		t.Errorf("Title = %q, want %q", track.Title, "Both")
+	}
+	if track.SampleRate == nil || *track.SampleRate != 44100 {
+		t.Errorf("SampleRate = %v, want 44100", track.SampleRate)
+	}
+	if track.BitsPerSample == nil || *track.BitsPerSample != 16 {
+		t.Errorf("BitsPerSample = %v, want 16", track.BitsPerSample)
+	}
+}
+
+func TestExtractAIFF_COMMChunkSurfacesSampleRateAndBits(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		rate uint32
+		bits int16
+	}{
+		{"CD", 44100, 16},
+		{"hi-res", 96000, 24},
+		{"DXD", 352800, 24},
+		{"192/24", 192000, 24},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			comm := buildAIFFCOMMChunk(2, tc.rate*5, tc.bits, tc.rate)
+			path := writeTempAIFF(t, buildAIFFWithID3(t, nil, comm))
+			track := &Track{}
+			if err := extractAIFFWithContext(path, track, nil); err != nil {
+				t.Fatalf("extractAIFFWithContext: %v", err)
+			}
+			if track.SampleRate == nil || *track.SampleRate != float64(tc.rate) {
+				t.Errorf("SampleRate = %v, want %d", track.SampleRate, tc.rate)
+			}
+			if track.BitsPerSample == nil || *track.BitsPerSample != int(tc.bits) {
+				t.Errorf("BitsPerSample = %v, want %d", track.BitsPerSample, tc.bits)
+			}
+		})
+	}
+}
+
+func TestExtractAIFF_COMMCoexistsWithID3(t *testing.T) {
+	// COMM (format) + ID3 (tags) both present, like a real tagged AIFF.
+	id3 := buildID3v2_3(map[string]string{"title": "Aria", "artist": "Gould"})
+	comm := buildAIFFCOMMChunk(2, 44100*5, 24, 88200)
+	path := writeTempAIFF(t, buildAIFFWithID3(t, id3, comm))
+	track := &Track{}
+	if err := extractAIFFWithContext(path, track, nil); err != nil {
+		t.Fatalf("extractAIFFWithContext: %v", err)
+	}
+	if track.Title != "Aria" {
+		t.Errorf("Title = %q, want %q", track.Title, "Aria")
+	}
+	if track.SampleRate == nil || *track.SampleRate != 88200 {
+		t.Errorf("SampleRate = %v, want 88200", track.SampleRate)
+	}
+	if track.BitsPerSample == nil || *track.BitsPerSample != 24 {
+		t.Errorf("BitsPerSample = %v, want 24", track.BitsPerSample)
+	}
+}
+
+func TestExtractAIFC_COMMWithCompressionTrailer(t *testing.T) {
+	// AIFC COMM appends a compressionType FOURCC + pstring after the
+	// 80-bit rate; the leading 18 bytes parse identically. "NONE" is
+	// uncompressed big-endian PCM.
+	trailer := append([]byte("NONE"), 0x00) // 4-byte FOURCC + empty pstring
+	comm := buildAIFFCOMMChunk(2, 48000*5, 24, 48000, trailer...)
+	// Assemble an AIFC FORM around the COMM chunk.
+	form := []byte("FORM")
+	var sz [4]byte
+	binary.BigEndian.PutUint32(sz[:], uint32(len("AIFC")+len(comm)))
+	form = append(form, sz[:]...)
+	form = append(form, []byte("AIFC")...)
+	form = append(form, comm...)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fixture.aifc")
+	if err := os.WriteFile(path, form, 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	track := &Track{}
+	if err := extractAIFFWithContext(path, track, nil); err != nil {
+		t.Fatalf("extractAIFFWithContext: %v", err)
+	}
+	if track.SampleRate == nil || *track.SampleRate != 48000 {
+		t.Errorf("SampleRate = %v, want 48000", track.SampleRate)
+	}
+	if track.BitsPerSample == nil || *track.BitsPerSample != 24 {
+		t.Errorf("BitsPerSample = %v, want 24 (NONE is uncompressed PCM)", track.BitsPerSample)
+	}
+}
+
+// TestExtractAIFC_LossyCompressionKeepsBitsNil — a COMPRESSED AIFC
+// (compressionType "ima4", lossy ADPCM) must surface SampleRate but
+// leave BitsPerSample nil: its COMM.sampleSize describes the
+// pre-compression source, not the stored signal (the AIFF analog of the
+// iOS PR #371 lossy-bit-depth regression). CodeRabbit Major on PR #440.
+func TestExtractAIFC_LossyCompressionKeepsBitsNil(t *testing.T) {
+	trailer := append([]byte("ima4"), 0x00) // lossy ADPCM compression FOURCC + empty pstring
+	comm := buildAIFFCOMMChunk(2, 44100*5, 16, 44100, trailer...)
+	form := []byte("FORM")
+	var sz [4]byte
+	binary.BigEndian.PutUint32(sz[:], uint32(len("AIFC")+len(comm)))
+	form = append(form, sz[:]...)
+	form = append(form, []byte("AIFC")...)
+	form = append(form, comm...)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fixture.aifc")
+	if err := os.WriteFile(path, form, 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	track := &Track{}
+	if err := extractAIFFWithContext(path, track, nil); err != nil {
+		t.Fatalf("extractAIFFWithContext: %v", err)
+	}
+	if track.SampleRate == nil || *track.SampleRate != 44100 {
+		t.Errorf("SampleRate = %v, want 44100 (rate always set)", track.SampleRate)
+	}
+	if track.BitsPerSample != nil {
+		t.Errorf("BitsPerSample = %v, want nil for lossy AIFC compression", *track.BitsPerSample)
+	}
+}
+
+// TestAIFFCOMMHasPCMDepth pins the AIFF/AIFC bit-depth eligibility gate:
+// plain AIFF always, uncompressed AIFC FOURCCs yes, lossy ones no.
+func TestAIFFCOMMHasPCMDepth(t *testing.T) {
+	// Plain AIFF — body content irrelevant.
+	if !aiffCOMMHasPCMDepth(make([]byte, 18), "AIFF") {
+		t.Error("AIFF should always be PCM-depth eligible")
+	}
+	commWith := func(comp string) []byte {
+		b := make([]byte, 22)
+		copy(b[18:22], comp)
+		return b
+	}
+	for _, comp := range []string{"NONE", "twos", "sowt", "raw ", "fl32", "fl64", "in24", "in32", "23ni"} {
+		if !aiffCOMMHasPCMDepth(commWith(comp), "AIFC") {
+			t.Errorf("AIFC %q should be PCM-depth eligible", comp)
+		}
+	}
+	for _, comp := range []string{"ima4", "ulaw", "alaw", "MAC3", "MAC6", "QDMC", "agsm"} {
+		if aiffCOMMHasPCMDepth(commWith(comp), "AIFC") {
+			t.Errorf("AIFC %q (lossy/compressed) must NOT be PCM-depth eligible", comp)
+		}
+	}
+	// AIFC COMM too short to hold the compressionType → not eligible.
+	if aiffCOMMHasPCMDepth(make([]byte, 18), "AIFC") {
+		t.Error("AIFC with truncated COMM (no compressionType) must not be eligible")
+	}
+}
+
+// TestParseAIFFExtended_RoundTrip pins the 80-bit IEEE-extended decoder
+// against the common sample rates — each must decode to its exact
+// integer with no floating-point drift (math.Ldexp is exact here).
+func TestParseAIFFExtended_RoundTrip(t *testing.T) {
+	for _, rate := range []uint32{8000, 11025, 16000, 22050, 32000, 44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000, 768000} {
+		ext := encodeAIFFExtendedInt(rate)
+		got := parseAIFFExtended(ext[:])
+		if got != float64(rate) {
+			t.Errorf("parseAIFFExtended(encode(%d)) = %v, want %d", rate, got, rate)
+		}
+	}
+}
+
+// TestParseAIFFExtended_DegenerateEncodings — zero, Inf, and NaN
+// encodings (and a too-short slice) must all decode to 0 so a corrupt
+// COMM leaves SampleRate nil rather than emitting a garbage rate.
+func TestParseAIFFExtended_DegenerateEncodings(t *testing.T) {
+	zero := make([]byte, 10)
+	if got := parseAIFFExtended(zero); got != 0 {
+		t.Errorf("zero encoding = %v, want 0", got)
+	}
+	// Exponent all-ones (0x7FFF) = Inf/NaN.
+	inf := make([]byte, 10)
+	inf[0], inf[1] = 0x7F, 0xFF
+	inf[2] = 0x80 // non-zero mantissa MSB
+	if got := parseAIFFExtended(inf); got != 0 {
+		t.Errorf("Inf/NaN encoding = %v, want 0", got)
+	}
+	// A huge but non-0x7FFF exponent (0x7FFE here) drives Ldexp to
+	// +Inf — which must clamp to 0, because a +Inf SampleRate would
+	// fail json.Marshal and break the tags_json write (Gemini HIGH on
+	// PR #440). Pre-fix this returned +Inf.
+	overflow := make([]byte, 10)
+	overflow[0], overflow[1] = 0x7F, 0xFE
+	overflow[2] = 0x80 // mantissa MSB set
+	if got := parseAIFFExtended(overflow); got != 0 {
+		t.Errorf("overflow encoding = %v, want 0 (must not return ±Inf)", got)
+	}
+	if got := parseAIFFExtended([]byte{0x40, 0x0E}); got != 0 {
+		t.Errorf("short slice = %v, want 0", got)
+	}
+}

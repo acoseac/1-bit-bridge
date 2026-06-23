@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -327,6 +328,86 @@ func TestExtractALACBitDepth_LargesizeOuterBox(t *testing.T) {
 	}
 }
 
+// TestExtractMP4SampleRate_ALACFromConfig — ALAC reads the authoritative
+// sample rate from ALACSpecificConfig, including hi-res rates the
+// AudioSampleEntry 16.16 field can't hold. The 16.16 header field is
+// zero in the fixture, so a passing hi-res case proves the config
+// override fires.
+func TestExtractMP4SampleRate_ALACFromConfig(t *testing.T) {
+	for _, rate := range []uint32{44100, 48000, 88200, 96000, 176400, 192000, 352800} {
+		t.Run(strconv.Itoa(int(rate)), func(t *testing.T) {
+			mp4 := buildMP4WithALACConfigRate(24, rate)
+			got, err := extractMP4SampleRate(bytes.NewReader(mp4))
+			if err != nil {
+				t.Fatalf("extractMP4SampleRate: %v", err)
+			}
+			if got != float64(rate) {
+				t.Errorf("got %v, want %d", got, rate)
+			}
+		})
+	}
+}
+
+// TestExtractMP4SampleRate_AACFromAudioSampleEntry — AAC (`mp4a`) has no
+// inner config the bridge reads, so the rate comes from the
+// AudioSampleEntry 16.16 fixed-point field.
+func TestExtractMP4SampleRate_AACFromAudioSampleEntry(t *testing.T) {
+	for _, rate := range []uint32{44100, 48000} {
+		t.Run(strconv.Itoa(int(rate)), func(t *testing.T) {
+			mp4 := buildMP4WithAAC(rate)
+			got, err := extractMP4SampleRate(bytes.NewReader(mp4))
+			if err != nil {
+				t.Fatalf("extractMP4SampleRate: %v", err)
+			}
+			if got != float64(rate) {
+				t.Errorf("got %v, want %d", got, rate)
+			}
+		})
+	}
+}
+
+// TestExtractMP4SampleRate_VideoEntryReturnsZero — a video-first stsd
+// (first sample entry FourCC "avc1") has a different body layout; the
+// rate reader must NOT read a bogus 16.16 out of it. CodeRabbit Major on
+// PR #440.
+func TestExtractMP4SampleRate_VideoEntryReturnsZero(t *testing.T) {
+	mp4 := buildMP4WithSampleEntryPayload("avc1", make([]byte, 28))
+	got, err := extractMP4SampleRate(bytes.NewReader(mp4))
+	if err != nil {
+		t.Fatalf("extractMP4SampleRate: %v", err)
+	}
+	if got != 0 {
+		t.Errorf("got %v, want 0 for a video sample entry", got)
+	}
+}
+
+// TestExtractMP4SampleRate_SuppressesStructuralNotFound — a non-MP4
+// input returns (0, nil) so the caller leaves SampleRate nil rather than
+// failing the scan (mirrors the bit-depth walker's honest-suppression).
+func TestExtractMP4SampleRate_SuppressesStructuralNotFound(t *testing.T) {
+	got, err := extractMP4SampleRate(bytes.NewReader(make([]byte, 8)))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != 0 {
+		t.Errorf("got %v, want 0 for non-MP4 input", got)
+	}
+}
+
+// TestExtractMP4SampleRate_PropagatesIOFailure — genuine I/O failures
+// surface as errors, not silent 0, so the caller's scanLogger.Warn fires
+// on real disk faults.
+func TestExtractMP4SampleRate_PropagatesIOFailure(t *testing.T) {
+	sentinel := errors.New("simulated NAS read failure")
+	_, err := extractMP4SampleRate(failingReadSeeker{err: sentinel})
+	if err == nil {
+		t.Fatal("expected I/O error to propagate, got nil")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("expected error to wrap sentinel %v, got %v", sentinel, err)
+	}
+}
+
 // buildMinimalMP4 returns a byte slice containing the smallest
 // MP4-shaped tree the codec walker needs: ftyp + moov containing one
 // trak/mdia/minf/stbl/stsd with one sample entry whose format is the
@@ -454,31 +535,64 @@ func buildMP4WithMoovPadding(codec string, freePaddingBytes int) []byte {
 //   - inner `alac` atom: 8-byte header + 4-byte FullBox ver+flags +
 //     24-byte ALACSpecificConfig
 func buildALACSampleEntryPayload(bitDepth byte) []byte {
+	return buildALACSampleEntryPayloadRate(bitDepth, 44100)
+}
+
+// buildALACSampleEntryPayloadRate is buildALACSampleEntryPayload with a
+// parameterised ALACSpecificConfig sample rate so the hi-res sample-rate
+// path (config rate overriding the AudioSampleEntry 16.16 field) can be
+// exercised. The 28-byte AudioSampleEntry header stays all-zero, so the
+// 16.16 rate reads as 0 — exactly the hi-res scenario where the config
+// rate is authoritative.
+func buildALACSampleEntryPayloadRate(bitDepth byte, sampleRate uint32) []byte {
 	out := &bytes.Buffer{}
 	// AudioSampleEntry header (28 bytes, zeros are fine for the walker).
 	out.Write(make([]byte, 28))
 
 	// Inner `alac` config atom payload: 4-byte FullBox ver+flags,
-	// then 24-byte ALACSpecificConfig. Only bitDepth at offset 5
-	// matters for the walker; other fields filled with shape-valid
-	// defaults so a future read-more-than-bitDepth test stays
-	// realistic.
+	// then 24-byte ALACSpecificConfig. bitDepth at offset 5 and
+	// sampleRate at offset 20 are what the walkers read; other fields
+	// filled with shape-valid defaults.
 	innerPayload := &bytes.Buffer{}
-	innerPayload.Write(make([]byte, 4))                         // version+flags
-	binary.Write(innerPayload, binary.BigEndian, uint32(4096))  // frameLength
-	innerPayload.WriteByte(0)                                   // compatibleVersion
-	innerPayload.WriteByte(bitDepth)                            // BIT_DEPTH ← what we read
-	innerPayload.WriteByte(40)                                  // pb
-	innerPayload.WriteByte(10)                                  // mb
-	innerPayload.WriteByte(14)                                  // kb
-	innerPayload.WriteByte(2)                                   // numChannels
-	binary.Write(innerPayload, binary.BigEndian, uint16(255))   // maxRun
-	binary.Write(innerPayload, binary.BigEndian, uint32(0))     // maxFrameBytes
-	binary.Write(innerPayload, binary.BigEndian, uint32(0))     // avgBitRate
-	binary.Write(innerPayload, binary.BigEndian, uint32(44100)) // sampleRate
+	innerPayload.Write(make([]byte, 4))                        // version+flags
+	binary.Write(innerPayload, binary.BigEndian, uint32(4096)) // frameLength
+	innerPayload.WriteByte(0)                                  // compatibleVersion
+	innerPayload.WriteByte(bitDepth)                           // BIT_DEPTH ← what we read
+	innerPayload.WriteByte(40)                                 // pb
+	innerPayload.WriteByte(10)                                 // mb
+	innerPayload.WriteByte(14)                                 // kb
+	innerPayload.WriteByte(2)                                  // numChannels
+	binary.Write(innerPayload, binary.BigEndian, uint16(255))  // maxRun
+	binary.Write(innerPayload, binary.BigEndian, uint32(0))    // maxFrameBytes
+	binary.Write(innerPayload, binary.BigEndian, uint32(0))    // avgBitRate
+	binary.Write(innerPayload, binary.BigEndian, sampleRate)   // sampleRate ← what we read
 
 	writeAtom(out, "alac", innerPayload.Bytes())
 	return out.Bytes()
+}
+
+// buildMP4WithALACConfigRate builds a minimal MP4 whose ALAC config
+// declares the given bit depth + sample rate. Used by the sample-rate
+// walker's hi-res tests.
+func buildMP4WithALACConfigRate(bitDepth byte, sampleRate uint32) []byte {
+	return buildMP4WithSampleEntryPayload("alac", buildALACSampleEntryPayloadRate(bitDepth, sampleRate))
+}
+
+// buildAACSampleEntryPayload returns a 28-byte version-0 AudioSampleEntry
+// body whose 16.16 fixed-point sampleRate field (offset 24) encodes the
+// given rate. `mp4a` (AAC) carries no inner config the bridge reads, so
+// this AudioSampleEntry field is the sample-rate source. Rates must be
+// ≤ 65535 Hz (the 16.16 integer-part limit) — true for all real AAC.
+func buildAACSampleEntryPayload(sampleRate uint32) []byte {
+	body := make([]byte, 28)
+	binary.BigEndian.PutUint32(body[24:28], sampleRate<<16)
+	return body
+}
+
+// buildMP4WithAAC builds a minimal MP4 with an `mp4a` sample entry whose
+// AudioSampleEntry declares the given sample rate.
+func buildMP4WithAAC(sampleRate uint32) []byte {
+	return buildMP4WithSampleEntryPayload("mp4a", buildAACSampleEntryPayload(sampleRate))
 }
 
 // buildMP4WithALACConfig builds a minimal MP4 in which the single

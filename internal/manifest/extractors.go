@@ -251,8 +251,22 @@ func extractMP4WithContext(absPath string, t *Track, ec *ExtractContext) error {
 			t.BitsPerSample = &bits
 		}
 	}
+	// Sample rate: ALAC reads the authoritative rate from
+	// ALACSpecificConfig (so hi-res 96/192 kHz survives), AAC reads the
+	// AudioSampleEntry 16.16 rate. Unlike bits, rate is meaningful for
+	// the lossy `mp4a` path too, so this runs regardless of codec — it
+	// moves AAC tracks out of the composition bar's "Unknown" bucket.
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	if rate, err := extractMP4SampleRate(f); err != nil {
+		scanLogger.Warn("mp4 sample-rate walk failed; manifest will carry nil sampleRate",
+			"path", absPath, "err", err)
+	} else if rate > 0 {
+		t.SampleRate = &rate
+	}
 	// Seek to head before handing the reader to dhowden/tag —
-	// extractMP4Codec and extractALACBitDepth both consumed bytes.
+	// the codec / bit-depth / sample-rate walks all consumed bytes.
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
@@ -293,7 +307,26 @@ func extractByFormat(absPath string, t *Track, ec *ExtractContext) error {
 		// (returns `tag.MP3`), but we set it directly here to avoid
 		// an extra step.
 		t.Codec = "MP3"
-		return extractViaDhowdenWithContext(absPath, t, ec)
+		// Open once: read the sample rate from the first MPEG frame
+		// header (dhowden surfaces tags but not frame geometry), then
+		// rewind and hand the same handle to the tag reader — the
+		// single-open-then-rewind pattern the FLAC branch uses. Bit
+		// depth stays nil (not meaningful for a lossy codec).
+		f, err := os.Open(absPath)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		if rate, err := extractMP3SampleRate(f); err != nil {
+			scanLogger.Warn("mp3 sample-rate parse failed; manifest will carry nil sampleRate",
+				"path", absPath, "err", err)
+		} else if rate > 0 {
+			t.SampleRate = &rate
+		}
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
+		return extractViaDhowdenFromReader(f, absPath, t, ec)
 	case ".ogg", ".oga":
 		// OGG container; for v1.2 we conservatively report "OGG"
 		// rather than trying to distinguish Vorbis vs Opus — both
