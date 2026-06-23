@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -290,54 +291,114 @@ func (s *Server) apiStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.getStatsSnapshot())
 }
 
+// snapshotDBTimeout bounds the best-effort DB reads behind the dashboard
+// stats / upscale / analysis SSE snapshots. These run from the
+// per-connection SSE publisher (stats + composition via a
+// context.Background(); the payloads are best-effort, not user-
+// cancellable), so without a deadline a wedged read — SQLite lock
+// contention past busy_timeout, a stalled volume — would block that
+// publisher goroutine indefinitely and the connection couldn't even
+// observe its own client-disconnect / shutdown until the read returned.
+// modernc.org/sqlite honours context cancellation, so the deadline
+// actually interrupts the query. 2s is far above the normal time for
+// these COUNT / small-GROUP-BY reads, so a fire signals a genuine stall
+// rather than a slow-but-valid query. (The heavier full-table
+// composition scan gets its own, generous ceiling — see
+// compositionDBTimeout.)
+const snapshotDBTimeout = 2 * time.Second
+
+// statsDBPart is the DB-derived subset of statsResponse, cached as a unit
+// so a transient SQL error or snapshotDBTimeout during a tick serves the
+// last good numbers instead of zeroing the dashboard tiles. Pre-fix the
+// reads zeroed silently on error; this just makes the degrade graceful,
+// the same way getCompositionSnapshot already serves its last-good
+// composition on a FormatDistribution error.
+type statsDBPart struct {
+	tracks          int
+	upscaledTracks  int
+	optimizedTracks int
+	variantFiles    int
+	variantBytes    int64
+	upnpRouted      int
+}
+
+// readStatsDBPart runs the four best-effort stats DB reads under ctx and
+// returns them as a unit. Returns the FIRST error encountered (with a
+// zero part) so the caller falls back to the cached last-good values as
+// a whole rather than mixing a fresh field with stale siblings.
+func (s *Server) readStatsDBPart(ctx context.Context) (statsDBPart, error) {
+	var p statsDBPart
+	tracks, err := s.deps.Manifest.CountTracks(ctx)
+	if err != nil {
+		return statsDBPart{}, fmt.Errorf("count tracks: %w", err)
+	}
+	rollup, err := s.deps.Manifest.RollupByPrefix(ctx, "")
+	if err != nil {
+		return statsDBPart{}, fmt.Errorf("library rollup: %w", err)
+	}
+	byKind, err := s.deps.Manifest.VariantStatsByKind(ctx)
+	if err != nil {
+		return statsDBPart{}, fmt.Errorf("variant stats by kind: %w", err)
+	}
+	upnpRouted, err := s.deps.Manifest.CountUPnPRoutingTotal(ctx)
+	if err != nil {
+		return statsDBPart{}, fmt.Errorf("upnp routing count: %w", err)
+	}
+	for _, st := range byKind {
+		p.variantFiles += st.Files
+		p.variantBytes += st.Bytes
+	}
+	p.tracks = tracks
+	p.upscaledTracks = rollup.UpscaledTrackCount
+	p.optimizedTracks = rollup.OptimizedTrackCount
+	p.upnpRouted = upnpRouted
+	return p, nil
+}
+
 // getStatsSnapshot is the shared builder for the dashboard stats
 // payload. Used by both the REST handler (apiStats) and the SSE
 // handler (apiEvents). Cheap reads only — no DB writes, no external
-// network. Suitable for sub-second polling.
+// network. Suitable for sub-second polling. The DB reads are bounded by
+// snapshotDBTimeout and degrade to the last-good statsDBPart on
+// error/timeout so a tick during lock contention doesn't flash zeros.
 func (s *Server) getStatsSnapshot() statsResponse {
 	cfg := s.deps.CfgHolder.Load()
 	now := time.Now().UTC()
-	// No request context here (called from SSE event publisher
-	// too). Use Background — admin dashboard stats are best-
-	// effort and not user-cancellable anyway.
-	tracks, _ := s.deps.Manifest.CountTracks(context.Background())
 	dbBytes := dbSize(filepath.Join(cfg.DataDir, "bridge.db"))
-	// Library composition — best-effort; a SQL hiccup leaves the
-	// breakdown zeroed rather than failing the whole stats payload.
-	rollup, err := s.deps.Manifest.RollupByPrefix(context.Background(), "")
+
+	// No request context here (the SSE publisher also calls this), so a
+	// wedged read would otherwise block that goroutine indefinitely.
+	ctx, cancel := context.WithTimeout(context.Background(), snapshotDBTimeout)
+	defer cancel()
+	part, err := s.readStatsDBPart(ctx)
+	s.statsMu.Lock()
 	if err != nil {
-		logger.Warn("stats: library rollup", "err", err)
+		logger.Warn("stats: db read degraded, serving last-good",
+			"err", err, "haveCache", s.statsDBValid)
+		if s.statsDBValid {
+			part = s.statsDB
+		}
+	} else {
+		s.statsDB = part
+		s.statsDBValid = true
 	}
-	byKind, err := s.deps.Manifest.VariantStatsByKind(context.Background())
-	if err != nil {
-		logger.Warn("stats: variant stats by kind", "err", err)
-		byKind = map[string]manifest.VariantKindStat{}
-	}
-	var variantFiles int
-	var variantBytes int64
-	for _, st := range byKind {
-		variantFiles += st.Files
-		variantBytes += st.Bytes
-	}
-	upnpRouted, err := s.deps.Manifest.CountUPnPRoutingTotal(context.Background())
-	if err != nil {
-		logger.Warn("stats: upnp routing count", "err", err)
-	}
+	s.statsMu.Unlock()
+
 	return statsResponse{
 		LibraryName:         cfg.LibraryName,
 		ProtocolVersion:     version.ProtocolVersion,
 		ServerVersion:       version.ServerVersion,
 		UptimeSec:           int64(now.Sub(s.deps.StartedAt).Seconds()),
 		StartedAt:           s.deps.StartedAt,
-		TracksIndexed:       tracks,
+		TracksIndexed:       part.tracks,
 		IsScanning:          s.deps.Scanner.IsScanning(),
 		ScanProgress:        s.deps.Scanner.ScanProgress(),
 		LastFullScan:        s.deps.Scanner.LastFullScan(),
-		TracksWithUpscaled:  rollup.UpscaledTrackCount,
-		TracksWithOptimized: rollup.OptimizedTrackCount,
-		VariantFiles:        variantFiles,
-		VariantBytes:        variantBytes,
-		UPnPRoutedTracks:    upnpRouted,
+		TracksWithUpscaled:  part.upscaledTracks,
+		TracksWithOptimized: part.optimizedTracks,
+		VariantFiles:        part.variantFiles,
+		VariantBytes:        part.variantBytes,
+		UPnPRoutedTracks:    part.upnpRouted,
 		DBBytes:             dbBytes,
 		Fingerprint:         s.deps.Fingerprint,
 		DeviceCount:         len(s.deps.Auth.List()),
@@ -483,6 +544,17 @@ func buildComposition(groups []manifest.FormatGroup) compositionResponse {
 // off the SSE hot path.
 const compositionCacheTTL = 60 * time.Second
 
+// compositionDBTimeout is a deliberately generous ceiling on the
+// full-table FormatDistribution scan — a hang-breaker, NOT a perf gate.
+// Unlike the small stats reads (snapshotDBTimeout = 2s), this scan can
+// legitimately take several seconds on a large library, so a tight
+// timeout would false-trip and the composition tile would never
+// populate. SQLite's 5s busy_timeout already bounds lock contention
+// (the read errors and we serve last-good); this only breaks a
+// pathological I/O hang that would otherwise wedge the singleflight
+// leader — and every caller queued behind it — forever.
+const compositionDBTimeout = 60 * time.Second
+
 // getCompositionSnapshot returns the cached master-quality breakdown,
 // recomputing via a full-table json_extract scan only when the cache is
 // older than compositionCacheTTL. The recompute is single-flighted so N
@@ -510,7 +582,9 @@ func (s *Server) getCompositionSnapshot() compositionResponse {
 			return snap, nil
 		}
 		s.compositionMu.Unlock()
-		groups, err := s.deps.Manifest.FormatDistribution(context.Background())
+		ctx, cancel := context.WithTimeout(context.Background(), compositionDBTimeout)
+		defer cancel()
+		groups, err := s.deps.Manifest.FormatDistribution(ctx)
 		if err != nil {
 			logger.Warn("composition: format distribution", "err", err)
 			s.compositionMu.Lock()
@@ -1427,10 +1501,15 @@ func (s *Server) getUpscaleStatsSnapshot(ctx context.Context) upscaleStatsRespon
 	}
 	resp.Enabled = (resp.Pool != nil)
 	if s.deps.Manifest != nil {
+		// Bound the read so a wedged query can't hold the SSE publisher
+		// past snapshotDBTimeout — the connection ctx alone only cancels
+		// on client disconnect, not on a slow/stalled query.
+		dbCtx, cancel := context.WithTimeout(ctx, snapshotDBTimeout)
+		defer cancel()
 		// Per-kind split drives both the combined totals (back-compat)
 		// and the honest "Upscaled / Optimized" breakdown. One query
 		// instead of the prior kind-agnostic CountVariants.
-		byKind, err := s.deps.Manifest.VariantStatsByKind(ctx)
+		byKind, err := s.deps.Manifest.VariantStatsByKind(dbCtx)
 		if err != nil {
 			// Log + degrade: caller still gets the live fields. A SQL
 			// failure here should be visible in logs but not turn the
@@ -1532,7 +1611,11 @@ func (s *Server) getAnalysisStatsSnapshot(ctx context.Context) analysisStatsResp
 		resp.Enabled = cfg.Analysis.Enabled && avail != nil && *avail
 	}
 	if s.deps.Manifest != nil {
-		count, bytes, err := s.deps.Manifest.CountAnalysis(ctx)
+		// Bound the read (see getUpscaleStatsSnapshot) so a stalled
+		// query can't pin the SSE publisher past snapshotDBTimeout.
+		dbCtx, cancel := context.WithTimeout(ctx, snapshotDBTimeout)
+		defer cancel()
+		count, bytes, err := s.deps.Manifest.CountAnalysis(dbCtx)
 		if err != nil {
 			logger.Warn("analysis stats: count analysis", "err", err)
 		} else {
