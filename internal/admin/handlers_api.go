@@ -1404,6 +1404,18 @@ type upscaleStatsResponse struct {
 // `cfg.Upscale.Enabled` from `/api/settings.upscaleEnabled`
 // separately for the toggle's initial state.
 func (s *Server) apiUpscaleStats(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.getUpscaleStatsSnapshot(r.Context()))
+}
+
+// getUpscaleStatsSnapshot builds the upscale runtime + on-disk snapshot
+// shared by the REST handler (apiUpscaleStats) and the SSE `upscale`
+// event publisher — the single source of truth, like getStatsSnapshot ↔
+// getStatsSSESnapshot. See apiUpscaleStats' doc for the live-vs-persisted
+// `enabled` semantics. Cheap: one VariantStatsByKind GROUP BY (small,
+// PK-planned table) + a mutex-guarded pool snapshot + the TTL-cached sox
+// precheck. No monotonic-per-tick field, so it diff-suppresses cleanly on
+// an idle bridge (Enqueued/Done/Failed only move when jobs run).
+func (s *Server) getUpscaleStatsSnapshot(ctx context.Context) upscaleStatsResponse {
 	cfg := s.deps.CfgHolder.Load()
 	var resp upscaleStatsResponse
 	resp.StoragePath = cfg.Upscale.EffectiveVariantsDir(cfg.DataDir)
@@ -1418,12 +1430,11 @@ func (s *Server) apiUpscaleStats(w http.ResponseWriter, r *http.Request) {
 		// Per-kind split drives both the combined totals (back-compat)
 		// and the honest "Upscaled / Optimized" breakdown. One query
 		// instead of the prior kind-agnostic CountVariants.
-		byKind, err := s.deps.Manifest.VariantStatsByKind(r.Context())
+		byKind, err := s.deps.Manifest.VariantStatsByKind(ctx)
 		if err != nil {
-			// Log + degrade: caller still gets the live
-			// fields. A SQL failure here is the kind of
-			// thing that should be visible in logs but not
-			// turn the whole tile into an error state.
+			// Log + degrade: caller still gets the live fields. A SQL
+			// failure here should be visible in logs but not turn the
+			// whole tile into an error state.
 			logger.Warn("upscale stats: variant stats by kind", "err", err)
 		} else {
 			up := byKind["upscale"]
@@ -1441,7 +1452,7 @@ func (s *Server) apiUpscaleStats(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	writeJSON(w, http.StatusOK, resp)
+	return resp
 }
 
 // soxAvailabilityCacheTTL bounds how long the cached precheck
@@ -1492,6 +1503,15 @@ type analysisStatsResponse struct {
 // source for the Audio analysis section. Cheap (one SQL COUNT + the
 // TTL-cached sox precheck).
 func (s *Server) apiAnalysisStats(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.getAnalysisStatsSnapshot(r.Context()))
+}
+
+// getAnalysisStatsSnapshot builds the audio-analysis snapshot shared by
+// the REST handler (apiAnalysisStats) and the SSE `analysis` event
+// publisher. Cheap (one CountAnalysis COUNT + the TTL-cached sox
+// precheck); diff-suppresses cleanly when idle (counts move only after
+// `bridge analyze` runs).
+func (s *Server) getAnalysisStatsSnapshot(ctx context.Context) analysisStatsResponse {
 	cfg := s.deps.CfgHolder.Load()
 	var resp analysisStatsResponse
 	// Tracks analyze.WaveformDirSubdir ("waveforms"); inlined to avoid
@@ -1512,7 +1532,7 @@ func (s *Server) apiAnalysisStats(w http.ResponseWriter, r *http.Request) {
 		resp.Enabled = cfg.Analysis.Enabled && avail != nil && *avail
 	}
 	if s.deps.Manifest != nil {
-		count, bytes, err := s.deps.Manifest.CountAnalysis(r.Context())
+		count, bytes, err := s.deps.Manifest.CountAnalysis(ctx)
 		if err != nil {
 			logger.Warn("analysis stats: count analysis", "err", err)
 		} else {
@@ -1520,7 +1540,7 @@ func (s *Server) apiAnalysisStats(w http.ResponseWriter, r *http.Request) {
 			resp.CachedBytes = bytes
 		}
 	}
-	writeJSON(w, http.StatusOK, resp)
+	return resp
 }
 
 // splitCustomEndpointsText parses the textarea form of the custom-
