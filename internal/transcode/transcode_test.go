@@ -165,9 +165,10 @@ func TestSidecarFilenameLengthBounded(t *testing.T) {
 
 // TestSoxArgsShape pins the exact argv shape we hand to sox.
 // `-G` (gain-guard) leads as a global option; quality "very-high"
-// → `rate -v <Hz>`, dither -s, bit depth flag -b N, .tmp suffix
-// on output. Any change to this shape needs an integration-test
-// re-run on a known-good fixture.
+// → `rate -v -L <Hz>` (linear phase pinned explicitly; byte-identical
+// to sox's default — see SoxArgs), dither -s, bit depth flag -b N,
+// .tmp suffix on output. Any change to this shape needs an
+// integration-test re-run on a known-good fixture.
 func TestSoxArgsShape(t *testing.T) {
 	j := JobSpec{
 		SourceAbsPath:    "/lib/Music/Album/01.flac",
@@ -184,7 +185,7 @@ func TestSoxArgsShape(t *testing.T) {
 		"-b", "24",
 		"-t", "flac",
 		j.SidecarPath() + ".tmp",
-		"rate", "-v", "176400",
+		"rate", "-v", "-L", "176400",
 		"dither", "-s",
 	}
 	if len(args) != len(want) {
@@ -195,10 +196,10 @@ func TestSoxArgsShape(t *testing.T) {
 			t.Errorf("args[%d]: got %q, want %q", i, args[i], want[i])
 		}
 	}
-	// Settings JSON must mention the rate flag, target rate, guard
-	// flag, and schema version so a future post-mortem can identify
-	// what produced this sidecar.
-	for _, needle := range []string{`"resampler":"sox"`, `"rateFlag":"-v"`, `"targetRate":176400`, `"guard":true`, `"schemaVersion":"v2"`} {
+	// Settings JSON must mention the rate flag, phase, target rate,
+	// guard flag, and schema version so a future post-mortem can
+	// identify what produced this sidecar.
+	for _, needle := range []string{`"resampler":"sox"`, `"rateFlag":"-v"`, `"phase":"linear"`, `"targetRate":176400`, `"guard":true`, `"schemaVersion":"v2"`} {
 		if !strings.Contains(settings, needle) {
 			t.Errorf("settings JSON missing %q (got: %s)", needle, settings)
 		}
