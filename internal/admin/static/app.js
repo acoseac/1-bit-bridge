@@ -2037,7 +2037,9 @@ function renderWorkerGrid(r) {
     const status = document.createElement("span");
     status.className = "worker-status";
     if (w.busy) {
-      const name = w.sourceRel ? w.sourceRel.split("/").pop() : "(working)";
+      // Normalise backslashes first — a Windows host's library-relative
+      // paths can carry `\` separators (Gemini on #437).
+      const name = w.sourceRel ? w.sourceRel.replace(/\\/g, "/").split("/").pop() : "(working)";
       status.textContent = name;
       status.title = w.sourceRel || "";
     } else {
