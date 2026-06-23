@@ -322,16 +322,19 @@ type statsDBPart struct {
 	upnpRouted      int
 }
 
-// readStatsDBPart runs the four best-effort stats DB reads under ctx and
+// readStatsDBPart runs the three best-effort stats DB reads under ctx and
 // returns them as a unit. Returns the FIRST error encountered (with a
 // zero part) so the caller falls back to the cached last-good values as
 // a whole rather than mixing a fresh field with stale siblings.
+//
+// The total track count comes from rollup.TrackCount: the global
+// RollupByPrefix("") fast path runs `SELECT COUNT(*) FROM tracks` —
+// byte-for-byte what CountTracks runs — so a separate CountTracks call
+// would be a redundant 4th round-trip AND open a divergence window
+// between the two queries under concurrent writes. One query keeps the
+// total + variant rollup consistent. (Gemini on PR #443.)
 func (s *Server) readStatsDBPart(ctx context.Context) (statsDBPart, error) {
 	var p statsDBPart
-	tracks, err := s.deps.Manifest.CountTracks(ctx)
-	if err != nil {
-		return statsDBPart{}, fmt.Errorf("count tracks: %w", err)
-	}
 	rollup, err := s.deps.Manifest.RollupByPrefix(ctx, "")
 	if err != nil {
 		return statsDBPart{}, fmt.Errorf("library rollup: %w", err)
@@ -348,7 +351,7 @@ func (s *Server) readStatsDBPart(ctx context.Context) (statsDBPart, error) {
 		p.variantFiles += st.Files
 		p.variantBytes += st.Bytes
 	}
-	p.tracks = tracks
+	p.tracks = rollup.TrackCount
 	p.upscaledTracks = rollup.UpscaledTrackCount
 	p.optimizedTracks = rollup.OptimizedTrackCount
 	p.upnpRouted = upnpRouted
