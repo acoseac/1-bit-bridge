@@ -2,7 +2,6 @@ package admin
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -191,13 +190,14 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 	// upscale + analysis telemetry — these replace the Settings page's
 	// former /api/upscale/stats and /api/analysis/stats 5 s pollers (one
 	// HTTP request per open tab). Same snapshot the REST endpoints serve
-	// (kept as thin wrappers + first-paint fallback). Background ctx — the
-	// publisher isn't request-scoped.
+	// (kept as thin wrappers + first-paint fallback). Use the connection
+	// `ctx` so the snapshot's DB query (VariantStatsByKind / CountAnalysis)
+	// is cancelled if the client disconnects mid-tick (Gemini on #436).
 	publishUpscale := func() error {
-		return marshalAndPublish("upscale", s.getUpscaleStatsSnapshot(context.Background()), &lastUpscale)
+		return marshalAndPublish("upscale", s.getUpscaleStatsSnapshot(ctx), &lastUpscale)
 	}
 	publishAnalysis := func() error {
-		return marshalAndPublish("analysis", s.getAnalysisStatsSnapshot(context.Background()), &lastAnalysis)
+		return marshalAndPublish("analysis", s.getAnalysisStatsSnapshot(ctx), &lastAnalysis)
 	}
 
 	// Initial snapshot — fires synchronously after headers so the
