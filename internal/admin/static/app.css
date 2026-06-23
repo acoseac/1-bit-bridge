@@ -2207,8 +2207,16 @@ section.library-inspector {
 .camelot-seg {
   stroke: var(--bg-panel);
   stroke-width: 1.5;
-  cursor: pointer;
   transition: fill-opacity 0.12s ease, stroke 0.12s ease;
+}
+/* Only keyed segments (count > 0) are click-to-filter; empty keys keep the
+   default cursor so they don't invite a click that lands on an empty list. */
+.camelot-seg.is-clickable {
+  cursor: pointer;
+}
+.camelot-seg.is-clickable:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 .camelot-seg.empty {
   stroke: var(--border);

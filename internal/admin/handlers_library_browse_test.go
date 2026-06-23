@@ -73,6 +73,75 @@ func browseTestSeed(t *testing.T, srv *Server) {
 	}
 }
 
+// TestApiLibraryBrowse_CamelotKeyFilter pins the harmonic-key filter view
+// (?camelot=8A): a flat, library-wide list of ANALYZED tracks in that key,
+// folders empty, KeyFilter/KeyName populated. Backs the coverage wheel's
+// click-to-scope deep-link. A track in a different key and an unanalyzed
+// track must NOT appear.
+func TestApiLibraryBrowse_CamelotKeyFilter(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	ctx := context.Background()
+	for _, p := range []string{
+		"MusicA/Album1/in-key.flac",
+		"MusicA/Album1/other-key.flac",
+		"MusicA/Album1/no-analysis.flac",
+	} {
+		rate := 44100.0
+		bits := 16
+		isDSD := false
+		if err := srv.deps.Manifest.UpsertTrack(ctx, &manifest.Track{
+			Path: p, Size: 100, SampleRate: &rate, BitsPerSample: &bits, Codec: "FLAC", IsDSD: &isDSD,
+		}); err != nil {
+			t.Fatalf("UpsertTrack %q: %v", p, err)
+		}
+	}
+	// KeyRoot 9 / minor → Camelot 8A (A minor); KeyRoot 0 / major → 8B.
+	aMinor, cMajor := 9, 0
+	if err := srv.deps.Manifest.UpsertAnalysis(ctx, manifest.AnalysisRow{
+		SourcePath: "MusicA/Album1/in-key.flac", KeyRoot: &aMinor, KeyMode: "minor",
+	}); err != nil {
+		t.Fatalf("UpsertAnalysis in-key: %v", err)
+	}
+	if err := srv.deps.Manifest.UpsertAnalysis(ctx, manifest.AnalysisRow{
+		SourcePath: "MusicA/Album1/other-key.flac", KeyRoot: &cMajor, KeyMode: "major",
+	}); err != nil {
+		t.Fatalf("UpsertAnalysis other-key: %v", err)
+	}
+
+	var resp browseResponse
+	code := doJSON(t, srv.Handler(), "GET", "/api/library/browse?camelot=8A", nil, &resp)
+	if code != http.StatusOK {
+		t.Fatalf("camelot=8A: status %d", code)
+	}
+	if resp.KeyFilter != "8A" {
+		t.Errorf("KeyFilter = %q, want 8A", resp.KeyFilter)
+	}
+	if resp.KeyName != "A minor" {
+		t.Errorf("KeyName = %q, want %q", resp.KeyName, "A minor")
+	}
+	if len(resp.Folders) != 0 {
+		t.Errorf("Folders len = %d, want 0 (key view is flat)", len(resp.Folders))
+	}
+	if resp.TotalTracks != 1 || len(resp.Tracks) != 1 {
+		t.Fatalf("tracks: total=%d listed=%d, want exactly the one 8A track",
+			resp.TotalTracks, len(resp.Tracks))
+	}
+	if resp.Tracks[0].Path != "MusicA/Album1/in-key.flac" {
+		t.Errorf("Tracks[0].Path = %q, want the in-key track", resp.Tracks[0].Path)
+	}
+}
+
+// TestApiLibraryBrowse_CamelotRejectsBadCode pins the 400 on a malformed
+// wheel code so a bogus deep-link can't masquerade as a key filter.
+func TestApiLibraryBrowse_CamelotRejectsBadCode(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	var resp browseResponse
+	code := doJSON(t, srv.Handler(), "GET", "/api/library/browse?camelot=8Z", nil, &resp)
+	if code != http.StatusBadRequest {
+		t.Fatalf("camelot=8Z: status %d, want 400", code)
+	}
+}
+
 // TestApiLibraryBrowse_RootListsTopLevelFolders pins the top-level
 // browse response to the seeded fixture's two roots (MusicA,
 // MusicB).

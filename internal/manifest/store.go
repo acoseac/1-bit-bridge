@@ -4106,6 +4106,15 @@ func (s *Store) ListChildTracksPage(ctx context.Context, parent, after string, l
 	if err != nil {
 		return nil, fmt.Errorf("list child tracks page %q: %w", parent, err)
 	}
+	return scanChildTrackRows(rows)
+}
+
+// scanChildTrackRows materialises ChildTrack rows from any query built on
+// childTrackRowSelect (identical column order). Shared by the path-prefix
+// browse (ListChildTracksPage) and the harmonic-key filter
+// (ListTracksByKeyPage) so the json_extract → typed-pointer mapping lives in
+// one place. Takes ownership of rows (closes them).
+func scanChildTrackRows(rows *sql.Rows) ([]ChildTrack, error) {
 	defer rows.Close()
 	out := []ChildTrack{}
 	for rows.Next() {
@@ -4141,6 +4150,65 @@ func (s *Store) ListChildTracksPage(ctx context.Context, parent, after string, l
 		out = append(out, ct)
 	}
 	return out, rows.Err()
+}
+
+// tracksByKeyQuery is childTrackRowSelect + the harmonic-key FROM/WHERE, a
+// compile-time CONSTANT.
+//
+// KNOWN SonarCloud FALSE POSITIVE — go:S2077 "dynamically formatted SQL":
+// the rule fires on the `+` syntactically, even though both operands are
+// constants. It is safe — every dynamic value (keyRoot, keyMode, the path
+// cursor, the limit) is a bound ? parameter in ListTracksByKeyPage, so no
+// user-controlled text ever reaches the SQL string. It's the same shape as
+// the 4 pre-existing childTrackRowSelect+ query sites (ListChildTracksPage
+// etc.), which are unflagged only because they predate this PR. Resolve it
+// as a false positive in SonarCloud: the Go analyzer does NOT honor in-code
+// // NOSONAR, and inlining the literal to drop the `+` would duplicate
+// childTrackRowSelect's ~12 SELECT columns and risk a column-order desync
+// with scanChildTrackRows.
+const tracksByKeyQuery = childTrackRowSelect + `
+	  FROM tracks t
+	  JOIN track_analysis ta ON ta.source_path = t.path
+	 WHERE ta.key_root = ? AND ta.key_mode = ?
+	   AND t.path > ?
+	 ORDER BY t.path ASC
+	 LIMIT ?`
+
+// ListTracksByKeyPage returns tracks whose analysis key matches
+// (keyRoot, keyMode), library-wide, cursor-paginated by path ASC. Backs the
+// admin Library Inspector's harmonic-key filter (the coverage wheel's
+// click-to-scope deep-link). The INNER JOIN on track_analysis means only
+// analyzed tracks appear — UPnP-routed/remote rows have no analysis row and
+// are excluded for free, matching the inspector's local-only,
+// variant-generation scope. keyMode is "minor"/"major" (see ToCamelot).
+func (s *Store) ListTracksByKeyPage(ctx context.Context, keyRoot int, keyMode, after string, limit int) ([]ChildTrack, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+	rows, err := s.db.QueryContext(ctx, tracksByKeyQuery, keyRoot, keyMode, after, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list tracks by key (%d,%s): %w", keyRoot, keyMode, err)
+	}
+	return scanChildTrackRows(rows)
+}
+
+// CountTracksByKey returns the total analyzed tracks matching
+// (keyRoot, keyMode) — pairs with ListTracksByKeyPage for the "X of Y" hint.
+// Queries track_analysis directly: its source_path FK references
+// tracks(path) ON DELETE CASCADE, so every analyzed row has a live track
+// and this count equals the tracks⋈track_analysis join without the join
+// overhead (Gemini on PR #444). ListTracksByKeyPage still needs the join —
+// it reads track columns.
+func (s *Store) CountTracksByKey(ctx context.Context, keyRoot int, keyMode string) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM track_analysis
+		 WHERE key_root = ? AND key_mode = ?
+	`, keyRoot, keyMode).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count tracks by key (%d,%s): %w", keyRoot, keyMode, err)
+	}
+	return n, nil
 }
 
 // CountChildFolders returns the total count of immediate-child
