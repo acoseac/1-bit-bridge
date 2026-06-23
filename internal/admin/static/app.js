@@ -3757,12 +3757,41 @@ function inspectorPanelDeleteClick(ev) {
   inspectorDeleteVariantsForKind(kind, sel.row.path || "");
 }
 
-// inspectorSubmitBatchForKind fires N parallel POSTs against
-// /api/upscale/batch (one per path) with the same `kind`. Aggregates
-// enqueued / alreadyCovered counts into a single status line on the
-// kind's drawer section (when paths.length === 1) or the selection
-// bar (when paths.length > 1). The selection-bar callers route
+// inspectorEvictSelectedPath removes one folder from the batch selection
+// after its submit succeeded: drop it from selectedPaths and uncheck its
+// tile (clearing the selected outline). Matching is by data-path value
+// (folder names can contain CSS-selector metacharacters, so we iterate
+// the checkboxes rather than build an attribute selector). A no-op when
+// the path isn't selected — e.g. a single-folder kebab submit on a tile
+// the operator never checked.
+function inspectorEvictSelectedPath(path) {
+  inspectorState.selectedPaths.delete(path);
+  for (const cb of document.querySelectorAll(
+    '.inspector-tile input[type="checkbox"][data-path]')) {
+    if (cb.dataset.path === path) {
+      cb.checked = false;
+      const tile = cb.closest(".inspector-tile");
+      if (tile) delete tile.dataset.selected;
+      break;
+    }
+  }
+}
+
+// inspectorSubmitBatchForKind fires N SEQUENTIAL POSTs against
+// /api/upscale/batch (one per path) with the same `kind` — serial, not
+// Promise.all, to avoid bursting concurrent connections at the SQLite
+// single-writer envelope (see the loop comment + Gemini on PR #276).
+// Aggregates enqueued / alreadyCovered counts into a single status line
+// on the kind's drawer section (when paths.length === 1) or the
+// selection bar (when paths.length > 1). The selection-bar callers route
 // through inspectorSelectionSubmit, which delegates here.
+//
+// Each path is evicted from the selection (checkbox unchecked + dropped
+// from selectedPaths) the moment its POST acks OK — so on a partial
+// failure only the folders that actually failed stay selected, and a
+// retry re-submits ONLY those rather than re-walking the whole original
+// batch server-side (each re-POST costs a full per-folder SQL projection
+// + disk pre-check). Pre-fix, any failure preserved the entire selection.
 // inspectorPreflightNoOpReason — pure helper that maps a single
 // projection response to a human-readable "nothing to do because…"
 // string when `projectedFiles === 0`. Reuses the message matrix
@@ -3948,6 +3977,9 @@ async function inspectorSubmitBatchForKind(kind, paths) {
       }
       const data = await res.json();
       results.push({ path, ok: true, data });
+      // Evict the moment this folder acks OK so a partial-failure retry
+      // re-submits only the still-failed folders (see function doc).
+      inspectorEvictSelectedPath(path);
     } catch (err) {
       results.push({ path, error: err.message });
     }
@@ -4431,12 +4463,19 @@ async function inspectorPanelConfirmSubmit() {
       inspectorClosePanel();
     } else {
       // Partial / total failure — drop back to the summary so the
-      // operator can retry. The toast on the panel carries the
-      // per-folder failure summary.
+      // operator can retry. Successful folders were already evicted from
+      // the selection as their POSTs acked, so repaint the summary from
+      // what REMAINS (failures only): the title count + coverage bars
+      // then reflect exactly what a retry will re-submit. The toast on
+      // the panel carries the per-folder failure summary.
       delete panel.dataset.confirming;
       const overlay = document.getElementById("panel-confirm-overlay");
       if (overlay) overlay.hidden = true;
-      inspectorA11yListeners("batch-summary");
+      if (inspectorState.selectedPaths.size > 0) {
+        inspectorOpenPanelBatch(); // recomputes + reinstalls batch-summary a11y
+      } else {
+        inspectorClosePanel();
+      }
     }
   } finally {
     if (submitBtn) submitBtn.disabled = false;
