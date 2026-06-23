@@ -3196,6 +3196,24 @@ function buildFolderTile(f) {
   return tile;
 }
 
+// SKIP_LABELS maps the server's kind-agnostic skipReason codes
+// (browseTrackRow.skipReason) to a short tile badge + a fuller tooltip.
+// Only these known codes render a badge — an unknown/empty reason is a
+// no-op (the track is eligible, or only softly skipped by a per-kind
+// projection, which the action panel's aggregate copy covers).
+const SKIP_LABELS = {
+  dsd_bitstream: { short: "DSD", full: "DSD bitstream — 1-bit, not PCM-resamplable" },
+  lossy_source: { short: "Lossy", full: "Lossy source — upscaling adds no fidelity" },
+  unknown_format: { short: "Unknown format", full: "Format unknown — the scanner couldn't read the sample rate / bit depth" },
+};
+
+function skipBadgeHTML(reason) {
+  const m = SKIP_LABELS[reason];
+  if (!m) return "";
+  // reason is a fixed enum key (looked up above); short/full are constants.
+  return `<div class="skip-badge" data-skip="${reason}" title="${escapeHTML(m.full)}">🚫 ${escapeHTML(m.short)}</div>`;
+}
+
 function buildTrackTile(t) {
   const tile = document.createElement("article");
   tile.className = "inspector-tile";
@@ -3210,6 +3228,7 @@ function buildTrackTile(t) {
         popovertarget="menu-${escapeHTML(t.pathHash || "")}"
         aria-label="Actions for ${escapeHTML(t.name)}">⋯</button>
     </header>
+    ${skipBadgeHTML(t.skipReason)}
     <dl class="tile-meta">
       <div><dt>Quality</dt><dd>${formatTrackQuality(t)}</dd></div>
       <div><dt>Size</dt><dd>${humanBytes(t.sizeBytes || 0)}</dd></div>
