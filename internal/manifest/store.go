@@ -4394,6 +4394,63 @@ func (s *Store) VariantStatsByKind(ctx context.Context) (map[string]VariantKindS
 	return out, nil
 }
 
+// FormatGroup is one (codec, sampleRate, bitsPerSample, isDSD) bucket
+// with its track count, as returned by FormatDistribution. The format
+// fields live in the `tags_json` BLOB (the `tracks` table has no
+// dedicated format columns), so the GROUP BY pays a full-table
+// json_extract scan — callers MUST cache the result rather than calling
+// it on a hot path (the admin console wraps it in a TTL + single-flight
+// cache). SampleRate is Hz, BitsPerSample is 16/24/32 (1 for DSD).
+type FormatGroup struct {
+	Codec         string
+	SampleRate    int
+	BitsPerSample int
+	IsDSD         bool
+	Count         int
+}
+
+// FormatDistribution returns the library's master-quality breakdown as
+// raw (codec, sampleRate, bitsPerSample, isDSD) groups with per-group
+// track counts. Includes EVERY row in `tracks` (UPnP-routed rows too)
+// so the caller's buckets sum to the same total as CountTracks /
+// RollupByPrefix("").TrackCount; a row with no extractable format
+// (sampleRate 0, not DSD) lands in its own group the caller surfaces as
+// "Unknown".
+//
+// The `is_dsd` extraction mirrors the proven production form in
+// ListTrackProjectionsUnderPrefix: SQLite's json_extract returns SQL
+// INTEGER 1/0 for a JSON boolean, so the `CAST(... AS INTEGER) != 0`
+// round-trip is correct (it already drives the live DSD-skip gate).
+//
+// Full-table json_extract scan — NOT for hot paths; see FormatGroup.
+// Read-only, so no `s.mu` (WAL handles concurrent readers).
+func (s *Store) FormatDistribution(ctx context.Context) ([]FormatGroup, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT COALESCE(json_extract(tags_json, '$.codec'), '')                         AS codec,
+		       CAST(COALESCE(json_extract(tags_json, '$.sampleRate'), 0) AS INTEGER)    AS rate,
+		       CAST(COALESCE(json_extract(tags_json, '$.bitsPerSample'), 0) AS INTEGER) AS bits,
+		       CAST(COALESCE(json_extract(tags_json, '$.isDSD'), 0) AS INTEGER)         AS is_dsd,
+		       COUNT(*)                                                                  AS n
+		  FROM tracks
+		 GROUP BY codec, rate, bits, is_dsd
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("format distribution: %w", err)
+	}
+	defer rows.Close()
+	out := []FormatGroup{}
+	for rows.Next() {
+		var g FormatGroup
+		var isDSD int
+		if err := rows.Scan(&g.Codec, &g.SampleRate, &g.BitsPerSample, &isDSD, &g.Count); err != nil {
+			return nil, err
+		}
+		g.IsDSD = isDSD != 0
+		out = append(out, g)
+	}
+	return out, rows.Err()
+}
+
 // TrackProjection carries the per-track fields the operator pre-
 // flight (apiLibraryBrowseProjection) needs to call ProjectedSize.
 // Slim shape so listing every track under a path doesn't pay the

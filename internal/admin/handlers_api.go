@@ -360,6 +360,177 @@ func (s *Server) getStatsSSESnapshot() statsResponse {
 	return snap
 }
 
+// --- library composition (master-quality breakdown) ---
+
+// compositionBar is one labelled segment of a distribution bar — a
+// sampling-density tier, a DSD tier, or a codec. Admin-local wire DTO.
+type compositionBar struct {
+	Label string `json:"label"`
+	Count int    `json:"count"`
+}
+
+// compositionResponse is the dashboard "Library composition" master-
+// quality breakdown: three distribution bars over the same track set.
+// PCM + DSD partition the library (every track is in exactly one), so
+// sum(PCM)+sum(DSD)==Total; Codecs is an orthogonal view that also sums
+// to Total. Emitted on the SSE `composition` event, consumed by app.js
+// applyComposition. Only non-zero buckets, in deterministic order, so
+// the SSE byte-diff stays stable across idle ticks.
+type compositionResponse struct {
+	Total  int              `json:"total"`
+	PCM    []compositionBar `json:"pcm"`
+	DSD    []compositionBar `json:"dsd"`
+	Codecs []compositionBar `json:"codecs"`
+}
+
+// pcmTierOrder / dsdTierOrder fix the display + wire order of the PCM
+// sampling-density and DSD-rate tiers (deterministic SSE diff).
+var (
+	pcmTierOrder = []string{"44.1–48 kHz", "88.2–96 kHz", "176.4–192 kHz", "≥352.8 kHz (DXD)", "32-bit PCM", "Unknown"}
+	dsdTierOrder = []string{"DSD64", "DSD128", "DSD256", "DSD512", "DSD (other)"}
+)
+
+// pcmTier classifies a non-DSD track by sampling density. Labels are
+// rate-honest (no bit-depth claim a merged bucket could contradict);
+// 32-bit PCM is called out separately and an unparseable rate lands in
+// "Unknown" so the bars still reconcile to the library total.
+func pcmTier(rate, bits int) string {
+	switch {
+	case rate <= 0:
+		return "Unknown"
+	case bits >= 32:
+		return "32-bit PCM"
+	case rate <= 48000:
+		return "44.1–48 kHz"
+	case rate <= 96000:
+		return "88.2–96 kHz"
+	case rate <= 192000:
+		return "176.4–192 kHz"
+	default:
+		return "≥352.8 kHz (DXD)"
+	}
+}
+
+// dsdTier classifies a DSD track by modulation rate. `>=` thresholds
+// (not exact equality) tolerate minor rate variance and keep ordering.
+func dsdTier(rate int) string {
+	switch {
+	case rate >= 22579200:
+		return "DSD512"
+	case rate >= 11289600:
+		return "DSD256"
+	case rate >= 5644800:
+		return "DSD128"
+	case rate >= 2822400:
+		return "DSD64"
+	default:
+		return "DSD (other)"
+	}
+}
+
+// buildComposition buckets raw FormatDistribution groups into the three
+// distribution bars. Pure + deterministic (fixed tier order; codecs by
+// count desc then label asc) so identical inputs marshal to byte-
+// identical JSON for the SSE diff.
+func buildComposition(groups []manifest.FormatGroup) compositionResponse {
+	pcm := map[string]int{}
+	dsd := map[string]int{}
+	codecs := map[string]int{}
+	total := 0
+	for _, g := range groups {
+		total += g.Count
+		label := g.Codec
+		if label == "" {
+			label = "Unknown"
+		}
+		codecs[label] += g.Count
+		if g.IsDSD {
+			dsd[dsdTier(g.SampleRate)] += g.Count
+			continue
+		}
+		pcm[pcmTier(g.SampleRate, g.BitsPerSample)] += g.Count
+	}
+	orderedBars := func(counts map[string]int, order []string) []compositionBar {
+		bars := []compositionBar{}
+		for _, label := range order {
+			if n := counts[label]; n > 0 {
+				bars = append(bars, compositionBar{Label: label, Count: n})
+			}
+		}
+		return bars
+	}
+	codecBars := make([]compositionBar, 0, len(codecs))
+	for label, n := range codecs {
+		codecBars = append(codecBars, compositionBar{Label: label, Count: n})
+	}
+	slices.SortFunc(codecBars, func(a, b compositionBar) int {
+		if a.Count != b.Count {
+			return b.Count - a.Count // count desc
+		}
+		return strings.Compare(a.Label, b.Label) // label asc — deterministic tie-break
+	})
+	return compositionResponse{
+		Total:  total,
+		PCM:    orderedBars(pcm, pcmTierOrder),
+		DSD:    orderedBars(dsd, dsdTierOrder),
+		Codecs: codecBars,
+	}
+}
+
+// compositionCacheTTL bounds how long a bucketed composition snapshot is
+// reused before FormatDistribution is re-scanned. Format only changes
+// after a scan, so 60s is generous and keeps the full-table json_extract
+// off the SSE hot path.
+const compositionCacheTTL = 60 * time.Second
+
+// getCompositionSnapshot returns the cached master-quality breakdown,
+// recomputing via a full-table json_extract scan only when the cache is
+// older than compositionCacheTTL. The recompute is single-flighted so N
+// SSE connections hitting the 30s tick (or initial-emit) after expiry
+// collapse to ONE scan, not N concurrent ones. Best-effort: a SQL error
+// serves the last good snapshot rather than failing the tile.
+func (s *Server) getCompositionSnapshot() compositionResponse {
+	if s.deps.Manifest == nil {
+		return compositionResponse{}
+	}
+	s.compositionMu.Lock()
+	if !s.compositionAt.IsZero() && time.Since(s.compositionAt) < compositionCacheTTL {
+		snap := s.composition
+		s.compositionMu.Unlock()
+		return snap
+	}
+	s.compositionMu.Unlock()
+	v, _, _ := s.compositionSF.Do("composition", func() (any, error) {
+		// Re-check under the flight: a prior flight may have refreshed
+		// the cache while this caller was queued behind Do.
+		s.compositionMu.Lock()
+		if !s.compositionAt.IsZero() && time.Since(s.compositionAt) < compositionCacheTTL {
+			snap := s.composition
+			s.compositionMu.Unlock()
+			return snap, nil
+		}
+		s.compositionMu.Unlock()
+		groups, err := s.deps.Manifest.FormatDistribution(context.Background())
+		if err != nil {
+			logger.Warn("composition: format distribution", "err", err)
+			s.compositionMu.Lock()
+			snap := s.composition // last good (possibly zero)
+			s.compositionMu.Unlock()
+			return snap, nil
+		}
+		snap := buildComposition(groups)
+		s.compositionMu.Lock()
+		s.composition = snap
+		s.compositionAt = time.Now()
+		s.compositionMu.Unlock()
+		return snap, nil
+	})
+	if snap, ok := v.(compositionResponse); ok {
+		return snap
+	}
+	return compositionResponse{}
+}
+
 // --- GET /api/endpoints ---
 
 // adminEndpointEntry is the JSON shape for the admin console's
