@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/version"
@@ -249,31 +248,12 @@ func (s *Server) pageUPnP(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) pageSettings(w http.ResponseWriter, r *http.Request) {
 	cfg := s.deps.CfgHolder.Load()
-	data := settingsResponse{
-		LibraryName:              cfg.LibraryName,
-		ListenAddress:            cfg.ListenAddress,
-		AdminAddress:             cfg.AdminAddress,
-		DataDir:                  cfg.DataDir,
-		ScanIntervalSec:          cfg.ScanIntervalSec,
-		TLSCertPath:              cfg.TLSCertPath,
-		TLSKeyPath:               cfg.TLSKeyPath,
-		CustomEndpoints:          cfg.CustomEndpoints,
-		CustomEndpointsText:      strings.Join(cfg.CustomEndpoints, "\n"),
-		UpdateAutoInstall:        cfg.Update.AutoInstall,
-		UpdateQuietHours:         cfg.Update.QuietHours,
-		UpdateCheckIntervalHours: cfg.Update.CheckIntervalHours,
-		UpscaleEnabled:           cfg.Upscale.Enabled,
-		UpscaleStoragePath:       cfg.Upscale.EffectiveVariantsDir(cfg.DataDir),
-		AnalysisEnabled:          cfg.Analysis.Enabled,
-		SmartPlaylistsEnabled:    cfg.SmartPlaylists.Enabled,
-		IsSupervised:             s.deps.IsSupervised,
-		BackupIntervalHours:      cfg.Backup.EffectiveIntervalHours(),
-		BackupKeep:               cfg.Backup.EffectiveKeep(),
-		IsPublic:                 cfg.IsPublic(),
-		DLNAEnabled:              cfg.DLNA.Enabled,
-		DLNAListenAddress:        cfg.DLNA.EffectiveDLNAListenAddress(),
-		DLNABlockedByPublic:      cfg.IsPublic(),
-	}
+	// Shared builder — the single source of truth for every config-derived
+	// settings field, so this server-rendered page and the JSON apiSettingsGet
+	// can't diverge (they previously did: this handler omitted the enrich /
+	// atlas / mDNS / Tailscale fields, so the General tab rendered them blank
+	// and a Save would clobber them). Handler-specific sox hints layered below.
+	data := settingsResponseFromConfig(cfg, s.deps.IsSupervised)
 	// v1.2 Audio quality section: pre-compute the boolean +
 	// install hint so the template doesn't need a `deref`
 	// helper or a runtime.GOOS switch. The hint is OS-aware

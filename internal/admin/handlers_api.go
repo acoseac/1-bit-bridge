@@ -1017,8 +1017,18 @@ func (s *Server) apiTokensRevoke(w http.ResponseWriter, r *http.Request) {
 
 // --- GET /api/settings ---
 
-func (s *Server) apiSettingsGet(w http.ResponseWriter, r *http.Request) {
-	cfg := s.deps.CfgHolder.Load()
+// settingsResponseFromConfig builds the config-derived portion of the
+// settings payload shared by the JSON API (apiSettingsGet) and the
+// server-rendered page (pageSettings) — the single source of truth for every
+// field that mirrors the live config, so the two handlers can't drift. They
+// previously did: pageSettings silently omitted the enrich / atlas / mDNS /
+// Tailscale fields, so the Settings → General tab rendered them blank (the
+// enrich URLs showed only their public-default placeholders; rich-metadata +
+// mDNS unchecked; Tailscale mode unselected) and a Save would clobber those
+// config values back to defaults. Handler-specific extras — the
+// sox-availability bool + the install/format hint strings — are layered on by
+// each caller afterward.
+func settingsResponseFromConfig(cfg *config.Config, isSupervised bool) settingsResponse {
 	resp := settingsResponse{
 		LibraryName:              cfg.LibraryName,
 		ListenAddress:            cfg.ListenAddress,
@@ -1033,46 +1043,39 @@ func (s *Server) apiSettingsGet(w http.ResponseWriter, r *http.Request) {
 		UpdateQuietHours:         cfg.Update.QuietHours,
 		UpdateCheckIntervalHours: cfg.Update.CheckIntervalHours,
 		UpscaleEnabled:           cfg.Upscale.Enabled,
+		UpscaleStoragePath:       cfg.Upscale.EffectiveVariantsDir(cfg.DataDir),
 		AnalysisEnabled:          cfg.Analysis.Enabled,
 		SmartPlaylistsEnabled:    cfg.SmartPlaylists.Enabled,
 		EnrichMusicBrainzBaseURL: cfg.Enrich.MusicBrainzBaseURL,
 		EnrichCoverArtBaseURL:    cfg.Enrich.CoverArtBaseURL,
 		AtlasEnabled:             cfg.Atlas.Enabled,
-		UpscaleStoragePath:       cfg.Upscale.EffectiveVariantsDir(cfg.DataDir),
-		IsSupervised:             s.deps.IsSupervised,
-		// Same backup fields the page-template handler emits
-		// (`pageSettings`). Without these the JSON API drops them
-		// via `omitempty` and any programmatic GET /api/settings
-		// caller (curl, future iOS / external tooling) sees a
-		// payload missing the retention policy values. Keep the
-		// two handlers in lockstep. (CodeRabbit on PR #129.)
-		BackupIntervalHours: cfg.Backup.EffectiveIntervalHours(),
-		BackupKeep:          cfg.Backup.EffectiveKeep(),
-		// PR 4 — surface the resolved posture-aware values so
-		// the Settings UI doesn't have to re-derive them.
-		MDNSEnabled: cfg.EffectiveMDNSEnabled(),
-		IsPublic:    cfg.IsPublic(),
-		// DLNA toggle posture.
-		DLNAEnabled:         cfg.DLNA.Enabled,
-		DLNAListenAddress:   cfg.DLNA.EffectiveDLNAListenAddress(),
-		DLNABlockedByPublic: cfg.IsPublic(),
+		IsSupervised:             isSupervised,
+		BackupIntervalHours:      cfg.Backup.EffectiveIntervalHours(),
+		BackupKeep:               cfg.Backup.EffectiveKeep(),
+		MDNSEnabled:              cfg.EffectiveMDNSEnabled(),
+		IsPublic:                 cfg.IsPublic(),
+		DLNAEnabled:              cfg.DLNA.Enabled,
+		DLNAListenAddress:        cfg.DLNA.EffectiveDLNAListenAddress(),
+		DLNABlockedByPublic:      cfg.IsPublic(),
 	}
-	// Tailscale mode: tolerate an unknown YAML value by falling
-	// back to the effective default — the UI shows a recognizable
-	// selection even if Validate is currently rejecting the
-	// config (unlikely on the happy path; defensive).
+	// Tailscale mode: tolerate an unknown YAML value by falling back to the
+	// effective default so the UI shows a recognizable selection even if
+	// Validate is currently rejecting the config (defensive).
 	if tm, err := cfg.Tailscale.EffectiveMode(); err == nil {
 		resp.TailscaleMode = string(tm)
 	} else {
 		resp.TailscaleMode = string(config.TailscaleModeCLI)
 	}
-	// Probe sox availability so the Settings UI can warn the
-	// operator before they enable the feature. Cheap (one
-	// exec.LookPath + a 2 s --version check inside
-	// PrecheckSox); fires on every settings page load, but
-	// the operator opens this page rarely. Logged-but-
-	// swallowed on failure so a temporarily slow PATH lookup
-	// doesn't break the whole settings tile.
+	return resp
+}
+
+func (s *Server) apiSettingsGet(w http.ResponseWriter, r *http.Request) {
+	cfg := s.deps.CfgHolder.Load()
+	resp := settingsResponseFromConfig(cfg, s.deps.IsSupervised)
+	// Probe sox availability so the Settings UI can warn before the operator
+	// enables the feature. Cheap (LookPath + a 2 s --version check inside
+	// PrecheckSox); logged-but-swallowed on failure. The JSON API needs only
+	// the bool — the page render adds the install/format hint strings.
 	if s.deps.UpscalePrecheck != nil {
 		ok := s.deps.UpscalePrecheck() == nil
 		resp.UpscaleSoxAvailable = &ok
