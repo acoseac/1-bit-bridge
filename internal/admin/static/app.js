@@ -2357,6 +2357,10 @@ const inspectorState = {
   // requests skip that collection on the server.
   nextFolderCursor: null,
   nextTrackCursor: null,
+  // camelot is the active harmonic-key filter ("" = none). When set, the
+  // inspector shows a flat, library-wide list of analyzed tracks in that
+  // Camelot key (the coverage-wheel deep-link) instead of a folder browse.
+  camelot: "",
   totalFolders: 0,
   totalTracks: 0,
   // renderedFolders / renderedTracks track the count of rows in
@@ -2390,15 +2394,19 @@ let inspectorSearchDebounce = null;
 let inspectorSearchController = null;
 
 function initLibraryInspector() {
-  // Initial path comes from `?path=` query so bookmarks / refresh
-  // land on the right folder. Falls back to library root.
+  // Initial view comes from the query so bookmarks / refresh / the
+  // coverage-wheel deep-link land correctly: `?camelot=8A` opens the
+  // harmonic-key filter (flat list), else `?path=` opens that folder,
+  // else the library root.
   const params = new URLSearchParams(window.location.search);
-  const initialPath = params.get("path") || "";
+  const initialCamelot = params.get("camelot") || "";
+  const initialPath = initialCamelot ? "" : (params.get("path") || "");
   // Replace (not push) the initial entry so the user's first Back
-  // press doesn't land them on a redundant `?path=` history slot.
-  history.replaceState({ path: initialPath, scrollY: 0 }, "",
-    inspectorURLFor(initialPath));
-  inspectorNavigate(initialPath, { skipHistory: true });
+  // press doesn't land them on a redundant query-string history slot.
+  history.replaceState(
+    { path: initialPath, camelot: initialCamelot, scrollY: 0 }, "",
+    inspectorURLFor(initialPath, initialCamelot));
+  inspectorNavigate(initialPath, { skipHistory: true, camelot: initialCamelot });
 
   // Breadcrumb clicks
   document.getElementById("inspector-breadcrumbs")
@@ -2545,11 +2553,16 @@ function initLibraryInspector() {
   // Browser history integration. popstate restores path + scroll
   // from the entry's stored state without re-pushing history.
   window.addEventListener("popstate", (ev) => {
+    const sp = new URLSearchParams(window.location.search);
     const target = (ev.state && typeof ev.state.path === "string")
       ? ev.state.path
-      : (new URLSearchParams(window.location.search).get("path") || "");
+      : (sp.get("path") || "");
+    const camelot = (ev.state && typeof ev.state.camelot === "string")
+      ? ev.state.camelot
+      : (sp.get("camelot") || "");
     inspectorNavigate(target, {
       skipHistory: true,
+      camelot,
       restoreScroll: ev.state ? ev.state.scrollY : 0,
     });
   });
@@ -2728,7 +2741,8 @@ function updateInspectorStickyHeights() {
 // inspectorURLFor builds the canonical URL for a given inspector
 // path. Centralised so the pushState / replaceState / initial-load
 // branches don't drift in encoding.
-function inspectorURLFor(path) {
+function inspectorURLFor(path, camelot) {
+  if (camelot) return `/library/inspector?camelot=${encodeURIComponent(camelot)}`;
   return path
     ? `/library/inspector?path=${encodeURIComponent(path)}`
     : `/library/inspector`;
@@ -2751,12 +2765,18 @@ function inspectorNavigateUp() {
 //   - restoreScroll: number of pixels to scrollTo after the table
 //     body re-renders (popstate-driven restoration).
 async function inspectorNavigate(path, opts = {}) {
+  // The harmonic-key filter ("" = none) is part of the view identity.
+  // Any navigate WITHOUT opts.camelot clears it (clicking a folder or the
+  // breadcrumb root exits the key filter back to a normal browse).
+  const camelot = opts.camelot || "";
   // Same-path refresh: don't add a duplicate history entry. This
   // covers callers like inspectorDeleteVariants that re-navigate
   // to the current folder to refresh row data after mutation, AND
-  // a user clicking the active breadcrumb crumb.
+  // a user clicking the active breadcrumb crumb. A path match with a
+  // DIFFERENT camelot still pushes (it's a different view).
   if (!opts.skipHistory && history.state
-    && history.state.path === path) {
+    && history.state.path === path
+    && (history.state.camelot || "") === camelot) {
     opts = { ...opts, skipHistory: true };
   }
   // Capture the OUTGOING entry's scroll position BEFORE we mutate
@@ -2770,6 +2790,7 @@ async function inspectorNavigate(path, opts = {}) {
   }
 
   inspectorState.path = path;
+  inspectorState.camelot = camelot;
   // Invalidate any in-flight chunked-render pump from a previous
   // navigation or load-more BEFORE the new fetch starts. Pre-fix
   // the generation was only bumped INSIDE inspectorAppendRows on
@@ -2795,14 +2816,19 @@ async function inspectorNavigate(path, opts = {}) {
   document.getElementById("inspector-error").hidden = true;
   document.getElementById("inspector-current-heading").textContent =
     "Loading…";
-  document.title = `Library Inspector — ${path || "Root"}`;
+  document.title = camelot
+    ? `Library Inspector — Key ${camelot}`
+    : `Library Inspector — ${path || "Root"}`;
 
   if (!opts.skipHistory) {
-    history.pushState({ path, scrollY: 0 }, "", inspectorURLFor(path));
+    history.pushState({ path, camelot, scrollY: 0 }, "", inspectorURLFor(path, camelot));
   }
 
   try {
-    const res = await fetch(`/api/library/browse?path=${encodeURIComponent(path)}`);
+    const browseQuery = camelot
+      ? `camelot=${encodeURIComponent(camelot)}`
+      : `path=${encodeURIComponent(path)}`;
+    const res = await fetch(`/api/library/browse?${browseQuery}`);
     // Race guard: a slow response from an earlier navigation must
     // not overwrite the newer navigation's content. Compare against
     // the live `inspectorState.path` set synchronously at the top
@@ -2956,6 +2982,18 @@ function inspectorRenderBreadcrumbs(path) {
   root.dataset.path = "";
   root.textContent = "Library";
   crumbs.appendChild(root);
+  // Harmonic-key filter view: show "Library › Key 8A" instead of a folder
+  // trail. The root crumb (dataset.path="") is the CLEAR affordance — its
+  // click handler calls inspectorNavigate("") with no camelot, exiting the
+  // filter back to a normal browse.
+  if (inspectorState.camelot) {
+    crumbs.appendChild(document.createTextNode(" › "));
+    const span = document.createElement("span");
+    span.className = "inspector-key-crumb";
+    span.textContent = `Key ${inspectorState.camelot}`;
+    crumbs.appendChild(span);
+    return;
+  }
   if (!path) return;
   const parts = path.split("/");
   let acc = "";
@@ -2977,7 +3015,9 @@ function inspectorRenderBreadcrumbs(path) {
 // partial height after just the first 200-row chunk.
 async function inspectorRender(data) {
   document.getElementById("inspector-current-heading").textContent =
-    pathLabel(data.path);
+    data.keyFilter
+      ? `Key ${data.keyFilter}${data.keyName ? " — " + data.keyName : ""}`
+      : pathLabel(data.path);
 
   // Capture pagination metadata so Load-more (manual click or
   // IntersectionObserver auto-fire) can advance against the right
@@ -3396,11 +3436,18 @@ async function inspectorLoadMore() {
   inspectorState.loadingMore = true;
   const path = inspectorState.path;
   try {
-    const params = new URLSearchParams({ path });
-    // Include each cursor param IF the collection isn't exhausted;
-    // OMIT the param to signal exhausted to the server.
-    if (inspectorState.nextFolderCursor) {
-      params.set("afterFolder", inspectorState.nextFolderCursor);
+    const params = new URLSearchParams();
+    // Harmonic-key filter view is a flat track list (no folders); the
+    // folder cursor only applies to a normal path browse.
+    if (inspectorState.camelot) {
+      params.set("camelot", inspectorState.camelot);
+    } else {
+      params.set("path", path);
+      // Include each cursor param IF the collection isn't exhausted;
+      // OMIT the param to signal exhausted to the server.
+      if (inspectorState.nextFolderCursor) {
+        params.set("afterFolder", inspectorState.nextFolderCursor);
+      }
     }
     if (inspectorState.nextTrackCursor) {
       params.set("afterTrack", inspectorState.nextTrackCursor);
@@ -5406,6 +5453,27 @@ function initCamelotWheel() {
       seg.appendChild(title);
       seg.addEventListener("mouseenter", () => highlightCamelot(code, segByCode, coverage));
       seg.addEventListener("mouseleave", () => clearCamelot(segByCode));
+      // Click / tap / keyboard → scope the Library Inspector to this key.
+      // Only keyed segments (count > 0) are interactive — an empty key
+      // would deep-link to an empty list. touchstart ALSO previews the
+      // readout so tablet users get the metrics as they tap (the
+      // synthesized click then performs the navigation).
+      if (count > 0) {
+        seg.classList.add("is-clickable");
+        seg.setAttribute("role", "button");
+        seg.setAttribute("tabindex", "0");
+        seg.setAttribute("aria-label",
+          `${code}: ${count} track${count === 1 ? "" : "s"} — view in Library Inspector`);
+        seg.addEventListener("click", () => camelotOpenKeyInInspector(code));
+        seg.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            camelotOpenKeyInInspector(code);
+          }
+        });
+        seg.addEventListener("touchstart",
+          () => highlightCamelot(code, segByCode, coverage), { passive: true });
+      }
       svg.appendChild(seg);
       segByCode.set(code, seg);
 
@@ -5468,6 +5536,15 @@ function clearCamelot(segByCode) {
   segByCode.forEach((seg) => seg.classList.remove("is-hover", "is-compat", "is-dim"));
   const readout = document.getElementById("camelot-readout");
   if (readout && readout.dataset.summary) readout.textContent = readout.dataset.summary;
+}
+
+// camelotOpenKeyInInspector deep-links to the Library Inspector's
+// harmonic-key filter view for a wheel code (e.g. "8A") — cross-page
+// navigation from the Smart Mixes coverage wheel to /library/inspector,
+// which reads ?camelot= on load (see initLibraryInspector).
+function camelotOpenKeyInInspector(code) {
+  if (!/^\d+[AB]$/i.test(code)) return;
+  window.location.href = `/library/inspector?camelot=${encodeURIComponent(code)}`;
 }
 
 function camelotPolar(cx, cy, r, deg) {

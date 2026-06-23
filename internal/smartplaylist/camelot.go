@@ -1,5 +1,10 @@
 package smartplaylist
 
+import (
+	"strconv"
+	"strings"
+)
+
 // Camelot wheel mapping + harmonic-compatibility scoring for Auto Mix.
 //
 // The Camelot wheel labels each key 1..12 with a letter: A = minor (inner
@@ -40,6 +45,42 @@ func ToCamelot(keyRoot int, mode string) (Camelot, bool) {
 	default:
 		return Camelot{}, false
 	}
+}
+
+// FromCamelot is the inverse of ToCamelot: it parses a wheel code like
+// "8A" / "8B" back into the (keyRoot, mode) pair stored in track_analysis.
+// Letter A = minor, B = major; input is upper-cased + trimmed so "8a" works.
+// ok=false for a malformed code, an out-of-range number, or an unknown
+// letter. Used by the admin Library Inspector's "filter by harmonic key"
+// deep-link from the coverage wheel — the same single-source mapping as
+// ToCamelot, so a clicked wheel segment and the rows it filters always
+// agree. camelotMinor/camelotMajor are permutations of 1..12, so the
+// reverse lookup is an unambiguous bijection.
+func FromCamelot(code string) (keyRoot int, mode string, ok bool) {
+	code = strings.ToUpper(strings.TrimSpace(code))
+	if len(code) < 2 {
+		return 0, "", false
+	}
+	letter := code[len(code)-1]
+	num, err := strconv.Atoi(code[:len(code)-1])
+	if err != nil || num < 1 || num > 12 {
+		return 0, "", false
+	}
+	var table *[12]int
+	switch letter {
+	case 'A':
+		table, mode = &camelotMinor, "minor"
+	case 'B':
+		table, mode = &camelotMajor, "major"
+	default:
+		return 0, "", false
+	}
+	for root, n := range table {
+		if n == num {
+			return root, mode, true
+		}
+	}
+	return 0, "", false // unreachable: tables cover every number 1..12
 }
 
 // camelotCircDiff is the circular distance between two wheel numbers (1..12),

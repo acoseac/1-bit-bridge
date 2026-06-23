@@ -33,6 +33,7 @@ import (
 	"strings"
 
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
+	"github.com/acoseac/1-bit-bridge/internal/smartplaylist"
 )
 
 // pathHash returns a stable 8-character lowercase hex digest of the
@@ -133,6 +134,12 @@ type browseResponse struct {
 	SubtreeUpscaled  int   `json:"subtreeUpscaled,omitempty"`
 	SubtreeOptimized int   `json:"subtreeOptimized,omitempty"`
 	SubtreeSizeBytes int64 `json:"subtreeSizeBytes,omitempty"`
+	// KeyFilter / KeyName are set ONLY on the harmonic-key filter view
+	// (?camelot=8A): the Camelot code echoed back (upper-cased) and its
+	// human pitch name ("A minor"), driving the inspector's "filtering by
+	// key" banner. Empty on a normal folder browse.
+	KeyFilter string `json:"keyFilter,omitempty"`
+	KeyName   string `json:"keyName,omitempty"`
 }
 
 // browseProjectionResponse is the JSON envelope returned by
@@ -200,6 +207,14 @@ func fundamentalSkipReason(isDSD bool, codec string, sampleRate *float64, bitsPe
 // Returns one level of children under `path`. Empty / missing
 // `path` returns the top-level folders + any root-level tracks.
 func (s *Server) apiLibraryBrowse(w http.ResponseWriter, r *http.Request) {
+	// Harmonic-key filter view (the coverage wheel's click-to-scope
+	// deep-link): a flat, library-wide list of analyzed tracks in one
+	// key. Same browseResponse shape (Folders empty) so the inspector
+	// reuses its tile renderer + cursor pagination unchanged.
+	if camelot := strings.TrimSpace(r.URL.Query().Get("camelot")); camelot != "" {
+		s.browseByKey(w, r, camelot)
+		return
+	}
 	rawPath := r.URL.Query().Get("path")
 	normalised, ok := normaliseBrowsePath(rawPath)
 	if !ok {
@@ -304,19 +319,7 @@ func (s *Server) apiLibraryBrowse(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	for _, t := range tracks {
-		resp.Tracks = append(resp.Tracks, browseTrackRow{
-			Name:          path.Base(t.Path),
-			Path:          t.Path,
-			SizeBytes:     t.Size,
-			SampleRate:    t.SampleRate,
-			BitsPerSample: t.BitsPerSample,
-			Codec:         t.Codec,
-			IsDSD:         t.IsDSD,
-			IsUpscaled:    t.IsUpscaled,
-			IsOptimized:   t.IsOptimized,
-			PathHash:      pathHash(t.Path),
-			SkipReason:    fundamentalSkipReason(t.IsDSD != nil && *t.IsDSD, t.Codec, t.SampleRate, t.BitsPerSample),
-		})
+		resp.Tracks = append(resp.Tracks, toBrowseTrackRow(t))
 	}
 	// Next-page cursors: a "full page" (len == limit) MIGHT have
 	// more; signal continuation via the last row's path. A
@@ -330,6 +333,100 @@ func (s *Server) apiLibraryBrowse(w http.ResponseWriter, r *http.Request) {
 		resp.NextFolderCursor = folders[len(folders)-1].Path
 	}
 	if len(tracks) == limit && fetchTracks {
+		resp.NextTrackCursor = tracks[len(tracks)-1].Path
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// pitchNames maps keyRoot 0..11 (C=0) to its pitch-class name for the
+// inspector's harmonic-key banner. Sharps match the Camelot wheel labels.
+var pitchNames = [12]string{"C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B"}
+
+// camelotKeyName renders a (keyRoot, mode) as a human pitch name, e.g.
+// "A minor" / "C major". Empty for an out-of-range root.
+func camelotKeyName(keyRoot int, mode string) string {
+	if keyRoot < 0 || keyRoot > 11 {
+		return ""
+	}
+	return pitchNames[keyRoot] + " " + mode
+}
+
+// toBrowseTrackRow projects a manifest.ChildTrack into the wire row shape.
+// Shared by the folder browse and the harmonic-key filter so the
+// skip-reason + pointer-field mapping lives in one place.
+func toBrowseTrackRow(t manifest.ChildTrack) browseTrackRow {
+	return browseTrackRow{
+		Name:          path.Base(t.Path),
+		Path:          t.Path,
+		SizeBytes:     t.Size,
+		SampleRate:    t.SampleRate,
+		BitsPerSample: t.BitsPerSample,
+		Codec:         t.Codec,
+		IsDSD:         t.IsDSD,
+		IsUpscaled:    t.IsUpscaled,
+		IsOptimized:   t.IsOptimized,
+		PathHash:      pathHash(t.Path),
+		SkipReason:    fundamentalSkipReason(t.IsDSD != nil && *t.IsDSD, t.Codec, t.SampleRate, t.BitsPerSample),
+	}
+}
+
+// browseByKey serves the harmonic-key filter view: a flat, library-wide,
+// cursor-paginated list of analyzed tracks whose key matches the Camelot
+// code. Folders are always empty (a key view has no hierarchy); the
+// inspector renders it with its existing tile + load-more machinery and
+// shows a "filtering by key" banner from KeyFilter/KeyName. Track-cursor
+// pagination only (afterTrack); afterFolder doesn't apply.
+func (s *Server) browseByKey(w http.ResponseWriter, r *http.Request, camelot string) {
+	keyRoot, keyMode, ok := smartplaylist.FromCamelot(camelot)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "bad-key",
+			"camelot must be a wheel code like 8A (minor) or 8B (major)")
+		return
+	}
+	if s.deps.Manifest == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "manifest store not wired")
+		return
+	}
+	q := r.URL.Query()
+	afterTrack := q.Get("afterTrack")
+	isFirstPage := !q.Has("afterTrack")
+	limit := 500
+	if v := q.Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			if n > 2000 {
+				n = 2000
+			}
+			limit = n
+		}
+	}
+	tracks, err := s.deps.Manifest.ListTracksByKeyPage(r.Context(), keyRoot, keyMode, afterTrack, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "browse-by-key", err.Error())
+		return
+	}
+	total, err := s.deps.Manifest.CountTracksByKey(r.Context(), keyRoot, keyMode)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "count-by-key", err.Error())
+		return
+	}
+	resp := browseResponse{
+		Path:        "",
+		KeyFilter:   strings.ToUpper(strings.TrimSpace(camelot)),
+		KeyName:     camelotKeyName(keyRoot, keyMode),
+		Folders:     []browseFolderRow{},
+		Tracks:      make([]browseTrackRow, 0, len(tracks)),
+		TotalTracks: total,
+		Limit:       limit,
+	}
+	// The flat key list IS its own subtree; surface the total on the first
+	// page so the action-panel coverage header has a denominator.
+	if isFirstPage {
+		resp.SubtreeTracks = total
+	}
+	for _, t := range tracks {
+		resp.Tracks = append(resp.Tracks, toBrowseTrackRow(t))
+	}
+	if len(tracks) == limit {
 		resp.NextTrackCursor = tracks[len(tracks)-1].Path
 	}
 	writeJSON(w, http.StatusOK, resp)
