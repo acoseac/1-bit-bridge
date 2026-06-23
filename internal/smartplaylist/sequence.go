@@ -49,7 +49,7 @@ func sequenceHarmonic(seed TrackFeature, pool []TrackFeature, maxItems int) []Tr
 		if f.KeyRoot == nil {
 			continue
 		}
-		c, ok := toCamelot(*f.KeyRoot, f.KeyMode)
+		c, ok := ToCamelot(*f.KeyRoot, f.KeyMode)
 		if !ok {
 			continue
 		}
@@ -62,7 +62,7 @@ func sequenceHarmonic(seed TrackFeature, pool []TrackFeature, maxItems int) []Tr
 	// Resolve the seed's position; fall back to the first candidate.
 	seedC, ok := Camelot{}, false
 	if seed.KeyRoot != nil {
-		seedC, ok = toCamelot(*seed.KeyRoot, seed.KeyMode)
+		seedC, ok = ToCamelot(*seed.KeyRoot, seed.KeyMode)
 	}
 	if !ok {
 		seed = cands[0].f
