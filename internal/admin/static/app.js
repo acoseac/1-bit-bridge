@@ -3989,6 +3989,11 @@ async function inspectorSubmitBatchForKind(kind, paths) {
   const failed = results.filter(r => r.error);
   const enqueued = ok.reduce((n, r) => n + (r.data?.enqueuedCount || 0), 0);
   const covered = ok.reduce((n, r) => n + (r.data?.alreadyCovered || 0), 0);
+  // Captured for the multi-path failure cases so inspectorPanelConfirmSubmit
+  // can re-surface it on the redrawn batch summary after it hides the
+  // confirm overlay (the toast below lands inside that overlay, so it would
+  // otherwise vanish with the count change unexplained). CodeRabbit on #442.
+  let failureMsg = "";
 
   if (single && status) {
     if (failed.length > 0) {
@@ -4005,10 +4010,11 @@ async function inspectorSubmitBatchForKind(kind, paths) {
     // The trusted-HTML form is reserved for the success branch where
     // every interpolated value is a numeric count from the server.
     if (failed.length > 0 && ok.length === 0) {
-      inspectorSelectionToast(`Couldn't submit any: ${failed[0].error}`);
+      failureMsg = `Couldn't submit any: ${failed[0].error}`;
+      inspectorSelectionToast(failureMsg);
     } else if (failed.length > 0) {
-      inspectorSelectionToast(
-        `${enqueued} tracks queued across ${ok.length} folders · ${failed.length} folders failed`);
+      failureMsg = `${enqueued} tracks queued across ${ok.length} folders · ${failed.length} folders failed`;
+      inspectorSelectionToast(failureMsg);
     } else {
       // SAFE: enqueued + ok.length are server-supplied integers,
       // not user-controlled strings; rendered via the html sentinel
@@ -4033,7 +4039,7 @@ async function inspectorSubmitBatchForKind(kind, paths) {
   if (ok.length > 0 && failed.length === 0 && inspectorState.path === originPath) {
     await inspectorNavigate(originPath);
   }
-  return { ok: ok.length, failed: failed.length, enqueued };
+  return { ok: ok.length, failed: failed.length, enqueued, message: failureMsg };
 }
 
 // inspectorDeleteVariantsForKind fires DELETE /api/upscale/variants
@@ -4466,13 +4472,18 @@ async function inspectorPanelConfirmSubmit() {
       // operator can retry. Successful folders were already evicted from
       // the selection as their POSTs acked, so repaint the summary from
       // what REMAINS (failures only): the title count + coverage bars
-      // then reflect exactly what a retry will re-submit. The toast on
-      // the panel carries the per-folder failure summary.
+      // then reflect exactly what a retry will re-submit.
       delete panel.dataset.confirming;
       const overlay = document.getElementById("panel-confirm-overlay");
       if (overlay) overlay.hidden = true;
       if (inspectorState.selectedPaths.size > 0) {
         inspectorOpenPanelBatch(); // recomputes + reinstalls batch-summary a11y
+        // Re-surface the failure summary on the redrawn panel. The toast
+        // inspectorSubmitBatchForKind emitted landed in the confirm
+        // overlay we just hid; re-emitting now (with `confirming` cleared)
+        // routes it to the visible per-card submit row so the operator
+        // sees WHY those folders are still selected. CodeRabbit on #442.
+        if (result.message) inspectorSelectionToast(result.message);
       } else {
         inspectorClosePanel();
       }
