@@ -102,8 +102,8 @@ func runAnalyzeBatch(ctx context.Context, stdout, stderr io.Writer, store *manif
 	}
 	candidates := res.candidates
 
-	fmt.Fprintf(stdout, "analyze: %d tracks, %d to analyze, %d up-to-date, %d skipped (DSD), %d unreadable\n",
-		res.total, len(candidates), res.skipped, res.dsdSkipped, res.missing)
+	fmt.Fprintf(stdout, "analyze: %d tracks, %d to analyze, %d up-to-date, %d skipped (DSD), %d empty, %d unreadable\n",
+		res.total, len(candidates), res.skipped, res.dsdSkipped, res.emptySkipped, res.missing)
 	if p.dryRun {
 		return 0
 	}
@@ -236,11 +236,12 @@ func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 // analysisScanResult bundles the enumeration outcome shared by the CLI
 // batch path and the serve-side auto-analysis sweeper.
 type analysisScanResult struct {
-	candidates []analyze.AnalyzeSpec
-	total      int
-	skipped    int // up-to-date sidecar (scan-skip gate hit)
-	dsdSkipped int // DSD source (sox can't decode)
-	missing    int // unresolvable / directory
+	candidates   []analyze.AnalyzeSpec
+	total        int
+	skipped      int // up-to-date sidecar (scan-skip gate hit)
+	dsdSkipped   int // DSD source (sox can't decode)
+	emptySkipped int // zero-byte source (unanalyzable — failed/incomplete upload)
+	missing      int // unresolvable / directory
 }
 
 // collectAnalysisCandidates enumerates library tracks that need a
@@ -268,6 +269,20 @@ func collectAnalysisCandidates(ctx context.Context, store *manifest.Store, resol
 		abs, info, rerr := resolver.ResolveChecked(rel)
 		if rerr != nil || info.IsDir() {
 			res.missing++
+			continue
+		}
+		// A zero-byte source can never produce a waveform: sox can't probe
+		// it and the ffmpeg fallback fails with "Cannot determine format …
+		// after EOF". These are failed/incomplete uploads (e.g. a truncated
+		// B2 sync), so skip them at collection time — otherwise the sweeper
+		// re-enqueues + re-fails them on every tick (recurring "analyze:
+		// failed" log noise). A re-upload makes size > 0 and the file flows
+		// through normally on the next sweep. Skipped even under --force,
+		// since force bypasses the freshness gate, not unanalyzability — and
+		// the check stays mtime/size-driven so it can't suppress a real file
+		// that's only TRANSIENTLY failing (those keep a non-zero size).
+		if info.Size() == 0 {
+			res.emptySkipped++
 			continue
 		}
 		if !force {
