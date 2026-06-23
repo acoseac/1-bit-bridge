@@ -806,6 +806,16 @@ func TestParseAIFFExtended_DegenerateEncodings(t *testing.T) {
 	if got := parseAIFFExtended(inf); got != 0 {
 		t.Errorf("Inf/NaN encoding = %v, want 0", got)
 	}
+	// A huge but non-0x7FFF exponent (0x7FFE here) drives Ldexp to
+	// +Inf — which must clamp to 0, because a +Inf SampleRate would
+	// fail json.Marshal and break the tags_json write (Gemini HIGH on
+	// PR #440). Pre-fix this returned +Inf.
+	overflow := make([]byte, 10)
+	overflow[0], overflow[1] = 0x7F, 0xFE
+	overflow[2] = 0x80 // mantissa MSB set
+	if got := parseAIFFExtended(overflow); got != 0 {
+		t.Errorf("overflow encoding = %v, want 0 (must not return ±Inf)", got)
+	}
 	if got := parseAIFFExtended([]byte{0x40, 0x0E}); got != 0 {
 		t.Errorf("short slice = %v, want 0", got)
 	}

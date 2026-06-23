@@ -196,7 +196,16 @@ func parseAIFFExtended(b []byte) float64 {
 		return 0
 	}
 	// value = sign × mantissa × 2^(exponent − 16383 − 63)
-	return sign * math.Ldexp(float64(mantissa), exponent-16383-63)
+	val := sign * math.Ldexp(float64(mantissa), exponent-16383-63)
+	// A corrupt COMM chunk with a huge (but non-0x7FFF) exponent can
+	// overflow Ldexp to ±Inf. A ±Inf / NaN SampleRate would fail
+	// json.Marshal when the Track is persisted, breaking the whole
+	// tags_json batch write — so refuse it and leave SampleRate nil
+	// rather than let one malformed file derail the scan.
+	if math.IsInf(val, 0) || math.IsNaN(val) {
+		return 0
+	}
+	return val
 }
 
 // extractWAVWithContext is the RIFF/WAVE analog of
