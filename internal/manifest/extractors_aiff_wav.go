@@ -123,7 +123,7 @@ func extractAIFFWithContext(absPath string, t *Track, ec *ExtractContext) error 
 					return fmt.Errorf("aiff: COMM pad seek: %w", err)
 				}
 			}
-			parseAIFFCOMMChunk(body, t)
+			parseAIFFCOMMChunk(body, t, formType)
 			continue
 		}
 		if err := seekPastChunk(f, int64(size)); err != nil {
@@ -149,13 +149,16 @@ func extractAIFFWithContext(absPath string, t *Track, ec *ExtractContext) error 
 //	[6:8]  sampleSize    int16   — bits per sample of the (decompressed) signal
 //	[8:18] sampleRate    80-bit IEEE-754 extended
 //
-// For AIFC the sampleSize holds the bit depth of the UNCOMPRESSED data
-// (sowt / NONE / twos / fl32 / in24 … are the common "compressions",
-// all of which are really just byte-ordered PCM), so it stays a
-// meaningful integer bit depth. BitsPerSample is gated by
-// canSetBitsPerSample (which allowlists "AIFF") as defense-in-depth,
-// matching every other bits-write site.
-func parseAIFFCOMMChunk(body []byte, t *Track) {
+// SampleRate is always stamped. BitsPerSample is gated TWICE: by
+// canSetBitsPerSample (allowlists "AIFF") AND by aiffCOMMHasPCMDepth —
+// because `.aifc` is stamped Codec="AIFF" before the COMM is parsed, a
+// COMPRESSED AIFC variant (e.g. ima4 / ulaw) would otherwise surface its
+// COMM.sampleSize as a real PCM bit depth, the AIFF analog of the iOS
+// PR #371 "lossy source reports a container bit depth" regression. For
+// AIFC we therefore only set bits when the compressionType is a known
+// PCM-like FOURCC. Plain AIFF is uncompressed by definition, so it's
+// always eligible.
+func parseAIFFCOMMChunk(body []byte, t *Track, formType string) {
 	if len(body) < 18 {
 		return
 	}
@@ -164,9 +167,30 @@ func parseAIFFCOMMChunk(body []byte, t *Track) {
 	if sampleRate > 0 {
 		t.SampleRate = &sampleRate
 	}
-	if sampleSize > 0 && canSetBitsPerSample(t.Codec) {
+	if sampleSize > 0 && canSetBitsPerSample(t.Codec) && aiffCOMMHasPCMDepth(body, formType) {
 		bps := int(sampleSize)
 		t.BitsPerSample = &bps
+	}
+}
+
+// aiffCOMMHasPCMDepth reports whether the COMM chunk's sampleSize is a
+// meaningful PCM bit depth. Plain AIFF is always uncompressed PCM. AIFC
+// appends a 4-byte compressionType FOURCC at COMM body offset 18; only
+// the byte-ordered / float / sized-PCM "compressions" carry a real bit
+// depth — every other code is a lossy/compressed scheme whose sampleSize
+// describes the pre-compression source, not the stored signal.
+func aiffCOMMHasPCMDepth(body []byte, formType string) bool {
+	if formType == "AIFF" {
+		return true
+	}
+	if formType != "AIFC" || len(body) < 22 {
+		return false
+	}
+	switch string(body[18:22]) {
+	case "NONE", "twos", "sowt", "raw ", "fl32", "fl64", "in24", "in32", "23ni":
+		return true
+	default:
+		return false
 	}
 }
 

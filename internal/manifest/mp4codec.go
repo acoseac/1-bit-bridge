@@ -332,9 +332,16 @@ func locateInnerALACConfig(r io.ReadSeeker, entryStart, entrySize, stsdEnd uint6
 // extractMP4SampleRate parses the audio sample rate (Hz) from an MP4
 // file's first stsd sample entry. Returns 0 (no error) when the rate
 // can't be determined — a non-MP4 / structurally-incomplete file, or a
-// layout the walker doesn't recognise — so the caller leaves
-// t.SampleRate nil and falls through cleanly. Genuine I/O / atom-walk
-// failures propagate.
+// first entry that isn't one of the two audio codecs the bridge reads —
+// so the caller leaves t.SampleRate nil and falls through cleanly.
+// Genuine I/O / atom-walk failures propagate.
+//
+// **Audio-only gate**: the rate is read ONLY when the first sample
+// entry's FourCC is `mp4a` or `alac`. A video-first MP4 (a video trak
+// ahead of the audio trak) has a different sample-entry body layout, so
+// reading a 16.16 "rate" out of it would persist a bogus value. The
+// bridge classifies only those two MP4 audio codecs anyway, so anything
+// else honestly yields no rate.
 //
 // Two read paths:
 //   - AAC (`mp4a`): the version-0 AudioSampleEntry carries a 16.16
@@ -342,9 +349,7 @@ func locateInnerALACConfig(r io.ReadSeeker, entryStart, entrySize, stsdEnd uint6
 //     upper 16 bits — correct for every realistic AAC rate (≤48 kHz).
 //   - ALAC (`alac`): the AudioSampleEntry 16.16 field can't represent
 //     hi-res rates (>65535 Hz), so the authoritative 32-bit sampleRate
-//     from ALACSpecificConfig (its last 4 bytes) overrides it when
-//     present. For ≤48 kHz ALAC both agree; the 16.16 read stays as a
-//     fallback when the config is unreadable.
+//     from ALACSpecificConfig (its last 4 bytes) is read directly.
 func extractMP4SampleRate(r io.ReadSeeker) (float64, error) {
 	stsdStart, stsdHdr, stsdSize, err := findSTSD(r)
 	if err != nil {
@@ -369,13 +374,17 @@ func extractMP4SampleRate(r io.ReadSeeker) (float64, error) {
 	if _, err := io.ReadFull(r, fourcc[:]); err != nil {
 		return 0, err
 	}
+	codec := string(fourcc[:])
 
-	// AudioSampleEntry (version 0) 16.16 fixed-point sampleRate at body
-	// offset 24; the body begins at entryStart + 8.
-	var rate float64
-	const audioSampleEntryRateOffset = 8 + 24
-	asRateOff := entryStart + audioSampleEntryRateOffset
-	if asRateOff+4 <= stsdEnd {
+	switch codec {
+	case "mp4a":
+		// AAC: version-0 AudioSampleEntry 16.16 fixed-point sampleRate at
+		// body offset 24 (the body begins at entryStart + 8).
+		const audioSampleEntryRateOffset = 8 + 24
+		asRateOff := entryStart + audioSampleEntryRateOffset
+		if asRateOff+4 > stsdEnd {
+			return 0, nil
+		}
 		if _, err := r.Seek(int64(asRateOff), io.SeekStart); err != nil {
 			return 0, err
 		}
@@ -383,34 +392,37 @@ func extractMP4SampleRate(r io.ReadSeeker) (float64, error) {
 		if err := binary.Read(r, binary.BigEndian, &fixed); err != nil {
 			return 0, err
 		}
-		rate = float64(fixed >> 16)
-	}
+		return float64(fixed >> 16), nil
 
-	if string(fourcc[:]) == "alac" {
+	case "alac":
 		innerStart, innerHdr, innerSize, found, err := locateInnerALACConfig(r, entryStart, uint64(entrySize), stsdEnd)
 		if err != nil {
 			return 0, err
 		}
-		if found {
-			// ALACSpecificConfig sampleRate is its last 4 bytes (config
-			// offset 20). Inner payload = 4-byte FullBox version+flags +
-			// 24-byte config, so the rate sits at inner payload offset 24.
-			const sampleRatePayloadOffset = 24
-			if innerSize >= innerHdr+sampleRatePayloadOffset+4 {
-				if _, err := r.Seek(int64(innerStart+innerHdr+sampleRatePayloadOffset), io.SeekStart); err != nil {
-					return 0, err
-				}
-				var configRate uint32
-				if err := binary.Read(r, binary.BigEndian, &configRate); err != nil {
-					return 0, err
-				}
-				if configRate > 0 {
-					rate = float64(configRate)
-				}
-			}
+		if !found {
+			return 0, nil
 		}
+		// ALACSpecificConfig sampleRate is its last 4 bytes (config
+		// offset 20). Inner payload = 4-byte FullBox version+flags +
+		// 24-byte config, so the rate sits at inner payload offset 24.
+		const sampleRatePayloadOffset = 24
+		if innerSize < innerHdr+sampleRatePayloadOffset+4 {
+			return 0, nil
+		}
+		if _, err := r.Seek(int64(innerStart+innerHdr+sampleRatePayloadOffset), io.SeekStart); err != nil {
+			return 0, err
+		}
+		var configRate uint32
+		if err := binary.Read(r, binary.BigEndian, &configRate); err != nil {
+			return 0, err
+		}
+		return float64(configRate), nil
+
+	default:
+		// Not one of the audio sample entries we read (video / unknown
+		// codec) — honest 0 rather than a bogus rate from the wrong layout.
+		return 0, nil
 	}
-	return rate, nil
 }
 
 // findAtom scans MP4 atoms starting at `start` (absolute byte offset

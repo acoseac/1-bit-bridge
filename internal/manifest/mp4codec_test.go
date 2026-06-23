@@ -366,6 +366,21 @@ func TestExtractMP4SampleRate_AACFromAudioSampleEntry(t *testing.T) {
 	}
 }
 
+// TestExtractMP4SampleRate_VideoEntryReturnsZero — a video-first stsd
+// (first sample entry FourCC "avc1") has a different body layout; the
+// rate reader must NOT read a bogus 16.16 out of it. CodeRabbit Major on
+// PR #440.
+func TestExtractMP4SampleRate_VideoEntryReturnsZero(t *testing.T) {
+	mp4 := buildMP4WithSampleEntryPayload("avc1", make([]byte, 28))
+	got, err := extractMP4SampleRate(bytes.NewReader(mp4))
+	if err != nil {
+		t.Fatalf("extractMP4SampleRate: %v", err)
+	}
+	if got != 0 {
+		t.Errorf("got %v, want 0 for a video sample entry", got)
+	}
+}
+
 // TestExtractMP4SampleRate_SuppressesStructuralNotFound — a non-MP4
 // input returns (0, nil) so the caller leaves SampleRate nil rather than
 // failing the scan (mirrors the bit-depth walker's honest-suppression).

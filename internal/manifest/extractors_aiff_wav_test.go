@@ -608,13 +608,13 @@ func encodeAIFFExtendedInt(rate uint32) [10]byte {
 // (e.g. an AIFC compressionType FOURCC + pstring) is appended after the
 // 80-bit sample rate so AIFC-shaped COMM chunks can be exercised too.
 func buildAIFFCOMMChunk(channels int16, numFrames uint32, sampleSize int16, sampleRate uint32, extraTrailer ...byte) []byte {
-	payload := make([]byte, 18)
+	payload := make([]byte, 18+len(extraTrailer))
 	binary.BigEndian.PutUint16(payload[0:2], uint16(channels))
 	binary.BigEndian.PutUint32(payload[2:6], numFrames)
 	binary.BigEndian.PutUint16(payload[6:8], uint16(sampleSize))
 	ext := encodeAIFFExtendedInt(sampleRate)
 	copy(payload[8:18], ext[:])
-	payload = append(payload, extraTrailer...)
+	copy(payload[18:], extraTrailer)
 	return wrapChunkBE("COMM", payload)
 }
 
@@ -774,7 +774,67 @@ func TestExtractAIFC_COMMWithCompressionTrailer(t *testing.T) {
 		t.Errorf("SampleRate = %v, want 48000", track.SampleRate)
 	}
 	if track.BitsPerSample == nil || *track.BitsPerSample != 24 {
-		t.Errorf("BitsPerSample = %v, want 24", track.BitsPerSample)
+		t.Errorf("BitsPerSample = %v, want 24 (NONE is uncompressed PCM)", track.BitsPerSample)
+	}
+}
+
+// TestExtractAIFC_LossyCompressionKeepsBitsNil — a COMPRESSED AIFC
+// (compressionType "ima4", lossy ADPCM) must surface SampleRate but
+// leave BitsPerSample nil: its COMM.sampleSize describes the
+// pre-compression source, not the stored signal (the AIFF analog of the
+// iOS PR #371 lossy-bit-depth regression). CodeRabbit Major on PR #440.
+func TestExtractAIFC_LossyCompressionKeepsBitsNil(t *testing.T) {
+	trailer := append([]byte("ima4"), 0x00) // lossy ADPCM compression FOURCC + empty pstring
+	comm := buildAIFFCOMMChunk(2, 44100*5, 16, 44100, trailer...)
+	form := []byte("FORM")
+	var sz [4]byte
+	binary.BigEndian.PutUint32(sz[:], uint32(len("AIFC")+len(comm)))
+	form = append(form, sz[:]...)
+	form = append(form, []byte("AIFC")...)
+	form = append(form, comm...)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fixture.aifc")
+	if err := os.WriteFile(path, form, 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	track := &Track{}
+	if err := extractAIFFWithContext(path, track, nil); err != nil {
+		t.Fatalf("extractAIFFWithContext: %v", err)
+	}
+	if track.SampleRate == nil || *track.SampleRate != 44100 {
+		t.Errorf("SampleRate = %v, want 44100 (rate always set)", track.SampleRate)
+	}
+	if track.BitsPerSample != nil {
+		t.Errorf("BitsPerSample = %v, want nil for lossy AIFC compression", *track.BitsPerSample)
+	}
+}
+
+// TestAIFFCOMMHasPCMDepth pins the AIFF/AIFC bit-depth eligibility gate:
+// plain AIFF always, uncompressed AIFC FOURCCs yes, lossy ones no.
+func TestAIFFCOMMHasPCMDepth(t *testing.T) {
+	// Plain AIFF — body content irrelevant.
+	if !aiffCOMMHasPCMDepth(make([]byte, 18), "AIFF") {
+		t.Error("AIFF should always be PCM-depth eligible")
+	}
+	commWith := func(comp string) []byte {
+		b := make([]byte, 22)
+		copy(b[18:22], comp)
+		return b
+	}
+	for _, comp := range []string{"NONE", "twos", "sowt", "raw ", "fl32", "fl64", "in24", "in32", "23ni"} {
+		if !aiffCOMMHasPCMDepth(commWith(comp), "AIFC") {
+			t.Errorf("AIFC %q should be PCM-depth eligible", comp)
+		}
+	}
+	for _, comp := range []string{"ima4", "ulaw", "alaw", "MAC3", "MAC6", "QDMC", "agsm"} {
+		if aiffCOMMHasPCMDepth(commWith(comp), "AIFC") {
+			t.Errorf("AIFC %q (lossy/compressed) must NOT be PCM-depth eligible", comp)
+		}
+	}
+	// AIFC COMM too short to hold the compressionType → not eligible.
+	if aiffCOMMHasPCMDepth(make([]byte, 18), "AIFC") {
+		t.Error("AIFC with truncated COMM (no compressionType) must not be eligible")
 	}
 }
 
