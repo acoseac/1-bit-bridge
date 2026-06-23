@@ -4152,28 +4152,27 @@ func scanChildTrackRows(rows *sql.Rows) ([]ChildTrack, error) {
 	return out, rows.Err()
 }
 
-// tracksByKeyFromWhere is the FROM/WHERE half of the harmonic-key query,
-// split out so tracksByKeyQuery below concatenates two named constants on a
-// single statement line that can carry the NOSONAR marker.
-const tracksByKeyFromWhere = `
+// tracksByKeyQuery is childTrackRowSelect + the harmonic-key FROM/WHERE, a
+// compile-time CONSTANT.
+//
+// KNOWN SonarCloud FALSE POSITIVE — go:S2077 "dynamically formatted SQL":
+// the rule fires on the `+` syntactically, even though both operands are
+// constants. It is safe — every dynamic value (keyRoot, keyMode, the path
+// cursor, the limit) is a bound ? parameter in ListTracksByKeyPage, so no
+// user-controlled text ever reaches the SQL string. It's the same shape as
+// the 4 pre-existing childTrackRowSelect+ query sites (ListChildTracksPage
+// etc.), which are unflagged only because they predate this PR. Resolve it
+// as a false positive in SonarCloud: the Go analyzer does NOT honor in-code
+// // NOSONAR, and inlining the literal to drop the `+` would duplicate
+// childTrackRowSelect's ~12 SELECT columns and risk a column-order desync
+// with scanChildTrackRows.
+const tracksByKeyQuery = childTrackRowSelect + `
 	  FROM tracks t
 	  JOIN track_analysis ta ON ta.source_path = t.path
 	 WHERE ta.key_root = ? AND ta.key_mode = ?
 	   AND t.path > ?
 	 ORDER BY t.path ASC
 	 LIMIT ?`
-
-// tracksByKeyQuery is childTrackRowSelect + the key FROM/WHERE, a
-// compile-time CONSTANT. go:S2077 fires on the `+` (it flags any SQL-string
-// concatenation syntactically, even constant ⊕ constant — the same pattern
-// backs 4 pre-existing childTrackRowSelect+ sites that are safe for the same
-// reason). It's a false positive: both operands are constants and every
-// dynamic value (keyRoot, keyMode, path cursor, limit) is a bound ?
-// parameter in ListTracksByKeyPage, so no user-controlled text reaches the
-// SQL. Inlining to drop the + would duplicate childTrackRowSelect's ~12
-// SELECT columns and risk a column-order desync with scanChildTrackRows, so
-// suppress the FP in-code instead.
-const tracksByKeyQuery = childTrackRowSelect + tracksByKeyFromWhere // NOSONAR(go:S2077): constant + bound params, see above
 
 // ListTracksByKeyPage returns tracks whose analysis key matches
 // (keyRoot, keyMode), library-wide, cursor-paginated by path ASC. Backs the
