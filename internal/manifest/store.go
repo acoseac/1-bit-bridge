@@ -4152,21 +4152,28 @@ func scanChildTrackRows(rows *sql.Rows) ([]ChildTrack, error) {
 	return out, rows.Err()
 }
 
-// tracksByKeyQuery is childTrackRowSelect + the harmonic-key FROM/WHERE,
-// assembled as a compile-time CONSTANT so ListTracksByKeyPage hands a
-// constant string to QueryContext rather than an inline concatenation at
-// the sink. go:S2077 flags `db.Query(prefix + "...")` as "dynamically
-// formatted SQL" even when both operands are constants; a single const
-// identifier is the canonical safe form. Every dynamic value — keyRoot,
-// keyMode, the path cursor, the limit — is a bound ? parameter, so no
-// user-controlled text ever reaches the SQL string.
-const tracksByKeyQuery = childTrackRowSelect + `
+// tracksByKeyFromWhere is the FROM/WHERE half of the harmonic-key query,
+// split out so tracksByKeyQuery below concatenates two named constants on a
+// single statement line that can carry the NOSONAR marker.
+const tracksByKeyFromWhere = `
 	  FROM tracks t
 	  JOIN track_analysis ta ON ta.source_path = t.path
 	 WHERE ta.key_root = ? AND ta.key_mode = ?
 	   AND t.path > ?
 	 ORDER BY t.path ASC
 	 LIMIT ?`
+
+// tracksByKeyQuery is childTrackRowSelect + the key FROM/WHERE, a
+// compile-time CONSTANT. go:S2077 fires on the `+` (it flags any SQL-string
+// concatenation syntactically, even constant ⊕ constant — the same pattern
+// backs 4 pre-existing childTrackRowSelect+ sites that are safe for the same
+// reason). It's a false positive: both operands are constants and every
+// dynamic value (keyRoot, keyMode, path cursor, limit) is a bound ?
+// parameter in ListTracksByKeyPage, so no user-controlled text reaches the
+// SQL. Inlining to drop the + would duplicate childTrackRowSelect's ~12
+// SELECT columns and risk a column-order desync with scanChildTrackRows, so
+// suppress the FP in-code instead.
+const tracksByKeyQuery = childTrackRowSelect + tracksByKeyFromWhere // NOSONAR(go:S2077): constant + bound params, see above
 
 // ListTracksByKeyPage returns tracks whose analysis key matches
 // (keyRoot, keyMode), library-wide, cursor-paginated by path ASC. Backs the
