@@ -712,6 +712,17 @@ type Server struct {
 	compositionAt time.Time
 	compositionSF singleflight.Group
 
+	// stats DB-read last-good cache. getStatsSnapshot bounds its four
+	// best-effort DB reads with snapshotDBTimeout; on error/timeout it
+	// serves this last-good statsDBPart so the dashboard tiles don't flash
+	// zero during scan-time lock contention (mirrors the last-good degrade
+	// getCompositionSnapshot already does for the heavier format scan).
+	// getStatsSnapshot runs from BOTH the REST handler and the SSE
+	// publisher, so guard with a dedicated mutex.
+	statsMu      sync.Mutex
+	statsDB      statsDBPart
+	statsDBValid bool
+
 	// boundAdminAddr is the address the TCP listener was actually
 	// bound to, recorded in Serve() once net.Listen succeeds. It is
 	// used by originMatchesAdmin() so that CSRF validation reflects
