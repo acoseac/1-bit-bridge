@@ -236,6 +236,10 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 	// tick because pairing.List() is a cheap map iteration AND the
 	// SecondsUntilExpiry countdown depends on it during a join flow.
 	var wasScanning bool
+	// wasUpscaleBusy latches the prior fast-tick pool-busy state so the
+	// worker grid fires one final frame as the pool goes idle (workers →
+	// idle sub-second), then the fast-tick upscale publish goes quiet.
+	var wasUpscaleBusy bool
 
 	for {
 		select {
@@ -252,6 +256,19 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 			if err := publishPairing(); err != nil {
 				return
 			}
+			// Worker grid at per-second resolution WHILE the pool is busy
+			// (diff-suppressed, so a steadily-running job doesn't spam).
+			// Idle bridges skip this — the 5 s medium tick still carries
+			// the full upscale snapshot. UpscaleBusy is a cheap atomic
+			// probe (no DB); the publish itself runs the snapshot only
+			// when the gate opens.
+			busy := s.deps.UpscaleBusy != nil && s.deps.UpscaleBusy()
+			if busy || wasUpscaleBusy {
+				if err := publishUpscale(); err != nil {
+					return
+				}
+			}
+			wasUpscaleBusy = busy
 		case <-medTk.C:
 			if err := publishStats(); err != nil {
 				return

@@ -92,6 +92,16 @@ type Pool struct {
 	doneCnt     atomic.Uint64
 	failedCnt   atomic.Uint64
 
+	// activeJobs[workerID] holds the job worker `workerID` is currently
+	// processing (nil = idle). One atomic.Pointer slot per worker, sized
+	// once at NewPool. Single-writer-per-slot (the owning worker) +
+	// lock-free reads via ActiveWorkers() for the live SSE worker grid.
+	// The stored *ActiveJob is IMMUTABLE after Store — a reader never sees
+	// a torn struct, and the JSON stays byte-stable while a job runs (it
+	// carries StartedAtUnixMs, NOT a ticking elapsed) so the upscale SSE
+	// frame diff-suppresses between real job transitions.
+	activeJobs []atomic.Pointer[ActiveJob]
+
 	// onStateChange fires after every observable state transition
 	// (job enqueued, completed, sox-failed, store-failed). Nil when
 	// not wired — silently dropped, same back-compat shape as every
@@ -319,6 +329,7 @@ func NewPool(store *manifest.Store, workers, queueCap int) *Pool {
 		upscaleJobs:  make(chan poolJob, queueCap),
 		queueCap:     queueCap,
 		inflight:     make(map[string]struct{}),
+		activeJobs:   make([]atomic.Pointer[ActiveJob], workers),
 		stopCtx:      stopCtx,
 		stopCancel:   stopCancel,
 		runner:       RunSox,
@@ -333,7 +344,7 @@ func NewPool(store *manifest.Store, workers, queueCap int) *Pool {
 	}
 	for i := 0; i < workers; i++ {
 		p.wg.Add(1)
-		go p.workerLoop()
+		go p.workerLoop(i) // stable worker ID for the activeJobs slot
 	}
 	p.publisherWG.Add(1)
 	go p.runPublisher()
@@ -683,6 +694,64 @@ type PoolStats struct {
 	Failed   uint64
 }
 
+// ActiveJob is the immutable snapshot of the job a worker is currently
+// running, stored in Pool.activeJobs[workerID]. Built once at job start
+// and never mutated (a future phase field would allocate + Store a fresh
+// one), so concurrent ActiveWorkers() reads are torn-state-free without a
+// lock. Carries StartedAtUnixMs (not a ticking elapsed) so the worker
+// grid's wire shape stays stable while a job runs — the client ticks the
+// elapsed display locally.
+type ActiveJob struct {
+	SourceRel        string  // SourceLibraryRel — the display path
+	SourceSampleRate int     // Hz, 0 if unknown
+	SourceBits       int     // bit depth, 0 if unknown
+	TargetSampleRate int     // Hz
+	TargetBits       int     // 16/24/32
+	Quality          Quality // resampler quality (very-high / high / medium)
+	Kind             JobKind // upscale / optimize
+	StartedAtUnixMs  int64
+}
+
+// ActiveJobView is the per-worker value snapshot ActiveWorkers returns —
+// one entry per worker slot, Busy=false for idle workers. Plain value
+// type safe to hand to the admin / SSE layer.
+type ActiveJobView struct {
+	WorkerID         int    `json:"workerId"`
+	Busy             bool   `json:"busy"`
+	SourceRel        string `json:"sourceRel,omitempty"`
+	SourceSampleRate int    `json:"sourceSampleRate,omitempty"`
+	SourceBits       int    `json:"sourceBits,omitempty"`
+	TargetSampleRate int    `json:"targetSampleRate,omitempty"`
+	TargetBits       int    `json:"targetBits,omitempty"`
+	Quality          string `json:"quality,omitempty"`
+	Kind             string `json:"kind,omitempty"`
+	StartedAtUnixMs  int64  `json:"startedAtUnixMs,omitempty"`
+}
+
+// ActiveWorkers returns one snapshot per worker slot (WorkerID 0..N-1),
+// Busy=false for idle workers. Lock-free: each slot is an atomic.Pointer
+// read; the *ActiveJob behind it is immutable. Order is stable (slot
+// index), so the SSE worker grid renders deterministically.
+func (p *Pool) ActiveWorkers() []ActiveJobView {
+	out := make([]ActiveJobView, len(p.activeJobs))
+	for i := range p.activeJobs {
+		v := ActiveJobView{WorkerID: i}
+		if aj := p.activeJobs[i].Load(); aj != nil {
+			v.Busy = true
+			v.SourceRel = aj.SourceRel
+			v.SourceSampleRate = aj.SourceSampleRate
+			v.SourceBits = aj.SourceBits
+			v.TargetSampleRate = aj.TargetSampleRate
+			v.TargetBits = aj.TargetBits
+			v.Quality = string(aj.Quality)
+			v.Kind = string(aj.Kind)
+			v.StartedAtUnixMs = aj.StartedAtUnixMs
+		}
+		out[i] = v
+	}
+	return out
+}
+
 // DropInflight removes entries from the dedup `inflight` map whose
 // source_path satisfies the supplied predicate. Returns the count
 // dropped.
@@ -811,7 +880,7 @@ func (p *Pool) Stats() PoolStats {
 // The pool's stopCtx is plumbed into RunSox via
 // exec.CommandContext, so a Stop() while a sox is in flight
 // SIGKILLs the process and the worker exits the loop cleanly.
-func (p *Pool) workerLoop() {
+func (p *Pool) workerLoop(workerID int) {
 	defer p.wg.Done()
 	optCh := (<-chan poolJob)(p.optimizeJobs)
 	upsCh := (<-chan poolJob)(p.upscaleJobs)
@@ -826,7 +895,7 @@ func (p *Pool) workerLoop() {
 					optCh = nil
 					continue
 				}
-				p.processJob(job)
+				p.processJob(workerID, job)
 				continue
 			default:
 			}
@@ -845,13 +914,13 @@ func (p *Pool) workerLoop() {
 				optCh = nil
 				continue
 			}
-			p.processJob(job)
+			p.processJob(workerID, job)
 		case job, ok := <-upsCh:
 			if !ok {
 				upsCh = nil
 				continue
 			}
-			p.processJob(job)
+			p.processJob(workerID, job)
 		}
 	}
 }
@@ -879,7 +948,7 @@ func (p *Pool) workerLoop() {
 // `failedCnt` and fires the callback after `releaseDedup`, including
 // the new per-job timeout branch (logged distinctly so operators
 // can tell a hung-sox kill from an internal sox failure).
-func (p *Pool) processJob(job poolJob) {
+func (p *Pool) processJob(workerID int, job poolJob) {
 	// `startedAt` feeds durationSeconds on every failure / completion
 	// path so the Coordinator's rolling-throughput average sees the
 	// wall-clock cost of each job regardless of which exit path is
@@ -913,7 +982,7 @@ func (p *Pool) processJob(job poolJob) {
 			}
 		}
 		if !released {
-			p.releaseDedup(job.dedup)
+			p.finishJob(workerID, job.dedup)
 			// Match the synchronous error branches' shape: fire the
 			// state-change AFTER releaseDedup so the published
 			// snapshot reflects the final state (job out of
@@ -947,10 +1016,26 @@ func (p *Pool) processJob(job poolJob) {
 	// Cooperative stop check before spending CPU on a sox
 	// invocation we'll just kill.
 	if p.closed.Load() {
-		p.releaseDedup(job.dedup)
+		p.finishJob(workerID, job.dedup)
 		released = true
 		return
 	}
+
+	// Publish this worker's active job for the live grid — AFTER the
+	// stop check so an immediately-abandoned job never flashes as active.
+	// Immutable after Store; every terminal path below clears it via
+	// finishJob (which runs BEFORE that path's fireStateChange, so the
+	// published snapshot shows the worker idle, not stale-active).
+	p.activeJobs[workerID].Store(&ActiveJob{
+		SourceRel:        job.spec.SourceLibraryRel,
+		SourceSampleRate: job.spec.SourceSampleRate,
+		SourceBits:       job.spec.SourceBits,
+		TargetSampleRate: job.spec.TargetSampleRate,
+		TargetBits:       job.spec.TargetBits,
+		Quality:          job.spec.Quality,
+		Kind:             job.spec.Kind,
+		StartedAtUnixMs:  startedAt.UnixMilli(),
+	})
 
 	jobCtx, cancel := context.WithTimeout(p.stopCtx, p.jobTimeout)
 	defer cancel()
@@ -974,7 +1059,7 @@ func (p *Pool) processJob(job poolJob) {
 					"err", err)
 			}
 		}
-		p.releaseDedup(job.dedup)
+		p.finishJob(workerID, job.dedup)
 		released = true
 		// Fire AFTER releaseDedup so the published snapshot
 		// reflects the final state (job out of inflight) —
@@ -1016,7 +1101,7 @@ func (p *Pool) processJob(job poolJob) {
 			_ = os.Remove(sidecarPath)
 			p.fireJobFailedFor(job, "fsync sidecar: "+err.Error(), startedAt)
 		}
-		p.releaseDedup(job.dedup)
+		p.finishJob(workerID, job.dedup)
 		released = true
 		if !p.closed.Load() {
 			p.fireStateChange()
@@ -1092,7 +1177,7 @@ func (p *Pool) processJob(job poolJob) {
 		// fired the SSE first while the failed job was still in
 		// `p.inflight`, briefly publishing a stale snapshot that
 		// iOS clients then had to reconcile away on the next tick.
-		p.releaseDedup(job.dedup)
+		p.finishJob(workerID, job.dedup)
 		released = true
 		if !p.closed.Load() {
 			// Worker isn't stalled by the publisher's CountVariants
@@ -1107,7 +1192,7 @@ func (p *Pool) processJob(job poolJob) {
 	dur := time.Since(startedAt).Seconds()
 	metrics.UpscaleDurationHist.Observe(dur)
 	metrics.UpscaleDurationWindow.Observe(dur)
-	p.releaseDedup(job.dedup)
+	p.finishJob(workerID, job.dedup)
 	released = true
 	// Per-job completion event fires AFTER UpsertVariant commits
 	// (success branch above) and AFTER releaseDedup so the
@@ -1194,6 +1279,19 @@ func redactSoxErr(s string, spec JobSpec) string {
 		s += "…(truncated)"
 	}
 	return s
+}
+
+// finishJob clears worker `workerID`'s active-job slot AND releases the
+// (source, variant) dedup slot — the two cleanups a job's terminal path
+// must do together, BEFORE it fires its state-change. Clearing the slot
+// before fireStateChange is load-bearing: a bare top-level `defer
+// Store(nil)` would (LIFO) run AFTER the body's explicit fireStateChange
+// and publish a snapshot still showing the just-finished worker as active
+// until the next tick. Store(nil) on an already-nil slot (the
+// cooperative-stop path runs before the slot is set) is a harmless no-op.
+func (p *Pool) finishJob(workerID int, dedup string) {
+	p.activeJobs[workerID].Store(nil)
+	p.releaseDedup(dedup)
 }
 
 // releaseDedup drops the (source, variant) slot from the inflight

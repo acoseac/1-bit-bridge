@@ -305,6 +305,10 @@ func classifyUpscaleTrack(
 		return nil, 0
 	}
 	sourceRateHz := int(*t.SampleRate)
+	srcBits := 0 // display-only (worker grid signal chain); nil → 0 (unknown)
+	if t.BitsPerSample != nil {
+		srcBits = *t.BitsPerSample
+	}
 	target, targetBitsForJob, skip, exitCode := resolveCLITargetForKind(stderr, t, p, sourceRateHz, counters)
 	if exitCode != 0 || skip {
 		return nil, exitCode
@@ -328,6 +332,7 @@ func classifyUpscaleTrack(
 		SourceAbsPath:    absPath,
 		SourceLibraryRel: t.Path,
 		SourceSampleRate: sourceRateHz,
+		SourceBits:       srcBits,
 		TargetSampleRate: target,
 		TargetBits:       targetBitsForJob,
 		Quality:          p.quality,

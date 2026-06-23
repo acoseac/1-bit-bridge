@@ -18,6 +18,17 @@
     </p>
   </div>
 
+  {{/* Live SoX pipeline — one row per worker slot, painted by app.js
+       renderWorkerGrid from the SSE `upscale` event. Hidden when the
+       upscale feature is off (no pool). The elapsed time ticks locally
+       (1 s) from each row's immutable startedAtUnixMs; the SSE frame only
+       changes on a real start/finish, so it stays diff-suppressed. */}}
+  <div class="panel" id="workers-panel" hidden>
+    <h2>Workers</h2>
+    <p class="hint">Live SoX pipeline — what each worker is converting right now.</p>
+    <div class="workers-grid" id="workers-grid"></div>
+  </div>
+
   <div class="panel">
     <table class="rows" id="jobs-table">
       <thead>

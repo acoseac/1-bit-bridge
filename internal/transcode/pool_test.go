@@ -493,6 +493,86 @@ func TestPoolJobTimesOutAndCountsAsFailure(t *testing.T) {
 	}
 }
 
+// TestPoolActiveWorkersReflectsInflight pins the live worker-grid
+// contract: a worker's activeJobs slot is empty when idle, carries the
+// running job's immutable signal-chain view (incl. StartedAtUnixMs) while
+// busy, and clears on the terminal path — BEFORE the state-change fire,
+// via finishJob. The concurrent ActiveWorkers() reads vs the worker's
+// Store make this the regression guard for the immutable-after-Store /
+// no-torn-read contract under `-race`.
+func TestPoolActiveWorkersReflectsInflight(t *testing.T) {
+	store := openTempStoreForPool(t)
+	t.Cleanup(func() { _ = store.Close() })
+
+	p := NewPool(store, 1, 4)
+	p.fsyncFn = noopFsync
+	t.Cleanup(p.Stop)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	p.runner = func(ctx context.Context, _ JobSpec) (int64, error) {
+		close(started)
+		<-release // hold the worker busy until the test releases it
+		// Synthetic failure → the runner-error terminal path (which, like
+		// every terminal path, clears the slot via finishJob). Avoids the
+		// variant FK that a success path's UpsertVariant would hit.
+		return 0, errors.New("synthetic failure")
+	}
+
+	// Idle: one slot, not busy.
+	if w := p.ActiveWorkers(); len(w) != 1 || w[0].Busy {
+		t.Fatalf("pre-enqueue: want 1 idle worker, got %+v", w)
+	}
+
+	spec := JobSpec{
+		SourceLibraryRel: "Music/Album/giant-steps.flac",
+		SourceAbsPath:    "/dev/null/missing",
+		SourceSampleRate: 44100,
+		SourceBits:       16,
+		TargetSampleRate: 176400,
+		TargetBits:       24,
+		Quality:          QualityVeryHigh,
+		Kind:             JobKindUpscale,
+		OutputDir:        t.TempDir(),
+	}
+	if err := p.Enqueue(spec); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runner stub never invoked — pool dispatch broken?")
+	}
+
+	// Busy: the slot reflects the job + its signal-chain fields.
+	w := p.ActiveWorkers()
+	if len(w) != 1 || !w[0].Busy {
+		t.Fatalf("mid-run: want 1 busy worker, got %+v", w)
+	}
+	got := w[0]
+	if got.SourceRel != spec.SourceLibraryRel ||
+		got.SourceSampleRate != 44100 || got.SourceBits != 16 ||
+		got.TargetSampleRate != 176400 || got.TargetBits != 24 ||
+		got.Kind != string(JobKindUpscale) || got.StartedAtUnixMs == 0 {
+		t.Fatalf("mid-run worker view wrong: %+v", got)
+	}
+
+	// Release → the terminal path must clear the slot AND release the
+	// dedup (both done by finishJob, before fireStateChange).
+	close(release)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		w := p.ActiveWorkers()
+		if len(w) == 1 && !w[0].Busy && p.Stats().Inflight == 0 {
+			return // slot cleared + dedup released — contract holds
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("worker slot did not clear after completion: %+v inflight=%d",
+		p.ActiveWorkers(), p.Stats().Inflight)
+}
+
 // TestPoolStopDuringJobSuppressesFailure pins the inverse of the
 // timeout test: when Stop() cancels the pool while a job is in
 // flight, the resulting ctx.Err() must NOT count as a failure.

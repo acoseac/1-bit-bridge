@@ -1991,6 +1991,131 @@ async function refreshUpscaleStats() {
   }
 }
 
+// applyUpscale is the `upscale` SSE entry point — it drives BOTH the
+// Settings "Audio quality" tile and the Jobs page "Workers" grid. Each
+// renderer is a no-op on the page that lacks its container, so one event
+// feeds whichever surface is open.
+function applyUpscale(r) {
+  applyUpscaleStats(r); // Settings tile
+  renderWorkerGrid(r); // Jobs page live pipeline
+}
+
+// workerElapsedTimer ticks the per-worker elapsed labels locally (1 s) so
+// the SSE frame can stay diff-suppressed while a job runs (it carries an
+// immutable startedAtUnixMs, not a server-computed elapsed). Only runs
+// while at least one worker is busy.
+let workerElapsedTimer = null;
+
+// renderWorkerGrid paints the Jobs page "Workers" panel from the SSE
+// `upscale` payload's pool.activeWorkers. No-op off the Jobs page. The
+// panel hides when the upscale feature is off (no pool → no workers).
+function renderWorkerGrid(r) {
+  const panel = document.getElementById("workers-panel");
+  const grid = document.getElementById("workers-grid");
+  if (!panel || !grid) return; // not on the Jobs page
+  const workers = (r && r.pool && r.pool.activeWorkers) || [];
+  if (workers.length === 0) {
+    panel.hidden = true;
+    grid.textContent = "";
+    stopWorkerElapsedTicker();
+    return;
+  }
+  panel.hidden = false;
+  grid.textContent = "";
+  let anyBusy = false;
+  workers.forEach((w) => {
+    const row = document.createElement("div");
+    row.className = w.busy ? "worker-row busy" : "worker-row idle";
+
+    const head = document.createElement("div");
+    head.className = "worker-head";
+    const id = document.createElement("span");
+    id.className = "worker-id";
+    id.textContent = `Worker #${(w.workerId ?? 0) + 1}`;
+    head.appendChild(id);
+
+    const status = document.createElement("span");
+    status.className = "worker-status";
+    if (w.busy) {
+      // Normalise backslashes first — a Windows host's library-relative
+      // paths can carry `\` separators (Gemini on #437).
+      const name = w.sourceRel ? w.sourceRel.replace(/\\/g, "/").split("/").pop() : "(working)";
+      status.textContent = name;
+      status.title = w.sourceRel || "";
+    } else {
+      status.textContent = "Idle";
+    }
+    head.appendChild(status);
+
+    if (w.busy && w.startedAtUnixMs) {
+      anyBusy = true;
+      const el = document.createElement("span");
+      el.className = "worker-elapsed";
+      el.dataset.started = String(w.startedAtUnixMs);
+      el.textContent = elapsedStr(w.startedAtUnixMs);
+      head.appendChild(el);
+    }
+    row.appendChild(head);
+
+    if (w.busy) {
+      const chain = document.createElement("div");
+      chain.className = "worker-chain";
+      chain.textContent = signalChain(w);
+      row.appendChild(chain);
+    }
+    grid.appendChild(row);
+  });
+  if (anyBusy) startWorkerElapsedTicker();
+  else stopWorkerElapsedTicker();
+}
+
+// signalChain renders an audiophile signal-chain string for a busy
+// worker, e.g. "Upscale: 44.1 kHz/16-bit ➔ 176.4 kHz/24-bit · SoX
+// very-high". Source bit depth is shown only when known (the bridge
+// extracts it for FLAC/DSD; 0 = unknown is omitted).
+function signalChain(w) {
+  const src = fmtRate(w.sourceSampleRate) + (w.sourceBits ? `/${w.sourceBits}-bit` : "");
+  const tgt = fmtRate(w.targetSampleRate) + (w.targetBits ? `/${w.targetBits}-bit` : "");
+  const kind = w.kind === "optimize" ? "Optimize" : "Upscale";
+  const q = w.quality ? ` · SoX ${w.quality}` : "";
+  return `${kind}: ${src} ➔ ${tgt}${q}`;
+}
+
+function fmtRate(hz) {
+  if (!hz) return "?";
+  const k = hz / 1000;
+  return (Number.isInteger(k) ? k : k.toFixed(1)) + " kHz";
+}
+
+function elapsedStr(startedMs) {
+  const s = Math.max(0, Math.floor((Date.now() - startedMs) / 1000));
+  const m = Math.floor(s / 60);
+  const sec = s % 60;
+  return m > 0 ? `${m}m ${sec}s` : `${sec}s`;
+}
+
+function startWorkerElapsedTicker() {
+  if (workerElapsedTimer) return;
+  workerElapsedTimer = setInterval(() => {
+    const els = document.querySelectorAll(".worker-elapsed");
+    if (els.length === 0) {
+      stopWorkerElapsedTicker();
+      return;
+    }
+    els.forEach((el) => {
+      const s = el.dataset.started;
+      if (s) el.textContent = elapsedStr(Number(s));
+    });
+  }, 1000);
+}
+
+function stopWorkerElapsedTicker() {
+  if (workerElapsedTimer) {
+    clearInterval(workerElapsedTimer);
+    workerElapsedTimer = null;
+  }
+}
+
 // applyAnalysisStats renders the Settings "Audio analysis" tile from an
 // /api/analysis/stats payload (SSE `analysis` event). No-op off Settings.
 function applyAnalysisStats(r) {
@@ -2120,7 +2245,7 @@ function startEventStream() {
   es.addEventListener("pairing",     seen((e) => safeApply("pairing",     e.data, applyPairing)));
   es.addEventListener("updates",     seen((e) => safeApply("updates",     e.data, renderUpdateTile)));
   es.addEventListener("tailscale",   seen((e) => safeApply("tailscale",   e.data, renderTailscaleTile)));
-  es.addEventListener("upscale",     seen((e) => safeApply("upscale",     e.data, applyUpscaleStats)));
+  es.addEventListener("upscale",     seen((e) => safeApply("upscale",     e.data, applyUpscale)));
   es.addEventListener("analysis",    seen((e) => safeApply("analysis",    e.data, applyAnalysisStats)));
 
   es.onopen = () => {

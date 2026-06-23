@@ -480,6 +480,7 @@ func buildOptimizeSpec(track *manifest.Track, absPath, outputDir string) (transc
 		SourceAbsPath:    absPath,
 		SourceLibraryRel: track.Path,
 		SourceSampleRate: sourceHz,
+		SourceBits:       sourceBits,
 		TargetSampleRate: target,
 		TargetBits:       16,
 		Quality:          transcode.QualityVeryHigh,
@@ -521,6 +522,13 @@ func (a *upscaleEnqueuerAdapter) EnqueueOne(libraryRelativePath string) error {
 		return api.ErrUpscaleIneligible
 	}
 	sourceHz := int(*track.SampleRate)
+	// SourceBits feeds the live worker grid's signal chain only; nil → 0
+	// (unknown). Upscale targets a fixed bit depth, so a missing source
+	// bit depth is not an eligibility concern.
+	srcBits := 0
+	if track.BitsPerSample != nil {
+		srcBits = *track.BitsPerSample
+	}
 	target, err := transcode.ResolveTargetRate(a.cfg.Upscale.EffectiveTargetRate(), sourceHz)
 	if err != nil {
 		return fmt.Errorf("resolve target rate: %w", err)
@@ -538,6 +546,7 @@ func (a *upscaleEnqueuerAdapter) EnqueueOne(libraryRelativePath string) error {
 		SourceAbsPath:    abs,
 		SourceLibraryRel: track.Path,
 		SourceSampleRate: sourceHz,
+		SourceBits:       srcBits,
 		TargetSampleRate: target,
 		TargetBits:       a.cfg.Upscale.EffectiveTargetBits(),
 		Quality:          transcode.QualityVeryHigh,
@@ -2575,15 +2584,46 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 				return nil
 			}
 			s := upscalePool.Stats()
-			return &admin.UpscalePoolStats{
-				Workers:  s.Workers,
-				QueueCap: s.QueueCap,
-				QueueLen: s.QueueLen,
-				Inflight: s.Inflight,
-				Enqueued: s.Enqueued,
-				Done:     s.Done,
-				Failed:   s.Failed,
+			// Map the pool's live per-worker grid into the admin DTO
+			// (keeps internal/admin from importing internal/transcode).
+			aw := upscalePool.ActiveWorkers()
+			workers := make([]admin.ActiveWorkerView, len(aw))
+			for i, w := range aw {
+				workers[i] = admin.ActiveWorkerView{
+					WorkerID:         w.WorkerID,
+					Busy:             w.Busy,
+					SourceRel:        w.SourceRel,
+					SourceSampleRate: w.SourceSampleRate,
+					SourceBits:       w.SourceBits,
+					TargetSampleRate: w.TargetSampleRate,
+					TargetBits:       w.TargetBits,
+					Quality:          w.Quality,
+					Kind:             w.Kind,
+					StartedAtUnixMs:  w.StartedAtUnixMs,
+				}
 			}
+			return &admin.UpscalePoolStats{
+				Workers:       s.Workers,
+				QueueCap:      s.QueueCap,
+				QueueLen:      s.QueueLen,
+				Inflight:      s.Inflight,
+				Enqueued:      s.Enqueued,
+				Done:          s.Done,
+				Failed:        s.Failed,
+				ActiveWorkers: workers,
+			}
+		},
+		UpscaleBusy: func() bool {
+			// Cheap atomic probe (Stats() = atomic counters + a map-len,
+			// no DB) gating the fast-tick worker grid. Mirror the
+			// UpscaleStats live-vs-persisted gate so a PATCHed-off feature
+			// reports not-busy even while the long-lived pool drains.
+			live := cfgHolder.Load()
+			if upscalePool == nil || live == nil || !live.Upscale.Enabled {
+				return false
+			}
+			st := upscalePool.Stats()
+			return st.Inflight > 0 || st.QueueLen > 0
 		},
 		// Library Inspector projection closures (v1.3). Wired
 		// to nil when upscale is disabled so the admin
