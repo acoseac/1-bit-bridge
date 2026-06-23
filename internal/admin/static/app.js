@@ -2831,17 +2831,20 @@ async function inspectorNavigate(path, opts = {}) {
     const res = await fetch(`/api/library/browse?${browseQuery}`);
     // Race guard: a slow response from an earlier navigation must
     // not overwrite the newer navigation's content. Compare against
-    // the live `inspectorState.path` set synchronously at the top
-    // of this call; subsequent navigations bump it before their
-    // own fetch awaits. Per Gemini medium on PR #202.
-    if (inspectorState.path !== path) {
+    // the live `inspectorState.path` AND `.camelot` set synchronously
+    // at the top of this call; subsequent navigations bump them before
+    // their own fetch awaits. The camelot check is load-bearing: every
+    // key view has path "", so without it a slow 8A response would
+    // overwrite a newer 8B view. Per Gemini medium on PR #202 +
+    // Gemini HIGH on PR #444.
+    if (inspectorState.path !== path || inspectorState.camelot !== camelot) {
       return;
     }
     if (!res.ok) {
       throw new Error(`browse: HTTP ${res.status}`);
     }
     const data = await res.json();
-    if (inspectorState.path !== path) {
+    if (inspectorState.path !== path || inspectorState.camelot !== camelot) {
       return;
     }
     inspectorState.lastBrowseData = data;
@@ -2852,14 +2855,14 @@ async function inspectorNavigate(path, opts = {}) {
     // deep scroll-target to the partial document height.
     // CodeRabbit Major on PR #246 round-2.
     await inspectorRender(data);
-    if (inspectorState.path !== path) return;
+    if (inspectorState.path !== path || inspectorState.camelot !== camelot) return;
     // Restore scroll after the table body is fully realized.
     const targetY = typeof opts.restoreScroll === "number"
       ? opts.restoreScroll
       : 0;
     requestAnimationFrame(() => window.scrollTo(0, targetY));
   } catch (err) {
-    if (inspectorState.path !== path) {
+    if (inspectorState.path !== path || inspectorState.camelot !== camelot) {
       return;
     }
     document.getElementById("inspector-error").hidden = false;
@@ -3435,6 +3438,10 @@ async function inspectorLoadMore() {
   if (inspectorState.mode === "search") return;
   inspectorState.loadingMore = true;
   const path = inspectorState.path;
+  // Capture camelot too — all key views share path "", so the race guards
+  // below need it to drop a stale load-more from a previously-active key
+  // (which would otherwise clobber the new key's pagination cursors).
+  const camelot = inspectorState.camelot;
   try {
     const params = new URLSearchParams();
     // Harmonic-key filter view is a flat track list (no folders); the
@@ -3453,10 +3460,10 @@ async function inspectorLoadMore() {
       params.set("afterTrack", inspectorState.nextTrackCursor);
     }
     const res = await fetch(`/api/library/browse?${params.toString()}`);
-    if (inspectorState.path !== path || inspectorState.mode === "search") return;
+    if (inspectorState.path !== path || inspectorState.camelot !== camelot || inspectorState.mode === "search") return;
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
-    if (inspectorState.path !== path || inspectorState.mode === "search") return;
+    if (inspectorState.path !== path || inspectorState.camelot !== camelot || inspectorState.mode === "search") return;
     // Advance cursors based on the new page response.
     inspectorState.nextFolderCursor = data.nextFolderCursor || "";
     inspectorState.nextTrackCursor = data.nextTrackCursor || "";

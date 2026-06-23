@@ -4188,13 +4188,16 @@ func (s *Store) ListTracksByKeyPage(ctx context.Context, keyRoot int, keyMode, a
 
 // CountTracksByKey returns the total analyzed tracks matching
 // (keyRoot, keyMode) — pairs with ListTracksByKeyPage for the "X of Y" hint.
+// Queries track_analysis directly: its source_path FK references
+// tracks(path) ON DELETE CASCADE, so every analyzed row has a live track
+// and this count equals the tracks⋈track_analysis join without the join
+// overhead (Gemini on PR #444). ListTracksByKeyPage still needs the join —
+// it reads track columns.
 func (s *Store) CountTracksByKey(ctx context.Context, keyRoot int, keyMode string) (int, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx, `
-		SELECT COUNT(*)
-		  FROM tracks t
-		  JOIN track_analysis ta ON ta.source_path = t.path
-		 WHERE ta.key_root = ? AND ta.key_mode = ?
+		SELECT COUNT(*) FROM track_analysis
+		 WHERE key_root = ? AND key_mode = ?
 	`, keyRoot, keyMode).Scan(&n)
 	if err != nil {
 		return 0, fmt.Errorf("count tracks by key (%d,%s): %w", keyRoot, keyMode, err)
