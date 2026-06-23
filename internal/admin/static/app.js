@@ -4483,7 +4483,7 @@ async function inspectorPanelConfirmSubmit() {
         // overlay we just hid; re-emitting now (with `confirming` cleared)
         // routes it to the visible per-card submit row so the operator
         // sees WHY those folders are still selected. CodeRabbit on #442.
-        if (result.message) inspectorSelectionToast(result.message);
+        if (result?.message) inspectorSelectionToast(result.message);
       } else {
         inspectorClosePanel();
       }
