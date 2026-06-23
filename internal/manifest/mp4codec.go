@@ -257,39 +257,13 @@ func extractALACBitDepth(r io.ReadSeeker) (int, error) {
 		return 0, nil
 	}
 
-	// Outer sample-entry box: header is the 8 bytes we just read.
-	// Audio sample-entry header is 28 more bytes (see docblock).
-	// Inner atoms start at entryStart + 8 (sample-entry header) + 28.
-	const audioSampleEntryHeaderBytes = 28
-	innerSearchStart := entryStart + 8 + audioSampleEntryHeaderBytes
-	// Bound entrySize against the enclosing stsd box. `entrySize` is
-	// untrusted container data: a malformed file declaring
-	// `entrySize == 0xFFFFFFFF` would otherwise let the inner
-	// `findAtom("alac", …)` scan beyond stsd into unrelated mp4 boxes
-	// (stts, stsc, stsz, …) — and any 4-byte stretch that happens to
-	// spell "alac" would yield a false-positive bit depth instead of
-	// honest suppression. Clamp to `min(entryStart + entrySize,
-	// stsdEnd)` and bail on underflow / inversion. Per CodeRabbit
-	// Major on PR #237.
-	entryEnd := entryStart + uint64(entrySize)
-	stsdEnd := stsdStart + stsdSize
-	if entryEnd < entryStart || entryEnd > stsdEnd {
-		// Underflow (overflow wraparound) OR entry claims to extend
-		// past stsd — both are corruption signals; return honest 0.
-		return 0, nil
-	}
-	innerSearchEnd := entryEnd
-	if innerSearchStart > innerSearchEnd {
-		return 0, nil
-	}
-
-	innerStart, innerHdr, innerSize, err := findAtom(r, "alac", innerSearchStart, innerSearchEnd)
+	innerStart, innerHdr, innerSize, found, err := locateInnerALACConfig(r, entryStart, uint64(entrySize), stsdStart+stsdSize)
 	if err != nil {
 		return 0, err
 	}
-	if innerSize == 0 {
-		// Atypical encoder / corrupt container — caller skips
-		// assignment gracefully.
+	if !found {
+		// Non-alac entry / oversized entry / missing inner atom —
+		// honest suppression, caller skips assignment gracefully.
 		return 0, nil
 	}
 
@@ -313,6 +287,130 @@ func extractALACBitDepth(r io.ReadSeeker) (int, error) {
 		return 0, err
 	}
 	return int(bitDepth[0]), nil
+}
+
+// locateInnerALACConfig finds the inner `alac` config FullBox within the
+// first stsd sample entry, given the entry's start offset, its declared
+// size, and the enclosing stsd box's end. Callers MUST have already
+// confirmed the outer sample-entry FourCC is "alac".
+//
+// Shared by extractALACBitDepth (reads the ALACSpecificConfig bitDepth)
+// and extractMP4SampleRate (reads the ALACSpecificConfig sampleRate).
+// found=false (nil err) for the honest-suppression cases — an oversized
+// entry that would overrun stsd, or a missing inner atom; a non-nil
+// error is reserved for genuine I/O / atom-walk-budget failures so the
+// caller's scanLogger.Warn surfaces real disk faults.
+//
+// The entrySize clamp is load-bearing: `entrySize` is untrusted
+// container data, and a malformed file declaring `entrySize ==
+// 0xFFFFFFFF` would otherwise let `findAtom("alac", …)` scan beyond stsd
+// into unrelated boxes (stts, stsc, stsz, …) where any 4-byte stretch
+// spelling "alac" yields a false positive. Clamp to the entry's true
+// end and bail on underflow / inversion (per CodeRabbit Major on PR #237).
+func locateInnerALACConfig(r io.ReadSeeker, entryStart, entrySize, stsdEnd uint64) (innerStart, innerHdr, innerSize uint64, found bool, err error) {
+	// Outer sample-entry box: 8-byte box header + 28-byte audio
+	// sample-entry header, after which the inner config atoms begin.
+	const audioSampleEntryHeaderBytes = 28
+	innerSearchStart := entryStart + 8 + audioSampleEntryHeaderBytes
+	entryEnd := entryStart + entrySize
+	if entryEnd < entryStart || entryEnd > stsdEnd {
+		return 0, 0, 0, false, nil
+	}
+	if innerSearchStart > entryEnd {
+		return 0, 0, 0, false, nil
+	}
+	innerStart, innerHdr, innerSize, err = findAtom(r, "alac", innerSearchStart, entryEnd)
+	if err != nil {
+		return 0, 0, 0, false, err
+	}
+	if innerSize == 0 {
+		return 0, 0, 0, false, nil
+	}
+	return innerStart, innerHdr, innerSize, true, nil
+}
+
+// extractMP4SampleRate parses the audio sample rate (Hz) from an MP4
+// file's first stsd sample entry. Returns 0 (no error) when the rate
+// can't be determined — a non-MP4 / structurally-incomplete file, or a
+// layout the walker doesn't recognise — so the caller leaves
+// t.SampleRate nil and falls through cleanly. Genuine I/O / atom-walk
+// failures propagate.
+//
+// Two read paths:
+//   - AAC (`mp4a`): the version-0 AudioSampleEntry carries a 16.16
+//     fixed-point sampleRate at body offset 24. The integer Hz is the
+//     upper 16 bits — correct for every realistic AAC rate (≤48 kHz).
+//   - ALAC (`alac`): the AudioSampleEntry 16.16 field can't represent
+//     hi-res rates (>65535 Hz), so the authoritative 32-bit sampleRate
+//     from ALACSpecificConfig (its last 4 bytes) overrides it when
+//     present. For ≤48 kHz ALAC both agree; the 16.16 read stays as a
+//     fallback when the config is unreadable.
+func extractMP4SampleRate(r io.ReadSeeker) (float64, error) {
+	stsdStart, stsdHdr, stsdSize, err := findSTSD(r)
+	if err != nil {
+		if errors.Is(err, errMP4StructureNotFound) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	entryStart := stsdStart + stsdHdr + 8
+	stsdEnd := stsdStart + stsdSize
+	if entryStart+8 > stsdEnd {
+		return 0, nil
+	}
+	if _, err := r.Seek(int64(entryStart), io.SeekStart); err != nil {
+		return 0, err
+	}
+	var entrySize uint32
+	if err := binary.Read(r, binary.BigEndian, &entrySize); err != nil {
+		return 0, err
+	}
+	var fourcc [4]byte
+	if _, err := io.ReadFull(r, fourcc[:]); err != nil {
+		return 0, err
+	}
+
+	// AudioSampleEntry (version 0) 16.16 fixed-point sampleRate at body
+	// offset 24; the body begins at entryStart + 8.
+	var rate float64
+	const audioSampleEntryRateOffset = 8 + 24
+	asRateOff := entryStart + audioSampleEntryRateOffset
+	if asRateOff+4 <= stsdEnd {
+		if _, err := r.Seek(int64(asRateOff), io.SeekStart); err != nil {
+			return 0, err
+		}
+		var fixed uint32
+		if err := binary.Read(r, binary.BigEndian, &fixed); err != nil {
+			return 0, err
+		}
+		rate = float64(fixed >> 16)
+	}
+
+	if string(fourcc[:]) == "alac" {
+		innerStart, innerHdr, innerSize, found, err := locateInnerALACConfig(r, entryStart, uint64(entrySize), stsdEnd)
+		if err != nil {
+			return 0, err
+		}
+		if found {
+			// ALACSpecificConfig sampleRate is its last 4 bytes (config
+			// offset 20). Inner payload = 4-byte FullBox version+flags +
+			// 24-byte config, so the rate sits at inner payload offset 24.
+			const sampleRatePayloadOffset = 24
+			if innerSize >= innerHdr+sampleRatePayloadOffset+4 {
+				if _, err := r.Seek(int64(innerStart+innerHdr+sampleRatePayloadOffset), io.SeekStart); err != nil {
+					return 0, err
+				}
+				var configRate uint32
+				if err := binary.Read(r, binary.BigEndian, &configRate); err != nil {
+					return 0, err
+				}
+				if configRate > 0 {
+					rate = float64(configRate)
+				}
+			}
+		}
+	}
+	return rate, nil
 }
 
 // findAtom scans MP4 atoms starting at `start` (absolute byte offset

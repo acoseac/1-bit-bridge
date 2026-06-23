@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"strings"
 
@@ -96,6 +97,35 @@ func extractAIFFWithContext(absPath string, t *Track, ec *ExtractContext) error 
 			// guards inside populateFromTagMetadata.
 			continue
 		}
+		if fourcc == "COMM" {
+			// The COMM (Common) chunk carries the PCM geometry:
+			// numChannels (BE int16), numSampleFrames (BE uint32),
+			// sampleSize (BE int16 — bits per sample), and an
+			// 80-bit IEEE-754 extended-precision sampleRate. AIFC
+			// appends a compressionType FOURCC + pstring after the
+			// sampleRate, but the leading 18 bytes are identical, so
+			// the same parse serves both form types. 1 KiB cap — a
+			// real COMM is 18 bytes (AIFF) or a few dozen (AIFC).
+			const minCOMMSize = 18
+			const maxCOMMSize = 1 << 10
+			if size < minCOMMSize || size > maxCOMMSize {
+				if err := seekPastChunk(f, int64(size)); err != nil {
+					return err
+				}
+				continue
+			}
+			body := make([]byte, size)
+			if _, err := io.ReadFull(f, body); err != nil {
+				return fmt.Errorf("aiff: COMM body read: %w", err)
+			}
+			if size%2 == 1 {
+				if _, err := f.Seek(1, io.SeekCurrent); err != nil {
+					return fmt.Errorf("aiff: COMM pad seek: %w", err)
+				}
+			}
+			parseAIFFCOMMChunk(body, t)
+			continue
+		}
 		if err := seekPastChunk(f, int64(size)); err != nil {
 			return err
 		}
@@ -108,6 +138,65 @@ func extractAIFFWithContext(absPath string, t *Track, ec *ExtractContext) error 
 		extractLocalArtwork(absPath, t, idTagMetadata, ec)
 	}
 	return nil
+}
+
+// parseAIFFCOMMChunk reads the PCM geometry from an AIFF/AIFC COMM
+// chunk body and stamps t.SampleRate + t.BitsPerSample. Layout (all
+// big-endian):
+//
+//	[0:2]  numChannels   int16
+//	[2:6]  numSampleFrames uint32
+//	[6:8]  sampleSize    int16   — bits per sample of the (decompressed) signal
+//	[8:18] sampleRate    80-bit IEEE-754 extended
+//
+// For AIFC the sampleSize holds the bit depth of the UNCOMPRESSED data
+// (sowt / NONE / twos / fl32 / in24 … are the common "compressions",
+// all of which are really just byte-ordered PCM), so it stays a
+// meaningful integer bit depth. BitsPerSample is gated by
+// canSetBitsPerSample (which allowlists "AIFF") as defense-in-depth,
+// matching every other bits-write site.
+func parseAIFFCOMMChunk(body []byte, t *Track) {
+	if len(body) < 18 {
+		return
+	}
+	sampleSize := int16(binary.BigEndian.Uint16(body[6:8]))
+	sampleRate := parseAIFFExtended(body[8:18])
+	if sampleRate > 0 {
+		t.SampleRate = &sampleRate
+	}
+	if sampleSize > 0 && canSetBitsPerSample(t.Codec) {
+		bps := int(sampleSize)
+		t.BitsPerSample = &bps
+	}
+}
+
+// parseAIFFExtended decodes a 10-byte 80-bit IEEE-754 extended-precision
+// float (the "long double" AIFF stores its sample rate as) into a
+// float64. Layout (big-endian): 1 sign bit, 15 exponent bits (bias
+// 16383), 64 mantissa bits with an EXPLICIT integer bit (unlike IEEE
+// binary64's implicit leading 1). Returns 0 for the zero, Inf, and NaN
+// encodings — none are valid sample rates. math.Ldexp is exact for the
+// power-of-two scaling, so integer sample rates round-trip without
+// floating-point drift.
+func parseAIFFExtended(b []byte) float64 {
+	if len(b) < 10 {
+		return 0
+	}
+	sign := 1.0
+	if b[0]&0x80 != 0 {
+		sign = -1.0
+	}
+	exponent := int(uint16(b[0]&0x7F)<<8 | uint16(b[1]))
+	mantissa := binary.BigEndian.Uint64(b[2:10])
+	switch {
+	case exponent == 0 && mantissa == 0:
+		return 0
+	case exponent == 0x7FFF:
+		// Inf / NaN — not a real sample rate.
+		return 0
+	}
+	// value = sign × mantissa × 2^(exponent − 16383 − 63)
+	return sign * math.Ldexp(float64(mantissa), exponent-16383-63)
 }
 
 // extractWAVWithContext is the RIFF/WAVE analog of
@@ -220,6 +309,30 @@ func extractWAVWithContext(absPath string, t *Track, ec *ExtractContext) error {
 			if string(body[0:4]) == "INFO" {
 				parseWAVINFOBlock(body[4:], t)
 			}
+		case fourcc == "fmt ":
+			// The fmt chunk carries the PCM geometry (sampleRate +
+			// bitsPerSample). Real fmt chunks are 16 (PCM), 18
+			// (WAVEFORMATEX), or 40 (WAVE_FORMAT_EXTENSIBLE) bytes; a
+			// declared size below 16 can't hold WAVEFORMAT and a wildly
+			// large one is corruption — skip both rather than allocate.
+			const minFmtSize = 16
+			const maxFmtSize = 1 << 10
+			if size < minFmtSize || size > maxFmtSize {
+				if err := seekPastChunk(f, int64(size)); err != nil {
+					return err
+				}
+				continue
+			}
+			body := make([]byte, size)
+			if _, err := io.ReadFull(f, body); err != nil {
+				return fmt.Errorf("wav: fmt body read: %w", err)
+			}
+			if size%2 == 1 {
+				if _, err := f.Seek(1, io.SeekCurrent); err != nil {
+					return fmt.Errorf("wav: fmt pad seek: %w", err)
+				}
+			}
+			parseWAVFmtChunk(body, t)
 		default:
 			if err := seekPastChunk(f, int64(size)); err != nil {
 				return err
@@ -299,6 +412,51 @@ func parseWAVINFOBlock(body []byte, t *Track) {
 			break
 		}
 		body = body[advance:]
+	}
+}
+
+// WAVE format tags (the `wFormatTag` field at fmt-chunk offset 0). Only
+// PCM and IEEE-float carry a meaningful integer/float bit depth; A-law,
+// mu-law, ADPCM, MP3-in-WAV (0x55), etc. are compressed and their
+// bitsPerSample is a container artefact, not a signal depth.
+const (
+	wavFormatPCM        = 0x0001
+	wavFormatIEEEFloat  = 0x0003
+	wavFormatExtensible = 0xFFFE
+)
+
+// parseWAVFmtChunk reads the PCM geometry from a RIFF/WAVE fmt chunk
+// body and stamps t.SampleRate + t.BitsPerSample. Layout (all
+// little-endian): [0:2] wFormatTag, [2:4] nChannels, [4:8] nSamplesPerSec,
+// [8:12] nAvgBytesPerSec, [12:14] nBlockAlign, [14:16] wBitsPerSample.
+//
+// WAVE_FORMAT_EXTENSIBLE (0xFFFE) wraps the real format code in the
+// first 2 bytes of the SubFormat GUID (offset 24); wBitsPerSample at
+// [14:16] is then the container width (the value iOS / the composition
+// bar want), with the valid-bits count at [18:20]. BitsPerSample is set
+// only for PCM / IEEE-float and gated by canSetBitsPerSample (allowlists
+// "WAV") as defense-in-depth, matching every other bits-write site.
+func parseWAVFmtChunk(body []byte, t *Track) {
+	if len(body) < 16 {
+		return
+	}
+	formatTag := binary.LittleEndian.Uint16(body[0:2])
+	sampleRate := binary.LittleEndian.Uint32(body[4:8])
+	bitsPerSample := binary.LittleEndian.Uint16(body[14:16])
+
+	effectiveFormat := formatTag
+	if formatTag == wavFormatExtensible && len(body) >= 26 {
+		effectiveFormat = binary.LittleEndian.Uint16(body[24:26])
+	}
+
+	if sampleRate > 0 {
+		sr := float64(sampleRate)
+		t.SampleRate = &sr
+	}
+	isPCMLike := effectiveFormat == wavFormatPCM || effectiveFormat == wavFormatIEEEFloat
+	if isPCMLike && bitsPerSample > 0 && canSetBitsPerSample(t.Codec) {
+		bps := int(bitsPerSample)
+		t.BitsPerSample = &bps
 	}
 }
 
