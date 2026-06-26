@@ -49,30 +49,31 @@ func TestDecodedShortOfDuration(t *testing.T) {
 	const sr = AnalysisSampleRate
 	cases := []struct {
 		name      string
-		tool      decoderTool
 		expected  float64
 		frames    int64
 		wantShort bool
 	}{
 		// Reported case: ~58% decoded of declared duration → truncated.
-		{"ffmpeg truncated 58pct", decoderFFmpeg, 100, int64(58 * sr), true},
-		// Complete decode (exact) → accepted.
-		{"ffmpeg complete", decoderFFmpeg, 100, int64(100 * sr), false},
-		// Glitchy-but-complete: 1% short (encoder delay / rounding) → accepted.
-		{"ffmpeg near-complete 99pct", decoderFFmpeg, 100, int64(99 * sr), false},
+		{"truncated 58pct", 100, int64(58 * sr), true},
+		// Complete decode (exact) → accepted. This is also the glitchy-but-
+		// complete FLAC case (mid-stream LOST_SYNC that resyncs to EOF): full
+		// length decoded, so it is committed rather than treadmilled.
+		{"complete", 100, int64(100 * sr), false},
+		// 1% short (encoder delay / rounding / VBR drift) → accepted.
+		{"near-complete 99pct", 100, int64(99 * sr), false},
 		// Just inside the 90% floor → accepted; just below → rejected.
-		{"ffmpeg at 90pct floor", decoderFFmpeg, 100, int64(90 * sr), false},
-		{"ffmpeg below floor 89pct", decoderFFmpeg, 100, int64(89 * sr), true},
-		// sox path is intentionally unchecked even on a short decode.
-		{"sox short not checked", decoderSox, 100, int64(58 * sr), false},
+		{"at 90pct floor", 100, int64(90 * sr), false},
+		{"below floor 89pct", 100, int64(89 * sr), true},
 		// Unknown duration (probe miss) → no check, commit as before.
-		{"ffmpeg unknown duration", decoderFFmpeg, 0, int64(1 * sr), false},
+		{"unknown duration", 0, int64(1 * sr), false},
+		// Zero frames against a known duration → truncated.
+		{"zero frames", 100, 0, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := decodedShortOfDuration(c.tool, c.expected, c.frames); got != c.wantShort {
-				t.Errorf("decodedShortOfDuration(%s, %.0fs, %d frames) = %v, want %v",
-					c.tool, c.expected, c.frames, got, c.wantShort)
+			if got := decodedShortOfDuration(c.expected, c.frames); got != c.wantShort {
+				t.Errorf("decodedShortOfDuration(%.0fs, %d frames) = %v, want %v",
+					c.expected, c.frames, got, c.wantShort)
 			}
 		})
 	}
@@ -105,11 +106,14 @@ func TestFFprobeDuration_SurfacesPositiveDuration(t *testing.T) {
 }
 
 func TestDecodeCommand_SelectsBinary(t *testing.T) {
-	if name, _ := decodeCommand(decoderSox, "/lib/a.flac", 2); name != "sox" {
-		t.Errorf("decoderSox → %q, want sox", name)
-	}
-	// The ffmpeg binary is resolved through the seam, so the exec'd path is the
+	// Both binaries are resolved through their seam, so the exec'd path is the
 	// one the availability check found (not a re-PATH-resolved bare name).
+	origSox := soxLookPath
+	t.Cleanup(func() { soxLookPath = origSox })
+	soxLookPath = func() (string, error) { return "/usr/bin/sox", nil }
+	if name, _ := decodeCommand(decoderSox, "/lib/a.flac", 2); name != "/usr/bin/sox" {
+		t.Errorf("decoderSox → %q, want resolved /usr/bin/sox", name)
+	}
 	forceFFmpeg(t, true) // seam resolves to /usr/bin/ffmpeg
 	if name, args := decodeCommand(decoderFFmpeg, "/lib/a.m4a", 2); name != "/usr/bin/ffmpeg" || args[0] != "-nostdin" {
 		t.Errorf("decoderFFmpeg → (%q, %v), want resolved /usr/bin/ffmpeg + argv", name, args)
