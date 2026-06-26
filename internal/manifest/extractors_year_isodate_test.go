@@ -46,3 +46,19 @@ func TestPopulateFromTag_Year_UnparseablePresentStaysZero(t *testing.T) {
 		t.Errorf("Year = %d, want 0", *track.Year)
 	}
 }
+
+// stringOf must resolve the earliest-listed key DETERMINISTICALLY when a
+// file carries more than one matching tag — not by Go's randomized map
+// iteration order (which would flap the parsed year across scans, the exact
+// instability the year fix is meant to remove). 200 iterations reliably
+// surfaces map-order non-determinism on a small map. Gemini HIGH on PR #447.
+func TestStringOf_DeterministicKeyPriority(t *testing.T) {
+	raw := map[string]any{"tdrc": "2023-06-09", "year": "1999"}
+	for i := 0; i < 200; i++ {
+		got, ok := stringOf(raw, "tdrc", "tdrl", "tyer", "date", "year")
+		if !ok || got != "2023-06-09" {
+			t.Fatalf("iteration %d: stringOf = (%q, %v), want (%q, true) — priority must be deterministic",
+				i, got, ok, "2023-06-09")
+		}
+	}
+}

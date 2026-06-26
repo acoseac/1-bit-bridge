@@ -916,18 +916,9 @@ func stringOf(raw map[string]any, keys ...string) (string, bool) {
 	if len(keys) == 0 {
 		return "", false
 	}
-	for mapKey, v := range raw {
-		norm := normaliseRawTagKey(mapKey)
-		matched := false
-		for _, k := range keys {
-			if norm == k {
-				matched = true
-				break
-			}
-		}
-		if !matched {
-			continue
-		}
+	// Coerce a raw tag value to a non-empty trimmed string, mirroring the
+	// value shapes dhowden/tag surfaces.
+	coerce := func(v any) (string, bool) {
 		switch s := v.(type) {
 		case string:
 			if trimmed := strings.TrimSpace(s); trimmed != "" {
@@ -969,6 +960,24 @@ func stringOf(raw map[string]any, keys ...string) (string, bool) {
 				return "1", true
 			}
 			return "0", true
+		}
+		return "", false
+	}
+	// Iterate the REQUESTED keys in priority order — NOT the raw map, whose
+	// Go iteration order is randomized. When a file carries more than one
+	// matching tag (e.g. both DATE and YEAR, or TDRC + TYER), the earliest-
+	// listed key wins DETERMINISTICALLY, so the resolved value (and any year
+	// parsed from it) is stable across scans instead of flapping with map
+	// order. Gemini HIGH on PR #447. The inner scan is O(map) but the map is
+	// a dozen tags and `keys` is a handful, so the nesting is negligible.
+	for _, k := range keys {
+		for mapKey, v := range raw {
+			if normaliseRawTagKey(mapKey) != k {
+				continue
+			}
+			if out, ok := coerce(v); ok {
+				return out, true
+			}
 		}
 	}
 	return "", false
