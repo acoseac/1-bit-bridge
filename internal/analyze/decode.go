@@ -47,6 +47,7 @@ func (d decoderTool) String() string {
 var (
 	ffmpegLookPath  = func() (string, error) { return exec.LookPath("ffmpeg") }
 	ffprobeLookPath = func() (string, error) { return exec.LookPath("ffprobe") }
+	soxLookPath     = func() (string, error) { return exec.LookPath("sox") }
 )
 
 // ffmpegToolsAvailable reports whether BOTH ffmpeg (decode) and ffprobe
@@ -154,8 +155,13 @@ func ffprobeDuration(ctx context.Context, srcAbs string) float64 {
 // decoded length (verified against sox 14.x: an 8.0s VBR MP3 with and without
 // the Info tag both probe to within <0.1% of the decoded length), so it does
 // not false-reject complete VBR MP3s.
+//
+// Resolves sox to its absolute path via resolveBin (the soxLookPath seam) so
+// the exec target is fixed rather than PATH-relative — matching how this file
+// already resolves ffmpeg/ffprobe and the filepath.IsAbs defense-in-depth used
+// for the Tailscale CLI.
 func soxDuration(ctx context.Context, srcAbs string) float64 {
-	out, err := exec.CommandContext(ctx, "sox", "--i", "-D", srcAbs).Output()
+	out, err := exec.CommandContext(ctx, resolveBin(soxLookPath, "sox"), "--i", "-D", srcAbs).Output()
 	if err != nil {
 		return 0
 	}
