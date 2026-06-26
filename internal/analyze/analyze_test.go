@@ -145,7 +145,7 @@ func TestDownmixMatchesMonoDecode(t *testing.T) {
 
 	waveformVia := func(channels int) []byte {
 		pk := newPeaker(waveformBucketSamples)
-		total, err := decodeFrames(ctx, src, channels, decoderSox, func(frame []float64) {
+		total, err := decodeFrames(ctx, src, channels, decoderSox, 0, func(frame []float64) {
 			pk.add(downmixFrame(frame))
 		})
 		if err != nil {
@@ -180,7 +180,7 @@ func TestChromaExtractionFromRealChord(t *testing.T) {
 		t.Fatalf("sox synth chord: %v\n%s", err, out)
 	}
 	a := newKeyTempoAnalyzer()
-	if _, err := decodeFrames(context.Background(), src, 1, decoderSox, func(frame []float64) {
+	if _, err := decodeFrames(context.Background(), src, 1, decoderSox, 0, func(frame []float64) {
 		a.add(downmixFrame(frame))
 	}); err != nil {
 		t.Fatalf("decodeFrames: %v", err)

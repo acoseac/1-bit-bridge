@@ -3,6 +3,7 @@ package analyze
 import (
 	"context"
 	"errors"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -38,6 +39,71 @@ func TestFFmpegDecodeArgs_MatchesSoxWireFormat(t *testing.T) {
 	}
 }
 
+// TestDecodedShortOfDuration pins the ffmpeg-path truncation guard. ffmpeg can
+// exit 0 after concealing a mid-stream decode error, so a truncated-but-openable
+// faststart m4a would otherwise commit a partial waveform; decodeFrames rejects
+// it by comparing the decoded length against the ffprobe-reported duration.
+// A glitchy-but-complete file decodes ~full length and is accepted (no
+// treadmill); the sox path and unknown-duration probes are never checked.
+func TestDecodedShortOfDuration(t *testing.T) {
+	const sr = AnalysisSampleRate
+	cases := []struct {
+		name      string
+		tool      decoderTool
+		expected  float64
+		frames    int64
+		wantShort bool
+	}{
+		// Reported case: ~58% decoded of declared duration → truncated.
+		{"ffmpeg truncated 58pct", decoderFFmpeg, 100, int64(58 * sr), true},
+		// Complete decode (exact) → accepted.
+		{"ffmpeg complete", decoderFFmpeg, 100, int64(100 * sr), false},
+		// Glitchy-but-complete: 1% short (encoder delay / rounding) → accepted.
+		{"ffmpeg near-complete 99pct", decoderFFmpeg, 100, int64(99 * sr), false},
+		// Just inside the 90% floor → accepted; just below → rejected.
+		{"ffmpeg at 90pct floor", decoderFFmpeg, 100, int64(90 * sr), false},
+		{"ffmpeg below floor 89pct", decoderFFmpeg, 100, int64(89 * sr), true},
+		// sox path is intentionally unchecked even on a short decode.
+		{"sox short not checked", decoderSox, 100, int64(58 * sr), false},
+		// Unknown duration (probe miss) → no check, commit as before.
+		{"ffmpeg unknown duration", decoderFFmpeg, 0, int64(1 * sr), false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := decodedShortOfDuration(c.tool, c.expected, c.frames); got != c.wantShort {
+				t.Errorf("decodedShortOfDuration(%s, %.0fs, %d frames) = %v, want %v",
+					c.tool, c.expected, c.frames, got, c.wantShort)
+			}
+		})
+	}
+}
+
+// TestFFprobeDuration_SurfacesPositiveDuration guards the expectedSec contract.
+// The probe-channel tests above discard probeChannels' fourth return, so a
+// regression that made the duration probe always return 0 would silently
+// disable the ffmpeg truncation guard (decodedShortOfDuration short-circuits on
+// expectedSec <= 0) with no failing test. This pins that ffprobeDuration — the
+// source of expectedSec on the ffmpeg path — surfaces a positive, correct
+// duration. Requires ffprobe (+ sox to synthesize a known-length source);
+// skipped where either is absent (the macOS/Linux CI gate has both).
+func TestFFprobeDuration_SurfacesPositiveDuration(t *testing.T) {
+	if _, err := exec.LookPath("ffprobe"); err != nil {
+		t.Skip("ffprobe not installed")
+	}
+	if _, err := exec.LookPath("sox"); err != nil {
+		t.Skip("sox not installed")
+	}
+	src := filepath.Join(t.TempDir(), "tone.wav")
+	if out, err := exec.Command("sox", "-n", "-r", "48000", "-c", "1", src,
+		"synth", "3", "sine", "440").CombinedOutput(); err != nil {
+		t.Skipf("sox synth: %v\n%s", err, out)
+	}
+	got := ffprobeDuration(context.Background(), src)
+	if got < 2.5 || got > 3.5 {
+		t.Errorf("ffprobeDuration(3s tone) = %.3f, want ~3.0 — a positive duration MUST be surfaced or the ffmpeg truncation guard is silently disabled", got)
+	}
+}
+
 func TestDecodeCommand_SelectsBinary(t *testing.T) {
 	if name, _ := decodeCommand(decoderSox, "/lib/a.flac", 2); name != "sox" {
 		t.Errorf("decoderSox → %q, want sox", name)
@@ -55,7 +121,7 @@ func TestProbeChannels_FallsBackToFFmpegWhenSoxCannotProbe(t *testing.T) {
 	// A path sox can't probe (nonexistent / unreadable) → sox --i fails →
 	// with the ffmpeg toolchain "present", the decoder choice flips to ffmpeg.
 	bogus := filepath.Join(t.TempDir(), "missing.m4a")
-	_, _, tool := probeChannels(context.Background(), bogus)
+	_, _, tool, _ := probeChannels(context.Background(), bogus)
 	if tool != decoderFFmpeg {
 		t.Errorf("tool = %s, want ffmpeg (sox can't probe + ffmpeg available)", tool)
 	}
@@ -64,7 +130,7 @@ func TestProbeChannels_FallsBackToFFmpegWhenSoxCannotProbe(t *testing.T) {
 func TestProbeChannels_StaysSoxWhenNoFFmpeg(t *testing.T) {
 	forceFFmpeg(t, false)
 	bogus := filepath.Join(t.TempDir(), "missing.m4a")
-	n, ok, tool := probeChannels(context.Background(), bogus)
+	n, ok, tool, _ := probeChannels(context.Background(), bogus)
 	if tool != decoderSox {
 		t.Errorf("tool = %s, want sox (no ffmpeg fallback)", tool)
 	}
