@@ -3,6 +3,7 @@ package analyze
 import (
 	"context"
 	"errors"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -74,6 +75,32 @@ func TestDecodedShortOfDuration(t *testing.T) {
 					c.tool, c.expected, c.frames, got, c.wantShort)
 			}
 		})
+	}
+}
+
+// TestFFprobeDuration_SurfacesPositiveDuration guards the expectedSec contract.
+// The probe-channel tests above discard probeChannels' fourth return, so a
+// regression that made the duration probe always return 0 would silently
+// disable the ffmpeg truncation guard (decodedShortOfDuration short-circuits on
+// expectedSec <= 0) with no failing test. This pins that ffprobeDuration — the
+// source of expectedSec on the ffmpeg path — surfaces a positive, correct
+// duration. Requires ffprobe (+ sox to synthesize a known-length source);
+// skipped where either is absent (the macOS/Linux CI gate has both).
+func TestFFprobeDuration_SurfacesPositiveDuration(t *testing.T) {
+	if _, err := exec.LookPath("ffprobe"); err != nil {
+		t.Skip("ffprobe not installed")
+	}
+	if _, err := exec.LookPath("sox"); err != nil {
+		t.Skip("sox not installed")
+	}
+	src := filepath.Join(t.TempDir(), "tone.wav")
+	if out, err := exec.Command("sox", "-n", "-r", "48000", "-c", "1", src,
+		"synth", "3", "sine", "440").CombinedOutput(); err != nil {
+		t.Skipf("sox synth: %v\n%s", err, out)
+	}
+	got := ffprobeDuration(context.Background(), src)
+	if got < 2.5 || got > 3.5 {
+		t.Errorf("ffprobeDuration(3s tone) = %.3f, want ~3.0 — a positive duration MUST be surfaced or the ffmpeg truncation guard is silently disabled", got)
 	}
 }
 
