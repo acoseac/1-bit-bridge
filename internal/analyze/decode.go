@@ -127,9 +127,21 @@ func ffprobeChannels(ctx context.Context, srcAbs string) (int, bool) {
 	return n, true
 }
 
+// parseDuration parses a probe's seconds-as-float stdout, returning 0 for any
+// invalid value (parse error, "N/A", non-positive, or non-finite) so the caller
+// treats it as "duration unknown, skip the truncation check" rather than
+// rejecting. Shared by ffprobeDuration + soxDuration so both probes stay in
+// lockstep on the validity rule.
+func parseDuration(out []byte) float64 {
+	d, err := strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
+	if err != nil || d <= 0 || math.IsInf(d, 0) || math.IsNaN(d) {
+		return 0
+	}
+	return d
+}
+
 // ffprobeDuration reads the container duration (seconds) via ffprobe's
-// format=duration. Returns 0 on ANY failure (probe error, "N/A", parse
-// failure, non-finite, non-positive) — the caller treats 0 as "duration
+// format=duration. Returns 0 on ANY failure — the caller treats 0 as "duration
 // unknown, skip the truncation check" rather than rejecting, so a probe miss
 // can never block a legitimately-complete file. Only called on the ffmpeg
 // fallback path (m4a/mp4 containers, which carry a format duration).
@@ -140,11 +152,7 @@ func ffprobeDuration(ctx context.Context, srcAbs string) float64 {
 	if err != nil {
 		return 0
 	}
-	d, err := strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
-	if err != nil || d <= 0 || math.IsInf(d, 0) || math.IsNaN(d) {
-		return 0
-	}
-	return d
+	return parseDuration(out)
 }
 
 // soxDuration reads the source duration (seconds) via `sox --i -D` for the sox
@@ -165,11 +173,7 @@ func soxDuration(ctx context.Context, srcAbs string) float64 {
 	if err != nil {
 		return 0
 	}
-	d, err := strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
-	if err != nil || d <= 0 || math.IsInf(d, 0) || math.IsNaN(d) {
-		return 0
-	}
-	return d
+	return parseDuration(out)
 }
 
 // minDecodedFraction is the lower bound on (decoded length / probed duration)
@@ -203,7 +207,7 @@ func decodeCommand(tool decoderTool, srcAbs string, channels int) (string, []str
 	if tool == decoderFFmpeg {
 		return resolveBin(ffmpegLookPath, "ffmpeg"), ffmpegDecodeArgs(srcAbs, channels)
 	}
-	return "sox", decodeArgs(srcAbs, channels)
+	return resolveBin(soxLookPath, "sox"), decodeArgs(srcAbs, channels)
 }
 
 // decodeArgs builds the sox argv that decodes any supported source to
@@ -245,7 +249,7 @@ func decodeArgs(srcAbs string, channels int) []string {
 // on the sox path, ffprobe `format=duration` on the ffmpeg path) used by
 // decodeFrames to reject a truncated decode; 0 means "unknown, skip the check".
 func probeChannels(ctx context.Context, srcAbs string) (int, bool, decoderTool, float64) {
-	if out, err := exec.CommandContext(ctx, "sox", "--i", "-c", srcAbs).Output(); err == nil {
+	if out, err := exec.CommandContext(ctx, resolveBin(soxLookPath, "sox"), "--i", "-c", srcAbs).Output(); err == nil {
 		if n, perr := strconv.Atoi(strings.TrimSpace(string(out))); perr == nil && n >= 1 && n <= maxAnalysisChannels {
 			// Probe the sox duration off the same cheap pre-decode step so
 			// decodeFrames can reject a truncated source (e.g. a FLAC that sox
