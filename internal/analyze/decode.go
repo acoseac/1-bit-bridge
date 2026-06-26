@@ -146,27 +146,50 @@ func ffprobeDuration(ctx context.Context, srcAbs string) float64 {
 	return d
 }
 
-// ffmpegMinDecodedFraction is the lower bound on (decoded length / probed
-// duration) for the ffmpeg fallback to accept a decode. Below it the source is
-// treated as truncated. 0.90 leaves generous headroom for legitimate
-// encoder-delay/padding, container-duration rounding, and VBR estimate drift
-// (all sub-second / sub-1% in practice) while still catching a real truncation
-// — the field-reported case decoded ~58% of its declared duration.
-const ffmpegMinDecodedFraction = 0.90
+// soxDuration reads the source duration (seconds) via `sox --i -D` for the sox
+// decode path. Returns 0 on ANY failure (so the caller skips the truncation
+// check rather than rejecting). sox's duration is reliable for the formats it
+// handles: FLAC/WAV/AIFF carry it in the header, and sox reports an accurate
+// duration for VBR MP3 too — both Xing-tagged AND header-less files match their
+// decoded length (verified against sox 14.x: an 8.0s VBR MP3 with and without
+// the Info tag both probe to within <0.1% of the decoded length), so it does
+// not false-reject complete VBR MP3s.
+func soxDuration(ctx context.Context, srcAbs string) float64 {
+	out, err := exec.CommandContext(ctx, "sox", "--i", "-D", srcAbs).Output()
+	if err != nil {
+		return 0
+	}
+	d, err := strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
+	if err != nil || d <= 0 || math.IsInf(d, 0) || math.IsNaN(d) {
+		return 0
+	}
+	return d
+}
 
-// decodedShortOfDuration reports whether a CLEAN ffmpeg decode that produced
+// minDecodedFraction is the lower bound on (decoded length / probed duration)
+// for a decode to be accepted. Below it the source is treated as truncated.
+// 0.90 leaves generous headroom for legitimate encoder-delay/padding,
+// container-duration rounding, and VBR estimate drift (all sub-second / sub-1%
+// in practice) while still catching a real truncation — the field-reported case
+// decoded ~58% of its declared duration.
+const minDecodedFraction = 0.90
+
+// decodedShortOfDuration reports whether a CLEAN decode that produced
 // totalFrames at AnalysisSampleRate fell materially short of the probed
-// expectedSec — the signature of a truncated-but-openable source that ffmpeg
-// concealed and exited 0 on. Returns false (no rejection) when the check
-// doesn't apply: a non-ffmpeg tool (the sox path is intentionally unchanged) or
-// an unknown duration (expectedSec <= 0). A glitchy-but-complete file decodes
-// ~full length and passes, so it is NOT treadmilled.
-func decodedShortOfDuration(tool decoderTool, expectedSec float64, totalFrames int64) bool {
-	if tool != decoderFFmpeg || expectedSec <= 0 {
+// expectedSec — the signature of a truncated-but-openable source the decoder
+// concealed and exited 0 on (ffmpeg conceals a mid-stream error; sox exits 0
+// after a FLAC LOST_SYNC). Returns false (no rejection) when expectedSec <= 0
+// (duration unknown — commit as before). A glitchy-but-COMPLETE file decodes to
+// full length and passes, so a mid-stream FLAC glitch that resyncs to EOF is
+// NOT treadmilled — that case is exactly why this is a duration check and not
+// stderr-error matching, which fires identically on truncated and resynced-
+// complete files.
+func decodedShortOfDuration(expectedSec float64, totalFrames int64) bool {
+	if expectedSec <= 0 {
 		return false
 	}
 	decodedSec := float64(totalFrames) / float64(AnalysisSampleRate)
-	return decodedSec < expectedSec*ffmpegMinDecodedFraction
+	return decodedSec < expectedSec*minDecodedFraction
 }
 
 // decodeCommand returns the binary + argv for the chosen decoder.
@@ -212,15 +235,17 @@ func decodeArgs(srcAbs string, channels int) []string {
 // is unknown, so the caller decodes mono and SKIPS loudness rather than trusting
 // a guessed layout (a wrong guess would silently store a biased ReplayGain). The
 // decision is made HERE, off the cheap probe, so the expensive streaming decode
-// never has to fail-and-retry. expectedSec is the ffprobe-reported duration, set
-// only on the ffmpeg path (0 elsewhere) and used by decodeFrames to reject a
-// truncated decode; 0 means "unknown, skip the check". With no ffmpeg fallback
-// available the behaviour is exactly as before: tool==decoderSox, expectedSec==0,
-// and an unreadable format fails the downstream sox decode (file skipped).
+// never has to fail-and-retry. expectedSec is the probed duration (sox `--i -D`
+// on the sox path, ffprobe `format=duration` on the ffmpeg path) used by
+// decodeFrames to reject a truncated decode; 0 means "unknown, skip the check".
 func probeChannels(ctx context.Context, srcAbs string) (int, bool, decoderTool, float64) {
 	if out, err := exec.CommandContext(ctx, "sox", "--i", "-c", srcAbs).Output(); err == nil {
 		if n, perr := strconv.Atoi(strings.TrimSpace(string(out))); perr == nil && n >= 1 && n <= maxAnalysisChannels {
-			return n, true, decoderSox, 0
+			// Probe the sox duration off the same cheap pre-decode step so
+			// decodeFrames can reject a truncated source (e.g. a FLAC that sox
+			// opens via its intact STREAMINFO header, decodes ~half, and exits 0
+			// on LOST_SYNC). 0 on probe miss → no check (commit as before).
+			return n, true, decoderSox, soxDuration(ctx, srcAbs)
 		}
 		// sox answered but with an unparseable / out-of-range count — fall
 		// through to the ffmpeg path (it may still decode cleanly).
@@ -310,52 +335,20 @@ func decodeFrames(ctx context.Context, srcAbs string, channels int, tool decoder
 			tool, werr, redactSoxErr(strings.TrimSpace(stderr.String()), srcAbs))
 	}
 	processReleased = true
-	// sox can exit 0 after a mid-stream decode FAILURE: a truncated-but-openable
-	// FLAC (STREAMINFO header intact, audio cut short) prints
-	// `sox FAIL ... LOST_SYNC` yet returns 0, which would otherwise commit a
-	// partial waveform keyed to the truncated file's mtime+size that the
-	// scan-skip gate never re-analyzes. Treat sox's own FAIL classification as a
-	// decode error so nothing is committed (the candidate re-flows until the
-	// file is fully re-uploaded). Only the sox path: ffmpeg uses the duration
-	// check below; matching FAIL-text on ffmpeg stderr would be the wrong shape.
-	if tool == decoderSox && soxReportedFailure(stderr.String()) {
-		return totalFrames, fmt.Errorf("%s: %s", tool,
-			redactSoxErr(strings.TrimSpace(stderr.String()), srcAbs))
-	}
-	// Clean exit, but ffmpeg may have concealed a mid-stream decode error and
-	// stopped early on a truncated source — reject when the decoded length is
-	// materially short of the probed duration so a partial waveform is never
-	// committed (sox path / unknown duration: no-op).
-	if decodedShortOfDuration(tool, expectedSec, totalFrames) {
+	// A clean exit does NOT guarantee a complete decode: ffmpeg conceals a
+	// mid-stream error and exits 0, and sox exits 0 after a FLAC LOST_SYNC even
+	// on a truncated file. Reject when the decoded length is materially short of
+	// the probed duration so a partial waveform is never committed (it would be
+	// keyed to the truncated file's mtime+size and never re-analyzed). A
+	// glitchy-but-COMPLETE file decodes to full length and is accepted: a
+	// mid-stream FLAC glitch resyncs to EOF and prints the SAME
+	// `sox FAIL ... LOST_SYNC` as a real truncation, so stderr matching cannot
+	// tell them apart — the decoded-length check can. Unknown duration: no-op.
+	if decodedShortOfDuration(expectedSec, totalFrames) {
 		return totalFrames, fmt.Errorf("%s: decoded %.1fs of %.1fs probed — source appears truncated",
 			tool, float64(totalFrames)/float64(AnalysisSampleRate), expectedSec)
 	}
 	return totalFrames, nil
-}
-
-// soxReportedFailure reports whether sox's stderr carries a FAIL-level decode
-// error even though the process exited 0 — a truncated-but-openable source
-// (e.g. a FLAC truncated mid-stream) prints `sox FAIL ... LOST_SYNC` yet
-// returns 0, which would otherwise commit a partial waveform. It matches sox's
-// own FAIL classification (a line beginning `sox FAIL`) plus the unambiguous
-// `LOST_SYNC` decoder-error marker.
-//
-// WARN lines are deliberately NOT matched. In particular
-// `sox WARN flac: decoder MD5 checksum mismatch` also fires on a perfectly
-// valid, complete FLAC whose tags were edited in place (the audio MD5 in the
-// STREAMINFO header no longer matches the re-muxed stream) — treating that as a
-// failure would commit nothing and re-analyze the file on every sweep
-// (a treadmill, the exact false-positive class to avoid). Empirically validated
-// against sox 14.x (a 55%-truncated FLAC: exit 0, `sox FAIL ... LOST_SYNC` +
-// `sox WARN ... MD5 checksum mismatch`; a valid file: exit 0, empty stderr).
-func soxReportedFailure(stderr string) bool {
-	for _, line := range strings.Split(stderr, "\n") {
-		l := strings.ToLower(strings.TrimSpace(line))
-		if strings.HasPrefix(l, "sox fail") || strings.Contains(l, "lost_sync") {
-			return true
-		}
-	}
-	return false
 }
 
 // streamFloat32LE reads little-endian float32 samples from r and calls

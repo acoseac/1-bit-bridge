@@ -265,3 +265,49 @@ func TestRunAnalysisTruncatedFLACWritesNoSidecar(t *testing.T) {
 		t.Fatalf("expected no sidecar after a truncated decode, found %d entries", len(entries))
 	}
 }
+
+// TestRunAnalysisGlitchyCompleteFLACCommits is the counterpart: a FLAC with a
+// mid-stream corruption the decoder RESYNCS past still reaches EOF (full-length
+// decode) and prints the SAME `sox FAIL ... LOST_SYNC` to stderr as a truncated
+// file — yet it is COMPLETE, so analysis must commit a sidecar rather than
+// treadmill it. This is why the guard is a decoded-LENGTH check, not stderr
+// matching (which can't tell a resynced-complete file from a truncated one);
+// it is the regression guard against reverting to stderr-error matching.
+func TestRunAnalysisGlitchyCompleteFLACCommits(t *testing.T) {
+	requireSox(t)
+	dir := t.TempDir()
+	src := filepath.Join(dir, "tone.flac")
+	if out, err := exec.Command("sox", "-n", "-r", "48000", "-c", "1", src,
+		"synth", "10", "sine", "440").CombinedOutput(); err != nil {
+		t.Fatalf("sox synth flac: %v\n%s", err, out)
+	}
+	// Flip ~200 bytes mid-stream WITHOUT changing the length (STREAMINFO at the
+	// front is untouched, so the declared duration stays 10s). The decoder loses
+	// sync, prints sox FAIL ... LOST_SYNC, resyncs, and decodes to EOF.
+	b, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(b) < 1000 {
+		t.Fatalf("flac unexpectedly small (%d bytes)", len(b))
+	}
+	for i := len(b) / 2; i < len(b)/2+200; i++ {
+		b[i] ^= 0xFF
+	}
+	if err := os.WriteFile(src, b, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	outDir := filepath.Join(dir, "waveforms")
+	res, err := RunAnalysis(context.Background(), AnalyzeSpec{
+		SourceAbsPath: src, SourceLibraryRel: "tone.flac", OutputDir: outDir,
+	})
+	if err != nil {
+		t.Fatalf("glitchy-but-complete FLAC must commit, got error: %v", err)
+	}
+	if res.WaveformPath == "" {
+		t.Fatal("expected a waveform sidecar path, got empty")
+	}
+	if _, statErr := os.Stat(res.WaveformPath); statErr != nil {
+		t.Fatalf("waveform sidecar not written: %v", statErr)
+	}
+}

@@ -49,30 +49,31 @@ func TestDecodedShortOfDuration(t *testing.T) {
 	const sr = AnalysisSampleRate
 	cases := []struct {
 		name      string
-		tool      decoderTool
 		expected  float64
 		frames    int64
 		wantShort bool
 	}{
 		// Reported case: ~58% decoded of declared duration → truncated.
-		{"ffmpeg truncated 58pct", decoderFFmpeg, 100, int64(58 * sr), true},
-		// Complete decode (exact) → accepted.
-		{"ffmpeg complete", decoderFFmpeg, 100, int64(100 * sr), false},
-		// Glitchy-but-complete: 1% short (encoder delay / rounding) → accepted.
-		{"ffmpeg near-complete 99pct", decoderFFmpeg, 100, int64(99 * sr), false},
+		{"truncated 58pct", 100, int64(58 * sr), true},
+		// Complete decode (exact) → accepted. This is also the glitchy-but-
+		// complete FLAC case (mid-stream LOST_SYNC that resyncs to EOF): full
+		// length decoded, so it is committed rather than treadmilled.
+		{"complete", 100, int64(100 * sr), false},
+		// 1% short (encoder delay / rounding / VBR drift) → accepted.
+		{"near-complete 99pct", 100, int64(99 * sr), false},
 		// Just inside the 90% floor → accepted; just below → rejected.
-		{"ffmpeg at 90pct floor", decoderFFmpeg, 100, int64(90 * sr), false},
-		{"ffmpeg below floor 89pct", decoderFFmpeg, 100, int64(89 * sr), true},
-		// sox path is intentionally unchecked even on a short decode.
-		{"sox short not checked", decoderSox, 100, int64(58 * sr), false},
+		{"at 90pct floor", 100, int64(90 * sr), false},
+		{"below floor 89pct", 100, int64(89 * sr), true},
 		// Unknown duration (probe miss) → no check, commit as before.
-		{"ffmpeg unknown duration", decoderFFmpeg, 0, int64(1 * sr), false},
+		{"unknown duration", 0, int64(1 * sr), false},
+		// Zero frames against a known duration → truncated.
+		{"zero frames", 100, 0, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := decodedShortOfDuration(c.tool, c.expected, c.frames); got != c.wantShort {
-				t.Errorf("decodedShortOfDuration(%s, %.0fs, %d frames) = %v, want %v",
-					c.tool, c.expected, c.frames, got, c.wantShort)
+			if got := decodedShortOfDuration(c.expected, c.frames); got != c.wantShort {
+				t.Errorf("decodedShortOfDuration(%.0fs, %d frames) = %v, want %v",
+					c.expected, c.frames, got, c.wantShort)
 			}
 		})
 	}
@@ -101,40 +102,6 @@ func TestFFprobeDuration_SurfacesPositiveDuration(t *testing.T) {
 	got := ffprobeDuration(context.Background(), src)
 	if got < 2.5 || got > 3.5 {
 		t.Errorf("ffprobeDuration(3s tone) = %.3f, want ~3.0 — a positive duration MUST be surfaced or the ffmpeg truncation guard is silently disabled", got)
-	}
-}
-
-// TestSoxReportedFailure pins the sox-path truncation guard: sox can exit 0
-// after a mid-stream decode failure (a truncated FLAC prints `sox FAIL ...
-// LOST_SYNC` yet returns 0), which would otherwise commit a partial waveform.
-// The MD5-mismatch WARN must NOT be matched — it also fires on valid
-// tag-edited FLACs, so matching it would treadmill valid files.
-func TestSoxReportedFailure(t *testing.T) {
-	cases := []struct {
-		name   string
-		stderr string
-		want   bool
-	}{
-		{
-			// The empirically-observed 55%-truncated-FLAC output.
-			name:   "FAIL LOST_SYNC with MD5 WARN",
-			stderr: "sox FAIL sox: `t.flac' FLAC__STREAM_DECODER_ERROR_STATUS_LOST_SYNC: Invalid argument\nsox WARN flac: decoder MD5 checksum mismatch.",
-			want:   true,
-		},
-		{"bare sox FAIL line", "sox FAIL formats: error reading", true},
-		{"LOST_SYNC without FAIL prefix", "decoder error: FLAC__...LOST_SYNC here", true},
-		// Valid tag-edited FLAC: MD5 mismatch is a WARN — must be accepted.
-		{"MD5 mismatch WARN only", "sox WARN flac: decoder MD5 checksum mismatch.", false},
-		{"benign WARN", "sox WARN wav: premature EOF on .wav header — but recovered", false},
-		{"empty stderr (valid file)", "", false},
-		{"whitespace only", "   \n  \n", false},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if got := soxReportedFailure(c.stderr); got != c.want {
-				t.Errorf("soxReportedFailure(%q) = %v, want %v", c.stderr, got, c.want)
-			}
-		})
 	}
 }
 
