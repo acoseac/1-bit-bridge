@@ -530,6 +530,20 @@ func populateFromTagMetadata(m tag.Metadata, t *Track) {
 		// `hasAnyRawKey` is key-only — value shape is irrelevant.
 		if hasAnyRawKey(raw, "tyer", "tdrc", "tdrl", "date", "year", "©day", "©yyy") {
 			y := m.Year()
+			// dhowden's `Year()` returns 0 for an ISO-8601 date value like
+			// "2023-06-09" (a valid DATE / TDRC tag — Melody Gardot's
+			// "Entre eux deux (The Paris Sessions)" is tagged that way).
+			// Recover the 4-digit year from the raw tag the same way
+			// `OriginalYear` already does (`parseYearPrefix`), so a
+			// full-date release tag doesn't surface as year 0. Only on the
+			// 0 case — a clean `m.Year()` (plain "2022") is left untouched.
+			if y == 0 {
+				if v, ok := stringOf(raw, "tdrc", "tdrl", "tyer", "date", "year", "©day", "©yyy"); ok {
+					if py, perr := parseYearPrefix(v); perr == nil {
+						y = py
+					}
+				}
+			}
 			t.Year = &y
 		}
 		if hasAnyRawKey(raw, "trck", "tracknumber", "trkn") {
