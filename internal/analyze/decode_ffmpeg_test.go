@@ -38,6 +38,29 @@ func TestFFmpegDecodeArgs_MatchesSoxWireFormat(t *testing.T) {
 	}
 }
 
+// TestFFmpegDecodeArgs_AbortsOnMidStreamError pins the `-xerror` flag that
+// keeps the "commit only on clean decode" invariant honest for the ffmpeg
+// fallback. Without it, ffmpeg exits 0 on a truncated-but-openable m4a/mp4
+// (the faststart layout) after decoding only the first N seconds, so
+// decodeFrames returns (partialFrames, nil) and RunAnalysis commits a partial
+// waveform that the mtime+size scan-skip gate never re-analyzes. Empirically,
+// the truncated faststart m4a exits 183 with `-xerror` (→ decodeFrames errors →
+// nothing committed). Structural gate: runs without ffmpeg installed; the
+// empirical exit-code behaviour was verified by hand.
+func TestFFmpegDecodeArgs_AbortsOnMidStreamError(t *testing.T) {
+	args := ffmpegDecodeArgs("/lib/a.m4a", 2)
+	found := false
+	for _, a := range args {
+		if a == "-xerror" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("ffmpegDecodeArgs missing -xerror (mid-stream decode errors would silently commit a partial waveform): %v", args)
+	}
+}
+
 func TestDecodeCommand_SelectsBinary(t *testing.T) {
 	if name, _ := decodeCommand(decoderSox, "/lib/a.flac", 2); name != "sox" {
 		t.Errorf("decoderSox → %q, want sox", name)

@@ -86,9 +86,25 @@ func resolveBin(look func() (string, error), fallback string) string {
 //     (load-bearing for the BS.1770 K-weighting), matching sox's `-c/-r`.
 //   - `-nostdin` so ffmpeg never blocks reading the controlling terminal;
 //     `-loglevel error` keeps stderr to real failures for redaction.
+//   - `-xerror` is LOAD-BEARING for the "commit only on clean decode"
+//     invariant decodeFrames relies on. By default ffmpeg exits 0 even when a
+//     packet fails to decode mid-stream, so a truncated-but-openable m4a/mp4
+//     (the common Apple/Apple-Music faststart layout — moov atom at the front;
+//     e.g. a partially-uploaded rclone-to-B2 sync) would decode only its first
+//     N seconds, exit 0, and let decodeFrames return (partialFrames, nil) —
+//     RunAnalysis would then commit a waveform covering ~half the audio with a
+//     duration + ReplayGain/key/tempo measured on the partial signal, keyed to
+//     the truncated file's mtime+size so the scan-skip gate never re-analyzes
+//     it. `-xerror` makes ffmpeg exit non-zero on the first decode error so
+//     cmd.Wait() surfaces it and nothing is committed — the candidate keeps
+//     re-flowing until the file is fully uploaded (self-healing, matching the
+//     #446 design). A clean decode of a valid file logs no errors, so this is a
+//     no-op there. (sox's primary path rejects unopenable inputs with a
+//     non-zero exit already; ffmpeg's default-exit-0-on-mid-stream-error is the
+//     gap this closes.)
 func ffmpegDecodeArgs(srcAbs string, channels int) []string {
 	return []string{
-		"-nostdin", "-hide_banner", "-loglevel", "error",
+		"-nostdin", "-hide_banner", "-loglevel", "error", "-xerror",
 		"-i", srcAbs,
 		"-map", "0:a:0",
 		"-ac", strconv.Itoa(channels), "-ar", "48000",
