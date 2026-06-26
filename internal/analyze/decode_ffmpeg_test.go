@@ -104,6 +104,40 @@ func TestFFprobeDuration_SurfacesPositiveDuration(t *testing.T) {
 	}
 }
 
+// TestSoxReportedFailure pins the sox-path truncation guard: sox can exit 0
+// after a mid-stream decode failure (a truncated FLAC prints `sox FAIL ...
+// LOST_SYNC` yet returns 0), which would otherwise commit a partial waveform.
+// The MD5-mismatch WARN must NOT be matched — it also fires on valid
+// tag-edited FLACs, so matching it would treadmill valid files.
+func TestSoxReportedFailure(t *testing.T) {
+	cases := []struct {
+		name   string
+		stderr string
+		want   bool
+	}{
+		{
+			// The empirically-observed 55%-truncated-FLAC output.
+			name:   "FAIL LOST_SYNC with MD5 WARN",
+			stderr: "sox FAIL sox: `t.flac' FLAC__STREAM_DECODER_ERROR_STATUS_LOST_SYNC: Invalid argument\nsox WARN flac: decoder MD5 checksum mismatch.",
+			want:   true,
+		},
+		{"bare sox FAIL line", "sox FAIL formats: error reading", true},
+		{"LOST_SYNC without FAIL prefix", "decoder error: FLAC__...LOST_SYNC here", true},
+		// Valid tag-edited FLAC: MD5 mismatch is a WARN — must be accepted.
+		{"MD5 mismatch WARN only", "sox WARN flac: decoder MD5 checksum mismatch.", false},
+		{"benign WARN", "sox WARN wav: premature EOF on .wav header — but recovered", false},
+		{"empty stderr (valid file)", "", false},
+		{"whitespace only", "   \n  \n", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := soxReportedFailure(c.stderr); got != c.want {
+				t.Errorf("soxReportedFailure(%q) = %v, want %v", c.stderr, got, c.want)
+			}
+		})
+	}
+}
+
 func TestDecodeCommand_SelectsBinary(t *testing.T) {
 	if name, _ := decodeCommand(decoderSox, "/lib/a.flac", 2); name != "sox" {
 		t.Errorf("decoderSox → %q, want sox", name)

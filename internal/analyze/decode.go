@@ -310,6 +310,18 @@ func decodeFrames(ctx context.Context, srcAbs string, channels int, tool decoder
 			tool, werr, redactSoxErr(strings.TrimSpace(stderr.String()), srcAbs))
 	}
 	processReleased = true
+	// sox can exit 0 after a mid-stream decode FAILURE: a truncated-but-openable
+	// FLAC (STREAMINFO header intact, audio cut short) prints
+	// `sox FAIL ... LOST_SYNC` yet returns 0, which would otherwise commit a
+	// partial waveform keyed to the truncated file's mtime+size that the
+	// scan-skip gate never re-analyzes. Treat sox's own FAIL classification as a
+	// decode error so nothing is committed (the candidate re-flows until the
+	// file is fully re-uploaded). Only the sox path: ffmpeg uses the duration
+	// check below; matching FAIL-text on ffmpeg stderr would be the wrong shape.
+	if tool == decoderSox && soxReportedFailure(stderr.String()) {
+		return totalFrames, fmt.Errorf("%s: %s", tool,
+			redactSoxErr(strings.TrimSpace(stderr.String()), srcAbs))
+	}
 	// Clean exit, but ffmpeg may have concealed a mid-stream decode error and
 	// stopped early on a truncated source — reject when the decoded length is
 	// materially short of the probed duration so a partial waveform is never
@@ -319,6 +331,31 @@ func decodeFrames(ctx context.Context, srcAbs string, channels int, tool decoder
 			tool, float64(totalFrames)/float64(AnalysisSampleRate), expectedSec)
 	}
 	return totalFrames, nil
+}
+
+// soxReportedFailure reports whether sox's stderr carries a FAIL-level decode
+// error even though the process exited 0 — a truncated-but-openable source
+// (e.g. a FLAC truncated mid-stream) prints `sox FAIL ... LOST_SYNC` yet
+// returns 0, which would otherwise commit a partial waveform. It matches sox's
+// own FAIL classification (a line beginning `sox FAIL`) plus the unambiguous
+// `LOST_SYNC` decoder-error marker.
+//
+// WARN lines are deliberately NOT matched. In particular
+// `sox WARN flac: decoder MD5 checksum mismatch` also fires on a perfectly
+// valid, complete FLAC whose tags were edited in place (the audio MD5 in the
+// STREAMINFO header no longer matches the re-muxed stream) — treating that as a
+// failure would commit nothing and re-analyze the file on every sweep
+// (a treadmill, the exact false-positive class to avoid). Empirically validated
+// against sox 14.x (a 55%-truncated FLAC: exit 0, `sox FAIL ... LOST_SYNC` +
+// `sox WARN ... MD5 checksum mismatch`; a valid file: exit 0, empty stderr).
+func soxReportedFailure(stderr string) bool {
+	for _, line := range strings.Split(stderr, "\n") {
+		l := strings.ToLower(strings.TrimSpace(line))
+		if strings.HasPrefix(l, "sox fail") || strings.Contains(l, "lost_sync") {
+			return true
+		}
+	}
+	return false
 }
 
 // streamFloat32LE reads little-endian float32 samples from r and calls

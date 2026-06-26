@@ -225,3 +225,43 @@ func TestRunAnalysisCorruptFileWritesNoSidecar(t *testing.T) {
 		t.Fatalf("expected empty output dir, found %v", names)
 	}
 }
+
+// TestRunAnalysisTruncatedFLACWritesNoSidecar is the end-to-end gate for the
+// sox-path truncation guard. A FLAC truncated mid-stream keeps its STREAMINFO
+// header (at the front), so sox OPENS it, decodes ~half, prints
+// `sox FAIL ... LOST_SYNC`, and exits 0 — pre-fix that committed a partial
+// waveform. RunAnalysis must surface the decode failure and write no sidecar so
+// the file re-flows until it is fully re-uploaded.
+func TestRunAnalysisTruncatedFLACWritesNoSidecar(t *testing.T) {
+	requireSox(t)
+	dir := t.TempDir()
+	src := filepath.Join(dir, "tone.flac")
+	if out, err := exec.Command("sox", "-n", "-r", "48000", "-c", "1", src,
+		"synth", "10", "sine", "440").CombinedOutput(); err != nil {
+		t.Fatalf("sox synth flac: %v\n%s", err, out)
+	}
+	info, err := os.Stat(src)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	// Cut the audio mid-stream; the front STREAMINFO header survives.
+	if err := os.Truncate(src, info.Size()*55/100); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	outDir := filepath.Join(dir, "waveforms")
+	if _, err := RunAnalysis(context.Background(), AnalyzeSpec{
+		SourceAbsPath: src, SourceLibraryRel: "tone.flac", OutputDir: outDir,
+	}); err == nil {
+		t.Fatal("expected error on truncated FLAC (sox exits 0 with a FAIL stderr)")
+	}
+	entries, err := os.ReadDir(outDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return // no output dir created → no sidecar, the desired outcome
+		}
+		t.Fatalf("read out dir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected no sidecar after a truncated decode, found %d entries", len(entries))
+	}
+}
