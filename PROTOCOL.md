@@ -725,7 +725,7 @@ The bridge regenerates the families on a daily cadence into a server-side cache 
 | `autoMix` | analysis (key + tempo) | Camelot-wheel harmonic flow, level-matched via ReplayGain; **requires `analysis.enabled`** |
 | `dailyMix` | history + analysis | ~70% familiar + ~30% discovery; discovery leg requires `analysis.enabled` |
 | `timeOfDay` | history (by hour) | the device's current-local-hour habit (see `local_hour` below) |
-| `artistDeepCuts` | history + library | tracks unplayed in 90d+, drawn from artists with ≥ 3 plays in the last 30d (per-artist cap 3); rotates weekly by UTC ISO week |
+| `artistDeepCuts` | history + library | tracks unplayed in the last ~90d, drawn from artists with ≥ 3 plays in the last ~30d (per-artist cap 3); rotates weekly by UTC ISO week |
 | `liftOff` | analysis | bpm ≥ 120 AND replaygain ≤ -8 dB (loud, fast mood band); rotates weekly; **requires `analysis.enabled`** |
 | `windDown` | analysis | bpm ≤ 90 AND replaygain > -6 dB (quiet, slow mood band); rotates weekly; **requires `analysis.enabled`** |
 | `finishLine` | history (sessions) | tracks chained to the user's average listening-session length |
