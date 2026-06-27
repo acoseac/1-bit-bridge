@@ -719,13 +719,13 @@ The bridge regenerates the families on a daily cadence into a server-side cache 
 |---|---|---|
 | `heavyRotation` | history (last ~14d) | most-played, qualifying plays only (≥ 30s listened) |
 | `driveMix` | history (CarPlay-only, last ~60d) | most-played over CarPlay (`iface_type = "CarPlay"`); a wider window than Heavy Rotation so occasional drives still populate it |
-| `onRepeat` | history (last ~30d) | "sustained obsession" — paths with ≥ 4 qualifying plays AND ≥ 3 distinct days carrying ≥ 2 plays/day; **carries hysteresis** (surfaces at ≥ 12 tracks, stays visible while ≥ 8) |
+| `onRepeat` | history (last ~30d) | "sustained obsession" — paths played on ≥ 3 distinct days that each carried ≥ 2 qualifying plays (so ≥ 6 in total); **carries hysteresis** (surfaces at ≥ 12 tracks, stays visible while ≥ 8) |
 | `forgottenFavorites` | history | loved long ago, untouched in the last ~30d |
 | `recentlyPlayed` | history | distinct tracks, newest first |
 | `autoMix` | analysis (key + tempo) | Camelot-wheel harmonic flow, level-matched via ReplayGain; **requires `analysis.enabled`** |
 | `dailyMix` | history + analysis | ~70% familiar + ~30% discovery; discovery leg requires `analysis.enabled` |
 | `timeOfDay` | history (by hour) | the device's current-local-hour habit (see `local_hour` below) |
-| `artistDeepCuts` | history + library | tracks by artists with ≥ 3 plays in the last 30d that have NOT been played in 90d+ (per-artist cap 3); rotates weekly by UTC ISO week |
+| `artistDeepCuts` | history + library | tracks unplayed in the last ~90d, drawn from artists with ≥ 3 plays in the last ~30d (per-artist cap 3); rotates weekly by UTC ISO week |
 | `liftOff` | analysis | bpm ≥ 120 AND replaygain ≤ -8 dB (loud, fast mood band); rotates weekly; **requires `analysis.enabled`** |
 | `windDown` | analysis | bpm ≤ 90 AND replaygain > -6 dB (quiet, slow mood band); rotates weekly; **requires `analysis.enabled`** |
 | `finishLine` | history (sessions) | tracks chained to the user's average listening-session length |
