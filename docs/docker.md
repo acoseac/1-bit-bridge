@@ -170,6 +170,52 @@ proxy (Caddy / Traefik / nginx) with HTTP basic auth in front of
 bridge's CSRF defenses still apply, but the loopback-only
 binding inside the container is what stops anonymous LAN access.
 
+## Public mode (internet-exposed)
+
+By default the container runs in **loopback mode** — the iOS API on
+`7788` and the admin console bound to `127.0.0.1:7789` with no
+password. That's the right posture for a LAN / Tailscale deployment,
+and everything above assumes it.
+
+For a bridge intentionally exposed to the public internet, the bridge
+has a **public mode** (`deployment.mode: public`) that adds a
+single-user admin password and a Let's Encrypt certificate. Generate
+the config once with `--public` — it prints the admin password a
+single time, so capture it:
+
+```sh
+docker run --rm -it \
+    -v 1-bit-bridge-state:/data \
+    -v ~/music:/library:ro \
+    1-bit-bridge:dev \
+    init --public --yes --no-service \
+         --dir /data --library /library \
+         --domain bridge.example.com --email you@example.com
+```
+
+Public mode binds the API on `:443` so Let's Encrypt's TLS-ALPN-01
+challenge can validate, so publish `443` (TCP + UDP for HTTP/3) when
+you serve:
+
+```sh
+docker run -d --name 1-bit-bridge \
+    -p 443:443/tcp -p 443:443/udp \
+    -v 1-bit-bridge-state:/data \
+    -v ~/music:/library:ro \
+    1-bit-bridge:dev
+```
+
+The public domain must resolve to the host and TCP/443 must be
+reachable for the certificate to issue. Rotate the admin password
+later with `docker exec 1-bit-bridge bridge admin reset-password`.
+Public mode also refuses to start the DLNA MediaServer (an
+internet-facing host must not expose an unauthenticated browser).
+
+For the full security model — firewalling, the admin-console
+exposure options, and the reverse-proxy variant (`--public --proxy`,
+where TLS is terminated upstream and `--email` isn't needed) — see the
+[Public-VPS deployment runbook](deployment/public-vps.md).
+
 ## Logs
 
 The container writes logs to stdout/stderr (no service-manager

@@ -70,5 +70,29 @@ privacy, link-rendering, and anchor-target issues. The HTML-rendering items now 
 
 The release workflow drafts a GitHub Release in ~3 min: signed + notarized darwin × amd64/arm64 archives, unsigned linux × amd64/arm64 + windows × amd64/arm64 archives, `release-meta.json` sidecar. Edit the auto-generated changelog (filtered by goreleaser to drop docs/chore commits) into a user-facing summary highlighting the v1.x features that landed, then click Publish. End-user install instructions in `README.md` work from publish onward.
 
+### Container image (GHCR) — auto-published on tag push
+
+`.github/workflows/docker.yml` builds and pushes the multi-arch image
+`ghcr.io/acoseac/1-bit-bridge` (linux/amd64 + linux/arm64) on every `v*` tag push, in parallel with
+the goreleaser job — **no manual step per release.** It tags `:MAJOR.MINOR.PATCH`, `:MAJOR.MINOR`, and
+`:latest`, injecting the tag into `version.ServerVersion` via the `VERSION` build-arg. The GHCR package
+was made **public once** (introduced with v0.1.7) and stays public for every future version.
+
+Per-release hygiene:
+
+- **Keep `Dockerfile`'s `ARG GO_VERSION` in step with go.mod's `go` directive.** The alpine golang
+  image runs `GOTOOLCHAIN=local`, so a stale value fails the image build with `go.mod requires go >= X`
+  (this is what broke the v0.1.7 image build on the first attempt). The `docker` workflow surfaces it as
+  a red run, but bump it proactively whenever go.mod bumps Go.
+- **Verify after the tag pushes:** the `docker` workflow run is green and the new tags resolve — e.g.
+  `docker buildx imagetools inspect ghcr.io/acoseac/1-bit-bridge:<ver>` (shows both arches), or the
+  anonymous registry tags list.
+- **Keep the pull instructions in sync** when the tag scheme or run/usage changes: `docs/docker.md`
+  (this repo) and the 1-bit.app **download** page's container line (`1bitapp` repo,
+  `src/pages/bridge/download.astro`).
+- **Publishing an image for a tag whose own `Dockerfile` is broken** (a frozen tag that predates a
+  `GO_VERSION` fix): dispatch the workflow with `tag=<version>` + `ref=main` so it builds current
+  packaging from a ref whose Go source matches that release. This is how the v0.1.7 image was published.
+
 If the operator-side runbook documents anything that's NOT in this CLAUDE.md, fold it back here — this section is the single source of truth for the release process.
 
