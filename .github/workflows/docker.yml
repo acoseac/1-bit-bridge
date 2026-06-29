@@ -23,8 +23,12 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Git tag to build + publish (e.g. v0.1.7)"
+        description: "Version to publish as the image tag, e.g. v0.1.7"
         required: true
+        type: string
+      ref:
+        description: "Git ref to build from (branch / tag / SHA). Defaults to the version tag; set to a branch (e.g. main) to build current packaging for a frozen release tag whose own Dockerfile predates it."
+        required: false
         type: string
 
 permissions:
@@ -43,7 +47,7 @@ jobs:
       # .github/dependabot.yml. SHAs match release.yml where shared.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ inputs.ref || inputs.tag || github.ref }}
 
       - name: Resolve version + image tags
         id: meta
