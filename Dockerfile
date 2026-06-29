@@ -57,12 +57,14 @@ COPY . .
 # build identity rather than the placeholder constant (Gemini Medium
 # on PR #80).
 ARG VERSION=docker
-# TARGETOS / TARGETARCH are BuildKit-provided per target platform. Left
-# without defaults on purpose: under BuildKit (the default builder) they
-# carry the target's OS/arch; on a plain `docker build` they resolve to
-# the host; on a legacy non-BuildKit builder they expand empty so
-# `go build` falls back to the host arch — all three are correct.
-ARG TARGETOS
+# TARGETOS / TARGETARCH are BuildKit-provided per target platform and
+# drive the cross-compile. TARGETOS defaults to "linux" (the only OS the
+# alpine runtime stage supports) so a non-BuildKit `docker build` — where
+# these predefined args aren't populated — still builds a linux binary;
+# BuildKit overrides it per target. TARGETARCH has no default: empty makes
+# `go build` use the builder's native arch (the host on a plain build),
+# while BuildKit sets it per target for a multi-arch build.
+ARG TARGETOS=linux
 ARG TARGETARCH
 ENV CGO_ENABLED=0
 
