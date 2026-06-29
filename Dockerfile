@@ -32,7 +32,11 @@ ARG GO_VERSION=1.25
 ARG ALPINE_VERSION=3.19
 
 # --- builder ---
-FROM golang:${GO_VERSION}-alpine AS builder
+# Pinned to the native build platform (BuildKit-provided $BUILDPLATFORM)
+# so the Go compile runs natively and cross-compiles to $TARGETARCH,
+# rather than running the whole builder under QEMU emulation for arm64.
+# Requires BuildKit (the default in modern Docker / `docker buildx`).
+FROM --platform=${BUILDPLATFORM} golang:${GO_VERSION}-alpine AS builder
 
 RUN apk add --no-cache git
 
@@ -53,10 +57,16 @@ COPY . .
 # build identity rather than the placeholder constant (Gemini Medium
 # on PR #80).
 ARG VERSION=docker
-ENV CGO_ENABLED=0 \
-    GOOS=linux
+# TARGETOS / TARGETARCH are BuildKit-provided per target platform. Left
+# without defaults on purpose: under BuildKit (the default builder) they
+# carry the target's OS/arch; on a plain `docker build` they resolve to
+# the host; on a legacy non-BuildKit builder they expand empty so
+# `go build` falls back to the host arch — all three are correct.
+ARG TARGETOS
+ARG TARGETARCH
+ENV CGO_ENABLED=0
 
-RUN go build \
+RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
     -trimpath \
     -ldflags="-s -w -X github.com/acoseac/1-bit-bridge/internal/version.ServerVersion=${VERSION}" \
     -o /out/bridge \

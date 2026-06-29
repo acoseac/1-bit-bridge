@@ -1,0 +1,91 @@
+name: docker
+
+# Builds + publishes the multi-arch container image to the GitHub
+# Container Registry (GHCR): ghcr.io/acoseac/1-bit-bridge.
+#
+#   - On a tag push (v*), publishes the image for that release alongside
+#     the goreleaser archives produced by release.yml.
+#   - Via workflow_dispatch, publishes a specific tag — used to publish
+#     an image for a release that predates this workflow (e.g. v0.1.7).
+#
+# Auth uses the workflow's built-in GITHUB_TOKEN (packages: write) — no
+# PAT or repo secret to manage.
+#
+# ONE-TIME: the first push creates the package as PRIVATE. Flip it to
+# Public once at
+#   https://github.com/users/acoseac/packages/container/1-bit-bridge/settings
+# after which anonymous `docker pull` works and it stays public.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Git tag to build + publish (e.g. v0.1.7)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/acoseac/1-bit-bridge
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      # Commit-pinned so a hijacked / retagged upstream can't tamper with
+      # a published image. Version comments feed Dependabot — see
+      # .github/dependabot.yml. SHAs match release.yml where shared.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Resolve version + image tags
+        id: meta
+        run: |
+          set -eu
+          RAW="${{ inputs.tag || github.ref_name }}"
+          VER="${RAW#v}"            # strip a leading v  ->  0.1.7
+          MINOR="${VER%.*}"         # 0.1.7  ->  0.1
+          {
+            echo "version=$VER"
+            echo "tags=${IMAGE}:${VER},${IMAGE}:${MINOR},${IMAGE}:latest"
+          } >> "$GITHUB_OUTPUT"
+          echo "Building $RAW -> ${IMAGE}:{${VER},${MINOR},latest}"
+
+      # QEMU is still needed for the small per-arch runtime stage (apk add
+      # + adduser); the Go build itself cross-compiles natively on the
+      # amd64 runner (see Dockerfile BUILDPLATFORM/TARGETARCH), so the slow
+      # emulated-compile path is avoided.
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          # Keep the manifest a clean 2-arch index — provenance/SBOM
+          # attestations add "unknown/unknown" entries that clutter the
+          # GHCR UI. Can be revisited (mode=max) if supply-chain
+          # attestations are wanted later.
+          provenance: false
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/acoseac/1-bit-bridge
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.description=Cross-platform Go companion server for the 1-bit iOS music player
