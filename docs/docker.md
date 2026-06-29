@@ -193,17 +193,27 @@ docker run --rm -it \
          --domain bridge.example.com --email you@example.com
 ```
 
-Public mode binds the API on `:443` so Let's Encrypt's TLS-ALPN-01
-challenge can validate, so publish `443` (TCP + UDP for HTTP/3) when
-you serve:
+Public mode binds the API on `:443` (Let's Encrypt's TLS-ALPN-01
+challenge validates only on TCP/443). The container runs as the
+non-root `bridge` user, which can't bind a privileged port by default —
+allow it with `--sysctl net.ipv4.ip_unprivileged_port_start=0`, and
+publish `443` (TCP + UDP for HTTP/3):
 
 ```sh
 docker run -d --name 1-bit-bridge \
+    --sysctl net.ipv4.ip_unprivileged_port_start=0 \
     -p 443:443/tcp -p 443:443/udp \
     -v 1-bit-bridge-state:/data \
     -v ~/music:/library:ro \
     1-bit-bridge:dev
 ```
+
+> Prefer not to bind a privileged port in-container? Init with
+> `--listen-address :8443` instead, map `-p 443:8443/tcp -p 443:8443/udp`,
+> and set `autocert.external443Mapping: true` in `bridge.yaml`. That
+> opt-in tells the bridge a front door maps `WAN:443 → :8443` — which the
+> public-mode config validation otherwise requires, since ACME only
+> validates on 443.
 
 The public domain must resolve to the host and TCP/443 must be
 reachable for the certificate to issue. Rotate the admin password
