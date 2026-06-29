@@ -9,10 +9,25 @@ so a YAML rewrite isn't required to retarget a containerised
 deployment.
 
 > **Status:** Dockerfile and env overrides are first-class
-> supported. We do **not** publish a pre-built image yet — pin
-> against the repo and `docker build` locally for now.
+> supported. As of **v0.1.7** a pre-built multi-arch image
+> (`linux/amd64` + `linux/arm64`) is published to the GitHub
+> Container Registry for every release — building from source
+> (below) stays supported for local hacking.
 
-## Build
+## Pull the published image
+
+```sh
+docker pull ghcr.io/acoseac/1-bit-bridge:latest      # newest release
+docker pull ghcr.io/acoseac/1-bit-bridge:0.1.7       # a specific version
+```
+
+The image is public — no `docker login` needed to pull. It runs as a
+non-root `bridge` user, exposes `7788`, and keeps all state under the
+`/data` volume (see [First-time setup](#first-time-setup) below). Tags:
+`latest`, the full `MAJOR.MINOR.PATCH` (e.g. `0.1.7`), and the
+`MAJOR.MINOR` series (e.g. `0.1`).
+
+## Build it yourself
 
 ```sh
 git clone https://github.com/acoseac/1-bit-bridge.git
@@ -22,6 +37,9 @@ docker build -t 1-bit-bridge:dev .
 
 Multi-arch builds (linux/amd64 + linux/arm64 for Apple Silicon
 hosts) work via `docker buildx build --platform=linux/amd64,linux/arm64`.
+The builder cross-compiles natively per target arch (it pins the build
+stage to `$BUILDPLATFORM`), so an arm64 image builds without QEMU-emulating
+the whole Go compile.
 
 ## First-time setup
 
