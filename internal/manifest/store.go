@@ -1257,8 +1257,16 @@ func (s *Store) UnenrichedTracks(ctx context.Context, limit int) ([]Track, error
 	}
 	defer rows.Close()
 	// Pre-size to the LIMIT (normalized above): the loop appends at most
-	// `limit` rows, so this avoids the append-growth reallocations.
-	out := make([]Track, 0, limit)
+	// `limit` rows, so this avoids the append-growth reallocations. Cap the
+	// hint so a caller passing a huge limit can't pre-allocate a giant
+	// backing array when few rows are actually unenriched (BatchLimit is
+	// caller-controlled, only floored at <=0); append still grows past the
+	// cap in the rare large-batch case.
+	capHint := limit
+	if capHint > 1000 {
+		capHint = 1000
+	}
+	out := make([]Track, 0, capHint)
 	for rows.Next() {
 		var raw []byte
 		if err := rows.Scan(&raw); err != nil {
