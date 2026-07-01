@@ -487,11 +487,18 @@ var migrations = []migration{
 				logger.Warn("FTS5 probe: checkout connection", "err", connErr.Error())
 				return nil
 			}
-			_, probeErr := conn.ExecContext(probeCtx, `CREATE VIRTUAL TABLE temp.__fts5_probe USING fts5(x)`)
-			if probeErr == nil {
+			// `defer conn.Close()` inside a scoped func: panic-safe (a
+			// future ExecContext that panics still releases the connection)
+			// AND returns it to the pool BEFORE the O(N) tracks_fts backfill
+			// below runs on the pool, rather than holding it idle.
+			probeErr := func() error {
+				defer conn.Close()
+				if _, err := conn.ExecContext(probeCtx, `CREATE VIRTUAL TABLE temp.__fts5_probe USING fts5(x)`); err != nil {
+					return err
+				}
 				_, _ = conn.ExecContext(probeCtx, `DROP TABLE temp.__fts5_probe`)
-			}
-			_ = conn.Close()
+				return nil
+			}()
 			if probeErr != nil {
 				logger.Warn("FTS5 unavailable; library search will be disabled",
 					"err", probeErr.Error())
