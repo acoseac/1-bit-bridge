@@ -31,13 +31,26 @@ var watcherLogger = logging.Component("watcher")
 // loop and spawns one fire-and-forget goroutine per debounced
 // dispatch. The debounce map is mutex-protected; scan invocations
 // serialise via Scanner's own s.mu.
+// pendingScan is one armed debounce entry. Wrapping the timer in a
+// pointer struct gives each AfterFunc callback a STABLE IDENTITY to
+// compare against wt.pending[dir]. time.Timer.Reset/Stop cannot cancel a
+// callback that has already been dispatched, so a timer that fired but
+// whose callback hasn't yet re-acquired wt.mu must NOT delete a fresh
+// entry a concurrent scheduleScan installed in the meantime. Without the
+// identity check the stale callback evicts the live entry, and under a
+// sustained event storm the map loses track of the current timer per dir
+// → unbounded timer creation + overlapping ScanSubtree dispatches.
+type pendingScan struct {
+	timer *time.Timer
+}
+
 type Watcher struct {
 	scanner  *Scanner
 	debounce time.Duration
 	w        *fsnotify.Watcher
 
 	mu      sync.Mutex
-	pending map[string]*time.Timer
+	pending map[string]*pendingScan
 }
 
 // NewWatcher constructs a Watcher against the scanner's currently
@@ -60,7 +73,7 @@ func NewWatcher(scanner *Scanner, debounce time.Duration) (*Watcher, error) {
 		scanner:  scanner,
 		debounce: debounce,
 		w:        w,
-		pending:  make(map[string]*time.Timer),
+		pending:  make(map[string]*pendingScan),
 	}, nil
 }
 
@@ -196,16 +209,31 @@ func (wt *Watcher) handleEvent(ctx context.Context, ev fsnotify.Event) {
 // into a single ScanSubtree invocation. The timer fire path
 // re-checks `ctx.Err()` so a watcher shutdown doesn't dispatch a
 // stale scan after Run() returns.
+//
+// Reschedule vs. re-arm is decided by Stop(): if the existing timer is
+// stopped before it fired, we reuse the same entry with a fresh window;
+// if Stop() reports the timer already fired (its callback is in flight,
+// blocked on wt.mu which we hold), we install a FRESH entry instead. The
+// in-flight stale callback then finds `wt.pending[dir] != its own ps` and
+// no-ops, so it can neither evict nor double-dispatch the new entry.
 func (wt *Watcher) scheduleScan(ctx context.Context, dir string) {
 	wt.mu.Lock()
 	defer wt.mu.Unlock()
 	if existing, ok := wt.pending[dir]; ok {
-		existing.Reset(wt.debounce)
-		return
+		if existing.timer.Stop() {
+			existing.timer.Reset(wt.debounce)
+			return
+		}
+		// Stop() == false: the timer already fired; its callback is
+		// blocked on wt.mu. Fall through to a fresh entry — the stale
+		// callback's identity check keeps it from touching this one.
 	}
-	wt.pending[dir] = time.AfterFunc(wt.debounce, func() {
+	ps := &pendingScan{}
+	ps.timer = time.AfterFunc(wt.debounce, func() {
 		wt.mu.Lock()
-		delete(wt.pending, dir)
+		if wt.pending[dir] == ps {
+			delete(wt.pending, dir)
+		}
 		wt.mu.Unlock()
 		if ctx.Err() != nil {
 			return
@@ -215,6 +243,7 @@ func (wt *Watcher) scheduleScan(ctx context.Context, dir string) {
 			watcherLogger.Error("subtree scan", "dir", dir, "err", err)
 		}
 	})
+	wt.pending[dir] = ps
 }
 
 // cancelAllPending stops every armed debounce timer. Called from
@@ -224,8 +253,8 @@ func (wt *Watcher) scheduleScan(ctx context.Context, dir string) {
 func (wt *Watcher) cancelAllPending() {
 	wt.mu.Lock()
 	defer wt.mu.Unlock()
-	for k, t := range wt.pending {
-		t.Stop()
+	for k, ps := range wt.pending {
+		ps.timer.Stop()
 		delete(wt.pending, k)
 	}
 }

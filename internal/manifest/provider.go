@@ -3,6 +3,7 @@ package manifest
 import (
 	"context"
 	"io"
+	"sync/atomic"
 	"time"
 )
 
@@ -55,9 +56,15 @@ type VariantLookup struct {
 // disappear from the wire without the sidecars being deleted from
 // disk. Round-trippable: re-enable and the variants reappear.
 type Provider struct {
-	store          *Store
-	scanner        *Scanner
-	upscaleEnabled bool
+	store   *Store
+	scanner *Scanner
+	// upscaleEnabled is written by SetUpscaleEnabled and read on every
+	// manifest fetch (WriteManifest / BuildManifestPage run on HTTP-handler
+	// goroutines) — atomic.Bool so those concurrent read/write accesses are
+	// race-free, honouring the "safe to call at any point" contract on the
+	// setter. Provider is always used by pointer (see NewProvider), so the
+	// non-copyable atomic is never copied (go vet copylocks stays clean).
+	upscaleEnabled atomic.Bool
 }
 
 // NewProvider ties together the store and scanner so the api package can
@@ -70,10 +77,12 @@ func NewProvider(store *Store, scanner *Scanner) *Provider {
 
 // SetUpscaleEnabled flips the gate that decides whether the manifest
 // emits each Track's `Variants` slice. Plumbed from `cfg.Upscale.Enabled`
-// at serve startup. Safe to call at any point — provider methods read
-// the field on each call so a hot-reload of bridge.yaml takes effect
-// on the next /v1/manifest fetch.
-func (p *Provider) SetUpscaleEnabled(v bool) { p.upscaleEnabled = v }
+// at serve startup. Safe to call at any point — the field is an
+// atomic.Bool that provider methods Load on each call, so this setter and
+// the concurrent per-request reads stay race-free even if a future caller
+// wires it to a live bridge.yaml hot-reload; the change takes effect on
+// the next /v1/manifest fetch.
+func (p *Provider) SetUpscaleEnabled(v bool) { p.upscaleEnabled.Store(v) }
 
 // WriteManifest satisfies api.ManifestProvider for the legacy
 // non-paginated /v1/manifest endpoint. Streams JSON straight to w
@@ -86,14 +95,14 @@ func (p *Provider) SetUpscaleEnabled(v bool) { p.upscaleEnabled = v }
 // disconnect mid-response (slow network, iOS app backgrounded mid-sync,
 // slow-read DOS) terminates the SQLite scan instead of running to EOF.
 func (p *Provider) WriteManifest(ctx context.Context, w io.Writer, since time.Time) error {
-	return writeManifestGated(ctx, w, p.store, p.scanner.Roots(), since, p.upscaleEnabled)
+	return writeManifestGated(ctx, w, p.store, p.scanner.Roots(), since, p.upscaleEnabled.Load())
 }
 
 // BuildManifestPage satisfies api.ManifestProvider for the paginated
 // full-manifest path introduced in v1.1. See `BuildManifestPage` in
 // scanner.go for the cursor semantics.
 func (p *Provider) BuildManifestPage(ctx context.Context, cursor string, limit int) (*Manifest, error) {
-	return buildManifestPageGated(ctx, p.store, p.scanner.Roots(), cursor, limit, p.upscaleEnabled)
+	return buildManifestPageGated(ctx, p.store, p.scanner.Roots(), cursor, limit, p.upscaleEnabled.Load())
 }
 
 // IsScanning satisfies api.ManifestProvider.

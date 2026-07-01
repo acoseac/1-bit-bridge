@@ -472,17 +472,44 @@ var migrations = []migration{
 		// rather than the whole bridge failing to start.
 		sql: `-- table + triggers + backfill run in post() so we can probe FTS5 availability`,
 		post: func(db *sql.DB) error {
-			// FTS5 capability probe via TEMP table — no schema side
-			// effects if it fails, cheap if it succeeds. The two
-			// `db.Exec` calls below are tolerated because the inner
-			// `if err != nil` immediately swallows and returns nil
-			// (graceful degradation).
-			if _, err := db.Exec(`CREATE VIRTUAL TABLE temp.__fts5_probe USING fts5(x)`); err != nil {
-				logger.Warn("FTS5 unavailable; library search will be disabled",
-					"err", err.Error())
+			// FTS5 capability probe via a TEMP table on a DEDICATED
+			// connection — TEMP tables are connection-scoped, so the
+			// CREATE and its DROP MUST hit the SAME session. Issuing both
+			// via the pooled db.Exec could draw different connections,
+			// leaving the (empty) probe table lingering on the first for
+			// the process lifetime. No schema side effects if the probe
+			// fails; cheap if it succeeds; failure swallows and returns
+			// nil (graceful degradation — the search API 503s if
+			// tracks_fts is absent).
+			// Bound the whole probe (conn checkout + CREATE/DROP) so a
+			// pathologically locked/unresponsive DB fails gracefully
+			// (FTS5 disabled) instead of wedging startup. The probe is an
+			// in-memory temp-table op — microseconds normally — so 5s only
+			// fires on a genuine hang.
+			probeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			conn, connErr := db.Conn(probeCtx)
+			if connErr != nil {
+				logger.Warn("FTS5 probe: checkout connection", "err", connErr.Error())
 				return nil
 			}
-			_, _ = db.Exec(`DROP TABLE temp.__fts5_probe`)
+			// `defer conn.Close()` inside a scoped func: panic-safe (a
+			// future ExecContext that panics still releases the connection)
+			// AND returns it to the pool BEFORE the O(N) tracks_fts backfill
+			// below runs on the pool, rather than holding it idle.
+			probeErr := func() error {
+				defer conn.Close()
+				if _, err := conn.ExecContext(probeCtx, `CREATE VIRTUAL TABLE temp.__fts5_probe USING fts5(x)`); err != nil {
+					return err
+				}
+				_, _ = conn.ExecContext(probeCtx, `DROP TABLE temp.__fts5_probe`)
+				return nil
+			}()
+			if probeErr != nil {
+				logger.Warn("FTS5 unavailable; library search will be disabled",
+					"err", probeErr.Error())
+				return nil
+			}
 
 			// FTS5 confirmed. Create the real table + triggers.
 			// IF NOT EXISTS on all DDL — defends against partial-apply
@@ -1229,7 +1256,17 @@ func (s *Store) UnenrichedTracks(ctx context.Context, limit int) ([]Track, error
 		return nil, err
 	}
 	defer rows.Close()
-	var out []Track
+	// Pre-size to the LIMIT (normalized above): the loop appends at most
+	// `limit` rows, so this avoids the append-growth reallocations. Cap the
+	// hint so a caller passing a huge limit can't pre-allocate a giant
+	// backing array when few rows are actually unenriched (BatchLimit is
+	// caller-controlled, only floored at <=0); append still grows past the
+	// cap in the rare large-batch case.
+	capHint := limit
+	if capHint > 1000 {
+		capHint = 1000
+	}
+	out := make([]Track, 0, capHint)
 	for rows.Next() {
 		var raw []byte
 		if err := rows.Scan(&raw); err != nil {
@@ -1557,7 +1594,7 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 	// clock) advances to `existing+1`. The batch-level shared `now` is
 	// the right shape — per-track s.now() calls would burn 500 syscalls
 	// per batch on Pi-class hardware and break the deterministic test seam.
-	stmt, err := tx.Prepare(`
+	stmt, err := tx.PrepareContext(ctx, `
 		INSERT INTO tracks(path, size, mtime_ns, tags_json, indexed_at)
 		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(path) DO UPDATE SET
@@ -3244,7 +3281,7 @@ func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(ctx context.Context, 
 		return 0, err
 	}
 	defer tx.Rollback()
-	stmt, err := tx.Prepare(`UPDATE tracks SET missing_count = missing_count + 1 WHERE path = ?`)
+	stmt, err := tx.PrepareContext(ctx, `UPDATE tracks SET missing_count = missing_count + 1 WHERE path = ?`)
 	if err != nil {
 		return 0, err
 	}
@@ -3311,7 +3348,7 @@ func (s *Store) IncrementMissingFoldersAndDeleteAtThreshold(ctx context.Context,
 		return 0, err
 	}
 	defer tx.Rollback()
-	stmt, err := tx.Prepare(`UPDATE folders SET missing_count = missing_count + 1 WHERE path = ?`)
+	stmt, err := tx.PrepareContext(ctx, `UPDATE folders SET missing_count = missing_count + 1 WHERE path = ?`)
 	if err != nil {
 		return 0, err
 	}
