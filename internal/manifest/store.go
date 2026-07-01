@@ -1419,18 +1419,21 @@ func (s *Store) applyReconciledTracks(ctx context.Context, changed []Track) (int
 	for i := range changed {
 		raw, err := marshalForStorage(&changed[i])
 		if err != nil {
-			return n, err
+			// Any error path triggers the deferred tx.Rollback, so zero
+			// rows were committed — return 0, not the partial count, so
+			// callers/metrics don't record an aborted batch as a success.
+			return 0, err
 		}
 		res, err := stmt.ExecContext(ctx, raw, now, now, changed[i].Path)
 		if err != nil {
-			return n, err
+			return 0, err
 		}
 		if affected, _ := res.RowsAffected(); affected > 0 {
 			n++
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return n, err
+		return 0, err // rollback on failed commit → nothing persisted.
 	}
 	return n, nil
 }
@@ -1663,12 +1666,22 @@ func (s *Store) DeleteTrack(ctx context.Context, path string) error {
 // would acquire s.mu, BEGIN, write, COMMIT, fsync N times and starve
 // concurrent readers/writers for the duration.
 //
-// Sidecar-file unlinking is preserved: variants for every doomed track
-// are enumerated in one query, the rows are deleted under the FK
-// CASCADE in one DELETE-IN, then the sidecar files are unlinked off the
-// lock. Empty input is a no-op. Per-row errors are best-effort logged
-// (matching DeleteTrack's tolerance) so a single doomed sidecar can't
-// strand the rest of the batch.
+// The whole batch commits ONCE: a concurrent WAL reader never observes a
+// partially-wiped library mid-reap, and the reap costs one fsync instead
+// of one per chunk. Chunking below bounds only the SQL parameter list —
+// it is orthogonal to the transaction boundary, so every chunk's DELETE
+// runs inside the one hoisted tx.
+//
+// Sidecar-file unlinking is preserved: variant + waveform sidecars for
+// every doomed track are enumerated (on the tx's connection, before the
+// DELETE drops them under FK CASCADE) and accumulated across chunks, then
+// unlinked once after commit — still UNDER s.mu, per the writer-contract
+// invariant (the SELECT-sidecars -> DELETE-rows -> os.Remove sequence is
+// deliberately atomic; matches DeleteTracksByPrefix / WipeAllTracks).
+// Empty input is a no-op. Variant enumeration is STRICT (a QueryContext
+// failure or truncated iterator aborts + rolls the batch back, so the
+// DELETE can never orphan sidecar files); per-row scan errors and
+// waveform enumeration stay best-effort.
 func (s *Store) DeleteTracksBatch(ctx context.Context, paths []string) error {
 	if len(paths) == 0 {
 		return nil
@@ -1676,11 +1689,24 @@ func (s *Store) DeleteTracksBatch(ctx context.Context, paths []string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// One transaction wraps the ENTIRE batch (the atomicity contract
+	// above). All reads AND writes go through tx so the batch stays on
+	// tx's single pinned connection — enumerating sidecars on the bare
+	// s.db pool handle while the tx holds a write would check out a
+	// SECOND connection inside the s.mu critical section (pool-starvation
+	// / lock-ordering anti-pattern).
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("manifest: DeleteTracksBatch begin tx: %w", err)
+	}
+	defer tx.Rollback() // no-op after Commit; structural rollback guarantee.
+
 	// Chunk to keep the SQL parameter list (and the `IN (?, ?, ...)`
 	// expression) well under SQLite's defaults (999 params on most
 	// builds, modernc.org/sqlite raises this but staying conservative
-	// keeps the function portable + readable). 200 matches the
-	// existing UpsertTrackBatch's batch shape.
+	// keeps the function portable + readable). 200 matches the existing
+	// UpsertTrackBatch's batch shape.
+	var allSidecars []string
 	const chunkSize = 200
 	for start := 0; start < len(paths); start += chunkSize {
 		end := start + chunkSize
@@ -1689,54 +1715,63 @@ func (s *Store) DeleteTracksBatch(ctx context.Context, paths []string) error {
 		}
 		chunk := paths[start:end]
 
-		// Enumerate sidecars for THIS chunk before the DELETE so the
-		// FK CASCADE doesn't yank rows out from under us. The SQL is
-		// built by buildPathInQuery (placeholders only — no caller
-		// string ever reaches the query body, so the dynamic '?,?,?'
-		// list is injection-safe by construction).
-		selectSQL, args := buildPathInQuery("SELECT sidecar_path FROM track_variants WHERE source_path", chunk)
-		rows, err := s.db.QueryContext(ctx, selectSQL, args...)
-		var sidecars []string
-		if err == nil {
-			for rows.Next() {
-				var sp string
-				if scanErr := rows.Scan(&sp); scanErr != nil {
-					logger.Warn("delete-tracks-batch: scan sidecar", "err", scanErr)
-					continue
-				}
-				sidecars = append(sidecars, sp)
+		// Enumerate variant sidecars for THIS chunk before the DELETE so
+		// the FK CASCADE doesn't yank rows out from under us.
+		// buildPathInQuery emits placeholders only — no caller string
+		// reaches the query body, so the dynamic '?,?,?' list is
+		// injection-safe by construction. A *sql.Tx pins one connection,
+		// so the variant Rows MUST be closed (explicitly — no defer inside
+		// the loop) before the waveform read and the DELETE run on tx.
+		//
+		// STRICT enumeration (Iterator-error refusal — mirrors
+		// DeleteTracksByPrefix's listSidecarsByPathPrefix, CodeRabbit
+		// Major + Gemini High on PR #210): a QueryContext failure or a
+		// truncated iterator would let the DELETE below orphan sidecar
+		// files on disk, so abort and roll the whole batch back via the
+		// deferred tx.Rollback (the cascade hasn't run). Per-row scan
+		// errors stay best-effort (log + continue).
+		selectSQL, selArgs := buildPathInQuery("SELECT sidecar_path FROM track_variants WHERE source_path", chunk)
+		rows, err := tx.QueryContext(ctx, selectSQL, selArgs...)
+		if err != nil {
+			return fmt.Errorf("manifest: DeleteTracksBatch list sidecars: %w", err)
+		}
+		for rows.Next() {
+			var sp string
+			if scanErr := rows.Scan(&sp); scanErr != nil {
+				logger.Warn("delete-tracks-batch: scan sidecar", "err", scanErr)
+				continue
 			}
-			if iterErr := rows.Err(); iterErr != nil {
-				logger.Warn("delete-tracks-batch: iter sidecars", "err", iterErr)
-			}
+			allSidecars = append(allSidecars, sp)
+		}
+		if iterErr := rows.Err(); iterErr != nil {
 			rows.Close()
-		} else {
-			logger.Warn("delete-tracks-batch: list sidecars", "err", err)
+			return fmt.Errorf("manifest: DeleteTracksBatch iter sidecars: %w", iterErr)
 		}
-		// Waveform sidecars for the same chunk (track_analysis).
+		rows.Close()
+		// Waveform sidecars for the same chunk (track_analysis), on tx.
 		wfIn, wfArgs := buildPathInQuery("source_path", chunk)
-		sidecars = append(sidecars, s.listWaveformSidecars(ctx, wfIn, wfArgs...)...)
+		allSidecars = append(allSidecars, s.listWaveformSidecarsTx(ctx, tx, wfIn, wfArgs...)...)
 
-		// One DELETE for the whole chunk under a single transaction.
-		// FK CASCADE handles upnp_track_routing + track_variants in
-		// one shot.
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			return fmt.Errorf("manifest: DeleteTracksBatch begin tx: %w", err)
-		}
-		deleteSQL, args := buildPathInQuery("DELETE FROM tracks WHERE path", chunk)
-		_, err = tx.ExecContext(ctx, deleteSQL, args...)
-		if err != nil {
-			_ = tx.Rollback()
+		// One DELETE for the whole chunk. FK CASCADE handles
+		// upnp_track_routing + track_variants + track_analysis in one
+		// shot.
+		deleteSQL, delArgs := buildPathInQuery("DELETE FROM tracks WHERE path", chunk)
+		if _, err := tx.ExecContext(ctx, deleteSQL, delArgs...); err != nil {
 			return fmt.Errorf("manifest: DeleteTracksBatch exec: %w", err)
 		}
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("manifest: DeleteTracksBatch commit: %w", err)
-		}
-
-		// Sidecar files off the lock.
-		removeSidecarFiles(sidecars)
 	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("manifest: DeleteTracksBatch commit: %w", err)
+	}
+
+	// Sidecar files unlinked once, after the single commit — still UNDER
+	// s.mu (matches DeleteTracksByPrefix / WipeAllTracks). The
+	// SELECT-sidecars -> DELETE-rows -> os.Remove-files sequence is
+	// deliberately atomic per the writer-contract invariant: releasing the
+	// lock before the unlink would let a concurrent UpsertVariant resurrect
+	// a row pointing at a content-hashed sidecar we're about to remove.
+	removeSidecarFiles(allSidecars)
 	return nil
 }
 
@@ -2757,7 +2792,31 @@ func removeSidecarFiles(paths []string) {
 	}
 }
 
-// listWaveformSidecars returns the non-empty `track_analysis.waveform_path`
+// rowQueryer is the read surface shared by *sql.DB and *sql.Tx, so a
+// helper can enumerate rows either on the pool (default) or pinned to an
+// in-flight transaction's single connection. Lets listWaveformSidecars
+// serve both the pooled callers and DeleteTracksBatch's tx-pinned batch
+// from one implementation.
+type rowQueryer interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
+// listWaveformSidecars enumerates waveform sidecars via the pooled db
+// handle. Callers that hold an open transaction and need the read on the
+// SAME connection (so their tx's write doesn't tie up a second pooled
+// connection while it runs) must use listWaveformSidecarsTx instead.
+func (s *Store) listWaveformSidecars(ctx context.Context, where string, args ...any) []string {
+	return listWaveformSidecarsQ(ctx, s.db, where, args...)
+}
+
+// listWaveformSidecarsTx is the transaction-pinned variant: the read runs
+// on tx's connection so DeleteTracksBatch keeps its entire enumerate+delete
+// batch on the one connection its single transaction pins.
+func (s *Store) listWaveformSidecarsTx(ctx context.Context, tx *sql.Tx, where string, args ...any) []string {
+	return listWaveformSidecarsQ(ctx, tx, where, args...)
+}
+
+// listWaveformSidecarsQ returns the non-empty `track_analysis.waveform_path`
 // values matching the given WHERE clause, for the delete paths to unlink
 // alongside variant sidecars (CASCADE drops the row but not the on-disk
 // file — same contract as track_variants). Best-effort: enumeration
@@ -2767,8 +2826,8 @@ func removeSidecarFiles(paths []string) {
 // "source_path = ?") — never caller text — so the concatenation is
 // injection-safe; all values flow through `args` placeholders. Caller
 // holds s.mu (writer-serialization contract).
-func (s *Store) listWaveformSidecars(ctx context.Context, where string, args ...any) []string {
-	rows, err := s.db.QueryContext(ctx,
+func listWaveformSidecarsQ(ctx context.Context, q rowQueryer, where string, args ...any) []string {
+	rows, err := q.QueryContext(ctx,
 		`SELECT waveform_path FROM track_analysis WHERE waveform_path != '' AND (`+where+`)`, args...)
 	if err != nil {
 		logger.Warn("list waveform sidecars", "err", err)
@@ -3328,6 +3387,19 @@ func (s *Store) ResetTrackMissingCount(ctx context.Context, path string) error {
 // and doesn't want to wait N scans for cleanup. Returns the total
 // number of rows deleted across both tables.
 //
+// UPnP-routed tracks are SPARED regardless of their missing_count — the
+// tracks delete carries a NOT EXISTS anti-join against upnp_track_routing
+// (the codebase-preferred anti-join form since PR #404 — idiomatic +
+// NULL-safe; equivalent to the guard on IncrementMissingTracksAndDelete-
+// AtThreshold, PR #370). Routed rows can hold stale increments from before
+// the scanner-side missing-pass exclusion landed, and their lifecycle
+// belongs solely to the ingest's last_seen_at reap — NO caller may
+// threshold-delete a routed row. Without the guard this escape hatch
+// would silently wipe a live UPnP upstream (and its cached tags_json
+// enrichment) on an operator who ran clear-missing to purge an unrelated
+// decommissioned filesystem mount. The folders delete needs no guard —
+// folders are filesystem-only, never routed.
+//
 // Both deletes happen in one transaction so a crash mid-clear can't
 // leave the operator with a partially-purged state — re-running the
 // command picks up exactly the rows the prior attempt missed.
@@ -3341,7 +3413,12 @@ func (s *Store) ClearMissingCounts(ctx context.Context) (int64, error) {
 		return 0, err
 	}
 	defer tx.Rollback()
-	tRes, err := tx.ExecContext(ctx, `DELETE FROM tracks WHERE missing_count > 0`)
+	tRes, err := tx.ExecContext(ctx, `
+		DELETE FROM tracks
+		 WHERE missing_count > 0
+		   AND NOT EXISTS (
+			SELECT 1 FROM upnp_track_routing r WHERE r.source_path = tracks.path
+		   )`)
 	if err != nil {
 		return 0, err
 	}
