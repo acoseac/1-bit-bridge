@@ -3388,9 +3388,10 @@ func (s *Store) ResetTrackMissingCount(ctx context.Context, path string) error {
 // number of rows deleted across both tables.
 //
 // UPnP-routed tracks are SPARED regardless of their missing_count — the
-// tracks delete carries the same `AND path NOT IN (SELECT source_path
-// FROM upnp_track_routing)` guard as IncrementMissingTracksAndDeleteAt-
-// Threshold (PR #370). Routed rows can hold stale increments from before
+// tracks delete carries a NOT EXISTS anti-join against upnp_track_routing
+// (the codebase-preferred anti-join form since PR #404 — idiomatic +
+// NULL-safe; equivalent to the guard on IncrementMissingTracksAndDelete-
+// AtThreshold, PR #370). Routed rows can hold stale increments from before
 // the scanner-side missing-pass exclusion landed, and their lifecycle
 // belongs solely to the ingest's last_seen_at reap — NO caller may
 // threshold-delete a routed row. Without the guard this escape hatch
@@ -3415,7 +3416,9 @@ func (s *Store) ClearMissingCounts(ctx context.Context) (int64, error) {
 	tRes, err := tx.ExecContext(ctx, `
 		DELETE FROM tracks
 		 WHERE missing_count > 0
-		   AND path NOT IN (SELECT source_path FROM upnp_track_routing)`)
+		   AND NOT EXISTS (
+			SELECT 1 FROM upnp_track_routing r WHERE r.source_path = tracks.path
+		   )`)
 	if err != nil {
 		return 0, err
 	}
