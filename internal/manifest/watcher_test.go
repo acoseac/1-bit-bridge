@@ -125,3 +125,103 @@ func TestIsWatchLimitError(t *testing.T) {
 type strErr struct{ s string }
 
 func (e *strErr) Error() string { return e.s }
+
+// TestWatcherScheduleScanCoalescesAndCleans drives repeated scheduleScan
+// calls for one dir and asserts they collapse to a single pending entry
+// (the reschedule path) that the fired callback then removes — the map
+// self-cleans, no leaked timers. ctx is cancelled so the callback returns
+// before ScanSubtree; only the debounce-map bookkeeping is exercised.
+func TestWatcherScheduleScanCoalescesAndCleans(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenStore(filepath.Join(dir, "bridge.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer store.Close()
+	scanner := NewScanner([]string{dir}, store, "")
+	w, err := NewWatcher(scanner, 30*time.Millisecond)
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // callback skips the scan; we only check map bookkeeping.
+
+	const target = "/watched/dir"
+	for i := 0; i < 5; i++ {
+		w.scheduleScan(ctx, target)
+	}
+	w.mu.Lock()
+	n := len(w.pending)
+	w.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("pending entries = %d, want 1 (five events for one dir must coalesce)", n)
+	}
+
+	// After the debounce window the callback fires and removes the entry.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		w.mu.Lock()
+		n = len(w.pending)
+		w.mu.Unlock()
+		if n == 0 {
+			return // self-cleaned
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("pending map not cleaned after debounce; still %d entries", n)
+}
+
+// TestWatcherStaleTimerDoesNotEvictFreshEntry reproduces the debounce
+// identity race: a timer fires, its callback parks on wt.mu, and while it
+// is parked a FRESH entry is installed for the same dir. The stale
+// callback must NOT delete the fresh entry. Pre-fix (unconditional
+// delete) it did — which under an event storm let the map lose track of
+// the live timer and spawn overlapping scans.
+func TestWatcherStaleTimerDoesNotEvictFreshEntry(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenStore(filepath.Join(dir, "bridge.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer store.Close()
+	scanner := NewScanner([]string{dir}, store, "")
+	w, err := NewWatcher(scanner, 20*time.Millisecond)
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // stale callback returns before ScanSubtree.
+
+	const target = "/watched/dir"
+	w.scheduleScan(ctx, target) // arms ps1 (fires in 20ms)
+
+	// Hold the lock across the debounce window so ps1's callback fires but
+	// parks on wt.mu before it can run its delete check.
+	w.mu.Lock()
+	ps1 := w.pending[target]
+	time.Sleep(60 * time.Millisecond) // > debounce: ps1 fires, callback parks on wt.mu.
+
+	// Install a FRESH entry for the same dir (a long timer that won't fire
+	// during the test), mimicking scheduleScan's Stop()==false path.
+	ps2 := &pendingScan{}
+	ps2.timer = time.AfterFunc(time.Hour, func() {})
+	defer ps2.timer.Stop()
+	w.pending[target] = ps2
+	w.mu.Unlock() // release: ps1's parked callback now proceeds.
+
+	if ps1 == ps2 {
+		t.Fatal("test setup error: ps1 and ps2 must be distinct")
+	}
+
+	// Give the stale ps1 callback time to run its delete check + return.
+	time.Sleep(150 * time.Millisecond)
+
+	w.mu.Lock()
+	got := w.pending[target]
+	w.mu.Unlock()
+	if got != ps2 {
+		t.Fatalf("fresh entry evicted by the stale timer callback (got %p, want ps2 %p); identity guard failed", got, ps2)
+	}
+}
