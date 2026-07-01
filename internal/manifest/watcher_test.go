@@ -143,6 +143,7 @@ func TestWatcherScheduleScanCoalescesAndCleans(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWatcher: %v", err)
 	}
+	defer w.w.Close() // NewWatcher allocates an fsnotify.Watcher; these tests don't Run() it.
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // callback skips the scan; we only check map bookkeeping.
@@ -190,6 +191,7 @@ func TestWatcherStaleTimerDoesNotEvictFreshEntry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWatcher: %v", err)
 	}
+	defer w.w.Close() // NewWatcher allocates an fsnotify.Watcher; these tests don't Run() it.
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // stale callback returns before ScanSubtree.

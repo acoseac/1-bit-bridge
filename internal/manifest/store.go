@@ -481,7 +481,13 @@ var migrations = []migration{
 			// fails; cheap if it succeeds; failure swallows and returns
 			// nil (graceful degradation — the search API 503s if
 			// tracks_fts is absent).
-			probeCtx := context.Background()
+			// Bound the whole probe (conn checkout + CREATE/DROP) so a
+			// pathologically locked/unresponsive DB fails gracefully
+			// (FTS5 disabled) instead of wedging startup. The probe is an
+			// in-memory temp-table op — microseconds normally — so 5s only
+			// fires on a genuine hang.
+			probeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
 			conn, connErr := db.Conn(probeCtx)
 			if connErr != nil {
 				logger.Warn("FTS5 probe: checkout connection", "err", connErr.Error())
