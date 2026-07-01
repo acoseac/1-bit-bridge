@@ -160,7 +160,15 @@ func TestScannerThreshold1PreservesImmediateDelete(t *testing.T) {
 }
 
 // TestClearMissingCounts verifies the operator escape hatch wipes only
-// rows whose missing_count > 0, leaving healthy rows untouched.
+// filesystem rows whose missing_count > 0, leaving healthy rows AND
+// UPnP-routed rows untouched. The routed-row survival is the load-bearing
+// case: a routed row can carry a STALE missing_count (a pre-fix increment
+// from before the scanner-side exclusion, which the scanner never clears
+// because it now spares routed rows entirely), and the clear-missing
+// escape hatch MUST NOT reap it — its lifecycle belongs to the ingest's
+// last_seen_at reap (PR #370). Without the tracks-delete UPnP guard this
+// would silently wipe a live upstream (Chord 2Go: 15k rows) on an
+// operator purging an unrelated decommissioned filesystem mount.
 func TestClearMissingCounts(t *testing.T) {
 	dir := t.TempDir()
 	doomed := filepath.Join(dir, "doomed.flac")
@@ -174,6 +182,17 @@ func TestClearMissingCounts(t *testing.T) {
 	}
 	defer store.Close()
 
+	// Seed a UPnP-routed track and give it a STALE missing_count > 0
+	// directly — the scanner spares routed rows so it can't accumulate
+	// one, but a pre-exclusion increment is exactly the state the guard
+	// defends against.
+	const routedPath = "2go/Music/Artist/Album/01 - Track.flac"
+	seedRoutedTrack(t, store, routedPath)
+	if _, err := store.db.ExecContext(context.Background(),
+		`UPDATE tracks SET missing_count = 2 WHERE path = ?`, routedPath); err != nil {
+		t.Fatalf("seed stale routed missing_count: %v", err)
+	}
+
 	s := NewScanner([]string{dir}, store, "")
 	s.SetDeleteThreshold(5) // generous threshold so doomed accumulates count without being deleted
 	if _, err := s.Scan(context.Background()); err != nil {
@@ -185,16 +204,22 @@ func TestClearMissingCounts(t *testing.T) {
 	if _, err := s.Scan(context.Background()); err != nil {
 		t.Fatalf("scan 2: %v", err)
 	}
-	// doomed has missing_count=1 now; healthy is at 0.
+	// doomed has missing_count=1 now; healthy is at 0; routed is at 2.
 	n, err := store.ClearMissingCounts(context.Background())
 	if err != nil {
 		t.Fatalf("ClearMissingCounts: %v", err)
 	}
 	if n != 1 {
-		t.Errorf("ClearMissingCounts returned %d, want 1", n)
+		t.Errorf("ClearMissingCounts returned %d, want 1 (only the filesystem doomed row is reaped; the routed row is spared)", n)
 	}
-	if got := countTracksHelper(t, store); got != 1 {
-		t.Errorf("after clear: tracks = %d, want 1 (healthy must survive)", got)
+	if got := countTracksHelper(t, store); got != 2 {
+		t.Errorf("after clear: tracks = %d, want 2 (healthy + routed must survive)", got)
+	}
+	if tr, err := store.GetTrack(context.Background(), routedPath); err != nil || tr == nil {
+		t.Errorf("routed row was wiped by clear-missing (tr=%v, err=%v); the UPnP guard must spare it", tr, err)
+	}
+	if tr, _ := store.GetTrack(context.Background(), doomed); tr != nil {
+		t.Errorf("doomed filesystem row survived clear-missing; it should have been purged")
 	}
 }
 
