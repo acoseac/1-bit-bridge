@@ -131,9 +131,17 @@ func TestPoolFsyncSuccessReachesUpsert(t *testing.T) {
 		t.Fatalf("Enqueue: %v", err)
 	}
 
+	// Wait for BOTH the doneCnt bump AND the jobComplete callback —
+	// mirrors the failure-path sibling above (Failed && jobFailedFires).
+	// The callback fires asynchronously on the publisher goroutine AFTER
+	// doneCnt is incremented (pool.go: doneCnt.Add -> fireJobComplete ->
+	// publisher -> callback). Polling only Done and then asserting
+	// jobCompleteFires immediately raced the publisher — flaky under -race
+	// on a loaded CI runner (the loop broke on Done>=1 before the callback
+	// had fired).
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		if p.Stats().Done >= 1 {
+		if p.Stats().Done >= 1 && jobCompleteFires.Load() >= 1 {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
