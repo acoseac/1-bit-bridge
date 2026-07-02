@@ -24,7 +24,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -413,11 +412,12 @@ type artistCandidate struct {
 // --- matching ---
 
 func pickBestRelease(candidates []releaseCandidate, album, artist string) *releaseCandidate {
-	type scored struct {
-		r     *releaseCandidate
-		score int
-	}
-	var out []scored
+	// Hoist the query-side lowercasing out of the candidate loop — album
+	// and artist are fixed across every candidate.
+	albumLower := strings.ToLower(album)
+	artistLower := strings.ToLower(artist)
+	var best *releaseCandidate
+	bestScore := 0
 	for i := range candidates {
 		c := &candidates[i]
 		// Matches the >=80 contract in the SearchRelease docstring.
@@ -426,10 +426,10 @@ func pickBestRelease(candidates []releaseCandidate, album, artist string) *relea
 		if c.Score < 80 {
 			continue
 		}
-		if !caseInsensitiveMatch(c.Title, album) {
+		if !caseInsensitiveContains(c.Title, albumLower) {
 			continue
 		}
-		if !anyArtistMatches(c.ArtistCredit, artist) {
+		if !anyArtistMatchesLower(c.ArtistCredit, artistLower) {
 			continue
 		}
 		// Weight: MB score + exact-match bonuses.
@@ -440,13 +440,15 @@ func pickBestRelease(candidates []releaseCandidate, album, artist string) *relea
 		if len(c.ArtistCredit) > 0 && strings.EqualFold(c.ArtistCredit[0].Name, artist) {
 			s += 10
 		}
-		out = append(out, scored{r: c, score: s})
+		// Linear max-scan: keep the FIRST candidate that reaches the top
+		// score (strict `>` preserves the stable "first of equal score
+		// wins" tie-break the previous sort.SliceStable produced).
+		if best == nil || s > bestScore {
+			best = c
+			bestScore = s
+		}
 	}
-	if len(out) == 0 {
-		return nil
-	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].score > out[j].score })
-	return out[0].r
+	return best
 }
 
 func pickBestArtist(candidates []artistCandidate, artist string) *artistCandidate {
@@ -467,16 +469,22 @@ func pickBestArtist(candidates []artistCandidate, artist string) *artistCandidat
 	return nil
 }
 
-func caseInsensitiveMatch(a, b string) bool {
-	// Lowercase each operand once (4 ToLower allocations → 2).
-	la, lb := strings.ToLower(a), strings.ToLower(b)
-	return strings.Contains(la, lb) || strings.Contains(lb, la)
+// caseInsensitiveContains reports whether a and bLower overlap as
+// case-insensitive substrings (either direction). bLower MUST already be
+// lowercased by the caller (hoisted out of the candidate loop); only a —
+// which varies per candidate — is lowered here.
+func caseInsensitiveContains(a, bLower string) bool {
+	la := strings.ToLower(a)
+	return strings.Contains(la, bLower) || strings.Contains(bLower, la)
 }
 
-func anyArtistMatches(credits []artistCredit, artist string) bool {
-	al := strings.ToLower(artist)
+// anyArtistMatchesLower reports whether any credit name overlaps
+// artistLower (already lowercased by the caller) as a case-insensitive
+// substring, either direction.
+func anyArtistMatchesLower(credits []artistCredit, artistLower string) bool {
 	for _, c := range credits {
-		if strings.Contains(strings.ToLower(c.Name), al) || strings.Contains(al, strings.ToLower(c.Name)) {
+		lc := strings.ToLower(c.Name)
+		if strings.Contains(lc, artistLower) || strings.Contains(artistLower, lc) {
 			return true
 		}
 	}

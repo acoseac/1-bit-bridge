@@ -135,7 +135,7 @@ func (s *Store) ListHistory(ctx context.Context, deviceToken string, limit int, 
 		return nil, err
 	}
 	defer rows.Close()
-	var out []HistoryEventOut
+	out := make([]HistoryEventOut, 0, limit) // limit clamped to [1,1000] above
 	for rows.Next() {
 		var e HistoryEventOut
 		var dop int
@@ -211,7 +211,7 @@ func (s *Store) TopTracks(ctx context.Context, limit int) ([]HistoryBucket, erro
 		return nil, err
 	}
 	defer rows.Close()
-	var out []HistoryBucket
+	out := make([]HistoryBucket, 0, limit) // limit clamped to [1,100] above
 	for rows.Next() {
 		var b HistoryBucket
 		if err := rows.Scan(&b.Label, &b.Count); err != nil {
