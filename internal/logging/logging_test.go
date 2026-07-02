@@ -2,6 +2,7 @@ package logging
 
 import (
 	"bytes"
+	"encoding/json"
 	"log/slog"
 	"strings"
 	"sync"
@@ -93,6 +94,44 @@ func TestWithAttrsAndGroup(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in: %q", want, out)
 		}
+	}
+}
+
+// TestDynamicHandler_PreservesGroupAttrInterleaving pins slog's interleaving
+// contract through the dynamicHandler shim: an attr added BEFORE a group stays
+// at the root, one added AFTER nests inside. Uses a JSON handler so the nesting
+// is inspectable. The pre-fix shim replayed all-groups-then-all-attrs, which
+// pushed the root `component` (and any pre-group attr) inside the later group.
+func TestDynamicHandler_PreservesGroupAttrInterleaving(t *testing.T) {
+	resetOnce()
+	var buf bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+
+	// component (root) → attr "a" (root) → group "g" → attr "b" (inside g).
+	Component("scanner").With("a", 1).WithGroup("g").With("b", 2).Info("hi")
+
+	var m map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &m); err != nil {
+		t.Fatalf("parse %q: %v", buf.String(), err)
+	}
+	if m["component"] != "scanner" {
+		t.Errorf("component should be at root, got %v (full: %v)", m["component"], m)
+	}
+	if m["a"] != float64(1) {
+		t.Errorf("attr 'a' (added before the group) should be at root, got %v (full: %v)", m["a"], m)
+	}
+	g, ok := m["g"].(map[string]any)
+	if !ok {
+		t.Fatalf("group 'g' missing or not an object: %v", m)
+	}
+	if g["b"] != float64(2) {
+		t.Errorf("attr 'b' (added after the group) should nest inside 'g', got %v", g)
+	}
+	if _, leaked := g["component"]; leaked {
+		t.Errorf("component wrongly nested inside group 'g': %v", g)
+	}
+	if _, leaked := g["a"]; leaked {
+		t.Errorf("attr 'a' wrongly nested inside group 'g': %v", g)
 	}
 }
 

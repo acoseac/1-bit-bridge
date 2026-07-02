@@ -17,10 +17,9 @@ import (
 // caller's file fsync would already have failed if the path didn't
 // exist.
 func syncDir(filePath string) (err error) {
+	// filepath.Dir never returns "" — a bare filename yields ".", which os.Open
+	// handles natively — so no empty-string fallback is needed.
 	dir := filepath.Dir(filePath)
-	if dir == "" {
-		dir = "."
-	}
 	var d *os.File
 	d, err = os.Open(dir)
 	if err != nil {

@@ -125,10 +125,12 @@ func RenameWithRetry(src, dst string) error {
 // fails) so the caller can route on `errors.Is` / `os.IsNotExist`
 // as appropriate.
 func WriteBytes(path string, data []byte, tmpPrefix string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), tmpPrefix)
+	// Same directory as `path` so the rename is a same-filesystem atomic op.
+	tmp, err := os.CreateTemp(dir, tmpPrefix)
 	if err != nil {
 		return err
 	}
