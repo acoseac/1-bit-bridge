@@ -153,9 +153,10 @@ func NewPool(store *manifest.Store, workers, queueCap int, opts ...PoolOption) *
 
 // Enqueue submits a spec to the pool. Non-blocking; ErrQueueFull when
 // the channel is full, nil (silent no-op) on a duplicate, ErrPoolClosed
-// after Stop. The channel send runs inside p.mu and Stop closes the
-// channel under the same lock, so a send-on-closed-channel panic is
-// impossible.
+// after Stop. Both the jobs send and the state-change signal run under
+// p.mu; Stop acquires p.mu before closing the jobs channel and only
+// closes stateChangeChan afterward (post wg.Wait), so neither send can
+// race a close and panic.
 func (p *Pool) Enqueue(spec AnalyzeSpec) error {
 	if p.closed.Load() {
 		return ErrPoolClosed
@@ -174,8 +175,15 @@ func (p *Pool) Enqueue(spec AnalyzeSpec) error {
 	select {
 	case p.jobs <- poolJob{spec: spec, dedup: dedup}:
 		p.enqueuedCnt.Add(1)
-		p.mu.Unlock()
+		// fireStateChange BEFORE the unlock — mirrors internal/transcode
+		// Pool. Stop() closes stateChangeChan only after acquiring p.mu
+		// (to close jobs) + wg.Wait, so a send under the lock strictly
+		// happens-before the close; a post-unlock send could race Stop
+		// and panic on the closed channel. Enqueue is the only
+		// fireStateChange caller not bounded by wg.Wait (workers are).
+		// Non-blocking cap-1 send can't park under the lock.
 		p.fireStateChange()
+		p.mu.Unlock()
 		return nil
 	default:
 		delete(p.inflight, dedup)
