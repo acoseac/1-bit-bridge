@@ -42,6 +42,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"slices"
 	"sync"
 	"sync/atomic"
 )
@@ -86,14 +87,19 @@ func Init(w io.Writer) *slog.Logger {
 //	var logger = logging.Component("scanner")
 //	logger.Info("starting scan", "roots", len(roots))
 func Component(name string) *slog.Logger {
-	return slog.New(&dynamicHandler{}).With("component", name)
+	// Seed the component attr directly into the handler's op chain rather than
+	// slog.New(&dynamicHandler{}).With(...) — the latter allocates an
+	// intermediate logger and clones the handler just to add one attr.
+	return slog.New(&dynamicHandler{
+		ops: []handlerOp{{attrs: []slog.Attr{slog.String("component", name)}}},
+	})
 }
 
 // dynamicHandler resolves `slog.Default().Handler()` on every
-// Handle() / Enabled() call. WithAttrs and WithGroup remember the
-// caller's intent locally so chained derivations survive the
-// indirection — at Handle time we re-apply the saved
-// groups+attrs to the live default handler before forwarding.
+// Handle() / Enabled() call. WithAttrs and WithGroup record the
+// caller's intent locally (as an ordered op chain) so chained
+// derivations survive the indirection — at Handle time we replay the
+// saved ops, in order, onto the live default handler before forwarding.
 //
 // **Resolution caching**: the WithGroup/WithAttrs replay is the
 // expensive part — each step deep-clones the handler tree. Pre-fix,
@@ -120,21 +126,37 @@ func Component(name string) *slog.Logger {
 // Concurrency: cache is `atomic.Pointer[cachedResolution]` so reads
 // are lock-free. Two goroutines racing on a cold cache may both
 // rebuild and Store; both produce identical chains (pure function of
-// h.groups + h.attrs + the resolved handler) so the loser's wasted
-// work is one extra clone — same cost as the pre-fix per-call
-// allocation, applied just once instead of every line.
+// h.ops + the resolved handler) so the loser's wasted work is one
+// extra clone — same cost as the pre-fix per-call allocation, applied
+// just once instead of every line.
 //
 // **Enabled() stays uncached** — slog.Handler.Enabled is short-
 // circuit cheap on the level filter and doesn't deep-clone. Caching
 // it would burn complexity for no gain.
 type dynamicHandler struct {
-	groups []string    // ordered list of WithGroup names
-	attrs  []slog.Attr // accumulated WithAttrs additions
+	// ops is the WithGroup/WithAttrs derivation chain in CALL ORDER,
+	// replayed against the live default handler at Handle time. Order
+	// preserves slog's interleaving contract: an attr added BEFORE a
+	// group stays outside it, one added AFTER nests inside. The prior
+	// shape kept two flat slices (all groups, all attrs) and replayed
+	// groups-then-attrs, which silently pushed a root attr — e.g.
+	// Component's `component=…` — inside any later WithGroup.
+	ops []handlerOp
 
 	// cache stores the resolved handler chain keyed on the
 	// `*slog.Logger` `slog.Default()` returned when we built it.
 	// Lock-free reads; cache miss falls through to a rebuild + Store.
 	cache atomic.Pointer[cachedResolution]
+}
+
+// handlerOp is one step of a dynamicHandler's derivation chain: a WithGroup
+// when isGroup, otherwise a WithAttrs. Recording steps in a single ordered
+// slice (rather than separate group/attr slices) is what preserves slog's
+// group↔attr interleaving.
+type handlerOp struct {
+	isGroup bool
+	name    string      // group name when isGroup
+	attrs   []slog.Attr // attrs when !isGroup
 }
 
 // cachedResolution pairs a resolved handler chain with the
@@ -201,15 +223,16 @@ func (h *dynamicHandler) Handle(ctx context.Context, r slog.Record) error {
 		return c.resolved.Handle(ctx, r)
 	}
 	resolved := logger.Handler()
-	for _, g := range h.groups {
-		resolved = resolved.WithGroup(g)
-	}
-	if len(h.attrs) > 0 {
-		resolved = resolved.WithAttrs(h.attrs)
+	for _, op := range h.ops {
+		if op.isGroup {
+			resolved = resolved.WithGroup(op.name)
+		} else {
+			resolved = resolved.WithAttrs(op.attrs)
+		}
 	}
 	// Store a fresh resolution. Concurrent rebuilds race on Store;
 	// last-writer-wins is fine because every winner produces the
-	// same (h.groups + h.attrs + logger)-determined chain.
+	// same (h.ops + logger)-determined chain.
 	h.cache.Store(&cachedResolution{base: logger, resolved: resolved})
 	return resolved.Handle(ctx, r)
 }
@@ -218,26 +241,22 @@ func (h *dynamicHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	if len(attrs) == 0 {
 		return h
 	}
-	merged := make([]slog.Attr, 0, len(h.attrs)+len(attrs))
-	merged = append(merged, h.attrs...)
-	merged = append(merged, attrs...)
-	// h.groups is read-only — WithGroup clones it before appending and
-	// WithAttrs never touches it — so share the header directly instead
-	// of allocating a throwaway clone here. Gemini r4.
-	return &dynamicHandler{groups: h.groups, attrs: merged}
+	return &dynamicHandler{ops: h.appendOp(handlerOp{attrs: slices.Clone(attrs)})}
 }
 
 func (h *dynamicHandler) WithGroup(name string) slog.Handler {
 	if name == "" {
 		return h
 	}
-	// Build groups in a single allocation: slices.Clone + append would
-	// double-allocate (Clone gives cap==len, so the append reallocs).
-	// Pre-size to len+1 and copy once. Never mutates the parent's backing
-	// array; h.attrs is read-only (WithAttrs always builds a fresh
-	// slice), so share its header directly. Gemini r4 (round 1).
-	groups := make([]string, 0, len(h.groups)+1)
-	groups = append(groups, h.groups...)
-	groups = append(groups, name)
-	return &dynamicHandler{groups: groups, attrs: h.attrs}
+	return &dynamicHandler{ops: h.appendOp(handlerOp{isGroup: true, name: name})}
+}
+
+// appendOp returns h.ops with op appended, in a single fresh allocation. It
+// never mutates the parent's backing array (sized len+1, copied once), so
+// derived handlers can share the parent's ops prefix safely.
+func (h *dynamicHandler) appendOp(op handlerOp) []handlerOp {
+	ops := make([]handlerOp, len(h.ops)+1)
+	copy(ops, h.ops)
+	ops[len(h.ops)] = op
+	return ops
 }
