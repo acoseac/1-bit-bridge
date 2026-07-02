@@ -43,10 +43,13 @@ func SanitizeCoverKey(s string) string {
 		return "_"
 	}
 	// Fast path: a key that's already clean (the common case) is returned
-	// verbatim, skipping the strings.Builder allocation entirely.
+	// verbatim, skipping the strings.Builder allocation entirely. Scanned
+	// byte-wise — every allowed char is ASCII, so a non-ASCII byte is
+	// never clean, and this avoids the UTF-8 decode that `range s` does.
 	clean := true
-	for _, r := range s {
-		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '_' || r == '-') {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '.' || c == '_' || c == '-') {
 			clean = false
 			break
 		}
