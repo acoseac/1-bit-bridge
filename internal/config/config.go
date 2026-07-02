@@ -1294,12 +1294,15 @@ type BackupConfig struct {
 	IntervalHours *int `yaml:"intervalHours,omitempty"`
 
 	// Keep is the maximum number of snapshots to retain after a
-	// rotation. Older snapshots beyond this count are deleted on
-	// each periodic snapshot. Zero or negative disables pruning;
-	// the operator manages backup-disk usage by hand in that case.
-	// Defaults to DefaultBackupKeep when the entire backup section
-	// is omitted; an operator who wants no pruning sets `keep: -1`
-	// (a negative value won't trip Validate).
+	// rotation. Older snapshots beyond this count are deleted on each
+	// periodic snapshot. A NEGATIVE value (e.g. `keep: -1`) disables
+	// pruning — the operator manages backup-disk usage by hand in that
+	// case (a negative value won't trip Validate).
+	//
+	// Zero or an omitted `backup` section BOTH fall back to
+	// DefaultBackupKeep: `keep,omitempty` can't distinguish "absent" from
+	// "explicit 0", and EffectiveKeep() maps zero to the default. So
+	// `keep: 0` does NOT disable pruning — use `keep: -1` for that.
 	Keep int `yaml:"keep,omitempty"`
 }
 

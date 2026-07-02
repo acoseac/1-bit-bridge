@@ -45,10 +45,10 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math/big"
 	"slices"
 	"sync"
 	"time"
@@ -896,16 +896,15 @@ func randomHex(nBytes int) (string, error) {
 // formatted with leading zeros so "004123" survives string round-trips
 // (vs "4123" if stored as int and re-formatted).
 //
-// The mod-1_000_000 introduces a vanishingly small modulo bias (2^32 is
-// not divisible by 10^6) — for a verification code the bias is
-// inconsequential against the threat (admin reads it off the iPhone
-// before approving; an attacker who can guess the code still has to
-// pass the pollSecret bearer check on the poll endpoint).
+// rand.Int draws uniformly from [0, 1_000_000) with no modulo bias
+// (rejection-sampled inside crypto/rand). The real security margin is the
+// pollSecret bearer check on the poll endpoint plus the admin reading the
+// code off the iPhone before approving; the uniform draw just keeps the
+// distribution clean and off static-analysis radar.
 func randomVerificationCode() (string, error) {
-	var buf [4]byte
-	if _, err := rand.Read(buf[:]); err != nil {
+	n, err := rand.Int(rand.Reader, big.NewInt(1_000_000))
+	if err != nil {
 		return "", err
 	}
-	n := binary.BigEndian.Uint32(buf[:]) % 1_000_000
-	return fmt.Sprintf("%06d", n), nil
+	return fmt.Sprintf("%06d", n.Int64()), nil
 }
