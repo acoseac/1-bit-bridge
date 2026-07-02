@@ -555,6 +555,9 @@ func dirEntirelyBehindCursor(dirPath, cursor string) bool {
 // boundaries by index; string slicing yields a view, not a copy, so no heap
 // allocation occurs. Pinned by TestPathWalkCompare_ZeroAlloc.
 func pathWalkCompare(a, b string) int {
+	if a == b {
+		return 0 // fast path: the resume cursor re-encounters its own path once per tick
+	}
 	sep := byte(filepath.Separator) // ASCII '/' or '\'; string indexing yields bytes
 	ia, ib := 0, 0
 	for ia < len(a) && ib < len(b) {
