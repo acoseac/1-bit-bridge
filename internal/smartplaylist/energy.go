@@ -167,12 +167,17 @@ func fnv1a64(a, b uint64) uint64 {
 		offset uint64 = 14695981039346656037
 		prime  uint64 = 1099511628211
 	)
+	// Unrolled over a then b (no array, no outer loop) so the compiler can't
+	// leave any allocation on the table (Gemini round-3). Pinned by
+	// TestFnv1a64_ZeroAllocMatchesReference.
 	hash := offset
-	for _, v := range [2]uint64{a, b} {
-		for s := 56; s >= 0; s -= 8 {
-			hash ^= (v >> s) & 0xff
-			hash *= prime
-		}
+	for s := 56; s >= 0; s -= 8 {
+		hash ^= (a >> s) & 0xff
+		hash *= prime
+	}
+	for s := 56; s >= 0; s -= 8 {
+		hash ^= (b >> s) & 0xff
+		hash *= prime
 	}
 	return hash
 }
