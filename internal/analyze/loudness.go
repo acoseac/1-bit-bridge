@@ -122,6 +122,14 @@ func (m *loudnessMeter) addFrame(frame []float64) {
 		if ch < len(frame) {
 			x = frame[ch]
 		}
+		// A NaN sample (corrupt decode) permanently poisons the biquad
+		// filter state and the rolling sumSq accumulator — NaN propagates
+		// through the filter feedback so every later sample evaluates to
+		// NaN and the track's integrated LUFS comes out NaN. Treat it as
+		// silence, mirroring peaker.add (Gemini #395).
+		if math.IsNaN(x) {
+			x = 0
+		}
 		f := m.stage2[ch].process(m.stage1[ch].process(x))
 		sq := f * f
 		m.sumSq[ch] += sq - m.ringSq[ch][m.pos]
