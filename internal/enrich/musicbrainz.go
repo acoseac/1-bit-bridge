@@ -474,9 +474,10 @@ func pickBestArtist(candidates []artistCandidate, artist string) *artistCandidat
 // lowercased by the caller (hoisted out of the candidate loop); only a —
 // which varies per candidate — is lowered here.
 func caseInsensitiveContains(a, bLower string) bool {
-	if a == "" {
-		// An empty title must not fuzzy-match a real album: strings.Contains
-		// with an empty needle is trivially true, which would over-match.
+	if a == "" || bLower == "" {
+		// Neither side may be empty: strings.Contains with an empty needle is
+		// trivially true, which would over-match. In practice bLower is the
+		// always-non-empty album query, but guard both sides for future callers.
 		return false
 	}
 	if strings.EqualFold(a, bLower) {
