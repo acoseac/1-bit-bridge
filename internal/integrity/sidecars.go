@@ -367,10 +367,13 @@ func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 		if !shouldConsiderSidecarFile(path) {
 			return nil
 		}
-		// Skip past the cursor: only process entries whose lexical
-		// order is STRICTLY GREATER than the prior tick's last
-		// processed path. Empty cursor = start of tree.
-		if walkStartCursor != "" && path <= walkStartCursor {
+		// Skip past the cursor: only process entries whose WALK order
+		// is STRICTLY AFTER the prior tick's last processed path. Empty
+		// cursor = start of tree. Uses pathWalkCompare (NOT a raw string
+		// compare) so a sibling like "A-Bonus/x.flac" — which WalkDir
+		// visits AFTER "A/…" but which sorts BEFORE it as a raw string
+		// (`-` < `/`) — isn't wrongly skipped.
+		if walkStartCursor != "" && pathWalkCompare(path, walkStartCursor) <= 0 {
 			return nil
 		}
 
@@ -488,39 +491,103 @@ func shouldConsiderSidecarFile(path string) bool {
 }
 
 // dirEntirelyBehindCursor reports whether the directory `dirPath` — and
-// therefore its entire subtree — is lexically behind `cursor` and can be
+// therefore its entire subtree — has been fully walked already (it sorts
+// entirely BEFORE `cursor` in filepath.WalkDir traversal order) and can be
 // pruned with filepath.SkipDir during a chunk-resumed walk. `cursor` is the
 // last path processed by the prior tick (empty on a fresh, from-the-top pass).
 //
-// Skip iff the directory's NAMESPACE (`dirPath` + separator) is strictly less
-// than the cursor AND the directory is not an ancestor of the cursor:
+// Prune iff `dirPath` is NOT an ancestor of the cursor AND it sorts before the
+// cursor in WALK order (via pathWalkCompare, NOT a raw string compare):
 //
-//   - Comparing `dirPath + sep` (not the bare `dirPath`) is load-bearing. The
-//     separator '/'(0x2F) and '\'(0x5C) both sort AFTER '.'(0x2E), so a bare
-//     compare would rank "A/B" < "A/B.flac" and wrongly skip the "A/B/"
-//     subtree when the cursor is the sibling FILE "A/B.flac" — missing the
-//     still-unprocessed "A/B/02.flac" (sorts after the cursor). Appending the
-//     separator compares "A/B/" vs "A/B.flac" → "A/B/" > "A/B.flac" → no skip.
-//   - The HasPrefix guard keeps an ANCESTOR of the cursor (e.g. dir "A/B",
-//     cursor "A/B/c.flac") descended so the walk can reach the resume point.
-//   - An empty cursor (fresh pass) never skips. The root output dir is always
-//     an ancestor of any in-tree cursor, so it's never pruned.
+//   - A subtree is contiguous in walk order and — when it doesn't contain the
+//     cursor — lies entirely on one side of it. `pathWalkCompare(dir, cursor)
+//     < 0` means the whole subtree precedes the cursor → already swept → prune.
+//   - The ancestor guard keeps a parent of the cursor (e.g. dir "A/B", cursor
+//     "A/B/c.flac") descended so the walk can reach the resume point. It ALSO
+//     covers the walk root (always an ancestor of an in-tree cursor) and is
+//     what makes the raw-string compare unnecessary for the trailing-slash /
+//     volume-root cases the prior implementation special-cased.
+//   - An empty cursor (fresh pass) never skips.
 //
-// Predicate confirmed via Gemini consult (2026-06-13); native separators
-// throughout, matching the rest of the sweep's path comparisons.
+// **Why walk order, not raw string order** (external review bridge02-04, Gemini
+// consult ×2): filepath.WalkDir reads each dir's entries sorted by BASE name
+// and visits a dir before its children, so "A/…" is fully walked before sibling
+// "A-Bonus/…" (base names "A" < "A-Bonus"). But the separator sorts AFTER '-',
+// ' ', '.', '&', "'", … so "A-Bonus/…" < "A/…" as a RAW string — the prior
+// `withSep < cursor` compare therefore wrongly pruned the still-unwalked
+// "A-Bonus" subtree. pathWalkCompare compares segment-by-segment and matches
+// WalkDir order exactly.
 func dirEntirelyBehindCursor(dirPath, cursor string) bool {
 	if cursor == "" {
 		return false
 	}
-	// Append the separator to compare the directory's NAMESPACE — UNLESS
-	// dirPath already ends with one. A filesystem/volume root ("/", "C:\")
-	// or a trailing-slash outputDir would otherwise become "//" / "C:\\",
-	// which no in-tree cursor is a prefix of, so the walk root itself would
-	// be wrongly SkipDir'd and the entire sweep would halt. (Gemini HIGH, r3)
 	sep := string(filepath.Separator)
-	withSep := dirPath
-	if !strings.HasSuffix(withSep, sep) {
-		withSep += sep
+	// Trim a trailing separator (volume/filesystem root "/", "C:\", or a
+	// trailing-slash outputDir) so the ancestor prefix below can't build a
+	// double separator that no in-tree cursor matches — which would wrongly
+	// prune the walk root and halt the whole sweep.
+	trimmed := strings.TrimSuffix(dirPath, sep)
+	// Keep an ancestor of the cursor (incl. the walk root) descended so the
+	// walk can reach the resume point.
+	if cursor == trimmed || strings.HasPrefix(cursor, trimmed+sep) {
+		return false
 	}
-	return withSep < cursor && !strings.HasPrefix(cursor, withSep)
+	// Not an ancestor → the whole subtree is on one side of the cursor. Prune
+	// iff it precedes the cursor in walk order.
+	return pathWalkCompare(trimmed, cursor) < 0
+}
+
+// pathWalkCompare compares two clean filesystem paths in filepath.WalkDir
+// traversal order and returns -1, 0, or +1. The comparison is segment-by-
+// segment (splitting on the OS separator), with a shorter path — an ancestor —
+// ordering BEFORE a longer path that extends it (WalkDir visits a directory
+// node before its children).
+//
+// **Why not a raw string compare**: WalkDir orders siblings by BASE name, so
+// "A-Bonus/x.flac" is visited AFTER everything under "A/", yet the raw strings
+// sort "A-Bonus/…" < "A/…" because the separator ('/' 0x2F, '\' 0x5C) sorts
+// AFTER '-'(0x2D), ' '(0x20), '.'(0x2E), '&'(0x26), "'"(0x27), … — all common
+// in music directory names. Segment comparison sidesteps that collation trap.
+//
+// **Zero-alloc** (Gemini review on bridge02-04): the function runs on every walk
+// entry until the resume cursor clears, so on a 50k–100k-sidecar library a
+// `strings.Split`-per-call form would be real GC pressure. This scans segment
+// boundaries by index; string slicing yields a view, not a copy, so no heap
+// allocation occurs. Pinned by TestPathWalkCompare_ZeroAlloc.
+func pathWalkCompare(a, b string) int {
+	sep := byte(filepath.Separator) // ASCII '/' or '\'; string indexing yields bytes
+	ia, ib := 0, 0
+	for ia < len(a) && ib < len(b) {
+		ea := ia
+		for ea < len(a) && a[ea] != sep {
+			ea++
+		}
+		eb := ib
+		for eb < len(b) && b[eb] != sep {
+			eb++
+		}
+		if segA, segB := a[ia:ea], b[ib:eb]; segA != segB {
+			if segA < segB {
+				return -1
+			}
+			return 1
+		}
+		// Advance past the evaluated segment and its trailing separator.
+		ia = ea
+		if ia < len(a) {
+			ia++
+		}
+		ib = eb
+		if ib < len(b) {
+			ib++
+		}
+	}
+	switch {
+	case ia < len(a):
+		return 1
+	case ib < len(b):
+		return -1
+	default:
+		return 0
+	}
 }
