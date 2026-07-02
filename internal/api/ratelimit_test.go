@@ -190,6 +190,33 @@ func TestRateLimitManifestMiddleware_429WithRetryAfter(t *testing.T) {
 	}
 }
 
+// TestRateLimitManifestMiddleware_RetryAfterRoundsUp pins the math.Ceil
+// fix: at 40 rpm / burst 1 the bucket yields one token per 1.5s, so the
+// second back-to-back request's reservation delay is ~1.5s. The old
+// int() truncation advertised Retry-After=1 — a compliant client that
+// slept 1s would wake before the token refilled and get another 429.
+// Rounding up advertises >= 2 so the sleep actually clears the bucket.
+func TestRateLimitManifestMiddleware_RetryAfterRoundsUp(t *testing.T) {
+	srv, raw, _ := newRateLimitedTestServer(t, 40, 1)
+	defer srv.Close()
+
+	resp := manifestRequest(t, srv, raw) // consumes the single burst token
+	resp.Body.Close()
+
+	resp = manifestRequest(t, srv, raw) // deferred ~1.5s → 429
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("second call status = %d, want 429", resp.StatusCode)
+	}
+	n, err := strconv.Atoi(resp.Header.Get("Retry-After"))
+	if err != nil {
+		t.Fatalf("Retry-After = %q, want integer seconds", resp.Header.Get("Retry-After"))
+	}
+	if n < 2 {
+		t.Errorf("Retry-After = %d, want >= 2 (ceil of ~1.5s); a truncated 1 wakes the client too early", n)
+	}
+}
+
 // TestRateLimitManifestMiddleware_PerClientIsolation: tokens A and B
 // share the bridge — burning A's burst MUST NOT block B.
 func TestRateLimitManifestMiddleware_PerClientIsolation(t *testing.T) {

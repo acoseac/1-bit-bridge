@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"math"
 	"net/http"
 	"strconv"
 	"sync"
@@ -248,7 +249,13 @@ func (s *Server) rateLimitManifest(next http.HandlerFunc) http.HandlerFunc {
 			// counts as a consumed token and the recovery window
 			// stretches out further than the limit advertises.
 			res.Cancel()
-			retry := int(delay.Seconds())
+			// math.Ceil, not a bare int() truncation: a 1.9s delay
+			// truncated to 1 advertises a 1s Retry-After, so a compliant
+			// client sleeps 1s, wakes before the bucket has a token, and
+			// gets another 429. Round up so the advertised window actually
+			// clears the reservation. The <1 floor still guards a sub-1s
+			// delay from advertising 0 (immediate hammer).
+			retry := int(math.Ceil(delay.Seconds()))
 			if retry < 1 {
 				retry = 1
 			}
