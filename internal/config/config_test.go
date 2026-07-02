@@ -645,6 +645,24 @@ func TestBackupIntervalHoursExplicitZeroDisables(t *testing.T) {
 	}
 }
 
+// TestEffectiveKeepZeroVsNegative pins the documented contract (bridge02-03
+// review, finding D): `keep: 0` (and an omitted section, which omitempty
+// makes indistinguishable) fall back to DefaultBackupKeep — zero does NOT
+// disable pruning. A negative value passes through verbatim; backup.Prune
+// treats keep <= 0 as "retain everything", so `keep: -1` is the disable
+// sentinel.
+func TestEffectiveKeepZeroVsNegative(t *testing.T) {
+	if got := (BackupConfig{Keep: 0}).EffectiveKeep(); got != DefaultBackupKeep {
+		t.Errorf("keep=0: EffectiveKeep=%d, want DefaultBackupKeep=%d (zero does not disable)", got, DefaultBackupKeep)
+	}
+	if got := (BackupConfig{Keep: -1}).EffectiveKeep(); got != -1 {
+		t.Errorf("keep=-1: EffectiveKeep=%d, want -1 (disable sentinel passed through to Prune)", got)
+	}
+	if got := (BackupConfig{Keep: 5}).EffectiveKeep(); got != 5 {
+		t.Errorf("keep=5: EffectiveKeep=%d, want 5", got)
+	}
+}
+
 func TestBackupIntervalHoursPositiveOverrides(t *testing.T) {
 	libRoot := t.TempDir()
 	cfgPath := filepath.Join(t.TempDir(), "bridge.yaml")
