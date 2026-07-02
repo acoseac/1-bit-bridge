@@ -106,8 +106,6 @@ type eventBroker struct {
 	startOnce sync.Once // guards Start() against duplicate goroutine spawn
 
 	nextID atomic.Int64
-
-	now func() time.Time
 }
 
 func newEventBroker() *eventBroker {
@@ -117,7 +115,6 @@ func newEventBroker() *eventBroker {
 		stopCh:         make(chan struct{}),
 		doneCh:         make(chan struct{}),
 		replayCapacity: 100,
-		now:            time.Now,
 	}
 }
 

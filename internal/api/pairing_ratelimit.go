@@ -130,7 +130,13 @@ func (p *pairingRateLimiter) evictOldestLocked() {
 	var oldestSeen time.Time
 	first := true
 	for ip, e := range p.limiters {
-		if first || e.lastSeen.Before(oldestSeen) {
+		// Tie-break equal lastSeen on the IP string so eviction is
+		// deterministic — Go's map iteration order is randomized, so
+		// without this two entries stamped in the same instant would
+		// evict arbitrarily (harmless in production, but flaky under
+		// frozen-clock tests).
+		if first || e.lastSeen.Before(oldestSeen) ||
+			(e.lastSeen.Equal(oldestSeen) && ip < oldestIP) {
 			oldestIP = ip
 			oldestSeen = e.lastSeen
 			first = false

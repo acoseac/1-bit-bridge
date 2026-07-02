@@ -180,6 +180,51 @@ func TestPairingRateLimiter_BoundedMapEvictsByOldestLastSeen(t *testing.T) {
 	}
 }
 
+// TestPairingRateLimiter_EvictOldestTieBreaksByIP pins the deterministic
+// tie-break: when several entries share the exact same lastSeen (same
+// instant under a frozen clock), evictOldestLocked drops the
+// lexicographically-smallest IP instead of an arbitrary one picked by
+// Go's randomized map iteration.
+func TestPairingRateLimiter_EvictOldestTieBreaksByIP(t *testing.T) {
+	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	rl := &pairingRateLimiter{
+		limiters:   make(map[string]*rateEntry),
+		burst:      pairingRateBurst,
+		limit:      rate.Every(pairingRateRefillInterval),
+		maxAge:     pairingRateGCMaxAge,
+		maxEntries: pairingRateMaxEntries,
+		now:        func() time.Time { return now }, // frozen — every entry shares lastSeen
+	}
+
+	// Insert out of lexical order; all get the same (frozen) lastSeen.
+	for _, ip := range []string{"10.0.0.9", "10.0.0.1", "10.0.0.5"} {
+		rl.allow(ip)
+	}
+	for ip, e := range rl.limiters {
+		if !e.lastSeen.Equal(now) {
+			t.Fatalf("%s lastSeen = %v, want frozen %v (setup precondition)", ip, e.lastSeen, now)
+		}
+	}
+
+	// evictOldestLocked documents "caller MUST hold p.mu" — honor the
+	// contract even though this single-goroutine test wouldn't race.
+	rl.mu.Lock()
+	rl.evictOldestLocked()
+	rl.mu.Unlock()
+
+	if _, ok := rl.limiters["10.0.0.1"]; ok {
+		t.Error("10.0.0.1 (lex-smallest among tied lastSeen) should have been evicted")
+	}
+	if got := len(rl.limiters); got != 2 {
+		t.Fatalf("want 2 entries after eviction, got %d", got)
+	}
+	for _, ip := range []string{"10.0.0.5", "10.0.0.9"} {
+		if _, ok := rl.limiters[ip]; !ok {
+			t.Errorf("%s should survive (larger IP, tied lastSeen)", ip)
+		}
+	}
+}
+
 // TestPairingRateLimiter_ConcurrentAllowsAreSafe: the limiter is
 // shared across goroutines (each HTTP request runs in its own
 // goroutine). Hammering it from many goroutines must not race or

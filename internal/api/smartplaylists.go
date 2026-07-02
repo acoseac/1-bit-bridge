@@ -128,7 +128,7 @@ func buildSmartPlaylistDTO(row manifest.StoredSmartPlaylist, nowUTCHour, localHo
 		_ = json.Unmarshal(row.EnergyJSON, &dto.Energy)
 	}
 
-	if row.Kind == string(timeOfDayKind) {
+	if row.Kind == timeOfDayKind {
 		var blob manifest.SmartPlaylistHourlyBlob
 		if err := json.Unmarshal(row.ItemsJSON, &blob); err != nil {
 			return smartPlaylistDTO{}, false
