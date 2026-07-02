@@ -378,11 +378,13 @@ func (p *Pool) Enqueue(spec JobSpec) error {
 	// order made `fire()` run BEFORE the unlock, deadlocking when
 	// the wired callback called UpscaleStatsSnapshot which takes
 	// p.mu.Lock() inside Stats(). CodeRabbit + Gemini caught this
-	// at critical severity. Now: explicit unlock per branch, then
-	// fireStateChange() — the publisher consumes the signal
-	// asynchronously on its own goroutine, so the wired broker
-	// callback (with its own mutex) can't cross-mutex couple with
-	// p.mu via the publish path.
+	// at critical severity. Since then fire() became fireStateChange()
+	// — a non-blocking send to the async publisher goroutine, NOT a
+	// synchronous callback — so the success branch below now sends the
+	// signal UNDER the lock (before Unlock) to close the Enqueue-vs-Stop
+	// shutdown race (see the inline note there). The publisher invokes
+	// the wired broker callback on its own goroutine, so it still can't
+	// cross-mutex couple with p.mu via the publish path.
 	p.mu.Lock()
 	if p.closed.Load() {
 		p.mu.Unlock()
@@ -409,11 +411,18 @@ func (p *Pool) Enqueue(spec JobSpec) error {
 	select {
 	case jobsChan <- poolJob{spec: spec, dedup: dedup}:
 		p.enqueuedCnt.Add(1)
-		p.mu.Unlock()
-		// Non-blocking send to the publisher; safe to invoke after
-		// unlock OR (in principle) under the lock since the send
-		// can't park. Kept after unlock to minimise lock window.
+		// fireStateChange BEFORE the unlock. Stop() must hold p.mu to
+		// close the jobs channels and only closes stateChangeChan
+		// afterward (post wg.Wait), so this non-blocking send strictly
+		// happens-before that close. Sending AFTER the unlock let a
+		// preempted goroutine race Stop's close(stateChangeChan) and
+		// panic on the closed channel (send-on-closed panics even inside
+		// a select/default). Enqueue is the only fireStateChange caller
+		// not bounded by wg.Wait — workers are. Safe under the lock: the
+		// cap-1 select/default send can't park, and the async publisher
+		// never re-enters p.mu (unlike the PR #136 synchronous callback).
 		p.fireStateChange()
+		p.mu.Unlock()
 		return nil
 	default:
 		// Roll back the optimistic claim — couldn't fit the job
