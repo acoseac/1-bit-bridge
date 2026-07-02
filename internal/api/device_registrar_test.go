@@ -176,3 +176,64 @@ func TestTouchDeviceConcurrentRebindNotSkipped(t *testing.T) {
 		t.Fatalf("concurrent rebind: want 2 upserts (both tokens), got %d", got)
 	}
 }
+
+// TestTouchDeviceClearsInflightAfterUpsertPanic pins the panic-safe
+// cleanup: if UpsertDeviceRegistration panics (SQL driver / ctx panic),
+// the deferred delete MUST still release the in-flight reservation during
+// unwind — otherwise the (device,token) key stays wedged in deviceInflight
+// for the process lifetime and every future registration for it is
+// silently dropped by the inflight guard. Runs clean under -race (the
+// deferred cleanup re-acquires the mutex).
+func TestTouchDeviceClearsInflightAfterUpsertPanic(t *testing.T) {
+	var mu sync.Mutex
+	invocations := 0
+	panicNext := true
+	fr := &fakeRegistrar{hook: func(_, _ string) {
+		mu.Lock()
+		invocations++
+		shouldPanic := panicNext
+		panicNext = false
+		mu.Unlock()
+		if shouldPanic {
+			panic("simulated SQL driver panic")
+		}
+	}}
+	cfg := &config.Config{LibraryRoots: []string{t.TempDir()}, ListenAddress: ":7788", LibraryName: "T"}
+	s := New(cfg, nil, nil, "fp").WithDeviceRegistrar(fr)
+	ctx := context.Background()
+
+	// First call panics inside the upsert. In production the http
+	// recoverer middleware catches this; emulate that here so we can
+	// assert the aftermath. touchDevice's deferred cleanup runs during
+	// the unwind, before the panic reaches this recover.
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("expected touchDevice to propagate the upsert panic")
+			}
+		}()
+		s.touchDevice(ctx, "dev1", "tok-a")
+	}()
+
+	// Same (device,token) again: the registrar MUST be reached a second
+	// time, proving the in-flight slot was released on the panic path.
+	// Pre-fix (delete not deferred) this call short-circuits on the
+	// wedged inflight key and never invokes the registrar.
+	s.touchDevice(ctx, "dev1", "tok-a")
+
+	mu.Lock()
+	got := invocations
+	mu.Unlock()
+	if got != 2 {
+		t.Fatalf("registrar invocations = %d, want 2 (panic + retry); inflight key likely wedged", got)
+	}
+
+	// The successful retry cached the debounce entry, so a third call is a no-op.
+	s.touchDevice(ctx, "dev1", "tok-a")
+	mu.Lock()
+	got = invocations
+	mu.Unlock()
+	if got != 2 {
+		t.Fatalf("after success want debounce (invocations still 2), got %d", got)
+	}
+}
