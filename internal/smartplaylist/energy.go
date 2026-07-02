@@ -151,9 +151,9 @@ func variance(xs []float64) float64 {
 // derived from (seed, index), keeping values in [0,1].
 func applySeededNoise(env []float64, seed uint64) {
 	h := fnv.New64a() // hoisted; Reset() per index avoids a hasher alloc per bar
+	var buf [16]byte  // hoisted too — h.Write(buf[:]) can escape buf to the heap per iter
 	for i := range env {
 		h.Reset()
-		var buf [16]byte
 		putUint64(buf[0:8], seed)
 		putUint64(buf[8:16], uint64(i))
 		_, _ = h.Write(buf[:])

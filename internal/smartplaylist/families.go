@@ -19,8 +19,10 @@ func pathsOf(stats []PlayStat) []string {
 // itemsFromPaths hydrates paths into items via the feature map, dropping
 // paths that no longer resolve (a since-deleted track), capped at maxItems.
 func itemsFromPaths(paths []string, features map[string]TrackFeature, maxItems int) []Item {
-	// Pre-size to the known upper bound; max(_, 0) guards a defensive negative cap.
-	items := make([]Item, 0, min(len(paths), max(maxItems, 0)))
+	if maxItems <= 0 {
+		return nil
+	}
+	items := make([]Item, 0, min(len(paths), maxItems))
 	for _, p := range paths {
 		f, ok := features[p]
 		if !ok {
@@ -35,7 +37,10 @@ func itemsFromPaths(paths []string, features map[string]TrackFeature, maxItems i
 }
 
 func itemsFromFeatures(feats []TrackFeature, maxItems int) []Item {
-	items := make([]Item, 0, min(len(feats), max(maxItems, 0)))
+	if maxItems <= 0 {
+		return nil
+	}
+	items := make([]Item, 0, min(len(feats), maxItems))
 	for _, f := range feats {
 		items = append(items, Item{Position: len(items), Path: f.Path, Title: f.Title, Artist: f.Artist})
 		if len(items) >= maxItems {
@@ -324,8 +329,8 @@ func buildFinishLine(in Inputs, opts Options) (GeneratedPlaylist, bool) {
 	// Candidate pool: recent then heavy favourites with a known duration,
 	// deduped, order-preserving. Iterate both PlayStat slices in place rather
 	// than allocating throwaway path slices (pathsOf ×2 + the append copy).
-	seen := map[string]bool{}
-	var feats []TrackFeature
+	seen := make(map[string]bool, len(in.Recent)+len(in.HeavyRotation))
+	feats := make([]TrackFeature, 0, len(in.Recent)+len(in.HeavyRotation))
 	addStats := func(stats []PlayStat) {
 		for _, s := range stats {
 			p := s.Path
