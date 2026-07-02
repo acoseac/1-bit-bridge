@@ -834,8 +834,11 @@ func skipID3v2(r io.ReadSeeker) error {
 	// 28-bit synchsafe size (7 bits/byte), excludes the 10-byte header.
 	size := int64(h[6]&0x7f)<<21 | int64(h[7]&0x7f)<<14 | int64(h[8]&0x7f)<<7 | int64(h[9]&0x7f)
 	skip := start + 10 + size
-	if h[5]&0x10 != 0 {
-		skip += 10 // optional ID3v2 footer (ID3v2.4)
+	// The footer flag (bit 4) is only defined in ID3v2.4 — in v2.2/v2.3
+	// that bit is unused, so a non-conforming tagger setting it must not
+	// make us over-skip into the payload. Gate on the major version.
+	if h[3] >= 4 && h[5]&0x10 != 0 {
+		skip += 10 // optional ID3v2.4 footer
 	}
 	_, err = r.Seek(skip, io.SeekStart)
 	return err

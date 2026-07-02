@@ -1,12 +1,61 @@
 package manifest
 
 import (
+	"bytes"
 	"encoding/binary"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
+
+// TestSkipID3v2 pins the offset math of the ID3v2-skip helper, including
+// the ID3v2.4-only footer gate: a non-conforming v2.2/v2.3 tag with the
+// footer bit set must NOT make us over-skip into the payload.
+func TestSkipID3v2(t *testing.T) {
+	id3Header := func(major, flags byte, payloadSize int) []byte {
+		h := make([]byte, 10)
+		copy(h[0:3], "ID3")
+		h[3] = major
+		h[5] = flags
+		n := uint32(payloadSize)
+		h[6] = byte((n >> 21) & 0x7f)
+		h[7] = byte((n >> 14) & 0x7f)
+		h[8] = byte((n >> 7) & 0x7f)
+		h[9] = byte(n & 0x7f)
+		return h
+	}
+	const payloadSize = 20
+	tag := func(major, flags byte) []byte {
+		return append(id3Header(major, flags, payloadSize), bytes.Repeat([]byte{0x11}, payloadSize)...)
+	}
+	marker := []byte("fLaC and the rest of the stream")
+
+	cases := []struct {
+		name    string
+		data    []byte
+		wantPos int64
+	}{
+		{"no id3 rewinds to start", append([]byte("fLaC"), marker...), 0},
+		{"v2.3 no footer", append(tag(3, 0x00), marker...), 10 + payloadSize},
+		{"v2.3 footer-bit-set is ignored", append(tag(3, 0x10), marker...), 10 + payloadSize},
+		{"v2.4 footer skips extra 10", append(tag(4, 0x10), marker...), 10 + payloadSize + 10},
+		{"too short rewinds to start", []byte("ID3"), 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := bytes.NewReader(tc.data)
+			if err := skipID3v2(r); err != nil {
+				t.Fatalf("skipID3v2: %v", err)
+			}
+			pos, _ := r.Seek(0, io.SeekCurrent)
+			if pos != tc.wantPos {
+				t.Errorf("cursor at %d, want %d", pos, tc.wantPos)
+			}
+		})
+	}
+}
 
 // TestExtCoversDispatcher pins the F1 invariant: every extension the
 // format dispatcher (extractByFormat) routes to a dedicated parser must
