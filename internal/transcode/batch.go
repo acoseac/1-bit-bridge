@@ -22,7 +22,6 @@ package transcode
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -892,8 +891,13 @@ func (c *Coordinator) transitionStatus(batchID uuid.UUID, status, errMsg string,
 	c.mu.Lock()
 	state, ok := c.liveBatches[batchID]
 	if !ok {
+		// Not live: already terminal, already cancelled, OR never
+		// existed. Cancel is an idempotent no-op for all three — we don't
+		// distinguish "unknown batch" (there's no cheap DB existence
+		// check, and the HTTP handlers map every error to 500, not 404),
+		// so cancelling a bogus/finished batchID succeeds silently.
 		c.mu.Unlock()
-		return nil // already terminal; idempotent no-op
+		return nil
 	}
 	state.Row.Status = status
 	if errMsg != "" {
@@ -949,21 +953,14 @@ func (c *Coordinator) OnJobComplete(path, variantID string, sampleRate, bitsPerS
 	delete(state.RemainingIDs, path)
 	state.Row.UpdatedAt = completedAt.UnixNano()
 	allDone := len(state.RemainingIDs) == 0
-	terminalErr := ""
-	terminalStatus := ""
 	if allDone {
-		if state.Row.FailedFiles == 0 {
-			terminalStatus = "completed"
-		} else if state.Row.FailedFiles == state.Row.TotalFiles {
-			terminalStatus = "failed"
-			terminalErr = "every track in this batch failed sox / store-write"
-		} else {
-			terminalStatus = "completed" // mixed results — `completed` reflects "the batch is done", failed count separately rendered
-		}
-		state.Row.Status = terminalStatus
-		if terminalErr != "" {
-			state.Row.Error = terminalErr
-		}
+		// A completion event just incremented ProcessedFiles, so
+		// FailedFiles < TotalFiles here — the batch is "completed" (some
+		// tracks may have failed; FailedFiles carries that count and the
+		// Jobs page renders it separately). A 100%-failure batch's last
+		// event is a FAILURE, so it terminates in OnJobFailed, which sets
+		// "failed" — this handler never observes an all-failed batch.
+		state.Row.Status = "completed"
 	}
 	rowCopy := state.Row
 	if allDone {
@@ -1000,9 +997,10 @@ func (c *Coordinator) OnJobFailed(path, variantID, errMsg string, durationSecond
 	}
 	state.Row.FailedFiles++
 	delete(state.RemainingIDs, path)
-	// Surface the first error verbatim; subsequent failures
-	// append a count suffix so the Jobs page doesn't drown in
-	// repetitive text.
+	// Surface the first failure's error verbatim. The aggregate failure
+	// count is carried separately in FailedFiles (the Jobs page renders
+	// it), so Error stays the single first message rather than a
+	// repetitive count-suffixed string.
 	if state.Row.Error == "" {
 		state.Row.Error = errMsg
 	}
@@ -1162,11 +1160,6 @@ func isTerminalStatus(s string) bool {
 	}
 	return false
 }
-
-// ErrBatchNotFound is returned by Cancel / inspect operations when
-// the batchID isn't in `upscale_batches`. Distinct from a no-op
-// transition (terminal-status batch — Cancel returns nil for that).
-var ErrBatchNotFound = errors.New("upscale batch not found")
 
 // silence unused-context noise; `context.Context` is on Submit's
 // signature for forward-compat (the future per-batch cancel-via-
