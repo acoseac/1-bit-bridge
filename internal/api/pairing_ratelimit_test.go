@@ -206,7 +206,11 @@ func TestPairingRateLimiter_EvictOldestTieBreaksByIP(t *testing.T) {
 		}
 	}
 
+	// evictOldestLocked documents "caller MUST hold p.mu" — honor the
+	// contract even though this single-goroutine test wouldn't race.
+	rl.mu.Lock()
 	rl.evictOldestLocked()
+	rl.mu.Unlock()
 
 	if _, ok := rl.limiters["10.0.0.1"]; ok {
 		t.Error("10.0.0.1 (lex-smallest among tied lastSeen) should have been evicted")

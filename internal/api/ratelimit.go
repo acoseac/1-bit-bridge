@@ -253,12 +253,11 @@ func (s *Server) rateLimitManifest(next http.HandlerFunc) http.HandlerFunc {
 			// truncated to 1 advertises a 1s Retry-After, so a compliant
 			// client sleeps 1s, wakes before the bucket has a token, and
 			// gets another 429. Round up so the advertised window actually
-			// clears the reservation. The <1 floor still guards a sub-1s
-			// delay from advertising 0 (immediate hammer).
+			// clears the reservation. delay > 0 is guaranteed by the check
+			// above, so math.Ceil(delay.Seconds()) is always >= 1 — no
+			// separate floor is needed to avoid a 0s (immediate-hammer)
+			// window.
 			retry := int(math.Ceil(delay.Seconds()))
-			if retry < 1 {
-				retry = 1
-			}
 			w.Header().Set("Retry-After", strconv.Itoa(retry))
 			writeError(w, http.StatusTooManyRequests, "rate_limited",
 				"too many manifest requests; retry after the Retry-After window")
