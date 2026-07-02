@@ -444,14 +444,57 @@ func TestHealthIncludesUpdateFieldsWhenUpdaterAttached(t *testing.T) {
 	if got.LatestServerVersion != "9.9.9" {
 		t.Errorf("LatestServerVersion = %q, want 9.9.9", got.LatestServerVersion)
 	}
-	if !got.UpdateAvailable {
-		t.Error("UpdateAvailable = false, want true")
+	if got.UpdateAvailable == nil || !*got.UpdateAvailable {
+		t.Error("UpdateAvailable = nil/false, want true")
 	}
 	if got.UpdateReleaseNotesURL != "https://example.test/release" {
 		t.Errorf("UpdateReleaseNotesURL = %q", got.UpdateReleaseNotesURL)
 	}
 	if got.MinClientVersion != "1.2.0" {
 		t.Errorf("MinClientVersion = %q, want 1.2.0", got.MinClientVersion)
+	}
+}
+
+// TestHealthUpdateAvailableFalseIsPresentWhenNoUpdate pins the *bool fix:
+// with an updater wired and a poll that found no newer release,
+// updateAvailable MUST serialize as an explicit `false` rather than being
+// dropped by omitempty. A bare-bool field would leave a paired client
+// unable to distinguish "checked, up to date" from the absent-field
+// "not checked" state (and inconsistent with latestServerVersion, which
+// IS present in the same response).
+func TestHealthUpdateAvailableFalseIsPresentWhenNoUpdate(t *testing.T) {
+	dir := t.TempDir()
+	lib := filepath.Join(dir, "Music")
+	os.MkdirAll(lib, 0o755)
+	cfg := &config.Config{LibraryRoots: []string{lib}, ListenAddress: ":7788", LibraryName: "T"}
+	store, err := auth.OpenStore(filepath.Join(dir, "tokens.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := New(cfg, store, nil, "fp").WithUpdater(fakeUpdater{
+		info: UpdateInfo{LatestVersion: "1.0.0", UpdateAvailable: false},
+	})
+	hs := httptest.NewServer(srv.Handler())
+	t.Cleanup(hs.Close)
+
+	resp, err := http.Get(hs.URL + "/v1/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), `"updateAvailable":false`) {
+		t.Errorf("updateAvailable:false absent from wire (dropped by omitempty?): %s", body)
+	}
+	var got HealthResponse
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.UpdateAvailable == nil {
+		t.Fatal("UpdateAvailable decoded as nil, want non-nil false")
+	}
+	if *got.UpdateAvailable {
+		t.Error("*UpdateAvailable = true, want false")
 	}
 }
 

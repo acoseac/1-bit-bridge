@@ -503,23 +503,49 @@ func (s *Server) touchDevice(ctx context.Context, deviceToken, tokenID string) {
 	s.deviceInflight[key] = struct{}{}
 	s.deviceSeenMu.Unlock()
 
+	// Always release the in-flight reservation — even if the upsert
+	// below panics. A SQL-driver / ctx-cancellation panic would
+	// otherwise skip the delete and wedge this (device,token) key in
+	// deviceInflight for the process lifetime, silently dropping every
+	// future registration attempt for it (the fresh/inflight guards
+	// above would keep short-circuiting). The closure MUST re-acquire
+	// s.deviceSeenMu: deviceInflight is a shared map read/written
+	// concurrently across request goroutines, and the lock was released
+	// above before the DB call, so a bare `defer delete(...)` would be a
+	// concurrent-map write race.
+	defer func() {
+		s.deviceSeenMu.Lock()
+		delete(s.deviceInflight, key)
+		s.deviceSeenMu.Unlock()
+	}()
+
 	// name="" on the header path — UpsertDeviceRegistration preserves any
 	// name the pairing-approval path already captured.
 	err := s.deviceRegistrar.UpsertDeviceRegistration(ctx, deviceToken, tokenID, "")
-
-	s.deviceSeenMu.Lock()
-	delete(s.deviceInflight, key)
-	if err == nil {
-		// Record the debounce entry ONLY after a successful upsert. On
-		// failure leave deviceSeen untouched so the next request retries
-		// immediately rather than waiting out deviceRegistrarTTL (Gemini
-		// HIGH + CodeRabbit Major round 1).
-		s.deviceSeen[deviceToken] = deviceSeenEntry{tokenID: tokenID, at: now}
-	}
-	s.deviceSeenMu.Unlock()
 	if err != nil {
-		httpLogger.Warn("device registration upsert failed", "err", err)
+		// touchDevice runs on the request ctx, so a client disconnect
+		// mid-upsert surfaces as context.Canceled/DeadlineExceeded — the
+		// normal iOS-backgrounds-mid-request case, not a server fault.
+		// Demote it to debug (same false-positive-alert rationale as the
+		// manifest stream); a real DB fault still logs at warn.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			httpLogger.Debug("device registration upsert cancelled", "err", err)
+		} else {
+			httpLogger.Warn("device registration upsert failed", "err", err)
+		}
+		return
 	}
+
+	// Record the debounce entry ONLY after a successful upsert. On
+	// failure leave deviceSeen untouched so the next request retries
+	// immediately rather than waiting out deviceRegistrarTTL (Gemini
+	// HIGH + CodeRabbit Major round 1). Safe against the momentary window
+	// where deviceSeen is set but the deferred delete hasn't run yet: a
+	// concurrent same-key request hits the `fresh` short-circuit above and
+	// never inspects deviceInflight.
+	s.deviceSeenMu.Lock()
+	s.deviceSeen[deviceToken] = deviceSeenEntry{tokenID: tokenID, at: now}
+	s.deviceSeenMu.Unlock()
 }
 
 // WithUpscale wires the v1.2 PCM-upscaling feature into the
@@ -969,18 +995,25 @@ func (s *Server) Handler() http.Handler {
 // all four as optional and falls back to "no update info" rather
 // than a hard error if any are missing.
 type HealthResponse struct {
-	ProtocolVersion       int       `json:"protocolVersion"`
-	ServerVersion         string    `json:"serverVersion"`
-	LibraryName           string    `json:"libraryName"`
-	LibraryRoots          []string  `json:"libraryRoots"`
-	CertFingerprint       string    `json:"certFingerprint"`
-	StartedAt             time.Time `json:"startedAt"`
-	ScanState             ScanState `json:"scanState"`
-	Endpoints             []string  `json:"endpoints,omitempty"`
-	LatestServerVersion   string    `json:"latestServerVersion,omitempty"`
-	UpdateAvailable       bool      `json:"updateAvailable,omitempty"`
-	UpdateReleaseNotesURL string    `json:"updateReleaseNotesURL,omitempty"`
-	MinClientVersion      string    `json:"minClientVersion,omitempty"`
+	ProtocolVersion     int       `json:"protocolVersion"`
+	ServerVersion       string    `json:"serverVersion"`
+	LibraryName         string    `json:"libraryName"`
+	LibraryRoots        []string  `json:"libraryRoots"`
+	CertFingerprint     string    `json:"certFingerprint"`
+	StartedAt           time.Time `json:"startedAt"`
+	ScanState           ScanState `json:"scanState"`
+	Endpoints           []string  `json:"endpoints,omitempty"`
+	LatestServerVersion string    `json:"latestServerVersion,omitempty"`
+	// UpdateAvailable is a pointer so a genuine `false` (updater
+	// wired, poll ran, no newer release) serializes explicitly rather
+	// than being dropped by `omitempty` — otherwise a successful poll
+	// with no update sends `latestServerVersion` but silently omits
+	// `updateAvailable`, leaving clients unable to distinguish
+	// "checked, up to date" from "not checked". Nil (no updater wired)
+	// stays omitted. Same rationale as `UpscaleEnabled` below.
+	UpdateAvailable       *bool  `json:"updateAvailable,omitempty"`
+	UpdateReleaseNotesURL string `json:"updateReleaseNotesURL,omitempty"`
+	MinClientVersion      string `json:"minClientVersion,omitempty"`
 	// UpscaleEnabled mirrors the runtime config flag
 	// `cfg.Upscale.Enabled` AND the result of the sox-on-PATH
 	// startup probe (a true config setting whose probe failed
@@ -1258,7 +1291,10 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	if s.updater != nil {
 		info := s.updater.UpdateInfo()
 		resp.LatestServerVersion = info.LatestVersion
-		resp.UpdateAvailable = info.UpdateAvailable
+		// Local copy's address, not &info.UpdateAvailable directly —
+		// robust if UpdateInfo ever returns a reused/looped struct.
+		updateAvail := info.UpdateAvailable
+		resp.UpdateAvailable = &updateAvail
 		resp.UpdateReleaseNotesURL = info.ReleaseNotesURL
 		resp.MinClientVersion = info.MinClientVersion
 	}
@@ -1826,6 +1862,18 @@ func (s *Server) manifestHandler(w http.ResponseWriter, r *http.Request) {
 			// silently retry, masking the real DB failure).
 			w.Header().Del(headerContentEncoding)
 			w.Header().Del("Vary")
+			// A client that disconnected (or hit its own deadline)
+			// before the first body byte is the normal iOS-backgrounds-
+			// mid-sync case, NOT a server fault — demote to debug and
+			// bail without a 5xx, mirroring the post-write branch below
+			// (gemini medium review on PR #117). Otherwise a slow-network
+			// drop during the initial CountTracks / first read would log
+			// at Error and trigger the same false-positive monitoring
+			// alerts that fix was meant to suppress.
+			if errors.Is(writeErr, context.Canceled) || errors.Is(writeErr, context.DeadlineExceeded) {
+				logger.Debug("manifest stream cancelled by client before first write", "err", writeErr)
+				return
+			}
 			// writeErrorLog, not writeError(err.Error()): the wrapped
 			// SQLite error can embed driver detail / DB-file path
 			// fragments, and the 5xx contract keeps those out of wire

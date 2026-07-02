@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -272,6 +273,39 @@ func TestManifestStreamFailureBeforeFirstByteReturns500(t *testing.T) {
 	}
 	if er.Error != "internal" {
 		t.Errorf("error code = %q, want internal", er.Error)
+	}
+}
+
+// TestManifestClientCancelBeforeFirstByteDoesNotReturn500 pins the
+// pre-write cancellation demotion: when WriteManifest returns
+// context.Canceled / DeadlineExceeded before any body byte (iOS
+// backgrounded mid-sync, or the client's own deadline fired), the handler
+// must demote to a debug log and bail — NOT emit a 500. A pre-fix 500
+// here logged at Error and tripped the exact false-positive monitoring
+// alerts PR #117 suppressed for the post-write path. A genuine pre-write
+// DB fault still 500s (TestManifestStreamFailureBeforeFirstByteReturns500
+// is the sibling guard).
+func TestManifestClientCancelBeforeFirstByteDoesNotReturn500(t *testing.T) {
+	mp := &fakeManifestProvider{err: context.Canceled}
+	hs, tok := withManifest(t, mp)
+	req, _ := http.NewRequest("GET", hs.URL+"/v1/manifest", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusInternalServerError {
+		t.Fatalf("pre-write context.Canceled produced 500 (should demote + bail): body=%q", body)
+	}
+	// Nothing was written before the bail, so net/http flushes a bare 200
+	// with an empty body (the client that actually cancelled never sees it).
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200 (empty body)", resp.StatusCode)
+	}
+	if len(body) != 0 {
+		t.Errorf("body = %q, want empty", body)
 	}
 }
 
