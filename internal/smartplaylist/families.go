@@ -19,7 +19,10 @@ func pathsOf(stats []PlayStat) []string {
 // itemsFromPaths hydrates paths into items via the feature map, dropping
 // paths that no longer resolve (a since-deleted track), capped at maxItems.
 func itemsFromPaths(paths []string, features map[string]TrackFeature, maxItems int) []Item {
-	var items []Item
+	if maxItems <= 0 {
+		return nil
+	}
+	items := make([]Item, 0, min(len(paths), maxItems))
 	for _, p := range paths {
 		f, ok := features[p]
 		if !ok {
@@ -34,7 +37,10 @@ func itemsFromPaths(paths []string, features map[string]TrackFeature, maxItems i
 }
 
 func itemsFromFeatures(feats []TrackFeature, maxItems int) []Item {
-	var items []Item
+	if maxItems <= 0 {
+		return nil
+	}
+	items := make([]Item, 0, min(len(feats), maxItems))
 	for _, f := range feats {
 		items = append(items, Item{Position: len(items), Path: f.Path, Title: f.Title, Artist: f.Artist})
 		if len(items) >= maxItems {
@@ -197,7 +203,19 @@ func buildDailyMix(in Inputs, opts Options) (GeneratedPlaylist, bool) {
 	}
 
 	target := opts.MaxItems
+	// Clamp everything to non-negative before slicing. MaxItems/DailyDiscoveryRatio
+	// are sane defaults today, but a future config exposure with a negative MaxItems
+	// or an out-of-[0,1] ratio would otherwise drive nDisc or nFam negative and panic
+	// familiar[:nFam] / discovery[:nDisc] in this background regeneration pass.
+	if target < 0 {
+		target = 0
+	}
 	nDisc := int(math.Round(float64(target) * opts.DailyDiscoveryRatio))
+	if nDisc < 0 {
+		nDisc = 0
+	} else if nDisc > target {
+		nDisc = target
+	}
 	if nDisc > len(discovery) {
 		nDisc = len(discovery)
 	}
@@ -312,18 +330,30 @@ func buildFinishLine(in Inputs, opts Options) (GeneratedPlaylist, bool) {
 		return GeneratedPlaylist{}, false
 	}
 	// Candidate pool: recent then heavy favourites with a known duration,
-	// deduped, order-preserving.
-	seen := map[string]bool{}
-	var feats []TrackFeature
-	for _, p := range append(pathsOf(in.Recent), pathsOf(in.HeavyRotation)...) {
-		if seen[p] {
+	// deduped, order-preserving. Two flat loops (no throwaway path slices, no
+	// closure) over the pre-sized seen map + feats slice.
+	seen := make(map[string]bool, len(in.Recent)+len(in.HeavyRotation))
+	feats := make([]TrackFeature, 0, len(in.Recent)+len(in.HeavyRotation))
+	for _, s := range in.Recent {
+		if seen[s.Path] {
 			continue
 		}
-		f, ok := in.Features[p]
+		f, ok := in.Features[s.Path]
 		if !ok || f.Duration <= 0 {
 			continue
 		}
-		seen[p] = true
+		seen[s.Path] = true
+		feats = append(feats, f)
+	}
+	for _, s := range in.HeavyRotation {
+		if seen[s.Path] {
+			continue
+		}
+		f, ok := in.Features[s.Path]
+		if !ok || f.Duration <= 0 {
+			continue
+		}
+		seen[s.Path] = true
 		feats = append(feats, f)
 	}
 	// Greedy chain toward the average session length.

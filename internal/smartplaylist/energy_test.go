@@ -1,11 +1,35 @@
 package smartplaylist
 
 import (
+	"hash/fnv"
 	"math"
 	"testing"
 )
 
 func fptr(v float64) *float64 { return &v }
+
+// TestFnv1a64_ZeroAllocMatchesReference locks the inlined hash: (1) bit-identical
+// to fnv.New64a over the 16 big-endian bytes (seed, index) so applySeededNoise's
+// noise pattern is unchanged, and (2) zero heap allocations (its whole reason for
+// existing over fnv.New64a).
+func TestFnv1a64_ZeroAllocMatchesReference(t *testing.T) {
+	ref := func(a, b uint64) uint64 {
+		h := fnv.New64a()
+		var buf [16]byte
+		putUint64(buf[0:8], a)
+		putUint64(buf[8:16], b)
+		_, _ = h.Write(buf[:])
+		return h.Sum64()
+	}
+	for _, tc := range [][2]uint64{{0, 0}, {1, 0}, {0, 1}, {12345, 48}, {^uint64(0), 7}, {0xdeadbeef, 0xfeedface}} {
+		if got, want := fnv1a64(tc[0], tc[1]), ref(tc[0], tc[1]); got != want {
+			t.Errorf("fnv1a64(%d,%d)=%d, want %d (must match fnv.New64a)", tc[0], tc[1], got, want)
+		}
+	}
+	if allocs := testing.AllocsPerRun(100, func() { _ = fnv1a64(12345, 48) }); allocs != 0 {
+		t.Errorf("fnv1a64 allocated %v times/run, want 0", allocs)
+	}
+}
 
 func TestLoudnessToEnergy_LinearMap(t *testing.T) {
 	cases := []struct {

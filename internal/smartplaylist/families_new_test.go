@@ -1,6 +1,7 @@
 package smartplaylist
 
 import (
+	"fmt"
 	"testing"
 )
 
@@ -299,4 +300,60 @@ func TestSeedFromISOWeek_StableAcrossCalls(t *testing.T) {
 	if SeedFromISOWeek(2025, 25) == SeedFromISOWeek(2026, 25) {
 		t.Fatal("adjacent years must produce distinct seeds")
 	}
+}
+
+// --- Daily Mix defensive bounds ---
+
+// TestBuildDailyMix_ClampsDiscoveryRatio guards the background regeneration pass
+// against an out-of-range DailyDiscoveryRatio. With ratio >1 the discovery count
+// would exceed target (→ nFam negative → familiar[:nFam] panic); with ratio <0 it
+// would go negative (→ discovery[:nDisc] panic). The ratio is a hardcoded 0.30
+// today, but the clamp must hold if it ever becomes operator-configurable.
+func TestBuildDailyMix_ClampsDiscoveryRatio(t *testing.T) {
+	var famPaths, discPaths []string
+	for i := 0; i < 12; i++ {
+		famPaths = append(famPaths, fmt.Sprintf("/fam%02d.flac", i))
+	}
+	for i := 0; i < 20; i++ {
+		discPaths = append(discPaths, fmt.Sprintf("/disc%02d.flac", i))
+	}
+	feats := featurePool(append(append([]string{}, famPaths...), discPaths...)...)
+	analyzed := make([]TrackFeature, 0, len(discPaths))
+	for _, p := range discPaths {
+		analyzed = append(analyzed, feats[p])
+	}
+	played := map[string]bool{} // familiar are "played" → excluded from the discovery pool
+	for _, p := range famPaths {
+		played[p] = true
+	}
+	base := Inputs{
+		Familiar:     makePlayStats(famPaths),
+		AnalyzedPool: analyzed,
+		PlayedPaths:  played,
+		Features:     feats,
+	}
+
+	// 1.5 / 2.0 exercise the >target overflow (nFam<0); -0.5 the <0 underflow. Each
+	// must produce a bounded, panic-free mix.
+	for _, ratio := range []float64{1.5, 2.0, -0.5, 0.0, 0.3} {
+		t.Run(fmt.Sprintf("ratio=%v", ratio), func(t *testing.T) {
+			opts := Options{AnalysisEnabled: true, MaxItems: 10, MinDailyFamiliar: 2, DailyDiscoveryRatio: ratio}
+			got, ok := buildDailyMix(base, opts) // must not panic
+			if !ok {
+				t.Fatalf("Daily Mix should fire (familiar=%d ≥ MinDailyFamiliar)", len(famPaths))
+			}
+			if len(got.Items) == 0 || len(got.Items) > opts.MaxItems {
+				t.Fatalf("items=%d, want 1..=%d", len(got.Items), opts.MaxItems)
+			}
+		})
+	}
+
+	// A negative MaxItems drives target<0 → nFam = target-nDisc negative →
+	// familiar[:nFam] panic without the target clamp (Gemini round-2).
+	t.Run("negative MaxItems", func(t *testing.T) {
+		opts := Options{AnalysisEnabled: true, MaxItems: -5, MinDailyFamiliar: 2, DailyDiscoveryRatio: 0.3}
+		if _, ok := buildDailyMix(base, opts); !ok { // must not panic
+			t.Fatal("Daily Mix should still fire with a negative MaxItems (target clamps to 0)")
+		}
+	})
 }

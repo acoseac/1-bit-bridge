@@ -44,7 +44,7 @@ type harmonicCand struct {
 // pool (final tie-break by path), so the daily Auto Mix doesn't reshuffle.
 func sequenceHarmonic(seed TrackFeature, pool []TrackFeature, maxItems int) []TrackFeature {
 	// Keep only key-bearing tracks (others can't be harmonically sequenced).
-	var cands []harmonicCand
+	cands := make([]harmonicCand, 0, len(pool)) // upper-bounded by the pool
 	for _, f := range pool {
 		if f.KeyRoot == nil {
 			continue
