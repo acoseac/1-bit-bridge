@@ -347,4 +347,13 @@ func TestBuildDailyMix_ClampsDiscoveryRatio(t *testing.T) {
 			}
 		})
 	}
+
+	// A negative MaxItems drives target<0 → nFam = target-nDisc negative →
+	// familiar[:nFam] panic without the target clamp (Gemini round-2).
+	t.Run("negative MaxItems", func(t *testing.T) {
+		opts := Options{AnalysisEnabled: true, MaxItems: -5, MinDailyFamiliar: 2, DailyDiscoveryRatio: 0.3}
+		if _, ok := buildDailyMix(base, opts); !ok { // must not panic
+			t.Fatal("Daily Mix should still fire with a negative MaxItems (target clamps to 0)")
+		}
+	})
 }

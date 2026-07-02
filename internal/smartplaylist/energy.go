@@ -150,17 +150,31 @@ func variance(xs []float64) float64 {
 // applySeededNoise nudges each element by a deterministic ±energyNoiseAmp,
 // derived from (seed, index), keeping values in [0,1].
 func applySeededNoise(env []float64, seed uint64) {
-	h := fnv.New64a() // hoisted; Reset() per index avoids a hasher alloc per bar
-	var buf [16]byte  // hoisted too — h.Write(buf[:]) can escape buf to the heap per iter
 	for i := range env {
-		h.Reset()
-		putUint64(buf[0:8], seed)
-		putUint64(buf[8:16], uint64(i))
-		_, _ = h.Write(buf[:])
 		// Map the hash to [-1, 1], scale by the amplitude.
-		frac := float64(h.Sum64()%10001)/10000.0*2 - 1
+		frac := float64(fnv1a64(seed, uint64(i))%10001)/10000.0*2 - 1
 		env[i] = clamp01(env[i] + frac*energyNoiseAmp)
 	}
+}
+
+// fnv1a64 is an inlined, allocation-free FNV-1a hash over two big-endian uint64s.
+// It avoids fnv.New64a()'s interface allocation and the buffer escape h.Write
+// forces — mirroring hashSeedPath's inlined hash (PR #431). The byte order (seed
+// MSB→LSB, then index) makes it bit-identical to hashing putUint64(seed) followed
+// by putUint64(index) through fnv.New64a, so the noise pattern is unchanged.
+func fnv1a64(a, b uint64) uint64 {
+	const (
+		offset uint64 = 14695981039346656037
+		prime  uint64 = 1099511628211
+	)
+	hash := offset
+	for _, v := range [2]uint64{a, b} {
+		for s := 56; s >= 0; s -= 8 {
+			hash ^= (v >> s) & 0xff
+			hash *= prime
+		}
+	}
+	return hash
 }
 
 func putUint64(b []byte, v uint64) {

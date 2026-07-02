@@ -203,11 +203,14 @@ func buildDailyMix(in Inputs, opts Options) (GeneratedPlaylist, bool) {
 	}
 
 	target := opts.MaxItems
+	// Clamp everything to non-negative before slicing. MaxItems/DailyDiscoveryRatio
+	// are sane defaults today, but a future config exposure with a negative MaxItems
+	// or an out-of-[0,1] ratio would otherwise drive nDisc or nFam negative and panic
+	// familiar[:nFam] / discovery[:nDisc] in this background regeneration pass.
+	if target < 0 {
+		target = 0
+	}
 	nDisc := int(math.Round(float64(target) * opts.DailyDiscoveryRatio))
-	// Clamp to [0, target] before slicing. DailyDiscoveryRatio is a hardcoded
-	// 0.30 today, but a future config exposure with a ratio <0 or >1 would drive
-	// nDisc negative (→ discovery[:nDisc] panic) or past target (→ nFam negative
-	// → familiar[:nFam] panic) in this background regeneration pass.
 	if nDisc < 0 {
 		nDisc = 0
 	} else if nDisc > target {
@@ -327,26 +330,32 @@ func buildFinishLine(in Inputs, opts Options) (GeneratedPlaylist, bool) {
 		return GeneratedPlaylist{}, false
 	}
 	// Candidate pool: recent then heavy favourites with a known duration,
-	// deduped, order-preserving. Iterate both PlayStat slices in place rather
-	// than allocating throwaway path slices (pathsOf ×2 + the append copy).
+	// deduped, order-preserving. Two flat loops (no throwaway path slices, no
+	// closure) over the pre-sized seen map + feats slice.
 	seen := make(map[string]bool, len(in.Recent)+len(in.HeavyRotation))
 	feats := make([]TrackFeature, 0, len(in.Recent)+len(in.HeavyRotation))
-	addStats := func(stats []PlayStat) {
-		for _, s := range stats {
-			p := s.Path
-			if seen[p] {
-				continue
-			}
-			f, ok := in.Features[p]
-			if !ok || f.Duration <= 0 {
-				continue
-			}
-			seen[p] = true
-			feats = append(feats, f)
+	for _, s := range in.Recent {
+		if seen[s.Path] {
+			continue
 		}
+		f, ok := in.Features[s.Path]
+		if !ok || f.Duration <= 0 {
+			continue
+		}
+		seen[s.Path] = true
+		feats = append(feats, f)
 	}
-	addStats(in.Recent)
-	addStats(in.HeavyRotation)
+	for _, s := range in.HeavyRotation {
+		if seen[s.Path] {
+			continue
+		}
+		f, ok := in.Features[s.Path]
+		if !ok || f.Duration <= 0 {
+			continue
+		}
+		seen[s.Path] = true
+		feats = append(feats, f)
+	}
 	// Greedy chain toward the average session length.
 	var chosen []TrackFeature
 	var sum float64
