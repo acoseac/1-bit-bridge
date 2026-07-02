@@ -31,6 +31,14 @@ func TestResetPasswordConcurrentWithVerify(t *testing.T) {
 	// bcrypt read against ResetPassword's pointer swap under -race.
 	var wg sync.WaitGroup
 	stop := make(chan struct{})
+	// Always stop + join the background Verify goroutines, even if a
+	// t.Fatalf below returns early — a leaked goroutine spinning Verify
+	// would race subsequent tests. Single close lives here. Gemini on the
+	// bridge02-03 review.
+	defer func() {
+		close(stop)
+		wg.Wait()
+	}()
 	for g := 0; g < 3; g++ {
 		wg.Add(1)
 		go func() {
@@ -52,9 +60,10 @@ func TestResetPasswordConcurrentWithVerify(t *testing.T) {
 			t.Fatalf("ResetPassword round %d: %v", i, err)
 		}
 	}
-	close(stop)
-	wg.Wait()
 
+	// The final assertions run while the background goroutines are still
+	// spinning — harmless, Verify is concurrent-safe and these use distinct
+	// passwords. The deferred cleanup stops + joins them on return.
 	if err := s.Verify("admin", pw(rounds-1)); err != nil {
 		t.Fatalf("Verify final password: %v", err)
 	}
