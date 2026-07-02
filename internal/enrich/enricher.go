@@ -513,6 +513,12 @@ func ArtistImagePath(cacheDir, mbid string) string {
 	return filepath.Join(cacheDir, fmt.Sprintf("artist-%s.jpg", mbid))
 }
 
+// artistCaser is shared across the (parallel) enrichment workers.
+// cases.Fold() returns a Caser explicitly documented as "stateless and
+// safe to use concurrently by multiple goroutines," so one package-level
+// instance replaces the per-call construction the previous code did.
+var artistCaser = cases.Fold()
+
 // ArtistImagePathByName returns the canonical on-disk cache path for
 // an artist's image, keyed by a SHA-256 of the NFC-normalized,
 // whitespace-trimmed, case-folded artist name. Matches iOS's
@@ -530,8 +536,9 @@ func ArtistImagePath(cacheDir, mbid string) string {
 // other accents (combining acute U+0301 on Beyoncé's é, etc.) use
 // different combining marks and are preserved.
 //
-// `cases.Fold` is somewhat more CPU-intensive than `ToLower` but only
-// runs once per artist during enrichment — never in a tight parsing
+// `cases.Fold` is somewhat more CPU-intensive than `ToLower`, but the
+// shared caser (artistCaser) is built once at package scope and runs
+// only once per artist during enrichment — never in a tight parsing
 // loop — so the cost is negligible.
 //
 // Collisions: two distinct artists with the same display name ("Nirvana"
@@ -539,7 +546,7 @@ func ArtistImagePath(cacheDir, mbid string) string {
 // them in its library model via the same normalization rules, so the
 // UX is consistent end-to-end.
 func ArtistImagePathByName(cacheDir, artistName string) string {
-	folded := cases.Fold().String(strings.TrimSpace(artistName))
+	folded := artistCaser.String(strings.TrimSpace(artistName))
 	folded = strings.ReplaceAll(folded, "\u0307", "")
 	normalized := norm.NFC.String(folded)
 	sum := sha256.Sum256([]byte(normalized))
@@ -616,8 +623,15 @@ func (e *Enricher) ensureArtworkCached(ctx context.Context, mbid, rgMBID, artist
 		// the buffered Fetch path. Pi-class hosts running fresh-library
 		// enrichment now stay bounded under a few MB peak even with
 		// multiple in-flight fetches.
-		werr := writeArtworkAtomicStream(path, body, MaxCoverArtBytes)
-		body.Close()
+		// Scope-bound defer: body is closed when this closure returns
+		// (right after the write) — panic-safe, and it never holds the
+		// connection across the release-group / iTunes fallbacks below,
+		// which a bare function-scoped defer would if a future edit
+		// dropped one of the early returns.
+		werr := func() error {
+			defer body.Close()
+			return writeArtworkAtomicStream(path, body, MaxCoverArtBytes)
+		}()
 		if werr != nil {
 			return false, werr
 		}
@@ -643,8 +657,10 @@ func (e *Enricher) ensureArtworkCached(ctx context.Context, mbid, rgMBID, artist
 		}
 		rgBody, rgFetchErr := e.caa.FetchReleaseGroupFrontStream(ctx, rgMBID, size)
 		if rgFetchErr == nil {
-			werr := writeArtworkAtomicStream(path, rgBody, MaxCoverArtBytes)
-			rgBody.Close()
+			werr := func() error {
+				defer rgBody.Close()
+				return writeArtworkAtomicStream(path, rgBody, MaxCoverArtBytes)
+			}()
 			if werr != nil {
 				return false, werr
 			}
@@ -674,8 +690,10 @@ func (e *Enricher) ensureArtworkCached(ctx context.Context, mbid, rgMBID, artist
 			// inside writeArtworkAtomicStream + io.LimitReader; the
 			// iTunes path now inherits the ~32 KB peak-RAM profile of
 			// the CAA fetches rather than buffering the whole image.
-			werr := writeArtworkAtomicStream(path, itBody, MaxCoverArtBytes)
-			itBody.Close()
+			werr := func() error {
+				defer itBody.Close()
+				return writeArtworkAtomicStream(path, itBody, MaxCoverArtBytes)
+			}()
 			if werr != nil {
 				return false, werr
 			}

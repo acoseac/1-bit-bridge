@@ -42,6 +42,21 @@ func SanitizeCoverKey(s string) string {
 	if s == "" {
 		return "_"
 	}
+	// Fast path: a key that's already clean (the common case) is returned
+	// verbatim, skipping the strings.Builder allocation entirely. Scanned
+	// byte-wise — every allowed char is ASCII, so a non-ASCII byte is
+	// never clean, and this avoids the UTF-8 decode that `range s` does.
+	clean := true
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '.' || c == '_' || c == '-') {
+			clean = false
+			break
+		}
+	}
+	if clean {
+		return s
+	}
 	var b strings.Builder
 	b.Grow(len(s))
 	for _, r := range s {
@@ -160,17 +175,22 @@ func (s *Store) PrunePlaylistCoversExcept(ctx context.Context, scope string, kee
 	if err != nil {
 		return nil, err
 	}
+	// Panic-safety net. The explicit Close after the scan loop still runs
+	// first (and releases the pooled connection before the DELETE loop
+	// below); sql.Rows.Close is idempotent, so this double-close is safe.
+	defer rows.Close()
 	var candidates []PlaylistCover
 	for rows.Next() {
 		var c PlaylistCover
 		if err := rows.Scan(&c.Scope, &c.Key, &c.ImageHash, &c.Ext, &c.UpdatedAt); err != nil {
-			rows.Close()
 			return nil, err
 		}
 		if _, ok := keep[c.Key]; !ok {
 			candidates = append(candidates, c)
 		}
 	}
+	// Release the SELECT's connection before the DELETE loop so we don't
+	// hold a cursor open across the mutations (pool churn).
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, err
