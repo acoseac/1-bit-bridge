@@ -139,11 +139,12 @@ func (s *Store) Username() string {
 // printed banner. Discarding the returned string is the caller's
 // responsibility; no log line in this package ever sees it.
 func (s *Store) MintInitial(username string) (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.user != nil {
-		return "", ErrAlreadyInitialised
-	}
+	// Generate the password + bcrypt hash BEFORE taking s.mu. bcrypt at
+	// cost 12 is ~250ms, and s.mu also guards Verify / ValidateSession, so
+	// hashing under the lock would stall all admin auth for that window.
+	// Neither call needs store state. If MintInitial then loses the
+	// `s.user != nil` race (one-time startup path) the hash is wasted —
+	// acceptable for a startup-only call.
 	plaintext, err := generatePassword()
 	if err != nil {
 		return "", fmt.Errorf("generate password: %w", err)
@@ -151,6 +152,11 @@ func (s *Store) MintInitial(username string) (string, error) {
 	hash, err := bcrypt.GenerateFromPassword([]byte(plaintext), adminBcryptCost)
 	if err != nil {
 		return "", fmt.Errorf("bcrypt: %w", err)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.user != nil {
+		return "", ErrAlreadyInitialised
 	}
 	now := s.now()
 	s.user = &userRecord{
@@ -176,14 +182,20 @@ func (s *Store) ResetPassword(username, newPassword string) error {
 	if newPassword == "" {
 		return errors.New("adminauth: new password must not be empty")
 	}
+	// Hash BEFORE taking s.mu. bcrypt at cost 12 is ~250ms, and s.mu also
+	// guards Verify / ValidateSession, so hashing under the lock stalls
+	// all admin auth for that window. bcrypt needs only newPassword, no
+	// store state. A username-mismatch caller wastes the hash on the
+	// error path (rare) — acceptable for keeping the success path off the
+	// lock.
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), adminBcryptCost)
+	if err != nil {
+		return fmt.Errorf("bcrypt: %w", err)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.user != nil && s.user.Username != username {
 		return ErrUsernameMismatch
-	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), adminBcryptCost)
-	if err != nil {
-		return fmt.Errorf("bcrypt: %w", err)
 	}
 	now := s.now()
 	// Build a FRESH userRecord pointer rather than mutating the
@@ -321,8 +333,8 @@ func (s *Store) SessionCount() int {
 }
 
 // load reads the on-disk credentials file. Missing file leaves the
-// user nil (caller checks via IsInitialised). Caller MUST hold the
-// mutex.
+// user nil (caller checks via IsInitialised). This method locks s.mu
+// internally, so callers MUST NOT hold it.
 func (s *Store) load() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
