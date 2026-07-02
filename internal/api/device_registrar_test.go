@@ -208,7 +208,7 @@ func TestTouchDeviceClearsInflightAfterUpsertPanic(t *testing.T) {
 	// the unwind, before the panic reaches this recover.
 	func() {
 		defer func() {
-			if r := recover(); r == nil {
+			if recover() == nil {
 				t.Fatal("expected touchDevice to propagate the upsert panic")
 			}
 		}()

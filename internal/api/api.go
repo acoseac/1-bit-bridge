@@ -523,7 +523,16 @@ func (s *Server) touchDevice(ctx context.Context, deviceToken, tokenID string) {
 	// name the pairing-approval path already captured.
 	err := s.deviceRegistrar.UpsertDeviceRegistration(ctx, deviceToken, tokenID, "")
 	if err != nil {
-		httpLogger.Warn("device registration upsert failed", "err", err)
+		// touchDevice runs on the request ctx, so a client disconnect
+		// mid-upsert surfaces as context.Canceled/DeadlineExceeded — the
+		// normal iOS-backgrounds-mid-request case, not a server fault.
+		// Demote it to debug (same false-positive-alert rationale as the
+		// manifest stream); a real DB fault still logs at warn.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			httpLogger.Debug("device registration upsert cancelled", "err", err)
+		} else {
+			httpLogger.Warn("device registration upsert failed", "err", err)
+		}
 		return
 	}
 
