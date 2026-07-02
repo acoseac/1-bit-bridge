@@ -400,9 +400,20 @@ func TestDirEntirelyBehindCursor(t *testing.T) {
 		{"empty cursor never skips", "A", "", false},
 		{"straddling sibling fully behind", "A", "B" + sep + "c.flac", true},
 		{"ancestor of cursor must descend", "A" + sep + "B", "A" + sep + "B" + sep + "c.flac", false},
-		{"dot-vs-sep: dir A/B with cursor A/B.flac must descend", "A" + sep + "B", "A" + sep + "B.flac", false},
+		// A dir is fully walked BEFORE its sibling file (base names "B" < "B.flac"),
+		// so a cursor on "A/B.flac" means "A/B" is already swept → prune. (The prior
+		// implementation left this un-pruned on the mistaken belief that "A/B/02.flac"
+		// sorts after "A/B.flac" — it's visited before.)
+		{"dir A/B fully behind sibling file A/B.flac", "A" + sep + "B", "A" + sep + "B.flac", true},
 		{"later sibling not behind", "C", "B" + sep + "c.flac", false},
 		{"earlier sibling fully behind", "AlbumA", "AlbumB" + sep + "01.flac", true},
+		// The bridge02-04 regression: WalkDir visits all of "A/" before sibling
+		// "A-Bonus/" (base names "A" < "A-Bonus"), so "A-Bonus" is still unwalked when
+		// the cursor sits inside "A" — must NOT be pruned even though "A-Bonus/…" <
+		// "A/…" as a raw string ('-' < '/').
+		{"sibling A-Bonus after A must descend (dash<sep)", "A-Bonus", "A" + sep + "track.flac", false},
+		{"sibling 'A B' after A must descend (space<sep)", "A B", "A" + sep + "track.flac", false},
+		{"A-Bonus genuinely behind when cursor in later sibling", "A-Bonus", "B" + sep + "x.flac", true},
 		{"root dir is ancestor of in-tree cursor", "out", "out" + sep + "A" + sep + "x.flac", false},
 		{"volume/filesystem root is ancestor of in-tree cursor", sep, sep + "A" + sep + "x.flac", false},
 		{"trailing-separator dir is ancestor of in-tree cursor", "out" + sep, "out" + sep + "A" + sep + "x.flac", false},
@@ -494,5 +505,112 @@ func TestOrphanSidecarSweeperEffectiveOverrides(t *testing.T) {
 				t.Errorf("effectiveChunkSize = %d, want %d", got, c.wantChunkSize)
 			}
 		})
+	}
+}
+
+// TestOrphanSidecarSweeper_SiblingDashDir_NotPruned is the bridge02-04 regression:
+// a sibling album directory whose name sorts BEFORE an earlier-walked sibling as a raw
+// string ("A-Bonus" vs "A/…", '-' 0x2D < '/' 0x2F) must NOT be pruned by the chunk-
+// resume SkipDir short-circuit — filepath.WalkDir visits "A-Bonus/" AFTER all of "A/",
+// so its orphan is still unswept when the cursor sits inside "A". Fails on the pre-fix
+// raw-string dirEntirelyBehindCursor (the orphan survives the sweep).
+func TestOrphanSidecarSweeper_SiblingDashDir_NotPruned(t *testing.T) {
+	outputDir := t.TempDir()
+	// Walk order (base-name sort): A/ (whole subtree) THEN A-Bonus/.
+	a := seedSidecarAlbum(t, outputDir, "A", 2)           // both known
+	bonus := seedSidecarAlbum(t, outputDir, "A-Bonus", 1) // the orphan
+
+	known := map[string]struct{}{a[0]: {}, a[1]: {}}
+	lister := &fakeSidecarLister{known: known}
+	s := NewOrphanSidecarSweeper(lister, outputDir, 1*time.Hour)
+	s.chunkSizeForTest = 2 // tick 1 fills on A/*, forcing a resume that must reach A-Bonus
+	s.gracePeriodForTest = 1 * time.Nanosecond
+
+	total := 0
+	for i := 0; i < 10; i++ { // bounded; sweep completes in 2 ticks
+		total += s.tick(context.Background())
+		if s.lastProcessedPath == "" {
+			break // cursor reset → full tree covered
+		}
+	}
+
+	if total != 1 {
+		t.Errorf("total unlinked = %d, want 1 (the A-Bonus orphan)", total)
+	}
+	if _, err := os.Stat(bonus[0]); !os.IsNotExist(err) {
+		t.Errorf("orphan %q survived — SkipDir wrongly pruned the A-Bonus subtree (raw-string collation bug): err=%v", bonus[0], err)
+	}
+	for _, p := range a {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("known sidecar %q was unlinked (should have survived): %v", p, err)
+		}
+	}
+}
+
+// TestPathWalkCompare_MatchesActualWalkDirOrder empirically locks the helper against
+// filepath.WalkDir's real traversal order: it builds a tree seeded with dir/file
+// collation traps (sibling names with '-' and ' '; a dir vs a sibling file of the same
+// stem; nested subtrees), records the ACTUAL visit order, and asserts pathWalkCompare
+// reproduces it (strictly increasing across every consecutive pair).
+func TestPathWalkCompare_MatchesActualWalkDirOrder(t *testing.T) {
+	root := t.TempDir()
+	mk := func(rel string) {
+		p := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", p, err)
+		}
+		if err := os.WriteFile(p, []byte{0}, 0o644); err != nil {
+			t.Fatalf("write %s: %v", p, err)
+		}
+	}
+	for _, rel := range []string{
+		"A/00.flac", "A/01.flac",
+		"A B/00.flac",     // space sibling (' ' < '/')
+		"A-Bonus/00.flac", // dash sibling ('-' < '/')
+		"B/nested/00.flac",
+		"B/nested.flac", // file sibling of the "nested" dir ('.' < '/')
+		"B.flac",        // file sibling of the "B" dir
+	} {
+		mk(rel)
+	}
+
+	var order []string
+	if err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		order = append(order, p)
+		return nil
+	}); err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+
+	for i := 0; i+1 < len(order); i++ {
+		if got := pathWalkCompare(order[i], order[i+1]); got >= 0 {
+			t.Errorf("pathWalkCompare(%q, %q) = %d, want < 0 (WalkDir visited them in this order)",
+				order[i], order[i+1], got)
+		}
+	}
+	// Sanity: equal compares 0; the compare is antisymmetric.
+	if got := pathWalkCompare(order[0], order[0]); got != 0 {
+		t.Errorf("pathWalkCompare(x, x) = %d, want 0", got)
+	}
+	if len(order) > 1 {
+		if a, b := pathWalkCompare(order[0], order[1]), pathWalkCompare(order[1], order[0]); a != -b {
+			t.Errorf("not antisymmetric: cmp(a,b)=%d cmp(b,a)=%d", a, b)
+		}
+	}
+}
+
+// TestPathWalkCompare_ZeroAlloc locks the zero-alloc contract (see the helper doc): the
+// function runs on every walk entry until the resume cursor clears, so a future refactor
+// to strings.Split would reintroduce per-entry GC pressure on large libraries.
+func TestPathWalkCompare_ZeroAlloc(t *testing.T) {
+	a := filepath.Join("music", "Diana Krall", "The Look of Love", "01 Love Letters.flac")
+	b := filepath.Join("music", "Diana Krall", "The Look of Love", "02 I Remember You.flac")
+	if allocs := testing.AllocsPerRun(100, func() {
+		_ = pathWalkCompare(a, b)
+	}); allocs != 0 {
+		t.Errorf("pathWalkCompare allocated %v times/run, want 0", allocs)
 	}
 }
