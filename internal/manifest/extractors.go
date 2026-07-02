@@ -3,6 +3,7 @@ package manifest
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -58,10 +59,14 @@ const maxArtworkBytes = 25 * 1024 * 1024 // 25 MiB
 // Case-folded via strings.EqualFold so the gate works regardless
 // of how a caller-supplied codec string is cased.
 func canSetBitsPerSample(codec string) bool {
-	for _, lossless := range []string{"FLAC", "ALAC", "DSF", "DFF", "WAV", "AIFF"} {
-		if strings.EqualFold(codec, lossless) {
-			return true
-		}
+	switch {
+	case strings.EqualFold(codec, "FLAC"),
+		strings.EqualFold(codec, "ALAC"),
+		strings.EqualFold(codec, "DSF"),
+		strings.EqualFold(codec, "DFF"),
+		strings.EqualFold(codec, "WAV"),
+		strings.EqualFold(codec, "AIFF"):
+		return true
 	}
 	return false
 }
@@ -103,14 +108,23 @@ type ExtractContext struct {
 
 // Ext enumerates the file extensions the scanner considers. Case-
 // insensitive; leading "." included for filepath.Ext matching.
+//
+// KEEP IN SYNC with extractByFormat's switch: the scanner's WalkDir
+// gates discovery on this map (scanner.go — `if !Ext[ext]`), so an
+// extension the dispatcher can parse but that's missing here is
+// silently skipped at scan time (the dispatcher case becomes dead
+// code). TestExtCoversDispatcher pins the intersection.
 var Ext = map[string]bool{
 	".flac": true,
 	".dsf":  true,
 	".dff":  true, // DSDIFF — rarer but found in audiophile libraries
 	".mp3":  true,
 	".m4a":  true, // AAC / ALAC
+	".m4b":  true, // MPEG-4 audiobook — same MP4 container/atoms as .m4a
+	".m4p":  true, // legacy iTunes DRM AAC; tags parse even if playback can't decrypt
 	".mp4":  true, // lossy audio inside MP4 container, uncommon but valid
 	".ogg":  true,
+	".oga":  true, // Ogg audio (Vorbis/Opus/FLAC-in-Ogg); same dhowden path as .ogg
 	".wav":  true,
 	".aif":  true,
 	".aiff": true,
@@ -289,6 +303,10 @@ func extractMP4WithContext(absPath string, t *Track, ec *ExtractContext) error {
 // up, not V1 scope. See folderArtCandidates and looksLikeJPEG.
 func extractByFormat(absPath string, t *Track, ec *ExtractContext) error {
 	ext := strings.ToLower(filepath.Ext(absPath))
+	// KEEP IN SYNC with the Ext map: every extension routed to a
+	// dedicated case below must also be registered in Ext, or the
+	// scanner's discovery gate skips those files before they ever
+	// reach this dispatcher. TestExtCoversDispatcher pins it.
 	switch ext {
 	case ".dsf":
 		return extractDSFWithContext(absPath, t, ec)
@@ -790,6 +808,39 @@ func trimNonEmpty(in []string) []string {
 	return out
 }
 
+// skipID3v2 advances r past a leading ID3v2 tag if present, leaving the
+// cursor at the real payload start (the fLaC magic for our FLAC callers).
+// Some taggers prepend an ID3v2 tag to FLAC — out of spec but common
+// enough that dhowden/tag tolerates it; our STREAMINFO + Vorbis passes
+// read the magic at the current offset and would otherwise bail,
+// silently dropping hi-res format fields and multi-value artists.
+// No-op (rewinds to the original offset) when no ID3v2 tag is present or
+// the stream is too short to hold a header.
+func skipID3v2(r io.ReadSeeker) error {
+	start, err := r.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return err
+	}
+	var h [10]byte
+	if _, err := io.ReadFull(r, h[:]); err != nil || string(h[0:3]) != "ID3" {
+		// Not an ID3 tag, or the stream is too short to hold a header.
+		// Rewind and let the caller's fLaC-magic read produce the real
+		// verdict; only a failed rewind is worth surfacing.
+		if _, serr := r.Seek(start, io.SeekStart); serr != nil {
+			return serr
+		}
+		return nil
+	}
+	// 28-bit synchsafe size (7 bits/byte), excludes the 10-byte header.
+	size := int64(h[6]&0x7f)<<21 | int64(h[7]&0x7f)<<14 | int64(h[8]&0x7f)<<7 | int64(h[9]&0x7f)
+	skip := start + 10 + size
+	if h[5]&0x10 != 0 {
+		skip += 10 // optional ID3v2 footer (ID3v2.4)
+	}
+	_, err = r.Seek(skip, io.SeekStart)
+	return err
+}
+
 // applyFLACMultiValueArtists scans the FLAC's Vorbis Comment block for
 // repeated `ARTIST` / `ALBUMARTIST` entries (which dhowden/tag's
 // last-wins map collapses to a single value) and overrides
@@ -810,7 +861,14 @@ func trimNonEmpty(in []string) []string {
 // dhowden-populated value is correct in that case). Non-FLAC
 // formats are NOT covered by this helper — ID3v2 TPE1 multi-value
 // (MP3 / DSF / M4A) is a deferred follow-up.
-func applyFLACMultiValueArtists(r io.Reader, t *Track) {
+func applyFLACMultiValueArtists(r io.ReadSeeker, t *Track) {
+	// Skip a leading ID3v2 tag if some tagger prepended one (out of
+	// spec but common); otherwise the fLaC magic check below fails and
+	// the multi-value artists silently collapse to dhowden's last-wins
+	// single value.
+	if err := skipID3v2(r); err != nil {
+		return
+	}
 	// FLAC magic.
 	var magic [4]byte
 	if _, err := io.ReadFull(r, magic[:]); err != nil {
@@ -1123,7 +1181,15 @@ func extractFLACFormat(absPath string, t *Track) error {
 // inside the metadata region when this returns.
 //
 // Per Gemini A8 / iOS bug review #7 + CodeRabbit Major round-1 on PR #165.
-func extractFLACFormatFromReader(r io.Reader, absPath string, t *Track) error {
+func extractFLACFormatFromReader(r io.ReadSeeker, absPath string, t *Track) error {
+	// Skip a leading ID3v2 tag if present (some taggers prepend one to
+	// FLAC — out of spec but common; dhowden tolerates it downstream).
+	// Without this the magic check below fails on those files and the
+	// hi-res format fields (sample rate, bit depth, duration) are
+	// silently dropped.
+	if err := skipID3v2(r); err != nil {
+		return fmt.Errorf("flac: %q: skip id3v2: %w", absPath, err)
+	}
 	// FLAC magic: 4 bytes "fLaC".
 	var magic [4]byte
 	if _, err := io.ReadFull(r, magic[:]); err != nil {
@@ -1852,7 +1918,11 @@ func scanFolderArtwork(dir, cacheDir string) folderArtResult {
 		// Stat to enforce the size cap before we slurp the file —
 		// otherwise a misnamed huge image (someone called their
 		// 4K wallpaper cover.jpg) lands in RAM before we reject it.
-		info, err := entry.Info()
+		// os.Stat (not entry.Info) so a symlinked cover.jpg is measured
+		// by its TARGET size: entry.Info() reports the link itself
+		// (lstat) — a small size that passes the cap — while os.ReadFile
+		// below follows the link and would slurp the full target.
+		info, err := os.Stat(full)
 		if err != nil {
 			scanLogger.Warn("folder-art stat", "path", full, "err", err)
 			continue
@@ -1875,7 +1945,7 @@ func scanFolderArtwork(dir, cacheDir string) folderArtResult {
 		// re-save as JPEG.
 		if !looksLikeJPEG(data) {
 			scanLogger.Warn("folder-art bytes not JPEG; skipping",
-				"path", full, "first", fmt.Sprintf("%x", data[:min4(len(data))]))
+				"path", full, "first", fmt.Sprintf("%x", data[:min(len(data), 4)]))
 			continue
 		}
 		if mbid, ok := stampLocalArtwork(data, cacheDir); ok {
@@ -1885,15 +1955,6 @@ func scanFolderArtwork(dir, cacheDir string) folderArtResult {
 		// in case the directory has another candidate (rare).
 	}
 	return folderArtResult{}
-}
-
-// min4 clamps to 4 to keep the warn-log preview short and avoid an
-// out-of-range slice on the rare 0-3-byte garbage file.
-func min4(n int) int {
-	if n < 4 {
-		return n
-	}
-	return 4
 }
 
 // stampLocalArtwork hashes data, computes the local-<hash> sentinel,
@@ -1936,22 +1997,14 @@ func writeArtworkAtomicScan(path string, data []byte) error {
 // a failing rename swap the package-level seam via
 // `atomicwrite.SetRenameFuncForTest`.
 
-func le32(b []byte) uint32 {
-	return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24
-}
+// le32/le64 read little-endian integers (DSF's fmt-chunk dialect);
+// callers pass slices already bounds-guaranteed to hold the width.
+func le32(b []byte) uint32 { return binary.LittleEndian.Uint32(b) }
 
-func le64(b []byte) uint64 {
-	return uint64(b[0]) | uint64(b[1])<<8 | uint64(b[2])<<16 | uint64(b[3])<<24 |
-		uint64(b[4])<<32 | uint64(b[5])<<40 | uint64(b[6])<<48 | uint64(b[7])<<56
-}
+func le64(b []byte) uint64 { return binary.LittleEndian.Uint64(b) }
 
 // DSDIFF (DFF) chunks use big-endian sizes (IFF/AIFF dialect), unlike
 // DSF's little-endian header. Kept narrowly scoped to extractor needs.
-func be32(b []byte) uint32 {
-	return uint32(b[3]) | uint32(b[2])<<8 | uint32(b[1])<<16 | uint32(b[0])<<24
-}
+func be32(b []byte) uint32 { return binary.BigEndian.Uint32(b) }
 
-func be64(b []byte) uint64 {
-	return uint64(b[7]) | uint64(b[6])<<8 | uint64(b[5])<<16 | uint64(b[4])<<24 |
-		uint64(b[3])<<32 | uint64(b[2])<<40 | uint64(b[1])<<48 | uint64(b[0])<<56
-}
+func be64(b []byte) uint64 { return binary.BigEndian.Uint64(b) }
