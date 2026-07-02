@@ -378,11 +378,13 @@ func (p *Pool) Enqueue(spec JobSpec) error {
 	// order made `fire()` run BEFORE the unlock, deadlocking when
 	// the wired callback called UpscaleStatsSnapshot which takes
 	// p.mu.Lock() inside Stats(). CodeRabbit + Gemini caught this
-	// at critical severity. Now: explicit unlock per branch, then
-	// fireStateChange() — the publisher consumes the signal
-	// asynchronously on its own goroutine, so the wired broker
-	// callback (with its own mutex) can't cross-mutex couple with
-	// p.mu via the publish path.
+	// at critical severity. Since then fire() became fireStateChange()
+	// — a non-blocking send to the async publisher goroutine, NOT a
+	// synchronous callback — so the success branch below now sends the
+	// signal UNDER the lock (before Unlock) to close the Enqueue-vs-Stop
+	// shutdown race (see the inline note there). The publisher invokes
+	// the wired broker callback on its own goroutine, so it still can't
+	// cross-mutex couple with p.mu via the publish path.
 	p.mu.Lock()
 	if p.closed.Load() {
 		p.mu.Unlock()
