@@ -19,7 +19,8 @@ func pathsOf(stats []PlayStat) []string {
 // itemsFromPaths hydrates paths into items via the feature map, dropping
 // paths that no longer resolve (a since-deleted track), capped at maxItems.
 func itemsFromPaths(paths []string, features map[string]TrackFeature, maxItems int) []Item {
-	var items []Item
+	// Pre-size to the known upper bound; max(_, 0) guards a defensive negative cap.
+	items := make([]Item, 0, min(len(paths), max(maxItems, 0)))
 	for _, p := range paths {
 		f, ok := features[p]
 		if !ok {
@@ -34,7 +35,7 @@ func itemsFromPaths(paths []string, features map[string]TrackFeature, maxItems i
 }
 
 func itemsFromFeatures(feats []TrackFeature, maxItems int) []Item {
-	var items []Item
+	items := make([]Item, 0, min(len(feats), max(maxItems, 0)))
 	for _, f := range feats {
 		items = append(items, Item{Position: len(items), Path: f.Path, Title: f.Title, Artist: f.Artist})
 		if len(items) >= maxItems {
@@ -198,6 +199,15 @@ func buildDailyMix(in Inputs, opts Options) (GeneratedPlaylist, bool) {
 
 	target := opts.MaxItems
 	nDisc := int(math.Round(float64(target) * opts.DailyDiscoveryRatio))
+	// Clamp to [0, target] before slicing. DailyDiscoveryRatio is a hardcoded
+	// 0.30 today, but a future config exposure with a ratio <0 or >1 would drive
+	// nDisc negative (→ discovery[:nDisc] panic) or past target (→ nFam negative
+	// → familiar[:nFam] panic) in this background regeneration pass.
+	if nDisc < 0 {
+		nDisc = 0
+	} else if nDisc > target {
+		nDisc = target
+	}
 	if nDisc > len(discovery) {
 		nDisc = len(discovery)
 	}
@@ -312,20 +322,26 @@ func buildFinishLine(in Inputs, opts Options) (GeneratedPlaylist, bool) {
 		return GeneratedPlaylist{}, false
 	}
 	// Candidate pool: recent then heavy favourites with a known duration,
-	// deduped, order-preserving.
+	// deduped, order-preserving. Iterate both PlayStat slices in place rather
+	// than allocating throwaway path slices (pathsOf ×2 + the append copy).
 	seen := map[string]bool{}
 	var feats []TrackFeature
-	for _, p := range append(pathsOf(in.Recent), pathsOf(in.HeavyRotation)...) {
-		if seen[p] {
-			continue
+	addStats := func(stats []PlayStat) {
+		for _, s := range stats {
+			p := s.Path
+			if seen[p] {
+				continue
+			}
+			f, ok := in.Features[p]
+			if !ok || f.Duration <= 0 {
+				continue
+			}
+			seen[p] = true
+			feats = append(feats, f)
 		}
-		f, ok := in.Features[p]
-		if !ok || f.Duration <= 0 {
-			continue
-		}
-		seen[p] = true
-		feats = append(feats, f)
 	}
+	addStats(in.Recent)
+	addStats(in.HeavyRotation)
 	// Greedy chain toward the average session length.
 	var chosen []TrackFeature
 	var sum float64

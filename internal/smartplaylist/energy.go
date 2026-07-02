@@ -150,8 +150,9 @@ func variance(xs []float64) float64 {
 // applySeededNoise nudges each element by a deterministic ±energyNoiseAmp,
 // derived from (seed, index), keeping values in [0,1].
 func applySeededNoise(env []float64, seed uint64) {
+	h := fnv.New64a() // hoisted; Reset() per index avoids a hasher alloc per bar
 	for i := range env {
-		h := fnv.New64a()
+		h.Reset()
 		var buf [16]byte
 		putUint64(buf[0:8], seed)
 		putUint64(buf[8:16], uint64(i))
