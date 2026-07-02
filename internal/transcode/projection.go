@@ -103,7 +103,12 @@ func ProjectedSize(
 	// math.Round → int64 conversion guards against floating-point drift
 	// on edge inputs. Result clamped at MaxInt64 in the (unrealistic)
 	// case the projection overflows.
-	if projected > math.MaxInt64 {
+	//
+	// `>=` not `>`: float64(math.MaxInt64) rounds UP to 2^63, so a
+	// projected value of exactly 2^63 slips a `>` check and then
+	// int64(math.Round(...)) wraps to a negative size. Matches the
+	// DiskHasHeadroom guard below.
+	if projected >= float64(math.MaxInt64) {
 		return math.MaxInt64
 	}
 	return int64(math.Round(projected))

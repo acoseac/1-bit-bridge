@@ -414,12 +414,18 @@ func safeVariantFilename(srcBase, variantID string) string {
 	suffix := fmt.Sprintf("~%s.%s.flac", sha8, variantID)
 	budget := fsBasenameCap - len(suffix)
 	if budget < 8 {
-		// Pathological: variantID alone consumes the budget. Fall
-		// back to a fully-hash-named filename — losing the
-		// source-mirror property but guaranteeing a valid filename.
-		// In practice the variantID is ~25 chars; this branch is
-		// dead under realistic configs.
-		return fmt.Sprintf("v.%s%s", sha8, suffix)
+		// Pathological: variantID alone consumes the budget. Fall back to
+		// a fully-hash-named filename — losing the source-mirror property
+		// but guaranteeing a valid, bounded name. It MUST still encode the
+		// variant: the prior `v.<sha8>` + oversized suffix form both blew
+		// the budget (it re-appended the too-long suffix) AND — had the
+		// suffix been dropped — would have collided two variants of the
+		// same source (violating the VariantID-suffix invariant). Hash the
+		// variantID too. In practice variantID is ~25 chars, so this
+		// branch is dead under realistic configs.
+		vsum := sha256.Sum256([]byte(variantID))
+		variantHash8 := hex.EncodeToString(vsum[:])[:8]
+		return fmt.Sprintf("v.%s.%s.flac", sha8, variantHash8)
 	}
 	if len(sanitized) <= budget {
 		return sanitized + suffix
