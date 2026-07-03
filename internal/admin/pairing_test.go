@@ -287,7 +287,10 @@ func TestEnsureMDNSHost(t *testing.T) {
 		{"host", "host.local"},               // bare hostname gets .local
 		{"mac-mini.local", "mac-mini.local"}, // already dotted, unchanged
 		{"bridge.ars.md", "bridge.ars.md"},   // FQDN unchanged
-		{"192.168.1.5", "192.168.1.5"},       // IP literal (dotted) unchanged
+		{"192.168.1.5", "192.168.1.5"},       // IPv4 literal (dotted) unchanged
+		{"::1", "::1"},                       // bare IPv6 loopback unchanged (would be ::1.local)
+		{"[::1]", "[::1]"},                   // bracketed IPv6 unchanged
+		{"fe80::1", "fe80::1"},               // link-local IPv6 unchanged
 	}
 	for _, c := range cases {
 		if got := ensureMDNSHost(c.in); got != c.want {
