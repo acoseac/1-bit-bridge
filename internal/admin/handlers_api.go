@@ -737,6 +737,28 @@ func (s *Server) apiRootsList(w http.ResponseWriter, r *http.Request) {
 
 // --- POST /api/roots {path} ---
 
+// normalizeRootPathReq trims + absolutizes a library-root path from an
+// admin roots request. On a rejectable input (empty, or unresolvable by
+// filepath.Abs) it writes the error response and returns ok=false so the
+// caller returns immediately. Shared by apiRootsAdd + apiRootsRemove so
+// both agree on the canonical absolute form Scanner.Roots() stores — a
+// mismatch there makes remove false-trip a 404 against an added root.
+// filepath.Abs("") resolves to the process CWD, so rejecting empty is
+// load-bearing, not cosmetic.
+func normalizeRootPathReq(w http.ResponseWriter, raw string) (abs string, ok bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		writeError(w, http.StatusBadRequest, "path-required", "path must not be empty")
+		return "", false
+	}
+	abs, err := filepath.Abs(raw)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad-path", err.Error())
+		return "", false
+	}
+	return abs, true
+}
+
 func (s *Server) apiRootsAdd(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Path string `json:"path"`
@@ -745,14 +767,8 @@ func (s *Server) apiRootsAdd(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errCodeBadJSON, err.Error())
 		return
 	}
-	req.Path = strings.TrimSpace(req.Path)
-	if req.Path == "" {
-		writeError(w, http.StatusBadRequest, "path-required", "path must not be empty")
-		return
-	}
-	abs, err := filepath.Abs(req.Path)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "bad-path", err.Error())
+	abs, ok := normalizeRootPathReq(w, req.Path)
+	if !ok {
 		return
 	}
 	info, err := os.Stat(abs)
@@ -848,23 +864,12 @@ func (s *Server) apiRootsRemove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Normalize the incoming path exactly as apiRootsAdd does before it
-	// persists (TrimSpace + filepath.Abs) — Scanner.Roots() holds cleaned
-	// absolute paths, so a caller that submits a relative, untrimmed, or
-	// trailing-slash form (e.g. "/Music/" or " ./Music") must resolve to
-	// the same absolute form or the slices.Index lookup below false-trips
-	// into a confusing 404. Pure computation, done before taking s.mu.
-	req.Path = strings.TrimSpace(req.Path)
-	if req.Path == "" {
-		// filepath.Abs("") resolves to the process CWD — reject up front
-		// (mirrors apiRootsAdd) so an empty path can't accidentally match
-		// a root or produce a confusing 404. (Gemini review.)
-		writeError(w, http.StatusBadRequest, "path-required", "path must not be empty")
-		return
-	}
-	abs, err := filepath.Abs(req.Path)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "bad-path", err.Error())
+	// Normalize identically to apiRootsAdd (shared helper) so the cleaned
+	// absolute form matches what Scanner.Roots() stores — otherwise a
+	// relative / untrimmed / trailing-slash input (e.g. "/Music/" or
+	// " ./Music") false-trips the slices.Index 404 below.
+	abs, ok := normalizeRootPathReq(w, req.Path)
+	if !ok {
 		return
 	}
 
