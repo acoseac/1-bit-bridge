@@ -206,7 +206,18 @@ func FetchGetProtocolInfo(
 	if err != nil {
 		return nil, fmt.Errorf("read body: %w", err)
 	}
-	return ParseGetProtocolInfoResponse(body)
+	sinks, err := ParseGetProtocolInfoResponse(body)
+	if err != nil {
+		// A 500 whose body ISN'T a SOAP fault (a proxy/LB HTML error page,
+		// a crashed server) would otherwise surface as a bare XML parse
+		// error, dropping the "status 500" context. Re-attach it. A real
+		// SOAP fault returns ErrSOAPFault directly so errors.Is still works.
+		if resp.StatusCode == http.StatusInternalServerError && !errors.Is(err, ErrSOAPFault) {
+			return nil, fmt.Errorf("POST %s: status 500: %w", connectionManagerControlURL, err)
+		}
+		return nil, err
+	}
+	return sinks, nil
 }
 
 // getProtocolInfoEnvelope is the fixed SOAP body for GetProtocolInfo (no

@@ -303,6 +303,29 @@ func TestCanonicalServiceType(t *testing.T) {
 	}
 }
 
+func TestParseDeviceDescription_DuplicateVersionLastWins(t *testing.T) {
+	// A device advertising the same service at two versions collapses to one
+	// ":1" key — last-encountered wins (the documented contract; minor UPnP
+	// revisions are backward-compatible, so either control URL drives it).
+	xml := `<?xml version="1.0"?><root><device>` +
+		`<friendlyName>Dup</friendlyName><UDN>uuid:dup</UDN><serviceList>` +
+		`<service><serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>` +
+		`<controlURL>/avt/v1</controlURL></service>` +
+		`<service><serviceType>urn:schemas-upnp-org:service:AVTransport:2</serviceType>` +
+		`<controlURL>/avt/v2</controlURL></service>` +
+		`</serviceList></device></root>`
+	desc, err := ParseDeviceDescription([]byte(xml), "http://192.0.2.11:8080/desc.xml")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if av := desc.Services[ServiceAVTransport]; av.ControlURL != "http://192.0.2.11:8080/avt/v2" {
+		t.Errorf("last-encountered version should win: ControlURL = %q, want .../avt/v2", av.ControlURL)
+	}
+	if len(desc.Services) != 1 {
+		t.Errorf("both versions should collapse to one key, got %d services: %v", len(desc.Services), desc.Services)
+	}
+}
+
 func TestParseDeviceDescription_RejectsMissingAVTransport(t *testing.T) {
 	// A renderer without AVTransport can't be driven as an audio
 	// target — surfacing it would mislead the user.
