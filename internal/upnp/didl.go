@@ -152,10 +152,14 @@ func ParseBrowseResponse(body []byte) (BrowseResult, error) {
 	if err := xml.Unmarshal(body, &env); err != nil {
 		return BrowseResult{}, fmt.Errorf("upnp: parse SOAP envelope: %w", err)
 	}
-	switch env.Body.Response.XMLName.Local {
-	case "Fault":
+	// EqualFold so a loose server that emits a lowercase <s:fault> is still
+	// caught rather than masquerading as an empty result. Matches the sibling
+	// internal/dlna/discovery.ParseGetProtocolInfoResponse form.
+	local := env.Body.Response.XMLName.Local
+	if strings.EqualFold(local, "Fault") {
 		return BrowseResult{}, ErrSOAPFault
-	case "":
+	}
+	if local == "" {
 		return BrowseResult{}, ErrMissingResponseElement
 	}
 	res, err := parseDIDL(env.Body.Response.Result)
@@ -233,11 +237,13 @@ func parseSystemUpdateID(body []byte) (string, error) {
 	}
 	// Match ParseBrowseResponse's response-discrimination: surface a
 	// broken server (no Fault, no Response element) loudly instead of
-	// returning "" as if it were a valid "unknown ID".
-	switch env.Body.Response.XMLName.Local {
-	case "Fault":
+	// returning "" as if it were a valid "unknown ID". EqualFold so a
+	// lowercase <s:fault> is still caught.
+	local := env.Body.Response.XMLName.Local
+	if strings.EqualFold(local, "Fault") {
 		return "", ErrSOAPFault
-	case "":
+	}
+	if local == "" {
 		return "", ErrMissingResponseElement
 	}
 	return strings.TrimSpace(env.Body.Response.ID), nil

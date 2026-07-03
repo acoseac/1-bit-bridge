@@ -261,6 +261,26 @@ func TestFetchGetProtocolInfo_PropagatesParseError(t *testing.T) {
 	}
 }
 
+func TestFetchGetProtocolInfo_HTTP500FaultReachesParser(t *testing.T) {
+	// SOAP 1.1 returns Faults with HTTP 500 (§4.4). FetchGetProtocolInfo must
+	// let 500 through to the body parse so the Fault surfaces as ErrSOAPFault
+	// instead of an opaque "status 500".
+	const fault = `<?xml version="1.0"?>` +
+		`<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body>` +
+		`<s:Fault><faultcode>s:Client</faultcode><faultstring>UPnPError</faultstring></s:Fault>` +
+		`</s:Body></s:Envelope>`
+	disp := &stubDispatcher{
+		handler: func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, fault)
+		},
+	}
+	_, err := FetchGetProtocolInfo(context.Background(), disp, "http://x/cm/ctrl")
+	if !errors.Is(err, ErrSOAPFault) {
+		t.Fatalf("err = %v, want ErrSOAPFault", err)
+	}
+}
+
 // -----------------------------------------------------------------------------
 // HTTPClientDispatcher
 // -----------------------------------------------------------------------------

@@ -146,6 +146,28 @@ func TestParseBrowseResponse_Fault(t *testing.T) {
 	}
 }
 
+func TestParseBrowseResponse_LowercaseFault(t *testing.T) {
+	// A loose server that emits a lowercase <s:fault> must still surface as
+	// ErrSOAPFault, not a falsely-empty result.
+	fault := []byte(`<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body>` +
+		`<s:fault><faultcode>s:Client</faultcode></s:fault>` +
+		`</s:Body></s:Envelope>`)
+	_, err := ParseBrowseResponse(fault)
+	if !errors.Is(err, ErrSOAPFault) {
+		t.Fatalf("err = %v; want ErrSOAPFault", err)
+	}
+}
+
+func TestParseSystemUpdateID_LowercaseFault(t *testing.T) {
+	fault := []byte(`<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body>` +
+		`<s:fault><faultcode>s:Client</faultcode></s:fault>` +
+		`</s:Body></s:Envelope>`)
+	_, err := parseSystemUpdateID(fault)
+	if !errors.Is(err, ErrSOAPFault) {
+		t.Fatalf("err = %v; want ErrSOAPFault", err)
+	}
+}
+
 func TestParseBrowseResponse_MissingResponse(t *testing.T) {
 	empty := []byte(`<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body></s:Body></s:Envelope>`)
 	_, err := ParseBrowseResponse(empty)
