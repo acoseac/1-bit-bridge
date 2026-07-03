@@ -53,6 +53,17 @@ func TestRootsRemoveUnknownPathStill404(t *testing.T) {
 	}
 }
 
+// TestRootsRemoveEmptyPathRejected guards the Gemini review finding: a
+// whitespace-only path trims to "" and filepath.Abs("") would resolve to
+// the process CWD — reject with 400 instead of matching a root or 404ing.
+func TestRootsRemoveEmptyPathRejected(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	code := doJSON(t, srv.Handler(), "DELETE", "/api/roots", map[string]string{"path": "   "}, nil)
+	if code != http.StatusBadRequest {
+		t.Errorf("remove whitespace-only path: got %d, want 400", code)
+	}
+}
+
 // TestSoxAvailabilityProbeRunsUnlocked is the F8 regression: the probe
 // (a ≤2 s `sox --help` shell-out in prod) must run WITHOUT
 // soxAvailabilityMu held, or concurrent SSE snapshot callers block on

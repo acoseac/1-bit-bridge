@@ -855,6 +855,13 @@ func (s *Server) apiRootsRemove(w http.ResponseWriter, r *http.Request) {
 	// the same absolute form or the slices.Index lookup below false-trips
 	// into a confusing 404. Pure computation, done before taking s.mu.
 	req.Path = strings.TrimSpace(req.Path)
+	if req.Path == "" {
+		// filepath.Abs("") resolves to the process CWD — reject up front
+		// (mirrors apiRootsAdd) so an empty path can't accidentally match
+		// a root or produce a confusing 404. (Gemini review.)
+		writeError(w, http.StatusBadRequest, "path-required", "path must not be empty")
+		return
+	}
 	abs, err := filepath.Abs(req.Path)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "bad-path", err.Error())
