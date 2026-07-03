@@ -84,6 +84,19 @@ var ErrNoMatchingAsset = errors.New("no matching asset")
 //
 // Returns the verified archive's hex SHA-256 on success — used by
 // install bookkeeping for diagnostic logging.
+// maxArchiveDownloadBytes caps the release archive written to disk
+// before its checksum is verified. The bridge archive is ~30 MiB; 1 GiB
+// is generous headroom while bounding the damage from a hung CDN or a
+// compromised release that streams endlessly — the checksum is only
+// checked AFTER the full download, so without a bound the disk would
+// fill before the mismatch is caught. Matches the extract-side ceiling
+// in writeExecutable.
+//
+// A var (not a const) solely so tests can shrink it — same test-seam
+// convention as renameFunc / commandContext elsewhere in the repo.
+// Production code MUST NOT mutate it.
+var maxArchiveDownloadBytes int64 = 1 << 30
+
 func downloadVerified(ctx context.Context, hc *http.Client,
 	archiveURL, archiveName, checksumsURL string,
 	dst string,
@@ -115,9 +128,19 @@ func downloadVerified(ctx context.Context, hc *http.Client,
 	}
 
 	h := sha256.New()
-	tee := io.TeeReader(resp.Body, h)
-	if _, err := io.Copy(out, tee); err != nil {
+	// Bound the write-to-disk. Read one byte past the cap so a legit
+	// exactly-cap-sized archive isn't false-rejected; n > cap means the
+	// source overran and we bail with an explicit error (before the
+	// checksum compare, which would otherwise report a confusing generic
+	// mismatch). The truncated dst is never committed — install swaps
+	// only on a returned nil error.
+	tee := io.TeeReader(io.LimitReader(resp.Body, maxArchiveDownloadBytes+1), h)
+	n, err := io.Copy(out, tee)
+	if err != nil {
 		return "", fmt.Errorf("write archive: %w", err)
+	}
+	if n > maxArchiveDownloadBytes {
+		return "", fmt.Errorf("archive exceeds size limit of %d bytes", maxArchiveDownloadBytes)
 	}
 	got := hex.EncodeToString(h.Sum(nil))
 	if got != expected {
@@ -205,6 +228,13 @@ func extractTarGzBinary(archivePath, binaryName, dst string) error {
 		if !isBinaryEntry(hdr.Name, binaryName) {
 			continue
 		}
+		// Only a regular file is a real binary. A tampered/malformed
+		// archive could carry a symlink, directory, or device node
+		// sharing the basename; feeding one to writeExecutable would
+		// install a 0-byte or bogus binary. Skip and keep scanning.
+		if hdr.Typeflag != tar.TypeReg {
+			continue
+		}
 		return writeExecutable(dst, tr, hdr.Size)
 	}
 	return fmt.Errorf("archive %s: %s not found", filepath.Base(archivePath), binaryName)
@@ -218,6 +248,12 @@ func extractZipBinary(archivePath, binaryName, dst string) error {
 	defer zr.Close()
 	for _, zf := range zr.File {
 		if !isBinaryEntry(zf.Name, binaryName) {
+			continue
+		}
+		// archive/zip has no Typeflag; the file mode is the equivalent
+		// guard. A directory or symlink entry named like the binary must
+		// not be extracted (see the tar path's tar.TypeReg check).
+		if !zf.Mode().IsRegular() {
 			continue
 		}
 		rc, err := zf.Open()
