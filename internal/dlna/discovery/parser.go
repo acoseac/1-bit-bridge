@@ -168,6 +168,44 @@ const (
 	ServiceRenderingControl  = "urn:schemas-upnp-org:service:RenderingControl:1"
 )
 
+// serviceTypeCanonical maps each recognised renderer service's version-less
+// prefix (including the trailing ':') to its canonical ":1" type. A device
+// advertising AVTransport:2 / :3 is mapped back to the ":1" key so the strict
+// downstream desc.Services[ServiceAVTransport] lookups still resolve — UPnP
+// minor service revisions are backward-compatible for the actions we drive.
+// Mirrors the prefix tolerance in
+// internal/upnp.lookupContentDirectoryControlURL.
+var serviceTypeCanonical = [...]struct{ prefix, canonical string }{
+	{"urn:schemas-upnp-org:service:AVTransport:", ServiceAVTransport},
+	{"urn:schemas-upnp-org:service:ConnectionManager:", ServiceConnectionManager},
+	{"urn:schemas-upnp-org:service:RenderingControl:", ServiceRenderingControl},
+}
+
+// canonicalServiceType folds a known renderer service type to its ":1" form
+// when its trailing version is numeric; unknown types pass through untouched.
+// A device advertising the same service at multiple versions collapses to one
+// ":1" key (last-encountered wins), which is the correct default.
+func canonicalServiceType(stype string) string {
+	for _, e := range serviceTypeCanonical {
+		if rest, ok := strings.CutPrefix(stype, e.prefix); ok && isAllDigits(rest) {
+			return e.canonical
+		}
+	}
+	return stype
+}
+
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // rawDeviceDescription is the XML unmarshaling target. Renderer
 // XML is messy (mixed casing, optional namespaces, vendor
 // extensions) — `xml.Unmarshal`'s case-insensitive matching +
@@ -233,6 +271,9 @@ func ParseDeviceDescription(body []byte, baseURL string) (DeviceDescription, err
 		if stype == "" {
 			continue
 		}
+		// Fold AVTransport:2 / RenderingControl:3 / ... back to the ":1"
+		// lookup keys so a modern renderer isn't marked "no AVTransport".
+		stype = canonicalServiceType(stype)
 		ctrl, ctrlErr := resolveServiceURL(base, s.ControlURL)
 		if ctrlErr != nil {
 			// Silently dropping the service marks an otherwise-usable renderer

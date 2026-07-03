@@ -256,6 +256,53 @@ func TestParseDeviceDescription_ChordShape(t *testing.T) {
 	}
 }
 
+func TestParseDeviceDescription_VersionTolerantAVTransport(t *testing.T) {
+	// A renderer advertising AVTransport:2 / RenderingControl:3 (real,
+	// backward-compatible UPnP revisions) must still be drivable — the
+	// versioned types fold to the ":1" lookup keys.
+	xml := `<?xml version="1.0"?><root><device>` +
+		`<friendlyName>V2 Renderer</friendlyName><UDN>uuid:v2</UDN><serviceList>` +
+		`<service><serviceType>urn:schemas-upnp-org:service:AVTransport:2</serviceType>` +
+		`<controlURL>/avt/ctrl</controlURL></service>` +
+		`<service><serviceType>urn:schemas-upnp-org:service:RenderingControl:3</serviceType>` +
+		`<controlURL>/rc/ctrl</controlURL></service>` +
+		`</serviceList></device></root>`
+	desc, err := ParseDeviceDescription([]byte(xml), "http://192.0.2.9:8080/desc.xml")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	av, ok := desc.Services[ServiceAVTransport]
+	if !ok {
+		t.Fatalf("AVTransport:2 not folded to the :1 key; services=%v", desc.Services)
+	}
+	if av.ControlURL != "http://192.0.2.9:8080/avt/ctrl" {
+		t.Errorf("AVTransport.ControlURL = %q", av.ControlURL)
+	}
+	if _, ok := desc.Services[ServiceRenderingControl]; !ok {
+		t.Errorf("RenderingControl:3 not folded to the :1 key")
+	}
+}
+
+func TestCanonicalServiceType(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"urn:schemas-upnp-org:service:AVTransport:1", ServiceAVTransport},
+		{"urn:schemas-upnp-org:service:AVTransport:2", ServiceAVTransport},
+		{"urn:schemas-upnp-org:service:AVTransport:3", ServiceAVTransport},
+		{"urn:schemas-upnp-org:service:ConnectionManager:2", ServiceConnectionManager},
+		{"urn:schemas-upnp-org:service:RenderingControl:4", ServiceRenderingControl},
+		// Non-numeric trailing segment is not a version — leave untouched.
+		{"urn:schemas-upnp-org:service:AVTransport:x", "urn:schemas-upnp-org:service:AVTransport:x"},
+		// Unknown / non-renderer services pass through.
+		{"urn:schemas-upnp-org:service:ContentDirectory:1", "urn:schemas-upnp-org:service:ContentDirectory:1"},
+		{"urn:vendor:service:Custom:1", "urn:vendor:service:Custom:1"},
+	}
+	for _, c := range cases {
+		if got := canonicalServiceType(c.in); got != c.want {
+			t.Errorf("canonicalServiceType(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 func TestParseDeviceDescription_RejectsMissingAVTransport(t *testing.T) {
 	// A renderer without AVTransport can't be driven as an audio
 	// target — surfacing it would mislead the user.

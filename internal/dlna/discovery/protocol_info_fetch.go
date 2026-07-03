@@ -191,7 +191,11 @@ func FetchGetProtocolInfo(
 		return nil, errors.New("dispatcher returned response with nil Body")
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if !IsHTTPStatusOK(resp.StatusCode) {
+	// A SOAP 1.1 Fault is returned with HTTP 500 (SOAP 1.1 §4.4), so let 500
+	// through to the body parse — ParseGetProtocolInfoResponse surfaces the
+	// Fault as ErrSOAPFault instead of an opaque "status 500". Any other
+	// non-200 is terminal.
+	if !IsHTTPStatusOK(resp.StatusCode) && resp.StatusCode != http.StatusInternalServerError {
 		return nil, fmt.Errorf(
 			"POST %s: status %d",
 			connectionManagerControlURL,
@@ -205,17 +209,20 @@ func FetchGetProtocolInfo(
 	return ParseGetProtocolInfoResponse(body)
 }
 
-// buildGetProtocolInfoEnvelope assembles the SOAP request body for
-// `GetProtocolInfo`. The envelope is fixed (no per-call parameters
-// — GetProtocolInfo takes no inputs), so the body bytes are
-// effectively a constant. Defined as a function rather than a
-// `const` byte slice for clarity at the call site.
+// getProtocolInfoEnvelope is the fixed SOAP body for GetProtocolInfo (no
+// per-call parameters — GetProtocolInfo takes no inputs), built once at
+// package init instead of re-allocated per probe. Mirrors silenceWAVCache in
+// internal/dlna/silence.go. The returned slice is SHARED and MUST NOT be
+// mutated; the only caller wraps it in a read-only bytes.NewReader.
+var getProtocolInfoEnvelope = []byte(`<?xml version="1.0" encoding="utf-8"?>` +
+	`<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" ` +
+	`s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">` +
+	`<s:Body>` +
+	`<u:GetProtocolInfo xmlns:u="urn:schemas-upnp-org:service:ConnectionManager:1"/>` +
+	`</s:Body>` +
+	`</s:Envelope>`)
+
+// buildGetProtocolInfoEnvelope returns the shared, immutable envelope bytes.
 func buildGetProtocolInfoEnvelope() []byte {
-	return []byte(`<?xml version="1.0" encoding="utf-8"?>` +
-		`<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" ` +
-		`s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">` +
-		`<s:Body>` +
-		`<u:GetProtocolInfo xmlns:u="urn:schemas-upnp-org:service:ConnectionManager:1"/>` +
-		`</s:Body>` +
-		`</s:Envelope>`)
+	return getProtocolInfoEnvelope
 }

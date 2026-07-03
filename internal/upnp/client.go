@@ -209,10 +209,16 @@ func buildSearchEnvelope(containerID, searchCriteria, filter string, startingInd
 	return b.Bytes()
 }
 
+// getSystemUpdateIDEnvelope is the fixed SOAP body for GetSystemUpdateID (no
+// per-call args), built once instead of re-allocated per poll. The returned
+// slice is SHARED and MUST NOT be mutated; the only caller wraps it in a
+// read-only bytes.NewReader.
+var getSystemUpdateIDEnvelope = []byte(soapHeader +
+	`<u:GetSystemUpdateID xmlns:u="` + ContentDirectoryServiceType + `"/>` +
+	soapFooter)
+
 func buildGetSystemUpdateIDEnvelope() []byte {
-	return []byte(soapHeader +
-		`<u:GetSystemUpdateID xmlns:u="` + ContentDirectoryServiceType + `"/>` +
-		soapFooter)
+	return getSystemUpdateIDEnvelope
 }
 
 // writeArg writes <name>escaped(val)</name>. Argument values are
