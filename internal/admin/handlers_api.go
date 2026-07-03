@@ -737,6 +737,28 @@ func (s *Server) apiRootsList(w http.ResponseWriter, r *http.Request) {
 
 // --- POST /api/roots {path} ---
 
+// normalizeRootPathReq trims + absolutizes a library-root path from an
+// admin roots request. On a rejectable input (empty, or unresolvable by
+// filepath.Abs) it writes the error response and returns ok=false so the
+// caller returns immediately. Shared by apiRootsAdd + apiRootsRemove so
+// both agree on the canonical absolute form Scanner.Roots() stores — a
+// mismatch there makes remove false-trip a 404 against an added root.
+// filepath.Abs("") resolves to the process CWD, so rejecting empty is
+// load-bearing, not cosmetic.
+func normalizeRootPathReq(w http.ResponseWriter, raw string) (abs string, ok bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		writeError(w, http.StatusBadRequest, "path-required", "path must not be empty")
+		return "", false
+	}
+	abs, err := filepath.Abs(raw)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad-path", err.Error())
+		return "", false
+	}
+	return abs, true
+}
+
 func (s *Server) apiRootsAdd(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Path string `json:"path"`
@@ -745,14 +767,8 @@ func (s *Server) apiRootsAdd(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errCodeBadJSON, err.Error())
 		return
 	}
-	req.Path = strings.TrimSpace(req.Path)
-	if req.Path == "" {
-		writeError(w, http.StatusBadRequest, "path-required", "path must not be empty")
-		return
-	}
-	abs, err := filepath.Abs(req.Path)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "bad-path", err.Error())
+	abs, ok := normalizeRootPathReq(w, req.Path)
+	if !ok {
 		return
 	}
 	info, err := os.Stat(abs)
@@ -848,12 +864,21 @@ func (s *Server) apiRootsRemove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Normalize identically to apiRootsAdd (shared helper) so the cleaned
+	// absolute form matches what Scanner.Roots() stores — otherwise a
+	// relative / untrimmed / trailing-slash input (e.g. "/Music/" or
+	// " ./Music") false-trips the slices.Index 404 below.
+	abs, ok := normalizeRootPathReq(w, req.Path)
+	if !ok {
+		return
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cfg := s.deps.CfgHolder.Load()
 
 	current := s.deps.Scanner.Roots()
-	idx := slices.Index(current, req.Path)
+	idx := slices.Index(current, abs)
 	if idx < 0 {
 		writeError(w, http.StatusNotFound, "unknown-root", "not in current library")
 		return
@@ -1558,15 +1583,32 @@ func (s *Server) cachedSoxAvailability() *bool {
 		return nil
 	}
 	now := time.Now()
+
+	// Fast path: serve a fresh cached value, then release the lock. The
+	// unlocks are EXPLICIT (no defer) because the whole point is to run
+	// UpscalePrecheck() UNLOCKED — it can shell out to `sox --help` for
+	// up to 2 s, and cachedSoxAvailability is called on the SSE snapshot
+	// path (getUpscaleStatsSnapshot / getAnalysisStatsSnapshot). A
+	// deferred unlock would hold soxAvailabilityMu across that probe and
+	// block every concurrent SSE connection / Settings tab.
 	s.soxAvailabilityMu.Lock()
-	defer s.soxAvailabilityMu.Unlock()
 	if !s.soxAvailabilityAt.IsZero() && now.Sub(s.soxAvailabilityAt) < soxAvailabilityCacheTTL {
 		v := s.soxAvailability
+		s.soxAvailabilityMu.Unlock()
 		return &v
 	}
+	s.soxAvailabilityMu.Unlock()
+
+	// Probe unlocked. Concurrent cache-miss callers may each invoke
+	// UpscalePrecheck, but the wired soxToolchainCache (cmd/bridge, its
+	// own mutex + TTL) dedupes the actual exec — at most one real
+	// `sox --help` runs; the rest are warm-cache hits.
 	v := s.deps.UpscalePrecheck() == nil
+
+	s.soxAvailabilityMu.Lock()
 	s.soxAvailability = v
-	s.soxAvailabilityAt = now
+	s.soxAvailabilityAt = time.Now() // fresh timestamp captured post-probe
+	s.soxAvailabilityMu.Unlock()
 	return &v
 }
 

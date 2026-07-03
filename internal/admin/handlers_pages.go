@@ -97,11 +97,15 @@ func (s *Server) renderPage(w http.ResponseWriter, active string, data any) {
 
 func (s *Server) pageDashboard(w http.ResponseWriter, r *http.Request) {
 	cfg := s.deps.CfgHolder.Load()
-	tracks, _ := s.deps.Manifest.CountTracks(r.Context())
 	dbBytes := dbSize(filepath.Join(cfg.DataDir, "bridge.db"))
 	// Library composition for first paint (live updates come from the
 	// SSE stats frame via app.js applyStats). Best-effort — a SQL
-	// hiccup leaves the breakdown zeroed.
+	// hiccup leaves the breakdown zeroed. RollupByPrefix("") runs the
+	// same `SELECT COUNT(*) FROM tracks` fast path CountTracks would, so
+	// rollup.TrackCount IS the indexed-track total — a separate
+	// CountTracks call was redundant AND opened a divergence window with
+	// the SSE readStatsDBPart path (which sources TracksIndexed from the
+	// same rollup).
 	rollup, _ := s.deps.Manifest.RollupByPrefix(r.Context(), "")
 	var variantFiles int
 	var variantBytes int64
@@ -114,7 +118,7 @@ func (s *Server) pageDashboard(w http.ResponseWriter, r *http.Request) {
 	data := map[string]any{
 		"Uptime":              time.Since(s.deps.StartedAt),
 		"StartedAt":           s.deps.StartedAt,
-		"TracksIndexed":       tracks,
+		"TracksIndexed":       rollup.TrackCount,
 		"TracksWithUpscaled":  rollup.UpscaledTrackCount,
 		"TracksWithOptimized": rollup.OptimizedTrackCount,
 		"VariantFiles":        variantFiles,

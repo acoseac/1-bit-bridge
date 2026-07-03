@@ -142,6 +142,36 @@ func TestApiUPnPServers_WiredEmitsConfiguredAndDiscoveryState(t *testing.T) {
 	}
 }
 
+// TestApiUPnPServers_WiredNilSlicesMarshalAsEmptyArray is the F21
+// regression: a wired provider that returns a nil slice must still put
+// `[]` on the wire, not `null` (a nil overwrite of the pre-initialized
+// empty slice would break the frontend's array iteration). Decoding
+// round-trips `[]` to a non-nil slice and `null` to nil, so a non-nil
+// decode proves the wire carried `[]`.
+func TestApiUPnPServers_WiredNilSlicesMarshalAsEmptyArray(t *testing.T) {
+	s := newTestUPnPHandler(t, &stubUPnPProvider{}) // servers + discovered are nil
+
+	w := httptest.NewRecorder()
+	s.apiUPnPServers(w, httptest.NewRequest(http.MethodGet, "/api/upnp/servers", nil))
+	var resp upnpServersResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode servers: %v", err)
+	}
+	if resp.Servers == nil {
+		t.Errorf("apiUPnPServers: Servers decoded as nil (wire was `null`); want `[]` — body=%s", w.Body.String())
+	}
+
+	w2 := httptest.NewRecorder()
+	s.apiUPnPDiscovered(w2, httptest.NewRequest(http.MethodGet, "/api/upnp/discovered", nil))
+	var disc upnpDiscoveredResponse
+	if err := json.Unmarshal(w2.Body.Bytes(), &disc); err != nil {
+		t.Fatalf("decode discovered: %v", err)
+	}
+	if disc.Servers == nil {
+		t.Errorf("apiUPnPDiscovered: Servers decoded as nil (wire was `null`); want `[]` — body=%s", w2.Body.String())
+	}
+}
+
 // --- POST /api/upnp/rescan ---
 
 func TestApiUPnPRescan_NotWiredReturns404(t *testing.T) {

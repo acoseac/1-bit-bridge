@@ -150,7 +150,12 @@ func (s *Server) apiUPnPServers(w http.ResponseWriter, _ *http.Request) {
 	resp := upnpServersResponse{Servers: []UPnPUpstreamServerState{}}
 	if s.deps.UPnPUpstream != nil {
 		resp.Enabled = true
-		resp.Servers = s.deps.UPnPUpstream.ConfiguredServers()
+		// Keep the pre-initialized [] when the provider returns nil — a
+		// nil slice marshals to `"servers": null`, which breaks the
+		// frontend's array iteration. Empty (non-nil) marshals to `[]`.
+		if servers := s.deps.UPnPUpstream.ConfiguredServers(); servers != nil {
+			resp.Servers = servers
+		}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -230,7 +235,11 @@ func (s *Server) apiUPnPDiscovered(w http.ResponseWriter, _ *http.Request) {
 	resp := upnpDiscoveredResponse{Servers: []UPnPDiscoveredServer{}}
 	if s.deps.UPnPUpstream != nil {
 		resp.Enabled = true
-		resp.Servers = s.deps.UPnPUpstream.DiscoveredServers()
+		// Keep the pre-initialized [] when the provider returns nil (see
+		// apiUPnPServers) so the wire carries `[]`, not `null`.
+		if servers := s.deps.UPnPUpstream.DiscoveredServers(); servers != nil {
+			resp.Servers = servers
+		}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
