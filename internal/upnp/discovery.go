@@ -336,8 +336,14 @@ func (c *MediaServerDiscoveryClient) Stop() {
 	c.runMu.Lock()
 	c.runCancel = nil
 	c.runCtx = nil
-	c.runMu.Unlock()
+	// Clear the cache UNDER runMu: if it ran after the unlock, a concurrent
+	// Start() could pass its `runCancel != nil` guard in the gap, spin up fresh
+	// loops that Upsert, and then this stale Clear() would wipe the new
+	// client's cache. Clear takes cache.mu (not runMu) so there's no lock-order
+	// hazard, and all loops have already exited (wg.Wait above) so no reader is
+	// blocked on runMu here. (Gemini HIGH on PR #469.)
 	c.cache.Clear()
+	c.runMu.Unlock()
 }
 
 func (c *MediaServerDiscoveryClient) snapshotConn() *net.UDPConn {

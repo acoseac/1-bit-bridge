@@ -332,8 +332,14 @@ func (c *SSDPDiscoveryClient) Stop() {
 	c.runMu.Lock()
 	c.runCancel = nil
 	c.runCtx = nil
-	c.runMu.Unlock()
+	// Clear the cache UNDER runMu (not after the unlock): otherwise a concurrent
+	// Start() could pass its `runCancel != nil` guard in the gap, spin up fresh
+	// loops that Upsert, and this stale Clear() would wipe the new client's
+	// cache. Clear takes cache.mu (not runMu) so there's no lock-order hazard,
+	// and all loops have already exited (wg.Wait above). (Twin of the Gemini
+	// HIGH fix on PR #469's MediaServerDiscoveryClient — kept identical.)
 	c.cache.Clear()
+	c.runMu.Unlock()
 	packageLogger.Info("DLNA renderer discovery stopped")
 }
 
