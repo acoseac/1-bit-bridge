@@ -26,6 +26,12 @@ var packageLogger = logging.Component("dlna-discovery")
 // letting it kill discovery for the process lifetime.
 const ssdpReadErrBackoff = 250 * time.Millisecond
 
+// ssdpReadErrEscalateAt is the consecutive-read-error count at which the loop
+// logs once at Error instead of Warn — a distinct "discovery is sustained-
+// degraded" signal (e.g. the interface was removed) vs a one-off transient
+// blip. ~20 × ssdpReadErrBackoff ≈ 5s of back-to-back failures.
+const ssdpReadErrEscalateAt = 20
+
 // structuralStubLastSeen is the sentinel LastSeenAt stamped on a
 // STRUCTURALLY-failed renderer stub (4xx / unparseable description / no
 // AVTransport — see errStructuralDescription). Because EvictStale treats
@@ -359,6 +365,7 @@ func (c *SSDPDiscoveryClient) snapshotConn() *net.UDPConn {
 func (c *SSDPDiscoveryClient) runLoop(ctx context.Context) {
 	defer c.wg.Done()
 	buf := make([]byte, 4096) // SSDP packets are always <2KB in practice
+	consecutiveReadErrs := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -383,9 +390,11 @@ func (c *SSDPDiscoveryClient) runLoop(ctx context.Context) {
 		_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 		n, src, err := conn.ReadFromUDP(buf)
 		if err != nil {
-			// Read timeout is the expected loop tick.
+			// Read timeout is the expected loop tick. A successful timeout
+			// proves the read path works, so reset the error streak.
 			var nErr net.Error
 			if errors.As(err, &nErr) && nErr.Timeout() {
+				consecutiveReadErrs = 0
 				continue
 			}
 			// Shutdown — Stop closed the socket ("use of closed connection")
@@ -397,7 +406,13 @@ func (c *SSDPDiscoveryClient) runLoop(ctx context.Context) {
 			// port-unreachable): don't kill discovery for the process
 			// lifetime — log + ctx-aware backoff + retry. The backoff caps a
 			// persistently-broken socket at ~4 reads/sec instead of hot-spin.
-			packageLogger.Warn("SSDP read error; backing off", "err", err.Error())
+			consecutiveReadErrs++
+			if consecutiveReadErrs == ssdpReadErrEscalateAt {
+				packageLogger.Error("SSDP read errors sustained; discovery degraded",
+					"consecutive", consecutiveReadErrs, "err", err.Error())
+			} else {
+				packageLogger.Warn("SSDP read error; backing off", "err", err.Error())
+			}
 			select {
 			case <-ctx.Done():
 				return
@@ -405,6 +420,7 @@ func (c *SSDPDiscoveryClient) runLoop(ctx context.Context) {
 			}
 			continue
 		}
+		consecutiveReadErrs = 0
 		packet := make([]byte, n)
 		copy(packet, buf[:n])
 		c.handlePacket(ctx, packet, src)

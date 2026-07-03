@@ -30,6 +30,12 @@ const MediaServerDeviceType = "urn:schemas-upnp-org:device:MediaServer:1"
 // from rather than letting it kill discovery for the process lifetime.
 const ssdpReadErrBackoff = 250 * time.Millisecond
 
+// ssdpReadErrEscalateAt is the consecutive-read-error count at which the loop
+// logs once at Error instead of Warn — a distinct "discovery is sustained-
+// degraded" signal (e.g. the interface was removed) vs a one-off transient
+// blip. ~20 × ssdpReadErrBackoff ≈ 5s of back-to-back failures.
+const ssdpReadErrEscalateAt = 20
+
 // ContentDirectoryServiceTypePrefix is the prefix used to find the CDS
 // entry inside a parsed device description's Services map (the version
 // suffix differs across MiniDLNA / upmpdcli / MinimServer — match by
@@ -356,6 +362,7 @@ func (c *MediaServerDiscoveryClient) snapshotConn() *net.UDPConn {
 func (c *MediaServerDiscoveryClient) runLoop(ctx context.Context) {
 	defer c.wg.Done()
 	buf := make([]byte, 4096)
+	consecutiveReadErrs := 0
 	for {
 		if ctx.Err() != nil {
 			return
@@ -371,9 +378,11 @@ func (c *MediaServerDiscoveryClient) runLoop(ctx context.Context) {
 		_ = conn.SetReadDeadline(c.nowFunc().Add(2 * time.Second))
 		n, addr, err := conn.ReadFromUDP(buf)
 		if err != nil {
-			// Deadline tick — the normal idle path.
+			// Deadline tick — the normal idle path. A successful timeout
+			// proves the read path works, so reset the error streak.
 			var nerr net.Error
 			if errors.As(err, &nerr) && nerr.Timeout() {
+				consecutiveReadErrs = 0
 				continue
 			}
 			// Shutdown — Stop closed the socket / cancelled ctx.
@@ -384,7 +393,13 @@ func (c *MediaServerDiscoveryClient) runLoop(ctx context.Context) {
 			// port-unreachable): don't kill discovery for the process
 			// lifetime — log + ctx-aware backoff + retry. The backoff caps a
 			// persistently-broken socket at ~4 reads/sec instead of hot-spin.
-			logger.Warn("SSDP read error; backing off", "err", err.Error())
+			consecutiveReadErrs++
+			if consecutiveReadErrs == ssdpReadErrEscalateAt {
+				logger.Error("SSDP read errors sustained; discovery degraded",
+					"consecutive", consecutiveReadErrs, "err", err.Error())
+			} else {
+				logger.Warn("SSDP read error; backing off", "err", err.Error())
+			}
 			select {
 			case <-ctx.Done():
 				return
@@ -392,6 +407,7 @@ func (c *MediaServerDiscoveryClient) runLoop(ctx context.Context) {
 			}
 			continue
 		}
+		consecutiveReadErrs = 0
 		c.handlePacket(ctx, append([]byte(nil), buf[:n]...), addr)
 	}
 }
