@@ -150,3 +150,42 @@ func TestExtractZipBinary_SkipsNonRegularEntry(t *testing.T) {
 		t.Errorf("dst was written from a non-regular zip entry; want no file at %s", dst)
 	}
 }
+
+// TestExtractZipBinary_ExtractsRegularFile is the positive companion for
+// the zip path (CodeRabbit review): a regular-file entry named like the
+// binary still extracts, so the IsRegular guard doesn't over-reject a
+// legitimate Windows binary.
+func TestExtractZipBinary_ExtractsRegularFile(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "archive.zip")
+	f, err := os.Create(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(f)
+	hdr := &zip.FileHeader{Name: "bridge.exe"}
+	hdr.SetMode(0o755) // regular file
+	zwEntry, err := zw.CreateHeader(hdr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := []byte("MZ\x00\x00fake-pe\n")
+	if _, err := zwEntry.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	dst := filepath.Join(t.TempDir(), "bridge.exe")
+	if err := extractZipBinary(p, "bridge.exe", dst); err != nil {
+		t.Fatalf("regular zip entry: %v", err)
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("read dst: %v", err)
+	}
+	if string(got) != string(content) {
+		t.Errorf("extracted content = %q, want %q", got, content)
+	}
+}

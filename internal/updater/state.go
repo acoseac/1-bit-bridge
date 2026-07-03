@@ -159,12 +159,16 @@ func SaveState(dataDir string, st State) error {
 	// level, but POSIX doesn't guarantee the entry itself is durable
 	// until the parent dir is fsynced — a crash in that window could
 	// leave the marker missing and the boot-time rollback logic would
-	// skip. Mirrors swapBinary in swap_unix.go. Best-effort: on Windows
-	// FlushFileBuffers on a directory handle fails and is ignored (NTFS
-	// journaling + the temp fsync above already cover durability there).
-	if d, err := os.Open(dataDir); err == nil {
-		_ = d.Sync()
-		_ = d.Close()
+	// skip. Mirrors swapBinary in swap_unix.go, which is likewise
+	// Unix-only. Skipped on Windows, where FlushFileBuffers on a
+	// directory handle always fails (ERROR_INVALID_HANDLE) — NTFS
+	// journaling + the temp fsync above already cover durability there
+	// (Gemini review; isWindows lives in install.go).
+	if !isWindows() {
+		if d, err := os.Open(dataDir); err == nil {
+			_ = d.Sync()
+			_ = d.Close()
+		}
 	}
 	return nil
 }
