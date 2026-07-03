@@ -2,6 +2,7 @@ package upnp
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -267,5 +268,96 @@ func TestSameURLHost(t *testing.T) {
 		if got := sameURLHost(c.a, c.b); got != c.want {
 			t.Errorf("sameURLHost(%q, %q) = %v, want %v", c.a, c.b, got, c.want)
 		}
+	}
+}
+
+// blockingServerDispatcher signals when a detail fetch enters and then blocks
+// until released, so a test can hold a fetch in-flight across Stop().
+type blockingServerDispatcher struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (d *blockingServerDispatcher) Do(_ context.Context, _ *http.Request) (*http.Response, error) {
+	select {
+	case d.entered <- struct{}{}:
+	default:
+	}
+	<-d.release
+	return nil, errors.New("blockingServerDispatcher released")
+}
+
+// TestStopWaitsForInFlightFetch pins the WaitGroup lifecycle: Stop() must park
+// in wg.Wait() until an in-flight detail fetch drains, and that fetch must not
+// Upsert into the just-cleared cache (the Stop()/Upsert race). Mirrors the
+// sibling internal/dlna/discovery renderer test of the same name.
+func TestStopWaitsForInFlightFetch(t *testing.T) {
+	disp := &blockingServerDispatcher{
+		entered: make(chan struct{}, 1),
+		release: make(chan struct{}),
+	}
+	cache := NewServerCache()
+	c := newServerDiscoveryTestClient(t, disp, cache)
+
+	parent, cancelParent := context.WithCancel(context.Background())
+	t.Cleanup(cancelParent) // failure-path net: cancels the run loops even if Stop isn't reached
+	if err := c.Start(parent); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	// The stub blocks on `release` ignoring ctx, so only closing `release`
+	// can unblock the in-flight fetch (and the Stop goroutine waiting on it).
+	// Register an idempotent closer so a t.Fatal before the happy-path
+	// release still drains it instead of hanging cleanup.
+	releaseClosed := false
+	releaseFetch := func() {
+		if !releaseClosed {
+			releaseClosed = true
+			close(disp.release)
+		}
+	}
+	t.Cleanup(releaseFetch)
+
+	// Snapshot the live runCtx (the one Stop cancels) under the lock so the
+	// fetch's cancellation guards observe Stop()'s runCancel().
+	c.runMu.RLock()
+	runCtx := c.runCtx
+	c.runMu.RUnlock()
+
+	// Trigger one detail fetch deterministically — handlePacket spawns the
+	// tracked fetch for a first-time UDN carrying a Location.
+	c.handlePacket(runCtx, alivePacket("uuid:inflight", "http://192.0.2.10:8080/desc.xml"), nil)
+
+	select {
+	case <-disp.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("detail fetch never entered the dispatcher")
+	}
+
+	stopReturned := make(chan struct{})
+	go func() {
+		c.Stop()
+		close(stopReturned)
+	}()
+
+	// Stop() must NOT return while the fetch is still blocked — wg.Wait() holds it.
+	select {
+	case <-stopReturned:
+		t.Fatal("Stop() returned before the in-flight fetch finished — wg.Wait() missing/misplaced")
+	case <-time.After(150 * time.Millisecond):
+		// Expected: Stop is parked in wg.Wait().
+	}
+
+	// Release the fetch; it returns an error, sees runCtx cancelled, and exits
+	// without Upsert.
+	releaseFetch()
+
+	select {
+	case <-stopReturned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop() did not return after the fetch drained")
+	}
+
+	if n := cache.Len(); n != 0 {
+		t.Errorf("cache has %d entries after Stop; want 0 (no post-Clear Upsert)", n)
 	}
 }

@@ -12,8 +12,11 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/dlna/discovery"
+	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"golang.org/x/net/ipv4"
 )
+
+var logger = logging.Component("upnp")
 
 // MediaServerDeviceType is the SSDP search target for UPnP MediaServers
 // (the sibling of internal/dlna/discovery's MediaRenderer:1 target).
@@ -207,6 +210,14 @@ type MediaServerDiscoveryClient struct {
 	conn      *net.UDPConn
 	runCtx    context.Context //nolint:containedctx // discovery client lifecycle
 	runCancel context.CancelFunc
+
+	// wg tracks the two run loops (runLoop, runTickLoop) AND every
+	// in-flight detail fetch so Stop() can block until the cache can no
+	// longer be mutated BEFORE it calls cache.Clear(). Without it, a fetch
+	// that already passed its runCtx.Err() guard could Upsert into the
+	// freshly-cleared cache (the Stop()/Upsert race). Mirrors the sibling
+	// internal/dlna/discovery.SSDPDiscoveryClient invariant.
+	wg sync.WaitGroup
 }
 
 // NewMediaServerDiscoveryClient validates the config and returns a
@@ -264,15 +275,24 @@ func (c *MediaServerDiscoveryClient) Start(parent context.Context) error {
 	c.conn = conn
 	// Pin outgoing M-SEARCH multicast to the operator-chosen interface
 	// — same rationale as internal/dlna/discovery (Windows + Tailscale
-	// 2026-05-27 incident). Soft-fail.
+	// 2026-05-27 incident). Soft-fail: a failure here means multicast goes
+	// via the OS default (degraded, not broken), so we log + continue
+	// rather than refuse to start. Matches internal/dlna/ssdp.go's Warn.
 	if c.cfg.Interface != nil {
-		_ = ipv4.NewPacketConn(conn).SetMulticastInterface(c.cfg.Interface)
+		if err := ipv4.NewPacketConn(conn).SetMulticastInterface(c.cfg.Interface); err != nil {
+			logger.Warn("SSDP multicast interface bind failed (falling back to OS default)",
+				"interface", c.cfg.Interface.Name, "err", err.Error())
+		}
 	}
 
 	runCtx, runCancel := context.WithCancel(parent)
 	c.runCtx = runCtx
 	c.runCancel = runCancel
 
+	// Add(2) under runMu, before the spawns, pairs with the deferred Done()
+	// at the top of each loop. Start + Stop serialize on runMu and Stop's
+	// Wait() runs AFTER it releases runMu, so this Add never races Wait.
+	c.wg.Add(2)
 	go c.runLoop(runCtx)
 	go c.runTickLoop(runCtx)
 	return nil
@@ -291,10 +311,31 @@ func (c *MediaServerDiscoveryClient) Stop() {
 		_ = c.conn.Close()
 		c.conn = nil
 	}
+	c.runMu.Unlock()
+	// Wait for runLoop, runTickLoop, and any in-flight detail fetches to
+	// exit BEFORE clearing the cache — otherwise a fetch that already passed
+	// its runCtx.Err() guard could Upsert into the cleared cache. runCancel()
+	// above cancels every fetch's derived context, so this is bounded by
+	// in-flight cancellation latency, not DetailFetchTimeout. Wait() runs
+	// OUTSIDE runMu (load-bearing): runLoop/sendMSearch take runMu.RLock via
+	// snapshotConn on their way out, so holding the lock here would deadlock.
+	c.wg.Wait()
+	// Clear runCancel/runCtx only AFTER Wait() returns. Keeping runCancel
+	// non-nil across the Wait window is load-bearing: it makes a concurrent
+	// Start() fail its `runCancel != nil` guard instead of slipping past to
+	// call wg.Add(2) while this Wait is in progress (which panics with
+	// "WaitGroup misuse: Add called concurrently with Wait").
+	c.runMu.Lock()
 	c.runCancel = nil
 	c.runCtx = nil
-	c.runMu.Unlock()
+	// Clear the cache UNDER runMu: if it ran after the unlock, a concurrent
+	// Start() could pass its `runCancel != nil` guard in the gap, spin up fresh
+	// loops that Upsert, and then this stale Clear() would wipe the new
+	// client's cache. Clear takes cache.mu (not runMu) so there's no lock-order
+	// hazard, and all loops have already exited (wg.Wait above) so no reader is
+	// blocked on runMu here. (Gemini HIGH on PR #469.)
 	c.cache.Clear()
+	c.runMu.Unlock()
 }
 
 func (c *MediaServerDiscoveryClient) snapshotConn() *net.UDPConn {
@@ -305,7 +346,9 @@ func (c *MediaServerDiscoveryClient) snapshotConn() *net.UDPConn {
 
 // runLoop reads SSDP packets until ctx is cancelled / the conn is closed.
 func (c *MediaServerDiscoveryClient) runLoop(ctx context.Context) {
+	defer c.wg.Done()
 	buf := make([]byte, 4096)
+	consecutiveReadErrs := 0
 	for {
 		if ctx.Err() != nil {
 			return
@@ -321,13 +364,15 @@ func (c *MediaServerDiscoveryClient) runLoop(ctx context.Context) {
 		_ = conn.SetReadDeadline(c.nowFunc().Add(2 * time.Second))
 		n, addr, err := conn.ReadFromUDP(buf)
 		if err != nil {
-			// Read deadline / Stop'd socket — both expected.
-			var nerr net.Error
-			if errors.As(err, &nerr) && nerr.Timeout() {
-				continue
+			// Shared policy (timeout→retry / shutdown→return / transient→
+			// log+backoff+retry, escalating on a sustained streak) — kept in
+			// one place so this client and the renderer client can't drift.
+			if discovery.HandleReadErr(ctx, err, &consecutiveReadErrs, logger) {
+				return
 			}
-			return
+			continue
 		}
+		consecutiveReadErrs = 0
 		c.handlePacket(ctx, append([]byte(nil), buf[:n]...), addr)
 	}
 }
@@ -335,6 +380,7 @@ func (c *MediaServerDiscoveryClient) runLoop(ctx context.Context) {
 // runTickLoop sends M-SEARCH on the configured cadence and evicts stale
 // entries each tick.
 func (c *MediaServerDiscoveryClient) runTickLoop(ctx context.Context) {
+	defer c.wg.Done()
 	// Fire one immediately so the cache populates without waiting.
 	c.sendMSearch()
 	t := time.NewTicker(c.cfg.MSearchInterval)
@@ -407,7 +453,7 @@ func (c *MediaServerDiscoveryClient) handlePacket(ctx context.Context, packet []
 		// is correct for a server that moved somewhere unreachable.
 		if hdr.Location != "" &&
 			!sameURLHost(hdr.Location, existing.ContentDirectoryControlURL) {
-			go c.fetchAndCacheDetails(ctx, udn, hdr.Location, now)
+			c.spawnDetailFetch(ctx, udn, hdr.Location, now)
 			return
 		}
 		c.cache.Upsert(ServerInfo{UDN: udn, LastSeenAt: now})
@@ -416,7 +462,7 @@ func (c *MediaServerDiscoveryClient) handlePacket(ctx context.Context, packet []
 	if hdr.Location == "" {
 		return
 	}
-	go c.fetchAndCacheDetails(ctx, udn, hdr.Location, now)
+	c.spawnDetailFetch(ctx, udn, hdr.Location, now)
 }
 
 // sameURLHost reports whether two URLs share the same host:port.
@@ -431,17 +477,41 @@ func sameURLHost(a, b string) bool {
 	return ua.Host == ub.Host
 }
 
+// spawnDetailFetch tracks the fetch in the WaitGroup before launching it.
+// wg.Add(1) here (not inside fetchAndCacheDetails) is safe vs Stop()'s
+// wg.Wait(): handlePacket runs ON the runLoop goroutine, which holds its own
+// wg slot for its entire lifetime, so this Add takes the counter ≥1→≥2, never
+// 0→1 (the only shape that panics under a concurrent Wait). Stop()'s Wait
+// can't return until runLoop returns, by which time no further fetch Adds are
+// issued.
+func (c *MediaServerDiscoveryClient) spawnDetailFetch(ctx context.Context, udn, location string, now time.Time) {
+	c.wg.Add(1)
+	go c.fetchAndCacheDetails(ctx, udn, location, now)
+}
+
 // fetchAndCacheDetails downloads + parses the device description for a
 // newly-discovered UDN, extracts the ContentDirectory controlURL, and
 // caches it. Bounded by a semaphore so a NOTIFY storm can't fan out
 // unbounded TCP connections.
 func (c *MediaServerDiscoveryClient) fetchAndCacheDetails(runCtx context.Context, udn, location string, lastSeenAt time.Time) {
+	// Paired with the wg.Add(1) in spawnDetailFetch. Deferred at the very top
+	// so it fires on EVERY return path (including the semaphore-acquire
+	// ctx.Done bail below), letting Stop()'s Wait() observe completion.
+	defer c.wg.Done()
 	select {
 	case c.detailFetchSem <- struct{}{}:
 	case <-runCtx.Done():
 		return
 	}
 	defer func() { <-c.detailFetchSem }()
+
+	// Re-check cancellation post-acquire — a long queue ahead of us could
+	// mean ctx was cancelled while we waited. Stop()'s wg.Wait() is the
+	// primary guarantee that no Upsert lands after cache.Clear(); this is
+	// defense-in-depth so a cancelled fetch doesn't do pointless work.
+	if runCtx.Err() != nil {
+		return
+	}
 
 	fetchCtx, cancel := context.WithTimeout(runCtx, c.cfg.DetailFetchTimeout)
 	defer cancel()

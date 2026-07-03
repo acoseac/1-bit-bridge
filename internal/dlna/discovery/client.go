@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"sync"
@@ -17,6 +18,61 @@ import (
 // declare a single package-scoped `logging.Component(...)` logger.
 // Per CodeRabbit Major round-1 on PR #305.
 var packageLogger = logging.Component("dlna-discovery")
+
+// ssdpReadErrBackoff paces the read loop after an unexpected (non-timeout,
+// non-shutdown) UDP read error so a persistently-broken socket can't hot-spin
+// a CPU core. On Windows an unconnected UDP socket can surface WSAECONNRESET
+// on the read that follows a send whose datagram drew an ICMP port-unreachable
+// (SIO_UDP_CONNRESET) — a transient one-shot we recover from rather than
+// letting it kill discovery for the process lifetime.
+const ssdpReadErrBackoff = 250 * time.Millisecond
+
+// ssdpReadErrEscalateAt is the consecutive-read-error count at which the loop
+// logs once at Error instead of Warn — a distinct "discovery is sustained-
+// degraded" signal (e.g. the interface was removed) vs a one-off transient
+// blip. ~20 × ssdpReadErrBackoff ≈ 5s of back-to-back failures.
+const ssdpReadErrEscalateAt = 20
+
+// HandleReadErr drives the shared read-loop resilience policy so BOTH SSDP
+// discovery read loops — this package's renderer client AND
+// internal/upnp's MediaServer client — stay byte-identical (they mirror each
+// other by design; keeping the policy in one place is what stops them drifting):
+//   - a read-deadline timeout is the normal idle tick → reset the streak, the
+//     caller continues;
+//   - a shutdown signal (ctx cancelled OR socket closed by Stop) → the caller
+//     returns;
+//   - any other (transient) error, e.g. a Windows WSAECONNRESET after an ICMP
+//     port-unreachable → log + ctx-aware backoff (bounding a persistently-
+//     broken socket at ~4 reads/sec instead of hot-spinning a core), bump the
+//     streak, and escalate to Error once failures are sustained; caller
+//     continues.
+//
+// Returns stop=true when the caller should exit its loop. `streak` is the
+// caller's consecutive-error counter (reset here on a timeout, bumped on a
+// transient error; the caller also resets it on a successful read).
+func HandleReadErr(ctx context.Context, err error, streak *int, log *slog.Logger) (stop bool) {
+	var nErr net.Error
+	if errors.As(err, &nErr) && nErr.Timeout() {
+		*streak = 0
+		return false
+	}
+	if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	*streak++
+	if *streak == ssdpReadErrEscalateAt {
+		log.Error("SSDP read errors sustained; discovery degraded",
+			"consecutive", *streak, "err", err.Error())
+	} else {
+		log.Warn("SSDP read error; backing off", "err", err.Error())
+	}
+	select {
+	case <-ctx.Done():
+		return true
+	case <-time.After(ssdpReadErrBackoff):
+	}
+	return false
+}
 
 // structuralStubLastSeen is the sentinel LastSeenAt stamped on a
 // STRUCTURALLY-failed renderer stub (4xx / unparseable description / no
@@ -324,8 +380,14 @@ func (c *SSDPDiscoveryClient) Stop() {
 	c.runMu.Lock()
 	c.runCancel = nil
 	c.runCtx = nil
-	c.runMu.Unlock()
+	// Clear the cache UNDER runMu (not after the unlock): otherwise a concurrent
+	// Start() could pass its `runCancel != nil` guard in the gap, spin up fresh
+	// loops that Upsert, and this stale Clear() would wipe the new client's
+	// cache. Clear takes cache.mu (not runMu) so there's no lock-order hazard,
+	// and all loops have already exited (wg.Wait above). (Twin of the Gemini
+	// HIGH fix on PR #469's MediaServerDiscoveryClient — kept identical.)
 	c.cache.Clear()
+	c.runMu.Unlock()
 	packageLogger.Info("DLNA renderer discovery stopped")
 }
 
@@ -345,6 +407,7 @@ func (c *SSDPDiscoveryClient) snapshotConn() *net.UDPConn {
 func (c *SSDPDiscoveryClient) runLoop(ctx context.Context) {
 	defer c.wg.Done()
 	buf := make([]byte, 4096) // SSDP packets are always <2KB in practice
+	consecutiveReadErrs := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -369,22 +432,12 @@ func (c *SSDPDiscoveryClient) runLoop(ctx context.Context) {
 		_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 		n, src, err := conn.ReadFromUDP(buf)
 		if err != nil {
-			// Read timeout is the expected loop tick; anything
-			// else after a cancel is a closed-socket signal.
-			var nErr net.Error
-			if errors.As(err, &nErr) && nErr.Timeout() {
-				continue
-			}
-			// On Stop the read returns "use of closed connection"
-			// — quiet exit, not an error log.
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				packageLogger.Warn("SSDP read error", "err", err.Error())
+			if HandleReadErr(ctx, err, &consecutiveReadErrs, packageLogger) {
 				return
 			}
+			continue
 		}
+		consecutiveReadErrs = 0
 		packet := make([]byte, n)
 		copy(packet, buf[:n])
 		c.handlePacket(ctx, packet, src)
