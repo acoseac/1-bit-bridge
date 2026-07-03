@@ -277,6 +277,25 @@ func TestDefaultBridgeURLLoopbackUsesMDNS(t *testing.T) {
 	}
 }
 
+// TestEnsureMDNSHost pins the mDNS-suffix rule, including the F4
+// regression: the "localhost" fallback (used when os.Hostname fails)
+// must NOT become "localhost.local" — that breaks the documented
+// same-machine simulator pairing path.
+func TestEnsureMDNSHost(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"localhost", "localhost"},           // F4: loopback fallback stays bare
+		{"host", "host.local"},               // bare hostname gets .local
+		{"mac-mini.local", "mac-mini.local"}, // already dotted, unchanged
+		{"bridge.ars.md", "bridge.ars.md"},   // FQDN unchanged
+		{"192.168.1.5", "192.168.1.5"},       // IP literal (dotted) unchanged
+	}
+	for _, c := range cases {
+		if got := ensureMDNSHost(c.in); got != c.want {
+			t.Errorf("ensureMDNSHost(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 // --- pairFingerprint: bake the cert the device will actually see ---
 
 func TestPairFingerprintUsesResolverForPublicHost(t *testing.T) {

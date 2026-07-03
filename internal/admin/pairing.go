@@ -243,11 +243,16 @@ func pairURLHost(rawURL string) string {
 	return u.Hostname()
 }
 
+// ensureMDNSHost appends `.local` to a bare (dot-less) hostname so the
+// pairing URL resolves over mDNS. Two values are returned unchanged:
+// any host already containing a dot (FQDN, `mac.local`, or an IP
+// literal), and the literal "localhost" — defaultBridgeURL falls back
+// to "localhost" when os.Hostname() fails, and appending `.local` there
+// would break the documented same-machine simulator pairing path
+// ("localhost.local" doesn't resolve to loopback).
 func ensureMDNSHost(host string) string {
-	for _, c := range host {
-		if c == '.' {
-			return host
-		}
+	if host == "localhost" || strings.Contains(host, ".") {
+		return host
 	}
 	return host + ".local"
 }
