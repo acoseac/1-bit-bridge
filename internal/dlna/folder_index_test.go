@@ -232,3 +232,30 @@ func Test_BuildFolderIndex_LookupTrackRoundtrip(t *testing.T) {
 		t.Errorf("LookupTrack returned wrong TrackID: %q", ti.TrackID)
 	}
 }
+
+func TestRelParentDir(t *testing.T) {
+	cases := []struct {
+		name    string
+		absPath string
+		libRoot string
+		want    string
+	}{
+		// F1: a Windows backslash path against the forward-slashed libRoot
+		// (longestCommonPathPrefix always normalizes). The prefix strip must
+		// run AFTER normalization or the raw "C:/lib" leaks into the hierarchy.
+		{"windows_backslash", `C:\lib\Artist\Album\track.flac`, "C:/lib", "Artist/Album"},
+		{"unix_forward_slash", "/library/Artist/Album/track.flac", "/library", "Artist/Album"},
+		// Directly under the root → no folder component.
+		{"track_directly_under_root", "/library/track.flac", "/library", ""},
+		// Empty libRoot: normalize separators, no prefix strip.
+		{"no_libroot_backslash", `D:\Artist\Album\x.flac`, "", "D:/Artist/Album"},
+		{"empty_abspath", "", "/library", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := relParentDir(tc.absPath, tc.libRoot); got != tc.want {
+				t.Errorf("relParentDir(%q, %q) = %q, want %q", tc.absPath, tc.libRoot, got, tc.want)
+			}
+		})
+	}
+}

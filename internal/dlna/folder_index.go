@@ -337,13 +337,15 @@ func relParentDir(absPath, libRoot string) string {
 	if absPath == "" {
 		return ""
 	}
-	stripped := absPath
-	if libRoot != "" && strings.HasPrefix(absPath, libRoot) {
-		stripped = strings.TrimPrefix(absPath, libRoot)
+	// Normalize OS separators to forward slashes FIRST — libRoot (from
+	// longestCommonPathPrefix) is already forward-slashed, so the prefix check
+	// must compare against the normalized form. On Windows a backslash absPath
+	// would otherwise fail the HasPrefix and leak the raw drive path into the
+	// DLNA folder hierarchy.
+	stripped := strings.ReplaceAll(absPath, "\\", "/")
+	if libRoot != "" && strings.HasPrefix(stripped, libRoot) {
+		stripped = strings.TrimPrefix(stripped, libRoot)
 	}
-	// Normalize OS-specific path separators to forward slashes —
-	// the manifest convention uses '/' for portability.
-	stripped = strings.ReplaceAll(stripped, "\\", "/")
 	stripped = strings.TrimPrefix(stripped, "/")
 	dir := path.Dir(stripped)
 	if dir == "." || dir == "" {

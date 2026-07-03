@@ -52,29 +52,40 @@ func IsLANEligibleInterface(iface net.Interface, addrs []net.Addr, opts Eligibil
 		return true
 	}
 
+	// Scan ALL addresses before deciding. Returning true on the first
+	// private/link-local address would wrongly ACCEPT a pure-WAN NIC — nearly
+	// every interface (public gateways included) carries an fe80 link-local,
+	// so an fe80 short-circuit classifies a public-only NIC as LAN. The
+	// three-flag scan instead rejects a public-only NIC while keeping a
+	// dual-stack home LAN eligible: modern home LAN interfaces routinely carry
+	// a public IPv6 (2000::/3 via SLAAC) alongside their private IPv4, so
+	// "disqualify on any public IP" would break DLNA on those networks.
+	//
+	// Eligible iff it has a private (LAN) address, OR it actually carries a
+	// link-local address with no public unicast (mDNS-only / no-DHCP nets).
+	// Requiring the link-local to be PRESENT (not merely "no public") keeps a
+	// no-address / loopback-only interface ineligible. (Gemini-approved
+	// predicate, refined for the empty-address edge the existing table pins.)
+	hasPrivate, hasPublic, hasLinkLocal := false, false, false
 	for _, addr := range addrs {
 		ip := ipFromAddr(addr)
-		if ip == nil {
+		if ip == nil || ip.IsLoopback() {
 			continue
 		}
-		// Defense in depth — re-check loopback at the address level too.
-		if ip.IsLoopback() {
-			continue
-		}
-		// Link-local always allowed (covers mDNS-only / no-DHCP networks).
-		if ip.IsLinkLocalUnicast() {
-			return true
-		}
-		// IsPrivate covers RFC1918 IPv4 + RFC4193 IPv6 unique-local.
-		if ip.IsPrivate() {
-			// CGNAT (100.64.0.0/10) is NOT RFC1918 — go's IsPrivate
-			// returns false for it, so we don't need to filter it
-			// explicitly here. CGNAT is only ever LAN-eligible via
-			// the TsnetIfaceName opt-in above.
-			return true
+		switch {
+		case ip.IsPrivate():
+			// RFC1918 IPv4 + RFC4193 IPv6 unique-local.
+			hasPrivate = true
+		case ip.IsLinkLocalUnicast():
+			// fe80::/10 + 169.254/16 — neither Private nor GlobalUnicast.
+			hasLinkLocal = true
+		case ip.IsGlobalUnicast():
+			// Public v4/v6, incl. CGNAT 100.64/10 (only LAN-eligible via the
+			// TsnetIfaceName opt-in above).
+			hasPublic = true
 		}
 	}
-	return false
+	return hasPrivate || (hasLinkLocal && !hasPublic)
 }
 
 func ipFromAddr(addr net.Addr) net.IP {

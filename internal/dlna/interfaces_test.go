@@ -72,6 +72,22 @@ func TestIsLANEligibleInterface(t *testing.T) {
 		// eligible because the walk continues
 		{"multi_addr_public_then_private", mkIface("eth0", net.FlagUp), []net.Addr{mkIPNet("8.8.8.8"), mkIPNet("192.168.1.5")}, EligibilityOpts{}, true},
 
+		// F5 fix: a pure-WAN NIC carries an fe80 link-local alongside its
+		// public address. The old fe80 short-circuit wrongly classified it
+		// LAN-eligible; now rejected (public present, no private).
+		{"public_v4_with_linklocal", mkIface("eth0", net.FlagUp), []net.Addr{mkIPNet("8.8.8.8"), mkIPNet("fe80::1")}, EligibilityOpts{}, false},
+		{"public_v6_with_linklocal", mkIface("eth0", net.FlagUp), []net.Addr{mkIPNet("2001:4860:4860::8888"), mkIPNet("fe80::1")}, EligibilityOpts{}, false},
+
+		// Dual-stack home LAN: private IPv4 + public IPv6 (SLAAC) + fe80. Must
+		// STAY eligible — "disqualify on any public IP" would break DLNA here.
+		{"dualstack_private_v4_public_v6", mkIface("eth0", net.FlagUp), []net.Addr{mkIPNet("192.168.1.5"), mkIPNet("2001:4860:4860::8888"), mkIPNet("fe80::1")}, EligibilityOpts{}, true},
+
+		// ULA (fc00::/7) is private per Go's IsPrivate — eligible.
+		{"ula_ipv6", mkIface("eth0", net.FlagUp), []net.Addr{mkIPNet("fd12:3456::1")}, EligibilityOpts{}, true},
+
+		// Link-local + private → eligible (private path).
+		{"linklocal_and_private", mkIface("eth0", net.FlagUp), []net.Addr{mkIPNet("fe80::1"), mkIPNet("192.168.1.5")}, EligibilityOpts{}, true},
+
 		// No addresses at all refused
 		{"no_addrs", mkIface("eth0", net.FlagUp), nil, EligibilityOpts{}, false},
 

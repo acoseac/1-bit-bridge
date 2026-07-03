@@ -471,6 +471,15 @@ func DIDLForContainer(opts DIDLContainerOpts) string {
 // XML payload, and SOAP requires it embedded as an escaped string).
 func WrapDIDLLite(elements ...string) string {
 	var sb strings.Builder
+	// Pre-size to skip the builder's early geometric regrowths — a flat-list
+	// Browse wraps hundreds of pre-built ~500-700B item elements at once. ~220B
+	// base covers the DIDL-Lite namespace open + close tags. (Mirrors the
+	// sb.Grow already in DIDLForTrack.)
+	size := 220
+	for _, e := range elements {
+		size += len(e)
+	}
+	sb.Grow(size)
 	sb.WriteString(`<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">`)
 	for _, e := range elements {
 		sb.WriteString(e)
