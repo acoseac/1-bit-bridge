@@ -107,7 +107,8 @@ func (s *Server) sessionMiddleware(next http.Handler) http.Handler {
 
 // isAuthBypassPath returns true for the small set of routes that
 // must work without a session (login form itself, static assets,
-// favicons). Anything else requires auth in public mode.
+// favicons, Prometheus metrics). Anything else requires auth in
+// public mode.
 func isAuthBypassPath(path string) bool {
 	switch {
 	case path == "/login":
@@ -115,6 +116,12 @@ func isAuthBypassPath(path string) bool {
 	case strings.HasPrefix(path, "/static/"):
 		return true
 	case strings.HasPrefix(path, "/favicon"):
+		return true
+	case path == "/metrics":
+		// /metrics is gated by its own loopbackOnly wrap at
+		// registration (see admin.go), so a same-host scraper needs no
+		// session cookie. Without this bypass, a local Prometheus
+		// scrape in public mode gets a 302 to /login and breaks.
 		return true
 	}
 	return false

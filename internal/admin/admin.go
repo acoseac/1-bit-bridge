@@ -867,12 +867,18 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/pairing/{id}/approve", s.apiPairingApprove)
 	mux.HandleFunc("POST /api/pairing/{id}/decline", s.apiPairingDecline)
 
-	// Prometheus exposition. Loopback-bound by the outer
-	// `loopbackOnly` wrap — scrapers must run on the same host
-	// (local Prometheus / Grafana Alloy / node_exporter sidecar).
-	// The CSRF guard is a no-op for GET so the bare promhttp
-	// handler is safe to pass through both layers.
-	mux.Handle("GET /metrics", promhttp.Handler())
+	// Prometheus exposition. Loopback-bound HERE at registration —
+	// scrapers must run on the same host (local Prometheus / Grafana
+	// Alloy / node_exporter sidecar). The outer `boundaryMiddleware`
+	// loopback wrap is BYPASSED in public mode (the listener is
+	// exposed beyond loopback by design), so the endpoint needs its
+	// own loopbackOnly gate to stay same-host-only regardless of
+	// deployment mode. `/metrics` is also on `isAuthBypassPath`, so a
+	// cookie-less local scraper isn't 302'd to /login in public mode —
+	// the loopback gate is the sole trust boundary and matches the
+	// "scrapers run on the same host" intent. The CSRF guard is a
+	// no-op for GET so the bare promhttp handler passes through safely.
+	mux.Handle("GET /metrics", loopbackOnly(promhttp.Handler()))
 
 	// Static. The embed keeps files at "static/app.css", not "app.css",
 	// so we serve the fs directly — the request path already matches.
