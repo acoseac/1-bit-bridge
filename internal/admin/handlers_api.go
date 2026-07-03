@@ -848,12 +848,25 @@ func (s *Server) apiRootsRemove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Normalize the incoming path exactly as apiRootsAdd does before it
+	// persists (TrimSpace + filepath.Abs) — Scanner.Roots() holds cleaned
+	// absolute paths, so a caller that submits a relative, untrimmed, or
+	// trailing-slash form (e.g. "/Music/" or " ./Music") must resolve to
+	// the same absolute form or the slices.Index lookup below false-trips
+	// into a confusing 404. Pure computation, done before taking s.mu.
+	req.Path = strings.TrimSpace(req.Path)
+	abs, err := filepath.Abs(req.Path)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad-path", err.Error())
+		return
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cfg := s.deps.CfgHolder.Load()
 
 	current := s.deps.Scanner.Roots()
-	idx := slices.Index(current, req.Path)
+	idx := slices.Index(current, abs)
 	if idx < 0 {
 		writeError(w, http.StatusNotFound, "unknown-root", "not in current library")
 		return
@@ -1558,15 +1571,32 @@ func (s *Server) cachedSoxAvailability() *bool {
 		return nil
 	}
 	now := time.Now()
+
+	// Fast path: serve a fresh cached value, then release the lock. The
+	// unlocks are EXPLICIT (no defer) because the whole point is to run
+	// UpscalePrecheck() UNLOCKED — it can shell out to `sox --help` for
+	// up to 2 s, and cachedSoxAvailability is called on the SSE snapshot
+	// path (getUpscaleStatsSnapshot / getAnalysisStatsSnapshot). A
+	// deferred unlock would hold soxAvailabilityMu across that probe and
+	// block every concurrent SSE connection / Settings tab.
 	s.soxAvailabilityMu.Lock()
-	defer s.soxAvailabilityMu.Unlock()
 	if !s.soxAvailabilityAt.IsZero() && now.Sub(s.soxAvailabilityAt) < soxAvailabilityCacheTTL {
 		v := s.soxAvailability
+		s.soxAvailabilityMu.Unlock()
 		return &v
 	}
+	s.soxAvailabilityMu.Unlock()
+
+	// Probe unlocked. Concurrent cache-miss callers may each invoke
+	// UpscalePrecheck, but the wired soxToolchainCache (cmd/bridge, its
+	// own mutex + TTL) dedupes the actual exec — at most one real
+	// `sox --help` runs; the rest are warm-cache hits.
 	v := s.deps.UpscalePrecheck() == nil
+
+	s.soxAvailabilityMu.Lock()
 	s.soxAvailability = v
-	s.soxAvailabilityAt = now
+	s.soxAvailabilityAt = time.Now() // fresh timestamp captured post-probe
+	s.soxAvailabilityMu.Unlock()
 	return &v
 }
 
