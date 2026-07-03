@@ -18,6 +18,14 @@ import (
 // Per CodeRabbit Major round-1 on PR #305.
 var packageLogger = logging.Component("dlna-discovery")
 
+// ssdpReadErrBackoff paces the read loop after an unexpected (non-timeout,
+// non-shutdown) UDP read error so a persistently-broken socket can't hot-spin
+// a CPU core. On Windows an unconnected UDP socket can surface WSAECONNRESET
+// on the read that follows a send whose datagram drew an ICMP port-unreachable
+// (SIO_UDP_CONNRESET) — a transient one-shot we recover from rather than
+// letting it kill discovery for the process lifetime.
+const ssdpReadErrBackoff = 250 * time.Millisecond
+
 // structuralStubLastSeen is the sentinel LastSeenAt stamped on a
 // STRUCTURALLY-failed renderer stub (4xx / unparseable description / no
 // AVTransport — see errStructuralDescription). Because EvictStale treats
@@ -369,21 +377,27 @@ func (c *SSDPDiscoveryClient) runLoop(ctx context.Context) {
 		_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 		n, src, err := conn.ReadFromUDP(buf)
 		if err != nil {
-			// Read timeout is the expected loop tick; anything
-			// else after a cancel is a closed-socket signal.
+			// Read timeout is the expected loop tick.
 			var nErr net.Error
 			if errors.As(err, &nErr) && nErr.Timeout() {
 				continue
 			}
-			// On Stop the read returns "use of closed connection"
-			// — quiet exit, not an error log.
+			// Shutdown — Stop closed the socket ("use of closed connection")
+			// or the parent ctx was cancelled. Quiet exit, not an error log.
+			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+				return
+			}
+			// Unexpected transient (e.g. Windows WSAECONNRESET after an ICMP
+			// port-unreachable): don't kill discovery for the process
+			// lifetime — log + ctx-aware backoff + retry. The backoff caps a
+			// persistently-broken socket at ~4 reads/sec instead of hot-spin.
+			packageLogger.Warn("SSDP read error; backing off", "err", err.Error())
 			select {
 			case <-ctx.Done():
 				return
-			default:
-				packageLogger.Warn("SSDP read error", "err", err.Error())
-				return
+			case <-time.After(ssdpReadErrBackoff):
 			}
+			continue
 		}
 		packet := make([]byte, n)
 		copy(packet, buf[:n])
