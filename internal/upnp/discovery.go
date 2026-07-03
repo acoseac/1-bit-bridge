@@ -22,20 +22,6 @@ var logger = logging.Component("upnp")
 // (the sibling of internal/dlna/discovery's MediaRenderer:1 target).
 const MediaServerDeviceType = "urn:schemas-upnp-org:device:MediaServer:1"
 
-// ssdpReadErrBackoff paces the read loop after an unexpected (non-timeout,
-// non-shutdown) UDP read error so a persistently-broken socket can't
-// hot-spin a CPU core. On Windows an unconnected UDP socket can surface
-// WSAECONNRESET on the read that follows a send whose datagram drew an ICMP
-// port-unreachable (SIO_UDP_CONNRESET) — a transient one-shot we recover
-// from rather than letting it kill discovery for the process lifetime.
-const ssdpReadErrBackoff = 250 * time.Millisecond
-
-// ssdpReadErrEscalateAt is the consecutive-read-error count at which the loop
-// logs once at Error instead of Warn — a distinct "discovery is sustained-
-// degraded" signal (e.g. the interface was removed) vs a one-off transient
-// blip. ~20 × ssdpReadErrBackoff ≈ 5s of back-to-back failures.
-const ssdpReadErrEscalateAt = 20
-
 // ContentDirectoryServiceTypePrefix is the prefix used to find the CDS
 // entry inside a parsed device description's Services map (the version
 // suffix differs across MiniDLNA / upmpdcli / MinimServer — match by
@@ -378,32 +364,11 @@ func (c *MediaServerDiscoveryClient) runLoop(ctx context.Context) {
 		_ = conn.SetReadDeadline(c.nowFunc().Add(2 * time.Second))
 		n, addr, err := conn.ReadFromUDP(buf)
 		if err != nil {
-			// Deadline tick — the normal idle path. A successful timeout
-			// proves the read path works, so reset the error streak.
-			var nerr net.Error
-			if errors.As(err, &nerr) && nerr.Timeout() {
-				consecutiveReadErrs = 0
-				continue
-			}
-			// Shutdown — Stop closed the socket / cancelled ctx.
-			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+			// Shared policy (timeout→retry / shutdown→return / transient→
+			// log+backoff+retry, escalating on a sustained streak) — kept in
+			// one place so this client and the renderer client can't drift.
+			if discovery.HandleReadErr(ctx, err, &consecutiveReadErrs, logger) {
 				return
-			}
-			// Unexpected transient (e.g. Windows WSAECONNRESET after an ICMP
-			// port-unreachable): don't kill discovery for the process
-			// lifetime — log + ctx-aware backoff + retry. The backoff caps a
-			// persistently-broken socket at ~4 reads/sec instead of hot-spin.
-			consecutiveReadErrs++
-			if consecutiveReadErrs == ssdpReadErrEscalateAt {
-				logger.Error("SSDP read errors sustained; discovery degraded",
-					"consecutive", consecutiveReadErrs, "err", err.Error())
-			} else {
-				logger.Warn("SSDP read error; backing off", "err", err.Error())
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(ssdpReadErrBackoff):
 			}
 			continue
 		}

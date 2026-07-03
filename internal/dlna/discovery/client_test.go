@@ -533,3 +533,46 @@ func TestStopWaitsForInFlightFetch(t *testing.T) {
 		t.Errorf("cache not empty after Stop(): %d entries (a fetch Upserted past Clear())", n)
 	}
 }
+
+// readErrTimeout is a net.Error whose Timeout() is true — the normal
+// read-deadline tick.
+type readErrTimeout struct{}
+
+func (readErrTimeout) Error() string   { return "i/o timeout" }
+func (readErrTimeout) Timeout() bool   { return true }
+func (readErrTimeout) Temporary() bool { return true }
+
+func TestHandleReadErr(t *testing.T) {
+	// Timeout tick → keep looping AND reset the streak (the read path works).
+	streak := 5
+	if stop := HandleReadErr(context.Background(), readErrTimeout{}, &streak, packageLogger); stop {
+		t.Error("timeout should not stop the loop")
+	}
+	if streak != 0 {
+		t.Errorf("timeout should reset streak, got %d", streak)
+	}
+
+	// Closed socket → stop (shutdown).
+	streak = 0
+	if stop := HandleReadErr(context.Background(), net.ErrClosed, &streak, packageLogger); !stop {
+		t.Error("net.ErrClosed should stop the loop")
+	}
+
+	// Non-timeout error under a cancelled ctx → stop (shutdown), before any backoff.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	streak = 0
+	if stop := HandleReadErr(ctx, errors.New("boom"), &streak, packageLogger); !stop {
+		t.Error("cancelled ctx should stop the loop")
+	}
+
+	// Transient error under a live ctx → keep looping, streak bumped (pays one
+	// backoff before returning).
+	streak = 0
+	if stop := HandleReadErr(context.Background(), errors.New("boom"), &streak, packageLogger); stop {
+		t.Error("transient error under a live ctx should not stop the loop")
+	}
+	if streak != 1 {
+		t.Errorf("transient error should bump streak to 1, got %d", streak)
+	}
+}

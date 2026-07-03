@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"sync"
@@ -31,6 +32,47 @@ const ssdpReadErrBackoff = 250 * time.Millisecond
 // degraded" signal (e.g. the interface was removed) vs a one-off transient
 // blip. ~20 × ssdpReadErrBackoff ≈ 5s of back-to-back failures.
 const ssdpReadErrEscalateAt = 20
+
+// HandleReadErr drives the shared read-loop resilience policy so BOTH SSDP
+// discovery read loops — this package's renderer client AND
+// internal/upnp's MediaServer client — stay byte-identical (they mirror each
+// other by design; keeping the policy in one place is what stops them drifting):
+//   - a read-deadline timeout is the normal idle tick → reset the streak, the
+//     caller continues;
+//   - a shutdown signal (ctx cancelled OR socket closed by Stop) → the caller
+//     returns;
+//   - any other (transient) error, e.g. a Windows WSAECONNRESET after an ICMP
+//     port-unreachable → log + ctx-aware backoff (bounding a persistently-
+//     broken socket at ~4 reads/sec instead of hot-spinning a core), bump the
+//     streak, and escalate to Error once failures are sustained; caller
+//     continues.
+//
+// Returns stop=true when the caller should exit its loop. `streak` is the
+// caller's consecutive-error counter (reset here on a timeout, bumped on a
+// transient error; the caller also resets it on a successful read).
+func HandleReadErr(ctx context.Context, err error, streak *int, log *slog.Logger) (stop bool) {
+	var nErr net.Error
+	if errors.As(err, &nErr) && nErr.Timeout() {
+		*streak = 0
+		return false
+	}
+	if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	*streak++
+	if *streak == ssdpReadErrEscalateAt {
+		log.Error("SSDP read errors sustained; discovery degraded",
+			"consecutive", *streak, "err", err.Error())
+	} else {
+		log.Warn("SSDP read error; backing off", "err", err.Error())
+	}
+	select {
+	case <-ctx.Done():
+		return true
+	case <-time.After(ssdpReadErrBackoff):
+	}
+	return false
+}
 
 // structuralStubLastSeen is the sentinel LastSeenAt stamped on a
 // STRUCTURALLY-failed renderer stub (4xx / unparseable description / no
@@ -390,33 +432,8 @@ func (c *SSDPDiscoveryClient) runLoop(ctx context.Context) {
 		_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 		n, src, err := conn.ReadFromUDP(buf)
 		if err != nil {
-			// Read timeout is the expected loop tick. A successful timeout
-			// proves the read path works, so reset the error streak.
-			var nErr net.Error
-			if errors.As(err, &nErr) && nErr.Timeout() {
-				consecutiveReadErrs = 0
-				continue
-			}
-			// Shutdown — Stop closed the socket ("use of closed connection")
-			// or the parent ctx was cancelled. Quiet exit, not an error log.
-			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+			if HandleReadErr(ctx, err, &consecutiveReadErrs, packageLogger) {
 				return
-			}
-			// Unexpected transient (e.g. Windows WSAECONNRESET after an ICMP
-			// port-unreachable): don't kill discovery for the process
-			// lifetime — log + ctx-aware backoff + retry. The backoff caps a
-			// persistently-broken socket at ~4 reads/sec instead of hot-spin.
-			consecutiveReadErrs++
-			if consecutiveReadErrs == ssdpReadErrEscalateAt {
-				packageLogger.Error("SSDP read errors sustained; discovery degraded",
-					"consecutive", consecutiveReadErrs, "err", err.Error())
-			} else {
-				packageLogger.Warn("SSDP read error; backing off", "err", err.Error())
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(ssdpReadErrBackoff):
 			}
 			continue
 		}
