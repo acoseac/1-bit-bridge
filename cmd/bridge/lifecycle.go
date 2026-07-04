@@ -74,7 +74,14 @@ func restartCmd(args []string, _ io.Writer, stderr io.Writer) int {
 // non-installed binary almost certainly want to be told to run
 // `bridge init` first rather than a silent no-op.
 func ensureInstalled(stderr io.Writer) bool {
-	kind, _ := packaging.InstalledKind()
+	kind, err := packaging.InstalledKind()
+	if err != nil {
+		// A real probe failure (e.g. a systemd D-Bus error) is NOT the
+		// same as "not installed" — surface it so the operator isn't
+		// misled by the generic no-unit message below.
+		fmt.Fprintf(stderr, "bridge: could not determine service install state: %v\n", err)
+		return false
+	}
 	if kind == packaging.KindNone {
 		fmt.Fprintln(stderr, "bridge: no service unit installed (run `bridge init` first, or `bridge serve` to run in the foreground)")
 		return false

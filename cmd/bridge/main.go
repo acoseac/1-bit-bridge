@@ -1273,7 +1273,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	case "pair":
 		return pairCmd(args[1:], stdout, stderr)
 	case "scan":
-		return scanCmd(args[1:], stdout, stderr)
+		return scanCmd(ctx, args[1:], stdout, stderr)
 	case "upscale":
 		return upscaleCmd(ctx, args[1:], stdout, stderr)
 	case "analyze":
@@ -3204,7 +3204,7 @@ func pairCmd(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func scanCmd(args []string, stdout, stderr io.Writer) int {
+func scanCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("scan", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	configPath := fs.String("config", defaultConfigPath, configFlagUsage)
@@ -3231,7 +3231,10 @@ func scanCmd(args []string, stdout, stderr io.Writer) int {
 
 	fmt.Fprintf(stdout, "Scanning %v ...\n", cfg.LibraryRoots)
 	start := time.Now()
-	n, err := scanner.Scan(context.Background())
+	// Honor the signal-wired ctx from run() so Ctrl-C cancels the scan
+	// (signal.NotifyContext intercepts the first SIGINT without killing
+	// the process; a fresh context.Background() here would ignore it).
+	n, err := scanner.Scan(ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "scan error: %v\n", err)
 		return 1

@@ -115,6 +115,12 @@ func updateCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 		fmt.Fprintf(stderr, "os.Executable failed: %v\n", exeErr)
 		return 1
 	}
+	// Resolve symlinks so a symlinked install (e.g. /usr/local/bin/bridge
+	// → /opt/1-bit-bridge/bridge) swaps the real binary, not the link.
+	// Mirrors the binary resolution in init.go's service install.
+	if resolved, lerr := filepath.EvalSymlinks(binaryPath); lerr == nil {
+		binaryPath = resolved
+	}
 
 	// CLI install: pass nil sessions tracker (no running HTTP server
 	// in this process) and Force=true (no inflight downloads to gate
