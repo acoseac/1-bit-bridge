@@ -164,3 +164,30 @@ func TestAdmin_ForceRescan_AcceptsManualURLServer(t *testing.T) {
 		t.Fatalf("err = %v; want ErrUPnPRescanInFlight (identity gate must accept the manual URL)", err)
 	}
 }
+
+func TestSanitizeSkipList(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{"trims and drops empties", []string{" A ", "", "B", "  "}, []string{"A", "B"}},
+		{"dedups preserving order", []string{"System", "System", "Other"}, []string{"System", "Other"}},
+		{"dedup is case-sensitive", []string{"System", "system"}, []string{"System", "system"}},
+		{"all empty is nil", []string{"", "   "}, nil},
+		{"nil input is nil", nil, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := sanitizeSkipList(c.in)
+			if len(got) != len(c.want) {
+				t.Fatalf("sanitizeSkipList(%q) = %q, want %q", c.in, got, c.want)
+			}
+			for i := range got {
+				if got[i] != c.want[i] {
+					t.Errorf("index %d: got %q, want %q (full: %q)", i, got[i], c.want[i], got)
+				}
+			}
+		})
+	}
+}

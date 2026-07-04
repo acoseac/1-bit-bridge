@@ -134,6 +134,13 @@ func variantsMoveCmd(ctx context.Context, args []string, stdout, stderr io.Write
 		failed  int
 	)
 	for _, v := range all {
+		// Stop promptly on Ctrl-C rather than driving every remaining
+		// moveOneVariant into a canceled-ctx DB write and flooding
+		// stderr with one error per row.
+		if err := ctx.Err(); err != nil {
+			fmt.Fprintf(stderr, "move interrupted (moved=%d skipped=%d failed=%d)\n", moved, skipped, failed)
+			return 130
+		}
 		newPath := computeNewSidecarPath(*to, v)
 		if newPath == v.SidecarPath {
 			skipped++
