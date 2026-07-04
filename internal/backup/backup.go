@@ -244,9 +244,16 @@ func Restore(snapshotDir string, dst Targets) error {
 			// the OLD db with no wal (clean, restore just didn't finish —
 			// re-runnable) rather than NEW db + OLD wal (corruption).
 			// Restore requires the bridge stopped (docblock), so there is
-			// no concurrent writer.
-			_ = os.Remove(target + "-wal")
-			_ = os.Remove(target + "-shm")
+			// no concurrent writer. A non-ErrNotExist failure (permission,
+			// path-is-a-dir) must ABORT — proceeding would leave the stale
+			// WAL in place while copyFile overwrites the DB, reproducing
+			// the exact corruption this block prevents (Gemini + CodeRabbit
+			// on PR #476).
+			for _, sidecar := range []string{target + "-wal", target + "-shm"} {
+				if err := os.Remove(sidecar); err != nil && !errors.Is(err, os.ErrNotExist) {
+					return fmt.Errorf("remove stale sidecar %s: %w", sidecar, err)
+				}
+			}
 		}
 		if err := copyFile(srcPath, target, mode); err != nil {
 			return fmt.Errorf("restore %s: %w", name, err)
