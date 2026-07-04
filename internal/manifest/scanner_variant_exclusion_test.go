@@ -34,6 +34,14 @@ func TestIsVariantSidecarName(t *testing.T) {
 		{"upscaled-mix.flac", false},
 		{"optimized.flac", false},
 		{"", false},
+		// Anchoring (Gemini + CodeRabbit on PR #475): a real single-extension file that
+		// merely CONTAINS a variant-shaped infix must NOT be excluded — the trailing
+		// segment isn't a well-formed variant ID, and/or isn't preceded by an audio ext.
+		{"01.upscaled-mix.flac", false},
+		{"something.optimized-version.flac", false},
+		{"Song (Album).optimized-Mix.flac", false},
+		{"Track.flac.optimized-v2-44100.flac", false},   // variant ID missing the bits segment
+		{"Track.txt.optimized-v2-44100-16.flac", false}, // source is not a supported audio ext
 	}
 	for _, tc := range cases {
 		if got := isVariantSidecarName(tc.name); got != tc.want {
