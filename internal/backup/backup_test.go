@@ -169,6 +169,53 @@ func TestRestoreRoundTripsSimpleFiles(t *testing.T) {
 	}
 }
 
+// Restore must delete any pre-restore -wal/-shm sidecars when it
+// replaces the manifest DB. Snapshot writes a clean VACUUM INTO db
+// (no WAL in the bundle); leaving the old WAL on disk would have
+// SQLite replay stale frames onto the restored file and corrupt it.
+func TestRestoreRemovesStaleWALSHM(t *testing.T) {
+	dataDir := t.TempDir()
+	src := primeLiveState(t, dataDir)
+
+	dst, err := backup.Snapshot(t.Context(), src)
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+
+	// Simulate a pre-restore WAL/SHM pair belonging to the live DB.
+	walPath := src.ManifestDB + "-wal"
+	shmPath := src.ManifestDB + "-shm"
+	if err := os.WriteFile(walPath, []byte("stale-wal-frames"), 0o600); err != nil {
+		t.Fatalf("write stale wal: %v", err)
+	}
+	if err := os.WriteFile(shmPath, []byte("stale-shm"), 0o600); err != nil {
+		t.Fatalf("write stale shm: %v", err)
+	}
+
+	if err := backup.Restore(dst, backup.Targets{
+		ManifestDB: src.ManifestDB,
+		TokensJSON: src.TokensJSON,
+		ServerCert: src.ServerCert,
+		ServerKey:  src.ServerKey,
+		BridgeYAML: src.BridgeYAML,
+	}); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+
+	if pathExists(t, walPath) {
+		t.Errorf("stale %s survived Restore — SQLite would replay it onto the restored DB", walPath)
+	}
+	if pathExists(t, shmPath) {
+		t.Errorf("stale %s survived Restore", shmPath)
+	}
+
+	// The restored main DB must match the snapshot's clean copy.
+	snapDB := readBytes(t, filepath.Join(dst, backup.ManifestDBFileName))
+	if got := readBytes(t, src.ManifestDB); string(got) != string(snapDB) {
+		t.Errorf("restored bridge.db (%d bytes) != snapshot bridge.db (%d bytes)", len(got), len(snapDB))
+	}
+}
+
 // Restore must refuse a snapshot whose manifest schema doesn't match
 // — otherwise a future schema change could silently overwrite live
 // state with an incompatible older format.
