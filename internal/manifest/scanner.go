@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"runtime/debug"
 	"strings"
@@ -1084,8 +1085,7 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 		if strings.HasPrefix(d.Name(), ".") {
 			return nil
 		}
-		ext := strings.ToLower(filepath.Ext(abs))
-		if !Ext[ext] {
+		if !enqueueableAudioFile(abs, d.Name()) {
 			return nil
 		}
 		info, err := d.Info()
@@ -1274,8 +1274,7 @@ func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, see
 		if strings.HasPrefix(d.Name(), ".") {
 			return nil
 		}
-		ext := strings.ToLower(filepath.Ext(abs))
-		if !Ext[ext] {
+		if !enqueueableAudioFile(abs, d.Name()) {
 			return nil
 		}
 
@@ -1507,6 +1506,54 @@ func shouldSkipDir(name string) bool {
 		return true
 	}
 	return strings.HasPrefix(name, ".")
+}
+
+// variantIDInfixRe matches a bridge variant ID EXACTLY:
+// `<kind>-v<schemaVersion>-<targetRate>-<targetBits>` (kind ∈ upscaled/optimized), e.g.
+// `optimized-v2-44100-16`, `upscaled-v2-176400-24`. Anchored to the whole segment so a
+// coincidental `.optimized-…` substring in a real filename doesn't match. Version-agnostic
+// (`v[0-9]+`) — a future schema bump must still be excluded. Mirrors the
+// `VariantKindPrefix*` LIKE-discriminator rationale (kept in `manifest` to avoid the
+// `transcode` import cycle).
+var variantIDInfixRe = regexp.MustCompile(
+	`^(?:` + VariantKindPrefixUpscaled + `|` + VariantKindPrefixOptimized + `)-v[0-9]+-[0-9]+-[0-9]+$`)
+
+// isVariantSidecarName reports whether a file basename is one of the bridge's own
+// optimize/upscale transcode artifacts and therefore must NOT be indexed as a library
+// track. Sidecars are `<srcBase>.<variantID>.flac` (the transcoder always emits FLAC) —
+// e.g. `01 Love Letters.flac.upscaled-v2-176400-24.flac`. They live in the on-demand
+// variant pool (`upscale.variantsDir`), served via the variant path + aggregated onto
+// their PARENT track's manifest entry — never standalone library content. But if a
+// `variantsDir` resolves inside a `libraryRoot`, or variants get synced into a scanned
+// mount (the field case: a `variants/` folder inside a read-only B2 library bucket —
+// ~26% of a 24k-track library indexed as phantom downscaled "tracks", doubling every
+// affected album), the extension-only walk gate would otherwise enqueue them; skipping
+// them drops the phantom rows on the next scan via the bounded deletion pass.
+//
+// The match is ANCHORED (not a loose `.optimized-` substring): the trailing dot-segment
+// before `.flac` must be a well-formed variant ID AND the part before it must itself be a
+// supported audio file (the source), so a legitimately-named single-extension track like
+// `Song.optimized-Mix.flac` or `01.upscaled-mix.flac` is never mistaken for a sidecar.
+func isVariantSidecarName(name string) bool {
+	const variantExt = ".flac"
+	if !strings.HasSuffix(name, variantExt) {
+		return false
+	}
+	base := name[:len(name)-len(variantExt)]
+	dot := strings.LastIndex(base, ".")
+	if dot < 0 {
+		return false
+	}
+	return variantIDInfixRe.MatchString(base[dot+1:]) &&
+		Ext[strings.ToLower(filepath.Ext(base[:dot]))]
+}
+
+// enqueueableAudioFile reports whether a walked file should be enqueued for extraction:
+// a supported audio extension AND not one of our own variant sidecars. Shared by both
+// WalkDir callbacks (full Scan + incremental subtree walk) so the file-inclusion gate
+// lives in ONE place.
+func enqueueableAudioFile(abs, name string) bool {
+	return Ext[strings.ToLower(filepath.Ext(abs))] && !isVariantSidecarName(name)
 }
 
 // RunPeriodic runs an initial scan, then rescans every interval until ctx
