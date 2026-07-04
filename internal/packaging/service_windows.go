@@ -156,7 +156,14 @@ func waitForServiceGone(m *mgr.Mgr, name string, timeout time.Duration) error {
 	for time.Now().Before(deadline) {
 		s, err := m.OpenService(name)
 		if err != nil {
-			return nil
+			if isServiceMissing(err) {
+				return nil // ERROR_SERVICE_DOES_NOT_EXIST — truly gone.
+			}
+			// A different OpenService failure (ACCESS_DENIED, a transient
+			// SCM/RPC fault) does NOT mean the service is gone — surface it
+			// rather than letting the caller proceed into a confusing
+			// CreateService failure (Gemini on PR #481).
+			return fmt.Errorf("open service %q while waiting for delete: %w", name, err)
 		}
 		s.Close()
 		time.Sleep(100 * time.Millisecond)
