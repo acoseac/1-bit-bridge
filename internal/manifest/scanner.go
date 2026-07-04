@@ -1088,6 +1088,9 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 		if !Ext[ext] {
 			return nil
 		}
+		if isVariantSidecarName(d.Name()) {
+			return nil // our own optimize/upscale sidecar — never a library track
+		}
 		info, err := d.Info()
 		if err != nil {
 			scanLogger.Warn("subtree stat", "path", abs, "err", err)
@@ -1277,6 +1280,9 @@ func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, see
 		ext := strings.ToLower(filepath.Ext(abs))
 		if !Ext[ext] {
 			return nil
+		}
+		if isVariantSidecarName(d.Name()) {
+			return nil // our own optimize/upscale sidecar — never a library track
 		}
 
 		info, err := d.Info()
@@ -1507,6 +1513,26 @@ func shouldSkipDir(name string) bool {
 		return true
 	}
 	return strings.HasPrefix(name, ".")
+}
+
+// isVariantSidecarName reports whether a file basename is one of the bridge's own
+// optimize/upscale transcode artifacts and therefore must NOT be indexed as a library
+// track. Sidecars are named `<srcBase>.<variantID>.flac` where variantID is
+// `<kind>-<schema>-<rate>-<bits>` (kind ∈ upscaled/optimized) — e.g.
+// `01 Love Letters.flac.upscaled-v2-176400-24.flac` — so the basename always carries a
+// `.upscaled-` / `.optimized-` infix. These live in the on-demand variant pool
+// (`upscale.variantsDir`) and are served via the variant path, aggregated onto their
+// PARENT track's manifest entry — they are never standalone library content. But if a
+// `variantsDir` resolves inside a `libraryRoot`, or variants get synced into a scanned
+// mount (the field case: a `variants/` folder inside a read-only B2 library bucket —
+// ~26% of a 24k-track library indexed as phantom downscaled "tracks", doubling every
+// affected album), the extension-only walk gate would otherwise enqueue them. Skipping
+// them here drops the phantom rows on the next scan via the bounded deletion pass.
+// Version-agnostic (matches `.upscaled-` / `.optimized-`, catching pre-v2 + future-schema
+// sidecars) — mirrors the `VariantKindPrefix*` LIKE-discriminator rationale.
+func isVariantSidecarName(name string) bool {
+	return strings.Contains(name, "."+VariantKindPrefixUpscaled+"-") ||
+		strings.Contains(name, "."+VariantKindPrefixOptimized+"-")
 }
 
 // RunPeriodic runs an initial scan, then rescans every interval until ctx
