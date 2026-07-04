@@ -58,7 +58,15 @@ func InstallWindowsService(p Params) (string, error) {
 		}
 		_ = s.Delete()
 		s.Close()
-		waitForServiceGone(m, ServiceLabel, 3*time.Second)
+		// Wait (generously) for the SCM to finalize the async delete. A
+		// timeout means the delete is genuinely stuck (a handle held open
+		// elsewhere) — surface it rather than silently proceeding into a
+		// CreateService that would fail with MARKED_FOR_DELETE. The
+		// normal sub-second residual after "gone" is absorbed by
+		// createServiceWithRetry below.
+		if werr := waitForServiceGone(m, ServiceLabel, 5*time.Second); werr != nil {
+			return "", werr
+		}
 	}
 
 	// Resolve the data dir for the service's log file. Co-located with
@@ -83,8 +91,10 @@ func InstallWindowsService(p Params) (string, error) {
 
 	// The SCM expects the binary arg list as a single string; the Go
 	// wrapper takes additional args as a slice and joins with spaces.
-	// Our ImagePath is `bridge.exe serve --config <cfg>`.
-	s, err := m.CreateService(ServiceLabel, p.BinaryPath, config,
+	// Our ImagePath is `bridge.exe serve --config <cfg>`. Retry-wrapped
+	// to absorb a residual MARKED_FOR_DELETE from the just-deleted prior
+	// service (the SCM finalizes deletes asynchronously).
+	s, err := createServiceWithRetry(m, config, p.BinaryPath,
 		"serve", "--config", p.ConfigPath)
 	if err != nil {
 		return "", fmt.Errorf("create service: %w", err)
@@ -136,18 +146,47 @@ func UninstallWindowsService() error {
 }
 
 // waitForServiceGone polls the SCM until OpenService returns "service
-// does not exist", or the timeout expires. Protects Install from
-// racing the SCM's async Delete.
-func waitForServiceGone(m *mgr.Mgr, name string, timeout time.Duration) {
+// does not exist", or the timeout expires. Protects Install from racing
+// the SCM's async Delete. Returns an error on timeout so the caller can
+// surface a genuinely-stuck delete (e.g. a monitoring tool holding a
+// handle) instead of silently proceeding into a CreateService that would
+// fail with ERROR_SERVICE_MARKED_FOR_DELETE.
+func waitForServiceGone(m *mgr.Mgr, name string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		s, err := m.OpenService(name)
 		if err != nil {
-			return
+			return nil
 		}
 		s.Close()
 		time.Sleep(100 * time.Millisecond)
 	}
+	return fmt.Errorf("service %q still present after %s (SCM delete still pending)", name, timeout)
+}
+
+// createServiceWithRetry creates the bridge service, retrying briefly on
+// ERROR_SERVICE_MARKED_FOR_DELETE. Even after waitForServiceGone reports
+// the prior service gone, the SCM finalizes the Delete asynchronously on
+// its own thread, so CreateService can transiently hit MARKED_FOR_DELETE
+// for a few hundred ms. A bounded retry with a 100ms yield absorbs that
+// window — a tight no-yield loop would burn every attempt inside a single
+// scheduling quantum before the handle clears. Any other error returns
+// immediately (no point spinning on a real fault).
+func createServiceWithRetry(m *mgr.Mgr, cfg mgr.Config, binary string, args ...string) (*mgr.Service, error) {
+	const maxAttempts = 20 // ~2s at 100ms
+	var lastErr error
+	for i := 0; i < maxAttempts; i++ {
+		s, err := m.CreateService(ServiceLabel, binary, cfg, args...)
+		if err == nil {
+			return s, nil
+		}
+		if !errors.Is(err, windows.ERROR_SERVICE_MARKED_FOR_DELETE) {
+			return nil, err
+		}
+		lastErr = err
+		time.Sleep(100 * time.Millisecond)
+	}
+	return nil, fmt.Errorf("still marked for delete after %d attempts: %w", maxAttempts, lastErr)
 }
 
 // waitForServiceStopped polls the service's Query() state until it

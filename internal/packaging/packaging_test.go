@@ -103,6 +103,27 @@ func TestRenderSystemdTemplate_EscapesBadChars(t *testing.T) {
 	}
 }
 
+// A literal percent in a path must be doubled to %% so systemd doesn't
+// treat it as a specifier prefix (%h, %u, …) and fail unit parsing.
+func TestRenderSystemdTemplate_EscapesPercent(t *testing.T) {
+	body, err := render("systemd.service.tmpl", Params{
+		BinaryPath: "/usr/local/bin/bridge",
+		ConfigPath: "/opt/Top_100_10%_Off/bridge.yaml",
+		WorkingDir: "/opt/Top_100_10%_Off/data",
+		LogPath:    "/var/log/bridge.log",
+	})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	s := string(body)
+	if strings.Contains(s, "Top_100_10%_Off") {
+		t.Errorf("rendered systemd left a bare %% (specifier prefix) in a path\n--\n%s", s)
+	}
+	if !strings.Contains(s, "Top_100_10%%_Off") {
+		t.Errorf("rendered systemd missing the doubled %%%% escape\n--\n%s", s)
+	}
+}
+
 func TestRenderStartupCmd_Windows(t *testing.T) {
 	body, err := render("startup.cmd.tmpl", Params{
 		BinaryPath: `C:\Program Files\1-bit-bridge\bridge.exe`,

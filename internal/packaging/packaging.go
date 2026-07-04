@@ -279,12 +279,17 @@ func render(name string, p Params) ([]byte, error) {
 			// when wrapped in double quotes (which the template does).
 			// Inside those quotes, `\\` and `\"` are the escape sequences
 			// the parser expects, and CR/LF/NUL would terminate the value
-			// early. Backslash goes first so it doesn't double-escape the
-			// replacements for `"` and CR/LF that follow. A path like
+			// early. `%` is a specifier prefix (%h, %u, …) — a literal
+			// percent in a path (e.g. `Top_100_10%_Off`) must be doubled
+			// to `%%` or systemd fails specifier expansion at unit parse.
+			// Backslash goes first so it doesn't double-escape the
+			// replacements for `"` and CR/LF that follow; strings.NewReplacer
+			// is single-pass so `%%` isn't re-escaped. A path like
 			// `/Users/Bob's "Music"` or `C:\Users\bob` round-trips intact.
 			r := strings.NewReplacer(
 				`\`, `\\`,
 				`"`, `\"`,
+				`%`, `%%`,
 				"\n", `\n`,
 				"\r", `\r`,
 				"\x00", "",

@@ -60,13 +60,25 @@ func openBridgeServiceForSCM() (*mgr.Mgr, *mgr.Service, bool, error) {
 	return m, s, false, nil
 }
 
-// stopForOS asks the SCM to stop the bridge service. The kind
-// argument is unused on Windows (Stop's dispatcher only forwards
-// KindWindowsSCM here; Startup-folder installs are user processes,
-// not SCM services, so they're ignored). Wraps access-denied so the
-// caller's friendly "Re-launch as Administrator" path can classify
-// it via errors.Is(err, windows.ERROR_ACCESS_DENIED).
-func stopForOS(_ ServiceKind) error {
+// errStartupFolderCLI builds the "can't <verb> a Startup-folder install
+// via the SCM" error the three lifecycle ops return for
+// KindWindowsStartup. A Startup-folder install is a plain user process
+// launched from the Startup folder, not an SCM-managed service, so the
+// CLI has no service handle to signal — a clear error beats the silent
+// no-op the pre-fix SCM-missing path produced.
+func errStartupFolderCLI(verb, hint string) error {
+	return fmt.Errorf("cannot %s a Startup-folder install from the CLI; %s", verb, hint)
+}
+
+// stopForOS asks the SCM to stop the bridge service. A KindWindowsStartup
+// install has no SCM service, so it returns a clear error rather than the
+// silent no-op the SCM-missing path would otherwise produce. Wraps
+// access-denied so the caller's friendly "Re-launch as Administrator"
+// path can classify it via errors.Is(err, windows.ERROR_ACCESS_DENIED).
+func stopForOS(kind ServiceKind) error {
+	if kind == KindWindowsStartup {
+		return errStartupFolderCLI("stop", "end the bridge.exe process in Task Manager")
+	}
 	m, s, missing, err := openBridgeServiceForSCM()
 	if err != nil {
 		return err
@@ -101,8 +113,13 @@ func stopForOS(_ ServiceKind) error {
 // Same access-denied wrapping as stopForOS. Stop failures are
 // classified the same way: already-stopped is acceptable, anything
 // else surfaces before we attempt Start (so the user doesn't see
-// a misleading start-error masking a real stop fault).
-func restartForOS(_ ServiceKind) error {
+// a misleading start-error masking a real stop fault). A
+// KindWindowsStartup install has no SCM service to restart — return a
+// clear error instead of the silent no-op the SCM-missing path produced.
+func restartForOS(kind ServiceKind) error {
+	if kind == KindWindowsStartup {
+		return errStartupFolderCLI("restart", "end the bridge.exe process in Task Manager, then run `bridge serve`")
+	}
 	m, s, missing, err := openBridgeServiceForSCM()
 	if err != nil {
 		return err
@@ -141,8 +158,13 @@ func restartForOS(_ ServiceKind) error {
 // startForOS asks the SCM to start the installed bridge service.
 // Idempotent against an already-running service (returns nil if
 // `s.Start()` reports ERROR_SERVICE_ALREADY_RUNNING). Same admin
-// gate semantics as stopForOS / restartForOS.
-func startForOS(_ ServiceKind) error {
+// gate semantics as stopForOS / restartForOS. A KindWindowsStartup
+// install has no SCM service — return a clear error rather than the
+// silent no-op the SCM-missing path produced.
+func startForOS(kind ServiceKind) error {
+	if kind == KindWindowsStartup {
+		return errStartupFolderCLI("start", "run `bridge serve` (the Startup entry launches automatically on next sign-in)")
+	}
 	m, s, missing, err := openBridgeServiceForSCM()
 	if err != nil {
 		return err
