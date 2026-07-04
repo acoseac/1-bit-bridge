@@ -306,12 +306,22 @@ func (s *OrphanSidecarSweeper) run(ctx context.Context, done chan struct{}) {
 // without hitting the chunk cap — that's the "we've covered the
 // whole tree this tick, next tick should start over" signal.
 func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
-	known, err := s.lister.AllSidecarPaths(ctx)
+	raw, err := s.lister.AllSidecarPaths(ctx)
 	if err != nil {
 		logger.Error("orphan sidecar sweep: AllSidecarPaths failed",
 			slog.Any("err", err),
 		)
 		return 0
+	}
+	// Case-fold + clean the known-set keys so a casing delta between the
+	// DB SidecarPath and the on-disk WalkDir path can't misclassify a live
+	// sidecar as orphan (and unlink it) on a case-insensitive FS — the same
+	// hazard fixed in `bridge upscale --gc` (CodeRabbit on PR #477). The
+	// cursor-resume comparisons (pathWalkCompare / dirEntirelyBehindCursor)
+	// below stay on RAW paths; they must track WalkDir's byte-order traversal.
+	known := make(map[string]struct{}, len(raw))
+	for k := range raw {
+		known[strings.ToLower(filepath.Clean(k))] = struct{}{}
 	}
 
 	grace := s.effectiveGracePeriod()
@@ -384,7 +394,7 @@ func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 		// file and we'd re-walk every previous tick's set).
 		newCursor = path
 
-		if _, isKnown := known[path]; isKnown {
+		if _, isKnown := known[strings.ToLower(filepath.Clean(path))]; isKnown {
 			// Sidecar is in the DB — nothing to do. No ModTime read
 			// needed; the known-set check already proved consistency.
 			if examined >= chunkSize {

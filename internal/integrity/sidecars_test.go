@@ -145,6 +145,35 @@ func TestOrphanSidecarSweeperTickUnlinksOrphans(t *testing.T) {
 	}
 }
 
+// A live sidecar whose DB SidecarPath differs from its on-disk (WalkDir)
+// path only in case must NOT be unlinked on a case-insensitive FS. The
+// known-set is case-folded, so the mixed-case on-disk file still matches;
+// on the pre-fix raw lookup the file was treated as orphan and deleted.
+func TestOrphanSidecarSweeperCaseInsensitive(t *testing.T) {
+	outputDir := t.TempDir()
+	dir := filepath.Join(outputDir, "Artist", "Album")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sidecar := filepath.Join(dir, "Track.flac")
+	if err := os.WriteFile(sidecar, []byte{0}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// DB records the SAME file under a different-cased path (as if written
+	// on a case-insensitive FS with mixed casing).
+	dbPath := filepath.Join(outputDir, "artist", "album", "track.flac")
+	lister := &fakeSidecarLister{known: map[string]struct{}{dbPath: {}}}
+
+	s := NewOrphanSidecarSweeper(lister, outputDir, 1*time.Hour)
+	s.gracePeriodForTest = 1 * time.Nanosecond
+	if unlinked := s.tick(context.Background()); unlinked != 0 {
+		t.Errorf("unlinked = %d, want 0 (live sidecar with a case-only DB delta)", unlinked)
+	}
+	if _, err := os.Stat(sidecar); err != nil {
+		t.Errorf("live sidecar %q was unlinked over a casing delta: %v", sidecar, err)
+	}
+}
+
 // TestOrphanSidecarSweeperRespectsChunkCap pins the chunked-walk
 // contract: one tick processes at most `gcChunkSize` entries; the
 // remainder is left for subsequent ticks. The cursor advances so
