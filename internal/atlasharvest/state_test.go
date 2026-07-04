@@ -1,6 +1,7 @@
 package atlasharvest
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -125,4 +126,35 @@ func TestStateStore_PendingCovers(t *testing.T) {
 	if n := len(s2.PendingCoversSnapshot()); n != 0 {
 		t.Errorf("reopened pending set has %d entries, want 0", n)
 	}
+}
+
+// Snapshot must deep-copy PendingCovers so a caller iterating the
+// returned map doesn't race a concurrent AddPendingCovers writer. Under
+// `go test -race` the pre-fix shallow copy (shared map) trips a
+// concurrent map read/write here.
+func TestStateSnapshotDeepCopiesPendingCovers(t *testing.T) {
+	s, err := OpenStateStore(filepath.Join(t.TempDir(), "atlas-harvest.json"))
+	if err != nil {
+		t.Fatalf("OpenStateStore: %v", err)
+	}
+	if err := s.AddPendingCovers([]string{"seed-a", "seed-b"}); err != nil {
+		t.Fatalf("AddPendingCovers: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			snap := s.Snapshot()
+			total := 0
+			for _, v := range snap.PendingCovers { // iterate the copy
+				total += v
+			}
+			_ = total
+		}
+	}()
+	for i := 0; i < 200; i++ {
+		_ = s.AddPendingCovers([]string{fmt.Sprintf("mbid-%d", i)})
+	}
+	<-done
 }

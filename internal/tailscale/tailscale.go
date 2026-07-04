@@ -95,9 +95,15 @@ type NodeInfo struct {
 // followed by `tailscale status --json` and returns a populated NodeInfo.
 //
 // CLI-not-found is NOT an error — it returns NodeInfo{CLIAvailable: false}
-// with nil err. A genuine error (CLI present but `status` fails, JSON
-// can't be parsed, MagicDNS suffix can't be derived) returns a non-nil
-// err so the caller can log at .error level.
+// with nil err. A genuine error (CLI present but `status` fails, or the
+// JSON can't be parsed) returns a non-nil err so the caller can log at
+// .error level.
+//
+// An empty MagicDNS suffix is deliberately NOT an error: it's the normal
+// "MagicDNS not enabled in tailnet" state. It returns (info, nil) with
+// LastError set — the caller (detectAndMint) treats it the same as
+// !CLIAvailable and falls through to self-signed. Do NOT "fix" this into
+// a non-nil err; that would spam .error for a routine off state.
 func Detect(ctx context.Context) (NodeInfo, error) {
 	binary, ok := resolveBinary()
 	if !ok {

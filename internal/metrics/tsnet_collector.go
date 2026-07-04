@@ -22,8 +22,9 @@ import (
 // confusion and makes the "this is for the observability surface"
 // intent explicit.
 type tsnetStatusProvider interface {
-	// MetricsState returns 0=down, 1=starting, 2=running.
-	// Disabled mode is represented by "no provider registered".
+	// MetricsState returns 0=down, 1=starting, 2=running. Disabled mode
+	// is represented by "no provider registered" — the collector /
+	// snapshot map a nil provider to state 3 (disabled).
 	MetricsState() int
 	// MetricsPeersOnline returns the count of peers currently online.
 	MetricsPeersOnline() int
@@ -47,14 +48,14 @@ func RegisterTsnetProvider(p tsnetStatusProvider) {
 	tsnetProviderMu.Unlock()
 }
 
-// TsnetNodeStateSnapshot returns the current state value or 0 when
-// no provider is registered. Used by /v1/diagnostics.
+// TsnetNodeStateSnapshot returns the current state value, or 3
+// (disabled) when no provider is registered. Used by /v1/diagnostics.
 func TsnetNodeStateSnapshot() int {
 	tsnetProviderMu.RLock()
 	p := tsnetProvider
 	tsnetProviderMu.RUnlock()
 	if p == nil {
-		return 0
+		return 3 // no provider registered == tailscale disabled
 	}
 	return p.MetricsState()
 }
@@ -111,7 +112,10 @@ func (c *tsnetCollector) Collect(ch chan<- prometheus.Metric) {
 	p := tsnetProvider
 	tsnetProviderMu.RUnlock()
 	if p == nil {
-		ch <- prometheus.MustNewConstMetric(c.nodeState, prometheus.GaugeValue, 0)
+		// No provider registered == tailscale disabled → state 3 (matches
+		// the metric descriptor, and lets dashboards tell an intentionally-
+		// disabled node apart from a genuinely-down one).
+		ch <- prometheus.MustNewConstMetric(c.nodeState, prometheus.GaugeValue, 3)
 		ch <- prometheus.MustNewConstMetric(c.peersOnline, prometheus.GaugeValue, 0)
 		return
 	}

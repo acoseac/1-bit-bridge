@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
 	"sync"
@@ -168,26 +169,29 @@ func (a *tailscaleAutoPilot) Start(ctx context.Context) {
 // the inverse — it requires a fresh `bridge serve` start because
 // the listener composition + provider wiring need a clean boot.
 func (a *tailscaleAutoPilot) Disable() {
-	// **Set the gate FIRST**, before cancelling the ctx. Any
-	// detectAndMint pass that's already past the ctx check will
-	// see `disabled=true` at the publish check and return without
-	// re-installing the cert. Without this ordering, a concurrent
-	// detection could win the race after cancel() but before we
-	// clear the cert below, leaving us with cert installed AND
-	// auto-pilot ctx cancelled — the SNI switcher would keep
-	// serving stale LE state under the (now disabled) magic-DNS
-	// SNI (CodeRabbit Major on PR #294).
-	a.disabled.Store(true)
+	// Set the gate AND clear certManager UNDER a.mu, atomically. Each
+	// detectAndMint re-injection guards its certManager write with the
+	// same lock + a disabled re-check, so serializing them here closes the
+	// TOCTOU where a concurrent detection observed disabled=false and then
+	// landed its cert write after this clear (Gemini on PR #480). The gate
+	// is still set before cancel() (which runs after the unlock), so a
+	// detection already past the ctx check still sees disabled=true.
+	// CodeRabbit Major on PR #294 established the gate-before-clear intent;
+	// this makes it lock-atomic. certManager.SetX are lock-free atomics,
+	// so holding a.mu across them can't create a lock-ordering cycle.
 	a.mu.Lock()
+	a.disabled.Store(true)
 	cancel := a.cancelLocal
 	a.cancelLocal = nil
-	a.mu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
 	if a.certManager != nil {
 		a.certManager.SetTailscaleCert(nil)
 		a.certManager.SetMagicDNSSuffix("")
+	}
+	a.mu.Unlock()
+	// Cancel OUTSIDE the lock — ctx cancellation can run downstream
+	// callbacks, and we never hold a.mu across arbitrary work.
+	if cancel != nil {
+		cancel()
 	}
 	// Reset the snapshot so the admin tile reflects "disabled"
 	// instead of stale last-seen state.
@@ -290,11 +294,25 @@ func (a *tailscaleAutoPilot) detectAndMint(ctx context.Context, trigger string) 
 		return snap
 	}
 
+	// Re-check the disable gate and inject UNDER a.mu so a concurrent
+	// operator Disable() — which now sets the gate AND clears certManager
+	// under the same lock — can't be clobbered by this re-injection. The
+	// top-of-function gate narrowed the window; holding a.mu across the
+	// check+write pair closes the residual TOCTOU (Gemini on PR #480).
+	// a.mu is held ONLY across check+write, never across the slow
+	// Detect()/MintCert IO.
+	//
 	// Hand the suffix to the SNI switcher even before we know the LE
 	// cert's status — that way Get() can already classify SNI without
 	// waiting on the mint. If MintCert ultimately fails, Get falls
 	// through to self-signed for that SNI (= pre-PR behaviour).
+	a.mu.Lock()
+	if a.disabled.Load() {
+		a.mu.Unlock()
+		return a.Snapshot()
+	}
 	a.certManager.SetMagicDNSSuffix(info.TailnetSuffix)
+	a.mu.Unlock()
 
 	certPath, keyPath := servertailscale.LECertPaths(a.dataDir)
 	snap.CertPath = certPath
@@ -317,7 +335,13 @@ func (a *tailscaleAutoPilot) detectAndMint(ctx context.Context, trigger string) 
 	// tick. Skip-mint short-circuit only kicks in when the cert is
 	// outside the renewal window.
 	if existing, err := servertls.LoadTailscaleCertFromDisk(certPath, keyPath); err == nil && existing.Leaf != nil {
+		a.mu.Lock()
+		if a.disabled.Load() { // Disable() may have landed during the load
+			a.mu.Unlock()
+			return a.Snapshot()
+		}
 		a.certManager.SetTailscaleCert(existing)
+		a.mu.Unlock()
 		snap.CertPresent = true
 		expiry := existing.Leaf.NotAfter
 		snap.CertNotAfter = &expiry
@@ -380,7 +404,13 @@ func (a *tailscaleAutoPilot) detectAndMint(ctx context.Context, trigger string) 
 		a.publish(snap)
 		return snap
 	}
+	a.mu.Lock()
+	if a.disabled.Load() { // Disable() may have landed during the slow MintCert
+		a.mu.Unlock()
+		return a.Snapshot()
+	}
 	a.certManager.SetTailscaleCert(loaded)
+	a.mu.Unlock()
 	snap.CertPresent = true
 	snap.HTTPSCertsEnabled = true
 	expiryStr := "unknown"
@@ -426,10 +456,11 @@ func warnLECertExpiringSoon(magicDNS string, notAfter, now time.Time) string {
 		return ""
 	}
 	if remaining < 0 {
-		// Floor at 0 in the message rather than printing a negative
-		// "expires in -3 days" which reads worse than "expired 3 days
-		// ago" (same convention `bridge cert info` uses).
-		daysOver := int(-remaining / (24 * time.Hour))
+		// Report elapsed time as "expired N days past" rather than a
+		// negative "expires in -3 days". Round UP so a cert expired less
+		// than a day ago reads "1 day past", not "0 days past" — integer
+		// truncation on -remaining/24h floored every sub-day expiry to 0.
+		daysOver := int(math.Ceil(float64(-remaining) / float64(24*time.Hour)))
 		return fmt.Sprintf("WARNING: tailscale LE cert for %s has EXPIRED (%d days past). "+
 			"Auto-renew appears stuck — run `bridge tailscale status` and check the admin DNS page.",
 			magicDNS, daysOver)

@@ -161,6 +161,12 @@ func resetTailscaleStatusCache() {
 	tailscaleStatusCached = tailscaleStatus{}
 	tailscaleStatusErr = nil
 	tailscaleStatusFetched = time.Time{}
+	// Deliberately DON'T touch tailscaleStatusInflight: the singleflight
+	// leader clears it (and closes its channel) under this same mutex
+	// before returning — even on panic, via the recover in
+	// cachedTailscaleStatus — so it's already nil after any completed
+	// call. Clearing it here would only risk clobbering a channel a
+	// concurrent in-flight fetch just installed (Gemini on PR #480).
 }
 
 // GetTailscaleDNSName returns the host's MagicDNS name (e.g.

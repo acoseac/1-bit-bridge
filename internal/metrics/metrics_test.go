@@ -121,3 +121,18 @@ func readCounter(c interface {
 	}
 	return *m.Counter.Value
 }
+
+// With no tsnet provider registered (tailscale disabled / pre-boot),
+// the node-state snapshot must report 3 (disabled), matching the metric
+// descriptor — not 0 (down), so dashboards can distinguish the two.
+func TestTsnetNodeStateSnapshotDisabledReportsThree(t *testing.T) {
+	tsnetProviderMu.RLock()
+	prev := tsnetProvider
+	tsnetProviderMu.RUnlock()
+	t.Cleanup(func() { RegisterTsnetProvider(prev) })
+
+	RegisterTsnetProvider(nil)
+	if got := TsnetNodeStateSnapshot(); got != 3 {
+		t.Errorf("TsnetNodeStateSnapshot() with no provider = %d, want 3 (disabled)", got)
+	}
+}
