@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 
@@ -38,5 +39,27 @@ func TestLifecycleNoService(t *testing.T) {
 				t.Errorf("missing hint, stderr = %q", stderr.String())
 			}
 		})
+	}
+}
+
+// ensureInstalled must surface a real InstalledKind() probe failure
+// (e.g. a systemd D-Bus error) as a distinct message + false, NOT the
+// misleading "no service unit installed" hint.
+func TestEnsureInstalledSurfacesProbeError(t *testing.T) {
+	orig := installedKindFunc
+	t.Cleanup(func() { installedKindFunc = orig })
+	installedKindFunc = func() (packaging.ServiceKind, error) {
+		return packaging.KindNone, errors.New("systemd D-Bus unavailable")
+	}
+
+	var stderr bytes.Buffer
+	if ensureInstalled(&stderr) {
+		t.Errorf("ensureInstalled returned true on a probe error")
+	}
+	if !strings.Contains(stderr.String(), "could not determine service install state") {
+		t.Errorf("missing probe-error message, stderr = %q", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "no service unit installed") {
+		t.Errorf("emitted the misleading no-unit hint on a probe error, stderr = %q", stderr.String())
 	}
 }
