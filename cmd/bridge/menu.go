@@ -543,6 +543,10 @@ func adminAddrFromCfg(cfgPath string) string {
 // cancellation cleanly (golangci-lint `noctx` compliant; CodeRabbit on
 // PR #72).
 func waitForListen(addr string, timeout time.Duration) bool {
+	// A wildcard admin bind (0.0.0.0 / :: in public mode) isn't dialable
+	// on Windows; probe loopback so the restart health-check doesn't
+	// falsely report "service didn't respond".
+	addr = probeLoopbackAddr(addr)
 	overall, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	dialer := &net.Dialer{Timeout: 200 * time.Millisecond}
@@ -574,10 +578,15 @@ func waitForListen(addr string, timeout time.Duration) bool {
 // default if cfg load fails. Best-effort — on a headless host the
 // browser-open command fails silently and we just print the URL.
 func actOpenAdmin(_ context.Context, _ *bufio.Reader, stdout, _ io.Writer, s menuState) int {
-	url := "http://127.0.0.1:7789/"
+	// Route through operatorAdminURL (the single source of truth for
+	// browser routing) so a public-posture bridge prints its real
+	// https URL (autocert domain / reverse-proxy) instead of a plain
+	// http://<bindAddr> that would break. "http" is the loopback
+	// default; the helper forces https for public mode.
+	url := operatorAdminURL(nil, "http")
 	if s.cfgPath != "" {
-		if cfg, err := config.Load(s.cfgPath); err == nil && cfg.AdminAddress != "" {
-			url = "http://" + cfg.AdminAddress + "/"
+		if cfg, err := config.Load(s.cfgPath); err == nil {
+			url = operatorAdminURL(cfg, "http")
 		}
 	}
 	fmt.Fprintf(stdout, "  Admin console: %s\n", url)

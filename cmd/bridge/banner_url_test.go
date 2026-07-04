@@ -214,12 +214,12 @@ func TestOperatorAdminURLNilConfigReturnsBrowseableFallback(t *testing.T) {
 	if got != want {
 		t.Errorf("operatorAdminURL(nil, http) = %q, want %q", got, want)
 	}
-	// Empty scheme defaults to https on the nil-cfg path (matches
-	// the in-doc rationale: a caller without scheme context most
-	// likely came from a public-mode init footer where https is
-	// the right default).
+	// Empty scheme defaults to http on the nil-cfg path: with no cfg we
+	// fall back to the loopback DefaultAdminAddress, which is served over
+	// plain http. (Matches the docblock and the cfg!=nil loopback branch;
+	// an https default here would print an unreachable https://127.0.0.1.)
 	got = operatorAdminURL(nil, "")
-	wantEmpty := "https://" + config.DefaultAdminAddress + "/"
+	wantEmpty := "http://" + config.DefaultAdminAddress + "/"
 	if got != wantEmpty {
 		t.Errorf("operatorAdminURL(nil, empty) = %q, want %q", got, wantEmpty)
 	}

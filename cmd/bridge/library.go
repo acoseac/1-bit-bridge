@@ -213,6 +213,10 @@ func tryLibraryViaAdmin(ctx context.Context, cfg *config.Config, method, path st
 	if addr == "" {
 		addr = config.DefaultAdminAddress
 	}
+	// A wildcard admin bind (0.0.0.0 / :: in public mode) isn't dialable
+	// on Windows; probe loopback so the auto-detect doesn't needlessly
+	// fall through to the offline YAML-mutation path.
+	addr = probeLoopbackAddr(addr)
 	probeCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
 	defer cancel()
 	probeReq, err := http.NewRequestWithContext(probeCtx, http.MethodGet, "http://"+addr+"/api/stats", nil)

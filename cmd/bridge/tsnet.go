@@ -534,6 +534,10 @@ func isAdminAlive(cfg *config.Config) bool {
 	if addr == "" {
 		addr = config.DefaultAdminAddress
 	}
+	// A wildcard admin bind (0.0.0.0 / :: in public mode) isn't dialable
+	// on Windows; probe loopback instead so a false negative here can't
+	// convince tsnet logout the bridge is stopped and wipe live state.
+	addr = probeLoopbackAddr(addr)
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/api/stats", nil)
