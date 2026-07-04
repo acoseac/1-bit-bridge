@@ -101,8 +101,12 @@ func banneradminURL(domain, adminAddress, scheme string) string {
 // would be a real UX paper-cut; the defensive fallback is cheap.
 func operatorAdminURL(cfg *config.Config, adminScheme string) string {
 	if cfg == nil {
+		// No cfg → fall back to the loopback DefaultAdminAddress, which
+		// is served over plain http. Default the scheme to "http" to
+		// match that (and the docblock + the cfg!=nil loopback branch);
+		// "https" here would print an unreachable https://127.0.0.1 URL.
 		if adminScheme == "" {
-			adminScheme = "https"
+			adminScheme = "http"
 		}
 		return adminScheme + "://" + config.DefaultAdminAddress + "/"
 	}

@@ -534,6 +534,9 @@ func isAdminAlive(cfg *config.Config) bool {
 	if addr == "" {
 		addr = config.DefaultAdminAddress
 	}
+	// Loopback-map so a Windows false-negative on a wildcard bind can't
+	// convince tsnet logout the bridge is stopped and wipe live state.
+	addr = probeLoopbackAddr(addr)
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/api/stats", nil)
