@@ -626,7 +626,7 @@ func runGCForwardSweep(ctx context.Context, stdout, stderr io.Writer, outputDir 
 		if d.IsDir() {
 			return nil
 		}
-		if known[path] {
+		if known[strings.ToLower(filepath.Clean(path))] {
 			kept++
 			return nil
 		}
@@ -785,9 +785,14 @@ func runGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store,
 		fmt.Fprintf(stderr, "list variants: %v\n", err)
 		return 1
 	}
+	// Key the known-set on a case-folded + cleaned path so the forward
+	// sweep can't delete a live sidecar over a casing delta between the
+	// DB SidecarPath and the on-disk WalkDir path on a case-insensitive
+	// FS (Windows / macOS). Mirrors runAnalyzeGC (PR #395); the reverse
+	// sweep stats DB paths directly and needs no normalization.
 	known := make(map[string]bool, len(allRows))
 	for _, r := range allRows {
-		known[r.SidecarPath] = true
+		known[strings.ToLower(filepath.Clean(r.SidecarPath))] = true
 	}
 
 	_, _, failed, exitCode := runGCForwardSweep(ctx, stdout, stderr, outputDir, known)
