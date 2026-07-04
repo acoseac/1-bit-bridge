@@ -82,6 +82,43 @@ func TestBootstrapTranscodeCmdHonorsVariantsDir(t *testing.T) {
 // PR #351; next manifest sync re-pulled the same dead v1 ID and the
 // loop restarted. The reverse-sweep gc breaks the loop at the
 // source-of-truth layer.
+// The forward sweep must not delete a live sidecar when the DB
+// SidecarPath and the on-disk (WalkDir) path differ only in case — the
+// data-loss hazard on case-insensitive filesystems (Windows / macOS).
+// The known-set is built case-folded (as runGC does), so the mixed-case
+// on-disk file must still match. On the pre-fix raw lookup the mixed-case
+// walk path misses the lowercase-keyed map and the file is deleted.
+func TestRunGCForwardSweepCaseInsensitive(t *testing.T) {
+	outputDir := t.TempDir()
+	dir := filepath.Join(outputDir, "Artist", "Album")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sidecar := filepath.Join(dir, "Track.flac.upscaled-v1-192000-24.flac")
+	if err := os.WriteFile(sidecar, []byte("flac"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Known-set keyed exactly as runGC keys it: case-folded + cleaned.
+	// The lowercase key vs the mixed-case on-disk walk path is the casing
+	// delta the fix bridges.
+	known := map[string]bool{strings.ToLower(filepath.Clean(sidecar)): true}
+
+	removed, kept, failed, exitCode := runGCForwardSweep(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, outputDir, known)
+	if exitCode != 0 || failed != 0 {
+		t.Fatalf("sweep unexpected: exit=%d failed=%d", exitCode, failed)
+	}
+	if removed != 0 {
+		t.Errorf("live sidecar deleted over a casing delta (removed=%d)", removed)
+	}
+	if kept != 1 {
+		t.Errorf("kept=%d, want 1", kept)
+	}
+	if _, err := os.Stat(sidecar); err != nil {
+		t.Errorf("live sidecar %s was deleted: %v", sidecar, err)
+	}
+}
+
 func TestRunGCReverseSweepRemovesOrphanRows(t *testing.T) {
 	dir := t.TempDir()
 	storePath := filepath.Join(dir, "bridge.db")
