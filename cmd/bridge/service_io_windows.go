@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"golang.org/x/sys/windows"
 )
 
 // redirectServiceIO points os.Stdout and os.Stderr at a per-machine log
@@ -52,4 +54,21 @@ func redirectServiceIO() {
 	}
 	os.Stdout = f
 	os.Stderr = f
+
+	// Reassigning the Go os.Stdout/os.Stderr vars redirects fmt.Fprintln
+	// and the slog handlers, but Go-runtime *fatal* output (an unrecovered
+	// panic, a concurrent-map-write, an OOM throw) is written by
+	// runtime.write1(fd=2), which resolves its target via
+	// GetStdHandle(STD_ERROR_HANDLE) fresh on every write — verified in
+	// the go1.26 runtime source (runtime/os_windows.go); the handle is NOT
+	// cached at init. Pointing the process std-handle table at the log
+	// file therefore ALSO lands those fatal crash traces in bridge.log
+	// instead of losing them to the console-less SCM. Errors are
+	// non-fatal — the Go-var redirect above still covers normal output.
+	//
+	// Version note: this relies on write1 resolving the handle per-write;
+	// re-verify against runtime/os_windows.go if a future Go caches it.
+	h := windows.Handle(f.Fd())
+	_ = windows.SetStdHandle(windows.STD_OUTPUT_HANDLE, h)
+	_ = windows.SetStdHandle(windows.STD_ERROR_HANDLE, h)
 }
