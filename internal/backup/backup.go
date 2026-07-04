@@ -232,6 +232,22 @@ func Restore(snapshotDir string, dst Targets) error {
 		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 			return fmt.Errorf("create dir for %s: %w", name, err)
 		}
+		if name == ManifestDBFileName {
+			// Drop the live pre-restore WAL/SHM BEFORE overwriting the
+			// main DB. Snapshot's VACUUM INTO produces a clean single-
+			// file bridge.db (no -wal in the bundle), so the only WAL on
+			// disk belongs to the DB we're about to replace — SQLite
+			// would otherwise replay those stale frames onto the restored
+			// (older, different) main file on next open and corrupt it.
+			// Order is load-bearing: copyFile is an atomic temp+rename,
+			// so removing WAL/SHM first means a crash in the gap leaves
+			// the OLD db with no wal (clean, restore just didn't finish —
+			// re-runnable) rather than NEW db + OLD wal (corruption).
+			// Restore requires the bridge stopped (docblock), so there is
+			// no concurrent writer.
+			_ = os.Remove(target + "-wal")
+			_ = os.Remove(target + "-shm")
+		}
 		if err := copyFile(srcPath, target, mode); err != nil {
 			return fmt.Errorf("restore %s: %w", name, err)
 		}
@@ -428,13 +444,15 @@ func readManifest(path string) (Manifest, error) {
 // "-1", "-2" suffixes until one succeeds.
 func createUniqueSnapshotDir(backupsRoot string, t time.Time) (string, error) {
 	base := filepath.Join(backupsRoot, t.UTC().Format(timestampLayout))
-	candidates := []string{base}
-	for i := 1; i < 100; i++ {
-		candidates = append(candidates, fmt.Sprintf("%s-%d", base, i))
-	}
-	for _, c := range candidates {
-		if err := os.Mkdir(c, 0o700); err == nil {
-			return c, nil
+	// Test candidates lazily — the base path succeeds >99% of the time,
+	// so building all 100 fallback strings up front is wasted work.
+	for i := 0; i < 100; i++ {
+		candidate := base
+		if i > 0 {
+			candidate = fmt.Sprintf("%s-%d", base, i)
+		}
+		if err := os.Mkdir(candidate, 0o700); err == nil {
+			return candidate, nil
 		} else if !errors.Is(err, os.ErrExist) {
 			return "", err
 		}
