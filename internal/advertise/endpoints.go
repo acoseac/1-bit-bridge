@@ -275,8 +275,10 @@ func ipFromAddr(a net.Addr) (net.IP, bool) {
 }
 
 // ipHostForURL formats an IP for embedding in a URL host-part. IPv6
-// must be square-bracketed; IPv4 is just the dotted-quad. `%zone`
-// suffixes on link-local IPv6 are preserved because iOS uses them.
+// must be square-bracketed; IPv4 is the bare dotted-quad. Link-local
+// IPv6 (fe80::/10) is filtered upstream in Endpoints() and never reaches
+// here — which is just as well, since net.IP is a plain []byte and can't
+// carry a %zone suffix anyway (zones live on net.IPAddr, not net.IP).
 func ipHostForURL(ip net.IP) string {
 	if ip.To4() != nil {
 		return ip.String()

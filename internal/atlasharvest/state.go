@@ -65,11 +65,22 @@ func OpenStateStore(path string) (*StateStore, error) {
 	return s, nil
 }
 
-// Snapshot returns a copy of the current state.
+// Snapshot returns a copy of the current state. The PendingCovers map is
+// deep-copied under the lock — returning s.st by value still shares the
+// map's underlying storage, so a caller reading/marshalling the snapshot
+// concurrently with AddPendingCovers / SettlePendingCovers (which mutate
+// the map under s.mu) would otherwise trip a fatal concurrent map access.
 func (s *StateStore) Snapshot() State {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.st
+	snap := s.st
+	if s.st.PendingCovers != nil {
+		snap.PendingCovers = make(map[string]int, len(s.st.PendingCovers))
+		for k, v := range s.st.PendingCovers {
+			snap.PendingCovers[k] = v
+		}
+	}
+	return snap
 }
 
 // AtlasCredential returns the provisioned bulk_harvest bearer + Atlas base URL

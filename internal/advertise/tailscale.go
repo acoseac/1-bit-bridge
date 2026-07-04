@@ -161,6 +161,10 @@ func resetTailscaleStatusCache() {
 	tailscaleStatusCached = tailscaleStatus{}
 	tailscaleStatusErr = nil
 	tailscaleStatusFetched = time.Time{}
+	// Also clear the singleflight gate. If a prior test left an in-flight
+	// channel set, a subsequent cachedTailscaleStatus() would block on
+	// that stale channel and receive the pre-reset result.
+	tailscaleStatusInflight = nil
 }
 
 // GetTailscaleDNSName returns the host's MagicDNS name (e.g.

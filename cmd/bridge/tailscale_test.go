@@ -58,6 +58,13 @@ func TestWarnLECertExpiringSoon(t *testing.T) {
 			notAfter:    now.Add(-365 * 24 * time.Hour),
 			wantContain: "EXPIRED (365 days past)",
 		},
+		{
+			// Sub-day expiry rounds UP: pre-fix integer truncation
+			// printed "0 days past" for a cert expired < 24h ago.
+			name:        "expired_12_hours_ago_rounds_up",
+			notAfter:    now.Add(-12 * time.Hour),
+			wantContain: "EXPIRED (1 days past)",
+		},
 	}
 
 	for _, c := range cases {

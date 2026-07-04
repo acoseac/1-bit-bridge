@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
 	"sync"
@@ -290,6 +291,16 @@ func (a *tailscaleAutoPilot) detectAndMint(ctx context.Context, trigger string) 
 		return snap
 	}
 
+	// Re-check the disable gate before re-injecting Tailscale state: a
+	// concurrent operator Disable() could have completed while we were
+	// blocked in the slow Detect() above. The top-of-function gate + the
+	// publish() gate only cover the snapshot; without this, the success
+	// path would clobber Disable's certManager teardown and keep serving
+	// the LE cert on the magic-DNS SNI after Tailscale was turned off.
+	if a.disabled.Load() {
+		return a.Snapshot()
+	}
+
 	// Hand the suffix to the SNI switcher even before we know the LE
 	// cert's status — that way Get() can already classify SNI without
 	// waiting on the mint. If MintCert ultimately fails, Get falls
@@ -317,6 +328,9 @@ func (a *tailscaleAutoPilot) detectAndMint(ctx context.Context, trigger string) 
 	// tick. Skip-mint short-circuit only kicks in when the cert is
 	// outside the renewal window.
 	if existing, err := servertls.LoadTailscaleCertFromDisk(certPath, keyPath); err == nil && existing.Leaf != nil {
+		if a.disabled.Load() { // Disable() may have landed during the load
+			return a.Snapshot()
+		}
 		a.certManager.SetTailscaleCert(existing)
 		snap.CertPresent = true
 		expiry := existing.Leaf.NotAfter
@@ -380,6 +394,9 @@ func (a *tailscaleAutoPilot) detectAndMint(ctx context.Context, trigger string) 
 		a.publish(snap)
 		return snap
 	}
+	if a.disabled.Load() { // Disable() may have landed during the slow MintCert
+		return a.Snapshot()
+	}
 	a.certManager.SetTailscaleCert(loaded)
 	snap.CertPresent = true
 	snap.HTTPSCertsEnabled = true
@@ -426,10 +443,11 @@ func warnLECertExpiringSoon(magicDNS string, notAfter, now time.Time) string {
 		return ""
 	}
 	if remaining < 0 {
-		// Floor at 0 in the message rather than printing a negative
-		// "expires in -3 days" which reads worse than "expired 3 days
-		// ago" (same convention `bridge cert info` uses).
-		daysOver := int(-remaining / (24 * time.Hour))
+		// Report elapsed time as "expired N days past" rather than a
+		// negative "expires in -3 days". Round UP so a cert expired less
+		// than a day ago reads "1 day past", not "0 days past" — integer
+		// truncation on -remaining/24h floored every sub-day expiry to 0.
+		daysOver := int(math.Ceil(float64(-remaining) / float64(24*time.Hour)))
 		return fmt.Sprintf("WARNING: tailscale LE cert for %s has EXPIRED (%d days past). "+
 			"Auto-renew appears stuck — run `bridge tailscale status` and check the admin DNS page.",
 			magicDNS, daysOver)
