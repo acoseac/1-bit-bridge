@@ -226,7 +226,10 @@ func (s *Server) rateLimitManifest(next http.HandlerFunc) http.HandlerFunc {
 		// Per Gemini medium on PR #235: a `cursor`-OR-`limit` gate
 		// would let a misbehaving authed client send `?cursor=anything`
 		// to bypass the bucket while still receiving the full dump.
-		if r.URL.Query().Get("limit") != "" {
+		// safeQuery for uniform query-handling discipline (limit is
+		// numeric so there's no functional difference, but every other
+		// handler routes through it).
+		if safeQuery(r).Get("limit") != "" {
 			next(w, r)
 			return
 		}

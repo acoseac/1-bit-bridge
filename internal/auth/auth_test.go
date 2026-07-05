@@ -233,6 +233,35 @@ func TestRevokeUnknownReturnsErrNotFound(t *testing.T) {
 	}
 }
 
+// TestRevokeRollsBackOnPersistFailure pins the rollback contract that
+// brings Revoke in line with Mint/Rotate/SetExpiry: if persist fails
+// mid-Revoke (here a read-only dir), the in-memory slice must be
+// restored so a still-valid token isn't rejected until restart.
+// reloadIfStale can't recover it — a failed write didn't change the
+// file's mtime/size, so the stale in-memory view (token missing) would
+// otherwise persist.
+func TestRevokeRollsBackOnPersistFailure(t *testing.T) {
+	s, path := newTmpStore(t)
+	raw, tok, _ := s.Mint("iPhone")
+
+	dir := filepath.Dir(path)
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Skip("cannot chmod temp dir for this test")
+	}
+	defer os.Chmod(dir, 0o755)
+
+	if err := s.Revoke(tok.ID); err == nil {
+		t.Skip("persist succeeded despite read-only dir — platform-dependent")
+	}
+	// Rollback restored the token: still counted AND still validates.
+	if len(s.List()) != 1 {
+		t.Errorf("failed Revoke left %d tokens in memory, want 1 (rollback)", len(s.List()))
+	}
+	if _, ok := s.Validate(raw); !ok {
+		t.Error("token rejected after a failed Revoke — rollback did not restore it")
+	}
+}
+
 func TestReloadPreservesNewerInMemoryLastUsed(t *testing.T) {
 	// Regression guard: an out-of-process write to tokens.json (e.g.
 	// `bridge pair` appending a new token) must not clobber in-memory
