@@ -399,7 +399,11 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) error {
 	} else {
 		metrics.RecordMBCache("artist", false)
 		if !sleepCtx(ctx, e.MBMinInterval) {
-			return nil
+			// ctx cancelled during pacing — sleepCtx returns false only
+			// when ctx.Err() != nil, so propagate it: enrichOne then skips
+			// MarkEnriched on shutdown instead of stamping the track +
+			// logging a spurious "context canceled". Mirrors the album path.
+			return ctx.Err()
 		}
 		res, err := e.mb.SearchArtist(ctx, t.Artist)
 		if err != nil {
@@ -409,13 +413,21 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) error {
 			if ctx.Err() == nil {
 				logger.Error("MB artist search", "artist", t.Artist, "err", err)
 			}
+			// Shutdown/cancellation: propagate the ctx error so enrichOne
+			// skips MarkEnriched (mirrors the album SearchRelease path) — no
+			// spurious "mark enriched: context canceled" log, and the track
+			// retries on the next run. Checked BEFORE IsTransient because a
+			// cancel surfaces as context.Canceled, which IsTransient treats
+			// as non-transient (→ would otherwise fall through to nil).
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			// Transient MB error (5xx / 429 / timeout / conn-refused):
 			// propagate so enrichOne skips MarkEnriched and the worker
 			// retries this track on the next batch when MB recovers —
 			// mirrors the album SearchRelease invariant. Persistent errors
 			// (404 / decode) fall through to nil so the track is stamped
-			// enriched and doesn't spin. A cancelled ctx (shutdown) is NOT
-			// transient (IsTransient returns false), so it also returns nil.
+			// enriched and doesn't spin.
 			if IsTransient(err) {
 				return err
 			}

@@ -76,15 +76,18 @@ type Provider struct {
 	lastPendingErrLogNS atomic.Int64
 }
 
-// throttledHealthErr logs a health-probe DB error at most ~once/min per call
+// throttledHealthErr logs a health-probe DB error at most once/min per call
 // site so a persistently-broken DB polled on every /v1/health request doesn't
-// flood the log. Racy-by-design (a rare concurrent double-log under two
-// simultaneous probes is harmless) — no mutex on the health hot path.
+// flood the log. Lock-free AND race-free: the CompareAndSwap lets exactly one
+// goroutine per window win the timestamp update and log — no mutex on the
+// health hot path, no double-log under simultaneous probes.
 func throttledHealthErr(last *atomic.Int64, msg string, err error) {
 	now := time.Now().UnixNano()
-	if now-last.Load() > int64(time.Minute) {
-		last.Store(now)
-		logger.Error(msg, "err", err)
+	prev := last.Load()
+	if now-prev > int64(time.Minute) {
+		if last.CompareAndSwap(prev, now) {
+			logger.Error(msg, "err", err)
+		}
 	}
 }
 
