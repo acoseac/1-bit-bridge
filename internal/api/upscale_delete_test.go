@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
@@ -26,6 +27,10 @@ type stubVariantDeleter struct {
 	deletes []string // "sourcePath|variantID"
 	listErr error    // injected for the enumeration-failure branch
 	delErr  error    // injected for the per-row delete failure branch
+	// afterDelete, when set, runs after each successful DeleteVariant —
+	// lets a test cancel the request context mid-loop to exercise the
+	// ctx early-break.
+	afterDelete func()
 }
 
 func (s *stubVariantDeleter) AllVariants(ctx context.Context) ([]VariantSummary, error) {
@@ -75,6 +80,9 @@ func (s *stubVariantDeleter) DeleteVariant(ctx context.Context, sourcePath, vari
 		return s.delErr
 	}
 	s.deletes = append(s.deletes, sourcePath+"|"+variantID)
+	if s.afterDelete != nil {
+		s.afterDelete()
+	}
 	return nil
 }
 
@@ -566,5 +574,92 @@ func TestValidateRelativePath_rejectsBad(t *testing.T) {
 		if _, ok := validateRelativePath(in); ok {
 			t.Errorf("accepted bad path %q", in)
 		}
+	}
+}
+
+// TestRunVariantDelete_DedupsVariantIDsInSSE pins the dedup: two tracks
+// sharing ONE variant kind must emit that variant ID exactly once in the
+// upscale.deleted event (mirrors the DeletedPaths dedup), while both
+// distinct source paths survive.
+func TestRunVariantDelete_DedupsVariantIDsInSSE(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := &config.Config{LibraryRoots: []string{tmp}, ListenAddress: ":7788", LibraryName: "Test"}
+	authStore, _ := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
+	srv := New(cfg, authStore, nil, "fp")
+	deleter := &stubVariantDeleter{
+		all: []VariantSummary{
+			{SourcePath: "Music/Album/01.flac", VariantID: "upscaled-v2-192000-24",
+				SidecarPath: filepath.Join(tmp, "u1"), SizeBytes: 1000},
+			{SourcePath: "Music/Album/02.flac", VariantID: "upscaled-v2-192000-24",
+				SidecarPath: filepath.Join(tmp, "u2"), SizeBytes: 1000},
+		},
+		byPath: map[string][]VariantSummary{},
+	}
+	srv = srv.WithVariantDeleter(deleter)
+	stop := srv.StartEventBroker()
+	defer stop()
+
+	sub, _ := srv.eventBroker.subscribe([]string{"upscale"}, "")
+	defer srv.eventBroker.unsubscribe(sub)
+
+	resp, err := srv.RunVariantDelete(context.Background(), VariantDeleteRequest{All: true})
+	if err != nil {
+		t.Fatalf("RunVariantDelete: %v", err)
+	}
+	if resp.DeletedCount != 2 {
+		t.Fatalf("deletedCount = %d, want 2", resp.DeletedCount)
+	}
+
+	select {
+	case env := <-sub.ch:
+		if env.Topic != "upscale.deleted" {
+			t.Fatalf("topic = %q, want upscale.deleted", env.Topic)
+		}
+		var ev UpscaleDeletedEvent
+		if err := json.Unmarshal(env.Data, &ev); err != nil {
+			t.Fatalf("decode event: %v", err)
+		}
+		if len(ev.VariantIDs) != 1 || ev.VariantIDs[0] != "upscaled-v2-192000-24" {
+			t.Errorf("VariantIDs = %v, want exactly [upscaled-v2-192000-24] (deduped)", ev.VariantIDs)
+		}
+		if len(ev.Paths) != 2 {
+			t.Errorf("Paths = %v, want 2 distinct source paths", ev.Paths)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("upscale.deleted event not delivered")
+	}
+}
+
+// TestRunVariantDelete_StopsOnContextCancel pins the ctx early-break:
+// once the request context is canceled mid-loop, no further sidecars are
+// unlinked / rows deleted (the file-gone/row-kept zombie cascade the
+// break prevents), and DeletedCount reflects only the pre-cancel rows.
+func TestRunVariantDelete_StopsOnContextCancel(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := &config.Config{LibraryRoots: []string{tmp}, ListenAddress: ":7788", LibraryName: "Test"}
+	authStore, _ := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	deleter := &stubVariantDeleter{
+		all: []VariantSummary{
+			{SourcePath: "Music/01.flac", VariantID: "v1", SidecarPath: filepath.Join(tmp, "a"), SizeBytes: 1},
+			{SourcePath: "Music/02.flac", VariantID: "v2", SidecarPath: filepath.Join(tmp, "b"), SizeBytes: 1},
+			{SourcePath: "Music/03.flac", VariantID: "v3", SidecarPath: filepath.Join(tmp, "c"), SizeBytes: 1},
+		},
+		byPath: map[string][]VariantSummary{},
+	}
+	// Cancel right after the first row's DB delete so iteration 2 breaks.
+	deleter.afterDelete = cancel
+
+	srv := New(cfg, authStore, nil, "fp").WithVariantDeleter(deleter)
+	resp, err := srv.RunVariantDelete(ctx, VariantDeleteRequest{All: true})
+	if err != nil {
+		t.Fatalf("RunVariantDelete: %v", err)
+	}
+	if resp.DeletedCount != 1 {
+		t.Errorf("deletedCount = %d, want 1 (loop broke after ctx cancel)", resp.DeletedCount)
+	}
+	if got := deleter.deletedKeys(); len(got) != 1 || got[0] != "Music/01.flac|v1" {
+		t.Errorf("DeleteVariant calls = %v, want only [Music/01.flac|v1] (rows 2-3 skipped)", got)
 	}
 }

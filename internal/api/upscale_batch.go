@@ -225,7 +225,7 @@ func (s *Server) upscaleBatchList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit := 100
-	if v := r.URL.Query().Get("limit"); v != "" {
+	if v := safeQuery(r).Get("limit"); v != "" {
 		// Loose parse — invalid value falls back to default.
 		var n int
 		if _, err := fmt.Sscan(v, &n); err == nil && n > 0 && n <= 500 {

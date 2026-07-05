@@ -549,8 +549,27 @@ func (s *Store) Revoke(id string) error {
 	}
 	for i, tok := range s.tokens {
 		if tok.ID == id {
-			s.tokens = append(s.tokens[:i], s.tokens[i+1:]...)
-			return s.persist()
+			// Build the post-delete slice in a FRESH backing array so
+			// `orig` stays a valid rollback snapshot. An in-place
+			// `append(s.tokens[:i], s.tokens[i+1:]...)` shifts the shared
+			// backing array out from under `orig` and corrupts it — so a
+			// persist failure could not be rolled back cleanly. Same
+			// snapshot-and-rollback contract as Mint/Rotate/SetExpiry: a
+			// failed write must not leave memory diverged from disk
+			// (reloadIfStale won't resync — the failed persist didn't
+			// change the file mtime/size — so a still-valid token would be
+			// rejected until restart). Dropping `orig` on success also
+			// releases the removed Token (+ its ExpiresAt pointer) for GC.
+			orig := s.tokens
+			next := make([]Token, 0, len(orig)-1)
+			next = append(next, orig[:i]...)
+			next = append(next, orig[i+1:]...)
+			s.tokens = next
+			if err := s.persist(); err != nil {
+				s.tokens = orig
+				return err
+			}
+			return nil
 		}
 	}
 	return ErrNotFound

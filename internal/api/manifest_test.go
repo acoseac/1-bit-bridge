@@ -1,6 +1,7 @@
 package api
 
 import (
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"io"
@@ -336,5 +337,72 @@ func TestManifestLegacyPathUntouched(t *testing.T) {
 	}
 	if mp.lastPageLimit != 0 {
 		t.Errorf("paginated builder was called (limit=%d)", mp.lastPageLimit)
+	}
+}
+
+// TestManifestPaginatedGzipsWhenAccepted pins that the paginated page
+// path honours Accept-Encoding: gzip (the legacy single-shot path
+// already did; a max 5000-track page is several MB of JSON). Setting the
+// header manually stops Go's transport from transparently decompressing,
+// so we can observe Content-Encoding and gunzip ourselves.
+func TestManifestPaginatedGzipsWhenAccepted(t *testing.T) {
+	mp := &fakeManifestProvider{
+		pageBody: &manifest.Manifest{Version: 1, Total: pagePtrTo(7)},
+	}
+	hs, tok := withManifest(t, mp)
+	req, _ := http.NewRequest("GET", hs.URL+"/v1/manifest?limit=100", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("Accept-Encoding", "gzip")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if ce := resp.Header.Get("Content-Encoding"); ce != "gzip" {
+		t.Fatalf("Content-Encoding = %q, want gzip", ce)
+	}
+	gz, err := gzip.NewReader(resp.Body)
+	if err != nil {
+		t.Fatalf("gzip reader: %v", err)
+	}
+	defer gz.Close()
+	var got map[string]any
+	if err := json.NewDecoder(gz).Decode(&got); err != nil {
+		t.Fatalf("decode gunzipped page: %v", err)
+	}
+	if int(got["version"].(float64)) != 1 {
+		t.Errorf("version = %v", got["version"])
+	}
+	if int(got["total"].(float64)) != 7 {
+		t.Errorf("total = %v, want 7", got["total"])
+	}
+}
+
+// TestManifestPaginatedPlainWhenGzipRefused is the fallback guard: with
+// gzip explicitly refused the page ships uncompressed (no
+// Content-Encoding) and decodes directly.
+func TestManifestPaginatedPlainWhenGzipRefused(t *testing.T) {
+	mp := &fakeManifestProvider{pageBody: &manifest.Manifest{Version: 1, Total: pagePtrTo(0)}}
+	hs, tok := withManifest(t, mp)
+	req, _ := http.NewRequest("GET", hs.URL+"/v1/manifest?limit=100", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("Accept-Encoding", "identity")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if ce := resp.Header.Get("Content-Encoding"); ce != "" {
+		t.Errorf("Content-Encoding = %q, want empty (identity)", ce)
+	}
+	var got map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode plain page: %v", err)
+	}
+	if int(got["version"].(float64)) != 1 {
+		t.Errorf("version = %v", got["version"])
 	}
 }

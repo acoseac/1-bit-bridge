@@ -48,8 +48,11 @@ func safeAnalysisFilename(srcBase string) string {
 	suffix := fmt.Sprintf("~%s%s", sha8, waveformExt)
 	budget := fsBasenameCap - len(suffix)
 	if budget < 8 {
-		// Pathological: the suffix alone consumes the budget.
-		return fmt.Sprintf("v.%s%s", sha8, suffix)
+		// Pathological: the suffix alone consumes the budget. Emit a
+		// fully-hashed name — `suffix` already carries the extension, so
+		// use waveformExt (not `suffix`) to avoid a doubled `~<sha8>`.
+		// Matches the transcode safeVariantFilename twin.
+		return fmt.Sprintf("v.%s%s", sha8, waveformExt)
 	}
 	if len(sanitized) <= budget {
 		return sanitized + suffix

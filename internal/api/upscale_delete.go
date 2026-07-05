@@ -423,9 +423,18 @@ func (s *Server) RunVariantDelete(ctx context.Context, req VariantDeleteRequest)
 	// throughout; iOS reconciles on the SSE we emit at the end
 	// with whatever DID disappear.
 	deletedPaths := map[string]struct{}{}
+	seenVariantIDs := map[string]struct{}{}
 	deletedVariantIDs := make([]string, 0, len(rows))
 	logger := LoggerFromContext(ctx)
 	for _, row := range rows {
+		// Client disconnect (or admin cancel) cancels ctx; DeleteVariant
+		// would then fail on every remaining row while os.Remove keeps
+		// unlinking sidecars — a cascade of file-gone/row-kept zombies
+		// (recoverable via `--gc`, but noisy). Stop before further
+		// destructive I/O.
+		if err := ctx.Err(); err != nil {
+			break
+		}
 		if err := os.Remove(row.SidecarPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			logger.Warn("variant unlink failed; leaving DB row in place",
 				slog.String("sidecar", row.SidecarPath),
@@ -449,7 +458,12 @@ func (s *Server) RunVariantDelete(ctx context.Context, req VariantDeleteRequest)
 		// the prior shape leaked failed-delete variantIDs into
 		// the event, telling iOS clients "these variants are
 		// gone" while the DB row was still alive.
-		deletedVariantIDs = append(deletedVariantIDs, row.VariantID)
+		// Dedup like DeletedPaths below: N tracks sharing one variant
+		// kind would otherwise repeat the same ID N times in the SSE.
+		if _, seen := seenVariantIDs[row.VariantID]; !seen {
+			seenVariantIDs[row.VariantID] = struct{}{}
+			deletedVariantIDs = append(deletedVariantIDs, row.VariantID)
+		}
 		if _, seen := deletedPaths[row.SourcePath]; !seen {
 			deletedPaths[row.SourcePath] = struct{}{}
 			resp.DeletedPaths = append(resp.DeletedPaths, row.SourcePath)
