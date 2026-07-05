@@ -68,6 +68,8 @@ var logger = logging.Component("api")
 // deleted across the manifest gzip negotiation path. Extracted to
 // satisfy SonarCloud go:S1192; the value is fixed by RFC 7231 §3.1.2.2.
 const headerContentEncoding = "Content-Encoding"
+const headerContentType = "Content-Type"
+const contentTypeJSON = "application/json; charset=utf-8"
 
 // manifestGzipPool reuses gzip.Writer instances across concurrent
 // /v1/manifest requests. `gzip.NewWriter` allocates a ~256 KB
@@ -1776,7 +1778,7 @@ func (s *Server) manifestHandler(w http.ResponseWriter, r *http.Request) {
 	// 5xx instead of a 200-with-truncated-body that breaks iOS-side
 	// JSON decode (Qodo #1 on PR #70). Once any byte has gone out we
 	// can only log the error — headers are committed.
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set(headerContentType, contentTypeJSON)
 
 	// Negotiate gzip on the wire. JSON manifests compress 3–5× on
 	// typical libraries (50k tracks: ~150 MB identity → ~30–40 MB
@@ -2031,7 +2033,7 @@ func extractBearer(r *http.Request) string {
 // internal/admin/handlers_api.go and run their own already-compact
 // writeJSON.
 func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set(headerContentType, contentTypeJSON)
 	w.WriteHeader(status)
 	// Encode errors usually mean the client disconnected mid-
 	// response (`broken pipe` / `connection reset by peer`).
@@ -2065,15 +2067,19 @@ func writeJSONGzip(w http.ResponseWriter, r *http.Request, status int, v any) {
 		writeJSON(w, status, v)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set(headerContentType, contentTypeJSON)
 	w.Header().Set("Vary", "Accept-Encoding")
 	w.Header().Set(headerContentEncoding, "gzip")
 	w.WriteHeader(status)
 	gz := manifestGzipPool.Get().(*gzip.Writer)
 	gz.Reset(w)
+	// Defer Put so a panic in Encode still returns the writer to the pool
+	// (LIFO: runs after the explicit Close on the normal path). Matches the
+	// legacy manifest path's unconditional defer; a writer returned without
+	// a successful Close is re-bound cleanly by the next Reset.
+	defer manifestGzipPool.Put(gz)
 	encErr := json.NewEncoder(gz).Encode(v)
 	closeErr := gz.Close()
-	manifestGzipPool.Put(gz)
 	if encErr != nil || closeErr != nil {
 		// Headers + status already committed — can only log (usually a
 		// client disconnect mid-response; same debug level as writeJSON).
