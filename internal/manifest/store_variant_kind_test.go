@@ -275,6 +275,31 @@ func TestRollupByPrefix_SplitsVariantSizesByKind(t *testing.T) {
 	}
 }
 
+// TestHumanLabelForVariant pins the picker/admin label rendering across
+// both kinds AND both the FLAC + non-FLAC format branches. The non-FLAC
+// case is the regression guard for the fix: the `default` branch MUST keep
+// the operator-facing kind prefix and upper-case the format (previously it
+// dropped `kind` and emitted the raw lower-case format, e.g. "wav 24/192").
+func TestHumanLabelForVariant(t *testing.T) {
+	cases := []struct {
+		name string
+		v    Variant
+		want string
+	}{
+		{"flac upscaled 44.1 family", Variant{ID: "upscaled-v2-176400-24", Format: "flac", SampleRate: 176400, BitsPerSample: 24}, "Upscaled FLAC 24/176.4"},
+		{"flac optimized 44.1", Variant{ID: "optimized-v2-44100-16", Format: "flac", SampleRate: 44100, BitsPerSample: 16}, "Optimized FLAC 16/44.1"},
+		{"non-flac upscaled keeps kind + upper format", Variant{ID: "upscaled-v2-192000-24", Format: "wav", SampleRate: 192000, BitsPerSample: 24}, "Upscaled WAV 24/192"},
+		{"non-flac optimized keeps kind + upper format", Variant{ID: "optimized-v2-48000-16", Format: "alac", SampleRate: 48000, BitsPerSample: 16}, "Optimized ALAC 16/48"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := humanLabelForVariant(tc.v); got != tc.want {
+				t.Errorf("humanLabelForVariant(%+v) = %q, want %q", tc.v, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestVariantKindPrefixConstants pins the exported constant strings
 // so a future refactor that renames them doesn't silently produce
 // SQL that filters by an empty / mis-typed prefix. The bridge-side

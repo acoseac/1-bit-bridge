@@ -856,8 +856,12 @@ func skipID3v2(r io.ReadSeeker) error {
 // 4 bytes each) and the BODY of only the Vorbis Comment block.
 // PICTURE blocks (the 5–10 MiB JPEGs the existing single-open
 // optimization was protecting) get skipped via the block's
-// `Skip()` method — which uses `Seek` on `io.Seeker` inputs and
-// falls back to `io.Copy(io.Discard, ...)` otherwise.
+// `Skip()` method — which checks whether the body
+// reader is an `io.Seeker`. `meta.New` wraps the body in an
+// `io.LimitReader`, and `*io.LimitedReader` is never a Seeker — so
+// `Skip()` always reads+discards the body via `io.Copy(io.Discard,
+// ...)`, advancing `r` past the block without materialising the
+// large payload into any buffer of ours.
 //
 // Best-effort: malformed / corrupt FLAC streams silently no-op
 // rather than failing the scan. Single-value tags also no-op (the
@@ -935,9 +939,10 @@ func applyFLACMultiValueArtists(r io.ReadSeeker, t *Track) {
 			return
 		}
 		// Non-Vorbis block (STREAMINFO, PICTURE, PADDING, etc.) —
-		// skip the body without reading it. For `*os.File` the
-		// underlying `Skip()` uses `Seek` and never touches the
-		// payload bytes.
+		// skip the body without buffering it. `block.Skip()` reads the
+		// body through the block's internal `io.LimitReader` (bounded to
+		// `block.Length`) and discards it via `io.Copy`, advancing `r` to
+		// the next block header without touching the payload bytes.
 		if err := block.Skip(); err != nil {
 			return
 		}

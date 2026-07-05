@@ -92,6 +92,7 @@ func OpenStore(path string) (*Store, error) {
 	// Reads are fine via the default pool; modernc.org/sqlite uses the
 	// standard database/sql connection pool.
 	if err := db.Ping(); err != nil {
+		db.Close() // release the handle + background goroutines; mirrors the migrate() error path below
 		return nil, fmt.Errorf("ping sqlite: %w", err)
 	}
 	s := &Store{db: db, now: time.Now}
@@ -2159,7 +2160,10 @@ func humanLabelForVariant(v Variant) string {
 	case v.Format == "flac":
 		return fmt.Sprintf("%s FLAC %d/%s", kind, v.BitsPerSample, rateLabel)
 	default:
-		return fmt.Sprintf("%s %d/%s", v.Format, v.BitsPerSample, rateLabel)
+		// Non-FLAC variants (none today — sox forces -t flac) still carry
+		// the operator-facing kind prefix + an upper-cased format token.
+		// Don't drop `kind` here (see the docblock's "branch on the prefix").
+		return fmt.Sprintf("%s %s %d/%s", kind, strings.ToUpper(v.Format), v.BitsPerSample, rateLabel)
 	}
 }
 
@@ -2353,7 +2357,11 @@ func (s *Store) ListTracksPage(ctx context.Context, afterPath string, limit int)
 		return nil, err
 	}
 	defer rows.Close()
-	out := []Track{}
+	// Pre-size to the page bound. `limit` is already defaulted to 1000 above
+	// and the sole caller clamps it to <=5001; min(...,8192) caps a
+	// hypothetical future caller passing an unbounded limit straight to the
+	// store, so the prealloc can't blow up memory on a near-empty table.
+	out := make([]Track, 0, min(limit, 8192))
 	for rows.Next() {
 		var raw []byte
 		var enrichedAt int64
