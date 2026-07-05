@@ -368,8 +368,14 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 		}
 	}
 
-	// Resolve artist MBID + fetch artist image (Deezer fallback).
-	e.resolveArtist(ctx, t)
+	// Resolve artist MBID + fetch artist image (Deezer fallback). A
+	// TRANSIENT MusicBrainz SearchArtist error propagates here so we skip
+	// MarkEnriched and the worker retries this track on the next batch —
+	// mirrors the album SearchRelease path. Persistent errors and any
+	// Deezer/CAA image-fetch miss return nil (already logged inside).
+	if err := e.resolveArtist(ctx, t); err != nil {
+		return
+	}
 
 	if err := e.store.MarkEnriched(ctx, t); err != nil {
 		logger.Error("mark enriched", "path", t.Path, "err", err)
@@ -381,9 +387,9 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 // resolveArtist fills in t.ArtistMBID and ensures the artist image is
 // cached locally. Best-effort: missing Deezer or missing MBID is not a
 // failure. Sibling tracks by the same artist share one round-trip each.
-func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) {
+func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) error {
 	if t.Artist == "" {
-		return
+		return nil
 	}
 	key := "artist\x00" + t.Artist
 	var artistMBID string
@@ -393,7 +399,11 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) {
 	} else {
 		metrics.RecordMBCache("artist", false)
 		if !sleepCtx(ctx, e.MBMinInterval) {
-			return
+			// ctx cancelled during pacing — sleepCtx returns false only
+			// when ctx.Err() != nil, so propagate it: enrichOne then skips
+			// MarkEnriched on shutdown instead of stamping the track +
+			// logging a spurious "context canceled". Mirrors the album path.
+			return ctx.Err()
 		}
 		res, err := e.mb.SearchArtist(ctx, t.Artist)
 		if err != nil {
@@ -403,7 +413,25 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) {
 			if ctx.Err() == nil {
 				logger.Error("MB artist search", "artist", t.Artist, "err", err)
 			}
-			return
+			// Shutdown/cancellation: propagate the ctx error so enrichOne
+			// skips MarkEnriched (mirrors the album SearchRelease path) — no
+			// spurious "mark enriched: context canceled" log, and the track
+			// retries on the next run. Checked BEFORE IsTransient because a
+			// cancel surfaces as context.Canceled, which IsTransient treats
+			// as non-transient (→ would otherwise fall through to nil).
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			// Transient MB error (5xx / 429 / timeout / conn-refused):
+			// propagate so enrichOne skips MarkEnriched and the worker
+			// retries this track on the next batch when MB recovers —
+			// mirrors the album SearchRelease invariant. Persistent errors
+			// (404 / decode) fall through to nil so the track is stamped
+			// enriched and doesn't spin.
+			if IsTransient(err) {
+				return err
+			}
+			return nil
 		}
 		// Only positively cache non-empty MBIDs. Storing the empty string
 		// for a "no match" result would session-cache the miss and block
@@ -422,22 +450,28 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) {
 	// Fetch Deezer image (the only source in v1 for artist portraits).
 	// Cache file is keyed by artist MBID; name-keyed caching is not
 	// implemented today — see /v1/artist-image for the MBID-only API.
+	//
+	// The portrait fetch is tier-2, like album artwork: any failure is
+	// logged + absorbed (return nil) so an image miss never blocks the
+	// already-resolved ArtistMBID from being committed via MarkEnriched.
+	// Only the tier-1 SearchArtist transient case above propagates.
 	if e.deezer == nil || artistMBID == "" {
-		return
+		return nil
 	}
 	// Negative-cache Deezer misses so sibling tracks by the same artist
 	// don't each re-query Deezer for a portrait the API doesn't have.
 	if e.deezerNegCache.Has(artistMBID) {
-		return
+		return nil
 	}
 	found, err := e.ensureArtistImageCached(ctx, artistMBID, t.Artist)
 	if err != nil {
 		logger.Error("artist image", "artist", t.Artist, "mbid", artistMBID, "err", err)
-		return
+		return nil
 	}
 	if !found {
 		e.deezerNegCache.Set(artistMBID, struct{}{})
 	}
+	return nil
 }
 
 // ensureArtistImageCached downloads and caches the artist's Deezer

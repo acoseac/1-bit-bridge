@@ -65,6 +65,30 @@ type Provider struct {
 	// setter. Provider is always used by pointer (see NewProvider), so the
 	// non-copyable atomic is never copied (go vet copylocks stays clean).
 	upscaleEnabled atomic.Bool
+
+	// last{Count,Pending}ErrLogNS carry the unix-nano timestamp of the most
+	// recent health-probe DB-error log for TracksIndexed / PendingDeletions.
+	// /v1/health is polled frequently, so a persistently-broken DB would
+	// otherwise flood the log — throttledHealthErr rate-limits each site to
+	// ~once/min. atomic.Int64 (non-copyable, like upscaleEnabled above)
+	// keeps the concurrent HTTP-handler reads/writes race-free.
+	lastCountErrLogNS   atomic.Int64
+	lastPendingErrLogNS atomic.Int64
+}
+
+// throttledHealthErr logs a health-probe DB error at most once/min per call
+// site so a persistently-broken DB polled on every /v1/health request doesn't
+// flood the log. Lock-free AND race-free: the CompareAndSwap lets exactly one
+// goroutine per window win the timestamp update and log — no mutex on the
+// health hot path, no double-log under simultaneous probes.
+func throttledHealthErr(last *atomic.Int64, msg string, err error) {
+	now := time.Now().UnixNano()
+	prev := last.Load()
+	if now-prev > int64(time.Minute) {
+		if last.CompareAndSwap(prev, now) {
+			logger.Error(msg, "err", err)
+		}
+	}
 }
 
 // NewProvider ties together the store and scanner so the api package can
@@ -117,6 +141,10 @@ func (p *Provider) LastFullScan() time.Time { return p.scanner.LastFullScan() }
 func (p *Provider) TracksIndexed(ctx context.Context) int {
 	n, err := p.store.CountTracks(ctx)
 	if err != nil {
+		// Surface the DB fault for operators without changing the wire
+		// value — returning e.g. -1 would break the versioned /v1/health
+		// contract + the iOS decoder. Throttled (see helper).
+		throttledHealthErr(&p.lastCountErrLogNS, "health probe: count tracks failed", err)
 		return 0
 	}
 	return n
@@ -129,6 +157,7 @@ func (p *Provider) TracksIndexed(ctx context.Context) int {
 func (p *Provider) PendingDeletions(ctx context.Context) int64 {
 	n, err := p.store.PendingDeletions(ctx)
 	if err != nil {
+		throttledHealthErr(&p.lastPendingErrLogNS, "health probe: pending deletions failed", err)
 		return 0
 	}
 	return n
