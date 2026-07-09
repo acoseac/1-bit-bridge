@@ -70,6 +70,69 @@ func TestEnvOverrides(t *testing.T) {
 	}
 }
 
+// TestEnvOverridesBool exercises the ParseBool-backed env toggles
+// directly against applyEnvOverrides (the string-var Load test above
+// already proves Load calls it). Covers the three container toggles:
+// BRIDGE_UPSCALE_ENABLED / BRIDGE_ANALYSIS_ENABLED (added for the
+// Docker audio-tools image) and BRIDGE_DISABLE_HTTP3 (previously
+// untested — backfilled here). The load-bearing case is "garbage
+// leaves the prior value untouched": a value ParseBool can't decode
+// (e.g. "yes", "on") must be silently ignored, NOT coerced to false,
+// so a typo can't flip a feature off behind the operator's back.
+func TestEnvOverridesBool(t *testing.T) {
+	// Every case seeds one bool field, sets one env var, and asserts
+	// the post-override value. field() returns a pointer so the same
+	// accessor both seeds and reads.
+	cases := []struct {
+		name  string
+		key   string
+		value string // "" means the var is left unset
+		seed  bool
+		want  bool
+		field func(*Config) *bool
+	}{
+		// BRIDGE_UPSCALE_ENABLED
+		{"upscale true from false", "BRIDGE_UPSCALE_ENABLED", "true", false, true, func(c *Config) *bool { return &c.Upscale.Enabled }},
+		{"upscale false from true", "BRIDGE_UPSCALE_ENABLED", "false", true, false, func(c *Config) *bool { return &c.Upscale.Enabled }},
+		{"upscale 1 from false", "BRIDGE_UPSCALE_ENABLED", "1", false, true, func(c *Config) *bool { return &c.Upscale.Enabled }},
+		{"upscale garbage keeps seed true", "BRIDGE_UPSCALE_ENABLED", "yes", true, true, func(c *Config) *bool { return &c.Upscale.Enabled }},
+		{"upscale garbage keeps seed false", "BRIDGE_UPSCALE_ENABLED", "maybe", false, false, func(c *Config) *bool { return &c.Upscale.Enabled }},
+		{"upscale unset keeps seed true", "BRIDGE_UPSCALE_ENABLED", "", true, true, func(c *Config) *bool { return &c.Upscale.Enabled }},
+		// BRIDGE_ANALYSIS_ENABLED
+		{"analysis true from false", "BRIDGE_ANALYSIS_ENABLED", "true", false, true, func(c *Config) *bool { return &c.Analysis.Enabled }},
+		{"analysis false from true", "BRIDGE_ANALYSIS_ENABLED", "false", true, false, func(c *Config) *bool { return &c.Analysis.Enabled }},
+		{"analysis garbage keeps seed true", "BRIDGE_ANALYSIS_ENABLED", "on", true, true, func(c *Config) *bool { return &c.Analysis.Enabled }},
+		{"analysis unset keeps seed false", "BRIDGE_ANALYSIS_ENABLED", "", false, false, func(c *Config) *bool { return &c.Analysis.Enabled }},
+		// BRIDGE_DISABLE_HTTP3 (boy-scout: previously had no coverage)
+		{"http3 true from false", "BRIDGE_DISABLE_HTTP3", "true", false, true, func(c *Config) *bool { return &c.DisableHTTP3 }},
+		{"http3 false from true", "BRIDGE_DISABLE_HTTP3", "false", true, false, func(c *Config) *bool { return &c.DisableHTTP3 }},
+		{"http3 garbage keeps seed true", "BRIDGE_DISABLE_HTTP3", "nope", true, true, func(c *Config) *bool { return &c.DisableHTTP3 }},
+		{"http3 unset keeps seed true", "BRIDGE_DISABLE_HTTP3", "", true, true, func(c *Config) *bool { return &c.DisableHTTP3 }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Clear all three keys so a value leaked from the dev
+			// machine's shell can't skew a case that expects "unset".
+			for _, k := range []string{
+				"BRIDGE_UPSCALE_ENABLED", "BRIDGE_ANALYSIS_ENABLED", "BRIDGE_DISABLE_HTTP3",
+			} {
+				t.Setenv(k, "")
+				os.Unsetenv(k)
+			}
+			if tc.value != "" {
+				t.Setenv(tc.key, tc.value)
+			}
+			c := &Config{}
+			p := tc.field(c)
+			*p = tc.seed
+			c.applyEnvOverrides()
+			if got := *tc.field(c); got != tc.want {
+				t.Errorf("%s=%q seed=%v: got %v, want %v", tc.key, tc.value, tc.seed, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestEnvOverridesAbsent asserts unset vars leave YAML untouched
 // — guards against an over-eager always-overwrite implementation.
 func TestEnvOverridesAbsent(t *testing.T) {

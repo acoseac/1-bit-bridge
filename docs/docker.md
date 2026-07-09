@@ -116,6 +116,13 @@ defaults. Empty / unset env = no change.
 | `BRIDGE_LIBRARY_NAME` | `libraryName` | Display name for the library. |
 | `BRIDGE_DISABLE_HTTP3` | `disableHttp3` | Set to `true` to bypass UDP listeners. |
 | `BRIDGE_LIBRARY_ROOTS` | `libraryRoots` | Colon-separated list. Example: `/library:/library2`. |
+| `BRIDGE_UPSCALE_ENABLED` | `upscale.enabled` | `true`/`false`. Enables offline PCM upscaling + CarPlay-optimize. Uses the bundled audio toolchain — see [Audio features](#audio-features-upscale--analysis). |
+| `BRIDGE_ANALYSIS_ENABLED` | `analysis.enabled` | `true`/`false`. Enables waveform / loudness / key-tempo analysis. Same toolchain. |
+
+`BRIDGE_DISABLE_HTTP3`, `BRIDGE_UPSCALE_ENABLED`, and
+`BRIDGE_ANALYSIS_ENABLED` are parsed with Go's `strconv.ParseBool`:
+`true`/`false` (also `1`/`0`, `t`/`f`). A value it can't parse — `yes`,
+`on` — is silently ignored, leaving the YAML/default in place.
 
 ### Why env overrides
 
@@ -147,6 +154,94 @@ services:
       TZ: Europe/Berlin
     restart: unless-stopped
 ```
+
+## Audio features (upscale + analysis)
+
+As of **v0.1.8** the image bundles the audio toolchain — `sox`,
+`ffmpeg`, and `ffprobe` — so the optional **offline upscaling /
+CarPlay-optimize** and **audio-analysis** (waveform, loudness,
+key/tempo) features work inside the container. Both are **off by
+default** and cost nothing until enabled. Bundling `ffmpeg` is what
+makes this image noticeably larger than a bare Go binary — the
+deliberate trade for in-container audio processing.
+
+> There's no on-the-fly transcoding: the bridge pre-converts to FLAC
+> sidecars offline and serves them bit-exact, the same as any other
+> file. See [PROTOCOL.md](../PROTOCOL.md).
+
+### Enabling
+
+Flip either feature on with an env var (idiomatic for containers):
+
+```sh
+docker run -d --name 1-bit-bridge \
+    -p 7788:7788/tcp -p 7788:7788/udp \
+    -v ~/music:/library:ro \
+    -v 1-bit-bridge-state:/data \
+    -e BRIDGE_UPSCALE_ENABLED=true \
+    -e BRIDGE_ANALYSIS_ENABLED=true \
+    ghcr.io/acoseac/1-bit-bridge:latest
+```
+
+Equivalently, set `upscale.enabled: true` / `analysis.enabled: true` in
+`bridge.yaml`, or use the admin console's Settings toggle (restart to
+apply). Env wins over YAML, so `-e BRIDGE_UPSCALE_ENABLED=false` is a
+clean kill-switch over a YAML that has it on. Use `true` / `false` — a
+value `strconv.ParseBool` can't decode (`yes`, `on`) is silently
+ignored, so a typo reads as "unchanged," not "off."
+
+Verify the toolchain resolved inside the **running** container:
+
+```sh
+docker exec 1-bit-bridge bridge doctor
+```
+
+The `audio-toolchain` check reports OK when `sox` (with FLAC) and the
+decoders are present. Run it against the running container, not a
+throwaway `docker run --rm … doctor` — `doctor`'s port checks probe a
+loopback socket in whatever network namespace they execute in, so an
+ephemeral clone can report misleading port state.
+
+### Variant storage (`variantsDir`)
+
+Upscaled/optimized FLAC sidecars are written under
+`upscale.variantsDir`, default `<dataDir>/transcoded` (inside the
+`/data` volume). To keep them off the state volume, point it at a
+dedicated volume. It **must be an absolute path and must not resolve
+under any library root** — the bridge refuses to start otherwise.
+
+**Permissions gotcha (non-root user):** the container runs as the
+non-root system user `bridge` (UID 100 — the value the
+[Troubleshooting](#troubleshooting) section cites; confirm with
+`docker exec 1-bit-bridge id bridge`). A **separately-mounted**
+`variantsDir` volume (or a host bind-mount used for `/data`) is created
+`root:root` by Docker, and the `bridge` user then can't write sidecars
+(`permission denied`). Pre-create the directory and `chown` it to that
+UID/GID before starting:
+
+```sh
+mkdir -p ./transcoded && sudo chown 100:100 ./transcoded
+# then: -v ./transcoded:/transcoded  and  upscale.variantsDir: /transcoded
+```
+
+The read-only library mount (`… :ro`) is immune — the bridge never
+writes there.
+
+### Worker counts on large / shared hosts
+
+The bridge sizes its worker pools from `runtime.NumCPU()`
+(`upscale.workers` = `min(NumCPU-1, 4)`; `analysis.workers` =
+`max(1, NumCPU/2)`, uncapped). On a many-core or shared host a big
+analysis run can spin up enough workers to saturate the box. For a
+predictable bound, set `upscale.workers` / `analysis.workers`
+explicitly in `bridge.yaml` — deterministic regardless of the
+container's CPU-limit flavor. Docker `--cpus` / `--cpuset-cpus` are a
+useful complementary throttle on top.
+
+> Optional hygiene: mounting `/tmp` as `tmpfs` is fine, but note it's
+> not the bottleneck here — the sox pipeline writes its `.tmp` sidecar
+> under `variantsDir` (atomic rename) and analysis decodes stream over
+> stdout pipes, so the heavy write path is the `variantsDir` volume.
 
 ## Admin console access
 
@@ -220,6 +315,86 @@ reachable for the certificate to issue. Rotate the admin password
 later with `docker exec 1-bit-bridge bridge admin reset-password`.
 Public mode also refuses to start the DLNA MediaServer (an
 internet-facing host must not expose an unauthenticated browser).
+
+### docker-compose (public mode + audio, mirroring a tuned VPS)
+
+This mirrors the posture of a tuned public VPS: public mode + Let's
+Encrypt, HTTP/3 on, a read-only library, audio features enabled, and
+variant storage on its own volume. Public mode itself (domain, ACME
+email, admin password) lives in `bridge.yaml` — env vars are too flat
+to express it — so `init --public` once (above), then let compose drive
+the rest:
+
+```yaml
+# docker-compose.yml — internet-exposed bridge with audio features
+services:
+  bridge:
+    image: ghcr.io/acoseac/1-bit-bridge:latest
+    container_name: 1-bit-bridge
+    sysctls:
+      # let the non-root user bind :443 for the ACME TLS-ALPN-01 challenge
+      net.ipv4.ip_unprivileged_port_start: "0"
+    ports:
+      - "443:443/tcp"
+      - "443:443/udp"          # HTTP/3 — omit and you silently drop to h2
+    volumes:
+      - ./bridge-data:/data    # holds bridge.yaml (from init --public)
+      - /mnt/music:/library:ro # library, read-only
+      - ./transcoded:/transcoded  # upscale sidecars; chown to the bridge UID (see above)
+    environment:
+      BRIDGE_UPSCALE_ENABLED: "true"
+      BRIDGE_ANALYSIS_ENABLED: "true"
+      TZ: Europe/Helsinki
+    tmpfs:
+      - /tmp
+    # cpus: "2"                # optional throttle; also bound workers in bridge.yaml
+    restart: unless-stopped
+```
+
+A few knobs in the `init --public`-generated `bridge.yaml` echo the VPS
+tuning:
+
+```yaml
+deployment:
+  mode: public
+autocert:
+  enabled: true
+  domain: bridge.example.com
+  email: you@example.com
+scanIntervalSec: 21600        # 6h (the default) — keep it high on a
+                              # network/rclone-backed library to cut churn
+upscale:
+  enabled: true
+  variantsDir: /transcoded    # matches the volume above; absolute, off /data
+  workers: 2                  # deterministic bound (optional)
+analysis:
+  enabled: true
+  workers: 2
+artwork:
+  cacheMaxBytes: 2147483648   # 2 GiB on-disk cover cap (optional, small disks)
+```
+
+**The QUIC UDP tuning is host-level, not a container setting.** The
+socket-buffer sysctls that materially help HTTP/3 on lossy links —
+`net.core.rmem_max` / `net.core.wmem_max = 7340032` and
+`net.core.default_qdisc = fq` — are host-global (not namespaced), so a
+container / compose `sysctls:` block can't set them (only `net.ipv4.*`
+and a few others are allowed inside a container). Put them on the
+host/VM:
+
+```sh
+# /etc/sysctl.d/999-bridge-quic.conf  — the 999- prefix matters: later
+# drop-ins win, and some cloud images ship a 99-*.conf that would clobber
+# a lower number. Apply with `sudo sysctl --system`, then VERIFY with
+# `sysctl net.core.rmem_max` (the apply-time output can lie).
+net.core.rmem_max = 7340032
+net.core.wmem_max = 7340032
+net.core.default_qdisc = fq
+```
+
+Mounting the library itself (e.g. an rclone/B2 FUSE mount) is a host
+concern — mount it on the host and bind-mount the path in, as
+`/mnt/music` above.
 
 For the full security model — firewalling, the admin-console
 exposure options, and the reverse-proxy variant (`--public --proxy`,

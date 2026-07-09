@@ -85,6 +85,19 @@ FROM alpine:${ALPINE_VERSION}
 # tzdata: lets the quiet-hours window in the auto-installer
 # evaluate against the operator's local TZ via TZ env.
 #
+# sox: drives the offline upscale / CarPlay-optimize pipeline and is
+# the primary decoder for audio-analysis (waveform / loudness /
+# key-tempo). Alpine's sox is compiled with FLAC support built in, so
+# no separate plugin package is needed (the pipeline forces `-t flac`,
+# which `internal/doctor` verifies). ffmpeg (ships ffprobe too): the
+# analysis fallback decoder for AAC/m4a that Alpine sox can't open.
+# lsof: lets `bridge doctor` attribute the API/admin ports to our own
+# process instead of degrading to a Warn (busybox lsof lacks the flags
+# `internal/doctor` needs). sox and ffmpeg run as separate executables
+# invoked via os/exec (aggregation, not linked into the Go binary), so
+# their GPL/LGPL terms don't affect the bridge's MIT license. All three
+# are inert unless upscale/analysis are enabled in config.
+#
 # `mkdir /data && chown bridge:bridge /data` BEFORE the USER switch
 # is load-bearing (Gemini High + Qodo Bug on PR #80): WORKDIR / VOLUME
 # create the directory with root:root ownership by default, so the
@@ -93,7 +106,7 @@ FROM alpine:${ALPINE_VERSION}
 # errors. Operators bind-mounting their own pre-owned volume override
 # this — but the in-image baseline must be writable for fresh
 # `docker run -v 1-bit-bridge-state:/data` deployments to work.
-RUN apk add --no-cache ca-certificates tzdata && \
+RUN apk add --no-cache ca-certificates tzdata sox ffmpeg lsof && \
     addgroup -S bridge && \
     adduser -S -G bridge bridge && \
     mkdir -p /data && \

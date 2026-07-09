@@ -1505,6 +1505,27 @@ func (c *Config) applyEnvOverrides() {
 			c.DisableHTTP3 = b
 		}
 	}
+	// Upscale / analysis toggles. Container-idiomatic on/off for the
+	// two sox/ffmpeg-backed features (there is no other env path to
+	// enable them — the underlying config is otherwise YAML-only, and
+	// editing a YAML inside a baked image is the awkward alternative
+	// docker.md warns about). Only the master Enabled bool is exposed;
+	// workers / queueCap keep their runtime.NumCPU-derived defaults.
+	// A malformed value is ignored (parse error → leave the YAML/default
+	// in place), matching BRIDGE_DISABLE_HTTP3 above. The startup sox
+	// probe (soxFeatureReady) still AND-gates actual activation, so
+	// setting these true on a host without a usable sox degrades to
+	// feature-off with a log line rather than a hard failure.
+	if v := os.Getenv("BRIDGE_UPSCALE_ENABLED"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Upscale.Enabled = b
+		}
+	}
+	if v := os.Getenv("BRIDGE_ANALYSIS_ENABLED"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Analysis.Enabled = b
+		}
+	}
 	if v := os.Getenv("BRIDGE_LIBRARY_ROOTS"); v != "" {
 		// Use the OS-native PATH-style separator: `:` on POSIX,
 		// `;` on Windows. Pre-fix we hard-coded `:` everywhere,
