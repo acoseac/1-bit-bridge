@@ -137,11 +137,12 @@ USER bridge
 # `bridge init` remains available for explicit / public-mode setup:
 #   docker run --rm ... bridge init --yes --library /library --no-service
 #
-# HEALTHCHECK probes the unauthenticated /v1/health on the API port via the
-# `bridge health` subcommand — it reads the listen address from the config so
-# it works in loopback (:7788) and public (:443/:8443) alike, and (unlike the
-# admin API that `bridge status` uses) isn't blocked by public-mode auth.
-# start-period covers the first-boot cert mint + listener bind.
+# HEALTHCHECK checks the API listener is accepting connections via the
+# `bridge health` subcommand (a TCP dial — no TLS/cert surface) — it reads the
+# listen address from the config so it works in loopback (:7788) and public
+# (:443/:8443) alike, and (unlike the admin API that `bridge status` uses)
+# isn't gated by public-mode auth. start-period covers the first-boot cert
+# mint + listener bind.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
     CMD ["/usr/local/bin/bridge", "health", "--config", "/data/bridge.yaml"]
 

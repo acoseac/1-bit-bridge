@@ -4,38 +4,21 @@ import (
 	"context"
 	"io"
 	"net"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 )
 
-func TestHealthCmd(t *testing.T) {
-	cases := []struct {
-		name   string
-		status int
-		want   int
-	}{
-		{"200 healthy", http.StatusOK, 0},
-		{"500 unhealthy", http.StatusInternalServerError, 1},
+// TestHealthCmdListenerUp: a bound listener → exit 0 (healthy).
+func TestHealthCmdListenerUp(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path != "/v1/health" {
-					w.WriteHeader(http.StatusNotFound)
-					return
-				}
-				w.WriteHeader(tc.status)
-			}))
-			defer ts.Close()
-			cfgPath := writeHealthTestConfig(t, ts.Listener.Addr().String())
-			got := healthCmd(context.Background(), []string{"--config", cfgPath}, io.Discard, io.Discard)
-			if got != tc.want {
-				t.Errorf("healthCmd exit = %d, want %d", got, tc.want)
-			}
-		})
+	defer ln.Close()
+	cfgPath := writeHealthTestConfig(t, ln.Addr().String())
+	if got := healthCmd(context.Background(), []string{"--config", cfgPath}, io.Discard, io.Discard); got != 0 {
+		t.Errorf("healthCmd (listener up) exit = %d, want 0", got)
 	}
 }
 
@@ -50,11 +33,12 @@ func TestHealthCmdConnectionRefused(t *testing.T) {
 // TestHealthCmdWildcardDialsLoopback: a wildcard bind (":PORT") must be
 // probed on 127.0.0.1:PORT, not a literal empty host.
 func TestHealthCmdWildcardDialsLoopback(t *testing.T) {
-	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer ts.Close()
-	_, port, err := net.SplitHostPort(ts.Listener.Addr().String())
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	_, port, err := net.SplitHostPort(ln.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
