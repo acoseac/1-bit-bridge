@@ -35,6 +35,22 @@ import (
 // Idempotent: re-running on a populated config dir offers to keep or
 // rewrite the existing bridge.yaml. The TLS cert is always preserved —
 // rotating it breaks every paired client's pin.
+// baseConfig builds the minimal loopback-mode config shared by two
+// writers: `bridge init` (as its base, before any --public mutations) and
+// serve's --init-if-missing auto-init. Values are the loopback defaults;
+// callers layer mode-specific fields on top. Kept as one helper so the two
+// seed paths can't drift.
+func baseConfig(roots []string, name, dataDir string) *config.Config {
+	return &config.Config{
+		LibraryRoots:    roots,
+		ListenAddress:   config.DefaultListenAddress,
+		AdminAddress:    config.DefaultAdminAddress,
+		DataDir:         dataDir,
+		ScanIntervalSec: config.DefaultScanIntervalSec,
+		LibraryName:     name,
+	}
+}
+
 func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -252,14 +268,7 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if abs != "" {
 		roots = []string{abs}
 	}
-	cfg := &config.Config{
-		LibraryRoots:    roots,
-		ListenAddress:   config.DefaultListenAddress,
-		AdminAddress:    config.DefaultAdminAddress,
-		DataDir:         dataDir,
-		ScanIntervalSec: config.DefaultScanIntervalSec,
-		LibraryName:     name,
-	}
+	cfg := baseConfig(roots, name, dataDir)
 	if *publicMode {
 		// Public-mode YAML shape (PR 5). Defaults:
 		//   listenAddress: :443       (ACME prerequisite — TLS-ALPN-01)

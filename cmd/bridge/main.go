@@ -1298,6 +1298,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return certCmd(args[1:], os.Stdin, stdout, stderr)
 	case "status":
 		return statusCmd(ctx, args[1:], stdout, stderr)
+	case "health":
+		return healthCmd(ctx, args[1:], stdout, stderr)
 	case "logs":
 		return logsCmd(ctx, args[1:], stdout, stderr)
 	case "library":
@@ -1379,8 +1381,9 @@ First-time install:
 // invocations or the second call sees a canceled parent and shuts
 // down instantly (Go contexts can't be un-canceled).
 type serveOpts struct {
-	configPath   string
-	addrOverride string
+	configPath    string
+	addrOverride  string
+	initIfMissing bool
 }
 
 func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -1388,10 +1391,41 @@ func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	fs.SetOutput(stderr)
 	configPath := fs.String("config", defaultConfigPath, configFlagUsage)
 	addrOverride := fs.String("addr", "", "override listenAddress from config (host:port)")
+	initIfMissing := fs.Bool("init-if-missing", false, "on first run, write a default config if --config is missing, then serve (container convenience; env overrides still apply)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	return runServe(ctx, serveOpts{configPath: *configPath, addrOverride: *addrOverride}, stdout, stderr)
+	return runServe(ctx, serveOpts{configPath: *configPath, addrOverride: *addrOverride, initIfMissing: *initIfMissing}, stdout, stderr)
+}
+
+// autoInitDefaultRoot is the library mount path serve's --init-if-missing
+// seeds into the config when BRIDGE_LIBRARY_ROOTS is unset — the convention
+// docs/docker.md uses (`-v ~/music:/library:ro`).
+const autoInitDefaultRoot = "/library"
+
+// writeAutoInitConfig writes a minimal loopback seed config for serve's
+// --init-if-missing container path. It is DELIBERATELY sparse and does NOT
+// read BRIDGE_* env: the config.Load that immediately follows applies
+// applyEnvOverrides, so BRIDGE_LIBRARY_ROOTS / BRIDGE_LIBRARY_NAME /
+// BRIDGE_DATA_DIR inject dynamically at runtime every boot — env stays the
+// live source of truth and the YAML is only a fallback (baking day-one env
+// values onto disk would mask a later docker-compose change). libraryRoots
+// defaults to /library; dataDir "data" resolves under the config dir
+// (matching init). No cert mint here — serve's LoadOrGenerate first-mints on
+// the persistent volume. MkdirAll(0o700) because config.Save writes its temp
+// file in the config dir, which fails if the parent doesn't exist yet.
+func writeAutoInitConfig(cfgPath string) error {
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o700); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	cfg := baseConfig([]string{autoInitDefaultRoot}, config.DefaultLibraryName, "data")
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("validate seed config: %w", err)
+	}
+	if err := cfg.Save(cfgPath); err != nil {
+		return fmt.Errorf("save seed config: %w", err)
+	}
+	return nil
 }
 
 // runServe is the library-callable serve loop. Identical behavior to
@@ -1404,6 +1438,21 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 
 	configPath := &opts.configPath
 	addrOverride := &opts.addrOverride
+	// Container convenience: if --init-if-missing is set (the Docker CMD
+	// sets it) and no config exists yet, write a sparse default so the
+	// image needs only a single `docker run` / `docker compose up`. A bare
+	// `bridge serve` without the flag is unchanged — a missing config still
+	// errors below, directing the operator to `bridge init`.
+	if opts.initIfMissing {
+		if _, statErr := os.Stat(*configPath); os.IsNotExist(statErr) {
+			if werr := writeAutoInitConfig(*configPath); werr != nil {
+				fmt.Fprintf(stderr, "auto-init: %v\n", werr)
+				return 2
+			}
+			logger.Info("no config found — wrote a default; env (BRIDGE_LIBRARY_ROOTS/NAME/…) still overrides it at runtime",
+				"path", *configPath, "libraryRoots", autoInitDefaultRoot)
+		}
+	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, configLoadFailedFormat, err)

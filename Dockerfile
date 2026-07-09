@@ -130,10 +130,21 @@ EXPOSE 7788
 
 USER bridge
 
-# `bridge serve` is the only sensible default. `bridge init` is a
-# one-time setup; the operator runs it via `docker run --rm ...
-# bridge init --yes --library /library --no-service`. Once
-# bridge.yaml exists at /data/bridge.yaml, this entrypoint takes
-# over.
+# `--init-if-missing` makes first boot one-command: if /data/bridge.yaml
+# doesn't exist yet, serve writes a sparse default (library root defaults to
+# /library; BRIDGE_LIBRARY_ROOTS / BRIDGE_LIBRARY_NAME override it at runtime)
+# and then serves. On every later boot the existing config is used as-is.
+# `bridge init` remains available for explicit / public-mode setup:
+#   docker run --rm ... bridge init --yes --library /library --no-service
+#
+# HEALTHCHECK checks the API listener is accepting connections via the
+# `bridge health` subcommand (a TCP dial — no TLS/cert surface) — it reads the
+# listen address from the config so it works in loopback (:7788) and public
+# (:443/:8443) alike, and (unlike the admin API that `bridge status` uses)
+# isn't gated by public-mode auth. start-period covers the first-boot cert
+# mint + listener bind.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
+    CMD ["/usr/local/bin/bridge", "health", "--config", "/data/bridge.yaml"]
+
 ENTRYPOINT ["/usr/local/bin/bridge"]
-CMD ["serve", "--config", "/data/bridge.yaml"]
+CMD ["serve", "--config", "/data/bridge.yaml", "--init-if-missing"]

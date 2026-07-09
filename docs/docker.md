@@ -14,6 +14,62 @@ deployment.
 > Container Registry for every release — building from source
 > (below) stays supported for local hacking.
 
+## Quickstart
+
+The fastest path — one file, one command. Since **v0.1.8** the container
+**auto-initialises on first boot** (it writes a default `bridge.yaml` if one
+doesn't exist yet), so there's no separate `bridge init` step.
+
+```yaml
+# docker-compose.yml
+services:
+  bridge:
+    image: ghcr.io/acoseac/1-bit-bridge:latest
+    container_name: 1-bit-bridge
+    ports:
+      - "7788:7788/tcp"
+      - "7788:7788/udp"        # HTTP/3 — omit this and the bridge falls back to HTTP/2
+    volumes:
+      - ~/music:/library:ro    # your library, read-only (see the permission note)
+      - bridge-state:/data     # named volume — config, DB, TLS cert auto-generate here
+    # environment:
+    #   BRIDGE_LIBRARY_ROOTS: /library     # the default; override for a different/multi mount
+    #   BRIDGE_LIBRARY_NAME: "Living Room"
+    #   BRIDGE_UPSCALE_ENABLED: "true"     # optional audio features (see below)
+    #   BRIDGE_ANALYSIS_ENABLED: "true"
+    restart: unless-stopped
+volumes:
+  bridge-state:
+```
+
+```sh
+docker compose up -d
+docker compose logs -f          # watch the first scan
+```
+
+That's it — the bridge scans `/library`, writes its state into the
+`bridge-state` volume, and `docker ps` shows a health status once it's up.
+Pair iOS against `https://<host>:7788` with the fingerprint from
+`docker exec 1-bit-bridge bridge cert info`.
+
+**Two things that trip people up:**
+
+- **Your library must be readable by the container user (UID 100).** The
+  bridge runs as a non-root user; if the `/library` bind-mount is owned by
+  someone else and isn't world-readable, the scan logs `library root
+  unreadable …` and indexes **0 tracks**. Fix it host-side —
+  `chmod -R a+rX /path/to/music`, `chown` it to UID 100, or add
+  `user: "0:0"` to run the container as root. The `:ro` mount is never
+  written to.
+- **Use a named volume for `/data`** (as above), not a host bind-mount. A
+  bind-mount like `./data:/data` is created root-owned, so the non-root
+  process can't write its config/DB/cert into it; a named volume inherits the
+  image's writable `/data`.
+
+Prefer plain `docker run`, want to create the config explicitly, or running
+public-mode? See [First-time setup](#first-time-setup) and
+[Public mode](#public-mode-internet-exposed) below.
+
 ## Pull the published image
 
 ```sh
@@ -43,9 +99,9 @@ the whole Go compile.
 
 ## First-time setup
 
-The container runs `bridge serve --config /data/bridge.yaml` by
-default. That file doesn't exist on the first run — you have two
-options:
+The [Quickstart](#quickstart) auto-init path handles the common case with no
+setup step. Create the config explicitly instead when you want public mode, a
+hand-tuned YAML, or to see the pairing fingerprint printed up front:
 
 ### Option A: one-shot `bridge init` inside the container
 
@@ -84,7 +140,10 @@ present.
 
 ## Running
 
-Once `/data/bridge.yaml` exists:
+The plain `docker run` form (the [Quickstart](#quickstart) uses compose). The
+image's default command carries `--init-if-missing`, so this auto-inits on
+first run too — a pre-supplied or `bridge init`-generated config is used as-is
+if present:
 
 ```sh
 docker run -d \
