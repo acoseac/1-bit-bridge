@@ -161,9 +161,9 @@ As of **v0.1.8** the image bundles the audio toolchain — `sox`,
 `ffmpeg`, and `ffprobe` — so the optional **offline upscaling /
 CarPlay-optimize** and **audio-analysis** (waveform, loudness,
 key/tempo) features work inside the container. Both are **off by
-default** and cost nothing until enabled. Bundling `ffmpeg` is what
-makes this image noticeably larger than a bare Go binary — the
-deliberate trade for in-container audio processing.
+default** and cost nothing until enabled. Bundling `ffmpeg` pushes the
+image to roughly **260 MB** (it dominates the size) — the deliberate
+trade for in-container audio processing.
 
 > There's no on-the-fly transcoding: the bridge pre-converts to FLAC
 > sidecars offline and serves them bit-exact, the same as any other
@@ -190,17 +190,21 @@ clean kill-switch over a YAML that has it on. Use `true` / `false` — a
 value `strconv.ParseBool` can't decode (`yes`, `on`) is silently
 ignored, so a typo reads as "unchanged," not "off."
 
-Verify the toolchain resolved inside the **running** container:
+Verify the toolchain resolved:
 
 ```sh
 docker exec 1-bit-bridge bridge doctor
 ```
 
-The `audio-toolchain` check reports OK when `sox` (with FLAC) and the
-decoders are present. Run it against the running container, not a
-throwaway `docker run --rm … doctor` — `doctor`'s port checks probe a
-loopback socket in whatever network namespace they execute in, so an
-ephemeral clone can report misleading port state.
+Look at the **`audio-toolchain`** line — it reports `sox vX, FLAC
+supported` when the toolchain is present (`docker exec` inherits the
+container's `BRIDGE_*_ENABLED`, so the check runs rather than reporting
+a no-op "not enabled"). The `port-api` / `port-admin` checks will show
+**in use** here — that's expected, not a problem: `bridge serve` is
+already holding those ports in the same container, and the bridge writes
+no PID file for `doctor` to recognise its own listener, so it can't tell
+itself apart from a foreign process. Those checks are a preflight signal
+for a fresh host, not a running container.
 
 ### Variant storage (`variantsDir`)
 

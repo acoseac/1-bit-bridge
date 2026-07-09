@@ -91,9 +91,13 @@ FROM alpine:${ALPINE_VERSION}
 # no separate plugin package is needed (the pipeline forces `-t flac`,
 # which `internal/doctor` verifies). ffmpeg (ships ffprobe too): the
 # analysis fallback decoder for AAC/m4a that Alpine sox can't open.
-# lsof: lets `bridge doctor` attribute the API/admin ports to our own
-# process instead of degrading to a Warn (busybox lsof lacks the flags
-# `internal/doctor` needs). sox and ffmpeg run as separate executables
+# lsof: `bridge doctor`'s preflight port check runs `lsof -nP -iTCP…`
+# to name the process occupying the API/admin ports (busybox lsof lacks
+# those flags, so without it the check falls back to a vaguer Warn). It
+# doesn't currently distinguish our own running bridge — `bridge serve`
+# writes no PID file yet — so a `doctor` run inside a live-serving
+# container still reports those ports in use.
+# sox and ffmpeg run as separate executables
 # invoked via os/exec (aggregation, not linked into the Go binary), so
 # their GPL/LGPL terms don't affect the bridge's MIT license. All three
 # are inert unless upscale/analysis are enabled in config.
