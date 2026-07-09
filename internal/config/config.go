@@ -1481,6 +1481,23 @@ func Load(path string) (*Config, error) {
 // Path-typed values (DataDir, LibraryRoots) still go through
 // `resolvePaths` afterwards so a relative path inherits the same
 // "relative-to-config-dir" semantics as a YAML field.
+// applyBoolEnv sets *dst from the boolean env var `key` when it is present
+// and parseable via strconv.ParseBool. A present-but-unparseable value
+// (e.g. `yes`, `on`, or a typo) is logged at Warn and ignored — the
+// YAML/default value stands, so a mistyped override can't silently flip a
+// feature to false. An unset / empty var is a no-op.
+func applyBoolEnv(key string, dst *bool) {
+	v := os.Getenv(key)
+	if v == "" {
+		return
+	}
+	if b, err := strconv.ParseBool(v); err == nil {
+		*dst = b
+	} else {
+		validateLogger.Warn("ignoring unparseable boolean env var", "var", key, "value", v, "err", err)
+	}
+}
+
 func (c *Config) applyEnvOverrides() {
 	if v := os.Getenv("BRIDGE_LISTEN_ADDRESS"); v != "" {
 		c.ListenAddress = v
@@ -1500,11 +1517,20 @@ func (c *Config) applyEnvOverrides() {
 	if v := os.Getenv("BRIDGE_COVERART_BASE_URL"); v != "" {
 		c.Enrich.CoverArtBaseURL = v
 	}
-	if v := os.Getenv("BRIDGE_DISABLE_HTTP3"); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			c.DisableHTTP3 = b
-		}
-	}
+	// Boolean toggles, via the shared applyBoolEnv helper: a malformed
+	// value is logged at Warn and ignored (the YAML/default stands)
+	// rather than coerced to false — a typo like `yes`/`on` must not
+	// silently flip a feature off. BRIDGE_UPSCALE_ENABLED /
+	// BRIDGE_ANALYSIS_ENABLED are the only env path to enable those two
+	// sox/ffmpeg-backed features (otherwise YAML-only); the startup sox
+	// probe (soxFeatureReady) still AND-gates actual activation, so
+	// setting them true on a host without a usable sox degrades to
+	// feature-off with a log line rather than a hard failure. Only the
+	// master Enabled bool is exposed; workers / queueCap keep their
+	// runtime.NumCPU-derived defaults.
+	applyBoolEnv("BRIDGE_DISABLE_HTTP3", &c.DisableHTTP3)
+	applyBoolEnv("BRIDGE_UPSCALE_ENABLED", &c.Upscale.Enabled)
+	applyBoolEnv("BRIDGE_ANALYSIS_ENABLED", &c.Analysis.Enabled)
 	if v := os.Getenv("BRIDGE_LIBRARY_ROOTS"); v != "" {
 		// Use the OS-native PATH-style separator: `:` on POSIX,
 		// `;` on Windows. Pre-fix we hard-coded `:` everywhere,
