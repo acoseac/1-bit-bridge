@@ -374,6 +374,21 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 		// Mode (a) already sentinel'd via walkRoot's upfront os.Stat;
 		// skip the (b) interrogation for roots already errored.
 		if _, errored := errorSubtrees[rootSentinel]; errored {
+			// The root itself failed to walk → it contributed 0 files and
+			// the deletion pass is spared. Surface ONE actionable line for
+			// the silent-empty-library case (common in Docker when the
+			// container user can't read a bind-mount). Re-probe with ReadDir:
+			// os.Stat succeeds on a mounted-but-unreadable dir, so only the
+			// directory-READ error distinguishes "unreadable by this user"
+			// from "not mounted" (the latter is already logged as "root
+			// unreachable" by walkRoot — don't double-log it here).
+			if observed == 0 {
+				if _, readErr := os.ReadDir(root); errors.Is(readErr, fs.ErrPermission) {
+					scanLogger.Error("library root unreadable",
+						"root", root, "uid", os.Getuid(),
+						"hint", "indexed 0 files here — the mount isn't readable by this user; on Docker chown the bind-mount to the container UID or run with --user/PUID. See docs/docker.md")
+				}
+			}
 			continue
 		}
 		if observed == 0 && !hasAllowEmptySentinel(root) {
@@ -1205,7 +1220,8 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 // of legitimately-deleted files on the SSD.
 func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, seen, seenFolders, errorSubtrees map[string]struct{}, paths chan<- pathInfo) (int, error) {
 	if _, err := os.Stat(root); err != nil {
-		scanLogger.Error("root unreachable", "root", root, "err", err)
+		scanLogger.Error("root unreachable", "root", root, "err", err,
+			"hint", "the library root can't be reached — is the volume/mount present? On Docker check the -v / compose volumes mapping. See docs/docker.md")
 		errorSubtrees[relPath(root, root, multiRoot)] = struct{}{}
 		return 0, nil
 	}
