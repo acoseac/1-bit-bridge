@@ -499,6 +499,16 @@ func (s *Store) Delete(id, pollSecret string) error {
 	if subtle.ConstantTimeCompare(presented[:], req.PollHash[:]) != 1 {
 		return ErrUnauthorized
 	}
+	// A row that has expired WITH a minted token is mid-revocation —
+	// onTimer owns its lifecycle now, possibly across retry backoffs
+	// (see the StateApproved→StateExpired transition in onTimer). Refuse
+	// the delete: stopping the timer + dropping the row here would abort
+	// the retry loop and orphan a still-live token in auth.Store that the
+	// revoke never got to kill. iOS sees ErrNotFound (the request has
+	// effectively expired), which the handler maps to 200 for an ack.
+	if req.State == StateExpired && req.TokenID != "" {
+		return ErrNotFound
+	}
 	if req.expiryTimer != nil {
 		req.expiryTimer.Stop()
 	}
