@@ -45,6 +45,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 )
 
@@ -511,16 +512,52 @@ func ipsToStrings(ips []net.IP) []string {
 	return out
 }
 
+// writePEM encodes der as a PEM block and commits it to path ATOMICALLY:
+// the block is written to a temp file in the same directory, fsync'd, and
+// renamed over path. A failed or interrupted write (disk full, process
+// kill) therefore leaves any pre-existing file at path intact instead of
+// truncating it — the bridge stays bootable across a failed cert rotate.
+// (The rotate CLI must NOT pre-remove the old files, or this guarantee is
+// lost; see cmd/bridge/cert.go.)
+//
+// RenameWithRetry absorbs the Windows AV-scan-on-close rename window — the
+// cert/key live under %LOCALAPPDATA%. Chmod runs on the temp file BEFORE
+// the rename so the final mode is correct with no post-rename perms window
+// (os.CreateTemp yields 0o600; the 0o644 cert needs widening, the key
+// stays at 0o600).
 func writePEM(path, blockType string, der []byte, mode os.FileMode) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".pem-*.tmp")
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	if err := pem.Encode(f, &pem.Block{Type: blockType, Bytes: der}); err != nil {
+	tmpName := tmp.Name()
+	// Remove defer registered FIRST → runs LAST (LIFO). Close defer
+	// registered SECOND → runs FIRST, releasing the FD before Remove tries
+	// to unlink (Windows holds an open file from being removed). Mirrors
+	// the canonical pattern in internal/auth/auth.go and internal/config.
+	defer func() {
+		if tmpName != "" {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	defer func() { _ = tmp.Close() }()
+	if err := tmp.Chmod(mode); err != nil {
 		return err
 	}
-	return f.Sync()
+	if err := pem.Encode(tmp, &pem.Block{Type: blockType, Bytes: der}); err != nil {
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := atomicwrite.RenameWithRetry(tmpName, path); err != nil {
+		return err
+	}
+	tmpName = "" // rename succeeded — suppress the deferred Remove
+	return nil
 }
 
 // fingerprintFromPEM reads the PEM-encoded cert file and returns its SHA-256

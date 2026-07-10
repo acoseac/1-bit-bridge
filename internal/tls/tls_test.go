@@ -1,9 +1,11 @@
 package tls
 
 import (
+	"bytes"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -16,6 +18,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 )
 
 func TestGenerateFirstRun(t *testing.T) {
@@ -106,6 +110,69 @@ func TestGenerateOrphanCertCleanupOnKeyFailure(t *testing.T) {
 	}
 	if fileExists(certPath) {
 		t.Error("cert left on disk after key-write failure — orphan state")
+	}
+}
+
+func TestGeneratePreservesExistingOnWriteFailure(t *testing.T) {
+	// writePEM commits each PEM via temp-file + rename, so a rename failure
+	// during (re)generation must leave any pre-existing cert/key
+	// byte-identical on disk — the bridge stays bootable instead of being
+	// left with a truncated/half-written pair. Pins the atomicity contract
+	// (and, with cmd/bridge/cert.go no longer pre-removing, the
+	// crash-safety of `bridge cert rotate`).
+	dir := t.TempDir()
+	certPath, keyPath := DefaultPaths(dir)
+
+	if _, _, err := LoadOrGenerate(certPath, keyPath, "myhost.local"); err != nil {
+		t.Fatalf("initial LoadOrGenerate: %v", err)
+	}
+	origCert, err := os.ReadFile(certPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	origKey, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Force every rename to fail — simulates disk-full / interruption at
+	// the atomic commit step. The cert write attempts its rename first and
+	// errors out, so the key write is never reached.
+	restore := atomicwrite.SetRenameFuncForTest(func(_, _ string) error {
+		return errors.New("simulated rename failure")
+	})
+	defer atomicwrite.SetRenameFuncForTest(restore)
+
+	if err := Generate(certPath, keyPath, "myhost.local"); err == nil {
+		t.Fatal("expected Generate to fail when the rename fails")
+	}
+
+	// The pre-existing pair must be intact and unchanged.
+	gotCert, err := os.ReadFile(certPath)
+	if err != nil {
+		t.Fatalf("cert missing after failed regeneration: %v", err)
+	}
+	if !bytes.Equal(gotCert, origCert) {
+		t.Error("cert changed after a failed regeneration — atomicity violated")
+	}
+	gotKey, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatalf("key missing after failed regeneration: %v", err)
+	}
+	if !bytes.Equal(gotKey, origKey) {
+		t.Error("key changed after a failed regeneration — atomicity violated")
+	}
+
+	// No scratch .pem-*.tmp file must leak from the failed write.
+	certDir := filepath.Dir(certPath)
+	entries, err := os.ReadDir(certDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".pem-") && strings.HasSuffix(e.Name(), ".tmp") {
+			t.Errorf("leaked temp file after failed rename: %s", e.Name())
+		}
 	}
 }
 
