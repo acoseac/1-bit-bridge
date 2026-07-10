@@ -931,13 +931,7 @@ func TestApprovedTimeoutRevokeDoesNotLeakTokenViaPoll(t *testing.T) {
 	}
 
 	mint := &stubMint{}
-	s = NewStore(Options{
-		TTL:         50 * time.Millisecond,
-		Grace:       50 * time.Millisecond,
-		MaxPending:  4,
-		RevokeToken: revoke,
-	})
-	t.Cleanup(s.Close)
+	s = quickStore(t, 50*time.Millisecond, 50*time.Millisecond, revoke)
 
 	req, err := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP", "")
 	if err != nil {
@@ -989,13 +983,7 @@ func TestDeleteDuringRevokeRetryIsRejected(t *testing.T) {
 	}
 
 	mint := &stubMint{}
-	s := NewStore(Options{
-		TTL:         50 * time.Millisecond,
-		Grace:       50 * time.Millisecond,
-		MaxPending:  4,
-		RevokeToken: revoke,
-	})
-	t.Cleanup(s.Close)
+	s := quickStore(t, 50*time.Millisecond, 50*time.Millisecond, revoke)
 	req, err := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP", "")
 	if err != nil {
 		t.Fatalf("CreateRequest: %v", err)
