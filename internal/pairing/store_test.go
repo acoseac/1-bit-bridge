@@ -896,3 +896,71 @@ func TestCreateRequestStoresDeviceToken(t *testing.T) {
 		t.Errorf("DeviceToken = %q, want 9f3ce1", snap.DeviceToken)
 	}
 }
+
+// TestApprovedTimeoutRevokeDoesNotLeakTokenViaPoll pins the fix for the
+// revoke token-leak / TOCTOU window. When an Approved-but-unacknowledged
+// request times out, onTimer must transition the row OUT of Approved
+// (to Expired) UNDER s.mu before it performs the out-of-lock revoke —
+// otherwise a Poll racing the revoke (or one of its backoff-retry
+// windows) receives a token the revoke is about to destroy, and every
+// subsequent iOS request 401s on the dead token.
+//
+// We exercise the exact window by polling from INSIDE the injected
+// revoke callback: at that point onTimer has released s.mu, so Poll can
+// acquire it, and the row must already read Expired with no token.
+func TestApprovedTimeoutRevokeDoesNotLeakTokenViaPoll(t *testing.T) {
+	raw, hashHex := makePollPair(t, "leak")
+
+	var s *Store
+	idCh := make(chan string, 1) // carries the request id into the callback (channel = happens-before)
+	done := make(chan struct{})
+	var once sync.Once
+	var duringState State
+	var duringToken string
+	var duringErr error
+
+	revoke := func(tokenID string) error {
+		id := <-idCh
+		idCh <- id // keep it available; success path calls this once, a retry could re-read
+		res, err := s.Poll(id, raw)
+		once.Do(func() {
+			duringState, duringToken, duringErr = res.State, res.Token, err
+			close(done)
+		})
+		return nil
+	}
+
+	mint := &stubMint{}
+	s = NewStore(Options{
+		TTL:         50 * time.Millisecond,
+		Grace:       50 * time.Millisecond,
+		MaxPending:  4,
+		RevokeToken: revoke,
+	})
+	t.Cleanup(s.Close)
+
+	req, err := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP", "")
+	if err != nil {
+		t.Fatalf("CreateRequest: %v", err)
+	}
+	if _, err := s.Approve(req.ID, "FP", mint.fn); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+	idCh <- req.ID // hand the id to the callback (it blocks on <-idCh until this lands)
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("revoke callback never fired within 3s")
+	}
+
+	if duringErr != nil {
+		t.Fatalf("Poll during revoke: unexpected error %v", duringErr)
+	}
+	if duringState != StateExpired {
+		t.Errorf("Poll during revoke: state = %v, want StateExpired (row must leave Approved before the revoke)", duringState)
+	}
+	if duringToken != "" {
+		t.Errorf("Poll during revoke leaked token %q, want empty — a token handed out here is killed by the revoke and would 401", duringToken)
+	}
+}
