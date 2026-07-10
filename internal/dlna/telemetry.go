@@ -158,6 +158,17 @@ func TelemetryMiddleware(store *TelemetryStore, next http.Handler) http.Handler 
 		// afterwards to preserve net/http's per-request panic recovery.
 		// DeepSeek review.
 		defer func() {
+			rec := recover()
+			status := recw.statusCode
+			// A panic before any header/body was committed leaves statusCode
+			// at the http.StatusOK default, misreporting a request that
+			// actually failed. Record 500 in that case (net/http aborts the
+			// connection on an unrecovered panic). Guard on !wroteHeader:
+			// once WriteHeader/Write/ReadFrom has committed a status, THAT is
+			// what the client received — don't retroactively relabel it.
+			if rec != nil && !recw.wroteHeader {
+				status = http.StatusInternalServerError
+			}
 			store.Record(TelemetryEntry{
 				Timestamp:             start,
 				Method:                r.Method,
@@ -166,13 +177,13 @@ func TelemetryMiddleware(store *TelemetryStore, next http.Handler) http.Handler 
 				AcceptHeader:          r.Header.Get("Accept"),
 				RangeHeader:           r.Header.Get("Range"),
 				ContentFeaturesAccept: r.Header.Get("getContentFeatures.dlna.org"),
-				StatusCode:            recw.statusCode,
+				StatusCode:            status,
 				BytesServed:           recw.bytesSent,
 				DurationMS:            time.Since(start).Milliseconds(),
 				RemoteAddr:            r.RemoteAddr,
 			})
-			if rec := recover(); rec != nil {
-				panic(rec)
+			if rec != nil {
+				panic(rec) // preserve net/http's per-request panic recovery
 			}
 		}()
 		next.ServeHTTP(recw, r)

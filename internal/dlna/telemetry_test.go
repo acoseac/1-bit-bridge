@@ -207,6 +207,69 @@ func Test_TelemetryMiddleware_CapturesNonDefaultStatusCode(t *testing.T) {
 	}
 }
 
+func Test_TelemetryMiddleware_PanicBeforeHeaderRecords500(t *testing.T) {
+	// A handler that panics before writing any header/body leaves the
+	// recorder at its 200 default. The middleware must record 500 (the
+	// request failed) — and exactly ONE entry (no double-record).
+	store := NewTelemetryStore(10)
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		panic("boom before header")
+	})
+	h := TelemetryMiddleware(store, inner)
+	req := httptest.NewRequest(http.MethodGet, "/panic", nil)
+	rec := httptest.NewRecorder()
+
+	// The middleware re-panics to preserve net/http's recovery; catch it here.
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Error("middleware swallowed the panic; it must re-panic to preserve net/http recovery")
+			}
+		}()
+		h.ServeHTTP(rec, req)
+	}()
+
+	got := store.Snapshot()
+	if len(got) != 1 {
+		t.Fatalf("expected exactly 1 entry on panic (no double-record), got %d", len(got))
+	}
+	if got[0].StatusCode != http.StatusInternalServerError {
+		t.Errorf("StatusCode = %d, want 500 (panic before any header)", got[0].StatusCode)
+	}
+}
+
+func Test_TelemetryMiddleware_PanicAfterHeaderKeepsStatus(t *testing.T) {
+	// If the handler already committed a status (here 206 + a body chunk)
+	// and THEN panics, the recorded status must stay 206 — that's what the
+	// client received on the wire. The !wroteHeader guard prevents a
+	// retroactive 500 relabel.
+	store := NewTelemetryStore(10)
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write([]byte("partial"))
+		panic("boom mid-stream")
+	})
+	h := TelemetryMiddleware(store, inner)
+	req := httptest.NewRequest(http.MethodGet, "/partial-then-panic", nil)
+	rec := httptest.NewRecorder()
+
+	func() {
+		defer func() { _ = recover() }()
+		h.ServeHTTP(rec, req)
+	}()
+
+	got := store.Snapshot()
+	if len(got) != 1 {
+		t.Fatalf("expected exactly 1 entry, got %d", len(got))
+	}
+	if got[0].StatusCode != http.StatusPartialContent {
+		t.Errorf("StatusCode = %d, want 206 — a committed status must not be relabeled 500 by a later panic", got[0].StatusCode)
+	}
+	if got[0].BytesServed != int64(len("partial")) {
+		t.Errorf("BytesServed = %d, want %d", got[0].BytesServed, len("partial"))
+	}
+}
+
 func Test_TelemetryMiddleware_CapturesDuration(t *testing.T) {
 	store := NewTelemetryStore(10)
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
