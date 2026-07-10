@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -400,7 +401,7 @@ func (s *Store) persist() error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close tmp: %w", err)
 	}
-	if err := os.Rename(tmpName, s.path); err != nil {
+	if err := atomicwrite.RenameWithRetry(tmpName, s.path); err != nil {
 		return fmt.Errorf("rename adminauth store: %w", err)
 	}
 	tmpName = "" // success — suppress the cleanup defer

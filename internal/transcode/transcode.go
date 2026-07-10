@@ -38,6 +38,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/google/uuid"
@@ -727,7 +728,7 @@ func RunSox(ctx context.Context, j JobSpec) (int64, error) {
 	}
 	// Atomic rename on success. Same FS as DataDir so this is a
 	// rename(2), not a copy.
-	if err := os.Rename(tmpPath, finalPath); err != nil {
+	if err := atomicwrite.RenameWithRetryCtx(ctx, tmpPath, finalPath); err != nil {
 		return 0, fmt.Errorf("rename sidecar: %w", err)
 	}
 	cleanup = false // success — keep the now-renamed final file

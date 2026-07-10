@@ -22,6 +22,7 @@ package atomicwrite
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"time"
@@ -78,11 +79,33 @@ var renameBackoff = []time.Duration{
 // Caller is responsible for post-failure semantics — typically the
 // "stat the destination and accept if its bytes match what we
 // tried to write" fallback that `WriteBytes` implements.
+//
+// This is the context-free form for one-shot writers (config /
+// token-store / update-state persists) that aren't driven by a
+// cancellable worker. A caller running inside a cancellable job (the
+// transcode / analyze pools) should use RenameWithRetryCtx so a
+// shutting-down worker frees its slot without waiting out the backoff.
 func RenameWithRetry(src, dst string) error {
+	return RenameWithRetryCtx(context.Background(), src, dst)
+}
+
+// RenameWithRetryCtx is RenameWithRetry with a cancellation-aware
+// backoff: on ctx cancellation between attempts it returns ctx.Err()
+// immediately instead of sleeping out the remaining schedule. The
+// rename syscall itself isn't interruptible, but the inter-attempt
+// sleeps (up to ~750ms total on Windows) are — enough to let a
+// shutting-down transcode/analyze worker release its slot promptly
+// rather than block the pool's shutdown grace window. The first
+// attempt (no sleep) always runs; only the backoff sleeps observe ctx.
+func RenameWithRetryCtx(ctx context.Context, src, dst string) error {
 	var err error
 	for _, d := range renameBackoff {
 		if d > 0 {
-			time.Sleep(d)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(d):
+			}
 		}
 		err = renameFunc(src, dst)
 		if err == nil {

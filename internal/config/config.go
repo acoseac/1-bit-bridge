@@ -20,6 +20,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 )
 
@@ -2309,7 +2310,7 @@ func (c *Config) Save(path string) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close tmp: %w", err)
 	}
-	if err := os.Rename(tmpName, path); err != nil {
+	if err := atomicwrite.RenameWithRetry(tmpName, path); err != nil {
 		return fmt.Errorf("rename: %w", err)
 	}
 	tmpName = "" // suppress defer cleanup

@@ -35,6 +35,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/dsn"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 	_ "modernc.org/sqlite" // register "sqlite" driver
@@ -416,7 +417,7 @@ func copyFile(srcPath, dstPath string, mode os.FileMode) error {
 	if err := os.Chmod(tmpName, mode); err != nil {
 		return err
 	}
-	if err := os.Rename(tmpName, dstPath); err != nil {
+	if err := atomicwrite.RenameWithRetry(tmpName, dstPath); err != nil {
 		return err
 	}
 	committed = true
