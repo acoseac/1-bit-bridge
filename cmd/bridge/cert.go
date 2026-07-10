@@ -151,13 +151,12 @@ func certRotateCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 		}
 	}
 
-	// Remove existing files before regenerating — `Generate` writes
-	// fresh ones; the existing files won't conflict with the rename
-	// inside writePEM (it uses O_TRUNC) but explicit removal makes
-	// the failure mode clearer if perms get in the way.
-	_ = os.Remove(certPath)
-	_ = os.Remove(keyPath)
-
+	// Regenerate directly over the existing files. writePEM commits each
+	// PEM via a temp-file + atomic rename, so a failed or interrupted write
+	// (disk full, process kill) leaves the prior cert/key intact and the
+	// bridge bootable. Do NOT pre-remove the old files here — that would
+	// defeat the atomic overwrite and reintroduce the
+	// unbootable-on-failed-rotation hazard the atomic write closes.
 	hostname, _ := os.Hostname()
 	// Rotate is the operator-driven path that picks up Tailscale +
 	// custom-endpoint SAN changes since the last cert was minted. We

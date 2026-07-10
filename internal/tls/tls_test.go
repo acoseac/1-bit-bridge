@@ -1,9 +1,11 @@
 package tls
 
 import (
+	"bytes"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -16,6 +18,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 )
 
 func TestGenerateFirstRun(t *testing.T) {
@@ -86,14 +90,15 @@ func TestGenerateFirstRun(t *testing.T) {
 }
 
 func TestGenerateOrphanCertCleanupOnKeyFailure(t *testing.T) {
-	// If the key write fails after the cert write succeeded, the cert
-	// must be removed so the next LoadOrGenerate mints a fresh pair
-	// rather than tripping the "inconsistent TLS material" error.
+	// With the two-phase commit, a key-write failure means the cert is
+	// never renamed into place (both PEMs are staged first, then committed
+	// together), so certPath must not exist afterward — no orphan cert for
+	// the next LoadOrGenerate to trip over as "inconsistent TLS material".
 	dir := t.TempDir()
 	certPath := filepath.Join(dir, "cert.pem")
 	// Point keyPath at a directory that doesn't exist AND can't be
-	// created (a file at the parent). This makes writePEM(keyPath) fail
-	// after cert write succeeds.
+	// created (a file at the parent). This makes staging the key PEM fail
+	// while the cert PEM stages successfully.
 	blocker := filepath.Join(dir, "blocker")
 	if err := os.WriteFile(blocker, []byte("not a dir"), 0o600); err != nil {
 		t.Fatal(err)
@@ -106,6 +111,112 @@ func TestGenerateOrphanCertCleanupOnKeyFailure(t *testing.T) {
 	}
 	if fileExists(certPath) {
 		t.Error("cert left on disk after key-write failure — orphan state")
+	}
+}
+
+func TestGeneratePreservesExistingOnWriteFailure(t *testing.T) {
+	// writePEM commits each PEM via temp-file + rename, so a rename failure
+	// during (re)generation must leave any pre-existing cert/key
+	// byte-identical on disk — the bridge stays bootable instead of being
+	// left with a truncated/half-written pair. Pins the atomicity contract
+	// (and, with cmd/bridge/cert.go no longer pre-removing, the
+	// crash-safety of `bridge cert rotate`).
+	dir := t.TempDir()
+	certPath, keyPath := DefaultPaths(dir)
+
+	if _, _, err := LoadOrGenerate(certPath, keyPath, "myhost.local"); err != nil {
+		t.Fatalf("initial LoadOrGenerate: %v", err)
+	}
+	origCert, err := os.ReadFile(certPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	origKey, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Force every rename to fail — simulates disk-full / interruption at
+	// the atomic commit step. The cert write attempts its rename first and
+	// errors out, so the key write is never reached.
+	restore := atomicwrite.SetRenameFuncForTest(func(_, _ string) error {
+		return errors.New("simulated rename failure")
+	})
+	defer atomicwrite.SetRenameFuncForTest(restore)
+
+	if err := Generate(certPath, keyPath, "myhost.local"); err == nil {
+		t.Fatal("expected Generate to fail when the rename fails")
+	}
+
+	// The pre-existing pair must be intact and unchanged.
+	gotCert, err := os.ReadFile(certPath)
+	if err != nil {
+		t.Fatalf("cert missing after failed regeneration: %v", err)
+	}
+	if !bytes.Equal(gotCert, origCert) {
+		t.Error("cert changed after a failed regeneration — atomicity violated")
+	}
+	gotKey, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatalf("key missing after failed regeneration: %v", err)
+	}
+	if !bytes.Equal(gotKey, origKey) {
+		t.Error("key changed after a failed regeneration — atomicity violated")
+	}
+
+	// No scratch .pem-*.tmp file must leak from the failed write.
+	certDir := filepath.Dir(certPath)
+	entries, err := os.ReadDir(certDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".pem-") && strings.HasSuffix(e.Name(), ".tmp") {
+			t.Errorf("leaked temp file after failed rename: %s", e.Name())
+		}
+	}
+}
+
+func TestGenerateKeyFailureDoesNotDeleteCert(t *testing.T) {
+	// Gemini HIGH (PR #487): a key-write failure must never leave the
+	// system with NO cert. The two-phase stage-both-then-rename-both commit
+	// means the cert is either preserved (old) or committed (new) — never
+	// deleted. Here the cert rename succeeds but the key rename fails; a
+	// cert file must still exist afterward. The old orphan-cleanup
+	// (os.Remove(certPath) on key failure) would have deleted it, leaving
+	// the bridge with no cert at all.
+	dir := t.TempDir()
+	certPath, keyPath := DefaultPaths(dir)
+	if _, _, err := LoadOrGenerate(certPath, keyPath, "myhost.local"); err != nil {
+		t.Fatalf("initial LoadOrGenerate: %v", err)
+	}
+
+	// Fail only the KEY rename; the cert rename commits normally.
+	restore := atomicwrite.SetRenameFuncForTest(func(src, dst string) error {
+		if dst == keyPath {
+			return errors.New("simulated key rename failure")
+		}
+		return os.Rename(src, dst)
+	})
+	defer atomicwrite.SetRenameFuncForTest(restore)
+
+	if err := Generate(certPath, keyPath, "myhost.local"); err == nil {
+		t.Fatal("expected Generate to fail when the key rename fails")
+	}
+
+	// The crux of the fix: a cert file MUST still exist (not deleted).
+	if !fileExists(certPath) {
+		t.Error("cert file was deleted after a key-write failure — the exact bug the two-phase commit prevents")
+	}
+	// No scratch .pem-*.tmp files must leak.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".pem-") && strings.HasSuffix(e.Name(), ".tmp") {
+			t.Errorf("leaked temp file after key-rename failure: %s", e.Name())
+		}
 	}
 }
 
