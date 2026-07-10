@@ -499,6 +499,16 @@ func (s *Store) Delete(id, pollSecret string) error {
 	if subtle.ConstantTimeCompare(presented[:], req.PollHash[:]) != 1 {
 		return ErrUnauthorized
 	}
+	// A row that has expired WITH a minted token is mid-revocation —
+	// onTimer owns its lifecycle now, possibly across retry backoffs
+	// (see the StateApproved→StateExpired transition in onTimer). Refuse
+	// the delete: stopping the timer + dropping the row here would abort
+	// the retry loop and orphan a still-live token in auth.Store that the
+	// revoke never got to kill. iOS sees ErrNotFound (the request has
+	// effectively expired), which the handler maps to 200 for an ack.
+	if req.State == StateExpired && req.TokenID != "" {
+		return ErrNotFound
+	}
 	if req.expiryTimer != nil {
 		req.expiryTimer.Stop()
 	}
@@ -725,10 +735,11 @@ func (s *Store) onTimer(id string, gen uint64) {
 	s.mu.Lock()
 	var revokeID string
 	// State-change snapshot for the Pending→Expired transition fires
-	// AFTER the lock is released — same shape as Approve / Decline.
-	// Other onTimer branches don't observably transition (StateApproved
-	// is the revoke path, terminal-state branches just clean up the
-	// row), so they don't fire onStateChange.
+	// AFTER the lock is released — same shape as Approve / Decline. The
+	// StateApproved branch ALSO transitions to Expired (under the lock,
+	// before the out-of-lock revoke) to close a token-leak window; that
+	// transition surfaces on the admin SSE pairing tick (500 ms) so it
+	// deliberately doesn't fire onStateChange.
 	var afterUnlock Request
 	var fire bool
 	if req, ok := s.byID[id]; ok && req.timerGen == gen {
@@ -744,14 +755,34 @@ func (s *Store) onTimer(id string, gen uint64) {
 			afterUnlock = snapshotForEvent(req)
 			fire = true
 		case StateApproved:
-			// Capture the intent but DON'T delete the row yet. If
-			// `s.revoke` fails we need to retry, and a deleted row
-			// has lost the only handle the Store has on the
+			// Transition OUT of Approved under the lock BEFORE the
+			// out-of-lock revoke. Poll gates token delivery on
+			// State==StateApproved, so leaving the row Approved during
+			// the revoke (and its backoff-retry windows) lets a
+			// concurrent Poll hand iOS a token that the revoke then
+			// destroys — a dead token that 401s every subsequent
+			// request. The revoke bookkeeping survives on req.TokenID
+			// (see the terminal branch); DON'T delete the row yet
+			// because a failed revoke needs to retry, and a deleted
+			// row has lost the only handle the Store has on the
 			// to-be-revoked token. (CodeRabbit on PR #103 second
 			// pass.) Finalisation happens below, outside the lock.
+			req.State = StateExpired
+			req.DecidedAt = s.now()
 			revokeID = req.TokenID
 		case StateDeclined, StateExpired, StateCertRotated:
-			delete(s.byID, id)
+			// A row that reaches a terminal state WITH a minted
+			// TokenID can only be a previously-Approved row now
+			// mid-revoke-retry — Declined / CertRotated / the
+			// Pending→Expired sweep never mint a token. Re-dispatch to
+			// the revoke path; a bare delete here would orphan a
+			// still-live token in auth.Store. Genuinely terminal rows
+			// (no token) are cleaned up.
+			if req.TokenID != "" {
+				revokeID = req.TokenID
+			} else {
+				delete(s.byID, id)
+			}
 		}
 	}
 	s.mu.Unlock()

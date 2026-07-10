@@ -896,3 +896,129 @@ func TestCreateRequestStoresDeviceToken(t *testing.T) {
 		t.Errorf("DeviceToken = %q, want 9f3ce1", snap.DeviceToken)
 	}
 }
+
+// TestApprovedTimeoutRevokeDoesNotLeakTokenViaPoll pins the fix for the
+// revoke token-leak / TOCTOU window. When an Approved-but-unacknowledged
+// request times out, onTimer must transition the row OUT of Approved
+// (to Expired) UNDER s.mu before it performs the out-of-lock revoke —
+// otherwise a Poll racing the revoke (or one of its backoff-retry
+// windows) receives a token the revoke is about to destroy, and every
+// subsequent iOS request 401s on the dead token.
+//
+// We exercise the exact window by polling from INSIDE the injected
+// revoke callback: at that point onTimer has released s.mu, so Poll can
+// acquire it, and the row must already read Expired with no token.
+func TestApprovedTimeoutRevokeDoesNotLeakTokenViaPoll(t *testing.T) {
+	raw, hashHex := makePollPair(t, "leak")
+
+	var s *Store
+	idCh := make(chan string, 1) // carries the request id into the callback (channel = happens-before)
+	done := make(chan struct{})
+	var once sync.Once
+	var duringState State
+	var duringToken string
+	var duringErr error
+
+	revoke := func(tokenID string) error {
+		id := <-idCh
+		idCh <- id // keep it available; success path calls this once, a retry could re-read
+		res, err := s.Poll(id, raw)
+		once.Do(func() {
+			duringState, duringToken, duringErr = res.State, res.Token, err
+			close(done)
+		})
+		return nil
+	}
+
+	mint := &stubMint{}
+	s = quickStore(t, 50*time.Millisecond, 50*time.Millisecond, revoke)
+
+	req, err := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP", "")
+	if err != nil {
+		t.Fatalf("CreateRequest: %v", err)
+	}
+	if _, err := s.Approve(req.ID, "FP", mint.fn); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+	idCh <- req.ID // hand the id to the callback (it blocks on <-idCh until this lands)
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("revoke callback never fired within 3s")
+	}
+
+	if duringErr != nil {
+		t.Fatalf("Poll during revoke: unexpected error %v", duringErr)
+	}
+	if duringState != StateExpired {
+		t.Errorf("Poll during revoke: state = %v, want StateExpired (row must leave Approved before the revoke)", duringState)
+	}
+	if duringToken != "" {
+		t.Errorf("Poll during revoke leaked token %q, want empty — a token handed out here is killed by the revoke and would 401", duringToken)
+	}
+}
+
+// TestDeleteDuringRevokeRetryIsRejected pins the companion guard to the
+// leak fix: once a request has expired WITH a minted token (revocation in
+// progress, possibly across retry backoffs), a concurrent Delete must be
+// rejected. Otherwise Delete would stop the retry timer and drop the row,
+// orphaning a still-live token in auth.Store that the revoke never killed.
+func TestDeleteDuringRevokeRetryIsRejected(t *testing.T) {
+	raw, hashHex := makePollPair(t, "del-retry")
+
+	revokeStarted := make(chan struct{})
+	proceed := make(chan struct{})
+	var revokeCalls int32
+	var once sync.Once
+	revoke := func(tokenID string) error {
+		if atomic.AddInt32(&revokeCalls, 1) == 1 {
+			// First revoke: signal the test, block so it can Delete while
+			// we're mid-revoke, then fail so a retry is armed.
+			once.Do(func() { close(revokeStarted) })
+			<-proceed
+			return errors.New("transient revoke failure")
+		}
+		return nil // the retry succeeds
+	}
+
+	mint := &stubMint{}
+	s := quickStore(t, 50*time.Millisecond, 50*time.Millisecond, revoke)
+	req, err := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP", "")
+	if err != nil {
+		t.Fatalf("CreateRequest: %v", err)
+	}
+	if _, err := s.Approve(req.ID, "FP", mint.fn); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+
+	// onTimer has expired the row and is parked inside the first revoke;
+	// the row is now Expired with a minted TokenID.
+	select {
+	case <-revokeStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("revoke never started")
+	}
+
+	// A Delete during this window must be rejected (not abort the revoke).
+	if err := s.Delete(req.ID, raw); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Delete during revoke retry: err = %v, want ErrNotFound", err)
+	}
+	close(proceed) // first revoke returns its failure → a retry is scheduled
+
+	// The retry must still run and eventually succeed → row deleted.
+	deadline := time.After(3 * time.Second)
+	for {
+		if _, err := s.Poll(req.ID, raw); errors.Is(err, ErrNotFound) {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("revoke retry did not complete after the Delete was rejected")
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	if got := atomic.LoadInt32(&revokeCalls); got < 2 {
+		t.Errorf("revoke calls = %d, want >= 2 (the retry must have fired despite the Delete)", got)
+	}
+}
