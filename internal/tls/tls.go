@@ -175,15 +175,15 @@ func logIfExpiringSoon(certPath string) {
 // `bridge cert rotate` for an operator-driven rotation, and
 // internally by `LoadOrGenerate` for first-run minting.
 //
-// **Overwrites atomically** — `writePEM` commits each PEM via a
-// temp-file + rename, so any pre-existing files at `certPath` /
-// `keyPath` are replaced atomically; a failed or interrupted write
-// leaves the prior files intact (the bridge stays bootable). The
-// first-run path in `LoadOrGenerate` gates on file-existence before
-// calling Generate; the CLI rotate path relies on this atomic
-// overwrite and does NOT pre-remove the files (see cmd/bridge/cert.go).
-// Callers that don't want to replace an existing cert must check
-// themselves before calling.
+// **Overwrites atomically (two-phase)** — GenerateWithOptions stages
+// both the cert and key PEMs to temp files, then renames both into
+// place, so a failure writing EITHER file leaves the pre-existing
+// cert+key intact (the bridge stays bootable across a failed rotate).
+// The first-run path in `LoadOrGenerate` gates on file-existence before
+// calling Generate; the CLI rotate path relies on this atomic overwrite
+// and does NOT pre-remove the files (see cmd/bridge/cert.go). Callers
+// that don't want to replace an existing cert must check themselves
+// before calling.
 //
 // **A rotated cert always has a new SHA-256 fingerprint** —
 // even if the public key is unchanged, the cert binary differs
@@ -256,18 +256,51 @@ func GenerateWithOptions(certPath, keyPath string, opts GenerateOptions) error {
 	if err != nil {
 		return fmt.Errorf("create cert: %w", err)
 	}
-	if err := writePEM(certPath, "CERTIFICATE", certDER, 0o644); err != nil {
-		return fmt.Errorf("write cert: %w", err)
-	}
 	keyDER, err := x509.MarshalECPrivateKey(priv)
 	if err != nil {
-		_ = os.Remove(certPath) // best-effort: avoid orphan cert without matching key
 		return fmt.Errorf("marshal key: %w", err)
 	}
-	if err := writePEM(keyPath, "EC PRIVATE KEY", keyDER, 0o600); err != nil {
-		_ = os.Remove(certPath) // best-effort: avoid orphan cert without matching key
+
+	// Two-phase commit so a failure writing EITHER file leaves the
+	// pre-existing cert+key untouched (the bridge stays bootable across a
+	// failed `bridge cert rotate`): stage both PEMs to temp files first,
+	// then rename both into place. The prior "write cert, then write key,
+	// and os.Remove the cert if the key fails" shape deleted a
+	// freshly-committed cert on a key-write failure, leaving NO cert at
+	// all (Gemini review on PR #487).
+	certTmp, err := stagePEM(certPath, "CERTIFICATE", certDER, 0o644)
+	if err != nil {
+		return fmt.Errorf("write cert: %w", err)
+	}
+	defer func() {
+		if certTmp != "" {
+			_ = os.Remove(certTmp)
+		}
+	}()
+	keyTmp, err := stagePEM(keyPath, "EC PRIVATE KEY", keyDER, 0o600)
+	if err != nil {
 		return fmt.Errorf("write key: %w", err)
 	}
+	defer func() {
+		if keyTmp != "" {
+			_ = os.Remove(keyTmp)
+		}
+	}()
+
+	// Both PEMs are staged + fsync'd; the pre-existing cert/key are still
+	// untouched. Commit. A cert-rename failure leaves both originals
+	// intact. A failure/crash BETWEEN the two renames leaves a new-cert /
+	// old-key mismatch — the bridge fails closed (LoadX509KeyPair rejects
+	// it) and re-running `bridge cert rotate` recovers; that irreducible
+	// two-rename window is the single residual.
+	if err := atomicwrite.RenameWithRetry(certTmp, certPath); err != nil {
+		return fmt.Errorf("commit cert: %w", err)
+	}
+	certTmp = "" // committed — suppress the deferred Remove
+	if err := atomicwrite.RenameWithRetry(keyTmp, keyPath); err != nil {
+		return fmt.Errorf("commit key: %w", err)
+	}
+	keyTmp = "" // committed
 	return nil
 }
 
@@ -514,52 +547,49 @@ func ipsToStrings(ips []net.IP) []string {
 	return out
 }
 
-// writePEM encodes der as a PEM block and commits it to path ATOMICALLY:
-// the block is written to a temp file in the same directory, fsync'd, and
-// renamed over path. A failed or interrupted write (disk full, process
-// kill) therefore leaves any pre-existing file at path intact instead of
-// truncating it — the bridge stays bootable across a failed cert rotate.
-// (The rotate CLI must NOT pre-remove the old files, or this guarantee is
-// lost; see cmd/bridge/cert.go.)
+// stagePEM encodes der as a PEM block into a fresh temp file in the SAME
+// directory as path, fsync'd and chmod'd to mode, and returns the temp
+// file's path WITHOUT renaming it into place. The caller commits it via
+// atomicwrite.RenameWithRetry only after every sibling file has been
+// staged — so a failure staging a LATER file leaves the earlier file's
+// target completely untouched (two-phase commit; see GenerateWithOptions).
+// This is what keeps a failed `bridge cert rotate` from destroying the
+// pre-existing cert/key pair. On any staging error the temp file is
+// removed and "" is returned.
 //
-// RenameWithRetry absorbs the Windows AV-scan-on-close rename window — the
-// cert/key live under %LOCALAPPDATA%. Chmod runs on the temp file BEFORE
-// the rename so the final mode is correct with no post-rename perms window
-// (os.CreateTemp yields 0o600; the 0o644 cert needs widening, the key
-// stays at 0o600).
-func writePEM(path, blockType string, der []byte, mode os.FileMode) error {
+// Chmod runs on the temp file BEFORE it's returned so the committed file
+// lands at its final mode with no post-rename window (os.CreateTemp yields
+// 0o600; the 0o644 cert needs widening, the key stays at 0o600). The
+// caller's RenameWithRetry absorbs the Windows AV-scan-on-close rename
+// window — cert/key live under %LOCALAPPDATA%.
+func stagePEM(path, blockType string, der []byte, mode os.FileMode) (tmpName string, err error) {
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".pem-*.tmp")
 	if err != nil {
-		return err
+		return "", err
 	}
-	tmpName := tmp.Name()
-	// Remove defer registered FIRST → runs LAST (LIFO). Close defer
-	// registered SECOND → runs FIRST, releasing the FD before Remove tries
-	// to unlink (Windows holds an open file from being removed). Mirrors
-	// the canonical pattern in internal/auth/auth.go and internal/config.
+	name := tmp.Name()
+	// On any staging error below, don't leave the temp file behind. Only
+	// fires on the error paths (err != nil); the success path returns the
+	// staged name for the caller to commit + clean up.
 	defer func() {
-		if tmpName != "" {
-			_ = os.Remove(tmpName)
+		if err != nil {
+			_ = tmp.Close()
+			_ = os.Remove(name)
 		}
 	}()
-	defer func() { _ = tmp.Close() }()
-	if err := tmp.Chmod(mode); err != nil {
-		return err
+	if err = tmp.Chmod(mode); err != nil {
+		return "", err
 	}
-	if err := pem.Encode(tmp, &pem.Block{Type: blockType, Bytes: der}); err != nil {
-		return err
+	if err = pem.Encode(tmp, &pem.Block{Type: blockType, Bytes: der}); err != nil {
+		return "", err
 	}
-	if err := tmp.Sync(); err != nil {
-		return err
+	if err = tmp.Sync(); err != nil {
+		return "", err
 	}
-	if err := tmp.Close(); err != nil {
-		return err
+	if err = tmp.Close(); err != nil {
+		return "", err
 	}
-	if err := atomicwrite.RenameWithRetry(tmpName, path); err != nil {
-		return err
-	}
-	tmpName = "" // rename succeeded — suppress the deferred Remove
-	return nil
+	return name, nil
 }
 
 // fingerprintFromPEM reads the PEM-encoded cert file and returns its SHA-256
