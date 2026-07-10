@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
 
@@ -150,7 +151,7 @@ func SaveState(dataDir string, st State) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close tmp: %w", err)
 	}
-	if err := os.Rename(tmpName, StatePath(dataDir)); err != nil {
+	if err := atomicwrite.RenameWithRetry(tmpName, StatePath(dataDir)); err != nil {
 		return fmt.Errorf("rename: %w", err)
 	}
 	tmpName = ""

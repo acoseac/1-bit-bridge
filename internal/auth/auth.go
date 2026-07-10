@@ -29,6 +29,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 )
 
@@ -304,7 +305,7 @@ func (s *Store) persist() error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close tmp: %w", err)
 	}
-	if err := os.Rename(tmpName, s.path); err != nil {
+	if err := atomicwrite.RenameWithRetry(tmpName, s.path); err != nil {
 		return fmt.Errorf("rename: %w", err)
 	}
 	tmpName = "" // suppress defer cleanup

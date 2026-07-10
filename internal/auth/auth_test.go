@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 )
 
 func newTmpStore(t *testing.T) (*Store, string) {
@@ -32,6 +34,42 @@ func (s *Store) loadedForTest() time.Time {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.loaded
+}
+
+func TestPersistRetriesRenameOnTransientFailure(t *testing.T) {
+	// persist() commits via atomicwrite.RenameWithRetry, so a transient
+	// rename failure (the Windows Defender / Search-Indexer scan-on-close
+	// window) is absorbed instead of surfacing as a lost Mint. Inject a
+	// fail-once rename and confirm the mint still lands durably. Pins that
+	// the token store is wired through RenameWithRetry, not bare os.Rename.
+	s, path := newTmpStore(t)
+
+	renameCalls := 0
+	prev := atomicwrite.SetRenameFuncForTest(func(src, dst string) error {
+		renameCalls++
+		if renameCalls == 1 {
+			return errors.New("simulated transient rename failure")
+		}
+		return os.Rename(src, dst)
+	})
+	defer atomicwrite.SetRenameFuncForTest(prev)
+
+	raw, _, err := s.Mint("device")
+	if err != nil {
+		t.Fatalf("Mint under transient rename failure: %v", err)
+	}
+	if renameCalls < 2 {
+		t.Errorf("rename attempts = %d, want >= 2 (the retry didn't fire)", renameCalls)
+	}
+
+	// The token must be durably on disk — reopen and validate.
+	s2, err := OpenStore(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	if _, ok := s2.Validate(raw); !ok {
+		t.Error("minted token not persisted after the rename retry")
+	}
 }
 
 func TestOpenStoreMissingFile(t *testing.T) {
