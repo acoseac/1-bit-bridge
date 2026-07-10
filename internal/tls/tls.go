@@ -175,13 +175,15 @@ func logIfExpiringSoon(certPath string) {
 // `bridge cert rotate` for an operator-driven rotation, and
 // internally by `LoadOrGenerate` for first-run minting.
 //
-// **Performs an unconditional write** — `writePEM` opens with
-// `O_TRUNC`, so any pre-existing files at `certPath` / `keyPath`
-// are overwritten. The first-run path in `LoadOrGenerate` already
-// gates on file-existence before calling Generate; the CLI rotate
-// path explicitly removes the existing files first to make the
-// failure-mode-on-perm-error clearer. Callers that don't want to
-// blow away an existing cert must check themselves before calling.
+// **Overwrites atomically** — `writePEM` commits each PEM via a
+// temp-file + rename, so any pre-existing files at `certPath` /
+// `keyPath` are replaced atomically; a failed or interrupted write
+// leaves the prior files intact (the bridge stays bootable). The
+// first-run path in `LoadOrGenerate` gates on file-existence before
+// calling Generate; the CLI rotate path relies on this atomic
+// overwrite and does NOT pre-remove the files (see cmd/bridge/cert.go).
+// Callers that don't want to replace an existing cert must check
+// themselves before calling.
 //
 // **A rotated cert always has a new SHA-256 fingerprint** —
 // even if the public key is unchanged, the cert binary differs
