@@ -195,7 +195,7 @@ func RunAnalysis(ctx context.Context, spec AnalyzeSpec) (Result, error) {
 	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
 		return Result{}, fmt.Errorf("write waveform tmp: %w", err)
 	}
-	if err := atomicwrite.RenameWithRetry(tmpPath, finalPath); err != nil {
+	if err := atomicwrite.RenameWithRetryCtx(ctx, tmpPath, finalPath); err != nil {
 		return Result{}, fmt.Errorf("rename waveform: %w", err)
 	}
 	cleanup = false

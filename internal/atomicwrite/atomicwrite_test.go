@@ -2,10 +2,13 @@ package atomicwrite
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestWriteBytes_happyPath pins the basic contract: writes the
@@ -145,5 +148,51 @@ func TestSetRenameFuncForTest_restoresPrevious(t *testing.T) {
 	err := renameFunc("/nonexistent-src", "/nonexistent-dst")
 	if err == nil {
 		t.Error("restored renameFunc returned nil; expected os.Rename's not-exist error")
+	}
+}
+
+func TestRenameWithRetryCtx_CancelledReturnsPromptly(t *testing.T) {
+	// A cancellation-aware backoff must return ctx.Err() at the next
+	// inter-attempt sleep instead of sleeping out the full ~750ms
+	// schedule — so a shutting-down transcode/analyze worker frees its
+	// slot promptly rather than block the pool's shutdown grace.
+	prev := SetRenameFuncForTest(func(src, dst string) error {
+		return errors.New("always fails")
+	})
+	t.Cleanup(func() { SetRenameFuncForTest(prev) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already cancelled before the call
+
+	start := time.Now()
+	err := RenameWithRetryCtx(ctx, "src", "dst")
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want context.Canceled", err)
+	}
+	if elapsed > 200*time.Millisecond {
+		t.Errorf("took %v after cancel, want prompt (< 200ms, not the ~750ms full backoff)", elapsed)
+	}
+}
+
+func TestRenameWithRetryCtx_RetriesThenSucceedsUnderLiveCtx(t *testing.T) {
+	// With a live (uncancelled) ctx the variant behaves exactly like
+	// RenameWithRetry: a transient failure is retried, then succeeds.
+	calls := 0
+	prev := SetRenameFuncForTest(func(src, dst string) error {
+		calls++
+		if calls == 1 {
+			return os.ErrPermission
+		}
+		return nil
+	})
+	t.Cleanup(func() { SetRenameFuncForTest(prev) })
+
+	if err := RenameWithRetryCtx(context.Background(), "src", "dst"); err != nil {
+		t.Fatalf("RenameWithRetryCtx under live ctx: %v", err)
+	}
+	if calls < 2 {
+		t.Errorf("rename attempts = %d, want >= 2 (retry didn't fire)", calls)
 	}
 }
