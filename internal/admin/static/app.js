@@ -244,6 +244,90 @@ function renderDistBar(barId, legendId, segs, total, kind) {
   });
 }
 
+// applyEnrichment renders the dashboard "Enrichment" panel from the SSE
+// `enrichment` event: the derived pending/matched/missing counts, a coarse
+// ETA, the last-enriched time, and the matched-vs-missing coverage bar. The
+// whole panel stays hidden until the first frame lands (cold cache / empty
+// library shows nothing rather than zeros). No-op on pages without the panel.
+function applyEnrichment(e) {
+  const panel = document.getElementById("enrichment-panel");
+  if (!panel || !e) return;
+  panel.hidden = false;
+
+  const pending = e.pending ?? 0;
+  setText("enrich-pending", pending);
+  setText("enrich-matched", e.matched ?? 0);
+  setText("enrich-missing", e.missing ?? 0);
+
+  const last = document.getElementById("enrich-last");
+  if (last) {
+    last.textContent = e.lastEnrichedAt
+      ? formatTimeAgo(new Date(e.lastEnrichedAt))
+      : "never";
+  }
+
+  const etaEl = document.getElementById("enrich-eta");
+  if (etaEl) etaEl.textContent = formatEnrichEta(pending, e.etaSecondsEstimate);
+
+  renderCoverageBar(e.matched ?? 0, e.missing ?? 0);
+}
+
+// formatEnrichEta turns the pending count + coarse server estimate into a
+// human string. Guards zero-pending / non-finite FIRST so a stray empty SSE
+// frame can never render "NaN seconds". Sub-2min → seconds; else minutes/hours,
+// always tagged "(estimate)" so a slowly-draining queue never reads as frozen.
+function formatEnrichEta(pending, etaSeconds) {
+  if (!pending || pending <= 0) return "all caught up";
+  const secs = Number(etaSeconds);
+  if (!Number.isFinite(secs) || secs <= 0) return "processing…";
+  if (secs < 120) return `processing… (~${Math.round(secs)}s remaining)`;
+  const mins = secs / 60;
+  if (mins < 90) return `~${Math.round(mins)} min remaining (estimate)`;
+  return `~${(mins / 60).toFixed(1)} hours remaining (estimate)`;
+}
+
+// renderCoverageBar paints the two-segment matched-vs-missing bar (reusing the
+// composition .dist-bar styles; colour comes from data-cov in CSS: matched =
+// --ok, missing = --warn). Hidden until at least one track is enriched.
+// Built via createElement/textContent (never innerHTML) — same XSS posture as
+// renderDistBar, though these labels are static.
+function renderCoverageBar(matched, missing) {
+  const bar = document.getElementById("enrich-coverage-bar");
+  const legend = document.getElementById("enrich-coverage-legend");
+  const section = document.getElementById("enrich-coverage-section");
+  if (!bar || !legend || !section) return;
+  const total = matched + missing;
+  section.hidden = total === 0;
+  bar.textContent = "";
+  legend.textContent = "";
+  if (total === 0) return;
+  const segs = [
+    { label: "Matched", count: matched, cov: "matched" },
+    { label: "Missing", count: missing, cov: "missing" },
+  ];
+  segs.forEach((seg) => {
+    const pct = (seg.count / total) * 100;
+    const span = document.createElement("span");
+    span.className = "dist-seg";
+    span.dataset.cov = seg.cov;
+    span.style.width = pct.toFixed(2) + "%";
+    span.title = `${seg.label}: ${seg.count} (${pct.toFixed(1)}%)`;
+    bar.appendChild(span);
+
+    const item = document.createElement("span");
+    item.className = "dist-legend-item";
+    item.dataset.cov = seg.cov;
+    const swatch = document.createElement("i");
+    swatch.className = "dist-swatch";
+    item.appendChild(swatch);
+    item.appendChild(document.createTextNode(`${seg.label} `));
+    const b = document.createElement("b");
+    b.textContent = String(seg.count);
+    item.appendChild(b);
+    legend.appendChild(item);
+  });
+}
+
 // refreshBackups fetches /api/backups and renders the latest count +
 // most-recent timestamp into the dashboard's Backups panel. Errors
 // degrade gracefully — the panel just shows the placeholder dashes.
@@ -2250,6 +2334,7 @@ function startEventStream() {
   const seen = (fn) => (e) => { lastEventSourceSeenAt = Date.now(); fn(e); };
   es.addEventListener("stats",       seen((e) => safeApply("stats",       e.data, applyStats)));
   es.addEventListener("composition", seen((e) => safeApply("composition", e.data, applyComposition)));
+  es.addEventListener("enrichment",  seen((e) => safeApply("enrichment",  e.data, applyEnrichment)));
   es.addEventListener("endpoints",   seen((e) => safeApply("endpoints",   e.data, applyEndpoints)));
   es.addEventListener("pairing",     seen((e) => safeApply("pairing",     e.data, applyPairing)));
   es.addEventListener("updates",     seen((e) => safeApply("updates",     e.data, renderUpdateTile)));

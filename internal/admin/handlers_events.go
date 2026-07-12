@@ -100,6 +100,7 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 		lastUpdates     []byte
 		lastTailscale   []byte
 		lastComposition []byte
+		lastEnrichment  []byte
 		lastUpscale     []byte
 		lastAnalysis    []byte
 	)
@@ -187,6 +188,13 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 		return marshalAndPublish("composition", s.getCompositionSnapshot(), &lastComposition)
 	}
 
+	// enrichment (dashboard enrichment-progress card) rides the slow tick and is
+	// TTL-cached + single-flighted in getEnrichmentSnapshot, so it stays cheap
+	// even though the underlying matched/missing split is a full-table scan.
+	publishEnrichment := func() error {
+		return marshalAndPublish("enrichment", s.getEnrichmentSnapshot(), &lastEnrichment)
+	}
+
 	// upscale + analysis telemetry — these replace the Settings page's
 	// former /api/upscale/stats and /api/analysis/stats 5 s pollers (one
 	// HTTP request per open tab). Same snapshot the REST endpoints serve
@@ -208,7 +216,7 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 	// paint at all. Bail on any write error: client already gone.
 	for _, f := range []func() error{
 		publishStats, publishPairing, publishEndpoints, publishUpdates, publishTailscale,
-		publishComposition, publishUpscale, publishAnalysis,
+		publishComposition, publishEnrichment, publishUpscale, publishAnalysis,
 	} {
 		if err := f(); err != nil {
 			return
@@ -294,6 +302,12 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 			// Composition rides the slow tick — format only changes
 			// after a scan; the snapshot is TTL-cached + diff-suppressed.
 			if err := publishComposition(); err != nil {
+				return
+			}
+			// Enrichment progress also rides the slow tick — it fills over
+			// minutes-to-hours, and the snapshot is TTL-cached + diff-
+			// suppressed (idle bridges emit nothing between heartbeats).
+			if err := publishEnrichment(); err != nil {
 				return
 			}
 		case <-heartbeatTk.C:

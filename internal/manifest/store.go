@@ -1243,15 +1243,43 @@ func (s *Store) migrate() error {
 
 // UnenrichedTracks returns up to limit tracks that haven't been through the
 // MusicBrainz/CoverArt pass. Used by internal/enrich.
+//
+// Ordering is newest-`indexed_at`-first (LIFO), so an album dropped into a
+// steady-state library enriches ahead of the older backlog instead of waiting
+// behind it alphabetically — the single-goroutine worker's real ceiling is the
+// upstream rate limits, not CPU, so which rows drain first is the only lever on
+// perceived responsiveness. `path ASC` is the deterministic tie-break: an
+// UpsertTrackBatch flush stamps one `indexed_at` for the whole batch, so ties
+// are common and would otherwise permute nondeterministically. On a *fresh*
+// full scan every row shares ~one `indexed_at`, so the order is a near-no-op
+// there (you're waiting for everything anyway) — the win is precisely the
+// add-one-album-to-a-big-library case.
+//
+// The sort+LIMIT is isolated into a subquery that selects only `path`, so
+// SQLite's sorter materializes the lightweight (path, indexed_at) keys of the
+// unenriched pool — NOT the heavy `tags_json` BLOB living in each row's B-tree
+// leaf — and the outer query then reads `tags_json` for just the ~limit winning
+// paths via primary-key lookups. On a heavy fresh backlog (every row
+// `enriched_at = 0`) that's a 50k-lightweight-key sort + ~100 blob reads instead
+// of pulling 50k blobs through the sorter, which matters on slow flash
+// (Pi/SD-card) during the 15s poll. The sort itself is unavoidable (finding the
+// newest-N needs it); a composite `(enriched_at, indexed_at)` index would make
+// it a bounded index-range scan, but it costs write-amplification on every track
+// write for a gain the path-only subquery already largely captures, so it's left
+// off. (Gemini review on PR #490.)
 func (s *Store) UnenrichedTracks(ctx context.Context, limit int) ([]Track, error) {
 	if limit <= 0 {
 		limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT tags_json FROM tracks
-		WHERE enriched_at = 0
-		ORDER BY path ASC
-		LIMIT ?
+		WHERE path IN (
+			SELECT path FROM tracks
+			WHERE enriched_at = 0
+			ORDER BY indexed_at DESC, path ASC
+			LIMIT ?
+		)
+		ORDER BY indexed_at DESC, path ASC
 	`, limit)
 	if err != nil {
 		return nil, err
@@ -2639,6 +2667,65 @@ func (s *Store) EnrichmentCounts(ctx context.Context) (enriched int, lastEnriche
 		lastEnrichedAt = &t
 	}
 	return enriched, lastEnrichedAt, nil
+}
+
+// EnrichmentBreakdown returns the derived per-state track counts the admin
+// dashboard renders so the operator can watch the enrichment trickle drain and
+// spot coverage gaps:
+//
+//   - pending: never been through the enricher (`enriched_at = 0`).
+//   - matched: enriched AND an artwork MBID landed — a cover is cached.
+//   - missing: enriched but no cover found anywhere (MB/CAA/CAA-rg/iTunes all
+//     missed, or no MB match at all). This is the coverage-gap signal.
+//
+// No new column: the split is derived from the existing `enriched_at` column +
+// the `$.artworkMBID` tag, so it stays exactly consistent with what `enrichOne`
+// writes — a track is MarkEnriched even when artwork misses, and `t.ArtworkMBID`
+// is set only when bytes reach disk, so an enriched row with a NULL
+// `$.artworkMBID` is precisely a gap. A `local-<sha256>` sentinel is a non-NULL
+// value, so a locally-curated cover counts as matched (correct). Because
+// `Track.ArtworkMBID` is `omitempty`, an empty value is absent from `tags_json`,
+// so IS NULL / IS NOT NULL is the exact test (and matches the functional index
+// expression `json_extract(tags_json,'$.artworkMBID')`).
+//
+// Four index-friendly subqueries in one statement (one consistent read, no
+// divergence window between separate COUNTs): `pending` and `total` are COUNTs
+// against `idx_tracks_enriched` / the table; `matched` counts non-NULL
+// `$.artworkMBID`, which the functional index `idx_tracks_artwork_mbid` answers
+// WITHOUT parsing every `tags_json` BLOB; and `missing` is DERIVED as
+// `total - pending - matched` (every track is pending XOR enriched, and enriched
+// splits matched/missing), so it costs no second json_extract pass. This is the
+// EnrichmentCounts subquery shape (same `> 0` sargeability note applies); the
+// admin caller still TTL-caches + single-flights it. Read-only, no `s.mu` (WAL
+// concurrent-reader), so a slow read can't stall a writer. (Gemini review on
+// PR #490.)
+//
+// `lastEnrichedAt` mirrors EnrichmentCounts exactly: MAX(enriched_at) is a valid
+// `0` (NOT SQL NULL) on a fresh all-unenriched library, so the `!= 0` guard maps
+// it to nil ("never"); the stored unit is UnixNano, hence time.Unix(0, ns).
+func (s *Store) EnrichmentBreakdown(ctx context.Context) (pending, matched, missing int, lastEnrichedAt *time.Time, err error) {
+	var lastNs sql.NullInt64
+	var total int
+	err = s.db.QueryRowContext(ctx, `
+		SELECT
+			(SELECT COUNT(*) FROM tracks WHERE enriched_at = 0),
+			(SELECT COUNT(*) FROM tracks WHERE enriched_at > 0
+				AND json_extract(tags_json, '$.artworkMBID') IS NOT NULL),
+			(SELECT COUNT(*) FROM tracks),
+			(SELECT MAX(enriched_at) FROM tracks)
+	`).Scan(&pending, &matched, &total, &lastNs)
+	if err != nil {
+		return 0, 0, 0, nil, err
+	}
+	// Derive missing rather than counting it: every track is pending XOR
+	// enriched, and enriched splits into matched/missing — so this avoids a
+	// second json_extract pass. total >= pending+matched always holds.
+	missing = total - pending - matched
+	if lastNs.Valid && lastNs.Int64 != 0 {
+		t := time.Unix(0, lastNs.Int64).UTC()
+		lastEnrichedAt = &t
+	}
+	return pending, matched, missing, lastEnrichedAt, nil
 }
 
 // CountTracksUnderRoot returns the number of track rows belonging to

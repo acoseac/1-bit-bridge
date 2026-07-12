@@ -2130,6 +2130,17 @@ section.library-inspector {
 .dist-legend-item.is-unknown {
   opacity: 0.75;
 }
+/* Enrichment coverage bar — a fixed two-colour semantic (not a hue ramp):
+   matched = success green, missing = attention amber (a gap the operator may
+   want to fill). Reuses the .dist-bar / .dist-seg / .dist-swatch structure. */
+.dist-seg[data-cov="matched"],
+.dist-legend-item[data-cov="matched"] .dist-swatch {
+  background: var(--ok);
+}
+.dist-seg[data-cov="missing"],
+.dist-legend-item[data-cov="missing"] .dist-swatch {
+  background: var(--warn);
+}
 
 /* Live SoX worker grid (Jobs page "Workers" panel). One card per worker
    slot; busy workers carry a signal chain + a locally-ticked elapsed. */
