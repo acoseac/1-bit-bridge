@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -606,6 +607,109 @@ func (s *Server) getCompositionSnapshot() compositionResponse {
 		return snap
 	}
 	return compositionResponse{}
+}
+
+// --- enrichment progress (dashboard legibility) ---
+
+// enrichmentResponse is the dashboard "Enrichment" card payload: the derived
+// pending / matched / missing split + last-enriched time + a coarse ETA. All of
+// it is derived from existing columns (no enrich_status column, no migration) —
+// see manifest.Store.EnrichmentBreakdown. Emitted on the SSE `enrichment` event
+// + served by GET /api/enrichment. Admin-local wire DTO.
+type enrichmentResponse struct {
+	Pending            int        `json:"pending"`
+	Matched            int        `json:"matched"`
+	Missing            int        `json:"missing"`
+	LastEnrichedAt     *time.Time `json:"lastEnrichedAt,omitempty"`
+	EtaSecondsEstimate int64      `json:"etaSecondsEstimate"`
+}
+
+// Enrichment ETA is a deliberately rough reassurance number, not a promise. The
+// single-goroutine enricher pays the MusicBrainz pace (MBMinInterval, ~1.1s)
+// once per ALBUM, then sibling tracks on that album hit the in-memory albumCache
+// for free — so `pending * 1.1s` overshoots by ~the average tracks-per-album.
+// Dividing by avgTracksPerAlbum lands the estimate in the right order of
+// magnitude (a 50k fresh scan → ~1.5h, not the ~15h a per-track multiply shows).
+// It still ignores CAA/iTunes/Deezer pacing, so treat it as a ballpark.
+const (
+	avgTracksPerAlbum = 10.0
+	enrichPaceSeconds = 1.1
+)
+
+// enrichmentCacheTTL bounds how long an EnrichmentBreakdown snapshot is reused.
+// Short enough to visibly watch the queue drain on the 30s SSE tick, long enough
+// to keep the full-table json_extract scan off the hot path (and to collapse N
+// open tabs to one scan via the singleflight).
+const enrichmentCacheTTL = 15 * time.Second
+
+// enrichmentDBTimeout is a generous hang-breaker on the full-table scan, NOT a
+// perf gate — same rationale as compositionDBTimeout. The matched/missing split
+// is a full-table json_extract that legitimately takes seconds on a large
+// library, so a tight timeout would false-trip and the card would never
+// populate. The read holds no s.mu (WAL concurrent-reader), so it can't stall a
+// writer regardless; this only breaks a pathological I/O hang that would
+// otherwise wedge the singleflight leader and everyone queued behind it.
+const enrichmentDBTimeout = 60 * time.Second
+
+// getEnrichmentSnapshot returns the cached enrichment breakdown, recomputing via
+// a full-table scan only when the cache is older than enrichmentCacheTTL. The
+// recompute is single-flighted so concurrent SSE ticks / initial-emits collapse
+// to ONE scan. Best-effort: a SQL error serves the last good snapshot rather
+// than failing the card. Mirrors getCompositionSnapshot.
+func (s *Server) getEnrichmentSnapshot() enrichmentResponse {
+	if s.deps.Manifest == nil {
+		return enrichmentResponse{}
+	}
+	s.enrichmentMu.Lock()
+	if !s.enrichmentAt.IsZero() && time.Since(s.enrichmentAt) < enrichmentCacheTTL {
+		snap := s.enrichment
+		s.enrichmentMu.Unlock()
+		return snap
+	}
+	s.enrichmentMu.Unlock()
+	v, _, _ := s.enrichmentSF.Do("enrichment", func() (any, error) {
+		// Re-check under the flight: a prior flight may have refreshed the
+		// cache while this caller was queued behind Do.
+		s.enrichmentMu.Lock()
+		if !s.enrichmentAt.IsZero() && time.Since(s.enrichmentAt) < enrichmentCacheTTL {
+			snap := s.enrichment
+			s.enrichmentMu.Unlock()
+			return snap, nil
+		}
+		s.enrichmentMu.Unlock()
+		ctx, cancel := context.WithTimeout(context.Background(), enrichmentDBTimeout)
+		defer cancel()
+		pending, matched, missing, last, err := s.deps.Manifest.EnrichmentBreakdown(ctx)
+		if err != nil {
+			logger.Warn("enrichment: breakdown", "err", err)
+			s.enrichmentMu.Lock()
+			snap := s.enrichment // last good (possibly zero)
+			s.enrichmentMu.Unlock()
+			return snap, nil
+		}
+		snap := enrichmentResponse{
+			Pending:            pending,
+			Matched:            matched,
+			Missing:            missing,
+			LastEnrichedAt:     last,
+			EtaSecondsEstimate: int64(math.Round((float64(pending) / avgTracksPerAlbum) * enrichPaceSeconds)),
+		}
+		s.enrichmentMu.Lock()
+		s.enrichment = snap
+		s.enrichmentAt = time.Now()
+		s.enrichmentMu.Unlock()
+		return snap, nil
+	})
+	if snap, ok := v.(enrichmentResponse); ok {
+		return snap
+	}
+	return enrichmentResponse{}
+}
+
+// apiEnrichment serves GET /api/enrichment — the REST twin of the `enrichment`
+// SSE event (same getEnrichmentSnapshot source), for scripting / first paint.
+func (s *Server) apiEnrichment(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.getEnrichmentSnapshot())
 }
 
 // --- GET /api/endpoints ---

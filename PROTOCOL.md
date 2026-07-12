@@ -263,6 +263,20 @@ Field-for-field, this is a serialization of the iOS `Track` / folder rows in [`L
 
 Pre-v1.1 servers omit the field. Clients MUST treat absence as "fully enriched" — the conservative back-compat assumption (matches the pre-flag behaviour where the iOS scanner unconditionally treated bridge tracks as parsed). Newer clients use `enriched: false` to suppress the permanent Deezer-miss stamp on artists whose MBID hasn't landed yet, so the eventual sync's bridge-cached image still wins over a premature negative cache.
 
+#### Deriving per-track enrichment state (no new field, since v1.1)
+
+A client renders a per-track "pending / matched / no-cover" badge purely from the two fields the manifest already carries — there is **no dedicated state field on the wire**, and none is planned:
+
+| `enriched` | `artworkMBID` | State | Meaning |
+|---|---|---|---|
+| `false` (or absent¹) | — | **pending** | still queued for the enricher; a cover may still appear |
+| `true` | present | **matched** | a cover is cached and served by `/v1/artwork/{mbid}` |
+| `true` | absent | **missing** | enriched, but no cover was found anywhere (MB / CAA / CAA-release-group / iTunes all missed, or there was no MB match) — a persistent coverage gap |
+
+¹ Absent `enriched` (a pre-v1.1 server) is treated as "fully enriched" per the back-compat rule above, so those tracks resolve to **matched** / **missing** by `artworkMBID` presence — never **pending**. A `local-<sha256>` `artworkMBID` (a curated `cover.jpg` / embedded APIC) is a present value, so it reads as **matched**.
+
+**A transient failure is deliberately indistinguishable from pending.** On an upstream outage the bridge leaves `enriched` at `false` (the `IsTransient` guard) precisely so the row is retried — so a client cannot, and should not try to, tell "still queued" apart from "failed transiently, will retry" from the manifest alone. Both present as **pending** and both self-heal. Operators who want the pending / matched / missing *counts* for the whole library read them from the loopback admin console (`GET /api/enrichment`), which derives the same split server-side.
+
 #### Manifest-level `enrichmentProgress` (additive, since v1.1)
 
 `enrichmentProgress` is a snapshot of library-wide enrichment status at manifest-build time:

@@ -712,6 +712,17 @@ type Server struct {
 	compositionAt time.Time
 	compositionSF singleflight.Group
 
+	// enrichment cache (dashboard enrichment-progress breakdown). Same shape
+	// and rationale as the composition cache above: EnrichmentBreakdown is a
+	// full-table json_extract scan (the matched/missing split), too expensive
+	// for the SSE hot path — cache the snapshot for enrichmentCacheTTL and
+	// single-flight the recompute so the 30s SSE tick / initial-emit across N
+	// open tabs collapses to one scan after expiry.
+	enrichmentMu sync.Mutex
+	enrichment   enrichmentResponse
+	enrichmentAt time.Time
+	enrichmentSF singleflight.Group
+
 	// stats DB-read last-good cache. getStatsSnapshot bounds its four
 	// best-effort DB reads with snapshotDBTimeout; on error/timeout it
 	// serves this last-good statsDBPart so the dashboard tiles don't flash
@@ -798,6 +809,7 @@ func (s *Server) Handler() http.Handler {
 
 	// JSON API.
 	mux.HandleFunc("GET /api/stats", s.apiStats)
+	mux.HandleFunc("GET /api/enrichment", s.apiEnrichment)
 	mux.HandleFunc("GET /api/endpoints", s.apiEndpoints)
 	mux.HandleFunc("GET /api/events", s.apiEvents)
 	mux.HandleFunc("GET /api/updates", s.apiUpdatesGet)

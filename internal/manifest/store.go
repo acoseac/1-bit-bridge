@@ -1243,6 +1243,27 @@ func (s *Store) migrate() error {
 
 // UnenrichedTracks returns up to limit tracks that haven't been through the
 // MusicBrainz/CoverArt pass. Used by internal/enrich.
+//
+// Ordering is newest-`indexed_at`-first (LIFO), so an album dropped into a
+// steady-state library enriches ahead of the older backlog instead of waiting
+// behind it alphabetically — the single-goroutine worker's real ceiling is the
+// upstream rate limits, not CPU, so which rows drain first is the only lever on
+// perceived responsiveness. `path ASC` is the deterministic tie-break: an
+// UpsertTrackBatch flush stamps one `indexed_at` for the whole batch, so ties
+// are common and would otherwise permute nondeterministically. On a *fresh*
+// full scan every row shares ~one `indexed_at`, so the order is a near-no-op
+// there (you're waiting for everything anyway) — the win is precisely the
+// add-one-album-to-a-big-library case.
+//
+// No composite `(enriched_at, indexed_at)` index: on a heavy fresh backlog
+// (every row `enriched_at = 0`) the planner filesorts the matching pool by
+// `indexed_at`, and because each row carries the heavy `tags_json` BLOB in the
+// same B-tree leaf that sort can spill transient I/O on slow flash (Pi/SD-card)
+// during the 15s poll. It drains as enrichment progresses; a composite index is
+// the escape hatch if profiling ever shows the sort matters, but it costs
+// write-amplification on every track write for a micro-gain, so it's left off.
+// A subquery/CTE "cap" would NOT help — finding the newest-N still requires
+// sorting the whole unenriched pool.
 func (s *Store) UnenrichedTracks(ctx context.Context, limit int) ([]Track, error) {
 	if limit <= 0 {
 		limit = 100
@@ -1250,7 +1271,7 @@ func (s *Store) UnenrichedTracks(ctx context.Context, limit int) ([]Track, error
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT tags_json FROM tracks
 		WHERE enriched_at = 0
-		ORDER BY path ASC
+		ORDER BY indexed_at DESC, path ASC
 		LIMIT ?
 	`, limit)
 	if err != nil {
@@ -2639,6 +2660,57 @@ func (s *Store) EnrichmentCounts(ctx context.Context) (enriched int, lastEnriche
 		lastEnrichedAt = &t
 	}
 	return enriched, lastEnrichedAt, nil
+}
+
+// EnrichmentBreakdown returns the derived per-state track counts the admin
+// dashboard renders so the operator can watch the enrichment trickle drain and
+// spot coverage gaps:
+//
+//   - pending: never been through the enricher (`enriched_at = 0`).
+//   - matched: enriched AND an artwork MBID landed — a cover is cached.
+//   - missing: enriched but no cover found anywhere (MB/CAA/CAA-rg/iTunes all
+//     missed, or no MB match at all). This is the coverage-gap signal.
+//
+// No new column: the split is derived from the existing `enriched_at` column +
+// the `$.artworkMBID` tag, so it stays exactly consistent with what `enrichOne`
+// writes — a track is MarkEnriched even when artwork misses, and `t.ArtworkMBID`
+// is set only when bytes reach disk, so an enriched row with a NULL
+// `$.artworkMBID` is precisely a gap. A `local-<sha256>` sentinel is a non-NULL
+// value, so a locally-curated cover counts as matched (correct). Because
+// `Track.ArtworkMBID` is `omitempty`, an empty value is absent from `tags_json`,
+// so IS NULL / IS NOT NULL is the exact test (and matches the functional index
+// expression `json_extract(tags_json,'$.artworkMBID')`).
+//
+// One full-table scan so the three counts are a single internally-consistent
+// snapshot (no divergence window between separate COUNTs). `enriched_at` isn't
+// in `idx_tracks_artwork_mbid`, so this is a table scan regardless of predicate
+// form — the admin caller bounds it with a TTL cache + singleflight. Read-only,
+// no `s.mu` (WAL concurrent-reader), same posture as EnrichmentCounts, so a slow
+// scan can't stall a concurrent writer.
+//
+// `lastEnrichedAt` mirrors EnrichmentCounts exactly: MAX(enriched_at) is a valid
+// `0` (NOT SQL NULL) on a fresh all-unenriched library, so the `!= 0` guard maps
+// it to nil ("never"); the stored unit is UnixNano, hence time.Unix(0, ns).
+func (s *Store) EnrichmentBreakdown(ctx context.Context) (pending, matched, missing int, lastEnrichedAt *time.Time, err error) {
+	var lastNs sql.NullInt64
+	err = s.db.QueryRowContext(ctx, `
+		SELECT
+			COALESCE(SUM(CASE WHEN enriched_at = 0 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN enriched_at > 0
+				AND json_extract(tags_json, '$.artworkMBID') IS NOT NULL THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN enriched_at > 0
+				AND json_extract(tags_json, '$.artworkMBID') IS NULL THEN 1 ELSE 0 END), 0),
+			MAX(enriched_at)
+		FROM tracks
+	`).Scan(&pending, &matched, &missing, &lastNs)
+	if err != nil {
+		return 0, 0, 0, nil, err
+	}
+	if lastNs.Valid && lastNs.Int64 != 0 {
+		t := time.Unix(0, lastNs.Int64).UTC()
+		lastEnrichedAt = &t
+	}
+	return pending, matched, missing, lastEnrichedAt, nil
 }
 
 // CountTracksUnderRoot returns the number of track rows belonging to

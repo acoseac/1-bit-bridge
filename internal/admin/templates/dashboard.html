@@ -63,6 +63,36 @@
     </div>
   </div>
 
+  {{/* Enrichment progress — metadata + artwork trickle legibility. The
+       pending / matched / missing split is DERIVED (no new column) and painted
+       by app.js applyEnrichment from the SSE `enrichment` event (initial-emit
+       on connect + 30s slow tick). No server-rendered first paint (the split
+       needs a full-table scan); the panel stays hidden until the first frame
+       lands so a cold cache / empty library shows nothing rather than zeros. */}}
+  <div class="panel" id="enrichment-panel" hidden>
+    <h2>Enrichment</h2>
+    <p class="hint">Metadata &amp; artwork fill in after a scan, paced to respect MusicBrainz / Cover Art Archive. <em>Matched</em> tracks have a cover cached; <em>missing</em> are enriched but no cover was found anywhere — a coverage gap.</p>
+    <dl class="composition">
+      <dt>Pending</dt>
+      <dd><span id="enrich-pending">0</span> tracks in the queue · <span id="enrich-eta" class="hint"></span></dd>
+      <dt>Matched</dt>
+      <dd><span id="enrich-matched">0</span> tracks have a cover</dd>
+      <dt>Missing</dt>
+      <dd><span id="enrich-missing">0</span> tracks enriched without a cover</dd>
+      <dt>Last enriched</dt>
+      <dd id="enrich-last">never</dd>
+    </dl>
+
+    {{/* Coverage bar — matched (has cover) vs missing (gap), reusing the
+         composition dist-bar styles. Hidden until at least one track is
+         enriched (matched + missing > 0). */}}
+    <div class="dist-section" id="enrich-coverage-section" hidden>
+      <div class="dist-title">Artwork coverage</div>
+      <div class="dist-bar" id="enrich-coverage-bar" role="img" aria-label="Artwork coverage: matched vs missing"></div>
+      <div class="dist-legend" id="enrich-coverage-legend"></div>
+    </div>
+  </div>
+
   <div class="panel">
     <div class="panel-head">
       <h2>Scanner</h2>
