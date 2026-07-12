@@ -1255,24 +1255,31 @@ func (s *Store) migrate() error {
 // there (you're waiting for everything anyway) — the win is precisely the
 // add-one-album-to-a-big-library case.
 //
-// No composite `(enriched_at, indexed_at)` index: on a heavy fresh backlog
-// (every row `enriched_at = 0`) the planner filesorts the matching pool by
-// `indexed_at`, and because each row carries the heavy `tags_json` BLOB in the
-// same B-tree leaf that sort can spill transient I/O on slow flash (Pi/SD-card)
-// during the 15s poll. It drains as enrichment progresses; a composite index is
-// the escape hatch if profiling ever shows the sort matters, but it costs
-// write-amplification on every track write for a micro-gain, so it's left off.
-// A subquery/CTE "cap" would NOT help — finding the newest-N still requires
-// sorting the whole unenriched pool.
+// The sort+LIMIT is isolated into a subquery that selects only `path`, so
+// SQLite's sorter materializes the lightweight (path, indexed_at) keys of the
+// unenriched pool — NOT the heavy `tags_json` BLOB living in each row's B-tree
+// leaf — and the outer query then reads `tags_json` for just the ~limit winning
+// paths via primary-key lookups. On a heavy fresh backlog (every row
+// `enriched_at = 0`) that's a 50k-lightweight-key sort + ~100 blob reads instead
+// of pulling 50k blobs through the sorter, which matters on slow flash
+// (Pi/SD-card) during the 15s poll. The sort itself is unavoidable (finding the
+// newest-N needs it); a composite `(enriched_at, indexed_at)` index would make
+// it a bounded index-range scan, but it costs write-amplification on every track
+// write for a gain the path-only subquery already largely captures, so it's left
+// off. (Gemini review on PR #490.)
 func (s *Store) UnenrichedTracks(ctx context.Context, limit int) ([]Track, error) {
 	if limit <= 0 {
 		limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT tags_json FROM tracks
-		WHERE enriched_at = 0
+		WHERE path IN (
+			SELECT path FROM tracks
+			WHERE enriched_at = 0
+			ORDER BY indexed_at DESC, path ASC
+			LIMIT ?
+		)
 		ORDER BY indexed_at DESC, path ASC
-		LIMIT ?
 	`, limit)
 	if err != nil {
 		return nil, err
@@ -2681,31 +2688,39 @@ func (s *Store) EnrichmentCounts(ctx context.Context) (enriched int, lastEnriche
 // so IS NULL / IS NOT NULL is the exact test (and matches the functional index
 // expression `json_extract(tags_json,'$.artworkMBID')`).
 //
-// One full-table scan so the three counts are a single internally-consistent
-// snapshot (no divergence window between separate COUNTs). `enriched_at` isn't
-// in `idx_tracks_artwork_mbid`, so this is a table scan regardless of predicate
-// form — the admin caller bounds it with a TTL cache + singleflight. Read-only,
-// no `s.mu` (WAL concurrent-reader), same posture as EnrichmentCounts, so a slow
-// scan can't stall a concurrent writer.
+// Four index-friendly subqueries in one statement (one consistent read, no
+// divergence window between separate COUNTs): `pending` and `total` are COUNTs
+// against `idx_tracks_enriched` / the table; `matched` counts non-NULL
+// `$.artworkMBID`, which the functional index `idx_tracks_artwork_mbid` answers
+// WITHOUT parsing every `tags_json` BLOB; and `missing` is DERIVED as
+// `total - pending - matched` (every track is pending XOR enriched, and enriched
+// splits matched/missing), so it costs no second json_extract pass. This is the
+// EnrichmentCounts subquery shape (same `> 0` sargeability note applies); the
+// admin caller still TTL-caches + single-flights it. Read-only, no `s.mu` (WAL
+// concurrent-reader), so a slow read can't stall a writer. (Gemini review on
+// PR #490.)
 //
 // `lastEnrichedAt` mirrors EnrichmentCounts exactly: MAX(enriched_at) is a valid
 // `0` (NOT SQL NULL) on a fresh all-unenriched library, so the `!= 0` guard maps
 // it to nil ("never"); the stored unit is UnixNano, hence time.Unix(0, ns).
 func (s *Store) EnrichmentBreakdown(ctx context.Context) (pending, matched, missing int, lastEnrichedAt *time.Time, err error) {
 	var lastNs sql.NullInt64
+	var total int
 	err = s.db.QueryRowContext(ctx, `
 		SELECT
-			COALESCE(SUM(CASE WHEN enriched_at = 0 THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN enriched_at > 0
-				AND json_extract(tags_json, '$.artworkMBID') IS NOT NULL THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN enriched_at > 0
-				AND json_extract(tags_json, '$.artworkMBID') IS NULL THEN 1 ELSE 0 END), 0),
-			MAX(enriched_at)
-		FROM tracks
-	`).Scan(&pending, &matched, &missing, &lastNs)
+			(SELECT COUNT(*) FROM tracks WHERE enriched_at = 0),
+			(SELECT COUNT(*) FROM tracks WHERE enriched_at > 0
+				AND json_extract(tags_json, '$.artworkMBID') IS NOT NULL),
+			(SELECT COUNT(*) FROM tracks),
+			(SELECT MAX(enriched_at) FROM tracks)
+	`).Scan(&pending, &matched, &total, &lastNs)
 	if err != nil {
 		return 0, 0, 0, nil, err
 	}
+	// Derive missing rather than counting it: every track is pending XOR
+	// enriched, and enriched splits into matched/missing — so this avoids a
+	// second json_extract pass. total >= pending+matched always holds.
+	missing = total - pending - matched
 	if lastNs.Valid && lastNs.Int64 != 0 {
 		t := time.Unix(0, lastNs.Int64).UTC()
 		lastEnrichedAt = &t

@@ -17,31 +17,32 @@ func TestUnenrichedTracksOrdersByIndexedAtDesc(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 
-	// Insert in an order that is neither the final order nor the alphabetical
-	// order. Clock is injected per-insert so indexed_at is deterministic.
-	// Note the paths: the NEWEST track sorts FIRST alphabetically and the
-	// OLDEST sorts LAST — so `ORDER BY path ASC` (old behaviour) and
-	// `ORDER BY indexed_at DESC` (new) produce opposite results.
+	// Clock is injected per-insert so indexed_at is deterministic. The paths are
+	// chosen so alphabetical order and indexed_at-DESC order DISAGREE at the
+	// extremes: the OLDEST track sorts FIRST by path and the NEWEST sorts LAST.
+	// So `ORDER BY path ASC` (the pre-LIFO behaviour) would produce the OPPOSITE
+	// sequence at head/tail — a regression to it fails this test (rather than
+	// passing vacuously, which it would if newest also sorted first by path).
 	insert := func(ns int64, path string) {
 		s.now = func() time.Time { return time.Unix(0, ns) }
 		if err := s.UpsertTrack(ctx, &Track{Path: path, Size: 1, ModTime: time.Unix(1, 0)}); err != nil {
 			t.Fatalf("UpsertTrack(%q): %v", path, err)
 		}
 	}
-	insert(1000, "Music/Z/old.flac")    // oldest, sorts last by path
+	insert(1000, "Music/A/old.flac")    // oldest, sorts FIRST by path — disagrees with indexed_at DESC
 	insert(3000, "Music/M/b.flac")      // middle clock, tie with a.flac
 	insert(3000, "Music/M/a.flac")      // same clock as b.flac — tie-break case
-	insert(5000, "Music/A/newest.flac") // newest, sorts first by path
+	insert(5000, "Music/Z/newest.flac") // newest, sorts LAST by path — disagrees with indexed_at DESC
 
 	got, err := s.UnenrichedTracks(ctx, 100)
 	if err != nil {
 		t.Fatalf("UnenrichedTracks: %v", err)
 	}
 	want := []string{
-		"Music/A/newest.flac", // indexed_at 5000 (newest) — beats its alphabetical-first path
+		"Music/Z/newest.flac", // indexed_at 5000 (newest) — LAST alphabetically, FIRST by LIFO
 		"Music/M/a.flac",      // indexed_at 3000, path a < b (tie-break)
 		"Music/M/b.flac",      // indexed_at 3000
-		"Music/Z/old.flac",    // indexed_at 1000 (oldest) — last despite alphabetical-last path
+		"Music/A/old.flac",    // indexed_at 1000 (oldest) — FIRST alphabetically, LAST by LIFO
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %d rows, want %d", len(got), len(want))
