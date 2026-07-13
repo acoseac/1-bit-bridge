@@ -109,6 +109,17 @@ func (c *ContentDirectoryClient) BrowseAll(
 		// that ignores StartingIndex and re-serves the same non-empty page
 		// forever still trips MaxBrowseAllItems (accumulated count grows).
 		pageLen := len(page.Containers) + len(page.Items)
+		// An actually-empty page is the terminal signal regardless of the
+		// server's reported NumberReturned. Break here so a non-conforming
+		// server that reports NumberReturned>0 for an EMPTY page can't
+		// busy-spin: its accumulated item count never grows, so the
+		// MaxBrowseAllItems ceiling below never trips, and NextStartingIndex
+		// would keep returning more=true while TotalMatches is unknown —
+		// an unbounded request storm (Gemini #492). This also subsumes the
+		// genuine-EOF case (last page empty).
+		if pageLen == 0 {
+			break
+		}
 		effectiveReturned := page.NumberReturned
 		if effectiveReturned <= 0 {
 			effectiveReturned = pageLen

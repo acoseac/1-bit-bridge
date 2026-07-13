@@ -219,6 +219,28 @@ func TestBrowseAll_ContinuesWhenServerUnderReportsNumberReturned(t *testing.T) {
 	}
 }
 
+func TestBrowseAll_EmptyPageWithPositiveNumberReturnedTerminates(t *testing.T) {
+	// A non-conforming server that reports NumberReturned>0 but returns an
+	// EMPTY page must NOT busy-spin: pageLen==0 is the terminal signal.
+	// Pre-fix this looped forever — the item count never grows so
+	// MaxBrowseAllItems never trips, and NextStartingIndex keeps returning
+	// more=true while TotalMatches is unknown (Gemini #492). The stub repeats
+	// its last response, so a regression that drops the break would hang here.
+	empty := wrapBrowse(`<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/"></DIDL-Lite>`, 200, 0)
+	stub := &stubDispatcher{queue: []stubResp{{status: 200, body: string(empty)}}}
+	c := NewContentDirectoryClient(stub)
+	containers, items, err := c.BrowseAll(context.Background(), testControlURL, "0")
+	if err != nil {
+		t.Fatalf("BrowseAll: %v", err)
+	}
+	if len(containers) != 0 || len(items) != 0 {
+		t.Fatalf("got %d containers / %d items; want 0 / 0", len(containers), len(items))
+	}
+	if len(stub.reqs) != 1 {
+		t.Fatalf("Browse calls = %d; want 1 (an empty page must terminate immediately)", len(stub.reqs))
+	}
+}
+
 func TestBrowse_SOAPFault500_SurfacesErrSOAPFault(t *testing.T) {
 	fault := `<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body>` +
 		`<s:Fault><faultcode>s:Client</faultcode><detail><UPnPError><errorCode>701</errorCode>` +
