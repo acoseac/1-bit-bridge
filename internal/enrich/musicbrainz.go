@@ -161,6 +161,10 @@ func (c *MusicBrainzClient) get(ctx context.Context, u string, out any) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
+		// Drain the (usually tiny) 404 body so the deferred Close returns the
+		// HTTP/1.1 connection to the idle pool instead of dropping it — MB 404
+		// (album not on MB) is the common cold-cache case.
+		drainBody(resp.Body)
 		return errNotFound
 	}
 	// MB asks anonymous clients to back off when it's overloaded. Honor
@@ -185,6 +189,9 @@ func (c *MusicBrainzClient) get(ctx context.Context, u string, out any) error {
 	}
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		// Drain any remainder past the 512-byte error snippet so the deferred
+		// Close can reuse the connection.
+		drainBody(resp.Body)
 		return &httpError{StatusCode: resp.StatusCode, Body: string(b)}
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
@@ -306,9 +313,13 @@ func IsNotFound(err error) bool { return errors.Is(err, errNotFound) }
 //     resets)
 //   - syscall.ECONNREFUSED / ENETUNREACH / EHOSTUNREACH (MB restart
 //     window, boot-before-network, route flap — all clear in seconds)
+//   - *net.DNSError other than NXDOMAIN (local resolver restart,
+//     boot-before-network, SERVFAIL/REFUSED from a captive portal or
+//     Pi-hole — environmental against our hardcoded-valid hosts)
 //
 // Persistent (NOT transient):
 //   - errNotFound (HTTP 404 — the album genuinely isn't on MB)
+//   - *net.DNSError with IsNotFound (NXDOMAIN — the host is genuinely gone)
 //   - JSON decode errors (schema drift; will fail every retry)
 //   - HTTP 4xx other than 429 (bad request shape, auth, etc.)
 func IsTransient(err error) bool {
@@ -322,9 +333,27 @@ func IsTransient(err error) bool {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
-	// net.Error covers most timeout / DNS / connect-refused shapes.
+	// net.Error covers most timeout / connect-refused shapes.
 	var ne net.Error
 	if errors.As(err, &ne) && ne.Timeout() {
+		return true
+	}
+	// DNS resolution failures against our hardcoded-valid hosts are
+	// environmental (local resolver restart, boot-before-network, a captive
+	// portal or Pi-hole returning SERVFAIL / REFUSED), NOT a data-contract
+	// problem — treat any *net.DNSError as transient EXCEPT a hard NXDOMAIN
+	// (IsNotFound), the one shape that says "this host is genuinely gone."
+	// This COMPLEMENTS the errno arm below: a fully-down network surfaces as
+	// EITHER a *net.DNSError (resolution failed) OR a raw ENETUNREACH /
+	// ECONNREFUSED (route/connect failed), and the two arms together cover
+	// both. Gated on IsNotFound rather than the Go-1.18-deprecated
+	// IsTemporary / Temporary() (which trips staticcheck SA1019 and is
+	// platform-leaky). Gemini-consulted 2026-07-13.
+	var dnsErr *net.DNSError
+	// dnsErr != nil guards the typed-nil case: errors.As can report true with
+	// a nil *net.DNSError if the chain carries one (a non-nil error interface
+	// wrapping a nil pointer), and dnsErr.IsNotFound would then panic.
+	if errors.As(err, &dnsErr) && dnsErr != nil && !dnsErr.IsNotFound {
 		return true
 	}
 	// TCP/route-level failures surface as wrapped syscall errnos

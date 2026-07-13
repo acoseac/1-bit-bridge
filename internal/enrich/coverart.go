@@ -133,10 +133,12 @@ func (c *CoverArtClient) fetchStream(ctx context.Context, u string) (io.ReadClos
 		return nil, err
 	}
 	if resp.StatusCode == http.StatusNotFound {
+		drainBody(resp.Body)
 		resp.Body.Close()
 		return nil, errNotFound
 	}
 	if resp.StatusCode != http.StatusOK {
+		drainBody(resp.Body)
 		resp.Body.Close()
 		return nil, fmt.Errorf("coverart: HTTP %d", resp.StatusCode)
 	}

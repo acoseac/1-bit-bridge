@@ -44,12 +44,30 @@ func TestIsTransient_PinsClassification(t *testing.T) {
 		// net.Error with Timeout() == true — the most common shape
 		// for connect / read timeouts surfaced by net/http.
 		{"net timeout", &fakeNetErr{timeout: true}, true},
-		// A net.Error without Timeout() (e.g., DNS NXDOMAIN) is
-		// not classified as transient by the timeout check alone —
-		// arguable but simple, and avoids over-retrying genuinely
-		// broken DNS state. The host-level errors below pick up
-		// the cases we care about.
-		{"net non-timeout", &fakeNetErr{timeout: false}, false},
+		// A GENERIC (non-DNS) net.Error without Timeout() is not
+		// transient — the timeout arm doesn't fire and no other arm
+		// matches a bare net.Error. DNS errors are handled by their own
+		// dedicated arm (cases below), NOT by this generic check, so this
+		// case stays false even after the E2 DNSError arm was added.
+		{"generic net.Error non-timeout", &fakeNetErr{timeout: false}, false},
+
+		// *net.DNSError classification (E2): against our hardcoded-valid
+		// hosts, any DNS failure EXCEPT a hard NXDOMAIN is environmental
+		// (local resolver restart, boot-before-network, a captive-portal /
+		// Pi-hole SERVFAIL or REFUSED) and MUST be transient so the
+		// in-flight queue isn't poisoned. NXDOMAIN (IsNotFound) is the one
+		// persistent shape. Gated on IsNotFound, NOT the Go-1.18-deprecated
+		// IsTemporary. Gemini-consulted 2026-07-13.
+		{"DNSError SERVFAIL (not NXDOMAIN)",
+			&net.DNSError{Err: "server misbehaving", Name: "musicbrainz.org"}, true},
+		{"DNSError REFUSED (not NXDOMAIN)",
+			&net.DNSError{Err: "connection refused", Name: "coverartarchive.org"}, true},
+		{"DNSError NXDOMAIN stays persistent",
+			&net.DNSError{Err: "no such host", Name: "nope.invalid", IsNotFound: true}, false},
+		{"DNSError timeout (caught by the net.Error timeout arm)",
+			&net.DNSError{Err: "i/o timeout", Name: "musicbrainz.org", IsTimeout: true}, true},
+		{"wrapped DNSError SERVFAIL survives errors.As",
+			fmt.Errorf("lookup: %w", &net.DNSError{Err: "server misbehaving", Name: "musicbrainz.org"}), true},
 
 		// TCP-level resets / aborts are transient — the upstream
 		// closed the socket mid-handshake, not a permanent state.

@@ -1,6 +1,7 @@
 package enrich
 
 import (
+	"io"
 	"net"
 	"net/http"
 	"time"
@@ -58,4 +59,27 @@ var sharedHTTPTransport = &http.Transport{
 	IdleConnTimeout:       60 * time.Second,
 	TLSHandshakeTimeout:   10 * time.Second,
 	ExpectContinueTimeout: 1 * time.Second,
+}
+
+// maxDrainBytes bounds how much of a discarded HTTP error/404 body the
+// enrich clients read back before Close(). net/http only returns an
+// HTTP/1.1 connection to the idle pool if the body was read to EOF, so
+// closing an unread error body drops the connection (forcing a re-dial +
+// TLS handshake on the next request — costly during a cold-cache pass
+// against the same handful of hosts). Draining fixes that, but an
+// unbounded io.Copy would let a hostile/misconfigured upstream tie up the
+// goroutine on an endless error stream; 64 KiB comfortably covers any real
+// MusicBrainz / Cover Art Archive error page.
+const maxDrainBytes = 64 << 10
+
+// drainBody discards up to maxDrainBytes of body so the underlying
+// connection can be reused. The caller still Closes the body. Nil-safe: a
+// nil reader is a no-op (production callers pass net/http's always-non-nil
+// resp.Body, but the guard keeps the shared helper safe for any future caller
+// or test mock).
+func drainBody(body io.Reader) {
+	if body == nil {
+		return
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(body, maxDrainBytes))
 }

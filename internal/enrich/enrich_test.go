@@ -12,9 +12,34 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
+
+func TestDrainBodyNilSafe(t *testing.T) {
+	// Must not panic on a nil reader (Gemini #491 round-2 defensive guard):
+	// io.LimitReader(nil, …).Read would otherwise nil-deref.
+	drainBody(nil)
+}
+
+func TestTruncateForLog(t *testing.T) {
+	if got := truncateForLog("abc"); got != "abc" {
+		t.Errorf("short value = %q, want %q", got, "abc")
+	}
+	long := truncateForLog(strings.Repeat("x", 300))
+	if len(long) > maxLoggedValueLen+len("...(truncated)") {
+		t.Errorf("truncated length %d exceeds cap", len(long))
+	}
+	if !strings.HasSuffix(long, "...(truncated)") {
+		t.Errorf("missing truncation marker: %q", long)
+	}
+	// Must never split a UTF-8 rune (2-byte runes straddling the 96-byte cut).
+	body := strings.TrimSuffix(truncateForLog(strings.Repeat("é", 100)), "...(truncated)")
+	if !utf8.ValidString(body) {
+		t.Errorf("truncated body is not valid UTF-8: %q", body)
+	}
+}
 
 // startEnricherForTest launches e.Run on its own goroutine with a
 // timeout-bounded ctx and returns a join func the caller MUST defer at
@@ -697,6 +722,87 @@ func TestEnricherProcessesTracksEndToEnd(t *testing.T) {
 		"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", 500)
 	if _, err := os.Stat(wantPath); err != nil {
 		t.Errorf("artwork not cached at %q: %v", wantPath, err)
+	}
+}
+
+func TestEnrichOneRejectsNonUUIDEmbeddedAlbumMBID(t *testing.T) {
+	// A crafted MUSICBRAINZ_ALBUMID tag must not be usable as an artwork-cache
+	// path. Pre-fix, the raw tag flowed straight into ArtworkCachePath
+	// (filepath.Join), so "../../pwned" escaped the cache dir when
+	// writeArtworkAtomicStream MkdirAll+renamed. The track must instead
+	// degrade to the normal name-based search path (identical to a file that
+	// carried no MBID tag), and nothing may be written outside cacheDir.
+	const maliciousMBID = "../../pwned"
+	const validMBID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+
+	// Mock MB: a release search resolves to a valid UUID; artist search is empty.
+	mbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/release/") {
+			io.WriteString(w, `{"releases":[{"id":"`+validMBID+`","score":100,"title":"Album","artist-credit":[{"name":"Artist"}]}]}`)
+			return
+		}
+		io.WriteString(w, `{"artists":[]}`)
+	}))
+	defer mbSrv.Close()
+
+	// Mock CAA: returns a JPEG for ANY request — so the PRE-FIX code would
+	// have written the escaped file, making this a true regression guard.
+	caaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Write([]byte{0xFF, 0xD8, 0xFF, 0xE0})
+	}))
+	defer caaSrv.Close()
+
+	// Nest cacheDir two levels under the test temp root so "../../pwned"
+	// escapes cacheDir but still lands inside t.TempDir() (auto-cleaned).
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "data")
+	cacheDir := filepath.Join(dataDir, "artwork")
+	store, err := manifest.OpenStore(filepath.Join(dataDir, "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	store.UpsertTrack(context.Background(), &manifest.Track{
+		Path:               "Artist/Album/01.flac",
+		Size:               100,
+		ModTime:            time.Now(),
+		Artist:             "Artist",
+		Album:              "Album",
+		Title:              "01.flac",
+		MusicBrainzAlbumID: maliciousMBID,
+	})
+
+	e := NewEnricher(store,
+		NewMusicBrainzClient(mbSrv.URL, "test", nil),
+		NewCoverArtClient(caaSrv.URL, "test", nil),
+		nil, cacheDir)
+	defer startEnricherForTest(e, 3*time.Second)()
+
+	if got := waitEnricherDone(e, 1, 2*time.Second); got < 1 {
+		t.Fatalf("enriched %d, want 1 (bad MBID must degrade to search, not skip; skipped=%d)", got, e.skipped.Load())
+	}
+
+	// Core security assertion: the escaped path must NOT exist.
+	escaped := ArtworkCachePath(cacheDir, maliciousMBID, 500)
+	if _, statErr := os.Stat(escaped); !os.IsNotExist(statErr) {
+		t.Fatalf("path-traversal: escaped artwork file exists at %q (stat err=%v)", escaped, statErr)
+	}
+
+	// The track fell through to the normal search path: MBID is now the
+	// searched UUID (not the malicious value, not empty-from-skip), and
+	// artwork is cached under it INSIDE cacheDir.
+	all, _ := store.ListTracks(context.Background(), nil)
+	if len(all) != 1 {
+		t.Fatalf("got %d tracks, want 1", len(all))
+	}
+	if all[0].MusicBrainzAlbumID != validMBID {
+		t.Errorf("MusicBrainzAlbumID = %q, want searched UUID %q (bad MBID should degrade to search)",
+			all[0].MusicBrainzAlbumID, validMBID)
+	}
+	if _, statErr := os.Stat(ArtworkCachePath(cacheDir, validMBID, 500)); statErr != nil {
+		t.Errorf("artwork not cached at the valid path inside cacheDir: %v", statErr)
 	}
 }
 
