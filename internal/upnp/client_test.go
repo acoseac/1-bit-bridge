@@ -241,6 +241,39 @@ func TestBrowseAll_EmptyPageWithPositiveNumberReturnedTerminates(t *testing.T) {
 	}
 }
 
+func TestBrowseAll_PositiveUnderReportAdvancesByParsedCount(t *testing.T) {
+	// A server that under-reports a POSITIVE NumberReturned (returns 2 items,
+	// reports 1) must still advance StartingIndex by the ACTUAL parsed count
+	// (2), not the reported 1 — advancing by the undercount would re-fetch the
+	// overlap and duplicate items (Gemini #492 round 2). The stub ignores
+	// StartingIndex, so we assert the advanced index on the next request.
+	page1 := wrapBrowse(
+		`<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/">`+
+			`<item id="a" parentID="0"><dc:title>A</dc:title></item>`+
+			`<item id="b" parentID="0"><dc:title>B</dc:title></item>`+
+			`</DIDL-Lite>`, 1, 0) // reports NumberReturned=1 but returns 2 items
+	page2 := wrapBrowse(`<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/"></DIDL-Lite>`, 0, 0)
+	stub := &stubDispatcher{queue: []stubResp{
+		{status: 200, body: string(page1)},
+		{status: 200, body: string(page2)},
+	}}
+	c := NewContentDirectoryClient(stub)
+	_, items, err := c.BrowseAll(context.Background(), testControlURL, "0")
+	if err != nil {
+		t.Fatalf("BrowseAll: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("got %d items; want 2", len(items))
+	}
+	if len(stub.reqs) != 2 {
+		t.Fatalf("Browse calls = %d; want 2", len(stub.reqs))
+	}
+	// Second request must advance by the parsed count (2), not NumberReturned (1).
+	if !strings.Contains(stub.bodies[1], `<StartingIndex>2</StartingIndex>`) {
+		t.Errorf("page-2 StartingIndex not advanced by parsed count (want 2):\n%s", stub.bodies[1])
+	}
+}
+
 func TestBrowse_SOAPFault500_SurfacesErrSOAPFault(t *testing.T) {
 	fault := `<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body>` +
 		`<s:Fault><faultcode>s:Client</faultcode><detail><UPnPError><errorCode>701</errorCode>` +

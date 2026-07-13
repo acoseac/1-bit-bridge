@@ -120,8 +120,16 @@ func (c *ContentDirectoryClient) BrowseAll(
 		if pageLen == 0 {
 			break
 		}
+		// Advance by the ACTUAL parsed row count whenever the server's
+		// reported NumberReturned UNDERCOUNTS it — not just when it's <=0 but
+		// also a positive under-report (e.g. returns 10 items, reports 5).
+		// Advancing StartingIndex by an undercount re-fetches the overlap on
+		// the next page and duplicates items in the accumulated list. A report
+		// LARGER than pageLen (the parser filtered/skipped some rows) is kept
+		// so we still consume the whole server page and don't loop. pageLen>0
+		// here (empty-page break above). (Gemini #492 round 2.)
 		effectiveReturned := page.NumberReturned
-		if effectiveReturned <= 0 {
+		if effectiveReturned < pageLen {
 			effectiveReturned = pageLen
 		}
 		next, more := NextStartingIndex(start, effectiveReturned, page.TotalMatches)
