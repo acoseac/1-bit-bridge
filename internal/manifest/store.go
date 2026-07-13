@@ -1416,6 +1416,80 @@ func (s *Store) MarkEnriched(ctx context.Context, t *Track) error {
 	return err
 }
 
+// ResetEnrichedMisses re-queues every track the enricher finished WITHOUT a
+// full result — enriched (enriched_at > 0) but still missing its release
+// artwork MBID or its artist MBID — by resetting enriched_at to 0 so the
+// worker's `WHERE enriched_at = 0` query picks it up again. This is the
+// operator-triggered "Retry missing" reset behind POST /api/enrichment/retry:
+// the third sanctioned enriched_at writer alongside the upsert reset and
+// MarkEnriched (see CLAUDE.md "enriched_at monotonicity"). It is semantically
+// the documented manual `UPDATE tracks SET enriched_at = 0` recipe, scoped to
+// the rows that actually miss data so a full-library MB/CAA re-crawl is never
+// triggered.
+//
+// indexed_at is deliberately NOT bumped — nothing about the row's content
+// changed yet; MarkEnriched bumps it when the retry actually lands new data.
+// UPnP-routed rows flow through the enricher like filesystem rows (the worker
+// query has no routing anti-join), so no exclusion is needed here either.
+// Holds s.mu (writer contract). Returns the number of rows re-queued.
+func (s *Store) ResetEnrichedMisses(ctx context.Context) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE tracks SET enriched_at = 0
+		 WHERE enriched_at > 0
+		   AND (json_extract(tags_json, '$.artworkMBID') IS NULL
+		     OR json_extract(tags_json, '$.artistMBID') IS NULL)
+	`)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// ResetEnrichedByArtistMBIDs re-queues every enriched track whose artistMBID
+// is in the given set. The admin "Retry missing" handler uses it for the
+// facet ResetEnrichedMisses can't express in SQL: artistMBID resolved but the
+// cached artist image file is missing on disk (the have/missing set is
+// computed in Go from the artwork cache dir). Re-running the enricher on
+// those rows re-fetches the Deezer artist image; the album-level caches make
+// the MB half of the re-run cheap. Same enriched_at-writer sanction and
+// no-indexed_at-bump contract as ResetEnrichedMisses. Chunked IN-lists keep
+// the statement under SQLite's bind-variable ceiling. Holds s.mu.
+func (s *Store) ResetEnrichedByArtistMBIDs(ctx context.Context, mbids []string) (int64, error) {
+	if len(mbids) == 0 {
+		return 0, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	const chunkSize = 500
+	var total int64
+	for start := 0; start < len(mbids); start += chunkSize {
+		end := min(start+chunkSize, len(mbids))
+		chunk := mbids[start:end]
+		placeholders := strings.Repeat("?,", len(chunk))
+		placeholders = placeholders[:len(placeholders)-1]
+		args := make([]any, len(chunk))
+		for i, m := range chunk {
+			args[i] = m
+		}
+		res, err := s.db.ExecContext(ctx, `
+			UPDATE tracks SET enriched_at = 0
+			 WHERE enriched_at > 0
+			   AND json_extract(tags_json, '$.artistMBID') IN (`+placeholders+`)
+		`, args...)
+		if err != nil {
+			return total, err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return total, err
+		}
+		total += n
+	}
+	return total, nil
+}
+
 // ApplyAlbumArtistReconciliation rewrites tags_json for each supplied
 // track (its AlbumArtist already set to the reconciled value) and bumps
 // indexed_at so iOS delta-sync surfaces the change. enriched_at is

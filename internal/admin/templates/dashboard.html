@@ -70,15 +70,35 @@
        needs a full-table scan); the panel stays hidden until the first frame
        lands so a cold cache / empty library shows nothing rather than zeros. */}}
   <div class="panel" id="enrichment-panel" hidden>
-    <h2>Enrichment</h2>
-    <p class="hint">Metadata &amp; artwork fill in after a scan, paced to respect MusicBrainz / Cover Art Archive. <em>Matched</em> tracks have a cover cached; <em>missing</em> are enriched but no cover was found anywhere — a coverage gap.</p>
+    <div class="panel-head">
+      <h2>Enrichment</h2>
+      {{/* Retry missing — POST /api/enrichment/retry re-queues enriched-but-
+           incomplete tracks (covers, artist match, artist images) for the
+           enricher and nudges the Atlas harvest client into a full re-submit
+           (bios / descriptions). Revealed by applyEnrichment only when some
+           facet actually has gaps; server rate-guards repeat clicks (429). */}}
+      <button type="button" id="enrich-retry" class="btn" hidden>Retry missing</button>
+    </div>
+    <p class="hint">Metadata &amp; artwork fill in after a scan, paced to respect the enrichment source. <em>Matched</em> tracks have a cover cached; <em>missing</em> are enriched but no cover was found anywhere — a coverage gap.</p>
     <dl class="composition">
+      <dt id="enrich-source-dt" hidden>Source</dt>
+      <dd id="enrich-source" hidden></dd>
       <dt>Pending</dt>
       <dd><span id="enrich-pending">0</span> tracks in the queue · <span id="enrich-eta" class="hint"></span></dd>
       <dt>Matched</dt>
       <dd><span id="enrich-matched">0</span> tracks have a cover</dd>
       <dt>Missing</dt>
       <dd><span id="enrich-missing">0</span> tracks enriched without a cover</dd>
+      {{/* Coverage rows (have · missing per facet) — hidden until the SSE
+           frame carries the corresponding field; bios/descriptions appear
+           only on Atlas-wired bridges, artist images whenever the artwork
+           cache dir is wired. Painted by applyEnrichment. */}}
+      <dt id="enrich-artist-images-dt" hidden>Artist images</dt>
+      <dd id="enrich-artist-images" hidden></dd>
+      <dt id="enrich-artist-bios-dt" hidden>Artist bios</dt>
+      <dd id="enrich-artist-bios" hidden></dd>
+      <dt id="enrich-album-desc-dt" hidden>Album descriptions</dt>
+      <dd id="enrich-album-desc" hidden></dd>
       <dt>Last enriched</dt>
       <dd id="enrich-last">never</dd>
     </dl>

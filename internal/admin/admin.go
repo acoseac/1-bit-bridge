@@ -182,6 +182,25 @@ type Deps struct {
 	// Nil-safe: absent → never fast-tick the upscale frame.
 	UpscaleBusy func() bool
 
+	// ArtistImageMBIDs enumerates the artist MBIDs with a cached image
+	// file on disk (lowercase-keyed set). Wired to a closure over
+	// `enrich.CachedArtistImageMBIDs(artworkDir)` in cmd/bridge/main.go
+	// (UpscalePrecheck decoupling pattern — admin never imports
+	// internal/enrich). Feeds the dashboard's artist-image have/missing
+	// coverage stats; called only inside the 60s-TTL enrichment-meta
+	// snapshot, so the directory read stays off any hot path. Nil-safe:
+	// absent → the artistImages coverage field is omitted.
+	ArtistImageMBIDs func() (map[string]struct{}, error)
+
+	// HarvestForceSubmit zeroes the Atlas bulk-harvest client's
+	// last-submit stamp so its next tick (≤ PollInterval) re-submits the
+	// full library — Atlas then re-attempts every unresolved bio /
+	// description (submission is idempotent server-side). Returns whether
+	// the nudge was actually applied. Wired in cmd/bridge/main.go only
+	// when the harvest client is running; nil (or false) surfaces as
+	// `harvestResubmitted: false` on the retry response.
+	HarvestForceSubmit func() bool
+
 	// AnalysisActive reports the LIVE runtime state of the audio-
 	// analysis feature — i.e. the startup-computed `analysisActive`
 	// (config flag AND sox-precheck outcome), NOT the persisted config
@@ -723,6 +742,26 @@ type Server struct {
 	enrichmentAt time.Time
 	enrichmentSF singleflight.Group
 
+	// enrichment-meta cache (dashboard coverage stats: artist images /
+	// artist bios / album descriptions). AtlasMetaBreakdownCounts is a
+	// full-table json_extract CTE and the artist-image set is an
+	// os.ReadDir — both far too expensive per tick, and both slow-moving
+	// (they change on enrichment/harvest progress, not per request) — so
+	// the composed part is cached for enrichmentMetaCacheTTL (60s,
+	// composition pattern) and the recompute is single-flighted.
+	enrichmentMetaMu sync.Mutex
+	enrichmentMeta   enrichmentMetaPart
+	enrichmentMetaAt time.Time
+	enrichmentMetaSF singleflight.Group
+
+	// enrichment-retry rate guard: POST /api/enrichment/retry is refused
+	// (429) within enrichRetryMinInterval of the previous accepted call.
+	// The reset itself is idempotent — this is UX politeness plus
+	// protection against a panic-clicked button re-queueing the enricher
+	// (and its MusicBrainz pacing budget) over and over.
+	enrichRetryMu sync.Mutex
+	enrichRetryAt time.Time
+
 	// stats DB-read last-good cache. getStatsSnapshot bounds its four
 	// best-effort DB reads with snapshotDBTimeout; on error/timeout it
 	// serves this last-good statsDBPart so the dashboard tiles don't flash
@@ -810,6 +849,7 @@ func (s *Server) Handler() http.Handler {
 	// JSON API.
 	mux.HandleFunc("GET /api/stats", s.apiStats)
 	mux.HandleFunc("GET /api/enrichment", s.apiEnrichment)
+	mux.HandleFunc("POST /api/enrichment/retry", s.apiEnrichmentRetry)
 	mux.HandleFunc("GET /api/endpoints", s.apiEndpoints)
 	mux.HandleFunc("GET /api/events", s.apiEvents)
 	mux.HandleFunc("GET /api/updates", s.apiUpdatesGet)
