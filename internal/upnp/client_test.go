@@ -177,6 +177,103 @@ func TestBrowseAll_Paginates(t *testing.T) {
 	}
 }
 
+func TestBrowseAll_ContinuesWhenServerUnderReportsNumberReturned(t *testing.T) {
+	// A non-conforming upstream returns a non-empty DIDL page while
+	// reporting NumberReturned=0. BrowseAll MUST keep paginating on the
+	// ACTUALLY-PARSED row count — otherwise it stops after page 1, the walk
+	// finishes un-truncated (nil error, Truncated=false), and the ingest
+	// reconcile sweep reaps every unreached track (silent data loss).
+	// Pre-fix this returned only page 1's 2 items after a single Browse call.
+	page1 := wrapBrowse(
+		`<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/">`+
+			`<item id="a" parentID="0"><dc:title>A</dc:title></item>`+
+			`<item id="b" parentID="0"><dc:title>B</dc:title></item>`+
+			`</DIDL-Lite>`, 0, 0) // NumberReturned=0 (a lie), TotalMatches=0 (unknown)
+	page2 := wrapBrowse(
+		`<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/">`+
+			`<item id="c" parentID="0"><dc:title>C</dc:title></item>`+
+			`</DIDL-Lite>`, 0, 0)
+	page3 := wrapBrowse(`<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/"></DIDL-Lite>`, 0, 0)
+	stub := &stubDispatcher{queue: []stubResp{
+		{status: 200, body: string(page1)},
+		{status: 200, body: string(page2)},
+		{status: 200, body: string(page3)},
+	}}
+	c := NewContentDirectoryClient(stub)
+	containers, items, err := c.BrowseAll(context.Background(), testControlURL, "0")
+	if err != nil {
+		t.Fatalf("BrowseAll: %v", err)
+	}
+	if len(containers) != 0 || len(items) != 3 {
+		t.Fatalf("got %d containers / %d items; want 0 / 3 (an under-reported page must not look like EOF)", len(containers), len(items))
+	}
+	if len(stub.reqs) != 3 {
+		t.Fatalf("Browse calls = %d; want 3 (must not stop at the NumberReturned=0 page)", len(stub.reqs))
+	}
+	// StartingIndex advances by the actually-parsed row count each page.
+	if !strings.Contains(stub.bodies[1], `<StartingIndex>2</StartingIndex>`) {
+		t.Errorf("page-2 StartingIndex not advanced by parsed count:\n%s", stub.bodies[1])
+	}
+	if !strings.Contains(stub.bodies[2], `<StartingIndex>3</StartingIndex>`) {
+		t.Errorf("page-3 StartingIndex not advanced by parsed count:\n%s", stub.bodies[2])
+	}
+}
+
+func TestBrowseAll_EmptyPageWithPositiveNumberReturnedTerminates(t *testing.T) {
+	// A non-conforming server that reports NumberReturned>0 but returns an
+	// EMPTY page must NOT busy-spin: pageLen==0 is the terminal signal.
+	// Pre-fix this looped forever — the item count never grows so
+	// MaxBrowseAllItems never trips, and NextStartingIndex keeps returning
+	// more=true while TotalMatches is unknown (Gemini #492). The stub repeats
+	// its last response, so a regression that drops the break would hang here.
+	empty := wrapBrowse(`<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/"></DIDL-Lite>`, 200, 0)
+	stub := &stubDispatcher{queue: []stubResp{{status: 200, body: string(empty)}}}
+	c := NewContentDirectoryClient(stub)
+	containers, items, err := c.BrowseAll(context.Background(), testControlURL, "0")
+	if err != nil {
+		t.Fatalf("BrowseAll: %v", err)
+	}
+	if len(containers) != 0 || len(items) != 0 {
+		t.Fatalf("got %d containers / %d items; want 0 / 0", len(containers), len(items))
+	}
+	if len(stub.reqs) != 1 {
+		t.Fatalf("Browse calls = %d; want 1 (an empty page must terminate immediately)", len(stub.reqs))
+	}
+}
+
+func TestBrowseAll_PositiveUnderReportAdvancesByParsedCount(t *testing.T) {
+	// A server that under-reports a POSITIVE NumberReturned (returns 2 items,
+	// reports 1) must still advance StartingIndex by the ACTUAL parsed count
+	// (2), not the reported 1 — advancing by the undercount would re-fetch the
+	// overlap and duplicate items (Gemini #492 round 2). The stub ignores
+	// StartingIndex, so we assert the advanced index on the next request.
+	page1 := wrapBrowse(
+		`<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/">`+
+			`<item id="a" parentID="0"><dc:title>A</dc:title></item>`+
+			`<item id="b" parentID="0"><dc:title>B</dc:title></item>`+
+			`</DIDL-Lite>`, 1, 0) // reports NumberReturned=1 but returns 2 items
+	page2 := wrapBrowse(`<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/"></DIDL-Lite>`, 0, 0)
+	stub := &stubDispatcher{queue: []stubResp{
+		{status: 200, body: string(page1)},
+		{status: 200, body: string(page2)},
+	}}
+	c := NewContentDirectoryClient(stub)
+	_, items, err := c.BrowseAll(context.Background(), testControlURL, "0")
+	if err != nil {
+		t.Fatalf("BrowseAll: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("got %d items; want 2", len(items))
+	}
+	if len(stub.reqs) != 2 {
+		t.Fatalf("Browse calls = %d; want 2", len(stub.reqs))
+	}
+	// Second request must advance by the parsed count (2), not NumberReturned (1).
+	if !strings.Contains(stub.bodies[1], `<StartingIndex>2</StartingIndex>`) {
+		t.Errorf("page-2 StartingIndex not advanced by parsed count (want 2):\n%s", stub.bodies[1])
+	}
+}
+
 func TestBrowse_SOAPFault500_SurfacesErrSOAPFault(t *testing.T) {
 	fault := `<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body>` +
 		`<s:Fault><faultcode>s:Client</faultcode><detail><UPnPError><errorCode>701</errorCode>` +

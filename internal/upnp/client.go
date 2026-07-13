@@ -78,8 +78,8 @@ func (c *ContentDirectoryClient) Search(
 
 // BrowseAll paginates Browse(BrowseDirectChildren) over a container,
 // accumulating its direct-child containers + items. Serial by
-// construction (one page at a time). Terminates per NextStartingIndex
-// (empty page = EOF) and the MaxBrowseAllItems hard ceiling. ctx
+// construction (one page at a time). Terminates on an actually-empty
+// page (see below) and the MaxBrowseAllItems hard ceiling. ctx
 // cancellation is honored between pages.
 func (c *ContentDirectoryClient) BrowseAll(
 	ctx context.Context,
@@ -96,7 +96,43 @@ func (c *ContentDirectoryClient) BrowseAll(
 		}
 		containers = append(containers, page.Containers...)
 		items = append(items, page.Items...)
-		next, more := NextStartingIndex(start, page.NumberReturned, page.TotalMatches)
+		// Terminate + advance on the ACTUALLY-PARSED row count, not the
+		// server's self-reported NumberReturned. A non-conforming upstream
+		// that returns a non-empty DIDL page while reporting
+		// NumberReturned=0 would otherwise look like EOF here — and because
+		// the walk then finishes un-truncated (nil error, Truncated=false),
+		// the ingest reconcile sweep treats every unreached track as deleted
+		// upstream and reaps it (silent data loss). We already distrust
+		// TotalMatches for the sibling MiniDLNA "inaccurate count while the
+		// DB builds" quirk; extend the same distrust to NumberReturned. A
+		// genuinely empty page (pageLen==0) still terminates; a broken server
+		// that ignores StartingIndex and re-serves the same non-empty page
+		// forever still trips MaxBrowseAllItems (accumulated count grows).
+		pageLen := len(page.Containers) + len(page.Items)
+		// An actually-empty page is the terminal signal regardless of the
+		// server's reported NumberReturned. Break here so a non-conforming
+		// server that reports NumberReturned>0 for an EMPTY page can't
+		// busy-spin: its accumulated item count never grows, so the
+		// MaxBrowseAllItems ceiling below never trips, and NextStartingIndex
+		// would keep returning more=true while TotalMatches is unknown —
+		// an unbounded request storm (Gemini #492). This also subsumes the
+		// genuine-EOF case (last page empty).
+		if pageLen == 0 {
+			break
+		}
+		// Advance by the ACTUAL parsed row count whenever the server's
+		// reported NumberReturned UNDERCOUNTS it — not just when it's <=0 but
+		// also a positive under-report (e.g. returns 10 items, reports 5).
+		// Advancing StartingIndex by an undercount re-fetches the overlap on
+		// the next page and duplicates items in the accumulated list. A report
+		// LARGER than pageLen (the parser filtered/skipped some rows) is kept
+		// so we still consume the whole server page and don't loop. pageLen>0
+		// here (empty-page break above). (Gemini #492 round 2.)
+		effectiveReturned := page.NumberReturned
+		if effectiveReturned < pageLen {
+			effectiveReturned = pageLen
+		}
+		next, more := NextStartingIndex(start, effectiveReturned, page.TotalMatches)
 		// Distinguish "natural EOF" from "hit our safety ceiling": only
 		// the latter is a truncation the caller must not trust as the
 		// complete view of the container.

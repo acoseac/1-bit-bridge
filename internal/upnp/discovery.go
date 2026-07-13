@@ -358,10 +358,16 @@ func (c *MediaServerDiscoveryClient) runLoop(ctx context.Context) {
 			return
 		}
 		// Short read deadline so an idle socket still hears ctx cancel.
-		// Route through nowFunc so tests with an injected clock can
-		// reason about timeouts deterministically (matches
-		// internal/dlna/discovery's convention).
-		_ = conn.SetReadDeadline(c.nowFunc().Add(2 * time.Second))
+		// Wall-clock (time.Now), NOT c.nowFunc(): net.Conn deadlines are
+		// always evaluated against the real OS clock, so feeding the
+		// injectable logical clock here would instant-timeout every read
+		// under a test that pins nowFunc to a past date — HandleReadErr
+		// treats a timeout as retry-with-no-backoff, so the loop would
+		// busy-spin a core and read no packets (discovery silently dead).
+		// nowFunc stays for the TTL/staleness domain (EvictStale below),
+		// where logical time is the right reference. Mirrors the sibling
+		// renderer client at internal/dlna/discovery/client.go.
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 		n, addr, err := conn.ReadFromUDP(buf)
 		if err != nil {
 			// Shared policy (timeout→retry / shutdown→return / transient→

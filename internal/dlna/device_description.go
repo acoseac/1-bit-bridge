@@ -83,7 +83,7 @@ func DeviceDescriptionXML(opts DeviceDescriptionOpts) []byte {
 		escapeXMLText(opts.ModelDescription),
 		escapeXMLText(opts.ModelName),
 		escapeXMLText(opts.ModelNumber),
-		opts.UDN,
+		escapeXMLText(opts.UDN),
 		ContentDirectoryServiceType,
 		ConnectionManagerServiceType,
 	))
