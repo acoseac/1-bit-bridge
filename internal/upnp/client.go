@@ -78,8 +78,8 @@ func (c *ContentDirectoryClient) Search(
 
 // BrowseAll paginates Browse(BrowseDirectChildren) over a container,
 // accumulating its direct-child containers + items. Serial by
-// construction (one page at a time). Terminates per NextStartingIndex
-// (empty page = EOF) and the MaxBrowseAllItems hard ceiling. ctx
+// construction (one page at a time). Terminates on an actually-empty
+// page (see below) and the MaxBrowseAllItems hard ceiling. ctx
 // cancellation is honored between pages.
 func (c *ContentDirectoryClient) BrowseAll(
 	ctx context.Context,
@@ -96,7 +96,24 @@ func (c *ContentDirectoryClient) BrowseAll(
 		}
 		containers = append(containers, page.Containers...)
 		items = append(items, page.Items...)
-		next, more := NextStartingIndex(start, page.NumberReturned, page.TotalMatches)
+		// Terminate + advance on the ACTUALLY-PARSED row count, not the
+		// server's self-reported NumberReturned. A non-conforming upstream
+		// that returns a non-empty DIDL page while reporting
+		// NumberReturned=0 would otherwise look like EOF here — and because
+		// the walk then finishes un-truncated (nil error, Truncated=false),
+		// the ingest reconcile sweep treats every unreached track as deleted
+		// upstream and reaps it (silent data loss). We already distrust
+		// TotalMatches for the sibling MiniDLNA "inaccurate count while the
+		// DB builds" quirk; extend the same distrust to NumberReturned. A
+		// genuinely empty page (pageLen==0) still terminates; a broken server
+		// that ignores StartingIndex and re-serves the same non-empty page
+		// forever still trips MaxBrowseAllItems (accumulated count grows).
+		pageLen := len(page.Containers) + len(page.Items)
+		effectiveReturned := page.NumberReturned
+		if effectiveReturned <= 0 {
+			effectiveReturned = pageLen
+		}
+		next, more := NextStartingIndex(start, effectiveReturned, page.TotalMatches)
 		// Distinguish "natural EOF" from "hit our safety ceiling": only
 		// the latter is a truncation the caller must not trust as the
 		// complete view of the container.

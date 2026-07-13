@@ -50,17 +50,20 @@ func Test_DeviceDescriptionXML_XMLEscapesSpecialChars(t *testing.T) {
 	// Caller passes potentially-unsafe text via FriendlyName et al.;
 	// the generator must escape it.
 	xml := string(DeviceDescriptionXML(DeviceDescriptionOpts{
-		UDN:              "uuid:test",
+		UDN:              "uuid:test&<evil>",
 		FriendlyName:     `Bridge "Foo" & <Bar>`,
 		Manufacturer:     "vendor & co",
 		ModelDescription: "model'with'apostrophes",
 	}))
 	// Each escaped substring should appear; the raw unescaped form
-	// should not (it would be invalid XML).
+	// should not (it would be invalid XML). The UDN is escaped like every
+	// sibling field — an XML metacharacter in it would otherwise corrupt
+	// the description document and make the device invisible to renderers.
 	mustContain := []string{
 		`Bridge &quot;Foo&quot; &amp; &lt;Bar&gt;`,
 		`vendor &amp; co`,
 		`model&apos;with&apos;apostrophes`,
+		`<UDN>uuid:test&amp;&lt;evil&gt;</UDN>`,
 	}
 	for _, want := range mustContain {
 		if !strings.Contains(xml, want) {

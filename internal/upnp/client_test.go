@@ -177,6 +177,48 @@ func TestBrowseAll_Paginates(t *testing.T) {
 	}
 }
 
+func TestBrowseAll_ContinuesWhenServerUnderReportsNumberReturned(t *testing.T) {
+	// A non-conforming upstream returns a non-empty DIDL page while
+	// reporting NumberReturned=0. BrowseAll MUST keep paginating on the
+	// ACTUALLY-PARSED row count — otherwise it stops after page 1, the walk
+	// finishes un-truncated (nil error, Truncated=false), and the ingest
+	// reconcile sweep reaps every unreached track (silent data loss).
+	// Pre-fix this returned only page 1's 2 items after a single Browse call.
+	page1 := wrapBrowse(
+		`<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/">`+
+			`<item id="a" parentID="0"><dc:title>A</dc:title></item>`+
+			`<item id="b" parentID="0"><dc:title>B</dc:title></item>`+
+			`</DIDL-Lite>`, 0, 0) // NumberReturned=0 (a lie), TotalMatches=0 (unknown)
+	page2 := wrapBrowse(
+		`<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/">`+
+			`<item id="c" parentID="0"><dc:title>C</dc:title></item>`+
+			`</DIDL-Lite>`, 0, 0)
+	page3 := wrapBrowse(`<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/"></DIDL-Lite>`, 0, 0)
+	stub := &stubDispatcher{queue: []stubResp{
+		{status: 200, body: string(page1)},
+		{status: 200, body: string(page2)},
+		{status: 200, body: string(page3)},
+	}}
+	c := NewContentDirectoryClient(stub)
+	containers, items, err := c.BrowseAll(context.Background(), testControlURL, "0")
+	if err != nil {
+		t.Fatalf("BrowseAll: %v", err)
+	}
+	if len(containers) != 0 || len(items) != 3 {
+		t.Fatalf("got %d containers / %d items; want 0 / 3 (an under-reported page must not look like EOF)", len(containers), len(items))
+	}
+	if len(stub.reqs) != 3 {
+		t.Fatalf("Browse calls = %d; want 3 (must not stop at the NumberReturned=0 page)", len(stub.reqs))
+	}
+	// StartingIndex advances by the actually-parsed row count each page.
+	if !strings.Contains(stub.bodies[1], `<StartingIndex>2</StartingIndex>`) {
+		t.Errorf("page-2 StartingIndex not advanced by parsed count:\n%s", stub.bodies[1])
+	}
+	if !strings.Contains(stub.bodies[2], `<StartingIndex>3</StartingIndex>`) {
+		t.Errorf("page-3 StartingIndex not advanced by parsed count:\n%s", stub.bodies[2])
+	}
+}
+
 func TestBrowse_SOAPFault500_SurfacesErrSOAPFault(t *testing.T) {
 	fault := `<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body>` +
 		`<s:Fault><faultcode>s:Client</faultcode><detail><UPnPError><errorCode>701</errorCode>` +
