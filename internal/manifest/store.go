@@ -1460,6 +1460,33 @@ func (s *Store) applyReconciledTracks(ctx context.Context, changed []Track) (int
 	if len(changed) == 0 {
 		return 0, nil
 	}
+	// Pre-marshal every row OUTSIDE s.mu so the writer mutex only covers the
+	// actual SQLite writes — mirrors UpsertTrackBatch (Gemini on PR #71). On a
+	// split-album-heavy first reconcile `changed` can be thousands of rows;
+	// marshaling under the lock would block the enricher/scanner writers for
+	// the whole batch. A marshal error returns before any lock/tx is taken
+	// (fails safe — strictly cleaner than the prior rollback-on-marshal path).
+	// `changed` is freshly built by loadAndApplyReconciled from per-row
+	// GetTrack results and isn't shared with the enricher/scanner goroutines,
+	// so reading it unlocked here is safe.
+	type reconciledRow struct {
+		path string
+		raw  []byte
+	}
+	rows := make([]reconciledRow, len(changed))
+	for i := range changed {
+		raw, err := marshalForStorage(&changed[i])
+		if err != nil {
+			return 0, err
+		}
+		rows[i] = reconciledRow{path: changed[i].Path, raw: raw}
+	}
+	// A scan cancelled mid-reconcile shouldn't acquire the writer mutex and
+	// open a write transaction after the (now-unlocked) marshal loop.
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -1482,15 +1509,8 @@ func (s *Store) applyReconciledTracks(ctx context.Context, changed []Track) (int
 	defer stmt.Close()
 	now := s.now().UnixNano()
 	n := 0
-	for i := range changed {
-		raw, err := marshalForStorage(&changed[i])
-		if err != nil {
-			// Any error path triggers the deferred tx.Rollback, so zero
-			// rows were committed — return 0, not the partial count, so
-			// callers/metrics don't record an aborted batch as a success.
-			return 0, err
-		}
-		res, err := stmt.ExecContext(ctx, raw, now, now, changed[i].Path)
+	for _, r := range rows {
+		res, err := stmt.ExecContext(ctx, r.raw, now, now, r.path)
 		if err != nil {
 			return 0, err
 		}
@@ -3478,8 +3498,11 @@ func (s *Store) IncrementMissingFoldersAndDeleteAtThreshold(ctx context.Context,
 // PendingDeletions returns the total count of rows across `tracks` and
 // `folders` that have a non-zero missing_count but haven't yet hit the
 // delete threshold. Exposed for the /v1/health ScanState surface and
-// the admin dashboard "X rows pending deletion" hint. Cheap query —
-// two indexed counts. Nil-safe under closed Store (returns 0, nil).
+// the admin dashboard "X rows pending deletion" hint. Two filtered
+// COUNT(*) scans — there is NO dedicated missing_count index, so the
+// `missing_count > 0` predicate is a table scan; the /v1/health caller
+// TTL-caches the result (healthCountsCache) so an unauthenticated flood
+// can't run these per request. Nil-safe under closed Store (returns 0, nil).
 func (s *Store) PendingDeletions(ctx context.Context) (int64, error) {
 	if s == nil || s.db == nil {
 		return 0, nil

@@ -142,6 +142,7 @@ type Server struct {
 	eventBroker            *eventBroker                 // nil disables /v1/events (back-compat for test harnesses); wired once at startup, see StartEventBroker
 	manifestRateLimiter    *manifestRateLimiter         // per-token-ID token-bucket for /v1/manifest
 	reachability           *reachabilityCache           // per-root probe TTL cache used by /v1/list, /v1/stat, /v1/health
+	healthCounts           *healthCountsCache           // TTL cache for /v1/health scan-state COUNT(*) scans
 	fingerprint            string
 	startedAt              time.Time
 
@@ -373,6 +374,7 @@ func New(cfg *config.Config, store *auth.Store, mp ManifestProvider, fingerprint
 		pairingRateLimiter:  newPairingRateLimiter(),
 		manifestRateLimiter: newManifestRateLimiter(cfg.Limits.Manifest.EffectiveRPM(), cfg.Limits.Manifest.EffectiveBurst()),
 		reachability:        newReachabilityCache(),
+		healthCounts:        newHealthCountsCache(),
 		fingerprint:         fingerprint,
 		startedAt:           time.Now().UTC(),
 	}
@@ -1285,8 +1287,10 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	if s.manifest != nil {
 		scanState.IsScanning = s.manifest.IsScanning()
 		scanState.LastFullScan = s.manifest.LastFullScan()
-		scanState.TracksIndexed = s.manifest.TracksIndexed(r.Context())
-		scanState.PendingDeletions = s.manifest.PendingDeletions(r.Context())
+		// TTL-cached: /v1/health is unauthenticated and can be flooded, so the
+		// two COUNT(*) scans run at most ~once per healthCountsTTL rather than
+		// per request. See healthCountsCache.
+		scanState.TracksIndexed, scanState.PendingDeletions = s.healthCounts.counts(r.Context(), s.manifest)
 	}
 	resp := HealthResponse{
 		ProtocolVersion: version.ProtocolVersion,

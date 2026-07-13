@@ -265,6 +265,12 @@ type Store struct {
 	mu   sync.Mutex
 	byID map[string]*Request
 
+	// closed is set by Close() (under mu). onTimer no-ops when it's set so a
+	// callback that had already fired before Close() stopped its timer
+	// (Stop returned false) can't re-arm a fresh grace timer that would
+	// outlive Close. Monotonic false->true; mirrors transcode.Pool's closed.
+	closed bool
+
 	ttl        time.Duration
 	grace      time.Duration
 	maxPending int
@@ -702,11 +708,14 @@ func (s *Store) TTLSeconds() int {
 // admin handler to compute per-row countdowns.
 func (s *Store) TTL() time.Duration { return s.ttl }
 
-// Close stops every per-request timer. Call on clean shutdown so the
-// timer goroutines drain promptly. Safe to call multiple times.
+// Close stops every per-request timer and marks the store closed so an
+// already-fired callback (whose Stop() returned false) can't re-arm a fresh
+// grace timer after we return. Call on clean shutdown so the timer
+// goroutines drain promptly. Safe to call multiple times.
 func (s *Store) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.closed = true
 	for _, req := range s.byID {
 		if req.expiryTimer != nil {
 			req.expiryTimer.Stop()
@@ -733,6 +742,14 @@ func (s *Store) Close() {
 // timer's eventual firing be the only authoritative deadline.
 func (s *Store) onTimer(id string, gen uint64) {
 	s.mu.Lock()
+	if s.closed {
+		// Close() stopped every timer and marked the store closed; a callback
+		// that had already fired (Stop returned false) must NOT re-arm a fresh
+		// grace timer here — that would outlive Close and contradict its
+		// drain-promptly contract. Mirrors transcode.Pool's p.closed gate.
+		s.mu.Unlock()
+		return
+	}
 	var revokeID string
 	// State-change snapshot for the Pending→Expired transition fires
 	// AFTER the lock is released — same shape as Approve / Decline. The
@@ -809,6 +826,15 @@ func (s *Store) onTimer(id string, gen uint64) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		// Close() ran DURING the out-of-lock revoke above: it set closed and
+		// stopped every timer. Do NOT fall through to scheduleTimer on a
+		// revoke failure — that would arm a fresh retry timer that outlives
+		// Close, the exact leak the top-of-onTimer guard prevents for the
+		// pre-revoke path (Gemini on PR #494). The in-memory row is discarded
+		// on process exit and the revoke already ran, so nothing is left to do.
+		return
+	}
 	req, ok := s.byID[id]
 	if !ok {
 		// Already cleaned up by Delete or a concurrent path —

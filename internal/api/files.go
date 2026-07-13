@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"errors"
-	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -568,7 +567,3 @@ func (s entriesByCaseFold) Swap(i, j int) {
 	s.entries[i], s.entries[j] = s.entries[j], s.entries[i]
 	s.keys[i], s.keys[j] = s.keys[j], s.keys[i]
 }
-
-// Copy is exposed for test shims; wraps io.Copy so tests can swap it out.
-// (Currently unused — kept as a seam for benchmarks.)
-var Copy = io.Copy

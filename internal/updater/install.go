@@ -148,7 +148,19 @@ func (u *Updater) Install(ctx context.Context, opts InstallOptions) (Status, err
 			return status, fmt.Errorf("fetch release-meta.json: %w", err)
 		}
 		if err == nil {
-			if reason := compatGateReason(meta.MinClientVersion, u.tokenSnapshot()); reason != "" {
+			// Sanity-check the meta belongs to the candidate we're about to
+			// install. A stale CDN cache or a partial publication could deliver
+			// an OLDER meta against a NEWER archive, driving the compat gate off
+			// the wrong client floor. On mismatch, treat as no-floor (warn +
+			// permissive) — matching the "absent -> no floor" posture rather
+			// than gating on possibly-wrong data. Both operands go through
+			// normalizeTag so a `v`-prefix / whitespace skew isn't a false
+			// mismatch (status.LatestVersion is already normalized; the
+			// double-normalize is idempotent and defensive).
+			if meta.Version != "" && normalizeTag(meta.Version) != normalizeTag(status.LatestVersion) {
+				logger.Warn("release-meta.json version mismatch; treating as no client-version floor",
+					"metaVersion", meta.Version, "candidate", status.LatestVersion)
+			} else if reason := compatGateReason(meta.MinClientVersion, u.tokenSnapshot()); reason != "" {
 				u.recordDeferredReason(reason)
 				return status, fmt.Errorf("%w: %s", ErrCompatGateRefused, reason)
 			}

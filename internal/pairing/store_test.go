@@ -117,6 +117,46 @@ func TestCreateAndPollPending(t *testing.T) {
 	}
 }
 
+// TestCloseShortCircuitsFiredTimerCallback pins C1: a Pending timer
+// callback that had already fired before Close() stopped it must NOT re-arm
+// a fresh grace timer after Close() returns. We simulate the fired-but-parked
+// callback by invoking onTimer directly WITH THE LIVE GENERATION (so only the
+// closed flag — not the timerGen guard — can stop it) after Close().
+func TestCloseShortCircuitsFiredTimerCallback(t *testing.T) {
+	// Long TTL so the real armed timer can't fire during the test.
+	s := quickStore(t, time.Hour, time.Hour, nil)
+	_, hashHex := makePollPair(t, "a")
+	req, err := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP", "")
+	if err != nil {
+		t.Fatalf("CreateRequest: %v", err)
+	}
+
+	s.mu.Lock()
+	gen := s.byID[req.ID].timerGen
+	s.mu.Unlock()
+
+	s.Close() // stops + nils the timer, marks closed
+
+	// Stale fired callback resuming after Close, matching generation.
+	s.onTimer(req.ID, gen)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.closed {
+		t.Fatal("Close did not set closed")
+	}
+	got := s.byID[req.ID]
+	if got == nil {
+		t.Fatal("request row disappeared")
+	}
+	if got.State != StatePending {
+		t.Errorf("State = %v, want Pending (a closed-store onTimer must not transition)", got.State)
+	}
+	if got.expiryTimer != nil {
+		t.Error("a fresh grace timer was armed after Close (closed gate failed)")
+	}
+}
+
 func TestPollRejectsWrongSecret(t *testing.T) {
 	s := quickStore(t, time.Second, time.Second, nil)
 	_, hashHex := makePollPair(t, "a")
@@ -628,6 +668,70 @@ func TestSnapshotRedactsSecretMaterial(t *testing.T) {
 		if r.PollHash != ([32]byte{}) {
 			t.Errorf("List leaked PollHash on row %s", r.ID)
 		}
+	}
+}
+
+// TestCloseDuringRevokeDoesNotRearmTimer pins the Gemini-#494 race: if
+// Close() runs WHILE onTimer is parked in the out-of-lock revoke, the
+// post-revoke re-acquire must re-check closed and NOT schedule a retry timer
+// that outlives Close. We block inside the revoke fn, Close() the store, then
+// release the revoke with a failure and assert no fresh timer was armed.
+func TestCloseDuringRevokeDoesNotRearmTimer(t *testing.T) {
+	revokeEntered := make(chan struct{})
+	revokeRelease := make(chan struct{})
+	blockingFailingRevoke := func(string) error {
+		close(revokeEntered)
+		<-revokeRelease
+		return errors.New("simulated revoke failure")
+	}
+	// Long TTL/grace so Approve's own undelivered-cleanup timer can't fire
+	// during the test — the only onTimer invocation is our manual one.
+	s := NewStore(Options{
+		TTL:         time.Hour,
+		Grace:       time.Hour,
+		MaxPending:  4,
+		RevokeToken: blockingFailingRevoke,
+	})
+	t.Cleanup(s.Close)
+
+	mint := &stubMint{}
+	_, hashHex := makePollPair(t, "race")
+	req, err := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Approve(req.ID, "FP", mint.fn); err != nil {
+		t.Fatal(err)
+	}
+
+	s.mu.Lock()
+	gen := s.byID[req.ID].timerGen
+	s.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() { defer close(done); s.onTimer(req.ID, gen) }()
+
+	select {
+	case <-revokeEntered: // onTimer is now parked in the out-of-lock revoke
+	case <-time.After(2 * time.Second):
+		close(revokeRelease)
+		t.Fatal("revoke never entered — onTimer didn't reach the revoke path")
+	}
+	s.Close()            // sets closed + stops timers WHILE the revoke is in flight
+	close(revokeRelease) // revoke returns an error → onTimer re-acquires the lock
+	<-done               // and must hit the closed re-check instead of scheduleTimer
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.closed {
+		t.Fatal("Close did not set closed")
+	}
+	got := s.byID[req.ID]
+	if got == nil {
+		t.Fatal("row unexpectedly deleted (closed re-check should return before delete)")
+	}
+	if got.expiryTimer != nil {
+		t.Error("a retry timer was armed after Close during revoke (post-revoke closed re-check failed)")
 	}
 }
 
