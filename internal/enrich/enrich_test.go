@@ -12,9 +12,28 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
+
+func TestTruncateForLog(t *testing.T) {
+	if got := truncateForLog("abc"); got != "abc" {
+		t.Errorf("short value = %q, want %q", got, "abc")
+	}
+	long := truncateForLog(strings.Repeat("x", 300))
+	if len(long) > maxLoggedValueLen+len("...(truncated)") {
+		t.Errorf("truncated length %d exceeds cap", len(long))
+	}
+	if !strings.HasSuffix(long, "...(truncated)") {
+		t.Errorf("missing truncation marker: %q", long)
+	}
+	// Must never split a UTF-8 rune (2-byte runes straddling the 96-byte cut).
+	body := strings.TrimSuffix(truncateForLog(strings.Repeat("é", 100)), "...(truncated)")
+	if !utf8.ValidString(body) {
+		t.Errorf("truncated body is not valid UTF-8: %q", body)
+	}
+}
 
 // startEnricherForTest launches e.Run on its own goroutine with a
 // timeout-bounded ctx and returns a join func the caller MUST defer at

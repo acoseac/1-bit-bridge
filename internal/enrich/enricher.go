@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/text/cases"
 	"golang.org/x/text/unicode/norm"
@@ -40,6 +41,24 @@ var mbidValidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-
 
 // isValidMBID reports whether s is a well-formed MusicBrainz UUID.
 func isValidMBID(s string) bool { return mbidValidPattern.MatchString(s) }
+
+// maxLoggedValueLen bounds an untrusted value written to logs so a hostile
+// tag can't flood the log. slog already quotes + escapes control chars in the
+// value, so this only handles length.
+const maxLoggedValueLen = 96
+
+// truncateForLog bounds s to maxLoggedValueLen bytes at a UTF-8 rune boundary
+// (never emitting a split sequence) with a marker appended when it was cut.
+func truncateForLog(s string) string {
+	if len(s) <= maxLoggedValueLen {
+		return s
+	}
+	cut := maxLoggedValueLen
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "...(truncated)"
+}
 
 // Enricher is a long-running worker that pulls un-enriched tracks from
 // the manifest store, looks them up against MusicBrainz / Deezer, caches
@@ -268,7 +287,13 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 	// MBID tag at all, so there is no new match-quality risk (that path already
 	// exists). See mbidValidPattern.
 	if t.MusicBrainzAlbumID != "" && !isValidMBID(t.MusicBrainzAlbumID) {
-		logger.Warn("ignoring non-UUID embedded album MBID", "path", t.Path, "value", t.MusicBrainzAlbumID)
+		// Bound the untrusted tag value before logging: the length cap defends
+		// against log flooding from a hostile tag, and slog's text + JSON
+		// handlers already escape control chars / newlines in string values
+		// (CWE-117 log-injection defense). Pass the raw truncated value rather
+		// than a pre-quoted %q form so the handler quotes exactly once, not
+		// twice. (Gemini #491)
+		logger.Warn("ignoring non-UUID embedded album MBID", "path", t.Path, "value", truncateForLog(t.MusicBrainzAlbumID))
 		t.MusicBrainzAlbumID = ""
 	}
 
