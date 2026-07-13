@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -24,6 +25,21 @@ import (
 )
 
 var logger = logging.Component("enricher")
+
+// mbidValidPattern matches a MusicBrainz UUID. An embedded
+// MUSICBRAINZ_ALBUMID tag is attacker-influenceable — it comes straight
+// from the file's tags via stringOf (which only trims) and flows into the
+// artwork-cache FILE PATH (ArtworkCachePath -> filepath.Join) and outbound
+// CAA/Atlas URLs, so it MUST be validated before use. The /v1/artwork read
+// handler already guards the identical value with the same UUID shape
+// (api/artwork.go mbidPattern) "to prevent traversal and filesystem abuse";
+// this mirrors that guard on the enricher write side. Kept independent of
+// the api package on purpose — the dependency direction is api -> enrich,
+// so enrich must not import api.
+var mbidValidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// isValidMBID reports whether s is a well-formed MusicBrainz UUID.
+func isValidMBID(s string) bool { return mbidValidPattern.MatchString(s) }
 
 // Enricher is a long-running worker that pulls un-enriched tracks from
 // the manifest store, looks them up against MusicBrainz / Deezer, caches
@@ -242,6 +258,18 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 	if t.Artist == "" || t.Album == "" {
 		e.markSkipped(ctx, t, "no artist/album to search by")
 		return
+	}
+
+	// Defense-in-depth: reject a non-UUID embedded album MBID before it can
+	// reach ArtworkCachePath / the CAA+Atlas URL builders. A crafted tag like
+	// "../../evil" would otherwise escape cacheDir when writeArtworkAtomicStream
+	// MkdirAll+renames. Treating it as ABSENT lets the track fall through to the
+	// normal name-based search path below — identical to a file that carried no
+	// MBID tag at all, so there is no new match-quality risk (that path already
+	// exists). See mbidValidPattern.
+	if t.MusicBrainzAlbumID != "" && !isValidMBID(t.MusicBrainzAlbumID) {
+		logger.Warn("ignoring non-UUID embedded album MBID", "path", t.Path, "value", t.MusicBrainzAlbumID)
+		t.MusicBrainzAlbumID = ""
 	}
 
 	// If the file already carried an MBID, we don't need to search — just

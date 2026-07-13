@@ -161,6 +161,10 @@ func (c *MusicBrainzClient) get(ctx context.Context, u string, out any) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
+		// Drain the (usually tiny) 404 body so the deferred Close returns the
+		// HTTP/1.1 connection to the idle pool instead of dropping it — MB 404
+		// (album not on MB) is the common cold-cache case.
+		drainBody(resp.Body)
 		return errNotFound
 	}
 	// MB asks anonymous clients to back off when it's overloaded. Honor
@@ -185,6 +189,9 @@ func (c *MusicBrainzClient) get(ctx context.Context, u string, out any) error {
 	}
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		// Drain any remainder past the 512-byte error snippet so the deferred
+		// Close can reuse the connection.
+		drainBody(resp.Body)
 		return &httpError{StatusCode: resp.StatusCode, Body: string(b)}
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
