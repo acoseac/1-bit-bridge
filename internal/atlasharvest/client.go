@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -90,9 +91,19 @@ type Client struct {
 	MBIDs     MBIDSource
 	Sink      MetaSink
 	Refetcher CoverRefetcher // optional; nil = artist-bio harvest only (no cover harvest)
-	HTTP      *http.Client
-	Log       *slog.Logger
-	Now       func() time.Time
+	// Booklets + BookletFiles wire the PDF-booklet check/fetch loops
+	// (booklets.go). Both optional: nil Booklets disables the feature
+	// entirely; nil BookletFiles disables only the download sweep (checks
+	// still record availability for the wire tag).
+	Booklets     BookletSink
+	BookletFiles BookletFileStore
+	HTTP         *http.Client
+	Log          *slog.Logger
+	Now          func() time.Time
+
+	// bookletPriority channel plumbing (lazily built; see bookletPriority).
+	bookletPriorityOnce sync.Once
+	bookletPriorityCh   chan string
 
 	// SubmitInterval is the re-submit cadence (re-submitting is idempotent at
 	// Atlas, but cheap to skip) — catches artists added since the last submit.
@@ -188,6 +199,27 @@ func (c *Client) tick(ctx context.Context) {
 		c.handleErr(ctx, "poll", err)
 	}
 	c.refreshCovers(ctx)
+	if c.Booklets != nil {
+		if bookletsCheckDue(st, c.now(), c.submitInterval()) {
+			err := c.checkBooklets(ctx, st)
+			switch {
+			case errors.Is(err, errBookletEndpointMissing):
+				// Pre-booklet Atlas: log + stamp so the next attempt is a
+				// full interval away (never trips the credential-wipe path).
+				c.log().InfoContext(ctx, "atlasharvest.booklets_unsupported_by_atlas")
+			case err != nil:
+				// Transient: no stamp → retried next tick, mirroring the
+				// submit path's retry shape.
+				c.handleErr(ctx, "booklets_check", err)
+			}
+			if err == nil || errors.Is(err, errBookletEndpointMissing) {
+				if serr := c.State.SetLastBookletCheck(c.now()); serr != nil {
+					c.log().WarnContext(ctx, "atlasharvest.state.persist_failed", "phase", "booklets", "error", serr)
+				}
+			}
+		}
+		c.fetchBooklets(ctx)
+	}
 }
 
 const (

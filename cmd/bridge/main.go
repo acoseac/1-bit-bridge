@@ -40,6 +40,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/analyze"
 	"github.com/acoseac/1-bit-bridge/internal/api"
 	"github.com/acoseac/1-bit-bridge/internal/atlasharvest"
+	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/enrich"
@@ -158,6 +159,75 @@ func (a atlasHarvestSink) UpsertReleaseMeta(ctx context.Context, m atlasharvest.
 		Source:      m.Source,
 		SourceURL:   m.SourceURL,
 	})
+}
+
+// bookletSinkAdapter adapts *manifest.Store to the harvest client's
+// BookletSink — a pass-through except BookletsToFetch, whose row type is
+// narrowed to the (mbid, etag) pair the fetch sweep needs (keeps the
+// atlasharvest package from importing internal/manifest).
+type bookletSinkAdapter struct{ store *manifest.Store }
+
+func (b bookletSinkAdapter) DistinctAlbumReleaseMBIDs(ctx context.Context) ([]string, error) {
+	return b.store.DistinctAlbumReleaseMBIDs(ctx)
+}
+
+func (b bookletSinkAdapter) BookletsToCheck(ctx context.Context, candidates []string, maxAttempts int) ([]string, error) {
+	return b.store.BookletsToCheck(ctx, candidates, maxAttempts)
+}
+
+func (b bookletSinkAdapter) UpsertBookletAvailability(ctx context.Context, mbid string, available bool, etag string, size int64) error {
+	return b.store.UpsertBookletAvailability(ctx, mbid, available, etag, size)
+}
+
+func (b bookletSinkAdapter) SetBookletTagAndBumpIndex(ctx context.Context, releaseMBID, tag string) (int64, error) {
+	return b.store.SetBookletTagAndBumpIndex(ctx, releaseMBID, tag)
+}
+
+func (b bookletSinkAdapter) BookletsToFetch(ctx context.Context, limit int) ([]atlasharvest.BookletFetchItem, error) {
+	rows, err := b.store.BookletsToFetch(ctx, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]atlasharvest.BookletFetchItem, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, atlasharvest.BookletFetchItem{ReleaseMBID: r.ReleaseMBID, Etag: r.Etag})
+	}
+	return out, nil
+}
+
+func (b bookletSinkAdapter) MarkBookletFetched(ctx context.Context, mbid string) error {
+	return b.store.MarkBookletFetched(ctx, mbid)
+}
+
+func (b bookletSinkAdapter) MarkBookletUnavailable(ctx context.Context, mbid string) error {
+	return b.store.MarkBookletUnavailable(ctx, mbid)
+}
+
+func (b bookletSinkAdapter) DeleteBookletsNotIn(ctx context.Context, universe []string) ([]string, error) {
+	return b.store.DeleteBookletsNotIn(ctx, universe)
+}
+
+// bookletDiskStore persists fetched booklet PDFs under <dataDir>/booklets/
+// via the atomicwrite helpers. Paths come from api.BookletPath so the
+// writer and the /v1/booklet server can never disagree about layout; the
+// MBIDs are strict UUIDs by the time they reach here (validated at the
+// check-response boundary and the API handler).
+type bookletDiskStore struct{ dir string }
+
+func (b bookletDiskStore) WriteBooklet(mbid string, r io.Reader) error {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return err
+	}
+	return atomicwrite.WriteBytes(api.BookletPath(b.dir, mbid), data, ".booklet-*.pdf.tmp")
+}
+
+func (b bookletDiskStore) RemoveBooklet(mbid string) error {
+	err := os.Remove(api.BookletPath(b.dir, mbid))
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 // atlasCoverRefetcher adapts the enricher's authenticated premium-cover fetcher
@@ -1995,6 +2065,18 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			Refetcher: atlasCoverRefetcher{premium: premiumCovers, artworkDir: artworkDir, store: manifestStore},
 			Log:       logging.Component("atlasharvest"),
 		}
+		// PDF booklet check + fetch loops (v1.8) ride the same harvest
+		// credential. The cache dir failing to create degrades to
+		// availability-checks-only (no downloads, /v1/booklet answers 202)
+		// rather than disabling the feature.
+		bookletsDir := filepath.Join(cfg.DataDir, "booklets")
+		harvestClient.Booklets = bookletSinkAdapter{store: manifestStore}
+		if err := os.MkdirAll(bookletsDir, 0o700); err != nil {
+			fmt.Fprintf(stderr, "booklets: create cache dir: %v (downloads disabled)\n", err)
+		} else {
+			harvestClient.BookletFiles = bookletDiskStore{dir: bookletsDir}
+		}
+		apiSrv.WithBooklets(manifestStore, bookletsDir, harvestClient.NudgeBookletFetch)
 	}
 	if harvestClient != nil {
 		go harvestClient.Run(scanCtx)

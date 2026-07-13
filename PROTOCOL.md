@@ -621,6 +621,26 @@ Provisions the bridge-driven **bulk harvest**. The iOS app (which alone holds an
 
 `token` is required; `atlasBaseUrl` MUST be an `https` URL (the bridge dials it with the bearer — http is rejected to avoid cleartext token transport); `expiresInSeconds` ≤ 0 (or omitted) means "unknown expiry". **`200`** `{ "ok": true }` on success. Advertised by the bridge accepting the route; gated on `atlas.harvestEnabled` (a bridge with the feature off returns `404 harvest_not_supported`). The harvest client is dormant (cheap idle ticks) until a credential is provisioned.
 
+### PDF album booklets (additive, since v1.8)
+
+Digital booklets for releases, sourced through the operator's Atlas mirror and cached on the bridge. **No provenance is exposed anywhere on this surface — by design.** The wire never names where a booklet came from; clients present booklets as library content.
+
+Advertised via the `booklets` flag in `/v1/health.features` — present only on bridges with the Atlas harvest credential wiring (`atlas.enabled` + `atlas.harvestEnabled`). Pre-feature bridges omit the flag and return `404` from the route below.
+
+#### `Track.bookletTag` (manifest — additive field)
+
+A non-empty `bookletTag` on a manifest track advertises that `GET /v1/booklet/{musicBrainzAlbumID}` serves a PDF booklet for that track's release. The value is an **opaque content tag** for cache-busting: it changes when the booklet's bytes change upstream, and the row's `indexed_at` bumps on any change, so delta-sync (`/v1/manifest?since=`) re-delivers the affected tracks. Keyed by **`musicBrainzAlbumID`** (not `artworkMBID` — a locally-curated cover doesn't preclude a booklet). Omitted (`omitempty`) when no booklet exists; pre-feature clients ignore the field. `ProtocolVersion` stays at `1`.
+
+#### `GET /v1/booklet/{mbid}` (bearer-authenticated)
+
+Serves the cached PDF for the release MBID (strict UUID validation).
+
+- **`200`** — `application/pdf`, served with Range support (`http.ServeContent`), `Content-Disposition: inline`, `Cache-Control: private`.
+- **`202` + `Retry-After: 30`** — the booklet is known + available but the bridge's background download hasn't landed it yet. The request also *prioritizes* that release in the download queue, so a client retrying after the window typically succeeds on the first retry. Same pending semantics as `/v1/artwork`.
+- **`404`** — unknown release, or no booklet exists for it (also the shape pre-feature bridges return).
+
+Booklets can be 10–64 MB; clients should download once and cache keyed by `(mbid, bookletTag)`.
+
 ### Playlist backup (additive, since v1.6; user-wide since v1.7)
 
 Playlist backup. The bridge is a **safe, not a player**: a playlist may mix tracks from several bridges plus local/SMB sources. Items owned by this bridge are stored as resolvable `path`s; items owned by another bridge (or device-local / SMB) are stored as **opaque references** the bridge never resolves or serves — iOS re-resolves them locally on restore against its own shares.

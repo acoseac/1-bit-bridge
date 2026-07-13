@@ -30,6 +30,10 @@ type State struct {
 	ExpiresAt    time.Time `json:"expiresAt"`    // token expiry (zero = unknown)
 	ResultCursor int64     `json:"resultCursor"` // delta-sync cursor
 	LastSubmitAt time.Time `json:"lastSubmitAt"` // last full library submit
+	// LastBookletCheckAt is the last booklet availability-check cycle
+	// (v1.8) — same slow re-check cadence as LastSubmitAt. Additive field:
+	// pre-existing state files unmarshal it as zero (= check due).
+	LastBookletCheckAt time.Time `json:"lastBookletCheckAt"`
 	// PendingCovers maps a release MBID Atlas reported "resolved" (a cover
 	// reverse-resolve was enqueued) to the number of premium re-fetch attempts
 	// that have come back CAA (premium not ready yet). The refresh sweep drains
@@ -136,6 +140,15 @@ func (s *StateStore) SetLastSubmit(t time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.st.LastSubmitAt = t
+	return s.persistLocked()
+}
+
+// SetLastBookletCheck records the time of the last booklet availability
+// check cycle.
+func (s *StateStore) SetLastBookletCheck(t time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.st.LastBookletCheckAt = t
 	return s.persistLocked()
 }
 

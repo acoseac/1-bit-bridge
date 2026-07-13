@@ -84,6 +84,17 @@ type Track struct {
 	// cover identity and re-fetches when it changes. Additive (omitempty); no
 	// ProtocolVersion bump.
 	ArtworkVersion string `json:"artworkVersion,omitempty"`
+	// BookletTag, when non-empty, advertises that GET
+	// /v1/booklet/{musicBrainzAlbumID} serves a PDF album booklet for this
+	// track's release; the value is an opaque content tag for client
+	// cache-busting (it changes when the booklet's bytes change upstream).
+	// COLUMN-derived exactly like ArtworkVersion (spliced from the
+	// booklet_tag column at read time, never persisted into tags_json; set
+	// only by the Atlas booklet availability loop, which also bumps
+	// indexed_at so delta-sync surfaces the change). Keyed by
+	// MusicBrainzAlbumID, NOT ArtworkMBID — a locally-curated cover doesn't
+	// preclude a booklet. Additive (omitempty); no ProtocolVersion bump.
+	BookletTag string `json:"bookletTag,omitempty"`
 	// ArtistMBID is set by the enricher when a matching MusicBrainz artist
 	// was found. Used for artist-image endpoints (PR #9).
 	ArtistMBID string `json:"artistMBID,omitempty"`

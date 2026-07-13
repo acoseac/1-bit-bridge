@@ -645,6 +645,16 @@ type enrichmentResponse struct {
 	ArtistImages      *coverageCounts `json:"artistImages,omitempty"`
 	ArtistBios        *coverageCounts `json:"artistBios,omitempty"`
 	AlbumDescriptions *coverageCounts `json:"albumDescriptions,omitempty"`
+	// Booklets reports PDF album booklets known available upstream vs
+	// already cached on the bridge's disk. Nil (omitted) on bridges
+	// without the booklet wiring or when none are available yet.
+	Booklets *bookletCounts `json:"booklets,omitempty"`
+}
+
+// bookletCounts is the available/cached pair for the booklet stat row.
+type bookletCounts struct {
+	Available int `json:"available"`
+	Cached    int `json:"cached"`
 }
 
 // coverageCounts is a have/missing pair for one enrichment facet
@@ -660,6 +670,7 @@ type enrichmentMetaPart struct {
 	ArtistImages      *coverageCounts
 	ArtistBios        *coverageCounts
 	AlbumDescriptions *coverageCounts
+	Booklets          *bookletCounts
 }
 
 // Enrichment ETA is a deliberately rough reassurance number, not a promise. The
@@ -703,6 +714,7 @@ func (s *Server) getEnrichmentSnapshot() enrichmentResponse {
 	snap.ArtistImages = meta.ArtistImages
 	snap.ArtistBios = meta.ArtistBios
 	snap.AlbumDescriptions = meta.AlbumDescriptions
+	snap.Booklets = meta.Booklets
 	return snap
 }
 
@@ -812,6 +824,13 @@ func (s *Server) getEnrichmentMetaSnapshot() enrichmentMetaPart {
 			snap.AlbumDescriptions = &coverageCounts{Have: b.ReleaseDescsFound, Missing: b.ReleasesTotal - b.ReleaseDescsFound}
 		}
 		snap.ArtistImages = s.artistImageCoverage(ctx)
+		// Booklets (v1.8): cheap two-COUNT read; omitted while nothing is
+		// available (unwired bridges keep an empty table → nil facet).
+		if avail, cached, berr := s.deps.Manifest.BookletCounts(ctx); berr != nil {
+			logger.Warn("enrichment: booklet counts", "err", berr)
+		} else if avail > 0 {
+			snap.Booklets = &bookletCounts{Available: avail, Cached: cached}
+		}
 		s.enrichmentMetaMu.Lock()
 		s.enrichmentMeta = snap
 		s.enrichmentMetaAt = time.Now()

@@ -1131,6 +1131,45 @@ var migrations = []migration{
 			return nil
 		},
 	},
+	{
+		version: 24,
+		name:    "booklets table + release-mbid functional index + tracks.booklet_tag",
+		// PDF album booklets (v1.8): per-release availability + fetch state
+		// learned from Atlas via the harvest credential (booklets table), a
+		// functional index on $.musicBrainzAlbumID so the whole-album
+		// booklet_tag bump (SetBookletTagAndBumpIndex) is index-backed
+		// instead of a table scan, and the column-only tracks.booklet_tag
+		// wire marker (spliced at read like artwork_version, never in
+		// tags_json). Index FIRST, all DDL idempotent (IF NOT EXISTS) per
+		// the migration-ladder contract; the ADD COLUMN rides post() with
+		// the same no-swallowed-ALTER shape as v22/v23.
+		sql: `
+			CREATE INDEX IF NOT EXISTS idx_tracks_release_mbid
+				ON tracks(json_extract(tags_json, '$.musicBrainzAlbumID'));
+			CREATE TABLE IF NOT EXISTS booklets (
+				release_mbid   TEXT PRIMARY KEY,
+				available      INTEGER NOT NULL DEFAULT 0,
+				etag           TEXT NOT NULL DEFAULT '',
+				bytes          INTEGER NOT NULL DEFAULT 0,
+				check_attempts INTEGER NOT NULL DEFAULT 0,
+				checked_at     INTEGER NOT NULL,
+				fetched_at     INTEGER
+			);
+		`,
+		post: func(db *sql.DB) error {
+			exists, err := atlasColumnExists(db, "tracks", "booklet_tag")
+			if err != nil {
+				return fmt.Errorf("inspect tracks.booklet_tag: %w", err)
+			}
+			if exists {
+				return nil
+			}
+			if _, err := db.Exec("ALTER TABLE tracks ADD COLUMN booklet_tag TEXT"); err != nil {
+				return fmt.Errorf("add tracks.booklet_tag: %w", err)
+			}
+			return nil
+		},
+	},
 }
 
 // atlasColumnExists reports whether `table` already has a column named `col`,
@@ -1352,6 +1391,10 @@ func marshalForStorage(t *Track) ([]byte, error) {
 	// spliced value into tags_json (where the JSON-only readers would surface a
 	// stale version) AND can't have UpsertTrack's tags_json clobber the column.
 	clone.ArtworkVersion = ""
+	// BookletTag is column-derived exactly like ArtworkVersion (spliced from
+	// the booklet_tag column at read time, set only by the booklet
+	// availability loop) — same zero-before-marshal contract.
+	clone.BookletTag = ""
 	// ReplayGainTrackDB is DUAL-source: a curated tag (the scanner
 	// extracted it — must persist) OR an analysis splice (must NOT
 	// persist, else a round-tripped read Track freezes the analysis value
@@ -2327,7 +2370,7 @@ func formatSampleRateLabel(hz float64) string {
 // require re-marshalling every track on each `MarkEnriched` write
 // just to flip a bool, which is what the column is for.
 func (s *Store) ListTracks(ctx context.Context, since *time.Time) ([]Track, error) {
-	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + keyTempoSQL + `, artwork_version FROM tracks`
+	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + keyTempoSQL + `, artwork_version, booklet_tag FROM tracks`
 	args := []any{}
 	if since != nil {
 		q += ` WHERE indexed_at > ?`
@@ -2348,7 +2391,8 @@ func (s *Store) ListTracks(ctx context.Context, since *time.Time) ([]Track, erro
 		var rg sql.NullFloat64
 		var ktRaw sql.NullString
 		var artVer sql.NullString
-		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw, &artVer); err != nil {
+		var bkTag sql.NullString
+		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw, &artVer, &bkTag); err != nil {
 			return nil, err
 		}
 		var t Track
@@ -2359,6 +2403,7 @@ func (s *Store) ListTracks(ctx context.Context, since *time.Time) ([]Track, erro
 		t.Enriched = boolPtr(enrichedAt != 0)
 		t.WaveformTag = wfTag.String
 		t.ArtworkVersion = artVer.String
+		t.BookletTag = bkTag.String
 		spliceAnalysisReplayGain(&t, rg)
 		spliceAnalysisKeyTempo(&t, ktRaw)
 		out = append(out, t)
@@ -2389,7 +2434,7 @@ func (s *Store) StreamTracks(ctx context.Context, sp *time.Time, fn func(*Track)
 		// production crash deep in the streaming-manifest path.
 		return errors.New("StreamTracks: nil callback")
 	}
-	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + keyTempoSQL + `, artwork_version FROM tracks`
+	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + keyTempoSQL + `, artwork_version, booklet_tag FROM tracks`
 	args := []any{}
 	if sp != nil {
 		q += ` WHERE indexed_at > ?`
@@ -2423,7 +2468,8 @@ func (s *Store) StreamTracks(ctx context.Context, sp *time.Time, fn func(*Track)
 		var rg sql.NullFloat64
 		var ktRaw sql.NullString
 		var artVer sql.NullString
-		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw, &artVer); err != nil {
+		var bkTag sql.NullString
+		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw, &artVer, &bkTag); err != nil {
 			return err
 		}
 		t = Track{}
@@ -2434,6 +2480,7 @@ func (s *Store) StreamTracks(ctx context.Context, sp *time.Time, fn func(*Track)
 		scanTrackVariants(&t, variantsRaw)
 		t.WaveformTag = wfTag.String
 		t.ArtworkVersion = artVer.String
+		t.BookletTag = bkTag.String
 		spliceAnalysisReplayGain(&t, rg)
 		spliceAnalysisKeyTempo(&t, ktRaw)
 		if err := fn(&t); err != nil {
@@ -2464,7 +2511,7 @@ func (s *Store) ListTracksPage(ctx context.Context, afterPath string, limit int)
 		limit = 1000
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT tags_json, enriched_at, `+variantsAggSQL+`, `+waveformTagSQL+`, `+replayGainSQL+`, `+keyTempoSQL+`, artwork_version FROM tracks
+		SELECT tags_json, enriched_at, `+variantsAggSQL+`, `+waveformTagSQL+`, `+replayGainSQL+`, `+keyTempoSQL+`, artwork_version, booklet_tag FROM tracks
 		WHERE path > ?
 		ORDER BY path ASC
 		LIMIT ?
@@ -2486,7 +2533,8 @@ func (s *Store) ListTracksPage(ctx context.Context, afterPath string, limit int)
 		var rg sql.NullFloat64
 		var ktRaw sql.NullString
 		var artVer sql.NullString
-		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw, &artVer); err != nil {
+		var bkTag sql.NullString
+		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw, &artVer, &bkTag); err != nil {
 			return nil, err
 		}
 		var t Track
@@ -2497,6 +2545,7 @@ func (s *Store) ListTracksPage(ctx context.Context, afterPath string, limit int)
 		t.Enriched = boolPtr(enrichedAt != 0)
 		t.WaveformTag = wfTag.String
 		t.ArtworkVersion = artVer.String
+		t.BookletTag = bkTag.String
 		spliceAnalysisReplayGain(&t, rg)
 		spliceAnalysisKeyTempo(&t, ktRaw)
 		out = append(out, t)

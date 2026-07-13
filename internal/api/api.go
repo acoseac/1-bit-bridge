@@ -140,6 +140,9 @@ type Server struct {
 	analysisStatsProvider  AnalysisStatsProvider        // nil unless WithAnalysisStats wired — /v1/analysis/stats
 	batchCoordinator       BatchCoordinator             // nil unless WithBatchCoordinator wired (v1.3 operator-driven upscale)
 	eventBroker            *eventBroker                 // nil disables /v1/events (back-compat for test harnesses); wired once at startup, see StartEventBroker
+	bookletStore           BookletStore                 // nil unless WithBooklets wired — /v1/booklet availability lookups
+	bookletDir             string                       // on-disk PDF cache dir (WithBooklets)
+	bookletNudge           func(mbid string)            // optional fetch-priority nudge for the 202 path (WithBooklets)
 	manifestRateLimiter    *manifestRateLimiter         // per-token-ID token-bucket for /v1/manifest
 	reachability           *reachabilityCache           // per-root probe TTL cache used by /v1/list, /v1/stat, /v1/health
 	healthCounts           *healthCountsCache           // TTL cache for /v1/health scan-state COUNT(*) scans
@@ -1362,21 +1365,28 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	//     of whether the transcode pool exists.
 	//
 	// Alpha-sort stays correct by construction: each conditional
-	// appends in lex order. Capacity 19 covers the current maximum
-	// (atlasEnrichment + carPlayOptimize + deleteVariants + diagnosticsSummary +
-	// dlnaServer + keyTempo + loudness + operatorDrivenUpscale +
-	// pairingEventsSupported + playbackHistory + playbackHistoryRead +
-	// playlistBackup + playlistsCrossDevice + pushEventsSupported +
-	// rendererDiscovery + smartPlaylists + upscaleCompleteEvents +
-	// variantBumpsIndex + waveform).
-	feats := make([]string, 0, 19)
+	// appends in lex order. Capacity 20 covers the current maximum
+	// (atlasEnrichment + booklets + carPlayOptimize + deleteVariants +
+	// diagnosticsSummary + dlnaServer + keyTempo + loudness +
+	// operatorDrivenUpscale + pairingEventsSupported + playbackHistory +
+	// playbackHistoryRead + playlistBackup + playlistsCrossDevice +
+	// pushEventsSupported + rendererDiscovery + smartPlaylists +
+	// upscaleCompleteEvents + variantBumpsIndex + waveform).
+	feats := make([]string, 0, 20)
 	// `atlasEnrichment` advertises the rich-tier Atlas metadata surface
 	// (cfg.Atlas.Enabled): the bridge accepts POST /v1/atlas-ingest from the
 	// closed-source app and serves GET /v1/atlas-meta/{release,artist}/{mbid}.
 	// iOS gates its bio/description fetch-and-ferry flow on this. Alpha-sorts
-	// first (`a` < `c`).
+	// first (`a` < `b`).
 	if s.atlasMetaEnabled && s.atlasMetaStore != nil {
 		feats = append(feats, "atlasEnrichment")
+	}
+	// `booklets` advertises GET /v1/booklet/{mbid} + the per-track
+	// `bookletTag` manifest field (PDF album booklets, v1.8). Gated on the
+	// booklet wiring (harvest-credential deployments only). Alpha-sorts
+	// between `atlasEnrichment` and `carPlayOptimize` (a < b < c).
+	if s.bookletStore != nil && s.bookletDir != "" {
+		feats = append(feats, "booklets")
 	}
 	if s.upscaleEnabled {
 		if s.carPlayOptimizeEnabled {
