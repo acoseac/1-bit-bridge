@@ -134,9 +134,17 @@ func (s *Store) BookletsToCheck(ctx context.Context, candidates []string, maxAtt
 	if len(candidates) == 0 {
 		return nil, nil
 	}
+	// Server-side candidate filter (same json_each single-bind shape as
+	// DeleteBookletsNotIn) — a client-side scan would buffer the whole
+	// table regardless of candidate-set size (CodeRabbit on PR #496).
+	blob, err := json.Marshal(candidates)
+	if err != nil {
+		return nil, err
+	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT release_mbid, available, check_attempts FROM booklets
-	`)
+		 WHERE release_mbid IN (SELECT value FROM json_each(?))
+	`, string(blob))
 	if err != nil {
 		return nil, err
 	}
