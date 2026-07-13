@@ -200,26 +200,32 @@ func (c *Client) tick(ctx context.Context) {
 	}
 	c.refreshCovers(ctx)
 	if c.Booklets != nil {
-		if bookletsCheckDue(st, c.now(), c.submitInterval()) {
-			err := c.checkBooklets(ctx, st)
-			switch {
-			case errors.Is(err, errBookletEndpointMissing):
-				// Pre-booklet Atlas: log + stamp so the next attempt is a
-				// full interval away (never trips the credential-wipe path).
-				c.log().InfoContext(ctx, "atlasharvest.booklets_unsupported_by_atlas")
-			case err != nil:
-				// Transient: no stamp → retried next tick, mirroring the
-				// submit path's retry shape.
-				c.handleErr(ctx, "booklets_check", err)
-			}
-			if err == nil || errors.Is(err, errBookletEndpointMissing) {
-				if serr := c.State.SetLastBookletCheck(c.now()); serr != nil {
-					c.log().WarnContext(ctx, "atlasharvest.state.persist_failed", "phase", "booklets", "error", serr)
-				}
+		c.tickBooklets(ctx, st)
+	}
+}
+
+// tickBooklets runs the booklet legs of one tick: the interval-gated
+// availability check (stamped on success AND on endpoint-missing so a
+// pre-booklet Atlas is probed once per interval, never per tick; transient
+// errors leave the stamp alone → retried next tick, mirroring the submit
+// leg) followed by the budget-bounded fetch sweep.
+func (c *Client) tickBooklets(ctx context.Context, st State) {
+	if bookletsCheckDue(st, c.now(), c.submitInterval()) {
+		err := c.checkBooklets(ctx, st)
+		switch {
+		case errors.Is(err, errBookletEndpointMissing):
+			// Pre-booklet Atlas: never trips the credential-wipe path.
+			c.log().InfoContext(ctx, "atlasharvest.booklets_unsupported_by_atlas")
+		case err != nil:
+			c.handleErr(ctx, "booklets_check", err)
+		}
+		if err == nil || errors.Is(err, errBookletEndpointMissing) {
+			if serr := c.State.SetLastBookletCheck(c.now()); serr != nil {
+				c.log().WarnContext(ctx, "atlasharvest.state.persist_failed", "phase", "booklets", "error", serr)
 			}
 		}
-		c.fetchBooklets(ctx)
 	}
+	c.fetchBooklets(ctx)
 }
 
 const (

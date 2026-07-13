@@ -109,41 +109,49 @@ func (c *Client) checkBooklets(ctx context.Context, st State) error {
 	}
 	for i := 0; i < len(candidates); i += bookletCheckChunk {
 		end := min(i+bookletCheckChunk, len(candidates))
-		chunk := candidates[i:end]
-		var resp bookletsCheckResponse
-		if err := c.postJSON(ctx, st, "/v1/atlas/harvest/booklets/check", bookletsCheckRequest{MBIDs: chunk}, &resp); err != nil {
-			if isHTTPNotFound(err) {
-				return errBookletEndpointMissing
-			}
+		if err := c.checkBookletChunk(ctx, st, candidates[i:end]); err != nil {
 			return err
-		}
-		available := make(map[string]bookletsCheckItem, len(resp.Booklets))
-		for _, b := range resp.Booklets {
-			if b.MBID == "" {
-				continue
-			}
-			available[b.MBID] = b
-		}
-		for _, mbid := range chunk {
-			if b, ok := available[mbid]; ok {
-				if err := c.Booklets.UpsertBookletAvailability(ctx, mbid, true, b.Etag, b.Bytes); err != nil {
-					return fmt.Errorf("record booklet %s: %w", mbid, err)
-				}
-				// Stamp the wire tag (no-op when unchanged) — the strict-
-				// advance indexed_at bump is what surfaces the flip to iOS.
-				if _, err := c.Booklets.SetBookletTagAndBumpIndex(ctx, mbid, b.Etag); err != nil {
-					return fmt.Errorf("stamp booklet tag %s: %w", mbid, err)
-				}
-			} else {
-				if err := c.Booklets.UpsertBookletAvailability(ctx, mbid, false, "", 0); err != nil {
-					return fmt.Errorf("record booklet miss %s: %w", mbid, err)
-				}
-			}
 		}
 	}
 	c.gcBooklets(ctx, universe)
 	c.log().InfoContext(ctx, "atlasharvest.booklets_checked",
 		"universe", len(universe), "checked", len(candidates))
+	return nil
+}
+
+// checkBookletChunk POSTs one candidate chunk and records every verdict:
+// present in the response → available (+ the wire-tag stamp, whose
+// strict-advance indexed_at bump is what surfaces the flip to iOS);
+// absent → a miss that burns one attempt.
+func (c *Client) checkBookletChunk(ctx context.Context, st State, chunk []string) error {
+	var resp bookletsCheckResponse
+	if err := c.postJSON(ctx, st, "/v1/atlas/harvest/booklets/check", bookletsCheckRequest{MBIDs: chunk}, &resp); err != nil {
+		if isHTTPNotFound(err) {
+			return errBookletEndpointMissing
+		}
+		return err
+	}
+	available := make(map[string]bookletsCheckItem, len(resp.Booklets))
+	for _, b := range resp.Booklets {
+		if b.MBID != "" {
+			available[b.MBID] = b
+		}
+	}
+	for _, mbid := range chunk {
+		b, ok := available[mbid]
+		if !ok {
+			if err := c.Booklets.UpsertBookletAvailability(ctx, mbid, false, "", 0); err != nil {
+				return fmt.Errorf("record booklet miss %s: %w", mbid, err)
+			}
+			continue
+		}
+		if err := c.Booklets.UpsertBookletAvailability(ctx, mbid, true, b.Etag, b.Bytes); err != nil {
+			return fmt.Errorf("record booklet %s: %w", mbid, err)
+		}
+		if _, err := c.Booklets.SetBookletTagAndBumpIndex(ctx, mbid, b.Etag); err != nil {
+			return fmt.Errorf("stamp booklet tag %s: %w", mbid, err)
+		}
+	}
 	return nil
 }
 
@@ -183,35 +191,13 @@ func (c *Client) fetchBooklets(ctx context.Context) {
 	fetched := 0
 	seen := make(map[string]struct{}, budget)
 
-	fetchOne := func(mbid string) {
-		if _, dup := seen[mbid]; dup {
-			return
-		}
-		seen[mbid] = struct{}{}
-		if err := c.fetchBookletPDF(ctx, st, mbid); err != nil {
-			if errors.Is(err, errBookletGone) {
-				if uerr := c.Booklets.MarkBookletUnavailable(ctx, mbid); uerr != nil {
-					c.log().WarnContext(ctx, "atlasharvest.booklet_mark_unavailable", "mbid", mbid, "error", uerr)
-				}
-				if _, terr := c.Booklets.SetBookletTagAndBumpIndex(ctx, mbid, ""); terr != nil {
-					c.log().WarnContext(ctx, "atlasharvest.booklet_clear_tag", "mbid", mbid, "error", terr)
-				}
-				return
-			}
-			c.log().WarnContext(ctx, "atlasharvest.booklet_fetch_failed", "mbid", mbid, "error", err)
-			return
-		}
-		if err := c.Booklets.MarkBookletFetched(ctx, mbid); err != nil {
-			c.log().WarnContext(ctx, "atlasharvest.booklet_mark_fetched", "mbid", mbid, "error", err)
-		}
-		fetched++
-	}
-
 	// Priority first: tap-driven requests from the API's 202 path.
 	for budget > len(seen) {
 		select {
 		case mbid := <-c.bookletPriority():
-			fetchOne(mbid)
+			if c.fetchOneBooklet(ctx, st, mbid, seen) {
+				fetched++
+			}
 			continue
 		default:
 		}
@@ -227,12 +213,42 @@ func (c *Client) fetchBooklets(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
-			fetchOne(it.ReleaseMBID)
+			if c.fetchOneBooklet(ctx, st, it.ReleaseMBID, seen) {
+				fetched++
+			}
 		}
 	}
 	if fetched > 0 {
 		c.log().InfoContext(ctx, "atlasharvest.booklets_fetched", "count", fetched)
 	}
+}
+
+// fetchOneBooklet downloads one PDF (dedup'd via seen; reports whether a
+// fetch landed). An upstream 404 flips the row unavailable AND clears the
+// wire tag — a real state change iOS must see; transient errors just log,
+// leaving the row pending for the next tick.
+func (c *Client) fetchOneBooklet(ctx context.Context, st State, mbid string, seen map[string]struct{}) bool {
+	if _, dup := seen[mbid]; dup {
+		return false
+	}
+	seen[mbid] = struct{}{}
+	if err := c.fetchBookletPDF(ctx, st, mbid); err != nil {
+		if errors.Is(err, errBookletGone) {
+			if uerr := c.Booklets.MarkBookletUnavailable(ctx, mbid); uerr != nil {
+				c.log().WarnContext(ctx, "atlasharvest.booklet_mark_unavailable", "mbid", mbid, "error", uerr)
+			}
+			if _, terr := c.Booklets.SetBookletTagAndBumpIndex(ctx, mbid, ""); terr != nil {
+				c.log().WarnContext(ctx, "atlasharvest.booklet_clear_tag", "mbid", mbid, "error", terr)
+			}
+			return false
+		}
+		c.log().WarnContext(ctx, "atlasharvest.booklet_fetch_failed", "mbid", mbid, "error", err)
+		return false
+	}
+	if err := c.Booklets.MarkBookletFetched(ctx, mbid); err != nil {
+		c.log().WarnContext(ctx, "atlasharvest.booklet_mark_fetched", "mbid", mbid, "error", err)
+	}
+	return true
 }
 
 // errBookletGone marks an Atlas 404 on the PDF fetch — the booklet

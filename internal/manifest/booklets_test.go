@@ -11,58 +11,66 @@ const (
 	bkRel2 = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 )
 
-func TestUpsertBookletAvailabilitySemantics(t *testing.T) {
+// mustGetBooklet is the test-side fetch helper (fatal on error/absent).
+func mustGetBooklet(t *testing.T, s *Store, mbid string) *BookletRow {
+	t.Helper()
+	row, err := s.GetBooklet(context.Background(), mbid)
+	if err != nil || row == nil {
+		t.Fatalf("GetBooklet(%s) = (%v, %v)", mbid, row, err)
+	}
+	return row
+}
+
+func TestUpsertBookletAvailabilityMissesAccumulate(t *testing.T) {
 	s := openAtlasTestStore(t)
 	ctx := context.Background()
-
-	// Misses accumulate attempts.
 	for i := 1; i <= 2; i++ {
 		if err := s.UpsertBookletAvailability(ctx, bkRel1, false, "", 0); err != nil {
 			t.Fatal(err)
 		}
-		row, err := s.GetBooklet(ctx, bkRel1)
-		if err != nil || row == nil {
-			t.Fatalf("get after miss %d: (%v, %v)", i, row, err)
-		}
+		row := mustGetBooklet(t, s, bkRel1)
 		if row.Available || row.CheckAttempts != i {
 			t.Errorf("after miss %d: available=%v attempts=%d", i, row.Available, row.CheckAttempts)
 		}
 	}
-
 	// Availability resets attempts + stores tag/size.
 	if err := s.UpsertBookletAvailability(ctx, bkRel1, true, "etag-1", 1234); err != nil {
 		t.Fatal(err)
 	}
-	row, _ := s.GetBooklet(ctx, bkRel1)
+	row := mustGetBooklet(t, s, bkRel1)
 	if !row.Available || row.CheckAttempts != 0 || row.Etag != "etag-1" || row.Bytes != 1234 {
 		t.Errorf("after available: %+v", row)
+	}
+}
+
+func TestUpsertBookletAvailabilityEtagLifecycle(t *testing.T) {
+	s := openAtlasTestStore(t)
+	ctx := context.Background()
+	if err := s.UpsertBookletAvailability(ctx, bkRel1, true, "etag-1", 1234); err != nil {
+		t.Fatal(err)
 	}
 	if err := s.MarkBookletFetched(ctx, bkRel1); err != nil {
 		t.Fatal(err)
 	}
-
 	// Same-etag re-check keeps fetched_at; a changed etag clears it (stale
 	// cached PDF must re-download).
 	if err := s.UpsertBookletAvailability(ctx, bkRel1, true, "etag-1", 1234); err != nil {
 		t.Fatal(err)
 	}
-	row, _ = s.GetBooklet(ctx, bkRel1)
-	if row.FetchedAt == nil {
+	if mustGetBooklet(t, s, bkRel1).FetchedAt == nil {
 		t.Error("same-etag re-check cleared fetched_at, want preserved")
 	}
 	if err := s.UpsertBookletAvailability(ctx, bkRel1, true, "etag-2", 2222); err != nil {
 		t.Fatal(err)
 	}
-	row, _ = s.GetBooklet(ctx, bkRel1)
-	if row.FetchedAt != nil {
+	if mustGetBooklet(t, s, bkRel1).FetchedAt != nil {
 		t.Error("etag change kept fetched_at, want cleared (cached PDF is stale)")
 	}
-
 	// MarkBookletUnavailable flips + clears.
 	if err := s.MarkBookletUnavailable(ctx, bkRel1); err != nil {
 		t.Fatal(err)
 	}
-	row, _ = s.GetBooklet(ctx, bkRel1)
+	row := mustGetBooklet(t, s, bkRel1)
 	if row.Available || row.Etag != "" || row.FetchedAt != nil {
 		t.Errorf("after unavailable: %+v", row)
 	}
