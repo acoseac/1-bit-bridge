@@ -2609,6 +2609,26 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// so the admin tile's `enabled` matches /v1/health's `waveform`
 		// flag rather than the persisted config flag.
 		AnalysisActive: func() bool { return analysisActive },
+		// Artist-image coverage source for the dashboard enrichment card —
+		// one ReadDir over the shared artwork cache dir, called behind the
+		// admin's 60s enrichment-meta TTL (never per-tick).
+		ArtistImageMBIDs: func() (map[string]struct{}, error) {
+			return enrich.CachedArtistImageMBIDs(artworkDir)
+		},
+		// "Retry missing" harvest nudge: zeroing the last-submit stamp makes
+		// the harvest client's next tick re-submit the full library (Atlas
+		// re-attempts unresolved bios/descriptions; submit is idempotent).
+		// nil-equivalent when harvest isn't wired: returns false.
+		HarvestForceSubmit: func() bool {
+			if harvestState == nil {
+				return false
+			}
+			if err := harvestState.SetLastSubmit(time.Time{}); err != nil {
+				logger.Warn("enrichment retry: reset harvest submit stamp", "err", err)
+				return false
+			}
+			return true
+		},
 		UpscaleStats: func() *admin.UpscalePoolStats {
 			// Snapshot the pool's live counters when the
 			// feature is active. Two off-paths return nil

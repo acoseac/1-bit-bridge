@@ -105,6 +105,31 @@ function initDashboard() {
     });
   }
 
+  // Enrichment panel: "Retry missing" re-queues enriched-but-incomplete
+  // tracks + nudges the harvest re-submit. Success shows the re-queued
+  // count briefly; the server 429s repeat clicks inside its rate window.
+  const enrichRetryBtn = document.getElementById("enrich-retry");
+  if (enrichRetryBtn) {
+    const idleText = enrichRetryBtn.textContent;
+    enrichRetryBtn.addEventListener("click", async () => {
+      enrichRetryBtn.disabled = true;
+      enrichRetryBtn.textContent = "Retrying…";
+      try {
+        const r = await API.post("/api/enrichment/retry");
+        enrichRetryBtn.textContent =
+          r && r.resetTracks > 0 ? `Re-queued ${r.resetTracks}` : "Re-checked";
+      } catch (err) {
+        enrichRetryBtn.textContent = idleText;
+        alert("Retry failed: " + err.message);
+      } finally {
+        setTimeout(() => {
+          enrichRetryBtn.disabled = false;
+          enrichRetryBtn.textContent = idleText;
+        }, 4000);
+      }
+    });
+  }
+
   // Updates panel: "Check now" forces a fresh GitHub poll. The handler
   // returns the post-check status so the tile refreshes in one trip.
   const updateCheckBtn = document.getElementById("update-check");
@@ -269,7 +294,53 @@ function applyEnrichment(e) {
   const etaEl = document.getElementById("enrich-eta");
   if (etaEl) etaEl.textContent = formatEnrichEta(pending, e.etaSecondsEstimate);
 
+  // Source row — config-derived label, hidden on frames that omit it.
+  const srcDt = document.getElementById("enrich-source-dt");
+  const srcDd = document.getElementById("enrich-source");
+  if (srcDt && srcDd) {
+    const label = ENRICH_SOURCE_LABELS[e.source];
+    srcDt.hidden = srcDd.hidden = !label;
+    if (label) srcDd.textContent = label;
+  }
+
+  // Coverage rows: artist images / bios / album descriptions. Each is
+  // omitted from the payload when its data source isn't wired (e.g. bios
+  // on a bridge without Atlas) — the row stays hidden in that case.
+  setEnrichCoverage("enrich-artist-images", e.artistImages);
+  setEnrichCoverage("enrich-artist-bios", e.artistBios);
+  setEnrichCoverage("enrich-album-desc", e.albumDescriptions);
+
+  // Reveal "Retry missing" only when some facet actually has gaps.
+  const retryBtn = document.getElementById("enrich-retry");
+  if (retryBtn) {
+    const anyMissing =
+      (e.missing ?? 0) > 0 ||
+      (e.artistImages?.missing ?? 0) > 0 ||
+      (e.artistBios?.missing ?? 0) > 0 ||
+      (e.albumDescriptions?.missing ?? 0) > 0;
+    retryBtn.hidden = !anyMissing;
+  }
+
   renderCoverageBar(e.matched ?? 0, e.missing ?? 0);
+}
+
+// Human labels for enrichmentResponse.source (deriveEnrichSource values).
+const ENRICH_SOURCE_LABELS = {
+  musicbrainz: "MusicBrainz (public)",
+  atlas: "Atlas (self-hosted)",
+  custom: "Custom mirrors",
+};
+
+// setEnrichCoverage paints one "N have · M missing" coverage row, keyed by
+// the shared id prefix (dt = `${baseId}-dt`, dd = baseId). Hides the pair
+// when the facet is absent from the payload.
+function setEnrichCoverage(baseId, counts) {
+  const dt = document.getElementById(baseId + "-dt");
+  const dd = document.getElementById(baseId);
+  if (!dt || !dd) return;
+  const show = counts && typeof counts.have === "number";
+  dt.hidden = dd.hidden = !show;
+  if (show) dd.textContent = `${counts.have} have · ${counts.missing} missing`;
 }
 
 // formatEnrichEta turns the pending count + coarse server estimate into a
@@ -1721,8 +1792,56 @@ function initSettingsTabs() {
   activate(saved && validIds.has(saved) ? saved : tabsArr[0].dataset.tab);
 }
 
+// initEnrichmentSource wires the Enrichment tab's source picker: the Atlas
+// URL field shows only for source=atlas, "custom" opens the Advanced raw
+// fields, and hand-editing a raw URL flips the picker to Custom so the
+// submit-time mapping never silently overwrites a manual edit.
+function initEnrichmentSource() {
+  const sel = document.querySelector('select[name="enrichSource"]');
+  if (!sel) return;
+  const atlasField = document.getElementById("enrich-atlas-field");
+  const advanced = document.getElementById("enrich-advanced");
+  const apply = () => {
+    if (atlasField) atlasField.hidden = sel.value !== "atlas";
+    if (advanced && sel.value === "custom") advanced.open = true;
+  };
+  sel.addEventListener("change", apply);
+  for (const name of ["enrichMusicBrainzBaseURL", "enrichCoverArtBaseURL"]) {
+    document.querySelector(`[name="${name}"]`)?.addEventListener("input", () => {
+      if (sel.value !== "custom") {
+        sel.value = "custom";
+        apply();
+      }
+    });
+  }
+}
+
+// mapEnrichSourceToBases resolves the source picker + Atlas URL + raw fields
+// into the two base URLs the PATCH actually carries (the config schema is
+// unchanged — URLs stay the single source of truth). Returns null with an
+// error message when Atlas is selected without a URL.
+function mapEnrichSourceToBases(fd) {
+  const src = fd.get("enrichSource") || "custom";
+  if (src === "musicbrainz") {
+    return { mb: "", ca: "" }; // public defaults
+  }
+  if (src === "atlas") {
+    // Trailing-slash trim via a loop, not /\/+$/ — Sonar flags that regex
+    // class as super-linear under backtracking.
+    let a = (fd.get("enrichAtlasURL") || "").trim();
+    while (a.endsWith("/")) a = a.slice(0, -1);
+    if (!a) return { err: "Atlas URL is required when the enrichment source is Atlas." };
+    return { mb: a + "/ws/2", ca: a };
+  }
+  return {
+    mb: fd.get("enrichMusicBrainzBaseURL") || "",
+    ca: fd.get("enrichCoverArtBaseURL") || "",
+  };
+}
+
 function initSettings() {
   initSettingsTabs();
+  initEnrichmentSource();
   // Cert info is a one-shot fetch — the cert doesn't change without
   // a restart, so polling it is wasted work. The endpoints panel is
   // hydrated by the SSE stream wired at the bottom of this file.
@@ -1815,6 +1934,14 @@ function initSettings() {
       if (!ok) return;
     }
 
+    // Resolve the Enrichment tab's source picker into the two base URLs
+    // the server expects (PATCH surface unchanged; picker is UI-only).
+    const enrichBases = mapEnrichSourceToBases(fd);
+    if (enrichBases.err) {
+      showMsg(msg, "err", enrichBases.err);
+      return;
+    }
+
     const body = {
       libraryName: fd.get("libraryName"),
       listenAddress: fd.get("listenAddress"),
@@ -1838,11 +1965,12 @@ function initSettings() {
       upscaleEnabled: fd.get("upscaleEnabled") === "on",
       analysisEnabled: fd.get("analysisEnabled") === "on",
       smartPlaylistsEnabled: fd.get("smartPlaylistsEnabled") === "on",
-      // Enrich upstream base URLs (blank = public MusicBrainz / Cover Art
-      // defaults; point at a self-hosted Atlas mirror). Server validates +
-      // normalizes; restart-required.
-      enrichMusicBrainzBaseURL: fd.get("enrichMusicBrainzBaseURL") || "",
-      enrichCoverArtBaseURL: fd.get("enrichCoverArtBaseURL") || "",
+      // Enrich upstream base URLs, resolved from the source picker above
+      // (blank = public MusicBrainz / Cover Art defaults; atlas = derived
+      // <url>/ws/2 + <url>; custom = the raw Advanced fields). Server
+      // validates + normalizes; restart-required.
+      enrichMusicBrainzBaseURL: enrichBases.mb,
+      enrichCoverArtBaseURL: enrichBases.ca,
       // Rich-tier Atlas metadata opt-in (bios/descriptions via the app
       // ferry). Restart-required; same checkbox-coerce pattern.
       atlasEnabled: fd.get("atlasEnabled") === "on",
@@ -1868,6 +1996,12 @@ function initSettings() {
     };
     try {
       const r = await API.patch("/api/settings", body);
+      // Sync the Advanced raw inputs to what was actually saved so the
+      // picker view and the raw view can't disagree after a save.
+      const mbRaw = form.querySelector('[name="enrichMusicBrainzBaseURL"]');
+      const caRaw = form.querySelector('[name="enrichCoverArtBaseURL"]');
+      if (mbRaw) mbRaw.value = enrichBases.mb;
+      if (caRaw) caRaw.value = enrichBases.ca;
       showMsg(msg, r.restartRequired ? "warn" : "ok",
         r.restartRequired
           ? "Saved. Some fields need a restart to take effect."

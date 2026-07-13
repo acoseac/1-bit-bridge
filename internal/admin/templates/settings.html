@@ -48,6 +48,9 @@
       <button id="settings-tab-general" type="button" class="tab-btn active" role="tab"
               data-tab="general" aria-controls="settings-panel-general"
               aria-selected="true">General</button>
+      <button id="settings-tab-enrichment" type="button" class="tab-btn" role="tab"
+              data-tab="enrichment" aria-controls="settings-panel-enrichment"
+              aria-selected="false">Enrichment</button>
       <button id="settings-tab-networking" type="button" class="tab-btn" role="tab"
               data-tab="networking" aria-controls="settings-panel-networking"
               aria-selected="false">Networking</button>
@@ -90,29 +93,52 @@
         <small class="hint">Set at <code>bridge init</code> time; not editable here.</small>
       </div>
 
-      <h2 class="section-head">Metadata enrichment</h2>
+    </div>
+
+    <div id="settings-panel-enrichment" class="tab-pane" data-tab="enrichment"
+         role="tabpanel" aria-labelledby="settings-tab-enrichment">
+      <h2 class="section-head">Enrichment</h2>
       <p class="hint">
-        The background enricher fills in cover art + MusicBrainz IDs. By
-        default it queries public MusicBrainz + Cover Art Archive. Point these
-        at a self-hosted <a href="https://github.com/acoseac/1-bit-atlas">Atlas</a>
-        mirror to keep enrichment on your own network — set MusicBrainz to
-        <code>https://&lt;atlas-host&gt;/ws/2</code> and Cover Art to
-        <code>https://&lt;atlas-host&gt;</code>. Leave blank for the public defaults.
+        The background enricher fills in cover art + MusicBrainz IDs. Choose
+        where it looks: the public MusicBrainz + Cover Art Archive services,
+        or a self-hosted <a href="https://github.com/acoseac/1-bit-atlas">Atlas</a>
+        mirror on your own network.
       </p>
 
       <div class="field">
-        <label>MusicBrainz base URL <span class="badge warn">restart</span>
-          <input name="enrichMusicBrainzBaseURL" type="url" value="{{.Data.EnrichMusicBrainzBaseURL}}"
-                 placeholder="https://musicbrainz.org/ws/2">
+        <label>Enrichment source <span class="badge warn">restart</span>
+          <select name="enrichSource">
+            <option value="musicbrainz" {{if eq .Data.EnrichSource "musicbrainz"}}selected{{end}}>MusicBrainz (public)</option>
+            <option value="atlas" {{if eq .Data.EnrichSource "atlas"}}selected{{end}}>Atlas (self-hosted)</option>
+            <option value="custom" {{if eq .Data.EnrichSource "custom"}}selected{{end}}>Custom mirrors</option>
+          </select>
         </label>
       </div>
 
-      <div class="field">
-        <label>Cover Art base URL <span class="badge warn">restart</span>
-          <input name="enrichCoverArtBaseURL" type="url" value="{{.Data.EnrichCoverArtBaseURL}}"
-                 placeholder="https://coverartarchive.org">
+      <div class="field" id="enrich-atlas-field" {{if ne .Data.EnrichSource "atlas"}}hidden{{end}}>
+        <label>Atlas URL
+          <input name="enrichAtlasURL" type="url" value="{{.Data.EnrichAtlasURL}}"
+                 placeholder="https://atlas.example.com">
         </label>
+        <small class="hint">The Atlas host serves both MusicBrainz lookups
+          and cover art; the bridge derives the right paths automatically.</small>
       </div>
+
+      <details id="enrich-advanced" {{if eq .Data.EnrichSource "custom"}}open{{end}}>
+        <summary>Advanced: raw mirror URLs</summary>
+        <div class="field">
+          <label>MusicBrainz base URL <span class="badge warn">restart</span>
+            <input name="enrichMusicBrainzBaseURL" type="url" value="{{.Data.EnrichMusicBrainzBaseURL}}"
+                   placeholder="https://musicbrainz.org/ws/2">
+          </label>
+        </div>
+        <div class="field">
+          <label>Cover Art base URL <span class="badge warn">restart</span>
+            <input name="enrichCoverArtBaseURL" type="url" value="{{.Data.EnrichCoverArtBaseURL}}"
+                   placeholder="https://coverartarchive.org">
+          </label>
+        </div>
+      </details>
 
       <div class="field">
         <label class="checkbox">
@@ -120,11 +146,10 @@
           Rich metadata: bios, descriptions, genres <span class="badge warn">restart</span>
         </label>
         <small class="hint">
-          When enabled, the bridge accepts artist bios + album descriptions
-          pushed by the 1-bit app (which holds the Atlas access key — the
-          open-source bridge never sees it) and serves them back to all your
-          devices via <code>/v1/atlas-meta</code>. Advertises
-          <code>atlasEnrichment</code> on <code>/v1/health</code>; off by default.
+          Accepts artist bios + album descriptions pushed by the 1-bit app
+          (which holds the Atlas access key — the bridge never sees it) and
+          serves them back to all your devices via <code>/v1/atlas-meta</code>.
+          Off by default.
         </small>
       </div>
     </div>

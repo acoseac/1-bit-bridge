@@ -183,6 +183,16 @@ type settingsResponse struct {
 	// / genres via the app ferry — distinct from the Enrich base URLs above,
 	// which are the artwork + MusicBrainz source). Restart-required.
 	AtlasEnabled bool `json:"atlasEnabled"`
+	// EnrichSource / EnrichAtlasURL are template-only conveniences for the
+	// Settings → Enrichment tab's source picker, DERIVED from the two base
+	// URLs above by deriveEnrichSource (the URLs stay the single source of
+	// truth — there is no separate `enrich.source` config field, so an
+	// existing Atlas-pointed bridge.yaml auto-detects as "atlas" with zero
+	// migration). `json:"-"` keeps the JSON API surface clean: programmatic
+	// PATCH consumers keep sending the raw base URLs. Same pattern as
+	// UpscaleSoxMissing.
+	EnrichSource   string `json:"-"`
+	EnrichAtlasURL string `json:"-"`
 	// PR 4: tailscale + mDNS posture.
 	// TailscaleMode mirrors cfg.Tailscale.EffectiveMode (one of
 	// "cli", "tsnet", "disabled"). IsPublic flags the
@@ -622,6 +632,34 @@ type enrichmentResponse struct {
 	Missing            int        `json:"missing"`
 	LastEnrichedAt     *time.Time `json:"lastEnrichedAt,omitempty"`
 	EtaSecondsEstimate int64      `json:"etaSecondsEstimate"`
+	// Source labels which enrichment upstream this bridge queries —
+	// "musicbrainz" / "atlas" / "custom", derived from the live config by
+	// deriveEnrichSource. Config-derived and stable, so it never churns the
+	// SSE byte-diff.
+	Source string `json:"source,omitempty"`
+	// Coverage stats for the rich-tier facets, each nil (omitted) when the
+	// backing data source isn't wired: artist images need the
+	// Deps.ArtistImageMBIDs closure; bios/descriptions come from the
+	// artist_atlas / release_atlas tables. All three ride the 60s
+	// enrichment-meta cache (getEnrichmentMetaSnapshot).
+	ArtistImages      *coverageCounts `json:"artistImages,omitempty"`
+	ArtistBios        *coverageCounts `json:"artistBios,omitempty"`
+	AlbumDescriptions *coverageCounts `json:"albumDescriptions,omitempty"`
+}
+
+// coverageCounts is a have/missing pair for one enrichment facet
+// (admin-local wire DTO — rendered as "N have · M missing" on the card).
+type coverageCounts struct {
+	Have    int `json:"have"`
+	Missing int `json:"missing"`
+}
+
+// enrichmentMetaPart is the cached slow half of the enrichment card: the
+// coverage stats whose recompute costs a full-table CTE + an os.ReadDir.
+type enrichmentMetaPart struct {
+	ArtistImages      *coverageCounts
+	ArtistBios        *coverageCounts
+	AlbumDescriptions *coverageCounts
 }
 
 // Enrichment ETA is a deliberately rough reassurance number, not a promise. The
@@ -651,12 +689,29 @@ const enrichmentCacheTTL = 15 * time.Second
 // otherwise wedge the singleflight leader and everyone queued behind it.
 const enrichmentDBTimeout = 60 * time.Second
 
-// getEnrichmentSnapshot returns the cached enrichment breakdown, recomputing via
-// a full-table scan only when the cache is older than enrichmentCacheTTL. The
+// getEnrichmentSnapshot composes the full enrichment-card payload: the
+// 15s-cached pending/matched/missing breakdown, the config-derived source
+// label, and the 60s-cached coverage stats. Every input is cached, so the
+// marshalled bytes only change when data changes — SSE diff-suppression
+// stays stable.
+func (s *Server) getEnrichmentSnapshot() enrichmentResponse {
+	snap := s.getEnrichmentBreakdownPart()
+	if cfg := s.deps.CfgHolder.Load(); cfg != nil {
+		snap.Source, _ = deriveEnrichSource(cfg.Enrich.MusicBrainzBaseURL, cfg.Enrich.CoverArtBaseURL)
+	}
+	meta := s.getEnrichmentMetaSnapshot()
+	snap.ArtistImages = meta.ArtistImages
+	snap.ArtistBios = meta.ArtistBios
+	snap.AlbumDescriptions = meta.AlbumDescriptions
+	return snap
+}
+
+// getEnrichmentBreakdownPart returns the cached enrichment breakdown, recomputing
+// via a full-table scan only when the cache is older than enrichmentCacheTTL. The
 // recompute is single-flighted so concurrent SSE ticks / initial-emits collapse
 // to ONE scan. Best-effort: a SQL error serves the last good snapshot rather
 // than failing the card. Mirrors getCompositionSnapshot.
-func (s *Server) getEnrichmentSnapshot() enrichmentResponse {
+func (s *Server) getEnrichmentBreakdownPart() enrichmentResponse {
 	if s.deps.Manifest == nil {
 		return enrichmentResponse{}
 	}
@@ -706,10 +761,201 @@ func (s *Server) getEnrichmentSnapshot() enrichmentResponse {
 	return enrichmentResponse{}
 }
 
+// enrichmentMetaCacheTTL bounds how long the coverage stats (artist images /
+// bios / album descriptions) are reused. The recompute is a full-table CTE +
+// one os.ReadDir — composition-class cost, so composition-class TTL (60s).
+const enrichmentMetaCacheTTL = 60 * time.Second
+
+// getEnrichmentMetaSnapshot returns the cached coverage stats, recomputing
+// only when older than enrichmentMetaCacheTTL. Single-flighted + last-good
+// on error, mirroring getCompositionSnapshot. Facets whose data source is
+// unavailable stay nil so the wire field is omitted rather than zero-lying.
+func (s *Server) getEnrichmentMetaSnapshot() enrichmentMetaPart {
+	if s.deps.Manifest == nil {
+		return enrichmentMetaPart{}
+	}
+	s.enrichmentMetaMu.Lock()
+	if !s.enrichmentMetaAt.IsZero() && time.Since(s.enrichmentMetaAt) < enrichmentMetaCacheTTL {
+		snap := s.enrichmentMeta
+		s.enrichmentMetaMu.Unlock()
+		return snap
+	}
+	s.enrichmentMetaMu.Unlock()
+	v, _, _ := s.enrichmentMetaSF.Do("enrichment-meta", func() (any, error) {
+		// Re-check under the flight: a prior flight may have refreshed the
+		// cache while this caller was queued behind Do.
+		s.enrichmentMetaMu.Lock()
+		if !s.enrichmentMetaAt.IsZero() && time.Since(s.enrichmentMetaAt) < enrichmentMetaCacheTTL {
+			snap := s.enrichmentMeta
+			s.enrichmentMetaMu.Unlock()
+			return snap, nil
+		}
+		s.enrichmentMetaMu.Unlock()
+		ctx, cancel := context.WithTimeout(context.Background(), enrichmentDBTimeout)
+		defer cancel()
+		var snap enrichmentMetaPart
+		b, err := s.deps.Manifest.AtlasMetaBreakdownCounts(ctx)
+		if err != nil {
+			logger.Warn("enrichment: atlas-meta breakdown", "err", err)
+			s.enrichmentMetaMu.Lock()
+			snap = s.enrichmentMeta // last good (possibly zero)
+			s.enrichmentMetaMu.Unlock()
+			return snap, nil
+		}
+		// A facet whose MBID universe is empty (nothing enriched yet, or a
+		// library with no MB matches) stays nil so the card doesn't render
+		// noise rows of "0 have · 0 missing".
+		if b.ArtistsTotal > 0 {
+			snap.ArtistBios = &coverageCounts{Have: b.ArtistBiosFound, Missing: b.ArtistsTotal - b.ArtistBiosFound}
+		}
+		if b.ReleasesTotal > 0 {
+			snap.AlbumDescriptions = &coverageCounts{Have: b.ReleaseDescsFound, Missing: b.ReleasesTotal - b.ReleaseDescsFound}
+		}
+		snap.ArtistImages = s.artistImageCoverage(ctx)
+		s.enrichmentMetaMu.Lock()
+		s.enrichmentMeta = snap
+		s.enrichmentMetaAt = time.Now()
+		s.enrichmentMetaMu.Unlock()
+		return snap, nil
+	})
+	if snap, ok := v.(enrichmentMetaPart); ok {
+		return snap
+	}
+	return enrichmentMetaPart{}
+}
+
+// artistImageCoverage intersects the library's distinct artist MBIDs with the
+// on-disk artist-image cache (via the nil-safe Deps.ArtistImageMBIDs closure).
+// Returns nil (facet omitted) when the closure isn't wired or either read
+// fails — never a zero-lying pair. Only called inside the enrichment-meta
+// flight, so both reads ride the 60s TTL.
+func (s *Server) artistImageCoverage(ctx context.Context) *coverageCounts {
+	if s.deps.ArtistImageMBIDs == nil {
+		return nil
+	}
+	files, err := s.deps.ArtistImageMBIDs()
+	if err != nil {
+		logger.Warn("enrichment: artist image dir", "err", err)
+		return nil
+	}
+	mbids, err := s.deps.Manifest.DistinctArtistMBIDs(ctx)
+	if err != nil {
+		logger.Warn("enrichment: distinct artist mbids", "err", err)
+		return nil
+	}
+	if len(mbids) == 0 {
+		return nil // empty universe — omit rather than render "0 have · 0 missing"
+	}
+	have := 0
+	for _, m := range mbids {
+		if _, ok := files[strings.ToLower(m)]; ok {
+			have++
+		}
+	}
+	return &coverageCounts{Have: have, Missing: len(mbids) - have}
+}
+
 // apiEnrichment serves GET /api/enrichment — the REST twin of the `enrichment`
 // SSE event (same getEnrichmentSnapshot source), for scripting / first paint.
 func (s *Server) apiEnrichment(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.getEnrichmentSnapshot())
+}
+
+// enrichRetryMinInterval is the POST /api/enrichment/retry rate guard: a
+// second click inside the window is refused with 429. The underlying resets
+// are idempotent — the guard just keeps a panic-clicked button from
+// repeatedly re-nudging the enricher + harvest submit.
+const enrichRetryMinInterval = 60 * time.Second
+
+// enrichmentRetryResponse reports what the retry actually did: how many
+// tracks were re-queued for the enricher, and whether the Atlas harvest
+// client was nudged into a full re-submit (false when harvest isn't wired).
+type enrichmentRetryResponse struct {
+	ResetTracks        int64 `json:"resetTracks"`
+	HarvestResubmitted bool  `json:"harvestResubmitted"`
+}
+
+// apiEnrichmentRetry handles POST /api/enrichment/retry — the dashboard's
+// "Retry missing" button. Three facets, each via its correct mechanism:
+//
+//  1. Tracks enriched without artwork or an artist match get enriched_at
+//     reset (ResetEnrichedMisses) so the enricher worker re-runs them.
+//  2. Tracks whose artist RESOLVED but whose cached artist image file is
+//     missing on disk get the same reset via the MBID-set overload — the
+//     file check can't be expressed in SQL, so the missing set is computed
+//     here from the artwork cache dir.
+//  3. Bios / album descriptions are NOT enricher-owned (they arrive via the
+//     Atlas harvest results), so their retry is a forced full re-submit on
+//     the harvest client's next tick (HarvestForceSubmit, nil-safe).
+func (s *Server) apiEnrichmentRetry(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Manifest == nil {
+		writeError(w, http.StatusServiceUnavailable, "not-wired", "manifest store not available")
+		return
+	}
+	s.enrichRetryMu.Lock()
+	if !s.enrichRetryAt.IsZero() && time.Since(s.enrichRetryAt) < enrichRetryMinInterval {
+		s.enrichRetryMu.Unlock()
+		writeError(w, http.StatusTooManyRequests, "rate_limited",
+			"retry already triggered — wait a minute before retrying again")
+		return
+	}
+	s.enrichRetryAt = time.Now()
+	s.enrichRetryMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(r.Context(), enrichmentDBTimeout)
+	defer cancel()
+	reset, err := s.deps.Manifest.ResetEnrichedMisses(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "reset-failed", err.Error())
+		return
+	}
+	// Facet 2: artist image gaps (extracted helper — see its doc).
+	reset += s.resetArtistImageGaps(ctx)
+	resubmitted := false
+	if s.deps.HarvestForceSubmit != nil {
+		resubmitted = s.deps.HarvestForceSubmit()
+	}
+	// Invalidate the breakdown cache so the pending-count jump lands on the
+	// next SSE tick instead of after the 15s TTL.
+	s.enrichmentMu.Lock()
+	s.enrichmentAt = time.Time{}
+	s.enrichmentMu.Unlock()
+	logger.Info("enrichment retry triggered", "resetTracks", reset, "harvestResubmitted", resubmitted)
+	writeJSON(w, http.StatusOK, enrichmentRetryResponse{
+		ResetTracks:        reset,
+		HarvestResubmitted: resubmitted,
+	})
+}
+
+// resetArtistImageGaps re-queues enriched tracks whose resolved artist lacks
+// a cached image file — one dir read + one distinct-MBID query computing the
+// missing set directly (calling artistImageCoverage first would duplicate
+// both reads; Gemini on PR #495). Best-effort: any failure degrades to 0
+// (covers-only retry) rather than failing the caller's request.
+// ResetEnrichedByArtistMBIDs no-ops on an empty set.
+func (s *Server) resetArtistImageGaps(ctx context.Context) int64 {
+	if s.deps.ArtistImageMBIDs == nil {
+		return 0
+	}
+	files, err := s.deps.ArtistImageMBIDs()
+	if err != nil {
+		return 0
+	}
+	mbids, err := s.deps.Manifest.DistinctArtistMBIDs(ctx)
+	if err != nil {
+		return 0
+	}
+	var missing []string
+	for _, m := range mbids {
+		if _, ok := files[strings.ToLower(m)]; !ok {
+			missing = append(missing, m)
+		}
+	}
+	n, err := s.deps.Manifest.ResetEnrichedByArtistMBIDs(ctx, missing)
+	if err != nil {
+		logger.Warn("enrichment retry: artist-image reset", "err", err)
+	}
+	return n
 }
 
 // --- GET /api/endpoints ---
@@ -1195,7 +1441,38 @@ func settingsResponseFromConfig(cfg *config.Config, isSupervised bool) settingsR
 	} else {
 		resp.TailscaleMode = string(config.TailscaleModeCLI)
 	}
+	resp.EnrichSource, resp.EnrichAtlasURL = deriveEnrichSource(
+		cfg.Enrich.MusicBrainzBaseURL, cfg.Enrich.CoverArtBaseURL)
 	return resp
+}
+
+// Enrichment-source labels for the Settings picker + the dashboard card.
+// "musicbrainz" = both base URLs empty (public defaults); "atlas" = the
+// canonical Atlas-mirror shape (MB = <atlas>/ws/2, CoverArt = <atlas>);
+// anything else = "custom" (hand-tuned mirrors — the Advanced fields).
+const (
+	enrichSourceMusicBrainz = "musicbrainz"
+	enrichSourceAtlas       = "atlas"
+	enrichSourceCustom      = "custom"
+)
+
+// deriveEnrichSource classifies the stored enrich base URLs into the
+// Settings picker's source state, returning the Atlas base URL when the
+// shape matches. Both inputs are trailing-slash-trimmed defensively —
+// applyEnrichBase and Config.Validate already normalize persisted values,
+// but env-var overrides (BRIDGE_MUSICBRAINZ_BASE_URL) reach the live config
+// unnormalized and must not drop the operator into "custom" over a slash.
+func deriveEnrichSource(mbBase, caBase string) (source, atlasURL string) {
+	mb := strings.TrimRight(strings.TrimSpace(mbBase), "/")
+	ca := strings.TrimRight(strings.TrimSpace(caBase), "/")
+	switch {
+	case mb == "" && ca == "":
+		return enrichSourceMusicBrainz, ""
+	case ca != "" && strings.HasSuffix(mb, "/ws/2") && strings.TrimSuffix(mb, "/ws/2") == ca:
+		return enrichSourceAtlas, ca
+	default:
+		return enrichSourceCustom, ""
+	}
 }
 
 func (s *Server) apiSettingsGet(w http.ResponseWriter, r *http.Request) {

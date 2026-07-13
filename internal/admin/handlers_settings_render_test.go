@@ -71,3 +71,52 @@ func TestSettingsPageRendersEnrichURLFromConfig(t *testing.T) {
 		t.Error("/settings did not render the configured enrich URL as an input value — pageSettings omitting the field again?")
 	}
 }
+
+// TestSettingsPageRendersEnrichmentTab pins the dedicated Enrichment tab: the
+// tab button + pane exist, the source picker derives "atlas" from an
+// Atlas-shaped config (with the URL prefilled), and the enrichment fields no
+// longer live inside the General pane.
+func TestSettingsPageRendersEnrichmentTab(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	resp := patchSettings(t, ts.URL,
+		`{"enrichMusicBrainzBaseURL":"https://atlas.test/ws/2","enrichCoverArtBaseURL":"https://atlas.test"}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("PATCH enrich URLs: status %d, want 200", resp.StatusCode)
+	}
+
+	gresp, err := http.Get(ts.URL + "/settings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gresp.Body.Close()
+	body, _ := io.ReadAll(gresp.Body)
+	page := string(body)
+
+	for _, want := range []string{
+		`data-tab="enrichment"`,
+		`id="settings-panel-enrichment"`,
+		`name="enrichSource"`,
+		`name="enrichAtlasURL"`,
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("/settings missing %s", want)
+		}
+	}
+	// Atlas-shaped config → the atlas option is selected + URL prefilled.
+	if !strings.Contains(page, `value="atlas" selected`) {
+		t.Error("/settings source picker did not derive 'atlas' from the Atlas-shaped config")
+	}
+	if !strings.Contains(page, `name="enrichAtlasURL" type="url" value="https://atlas.test"`) {
+		t.Error("/settings did not prefill the Atlas URL field from the derived config")
+	}
+	// The General pane must no longer host the enrichment fields — they
+	// moved to the Enrichment pane (raw fields live in its Advanced block).
+	generalPane := page[strings.Index(page, `id="settings-panel-general"`):strings.Index(page, `id="settings-panel-enrichment"`)]
+	if strings.Contains(generalPane, "enrichMusicBrainzBaseURL") {
+		t.Error("General pane still contains the enrichment fields — the move to the Enrichment tab regressed")
+	}
+}

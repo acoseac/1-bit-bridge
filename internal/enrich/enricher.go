@@ -600,6 +600,47 @@ func ArtistImagePath(cacheDir, mbid string) string {
 	return filepath.Join(cacheDir, fmt.Sprintf("artist-%s.jpg", mbid))
 }
 
+// CachedArtistImageMBIDs enumerates the artist MBIDs that have a cached
+// image on disk — the `artist-<mbid>.jpg` files ArtistImagePath writes —
+// as a lowercase-keyed set. One os.ReadDir over the cache dir; the strict
+// UUID check on the middle segment naturally excludes the name-hashed
+// canonical files (`artist-name-<sha256>.jpg`, see ArtistImagePathByName)
+// and the `<mbid>-<size>.jpg` album covers sharing the directory. A
+// missing cache dir is "no images yet", not an error (fresh install).
+// Used by the admin dashboard's artist-image coverage stats via the
+// Deps.ArtistImageMBIDs closure — called behind a 60s TTL cache there,
+// so the directory read is off any hot path.
+func CachedArtistImageMBIDs(cacheDir string) (map[string]struct{}, error) {
+	if cacheDir == "" {
+		// An unconfigured dir must not fall through to os.ReadDir(""), which
+		// would enumerate the process's working directory (Gemini on PR #495).
+		return map[string]struct{}{}, nil
+	}
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return map[string]struct{}{}, nil
+		}
+		return nil, err
+	}
+	out := make(map[string]struct{}, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasPrefix(name, "artist-") || !strings.HasSuffix(name, ".jpg") {
+			continue
+		}
+		mbid := strings.TrimSuffix(strings.TrimPrefix(name, "artist-"), ".jpg")
+		if !isValidMBID(mbid) {
+			continue
+		}
+		out[strings.ToLower(mbid)] = struct{}{}
+	}
+	return out, nil
+}
+
 // artistCaser is shared across the (parallel) enrichment workers.
 // cases.Fold() returns a Caser explicitly documented as "stateless and
 // safe to use concurrently by multiple goroutines," so one package-level
