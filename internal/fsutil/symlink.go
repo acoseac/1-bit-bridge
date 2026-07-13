@@ -1,6 +1,9 @@
 package fsutil
 
-import "path/filepath"
+import (
+	"path/filepath"
+	"strings"
+)
 
 // EvalSymlinksOrClean returns filepath.EvalSymlinks(p) when it succeeds.
 // When the leaf doesn't exist yet (typical for a brand-new install where
@@ -40,4 +43,34 @@ func EvalSymlinksOrClean(p string) string {
 		}
 		cur = parent
 	}
+}
+
+// IsUnderAny reports whether candidate resolves AT or UNDER any of roots,
+// resolving symlinks on BOTH sides via EvalSymlinksOrClean before the
+// filepath.Rel comparison. Returns the resolved (cleaned) root it matched, or
+// "" when candidate is safely outside every root. Empty root entries and
+// cross-volume Rel errors (different Windows volumes) are skipped.
+//
+// This is the single canonical containment check shared by the three sites
+// that must stay in lockstep: config.validateVariantsDir, the admin
+// variants-dir handler (assertNotUnderLibraryRoots), and the `bridge variants
+// move` CLI. A `rel` of ".." or one starting with "../" (or "..\\") means
+// candidate is ABOVE the root; anything else — including "." (equal to root)
+// and dot-prefixed subpaths like ".cache/x" — means AT-or-UNDER.
+func IsUnderAny(candidate string, roots []string) string {
+	cleaned := EvalSymlinksOrClean(candidate)
+	for _, root := range roots {
+		if root == "" {
+			continue
+		}
+		cleanedRoot := EvalSymlinksOrClean(root)
+		rel, err := filepath.Rel(cleanedRoot, cleaned)
+		if err != nil {
+			continue // cross-volume on Windows; can't be nested.
+		}
+		if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return cleanedRoot
+		}
+	}
+	return ""
 }

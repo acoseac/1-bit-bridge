@@ -1931,33 +1931,14 @@ func validateVariantsDir(variantsDir string, libraryRoots []string) error {
 	if !filepath.IsAbs(variantsDir) {
 		return errors.New("must be an absolute path")
 	}
-	// Symlink resolution before the containment check (CodeRabbit
-	// Major on PR D1). The prior lexical-only check using
-	// `filepath.Clean` + `filepath.Rel` could be bypassed if either
-	// the variantsDir OR a library root contained a symlink that
-	// resolved into the other tree. EvalSymlinks fails on non-existent
-	// paths — variantsDir may legitimately not exist yet (created on
-	// first upscale). We try EvalSymlinks first; on failure, fall
-	// through to the lexical check so a brand-new install still
-	// validates.
-	candidate := fsutil.EvalSymlinksOrClean(variantsDir)
-	for _, root := range libraryRoots {
-		if root == "" {
-			continue
-		}
-		cleanedRoot := fsutil.EvalSymlinksOrClean(root)
-		rel, err := filepath.Rel(cleanedRoot, candidate)
-		if err != nil {
-			// Different volumes on Windows; can't compare → not nested.
-			continue
-		}
-		// rel starts with ".." iff candidate is OUTSIDE cleanedRoot.
-		// Equal-to-".." or starts-with-"../" / "..\\" means "above".
-		// Anything else means candidate is AT or UNDER cleanedRoot —
-		// rejected.
-		if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return fmt.Errorf("must not be under library root %q (variants would tangle with source files)", cleanedRoot)
-		}
+	// Containment check with symlink resolution on both sides (CodeRabbit
+	// Major on PR D1): a lexical-only check could be bypassed by a symlink in
+	// either the variantsDir OR a library root that resolves into the other
+	// tree. fsutil.IsUnderAny is the single canonical form, shared with the
+	// admin handler + the `bridge variants move` CLI so all three stay in
+	// lockstep.
+	if matched := fsutil.IsUnderAny(variantsDir, libraryRoots); matched != "" {
+		return fmt.Errorf("must not be under library root %q (variants would tangle with source files)", matched)
 	}
 	return nil
 }

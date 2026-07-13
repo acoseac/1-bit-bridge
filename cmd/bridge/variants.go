@@ -103,7 +103,7 @@ func variantsMoveCmd(ctx context.Context, args []string, stdout, stderr io.Write
 		fmt.Fprintf(stderr, "config load: %v\n", err)
 		return 2
 	}
-	if conflictingRoot := isUnderAnyLibraryRoot(*to, cfg.LibraryRoots); conflictingRoot != "" {
+	if conflictingRoot := fsutil.IsUnderAny(*to, cfg.LibraryRoots); conflictingRoot != "" {
 		fmt.Fprintf(stderr, "--to must not be under library root %q\n", conflictingRoot)
 		return 2
 	}
@@ -327,41 +327,4 @@ func isCrossDeviceError(err error) bool {
 		strings.Contains(s, "EXDEV") ||
 		strings.Contains(s, "different file system") ||
 		strings.Contains(s, "different disk drive")
-}
-
-// isUnderAnyLibraryRoot returns the first library root that `to`
-// resolves at OR under. Returns "" when `to` is safely outside
-// every root (or when every Rel() returns a cross-volume error).
-//
-// Pure helper extracted from variantsMoveCmd so the predicate can
-// be table-tested. Mirrors `config.validateVariantsDir`'s shape:
-// "rel == '..'" / "rel starts with '..'+sep" means the destination
-// is OUTSIDE the root; anything else (including `rel == "."` for
-// equal-to-root AND `rel == ".cache/..."` for dot-prefixed subs)
-// means AT-OR-UNDER. Gemini medium on PR #246 asked for regression
-// coverage on the dot-prefixed cases that pre-fix passed through.
-//
-// Both sides are resolved through the shared fsutil.EvalSymlinksOrClean
-// (the same helper config + admin use) BEFORE the Rel() math: a lexical-
-// only Clean would let a `--to` whose parent symlinks into a library root
-// slip past this guard, then os.MkdirAll would write variant FLACs THROUGH
-// the symlink into the read-only library (the PR #75 read-only-library
-// invariant). It resolves the nearest EXISTING ancestor when `--to` itself
-// doesn't exist yet, so a brand-new destination is still validated.
-func isUnderAnyLibraryRoot(to string, libraryRoots []string) string {
-	cleanedTo := fsutil.EvalSymlinksOrClean(to)
-	for _, root := range libraryRoots {
-		if root == "" {
-			continue
-		}
-		cleanedRoot := fsutil.EvalSymlinksOrClean(root)
-		rel, err := filepath.Rel(cleanedRoot, cleanedTo)
-		if err != nil {
-			continue // cross-volume on Windows; can't be nested.
-		}
-		if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return cleanedRoot
-		}
-	}
-	return ""
 }

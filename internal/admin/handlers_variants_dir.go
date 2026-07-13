@@ -221,19 +221,8 @@ func (s *Server) probeUsedByKind(ctx context.Context) map[string]int64 {
 // `internal/admin` pins the contract via a sibling-path acceptance +
 // under-root rejection pair plus a symlink-resolution case.
 func assertNotUnderLibraryRoots(candidate string, roots []string) error {
-	cleaned := fsutil.EvalSymlinksOrClean(candidate)
-	for _, root := range roots {
-		if root == "" {
-			continue
-		}
-		cleanedRoot := fsutil.EvalSymlinksOrClean(root)
-		rel, err := filepath.Rel(cleanedRoot, cleaned)
-		if err != nil {
-			continue
-		}
-		if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return errors.New("variants directory must not be under any library root (variants would tangle with source files)")
-		}
+	if fsutil.IsUnderAny(candidate, roots) != "" {
+		return errors.New("variants directory must not be under any library root (variants would tangle with source files)")
 	}
 	return nil
 }

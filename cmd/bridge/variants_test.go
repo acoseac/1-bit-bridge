@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -93,99 +92,15 @@ func TestVariantsMoveDryRunSkipsConfirm(t *testing.T) {
 	}
 }
 
-// TestIsUnderAnyLibraryRoot pins the containment predicate that
-// rejects destinations equal to OR nested under any library root.
-//
-// Pre-fix shape (PR #245) used `rel[0] != '.'` which silently
-// allowed:
-//   - rel == "."         (destination identical to a root)
-//   - rel == ".cache/x"  (literal dot-prefixed subpath)
-//
-// CodeRabbit Major caught it; Gemini medium on PR #246 asked for
-// regression tests on those exact cases.
-func TestIsUnderAnyLibraryRoot(t *testing.T) {
-	roots := []string{"/library/music", "/library/audio"}
-	cases := []struct {
-		name string
-		to   string
-		want string // "" means safe; otherwise the matching root.
-	}{
-		{
-			name: "outside every root — safe",
-			to:   "/data/transcoded",
-			want: "",
-		},
-		{
-			name: "outside every root — sibling of root",
-			to:   "/library/transcoded",
-			want: "",
-		},
-		{
-			name: "equal to root — REJECT (was bypassable pre-fix)",
-			to:   "/library/music",
-			want: "/library/music",
-		},
-		{
-			name: "direct child — REJECT",
-			to:   "/library/music/transcoded",
-			want: "/library/music",
-		},
-		{
-			name: "deep child — REJECT",
-			to:   "/library/music/Artist/Album/cache",
-			want: "/library/music",
-		},
-		{
-			name: "dot-prefixed child — REJECT (was bypassable pre-fix)",
-			to:   "/library/music/.cache",
-			want: "/library/music",
-		},
-		{
-			name: "dot-prefixed deep child — REJECT (was bypassable pre-fix)",
-			to:   "/library/music/.cache/variants",
-			want: "/library/music",
-		},
-		{
-			name: "matches second root",
-			to:   "/library/audio/variants",
-			want: "/library/audio",
-		},
-		{
-			name: "empty root slot is ignored",
-			to:   "/data/transcoded",
-			want: "",
-		},
-		{
-			name: "trailing slash on root — same shape after clean",
-			to:   "/library/music/transcoded",
-			want: "/library/music",
-		},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			testRoots := roots
-			if c.name == "empty root slot is ignored" {
-				testRoots = []string{"", "/library/music", "/library/audio"}
-			}
-			if c.name == "trailing slash on root — same shape after clean" {
-				testRoots = []string{"/library/music/", "/library/audio/"}
-			}
-			got := isUnderAnyLibraryRoot(c.to, testRoots)
-			// Compare via filepath.Clean so the test isn't fragile
-			// against trailing-slash variations in `want`.
-			if filepath.Clean(got) != filepath.Clean(c.want) {
-				t.Errorf("got %q, want %q (to=%q)", got, c.want, c.to)
-			}
-		})
-	}
-}
-
 // TestComputeNewSidecarPath_MatchesPoolWriter pins V1: the move CLI must
 // recompute the sidecar filename with the SAME FAT-sanitization +
 // 255-byte cap the pool writer applies (transcode.VariantSidecarBasename),
 // so a move to a FAT/exFAT target doesn't fail on colon/`?`-bearing
 // classical filenames and an over-long name doesn't hit ENAMETOOLONG.
 // Pre-fix this used a raw fmt.Sprintf that skipped both.
+//
+// The containment/symlink checks that used to live here moved with the
+// helper to internal/fsutil (TestIsUnderAny + TestIsUnderAny_ResolvesSymlinkedParent).
 func TestComputeNewSidecarPath_MatchesPoolWriter(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -216,23 +131,5 @@ func TestComputeNewSidecarPath_MatchesPoolWriter(t *testing.T) {
 				t.Errorf("basename length %d exceeds 255-byte cap: %q", len(gotBase), gotBase)
 			}
 		})
-	}
-}
-
-// TestIsUnderAnyLibraryRoot_ResolvesSymlinkedParent pins V2: a --to whose
-// PARENT symlinks into a library root must be caught even though --to
-// itself doesn't exist yet. Pre-fix (lexical Clean only) this slipped
-// through, and os.MkdirAll would then write variant FLACs through the
-// symlink into the read-only library.
-func TestIsUnderAnyLibraryRoot_ResolvesSymlinkedParent(t *testing.T) {
-	realRoot := t.TempDir()
-	link := filepath.Join(t.TempDir(), "link")
-	if err := os.Symlink(realRoot, link); err != nil {
-		t.Skipf("symlinks unsupported on this platform/host: %v", err)
-	}
-	// link -> realRoot; "variants" under it doesn't exist yet.
-	to := filepath.Join(link, "variants")
-	if got := isUnderAnyLibraryRoot(to, []string{realRoot}); got == "" {
-		t.Fatalf("symlinked-parent --to %q not detected as under root %q", to, realRoot)
 	}
 }
