@@ -909,28 +909,8 @@ func (s *Server) apiEnrichmentRetry(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "reset-failed", err.Error())
 		return
 	}
-	// Facet 2: artist image gaps — one dir read + one distinct-MBID query
-	// computing the missing set directly (calling artistImageCoverage first
-	// would duplicate both reads; Gemini on PR #495). Best-effort: any
-	// failure degrades to a covers-only retry rather than failing the
-	// request. ResetEnrichedByArtistMBIDs no-ops on an empty set.
-	if s.deps.ArtistImageMBIDs != nil {
-		if files, ferr := s.deps.ArtistImageMBIDs(); ferr == nil {
-			if mbids, merr := s.deps.Manifest.DistinctArtistMBIDs(ctx); merr == nil {
-				var missing []string
-				for _, m := range mbids {
-					if _, ok := files[strings.ToLower(m)]; !ok {
-						missing = append(missing, m)
-					}
-				}
-				n, rerr := s.deps.Manifest.ResetEnrichedByArtistMBIDs(ctx, missing)
-				if rerr != nil {
-					logger.Warn("enrichment retry: artist-image reset", "err", rerr)
-				}
-				reset += n
-			}
-		}
-	}
+	// Facet 2: artist image gaps (extracted helper — see its doc).
+	reset += s.resetArtistImageGaps(ctx)
 	resubmitted := false
 	if s.deps.HarvestForceSubmit != nil {
 		resubmitted = s.deps.HarvestForceSubmit()
@@ -945,6 +925,37 @@ func (s *Server) apiEnrichmentRetry(w http.ResponseWriter, r *http.Request) {
 		ResetTracks:        reset,
 		HarvestResubmitted: resubmitted,
 	})
+}
+
+// resetArtistImageGaps re-queues enriched tracks whose resolved artist lacks
+// a cached image file — one dir read + one distinct-MBID query computing the
+// missing set directly (calling artistImageCoverage first would duplicate
+// both reads; Gemini on PR #495). Best-effort: any failure degrades to 0
+// (covers-only retry) rather than failing the caller's request.
+// ResetEnrichedByArtistMBIDs no-ops on an empty set.
+func (s *Server) resetArtistImageGaps(ctx context.Context) int64 {
+	if s.deps.ArtistImageMBIDs == nil {
+		return 0
+	}
+	files, err := s.deps.ArtistImageMBIDs()
+	if err != nil {
+		return 0
+	}
+	mbids, err := s.deps.Manifest.DistinctArtistMBIDs(ctx)
+	if err != nil {
+		return 0
+	}
+	var missing []string
+	for _, m := range mbids {
+		if _, ok := files[strings.ToLower(m)]; !ok {
+			missing = append(missing, m)
+		}
+	}
+	n, err := s.deps.Manifest.ResetEnrichedByArtistMBIDs(ctx, missing)
+	if err != nil {
+		logger.Warn("enrichment retry: artist-image reset", "err", err)
+	}
+	return n
 }
 
 // --- GET /api/endpoints ---

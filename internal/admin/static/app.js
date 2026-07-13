@@ -1826,7 +1826,10 @@ function mapEnrichSourceToBases(fd) {
     return { mb: "", ca: "" }; // public defaults
   }
   if (src === "atlas") {
-    const a = (fd.get("enrichAtlasURL") || "").trim().replace(/\/+$/, "");
+    // Trailing-slash trim via a loop, not /\/+$/ — Sonar flags that regex
+    // class as super-linear under backtracking.
+    let a = (fd.get("enrichAtlasURL") || "").trim();
+    while (a.endsWith("/")) a = a.slice(0, -1);
     if (!a) return { err: "Atlas URL is required when the enrichment source is Atlas." };
     return { mb: a + "/ws/2", ca: a };
   }
