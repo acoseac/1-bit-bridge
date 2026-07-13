@@ -60,7 +60,7 @@ func TestIsUnderAny_ResolvesSymlinkedParent(t *testing.T) {
 	}
 	// link -> realRoot; "variants" under it doesn't exist yet.
 	candidate := filepath.Join(link, "variants")
-	if got := IsUnderAny(candidate, []string{realRoot}); got == "" {
+	if IsUnderAny(candidate, []string{realRoot}) == "" {
 		t.Fatalf("symlinked-parent candidate %q not detected as under root %q", candidate, realRoot)
 	}
 }
