@@ -73,7 +73,13 @@ var sharedHTTPTransport = &http.Transport{
 const maxDrainBytes = 64 << 10
 
 // drainBody discards up to maxDrainBytes of body so the underlying
-// connection can be reused. The caller still Closes the body.
+// connection can be reused. The caller still Closes the body. Nil-safe: a
+// nil reader is a no-op (production callers pass net/http's always-non-nil
+// resp.Body, but the guard keeps the shared helper safe for any future caller
+// or test mock).
 func drainBody(body io.Reader) {
+	if body == nil {
+		return
+	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(body, maxDrainBytes))
 }

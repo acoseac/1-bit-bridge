@@ -350,7 +350,10 @@ func IsTransient(err error) bool {
 	// IsTemporary / Temporary() (which trips staticcheck SA1019 and is
 	// platform-leaky). Gemini-consulted 2026-07-13.
 	var dnsErr *net.DNSError
-	if errors.As(err, &dnsErr) && !dnsErr.IsNotFound {
+	// dnsErr != nil guards the typed-nil case: errors.As can report true with
+	// a nil *net.DNSError if the chain carries one (a non-nil error interface
+	// wrapping a nil pointer), and dnsErr.IsNotFound would then panic.
+	if errors.As(err, &dnsErr) && dnsErr != nil && !dnsErr.IsNotFound {
 		return true
 	}
 	// TCP/route-level failures surface as wrapped syscall errnos

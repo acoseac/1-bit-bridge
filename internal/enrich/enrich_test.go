@@ -17,6 +17,12 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
+func TestDrainBodyNilSafe(t *testing.T) {
+	// Must not panic on a nil reader (Gemini #491 round-2 defensive guard):
+	// io.LimitReader(nil, …).Read would otherwise nil-deref.
+	drainBody(nil)
+}
+
 func TestTruncateForLog(t *testing.T) {
 	if got := truncateForLog("abc"); got != "abc" {
 		t.Errorf("short value = %q, want %q", got, "abc")
