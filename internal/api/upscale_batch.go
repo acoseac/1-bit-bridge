@@ -117,6 +117,23 @@ var ErrBatchInsufficientDiskSpace = errors.New("upscale batch insufficient disk 
 
 func (e *BatchInsufficientDiskSpace) Unwrap() error { return ErrBatchInsufficientDiskSpace }
 
+// batchListResponse is the JSON body for GET /v1/upscale/batches. A typed
+// DTO (not a map[string]any) so the wire shape is committed at compile time,
+// matching the DTO-by-convention discipline the rest of the package follows.
+type batchListResponse struct {
+	Batches     []BatchRow `json:"batches"`
+	GeneratedAt time.Time  `json:"generatedAt"`
+}
+
+// insufficientDiskSpaceResponse is the 507 body for POST /v1/upscale/batch
+// when the disk-space pre-flight refuses. Typed DTO (was a map[string]any).
+type insufficientDiskSpaceResponse struct {
+	Error          string `json:"error"`
+	ProjectedBytes int64  `json:"projectedBytes"`
+	RequiredBytes  int64  `json:"requiredBytes"`
+	AvailableBytes int64  `json:"availableBytes"`
+}
+
 // BatchRequest is the request body shape for POST /v1/upscale/batch.
 // `targetRate` / `targetBits` are optional — when omitted the
 // coordinator falls back to the DB-stored admin Settings.
@@ -202,11 +219,11 @@ func (s *Server) upscaleBatchSubmit(w http.ResponseWriter, r *http.Request) {
 			// available." Carries the numbers in the JSON body so
 			// the admin UI can render the projection without
 			// re-running it.
-			writeJSON(w, http.StatusInsufficientStorage, map[string]any{
-				"error":          "insufficient_disk_space",
-				"projectedBytes": dskErr.ProjectedBytes,
-				"requiredBytes":  dskErr.RequiredBytes,
-				"availableBytes": dskErr.AvailableBytes,
+			writeJSON(w, http.StatusInsufficientStorage, insufficientDiskSpaceResponse{
+				Error:          "insufficient_disk_space",
+				ProjectedBytes: dskErr.ProjectedBytes,
+				RequiredBytes:  dskErr.RequiredBytes,
+				AvailableBytes: dskErr.AvailableBytes,
 			})
 			return
 		}
@@ -238,9 +255,9 @@ func (s *Server) upscaleBatchList(w http.ResponseWriter, r *http.Request) {
 			"list batches failed", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"batches":     rows,
-		"generatedAt": time.Now().UTC(),
+	writeJSON(w, http.StatusOK, batchListResponse{
+		Batches:     rows,
+		GeneratedAt: time.Now().UTC(),
 	})
 }
 

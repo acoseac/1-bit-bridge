@@ -117,6 +117,46 @@ func TestCreateAndPollPending(t *testing.T) {
 	}
 }
 
+// TestCloseShortCircuitsFiredTimerCallback pins C1: a Pending timer
+// callback that had already fired before Close() stopped it must NOT re-arm
+// a fresh grace timer after Close() returns. We simulate the fired-but-parked
+// callback by invoking onTimer directly WITH THE LIVE GENERATION (so only the
+// closed flag — not the timerGen guard — can stop it) after Close().
+func TestCloseShortCircuitsFiredTimerCallback(t *testing.T) {
+	// Long TTL so the real armed timer can't fire during the test.
+	s := quickStore(t, time.Hour, time.Hour, nil)
+	_, hashHex := makePollPair(t, "a")
+	req, err := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP", "")
+	if err != nil {
+		t.Fatalf("CreateRequest: %v", err)
+	}
+
+	s.mu.Lock()
+	gen := s.byID[req.ID].timerGen
+	s.mu.Unlock()
+
+	s.Close() // stops + nils the timer, marks closed
+
+	// Stale fired callback resuming after Close, matching generation.
+	s.onTimer(req.ID, gen)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.closed {
+		t.Fatal("Close did not set closed")
+	}
+	got := s.byID[req.ID]
+	if got == nil {
+		t.Fatal("request row disappeared")
+	}
+	if got.State != StatePending {
+		t.Errorf("State = %v, want Pending (a closed-store onTimer must not transition)", got.State)
+	}
+	if got.expiryTimer != nil {
+		t.Error("a fresh grace timer was armed after Close (closed gate failed)")
+	}
+}
+
 func TestPollRejectsWrongSecret(t *testing.T) {
 	s := quickStore(t, time.Second, time.Second, nil)
 	_, hashHex := makePollPair(t, "a")
