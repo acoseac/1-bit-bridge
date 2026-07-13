@@ -36,7 +36,9 @@ import (
 	"syscall"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
+	"github.com/acoseac/1-bit-bridge/internal/transcode"
 )
 
 func variantsCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -101,7 +103,7 @@ func variantsMoveCmd(ctx context.Context, args []string, stdout, stderr io.Write
 		fmt.Fprintf(stderr, "config load: %v\n", err)
 		return 2
 	}
-	if conflictingRoot := isUnderAnyLibraryRoot(*to, cfg.LibraryRoots); conflictingRoot != "" {
+	if conflictingRoot := fsutil.IsUnderAny(*to, cfg.LibraryRoots); conflictingRoot != "" {
 		fmt.Fprintf(stderr, "--to must not be under library root %q\n", conflictingRoot)
 		return 2
 	}
@@ -176,15 +178,22 @@ func variantsMoveCmd(ctx context.Context, args []string, stdout, stderr io.Write
 // `transcode.JobSpec.SidecarPath`. Mirrors the same shape that the
 // runtime pool produces for new conversions.
 //
-// Constructed by hand here (rather than calling JobSpec.SidecarPath)
-// because we don't have the full JobSpec — only the persisted
-// VariantRow. The mapping is deterministic from
-// `(source_path, variant_id)` so this stays in lockstep with the
-// pool's writer.
+// We don't have the full JobSpec here (only the persisted VariantRow),
+// so we can't call JobSpec.SidecarPath directly — but we DO share its
+// basename builder (transcode.VariantSidecarBasename) so the two can't
+// drift. The dir prefix mirrors SidecarPath's (dir segments are not
+// sanitized: they came from the source filesystem, which already
+// accepts them).
 func computeNewSidecarPath(toDir string, v manifest.VariantRow) string {
 	dir := filepath.Dir(v.SourcePath)
 	base := filepath.Base(v.SourcePath)
-	filename := fmt.Sprintf("%s.%s.flac", base, v.VariantID)
+	// Use the SAME builder the pool writer uses (transcode.VariantSidecarBasename
+	// -> safeVariantFilename) so the recomputed path can't drift from the
+	// persisted sidecar_path. A raw fmt.Sprintf here skipped the FAT
+	// sanitization + 255-byte truncation, so a move to a FAT/exFAT target
+	// (the documented use case) failed on every colon/`?`-bearing classical
+	// filename, and over-long names hit ENAMETOOLONG even on ext4.
+	filename := transcode.VariantSidecarBasename(base, v.VariantID)
 	if dir == "" || dir == "." {
 		return filepath.Join(toDir, filename)
 	}
@@ -318,33 +327,4 @@ func isCrossDeviceError(err error) bool {
 		strings.Contains(s, "EXDEV") ||
 		strings.Contains(s, "different file system") ||
 		strings.Contains(s, "different disk drive")
-}
-
-// isUnderAnyLibraryRoot returns the first library root that `to`
-// resolves at OR under. Returns "" when `to` is safely outside
-// every root (or when every Rel() returns a cross-volume error).
-//
-// Pure helper extracted from variantsMoveCmd so the predicate can
-// be table-tested. Mirrors `config.validateVariantsDir`'s shape:
-// "rel == '..'" / "rel starts with '..'+sep" means the destination
-// is OUTSIDE the root; anything else (including `rel == "."` for
-// equal-to-root AND `rel == ".cache/..."` for dot-prefixed subs)
-// means AT-OR-UNDER. Gemini medium on PR #246 asked for regression
-// coverage on the dot-prefixed cases that pre-fix passed through.
-func isUnderAnyLibraryRoot(to string, libraryRoots []string) string {
-	cleanedTo := filepath.Clean(to)
-	for _, root := range libraryRoots {
-		if root == "" {
-			continue
-		}
-		cleanedRoot := filepath.Clean(root)
-		rel, err := filepath.Rel(cleanedRoot, cleanedTo)
-		if err != nil {
-			continue // cross-volume on Windows; can't be nested.
-		}
-		if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return cleanedRoot
-		}
-	}
-	return ""
 }

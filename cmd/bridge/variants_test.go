@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
+	"github.com/acoseac/1-bit-bridge/internal/transcode"
 )
 
 // TestVariantsMoveRefusesWithoutConfirm pins the typed-phrase
@@ -89,88 +92,43 @@ func TestVariantsMoveDryRunSkipsConfirm(t *testing.T) {
 	}
 }
 
-// TestIsUnderAnyLibraryRoot pins the containment predicate that
-// rejects destinations equal to OR nested under any library root.
+// TestComputeNewSidecarPath_MatchesPoolWriter pins V1: the move CLI must
+// recompute the sidecar filename with the SAME FAT-sanitization +
+// 255-byte cap the pool writer applies (transcode.VariantSidecarBasename),
+// so a move to a FAT/exFAT target doesn't fail on colon/`?`-bearing
+// classical filenames and an over-long name doesn't hit ENAMETOOLONG.
+// Pre-fix this used a raw fmt.Sprintf that skipped both.
 //
-// Pre-fix shape (PR #245) used `rel[0] != '.'` which silently
-// allowed:
-//   - rel == "."         (destination identical to a root)
-//   - rel == ".cache/x"  (literal dot-prefixed subpath)
-//
-// CodeRabbit Major caught it; Gemini medium on PR #246 asked for
-// regression tests on those exact cases.
-func TestIsUnderAnyLibraryRoot(t *testing.T) {
-	roots := []string{"/library/music", "/library/audio"}
+// The containment/symlink checks that used to live here moved with the
+// helper to internal/fsutil (TestIsUnderAny + TestIsUnderAny_ResolvesSymlinkedParent).
+func TestComputeNewSidecarPath_MatchesPoolWriter(t *testing.T) {
 	cases := []struct {
-		name string
-		to   string
-		want string // "" means safe; otherwise the matching root.
+		name       string
+		sourcePath string
+		variantID  string
 	}{
-		{
-			name: "outside every root — safe",
-			to:   "/data/transcoded",
-			want: "",
-		},
-		{
-			name: "outside every root — sibling of root",
-			to:   "/library/transcoded",
-			want: "",
-		},
-		{
-			name: "equal to root — REJECT (was bypassable pre-fix)",
-			to:   "/library/music",
-			want: "/library/music",
-		},
-		{
-			name: "direct child — REJECT",
-			to:   "/library/music/transcoded",
-			want: "/library/music",
-		},
-		{
-			name: "deep child — REJECT",
-			to:   "/library/music/Artist/Album/cache",
-			want: "/library/music",
-		},
-		{
-			name: "dot-prefixed child — REJECT (was bypassable pre-fix)",
-			to:   "/library/music/.cache",
-			want: "/library/music",
-		},
-		{
-			name: "dot-prefixed deep child — REJECT (was bypassable pre-fix)",
-			to:   "/library/music/.cache/variants",
-			want: "/library/music",
-		},
-		{
-			name: "matches second root",
-			to:   "/library/audio/variants",
-			want: "/library/audio",
-		},
-		{
-			name: "empty root slot is ignored",
-			to:   "/data/transcoded",
-			want: "",
-		},
-		{
-			name: "trailing slash on root — same shape after clean",
-			to:   "/library/music/transcoded",
-			want: "/library/music",
-		},
+		{"fat-illegal chars", `Artist/Album/Track: A? "Live".flac`, "upscaled-v1-96000-24"},
+		{"over-long basename", "Artist/Album/" + strings.Repeat("x", 300) + ".flac", "optimized-v1-44100-16"},
+		{"clean name", "Artist/Album/Song.flac", "upscaled-v1-192000-24"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			testRoots := roots
-			if c.name == "empty root slot is ignored" {
-				testRoots = []string{"", "/library/music", "/library/audio"}
+			got := computeNewSidecarPath(filepath.Join("out", "variants"), manifest.VariantRow{
+				SourcePath: c.sourcePath,
+				VariantID:  c.variantID,
+			})
+			gotBase := filepath.Base(got)
+			wantBase := transcode.VariantSidecarBasename(filepath.Base(c.sourcePath), c.variantID)
+			if gotBase != wantBase {
+				t.Errorf("basename = %q, want pool-writer basename %q", gotBase, wantBase)
 			}
-			if c.name == "trailing slash on root — same shape after clean" {
-				testRoots = []string{"/library/music/", "/library/audio/"}
+			for _, bad := range []string{":", "?", `"`, "*", "<", ">", "|"} {
+				if strings.Contains(gotBase, bad) {
+					t.Errorf("filename %q still contains FAT-illegal %q", gotBase, bad)
+				}
 			}
-			got := isUnderAnyLibraryRoot(c.to, testRoots)
-			// Compare via filepath.Clean so the test isn't fragile
-			// against trailing-slash variations in `want`.
-			if filepath.Clean(got) != filepath.Clean(c.want) {
-				t.Errorf("got %q, want %q (to=%q)", got, c.want, c.to)
+			if len(gotBase) > 255 {
+				t.Errorf("basename length %d exceeds 255-byte cap: %q", len(gotBase), gotBase)
 			}
 		})
 	}
