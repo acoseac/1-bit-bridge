@@ -1458,40 +1458,30 @@ func (s *Store) ResetEnrichedMisses(ctx context.Context) (int64, error) {
 // computed in Go from the artwork cache dir). Re-running the enricher on
 // those rows re-fetches the Deezer artist image; the album-level caches make
 // the MB half of the re-run cheap. Same enriched_at-writer sanction and
-// no-indexed_at-bump contract as ResetEnrichedMisses. Chunked IN-lists keep
-// the statement under SQLite's bind-variable ceiling. Holds s.mu.
+// no-indexed_at-bump contract as ResetEnrichedMisses.
+//
+// The set is passed as ONE bound JSON-array parameter consumed via
+// json_each — a single static statement with no placeholder construction
+// (no S2077 surface) and no bind-variable-ceiling chunking. Holds s.mu.
 func (s *Store) ResetEnrichedByArtistMBIDs(ctx context.Context, mbids []string) (int64, error) {
 	if len(mbids) == 0 {
 		return 0, nil
 	}
+	blob, err := json.Marshal(mbids)
+	if err != nil {
+		return 0, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	const chunkSize = 500
-	var total int64
-	for start := 0; start < len(mbids); start += chunkSize {
-		end := min(start+chunkSize, len(mbids))
-		chunk := mbids[start:end]
-		placeholders := strings.Repeat("?,", len(chunk))
-		placeholders = placeholders[:len(placeholders)-1]
-		args := make([]any, len(chunk))
-		for i, m := range chunk {
-			args[i] = m
-		}
-		res, err := s.db.ExecContext(ctx, `
-			UPDATE tracks SET enriched_at = 0
-			 WHERE enriched_at > 0
-			   AND json_extract(tags_json, '$.artistMBID') IN (`+placeholders+`)
-		`, args...)
-		if err != nil {
-			return total, err
-		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return total, err
-		}
-		total += n
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE tracks SET enriched_at = 0
+		 WHERE enriched_at > 0
+		   AND json_extract(tags_json, '$.artistMBID') IN (SELECT value FROM json_each(?))
+	`, string(blob))
+	if err != nil {
+		return 0, err
 	}
-	return total, nil
+	return res.RowsAffected()
 }
 
 // ApplyAlbumArtistReconciliation rewrites tags_json for each supplied
