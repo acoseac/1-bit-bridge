@@ -15,11 +15,13 @@ func TestAtlasMetaBreakdownCounts(t *testing.T) {
 	ctx := context.Background()
 
 	const (
-		artistWithBio = "11111111-1111-4111-8111-111111111111"
-		artistNoBio   = "22222222-2222-4222-8222-222222222222"
-		relWithDesc   = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-		relNoDesc     = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
-		localArt      = "local-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+		artistWithBio  = "11111111-1111-4111-8111-111111111111"
+		artistNoBio    = "22222222-2222-4222-8222-222222222222"
+		artistEmptyBio = "33333333-3333-4333-8333-333333333333" // found=1 but no text
+		relWithDesc    = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+		relNoDesc      = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+		relEmptyDesc   = "cccccccc-cccc-4ccc-8ccc-cccccccccccc" // found=1, label only
+		localArt       = "local-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	)
 
 	seed := []*Track{
@@ -35,6 +37,9 @@ func TestAtlasMetaBreakdownCounts(t *testing.T) {
 			ArtistMBID: artistNoBio, ArtworkMBID: localArt, MusicBrainzAlbumID: relNoDesc},
 		// No MBIDs at all — contributes to neither universe.
 		{Path: "C/bare.flac", Size: 1, ModTime: time.Unix(1, 0)},
+		// found=1 rows WITHOUT text (below) must still count as missing.
+		{Path: "D/empty.flac", Size: 1, ModTime: time.Unix(1, 0),
+			ArtistMBID: artistEmptyBio, MusicBrainzAlbumID: relEmptyDesc},
 	}
 	for _, tr := range seed {
 		if err := s.UpsertTrack(ctx, tr); err != nil {
@@ -56,16 +61,25 @@ func TestAtlasMetaBreakdownCounts(t *testing.T) {
 	if err := s.UpsertReleaseAtlasMeta(ctx, ReleaseAtlasMeta{ReleaseMBID: relNoDesc, Found: false}); err != nil {
 		t.Fatal(err)
 	}
+	// found=1 but no UI-visible text — a bio-less artist resolution and a
+	// label-only release. Both must count as MISSING, not have (the counters
+	// describe what the UI can show).
+	if err := s.UpsertArtistAtlasMeta(ctx, ArtistAtlasMeta{ArtistMBID: artistEmptyBio, Found: true, Genres: []string{"Jazz"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertReleaseAtlasMeta(ctx, ReleaseAtlasMeta{ReleaseMBID: relEmptyDesc, Found: true, RecordLabel: "Blue Note"}); err != nil {
+		t.Fatal(err)
+	}
 
 	b, err := s.AtlasMetaBreakdownCounts(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b.ArtistsTotal != 2 || b.ArtistBiosFound != 1 {
-		t.Errorf("artists = (total=%d found=%d), want (2, 1)", b.ArtistsTotal, b.ArtistBiosFound)
+	if b.ArtistsTotal != 3 || b.ArtistBiosFound != 1 {
+		t.Errorf("artists = (total=%d found=%d), want (3, 1) — tombstone AND empty-bio rows count missing", b.ArtistsTotal, b.ArtistBiosFound)
 	}
-	if b.ReleasesTotal != 2 || b.ReleaseDescsFound != 1 {
-		t.Errorf("releases = (total=%d found=%d), want (2, 1) — union must dedupe and exclude local-", b.ReleasesTotal, b.ReleaseDescsFound)
+	if b.ReleasesTotal != 3 || b.ReleaseDescsFound != 1 {
+		t.Errorf("releases = (total=%d found=%d), want (3, 1) — union dedupes, local- excluded, label-only counts missing", b.ReleasesTotal, b.ReleaseDescsFound)
 	}
 }
 

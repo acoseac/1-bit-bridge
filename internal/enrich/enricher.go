@@ -611,6 +611,11 @@ func ArtistImagePath(cacheDir, mbid string) string {
 // Deps.ArtistImageMBIDs closure — called behind a 60s TTL cache there,
 // so the directory read is off any hot path.
 func CachedArtistImageMBIDs(cacheDir string) (map[string]struct{}, error) {
+	if cacheDir == "" {
+		// An unconfigured dir must not fall through to os.ReadDir(""), which
+		// would enumerate the process's working directory (Gemini on PR #495).
+		return map[string]struct{}{}, nil
+	}
 	entries, err := os.ReadDir(cacheDir)
 	if err != nil {
 		if os.IsNotExist(err) {

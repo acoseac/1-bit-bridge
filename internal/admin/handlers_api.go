@@ -909,12 +909,15 @@ func (s *Server) apiEnrichmentRetry(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "reset-failed", err.Error())
 		return
 	}
-	// Facet 2: artist image gaps. Best-effort — a dir-read/scan failure
-	// degrades to "covers-only retry" rather than failing the request.
-	if imgs := s.artistImageCoverage(ctx); imgs != nil && imgs.Missing > 0 {
+	// Facet 2: artist image gaps — one dir read + one distinct-MBID query
+	// computing the missing set directly (calling artistImageCoverage first
+	// would duplicate both reads; Gemini on PR #495). Best-effort: any
+	// failure degrades to a covers-only retry rather than failing the
+	// request. ResetEnrichedByArtistMBIDs no-ops on an empty set.
+	if s.deps.ArtistImageMBIDs != nil {
 		if files, ferr := s.deps.ArtistImageMBIDs(); ferr == nil {
 			if mbids, merr := s.deps.Manifest.DistinctArtistMBIDs(ctx); merr == nil {
-				missing := make([]string, 0, imgs.Missing)
+				var missing []string
 				for _, m := range mbids {
 					if _, ok := files[strings.ToLower(m)]; !ok {
 						missing = append(missing, m)

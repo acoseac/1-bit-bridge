@@ -171,7 +171,10 @@ func (s *Store) GetArtistAtlasMeta(ctx context.Context, mbid string) (*ArtistAtl
 // descriptions (release_atlas), each measured against the library's distinct
 // MBID universe. Tombstone rows (found=0) count as MISSING — the entity was
 // checked and nothing was found, which is exactly the gap the dashboard's
-// coverage stats should surface.
+// coverage stats should surface. A found=1 row whose TEXT is empty (e.g. a
+// release that resolved only a label/genres) ALSO counts as missing — the
+// counters describe what the UI can actually show, not mere resolution
+// (CodeRabbit on PR #495).
 type AtlasMetaBreakdown struct {
 	// ArtistsTotal is the number of distinct artist MBIDs in the library
 	// (the harvest submit universe); ArtistBiosFound counts those with a
@@ -219,11 +222,13 @@ func (s *Store) AtlasMetaBreakdownCounts(ctx context.Context) (AtlasMetaBreakdow
 			(SELECT COUNT(*) FROM artists),
 			(SELECT COUNT(*) FROM artists a
 			  WHERE EXISTS (SELECT 1 FROM artist_atlas m
-			                 WHERE m.artist_mbid = a.mbid AND m.found = 1)),
+			                 WHERE m.artist_mbid = a.mbid AND m.found = 1
+			                   AND (TRIM(m.bio) != '' OR TRIM(m.bio_summary) != ''))),
 			(SELECT COUNT(*) FROM releases),
 			(SELECT COUNT(*) FROM releases r
 			  WHERE EXISTS (SELECT 1 FROM release_atlas m
-			                 WHERE m.release_mbid = r.mbid AND m.found = 1))
+			                 WHERE m.release_mbid = r.mbid AND m.found = 1
+			                   AND TRIM(m.description) != ''))
 	`).Scan(&b.ArtistsTotal, &b.ArtistBiosFound, &b.ReleasesTotal, &b.ReleaseDescsFound)
 	return b, err
 }

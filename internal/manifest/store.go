@@ -1435,11 +1435,15 @@ func (s *Store) MarkEnriched(ctx context.Context, t *Track) error {
 func (s *Store) ResetEnrichedMisses(ctx context.Context) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// COALESCE-to-'' folds JSON-null/absent and explicit-empty into one
+	// "missing" predicate — Track MBID fields are omitempty so absent is the
+	// normal shape, but the Distinct*MBIDs enumerators guard != '' for the
+	// same defensive reason (CodeRabbit + Gemini on PR #495).
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE tracks SET enriched_at = 0
 		 WHERE enriched_at > 0
-		   AND (json_extract(tags_json, '$.artworkMBID') IS NULL
-		     OR json_extract(tags_json, '$.artistMBID') IS NULL)
+		   AND (COALESCE(json_extract(tags_json, '$.artworkMBID'), '') = ''
+		     OR COALESCE(json_extract(tags_json, '$.artistMBID'), '') = '')
 	`)
 	if err != nil {
 		return 0, err

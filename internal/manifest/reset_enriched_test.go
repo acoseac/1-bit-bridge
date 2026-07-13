@@ -37,20 +37,29 @@ func TestResetEnrichedMisses(t *testing.T) {
 	upsert(&Track{Path: "C/no-artist.flac", Size: 1, ModTime: time.Unix(1, 0),
 		ArtworkMBID: relMBID}, true)
 	upsert(&Track{Path: "D/pending.flac", Size: 1, ModTime: time.Unix(1, 0)}, false)
+	// Explicit-empty MBID regression (CodeRabbit on PR #495): omitempty means
+	// UpsertTrack never writes "", so plant it with json_set directly — the
+	// COALESCE predicate must treat it as missing like JSON-null/absent.
+	upsert(&Track{Path: "E/empty-mbid.flac", Size: 1, ModTime: time.Unix(1, 0),
+		ArtworkMBID: relMBID, ArtistMBID: artMBID}, true)
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE tracks SET tags_json = json_set(tags_json, '$.artworkMBID', '') WHERE path = 'E/empty-mbid.flac'`); err != nil {
+		t.Fatal(err)
+	}
 
 	n, err := s.ResetEnrichedMisses(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 2 {
-		t.Fatalf("reset = %d rows, want 2 (no-artwork + no-artist)", n)
+	if n != 3 {
+		t.Fatalf("reset = %d rows, want 3 (no-artwork + no-artist + empty-string artwork)", n)
 	}
 	pending, _, _, _, err := s.EnrichmentBreakdown(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pending != 3 {
-		t.Errorf("pending after reset = %d, want 3 (2 reset + 1 already pending)", pending)
+	if pending != 4 {
+		t.Errorf("pending after reset = %d, want 4 (3 reset + 1 already pending)", pending)
 	}
 
 	// Idempotent: the reset rows are now pending (enriched_at = 0), so a
