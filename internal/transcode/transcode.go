@@ -348,6 +348,17 @@ func (j JobSpec) SidecarPath() string {
 	return filepath.Join(j.OutputDir, dir, filename)
 }
 
+// VariantSidecarBasename builds the variant FLAC's basename for the
+// source-path-mirrored layout — the single source of truth shared by the
+// runtime writer (JobSpec.SidecarPath, above) and the `bridge variants
+// move` CLI (cmd/bridge computeNewSidecarPath), so the two can't drift.
+// srcBase is the source file's basename (filepath.Base of its library-
+// relative path); variantID is the persisted variant ID. See
+// safeVariantFilename for the FAT-sanitization + 255-byte-cap trade-offs.
+func VariantSidecarBasename(srcBase, variantID string) string {
+	return safeVariantFilename(srcBase, variantID)
+}
+
 // safeVariantFilename builds the variant FLAC's basename for the
 // source-path-mirrored layout. Trade-offs documented in
 // `SidecarPath`'s docblock.

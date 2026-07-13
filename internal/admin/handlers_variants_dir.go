@@ -26,6 +26,7 @@ import (
 	"strings"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
 )
@@ -213,19 +214,19 @@ func (s *Server) probeUsedByKind(ctx context.Context) map[string]int64 {
 // containment check, INCLUDING its symlink resolution — a lexical-only
 // check here would let the admin accept a symlinked path that
 // `config.Load`'s validation rejects on the next boot (bridge fails to
-// start over a value the UI said was fine). Duplicated here (rather
-// than exported from config) so the admin handler can produce its own
-// error formatting without a config-package round-trip. Both paths
-// MUST stay in lockstep — a test in `internal/admin` pins the contract
-// via a sibling-path acceptance + under-root rejection pair plus a
-// symlink-resolution case.
+// start over a value the UI said was fine). The symlink resolution is the
+// shared `fsutil.EvalSymlinksOrClean` (single canonical copy, also used by
+// config + the `bridge variants move` CLI) so all three stay in lockstep;
+// only the admin-specific error formatting lives here. A test in
+// `internal/admin` pins the contract via a sibling-path acceptance +
+// under-root rejection pair plus a symlink-resolution case.
 func assertNotUnderLibraryRoots(candidate string, roots []string) error {
-	cleaned := evalSymlinksOrClean(candidate)
+	cleaned := fsutil.EvalSymlinksOrClean(candidate)
 	for _, root := range roots {
 		if root == "" {
 			continue
 		}
-		cleanedRoot := evalSymlinksOrClean(root)
+		cleanedRoot := fsutil.EvalSymlinksOrClean(root)
 		rel, err := filepath.Rel(cleanedRoot, cleaned)
 		if err != nil {
 			continue
@@ -235,38 +236,6 @@ func assertNotUnderLibraryRoots(candidate string, roots []string) error {
 		}
 	}
 	return nil
-}
-
-// evalSymlinksOrClean is a byte-for-byte twin of
-// `config.evalSymlinksOrClean`: EvalSymlinks when the path exists,
-// otherwise resolve symlinks in the nearest EXISTING ancestor and
-// re-append the missing tail (a brand-new variants dir is created on
-// first upscale; an unmounted library root is typed but absent). The
-// ancestor walk closes the symlinked-parent bypass: a plain Clean
-// fallback would let a variants_dir whose parent symlinks into a
-// library root pass this check, then os.MkdirAll would write through
-// the symlink into the read-only root. MUST stay in lockstep with the
-// config twin — divergence re-opens the accept-here / reject-at-boot
-// mismatch documented on assertNotUnderLibraryRoots.
-func evalSymlinksOrClean(p string) string {
-	if resolved, err := filepath.EvalSymlinks(p); err == nil {
-		return resolved
-	}
-	p = filepath.Clean(p)
-	missing := ""
-	for cur := p; ; {
-		parent := filepath.Dir(cur)
-		if parent == cur {
-			// Reached the filesystem / volume root without finding an
-			// existing ancestor — fall back to the lexical clean.
-			return p
-		}
-		missing = filepath.Join(filepath.Base(cur), missing)
-		if resolved, err := filepath.EvalSymlinks(parent); err == nil {
-			return filepath.Join(resolved, missing)
-		}
-		cur = parent
-	}
 }
 
 // probeVariantsDirUsage returns (usedBytes, freeBytes) for the

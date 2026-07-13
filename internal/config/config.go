@@ -21,6 +21,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 )
 
@@ -1939,12 +1940,12 @@ func validateVariantsDir(variantsDir string, libraryRoots []string) error {
 	// first upscale). We try EvalSymlinks first; on failure, fall
 	// through to the lexical check so a brand-new install still
 	// validates.
-	candidate := evalSymlinksOrClean(variantsDir)
+	candidate := fsutil.EvalSymlinksOrClean(variantsDir)
 	for _, root := range libraryRoots {
 		if root == "" {
 			continue
 		}
-		cleanedRoot := evalSymlinksOrClean(root)
+		cleanedRoot := fsutil.EvalSymlinksOrClean(root)
 		rel, err := filepath.Rel(cleanedRoot, candidate)
 		if err != nil {
 			// Different volumes on Windows; can't compare → not nested.
@@ -1959,46 +1960,6 @@ func validateVariantsDir(variantsDir string, libraryRoots []string) error {
 		}
 	}
 	return nil
-}
-
-// evalSymlinksOrClean returns `filepath.EvalSymlinks(p)` when it
-// succeeds. When the leaf doesn't exist yet (typical for a brand-new
-// install where variants_dir is created on first upscale, or for a
-// library root the operator typed into bridge.yaml but hasn't mounted),
-// it resolves symlinks in the NEAREST EXISTING ANCESTOR and re-appends
-// the missing trailing components.
-//
-// The ancestor walk is load-bearing, not cosmetic: a plain
-// `filepath.Clean` fallback leaves a symlinked PARENT component
-// unresolved, so a variants_dir like `/data/link/transcoded` (where
-// `/data/link` → a library root and `transcoded` doesn't exist yet)
-// passes the lexical containment check — and then `os.MkdirAll` on first
-// upscale writes THROUGH the symlink, dumping variant files into the
-// read-only library root. Resolving the existing-ancestor prefix closes
-// that bypass while still validating brand-new paths.
-//
-// `internal/admin` carries a byte-for-byte twin (handlers_variants_dir.go)
-// so the admin's pre-save check matches what this package enforces at
-// the next config load — keep the two in lockstep.
-func evalSymlinksOrClean(p string) string {
-	if resolved, err := filepath.EvalSymlinks(p); err == nil {
-		return resolved
-	}
-	p = filepath.Clean(p)
-	missing := ""
-	for cur := p; ; {
-		parent := filepath.Dir(cur)
-		if parent == cur {
-			// Reached the filesystem / volume root without finding an
-			// existing ancestor — fall back to the lexical clean.
-			return p
-		}
-		missing = filepath.Join(filepath.Base(cur), missing)
-		if resolved, err := filepath.EvalSymlinks(parent); err == nil {
-			return filepath.Join(resolved, missing)
-		}
-		cur = parent
-	}
 }
 
 // maxCustomEndpointHostLen caps the per-entry hostname at the RFC 1035

@@ -36,7 +36,9 @@ import (
 	"syscall"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
+	"github.com/acoseac/1-bit-bridge/internal/transcode"
 )
 
 func variantsCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -176,15 +178,22 @@ func variantsMoveCmd(ctx context.Context, args []string, stdout, stderr io.Write
 // `transcode.JobSpec.SidecarPath`. Mirrors the same shape that the
 // runtime pool produces for new conversions.
 //
-// Constructed by hand here (rather than calling JobSpec.SidecarPath)
-// because we don't have the full JobSpec — only the persisted
-// VariantRow. The mapping is deterministic from
-// `(source_path, variant_id)` so this stays in lockstep with the
-// pool's writer.
+// We don't have the full JobSpec here (only the persisted VariantRow),
+// so we can't call JobSpec.SidecarPath directly — but we DO share its
+// basename builder (transcode.VariantSidecarBasename) so the two can't
+// drift. The dir prefix mirrors SidecarPath's (dir segments are not
+// sanitized: they came from the source filesystem, which already
+// accepts them).
 func computeNewSidecarPath(toDir string, v manifest.VariantRow) string {
 	dir := filepath.Dir(v.SourcePath)
 	base := filepath.Base(v.SourcePath)
-	filename := fmt.Sprintf("%s.%s.flac", base, v.VariantID)
+	// Use the SAME builder the pool writer uses (transcode.VariantSidecarBasename
+	// -> safeVariantFilename) so the recomputed path can't drift from the
+	// persisted sidecar_path. A raw fmt.Sprintf here skipped the FAT
+	// sanitization + 255-byte truncation, so a move to a FAT/exFAT target
+	// (the documented use case) failed on every colon/`?`-bearing classical
+	// filename, and over-long names hit ENAMETOOLONG even on ext4.
+	filename := transcode.VariantSidecarBasename(base, v.VariantID)
 	if dir == "" || dir == "." {
 		return filepath.Join(toDir, filename)
 	}
@@ -331,13 +340,21 @@ func isCrossDeviceError(err error) bool {
 // equal-to-root AND `rel == ".cache/..."` for dot-prefixed subs)
 // means AT-OR-UNDER. Gemini medium on PR #246 asked for regression
 // coverage on the dot-prefixed cases that pre-fix passed through.
+//
+// Both sides are resolved through the shared fsutil.EvalSymlinksOrClean
+// (the same helper config + admin use) BEFORE the Rel() math: a lexical-
+// only Clean would let a `--to` whose parent symlinks into a library root
+// slip past this guard, then os.MkdirAll would write variant FLACs THROUGH
+// the symlink into the read-only library (the PR #75 read-only-library
+// invariant). It resolves the nearest EXISTING ancestor when `--to` itself
+// doesn't exist yet, so a brand-new destination is still validated.
 func isUnderAnyLibraryRoot(to string, libraryRoots []string) string {
-	cleanedTo := filepath.Clean(to)
+	cleanedTo := fsutil.EvalSymlinksOrClean(to)
 	for _, root := range libraryRoots {
 		if root == "" {
 			continue
 		}
-		cleanedRoot := filepath.Clean(root)
+		cleanedRoot := fsutil.EvalSymlinksOrClean(root)
 		rel, err := filepath.Rel(cleanedRoot, cleanedTo)
 		if err != nil {
 			continue // cross-volume on Windows; can't be nested.
