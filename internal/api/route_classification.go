@@ -207,6 +207,12 @@ func (s *Server) routeRegistry() []route {
 		{pattern: "GET /v1/artwork/{mbid}", kind: boundedRoute, handler: s.authed(s.artwork)},
 		{pattern: "GET /v1/artist-image/{mbid}", kind: boundedRoute, handler: s.authed(s.artistImage)},
 
+		// PDF album booklet — streamingRoute, NOT bounded: booklets run
+		// 10-64 MB, and over a slow Tailscale DERP relay (~1 MB/s) the
+		// bounded 60s write deadline would tear the transfer mid-file.
+		// Same classification rationale as /v1/download.
+		{pattern: "GET /v1/booklet/{mbid}", kind: streamingRoute, handler: s.authed(s.booklet)},
+
 		// Custom playlist / smart-mix cover art — operator-uploaded JPEGs
 		// (~600 px). 404 when none (iOS falls back to the auto-mosaic).
 		{pattern: "GET /v1/smart-playlist-image/{slug}", kind: boundedRoute, handler: s.authed(s.smartMixCover)},

@@ -645,6 +645,16 @@ type enrichmentResponse struct {
 	ArtistImages      *coverageCounts `json:"artistImages,omitempty"`
 	ArtistBios        *coverageCounts `json:"artistBios,omitempty"`
 	AlbumDescriptions *coverageCounts `json:"albumDescriptions,omitempty"`
+	// Booklets reports PDF album booklets known available upstream vs
+	// already cached on the bridge's disk. Nil (omitted) on bridges
+	// without the booklet wiring or when none are available yet.
+	Booklets *bookletCounts `json:"booklets,omitempty"`
+}
+
+// bookletCounts is the available/cached pair for the booklet stat row.
+type bookletCounts struct {
+	Available int `json:"available"`
+	Cached    int `json:"cached"`
 }
 
 // coverageCounts is a have/missing pair for one enrichment facet
@@ -660,6 +670,7 @@ type enrichmentMetaPart struct {
 	ArtistImages      *coverageCounts
 	ArtistBios        *coverageCounts
 	AlbumDescriptions *coverageCounts
+	Booklets          *bookletCounts
 }
 
 // Enrichment ETA is a deliberately rough reassurance number, not a promise. The
@@ -703,6 +714,7 @@ func (s *Server) getEnrichmentSnapshot() enrichmentResponse {
 	snap.ArtistImages = meta.ArtistImages
 	snap.ArtistBios = meta.ArtistBios
 	snap.AlbumDescriptions = meta.AlbumDescriptions
+	snap.Booklets = meta.Booklets
 	return snap
 }
 
@@ -793,25 +805,13 @@ func (s *Server) getEnrichmentMetaSnapshot() enrichmentMetaPart {
 		s.enrichmentMetaMu.Unlock()
 		ctx, cancel := context.WithTimeout(context.Background(), enrichmentDBTimeout)
 		defer cancel()
-		var snap enrichmentMetaPart
-		b, err := s.deps.Manifest.AtlasMetaBreakdownCounts(ctx)
-		if err != nil {
-			logger.Warn("enrichment: atlas-meta breakdown", "err", err)
+		snap, ok := s.computeEnrichmentMeta(ctx)
+		if !ok {
 			s.enrichmentMetaMu.Lock()
 			snap = s.enrichmentMeta // last good (possibly zero)
 			s.enrichmentMetaMu.Unlock()
 			return snap, nil
 		}
-		// A facet whose MBID universe is empty (nothing enriched yet, or a
-		// library with no MB matches) stays nil so the card doesn't render
-		// noise rows of "0 have · 0 missing".
-		if b.ArtistsTotal > 0 {
-			snap.ArtistBios = &coverageCounts{Have: b.ArtistBiosFound, Missing: b.ArtistsTotal - b.ArtistBiosFound}
-		}
-		if b.ReleasesTotal > 0 {
-			snap.AlbumDescriptions = &coverageCounts{Have: b.ReleaseDescsFound, Missing: b.ReleasesTotal - b.ReleaseDescsFound}
-		}
-		snap.ArtistImages = s.artistImageCoverage(ctx)
 		s.enrichmentMetaMu.Lock()
 		s.enrichmentMeta = snap
 		s.enrichmentMetaAt = time.Now()
@@ -822,6 +822,35 @@ func (s *Server) getEnrichmentMetaSnapshot() enrichmentMetaPart {
 		return snap
 	}
 	return enrichmentMetaPart{}
+}
+
+// computeEnrichmentMeta builds a fresh coverage snapshot (the singleflight
+// body's compute half — split out for cognitive-complexity budget). ok=false
+// means the primary breakdown read failed and the caller should serve
+// last-good. A facet whose MBID universe is empty stays nil so the card
+// doesn't render noise rows of "0 have · 0 missing".
+func (s *Server) computeEnrichmentMeta(ctx context.Context) (enrichmentMetaPart, bool) {
+	var snap enrichmentMetaPart
+	b, err := s.deps.Manifest.AtlasMetaBreakdownCounts(ctx)
+	if err != nil {
+		logger.Warn("enrichment: atlas-meta breakdown", "err", err)
+		return snap, false
+	}
+	if b.ArtistsTotal > 0 {
+		snap.ArtistBios = &coverageCounts{Have: b.ArtistBiosFound, Missing: b.ArtistsTotal - b.ArtistBiosFound}
+	}
+	if b.ReleasesTotal > 0 {
+		snap.AlbumDescriptions = &coverageCounts{Have: b.ReleaseDescsFound, Missing: b.ReleasesTotal - b.ReleaseDescsFound}
+	}
+	snap.ArtistImages = s.artistImageCoverage(ctx)
+	// Booklets (v1.8): cheap two-COUNT read; omitted while nothing is
+	// available (unwired bridges keep an empty table → nil facet).
+	if avail, cached, berr := s.deps.Manifest.BookletCounts(ctx); berr != nil {
+		logger.Warn("enrichment: booklet counts", "err", berr)
+	} else if avail > 0 {
+		snap.Booklets = &bookletCounts{Available: avail, Cached: cached}
+	}
+	return snap, true
 }
 
 // artistImageCoverage intersects the library's distinct artist MBIDs with the

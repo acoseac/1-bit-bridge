@@ -310,6 +310,17 @@ function applyEnrichment(e) {
   setEnrichCoverage("enrich-artist-bios", e.artistBios);
   setEnrichCoverage("enrich-album-desc", e.albumDescriptions);
 
+  // PDF booklets: "N available · M cached" (different vocabulary from the
+  // have/missing coverage rows — availability is upstream-driven).
+  const bkDt = document.getElementById("enrich-booklets-dt");
+  const bkDd = document.getElementById("enrich-booklets");
+  if (bkDt && bkDd) {
+    const bk = e.booklets;
+    const show = bk && typeof bk.available === "number";
+    bkDt.hidden = bkDd.hidden = !show;
+    if (show) bkDd.textContent = `${bk.available} available · ${bk.cached} cached`;
+  }
+
   // Reveal "Retry missing" only when some facet actually has gaps.
   const retryBtn = document.getElementById("enrich-retry");
   if (retryBtn) {

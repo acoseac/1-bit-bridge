@@ -34,6 +34,7 @@ func TestRouteRegistry_completeness(t *testing.T) {
 		"GET /v1/manifest",
 		"GET /v1/artwork/{mbid}",
 		"GET /v1/artist-image/{mbid}",
+		"GET /v1/booklet/{mbid}",
 		"GET /v1/smart-playlist-image/{slug}",
 		"GET /v1/playlist-image/{id}",
 		"GET /v1/waveform",
@@ -118,6 +119,9 @@ func TestRouteRegistry_noUnexpectedStreamingRoutes(t *testing.T) {
 		"GET /v1/manifest":                   {},
 		"GET /v1/events":                     {},
 		"GET /v1/pairing/{requestID}/events": {},
+		// Booklets are 10-64 MB PDFs — a slow DERP relay would blow the
+		// bounded 60s write deadline (same rationale as /v1/download).
+		"GET /v1/booklet/{mbid}": {},
 	}
 	s := newRouteRegistryTestServer(t)
 	for _, rt := range s.routeRegistry() {
