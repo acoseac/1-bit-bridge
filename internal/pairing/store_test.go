@@ -671,6 +671,70 @@ func TestSnapshotRedactsSecretMaterial(t *testing.T) {
 	}
 }
 
+// TestCloseDuringRevokeDoesNotRearmTimer pins the Gemini-#494 race: if
+// Close() runs WHILE onTimer is parked in the out-of-lock revoke, the
+// post-revoke re-acquire must re-check closed and NOT schedule a retry timer
+// that outlives Close. We block inside the revoke fn, Close() the store, then
+// release the revoke with a failure and assert no fresh timer was armed.
+func TestCloseDuringRevokeDoesNotRearmTimer(t *testing.T) {
+	revokeEntered := make(chan struct{})
+	revokeRelease := make(chan struct{})
+	blockingFailingRevoke := func(string) error {
+		close(revokeEntered)
+		<-revokeRelease
+		return errors.New("simulated revoke failure")
+	}
+	// Long TTL/grace so Approve's own undelivered-cleanup timer can't fire
+	// during the test — the only onTimer invocation is our manual one.
+	s := NewStore(Options{
+		TTL:         time.Hour,
+		Grace:       time.Hour,
+		MaxPending:  4,
+		RevokeToken: blockingFailingRevoke,
+	})
+	t.Cleanup(s.Close)
+
+	mint := &stubMint{}
+	_, hashHex := makePollPair(t, "race")
+	req, err := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Approve(req.ID, "FP", mint.fn); err != nil {
+		t.Fatal(err)
+	}
+
+	s.mu.Lock()
+	gen := s.byID[req.ID].timerGen
+	s.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() { defer close(done); s.onTimer(req.ID, gen) }()
+
+	select {
+	case <-revokeEntered: // onTimer is now parked in the out-of-lock revoke
+	case <-time.After(2 * time.Second):
+		close(revokeRelease)
+		t.Fatal("revoke never entered — onTimer didn't reach the revoke path")
+	}
+	s.Close()            // sets closed + stops timers WHILE the revoke is in flight
+	close(revokeRelease) // revoke returns an error → onTimer re-acquires the lock
+	<-done               // and must hit the closed re-check instead of scheduleTimer
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.closed {
+		t.Fatal("Close did not set closed")
+	}
+	got := s.byID[req.ID]
+	if got == nil {
+		t.Fatal("row unexpectedly deleted (closed re-check should return before delete)")
+	}
+	if got.expiryTimer != nil {
+		t.Error("a retry timer was armed after Close during revoke (post-revoke closed re-check failed)")
+	}
+}
+
 func TestRevokeRetryOnFailure(t *testing.T) {
 	// Locks the CodeRabbit-second-pass invariant: an Approved-but-
 	// undelivered request whose first revoke fails must NOT be deleted

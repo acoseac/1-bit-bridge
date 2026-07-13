@@ -826,6 +826,15 @@ func (s *Store) onTimer(id string, gen uint64) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		// Close() ran DURING the out-of-lock revoke above: it set closed and
+		// stopped every timer. Do NOT fall through to scheduleTimer on a
+		// revoke failure — that would arm a fresh retry timer that outlives
+		// Close, the exact leak the top-of-onTimer guard prevents for the
+		// pre-revoke path (Gemini on PR #494). The in-memory row is discarded
+		// on process exit and the revoke already ran, so nothing is left to do.
+		return
+	}
 	req, ok := s.byID[id]
 	if !ok {
 		// Already cleaned up by Delete or a concurrent path —
