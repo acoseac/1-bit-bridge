@@ -1,0 +1,56 @@
+# 1-bit-bridge — LAN / loopback Docker deployment (the common case).
+#
+#   1. (optional) cp .env.example .env  and edit it — at minimum point
+#      BRIDGE_LIBRARY_HOST_PATH at your music folder.
+#   2. docker compose up -d
+#   3. docker compose logs -f           # watch the first library scan
+#
+# Pair iOS against https://<host>:7788 using the fingerprint from:
+#   docker exec 1-bit-bridge bridge cert info
+#
+# Compose auto-loads a sibling ".env" for the ${VAR} substitutions below, so
+# you never edit this file for the common knobs — put them in .env. With no
+# .env at all the container still boots on sane defaults (single library at
+# ./music, HTTP/2 + HTTP/3 on :7788, audio features off).
+#
+# Internet-exposed (public) mode needs a one-time `bridge init --public` plus a
+# :443 + sysctl layout — see docs/docker.md → "Public mode (internet-exposed)".
+
+services:
+  bridge:
+    image: ghcr.io/acoseac/1-bit-bridge:latest   # pin a version (e.g. :0.1.7) for reproducible deploys
+    # Building from a git clone instead of pulling the published image?
+    # Comment out the `image:` line above and uncomment this:
+    # build: .
+    container_name: 1-bit-bridge
+    restart: unless-stopped
+    ports:
+      - "7788:7788/tcp"
+      - "7788:7788/udp"        # HTTP/3 (QUIC). Drop this line → the bridge serves HTTP/2 only.
+    volumes:
+      # Your music library, mounted READ-ONLY. Point BRIDGE_LIBRARY_HOST_PATH
+      # (in .env) at your files. The host path must be readable by the container
+      # user (UID 100) or the scan indexes 0 tracks — see docs/docker.md.
+      - "${BRIDGE_LIBRARY_HOST_PATH:-./music}:/library:ro"
+      # Persistent state: bridge.yaml, the SQLite manifest, the TLS cert, the
+      # artwork cache. MUST be a named volume — a host bind-mount is created
+      # root-owned and the non-root container process can't write into it.
+      - "bridge-state:/data"
+    environment:
+      # Container-side library roots. Inside the container the mount above is
+      # always /library, so leave this as-is for a single library. For MULTIPLE
+      # libraries add more read-only volume lines and list them colon-separated,
+      # e.g. BRIDGE_LIBRARY_ROOTS=/library:/library2.
+      BRIDGE_LIBRARY_ROOTS: "${BRIDGE_LIBRARY_ROOTS:-/library}"
+      BRIDGE_LIBRARY_NAME: "${BRIDGE_LIBRARY_NAME:-1-bit Library}"
+      # Optional audio features (bundled sox + ffmpeg toolchain). Off by default;
+      # they cost nothing until enabled. See docs/docker.md → "Audio features".
+      BRIDGE_UPSCALE_ENABLED: "${BRIDGE_UPSCALE_ENABLED:-false}"
+      BRIDGE_ANALYSIS_ENABLED: "${BRIDGE_ANALYSIS_ENABLED:-false}"
+      # Set true to disable HTTP/3 entirely (also drop the /udp port above).
+      BRIDGE_DISABLE_HTTP3: "${BRIDGE_DISABLE_HTTP3:-false}"
+      # Local timezone for the auto-updater quiet-hours window.
+      TZ: "${TZ:-UTC}"
+
+volumes:
+  bridge-state:

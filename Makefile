@@ -1,6 +1,7 @@
-.PHONY: build build-all test test-fast check fmt vet clean run
+.PHONY: build build-all test test-fast check fmt vet clean run check-go-version docker
 
 BINARY      := bridge
+IMAGE       := 1-bit-bridge
 PKG         := ./cmd/bridge
 DIST        := dist
 
@@ -82,3 +83,30 @@ clean:
 
 run:
 	go run $(PKG) serve --config config/bridge.yaml.example
+
+# Guard: the Dockerfile's `ARG GO_VERSION` major.minor MUST match go.mod's
+# `go` directive. The alpine golang image sets GOTOOLCHAIN=local, so a stale
+# ARG fails the image build with "go.mod requires go >= X" rather than
+# auto-downloading a toolchain (this broke the first v0.1.7 image). CI runs
+# this via .github/workflows/gate.yml; run it locally before bumping either.
+check-go-version:
+	@gomod=$$(awk '/^go /{print $$2; exit}' go.mod); \
+	dockerfile=$$(awk -F= '/^ARG GO_VERSION=/{print $$2; exit}' Dockerfile); \
+	gomm=$$(printf '%s' "$$gomod" | cut -d. -f1-2); \
+	dfmm=$$(printf '%s' "$$dockerfile" | cut -d. -f1-2); \
+	if [ -z "$$gomm" ] || [ -z "$$dfmm" ]; then \
+		echo "check-go-version: could not parse versions (go.mod='$$gomod' Dockerfile='$$dockerfile')"; exit 1; \
+	fi; \
+	if [ "$$gomm" != "$$dfmm" ]; then \
+		echo "check-go-version: MISMATCH — Dockerfile ARG GO_VERSION=$$dockerfile ($$dfmm) != go.mod go $$gomod ($$gomm)"; \
+		echo "  fix: set 'ARG GO_VERSION=$$gomm' in Dockerfile (GOTOOLCHAIN=local fails the alpine build on a stale value)"; \
+		exit 1; \
+	fi; \
+	echo "check-go-version: OK (go.mod go $$gomod, Dockerfile GO_VERSION $$dockerfile -> major.minor $$gomm)"
+
+# Convenience: build the container image for the host arch, injecting VERSION
+# so `bridge version` reports the build identity (mirrors the ServerVersion
+# injection `make build` does). Multi-arch builds use `docker buildx` — see
+# docs/docker.md. Runs the go-version guard first for a clear early failure.
+docker: check-go-version
+	docker build --build-arg VERSION="$(VERSION)" -t $(IMAGE):dev .
