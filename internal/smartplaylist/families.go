@@ -19,22 +19,10 @@ func pathsOf(stats []PlayStat) []string {
 
 // itemsFromPaths hydrates paths into items via the feature map, dropping
 // paths that no longer resolve (a since-deleted track), capped at maxItems.
+// Thin wrapper over itemsFromPathsDiverse with the diversity caps disabled
+// (0 = no cap) — one implementation, no duplicated hydrate/append loop.
 func itemsFromPaths(paths []string, features map[string]TrackFeature, maxItems int) []Item {
-	if maxItems <= 0 {
-		return nil
-	}
-	items := make([]Item, 0, min(len(paths), maxItems))
-	for _, p := range paths {
-		f, ok := features[p]
-		if !ok {
-			continue
-		}
-		items = append(items, Item{Position: len(items), Path: p, Title: f.Title, Artist: f.Artist})
-		if len(items) >= maxItems {
-			break
-		}
-	}
-	return items
+	return itemsFromPathsDiverse(paths, features, maxItems, 0, 0)
 }
 
 // itemsFromPathsDiverse is itemsFromPaths with per-artist and per-album
