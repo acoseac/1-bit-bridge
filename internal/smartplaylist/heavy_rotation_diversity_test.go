@@ -1,6 +1,32 @@
 package smartplaylist
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
+
+// When the diversity caps would starve the mix below MinHeavyRotation (a pool
+// dominated by a few artists/albums), buildHeavyRotation falls back to the
+// UNCAPPED list so the family shows instead of hiding (the raw pool already met
+// the floor upstream).
+func TestBuildHeavyRotation_capStarvation_fallsBackUncapped(t *testing.T) {
+	feats := map[string]TrackFeature{}
+	var stats []PlayStat
+	for i := 0; i < 12; i++ {
+		p := fmt.Sprintf("dom/%d.flac", i)
+		feats[p] = TrackFeature{Path: p, Title: fmt.Sprintf("T%d", i), Artist: "One", Album: "Alb"}
+		stats = append(stats, PlayStat{Path: p, Plays: 5})
+	}
+	in := Inputs{HeavyRotation: stats, Features: feats}
+	opts := Options{MaxItems: 50, MinHeavyRotation: 10, HeavyRotationPerArtistCap: 4, HeavyRotationPerAlbumCap: 4}
+	pl, ok := buildHeavyRotation(in, opts)
+	if !ok {
+		t.Fatalf("expected the family to be generated via the uncapped fallback")
+	}
+	if len(pl.Items) != 12 {
+		t.Fatalf("uncapped fallback: want all 12 items, got %d", len(pl.Items))
+	}
+}
 
 // itemsFromPathsDiverse enforces per-artist / per-album diversity caps on the
 // Heavy Rotation build so one heavily-played artist / album can't flood the

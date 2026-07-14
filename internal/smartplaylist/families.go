@@ -102,6 +102,14 @@ func buildHeavyRotation(in Inputs, opts Options) (GeneratedPlaylist, bool) {
 	items := itemsFromPathsDiverse(pathsOf(in.HeavyRotation), in.Features, opts.MaxItems,
 		opts.HeavyRotationPerArtistCap, opts.HeavyRotationPerAlbumCap)
 	if len(items) < opts.MinHeavyRotation {
+		// The caps starved the mix (a pool dominated by a few artists/albums).
+		// Fall back to the UNCAPPED list rather than hiding the family — the
+		// upstream floor guaranteed the raw pool reached MinHeavyRotation, so a
+		// less-diverse mix is better than none, and it preserves the operator's
+		// play-count-floor intent (vs degrading the floor). CodeRabbit on #497.
+		items = itemsFromPaths(pathsOf(in.HeavyRotation), in.Features, opts.MaxItems)
+	}
+	if len(items) < opts.MinHeavyRotation {
 		return GeneratedPlaylist{}, false
 	}
 	return GeneratedPlaylist{

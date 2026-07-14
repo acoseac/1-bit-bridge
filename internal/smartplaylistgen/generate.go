@@ -143,7 +143,10 @@ func assembleInputs(ctx context.Context, store *manifest.Store, opts Options) (s
 	// rounds preferred the Go loop). floor==1 is a no-op HAVING → the full
 	// pool, so the family never hides purely because of the floor.
 	var heavy []manifest.PlayStatRow
-	for floor := opts.HeavyRotationMinPlays; floor >= 1; floor-- {
+	// `max(1, …)` so a config of 0 / negative doesn't make the `floor >= 1`
+	// loop skip entirely and starve the mix (Gemini on PR #497); floor 1 is a
+	// no-op HAVING = the full pool.
+	for floor := max(1, opts.HeavyRotationMinPlays); floor >= 1; floor-- {
 		var qerr error
 		heavy, qerr = store.PlayStatsInWindow(ctx, now-opts.HeavyWindow.Nanoseconds(), 0, opts.MinPlaySeconds, floor, eng.MaxItems)
 		if qerr != nil {
