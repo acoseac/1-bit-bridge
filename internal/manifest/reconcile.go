@@ -252,7 +252,10 @@ func reconcileAlbumTitles(tracks []ReconcileTarget) []ReconcileTarget {
 func reconcileYearsByMBID(tracks []ReconcileTarget) []ReconcileTarget {
 	groups := map[string][]int{}
 	for i := range tracks {
-		mbid := strings.TrimSpace(tracks[i].MusicBrainzAlbumID)
+		// Lowercase: MusicBrainz ids are case-insensitive UUIDs, but a
+		// user-tagged file / external source may write mixed case; group them
+		// together (Gemini on PR #498). `local-<hash>` is already lowercase.
+		mbid := strings.ToLower(strings.TrimSpace(tracks[i].MusicBrainzAlbumID))
 		if mbid == "" || strings.HasPrefix(mbid, "local-") {
 			continue // no real release id
 		}

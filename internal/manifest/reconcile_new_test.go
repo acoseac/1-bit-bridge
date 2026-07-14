@@ -130,6 +130,14 @@ func TestReconcileYearsByMBID(t *testing.T) {
 			want: map[string]int{"B/loose/stray.flac": 2011},
 		},
 		{
+			name: "MBID casing is normalized (mixed-case stray groups with lowercase sibling)",
+			in: []ReconcileTarget{
+				mk("A/x/1.flac", yp(2011), mbid),
+				mk("B/s/stray.flac", yp(0), "F51A95D4-98A5-43F1-8C4A-C2CAB20A9CBD"),
+			},
+			want: map[string]int{"B/s/stray.flac": 2011},
+		},
+		{
 			name: "too many year-0 tracks (full copy / edition) → skip",
 			in: []ReconcileTarget{
 				mk("A/x/1.flac", yp(1998), mbid),
