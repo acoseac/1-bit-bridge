@@ -148,7 +148,11 @@ type PlayStatRow struct {
 // rule" applied at generation time, never at ingestion). untilNS <= 0 means
 // open-ended (up to now). Backs Heavy Rotation (14-day window) and the Daily
 // Mix "familiar" set (wider window). Read path — no s.mu.
-func (s *Store) PlayStatsInWindow(ctx context.Context, sinceNS, untilNS int64, minDuration float64, limit int) ([]PlayStatRow, error) {
+// `minPlays` is an optional play-count floor (Heavy Rotation's ≥N-plays
+// gate): rows are kept only when COUNT(*) >= minPlays. A value <= 1 is a
+// no-op (GROUP BY already implies COUNT(*) >= 1), so callers that want the
+// unfiltered pool (the Daily Mix "familiar" set) pass 0.
+func (s *Store) PlayStatsInWindow(ctx context.Context, sinceNS, untilNS int64, minDuration float64, minPlays, limit int) ([]PlayStatRow, error) {
 	limit = clampLimit(limit, 100, 5000)
 	q := `
 		SELECT path, COUNT(*) AS n, MAX(started_at) AS last, MIN(started_at) AS first
@@ -159,7 +163,12 @@ func (s *Store) PlayStatsInWindow(ctx context.Context, sinceNS, untilNS int64, m
 		q += ` AND started_at < ?`
 		args = append(args, untilNS)
 	}
-	q += ` GROUP BY path ORDER BY n DESC, last DESC LIMIT ?`
+	q += ` GROUP BY path`
+	if minPlays > 1 {
+		q += ` HAVING COUNT(*) >= ?`
+		args = append(args, minPlays)
+	}
+	q += ` ORDER BY n DESC, last DESC LIMIT ?`
 	args = append(args, limit)
 	return s.scanPlayStats(ctx, q, args...)
 }

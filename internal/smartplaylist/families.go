@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 )
 
 // --- shared item helpers ---
@@ -36,6 +37,49 @@ func itemsFromPaths(paths []string, features map[string]TrackFeature, maxItems i
 	return items
 }
 
+// itemsFromPathsDiverse is itemsFromPaths with per-artist and per-album
+// diversity caps: it preserves the input (plays-desc) order but skips a track
+// once its artist OR album has already contributed `perArtistCap` /
+// `perAlbumCap` items, so one heavily-played artist/album can't flood the mix
+// (the "13 Beatles tracks in a row" case). A cap <= 0 disables that axis; an
+// empty artist/album key is never capped (so blank-tag tracks aren't all
+// collapsed). Pure + testable.
+func itemsFromPathsDiverse(paths []string, features map[string]TrackFeature, maxItems, perArtistCap, perAlbumCap int) []Item {
+	if maxItems <= 0 {
+		return nil
+	}
+	items := make([]Item, 0, min(len(paths), maxItems))
+	artistCounts := map[string]int{}
+	albumCounts := map[string]int{}
+	for _, p := range paths {
+		f, ok := features[p]
+		if !ok {
+			continue
+		}
+		aKey := diversityKey(f.Artist)
+		alKey := diversityKey(f.Album)
+		if perArtistCap > 0 && aKey != "" && artistCounts[aKey] >= perArtistCap {
+			continue
+		}
+		if perAlbumCap > 0 && alKey != "" && albumCounts[alKey] >= perAlbumCap {
+			continue
+		}
+		items = append(items, Item{Position: len(items), Path: p, Title: f.Title, Artist: f.Artist})
+		artistCounts[aKey]++
+		albumCounts[alKey]++
+		if len(items) >= maxItems {
+			break
+		}
+	}
+	return items
+}
+
+// diversityKey normalizes an artist / album display string for the diversity
+// caps so casing / surrounding whitespace variants count as the same act.
+func diversityKey(s string) string {
+	return strings.ToLower(strings.TrimSpace(s))
+}
+
 func itemsFromFeatures(feats []TrackFeature, maxItems int) []Item {
 	if maxItems <= 0 {
 		return nil
@@ -53,7 +97,10 @@ func itemsFromFeatures(feats []TrackFeature, maxItems int) []Item {
 // --- listening families ---
 
 func buildHeavyRotation(in Inputs, opts Options) (GeneratedPlaylist, bool) {
-	items := itemsFromPaths(pathsOf(in.HeavyRotation), in.Features, opts.MaxItems)
+	// Diversity-capped so one heavily-played artist/album can't dominate the
+	// mix (the play-count floor is applied upstream in the query).
+	items := itemsFromPathsDiverse(pathsOf(in.HeavyRotation), in.Features, opts.MaxItems,
+		opts.HeavyRotationPerArtistCap, opts.HeavyRotationPerAlbumCap)
 	if len(items) < opts.MinHeavyRotation {
 		return GeneratedPlaylist{}, false
 	}
