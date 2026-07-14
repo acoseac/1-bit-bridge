@@ -109,4 +109,4 @@ check-go-version:
 # injection `make build` does). Multi-arch builds use `docker buildx` — see
 # docs/docker.md. Runs the go-version guard first for a clear early failure.
 docker: check-go-version
-	docker build --build-arg VERSION=$(VERSION) -t $(IMAGE):dev .
+	docker build --build-arg VERSION="$(VERSION)" -t $(IMAGE):dev .

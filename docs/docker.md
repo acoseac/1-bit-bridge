@@ -197,7 +197,7 @@ defaults. Empty / unset env = no change.
 | Variable | YAML field | Notes |
 |---|---|---|
 | `BRIDGE_LISTEN_ADDRESS` | `listenAddress` | Main HTTPS bind, e.g. `:7788`. |
-| `BRIDGE_ADMIN_ADDRESS` | `adminAddress` | Loopback admin console (default `127.0.0.1:7789`). **Must stay a loopback host** — a non-loopback value (e.g. `0.0.0.0:7789`) fails validation and the bridge **refuses to start**, because the admin API is unauthenticated. For browser access see [Admin console access](#admin-console-access). |
+| `BRIDGE_ADMIN_ADDRESS` | `adminAddress` | Loopback admin console (default `127.0.0.1:7789`). **Must stay a loopback host in loopback mode** — a non-loopback value (e.g. `0.0.0.0:7789`) fails validation and the bridge **refuses to start**, since the admin API is unauthenticated in loopback mode. Public mode (which password-protects the console) allows non-loopback binds. For browser access see [Admin console access](#admin-console-access). |
 | `BRIDGE_DATA_DIR` | `dataDir` | Persistent volume path inside the container. See [Where state lives](#where-state-lives-data) before overriding. |
 | `BRIDGE_LIBRARY_NAME` | `libraryName` | Display name for the library. |
 | `BRIDGE_DISABLE_HTTP3` | `disableHttp3` | Set to `true` to bypass UDP listeners. |
@@ -421,8 +421,8 @@ internet-facing host must not expose an unauthenticated browser).
 > `/data` volume). If that volume is ephemeral, or you wipe it, the bridge
 > re-requests the cert on every start and hits Let's Encrypt's
 > **duplicate-certificate rate limit — 5 per domain per week** — after which
-> issuance fails for days. The named `/data` volume below handles this; just
-> don't point `/data` at a `tmpfs` or a throwaway bind-mount.
+> issuance fails for days. Back `/data` with a persistent named volume (as the
+> compose below does); don't point it at a `tmpfs` or a throwaway bind-mount.
 
 ### docker-compose (public mode + audio, mirroring a tuned VPS)
 
@@ -446,8 +446,8 @@ services:
       - "443:443/tcp"
       - "443:443/udp"          # HTTP/3 — omit and you silently drop to h2
     volumes:
-      - ./bridge-data:/data    # holds bridge.yaml (from init --public)
-      - /mnt/music:/library:ro # library, read-only
+      - 1-bit-bridge-state:/data  # the named volume `init --public` wrote to (above)
+      - /mnt/music:/library:ro    # library, read-only
       - ./transcoded:/transcoded  # upscale sidecars; chown to the bridge UID (see above)
     environment:
       BRIDGE_UPSCALE_ENABLED: "true"
@@ -457,6 +457,9 @@ services:
       - /tmp
     # cpus: "2"                # optional throttle; also bound workers in bridge.yaml
     restart: unless-stopped
+volumes:
+  1-bit-bridge-state:
+    external: true             # created by the `docker run … init --public` step above
 ```
 
 A few knobs in the `init --public`-generated `bridge.yaml` echo the VPS
