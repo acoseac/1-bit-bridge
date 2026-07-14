@@ -1564,6 +1564,15 @@ func (s *Store) ApplyTrackNumberReconciliation(ctx context.Context, changed []Tr
 	return s.applyReconciledTracks(ctx, changed)
 }
 
+// ApplyAlbumTitleReconciliation persists album-title-reconciled tracks (the
+// folder-name-garbage rewrite in reconcileAlbumTitles). Identical contract to
+// ApplyAlbumArtistReconciliation: rewrites tags_json in one transaction,
+// strict-advances indexed_at so iOS delta-sync surfaces the change, and leaves
+// enriched_at untouched (a metadata-consistency pass, not re-enrichment).
+func (s *Store) ApplyAlbumTitleReconciliation(ctx context.Context, changed []Track) (int, error) {
+	return s.applyReconciledTracks(ctx, changed)
+}
+
 // applyReconciledTracks is the shared writer behind the post-scan
 // metadata-reconciliation passes (AlbumArtist, Year, TrackNumber). See
 // ApplyAlbumArtistReconciliation's docblock above for the full invariants.

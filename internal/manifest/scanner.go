@@ -518,6 +518,17 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	s.lastFull.Store(time.Now().UTC().UnixNano())
 	_ = s.store.SetScanState(ctx, "last_full_scan", time.Now().UTC().Format(time.RFC3339Nano))
 
+	// Album-title reconciliation: rewrite tracks whose album tag is just the
+	// folder name (a mis-tag / scan fallback, e.g. the dub folder convention)
+	// to their folder's single clean-sibling title, so they don't split off
+	// into a separate album row on iOS. Runs FIRST so the AlbumArtist pass
+	// below then groups the now-unified folder. DB-only, enriched_at-untouched.
+	// Non-fatal.
+	if n, rErr := s.runAlbumTitleReconciliation(ctx); rErr != nil {
+		scanLogger.Error("album-title reconciliation", "err", rErr)
+	} else if n > 0 {
+		scanLogger.Info("album-title reconciliation fixed folder-name album tags", "tracks", n)
+	}
 	// Reconcile AlbumArtist inconsistencies within each directory so one
 	// physical album yields one consistent AlbumArtist (and therefore one
 	// album identity on iOS). DB-only — no MusicBrainz; leaves
@@ -536,6 +547,16 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 		scanLogger.Error("year reconciliation", "err", rErr)
 	} else if n > 0 {
 		scanLogger.Info("year reconciliation filled missing album years", "tracks", n)
+	}
+	// Cross-folder year fill by MusicBrainz release id: fills a year-0 stray
+	// (a few loose tracks in their own folder) from a same-MBID sibling —
+	// bounded to genuine strays so it can't merge two full copies / editions.
+	// Complements the within-folder pass above. Same DB-only,
+	// enriched_at-untouched contract. Non-fatal.
+	if n, rErr := s.runYearReconciliationByMBID(ctx); rErr != nil {
+		scanLogger.Error("year reconciliation (mbid)", "err", rErr)
+	} else if n > 0 {
+		scanLogger.Info("year reconciliation (mbid) filled stray years", "tracks", n)
 	}
 	// Track-number backfill: fill a MISSING track number from the filename's
 	// leading "NN" so albums indexed before the extractor-level backfill (the
@@ -597,6 +618,55 @@ func (s *Scanner) runYearReconciliation(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("stream tracks: %w", err)
 	}
 	changed := reconcileYears(targets)
+	return s.loadAndApplyReconciled(ctx, changed,
+		func(t *Track, c ReconcileTarget) { t.Year = c.Year },
+		s.store.ApplyYearReconciliation)
+}
+
+// runAlbumTitleReconciliation runs the post-scan album-title fix: it streams
+// the library into lightweight targets, rewrites tracks whose album tag is just
+// the folder name to their folder's single clean-sibling title (see
+// reconcileAlbumTitles), loads the full Track only for the changed rows, and
+// persists via ApplyAlbumTitleReconciliation (bumps indexed_at, leaves
+// enriched_at untouched). Runs BEFORE the AlbumArtist pass so the two compose
+// in one scan (unified titles let the AlbumArtist pass then group the folder).
+func (s *Scanner) runAlbumTitleReconciliation(ctx context.Context) (int, error) {
+	var targets []ReconcileTarget
+	if err := s.store.StreamTracks(ctx, nil, func(t *Track) error {
+		targets = append(targets, ReconcileTarget{Path: t.Path, Album: t.Album})
+		return nil
+	}); err != nil {
+		return 0, fmt.Errorf("stream tracks: %w", err)
+	}
+	changed := reconcileAlbumTitles(targets)
+	return s.loadAndApplyReconciled(ctx, changed,
+		func(t *Track, c ReconcileTarget) { t.Album = c.Album },
+		s.store.ApplyAlbumTitleReconciliation)
+}
+
+// runYearReconciliationByMBID runs the post-scan CROSS-folder year fill: it
+// streams the library into lightweight targets carrying the MusicBrainz release
+// id, fills a year-0 stray's year from a same-MBID sibling (see
+// reconcileYearsByMBID — bounded to genuine strays), loads the full Track only
+// for the changed rows, and persists via ApplyYearReconciliation (bumps
+// indexed_at, leaves enriched_at untouched). Complements the within-folder
+// reconcileYears for strays that live in their own single-track folder.
+func (s *Scanner) runYearReconciliationByMBID(ctx context.Context) (int, error) {
+	var targets []ReconcileTarget
+	if err := s.store.StreamTracks(ctx, nil, func(t *Track) error {
+		// Deep-copy the year pointer (StreamTracks reuses one Track alloc);
+		// MusicBrainzAlbumID is a string value, copied by the struct assignment.
+		var yr *int
+		if t.Year != nil {
+			v := *t.Year
+			yr = &v
+		}
+		targets = append(targets, ReconcileTarget{Path: t.Path, Year: yr, MusicBrainzAlbumID: t.MusicBrainzAlbumID})
+		return nil
+	}); err != nil {
+		return 0, fmt.Errorf("stream tracks: %w", err)
+	}
+	changed := reconcileYearsByMBID(targets)
 	return s.loadAndApplyReconciled(ctx, changed,
 		func(t *Track, c ReconcileTarget) { t.Year = c.Year },
 		s.store.ApplyYearReconciliation)
