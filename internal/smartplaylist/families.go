@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 )
 
 // --- shared item helpers ---
@@ -18,22 +19,53 @@ func pathsOf(stats []PlayStat) []string {
 
 // itemsFromPaths hydrates paths into items via the feature map, dropping
 // paths that no longer resolve (a since-deleted track), capped at maxItems.
+// Thin wrapper over itemsFromPathsDiverse with the diversity caps disabled
+// (0 = no cap) — one implementation, no duplicated hydrate/append loop.
 func itemsFromPaths(paths []string, features map[string]TrackFeature, maxItems int) []Item {
+	return itemsFromPathsDiverse(paths, features, maxItems, 0, 0)
+}
+
+// itemsFromPathsDiverse is itemsFromPaths with per-artist and per-album
+// diversity caps: it preserves the input (plays-desc) order but skips a track
+// once its artist OR album has already contributed `perArtistCap` /
+// `perAlbumCap` items, so one heavily-played artist/album can't flood the mix
+// (the "13 Beatles tracks in a row" case). A cap <= 0 disables that axis; an
+// empty artist/album key is never capped (so blank-tag tracks aren't all
+// collapsed). Pure + testable.
+func itemsFromPathsDiverse(paths []string, features map[string]TrackFeature, maxItems, perArtistCap, perAlbumCap int) []Item {
 	if maxItems <= 0 {
 		return nil
 	}
 	items := make([]Item, 0, min(len(paths), maxItems))
+	artistCounts := map[string]int{}
+	albumCounts := map[string]int{}
 	for _, p := range paths {
 		f, ok := features[p]
 		if !ok {
 			continue
 		}
+		aKey := diversityKey(f.Artist)
+		alKey := diversityKey(f.Album)
+		if perArtistCap > 0 && aKey != "" && artistCounts[aKey] >= perArtistCap {
+			continue
+		}
+		if perAlbumCap > 0 && alKey != "" && albumCounts[alKey] >= perAlbumCap {
+			continue
+		}
 		items = append(items, Item{Position: len(items), Path: p, Title: f.Title, Artist: f.Artist})
+		artistCounts[aKey]++
+		albumCounts[alKey]++
 		if len(items) >= maxItems {
 			break
 		}
 	}
 	return items
+}
+
+// diversityKey normalizes an artist / album display string for the diversity
+// caps so casing / surrounding whitespace variants count as the same act.
+func diversityKey(s string) string {
+	return strings.ToLower(strings.TrimSpace(s))
 }
 
 func itemsFromFeatures(feats []TrackFeature, maxItems int) []Item {
@@ -53,7 +85,18 @@ func itemsFromFeatures(feats []TrackFeature, maxItems int) []Item {
 // --- listening families ---
 
 func buildHeavyRotation(in Inputs, opts Options) (GeneratedPlaylist, bool) {
-	items := itemsFromPaths(pathsOf(in.HeavyRotation), in.Features, opts.MaxItems)
+	// Diversity-capped so one heavily-played artist/album can't dominate the
+	// mix (the play-count floor is applied upstream in the query).
+	items := itemsFromPathsDiverse(pathsOf(in.HeavyRotation), in.Features, opts.MaxItems,
+		opts.HeavyRotationPerArtistCap, opts.HeavyRotationPerAlbumCap)
+	if len(items) < opts.MinHeavyRotation {
+		// The caps starved the mix (a pool dominated by a few artists/albums).
+		// Fall back to the UNCAPPED list rather than hiding the family — the
+		// upstream floor guaranteed the raw pool reached MinHeavyRotation, so a
+		// less-diverse mix is better than none, and it preserves the operator's
+		// play-count-floor intent (vs degrading the floor). CodeRabbit on #497.
+		items = itemsFromPaths(pathsOf(in.HeavyRotation), in.Features, opts.MaxItems)
+	}
 	if len(items) < opts.MinHeavyRotation {
 		return GeneratedPlaylist{}, false
 	}

@@ -148,8 +148,8 @@ func TestPlayStats_30sRuleAndWindow(t *testing.T) {
 		PlaybackHistoryRow{Path: "/b.flac", StartedAt: now - 20*day, DurationUsed: 200},
 	)
 
-	// 14-day window: only /a.flac, count 3 (skip excluded).
-	rows, err := s.PlayStatsInWindow(ctx, now-14*day, 0, 30.0, 50)
+	// 14-day window: only /a.flac, count 3 (skip excluded). minPlays 0 = no floor.
+	rows, err := s.PlayStatsInWindow(ctx, now-14*day, 0, 30.0, 0, 50)
 	if err != nil {
 		t.Fatalf("PlayStatsInWindow: %v", err)
 	}
@@ -157,13 +157,55 @@ func TestPlayStats_30sRuleAndWindow(t *testing.T) {
 		t.Fatalf("14d window: want [/a.flac x3], got %+v", rows)
 	}
 
-	// 30-day window: both, /a.flac first (3 > 1).
-	rows, err = s.PlayStatsInWindow(ctx, now-30*day, 0, 30.0, 50)
+	// 30-day window: both, /a.flac first (3 > 1). minPlays 0 = no floor.
+	rows, err = s.PlayStatsInWindow(ctx, now-30*day, 0, 30.0, 0, 50)
 	if err != nil {
 		t.Fatalf("PlayStatsInWindow (30d): %v", err)
 	}
 	if len(rows) != 2 || rows[0].Path != "/a.flac" || rows[1].Path != "/b.flac" {
 		t.Fatalf("30d window ordering: %+v", rows)
+	}
+}
+
+// The Heavy Rotation play-count floor: minPlays filters out tracks below the
+// threshold; minPlays <= 1 is a no-op (the "familiar" pool passes 0).
+func TestPlayStatsInWindow_minPlaysFloor(t *testing.T) {
+	s := newSPStore(t)
+	ctx := context.Background()
+	mustUpsertTrack(t, s, &Track{Path: "/heavy.flac", Title: "Heavy"})
+	mustUpsertTrack(t, s, &Track{Path: "/once.flac", Title: "Once"})
+
+	now := utcNS(2026, 1, 20, 12, 0)
+	day := int64(24 * time.Hour)
+	mustInsertHistory(t, s,
+		PlaybackHistoryRow{Path: "/heavy.flac", StartedAt: now - 1*day, DurationUsed: 120},
+		PlaybackHistoryRow{Path: "/heavy.flac", StartedAt: now - 2*day, DurationUsed: 120},
+		PlaybackHistoryRow{Path: "/heavy.flac", StartedAt: now - 3*day, DurationUsed: 120},
+		PlaybackHistoryRow{Path: "/once.flac", StartedAt: now - 1*day, DurationUsed: 120}, // 1 play
+	)
+
+	all, err := s.PlayStatsInWindow(ctx, now-14*day, 0, 30.0, 0, 50)
+	if err != nil {
+		t.Fatalf("minPlays 0: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("minPlays 0: want both tracks, got %d", len(all))
+	}
+
+	floored, err := s.PlayStatsInWindow(ctx, now-14*day, 0, 30.0, 3, 50)
+	if err != nil {
+		t.Fatalf("minPlays 3: %v", err)
+	}
+	if len(floored) != 1 || floored[0].Path != "/heavy.flac" {
+		t.Fatalf("minPlays 3: single-play track must be floored out, got %+v", floored)
+	}
+
+	one, err := s.PlayStatsInWindow(ctx, now-14*day, 0, 30.0, 1, 50)
+	if err != nil {
+		t.Fatalf("minPlays 1: %v", err)
+	}
+	if len(one) != 2 {
+		t.Fatalf("minPlays 1 must be a no-op: want 2, got %d", len(one))
 	}
 }
 

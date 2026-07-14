@@ -163,13 +163,19 @@ type Options struct {
 	AnalysisEnabled bool
 	MaxItems        int // cap per family
 
-	MinHeavyRotation  int
-	MinRecentlyPlayed int
-	MinForgotten      int
-	MinAutoMixPool    int // analyzed-pool size gate for Auto Mix
-	MinTimeOfDayPlays int // the busiest single hour must reach this
-	MinDailyFamiliar  int
-	MinSessions       int // sessions needed to trust the Finish Line target
+	MinHeavyRotation int
+	// Heavy Rotation per-artist / per-album diversity caps: no single artist
+	// or album may take more than this many of the mix's slots, so one
+	// heavily-played album can't flood the list (e.g. 13 tracks in a row).
+	// <= 0 disables the cap.
+	HeavyRotationPerArtistCap int
+	HeavyRotationPerAlbumCap  int
+	MinRecentlyPlayed         int
+	MinForgotten              int
+	MinAutoMixPool            int // analyzed-pool size gate for Auto Mix
+	MinTimeOfDayPlays         int // the busiest single hour must reach this
+	MinDailyFamiliar          int
+	MinSessions               int // sessions needed to trust the Finish Line target
 
 	SessionGapSeconds   float64 // idle gap that ends a session (Gemini: 60 min)
 	DailyDiscoveryRatio float64 // fraction of the Daily Mix that is discovery
@@ -199,17 +205,19 @@ type Options struct {
 // "in-implementation tuning" knobs flagged in the plan — adjust here.
 func DefaultOptions(analysisEnabled bool) Options {
 	return Options{
-		AnalysisEnabled:     analysisEnabled,
-		MaxItems:            50,
-		MinHeavyRotation:    10,
-		MinRecentlyPlayed:   5,
-		MinForgotten:        10,
-		MinAutoMixPool:      20,
-		MinTimeOfDayPlays:   15,
-		MinDailyFamiliar:    10,
-		MinSessions:         20,
-		SessionGapSeconds:   60 * 60, // 60-min idle = new session (Gemini 2026-06-14)
-		DailyDiscoveryRatio: 0.30,
+		AnalysisEnabled:           analysisEnabled,
+		MaxItems:                  50,
+		MinHeavyRotation:          10,
+		HeavyRotationPerArtistCap: 4,
+		HeavyRotationPerAlbumCap:  4,
+		MinRecentlyPlayed:         5,
+		MinForgotten:              10,
+		MinAutoMixPool:            20,
+		MinTimeOfDayPlays:         15,
+		MinDailyFamiliar:          10,
+		MinSessions:               20,
+		SessionGapSeconds:         60 * 60, // 60-min idle = new session (Gemini 2026-06-14)
+		DailyDiscoveryRatio:       0.30,
 		// Drive Mix.
 		MinDriveMix:      10,
 		MaxDriveMixItems: 30,

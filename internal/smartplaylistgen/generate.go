@@ -23,14 +23,15 @@ type Options struct {
 	AnalysisEnabled bool
 	NowNS           int64 // UnixNano "now" for all window math
 
-	MinPlaySeconds    float64       // the "30s rule" applied in the queries
-	HeavyWindow       time.Duration // Heavy Rotation lookback (14d)
-	FamiliarWindow    time.Duration // Daily Mix "familiar" lookback (60d)
-	ForgottenNotSince time.Duration // last play older than this = forgotten (30d)
-	ForgottenMinPlays int           // historic plays to count as a favorite (3)
-	HourWindow        time.Duration // time-of-day bucket lookback (90d)
-	SessionWindow     time.Duration // Finish Line events lookback (90d)
-	PoolLimit         int           // analyzed-pool cap (5000)
+	MinPlaySeconds        float64       // the "30s rule" applied in the queries
+	HeavyWindow           time.Duration // Heavy Rotation lookback (14d)
+	HeavyRotationMinPlays int           // Heavy Rotation preferred play-count floor (3), degrades to 1
+	FamiliarWindow        time.Duration // Daily Mix "familiar" lookback (60d)
+	ForgottenNotSince     time.Duration // last play older than this = forgotten (30d)
+	ForgottenMinPlays     int           // historic plays to count as a favorite (3)
+	HourWindow            time.Duration // time-of-day bucket lookback (90d)
+	SessionWindow         time.Duration // Finish Line events lookback (90d)
+	PoolLimit             int           // analyzed-pool cap (5000)
 
 	// Drive Mix lookback (CarPlay-only plays). 60d default — wider than the
 	// 14d Heavy Rotation window so commutes that don't include daily-driver
@@ -77,16 +78,17 @@ type Options struct {
 func DefaultOptions(nowNS int64, analysisEnabled bool) Options {
 	const day = 24 * time.Hour
 	return Options{
-		AnalysisEnabled:   analysisEnabled,
-		NowNS:             nowNS,
-		MinPlaySeconds:    30,
-		HeavyWindow:       14 * day,
-		FamiliarWindow:    60 * day,
-		ForgottenNotSince: 30 * day,
-		ForgottenMinPlays: 3,
-		HourWindow:        90 * day,
-		SessionWindow:     90 * day,
-		PoolLimit:         5000,
+		AnalysisEnabled:       analysisEnabled,
+		NowNS:                 nowNS,
+		MinPlaySeconds:        30,
+		HeavyWindow:           14 * day,
+		HeavyRotationMinPlays: 3,
+		FamiliarWindow:        60 * day,
+		ForgottenNotSince:     30 * day,
+		ForgottenMinPlays:     3,
+		HourWindow:            90 * day,
+		SessionWindow:         90 * day,
+		PoolLimit:             5000,
 		// Drive Mix: 60d CarPlay-only window (Heavy Rotation pattern).
 		DriveWindow: 60 * day,
 		// On Repeat: 30d window. ≥ 4 total plays AND ≥ 3 distinct days with
@@ -133,11 +135,30 @@ func assembleInputs(ctx context.Context, store *manifest.Store, opts Options) (s
 	now := opts.NowNS
 	eng := opts.Engine
 
-	heavy, err := store.PlayStatsInWindow(ctx, now-opts.HeavyWindow.Nanoseconds(), 0, opts.MinPlaySeconds, eng.MaxItems)
-	if err != nil {
-		return smartplaylist.Inputs{}, err
+	// Heavy Rotation: prefer a ≥HeavyRotationMinPlays floor so one-time and
+	// twice-played tracks don't flood the mix, but DEGRADE the floor (…→2→1)
+	// if that would starve the mix below MinHeavyRotation during a quiet week.
+	// SQLite is in-process (zero network) so a few sequential queries are
+	// cleaner + more testable than a single windowed-rank query (both review
+	// rounds preferred the Go loop). floor==1 is a no-op HAVING → the full
+	// pool, so the family never hides purely because of the floor.
+	var heavy []manifest.PlayStatRow
+	// `max(1, …)` so a config of 0 / negative doesn't make the `floor >= 1`
+	// loop skip entirely and starve the mix (Gemini on PR #497); floor 1 is a
+	// no-op HAVING = the full pool.
+	for floor := max(1, opts.HeavyRotationMinPlays); floor >= 1; floor-- {
+		var qerr error
+		heavy, qerr = store.PlayStatsInWindow(ctx, now-opts.HeavyWindow.Nanoseconds(), 0, opts.MinPlaySeconds, floor, eng.MaxItems)
+		if qerr != nil {
+			return smartplaylist.Inputs{}, qerr
+		}
+		if len(heavy) >= eng.MinHeavyRotation {
+			break
+		}
 	}
-	familiar, err := store.PlayStatsInWindow(ctx, now-opts.FamiliarWindow.Nanoseconds(), 0, opts.MinPlaySeconds, eng.MaxItems*2)
+	// familiar: unfiltered pool (minPlays 0) — the Daily Mix family keeps
+	// single-play tracks by design.
+	familiar, err := store.PlayStatsInWindow(ctx, now-opts.FamiliarWindow.Nanoseconds(), 0, opts.MinPlaySeconds, 0, eng.MaxItems*2)
 	if err != nil {
 		return smartplaylist.Inputs{}, err
 	}
