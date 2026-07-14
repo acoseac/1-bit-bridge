@@ -8,11 +8,14 @@ name: gate
 #   make fmt vet test build-all
 # (gofmt.yml = the `fmt` check; this workflow = vet + test + build-all).
 #
-# Structure: vet / test-race / build-all run as THREE PARALLEL JOBS (they
-# share no state) so wall time is the slowest single step (~test-race),
-# not the sum — the prior single sequential job ran ~20 min. A tiny `gate`
-# job fans them back into one green signal (convenient if `main` ever gains
-# a required-status-check rule; today it has none).
+# Structure: vet / test-race / build-all / go-version run as FOUR PARALLEL
+# JOBS (they share no state) so wall time is the slowest single step
+# (~test-race), not the sum — the prior single sequential job ran ~20 min. A
+# tiny `gate` job fans them back into one green signal (convenient if `main`
+# ever gains a required-status-check rule; today it has none). `go-version` is
+# a fast text check (no Go toolchain) that keeps the Dockerfile's ARG
+# GO_VERSION in step with go.mod — a stale pair breaks the image build under
+# GOTOOLCHAIN=local (it broke the first v0.1.7 image).
 #
 # Cache: each job manages its own Go cache explicitly via actions/cache
 # rather than setup-go's built-in `cache: true`. The built-in cache keys
@@ -123,12 +126,27 @@ jobs:
       - name: build-all (cross-compile)
         run: make build-all P=$(nproc)
 
-  # Single green signal that fans in the three parallel jobs. `if: always()`
-  # + the explicit result check means a failed (or cancelled) dependency
-  # fails the gate rather than letting a SKIP read as success.
+  # Text-only guard: the Dockerfile's `ARG GO_VERSION` major.minor must match
+  # go.mod's `go` directive (GOTOOLCHAIN=local makes a stale pair a hard image
+  # build failure). No Go toolchain / cache needed — awk + cut in a Make target.
+  go-version:
+    name: go-version sync
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Dockerfile GO_VERSION matches go.mod
+        run: make check-go-version
+
+  # Single green signal that fans in the parallel jobs. `if: always()` + the
+  # explicit result check means a failed (or cancelled) dependency fails the
+  # gate rather than letting a SKIP read as success.
   gate:
     name: gate
-    needs: [vet, test, build-all]
+    needs: [vet, test, build-all, go-version]
     if: always()
     runs-on: ubuntu-latest
     permissions: {}
@@ -137,8 +155,9 @@ jobs:
         run: |
           if [ "${{ needs.vet.result }}" != "success" ] \
             || [ "${{ needs.test.result }}" != "success" ] \
-            || [ "${{ needs.build-all.result }}" != "success" ]; then
-            echo "::error::gate failed (vet=${{ needs.vet.result }} test=${{ needs.test.result }} build-all=${{ needs.build-all.result }})"
+            || [ "${{ needs.build-all.result }}" != "success" ] \
+            || [ "${{ needs.go-version.result }}" != "success" ]; then
+            echo "::error::gate failed (vet=${{ needs.vet.result }} test=${{ needs.test.result }} build-all=${{ needs.build-all.result }} go-version=${{ needs.go-version.result }})"
             exit 1
           fi
-          echo "gate passed: vet, test -race, build-all all green"
+          echo "gate passed: vet, test -race, build-all, go-version all green"

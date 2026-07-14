@@ -126,7 +126,10 @@ COPY --from=builder /out/bridge /usr/local/bin/bridge
 VOLUME /data
 WORKDIR /data
 
-EXPOSE 7788
+# 7788/tcp = HTTP/2 API; 7788/udp = HTTP/3 (QUIC). EXPOSE is image metadata
+# only — operators still publish both (`-p 7788:7788/tcp -p 7788:7788/udp`);
+# omitting the udp mapping silently drops HTTP/3 down to HTTP/2.
+EXPOSE 7788/tcp 7788/udp
 
 USER bridge
 

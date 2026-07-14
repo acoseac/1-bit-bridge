@@ -39,6 +39,19 @@ bridge.yaml
 .git/
 .github/
 
+# Compose + env files for `docker compose` users. A user-created `.env`
+# may hold secrets (TS_AUTHKEY, enrichment URLs) and must NEVER be baked
+# into an image layer by the builder's `COPY . .`. The committed
+# `compose.yaml` / `.env.example` are build-context noise that would bust
+# the go-module cache layer, so drop the whole family.
+.env
+.env.*
+compose.yaml
+compose.override.yaml
+compose.override.yml
+docker-compose.yml
+docker-compose.override.yml
+
 # Misc.
 coverage.out
 *.test
