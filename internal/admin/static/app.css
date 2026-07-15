@@ -12,72 +12,131 @@
  */
 
 :root {
-  /* Default = light theme. Operators with a system dark-mode preference
-   * flip to the dark-on-near-black overrides via @media below. */
+  /* Modern-minimal refresh: light is the base/default; System dark is applied
+   * by the @media block below ONLY when no explicit data-theme is set, and an
+   * explicit choice wins via [data-theme] specificity. Dark VALUES live once
+   * in the --_dark-* vars; only the token MAPPING repeats across the two dark
+   * selector contexts, so the palettes can't drift. All public token NAMES are
+   * preserved so every downstream rule + app.js (data-* state) reads unchanged. */
+  color-scheme: light;
+
+  /* ---- Light theme (base) ---- */
   --bg: #f8fafc;                     /* slate-50 canvas */
   --bg-panel: #ffffff;               /* crisp panel surface */
-  --bg-elev: #f1f5f9;                /* slate-100 form fields & elevated tokens */
-  --fg: #0f172a;                     /* deep dark indigo-slate body text */
-  --fg-muted: #64748b;               /* refined slate text for descriptions */
-  --accent: #4f46e5;                 /* indigo-600 — primary interactions */
-  --accent-hot: #e11d48;             /* rose-600 — destructive actions */
-  --accent-warm: #d97706;            /* amber-600 — warning/restart indicators */
-  /* Pre-computed amber tint for legacy webviews that don't honor
-   * color-mix(). Modern browsers progressively enhance to color-mix
-   * (the second `background:` declaration wins). Older enterprise
-   * kiosk browsers see this pastel and the layout still works. */
+  --bg-elev: #f1f5f9;                /* slate-100 fields & elevated tokens */
+  --fg: #0f172a;                     /* deep slate body text */
+  --fg-muted: #64748b;               /* muted slate for descriptions */
+  --accent: #4f46e5;                 /* indigo — the single quiet accent */
+  --accent-hot: #e11d48;             /* rose — retained for --danger derivation */
+  --accent-warm: #d97706;            /* amber — warning / restart indicators */
+  /* Pre-computed amber tint for legacy webviews that don't honor color-mix();
+   * modern browsers progressively enhance. */
   --accent-warm-tint: #fef3c7;
   --accent-soft: rgba(79, 70, 229, 0.08);
   --accent-glow-color: #4f46e540;    /* ≈25% alpha — used by .brand-mark */
-  --danger: #e11d48;                 /* matched to rose accent-hot */
+  --danger: #e11d48;
   --ok: #10b981;                     /* emerald — online / success */
-  --warn: #d97706;                   /* matched to amber accent-warm */
-  --border: #e2e8f0;                 /* slate-200 subtle separations */
-  --radius: 10px;                    /* smoother modern rounded corners (up from 8px) */
+  --warn: #d97706;                   /* amber — matched to --accent-warm */
+  --border: #e2e8f0;                 /* slate-200 hairline */
+
+  /* ---- Dark palette (single source of truth; mapped in the two blocks
+   *      below). Edit a dark value HERE, never in the mapping blocks. ---- */
+  --_dark-bg: #0b0f19;
+  --_dark-bg-panel: #151f32;
+  --_dark-bg-elev: #1e293b;
+  --_dark-fg: #f8fafc;
+  --_dark-fg-muted: #94a3b8;
+  --_dark-accent: #818cf8;           /* indigo-400 — readable on slate */
+  --_dark-accent-hot: #fb7185;
+  --_dark-accent-warm: #fbbf24;
+  --_dark-accent-warm-tint: #2e2204;
+  --_dark-accent-soft: rgba(129, 140, 248, 0.15);
+  --_dark-accent-glow-color: rgba(129, 140, 248, 0.3);
+  --_dark-danger: #fb7185;
+  --_dark-ok: #34d399;
+  --_dark-warn: #fbbf24;
+  --_dark-border: #273549;
+
+  /* ---- Type ---- */
   --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", Segoe UI, Roboto, system-ui, sans-serif;
-  /* Display stack used for titles — same system-only rationale as the
-   * prior theme. Bahnschrift ships on Windows 10+; Avenir Next
-   * Condensed on macOS/iOS; Oswald on many Linux distros. */
-  --display: "Bahnschrift", "Avenir Next Condensed", "Oswald", "Futura", Impact, var(--sans);
-  --glow: 0 0 0 3px var(--accent-soft);  /* focus-ring style halo, not the prior blur */
-  --glow-hot: 0 0 0 3px rgba(225, 29, 72, 0.15);
-  --scanline-color: transparent;     /* modern theme drops the retro scanline overlay */
+  --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, system-ui, sans-serif;
+  /* Modern-minimal drops the condensed-impact display stack (which rendered a
+   * different heading font on Windows vs macOS). Headings use the system sans;
+   * weight/tracking are set per-selector. Name kept so downstream rules resolve. */
+  --display: var(--sans);
+
+  /* ---- Scale (rem tracks the 16px root for zoom/a11y; the existing rem
+   *      layer was authored against this base, so it stays valid) ---- */
+  --space-1: 0.25rem;                /* 4px  */
+  --space-2: 0.5rem;                 /* 8px  */
+  --space-3: 0.75rem;                /* 12px */
+  --space-4: 1rem;                   /* 16px */
+  --space-5: 1.5rem;                 /* 24px */
+  --space-6: 2rem;                   /* 32px */
+  --radius: 10px;
+  --radius-sm: 6px;
+  --radius-pill: 999px;
+
+  /* ---- Focus rings (auto-track --accent-soft / --danger, so no dark map) ---- */
+  --glow: 0 0 0 3px var(--accent-soft);
+  --glow-hot: 0 0 0 3px color-mix(in srgb, var(--danger) 22%, transparent);
+
+  /* ---- Semantic aliases: newer rules referenced these but they were never
+   *      defined, so theming silently fell back. Alias to the real tokens. ---- */
+  --text: var(--fg);
+  --text-muted: var(--fg-muted);
+  --surface: var(--bg-panel);
+  --surface-2: var(--bg-elev);
+  --err: var(--danger);
 }
 
+/* System dark — applies ONLY when the operator hasn't picked a theme
+ * (attribute absent). Being a live media query, it tracks OS light↔dark
+ * transitions natively with no JS. KEEP THIS MAPPING IN SYNC with the
+ * :root[data-theme="dark"] block below (values are single-sourced above). */
 @media (prefers-color-scheme: dark) {
-  :root {
-    /* Mirrored accent palette on a near-black slate-indigo surface;
-     * accents shifted +2 lightness steps for AA contrast against the
-     * deep panel background. */
-    --bg: #0b0f19;                   /* premium deep slate-indigo void */
-    --bg-panel: #151f32;             /* dark-blue panel surface */
-    --bg-elev: #1e293b;              /* slate-800 — form-field bg */
-    --fg: #f8fafc;
-    --fg-muted: #94a3b8;             /* slate-400 */
-    --accent: #818cf8;               /* indigo-400 — readable on slate-900 */
-    --accent-hot: #fb7185;           /* rose-400 — soft destructive accent */
-    --accent-warm: #fbbf24;          /* amber-400 */
-    /* Dark-mode equivalent of the pastel amber tint. */
-    --accent-warm-tint: #2e2204;
-    --accent-soft: rgba(129, 140, 248, 0.15);
-    --accent-glow-color: rgba(129, 140, 248, 0.3);
-    --danger: #fb7185;
-    --ok: #34d399;                   /* emerald-400 — pops against slate-900 */
-    --warn: #fbbf24;
-    --border: #273549;               /* slate-700-ish */
-    --glow: 0 0 0 3px var(--accent-soft);
-    --glow-hot: 0 0 0 3px rgba(251, 113, 133, 0.18);
-    --scanline-color: transparent;
+  :root:not([data-theme]) {
+    color-scheme: dark;
+    --bg: var(--_dark-bg);
+    --bg-panel: var(--_dark-bg-panel);
+    --bg-elev: var(--_dark-bg-elev);
+    --fg: var(--_dark-fg);
+    --fg-muted: var(--_dark-fg-muted);
+    --accent: var(--_dark-accent);
+    --accent-hot: var(--_dark-accent-hot);
+    --accent-warm: var(--_dark-accent-warm);
+    --accent-warm-tint: var(--_dark-accent-warm-tint);
+    --accent-soft: var(--_dark-accent-soft);
+    --accent-glow-color: var(--_dark-accent-glow-color);
+    --danger: var(--_dark-danger);
+    --ok: var(--_dark-ok);
+    --warn: var(--_dark-warn);
+    --border: var(--_dark-border);
   }
+}
+/* Explicit dark choice — wins over the OS regardless (attribute specificity).
+ * KEEP IN SYNC with the @media mapping above. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: var(--_dark-bg);
+  --bg-panel: var(--_dark-bg-panel);
+  --bg-elev: var(--_dark-bg-elev);
+  --fg: var(--_dark-fg);
+  --fg-muted: var(--_dark-fg-muted);
+  --accent: var(--_dark-accent);
+  --accent-hot: var(--_dark-accent-hot);
+  --accent-warm: var(--_dark-accent-warm);
+  --accent-warm-tint: var(--_dark-accent-warm-tint);
+  --accent-soft: var(--_dark-accent-soft);
+  --accent-glow-color: var(--_dark-accent-glow-color);
+  --danger: var(--_dark-danger);
+  --ok: var(--_dark-ok);
+  --warn: var(--_dark-warn);
+  --border: var(--_dark-border);
 }
 
 * { box-sizing: border-box; }
 
-/* Scanline grid. Fixed-position pseudo-element under everything, with
- * two crossed linear-gradients at ~40px intervals. Opacity comes from
- * the --scanline-color token so light and dark modes each get the
- * right tint without a second rule. */
 body {
   margin: 0;
   font-family: var(--sans);
@@ -88,16 +147,14 @@ body {
   min-height: 100vh;
   position: relative;
 }
-body::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  z-index: -1;
-  background-image:
-    linear-gradient(to bottom, var(--scanline-color) 1px, transparent 1px),
-    linear-gradient(to right, var(--scanline-color) 1px, transparent 1px);
-  background-size: 40px 40px;
+
+/* Global keyboard-focus ring. Uses outline (not box-shadow) so it survives
+ * forced-colors / Windows High Contrast Mode, where box-shadows are stripped
+ * but the system repaints outlines in a high-visibility color. Decorative
+ * --glow box-shadows elsewhere remain as an enhancement on top. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 /* ===========================================================
@@ -162,8 +219,6 @@ body.login-page {
   border: none;
   border-radius: var(--radius);
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
   cursor: pointer;
   transition: background 0.15s ease, transform 0.05s ease;
 }
@@ -237,8 +292,6 @@ header {
   padding: 14px 24px;
   background: var(--bg-panel);
   border-bottom: 1px solid var(--border);
-  /* Subtle neon underline so the header reads as a chassis edge. */
-  box-shadow: 0 1px 0 color-mix(in srgb, var(--accent) 40%, transparent);
 }
 
 .brand {
@@ -263,26 +316,31 @@ header {
   flex-shrink: 0;
   display: block;
 }
+/* Light-mode brand-mark framing — applies for EFFECTIVE light (system light
+ * with no manual override, OR an explicit light choice). On a white panel the
+ * artwork's dark-teal background can read as a heavy blob; frame it with a
+ * matching panel-bg pad + border so it reads as an icon-in-a-tile. Keep the
+ * two blocks in sync. */
 @media (prefers-color-scheme: light) {
-  /* On a white panel the artwork's dark-teal background can read as a
-   * heavy blob. Frame it intentionally with a matching panel-bg pad +
-   * border, so it looks like an icon-in-a-tile rather than a photo
-   * pasted on top. Avoids filter:brightness which would wash the gold. */
-  .brand-mark {
+  :root:not([data-theme]) .brand-mark {
     padding: 4px;
     background: var(--bg-panel);
     border: 1px solid var(--border);
   }
 }
+:root[data-theme="light"] .brand-mark {
+  padding: 4px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+}
 /* Group .login-brand .name so the login page's brand wrapper (which uses
  * .login-brand, not .brand) picks up the same display-font typography.
  * Without this grouped selector the login title falls back to default body text. */
 .brand .name, .login-brand .name {
-  font-weight: 500;
+  font-weight: 600;
+  font-size: 15px;
   color: var(--fg);
-  font-family: var(--display);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  letter-spacing: -0.01em;
 }
 
 header nav {
@@ -298,10 +356,8 @@ header nav a {
   text-decoration: none;
   padding: 6px 12px;
   border-radius: var(--radius);
-  font-weight: 600;
-  font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
+  font-weight: 500;
+  font-size: 13px;
   position: relative;
   transition: color 0.12s;
 }
@@ -332,8 +388,7 @@ body[data-section="settings"] #primary-nav a[data-tab="settings"]::after {
   right: 12px;
   bottom: 0;
   height: 2px;
-  background: linear-gradient(to right, var(--accent), var(--accent-hot));
-  box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 50%, transparent);
+  background: var(--accent);
   border-radius: 2px;
 }
 
@@ -388,11 +443,9 @@ body[data-section="settings"] #primary-nav a[data-tab="settings"]::after {
  *   data-state="disconnected" — onerror with readyState=CLOSED (terminal)
  * Kept at meta font size so it doesn't dominate the header. */
 .conn-badge {
-  font-size: 10px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  padding: 2px 8px;
-  border-radius: 999px;
+  font-size: 11px;
+  padding: 2px 9px;
+  border-radius: var(--radius-pill);
   border: 1px solid currentcolor;
   white-space: nowrap;
   transition: color 120ms ease, opacity 120ms ease;
@@ -405,31 +458,50 @@ body[data-section="settings"] #primary-nav a[data-tab="settings"]::after {
   color: var(--fg-muted);
 }
 .conn-badge[data-state="reconnecting"] {
-  color: #f5a623; /* amber */
+  color: var(--warn);
 }
 .conn-badge[data-state="disconnected"] {
-  color: #e85a5a; /* red */
+  color: var(--danger);
+}
+
+/* Header light / dark / system theme toggle. The glyph is a text character so
+ * it inherits a themed color (invisible-on-dark is avoided). */
+.theme-toggle {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--fg-muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  padding: 3px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.12s, border-color 0.12s;
+}
+.theme-toggle:hover {
+  color: var(--fg);
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
 }
 
 main { padding: 24px; max-width: 1100px; margin: 0 auto; }
 
 h1 {
-  font-family: var(--display);
-  font-size: 26px;
-  font-weight: 700;
+  font-size: 22px;
+  font-weight: 600;
   margin: 0 0 4px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  letter-spacing: -0.02em;
   color: var(--fg);
 }
 h2 {
-  font-family: var(--display);
   font-size: 15px;
-  font-weight: 700;
+  font-weight: 600;
   margin: 0 0 12px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--fg-muted);
+  letter-spacing: -0.01em;
+  color: var(--fg);
 }
 /* Subsection heading inside a long form (settings.html groups: General,
  * Networking, Updates). Accent-colored so it reads as a divider, with
@@ -437,11 +509,9 @@ h2 {
  * in a form gets margin-top: 0 to avoid a leading gap above the first
  * group. */
 .section-head {
-  font-family: var(--display);
-  font-size: 14px;
-  font-weight: 700;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0;
   color: var(--accent);
   margin: 28px 0 12px;
   padding-bottom: 6px;
@@ -482,16 +552,9 @@ h2 {
   border-radius: var(--radius);
   padding: 20px;
   margin-bottom: 20px;
-  /* A faint inner border highlights the panel edge; layered with a soft
-   * exterior depth shadow for a modern card lift. The inset uses
-   * --accent-soft (a precomputed rgba(--accent, 8% light / 15% dark)
-   * token) instead of color-mix() so the entire multi-shadow declaration
-   * is parseable on legacy webviews without color-mix support — without
-   * this, IACVT would drop the entire box-shadow including the depth
-   * layers, leaving the panel flat. */
-  box-shadow: inset 0 0 0 1px var(--accent-soft),
-              0 4px 6px -1px rgba(0, 0, 0, 0.05),
-              0 2px 4px -1px rgba(0, 0, 0, 0.03);
+  /* Single soft depth shadow; the hairline border does the edge work. The
+   * prior inset accent ring + double drop-shadow read as a neon "lift". */
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
 }
 .panel-head {
   display: flex;
@@ -516,20 +579,9 @@ h2 {
   overflow: hidden;
   transition: border-color 0.15s, box-shadow 0.15s;
 }
-.card::before {
-  /* Corner accent — a single-pixel gradient along the top edge so the
-   * stat cards read as a row of gauges without borrowing attention
-   * from the numbers. */
-  content: "";
-  position: absolute;
-  inset: 0 0 auto 0;
-  height: 2px;
-  background: linear-gradient(to right, var(--accent), var(--accent-hot));
-  opacity: 0.6;
-}
 .card:hover {
-  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
-  box-shadow: var(--glow);
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
 }
 .card-label {
   color: var(--fg-muted);
@@ -541,10 +593,9 @@ h2 {
 }
 .card-value {
   font-size: 26px;
-  font-weight: 700;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
-  font-family: var(--display);
-  letter-spacing: 0.02em;
+  letter-spacing: -0.02em;
   color: var(--fg);
 }
 .card-foot { color: var(--fg-muted); font-size: 11px; margin-top: 4px; }
@@ -556,19 +607,16 @@ dd code { display: inline-block; margin-right: 6px; margin-bottom: 4px; }
 
 .badge {
   display: inline-block;
-  padding: 2px 8px;
-  border-radius: 12px;
+  padding: 2px 9px;
+  border-radius: var(--radius-pill);
   font-size: 11px;
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
   border: 1px solid transparent;
 }
 .badge.running {
-  background: color-mix(in srgb, var(--ok) 16%, transparent);
+  background: color-mix(in srgb, var(--ok) 14%, transparent);
   color: var(--ok);
-  border-color: color-mix(in srgb, var(--ok) 40%, transparent);
-  box-shadow: 0 0 6px color-mix(in srgb, var(--ok) 30%, transparent);
+  border-color: color-mix(in srgb, var(--ok) 35%, transparent);
 }
 .badge.idle {
   background: var(--bg-elev);
@@ -576,24 +624,22 @@ dd code { display: inline-block; margin-right: 6px; margin-bottom: 4px; }
   border-color: var(--border);
 }
 .badge.warn {
-  background: color-mix(in srgb, var(--accent-warm) 18%, transparent);
+  background: color-mix(in srgb, var(--accent-warm) 16%, transparent);
   color: var(--accent-warm);
-  border-color: color-mix(in srgb, var(--accent-warm) 40%, transparent);
-  box-shadow: 0 0 6px color-mix(in srgb, var(--accent-warm) 25%, transparent);
+  border-color: color-mix(in srgb, var(--accent-warm) 35%, transparent);
 }
 
 .fingerprint {
   display: block;
   padding: 10px 12px;
   font-size: 12px;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.03em;
   white-space: pre-wrap;
   word-break: break-all;
-  /* Fingerprint is a "read-only receipt" — give it the same inner-ring
-   * treatment as the panels so it looks like a terminal readout, not
-   * an input. */
-  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
-  box-shadow: inset 0 0 10px color-mix(in srgb, var(--accent) 10%, transparent);
+  /* Read-only receipt — a quiet elevated tile, no inner accent glow. */
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
 }
 
 table.rows {
@@ -608,10 +654,7 @@ table.rows th, table.rows td {
 table.rows th {
   color: var(--fg-muted);
   font-weight: 600;
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  font-family: var(--display);
+  font-size: 12px;
 }
 table.rows td.num, table.rows th.num { text-align: right; font-variant-numeric: tabular-nums; }
 table.rows tbody tr:last-child td { border-bottom: none; }
@@ -629,8 +672,6 @@ table.rows tbody tr:hover td { background: color-mix(in srgb, var(--accent) 4%, 
   padding: 8px 16px;
   border-radius: var(--radius);
   cursor: pointer;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
   /* Explicit property list rather than `all` — `all` makes the browser
    * watch every animatable property for changes, which is wasted work
    * for a button that only animates the few listed below. The refined
@@ -645,15 +686,16 @@ table.rows tbody tr:hover td { background: color-mix(in srgb, var(--accent) 4%, 
   border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
 }
 .btn:active { transform: translateY(1px); }
+/* Modern-minimal: solid-fill primary (the prior ghost/outline read as the
+ * old control-panel idiom). */
 .btn.primary {
-  background: transparent;
-  color: var(--accent);
+  background: var(--accent);
+  color: #fff;
   border-color: var(--accent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 20%, transparent);
 }
 .btn.primary:hover {
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-  box-shadow: 0 0 0 1px var(--accent), var(--glow);
+  background: color-mix(in srgb, var(--accent) 88%, #000);
+  border-color: color-mix(in srgb, var(--accent) 88%, #000);
 }
 /* .destructive is an alias used in settings.html for the same visual intent
  * as .danger — group the selectors so neither path drifts. */
@@ -663,7 +705,7 @@ table.rows tbody tr:hover td { background: color-mix(in srgb, var(--accent) 4%, 
 }
 .btn.danger:hover, .btn.destructive:hover {
   background: color-mix(in srgb, var(--danger) 12%, transparent);
-  box-shadow: 0 0 10px color-mix(in srgb, var(--danger) 30%, transparent);
+  border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
 }
 .btn:disabled { opacity: 0.5; cursor: default; }
 .btn:disabled:hover { background: var(--bg-elev); border-color: var(--border); box-shadow: none; }
@@ -704,13 +746,77 @@ form label {
   display: block;
   margin-bottom: 14px;
   color: var(--fg-muted);
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
+  font-size: 12px;
   font-weight: 600;
 }
 
 form .field { margin-bottom: 18px; }
+
+/* Settings toggle switches. `.checkbox` is <label class="checkbox"><input
+ * type=checkbox role=switch> Text</label>; it inherits `form label` (block,
+ * muted), so `label.checkbox` (placed after, equal specificity) overrides to a
+ * flex switch-row. The native checkbox is restyled via appearance:none. */
+label.checkbox {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+  color: var(--fg);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+}
+label.checkbox input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  flex-shrink: 0;                 /* don't collapse next to a long/wrapped label */
+  width: 38px;
+  height: 22px;
+  margin: 0;
+  border-radius: var(--radius-pill);
+  background: var(--surface-2);
+  /* Visible hairline; forced-colors repaints it so the track stays defined. */
+  border: 1px solid var(--border);
+  position: relative;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+label.checkbox input[type="checkbox"]::before {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  /* Transparent border → invisible normally, repainted under forced-colors
+   * so the thumb stays visible when the track fill flattens. */
+  border: 1px solid transparent;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  transition: transform 0.15s ease;
+}
+label.checkbox input[type="checkbox"]:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+label.checkbox input[type="checkbox"]:checked::before {
+  transform: translateX(16px);
+}
+label.checkbox input[type="checkbox"]:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+label.checkbox input[type="checkbox"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  label.checkbox input[type="checkbox"],
+  label.checkbox input[type="checkbox"]::before {
+    transition: none;
+  }
+}
 /* .actions is used both inside <form> (settings.html) and standalone
  * (devices.html). Group the selectors so both forms get flex + right-align
  * + wrap; only the form variant carries the top margin. */
@@ -750,21 +856,17 @@ form .actions { margin-top: 18px; }
 
 dialog {
   background: var(--bg-panel);
-  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
-  border-radius: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
   padding: 0;
   color: var(--fg);
   max-width: 520px;
   width: 92%;
-  /* A soft neon halo so the modal feels lit from the inside, not
-   * pasted on top. */
-  box-shadow:
-    0 20px 60px rgba(0, 0, 0, 0.6),
-    0 0 40px color-mix(in srgb, var(--accent) 20%, transparent);
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.28);
 }
 dialog::backdrop { background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(3px); }
 dialog section { padding: 24px; }
-dialog h2 { font-size: 18px; color: var(--accent); }
+dialog h2 { font-size: 18px; color: var(--fg); }
 
 .pair-qr {
   display: flex;
@@ -776,18 +878,12 @@ dialog h2 { font-size: 18px; color: var(--accent); }
   border-radius: var(--radius);
   background: #fff;
   padding: 10px;
-  /* Subtle neon frame around the QR so it reads as an artifact in the
-   * UI, not a foreign PNG. */
-  box-shadow:
-    0 0 0 1px var(--accent),
-    0 0 16px color-mix(in srgb, var(--accent) 30%, transparent);
+  box-shadow: 0 0 0 1px var(--border);
 }
 .pair-fields { display: grid; gap: 12px; }
 .kv-label {
   color: var(--fg-muted);
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
+  font-size: 12px;
   margin-bottom: 4px;
   font-weight: 600;
 }
@@ -847,23 +943,21 @@ dialog h2 { font-size: 18px; color: var(--accent); }
   flex: 0 0 auto;
   font-size: 11px;
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
   padding: 2px 8px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   border: 1px solid currentcolor;
   /* Default tone for unknown classes — overridden per class below.
-   * Using `currentColor` for the border keeps it tinted with the
-   * tag's text color so a future class string just needs a single
-   * `color:` rule. */
+   * currentColor border tints with the tag color so a new class only
+   * needs a `color:` rule. Colours now derive from semantic tokens so
+   * both themes track automatically (was hardcoded tan/copper/teal/gold). */
   color: var(--fg-muted);
   background: transparent;
 }
-.endpoint-tag.lan { color: #c5a06a; }            /* warm tan */
-.endpoint-tag.tailscale { color: #d4945a; }       /* copper */
-.endpoint-tag.tailscale-dns { color: #c47a3a; }   /* deeper copper — distinct from CGNAT IP */
-.endpoint-tag.mdns { color: #6ab5a8; }            /* muted teal — keeps a cool note for hierarchy */
-.endpoint-tag.public { color: #e8b86a; }          /* bright gold — public addresses pop */
+.endpoint-tag.lan { color: var(--accent); }                                              /* local network — primary path */
+.endpoint-tag.tailscale { color: var(--ok); }                                            /* secure mesh */
+.endpoint-tag.tailscale-dns { color: color-mix(in srgb, var(--ok) 60%, var(--accent)); } /* teal — distinct from CGNAT IP */
+.endpoint-tag.mdns { color: var(--fg-muted); }                                           /* neutral */
+.endpoint-tag.public { color: var(--warn); }                                             /* public exposure — caution */
 .endpoint-url {
   flex: 1;
   font-family: var(--mono, monospace);
@@ -961,14 +1055,20 @@ dialog h2 { font-size: 18px; color: var(--accent); }
 .pairing-badge-count {
   font-variant-numeric: tabular-nums;
 }
+/* Effective-dark pairing badge (mix toward black instead of white). Same
+ * plain-color → color-mix progressive-enhance pattern as the light rule.
+ * Keep the two blocks in sync. */
 @media (prefers-color-scheme: dark) {
-  .pairing-badge {
-    /* Same plain-color → color-mix progressive-enhance pattern as
-     * the light-mode rule above. */
+  :root:not([data-theme]) .pairing-badge {
     background: var(--accent-warm);
     background: color-mix(in srgb, var(--warn) 90%, black);
     color: #1a1a1a;
   }
+}
+:root[data-theme="dark"] .pairing-badge {
+  background: var(--accent-warm);
+  background: color-mix(in srgb, var(--warn) 90%, black);
+  color: #1a1a1a;
 }
 @keyframes pairing-badge-pulse {
   /* The middle keyframe expands the box-shadow ring outward AND
@@ -1011,9 +1111,7 @@ dialog h2 { font-size: 18px; color: var(--accent); }
   gap: 12px;
 }
 .pairing-code-label {
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
+  font-size: 12px;
   color: var(--fg-muted);
 }
 .pairing-code-value {
@@ -1041,13 +1139,6 @@ dialog h2 { font-size: 18px; color: var(--accent); }
 .pairing-error {
   color: var(--danger);
   font-size: 13px;
-}
-
-/* Reduced motion: the scanline grid is static so there's nothing to
- * disable, but a reader that opts out should see the grid dimmed
- * further so it fully recedes. */
-@media (prefers-reduced-motion: reduce) {
-  body::before { opacity: 0.5; }
 }
 
 /* v1.2 Audio quality (upscale) settings card. The warn-banner
@@ -1809,17 +1900,21 @@ code.storage-path {
 .jobs-page .status {
   display: inline-block;
   padding: 0.15em 0.6em;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   font-size: 0.8em;
   font-weight: 500;
-  background: rgba(120, 120, 120, 0.15);
+  background: var(--bg-elev);
+  color: var(--fg-muted);
 }
-.jobs-page .status-running     { background: rgba(50, 130, 220, 0.18); color: #0c5aa6; }
-.jobs-page .status-pending     { background: rgba(120, 120, 120, 0.18); color: #555; }
-.jobs-page .status-completed   { background: rgba(50, 180, 100, 0.18); color: #1b6e3c; }
-.jobs-page .status-failed      { background: rgba(220, 50, 50, 0.18); color: #a31818; }
-.jobs-page .status-cancelled   { background: rgba(200, 150, 50, 0.18); color: #8a5a08; }
-.jobs-page .status-interrupted { background: rgba(220, 130, 50, 0.18); color: #a05408; }
+/* Token-derived tints (were hardcoded rgba+hex) so both themes track. */
+.jobs-page .status-running     { background: color-mix(in srgb, var(--accent) 16%, transparent);      color: var(--accent); }
+.jobs-page .status-pending     { background: var(--bg-elev);                                          color: var(--fg-muted); }
+.jobs-page .status-completed   { background: color-mix(in srgb, var(--ok) 16%, transparent);          color: var(--ok); }
+.jobs-page .status-failed      { background: color-mix(in srgb, var(--danger) 16%, transparent);      color: var(--danger); }
+.jobs-page .status-cancelled   { background: color-mix(in srgb, var(--warn) 16%, transparent);        color: var(--warn); }
+/* interrupted: an amber→rose orange, distinct from cancelled's amber
+   (--warn == --accent-warm) and failed's rose (--danger == --accent-hot). */
+.jobs-page .status-interrupted { background: color-mix(in srgb, color-mix(in srgb, var(--warn), var(--danger)) 16%, transparent); color: color-mix(in srgb, var(--warn), var(--danger)); }
 
 .jobs-page .job-error-row td {
   background: rgba(220, 50, 50, 0.04);
@@ -1856,10 +1951,15 @@ section.library-inspector {
   --kind-upscale: var(--accent);
   --kind-optimize: #06b6d4; /* cyan-500 */
 }
+/* Effective-dark override of the optimize hue (readable cyan on slate).
+ * Keep the two blocks in sync. */
 @media (prefers-color-scheme: dark) {
-  section.library-inspector {
-    --kind-optimize: #22d3ee; /* cyan-400 — readable on slate-900 */
+  :root:not([data-theme]) section.library-inspector {
+    --kind-optimize: #22d3ee; /* cyan-400 — readable on slate */
   }
+}
+:root[data-theme="dark"] section.library-inspector {
+  --kind-optimize: #22d3ee;
 }
 
 .inspector-content {
@@ -2051,8 +2151,7 @@ section.library-inspector {
 }
 .dist-heading {
   font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+  font-weight: 600;
   color: var(--fg-muted);
   margin: 0 0 12px;
 }
@@ -2976,11 +3075,8 @@ section.library-inspector {
   }
   table.rows td::before {
     content: attr(data-label);
-    font-family: var(--display);
     font-weight: 600;
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
+    font-size: 12px;
     color: var(--fg-muted);
   }
   /* .num cells normally right-align — in card-stack mode the value lives
