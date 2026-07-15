@@ -3,12 +3,14 @@
 <section class="page library-inspector" data-sox-available="{{.Data.SoxAvailable}}">
   <h1>Library Inspector</h1>
   {{/*
-    Intro is wrapped in a native <details> so it collapses on phones
-    (≤600px) where 13 lines of prose would eat the whole viewport. The
-    CSS force-expands it and hides the <summary> on desktop (≥601px), so
-    wide layouts render exactly as before. Closed-by-default in markup.
+    Intro collapses to a one-line disclosure on phones (≤600px), where 13
+    lines of prose would eat the whole viewport. It's `open` in markup so
+    desktop shows the full prose in EVERY browser (a pure-CSS force-open
+    fails in Firefox, whose UA `details:not([open]) > *{display:none
+    !important}` outranks author styles); the inline script below removes
+    `open` on ≤600px, and CSS just hides the <summary> toggle on ≥601px.
   */}}
-  <details class="inspector-guide">
+  <details class="inspector-guide" id="inspector-guide" open>
     <summary>About the Library Inspector</summary>
     <p class="lede">
       Browse the indexed library and generate variants at folder / root
@@ -25,6 +27,14 @@
       optimized variants there).
     </p>
   </details>
+  {{- /* Collapse the intro on phones. Runs at parse time — before first paint —
+       so there's no flash of the expanded intro on mobile. Mirrors the
+       pre-paint theme script in layout.html; admin responses set no CSP. */ -}}
+  <script>
+    if (window.matchMedia("(max-width: 600px)").matches) {
+      document.getElementById("inspector-guide").removeAttribute("open");
+    }
+  </script>
 
   {{/*
     Search bar (PR B's two-phase behaviour preserved). `/` focuses

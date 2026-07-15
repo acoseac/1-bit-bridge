@@ -3081,6 +3081,10 @@ section.library-inspector {
     max-width: none;
     max-height: 85vh;
     border-radius: 12px 12px 0 0;
+    /* opacity 0 on the closed base state is what makes the exit FADE (not just
+     * slide) — without it both states default to opacity:1 and the transition
+     * is a no-op on dismiss (Gemini on #502). */
+    opacity: 0;
     transform: translateY(100%);
     padding-bottom: max(1rem, env(safe-area-inset-bottom));
     transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1),
@@ -3089,10 +3093,12 @@ section.library-inspector {
                 overlay 0.3s allow-discrete;
   }
   .inspector-action-panel[data-mode="single"]:popover-open {
+    opacity: 1;
     transform: translateY(0);
   }
   @starting-style {
     .inspector-action-panel[data-mode="single"]:popover-open {
+      opacity: 0;
       transform: translateY(100%);
     }
   }
@@ -3109,20 +3115,15 @@ section.library-inspector {
   .inspector-tree .inspector-current-heading-row .folder-action-info { min-height: 44px; }
 }
 
-/* 4.1 (desktop half) · force the intro <details> fully open on ≥601px and drop
- * the summary toggle, so desktop shows the full prose exactly as before —
- * JS-free, complementary to the ≤600px collapse. */
+/* 4.1 (desktop half) · the intro <details> is `open` in markup, so desktop
+ * shows the full prose in every browser; here we just hide the <summary>
+ * toggle on ≥601px. On ≤600px the inline parse-time script (in the template)
+ * removes `open` to collapse it. This replaces an earlier pure-CSS force-open
+ * that overrode the ::details-content pseudo and broke in Firefox (whose UA
+ * `details:not([open]) > *{display:none!important}` outranks author rules —
+ * Gemini on #502). */
 @media (min-width: 601px) {
   .inspector-guide > summary { display: none; }
-  /* Modern engines (Chromium 128+, Safari 18.4+) wrap closed-<details> content
-   * in a ::details-content pseudo with content-visibility:hidden — the display
-   * trick below can't reveal it, so override content-visibility. !important
-   * beats the UA's `details:not([open])::details-content` rule; scoped to this
-   * min-width block so mobile's native collapse is untouched. Engines without
-   * ::details-content ignore this rule (invalid selector) and use the fallback. */
-  .inspector-guide::details-content { content-visibility: visible !important; }
-  /* Fallback for engines predating ::details-content. */
-  .inspector-guide > *:not(summary) { display: block; }
 }
 
 /* ===== Phone-width adaptations (≤640px) =================================
