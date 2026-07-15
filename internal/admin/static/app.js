@@ -3571,6 +3571,45 @@ function attachTileMenu(tile, item) {
     // Close the popover natively.
     if (typeof popover.hidePopover === "function") popover.hidePopover();
   });
+  // Anchor the menu to its ⋯ button on each open. A `popovertarget` popover has
+  // no native anchored positioning, so without this it lands at the viewport
+  // top-left (the UA centering is deliberately the CSS fallback, not the primary
+  // path). Done in JS — not CSS Anchor Positioning — so it works in Safari /
+  // Firefox too. `beforetoggle` fires before paint, so there's no flash.
+  popover.addEventListener("beforetoggle", (e) => {
+    if (e.newState !== "open") return;
+    const btn = tile.querySelector(".tile-menu-btn");
+    if (!btn) return;
+    const r = btn.getBoundingClientRect();
+    const menuW = 240; // matches min-width
+    const estH = 240; // ~5 items + dividers; only used to pick below-vs-above
+    // Right-align the menu to the button, clamped inside the viewport.
+    let left = Math.min(r.right, window.innerWidth - 8) - menuW;
+    left = Math.max(8, left);
+    popover.style.position = "fixed";
+    popover.style.inset = "auto"; // clear the UA popover `inset: 0`
+    popover.style.margin = "0";
+    popover.style.left = left + "px";
+    // Open downward when there's room, else flip up — choosing whichever side
+    // actually has more room on a short viewport. Anchor the button-facing edge
+    // (top when below, bottom when above) so the menu stays snug regardless of
+    // its real height, and cap max-height to the available space so items scroll
+    // (CSS overflow-y) instead of clipping off-screen on landscape / zoomed
+    // viewports (Gemini on #503).
+    const gap = 4;
+    const vpMargin = 8;
+    const spaceBelow = window.innerHeight - r.bottom;
+    const spaceAbove = r.top;
+    if (spaceBelow >= estH || spaceBelow >= spaceAbove) {
+      popover.style.top = r.bottom + gap + "px";
+      popover.style.bottom = "auto";
+      popover.style.maxHeight = Math.max(96, spaceBelow - gap - vpMargin) + "px";
+    } else {
+      popover.style.bottom = window.innerHeight - r.top + gap + "px";
+      popover.style.top = "auto";
+      popover.style.maxHeight = Math.max(96, spaceAbove - gap - vpMargin) + "px";
+    }
+  });
   tile.appendChild(popover);
 }
 
