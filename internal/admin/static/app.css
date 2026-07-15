@@ -2933,6 +2933,40 @@ section.library-inspector {
     text-align: center;
     padding: 12px;
   }
+
+  /* --- Secondary nav bars → horizontal scroll-strips (mobile rework).
+   *     Mirrors the header-nav belt above so top-nav / subnav / settings-tabs
+   *     share one idiom; inert until the row actually overflows. The 7-tab
+   *     Settings bar was wrapping to ~3 rows with an orphaned active underline. */
+  .tab-nav, .subnav {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .tab-nav::-webkit-scrollbar,
+  .subnav::-webkit-scrollbar { display: none; }
+  .tab-btn, .subnav a { flex-shrink: 0; }
+
+  /* Scroll affordance on the Settings tab bar (the belt that reliably
+   * overflows): a right-edge fade signals "more tabs", and a trailing flex
+   * spacer lets the last tab scroll clear of the fade — padding-right is
+   * unreliably honored in flex overflow-scroll calc. Kept OFF .subnav /
+   * header nav, whose 2–6 short items usually fit; an always-on fade there
+   * would dim a non-scrollable edge. */
+  .tab-nav {
+    /* Fade width = the 48px trailing spacer, so the last tab is fully clear of
+     * the fade when scrolled to the end. A percentage fade (e.g. 88%) scales
+     * with viewport width and overruns the fixed spacer on wider phones,
+     * leaving the last tab partially dimmed (Gemini on #501). */
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 48px), transparent);
+    mask-image: linear-gradient(to right, #000 calc(100% - 48px), transparent);
+  }
+  .tab-nav::after {
+    content: "";
+    flex-shrink: 0;
+    width: 48px;
+  }
 }
 
 @media (max-width: 600px) {
@@ -3146,6 +3180,34 @@ section.library-inspector {
     text-overflow: clip;
     overflow-wrap: anywhere;
   }
+
+  /* --- Group B: dl / status-grid readouts stack to one column. The fixed
+   *     150px (status-grid max-content) label column starves values at 375px.
+   *     The explicit .status-grid selector is required — its (0,2,0) rule
+   *     outranks a bare `dl`. --- */
+  dl,
+  .upscale-stats .status-grid {
+    grid-template-columns: 1fr;
+    gap: 2px 0;
+  }
+  dl dt { margin-top: 10px; font-weight: 600; }
+  dl dt:first-of-type { margin-top: 0; }
+  /* Long paths / URLs / fingerprints break within the full-width value instead
+   * of overflowing. `overflow-wrap: anywhere` breaks only on real overflow
+   * (short values stay intact); `word-break: normal` is required to un-inherit
+   * the global `code { word-break: break-all }` (~line 284), which would
+   * otherwise force eager mid-character breaks (Gemini on #501). */
+  dl dd code { overflow-wrap: anywhere; word-break: normal; }
+
+  /* --- Group D: touch targets to the 44px floor. `.theme-toggle` sits in the
+   *     centered header .meta row; `label.checkbox` already flex-centers, so a
+   *     min-height alone pads the whole tappable switch row to 44px. --- */
+  .theme-toggle { min-height: 44px; padding-inline: 14px; }
+  label.checkbox { min-height: 44px; }
+
+  /* --- Group F: tighten intro copy so content starts higher on phone. --- */
+  .lede { font-size: 13px; margin-bottom: 14px; }
+  .page > .muted { font-size: 13px; }
 }
 
 /* ---- Data page (playlists + listening history) ---- */

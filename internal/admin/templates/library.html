@@ -22,11 +22,11 @@
       <tbody id="roots-body">
         {{range .Data.Roots}}
         <tr data-path="{{.Path}}">
-          <td><code>{{.Path}}</code></td>
-          <td class="num">{{.Tracks}}</td>
-          <td class="num">{{.UpscaledTracks}}{{if .UpscaledBytes}} <span class="muted">({{bytesHuman .UpscaledBytes}})</span>{{end}}</td>
-          <td class="num">{{.OptimizedTracks}}{{if .OptimizedBytes}} <span class="muted">({{bytesHuman .OptimizedBytes}})</span>{{end}}</td>
-          <td><button type="button" class="btn danger remove-root">Remove</button></td>
+          <td data-label="Path"><code>{{.Path}}</code></td>
+          <td class="num" data-label="Originals">{{.Tracks}}</td>
+          <td class="num" data-label="Upscaled">{{.UpscaledTracks}}{{if .UpscaledBytes}} <span class="muted">({{bytesHuman .UpscaledBytes}})</span>{{end}}</td>
+          <td class="num" data-label="Optimized">{{.OptimizedTracks}}{{if .OptimizedBytes}} <span class="muted">({{bytesHuman .OptimizedBytes}})</span>{{end}}</td>
+          <td class="row-actions" data-label="Actions"><button type="button" class="btn danger remove-root">Remove</button></td>
         </tr>
         {{else}}
         <tr><td colspan="5"><em>No roots configured.</em></td></tr>
@@ -47,19 +47,17 @@
       Where the bridge stores generated variant sidecars (upscaled + optimized
       FLACs). These are separate from your originals and never counted as library tracks.
     </p>
-    <table class="rows">
-      <tbody>
-        <tr><th>Stored at</th><td><code>{{.Data.VariantsDir}}</code></td></tr>
-        <tr>
-          <th>Upscaled</th>
-          <td>{{.Data.UpscaledVariants}} file{{if ne .Data.UpscaledVariants 1}}s{{end}} · {{bytesHuman .Data.UpscaledBytes}}</td>
-        </tr>
-        <tr>
-          <th>Optimized</th>
-          <td>{{.Data.OptimizedVariants}} file{{if ne .Data.OptimizedVariants 1}}s{{end}} · {{bytesHuman .Data.OptimizedBytes}}</td>
-        </tr>
-      </tbody>
-    </table>
+    {{- /* Key/value readout as a <dl>, not table.rows — inherits the mobile
+         dl stack (single column ≤640px) for free, and semantically it IS a
+         description list. See CLAUDE.md admin mobile conventions. */ -}}
+    <dl>
+      <dt>Stored at</dt>
+      <dd><code>{{.Data.VariantsDir}}</code></dd>
+      <dt>Upscaled</dt>
+      <dd>{{.Data.UpscaledVariants}} file{{if ne .Data.UpscaledVariants 1}}s{{end}} · {{bytesHuman .Data.UpscaledBytes}}</dd>
+      <dt>Optimized</dt>
+      <dd>{{.Data.OptimizedVariants}} file{{if ne .Data.OptimizedVariants 1}}s{{end}} · {{bytesHuman .Data.OptimizedBytes}}</dd>
+    </dl>
   </div>
 
   <div class="panel">
