@@ -2969,6 +2969,34 @@ section.library-inspector {
   }
 }
 
+/* --- Library Inspector — mobile rework (Phase 4) --------------------------
+ * The Inspector is 100% tile-based (no table on this page), so these are
+ * CSS-only reflows layered on the existing ≤600px inspector block below.
+ *
+ * 4.1 · The 13-line intro lede is wrapped in <details class="inspector-guide">
+ * (closed by default). On phones it collapses; the min-width:601px block at the
+ * end force-expands it and hides the <summary>, so desktop is unchanged. The
+ * default disclosure triangle is stripped for a themed chevron. */
+.inspector-guide { margin: 0 0 20px; }
+.inspector-guide > summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-weight: 600;
+  color: var(--fg);
+  padding: 4px 0;
+}
+.inspector-guide > summary::-webkit-details-marker { display: none; }
+.inspector-guide > summary::before {
+  content: "\25B8";                 /* ▸ */
+  color: var(--fg-muted);
+  transition: transform 0.15s ease;
+}
+.inspector-guide[open] > summary::before { transform: rotate(90deg); }
+.inspector-guide .lede { margin: 0.5rem 0 0; }
+
 @media (max-width: 600px) {
   .inspector-grid {
     grid-template-columns: 1fr;
@@ -2985,6 +3013,116 @@ section.library-inspector {
   .panel-card .card-summary-hint {
     display: none;
   }
+
+  /* 4.2 · Reclaim the sticky stack. The storage bar is reference-only —
+   * unstick it so the tile grid keeps the viewport (search + toolbar stay
+   * pinned for reach). Safe: --inspector-storage-bottom's ONLY consumer is
+   * the never-rendered #inspector-rows-table thead. */
+  .library-inspector .inspector-storage-bar { position: static; }
+  /* Deep paths overflow the narrow toolbar — the breadcrumb trail drops to
+   * its own row and scrolls horizontally (header-nav belt idiom). The sticky-
+   * offset JS re-measures on wrap via its ResizeObserver, so no JS change. */
+  .library-inspector .breadcrumbs {
+    flex: 1 1 100%;
+    min-width: 0;
+    overflow-x: auto;
+    white-space: nowrap;
+    scrollbar-width: none;
+  }
+  .library-inspector .breadcrumbs::-webkit-scrollbar { display: none; }
+
+  /* 4.3 · The dense 8-row action-panel stat blocks stack label-over-value
+   * (the 1fr auto grid crams long values like the optimize Target). Buttons
+   * go full-width with a 44px floor. Mode-agnostic → fixes single, batch,
+   * and the confirm overlay in one place. */
+  .panel-card dl.kv,
+  .panel-confirm dl.kv {
+    grid-template-columns: 1fr;
+    gap: 0.15rem 0;
+  }
+  .panel-card dl.kv dt,
+  .panel-confirm dl.kv dt {
+    margin-top: 0.45rem;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .panel-card dl.kv dt:first-of-type,
+  .panel-confirm dl.kv dt:first-of-type { margin-top: 0; }
+  .panel-card dl.kv dd,
+  .panel-confirm dl.kv dd {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .panel-card .panel-actions-row,
+  .panel-confirm .panel-confirm-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .panel-card .panel-actions-row .btn,
+  .panel-confirm .panel-confirm-actions .btn {
+    width: 100%;
+    min-height: 44px;
+  }
+
+  /* 4.4 · Single-tile action panel becomes a thumb-reachable bottom sheet.
+   * Overrides the desktop viewport-centering AND its @starting-style so it
+   * slides UP on open and DOWN on dismiss (display/overlay allow-discrete).
+   * padding-bottom clears the iOS home indicator — env() needs viewport-fit=
+   * cover for the true inset; the 1rem floor always applies otherwise. Needs
+   * Chrome 117+/Safari 17+ for the exit animation; older browsers show/hide
+   * instantly (the popover still works). Batch mode is a different selector. */
+  .inspector-action-panel[data-mode="single"] {
+    top: auto;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    width: auto;
+    max-width: none;
+    max-height: 85vh;
+    border-radius: 12px 12px 0 0;
+    transform: translateY(100%);
+    padding-bottom: max(1rem, env(safe-area-inset-bottom));
+    transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1),
+                opacity 0.3s ease,
+                display 0.3s allow-discrete,
+                overlay 0.3s allow-discrete;
+  }
+  .inspector-action-panel[data-mode="single"]:popover-open {
+    transform: translateY(0);
+  }
+  @starting-style {
+    .inspector-action-panel[data-mode="single"]:popover-open {
+      transform: translateY(100%);
+    }
+  }
+
+  /* 4.5 · Tile corner controls to the 44px HIG floor (vertical room is cheap
+   * in the 1-column grid). */
+  .tile-select { min-width: 44px; min-height: 44px; }
+  .tile-info-btn,
+  .tile-menu-btn { min-width: 44px; min-height: 44px; }
+
+  /* 4.6 · Remaining sub-44px controls. */
+  .subnav a { padding: 12px 14px; }
+  .library-inspector .inspector-storage-btn { min-height: 44px; }
+  .inspector-tree .inspector-current-heading-row .folder-action-info { min-height: 44px; }
+}
+
+/* 4.1 (desktop half) · force the intro <details> fully open on ≥601px and drop
+ * the summary toggle, so desktop shows the full prose exactly as before —
+ * JS-free, complementary to the ≤600px collapse. */
+@media (min-width: 601px) {
+  .inspector-guide > summary { display: none; }
+  /* Modern engines (Chromium 128+, Safari 18.4+) wrap closed-<details> content
+   * in a ::details-content pseudo with content-visibility:hidden — the display
+   * trick below can't reveal it, so override content-visibility. !important
+   * beats the UA's `details:not([open])::details-content` rule; scoped to this
+   * min-width block so mobile's native collapse is untouched. Engines without
+   * ::details-content ignore this rule (invalid selector) and use the fallback. */
+  .inspector-guide::details-content { content-visibility: visible !important; }
+  /* Fallback for engines predating ::details-content. */
+  .inspector-guide > *:not(summary) { display: block; }
 }
 
 /* ===== Phone-width adaptations (≤640px) =================================

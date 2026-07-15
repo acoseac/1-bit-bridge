@@ -2,20 +2,29 @@
 {{template "library-subnav" .}}
 <section class="page library-inspector" data-sox-available="{{.Data.SoxAvailable}}">
   <h1>Library Inspector</h1>
-  <p class="lede">
-    Browse the indexed library and generate variants at folder / root
-    / whole-library granularity. Each folder tile shows upscaled
-    coverage (hi-res target — Hugo / Mojo / Qutest path) AND
-    CarPlay-optimized coverage (16-bit family-preserving 44.1k or
-    48k — head-unit friendly, ~30% the file size of high-res FLAC).
-    Tap a tile to enter; tap the ⓘ icon to open the action panel,
-    or use the ⋯ menu for quick per-tile actions. Select multiple
-    tiles via the corner checkbox to act in batch. The bridge
-    handles the work in the background; paired iOS devices pick up
-    new variants automatically when their corresponding toggle is on
-    (or when CarPlay is the active route — Tier 0 routing prefers
-    optimized variants there).
-  </p>
+  {{/*
+    Intro is wrapped in a native <details> so it collapses on phones
+    (≤600px) where 13 lines of prose would eat the whole viewport. The
+    CSS force-expands it and hides the <summary> on desktop (≥601px), so
+    wide layouts render exactly as before. Closed-by-default in markup.
+  */}}
+  <details class="inspector-guide">
+    <summary>About the Library Inspector</summary>
+    <p class="lede">
+      Browse the indexed library and generate variants at folder / root
+      / whole-library granularity. Each folder tile shows upscaled
+      coverage (hi-res target — Hugo / Mojo / Qutest path) AND
+      CarPlay-optimized coverage (16-bit family-preserving 44.1k or
+      48k — head-unit friendly, ~30% the file size of high-res FLAC).
+      Tap a tile to enter; tap the ⓘ icon to open the action panel,
+      or use the ⋯ menu for quick per-tile actions. Select multiple
+      tiles via the corner checkbox to act in batch. The bridge
+      handles the work in the background; paired iOS devices pick up
+      new variants automatically when their corresponding toggle is on
+      (or when CarPlay is the active route — Tier 0 routing prefers
+      optimized variants there).
+    </p>
+  </details>
 
   {{/*
     Search bar (PR B's two-phase behaviour preserved). `/` focuses
