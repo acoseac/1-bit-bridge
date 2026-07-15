@@ -1912,7 +1912,9 @@ code.storage-path {
 .jobs-page .status-completed   { background: color-mix(in srgb, var(--ok) 16%, transparent);          color: var(--ok); }
 .jobs-page .status-failed      { background: color-mix(in srgb, var(--danger) 16%, transparent);      color: var(--danger); }
 .jobs-page .status-cancelled   { background: color-mix(in srgb, var(--warn) 16%, transparent);        color: var(--warn); }
-.jobs-page .status-interrupted { background: color-mix(in srgb, var(--accent-warm) 16%, transparent); color: var(--accent-warm); }
+/* interrupted: an amber→rose orange, distinct from cancelled's amber
+   (--warn == --accent-warm) and failed's rose (--danger == --accent-hot). */
+.jobs-page .status-interrupted { background: color-mix(in srgb, color-mix(in srgb, var(--warn), var(--danger)) 16%, transparent); color: color-mix(in srgb, var(--warn), var(--danger)); }
 
 .jobs-page .job-error-row td {
   background: rgba(220, 50, 50, 0.04);
