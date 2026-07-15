@@ -142,7 +142,7 @@
 
       <div class="field">
         <label class="checkbox">
-          <input name="atlasEnabled" type="checkbox" {{if .Data.AtlasEnabled}}checked{{end}}>
+          <input name="atlasEnabled" type="checkbox" role="switch" {{if .Data.AtlasEnabled}}checked{{end}}>
           Rich metadata: bios, descriptions, genres <span class="badge warn">restart</span>
         </label>
         <small class="hint">
@@ -198,8 +198,8 @@
       </div>
 
       <div class="field" {{if .Data.IsPublic}}hidden{{end}}>
-        <label>
-          <input type="checkbox" name="mdnsEnabled" {{if .Data.MDNSEnabled}}checked{{end}}>
+        <label class="checkbox">
+          <input type="checkbox" role="switch" name="mdnsEnabled" {{if .Data.MDNSEnabled}}checked{{end}}>
           Advertise on mDNS / Bonjour
         </label>
         <small class="hint">
@@ -209,8 +209,8 @@
       </div>
 
       <div class="field">
-        <label>
-          <input type="checkbox" name="dlnaEnabled" {{if .Data.DLNAEnabled}}checked{{end}} {{if .Data.DLNABlockedByPublic}}disabled{{end}}>
+        <label class="checkbox">
+          <input type="checkbox" role="switch" name="dlnaEnabled" {{if .Data.DLNAEnabled}}checked{{end}} {{if .Data.DLNABlockedByPublic}}disabled{{end}}>
           Enable UPnP/DLNA server <span class="badge warn">restart</span>
         </label>
         <small class="hint">
@@ -338,7 +338,7 @@
 
       <div class="field">
         <label class="checkbox">
-          <input name="updateAutoInstall" type="checkbox" {{if .Data.UpdateAutoInstall}}checked{{end}}>
+          <input name="updateAutoInstall" type="checkbox" role="switch" {{if .Data.UpdateAutoInstall}}checked{{end}}>
           Auto-install new releases <span class="badge warn">restart</span>
         </label>
         <small class="hint">
@@ -386,7 +386,7 @@
 
       <div class="field">
         <label class="checkbox">
-          <input name="upscaleEnabled" type="checkbox" {{if .Data.UpscaleEnabled}}checked{{end}}>
+          <input name="upscaleEnabled" type="checkbox" role="switch" {{if .Data.UpscaleEnabled}}checked{{end}}>
           Enable PCM upscaling <span class="badge warn">restart</span>
         </label>
         <small class="hint">
@@ -463,7 +463,7 @@
 
       <div class="field">
         <label class="checkbox">
-          <input name="analysisEnabled" type="checkbox" {{if .Data.AnalysisEnabled}}checked{{end}}>
+          <input name="analysisEnabled" type="checkbox" role="switch" {{if .Data.AnalysisEnabled}}checked{{end}}>
           Enable audio analysis <span class="badge warn">restart</span>
         </label>
         <small class="hint">
@@ -507,7 +507,7 @@
 
       <div class="field">
         <label class="checkbox">
-          <input name="smartPlaylistsEnabled" type="checkbox" {{if .Data.SmartPlaylistsEnabled}}checked{{end}}>
+          <input name="smartPlaylistsEnabled" type="checkbox" role="switch" {{if .Data.SmartPlaylistsEnabled}}checked{{end}}>
           Enable smart mixes <span class="badge warn">restart</span>
         </label>
         <small class="hint">

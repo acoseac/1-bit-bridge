@@ -5928,8 +5928,57 @@ function initSmartMixes() {
   });
 }
 
+// Light / dark / system theme toggle. Cycles system → light → dark and
+// persists to localStorage["bridge-theme"]. applyTheme mirrors the pre-paint
+// IIFE in layout.html <head> (which prevents the flash-of-wrong-theme on load).
+// No matchMedia listener is needed: "system" removes the attribute and the CSS
+// :root:not([data-theme]) dark media query tracks OS changes natively.
+const THEME_KEY = "bridge-theme";
+const THEME_ORDER = ["system", "light", "dark"];
+const THEME_LABEL = { system: "System", light: "Light", dark: "Dark" };
+const THEME_GLYPH = { system: "◑", light: "☀", dark: "☾" }; // ◑ ☀ ☾
+
+function currentTheme() {
+  try {
+    const t = localStorage.getItem(THEME_KEY);
+    if (t === "light" || t === "dark") return t;
+  } catch (e) { /* storage disabled / private mode */ }
+  return "system";
+}
+
+function applyTheme(mode, persist) {
+  const root = document.documentElement;
+  if (mode === "light" || mode === "dark") {
+    root.setAttribute("data-theme", mode);
+  } else {
+    mode = "system";
+    root.removeAttribute("data-theme");
+  }
+  if (persist) {
+    try { localStorage.setItem(THEME_KEY, mode); } catch (e) { /* ignore */ }
+  }
+  const btn = document.getElementById("theme-toggle");
+  if (btn) {
+    btn.textContent = THEME_GLYPH[mode] + " " + THEME_LABEL[mode];
+    btn.setAttribute("aria-label", "Theme: " + mode + " (click to change)");
+  }
+}
+
+function initTheme() {
+  // Sync the button label with the persisted choice (the pre-paint IIFE
+  // already applied data-theme, so this doesn't repaint).
+  applyTheme(currentTheme(), false);
+  const btn = document.getElementById("theme-toggle");
+  if (!btn) return;
+  btn.addEventListener("click", () => {
+    const next = THEME_ORDER[(THEME_ORDER.indexOf(currentTheme()) + 1) % THEME_ORDER.length];
+    applyTheme(next, true);
+  });
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   initMobileNav();
+  initTheme();
   const active = document.body.dataset.active;
   switch (active) {
     case "dashboard": initDashboard(); break;
