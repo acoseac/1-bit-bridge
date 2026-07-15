@@ -3590,15 +3590,24 @@ function attachTileMenu(tile, item) {
     popover.style.inset = "auto"; // clear the UA popover `inset: 0`
     popover.style.margin = "0";
     popover.style.left = left + "px";
-    // Below the button when there's room; else anchor the menu's BOTTOM just
-    // above it — snug regardless of the menu's real height (the estimate only
-    // decides the direction, so an over/under-estimate can't leave a gap).
-    if (window.innerHeight - r.bottom >= estH) {
-      popover.style.top = r.bottom + 4 + "px";
+    // Open downward when there's room, else flip up — choosing whichever side
+    // actually has more room on a short viewport. Anchor the button-facing edge
+    // (top when below, bottom when above) so the menu stays snug regardless of
+    // its real height, and cap max-height to the available space so items scroll
+    // (CSS overflow-y) instead of clipping off-screen on landscape / zoomed
+    // viewports (Gemini on #503).
+    const gap = 4;
+    const vpMargin = 8;
+    const spaceBelow = window.innerHeight - r.bottom;
+    const spaceAbove = r.top;
+    if (spaceBelow >= estH || spaceBelow >= spaceAbove) {
+      popover.style.top = r.bottom + gap + "px";
       popover.style.bottom = "auto";
+      popover.style.maxHeight = Math.max(96, spaceBelow - gap - vpMargin) + "px";
     } else {
-      popover.style.bottom = window.innerHeight - r.top + 4 + "px";
+      popover.style.bottom = window.innerHeight - r.top + gap + "px";
       popover.style.top = "auto";
+      popover.style.maxHeight = Math.max(96, spaceAbove - gap - vpMargin) + "px";
     }
   });
   tile.appendChild(popover);

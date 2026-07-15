@@ -2430,6 +2430,9 @@ section.library-inspector {
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
   padding: 0.4rem 0;
   min-width: 240px;
+  /* Scroll rather than clip when a short / zoomed viewport can't fit every
+     item — the JS caps max-height to the available space on open (Gemini #503). */
+  overflow-y: auto;
   /* A `popovertarget`-invoked popover has NO built-in anchored positioning.
      attachTileMenu's `beforetoggle` handler positions it against the ⋯ button
      on each open (position:fixed + inset:auto + left/top). `margin:auto` is the
