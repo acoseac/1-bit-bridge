@@ -2955,8 +2955,12 @@ section.library-inspector {
    * header nav, whose 2–6 short items usually fit; an always-on fade there
    * would dim a non-scrollable edge. */
   .tab-nav {
-    -webkit-mask-image: linear-gradient(to right, #000 88%, transparent);
-    mask-image: linear-gradient(to right, #000 88%, transparent);
+    /* Fade width = the 48px trailing spacer, so the last tab is fully clear of
+     * the fade when scrolled to the end. A percentage fade (e.g. 88%) scales
+     * with viewport width and overruns the fixed spacer on wider phones,
+     * leaving the last tab partially dimmed (Gemini on #501). */
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 48px), transparent);
+    mask-image: linear-gradient(to right, #000 calc(100% - 48px), transparent);
   }
   .tab-nav::after {
     content: "";
@@ -3188,10 +3192,12 @@ section.library-inspector {
   }
   dl dt { margin-top: 10px; font-weight: 600; }
   dl dt:first-of-type { margin-top: 0; }
-  /* Long paths / URLs / fingerprints break within the full-width value
-   * instead of overflowing. `anywhere` (not break-all) breaks only on real
-   * overflow, so short code values stay intact. */
-  dl dd code { overflow-wrap: anywhere; }
+  /* Long paths / URLs / fingerprints break within the full-width value instead
+   * of overflowing. `overflow-wrap: anywhere` breaks only on real overflow
+   * (short values stay intact); `word-break: normal` is required to un-inherit
+   * the global `code { word-break: break-all }` (~line 284), which would
+   * otherwise force eager mid-character breaks (Gemini on #501). */
+  dl dd code { overflow-wrap: anywhere; word-break: normal; }
 
   /* --- Group D: touch targets to the 44px floor. `.theme-toggle` sits in the
    *     centered header .meta row; `label.checkbox` already flex-centers, so a
