@@ -5560,11 +5560,11 @@ async function loadPlaylists() {
     }
     body.innerHTML = rows.map((p) => `
       <tr class="playlist-row" data-device="${escapeHTML(p.deviceTokenPrefix)}" data-id="${escapeHTML(p.id)}">
-        <td>${escapeHTML(p.name)}</td>
-        <td><code>${escapeHTML(p.deviceTokenPrefix)}</code></td>
-        <td class="num">${p.trackCount}</td>
-        <td>${p.updatedAt ? formatTimeAgo(new Date(p.updatedAt)) : "—"}</td>
-        <td><button type="button" class="btn open-playlist">View</button></td>
+        <td data-label="Name">${escapeHTML(p.name)}</td>
+        <td data-label="Device"><code>${escapeHTML(p.deviceTokenPrefix)}</code></td>
+        <td class="num" data-label="Tracks">${p.trackCount}</td>
+        <td data-label="Updated">${p.updatedAt ? formatTimeAgo(new Date(p.updatedAt)) : "—"}</td>
+        <td class="row-actions" data-label="Actions"><button type="button" class="btn open-playlist">View</button></td>
       </tr>`).join("");
     body.querySelectorAll(".playlist-row").forEach((tr) => {
       tr.querySelector(".open-playlist").addEventListener("click", () =>
@@ -5590,10 +5590,10 @@ async function openPlaylistDetail(device, id) {
       ? `<tr><td colspan="4"><em>Empty playlist.</em></td></tr>`
       : items.map((it) => `
         <tr>
-          <td class="num">${it.position + 1}</td>
-          <td>${escapeHTML(it.title || "—")}</td>
-          <td>${escapeHTML(it.artist || "—")}</td>
-          <td>${it.foreign
+          <td class="num" data-label="#">${it.position + 1}</td>
+          <td data-label="Title">${escapeHTML(it.title || "—")}</td>
+          <td data-label="Artist">${escapeHTML(it.artist || "—")}</td>
+          <td data-label="Source">${it.foreign
             ? `<span class="badge idle" title="${escapeHTML(it.originPath || "")}">foreign</span>`
             : `<code>${escapeHTML(it.path || "")}</code>`}</td>
         </tr>`).join("");
@@ -5651,12 +5651,12 @@ async function loadHistoryEvents(reset) {
     const events = data.events || [];
     const rowsHTML = events.map((e) => `
       <tr>
-        <td>${e.startedAt ? formatTimeAgo(new Date(e.startedAt)) : "—"}</td>
-        <td><code>${escapeHTML((e.path || "").split("/").pop())}</code></td>
-        <td>${escapeHTML(e.codec || "—")}</td>
-        <td>${escapeHTML(e.route || "—")}</td>
-        <td class="num">${e.outputRate ? (e.outputRate / 1000).toFixed(1) + "k" : "—"}</td>
-        <td class="num">${Math.round(e.durationUsed || 0)}s</td>
+        <td data-label="When">${e.startedAt ? formatTimeAgo(new Date(e.startedAt)) : "—"}</td>
+        <td data-label="Track"><code>${escapeHTML((e.path || "").split("/").pop())}</code></td>
+        <td data-label="Codec">${escapeHTML(e.codec || "—")}</td>
+        <td data-label="Route">${escapeHTML(e.route || "—")}</td>
+        <td class="num" data-label="Rate">${e.outputRate ? (e.outputRate / 1000).toFixed(1) + "k" : "—"}</td>
+        <td class="num" data-label="Played">${Math.round(e.durationUsed || 0)}s</td>
       </tr>`).join("");
     if (reset) {
       body.innerHTML = events.length === 0
