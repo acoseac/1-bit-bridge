@@ -2430,10 +2430,13 @@ section.library-inspector {
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
   padding: 0.4rem 0;
   min-width: 240px;
-  /* Positioning fallback for browsers without CSS Anchor; the JS
-     places the popover via popover API but explicit centering keeps
-     it on-screen if anchor positioning fails. */
-  margin: 0;
+  /* A `popovertarget`-invoked popover has NO built-in anchored positioning.
+     attachTileMenu's `beforetoggle` handler positions it against the ⋯ button
+     on each open (position:fixed + inset:auto + left/top). `margin:auto` is the
+     no-JS fallback — it keeps the UA centering so the menu stays on-screen if
+     the JS ever doesn't run. Do NOT set `margin:0` here: with the UA `inset:0`
+     still in effect it pins the menu to the viewport TOP-LEFT. */
+  margin: auto;
 }
 .tile-menu-popover .menu-item {
   display: block;

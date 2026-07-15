@@ -3571,6 +3571,36 @@ function attachTileMenu(tile, item) {
     // Close the popover natively.
     if (typeof popover.hidePopover === "function") popover.hidePopover();
   });
+  // Anchor the menu to its ⋯ button on each open. A `popovertarget` popover has
+  // no native anchored positioning, so without this it lands at the viewport
+  // top-left (the UA centering is deliberately the CSS fallback, not the primary
+  // path). Done in JS — not CSS Anchor Positioning — so it works in Safari /
+  // Firefox too. `beforetoggle` fires before paint, so there's no flash.
+  popover.addEventListener("beforetoggle", (e) => {
+    if (e.newState !== "open") return;
+    const btn = tile.querySelector(".tile-menu-btn");
+    if (!btn) return;
+    const r = btn.getBoundingClientRect();
+    const menuW = 240; // matches min-width
+    const estH = 240; // ~5 items + dividers; only used to pick below-vs-above
+    // Right-align the menu to the button, clamped inside the viewport.
+    let left = Math.min(r.right, window.innerWidth - 8) - menuW;
+    left = Math.max(8, left);
+    popover.style.position = "fixed";
+    popover.style.inset = "auto"; // clear the UA popover `inset: 0`
+    popover.style.margin = "0";
+    popover.style.left = left + "px";
+    // Below the button when there's room; else anchor the menu's BOTTOM just
+    // above it — snug regardless of the menu's real height (the estimate only
+    // decides the direction, so an over/under-estimate can't leave a gap).
+    if (window.innerHeight - r.bottom >= estH) {
+      popover.style.top = r.bottom + 4 + "px";
+      popover.style.bottom = "auto";
+    } else {
+      popover.style.bottom = window.innerHeight - r.top + 4 + "px";
+      popover.style.top = "auto";
+    }
+  });
   tile.appendChild(popover);
 }
 
