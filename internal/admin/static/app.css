@@ -2060,6 +2060,27 @@ section.library-inspector {
   font-size: 1.1rem;
   flex-shrink: 0;
 }
+/* Atlas metadata layer: tile artwork thumbnail (album cover or artist
+ * portrait via the loopback byte routes). Fixed square so tiles don't
+ * jump when the lazy image lands; fades in on load; the emoji icon
+ * hides once a thumb is showing. */
+.tile-thumb {
+  width: 44px;
+  height: 44px;
+  border-radius: 6px;
+  object-fit: cover;
+  object-position: center;
+  flex-shrink: 0;
+  background: var(--bg-elev);
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+.tile-thumb[data-loaded="true"] { opacity: 1; }
+.inspector-tile[data-thumb="true"] .tile-icon { display: none; }
+.tile-booklet { font-size: 0.85rem; flex-shrink: 0; }
+@media (prefers-reduced-motion: reduce) {
+  .tile-thumb { transition: none; opacity: 1; }
+}
 .tile-name {
   margin: 0;
   font-size: 0.95rem;
@@ -2539,6 +2560,52 @@ section.library-inspector {
 /* Replaces the legacy persistent right drawer + sticky bottom
    selection bar. Native popover for top-layer rendering; positioning
    + Escape + focus-trap are JS-driven (see app.js). */
+/* About card content (Atlas metadata layer). All dynamic strings are
+ * textContent-rendered; these classes only shape them. */
+#panel-about-content .about-thumbs {
+  display: flex;
+  gap: 0.6rem;
+  margin-bottom: 0.6rem;
+}
+#panel-about-content .about-cover {
+  width: 96px;
+  height: 96px;
+  border-radius: 8px;
+  object-fit: cover;
+  object-position: center;
+  background: var(--bg-elev);
+}
+#panel-about-content .about-block { margin: 0 0 0.75rem; }
+#panel-about-content .about-block h4 {
+  margin: 0 0 0.25rem;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: color-mix(in srgb, currentcolor 60%, transparent);
+}
+#panel-about-content .about-clamp {
+  margin: 0 0 0.3rem;
+  white-space: pre-line;
+}
+#panel-about-content .about-clamp[data-expanded="false"] {
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+#panel-about-content .about-expand { margin: 0 0 0.4rem; }
+#panel-about-content .about-genres {
+  margin: 0.15rem 0;
+  font-size: 0.8rem;
+  color: color-mix(in srgb, currentcolor 55%, transparent);
+}
+#panel-about-content .about-attribution {
+  margin: 0.15rem 0 0;
+  font-size: 0.8rem;
+  color: color-mix(in srgb, currentcolor 55%, transparent);
+}
+#panel-about-content .about-booklet-row { margin: 0.2rem 0; }
+
 .inspector-action-panel {
   /* Plain-color fallback before color-mix (IACVT-safe; the gradient
      selectors below progressive-enhance via color-mix). */
@@ -3349,8 +3416,19 @@ section.library-inspector {
   /* --- Inspector long folder names -----------------------------------------
    * Desktop clamps .tile-name to 2 lines; raise to 3 on phone where the
    * grid is already 1-column and vertical room is cheap. Keep the clamp
-   * (an `overflow: visible` reset here would defeat it entirely). */
+   * (an `overflow: visible` reset here would defeat it entirely).
+   *
+   * The header also WRAPS here, moving the name to its own full-width
+   * second row: at 375px the row's fixed-size items (44px checkbox +
+   * 44px thumb + booklet chip + 44px ⓘ + 44px ⋯ + gaps) leave the
+   * name only a sliver, and flex-shrink crushed it to one character
+   * per line. Full-width row 2 gives it the whole tile instead. */
+  .inspector-tile .tile-header {
+    flex-wrap: wrap;
+  }
   .inspector-tile .tile-name {
+    flex-basis: 100%;
+    order: 10;
     -webkit-line-clamp: 3;
   }
 

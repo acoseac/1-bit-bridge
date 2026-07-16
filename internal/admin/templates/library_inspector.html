@@ -1,6 +1,7 @@
 {{define "content"}}
 {{template "library-subnav" .}}
-<section class="page library-inspector" data-sox-available="{{.Data.SoxAvailable}}">
+<section class="page library-inspector" data-sox-available="{{.Data.SoxAvailable}}"
+         data-atlas-enabled="{{.Data.AtlasEnabled}}" data-booklets-enabled="{{.Data.BookletsEnabled}}">
   <h1>Library Inspector</h1>
   {{/*
     Intro collapses to a one-line disclosure on phones (≤600px), where 13
@@ -288,6 +289,35 @@
           <p class="hint panel-attarget" data-kind="optimize" hidden></p>
         </div>
       </section>
+
+      {{if .Data.AtlasEnabled}}
+      {{/*
+        About card (Atlas metadata layer): artist bio + album
+        description from the artist_atlas / release_atlas overlays,
+        booklet rows, and the folder-scoped "Retry missing metadata"
+        action. Rendered only when atlas.enabled — tile artwork is
+        data-driven regardless, but bios/descriptions/booklets are
+        Atlas surfaces. Content is filled by JS (createElement/
+        textContent ONLY — third-party strings) on first expand.
+      */}}
+      <section class="panel-card" data-kind="about" id="panel-card-about">
+        <header class="card-summary-trigger" role="button" tabindex="0"
+                aria-expanded="false" aria-controls="panel-details-about">
+          <span class="card-chevron" aria-hidden="true">▸</span>
+          <h3>About</h3>
+          <span class="card-summary-hint" id="panel-hint-about"></span>
+        </header>
+        <div class="card-details" id="panel-details-about" hidden>
+          <div id="panel-about-content"><p class="hint">Loading metadata…</p></div>
+          <div class="panel-actions-row">
+            <button type="button" class="btn" id="panel-about-retry" hidden>
+              Retry missing metadata
+            </button>
+          </div>
+          <p class="hint" id="panel-about-status" aria-live="polite"></p>
+        </div>
+      </section>
+      {{end}}
     </div>
 
     {{/*
