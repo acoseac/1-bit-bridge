@@ -539,16 +539,28 @@ func TestApiLibraryBrowseProjection_AtTargetBucket(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	// Lossy-with-bits under MusicB (the bogus-bits case — real MP3s
+	// carry no bit depth): must land in unknownFormatFiles for
+	// kind=upscale, never in projected or at-target.
+	mp3Rate := 44100.0
+	mp3Bits := 16
+	if err := srv.deps.Manifest.UpsertTrack(context.Background(), &manifest.Track{
+		Path: "MusicB/Album3/bogus.mp3", Size: 400,
+		SampleRate: &mp3Rate, BitsPerSample: &mp3Bits, Codec: "MP3", IsDSD: &noDSD,
+	}); err != nil {
+		t.Fatal(err)
+	}
 
-	// kind=upscale over MusicB: 48/24 projected; 192/24 at target.
+	// kind=upscale over MusicB: 48/24 projected; 192/24 at target;
+	// the lossy row genuinely skipped.
 	var up browseProjectionResponse
 	code := doJSON(t, srv.Handler(), "GET",
 		"/api/library/browse-projection?path=MusicB&kind=upscale", nil, &up)
 	if code != http.StatusOK {
 		t.Fatalf("upscale projection: %d", code)
 	}
-	if up.ProjectedFiles != 1 || up.AlreadyAtTargetFiles != 1 || up.UnknownFormatFiles != 0 {
-		t.Errorf("upscale buckets = projected %d / atTarget %d / unknown %d, want 1/1/0",
+	if up.ProjectedFiles != 1 || up.AlreadyAtTargetFiles != 1 || up.UnknownFormatFiles != 1 {
+		t.Errorf("upscale buckets = projected %d / atTarget %d / unknown %d, want 1/1/1",
 			up.ProjectedFiles, up.AlreadyAtTargetFiles, up.UnknownFormatFiles)
 	}
 

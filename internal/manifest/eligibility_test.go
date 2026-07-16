@@ -169,8 +169,10 @@ func TestEligibleCountsForFolders(t *testing.T) {
 	seedVariantFor(t, s, "HiRes/02.flac", "upscaled-v2-192000-24")
 	// DSD: excluded from both kinds.
 	seedFormatTrack(t, s, "DSD/01.dsf", "DSF", 2822400, 1, true)
-	// Lossy: not optimize-eligible (PCM allowlist); IS upscale-eligible
-	// today (Submit has no codec gate — parity, see upscaleEligibleSQL).
+	// Lossy: excluded from BOTH kinds — optimize via the PCM allowlist,
+	// upscale via the IsLossyCodec denylist (the bogus-bits case: real
+	// MP3s carry no bit depth and already fall out on geometry; this
+	// row models a fabricated bits tag slipping past that gate).
 	seedFormatTrack(t, s, "Lossy/01.mp3", "MP3", 44100, 16, false)
 	// Unknown geometry: excluded from both.
 	seedFormatTrack(t, s, "Unknown/01.flac", "", 0, 0, false)
@@ -192,7 +194,7 @@ func TestEligibleCountsForFolders(t *testing.T) {
 		"AtFloor":     {Upscale: 2, Optimize: 0},
 		"HiRes":       {Upscale: 2, Optimize: 2},
 		"DSD":         {Upscale: 0, Optimize: 0},
-		"Lossy":       {Upscale: 1, Optimize: 0},
+		"Lossy":       {Upscale: 0, Optimize: 0},
 		"Unknown":     {Upscale: 0, Optimize: 0},
 		"ExtFallback": {Upscale: 1, Optimize: 1},
 		"Done":        {Upscale: 1, Optimize: 1},

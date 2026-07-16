@@ -45,9 +45,11 @@ func TestFundamentalSkipReason(t *testing.T) {
 	}
 }
 
-// TestIsLossyCodecLabel pins the lossy-LABEL denylist (presentation only;
-// the eligibility gate elsewhere is a PCM allowlist). Lossless + DSD +
-// empty codec are NOT lossy.
+// TestIsLossyCodecLabel pins the lossy denylist the badge AND the
+// upscale gates share (it delegates to manifest.IsLossyCodec — the
+// single source of truth also mirrored by upscaleEligibleSQL; the
+// optimize gate remains transcode.OptimizeEligible's PCM allowlist).
+// Lossless + DSD + empty codec are NOT lossy.
 func TestIsLossyCodecLabel(t *testing.T) {
 	lossy := []string{"MP3", "mp3", " AAC ", "OGG", "OPUS", "WMA"}
 	for _, c := range lossy {

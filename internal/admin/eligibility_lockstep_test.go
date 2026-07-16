@@ -110,16 +110,21 @@ func TestEligibilitySQLAgreesWithOptimizeEligible(t *testing.T) {
 
 // TestEligibilitySQLAgreesWithUpscaleSubmitGate — upscaleEligibleSQL
 // must agree with a literal re-statement of Coordinator.Submit's
-// candidate gate (internal/transcode/batch.go): known geometry, never
-// downsample on either axis, skip exact-at-target. Submit has no
-// codec/DSD arm (real DSD falls out via rate > target), so the
-// re-statement doesn't either; the matrix keeps DSD rows realistic so
-// the SQL's defensive is_dsd arm agrees.
+// candidate gate (internal/transcode/batch.go): NOT lossy
+// (manifest.IsLossyCodec — the re-statement calls the REAL shared
+// predicate, same as Submit does), known geometry, never downsample
+// on either axis, skip exact-at-target. Submit has no DSD arm (real
+// DSD falls out via rate > target), so the re-statement doesn't
+// either; the matrix keeps DSD rows realistic so the SQL's defensive
+// is_dsd arm agrees.
 func TestEligibilitySQLAgreesWithUpscaleSubmitGate(t *testing.T) {
 	const targetRate, targetBits = 192000, 24
-	submitGate := func(rate float64, bits int) bool {
+	submitGate := func(codec string, rate float64, bits int) bool {
 		r, b := int(rate), bits
 		if r <= 0 || b <= 0 {
+			return false
+		}
+		if manifest.IsLossyCodec(codec) {
 			return false
 		}
 		if r > targetRate || b > targetBits {
@@ -140,7 +145,7 @@ func TestEligibilitySQLAgreesWithUpscaleSubmitGate(t *testing.T) {
 		t.Fatalf("EligibleCountsForFolders: %v", err)
 	}
 	for i, c := range eligibilityMatrix {
-		want := submitGate(c.rate, c.bits)
+		want := submitGate(c.codec, c.rate, c.bits)
 		got := counts[paths[i]].Upscale == 1
 		if got != want {
 			t.Errorf("%s: SQL upscale-eligible=%v, Submit gate=%v — mirrors diverged",

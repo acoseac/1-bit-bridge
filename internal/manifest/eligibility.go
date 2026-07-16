@@ -47,13 +47,18 @@ const optimizeEligibleSQL = `(
 )`
 
 // upscaleEligibleSQL mirrors Coordinator.Submit's candidate gate at a
-// bound (targetRate, targetBits): known geometry, never downsample on
-// either axis, skip the exact-at-target no-op. DSD falls out via
-// rate > target (2.8 MHz DSD rates dwarf any PCM target); the
-// explicit is_dsd arm is belt-and-braces for exotic rows. Lossy
-// codecs are deliberately NOT excluded — Submit has no codec gate
-// today, and this mirror stays semantics-neutral (the lossy-denylist
-// question is a separate, deferred decision).
+// bound (targetRate, targetBits): NOT a lossy encode (the IsLossyCodec
+// set — upscaling decoded lossy audio adds no fidelity, and
+// PROTOCOL.md documents the /v1/upscale gate as "PCM"), known
+// geometry, never downsample on either axis, skip the exact-at-target
+// no-op. DSD falls out via rate > target (2.8 MHz DSD rates dwarf any
+// PCM target); the explicit is_dsd arm is belt-and-braces for exotic
+// rows. A NULL/empty codec is NOT lossy (legacy pre-codec rows with
+// valid geometry stay eligible — IsLossyCodec's documented fail-open).
+//
+// The NOT IN set is the SQL mirror of manifest.IsLossyCodec — change
+// the two together; TestEligibilitySQLAgreesWithUpscaleSubmitGate
+// pins the agreement.
 //
 // BINDS (textual order): targetRate, targetBits, targetRate,
 // targetBits. Zero/negative binds (target unresolved) collapse the
@@ -61,6 +66,7 @@ const optimizeEligibleSQL = `(
 // degrades to covered-only, which is the safe rendering.
 const upscaleEligibleSQL = `(
 	COALESCE(t.is_dsd,0) != 1
+	AND UPPER(TRIM(COALESCE(t.codec,''))) NOT IN ('MP3','AAC','OGG','OPUS','WMA')
 	AND COALESCE(t.sample_rate,0) > 0 AND COALESCE(t.bits_per_sample,0) > 0
 	AND NOT (t.sample_rate > ? OR t.bits_per_sample > ?)
 	AND NOT (t.sample_rate = ? AND t.bits_per_sample = ?)

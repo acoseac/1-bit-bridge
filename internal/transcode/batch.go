@@ -270,6 +270,17 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 		if t.SampleRate <= 0 || t.BitsPerSample <= 0 {
 			continue
 		}
+		// Lossy sources are never upscaled: sox would just resample
+		// DECODED lossy audio into a FLAC several times the size, and
+		// PROTOCOL.md documents the /v1/upscale gate as "PCM". The
+		// geometry gate above already excludes almost all lossy files
+		// (they carry no meaningful bit depth) — this closes the
+		// bogus-bits-tag hole and matches the inspector's lossy_source
+		// badge. manifest.IsLossyCodec is the single source of truth
+		// (SQL mirror: upscaleEligibleSQL).
+		if manifest.IsLossyCodec(t.Codec) {
+			continue
+		}
 		// Eligibility for upscaling. The full skip predicate
 		// covers three cases:
 		//
