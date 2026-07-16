@@ -2271,6 +2271,12 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// disk checks that grade that volume.
 		liveVariantsDir := func() string {
 			live := cfgHolder.Load()
+			if live == nil {
+				// Defensive: the holder is seeded before serving, but a
+				// nil snapshot must not panic a Submit — "" makes the
+				// coordinator's disk check fall back to its dataDir.
+				return ""
+			}
 			return live.Upscale.EffectiveVariantsDir(live.DataDir)
 		}
 		apiSrv.WithUpscaleEnqueuer(&upscaleEnqueuerAdapter{
@@ -2860,9 +2866,13 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 				coord: upscaleCoordinator,
 				store: manifestStore,
 				// Live-resolved so hot variants-dir changes apply
-				// without restart (see upscaleEnqueuerAdapter).
+				// without restart (see upscaleEnqueuerAdapter). Nil
+				// snapshot → "" → coordinator falls back to dataDir.
 				outputDir: func() string {
 					live := cfgHolder.Load()
+					if live == nil {
+						return ""
+					}
 					return live.Upscale.EffectiveVariantsDir(live.DataDir)
 				},
 			}

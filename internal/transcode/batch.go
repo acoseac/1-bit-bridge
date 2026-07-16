@@ -22,6 +22,7 @@ package transcode
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -332,17 +333,17 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 	if checkDir == "" {
 		checkDir = c.dataDir
 	}
-	ok, available, err := DiskHasHeadroom(checkDir, totalProjected, DefaultDiskSafetyMargin)
+	// DiskHasHeadroom returns the typed *InsufficientDiskSpaceError AS
+	// its err on refusal — surface that directly (callers errors.As it
+	// for the 507 mapping) and reserve the "disk probe" wrap for
+	// genuine probe failures.
+	_, available, err := DiskHasHeadroom(checkDir, totalProjected, DefaultDiskSafetyMargin)
 	if err != nil {
-		return nil, fmt.Errorf("submit: disk probe: %w", err)
-	}
-	if !ok {
-		return nil, &InsufficientDiskSpaceError{
-			ProjectedBytes: totalProjected,
-			RequiredBytes:  int64(float64(totalProjected) * (1 + DefaultDiskSafetyMargin)),
-			AvailableBytes: available,
-			Dir:            checkDir,
+		var dskErr *InsufficientDiskSpaceError
+		if errors.As(err, &dskErr) {
+			return nil, err
 		}
+		return nil, fmt.Errorf("submit: disk probe: %w", err)
 	}
 
 	// Insert the batch row first so any pool callback that races
@@ -614,22 +615,19 @@ func (c *Coordinator) SubmitOptimize(ctx context.Context, path string, outputDir
 
 	// Same write-target disk check as Submit: grade outputDir (the
 	// actual sidecar destination), falling back to dataDir only for
-	// callers that pass "".
+	// callers that pass "". The typed refusal surfaces directly; the
+	// wrap is for genuine probe failures (see Submit).
 	checkDir := outputDir
 	if checkDir == "" {
 		checkDir = c.dataDir
 	}
-	ok, available, err := DiskHasHeadroom(checkDir, picked.totalProjected, DefaultDiskSafetyMargin)
+	_, available, err := DiskHasHeadroom(checkDir, picked.totalProjected, DefaultDiskSafetyMargin)
 	if err != nil {
-		return nil, fmt.Errorf("submit optimize: disk probe: %w", err)
-	}
-	if !ok {
-		return nil, &InsufficientDiskSpaceError{
-			ProjectedBytes: picked.totalProjected,
-			RequiredBytes:  int64(float64(picked.totalProjected) * (1 + DefaultDiskSafetyMargin)),
-			AvailableBytes: available,
-			Dir:            checkDir,
+		var dskErr *InsufficientDiskSpaceError
+		if errors.As(err, &dskErr) {
+			return nil, err
 		}
+		return nil, fmt.Errorf("submit optimize: disk probe: %w", err)
 	}
 
 	// Skip count = projections seen − enqueueable − already-covered.

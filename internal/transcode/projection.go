@@ -135,7 +135,18 @@ func AvailableDiskSpaceNearest(dir string) (int64, error) {
 	dir = filepath.Clean(dir)
 	probe := dir
 	for {
-		if _, err := os.Stat(probe); err == nil {
+		_, err := os.Stat(probe)
+		if err == nil {
+			break
+		}
+		if !os.IsNotExist(err) {
+			// Only NON-EXISTENCE walks up: any other stat failure
+			// (permission flap, transient I/O) means the path may
+			// well exist — walking past it would grade the wrong
+			// parent volume and mask the real fault. Stat the
+			// configured dir itself so AvailableDiskSpace surfaces
+			// the genuine error to the caller.
+			probe = dir
 			break
 		}
 		parent := filepath.Dir(probe)
