@@ -4052,7 +4052,7 @@ async function inspectorFetchPanelProjection(path, kind) {
         if (warnEl) {
           warnEl.hidden = false;
           warnEl.textContent =
-            `Not enough free space: needs ${humanBytes(data.requiredBytesWithMargin)} (incl. 10% safety margin), only ${humanBytes(data.availableBytes)} available on the bridge data volume.`;
+            `Not enough free space: needs ${humanBytes(data.requiredBytesWithMargin)} (incl. 10% safety margin), only ${humanBytes(data.availableBytes)} free where variants are stored.`;
         }
       }
     }

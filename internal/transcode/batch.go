@@ -22,6 +22,7 @@ package transcode
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -97,8 +98,14 @@ const throughputMinSamples = 3
 // Coordinator wraps a Pool with per-batch enrollment, live
 // counters, throughput math, and SSE event emission.
 type Coordinator struct {
-	pool     *Pool
-	store    *manifest.Store
+	pool  *Pool
+	store *manifest.Store
+	// dataDir is the FALLBACK disk-check dir only — the pre-flight
+	// headroom checks in Submit / SubmitOptimize grade the per-call
+	// `outputDir` (the directory the variants are actually written
+	// to, which may live on a different volume than the bridge data
+	// dir). dataDir is used only when a caller passes outputDir=""
+	// (test harnesses / legacy callers).
 	dataDir  string
 	publish  CoordinatorPublishFunc
 	resolver ResolverFunc
@@ -316,19 +323,27 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 			"batchPath", path, "count", resolveErrors)
 	}
 
-	// Pre-flight disk check. Refuse with a typed error carrying
-	// the operator-facing numbers.
-	ok, available, err := DiskHasHeadroom(c.dataDir, totalProjected, DefaultDiskSafetyMargin)
-	if err != nil {
-		return nil, fmt.Errorf("submit: disk probe: %w", err)
+	// Pre-flight disk check against the directory the variants will
+	// actually be WRITTEN to — outputDir may live on a different
+	// volume than the bridge data dir (field case: bridge.ars.md's
+	// variants on a ~1 PB B2 mount while dataDir sits on a 29 GB
+	// root disk; checking dataDir refused batches that fit easily).
+	// Refuse with a typed error carrying the operator-facing numbers.
+	checkDir := outputDir
+	if checkDir == "" {
+		checkDir = c.dataDir
 	}
-	if !ok {
-		return nil, &InsufficientDiskSpaceError{
-			ProjectedBytes: totalProjected,
-			RequiredBytes:  int64(float64(totalProjected) * (1 + DefaultDiskSafetyMargin)),
-			AvailableBytes: available,
-			Dir:            c.dataDir,
+	// DiskHasHeadroom returns the typed *InsufficientDiskSpaceError AS
+	// its err on refusal — surface that directly (callers errors.As it
+	// for the 507 mapping) and reserve the "disk probe" wrap for
+	// genuine probe failures.
+	_, available, err := DiskHasHeadroom(checkDir, totalProjected, DefaultDiskSafetyMargin)
+	if err != nil {
+		var dskErr *InsufficientDiskSpaceError
+		if errors.As(err, &dskErr) {
+			return nil, err
 		}
+		return nil, fmt.Errorf("submit: disk probe: %w", err)
 	}
 
 	// Insert the batch row first so any pool callback that races
@@ -598,17 +613,21 @@ func (c *Coordinator) SubmitOptimize(ctx context.Context, path string, outputDir
 
 	picked := c.buildOptimizeCandidates(path, projections)
 
-	ok, available, err := DiskHasHeadroom(c.dataDir, picked.totalProjected, DefaultDiskSafetyMargin)
-	if err != nil {
-		return nil, fmt.Errorf("submit optimize: disk probe: %w", err)
+	// Same write-target disk check as Submit: grade outputDir (the
+	// actual sidecar destination), falling back to dataDir only for
+	// callers that pass "". The typed refusal surfaces directly; the
+	// wrap is for genuine probe failures (see Submit).
+	checkDir := outputDir
+	if checkDir == "" {
+		checkDir = c.dataDir
 	}
-	if !ok {
-		return nil, &InsufficientDiskSpaceError{
-			ProjectedBytes: picked.totalProjected,
-			RequiredBytes:  int64(float64(picked.totalProjected) * (1 + DefaultDiskSafetyMargin)),
-			AvailableBytes: available,
-			Dir:            c.dataDir,
+	_, available, err := DiskHasHeadroom(checkDir, picked.totalProjected, DefaultDiskSafetyMargin)
+	if err != nil {
+		var dskErr *InsufficientDiskSpaceError
+		if errors.As(err, &dskErr) {
+			return nil, err
 		}
+		return nil, fmt.Errorf("submit optimize: disk probe: %w", err)
 	}
 
 	// Skip count = projections seen − enqueueable − already-covered.

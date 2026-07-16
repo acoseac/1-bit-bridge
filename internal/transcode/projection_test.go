@@ -5,6 +5,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -231,4 +232,85 @@ func abs64(x int64) int64 {
 		return -x
 	}
 	return x
+}
+
+// TestAvailableDiskSpaceNearest_MissingLeaf pins the cold-start
+// contract: probing a directory that doesn't exist yet (the lazily-
+// created variants dir, or a custom variantsDir on an unmounted
+// volume) grades the closest EXISTING ancestor's volume instead of
+// erroring with ENOENT.
+func TestAvailableDiskSpaceNearest_MissingLeaf(t *testing.T) {
+	base := t.TempDir()
+	missing := filepath.Join(base, "variants", "deep", "not-created-yet")
+	free, err := AvailableDiskSpaceNearest(missing)
+	if err != nil {
+		t.Fatalf("AvailableDiskSpaceNearest(%q): %v", missing, err)
+	}
+	if free <= 0 {
+		t.Errorf("free = %d, want > 0 (ancestor volume stats)", free)
+	}
+}
+
+// TestAvailableDiskSpaceNearest_ExistingDir pins the no-op case: an
+// existing directory is graded directly.
+func TestAvailableDiskSpaceNearest_ExistingDir(t *testing.T) {
+	dir := t.TempDir()
+	free, err := AvailableDiskSpaceNearest(dir)
+	if err != nil {
+		t.Fatalf("AvailableDiskSpaceNearest(%q): %v", dir, err)
+	}
+	if free <= 0 {
+		t.Errorf("free = %d, want > 0", free)
+	}
+}
+
+// TestAvailableDiskSpaceNearest_TerminatesAtRoot pins the ancestor
+// walk's termination: a path whose every segment is missing walks to
+// the volume root (the filepath.Dir fixed point) and stats that —
+// no infinite loop, no error on a healthy root.
+func TestAvailableDiskSpaceNearest_TerminatesAtRoot(t *testing.T) {
+	free, err := AvailableDiskSpaceNearest(string(filepath.Separator) + filepath.Join(
+		"no-such-dir-zz9-plural-alpha", "x", "y"))
+	if err != nil {
+		t.Fatalf("AvailableDiskSpaceNearest: %v", err)
+	}
+	if free <= 0 {
+		t.Errorf("free = %d, want > 0 (root volume stats)", free)
+	}
+}
+
+// TestAvailableDiskSpaceNearest_NonNotExistErrorSurfaces pins the
+// review-hardened error policy: only NON-EXISTENCE walks the ancestor
+// chain. Any other stat failure (here: EACCES via an unsearchable
+// parent) must surface an error for the CONFIGURED dir rather than
+// silently grading some ancestor's volume. POSIX-only — the 0o000
+// trick doesn't translate to Windows ACLs.
+func TestAvailableDiskSpaceNearest_NonNotExistErrorSurfaces(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("0o000-parent EACCES probe is POSIX-only")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses permission bits")
+	}
+	base := t.TempDir()
+	locked := filepath.Join(base, "locked")
+	if err := os.Mkdir(locked, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(locked, "variants")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Chmod the PARENT to 0o000 so stat'ing the leaf yields EACCES
+	// (stat'ing a 0o000 dir itself still succeeds — the kernel only
+	// refuses traversal THROUGH it). Restore immediately via Cleanup
+	// so t.TempDir's own removal can walk the tree.
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+
+	if _, err := AvailableDiskSpaceNearest(target); err == nil {
+		t.Fatalf("want an error surfaced for the unreachable configured dir, got nil (walked to an ancestor volume instead)")
+	}
 }

@@ -21,6 +21,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 )
 
 // DefaultDiskSafetyMargin is the headroom fraction applied on top of
@@ -114,6 +116,54 @@ func ProjectedSize(
 	return int64(math.Round(projected))
 }
 
+// AvailableDiskSpaceNearest probes the free space for `dir`, falling
+// back to the closest EXISTING ancestor when `dir` itself doesn't
+// exist yet. The variants dir is created lazily (sox writes the first
+// sidecar's parents on demand) and a custom `upscale.variantsDir` may
+// simply not be mounted — a bare statfs on either returns ENOENT and
+// would fail the pre-flight for a batch that is actually fine.
+// Probing the nearest ancestor reports the volume the directory WILL
+// land on once created.
+//
+// filepath.Clean first so trailing slashes / relative segments can't
+// stall the ancestor walk; termination is the filepath.Dir fixed
+// point (`/` on POSIX, `C:\` on Windows). A missing configured dir is
+// logged at Warn — on a host whose variants volume failed to mount,
+// that line is the operator's signal that the check is now grading
+// the wrong (parent) volume.
+func AvailableDiskSpaceNearest(dir string) (int64, error) {
+	dir = filepath.Clean(dir)
+	probe := dir
+	for {
+		_, err := os.Stat(probe)
+		if err == nil {
+			break
+		}
+		if !os.IsNotExist(err) {
+			// Only NON-EXISTENCE walks up: any other stat failure
+			// (permission flap, transient I/O) means the path may
+			// well exist — walking past it would grade the wrong
+			// parent volume and mask the real fault. Stat the
+			// configured dir itself so AvailableDiskSpace surfaces
+			// the genuine error to the caller.
+			probe = dir
+			break
+		}
+		parent := filepath.Dir(probe)
+		if parent == probe {
+			// Volume root — stat it anyway and let AvailableDiskSpace
+			// surface the real error if even the root is unreadable.
+			break
+		}
+		probe = parent
+	}
+	if probe != dir {
+		logger.Warn("disk probe: directory missing; probing nearest existing ancestor",
+			"dir", dir, "ancestor", probe)
+	}
+	return AvailableDiskSpace(probe)
+}
+
 // ErrInsufficientDiskSpace is returned by DiskHasHeadroom when the
 // projected size (after applying the safety margin) exceeds the free
 // space. The error embeds the numbers so the coordinator can surface
@@ -152,14 +202,17 @@ func (e *InsufficientDiskSpaceError) Unwrap() error { return ErrInsufficientDisk
 // zero or negative projectedBytes is treated as "no work to do" and
 // always returns ok=true.
 //
-// Probe errors (Statfs failure, missing directory) surface as the
-// returned `err`; callers should treat those as "can't check, refuse
-// the batch" — silently proceeding risks a disk-full mid-batch.
+// The probe routes through AvailableDiskSpaceNearest, so a `dir`
+// that doesn't exist yet (lazily-created variants dir) is graded by
+// its closest existing ancestor's volume. Remaining probe errors
+// (Statfs failure on an existing path) surface as the returned
+// `err`; callers should treat those as "can't check, refuse the
+// batch" — silently proceeding risks a disk-full mid-batch.
 func DiskHasHeadroom(dir string, projectedBytes int64, safetyMargin float64) (ok bool, freeBytes int64, err error) {
 	if projectedBytes <= 0 {
 		// No work projected — pair with a successful disk probe so
 		// callers always get a meaningful freeBytes value.
-		freeBytes, err = AvailableDiskSpace(dir)
+		freeBytes, err = AvailableDiskSpaceNearest(dir)
 		if err != nil {
 			return false, 0, err
 		}
@@ -168,7 +221,7 @@ func DiskHasHeadroom(dir string, projectedBytes int64, safetyMargin float64) (ok
 	if safetyMargin < 0 || math.IsNaN(safetyMargin) {
 		safetyMargin = 0
 	}
-	freeBytes, err = AvailableDiskSpace(dir)
+	freeBytes, err = AvailableDiskSpaceNearest(dir)
 	if err != nil {
 		return false, 0, err
 	}
