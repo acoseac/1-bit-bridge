@@ -24,6 +24,7 @@
 package admin
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"hash/crc32"
@@ -32,6 +33,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/smartplaylist"
 )
@@ -69,6 +71,20 @@ type browseFolderRow struct {
 	UpscaledSizeBytes  int64  `json:"upscaledSizeBytes"`
 	OptimizedSizeBytes int64  `json:"optimizedSizeBytes"`
 	PathHash           string `json:"pathHash"`
+	// *EligibleCount are the coverage-bar DENOMINATORS: tracks that
+	// have a variant of the kind OR are currently eligible to get one
+	// (manifest.EligibleCountsForFolders). Tracks that need nothing —
+	// at the CarPlay floor, at the upscale target, DSD, unknown
+	// geometry — drop out so a fully-processed mixed folder reads
+	// 100%, with the tile showing "N need nothing" for the rest.
+	//
+	// POINTERS, not plain ints: nil (field omitted) = "counts
+	// unavailable" (store error — degrade) and the JS falls back to
+	// TrackCount; a present 0 = genuinely nothing eligible (all-DSD
+	// folder) and renders as "all set". A non-pointer 0 couldn't
+	// distinguish the two.
+	UpscaleEligibleCount  *int `json:"upscaleEligibleCount,omitempty"`
+	OptimizeEligibleCount *int `json:"optimizeEligibleCount,omitempty"`
 }
 
 // browseTrackRow is the JSON shape for one track entry. Pointer
@@ -134,6 +150,13 @@ type browseResponse struct {
 	SubtreeUpscaled  int   `json:"subtreeUpscaled,omitempty"`
 	SubtreeOptimized int   `json:"subtreeOptimized,omitempty"`
 	SubtreeSizeBytes int64 `json:"subtreeSizeBytes,omitempty"`
+	// Subtree*Eligible mirror the per-folder eligible denominators for
+	// the ENTIRE node (manifest.EligibleRollupByPrefix) — the action
+	// panel's coverage header uses these. First page only, like the
+	// other Subtree fields. Pointers for the same nil-vs-genuine-zero
+	// reason as browseFolderRow's eligible counts.
+	SubtreeUpscaleEligible  *int `json:"subtreeUpscaleEligible,omitempty"`
+	SubtreeOptimizeEligible *int `json:"subtreeOptimizeEligible,omitempty"`
 	// KeyFilter / KeyName are set ONLY on the harmonic-key filter view
 	// (?camelot=8A): the Camelot code echoed back (upper-cased) and its
 	// human pitch name ("A minor"), driving the inspector's "filtering by
@@ -152,16 +175,22 @@ type browseProjectionResponse struct {
 	// Kind echoes the resolved variant kind ("upscale" / "optimize")
 	// so the UI knows which section of the drawer this payload
 	// populates.
-	Kind                    string `json:"kind"`
-	ProjectedFiles          int    `json:"projectedFiles"`
-	AlreadyCoveredFiles     int    `json:"alreadyCoveredFiles"`
-	ProjectedSizeBytes      int64  `json:"projectedSizeBytes"`
-	AvailableBytes          int64  `json:"availableBytes"`
-	WouldFit                bool   `json:"wouldFit"`
-	TargetRate              int    `json:"targetRate"`
-	TargetBits              int    `json:"targetBits"`
-	UnknownFormatFiles      int    `json:"unknownFormatFiles"`
-	RequiredBytesWithMargin int64  `json:"requiredBytesWithMargin"`
+	Kind                string `json:"kind"`
+	ProjectedFiles      int    `json:"projectedFiles"`
+	AlreadyCoveredFiles int    `json:"alreadyCoveredFiles"`
+	ProjectedSizeBytes  int64  `json:"projectedSizeBytes"`
+	AvailableBytes      int64  `json:"availableBytes"`
+	WouldFit            bool   `json:"wouldFit"`
+	TargetRate          int    `json:"targetRate"`
+	TargetBits          int    `json:"targetBits"`
+	// UnknownFormatFiles counts genuinely-skipped tracks (DSD, lossy,
+	// unknown geometry); AlreadyAtTargetFiles counts tracks that need
+	// NOTHING (PCM at/below the CarPlay floor for optimize; at/above
+	// the target for upscale). The UI renders the former as a warning
+	// hint and the latter as neutral "nothing to do" copy.
+	UnknownFormatFiles      int   `json:"unknownFormatFiles"`
+	AlreadyAtTargetFiles    int   `json:"alreadyAtTargetFiles"`
+	RequiredBytesWithMargin int64 `json:"requiredBytesWithMargin"`
 }
 
 // lossyCodecLabels are the codec strings the scanner stamps for lossy
@@ -292,6 +321,32 @@ func (s *Server) apiLibraryBrowse(w http.ResponseWriter, r *http.Request) {
 		TotalTracks:  totalTracks,
 		Limit:        limit,
 	}
+	// Eligible-denominator counts for the coverage bars. Target
+	// resolution and the counts themselves DEGRADE rather than fail
+	// the browse: on any error the denominators stay zero and the JS
+	// falls back to trackCount (the pre-eligibility rendering). A
+	// zero/unresolved upscale target likewise collapses the upscale
+	// arm to covered-only inside the SQL — see upscaleEligibleSQL.
+	targetRate, targetBits := 0, 0
+	if cfg := s.deps.CfgHolder.Load(); cfg != nil {
+		if tr, tb, err := s.resolveUpscaleTarget(r.Context(), cfg); err == nil {
+			targetRate, targetBits = tr, tb
+		} else {
+			logger.Warn("browse: upscale target unresolved; eligible counts degrade to covered-only", "err", err)
+		}
+	}
+	var eligible map[string]manifest.EligibleCounts
+	if len(folders) > 0 {
+		paths := make([]string, len(folders))
+		for i, f := range folders {
+			paths[i] = f.Path
+		}
+		eligible, err = s.deps.Manifest.EligibleCountsForFolders(r.Context(), paths, targetRate, targetBits)
+		if err != nil {
+			logger.Warn("browse: eligible counts unavailable; tiles fall back to all-tracks denominators", "err", err)
+			eligible = nil
+		}
+	}
 	// Recursive subtree rollup for the whole node — only on the first page
 	// (the client caches it from there; load-more pages don't use it, so
 	// re-walking the subtree per follow-up page would be wasted work).
@@ -305,9 +360,15 @@ func (s *Server) apiLibraryBrowse(w http.ResponseWriter, r *http.Request) {
 		resp.SubtreeUpscaled = rollup.UpscaledTrackCount
 		resp.SubtreeOptimized = rollup.OptimizedTrackCount
 		resp.SubtreeSizeBytes = rollup.TotalSizeBytes
+		if ec, err := s.deps.Manifest.EligibleRollupByPrefix(r.Context(), normalised, targetRate, targetBits); err == nil {
+			resp.SubtreeUpscaleEligible = intPtr(ec.Upscale)
+			resp.SubtreeOptimizeEligible = intPtr(ec.Optimize)
+		} else {
+			logger.Warn("browse: eligible rollup unavailable; panel header falls back", "err", err)
+		}
 	}
 	for _, f := range folders {
-		resp.Folders = append(resp.Folders, browseFolderRow{
+		row := browseFolderRow{
 			Name:               path.Base(f.Path),
 			Path:               f.Path,
 			TrackCount:         f.TrackCount,
@@ -317,7 +378,12 @@ func (s *Server) apiLibraryBrowse(w http.ResponseWriter, r *http.Request) {
 			UpscaledSizeBytes:  f.UpscaledSizeBytes,
 			OptimizedSizeBytes: f.OptimizedSizeBytes,
 			PathHash:           pathHash(f.Path),
-		})
+		}
+		if ec, ok := eligible[f.Path]; ok {
+			row.UpscaleEligibleCount = intPtr(ec.Upscale)
+			row.OptimizeEligibleCount = intPtr(ec.Optimize)
+		}
+		resp.Folders = append(resp.Folders, row)
 	}
 	for _, t := range tracks {
 		resp.Tracks = append(resp.Tracks, toBrowseTrackRow(t))
@@ -433,6 +499,28 @@ func (s *Server) browseByKey(w http.ResponseWriter, r *http.Request, camelot str
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// intPtr boxes an int for the optional (nil = unavailable) JSON
+// fields on browse rows.
+func intPtr(v int) *int { return &v }
+
+// resolveUpscaleTarget resolves the ACTIVE upscale target: the
+// DB-backed setting wins; the YAML bootstrap is the fallback for
+// unseeded installs. Shared by the projection endpoint (which fails
+// the request on error) and the browse endpoint's eligible-count
+// computation (which degrades to covered-only denominators instead).
+func (s *Server) resolveUpscaleTarget(ctx context.Context, cfg *config.Config) (int, int, error) {
+	rate, bits, err := s.deps.Manifest.GetUpscaleTarget(ctx)
+	switch {
+	case err == nil:
+		return rate, bits, nil
+	case errors.Is(err, manifest.ErrUpscaleTargetUnset):
+		return cfg.Upscale.EffectiveBootstrapTargetRate(),
+			cfg.Upscale.EffectiveBootstrapTargetBits(), nil
+	default:
+		return 0, 0, err
+	}
+}
+
 // apiLibraryBrowseProjection handles
 // GET /api/library/browse-projection?path=...&kind=upscale|optimize
 //
@@ -506,14 +594,10 @@ func (s *Server) apiLibraryBrowseProjection(w http.ResponseWriter, r *http.Reque
 		err        error
 	)
 	if kind == "upscale" {
-		rate, bits, err = s.deps.Manifest.GetUpscaleTarget(r.Context())
-		if err != nil && !errors.Is(err, manifest.ErrUpscaleTargetUnset) {
+		rate, bits, err = s.resolveUpscaleTarget(r.Context(), cfg)
+		if err != nil {
 			writeError(w, http.StatusInternalServerError, "read-target", err.Error())
 			return
-		}
-		if errors.Is(err, manifest.ErrUpscaleTargetUnset) {
-			rate = cfg.Upscale.EffectiveBootstrapTargetRate()
-			bits = cfg.Upscale.EffectiveBootstrapTargetBits()
 		}
 	}
 
@@ -535,6 +619,7 @@ func (s *Server) apiLibraryBrowseProjection(w http.ResponseWriter, r *http.Reque
 		projectedFiles int
 		coveredFiles   int
 		unknownFormat  int
+		atTarget       int
 	)
 	for _, t := range projections {
 		if t.HasVariant {
@@ -566,13 +651,32 @@ func (s *Server) apiLibraryBrowseProjection(w http.ResponseWriter, r *http.Reque
 		}
 		// Per-track target derivation for optimize: family-preserving
 		// 16/44.1 or 16/48 depending on source rate. Upscale uses the
-		// static outer-scope target resolved above. The OptimizeEligible
-		// gate folds below-target / lossy tracks into unknownFormat so
-		// the UI's "X skipped" copy reconciles with the JSON payload.
+		// static outer-scope target resolved above.
+		//
+		// The at-target split (alreadyAtTargetFiles): tracks that need
+		// NOTHING are counted separately from the genuinely-skipped
+		// bucket. Pre-split, an at-floor CD track (optimize) landed in
+		// unknownFormat — rendered as "DSD, lossy, or unknown — skipped",
+		// which read as a failure for a track that is simply already
+		// CarPlay-ready — and an at/above-target track (upscale) vanished
+		// from every bucket via the ProjectedSize<=0 fall-through,
+		// under-reporting the panel. The UI renders atTarget as a
+		// neutral hint, not a warning.
 		var trackRate, trackBits int
 		if kind == "optimize" {
 			if !s.deps.OptimizeEligible(t.Path, t.Codec, t.SampleRate, t.BitsPerSample) {
-				unknownFormat++
+				// fundamentalSkipReason distinguishes hard blocks
+				// (DSD / lossy / unknown geometry) from "PCM but
+				// already at/below the CarPlay floor" — the latter
+				// is the at-target case. Reuses the tile badges'
+				// classifier so the two surfaces can't disagree.
+				sr := float64(t.SampleRate)
+				bps := t.BitsPerSample
+				if fundamentalSkipReason(t.IsDSD, t.Codec, &sr, &bps) == "" {
+					atTarget++
+				} else {
+					unknownFormat++
+				}
 				continue
 			}
 			trackRate = s.deps.TargetRateForOptimize(t.SampleRate)
@@ -582,6 +686,14 @@ func (s *Server) apiLibraryBrowseProjection(w http.ResponseWriter, r *http.Reque
 				continue
 			}
 		} else {
+			if t.SampleRate > rate || t.BitsPerSample > bits ||
+				(t.SampleRate == rate && t.BitsPerSample == bits) {
+				// At or above the upscale target on either axis
+				// (Submit's never-downsample gate) or exactly at it
+				// (no-op) — nothing to generate for this track.
+				atTarget++
+				continue
+			}
 			trackRate = rate
 			trackBits = bits
 		}
@@ -644,6 +756,7 @@ func (s *Server) apiLibraryBrowseProjection(w http.ResponseWriter, r *http.Reque
 		TargetRate:              respTargetRate,
 		TargetBits:              respTargetBits,
 		UnknownFormatFiles:      unknownFormat,
+		AlreadyAtTargetFiles:    atTarget,
 		RequiredBytesWithMargin: required,
 	})
 }

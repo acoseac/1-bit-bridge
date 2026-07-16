@@ -3155,6 +3155,8 @@ function inspectorOpenProjectionForCurrent() {
     upscaledCount: data.subtreeUpscaled ?? fallback.upscaledCount,
     optimizedCount: data.subtreeOptimized ?? fallback.optimizedCount,
     totalSizeBytes: data.subtreeSizeBytes ?? fallback.totalSizeBytes,
+    upscaleEligibleCount: data.subtreeUpscaleEligible ?? fallback.upscaleEligible,
+    optimizeEligibleCount: data.subtreeOptimizeEligible ?? fallback.optimizeEligible,
   };
   inspectorOpenPanelSingle(folder);
 }
@@ -3174,6 +3176,13 @@ function inspectorBrowseRollup(data) {
   let upscaledCount = 0;
   let optimizedCount = 0;
   let totalSizeBytes = 0;
+  // Page-sum eligible denominators (fallback only — the server's
+  // subtree fields win). Loose tracks count as eligible here: their
+  // per-track eligibility isn't in the browse row, and over-counting
+  // in a degraded fallback beats under-counting (bar can only read
+  // lower, never a false 100%).
+  let upscaleEligible = tracks.length;
+  let optimizeEligible = tracks.length;
   for (const t of tracks) {
     if (t.isUpscaled) upscaledCount++;
     if (t.isOptimized) optimizedCount++;
@@ -3184,8 +3193,13 @@ function inspectorBrowseRollup(data) {
     upscaledCount += f.upscaledCount || 0;
     optimizedCount += f.optimizedCount || 0;
     totalSizeBytes += f.totalSizeBytes || 0;
+    upscaleEligible += f.upscaleEligibleCount ?? f.trackCount ?? 0;
+    optimizeEligible += f.optimizeEligibleCount ?? f.trackCount ?? 0;
   }
-  return { trackCount, upscaledCount, optimizedCount, totalSizeBytes };
+  return {
+    trackCount, upscaledCount, optimizedCount, totalSizeBytes,
+    upscaleEligible, optimizeEligible,
+  };
 }
 
 // inspectorClosePanel hides the floating action panel and tears
@@ -3411,10 +3425,34 @@ function buildFolderTile(f) {
   tile.tabIndex = 0;
   tile.setAttribute("aria-label", `Open folder ${f.name}`);
 
-  const upMax = Math.max(1, f.trackCount || 0);
-  const upVal = Math.min(f.upscaledCount || 0, upMax);
-  const opMax = Math.max(1, f.trackCount || 0);
-  const opVal = Math.min(f.optimizedCount || 0, opMax);
+  // Eligible-denominator coverage: the server's *EligibleCount fields
+  // count tracks that have a variant OR could get one — tracks that
+  // need nothing (already at target / DSD / unknown) drop out, so a
+  // fully-processed mixed folder reads 100% instead of pinning below
+  // it forever. `??` (not `||`) is load-bearing: a present 0 is a
+  // real denominator ("all set"), only ABSENT fields (degraded
+  // server, older payloads) fall back to the all-tracks count.
+  // trackCount is a Go int on the wire — a number, never null.
+  const upDen = f.upscaleEligibleCount ?? f.trackCount ?? 0;
+  const opDen = f.optimizeEligibleCount ?? f.trackCount ?? 0;
+  const upVal = Math.min(f.upscaledCount || 0, upDen);
+  const opVal = Math.min(f.optimizedCount || 0, opDen);
+
+  const coverageRow = (kind, label, val, den) => {
+    const exempt = Math.max(0, (f.trackCount || 0) - den);
+    const exemptNote = exempt > 0
+      ? `<span class="coverage-exempt" title="Not counted: already at target, DSD, lossy, or unknown format — nothing to generate">· ${exempt} need nothing</span>`
+      : "";
+    const count = den === 0
+      ? `<span class="coverage-count" title="No tracks need ${escapeHTML(label)} variants">—</span>`
+      : `<span class="coverage-count">${kind === "upscale" ? (f.upscaledCount || 0) : (f.optimizedCount || 0)} / ${den}</span>`;
+    return `
+      <div class="coverage-row" data-kind="${kind}"${den === 0 ? ` data-empty="true"` : ""}>
+        <span class="coverage-label">${label}</span>
+        <progress value="${val}" max="${Math.max(1, den)}"></progress>
+        ${count}${exemptNote}
+      </div>`;
+  };
 
   // The data-* attrs on the checkbox carry the client-side
   // aggregation inputs the panel's batch summary reads — no fetch
@@ -3426,7 +3464,9 @@ function buildFolderTile(f) {
           data-path="${escapeHTML(f.path)}"
           data-track-count="${f.trackCount || 0}"
           data-upscaled-count="${f.upscaledCount || 0}"
-          data-optimized-count="${f.optimizedCount || 0}" />
+          data-optimized-count="${f.optimizedCount || 0}"
+          data-upscale-eligible="${upDen}"
+          data-optimize-eligible="${opDen}" />
       </label>
       <span class="tile-icon" aria-hidden="true">📁</span>
       <h3 class="tile-name" title="${escapeHTML(f.name)}">${escapeHTML(f.name)}</h3>
@@ -3441,16 +3481,8 @@ function buildFolderTile(f) {
       <div><dt>Size</dt><dd>${humanBytes(f.totalSizeBytes || 0)}</dd></div>
     </dl>
     <div class="tile-coverage">
-      <div class="coverage-row" data-kind="upscale">
-        <span class="coverage-label">Upscaled</span>
-        <progress value="${upVal}" max="${upMax}"></progress>
-        <span class="coverage-count">${f.upscaledCount || 0} / ${f.trackCount || 0}</span>
-      </div>
-      <div class="coverage-row" data-kind="optimize">
-        <span class="coverage-label">CarPlay-optimized</span>
-        <progress value="${opVal}" max="${opMax}"></progress>
-        <span class="coverage-count">${f.optimizedCount || 0} / ${f.trackCount || 0}</span>
-      </div>
+      ${coverageRow("upscale", "Upscaled", upVal, upDen)}
+      ${coverageRow("optimize", "CarPlay-optimized", opVal, opDen)}
     </div>
   `;
   attachTileMenu(tile, f);
@@ -3855,22 +3887,32 @@ function setPanelKindInitial(kind, folder, coveredCount) {
   if (!card) return;
   const lbl = kind === "upscale" ? "upscaled" : "optimized";
   const trackCount = folder.trackCount || 0;
-  const remaining = Math.max(0, trackCount - coveredCount);
+  // Eligible denominator (covered + currently-eligible); `??` keeps a
+  // genuine 0 ("nothing needs this kind") distinct from an absent
+  // field (degraded server → fall back to all tracks).
+  const den = (kind === "upscale"
+    ? folder.upscaleEligibleCount
+    : folder.optimizeEligibleCount) ?? trackCount;
+  const needNothing = Math.max(0, trackCount - den);
+  const remaining = Math.max(0, den - coveredCount);
 
   // Coverage bar (custom progressbar div + ARIA semantics).
-  updateCoverageBar(kind, coveredCount, trackCount, lbl);
+  updateCoverageBar(kind, coveredCount, den, lbl);
 
   const ratioEl = document.getElementById(`panel-ratio-${kind}`);
-  if (ratioEl) ratioEl.textContent = `${coveredCount} / ${trackCount}`;
+  if (ratioEl) ratioEl.textContent = den === 0 ? "—" : `${coveredCount} / ${den}`;
   const hintEl = document.getElementById(`panel-hint-${kind}`);
   if (hintEl) {
     if (trackCount === 0) hintEl.textContent = "";
+    else if (den === 0) hintEl.textContent = "nothing to do";
     else if (remaining === 0) hintEl.textContent = "All covered";
-    else hintEl.textContent = `${remaining} left`;
+    else hintEl.textContent = needNothing > 0
+      ? `${remaining} left · ${needNothing} need nothing`
+      : `${remaining} left`;
   }
 
   setPanelDetailText(card, kind, ".panel-tracks",
-    `${trackCount} (${coveredCount} already ${lbl})`);
+    `${trackCount} (${coveredCount} already ${lbl}${needNothing > 0 ? `, ${needNothing} need nothing` : ""})`);
   setPanelDetailText(card, kind, ".panel-covered", String(coveredCount));
   setPanelDetailText(card, kind, ".panel-source-size",
     humanBytes(folder.totalSizeBytes || 0));
@@ -3883,6 +3925,7 @@ function setPanelKindInitial(kind, folder, coveredCount) {
 
   hidePanelEl(card, kind, ".panel-warning");
   hidePanelEl(card, kind, ".panel-unknown");
+  hidePanelEl(card, kind, ".panel-attarget");
   setPanelDetailText(card, kind, ".panel-submit-status", "");
 
   // Buttons start disabled; the projection response decides Generate
@@ -3977,6 +4020,7 @@ async function inspectorFetchPanelProjection(path, kind) {
   const lbl = kind === "upscale" ? "upscaled" : "optimized";
   const warnEl = card.querySelector(`.panel-warning[data-kind="${kind}"]`);
   const unknownEl = card.querySelector(`.panel-unknown[data-kind="${kind}"]`);
+  const atTargetEl = card.querySelector(`.panel-attarget[data-kind="${kind}"]`);
   const projectedEl = card.querySelector(`.panel-projected[data-kind="${kind}"]`);
   const freeEl = card.querySelector(`.panel-free[data-kind="${kind}"]`);
   const requiredEl = card.querySelector(`.panel-required[data-kind="${kind}"]`);
@@ -4013,13 +4057,20 @@ async function inspectorFetchPanelProjection(path, kind) {
       }
     }
 
+    // Genuinely-skipped tracks (DSD / lossy / unknown geometry) keep
+    // the warning-adjacent hint; tracks that are simply ALREADY AT
+    // the target format get their own neutral line — "already done"
+    // must not read as a failure (pre-split, at-floor CD tracks
+    // showed up as "skipped" under kind=optimize).
     if (data.unknownFormatFiles > 0 && unknownEl) {
       unknownEl.hidden = false;
-      const skipReason = kind === "optimize"
-        ? "DSD / lossy / already at target / unknown format"
-        : "DSD / lossy / unknown format";
       unknownEl.textContent =
-        `${data.unknownFormatFiles} tracks here are ${skipReason} — they'll be skipped.`;
+        `${data.unknownFormatFiles} tracks here are DSD / lossy / unknown format — they'll be skipped.`;
+    }
+    if (data.alreadyAtTargetFiles > 0 && atTargetEl) {
+      atTargetEl.hidden = false;
+      atTargetEl.textContent =
+        `${data.alreadyAtTargetFiles} tracks are already at the target format — nothing to do for them.`;
     }
 
     if (genBtn) {
@@ -4027,20 +4078,19 @@ async function inspectorFetchPanelProjection(path, kind) {
       if (data.projectedFiles === 0) {
         if (warnEl) {
           warnEl.hidden = false;
-          const total = data.alreadyCoveredFiles + data.unknownFormatFiles;
+          const atTarget = data.alreadyAtTargetFiles || 0;
+          const total = data.alreadyCoveredFiles + data.unknownFormatFiles + atTarget;
+          const parts = [];
+          if (data.alreadyCoveredFiles > 0) parts.push(`${data.alreadyCoveredFiles} already ${lbl}`);
+          if (atTarget > 0) parts.push(`${atTarget} already at target`);
+          if (data.unknownFormatFiles > 0) parts.push(`${data.unknownFormatFiles} not eligible`);
           let msg;
-          if (data.alreadyCoveredFiles > 0 && data.unknownFormatFiles === 0) {
-            msg = `All eligible tracks already have a ${lbl} variant.`;
-          } else if (data.alreadyCoveredFiles === 0 && data.unknownFormatFiles > 0) {
-            msg = kind === "optimize"
-              ? "No tracks here are eligible for CarPlay-optimize (already at target, lossy, DSD, or unknown source format)."
-              : "No tracks here support upscaling (DSD or unknown source format).";
-          } else if (data.alreadyCoveredFiles > 0 && data.unknownFormatFiles > 0) {
-            msg = `${data.alreadyCoveredFiles} tracks already ${lbl}, ${data.unknownFormatFiles} not eligible — nothing left to generate.`;
-          } else if (total === 0) {
+          if (total === 0) {
             msg = "No tracks here.";
+          } else if (parts.length === 1 && data.alreadyCoveredFiles > 0) {
+            msg = `All eligible tracks already have a ${lbl} variant.`;
           } else {
-            msg = "Nothing eligible.";
+            msg = `${parts.join(", ")} — nothing to generate.`;
           }
           warnEl.textContent = msg;
         }
@@ -4449,6 +4499,8 @@ function inspectorOnTileCheckboxChange(ev) {
       trackCount: Number.parseInt(cb.dataset.trackCount, 10) || 0,
       upscaledCount: Number.parseInt(cb.dataset.upscaledCount, 10) || 0,
       optimizedCount: Number.parseInt(cb.dataset.optimizedCount, 10) || 0,
+      upscaleEligible: Number.parseInt(cb.dataset.upscaleEligible, 10) || 0,
+      optimizeEligible: Number.parseInt(cb.dataset.optimizeEligible, 10) || 0,
     });
     if (tile) tile.dataset.selected = "true";
   } else {
@@ -4509,17 +4561,23 @@ function inspectorOpenPanelBatch() {
   panel.style.left = "";
 
   // Aggregate rollup math (same shape as the legacy selection bar
-  // — O(M), no DOM queries).
+  // — O(M), no DOM queries). Gaps use the ELIGIBLE denominators so
+  // "N left" means "N generate would actually enqueue", not "N
+  // tracks lack a variant for any reason incl. needing nothing".
   let trackCount = 0;
   let upscaledCount = 0;
   let optimizedCount = 0;
+  let upscaleEligible = 0;
+  let optimizeEligible = 0;
   for (const snap of sel.values()) {
     trackCount += snap.trackCount;
     upscaledCount += snap.upscaledCount;
     optimizedCount += snap.optimizedCount;
+    upscaleEligible += snap.upscaleEligible ?? snap.trackCount;
+    optimizeEligible += snap.optimizeEligible ?? snap.trackCount;
   }
-  const upscaleGap = Math.max(0, trackCount - upscaledCount);
-  const optimizeGap = Math.max(0, trackCount - optimizedCount);
+  const upscaleGap = Math.max(0, upscaleEligible - upscaledCount);
+  const optimizeGap = Math.max(0, optimizeEligible - optimizedCount);
 
   const titleEl = document.getElementById("panel-title");
   if (titleEl) {
@@ -4528,8 +4586,8 @@ function inspectorOpenPanelBatch() {
   const clearBtn = document.getElementById("panel-clear-selection");
   if (clearBtn) clearBtn.hidden = false;
 
-  setPanelKindBatch("upscale", trackCount, upscaledCount, upscaleGap);
-  setPanelKindBatch("optimize", trackCount, optimizedCount, optimizeGap);
+  setPanelKindBatch("upscale", trackCount, upscaledCount, upscaleGap, upscaleEligible);
+  setPanelKindBatch("optimize", trackCount, optimizedCount, optimizeGap, optimizeEligible);
 
   inspectorSetExpandedCard(inspectorState.panelExpandedKind || "upscale");
 
@@ -4540,19 +4598,24 @@ function inspectorOpenPanelBatch() {
   inspectorA11yListeners("batch-summary");
 }
 
-function setPanelKindBatch(kind, trackCount, coveredCount, gap) {
+function setPanelKindBatch(kind, trackCount, coveredCount, gap, eligible) {
   const card = document.getElementById(`panel-card-${kind}`);
   if (!card) return;
   const lbl = kind === "upscale" ? "upscaled" : "optimized";
-  updateCoverageBar(kind, coveredCount, trackCount, lbl);
+  const den = eligible ?? trackCount;
+  const needNothing = Math.max(0, trackCount - den);
+  updateCoverageBar(kind, coveredCount, den, lbl);
 
   const ratioEl = document.getElementById(`panel-ratio-${kind}`);
-  if (ratioEl) ratioEl.textContent = `${coveredCount} / ${trackCount}`;
+  if (ratioEl) ratioEl.textContent = den === 0 ? "—" : `${coveredCount} / ${den}`;
   const hintEl = document.getElementById(`panel-hint-${kind}`);
-  if (hintEl) hintEl.textContent = gap > 0 ? `${gap} left` : "All covered";
+  if (hintEl) {
+    if (den === 0) hintEl.textContent = trackCount > 0 ? "nothing to do" : "";
+    else hintEl.textContent = gap > 0 ? `${gap} left` : "All covered";
+  }
 
   setPanelDetailText(card, kind, ".panel-tracks",
-    `${trackCount} (${coveredCount} already ${lbl})`);
+    `${trackCount} (${coveredCount} already ${lbl}${needNothing > 0 ? `, ${needNothing} need nothing` : ""})`);
   setPanelDetailText(card, kind, ".panel-covered", String(coveredCount));
   setPanelDetailText(card, kind, ".panel-source-size", "—");
   setPanelDetailText(card, kind, ".panel-projected",
@@ -4564,6 +4627,7 @@ function setPanelKindBatch(kind, trackCount, coveredCount, gap) {
   }
   hidePanelEl(card, kind, ".panel-warning");
   hidePanelEl(card, kind, ".panel-unknown");
+  hidePanelEl(card, kind, ".panel-attarget");
   setPanelDetailText(card, kind, ".panel-submit-status", "");
 
   const soxMissing = !inspectorState.soxAvailable;

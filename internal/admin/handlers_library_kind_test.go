@@ -234,8 +234,10 @@ func TestApiLibraryBrowseProjection_KindOptimize(t *testing.T) {
 	}
 	// MusicA fixture: 3 tracks (Album1/01 44.1/16, Album1/02 44.1/16,
 	// Album2/01 96/24).
-	// - Two 44.1/16 tracks fail OptimizeEligible (already at floor)
-	//   → counted in UnknownFormatFiles, NOT ProjectedFiles.
+	// - Two 44.1/16 tracks fail OptimizeEligible but carry clean PCM
+	//   geometry (no fundamental block) — they're ALREADY AT the
+	//   CarPlay floor, so the at-target bucket counts them, NOT
+	//   UnknownFormatFiles (pre-split they were mislabeled "skipped").
 	// - One 96/24 track is eligible → ProjectedFiles=1.
 	// Crucially: the upscale variants on Album1/01 and Album2/01
 	// should NOT bleed into the optimize HasVariant count (senior
@@ -243,8 +245,11 @@ func TestApiLibraryBrowseProjection_KindOptimize(t *testing.T) {
 	if resp.AlreadyCoveredFiles != 0 {
 		t.Errorf("AlreadyCoveredFiles = %d, want 0 (no optimize variants seeded; upscale variants must NOT cross-contaminate)", resp.AlreadyCoveredFiles)
 	}
-	if resp.UnknownFormatFiles < 2 {
-		t.Errorf("UnknownFormatFiles = %d, want >= 2 (two 44.1/16 tracks already at floor)", resp.UnknownFormatFiles)
+	if resp.AlreadyAtTargetFiles != 2 {
+		t.Errorf("AlreadyAtTargetFiles = %d, want 2 (two 44.1/16 tracks already at floor)", resp.AlreadyAtTargetFiles)
+	}
+	if resp.UnknownFormatFiles != 0 {
+		t.Errorf("UnknownFormatFiles = %d, want 0 (at-floor PCM is not a fundamental skip)", resp.UnknownFormatFiles)
 	}
 	if resp.ProjectedFiles != 1 {
 		t.Errorf("ProjectedFiles = %d, want 1 (only the 96/24 track is eligible)", resp.ProjectedFiles)

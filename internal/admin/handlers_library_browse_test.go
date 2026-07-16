@@ -453,3 +453,116 @@ func TestApiLibraryBrowseProjection_ProbesVariantsDir(t *testing.T) {
 		t.Errorf("disk probe graded cfg.DataDir %q — the pre-fix bug", next.DataDir)
 	}
 }
+
+// TestApiLibraryBrowse_EligibleCounts pins the eligible-denominator
+// fields on browse rows + the first-page subtree twins: covered
+// tracks stay in the denominator, at-floor CD tracks drop out of the
+// optimize denominator, below-target tracks stay in the upscale one.
+func TestApiLibraryBrowse_EligibleCounts(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	browseTestSeed(t, srv)
+	if err := srv.deps.Manifest.SetUpscaleTarget(context.Background(), 192000, 24); err != nil {
+		t.Fatalf("SetUpscaleTarget: %v", err)
+	}
+
+	var resp browseResponse
+	code := doJSON(t, srv.Handler(), "GET", "/api/library/browse?path=MusicA", nil, &resp)
+	if code != http.StatusOK {
+		t.Fatalf("browse: %d", code)
+	}
+	byName := map[string]browseFolderRow{}
+	for _, f := range resp.Folders {
+		byName[f.Name] = f
+	}
+	deref := func(p *int) int {
+		t.Helper()
+		if p == nil {
+			t.Fatalf("eligible count absent — want a present value (nil is the degraded-server shape)")
+		}
+		return *p
+	}
+	// Album1: 2× 44.1/16 FLAC, one with an upscaled variant.
+	// Upscale: covered(1) + below-target(1) = 2. Optimize: at the
+	// CarPlay floor, no optimized variants = 0.
+	if got := deref(byName["Album1"].UpscaleEligibleCount); got != 2 {
+		t.Errorf("Album1 upscaleEligibleCount = %d, want 2", got)
+	}
+	if got := deref(byName["Album1"].OptimizeEligibleCount); got != 0 {
+		t.Errorf("Album1 optimizeEligibleCount = %d, want 0", got)
+	}
+	// Album2: 1× 96/24 with an upscaled variant. Upscale: covered = 1.
+	// Optimize: above the floor = 1.
+	if got := deref(byName["Album2"].UpscaleEligibleCount); got != 1 {
+		t.Errorf("Album2 upscaleEligibleCount = %d, want 1", got)
+	}
+	if got := deref(byName["Album2"].OptimizeEligibleCount); got != 1 {
+		t.Errorf("Album2 optimizeEligibleCount = %d, want 1", got)
+	}
+	// First-page subtree twins.
+	if resp.SubtreeUpscaleEligible == nil || *resp.SubtreeUpscaleEligible != 3 {
+		t.Errorf("subtreeUpscaleEligible = %v, want 3", resp.SubtreeUpscaleEligible)
+	}
+	if resp.SubtreeOptimizeEligible == nil || *resp.SubtreeOptimizeEligible != 1 {
+		t.Errorf("subtreeOptimizeEligible = %v, want 1", resp.SubtreeOptimizeEligible)
+	}
+}
+
+// TestApiLibraryBrowseProjection_AtTargetBucket pins the projection's
+// alreadyAtTargetFiles split: "needs nothing" tracks land there — NOT
+// in unknownFormatFiles (kind=optimize's at-floor CD case) and NOT
+// silently vanishing from every bucket (kind=upscale's at-target
+// case, which pre-split fell through ProjectedSize<=0 uncounted).
+func TestApiLibraryBrowseProjection_AtTargetBucket(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	browseTestSeed(t, srv)
+	wireOptimizeTestDeps(t, srv)
+	if err := srv.deps.Manifest.SetUpscaleTarget(context.Background(), 192000, 24); err != nil {
+		t.Fatalf("SetUpscaleTarget: %v", err)
+	}
+	// Extra seeds: an at-upscale-target track under MusicB, and a DSD
+	// track under MusicA (must stay in unknownFormatFiles for optimize).
+	atRate := 192000.0
+	atBits := 24
+	noDSD := false
+	if err := srv.deps.Manifest.UpsertTrack(context.Background(), &manifest.Track{
+		Path: "MusicB/Album3/attarget.flac", Size: 400,
+		SampleRate: &atRate, BitsPerSample: &atBits, Codec: "FLAC", IsDSD: &noDSD,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	dsdRate := 2822400.0
+	dsdBits := 1
+	isDSD := true
+	if err := srv.deps.Manifest.UpsertTrack(context.Background(), &manifest.Track{
+		Path: "MusicA/Album2/dsd.dsf", Size: 400,
+		SampleRate: &dsdRate, BitsPerSample: &dsdBits, Codec: "DSF", IsDSD: &isDSD,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// kind=upscale over MusicB: 48/24 projected; 192/24 at target.
+	var up browseProjectionResponse
+	code := doJSON(t, srv.Handler(), "GET",
+		"/api/library/browse-projection?path=MusicB&kind=upscale", nil, &up)
+	if code != http.StatusOK {
+		t.Fatalf("upscale projection: %d", code)
+	}
+	if up.ProjectedFiles != 1 || up.AlreadyAtTargetFiles != 1 || up.UnknownFormatFiles != 0 {
+		t.Errorf("upscale buckets = projected %d / atTarget %d / unknown %d, want 1/1/0",
+			up.ProjectedFiles, up.AlreadyAtTargetFiles, up.UnknownFormatFiles)
+	}
+
+	// kind=optimize over MusicA: Album2's 96/24 projected; the two
+	// at-floor 44.1/16 CD tracks are AT TARGET (not "unknown"); the
+	// DSD track is genuinely skipped.
+	var op browseProjectionResponse
+	code = doJSON(t, srv.Handler(), "GET",
+		"/api/library/browse-projection?path=MusicA&kind=optimize", nil, &op)
+	if code != http.StatusOK {
+		t.Fatalf("optimize projection: %d", code)
+	}
+	if op.ProjectedFiles != 1 || op.AlreadyAtTargetFiles != 2 || op.UnknownFormatFiles != 1 {
+		t.Errorf("optimize buckets = projected %d / atTarget %d / unknown %d, want 1/2/1",
+			op.ProjectedFiles, op.AlreadyAtTargetFiles, op.UnknownFormatFiles)
+	}
+}

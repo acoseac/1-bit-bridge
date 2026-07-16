@@ -1,0 +1,169 @@
+// Transcode-eligibility aggregation for the admin Library Inspector's
+// coverage bars (eligible-denominator semantics).
+//
+// The tile bars answer "did my generate finish?" — so their
+// denominator counts tracks that HAVE a variant of the kind OR are
+// currently ELIGIBLE to get one. Tracks that need nothing (already at
+// the CarPlay floor / at the upscale target / DSD / unknown geometry)
+// drop out of the denominator instead of pinning mixed folders below
+// 100% forever (field case: ABBA 62/136 "optimized" where the other
+// 74 tracks were already 16/44.1 — natively CarPlay-ready).
+//
+// The predicates are SQL MIRRORS of the Go gates:
+//
+//   - optimizeEligibleSQL ⇄ transcode.OptimizeEligible
+//   - upscaleEligibleSQL  ⇄ Coordinator.Submit's candidate walk
+//     (internal/transcode/batch.go)
+//
+// The duplication is deliberate (the rollups must stay plain-column
+// SQL — no json_extract on the browse hot path, which is what the v25
+// columns exist for) and is pinned by the admin package's lockstep
+// truth-table tests (TestEligibilitySQLAgreesWithOptimizeEligible /
+// ...WithUpscaleSubmitGate — admin is the only package importing both
+// manifest and transcode). CHANGE THE GO GATE AND THE SQL TOGETHER.
+package manifest
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+)
+
+// optimizeEligibleSQL mirrors transcode.OptimizeEligible exactly:
+// lossless-PCM allowlist (with the legacy extension fallback for
+// codec-empty rows) AND above the CarPlay floor (rate > 48000 OR
+// bits > 16). DSD needs no explicit arm — DSF/DFF codecs fail the
+// allowlist, and codec-empty DSD files don't carry PCM extensions.
+// TRIM matches the Go side's strings.TrimSpace; SQLite LIKE is
+// ASCII-case-insensitive, matching the Go ToLower ext compare.
+// References a `tracks` row aliased as `t`. No binds.
+const optimizeEligibleSQL = `(
+	( UPPER(TRIM(COALESCE(t.codec,''))) IN ('FLAC','ALAC','WAV','AIFF','PCM')
+	  OR ( TRIM(COALESCE(t.codec,'')) = ''
+	       AND ( t.path LIKE '%.flac' OR t.path LIKE '%.wav'
+	             OR t.path LIKE '%.aif' OR t.path LIKE '%.aiff'
+	             OR t.path LIKE '%.m4a' ) ) )
+	AND (COALESCE(t.sample_rate,0) > 48000 OR COALESCE(t.bits_per_sample,0) > 16)
+)`
+
+// upscaleEligibleSQL mirrors Coordinator.Submit's candidate gate at a
+// bound (targetRate, targetBits): known geometry, never downsample on
+// either axis, skip the exact-at-target no-op. DSD falls out via
+// rate > target (2.8 MHz DSD rates dwarf any PCM target); the
+// explicit is_dsd arm is belt-and-braces for exotic rows. Lossy
+// codecs are deliberately NOT excluded — Submit has no codec gate
+// today, and this mirror stays semantics-neutral (the lossy-denylist
+// question is a separate, deferred decision).
+//
+// BINDS (textual order): targetRate, targetBits, targetRate,
+// targetBits. Zero/negative binds (target unresolved) collapse the
+// predicate to false for every known-geometry row — the denominator
+// degrades to covered-only, which is the safe rendering.
+const upscaleEligibleSQL = `(
+	COALESCE(t.is_dsd,0) != 1
+	AND COALESCE(t.sample_rate,0) > 0 AND COALESCE(t.bits_per_sample,0) > 0
+	AND NOT (t.sample_rate > ? OR t.bits_per_sample > ?)
+	AND NOT (t.sample_rate = ? AND t.bits_per_sample = ?)
+)`
+
+// EligibleCounts carries the per-kind coverage DENOMINATORS for a
+// scope: tracks with a variant of the kind plus tracks currently
+// eligible to get one. The numerators are the existing covered
+// counts (ChildFolderRollup / FolderRollup).
+type EligibleCounts struct {
+	Upscale  int
+	Optimize int
+}
+
+// EligibleCountsForFolders returns, for each folder path in `paths`,
+// the per-kind coverage denominator over that folder's subtree.
+//
+// Paths travel as ONE bound JSON array consumed via json_each (the
+// ResetEnrichedByArtistMBIDs pattern — no placeholder concatenation,
+// no bind-ceiling chunking). Subtree scoping uses the same
+// `path >= p || '/' AND path < p || '0'` range trick as
+// childFolderRollupSelect ('0' is the ASCII successor of '/'), so
+// the per-folder probes ride the tracks PK index.
+//
+// BIND ORDER IS LOAD-BEARING: the upscale correlated subquery's four
+// eligibility binds (targetRate, targetBits, targetRate, targetBits)
+// precede the json_each blob in textual order — pinned by
+// TestEligibleCountsForFolders_bindingOrder.
+//
+// Read-only; no s.mu (WAL handles concurrent readers).
+func (s *Store) EligibleCountsForFolders(ctx context.Context, paths []string, targetRate, targetBits int) (map[string]EligibleCounts, error) {
+	if len(paths) == 0 {
+		return map[string]EligibleCounts{}, nil
+	}
+	blob, err := json.Marshal(paths)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT je.value,
+		  (SELECT COUNT(*) FROM tracks t
+		     WHERE t.path >= je.value || '/' AND t.path < je.value || '0'
+		       AND ( EXISTS(SELECT 1 FROM track_variants tv
+		                     WHERE tv.source_path = t.path
+		                       AND tv.variant_id LIKE 'upscaled-%')
+		             OR `+upscaleEligibleSQL+` )),
+		  (SELECT COUNT(*) FROM tracks t
+		     WHERE t.path >= je.value || '/' AND t.path < je.value || '0'
+		       AND ( EXISTS(SELECT 1 FROM track_variants tv
+		                     WHERE tv.source_path = t.path
+		                       AND tv.variant_id LIKE 'optimized-%')
+		             OR `+optimizeEligibleSQL+` ))
+		FROM json_each(?) je
+	`, targetRate, targetBits, targetRate, targetBits, string(blob))
+	if err != nil {
+		return nil, fmt.Errorf("eligible counts: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[string]EligibleCounts, len(paths))
+	for rows.Next() {
+		var p string
+		var ec EligibleCounts
+		if err := rows.Scan(&p, &ec.Upscale, &ec.Optimize); err != nil {
+			return nil, err
+		}
+		out[p] = ec
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// EligibleRollupByPrefix is the whole-subtree twin of
+// EligibleCountsForFolders for the action panel's current-node
+// header. Empty prefix means the whole library. Same bind-order
+// contract for the four upscale-eligibility binds; the two optional
+// prefix binds trail them.
+//
+// Read-only; no s.mu.
+func (s *Store) EligibleRollupByPrefix(ctx context.Context, prefix string, targetRate, targetBits int) (EligibleCounts, error) {
+	q := `
+		SELECT
+		  COALESCE(SUM(CASE WHEN
+		    ( EXISTS(SELECT 1 FROM track_variants tv
+		              WHERE tv.source_path = t.path
+		                AND tv.variant_id LIKE 'upscaled-%')
+		      OR ` + upscaleEligibleSQL + ` ) THEN 1 ELSE 0 END), 0),
+		  COALESCE(SUM(CASE WHEN
+		    ( EXISTS(SELECT 1 FROM track_variants tv
+		              WHERE tv.source_path = t.path
+		                AND tv.variant_id LIKE 'optimized-%')
+		      OR ` + optimizeEligibleSQL + ` ) THEN 1 ELSE 0 END), 0)
+		FROM tracks t`
+	args := []any{targetRate, targetBits, targetRate, targetBits}
+	if prefix != "" {
+		q += `
+		WHERE t.path >= ? || '/' AND t.path < ? || '0'`
+		args = append(args, prefix, prefix)
+	}
+	var ec EligibleCounts
+	if err := s.db.QueryRowContext(ctx, q, args...).Scan(&ec.Upscale, &ec.Optimize); err != nil {
+		return EligibleCounts{}, fmt.Errorf("eligible rollup %q: %w", prefix, err)
+	}
+	return ec, nil
+}

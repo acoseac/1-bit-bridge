@@ -1170,6 +1170,72 @@ var migrations = []migration{
 			return nil
 		},
 	},
+	{
+		// v25: format-fact columns on tracks (sample_rate /
+		// bits_per_sample / is_dsd / codec), stamped at every upsert
+		// and backfilled once from tags_json here.
+		//
+		// COLUMN-TRUTH CONTRACT: these are query ACCELERATORS only —
+		// they let the admin inspector's coverage rollups evaluate
+		// transcode-eligibility predicates with plain-column SQL
+		// instead of json_extract on the browse hot path. Go readers
+		// (GetTrack / ListTracks / every wire path) keep reading
+		// tags_json; the columns are never spliced onto wire output
+		// and MUST NOT gain json tags anywhere (same class as the
+		// mtime_ns column gotcha — tags_json remains read-truth).
+		//
+		// The backfill touches ONLY the four new columns — never
+		// enriched_at (the enricher's queue driver) or indexed_at
+		// (the iOS delta-sync clock). One full-table UPDATE, one-time
+		// at boot (seconds on a 50k-row library; transient WAL growth
+		// of ~rowcount × tens of bytes).
+		version: 25,
+		name:    "tracks format-fact columns + backfill",
+		sql:     `-- columns added idempotently in post(); see v25 docblock`,
+		post: func(db *sql.DB) error {
+			for _, a := range []struct{ col, typ string }{
+				{"sample_rate", "INTEGER"},
+				{"bits_per_sample", "INTEGER"},
+				{"is_dsd", "INTEGER"},
+				{"codec", "TEXT"},
+			} {
+				exists, err := atlasColumnExists(db, "tracks", a.col)
+				if err != nil {
+					return fmt.Errorf("inspect tracks.%s: %w", a.col, err)
+				}
+				if exists {
+					continue
+				}
+				if _, err := db.Exec("ALTER TABLE tracks ADD COLUMN " + a.col + " " + a.typ); err != nil {
+					return fmt.Errorf("add tracks.%s: %w", a.col, err)
+				}
+			}
+			return backfillFormatColumns(db)
+		},
+	},
+}
+
+// backfillFormatColumns derives the v25 format-fact columns from
+// tags_json for every existing row. Idempotent (re-running recomputes
+// the same values); runs inside the bridge's own connection so the
+// v4 expression-index function (unicode_lower) is registered. CAST
+// keeps SQLite's dynamic typing honest for the numeric columns —
+// tags_json carries sampleRate as a JSON number (Go *float64); a
+// missing key extracts as NULL and CAST(NULL) stays NULL, preserving
+// "unknown". JSON booleans extract as integer 1/0. Keys are
+// camelCase and case-sensitive (matches the existing $.artworkMBID
+// json_extract usage across the store).
+func backfillFormatColumns(db *sql.DB) error {
+	_, err := db.Exec(`
+		UPDATE tracks SET
+			sample_rate     = CAST(json_extract(tags_json, '$.sampleRate')    AS INTEGER),
+			bits_per_sample = CAST(json_extract(tags_json, '$.bitsPerSample') AS INTEGER),
+			is_dsd          = json_extract(tags_json, '$.isDSD'),
+			codec           = json_extract(tags_json, '$.codec')`)
+	if err != nil {
+		return fmt.Errorf("backfill format columns: %w", err)
+	}
+	return nil
 }
 
 // atlasColumnExists reports whether `table` already has a column named `col`,
@@ -1366,6 +1432,32 @@ func (s *Store) UnenrichedTracks(ctx context.Context, limit int) ([]Track, error
 // the latent risk on PR #68 even though no caller exercises it
 // today; this defensive shim makes the invariant structural rather
 // than relying on every future caller to remember.
+// formatColumnBinds returns SQL-nullable binds for the v25 format-fact
+// columns (sample_rate / bits_per_sample / is_dsd / codec), derived
+// from the Track's own fields. Untouched values stay nil → SQL NULL,
+// preserving "unknown" for rows whose extractor couldn't determine
+// geometry. Pointer fields are nil-checked BEFORE dereference —
+// Track.SampleRate is *float64 and a blind deref would panic on
+// geometry-less rows (dhowden fallback paths leave them populated,
+// but the WAV/AIFF walkers and hand-built test fixtures may not).
+// Shared by UpsertTrack and UpsertTrackBatch so the two write paths
+// can't drift.
+func formatColumnBinds(t *Track) (rate, bits, isDSD, codec any) {
+	if t.SampleRate != nil {
+		rate = int64(*t.SampleRate)
+	}
+	if t.BitsPerSample != nil {
+		bits = int64(*t.BitsPerSample)
+	}
+	if t.IsDSD != nil {
+		isDSD = boolToInt(*t.IsDSD)
+	}
+	if t.Codec != "" {
+		codec = t.Codec
+	}
+	return rate, bits, isDSD, codec
+}
+
 func marshalForStorage(t *Track) ([]byte, error) {
 	clone := *t
 	clone.Enriched = nil
@@ -1445,6 +1537,11 @@ func (s *Store) MarkEnriched(ctx context.Context, t *Track) error {
 	// low-res wall clocks, rapid back-to-back enrichment writes) still
 	// produces a strictly-greater indexed_at, keeping delta-sync's
 	// `> since` boundary semantically correct.
+	//
+	// The v25 format-fact columns are deliberately NOT re-stamped here:
+	// enrichment only adds MBIDs / artwork refs to tags_json — it never
+	// changes sampleRate / bitsPerSample / isDSD / codec, so the columns
+	// stamped at Upsert time can't drift.
 	now := s.now().UnixNano()
 	_, err = s.db.ExecContext(ctx, `
 		UPDATE tracks
@@ -1614,6 +1711,9 @@ func (s *Store) applyReconciledTracks(ctx context.Context, changed []Track) (int
 		return 0, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	// The v25 format-fact columns are deliberately NOT re-stamped here:
+	// reconciliation edits AlbumArtist / Year only — never the format
+	// fields — so the columns stamped at Upsert time can't drift.
 	stmt, err := tx.PrepareContext(ctx, `
 		UPDATE tracks
 		SET tags_json = ?,
@@ -1666,9 +1766,11 @@ func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	rate, bits, isDSD, codec := formatColumnBinds(t)
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO tracks(path, size, mtime_ns, tags_json, indexed_at)
-		VALUES (?, ?, ?, ?, ?)
+		INSERT INTO tracks(path, size, mtime_ns, tags_json, indexed_at,
+		                   sample_rate, bits_per_sample, is_dsd, codec)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(path) DO UPDATE SET
 			size          = excluded.size,
 			mtime_ns      = excluded.mtime_ns,
@@ -1695,8 +1797,17 @@ func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
 				WHEN json_extract(excluded.tags_json, '$.artworkMBID')
 				     IS json_extract(tracks.tags_json, '$.artworkMBID')
 				THEN tracks.artwork_version ELSE NULL
-			END
-	`, t.Path, t.Size, t.ModTime.UnixNano(), raw, s.now().UnixNano())
+			END,
+			-- v25 format-fact columns: stamped on every upsert so the
+			-- coverage rollups' eligibility SQL never needs json_extract
+			-- on the browse hot path. tags_json stays the read-truth for
+			-- Go readers (see the v25 migration docblock).
+			sample_rate     = excluded.sample_rate,
+			bits_per_sample = excluded.bits_per_sample,
+			is_dsd          = excluded.is_dsd,
+			codec           = excluded.codec
+	`, t.Path, t.Size, t.ModTime.UnixNano(), raw, s.now().UnixNano(),
+		rate, bits, isDSD, codec)
 	return err
 }
 
@@ -1730,6 +1841,10 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 		size    int64
 		mtime   int64
 		tagsRaw []byte
+		rate    any
+		bits    any
+		isDSD   any
+		codec   any
 	}
 	rows := make([]row, len(ts))
 	for i, t := range ts {
@@ -1737,11 +1852,16 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 		if err != nil {
 			return err
 		}
+		rate, bits, isDSD, codec := formatColumnBinds(t)
 		rows[i] = row{
 			path:    t.Path,
 			size:    t.Size,
 			mtime:   t.ModTime.UnixNano(),
 			tagsRaw: raw,
+			rate:    rate,
+			bits:    bits,
+			isDSD:   isDSD,
+			codec:   codec,
 		}
 	}
 
@@ -1764,8 +1884,9 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 	// the right shape — per-track s.now() calls would burn 500 syscalls
 	// per batch on Pi-class hardware and break the deterministic test seam.
 	stmt, err := tx.PrepareContext(ctx, `
-		INSERT INTO tracks(path, size, mtime_ns, tags_json, indexed_at)
-		VALUES (?, ?, ?, ?, ?)
+		INSERT INTO tracks(path, size, mtime_ns, tags_json, indexed_at,
+		                   sample_rate, bits_per_sample, is_dsd, codec)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(path) DO UPDATE SET
 			size          = excluded.size,
 			mtime_ns      = excluded.mtime_ns,
@@ -1786,7 +1907,12 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 				WHEN json_extract(excluded.tags_json, '$.artworkMBID')
 				     IS json_extract(tracks.tags_json, '$.artworkMBID')
 				THEN tracks.artwork_version ELSE NULL
-			END
+			END,
+			-- v25 format-fact columns — mirrors UpsertTrack.
+			sample_rate     = excluded.sample_rate,
+			bits_per_sample = excluded.bits_per_sample,
+			is_dsd          = excluded.is_dsd,
+			codec           = excluded.codec
 	`)
 	if err != nil {
 		return err
@@ -1794,7 +1920,8 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 	defer stmt.Close()
 	now := s.now().UnixNano()
 	for _, r := range rows {
-		if _, err := stmt.ExecContext(ctx, r.path, r.size, r.mtime, r.tagsRaw, now); err != nil {
+		if _, err := stmt.ExecContext(ctx, r.path, r.size, r.mtime, r.tagsRaw, now,
+			r.rate, r.bits, r.isDSD, r.codec); err != nil {
 			return err
 		}
 	}
@@ -4851,6 +4978,13 @@ type FormatGroup struct {
 // Full-table json_extract scan — NOT for hot paths; see FormatGroup.
 // Read-only, so no `s.mu` (WAL handles concurrent readers).
 func (s *Store) FormatDistribution(ctx context.Context) ([]FormatGroup, error) {
+	// ORDINAL GROUP BY (1..4) is load-bearing since migration v25:
+	// `tracks` now has real `codec` / `is_dsd` columns, and SQLite
+	// resolves bare GROUP BY names to TABLE COLUMNS before SELECT
+	// aliases — `GROUP BY codec, ..., is_dsd` silently switched from
+	// the tags_json aliases to the (possibly NULL) columns and
+	// misgrouped rows. tags_json stays this query's read-truth (the
+	// v25 column contract); the ordinals pin the aliases.
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT COALESCE(json_extract(tags_json, '$.codec'), '')                         AS codec,
 		       CAST(COALESCE(json_extract(tags_json, '$.sampleRate'), 0) AS INTEGER)    AS rate,
@@ -4858,7 +4992,7 @@ func (s *Store) FormatDistribution(ctx context.Context) ([]FormatGroup, error) {
 		       CAST(COALESCE(json_extract(tags_json, '$.isDSD'), 0) AS INTEGER)         AS is_dsd,
 		       COUNT(*)                                                                  AS n
 		  FROM tracks
-		 GROUP BY codec, rate, bits, is_dsd
+		 GROUP BY 1, 2, 3, 4
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("format distribution: %w", err)
