@@ -144,8 +144,9 @@ type browseResponse struct {
 
 // browseProjectionResponse is the JSON envelope returned by
 // GET /api/library/browse-projection. Numbers are bytes;
-// `wouldFit` carries the verdict against the bridge dataDir
-// volume's free space using `transcode.DefaultDiskSafetyMargin`.
+// `wouldFit` carries the verdict against the free space of the
+// volume holding the effective variants dir (the write target)
+// using `transcode.DefaultDiskSafetyMargin`.
 type browseProjectionResponse struct {
 	Path string `json:"path"`
 	// Kind echoes the resolved variant kind ("upscale" / "optimize")
@@ -437,9 +438,10 @@ func (s *Server) browseByKey(w http.ResponseWriter, r *http.Request, camelot str
 //
 // Walks every track under `path`, computes per-track projected
 // size via the wired closure (transcode.ProjectedSize), probes
-// disk space on the bridge's data volume, and returns the
-// pre-flight verdict the Library Inspector renders in the action
-// drawer.
+// disk space on the volume holding the effective variants dir
+// (the actual write target — NOT the bridge data volume), and
+// returns the pre-flight verdict the Library Inspector renders in
+// the action drawer.
 //
 // `?kind=upscale` (default when omitted, back-compat) projects
 // against the active upscale target (rate/bits resolved from
@@ -591,7 +593,15 @@ func (s *Server) apiLibraryBrowseProjection(w http.ResponseWriter, r *http.Reque
 		projectedFiles++
 	}
 
-	free, err := s.deps.AvailableDiskSpace(cfg.DataDir)
+	// Probe the volume the variants are actually WRITTEN to — the
+	// effective variants dir may live on a different (much larger)
+	// volume than the bridge data dir (field case: bridge.ars.md's
+	// B2-mounted variants vs a 29 GB root disk; grading DataDir
+	// refused batches that fit easily). The wired closure routes
+	// through AvailableDiskSpaceNearest, so a lazily-created /
+	// not-yet-existing variants dir is graded by its closest
+	// existing ancestor.
+	free, err := s.deps.AvailableDiskSpace(cfg.Upscale.EffectiveVariantsDir(cfg.DataDir))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "disk-probe", err.Error())
 		return

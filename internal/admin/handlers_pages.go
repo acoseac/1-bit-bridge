@@ -58,7 +58,7 @@ type pageData struct {
 
 // sectionForTab maps a page's ActiveTab to its top-level nav SECTION so the
 // header highlights the parent entry while the in-page sub-tab bar tracks the
-// specific page. Library groups Browse / Inspector / Jobs; Listening groups
+// specific page. Library groups Roots / Inspector / Jobs; Listening groups
 // Playlists & history / Smart mixes. Standalone pages are their own section.
 func sectionForTab(tab string) string {
 	switch tab {

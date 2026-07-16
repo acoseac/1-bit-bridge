@@ -163,27 +163,108 @@ func TestSubmit_FiltersIneligibleAndCovered(t *testing.T) {
 	}
 }
 
-// TestSubmit_RefusesOnInsufficientDiskSpace exercises the pre-
-// flight: a tiny stubbed disk-free helper forces the batch to
-// refuse with the typed error.
+// seedHugeTrack plants one uncovered, hi-res track whose projected
+// variant size exceeds any real volume's free space, so the disk
+// pre-flight deterministically refuses. 96k/24 makes it BOTH
+// upscale-eligible (below a 192/24 target) AND optimize-eligible
+// (above the CarPlay floor), so the same fixture drives both
+// Submit paths.
+func seedHugeTrack(t *testing.T, s *manifest.Store) {
+	t.Helper()
+	if err := s.UpsertFolder(context.Background(), &manifest.Folder{Path: "Huge"}); err != nil {
+		t.Fatal(err)
+	}
+	rate := float64(96000)
+	bits := 24
+	isDSD := false
+	if err := s.UpsertTrack(context.Background(), &manifest.Track{
+		Path:          "Huge/01.flac",
+		Size:          1 << 60, // ~1 EiB source → projection dwarfs any real free space
+		SampleRate:    &rate,
+		BitsPerSample: &bits,
+		Codec:         "FLAC",
+		IsDSD:         &isDSD,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestSubmit_RefusesOnInsufficientDiskSpace exercises the pre-flight
+// with a projection no real volume can hold, and pins that the check
+// grades the OUTPUT dir (the variants write target) — not the
+// coordinator's dataDir. The outputDir deliberately doesn't exist
+// yet: AvailableDiskSpaceNearest must fall back to its existing
+// parent volume instead of erroring (the lazily-created variants
+// dir cold-start case).
 func TestSubmit_RefusesOnInsufficientDiskSpace(t *testing.T) {
 	s := openTempStoreForBatch(t)
 	t.Cleanup(func() { _ = s.Close() })
-	seedBatchFixture(t, s)
+	seedHugeTrack(t, s)
 
 	p := NewPool(s, 1, 4)
 	t.Cleanup(p.Stop)
-	c, err := NewCoordinator(p, s, "/this/path/does/not/exist/anywhere", nil, func(rel string) (string, error) { return "/tmp/abs/" + rel, nil })
+	c, err := NewCoordinator(p, s, t.TempDir(), nil, func(rel string) (string, error) { return "/tmp/abs/" + rel, nil })
 	if err != nil {
 		t.Fatalf("NewCoordinator: %v", err)
 	}
-	// DataDir doesn't exist → AvailableDiskSpace errors → Submit
-	// surfaces it. Doesn't directly test the InsufficientDiskSpace
-	// path but locks the "disk probe failure is surfaced not
-	// swallowed" contract.
-	_, err = c.Submit(context.Background(), "Album", 192000, 24, t.TempDir())
-	if err == nil {
-		t.Fatalf("Submit on missing dataDir: want error, got nil")
+	outDir := filepath.Join(t.TempDir(), "variants", "not-created-yet")
+	_, err = c.Submit(context.Background(), "Huge", 192000, 24, outDir)
+	var dskErr *InsufficientDiskSpaceError
+	if !errors.As(err, &dskErr) {
+		t.Fatalf("Submit: want *InsufficientDiskSpaceError, got %v", err)
+	}
+	if dskErr.Dir != outDir {
+		t.Errorf("disk check graded %q, want the outputDir %q", dskErr.Dir, outDir)
+	}
+}
+
+// TestSubmitOptimize_DiskCheckTargetsOutputDir is the optimize twin:
+// the pre-flight for CarPlay-optimize batches must also grade the
+// per-call outputDir.
+func TestSubmitOptimize_DiskCheckTargetsOutputDir(t *testing.T) {
+	s := openTempStoreForBatch(t)
+	t.Cleanup(func() { _ = s.Close() })
+	seedHugeTrack(t, s)
+
+	p := NewPool(s, 1, 4)
+	t.Cleanup(p.Stop)
+	c, err := NewCoordinator(p, s, t.TempDir(), nil, func(rel string) (string, error) { return "/tmp/abs/" + rel, nil })
+	if err != nil {
+		t.Fatalf("NewCoordinator: %v", err)
+	}
+	outDir := filepath.Join(t.TempDir(), "variants", "not-created-yet")
+	_, err = c.SubmitOptimize(context.Background(), "Huge", outDir)
+	var dskErr *InsufficientDiskSpaceError
+	if !errors.As(err, &dskErr) {
+		t.Fatalf("SubmitOptimize: want *InsufficientDiskSpaceError, got %v", err)
+	}
+	if dskErr.Dir != outDir {
+		t.Errorf("disk check graded %q, want the outputDir %q", dskErr.Dir, outDir)
+	}
+}
+
+// TestSubmit_DiskCheckFallsBackToDataDir pins the outputDir==""
+// fallback: legacy/test callers that don't pass a write target get
+// the coordinator's dataDir graded, preserving pre-fix behaviour.
+func TestSubmit_DiskCheckFallsBackToDataDir(t *testing.T) {
+	s := openTempStoreForBatch(t)
+	t.Cleanup(func() { _ = s.Close() })
+	seedHugeTrack(t, s)
+
+	p := NewPool(s, 1, 4)
+	t.Cleanup(p.Stop)
+	dataDir := t.TempDir()
+	c, err := NewCoordinator(p, s, dataDir, nil, func(rel string) (string, error) { return "/tmp/abs/" + rel, nil })
+	if err != nil {
+		t.Fatalf("NewCoordinator: %v", err)
+	}
+	_, err = c.Submit(context.Background(), "Huge", 192000, 24, "")
+	var dskErr *InsufficientDiskSpaceError
+	if !errors.As(err, &dskErr) {
+		t.Fatalf("Submit: want *InsufficientDiskSpaceError, got %v", err)
+	}
+	if dskErr.Dir != dataDir {
+		t.Errorf("disk check graded %q, want the dataDir fallback %q", dskErr.Dir, dataDir)
 	}
 }
 

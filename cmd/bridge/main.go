@@ -441,11 +441,16 @@ func (a *integritySidecarListerAdapter) AllSidecarPaths(ctx context.Context) (ma
 //     package's ErrUpscaleQueueFull sentinel so the handler can
 //     `errors.Is` cleanly without importing transcode.
 type upscaleEnqueuerAdapter struct {
-	pool      *transcode.Pool
-	store     *manifest.Store
-	resolver  *bridgefs.Resolver
-	cfg       *config.Config
-	outputDir string
+	pool     *transcode.Pool
+	store    *manifest.Store
+	resolver *bridgefs.Resolver
+	cfg      *config.Config
+	// outputDir resolves the CURRENT effective variants dir per call
+	// (closure over the live config holder). A construction-time
+	// string snapshot silently ignored hot variants-dir changes
+	// (POST /api/upscale/variants-dir) until restart — new sidecars
+	// kept landing on, and disk checks kept grading, the old path.
+	outputDir func() string
 }
 
 // resolveAndLookupTrack is the shared scaffolding for `EnqueueOne`
@@ -576,7 +581,7 @@ func (a *upscaleEnqueuerAdapter) EnqueueOptimize(libraryRelativePath string) err
 	if err != nil {
 		return err
 	}
-	spec, err := buildOptimizeSpec(track, abs, a.outputDir)
+	spec, err := buildOptimizeSpec(track, abs, a.outputDir())
 	if err != nil {
 		return err
 	}
@@ -620,7 +625,7 @@ func (a *upscaleEnqueuerAdapter) EnqueueOne(libraryRelativePath string) error {
 		TargetSampleRate: target,
 		TargetBits:       a.cfg.Upscale.EffectiveTargetBits(),
 		Quality:          transcode.QualityVeryHigh,
-		OutputDir:        a.outputDir,
+		OutputDir:        a.outputDir(),
 	}
 	return a.finalizeAndEnqueue(spec, track.Path, true)
 }
@@ -633,10 +638,12 @@ func (a *upscaleEnqueuerAdapter) EnqueueOne(libraryRelativePath string) error {
 // stays free of that concern. Mirrors the upscaleEnqueuerAdapter
 // shape.
 type upscaleBatchCoordinatorAdapter struct {
-	coord     *transcode.Coordinator
-	store     *manifest.Store
-	dataDir   string
-	outputDir string
+	coord *transcode.Coordinator
+	store *manifest.Store
+	// outputDir resolves the CURRENT effective variants dir per call
+	// — see upscaleEnqueuerAdapter.outputDir for the hot-reload
+	// rationale.
+	outputDir func() string
 }
 
 // translateApiSubmitResult is the shared result/error translator
@@ -687,12 +694,12 @@ func (a *upscaleBatchCoordinatorAdapter) Submit(ctx context.Context, libraryRelP
 			}
 		}
 	}
-	res, err := a.coord.Submit(ctx, libraryRelPath, targetRate, targetBits, a.outputDir)
+	res, err := a.coord.Submit(ctx, libraryRelPath, targetRate, targetBits, a.outputDir())
 	return translateApiSubmitResult(res, err)
 }
 
 func (a *upscaleBatchCoordinatorAdapter) SubmitOptimize(ctx context.Context, libraryRelPath string) (api.BatchSubmitResult, error) {
-	res, err := a.coord.SubmitOptimize(ctx, libraryRelPath, a.outputDir)
+	res, err := a.coord.SubmitOptimize(ctx, libraryRelPath, a.outputDir())
 	return translateApiSubmitResult(res, err)
 }
 
@@ -739,10 +746,12 @@ func (a *upscaleBatchCoordinatorAdapter) Throughput() api.BatchThroughput {
 // packages' equivalent value types so the admin package stays free
 // of internal/transcode (mirrors UpscaleEnqueuer / UpscaleStats).
 type adminBatchCoordinatorAdapter struct {
-	coord     *transcode.Coordinator
-	store     *manifest.Store
-	dataDir   string
-	outputDir string
+	coord *transcode.Coordinator
+	store *manifest.Store
+	// outputDir resolves the CURRENT effective variants dir per call
+	// — see upscaleEnqueuerAdapter.outputDir for the hot-reload
+	// rationale.
+	outputDir func() string
 }
 
 // translateAdminSubmitResult mirrors translateApiSubmitResult for
@@ -786,12 +795,12 @@ func (a *adminBatchCoordinatorAdapter) Submit(ctx context.Context, libraryRelPat
 			}
 		}
 	}
-	res, err := a.coord.Submit(ctx, libraryRelPath, targetRate, targetBits, a.outputDir)
+	res, err := a.coord.Submit(ctx, libraryRelPath, targetRate, targetBits, a.outputDir())
 	return translateAdminSubmitResult(res, err)
 }
 
 func (a *adminBatchCoordinatorAdapter) SubmitOptimize(ctx context.Context, libraryRelPath string) (admin.AdminBatchSubmitResult, error) {
-	res, err := a.coord.SubmitOptimize(ctx, libraryRelPath, a.outputDir)
+	res, err := a.coord.SubmitOptimize(ctx, libraryRelPath, a.outputDir())
 	return translateAdminSubmitResult(res, err)
 }
 
@@ -2255,18 +2264,26 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 				}
 			}
 		}
+		// liveVariantsDir resolves the effective variants dir from the
+		// LIVE config holder so hot changes via POST
+		// /api/upscale/variants-dir take effect without a restart —
+		// both for where new sidecars land and for the pre-flight
+		// disk checks that grade that volume.
+		liveVariantsDir := func() string {
+			live := cfgHolder.Load()
+			return live.Upscale.EffectiveVariantsDir(live.DataDir)
+		}
 		apiSrv.WithUpscaleEnqueuer(&upscaleEnqueuerAdapter{
 			pool:      upscalePool,
 			store:     manifestStore,
 			resolver:  apiSrv.Resolver(),
 			cfg:       cfg,
-			outputDir: cfg.Upscale.EffectiveVariantsDir(cfg.DataDir),
+			outputDir: liveVariantsDir,
 		})
 		apiSrv.WithBatchCoordinator(&upscaleBatchCoordinatorAdapter{
 			coord:     upscaleCoordinator,
 			store:     manifestStore,
-			dataDir:   cfg.DataDir,
-			outputDir: cfg.Upscale.EffectiveVariantsDir(cfg.DataDir),
+			outputDir: liveVariantsDir,
 		})
 		// Variant lifecycle: DELETE /v1/upscale/variants + reactive
 		// serve-side cleanup + integrity ticker all share the same
@@ -2799,7 +2816,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			if live == nil || !live.Upscale.Enabled {
 				return nil
 			}
-			return transcode.AvailableDiskSpace
+			// Nearest-existing-ancestor probe: the variants dir is
+			// created lazily, so a bare statfs on it would ENOENT
+			// before the first sidecar lands.
+			return transcode.AvailableDiskSpaceNearest
 		}(),
 		// CarPlay-optimize deps closures. Gated on BOTH
 		// `Upscale.Enabled` AND `EffectiveOptimizeEnabled()` so
@@ -2837,10 +2857,14 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 				return nil
 			}
 			return &adminBatchCoordinatorAdapter{
-				coord:     upscaleCoordinator,
-				store:     manifestStore,
-				dataDir:   cfg.DataDir,
-				outputDir: cfg.Upscale.EffectiveVariantsDir(cfg.DataDir),
+				coord: upscaleCoordinator,
+				store: manifestStore,
+				// Live-resolved so hot variants-dir changes apply
+				// without restart (see upscaleEnqueuerAdapter).
+				outputDir: func() string {
+					live := cfgHolder.Load()
+					return live.Upscale.EffectiveVariantsDir(live.DataDir)
+				},
 			}
 		}(),
 		VariantDeleter: func() admin.AdminVariantDeleter {

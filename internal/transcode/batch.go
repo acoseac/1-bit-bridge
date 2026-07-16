@@ -97,8 +97,14 @@ const throughputMinSamples = 3
 // Coordinator wraps a Pool with per-batch enrollment, live
 // counters, throughput math, and SSE event emission.
 type Coordinator struct {
-	pool     *Pool
-	store    *manifest.Store
+	pool  *Pool
+	store *manifest.Store
+	// dataDir is the FALLBACK disk-check dir only — the pre-flight
+	// headroom checks in Submit / SubmitOptimize grade the per-call
+	// `outputDir` (the directory the variants are actually written
+	// to, which may live on a different volume than the bridge data
+	// dir). dataDir is used only when a caller passes outputDir=""
+	// (test harnesses / legacy callers).
 	dataDir  string
 	publish  CoordinatorPublishFunc
 	resolver ResolverFunc
@@ -316,9 +322,17 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 			"batchPath", path, "count", resolveErrors)
 	}
 
-	// Pre-flight disk check. Refuse with a typed error carrying
-	// the operator-facing numbers.
-	ok, available, err := DiskHasHeadroom(c.dataDir, totalProjected, DefaultDiskSafetyMargin)
+	// Pre-flight disk check against the directory the variants will
+	// actually be WRITTEN to — outputDir may live on a different
+	// volume than the bridge data dir (field case: bridge.ars.md's
+	// variants on a ~1 PB B2 mount while dataDir sits on a 29 GB
+	// root disk; checking dataDir refused batches that fit easily).
+	// Refuse with a typed error carrying the operator-facing numbers.
+	checkDir := outputDir
+	if checkDir == "" {
+		checkDir = c.dataDir
+	}
+	ok, available, err := DiskHasHeadroom(checkDir, totalProjected, DefaultDiskSafetyMargin)
 	if err != nil {
 		return nil, fmt.Errorf("submit: disk probe: %w", err)
 	}
@@ -327,7 +341,7 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 			ProjectedBytes: totalProjected,
 			RequiredBytes:  int64(float64(totalProjected) * (1 + DefaultDiskSafetyMargin)),
 			AvailableBytes: available,
-			Dir:            c.dataDir,
+			Dir:            checkDir,
 		}
 	}
 
@@ -598,7 +612,14 @@ func (c *Coordinator) SubmitOptimize(ctx context.Context, path string, outputDir
 
 	picked := c.buildOptimizeCandidates(path, projections)
 
-	ok, available, err := DiskHasHeadroom(c.dataDir, picked.totalProjected, DefaultDiskSafetyMargin)
+	// Same write-target disk check as Submit: grade outputDir (the
+	// actual sidecar destination), falling back to dataDir only for
+	// callers that pass "".
+	checkDir := outputDir
+	if checkDir == "" {
+		checkDir = c.dataDir
+	}
+	ok, available, err := DiskHasHeadroom(checkDir, picked.totalProjected, DefaultDiskSafetyMargin)
 	if err != nil {
 		return nil, fmt.Errorf("submit optimize: disk probe: %w", err)
 	}
@@ -607,7 +628,7 @@ func (c *Coordinator) SubmitOptimize(ctx context.Context, path string, outputDir
 			ProjectedBytes: picked.totalProjected,
 			RequiredBytes:  int64(float64(picked.totalProjected) * (1 + DefaultDiskSafetyMargin)),
 			AvailableBytes: available,
-			Dir:            c.dataDir,
+			Dir:            checkDir,
 		}
 	}
 

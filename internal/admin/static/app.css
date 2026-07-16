@@ -697,6 +697,19 @@ table.rows tbody tr:hover td { background: color-mix(in srgb, var(--accent) 4%, 
   background: color-mix(in srgb, var(--accent) 88%, #000);
   border-color: color-mix(in srgb, var(--accent) 88%, #000);
 }
+/* A disabled primary keeps its (dimmed) accent fill even on hover —
+ * the generic .btn:disabled:hover below swaps in the low-contrast
+ * panel gray, which left 50%-opacity white text unreadable on the
+ * Inspector's "Generate" buttons. Specificity (0,4,1) beats the
+ * generic (0,3,1) rule without !important; the base .btn:disabled
+ * opacity still applies. */
+.btn.primary:disabled,
+.btn.primary:disabled:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  box-shadow: none;
+}
 /* .destructive is an alias used in settings.html for the same visual intent
  * as .danger — group the selectors so neither path drifts. */
 .btn.danger, .btn.destructive {
@@ -2052,11 +2065,19 @@ section.library-inspector {
   font-size: 0.95rem;
   font-weight: 600;
   flex-grow: 1;
-  /* Long classical-album names get middle-truncated so both ends
-     stay visible (the disambiguating part is often at the tail). */
-  white-space: nowrap;
+  /* min-width:0 lets this flex item actually shrink — without it a
+     long unbroken name forces the header wide and pushes the ⓘ/⋯
+     controls off the tile. */
+  min-width: 0;
+  /* Long names wrap to a 2-line clamp instead of the old one-line
+     end-ellipsis, which cut titles like "ABDULLAH IB…" too hard to
+     read. Full name stays in the title= attribute for hover. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
   overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .tile-menu-btn {
   background: none;
@@ -3316,14 +3337,11 @@ section.library-inspector {
   }
 
   /* --- Inspector long folder names -----------------------------------------
-   * .tile-name has white-space: nowrap + overflow: hidden + ellipsis on
-   * desktop; reset all three so long names wrap across 2-3 lines on phone
-   * (vertical room is cheap here — the grid is already 1-column at 600px). */
+   * Desktop clamps .tile-name to 2 lines; raise to 3 on phone where the
+   * grid is already 1-column and vertical room is cheap. Keep the clamp
+   * (an `overflow: visible` reset here would defeat it entirely). */
   .inspector-tile .tile-name {
-    white-space: normal;
-    overflow: visible;
-    text-overflow: clip;
-    overflow-wrap: anywhere;
+    -webkit-line-clamp: 3;
   }
 
   /* --- Group B: dl / status-grid readouts stack to one column. The fixed

@@ -414,3 +414,42 @@ func TestNormaliseBrowsePath_PureUnit(t *testing.T) {
 		}
 	}
 }
+
+// TestApiLibraryBrowseProjection_ProbesVariantsDir pins the disk
+// probe's TARGET: the projection must grade the volume holding the
+// effective variants dir (where sidecars are written — possibly a
+// different, much larger volume than the bridge data dir), not
+// cfg.DataDir. Field case: bridge.ars.md's B2-mounted variants vs a
+// 29 GB root disk — grading DataDir refused batches that fit easily.
+func TestApiLibraryBrowseProjection_ProbesVariantsDir(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	browseTestSeed(t, srv)
+
+	srv.deps.ProjectedSize = func(sourceSize int64, sourceRate, sourceBits, targetRate, targetBits int) int64 {
+		return sourceSize
+	}
+	var probedDir string
+	srv.deps.AvailableDiskSpace = func(dir string) (int64, error) {
+		probedDir = dir
+		return 1 << 40, nil
+	}
+
+	cfg := srv.deps.CfgHolder.Load()
+	next := config.Clone(cfg)
+	next.Upscale.Enabled = true
+	next.Upscale.VariantsDir = "/sentinel/variants-on-another-volume"
+	srv.deps.CfgHolder.Store(next)
+
+	var resp browseProjectionResponse
+	code := doJSON(t, srv.Handler(), "GET", "/api/library/browse-projection?path=MusicA", nil, &resp)
+	if code != http.StatusOK {
+		t.Fatalf("projection: %d", code)
+	}
+	want := next.Upscale.EffectiveVariantsDir(next.DataDir)
+	if probedDir != want {
+		t.Errorf("disk probe graded %q, want the effective variants dir %q", probedDir, want)
+	}
+	if probedDir == next.DataDir {
+		t.Errorf("disk probe graded cfg.DataDir %q — the pre-fix bug", next.DataDir)
+	}
+}
