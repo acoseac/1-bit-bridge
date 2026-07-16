@@ -296,6 +296,16 @@ func classifyUpscaleTrack(
 		counters.notPCM++
 		return nil, 0
 	}
+	// Lossy sources are never upscaled OR optimized (PROTOCOL.md
+	// documents the gate as "PCM"; upscaling decoded lossy audio adds
+	// no fidelity). Mirrors Coordinator.Submit / EnqueueOne via the
+	// shared manifest.IsLossyCodec. Gating here (vs relying on
+	// OptimizeEligible below for kind=optimize) also counts lossy
+	// under the accurate `notPCM` bucket instead of alreadyAtTarget.
+	if manifest.IsLossyCodec(t.Codec) {
+		counters.notPCM++
+		return nil, 0
+	}
 	if t.SampleRate == nil {
 		// No rate metadata → can't decide a target; skip
 		// silently. The scanner sets this for every PCM file

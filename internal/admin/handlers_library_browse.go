@@ -193,16 +193,14 @@ type browseProjectionResponse struct {
 	RequiredBytesWithMargin int64 `json:"requiredBytesWithMargin"`
 }
 
-// lossyCodecLabels are the codec strings the scanner stamps for lossy
-// sources. Used ONLY for the per-track skip LABEL (lossy_source vs the
-// generic unknown_format) — the eligibility gate elsewhere is a PCM
-// allowlist. codec "" is unknown, NOT lossy, so it stays unknown_format.
-var lossyCodecLabels = map[string]bool{
-	"MP3": true, "AAC": true, "OGG": true, "OPUS": true, "WMA": true,
-}
-
+// isLossyCodecLabel answers "is this a lossy encode?" for the
+// per-track skip badge AND the projection walk's upscale gate.
+// Delegates to manifest.IsLossyCodec — the single source of truth
+// shared with Coordinator.Submit / EnqueueOne and mirrored by
+// upscaleEligibleSQL — so the badge and the gates can't drift.
+// codec "" is unknown, NOT lossy, so it stays unknown_format.
 func isLossyCodecLabel(codec string) bool {
-	return lossyCodecLabels[strings.ToUpper(strings.TrimSpace(codec))]
+	return manifest.IsLossyCodec(codec)
 }
 
 // fundamentalSkipReason returns the kind-agnostic, target-independent
@@ -686,6 +684,14 @@ func (s *Server) apiLibraryBrowseProjection(w http.ResponseWriter, r *http.Reque
 				continue
 			}
 		} else {
+			if manifest.IsLossyCodec(t.Codec) {
+				// Lossy sources are never upscaled (Submit's gate,
+				// PROTOCOL.md "PCM") — genuinely skipped, so they
+				// belong in the unknownFormat bucket the UI labels
+				// "DSD / lossy / unknown format", NOT at-target.
+				unknownFormat++
+				continue
+			}
 			if t.SampleRate > rate || t.BitsPerSample > bits ||
 				(t.SampleRate == rate && t.BitsPerSample == bits) {
 				// At or above the upscale target on either axis

@@ -520,3 +520,39 @@ func TestRedactSoxErr_InteriorGarbagePreservesMessage(t *testing.T) {
 		t.Errorf("missing truncation marker: %q", got[len(got)-30:])
 	}
 }
+
+// TestSubmit_SkipsLossySources pins the upscale lossy gate: a lossy
+// track that slips past the geometry gate (a fabricated bits tag —
+// real MP3s carry no bit depth) must NOT be enqueued, matching the
+// inspector's lossy_source badge and PROTOCOL.md's documented "PCM"
+// eligibility. The sibling FLAC still enqueues.
+func TestSubmit_SkipsLossySources(t *testing.T) {
+	s := openTempStoreForBatch(t)
+	t.Cleanup(func() { _ = s.Close() })
+	if err := s.UpsertFolder(context.Background(), &manifest.Folder{Path: "Mixed"}); err != nil {
+		t.Fatal(err)
+	}
+	seed := func(path, codec string, rate float64, bits int) {
+		t.Helper()
+		isDSD := false
+		if err := s.UpsertTrack(context.Background(), &manifest.Track{
+			Path: path, Size: 1_000_000, Codec: codec,
+			SampleRate: &rate, BitsPerSample: &bits, IsDSD: &isDSD,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed("Mixed/01.flac", "FLAC", 44100, 16)
+	seed("Mixed/02.mp3", "MP3", 44100, 16) // bogus-bits lossy row
+
+	c, p, _ := newTestCoordinatorWithStubbedPool(t, s)
+	t.Cleanup(p.Stop)
+	res, err := c.Submit(context.Background(), "Mixed", 192000, 24, t.TempDir())
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if res.TotalFiles != 1 || res.EnqueuedCount != 1 {
+		t.Errorf("TotalFiles/Enqueued = %d/%d, want 1/1 (the FLAC only — lossy row gated)",
+			res.TotalFiles, res.EnqueuedCount)
+	}
+}

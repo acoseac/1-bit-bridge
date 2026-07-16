@@ -593,6 +593,13 @@ func (a *upscaleEnqueuerAdapter) EnqueueOne(libraryRelativePath string) error {
 	if err != nil {
 		return err
 	}
+	// Lossy sources are never upscaled (PROTOCOL.md documents the
+	// gate as "PCM"; upscaling decoded lossy audio adds no fidelity).
+	// Mirrors Coordinator.Submit's batch walk — single source of
+	// truth in manifest.IsLossyCodec.
+	if manifest.IsLossyCodec(track.Codec) {
+		return api.ErrUpscaleIneligible
+	}
 	if track.SampleRate == nil {
 		return api.ErrUpscaleIneligible
 	}
