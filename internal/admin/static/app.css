@@ -2131,6 +2131,16 @@ section.library-inspector {
   font-variant-numeric: tabular-nums;
   color: color-mix(in srgb, currentcolor 60%, transparent);
 }
+/* "N need nothing" suffix — tracks outside the eligible denominator
+ * (already at target / DSD / lossy / unknown). Informational, muted. */
+.coverage-row .coverage-exempt {
+  font-size: 0.75rem;
+  white-space: nowrap;
+  color: color-mix(in srgb, currentcolor 45%, transparent);
+}
+/* A kind with a zero eligible denominator ("nothing to do") dims its
+ * whole row — the bar carries no signal there. */
+.coverage-row[data-empty="true"] { opacity: 0.55; }
 .coverage-row progress {
   appearance: none;
   -webkit-appearance: none;
