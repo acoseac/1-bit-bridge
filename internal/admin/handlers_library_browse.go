@@ -684,11 +684,13 @@ func (s *Server) apiLibraryBrowseProjection(w http.ResponseWriter, r *http.Reque
 				continue
 			}
 		} else {
-			if manifest.IsLossyCodec(t.Codec) {
+			if isLossyCodecLabel(t.Codec) {
 				// Lossy sources are never upscaled (Submit's gate,
 				// PROTOCOL.md "PCM") — genuinely skipped, so they
 				// belong in the unknownFormat bucket the UI labels
 				// "DSD / lossy / unknown format", NOT at-target.
+				// Same shared predicate as the tile badge (the local
+				// wrapper delegates to manifest.IsLossyCodec).
 				unknownFormat++
 				continue
 			}
