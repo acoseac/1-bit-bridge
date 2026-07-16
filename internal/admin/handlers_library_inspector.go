@@ -238,6 +238,14 @@ func (s *Server) pageLibraryInspector(w http.ResponseWriter, r *http.Request) {
 	s.renderPage(w, "library_inspector", map[string]any{
 		"UpscaleStoragePath": cfg.Upscale.EffectiveVariantsDir(cfg.DataDir),
 		"SoxAvailable":       soxAvailable,
+		// Atlas metadata layer gates: AtlasEnabled shows the About
+		// panel card (bios / descriptions); BookletsEnabled adds the
+		// booklet rows/chips (requires the harvest wiring — mirrors
+		// the /v1/health `booklets` flag condition via Deps.BookletPath).
+		// Tile artwork is data-driven regardless (covers exist via
+		// CAA / local extraction without Atlas).
+		"AtlasEnabled":    cfg.Atlas.Enabled,
+		"BookletsEnabled": s.deps.BookletPath != nil,
 	})
 }
 

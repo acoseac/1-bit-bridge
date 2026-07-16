@@ -2583,6 +2583,15 @@ const inspectorState = {
   // the page root's data-sox-available attribute. Used by the
   // selection bar + per-tile menu to gate generate actions.
   soxAvailable: true,
+  // Atlas metadata layer (seeded from data-atlas-enabled /
+  // data-booklets-enabled at init). atlasEnabled gates the About
+  // card fetch; tile artwork refs are fetched regardless (covers
+  // exist without Atlas). lastTileMeta memoizes the current path's
+  // children-refs response so load-more pages decorate without a
+  // refetch.
+  atlasEnabled: false,
+  bookletsEnabled: false,
+  lastTileMeta: null,
   // Search state (PR B). `mode` is "browse" (default) or "search"
   // (flat-results view). `searchQuery` is the active query; the
   // debounced timer + in-flight controller live in module-level
@@ -2740,6 +2749,12 @@ function initLibraryInspector() {
   // gate-disabled check.
   const page = document.querySelector(".library-inspector");
   inspectorState.soxAvailable = page?.dataset.soxAvailable !== "false";
+  // Atlas metadata layer gates (set once at mount, mirroring the
+  // template's server-side flags).
+  inspectorState.atlasEnabled = page?.dataset.atlasEnabled === "true";
+  inspectorState.bookletsEnabled = page?.dataset.bookletsEnabled === "true";
+  const aboutRetryBtn = document.getElementById("panel-about-retry");
+  if (aboutRetryBtn) aboutRetryBtn.addEventListener("click", inspectorAboutRetryClick);
 
   // Sticky-stack height tracker (from PR A): write actual measured
   // offsetHeight of the toolbar + storage bar into CSS custom
@@ -3039,6 +3054,7 @@ async function inspectorNavigate(path, opts = {}) {
   // folder under the new path. CodeRabbit Major late on PR #246.
   inspectorState.renderGeneration++;
   inspectorState.lastBrowseData = null;
+  inspectorState.lastTileMeta = null;
   // Any navigation exits search mode — covers the case where the
   // operator clicked a search-result folder/track and we land in
   // browse mode without an explicit Exit. Without this reset the
@@ -3095,6 +3111,10 @@ async function inspectorNavigate(path, opts = {}) {
     // CodeRabbit Major on PR #246 round-2.
     await inspectorRender(data);
     if (inspectorState.path !== path || inspectorState.camelot !== camelot) return;
+    // Atlas tile decoration — fire-and-forget AFTER the awaited
+    // render so it can never block the render/scroll-restore chain;
+    // its own path race-guard drops stale responses.
+    if (!camelot) inspectorFetchTileMeta(path);
     // Restore scroll after the table body is fully realized.
     const targetY = typeof opts.restoreScroll === "number"
       ? opts.restoreScroll
@@ -3401,6 +3421,9 @@ function inspectorAppendTiles(folders, tracks, replace) {
         requestAnimationFrame(pump);
       } else {
         inspectorRefreshLoadMoreSentinel();
+        // Load-more pages decorate from the memoized refs payload
+        // (the response covers ALL children — no refetch needed).
+        inspectorDecorateTiles();
         resolve();
       }
     }
@@ -3414,6 +3437,378 @@ function inspectorAppendTiles(folders, tracks, replace) {
 // shape to the new (folders, tracks, replace) one.
 function inspectorAppendRows(_body, folders, tracks, replace) {
   return inspectorAppendTiles(folders, tracks, replace);
+}
+
+// ===== Atlas metadata layer: tile artwork + booklet chips =====
+
+// inspectorFetchTileMeta pulls the current folder's children refs
+// (GET /api/library/enrichment) and decorates the rendered tiles.
+// Fire-and-forget from inspectorNavigate AFTER the awaited render —
+// it must never block the render/scroll-restore chain. One response
+// covers ALL children (unpaginated server-side grouping), memoized in
+// inspectorState.lastTileMeta so load-more pages decorate without a
+// refetch. Race-guarded on inspectorState.path like the browse fetch.
+async function inspectorFetchTileMeta(path) {
+  if (inspectorState.camelot) return; // key-filter view has no folder tiles
+  try {
+    const res = await fetch(`/api/library/enrichment?path=${encodeURIComponent(path)}`);
+    if (inspectorState.path !== path || inspectorState.camelot) return;
+    if (!res.ok) return; // decoration is best-effort — tiles stay icon-only
+    const data = await res.json();
+    if (inspectorState.path !== path || inspectorState.camelot) return;
+    inspectorState.lastTileMeta = data;
+    inspectorDecorateTiles();
+  } catch {
+    // Best-effort: a failed refs fetch leaves plain tiles.
+  }
+}
+
+// inspectorDecorateTiles patches the rendered folder tiles from the
+// memoized refs payload: cover / artist-portrait thumbnails (lazy
+// <img> against the loopback byte routes) + a booklet indicator chip.
+// Idempotent per tile via data-decorated.
+function inspectorDecorateTiles() {
+  const meta = inspectorState.lastTileMeta;
+  if (!meta || !meta.children) return;
+  const grid = document.getElementById("folders-grid");
+  if (!grid) return;
+  for (const tile of grid.querySelectorAll('.inspector-tile[data-kind="folder"]:not([data-decorated])')) {
+    tile.dataset.decorated = "true";
+    const tilePath = tile.dataset.path || "";
+    const name = tilePath.slice(tilePath.lastIndexOf("/") + 1);
+    const ref = meta.children[name];
+    if (!ref) continue;
+
+    const header = tile.querySelector(".tile-header");
+    const icon = tile.querySelector(".tile-icon");
+    if (header && (ref.artworkMBID || ref.artistMBID)) {
+      const img = document.createElement("img");
+      img.className = "tile-thumb";
+      img.loading = "lazy";
+      img.decoding = "async";
+      img.alt = "";
+      const coverURL = ref.artworkMBID
+        ? `/api/library/artwork/${encodeURIComponent(ref.artworkMBID)}?size=500${ref.artworkVersion ? `&v=${encodeURIComponent(ref.artworkVersion)}` : ""}`
+        : "";
+      // Artist folders prefer the portrait, falling back to the
+      // representative cover, then to no image (emoji icon stays).
+      const sources = [];
+      if (ref.kind === "artist" && ref.artistMBID) {
+        sources.push(`/api/library/artist-image/${encodeURIComponent(ref.artistMBID)}`);
+      }
+      if (coverURL) sources.push(coverURL);
+      if (sources.length > 0) {
+        let attempt = 0;
+        img.addEventListener("error", () => {
+          attempt++;
+          if (attempt < sources.length) {
+            img.src = sources[attempt];
+          } else {
+            img.remove();
+            delete tile.dataset.thumb;
+          }
+        });
+        img.addEventListener("load", () => {
+          img.dataset.loaded = "true";
+          tile.dataset.thumb = "true";
+        });
+        img.src = sources[0];
+        header.insertBefore(img, icon || header.firstChild);
+      }
+    }
+    if (ref.hasBooklet && header) {
+      const chip = document.createElement("span");
+      chip.className = "tile-booklet";
+      chip.textContent = "📖";
+      chip.title = "PDF booklet available — open the ⓘ panel to view";
+      chip.setAttribute("aria-label", "PDF booklet available");
+      const nameEl = tile.querySelector(".tile-name");
+      if (nameEl) nameEl.after(chip);
+      else header.appendChild(chip);
+    }
+  }
+}
+
+// ===== Atlas metadata layer: About panel card =====
+
+// safeExternalHref admits only parseable http(s) URLs — attribution
+// links come from third-party metadata and must never become
+// javascript:/data: vectors.
+function safeExternalHref(raw) {
+  try {
+    const u = new URL(raw);
+    if (u.protocol === "http:" || u.protocol === "https:") return u.href;
+  } catch {
+    /* fallthrough */
+  }
+  return null;
+}
+
+// aboutEl is a tiny createElement helper: tag, className, textContent.
+// EVERYTHING in the About card renders through textContent — bios,
+// descriptions, labels, and genres are remote third-party strings and
+// must never touch innerHTML (Camelot-wheel SVG precedent).
+function aboutEl(tag, className, text) {
+  const el = document.createElement(tag);
+  if (className) el.className = className;
+  if (text) el.textContent = text;
+  return el;
+}
+
+// appendAttribution renders the mandatory "Read more on <source>"
+// line (CC-BY-SA / ToS compliance — required whenever bio/description
+// text renders; PROTOCOL.md attribution contract).
+function appendAttribution(parent, source, sourceUrl) {
+  if (!source) return;
+  const p = aboutEl("p", "about-attribution");
+  const href = sourceUrl ? safeExternalHref(sourceUrl) : null;
+  if (href) {
+    const a = document.createElement("a");
+    a.href = href;
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+    a.textContent = `Read more on ${source}`;
+    p.appendChild(a);
+  } else {
+    p.textContent = `Source: ${source}`;
+  }
+  parent.appendChild(p);
+}
+
+// appendClampedText renders a long text block with a 4-line CSS clamp
+// and a "Show more" expander (swaps in the full text when longer).
+function appendClampedText(parent, summaryText, fullText) {
+  const display = summaryText || fullText;
+  if (!display) return;
+  const p = aboutEl("p", "about-clamp", display);
+  p.dataset.expanded = "false";
+  parent.appendChild(p);
+  const hasMore = fullText && fullText.length > display.length;
+  if (hasMore || display.length > 320) {
+    const btn = aboutEl("button", "btn about-expand", "Show more");
+    btn.type = "button";
+    btn.addEventListener("click", () => {
+      const expanded = p.dataset.expanded === "true";
+      if (expanded) {
+        p.textContent = display;
+        p.dataset.expanded = "false";
+        btn.textContent = "Show more";
+      } else {
+        p.textContent = fullText || display;
+        p.dataset.expanded = "true";
+        btn.textContent = "Show less";
+      }
+    });
+    parent.appendChild(btn);
+  }
+}
+
+// inspectorFetchPanelAbout loads the About card's detail for the open
+// single-mode folder. Race-guarded like the projection fetch.
+async function inspectorFetchPanelAbout(path) {
+  const card = document.getElementById("panel-card-about");
+  if (!card || !inspectorState.atlasEnabled) return;
+  const content = document.getElementById("panel-about-content");
+  const hint = document.getElementById("panel-hint-about");
+  const retryBtn = document.getElementById("panel-about-retry");
+  const statusEl = document.getElementById("panel-about-status");
+  if (statusEl) statusEl.textContent = "";
+  if (content) {
+    content.textContent = "";
+    content.appendChild(aboutEl("p", "hint", "Loading metadata…"));
+  }
+  const stillCurrent = () =>
+    inspectorState.panelMode === "single"
+    && inspectorState.selection?.kind === "folder"
+    && inspectorState.selection.row.path === path;
+  try {
+    const res = await fetch(`/api/library/enrichment/detail?path=${encodeURIComponent(path)}`);
+    if (!stillCurrent()) return;
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (!stillCurrent()) return;
+    renderAboutContent(content, hint, retryBtn, data);
+  } catch (err) {
+    if (!stillCurrent() || !content) return;
+    content.textContent = "";
+    content.appendChild(aboutEl("p", "hint", `Couldn't load metadata: ${err.message}`));
+  }
+}
+
+// renderAboutContent paints the About card from the detail payload.
+function renderAboutContent(content, hint, retryBtn, data) {
+  if (!content) return;
+  content.textContent = "";
+  let anyMissing = false;
+  const presence = [];
+
+  // Thumbnail row (cover + artist portrait when cached).
+  const thumbs = aboutEl("div", "about-thumbs");
+  if (data.coverMBID) {
+    const img = document.createElement("img");
+    img.className = "about-cover";
+    img.loading = "lazy";
+    img.alt = "Album cover";
+    img.src = `/api/library/artwork/${encodeURIComponent(data.coverMBID)}?size=500${data.coverVersion ? `&v=${encodeURIComponent(data.coverVersion)}` : ""}`;
+    img.addEventListener("error", () => img.remove());
+    thumbs.appendChild(img);
+  }
+  if (data.hasArtistImage && data.artist?.mbid) {
+    const img = document.createElement("img");
+    img.className = "about-cover";
+    img.loading = "lazy";
+    img.alt = "Artist portrait";
+    img.src = `/api/library/artist-image/${encodeURIComponent(data.artist.mbid)}`;
+    img.addEventListener("error", () => img.remove());
+    thumbs.appendChild(img);
+  }
+  if (thumbs.childNodes.length) content.appendChild(thumbs);
+
+  const noIdentifiers = !data.artist && !data.release
+    && !data.coverMBID && (!data.booklets || data.booklets.length === 0);
+  if (noIdentifiers) {
+    content.appendChild(aboutEl("p", "hint",
+      "No metadata identifiers found for this folder — nothing to look up yet (tracks may still be awaiting enrichment)."));
+  }
+
+  if (data.artist) {
+    const sec = aboutEl("section", "about-block");
+    sec.appendChild(aboutEl("h4", "", "Artist"));
+    switch (data.artist.state) {
+      case "found":
+        presence.push("bio");
+        appendClampedText(sec, data.artist.bioSummary, data.artist.bio);
+        if (data.artist.genres?.length) {
+          sec.appendChild(aboutEl("p", "about-genres", data.artist.genres.join(" · ")));
+        }
+        appendAttribution(sec, data.artist.source, data.artist.sourceUrl);
+        break;
+      case "missing":
+        anyMissing = true;
+        sec.appendChild(aboutEl("p", "hint", "Atlas has no bio for this artist."));
+        break;
+      default:
+        anyMissing = true;
+        sec.appendChild(aboutEl("p", "hint",
+          "Not checked yet — the harvest will fill this in on its next pass."));
+    }
+    if (!data.hasArtistImage && data.artist.mbid) {
+      anyMissing = true;
+      sec.appendChild(aboutEl("p", "hint", "No artist image cached."));
+    }
+    if (data.moreArtists > 0) {
+      sec.appendChild(aboutEl("p", "hint",
+        `Showing the dominant artist — ${data.moreArtists} more under this folder.`));
+    }
+    content.appendChild(sec);
+  }
+
+  if (data.release) {
+    const sec = aboutEl("section", "about-block");
+    sec.appendChild(aboutEl("h4", "", "Album"));
+    switch (data.release.state) {
+      case "found":
+        presence.push("description");
+        appendClampedText(sec, "", data.release.description);
+        if (data.release.recordLabel) {
+          sec.appendChild(aboutEl("p", "about-genres", `Label: ${data.release.recordLabel}`));
+        }
+        if (data.release.genres?.length) {
+          sec.appendChild(aboutEl("p", "about-genres", data.release.genres.join(" · ")));
+        }
+        appendAttribution(sec, data.release.source, data.release.sourceUrl);
+        break;
+      case "missing":
+        anyMissing = true;
+        sec.appendChild(aboutEl("p", "hint", "Atlas has no description for this album."));
+        break;
+      default:
+        anyMissing = true;
+        sec.appendChild(aboutEl("p", "hint",
+          "Not checked yet — the harvest will fill this in on its next pass."));
+    }
+    if (data.moreReleases > 0) {
+      sec.appendChild(aboutEl("p", "hint",
+        `Showing the dominant release — ${data.moreReleases} more under this folder.`));
+    }
+    content.appendChild(sec);
+  }
+
+  if (data.bookletsEnabled && data.booklets?.length) {
+    presence.push("booklet");
+    const sec = aboutEl("section", "about-block");
+    sec.appendChild(aboutEl("h4", "", data.booklets.length === 1 ? "Booklet" : "Booklets"));
+    for (const b of data.booklets) {
+      const row = aboutEl("p", "about-booklet-row");
+      if (b.state === "cached") {
+        const a = document.createElement("a");
+        a.href = `/api/library/booklet/${encodeURIComponent(b.mbid)}`;
+        a.target = "_blank";
+        a.rel = "noopener";
+        a.textContent = "View booklet (PDF)";
+        row.appendChild(a);
+      } else {
+        row.textContent = "Booklet available — download pending. ";
+        const btn = aboutEl("button", "btn about-fetch-booklet", "Fetch now");
+        btn.type = "button";
+        btn.addEventListener("click", async () => {
+          btn.disabled = true;
+          btn.textContent = "Queued…";
+          // The booklet route's 202 path nudges the fetch sweep
+          // server-side; no response handling needed here.
+          try { await fetch(`/api/library/booklet/${encodeURIComponent(b.mbid)}`); } catch { /* best-effort */ }
+        });
+        row.appendChild(btn);
+      }
+      sec.appendChild(row);
+    }
+    content.appendChild(sec);
+  }
+
+  if (hint) hint.textContent = presence.join(" · ");
+  if (retryBtn) retryBtn.hidden = !anyMissing;
+}
+
+// inspectorAboutRetryClick fires the folder-scoped metadata retry.
+// Optimistic in-card status, NO auto-refetch: enrichment runs at the
+// MB/CAA/Deezer clients' pacing, so an immediate refetch would lose
+// the race and read as failure — the card refreshes naturally on the
+// next open.
+async function inspectorAboutRetryClick() {
+  const btn = document.getElementById("panel-about-retry");
+  const statusEl = document.getElementById("panel-about-status");
+  const sel = inspectorState.selection;
+  if (inspectorState.panelMode !== "single" || sel?.kind !== "folder") return;
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch("/api/library/enrichment/retry", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ path: sel.row.path }),
+    });
+    if (res.status === 429) {
+      if (statusEl) statusEl.textContent = "A retry for this folder ran less than a minute ago — give it a moment.";
+      if (btn) btn.disabled = false;
+      return;
+    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (statusEl) {
+      const bits = [];
+      if (data.resetTracks > 0) bits.push(`${data.resetTracks} covers re-queued`);
+      if (data.artistImageResets > 0) bits.push(`${data.artistImageResets} artist images re-queued`);
+      if (data.bookletChecksReset > 0) bits.push(`${data.bookletChecksReset} booklet checks re-armed`);
+      if (data.harvestResubmitted) bits.push("bios/descriptions re-check queued (library-wide)");
+      statusEl.textContent = bits.length
+        ? `Retry queued — ${bits.join(", ")}. Metadata fills in in the background.`
+        : "Nothing to retry — everything under this folder is already queued or resolved.";
+    }
+    // Keep the button disabled for the guard window; the card
+    // refreshes on next open anyway.
+  } catch (err) {
+    if (statusEl) statusEl.textContent = `Retry failed: ${err.message}`;
+    if (btn) btn.disabled = false;
+  }
 }
 
 function buildFolderTile(f) {
@@ -3865,6 +4260,10 @@ function inspectorOpenPanelSingle(folder) {
   setPanelKindInitial("upscale", folder, folder.upscaledCount || 0);
   setPanelKindInitial("optimize", folder, folder.optimizedCount || 0);
 
+  // About card is single-mode only (batch hides it below).
+  const aboutCard = document.getElementById("panel-card-about");
+  if (aboutCard) aboutCard.hidden = false;
+
   // Restore the operator's last-expanded card; default to upscale.
   inspectorSetExpandedCard(inspectorState.panelExpandedKind || "upscale");
 
@@ -3877,6 +4276,26 @@ function inspectorOpenPanelSingle(folder) {
   // Async projection fetch fills in projected / free / required /
   // target and decides Generate button enablement.
   inspectorFetchPanelProjectionAllKinds(folder.path);
+  // About card detail is LAZY — fetched when the card expands (see
+  // inspectorOnCardTriggerActivate), or right away if About was the
+  // remembered expanded card. The root folder's detail is a full-
+  // table walk; don't pay it when the operator wanted the upscale
+  // numbers. Mark the card stale so re-opens on a new path refetch.
+  if (aboutCard) delete aboutCard.dataset.loadedPath;
+  if (inspectorState.panelExpandedKind === "about") {
+    inspectorMaybeFetchAbout();
+  }
+}
+
+// inspectorMaybeFetchAbout fetches the About detail for the open
+// single-mode folder unless the card already holds that path's data.
+function inspectorMaybeFetchAbout() {
+  const card = document.getElementById("panel-card-about");
+  const sel = inspectorState.selection;
+  if (!card || inspectorState.panelMode !== "single" || sel?.kind !== "folder") return;
+  if (card.dataset.loadedPath === sel.row.path) return;
+  card.dataset.loadedPath = sel.row.path;
+  inspectorFetchPanelAbout(sel.row.path);
 }
 
 // setPanelKindInitial pre-fills a card with the rollup snapshot
@@ -3982,11 +4401,13 @@ function inspectorOnCardTriggerActivate(ev) {
   const kind = card.dataset.kind;
   if (!kind) return;
   inspectorSetExpandedCard(kind);
+  // The About card's detail loads lazily on first expand per folder.
+  if (kind === "about") inspectorMaybeFetchAbout();
 }
 
 function inspectorSetExpandedCard(kind) {
   inspectorState.panelExpandedKind = kind;
-  for (const k of ["upscale", "optimize"]) {
+  for (const k of ["upscale", "optimize", "about"]) {
     const card = document.getElementById(`panel-card-${k}`);
     if (!card) continue;
     const trigger = card.querySelector(".card-summary-trigger");
@@ -4589,7 +5010,14 @@ function inspectorOpenPanelBatch() {
   setPanelKindBatch("upscale", trackCount, upscaledCount, upscaleGap, upscaleEligible);
   setPanelKindBatch("optimize", trackCount, optimizedCount, optimizeGap, optimizeEligible);
 
-  inspectorSetExpandedCard(inspectorState.panelExpandedKind || "upscale");
+  // The About card is per-folder — hide it in batch mode.
+  const aboutCard = document.getElementById("panel-card-about");
+  if (aboutCard) aboutCard.hidden = true;
+
+  const expandKind = inspectorState.panelExpandedKind === "about"
+    ? "upscale"
+    : (inspectorState.panelExpandedKind || "upscale");
+  inspectorSetExpandedCard(expandKind);
 
   if (typeof panel.showPopover === "function"
     && !panel.matches(":popover-open")) {

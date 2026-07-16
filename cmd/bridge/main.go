@@ -2058,6 +2058,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	if cfg.Atlas.HarvestEnabled && !cfg.Atlas.Enabled {
 		fmt.Fprintln(stderr, "atlas harvest: harvestEnabled requires atlas.enabled (bios are served via /v1/atlas-meta) — harvest disabled")
 	}
+	// bookletsDir is the PDF booklet cache path. Declared outside the
+	// harvest block: the admin inspector's loopback booklet route
+	// serves from it too (Deps.BookletPath below), and the path is
+	// derivable whether or not the harvest client is running.
+	bookletsDir := filepath.Join(cfg.DataDir, "booklets")
 	// harvestState was opened earlier (so the enricher could wire the premium-
 	// cover fetcher before its worker started). Reuse it for the bulk-harvest
 	// client; nil = feature off or the state file failed to open.
@@ -2078,7 +2083,6 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// credential. The cache dir failing to create degrades to
 		// availability-checks-only (no downloads, /v1/booklet answers 202)
 		// rather than disabling the feature.
-		bookletsDir := filepath.Join(cfg.DataDir, "booklets")
 		harvestClient.Booklets = bookletSinkAdapter{store: manifestStore}
 		if err := os.MkdirAll(bookletsDir, 0o700); err != nil {
 			fmt.Fprintf(stderr, "booklets: create cache dir: %v (downloads disabled)\n", err)
@@ -2734,6 +2738,30 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			}
 			return true
 		},
+		// Inspector byte-route path resolvers (loopback-only routes;
+		// ids are regex-validated in the handlers before these run).
+		// Cover + artist-image paths are wired unconditionally — the
+		// caches exist with or without Atlas (CAA / local extraction).
+		// Booklet closures are gated on the harvest client, mirroring
+		// the /v1/health `booklets` flag condition.
+		ArtworkPath: func(mbid string, size int) string {
+			return enrich.ArtworkCachePath(artworkDir, mbid, size)
+		},
+		ArtistImagePath: func(mbid string) string {
+			return enrich.ArtistImagePath(artworkDir, mbid)
+		},
+		BookletPath: func() func(string) string {
+			if harvestClient == nil {
+				return nil
+			}
+			return func(mbid string) string { return api.BookletPath(bookletsDir, mbid) }
+		}(),
+		BookletNudge: func() func(string) {
+			if harvestClient == nil {
+				return nil
+			}
+			return harvestClient.NudgeBookletFetch
+		}(),
 		UpscaleStats: func() *admin.UpscalePoolStats {
 			// Snapshot the pool's live counters when the
 			// feature is active. Two off-paths return nil

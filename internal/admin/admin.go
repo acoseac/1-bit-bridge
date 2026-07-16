@@ -201,6 +201,27 @@ type Deps struct {
 	// `harvestResubmitted: false` on the retry response.
 	HarvestForceSubmit func() bool
 
+	// ArtworkPath / ArtistImagePath / BookletPath resolve cache-file
+	// paths for the inspector's loopback byte-serving routes
+	// (/api/library/artwork|artist-image|booklet). Closures over
+	// enrich.ArtworkCachePath / enrich.ArtistImagePath /
+	// api.BookletPath in cmd/bridge/main.go — admin imports neither
+	// package (ArtistImageMBIDs decoupling precedent). The handlers
+	// validate ids against the same bounded-alphabet regexes as the
+	// /v1 twins BEFORE any path join, so the closures only ever see
+	// traversal-free values. Nil-safe: absent → the routes 404 and
+	// the UI falls back to icon-only tiles / no booklet links.
+	ArtworkPath     func(mbid string, size int) string
+	ArtistImagePath func(mbid string) string
+	BookletPath     func(mbid string) string
+
+	// BookletNudge prioritizes one release on the harvest booklet
+	// fetch sweep (harvest client NudgeBookletFetch — non-blocking,
+	// 32-buffered, drops are benign: the row still drains via
+	// BookletsToFetch in order). Nil when the harvest client isn't
+	// running.
+	BookletNudge func(mbid string)
+
 	// AnalysisActive reports the LIVE runtime state of the audio-
 	// analysis feature — i.e. the startup-computed `analysisActive`
 	// (config flag AND sox-precheck outcome), NOT the persisted config
@@ -762,6 +783,32 @@ type Server struct {
 	enrichRetryMu sync.Mutex
 	enrichRetryAt time.Time
 
+	// library-meta refs cache (inspector tile artwork/booklet refs).
+	// StreamTrackMetaRefsUnderPrefix is a json_extract subtree walk
+	// (full-table at the root) — composition cost class — so each
+	// path's grouped response is cached for libMetaCacheTTL and the
+	// recompute is single-flighted per path. Click-driven only; the
+	// SSE publisher never touches this.
+	libMetaMu    sync.Mutex
+	libMetaCache map[string]libMetaCacheEntry
+	libMetaSF    singleflight.Group
+
+	// library-meta retry guard: POST /api/library/enrichment/retry is
+	// per-PATH rate-limited (60s per normalized folder) so an operator
+	// can queue retries for DIFFERENT folders back-to-back while a
+	// panic-clicked button on one folder still 429s. Upstream services
+	// are protected by the enricher/harvest clients' own pacing — the
+	// guard is UX politeness, not the rate limiter. The map is pruned
+	// opportunistically (entries older than the window).
+	libMetaRetryMu sync.Mutex
+	libMetaRetryAt map[string]time.Time
+
+	// libMetaHarvestAt is the library-wide gate for the retry's
+	// HarvestForceSubmit facet — that facet is inherently global (the
+	// harvest submit has no per-folder scope), so two different-folder
+	// retries within the window only fire it once.
+	libMetaHarvestAt time.Time
+
 	// stats DB-read last-good cache. getStatsSnapshot bounds its four
 	// best-effort DB reads with snapshotDBTimeout; on error/timeout it
 	// serves this last-good statsDBPart so the dashboard tiles don't flash
@@ -885,6 +932,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/library/browse", s.apiLibraryBrowse)
 	mux.HandleFunc("GET /api/library/browse-projection", s.apiLibraryBrowseProjection)
 	mux.HandleFunc("GET /api/library/search", s.apiLibrarySearch)
+	// Inspector metadata layer (handlers_library_meta.go): tile
+	// artwork/booklet refs, About-card detail, folder-scoped retry,
+	// and the loopback byte routes serving the enrichment caches.
+	mux.HandleFunc("GET /api/library/enrichment", s.apiLibraryEnrichmentRefs)
+	mux.HandleFunc("GET /api/library/enrichment/detail", s.apiLibraryEnrichmentDetail)
+	mux.HandleFunc("POST /api/library/enrichment/retry", s.apiLibraryEnrichmentRetryScoped)
+	mux.HandleFunc("GET /api/library/artwork/{mbid}", s.apiLibraryArtwork)
+	mux.HandleFunc("GET /api/library/artist-image/{mbid}", s.apiLibraryArtistImage)
+	mux.HandleFunc("GET /api/library/booklet/{mbid}", s.apiLibraryBooklet)
 	mux.HandleFunc("POST /api/upscale/batch", s.apiUpscaleBatchSubmit)
 	mux.HandleFunc("GET /api/upscale/batches", s.apiUpscaleBatchList)
 	mux.HandleFunc("DELETE /api/upscale/batches/{id}", s.apiUpscaleBatchCancel)
