@@ -3416,8 +3416,19 @@ section.library-inspector {
   /* --- Inspector long folder names -----------------------------------------
    * Desktop clamps .tile-name to 2 lines; raise to 3 on phone where the
    * grid is already 1-column and vertical room is cheap. Keep the clamp
-   * (an `overflow: visible` reset here would defeat it entirely). */
+   * (an `overflow: visible` reset here would defeat it entirely).
+   *
+   * The header also WRAPS here, moving the name to its own full-width
+   * second row: at 375px the row's fixed-size items (44px checkbox +
+   * 44px thumb + booklet chip + 44px ⓘ + 44px ⋯ + gaps) leave the
+   * name only a sliver, and flex-shrink crushed it to one character
+   * per line. Full-width row 2 gives it the whole tile instead. */
+  .inspector-tile .tile-header {
+    flex-wrap: wrap;
+  }
   .inspector-tile .tile-name {
+    flex-basis: 100%;
+    order: 10;
     -webkit-line-clamp: 3;
   }
 
