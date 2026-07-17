@@ -353,17 +353,29 @@ func TestLibMetaCache_ErrorDoesNotCache(t *testing.T) {
 	}
 }
 
-// TestLibMetaCache_BoundsEntries pins the map bound.
+// TestLibMetaCache_BoundsEntries pins the map bound AND that
+// overflowing evicts rather than resetting. A `len <= max` assertion
+// alone would pass for a clear()-the-whole-map policy, which drops 64
+// fresh entries and makes a fast-browsing operator re-walk all of them
+// — so assert the cache stays FULL, and that the most recent writes
+// (the least expired) are the survivors.
 func TestLibMetaCache_BoundsEntries(t *testing.T) {
 	var c libMetaCache[string]
-	for i := range libMetaCacheMaxEntries + 10 {
+	const overflow = 10
+	for i := range libMetaCacheMaxEntries + overflow {
 		c.put(strconv.Itoa(i), "v")
 	}
-	if len(c.m) > libMetaCacheMaxEntries {
-		t.Errorf("len = %d, want <= %d", len(c.m), libMetaCacheMaxEntries)
+	if len(c.m) != libMetaCacheMaxEntries {
+		t.Errorf("len = %d, want exactly %d — overflow reset the map instead of evicting",
+			len(c.m), libMetaCacheMaxEntries)
 	}
-	if len(c.m) == 0 {
-		t.Errorf("cache emptied itself — the reset branch dropped the incoming entry too")
+	// The last-written key must survive; the first-written must not.
+	newest := strconv.Itoa(libMetaCacheMaxEntries + overflow - 1)
+	if _, ok := c.m[newest]; !ok {
+		t.Errorf("newest key %q evicted", newest)
+	}
+	if _, ok := c.m["0"]; ok {
+		t.Errorf("oldest key survived — eviction isn't expiry-ordered")
 	}
 }
 

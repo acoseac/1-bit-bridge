@@ -139,8 +139,6 @@ func (c *libMetaCache[T]) put(key string, resp T) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.m == nil {
-		// clear() can't cover this arm: it no-ops on a nil map and a
-		// write to one panics — the map has to exist first.
 		c.m = make(map[string]libMetaEntry[T])
 	}
 	if len(c.m) >= libMetaCacheMaxEntries {
@@ -149,12 +147,30 @@ func (c *libMetaCache[T]) put(key string, resp T) {
 				delete(c.m, k)
 			}
 		}
-		if len(c.m) >= libMetaCacheMaxEntries {
-			// Still full of fresh entries — unlikely (64 distinct paths
-			// inside one TTL); reset rather than evict-scan. clear()
-			// keeps the allocated buckets, which is what we want for a
-			// bounded cache that's about to refill.
-			clear(c.m)
+		// Still full of fresh entries (64 distinct paths inside one
+		// TTL). Evict the entry CLOSEST TO EXPIRY rather than resetting
+		// the map: a reset drops all 64, so an operator browsing fast
+		// enough to fill the cache would re-walk all 64 paths, refill,
+		// and reset again — the cache doing least exactly when it's
+		// needed most. The scan is O(libMetaCacheMaxEntries) on a
+		// branch that only fires under that sustained load.
+		//
+		// `at` is insert time and entries expire on it (get() never
+		// refreshes it), so the smallest `at` is the entry with the
+		// least remaining useful life — the cheapest one to lose. That
+		// makes this expiry-ordered, not LRU; for a TTL cache the two
+		// coincide on what matters.
+		for len(c.m) >= libMetaCacheMaxEntries {
+			oldestKey, oldestAt, found := "", time.Time{}, false
+			for k, e := range c.m {
+				if !found || e.at.Before(oldestAt) {
+					oldestKey, oldestAt, found = k, e.at, true
+				}
+			}
+			if !found {
+				break // unreachable under c.mu; guards the loop regardless
+			}
+			delete(c.m, oldestKey)
 		}
 	}
 	c.m[key] = libMetaEntry[T]{resp: resp, at: time.Now()}
