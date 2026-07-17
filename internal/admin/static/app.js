@@ -3448,14 +3448,23 @@ function inspectorAppendRows(_body, folders, tracks, replace) {
 // covers ALL children (unpaginated server-side grouping), memoized in
 // inspectorState.lastTileMeta so load-more pages decorate without a
 // refetch. Race-guarded on inspectorState.path like the browse fetch.
+// The guard covers mode as well as path: entering search does NOT
+// change inspectorState.path, and search results render folder tiles
+// into the same #folders-grid that inspectorDecorateTiles scans and
+// matches by BASENAME — so a slow refs walk landing after the user
+// searched would decorate a same-named hit from a different parent.
 async function inspectorFetchTileMeta(path) {
   if (inspectorState.camelot) return; // key-filter view has no folder tiles
+  const stale = () =>
+    inspectorState.path !== path
+    || inspectorState.camelot
+    || inspectorState.mode !== "browse";
   try {
     const res = await fetch(`/api/library/enrichment?path=${encodeURIComponent(path)}`);
-    if (inspectorState.path !== path || inspectorState.camelot) return;
+    if (stale()) return;
     if (!res.ok) return; // decoration is best-effort — tiles stay icon-only
     const data = await res.json();
-    if (inspectorState.path !== path || inspectorState.camelot) return;
+    if (stale()) return;
     inspectorState.lastTileMeta = data;
     inspectorDecorateTiles();
   } catch {
@@ -3629,7 +3638,14 @@ async function inspectorFetchPanelAbout(path) {
     if (!stillCurrent()) return;
     renderAboutContent(content, hint, retryBtn, data);
   } catch (err) {
-    if (!stillCurrent() || !content) return;
+    if (!stillCurrent()) return;
+    // Release the loaded-path marker so collapsing and re-expanding
+    // retries. Committing it before the fetch is what dedupes a rapid
+    // collapse/expand, but leaving it set on failure makes the error
+    // card terminal for the panel's lifetime. Guarded by stillCurrent()
+    // so a stale fetch can't clear the NEW selection's marker.
+    delete card.dataset.loadedPath;
+    if (!content) return;
     content.textContent = "";
     content.appendChild(aboutEl("p", "hint", `Couldn't load metadata: ${err.message}`));
   }
@@ -3664,11 +3680,19 @@ function renderAboutContent(content, hint, retryBtn, data) {
   }
   if (thumbs.childNodes.length) content.appendChild(thumbs);
 
+  // An empty payload is the state that MOST needs the retry, not least:
+  // the enricher may have run and matched nothing, which leaves
+  // enriched_at > 0 with empty MBIDs — outside the `WHERE enriched_at
+  // = 0` worker queue, so it never revisits them on its own. The
+  // folder-scoped retry re-queues exactly those rows. (If enrichment
+  // simply hasn't reached them yet, every retry facet no-ops — safe
+  // either way, so the copy must cover both readings.)
   const noIdentifiers = !data.artist && !data.release
     && !data.coverMBID && (!data.booklets || data.booklets.length === 0);
   if (noIdentifiers) {
+    anyMissing = true;
     content.appendChild(aboutEl("p", "hint",
-      "No metadata identifiers found for this folder — nothing to look up yet (tracks may still be awaiting enrichment)."));
+      "No metadata identifiers for this folder yet — either enrichment hasn't reached these tracks, or it ran and found no match. Retry re-queues them."));
   }
 
   if (data.artist) {

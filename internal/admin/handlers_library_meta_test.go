@@ -2,10 +2,12 @@ package admin
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
@@ -174,6 +176,44 @@ func TestApiLibraryEnrichmentDetail_States(t *testing.T) {
 	}
 }
 
+// TestApiLibraryEnrichmentDetail_Caches pins the 60s TTL + single-
+// flight on the detail walk — the twin of TestApiLibraryEnrichmentRefs'
+// cache block. The detail walk is the same json_extract cost class as
+// refs (full-table at the root), so it must never run uncached: a
+// second expand inside the window serves the cached payload.
+func TestApiLibraryEnrichmentDetail_Caches(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	seedMetaLibrary(t, srv)
+	enableAtlas(t, srv)
+	ctx := context.Background()
+
+	// A2's dominant release (metaUUIDOther) has never been ingested.
+	var first libraryMetaDetailResponse
+	if code := doJSON(t, srv.Handler(), "GET",
+		"/api/library/enrichment/detail?path=ArtistFolder/A2", nil, &first); code != http.StatusOK {
+		t.Fatalf("detail: %d", code)
+	}
+	if first.Release == nil || first.Release.State != "unchecked" {
+		t.Fatalf("release = %+v, want unchecked (never ingested)", first.Release)
+	}
+
+	// Mutate the overlay, re-request — the cached payload must come back
+	// unchanged.
+	if err := srv.deps.Manifest.UpsertReleaseAtlasMeta(ctx, manifest.ReleaseAtlasMeta{
+		ReleaseMBID: metaUUIDOther, Found: true, Description: "Fresh description.",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var again libraryMetaDetailResponse
+	if code := doJSON(t, srv.Handler(), "GET",
+		"/api/library/enrichment/detail?path=ArtistFolder/A2", nil, &again); code != http.StatusOK {
+		t.Fatalf("detail(2): %d", code)
+	}
+	if again.Release == nil || again.Release.State != "unchecked" {
+		t.Errorf("second request saw fresh data (%+v) — the detail walk is uncached", again.Release)
+	}
+}
+
 // TestApiLibraryEnrichmentRetryScoped pins the retry facets + the
 // per-path guard: same path 429s inside the window, a different path
 // passes.
@@ -220,6 +260,136 @@ func TestApiLibraryEnrichmentRetryScoped(t *testing.T) {
 		map[string]any{"path": "Full"}, &resp)
 	if code != http.StatusOK {
 		t.Errorf("different-path retry = %d, want 200 (per-path guard)", code)
+	}
+}
+
+// TestApiLibraryEnrichmentRetryScoped_InvalidatesMetaCaches pins the
+// both-cache sweep. The About card deliberately doesn't auto-refetch
+// after a retry — it refreshes on next open — which a stale detail
+// entry would defeat. Retries on an ANCESTOR path must sweep the
+// descendant's entries too.
+func TestApiLibraryEnrichmentRetryScoped_InvalidatesMetaCaches(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	seedMetaLibrary(t, srv)
+	enableAtlas(t, srv)
+	ctx := context.Background()
+
+	// Prime both caches for a descendant path.
+	var refs libraryMetaRefsResponse
+	if code := doJSON(t, srv.Handler(), "GET",
+		"/api/library/enrichment?path=ArtistFolder", nil, &refs); code != http.StatusOK {
+		t.Fatalf("refs: %d", code)
+	}
+	var detail libraryMetaDetailResponse
+	if code := doJSON(t, srv.Handler(), "GET",
+		"/api/library/enrichment/detail?path=ArtistFolder/A2", nil, &detail); code != http.StatusOK {
+		t.Fatalf("detail: %d", code)
+	}
+	if detail.Release == nil || detail.Release.State != "unchecked" {
+		t.Fatalf("release = %+v, want unchecked", detail.Release)
+	}
+
+	// Mutate both surfaces' underlying data, then retry at the ROOT —
+	// an ancestor of both cached paths.
+	if err := srv.deps.Manifest.UpsertReleaseAtlasMeta(ctx, manifest.ReleaseAtlasMeta{
+		ReleaseMBID: metaUUIDOther, Found: true, Description: "Fresh description.",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.deps.Manifest.UpsertTrack(ctx, &manifest.Track{
+		Path: "NewFolder/01.flac", Size: 1, ArtworkMBID: metaUUIDOther,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if code := doJSON(t, srv.Handler(), "POST", "/api/library/enrichment/retry",
+		map[string]any{"path": ""}, nil); code != http.StatusOK {
+		t.Fatalf("retry: %d", code)
+	}
+
+	var refs2 libraryMetaRefsResponse
+	if code := doJSON(t, srv.Handler(), "GET",
+		"/api/library/enrichment?path=ArtistFolder", nil, &refs2); code != http.StatusOK {
+		t.Fatalf("refs(2): %d", code)
+	}
+	var detail2 libraryMetaDetailResponse
+	if code := doJSON(t, srv.Handler(), "GET",
+		"/api/library/enrichment/detail?path=ArtistFolder/A2", nil, &detail2); code != http.StatusOK {
+		t.Fatalf("detail(2): %d", code)
+	}
+	if detail2.Release == nil || detail2.Release.State != "found" {
+		t.Errorf("detail after retry = %+v, want found — the detail cache wasn't swept", detail2.Release)
+	}
+}
+
+// TestLibMetaCache_ErrorDoesNotCache pins serve's put-on-success-only
+// contract: a failed walk must surface 500 and leave nothing behind,
+// or the whole TTL would serve a degraded response.
+func TestLibMetaCache_ErrorDoesNotCache(t *testing.T) {
+	var c libMetaCache[string]
+	calls := 0
+	compute := func(context.Context) (string, error) {
+		calls++
+		if calls == 1 {
+			return "", errors.New("walk exploded")
+		}
+		return "real", nil
+	}
+	serve := func() *httptest.ResponseRecorder {
+		t.Helper()
+		rw := httptest.NewRecorder()
+		c.serve(rw, httptest.NewRequest("GET", "/x", nil), "p", "meta-test", compute)
+		return rw
+	}
+
+	if rw := serve(); rw.Code != http.StatusInternalServerError {
+		t.Fatalf("first (failing) request = %d, want 500", rw.Code)
+	}
+	rw := serve()
+	if rw.Code != http.StatusOK {
+		t.Fatalf("second request = %d, want 200 — the error was cached", rw.Code)
+	}
+	if calls != 2 {
+		t.Errorf("compute calls = %d, want 2 — the error short-circuited the recompute", calls)
+	}
+}
+
+// TestLibMetaCache_BoundsEntries pins the map bound.
+func TestLibMetaCache_BoundsEntries(t *testing.T) {
+	var c libMetaCache[string]
+	for i := range libMetaCacheMaxEntries + 10 {
+		c.put(strconv.Itoa(i), "v")
+	}
+	if len(c.m) > libMetaCacheMaxEntries {
+		t.Errorf("len = %d, want <= %d", len(c.m), libMetaCacheMaxEntries)
+	}
+	if len(c.m) == 0 {
+		t.Errorf("cache emptied itself — the reset branch dropped the incoming entry too")
+	}
+}
+
+// TestPathOverlaps pins the invalidation predicate, including the
+// sibling-prefix false-match guard ("A/B" must not match "A/Bee").
+func TestPathOverlaps(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		{"", "", true},                      // root vs root
+		{"", "Rock/Live", true},             // cached root entry vs a scoped retry
+		{"Rock/Live", "", true},             // cached entry vs a root retry
+		{"Rock", "Rock", true},              // identical
+		{"Rock/Live", "Rock", true},         // descendant vs ancestor
+		{"Rock", "Rock/Live", true},         // ancestor vs descendant
+		{"Rock", "Jazz", false},             // siblings
+		{"Rock/Live", "Rock/Studio", false}, // siblings, shared parent
+		{"A/B", "A/Bee", false},             // sibling-prefix false-match guard
+		{"A/Bee", "A/B", false},             // ...and the reverse
+		{"Rock", "Rocks", false},            // top-level prefix false-match
+	}
+	for _, tc := range cases {
+		if got := pathOverlaps(tc.a, tc.b); got != tc.want {
+			t.Errorf("pathOverlaps(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+		}
 	}
 }
 

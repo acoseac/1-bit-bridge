@@ -783,15 +783,22 @@ type Server struct {
 	enrichRetryMu sync.Mutex
 	enrichRetryAt time.Time
 
-	// library-meta refs cache (inspector tile artwork/booklet refs).
-	// StreamTrackMetaRefsUnderPrefix is a json_extract subtree walk
+	// library-meta caches: inspector tile artwork/booklet refs, and the
+	// About card's per-folder detail. Both front a
+	// StreamTrackMetaRefsUnderPrefix json_extract subtree walk
 	// (full-table at the root) — composition cost class — so each
-	// path's grouped response is cached for libMetaCacheTTL and the
-	// recompute is single-flighted per path. Click-driven only; the
-	// SSE publisher never touches this.
-	libMetaMu    sync.Mutex
-	libMetaCache map[string]libMetaCacheEntry
-	libMetaSF    singleflight.Group
+	// path's response is cached for libMetaCacheTTL and the recompute
+	// is single-flighted per path. Click-driven only; the SSE publisher
+	// never touches these.
+	//
+	// Two caches rather than one keyed map: each is typed to its own
+	// response DTO (so nothing hands writeJSON an `any`), keeps its own
+	// libMetaCacheMaxEntries budget, and owns its own singleflight
+	// Group — see the libMetaCache docblock for why sharing a Group
+	// across two response types is unsafe. Both are keyed by bare
+	// normalised path and swept together by libMetaInvalidateUnder.
+	libMetaRefs   libMetaCache[libraryMetaRefsResponse]
+	libMetaDetail libMetaCache[libraryMetaDetailResponse]
 
 	// library-meta retry guard: POST /api/library/enrichment/retry is
 	// per-PATH rate-limited (60s per normalized folder) so an operator
