@@ -187,7 +187,7 @@ func (e *InsufficientDiskSpaceError) Error() string {
 		"%s: needs %d bytes (%.2f safety margin) on %q, %d available",
 		ErrInsufficientDiskSpace.Error(),
 		e.RequiredBytes,
-		float64(e.RequiredBytes)/float64(max64(e.ProjectedBytes, 1)),
+		float64(e.RequiredBytes)/float64(max(e.ProjectedBytes, 1)),
 		e.Dir,
 		e.AvailableBytes,
 	)
@@ -225,24 +225,7 @@ func DiskHasHeadroom(dir string, projectedBytes int64, safetyMargin float64) (ok
 	if err != nil {
 		return false, 0, err
 	}
-	// Float-to-int64 conversion needs an overflow guard. The
-	// multiplication can produce +Inf / NaN / values past MaxInt64
-	// for adversarial inputs (giant projectedBytes near MaxInt64,
-	// the margin pushing it over the float-exponent ceiling).
-	// Direct `int64(...)` wraps to a negative value on overflow,
-	// which then passes the `required > freeBytes` check silently
-	// — exactly the disk-full-mid-write hazard the helper exists
-	// to prevent. Gemini high on PR #199.
-	requiredF := math.Ceil(float64(projectedBytes) * (1 + safetyMargin))
-	var required int64
-	switch {
-	case math.IsNaN(requiredF) || math.IsInf(requiredF, 1) || requiredF >= float64(math.MaxInt64):
-		required = math.MaxInt64
-	case requiredF < 0:
-		required = 0
-	default:
-		required = int64(requiredF)
-	}
+	required := RequiredBytesWithMargin(projectedBytes, safetyMargin)
 	if required > freeBytes {
 		return false, freeBytes, &InsufficientDiskSpaceError{
 			ProjectedBytes: projectedBytes,
@@ -254,9 +237,47 @@ func DiskHasHeadroom(dir string, projectedBytes int64, safetyMargin float64) (ok
 	return true, freeBytes, nil
 }
 
-func max64(a, b int64) int64 {
-	if a > b {
-		return a
+// RequiredBytesWithMargin returns the free space a batch of
+// projectedBytes needs after applying safetyMargin — i.e.
+// ceil(projected × (1 + margin)).
+//
+// This is THE definition of the margin, exported because the admin
+// Library Inspector's projection endpoint has to predict exactly what
+// Submit will refuse. Any surface that renders a "needs X, have Y"
+// verdict MUST route through here rather than restating the
+// arithmetic: a second copy drifts silently the moment
+// DefaultDiskSafetyMargin moves, and the operator gets a green panel
+// followed by a 507.
+//
+// A negative or NaN margin is clamped to 0; a non-positive projection
+// yields 0.
+//
+// The float-to-int64 conversion needs an overflow guard. The
+// multiplication can produce +Inf / NaN / values past MaxInt64 for
+// adversarial inputs (giant projectedBytes near MaxInt64, the margin
+// pushing it over the float-exponent ceiling). A direct `int64(...)`
+// wraps to a NEGATIVE value on overflow, which then passes a
+// `required > free` check silently — exactly the disk-full-mid-write
+// hazard this exists to prevent, so overflow saturates to MaxInt64
+// (refuse) rather than wrapping. Gemini high on PR #199.
+//
+// (int64 → float64 is exact below 2^53 ≈ 9 PB; projections are many
+// orders of magnitude under that, and anything approaching it
+// saturates to a refusal anyway.)
+func RequiredBytesWithMargin(projectedBytes int64, safetyMargin float64) int64 {
+	if projectedBytes <= 0 {
+		return 0
 	}
-	return b
+	if safetyMargin < 0 || math.IsNaN(safetyMargin) {
+		safetyMargin = 0
+	}
+	requiredF := math.Ceil(float64(projectedBytes) * (1 + safetyMargin))
+	switch {
+	case math.IsNaN(requiredF) || math.IsInf(requiredF, 1) || requiredF >= float64(math.MaxInt64):
+		return math.MaxInt64
+	case requiredF < 0:
+		return 0
+	default:
+		return int64(requiredF)
+	}
 }

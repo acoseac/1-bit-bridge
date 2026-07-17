@@ -36,6 +36,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/smartplaylist"
+	"github.com/acoseac/1-bit-bridge/internal/transcode"
 )
 
 // pathHash returns a stable 8-character lowercase hex digest of the
@@ -726,22 +727,15 @@ func (s *Server) apiLibraryBrowseProjection(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusInternalServerError, "disk-probe", err.Error())
 		return
 	}
-	// Required bytes with the project-default safety margin (10%).
-	// Mirrors transcode.DiskHasHeadroom's math, kept in lockstep
-	// at the wire boundary so the UI's "X GB needed" copy matches
-	// what the coordinator will refuse at Submit time.
-	// Integer arithmetic, not a float64 round-trip: near MaxInt64 the
-	// float conversion could overflow to a negative "required" and
-	// falsely report headroom. Latent today (exabyte scale) but the
-	// integer form is strictly safer. (DeepSeek review.)
-	required := totalProjected + totalProjected/10
-	// Signed-int addition still wraps on overflow; totalProjected/10 is
-	// non-negative, so a sum < totalProjected can only mean it wrapped —
-	// clamp to MaxInt64 so "required <= free" can't falsely pass on a
-	// negative value (Gemini on PR #360).
-	if required < totalProjected {
-		required = 1<<63 - 1 // math.MaxInt64
-	}
+	// Required bytes, from the SAME helper Coordinator.Submit's
+	// pre-flight uses. This endpoint's entire contract is predicting
+	// what Submit will refuse, so it can't restate the arithmetic —
+	// a local copy drifts the moment DefaultDiskSafetyMargin moves and
+	// the operator gets a green panel followed by a 507. The helper
+	// carries the overflow guard (saturate to MaxInt64, never wrap
+	// negative — the hazard the earlier hand-rolled integer form was
+	// avoiding).
+	required := transcode.RequiredBytesWithMargin(totalProjected, transcode.DefaultDiskSafetyMargin)
 	// For kind=optimize, surface TargetBits=16 (always) but
 	// TargetRate=0 to signal "per-track family-preserved" — the UI
 	// renders "Target: 16-bit / 44.1k or 48k (family-preserved)"

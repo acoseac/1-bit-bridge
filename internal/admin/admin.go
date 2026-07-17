@@ -239,9 +239,14 @@ type Deps struct {
 	// variant produced from (sourceSize, sourceRate, sourceBits)
 	// at (targetRate, targetBits). Wired to
 	// `transcode.ProjectedSize` (with `DefaultCompressionFactor`
-	// baked in) via a closure in cmd/bridge/main.go so the admin
-	// package doesn't import internal/transcode. Mirrors the
-	// UpscaleStats / UpscalePrecheck decoupling pattern.
+	// baked in) via a closure in cmd/bridge/main.go. Mirrors the
+	// UpscaleStats / UpscalePrecheck pattern: what the closure buys
+	// is decoupling from the live Pool's RUNTIME STATE (nil here ==
+	// "feature off", which this package can then report without
+	// knowing why), not import avoidance — internal/admin does import
+	// internal/transcode for pure functions + consts
+	// (transcode.OutputDirFor, RequiredBytesWithMargin,
+	// DefaultDiskSafetyMargin).
 	//
 	// Nil when upscale is disabled — the projection endpoint
 	// surfaces a clean 503 in that case.
