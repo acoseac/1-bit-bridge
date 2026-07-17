@@ -289,15 +289,18 @@ func TestApiLibraryEnrichmentRetryScoped_InvalidatesMetaCaches(t *testing.T) {
 		t.Fatalf("release = %+v, want unchecked", detail.Release)
 	}
 
-	// Mutate both surfaces' underlying data, then retry at the ROOT —
-	// an ancestor of both cached paths.
+	// Mutate what each cached path actually covers, then retry at the
+	// ROOT — an ancestor of both. The refs mutation must land UNDER
+	// ArtistFolder: a new top-level folder wouldn't show up in
+	// ArtistFolder's refs whether or not the cache was swept, so it
+	// would pin nothing.
 	if err := srv.deps.Manifest.UpsertReleaseAtlasMeta(ctx, manifest.ReleaseAtlasMeta{
 		ReleaseMBID: metaUUIDOther, Found: true, Description: "Fresh description.",
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := srv.deps.Manifest.UpsertTrack(ctx, &manifest.Track{
-		Path: "NewFolder/01.flac", Size: 1, ArtworkMBID: metaUUIDOther,
+		Path: "ArtistFolder/A3/01.flac", Size: 1, ArtworkMBID: metaUUIDOther,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -310,6 +313,10 @@ func TestApiLibraryEnrichmentRetryScoped_InvalidatesMetaCaches(t *testing.T) {
 	if code := doJSON(t, srv.Handler(), "GET",
 		"/api/library/enrichment?path=ArtistFolder", nil, &refs2); code != http.StatusOK {
 		t.Fatalf("refs(2): %d", code)
+	}
+	if _, ok := refs2.Children["A3"]; !ok {
+		t.Errorf("refs after retry = %v, want the new A3 child — the refs cache wasn't swept",
+			refs2.Children)
 	}
 	var detail2 libraryMetaDetailResponse
 	if code := doJSON(t, srv.Handler(), "GET",

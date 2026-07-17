@@ -141,7 +141,11 @@ func (c *libMetaCache[T]) put(key string, resp T) {
 	if c.m == nil {
 		c.m = make(map[string]libMetaEntry[T])
 	}
-	if len(c.m) >= libMetaCacheMaxEntries {
+	// Overwriting an existing key can't grow the map, so it must not
+	// evict: a redundant put (two callers racing the same miss) would
+	// otherwise drop an unrelated live entry for nothing.
+	_, replacing := c.m[key]
+	if !replacing && len(c.m) >= libMetaCacheMaxEntries {
 		for k, e := range c.m {
 			if time.Since(e.at) >= libMetaCacheTTL {
 				delete(c.m, k)
@@ -177,6 +181,28 @@ func (c *libMetaCache[T]) put(key string, resp T) {
 }
 
 // invalidateUnder drops every entry whose path overlaps prefix.
+//
+// Deliberately NOT fenced against in-flight computations (no epoch
+// counter in the flight keys). A walk that started before a retry can
+// land after this sweep and re-populate the entry — but it stores
+// IDENTICAL data, because the retry writes nothing either cached
+// response reads:
+//
+//   - ResetEnrichedMisses* / ResetEnrichedByArtistMBIDs write
+//     tracks.enriched_at; the walks read tracks.tags_json.
+//   - HarvestForceSubmit only zeroes an in-memory submit stamp.
+//   - ResetBookletChecks writes booklets.check_attempts; the About
+//     card reads Available / Fetched.
+//   - BookletNudge queues a fetch — Fetched flips later, when the
+//     download lands.
+//
+// The retry RE-QUEUES work; it doesn't perform it. The data it leads
+// to changes minutes later at MB/CAA/Deezer pacing, far outside any
+// flight window. The sweep exists so the next open isn't served a
+// pre-retry entry from the remaining TTL, not to order against flights.
+//
+// If a future retry facet ever writes something a walk reads
+// synchronously, that reasoning lapses and this needs a real fence.
 func (c *libMetaCache[T]) invalidateUnder(prefix string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -211,6 +237,15 @@ func (c *libMetaCache[T]) serve(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	v, err, _ := c.sf.Do(key, func() (any, error) {
+		// Re-check inside the flight: a caller that missed above can be
+		// delayed past a prior flight's completion and would otherwise
+		// repeat the whole subtree walk against an already-fresh entry
+		// (the getEnrichmentMetaSnapshot precedent). Concurrent callers
+		// arriving DURING a flight are already deduped by singleflight;
+		// this covers the ones that arrive just after one ends.
+		if resp, ok := c.get(key); ok {
+			return resp, nil
+		}
 		ctx, cancel := context.WithTimeout(
 			context.WithoutCancel(r.Context()), enrichmentDBTimeout)
 		defer cancel()
