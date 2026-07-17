@@ -40,7 +40,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
@@ -92,9 +95,201 @@ type libraryMetaRefsResponse struct {
 	Children        map[string]libraryChildRef `json:"children"`
 }
 
-type libMetaCacheEntry struct {
-	resp libraryMetaRefsResponse
+type libMetaEntry[T any] struct {
+	resp T
 	at   time.Time
+}
+
+// libMetaCache is a bounded, TTL'd, single-flighted per-path response
+// cache. The zero value is ready to use (the map is lazily created).
+//
+// Both walks it fronts (refs + detail) are json_extract subtree scans
+// — full-table at the library root, the AtlasMetaBreakdownCounts cost
+// class — so serving one uncached is the bug this type exists to make
+// unrepresentable: `serve` owns the whole ceremony (TTL check →
+// single-flight → detached-but-bounded compute → store → write), and a
+// handler physically cannot skip a step by forgetting to write it out.
+//
+// Each instantiation owns its OWN singleflight.Group. That's
+// structural, not stylistic: one Group shared across two response
+// types would let a concurrent refs+detail request for the same path
+// collapse into a single flight and hand the joiner the wrong struct.
+// Separate Groups make that unrepresentable, and drop the key
+// namespacing a shared Group would need.
+type libMetaCache[T any] struct {
+	mu sync.Mutex
+	m  map[string]libMetaEntry[T]
+	sf singleflight.Group
+}
+
+// get returns the cached response for key when it's within the TTL.
+func (c *libMetaCache[T]) get(key string) (T, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if e, ok := c.m[key]; ok && time.Since(e.at) < libMetaCacheTTL {
+		return e.resp, true
+	}
+	var zero T
+	return zero, false
+}
+
+// put stores resp under key, bounding the map at
+// libMetaCacheMaxEntries.
+func (c *libMetaCache[T]) put(key string, resp T) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.m == nil {
+		c.m = make(map[string]libMetaEntry[T])
+	}
+	// Overwriting an existing key can't grow the map, so it must not
+	// evict: a redundant put (two callers racing the same miss) would
+	// otherwise drop an unrelated live entry for nothing.
+	_, replacing := c.m[key]
+	if !replacing && len(c.m) >= libMetaCacheMaxEntries {
+		for k, e := range c.m {
+			if time.Since(e.at) >= libMetaCacheTTL {
+				delete(c.m, k)
+			}
+		}
+		// Still full of fresh entries (64 distinct paths inside one
+		// TTL). Evict the entry CLOSEST TO EXPIRY rather than resetting
+		// the map: a reset drops all 64, so an operator browsing fast
+		// enough to fill the cache would re-walk all 64 paths, refill,
+		// and reset again — the cache doing least exactly when it's
+		// needed most. The scan is O(libMetaCacheMaxEntries) on a
+		// branch that only fires under that sustained load.
+		//
+		// `at` is insert time and entries expire on it (get() never
+		// refreshes it), so the smallest `at` is the entry with the
+		// least remaining useful life — the cheapest one to lose. That
+		// makes this expiry-ordered, not LRU; for a TTL cache the two
+		// coincide on what matters.
+		for len(c.m) >= libMetaCacheMaxEntries {
+			oldestKey, oldestAt, found := "", time.Time{}, false
+			for k, e := range c.m {
+				if !found || e.at.Before(oldestAt) {
+					oldestKey, oldestAt, found = k, e.at, true
+				}
+			}
+			if !found {
+				break // unreachable under c.mu; guards the loop regardless
+			}
+			delete(c.m, oldestKey)
+		}
+	}
+	c.m[key] = libMetaEntry[T]{resp: resp, at: time.Now()}
+}
+
+// invalidateUnder drops every entry whose path overlaps prefix.
+//
+// Deliberately NOT fenced against in-flight computations (no epoch
+// counter in the flight keys). A walk that started before a retry can
+// land after this sweep and re-populate the entry — but it stores
+// IDENTICAL data, because the retry writes nothing either cached
+// response reads:
+//
+//   - ResetEnrichedMisses* / ResetEnrichedByArtistMBIDs write
+//     tracks.enriched_at; the walks read tracks.tags_json.
+//   - HarvestForceSubmit only zeroes an in-memory submit stamp.
+//   - ResetBookletChecks writes booklets.check_attempts; the About
+//     card reads Available / Fetched.
+//   - BookletNudge queues a fetch — Fetched flips later, when the
+//     download lands.
+//
+// The retry RE-QUEUES work; it doesn't perform it. The data it leads
+// to changes minutes later at MB/CAA/Deezer pacing, far outside any
+// flight window. The sweep exists so the next open isn't served a
+// pre-retry entry from the remaining TTL, not to order against flights.
+//
+// If a future retry facet ever writes something a walk reads
+// synchronously, that reasoning lapses and this needs a real fence.
+func (c *libMetaCache[T]) invalidateUnder(prefix string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for p := range c.m {
+		if pathOverlaps(p, prefix) {
+			delete(c.m, p)
+		}
+	}
+}
+
+// serve answers one request from the cache, computing + storing on a
+// miss. compute runs UNLOCKED inside the flight, so a slow walk on one
+// path can't block cache lookups for another.
+//
+// The compute context is detached from the request
+// (context.WithoutCancel) because the result is shared with joined
+// callers — the first caller hanging up must not poison everyone
+// else's response (reachability-probe precedent, PR #373). It's then
+// re-bounded with a timeout: detaching without substituting a deadline
+// would leave a pathological walk with no ceiling at all. Order
+// matters — WithoutCancel first, or WithTimeout's deadline is stripped
+// right back off.
+//
+// Errors are NOT cached: a failed walk must not park a degraded
+// response for the whole TTL. (A best-effort facet that degraded but
+// still returned a response IS cached — that's the TTL contract, not a
+// leak.)
+func (c *libMetaCache[T]) serve(w http.ResponseWriter, r *http.Request,
+	key, errCode string, compute func(context.Context) (T, error)) {
+	if resp, ok := c.get(key); ok {
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+	v, err, _ := c.sf.Do(key, func() (any, error) {
+		// Re-check inside the flight: a caller that missed above can be
+		// delayed past a prior flight's completion and would otherwise
+		// repeat the whole subtree walk against an already-fresh entry
+		// (the getEnrichmentMetaSnapshot precedent). Concurrent callers
+		// arriving DURING a flight are already deduped by singleflight;
+		// this covers the ones that arrive just after one ends.
+		if resp, ok := c.get(key); ok {
+			return resp, nil
+		}
+		ctx, cancel := context.WithTimeout(
+			context.WithoutCancel(r.Context()), enrichmentDBTimeout)
+		defer cancel()
+		resp, err := compute(ctx)
+		if err != nil {
+			return nil, err
+		}
+		c.put(key, resp)
+		return resp, nil
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, errCode, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, v.(T))
+}
+
+// pathOverlaps reports whether two normalised browse paths cover
+// overlapping subtrees: identical, or either an ancestor of the other.
+//
+// "" is the library root and overlaps everything — both the "retry at
+// the root" case (b == "") and a cached root entry (a == ""). Neither
+// arm is redundant with the HasPrefix pair below: normaliseBrowsePath
+// guarantees no leading slash, so HasPrefix(x, ""+"/") is dead. That
+// same guarantee (path.Clean'd, forward slashes, no traversal) is what
+// makes the "/" boundary check sound — it's why this can't false-match
+// "A/Bee" against "A/B".
+func pathOverlaps(a, b string) bool {
+	if a == "" || b == "" || a == b {
+		return true
+	}
+	return strings.HasPrefix(a, b+"/") || strings.HasPrefix(b, a+"/")
+}
+
+// libMetaInvalidateUnder drops both per-path caches for the subtree.
+//
+// Each cache takes its own lock, so this is two acquisitions rather
+// than one. Nothing needs them to be atomic together: they're
+// independent best-effort TTL caches, so a request landing between the
+// two sweeps just gets one fresh + one stale, and the next open (a
+// second later) gets both fresh.
+func (s *Server) libMetaInvalidateUnder(prefix string) {
+	s.libMetaRefs.invalidateUnder(prefix)
+	s.libMetaDetail.invalidateUnder(prefix)
 }
 
 // apiLibraryEnrichmentRefs handles GET /api/library/enrichment?path=.
@@ -110,51 +305,10 @@ func (s *Server) apiLibraryEnrichmentRefs(w http.ResponseWriter, r *http.Request
 			"path contains traversal segments or is otherwise invalid")
 		return
 	}
-
-	// Cache hit?
-	s.libMetaMu.Lock()
-	if e, ok := s.libMetaCache[normalised]; ok && time.Since(e.at) < libMetaCacheTTL {
-		s.libMetaMu.Unlock()
-		writeJSON(w, http.StatusOK, e.resp)
-		return
-	}
-	s.libMetaMu.Unlock()
-
-	// Single-flight the recompute per path so N tabs landing after
-	// expiry collapse to one subtree walk. context.WithoutCancel: the
-	// result is shared with joined callers — the first caller hanging
-	// up must not poison everyone else's response (reachability-probe
-	// precedent, PR #373).
-	v, err, _ := s.libMetaSF.Do("refs:"+normalised, func() (any, error) {
-		resp, err := s.computeLibraryMetaRefs(context.WithoutCancel(r.Context()), normalised)
-		if err != nil {
-			return nil, err
-		}
-		s.libMetaMu.Lock()
-		if s.libMetaCache == nil {
-			s.libMetaCache = make(map[string]libMetaCacheEntry)
-		}
-		if len(s.libMetaCache) >= libMetaCacheMaxEntries {
-			for k, e := range s.libMetaCache {
-				if time.Since(e.at) >= libMetaCacheTTL {
-					delete(s.libMetaCache, k)
-				}
-			}
-			if len(s.libMetaCache) >= libMetaCacheMaxEntries {
-				// Still full of fresh entries — unlikely (64 distinct
-				// paths inside one TTL); reset rather than evict-scan.
-				s.libMetaCache = make(map[string]libMetaCacheEntry)
-			}
-		}
-		s.libMetaCache[normalised] = libMetaCacheEntry{resp: resp, at: time.Now()}
-		s.libMetaMu.Unlock()
-		return resp, nil
-	})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "meta-refs", err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, v.(libraryMetaRefsResponse))
+	s.libMetaRefs.serve(w, r, normalised, "meta-refs",
+		func(ctx context.Context) (libraryMetaRefsResponse, error) {
+			return s.computeLibraryMetaRefs(ctx, normalised)
+		})
 }
 
 // computeLibraryMetaRefs walks the subtree once and groups the MBID
@@ -353,6 +507,20 @@ func (s *Server) apiLibraryEnrichmentDetail(w http.ResponseWriter, r *http.Reque
 			"path contains traversal segments or is otherwise invalid")
 		return
 	}
+	s.libMetaDetail.serve(w, r, normalised, "meta-detail",
+		func(ctx context.Context) (libraryMetaDetailResponse, error) {
+			return s.computeLibraryMetaDetail(ctx, normalised)
+		})
+}
+
+// computeLibraryMetaDetail builds the About card for one folder: the
+// dominant artist's bio + the dominant release's description from the
+// Atlas overlays, booklet rows, artist-image presence.
+//
+// The Atlas/booklet facets are best-effort: a read failure logs and
+// leaves that facet at its "unchecked" default rather than failing the
+// whole card. Only the subtree walk itself is fatal.
+func (s *Server) computeLibraryMetaDetail(ctx context.Context, normalised string) (libraryMetaDetailResponse, error) {
 	cfg := s.deps.CfgHolder.Load()
 	resp := libraryMetaDetailResponse{
 		Path:            normalised,
@@ -366,7 +534,7 @@ func (s *Server) apiLibraryEnrichmentDetail(w http.ResponseWriter, r *http.Reque
 	releaseVotes := map[string]int{}
 	coverVotes := map[string]int{}
 	coverVer := map[string]string{}
-	err := s.deps.Manifest.StreamTrackMetaRefsUnderPrefix(r.Context(), normalised, func(ref manifest.TrackMetaRef) error {
+	err := s.deps.Manifest.StreamTrackMetaRefsUnderPrefix(ctx, normalised, func(ref manifest.TrackMetaRef) error {
 		if ref.ArtistMBID != "" {
 			artistVotes[ref.ArtistMBID]++
 		}
@@ -382,8 +550,7 @@ func (s *Server) apiLibraryEnrichmentDetail(w http.ResponseWriter, r *http.Reque
 		return nil
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "meta-detail", err.Error())
-		return
+		return resp, err
 	}
 	resp.CoverMBID = pickCoverRef(coverVotes)
 	resp.CoverVersion = coverVer[resp.CoverMBID]
@@ -399,7 +566,7 @@ func (s *Server) apiLibraryEnrichmentDetail(w http.ResponseWriter, r *http.Reque
 
 	if resp.AtlasEnabled && dominantArtist != "" {
 		dto := &aboutArtistDTO{MBID: dominantArtist, State: "unchecked"}
-		if meta, err := s.deps.Manifest.GetArtistAtlasMeta(r.Context(), dominantArtist); err != nil {
+		if meta, err := s.deps.Manifest.GetArtistAtlasMeta(ctx, dominantArtist); err != nil {
 			logger.Warn("meta detail: artist atlas read", "mbid", dominantArtist, "err", err)
 		} else if meta != nil {
 			if meta.Found && strings.TrimSpace(meta.Bio)+strings.TrimSpace(meta.BioSummary) != "" {
@@ -419,7 +586,7 @@ func (s *Server) apiLibraryEnrichmentDetail(w http.ResponseWriter, r *http.Reque
 	}
 	if resp.AtlasEnabled && dominantRelease != "" {
 		dto := &aboutReleaseDTO{MBID: dominantRelease, State: "unchecked"}
-		if meta, err := s.deps.Manifest.GetReleaseAtlasMeta(r.Context(), dominantRelease); err != nil {
+		if meta, err := s.deps.Manifest.GetReleaseAtlasMeta(ctx, dominantRelease); err != nil {
 			logger.Warn("meta detail: release atlas read", "mbid", dominantRelease, "err", err)
 		} else if meta != nil {
 			if meta.Found && strings.TrimSpace(meta.Description) != "" {
@@ -447,7 +614,7 @@ func (s *Server) apiLibraryEnrichmentDetail(w http.ResponseWriter, r *http.Reque
 		for m := range releaseVotes {
 			mbids = append(mbids, m)
 		}
-		states, err := s.deps.Manifest.BookletStatesIn(r.Context(), mbids)
+		states, err := s.deps.Manifest.BookletStatesIn(ctx, mbids)
 		if err != nil {
 			logger.Warn("meta detail: booklet states", "err", err)
 		} else {
@@ -467,7 +634,7 @@ func (s *Server) apiLibraryEnrichmentDetail(w http.ResponseWriter, r *http.Reque
 			})
 		}
 	}
-	writeJSON(w, http.StatusOK, resp)
+	return resp, nil
 }
 
 // pickDominant returns the most-voted key (ties broken
@@ -535,6 +702,12 @@ func (s *Server) apiLibraryEnrichmentRetryScoped(w http.ResponseWriter, r *http.
 			delete(s.libMetaRetryAt, p)
 		}
 	}
+	// The window re-check is independent of the prune above by design —
+	// don't couple them. It's unreachable while the prune runs
+	// unconditionally on the line before, but the moment that moves to
+	// a background sweep (or gets gated to every Nth call) this becomes
+	// the only thing standing between a panic-clicked button and the
+	// enrichers.
 	if at, hot := s.libMetaRetryAt[normalised]; hot && time.Since(at) < libraryMetaRetryMinInterval {
 		s.libMetaRetryMu.Unlock()
 		writeError(w, http.StatusTooManyRequests, "rate_limited",
@@ -610,18 +783,16 @@ func (s *Server) apiLibraryEnrichmentRetryScoped(w http.ResponseWriter, r *http.
 	}
 
 	// Invalidate the dashboard enrichment snapshot + this subtree's
-	// refs cache so the "pending" jump lands promptly.
+	// meta caches so the "pending" jump lands promptly. The DETAIL
+	// sweep is load-bearing: the About card deliberately doesn't
+	// auto-refetch after a retry (enrichment runs at the MB/CAA/Deezer
+	// clients' pacing, so an immediate refetch loses the race and reads
+	// as failure) — it refreshes on next open, which a 60s-stale cache
+	// entry would defeat.
 	s.enrichmentMu.Lock()
 	s.enrichmentAt = time.Time{}
 	s.enrichmentMu.Unlock()
-	s.libMetaMu.Lock()
-	for p := range s.libMetaCache {
-		if normalised == "" || p == normalised || strings.HasPrefix(p, normalised+"/") ||
-			strings.HasPrefix(normalised, p+"/") || p == "" {
-			delete(s.libMetaCache, p)
-		}
-	}
-	s.libMetaMu.Unlock()
+	s.libMetaInvalidateUnder(normalised)
 
 	logger.Info("library metadata retry", "path", normalised,
 		"resetTracks", resp.ResetTracks, "artistImageResets", resp.ArtistImageResets,
