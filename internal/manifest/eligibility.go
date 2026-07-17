@@ -34,8 +34,17 @@ import (
 // codec-empty rows) AND above the CarPlay floor (rate > 48000 OR
 // bits > 16). DSD needs no explicit arm — DSF/DFF codecs fail the
 // allowlist, and codec-empty DSD files don't carry PCM extensions.
-// TRIM matches the Go side's strings.TrimSpace; SQLite LIKE is
-// ASCII-case-insensitive, matching the Go ToLower ext compare.
+// SQLite LIKE is ASCII-case-insensitive, matching the Go ToLower ext
+// compare.
+//
+// NOTE: SQLite's TRIM is NOT strings.TrimSpace — it strips only U+0020,
+// where Go also strips \t \n \v \f \r and Unicode spaces. Harmless
+// today because every Track.Codec writer stamps a hardcoded literal
+// (extractors.go / mp4codec.go), so no whitespace-bearing codec can
+// reach the column. If a future extractor ever stamps a codec straight
+// from a tag, this mirror stops agreeing — normalise on the Go side
+// before it lands in the column.
+//
 // References a `tracks` row aliased as `t`. No binds.
 const optimizeEligibleSQL = `(
 	( UPPER(TRIM(COALESCE(t.codec,''))) IN ('FLAC','ALAC','WAV','AIFF','PCM')
@@ -71,6 +80,37 @@ const upscaleEligibleSQL = `(
 	AND NOT (t.sample_rate > ? OR t.bits_per_sample > ?)
 	AND NOT (t.sample_rate = ? AND t.bits_per_sample = ?)
 )`
+
+// <kind>CoveredOrEligibleSQL is the coverage DENOMINATOR predicate:
+// this track already HAS a variant of the kind, OR is currently
+// eligible to get one.
+//
+// Hoisted because EligibleCountsForFolders (the tile bar) and
+// EligibleRollupByPrefix (the action panel's header) render the SAME
+// folder's numbers from separate queries. Inlined, the two composites
+// were byte-identical copies pinned by separate tests with separate
+// fixtures — so a one-sided edit would make the two surfaces
+// contradict each other with nothing failing. Sharing the const makes
+// the agreement structural, exactly as <kind>EligibleSQL already does
+// one level down.
+//
+// Binds: whatever the composed <kind>EligibleSQL takes (none for
+// optimize; the four upscale target binds in textual order).
+const (
+	upscaleCoveredOrEligibleSQL = `(
+		EXISTS(SELECT 1 FROM track_variants tv
+		        WHERE tv.source_path = t.path
+		          AND tv.variant_id LIKE 'upscaled-%')
+		OR ` + upscaleEligibleSQL + `
+	)`
+
+	optimizeCoveredOrEligibleSQL = `(
+		EXISTS(SELECT 1 FROM track_variants tv
+		        WHERE tv.source_path = t.path
+		          AND tv.variant_id LIKE 'optimized-%')
+		OR ` + optimizeEligibleSQL + `
+	)`
+)
 
 // EligibleCounts carries the per-kind coverage DENOMINATORS for a
 // scope: tracks with a variant of the kind plus tracks currently
@@ -109,16 +149,10 @@ func (s *Store) EligibleCountsForFolders(ctx context.Context, paths []string, ta
 		SELECT je.value,
 		  (SELECT COUNT(*) FROM tracks t
 		     WHERE t.path >= je.value || '/' AND t.path < je.value || '0'
-		       AND ( EXISTS(SELECT 1 FROM track_variants tv
-		                     WHERE tv.source_path = t.path
-		                       AND tv.variant_id LIKE 'upscaled-%')
-		             OR `+upscaleEligibleSQL+` )),
+		       AND `+upscaleCoveredOrEligibleSQL+`),
 		  (SELECT COUNT(*) FROM tracks t
 		     WHERE t.path >= je.value || '/' AND t.path < je.value || '0'
-		       AND ( EXISTS(SELECT 1 FROM track_variants tv
-		                     WHERE tv.source_path = t.path
-		                       AND tv.variant_id LIKE 'optimized-%')
-		             OR `+optimizeEligibleSQL+` ))
+		       AND `+optimizeCoveredOrEligibleSQL+`)
 		FROM json_each(?) je
 	`, targetRate, targetBits, targetRate, targetBits, string(blob))
 	if err != nil {
@@ -150,16 +184,10 @@ func (s *Store) EligibleCountsForFolders(ctx context.Context, paths []string, ta
 func (s *Store) EligibleRollupByPrefix(ctx context.Context, prefix string, targetRate, targetBits int) (EligibleCounts, error) {
 	q := `
 		SELECT
-		  COALESCE(SUM(CASE WHEN
-		    ( EXISTS(SELECT 1 FROM track_variants tv
-		              WHERE tv.source_path = t.path
-		                AND tv.variant_id LIKE 'upscaled-%')
-		      OR ` + upscaleEligibleSQL + ` ) THEN 1 ELSE 0 END), 0),
-		  COALESCE(SUM(CASE WHEN
-		    ( EXISTS(SELECT 1 FROM track_variants tv
-		              WHERE tv.source_path = t.path
-		                AND tv.variant_id LIKE 'optimized-%')
-		      OR ` + optimizeEligibleSQL + ` ) THEN 1 ELSE 0 END), 0)
+		  COALESCE(SUM(CASE WHEN ` + upscaleCoveredOrEligibleSQL + `
+		    THEN 1 ELSE 0 END), 0),
+		  COALESCE(SUM(CASE WHEN ` + optimizeCoveredOrEligibleSQL + `
+		    THEN 1 ELSE 0 END), 0)
 		FROM tracks t`
 	args := []any{targetRate, targetBits, targetRate, targetBits}
 	if prefix != "" {

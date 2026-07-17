@@ -9,6 +9,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
+	"github.com/acoseac/1-bit-bridge/internal/transcode"
 )
 
 // browseTestSeed plants a small library on the test server's
@@ -314,11 +315,10 @@ func TestApiLibraryBrowseProjection_HappyPath(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	browseTestSeed(t, srv)
 
-	// Wire the two closures with simple stubs so we don't have to
-	// pull internal/transcode into this test (mirrors the
-	// cmd/bridge/main.go wiring pattern). Each closure is exercised
-	// for its math; the real transcode helpers are covered in
-	// projection_test.go in the transcode package.
+	// Stub the two RUNTIME closures (mirrors the cmd/bridge/main.go
+	// wiring pattern) so the test doesn't depend on the live Pool or
+	// the host's real free space. The margin assertion below still
+	// calls the REAL transcode helper — that pin is the point.
 	srv.deps.ProjectedSize = func(sourceSize int64, sourceRate, sourceBits, targetRate, targetBits int) int64 {
 		// Deterministic stub: per-byte, per-rate-ratio, per-bits-ratio.
 		// Returns a finite number we can verify against the seeded
@@ -365,9 +365,20 @@ func TestApiLibraryBrowseProjection_HappyPath(t *testing.T) {
 	if resp.TargetRate <= 0 || resp.TargetBits <= 0 {
 		t.Errorf("Target unset: rate=%d bits=%d", resp.TargetRate, resp.TargetBits)
 	}
-	if resp.RequiredBytesWithMargin < resp.ProjectedSizeBytes {
-		t.Errorf("RequiredBytesWithMargin (%d) < ProjectedSizeBytes (%d)",
-			resp.RequiredBytesWithMargin, resp.ProjectedSizeBytes)
+	// LOCKSTEP PIN: this endpoint's whole contract is predicting what
+	// Coordinator.Submit will refuse, so `required` must be the REAL
+	// transcode helper's output — not merely "at least the projection",
+	// which is what this assertion used to say and is why a hardcoded
+	// /10 here survived unnoticed alongside DefaultDiskSafetyMargin.
+	// Comparing against a re-statement of the arithmetic would pin
+	// nothing; the real import is load-bearing (same reasoning as
+	// eligibility_lockstep_test.go).
+	if want := transcode.RequiredBytesWithMargin(
+		resp.ProjectedSizeBytes, transcode.DefaultDiskSafetyMargin,
+	); resp.RequiredBytesWithMargin != want {
+		t.Errorf("RequiredBytesWithMargin = %d, want %d — the endpoint's margin math "+
+			"has drifted from transcode.DiskHasHeadroom's",
+			resp.RequiredBytesWithMargin, want)
 	}
 }
 

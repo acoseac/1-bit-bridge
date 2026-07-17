@@ -137,6 +137,59 @@ func TestDefaultCompressionFactor(t *testing.T) {
 
 // TestDiskHasHeadroom_HappyPath probes a real directory (t.TempDir())
 // for free space and asserts ok=true with a non-zero freeBytes count.
+// TestRequiredBytesWithMargin pins the margin arithmetic: the ceil,
+// the clamps, and — most importantly — the overflow SATURATION. A
+// direct int64() conversion wraps NEGATIVE past MaxInt64, which would
+// sail through every `required > free` check and hand a disk-full
+// batch a green light.
+func TestRequiredBytesWithMargin(t *testing.T) {
+	cases := []struct {
+		name      string
+		projected int64
+		margin    float64
+		want      int64
+	}{
+		{"default margin", 1000, DefaultDiskSafetyMargin, 1100},
+		{"ceil rounds up, never down", 1005, DefaultDiskSafetyMargin, 1106}, // 1105.5 → 1106
+		{"zero margin is identity", 1000, 0, 1000},
+		{"zero projection", 0, DefaultDiskSafetyMargin, 0},
+		{"negative projection", -5, DefaultDiskSafetyMargin, 0},
+		{"negative margin clamps to 0", 1000, -0.5, 1000},
+		{"NaN margin clamps to 0", 1000, math.NaN(), 1000},
+		{"overflow saturates, never wraps", math.MaxInt64, DefaultDiskSafetyMargin, math.MaxInt64},
+		{"+Inf margin saturates", 1000, math.Inf(1), math.MaxInt64},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := RequiredBytesWithMargin(tc.projected, tc.margin)
+			if got != tc.want {
+				t.Errorf("RequiredBytesWithMargin(%d, %v) = %d, want %d",
+					tc.projected, tc.margin, got, tc.want)
+			}
+			if got < 0 {
+				t.Errorf("negative required (%d) — overflow wrapped instead of saturating", got)
+			}
+		})
+	}
+}
+
+// TestDiskHasHeadroom_UsesRequiredBytesWithMargin pins that the
+// coordinator's refusal threshold IS the exported helper's output —
+// the admin projection endpoint predicts refusals from that helper, so
+// a second copy of the arithmetic here would drift the two apart.
+func TestDiskHasHeadroom_UsesRequiredBytesWithMargin(t *testing.T) {
+	dir := t.TempDir()
+	const projected = math.MaxInt64
+	_, _, err := DiskHasHeadroom(dir, projected, DefaultDiskSafetyMargin)
+	var dskErr *InsufficientDiskSpaceError
+	if !errors.As(err, &dskErr) {
+		t.Fatalf("err = %v, want *InsufficientDiskSpaceError", err)
+	}
+	if want := RequiredBytesWithMargin(projected, DefaultDiskSafetyMargin); dskErr.RequiredBytes != want {
+		t.Errorf("RequiredBytes = %d, want %d (the helper's value)", dskErr.RequiredBytes, want)
+	}
+}
+
 // We can't deterministically know the free-byte count on the CI host,
 // so the assertion is on the structural contract rather than a
 // numeric value.

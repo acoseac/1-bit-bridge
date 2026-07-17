@@ -210,6 +210,36 @@ type SubmitResult struct {
 	EnqueuedCount      int
 }
 
+// diskPreflight grades the volume the variants will actually be
+// WRITTEN to and returns its free bytes, refusing the batch if
+// projected + the safety margin wouldn't fit.
+//
+// outputDir is the sidecar destination; it may live on a different
+// volume than the bridge data dir (field case: bridge.ars.md's
+// variants on a ~1 PB B2 mount while dataDir sits on a 29 GB root
+// disk — grading dataDir refused batches that fit easily). c.dataDir
+// is the documented fallback for callers that pass "".
+//
+// The typed *InsufficientDiskSpaceError surfaces UNWRAPPED (callers
+// errors.As it for the 507 mapping); `op` prefixes only genuine probe
+// failures, which callers must treat as "can't check, refuse" —
+// silently proceeding risks a disk-full mid-batch.
+func (c *Coordinator) diskPreflight(outputDir string, projected int64, op string) (available int64, err error) {
+	checkDir := outputDir
+	if checkDir == "" {
+		checkDir = c.dataDir
+	}
+	_, available, err = DiskHasHeadroom(checkDir, projected, DefaultDiskSafetyMargin)
+	if err != nil {
+		var dskErr *InsufficientDiskSpaceError
+		if errors.As(err, &dskErr) {
+			return 0, err
+		}
+		return 0, fmt.Errorf("%s: disk probe: %w", op, err)
+	}
+	return available, nil
+}
+
 // Submit walks every track under `path`, filters ineligible /
 // already-covered, computes the projected variant size, refuses on
 // insufficient disk headroom, inserts an `upscale_batches` row,
@@ -334,27 +364,9 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 			"batchPath", path, "count", resolveErrors)
 	}
 
-	// Pre-flight disk check against the directory the variants will
-	// actually be WRITTEN to — outputDir may live on a different
-	// volume than the bridge data dir (field case: bridge.ars.md's
-	// variants on a ~1 PB B2 mount while dataDir sits on a 29 GB
-	// root disk; checking dataDir refused batches that fit easily).
-	// Refuse with a typed error carrying the operator-facing numbers.
-	checkDir := outputDir
-	if checkDir == "" {
-		checkDir = c.dataDir
-	}
-	// DiskHasHeadroom returns the typed *InsufficientDiskSpaceError AS
-	// its err on refusal — surface that directly (callers errors.As it
-	// for the 507 mapping) and reserve the "disk probe" wrap for
-	// genuine probe failures.
-	_, available, err := DiskHasHeadroom(checkDir, totalProjected, DefaultDiskSafetyMargin)
+	available, err := c.diskPreflight(outputDir, totalProjected, "submit")
 	if err != nil {
-		var dskErr *InsufficientDiskSpaceError
-		if errors.As(err, &dskErr) {
-			return nil, err
-		}
-		return nil, fmt.Errorf("submit: disk probe: %w", err)
+		return nil, err
 	}
 
 	// Insert the batch row first so any pool callback that races
@@ -624,21 +636,9 @@ func (c *Coordinator) SubmitOptimize(ctx context.Context, path string, outputDir
 
 	picked := c.buildOptimizeCandidates(path, projections)
 
-	// Same write-target disk check as Submit: grade outputDir (the
-	// actual sidecar destination), falling back to dataDir only for
-	// callers that pass "". The typed refusal surfaces directly; the
-	// wrap is for genuine probe failures (see Submit).
-	checkDir := outputDir
-	if checkDir == "" {
-		checkDir = c.dataDir
-	}
-	_, available, err := DiskHasHeadroom(checkDir, picked.totalProjected, DefaultDiskSafetyMargin)
+	available, err := c.diskPreflight(outputDir, picked.totalProjected, "submit optimize")
 	if err != nil {
-		var dskErr *InsufficientDiskSpaceError
-		if errors.As(err, &dskErr) {
-			return nil, err
-		}
-		return nil, fmt.Errorf("submit optimize: disk probe: %w", err)
+		return nil, err
 	}
 
 	// Skip count = projections seen − enqueueable − already-covered.
