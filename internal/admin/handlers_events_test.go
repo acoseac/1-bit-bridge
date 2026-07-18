@@ -93,9 +93,9 @@ func TestEventsStreamInitialSnapshot(t *testing.T) {
 		t.Fatalf("Cache-Control: got %q want no-cache", cc)
 	}
 
-	frames := readFrames(t, resp.Body, 9, 3*time.Second)
-	if len(frames) != 9 {
-		t.Fatalf("frames: got %d want 9 (got: %v)", len(frames), frames)
+	frames := readFrames(t, resp.Body, 10, 3*time.Second)
+	if len(frames) != 10 {
+		t.Fatalf("frames: got %d want 10 (got: %v)", len(frames), frames)
 	}
 	seen := map[string]bool{}
 	for _, f := range frames {
@@ -105,7 +105,7 @@ func TestEventsStreamInitialSnapshot(t *testing.T) {
 			t.Errorf("event %q invalid JSON: %v (raw: %q)", f.event, err, f.data)
 		}
 	}
-	for _, want := range []string{"stats", "pairing", "endpoints", "updates", "tailscale", "composition", "enrichment", "upscale", "analysis"} {
+	for _, want := range []string{"stats", "pairing", "endpoints", "updates", "tailscale", "composition", "sources", "enrichment", "upscale", "analysis"} {
 		if !seen[want] {
 			t.Errorf("missing initial-snapshot event %q", want)
 		}
@@ -131,9 +131,9 @@ func TestEventsStreamDiffSuppression(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	// Drain initial snapshot (9 named events incl. composition/enrichment/upscale/analysis).
-	initial := readFrames(t, resp.Body, 9, 3*time.Second)
-	if len(initial) != 9 {
+	// Drain initial snapshot (10 named events incl. composition/sources/enrichment/upscale/analysis).
+	initial := readFrames(t, resp.Body, 10, 3*time.Second)
+	if len(initial) != 10 {
 		t.Fatalf("initial snapshot incomplete: got %d frames", len(initial))
 	}
 
@@ -170,7 +170,7 @@ func TestEventsStreamWakesOnStateChange(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	if got := readFrames(t, resp.Body, 9, 3*time.Second); len(got) != 9 {
+	if got := readFrames(t, resp.Body, 10, 3*time.Second); len(got) != 10 {
 		t.Fatalf("initial snapshot incomplete: %d frames", len(got))
 	}
 
@@ -221,7 +221,7 @@ func TestEventsStreamShutdown(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	if got := readFrames(t, resp.Body, 9, 3*time.Second); len(got) != 9 {
+	if got := readFrames(t, resp.Body, 10, 3*time.Second); len(got) != 10 {
 		t.Fatalf("initial snapshot incomplete: %d frames", len(got))
 	}
 
