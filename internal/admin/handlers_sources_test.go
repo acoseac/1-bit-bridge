@@ -2,6 +2,17 @@ package admin
 
 import "testing"
 
+type sourcesCase struct {
+	name        string
+	total       int
+	routed      int
+	provider    UPnPUpstreamProvider
+	wantFS      int
+	wantRouted  int
+	wantEnabled bool
+	wantServers []sourceServerRow
+}
+
 // TestGetSourcesSnapshot pins the dashboard filesystem-vs-UPnP breakdown
 // assembler: filesystem = total - routedTotal (clamped >= 0), the clamped
 // routed distributed as a running budget across per-server rows so the
@@ -16,16 +27,7 @@ func TestGetSourcesSnapshot(t *testing.T) {
 		return UPnPUpstreamServerState{Name: name, ConfiguredUDN: udn, RoutedTracks: routed, Discovered: discovered}
 	}
 
-	tests := []struct {
-		name        string
-		total       int
-		routed      int
-		provider    UPnPUpstreamProvider
-		wantFS      int
-		wantRouted  int
-		wantEnabled bool
-		wantServers []sourceServerRow
-	}{
+	tests := []sourcesCase{
 		{
 			name: "normal split", total: 100, routed: 40,
 			provider:    &stubUPnPProvider{servers: []UPnPUpstreamServerState{udnSrv("2Go", "uuid:a", 40, false)}},
@@ -86,48 +88,65 @@ func TestGetSourcesSnapshot(t *testing.T) {
 			s := &Server{deps: Deps{UPnPUpstream: tc.provider}}
 			s.statsDB = statsDBPart{tracks: tc.total, upnpRouted: tc.routed}
 			s.statsDBValid = true
-
-			got := s.getSourcesSnapshot()
-
-			if got.Filesystem != tc.wantFS {
-				t.Errorf("Filesystem: got %d want %d", got.Filesystem, tc.wantFS)
-			}
-			if got.RoutedTotal != tc.wantRouted {
-				t.Errorf("RoutedTotal: got %d want %d", got.RoutedTotal, tc.wantRouted)
-			}
-			if got.Total != tc.total {
-				t.Errorf("Total: got %d want %d", got.Total, tc.total)
-			}
-			if got.UPnPEnabled != tc.wantEnabled {
-				t.Errorf("UPnPEnabled: got %v want %v", got.UPnPEnabled, tc.wantEnabled)
-			}
-			if got.Servers == nil {
-				t.Fatalf("Servers must be non-nil so it marshals to [] not null")
-			}
-			if len(got.Servers) != len(tc.wantServers) {
-				t.Fatalf("Servers len: got %d want %d (%+v)", len(got.Servers), len(tc.wantServers), got.Servers)
-			}
-			for i, want := range tc.wantServers {
-				if got.Servers[i] != want {
-					t.Errorf("Servers[%d]: got %+v want %+v", i, got.Servers[i], want)
-				}
-			}
-
-			// Reconciliation invariant: filesystem + sum(rows) + orphan
-			// remainder == total, and the remainder is never negative (the
-			// budget cap guarantees sum(rows) <= routedTotal).
-			sumRows := 0
-			for _, r := range got.Servers {
-				sumRows += r.RoutedTracks
-			}
-			remainder := got.RoutedTotal - sumRows
-			if remainder < 0 {
-				t.Errorf("orphan remainder negative: routedTotal=%d sumRows=%d", got.RoutedTotal, sumRows)
-			}
-			if got.Filesystem+sumRows+remainder != got.Total {
-				t.Errorf("does not reconcile: fs=%d + rows=%d + remainder=%d != total=%d",
-					got.Filesystem, sumRows, remainder, got.Total)
-			}
+			assertSourcesSnapshot(t, tc, s.getSourcesSnapshot())
 		})
+	}
+}
+
+// assertSourcesSnapshot checks the scalar fields, then delegates the
+// per-server rows and the reconciliation invariant to focused helpers
+// (kept split so each stays under the cognitive-complexity budget).
+func assertSourcesSnapshot(t *testing.T, tc sourcesCase, got sourcesResponse) {
+	t.Helper()
+	if got.Filesystem != tc.wantFS {
+		t.Errorf("Filesystem: got %d want %d", got.Filesystem, tc.wantFS)
+	}
+	if got.RoutedTotal != tc.wantRouted {
+		t.Errorf("RoutedTotal: got %d want %d", got.RoutedTotal, tc.wantRouted)
+	}
+	if got.Total != tc.total {
+		t.Errorf("Total: got %d want %d", got.Total, tc.total)
+	}
+	if got.UPnPEnabled != tc.wantEnabled {
+		t.Errorf("UPnPEnabled: got %v want %v", got.UPnPEnabled, tc.wantEnabled)
+	}
+	assertSourceServers(t, tc.wantServers, got.Servers)
+	assertSourcesReconcile(t, got)
+}
+
+// assertSourceServers checks the per-server rows exactly and that the slice
+// is non-nil (so it marshals to [] not null).
+func assertSourceServers(t *testing.T, want, got []sourceServerRow) {
+	t.Helper()
+	if got == nil {
+		t.Fatalf("Servers must be non-nil so it marshals to [] not null")
+	}
+	if len(got) != len(want) {
+		t.Fatalf("Servers len: got %d want %d (%+v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("Servers[%d]: got %+v want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+// assertSourcesReconcile pins the invariant that the rendered rows sum back
+// to Total — filesystem + sum(server rows) + orphan remainder == total — and
+// that the remainder is never negative (the budget cap keeps
+// sum(rows) <= routedTotal).
+func assertSourcesReconcile(t *testing.T, got sourcesResponse) {
+	t.Helper()
+	sum := 0
+	for _, r := range got.Servers {
+		sum += r.RoutedTracks
+	}
+	remainder := got.RoutedTotal - sum
+	if remainder < 0 {
+		t.Errorf("orphan remainder negative: routedTotal=%d sumRows=%d", got.RoutedTotal, sum)
+	}
+	if got.Filesystem+sum+remainder != got.Total {
+		t.Errorf("does not reconcile: fs=%d + rows=%d + remainder=%d != total=%d",
+			got.Filesystem, sum, remainder, got.Total)
 	}
 }

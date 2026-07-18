@@ -652,11 +652,16 @@ type sourcesResponse struct {
 // preferring the in-memory stats cache (s.statsDB, populated by the stats
 // path every 5s and first in the SSE initial-emit) so the slow-tick
 // `sources` publish costs zero DB reads and zero os.Stat, and stays byte-
-// consistent with the headline "Original tracks" card. The cold path —
-// reachable only by a bare GET /api/sources on a freshly-started bridge
-// before any stats read, since the SSE initial-emit runs publishStats
-// before publishSources — delegates to getStatsSnapshot, which does the
-// tested reads AND warms the cache for subsequent calls.
+// consistent with the headline "Original tracks" card.
+//
+// The cold path — reachable only by a bare GET /api/sources on a freshly-
+// started bridge before any stats read, since the SSE initial-emit runs
+// publishStats before publishSources — runs the same readStatsDBPart the
+// stats path uses (it holds the two counts we need), warms the cache for
+// subsequent calls, and degrades to the last-good part on a read error. It
+// deliberately does NOT route through getStatsSnapshot: that also does an
+// os.Stat on the DB file, a scanner-status read, and an auth-store lock we
+// don't need here (Gemini on PR #510).
 func (s *Server) trackSourceCounts() (total, routed int) {
 	s.statsMu.Lock()
 	warm := s.statsDBValid
@@ -667,8 +672,18 @@ func (s *Server) trackSourceCounts() (total, routed int) {
 	if warm {
 		return total, routed
 	}
-	st := s.getStatsSnapshot()
-	return st.TracksIndexed, st.UPnPRoutedTracks
+	ctx, cancel := context.WithTimeout(context.Background(), snapshotDBTimeout)
+	defer cancel()
+	part, err := s.readStatsDBPart(ctx)
+	s.statsMu.Lock()
+	if err == nil {
+		s.statsDB = part
+		s.statsDBValid = true
+	} else if s.statsDBValid {
+		part = s.statsDB
+	}
+	s.statsMu.Unlock()
+	return part.tracks, part.upnpRouted
 }
 
 // getSourcesSnapshot assembles the dashboard "Sources" breakdown from the
