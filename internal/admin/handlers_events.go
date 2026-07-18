@@ -100,6 +100,7 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 		lastUpdates     []byte
 		lastTailscale   []byte
 		lastComposition []byte
+		lastSources     []byte
 		lastEnrichment  []byte
 		lastUpscale     []byte
 		lastAnalysis    []byte
@@ -188,6 +189,14 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 		return marshalAndPublish("composition", s.getCompositionSnapshot(), &lastComposition)
 	}
 
+	// sources (dashboard filesystem-vs-UPnP-upstream track breakdown) rides
+	// the slow tick; getSourcesSnapshot reads the cached stats counts (no
+	// DB, no os.Stat) + the already-assembled ConfiguredServers state, so it
+	// stays cheap and diff-suppressed.
+	publishSources := func() error {
+		return marshalAndPublish("sources", s.getSourcesSnapshot(), &lastSources)
+	}
+
 	// enrichment (dashboard enrichment-progress card) rides the slow tick and is
 	// TTL-cached + single-flighted in getEnrichmentSnapshot, so it stays cheap
 	// even though the underlying matched/missing split is a full-table scan.
@@ -216,7 +225,7 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 	// paint at all. Bail on any write error: client already gone.
 	for _, f := range []func() error{
 		publishStats, publishPairing, publishEndpoints, publishUpdates, publishTailscale,
-		publishComposition, publishEnrichment, publishUpscale, publishAnalysis,
+		publishComposition, publishSources, publishEnrichment, publishUpscale, publishAnalysis,
 	} {
 		if err := f(); err != nil {
 			return
@@ -302,6 +311,12 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 			// Composition rides the slow tick — format only changes
 			// after a scan; the snapshot is TTL-cached + diff-suppressed.
 			if err := publishComposition(); err != nil {
+				return
+			}
+			// Sources (filesystem-vs-UPnP breakdown) rides the slow tick —
+			// upstream membership + online/offline is slow-moving; the
+			// snapshot reads cached counts (no DB) and is diff-suppressed.
+			if err := publishSources(); err != nil {
 				return
 			}
 			// Enrichment progress also rides the slow tick — it fills over

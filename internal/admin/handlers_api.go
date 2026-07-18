@@ -619,6 +619,131 @@ func (s *Server) getCompositionSnapshot() compositionResponse {
 	return compositionResponse{}
 }
 
+// --- library sources (dashboard filesystem-vs-UPnP breakdown) ---
+
+// sourceServerRow is one UPnP upstream in the dashboard "Sources"
+// breakdown. Admin-local wire DTO (consumed by app.js applySources).
+// RoutedTracks is budget-capped in getSourcesSnapshot so the rendered rows
+// always reconcile to Total even during a transient cross-read skew.
+// Online is only meaningful when Monitored: a manual-URL-only upstream has
+// no SSDP presence to watch, so it's badged "manual", not a false "offline".
+type sourceServerRow struct {
+	Name         string `json:"name"`
+	RoutedTracks int    `json:"routedTracks"`
+	Online       bool   `json:"online"`
+	Monitored    bool   `json:"monitored"`
+}
+
+// sourcesResponse is the dashboard "Sources" panel payload: filesystem
+// (on-this-bridge) vs per-UPnP-upstream track provenance. Filesystem +
+// RoutedTotal == Total, and the per-server rows + orphan remainder always
+// reconcile to Total (see getSourcesSnapshot). Emitted on the SSE
+// `sources` event. Cosmetic / admin-only — iOS and the v1 wire are
+// unaffected (offline-upstream tracks stay in the manifest as today).
+type sourcesResponse struct {
+	Filesystem  int               `json:"filesystem"`
+	RoutedTotal int               `json:"routedTotal"`
+	Total       int               `json:"total"`
+	UPnPEnabled bool              `json:"upnpEnabled"`
+	Servers     []sourceServerRow `json:"servers"`
+}
+
+// trackSourceCounts returns the library total and the UPnP-routed total,
+// preferring the in-memory stats cache (s.statsDB, populated by the stats
+// path every 5s and first in the SSE initial-emit) so the slow-tick
+// `sources` publish costs zero DB reads and zero os.Stat, and stays byte-
+// consistent with the headline "Original tracks" card.
+//
+// The cold path — reachable only by a bare GET /api/sources on a freshly-
+// started bridge before any stats read, since the SSE initial-emit runs
+// publishStats before publishSources — runs the same readStatsDBPart the
+// stats path uses (it holds the two counts we need), warms the cache for
+// subsequent calls, and degrades to the last-good part on a read error. It
+// deliberately does NOT route through getStatsSnapshot: that also does an
+// os.Stat on the DB file, a scanner-status read, and an auth-store lock we
+// don't need here (Gemini on PR #510).
+func (s *Server) trackSourceCounts() (total, routed int) {
+	s.statsMu.Lock()
+	warm := s.statsDBValid
+	if warm {
+		total, routed = s.statsDB.tracks, s.statsDB.upnpRouted
+	}
+	s.statsMu.Unlock()
+	if warm {
+		return total, routed
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), snapshotDBTimeout)
+	defer cancel()
+	part, err := s.readStatsDBPart(ctx)
+	s.statsMu.Lock()
+	if err == nil {
+		s.statsDB = part
+		s.statsDBValid = true
+	} else if s.statsDBValid {
+		part = s.statsDB
+	}
+	s.statsMu.Unlock()
+	return part.tracks, part.upnpRouted
+}
+
+// getSourcesSnapshot assembles the dashboard "Sources" breakdown from the
+// cached track counts + the already-assembled per-server ConfiguredServers
+// state — no new store query. filesystem = total - routedTotal.
+//
+// Reconciliation: the upnp_track_routing.source_path -> tracks.path FK
+// makes routedTotal <= total in a consistent snapshot, so filesystem is
+// >= 0; the clamp only guards the astronomically-rare sub-ms window
+// between the two (non-atomic) cached reads. The per-server RoutedTracks
+// come from a separate ConfiguredServers() read, so we distribute the
+// clamped routedTotal as a running budget across the rows — in steady
+// state the budget lands exactly on the real counts (no capping), but in a
+// transient skew it keeps sum(rows) <= routedTotal so the rendered
+// breakdown never over-sums. Any leftover budget is the orphan remainder
+// (rows whose upstream was just removed, pre-reap) that app.js renders as
+// "Other UPnP sources".
+func (s *Server) getSourcesSnapshot() sourcesResponse {
+	total, routed := s.trackSourceCounts()
+	if routed > total {
+		routed = total
+	}
+	resp := sourcesResponse{
+		Filesystem:  total - routed,
+		RoutedTotal: routed,
+		Total:       total,
+		Servers:     []sourceServerRow{},
+	}
+	if s.deps.UPnPUpstream != nil {
+		resp.UPnPEnabled = true
+		configured := s.deps.UPnPUpstream.ConfiguredServers()
+		resp.Servers = make([]sourceServerRow, 0, len(configured))
+		budget := routed
+		for _, srv := range configured {
+			n := srv.RoutedTracks
+			if n < 0 {
+				n = 0
+			}
+			if n > budget {
+				n = budget
+			}
+			budget -= n
+			resp.Servers = append(resp.Servers, sourceServerRow{
+				Name:         srv.Name,
+				RoutedTracks: n,
+				Online:       srv.Discovered,
+				Monitored:    srv.ConfiguredUDN != "",
+			})
+		}
+	}
+	return resp
+}
+
+// apiSources serves GET /api/sources — the REST twin of the SSE `sources`
+// event, for curl / tests / debugging. Loopback + csrfGuard apply via the
+// shared middleware chain (registered alongside /api/stats).
+func (s *Server) apiSources(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.getSourcesSnapshot())
+}
+
 // --- enrichment progress (dashboard legibility) ---
 
 // enrichmentResponse is the dashboard "Enrichment" card payload: the derived

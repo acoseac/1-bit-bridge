@@ -38,6 +38,17 @@
       <dd><span id="comp-variant-files">{{.Data.VariantFiles}}</span> files · <span id="comp-variant-bytes">{{bytesHuman .Data.VariantBytes}}</span> on disk</dd>
     </dl>
 
+    {{/* Sources — filesystem-vs-UPnP-upstream provenance, painted by
+         app.js applySources from the SSE `sources` event (initial-emit on
+         connect). Hidden until the first frame AND only shown when a UPnP
+         upstream is actually in the mix; a pure-filesystem bridge shows
+         nothing here. Cosmetic — offline-upstream tracks stay in the
+         library, this just makes the headline "Original tracks" honest. */}}
+    <div class="sources" id="sources-block" hidden>
+      <h3 class="dist-heading">Sources</h3>
+      <dl class="composition" id="sources-list"><!-- rows painted by applySources --></dl>
+    </div>
+
     {{/* Master-quality breakdown — proportional bars painted by
          app.js applyComposition from the SSE `composition` event
          (initial-emit fires on connect, so the wait is sub-second).
@@ -45,6 +56,10 @@
          cache shows nothing rather than empty bars. */}}
     <div class="master-quality" id="master-quality" hidden>
       <h3 class="dist-heading">Master quality</h3>
+      {{/* Revealed by applySources only when some tracks are UPnP-routed —
+           the bars count every track, so on a mixed library they reflect
+           the upstream too, not just this bridge. */}}
+      <p class="hint" id="master-quality-note" hidden>Includes tracks proxied from UPnP upstream servers.</p>
       <div class="dist-section">
         <div class="dist-title">PCM sampling density</div>
         <div class="dist-bar" id="comp-pcm-bar" role="img" aria-label="PCM sampling-density distribution"></div>

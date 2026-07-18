@@ -2196,6 +2196,45 @@ section.library-inspector {
    Proportional stacked segments painted by app.js renderDistBar; the
    segment palette is derived from data-kind + the per-segment --i index
    so the colours stay stable frame-to-frame. */
+/* Sources — filesystem-vs-UPnP-upstream provenance breakdown on the
+   dashboard "Library composition" panel (painted by app.js applySources).
+   Reuses the .composition dl but overrides the grid so upstream names get
+   room on the left and track counts right-align on the right. */
+.sources {
+  margin-top: 18px;
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+}
+#sources-list {
+  grid-template-columns: 1fr auto;
+  gap: 7px 16px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+#sources-list dt {
+  color: var(--fg);
+}
+#sources-list dd {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+/* Offline upstream — dim the whole row so the tracks that actually live on
+   this bridge stand out. This is the "grayed out" the operator asked for;
+   the amber "offline" chip stays legible at reduced opacity. */
+.source-offline {
+  opacity: 0.55;
+}
+/* Total — the reconciling sum (filesystem + upstreams). Separated + bold. */
+.source-total {
+  font-weight: 600;
+}
+#sources-list .source-total {
+  border-top: 1px solid var(--border);
+  margin-top: 2px;
+  padding-top: 9px;
+}
+
 .master-quality {
   margin-top: 18px;
   border-top: 1px solid var(--border);

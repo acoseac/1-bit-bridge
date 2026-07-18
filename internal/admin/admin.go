@@ -907,6 +907,7 @@ func (s *Server) Handler() http.Handler {
 
 	// JSON API.
 	mux.HandleFunc("GET /api/stats", s.apiStats)
+	mux.HandleFunc("GET /api/sources", s.apiSources)
 	mux.HandleFunc("GET /api/enrichment", s.apiEnrichment)
 	mux.HandleFunc("POST /api/enrichment/retry", s.apiEnrichmentRetry)
 	mux.HandleFunc("GET /api/endpoints", s.apiEndpoints)

@@ -269,6 +269,97 @@ function renderDistBar(barId, legendId, segs, total, kind) {
   });
 }
 
+// applySources renders the dashboard "Sources" breakdown from the SSE
+// `sources` event: filesystem ("on this bridge") vs each configured UPnP
+// upstream (with an online / offline / manual status chip, offline rows
+// dimmed) vs total. Cosmetic — it just makes the headline provenance
+// honest; the offline upstream's tracks stay in the library either way.
+//
+// Built via createElement/textContent (never innerHTML) so third-party
+// server names can't inject markup. The list is cleared each frame
+// (replaceChildren) so the 30 s tick can't stack duplicate rows, and
+// visibility is assigned in both directions so removing the last upstream
+// re-hides the block.
+function applySources(data) {
+  if (!data) return;
+
+  // Master-quality caption: reveal only when some tracks are UPnP-routed
+  // (otherwise the bars already reflect only this bridge). Reversible.
+  const note = document.getElementById("master-quality-note");
+  const routedTotal = data.routedTotal || 0;
+  if (note) note.hidden = routedTotal === 0;
+
+  const list = document.getElementById("sources-list");
+  const block = document.getElementById("sources-block");
+  if (!list || !block) return;
+
+  const servers = Array.isArray(data.servers) ? data.servers : [];
+  // The breakdown only earns its space when a UPnP upstream is actually in
+  // the mix; a pure-filesystem bridge shows nothing but its headline total.
+  const hasUPnP = !!data.upnpEnabled && (servers.length > 0 || routedTotal > 0);
+  block.hidden = !hasUPnP;
+  list.replaceChildren(); // clear first — reversible + no 30 s row stacking
+  if (!hasUPnP) return;
+
+  const nf = (n) => Number(n || 0).toLocaleString();
+  const tracksWord = (n) => (Number(n) === 1 ? "track" : "tracks");
+
+  // addRow appends a dt (label [+ status chip]) / dd (count) pair.
+  const addRow = (label, count, opts = {}) => {
+    const dt = document.createElement("dt");
+    dt.textContent = label;
+    if (opts.chip) {
+      const chip = document.createElement("span");
+      chip.className = "badge " + opts.chip.cls;
+      chip.textContent = opts.chip.text;
+      dt.appendChild(document.createTextNode(" "));
+      dt.appendChild(chip);
+    }
+    const dd = document.createElement("dd");
+    dd.textContent = `${nf(count)} ${tracksWord(count)}`;
+    if (opts.dim) {
+      dt.classList.add("source-offline");
+      dd.classList.add("source-offline");
+    }
+    if (opts.total) {
+      dt.classList.add("source-total");
+      dd.classList.add("source-total");
+    }
+    list.appendChild(dt);
+    list.appendChild(dd);
+  };
+
+  // Filesystem — the tracks that actually live on this bridge.
+  addRow("On this bridge", data.filesystem || 0);
+
+  // One row per configured UPnP upstream.
+  let sumRows = 0;
+  servers.forEach((srv) => {
+    const routed = srv.routedTracks || 0;
+    sumRows += routed;
+    let chip, dim = false;
+    if (!srv.monitored) {
+      // Manual-URL upstream: no SSDP presence to watch, so "offline" would
+      // be a false alarm — badge it neutral instead.
+      chip = { cls: "idle", text: "manual" };
+    } else if (srv.online) {
+      chip = { cls: "idle", text: "online" };
+    } else {
+      chip = { cls: "warn", text: "offline" };
+      dim = true;
+    }
+    addRow(srv.name || "UPnP upstream", routed, { chip, dim });
+  });
+
+  // Orphan remainder — routing rows whose upstream was just removed and
+  // haven't been reaped yet. The server-side budget guarantees this is >= 0.
+  const other = routedTotal - sumRows;
+  if (other > 0) addRow("Other UPnP sources", other);
+
+  // Total — reconciles: filesystem + servers + other == total.
+  addRow("Total", data.total || 0, { total: true });
+}
+
 // applyEnrichment renders the dashboard "Enrichment" panel from the SSE
 // `enrichment` event: the derived pending/matched/missing counts, a coarse
 // ETA, the last-enriched time, and the matched-vs-missing coverage bar. The
@@ -2479,6 +2570,7 @@ function startEventStream() {
   const seen = (fn) => (e) => { lastEventSourceSeenAt = Date.now(); fn(e); };
   es.addEventListener("stats",       seen((e) => safeApply("stats",       e.data, applyStats)));
   es.addEventListener("composition", seen((e) => safeApply("composition", e.data, applyComposition)));
+  es.addEventListener("sources",     seen((e) => safeApply("sources",     e.data, applySources)));
   es.addEventListener("enrichment",  seen((e) => safeApply("enrichment",  e.data, applyEnrichment)));
   es.addEventListener("endpoints",   seen((e) => safeApply("endpoints",   e.data, applyEndpoints)));
   es.addEventListener("pairing",     seen((e) => safeApply("pairing",     e.data, applyPairing)));
