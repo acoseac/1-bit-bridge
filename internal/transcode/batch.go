@@ -568,15 +568,14 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 		enqueued++
 	}
 
-	// Capture the persisted total BEFORE the fully-deduped transition below can
-	// delete the batch from liveBatches, so the 202 response agrees with the
-	// admin Jobs page after any dedup/queue-full truncation (Gemini).
-	finalTotal := len(cands)
-	c.mu.Lock()
-	if st, ok := c.liveBatches[batchID]; ok {
-		finalTotal = st.Row.TotalFiles
-	}
-	c.mu.Unlock()
+	// The 202 response reports `enqueued` — the persisted row's TotalFiles
+	// converges to exactly this in every path (it starts at len(cands), each
+	// dedup decrements it via dropDedupedPath, and a queue-full break sets it to
+	// `enqueued`). Reading it back from liveBatches would be both redundant AND
+	// wrong when a first-enqueue failure already deleted the batch: the lookup
+	// misses and falls back to len(cands), diverging from the row the admin Jobs
+	// page shows (CodeRabbit PR #515).
+	finalTotal := enqueued
 
 	// Every candidate deduped against in-flight jobs (a fully-overlapping
 	// re-submit) → no callback will fire for this batch; transition it now so it
@@ -740,7 +739,7 @@ func (c *Coordinator) SubmitOptimize(ctx context.Context, path string, outputDir
 		Path:               path,
 		TargetRate:         0, // per-track varies; admin surfaces "Mobile optimization"
 		TargetBits:         16,
-		TotalFiles:         len(picked.cands),
+		TotalFiles:         enqueued,
 		AlreadyCovered:     picked.alreadyCovered,
 		ProjectedSizeBytes: picked.totalProjected,
 		AvailableBytes:     available,
@@ -918,7 +917,11 @@ func (c *Coordinator) handleOptimizeEnqueueFailure(batchID uuid.UUID, cands []op
 				delete(st.RemainingIDs, c2.path)
 			}
 		}
-		st.Row.TotalFiles -= len(cands) - enqueued
+		// Set directly to the enqueued count (NOT `-= len(cands)-enqueued`) so it
+		// stays correct after any earlier dedup drops — mirrors Submit's queue-full
+		// path (line ~523). The `-=` form under-counts by the dedup total when a
+		// dedup and a queue-full break co-occur in the same batch (CodeRabbit PR #515).
+		st.Row.TotalFiles = enqueued
 		st.Row.Error = "partial enqueue: " + failureErr.Error()
 		st.Row.UpdatedAt = c.clock().UnixNano()
 		if len(st.RemainingIDs) == 0 {

@@ -66,6 +66,9 @@ func TestSubmit_OverlappingReSubmitDoesNotStickRunning(t *testing.T) {
 	if r1.EnqueuedCount != 2 {
 		t.Fatalf("batch 1 EnqueuedCount = %d, want 2", r1.EnqueuedCount)
 	}
+	if r1.TotalFiles != 2 {
+		t.Errorf("batch 1 TotalFiles = %d, want 2 (both enqueued)", r1.TotalFiles)
+	}
 
 	// Batch 2: same folder + target while batch 1 is in-flight → both dedup.
 	r2, err := c.Submit(context.Background(), "Album", 192000, 24, t.TempDir())
@@ -74,6 +77,13 @@ func TestSubmit_OverlappingReSubmitDoesNotStickRunning(t *testing.T) {
 	}
 	if r2.EnqueuedCount != 0 {
 		t.Errorf("batch 2 EnqueuedCount = %d, want 0 (all deduped)", r2.EnqueuedCount)
+	}
+	// TotalFiles must report the enqueued count (0), NOT len(cands) (2). The old
+	// code read it back from liveBatches after the fully-deduped transition had
+	// already deleted the batch, so it fell back to len(cands) and the 202
+	// response disagreed with the persisted row (CodeRabbit PR #515).
+	if r2.TotalFiles != 0 {
+		t.Errorf("batch 2 TotalFiles = %d, want 0 (all deduped, not len(cands))", r2.TotalFiles)
 	}
 	// The fix: batch 2 must reach a terminal status, not sit `running`/`pending`.
 	if st := batchStatus(t, s, r2.BatchID); st == "running" || st == "pending" {
