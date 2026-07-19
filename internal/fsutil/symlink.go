@@ -2,6 +2,7 @@ package fsutil
 
 import (
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -64,7 +65,18 @@ func IsUnderAny(candidate string, roots []string) string {
 			continue
 		}
 		cleanedRoot := EvalSymlinksOrClean(root)
-		rel, err := filepath.Rel(cleanedRoot, cleaned)
+		// Compare in the filesystem's case sensitivity. On macOS/Windows
+		// EvalSymlinks does NOT fold case to the on-disk canonical form, so a
+		// case-only difference (root ".../Music" vs candidate
+		// ".../music/variants" — the same physical directory) would otherwise
+		// report not-nested and let a variants dir be written INSIDE the
+		// library root (the PR #475 phantom-rows class). Fold both sides before
+		// Rel on case-insensitive GOOS; still return the original-case root.
+		relBase, relTarget := cleanedRoot, cleaned
+		if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+			relBase, relTarget = strings.ToLower(cleanedRoot), strings.ToLower(cleaned)
+		}
+		rel, err := filepath.Rel(relBase, relTarget)
 		if err != nil {
 			continue // cross-volume on Windows; can't be nested.
 		}
