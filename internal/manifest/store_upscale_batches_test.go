@@ -123,6 +123,67 @@ func TestInsertUpscaleBatch_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestUpdateUpscaleBatchProgress_DoesNotResurrectTerminalStatus locks the B3
+// resurrection guard: a straggler progress write (a stale `running` snapshot
+// persisted outside the coordinator lock) must NOT flip a batch that already
+// reached a terminal status back to running. All four terminal statuses are
+// covered — 'interrupted' was added to the guard in round 2 (Gemini PR #515),
+// since boot recovery stamps it and a late callback after a crash/restart could
+// otherwise revive it.
+func TestUpdateUpscaleBatchProgress_DoesNotResurrectTerminalStatus(t *testing.T) {
+	s := openTempStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+
+	for _, terminal := range []string{"completed", "failed", "cancelled", "interrupted"} {
+		t.Run(terminal, func(t *testing.T) {
+			id := uuid.Must(uuid.NewRandom())
+			now := time.Now().UnixNano()
+			if err := s.InsertUpscaleBatch(ctx, UpscaleBatchRow{
+				ID: id, Path: "Music/" + terminal, TargetRate: 192000, TargetBits: 24,
+				Status: terminal, TotalFiles: 10, ProcessedFiles: 10, CreatedAt: now, UpdatedAt: now,
+			}); err != nil {
+				t.Fatalf("insert: %v", err)
+			}
+			// Straggler write trying to flip it back to running.
+			if err := s.UpdateUpscaleBatchProgress(ctx, UpscaleBatchRow{
+				ID: id, Status: "running", ProcessedFiles: 5, UpdatedAt: now + 1,
+			}); err != nil {
+				t.Fatalf("progress write: %v", err)
+			}
+			var got string
+			if err := s.db.QueryRow(`SELECT status FROM upscale_batches WHERE id = ?`, id[:]).Scan(&got); err != nil {
+				t.Fatalf("readback: %v", err)
+			}
+			if got != terminal {
+				t.Errorf("status = %q, want %q (terminal row must not be resurrected)", got, terminal)
+			}
+		})
+	}
+
+	// Positive control: a non-terminal (running) row IS updated.
+	id := uuid.Must(uuid.NewRandom())
+	now := time.Now().UnixNano()
+	if err := s.InsertUpscaleBatch(ctx, UpscaleBatchRow{
+		ID: id, Path: "Music/live", TargetRate: 192000, TargetBits: 24,
+		Status: "running", TotalFiles: 10, ProcessedFiles: 2, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("insert control: %v", err)
+	}
+	if err := s.UpdateUpscaleBatchProgress(ctx, UpscaleBatchRow{
+		ID: id, Status: "running", ProcessedFiles: 7, UpdatedAt: now + 1,
+	}); err != nil {
+		t.Fatalf("progress write control: %v", err)
+	}
+	var proc int
+	if err := s.db.QueryRow(`SELECT processed_files FROM upscale_batches WHERE id = ?`, id[:]).Scan(&proc); err != nil {
+		t.Fatalf("readback control: %v", err)
+	}
+	if proc != 7 {
+		t.Errorf("processed_files = %d, want 7 (non-terminal row must update)", proc)
+	}
+}
+
 // TestRecoverInterruptedBatches_TransitionsPendingAndRunning seeds rows
 // in every status, runs the recovery helper, and asserts only `pending`
 // and `running` are flipped to `interrupted`. Terminal-status rows must
