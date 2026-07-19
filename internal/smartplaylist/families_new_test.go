@@ -348,12 +348,21 @@ func TestBuildDailyMix_ClampsDiscoveryRatio(t *testing.T) {
 		})
 	}
 
-	// A negative MaxItems drives target<0 → nFam = target-nDisc negative →
-	// familiar[:nFam] panic without the target clamp (Gemini round-2).
-	t.Run("negative MaxItems", func(t *testing.T) {
-		opts := Options{AnalysisEnabled: true, MaxItems: -5, MinDailyFamiliar: 2, DailyDiscoveryRatio: 0.3}
-		if _, ok := buildDailyMix(base, opts); !ok { // must not panic
-			t.Fatal("Daily Mix should still fire with a negative MaxItems (target clamps to 0)")
-		}
-	})
+	// A zero or negative MaxItems clamps target to 0 → nFam = nDisc = 0 → an
+	// EMPTY mix. buildDailyMix must NOT surface a visible-but-empty "Daily Mix"
+	// shelf on iOS (B45): it returns (zero, false), matching every sibling
+	// family's `len < min` guard. Still panic-free — the target clamp guards
+	// the familiar[:nFam] / discovery[:nDisc] slicing regardless.
+	for _, maxItems := range []int{0, -5} {
+		t.Run(fmt.Sprintf("emptyTarget/maxItems=%d", maxItems), func(t *testing.T) {
+			opts := Options{AnalysisEnabled: true, MaxItems: maxItems, MinDailyFamiliar: 2, DailyDiscoveryRatio: 0.3}
+			got, ok := buildDailyMix(base, opts) // must not panic
+			if ok {
+				t.Fatalf("Daily Mix must not fire with an empty item set (got ok=true, %d items)", len(got.Items))
+			}
+			if len(got.Items) != 0 {
+				t.Fatalf("non-firing Daily Mix must be the zero value, got %d items", len(got.Items))
+			}
+		})
+	}
 }

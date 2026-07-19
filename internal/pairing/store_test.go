@@ -1,10 +1,12 @@
 package pairing
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -1124,5 +1126,119 @@ func TestDeleteDuringRevokeRetryIsRejected(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&revokeCalls); got < 2 {
 		t.Errorf("revoke calls = %d, want >= 2 (the retry must have fired despite the Delete)", got)
+	}
+}
+
+// recordingLogHandler captures every slog.Record it receives so a test can
+// assert a specific structured log line was emitted. The dynamicHandler's
+// component-attr replay is intentionally dropped (WithAttrs/WithGroup return
+// self) — we only care about the record's own message + attrs.
+type recordingLogHandler struct {
+	mu      *sync.Mutex
+	records *[]slog.Record
+}
+
+func (h recordingLogHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h recordingLogHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	*h.records = append(*h.records, r.Clone())
+	return nil
+}
+
+func (h recordingLogHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h recordingLogHandler) WithGroup(string) slog.Handler      { return h }
+
+// captureLogs installs a recording slog handler as the default for the
+// duration of the test and returns a reader for the captured records. The
+// pairing package's `logger` (logging.Component) resolves slog.Default() at
+// log time, so this intercepts its output. Restored via t.Cleanup. Pairing
+// tests run sequentially (none call t.Parallel), so the process-global
+// SetDefault swap is safe here.
+func captureLogs(t *testing.T) func() []slog.Record {
+	t.Helper()
+	mu := &sync.Mutex{}
+	var recs []slog.Record
+	prev := slog.Default()
+	slog.SetDefault(slog.New(recordingLogHandler{mu: mu, records: &recs}))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return func() []slog.Record {
+		mu.Lock()
+		defer mu.Unlock()
+		out := make([]slog.Record, len(recs))
+		copy(out, recs)
+		return out
+	}
+}
+
+// logAttrValue extracts the string form of a single attr (by key) from a
+// slog.Record; the bool reports presence.
+func logAttrValue(r slog.Record, key string) (string, bool) {
+	var val string
+	var found bool
+	r.Attrs(func(a slog.Attr) bool {
+		if a.Key == key {
+			val, found = a.Value.String(), true
+			return false
+		}
+		return true
+	})
+	return val, found
+}
+
+// TestDeleteApprovedWithTokenLogsDroppedTokenID pins B4: a Delete that drops
+// an Approved row still holding a minted TokenID must NOT revoke — that is the
+// normal iOS acknowledgment flow (poll → persist → DELETE), and revoking would
+// kill the very bearer the device just persisted (see
+// TestDeleteAfterApprovePreventsRevoke). But because the Store cannot tell a
+// real ack from a client that DELETEs WITHOUT polling (orphaning a still-valid
+// token), it MUST log the dropped TokenID so an operator can reconcile.
+func TestDeleteApprovedWithTokenLogsDroppedTokenID(t *testing.T) {
+	revoke := &stubRevoke{}
+	mint := &stubMint{}
+	// Long TTL/grace so no timer fires (and logs) during the capture window.
+	s := quickStore(t, time.Hour, time.Hour, revoke.fn)
+	raw, hashHex := makePollPair(t, "b4-log")
+	req, err := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP", "")
+	if err != nil {
+		t.Fatalf("CreateRequest: %v", err)
+	}
+	approved, err := s.Approve(req.ID, "FP", mint.fn)
+	if err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+	// Mirror the normal ack: poll (receive the token) before deleting.
+	if _, err := s.Poll(req.ID, raw); err != nil {
+		t.Fatalf("Poll: %v", err)
+	}
+
+	// Install the recorder AFTER Approve so only the Delete line lands.
+	readLogs := captureLogs(t)
+	if err := s.Delete(req.ID, raw); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	// Acknowledgment DELETE must not revoke (the token is owned by the device).
+	if calls := revoke.calls(); len(calls) != 0 {
+		t.Errorf("revoke called %d times on Approved DELETE, want 0; calls=%v", len(calls), calls)
+	}
+	// The dropped TokenID must have been logged for operator reconciliation.
+	if approved.TokenID == "" {
+		t.Fatal("Approve snapshot dropped TokenID — test setup invalid")
+	}
+	var found bool
+	for _, r := range readLogs() {
+		if v, ok := logAttrValue(r, "tokenID"); ok && v == approved.TokenID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("Delete of Approved-with-token row did not log the dropped tokenID %q", approved.TokenID)
+	}
+	// Row is gone (the drop still happened — the log doesn't change the outcome).
+	if _, err := s.Poll(req.ID, raw); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Poll after Delete: err = %v, want ErrNotFound", err)
 	}
 }
