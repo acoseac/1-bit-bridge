@@ -1734,6 +1734,25 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		return 1
 	}
 	defer manifestStore.Close()
+	// bgWriters tracks the background goroutines that WRITE the manifest store
+	// (periodic scanner, enricher, fs watcher, atlas harvester, and the admin
+	// server whose bgScans drain is the SQLite guard). On shutdown they MUST
+	// fully drain before manifestStore.Close() runs — an in-flight
+	// UpsertTrackBatch / MarkEnriched / booklet / admin-scan write racing the
+	// close is the SQLite-corruption class (B8, via the watcher's fired
+	// AfterFunc dispatches) or "database is closed" shutdown noise + a
+	// truncated final batch (B27). The deferred scanCancel()/adminCancel()
+	// below run FIRST in LIFO order, so by the time joinBgWriters fires the
+	// writers are already exiting; it just waits for them, grace-bounded so a
+	// wedged writer can't block process exit. Assigned once adminErr + the
+	// writers are wired (below); nil until then, so the defer no-ops.
+	var bgWriters sync.WaitGroup
+	var joinBgWriters func()
+	defer func() {
+		if joinBgWriters != nil {
+			joinBgWriters()
+		}
+	}()
 	// Single source of truth for the artwork cache directory. The
 	// scanner writes scanner-side `local-<sha256>-500.jpg` here when
 	// it finds embedded ID3 APIC art or a folder-level cover.jpg /
@@ -1762,7 +1781,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// shutdown path runs.
 	scanCtx, scanCancel := context.WithCancel(ctx)
 	defer scanCancel()
-	go scanner.RunPeriodic(scanCtx, cfg.ScanInterval())
+	bgWriters.Add(1)
+	go func() {
+		defer bgWriters.Done()
+		scanner.RunPeriodic(scanCtx, cfg.ScanInterval())
+	}()
 
 	// Tailscale integration. Branched on cfg.Tailscale.EffectiveMode():
 	//
@@ -1832,7 +1855,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		if werr != nil {
 			fmt.Fprintf(stderr, "library watcher: %v (periodic scan still active)\n", werr)
 		} else {
+			bgWriters.Add(1)
 			go func() {
+				defer bgWriters.Done()
 				if err := watcher.Run(scanCtx); err != nil {
 					fmt.Fprintf(stderr, "library watcher exited: %v\n", err)
 				}
@@ -1885,7 +1910,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		premiumCovers = enrich.NewAtlasPremiumFetcher(harvestState, userAgent, nil)
 		enricher.WithPremiumCovers(premiumCovers)
 	}
-	go enricher.Run(scanCtx)
+	bgWriters.Add(1)
+	go func() {
+		defer bgWriters.Done()
+		enricher.Run(scanCtx)
+	}()
 
 	// Artwork-cache LRU eviction. Bounds the on-disk size of the shared
 	// <dataDir>/artwork/ cache (scanner local-* + enricher <mbid>-* + Atlas
@@ -2146,7 +2175,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		apiSrv.WithBooklets(manifestStore, bookletsDir, harvestClient.NudgeBookletFetch)
 	}
 	if harvestClient != nil {
-		go harvestClient.Run(scanCtx)
+		bgWriters.Add(1)
+		go func() {
+			defer bgWriters.Done()
+			harvestClient.Run(scanCtx)
+		}()
 	}
 
 	cfgHolder := apiSrv.ConfigHolder()
@@ -2981,9 +3014,27 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	adminCtx, adminCancel := context.WithCancel(context.Background())
 	defer adminCancel()
 	adminErr := make(chan error, 1)
+	bgWriters.Add(1)
 	go func() {
+		defer bgWriters.Done()
 		adminErr <- adminSrv.Serve(adminCtx)
 	}()
+	// Now that every manifest-writing background goroutine (+ the admin
+	// server) is wrapped in bgWriters, wire the shutdown join. It runs from
+	// the defer registered right after `defer manifestStore.Close()` — LIFO
+	// puts it AFTER the deferred scanCancel()/adminCancel() (so the writers
+	// are already exiting) and BEFORE Store.Close(). Grace-bounded: a wedged
+	// writer degrades to the pre-fix behaviour (close after the grace) plus a
+	// log line, never a hung process exit.
+	joinBgWriters = func() {
+		done := make(chan struct{})
+		go func() { bgWriters.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(shutdownGrace):
+			fmt.Fprintln(stderr, "shutdown: background manifest writers did not drain within grace")
+		}
+	}
 
 	// Listen first so we can report the actual bound address (useful when
 	// cfg.ListenAddress is ":0" — which test code uses).

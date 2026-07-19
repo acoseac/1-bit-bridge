@@ -61,6 +61,55 @@ func TestWatcherDebounce(t *testing.T) {
 	t.Errorf("expected at least one track in manifest within deadline; got 0")
 }
 
+// TestWatcherShutdownDrainsInflightScan is the B8 regression guard: Run's
+// shutdown path (cancel → deferred cancelAllPending + waitForInflightScans)
+// must return cleanly and NOT deadlock, so the caller can safely close the
+// store the instant Run returns. A file drop arms + fires a debounced
+// ScanSubtree; cancelling mid-flight exercises the new wait. Pre-fix, Run
+// returned without waiting for the fired dispatch (which could then race the
+// store close); the fix makes Run block on the in-flight scan — this test
+// pins that the block terminates (no deadlock) and the scan's write landed.
+func TestWatcherShutdownDrainsInflightScan(t *testing.T) {
+	dir := t.TempDir()
+	libDir := filepath.Join(dir, "Music")
+	if err := os.MkdirAll(libDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store, err := OpenStore(filepath.Join(dir, "bridge.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer store.Close()
+
+	scanner := NewScanner([]string{libDir}, store, "")
+	w, err := NewWatcher(scanner, 20*time.Millisecond)
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan struct{})
+	go func() { _ = w.Run(ctx); close(runDone) }()
+
+	time.Sleep(100 * time.Millisecond) // let the per-dir watches register
+	if err := os.WriteFile(filepath.Join(libDir, "x.flac"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(60 * time.Millisecond) // let the 20ms debounce fire the scan
+	cancel()
+
+	select {
+	case <-runDone: // Run's defer (cancelAllPending + waitForInflightScans) completed
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return after cancel — waitForInflightScans deadlocked")
+	}
+	// The dispatched scan completed before Run returned (Run waited for it),
+	// so its UpsertTrackBatch landed against the still-open store.
+	got, _ := store.ListTracks(context.Background(), nil)
+	if len(got) == 0 {
+		t.Error("expected the in-flight scan's track to have landed before Run returned")
+	}
+}
+
 // TestWatcherIgnoresDotfiles asserts dotfile creates don't trigger
 // a scan. The scanner skips them anyway, but we'd rather not
 // spend a debounce window on them.

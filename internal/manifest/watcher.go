@@ -51,6 +51,14 @@ type Watcher struct {
 
 	mu      sync.Mutex
 	pending map[string]*pendingScan
+	// closing is set (under mu) at shutdown so a debounce timer that fires
+	// during teardown skips its scan instead of racing the store close.
+	// scanWG tracks the in-flight AfterFunc scan dispatches (each is its own
+	// goroutine) so Run() can wait for them before returning — otherwise an
+	// in-flight ScanSubtree mid UpsertTrackBatch could run while the caller's
+	// deferred Store.Close() executes (B8, the SQLite-corruption class).
+	closing bool
+	scanWG  sync.WaitGroup
 }
 
 // NewWatcher constructs a Watcher against the scanner's currently
@@ -103,7 +111,10 @@ func (wt *Watcher) Run(ctx context.Context) error {
 	// below would leave armed timers running that fire ScanSubtree after
 	// Run has already returned. cancelAllPending is idempotent, so the
 	// defer is safe on every path.
-	defer wt.cancelAllPending()
+	defer func() {
+		wt.cancelAllPending()     // stop un-fired timers
+		wt.waitForInflightScans() // wait for already-fired ScanSubtree dispatches (B8)
+	}()
 	defer wt.w.Close()
 
 	roots := wt.scanner.Roots()
@@ -252,7 +263,20 @@ func (wt *Watcher) scheduleScan(ctx context.Context, dir string) {
 		if wt.pending[dir] == ps {
 			delete(wt.pending, dir)
 		}
+		if wt.closing {
+			// Shutting down: skip the scan and do NOT Add to scanWG —
+			// waitForInflightScans (which set closing under the same mu) is
+			// already waiting, and an Add here could race its Wait.
+			wt.mu.Unlock()
+			return
+		}
+		// Register this dispatch under mu, before releasing: it pairs with
+		// waitForInflightScans's closing=true+Wait so a fired-during-shutdown
+		// callback is either counted here (Add before closing → waited for) or
+		// observes closing and no-ops — never lost, never leaked.
+		wt.scanWG.Add(1)
 		wt.mu.Unlock()
+		defer wt.scanWG.Done()
 		if ctx.Err() != nil {
 			return
 		}
@@ -277,6 +301,20 @@ func (wt *Watcher) cancelAllPending() {
 		ps.timer.Stop()
 		delete(wt.pending, k)
 	}
+}
+
+// waitForInflightScans marks the watcher closing (so no debounce timer that
+// fires from here on starts a scan) and blocks until every already-dispatched
+// ScanSubtree has returned. Called from Run()'s defer AFTER cancelAllPending,
+// so Run doesn't return while a scan is mid UpsertTrackBatch — the caller can
+// then safely close the store once Run returns (B8). The closing flag and the
+// per-dispatch scanWG.Add both live under wt.mu, so a fired-during-shutdown
+// callback is deterministically either counted (waited for) or skipped.
+func (wt *Watcher) waitForInflightScans() {
+	wt.mu.Lock()
+	wt.closing = true
+	wt.mu.Unlock()
+	wt.scanWG.Wait()
 }
 
 // dirStat is a tiny helper that returns FileInfo for a path
