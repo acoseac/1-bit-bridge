@@ -103,6 +103,10 @@ func decodeCoverBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
 	var req coverUploadRequest
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, coverMaxBodyBytes))
 	if err := dec.Decode(&req); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			return nil, errors.New("request body too large")
+		}
 		return nil, errors.New("invalid JSON body")
 	}
 	b64 := req.Image
