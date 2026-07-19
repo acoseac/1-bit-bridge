@@ -435,11 +435,23 @@ func (s *Server) RunVariantDelete(ctx context.Context, req VariantDeleteRequest)
 		if err := ctx.Err(); err != nil {
 			break
 		}
-		if err := os.Remove(row.SidecarPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		// An empty SidecarPath (a legacy row whose sidecar path was never
+		// recorded) has nothing to unlink. Treat it as already-gone rather than
+		// calling os.Remove("") — on Windows that returns a platform-specific
+		// error (ERROR_INVALID_NAME) that errors.Is(os.ErrNotExist) does NOT
+		// match, which would log a warning and `continue`, stranding the DB row
+		// forever. Seeding removeErr with ErrNotExist flows through the guard
+		// below (no warning, row still deleted) and correctly frees 0 bytes
+		// (Gemini PR #518).
+		removeErr := os.ErrNotExist
+		if row.SidecarPath != "" {
+			removeErr = os.Remove(row.SidecarPath)
+		}
+		if removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
 			logger.Warn("variant unlink failed; leaving DB row in place",
 				slog.String("sidecar", row.SidecarPath),
 				slog.String("variant_id", row.VariantID),
-				slog.Any("err", err),
+				slog.Any("err", removeErr),
 			)
 			continue
 		}
@@ -452,7 +464,12 @@ func (s *Server) RunVariantDelete(ctx context.Context, req VariantDeleteRequest)
 			continue
 		}
 		resp.DeletedCount++
-		resp.FreedBytes += row.SizeBytes
+		// Count only bytes ACTUALLY reclaimed — an already-gone sidecar
+		// (ErrNotExist: a prior --gc / concurrent cleanup / manual wipe) is
+		// reconciled in the DB but freed nothing on disk.
+		if removeErr == nil {
+			resp.FreedBytes += row.SizeBytes
+		}
 		// Only successfully-deleted variantIDs land in the SSE
 		// payload (CodeRabbit Major + Gemini High on PR #209) —
 		// the prior shape leaked failed-delete variantIDs into

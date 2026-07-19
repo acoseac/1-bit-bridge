@@ -40,6 +40,7 @@ const (
 	atlasIngestMaxBodyBytes = 256 << 10 // 256 KiB whole-body
 	atlasMaxTextLen         = 16 << 10  // 16 KiB: bio / description / bioSummary
 	atlasMaxLabelLen        = 1 << 10   // 1 KiB: record label
+	atlasMaxETagLen         = 256       // bytes: opaque Atlas ETag (a short cache validator)
 	atlasMaxGenres          = 32        // entries
 	atlasMaxGenreLen        = 256       // bytes per genre
 	atlasMaxSourceLen       = 64        // bytes: attribution source name ("wiki", …)
@@ -249,6 +250,9 @@ func validateReleaseDTO(d *atlasReleaseDTO) error {
 	if len(d.RecordLabel) > atlasMaxLabelLen {
 		return fmt.Errorf("release.recordLabel exceeds %d bytes", atlasMaxLabelLen)
 	}
+	if len(d.AtlasETag) > atlasMaxETagLen {
+		return fmt.Errorf("release.atlasEtag exceeds %d bytes", atlasMaxETagLen)
+	}
 	if err := validateSource("release.descriptionSource", d.DescriptionSource, d.DescriptionSourceURL); err != nil {
 		return err
 	}
@@ -264,6 +268,9 @@ func validateArtistDTO(d *atlasArtistDTO) error {
 	}
 	if len(d.BioSummary) > atlasMaxTextLen {
 		return fmt.Errorf("artist.bioSummary exceeds %d bytes", atlasMaxTextLen)
+	}
+	if len(d.AtlasETag) > atlasMaxETagLen {
+		return fmt.Errorf("artist.atlasEtag exceeds %d bytes", atlasMaxETagLen)
 	}
 	if err := validateSource("artist.bioSource", d.BioSource, d.BioSourceURL); err != nil {
 		return err

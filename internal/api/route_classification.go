@@ -271,7 +271,7 @@ func (s *Server) routeRegistry() []route {
 		// plus the cursor-paged all-devices read feed (user-wide
 		// listening history; 2 s ctx-timeout matches the other
 		// fast-query routes).
-		{pattern: "POST /v1/history/batch", kind: boundedRoute, handler: withCtxTimeout(60*time.Second, s.authed(s.historyBatch))},
+		{pattern: "POST /v1/history/batch", kind: boundedRoute, handler: withCtxTimeout(10*time.Second, s.authed(s.historyBatch))},
 		{pattern: "GET /v1/history", kind: boundedRoute, handler: withCtxTimeout(2*time.Second, s.authed(s.historyList))},
 
 		// Atlas rich-tier metadata (Phase 2) — the iOS app (holding the Atlas
