@@ -18,6 +18,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
@@ -204,10 +205,19 @@ func checkAdminPort(d Deps) Check {
 	return checkPort("port-admin", d.AdminPort, d.OwnPIDFile)
 }
 
+// listenFunc is the TCP bind probe used by checkPort. A package var so
+// tests can inject a synthetic bind failure (e.g. a non-EADDRINUSE error
+// like EACCES) deterministically — the same test-seam convention as
+// portProbeAvailable. Production code MUST NOT mutate it.
+var listenFunc = net.Listen
+
 // checkPort probes `port` on 127.0.0.1. If the bind succeeds the port is
 // reported free; if it fails with "address already in use" and the
 // holding PID matches our OwnPIDFile, we report ok — doctor is
 // idempotent while the server is running. Any other binder is a fail.
+// A bind failure that ISN'T EADDRINUSE (e.g. EACCES on a privileged port
+// without elevation) is a Warn, not a Fail — it's a privilege/environment
+// issue, not a port conflict.
 //
 // Limitation: this probes loopback ONLY, so a conflict bound to a
 // specific non-loopback interface (e.g. 192.168.1.5:port) isn't detected
@@ -220,12 +230,23 @@ func checkPort(name string, port int, ownPIDFile string) Check {
 		return warn(name, "no port set", "pass Deps."+name+"Port")
 	}
 	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
-	lis, err := net.Listen("tcp", addr)
+	lis, err := listenFunc("tcp", addr)
 	if err == nil {
 		_ = lis.Close()
 		return ok(name, fmt.Sprintf("free (:%d)", port))
 	}
-	// Port is bound. Is it us?
+	// Only EADDRINUSE means the port is genuinely occupied. Other bind
+	// failures — EACCES (a privileged port <1024 without elevation),
+	// EADDRNOTAVAIL, a transient network error — are environment/privilege
+	// problems, NOT a port conflict. Reporting them as the hard "another
+	// process owns this port" Fail would be wrong and would block
+	// `bridge init`; degrade to a Warn that names the real cause instead.
+	if !errors.Is(err, syscall.EADDRINUSE) {
+		return warn(name, fmt.Sprintf(":%d not bindable", port),
+			"couldn't bind to probe this port ("+err.Error()+"); "+
+				"ports below 1024 need elevation, or the configured address may be invalid — check bridge.yaml")
+	}
+	// Port is in use. Is it us?
 	if ownPIDFile != "" {
 		if ownPID, readErr := readPID(ownPIDFile); readErr == nil && ownPID > 0 {
 			found, probeErr := isPIDListeningOnPort(port, ownPID)
