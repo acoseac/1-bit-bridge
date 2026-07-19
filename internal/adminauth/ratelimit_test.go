@@ -2,6 +2,8 @@ package adminauth
 
 import (
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -119,6 +121,82 @@ func TestRateLimiterCapsMapSizeUnderHighCardinality(t *testing.T) {
 	if size < maxBuckets-evictBatch {
 		t.Errorf("len(buckets) = %d, want close to %d (evicting too aggressively)",
 			size, maxBuckets)
+	}
+}
+
+func TestAllowAndReserveIsAtomicUnderConcurrency(t *testing.T) {
+	// The Allow-then-RecordFailure split lets N concurrent logins all
+	// observe attempts<max before any records, blowing past the ceiling
+	// by the in-flight concurrency. AllowAndReserve folds the check +
+	// increment into one locked op, so exactly RateLimitMaxAttempts are
+	// admitted regardless of how many requests race. Runs under -race.
+	rl := NewRateLimiter()
+	defer rl.Stop()
+
+	const goroutines = 200
+	var admitted int64
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start // release all at once to maximise contention
+			if rl.AllowAndReserve("1.2.3.4", "admin") {
+				atomic.AddInt64(&admitted, 1)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if admitted != RateLimitMaxAttempts {
+		t.Errorf("AllowAndReserve admitted %d of %d concurrent attempts, want exactly %d (ceiling)",
+			admitted, goroutines, RateLimitMaxAttempts)
+	}
+	// The bucket must reflect exactly the admitted reservations — no
+	// lost or double-counted increments under contention.
+	rl.mu.Lock()
+	got := rl.buckets["1.2.3.4|admin"].attempts
+	rl.mu.Unlock()
+	if got != RateLimitMaxAttempts {
+		t.Errorf("bucket attempts = %d, want %d", got, RateLimitMaxAttempts)
+	}
+}
+
+func TestAllowAndReserveResetsWindowAndClearsOnSuccess(t *testing.T) {
+	// Sequential contract: AllowAndReserve admits RateLimitMaxAttempts
+	// failures then refuses; RecordSuccess (the success-path follow-up)
+	// clears the reservation; and an expired window resets cleanly.
+	rl := NewRateLimiter()
+	defer rl.Stop()
+	tick := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	rl.now = func() time.Time { return tick }
+
+	for i := 0; i < RateLimitMaxAttempts; i++ {
+		if !rl.AllowAndReserve("1.2.3.4", "admin") {
+			t.Fatalf("AllowAndReserve should admit attempt %d (< ceiling)", i)
+		}
+	}
+	if rl.AllowAndReserve("1.2.3.4", "admin") {
+		t.Error("AllowAndReserve should refuse at the ceiling")
+	}
+	// A successful login clears the slate (the optimistic reservation).
+	rl.RecordSuccess("1.2.3.4", "admin")
+	if !rl.AllowAndReserve("1.2.3.4", "admin") {
+		t.Error("AllowAndReserve should admit again after RecordSuccess")
+	}
+
+	// Exhaust, then roll past the window: a fresh reservation is admitted.
+	for i := 0; i < RateLimitMaxAttempts; i++ {
+		rl.AllowAndReserve("5.6.7.8", "admin")
+	}
+	if rl.AllowAndReserve("5.6.7.8", "admin") {
+		t.Error("second key should be at its ceiling")
+	}
+	tick = tick.Add(RateLimitWindow + time.Minute)
+	if !rl.AllowAndReserve("5.6.7.8", "admin") {
+		t.Error("AllowAndReserve after window expiry should admit")
 	}
 }
 

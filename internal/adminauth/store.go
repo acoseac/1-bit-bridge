@@ -47,6 +47,20 @@ const (
 	SessionHardCap     = 7 * 24 * time.Hour
 )
 
+// maxSessions caps the number of live admin sessions the store holds
+// at once. A single-user console legitimately holds only a handful
+// (one per browser / device); the cap bounds the map's footprint so
+// a login stream that's never re-validated can't grow it without
+// bound. Sessions are pruned lazily (in ValidateSession / on logout)
+// AND there's no background janitor — a session created and never
+// touched again would otherwise linger until its 7-day hard cap with
+// no reader to reap it. CreateSession therefore sweeps expired
+// sessions and, if still at the cap, evicts the least-recently-used
+// one. Mirrors the RateLimiter's maxBuckets guard. 1024 is generous
+// headroom for any realistic single-operator deployment; the LRU
+// eviction never targets the active session.
+const maxSessions = 1024
+
 // Errors returned by the Store API. Callers map these to HTTP
 // status codes at the handler boundary; never leak them onto the
 // wire verbatim (the JSON 401 body says "unauthenticated" — the
@@ -271,6 +285,18 @@ func (s *Store) CreateSession(username string) (string, error) {
 	digest := sha256.Sum256([]byte(raw))
 	now := s.now()
 	s.mu.Lock()
+	// Opportunistic cleanup: drop any sessions past their idle timeout
+	// or hard cap. Nothing sweeps sessions in the background (see the
+	// maxSessions doc), so doing it on each new login keeps the map
+	// proportional to live sessions rather than to lifetime logins.
+	// Cheap — bounded by maxSessions, so the O(N) scan is trivial.
+	s.sweepExpiredSessionsLocked(now)
+	// Hard cap: if the map is still at the ceiling after the sweep (all
+	// sessions genuinely live), evict the least-recently-used one so a
+	// login stream can't grow it without bound.
+	if len(s.sessions) >= maxSessions {
+		s.evictOldestSessionLocked()
+	}
 	s.sessions[digest] = &Session{
 		Username:   username,
 		IssuedAt:   now,
@@ -278,6 +304,44 @@ func (s *Store) CreateSession(username string) (string, error) {
 	}
 	s.mu.Unlock()
 	return raw, nil
+}
+
+// sessionExpired reports whether a session has crossed its idle
+// timeout or hard cap as of now. Single predicate so CreateSession's
+// sweep and ValidateSession's per-lookup check can't drift.
+func sessionExpired(sess *Session, now time.Time) bool {
+	return now.Sub(sess.IssuedAt) > SessionHardCap ||
+		now.Sub(sess.LastUsedAt) > SessionIdleTimeout
+}
+
+// sweepExpiredSessionsLocked removes every session past its idle
+// timeout or hard cap. Caller MUST hold s.mu.
+func (s *Store) sweepExpiredSessionsLocked(now time.Time) {
+	for digest, sess := range s.sessions {
+		if sessionExpired(sess, now) {
+			delete(s.sessions, digest)
+		}
+	}
+}
+
+// evictOldestSessionLocked drops the single least-recently-used
+// session (by LastUsedAt). Caller MUST hold s.mu. Called only at the
+// maxSessions ceiling; the active operator's most-recently-used
+// session is never the eviction target.
+func (s *Store) evictOldestSessionLocked() {
+	var oldestKey [sha256.Size]byte
+	var oldestAt time.Time
+	found := false
+	for digest, sess := range s.sessions {
+		if !found || sess.LastUsedAt.Before(oldestAt) {
+			oldestKey = digest
+			oldestAt = sess.LastUsedAt
+			found = true
+		}
+	}
+	if found {
+		delete(s.sessions, oldestKey)
+	}
 }
 
 // ValidateSession looks up the session by raw token, checks both
@@ -299,11 +363,7 @@ func (s *Store) ValidateSession(raw string) (*Session, error) {
 		return nil, ErrSessionNotFound
 	}
 	now := s.now()
-	if now.Sub(sess.IssuedAt) > SessionHardCap {
-		delete(s.sessions, digest)
-		return nil, ErrSessionExpired
-	}
-	if now.Sub(sess.LastUsedAt) > SessionIdleTimeout {
+	if sessionExpired(sess, now) {
 		delete(s.sessions, digest)
 		return nil, ErrSessionExpired
 	}
@@ -408,21 +468,30 @@ func (s *Store) persist() error {
 	return nil
 }
 
-// passwordAlphabet excludes visually-ambiguous characters (0/O,
-// 1/l/I) so an operator transcribing the printed initial password
-// from a terminal banner doesn't trip on glyph collisions.
+// passwordAlphabet excludes the most confusable glyphs — the digits
+// 0 and 1, uppercase O and I, and lowercase l — so an operator
+// transcribing the printed initial password from a terminal banner
+// doesn't trip on collisions. Note the exclusion is asymmetric:
+// lowercase i and o are KEPT even though they collide with the
+// dropped 1/l/I and 0/O groups. That inconsistency is deliberate
+// enough to leave alone — changing the alphabet would re-derive the
+// entropy / rejection-sampling math below.
 const passwordAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
 
 // generatePassword returns a 16-character alphanumeric string
 // drawn from passwordAlphabet using crypto/rand. 16 chars from a
-// 55-character alphabet ≈ 92 bits of entropy — well above what
+// 57-character alphabet ≈ 93 bits of entropy — well above what
 // bcrypt's design comfortably handles.
 //
 // Uses rejection sampling to eliminate modulo bias (Gemini medium
-// review on PR #290). 256 % 55 = 36, so a naive `b[0] % 55` would
-// make the first 36 alphabet positions ~22 % more likely than the
-// last 19. We discard any byte ≥ 220 (the largest multiple of 55
-// below 256) and resample. Average rejection rate ≈ 14 % — cheap.
+// review on PR #290). 256 % 57 = 28, so a naive `b[0] % 57` would
+// make the first 28 alphabet positions ~25 % (5/4) more likely than
+// the last 29. We discard any byte ≥ 228 (= 4 × 57, the largest
+// multiple of 57 that fits in a byte) and resample. Average
+// rejection rate ≈ 11 % (28/256) — cheap. The `limit` below is
+// computed from len(passwordAlphabet) at runtime, so the sampling
+// stays unbiased even if the alphabet is edited; only these
+// illustrative numbers would need updating.
 func generatePassword() (string, error) {
 	const length = 16
 	alphabetLen := byte(len(passwordAlphabet))

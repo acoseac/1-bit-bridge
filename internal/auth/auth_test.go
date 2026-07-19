@@ -36,6 +36,16 @@ func (s *Store) loadedForTest() time.Time {
 	return s.loaded
 }
 
+// setLastUsedFlushForTest forces the LastUsedAt debounce clock to an
+// arbitrary time so a test can drive Validate straight into its
+// persist branch (Mint stamps lastUsedFlush = now, which would
+// otherwise keep a follow-up Validate inside the debounce window).
+func (s *Store) setLastUsedFlushForTest(ts time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastUsedFlush = ts
+}
+
 func TestPersistRetriesRenameOnTransientFailure(t *testing.T) {
 	// persist() commits via atomicwrite.RenameWithRetry, so a transient
 	// rename failure (the Windows Defender / Search-Indexer scan-on-close
@@ -496,6 +506,72 @@ func TestFlushLastUsedPreservesExternalMint(t *testing.T) {
 	}
 	if !got["serve-process"] {
 		t.Error("FlushLastUsed lost s1's own token")
+	}
+}
+
+func TestValidatePreservesExternalMintAcrossDebouncedPersist(t *testing.T) {
+	// A sibling `bridge pair` process minted a token AFTER this process's
+	// top-of-Validate reload ran but BEFORE its debounced LastUsedAt
+	// persist. s.mu is process-local — it doesn't serialize the sibling's
+	// file write — so without a reload immediately before that persist,
+	// the stale in-memory slice overwrites disk and silently deletes the
+	// sibling's fresh token. Mirror of TestFlushLastUsedPreservesExternalMint,
+	// driven through Validate. The hook injects the sibling mint into the
+	// exact reload↔persist window — the only place the fix matters (a mint
+	// landing before Validate is already caught by the top-of-method reload).
+	s1, path := newTmpStore(t)
+	rawOwn, _, err := s1.Mint("serve-process")
+	if err != nil {
+		t.Fatalf("s1 Mint: %v", err)
+	}
+
+	// Sibling store, opened now so it already knows serve-process. Its
+	// Mint (fired from the hook) grows the file, so the size tiebreaker
+	// makes s1's pre-persist staleness check deterministic even under
+	// coarse filesystem mtime.
+	s2, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Force the debounce window to have elapsed so Validate reaches the
+	// persist branch (Mint stamped lastUsedFlush = now).
+	s1.setLastUsedFlushForTest(time.Now().Add(-2 * lastUsedFlushInterval))
+
+	fired := false
+	beforeValidatePersistHook = func() {
+		if fired {
+			return
+		}
+		fired = true
+		// Runs while s1 holds s1.mu; s2 has its own mutex, so no deadlock.
+		if _, _, err := s2.Mint("external-pair"); err != nil {
+			t.Errorf("sibling Mint: %v", err)
+		}
+	}
+	defer func() { beforeValidatePersistHook = nil }()
+
+	if _, ok := s1.Validate(rawOwn); !ok {
+		t.Fatal("s1 missed its own token")
+	}
+	if !fired {
+		t.Fatal("hook never fired — Validate did not reach the debounced-persist branch")
+	}
+
+	// Assert against what landed ON DISK, via a fresh store.
+	s3, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, tok := range s3.List() {
+		got[tok.Name] = true
+	}
+	if !got["external-pair"] {
+		t.Error("Validate's debounced persist deleted the externally-minted token from tokens.json")
+	}
+	if !got["serve-process"] {
+		t.Error("Validate lost s1's own token")
 	}
 }
 

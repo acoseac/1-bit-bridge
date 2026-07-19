@@ -62,6 +62,16 @@ const BackupsDirName = "backups"
 // (no colons) and lexicographically sortable.
 const timestampLayout = "2006-01-02T15-04-05Z"
 
+// orphanReapGrace is how old a manifest-less snapshot dir must be
+// before ReapOrphans deletes it. Snapshot writes manifest.json LAST
+// (after the DB VACUUM + file copies), so a dir legitimately has no
+// manifest for the duration of an in-flight snapshot; the grace
+// spares that window while still reclaiming a dir orphaned by a hard
+// crash / power-loss (whose frozen mtime ages past the grace). One
+// hour is enormous headroom — the manifest SQLite copy takes seconds
+// even for a large library.
+const orphanReapGrace = 1 * time.Hour
+
 // Manifest is the metadata file written alongside each snapshot. It
 // records what produced the snapshot and which files are inside —
 // the file list lets Restore copy back exactly what was captured
@@ -222,6 +232,14 @@ func Restore(snapshotDir string, dst Targets) error {
 		srcPath := filepath.Join(snapshotDir, name)
 		if _, err := os.Stat(srcPath); errors.Is(err, os.ErrNotExist) {
 			continue
+		} else if err != nil {
+			// A non-ErrNotExist stat error (permission flap, transient
+			// I/O, symlink loop) MUST abort here — NOT fall through to
+			// the bridge.db block below, which removes the live -wal/-shm
+			// BEFORE copyFile and would then fail at its own os.Open,
+			// deleting the WAL for a source we never actually read. This
+			// mirrors Snapshot's non-ErrNotExist stat handling.
+			return fmt.Errorf("stat snapshot file %s: %w", name, err)
 		}
 		// Restore at 0o600 across the board — the snapshot bundle was
 		// stored that way, and bridge.yaml may carry sensitive data
@@ -268,15 +286,24 @@ func Restore(snapshotDir string, dst Targets) error {
 // "retain everything"; the caller is responsible for clamping if
 // they want a different floor. Returns the count of dirs deleted.
 func Prune(backupsRoot string, keep int) (int, error) {
+	// Reap crash-orphaned partial snapshots first — dirs with no
+	// manifest.json that `List` (and therefore the keep-policy below)
+	// can never see, so the keep-policy would leave them forever. Runs
+	// regardless of `keep` (an orphan is never a snapshot worth
+	// retaining). Best-effort: a reap error is joined into the return
+	// but doesn't block the keep-policy prune. Prune is the natural
+	// wiring point — every snapshot path (ticker, admin, CLI) calls it
+	// right after Snapshot.
+	_, reapErr := ReapOrphans(backupsRoot, orphanReapGrace)
 	if keep <= 0 {
-		return 0, nil
+		return 0, reapErr
 	}
 	manifests, err := List(backupsRoot)
 	if err != nil {
-		return 0, err
+		return 0, errors.Join(reapErr, err)
 	}
 	if len(manifests) <= keep {
-		return 0, nil
+		return 0, reapErr
 	}
 	// `manifests` is newest-first; the trailing entries are the
 	// oldest and the ones to delete. Use the on-disk DirName so the
@@ -297,7 +324,66 @@ func Prune(backupsRoot string, keep int) (int, error) {
 		}
 		deleted++
 	}
-	return deleted, errors.Join(errs...)
+	return deleted, errors.Join(reapErr, errors.Join(errs...))
+}
+
+// ReapOrphans deletes snapshot subdirectories under backupsRoot that
+// have no readable manifest.json AND whose directory mtime is older
+// than `grace`. These are the residue of a snapshot whose writer died
+// (SIGKILL / power-loss) between the DB copy and the manifest write:
+// they carry a near-full bridge.db copy, `List` skips them (no
+// manifest), and `Prune`'s keep-policy therefore can never reclaim
+// them — so they accumulate unbounded across hard crashes. (The
+// Snapshot deferred cleanup only covers graceful returns.)
+//
+// Returns the count reaped. Best-effort: a single un-removable dir
+// doesn't block the others (errors are joined). A `grace` of zero or
+// below reaps every manifest-less dir regardless of age (test
+// affordance; production passes orphanReapGrace via Prune).
+func ReapOrphans(backupsRoot string, grace time.Duration) (int, error) {
+	entries, err := os.ReadDir(backupsRoot)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	now := time.Now()
+	reaped := 0
+	var errs []error
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		dir := filepath.Join(backupsRoot, e.Name())
+		// A readable manifest means the snapshot completed — never reap
+		// it here; Prune's keep-policy owns valid snapshots.
+		if _, err := readManifest(filepath.Join(dir, ManifestFile)); err == nil {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			// Vanished between ReadDir and Info (a concurrent prune / the
+			// operator cleaning up) — nothing to reap.
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			errs = append(errs, fmt.Errorf("stat %s: %w", dir, err))
+			continue
+		}
+		// Spare a dir younger than the grace — it may be an in-progress
+		// snapshot that hasn't written its manifest yet. The dir mtime
+		// bumps as Snapshot adds files and freezes at the crash instant.
+		if grace > 0 && now.Sub(info.ModTime()) < grace {
+			continue
+		}
+		if err := os.RemoveAll(dir); err != nil {
+			errs = append(errs, fmt.Errorf("reap orphan %s: %w", dir, err))
+			continue
+		}
+		reaped++
+	}
+	return reaped, errors.Join(errs...)
 }
 
 // snapshotEntry is List's return shape — Manifest plus the on-disk
