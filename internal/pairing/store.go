@@ -217,6 +217,16 @@ type Request struct {
 	// revoke can't pin the row in memory forever. (CodeRabbit on
 	// PR #103, second-pass.)
 	revokeAttempts int
+
+	// delivered records whether RawToken has been returned to the client
+	// via at least one authorized Poll (set in Poll under s.mu). Additive
+	// to the read-many delivery contract — it does NOT change what Poll
+	// returns; it only lets Delete tell a genuine acknowledgment (polled →
+	// persisted → DELETEd) apart from a client that DELETEs WITHOUT ever
+	// polling (which orphans the minted token). Gates the B4 orphan-token
+	// log so the normal happy-path ack stays silent. Internal-only; never
+	// serialized to the wire.
+	delivered bool
 }
 
 // Options configures a Store. Zero values fall through to package defaults.
@@ -480,6 +490,10 @@ func (s *Store) Poll(id, pollSecret string) (PollResult, error) {
 	if req.State == StateApproved {
 		res.Token = req.RawToken
 		res.TokenID = req.TokenID
+		// Record that the token reached the client at least once. Read-many
+		// contract is unchanged (we still return it on every authorized poll);
+		// this only feeds Delete's orphan-vs-ack gate below.
+		req.delivered = true
 	}
 	return res, nil
 }
@@ -514,6 +528,21 @@ func (s *Store) Delete(id, pollSecret string) error {
 	// effectively expired), which the handler maps to 200 for an ack.
 	if req.State == StateExpired && req.TokenID != "" {
 		return ErrNotFound
+	}
+	// An Approved row holding a minted TokenID that was NEVER delivered via
+	// Poll is being dropped by the client's DELETE — the token was minted but
+	// the device never received it (a DELETE without any prior poll), so it's
+	// an orphan: still valid in auth.Store yet held by no one. Log the TokenID
+	// as an operator breadcrumb (reconcile via `bridge token revoke
+	// <tokenID>`). We deliberately DO NOT revoke here — the TTL+grace sweep in
+	// onTimer is the only sanctioned revoke path. The NORMAL acknowledgment
+	// flow (poll → delivered → DELETE) is intentionally SILENT: `delivered`
+	// gates this branch out, and revoking there would 401 the device whose
+	// just-persisted token IS the minted one (TestDeleteAfterApprovePreventsRevoke).
+	// (B4)
+	if req.State == StateApproved && req.TokenID != "" && !req.delivered {
+		logger.Info("approved pairing deleted before its token was ever polled; minted token orphaned",
+			"id", id, "tokenID", req.TokenID)
 	}
 	if req.expiryTimer != nil {
 		req.expiryTimer.Stop()
@@ -579,6 +608,12 @@ func (s *Store) Approve(id, currentFingerprint string, mint MintFunc) (Request, 
 	if req.State != StatePending {
 		return snapshot(req), ErrAlreadyDecided
 	}
+	// Capture the clock ONCE for this call so the wall-clock TTL guard,
+	// DecidedAt, and the elapsed-since-create math below all read the same
+	// instant. Previously each read a fresh s.now(); the divergence was
+	// masked only by the 1s floor on the undelivered-revoke deadline. (Q5)
+	now := s.now()
+
 	// Wall-clock TTL guard. The Pending sweeper timer is the primary
 	// expiry mechanism but is best-effort — Stop() returning false on
 	// a fired-but-unprocessed timer means the queued onTimer hasn't
@@ -588,9 +623,9 @@ func (s *Store) Approve(id, currentFingerprint string, mint MintFunc) (Request, 
 	// token for a request the user has likely abandoned. Transition
 	// the row to Expired ourselves and surface ErrAlreadyDecided so
 	// the admin handler 409s. (CodeRabbit on PR #103.)
-	if !s.now().Before(req.CreatedAt.Add(s.ttl)) {
+	if !now.Before(req.CreatedAt.Add(s.ttl)) {
 		req.State = StateExpired
-		req.DecidedAt = s.now()
+		req.DecidedAt = now
 		s.scheduleTimer(req, s.grace)
 		afterUnlock = snapshotForEvent(req)
 		fire = true
@@ -611,7 +646,7 @@ func (s *Store) Approve(id, currentFingerprint string, mint MintFunc) (Request, 
 	// guard explicitly.
 	if req.CertFingerprint != "" && req.CertFingerprint != currentFingerprint {
 		req.State = StateCertRotated
-		req.DecidedAt = s.now()
+		req.DecidedAt = now
 		s.scheduleTimer(req, s.grace)
 		afterUnlock = snapshotForEvent(req)
 		fire = true
@@ -623,7 +658,7 @@ func (s *Store) Approve(id, currentFingerprint string, mint MintFunc) (Request, 
 		return Request{}, fmt.Errorf("mint: %w", err)
 	}
 	req.State = StateApproved
-	req.DecidedAt = s.now()
+	req.DecidedAt = now
 	req.TokenID = tokenID
 	req.RawToken = rawToken
 
@@ -631,7 +666,7 @@ func (s *Store) Approve(id, currentFingerprint string, mint MintFunc) (Request, 
 	// undelivered-revoke deadline at CreatedAt + TTL + Grace. Compute
 	// what's left from creation; floor at 1s so a request approved at
 	// the very edge of TTL still gets a window for iOS to consume.
-	elapsed := s.now().Sub(req.CreatedAt)
+	elapsed := now.Sub(req.CreatedAt)
 	remaining := s.ttl + s.grace - elapsed
 	if remaining < time.Second {
 		remaining = time.Second
@@ -671,21 +706,24 @@ func (s *Store) Decline(id string) (Request, error) {
 	if req.State != StatePending {
 		return snapshot(req), ErrAlreadyDecided
 	}
+	// Capture the clock ONCE so the wall-clock guard and DecidedAt read the
+	// same instant (Q5).
+	now := s.now()
 	// Same wall-clock TTL guard as Approve — see the rationale there.
 	// A Decline after expiry is a no-op from the user's perspective
 	// (they've already given up); transitioning to Expired here
 	// preserves the "exactly one terminal transition per request"
 	// invariant.
-	if !s.now().Before(req.CreatedAt.Add(s.ttl)) {
+	if !now.Before(req.CreatedAt.Add(s.ttl)) {
 		req.State = StateExpired
-		req.DecidedAt = s.now()
+		req.DecidedAt = now
 		s.scheduleTimer(req, s.grace)
 		afterUnlock = snapshotForEvent(req)
 		fire = true
 		return snapshot(req), ErrAlreadyDecided
 	}
 	req.State = StateDeclined
-	req.DecidedAt = s.now()
+	req.DecidedAt = now
 	s.scheduleTimer(req, s.grace)
 	afterUnlock = snapshotForEvent(req)
 	fire = true
@@ -760,10 +798,13 @@ func (s *Store) onTimer(id string, gen uint64) {
 	var afterUnlock Request
 	var fire bool
 	if req, ok := s.byID[id]; ok && req.timerGen == gen {
+		// Capture the clock once for this callback so both terminal
+		// transitions below stamp DecidedAt from the same instant (Q5).
+		now := s.now()
 		switch req.State {
 		case StatePending:
 			req.State = StateExpired
-			req.DecidedAt = s.now()
+			req.DecidedAt = now
 			s.scheduleTimer(req, s.grace)
 			// Expired transition has no token to leak — but use
 			// snapshotForEvent for symmetry with Approve / Decline
@@ -785,7 +826,7 @@ func (s *Store) onTimer(id string, gen uint64) {
 			// to-be-revoked token. (CodeRabbit on PR #103 second
 			// pass.) Finalisation happens below, outside the lock.
 			req.State = StateExpired
-			req.DecidedAt = s.now()
+			req.DecidedAt = now
 			revokeID = req.TokenID
 		case StateDeclined, StateExpired, StateCertRotated:
 			// A row that reaches a terminal state WITH a minted
@@ -949,6 +990,12 @@ func randomHex(nBytes int) (string, error) {
 	return hex.EncodeToString(buf), nil
 }
 
+// verifyCodeMax is the exclusive upper bound for the 6-digit verification
+// code draw. Hoisted to package scope because rand.Int only READS its max
+// (never mutates it), so a fresh big.Int allocation per CreateRequest was
+// pure waste — a shared read-only bound is safe for concurrent draws. (Q4)
+var verifyCodeMax = big.NewInt(1_000_000)
+
 // randomVerificationCode returns a 6-digit decimal code from crypto/rand,
 // formatted with leading zeros so "004123" survives string round-trips
 // (vs "4123" if stored as int and re-formatted).
@@ -959,7 +1006,7 @@ func randomHex(nBytes int) (string, error) {
 // code off the iPhone before approving; the uniform draw just keeps the
 // distribution clean and off static-analysis radar.
 func randomVerificationCode() (string, error) {
-	n, err := rand.Int(rand.Reader, big.NewInt(1_000_000))
+	n, err := rand.Int(rand.Reader, verifyCodeMax)
 	if err != nil {
 		return "", err
 	}

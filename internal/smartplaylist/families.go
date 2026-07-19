@@ -267,6 +267,14 @@ func buildDailyMix(in Inputs, opts Options) (GeneratedPlaylist, bool) {
 		nFam = len(familiar)
 	}
 	merged := interleave(familiar[:nFam], discovery[:nDisc])
+	// Every sibling family ends with a `len(items) < min` drop; Daily Mix only
+	// carries the PRE-build MinDailyFamiliar floor. A clamped-to-zero target
+	// (opts.MaxItems <= 0) — or any fully-starved mix — otherwise slips through
+	// as ok=true with nil Items, surfacing a visible-but-empty "Daily Mix"
+	// shelf on iOS. Match the siblings: no items, no family. (B45)
+	if len(merged) == 0 {
+		return GeneratedPlaylist{}, false
+	}
 	return GeneratedPlaylist{
 		Slug: "daily-mix", Kind: KindDailyMix,
 		Title: "Daily Mix", Subtitle: "Favorites and a few you might've missed",

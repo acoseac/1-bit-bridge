@@ -1,10 +1,12 @@
 package pairing
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -1124,5 +1126,142 @@ func TestDeleteDuringRevokeRetryIsRejected(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&revokeCalls); got < 2 {
 		t.Errorf("revoke calls = %d, want >= 2 (the retry must have fired despite the Delete)", got)
+	}
+}
+
+// recordingLogHandler captures every slog.Record it receives so a test can
+// assert a specific structured log line was emitted. The dynamicHandler's
+// component-attr replay is intentionally dropped (WithAttrs/WithGroup return
+// self) — we only care about the record's own message + attrs.
+type recordingLogHandler struct {
+	mu      *sync.Mutex
+	records *[]slog.Record
+}
+
+func (h recordingLogHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h recordingLogHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	*h.records = append(*h.records, r.Clone())
+	return nil
+}
+
+func (h recordingLogHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h recordingLogHandler) WithGroup(string) slog.Handler      { return h }
+
+// captureLogs installs a recording slog handler as the default for the
+// duration of the test and returns a reader for the captured records. The
+// pairing package's `logger` (logging.Component) resolves slog.Default() at
+// log time, so this intercepts its output. Restored via t.Cleanup. Pairing
+// tests run sequentially (none call t.Parallel), so the process-global
+// SetDefault swap is safe here.
+func captureLogs(t *testing.T) func() []slog.Record {
+	t.Helper()
+	mu := &sync.Mutex{}
+	var recs []slog.Record
+	prev := slog.Default()
+	slog.SetDefault(slog.New(recordingLogHandler{mu: mu, records: &recs}))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return func() []slog.Record {
+		mu.Lock()
+		defer mu.Unlock()
+		out := make([]slog.Record, len(recs))
+		copy(out, recs)
+		return out
+	}
+}
+
+// logAttrValue extracts the string form of a single attr (by key) from a
+// slog.Record; the bool reports presence.
+func logAttrValue(r slog.Record, key string) (string, bool) {
+	var val string
+	var found bool
+	r.Attrs(func(a slog.Attr) bool {
+		if a.Key == key {
+			val, found = a.Value.String(), true
+			return false
+		}
+		return true
+	})
+	return val, found
+}
+
+// approveForDeleteTest creates + approves a request with a long TTL/grace (so
+// no background timer fires mid-test) and returns the store, revoke recorder,
+// request id, raw pollSecret, and the minted TokenID. Shared by the two B4
+// Delete-logging tests.
+func approveForDeleteTest(t *testing.T, seed string) (s *Store, revoke *stubRevoke, id, raw, tokenID string) {
+	t.Helper()
+	revoke = &stubRevoke{}
+	mint := &stubMint{}
+	s = quickStore(t, time.Hour, time.Hour, revoke.fn)
+	var hashHex string
+	raw, hashHex = makePollPair(t, seed)
+	req, err := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP", "")
+	if err != nil {
+		t.Fatalf("CreateRequest: %v", err)
+	}
+	approved, err := s.Approve(req.ID, "FP", mint.fn)
+	if err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+	if approved.TokenID == "" {
+		t.Fatal("Approve snapshot dropped TokenID — test setup invalid")
+	}
+	return s, revoke, req.ID, raw, approved.TokenID
+}
+
+// logsContainTokenID reports whether any captured record carries a tokenID attr
+// equal to want.
+func logsContainTokenID(recs []slog.Record, want string) bool {
+	for _, r := range recs {
+		if v, ok := logAttrValue(r, "tokenID"); ok && v == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestDeleteApprovedAckIsSilent pins B4 (happy path): a Delete that acknowledges
+// a token already delivered via Poll (poll → persist → DELETE) must be SILENT —
+// the token is owned by the device and revoking it would 401 the device
+// (TestDeleteAfterApprovePreventsRevoke). No revoke, no orphan log.
+func TestDeleteApprovedAckIsSilent(t *testing.T) {
+	s, revoke, id, raw, tokenID := approveForDeleteTest(t, "b4-ack")
+	if _, err := s.Poll(id, raw); err != nil { // token delivered
+		t.Fatalf("Poll: %v", err)
+	}
+	readLogs := captureLogs(t) // install AFTER Poll so only Delete could log
+	if err := s.Delete(id, raw); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if calls := revoke.calls(); len(calls) != 0 {
+		t.Errorf("revoke called %d times on ack DELETE, want 0", len(calls))
+	}
+	if logsContainTokenID(readLogs(), tokenID) {
+		t.Errorf("normal ack DELETE logged the orphan-token line for %q, want silent", tokenID)
+	}
+}
+
+// TestDeleteApprovedNeverPolledLogsOrphan pins B4 (orphan path): a Delete of an
+// Approved row whose token was NEVER delivered via Poll (a DELETE without any
+// prior poll) logs the tokenID as an operator breadcrumb. Still no revoke (the
+// TTL+grace sweep in onTimer is the only revoke path); the row is dropped.
+func TestDeleteApprovedNeverPolledLogsOrphan(t *testing.T) {
+	s, revoke, id, raw, tokenID := approveForDeleteTest(t, "b4-orphan")
+	// No Poll → the minted token was never delivered.
+	readLogs := captureLogs(t)
+	if err := s.Delete(id, raw); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if calls := revoke.calls(); len(calls) != 0 {
+		t.Errorf("revoke called %d times on orphan DELETE, want 0", len(calls))
+	}
+	if !logsContainTokenID(readLogs(), tokenID) {
+		t.Errorf("never-polled Approved DELETE did not log the orphan tokenID %q", tokenID)
+	}
+	if _, err := s.Poll(id, raw); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Poll after orphan Delete: err = %v, want ErrNotFound", err)
 	}
 }
