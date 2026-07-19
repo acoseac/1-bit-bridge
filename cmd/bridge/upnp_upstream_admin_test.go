@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -136,6 +137,39 @@ func TestAdmin_ForceRescan_RejectsUnknownUDN(t *testing.T) {
 	err := a.ForceRescan(context.Background(), "uuid:unknown")
 	if !errors.Is(err, admin.ErrUPnPNoSuchServer) {
 		t.Fatalf("err = %v; want ErrUPnPNoSuchServer", err)
+	}
+}
+
+func TestAdmin_ForceRescan_RefusesDuringShutdown(t *testing.T) {
+	// bgCtx is the lifecycle run scope (the PARENT of the periodic ingest
+	// loop's tickCtx). Once it's cancelled the periodic loop drops its
+	// startup +1 on ingestWg toward zero, so ForceRescan must refuse
+	// rather than call ingestWg.Add(1) into a possible Wait-at-zero race
+	// (Gemini medium on PR #524). The refusal happens BEFORE the inFlight
+	// latch AND before the Add, so the latch is left clean and no walk
+	// goroutine is spawned. Regression guard: without the bgCtx.Err() gate
+	// this call would return nil (and Add(1) + spawn against the nil
+	// ingester).
+	cfg := newUPnPTestCfg(t,
+		config.UPnPUpstreamServerConfig{Name: "S", UDN: "uuid:abc"},
+	)
+	rt := runtimeCfgFor(t, cfg)
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	var ingestWg sync.WaitGroup
+	a := &upnpAdminAdapter{
+		cfgHolder: rt, cache: upnp.NewServerCache(),
+		state: newUPnPAdminState(), bgCtx: cancelled, ingestWg: &ingestWg,
+	}
+	if err := a.ForceRescan(context.Background(), ""); err == nil {
+		t.Fatal("ForceRescan should refuse when bgCtx is cancelled (shutdown in progress)")
+	}
+	// The inFlight latch must be untouched — the refusal returns before it.
+	a.state.mu.Lock()
+	inFlight := a.state.inFlight
+	a.state.mu.Unlock()
+	if inFlight {
+		t.Error("inFlight latch leaked on the shutdown-refusal path")
 	}
 }
 

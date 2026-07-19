@@ -151,12 +151,14 @@ func certRotateCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 		}
 	}
 
-	// Regenerate directly over the existing files. writePEM commits each
-	// PEM via a temp-file + atomic rename, so a failed or interrupted write
-	// (disk full, process kill) leaves the prior cert/key intact and the
-	// bridge bootable. Do NOT pre-remove the old files here — that would
-	// defeat the atomic overwrite and reintroduce the
-	// unbootable-on-failed-rotation hazard the atomic write closes.
+	// Regenerate directly over the existing files. GenerateWithOptions is
+	// a two-phase commit: it stages BOTH the new cert and key to temp
+	// files (stagePEM) and only then atomically renames both into place,
+	// so a failure writing EITHER file leaves the prior cert/key pair
+	// fully intact and the bridge bootable. Do NOT pre-remove the old
+	// files here — that would defeat the atomic overwrite and reintroduce
+	// the unbootable-on-failed-rotation hazard the two-phase commit closes
+	// (PR #487).
 	hostname, _ := os.Hostname()
 	// Rotate is the operator-driven path that picks up Tailscale +
 	// custom-endpoint SAN changes since the last cert was minted. We

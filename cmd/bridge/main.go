@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -614,7 +615,36 @@ func (a *upscaleEnqueuerAdapter) EnqueueOne(libraryRelativePath string) error {
 	if track.BitsPerSample != nil {
 		srcBits = *track.BitsPerSample
 	}
-	target, err := transcode.ResolveTargetRate(a.cfg.Upscale.EffectiveTargetRate(), sourceHz)
+	// Resolve the target from the LIVE operator-controlled setting in
+	// scan_state (GetUpscaleTarget) — the same source the batch path
+	// (upscaleBatchCoordinatorAdapter.Submit) and the admin Inspector
+	// PATCH use. Reading a.cfg here froze the boot-time YAML target:
+	// admin target edits go to the DB via SetUpscaleTarget and NEVER
+	// touch the copy-on-write config, so the per-track POST /v1/upscale
+	// path kept converting to the stale bootstrap rate/bits after any
+	// runtime change (the sibling outputDir field was made a live closure
+	// for this same staleness class). Fall back to the bridge.yaml
+	// bootstrap value when the DB target is unset — startup seeds it, so
+	// this is a belt-and-braces path. Passing the resolved integer rate
+	// as a string keeps ResolveTargetRate's "never downsample /
+	// already-at-target → skip" semantics intact.
+	rateSetting := a.cfg.Upscale.EffectiveTargetRate()
+	targetBits := a.cfg.Upscale.EffectiveTargetBits()
+	if liveRate, liveBits, gErr := a.store.GetUpscaleTarget(context.Background()); gErr == nil {
+		rateSetting = strconv.Itoa(liveRate)
+		targetBits = liveBits
+	} else if !errors.Is(gErr, manifest.ErrUpscaleTargetUnset) {
+		// ErrUpscaleTargetUnset is the fresh-DB "never seeded" case → fall
+		// through to the bridge.yaml bootstrap default (startup seeds
+		// scan_state). Any OTHER error is a real store fault — and the
+		// imminent LookupVariant in finalizeAndEnqueue reads the same
+		// store and would hit it too — so propagate it (matching the
+		// adapter's LookupTrack/LookupVariant DB-error propagation) rather
+		// than silently converting at the stale bootstrap target. Gemini
+		// medium on PR #524.
+		return fmt.Errorf("get live upscale target: %w", gErr)
+	}
+	target, err := transcode.ResolveTargetRate(rateSetting, sourceHz)
 	if err != nil {
 		return fmt.Errorf("resolve target rate: %w", err)
 	}
@@ -633,7 +663,7 @@ func (a *upscaleEnqueuerAdapter) EnqueueOne(libraryRelativePath string) error {
 		SourceSampleRate: sourceHz,
 		SourceBits:       srcBits,
 		TargetSampleRate: target,
-		TargetBits:       a.cfg.Upscale.EffectiveTargetBits(),
+		TargetBits:       targetBits,
 		Quality:          transcode.QualityVeryHigh,
 		OutputDir:        a.outputDir(),
 	}
@@ -1684,7 +1714,6 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			fmt.Fprintf(stdout, "autocert: using LE STAGING directory — certs will not be browser-trusted\n")
 		}
 	}
-	_ = acmeManager // referenced later by the admin tile wiring in this PR
 
 	store, err := auth.OpenStore(filepath.Join(cfg.DataDir, tokensFileName))
 	if err != nil {
@@ -3124,6 +3153,30 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// before Start, so the original synchronous shape here always
 		// failed at boot for tsnet-mode bridges (PR #264 regression).
 	}
+
+	// LAN HTTP/3 teardown as a defer so EVERY exit path drains the QUIC
+	// listener and closes the bound UDP socket — not just the ctx.Done
+	// graceful branch. The three startup-error branches below (serveErr /
+	// adminErr / tsnetServeErr) `return 1` without touching lanH3Srv or
+	// udpConn, and lanH3Srv.Serve(udpConn) doesn't observe ctx; because
+	// runServe can return to the launcher menu (the process stays alive),
+	// a leaked Serve goroutine + a still-bound UDP port made the next
+	// "Start now" fail net.ListenUDP with "address already in use" and
+	// silently fall back to HTTP/2-only. Mirrors the tsnet-H3 defer below.
+	// Idempotent against the ctx.Done branch's explicit graceful drain:
+	// http3.Server.Shutdown + udpConn.Close both tolerate a second call
+	// (the tsnet-H3 listeners are already double-shut-down the same way).
+	// Nil-guarded — either bind may have failed or HTTP/3 may be disabled.
+	defer func() {
+		if lanH3Srv != nil {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+			defer cancel()
+			_ = lanH3Srv.Shutdown(shutdownCtx)
+		}
+		if udpConn != nil {
+			_ = udpConn.Close()
+		}
+	}()
 
 	fmt.Fprintln(stdout, "Press Ctrl-C to shut down.")
 
