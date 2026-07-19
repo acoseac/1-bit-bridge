@@ -8,6 +8,12 @@ import (
 	"path/filepath"
 )
 
+// linkFunc indirects os.Link so tests can force the hardlink step in
+// swapBinary to fail and exercise the two-rename fallback. Test-only
+// seam — production code MUST NOT mutate it (same convention as
+// renameFunc / removeFunc elsewhere in the package).
+var linkFunc = os.Link
+
 // swapBinary atomically replaces the running binary on darwin/linux.
 //
 // macOS/Linux semantics: os.Rename can replace a running executable
@@ -38,17 +44,67 @@ import (
 // dst is the path of the currently-running binary (typically from
 // os.Executable()). newBinary is the path to the freshly-extracted
 // binary in a temp location. backupExt is ".bak" in production.
+//
+// Crash-safety: the naive "rename dst→bak, then rename newBinary→dst"
+// leaves a window between the two syscalls in which NO file exists at
+// dst. A power loss there permanently loses the binary, and the
+// boot-time rollback can't recover — the missing file IS the bridge, so
+// the service manager has nothing to launch. Instead we hardlink dst→bak
+// FIRST (both directory entries now point at the old inode, so dst stays
+// present the whole time AND bak holds the old binary for rollback), then
+// atomically rename newBinary over dst. dst is never absent.
+//
+// os.Link fails on filesystems without hardlink support (some FUSE / FAT
+// / network mounts) and across filesystems (EXDEV). There we fall back to
+// the original two-rename swap (swapBinaryViaRename) — it reintroduces the
+// tiny no-file window but is the best a link-less filesystem allows.
 func swapBinary(dst, newBinary, backupExt string) error {
 	bak := dst + backupExt
 
-	// Move dst → dst.bak. If a stale .bak exists, overwrite it.
-	// os.Rename overwrites on POSIX so this is one syscall.
+	// os.Link refuses to create bak if it already exists (EEXIST), so
+	// clear any stale .bak from a previous cycle first. A missing .bak
+	// is the normal case, not an error.
+	if err := os.Remove(bak); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove stale backup %s: %w", bak, err)
+	}
+	if err := linkFunc(dst, bak); err != nil {
+		// Link-less / cross-device filesystem — fall back to the
+		// two-rename swap (which overwrites any bak itself).
+		return swapBinaryViaRename(dst, newBinary, bak)
+	}
+
+	// dst and bak now hardlink the same (old) inode. Atomically point dst
+	// at the new binary; bak keeps the old inode alive for rollback. On
+	// POSIX os.Rename over an existing dst is atomic, so a crash here
+	// leaves dst as either the old or the new binary — never absent.
+	if err := os.Rename(newBinary, dst); err != nil {
+		// The rename didn't happen, so dst still resolves to the old
+		// binary via its own directory entry (the surviving hardlink) —
+		// the bridge stays bootable. Drop the bak link we just made so a
+		// stale .bak (identical to the live binary, with no install
+		// marker committed) doesn't linger.
+		_ = os.Remove(bak)
+		return fmt.Errorf("install %s -> %s: %w", newBinary, dst, err)
+	}
+
+	fsyncDir(filepath.Dir(dst))
+	return nil
+}
+
+// swapBinaryViaRename is the fallback two-rename swap used when the
+// filesystem can't hardlink (EXDEV / no-hardlink-support). It carries the
+// original no-file window between the two renames; the hardlink path in
+// swapBinary is preferred precisely to avoid that window on filesystems
+// that support it. bak is dst+backupExt and has already been cleared by
+// the caller.
+func swapBinaryViaRename(dst, newBinary, bak string) error {
+	// Move dst → dst.bak. os.Rename overwrites on POSIX so a residual
+	// .bak (there shouldn't be one — the caller removed it) is fine.
 	if err := os.Rename(dst, bak); err != nil {
 		return fmt.Errorf("rename %s -> %s: %w", dst, bak, err)
 	}
-
-	// Move new binary into place. If this fails, restore .bak so
-	// we don't leave the operator with no executable at all.
+	// Move new binary into place. If this fails, restore .bak so we
+	// don't leave the operator with no executable at all.
 	if err := os.Rename(newBinary, dst); err != nil {
 		if rerr := os.Rename(bak, dst); rerr != nil {
 			return fmt.Errorf("install %s -> %s failed (%v); rollback also failed (%v); manual recovery needed",
@@ -56,19 +112,20 @@ func swapBinary(dst, newBinary, backupExt string) error {
 		}
 		return fmt.Errorf("install %s -> %s: %w (rolled back)", newBinary, dst, err)
 	}
+	fsyncDir(filepath.Dir(dst))
+	return nil
+}
 
-	// fsync the parent directory so the rename is durable. A crash
-	// between the rename's dentry update and the journal flush
-	// could otherwise leave an inconsistent state (which the
-	// rollback marker would notice on next boot, but we'd rather
-	// avoid the rollback dance entirely).
-	parent := filepath.Dir(dst)
-	if d, err := os.Open(parent); err == nil {
+// fsyncDir fsyncs a directory so a rename inside it is durable. A crash
+// between the rename's dentry update and the journal flush could
+// otherwise leave an inconsistent state (which the rollback marker would
+// notice on next boot, but we'd rather avoid the rollback dance entirely).
+// Best-effort: a directory that can't be opened/synced isn't fatal.
+func fsyncDir(dir string) {
+	if d, err := os.Open(dir); err == nil {
 		_ = d.Sync()
 		_ = d.Close()
 	}
-
-	return nil
 }
 
 // RollbackBinary restores dst.bak → dst, overwriting whatever is
@@ -83,10 +140,7 @@ func RollbackBinary(dst, backupExt string) error {
 	if err := os.Rename(bak, dst); err != nil {
 		return fmt.Errorf("rollback rename %s -> %s: %w", bak, dst, err)
 	}
-	if d, err := os.Open(filepath.Dir(dst)); err == nil {
-		_ = d.Sync()
-		_ = d.Close()
-	}
+	fsyncDir(filepath.Dir(dst))
 	return nil
 }
 

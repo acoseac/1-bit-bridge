@@ -3,6 +3,7 @@
 package updater
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -41,6 +42,34 @@ func TestSwapBinaryAtomicallyReplacesAndKeepsBak(t *testing.T) {
 	}
 	if string(bak) != "OLD" {
 		t.Errorf(".bak contents = %q, want OLD", string(bak))
+	}
+}
+
+func TestSwapBinaryFallsBackToRenameWhenHardlinkUnsupported(t *testing.T) {
+	// B35: swapBinary keeps dst present by hardlinking dst→bak first, but
+	// filesystems without hardlink support (some FUSE/FAT/network mounts)
+	// or a cross-device .bak make os.Link fail. There it must fall back to
+	// the two-rename swap and still land NEW at live + OLD at .bak.
+	orig := linkFunc
+	linkFunc = func(oldname, newname string) error {
+		return errors.New("simulated link-unsupported filesystem")
+	}
+	t.Cleanup(func() { linkFunc = orig })
+
+	dir := t.TempDir()
+	live := fakeBinary(t, dir, "bridge", "OLD")
+	newBin := fakeBinary(t, dir, "bridge.new", "NEW")
+
+	if err := swapBinary(live, newBin, ".bak"); err != nil {
+		t.Fatalf("swapBinary (fallback path): %v", err)
+	}
+	got, _ := os.ReadFile(live)
+	if string(got) != "NEW" {
+		t.Errorf("live binary = %q, want NEW (fallback path)", string(got))
+	}
+	bak, _ := os.ReadFile(live + ".bak")
+	if string(bak) != "OLD" {
+		t.Errorf(".bak = %q, want OLD (fallback path)", string(bak))
 	}
 }
 

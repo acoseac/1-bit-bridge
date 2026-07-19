@@ -295,14 +295,21 @@ func writeExecutable(dst string, src io.Reader, size int64) error {
 	// LimitReader provides the size cap; the caller's checksum
 	// already verified the archive bytes match, but a malformed
 	// header in the archive itself shouldn't blow up disk.
-	if size <= 0 {
+	//
+	// Track "declared size present" with a bool rather than reusing
+	// 1<<30 as a sentinel for "no declared size". Overloading the
+	// ceiling value let a tar/zip entry declaring EXACTLY 1 GiB skip
+	// the truncation check (size == 1<<30 suppressed the guard), so a
+	// truncated 1 GiB-declared payload would be silently accepted.
+	hasDeclaredSize := size > 0
+	if !hasDeclaredSize {
 		size = 1 << 30 // 1 GiB ceiling — bridge binary is ~30 MiB
 	}
 	n, err := io.Copy(out, io.LimitReader(src, size))
 	if err != nil {
 		return fmt.Errorf("write extracted binary: %w", err)
 	}
-	if size != 1<<30 && n != size {
+	if hasDeclaredSize && n != size {
 		return fmt.Errorf("extracted binary size mismatch: got %d, want %d", n, size)
 	}
 	if err := out.Sync(); err != nil {

@@ -444,7 +444,17 @@ func normalizeForSemver(v string) string {
 // a missing config field shouldn't surprise-disable behaviour the
 // operator explicitly opted into via AutoInstall=true.
 func (u *Updater) inAllowedWindow(t time.Time) bool {
-	if u.quietHoursStart == 0 && u.quietHoursEnd == 0 {
+	// start == end means "any time" (no window restriction). This covers
+	// BOTH the unset-config (0,0) case AND a degenerate operator window
+	// like "02:00-02:00" (start == end == 120), which config.ParseQuietHours
+	// accepts. Handling it HERE — the updater's policy layer — rather than
+	// in inWindow keeps inWindow byte-for-byte in lockstep with
+	// config.IsInQuietHours, which deliberately treats a zero-length window
+	// as "always outside" (false). The updater's policy is the opposite
+	// ("any time"), so the two diverge only at this layer; pre-fix the
+	// short-circuit fired only for (0,0), so a non-zero equal window fell
+	// through to inWindow(120,120,…) → false and auto-install fired NEVER.
+	if u.quietHoursStart == u.quietHoursEnd {
 		return true
 	}
 	mod := t.Hour()*60 + t.Minute()

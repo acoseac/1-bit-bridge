@@ -120,6 +120,32 @@ func TestInWindow(t *testing.T) {
 	}
 }
 
+func TestInAllowedWindowEqualBoundsMeansAnyTime(t *testing.T) {
+	// B36 regression: a degenerate quiet-hours window (start == end, e.g.
+	// "02:00-02:00" which config.ParseQuietHours accepts) means "any time"
+	// per inAllowedWindow's documented intent — auto-install must be
+	// ALLOWED at every wall-clock minute. Pre-fix the short-circuit fired
+	// only for (0,0), so a non-zero equal window fell through to
+	// inWindow(120,120,…) → false and auto-install fired NEVER.
+	nonZero := New(Options{QuietHoursStart: 120, QuietHoursEnd: 120}) // 02:00-02:00
+	for _, hm := range []struct{ h, m int }{{0, 0}, {2, 0}, {12, 0}, {23, 59}} {
+		at := time.Date(2026, 4, 25, hm.h, hm.m, 0, 0, time.UTC)
+		if !nonZero.inAllowedWindow(at) {
+			t.Errorf("inAllowedWindow(%02d:%02d) = false for degenerate 02:00-02:00 window; want true (any time)", hm.h, hm.m)
+		}
+	}
+	// The unset-config (0,0) case still means "any time".
+	unset := New(Options{})
+	if !unset.inAllowedWindow(time.Date(2026, 4, 25, 12, 0, 0, 0, time.UTC)) {
+		t.Error("inAllowedWindow(12:00) = false for unset (0,0) window; want true")
+	}
+	// A genuine window still defers outside its bounds (unchanged behaviour).
+	windowed := New(Options{QuietHoursStart: 120, QuietHoursEnd: 240}) // 02:00-04:00
+	if windowed.inAllowedWindow(time.Date(2026, 4, 25, 12, 0, 0, 0, time.UTC)) {
+		t.Error("inAllowedWindow(12:00) = true for a 02:00-04:00 window; want false (outside)")
+	}
+}
+
 func TestRunSkipsAutoInstallOnFailedPoll(t *testing.T) {
 	// Regression guard for PR #43 review (CodeRabbit): a stale
 	// UpdateAvailable=true from a prior successful poll must NOT
