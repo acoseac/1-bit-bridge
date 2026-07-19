@@ -456,6 +456,7 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 			"err", err)
 	}
 	enqueued := 0
+	deduped := 0
 	for _, ca := range cands {
 		spec := JobSpec{
 			SourceAbsPath:    ca.absPath,
@@ -470,7 +471,18 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 			OutputDir:        outputDir,
 			BatchID:          batchID,
 		}
-		if err := c.pool.Enqueue(spec); err != nil {
+		err := c.pool.Enqueue(spec)
+		if errors.Is(err, ErrDuplicateInflight) {
+			// Already queued/running from an overlapping batch. That job carries
+			// the OTHER batch's ID and won't call back into this one, so drop the
+			// path from remaining + total so allDone can still fire — the
+			// in-flight job produces the variant. Without this, an overlapping
+			// re-submit sat `running` forever.
+			c.dropDedupedPath(batchID, ca.path)
+			deduped++
+			continue
+		}
+		if err != nil {
 			// Queue full or pool closed — log the failure and stop
 			// enqueueing further jobs, BUT keep the batch in
 			// `liveBatches` so the already-enqueued jobs' callbacks
@@ -504,10 +516,11 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 						delete(st.RemainingIDs, c2.path)
 					}
 				}
-				// Reduce TotalFiles so the batch can still reach
-				// terminal state via the enqueued-and-completed
-				// count alone.
-				st.Row.TotalFiles -= len(cands) - enqueued
+				// Reduce TotalFiles to the real-job count so the batch can
+				// still reach terminal state via the enqueued-and-completed
+				// count alone. Set directly (not `-= len(cands)-enqueued`) so
+				// it stays correct after any earlier dedup drops.
+				st.Row.TotalFiles = enqueued
 				st.Row.Error = "partial enqueue: " + err.Error()
 				st.Row.UpdatedAt = c.clock().UnixNano()
 				// If nothing was enqueued, no callback will ever
@@ -555,18 +568,56 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 		enqueued++
 	}
 
+	// The 202 response reports `enqueued` — the persisted row's TotalFiles
+	// converges to exactly this in every path (it starts at len(cands), each
+	// dedup decrements it via dropDedupedPath, and a queue-full break sets it to
+	// `enqueued`). Reading it back from liveBatches would be both redundant AND
+	// wrong when a first-enqueue failure already deleted the batch: the lookup
+	// misses and falls back to len(cands), diverging from the row the admin Jobs
+	// page shows (CodeRabbit PR #515).
+	finalTotal := enqueued
+
+	// Every candidate deduped against in-flight jobs (a fully-overlapping
+	// re-submit) → no callback will fire for this batch; transition it now so it
+	// doesn't sit `running` forever (the overlapping batch produces the variants).
+	// Gate on `deduped == len(cands)`, NOT `enqueued == 0 && deduped > 0`: a
+	// queue-full break can also leave enqueued == 0 with deduped > 0, and that
+	// path already set a terminal (failed) status — completing it here would
+	// clobber the failure (CodeRabbit).
+	if deduped == len(cands) {
+		if err := c.transitionStatus(batchID, "completed", "", c.clock()); err != nil {
+			c.logger.Warn("submit: transition fully-deduped batch",
+				"batchID", batchID.String(), "err", err)
+		}
+	}
+
 	c.publishProgress(batchID)
 	return &SubmitResult{
 		BatchID:            batchID,
 		Path:               path,
 		TargetRate:         targetRate,
 		TargetBits:         targetBits,
-		TotalFiles:         len(cands),
+		TotalFiles:         finalTotal,
 		AlreadyCovered:     alreadyCovered,
 		ProjectedSizeBytes: totalProjected,
 		AvailableBytes:     available,
 		EnqueuedCount:      enqueued,
 	}, nil
+}
+
+// dropDedupedPath removes a path that Enqueue reported as already in-flight
+// (ErrDuplicateInflight) from the batch's remaining set + total, so allDone can
+// still fire — the in-flight job (owned by an overlapping batch) produces the
+// variant and never calls back into this batch.
+func (c *Coordinator) dropDedupedPath(batchID uuid.UUID, path string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if st, ok := c.liveBatches[batchID]; ok {
+		delete(st.RemainingIDs, path)
+		if st.Row.TotalFiles > 0 {
+			st.Row.TotalFiles--
+		}
+	}
 }
 
 // SubmitOptimize is the CarPlay-targeted batch path: enrolls every
@@ -688,7 +739,7 @@ func (c *Coordinator) SubmitOptimize(ctx context.Context, path string, outputDir
 		Path:               path,
 		TargetRate:         0, // per-track varies; admin surfaces "Mobile optimization"
 		TargetBits:         16,
-		TotalFiles:         len(picked.cands),
+		TotalFiles:         enqueued,
 		AlreadyCovered:     picked.alreadyCovered,
 		ProjectedSizeBytes: picked.totalProjected,
 		AvailableBytes:     available,
@@ -805,6 +856,7 @@ func (c *Coordinator) initOptimizeBatchState(ctx context.Context, batchPath stri
 // successfully enqueued.
 func (c *Coordinator) enqueueOptimizeJobs(batchID uuid.UUID, cands []optimizeCandidate, outputDir string) int {
 	enqueued := 0
+	deduped := 0
 	for _, ca := range cands {
 		spec := JobSpec{
 			SourceAbsPath:    ca.absPath,
@@ -820,11 +872,25 @@ func (c *Coordinator) enqueueOptimizeJobs(batchID uuid.UUID, cands []optimizeCan
 			BatchID:          batchID,
 			Kind:             JobKindOptimize,
 		}
-		if err := c.pool.Enqueue(spec); err != nil {
+		err := c.pool.Enqueue(spec)
+		if errors.Is(err, ErrDuplicateInflight) {
+			c.dropDedupedPath(batchID, ca.path)
+			deduped++
+			continue
+		}
+		if err != nil {
 			c.handleOptimizeEnqueueFailure(batchID, cands, ca.path, enqueued, err)
 			break
 		}
 		enqueued++
+	}
+	// Fully deduped → complete now (mirrors Submit); gate on deduped == len(cands)
+	// so a queue-full break doesn't spuriously complete a truncated batch.
+	if deduped == len(cands) {
+		if err := c.transitionStatus(batchID, "completed", "", c.clock()); err != nil {
+			c.logger.Warn("optimize: transition fully-deduped batch",
+				"batchID", batchID.String(), "err", err)
+		}
 	}
 	return enqueued
 }
@@ -851,7 +917,11 @@ func (c *Coordinator) handleOptimizeEnqueueFailure(batchID uuid.UUID, cands []op
 				delete(st.RemainingIDs, c2.path)
 			}
 		}
-		st.Row.TotalFiles -= len(cands) - enqueued
+		// Set directly to the enqueued count (NOT `-= len(cands)-enqueued`) so it
+		// stays correct after any earlier dedup drops — mirrors Submit's queue-full
+		// path (line ~523). The `-=` form under-counts by the dedup total when a
+		// dedup and a queue-full break co-occur in the same batch (CodeRabbit PR #515).
+		st.Row.TotalFiles = enqueued
 		st.Row.Error = "partial enqueue: " + failureErr.Error()
 		st.Row.UpdatedAt = c.clock().UnixNano()
 		if len(st.RemainingIDs) == 0 {

@@ -306,6 +306,14 @@ var ErrQueueFull = errors.New("transcode pool queue is full")
 // are accepted. Tests use it.
 var ErrPoolClosed = errors.New("transcode pool is closed")
 
+// ErrDuplicateInflight is returned by Enqueue when a job for the same
+// (source, variantID) is already queued or running. The caller should treat
+// it as "accepted, no new work" — the in-flight job produces the variant. It
+// is distinct from nil so a batch Coordinator can drop the deduped path from
+// its remaining/total counts (an in-flight job carries only the FIRST
+// enqueuer's BatchID and never calls back into a later overlapping batch).
+var ErrDuplicateInflight = errors.New("transcode pool: job already queued or running")
+
 // NewPool constructs a Pool sized at `workers` parallel sox
 // processes with a `queueCap`-bounded pending-job channel. Starts
 // `workers` goroutines immediately; they live until Stop is
@@ -392,7 +400,7 @@ func (p *Pool) Enqueue(spec JobSpec) error {
 	}
 	if _, ok := p.inflight[dedup]; ok {
 		p.mu.Unlock()
-		return nil // already queued or running
+		return ErrDuplicateInflight // already queued or running
 	}
 	// Optimistic insert: claim the slot before trying the channel
 	// send so two concurrent enqueues for the same job can't both
@@ -1076,9 +1084,13 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 		// the success / store-failure branches which already
 		// fire post-release.
 		if !p.closed.Load() {
-			errMsg := redactSoxErr(err.Error(), job.spec)
+			var errMsg string
 			if errors.Is(jobCtx.Err(), context.DeadlineExceeded) {
 				errMsg = "sox timed out after " + p.jobTimeout.String()
+			} else {
+				// Only pay for the (up to 4 KiB) stderr redaction passes on the
+				// non-timeout path — the timeout branch discards the result.
+				errMsg = redactSoxErr(err.Error(), job.spec)
 			}
 			p.fireJobFailedFor(job, errMsg, startedAt)
 			p.fireStateChange()

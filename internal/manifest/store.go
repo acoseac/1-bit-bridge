@@ -4067,6 +4067,13 @@ func (s *Store) InsertUpscaleBatch(ctx context.Context, row UpscaleBatchRow) err
 func (s *Store) UpdateUpscaleBatchProgress(ctx context.Context, row UpscaleBatchRow) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Guard: a non-terminal progress write must not resurrect a batch that has
+	// already reached a terminal status (the cancel-vs-late-completion LWW race,
+	// B3) — the persist runs outside c.mu, so a stale `running` snapshot could
+	// otherwise land after a terminal write. The full terminal set is
+	// completed/failed/cancelled/interrupted (see isTerminalStatus in batch.go);
+	// 'interrupted' is stamped by boot recovery, so a straggler callback after a
+	// crash/restart must not revive it either (Gemini PR #515 round 2).
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE upscale_batches
 		   SET status         = ?,
@@ -4075,6 +4082,7 @@ func (s *Store) UpdateUpscaleBatchProgress(ctx context.Context, row UpscaleBatch
 		       error          = ?,
 		       updated_at     = ?
 		 WHERE id = ?
+		   AND status NOT IN ('completed', 'failed', 'cancelled', 'interrupted')
 	`, row.Status, row.ProcessedFiles, row.FailedFiles, row.Error, row.UpdatedAt, row.ID[:])
 	return err
 }

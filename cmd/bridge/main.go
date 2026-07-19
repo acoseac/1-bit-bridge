@@ -523,6 +523,9 @@ func (a *upscaleEnqueuerAdapter) finalizeAndEnqueue(spec transcode.JobSpec, trac
 			return api.ErrUpscaleSourceMissing
 		}
 		return fmt.Errorf("pool closed: %w", enqueueErr)
+	case errors.Is(enqueueErr, transcode.ErrDuplicateInflight):
+		// Already queued/running from a prior request — treat as accepted.
+		return nil
 	case enqueueErr != nil:
 		return fmt.Errorf("enqueue: %w", enqueueErr)
 	}
