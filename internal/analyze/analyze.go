@@ -183,7 +183,11 @@ func RunAnalysis(ctx context.Context, spec AnalyzeSpec) (Result, error) {
 	total, err := decodeFrames(ctx, spec.SourceAbsPath, channels, tool, expectedSec, func(frame []float64) {
 		mono := downmixFrame(frame)
 		pk.add(mono)
-		meter.addFrame(frame)
+		if channelsOK {
+			// Skip the per-sample K-weighting biquads when the channel layout
+			// is unknown — the loudness result is discarded below in that case.
+			meter.addFrame(frame)
+		}
 		kt.add(mono)
 	})
 	if err != nil {

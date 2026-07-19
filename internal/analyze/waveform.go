@@ -121,7 +121,11 @@ func encodeWaveform(p *peaker, rateHz, bucketSamples int, totalSamples int64) []
 	binary.LittleEndian.PutUint32(out[14:18], uint32(count))
 	var durationMS uint32
 	if rateHz > 0 {
-		durationMS = uint32(totalSamples * 1000 / int64(rateHz))
+		ms := totalSamples * 1000 / int64(rateHz)
+		if ms > int64(math.MaxUint32) { // clamp: avoid a silent wrap past ~49.7 days
+			ms = int64(math.MaxUint32)
+		}
+		durationMS = uint32(ms)
 	}
 	binary.LittleEndian.PutUint32(out[18:22], durationMS)
 	for i := 0; i < count; i++ {
