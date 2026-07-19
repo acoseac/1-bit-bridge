@@ -43,6 +43,56 @@ func TestDownloadVerified_RejectsOversizeArchive(t *testing.T) {
 	}
 }
 
+// TestWriteExecutable_DeclaredExactly1GiBStillTruncationChecked is the Q37
+// regression: 1<<30 was overloaded as BOTH the "no declared size → 1 GiB
+// ceiling" sentinel AND a legitimate declared size, so an archive entry
+// declaring EXACTLY 1 GiB skipped the n != size truncation check. A short
+// (truncated) source declaring 1<<30 bytes must now fail with a size
+// mismatch rather than being silently accepted. Cheap to test: the declared
+// size is 1<<30 but the source is 9 bytes, so io.Copy returns quickly.
+func TestWriteExecutable_DeclaredExactly1GiBStillTruncationChecked(t *testing.T) {
+	dst := filepath.Join(t.TempDir(), "bridge")
+	src := strings.NewReader("truncated") // 9 bytes, far short of the declared 1 GiB
+	err := writeExecutable(dst, src, 1<<30)
+	if err == nil || !strings.Contains(err.Error(), "size mismatch") {
+		t.Fatalf("writeExecutable(size=1<<30) with a 9-byte source = %v; want a 'size mismatch' error", err)
+	}
+}
+
+// TestWriteExecutable_NoDeclaredSizeUsesCeiling is the positive companion:
+// a non-positive declared size (no header size) falls back to the 1 GiB
+// ceiling with NO exact-match assertion, so the full source still writes.
+func TestWriteExecutable_NoDeclaredSizeUsesCeiling(t *testing.T) {
+	dst := filepath.Join(t.TempDir(), "bridge")
+	content := "#!/bin/true\n"
+	if err := writeExecutable(dst, strings.NewReader(content), 0); err != nil {
+		t.Fatalf("writeExecutable(size=0): %v", err)
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("read dst: %v", err)
+	}
+	if string(got) != content {
+		t.Errorf("extracted content = %q, want %q", got, content)
+	}
+}
+
+// TestWriteExecutable_RejectsDeclaredSizeOverCeiling is the decompression-bomb
+// guard (Gemini security-high): a header declaring MORE than the 1 GiB ceiling
+// must be rejected outright — even with the hasDeclaredSize truncation guard,
+// io.LimitReader would otherwise stream up to the declared size and exhaust
+// disk. The reject happens before dst is created, so no 0-byte file is left.
+func TestWriteExecutable_RejectsDeclaredSizeOverCeiling(t *testing.T) {
+	dst := filepath.Join(t.TempDir(), "bridge")
+	err := writeExecutable(dst, strings.NewReader("x"), maxExtractedBinaryBytes+1)
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("writeExecutable(size=ceiling+1) = %v; want an 'exceeds ... ceiling' error", err)
+	}
+	if _, statErr := os.Stat(dst); statErr == nil {
+		t.Errorf("dst was created despite an over-ceiling declared size; want no file at %s", dst)
+	}
+}
+
 // writeTarGzSymlink builds a .tar.gz whose sole entry is a symlink with
 // the given name, returning the archive path.
 func writeTarGzSymlink(t *testing.T, name, linkTarget string) string {

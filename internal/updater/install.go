@@ -21,6 +21,13 @@ import (
 // github.go).
 const downloadTimeout = 15 * time.Minute
 
+// verifyTimeout bounds the signature/notarization check. On darwin
+// verifyBinary shells to `codesign … --check-notarization`, which can
+// reach out to Apple and hang (offline / captive portal) — this deadline
+// caps that so a wedged verify can't park the install forever. The parent
+// ctx is still honoured; this only adds an upper bound.
+const verifyTimeout = 2 * time.Minute
+
 // InstallOptions configures one Install attempt.
 type InstallOptions struct {
 	// DataDir is the bridge's working data directory; the install
@@ -108,6 +115,17 @@ func (u *Updater) Install(ctx context.Context, opts InstallOptions) (Status, err
 	if !opts.Force && opts.Sessions != nil && opts.Sessions.Inflight() > 0 {
 		return status, fmt.Errorf("%w: %d inflight download(s)",
 			ErrActiveSessions, opts.Sessions.Inflight())
+	}
+
+	// Permission preflight FIRST, before any network I/O: if we can't
+	// write to the binary's directory, the swap will fail late (after a
+	// ~30 MiB download + extract + verify). Catching it up front gives the
+	// operator the "try sudo" message immediately instead of after paying
+	// the download cost. The swap still surfaces a writability error later
+	// if the ACL changes mid-flight, but the common non-writable-dir case
+	// no longer wastes a download.
+	if err := preflightWritable(opts.BinaryPath); err != nil {
+		return status, err
 	}
 
 	// Re-fetch the release so the asset list is fresh — the cached
@@ -211,15 +229,14 @@ func (u *Updater) Install(ctx context.Context, opts InstallOptions) (Status, err
 	if verifier == nil {
 		verifier = verifyBinary
 	}
-	if err := verifier(ctx, extracted); err != nil {
+	// Bound the verify: on darwin it can contact Apple and hang offline
+	// (see verifyTimeout). Derives from the parent ctx so a caller
+	// cancellation still propagates.
+	verifyCtx, cancelVerify := context.WithTimeout(ctx, verifyTimeout)
+	err = verifier(verifyCtx, extracted)
+	cancelVerify()
+	if err != nil {
 		return status, fmt.Errorf("verify: %w", err)
-	}
-
-	// Permission preflight: if we can't write to the binary's
-	// directory, the swap will fail with a less clear error mid-
-	// flight. Catch it here so the operator gets a usable message.
-	if err := preflightWritable(opts.BinaryPath); err != nil {
-		return status, err
 	}
 
 	// Marker first (see method-doc rationale). This is the boot

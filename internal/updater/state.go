@@ -35,10 +35,10 @@ import (
 //     installedAt > 0), startup deletes bridge.bak so disk doesn't
 //     accumulate stale spares.
 //
-// The 5 min "recent attempt" window keeps a long-stale marker (e.g.
-// an attempted install whose service-manager respawn never happened)
-// from triggering rollback hours later when the user finally
-// restarts. If the marker is older than the window AND no
+// The 6 h "recent attempt" window (recencyWindow) keeps a long-stale
+// marker (e.g. an attempted install whose service-manager respawn
+// never happened) from triggering rollback hours later when the user
+// finally restarts. If the marker is older than the window AND no
 // install/installed transition has been recorded, treat as abandoned
 // and clear it.
 type State struct {

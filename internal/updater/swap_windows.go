@@ -70,9 +70,7 @@ func swapBinary(dst, newBinary, backupExt string) error {
 				// boot. Better to surface a clear "Install completed
 				// but service didn't restart cleanly" hint than fail
 				// the whole install on a transient SCM hiccup.
-				fmt.Fprintf(os.Stderr,
-					"updater: SCM service started fine on next boot, but immediate restart failed: %v\n",
-					err)
+				logger.Warn("post-swap service restart failed; the new binary will load on next boot via SCM auto-start", "err", err)
 			}
 			stoppedHandle.svc.Close()
 			stoppedHandle.scm.Disconnect()
@@ -90,6 +88,18 @@ func swapBinary(dst, newBinary, backupExt string) error {
 	// MOVEFILE_REPLACE_EXISTING, so a stale .bak is silently
 	// overwritten. Wrap each step's error so the operator can tell
 	// which side of the swap failed.
+	//
+	// Note on B35 (the swap_unix.go "hardlink dst→bak, then rename over
+	// dst" fix that keeps dst present throughout): it deliberately does
+	// NOT apply here. Windows lets you rename a running/locked .exe out of
+	// the way (the trick above) but refuses to REPLACE it in place —
+	// MoveFileEx over a mapped, running image fails with a sharing
+	// violation. So the running dst MUST be vacated to bak first, then the
+	// new binary placed at the now-empty dst; the tiny no-file window
+	// between the two renames is structurally unavoidable on this OS.
+	// NTFS metadata journaling ($LogFile) keeps each individual rename
+	// crash-consistent, and the boot-time rollback marker + SCM restart
+	// recover the rare crash-in-window case.
 	if err := os.Rename(dst, bak); err != nil {
 		return fmt.Errorf("rename %s -> %s: %w", dst, bak, err)
 	}
@@ -181,6 +191,18 @@ func stopServiceIfRunning() (*scmStopHandle, error) {
 			return nil, fmt.Errorf("send stop: %w", err)
 		}
 		if werr := waitServiceStopped(s, scmStopWait); werr != nil {
+			// We successfully SENT the stop but the service didn't reach
+			// Stopped within the budget. swapBinary treats this returned
+			// error as fatal and aborts the install BEFORE the rename —
+			// but the stop is already in flight, so returning without a
+			// restart would leave the bridge offline until a manual
+			// `sc start` / reboot (B34). WE initiated the stop, so we own
+			// bringing it back: best-effort Start before surfacing werr.
+			// A service still in StopPending may refuse Start; that's the
+			// best we can do, and werr (the real failure) still surfaces.
+			if serr := s.Start(); serr != nil {
+				logger.Error("service stop timed out and the compensating restart also failed; a manual `sc start` may be needed", "err", serr)
+			}
 			s.Close()
 			m.Disconnect()
 			return nil, werr
@@ -222,9 +244,7 @@ func RollbackBinary(dst, backupExt string) error {
 	if stoppedHandle != nil {
 		defer func() {
 			if err := stoppedHandle.svc.Start(); err != nil {
-				fmt.Fprintf(os.Stderr,
-					"updater: post-rollback service restart failed (will start on next boot): %v\n",
-					err)
+				logger.Warn("post-rollback service restart failed; will start on next boot", "err", err)
 			}
 			stoppedHandle.svc.Close()
 			stoppedHandle.scm.Disconnect()
