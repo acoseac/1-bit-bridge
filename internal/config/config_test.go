@@ -1136,3 +1136,196 @@ func TestTailscaleEffectiveMode(t *testing.T) {
 		}
 	}
 }
+
+// mkLoopbackConfig returns a minimal fully-valid loopback Config so the
+// validation-hardening tests below can mutate one field and assert on the
+// verdict without every other check tripping first.
+func mkLoopbackConfig(t *testing.T) *Config {
+	t.Helper()
+	return &Config{
+		LibraryRoots:    []string{t.TempDir()},
+		ListenAddress:   ":7788",
+		AdminAddress:    "127.0.0.1:7789",
+		ScanIntervalSec: 3600,
+	}
+}
+
+// TestValidateScanIntervalUpperBound pins B37: a huge scanIntervalSec is
+// REJECTED by Validate rather than reaching scanner.RunPeriodic, where
+// time.Duration(n)*time.Second overflows int64 into a negative Duration and
+// panics time.NewTicker at startup.
+func TestValidateScanIntervalUpperBound(t *testing.T) {
+	cases := []struct {
+		name    string
+		secs    int
+		wantErr bool
+	}{
+		{"typical", 3600, false},
+		{"one-year-ceiling-accepted", maxIntervalSeconds, false},
+		{"just-over-ceiling-rejected", maxIntervalSeconds + 1, true},
+		{"overflow-huge-rejected", 1 << 40, true}, // *time.Second overflows int64 → negative → NewTicker panic
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := mkLoopbackConfig(t)
+			cfg.ScanIntervalSec = tc.secs
+			err := cfg.Validate()
+			if tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "scanIntervalSec") {
+					t.Fatalf("secs=%d: want scanIntervalSec error, got %v", tc.secs, err)
+				}
+			} else if err != nil {
+				t.Fatalf("secs=%d: want nil, got %v", tc.secs, err)
+			}
+		})
+	}
+}
+
+// TestValidateAtlasMetaTTLUpperBound pins the B37 HOUR-unit ceiling — a units
+// slip (capping hour fields at the seconds ceiling) would still overflow.
+func TestValidateAtlasMetaTTLUpperBound(t *testing.T) {
+	cfg := mkLoopbackConfig(t)
+	cfg.Atlas.MetaTTLHours = maxIntervalHours + 1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "metaTtlHours") {
+		t.Fatalf("over-ceiling: want metaTtlHours error, got %v", err)
+	}
+	cfg.Atlas.MetaTTLHours = maxIntervalHours // exactly one year is fine
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("ceiling should pass, got %v", err)
+	}
+	cfg.Atlas.MetaTTLHours = 0 // 0 = "use the default"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("zero (default) should pass, got %v", err)
+	}
+}
+
+// TestValidatePort pins B39's port numericness/range check in isolation.
+func TestValidatePort(t *testing.T) {
+	cases := []struct {
+		port    string
+		wantErr bool
+	}{
+		{"", false},  // empty: the caller's own shape check owns it
+		{"0", false}, // 0 = OS-assigned ephemeral port (documented mode)
+		{"1", false},
+		{"7788", false},
+		{"65535", false},
+		{"65536", true}, // above range
+		{"99999", true}, // above range
+		{"abc", true},   // non-numeric
+		{"-1", true},    // parses but negative
+	}
+	for _, tc := range cases {
+		if err := validatePort(tc.port); (err != nil) != tc.wantErr {
+			t.Errorf("validatePort(%q) err=%v, wantErr=%v", tc.port, err, tc.wantErr)
+		}
+	}
+}
+
+// TestValidateRejectsBogusPort pins B39 end-to-end: a port net.SplitHostPort
+// accepts but net.Listen would reject is caught at load time on both the
+// listen and admin binds.
+func TestValidateRejectsBogusPort(t *testing.T) {
+	cases := []struct {
+		name    string
+		mutate  func(*Config)
+		wantSub string
+	}{
+		{"listen-out-of-range", func(c *Config) { c.ListenAddress = ":99999" }, "listenAddress"},
+		{"listen-non-numeric", func(c *Config) { c.ListenAddress = ":abc" }, "listenAddress"},
+		{"admin-non-numeric", func(c *Config) { c.AdminAddress = "127.0.0.1:abc" }, "adminAddress"},
+		{"admin-out-of-range", func(c *Config) { c.AdminAddress = "127.0.0.1:70000" }, "adminAddress"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := mkLoopbackConfig(t)
+			tc.mutate(cfg)
+			err := cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.wantSub) {
+				t.Fatalf("want %q error, got %v", tc.wantSub, err)
+			}
+		})
+	}
+	// A valid numeric port is accepted (the default base already binds :7788
+	// / :7789, so a clean Validate confirms the check doesn't over-reject).
+	if err := mkLoopbackConfig(t).Validate(); err != nil {
+		t.Fatalf("valid ports should pass, got %v", err)
+	}
+}
+
+// TestValidateWorkerCounts pins Q40: negative worker/queue counts are rejected
+// loudly (zero stays the "use the default" sentinel).
+func TestValidateWorkerCounts(t *testing.T) {
+	cases := []struct {
+		name    string
+		mutate  func(*Config)
+		wantSub string // "" = expect success
+	}{
+		{"upscale-workers-negative", func(c *Config) { c.Upscale.Workers = -1 }, "upscale.workers"},
+		{"upscale-queuecap-negative", func(c *Config) { c.Upscale.QueueCap = -1 }, "upscale.queueCap"},
+		{"analysis-workers-negative", func(c *Config) { c.Analysis.Workers = -1 }, "analysis.workers"},
+		{"analysis-queuecap-negative", func(c *Config) { c.Analysis.QueueCap = -1 }, "analysis.queueCap"},
+		{"zero-uses-default", func(c *Config) { c.Upscale.Workers = 0; c.Analysis.QueueCap = 0 }, ""},
+		{"positive-ok", func(c *Config) {
+			c.Upscale.Workers = 4
+			c.Upscale.QueueCap = 100
+			c.Analysis.Workers = 2
+			c.Analysis.QueueCap = 100
+		}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := mkLoopbackConfig(t)
+			tc.mutate(cfg)
+			err := cfg.Validate()
+			if tc.wantSub == "" {
+				if err != nil {
+					t.Fatalf("want nil, got %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantSub) {
+				t.Fatalf("want %q error, got %v", tc.wantSub, err)
+			}
+		})
+	}
+}
+
+// TestValidateDLNAListenAddress pins B38: the DLNA bind is validated when the
+// feature is on (and the default :7790 passes).
+func TestValidateDLNAListenAddress(t *testing.T) {
+	cfg := mkLoopbackConfig(t)
+	cfg.DLNA.Enabled = true
+	cfg.DLNA.ListenAddress = ":abc"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "dlna.listenAddress") {
+		t.Fatalf("bad dlna bind: want dlna.listenAddress error, got %v", err)
+	}
+	cfg.DLNA.ListenAddress = "" // EffectiveDLNAListenAddress → default :7790
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("DLNA on + default bind should pass, got %v", err)
+	}
+}
+
+// TestResolvePathCleansAbsolute pins Q39: an absolute path with a `..` segment
+// is Cleaned (not stored verbatim), while an empty value stays empty rather
+// than collapsing to ".".
+func TestResolvePathCleansAbsolute(t *testing.T) {
+	if got := resolvePath("/base", ""); got != "" {
+		t.Errorf("resolvePath(_, %q) = %q, want empty", "", got)
+	}
+	// Build an absolute path with an un-cleaned ".." segment by concatenation
+	// (filepath.Join would pre-clean it and make the assertion trivial).
+	sep := string(filepath.Separator)
+	absDirty := t.TempDir() + sep + ".." + sep + "private"
+	cleaned := filepath.Clean(absDirty)
+	if cleaned == absDirty {
+		t.Fatalf("test setup: %q was already clean", absDirty)
+	}
+	if got := resolvePath("", absDirty); got != cleaned {
+		t.Errorf("resolvePath(abs) = %q, want %q", got, cleaned)
+	}
+	rel := filepath.Join("sub", "x")
+	if got, want := resolvePath("/base", rel), filepath.Join("/base", rel); got != want {
+		t.Errorf("resolvePath(rel) = %q, want %q", got, want)
+	}
+}
