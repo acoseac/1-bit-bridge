@@ -2,6 +2,7 @@ package transcode
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -63,9 +64,9 @@ func TestDropInflightRemovesMatchingEntries(t *testing.T) {
 	if err := p.Enqueue(specA); err != nil {
 		t.Fatalf("re-Enqueue A after drop: %v", err)
 	}
-	// Re-enqueue specB MUST no-op (still in inflight).
-	if err := p.Enqueue(specB); err != nil {
-		t.Fatalf("re-Enqueue B (dedup): %v", err)
+	// Re-enqueue specB MUST dedup (still in inflight) → ErrDuplicateInflight.
+	if err := p.Enqueue(specB); !errors.Is(err, ErrDuplicateInflight) {
+		t.Fatalf("re-Enqueue B (dedup): got %v, want ErrDuplicateInflight", err)
 	}
 	stats := p.Stats()
 	// 3 enqueues total: original A, original B, re-A after drop.

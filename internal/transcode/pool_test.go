@@ -72,10 +72,11 @@ func TestPoolEnqueueDeduplicates(t *testing.T) {
 		t.Fatal("runner stub never invoked — pool dispatch broken?")
 	}
 
-	// Second enqueue with identical (source, variant) is a silent no-op
-	// while the first is still in-flight — returns nil, doesn't take a slot.
-	if err := p.Enqueue(spec); err != nil {
-		t.Fatalf("dedup Enqueue: %v", err)
+	// Second enqueue with identical (source, variant) while the first is still
+	// in-flight is deduped — returns ErrDuplicateInflight (distinct from nil so a
+	// batch Coordinator can drop the path), and doesn't take a slot.
+	if err := p.Enqueue(spec); !errors.Is(err, ErrDuplicateInflight) {
+		t.Fatalf("dedup Enqueue: got %v, want ErrDuplicateInflight", err)
 	}
 	stats := p.Stats()
 	if stats.Enqueued != 1 {
