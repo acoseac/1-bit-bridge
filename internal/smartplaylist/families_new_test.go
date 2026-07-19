@@ -304,12 +304,11 @@ func TestSeedFromISOWeek_StableAcrossCalls(t *testing.T) {
 
 // --- Daily Mix defensive bounds ---
 
-// TestBuildDailyMix_ClampsDiscoveryRatio guards the background regeneration pass
-// against an out-of-range DailyDiscoveryRatio. With ratio >1 the discovery count
-// would exceed target (→ nFam negative → familiar[:nFam] panic); with ratio <0 it
-// would go negative (→ discovery[:nDisc] panic). The ratio is a hardcoded 0.30
-// today, but the clamp must hold if it ever becomes operator-configurable.
-func TestBuildDailyMix_ClampsDiscoveryRatio(t *testing.T) {
+// dailyMixInputs builds a fixture with 12 familiar + 20 unplayed discovery
+// candidates (familiar are marked played → excluded from the discovery pool)
+// for the buildDailyMix bounds tests. Shared so the ratio-clamp and empty-
+// target tests don't duplicate the setup.
+func dailyMixInputs() Inputs {
 	var famPaths, discPaths []string
 	for i := 0; i < 12; i++ {
 		famPaths = append(famPaths, fmt.Sprintf("/fam%02d.flac", i))
@@ -322,16 +321,25 @@ func TestBuildDailyMix_ClampsDiscoveryRatio(t *testing.T) {
 	for _, p := range discPaths {
 		analyzed = append(analyzed, feats[p])
 	}
-	played := map[string]bool{} // familiar are "played" → excluded from the discovery pool
+	played := map[string]bool{}
 	for _, p := range famPaths {
 		played[p] = true
 	}
-	base := Inputs{
+	return Inputs{
 		Familiar:     makePlayStats(famPaths),
 		AnalyzedPool: analyzed,
 		PlayedPaths:  played,
 		Features:     feats,
 	}
+}
+
+// TestBuildDailyMix_ClampsDiscoveryRatio guards the background regeneration pass
+// against an out-of-range DailyDiscoveryRatio. With ratio >1 the discovery count
+// would exceed target (→ nFam negative → familiar[:nFam] panic); with ratio <0 it
+// would go negative (→ discovery[:nDisc] panic). The ratio is a hardcoded 0.30
+// today, but the clamp must hold if it ever becomes operator-configurable.
+func TestBuildDailyMix_ClampsDiscoveryRatio(t *testing.T) {
+	base := dailyMixInputs()
 
 	// 1.5 / 2.0 exercise the >target overflow (nFam<0); -0.5 the <0 underflow. Each
 	// must produce a bounded, panic-free mix.
@@ -340,21 +348,24 @@ func TestBuildDailyMix_ClampsDiscoveryRatio(t *testing.T) {
 			opts := Options{AnalysisEnabled: true, MaxItems: 10, MinDailyFamiliar: 2, DailyDiscoveryRatio: ratio}
 			got, ok := buildDailyMix(base, opts) // must not panic
 			if !ok {
-				t.Fatalf("Daily Mix should fire (familiar=%d ≥ MinDailyFamiliar)", len(famPaths))
+				t.Fatal("Daily Mix should fire (familiar ≥ MinDailyFamiliar)")
 			}
 			if len(got.Items) == 0 || len(got.Items) > opts.MaxItems {
 				t.Fatalf("items=%d, want 1..=%d", len(got.Items), opts.MaxItems)
 			}
 		})
 	}
+}
 
-	// A zero or negative MaxItems clamps target to 0 → nFam = nDisc = 0 → an
-	// EMPTY mix. buildDailyMix must NOT surface a visible-but-empty "Daily Mix"
-	// shelf on iOS (B45): it returns (zero, false), matching every sibling
-	// family's `len < min` guard. Still panic-free — the target clamp guards
-	// the familiar[:nFam] / discovery[:nDisc] slicing regardless.
+// TestBuildDailyMix_EmptyTargetDropsFamily pins B45: a zero or negative MaxItems
+// clamps target to 0 → nFam = nDisc = 0 → an EMPTY mix. buildDailyMix must NOT
+// surface a visible-but-empty "Daily Mix" shelf on iOS; it returns (zero, false),
+// matching every sibling family's `len < min` guard. Still panic-free — the
+// target clamp guards the familiar[:nFam] / discovery[:nDisc] slicing regardless.
+func TestBuildDailyMix_EmptyTargetDropsFamily(t *testing.T) {
+	base := dailyMixInputs()
 	for _, maxItems := range []int{0, -5} {
-		t.Run(fmt.Sprintf("emptyTarget/maxItems=%d", maxItems), func(t *testing.T) {
+		t.Run(fmt.Sprintf("maxItems=%d", maxItems), func(t *testing.T) {
 			opts := Options{AnalysisEnabled: true, MaxItems: maxItems, MinDailyFamiliar: 2, DailyDiscoveryRatio: 0.3}
 			got, ok := buildDailyMix(base, opts) // must not panic
 			if ok {

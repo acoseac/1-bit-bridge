@@ -217,6 +217,16 @@ type Request struct {
 	// revoke can't pin the row in memory forever. (CodeRabbit on
 	// PR #103, second-pass.)
 	revokeAttempts int
+
+	// delivered records whether RawToken has been returned to the client
+	// via at least one authorized Poll (set in Poll under s.mu). Additive
+	// to the read-many delivery contract — it does NOT change what Poll
+	// returns; it only lets Delete tell a genuine acknowledgment (polled →
+	// persisted → DELETEd) apart from a client that DELETEs WITHOUT ever
+	// polling (which orphans the minted token). Gates the B4 orphan-token
+	// log so the normal happy-path ack stays silent. Internal-only; never
+	// serialized to the wire.
+	delivered bool
 }
 
 // Options configures a Store. Zero values fall through to package defaults.
@@ -480,6 +490,10 @@ func (s *Store) Poll(id, pollSecret string) (PollResult, error) {
 	if req.State == StateApproved {
 		res.Token = req.RawToken
 		res.TokenID = req.TokenID
+		// Record that the token reached the client at least once. Read-many
+		// contract is unchanged (we still return it on every authorized poll);
+		// this only feeds Delete's orphan-vs-ack gate below.
+		req.delivered = true
 	}
 	return res, nil
 }
@@ -515,20 +529,19 @@ func (s *Store) Delete(id, pollSecret string) error {
 	if req.State == StateExpired && req.TokenID != "" {
 		return ErrNotFound
 	}
-	// An Approved row still holding a minted TokenID is being dropped by the
-	// client's DELETE. We deliberately DO NOT revoke here: this is the normal
-	// acknowledgment flow (iOS polled, persisted the token to its Keychain,
-	// and is now confirming receipt), and the minted token is the very bearer
-	// the device authenticates with — revoking it would 401 every subsequent
-	// request (pinned by TestDeleteAfterApprovePreventsRevoke; the TTL+grace
-	// sweep in onTimer is the ONLY sanctioned revoke path for a genuinely-
-	// undelivered token). But the Store cannot distinguish a real ack from a
-	// client that DELETEs WITHOUT ever polling — which orphans a still-valid,
-	// never-delivered token in auth.Store. Log the dropped TokenID so the
-	// operator has a breadcrumb: if a device's pairing never actually took,
-	// `bridge token revoke <tokenID>` reconciles the orphan. (B4)
-	if req.State == StateApproved && req.TokenID != "" {
-		logger.Info("pairing row deleted by client while approved; minted token left valid (revoke manually if the device never persisted it)",
+	// An Approved row holding a minted TokenID that was NEVER delivered via
+	// Poll is being dropped by the client's DELETE — the token was minted but
+	// the device never received it (a DELETE without any prior poll), so it's
+	// an orphan: still valid in auth.Store yet held by no one. Log the TokenID
+	// as an operator breadcrumb (reconcile via `bridge token revoke
+	// <tokenID>`). We deliberately DO NOT revoke here — the TTL+grace sweep in
+	// onTimer is the only sanctioned revoke path. The NORMAL acknowledgment
+	// flow (poll → delivered → DELETE) is intentionally SILENT: `delivered`
+	// gates this branch out, and revoking there would 401 the device whose
+	// just-persisted token IS the minted one (TestDeleteAfterApprovePreventsRevoke).
+	// (B4)
+	if req.State == StateApproved && req.TokenID != "" && !req.delivered {
+		logger.Info("approved pairing deleted before its token was ever polled; minted token orphaned",
 			"id", id, "tokenID", req.TokenID)
 	}
 	if req.expiryTimer != nil {
