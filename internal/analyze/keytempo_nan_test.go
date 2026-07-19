@@ -12,7 +12,10 @@ import (
 func TestKeyTempo_NonFiniteInputYieldsNoBogusKey(t *testing.T) {
 	for _, bad := range []float32{float32(math.NaN()), float32(math.Inf(1)), float32(math.Inf(-1))} {
 		kt := newKeyTempoAnalyzer()
-		for i := 0; i < (minWindowsForKey+50)*stftWindow; i++ {
+		// STFT consumes stftWindow samples for the first window and stftHop for
+		// each subsequent one, so stftWindow + N*stftHop yields ~N windows. Using
+		// N*stftWindow processed ~8x more windows (FFTs) than needed (Gemini #516).
+		for i := 0; i < stftWindow+(minWindowsForKey+50)*stftHop; i++ {
 			kt.add(bad)
 		}
 		if kt.windows < minWindowsForKey {
