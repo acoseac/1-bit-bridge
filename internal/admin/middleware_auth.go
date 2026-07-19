@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 
 	"github.com/acoseac/1-bit-bridge/internal/adminauth"
@@ -65,7 +66,11 @@ func (s *Server) sessionMiddleware(next http.Handler) http.Handler {
 			http.Error(w, "admin refused: auth not configured", http.StatusServiceUnavailable)
 			return
 		}
-		if isAuthBypassPath(r.URL.Path) {
+		// Normalize before the bypass check so a crafted path like
+		// /favicon/../api/settings can't prefix-match a bypass entry and skip
+		// the session gate. A path that changes under path.Clean carried
+		// redundant/traversal segments and never bypasses (falls through to auth).
+		if cp := path.Clean(r.URL.Path); cp == r.URL.Path && isAuthBypassPath(cp) {
 			next.ServeHTTP(w, r)
 			return
 		}

@@ -134,6 +134,18 @@ func (s *Server) apiVariantsDirPatch(w http.ResponseWriter, r *http.Request) {
 	// (Upscale.OptimizeEnabled is *bool) with the live snapshot.
 	s.mu.Lock()
 	next := config.Clone(s.deps.CfgHolder.Load())
+	// Re-validate against THIS locked snapshot's roots: a concurrent apiRootsAdd
+	// could have committed a root containing req.Path between the pre-lock check
+	// and here, and config.Load's validateVariantsDir would then reject the
+	// persisted value at next boot (the "UI said fine / boot rejects" hazard).
+	// Mirror the pre-lock guard's empty-path carve-out.
+	if req.Path != "" {
+		if err := assertNotUnderLibraryRoots(req.Path, next.LibraryRoots); err != nil {
+			s.mu.Unlock()
+			writeError(w, http.StatusBadRequest, "under-library-root", err.Error())
+			return
+		}
+	}
 	next.Upscale.VariantsDir = req.Path
 	if err := next.Save(s.deps.CfgPath); err != nil {
 		s.mu.Unlock()
