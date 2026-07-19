@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1337,5 +1338,135 @@ func TestEnricherRespectsContextCancelMidPacing(t *testing.T) {
 	// PR #140).
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("got (%q, %v), want errors.Is context.Canceled", rg, err)
+	}
+}
+
+// TestResolveReleaseGroupMBIDNegativeCachesPersistentErrors pins B6: EVERY
+// persistent (non-transient) release-group lookup error must be
+// negative-cached (as "") so sibling tracks on the same release — sharing
+// releaseMBID via the album cache — don't each re-issue the identical
+// guaranteed-fail MB query, every one paced at MBMinInterval. Pre-fix the
+// resolver returned on ANY error without caching; the first fix narrowly
+// cached only 404 (CodeRabbit Major on PR #520 flagged that JSON-decode /
+// schema-drift / persistent-4xx errors still slipped through). The
+// transient boundary is the load-bearing negative case: a 5xx must NOT be
+// cached so the next enrichment pass retries once MB recovers — mirroring
+// the transient-vs-persistent split SearchRelease makes in enrichOne.
+func TestResolveReleaseGroupMBIDNegativeCachesPersistentErrors(t *testing.T) {
+	cases := []struct {
+		name       string
+		status     int
+		body       string
+		persistent bool // true = should be negative-cached (sibling served from cache)
+	}{
+		{"404 not found", http.StatusNotFound, "", true},
+		{"400 persistent 4xx", http.StatusBadRequest, `{"error":"bad request"}`, true},
+		{"malformed JSON decode error", http.StatusOK, `{not valid json`, true},
+		{"500 transient", http.StatusInternalServerError, `{"error":"boom"}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var mbCalls atomic.Int32
+			mbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mbCalls.Add(1)
+				if tc.status != http.StatusOK {
+					w.WriteHeader(tc.status)
+				}
+				if tc.body != "" {
+					io.WriteString(w, tc.body)
+				}
+			}))
+			defer mbSrv.Close()
+
+			dir := t.TempDir()
+			store, err := manifest.OpenStore(filepath.Join(dir, "bridge.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+
+			e := NewEnricher(
+				store,
+				NewMusicBrainzClient(mbSrv.URL, "test", nil),
+				NewCoverArtClient("http://unused", "test", nil),
+				nil,
+				filepath.Join(dir, "artwork"),
+			)
+			e.MBMinInterval = 0 // no pacing — this test is about caching, not timing
+
+			const releaseMBID = "11111111-1111-4111-8111-111111111111"
+
+			// First lookup surfaces the error either way (rg empty, err set).
+			if rg, err := e.resolveReleaseGroupMBID(context.Background(), releaseMBID, ""); rg != "" || err == nil {
+				t.Fatalf("first lookup = (%q, %v), want (\"\", non-nil error)", rg, err)
+			}
+			if got := mbCalls.Load(); got != 1 {
+				t.Fatalf("MB called %d times on first lookup, want 1", got)
+			}
+
+			// Second lookup for the same release.
+			rg, err := e.resolveReleaseGroupMBID(context.Background(), releaseMBID, "")
+			if tc.persistent {
+				// Served from the negative cache: no second MB round-trip,
+				// no error (the "" hit means "no release-group association").
+				if rg != "" || err != nil {
+					t.Fatalf("cached lookup = (%q, %v), want (\"\", nil)", rg, err)
+				}
+				if got := mbCalls.Load(); got != 1 {
+					t.Errorf("MB called %d times after persistent-error negative cache; want 1", got)
+				}
+			} else {
+				// Transient: NOT cached — the sibling re-queries and re-errors
+				// so a later pass can succeed once MB recovers.
+				if err == nil {
+					t.Fatalf("transient error was cached: cached lookup = (%q, nil), want a re-issued error", rg)
+				}
+				if got := mbCalls.Load(); got != 2 {
+					t.Errorf("MB called %d times for transient error; want 2 (must re-query, not cache)", got)
+				}
+			}
+		})
+	}
+}
+
+// TestMusicBrainzGetReusesConnectionAfterSuccess pins Q14: the success path
+// must drain the response body past the decoded JSON document so net/http
+// returns the keep-alive HTTP/1.1 connection to the idle pool.
+// json.Decoder.Decode stops at the closing token and leaves the trailing
+// bytes unread; without an explicit drain the deferred Body.Close drops the
+// connection, forcing a re-dial on every enrichment call against the same
+// handful of API hosts. We assert reuse by counting server-side StateNew
+// transitions across two sequential SearchRelease calls — exactly one
+// connection should be opened.
+func TestMusicBrainzGetReusesConnectionAfterSuccess(t *testing.T) {
+	var newConns atomic.Int32
+	// Trailing whitespace after the JSON document is JSON-insignificant
+	// (Decode ignores it) but leaves bytes unread in the body — the exact
+	// remainder the drain must consume for the connection to be reusable.
+	// 1 KiB is well past any tiny auto-drain net/http might do yet well
+	// within drainBody's 64 KiB cap, so the drain reaches EOF and the
+	// connection is returned to the pool.
+	body := `{"releases":[{"id":"11111111-1111-4111-8111-111111111111","score":100,"title":"Blue Train","artist-credit":[{"name":"John Coltrane"}]}]}` + strings.Repeat(" ", 1024)
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, body)
+	}))
+	srv.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			newConns.Add(1)
+		}
+	}
+	srv.Start()
+	defer srv.Close()
+
+	// A dedicated keep-alive transport isolates the idle-conn pool from the
+	// package-global sharedHTTPTransport so the count is deterministic.
+	c := NewMusicBrainzClient(srv.URL, "test", &http.Client{Transport: &http.Transport{}})
+	for i := 0; i < 2; i++ {
+		if _, err := c.SearchRelease(context.Background(), "John Coltrane", "Blue Train"); err != nil {
+			t.Fatalf("SearchRelease #%d: %v", i+1, err)
+		}
+	}
+	if got := newConns.Load(); got != 1 {
+		t.Errorf("server opened %d connections across 2 calls; want 1 (success body not drained → keep-alive dropped)", got)
 	}
 }
