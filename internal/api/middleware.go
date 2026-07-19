@@ -154,6 +154,14 @@ func (s *statusWriter) Flush() {
 	}
 }
 
+// FlushError delegates the flush to the wrapped writer and surfaces its error
+// (e.g. a dead SSE client). Without it, http.NewResponseController(sw).Flush()
+// matches the void Flush() above at this level and always returns nil — making
+// the SSE handlers' `if err := rc.Flush(); err != nil` disconnect check dead.
+func (s *statusWriter) FlushError() error {
+	return http.NewResponseController(s.ResponseWriter).Flush()
+}
+
 // Unwrap returns the wrapped ResponseWriter so the stdlib's
 // http.ResponseController and downstream type assertions can reach the
 // underlying writer (Go 1.20+).

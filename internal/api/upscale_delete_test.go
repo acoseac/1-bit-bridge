@@ -275,8 +275,11 @@ func TestUpscaleDelete_pathHappyPath(t *testing.T) {
 	if dr.DeletedCount != 1 {
 		t.Errorf("deletedCount: got %d, want 1", dr.DeletedCount)
 	}
-	if dr.FreedBytes != 100 {
-		t.Errorf("freedBytes: got %d, want 100", dr.FreedBytes)
+	// The sidecar never existed on disk, so nothing was actually reclaimed:
+	// FreedBytes counts only bytes truly unlinked (B15), while DeletedCount
+	// still reflects the reconciled DB row.
+	if dr.FreedBytes != 0 {
+		t.Errorf("freedBytes: got %d, want 0 (sidecar was already absent)", dr.FreedBytes)
 	}
 	if len(dr.DeletedPaths) != 1 || dr.DeletedPaths[0] != "Music/Album/01.flac" {
 		t.Errorf("deletedPaths: got %v, want [Music/Album/01.flac]", dr.DeletedPaths)
