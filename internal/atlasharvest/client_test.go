@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -140,6 +141,45 @@ func TestClientSubmitAndPoll(t *testing.T) {
 	}
 	if c := state.Snapshot().ResultCursor; c != 5 {
 		t.Errorf("cursor = %d, want 5", c)
+	}
+}
+
+// TestPollResultsAcceptsLargeResultsPage pins Q46: a results page whose total
+// size exceeds the general 4 MiB decode cap (one artist with a very long bio)
+// must still decode — the results endpoint uses resultsDecodeMaxBytes. Pre-fix
+// the shared 4 MiB cap truncated the body, Decode failed with unexpected-EOF,
+// pollResults returned the error, and the cursor never advanced (every tick
+// re-requested the same oversized page → permanent stall).
+func TestPollResultsAcceptsLargeResultsPage(t *testing.T) {
+	bigBio := strings.Repeat("x", 5<<20) // 5 MiB — over the 4 MiB default, under the 32 MiB results cap
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/atlas/harvest/results" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		// Short page (1 < limit) so pollResults drains in one iteration.
+		_ = json.NewEncoder(w).Encode(resultsResponse{
+			Results:    []resultItem{{MBID: "a1", Found: true, Bio: bigBio}},
+			NextCursor: 1,
+		})
+	}))
+	defer srv.Close()
+
+	state := mustOpenState(t, filepath.Join(t.TempDir(), "s.json"))
+	if err := state.SetCredential("test-token", srv.URL, time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	sink := &fakeSink{}
+	c := &Client{State: state, MBIDs: &fakeMBIDs{}, Sink: sink}
+
+	if err := c.pollResults(context.Background()); err != nil {
+		t.Fatalf("pollResults with a >4 MiB page: %v", err)
+	}
+	if len(sink.stored) != 1 || len(sink.stored[0].Bio) != len(bigBio) {
+		t.Fatalf("large bio not decoded intact: stored %d items", len(sink.stored))
+	}
+	if c := state.Snapshot().ResultCursor; c != 1 {
+		t.Errorf("cursor = %d, want 1 (advanced)", c)
 	}
 }
 

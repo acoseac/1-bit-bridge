@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -21,6 +22,49 @@ func wrapBrowse(didl string, numberReturned, totalMatches int) []byte {
 		fmt.Sprintf(`<NumberReturned>%d</NumberReturned><TotalMatches>%d</TotalMatches><UpdateID>1</UpdateID>`,
 			numberReturned, totalMatches) +
 		`</u:BrowseResponse></s:Body></s:Envelope>`)
+}
+
+// TestVerifyXMLDepth pins B16: the iterative depth pre-scan accepts input up
+// to maxXMLDepth and rejects anything deeper BEFORE the recursive decode runs.
+// A malformed payload is NOT this pass's concern — it returns nil so the real
+// decoder surfaces the canonical parse error.
+func TestVerifyXMLDepth(t *testing.T) {
+	nested := func(depth int) string {
+		return strings.Repeat("<a>", depth) + strings.Repeat("</a>", depth)
+	}
+	if err := verifyXMLDepth(strings.NewReader(nested(10)), maxXMLDepth); err != nil {
+		t.Fatalf("shallow doc: %v", err)
+	}
+	// depth == maxXMLDepth is accepted (only "exceeds" rejects).
+	if err := verifyXMLDepth(strings.NewReader(nested(maxXMLDepth)), maxXMLDepth); err != nil {
+		t.Fatalf("at-limit doc: %v", err)
+	}
+	if err := verifyXMLDepth(strings.NewReader(nested(maxXMLDepth+1)), maxXMLDepth); !errors.Is(err, ErrXMLTooDeep) {
+		t.Fatalf("over-limit doc: got %v, want ErrXMLTooDeep", err)
+	}
+	// Malformed input passes through (real decode reports it).
+	if err := verifyXMLDepth(strings.NewReader("<a><b></a>"), maxXMLDepth); err != nil {
+		t.Fatalf("malformed input must not be rejected here: %v", err)
+	}
+}
+
+// TestParseDIDL_RejectsDeeplyNested pins the depth guard end-to-end through the
+// DIDL parser: a hostile payload nested past the cap is refused with
+// ErrXMLTooDeep rather than driving unbounded recursion in the decoder.
+func TestParseDIDL_RejectsDeeplyNested(t *testing.T) {
+	deep := "<DIDL-Lite>" + strings.Repeat("<c>", maxXMLDepth) + strings.Repeat("</c>", maxXMLDepth) + "</DIDL-Lite>"
+	if _, err := parseDIDL(deep); !errors.Is(err, ErrXMLTooDeep) {
+		t.Fatalf("deeply-nested DIDL: got %v, want ErrXMLTooDeep", err)
+	}
+}
+
+// TestParseBrowseResponse_RejectsDeeplyNested pins the same guard on the SOAP
+// envelope decode path.
+func TestParseBrowseResponse_RejectsDeeplyNested(t *testing.T) {
+	deep := "<Envelope><Body>" + strings.Repeat("<x>", maxXMLDepth) + strings.Repeat("</x>", maxXMLDepth) + "</Body></Envelope>"
+	if _, err := ParseBrowseResponse([]byte(deep)); !errors.Is(err, ErrXMLTooDeep) {
+		t.Fatalf("deeply-nested SOAP: got %v, want ErrXMLTooDeep", err)
+	}
 }
 
 func TestParseDIDL_RootContainers(t *testing.T) {

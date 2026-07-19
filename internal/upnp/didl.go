@@ -1,9 +1,11 @@
 package upnp
 
 import (
+	"bytes"
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 )
@@ -18,6 +20,48 @@ var ErrSOAPFault = errors.New("upnp: SOAP fault in ContentDirectory response")
 // the Body has no recognizable response element — surface a broken server
 // loudly rather than masquerading it as an empty result.
 var ErrMissingResponseElement = errors.New("upnp: SOAP body has no recognizable response element")
+
+// ErrXMLTooDeep is returned when an untrusted XML payload's element nesting
+// exceeds maxXMLDepth — rejected before the recursive decode runs.
+var ErrXMLTooDeep = errors.New("upnp: XML nesting depth exceeds limit")
+
+// maxXMLDepth bounds the element nesting depth the untrusted DIDL-Lite + SOAP
+// envelope parsers accept. encoding/xml already self-limits recursion at its
+// own maxUnmarshalDepth (10000), but a payload nested that deep — reachable
+// within the 8 MiB body cap a hostile/compromised LAN media server could send
+// — still spikes the goroutine stack + CPU on the way to that limit. Real
+// ContentDirectory responses nest only a handful of levels
+// (Envelope>Body>Response>Result, then DIDL-Lite>container/item>res); a few
+// hundred is orders-of-magnitude headroom while bounding the worst case far
+// below the stdlib backstop.
+const maxXMLDepth = 256
+
+// verifyXMLDepth scans the token stream ITERATIVELY (xml.Decoder.Token never
+// recurses per nesting level, so this pass can't itself overflow) and rejects
+// input whose element nesting exceeds maxDepth BEFORE the recursive
+// xml.Unmarshal / Decoder.Decode runs. Well-formed input passes through
+// untouched, so downstream parse results are identical; a tokenizer error is
+// swallowed here (returns nil) so the real decoder surfaces its canonical
+// parse error rather than this pass masking it.
+func verifyXMLDepth(r io.Reader, maxDepth int) error {
+	dec := xml.NewDecoder(r)
+	depth := 0
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil // EOF or malformed — let the real decode produce the verdict
+		}
+		switch tok.(type) {
+		case xml.StartElement:
+			depth++
+			if depth > maxDepth {
+				return ErrXMLTooDeep
+			}
+		case xml.EndElement:
+			depth--
+		}
+	}
+}
 
 // Container is a <container> from a Browse result — a folder / Album /
 // Artist node. IDs are server-defined + opaque (position-based on
@@ -148,6 +192,13 @@ type didlRes struct {
 // title containing '&' — are un-escaped on the second pass, so the two
 // passes compose correctly.)
 func ParseBrowseResponse(body []byte) (BrowseResult, error) {
+	// Bound nesting depth before the recursive unmarshal (defense-in-depth
+	// against a hostile upstream — see verifyXMLDepth). The DIDL inside
+	// <Result> is entity-escaped here (scanned as CharData), so it's bounded
+	// separately by parseDIDL's own check after un-escaping.
+	if err := verifyXMLDepth(bytes.NewReader(body), maxXMLDepth); err != nil {
+		return BrowseResult{}, fmt.Errorf("upnp: parse SOAP envelope: %w", err)
+	}
 	var env soapBrowseEnvelope
 	if err := xml.Unmarshal(body, &env); err != nil {
 		return BrowseResult{}, fmt.Errorf("upnp: parse SOAP envelope: %w", err)
@@ -177,6 +228,11 @@ func ParseBrowseResponse(body []byte) (BrowseResult, error) {
 func parseDIDL(didl string) (BrowseResult, error) {
 	if strings.TrimSpace(didl) == "" {
 		return BrowseResult{Containers: []Container{}, Items: []Object{}}, nil
+	}
+	// Bound nesting depth before the recursive decode (defense-in-depth
+	// against a hostile upstream — see verifyXMLDepth).
+	if err := verifyXMLDepth(strings.NewReader(didl), maxXMLDepth); err != nil {
+		return BrowseResult{}, fmt.Errorf("upnp: parse DIDL-Lite: %w", err)
 	}
 	var doc didlLite
 	// Decode straight from the string via strings.NewReader to avoid a
@@ -231,6 +287,11 @@ func parseDIDL(didl string) (BrowseResult, error) {
 // response. Returned verbatim — callers compare against a stored value;
 // MiniDLNA may legitimately return "0".
 func parseSystemUpdateID(body []byte) (string, error) {
+	// Bound nesting depth before the recursive unmarshal (defense-in-depth
+	// against a hostile upstream — see verifyXMLDepth).
+	if err := verifyXMLDepth(bytes.NewReader(body), maxXMLDepth); err != nil {
+		return "", fmt.Errorf("upnp: parse GetSystemUpdateID: %w", err)
+	}
 	var env soapSystemUpdateIDEnvelope
 	if err := xml.Unmarshal(body, &env); err != nil {
 		return "", fmt.Errorf("upnp: parse GetSystemUpdateID: %w", err)

@@ -97,9 +97,17 @@ type Client struct {
 	// still record availability for the wire tag).
 	Booklets     BookletSink
 	BookletFiles BookletFileStore
-	HTTP         *http.Client
-	Log          *slog.Logger
-	Now          func() time.Time
+	// ScanInProgress reports whether a library (re)scan is currently running.
+	// Optional (nil = never in progress). Wired to manifest.Scanner.IsScanning
+	// in cmd/bridge so the booklet orphan GC (gcBooklets) is SKIPPED while a
+	// wipe+rescan (admin root add/remove) leaves DistinctAlbumReleaseMBIDs
+	// returning a NON-empty-but-partial universe — GC'ing against that would
+	// delete every filesystem album's booklet row + cached PDF, then re-fetch
+	// them next cycle (iOS booklet chips blink off/on). See gcBooklets.
+	ScanInProgress func() bool
+	HTTP           *http.Client
+	Log            *slog.Logger
+	Now            func() time.Time
 
 	// bookletPriority channel plumbing (lazily built; see bookletPriority).
 	bookletPriorityOnce sync.Once
@@ -225,7 +233,14 @@ func (c *Client) tickBooklets(ctx context.Context, st State) {
 			}
 		}
 	}
-	c.fetchBooklets(ctx)
+	// The fetch leg returns errUnauthorized when Atlas rejects the token on a
+	// PDF fetch — route it through handleErr so the credential is wiped, the
+	// same as the check leg above and the submit/poll legs. Pre-fix the fetch
+	// path swallowed the rejection, leaving a dead token in place until a later
+	// tick's poll happened to catch it.
+	if ferr := c.fetchBooklets(ctx); ferr != nil {
+		c.handleErr(ctx, "booklets_fetch", ferr)
+	}
 }
 
 const (
@@ -415,7 +430,7 @@ func (c *Client) pollResults(ctx context.Context) error {
 		q.Set("since", strconv.FormatInt(st.ResultCursor, 10))
 		q.Set("limit", strconv.Itoa(limit))
 		var resp resultsResponse
-		if err := c.getJSON(ctx, st, "/v1/atlas/harvest/results?"+q.Encode(), &resp); err != nil {
+		if err := c.getJSONCapped(ctx, st, "/v1/atlas/harvest/results?"+q.Encode(), &resp, resultsDecodeMaxBytes); err != nil {
 			return err
 		}
 		var pendingReleases []string
@@ -482,6 +497,22 @@ func (c *Client) pollResults(ctx context.Context) error {
 
 // --- HTTP helpers ---
 
+const (
+	// defaultDecodeMaxBytes caps most Atlas JSON responses (submit acks,
+	// booklet-check verdicts) — small, bounded shapes.
+	defaultDecodeMaxBytes = 4 << 20
+	// resultsDecodeMaxBytes caps the harvest RESULTS page specifically. A page
+	// carries up to resultsLimit (200) items, each with a full artist bio +
+	// album description; the 4 MiB default could be exceeded by a page of
+	// long-bio artists, and a decode failure there stalls the cursor forever
+	// (pollResults returns the error, the cursor never advances, and every tick
+	// re-requests the same oversized page). 32 MiB ≈ 200 × 160 KiB per item —
+	// comfortably above any realistic bio/description while still bounding a
+	// runaway response. Streamed via json.Decoder over a LimitReader, so the cap
+	// bounds bytes read, not a preallocated buffer.
+	resultsDecodeMaxBytes = 32 << 20
+)
+
 func (c *Client) postJSON(ctx context.Context, st State, path string, body, out any) error {
 	b, err := json.Marshal(body)
 	if err != nil {
@@ -496,14 +527,24 @@ func (c *Client) postJSON(ctx context.Context, st State, path string, body, out 
 }
 
 func (c *Client) getJSON(ctx context.Context, st State, path string, out any) error {
+	return c.getJSONCapped(ctx, st, path, out, defaultDecodeMaxBytes)
+}
+
+// getJSONCapped is getJSON with an explicit decode cap — the results endpoint
+// passes resultsDecodeMaxBytes (a page of full bios can exceed the default).
+func (c *Client) getJSONCapped(ctx context.Context, st State, path string, out any, maxDecodeBytes int64) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, joinURL(st.AtlasBaseURL, path), nil)
 	if err != nil {
 		return err
 	}
-	return c.do(st, req, out)
+	return c.doCapped(st, req, out, maxDecodeBytes)
 }
 
 func (c *Client) do(st State, req *http.Request, out any) error {
+	return c.doCapped(st, req, out, defaultDecodeMaxBytes)
+}
+
+func (c *Client) doCapped(st State, req *http.Request, out any, maxDecodeBytes int64) error {
 	req.Header.Set("Authorization", "Bearer "+st.Token)
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
@@ -517,7 +558,7 @@ func (c *Client) do(st State, req *http.Request, out any) error {
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return fmt.Errorf("atlas %s: http %d: %s", req.URL.Path, resp.StatusCode, strings.TrimSpace(string(snippet)))
 	}
-	return json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(out)
+	return json.NewDecoder(io.LimitReader(resp.Body, maxDecodeBytes)).Decode(out)
 }
 
 func joinURL(base, path string) string {
