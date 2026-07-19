@@ -518,6 +518,12 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	s.lastFull.Store(time.Now().UTC().UnixNano())
 	_ = s.store.SetScanState(ctx, "last_full_scan", time.Now().UTC().Format(time.RFC3339Nano))
 
+	// Skip reconciliation cleanly if the scan context is already done (shutdown
+	// / deadline) — the passes are best-effort and the next scan retries, so
+	// there's no point starting them (and no ERROR-log noise on a normal stop).
+	if ctx.Err() != nil {
+		return count, nil
+	}
 	// Compute the UPnP-routed exclusion set ONCE for the five reconciliation
 	// passes below — they all skip routed rows, and recomputing it per-pass
 	// re-queried the DB + re-allocated a ~15k-entry map five times (Gemini
@@ -526,7 +532,14 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	// scan retries. See routedExclusionSet for the full rationale + contract.
 	routedSet, rsErr := s.routedExclusionSet(ctx)
 	if rsErr != nil {
-		scanLogger.Error("reconciliation skipped: routed exclusion set", "err", rsErr)
+		// A context end here is expected on shutdown — log it at Info so it
+		// doesn't surface as an ERROR in log monitoring; any other failure is a
+		// real error (the passes have no store-side backstop, so skip them all).
+		if errors.Is(rsErr, context.Canceled) || errors.Is(rsErr, context.DeadlineExceeded) {
+			scanLogger.Info("reconciliation skipped: scan context ended", "err", rsErr)
+		} else {
+			scanLogger.Error("reconciliation skipped: routed exclusion set", "err", rsErr)
+		}
 		return count, nil
 	}
 
