@@ -178,7 +178,7 @@ func TestSoxArgsShape(t *testing.T) {
 		Quality:          QualityVeryHigh,
 		OutputDir:        "/tmp/transcoded",
 	}
-	args, settings := j.SoxArgs()
+	args, settings, tmpPath := j.SoxArgs()
 	want := []string{
 		"-G",
 		"/lib/Music/Album/01.flac",
@@ -195,6 +195,14 @@ func TestSoxArgsShape(t *testing.T) {
 		if args[i] != want[i] {
 			t.Errorf("args[%d]: got %q, want %q", i, args[i], want[i])
 		}
+	}
+	// Q2: the returned tmpPath IS the sox output argument, so RunSox renames
+	// exactly the file sox wrote — no independent SidecarPath recomputation.
+	if tmpPath != args[6] {
+		t.Errorf("tmpPath %q != sox output arg args[6] %q", tmpPath, args[6])
+	}
+	if tmpPath != j.SidecarPath()+".tmp" {
+		t.Errorf("tmpPath = %q, want %q", tmpPath, j.SidecarPath()+".tmp")
 	}
 	// Settings JSON must mention the rate flag, phase, target rate,
 	// guard flag, and schema version so a future post-mortem can
@@ -222,7 +230,7 @@ func TestSoxArgsIncludesGuardFlag(t *testing.T) {
 		Quality:          QualityVeryHigh,
 		OutputDir:        "/tmp/transcoded",
 	}
-	args, _ := j.SoxArgs()
+	args, _, _ := j.SoxArgs()
 	if len(args) == 0 {
 		t.Fatal("SoxArgs returned empty slice")
 	}
@@ -250,7 +258,7 @@ func TestSoxArgsForcesFlacEncoder(t *testing.T) {
 		Quality:          QualityVeryHigh,
 		OutputDir:        "/tmp/transcoded",
 	}
-	args, _ := j.SoxArgs()
+	args, _, _ := j.SoxArgs()
 	// Find `-t flac` and assert it comes immediately before an
 	// argument that ends in `.tmp` (the output path).
 	tIdx := -1
@@ -289,7 +297,7 @@ func TestSoxArgsRespectsQualityPreset(t *testing.T) {
 			TargetBits:       24,
 			Quality:          c.q,
 		}
-		args, _ := j.SoxArgs()
+		args, _, _ := j.SoxArgs()
 		// Find "rate" in the args; the next token is the rate flag.
 		rateIdx := -1
 		for i, a := range args {

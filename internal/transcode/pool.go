@@ -1098,7 +1098,7 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 		return
 	}
 
-	_, settings := job.spec.SoxArgs()
+	_, settings, _ := job.spec.SoxArgs()
 	sidecarPath := job.spec.SidecarPath()
 
 	// Durability: flush the freshly-renamed sidecar (and its parent
