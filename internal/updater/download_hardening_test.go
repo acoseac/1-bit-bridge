@@ -77,6 +77,22 @@ func TestWriteExecutable_NoDeclaredSizeUsesCeiling(t *testing.T) {
 	}
 }
 
+// TestWriteExecutable_RejectsDeclaredSizeOverCeiling is the decompression-bomb
+// guard (Gemini security-high): a header declaring MORE than the 1 GiB ceiling
+// must be rejected outright — even with the hasDeclaredSize truncation guard,
+// io.LimitReader would otherwise stream up to the declared size and exhaust
+// disk. The reject happens before dst is created, so no 0-byte file is left.
+func TestWriteExecutable_RejectsDeclaredSizeOverCeiling(t *testing.T) {
+	dst := filepath.Join(t.TempDir(), "bridge")
+	err := writeExecutable(dst, strings.NewReader("x"), maxExtractedBinaryBytes+1)
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("writeExecutable(size=ceiling+1) = %v; want an 'exceeds ... ceiling' error", err)
+	}
+	if _, statErr := os.Stat(dst); statErr == nil {
+		t.Errorf("dst was created despite an over-ceiling declared size; want no file at %s", dst)
+	}
+}
+
 // writeTarGzSymlink builds a .tar.gz whose sole entry is a symlink with
 // the given name, returning the archive path.
 func writeTarGzSymlink(t *testing.T, name, linkTarget string) string {

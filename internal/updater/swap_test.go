@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 )
 
@@ -70,6 +71,45 @@ func TestSwapBinaryFallsBackToRenameWhenHardlinkUnsupported(t *testing.T) {
 	bak, _ := os.ReadFile(live + ".bak")
 	if string(bak) != "OLD" {
 		t.Errorf(".bak = %q, want OLD (fallback path)", string(bak))
+	}
+}
+
+func TestSwapBinaryFallsBackToCopyOnCrossDeviceRename(t *testing.T) {
+	// EXDEV: <DataDir>/updates/ and the install path live on different
+	// filesystems (e.g. /var vs /usr), so os.Rename(newBinary, dst) fails.
+	// placeNewBinary must copy newBinary into dst's own directory and
+	// atomically rename there — landing NEW at dst while bak still holds
+	// OLD (the rollback contract survives a cross-device swap).
+	orig := renameFunc
+	renameFunc = func(oldname, newname string) error {
+		return &os.LinkError{Op: "rename", Old: oldname, New: newname, Err: syscall.EXDEV}
+	}
+	t.Cleanup(func() { renameFunc = orig })
+
+	dir := t.TempDir()
+	live := fakeBinary(t, dir, "bridge", "OLD")
+	newBin := fakeBinary(t, dir, "bridge.new", "NEW")
+
+	if err := swapBinary(live, newBin, ".bak"); err != nil {
+		t.Fatalf("swapBinary (EXDEV copy fallback): %v", err)
+	}
+	if got, _ := os.ReadFile(live); string(got) != "NEW" {
+		t.Errorf("live binary = %q, want NEW (copy fallback)", string(got))
+	}
+	if bak, _ := os.ReadFile(live + ".bak"); string(bak) != "OLD" {
+		t.Errorf(".bak = %q, want OLD (rollback contract under EXDEV)", string(bak))
+	}
+	// Source consumed after the cross-device copy.
+	if _, err := os.Stat(newBin); !os.IsNotExist(err) {
+		t.Errorf("newBinary should be removed after copy; stat err = %v", err)
+	}
+	// Installed binary must carry the executable bit (copyAndRename chmods it).
+	fi, err := os.Stat(live)
+	if err != nil {
+		t.Fatalf("stat live: %v", err)
+	}
+	if fi.Mode().Perm()&0o100 == 0 {
+		t.Errorf("live mode = %v, want executable (owner-exec bit set)", fi.Mode().Perm())
 	}
 }
 

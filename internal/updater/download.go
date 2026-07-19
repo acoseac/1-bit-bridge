@@ -283,10 +283,27 @@ func isBinaryEntry(entry, binaryName string) bool {
 	return path.Base(entry) == binaryName
 }
 
+// maxExtractedBinaryBytes caps the extracted binary written to disk. The
+// bridge binary is ~30 MiB; 1 GiB is generous headroom while bounding a
+// decompression-bomb / lying-header archive that declares a huge size. A
+// declared size ABOVE this is rejected outright; a missing/zero declared
+// size falls back to it as the LimitReader ceiling. Mirrors
+// maxArchiveDownloadBytes (the compressed-download cap).
+const maxExtractedBinaryBytes = 1 << 30
+
 // writeExecutable copies up to size bytes from src into dst, sets
 // the executable bit, and fsyncs. The size cap defends against a
 // tampered archive header lying about its content length.
 func writeExecutable(dst string, src io.Reader, size int64) error {
+	// Reject a declared size beyond the ceiling BEFORE creating dst — a
+	// malformed/hostile archive header (decompression bomb) declaring a
+	// huge size must not drive an unbounded write, and even with a
+	// declared-size guard below, io.LimitReader would otherwise stream up
+	// to that declared size. >1 GiB is always abnormal for the ~30 MiB
+	// bridge binary. Rejecting before OpenFile leaves no 0-byte dst.
+	if size > maxExtractedBinaryBytes {
+		return fmt.Errorf("declared binary size %d exceeds %d-byte ceiling", size, maxExtractedBinaryBytes)
+	}
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
 	if err != nil {
 		return fmt.Errorf("create extracted binary: %w", err)
@@ -296,14 +313,14 @@ func writeExecutable(dst string, src io.Reader, size int64) error {
 	// already verified the archive bytes match, but a malformed
 	// header in the archive itself shouldn't blow up disk.
 	//
-	// Track "declared size present" with a bool rather than reusing
-	// 1<<30 as a sentinel for "no declared size". Overloading the
-	// ceiling value let a tar/zip entry declaring EXACTLY 1 GiB skip
-	// the truncation check (size == 1<<30 suppressed the guard), so a
-	// truncated 1 GiB-declared payload would be silently accepted.
+	// Track "declared size present" with a bool rather than reusing the
+	// ceiling as a sentinel for "no declared size". Overloading it let a
+	// tar/zip entry declaring EXACTLY the ceiling skip the truncation
+	// check, so a truncated ceiling-declared payload would be silently
+	// accepted.
 	hasDeclaredSize := size > 0
 	if !hasDeclaredSize {
-		size = 1 << 30 // 1 GiB ceiling — bridge binary is ~30 MiB
+		size = maxExtractedBinaryBytes // bridge binary is ~30 MiB
 	}
 	n, err := io.Copy(out, io.LimitReader(src, size))
 	if err != nil {

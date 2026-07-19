@@ -70,9 +70,7 @@ func swapBinary(dst, newBinary, backupExt string) error {
 				// boot. Better to surface a clear "Install completed
 				// but service didn't restart cleanly" hint than fail
 				// the whole install on a transient SCM hiccup.
-				fmt.Fprintf(os.Stderr,
-					"updater: SCM service started fine on next boot, but immediate restart failed: %v\n",
-					err)
+				logger.Warn("post-swap service restart failed; the new binary will load on next boot via SCM auto-start", "err", err)
 			}
 			stoppedHandle.svc.Close()
 			stoppedHandle.scm.Disconnect()
@@ -203,9 +201,7 @@ func stopServiceIfRunning() (*scmStopHandle, error) {
 			// A service still in StopPending may refuse Start; that's the
 			// best we can do, and werr (the real failure) still surfaces.
 			if serr := s.Start(); serr != nil {
-				fmt.Fprintf(os.Stderr,
-					"updater: service did not stop within budget and the compensating restart also failed (a manual `sc start` may be needed): %v\n",
-					serr)
+				logger.Error("service stop timed out and the compensating restart also failed; a manual `sc start` may be needed", "err", serr)
 			}
 			s.Close()
 			m.Disconnect()
@@ -248,9 +244,7 @@ func RollbackBinary(dst, backupExt string) error {
 	if stoppedHandle != nil {
 		defer func() {
 			if err := stoppedHandle.svc.Start(); err != nil {
-				fmt.Fprintf(os.Stderr,
-					"updater: post-rollback service restart failed (will start on next boot): %v\n",
-					err)
+				logger.Warn("post-rollback service restart failed; will start on next boot", "err", err)
 			}
 			stoppedHandle.svc.Close()
 			stoppedHandle.scm.Disconnect()
