@@ -10,7 +10,6 @@ import (
 	"image"
 	"image/jpeg"
 	_ "image/png" // register the PNG decoder for image.Decode / DecodeConfig
-	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -36,6 +35,13 @@ const coverMaxDim = 600
 // payload can't blow up memory.
 const coverSourceMaxDim = 12000
 
+// coverMaxSourcePixels caps the TOTAL decoded pixel count. The per-axis limit
+// alone still permits a 12000x12000 source to allocate a ~576 MB RGBA matrix,
+// and a highly-compressible PNG (e.g. solid color) encodes those dimensions in
+// a body well under coverMaxBodyBytes — an OOM vector on a RAM-constrained host.
+// ~16.7 MP (4096x4096, ~67 MB RGBA) is far above any real album cover.
+const coverMaxSourcePixels = 4096 * 4096
+
 type coverUploadRequest struct {
 	Image string `json:"image"` // base64 (optionally a data: URL); JPEG or PNG
 }
@@ -52,7 +58,8 @@ func processCoverImage(raw []byte) (out []byte, hash string, err error) {
 	if format != "jpeg" && format != "png" {
 		return nil, "", errors.New("unsupported image format (want jpeg or png)")
 	}
-	if cfg.Width <= 0 || cfg.Height <= 0 || cfg.Width > coverSourceMaxDim || cfg.Height > coverSourceMaxDim {
+	if cfg.Width <= 0 || cfg.Height <= 0 || cfg.Width > coverSourceMaxDim || cfg.Height > coverSourceMaxDim ||
+		int64(cfg.Width)*int64(cfg.Height) > coverMaxSourcePixels {
 		return nil, "", errors.New("image dimensions out of range")
 	}
 	src, _, err := image.Decode(bytes.NewReader(raw))
@@ -92,10 +99,14 @@ func processCoverImage(raw []byte) (out []byte, hash string, err error) {
 
 // decodeCoverBody reads the base64-JSON upload body (capped) and decodes the
 // image bytes. Tolerates a leading `data:<mime>;base64,` URL prefix.
-func decodeCoverBody(r *http.Request) ([]byte, error) {
+func decodeCoverBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
 	var req coverUploadRequest
-	dec := json.NewDecoder(io.LimitReader(r.Body, coverMaxBodyBytes))
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, coverMaxBodyBytes))
 	if err := dec.Decode(&req); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			return nil, errors.New("request body too large")
+		}
 		return nil, errors.New("invalid JSON body")
 	}
 	b64 := req.Image
@@ -120,7 +131,7 @@ func (s *Server) uploadCover(w http.ResponseWriter, r *http.Request, scope, key 
 		writeError(w, http.StatusBadRequest, "bad_request", "missing key")
 		return
 	}
-	raw, err := decodeCoverBody(r)
+	raw, err := decodeCoverBody(w, r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return

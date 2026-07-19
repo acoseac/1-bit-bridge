@@ -199,8 +199,8 @@ func (s *Server) apiPlaylistExport(w http.ResponseWriter, r *http.Request) {
 		_ = cw.Write([]string{"position", "title", "artist", "path", "originFingerprint", "originPath"})
 		for _, it := range items {
 			_ = cw.Write([]string{
-				strconv.Itoa(it.Position), it.Title, it.Artist,
-				it.Path, it.OriginFingerprint, it.OriginPath,
+				strconv.Itoa(it.Position), csvSafe(it.Title), csvSafe(it.Artist),
+				csvSafe(it.Path), csvSafe(it.OriginFingerprint), csvSafe(it.OriginPath),
 			})
 		}
 		cw.Flush()
@@ -321,6 +321,9 @@ func (s *Server) apiHistoryEvents(w http.ResponseWriter, r *http.Request) {
 	if v, err := strconv.Atoi(q.Get("limit")); err == nil && v > 0 {
 		limit = v
 	}
+	if limit > 1000 { // match ListHistory's internal cap so the full-page cursor check below holds
+		limit = 1000
+	}
 	var after int64
 	if v, err := strconv.ParseInt(q.Get("after"), 10, 64); err == nil {
 		after = v
@@ -335,7 +338,10 @@ func (s *Server) apiHistoryEvents(w http.ResponseWriter, r *http.Request) {
 		out = append(out, historyToDTO(e))
 	}
 	var next int64
-	if len(events) > 0 {
+	// Advance the cursor only on a FULL page; a short/final page returns 0 so
+	// the client stops (matches the /v1/history contract — avoids one extra
+	// empty fetch). `limit` is clamped above to the store's cap so this holds.
+	if len(events) == limit {
 		next = events[len(events)-1].ID // ListHistory is DESC by id
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"events": out, "nextCursor": next})
@@ -419,6 +425,23 @@ func (s *Server) collectHistoryForExport(r *http.Request, token string) ([]manif
 	return events, nil
 }
 
+// csvSafe neutralizes spreadsheet formula injection (CWE-1236): a field whose
+// first byte is = + - @ or a leading tab/CR is prefixed with a single quote so
+// Excel/LibreOffice/Numbers treat it as text, not a formula. Third-party
+// strings (track tags, device names, foreign-bridge playlist items) reach the
+// CSV exports verbatim, and encoding/csv quotes , " CR LF but NOT these leaders.
+// The M3U8 exporter was already hardened (m3uReplacer); the CSV siblings were not.
+func csvSafe(s string) string {
+	if s == "" {
+		return s
+	}
+	switch s[0] {
+	case '=', '+', '-', '@', '\t', '\r', '\n':
+		return "'" + s
+	}
+	return s
+}
+
 // writeHistoryCSV streams the history events as CSV (header + one row
 // per event). Caller has already set the download headers.
 func writeHistoryCSV(w http.ResponseWriter, events []manifest.HistoryEventOut) {
@@ -426,9 +449,9 @@ func writeHistoryCSV(w http.ResponseWriter, events []manifest.HistoryEventOut) {
 	_ = cw.Write([]string{"started_at", "path", "codec", "iface_type", "output_rate", "duration_used", "is_dop", "variant_id", "device_name"})
 	for _, e := range events {
 		_ = cw.Write([]string{
-			nsToRFC3339(e.StartedAt), e.Path, e.Codec, e.IfaceType,
+			nsToRFC3339(e.StartedAt), csvSafe(e.Path), csvSafe(e.Codec), csvSafe(e.IfaceType),
 			strconv.Itoa(e.OutputRate), strconv.FormatFloat(e.DurationUsed, 'f', -1, 64),
-			strconv.FormatBool(e.IsDoP), e.VariantID, e.DeviceName,
+			strconv.FormatBool(e.IsDoP), csvSafe(e.VariantID), csvSafe(e.DeviceName),
 		})
 	}
 	cw.Flush()

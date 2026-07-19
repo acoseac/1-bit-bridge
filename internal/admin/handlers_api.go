@@ -1060,6 +1060,11 @@ func (s *Server) apiEnrichmentRetry(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	reset, err := s.deps.Manifest.ResetEnrichedMisses(ctx)
 	if err != nil {
+		// The reset failed — nothing was re-queued — so don't hold the 60s
+		// rate-guard against the operator's next click; the reset is idempotent.
+		s.enrichRetryMu.Lock()
+		s.enrichRetryAt = time.Time{}
+		s.enrichRetryMu.Unlock()
 		writeError(w, http.StatusInternalServerError, "reset-failed", err.Error())
 		return
 	}

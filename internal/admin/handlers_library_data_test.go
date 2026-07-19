@@ -159,8 +159,21 @@ func TestHistoryEventsAndExport(t *testing.T) {
 	if code := doJSON(t, h, "GET", "/api/history/events?limit=50", nil, &page); code != 200 {
 		t.Fatalf("events: %d", code)
 	}
-	if len(page.Events) != 2 || page.NextCursor == 0 {
-		t.Fatalf("events page wrong: %+v", page)
+	// A page of 2 with limit=50 is a SHORT/final page → nextCursor 0 (no more),
+	// matching the /v1/history contract (Q26 fix).
+	if len(page.Events) != 2 || page.NextCursor != 0 {
+		t.Fatalf("short page should have nextCursor 0: %+v", page)
+	}
+	// A FULL page (returned count == limit) still advances the cursor.
+	var full struct {
+		Events     []historyEventDTO `json:"events"`
+		NextCursor int64             `json:"nextCursor"`
+	}
+	if code := doJSON(t, h, "GET", "/api/history/events?limit=1", nil, &full); code != 200 {
+		t.Fatalf("full-page events: %d", code)
+	}
+	if len(full.Events) != 1 || full.NextCursor == 0 {
+		t.Fatalf("full page should advance nextCursor: %+v", full)
 	}
 	if page.Events[0].Route == "" || page.Events[0].StartedAt == "" {
 		t.Errorf("event DTO missing fields: %+v", page.Events[0])
