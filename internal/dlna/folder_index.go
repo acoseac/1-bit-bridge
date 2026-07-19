@@ -22,12 +22,12 @@ const foldersRootObjectID = "2"
 //	"0" — root
 //	"1" — all_tracks
 //	"2" — folders root
-//	"3"-"9" — reserved for future static containers
+//	"3"-"999" — reserved for future static containers
 //
-// Hashed folder IDs land in [10, 2^64-1]. Collision probability with
-// the reserved range is ~10/2^64 per hash — effectively zero — but the
+// Hashed folder IDs land in [1000, 2^64-1]. Collision probability with
+// the reserved range is ~1000/2^64 per hash — effectively zero — but the
 // defensive guard costs nothing and surfaces intent. If a hash lands
-// in [0..9], we bump it by `folderIDReservedFloor` so the result is
+// in [0..999], we bump it by `folderIDReservedFloor` so the result is
 // stable AND outside the reserved range.
 const folderIDReservedFloor = 1000
 

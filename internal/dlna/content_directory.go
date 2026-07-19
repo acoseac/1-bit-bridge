@@ -785,6 +785,14 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, fc 
 			totalMatches = len(node.ChildFolderIDs) + len(node.ChildTrackIDs)
 			break
 		}
+		// A valid TRACK ObjectID (a leaf) has no direct children — the
+		// spec-correct DirectChildren response is an EMPTY list, not a
+		// NoSuchObject fault (which strict control points may treat as a
+		// session error rather than "leaf has no children"). Fall through
+		// with an empty DIDL (numberReturned/totalMatches stay 0).
+		if _, ok := folderIndex.LookupTrack(browse.ObjectID); ok {
+			break
+		}
 		writeSOAPFault(w, UPnPErrNoSuchObject)
 		return
 	}
