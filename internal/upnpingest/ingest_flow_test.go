@@ -219,6 +219,42 @@ func TestIngester_Run_SkipsWhenSystemUpdateIDMatchesAndWithinBackstop(t *testing
 	}
 }
 
+// TestIngester_Run_SkipPathCarriesServerUDN pins B13: a SKIPPED result (the
+// steady state — the SystemUpdateID gate exists to skip most ticks) MUST carry
+// ServerUDN so the admin adapter's per-server telemetry map keys correctly.
+// Pre-fix res.ServerUDN was stamped only AFTER the skip early-return, so every
+// skipped server collided under the empty key and a correctly-functioning
+// upstream showed no recent-walk telemetry on the admin "Sources" dashboard.
+func TestIngester_Run_SkipPathCarriesServerUDN(t *testing.T) {
+	stub := newStubSOAP()
+	stub.addRoute("GetSystemUpdateID", wrapSystemUpdateID("42"))
+	client := upnp.NewContentDirectoryClient(stub)
+	store := openIngestTestStore(t)
+	srv := config.UPnPUpstreamServerConfig{Name: "2Go", UDN: "uuid:test"}
+	cfg := config.UPnPUpstreamConfig{Enabled: true, Servers: []config.UPnPUpstreamServerConfig{srv}}
+	idStore := newMemoryUpdateIDStore()
+	idStore.Set(StableServerKey(srv), "42", time.Now().Add(-1*time.Hour))
+
+	ing, err := NewIngester(cfg, client, &stubResolver{controlURL: "http://h/ctl/CD"}, store, idStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := ing.Run(context.Background(), Options{})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	pr := res.PerServer[0]
+	if !pr.Skipped {
+		t.Fatalf("expected Skipped=true; got %+v", pr)
+	}
+	if pr.ServerUDN == "" {
+		t.Fatal("skip path must carry ServerUDN (B13); got empty")
+	}
+	if pr.ServerUDN != StableServerKey(srv) {
+		t.Fatalf("ServerUDN = %q; want %q", pr.ServerUDN, StableServerKey(srv))
+	}
+}
+
 func TestIngester_Run_DisabledIsNoop(t *testing.T) {
 	stub := newStubSOAP() // no routes; calling anything would error
 	client := upnp.NewContentDirectoryClient(stub)

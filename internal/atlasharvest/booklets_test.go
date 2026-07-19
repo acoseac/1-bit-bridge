@@ -295,6 +295,70 @@ func TestBookletFetchRefusesOversizedPDF(t *testing.T) {
 	}
 }
 
+// TestBookletGCSkippedWhileScanInProgress pins B46: the orphan GC is skipped
+// while a library scan is running, because a wipe+rescan (admin root add/remove)
+// leaves DistinctAlbumReleaseMBIDs returning a NON-empty-but-partial universe
+// (fs tracks wiped, UPnP-routed albums still present) that would otherwise GC
+// every filesystem album's booklet. A nil hook (production default) runs GC as
+// before.
+func TestBookletGCSkippedWhileScanInProgress(t *testing.T) {
+	const rel = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	sink := newFakeBookletSink()
+	c := &Client{Booklets: sink, ScanInProgress: func() bool { return true }}
+
+	c.gcBooklets(context.Background(), []string{rel})
+	if len(sink.gcSeen) != 0 {
+		t.Fatalf("GC ran during a scan; DeleteBookletsNotIn saw %v", sink.gcSeen)
+	}
+
+	// No scan in progress → GC runs normally.
+	c.ScanInProgress = func() bool { return false }
+	c.gcBooklets(context.Background(), []string{rel})
+	if len(sink.gcSeen) != 1 {
+		t.Fatalf("GC must run when no scan is in progress; gcSeen = %v", sink.gcSeen)
+	}
+
+	// nil hook (production default) → GC runs (prior behavior).
+	c.ScanInProgress = nil
+	c.gcBooklets(context.Background(), []string{rel})
+	if len(sink.gcSeen) != 2 {
+		t.Fatalf("nil ScanInProgress must run GC; gcSeen = %v", sink.gcSeen)
+	}
+}
+
+// TestBookletFetch401WipesCredential pins Q45: a 401/403 on the booklet FETCH
+// endpoint wipes the credential (via handleErr), matching the check/poll legs.
+// Pre-fix fetchBookletPDF classified 401/403 as errUnauthorized but the sole
+// caller swallowed it, so the credential-wipe never fired from the fetch path.
+func TestBookletFetch401WipesCredential(t *testing.T) {
+	const rel = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if quietResults(w, r) {
+			return
+		}
+		if r.URL.Path == "/v1/atlas/harvest/booklets/check" {
+			_ = json.NewEncoder(w).Encode(bookletsCheckResponse{})
+			return
+		}
+		// The booklet FETCH endpoint rejects the token.
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	sink := newFakeBookletSink()
+	sink.toFetch = []BookletFetchItem{{ReleaseMBID: rel, Etag: "e"}}
+	files := newFakeBookletFiles()
+	c := bookletTestClient(t, srv.URL, sink, files)
+	c.tick(context.Background())
+
+	if tok := c.State.Snapshot().Token; tok != "" {
+		t.Errorf("token = %q, want cleared — a 401 on the booklet FETCH must wipe the credential", tok)
+	}
+	if len(sink.fetched) != 0 {
+		t.Errorf("fetched marks = %v, want none after a 401", sink.fetched)
+	}
+}
+
 func TestNudgeBookletFetchPrioritizes(t *testing.T) {
 	const (
 		relTapped = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"

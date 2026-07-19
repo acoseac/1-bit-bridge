@@ -155,10 +155,31 @@ func (c *Client) checkBookletChunk(ctx context.Context, st State, chunk []string
 	return nil
 }
 
+// scanInProgress reports whether a library scan is currently running (nil hook
+// = never). Gates the booklet orphan GC — see gcBooklets.
+func (c *Client) scanInProgress() bool {
+	return c.ScanInProgress != nil && c.ScanInProgress()
+}
+
 // gcBooklets removes rows + cached PDFs for releases no longer in the
 // library. Best-effort: file-removal failures log and continue (the row is
 // already gone; a stale file is disk-only and unreachable via the API).
 func (c *Client) gcBooklets(ctx context.Context, universe []string) {
+	// Skip the orphan GC while a library scan is running. DeleteBookletsNotIn
+	// treats any release MBID absent from `universe` as "left the library" —
+	// but a wipe+rescan (admin root add/remove) briefly leaves
+	// DistinctAlbumReleaseMBIDs returning ONLY the UPnP-routed albums (the
+	// filesystem tracks are wiped, not yet re-indexed): a NON-empty-but-partial
+	// universe the len()==0 guard below can't catch. GC'ing against it would
+	// delete every filesystem album's booklet row + cached PDF, then re-fetch
+	// them next cycle (iOS booklet chips blink off/on). The next check cycle
+	// after the scan completes GCs against the full universe. nil hook
+	// (production default until the cmd/bridge wire lands) = always run,
+	// preserving prior behavior.
+	if c.scanInProgress() {
+		c.log().InfoContext(ctx, "atlasharvest.booklet_gc_skipped_scan_in_progress")
+		return
+	}
 	orphans, err := c.Booklets.DeleteBookletsNotIn(ctx, universe)
 	if err != nil {
 		c.log().WarnContext(ctx, "atlasharvest.booklet_gc_failed", "error", err)
@@ -181,10 +202,12 @@ func (c *Client) gcBooklets(ctx context.Context, universe []string) {
 // Priority-nudged MBIDs (the API's 202 path) drain first, then the oldest
 // pending rows. A 404 from Atlas flips the row unavailable and CLEARS the
 // wire tag (the flip is a real state change iOS must see); transient errors
-// leave the row pending for the next tick.
-func (c *Client) fetchBooklets(ctx context.Context) {
+// leave the row pending for the next tick. Returns errUnauthorized when Atlas
+// rejects the token so the caller (tickBooklets) routes it to handleErr and
+// wipes the credential — the fetch leg's analog of the check leg's wipe.
+func (c *Client) fetchBooklets(ctx context.Context) error {
 	if c.BookletFiles == nil {
-		return
+		return nil
 	}
 	st := c.State.Snapshot()
 	budget := bookletFetchPerTick
@@ -195,7 +218,11 @@ func (c *Client) fetchBooklets(ctx context.Context) {
 	for budget > len(seen) {
 		select {
 		case mbid := <-c.bookletPriority():
-			if c.fetchOneBooklet(ctx, st, mbid, seen) {
+			landed, err := c.fetchOneBooklet(ctx, st, mbid, seen)
+			if err != nil {
+				return err // errUnauthorized → abort the sweep; caller wipes
+			}
+			if landed {
 				fetched++
 			}
 			continue
@@ -207,13 +234,17 @@ func (c *Client) fetchBooklets(ctx context.Context) {
 		items, err := c.Booklets.BookletsToFetch(ctx, budget-len(seen))
 		if err != nil {
 			c.log().WarnContext(ctx, "atlasharvest.booklet_fetch_list", "error", err)
-			return
+			return nil
 		}
 		for _, it := range items {
 			if ctx.Err() != nil {
-				return
+				return nil
 			}
-			if c.fetchOneBooklet(ctx, st, it.ReleaseMBID, seen) {
+			landed, err := c.fetchOneBooklet(ctx, st, it.ReleaseMBID, seen)
+			if err != nil {
+				return err // errUnauthorized → abort the sweep; caller wipes
+			}
+			if landed {
 				fetched++
 			}
 		}
@@ -221,34 +252,42 @@ func (c *Client) fetchBooklets(ctx context.Context) {
 	if fetched > 0 {
 		c.log().InfoContext(ctx, "atlasharvest.booklets_fetched", "count", fetched)
 	}
+	return nil
 }
 
-// fetchOneBooklet downloads one PDF (dedup'd via seen; reports whether a
-// fetch landed). An upstream 404 flips the row unavailable AND clears the
-// wire tag — a real state change iOS must see; transient errors just log,
-// leaving the row pending for the next tick.
-func (c *Client) fetchOneBooklet(ctx context.Context, st State, mbid string, seen map[string]struct{}) bool {
+// fetchOneBooklet downloads one PDF (dedup'd via seen). Returns (landed,
+// fatal): `landed` reports whether a fetch was stored; `fatal` is non-nil ONLY
+// for errUnauthorized — a rejected token that MUST abort the sweep so the
+// caller wipes the credential (mirrors the check leg + do()). An upstream 404
+// flips the row unavailable AND clears the wire tag (a real state change iOS
+// must see); other transient errors just log, leaving the row pending for the
+// next tick.
+func (c *Client) fetchOneBooklet(ctx context.Context, st State, mbid string, seen map[string]struct{}) (bool, error) {
 	if _, dup := seen[mbid]; dup {
-		return false
+		return false, nil
 	}
 	seen[mbid] = struct{}{}
 	if err := c.fetchBookletPDF(ctx, st, mbid); err != nil {
-		if errors.Is(err, errBookletGone) {
+		switch {
+		case errors.Is(err, errBookletGone):
 			if uerr := c.Booklets.MarkBookletUnavailable(ctx, mbid); uerr != nil {
 				c.log().WarnContext(ctx, "atlasharvest.booklet_mark_unavailable", "mbid", mbid, "error", uerr)
 			}
 			if _, terr := c.Booklets.SetBookletTagAndBumpIndex(ctx, mbid, ""); terr != nil {
 				c.log().WarnContext(ctx, "atlasharvest.booklet_clear_tag", "mbid", mbid, "error", terr)
 			}
-			return false
+			return false, nil
+		case errors.Is(err, errUnauthorized):
+			return false, err
+		default:
+			c.log().WarnContext(ctx, "atlasharvest.booklet_fetch_failed", "mbid", mbid, "error", err)
+			return false, nil
 		}
-		c.log().WarnContext(ctx, "atlasharvest.booklet_fetch_failed", "mbid", mbid, "error", err)
-		return false
 	}
 	if err := c.Booklets.MarkBookletFetched(ctx, mbid); err != nil {
 		c.log().WarnContext(ctx, "atlasharvest.booklet_mark_fetched", "mbid", mbid, "error", err)
 	}
-	return true
+	return true, nil
 }
 
 // errBookletGone marks an Atlas 404 on the PDF fetch — the booklet

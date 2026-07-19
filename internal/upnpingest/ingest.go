@@ -263,6 +263,13 @@ func (i *Ingester) ingestOne(ctx context.Context, srv config.UPnPUpstreamServerC
 	// (lines that pass `udn`); this aligns the skip-gate with them. Same
 	// class as PR #353's admin-gate fix; this was the residual ingest miss.
 	udn := StableServerKey(srv)
+	// Stamp ServerUDN BEFORE the skip early-return. The admin adapter keys its
+	// per-server telemetry map on res.ServerUDN, and a SKIPPED result is the
+	// steady state — the SystemUpdateID gate exists to skip most ticks. Leaving
+	// it "" on the skip path collided every skipped server under the empty key,
+	// so a correctly-functioning (=skipped) upstream showed NO recent-walk
+	// telemetry on the admin "Sources" dashboard.
+	res.ServerUDN = udn
 	stored, _ := i.idStore.Get(udn)
 	lastWalkedAt, _ := i.idStore.LastWalkedAt(udn)
 	if decideSkipWalk(currentID, stored, lastWalkedAt, now(), backstop, forceWalk) {
@@ -273,7 +280,6 @@ func (i *Ingester) ingestOne(ctx context.Context, srv config.UPnPUpstreamServerC
 
 	// Walk.
 	res.WalkStartedAt = now()
-	res.ServerUDN = udn
 	prefix := normalizePrefix(srv)
 
 	// Skip-if-unchanged baseline: the stored manifest rows currently
