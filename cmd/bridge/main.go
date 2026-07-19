@@ -2127,6 +2127,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			// non-nil whenever harvestState is, both gated on atlas.enabled).
 			Refetcher: atlasCoverRefetcher{premium: premiumCovers, artworkDir: artworkDir, store: manifestStore},
 			Log:       logging.Component("atlasharvest"),
+			// Skip the booklet orphan-GC while a library (re)scan is in flight
+			// (B46): mid-rescan the album-release-MBID universe is transiently
+			// partial (e.g. a hybrid root add/remove runs WipeFilesystemTracks +
+			// rescan), so GCing against it would delete + re-fetch live booklets.
+			ScanInProgress: scanner.IsScanning,
 		}
 		// PDF booklet check + fetch loops (v1.8) ride the same harvest
 		// credential. The cache dir failing to create degrades to

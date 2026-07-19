@@ -242,6 +242,38 @@ func TestLoginFailureKeepsSessionLocked(t *testing.T) {
 	}
 }
 
+// TestLoginRateLimitCountsFailures pins the B43 wiring: the login handler
+// must count each failed attempt via AllowAndReserve, so after
+// RateLimitMaxAttempts failures the (IP, user) bucket is full and the next
+// attempt is locked out. A regressed wiring (check-only Allow that never
+// reserves, or a dropped counting call) would leave the bucket empty and
+// never lock out. Asserted against the injected limiter directly (Allow is
+// read-only) so the test stays fast — it doesn't pay the 5 s throttle sleep.
+func TestLoginRateLimitCountsFailures(t *testing.T) {
+	srv, _, limiter := newPublicTestServer(t, "correct-horse-battery")
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	for i := 0; i < adminauth.RateLimitMaxAttempts; i++ {
+		req, _ := http.NewRequest("POST", ts.URL+"/login", strings.NewReader(`{"username":"admin","password":"wrong"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Origin", "https://bridge.example.com")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("failed login %d: %v", i+1, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("failed login %d: status %d, want 401", i+1, resp.StatusCode)
+		}
+	}
+	// httptest binds loopback, so the handler's ExtractClientIP resolves to
+	// 127.0.0.1. After MaxAttempts reservations the bucket is at the ceiling.
+	if limiter.Allow("127.0.0.1", "admin") {
+		t.Error("after MaxAttempts failed logins the (IP, user) is NOT locked out — the handler stopped counting failures (B43 wiring regressed)")
+	}
+}
+
 // TestLoginGenericErrorMessage pins the response shape: the wire
 // must say "invalid credentials" regardless of whether the
 // username or password was wrong. Disclosing which half failed
