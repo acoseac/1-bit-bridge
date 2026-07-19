@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -51,6 +52,80 @@ const (
 	maxPlaylistIDLen   = 128
 )
 
+// errPlaylistTooManyItems is the sentinel cappedPlaylistItems.UnmarshalJSON
+// returns when the incoming array exceeds maxPlaylistItems. putPlaylist maps
+// it to a clean 400 without the full oversized array ever being built.
+var errPlaylistTooManyItems = errors.New("playlist has too many items")
+
+// errPlaylistItemsNotArray is returned when the "items" field is present but
+// is neither a JSON array nor null. Surfaces as a generic 400 (same status a
+// stdlib type-mismatch would produce), keeping the wire contract intact.
+var errPlaylistItemsNotArray = errors.New("playlist items must be a JSON array")
+
+// cappedPlaylistItems is []playlistItemDTO with a decode-time item-count cap.
+// The 16 MiB MaxBytesReader body cap bounds the raw bytes, but a crafted body
+// of minimal items (`{}` is ~3 bytes with its separator) still decodes to
+// ~1M structs (~100-200 MB transient) before the post-decode length guard
+// fires — a ~10x amplification from a single authed PUT, painful on Pi-class
+// hosts. No single body-size cap fixes this (a parseable item can be ~3 bytes
+// while a legitimate cross-bridge item is hundreds), so the fix streams the
+// array and aborts at maxPlaylistItems, bounding the struct expansion
+// regardless of per-item wire size.
+//
+// Only the request-decode path invokes this — marshalling is unaffected (a
+// named slice type serialises exactly like its underlying slice), so the
+// response DTOs that embed playlistDTO are unchanged, and stored playlists
+// (already capped on write) round-trip cleanly.
+type cappedPlaylistItems []playlistItemDTO
+
+func (c *cappedPlaylistItems) UnmarshalJSON(data []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	// Tolerate JSON null (→ nil slice), matching stdlib slice-decode.
+	if tok == nil {
+		*c = nil
+		return nil
+	}
+	if d, ok := tok.(json.Delim); !ok || d != '[' {
+		return errPlaylistItemsNotArray
+	}
+	items := make([]playlistItemDTO, 0)
+	for dec.More() {
+		// Guard BEFORE decoding the (cap+1)th element so the whole oversized
+		// array is never materialised.
+		if len(items) >= maxPlaylistItems {
+			return errPlaylistTooManyItems
+		}
+		var it playlistItemDTO
+		if err := dec.Decode(&it); err != nil {
+			return err
+		}
+		items = append(items, it)
+	}
+	// Consume AND verify the closing ']'. dec.More() returning false only tells
+	// us the next byte is a closing delimiter (or EOF) — a malformed value whose
+	// "items" isn't a cleanly-terminated array must not silently succeed, so
+	// assert the token is actually ']'.
+	closeTok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	if d, ok := closeTok.(json.Delim); !ok || d != ']' {
+		return errPlaylistItemsNotArray
+	}
+	// Reject any trailing content after the array (defensive: the outer decoder
+	// hands us exactly the array bytes, but keep the method self-validating for
+	// direct callers). More() is false at EOF/whitespace, true on real garbage.
+	if dec.More() {
+		return errPlaylistItemsNotArray
+	}
+	*c = items
+	return nil
+}
+
 // --- wire DTOs (the playlists contract; see PROTOCOL.md Appendix A.2/A.3) ---
 
 type playlistItemDTO struct {
@@ -63,10 +138,10 @@ type playlistItemDTO struct {
 }
 
 type playlistDTO struct {
-	ID             string            `json:"id"`
-	Name           string            `json:"name"`
-	LastModifiedAt int64             `json:"lastModifiedAt"` // UnixNano UTC (LWW guard key)
-	Items          []playlistItemDTO `json:"items"`
+	ID             string              `json:"id"`
+	Name           string              `json:"name"`
+	LastModifiedAt int64               `json:"lastModifiedAt"` // UnixNano UTC (LWW guard key)
+	Items          cappedPlaylistItems `json:"items"`
 	// ImageHash — SHA-256 hex of the operator-uploaded custom cover (scope
 	// 'playlist', key = id), served at GET /v1/playlist-image/{id}. Omitted
 	// when none (iOS uses the auto-mosaic). Additive (no ProtocolVersion bump).
@@ -209,6 +284,14 @@ func (s *Server) putPlaylist(w http.ResponseWriter, r *http.Request) {
 	var body playlistDTO
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, playlistMaxBodyBytes))
 	if err := dec.Decode(&body); err != nil {
+		// The item-count cap is enforced DURING decode (see
+		// cappedPlaylistItems) so a crafted array of minimal items can't
+		// balloon into ~1M structs before a post-decode length check. Map
+		// the sentinel to the same 400 the explicit check used to return.
+		if errors.Is(err, errPlaylistTooManyItems) {
+			writeError(w, http.StatusBadRequest, "bad_request", "playlist has too many items")
+			return
+		}
 		writeErrorLog(w, r, http.StatusBadRequest, "bad_request",
 			"request body must be a playlist JSON object", err)
 		return
@@ -230,10 +313,9 @@ func (s *Server) putPlaylist(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "lastModifiedAt must be a positive UnixNano value")
 		return
 	}
-	if len(body.Items) > maxPlaylistItems {
-		writeError(w, http.StatusBadRequest, "bad_request", "playlist has too many items")
-		return
-	}
+	// NB: the maxPlaylistItems ceiling is enforced during decode by
+	// cappedPlaylistItems.UnmarshalJSON (returning errPlaylistTooManyItems,
+	// mapped to 400 above), so body.Items is already bounded here.
 
 	items := make([]manifest.PlaylistItemRow, 0, len(body.Items))
 	seenPositions := make(map[int]struct{}, len(body.Items))
