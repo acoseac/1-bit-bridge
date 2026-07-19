@@ -2,7 +2,9 @@ package manifest
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -20,14 +22,29 @@ func PlaylistCoverDir(dataDir string) string {
 	return filepath.Join(dataDir, "playlist-covers")
 }
 
-// PlaylistCoverFilename is the on-disk basename for a cover. scope + key are
-// sanitized so a hostile/odd key can't escape the covers dir (path traversal)
-// — keys are slugs (`[a-z0-9-]`) or UUIDs in practice, but defend anyway.
+// PlaylistCoverFilename is the on-disk basename for a cover. The identity
+// component is hex(sha256(scope || NUL || key)) — an INJECTIVE map, so two
+// distinct (scope, key) pairs never collide on one file. The prior
+// SanitizeCoverKey form was LOSSY (every byte outside [A-Za-z0-9._-] → '_'),
+// so client playlist ids "a b" and "a_b" both mapped to the same file and a
+// cover upload for one silently overwrote the other's (serveCover would then
+// serve the wrong image while advertising the correct imageHash). The hash
+// alphabet is pure hex, so scope/key can't introduce a path separator or
+// traversal sequence; only the extension is still sanitized (belt-and-braces
+// — the sole writer stores "jpg"). The NUL separator matches
+// albumArtistGroupKey: it prevents (scope="ab",key="c") colliding with
+// (scope="a",key="bc").
+//
+// NOTE: this changes the on-disk filename scheme. Cover files written by a
+// prior bridge version are orphaned under their old names (recoverable — the
+// DB row keeps the imageHash and covers are re-uploadable); upload/serve/
+// delete all resolve to the new hashed name via PlaylistCoverPath.
 func PlaylistCoverFilename(scope, key, ext string) string {
 	if ext == "" {
 		ext = "jpg"
 	}
-	return SanitizeCoverKey(scope) + "-" + SanitizeCoverKey(key) + "." + SanitizeCoverKey(ext)
+	sum := sha256.Sum256([]byte(scope + "\x00" + key))
+	return hex.EncodeToString(sum[:]) + "." + SanitizeCoverKey(ext)
 }
 
 // PlaylistCoverPath is the full on-disk path for a cover image.

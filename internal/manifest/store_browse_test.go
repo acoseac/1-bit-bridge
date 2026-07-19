@@ -281,7 +281,122 @@ func TestRollupByPrefix_LikeEscapeProtectsAgainstWildcard(t *testing.T) {
 		t.Fatalf("RollupByPrefix: %v", err)
 	}
 	if r.TrackCount != 1 {
-		t.Errorf("TrackCount = %d, want 1 (likeEscape should have isolated Test_A's subtree from TestQA)", r.TrackCount)
+		t.Errorf("TrackCount = %d, want 1 (the byte-range scan matches Test_A literally, isolating it from TestQA)", r.TrackCount)
+	}
+}
+
+// TestRollupAndCountByPrefix_ByteRangeMatchesLike pins that the
+// index-range prefix scans (RollupByPrefix / CountTracksByPrefix, which
+// dropped `LIKE 'prefix/%'` for `path >= prefix||'/' AND path < prefix||'0'`)
+// return counts numerically identical to the LIKE form — including the
+// trailing-boundary case where a sibling folder ("Album 2", "AlbumX")
+// must NOT be counted under "Album". The expected counts are derived from
+// the pre-fix LIKE query run against the same DB, so a divergence between
+// the two forms fails the test.
+func TestRollupAndCountByPrefix_ByteRangeMatchesLike(t *testing.T) {
+	s := openTempStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+
+	tagsJSON, _ := json.Marshal(map[string]any{"sampleRate": 44100.0, "bitsPerSample": 16, "codec": "FLAC"})
+	// "Album 2" (space 0x20 < '/' 0x2F) sorts BEFORE "Album/"; "AlbumX"
+	// ('X' 0x58 > '0' 0x30) sorts AFTER "Album0". They bracket the "Album"
+	// prefix on both sides of the byte range — neither may be counted
+	// under "Album".
+	tracks := []struct {
+		path string
+		size int64
+	}{
+		{"Album/01.flac", 100},
+		{"Album/02.flac", 200},
+		{"Album/Disc 2/03.flac", 300}, // nested, still under Album
+		{"Album 2/01.flac", 400},      // trailing-boundary sibling before "Album/"
+		{"AlbumX/01.flac", 500},       // sibling after "Album0"
+	}
+	for _, tr := range tracks {
+		if _, err := s.db.Exec(
+			`INSERT INTO tracks(path, size, mtime_ns, tags_json, indexed_at) VALUES (?,?,1,?,1)`,
+			tr.path, tr.size, tagsJSON,
+		); err != nil {
+			t.Fatalf("insert %q: %v", tr.path, err)
+		}
+	}
+	// One upscaled + one optimized variant under Album, plus a variant
+	// under the "Album 2" sibling that must NOT roll up into Album.
+	variants := []VariantRow{
+		{SourcePath: "Album/01.flac", VariantID: "upscaled-v2-192000-24", SidecarPath: "/tmp/u.flac", Format: "flac", SampleRate: 192000, BitsPerSample: 24, SizeBytes: 1000, SourceMTimeNS: 1, SourceSize: 100, SoxSettings: "{}", CreatedAt: 1},
+		{SourcePath: "Album/02.flac", VariantID: "optimized-v2-48000-16", SidecarPath: "/tmp/o.flac", Format: "flac", SampleRate: 48000, BitsPerSample: 16, SizeBytes: 60, SourceMTimeNS: 1, SourceSize: 200, SoxSettings: "{}", CreatedAt: 1},
+		{SourcePath: "Album 2/01.flac", VariantID: "upscaled-v2-192000-24", SidecarPath: "/tmp/s.flac", Format: "flac", SampleRate: 192000, BitsPerSample: 24, SizeBytes: 9999, SourceMTimeNS: 1, SourceSize: 400, SoxSettings: "{}", CreatedAt: 1},
+	}
+	for _, v := range variants {
+		if err := s.UpsertVariant(ctx, v); err != nil {
+			t.Fatalf("UpsertVariant %q: %v", v.SourcePath, err)
+		}
+	}
+
+	for _, prefix := range []string{"Album", "Album 2", "AlbumX"} {
+		// Reference: the pre-fix LIKE form, run against the same DB.
+		var wantTracks int
+		var wantSize int64
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT COUNT(*), COALESCE(SUM(size),0) FROM tracks WHERE path LIKE ? ESCAPE '\'`,
+			likeEscape(prefix)+`/%`,
+		).Scan(&wantTracks, &wantSize); err != nil {
+			t.Fatalf("reference track count %q: %v", prefix, err)
+		}
+		var wantUp, wantOpt int
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT COUNT(DISTINCT source_path) FROM track_variants WHERE source_path LIKE ? ESCAPE '\' AND variant_id LIKE 'upscaled-%'`,
+			likeEscape(prefix)+`/%`,
+		).Scan(&wantUp); err != nil {
+			t.Fatalf("reference upscaled count %q: %v", prefix, err)
+		}
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT COUNT(DISTINCT source_path) FROM track_variants WHERE source_path LIKE ? ESCAPE '\' AND variant_id LIKE 'optimized-%'`,
+			likeEscape(prefix)+`/%`,
+		).Scan(&wantOpt); err != nil {
+			t.Fatalf("reference optimized count %q: %v", prefix, err)
+		}
+
+		r, err := s.RollupByPrefix(ctx, prefix)
+		if err != nil {
+			t.Fatalf("RollupByPrefix(%q): %v", prefix, err)
+		}
+		if r.TrackCount != wantTracks {
+			t.Errorf("RollupByPrefix(%q).TrackCount = %d, want %d (LIKE form)", prefix, r.TrackCount, wantTracks)
+		}
+		if r.TotalSizeBytes != wantSize {
+			t.Errorf("RollupByPrefix(%q).TotalSizeBytes = %d, want %d", prefix, r.TotalSizeBytes, wantSize)
+		}
+		if r.UpscaledTrackCount != wantUp {
+			t.Errorf("RollupByPrefix(%q).UpscaledTrackCount = %d, want %d (LIKE form)", prefix, r.UpscaledTrackCount, wantUp)
+		}
+		if r.OptimizedTrackCount != wantOpt {
+			t.Errorf("RollupByPrefix(%q).OptimizedTrackCount = %d, want %d (LIKE form)", prefix, r.OptimizedTrackCount, wantOpt)
+		}
+
+		// CountTracksByPrefix takes a slash-terminated prefix.
+		gotN, err := s.CountTracksByPrefix(ctx, prefix+"/")
+		if err != nil {
+			t.Fatalf("CountTracksByPrefix(%q): %v", prefix+"/", err)
+		}
+		if gotN != wantTracks {
+			t.Errorf("CountTracksByPrefix(%q) = %d, want %d (LIKE form)", prefix+"/", gotN, wantTracks)
+		}
+	}
+
+	// Belt-and-braces boundary assertions independent of the reference
+	// math: "Album" owns exactly its own 3 tracks + 1/1 variants — never
+	// the bracketing "Album 2" / "AlbumX" siblings.
+	r, err := s.RollupByPrefix(ctx, "Album")
+	if err != nil {
+		t.Fatalf("RollupByPrefix(Album): %v", err)
+	}
+	if r.TrackCount != 3 {
+		t.Errorf("RollupByPrefix(\"Album\").TrackCount = %d, want 3 (excludes 'Album 2' + 'AlbumX')", r.TrackCount)
+	}
+	if r.UpscaledTrackCount != 1 || r.OptimizedTrackCount != 1 {
+		t.Errorf("RollupByPrefix(\"Album\") variants = up %d/opt %d, want 1/1 (excludes the 'Album 2' variant)", r.UpscaledTrackCount, r.OptimizedTrackCount)
 	}
 }
 

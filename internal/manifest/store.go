@@ -2857,27 +2857,15 @@ func (s *Store) CountTracks(ctx context.Context) (int, error) {
 // (`json_extract` returns NULL) are skipped at the SQL layer so the
 // caller's set logic doesn't have to handle empty strings explicitly.
 func (s *Store) ArtworkMBIDsInUse(ctx context.Context) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	// The WHERE clause already guarantees non-null, non-empty values, so
+	// the shared enumerator's plain-string scan is safe — no NullString
+	// re-filter needed. Mirrors DistinctReleaseMBIDs / DistinctArtistMBIDs.
+	return collectStringColumn(s.db.QueryContext(ctx, `
 		SELECT DISTINCT json_extract(tags_json, '$.artworkMBID')
 		FROM tracks
 		WHERE json_extract(tags_json, '$.artworkMBID') IS NOT NULL
 		  AND json_extract(tags_json, '$.artworkMBID') != ''
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var v sql.NullString
-		if err := rows.Scan(&v); err != nil {
-			return nil, err
-		}
-		if v.Valid && v.String != "" {
-			out = append(out, v.String)
-		}
-	}
-	return out, rows.Err()
+	`))
 }
 
 // EnrichmentCounts returns the library-wide enrichment counters used
@@ -3028,17 +3016,25 @@ func (s *Store) CountTracksUnderRoot(ctx context.Context, rootBase string, multi
 	return s.CountTracksByPrefix(ctx, filepath.Base(rootBase)+"/")
 }
 
-// CountTracksByPrefix returns the number of track rows whose path begins
-// with prefix. In multi-root mode the admin console passes
-// "<rootBasename>/" to get a per-root count. prefix is matched literally —
-// "_" and "%" are escaped via the ESCAPE clause so a root named "foo_bar"
-// isn't treated as a LIKE wildcard.
+// CountTracksByPrefix returns the number of track rows under the folder
+// prefix. In multi-root mode the admin console passes "<rootBasename>/"
+// to get a per-root count.
+//
+// Scoped with the byte-range form `path >= base||'/' AND path < base||'0'`
+// (base = prefix with any trailing '/' stripped; '0' is the ASCII
+// successor of '/') — the established sibling idiom (RollupByPrefix /
+// EligibleRollupByPrefix). Numerically identical to the prior
+// `LIKE 'base/%'` form for folder prefixes, but the range predicate rides
+// the BINARY-collated `path` PRIMARY KEY instead of a case-insensitive
+// LIKE that forfeits the index and full-scans. A pure byte comparison
+// needs no LIKE-wildcard escaping, so a root named "foo_bar" is matched
+// literally without an ESCAPE clause.
 func (s *Store) CountTracksByPrefix(ctx context.Context, prefix string) (int, error) {
-	escaped := likeEscape(prefix)
+	base := strings.TrimSuffix(prefix, "/")
 	var n int
 	err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM tracks WHERE path LIKE ? ESCAPE '\'`,
-		escaped+"%",
+		`SELECT COUNT(*) FROM tracks WHERE path >= ? || '/' AND path < ? || '0'`,
+		base, base,
 	).Scan(&n)
 	return n, err
 }
@@ -3691,7 +3687,14 @@ func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(ctx context.Context, 
 	if err != nil {
 		return 0, err
 	}
-	deleted, _ := res.RowsAffected()
+	deleted, raErr := res.RowsAffected()
+	if raErr != nil {
+		// The DELETE ran; only the count read failed (modernc/sqlite
+		// permits it though it shouldn't in practice). Surface it rather
+		// than silently returning a 0 the scanner logs as an undercount,
+		// and still commit the reap. Matches RecoverInterruptedBatches.
+		logger.Warn("IncrementMissingTracks: RowsAffected after threshold delete failed", "err", raErr)
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
@@ -3741,7 +3744,12 @@ func (s *Store) IncrementMissingFoldersAndDeleteAtThreshold(ctx context.Context,
 	if err != nil {
 		return 0, err
 	}
-	deleted, _ := res.RowsAffected()
+	deleted, raErr := res.RowsAffected()
+	if raErr != nil {
+		// See IncrementMissingTracks: surface the count-read failure
+		// rather than logging a silent 0-row undercount, still commit.
+		logger.Warn("IncrementMissingFolders: RowsAffected after threshold delete failed", "err", raErr)
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
@@ -3834,8 +3842,18 @@ func (s *Store) ClearMissingCounts(ctx context.Context) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	tCount, _ := tRes.RowsAffected()
-	fCount, _ := fRes.RowsAffected()
+	// Both DELETEs already ran in the tx; a count-read failure
+	// (modernc/sqlite permits it, though it shouldn't in practice) must
+	// not silently undercount the operator's cleared total — surface it
+	// and still commit. Matches RecoverInterruptedBatches.
+	tCount, tErr := tRes.RowsAffected()
+	if tErr != nil {
+		logger.Warn("ClearMissingCounts: RowsAffected for tracks delete failed", "err", tErr)
+	}
+	fCount, fErr := fRes.RowsAffected()
+	if fErr != nil {
+		logger.Warn("ClearMissingCounts: RowsAffected for folders delete failed", "err", fErr)
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
@@ -4804,31 +4822,39 @@ func (s *Store) RollupByPrefix(ctx context.Context, prefix string) (FolderRollup
 		}
 		return out, nil
 	}
-	escaped := likeEscape(prefix)
-	pattern := escaped + `/%`
+	// Non-empty prefix: scope to the subtree with the byte-range form
+	// `path >= prefix||'/' AND path < prefix||'0'` ('0' is the ASCII
+	// successor of '/'), the established sibling idiom in
+	// EligibleRollupByPrefix / childFolderRollupSelect. SQLite's default
+	// LIKE is case-insensitive, so `path LIKE 'prefix/%'` can't be
+	// answered from the BINARY-collated `path` PRIMARY KEY and forces a
+	// full-table scan; the range predicate rides the index. The two
+	// track_variants counters collapse into ONE conditional-aggregation
+	// scan over the same source_path range (mirrors the empty-prefix
+	// branch above; Gemini on PR #340) instead of scanning the table
+	// twice. Numerically identical to the prior `LIKE 'prefix/%'` form
+	// for folder-derived prefixes (which never differ only by case).
 	var out FolderRollup
 	if err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*), COALESCE(SUM(size), 0)
 		  FROM tracks
-		 WHERE path LIKE ? ESCAPE '\'
-	`, pattern).Scan(&out.TrackCount, &out.TotalSizeBytes); err != nil {
+		 WHERE path >= ? || '/' AND path < ? || '0'
+	`, prefix, prefix).Scan(&out.TrackCount, &out.TotalSizeBytes); err != nil {
 		return FolderRollup{}, fmt.Errorf("rollup tracks %q: %w", prefix, err)
 	}
 	if err := s.db.QueryRowContext(ctx, `
-		SELECT COUNT(DISTINCT source_path), COALESCE(SUM(size_bytes), 0)
+		SELECT
+		  COUNT(DISTINCT CASE WHEN variant_id LIKE 'upscaled-%'  THEN source_path END),
+		  COALESCE(SUM(CASE WHEN variant_id LIKE 'upscaled-%'  THEN size_bytes END), 0),
+		  COUNT(DISTINCT CASE WHEN variant_id LIKE 'optimized-%' THEN source_path END),
+		  COALESCE(SUM(CASE WHEN variant_id LIKE 'optimized-%' THEN size_bytes END), 0)
 		  FROM track_variants
-		 WHERE source_path LIKE ? ESCAPE '\'
-		   AND variant_id LIKE 'upscaled-%'
-	`, pattern).Scan(&out.UpscaledTrackCount, &out.UpscaledSizeBytes); err != nil {
-		return FolderRollup{}, fmt.Errorf("rollup upscale variants %q: %w", prefix, err)
-	}
-	if err := s.db.QueryRowContext(ctx, `
-		SELECT COUNT(DISTINCT source_path), COALESCE(SUM(size_bytes), 0)
-		  FROM track_variants
-		 WHERE source_path LIKE ? ESCAPE '\'
-		   AND variant_id LIKE 'optimized-%'
-	`, pattern).Scan(&out.OptimizedTrackCount, &out.OptimizedSizeBytes); err != nil {
-		return FolderRollup{}, fmt.Errorf("rollup optimize variants %q: %w", prefix, err)
+		 WHERE source_path >= ? || '/' AND source_path < ? || '0'
+	`, prefix, prefix).Scan(
+		&out.UpscaledTrackCount, &out.UpscaledSizeBytes,
+		&out.OptimizedTrackCount, &out.OptimizedSizeBytes,
+	); err != nil {
+		return FolderRollup{}, fmt.Errorf("rollup variants %q: %w", prefix, err)
 	}
 	return out, nil
 }
