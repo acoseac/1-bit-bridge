@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 )
 
@@ -878,5 +880,88 @@ func TestParseAIFFExtended_DegenerateEncodings(t *testing.T) {
 	}
 	if got := parseAIFFExtended([]byte{0x40, 0x0E}); got != 0 {
 		t.Errorf("short slice = %v, want 0", got)
+	}
+}
+
+// TestExtractWAV_TruncatedFmtStillGetsFolderCover pins B10: a WAV file
+// truncated mid-`fmt ` chunk, sitting in a folder with a cover.jpg, must
+// still be indexed AND pick up the folder-level cover fallback. Pre-fix
+// the fmt body short-read hard-returned the error, so the walker never
+// reached extractLocalArtwork and the cover was lost (the track was
+// still indexed with path-derived defaults, just cover-less).
+func TestExtractWAV_TruncatedFmtStillGetsFolderCover(t *testing.T) {
+	dir := t.TempDir()
+	cacheDir := t.TempDir()
+
+	// Valid-magic JPEG cover next to the audio file (FF D8 FF SOI marker).
+	if err := os.WriteFile(filepath.Join(dir, "cover.jpg"),
+		[]byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10}, 0o600); err != nil {
+		t.Fatalf("write cover: %v", err)
+	}
+
+	// RIFF/WAVE with a `fmt ` chunk declaring a 16-byte body but only 4
+	// bytes present before EOF → io.ReadFull short-reads mid-body.
+	var buf []byte
+	var le [4]byte
+	buf = append(buf, []byte("RIFF")...)
+	binary.LittleEndian.PutUint32(le[:], 0xFFFFFFFF) // outer form size is irrelevant to the walk
+	buf = append(buf, le[:]...)
+	buf = append(buf, []byte("WAVE")...)
+	buf = append(buf, []byte("fmt ")...)
+	binary.LittleEndian.PutUint32(le[:], 16) // declares a 16-byte body...
+	buf = append(buf, le[:]...)
+	buf = append(buf, 0x01, 0x00, 0x02, 0x00) // ...but only 4 bytes follow, then EOF
+
+	path := filepath.Join(dir, "truncated.wav")
+	if err := os.WriteFile(path, buf, 0o600); err != nil {
+		t.Fatalf("write wav: %v", err)
+	}
+
+	track := &Track{}
+	ec := &ExtractContext{ArtworkCacheDir: cacheDir, FolderArtCache: &sync.Map{}}
+	if err := extractWAVWithContext(path, track, ec); err != nil {
+		t.Fatalf("extractWAVWithContext returned error on a truncated fmt chunk (should salvage + fall through): %v", err)
+	}
+	if !strings.HasPrefix(track.ArtworkMBID, "local-") {
+		t.Errorf("ArtworkMBID = %q, want a local-<hash> value from the folder cover.jpg fallback", track.ArtworkMBID)
+	}
+}
+
+// TestParseWAVINFOBlock_AdvancesPastOddPaddedSubchunks guards the Q18
+// widen-before-add arithmetic: parseWAVINFOBlock must advance correctly
+// across an odd-size (pad-byte) sub-chunk and still surface a later field,
+// and must terminate cleanly (no panic / infinite loop) when a sub-chunk
+// declares a size larger than the remaining body.
+func TestParseWAVINFOBlock_AdvancesPastOddPaddedSubchunks(t *testing.T) {
+	var body []byte
+	add := func(id, text string) {
+		body = append(body, []byte(id)...)
+		var sz [4]byte
+		binary.LittleEndian.PutUint32(sz[:], uint32(len(text)))
+		body = append(body, sz[:]...)
+		body = append(body, []byte(text)...)
+		if len(text)%2 == 1 {
+			body = append(body, 0x00) // IFF pad byte
+		}
+	}
+	add("INAM", "Odd")  // len 3 → padded; advance must land exactly on IART
+	add("IART", "Even") // len 4
+
+	tr := &Track{}
+	parseWAVINFOBlock(body, tr)
+	if tr.Title != "Odd" {
+		t.Errorf("Title = %q, want %q", tr.Title, "Odd")
+	}
+	if tr.Artist != "Even" {
+		t.Errorf("Artist = %q, want %q (advance desynced past the odd-size pad?)", tr.Artist, "Even")
+	}
+
+	// A sub-chunk whose declared size overruns the remaining body must
+	// break the loop cleanly rather than panic or spin.
+	overrun := append([]byte("INAM"), 0xFF, 0xFF, 0xFF, 0x7F) // size 0x7FFFFFFF, no payload
+	trOverrun := &Track{}
+	parseWAVINFOBlock(overrun, trOverrun) // must return without hanging or panicking
+	if trOverrun.Title != "" {
+		t.Errorf("Title = %q, want empty (overrun sub-chunk must be skipped)", trOverrun.Title)
 	}
 }

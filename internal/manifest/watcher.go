@@ -97,6 +97,13 @@ func NewWatcher(scanner *Scanner, debounce time.Duration) (*Watcher, error) {
 // watches for the new subtree so newly-mkdir'd folders inside an
 // already-watched root get picked up automatically.
 func (wt *Watcher) Run(ctx context.Context) error {
+	// Stop armed debounce timers on EVERY exit path — ctx cancel AND the
+	// fsnotify Events/Errors channels closing (an internal fatal error) —
+	// not just the ctx-cancel branch. Without this, the `!ok` returns
+	// below would leave armed timers running that fire ScanSubtree after
+	// Run has already returned. cancelAllPending is idempotent, so the
+	// defer is safe on every path.
+	defer wt.cancelAllPending()
 	defer wt.w.Close()
 
 	roots := wt.scanner.Roots()
@@ -110,7 +117,6 @@ func (wt *Watcher) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			wt.cancelAllPending()
 			return nil
 		case ev, ok := <-wt.w.Events:
 			if !ok {
@@ -168,14 +174,26 @@ func (wt *Watcher) addTree(root string) error {
 			return nil
 		}
 		if addErr := wt.w.Add(path); addErr != nil {
-			if isWatchLimitError(addErr) {
+			switch {
+			case isWatchLimitError(addErr):
 				watcherLogger.Error("watch limit reached — periodic scan covers the gap; raise fs.inotify.max_user_watches to fix",
 					"path", path, "err", addErr,
 					"hint", "echo fs.inotify.max_user_watches=524288 | sudo tee -a /etc/sysctl.d/99-bridge.conf && sudo sysctl -p")
 				limitHit = true
 				return nil
+			case isOpenFileLimitError(addErr):
+				// fd-exhaustion (EMFILE) is a DIFFERENT limit from the
+				// watch budget — pointing the operator at
+				// max_user_watches here would send them down the wrong
+				// path. Same degrade-to-periodic fallback, different hint.
+				watcherLogger.Error("open-file limit reached — periodic scan covers the gap; raise the open-files limit to fix",
+					"path", path, "err", addErr,
+					"hint", "raise the process open-files limit (ulimit -n, or LimitNOFILE= in the systemd unit) or the system-wide fs.file-max")
+				limitHit = true
+				return nil
+			default:
+				watcherLogger.Warn("watch add", "path", path, "err", addErr)
 			}
-			watcherLogger.Warn("watch add", "path", path, "err", addErr)
 		}
 		return nil
 	})
@@ -246,10 +264,12 @@ func (wt *Watcher) scheduleScan(ctx context.Context, dir string) {
 	wt.pending[dir] = ps
 }
 
-// cancelAllPending stops every armed debounce timer. Called from
-// Run()'s ctx-cancel branch so a shutting-down server doesn't
-// dispatch a flurry of scans against a context the scanner is
-// about to refuse.
+// cancelAllPending stops every armed debounce timer. Called via a
+// defer in Run() so every exit path — ctx cancel AND the fsnotify
+// Events/Errors channels closing — stops armed timers before Run
+// returns; otherwise a timer could fire ScanSubtree against a context
+// the scanner is about to refuse (or after Run has already returned).
+// Idempotent: a second call over an already-drained map is a no-op.
 func (wt *Watcher) cancelAllPending() {
 	wt.mu.Lock()
 	defer wt.mu.Unlock()
@@ -266,15 +286,17 @@ func dirStat(path string) (fs.FileInfo, error) {
 	return os.Stat(path)
 }
 
-// isWatchLimitError matches the platform-specific "too many
-// watches" error fsnotify surfaces. On Linux this is ENOSPC; on
-// other platforms the watch budget is effectively unlimited so
-// false is the right default. We rely on the error string match
-// rather than syscall.ENOSPC so the helper compiles cleanly on
-// Windows / macOS where ENOSPC isn't relevant to the watcher
-// budget. The match is conservative — only the canonical strings
-// fsnotify documents — so it doesn't fire on unrelated disk-full
-// errors.
+// isWatchLimitError matches the inotify WATCH-budget exhaustion errors
+// fsnotify surfaces — ENOSPC ("no space left on device", the
+// fs.inotify.max_user_watches ceiling) and the documented "watch limit
+// reached". On non-Linux platforms the watch budget is effectively
+// unlimited so false is the right default. We rely on the error string
+// match rather than syscall.ENOSPC so the helper compiles cleanly on
+// Windows / macOS where ENOSPC isn't relevant to the watcher budget.
+// The match is conservative — only the canonical strings — so it
+// doesn't fire on unrelated disk-full errors. fd-exhaustion (EMFILE,
+// "too many open files") is deliberately NOT matched here — it's a
+// different limit with a different remedy; see isOpenFileLimitError.
 func isWatchLimitError(err error) bool {
 	if err == nil {
 		return false
@@ -282,7 +304,6 @@ func isWatchLimitError(err error) bool {
 	s := err.Error()
 	for _, marker := range []string{
 		"no space left on device",
-		"too many open files",
 		"watch limit reached",
 	} {
 		if strings.Contains(s, marker) {
@@ -290,4 +311,19 @@ func isWatchLimitError(err error) bool {
 		}
 	}
 	return false
+}
+
+// isOpenFileLimitError matches fd-exhaustion (EMFILE / ENFILE, surfaced
+// as "too many open files") which inotify raises when the process- or
+// system-wide open-file limit is hit while arming a watch. Distinct
+// from isWatchLimitError: the remedy is raising the open-files limit
+// (ulimit -n / systemd LimitNOFILE / fs.file-max), NOT
+// fs.inotify.max_user_watches. Same degrade-to-periodic fallback, but a
+// different operator hint — pointing an fd-exhausted host at
+// max_user_watches would send the operator down the wrong path.
+func isOpenFileLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "too many open files")
 }

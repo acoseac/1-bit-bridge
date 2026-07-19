@@ -476,14 +476,26 @@ func findAtom(r io.ReadSeeker, name string, start, endBound uint64) (offset, hea
 		case 1:
 			var bigSize [8]byte
 			if _, err := io.ReadFull(r, bigSize[:]); err != nil {
+				if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+					// Truncated between the size==1 marker and its 8-byte
+					// largesize field — treat as not-found, mirroring the
+					// header read above. A truncated-but-openable atom
+					// tree must suppress (leave bits/rate nil) like an
+					// absent box, not propagate as a real I/O failure.
+					return 0, 0, 0, nil
+				}
 				return 0, 0, 0, err
 			}
 			atomSize = binary.BigEndian.Uint64(bigSize[:])
 			atomHeaderSize = 16
 		}
 		if atomSize < atomHeaderSize {
-			// Malformed — atom claims smaller than its own header.
-			return 0, 0, 0, fmt.Errorf("mp4: atom %q at %d has size %d < header (%d)", atomType, cursor, atomSize, atomHeaderSize)
+			// Malformed — atom claims smaller than its own header. This is
+			// a corrupt-but-present atom tree; wrap with
+			// errMP4StructureNotFound so callers suppress it (return 0
+			// bits / no error) like an ABSENT box rather than surfacing a
+			// scanLogger.Warn for what is a structure problem, not I/O.
+			return 0, 0, 0, fmt.Errorf("%w: atom %q at %d has size %d < header (%d)", errMP4StructureNotFound, atomType, cursor, atomSize, atomHeaderSize)
 		}
 		if atomType == name {
 			return cursor, atomHeaderSize, atomSize, nil

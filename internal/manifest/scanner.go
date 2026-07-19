@@ -423,6 +423,15 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	writerWG.Wait()
 
 	count := int(committed.Load())
+	// A ctx cancel during the workers/writer Wait window (clean walk
+	// already drained, walkErr==nil) MUST NOT run the deletion pass,
+	// stamp last_full_scan, or run reconciliation — a cut-short full
+	// scan would otherwise be indistinguishable from a complete one and
+	// falsely advance the dashboard's "last full scan". Mirror of the
+	// guard ScanSubtree carries (ctx first, then walkErr).
+	if ctx.Err() != nil {
+		return count, ctx.Err()
+	}
 	if walkErr != nil {
 		return count, walkErr
 	}
@@ -1249,11 +1258,12 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 
 	// Surface cancellation so a partial subtree update doesn't
 	// look like a clean completion (CodeRabbit Major post-merge
-	// on PR #83). `Scan` does the same; converting ctx.Err() to
-	// nil here would let the watcher's debounce loop log a
-	// success line for a scan that actually only committed a
-	// prefix of the work. Skip the deletion pass on cancel for
-	// the same reason — half-walked state is a poor input.
+	// on PR #83). `Scan` carries the identical guard before its
+	// own deletion pass; converting ctx.Err() to nil here would
+	// let the watcher's debounce loop log a success line for a
+	// scan that actually only committed a prefix of the work.
+	// Skip the deletion pass on cancel for the same reason —
+	// half-walked state is a poor input.
 	if ctx.Err() != nil {
 		return int(committed.Load()), ctx.Err()
 	}
@@ -1609,9 +1619,9 @@ func relPath(root, abs string, multiRoot bool) string {
 // `parts[len-1]`.
 func fillFromPath(t *Track, rel string, multiRoot bool) {
 	parts := strings.Split(rel, "/")
-	if len(parts) == 0 {
-		return
-	}
+	// (strings.Split never returns a zero-length slice — even rel=="" yields
+	// [""] — so parts[len-1] below is always in bounds; the real emptiness
+	// guards are the len(parts) >= 2 / >= 3 checks further down.)
 	// Title = filename without extension.
 	base := parts[len(parts)-1]
 	if ext := filepath.Ext(base); ext != "" {

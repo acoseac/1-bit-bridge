@@ -376,8 +376,12 @@ func extractByFormat(absPath string, t *Track, ec *ExtractContext) error {
 		}
 		defer f.Close()
 		if err := extractFLACFormatFromReader(f, absPath, t); err != nil {
-			// Format parse failure is fine — tags may still work.
-			_ = err
+			// Format parse failure is non-fatal — the tag pass below may
+			// still populate the track — but a corrupt STREAMINFO leaves
+			// it with no sampleRate/bits/duration, so surface a breadcrumb
+			// (DSF returns the err → scanner logs; MP3/MP4 log at Warn).
+			// Kept non-fatal: don't fail the whole extraction.
+			scanLogger.Warn("flac format parse failed; sampleRate/bits/duration will be nil", "path", absPath, "err", err)
 		}
 		if _, err := f.Seek(0, io.SeekStart); err != nil {
 			return err
