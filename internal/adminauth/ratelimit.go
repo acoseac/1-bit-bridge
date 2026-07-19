@@ -116,6 +116,17 @@ func (rl *RateLimiter) Stop() {
 // after a verification attempt fails. Allow / RecordFailure are
 // split so a successful Verify doesn't artificially bump the
 // counter on the success path.
+//
+// Concurrency note: Allow (check) and RecordFailure (increment) are
+// two independent locked ops. A caller that runs them around a slow
+// verify (bcrypt ~250 ms) lets N concurrent requests all observe
+// `attempts < max` before any of them records, so the ceiling can be
+// exceeded by the in-flight concurrency. That overrun is bounded and
+// mostly harmless — bcrypt's per-attempt cost is the real throughput
+// limiter, and this map is best-effort throttling on top of it — but
+// a caller that wants the count to stay consistent under concurrency
+// should prefer AllowAndReserve, which folds the check and the
+// increment into a single locked op.
 func (rl *RateLimiter) Allow(clientIP, username string) bool {
 	key := clientIP + "|" + username
 	rl.mu.Lock()
@@ -162,6 +173,57 @@ func (rl *RateLimiter) RecordFailure(clientIP, username string) {
 	}
 	b.attempts++
 	b.lastAttemptAt = now
+}
+
+// AllowAndReserve is the concurrency-safe consolidation of Allow +
+// RecordFailure: it checks the (clientIP, username) bucket against
+// the failure threshold AND reserves an attempt slot in ONE locked
+// op, returning true when the attempt may proceed. Because the check
+// and the increment can't be interleaved by a concurrent caller, at
+// most RateLimitMaxAttempts requests slip past the ceiling — closing
+// the window that the separate Allow-then-verify-then-RecordFailure
+// sequence leaves open across the slow bcrypt verify.
+//
+// The reserved slot is OPTIMISTIC and models a would-be failure: a
+// caller whose subsequent verify SUCCEEDS MUST call RecordSuccess to
+// clear the whole bucket, which preserves the original "a successful
+// login doesn't leave the counter bumped" contract. A caller whose
+// verify FAILS needs no follow-up — the reservation already counted
+// it (do NOT also call RecordFailure, or the attempt double-counts).
+//
+// (The admin login handler still uses the Allow/RecordFailure split;
+// swapping it to AllowAndReserve + RecordSuccess is the one-line
+// change that activates this guard — see the handler's doc.)
+func (rl *RateLimiter) AllowAndReserve(clientIP, username string) bool {
+	key := clientIP + "|" + username
+	now := rl.now()
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	b, ok := rl.buckets[key]
+	if !ok || now.Sub(b.firstAttempt) > RateLimitWindow {
+		// Fresh window (new key, or the previous window expired):
+		// admit and open a bucket with one reserved attempt. Mirror
+		// RecordFailure's map-size guard so a high-cardinality spray
+		// can't grow the map without bound.
+		if !ok && len(rl.buckets) >= maxBuckets {
+			rl.evictOldestLocked(evictBatch)
+		}
+		rl.buckets[key] = &bucket{
+			attempts:      1,
+			firstAttempt:  now,
+			lastAttemptAt: now,
+		}
+		return true
+	}
+	// At the ceiling: refuse WITHOUT reserving or bumping lastAttemptAt
+	// — a throttled request isn't an attempt and must not slide the
+	// bucket's liveness forward. Predicate matches Allow's `< max`.
+	if b.attempts >= RateLimitMaxAttempts {
+		return false
+	}
+	b.attempts++
+	b.lastAttemptAt = now
+	return true
 }
 
 // evictOldestLocked drops the n oldest entries (by lastAttemptAt)

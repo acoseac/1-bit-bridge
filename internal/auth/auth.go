@@ -35,6 +35,16 @@ import (
 
 var logger = logging.Component("auth")
 
+// beforeValidatePersistHook is a test-only seam (nil in production)
+// fired inside Validate's debounced-persist branch, immediately
+// before the pre-persist reloadIfStale. It lets a test drop a
+// sibling-process write into the exact window the reload guards, to
+// prove the debounced persist doesn't clobber a concurrent mint.
+// Follows the afterExtractHookForTests convention in the manifest
+// scanner: production cost is one nil-check per persist (at most once
+// per lastUsedFlushInterval per token), negligible.
+var beforeValidatePersistHook func()
+
 const (
 	// rawTokenBytes is the number of random bytes per minted token.
 	// 32 bytes → 256 bits → 43 base64url chars (no padding).
@@ -394,14 +404,34 @@ func (s *Store) Validate(rawToken string) (Token, bool) {
 			// round-trip is readable; the debounce gate uses `time.Since`
 			// which reads the monotonic clock and so survives NTP jumps.
 			s.tokens[i].LastUsedAt = now.UTC()
+			// Capture the matched token BEFORE any reload below. The
+			// pre-persist reloadIfStale can swap s.tokens for a fresh
+			// slice (different length/order after a sibling write), so
+			// s.tokens[i] would no longer name this match — return the
+			// captured copy instead. Value-identical to s.tokens[i] on
+			// the no-reload path.
+			matched := s.tokens[i]
 			if time.Since(s.lastUsedFlush) >= lastUsedFlushInterval {
+				if beforeValidatePersistHook != nil {
+					beforeValidatePersistHook()
+				}
+				// Cross-process safety: a sibling `bridge pair` /
+				// `bridge revoke` may have rewritten tokens.json since
+				// the top-of-method reloadIfStale ran — s.mu is
+				// process-local and does NOT serialize another PROCESS's
+				// write. Without this reload, persist() would write our
+				// stale slice back and silently drop a freshly-minted
+				// sibling token (or resurrect a revoked one). reload's
+				// per-token merge preserves the LastUsedAt bump above, so
+				// the reload can't lose it. Mirrors RecordClientVersion.
+				_ = s.reloadIfStale()
 				if err := s.persist(); err != nil {
 					logger.Error("persist LastUsedAt", "err", err)
 				}
 				// persist() stamps `lastUsedFlush` on success; nothing to
 				// do here on either branch.
 			}
-			return s.tokens[i], true
+			return matched, true
 		}
 	}
 	return Token{}, false

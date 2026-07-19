@@ -3,6 +3,7 @@ package backup_test
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -14,6 +15,23 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/dsn"
 	_ "modernc.org/sqlite"
 )
+
+// writeSnapshotManifest hand-writes a minimal valid manifest.json into
+// dir (marking it a "completed" snapshot for List / ReapOrphans). Uses
+// the exported Manifest shape so the schema tracks backup.SchemaVersion.
+func writeSnapshotManifest(t *testing.T, dir string, files ...string) {
+	t.Helper()
+	data, err := json.Marshal(backup.Manifest{
+		SchemaVersion: backup.SchemaVersion,
+		Files:         files,
+	})
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, backup.ManifestFile), data, 0o600); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+}
 
 // Snapshot must capture every present input file, write a manifest
 // describing them, and produce a directory under
@@ -216,6 +234,57 @@ func TestRestoreRemovesStaleWALSHM(t *testing.T) {
 	}
 }
 
+// A non-ErrNotExist stat error on a snapshot source file (permission
+// flap, symlink loop, transient I/O) MUST abort Restore BEFORE it
+// removes the live -wal/-shm sidecars — otherwise it deletes the WAL
+// for a source it never actually reads, then fails at copyFile's
+// os.Open, leaving the live DB inconsistent. Mirrors Snapshot's
+// non-ErrNotExist stat handling.
+func TestRestoreNonNotExistStatErrorPreservesLiveWAL(t *testing.T) {
+	tmp := t.TempDir()
+	snapDir := filepath.Join(tmp, "snap")
+	if err := os.MkdirAll(snapDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Manifest lists bridge.db so Restore reaches the per-file loop.
+	writeSnapshotManifest(t, snapDir, backup.ManifestDBFileName)
+
+	// Make the snapshot's bridge.db a self-referential symlink → os.Stat
+	// (which follows) returns ELOOP: a non-ErrNotExist error, deterministic
+	// and cheap. Skip where symlinks aren't available (e.g. unprivileged
+	// Windows) rather than fail.
+	srcDB := filepath.Join(snapDir, backup.ManifestDBFileName)
+	if err := os.Symlink(srcDB, srcDB); err != nil {
+		t.Skipf("symlinks unavailable on this host: %v", err)
+	}
+
+	// Live DB + its WAL/SHM sidecars that MUST survive an aborted restore.
+	target := filepath.Join(tmp, "live", "bridge.db")
+	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	wal := target + "-wal"
+	shm := target + "-shm"
+	for _, p := range []string{target, wal, shm} {
+		if err := os.WriteFile(p, []byte("live"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	err := backup.Restore(snapDir, backup.Targets{ManifestDB: target})
+	if err == nil {
+		t.Fatal("Restore should have failed on the non-ErrNotExist stat error")
+	}
+	// The load-bearing assertion: the live WAL/SHM were NOT deleted by
+	// the aborted restore.
+	if !pathExists(t, wal) {
+		t.Error("live -wal was deleted by an aborted Restore")
+	}
+	if !pathExists(t, shm) {
+		t.Error("live -shm was deleted by an aborted Restore")
+	}
+}
+
 // Restore must refuse a snapshot whose manifest schema doesn't match
 // — otherwise a future schema change could silently overwrite live
 // state with an incompatible older format.
@@ -368,6 +437,111 @@ func TestPruneIsBestEffortPastALockedDir(t *testing.T) {
 	}
 	if !pathExists(t, dirs[2]) {
 		t.Errorf("newest (kept) dir %q must remain", dirs[2])
+	}
+}
+
+// ReapOrphans reclaims crash-orphaned partial snapshots — dirs with a
+// near-full bridge.db copy but NO manifest.json (writer died between
+// the DB copy and the manifest write). `List` skips them, so Prune's
+// keep-policy can never see them; they'd accumulate unbounded across
+// hard crashes. The grace spares an in-progress snapshot (fresh mtime).
+func TestReapOrphansRemovesStaleManifestlessDirsSparesFreshAndValid(t *testing.T) {
+	root := t.TempDir()
+	grace := time.Hour
+	now := time.Now()
+
+	mkdir := func(name string) string {
+		t.Helper()
+		p := filepath.Join(root, name)
+		if err := os.MkdirAll(p, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	age := func(dir string, d time.Duration) {
+		t.Helper()
+		ts := now.Add(-d)
+		if err := os.Chtimes(dir, ts, ts); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// (a) Old orphan (no manifest, mtime well past the grace) → reaped.
+	oldOrphan := mkdir("2026-01-01T00-00-00Z")
+	if err := os.WriteFile(filepath.Join(oldOrphan, backup.ManifestDBFileName), []byte("partial-db"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	age(oldOrphan, 2*grace)
+
+	// (b) Fresh orphan (no manifest, recent mtime) → spared (may be an
+	// in-progress snapshot).
+	freshOrphan := mkdir("2026-01-02T00-00-00Z")
+	if err := os.WriteFile(filepath.Join(freshOrphan, backup.ManifestDBFileName), []byte("in-progress-db"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	age(freshOrphan, time.Minute)
+
+	// (c) Completed old snapshot (HAS a manifest) → spared regardless of
+	// age (Prune's keep-policy owns it, not ReapOrphans).
+	validOld := mkdir("2026-01-03T00-00-00Z")
+	writeSnapshotManifest(t, validOld, backup.ManifestDBFileName)
+	age(validOld, 3*grace)
+
+	reaped, err := backup.ReapOrphans(root, grace)
+	if err != nil {
+		t.Fatalf("ReapOrphans: %v", err)
+	}
+	if reaped != 1 {
+		t.Errorf("reaped = %d, want 1 (only the old orphan)", reaped)
+	}
+	if pathExists(t, oldOrphan) {
+		t.Error("old manifest-less orphan should have been reaped")
+	}
+	if !pathExists(t, freshOrphan) {
+		t.Error("fresh manifest-less dir (possible in-progress snapshot) must be spared")
+	}
+	if !pathExists(t, validOld) {
+		t.Error("completed snapshot (has manifest.json) must be spared regardless of age")
+	}
+}
+
+// Prune wires ReapOrphans, so a crash-orphaned dir is reclaimed on the
+// next snapshot's prune even when the keep-policy would otherwise never
+// see it. Runs regardless of the keep value.
+func TestPruneReapsCrashOrphans(t *testing.T) {
+	dataDir := t.TempDir()
+	src := primeLiveState(t, dataDir)
+	backupsRoot := filepath.Join(dataDir, backup.BackupsDirName)
+
+	// One valid snapshot (has a manifest) → must survive the prune.
+	valid, err := backup.Snapshot(t.Context(), src)
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+
+	// A crash orphan: a manifest-less dir with a well-aged mtime.
+	orphan := filepath.Join(backupsRoot, "2020-01-01T00-00-00Z")
+	if err := os.MkdirAll(orphan, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(orphan, backup.ManifestDBFileName), []byte("partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(orphan, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	// keep=5 (> the single valid snapshot) so the keep-policy deletes
+	// nothing — the orphan reclamation is entirely ReapOrphans's doing.
+	if _, err := backup.Prune(backupsRoot, 5); err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if pathExists(t, orphan) {
+		t.Error("Prune should have reaped the crash-orphaned manifest-less dir")
+	}
+	if !pathExists(t, valid) {
+		t.Error("Prune reaped a valid snapshot")
 	}
 }
 

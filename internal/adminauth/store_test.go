@@ -223,6 +223,66 @@ func TestSessionHardCapExpires(t *testing.T) {
 	}
 }
 
+func TestCreateSessionSweepsExpiredSessions(t *testing.T) {
+	// Nothing sweeps sessions in the background, so a session created
+	// and never re-validated would linger until its 7-day hard cap.
+	// CreateSession must sweep the expired ones before inserting the
+	// new one, keeping the map proportional to LIVE sessions rather
+	// than to lifetime logins.
+	s := newStore(t)
+	_, _ = s.MintInitial("admin")
+	tick := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return tick }
+
+	if _, err := s.CreateSession("admin"); err != nil {
+		t.Fatal(err)
+	}
+	if s.SessionCount() != 1 {
+		t.Fatalf("SessionCount = %d, want 1", s.SessionCount())
+	}
+
+	// Cross the idle timeout WITHOUT re-validating the first session.
+	tick = tick.Add(SessionIdleTimeout + time.Minute)
+	if _, err := s.CreateSession("admin"); err != nil {
+		t.Fatal(err)
+	}
+	// Only the fresh session should remain — the stale one was swept.
+	if got := s.SessionCount(); got != 1 {
+		t.Errorf("SessionCount = %d after expired-session sweep, want 1", got)
+	}
+}
+
+func TestCreateSessionEvictsOldestAtCap(t *testing.T) {
+	// When the map is full of genuinely-live sessions, a new login must
+	// evict the least-recently-used one rather than grow past the cap.
+	s := newStore(t)
+	_, _ = s.MintInitial("admin")
+	tick := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return tick }
+
+	// Fill to the cap. Step the clock so LastUsedAt ordering is
+	// deterministic — the first-created session is the LRU eviction
+	// target. Every session stays within the idle window, so the
+	// sweep never fires and the cap is the only bound exercised.
+	for i := 0; i < maxSessions; i++ {
+		if _, err := s.CreateSession("admin"); err != nil {
+			t.Fatal(err)
+		}
+		tick = tick.Add(time.Second)
+	}
+	if s.SessionCount() != maxSessions {
+		t.Fatalf("SessionCount = %d, want %d", s.SessionCount(), maxSessions)
+	}
+
+	// One more login must hold the ceiling by evicting the oldest.
+	if _, err := s.CreateSession("admin"); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.SessionCount(); got != maxSessions {
+		t.Errorf("SessionCount = %d after cap eviction, want %d", got, maxSessions)
+	}
+}
+
 func TestConcurrentLoginsDoNotRace(t *testing.T) {
 	// Smoke-test under -race: many goroutines concurrently
 	// validating + creating + deleting sessions. Ensures the
