@@ -35,6 +35,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
@@ -231,12 +232,79 @@ func relayResponseHeaders(w http.ResponseWriter, resp *http.Response) {
 // inflate the parent function's cognitive complexity (Sonar S3776 on
 // PR #356). Behavior unchanged.
 func (p *Proxy) copyResponseBody(w http.ResponseWriter, resp *http.Response, rt *manifest.UPnPRouting) {
-	if _, copyErr := io.Copy(w, resp.Body); copyErr != nil {
+	// Wrap the upstream body in an idle-timeout reader. The pre-header
+	// ResponseHeaderTimeout (defaultClient) only covers up to the first
+	// byte; without a body-phase idle bound, an upstream that sends
+	// headers then wedges the BODY would pin this goroutine + one of the
+	// 4 MaxConnsPerHost slots until the downstream client gives up. The
+	// timer arms only DURING each upstream Read (disarmed before the
+	// downstream Write), so a legitimately paused client — which
+	// backpressures the Write, not the Read — never trips it; only a
+	// genuine upstream stall does. On success every byte is still copied
+	// (bit-exact relay contract preserved).
+	body := newIdleTimeoutReader(resp.Body, streamIdleTimeout)
+	defer body.Close()
+	if _, copyErr := io.Copy(w, body); copyErr != nil {
 		if !errors.Is(copyErr, context.Canceled) {
 			p.log.Debug("upnp proxy: mid-stream copy error",
 				"err", copyErr, "udn", rt.ServerUDN, "objectID", rt.ObjectID)
 		}
 	}
+}
+
+// streamIdleTimeout bounds how long copyResponseBody waits for the NEXT
+// chunk from the upstream before treating the body stream as stalled. The
+// pre-header ResponseHeaderTimeout (10s) covers only up to the first
+// byte; 60s is far longer than any inter-chunk gap a healthy LAN DLNA
+// source produces mid-track, so only a real stall trips it.
+const streamIdleTimeout = 60 * time.Second
+
+// errIdleTimeout is returned from idleTimeoutReader.Read when the upstream
+// went idle past its budget — distinct from a client cancel so the copy
+// loop's Debug log can tell the two apart.
+var errIdleTimeout = errors.New("upnp proxy: upstream stalled (idle-read timeout)")
+
+// idleTimeoutReader wraps an upstream response body and aborts a read
+// that makes no progress within `idle`. The timer is armed at the top of
+// each Read and disarmed as soon as Read returns — so it covers ONLY time
+// spent waiting on the upstream, never the subsequent downstream Write.
+// That distinction is load-bearing: a paused iOS client backpressures the
+// Write (not the Read), and arming the timer across the Write would
+// falsely tear a legitimately-paused stream. On fire the timer closes the
+// underlying body so a blocked Read unblocks; Read then reports
+// errIdleTimeout so io.Copy stops.
+type idleTimeoutReader struct {
+	rc       io.ReadCloser
+	idle     time.Duration
+	timer    *time.Timer
+	timedOut atomic.Bool
+}
+
+func newIdleTimeoutReader(rc io.ReadCloser, idle time.Duration) *idleTimeoutReader {
+	r := &idleTimeoutReader{rc: rc, idle: idle}
+	// AfterFunc starts armed; Stop it immediately so the first Read is
+	// what arms the countdown (the standard "stopped AfterFunc" idiom).
+	r.timer = time.AfterFunc(idle, func() {
+		r.timedOut.Store(true)
+		_ = rc.Close() // unblock a Read parked on the upstream socket
+	})
+	r.timer.Stop()
+	return r
+}
+
+func (r *idleTimeoutReader) Read(p []byte) (int, error) {
+	r.timer.Reset(r.idle)
+	n, err := r.rc.Read(p)
+	r.timer.Stop()
+	if r.timedOut.Load() {
+		return n, errIdleTimeout
+	}
+	return n, err
+}
+
+func (r *idleTimeoutReader) Close() error {
+	r.timer.Stop()
+	return r.rc.Close()
 }
 
 // defaultClient returns the streaming-tuned HTTP client used for

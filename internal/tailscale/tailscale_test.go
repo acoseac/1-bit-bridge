@@ -328,3 +328,36 @@ func TestTrimErr_ASCIIBoundaryUnchanged(t *testing.T) {
 		t.Errorf("ASCII truncation changed: len %d, want %d", len(got), len(want))
 	}
 }
+
+// TestCappedBufferCapsAtLimit pins Q48: cappedBuffer must accumulate at
+// most `cap` bytes, silently drop the overflow, and report the FULL
+// length of every Write with no error — so a subprocess's output pipe
+// keeps draining (never blocked/killed on a short write) while the
+// in-memory copy stays bounded.
+func TestCappedBufferCapsAtLimit(t *testing.T) {
+	const limit = 16
+	cb := &cappedBuffer{cap: limit}
+
+	// Two writes that together exceed the cap.
+	if n, err := cb.Write([]byte("0123456789")); n != 10 || err != nil {
+		t.Fatalf("Write(first) = (%d, %v), want (10, nil)", n, err)
+	}
+	if n, err := cb.Write([]byte("abcdefghij")); n != 10 || err != nil {
+		t.Fatalf("Write(second) = (%d, %v), want (10, nil)", n, err)
+	}
+	if got := len(cb.Bytes()); got != limit {
+		t.Fatalf("buffered %d bytes, want exactly cap %d", got, limit)
+	}
+	if want := "0123456789abcdef"; cb.String() != want {
+		t.Fatalf("buffered %q, want %q (first cap bytes, overflow dropped)", cb.String(), want)
+	}
+
+	// A further over-cap write is a content no-op but still reports its
+	// full length with no error.
+	if n, err := cb.Write([]byte("XXXX")); n != 4 || err != nil {
+		t.Fatalf("Write(past cap) = (%d, %v), want (4, nil)", n, err)
+	}
+	if got := len(cb.Bytes()); got != limit {
+		t.Fatalf("after over-cap write buffered %d bytes, want cap %d", got, limit)
+	}
+}

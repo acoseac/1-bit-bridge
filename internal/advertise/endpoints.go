@@ -300,6 +300,12 @@ func classify(iface net.Interface, ip net.IP) Class {
 		}
 		return ClassTailscaleV6
 	}
+	// The IsLinkLocalUnicast() disjunct is unreachable via Endpoints() —
+	// it `continue`s on link-local BEFORE calling classify. It's retained
+	// deliberately: the ClassLANv4 doc lists 169.254/16 as part of the
+	// class, and direct callers (unit tests) rely on link-local bucketing
+	// as LAN. Keeping it costs nothing and keeps classify's contract
+	// self-consistent for any future caller that doesn't pre-filter.
 	if ip.IsLinkLocalUnicast() || ip.IsPrivate() {
 		if ip.To4() != nil {
 			return ClassLANv4

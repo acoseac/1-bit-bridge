@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	hcmdns "github.com/hashicorp/mdns"
@@ -450,13 +451,28 @@ func (a *Advertiser) Close() error {
 // absent. See txtIPsValue for the filter + size cap.
 func buildTXTRecords(cfg Config, ips []net.IP) []string {
 	hostBare := strings.TrimSuffix(cfg.advertisedHost(), ".")
+	// host= and library= are free-text (operator-controlled for the
+	// library name; hostname-derived for host) and were previously
+	// appended UNCAPPED. hashicorp/mdns's NewMDNSService does NOT validate
+	// TXT length, so an over-long value passes construction + Advertise
+	// (reporting success) and then fails SILENTLY inside per-query
+	// response encoding — killing LAN discovery with no startup signal.
+	// Cap + log both here, matching the ips= field's pattern.
+	hostVal, hostDropped := cappedTXTValue(hostBare, maxTXTValueLen)
+	if hostDropped > 0 {
+		logger.Info("mdns: host= TXT truncated to fit", "dropped", hostDropped)
+	}
 	out := []string{
 		fmt.Sprintf("pv=%d", cfg.ProtocolVersion),
-		fmt.Sprintf("host=%s", hostBare),
+		"host=" + hostVal,
 		fmt.Sprintf("port=%d", cfg.Port),
 	}
 	if cfg.LibraryName != "" {
-		out = append(out, "library="+cfg.LibraryName)
+		libVal, libDropped := cappedTXTValue(cfg.LibraryName, maxTXTValueLen)
+		if libDropped > 0 {
+			logger.Info("mdns: library= TXT truncated to fit", "dropped", libDropped)
+		}
+		out = append(out, "library="+libVal)
 	}
 	if v, dropped := txtIPsValue(ips, maxTXTIPsValueLen); v != "" {
 		out = append(out, "ips="+v)
@@ -465,6 +481,30 @@ func buildTXTRecords(cfg Config, ips []net.IP) []string {
 		}
 	}
 	return out
+}
+
+// maxTXTValueLen caps the byte length of a single free-text TXT VALUE
+// (library name, hostname). A DNS-SD TXT string maxes at 255 bytes; the
+// longest key here ("library=") eats 9, so 240 leaves comfortable
+// headroom for the whole "key=value" entry. Mirrors maxTXTIPsValueLen's
+// budget for the ips= list.
+const maxTXTValueLen = 240
+
+// cappedTXTValue truncates value to at most maxLen BYTES, cut back to a
+// UTF-8 rune boundary so the emitted TXT string stays well-formed (a
+// mid-rune cut would leave a partial multi-byte sequence a client's
+// String decode would mangle). Returns the (possibly truncated) value +
+// the number of bytes dropped (0 = untouched) so the caller can log
+// truncation with the same cap-and-log pattern the ips= field uses.
+func cappedTXTValue(value string, maxLen int) (string, int) {
+	if len(value) <= maxLen {
+		return value, 0
+	}
+	cut := maxLen
+	for cut > 0 && !utf8.RuneStart(value[cut]) {
+		cut--
+	}
+	return value[:cut], len(value) - cut
 }
 
 // maxTXTIPsValueLen caps the comma-joined value of the `ips=` TXT key.
