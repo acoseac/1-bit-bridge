@@ -2,6 +2,7 @@ package dlna
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -153,6 +154,48 @@ func Test_Server_StartStop_LifecycleBindsLoopbackPort(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	if !strings.Contains(string(body), "<UDN>uuid:test-lifecycle</UDN>") {
 		t.Errorf("description.xml body missing UDN: %s", body)
+	}
+}
+
+// Test_Server_Start_CancelsNotifyContextOnFailure pins Q31: a failed
+// Start() must cancel the derived GENA notify context instead of leaking
+// it until the parent ctx ends. A caller that saw Start fail typically
+// won't call Stop() (where notifyCancel normally fires), so the deferred
+// cancel on the error path is the only thing that frees the child.
+//
+// The failure is triggered deterministically by occupying the listen port
+// so the net.Listen inside Start fails — this exercises the SAME deferred
+// cancel that the "no advertiser could bind" (SSDP) error path relies on,
+// without depending on multicast permissions that vary across hosts.
+func Test_Server_Start_CancelsNotifyContextOnFailure(t *testing.T) {
+	// Occupy a loopback port and keep it bound so the server's own
+	// net.Listen on the same address fails with "address already in use".
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("occupy port: %v", err)
+	}
+	defer occupied.Close()
+	addr := occupied.Addr().String()
+
+	s, err := NewServer(ServerConfig{
+		Library:       newTestLib(),
+		UDN:           "uuid:test-notify-leak",
+		ListenAddress: addr,
+		ServerURL:     "http://" + addr,
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	if err := s.Start(context.Background()); err == nil {
+		t.Fatal("expected Start to fail binding an occupied port, got nil")
+	}
+
+	if s.notifyCtx == nil {
+		t.Fatal("notifyCtx should be set even on a failed Start")
+	}
+	if err := s.notifyCtx.Err(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("notifyCtx not cancelled after failed Start (leaked): Err() = %v, want context.Canceled", err)
 	}
 }
 
