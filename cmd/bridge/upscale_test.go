@@ -9,8 +9,68 @@ import (
 	"testing"
 	"time"
 
+	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
+	"github.com/acoseac/1-bit-bridge/internal/transcode"
 )
+
+// TestClassifyUpscaleTrackSkipsNonPositiveSampleRate pins the graceful-
+// skip guard: a PCM track whose SampleRate is present but non-positive
+// (0 / corrupt tag) with bits > 16 must be a silent skip that bumps the
+// notPCM counter, NOT a fatal exit. Pre-fix the optimize path let such a
+// track through OptimizeEligible (which returns true for a PCM source
+// with bits > 16 regardless of rate), then ResolveTargetRateForOptimize(0)
+// errored — propagating exitCode 2 up through runUpscaleBatch and
+// ABORTING the entire optimize run. One bogus tag killed the whole batch,
+// unlike every other per-track anomaly which is a graceful skip.
+func TestClassifyUpscaleTrackSkipsNonPositiveSampleRate(t *testing.T) {
+	store, err := manifest.OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	resolver := bridgefs.New([]string{t.TempDir()})
+
+	zeroRate := 0.0
+	bits := 24
+	track := manifest.Track{
+		Path:          "Artist/Album/bogus.flac",
+		Codec:         "FLAC", // PCM → OptimizeEligible depends only on rate/bits
+		SampleRate:    &zeroRate,
+		BitsPerSample: &bits, // > 16 so OptimizeEligible would return true
+	}
+
+	// Both kinds must skip gracefully; the optimize path is the one that
+	// aborted pre-fix, the upscale path is covered for symmetry.
+	for _, kind := range []struct {
+		name string
+		k    transcode.JobKind
+	}{
+		{"optimize", transcode.JobKindOptimize},
+		{"upscale", transcode.JobKindUpscale},
+	} {
+		t.Run(kind.name, func(t *testing.T) {
+			var counters upscaleSkipCounters
+			var stderr bytes.Buffer
+			p := runUpscaleParams{
+				targetRateFlag: "auto",
+				targetBits:     24,
+				quality:        transcode.QualityVeryHigh,
+				kind:           kind.k,
+			}
+			c, exit := classifyUpscaleTrack(context.Background(), &stderr, store, resolver, track, p, &counters)
+			if exit != 0 {
+				t.Fatalf("exitCode = %d, want 0 (graceful skip, not fatal abort); stderr=%q", exit, stderr.String())
+			}
+			if c != nil {
+				t.Errorf("candidate = %+v, want nil (skip)", c)
+			}
+			if counters.notPCM != 1 {
+				t.Errorf("notPCM = %d, want 1", counters.notPCM)
+			}
+		})
+	}
+}
 
 // TestBootstrapTranscodeCmdHonorsVariantsDir pins that the upscale /
 // optimize / --gc CLI writes sidecars to `upscale.variantsDir` when set

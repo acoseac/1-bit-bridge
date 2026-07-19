@@ -306,11 +306,18 @@ func classifyUpscaleTrack(
 		counters.notPCM++
 		return nil, 0
 	}
-	if t.SampleRate == nil {
-		// No rate metadata → can't decide a target; skip
-		// silently. The scanner sets this for every PCM file
-		// it parses successfully; absence usually means the
-		// extractor failed to identify the format.
+	if t.SampleRate == nil || *t.SampleRate <= 0 {
+		// No usable rate metadata → can't decide a target; skip
+		// silently. The scanner sets this for every PCM file it
+		// parses successfully; absence (nil) usually means the
+		// extractor failed to identify the format. A non-nil but
+		// non-positive rate (0 / negative) is a corrupt or bogus tag:
+		// without this guard it reaches OptimizeEligible (which returns
+		// true for a PCM source with bits > 16 regardless of rate) and
+		// then ResolveTargetRateForOptimize(0), whose "rate must be
+		// positive" error propagates exitCode 2 up through
+		// runUpscaleBatch and ABORTS the whole optimize run — where
+		// every other per-track anomaly is a graceful skip + counter.
 		counters.notPCM++
 		return nil, 0
 	}

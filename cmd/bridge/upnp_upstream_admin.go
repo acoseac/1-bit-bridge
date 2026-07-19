@@ -37,6 +37,15 @@ type upnpAdminAdapter struct {
 	// the lifecycle's Stop during graceful shutdown.
 	bgCtx context.Context //nolint:containedctx // intentional: ctx is the run-scope for spawned scans
 
+	// ingestWg is the lifecycle's ingest WaitGroup (&l.ingestWg), shared
+	// with the periodic ingest loop. ForceRescan's spawned goroutine
+	// registers on it so upnpUpstreamLifecycle.Stop's ingestWg.Wait()
+	// joins an operator-triggered rescan that's still writing to the
+	// manifest — otherwise Stop could return (and shutdown proceed to
+	// close the store) mid-walk. Nil-guarded: the direct-construction
+	// unit tests leave it unset.
+	ingestWg *sync.WaitGroup
+
 	// mu serializes CRUD writes (Add/Remove/Update) against each
 	// other so two concurrent admin requests can't race on Save +
 	// CfgHolder.Store and leave bridge.yaml inconsistent with the
@@ -210,7 +219,22 @@ func (a *upnpAdminAdapter) ForceRescan(_ context.Context, udn string) error {
 	if bgCtx == nil {
 		bgCtx = context.Background()
 	}
+	// Register the spawned walk on the lifecycle's ingest WaitGroup so
+	// graceful shutdown (upnpUpstreamLifecycle.Stop → ingestWg.Wait)
+	// joins it before the process tears down the manifest store. The
+	// periodic ingest loop holds a permanent +1 on this WaitGroup from
+	// startup until it exits on ctx-cancel, so this Add lifts the counter
+	// from ≥1 (never from zero) during normal operation — the same
+	// bounded-goroutine contract as admin's bgScans WaitGroup. Nil-guard
+	// for the direct-construction unit tests. Add(1) is paired with the
+	// deferred Done() inside the goroutine below.
+	if a.ingestWg != nil {
+		a.ingestWg.Add(1)
+	}
 	go func() {
+		if a.ingestWg != nil {
+			defer a.ingestWg.Done()
+		}
 		defer func() {
 			a.state.mu.Lock()
 			a.state.inFlight = false
@@ -263,6 +287,7 @@ func (l *upnpUpstreamLifecycle) installAdminAdapter(ctx context.Context, cfgHold
 		store:     store,
 		state:     l.adminState,
 		bgCtx:     ctx,
+		ingestWg:  &l.ingestWg,
 	}
 }
 
