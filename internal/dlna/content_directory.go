@@ -651,7 +651,14 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, fc 
 		rootContainers := []string{
 			DIDLForContainer(DIDLContainerOpts{
 				ID: allTracksObjectID, ParentID: "0", Title: "All Tracks",
-				ChildCount: folderIndex.TrackCount(),
+				// Q28: source the All Tracks childCount from lib.TrackCount() —
+				// the raw count the flat list actually enumerates in the
+				// allTracksObjectID DirectChildren case (lib.ListTrackInfos)
+				// and advertises in BrowseMetadata — NOT folderIndex.TrackCount()
+				// (deduped by trackByID). On a TrackID collision the two diverge,
+				// which is the exact childCount-vs-enumerated mismatch strict
+				// controllers reject; unifying on the enumerated count removes it.
+				ChildCount: lib.TrackCount(),
 				// `storageFolder` — reverting PR #313's playlist-
 				// Container change. PR #313 was driven by Gemini's
 				// round-3 hypothesis that mconnect filters out

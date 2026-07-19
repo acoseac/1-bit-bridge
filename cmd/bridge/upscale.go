@@ -446,7 +446,7 @@ func runUpscaleWorker(
 			}
 			continue
 		}
-		_, settings := c.spec.SoxArgs()
+		_, settings, _ := c.spec.SoxArgs()
 		row := manifest.VariantRow{
 			SourcePath:    c.spec.SourceLibraryRel,
 			VariantID:     c.spec.VariantID(),

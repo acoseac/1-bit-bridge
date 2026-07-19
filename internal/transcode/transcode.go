@@ -504,7 +504,7 @@ func safeVariantFilename(srcBase, variantID string) string {
 // phase" truthfully. Because the deterministic output is unchanged, NO
 // VariantSchemaVersion bump / regeneration is required — existing
 // sidecars stay valid.
-func (j JobSpec) SoxArgs() ([]string, string) {
+func (j JobSpec) SoxArgs() ([]string, string, string) {
 	rateFlag := "-v"
 	switch j.Quality {
 	case QualityHigh:
@@ -521,19 +521,26 @@ func (j JobSpec) SoxArgs() ([]string, string) {
 	// argument so sox ignores the filename and writes FLAC. (Bug
 	// found post-merge of PR #126: enqueue worked but every sox
 	// invocation failed during the worker pool's actual run.)
+	// Compute the sidecar tmp path ONCE and return it: RunSox reuses it as
+	// both the sox output target and (suffix-stripped) the rename destination,
+	// so it never re-derives SidecarPath() (which re-hashes an over-cap /
+	// FAT-sanitised filename) and the rename target is GUARANTEED to match the
+	// exact path sox was told to write — no independent recomputation to drift
+	// (Q2).
+	tmpPath := j.SidecarPath() + sidecarTmpSuffix
 	args := []string{
 		"-G",
 		j.SourceAbsPath,
 		"-b", strconv.Itoa(j.TargetBits),
 		"-t", "flac",
-		j.SidecarPath() + sidecarTmpSuffix,
+		tmpPath,
 		"rate", rateFlag, "-L", strconv.Itoa(j.TargetSampleRate),
 		"dither", "-s",
 	}
 	settings := fmt.Sprintf(
 		`{"resampler":"sox","quality":%q,"rateFlag":%q,"phase":"linear","targetRate":%d,"targetBits":%d,"guard":true,"schemaVersion":%q}`,
 		j.Quality, rateFlag, j.TargetSampleRate, j.TargetBits, VariantSchemaVersion)
-	return args, settings
+	return args, settings, tmpPath
 }
 
 // PickTargetRate decides the output sample rate from the source
@@ -700,8 +707,11 @@ func ResolveTargetRate(flagValue string, sourceRate int) (int, error) {
 // Output directory created if missing — `bridge upscale` only
 // guarantees DataDir exists, not the `transcoded` subdir.
 func RunSox(ctx context.Context, j JobSpec) (int64, error) {
-	args, _ := j.SoxArgs()
-	finalPath := j.SidecarPath()
+	args, _, tmpPath := j.SoxArgs()
+	// finalPath = the sox output path minus the tmp suffix. Derived from
+	// SoxArgs's single SidecarPath() computation (Q2) — no re-hash, and the
+	// rename target below is exactly the path sox wrote.
+	finalPath := strings.TrimSuffix(tmpPath, sidecarTmpSuffix)
 	// v1.4 source-mirrored layout: sidecars land under
 	// <OutputDir>/<libRel-dirname>/<filename>. The parent of
 	// finalPath may NOT exist yet (first variant in a new album
@@ -712,7 +722,6 @@ func RunSox(ctx context.Context, j JobSpec) (int64, error) {
 	if err := os.MkdirAll(filepath.Dir(finalPath), 0o755); err != nil {
 		return 0, fmt.Errorf("mkdir sidecar dir: %w", err)
 	}
-	tmpPath := finalPath + sidecarTmpSuffix
 	// Defensive: clear any stale .tmp from a previous interrupted
 	// run so SoX's open(O_CREAT) doesn't trip on prior crash debris.
 	_ = os.Remove(tmpPath)
