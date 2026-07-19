@@ -1957,11 +1957,21 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// verifies version-match and either confirms or rolls back.
 		updOpts.AutoInstallRestart = func() {
 			fmt.Fprintln(stdout, "Restarting after auto-install (service manager will respawn).")
-			scanCancel()
-			os.Exit(0)
+			// Route through the graceful cancellation — the same closure SIGINT
+			// and the admin restart use (admin.Deps.Restart == cancel) — so the
+			// transcode/analysis pools drain, the auth debounce flushes, and the
+			// manifest DB checkpoints before exit. os.Exit(0) here would skip
+			// every runServe defer (the "restart MUST NOT os.Exit(0)" contract).
+			cancel()
 		}
 	}
 	upd := updater.New(updOpts)
+	// Start the background poll loop: it refreshes the GitHub-release status on
+	// the configured cadence AND drives the opt-in auto-installer (maybeAutoInstall
+	// runs ONLY from Run). Lives off scanCtx so a SIGINT cancels it alongside the
+	// scanner. Without this call, background update checks never fire and
+	// update.autoInstall is dead — only the manual "Check now" path works.
+	go upd.Run(scanCtx)
 
 	updAdapter := updateInfoAdapter{
 		u:          upd,
