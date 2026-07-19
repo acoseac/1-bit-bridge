@@ -17,12 +17,16 @@ type fakeUPnPPublicProvider struct {
 	calls   atomic.Int64
 	servers []UPnPUpstreamPublicServer
 	block   chan struct{} // if non-nil, PublicServers blocks until it's closed
+	sleep   time.Duration // if > 0, PublicServers sleeps this long (to overrun the fetch deadline)
 }
 
 func (f *fakeUPnPPublicProvider) PublicServers(context.Context) []UPnPUpstreamPublicServer {
 	f.calls.Add(1)
 	if f.block != nil {
 		<-f.block
+	}
+	if f.sleep > 0 {
+		time.Sleep(f.sleep)
 	}
 	return f.servers
 }
@@ -123,6 +127,70 @@ func TestHealth_UPnPUpstreamServers_HandlerUsesTTLCache(t *testing.T) {
 	}
 	if got := p.calls.Load(); got != 1 {
 		t.Errorf("PublicServers called %d times across 5 sequential /v1/health hits; want 1 (handler must use publicServersCache)", got)
+	}
+}
+
+// TestPublicServersCache_ServesStaleSnapshotOnFetchTimeout (Gemini round-1)
+// pins serve-stale-on-error: once a good snapshot exists, a fetch whose
+// deadline fires (wedged SQLite / slow COUNT fan-out) preserves the last-good
+// list instead of clobbering it with the degraded/empty result — and leaves
+// the snapshot stale so the next call retries.
+func TestPublicServersCache_ServesStaleSnapshotOnFetchTimeout(t *testing.T) {
+	good := []UPnPUpstreamPublicServer{{Name: "2Go", PathPrefix: "2go", RoutedTracks: 15283}}
+	p := &fakeUPnPPublicProvider{servers: good}
+	c := newPublicServersCache()
+	c.fetchTimeout = 50 * time.Millisecond // shrink so the timeout path is fast
+
+	// First fetch resolves fast → good snapshot cached.
+	if got := c.servers(context.Background(), p); len(got) != 1 || got[0].RoutedTracks != 15283 {
+		t.Fatalf("first fetch = %+v; want the good list", got)
+	}
+
+	// Force the next call to be a cache miss.
+	c.mu.Lock()
+	c.snap.fetchedAt = time.Now().Add(-2 * publicServersTTL)
+	c.mu.Unlock()
+
+	// Provider now returns a degraded (empty) list AND overruns the deadline,
+	// so fetchCtx.Err() != nil — the wedged-DB signal.
+	p.servers = nil
+	p.sleep = 250 * time.Millisecond // > fetchTimeout(50ms)
+
+	if got := c.servers(context.Background(), p); len(got) != 1 || got[0].RoutedTracks != 15283 {
+		t.Fatalf("timed-out refetch = %+v; want the preserved good list, not the degraded/empty result", got)
+	}
+
+	// The snapshot stayed stale (timestamp untouched) so the next call retries
+	// rather than serving the degraded result for a full TTL window.
+	c.mu.Lock()
+	stale := time.Since(c.snap.fetchedAt) >= publicServersTTL
+	c.mu.Unlock()
+	if !stale {
+		t.Errorf("snapshot timestamp was refreshed on a failed fetch; want it left stale so the next call retries")
+	}
+}
+
+// TestPublicServersCache_FirstFetchTimeoutCachesResult confirms the no-prior-
+// snapshot branch: with nothing better to serve, a timed-out first fetch still
+// caches whatever the provider returned (doesn't spin).
+func TestPublicServersCache_FirstFetchTimeoutCachesResult(t *testing.T) {
+	p := &fakeUPnPPublicProvider{
+		servers: []UPnPUpstreamPublicServer{{Name: "late", PathPrefix: "late"}},
+		sleep:   120 * time.Millisecond,
+	}
+	c := newPublicServersCache()
+	c.fetchTimeout = 30 * time.Millisecond
+
+	if got := c.servers(context.Background(), p); len(got) != 1 || got[0].PathPrefix != "late" {
+		t.Fatalf("first (timed-out) fetch = %+v; want the provider result cached", got)
+	}
+	// A second call within the TTL is a cache hit — no new fetch.
+	p.sleep = 0
+	if got := c.servers(context.Background(), p); len(got) != 1 || got[0].PathPrefix != "late" {
+		t.Fatalf("second call = %+v; want the cached result", got)
+	}
+	if calls := p.calls.Load(); calls != 1 {
+		t.Errorf("provider called %d times; want 1 (first result cached despite the deadline)", calls)
 	}
 }
 

@@ -105,9 +105,22 @@ func (c *cappedPlaylistItems) UnmarshalJSON(data []byte) error {
 		}
 		items = append(items, it)
 	}
-	// Consume the closing ']' so a trailing-garbage array is rejected.
-	if _, err := dec.Token(); err != nil {
+	// Consume AND verify the closing ']'. dec.More() returning false only tells
+	// us the next byte is a closing delimiter (or EOF) — a malformed value whose
+	// "items" isn't a cleanly-terminated array must not silently succeed, so
+	// assert the token is actually ']'.
+	closeTok, err := dec.Token()
+	if err != nil {
 		return err
+	}
+	if d, ok := closeTok.(json.Delim); !ok || d != ']' {
+		return errPlaylistItemsNotArray
+	}
+	// Reject any trailing content after the array (defensive: the outer decoder
+	// hands us exactly the array bytes, but keep the method self-validating for
+	// direct callers). More() is false at EOF/whitespace, true on real garbage.
+	if dec.More() {
+		return errPlaylistItemsNotArray
 	}
 	*c = items
 	return nil

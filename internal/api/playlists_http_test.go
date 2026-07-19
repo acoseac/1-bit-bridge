@@ -344,3 +344,31 @@ func TestCappedPlaylistItemsUnmarshalCapsBeforeMaterializing(t *testing.T) {
 		t.Fatalf("decode null: err=%v items=%+v; want (nil, nil)", err, nullItems)
 	}
 }
+
+// TestCappedPlaylistItemsUnmarshalRejectsMalformed (Gemini round-1) pins that
+// the stream decoder verifies its closing ']' and rejects trailing content —
+// exercised by calling UnmarshalJSON directly, since the outer json.Decoder
+// hands the method exactly the array bytes (the malformed forms below can only
+// reach it via a direct caller). `[{}] extra` is the case the pre-round-1 code
+// silently accepted.
+func TestCappedPlaylistItemsUnmarshalRejectsMalformed(t *testing.T) {
+	for _, in := range []string{
+		`[{}`,        // unterminated array (no closing bracket)
+		`[{}}`,       // wrong closing delimiter
+		`[{}] extra`, // trailing garbage after the array
+		`[{},]`,      // trailing comma → dangling element
+	} {
+		var c cappedPlaylistItems
+		if err := c.UnmarshalJSON([]byte(in)); err == nil {
+			t.Errorf("UnmarshalJSON(%q) = nil error; want rejection", in)
+		}
+	}
+	// A clean array still round-trips.
+	var ok cappedPlaylistItems
+	if err := ok.UnmarshalJSON([]byte(`[{"position":0,"path":"a.flac"}]`)); err != nil {
+		t.Errorf("UnmarshalJSON(well-formed) = %v; want nil", err)
+	}
+	if len(ok) != 1 || ok[0].Path != "a.flac" {
+		t.Errorf("well-formed decode = %+v; want one item path a.flac", ok)
+	}
+}

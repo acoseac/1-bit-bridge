@@ -48,9 +48,17 @@ type publicServersCache struct {
 	snap    publicServersSnapshot
 	hasSnap bool
 	group   singleflight.Group
+	// fetchTimeout bounds a single detached provider call. Per-instance (not a
+	// package-level var) so tests can shrink it without racing a parallel test
+	// — same convention as transcode.Pool.jobTimeout (PR #162). Defaults to
+	// publicServersFetchTimeout via newPublicServersCache; a zero value falls
+	// back to that default so a hand-built &publicServersCache{} still works.
+	fetchTimeout time.Duration
 }
 
-func newPublicServersCache() *publicServersCache { return &publicServersCache{} }
+func newPublicServersCache() *publicServersCache {
+	return &publicServersCache{fetchTimeout: publicServersFetchTimeout}
+}
 
 // servers returns the cached UPnP upstream server list, refreshing on cache
 // miss or staleness. Nil receiver or nil provider returns nil so test
@@ -89,16 +97,32 @@ func (c *publicServersCache) servers(ctx context.Context, p UPnPUpstreamPublicPr
 		// Detach from the caller's ctx: the singleflight result is shared, so
 		// the first caller hanging up mid-fetch must not cache a nil for the
 		// rest. The per-server COUNTs are bounded by their own timeout instead.
-		fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), publicServersFetchTimeout)
+		timeout := c.fetchTimeout
+		if timeout <= 0 {
+			timeout = publicServersFetchTimeout
+		}
+		fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
 		defer cancel()
+		servers := p.PublicServers(fetchCtx)
+
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		// Serve-stale-on-error: WithoutCancel means only the fetch deadline can
+		// fire, so fetchCtx.Err() != nil signals a wedged SQLite handle / slow
+		// per-server COUNT fan-out. Don't clobber a good prior snapshot with the
+		// degraded/empty result — keep the last-good list and LEAVE its
+		// (already-stale) timestamp so the next request retries soon (bounded by
+		// singleflight to one in-flight fetch at a time). Only a first fetch with
+		// no prior snapshot caches a degraded result (nothing better to serve).
+		if fetchCtx.Err() != nil && c.hasSnap {
+			return c.snap, nil
+		}
 		snap := publicServersSnapshot{
-			servers:   p.PublicServers(fetchCtx),
+			servers:   servers,
 			fetchedAt: time.Now(),
 		}
-		c.mu.Lock()
 		c.snap = snap
 		c.hasSnap = true
-		c.mu.Unlock()
 		return snap, nil
 	})
 	snap := v.(publicServersSnapshot)
