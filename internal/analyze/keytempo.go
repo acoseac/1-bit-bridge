@@ -44,6 +44,13 @@ const (
 	// several of the slowest beat periods for tempo.
 	minWindowsForKey = 180
 
+	// minKeyCorrelation is the floor on the best Krumhansl-Schmuckler
+	// correlation for estimateKey to return a key at all — below it the chroma
+	// is effectively atonal/flat and a confident key would be a guess (the
+	// package's "no estimate rather than guess" contract). Conservative; tune
+	// up if it suppresses legitimately weak-tonal tracks.
+	minKeyCorrelation = 0.1
+
 	// maxAnalyzeWindows caps STFT processing at ~30 min of audio (at the
 	// 512-sample hop). Key + tempo are stable estimates well before then,
 	// so processing the tail of a multi-hour input (a DJ set, an
@@ -144,7 +151,15 @@ func (a *keyTempoAnalyzer) add(s float32) {
 	if a.windows >= maxAnalyzeWindows {
 		return
 	}
-	a.buf[a.bufLen] = float64(s)
+	// Sanitize non-finite samples (matches loudnessMeter.addFrame / peaker.add):
+	// a NaN/Inf from a corrupt decode otherwise poisons the FFT chroma and slips
+	// estimateKey's `sum <= 0` gate, committing a confident bogus key that's
+	// keyed to mtime+size and never re-analyzed.
+	v := float64(s)
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		v = 0
+	}
+	a.buf[a.bufLen] = v
 	a.bufLen++
 	if a.bufLen == stftWindow {
 		a.processWindow()
@@ -211,6 +226,12 @@ func (a *keyTempoAnalyzer) estimateKey() (root int, mode string, ok bool) {
 		if c := pearson12(rotated, ksMinor); c > bestCorr {
 			bestCorr, bestRoot, bestMajor = c, r, false
 		}
+	}
+	// Require a minimum correlation strength: a flat / atonal chroma produces a
+	// near-zero (or negative) best correlation, and returning a confident key
+	// there is a guess the package deliberately avoids.
+	if bestCorr < minKeyCorrelation {
+		return 0, "", false
 	}
 	if bestMajor {
 		return bestRoot, "major", true

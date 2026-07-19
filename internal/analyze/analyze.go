@@ -178,12 +178,23 @@ func RunAnalysis(ctx context.Context, spec AnalyzeSpec) (Result, error) {
 	// waveform but skip loudness so a biased value is never stored.
 	channels, channelsOK, tool, expectedSec := probeChannels(ctx, spec.SourceAbsPath)
 	pk := newPeaker(waveformBucketSamples)
-	meter := newLoudnessMeter(channels)
+	// Allocate the loudness meter only when the channel layout is known — it
+	// holds a multi-second sliding K-weighting window (~150 KB), and every
+	// meter access below is already channelsOK-gated, so an unknown layout
+	// discards the result anyway (Gemini PR #516).
+	var meter *loudnessMeter
+	if channelsOK {
+		meter = newLoudnessMeter(channels)
+	}
 	kt := newKeyTempoAnalyzer()
 	total, err := decodeFrames(ctx, spec.SourceAbsPath, channels, tool, expectedSec, func(frame []float64) {
 		mono := downmixFrame(frame)
 		pk.add(mono)
-		meter.addFrame(frame)
+		if channelsOK {
+			// Skip the per-sample K-weighting biquads when the channel layout
+			// is unknown — the loudness result is discarded below in that case.
+			meter.addFrame(frame)
+		}
 		kt.add(mono)
 	})
 	if err != nil {
