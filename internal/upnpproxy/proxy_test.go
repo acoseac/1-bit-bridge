@@ -2,11 +2,14 @@ package upnpproxy
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
@@ -311,5 +314,69 @@ func TestPreStreamError_ErrorString(t *testing.T) {
 	}
 	if e.Unwrap() != io.EOF {
 		t.Errorf("Unwrap() != io.EOF")
+	}
+}
+
+// --- idleTimeoutReader (Q50) ---
+
+// blockingReader models an upstream that sent headers then wedged the
+// body: Read blocks until Close is called (which is what the idle timer
+// does on fire), then returns EOF.
+type blockingReader struct {
+	ch     chan struct{}
+	closed atomic.Bool
+}
+
+func (b *blockingReader) Read(_ []byte) (int, error) {
+	<-b.ch
+	return 0, io.EOF
+}
+
+func (b *blockingReader) Close() error {
+	if b.closed.CompareAndSwap(false, true) {
+		close(b.ch)
+	}
+	return nil
+}
+
+// TestIdleTimeoutReader_TimesOutOnStall pins Q50: a Read on an upstream
+// that never delivers a byte must abort with errIdleTimeout after ~idle,
+// not hang forever pinning the goroutine + a MaxConnsPerHost slot.
+func TestIdleTimeoutReader_TimesOutOnStall(t *testing.T) {
+	br := &blockingReader{ch: make(chan struct{})}
+	r := newIdleTimeoutReader(br, 30*time.Millisecond)
+	defer r.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 8)
+		_, err := r.Read(buf)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, errIdleTimeout) {
+			t.Fatalf("Read on a stalled upstream returned %v, want errIdleTimeout", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Read did not time out on a stalled upstream within 2s")
+	}
+}
+
+// TestIdleTimeoutReader_PassesThroughWhenProgressing pins the bit-exact
+// contract: a reader that keeps delivering data relays every byte and
+// never trips the idle timer.
+func TestIdleTimeoutReader_PassesThroughWhenProgressing(t *testing.T) {
+	const payload = "the quick brown fox jumps over the lazy dog"
+	r := newIdleTimeoutReader(io.NopCloser(strings.NewReader(payload)), 30*time.Millisecond)
+	defer r.Close()
+
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("io.ReadAll on a progressing reader: %v", err)
+	}
+	if string(got) != payload {
+		t.Fatalf("relayed %q, want %q (bit-exact)", got, payload)
 	}
 }

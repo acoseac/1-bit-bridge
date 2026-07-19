@@ -18,13 +18,16 @@
 //
 // Windows: filepath.ToSlash normalizes `C:\path` to `C:/path` BEFORE
 // EscapedPath runs. Without it, the backslash gets percent-encoded
-// to %5C, producing a DSN SQLite cannot parse on Windows. Drive-letter
-// detection (`<letter>:/...`) gives those paths the SQLite-canonical
-// triple-slash form `file:///C:/path`. The bridge ships windows/amd64
-// + windows/arm64; goreleaser's cross-build doesn't run `go test` on
-// Windows, so this code path is exercised by the test suite only —
-// don't strip the drive-letter handling on the assumption "POSIX-
-// only" or Windows operators silently lose every DB open.
+// to %5C, producing a DSN SQLite cannot parse on Windows. On Windows
+// (runtime.GOOS == "windows") a leading `<letter>:/...` is an ABSOLUTE
+// drive-letter path and gets the SQLite-canonical triple-slash form
+// `file:///C:/path`; on POSIX the identical string is a RELATIVE path
+// (a dir literally named "C:") and correctly takes the opaque
+// `file:C:/path` form. The bridge ships windows/amd64 + windows/arm64;
+// goreleaser's cross-build doesn't run `go test` on Windows, so the
+// triple-slash branch is exercised only when the suite runs on a Windows
+// host — don't strip the drive-letter handling or Windows operators
+// silently lose every DB open.
 //
 // RawQuery is preserved verbatim so the pragma syntax
 // `_pragma=busy_timeout(5000)` (with parens that url.QueryEscape would
@@ -34,6 +37,7 @@ package dsn
 import (
 	"net/url"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -77,9 +81,13 @@ func File(path, rawQuery string) string {
 	case strings.HasPrefix(encoded, "/"):
 		// POSIX absolute (or UNC after ToSlash → //server/share/...).
 		sb.WriteString("//")
-	case hasDriveLetter(encoded):
+	case runtime.GOOS == "windows" && hasDriveLetter(encoded):
 		// Windows absolute drive-letter path. SQLite expects three
-		// slashes followed by the drive letter: file:///C:/path.
+		// slashes followed by the drive letter: file:///C:/path. Gated
+		// on GOOS: on POSIX a leading `<letter>:/…` is a RELATIVE path
+		// (a dir literally named e.g. "A:"), so it must fall through to
+		// the opaque `file:A:/…` form rather than be misread as an
+		// absolute drive-letter path pointing at `/A:/…`.
 		sb.WriteString("///")
 	}
 	sb.WriteString(encoded)
@@ -90,11 +98,12 @@ func File(path, rawQuery string) string {
 	return sb.String()
 }
 
-// hasDriveLetter reports whether s is a slashed Windows absolute
-// path of the form `<letter>:/...`. Detection runs on string
-// content (post-ToSlash) so callers and tests get the same answer
-// on every OS — `filepath.IsAbs` would only return true for these
-// when running on Windows itself.
+// hasDriveLetter reports whether s is a slashed `<letter>:/...` path
+// (post-ToSlash). It stays a PURE string predicate — the OS decision
+// lives at the call site in File(), which only treats a drive-letter
+// path as ABSOLUTE when runtime.GOOS == "windows" (on POSIX such a path
+// is relative). Keeping the predicate OS-agnostic lets it be reasoned
+// about + unit-tested without a runtime.GOOS branch.
 func hasDriveLetter(s string) bool {
 	if len(s) < 3 || s[1] != ':' || s[2] != '/' {
 		return false

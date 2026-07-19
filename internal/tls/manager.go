@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/net/idna"
 )
 
 // Manager owns the cert(s) the bridge serves and routes incoming TLS
@@ -93,9 +95,13 @@ type Manager struct {
 // package keeps the indirection so it doesn't need to import
 // internal/tlsacme directly (and tlsacme already imports
 // internal/tls for CertNotAfter — avoiding the cycle).
+//
+// The hook carries ONLY the GetCertificate func: the ALPN proto-id list
+// lives on Manager.nextProtos (the live source NextProtos() reads), so a
+// second copy on the hook would be dead weight — dropped in favour of the
+// single atomic.Value.
 type autocertHook struct {
-	GetCert    func(*cryptotls.ClientHelloInfo) (*cryptotls.Certificate, error)
-	NextProtos []string
+	GetCert func(*cryptotls.ClientHelloInfo) (*cryptotls.Certificate, error)
 }
 
 // servedCertProvider wraps the func that returns the LE leaf the
@@ -124,6 +130,33 @@ func NewManager(selfSigned *cryptotls.Certificate) *Manager {
 	return m
 }
 
+// normalizeSNIHost lowercases serverName, strips a trailing FQDN dot,
+// and converts any Unicode IDN labels to their ASCII (punycode) form via
+// golang.org/x/net/idna. This is what lets a TLS client that transmits
+// SNI as punycode (`xn--caf-dma.example`) match an operator-configured
+// Unicode public domain (`café.example`) — and vice-versa — instead of
+// falling through to the self-signed cert (which the public client would
+// reject at the ATS layer, silently killing the endpoint). The trailing
+// dot MUST be stripped BEFORE ToASCII: an empty final label makes the
+// idna Lookup profile error.
+//
+// On any IDNA error the helper falls back to the lowercased + trimmed
+// form, so ASCII hostnames (the overwhelming majority) behave exactly as
+// before — ToASCII is a no-op for a valid ASCII domain, and a malformed
+// or over-long label that ToASCII rejects still gets the pre-IDNA value
+// (no regression, no false match: a rejected label can't equal a stored
+// ASCII/punycode domain anyway).
+func normalizeSNIHost(serverName string) string {
+	h := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(serverName)), ".")
+	if h == "" {
+		return ""
+	}
+	if ascii, err := idna.Lookup.ToASCII(h); err == nil {
+		return ascii
+	}
+	return h
+}
+
 // SetAutocertProvider installs (or clears, when both args are
 // zero-valued) the autocert SNI route. Safe to call from any
 // goroutine; the swap is atomic.
@@ -138,7 +171,11 @@ func NewManager(selfSigned *cryptotls.Certificate) *Manager {
 // nextProtos is the ALPN proto-id list autocert needs the listener
 // to advertise (`acme.ALPNProto`). Empty when clearing.
 func (m *Manager) SetAutocertProvider(domain string, getCert func(*cryptotls.ClientHelloInfo) (*cryptotls.Certificate, error), nextProtos []string) {
-	domain = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")
+	// Store the punycode/normalized form so the SNI comparison in Get
+	// (which also runs incoming SNI through normalizeSNIHost) matches
+	// regardless of whether the operator configured the Unicode or the
+	// ASCII spelling of an IDN domain.
+	domain = normalizeSNIHost(domain)
 	if getCert == nil || domain == "" {
 		m.autocertProvider.Store(nil)
 		m.autocertDomain.Store("")
@@ -147,8 +184,7 @@ func (m *Manager) SetAutocertProvider(domain string, getCert func(*cryptotls.Cli
 		return
 	}
 	hook := &autocertHook{
-		GetCert:    getCert,
-		NextProtos: append([]string(nil), nextProtos...),
+		GetCert: getCert,
 	}
 	m.autocertProvider.Store(hook)
 	m.autocertDomain.Store(domain)
@@ -263,7 +299,7 @@ func (m *Manager) Get(hello *cryptotls.ClientHelloInfo) (*cryptotls.Certificate,
 	if hello == nil || hello.ServerName == "" {
 		return m.selfSigned, nil
 	}
-	sni := strings.TrimSuffix(strings.ToLower(hello.ServerName), ".")
+	sni := normalizeSNIHost(hello.ServerName)
 
 	// (2) Autocert — operator's public domain.
 	if domain, _ := m.autocertDomain.Load().(string); domain != "" && sni == domain {
@@ -316,7 +352,7 @@ func (m *Manager) Get(hello *cryptotls.ClientHelloInfo) (*cryptotls.Certificate,
 // no cert yet AND the self-signed leaf is somehow empty (never in
 // practice — self-signed is loaded before NewManager).
 func (m *Manager) FingerprintForServerName(serverName string) string {
-	sni := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(serverName)), ".")
+	sni := normalizeSNIHost(serverName)
 
 	// (1) Autocert domain → the LE leaf the listener actually serves,
 	// read from the autocert cache. Deliberately NOT via

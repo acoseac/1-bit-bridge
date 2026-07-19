@@ -2,6 +2,7 @@ package dsn
 
 import (
 	"net/url"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -26,6 +27,11 @@ func TestFile_PinsEncodingContract(t *testing.T) {
 		path     string
 		rawQuery string
 		want     string
+		// wantPosix, when non-empty, is the expected output on
+		// non-Windows hosts. Used by the drive-letter cases whose
+		// absolute-vs-relative meaning is OS-dependent — File() emits the
+		// triple-slash absolute form only on Windows (runtime.GOOS).
+		wantPosix string
 	}{
 		// Absolute POSIX paths — triple-slash form.
 		{
@@ -85,46 +91,76 @@ func TestFile_PinsEncodingContract(t *testing.T) {
 
 		// Windows drive-letter paths (Gemini on PR #146). The bridge
 		// ships windows/amd64 + windows/arm64; without ToSlash +
-		// drive-letter detection, EscapedPath would percent-encode
-		// every `\` to `%5C` and SQLite would refuse the URI on
-		// Windows. These cases exercise the helper cross-platform —
-		// the absolute-detection runs on slashed string content,
-		// not on filepath.IsAbs (which is OS-dependent), so the
-		// assertions hold on Linux/Darwin CI too.
+		// drive-letter handling, EscapedPath would percent-encode every
+		// `\` to `%5C` and SQLite would refuse the URI on Windows.
+		//
+		// The absolute-vs-relative meaning of `<letter>:/…` is
+		// OS-dependent: File() emits the triple-slash `file:///C:/…`
+		// (absolute) only on Windows; on POSIX the identical string is a
+		// relative path (dir literally named "C:") → opaque `file:C:/…`.
+		// So each case carries wantPosix for the non-Windows expectation.
 		{
-			name:     "windows absolute backslash",
-			path:     `C:\data\db.sqlite`,
-			rawQuery: "mode=ro",
-			want:     "file:///C:/data/db.sqlite?mode=ro",
+			name:      "windows absolute backslash",
+			path:      `C:\data\db.sqlite`,
+			rawQuery:  "mode=ro",
+			want:      "file:///C:/data/db.sqlite?mode=ro",
+			wantPosix: "file:C:/data/db.sqlite?mode=ro",
 		},
 		{
-			name:     "windows absolute forward-slash already",
-			path:     "C:/data/db.sqlite",
-			rawQuery: "mode=ro",
-			want:     "file:///C:/data/db.sqlite?mode=ro",
+			name:      "windows absolute forward-slash already",
+			path:      "C:/data/db.sqlite",
+			rawQuery:  "mode=ro",
+			want:      "file:///C:/data/db.sqlite?mode=ro",
+			wantPosix: "file:C:/data/db.sqlite?mode=ro",
 		},
 		{
-			name:     "windows lowercase drive letter",
-			path:     `d:\data\db.sqlite`,
-			rawQuery: "mode=ro",
-			want:     "file:///d:/data/db.sqlite?mode=ro",
+			name:      "windows lowercase drive letter",
+			path:      `d:\data\db.sqlite`,
+			rawQuery:  "mode=ro",
+			want:      "file:///d:/data/db.sqlite?mode=ro",
+			wantPosix: "file:d:/data/db.sqlite?mode=ro",
 		},
 		{
-			name:     "windows absolute with reserved char",
-			path:     `C:\data\Lib?weird\bridge.db`,
-			rawQuery: "mode=ro",
-			want:     "file:///C:/data/Lib%3Fweird/bridge.db?mode=ro",
+			name:      "windows absolute with reserved char",
+			path:      `C:\data\Lib?weird\bridge.db`,
+			rawQuery:  "mode=ro",
+			want:      "file:///C:/data/Lib%3Fweird/bridge.db?mode=ro",
+			wantPosix: "file:C:/data/Lib%3Fweird/bridge.db?mode=ro",
 		},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
+			want := c.want
+			if c.wantPosix != "" && runtime.GOOS != "windows" {
+				want = c.wantPosix
+			}
 			got := File(c.path, c.rawQuery)
-			if got != c.want {
-				t.Fatalf("File(%q, %q) = %q, want %q", c.path, c.rawQuery, got, c.want)
+			if got != want {
+				t.Fatalf("File(%q, %q) = %q, want %q", c.path, c.rawQuery, got, want)
 			}
 		})
+	}
+}
+
+// TestFile_PosixRelativeDriveLetterNotAbsolute pins B53: off Windows, a
+// path like "A:/db.sqlite" is a RELATIVE path (a dir literally named
+// "A:"), so File() MUST emit the opaque `file:A:/db.sqlite` form, NOT the
+// Windows-absolute `file:///A:/db.sqlite` (which SQLite would open as the
+// wrong file, `/A:/…`). The drive-letter → triple-slash mapping is gated
+// on runtime.GOOS == "windows".
+func TestFile_PosixRelativeDriveLetterNotAbsolute(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("on Windows a leading <letter>:/ IS an absolute drive-letter path")
+	}
+	const (
+		in   = "A:/db.sqlite"
+		want = "file:A:/db.sqlite?mode=ro"
+	)
+	if got := File(in, "mode=ro"); got != want {
+		t.Fatalf("File(%q) = %q, want %q (a POSIX dir named %q must not be read as a Windows drive)", in, got, want, "A:")
 	}
 }
 

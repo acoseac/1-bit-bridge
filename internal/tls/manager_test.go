@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"golang.org/x/net/idna"
 )
 
 // mintTestCert produces a `tls.Certificate` with `Leaf` populated
@@ -381,6 +383,63 @@ func TestManager_SetAutocertProviderClearWithNilGetCert(t *testing.T) {
 	}
 	if np := mgr.NextProtos(); len(np) != 0 {
 		t.Errorf("after Clear, NextProtos() = %v, want empty", np)
+	}
+}
+
+func TestManager_GetMatchesPunycodeSNIForUnicodeAutocertDomain(t *testing.T) {
+	// B40: an operator configures a Unicode IDN public domain; a real TLS
+	// client transmits the SNI as its punycode (A-label) form. IDNA
+	// normalization of BOTH the stored domain and the incoming SNI makes
+	// them compare equal so the autocert cert wins, instead of falling
+	// through to self-signed (which the public client rejects at ATS).
+	const unicodeDomain = "café.example"
+	puny, err := idna.Lookup.ToASCII(unicodeDomain)
+	if err != nil {
+		t.Fatalf("idna.ToASCII(%q): %v", unicodeDomain, err)
+	}
+	if puny == unicodeDomain {
+		t.Fatalf("IDNA left %q unchanged — test oracle is broken", unicodeDomain)
+	}
+
+	self := mintTestCert(t, []string{"host.local"})
+	acmeCert := mintTestCert(t, []string{"acme.local"})
+	acmeHook := func(*cryptotls.ClientHelloInfo) (*cryptotls.Certificate, error) { return acmeCert, nil }
+
+	// (a) configure with the Unicode spelling, dial with punycode.
+	mgr := NewManager(self)
+	mgr.SetAutocertProvider(unicodeDomain, acmeHook, nil)
+	if got, err := mgr.Get(&cryptotls.ClientHelloInfo{ServerName: puny}); err != nil || got != acmeCert {
+		t.Errorf("punycode SNI %q vs Unicode domain: got %p err %v, want acme %p", puny, got, err, acmeCert)
+	}
+
+	// (b) configure with punycode, dial with the Unicode spelling.
+	mgr2 := NewManager(self)
+	mgr2.SetAutocertProvider(puny, acmeHook, nil)
+	if got, err := mgr2.Get(&cryptotls.ClientHelloInfo{ServerName: unicodeDomain}); err != nil || got != acmeCert {
+		t.Errorf("Unicode SNI %q vs punycode domain %q: got %p err %v, want acme %p", unicodeDomain, puny, got, err, acmeCert)
+	}
+}
+
+func TestManager_GetASCIIDomainUnaffectedByIDNA(t *testing.T) {
+	// Regression guard: IDNA normalization must be a pure no-op for the
+	// overwhelmingly-common ASCII domain — exact, mixed-case, and
+	// trailing-dot SNI all still resolve to the autocert cert.
+	self := mintTestCert(t, []string{"host.local"})
+	acmeCert := mintTestCert(t, []string{"bridge.example.com"})
+	mgr := NewManager(self)
+	mgr.SetAutocertProvider(
+		"bridge.example.com",
+		func(*cryptotls.ClientHelloInfo) (*cryptotls.Certificate, error) { return acmeCert, nil },
+		nil,
+	)
+	for _, sni := range []string{"bridge.example.com", "BRIDGE.EXAMPLE.COM", "bridge.example.com."} {
+		got, err := mgr.Get(&cryptotls.ClientHelloInfo{ServerName: sni})
+		if err != nil {
+			t.Fatalf("Get(%q): %v", sni, err)
+		}
+		if got != acmeCert {
+			t.Errorf("ASCII domain SNI %q didn't match autocert (IDNA regressed the common path)", sni)
+		}
 	}
 }
 

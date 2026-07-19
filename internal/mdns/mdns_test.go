@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestBuildTXTRecordsIncludesProtocolAndLibrary(t *testing.T) {
@@ -26,6 +27,57 @@ func TestBuildTXTRecordsOmitsEmptyLibrary(t *testing.T) {
 		if strings.HasPrefix(r, "library=") {
 			t.Errorf("library should not be present when empty: %q", r)
 		}
+	}
+}
+
+// TestCappedTXTValueRuneSafe pins Q49's helper: truncation caps at maxLen
+// bytes, reports the dropped count, and never splits a multi-byte rune.
+func TestCappedTXTValueRuneSafe(t *testing.T) {
+	if v, dropped := cappedTXTValue("short", maxTXTValueLen); v != "short" || dropped != 0 {
+		t.Fatalf("cappedTXTValue(short) = (%q, %d), want (short, 0)", v, dropped)
+	}
+	long := strings.Repeat("a", 300)
+	if v, dropped := cappedTXTValue(long, maxTXTValueLen); len(v) != maxTXTValueLen || dropped != 60 {
+		t.Fatalf("cappedTXTValue(300a) = (len %d, dropped %d), want (%d, 60)", len(v), dropped, maxTXTValueLen)
+	}
+	// 2-byte runes; a 241-byte budget lands mid-rune, so the cut walks
+	// back to 240 (120 whole runes) — never a split rune.
+	multi := strings.Repeat("é", 200) // 400 bytes
+	mv, mdropped := cappedTXTValue(multi, 241)
+	if len(mv) != 240 {
+		t.Fatalf("cappedTXTValue(é*200, 241) kept %d bytes, want 240 (rune-boundary cut)", len(mv))
+	}
+	if !utf8.ValidString(mv) {
+		t.Fatalf("cappedTXTValue produced invalid UTF-8: %q", mv)
+	}
+	if mdropped != 160 {
+		t.Fatalf("cappedTXTValue reported %d dropped, want 160", mdropped)
+	}
+}
+
+// TestBuildTXTRecordsCapsLongLibraryName pins Q49 end-to-end: a
+// pathologically long library name MUST NOT push the library= TXT entry
+// past the DNS-SD 255-byte-per-string limit (hcmdns doesn't validate, so
+// an over-long entry would only fail later inside per-query encoding and
+// silently kill discovery).
+func TestBuildTXTRecordsCapsLongLibraryName(t *testing.T) {
+	got := buildTXTRecords(Config{
+		ProtocolVersion: 1,
+		Port:            7788,
+		LibraryName:     strings.Repeat("z", 1000),
+	}, nil)
+	var libEntry string
+	for _, e := range got {
+		if strings.HasPrefix(e, "library=") {
+			libEntry = e
+			break
+		}
+	}
+	if libEntry == "" {
+		t.Fatal("no library= entry emitted")
+	}
+	if len(libEntry) > 255 {
+		t.Fatalf("library= entry is %d bytes, exceeds the DNS-SD 255-byte TXT limit", len(libEntry))
 	}
 }
 

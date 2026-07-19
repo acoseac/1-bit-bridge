@@ -45,6 +45,40 @@ const macAppStoreBinary = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
 // (matches the pattern in [internal/advertise/tailscale.go]).
 var windowsTailscaleEnvs = []string{"ProgramFiles", "ProgramFiles(x86)"}
 
+// maxCLIOutputBytes bounds how much stdout/stderr the bridge buffers from
+// a `tailscale` subprocess before parsing. A well-behaved `status --json`
+// payload (a few KB — we pass --peers=false) is orders of magnitude under
+// this; the cap defends against a misbehaving / wedged / old CLI
+// streaming an arbitrarily large blob into memory ahead of json.Unmarshal
+// or the stderr inspection. 4 MiB is generous headroom over any real
+// payload while still bounded.
+const maxCLIOutputBytes = 4 << 20 // 4 MiB
+
+// cappedBuffer is an io.Writer that accumulates up to cap bytes and
+// silently discards the overflow, always reporting the full write length
+// with no error so the subprocess's output pipe keeps draining (the
+// process isn't blocked on a short write, nor killed with a broken pipe)
+// — we simply stop growing our in-memory copy. Bounds the memory a
+// runaway `tailscale` process can force the bridge to hold.
+type cappedBuffer struct {
+	buf bytes.Buffer
+	cap int
+}
+
+func (c *cappedBuffer) Write(p []byte) (int, error) {
+	if room := c.cap - c.buf.Len(); room > 0 {
+		if len(p) > room {
+			c.buf.Write(p[:room])
+		} else {
+			c.buf.Write(p)
+		}
+	}
+	return len(p), nil
+}
+
+func (c *cappedBuffer) String() string { return c.buf.String() }
+func (c *cappedBuffer) Bytes() []byte  { return c.buf.Bytes() }
+
 // NodeInfo describes the local Tailscale node, populated by Detect.
 //
 // The zero value (CLIAvailable=false) is the "Tailscale not installed"
@@ -117,9 +151,10 @@ func Detect(ctx context.Context) (NodeInfo, error) {
 	// large tailnet the full peer set adds avoidable latency + JSON
 	// volume to startup and every operator-triggered refresh.
 	cmd := commandContext(ctx, binary, "status", "--json", "--peers=false")
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	stdout := &cappedBuffer{cap: maxCLIOutputBytes}
+	stderr := &cappedBuffer{cap: maxCLIOutputBytes}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 	if err := cmd.Run(); err != nil {
 		info.LastError = trimErr(stderr.String(), err)
 		return info, fmt.Errorf("tailscale status: %w", err)
@@ -235,9 +270,10 @@ func MintCert(ctx context.Context, binary, magicDNS, certPath, keyPath string) e
 		"--key-file="+keyPath,
 		magicDNS,
 	)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	stdout := &cappedBuffer{cap: maxCLIOutputBytes}
+	stderr := &cappedBuffer{cap: maxCLIOutputBytes}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 	if err := cmd.Run(); err != nil {
 		// Check ctx.Err() BEFORE classifyMintError. On graceful
 		// shutdown the parent context cancels, cmd.Run() returns

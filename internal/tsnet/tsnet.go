@@ -17,8 +17,6 @@ import (
 	"tailscale.com/tsnet"
 )
 
-// ... rest of the struct definition ...
-
 // ListenPacket wraps the underlying tsnet.Server.ListenPacket.
 func (s *Server) ListenPacket(network, addr string) (net.PacketConn, error) {
 	s.lifecycleMu.Lock()
