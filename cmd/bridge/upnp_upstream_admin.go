@@ -202,6 +202,22 @@ func (a *upnpAdminAdapter) ForceRescan(_ context.Context, udn string) error {
 			return admin.ErrUPnPNoSuchServer
 		}
 	}
+	// Resolve the lifecycle run scope and refuse if graceful shutdown has
+	// already begun. bgCtx is the PARENT of the periodic ingest loop's
+	// tickCtx (context.WithCancel(ctx) in startUPnPUpstreamIfEnabled), so
+	// once it's cancelled the periodic loop exits and drops its startup +1
+	// on ingestWg toward 0 — a concurrent ingestWg.Add(1) below could then
+	// race Stop's ingestWg.Wait() at the zero transition and panic
+	// ("WaitGroup is reused before previous Wait has returned"). Refusing
+	// the instant bgCtx.Err() is non-nil — before both the inFlight latch
+	// and the Add — keeps the Add under the periodic loop's live +1.
+	// Gemini medium on PR #524.
+	bgCtx := a.bgCtx
+	if bgCtx == nil {
+		bgCtx = context.Background()
+	} else if bgCtx.Err() != nil {
+		return fmt.Errorf("cannot force-rescan: bridge is shutting down: %w", bgCtx.Err())
+	}
 	// Race-free acquire of the in-flight slot.
 	a.state.mu.Lock()
 	if a.state.inFlight {
@@ -211,20 +227,18 @@ func (a *upnpAdminAdapter) ForceRescan(_ context.Context, udn string) error {
 	a.state.inFlight = true
 	a.state.mu.Unlock()
 
-	// Spawn the walk under the lifecycle's bgCtx (NOT the request ctx)
-	// so a client disconnect / reverse-proxy timeout can't abort the
-	// scan mid-tree. The lifecycle's Stop cancels bgCtx during
-	// graceful shutdown, so this goroutine still drains cleanly.
-	bgCtx := a.bgCtx
-	if bgCtx == nil {
-		bgCtx = context.Background()
-	}
+	// bgCtx was resolved above (before the shutdown gate). It's the
+	// lifecycle run scope, NOT the request ctx, so a client disconnect /
+	// reverse-proxy timeout can't abort the scan mid-tree; the lifecycle's
+	// Stop cancels it during graceful shutdown so this goroutine drains
+	// cleanly.
+	//
 	// Register the spawned walk on the lifecycle's ingest WaitGroup so
 	// graceful shutdown (upnpUpstreamLifecycle.Stop → ingestWg.Wait)
 	// joins it before the process tears down the manifest store. The
-	// periodic ingest loop holds a permanent +1 on this WaitGroup from
-	// startup until it exits on ctx-cancel, so this Add lifts the counter
-	// from ≥1 (never from zero) during normal operation — the same
+	// bgCtx.Err() gate above guarantees the periodic ingest loop still
+	// holds its startup +1 here (it drops that only after bgCtx cancels),
+	// so this Add lifts the counter from ≥1, never from zero — the same
 	// bounded-goroutine contract as admin's bgScans WaitGroup. Nil-guard
 	// for the direct-construction unit tests. Add(1) is paired with the
 	// deferred Done() inside the goroutine below.

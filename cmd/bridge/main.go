@@ -633,6 +633,16 @@ func (a *upscaleEnqueuerAdapter) EnqueueOne(libraryRelativePath string) error {
 	if liveRate, liveBits, gErr := a.store.GetUpscaleTarget(context.Background()); gErr == nil {
 		rateSetting = strconv.Itoa(liveRate)
 		targetBits = liveBits
+	} else if !errors.Is(gErr, manifest.ErrUpscaleTargetUnset) {
+		// ErrUpscaleTargetUnset is the fresh-DB "never seeded" case → fall
+		// through to the bridge.yaml bootstrap default (startup seeds
+		// scan_state). Any OTHER error is a real store fault — and the
+		// imminent LookupVariant in finalizeAndEnqueue reads the same
+		// store and would hit it too — so propagate it (matching the
+		// adapter's LookupTrack/LookupVariant DB-error propagation) rather
+		// than silently converting at the stale bootstrap target. Gemini
+		// medium on PR #524.
+		return fmt.Errorf("get live upscale target: %w", gErr)
 	}
 	target, err := transcode.ResolveTargetRate(rateSetting, sourceHz)
 	if err != nil {
