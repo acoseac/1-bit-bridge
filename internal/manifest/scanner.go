@@ -518,13 +518,25 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	s.lastFull.Store(time.Now().UTC().UnixNano())
 	_ = s.store.SetScanState(ctx, "last_full_scan", time.Now().UTC().Format(time.RFC3339Nano))
 
+	// Compute the UPnP-routed exclusion set ONCE for the five reconciliation
+	// passes below — they all skip routed rows, and recomputing it per-pass
+	// re-queried the DB + re-allocated a ~15k-entry map five times (Gemini
+	// PR #511). Fail closed: a fetch error skips ALL reconciliation this scan
+	// (each pass would otherwise abort identically), logged non-fatal; the next
+	// scan retries. See routedExclusionSet for the full rationale + contract.
+	routedSet, rsErr := s.routedExclusionSet(ctx)
+	if rsErr != nil {
+		scanLogger.Error("reconciliation skipped: routed exclusion set", "err", rsErr)
+		return count, nil
+	}
+
 	// Album-title reconciliation: rewrite tracks whose album tag is just the
 	// folder name (a mis-tag / scan fallback, e.g. the dub folder convention)
 	// to their folder's single clean-sibling title, so they don't split off
 	// into a separate album row on iOS. Runs FIRST so the AlbumArtist pass
 	// below then groups the now-unified folder. DB-only, enriched_at-untouched.
 	// Non-fatal.
-	if n, rErr := s.runAlbumTitleReconciliation(ctx); rErr != nil {
+	if n, rErr := s.runAlbumTitleReconciliation(ctx, routedSet); rErr != nil {
 		scanLogger.Error("album-title reconciliation", "err", rErr)
 	} else if n > 0 {
 		scanLogger.Info("album-title reconciliation fixed folder-name album tags", "tracks", n)
@@ -534,7 +546,7 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	// album identity on iOS). DB-only — no MusicBrainz; leaves
 	// enriched_at untouched. Non-fatal: a reconciliation error must not
 	// fail an otherwise-successful scan.
-	if n, rErr := s.runAlbumArtistReconciliation(ctx); rErr != nil {
+	if n, rErr := s.runAlbumArtistReconciliation(ctx, routedSet); rErr != nil {
 		scanLogger.Error("album-artist reconciliation", "err", rErr)
 	} else if n > 0 {
 		scanLogger.Info("album-artist reconciliation unified split albums", "tracks", n)
@@ -543,7 +555,7 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	// dominant year, so a single untagged track doesn't split off into its
 	// own album row on iOS. Same DB-only, enriched_at-untouched contract as
 	// the AlbumArtist pass. Non-fatal.
-	if n, rErr := s.runYearReconciliation(ctx); rErr != nil {
+	if n, rErr := s.runYearReconciliation(ctx, routedSet); rErr != nil {
 		scanLogger.Error("year reconciliation", "err", rErr)
 	} else if n > 0 {
 		scanLogger.Info("year reconciliation filled missing album years", "tracks", n)
@@ -553,7 +565,7 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	// bounded to genuine strays so it can't merge two full copies / editions.
 	// Complements the within-folder pass above. Same DB-only,
 	// enriched_at-untouched contract. Non-fatal.
-	if n, rErr := s.runYearReconciliationByMBID(ctx); rErr != nil {
+	if n, rErr := s.runYearReconciliationByMBID(ctx, routedSet); rErr != nil {
 		scanLogger.Error("year reconciliation (mbid)", "err", rErr)
 	} else if n > 0 {
 		scanLogger.Info("year reconciliation (mbid) filled stray years", "tracks", n)
@@ -563,7 +575,7 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	// scanner skips unchanged files by mtime, so they never re-extract) still
 	// order correctly on iOS. Same DB-only, enriched_at-untouched contract;
 	// routed UPnP rows excluded. Non-fatal.
-	if n, rErr := s.runTrackNumberReconciliation(ctx); rErr != nil {
+	if n, rErr := s.runTrackNumberReconciliation(ctx, routedSet); rErr != nil {
 		scanLogger.Error("track-number reconciliation", "err", rErr)
 	} else if n > 0 {
 		scanLogger.Info("track-number reconciliation filled missing track numbers", "tracks", n)
@@ -603,13 +615,9 @@ func (s *Scanner) routedExclusionSet(ctx context.Context) (map[string]struct{}, 
 // directory-scoped dominant-value fixes (see reconcileAlbumArtists), and
 // persist them (indexed_at bumped, enriched_at untouched). Returns the
 // number of tracks unified. DB-only — no network.
-func (s *Scanner) runAlbumArtistReconciliation(ctx context.Context) (int, error) {
-	// Skip UPnP-routed rows (see routedExclusionSet): reconciling them
-	// re-opens the enrich→walk→wipe loop on hybrid libraries.
-	routedSet, err := s.routedExclusionSet(ctx)
-	if err != nil {
-		return 0, err
-	}
+func (s *Scanner) runAlbumArtistReconciliation(ctx context.Context, routedSet map[string]struct{}) (int, error) {
+	// routedSet (computed once by the caller) excludes UPnP-routed rows —
+	// reconciling them re-opens the enrich→walk→wipe loop on hybrid libraries.
 	// Stream the whole library into lightweight targets — never
 	// materialize every full Track (OOM risk on low-memory hosts; the
 	// codebase streams everywhere else for the same reason).
@@ -636,11 +644,8 @@ func (s *Scanner) runAlbumArtistReconciliation(ctx context.Context) (int, error)
 // loads the full Track only for the changed rows, and persists via
 // ApplyYearReconciliation (bumps indexed_at, leaves enriched_at untouched).
 // A row deleted between the stream and the get is SKIPPED, not fatal.
-func (s *Scanner) runYearReconciliation(ctx context.Context) (int, error) {
-	routedSet, err := s.routedExclusionSet(ctx) // skip routed rows (see routedExclusionSet)
-	if err != nil {
-		return 0, err
-	}
+func (s *Scanner) runYearReconciliation(ctx context.Context, routedSet map[string]struct{}) (int, error) {
+	// routedSet (computed once by the caller) excludes UPnP-routed rows.
 	var targets []ReconcileTarget
 	if err := s.store.StreamTracks(ctx, nil, func(t *Track) error {
 		if _, isRouted := routedSet[t.Path]; isRouted {
@@ -672,11 +677,8 @@ func (s *Scanner) runYearReconciliation(ctx context.Context) (int, error) {
 // persists via ApplyAlbumTitleReconciliation (bumps indexed_at, leaves
 // enriched_at untouched). Runs BEFORE the AlbumArtist pass so the two compose
 // in one scan (unified titles let the AlbumArtist pass then group the folder).
-func (s *Scanner) runAlbumTitleReconciliation(ctx context.Context) (int, error) {
-	routedSet, err := s.routedExclusionSet(ctx) // skip routed rows (see routedExclusionSet)
-	if err != nil {
-		return 0, err
-	}
+func (s *Scanner) runAlbumTitleReconciliation(ctx context.Context, routedSet map[string]struct{}) (int, error) {
+	// routedSet (computed once by the caller) excludes UPnP-routed rows.
 	var targets []ReconcileTarget
 	if err := s.store.StreamTracks(ctx, nil, func(t *Track) error {
 		if _, isRouted := routedSet[t.Path]; isRouted {
@@ -700,11 +702,8 @@ func (s *Scanner) runAlbumTitleReconciliation(ctx context.Context) (int, error) 
 // for the changed rows, and persists via ApplyYearReconciliation (bumps
 // indexed_at, leaves enriched_at untouched). Complements the within-folder
 // reconcileYears for strays that live in their own single-track folder.
-func (s *Scanner) runYearReconciliationByMBID(ctx context.Context) (int, error) {
-	routedSet, err := s.routedExclusionSet(ctx) // skip routed rows (see routedExclusionSet)
-	if err != nil {
-		return 0, err
-	}
+func (s *Scanner) runYearReconciliationByMBID(ctx context.Context, routedSet map[string]struct{}) (int, error) {
+	// routedSet (computed once by the caller) excludes UPnP-routed rows.
 	var targets []ReconcileTarget
 	if err := s.store.StreamTracks(ctx, nil, func(t *Track) error {
 		if _, isRouted := routedSet[t.Path]; isRouted {
@@ -737,15 +736,10 @@ func (s *Scanner) runYearReconciliationByMBID(ctx context.Context) (int, error) 
 // before the extractor-level backfill — the scanner skips unchanged files, so
 // they never re-extract. A row deleted between the stream and the get is
 // SKIPPED, not fatal.
-func (s *Scanner) runTrackNumberReconciliation(ctx context.Context) (int, error) {
-	// Exclude UPnP-routed rows (their track numbers belong to the upstream
-	// DIDL metadata, not bridge-side filename parsing) — see routedExclusionSet
-	// for the full rationale and the fail-closed contract, shared by all five
-	// reconciliation passes.
-	routedSet, err := s.routedExclusionSet(ctx)
-	if err != nil {
-		return 0, err
-	}
+func (s *Scanner) runTrackNumberReconciliation(ctx context.Context, routedSet map[string]struct{}) (int, error) {
+	// routedSet (computed once by the caller) excludes UPnP-routed rows: their
+	// track numbers belong to the upstream DIDL metadata, not bridge-side
+	// filename parsing. See routedExclusionSet for the full rationale.
 	var targets []ReconcileTarget
 	if err := s.store.StreamTracks(ctx, nil, func(t *Track) error {
 		if _, isRouted := routedSet[t.Path]; isRouted {
