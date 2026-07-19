@@ -1,6 +1,7 @@
 package fsutil
 
 import (
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -65,15 +66,18 @@ func IsUnderAny(candidate string, roots []string) string {
 			continue
 		}
 		cleanedRoot := EvalSymlinksOrClean(root)
-		// Compare in the filesystem's case sensitivity. On macOS/Windows
-		// EvalSymlinks does NOT fold case to the on-disk canonical form, so a
-		// case-only difference (root ".../Music" vs candidate
+		// Compare in the filesystem's case sensitivity. On a case-insensitive
+		// volume EvalSymlinks does NOT fold case to the on-disk canonical form,
+		// so a case-only difference (root ".../Music" vs candidate
 		// ".../music/variants" — the same physical directory) would otherwise
 		// report not-nested and let a variants dir be written INSIDE the
-		// library root (the PR #475 phantom-rows class). Fold both sides before
-		// Rel on case-insensitive GOOS; still return the original-case root.
+		// library root (the PR #475 phantom-rows class). Probe the actual
+		// filesystem (not just GOOS) so a Linux operator whose library sits on a
+		// case-insensitive mount — FAT32 / exFAT / NTFS, common on Pi/SBC — is
+		// covered too; fold both sides before Rel, still return the
+		// original-case root.
 		relBase, relTarget := cleanedRoot, cleaned
-		if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+		if caseInsensitiveFS(cleanedRoot) {
 			relBase, relTarget = strings.ToLower(cleanedRoot), strings.ToLower(cleaned)
 		}
 		rel, err := filepath.Rel(relBase, relTarget)
@@ -85,4 +89,48 @@ func IsUnderAny(candidate string, roots []string) string {
 		}
 	}
 	return ""
+}
+
+// caseInsensitiveFS reports whether the volume holding p (or its nearest
+// existing ancestor) treats names case-insensitively. It probes EMPIRICALLY —
+// stat the ancestor's base name and its case-swapped sibling, then compare via
+// os.SameFile — rather than trusting runtime.GOOS alone. That covers the case
+// the GOOS heuristic misses in both directions: a Linux operator whose library
+// lives on a case-insensitive mount (FAT32 / exFAT / NTFS — common on Pi/SBC),
+// and a case-sensitive volume on macOS/Windows. Falls back to the GOOS default
+// only when the path can't be probed (no existing ancestor yet, or a base name
+// with no case-foldable letter).
+func caseInsensitiveFS(p string) bool {
+	goosDefault := runtime.GOOS == "darwin" || runtime.GOOS == "windows"
+	// Walk up to the nearest existing directory so there's something to stat.
+	dir := p
+	for {
+		if _, err := os.Stat(dir); err == nil {
+			break
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return goosDefault // reached the volume root with nothing existing
+		}
+		dir = parent
+	}
+	base := filepath.Base(dir)
+	swapped := strings.ToUpper(base)
+	if swapped == base {
+		swapped = strings.ToLower(base)
+	}
+	if swapped == base {
+		return goosDefault // no case-foldable letter to probe with
+	}
+	fi1, err1 := os.Stat(dir)
+	fi2, err2 := os.Stat(filepath.Join(filepath.Dir(dir), swapped))
+	if err1 == nil && err2 == nil {
+		// Both names resolve. Same inode → case-insensitive (one physical dir);
+		// distinct inodes → a genuinely case-sensitive volume that happens to
+		// hold both spellings as separate dirs.
+		return os.SameFile(fi1, fi2)
+	}
+	// The swapped spelling doesn't resolve → case-sensitive (it would resolve
+	// to the same dir on a case-insensitive volume).
+	return false
 }
