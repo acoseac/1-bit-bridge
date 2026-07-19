@@ -536,18 +536,37 @@ func escapeXMLText(s string) string {
 	// — they can't appear even as escaped references, so a stray control char in
 	// a tag (buggy taggers emit them) would otherwise make a strict renderer
 	// reject the WHOLE Browse/Search response, not just the offending item.
-	// strings.Map returns s unchanged (no alloc) for the clean common case.
-	s = strings.Map(func(r rune) rune {
-		if r < 0x20 && r != '\t' && r != '\n' && r != '\r' {
-			return -1
-		}
-		return r
-	}, s)
+	//
+	// Gate the strings.Map on a cheap byte scan: escapeXMLText also runs over the
+	// whole didlLite payload (hundreds of KB for a large folder), and strings.Map
+	// iterates every rune through a closure even when nothing changes. A byte in
+	// [0x00,0x20) is always a standalone ASCII control (UTF-8 multi-byte
+	// sequences use bytes >= 0x80), so the scan is correct without rune decoding.
+	if hasXMLIllegalControl(s) {
+		s = strings.Map(func(r rune) rune {
+			if r < 0x20 && r != '\t' && r != '\n' && r != '\r' {
+				return -1
+			}
+			return r
+		}, s)
+	}
 	// Fast-path for the common case (no metacharacters to escape).
 	if !strings.ContainsAny(s, `&<>"'`) {
 		return s
 	}
 	return xmlTextReplacer.Replace(s)
+}
+
+// hasXMLIllegalControl reports whether s contains a C0 control byte XML 1.0
+// forbids (< 0x20, excluding tab/LF/CR). Byte-level — such bytes never appear
+// inside a multi-byte UTF-8 sequence, so no rune decoding is needed.
+func hasXMLIllegalControl(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if b := s[i]; b < 0x20 && b != '\t' && b != '\n' && b != '\r' {
+			return true
+		}
+	}
+	return false
 }
 
 // ExtensionFromPath returns the lowercase file extension (with leading
