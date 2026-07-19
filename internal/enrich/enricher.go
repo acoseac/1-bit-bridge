@@ -902,16 +902,20 @@ func (e *Enricher) resolveReleaseGroupMBID(ctx context.Context, releaseMBID, hin
 	}
 	rg, err := e.mb.ReleaseGroupMBID(ctx, releaseMBID)
 	if err != nil {
-		// Negative-cache a PERSISTENT 404 (the release genuinely has no
-		// release-group, or MB doesn't know the release MBID) so sibling
-		// tracks on the same release — all sharing releaseMBID via the
-		// album cache — don't each re-issue the identical guaranteed-404
-		// lookup, every one paced at MBMinInterval. Transient failures
-		// (network blip, 5xx, timeout, shutdown cancel) are LEFT uncached
-		// so the next enrichment pass retries them — the same
+		// Negative-cache a PERSISTENT failure as "" so sibling tracks on the
+		// same release — all sharing releaseMBID via the album cache — don't
+		// each re-issue the identical guaranteed-fail lookup, every one paced
+		// at MBMinInterval. "Persistent" is the full non-transient set, not
+		// just 404: a JSON-decode / schema-drift / persistent-4xx error will
+		// fail every retry too, so caching it stops the sibling re-hammer.
+		// Transient failures (network blip, 5xx, 429, timeout) are LEFT
+		// uncached so the next enrichment pass retries them. The ctx.Err()
+		// guard is load-bearing: IsTransient treats context.Canceled as
+		// non-transient, so without it a shutdown cancel would poison the
+		// cache for a release we never actually looked up. This mirrors the
 		// transient-vs-persistent split SearchRelease already makes in
-		// enrichOne.
-		if IsNotFound(err) {
+		// enrichOne (ctx-cancel first, then IsTransient, then cache-empty).
+		if !IsTransient(err) && ctx.Err() == nil {
 			e.releaseGroupCache.Set(releaseMBID, "")
 		}
 		return "", err

@@ -1341,57 +1341,91 @@ func TestEnricherRespectsContextCancelMidPacing(t *testing.T) {
 	}
 }
 
-// TestResolveReleaseGroupMBIDNegativeCaches404 pins B6: a PERSISTENT 404
-// from the release-group lookup must be negative-cached (as "") so sibling
-// tracks on the same release don't each re-issue the guaranteed-404 MB
-// query, every one paced at MBMinInterval. Pre-fix the resolver returned on
-// ANY error without caching, so a release that genuinely has no
-// release-group re-queried MB once per sibling track.
-func TestResolveReleaseGroupMBIDNegativeCaches404(t *testing.T) {
-	var mbCalls atomic.Int32
-	mbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mbCalls.Add(1)
-		http.NotFound(w, r) // release-group lookup 404s → errNotFound
-	}))
-	defer mbSrv.Close()
-
-	dir := t.TempDir()
-	store, err := manifest.OpenStore(filepath.Join(dir, "bridge.db"))
-	if err != nil {
-		t.Fatal(err)
+// TestResolveReleaseGroupMBIDNegativeCachesPersistentErrors pins B6: EVERY
+// persistent (non-transient) release-group lookup error must be
+// negative-cached (as "") so sibling tracks on the same release — sharing
+// releaseMBID via the album cache — don't each re-issue the identical
+// guaranteed-fail MB query, every one paced at MBMinInterval. Pre-fix the
+// resolver returned on ANY error without caching; the first fix narrowly
+// cached only 404 (CodeRabbit Major on PR #520 flagged that JSON-decode /
+// schema-drift / persistent-4xx errors still slipped through). The
+// transient boundary is the load-bearing negative case: a 5xx must NOT be
+// cached so the next enrichment pass retries once MB recovers — mirroring
+// the transient-vs-persistent split SearchRelease makes in enrichOne.
+func TestResolveReleaseGroupMBIDNegativeCachesPersistentErrors(t *testing.T) {
+	cases := []struct {
+		name       string
+		status     int
+		body       string
+		persistent bool // true = should be negative-cached (sibling served from cache)
+	}{
+		{"404 not found", http.StatusNotFound, "", true},
+		{"400 persistent 4xx", http.StatusBadRequest, `{"error":"bad request"}`, true},
+		{"malformed JSON decode error", http.StatusOK, `{not valid json`, true},
+		{"500 transient", http.StatusInternalServerError, `{"error":"boom"}`, false},
 	}
-	defer store.Close()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var mbCalls atomic.Int32
+			mbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mbCalls.Add(1)
+				if tc.status != http.StatusOK {
+					w.WriteHeader(tc.status)
+				}
+				if tc.body != "" {
+					io.WriteString(w, tc.body)
+				}
+			}))
+			defer mbSrv.Close()
 
-	e := NewEnricher(
-		store,
-		NewMusicBrainzClient(mbSrv.URL, "test", nil),
-		NewCoverArtClient("http://unused", "test", nil),
-		nil,
-		filepath.Join(dir, "artwork"),
-	)
-	e.MBMinInterval = 0 // no pacing — this test is about caching, not timing
+			dir := t.TempDir()
+			store, err := manifest.OpenStore(filepath.Join(dir, "bridge.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
 
-	const releaseMBID = "11111111-1111-4111-8111-111111111111"
+			e := NewEnricher(
+				store,
+				NewMusicBrainzClient(mbSrv.URL, "test", nil),
+				NewCoverArtClient("http://unused", "test", nil),
+				nil,
+				filepath.Join(dir, "artwork"),
+			)
+			e.MBMinInterval = 0 // no pacing — this test is about caching, not timing
 
-	// First lookup: MB 404s. The error surfaces (IsNotFound) AND the miss
-	// is negative-cached under the release MBID.
-	rg, err := e.resolveReleaseGroupMBID(context.Background(), releaseMBID, "")
-	if rg != "" || !IsNotFound(err) {
-		t.Fatalf("first lookup = (%q, %v), want (\"\", IsNotFound)", rg, err)
-	}
-	if got := mbCalls.Load(); got != 1 {
-		t.Fatalf("MB called %d times on first lookup, want 1", got)
-	}
+			const releaseMBID = "11111111-1111-4111-8111-111111111111"
 
-	// Sibling lookup for the same release: served from the negative cache
-	// with no second MB round-trip and no error (the "" hit means "no
-	// release-group association").
-	rg, err = e.resolveReleaseGroupMBID(context.Background(), releaseMBID, "")
-	if rg != "" || err != nil {
-		t.Fatalf("cached lookup = (%q, %v), want (\"\", nil)", rg, err)
-	}
-	if got := mbCalls.Load(); got != 1 {
-		t.Errorf("MB called %d times after negative cache; want 1 (sibling re-queried a guaranteed-404)", got)
+			// First lookup surfaces the error either way (rg empty, err set).
+			if rg, err := e.resolveReleaseGroupMBID(context.Background(), releaseMBID, ""); rg != "" || err == nil {
+				t.Fatalf("first lookup = (%q, %v), want (\"\", non-nil error)", rg, err)
+			}
+			if got := mbCalls.Load(); got != 1 {
+				t.Fatalf("MB called %d times on first lookup, want 1", got)
+			}
+
+			// Second lookup for the same release.
+			rg, err := e.resolveReleaseGroupMBID(context.Background(), releaseMBID, "")
+			if tc.persistent {
+				// Served from the negative cache: no second MB round-trip,
+				// no error (the "" hit means "no release-group association").
+				if rg != "" || err != nil {
+					t.Fatalf("cached lookup = (%q, %v), want (\"\", nil)", rg, err)
+				}
+				if got := mbCalls.Load(); got != 1 {
+					t.Errorf("MB called %d times after persistent-error negative cache; want 1", got)
+				}
+			} else {
+				// Transient: NOT cached — the sibling re-queries and re-errors
+				// so a later pass can succeed once MB recovers.
+				if err == nil {
+					t.Fatalf("transient error was cached: cached lookup = (%q, nil), want a re-issued error", rg)
+				}
+				if got := mbCalls.Load(); got != 2 {
+					t.Errorf("MB called %d times for transient error; want 2 (must re-query, not cache)", got)
+				}
+			}
+		})
 	}
 }
 
