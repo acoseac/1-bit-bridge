@@ -3,7 +3,6 @@ package fsutil
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 )
 
@@ -13,10 +12,13 @@ import (
 // guard lets sidecars be written inside the (possibly read-only) library root
 // (the PR #475 phantom-rows class).
 func TestIsUnderAny_CaseInsensitiveFSDetectsNested(t *testing.T) {
-	if runtime.GOOS != "darwin" && runtime.GOOS != "windows" {
+	base := t.TempDir()
+	// Probe the actual temp filesystem rather than assuming from GOOS — the
+	// case-only-nesting assertion below holds ONLY on a case-insensitive volume
+	// (covers case-sensitive macOS / case-insensitive Linux mounts too).
+	if !caseInsensitiveFS(base) {
 		t.Skip("case-only nesting only applies on case-insensitive filesystems")
 	}
-	base := t.TempDir()
 	root := filepath.Join(base, "Music")
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatal(err)

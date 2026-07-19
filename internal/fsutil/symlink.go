@@ -102,10 +102,13 @@ func IsUnderAny(candidate string, roots []string) string {
 // with no case-foldable letter).
 func caseInsensitiveFS(p string) bool {
 	goosDefault := runtime.GOOS == "darwin" || runtime.GOOS == "windows"
-	// Walk up to the nearest existing directory so there's something to stat.
+	// Walk up to the nearest existing directory so there's something to stat,
+	// keeping its FileInfo (fi1) so the SameFile comparison below doesn't re-stat.
 	dir := p
+	var fi1 os.FileInfo
 	for {
-		if _, err := os.Stat(dir); err == nil {
+		if info, err := os.Stat(dir); err == nil {
+			fi1 = info
 			break
 		}
 		parent := filepath.Dir(dir)
@@ -122,12 +125,11 @@ func caseInsensitiveFS(p string) bool {
 	if swapped == base {
 		return goosDefault // no case-foldable letter to probe with
 	}
-	fi1, err1 := os.Stat(dir)
 	fi2, err2 := os.Stat(filepath.Join(filepath.Dir(dir), swapped))
-	if err1 == nil && err2 == nil {
-		// Both names resolve. Same inode → case-insensitive (one physical dir);
-		// distinct inodes → a genuinely case-sensitive volume that happens to
-		// hold both spellings as separate dirs.
+	if err2 == nil {
+		// The swapped spelling resolves too. Same inode → case-insensitive (one
+		// physical dir); distinct inodes → a genuinely case-sensitive volume that
+		// happens to hold both spellings as separate dirs.
 		return os.SameFile(fi1, fi2)
 	}
 	// The swapped spelling doesn't resolve → case-sensitive (it would resolve
