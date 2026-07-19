@@ -67,7 +67,7 @@ func updateCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 	// pre-Phase-C behaviour); the operator just won't get the
 	// MinClientVersion-would-orphan refusal.
 	var tokenSnapshot func() []auth.Token
-	if store, err := auth.OpenStore(filepath.Join(cfg.DataDir, "tokens.json")); err == nil {
+	if store, err := auth.OpenStore(filepath.Join(cfg.DataDir, tokensFileName)); err == nil {
 		tokenSnapshot = store.List
 	} else {
 		fmt.Fprintf(stderr, "warning: token store unavailable (%v) — compat gate will be permissive\n", err)
@@ -101,7 +101,10 @@ func updateCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 	}
 
 	if !*yes {
-		fmt.Fprint(stdout, "Install update? [y/N] ")
+		// To stderr (like the restart prompt below): `bridge update >file` would
+		// otherwise hide this prompt in the redirected stream and block on
+		// invisible input.
+		fmt.Fprint(stderr, "Install update? [y/N] ")
 		var resp string
 		fmt.Fscanln(stdin, &resp)
 		if resp != "y" && resp != "Y" && resp != "yes" {

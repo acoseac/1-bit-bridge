@@ -1686,7 +1686,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	}
 	_ = acmeManager // referenced later by the admin tile wiring in this PR
 
-	store, err := auth.OpenStore(filepath.Join(cfg.DataDir, "tokens.json"))
+	store, err := auth.OpenStore(filepath.Join(cfg.DataDir, tokensFileName))
 	if err != nil {
 		fmt.Fprintf(stderr, "open token store: %v\n", err)
 		return 1
@@ -3419,7 +3419,7 @@ func pairCmd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, configLoadFailedFormat, err)
 		return 2
 	}
-	store, err := auth.OpenStore(filepath.Join(cfg.DataDir, "tokens.json"))
+	store, err := auth.OpenStore(filepath.Join(cfg.DataDir, tokensFileName))
 	if err != nil {
 		fmt.Fprintf(stderr, "open token store: %v\n", err)
 		return 1
