@@ -194,7 +194,16 @@ func (c *MusicBrainzClient) get(ctx context.Context, u string, out any) error {
 		drainBody(resp.Body)
 		return &httpError{StatusCode: resp.StatusCode, Body: string(b)}
 	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	err = json.NewDecoder(resp.Body).Decode(out)
+	// Drain any bytes past the decoded JSON document so the deferred Close
+	// returns the keep-alive HTTP/1.1 connection to the idle pool.
+	// json.Decoder stops at the closing token, not EOF, so an undrained
+	// remainder (typically a trailing newline) otherwise drops the
+	// connection and forces a re-dial + TLS handshake on the next call —
+	// costly during a cold-cache pass against the same handful of hosts.
+	// Matches the drain the 404 / non-200 branches above already do.
+	drainBody(resp.Body)
+	return err
 }
 
 // httpError carries the upstream MB HTTP status code in a typed shape

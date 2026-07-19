@@ -413,7 +413,13 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 	// impossible from this site.
 	if !strings.HasPrefix(t.ArtworkMBID, "local-") {
 		if cached, err := e.ensureArtworkCached(ctx, albumMBID, rgMBID, t.Artist, t.Album, 500); err != nil {
-			logger.Error("artwork", "mbid", albumMBID, "err", err)
+			// Suppress the Error log on a clean shutdown: ensureArtworkCached
+			// returns ctx.Err() when a pacing sleepCtx trips on cancel, which
+			// isn't a real artwork failure. Mirrors the ctx guard the album /
+			// artist SearchRelease / SearchArtist paths already carry.
+			if ctx.Err() == nil {
+				logger.Error("artwork", "mbid", albumMBID, "err", err)
+			}
 			// Artwork miss isn't fatal — mark enriched so we don't retry
 			// every 15 seconds. A future background pass can re-try.
 		} else if cached {
@@ -518,7 +524,12 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) error {
 	}
 	found, err := e.ensureArtistImageCached(ctx, artistMBID, t.Artist)
 	if err != nil {
-		logger.Error("artist image", "artist", t.Artist, "mbid", artistMBID, "err", err)
+		// Skip the Error log when the failure is just shutdown cancellation
+		// (ensureArtistImageCached returns ctx.Err() from its pacing
+		// sleepCtx). Mirrors the album/artist tier-1 ctx guard.
+		if ctx.Err() == nil {
+			logger.Error("artist image", "artist", t.Artist, "mbid", artistMBID, "err", err)
+		}
 		return nil
 	}
 	if !found {
@@ -828,10 +839,12 @@ func (e *Enricher) ensureArtworkCached(ctx context.Context, mbid, rgMBID, artist
 			e.itunesFallbackHits.Add(1)
 			return true, nil
 		}
-		if !IsNotFound(itErr) {
+		if !IsNotFound(itErr) && ctx.Err() == nil {
 			// Log iTunes errors but don't fail the whole call —
 			// the original release-level errNotFound is the more
-			// useful signal for the caller.
+			// useful signal for the caller. The ctx.Err() guard
+			// suppresses the spurious Error on a clean shutdown, where
+			// fetchITunesArtwork returns ctx.Err() from its pacing sleepCtx.
 			logger.Error("iTunes fallback", "artist", artist, "album", album, "err", itErr)
 		}
 	}
@@ -889,8 +902,18 @@ func (e *Enricher) resolveReleaseGroupMBID(ctx context.Context, releaseMBID, hin
 	}
 	rg, err := e.mb.ReleaseGroupMBID(ctx, releaseMBID)
 	if err != nil {
-		// Do not negative-cache on error — transient network failures
-		// should retry on the next enrichment pass.
+		// Negative-cache a PERSISTENT 404 (the release genuinely has no
+		// release-group, or MB doesn't know the release MBID) so sibling
+		// tracks on the same release — all sharing releaseMBID via the
+		// album cache — don't each re-issue the identical guaranteed-404
+		// lookup, every one paced at MBMinInterval. Transient failures
+		// (network blip, 5xx, timeout, shutdown cancel) are LEFT uncached
+		// so the next enrichment pass retries them — the same
+		// transient-vs-persistent split SearchRelease already makes in
+		// enrichOne.
+		if IsNotFound(err) {
+			e.releaseGroupCache.Set(releaseMBID, "")
+		}
 		return "", err
 	}
 	e.releaseGroupCache.Set(releaseMBID, rg)

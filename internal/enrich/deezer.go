@@ -132,7 +132,12 @@ func (c *DeezerClient) SearchArtist(ctx context.Context, name string) (string, e
 	var body struct {
 		Data []DeezerArtist `json:"data"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+	err = json.NewDecoder(resp.Body).Decode(&body)
+	// Drain any bytes past the decoded JSON document so the deferred Close
+	// returns the keep-alive connection to the idle pool — json.Decoder
+	// stops at the closing token, not EOF. Mirrors MusicBrainzClient.get.
+	drainBody(resp.Body)
+	if err != nil {
 		return "", err
 	}
 	match := pickDeezerArtist(body.Data, name)

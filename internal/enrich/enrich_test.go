@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1337,5 +1338,101 @@ func TestEnricherRespectsContextCancelMidPacing(t *testing.T) {
 	// PR #140).
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("got (%q, %v), want errors.Is context.Canceled", rg, err)
+	}
+}
+
+// TestResolveReleaseGroupMBIDNegativeCaches404 pins B6: a PERSISTENT 404
+// from the release-group lookup must be negative-cached (as "") so sibling
+// tracks on the same release don't each re-issue the guaranteed-404 MB
+// query, every one paced at MBMinInterval. Pre-fix the resolver returned on
+// ANY error without caching, so a release that genuinely has no
+// release-group re-queried MB once per sibling track.
+func TestResolveReleaseGroupMBIDNegativeCaches404(t *testing.T) {
+	var mbCalls atomic.Int32
+	mbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mbCalls.Add(1)
+		http.NotFound(w, r) // release-group lookup 404s → errNotFound
+	}))
+	defer mbSrv.Close()
+
+	dir := t.TempDir()
+	store, err := manifest.OpenStore(filepath.Join(dir, "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	e := NewEnricher(
+		store,
+		NewMusicBrainzClient(mbSrv.URL, "test", nil),
+		NewCoverArtClient("http://unused", "test", nil),
+		nil,
+		filepath.Join(dir, "artwork"),
+	)
+	e.MBMinInterval = 0 // no pacing — this test is about caching, not timing
+
+	const releaseMBID = "11111111-1111-4111-8111-111111111111"
+
+	// First lookup: MB 404s. The error surfaces (IsNotFound) AND the miss
+	// is negative-cached under the release MBID.
+	rg, err := e.resolveReleaseGroupMBID(context.Background(), releaseMBID, "")
+	if rg != "" || !IsNotFound(err) {
+		t.Fatalf("first lookup = (%q, %v), want (\"\", IsNotFound)", rg, err)
+	}
+	if got := mbCalls.Load(); got != 1 {
+		t.Fatalf("MB called %d times on first lookup, want 1", got)
+	}
+
+	// Sibling lookup for the same release: served from the negative cache
+	// with no second MB round-trip and no error (the "" hit means "no
+	// release-group association").
+	rg, err = e.resolveReleaseGroupMBID(context.Background(), releaseMBID, "")
+	if rg != "" || err != nil {
+		t.Fatalf("cached lookup = (%q, %v), want (\"\", nil)", rg, err)
+	}
+	if got := mbCalls.Load(); got != 1 {
+		t.Errorf("MB called %d times after negative cache; want 1 (sibling re-queried a guaranteed-404)", got)
+	}
+}
+
+// TestMusicBrainzGetReusesConnectionAfterSuccess pins Q14: the success path
+// must drain the response body past the decoded JSON document so net/http
+// returns the keep-alive HTTP/1.1 connection to the idle pool.
+// json.Decoder.Decode stops at the closing token and leaves the trailing
+// bytes unread; without an explicit drain the deferred Body.Close drops the
+// connection, forcing a re-dial on every enrichment call against the same
+// handful of API hosts. We assert reuse by counting server-side StateNew
+// transitions across two sequential SearchRelease calls — exactly one
+// connection should be opened.
+func TestMusicBrainzGetReusesConnectionAfterSuccess(t *testing.T) {
+	var newConns atomic.Int32
+	// Trailing whitespace after the JSON document is JSON-insignificant
+	// (Decode ignores it) but leaves bytes unread in the body — the exact
+	// remainder the drain must consume for the connection to be reusable.
+	// 1 KiB is well past any tiny auto-drain net/http might do yet well
+	// within drainBody's 64 KiB cap, so the drain reaches EOF and the
+	// connection is returned to the pool.
+	body := `{"releases":[{"id":"11111111-1111-4111-8111-111111111111","score":100,"title":"Blue Train","artist-credit":[{"name":"John Coltrane"}]}]}` + strings.Repeat(" ", 1024)
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, body)
+	}))
+	srv.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			newConns.Add(1)
+		}
+	}
+	srv.Start()
+	defer srv.Close()
+
+	// A dedicated keep-alive transport isolates the idle-conn pool from the
+	// package-global sharedHTTPTransport so the count is deterministic.
+	c := NewMusicBrainzClient(srv.URL, "test", &http.Client{Transport: &http.Transport{}})
+	for i := 0; i < 2; i++ {
+		if _, err := c.SearchRelease(context.Background(), "John Coltrane", "Blue Train"); err != nil {
+			t.Fatalf("SearchRelease #%d: %v", i+1, err)
+		}
+	}
+	if got := newConns.Load(); got != 1 {
+		t.Errorf("server opened %d connections across 2 calls; want 1 (success body not drained → keep-alive dropped)", got)
 	}
 }
