@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -273,4 +274,73 @@ func TestPlaylistHTTPFeatureOff404(t *testing.T) {
 		t.Fatalf("feature-off = %d, want 404", resp.StatusCode)
 	}
 	resp.Body.Close()
+}
+
+// buildPlaylistItemsJSON renders a JSON array of n minimal (`{}`) items — the
+// Q22 amplification vector: parseable-but-empty items that decode into full
+// structs. Each is ~3 bytes with its separator, so a modest body yields a
+// huge item count.
+func buildPlaylistItemsJSON(n int) []byte {
+	var b bytes.Buffer
+	b.WriteByte('[')
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(`{}`)
+	}
+	b.WriteByte(']')
+	return b.Bytes()
+}
+
+// TestPlaylistHTTPTooManyItems400 (Q22) pins the decode-time item-count cap: a
+// PUT whose items array exceeds maxPlaylistItems is rejected 400 with the
+// count-guard message — proving the guard fired during decode, not a generic
+// parse error or a MaxBytesReader overflow.
+func TestPlaylistHTTPTooManyItems400(t *testing.T) {
+	token, dt, srv := newPlaylistTestServer(t)
+	id := "eeeeeeee-0000-0000-0000-000000000005"
+	var b bytes.Buffer
+	b.WriteString(`{"id":"` + id + `","name":"big","lastModifiedAt":1,"items":`)
+	b.Write(buildPlaylistItemsJSON(maxPlaylistItems + 1))
+	b.WriteByte('}')
+	resp := doReq(t, srv, http.MethodPut, "/v1/playlists/"+id, token, dt, b.String())
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("over-cap PUT = %d, want 400", resp.StatusCode)
+	}
+	var env ErrorResponse
+	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+		t.Fatalf("decode error envelope: %v", err)
+	}
+	if env.Message != "playlist has too many items" {
+		t.Errorf("over-cap 400 message = %q; want %q (the count-guard, not a generic decode error)",
+			env.Message, "playlist has too many items")
+	}
+}
+
+// TestCappedPlaylistItemsUnmarshalCapsBeforeMaterializing (Q22) is the
+// structural proof: exactly at the cap decodes cleanly; one past it aborts
+// with the sentinel from inside the streaming loop, so the whole oversized
+// array is never built.
+func TestCappedPlaylistItemsUnmarshalCapsBeforeMaterializing(t *testing.T) {
+	var atCap cappedPlaylistItems
+	if err := json.Unmarshal(buildPlaylistItemsJSON(maxPlaylistItems), &atCap); err != nil {
+		t.Fatalf("decode at cap: unexpected error %v", err)
+	}
+	if len(atCap) != maxPlaylistItems {
+		t.Fatalf("decode at cap: got %d items, want %d", len(atCap), maxPlaylistItems)
+	}
+
+	var overCap cappedPlaylistItems
+	err := json.Unmarshal(buildPlaylistItemsJSON(maxPlaylistItems+1), &overCap)
+	if !errors.Is(err, errPlaylistTooManyItems) {
+		t.Fatalf("decode over cap: err = %v, want errPlaylistTooManyItems", err)
+	}
+
+	// null → nil slice (stdlib slice-decode parity), no error.
+	var nullItems cappedPlaylistItems
+	if err := json.Unmarshal([]byte("null"), &nullItems); err != nil || nullItems != nil {
+		t.Fatalf("decode null: err=%v items=%+v; want (nil, nil)", err, nullItems)
+	}
 }

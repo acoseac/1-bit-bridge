@@ -146,6 +146,7 @@ type Server struct {
 	manifestRateLimiter    *manifestRateLimiter         // per-token-ID token-bucket for /v1/manifest
 	reachability           *reachabilityCache           // per-root probe TTL cache used by /v1/list, /v1/stat, /v1/health
 	healthCounts           *healthCountsCache           // TTL cache for /v1/health scan-state COUNT(*) scans
+	publicServers          *publicServersCache          // TTL cache for /v1/health UPnP upstream per-server COUNT(*) scans
 	fingerprint            string
 	startedAt              time.Time
 
@@ -378,6 +379,7 @@ func New(cfg *config.Config, store *auth.Store, mp ManifestProvider, fingerprint
 		manifestRateLimiter: newManifestRateLimiter(cfg.Limits.Manifest.EffectiveRPM(), cfg.Limits.Manifest.EffectiveBurst()),
 		reachability:        newReachabilityCache(),
 		healthCounts:        newHealthCountsCache(),
+		publicServers:       newPublicServersCache(),
 		fingerprint:         fingerprint,
 		startedAt:           time.Now().UTC(),
 	}
@@ -1503,7 +1505,11 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// minimal public DTO; see UPnPUpstreamPublicServer for the field
 	// rationale.
 	if s.upnpPublicProvider != nil {
-		resp.UPnPUpstreamServers = s.upnpPublicProvider.PublicServers(r.Context())
+		// TTL-cached: /v1/health is unauthenticated and can be flooded, so
+		// the per-server COUNT(*) scans on upnp_track_routing run at most
+		// ~once per publicServersTTL rather than per request. See
+		// publicServersCache.
+		resp.UPnPUpstreamServers = s.publicServers.servers(r.Context(), s.upnpPublicProvider)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
