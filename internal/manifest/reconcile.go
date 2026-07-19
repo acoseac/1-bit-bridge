@@ -57,14 +57,7 @@ const maxStrayTracksForYearFill = 3
 // Returns only the targets that need changing, sorted by path for
 // deterministic output (tests + stable logs). Pure — no I/O.
 func reconcileAlbumArtists(tracks []ReconcileTarget) []ReconcileTarget {
-	groups := map[string][]int{}
-	for i := range tracks {
-		key, ok := albumArtistGroupKey(tracks[i].Path, tracks[i].Album)
-		if !ok {
-			continue
-		}
-		groups[key] = append(groups[key], i)
-	}
+	groups := groupByAlbumKey(tracks)
 
 	var changed []ReconcileTarget
 	for _, idxs := range groups {
@@ -122,14 +115,7 @@ func reconcileAlbumArtists(tracks []ReconcileTarget) []ReconcileTarget {
 // Returns only the targets needing a fill (Year set to the dominant value),
 // sorted by path for deterministic output. Pure — no I/O.
 func reconcileYears(tracks []ReconcileTarget) []ReconcileTarget {
-	groups := map[string][]int{}
-	for i := range tracks {
-		key, ok := albumArtistGroupKey(tracks[i].Path, tracks[i].Album)
-		if !ok {
-			continue
-		}
-		groups[key] = append(groups[key], i)
-	}
+	groups := groupByAlbumKey(tracks)
 
 	var changed []ReconcileTarget
 	for _, idxs := range groups {
@@ -411,6 +397,26 @@ func albumArtistGroupKey(path, album string) (string, bool) {
 	// the album's leading characters can't collide with a different
 	// (dir, album) split.
 	return trackDir(path) + "\x00" + al, true
+}
+
+// groupByAlbumKey buckets track indices by their directory-scoped
+// (directory + normalized album) key — the shared grouping preamble for
+// the directory-scoped reconciliation passes (reconcileAlbumArtists /
+// reconcileYears). Tracks with no album title (albumArtistGroupKey
+// returns ok=false) are dropped: a loose single is not "an album" and is
+// never reconciled. Kept in one place so the two passes group IDENTICALLY
+// — the dominant-vote determinism depends on the buckets matching
+// byte-for-byte.
+func groupByAlbumKey(tracks []ReconcileTarget) map[string][]int {
+	groups := map[string][]int{}
+	for i := range tracks {
+		key, ok := albumArtistGroupKey(tracks[i].Path, tracks[i].Album)
+		if !ok {
+			continue
+		}
+		groups[key] = append(groups[key], i)
+	}
+	return groups
 }
 
 // trackDir returns the directory portion of a relative track path,

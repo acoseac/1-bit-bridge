@@ -2,6 +2,8 @@ package manifest
 
 import (
 	"context"
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -104,6 +106,80 @@ func TestPrunePlaylistCoversExcept(t *testing.T) {
 	}
 	if _, ok := left["b"]; !ok {
 		t.Error("kept key 'b' was pruned")
+	}
+}
+
+// TestPlaylistCoverFilenameInjective pins the fix for the lossy filename
+// scheme: the pre-fix SanitizeCoverKey form mapped "a b" and "a_b" to the
+// SAME basename (space → '_'), so a cover upload for one silently
+// overwrote the other's while serveCover advertised the correct imageHash.
+// The sha256 identity must keep distinct (scope, key) pairs on distinct
+// files while staying traversal-safe.
+func TestPlaylistCoverFilenameInjective(t *testing.T) {
+	fnAB := PlaylistCoverFilename(CoverScopePlaylist, "a b", "jpg")
+	fnAUnderB := PlaylistCoverFilename(CoverScopePlaylist, "a_b", "jpg")
+	if fnAB == fnAUnderB {
+		t.Fatalf("collision: keys \"a b\" and \"a_b\" both map to %q", fnAB)
+	}
+
+	// Deterministic — the same identity always resolves to the same file.
+	if PlaylistCoverFilename(CoverScopePlaylist, "a b", "jpg") != fnAB {
+		t.Error("PlaylistCoverFilename is not deterministic")
+	}
+
+	// Scope is part of the identity: same key under different scopes must
+	// not collide.
+	if PlaylistCoverFilename(CoverScopeSmartMix, "x", "jpg") ==
+		PlaylistCoverFilename(CoverScopePlaylist, "x", "jpg") {
+		t.Error("scope must be part of the filename identity")
+	}
+
+	// The hash alphabet is pure hex, so no key can inject a path separator
+	// or traversal sequence; the extension stays the only structural part.
+	for _, key := range []string{"../../etc/passwd", "a/b", "a b", "..", "spaces & symbols!"} {
+		fn := PlaylistCoverFilename(CoverScopePlaylist, key, "jpg")
+		if strings.ContainsAny(fn, `/\`) || strings.Contains(fn, "..") {
+			t.Errorf("filename %q for key %q contains a path separator / traversal", fn, key)
+		}
+		if !strings.HasSuffix(fn, ".jpg") {
+			t.Errorf("filename %q for key %q missing .jpg extension", fn, key)
+		}
+	}
+}
+
+// TestPlaylistCoverPathIsolatesDistinctKeys proves an on-disk
+// upload/serve/delete round-trip for one key never touches a
+// collision-prone sibling's file (pre-fix "a b" and "a_b" shared a path).
+func TestPlaylistCoverPathIsolatesDistinctKeys(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(PlaylistCoverDir(dir), 0o700); err != nil {
+		t.Fatalf("mkdir covers: %v", err)
+	}
+	pathAB := PlaylistCoverPath(dir, CoverScopePlaylist, "a b", "jpg")
+	pathAUnderB := PlaylistCoverPath(dir, CoverScopePlaylist, "a_b", "jpg")
+	if pathAB == pathAUnderB {
+		t.Fatalf("distinct keys share a path: %q", pathAB)
+	}
+
+	// "Upload" a cover for "a b".
+	if err := os.WriteFile(pathAB, []byte("cover-for-a-space-b"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	// The sibling key "a_b" must NOT resolve to the file we just wrote.
+	if _, err := os.Stat(pathAUnderB); !os.IsNotExist(err) {
+		t.Fatalf("sibling key \"a_b\" unexpectedly resolves to an existing file (err=%v)", err)
+	}
+	// "Serve" for "a b" reads back the right bytes.
+	got, err := os.ReadFile(pathAB)
+	if err != nil || string(got) != "cover-for-a-space-b" {
+		t.Fatalf("serve read: got %q err %v", got, err)
+	}
+	// "Delete" for "a b" removes its own file and never touched "a_b".
+	if err := os.Remove(pathAB); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, err := os.Stat(pathAB); !os.IsNotExist(err) {
+		t.Error("file for \"a b\" still present after delete")
 	}
 }
 
