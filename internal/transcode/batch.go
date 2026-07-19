@@ -568,10 +568,24 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 		enqueued++
 	}
 
+	// Capture the persisted total BEFORE the fully-deduped transition below can
+	// delete the batch from liveBatches, so the 202 response agrees with the
+	// admin Jobs page after any dedup/queue-full truncation (Gemini).
+	finalTotal := len(cands)
+	c.mu.Lock()
+	if st, ok := c.liveBatches[batchID]; ok {
+		finalTotal = st.Row.TotalFiles
+	}
+	c.mu.Unlock()
+
 	// Every candidate deduped against in-flight jobs (a fully-overlapping
 	// re-submit) → no callback will fire for this batch; transition it now so it
 	// doesn't sit `running` forever (the overlapping batch produces the variants).
-	if enqueued == 0 && deduped > 0 {
+	// Gate on `deduped == len(cands)`, NOT `enqueued == 0 && deduped > 0`: a
+	// queue-full break can also leave enqueued == 0 with deduped > 0, and that
+	// path already set a terminal (failed) status — completing it here would
+	// clobber the failure (CodeRabbit).
+	if deduped == len(cands) {
 		if err := c.transitionStatus(batchID, "completed", "", c.clock()); err != nil {
 			c.logger.Warn("submit: transition fully-deduped batch",
 				"batchID", batchID.String(), "err", err)
@@ -579,14 +593,6 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 	}
 
 	c.publishProgress(batchID)
-	// Report the total that was actually persisted (after any dedup/queue-full
-	// truncation) so the 202 response agrees with the admin Jobs page.
-	finalTotal := len(cands)
-	c.mu.Lock()
-	if st, ok := c.liveBatches[batchID]; ok {
-		finalTotal = st.Row.TotalFiles
-	}
-	c.mu.Unlock()
 	return &SubmitResult{
 		BatchID:            batchID,
 		Path:               path,
@@ -879,8 +885,9 @@ func (c *Coordinator) enqueueOptimizeJobs(batchID uuid.UUID, cands []optimizeCan
 		}
 		enqueued++
 	}
-	// Fully deduped → complete now (mirrors Submit); no callback would fire.
-	if enqueued == 0 && deduped > 0 {
+	// Fully deduped → complete now (mirrors Submit); gate on deduped == len(cands)
+	// so a queue-full break doesn't spuriously complete a truncated batch.
+	if deduped == len(cands) {
 		if err := c.transitionStatus(batchID, "completed", "", c.clock()); err != nil {
 			c.logger.Warn("optimize: transition fully-deduped batch",
 				"batchID", batchID.String(), "err", err)
