@@ -262,6 +262,16 @@ func defaultClient() *http.Client {
 			IdleConnTimeout:       30 * time.Second,
 			ResponseHeaderTimeout: 10 * time.Second,
 		},
+		// Relay 3xx verbatim instead of following them. This client fetches from
+		// an SSDP-discovered upstream (a LAN device, possibly rogue or spoofed),
+		// so auto-following a redirect to http://127.0.0.1:7789/… or a
+		// link-local metadata address would turn the bridge into an SSRF proxy
+		// for its own loopback, no-auth admin API. ErrUseLastResponse also
+		// preserves the bit-exact contract (the upstream's 3xx flows back
+		// unchanged). Mirrors the enrich clients' installRedirectGuard.
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 	}
 }
 
