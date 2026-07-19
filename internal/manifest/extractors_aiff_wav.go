@@ -13,6 +13,33 @@ import (
 	tag "github.com/dhowden/tag"
 )
 
+// readIFFChunkBody reads exactly `size` bytes of an IFF/RIFF chunk body from r.
+// On a clean read it returns (body, false, nil).
+//
+// A mid-body truncation (io.EOF / io.ErrUnexpectedEOF) is NOT fatal — the file
+// is still worth indexing, and the folder-level cover.jpg fallback that runs at
+// the tail of each walker must stay reachable — so it logs a Warn and returns
+// (nil, true, nil). The caller MUST break its chunk walk on `truncated` (a bare
+// `break` in the AIFF if-chain walker, `break chunkLoop` in the WAV switch
+// walker) and fall through to extractLocalArtwork. Any other (genuine I/O) read
+// error is returned wrapped for the caller to propagate.
+//
+// `format` ("wav"/"aiff") + `chunk` ("fmt"/"ID3"/"COMM"/"LIST") shape the log +
+// error text so both read exactly as the five per-site strings did before this
+// was extracted (B10). Factoring the five near-identical blocks here also keeps
+// the SonarCloud new-code duplication gate green.
+func readIFFChunkBody(r io.Reader, size uint32, format, chunk, absPath string) (body []byte, truncated bool, err error) {
+	body = make([]byte, size)
+	if _, rerr := io.ReadFull(r, body); rerr != nil {
+		if errors.Is(rerr, io.EOF) || errors.Is(rerr, io.ErrUnexpectedEOF) {
+			scanLogger.Warn(format+": "+chunk+" body truncated; stopping chunk walk", "path", absPath, "err", rerr)
+			return nil, true, nil
+		}
+		return nil, false, fmt.Errorf("%s: %s body read: %w", format, chunk, rerr)
+	}
+	return body, false, nil
+}
+
 // extractAIFFWithContext walks an AIFF / AIFC FORM tree looking for
 // an embedded "ID3 " sub-chunk. When present, the chunk body is
 // handed to dhowden/tag's ID3v2 parser so APIC artwork and the same
@@ -82,20 +109,12 @@ func extractAIFFWithContext(absPath string, t *Track, ec *ExtractContext) error 
 				}
 				continue
 			}
-			body := make([]byte, size)
-			if _, err := io.ReadFull(f, body); err != nil {
-				if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-					// Truncated mid-chunk — the track is still worth
-					// indexing, and the folder-level cover.jpg fallback
-					// below must not be lost to a partial trailing chunk.
-					// Stop the walk (mirrors the header-read EOF break)
-					// and fall through to extractLocalArtwork. Bare break
-					// is correct here — this walker is an if-chain, not a
-					// switch (unlike the WAV twin).
-					scanLogger.Warn("aiff: ID3 body truncated; stopping chunk walk", "path", absPath, "err", err)
-					break
-				}
-				return fmt.Errorf("aiff: ID3 body read: %w", err)
+			body, truncated, err := readIFFChunkBody(f, size, "aiff", "ID3", absPath)
+			if err != nil {
+				return err
+			}
+			if truncated {
+				break // if-chain walker: bare break exits the for-loop
 			}
 			if size%2 == 1 {
 				if _, err := f.Seek(1, io.SeekCurrent); err != nil {
@@ -126,13 +145,12 @@ func extractAIFFWithContext(absPath string, t *Track, ec *ExtractContext) error 
 				}
 				continue
 			}
-			body := make([]byte, size)
-			if _, err := io.ReadFull(f, body); err != nil {
-				if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-					scanLogger.Warn("aiff: COMM body truncated; stopping chunk walk", "path", absPath, "err", err)
-					break
-				}
-				return fmt.Errorf("aiff: COMM body read: %w", err)
+			body, truncated, err := readIFFChunkBody(f, size, "aiff", "COMM", absPath)
+			if err != nil {
+				return err
+			}
+			if truncated {
+				break // if-chain walker: bare break exits the for-loop
 			}
 			if size%2 == 1 {
 				if _, err := f.Seek(1, io.SeekCurrent); err != nil {
@@ -313,18 +331,12 @@ chunkLoop:
 				}
 				continue
 			}
-			body := make([]byte, size)
-			if _, err := io.ReadFull(f, body); err != nil {
-				if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-					// Truncated mid-chunk — the track is still worth
-					// indexing, and the folder-level cover.jpg fallback
-					// below must not be lost to a partial trailing chunk.
-					// Stop the walk (mirrors the header-read EOF break)
-					// and fall through to extractLocalArtwork.
-					scanLogger.Warn("wav: ID3 body truncated; stopping chunk walk", "path", absPath, "err", err)
-					break chunkLoop
-				}
-				return fmt.Errorf("wav: ID3 body read: %w", err)
+			body, truncated, err := readIFFChunkBody(f, size, "wav", "ID3", absPath)
+			if err != nil {
+				return err
+			}
+			if truncated {
+				break chunkLoop // switch walker: labeled break exits the for-loop
 			}
 			if size%2 == 1 {
 				if _, err := f.Seek(1, io.SeekCurrent); err != nil {
@@ -359,13 +371,12 @@ chunkLoop:
 				}
 				continue
 			}
-			body := make([]byte, size)
-			if _, err := io.ReadFull(f, body); err != nil {
-				if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-					scanLogger.Warn("wav: LIST body truncated; stopping chunk walk", "path", absPath, "err", err)
-					break chunkLoop
-				}
-				return fmt.Errorf("wav: LIST body read: %w", err)
+			body, truncated, err := readIFFChunkBody(f, size, "wav", "LIST", absPath)
+			if err != nil {
+				return err
+			}
+			if truncated {
+				break chunkLoop // switch walker: labeled break exits the for-loop
 			}
 			if size%2 == 1 {
 				if _, err := f.Seek(1, io.SeekCurrent); err != nil {
@@ -389,16 +400,12 @@ chunkLoop:
 				}
 				continue
 			}
-			body := make([]byte, size)
-			if _, err := io.ReadFull(f, body); err != nil {
-				if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-					// Truncated mid-fmt — the folder-level cover.jpg
-					// fallback below must not be lost to a partial
-					// trailing chunk. Stop the walk and fall through.
-					scanLogger.Warn("wav: fmt body truncated; stopping chunk walk", "path", absPath, "err", err)
-					break chunkLoop
-				}
-				return fmt.Errorf("wav: fmt body read: %w", err)
+			body, truncated, err := readIFFChunkBody(f, size, "wav", "fmt", absPath)
+			if err != nil {
+				return err
+			}
+			if truncated {
+				break chunkLoop // switch walker: labeled break exits the for-loop
 			}
 			if size%2 == 1 {
 				if _, err := f.Seek(1, io.SeekCurrent); err != nil {
