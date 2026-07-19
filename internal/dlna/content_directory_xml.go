@@ -146,7 +146,7 @@ func sourceResAttrs(opts DIDLTrackOpts) []string {
 		mime, DLNAFlags,
 	)
 	attrs := []string{
-		fmt.Sprintf(`protocolInfo=%q`, protocolInfo),
+		fmt.Sprintf(`protocolInfo="%s"`, escapeXMLText(protocolInfo)),
 		fmt.Sprintf(`size="%d"`, opts.Size),
 	}
 	if opts.DurationSeconds > 0 {
@@ -343,7 +343,7 @@ func variantResElement(opts DIDLTrackOpts, v VariantInfo) string {
 		mime, DLNAFlags,
 	)
 	attrs := []string{
-		fmt.Sprintf(`protocolInfo=%q`, protocolInfo),
+		fmt.Sprintf(`protocolInfo="%s"`, escapeXMLText(protocolInfo)),
 		fmt.Sprintf(`size="%d"`, v.Size),
 	}
 	if opts.DurationSeconds > 0 {
@@ -532,7 +532,18 @@ func escapeXMLText(s string) string {
 	if s == "" {
 		return ""
 	}
-	// Fast-path for the common case (no escapes needed)
+	// Drop C0 control bytes XML 1.0 forbids (everything < 0x20 except tab/LF/CR)
+	// — they can't appear even as escaped references, so a stray control char in
+	// a tag (buggy taggers emit them) would otherwise make a strict renderer
+	// reject the WHOLE Browse/Search response, not just the offending item.
+	// strings.Map returns s unchanged (no alloc) for the clean common case.
+	s = strings.Map(func(r rune) rune {
+		if r < 0x20 && r != '\t' && r != '\n' && r != '\r' {
+			return -1
+		}
+		return r
+	}, s)
+	// Fast-path for the common case (no metacharacters to escape).
 	if !strings.ContainsAny(s, `&<>"'`) {
 		return s
 	}
