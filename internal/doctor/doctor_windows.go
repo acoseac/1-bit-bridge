@@ -4,7 +4,7 @@ package doctor
 
 import (
 	"fmt"
-	"runtime"
+	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -140,25 +140,29 @@ func extendedTCPTable(family int) ([]byte, error) {
 	var buf []byte
 	var size uint32
 	for attempt := 0; attempt < 5; attempt++ {
-		var ptr uintptr // 0 (NULL) for the size-query call; &buf[0] once allocated
+		// bufPtr stays an unsafe.Pointer (NOT a uintptr) so the GC keeps buf's
+		// backing array alive: nil → 0 (NULL) drives the size-query call,
+		// &buf[0] the fetch. We call syscall.Syscall6 DIRECTLY rather than
+		// LazyProc.Call because syscall.Syscall6 carries //go:uintptrescapes —
+		// the compiler pins each inline uintptr(unsafe.Pointer(...)) argument
+		// (buf AND the stack-local &size) across the call, guaranteeing they
+		// aren't moved or freed mid-syscall (unsafe.Pointer rule 4). LazyProc.Call
+		// is a plain method that launders its args through a []uintptr, so it
+		// gets none of that protection.
+		var bufPtr unsafe.Pointer
 		if len(buf) > 0 {
-			ptr = uintptr(unsafe.Pointer(&buf[0]))
+			bufPtr = unsafe.Pointer(&buf[0])
 		}
-		ret, _, _ := procGetExtendedTcp.Call(
-			ptr,
+		ret, _, _ := syscall.Syscall6(
+			procGetExtendedTcp.Addr(),
+			6, // GetExtendedTcpTable takes 6 args
+			uintptr(bufPtr),
 			uintptr(unsafe.Pointer(&size)),
 			0, // bOrder = FALSE — sort order is irrelevant to a membership test
 			uintptr(family),
 			uintptr(tcpTableOwnerPIDListener),
 			0, // Reserved
 		)
-		// `ptr` holds uintptr(unsafe.Pointer(&buf[0])) computed on an earlier
-		// line, which is OUTSIDE the compiler's unsafe.Pointer→uintptr syscall
-		// liveness special-case (unsafe.Pointer rule 4). Keep buf alive across
-		// the Call so a future moving/tightened GC can't reclaim or relocate it
-		// between the conversion and the syscall. (&size is converted inline in
-		// the Call argument list, so it's already covered.)
-		runtime.KeepAlive(buf)
 		switch ret {
 		case errSuccess:
 			return buf, nil
