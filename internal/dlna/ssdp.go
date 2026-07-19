@@ -81,6 +81,16 @@ type SSDPConfig struct {
 // renderer would purge the prior entry.
 const defaultAdvertiseInterval = 14 * time.Minute
 
+// ssdpListenerReadDeadline bounds each blocking ReadFromUDP in the
+// M-SEARCH listener so the loop wakes periodically to re-check
+// ctx.Done(). Without it, a bare parent-ctx cancel that does NOT go
+// through Stop() (which closes the listener to wake the read) would park
+// the goroutine — and its WaitGroup slot — inside ReadFromUDP indefinitely
+// on a quiet network. Today Server.Stop always calls adv.Stop(), so this
+// is latent defense-in-depth. Mirrors the sibling discovery client's
+// runLoop (internal/dlna/discovery/client.go).
+const ssdpListenerReadDeadline = 500 * time.Millisecond
+
 // SSDPAdvertiser runs the SSDP NOTIFY + M-SEARCH response goroutines.
 // Use `NewSSDPAdvertiser` to create, `Start` to begin, `Stop` to
 // gracefully tear down (sends ssdp:byebye for every NotifyTarget on
@@ -344,10 +354,24 @@ func (s *SSDPAdvertiser) runMSearchListener(ctx context.Context, listener *net.U
 			return
 		default:
 		}
-		// ReadFromUDP blocks; the Stop() path closes the listener
-		// to wake us up. Read errors are expected at teardown time.
+		// Short read deadline so the loop wakes periodically to re-check
+		// ctx.Done() above — without it, a bare parent-ctx cancel that
+		// doesn't go through Stop() (which closes the listener to wake the
+		// read) would park us inside ReadFromUDP indefinitely on a quiet
+		// network. Wall-clock (time.Now), never an injectable clock:
+		// net.Conn deadlines evaluate against the real OS clock.
+		_ = listener.SetReadDeadline(time.Now().Add(ssdpListenerReadDeadline))
+		// ReadFromUDP blocks up to the deadline; the Stop() path also closes
+		// the listener to wake us up. Read errors are expected at teardown.
 		n, src, err := listener.ReadFromUDP(buf)
 		if err != nil {
+			// A read-deadline timeout is the normal idle tick — loop back to
+			// the top so the ctx.Done() check fires. It is NOT an error worth
+			// logging (a quiet LAN produces one every deadline window).
+			var nErr net.Error
+			if errors.As(err, &nErr) && nErr.Timeout() {
+				continue
+			}
 			select {
 			case <-ctx.Done():
 				return // expected — Stop() closed the listener

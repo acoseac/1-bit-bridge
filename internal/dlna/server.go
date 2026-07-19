@@ -205,6 +205,22 @@ func (s *Server) Start(ctx context.Context) error {
 	s.notifyCtx, s.notifyCancel = context.WithCancel(ctx)
 	s.notifyClient = &http.Client{Timeout: genaInitialNotifyTimeout}
 
+	// On any error return BEFORE the happy tail hands ownership of the
+	// cancel to Stop(), cancel the derived context so the child isn't
+	// leaked until the parent ctx ends. A caller that saw Start fail
+	// typically won't call Stop() (the site where notifyCancel normally
+	// fires), so without this the notify context lingers for the parent
+	// ctx's whole lifetime. `started = true` on the success tail transfers
+	// ownership to Stop(); notifyCancel is idempotent (a second call is a
+	// no-op), so even a caller that DOES call Stop() after a failed Start
+	// can't double-cancel.
+	started := false
+	defer func() {
+		if !started {
+			s.notifyCancel()
+		}
+	}()
+
 	s.mux = http.NewServeMux()
 	s.mountHandlers()
 
@@ -285,6 +301,7 @@ func (s *Server) Start(ctx context.Context) error {
 		slog.String("friendlyName", s.cfg.FriendlyName),
 		slog.Bool("telemetryEnabled", s.cfg.TelemetryStore != nil),
 	)
+	started = true
 	return nil
 }
 

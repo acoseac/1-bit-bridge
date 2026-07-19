@@ -2,6 +2,7 @@ package dlna
 
 import (
 	"context"
+	"net"
 	"testing"
 	"time"
 )
@@ -68,6 +69,68 @@ func Test_SSDPAdvertiser_StopBeforeStartIsSafe(t *testing.T) {
 	a.Stop()
 	// Calling twice should also be safe
 	a.Stop()
+}
+
+// Test_SSDPAdvertiser_MSearchListenerWakesOnContextCancel pins B31: the
+// M-SEARCH listener loop must return promptly when its context is
+// cancelled WITHOUT Stop() closing the socket — the per-iteration read
+// deadline is what lets a bare parent-ctx cancel unpark the goroutine (and
+// free its WaitGroup slot). Pre-fix the goroutine parked in ReadFromUDP
+// until a packet arrived, so the 3s bound below would fire and fail.
+//
+// Drives runMSearchListener directly against a plain loopback UDP socket
+// (no multicast permissions needed → runs in sandboxed CI). The listener
+// never receives a packet, so every read hits the deadline: exactly the
+// "quiet network" case the fix targets.
+func Test_SSDPAdvertiser_MSearchListenerWakesOnContextCancel(t *testing.T) {
+	a := NewSSDPAdvertiser(SSDPConfig{
+		UDN:         "uuid:f1b3a5c2-8e7d-4f3b-9c1a-0d2e3f4a5b6c",
+		Location:    "http://127.0.0.1:7790/dlna/description.xml",
+		ServerToken: "test",
+	})
+	// runMSearchListener reads s.log only on a NON-timeout read error; set
+	// it so a stray error can't nil-deref. Start() would set this, but we
+	// drive the listener directly (bypassing the multicast bind).
+	a.log = ssdpLogger
+
+	listener, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("bind loopback UDP listener: %v", err)
+	}
+	defer listener.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Drive the listener exactly as Start() does: hold a wg slot for its
+	// lifetime (the goroutine's `defer s.wg.Done()` releases it on return).
+	a.wg.Add(1)
+	go a.runMSearchListener(ctx, listener)
+
+	// Give the goroutine time to pass the top-of-loop ctx.Done() check and
+	// PARK inside ReadFromUDP before cancelling. Without this, cancel()
+	// would usually land before the first read, so the loop would exit via
+	// the top-of-loop select — never exercising the read-deadline wake path
+	// this test guards. 50ms >> the microseconds the goroutine needs to
+	// reach the read, and << the 500ms deadline, so it's parked-in-read.
+	time.Sleep(50 * time.Millisecond)
+
+	// Cancel the ctx WITHOUT closing the listener — the whole point of B31
+	// is a parent-ctx cancel that never reaches Stop()'s socket-close. The
+	// goroutine (parked in ReadFromUDP) can only observe it after the read
+	// deadline fires and loops back to the top; pre-fix it never would.
+	cancel()
+
+	done := make(chan struct{})
+	go func() {
+		a.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		// Listener returned — the read deadline let it observe ctx.Done().
+	case <-time.After(3 * time.Second):
+		t.Fatal("runMSearchListener did not return after ctx cancel — leaked, parked in ReadFromUDP")
+	}
 }
 
 // Test_SSDPAdvertiser_StartStopRaceFree exercises the teardown race the
