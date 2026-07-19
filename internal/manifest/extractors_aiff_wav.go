@@ -13,6 +13,33 @@ import (
 	tag "github.com/dhowden/tag"
 )
 
+// readIFFChunkBody reads exactly `size` bytes of an IFF/RIFF chunk body from r.
+// On a clean read it returns (body, false, nil).
+//
+// A mid-body truncation (io.EOF / io.ErrUnexpectedEOF) is NOT fatal — the file
+// is still worth indexing, and the folder-level cover.jpg fallback that runs at
+// the tail of each walker must stay reachable — so it logs a Warn and returns
+// (nil, true, nil). The caller MUST break its chunk walk on `truncated` (a bare
+// `break` in the AIFF if-chain walker, `break chunkLoop` in the WAV switch
+// walker) and fall through to extractLocalArtwork. Any other (genuine I/O) read
+// error is returned wrapped for the caller to propagate.
+//
+// `format` ("wav"/"aiff") + `chunk` ("fmt"/"ID3"/"COMM"/"LIST") shape the log +
+// error text so both read exactly as the five per-site strings did before this
+// was extracted (B10). Factoring the five near-identical blocks here also keeps
+// the SonarCloud new-code duplication gate green.
+func readIFFChunkBody(r io.Reader, size uint32, format, chunk, absPath string) (body []byte, truncated bool, err error) {
+	body = make([]byte, size)
+	if _, rerr := io.ReadFull(r, body); rerr != nil {
+		if errors.Is(rerr, io.EOF) || errors.Is(rerr, io.ErrUnexpectedEOF) {
+			scanLogger.Warn(format+": "+chunk+" body truncated; stopping chunk walk", "path", absPath, "err", rerr)
+			return nil, true, nil
+		}
+		return nil, false, fmt.Errorf("%s: %s body read: %w", format, chunk, rerr)
+	}
+	return body, false, nil
+}
+
 // extractAIFFWithContext walks an AIFF / AIFC FORM tree looking for
 // an embedded "ID3 " sub-chunk. When present, the chunk body is
 // handed to dhowden/tag's ID3v2 parser so APIC artwork and the same
@@ -82,9 +109,12 @@ func extractAIFFWithContext(absPath string, t *Track, ec *ExtractContext) error 
 				}
 				continue
 			}
-			body := make([]byte, size)
-			if _, err := io.ReadFull(f, body); err != nil {
-				return fmt.Errorf("aiff: ID3 body read: %w", err)
+			body, truncated, err := readIFFChunkBody(f, size, "aiff", "ID3", absPath)
+			if err != nil {
+				return err
+			}
+			if truncated {
+				break // if-chain walker: bare break exits the for-loop
 			}
 			if size%2 == 1 {
 				if _, err := f.Seek(1, io.SeekCurrent); err != nil {
@@ -115,9 +145,12 @@ func extractAIFFWithContext(absPath string, t *Track, ec *ExtractContext) error 
 				}
 				continue
 			}
-			body := make([]byte, size)
-			if _, err := io.ReadFull(f, body); err != nil {
-				return fmt.Errorf("aiff: COMM body read: %w", err)
+			body, truncated, err := readIFFChunkBody(f, size, "aiff", "COMM", absPath)
+			if err != nil {
+				return err
+			}
+			if truncated {
+				break // if-chain walker: bare break exits the for-loop
 			}
 			if size%2 == 1 {
 				if _, err := f.Seek(1, io.SeekCurrent); err != nil {
@@ -270,6 +303,10 @@ func extractWAVWithContext(absPath string, t *Track, ec *ExtractContext) error {
 	}
 
 	var idTagMetadata tag.Metadata
+	// Labeled so a truncated chunk BODY inside the switch below can break
+	// the walk loop (a bare `break` would only exit the switch) and fall
+	// through to the extractLocalArtwork tail — see B10 body-read handling.
+chunkLoop:
 	for {
 		var sub [8]byte
 		if _, err := io.ReadFull(f, sub[:]); err != nil {
@@ -294,9 +331,12 @@ func extractWAVWithContext(absPath string, t *Track, ec *ExtractContext) error {
 				}
 				continue
 			}
-			body := make([]byte, size)
-			if _, err := io.ReadFull(f, body); err != nil {
-				return fmt.Errorf("wav: ID3 body read: %w", err)
+			body, truncated, err := readIFFChunkBody(f, size, "wav", "ID3", absPath)
+			if err != nil {
+				return err
+			}
+			if truncated {
+				break chunkLoop // switch walker: labeled break exits the for-loop
 			}
 			if size%2 == 1 {
 				if _, err := f.Seek(1, io.SeekCurrent); err != nil {
@@ -331,9 +371,12 @@ func extractWAVWithContext(absPath string, t *Track, ec *ExtractContext) error {
 				}
 				continue
 			}
-			body := make([]byte, size)
-			if _, err := io.ReadFull(f, body); err != nil {
-				return fmt.Errorf("wav: LIST body read: %w", err)
+			body, truncated, err := readIFFChunkBody(f, size, "wav", "LIST", absPath)
+			if err != nil {
+				return err
+			}
+			if truncated {
+				break chunkLoop // switch walker: labeled break exits the for-loop
 			}
 			if size%2 == 1 {
 				if _, err := f.Seek(1, io.SeekCurrent); err != nil {
@@ -357,9 +400,12 @@ func extractWAVWithContext(absPath string, t *Track, ec *ExtractContext) error {
 				}
 				continue
 			}
-			body := make([]byte, size)
-			if _, err := io.ReadFull(f, body); err != nil {
-				return fmt.Errorf("wav: fmt body read: %w", err)
+			body, truncated, err := readIFFChunkBody(f, size, "wav", "fmt", absPath)
+			if err != nil {
+				return err
+			}
+			if truncated {
+				break chunkLoop // switch walker: labeled break exits the for-loop
 			}
 			if size%2 == 1 {
 				if _, err := f.Seek(1, io.SeekCurrent); err != nil {
@@ -407,7 +453,11 @@ func parseWAVINFOBlock(body []byte, t *Track) {
 		if uint64(size) > uint64(len(body)-8) {
 			break
 		}
-		payload := body[8 : 8+size]
+		// Widen BEFORE adding: `8 + size` in uint32 would wrap for
+		// size >= 0xFFFFFFF8 (low>high → slice panic). Unreachable given
+		// the guard above + the 64 KiB LIST cap, but kept consistent with
+		// the be64 walkers as defense-in-depth (Q18).
+		payload := body[8 : 8+uint64(size)]
 		// RIFF INFO values are null-terminated C-strings. Truncate at
 		// the FIRST NUL before converting — some encoders pad the
 		// declared size with non-NUL junk after the terminator
@@ -438,7 +488,11 @@ func parseWAVINFOBlock(body []byte, t *Track) {
 				t.Genre = text
 			}
 		}
-		advance := uint64(8 + size)
+		// Widen BEFORE adding (not `uint64(8 + size)`): the inner `8 + size`
+		// evaluates in uint32 and would wrap for size >= 0xFFFFFFF8, yielding
+		// advance==0 → an infinite loop. Guarded unreachable today; consistent
+		// with the be64 walkers (Q18).
+		advance := 8 + uint64(size)
 		if advance%2 == 1 {
 			advance++
 		}

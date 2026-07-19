@@ -102,14 +102,17 @@ func TestWatcherIgnoresDotfiles(t *testing.T) {
 }
 
 // TestIsWatchLimitError pins the substring matcher against the
-// canonical fsnotify failure messages.
+// canonical fsnotify WATCH-budget messages. fd-exhaustion ("too many
+// open files") is deliberately NOT a watch-limit error — it routes to
+// isOpenFileLimitError so addTree emits the ulimit-oriented hint
+// instead of the max_user_watches one.
 func TestIsWatchLimitError(t *testing.T) {
 	cases := []struct {
 		err  string
 		want bool
 	}{
 		{"inotify_add_watch: no space left on device", true},
-		{"too many open files", true},
+		{"too many open files", false}, // fd-exhaustion, not a watch-limit — see isOpenFileLimitError
 		{"watch limit reached", true},
 		{"connection refused", false},
 		{"", false},
@@ -118,6 +121,30 @@ func TestIsWatchLimitError(t *testing.T) {
 		got := isWatchLimitError(&strErr{tc.err})
 		if got != tc.want {
 			t.Errorf("isWatchLimitError(%q) = %v, want %v", tc.err, got, tc.want)
+		}
+	}
+}
+
+// TestIsOpenFileLimitError pins the fd-exhaustion classifier that B9
+// split out of isWatchLimitError. Only "too many open files"
+// (EMFILE/ENFILE) matches; the watch-budget messages must NOT, so the
+// two paths emit distinct operator hints.
+func TestIsOpenFileLimitError(t *testing.T) {
+	cases := []struct {
+		err  string
+		want bool
+	}{
+		{"pipe: too many open files", true},
+		{"too many open files", true},
+		{"inotify_add_watch: no space left on device", false},
+		{"watch limit reached", false},
+		{"connection refused", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		got := isOpenFileLimitError(&strErr{tc.err})
+		if got != tc.want {
+			t.Errorf("isOpenFileLimitError(%q) = %v, want %v", tc.err, got, tc.want)
 		}
 	}
 }
