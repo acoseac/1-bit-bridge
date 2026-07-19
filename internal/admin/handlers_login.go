@@ -107,7 +107,7 @@ func (s *Server) apiLogin(w http.ResponseWriter, r *http.Request) {
 	cfg := s.deps.CfgHolder.Load()
 	clientIP := adminauth.ExtractClientIP(r, cfg.Deployment.AdminTLSTerminatedByProxy)
 
-	if !s.deps.LoginLimiter.Allow(clientIP, req.Username) {
+	if !s.deps.LoginLimiter.AllowAndReserve(clientIP, req.Username) {
 		// Slow the attacker without surfacing 429 — they shouldn't
 		// learn they've been throttled. Sleep on the handler
 		// goroutine; net/http handles request cancellation via the
@@ -132,9 +132,10 @@ func (s *Server) apiLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.deps.AdminAuth.Verify(req.Username, req.Password); err != nil {
-		s.deps.LoginLimiter.RecordFailure(clientIP, req.Username)
-		// Log the SPECIFIC reason server-side; keep the wire
-		// response generic.
+		// The attempt was already counted by AllowAndReserve's optimistic
+		// reservation above (B43) — do NOT RecordFailure here, or it
+		// double-counts. Log the SPECIFIC reason server-side; keep the
+		// wire response generic.
 		logger.Warn("admin login failed", "ip", clientIP, "username", req.Username, "err", err)
 		writeError(w, http.StatusUnauthorized, "invalid_credentials", "invalid credentials")
 		return
