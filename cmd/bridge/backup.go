@@ -135,7 +135,7 @@ func buildBackupSources(cfg *config.Config, configPath string) backup.Sources {
 	return backup.Sources{
 		DataDir:    cfg.DataDir,
 		ManifestDB: manifest.DefaultDBPath(cfg.DataDir),
-		TokensJSON: filepath.Join(cfg.DataDir, "tokens.json"),
+		TokensJSON: filepath.Join(cfg.DataDir, tokensFileName),
 		ServerCert: certPath,
 		ServerKey:  keyPath,
 		BridgeYAML: configPath,
@@ -240,7 +240,7 @@ func buildRestoreTargets(cfg *config.Config, configPath string) backup.Targets {
 	}
 	return backup.Targets{
 		ManifestDB: manifest.DefaultDBPath(cfg.DataDir),
-		TokensJSON: filepath.Join(cfg.DataDir, "tokens.json"),
+		TokensJSON: filepath.Join(cfg.DataDir, tokensFileName),
 		ServerCert: certPath,
 		ServerKey:  keyPath,
 		BridgeYAML: configPath,

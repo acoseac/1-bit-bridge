@@ -32,6 +32,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 
@@ -313,13 +314,14 @@ func isCrossDeviceError(err error) bool {
 	if errors.Is(err, syscall.EXDEV) {
 		return true
 	}
-	// Windows ERROR_NOT_SAME_DEVICE (0x11). `syscall.Errno` comparison
-	// works on all platforms — on Unix the constant doesn't exist by
-	// that exact name but the numeric value behaves identically when
-	// wrapping a Windows-side error.
-	const errNotSameDevice = syscall.Errno(0x11)
-	if errors.Is(err, errNotSameDevice) {
-		return true
+	// 0x11 is ERROR_NOT_SAME_DEVICE on Windows but EEXIST on Unix — only treat
+	// it as cross-device on Windows so a Unix EEXIST (e.g. a non-empty-dir
+	// rename target) isn't mis-routed into the copy+unlink path.
+	if runtime.GOOS == "windows" {
+		const errNotSameDevice = syscall.Errno(0x11)
+		if errors.Is(err, errNotSameDevice) {
+			return true
+		}
 	}
 	// Defensive substring fallback for already-flattened errors.
 	s := err.Error()

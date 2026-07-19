@@ -225,7 +225,7 @@ func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 		removed++
 		return nil
 	})
-	if walkErr != nil && errors.Is(walkErr, context.Canceled) {
+	if walkErr != nil && (errors.Is(walkErr, context.Canceled) || errors.Is(walkErr, context.DeadlineExceeded)) {
 		fmt.Fprintln(stderr, "analyze --gc: interrupted")
 		return 130
 	}
