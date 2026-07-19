@@ -4,6 +4,7 @@ package doctor
 
 import (
 	"fmt"
+	"runtime"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -151,6 +152,13 @@ func extendedTCPTable(family int) ([]byte, error) {
 			uintptr(tcpTableOwnerPIDListener),
 			0, // Reserved
 		)
+		// `ptr` holds uintptr(unsafe.Pointer(&buf[0])) computed on an earlier
+		// line, which is OUTSIDE the compiler's unsafe.Pointer→uintptr syscall
+		// liveness special-case (unsafe.Pointer rule 4). Keep buf alive across
+		// the Call so a future moving/tightened GC can't reclaim or relocate it
+		// between the conversion and the syscall. (&size is converted inline in
+		// the Call argument list, so it's already covered.)
+		runtime.KeepAlive(buf)
 		switch ret {
 		case errSuccess:
 			return buf, nil

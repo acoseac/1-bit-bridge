@@ -12,10 +12,16 @@ import (
 // SpawnDetached launches `<binary> serve --config <configPath>` as a
 // detached, minimized process whose stdout/stderr stream to logPath.
 // Matches the behaviour of the `.cmd` launcher installed in the user's
-// Startup folder by `installWindowsStartup` — exactly the same cmd.exe
-// wrapper, so the init-time spawn and the logon-time spawn produce a
-// single process-shape the operator can recognise (minimised console
-// window titled "1-bit-bridge").
+// Startup folder by `installWindowsStartup` — the same `start /min` cmd.exe
+// wrapper, so the init-time spawn and the logon-time spawn produce a single
+// process-shape the operator can recognise (minimised console window titled
+// "1-bit-bridge").
+//
+// Escaping uses cmdArgEscape, NOT the batch-file CmdEscape: this command is
+// passed to `cmd /c`, where cmd.exe does not collapse `%%`→`%`, so the
+// batch percent-doubling would corrupt a `%`-containing path here. The two
+// forms stay byte-identical for `%`-free paths (the overwhelmingly common
+// case) and agree at runtime otherwise — see cmdArgEscape.
 //
 // cmd.exe's `/c start` returns as soon as the child is handed off to
 // the shell; the real server keeps running independently of the init
@@ -27,9 +33,9 @@ func SpawnDetached(binary, configPath, logPath string) error {
 	}
 	script := fmt.Sprintf(
 		`start "1-bit-bridge" /min "%s" serve --config "%s" 1>>"%s" 2>&1`,
-		CmdEscape(binary),
-		CmdEscape(configPath),
-		CmdEscape(logPath),
+		cmdArgEscape(binary),
+		cmdArgEscape(configPath),
+		cmdArgEscape(logPath),
 	)
 	c := exec.Command("cmd.exe", "/c", script)
 	if err := c.Start(); err != nil {

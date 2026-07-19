@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -126,6 +127,42 @@ func TestPortCheck_BusyProbeUnavailableWarns(t *testing.T) {
 	c := checkPort("port-test", addr.Port, "")
 	if c.Status != Warn {
 		t.Errorf("bound port %d with probe unavailable: got %v, want warn", addr.Port, c.Status)
+	}
+}
+
+// TestPortCheck_NonAddrInUseErrorWarns pins B51: a bind failure that is NOT
+// EADDRINUSE — EACCES (a port <1024 without elevation), EADDRNOTAVAIL, a
+// transient network error — must degrade to Warn, not the hard "another
+// process owns this port" Fail that would wrongly block `bridge init`. The
+// listenFunc seam injects the error deterministically (a real EACCES would
+// need a privileged port, and root-vs-non-root would flip the outcome).
+func TestPortCheck_NonAddrInUseErrorWarns(t *testing.T) {
+	orig := listenFunc
+	t.Cleanup(func() { listenFunc = orig })
+	listenFunc = func(network, address string) (net.Listener, error) {
+		return nil, &net.OpError{Op: "listen", Net: network, Err: os.NewSyscallError("bind", syscall.EACCES)}
+	}
+	c := checkPort("port-test", 443, "")
+	if c.Status != Warn {
+		t.Errorf("non-EADDRINUSE bind error: got %q (%s / %s), want warn", c.Status, c.Summary, c.Hint)
+	}
+}
+
+// TestPortCheck_AddrInUseStillReachesOwnerProbe pins the other side of the
+// B51 branch: an EADDRINUSE bind error is still classified as "port in use"
+// and routed through the owner-probe path — with the probe forced available
+// and no OwnPIDFile, that stays the pre-existing Fail (not the new
+// not-bindable Warn).
+func TestPortCheck_AddrInUseStillReachesOwnerProbe(t *testing.T) {
+	withPortProbe(t, true)
+	orig := listenFunc
+	t.Cleanup(func() { listenFunc = orig })
+	listenFunc = func(network, address string) (net.Listener, error) {
+		return nil, &net.OpError{Op: "listen", Net: network, Err: os.NewSyscallError("bind", syscall.EADDRINUSE)}
+	}
+	c := checkPort("port-test", 7788, "")
+	if c.Status != Fail {
+		t.Errorf("EADDRINUSE (probe available, no ownPID): got %q (%s), want fail", c.Status, c.Summary)
 	}
 }
 

@@ -255,6 +255,54 @@ func uninstallSystemd() (string, error) {
 
 // --- template rendering ---
 
+// systemd unit-value escapers. systemd applies TWO distinct expansions to
+// unit-file values, and their scopes differ:
+//
+//   - Specifier expansion (%h, %u, …) applies to nearly every setting,
+//     including WorkingDirectory / StandardOutput / ExecStart. A literal
+//     `%` must always be doubled to `%%` or systemd fails specifier
+//     expansion at unit parse.
+//   - Environment-variable substitution ($FOO / ${FOO}) applies ONLY to
+//     the arguments of the Exec* command lines (ExecStart=, ExecStop=, …)
+//     and is NOT suppressed by the surrounding double quotes. A literal
+//     `$` in an Exec path must be doubled to `$$`, or systemd expands it
+//     (e.g. `/opt/My$Music/bridge.yaml` → `/opt/My/bridge.yaml`) and the
+//     service fails to start. A `$` in a NON-Exec path setting must be
+//     left alone — doubling it there would corrupt the path to `$$`.
+//
+// Both variants also escape `\` and `"` (the in-quote escapes systemd's
+// parser expects) and strip CR/LF/NUL, which would terminate the
+// double-quoted value early. Backslash is listed first so the escape it
+// introduces isn't itself reconsidered (strings.NewReplacer is single-pass,
+// so this is belt-and-braces). A path like `/Users/Bob's "Music"` or
+// `C:\Users\bob` round-trips intact.
+var (
+	// systemdEscapePathReplacer is for path-valued, NON-Exec settings
+	// (WorkingDirectory, StandardOutput=append:, StandardError=append:).
+	// It deliberately does NOT double `$`: those settings undergo no
+	// env-var substitution, so a `$` in the path must survive verbatim.
+	systemdEscapePathReplacer = strings.NewReplacer(
+		`\`, `\\`,
+		`"`, `\"`,
+		`%`, `%%`,
+		"\n", `\n`,
+		"\r", `\r`,
+		"\x00", "",
+	)
+	// systemdEscapeExecReplacer is for the Exec* command lines. Same as the
+	// path replacer PLUS `$`→`$$`, because Exec arguments undergo env-var
+	// substitution after quote removal.
+	systemdEscapeExecReplacer = strings.NewReplacer(
+		`\`, `\\`,
+		`"`, `\"`,
+		`%`, `%%`,
+		`$`, `$$`,
+		"\n", `\n`,
+		"\r", `\r`,
+		"\x00", "",
+	)
+)
+
 func render(name string, p Params) ([]byte, error) {
 	// The launchd plist is XML; the systemd unit is INI-like. Each template
 	// picks the right escape func for its own fields — both escapes are
@@ -274,29 +322,13 @@ func render(name string, p Params) ([]byte, error) {
 			}
 			return b.String()
 		},
-		"systemdEscape": func(s string) string {
-			// systemd unit values are parsed as shell-like quoted strings
-			// when wrapped in double quotes (which the template does).
-			// Inside those quotes, `\\` and `\"` are the escape sequences
-			// the parser expects, and CR/LF/NUL would terminate the value
-			// early. `%` is a specifier prefix (%h, %u, …) — a literal
-			// percent in a path (e.g. `Top_100_10%_Off`) must be doubled
-			// to `%%` or systemd fails specifier expansion at unit parse.
-			// Backslash goes first so it doesn't double-escape the
-			// replacements for `"` and CR/LF that follow; strings.NewReplacer
-			// is single-pass so `%%` isn't re-escaped. A path like
-			// `/Users/Bob's "Music"` or `C:\Users\bob` round-trips intact.
-			r := strings.NewReplacer(
-				`\`, `\\`,
-				`"`, `\"`,
-				`%`, `%%`,
-				"\n", `\n`,
-				"\r", `\r`,
-				"\x00", "",
-			)
-			return r.Replace(s)
-		},
-		"cmdEscape": func(s string) string { return CmdEscape(s) },
+		// systemd applies two DISTINCT expansions to unit values, so the
+		// template uses two escapers — see systemdEscape{Exec,Path}Replacer.
+		// Exec* command lines (ExecStart=/ExecStop=) additionally undergo
+		// environment-variable substitution, so `$` is doubled ONLY there.
+		"systemdEscapeExec": systemdEscapeExecReplacer.Replace,
+		"systemdEscapePath": systemdEscapePathReplacer.Replace,
+		"cmdEscape":         func(s string) string { return CmdEscape(s) },
 	}
 	t, err := template.New(name).Funcs(funcs).ParseFS(tmplFS, name)
 	if err != nil {
@@ -309,18 +341,51 @@ func render(name string, p Params) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// CmdEscape prepares a string for use inside a double-quoted argument on
-// a Windows `cmd.exe` command line. The only thing that can tear a
-// double-quoted argument is a literal `"` — cmd.exe's escape for a quote
-// inside quotes is `""`, NOT backslash-anything. Backslashes are fine
-// inside quoted arguments; they're literal path separators. CR / LF
-// would end the line, which would break the script. NUL can't appear in
-// a Windows path, but stripping it is cheap insurance.
+// CmdEscape prepares a string for use as a double-quoted argument inside a
+// Windows BATCH FILE (startup.cmd.tmpl). Two cmd.exe hazards are handled:
 //
-// Shared by the `cmdEscape` template func (startup.cmd.tmpl) and the
-// runtime `SpawnDetached` helper so the init-time spawn and the
-// logon-time Startup launcher produce byte-identical command lines.
+//   - A literal `"` ends the quoted argument; cmd.exe's in-quote escape for
+//     a quote is `""`, NOT backslash-anything (backslashes are literal path
+//     separators and round-trip fine inside quotes).
+//   - A literal `%` triggers variable expansion — cmd.exe expands `%VAR%`
+//     (and `%1`..`%9`) EVEN INSIDE double quotes, so a path like
+//     `C:\Music 50% Off\bridge.exe` would be mangled (cmd hunts for a
+//     closing `%`, and a `%NAME%` matching a real env var is substituted).
+//     In a batch file the literal-percent escape is `%%` (cmd collapses
+//     `%%`→`%` at parse time), so we double it.
+//
+// CR / LF would end the line and break the script; NUL can't appear in a
+// Windows path but stripping it is cheap insurance.
+//
+// This is the BATCH-FILE escaper, used by the `cmdEscape` template func for
+// startup.cmd.tmpl. The `%%` doubling is correct ONLY for a `.cmd`/`.bat`
+// file — cmd.exe does NOT collapse `%%` when a command is passed via
+// `cmd /c` on the command line, so the runtime `SpawnDetached` helper uses
+// cmdArgEscape instead. For a `%`-free path (the common case) both produce
+// byte-identical output; for a `%`-path they agree at RUNTIME (a batch `%%`
+// collapses to the same single `%` the /c form carries).
 func CmdEscape(s string) string {
+	return strings.NewReplacer(
+		`"`, `""`,
+		`%`, `%%`,
+		"\n", " ",
+		"\r", "",
+		"\x00", "",
+	).Replace(s)
+}
+
+// cmdArgEscape is the command-line counterpart to CmdEscape for a command
+// passed to `cmd /c <line>` (the SpawnDetached path) rather than written to
+// a batch file. It is deliberately CmdEscape MINUS the `%` doubling: cmd.exe
+// does NOT collapse `%%`→`%` for a `/c` command line (only when reading a
+// .bat/.cmd file), so doubling here would leave a literal `%%` in the path.
+//
+// There is no robust way to escape a literal `%` on the cmd command line —
+// caret does not escape it — so a `%`-containing path is passed through
+// as-is (the pre-existing behaviour). This affects only the transient
+// init-time spawn; the durable Startup-folder launcher is a .cmd file that
+// escapes `%` correctly via CmdEscape.
+func cmdArgEscape(s string) string {
 	return strings.NewReplacer(
 		`"`, `""`,
 		"\n", " ",

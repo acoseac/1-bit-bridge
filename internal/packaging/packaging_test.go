@@ -124,6 +124,45 @@ func TestRenderSystemdTemplate_EscapesPercent(t *testing.T) {
 	}
 }
 
+// TestRenderSystemdTemplate_EscapesDollarInExecOnly pins the Exec-vs-path
+// split. systemd applies environment-variable substitution ($VAR / ${VAR})
+// to the arguments of the Exec* command lines AFTER quote removal (the
+// surrounding double quotes do NOT suppress it), so a literal `$` in the
+// binary/config path MUST be doubled to `$$`. But WorkingDirectory /
+// StandardOutput / StandardError undergo specifier expansion only (no
+// $-substitution), so a `$` there must survive verbatim — doubling it
+// would corrupt the path.
+func TestRenderSystemdTemplate_EscapesDollarInExecOnly(t *testing.T) {
+	body, err := render("systemd.service.tmpl", Params{
+		BinaryPath: "/opt/My$Music/bridge",
+		ConfigPath: "/opt/My$Music/bridge.yaml",
+		WorkingDir: "/opt/My$Music/data",
+		LogPath:    "/var/log/My$Music/bridge.log",
+	})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	s := string(body)
+	// Exec* args: `$` doubled to `$$` (env-var substitution applies).
+	if !strings.Contains(s, `ExecStart="/opt/My$$Music/bridge" serve --config "/opt/My$$Music/bridge.yaml"`) {
+		t.Errorf("ExecStart did not double $ in path\n--\n%s", s)
+	}
+	// WorkingDirectory: single `$` preserved (specifier-only expansion).
+	if !strings.Contains(s, `WorkingDirectory="/opt/My$Music/data"`) {
+		t.Errorf("WorkingDirectory should keep a single $ (no env-var substitution there)\n--\n%s", s)
+	}
+	if strings.Contains(s, `WorkingDirectory="/opt/My$$Music/data"`) {
+		t.Errorf("WorkingDirectory must NOT double $\n--\n%s", s)
+	}
+	// StandardOutput/StandardError are also non-Exec path settings.
+	if !strings.Contains(s, `StandardOutput=append:"/var/log/My$Music/bridge.log"`) {
+		t.Errorf("StandardOutput should keep a single $\n--\n%s", s)
+	}
+	if strings.Contains(s, `/var/log/My$$Music/bridge.log`) {
+		t.Errorf("StandardOutput/StandardError must NOT double $\n--\n%s", s)
+	}
+}
+
 func TestRenderStartupCmd_Windows(t *testing.T) {
 	body, err := render("startup.cmd.tmpl", Params{
 		BinaryPath: `C:\Program Files\1-bit-bridge\bridge.exe`,
@@ -162,6 +201,57 @@ func TestRenderStartupCmd_EscapesEmbeddedQuote(t *testing.T) {
 	s := string(body)
 	if !strings.Contains(s, `br""idge.exe`) {
 		t.Errorf("expected doubled-quote escape, got:\n%s", s)
+	}
+}
+
+// TestRenderStartupCmd_EscapesPercent pins the batch-file percent escape:
+// cmd.exe expands %VAR% even inside double quotes, so a path with a literal
+// `%` (e.g. "C:\Music 50% Off\") must be doubled to `%%` in the .cmd file
+// (cmd collapses `%%`→`%` at parse time, yielding the correct literal path).
+func TestRenderStartupCmd_EscapesPercent(t *testing.T) {
+	body, err := render("startup.cmd.tmpl", Params{
+		BinaryPath: `C:\Music 50% Off\bridge.exe`,
+		ConfigPath: `C:\config\bridge.yaml`,
+		LogPath:    `C:\log\bridge.log`,
+	})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	s := string(body)
+	// The bare single-% form (which cmd would treat as a var-expansion
+	// trigger) must not survive; the doubled form must appear.
+	if strings.Contains(s, `50% Off`) {
+		t.Errorf("rendered startup.cmd left a bare %% (var-expansion trigger) in a path\n--\n%s", s)
+	}
+	if !strings.Contains(s, `C:\Music 50%% Off\bridge.exe`) {
+		t.Errorf("rendered startup.cmd missing the doubled %%%% escape\n--\n%s", s)
+	}
+}
+
+// TestCmdEscape_DoublesPercent pins the unit directly: the batch-file
+// escaper doubles `%` (and still doubles `"`), so a path with both is safe
+// inside a `.cmd` double-quoted argument.
+func TestCmdEscape_DoublesPercent(t *testing.T) {
+	got := CmdEscape(`50% "x"`)
+	if got != `50%% ""x""` {
+		t.Errorf("CmdEscape(`50%% \"x\"`) = %q, want `50%%%% \"\"x\"\"`", got)
+	}
+}
+
+// TestCmdArgEscape_DoesNotDoublePercent pins the `cmd /c` command-line
+// escaper used by SpawnDetached: unlike the batch-file CmdEscape it must
+// NOT double `%` — cmd.exe doesn't collapse `%%` for a `/c` command line,
+// so doubling would corrupt the path. Quotes are still doubled.
+func TestCmdArgEscape_DoesNotDoublePercent(t *testing.T) {
+	got := cmdArgEscape(`C:\Music 50% Off\br"idge.exe`)
+	if strings.Contains(got, `%%`) {
+		t.Errorf("cmdArgEscape doubled %% (wrong for cmd /c): %q", got)
+	}
+	if !strings.Contains(got, `50% Off`) {
+		t.Errorf("cmdArgEscape should keep a single %%: %q", got)
+	}
+	if !strings.Contains(got, `br""idge.exe`) {
+		t.Errorf("cmdArgEscape should still double the quote: %q", got)
 	}
 }
 
