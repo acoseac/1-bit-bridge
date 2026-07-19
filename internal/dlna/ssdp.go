@@ -11,6 +11,7 @@ import (
 
 	"golang.org/x/net/ipv4"
 
+	"github.com/acoseac/1-bit-bridge/internal/dlna/discovery"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 )
 
@@ -348,6 +349,7 @@ func (s *SSDPAdvertiser) runPeriodicNotify(ctx context.Context, sender *net.UDPC
 func (s *SSDPAdvertiser) runMSearchListener(ctx context.Context, listener *net.UDPConn) {
 	defer s.wg.Done()
 	buf := make([]byte, 2048) // SSDP packets are small; 2KB is plenty
+	consecutiveReadErrs := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -365,22 +367,20 @@ func (s *SSDPAdvertiser) runMSearchListener(ctx context.Context, listener *net.U
 		// the listener to wake us up. Read errors are expected at teardown.
 		n, src, err := listener.ReadFromUDP(buf)
 		if err != nil {
-			// A read-deadline timeout is the normal idle tick — loop back to
-			// the top so the ctx.Done() check fires. It is NOT an error worth
-			// logging (a quiet LAN produces one every deadline window).
-			var nErr net.Error
-			if errors.As(err, &nErr) && nErr.Timeout() {
-				continue
+			// Shared SSDP read-error policy (discovery.HandleReadErr, PR
+			// #469): a read-deadline timeout resets the streak + continues
+			// (the normal idle tick that keeps ctx-cancel responsive); a
+			// cancelled ctx OR a Stop()-closed socket (net.ErrClosed) exits;
+			// any other PERSISTENT error (interface down, hard socket fault)
+			// logs + a ctx-aware backoff so it can't hot-spin the CPU
+			// (Gemini HIGH on PR #521), escalating to one Error-level line
+			// once the streak is sustained.
+			if discovery.HandleReadErr(ctx, err, &consecutiveReadErrs, s.log) {
+				return
 			}
-			select {
-			case <-ctx.Done():
-				return // expected — Stop() closed the listener
-			default:
-			}
-			s.log.Debug("SSDP listener read error",
-				slog.String("err", err.Error()))
 			continue
 		}
+		consecutiveReadErrs = 0
 		// Offload the response to a bounded worker goroutine so the
 		// listener returns to `ReadFromUDP` immediately — `handleMSearch`
 		// sleeps (the spec-mandated MX delay) and does blocking socket
