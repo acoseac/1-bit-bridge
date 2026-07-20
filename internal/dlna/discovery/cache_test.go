@@ -1,6 +1,7 @@
 package discovery
 
 import (
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -222,4 +223,93 @@ func TestRendererCache_ConcurrentAccessIsRaceFree(t *testing.T) {
 		}
 	}()
 	wg.Wait()
+}
+
+// TestMergeRendererInfo_CoversEveryField is a RECURRENCE guard, not a
+// behaviour test. `RenderingControlURL` was added to RendererInfo after
+// mergeRendererInfo was written and the merge was never updated, so a fresh
+// value for it was silently dropped on the merge path (latent — Upsert only
+// merges into an EXISTING entry, and today every full-detail Upsert lands on
+// an absent one — but it is a real inconsistency: every other URL field
+// merges).
+//
+// Both structs are populated BY REFLECTION rather than by hand, which is the
+// whole point: a field added tomorrow is auto-populated here too, so if the
+// merge forgets it the result keeps the cached value and this test fails
+// naming that field. A hand-written fixture would leave a new field zero in
+// both inputs and pass vacuously.
+//
+// UDN is set identically on both sides because that's the real invariant —
+// Upsert keys on it, so a merge only ever combines two records for the SAME
+// renderer (mergeRendererInfo itself never copies UDN across; `out := cached`
+// carries it).
+func TestMergeRendererInfo_CoversEveryField(t *testing.T) {
+	const udn = "uuid:merge-completeness"
+	cached := RendererInfo{}
+	fresh := RendererInfo{}
+	fillDistinct(t, &cached, "cached")
+	fillDistinct(t, &fresh, "fresh")
+	cached.UDN, fresh.UDN = udn, udn
+
+	got := mergeRendererInfo(cached, fresh)
+
+	gv, fv := reflect.ValueOf(got), reflect.ValueOf(fresh)
+	for i := 0; i < gv.NumField(); i++ {
+		name := gv.Type().Field(i).Name
+		gf, ff := gv.Field(i), fv.Field(i)
+		// Unexported fields are skipped deliberately, not overlooked: they ride
+		// along verbatim via `out := cached` and are no part of the merge
+		// contract. (.Interface() would also panic on them.)
+		if !gf.CanInterface() {
+			continue
+		}
+		// time.Time must compare with Equal, not DeepEqual — DeepEqual inspects
+		// the monotonic reading and the location pointer, so two values naming
+		// the same instant can compare unequal.
+		if gt, ok := gf.Interface().(time.Time); ok {
+			if !gt.Equal(ff.Interface().(time.Time)) {
+				t.Errorf("field %s was not merged: got %v, want %v — a non-zero fresh value must win; add a merge branch for it in mergeRendererInfo",
+					name, gt, ff.Interface())
+			}
+			continue
+		}
+		if !reflect.DeepEqual(gf.Interface(), ff.Interface()) {
+			t.Errorf("field %s was not merged: got %v, want %v — a non-empty fresh value must win; add a merge branch for it in mergeRendererInfo",
+				name, gf.Interface(), ff.Interface())
+		}
+	}
+}
+
+// fillDistinct populates every field of the struct behind ptr with a non-zero
+// value tagged by marker, so two independently-filled copies differ in EVERY
+// field. Unhandled kinds fail loudly on purpose: adding a RendererInfo field
+// of a new type should force whoever adds it to teach this helper, which is
+// how the completeness guard above stays honest.
+func fillDistinct(t *testing.T, ptr any, marker string) {
+	t.Helper()
+	v := reflect.ValueOf(ptr).Elem()
+	for i := 0; i < v.NumField(); i++ {
+		f := v.Field(i)
+		name := v.Type().Field(i).Name
+		// Skip unexported fields — reflect can't Set them (it would panic), and
+		// the completeness guard deliberately doesn't cover them: they're
+		// carried verbatim by `out := cached`, not merged.
+		if !f.CanSet() {
+			continue
+		}
+		switch {
+		case f.Type() == reflect.TypeOf(time.Time{}):
+			base := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+			if marker == "fresh" {
+				base = base.Add(time.Hour)
+			}
+			f.Set(reflect.ValueOf(base))
+		case f.Kind() == reflect.String:
+			f.SetString(marker + "-" + name)
+		case f.Kind() == reflect.Slice && f.Type().Elem().Kind() == reflect.String:
+			f.Set(reflect.ValueOf([]string{marker + "-" + name}))
+		default:
+			t.Fatalf("fillDistinct: unhandled kind %s for field %s — extend this helper so TestMergeRendererInfo_CoversEveryField keeps covering every field", f.Kind(), name)
+		}
+	}
 }
