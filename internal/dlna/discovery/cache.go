@@ -96,6 +96,9 @@ func mergeRendererInfo(cached, fresh RendererInfo) RendererInfo {
 	if fresh.EventURL != "" {
 		out.EventURL = fresh.EventURL
 	}
+	if fresh.RenderingControlURL != "" {
+		out.RenderingControlURL = fresh.RenderingControlURL
+	}
 	if len(fresh.SinkProtocolInfos) > 0 {
 		out.SinkProtocolInfos = fresh.SinkProtocolInfos
 	}
