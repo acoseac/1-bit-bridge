@@ -106,7 +106,10 @@ sqlite3 /tmp/bridge-live/data/bridge.db "UPDATE tracks SET enriched_at = 0;"
 
 ## Production deployments
 
-**See `docs/deployment-runbook.md`** — full runbooks for the two live bridges: **home-pc** (Windows, SSH `arsenie@192.168.0.208`) and **bridge.ars.md** (Linux VPS, public mode). Read it before any deploy; covers scheduled-task names, update procedure, TLS/Tailscale gotchas, and the macOS sandboxed-CLI cert gotcha.
+**See `ops/deployment-runbook.md`** — full runbooks for the two live bridges: **home-pc** (Windows, SSH `arsenie@192.168.0.208`) and **bridge.ars.md** (Linux VPS, public mode). Read it before any deploy; covers scheduled-task names, update procedure, TLS/Tailscale gotchas, and the macOS sandboxed-CLI cert gotcha.
+
+**`docs/` is a PUBLIC WEBSITE — internal operator docs go in `ops/`.** GitHub Pages serves `main:/docs` at `acoseac.github.io/1-bit-bridge/` and the repo is public, so anything under `docs/` is on the open web (indexable, scrapeable, no login). The deployment runbook and the codebase audits were published there until 2026-07-20 — the runbook exposing live SSH coordinates, the router port-forward endpoint, and the ufw posture; the audits amounting to an exploit index for unreleased fixes. They now live in `ops/` (see `ops/README.md`). **Don't move them back, and don't add a new doc naming a live host / IP / port-forward / key path — or enumerating unfixed weaknesses — under `docs/`.** Deploy scripts in `deploy/` are not Pages-served but ARE public: keep host coordinates in env vars with placeholder defaults (`BRIDGE_WAN_URL`, `HOMEPC`), never hardcoded. Moving a file out of `docs/` stops future serving but does NOT purge git history or caches — a published secret still needs rotating.
+
 ## Things that have bitten before
 
 - **Byte-by-byte async iteration kills throughput.** Early `BridgeSourceClient` on the iOS side used `URLSession.bytes(for:)` which yields one `UInt8` per async step — 20M yields for a 20 MB file stalled the pipeline and surfaced as "Network connection lost" even over localhost. Fixed by switching to `URLSession.download(for:)`. Don't regress the iOS side back to byte-wise async reads; and don't add a server-side chunked-encoding mode that assumes byte-wise client consumption.
@@ -564,7 +567,7 @@ Stacked triple: disk-check volume fix + eligible-denominator coverage (migration
 
 ### Comprehensive-audit fix batch (PRs #511–#535, merged + deployed 2026-07-19)
 
-A full-codebase audit (`docs/audit-2026-07-18.md` — 53 bugs · 53 quick wins · 3 refactors, every finding re-traced against source) landed as 25 PRs. Bridge-only: **no `ProtocolVersion` bump, no `/v1/*` shape change, no iOS mirror**. Deployed to bridge.ars.md (`v0.1.7-96`); home-pc pending. Invariants worth not re-breaking:
+A full-codebase audit (`ops/audit-2026-07-18.md` — 53 bugs · 53 quick wins · 3 refactors, every finding re-traced against source) landed as 25 PRs. Bridge-only: **no `ProtocolVersion` bump, no `/v1/*` shape change, no iOS mirror**. Deployed to bridge.ars.md (`v0.1.7-96`); home-pc pending. Invariants worth not re-breaking:
 
 - **All FIVE post-scan reconciliation passes exclude UPnP-routed rows, from ONE routed set** ([scanner.go](internal/manifest/scanner.go), #511). Four of the five didn't (only `runTrackNumberReconciliation` had the guard) — and since `walkFieldsEqual` diffs exactly AlbumArtist/Album/Year, a disagreeing routed album flip-flopped every fs-scan ↔ UPnP-walk cycle: perpetual re-enrich treadmill + iOS delta churn (the PR #369/#370 wipe-loop class, re-opened via the reconciliation vector). The set is computed ONCE at the reconciliation head and threaded into all five — fail-closed (a fetch error skips ALL passes; an already-done ctx skips them at Info, not Error). **Don't reintroduce a per-pass `routedExclusionSet` call, don't drop the exclusion from any pass**, and **don't add a `len(routedSet)>0` guard before the map lookup** — Go's map access fast-paths `count==0` before hashing the key, so it saves nothing and costs a branch on hybrid libraries (declined on review).
 - **`go upd.Run(scanCtx)` must stay started, and `AutoInstallRestart` must NOT `os.Exit`** ([main.go](cmd/bridge/main.go), #512). The updater was fully wired but never launched — background polling AND the whole auto-install path were silently dead, with only the manual "Check now" button working. The restart callback now routes through the same cancellation closure as SIGINT / admin-restart (the documented "graceful shutdown triggers full cleanup" invariant, on the updater path).
@@ -642,7 +645,7 @@ For jobs spanning 3+ PRs, use the stacking pattern below instead.
 
 ## Post-merge deployment
 
-**See `docs/deployment-runbook.md`** — 3-step flow (local `/tmp/bridge-live/` fixture → home-pc Windows → bridge.ars.md VPS). Read it before deploying.
+**See `ops/deployment-runbook.md`** — 3-step flow (local `/tmp/bridge-live/` fixture → home-pc Windows → bridge.ars.md VPS). Read it before deploying.
 ## Multi-PR batch workflow
 
 For any larger job spanning **3+ PRs**, use the **stack-and-batch** pattern instead of the default serial merge-after-each. Time-validated against the v1.2 improvements batch (PRs #76 / #81 / #82 / #83 / #84 / #85 — security + slog + CLI + fsnotify + Docker + post-merge follow-ups). The serial pattern would have spent ~30 min just on bot-review wait windows; the stacked pattern collapsed that to one ~6 min wait.

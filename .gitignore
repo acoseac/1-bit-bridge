@@ -38,3 +38,7 @@
 /compose.override.yml
 /docker-compose.override.yaml
 /docker-compose.override.yml
+
+# Operator-local host coordinates (see ops/README.md) — never commit real
+# WAN/LAN IPs, SSH targets, or key paths to this public repo.
+ops/*.local.md

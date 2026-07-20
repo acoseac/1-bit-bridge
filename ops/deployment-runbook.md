@@ -4,18 +4,25 @@ Extracted from CLAUDE.md to keep it out of always-loaded context. **Read this
 before any production deploy** — covers the two live bridges (home-pc Windows,
 bridge.ars.md Linux VPS) and the post-merge 3-step deploy flow.
 
+> **Placeholders.** This repo is public, so live host coordinates are not committed.
+> Substitute your own for `<WAN-IP>`, `<HOMEPC-SSH>`, `<HOMEPC-LAN-IP>`, `<VPS-SSH>`, and
+> `<VPS-SSH-KEY>`. Keep the real values in `ops/coordinates.local.md` (gitignored) or your
+> shell environment — see [`ops/README.md`](README.md). These values were committed in
+> plaintext until 2026-07-20 and are still in git history, so treat the WAN endpoint as
+> disclosed: **rotate the router port-forward** rather than relying on this scrub.
+
 **Deploy scripts are git-tracked in [`deploy/`](../deploy/) — that is the source
 of truth.** The copies on the hosts (home-pc Desktop) and in `/tmp` on the
 workstation are synced FROM there, never edited in place (the 2026-06-01
 cert-re-mint bug existed because the only copy lived on the host and drifted).
 See [`deploy/README.md`](../deploy/README.md) for the script index + sync
 contract. Routine update one-liners:
-- **home-pc**: `ssh arsenie@192.168.0.208 'pwsh -NoProfile -Command -' < deploy/windows/update-bridge-windows.ps1` (cert-preserving; never re-mints)
+- **home-pc**: `ssh <HOMEPC-SSH> 'pwsh -NoProfile -Command -' < deploy/windows/update-bridge-windows.ps1` (cert-preserving; never re-mints)
 - **bridge.ars.md**: `./deploy/linux/deploy-bridge-vps.sh`
 
 ## Production deployments
 
-### home-pc (Windows, SSH `arsenie@192.168.0.208`)
+### home-pc (Windows, SSH `<HOMEPC-SSH>`)
 
 Operator's home Windows machine. Reachable from the operator's macOS workstation via SSH (OpenSSH server, **session is auto-elevated to admin** — no UAC popup needed for `New-NetFirewallRule` etc.). PowerShell 7 (`pwsh`), Git, and Go are pre-installed. Tailscale runs in CLI mode (`tailscale.exe` on PATH).
 
@@ -41,18 +48,18 @@ Operator's home Windows machine. Reachable from the operator's macOS workstation
 All scoped to the exe path, NOT port-wide. Old rules at the legacy exe paths (`C:\users\arsenie\desktop\1-bit-bridge_0.1.2_windows_amd64\bridge.exe`, `C:\users\arsenie\src\1-bit-bridge\bridge.exe`, etc.) are still in the firewall — harmless but stale; nuke at the next cleanup pass.
 
 **Endpoints advertised in `/v1/health`** (six total, in registration order):
-- `https://192.168.0.208:7788` — LAN (Ethernet)
+- `https://<HOMEPC-LAN-IP>:7788` — LAN (Ethernet)
 - `https://home-pc.local:7788` — mDNS
 - `https://home-pc.sable-eagle.ts.net:7788` — **Tailscale magic-DNS** (Let's Encrypt cert via the SNI cert switcher + `*.ts.net` pinning bypass in `PinningDelegate.shouldSkipPinning`; this is the working remote-access path from iOS over cellular)
 - `https://100.91.73.88:7788` — Tailscale IPv4 (iOS skips per `isTailscaleCGNATURL` filter — expected, magic-DNS replaces it)
 - `https://[fd7a:115c:a1e0::6e39:4958]:7788` — Tailscale IPv6
-- `https://145.224.86.89:7788` — **WAN custom endpoint** (router port-forward 7788 → 192.168.0.208:7788). Configured via `customEndpoints:` top-level YAML field. Public IP is RIPE-allocated (NOT CGNAT), so iOS will probe it normally.
+- `https://<WAN-IP>:7788` — **WAN custom endpoint** (router port-forward 7788 → <HOMEPC-LAN-IP>:7788). Configured via `customEndpoints:` top-level YAML field. Public IP is RIPE-allocated (NOT CGNAT), so iOS will probe it normally.
 
 **Cert SAN gotcha (re-discovered 2026-05-19):** `bridge init` mints the TLS cert against the **config at that moment**. If you edit `customEndpoints:` in `bridge.yaml` AFTER `init`, the cert's SAN list is stale and the first `serve` logs `WARN cert SANs are stale — missing_ips=[...]`. Run `bridge cert rotate --config ...\bridge.yaml --yes` after any customEndpoints edit. The fresh-install script flow gets this right because it rotates after the YAML edit; manual edits in the field need the same follow-up.
 
 **Helper scripts on `C:\Users\arsenie\Desktop\`** (idempotent — re-runnable for updates):
 
-Canonical source: [`deploy/windows/`](../deploy/windows/) — `scp deploy/windows/*.ps1 arsenie@192.168.0.208:C:/Users/arsenie/Desktop/` to sync before running.
+Canonical source: [`deploy/windows/`](../deploy/windows/) — `scp deploy/windows/*.ps1 <HOMEPC-SSH>:C:/Users/arsenie/Desktop/` to sync before running.
 
 | Script | Purpose |
 |---|---|
@@ -72,32 +79,32 @@ scp /tmp/setup-bridge-windows.ps1 \
     /tmp/rotate-cert-windows.ps1 \
     /tmp/firewall-bridge-windows.ps1 \
     /tmp/task-bridge-windows.ps1 \
-    arsenie@192.168.0.208:C:/Users/arsenie/Desktop/
+    <HOMEPC-SSH>:C:/Users/arsenie/Desktop/
 
 # 2. Re-run setup (pulls latest origin/main, rebuilds, refreshes YAML — but
 #    does NOT touch the cert unless you also pass `-force` to bridge init).
-ssh arsenie@192.168.0.208 'pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass \
+ssh <HOMEPC-SSH> 'pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass \
     -File C:\Users\arsenie\Desktop\setup-bridge-windows.ps1'
 
 # 3. Restart via the scheduled task (already registered — this just kicks it).
-ssh arsenie@192.168.0.208 'pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass \
+ssh <HOMEPC-SSH> 'pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass \
     -File C:\Users\arsenie\Desktop\task-bridge-windows.ps1'
 
 # 4. Verify from LAN.
-curl -sS -k --max-time 10 https://192.168.0.208:7788/v1/health | jq .serverVersion
+curl -sS -k --max-time 10 https://<HOMEPC-LAN-IP>:7788/v1/health | jq .serverVersion
 ```
 
 **Just restart (no rebuild)** — after a YAML edit or to recover from a wedged process:
 
 ```sh
-ssh arsenie@192.168.0.208 'pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass \
+ssh <HOMEPC-SSH> 'pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass \
     -File C:\Users\arsenie\Desktop\restart-bridge-windows.ps1'
 ```
 
 Or inline without the script:
 
 ```sh
-ssh arsenie@192.168.0.208 \
+ssh <HOMEPC-SSH> \
     'pwsh -Command "Stop-ScheduledTask -TaskName ''1-bit-bridge (home-pc)''; Start-Sleep 1; Start-ScheduledTask -TaskName ''1-bit-bridge (home-pc)''"'
 ```
 
@@ -109,7 +116,7 @@ ssh arsenie@192.168.0.208 \
 
 **zsh `echo` mangles `\b` in PowerShell paths sent via `-EncodedCommand`.** When piping a PowerShell script to PowerShell `-EncodedCommand` over SSH (the only sane way to avoid layered single-/double-quote escaping between zsh → CMD → pwsh), the natural pipeline is `echo -n "$PS" | iconv -f UTF-8 -t UTF-16LE | base64 | tr -d '\n'`. **`echo -n` on macOS zsh processes backslash escapes by default** (POSIX-noncompliant, zsh-historical behaviour), so any Windows path with `\b` — `C:\1-bit-bridge\bin`, `\bridge.exe`, `\backups` — gets `\b` collapsed to a literal 0x08 byte (backspace) BEFORE the base64 layer. PowerShell then receives a string with embedded BS control characters and fails with a `Test-Path` / `Rename-Item` error like `missing C:\1-bit-bridge_x0008_in\bridge.exe.new` (PowerShell's error formatter renders the BS byte as `_x0008_`). The failure mode is invisible at the source — single-quoted PowerShell strings don't help because the mangling happens in zsh, not PowerShell. **Always use `printf '%s' "$PS"` instead of `echo -n "$PS"`** as the first stage of the pipeline. `printf '%s'` is POSIX-defined to emit bytes verbatim. Bash's `echo` happens to default to non-interpret on macOS, but zsh is the default Mac shell now — code for zsh. Burned 2026-05-22 during the post-PR-#285 home-pc deploy: the rename step silently truncated three different paths until I switched the pipeline to `printf`.
 
-### bridge.ars.md (Linux VPS, public mode, SSH `arsenie@bridge.ars.md`)
+### bridge.ars.md (Linux VPS, public mode, SSH `<VPS-SSH>`)
 
 Public-internet-reachable bridge running in `deployment.mode: public` against a Backblaze B2 bucket mounted via rclone. Stood up 2026-05-24 (steps 1–11 of the post-PR-#296 deployment plan — iOS pairing deferred until the iOS Mirror PR for `PinningDelegate.shouldSkipPinning` extension lands; see `~/Desktop/to-do/2026-05-24-ios-mirror-public-vps-pinning-exemption.md`).
 
@@ -117,7 +124,7 @@ Public-internet-reachable bridge running in `deployment.mode: public` against a 
 
 | Item | Value |
 |---|---|
-| SSH | `ssh -i ~/.ssh/1bitbridge_key arsenie@bridge.ars.md` (key was copied from `~/Downloads/1bitbridge_key.pem`, perms 0600) |
+| SSH | `ssh -i ~/.ssh/<VPS-SSH-KEY> <VPS-SSH>` (key was copied from `~/Downloads/<VPS-SSH-KEY>.pem`, perms 0600) |
 | Default shell | bash (Linux) |
 | Service manager | systemd |
 | Binary path | `/usr/local/bin/bridge` (setcap `cap_net_bind_service=+ep` for non-root :443 bind) |
@@ -164,14 +171,14 @@ GOOS=linux GOARCH=amd64 go build \
 
 # 2. Upload as .new + verify SHA-256 BEFORE swap (so a truncated upload
 #    can't replace a working binary).
-scp -i ~/.ssh/1bitbridge_key dist/bridge-linux-amd64 \
-    arsenie@bridge.ars.md:/tmp/bridge.new
+scp -i ~/.ssh/<VPS-SSH-KEY> dist/bridge-linux-amd64 \
+    <VPS-SSH>:/tmp/bridge.new
 shasum -a 256 dist/bridge-linux-amd64                                                                 # local
-ssh -i ~/.ssh/1bitbridge_key arsenie@bridge.ars.md 'sha256sum /tmp/bridge.new'                        # remote
+ssh -i ~/.ssh/<VPS-SSH-KEY> <VPS-SSH> 'sha256sum /tmp/bridge.new'                        # remote
 
 # 3. Two-step rename swap + restart (mirrors the Windows pattern;
 #    keeps the .old-<ts> backup for one-step rollback).
-ssh -i ~/.ssh/1bitbridge_key arsenie@bridge.ars.md "
+ssh -i ~/.ssh/<VPS-SSH-KEY> <VPS-SSH> "
   TS=\$(date +%Y%m%d-%H%M%S)
   sudo mv /usr/local/bin/bridge /usr/local/bin/bridge.old-\$TS
   sudo mv /tmp/bridge.new /usr/local/bin/bridge
@@ -236,7 +243,7 @@ Full coordinates + canonical update procedure live in the `home-pc (Windows)` su
 
 Public-internet bridge running `deployment.mode: public` against rclone-mounted B2. Cross-compile + scp + two-step swap pattern for linux/amd64 + systemd. Full coordinates + canonical update procedure live in the `bridge.ars.md` subsection under "Production deployments" above — don't duplicate the deploy commands here; consult that section directly.
 
-**One-line summary**: `GOOS=linux GOARCH=amd64 go build … -o dist/bridge-linux-amd64 ./cmd/bridge` → `scp -i ~/.ssh/1bitbridge_key … :/tmp/bridge.new` → SHA-256 verify → two-step `sudo mv` swap + `setcap cap_net_bind_service=+ep` + `systemctl restart 1-bit-bridge`.
+**One-line summary**: `GOOS=linux GOARCH=amd64 go build … -o dist/bridge-linux-amd64 ./cmd/bridge` → `scp -i ~/.ssh/<VPS-SSH-KEY> … :/tmp/bridge.new` → SHA-256 verify → two-step `sudo mv` swap + `setcap cap_net_bind_service=+ep` + `systemctl restart 1-bit-bridge`.
 
 **Public-mode-specific verification** (extends the `/v1/health` check):
 
