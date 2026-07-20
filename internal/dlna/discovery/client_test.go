@@ -150,12 +150,15 @@ func TestHandlePacket_KnownUDNAliveRefreshesLastSeen(t *testing.T) {
 		ControlURL:   "http://192.0.2.7/ctrl", // complete entry → refresh path
 		LastSeenAt:   earlier,
 	})
+	// LOCATION must sit on the SAME host as the cached ControlURL — a
+	// different host is a MOVE and correctly triggers the re-fetch path
+	// (see client_host_change_test.go), not this plain refresh.
 	pkt := []byte("NOTIFY * HTTP/1.1\r\n" +
 		"HOST: 239.255.255.250:1900\r\n" +
 		"NT: urn:schemas-upnp-org:device:MediaRenderer:1\r\n" +
 		"NTS: ssdp:alive\r\n" +
 		"USN: uuid:known::urn:schemas-upnp-org:device:MediaRenderer:1\r\n" +
-		"LOCATION: http://x/y\r\n" +
+		"LOCATION: http://192.0.2.7/desc.xml\r\n" +
 		"\r\n")
 	c.handlePacket(context.Background(), pkt, nil)
 	info, _ := c.cache.Get("uuid:known")

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -174,6 +175,41 @@ type SSDPDiscoveryClient struct {
 	// documented bgScans WaitGroup invariant ("graceful shutdown
 	// triggers full cleanup").
 	wg sync.WaitGroup
+
+	// locMu guards lastLocation + inFlight. A DEDICATED mutex, not
+	// runMu: runMu's scope is the conn / runCtx lifecycle and Stop()
+	// holds it across cache.Clear(), so borrowing it for the per-packet
+	// bookkeeping below would widen a lock whose ordering contract is
+	// already load-bearing.
+	locMu sync.Mutex
+
+	// lastLocation maps UDN → the SSDP `Location` most recently FETCHED
+	// (or attempted) for that renderer. It's the host-change reference
+	// for entries whose cached ControlURL is empty — a failed-fetch stub
+	// carries no URL to compare a fresh announcement against, so without
+	// this map a renderer that failed at address A and moved to address B
+	// would never be re-fetched (a structural stub carries the year-2999
+	// sentinel and never ages out).
+	//
+	// Deliberately NOT a field on RendererInfo: that struct IS the
+	// `/v1/renderers` wire shape (see renderer_dto.go) and this is
+	// client-side bookkeeping the protocol has no business carrying.
+	lastLocation map[string]string
+
+	// inFlight holds the UDNs with a detail fetch currently running, so
+	// a burst of announcements for the same renderer dispatches exactly
+	// one fetch. Load-bearing for the host-change path: it Removes the
+	// cache entry, so every FURTHER packet for that UDN lands in the
+	// first-time-UDN branch and would spawn another fetch until the
+	// first one finally writes. (It also fixes the pre-existing case of
+	// a new renderer sending a burst of ssdp:alive NOTIFYs.)
+	//
+	// Self-cleaning: every claim is released by the spawned fetch's
+	// defer, so the map can't grow past the number of concurrent
+	// fetches. NOT a substitute for a time-based cooldown — after a
+	// FAILED fetch the stub's empty ControlURL makes the exists-branch
+	// early-return, which suppresses re-fetching until EvictStale.
+	inFlight map[string]struct{}
 }
 
 // DiscoveryConfig captures the SSDPDiscoveryClient's tunables.
@@ -266,6 +302,8 @@ func NewSSDPDiscoveryClient(
 		dispatcher:     cfg.Dispatcher,
 		detailFetchSem: make(chan struct{}, 4), // see field docblock
 		nowFunc:        nowFunc,
+		lastLocation:   make(map[string]string),
+		inFlight:       make(map[string]struct{}),
 	}, nil
 }
 
@@ -534,6 +572,7 @@ func (c *SSDPDiscoveryClient) handlePacket(
 	// some odd firmware, so we still handle the case defensively.)
 	if hdr.NTS == "ssdp:byebye" {
 		c.cache.Remove(udn)
+		c.forgetLocation(udn)
 		packageLogger.Debug("renderer byebye", "udn", udn)
 		return
 	}
@@ -543,6 +582,43 @@ func (c *SSDPDiscoveryClient) handlePacket(
 	// fetch; known UDNs just refresh lastSeenAt.
 	now := c.nowFunc()
 	if existing, exists := c.cache.Get(udn); exists {
+		// Known UDN announcing from a NEW host:port (DHCP lease renew,
+		// Wi-Fi ↔ Ethernet move). The cached ControlURL points at the old
+		// address, and because LastSeenAt keeps advancing on every packet
+		// EvictStale never ages the entry out — iOS would dispatch
+		// SetAVTransportURI to a dead address until the bridge restarts.
+		//
+		// REMOVE the entry, then re-fetch as a fresh discovery. Removal is
+		// load-bearing and is where this diverges from the server-side twin
+		// in internal/upnp/discovery.go (which re-fetches in place): here
+		// mergeRendererInfo is non-empty-wins and a failed re-fetch upserts
+		// a stub with an EMPTY ControlURL, so an in-place re-fetch would
+		// merge into the ghost — KEEPING the dead ControlURL while
+		// refreshing LastSeenAt, i.e. pinning the bad entry forever (and
+		// with the year-2999 structural sentinel, immortally). Removing
+		// first means a failed re-fetch writes a genuine stub: hidden from
+		// Snapshot, aged out + retried by EvictStale. It also resets a
+		// structural sentinel that was earned by the HTTP server at the OLD
+		// address and says nothing about the new one.
+		//
+		// A same-UDN fetch already in flight (for the old address) blocks
+		// the dispatch below; that fetch re-adds the dead entry + records
+		// its location, and the NEXT announcement re-detects the change
+		// with the dispatch slot free — self-healing within one M-SEARCH
+		// cycle.
+		if hdr.Location != "" {
+			// prev == "" means we have nothing to compare against — treat
+			// as "no change" rather than guessing (a false positive here
+			// is a re-fetch storm).
+			if prev := c.previousLocation(udn, existing.ControlURL); prev != "" &&
+				!sameURLHost(hdr.Location, prev) {
+				packageLogger.Debug("renderer moved; re-fetching description",
+					"udn", udn, "from", prev, "to", hdr.Location)
+				c.cache.Remove(udn)
+				c.spawnDetailFetch(ctx, udn, hdr.Location, now)
+				return
+			}
+		}
 		// Incomplete stub (no AVTransport ControlURL) = residue of a
 		// failed detail fetch. Do NOT refresh its LastSeenAt and do NOT
 		// re-fetch here: a transient-failure stub then ages out via
@@ -569,16 +645,110 @@ func (c *SSDPDiscoveryClient) handlePacket(
 	if hdr.Location == "" {
 		return // no location → can't fetch description; skip
 	}
-	// wg.Add(1) here (not inside fetchAndCacheDetails) is safe to run
-	// concurrently with Stop()'s wg.Wait(): in production handlePacket runs
-	// ON the runLoop goroutine, which holds its OWN wg slot for its entire
-	// lifetime, so the counter is always ≥1 here — this Add takes it ≥1→≥2,
-	// never 0→1 (the only shape that panics under a concurrent Wait). And
-	// Stop()'s Wait can't return until runLoop returns, by which time no
-	// further fetch Adds are issued. Mirrors the Add-under-live-parent
-	// pattern in internal/dlna/ssdp.go's runMSearchListener.
+	c.spawnDetailFetch(ctx, udn, hdr.Location, now)
+}
+
+// sameURLHost reports whether two URLs share the same host:port.
+// Unparseable input compares as "same" so a malformed SSDP Location
+// can't trigger description re-fetch storms against a healthy entry.
+//
+// Deliberate lockstep COPY of the identically-named helper in
+// internal/upnp/discovery.go (the MediaServer twin). Importing across the
+// two discovery subsystems for an 8-line helper would couple packages that
+// are otherwise independent by design — the same call already made for
+// tls.ParseHostFromURL / advertise.parseHostFromURL. Keep the two in sync;
+// the unparseable→true semantic is the load-bearing half.
+func sameURLHost(a, b string) bool {
+	ua, errA := url.Parse(a)
+	ub, errB := url.Parse(b)
+	if errA != nil || errB != nil {
+		return true
+	}
+	return ua.Host == ub.Host
+}
+
+// previousLocation returns the SSDP Location this client last fetched for
+// udn, falling back to the cached ControlURL (same host in every real
+// device description) when no fetch has been recorded — e.g. an entry
+// seeded by a caller other than the fetch path. Returns "" when neither is
+// known, which callers MUST treat as "no change" rather than guessing: a
+// false positive here dispatches a re-fetch storm.
+func (c *SSDPDiscoveryClient) previousLocation(udn, cachedControlURL string) string {
+	c.locMu.Lock()
+	loc := c.lastLocation[udn]
+	c.locMu.Unlock()
+	if loc != "" {
+		return loc
+	}
+	return cachedControlURL
+}
+
+// recordLocation stamps the Location a fetch resolved against, so the next
+// announcement for udn has a reference to compare hosts with even when the
+// fetch produced a ControlURL-less stub.
+func (c *SSDPDiscoveryClient) recordLocation(udn, location string) {
+	if udn == "" || location == "" {
+		return
+	}
+	c.locMu.Lock()
+	c.lastLocation[udn] = location
+	c.locMu.Unlock()
+}
+
+// forgetLocation drops udn's recorded Location — called when ssdp:byebye
+// removes the renderer, so the map tracks live devices only.
+//
+// Deliberately does NOT drop an inFlight claim: that claim is owned by the
+// running fetch's defer (so it can't leak), and clearing it here would let
+// a packet arriving mid-fetch spawn a duplicate.
+func (c *SSDPDiscoveryClient) forgetLocation(udn string) {
+	c.locMu.Lock()
+	delete(c.lastLocation, udn)
+	c.locMu.Unlock()
+}
+
+// claimFetch reserves the single in-flight fetch slot for udn. Returns
+// false when a fetch is already running, in which case the caller MUST NOT
+// spawn (and MUST NOT release).
+func (c *SSDPDiscoveryClient) claimFetch(udn string) bool {
+	c.locMu.Lock()
+	defer c.locMu.Unlock()
+	if _, busy := c.inFlight[udn]; busy {
+		return false
+	}
+	c.inFlight[udn] = struct{}{}
+	return true
+}
+
+// releaseFetch frees udn's in-flight slot. Called from the spawned fetch's
+// defer — see fetchAndCacheDetails for the ordering contract.
+func (c *SSDPDiscoveryClient) releaseFetch(udn string) {
+	c.locMu.Lock()
+	delete(c.inFlight, udn)
+	c.locMu.Unlock()
+}
+
+// spawnDetailFetch launches a tracked detail fetch for udn, unless one is
+// already in flight for that UDN (see the inFlight field docblock).
+//
+// wg.Add(1) here (not inside fetchAndCacheDetails) is safe to run
+// concurrently with Stop()'s wg.Wait(): in production handlePacket runs ON
+// the runLoop goroutine, which holds its OWN wg slot for its entire
+// lifetime, so the counter is always ≥1 here — this Add takes it ≥1→≥2,
+// never 0→1 (the only shape that panics under a concurrent Wait). And
+// Stop()'s Wait can't return until runLoop returns, by which time no
+// further fetch Adds are issued. Mirrors the Add-under-live-parent pattern
+// in internal/dlna/ssdp.go's runMSearchListener.
+func (c *SSDPDiscoveryClient) spawnDetailFetch(
+	ctx context.Context,
+	udn, location string,
+	now time.Time,
+) {
+	if !c.claimFetch(udn) {
+		return
+	}
 	c.wg.Add(1)
-	go c.fetchAndCacheDetails(ctx, udn, hdr.Location, now)
+	go c.fetchAndCacheDetails(ctx, udn, location, now)
 }
 
 // fetchAndCacheDetails dispatches the description + GetProtocolInfo
@@ -594,10 +764,15 @@ func (c *SSDPDiscoveryClient) fetchAndCacheDetails(
 	runCtx context.Context,
 	udn, location string, lastSeenAt time.Time,
 ) {
-	// Paired with the wg.Add(1) in handlePacket. Deferred at the very top
-	// so it fires on EVERY return path (including the semaphore-acquire
+	// Paired with the wg.Add(1) in spawnDetailFetch. Deferred at the very
+	// top so it fires on EVERY return path (including the semaphore-acquire
 	// ctx.Done bail below), letting Stop()'s Wait() observe completion.
 	defer c.wg.Done()
+	// Paired with the claimFetch in spawnDetailFetch. Registered AFTER the
+	// wg.Done defer so LIFO runs it FIRST: once Stop()'s wg.Wait() returns,
+	// every claim is guaranteed released (a lingering one would make a
+	// restarted client skip that UDN's first fetch).
+	defer c.releaseFetch(udn)
 	// Acquire / release the semaphore — bounded concurrency.
 	select {
 	case c.detailFetchSem <- struct{}{}:
@@ -642,6 +817,11 @@ func (c *SSDPDiscoveryClient) fetchAndCacheDetails(
 			"err", err.Error())
 		// Cache a stub (UDN + lastSeenAt only) so duplicate packets in
 		// THIS M-SEARCH cycle hit the exists-branch and don't re-fetch.
+		// Record the attempted Location too — the stub carries no
+		// ControlURL, so this map is the ONLY way a later announcement
+		// from a new address can be recognised as a move (which matters
+		// most for a structural stub: it never ages out on its own).
+		c.recordLocation(udn, location)
 		c.cache.Upsert(RendererInfo{UDN: udn, LastSeenAt: stubLastSeen})
 		return
 	}
@@ -672,6 +852,7 @@ func (c *SSDPDiscoveryClient) fetchAndCacheDetails(
 		return
 	}
 
+	c.recordLocation(udn, location)
 	c.cache.Upsert(RendererInfo{
 		UDN:                 udn,
 		FriendlyName:        desc.FriendlyName,
