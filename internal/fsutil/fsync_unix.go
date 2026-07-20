@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 )
 
-// syncDir opens the parent directory of `filePath` and Syncs the
+// SyncParentDir opens the parent directory of `filePath` and Syncs the
 // handle. On ext4 / XFS / APFS a fresh rename(2) can leave the
 // directory entry in the journal but not yet on disk; syncing the
 // directory handle commits the entry update so a power-loss between
@@ -16,7 +16,13 @@ import (
 // old path (or lose it). A missing parent is treated as success — the
 // caller's file fsync would already have failed if the path didn't
 // exist.
-func syncDir(filePath string) (err error) {
+//
+// Exported so `internal/atomicwrite` can run the same barrier after
+// its tmp-file rename without duplicating the per-platform split.
+// Callers that treat a failure as non-fatal (atomicwrite does — the
+// rename already succeeded, so the write is complete and visible) are
+// responsible for saying so at their call site.
+func SyncParentDir(filePath string) (err error) {
 	// filepath.Dir never returns "" — a bare filename yields ".", which os.Open
 	// handles natively — so no empty-string fallback is needed.
 	dir := filepath.Dir(filePath)

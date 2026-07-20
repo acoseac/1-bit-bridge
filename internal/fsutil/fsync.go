@@ -1,7 +1,9 @@
 // Package fsutil holds small cross-cutting filesystem helpers shared
 // across the bridge — today the durability barrier (file + parent-dir
 // fsync) that producers of on-disk sidecars run before committing the
-// SQLite row that points at the freshly-written file.
+// SQLite row that points at the freshly-written file, plus the
+// standalone parent-dir barrier `internal/atomicwrite` runs after its
+// tmp-file rename.
 //
 // `internal/transcode` carries an equivalent unexported copy
 // (`fsyncFileAndParent` / `syncDir`) predating this package; keep the
@@ -37,7 +39,7 @@ func FsyncFileAndParent(path string) error {
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("close after fsync: %w", err)
 	}
-	if err := syncDir(path); err != nil {
+	if err := SyncParentDir(path); err != nil {
 		return fmt.Errorf("fsync parent dir: %w", err)
 	}
 	return nil
