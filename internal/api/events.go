@@ -38,7 +38,11 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	topics := parseTopicsParam(r.URL.Query().Get("topics"))
+	topics, topicsErr := parseTopicsParam(r.URL.Query().Get("topics"))
+	if topicsErr != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", topicsErr.Error())
+		return
+	}
 	lastEventID := r.Header.Get("Last-Event-ID")
 
 	// Disable response encoding negotiation. A future global gzip
@@ -59,7 +63,21 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	// captured atomically with the live subscription — no missed
 	// events between "I have a Last-Event-ID" and "I'm in the
 	// fan-out".
-	sub, replay := s.eventBroker.subscribe(topics, lastEventID)
+	//
+	// maxPerTopic 0: this route is bearer-authed, so the global
+	// maxBrokerSubscribers cap is the bound. A per-topic cap here would
+	// wrongly limit several of the operator's own devices legitimately
+	// subscribing to the same topic filters.
+	sub, replay, subErr := s.eventBroker.subscribe(topics, lastEventID, 0)
+	if subErr != nil {
+		// Capacity, not a client error — a slot frees as soon as any
+		// stream disconnects. Headers set above are discarded by
+		// writeError's WriteHeader (nothing has been flushed yet).
+		w.Header().Set("Retry-After", "5")
+		writeError(w, http.StatusServiceUnavailable, "unavailable",
+			"too many active event streams; retry shortly")
+		return
+	}
 	defer s.eventBroker.unsubscribe(sub)
 
 	// Send headers + an initial flush so iOS's URLSession.bytes
@@ -116,14 +134,33 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// maxTopicsPerSubscription bounds the topics= allowlist. `subscriber.matches`
+// is a linear scan that short-circuits on a hit, so deliberately
+// non-matching topics force a full walk — and that walk runs for EVERY event
+// and every 15s heartbeat, inside the broker's global mutex. URL length is
+// otherwise bounded only by net/http's 1 MiB default MaxHeaderBytes, which
+// would admit tens of thousands of topics. No legitimate client passes more
+// than a handful.
+const maxTopicsPerSubscription = 32
+
+// errTooManyTopics is returned by parseTopicsParam past the cap. Rejecting
+// beats silently truncating: a client that asked for 40 topics and got 32
+// would miss events on the dropped 8 with no signal.
+var errTooManyTopics = fmt.Errorf("topics: at most %d may be requested", maxTopicsPerSubscription)
+
 // parseTopicsParam splits the comma-separated topics= query param
 // into an allowlist. Trims whitespace; drops empty entries. Empty
 // input means "all topics" (handled by subscriber.matches).
-func parseTopicsParam(raw string) []string {
+func parseTopicsParam(raw string) ([]string, error) {
 	if raw == "" {
-		return nil
+		return nil, nil
 	}
 	parts := strings.Split(raw, ",")
+	if len(parts) > maxTopicsPerSubscription {
+		// Bail on the raw split count, before allocating the output slice —
+		// the whole point is to not materialise an attacker-sized list.
+		return nil, errTooManyTopics
+	}
 	out := make([]string, 0, len(parts))
 	for _, p := range parts {
 		t := strings.TrimSpace(p)
@@ -131,7 +168,7 @@ func parseTopicsParam(raw string) []string {
 			out = append(out, t)
 		}
 	}
-	return out
+	return out, nil
 }
 
 // writeEvent serialises a single event envelope to the SSE wire. Each

@@ -602,7 +602,7 @@ func TestRunVariantDelete_DedupsVariantIDsInSSE(t *testing.T) {
 	stop := srv.StartEventBroker()
 	defer stop()
 
-	sub, _ := srv.eventBroker.subscribe([]string{"upscale"}, "")
+	sub, _, _ := srv.eventBroker.subscribe([]string{"upscale"}, "", 0)
 	defer srv.eventBroker.unsubscribe(sub)
 
 	resp, err := srv.RunVariantDelete(context.Background(), VariantDeleteRequest{All: true})

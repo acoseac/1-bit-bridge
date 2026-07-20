@@ -1,10 +1,12 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"math"
 	"net/http"
 	"strconv"
@@ -59,8 +61,78 @@ type historyEventDTO struct {
 	OutputTarget *hardwareTargetDTO `json:"outputTarget,omitempty"`
 }
 
+// errHistoryEventsNotArray is returned when "events" is present but is
+// neither a JSON array nor null. Surfaces as the same generic 400 a stdlib
+// type-mismatch would produce, keeping the wire contract intact.
+var errHistoryEventsNotArray = errors.New("history events must be a JSON array")
+
+// cappedHistoryEvents decodes the "events" array with a decode-time count
+// cap. The 4 MiB MaxBytesReader bounds the raw bytes, but `{}` is ~3 bytes
+// with its separator, so a crafted body still decodes to ~1.4M structs before
+// any post-decode guard fires — and the handler then sized its output slice
+// on that same uncapped count, doubling the amplification from a single
+// authed POST. No body-size cap fixes this (a parseable event is ~3 bytes
+// while a real one is hundreds), so the fix streams the array and stops
+// materialising structs at historyMaxBatchEvents.
+//
+// Mirrors cappedPlaylistItems in playlists.go, with one deliberate
+// difference: playlists REJECT an oversized array, whereas history DROPS the
+// excess and reports the count in the 202 (a device draining a long offline
+// queue must not have the whole batch refused). Elements past the cap are
+// parsed into an empty struct — parsed so the count stays exact and the array
+// is still validated, into `struct{}` so no per-element fields are allocated.
+type cappedHistoryEvents struct {
+	items    []historyEventDTO
+	overflow int
+}
+
+func (c *cappedHistoryEvents) UnmarshalJSON(data []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	// Tolerate JSON null (→ empty), matching stdlib slice-decode.
+	if tok == nil {
+		c.items, c.overflow = nil, 0
+		return nil
+	}
+	if d, ok := tok.(json.Delim); !ok || d != '[' {
+		return errHistoryEventsNotArray
+	}
+	items := make([]historyEventDTO, 0)
+	overflow := 0
+	for dec.More() {
+		if len(items) >= historyMaxBatchEvents {
+			var skip struct{}
+			if err := dec.Decode(&skip); err != nil {
+				return err
+			}
+			overflow++
+			continue
+		}
+		var e historyEventDTO
+		if err := dec.Decode(&e); err != nil {
+			return err
+		}
+		items = append(items, e)
+	}
+	// Consume AND verify the closing ']' — dec.More() returning false only
+	// says the next byte is a closing delimiter or EOF, so a malformed value
+	// whose "events" isn't a cleanly-terminated array must not pass silently.
+	closeTok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	if d, ok := closeTok.(json.Delim); !ok || d != ']' {
+		return errHistoryEventsNotArray
+	}
+	c.items, c.overflow = items, overflow
+	return nil
+}
+
 type historyBatchRequest struct {
-	Events []historyEventDTO `json:"events"`
+	Events cappedHistoryEvents `json:"events"`
 }
 
 type historyBatchResponse struct {
@@ -92,13 +164,14 @@ func (s *Server) historyBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	clean := make([]manifest.PlaybackHistoryRow, 0, len(body.Events))
-	dropped := 0
-	for i, e := range body.Events {
-		if i >= historyMaxBatchEvents {
-			dropped += len(body.Events) - i
-			break
-		}
+	// len(items) is bounded by historyMaxBatchEvents at decode time (see
+	// cappedHistoryEvents), so this pre-size can no longer be driven by the
+	// request. `overflow` carries the count the decoder parsed-and-discarded
+	// past the cap, preserving the exact `dropped` figure the 202 reports.
+	events := body.Events.items
+	clean := make([]manifest.PlaybackHistoryRow, 0, len(events))
+	dropped := body.Events.overflow
+	for _, e := range events {
 		path := strings.ReplaceAll(strings.TrimSpace(e.Path), `\`, "/")
 		// Strip a leading slash: iOS normalizes bridge-source paths with a
 		// leading "/", but the scanner stores track paths without one, so

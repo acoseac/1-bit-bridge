@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -81,7 +82,35 @@ const (
 	eventPublishBufferSize     = 64
 	subscriberChannelBufferLen = 16
 	heartbeatInterval          = 15 * time.Second
+
+	// maxBrokerSubscribers bounds concurrent SSE subscriptions across the
+	// whole broker. Each subscription costs a goroutine, a 16-slot channel,
+	// and a held TLS conn + fd — and `fanoutLocked` walks EVERY subscriber
+	// under `b.mu`, so an unbounded map degrades the 15s heartbeat for all
+	// clients well before memory runs out.
+	//
+	// Load-bearing because `GET /v1/pairing/{id}/events` is reachable
+	// WITHOUT a bearer token (it authenticates with the pollSecret from an
+	// unauthenticated POST /v1/pairing/requests), so nothing else caps how
+	// many streams a remote caller can hold open. The bound is generous
+	// against the real shape — "one operator, a handful of devices", each
+	// holding one /v1/events stream plus at most one pairing stream.
+	maxBrokerSubscribers = 256
+
+	// maxPairingSubscribersPerRequest bounds streams sharing ONE pairing
+	// request id. A single pollSecret must not authorise unlimited
+	// subscriptions; 3 covers a legitimate retry racing a stale connection
+	// that hasn't been reaped yet. Applied only to the pairing route —
+	// `/v1/events` is bearer-authed and passes 0 (no per-topic cap), since
+	// several devices legitimately share the same topic filters there.
+	maxPairingSubscribersPerRequest = 3
 )
+
+// errTooManySubscribers is returned by subscribe when either the global or
+// the per-topic subscription cap would be exceeded. Handlers map it to 503
+// with a Retry-After — the condition is transient (a cap frees as soon as
+// any stream disconnects), so it is deliberately not a 4xx.
+var errTooManySubscribers = errors.New("too many active event subscribers")
 
 type eventBroker struct {
 	publish chan eventEnvelope
@@ -319,8 +348,16 @@ func (b *eventBroker) fanoutHeartbeatLocked() {
 // processing of an event is either fully before or fully after the
 // subscribe() call.
 //
-// Caller MUST call unsubscribe when the request ends.
-func (b *eventBroker) subscribe(topics []string, lastEventID string) (*subscriber, []eventEnvelope) {
+// Capacity: refuses with errTooManySubscribers when the global
+// maxBrokerSubscribers cap is reached, or when `maxPerTopic` > 0 and any
+// requested topic already has that many subscribers. Both checks run inside
+// the same critical section as the insert, so concurrent subscribes cannot
+// race past the cap (the check-then-act shape would let N simultaneous
+// requests all observe "under the limit" before any inserted).
+//
+// Caller MUST call unsubscribe when the request ends — and MUST NOT call it
+// when subscribe returned an error (there is nothing registered to remove).
+func (b *eventBroker) subscribe(topics []string, lastEventID string, maxPerTopic int) (*subscriber, []eventEnvelope, error) {
 	sub := &subscriber{
 		ch:          make(chan eventEnvelope, subscriberChannelBufferLen),
 		topics:      topics,
@@ -328,9 +365,38 @@ func (b *eventBroker) subscribe(topics []string, lastEventID string) (*subscribe
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if len(b.subscribers) >= maxBrokerSubscribers {
+		return nil, nil, errTooManySubscribers
+	}
+	if maxPerTopic > 0 {
+		for _, t := range topics {
+			if b.countExactTopicLocked(t) >= maxPerTopic {
+				return nil, nil, errTooManySubscribers
+			}
+		}
+	}
 	replay := b.replaySinceLocked(lastEventID, topics)
 	b.subscribers[sub] = struct{}{}
-	return sub, replay
+	return sub, replay, nil
+}
+
+// countExactTopicLocked counts subscribers registered for exactly `topic`.
+// Exact (not prefix) match: the per-topic cap exists to bound streams sharing
+// one pairing request id, and a prefix match would let an unrelated broad
+// subscription ("pairing") consume another request's budget. O(subscribers),
+// but bounded by maxBrokerSubscribers and only paid on subscribe, which is
+// rare relative to fan-out. Caller MUST hold b.mu.
+func (b *eventBroker) countExactTopicLocked(topic string) int {
+	n := 0
+	for sub := range b.subscribers {
+		for _, t := range sub.topics {
+			if t == topic {
+				n++
+				break
+			}
+		}
+	}
+	return n
 }
 
 // unsubscribe removes a subscriber. Idempotent — calling twice is a

@@ -147,6 +147,7 @@ type Server struct {
 	reachability           *reachabilityCache           // per-root probe TTL cache used by /v1/list, /v1/stat, /v1/health
 	healthCounts           *healthCountsCache           // TTL cache for /v1/health scan-state COUNT(*) scans
 	publicServers          *publicServersCache          // TTL cache for /v1/health UPnP upstream per-server COUNT(*) scans
+	endpointsCache         *endpointsCache              // TTL cache for /v1/health advertised-endpoint interface walk
 	fingerprint            string
 	startedAt              time.Time
 
@@ -380,6 +381,7 @@ func New(cfg *config.Config, store *auth.Store, mp ManifestProvider, fingerprint
 		reachability:        newReachabilityCache(),
 		healthCounts:        newHealthCountsCache(),
 		publicServers:       newPublicServersCache(),
+		endpointsCache:      newEndpointsCache(),
 		fingerprint:         fingerprint,
 		startedAt:           time.Now().UTC(),
 	}
@@ -1305,7 +1307,11 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		CertFingerprint: s.fingerprint,
 		StartedAt:       s.startedAt,
 		ScanState:       scanState,
-		Endpoints:       s.reachableEndpoints(),
+		// TTL-cached for the same reason as the COUNT(*) scans above:
+		// /v1/health is unauthenticated and unlimited, and the uncached
+		// form ran a full interface enumeration (1 + N kernel dumps) per
+		// request. See endpointsCache.
+		Endpoints: s.endpointsCache.endpoints(s.reachableEndpoints),
 	}
 	if s.updater != nil {
 		info := s.updater.UpdateInfo()

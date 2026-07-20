@@ -7,9 +7,16 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/pairing"
 )
+
+// minPairingStreamLifetime floors the pairing SSE stream's bounded lifetime.
+// An already-approved request reports a remaining TTL of <= 0, and the stream
+// must still stay open long enough for the token to reach iOS and for its
+// DELETE acknowledgment to land.
+const minPairingStreamLifetime = 90 * time.Second
 
 // Shared pairing-error messages surfaced by every /v1/pairing*
 // handler. Four+ duplicates each across the create / poll / SSE /
@@ -279,7 +286,18 @@ func (s *Server) pairingEvents(w http.ResponseWriter, r *http.Request) {
 	// below is delivered to our channel instead of being silently
 	// missed. Gemini + Qodo + CodeRabbit all flagged the prior
 	// subscribe-after-Poll shape as a stuck-on-stale-state hazard.
-	sub, _ := s.eventBroker.subscribe([]string{topic}, "")
+	//
+	// Capacity: this route authenticates with the pollSecret from an
+	// UNAUTHENTICATED POST /v1/pairing/requests, so one request id must not
+	// authorise unlimited streams — hence the per-topic cap on top of the
+	// broker-global one.
+	sub, _, subErr := s.eventBroker.subscribe([]string{topic}, "", maxPairingSubscribersPerRequest)
+	if subErr != nil {
+		w.Header().Set("Retry-After", "5")
+		writeError(w, http.StatusServiceUnavailable, "unavailable",
+			"too many active pairing streams; retry shortly")
+		return
+	}
 	defer s.eventBroker.unsubscribe(sub)
 
 	// Re-Poll AFTER subscribe so the initial state event reflects any
@@ -333,10 +351,31 @@ func (s *Server) pairingEvents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Bound the stream's own lifetime to the pairing row's deadline. The loop
+	// below selects only on ctx.Done() and sub.ch and never re-checks pairing
+	// state, so without this a stream OUTLIVES the request (whose row the
+	// store deletes at TTL+grace) and is never reaped — the goroutine,
+	// channel, fd and TLS conn stay held indefinitely while nothing can ever
+	// send to it again. `pairing.DefaultGrace` matches the store's own
+	// terminal-state linger, and the floor keeps an already-approved request
+	// (whose remaining TTL may read <= 0) open long enough for the token
+	// delivery + DELETE acknowledgment round trip.
+	lifetime := time.Duration(res.TTLSecondsRemaining)*time.Second + pairing.DefaultGrace
+	if lifetime < minPairingStreamLifetime {
+		lifetime = minPairingStreamLifetime
+	}
+	streamDeadline := time.NewTimer(lifetime)
+	defer streamDeadline.Stop()
+
 	ctx := r.Context()
 	for {
 		select {
 		case <-ctx.Done():
+			return
+		case <-streamDeadline.C:
+			// Past TTL+grace the row is gone from the store; holding the
+			// connection open serves nothing. iOS reconnects if it still
+			// cares (it re-POSTs a fresh pairing request on expiry).
 			return
 		case env, ok := <-sub.ch:
 			if !ok {
