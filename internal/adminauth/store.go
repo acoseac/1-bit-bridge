@@ -294,8 +294,18 @@ func (s *Store) CreateSession(username string) (string, error) {
 	// Hard cap: if the map is still at the ceiling after the sweep (all
 	// sessions genuinely live), evict the least-recently-used one so a
 	// login stream can't grow it without bound.
-	if len(s.sessions) >= maxSessions {
+	// Evict in a LOOP, not a single conditional: if the map ever exceeds the
+	// ceiling (a lowered cap, or a future path that inserts in bulk) one
+	// eviction wouldn't bring it back under and the bound would silently stop
+	// holding (Gemini, post-merge review of #531). The no-progress guard makes
+	// the loop terminate even if a future evict implementation can no-op, so it
+	// can never spin while holding s.mu.
+	for len(s.sessions) >= maxSessions {
+		before := len(s.sessions)
 		s.evictOldestSessionLocked()
+		if len(s.sessions) >= before {
+			break
+		}
 	}
 	s.sessions[digest] = &Session{
 		Username:   username,

@@ -341,6 +341,14 @@ func Prune(backupsRoot string, keep int) (int, error) {
 // below reaps every manifest-less dir regardless of age (test
 // affordance; production passes orphanReapGrace via Prune).
 func ReapOrphans(backupsRoot string, grace time.Duration) (int, error) {
+	// Refuse an empty root: os.ReadDir("") reads the process's CURRENT WORKING
+	// DIRECTORY, and this function DELETES the subdirectories it finds without a
+	// manifest.json. A misconfigured/empty backupsRoot would therefore reap
+	// unrelated directories next to wherever the bridge happens to run (Gemini
+	// HIGH, post-merge review of #531). Fail closed instead.
+	if strings.TrimSpace(backupsRoot) == "" {
+		return 0, errors.New("backup: ReapOrphans requires a non-empty backups root")
+	}
 	entries, err := os.ReadDir(backupsRoot)
 	if errors.Is(err, os.ErrNotExist) {
 		return 0, nil

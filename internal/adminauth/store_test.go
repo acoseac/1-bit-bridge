@@ -264,9 +264,14 @@ func TestCreateSessionEvictsOldestAtCap(t *testing.T) {
 	// deterministic — the first-created session is the LRU eviction
 	// target. Every session stays within the idle window, so the
 	// sweep never fires and the cap is the only bound exercised.
+	var oldestRaw string
 	for i := 0; i < maxSessions; i++ {
-		if _, err := s.CreateSession("admin"); err != nil {
+		raw, err := s.CreateSession("admin")
+		if err != nil {
 			t.Fatal(err)
+		}
+		if i == 0 {
+			oldestRaw = raw // the LRU eviction target
 		}
 		tick = tick.Add(time.Second)
 	}
@@ -275,11 +280,23 @@ func TestCreateSessionEvictsOldestAtCap(t *testing.T) {
 	}
 
 	// One more login must hold the ceiling by evicting the oldest.
-	if _, err := s.CreateSession("admin"); err != nil {
+	newestRaw, err := s.CreateSession("admin")
+	if err != nil {
 		t.Fatal(err)
 	}
 	if got := s.SessionCount(); got != maxSessions {
 		t.Errorf("SessionCount = %d after cap eviction, want %d", got, maxSessions)
+	}
+	// Size alone doesn't prove the bound behaves: assert WHICH entry went.
+	// The LRU target (first created, never re-validated) must be gone and the
+	// just-created one must survive — an evictor that dropped an arbitrary (or
+	// the newest) session would still hold the count (Gemini, post-merge
+	// review of #531).
+	if _, err := s.ValidateSession(oldestRaw); !errors.Is(err, ErrSessionNotFound) {
+		t.Errorf("oldest session still valid after cap eviction (err=%v), want ErrSessionNotFound", err)
+	}
+	if _, err := s.ValidateSession(newestRaw); err != nil {
+		t.Errorf("newest session was evicted (err=%v), want it to survive", err)
 	}
 }
 

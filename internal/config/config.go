@@ -2160,8 +2160,14 @@ func IsInQuietHours(startMin, endMin, now int) bool {
 // fixtures), so rejecting it would break both. Only negatives, out-of-range
 // values, and non-numeric text are rejected — exactly what net.Listen faults.
 func validatePort(port string) error {
+	// An explicitly-empty port ("127.0.0.1:" / ":") is almost certainly a typo:
+	// SplitHostPort accepts it, but the bind then either fails or lands on an
+	// arbitrary ephemeral port. Reject it at load instead of surfacing as a
+	// confusing runtime listen error (Gemini, post-merge review of #529).
+	// Note a host with NO colon at all is already rejected earlier by
+	// SplitHostPort itself ("missing port in address").
 	if port == "" {
-		return nil
+		return errors.New("port must not be empty")
 	}
 	p, err := strconv.Atoi(port)
 	if err != nil || p < 0 || p > 65535 {

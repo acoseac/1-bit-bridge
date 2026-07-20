@@ -1757,9 +1757,15 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	defer func() {
 		done := make(chan struct{})
 		go func() { bgWriters.Wait(); close(done) }()
+		// NewTimer + defer Stop, NOT time.After: time.After's Timer survives
+		// until it fires even when `done` wins the select, and runServe is
+		// re-entered every time the launcher menu starts the bridge again, so
+		// the abandoned timers would accumulate (the PR #290 convention).
+		graceTimer := time.NewTimer(shutdownGrace)
+		defer graceTimer.Stop()
 		select {
 		case <-done:
-		case <-time.After(shutdownGrace):
+		case <-graceTimer.C:
 			fmt.Fprintln(stderr, "shutdown: background manifest writers did not drain within grace")
 		}
 	}()
