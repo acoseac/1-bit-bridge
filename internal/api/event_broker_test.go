@@ -32,7 +32,7 @@ func TestEventBroker_PublishedEventReachesSubscriber(t *testing.T) {
 	stop := b.Start()
 	defer stop()
 
-	sub, _ := b.subscribe([]string{"upscale"}, "")
+	sub, _, _ := b.subscribe([]string{"upscale"}, "", 0)
 	defer b.unsubscribe(sub)
 
 	b.Publish("upscale.stats", map[string]int{"queued": 3})
@@ -59,7 +59,7 @@ func TestEventBroker_PrefixMatchAllowsPairingWildcard(t *testing.T) {
 	stop := b.Start()
 	defer stop()
 
-	sub, _ := b.subscribe([]string{"pairing"}, "")
+	sub, _, _ := b.subscribe([]string{"pairing"}, "", 0)
 	defer b.unsubscribe(sub)
 
 	b.Publish("pairing.abc123", map[string]string{"state": "approved"})
@@ -81,7 +81,7 @@ func TestEventBroker_NonMatchingTopicFiltered(t *testing.T) {
 	stop := b.Start()
 	defer stop()
 
-	sub, _ := b.subscribe([]string{"upscale"}, "")
+	sub, _, _ := b.subscribe([]string{"upscale"}, "", 0)
 	defer b.unsubscribe(sub)
 
 	b.Publish("pairing.abc123", map[string]string{"state": "approved"})
@@ -102,7 +102,7 @@ func TestEventBroker_EmptyTopicsListMatchesAll(t *testing.T) {
 	stop := b.Start()
 	defer stop()
 
-	sub, _ := b.subscribe(nil, "")
+	sub, _, _ := b.subscribe(nil, "", 0)
 	defer b.unsubscribe(sub)
 
 	b.Publish("anything.goes", map[string]int{})
@@ -130,7 +130,7 @@ func TestEventBroker_SlowConsumerDropsOldest(t *testing.T) {
 	stop := b.Start()
 	defer stop()
 
-	sub, _ := b.subscribe(nil, "")
+	sub, _, _ := b.subscribe(nil, "", 0)
 	defer b.unsubscribe(sub)
 
 	// Fill subscriber buffer + 5 more (the buffer is 16; we fire
@@ -210,7 +210,7 @@ func TestEventBroker_ReplaySinceReturnsNothingForUnknownID(t *testing.T) {
 		})
 
 	// Subscribe with a Last-Event-ID we never issued.
-	_, replay := b.subscribe(nil, "9999999")
+	_, replay, _ := b.subscribe(nil, "9999999", 0)
 	if len(replay) != 0 {
 		t.Errorf("expected empty replay for unknown ID, got %d events", len(replay))
 	}
@@ -236,7 +236,7 @@ func TestEventBroker_ReplaySinceReturnsEventsAfterID(t *testing.T) {
 			return len(b.replayBuffer) >= 3
 		})
 
-	_, replay := b.subscribe(nil, "1")
+	_, replay, _ := b.subscribe(nil, "1", 0)
 	if len(replay) != 2 {
 		t.Errorf("expected 2 events after id=1, got %d", len(replay))
 	}
@@ -249,7 +249,7 @@ func TestEventBroker_ConcurrentPublishersAreSafe(t *testing.T) {
 	stop := b.Start()
 	defer stop()
 
-	sub, _ := b.subscribe(nil, "")
+	sub, _, _ := b.subscribe(nil, "", 0)
 	defer b.unsubscribe(sub)
 
 	const goroutines = 10
@@ -348,7 +348,7 @@ func TestEventBroker_SubscribeIsAtomicWithFanout(t *testing.T) {
 	// publishing the seed event so the probe captures its ID
 	// reliably (publishing before subscribe means the probe joins
 	// after fan-out and would miss the seed).
-	probe, _ := b.subscribe(nil, "")
+	probe, _, _ := b.subscribe(nil, "", 0)
 	defer b.unsubscribe(probe)
 	b.Publish("upscale.stats", 0)
 	var firstID string
@@ -371,7 +371,7 @@ func TestEventBroker_SubscribeIsAtomicWithFanout(t *testing.T) {
 	}()
 
 	// Race the subscribe() against the publish burst.
-	sub, replay := b.subscribe(nil, firstID)
+	sub, replay, _ := b.subscribe(nil, firstID, 0)
 	defer b.unsubscribe(sub)
 
 	seenIDs := map[string]int{}

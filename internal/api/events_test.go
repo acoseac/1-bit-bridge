@@ -241,7 +241,11 @@ func TestParseTopicsParam(t *testing.T) {
 		{"  ,  ", nil},
 	}
 	for _, tc := range cases {
-		got := parseTopicsParam(tc.in)
+		got, err := parseTopicsParam(tc.in)
+		if err != nil {
+			t.Errorf("parseTopicsParam(%q) unexpected error: %v", tc.in, err)
+			continue
+		}
 		if len(got) != len(tc.want) {
 			t.Errorf("parseTopicsParam(%q) = %v, want %v", tc.in, got, tc.want)
 			continue
