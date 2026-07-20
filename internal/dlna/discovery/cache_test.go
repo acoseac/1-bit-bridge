@@ -256,9 +256,26 @@ func TestMergeRendererInfo_CoversEveryField(t *testing.T) {
 	gv, fv := reflect.ValueOf(got), reflect.ValueOf(fresh)
 	for i := 0; i < gv.NumField(); i++ {
 		name := gv.Type().Field(i).Name
-		if !reflect.DeepEqual(gv.Field(i).Interface(), fv.Field(i).Interface()) {
+		gf, ff := gv.Field(i), fv.Field(i)
+		// Unexported fields are skipped deliberately, not overlooked: they ride
+		// along verbatim via `out := cached` and are no part of the merge
+		// contract. (.Interface() would also panic on them.)
+		if !gf.CanInterface() {
+			continue
+		}
+		// time.Time must compare with Equal, not DeepEqual — DeepEqual inspects
+		// the monotonic reading and the location pointer, so two values naming
+		// the same instant can compare unequal.
+		if gt, ok := gf.Interface().(time.Time); ok {
+			if !gt.Equal(ff.Interface().(time.Time)) {
+				t.Errorf("field %s was not merged: got %v, want %v — a non-zero fresh value must win; add a merge branch for it in mergeRendererInfo",
+					name, gt, ff.Interface())
+			}
+			continue
+		}
+		if !reflect.DeepEqual(gf.Interface(), ff.Interface()) {
 			t.Errorf("field %s was not merged: got %v, want %v — a non-empty fresh value must win; add a merge branch for it in mergeRendererInfo",
-				name, gv.Field(i).Interface(), fv.Field(i).Interface())
+				name, gf.Interface(), ff.Interface())
 		}
 	}
 }
@@ -274,6 +291,12 @@ func fillDistinct(t *testing.T, ptr any, marker string) {
 	for i := 0; i < v.NumField(); i++ {
 		f := v.Field(i)
 		name := v.Type().Field(i).Name
+		// Skip unexported fields — reflect can't Set them (it would panic), and
+		// the completeness guard deliberately doesn't cover them: they're
+		// carried verbatim by `out := cached`, not merged.
+		if !f.CanSet() {
+			continue
+		}
 		switch {
 		case f.Type() == reflect.TypeOf(time.Time{}):
 			base := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
