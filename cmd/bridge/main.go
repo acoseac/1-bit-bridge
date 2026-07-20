@@ -1538,7 +1538,7 @@ func writeAutoInitConfig(cfgPath string) error {
 		return fmt.Errorf("create config dir: %w", err)
 	}
 	cfg := baseConfig([]string{autoInitDefaultRoot}, config.DefaultLibraryName, "data")
-	if err := cfg.Validate(); err != nil {
+	if err := cfg.NormalizeAndValidate(); err != nil {
 		return fmt.Errorf("validate seed config: %w", err)
 	}
 	if err := cfg.Save(cfgPath); err != nil {

@@ -1447,7 +1447,11 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("abs config path %q: %w", path, err)
 	}
 	cfg.resolvePaths(filepath.Dir(absPath))
-	if err := cfg.Validate(); err != nil {
+	// NormalizeAndValidate, not bare Validate: the canonicalisation
+	// (enrich base URLs, autocert domain, customEndpoints prune) is part
+	// of what "loaded config" means to every downstream consumer. `cfg` is
+	// local to this call, so the in-place rewrite is safe.
+	if err := cfg.NormalizeAndValidate(); err != nil {
 		return nil, err
 	}
 	return &cfg, nil
@@ -1652,8 +1656,6 @@ func resolvePath(baseDir, p string) string {
 	return filepath.Join(baseDir, p)
 }
 
-// Validate checks invariants the server relies on. Called automatically by
-// Load; exposed for tests and for callers that construct Config in memory.
 // normalizeBaseURL trims surrounding whitespace and any trailing slash from
 // an optional enrich override base URL, and validates that a non-empty value
 // is an absolute http(s) URL. Empty stays empty (the enrich client falls back
@@ -1687,6 +1689,91 @@ const (
 	maxIntervalHours   = 365 * 24        // one year, in hours
 )
 
+// Normalize rewrites the fields whose canonical on-disk form differs from
+// what an operator might reasonably type: the two enrich base URLs (trim
+// whitespace + trailing slash), the public-mode autocert domain (trim), and
+// customEndpoints (prune-and-warn to the entries that survive
+// ValidateCustomEndpoints). Idempotent — running it twice produces the same
+// Config as running it once.
+//
+// It returns an error only for the malformed-input cases normalizeBaseURL
+// rejects; every other rewrite is infallible. Validate re-checks those same
+// base URLs, so a caller that skips Normalize still gets the error.
+//
+// MUST only be called on a Config the caller OWNS — one freshly built by
+// Load, or a config.Clone of a published snapshot. NEVER call it on a
+// RuntimeConfig.Load() result: that pointer is shared with every concurrent
+// per-request reader, and mutating it in place is exactly the torn read the
+// atomic holder exists to prevent. The copy-on-write sequence is
+// clone → mutate → NormalizeAndValidate → Save → hooks → Store.
+func (c *Config) Normalize() error {
+	// Enrich upstream base URLs: trim whitespace + any trailing slash so a
+	// self-hosted mirror configured as "https://host/ws/2/" doesn't produce
+	// double-slash request paths ("...//release/...").
+	mbBase, err := normalizeBaseURL("enrich.musicbrainzBaseURL", c.Enrich.MusicBrainzBaseURL)
+	if err != nil {
+		return err
+	}
+	c.Enrich.MusicBrainzBaseURL = mbBase
+	caaBase, err := normalizeBaseURL("enrich.coverArtBaseURL", c.Enrich.CoverArtBaseURL)
+	if err != nil {
+		return err
+	}
+	c.Enrich.CoverArtBaseURL = caaBase
+
+	// autocert.domain is only consumed in public mode (tlsacme.New, the
+	// admin Origin allowlist, the SNI gate), and Validate only enforces it
+	// there — so the trim stays gated on IsPublic to keep this a pure
+	// extraction of the previous in-Validate behaviour. A typo'd
+	// deployment.mode reports non-public here and Validate surfaces the
+	// mode error separately, exactly as before.
+	if c.IsPublic() {
+		c.Autocert.Domain = strings.TrimSpace(c.Autocert.Domain)
+	}
+
+	// CustomEndpoints: prune-and-warn. Accept HTTPS URLs only. We
+	// silently drop malformed / non-HTTPS entries because cert SAN
+	// generation downstream treats every kept entry as authoritative — a
+	// typo in one entry shouldn't fail the whole `Save` and lock the
+	// operator out of the admin console. This never errors; it rewrites
+	// the slice with the kept entries only.
+	//
+	// Per-entry warnings used to be discarded silently (Qodo bot review on
+	// PR #92 — without observability, a bad entry just disappeared). We
+	// log each at `.warn` so the operator sees the breadcrumb in the
+	// bridge logs even though the patch / load doesn't fail.
+	kept, warns := ValidateCustomEndpoints(c.CustomEndpoints)
+	c.CustomEndpoints = kept
+	for _, w := range warns {
+		validateLogger.Warn("dropped invalid custom endpoint", "err", w)
+	}
+	return nil
+}
+
+// NormalizeAndValidate canonicalises c in place and then checks it. This is
+// the load-time sequence — `Load` and every caller that persists a mutated
+// config (admin settings PATCH, the UPnP-upstream admin writer, `bridge
+// init`, `bridge serve`) uses it so the saved YAML carries the canonical
+// form. Same ownership rule as Normalize: the receiver must be a config the
+// caller owns, never a published RuntimeConfig snapshot.
+func (c *Config) NormalizeAndValidate() error {
+	if err := c.Normalize(); err != nil {
+		return err
+	}
+	return c.Validate()
+}
+
+// Validate checks invariants the server relies on. Called automatically by
+// Load (via NormalizeAndValidate); exposed for tests and for callers that
+// construct Config in memory.
+//
+// Validate is a PURE PREDICATE and MUST stay one — it reads the receiver and
+// returns a verdict, never writing a field. Canonicalisation lives in
+// Normalize. This matters because `RuntimeConfig` publishes an immutable
+// snapshot that every request reads concurrently: the natural-looking
+// `rc.Load().Validate()` would, if Validate mutated, write straight into the
+// live snapshot and race every reader. Keeping the write side in a
+// separately-named method makes that mistake impossible to make by accident.
 func (c *Config) Validate() error {
 	// Surface deployment.mode typos at load time rather than letting
 	// them silently fall through to "loopback" (IsPublic-returns-false
@@ -1728,20 +1815,16 @@ func (c *Config) Validate() error {
 	if c.ScanIntervalSec < 1 || c.ScanIntervalSec > maxIntervalSeconds {
 		return fmt.Errorf("scanIntervalSec: must be between 1 and %d, got %d", maxIntervalSeconds, c.ScanIntervalSec)
 	}
-	// Enrich upstream base URLs: normalize (trim whitespace + trailing
-	// slash) and require an absolute http(s) URL — surfaces typos at load
-	// time instead of as silent runtime enrichment failures, and prevents
-	// double-slash request paths against a self-hosted mirror.
-	mbBase, err := normalizeBaseURL("enrich.musicbrainzBaseURL", c.Enrich.MusicBrainzBaseURL)
-	if err != nil {
+	// Enrich upstream base URLs: require an absolute http(s) URL —
+	// surfaces typos at load time instead of as silent runtime enrichment
+	// failures. The normalized value is DISCARDED here; rewriting the
+	// field is Normalize's job (Validate stays a pure predicate).
+	if _, err := normalizeBaseURL("enrich.musicbrainzBaseURL", c.Enrich.MusicBrainzBaseURL); err != nil {
 		return err
 	}
-	c.Enrich.MusicBrainzBaseURL = mbBase
-	caaBase, err := normalizeBaseURL("enrich.coverArtBaseURL", c.Enrich.CoverArtBaseURL)
-	if err != nil {
+	if _, err := normalizeBaseURL("enrich.coverArtBaseURL", c.Enrich.CoverArtBaseURL); err != nil {
 		return err
 	}
-	c.Enrich.CoverArtBaseURL = caaBase
 	// Artwork cache cap: a negative value is almost certainly a typo. Zero
 	// is the valid "unbounded" sentinel; positive is a byte cap. Surface a
 	// negative at load time rather than letting the sweeper silently treat
@@ -1840,12 +1923,12 @@ func (c *Config) Validate() error {
 		}
 		// Trim before the empty check so a whitespace-only
 		// value ("   ") fails fast with the same error message
-		// (CodeRabbit Minor review post-PR-#292). Persist the
-		// trimmed form back into the config so downstream
+		// (CodeRabbit Minor review post-PR-#292). Persisting the
+		// trimmed form back into the config — so downstream
 		// consumers (tlsacme.New, the admin Origin allowlist,
-		// the SNI gate) all see the canonical value.
-		c.Autocert.Domain = strings.TrimSpace(c.Autocert.Domain)
-		if c.Autocert.Domain == "" {
+		// the SNI gate) all see the canonical value — is
+		// Normalize's job; Validate only checks.
+		if strings.TrimSpace(c.Autocert.Domain) == "" {
 			return errors.New("autocert.domain: must be set in public mode (the publicly-routable hostname iOS clients dial)")
 		}
 		// Admin-TLS gate: either the bridge terminates TLS itself
@@ -1934,24 +2017,11 @@ func (c *Config) Validate() error {
 	// snapshots is making a disk-space choice we don't second-
 	// guess.
 
-	// CustomEndpoints: prune-and-warn. Accept HTTPS URLs only. We
-	// silently drop malformed / non-HTTPS entries because cert SAN
-	// generation downstream (PR feat/tls-broader-sans) treats every
-	// kept entry as authoritative — a typo in one entry shouldn't
-	// fail the whole `Save` and lock the operator out of the admin
-	// console. Validate() never errors on CustomEndpoints; it
-	// rewrites the slice in-place with the kept entries only.
-	//
-	// Per-entry warnings used to be discarded silently (Qodo bot
-	// review on PR #92 — without observability, a bad entry just
-	// disappeared). We now log each warning at `.warn` so the
-	// operator sees the breadcrumb in the bridge logs even though
-	// the patch / load doesn't fail.
-	kept, warns := ValidateCustomEndpoints(c.CustomEndpoints)
-	c.CustomEndpoints = kept
-	for _, w := range warns {
-		validateLogger.Warn("dropped invalid custom endpoint", "err", w)
-	}
+	// CustomEndpoints is deliberately NOT checked here. It is
+	// prune-and-warn, never fatal (ValidateCustomEndpoints returns
+	// `(kept, warnings)` — no error), so there is no verdict for a pure
+	// predicate to render. The prune + the per-entry `.warn` logging live
+	// in Normalize, which owns every rewrite.
 
 	// tailscale.mode: surface typos at config-load time rather than
 	// deep inside the lifecycle wiring. Without this gate a typo'd

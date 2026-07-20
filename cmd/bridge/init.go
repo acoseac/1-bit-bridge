@@ -328,7 +328,7 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			cfg.Autocert.Email = *publicEmail
 		}
 	}
-	if err := cfg.Validate(); err != nil {
+	if err := cfg.NormalizeAndValidate(); err != nil {
 		fmt.Fprintf(stderr, "validate: %v\n", err)
 		return 1
 	}

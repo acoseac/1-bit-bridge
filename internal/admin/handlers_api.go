@@ -1942,7 +1942,11 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		mdnsNowEnabled = v
 	}
 
-	if err := next.Validate(); err != nil {
+	// NormalizeAndValidate, not bare Validate: this path PERSISTS `next`,
+	// so it depends on the canonicalisation (customEndpoints prune, enrich
+	// base-URL trimming, autocert-domain trim) landing on the saved YAML.
+	// `next` is a fresh config.Clone owned by this handler.
+	if err := next.NormalizeAndValidate(); err != nil {
 		writeError(w, http.StatusBadRequest, "validate", err.Error())
 		return
 	}

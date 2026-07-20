@@ -81,9 +81,10 @@ func TestEnrichBaseURLs_EnvOverrides(t *testing.T) {
 	}
 }
 
-// TestEnrichBaseURLs_Normalized: Validate() trims a trailing slash (so
+// TestEnrichBaseURLs_Normalized: Normalize() trims a trailing slash (so
 // requests don't get a double slash) and surrounding whitespace, for both
-// the YAML and the env paths.
+// the YAML and the env paths. Load runs NormalizeAndValidate, so the
+// end-to-end contract asserted here is unchanged.
 func TestEnrichBaseURLs_Normalized(t *testing.T) {
 	cfgPath := writeEnrichTestConfig(t,
 		"enrich:\n"+
