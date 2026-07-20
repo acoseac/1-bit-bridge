@@ -489,7 +489,7 @@ func (c *SSDPDiscoveryClient) runTickLoop(ctx context.Context) {
 	defer c.wg.Done()
 	// Initial M-SEARCH + eviction pass.
 	c.sendMSearch()
-	c.cache.EvictStale(c.nowFunc(), c.cfg.RendererTTL)
+	c.evictStaleEntries()
 	ticker := time.NewTicker(c.cfg.MSearchInterval)
 	defer ticker.Stop()
 	for {
@@ -498,8 +498,48 @@ func (c *SSDPDiscoveryClient) runTickLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			c.sendMSearch()
-			c.cache.EvictStale(c.nowFunc(), c.cfg.RendererTTL)
+			c.evictStaleEntries()
 		}
+	}
+}
+
+// evictStaleEntries runs the periodic cache eviction pass AND prunes the
+// client-side bookkeeping that shadows it. Both tick sites call this so the
+// two can't drift apart — a cache entry that ages out must not leave its
+// recorded Location behind.
+func (c *SSDPDiscoveryClient) evictStaleEntries() {
+	c.cache.EvictStale(c.nowFunc(), c.cfg.RendererTTL)
+	c.pruneLocations()
+}
+
+// pruneLocations drops lastLocation entries for UDNs that are neither cached
+// nor mid-fetch. Without it the map retains one entry per distinct UDN ever
+// observed: ssdp:byebye is the only other removal path, and this client is
+// M-SEARCH-only in production (see the lifecycle docblock) so byebye is
+// rarely received. A buggy or spoofed LAN source announcing many distinct
+// UDNs would otherwise grow it without bound.
+//
+// The in-flight half of the predicate is load-bearing: the host-change path
+// Removes the cache entry and THEN fetches, so there's a legitimate window
+// where a UDN has no cache entry but its recorded Location must survive for
+// the fetch to compare against.
+//
+// Lock order is locMu → cache.mu (via Get). Safe: RendererCache never calls
+// back into the client, and handlePacket's cache.Get / previousLocation
+// calls are sequential, never nested — so the inverse order doesn't exist
+// anywhere. Holding locMu across the lookups is also what makes the decision
+// race-free: a concurrent fetch can neither record nor release mid-prune.
+func (c *SSDPDiscoveryClient) pruneLocations() {
+	c.locMu.Lock()
+	defer c.locMu.Unlock()
+	for udn := range c.lastLocation {
+		if _, busy := c.inFlight[udn]; busy {
+			continue
+		}
+		if _, cached := c.cache.Get(udn); cached {
+			continue
+		}
+		delete(c.lastLocation, udn)
 	}
 }
 

@@ -378,6 +378,71 @@ func TestHandlePacket_BurstDuringInFlightFetchDispatchesOnce(t *testing.T) {
 	}
 }
 
+func TestEvictStaleEntries_PrunesLastLocation(t *testing.T) {
+	// lastLocation must not accumulate one entry per distinct UDN ever seen:
+	// byebye is the only other removal path and this client is M-SEARCH-only
+	// in production, so a buggy/spoofed source announcing many UDNs would
+	// grow it without bound. The eviction sweep is the reaper — it keeps only
+	// what's still cached or mid-fetch.
+	c := newTestClient(t, &countingDispatcher{})
+	now := time.Date(2026, 5, 26, 12, 0, 0, 0, time.UTC) // newTestClient's fixed clock
+
+	// Live: a fully-populated entry.
+	c.recordLocation("uuid:live-full", "http://192.0.2.7:8080/desc.xml")
+	c.cache.Upsert(RendererInfo{
+		UDN:        "uuid:live-full",
+		ControlURL: "http://192.0.2.7:8080/avtransport/control",
+		LastSeenAt: now,
+	})
+	// Live: a stub (no ControlURL) — its Location is the ONLY host-change
+	// reference it has, so it must survive.
+	c.recordLocation("uuid:live-stub", "http://192.0.2.8:8080/desc.xml")
+	c.cache.Upsert(RendererInfo{UDN: "uuid:live-stub", LastSeenAt: now})
+	// Mid-fetch: removed from the cache by the host-change path, fetch still
+	// running. Nothing to find in the cache, but the Location must survive.
+	c.recordLocation("uuid:inflight", "http://192.0.2.9:8080/desc.xml")
+	if !c.claimFetch("uuid:inflight") {
+		t.Fatal("claimFetch should succeed on a fresh UDN")
+	}
+	t.Cleanup(func() { c.releaseFetch("uuid:inflight") })
+	// Stale: cached, but old enough that this sweep's EvictStale drops it —
+	// the Location must go in the same pass.
+	c.recordLocation("uuid:stale", "http://192.0.2.10:8080/desc.xml")
+	c.cache.Upsert(RendererInfo{
+		UDN:        "uuid:stale",
+		ControlURL: "http://192.0.2.10:8080/avtransport/control",
+		LastSeenAt: now.Add(-10 * time.Minute), // past RendererTTL (60s)
+	})
+	// Gone: no cache entry, no fetch — pure residue.
+	c.recordLocation("uuid:gone-1", "http://192.0.2.11:8080/desc.xml")
+	c.recordLocation("uuid:gone-2", "http://192.0.2.12:8080/desc.xml")
+
+	c.evictStaleEntries()
+
+	want := map[string]bool{"uuid:live-full": true, "uuid:live-stub": true, "uuid:inflight": true}
+	c.locMu.Lock()
+	got := make(map[string]bool, len(c.lastLocation))
+	for udn := range c.lastLocation {
+		got[udn] = true
+	}
+	c.locMu.Unlock()
+	for udn := range want {
+		if !got[udn] {
+			t.Errorf("lastLocation dropped %q; live + in-flight UDNs must be retained", udn)
+		}
+	}
+	for udn := range got {
+		if !want[udn] {
+			t.Errorf("lastLocation retained %q; it is neither cached nor in-flight", udn)
+		}
+	}
+	// The stale entry's cache row went in the same pass — the prune must run
+	// AFTER EvictStale, not before.
+	if _, ok := c.cache.Get("uuid:stale"); ok {
+		t.Error("precondition: the stale entry should have been evicted")
+	}
+}
+
 func TestHandlePacket_ByeByeForgetsRecordedLocation(t *testing.T) {
 	// ssdp:byebye drops the renderer, so its recorded Location goes too —
 	// the map tracks live devices only.
