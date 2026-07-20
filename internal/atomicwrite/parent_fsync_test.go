@@ -13,6 +13,15 @@ import (
 // barrier seam and restores the production implementation on cleanup.
 // Returns a pointer to the slice of paths the barrier was asked to
 // flush, in call order.
+//
+// **Callers MUST NOT call `t.Parallel()`.** `syncParentDir` is a
+// process-global seam (see its docblock): parallel tests installing
+// different stubs would clobber each other's expectations, and the
+// recorded-path slice would interleave calls from unrelated tests.
+// Guarding the assignment with a mutex would only quiet the race
+// detector while leaving that logical interference intact — serial
+// execution plus the `t.Cleanup` restore below is the actual contract,
+// and it's the convention every test seam in this repo follows.
 func stubSyncParentDir(t *testing.T, ret error) *[]string {
 	t.Helper()
 	var seen []string

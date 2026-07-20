@@ -89,6 +89,17 @@ func SetRenameFuncForTest(fn func(src, dst string) error) func(src, dst string) 
 // tests override it (with a `t.Cleanup` restore), same convention as
 // `renameFunc`.
 //
+// **A test that overrides this MUST NOT call `t.Parallel()`.** The seam
+// is process-global, so two parallel tests installing different stubs
+// clobber each other's expectations regardless of any synchronisation —
+// a mutex around the assignment would silence the race DETECTOR while
+// leaving the logical interference in place, which is worse than no
+// guard at all because it hides the bug. Serial tests with a
+// `t.Cleanup` restore are the contract, matching every other seam in
+// the tree (`renameFunc` here, `commandContext` in internal/tailscale,
+// `soxLookPath` / `soxProbeCommand` in internal/transcode,
+// `afterExtractHookForTests` in internal/manifest, `Pool.runner`).
+//
 // On Windows `fsutil.SyncParentDir` is a compile-time no-op — see its
 // docblock for why FlushFileBuffers can't service a directory handle.
 var syncParentDir = fsutil.SyncParentDir
