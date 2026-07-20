@@ -1000,9 +1000,11 @@ func TestValidateCustomEndpoints_AcceptsBoundaryHost(t *testing.T) {
 	}
 }
 
-// TestConfigValidatePrunesCustomEndpoints verifies that Validate()
-// rewrites the slice in-place — invalid entries are dropped without
-// failing the whole config load.
+// TestConfigValidatePrunesCustomEndpoints verifies that the prune rewrites
+// the slice in-place — invalid entries are dropped without failing the whole
+// config load. The rewrite moved from Validate to Normalize (Validate is a
+// pure predicate); NormalizeAndValidate is the load-time sequence that
+// preserves the original end-to-end behaviour.
 func TestConfigValidatePrunesCustomEndpoints(t *testing.T) {
 	libRoot := t.TempDir()
 	c := &Config{
@@ -1017,11 +1019,11 @@ func TestConfigValidatePrunesCustomEndpoints(t *testing.T) {
 			"garbage",
 		},
 	}
-	if err := c.Validate(); err != nil {
-		t.Fatalf("Validate should not fail on bad entries: %v", err)
+	if err := c.NormalizeAndValidate(); err != nil {
+		t.Fatalf("NormalizeAndValidate should not fail on bad entries: %v", err)
 	}
 	if len(c.CustomEndpoints) != 1 {
-		t.Errorf("post-Validate CustomEndpoints = %v, want only the valid entry", c.CustomEndpoints)
+		t.Errorf("post-Normalize CustomEndpoints = %v, want only the valid entry", c.CustomEndpoints)
 	}
 }
 
@@ -1335,5 +1337,156 @@ func TestResolvePathCleansAbsolute(t *testing.T) {
 	rel := filepath.Join("sub", "x")
 	if got, want := resolvePath("/base", rel), filepath.Join("/base", rel); got != want {
 		t.Errorf("resolvePath(rel) = %q, want %q", got, want)
+	}
+}
+
+// TestValidateDoesNotMutateReceiver pins the load-bearing half of the
+// Normalize/Validate split: Validate is a PURE PREDICATE.
+//
+// The fixture is deliberately un-canonical in all four places Validate used
+// to rewrite — padded enrich base URLs, a padded autocert domain, and a
+// customEndpoints list carrying an entry the prune drops — and public-mode
+// (the autocert trim only ever applied there). Validate must still return
+// nil and leave every field byte-identical; Normalize is what rewrites them.
+//
+// This matters because RuntimeConfig publishes an immutable snapshot read
+// concurrently by every request: a Validate that wrote would turn the
+// natural-looking `rc.Load().Validate()` into a torn read of the live
+// snapshot.
+func TestValidateDoesNotMutateReceiver(t *testing.T) {
+	cfg := &Config{
+		LibraryRoots:    []string{t.TempDir()},
+		ListenAddress:   ":7788",
+		AdminAddress:    "0.0.0.0:7789",
+		ScanIntervalSec: 3600,
+		LibraryName:     "test",
+		Deployment:      DeploymentConfig{Mode: "public", AdminTLSTerminatedByProxy: true},
+		Autocert:        AutocertConfig{Domain: "  bridge.example.com  "},
+		Enrich: EnrichConfig{
+			MusicBrainzBaseURL: "  https://atlas.example/ws/2/  ",
+			CoverArtBaseURL:    " https://atlas.example/ ",
+		},
+		CustomEndpoints: []string{
+			"https://valid.example.com",
+			"http://wrong-scheme.example.com",
+		},
+	}
+	before := Clone(cfg)
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate on an un-canonical but otherwise valid config: %v", err)
+	}
+	if diff := diffConfigFields(reflect.ValueOf(before).Elem(), reflect.ValueOf(cfg).Elem(), "Config"); len(diff) > 0 {
+		t.Errorf("Validate mutated its receiver (it must be a pure predicate): %v", diff)
+	}
+
+	// Validate is idempotent-by-purity: a second call must also be a no-op.
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("second Validate: %v", err)
+	}
+	if diff := diffConfigFields(reflect.ValueOf(before).Elem(), reflect.ValueOf(cfg).Elem(), "Config"); len(diff) > 0 {
+		t.Errorf("second Validate mutated its receiver: %v", diff)
+	}
+
+	// Normalize owns every one of those rewrites.
+	if err := cfg.Normalize(); err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	if got, want := cfg.Enrich.MusicBrainzBaseURL, "https://atlas.example/ws/2"; got != want {
+		t.Errorf("Normalize MusicBrainzBaseURL = %q, want %q", got, want)
+	}
+	if got, want := cfg.Enrich.CoverArtBaseURL, "https://atlas.example"; got != want {
+		t.Errorf("Normalize CoverArtBaseURL = %q, want %q", got, want)
+	}
+	if got, want := cfg.Autocert.Domain, "bridge.example.com"; got != want {
+		t.Errorf("Normalize Autocert.Domain = %q, want %q", got, want)
+	}
+	if got, want := cfg.CustomEndpoints, []string{"https://valid.example.com"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("Normalize CustomEndpoints = %v, want %v", got, want)
+	}
+
+	// Normalize is idempotent — a second pass over an already-canonical
+	// config changes nothing.
+	normalized := Clone(cfg)
+	if err := cfg.Normalize(); err != nil {
+		t.Fatalf("second Normalize: %v", err)
+	}
+	if diff := diffConfigFields(reflect.ValueOf(normalized).Elem(), reflect.ValueOf(cfg).Elem(), "Config"); len(diff) > 0 {
+		t.Errorf("Normalize is not idempotent: %v", diff)
+	}
+}
+
+// diffConfigFields walks two Config values in lockstep and returns the
+// dotted path of every leaf whose value differs. Reports paths rather than a
+// bare reflect.DeepEqual verdict so a failure names the field that moved.
+// Unexported fields are skipped (Config carries none today; the guard keeps
+// .Interface() from panicking if one is ever added).
+func diffConfigFields(a, b reflect.Value, path string) []string {
+	if !a.IsValid() || !b.IsValid() {
+		return nil
+	}
+	var out []string
+	switch a.Kind() {
+	case reflect.Struct:
+		for i := 0; i < a.NumField(); i++ {
+			f := a.Type().Field(i)
+			if !f.IsExported() {
+				continue
+			}
+			out = append(out, diffConfigFields(a.Field(i), b.Field(i), path+"."+f.Name)...)
+		}
+	case reflect.Pointer, reflect.Interface:
+		if a.IsNil() != b.IsNil() {
+			return []string{fmt.Sprintf("%s (nil mismatch: %v vs %v)", path, a.IsNil(), b.IsNil())}
+		}
+		if !a.IsNil() {
+			out = append(out, diffConfigFields(a.Elem(), b.Elem(), path)...)
+		}
+	case reflect.Slice, reflect.Array:
+		if a.Len() != b.Len() {
+			return []string{fmt.Sprintf("%s (len %d → %d)", path, a.Len(), b.Len())}
+		}
+		for i := 0; i < a.Len(); i++ {
+			out = append(out, diffConfigFields(a.Index(i), b.Index(i), fmt.Sprintf("%s[%d]", path, i))...)
+		}
+	default:
+		if !reflect.DeepEqual(a.Interface(), b.Interface()) {
+			out = append(out, fmt.Sprintf("%s (%v → %v)", path, a.Interface(), b.Interface()))
+		}
+	}
+	return out
+}
+
+// TestNormalizeIsAtomicOnError pins the all-or-nothing contract: when a
+// rewrite fails, Normalize must leave the receiver completely untouched.
+//
+// The regression it guards is subtle — the second base URL is the malformed
+// one, so a naive assign-as-you-go implementation would have already written
+// the canonicalised MusicBrainz value before failing, handing a caller that
+// logs the error and carries on a half-normalized config.
+func TestNormalizeIsAtomicOnError(t *testing.T) {
+	cfg := &Config{
+		LibraryRoots:    []string{t.TempDir()},
+		ListenAddress:   ":7788",
+		AdminAddress:    "127.0.0.1:7789",
+		ScanIntervalSec: 3600,
+		LibraryName:     "test",
+		Enrich: EnrichConfig{
+			MusicBrainzBaseURL: "  https://atlas.example/ws/2/  ", // valid, would be rewritten
+			CoverArtBaseURL:    "not-a-url",                       // rejected
+		},
+		CustomEndpoints: []string{"https://valid.example.com", "garbage"},
+	}
+	before := Clone(cfg)
+
+	err := cfg.Normalize()
+	if err == nil {
+		t.Fatal("Normalize should reject a malformed coverArtBaseURL")
+	}
+	if !strings.Contains(err.Error(), "enrich.coverArtBaseURL") {
+		t.Errorf("error %q should name the offending field", err.Error())
+	}
+	if diff := diffConfigFields(reflect.ValueOf(before).Elem(), reflect.ValueOf(cfg).Elem(), "Config"); len(diff) > 0 {
+		t.Errorf("Normalize must be all-or-nothing; it partially mutated the receiver: %v", diff)
 	}
 }

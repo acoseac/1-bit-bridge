@@ -488,7 +488,7 @@ func (a *upnpAdminAdapter) UpdateServer(_ context.Context, udn string, req admin
 // Caller MUST hold `a.crudMu` (the CRUD-write serializer) before
 // invoking this helper. Helper does NOT re-acquire it.
 func (a *upnpAdminAdapter) persistCfg(next *config.Config) error {
-	if err := next.Validate(); err != nil {
+	if err := next.NormalizeAndValidate(); err != nil {
 		return fmt.Errorf("%w: %v", admin.ErrUPnPValidation, err)
 	}
 	if a.cfgPath == "" {
