@@ -8,15 +8,21 @@
 $ErrorActionPreference = 'Stop'
 $ProgressPreference    = 'SilentlyContinue'   # mute git/go progress noise
 
-$root      = 'C:\1-bit-bridge'
+# Host-specific coordinates. Override per machine via environment variables so
+# no real WAN address, library path, or LAN IP is committed to a public repo —
+# this file is world-readable on GitHub. BRIDGE_WAN_URL is the router
+# port-forward endpoint baked into `customEndpoints:`; leave it unset to skip
+# the WAN endpoint entirely (LAN + magic-DNS still work).
+$root      = if ($env:BRIDGE_ROOT)      { $env:BRIDGE_ROOT }      else { 'C:\1-bit-bridge' }
 $src       = Join-Path $root 'src'
 $binDir    = Join-Path $root 'bin'
 $dataDir   = Join-Path $root 'data'
 $cfgFile   = Join-Path $dataDir 'bridge.yaml'
-$libRoot   = 'F:\media\music'
-$variants  = 'E:\temp'
-$wanURL    = 'https://145.224.86.89:7788'
-$bridgeNm  = 'home-pc'
+$libRoot   = if ($env:BRIDGE_LIBRARY)   { $env:BRIDGE_LIBRARY }   else { 'F:\media\music' }
+$variants  = if ($env:BRIDGE_VARIANTS)  { $env:BRIDGE_VARIANTS }  else { 'E:\temp' }
+$wanURL    = $env:BRIDGE_WAN_URL        # e.g. 'https://203.0.113.1:7788'; unset = no WAN endpoint
+$lanURL    = if ($env:BRIDGE_LAN_URL)   { $env:BRIDGE_LAN_URL }   else { '' }
+$bridgeNm  = if ($env:BRIDGE_NAME)      { $env:BRIDGE_NAME }      else { 'home-pc' }
 
 Write-Host "=== 1/6 Workspace ==="
 New-Item -ItemType Directory -Force -Path $root, $binDir | Out-Null
@@ -67,13 +73,15 @@ Write-Host "`n=== 4/6 Inject customEndpoints + upscale.variantsDir ==="
 $yaml = Get-Content $cfgFile -Raw
 
 # Add customEndpoints at top level (idempotent -- only append if missing).
-if ($yaml -notmatch '(?m)^customEndpoints:') {
+if (-not $wanURL) {
+  Write-Host "  BRIDGE_WAN_URL unset -- skipping customEndpoints (LAN + magic-DNS still advertised)"
+} elseif ($yaml -notmatch '(?m)^customEndpoints:') {
   $yaml = $yaml.TrimEnd() + @"
 
 
-# Operator-added: WAN endpoint reachable via the home router's
-# port-forward of 7788 -> this host. Magic-DNS *.ts.net is auto-
-# advertised separately when Tailscale is running.
+# Operator-added: WAN endpoint reachable via the router's port-forward
+# of 7788 -> this host. Magic-DNS *.ts.net is auto-advertised separately
+# when Tailscale is running.
 customEndpoints:
   - $wanURL
 "@
@@ -114,8 +122,8 @@ Write-Host "Run with:"
 Write-Host "  $exe serve -config $cfgFile"
 Write-Host ""
 Write-Host "Once running, expected /v1/health.endpoints:"
-Write-Host "  https://192.168.0.208:7788  (LAN)"
-Write-Host "  https://home-pc.<tailnet>.ts.net:7788  (magic DNS -- auto)"
-Write-Host "  $wanURL  (WAN -- custom)"
+if ($lanURL) { Write-Host "  $lanURL  (LAN)" } else { Write-Host "  https://<this-host-LAN-IP>:7788  (LAN)" }
+Write-Host "  https://$bridgeNm.<tailnet>.ts.net:7788  (magic DNS -- auto)"
+if ($wanURL) { Write-Host "  $wanURL  (WAN -- custom)" }
 
 Write-Host "`nDone. config: $cfgFile  | binary: $exe"

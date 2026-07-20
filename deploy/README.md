@@ -7,16 +7,20 @@ place. The cert-re-mint bug fixed 2026-06-01 existed precisely because the
 only copy lived on the host and silently drifted.
 
 Full host coordinates, layout, firewall posture, and gotchas live in
-[`../docs/deployment-runbook.md`](../docs/deployment-runbook.md). This README
+[`../ops/deployment-runbook.md`](../ops/deployment-runbook.md). This README
 is just the script index + sync contract.
 
 ## windows/ — home-pc (Windows, scheduled-task runtime)
 
 Run from the operator's workstation. Sync first, then invoke over SSH via
-`pwsh ... -Command -` (stdin) or `-File` after scp'ing:
+`pwsh ... -Command -` (stdin) or `-File` after scp'ing. Set `HOMEPC` to the
+target's `user@host` once — this repo is public, so no real host coordinates are
+committed here (the operator's live values live in `ops/deployment-runbook.md`,
+which is not published):
 
 ```sh
-scp deploy/windows/*.ps1 arsenie@192.168.0.208:C:/Users/arsenie/Desktop/
+HOMEPC=user@192.0.2.10        # your Windows host
+scp deploy/windows/*.ps1 "$HOMEPC:C:/Users/<user>/Desktop/"
 ```
 
 | Script | When | Cert? |
@@ -30,8 +34,8 @@ scp deploy/windows/*.ps1 arsenie@192.168.0.208:C:/Users/arsenie/Desktop/
 Routine update (cert-safe), from the workstation:
 
 ```sh
-ssh arsenie@192.168.0.208 'pwsh -NoProfile -Command -' < deploy/windows/update-bridge-windows.ps1
-curl -sk https://192.168.0.208:7788/v1/health | jq .serverVersion
+ssh "$HOMEPC" 'pwsh -NoProfile -Command -' < deploy/windows/update-bridge-windows.ps1
+curl -sk "https://${HOMEPC#*@}:7788/v1/health" | jq .serverVersion
 ```
 
 **Cert policy:** only `rotate-cert-windows.ps1` re-mints. `setup` skips `init`
@@ -53,7 +57,7 @@ via env if coordinates change.
 
 ## When to deploy
 
-Per [`../docs/deployment-runbook.md`](../docs/deployment-runbook.md): after any
+Per [`../ops/deployment-runbook.md`](../ops/deployment-runbook.md): after any
 merged **runtime-behavior** PR, update the local fixture, then home-pc, then
 bridge.ars.md. Skip for docs-only / test-only merges (no shipped binary
 changes behavior).
