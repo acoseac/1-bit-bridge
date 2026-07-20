@@ -1700,6 +1700,13 @@ const (
 // rejects; every other rewrite is infallible. Validate re-checks those same
 // base URLs, so a caller that skips Normalize still gets the error.
 //
+// ALL-OR-NOTHING: on error the receiver is left completely UNMODIFIED. The
+// fallible step is ordered first and computes both of its values before
+// assigning either, so a caller that logs the error and carries on never
+// holds a half-normalized config (e.g. a canonicalised MusicBrainz URL
+// alongside a raw CoverArt one). A future rewrite that can fail must be
+// hoisted above the first assignment to preserve this.
+//
 // MUST only be called on a Config the caller OWNS — one freshly built by
 // Load, or a config.Clone of a published snapshot. NEVER call it on a
 // RuntimeConfig.Load() result: that pointer is shared with every concurrent
@@ -1710,16 +1717,26 @@ func (c *Config) Normalize() error {
 	// Enrich upstream base URLs: trim whitespace + any trailing slash so a
 	// self-hosted mirror configured as "https://host/ws/2/" doesn't produce
 	// double-slash request paths ("...//release/...").
+	//
+	// BOTH are computed before EITHER is assigned. This is the only fallible
+	// step in Normalize, and it is deliberately first, so a rejected value
+	// leaves the receiver completely untouched (see the all-or-nothing note
+	// on the doc comment) — a half-normalized config would be the worst
+	// outcome for a caller that logs the error and carries on.
 	mbBase, err := normalizeBaseURL("enrich.musicbrainzBaseURL", c.Enrich.MusicBrainzBaseURL)
 	if err != nil {
 		return err
 	}
-	c.Enrich.MusicBrainzBaseURL = mbBase
 	caaBase, err := normalizeBaseURL("enrich.coverArtBaseURL", c.Enrich.CoverArtBaseURL)
 	if err != nil {
 		return err
 	}
+	c.Enrich.MusicBrainzBaseURL = mbBase
 	c.Enrich.CoverArtBaseURL = caaBase
+
+	// Everything below is INFALLIBLE. Keep it that way: if a future rewrite
+	// here can fail, hoist its computation above the first assignment so the
+	// all-or-nothing contract survives.
 
 	// autocert.domain is only consumed in public mode (tlsacme.New, the
 	// admin Origin allowlist, the SNI gate), and Validate only enforces it

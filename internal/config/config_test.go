@@ -1456,3 +1456,37 @@ func diffConfigFields(a, b reflect.Value, path string) []string {
 	}
 	return out
 }
+
+// TestNormalizeIsAtomicOnError pins the all-or-nothing contract: when a
+// rewrite fails, Normalize must leave the receiver completely untouched.
+//
+// The regression it guards is subtle — the second base URL is the malformed
+// one, so a naive assign-as-you-go implementation would have already written
+// the canonicalised MusicBrainz value before failing, handing a caller that
+// logs the error and carries on a half-normalized config.
+func TestNormalizeIsAtomicOnError(t *testing.T) {
+	cfg := &Config{
+		LibraryRoots:    []string{t.TempDir()},
+		ListenAddress:   ":7788",
+		AdminAddress:    "127.0.0.1:7789",
+		ScanIntervalSec: 3600,
+		LibraryName:     "test",
+		Enrich: EnrichConfig{
+			MusicBrainzBaseURL: "  https://atlas.example/ws/2/  ", // valid, would be rewritten
+			CoverArtBaseURL:    "not-a-url",                       // rejected
+		},
+		CustomEndpoints: []string{"https://valid.example.com", "garbage"},
+	}
+	before := Clone(cfg)
+
+	err := cfg.Normalize()
+	if err == nil {
+		t.Fatal("Normalize should reject a malformed coverArtBaseURL")
+	}
+	if !strings.Contains(err.Error(), "enrich.coverArtBaseURL") {
+		t.Errorf("error %q should name the offending field", err.Error())
+	}
+	if diff := diffConfigFields(reflect.ValueOf(before).Elem(), reflect.ValueOf(cfg).Elem(), "Config"); len(diff) > 0 {
+		t.Errorf("Normalize must be all-or-nothing; it partially mutated the receiver: %v", diff)
+	}
+}
