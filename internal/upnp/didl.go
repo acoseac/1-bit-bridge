@@ -58,7 +58,15 @@ func verifyXMLDepth(r io.Reader, maxDepth int) error {
 				return ErrXMLTooDeep
 			}
 		case xml.EndElement:
-			depth--
+			// Clamp at zero: an unmatched EndElement must never drive the
+			// counter negative, or a following deeply-nested structure would
+			// need maxDepth + |negative| opens to trip the guard — a bypass.
+			// Strict-mode Token() already errors on a mismatched end tag (so
+			// this isn't reachable today), but the clamp costs nothing and
+			// keeps the bound sound if Strict is ever relaxed.
+			if depth > 0 {
+				depth--
+			}
 		}
 	}
 }

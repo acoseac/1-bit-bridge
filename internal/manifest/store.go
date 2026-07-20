@@ -4834,12 +4834,17 @@ func (s *Store) RollupByPrefix(ctx context.Context, prefix string) (FolderRollup
 	// branch above; Gemini on PR #340) instead of scanning the table
 	// twice. Numerically identical to the prior `LIKE 'prefix/%'` form
 	// for folder-derived prefixes (which never differ only by case).
+	// Strip a trailing slash before binding, mirroring CountTracksByPrefix: the
+	// range appends its own '/', so a caller passing "Album/" would otherwise
+	// build `path >= 'Album//'` and match NOTHING — a silently-empty rollup
+	// rather than an error (Gemini HIGH, post-merge review of #532).
+	base := strings.TrimSuffix(prefix, "/")
 	var out FolderRollup
 	if err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*), COALESCE(SUM(size), 0)
 		  FROM tracks
 		 WHERE path >= ? || '/' AND path < ? || '0'
-	`, prefix, prefix).Scan(&out.TrackCount, &out.TotalSizeBytes); err != nil {
+	`, base, base).Scan(&out.TrackCount, &out.TotalSizeBytes); err != nil {
 		return FolderRollup{}, fmt.Errorf("rollup tracks %q: %w", prefix, err)
 	}
 	if err := s.db.QueryRowContext(ctx, `
@@ -4850,7 +4855,7 @@ func (s *Store) RollupByPrefix(ctx context.Context, prefix string) (FolderRollup
 		  COALESCE(SUM(CASE WHEN variant_id LIKE 'optimized-%' THEN size_bytes END), 0)
 		  FROM track_variants
 		 WHERE source_path >= ? || '/' AND source_path < ? || '0'
-	`, prefix, prefix).Scan(
+	`, base, base).Scan(
 		&out.UpscaledTrackCount, &out.UpscaledSizeBytes,
 		&out.OptimizedTrackCount, &out.OptimizedSizeBytes,
 	); err != nil {

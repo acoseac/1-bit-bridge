@@ -267,9 +267,14 @@ func TestLoginRateLimitCountsFailures(t *testing.T) {
 			t.Fatalf("failed login %d: status %d, want 401", i+1, resp.StatusCode)
 		}
 	}
-	// httptest binds loopback, so the handler's ExtractClientIP resolves to
-	// 127.0.0.1. After MaxAttempts reservations the bucket is at the ceiling.
-	if limiter.Allow("127.0.0.1", "admin") {
+	// Derive the bucket key from the server's own loopback address rather than
+	// hardcoding 127.0.0.1: httptest may bind [::1] on IPv6-preferring hosts,
+	// where ExtractClientIP resolves to "::1" and a hardcoded v4 key would
+	// assert against an empty bucket and fail spuriously (Gemini, post-merge
+	// review of #533). Hostname() also strips the IPv6 brackets.
+	clientIP := mustParseURL(t, ts.URL).Hostname()
+	// After MaxAttempts reservations the bucket is at the ceiling.
+	if limiter.Allow(clientIP, "admin") {
 		t.Error("after MaxAttempts failed logins the (IP, user) is NOT locked out — the handler stopped counting failures (B43 wiring regressed)")
 	}
 }

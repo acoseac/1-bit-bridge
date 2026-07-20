@@ -1163,7 +1163,11 @@ func TestValidateScanIntervalUpperBound(t *testing.T) {
 		{"typical", 3600, false},
 		{"one-year-ceiling-accepted", maxIntervalSeconds, false},
 		{"just-over-ceiling-rejected", maxIntervalSeconds + 1, true},
-		{"overflow-huge-rejected", 1 << 40, true}, // *time.Second overflows int64 → negative → NewTicker panic
+		// math.MaxInt via ^uint(0)>>1 rather than a `1 << 40` literal: the
+		// latter doesn't fit an int on 32-bit builds and fails to COMPILE
+		// there (Gemini HIGH, post-merge review of #529). Either way it's far
+		// past the one-year ceiling, so the rejection assertion holds on both.
+		{"overflow-huge-rejected", int(^uint(0) >> 1), true}, // *time.Second would overflow int64 → negative → NewTicker panic
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1205,7 +1209,11 @@ func TestValidatePort(t *testing.T) {
 		port    string
 		wantErr bool
 	}{
-		{"", false},  // empty: the caller's own shape check owns it
+		// Empty is REJECTED: SplitHostPort already errors on a portless host
+		// ("missing port in address"), so an empty port here can only come from
+		// the explicit "host:" / ":" typo form, where the bind would fail or
+		// land on an arbitrary ephemeral port (Gemini, post-merge review #529).
+		{"", true},
 		{"0", false}, // 0 = OS-assigned ephemeral port (documented mode)
 		{"1", false},
 		{"7788", false},
