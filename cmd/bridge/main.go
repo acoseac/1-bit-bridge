@@ -1742,15 +1742,25 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// close is the SQLite-corruption class (B8, via the watcher's fired
 	// AfterFunc dispatches) or "database is closed" shutdown noise + a
 	// truncated final batch (B27). The deferred scanCancel()/adminCancel()
-	// below run FIRST in LIFO order, so by the time joinBgWriters fires the
-	// writers are already exiting; it just waits for them, grace-bounded so a
-	// wedged writer can't block process exit. Assigned once adminErr + the
-	// writers are wired (below); nil until then, so the defer no-ops.
+	// below run FIRST in LIFO order, so by the time this fires the writers are
+	// already exiting; it just waits for them, grace-bounded so a wedged
+	// writer can't block process exit.
+	//
+	// The wait is INLINE here, NOT routed through a function variable assigned
+	// later in runServe: any early return between the first tracked goroutine
+	// and that assignment would leave the variable nil, make this defer a
+	// no-op, and let a live writer race Store.Close() — reintroducing the exact
+	// corruption class this guards (Gemini HIGH, post-merge review of #534).
+	// `WaitGroup.Wait` on a zero counter returns immediately, so exiting before
+	// any writer starts costs nothing.
 	var bgWriters sync.WaitGroup
-	var joinBgWriters func()
 	defer func() {
-		if joinBgWriters != nil {
-			joinBgWriters()
+		done := make(chan struct{})
+		go func() { bgWriters.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(shutdownGrace):
+			fmt.Fprintln(stderr, "shutdown: background manifest writers did not drain within grace")
 		}
 	}()
 	// Single source of truth for the artwork cache directory. The
@@ -2306,14 +2316,27 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	if analysisActive {
 		analysisPool := analyze.NewPool(manifestStore, cfg.Analysis.EffectiveWorkers(), cfg.Analysis.EffectiveQueueCap())
 		defer analysisPool.Stop()
-		go runAnalysisSweeper(scanCtx, manifestStore, apiSrv.Resolver(),
-			analyze.WaveformDirFor(cfg.DataDir), analysisPool, cfg.ScanInterval())
+		// Joined via bgWriters: the sweeper queries the store and enqueues
+		// analysis jobs whose completions write it back, so it must drain
+		// before Store.Close() like the other manifest writers.
+		bgWriters.Add(1)
+		go func() {
+			defer bgWriters.Done()
+			runAnalysisSweeper(scanCtx, manifestStore, apiSrv.Resolver(),
+				analyze.WaveformDirFor(cfg.DataDir), analysisPool, cfg.ScanInterval())
+		}()
 	}
 
 	// Smart-playlist regenerator (shares scanCtx). analysisActive (the
 	// sox-resolved flag) gates the harmonic/discovery families.
 	if smartPlaylistsActive {
-		go runSmartPlaylistRegenerator(scanCtx, manifestStore, analysisActive, cfg.SmartPlaylists.EffectiveRegenerateInterval())
+		// Joined via bgWriters — the regenerator persists generated playlists
+		// to the store, so it must drain before Store.Close().
+		bgWriters.Add(1)
+		go func() {
+			defer bgWriters.Done()
+			runSmartPlaylistRegenerator(scanCtx, manifestStore, analysisActive, cfg.SmartPlaylists.EffectiveRegenerateInterval())
+		}()
 	}
 
 	var upscalePool *transcode.Pool
@@ -3019,23 +3042,6 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		defer bgWriters.Done()
 		adminErr <- adminSrv.Serve(adminCtx)
 	}()
-	// Now that every manifest-writing background goroutine (+ the admin
-	// server) is wrapped in bgWriters, wire the shutdown join. It runs from
-	// the defer registered right after `defer manifestStore.Close()` — LIFO
-	// puts it AFTER the deferred scanCancel()/adminCancel() (so the writers
-	// are already exiting) and BEFORE Store.Close(). Grace-bounded: a wedged
-	// writer degrades to the pre-fix behaviour (close after the grace) plus a
-	// log line, never a hung process exit.
-	joinBgWriters = func() {
-		done := make(chan struct{})
-		go func() { bgWriters.Wait(); close(done) }()
-		select {
-		case <-done:
-		case <-time.After(shutdownGrace):
-			fmt.Fprintln(stderr, "shutdown: background manifest writers did not drain within grace")
-		}
-	}
-
 	// Listen first so we can report the actual bound address (useful when
 	// cfg.ListenAddress is ":0" — which test code uses).
 	lis, err := net.Listen("tcp", cfg.ListenAddress)

@@ -236,6 +236,16 @@ func (i *Ingester) reapOrphanServers(ctx context.Context, out *IngestResult) {
 func (i *Ingester) ingestOne(ctx context.Context, srv config.UPnPUpstreamServerConfig,
 	forceWalk bool, backstop time.Duration, maxItems int, now func() time.Time, res *ServerIngestResult,
 ) {
+	// Stamp ServerUDN FIRST, before any early return. StableServerKey is a pure
+	// function of the configured server, so it's known at entry — and the admin
+	// adapter keys its per-server telemetry map on res.ServerUDN, so ANY path
+	// that returns with it empty collides under the "" key. That includes the
+	// resolve-failure and not-discoverable returns just below, i.e. exactly the
+	// offline/unreachable servers whose telemetry an operator most wants to see
+	// (Gemini, post-merge review of #527).
+	udn := StableServerKey(srv)
+	res.ServerUDN = udn
+
 	controlURL, err := i.resolver.ResolveControlURL(ctx, srv)
 	if err != nil {
 		res.Err = fmt.Errorf("resolve controlURL: %w", err)
@@ -262,14 +272,10 @@ func (i *Ingester) ingestOne(ctx context.Context, srv config.UPnPUpstreamServerC
 	// the others' walks. The walk/reap below already use StableServerKey
 	// (lines that pass `udn`); this aligns the skip-gate with them. Same
 	// class as PR #353's admin-gate fix; this was the residual ingest miss.
-	udn := StableServerKey(srv)
-	// Stamp ServerUDN BEFORE the skip early-return. The admin adapter keys its
-	// per-server telemetry map on res.ServerUDN, and a SKIPPED result is the
-	// steady state — the SystemUpdateID gate exists to skip most ticks. Leaving
-	// it "" on the skip path collided every skipped server under the empty key,
-	// so a correctly-functioning (=skipped) upstream showed NO recent-walk
-	// telemetry on the admin "Sources" dashboard.
-	res.ServerUDN = udn
+	// udn / res.ServerUDN are stamped at function entry (see the top of
+	// ingestOne) so EVERY early return — including the skip path below, which
+	// is the steady state since the SystemUpdateID gate skips most ticks —
+	// carries the key the admin telemetry map is keyed on.
 	stored, _ := i.idStore.Get(udn)
 	lastWalkedAt, _ := i.idStore.LastWalkedAt(udn)
 	if decideSkipWalk(currentID, stored, lastWalkedAt, now(), backstop, forceWalk) {

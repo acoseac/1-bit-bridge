@@ -281,19 +281,28 @@ type idleTimeoutReader struct {
 }
 
 func newIdleTimeoutReader(rc io.ReadCloser, idle time.Duration) *idleTimeoutReader {
-	r := &idleTimeoutReader{rc: rc, idle: idle}
-	// AfterFunc starts armed; Stop it immediately so the first Read is
-	// what arms the countdown (the standard "stopped AfterFunc" idiom).
-	r.timer = time.AfterFunc(idle, func() {
-		r.timedOut.Store(true)
-		_ = rc.Close() // unblock a Read parked on the upstream socket
-	})
-	r.timer.Stop()
-	return r
+	// The timer is created LAZILY, on the first Read (below). Constructing it
+	// armed here and Stop()ing it immediately — the usual "stopped AfterFunc"
+	// idiom — leaves a window, however narrow, in which it can fire before the
+	// Stop lands and close the body before a single byte is read (Gemini,
+	// post-merge review of #528). Creating it at the moment we actually want it
+	// armed removes the window instead of racing it.
+	//
+	// timer is touched only by Read and Close, which run on the same goroutine
+	// (io.Copy, then the deferred Close) — no lock needed. The AfterFunc
+	// callback touches only timedOut (atomic) + rc.Close().
+	return &idleTimeoutReader{rc: rc, idle: idle}
 }
 
 func (r *idleTimeoutReader) Read(p []byte) (int, error) {
-	r.timer.Reset(r.idle)
+	if r.timer == nil {
+		r.timer = time.AfterFunc(r.idle, func() {
+			r.timedOut.Store(true)
+			_ = r.rc.Close() // unblock a Read parked on the upstream socket
+		})
+	} else {
+		r.timer.Reset(r.idle)
+	}
 	n, err := r.rc.Read(p)
 	r.timer.Stop()
 	if r.timedOut.Load() {
@@ -303,7 +312,10 @@ func (r *idleTimeoutReader) Read(p []byte) (int, error) {
 }
 
 func (r *idleTimeoutReader) Close() error {
-	r.timer.Stop()
+	// nil when Close runs before any Read (the lazy construction above).
+	if r.timer != nil {
+		r.timer.Stop()
+	}
 	return r.rc.Close()
 }
 
