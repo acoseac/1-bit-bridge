@@ -2464,11 +2464,6 @@ function applyAnalysisStats(r) {
   setText("analysis-storage-path", r.storagePath ?? "—");
 }
 
-function setText(id, value) {
-  const el = document.getElementById(id);
-  if (el) el.textContent = String(value);
-}
-
 function formatBytes(n) {
   if (!n) return "0 B";
   const kb = 1024, mb = kb * 1024, gb = mb * 1024;
@@ -5492,15 +5487,6 @@ function pathLabel(path) {
   return path;
 }
 
-function escapeHTML(s) {
-  return String(s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
 function humanBytes(n) {
   if (n == null || isNaN(n)) return "—";
   const abs = Math.abs(n);
@@ -6623,9 +6609,28 @@ function initTheme() {
   });
 }
 
+// Public-mode sign-out (M10). The button renders only when IsPublic
+// (layout.html), so this is a no-op on loopback installs. POST /logout
+// invalidates the session server-side and clears the cookie; the
+// redirect to /login happens regardless of the POST outcome — an
+// operator who wants out lands on the login page even if the request
+// failed (the session still dies at its server-side cap).
+function initLogout() {
+  const btn = document.getElementById("logout-btn");
+  if (!btn) return;
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    try {
+      await API.post("/logout");
+    } catch (e) { /* fall through to the redirect either way */ }
+    window.location.href = "/login";
+  });
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   initMobileNav();
   initTheme();
+  initLogout();
   const active = document.body.dataset.active;
   switch (active) {
     case "dashboard": initDashboard(); break;

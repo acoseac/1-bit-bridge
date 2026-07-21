@@ -1,6 +1,7 @@
 package adminauth
 
 import (
+	"net/netip"
 	"slices"
 	"sync"
 	"time"
@@ -17,6 +18,11 @@ import (
 // per-attempt cost (~250ms at cost 12) does the heavy lifting on
 // the verification side. Hostile networks see a hard ceiling on
 // throughput.
+//
+// IPv6 clients share ONE bucket per /64 prefix (see bucketKey): SLAAC
+// hands a host the whole /64, so keying on the full address would let
+// an attacker rotate interface IDs for unlimited fresh 5-attempt
+// buckets (2026-07-21 review M2).
 const (
 	RateLimitMaxAttempts = 5
 	RateLimitWindow      = 15 * time.Minute
@@ -61,6 +67,30 @@ type bucket struct {
 	attempts      int
 	firstAttempt  time.Time
 	lastAttemptAt time.Time
+}
+
+// bucketKey derives the map key for a (clientIP, username) pair.
+// IPv6 addresses are collapsed to their /64 prefix so an attacker
+// with a typical advertised /64 can't rotate addresses for
+// unlimited fresh buckets; IPv4 keys pass through unchanged. Only
+// the bucket key is normalized — callers keep the full address for
+// logging.
+func bucketKey(clientIP, username string) string {
+	return normalizeClientIP(clientIP) + "|" + username
+}
+
+// normalizeClientIP maps an IPv6 address string to its /64 prefix
+// address ("2001:db8:abcd:1::1" → "2001:db8:abcd:1::"), the
+// standard SLAAC subnet boundary. IPv4 and unparseable inputs are
+// returned verbatim; 4-in-6 mapped addresses count as IPv4 (they
+// name exactly one host); any interface zone is stripped so the
+// same link-local client keys consistently.
+func normalizeClientIP(ip string) string {
+	addr, err := netip.ParseAddr(ip)
+	if err != nil || addr.Is4() || addr.Is4In6() {
+		return ip
+	}
+	return netip.PrefixFrom(addr.WithZone(""), 64).Masked().Addr().String()
 }
 
 // RateLimiter is a process-local, in-memory failed-login tracker.
@@ -128,7 +158,7 @@ func (rl *RateLimiter) Stop() {
 // should prefer AllowAndReserve, which folds the check and the
 // increment into a single locked op.
 func (rl *RateLimiter) Allow(clientIP, username string) bool {
-	key := clientIP + "|" + username
+	key := bucketKey(clientIP, username)
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 	b, ok := rl.buckets[key]
@@ -155,7 +185,7 @@ func (rl *RateLimiter) Allow(clientIP, username string) bool {
 // bounds the map's memory footprint under a high-cardinality
 // attack — see maxBuckets docstring for the threat model.
 func (rl *RateLimiter) RecordFailure(clientIP, username string) {
-	key := clientIP + "|" + username
+	key := bucketKey(clientIP, username)
 	now := rl.now()
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
@@ -195,7 +225,7 @@ func (rl *RateLimiter) RecordFailure(clientIP, username string) {
 // swapping it to AllowAndReserve + RecordSuccess is the one-line
 // change that activates this guard — see the handler's doc.)
 func (rl *RateLimiter) AllowAndReserve(clientIP, username string) bool {
-	key := clientIP + "|" + username
+	key := bucketKey(clientIP, username)
 	now := rl.now()
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
@@ -267,7 +297,7 @@ func (rl *RateLimiter) evictOldestLocked(n int) {
 // successful login should give the operator a clean slate so a
 // past typo storm doesn't carry forward.
 func (rl *RateLimiter) RecordSuccess(clientIP, username string) {
-	key := clientIP + "|" + username
+	key := bucketKey(clientIP, username)
 	rl.mu.Lock()
 	delete(rl.buckets, key)
 	rl.mu.Unlock()

@@ -37,8 +37,14 @@
 (function () {
   var form = document.getElementById("login-form");
   var err = document.getElementById("login-error");
+  var btn = form.querySelector("[type=submit]");
   form.addEventListener("submit", function (ev) {
     ev.preventDefault();
+    // One attempt in flight at a time: every POST consumes a
+    // rate-limiter reservation (AllowAndReserve counts before the
+    // bcrypt verify), so a double-click would burn two of the five.
+    if (btn.disabled) return;
+    btn.disabled = true;
     err.hidden = true;
     var data = {
       username: form.username.value,
@@ -63,6 +69,8 @@
     }).catch(function (e) {
       err.textContent = "Network error — try again";
       err.hidden = false;
+    }).finally(function () {
+      btn.disabled = false;
     });
   });
 })();

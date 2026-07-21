@@ -146,7 +146,12 @@ func (s *Server) apiPairingApprove(w http.ResponseWriter, r *http.Request) {
 			"the bridge TLS cert changed since this request was created; the device must re-pair")
 		return
 	case err != nil:
-		writeError(w, http.StatusInternalServerError, "approve_failed", err.Error())
+		// Keep the wire message generic: sqlite/FS errors can embed
+		// absolute host paths (2026-07-21 review Low). The detail goes
+		// to the server log — same convention as internal/api's
+		// writeErrorLog.
+		logger.Error("pairing approve", "id", id, "err", err)
+		writeError(w, http.StatusInternalServerError, "approve_failed", "could not approve the pairing request")
 		return
 	}
 	// Bind the device's durable recovery token to the freshly minted auth
@@ -189,7 +194,9 @@ func (s *Server) apiPairingDecline(w http.ResponseWriter, r *http.Request) {
 			"this pairing request was already approved, declined, or expired")
 		return
 	case err != nil:
-		writeError(w, http.StatusInternalServerError, "decline_failed", err.Error())
+		// Generic wire message + server-side log — see apiPairingApprove.
+		logger.Error("pairing decline", "id", id, "err", err)
+		writeError(w, http.StatusInternalServerError, "decline_failed", "could not decline the pairing request")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"id": snap.ID})

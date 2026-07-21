@@ -42,9 +42,12 @@ var tmplFuncs = template.FuncMap{
 // Today: layout.html uses it to suppress the UPnP nav link (the
 // upnpUpstream feature is `Config.Validate`-rejected in public mode
 // because SSDP multicast is LAN-only AND the upstream's RFC1918 byte
-// URLs are unreachable from a public VPS). upnp.html uses it to render
-// a "Not available on public deployments" panel for the case where
-// the operator bookmarked the URL directly.
+// URLs are unreachable from a public VPS) and to render the sign-out
+// button (loopback installs have no session to end). upnp.html uses it
+// to render a "Not available on public deployments" panel for the case
+// where the operator bookmarked the URL directly; data.html gates its
+// "never leaves the loopback admin console" copy on it. renderPage
+// itself reads it for the frame-ancestors clickjacking headers.
 type pageData struct {
 	ActiveTab       string
 	ActiveSection   string
@@ -80,6 +83,18 @@ func (s *Server) renderPage(w http.ResponseWriter, active string, data any) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
+	if cfg.IsPublic() {
+		// Clickjacking guard for the internet-facing console:
+		// authenticated pages carry destructive buttons (revoke,
+		// delete-all-variants, restart), and only the /login page
+		// previously sent X-Frame-Options. frame-ancestors is the
+		// modern primitive; XFO SAMEORIGIN covers legacy browsers.
+		// Loopback mode stays as-is, and a full CSP remains future
+		// work (see the layout.html head note) — inline scripts rule
+		// out script-src for now.
+		w.Header().Set("Content-Security-Policy", "frame-ancestors 'self'")
+		w.Header().Set("X-Frame-Options", "SAMEORIGIN")
+	}
 	envelope := pageData{
 		ActiveTab:       active,
 		ActiveSection:   sectionForTab(active),

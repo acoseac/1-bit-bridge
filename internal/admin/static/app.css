@@ -464,9 +464,10 @@ body[data-section="settings"] #primary-nav a[data-tab="settings"]::after {
   color: var(--danger);
 }
 
-/* Header light / dark / system theme toggle. The glyph is a text character so
- * it inherits a themed color (invisible-on-dark is avoided). */
-.theme-toggle {
+/* Header light / dark / system theme toggle + public-mode sign-out.
+ * The glyph is a text character so it inherits a themed color
+ * (invisible-on-dark is avoided). */
+.theme-toggle, .logout-btn {
   appearance: none;
   display: inline-flex;
   align-items: center;
@@ -482,7 +483,7 @@ body[data-section="settings"] #primary-nav a[data-tab="settings"]::after {
   white-space: nowrap;
   transition: color 0.12s, border-color 0.12s;
 }
-.theme-toggle:hover {
+.theme-toggle:hover, .logout-btn:hover {
   color: var(--fg);
   border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
 }
@@ -3489,10 +3490,11 @@ section.library-inspector {
    * otherwise force eager mid-character breaks (Gemini on #501). */
   dl dd code { overflow-wrap: anywhere; word-break: normal; }
 
-  /* --- Group D: touch targets to the 44px floor. `.theme-toggle` sits in the
-   *     centered header .meta row; `label.checkbox` already flex-centers, so a
-   *     min-height alone pads the whole tappable switch row to 44px. --- */
-  .theme-toggle { min-height: 44px; padding-inline: 14px; }
+  /* --- Group D: touch targets to the 44px floor. `.theme-toggle` /
+   *     `.logout-btn` sit in the centered header .meta row; `label.checkbox`
+   *     already flex-centers, so a min-height alone pads the whole tappable
+   *     switch row to 44px. --- */
+  .theme-toggle, .logout-btn { min-height: 44px; padding-inline: 14px; }
   label.checkbox { min-height: 44px; }
 
   /* --- Group F: tighten intro copy so content starts higher on phone. --- */
