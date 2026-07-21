@@ -72,6 +72,12 @@ const minCheckInterval = 1 * time.Hour
 // so log-aggregator queries match a single event name.
 const autoInstallDeferredMessage = "auto-install deferred"
 
+// activeDownloadsReason is the "reason" attribute value logged whenever
+// the auto-installer (or its deferred restart) steps off for in-flight
+// downloads — one constant so log-aggregator queries match a single
+// value across the gate sites.
+const activeDownloadsReason = "active downloads"
+
 // Status is a snapshot of the updater's current view of the world.
 // All times are UTC. Returned by Status() as a value so callers don't
 // hold the mutex across reads.
@@ -356,18 +362,13 @@ func (u *Updater) maybeAutoInstall(ctx context.Context) {
 	// + verify per poll cycle) — just wait for sessions to drain,
 	// then restart into the binary already on disk.
 	if u.pendingRestart.Load() {
-		if u.autoInstallOpts.Sessions != nil && u.autoInstallOpts.Sessions.Inflight() > 0 {
-			logger.Info("auto-install restart deferred", "reason", "active downloads", "inflight", u.autoInstallOpts.Sessions.Inflight())
-			return
-		}
-		logger.Info("auto-install complete; restarting to load new binary")
-		u.autoInstallRestart()
+		u.restartWhenDrained()
 		return
 	}
 	// Sessions inflight gate: refuse cleanly. The next poll cycle
 	// will try again.
-	if u.autoInstallOpts.Sessions != nil && u.autoInstallOpts.Sessions.Inflight() > 0 {
-		logger.Info(autoInstallDeferredMessage, "reason", "active downloads", "inflight", u.autoInstallOpts.Sessions.Inflight())
+	if n := u.inflightSessions(); n > 0 {
+		logger.Info(autoInstallDeferredMessage, "reason", activeDownloadsReason, "inflight", n)
 		return
 	}
 
@@ -386,17 +387,36 @@ func (u *Updater) maybeAutoInstall(ctx context.Context) {
 		return
 	}
 	// The binary on disk is now the candidate. Mark pending-restart
-	// BEFORE the sessions re-check so a deferred restart skips the
+	// BEFORE restartWhenDrained so a deferred restart skips the
 	// re-install on later poll cycles (see pendingRestart).
 	u.pendingRestart.Store(true)
-	// Re-check the sessions gate AFTER the install: the download phase
-	// can run for many minutes and a stream may have started in the
-	// meantime (Install itself only gates at entry, and the auto-
-	// installer's opts carry Force=false). Restarting now would kill
-	// it — defer to the next poll cycle, which takes the pending-
-	// restart fast path above and re-checks.
-	if u.autoInstallOpts.Sessions != nil && u.autoInstallOpts.Sessions.Inflight() > 0 {
-		logger.Info("auto-install restart deferred", "reason", "active downloads", "inflight", u.autoInstallOpts.Sessions.Inflight())
+	// restartWhenDrained re-checks the sessions gate AFTER the
+	// install: the download phase can run for many minutes and a
+	// stream may have started in the meantime (Install itself only
+	// gates at entry, and the auto-installer's opts carry
+	// Force=false). Restarting now would kill it — defer to the next
+	// poll cycle, which takes the pending-restart fast path above.
+	u.restartWhenDrained()
+}
+
+// inflightSessions reports the auto-installer session tracker's
+// inflight-download count (0 when no tracker is wired). Read ONCE per
+// gate so the condition and the log line can't observe different
+// values.
+func (u *Updater) inflightSessions() int64 {
+	if u.autoInstallOpts.Sessions == nil {
+		return 0
+	}
+	return u.autoInstallOpts.Sessions.Inflight()
+}
+
+// restartWhenDrained fires the auto-install restart, or — when
+// downloads are inflight — logs and defers to the next poll cycle.
+// Shared by the pending-restart fast path and the tail of a fresh
+// install; the caller guarantees an install candidate is on disk.
+func (u *Updater) restartWhenDrained() {
+	if n := u.inflightSessions(); n > 0 {
+		logger.Info("auto-install restart deferred", "reason", activeDownloadsReason, "inflight", n)
 		return
 	}
 	logger.Info("auto-install complete; restarting to load new binary")
