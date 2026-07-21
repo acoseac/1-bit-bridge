@@ -118,6 +118,8 @@ func TestAtlasHarvestCredentialExpiresInCeiling(t *testing.T) {
 		{"one hour", 3600, http.StatusOK, true},
 		{"exactly the ceiling", atlasHarvestMaxExpiresInSeconds, http.StatusOK, true},
 		{"one past the ceiling", atlasHarvestMaxExpiresInSeconds + 1, http.StatusBadRequest, false},
+		{"negative is invalid, not no-expiry", -1, http.StatusBadRequest, false},
+		{"negative underflow magnitude", math.MinInt, http.StatusBadRequest, false},
 		{"duration-overflow magnitude", math.MaxInt, http.StatusBadRequest, false},
 	}
 	for _, tc := range cases {
