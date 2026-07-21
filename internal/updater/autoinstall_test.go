@@ -265,11 +265,15 @@ func TestMaybeAutoInstallDefersRestartWhenSessionStartsMidInstall(t *testing.T) 
 		t.Errorf("mid-install session should not block the swap: live = %q, want bridge-binary-0.2.0", string(got))
 	}
 
-	// Stream drained: the next poll cycle re-attempts (idempotent)
-	// and restarts.
+	// Stream drained: the next poll cycle takes the pending-restart
+	// fast path — it restarts WITHOUT re-running the install (no
+	// second ~30 MiB archive download).
 	tracker.End()
 	upd.maybeAutoInstall(context.Background())
 	if got := restartCalls.Load(); got != 1 {
 		t.Errorf("restart fired %d time(s) after the session drained; want 1", got)
+	}
+	if got := fix.archiveFetches.Load(); got != 1 {
+		t.Errorf("archive fetched %d time(s) across the deferred-restart cycles; want 1 (no re-download)", got)
 	}
 }

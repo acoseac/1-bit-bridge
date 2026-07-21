@@ -208,6 +208,16 @@ type Updater struct {
 	// the per-attempt scratch dir is what keeps its cleanup from
 	// deleting an in-flight install's files.
 	installInFlight atomic.Bool
+
+	// pendingRestart marks "auto-install swapped the binary, restart
+	// deferred for active downloads". While set, maybeAutoInstall
+	// skips the whole install (a ~30 MiB re-download + verify per
+	// poll cycle) and only waits for sessions to drain before firing
+	// the restart. In-memory only: a manual admin/CLI install must
+	// NOT trigger the auto-installer's restart, so this can't be
+	// derived from update-state.json (which any successful Install
+	// arms).
+	pendingRestart atomic.Bool
 }
 
 // New builds an Updater. The poller is not started — call Run on it
@@ -309,7 +319,9 @@ func (u *Updater) Run(ctx context.Context) {
 // quiet-hours forbids it, sessions are inflight, or the
 // install/restart wiring is missing. On success the restart
 // callback is invoked — the process exits and service-manager
-// respawns into the new binary.
+// respawns into the new binary. When a previous cycle installed
+// but deferred the restart (pendingRestart), the install is NOT
+// re-run — only the sessions gate is re-checked.
 //
 // All conditional gates log at info level (so the operator can
 // audit "why didn't auto-install fire") but never escalate to
@@ -338,6 +350,20 @@ func (u *Updater) maybeAutoInstall(ctx context.Context) {
 		logger.Info(autoInstallDeferredMessage, "reason", "outside quiet-hours window")
 		return
 	}
+	// Pending-restart fast path: a previous cycle already installed
+	// the candidate but deferred the restart for active downloads.
+	// Don't re-run the whole install (a ~30 MiB re-download + extract
+	// + verify per poll cycle) — just wait for sessions to drain,
+	// then restart into the binary already on disk.
+	if u.pendingRestart.Load() {
+		if u.autoInstallOpts.Sessions != nil && u.autoInstallOpts.Sessions.Inflight() > 0 {
+			logger.Info("auto-install restart deferred", "reason", "active downloads", "inflight", u.autoInstallOpts.Sessions.Inflight())
+			return
+		}
+		logger.Info("auto-install complete; restarting to load new binary")
+		u.autoInstallRestart()
+		return
+	}
 	// Sessions inflight gate: refuse cleanly. The next poll cycle
 	// will try again.
 	if u.autoInstallOpts.Sessions != nil && u.autoInstallOpts.Sessions.Inflight() > 0 {
@@ -359,12 +385,16 @@ func (u *Updater) maybeAutoInstall(ctx context.Context) {
 		}
 		return
 	}
+	// The binary on disk is now the candidate. Mark pending-restart
+	// BEFORE the sessions re-check so a deferred restart skips the
+	// re-install on later poll cycles (see pendingRestart).
+	u.pendingRestart.Store(true)
 	// Re-check the sessions gate AFTER the install: the download phase
 	// can run for many minutes and a stream may have started in the
 	// meantime (Install itself only gates at entry, and the auto-
 	// installer's opts carry Force=false). Restarting now would kill
-	// it — defer to the next poll cycle, which re-attempts the
-	// (idempotent) install and re-checks.
+	// it — defer to the next poll cycle, which takes the pending-
+	// restart fast path above and re-checks.
 	if u.autoInstallOpts.Sessions != nil && u.autoInstallOpts.Sessions.Inflight() > 0 {
 		logger.Info("auto-install restart deferred", "reason", "active downloads", "inflight", u.autoInstallOpts.Sessions.Inflight())
 		return

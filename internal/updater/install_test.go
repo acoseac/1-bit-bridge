@@ -19,6 +19,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -40,6 +41,7 @@ type installFixture struct {
 	releaseJSON    []byte
 	archiveBytes   []byte
 	checksumsBytes []byte
+	archiveFetches atomic.Int32
 }
 
 func newInstallFixture(t *testing.T, latestVersion string) *installFixture {
@@ -89,6 +91,7 @@ func newInstallFixture(t *testing.T, latestVersion string) *installFixture {
 		w.Write(fix.releaseJSON)
 	})
 	mux.HandleFunc("/asset/"+archiveName, func(w http.ResponseWriter, r *http.Request) {
+		fix.archiveFetches.Add(1)
 		w.Write(archiveBytes)
 	})
 	mux.HandleFunc("/asset/checksums.txt", func(w http.ResponseWriter, r *http.Request) {
@@ -729,10 +732,10 @@ func TestInstallConcurrentCallsSerialized(t *testing.T) {
 }
 
 // TestInstallScratchIsPerAttempt pins the scratch-dir shape: every
-// attempt works inside its own MkdirTemp subdirectory under
-// <DataDir>/updates/ and cleanScratch removes only that directory —
-// the shared root must never carry an attempt's leftover files, so a
-// stray cleanup from a concurrent caller (incl. the CLI's separate
+// attempt works inside its own MkdirTemp directory directly under
+// DataDir (no persistent shared parent) and cleanScratch removes it —
+// DataDir must never carry an attempt's leftover "install-*" files, so
+// a stray cleanup from a concurrent caller (incl. the CLI's separate
 // process) can never delete an in-flight attempt's verified binary.
 func TestInstallScratchIsPerAttempt(t *testing.T) {
 	fix := newInstallFixture(t, "0.2.0")
@@ -741,16 +744,92 @@ func TestInstallScratchIsPerAttempt(t *testing.T) {
 		t.Fatalf("Install: %v", err)
 	}
 
-	updatesRoot := filepath.Join(filepath.Dir(livePath), "updates")
-	entries, err := os.ReadDir(updatesRoot)
+	dataDir := filepath.Dir(livePath)
+	entries, err := os.ReadDir(dataDir)
 	if err != nil {
-		t.Fatalf("read updates root: %v", err)
+		t.Fatalf("read data dir: %v", err)
 	}
-	if len(entries) != 0 {
-		names := make([]string, 0, len(entries))
-		for _, e := range entries {
-			names = append(names, e.Name())
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "install-") {
+			t.Errorf("data dir holds leftover attempt dir %q — per-attempt scratch not cleaned", e.Name())
 		}
-		t.Errorf("updates root holds leftover attempt files %v — per-attempt scratch not cleaned", names)
+	}
+}
+
+// TestInstallConcurrentRollbackSerialized pins the same try-lock on
+// the rollback path: while an Install holds the Updater, an operator
+// Rollback (the admin "Roll back" button) must fail fast with
+// ErrInstallInFlight rather than race the install on the .bak rename
+// target and update-state.json. Once the install completes, the lock
+// is released and the rollback proceeds.
+func TestInstallConcurrentRollbackSerialized(t *testing.T) {
+	fix := newInstallFixture(t, "0.2.0")
+
+	dir := t.TempDir()
+	livePath := filepath.Join(dir, "bridge")
+	if err := os.WriteFile(livePath, []byte("bridge-binary-0.1.0"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	upd := New(Options{
+		RepoOverride: "fake/repo",
+		Client:       NewClient("fake/repo", time.Second).WithBaseURL(fix.server.URL),
+	})
+	upd.mu.Lock()
+	upd.status.CurrentVersion = "0.1.0"
+	upd.status.LatestVersion = fix.latestVersion
+	upd.status.UpdateAvailable = true
+	upd.status.LastCheck = time.Now().UTC()
+	upd.mu.Unlock()
+
+	// Park the install mid-flight (lock held) in a blocking verifier.
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	blockingVerifier := func(context.Context, string) error {
+		once.Do(func() { close(started) })
+		<-release
+		return nil
+	}
+
+	installErr := make(chan error, 1)
+	go func() {
+		_, err := upd.Install(context.Background(), InstallOptions{
+			DataDir:    dir,
+			BinaryPath: livePath,
+			Force:      true,
+			Verifier:   blockingVerifier,
+		})
+		installErr <- err
+	}()
+	<-started // install now holds the lock, parked in verify
+
+	if err := upd.Rollback(InstallOptions{
+		DataDir:    dir,
+		BinaryPath: livePath,
+		Force:      true,
+	}); !errors.Is(err, ErrInstallInFlight) {
+		t.Errorf("Rollback during Install: err = %v, want ErrInstallInFlight", err)
+	}
+	close(release)
+	if err := <-installErr; err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	// Lock released: the rollback proceeds (the just-completed install
+	// left a .bak) and restores the previous binary.
+	if err := upd.Rollback(InstallOptions{
+		DataDir:    dir,
+		BinaryPath: livePath,
+		Force:      true,
+	}); err != nil {
+		t.Fatalf("Rollback after Install completed: %v (lock not released?)", err)
+	}
+	got, err := os.ReadFile(livePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "bridge-binary-0.1.0" {
+		t.Errorf("post-rollback live = %q, want bridge-binary-0.1.0", string(got))
 	}
 }

@@ -75,7 +75,7 @@ func TestSwapBinaryFallsBackToRenameWhenHardlinkUnsupported(t *testing.T) {
 }
 
 func TestSwapBinaryFallsBackToCopyOnCrossDeviceRename(t *testing.T) {
-	// EXDEV: <DataDir>/updates/ and the install path live on different
+	// EXDEV: the scratch dir and the install path live on different
 	// filesystems (e.g. /var vs /usr), so os.Rename(newBinary, dst) fails.
 	// placeNewBinary must copy newBinary into dst's own directory and
 	// atomically rename there — landing NEW at dst while bak still holds

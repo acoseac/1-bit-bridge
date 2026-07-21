@@ -31,8 +31,9 @@ const verifyTimeout = 2 * time.Minute
 // InstallOptions configures one Install attempt.
 type InstallOptions struct {
 	// DataDir is the bridge's working data directory; the install
-	// path uses <DataDir>/updates/ as its scratch area and writes
-	// update-state.json here for boot-time rollback bookkeeping.
+	// path creates a per-attempt scratch dir directly under it
+	// (os.MkdirTemp "install-*") and writes update-state.json here
+	// for boot-time rollback bookkeeping.
 	DataDir string
 
 	// BinaryPath is the absolute path of the running bridge binary
@@ -199,17 +200,22 @@ func (u *Updater) Install(ctx context.Context, opts InstallOptions) (Status, err
 		}
 	}
 
-	// Scratch dir under dataDir keeps temp files inside the
+	// Scratch dir directly under dataDir keeps temp files inside the
 	// bridge's writable area (avoids /tmp permissions surprises on
 	// macOS) and makes cleanup obvious. Each attempt gets its own
-	// MkdirTemp subdirectory so no cleanup — including one from a
-	// concurrent caller in ANOTHER process (the CLI can't share the
-	// in-process try-lock) — can delete this attempt's files mid-swap.
-	updatesRoot := filepath.Join(opts.DataDir, "updates")
-	if err := os.MkdirAll(updatesRoot, 0o700); err != nil {
+	// MkdirTemp directory — deliberately NO persistent shared parent
+	// (the earlier <DataDir>/updates/ root): unique names mean a
+	// root-run CLI's leftovers (root-owned, 0o700) never block later
+	// attempts by the unprivileged service user, and no cleanup —
+	// including one from a concurrent caller in ANOTHER process (the
+	// CLI can't share the in-process try-lock) — can delete this
+	// attempt's files mid-swap. DataDir itself is MkdirAll'd first to
+	// preserve the old implicit create-if-missing behaviour; its
+	// ownership is already correct for the running user.
+	if err := os.MkdirAll(opts.DataDir, 0o700); err != nil {
 		return status, fmt.Errorf("create scratch: %w", err)
 	}
-	scratch, err := os.MkdirTemp(updatesRoot, "install-")
+	scratch, err := os.MkdirTemp(opts.DataDir, "install-")
 	if err != nil {
 		return status, fmt.Errorf("create scratch: %w", err)
 	}
@@ -303,11 +309,23 @@ var (
 // admin "Roll back" button when the operator notices the new
 // version is broken AFTER a successful install (the boot-time
 // rollback only fires on truly unbootable builds).
+//
+// Errors: ErrInstallInFlight when an Install (or another Rollback)
+// is already running on this Updater, ErrActiveSessions when Force
+// is false and Sessions.Inflight() is nonzero.
 func (u *Updater) Rollback(opts InstallOptions) error {
 	// Phase B-Windows (PR #48) implements the rollback rename
 	// alongside darwin/linux — no platform guard needed here. The
 	// Windows-side `RollbackBinary` handles the SCM-stop dance
 	// transparently.
+	//
+	// Serialise against Install with the same try-lock: rollback
+	// renames .bak over the live binary and clears update-state.json
+	// — the exact swap targets an in-flight install is mutating.
+	if !u.installInFlight.CompareAndSwap(false, true) {
+		return ErrInstallInFlight
+	}
+	defer u.installInFlight.Store(false)
 	if !opts.Force && opts.Sessions != nil && opts.Sessions.Inflight() > 0 {
 		return fmt.Errorf("%w: %d inflight download(s)",
 			ErrActiveSessions, opts.Sessions.Inflight())
@@ -364,8 +382,8 @@ func preflightWritable(binaryPath string) error {
 
 // cleanScratch wipes one attempt's scratch dir so disk doesn't
 // accumulate failed-download leftovers. Each attempt removes only its
-// own MkdirTemp directory — never the shared updates/ root — so a
-// concurrent attempt's files survive a stray cleanup.
+// own MkdirTemp directory so a concurrent attempt's files survive a
+// stray cleanup.
 func cleanScratch(scratch string) {
 	_ = os.RemoveAll(scratch)
 }
