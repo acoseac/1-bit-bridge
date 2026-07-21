@@ -711,8 +711,12 @@ type UpdateStatus struct {
 type Server struct {
 	deps Deps
 
-	// mu serializes mutations that touch Cfg / Save / SetRoots / Wipe so
-	// two admin clients can't race the YAML rewrite.
+	// mu serializes the roots add/remove critical sections (pre-checks
+	// against Scanner.Roots(), manifest wipe, SetRoots fan-out) and the
+	// settings PATCH's commit→side-effect ordering, plus token
+	// mint/revoke. The config clone→Save→Store sequence itself is
+	// serialized process-wide by CfgHolder.Update's write lock — see
+	// config.RuntimeConfig.
 	mu sync.Mutex
 
 	// pageTmpls is one template bundle per page. Each bundle pre-parses

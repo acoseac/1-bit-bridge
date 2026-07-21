@@ -1,12 +1,22 @@
 package config
 
-import "sync/atomic"
+import (
+	"errors"
+	"sync"
+	"sync/atomic"
+)
 
 // RuntimeConfig is the process-wide holder for the live config
-// snapshot. Readers call Load() per-request; writers clone, mutate,
-// validate, save, run hooks, and atomically swap with Store().
+// snapshot. Readers call Load() per-request; writers go through
+// Update, which serialises the clone→mutate→Save→Store cycle behind
+// one mutex shared by every config writer in the process.
 type RuntimeConfig struct {
 	ptr atomic.Pointer[Config]
+	// mu serialises Update calls. Two writers that each clone the
+	// same base snapshot and then Save would have the last write
+	// silently drop the other's fields from both bridge.yaml and the
+	// final live snapshot (2026-07-21 review finding M13).
+	mu sync.Mutex
 }
 
 // NewRuntimeConfig initialises a RuntimeConfig from cfg.
@@ -35,6 +45,41 @@ func (r *RuntimeConfig) Store(cfg *Config) {
 // Clone returns a deep clone of the current snapshot.
 func (r *RuntimeConfig) Clone() *Config {
 	return Clone(r.Load())
+}
+
+// Update atomically applies a read-modify-write cycle to the live
+// config: it clones the current snapshot, hands the clone to fn to
+// mutate (and validate), persists the result to path via Save, and
+// publishes it with Store. The whole clone→Save→Store sequence runs
+// under the holder's write lock — shared by every config writer in
+// the process — so concurrent mutators (admin settings PATCH, roots
+// add/remove, UPnP server CRUD, …) can't clone the same base and
+// have the last Save silently drop the loser's field changes.
+//
+// When fn returns an error the clone is discarded: nothing is saved
+// or stored, and fn's error is returned verbatim. A Save failure
+// likewise leaves both the live snapshot and the on-disk file
+// untouched. fn runs under the write lock, so it must not call
+// Update re-entrantly (the mutex is not re-entrant) and must not
+// retain the clone after returning.
+func (r *RuntimeConfig) Update(path string, fn func(*Config) error) error {
+	if r == nil {
+		return errors.New("config: Update on nil RuntimeConfig")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	next := Clone(r.Load())
+	if next == nil {
+		return errors.New("config: Update with no config loaded")
+	}
+	if err := fn(next); err != nil {
+		return err
+	}
+	if err := next.Save(path); err != nil {
+		return err
+	}
+	r.ptr.Store(next)
+	return nil
 }
 
 // Clone returns a deep clone of cfg. Nil input returns nil.

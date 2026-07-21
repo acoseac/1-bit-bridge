@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -223,5 +225,168 @@ func TestSanitizeSkipList(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// upnpAdapterForPersistTest wires the minimal adapter shape the CRUD
+// paths exercise: holder + cfgPath (the persist target). cfg gets a
+// DataDir so updateCfg's NormalizeAndValidate sees a fully-valid
+// config. cfgPath's parent must exist (Config.Save writes its temp
+// file there).
+func upnpAdapterForPersistTest(t *testing.T, cfg *config.Config) (*upnpAdminAdapter, *config.RuntimeConfig, string) {
+	t.Helper()
+	cfg.DataDir = filepath.Join(t.TempDir(), "data")
+	cfgPath := filepath.Join(t.TempDir(), "bridge.yaml")
+	rt := runtimeCfgFor(t, cfg)
+	return &upnpAdminAdapter{cfgHolder: rt, cfgPath: cfgPath}, rt, cfgPath
+}
+
+// TestAdmin_UPnPCRUDPersistsThroughUpdate walks the real CRUD →
+// updateCfg → RuntimeConfig.Update → Save path end-to-end (pre-fix
+// this persist path had no direct coverage — the admin-layer tests
+// stub the provider). Each step asserts BOTH the live snapshot and
+// the on-disk YAML, pinning the Save→Store consistency the M13 fix
+// relies on.
+func TestAdmin_UPnPCRUDPersistsThroughUpdate(t *testing.T) {
+	a, rt, cfgPath := upnpAdapterForPersistTest(t, newUPnPTestCfg(t,
+		config.UPnPUpstreamServerConfig{Name: "Seed", UDN: "uuid:seed"},
+	))
+
+	assertPersisted := func(t *testing.T, wantUDNs ...string) {
+		t.Helper()
+		reloaded, err := config.Load(cfgPath)
+		if err != nil {
+			t.Fatalf("reload bridge.yaml: %v", err)
+		}
+		for _, snapshot := range []struct {
+			label string
+			cfg   *config.Config
+		}{{"live", rt.Load()}, {"disk", reloaded}} {
+			got := make([]string, 0, len(snapshot.cfg.UPnPUpstream.Servers))
+			for _, srv := range snapshot.cfg.UPnPUpstream.Servers {
+				got = append(got, srv.UDN)
+			}
+			if !slices.Equal(got, wantUDNs) {
+				t.Errorf("%s servers = %v, want %v", snapshot.label, got, wantUDNs)
+			}
+		}
+	}
+
+	t.Run("add persists to live + disk", func(t *testing.T) {
+		err := a.AddServer(context.Background(), admin.UPnPServerAddRequest{
+			Name: "Denon", UDN: "uuid:denon", PathPrefix: "/music",
+		})
+		if err != nil {
+			t.Fatalf("AddServer: %v", err)
+		}
+		assertPersisted(t, "uuid:seed", "uuid:denon")
+	})
+
+	t.Run("add duplicate identity rejected", func(t *testing.T) {
+		err := a.AddServer(context.Background(), admin.UPnPServerAddRequest{
+			Name: "Denon clone", UDN: "uuid:denon",
+		})
+		if !errors.Is(err, admin.ErrUPnPDuplicateUDN) {
+			t.Fatalf("err = %v, want ErrUPnPDuplicateUDN", err)
+		}
+		assertPersisted(t, "uuid:seed", "uuid:denon")
+	})
+
+	t.Run("update edits in place", func(t *testing.T) {
+		name := "Denon AVR"
+		err := a.UpdateServer(context.Background(), "uuid:denon", admin.UPnPServerUpdateRequest{Name: &name})
+		if err != nil {
+			t.Fatalf("UpdateServer: %v", err)
+		}
+		assertPersisted(t, "uuid:seed", "uuid:denon")
+		if got := rt.Load().UPnPUpstream.Servers[1].Name; got != "Denon AVR" {
+			t.Errorf("live Name = %q, want %q", got, "Denon AVR")
+		}
+	})
+
+	t.Run("remove drops from live + disk", func(t *testing.T) {
+		if err := a.RemoveServer(context.Background(), "uuid:denon"); err != nil {
+			t.Fatalf("RemoveServer: %v", err)
+		}
+		assertPersisted(t, "uuid:seed")
+	})
+
+	t.Run("remove unknown identity", func(t *testing.T) {
+		err := a.RemoveServer(context.Background(), "uuid:ghost")
+		if !errors.Is(err, admin.ErrUPnPNoSuchServer) {
+			t.Fatalf("err = %v, want ErrUPnPNoSuchServer", err)
+		}
+	})
+}
+
+// TestAdmin_UPnPCRUDConcurrentWithSettingsUpdate is the 2026-07-21
+// review M13 regression test at the adapter level. Pre-fix, UPnP
+// server CRUD serialized its clone→Save→Store on the adapter's own
+// crudMu while the admin settings PATCH serialized on the admin
+// server's s.mu — two DIFFERENT mutexes — so a concurrent pair cloned
+// the same base and the last Save silently dropped the loser's field
+// from bridge.yaml AND the live snapshot while both callers returned
+// success. Both writer families now funnel through
+// RuntimeConfig.Update's single write lock, so every mutation must
+// survive on disk and in the live snapshot.
+func TestAdmin_UPnPCRUDConcurrentWithSettingsUpdate(t *testing.T) {
+	a, rt, cfgPath := upnpAdapterForPersistTest(t, newUPnPTestCfg(t))
+
+	const n = 8
+	var wg sync.WaitGroup
+	wg.Add(2)
+	// UPnP-style writer: adapter CRUD appending to a slice field.
+	go func() {
+		defer wg.Done()
+		for i := 0; i < n; i++ {
+			udn := fmt.Sprintf("uuid:race-%d", i)
+			if err := a.AddServer(context.Background(), admin.UPnPServerAddRequest{
+				Name: "Race " + udn, UDN: udn,
+			}); err != nil {
+				t.Errorf("AddServer(%s): %v", udn, err)
+				return
+			}
+		}
+	}()
+	// Settings-style writer: scalar field mutation via the same
+	// holder the admin server's settings PATCH writes through.
+	go func() {
+		defer wg.Done()
+		for i := 0; i < n; i++ {
+			name := fmt.Sprintf("Library %d", i)
+			if err := rt.Update(cfgPath, func(next *config.Config) error {
+				next.LibraryName = name
+				return nil
+			}); err != nil {
+				t.Errorf("settings-style Update: %v", err)
+				return
+			}
+		}
+	}()
+	wg.Wait()
+
+	// Only the settings writer touches LibraryName and every clone
+	// preserves it, so the final value is deterministically its last
+	// write; every adapter append must have landed exactly once.
+	live := rt.Load()
+	if want := fmt.Sprintf("Library %d", n-1); live.LibraryName != want {
+		t.Errorf("live LibraryName = %q, want %q — settings write lost to a stale clone",
+			live.LibraryName, want)
+	}
+	if len(live.UPnPUpstream.Servers) != n {
+		t.Errorf("live servers = %d, want %d — adapter writes lost to a stale clone",
+			len(live.UPnPUpstream.Servers), n)
+	}
+	reloaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("reload bridge.yaml: %v", err)
+	}
+	if reloaded.LibraryName != live.LibraryName {
+		t.Errorf("disk LibraryName = %q, live = %q — last Save dropped a concurrent write",
+			reloaded.LibraryName, live.LibraryName)
+	}
+	if len(reloaded.UPnPUpstream.Servers) != len(live.UPnPUpstream.Servers) {
+		t.Errorf("disk servers = %d, live = %d — last Save dropped a concurrent write",
+			len(reloaded.UPnPUpstream.Servers), len(live.UPnPUpstream.Servers))
 	}
 }

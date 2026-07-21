@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -45,15 +46,6 @@ type upnpAdminAdapter struct {
 	// close the store) mid-walk. Nil-guarded: the direct-construction
 	// unit tests leave it unset.
 	ingestWg *sync.WaitGroup
-
-	// mu serializes CRUD writes (Add/Remove/Update) against each
-	// other so two concurrent admin requests can't race on Save +
-	// CfgHolder.Store and leave bridge.yaml inconsistent with the
-	// in-memory snapshot. Reads (ConfiguredServers /
-	// DiscoveredServers) don't need it — they each call
-	// cfgHolder.Load() once and the holder itself is safe for
-	// concurrent reads (atomic.Value semantics).
-	crudMu sync.Mutex
 }
 
 // upnpAdminState is the small in-memory store of last-run results,
@@ -351,11 +343,12 @@ func (a *upnpAdminAdapter) DiscoveredServers() []admin.UPnPDiscoveredServer {
 	return out
 }
 
-// AddServer validates the request, clones the live config, appends
-// the new server entry, runs Validate (catches the upnpUpstream-
-// specific shape rules + the cross-section ones), persists via
-// `Config.Save`, then atomically swaps the live snapshot via
-// CfgHolder.Store. On any failure before Save, the clone is
+// AddServer validates the request, then atomically (under the
+// holder's single write lock via CfgHolder.Update) clones the live
+// config, duplicate-checks + appends the new server entry, runs
+// NormalizeAndValidate (catches the upnpUpstream-specific shape rules
+// + the cross-section ones), persists via `Config.Save`, and swaps
+// the live snapshot. On any failure before Save, the clone is
 // discarded.
 //
 // Restart semantics: the upnpUpstreamLifecycle constructs its
@@ -365,10 +358,7 @@ func (a *upnpAdminAdapter) DiscoveredServers() []admin.UPnPDiscoveredServer {
 // response — same precedent as the Sox / DLNA / Tailscale-mode
 // switches.
 func (a *upnpAdminAdapter) AddServer(_ context.Context, req admin.UPnPServerAddRequest) error {
-	a.crudMu.Lock()
-	defer a.crudMu.Unlock()
-	cfg := a.cfgHolder.Load()
-	if cfg == nil {
+	if a.cfgHolder.Load() == nil {
 		return fmt.Errorf("%w: config not loaded", admin.ErrUPnPValidation)
 	}
 	name := strings.TrimSpace(req.Name)
@@ -380,28 +370,30 @@ func (a *upnpAdminAdapter) AddServer(_ context.Context, req admin.UPnPServerAddR
 	if udn == "" && manualURL == "" {
 		return fmt.Errorf("%w: either udn or manualDescriptionURL is required", admin.ErrUPnPValidation)
 	}
-	// Duplicate-identity check against existing rows. UDN match is
-	// the strong identity; ManualDescriptionURL match is the weak
-	// identity for SSDP-unreachable servers. A new row colliding on
-	// either is rejected with 409.
-	for _, existing := range cfg.UPnPUpstream.Servers {
-		if udn != "" && strings.TrimSpace(existing.UDN) == udn {
-			return fmt.Errorf("%w: %q is already configured", admin.ErrUPnPDuplicateUDN, udn)
+	return a.updateCfg(func(next *config.Config) error {
+		// Duplicate-identity check against existing rows. UDN match is
+		// the strong identity; ManualDescriptionURL match is the weak
+		// identity for SSDP-unreachable servers. A new row colliding on
+		// either is rejected with 409. Runs on the locked clone so a
+		// concurrent add can't slip the same identity past the check.
+		for _, existing := range next.UPnPUpstream.Servers {
+			if udn != "" && strings.TrimSpace(existing.UDN) == udn {
+				return fmt.Errorf("%w: %q is already configured", admin.ErrUPnPDuplicateUDN, udn)
+			}
+			if manualURL != "" && strings.TrimSpace(existing.ManualDescriptionURL) == manualURL {
+				return fmt.Errorf("%w: %q is already configured", admin.ErrUPnPDuplicateUDN, manualURL)
+			}
 		}
-		if manualURL != "" && strings.TrimSpace(existing.ManualDescriptionURL) == manualURL {
-			return fmt.Errorf("%w: %q is already configured", admin.ErrUPnPDuplicateUDN, manualURL)
-		}
-	}
-	next := config.Clone(cfg)
-	next.UPnPUpstream.Servers = append(next.UPnPUpstream.Servers, config.UPnPUpstreamServerConfig{
-		Name:                   name,
-		UDN:                    udn,
-		ManualDescriptionURL:   manualURL,
-		PathPrefix:             strings.TrimSpace(req.PathPrefix),
-		RootObjectID:           strings.TrimSpace(req.RootObjectID),
-		SkipTopLevelContainers: sanitizeSkipList(req.SkipTopLevelContainers),
+		next.UPnPUpstream.Servers = append(next.UPnPUpstream.Servers, config.UPnPUpstreamServerConfig{
+			Name:                   name,
+			UDN:                    udn,
+			ManualDescriptionURL:   manualURL,
+			PathPrefix:             strings.TrimSpace(req.PathPrefix),
+			RootObjectID:           strings.TrimSpace(req.RootObjectID),
+			SkipTopLevelContainers: sanitizeSkipList(req.SkipTopLevelContainers),
+		})
+		return nil
 	})
-	return a.persistCfg(next)
 }
 
 // RemoveServer drops the configured entry matching the UDN. Match is
@@ -417,23 +409,21 @@ func (a *upnpAdminAdapter) AddServer(_ context.Context, req admin.UPnPServerAddR
 // Doing the sweep here would tie up the admin goroutine on a manifest
 // write that may be holding other work.
 func (a *upnpAdminAdapter) RemoveServer(_ context.Context, udn string) error {
-	a.crudMu.Lock()
-	defer a.crudMu.Unlock()
-	cfg := a.cfgHolder.Load()
 	udn = strings.TrimSpace(udn)
-	if cfg == nil || udn == "" {
+	if a.cfgHolder.Load() == nil || udn == "" {
 		return admin.ErrUPnPNoSuchServer
 	}
-	idx := findConfiguredIdx(cfg, udn)
-	if idx < 0 {
-		return admin.ErrUPnPNoSuchServer
-	}
-	next := config.Clone(cfg)
-	next.UPnPUpstream.Servers = append(
-		next.UPnPUpstream.Servers[:idx],
-		next.UPnPUpstream.Servers[idx+1:]...,
-	)
-	return a.persistCfg(next)
+	return a.updateCfg(func(next *config.Config) error {
+		idx := findConfiguredIdx(next, udn)
+		if idx < 0 {
+			return admin.ErrUPnPNoSuchServer
+		}
+		next.UPnPUpstream.Servers = append(
+			next.UPnPUpstream.Servers[:idx],
+			next.UPnPUpstream.Servers[idx+1:]...,
+		)
+		return nil
+	})
 }
 
 // UpdateServer edits the operator-visible fields of an existing row.
@@ -446,58 +436,75 @@ func (a *upnpAdminAdapter) RemoveServer(_ context.Context, udn string) error {
 // RootObjectID — the YAML loader fills the defaults. An empty Name
 // is a validation error (the operator-visible label can't be blank).
 func (a *upnpAdminAdapter) UpdateServer(_ context.Context, udn string, req admin.UPnPServerUpdateRequest) error {
-	a.crudMu.Lock()
-	defer a.crudMu.Unlock()
-	cfg := a.cfgHolder.Load()
 	udn = strings.TrimSpace(udn)
-	if cfg == nil || udn == "" {
+	if a.cfgHolder.Load() == nil || udn == "" {
 		return admin.ErrUPnPNoSuchServer
 	}
-	idx := findConfiguredIdx(cfg, udn)
-	if idx < 0 {
-		return admin.ErrUPnPNoSuchServer
-	}
-	next := config.Clone(cfg)
-	row := &next.UPnPUpstream.Servers[idx]
-	if req.Name != nil {
-		name := strings.TrimSpace(*req.Name)
-		if name == "" {
-			return fmt.Errorf("%w: name must not be empty", admin.ErrUPnPValidation)
+	return a.updateCfg(func(next *config.Config) error {
+		idx := findConfiguredIdx(next, udn)
+		if idx < 0 {
+			return admin.ErrUPnPNoSuchServer
 		}
-		row.Name = name
-	}
-	if req.PathPrefix != nil {
-		row.PathPrefix = strings.TrimSpace(*req.PathPrefix)
-	}
-	if req.RootObjectID != nil {
-		row.RootObjectID = strings.TrimSpace(*req.RootObjectID)
-	}
-	if req.SkipTopLevelContainers != nil {
-		row.SkipTopLevelContainers = sanitizeSkipList(*req.SkipTopLevelContainers)
-	}
-	return a.persistCfg(next)
+		row := &next.UPnPUpstream.Servers[idx]
+		if req.Name != nil {
+			name := strings.TrimSpace(*req.Name)
+			if name == "" {
+				return fmt.Errorf("%w: name must not be empty", admin.ErrUPnPValidation)
+			}
+			row.Name = name
+		}
+		if req.PathPrefix != nil {
+			row.PathPrefix = strings.TrimSpace(*req.PathPrefix)
+		}
+		if req.RootObjectID != nil {
+			row.RootObjectID = strings.TrimSpace(*req.RootObjectID)
+		}
+		if req.SkipTopLevelContainers != nil {
+			row.SkipTopLevelContainers = sanitizeSkipList(*req.SkipTopLevelContainers)
+		}
+		return nil
+	})
 }
 
-// persistCfg is the shared validate→save→store tail used by every
-// CRUD path (AddServer / RemoveServer / UpdateServer). Validates
-// against the cross-section rules in `Config.Validate`, persists via
-// `Config.Save`, atomically swaps the live snapshot via
-// `CfgHolder.Store`. Extracted to drop SonarCloud duplication on
-// PR #357 round-2 — the tail was ~14 lines repeated in each method.
+// updateCfg is the shared mutate→validate→persist tail used by every
+// CRUD path (AddServer / RemoveServer / UpdateServer). fn runs under
+// the holder's single write lock (CfgHolder.Update): it receives the
+// fresh clone of the live snapshot, mutates it, and — after fn
+// succeeds — the helper validates the result against the cross-section
+// rules in `Config.NormalizeAndValidate`, and Update persists via
+// `Config.Save` + atomically swaps the live snapshot. Because the
+// clone→validate→Save→Store sequence is serialized with every OTHER
+// config writer in the process (admin settings/roots/variants-dir
+// handlers), a concurrent mutation can't be silently dropped by the
+// last Save (2026-07-21 review finding M13).
 //
-// Caller MUST hold `a.crudMu` (the CRUD-write serializer) before
-// invoking this helper. Helper does NOT re-acquire it.
-func (a *upnpAdminAdapter) persistCfg(next *config.Config) error {
-	if err := next.NormalizeAndValidate(); err != nil {
-		return fmt.Errorf("%w: %v", admin.ErrUPnPValidation, err)
-	}
+// fn rejections and validation failures carry the admin sentinel
+// wrapping (ErrUPnPValidation / ErrUPnPDuplicateUDN /
+// ErrUPnPNoSuchServer); anything else out of Update is the Save
+// failure and gets the "save bridge.yaml" wrapping. Extracted to drop
+// SonarCloud duplication on PR #357 round-2 (as persistCfg; reworked
+// to the Update contract for M13).
+func (a *upnpAdminAdapter) updateCfg(fn func(*config.Config) error) error {
 	if a.cfgPath == "" {
 		return fmt.Errorf("save bridge.yaml: cfgPath not wired")
 	}
-	if err := next.Save(a.cfgPath); err != nil {
+	err := a.cfgHolder.Update(a.cfgPath, func(next *config.Config) error {
+		if err := fn(next); err != nil {
+			return err
+		}
+		if err := next.NormalizeAndValidate(); err != nil {
+			return fmt.Errorf("%w: %v", admin.ErrUPnPValidation, err)
+		}
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, admin.ErrUPnPValidation) ||
+			errors.Is(err, admin.ErrUPnPDuplicateUDN) ||
+			errors.Is(err, admin.ErrUPnPNoSuchServer) {
+			return err
+		}
 		return fmt.Errorf("save bridge.yaml: %w", err)
 	}
-	a.cfgHolder.Store(next)
 	return nil
 }
 

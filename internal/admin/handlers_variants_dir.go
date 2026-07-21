@@ -99,12 +99,12 @@ func (s *Server) apiVariantsDirPatch(w http.ResponseWriter, r *http.Request) {
 
 	// Validation: empty = revert-to-default (valid); non-empty must
 	// be absolute AND not under any library root. Validation reads
-	// the live config snapshot WITHOUT holding the mutex —
-	// CfgHolder is atomic-pointer-backed (PR #234) so the read is
-	// race-free. The mutex is acquired ONLY for the load+clone+save+
-	// publish sequence below, narrowing the contended region from
-	// "validation + disk save + DB probes" down to "save + publish."
-	// CodeRabbit Major on PR #245.
+	// the live config snapshot WITHOUT holding any lock — CfgHolder
+	// is atomic-pointer-backed (PR #234) so the read is race-free.
+	// The holder's write lock is taken (inside CfgHolder.Update) ONLY
+	// for the clone+save+publish sequence below, narrowing the
+	// contended region from "validation + disk save + DB probes"
+	// down to "save + publish." CodeRabbit Major on PR #245.
 	if req.Path != "" {
 		if !filepath.IsAbs(req.Path) {
 			writeError(w, http.StatusBadRequest, "not-absolute",
@@ -118,49 +118,44 @@ func (s *Server) apiVariantsDirPatch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Mutate config + persist. Save() does atomic temp-file + rename.
-	// Mutex serialises concurrent operators editing config (single-
-	// user surface in practice, but the guard is a correctness
-	// backstop). The disk-snapshot + DB-count probes below run
-	// OUTSIDE the mutex so a slow filesystem stat can't serialise
-	// unrelated admin work.
-	//
-	// The holder is RE-loaded INSIDE the mutex and the mutation built
-	// on a deep config.Clone — same shape as apiSettingsPatch /
-	// apiRootsAdd. Cloning a pre-mutex snapshot would silently revert
-	// any config write (settings PATCH, roots add) that committed
-	// between the validation read above and the lock; a shallow
-	// `next := *cfg` would additionally alias pointer fields
-	// (Upscale.OptimizeEnabled is *bool) with the live snapshot.
-	s.mu.Lock()
-	next := config.Clone(s.deps.CfgHolder.Load())
-	// Re-validate against THIS locked snapshot's roots: a concurrent apiRootsAdd
-	// could have committed a root containing req.Path between the pre-lock check
-	// and here, and config.Load's validateVariantsDir would then reject the
-	// persisted value at next boot (the "UI said fine / boot rejects" hazard).
-	// Mirror the pre-lock guard's empty-path carve-out.
-	if req.Path != "" {
-		if err := assertNotUnderLibraryRoots(req.Path, next.LibraryRoots); err != nil {
-			s.mu.Unlock()
-			writeError(w, http.StatusBadRequest, "under-library-root", err.Error())
-			return
+	// Mutate + persist via CfgHolder.Update: the clone-from-live →
+	// re-validate → Save → Store sequence runs under the holder's
+	// single write lock, shared with every other config writer
+	// (settings PATCH, roots add/remove, UPnP server CRUD), so a
+	// concurrent writer committing between the validation read above
+	// and here is both SEEN (the clone is taken fresh inside the
+	// lock) and PRESERVED (its fields ride along in the clone) —
+	// 2026-07-21 review finding M13. Save() does atomic temp-file +
+	// rename. The disk-snapshot + DB-count probes below run OUTSIDE
+	// the lock so a slow filesystem stat can't serialise unrelated
+	// admin work.
+	err := s.deps.CfgHolder.Update(s.deps.CfgPath, func(next *config.Config) error {
+		// Re-validate against THIS locked snapshot's roots: a concurrent apiRootsAdd
+		// could have committed a root containing req.Path between the pre-check above
+		// and here, and config.Load's validateVariantsDir would then reject the
+		// persisted value at next boot (the "UI said fine / boot rejects" hazard).
+		// Mirror the pre-check's empty-path carve-out.
+		if req.Path != "" {
+			if err := assertNotUnderLibraryRoots(req.Path, next.LibraryRoots); err != nil {
+				return &cfgAbort{status: http.StatusBadRequest, code: "under-library-root", msg: err.Error()}
+			}
 		}
-	}
-	next.Upscale.VariantsDir = req.Path
-	if err := next.Save(s.deps.CfgPath); err != nil {
-		s.mu.Unlock()
-		writeError(w, http.StatusInternalServerError, "save-config", err.Error())
+		next.Upscale.VariantsDir = req.Path
+		return nil
+	})
+	if err != nil {
+		writeCfgUpdateErr(w, err)
 		return
 	}
-	// Reload via the holder so subsequent reads (including the
-	// transcode pool's next OutputDir computation) see the new value.
-	s.deps.CfgHolder.Store(next)
-	s.mu.Unlock()
 
 	// Return the refreshed snapshot. Disk + DB probes run unlocked —
-	// they're read-only and a stale-by-a-few-ms snapshot is fine.
-	current := next.Upscale.EffectiveVariantsDir(next.DataDir)
-	defaultDir := transcode.OutputDirFor(next.DataDir)
+	// they're read-only and a stale-by-a-few-ms snapshot is fine. The
+	// holder's fresh Load IS the clone Update just stored, so
+	// subsequent reads (including the transcode pool's next OutputDir
+	// computation) see the new value.
+	applied := s.deps.CfgHolder.Load()
+	current := applied.Upscale.EffectiveVariantsDir(applied.DataDir)
+	defaultDir := transcode.OutputDirFor(applied.DataDir)
 	ctx := r.Context()
 	used, free := s.probeVariantsDirUsage(ctx, current)
 	legacyCount, legacyBytes := s.countLegacyVariants(ctx, current)
@@ -276,9 +271,9 @@ func (s *Server) probeVariantsDirUsage(ctx context.Context, dir string) (int64, 
 // Implementation routes through `Manifest.CountVariantsNotUnderPrefix`,
 // a single SQL aggregate. Pre-fix this helper fetched every variant
 // into Go-side memory and iterated — inefficient at 50k+ variants
-// AND run while holding `s.mu` in apiVariantsDirPatch (Gemini medium
-// on PR D2). The SQL path is bounded to a single index range scan +
-// aggregate.
+// AND run while holding apiVariantsDirPatch's config-write lock
+// (Gemini medium on PR D2). The SQL path is bounded to a single index
+// range scan + aggregate.
 func (s *Server) countLegacyVariants(ctx context.Context, currentDir string) (int, int64) {
 	if currentDir == "" || s.deps.Manifest == nil {
 		return 0, 0

@@ -34,6 +34,32 @@ const (
 	errMsgUpdaterNotConfig = "updater is not configured"
 )
 
+// cfgAbort lets a config-mutation fn passed to CfgHolder.Update carry
+// the HTTP response the handler should write when fn rejects the
+// change: Update returns fn's error verbatim, so the handler maps a
+// *cfgAbort back to the exact status/code/body the pre-Update inline
+// validation wrote. Any non-cfgAbort error out of Update is the
+// on-disk Save failure (500 save-config).
+type cfgAbort struct {
+	status int
+	code   string
+	msg    string
+}
+
+func (e *cfgAbort) Error() string { return e.msg }
+
+// writeCfgUpdateErr maps a CfgHolder.Update failure to the handler's
+// error response: fn rejections (*cfgAbort) keep their intended
+// status + wire code; anything else is the Save failure.
+func writeCfgUpdateErr(w http.ResponseWriter, err error) {
+	var abort *cfgAbort
+	if errors.As(err, &abort) {
+		writeError(w, abort.status, abort.code, abort.msg)
+		return
+	}
+	writeError(w, http.StatusInternalServerError, errCodeSaveConfig, err.Error())
+}
+
 // --- response shapes ---
 
 type statsResponse struct {
@@ -1292,7 +1318,6 @@ func (s *Server) apiRootsAdd(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	cfg := s.deps.CfgHolder.Load()
 
 	current := s.deps.Scanner.Roots()
 	if slices.Contains(current, abs) {
@@ -1331,13 +1356,18 @@ func (s *Server) apiRootsAdd(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// Clone cfg before mutating. With copy-on-write semantics the live
-	// snapshot is only updated by the Store() call below; if Save fails
-	// we simply return early and the clone is discarded — no manual
-	// rollback required.
-	next := config.Clone(cfg)
-	next.LibraryRoots = newList
-	if err := next.Save(s.deps.CfgPath); err != nil {
+	// Persist via CfgHolder.Update: the clone-from-live → Save → Store
+	// sequence runs under the holder's single write lock, shared with
+	// every other config writer (settings PATCH, UPnP server CRUD, …).
+	// The clone is taken from the live snapshot inside that lock, so a
+	// concurrent writer committing between our checks above and here
+	// can't be silently dropped by our Save. If Save fails the clone
+	// is discarded — no manual rollback required.
+	err = s.deps.CfgHolder.Update(s.deps.CfgPath, func(next *config.Config) error {
+		next.LibraryRoots = newList
+		return nil
+	})
+	if err != nil {
 		// Compensating scan: if we reached here via the transition
 		// branch, WipeFilesystemTracks has already cleared the
 		// filesystem rows (UPnP-routed rows were spared) but the config
@@ -1357,7 +1387,6 @@ func (s *Server) apiRootsAdd(w http.ResponseWriter, r *http.Request) {
 	}
 	s.deps.Scanner.SetRoots(newList)
 	s.deps.Resolver.SetRoots(newList)
-	s.deps.CfgHolder.Store(next)
 	s.spawnBackgroundScan("post-add scan")
 	writeJSON(w, http.StatusCreated, rootRow{Path: abs, Tracks: 0})
 }
@@ -1384,7 +1413,6 @@ func (s *Server) apiRootsRemove(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	cfg := s.deps.CfgHolder.Load()
 
 	current := s.deps.Scanner.Roots()
 	idx := slices.Index(current, abs)
@@ -1428,13 +1456,16 @@ func (s *Server) apiRootsRemove(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// Clone cfg before mutating. With copy-on-write semantics the live
-	// snapshot is only updated by the Store() call below; if Save fails
-	// we simply return early and the clone is discarded — no manual
-	// rollback required.
-	next := config.Clone(cfg)
-	next.LibraryRoots = newList
-	if err := next.Save(s.deps.CfgPath); err != nil {
+	// Persist via CfgHolder.Update — same shape as apiRootsAdd: the
+	// clone-from-live → Save → Store sequence runs under the holder's
+	// single write lock, so a concurrent config writer committing
+	// between our checks above and here can't be silently dropped.
+	// On Save failure the clone is discarded — no manual rollback.
+	err := s.deps.CfgHolder.Update(s.deps.CfgPath, func(next *config.Config) error {
+		next.LibraryRoots = newList
+		return nil
+	})
+	if err != nil {
 		// Compensating scan — same rationale as the Add path: the
 		// manifest op above already mutated /v1/manifest (wipe or
 		// prefix-delete), and without a rescan the manifest sits in
@@ -1450,7 +1481,6 @@ func (s *Server) apiRootsRemove(w http.ResponseWriter, r *http.Request) {
 	}
 	s.deps.Scanner.SetRoots(newList)
 	s.deps.Resolver.SetRoots(newList)
-	s.deps.CfgHolder.Store(next)
 	s.spawnBackgroundScan("post-remove scan")
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -1740,221 +1770,231 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	cfg := s.deps.CfgHolder.Load()
-	next := config.Clone(cfg)
-	restart := false
 
-	if p.LibraryName != nil {
-		next.LibraryName = strings.TrimSpace(*p.LibraryName)
-		// Library name reaches iOS via /v1/health, which reads the live
-		// cfg each request — no restart needed.
-	}
-	if p.ListenAddress != nil {
-		if *p.ListenAddress != next.ListenAddress {
-			next.ListenAddress = *p.ListenAddress
-			restart = true
+	// Mutate + persist via CfgHolder.Update: the clone-from-live →
+	// mutate → validate → Save → Store sequence runs under the
+	// holder's single write lock, shared with every other config
+	// writer (roots add/remove, variants-dir PATCH, UPnP server CRUD),
+	// so a concurrent writer committing between two of our steps can't
+	// be silently dropped by our Save (2026-07-21 review finding M13).
+	// s.mu stays held across the commit AND the side effects below so
+	// two concurrent PATCHes fire their hot-reload callbacks in commit
+	// order. fn rejections ride back as *cfgAbort; updateErr is either
+	// one of those or the Save failure.
+	var (
+		restart              bool
+		tailscaleWasDisabled bool
+		tailscaleHotReload   bool
+		mdnsWasEnabled       bool
+		mdnsNowEnabled       bool
+	)
+	updateErr := s.deps.CfgHolder.Update(s.deps.CfgPath, func(next *config.Config) error {
+		if p.LibraryName != nil {
+			next.LibraryName = strings.TrimSpace(*p.LibraryName)
+			// Library name reaches iOS via /v1/health, which reads the live
+			// cfg each request — no restart needed.
 		}
-	}
-	if p.AdminAddress != nil {
-		if *p.AdminAddress != next.AdminAddress {
-			next.AdminAddress = *p.AdminAddress
-			restart = true
+		if p.ListenAddress != nil {
+			if *p.ListenAddress != next.ListenAddress {
+				next.ListenAddress = *p.ListenAddress
+				restart = true
+			}
 		}
-	}
-	if p.ScanIntervalSec != nil {
-		if *p.ScanIntervalSec != next.ScanIntervalSec {
-			next.ScanIntervalSec = *p.ScanIntervalSec
-			// scanner.RunPeriodic creates a static time.NewTicker at
-			// startup and never re-evaluates the interval; the new value
-			// only takes effect after a restart.
-			restart = true
+		if p.AdminAddress != nil {
+			if *p.AdminAddress != next.AdminAddress {
+				next.AdminAddress = *p.AdminAddress
+				restart = true
+			}
 		}
-	}
-	if p.UpdateAutoInstall != nil {
-		if *p.UpdateAutoInstall != next.Update.AutoInstall {
-			next.Update.AutoInstall = *p.UpdateAutoInstall
-			// AutoInstall is wired into the updater at constructor
-			// time (cmd/bridge/main.go reads cfg.Update.AutoInstall
-			// once when building updater.Options). Toggling it at
-			// runtime requires a restart for the change to bind.
-			restart = true
+		if p.ScanIntervalSec != nil {
+			if *p.ScanIntervalSec != next.ScanIntervalSec {
+				next.ScanIntervalSec = *p.ScanIntervalSec
+				// scanner.RunPeriodic creates a static time.NewTicker at
+				// startup and never re-evaluates the interval; the new value
+				// only takes effect after a restart.
+				restart = true
+			}
 		}
-	}
-	if p.UpdateQuietHours != nil {
-		if *p.UpdateQuietHours != next.Update.QuietHours {
-			next.Update.QuietHours = *p.UpdateQuietHours
-			restart = true
+		if p.UpdateAutoInstall != nil {
+			if *p.UpdateAutoInstall != next.Update.AutoInstall {
+				next.Update.AutoInstall = *p.UpdateAutoInstall
+				// AutoInstall is wired into the updater at constructor
+				// time (cmd/bridge/main.go reads cfg.Update.AutoInstall
+				// once when building updater.Options). Toggling it at
+				// runtime requires a restart for the change to bind.
+				restart = true
+			}
 		}
-	}
-	if p.UpdateCheckIntervalHours != nil {
-		if *p.UpdateCheckIntervalHours != next.Update.CheckIntervalHours {
-			next.Update.CheckIntervalHours = *p.UpdateCheckIntervalHours
-			restart = true
+		if p.UpdateQuietHours != nil {
+			if *p.UpdateQuietHours != next.Update.QuietHours {
+				next.Update.QuietHours = *p.UpdateQuietHours
+				restart = true
+			}
 		}
-	}
-	// Custom endpoints: array form takes precedence; textarea form is
-	// split on newlines (also tolerates `,` so curl-driven flat
-	// strings work). Validate() runs at the end and prunes invalid
-	// entries — we don't reject the whole patch on per-entry typos.
-	// Live behaviour: handlers read `cfg.CustomEndpoints` per-request
-	// (Endpoints / /v1/health), so config-on-disk + in-memory cfg
-	// updates suffice — no restart_required for this field alone.
-	// Cert SAN coverage for new entries is operator-driven via the
-	// admin Cert tile (PR feat/tls-broader-sans).
-	if p.UpscaleEnabled != nil {
-		if *p.UpscaleEnabled != next.Upscale.Enabled {
-			next.Upscale.Enabled = *p.UpscaleEnabled
-			// Pool / sox-precheck / api wiring happens once at
-			// `bridge serve` startup. A live flip would have to
-			// instantiate (or shut down) the Pool, change the
-			// /v1/health response, AND reconfigure the variant-
-			// store hook — invasive enough that surfacing
-			// "restart required" is the right call for v1.2.
-			// A future iteration could hot-apply via a
-			// runtime hook, but the operator-friction gain
-			// isn't worth the rewiring complexity until a
-			// user requests it.
-			restart = true
+		if p.UpdateCheckIntervalHours != nil {
+			if *p.UpdateCheckIntervalHours != next.Update.CheckIntervalHours {
+				next.Update.CheckIntervalHours = *p.UpdateCheckIntervalHours
+				restart = true
+			}
 		}
-	}
-	if p.AnalysisEnabled != nil {
-		if *p.AnalysisEnabled != next.Analysis.Enabled {
-			next.Analysis.Enabled = *p.AnalysisEnabled
-			// Same rationale as upscale: the serve-side `waveform`
-			// health flag + /v1/waveform wiring are decided once at
-			// startup, so a runtime flip needs a restart to take
-			// effect. Idempotent same-value submissions skip the banner.
-			restart = true
+		// Custom endpoints: array form takes precedence; textarea form is
+		// split on newlines (also tolerates `,` so curl-driven flat
+		// strings work). Validate() runs at the end and prunes invalid
+		// entries — we don't reject the whole patch on per-entry typos.
+		// Live behaviour: handlers read `cfg.CustomEndpoints` per-request
+		// (Endpoints / /v1/health), so config-on-disk + in-memory cfg
+		// updates suffice — no restart_required for this field alone.
+		// Cert SAN coverage for new entries is operator-driven via the
+		// admin Cert tile (PR feat/tls-broader-sans).
+		if p.UpscaleEnabled != nil {
+			if *p.UpscaleEnabled != next.Upscale.Enabled {
+				next.Upscale.Enabled = *p.UpscaleEnabled
+				// Pool / sox-precheck / api wiring happens once at
+				// `bridge serve` startup. A live flip would have to
+				// instantiate (or shut down) the Pool, change the
+				// /v1/health response, AND reconfigure the variant-
+				// store hook — invasive enough that surfacing
+				// "restart required" is the right call for v1.2.
+				// A future iteration could hot-apply via a
+				// runtime hook, but the operator-friction gain
+				// isn't worth the rewiring complexity until a
+				// user requests it.
+				restart = true
+			}
 		}
-	}
-	if p.SmartPlaylistsEnabled != nil {
-		if *p.SmartPlaylistsEnabled != next.SmartPlaylists.Enabled {
-			next.SmartPlaylists.Enabled = *p.SmartPlaylistsEnabled
-			// The daily smart-playlist regenerator goroutine is launched
-			// once at startup (cmd/bridge/main.go), so a runtime flip
-			// needs a restart. Idempotent same-value submissions skip the
-			// banner.
-			restart = true
+		if p.AnalysisEnabled != nil {
+			if *p.AnalysisEnabled != next.Analysis.Enabled {
+				next.Analysis.Enabled = *p.AnalysisEnabled
+				// Same rationale as upscale: the serve-side `waveform`
+				// health flag + /v1/waveform wiring are decided once at
+				// startup, so a runtime flip needs a restart to take
+				// effect. Idempotent same-value submissions skip the banner.
+				restart = true
+			}
 		}
-	}
-	// Enrich upstream base URLs (#406's config). Trim to match
-	// normalizeBaseURL so a re-submit of the stored value doesn't spuriously
-	// flag a restart; Config.Validate() below does the authoritative
-	// normalize + http(s) validation. Restart-required (clients wired once).
-	applyEnrichBase := func(in *string, dst *string) {
-		if in == nil {
-			return
+		if p.SmartPlaylistsEnabled != nil {
+			if *p.SmartPlaylistsEnabled != next.SmartPlaylists.Enabled {
+				next.SmartPlaylists.Enabled = *p.SmartPlaylistsEnabled
+				// The daily smart-playlist regenerator goroutine is launched
+				// once at startup (cmd/bridge/main.go), so a runtime flip
+				// needs a restart. Idempotent same-value submissions skip the
+				// banner.
+				restart = true
+			}
 		}
-		if v := strings.TrimRight(strings.TrimSpace(*in), "/"); v != *dst {
-			*dst = v
-			restart = true
+		// Enrich upstream base URLs (#406's config). Trim to match
+		// normalizeBaseURL so a re-submit of the stored value doesn't spuriously
+		// flag a restart; Config.Validate() below does the authoritative
+		// normalize + http(s) validation. Restart-required (clients wired once).
+		applyEnrichBase := func(in *string, dst *string) {
+			if in == nil {
+				return
+			}
+			if v := strings.TrimRight(strings.TrimSpace(*in), "/"); v != *dst {
+				*dst = v
+				restart = true
+			}
 		}
-	}
-	applyEnrichBase(p.EnrichMusicBrainzBaseURL, &next.Enrich.MusicBrainzBaseURL)
-	applyEnrichBase(p.EnrichCoverArtBaseURL, &next.Enrich.CoverArtBaseURL)
-	if p.AtlasEnabled != nil {
-		if *p.AtlasEnabled != next.Atlas.Enabled {
-			next.Atlas.Enabled = *p.AtlasEnabled
-			// Restart-required: the /v1/atlas-ingest + /v1/atlas-meta routes
-			// and the atlasEnrichment health flag are wired once at startup.
-			// Idempotent same-value submits skip the banner.
-			restart = true
+		applyEnrichBase(p.EnrichMusicBrainzBaseURL, &next.Enrich.MusicBrainzBaseURL)
+		applyEnrichBase(p.EnrichCoverArtBaseURL, &next.Enrich.CoverArtBaseURL)
+		if p.AtlasEnabled != nil {
+			if *p.AtlasEnabled != next.Atlas.Enabled {
+				next.Atlas.Enabled = *p.AtlasEnabled
+				// Restart-required: the /v1/atlas-ingest + /v1/atlas-meta routes
+				// and the atlasEnrichment health flag are wired once at startup.
+				// Idempotent same-value submits skip the banner.
+				restart = true
+			}
 		}
-	}
-	if p.CustomEndpoints != nil {
-		next.CustomEndpoints = *p.CustomEndpoints
-	} else if p.CustomEndpointsText != nil {
-		next.CustomEndpoints = splitCustomEndpointsText(*p.CustomEndpointsText)
-	}
+		if p.CustomEndpoints != nil {
+			next.CustomEndpoints = *p.CustomEndpoints
+		} else if p.CustomEndpointsText != nil {
+			next.CustomEndpoints = splitCustomEndpointsText(*p.CustomEndpointsText)
+		}
 
-	// PR 4 — Tailscale mode dropdown. Hot-reload matrix:
-	//   any  → disabled:  no restart; cmd-side TailscaleDisable
-	//                     callback cancels the auto-pilot ctx +
-	//                     clears the LE cert from certManager.
-	//   any  → cli|tsnet: RestartRequired — auto-pilot + listener
-	//                     composition need a clean boot.
-	// Same posture-default rule from applyDefaults applies on
-	// validation: the new value is taken literally (empty string
-	// is rejected by EffectiveMode → caught by next.Validate
-	// below if user typoed).
-	tailscaleWasDisabled := false
-	tailscaleNowDisabled := false
-	tailscaleHotReload := false
-	if p.TailscaleMode != nil {
-		prevMode, _ := next.Tailscale.EffectiveMode()
-		tailscaleWasDisabled = prevMode == config.TailscaleModeDisabled
-		// Empty payload is ambiguous: EffectiveMode() resolves
-		// "" to "cli" (historical default), but applyDefaults
-		// sets it to "disabled" in public mode. The PATCH
-		// surface tolerates whitespace but rejects the bare-
-		// empty form so an operator who accidentally clears the
-		// dropdown doesn't silently flip into the wrong mode.
-		// (Gemini medium on PR #294 caught the divergence.)
-		trimmed := strings.TrimSpace(*p.TailscaleMode)
-		if trimmed == "" {
-			writeError(w, http.StatusBadRequest, "validate",
-				"tailscaleMode: must be one of cli|tsnet|disabled (empty payload not accepted — would silently differ between loopback and public defaults)")
-			return
+		// PR 4 — Tailscale mode dropdown. Hot-reload matrix:
+		//   any  → disabled:  no restart; cmd-side TailscaleDisable
+		//                     callback cancels the auto-pilot ctx +
+		//                     clears the LE cert from certManager.
+		//   any  → cli|tsnet: RestartRequired — auto-pilot + listener
+		//                     composition need a clean boot.
+		// Same posture-default rule from applyDefaults applies on
+		// validation: the new value is taken literally (empty string
+		// is rejected by EffectiveMode → caught by next.Validate
+		// below if user typoed).
+		if p.TailscaleMode != nil {
+			prevMode, _ := next.Tailscale.EffectiveMode()
+			tailscaleWasDisabled = prevMode == config.TailscaleModeDisabled
+			// Empty payload is ambiguous: EffectiveMode() resolves
+			// "" to "cli" (historical default), but applyDefaults
+			// sets it to "disabled" in public mode. The PATCH
+			// surface tolerates whitespace but rejects the bare-
+			// empty form so an operator who accidentally clears the
+			// dropdown doesn't silently flip into the wrong mode.
+			// (Gemini medium on PR #294 caught the divergence.)
+			trimmed := strings.TrimSpace(*p.TailscaleMode)
+			if trimmed == "" {
+				return &cfgAbort{status: http.StatusBadRequest, code: "validate",
+					msg: "tailscaleMode: must be one of cli|tsnet|disabled (empty payload not accepted — would silently differ between loopback and public defaults)"}
+			}
+			next.Tailscale.Mode = trimmed
+			newMode, modeErr := next.Tailscale.EffectiveMode()
+			if modeErr != nil {
+				return &cfgAbort{status: http.StatusBadRequest, code: "validate", msg: modeErr.Error()}
+			}
+			tailscaleNowDisabled := newMode == config.TailscaleModeDisabled
+			// Hot-reload contract: only the cli → disabled
+			// transition fires the in-process Disable callback.
+			// All other transitions need a restart:
+			//   - disabled → cli|tsnet: auto-pilot + listener wiring
+			//     need a clean boot.
+			//   - cli ↔ tsnet:          same as above.
+			//   - tsnet → disabled:     the embedded tsnet.Server
+			//     and its listeners are wired at startup and can't
+			//     be torn down mid-process; without a restart they
+			//     would keep running until SIGINT (Gemini high on
+			//     PR #294).
+			tailscaleHotReload = newMode != prevMode &&
+				tailscaleNowDisabled &&
+				prevMode == config.TailscaleModeCLI
+			if newMode != prevMode && !tailscaleHotReload {
+				restart = true
+			}
 		}
-		next.Tailscale.Mode = trimmed
-		newMode, modeErr := next.Tailscale.EffectiveMode()
-		if modeErr != nil {
-			writeError(w, http.StatusBadRequest, "validate", modeErr.Error())
-			return
+		if p.DLNAEnabled != nil {
+			if *p.DLNAEnabled != next.DLNA.Enabled {
+				next.DLNA.Enabled = *p.DLNAEnabled
+				// The DLNA HTTP listener + SSDP advertisers bind once at
+				// `bridge serve` startup (dlna_wiring.startDLNAIfEnabled).
+				// A live flip would have to spin up / tear down the
+				// listener and the per-interface SSDP advertisers — same
+				// startup-wired shape as upscaleEnabled, so restart-required
+				// is the honest answer rather than a partial hot-apply.
+				restart = true
+			}
 		}
-		tailscaleNowDisabled = newMode == config.TailscaleModeDisabled
-		// Hot-reload contract: only the cli → disabled
-		// transition fires the in-process Disable callback.
-		// All other transitions need a restart:
-		//   - disabled → cli|tsnet: auto-pilot + listener wiring
-		//     need a clean boot.
-		//   - cli ↔ tsnet:          same as above.
-		//   - tsnet → disabled:     the embedded tsnet.Server
-		//     and its listeners are wired at startup and can't
-		//     be torn down mid-process; without a restart they
-		//     would keep running until SIGINT (Gemini high on
-		//     PR #294).
-		tailscaleHotReload = newMode != prevMode &&
-			tailscaleNowDisabled &&
-			prevMode == config.TailscaleModeCLI
-		if newMode != prevMode && !tailscaleHotReload {
-			restart = true
+		// PR 4 — mDNS toggle. Hot-reloadable in BOTH directions.
+		mdnsWasEnabled = next.EffectiveMDNSEnabled()
+		mdnsNowEnabled = mdnsWasEnabled
+		if p.MDNSEnabled != nil {
+			v := *p.MDNSEnabled
+			next.MDNS.Enabled = &v
+			mdnsNowEnabled = v
 		}
-	}
-	if p.DLNAEnabled != nil {
-		if *p.DLNAEnabled != next.DLNA.Enabled {
-			next.DLNA.Enabled = *p.DLNAEnabled
-			// The DLNA HTTP listener + SSDP advertisers bind once at
-			// `bridge serve` startup (dlna_wiring.startDLNAIfEnabled).
-			// A live flip would have to spin up / tear down the
-			// listener and the per-interface SSDP advertisers — same
-			// startup-wired shape as upscaleEnabled, so restart-required
-			// is the honest answer rather than a partial hot-apply.
-			restart = true
-		}
-	}
-	// PR 4 — mDNS toggle. Hot-reloadable in BOTH directions.
-	mdnsWasEnabled := next.EffectiveMDNSEnabled()
-	mdnsNowEnabled := mdnsWasEnabled
-	if p.MDNSEnabled != nil {
-		v := *p.MDNSEnabled
-		next.MDNS.Enabled = &v
-		mdnsNowEnabled = v
-	}
 
-	// NormalizeAndValidate, not bare Validate: this path PERSISTS `next`,
-	// so it depends on the canonicalisation (customEndpoints prune, enrich
-	// base-URL trimming, autocert-domain trim) landing on the saved YAML.
-	// `next` is a fresh config.Clone owned by this handler.
-	if err := next.NormalizeAndValidate(); err != nil {
-		writeError(w, http.StatusBadRequest, "validate", err.Error())
+		// NormalizeAndValidate, not bare Validate: this path PERSISTS `next`,
+		// so it depends on the canonicalisation (customEndpoints prune, enrich
+		// base-URL trimming, autocert-domain trim) landing on the saved YAML.
+		// `next` is the fresh clone of the live snapshot Update hands this fn.
+		if err := next.NormalizeAndValidate(); err != nil {
+			return &cfgAbort{status: http.StatusBadRequest, code: "validate", msg: err.Error()}
+		}
+		return nil
+	})
+	if updateErr != nil {
+		writeCfgUpdateErr(w, updateErr)
 		return
 	}
-	if err := next.Save(s.deps.CfgPath); err != nil {
-		writeError(w, http.StatusInternalServerError, errCodeSaveConfig, err.Error())
-		return
-	}
-	s.deps.CfgHolder.Store(next)
 
 	// Fire hot-reload side effects AFTER persisting + publishing
 	// the new config. Order matters: the mdns-toggle + tailscale-
