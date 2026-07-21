@@ -36,12 +36,7 @@ func TestLookupTrack_caseInsensitiveAndLeadingSlash(t *testing.T) {
 	defer s.Close()
 
 	const canonical = "Abdullah Ibrahim/The Balance/09 - Devotion.flac"
-	if err := s.UpsertTrack(context.Background(), &Track{
-		Path: canonical, Size: 1, ModTime: time.Now(),
-		Artist: "Abdullah Ibrahim", Album: "The Balance",
-	}); err != nil {
-		t.Fatalf("UpsertTrack: %v", err)
-	}
+	seedTrack(t, s, canonical)
 
 	cases := []struct {
 		name string
@@ -59,16 +54,7 @@ func TestLookupTrack_caseInsensitiveAndLeadingSlash(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tr, err := s.LookupTrack(context.Background(), tc.path)
-			if err != nil {
-				t.Fatalf("LookupTrack(%q): %v", tc.path, err)
-			}
-			if tr == nil {
-				t.Fatalf("LookupTrack(%q) = nil; expected the track to be found", tc.path)
-			}
-			if tr.Path != canonical {
-				t.Errorf("LookupTrack(%q).Path = %q, want canonical %q", tc.path, tr.Path, canonical)
-			}
+			assertLookupTrackCanonical(t, s, tc.path, canonical)
 		})
 	}
 }
@@ -204,26 +190,8 @@ func TestLookupVariant_caseInsensitiveAndLeadingSlash(t *testing.T) {
 
 	const canonical = "Abdullah Ibrahim/The Balance/09 - Devotion.flac"
 	const variantID = "v176400-24"
-	if err := s.UpsertTrack(context.Background(), &Track{
-		Path: canonical, Size: 1, ModTime: time.Now(),
-	}); err != nil {
-		t.Fatalf("UpsertTrack: %v", err)
-	}
-	if err := s.UpsertVariant(context.Background(), VariantRow{
-		SourcePath:    canonical,
-		VariantID:     variantID,
-		SidecarPath:   "/cache/variant.flac",
-		Format:        "flac",
-		SampleRate:    176_400,
-		BitsPerSample: 24,
-		SizeBytes:     1024,
-		SourceMTimeNS: 0,
-		SourceSize:    1,
-		SoxSettings:   "{}",
-		CreatedAt:     time.Now().Unix(),
-	}); err != nil {
-		t.Fatalf("UpsertVariant: %v", err)
-	}
+	seedTrack(t, s, canonical)
+	seedVariant(t, s, canonical, variantID)
 
 	cases := []struct {
 		name string
@@ -304,12 +272,7 @@ func TestLookupTrack_redundantSeparators_endToEnd(t *testing.T) {
 	defer s.Close()
 
 	const canonical = "Artist/Album/01.flac"
-	if err := s.UpsertTrack(context.Background(), &Track{
-		Path: canonical, Size: 1, ModTime: time.Now(),
-		Artist: "Artist", Album: "Album",
-	}); err != nil {
-		t.Fatalf("UpsertTrack: %v", err)
-	}
+	seedTrack(t, s, canonical)
 
 	cases := []string{
 		"Artist//Album/01.flac",
@@ -319,16 +282,7 @@ func TestLookupTrack_redundantSeparators_endToEnd(t *testing.T) {
 	}
 	for _, p := range cases {
 		t.Run(p, func(t *testing.T) {
-			tr, err := s.LookupTrack(context.Background(), p)
-			if err != nil {
-				t.Fatalf("LookupTrack(%q): %v", p, err)
-			}
-			if tr == nil {
-				t.Fatalf("LookupTrack(%q) = nil; redundant-separator path should canonicalize and hit", p)
-			}
-			if tr.Path != canonical {
-				t.Errorf("LookupTrack(%q).Path = %q, want %q", p, tr.Path, canonical)
-			}
+			assertLookupTrackCanonical(t, s, p, canonical)
 		})
 	}
 }
@@ -376,22 +330,8 @@ func TestLookupTrack_unicodeFolding(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := s.UpsertTrack(context.Background(), &Track{
-				Path: tc.canonical, Size: 1, ModTime: time.Now(),
-				Artist: "Artist", Album: "Album",
-			}); err != nil {
-				t.Fatalf("UpsertTrack(%q): %v", tc.canonical, err)
-			}
-			tr, err := s.LookupTrack(context.Background(), tc.ioshape)
-			if err != nil {
-				t.Fatalf("LookupTrack(%q): %v", tc.ioshape, err)
-			}
-			if tr == nil {
-				t.Fatalf("LookupTrack(%q) returned nil — pre-v4 ASCII-only LOWER would fail here; v4 unicode_lower must match", tc.ioshape)
-			}
-			if tr.Path != tc.canonical {
-				t.Errorf("LookupTrack(%q).Path = %q, want canonical %q", tc.ioshape, tr.Path, tc.canonical)
-			}
+			seedTrack(t, s, tc.canonical)
+			assertLookupTrackCanonical(t, s, tc.ioshape, tc.canonical)
 		})
 	}
 }
@@ -442,22 +382,8 @@ func TestLookupTrack_nfdStoredPathFoundByNfcLookup(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := s.UpsertTrack(context.Background(), &Track{
-				Path: tc.canonical, Size: 1, ModTime: time.Now(),
-				Artist: "Artist", Album: "Album",
-			}); err != nil {
-				t.Fatalf("UpsertTrack(%q): %v", tc.canonical, err)
-			}
-			tr, err := s.LookupTrack(context.Background(), tc.ioshape)
-			if err != nil {
-				t.Fatalf("LookupTrack(%q): %v", tc.ioshape, err)
-			}
-			if tr == nil {
-				t.Fatalf("LookupTrack(%q) returned nil — pre-M9 unicode_lower missed NFD-stored paths; NFC composition must match", tc.ioshape)
-			}
-			if tr.Path != tc.canonical {
-				t.Errorf("LookupTrack(%q).Path = %q, want canonical %q", tc.ioshape, tr.Path, tc.canonical)
-			}
+			seedTrack(t, s, tc.canonical)
+			assertLookupTrackCanonical(t, s, tc.ioshape, tc.canonical)
 		})
 	}
 }
@@ -481,26 +407,8 @@ func TestLookupVariantAndAnalysis_nfdStoredPathFoundByNfcLookup(t *testing.T) {
 	const ioshape = "/sigur rós/ágætis byrjun/01 svefn-g-englar.flac"              // NFC + lower + slash
 	const variantID = "v176400-24"
 
-	if err := s.UpsertTrack(context.Background(), &Track{
-		Path: canonical, Size: 1, ModTime: time.Now(),
-	}); err != nil {
-		t.Fatalf("UpsertTrack: %v", err)
-	}
-	if err := s.UpsertVariant(context.Background(), VariantRow{
-		SourcePath:    canonical,
-		VariantID:     variantID,
-		SidecarPath:   "/cache/variant.flac",
-		Format:        "flac",
-		SampleRate:    176_400,
-		BitsPerSample: 24,
-		SizeBytes:     1024,
-		SourceMTimeNS: 0,
-		SourceSize:    1,
-		SoxSettings:   "{}",
-		CreatedAt:     time.Now().Unix(),
-	}); err != nil {
-		t.Fatalf("UpsertVariant: %v", err)
-	}
+	seedTrack(t, s, canonical)
+	seedVariant(t, s, canonical, variantID)
 	if err := s.UpsertAnalysis(context.Background(), AnalysisRow{
 		SourcePath:    canonical,
 		WaveformPath:  "/cache/01.wave",
@@ -539,4 +447,58 @@ func TestLookupVariantAndAnalysis_nfdStoredPathFoundByNfcLookup(t *testing.T) {
 			t.Errorf("a.SourcePath = %q, want %q", a.SourcePath, canonical)
 		}
 	})
+}
+
+// seedTrack upserts one track row under the canonical (scanner-
+// stored) path shape and fails the test on error. Shared by the
+// lookup-shape tests so each table entry stays data-only; the
+// Artist/Album tags are filler — every assertion keys on Path.
+func seedTrack(t *testing.T, s *Store, canonical string) {
+	t.Helper()
+	if err := s.UpsertTrack(context.Background(), &Track{
+		Path: canonical, Size: 1, ModTime: time.Now(),
+		Artist: "Artist", Album: "Album",
+	}); err != nil {
+		t.Fatalf("UpsertTrack(%q): %v", canonical, err)
+	}
+}
+
+// assertLookupTrackCanonical asserts LookupTrack resolves the
+// iOS-shaped path (lowercased, optional leading slash) to the row
+// stored under canonical.
+func assertLookupTrackCanonical(t *testing.T, s *Store, ioshape, canonical string) {
+	t.Helper()
+	tr, err := s.LookupTrack(context.Background(), ioshape)
+	if err != nil {
+		t.Fatalf("LookupTrack(%q): %v", ioshape, err)
+	}
+	if tr == nil {
+		t.Fatalf("LookupTrack(%q) returned nil — the fold must match the stored row", ioshape)
+	}
+	if tr.Path != canonical {
+		t.Errorf("LookupTrack(%q).Path = %q, want canonical %q", ioshape, tr.Path, canonical)
+	}
+}
+
+// seedVariant upserts one variant row for sourcePath so the
+// LookupVariant shape tests stay table-only. The sidecar fields are
+// opaque to the lookup contract — only SourcePath/VariantID are
+// matched — so one shared fixture keeps them consistent.
+func seedVariant(t *testing.T, s *Store, sourcePath, variantID string) {
+	t.Helper()
+	if err := s.UpsertVariant(context.Background(), VariantRow{
+		SourcePath:    sourcePath,
+		VariantID:     variantID,
+		SidecarPath:   "/cache/variant.flac",
+		Format:        "flac",
+		SampleRate:    176_400,
+		BitsPerSample: 24,
+		SizeBytes:     1024,
+		SourceMTimeNS: 0,
+		SourceSize:    1,
+		SoxSettings:   "{}",
+		CreatedAt:     time.Now().Unix(),
+	}); err != nil {
+		t.Fatalf("UpsertVariant: %v", err)
+	}
 }
