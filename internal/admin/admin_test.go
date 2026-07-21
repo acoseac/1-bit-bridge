@@ -1127,6 +1127,34 @@ func TestRenderPage_LoopbackModeSecurityChromeUnchanged(t *testing.T) {
 	}
 }
 
+// TestPageLogin_FrameAncestorsNoneBothModes pins the login page's
+// stricter framing guard (gemini security-medium on PR #546): unlike
+// renderPage's public-mode-only 'self', the login page refuses framing
+// by ANY origin in BOTH modes — XFO DENY has always been unconditional
+// here, and the CSP frame-ancestors 'none' twin matches it.
+func TestPageLogin_FrameAncestorsNoneBothModes(t *testing.T) {
+	for _, public := range []bool{false, true} {
+		srv, cfg, _ := newTestServer(t)
+		if public {
+			cfg.Deployment.Mode = "public"
+			cfg.Deployment.AdminTLSTerminatedByProxy = true
+			cfg.Autocert.Domain = "bridge.example.com"
+			srv.deps.CfgHolder.Store(cfg)
+		}
+		rw := httptest.NewRecorder()
+		srv.pageLogin(rw, httptest.NewRequest("GET", "/login", nil))
+		if rw.Code != 200 {
+			t.Fatalf("public=%v: status = %d; want 200", public, rw.Code)
+		}
+		if got, want := rw.Header().Get("Content-Security-Policy"), "frame-ancestors 'none'"; got != want {
+			t.Errorf("public=%v: Content-Security-Policy = %q, want %q", public, got, want)
+		}
+		if got := rw.Header().Get("X-Frame-Options"); got != "DENY" {
+			t.Errorf("public=%v: X-Frame-Options = %q, want DENY", public, got)
+		}
+	}
+}
+
 func TestStaticAssetsEmbedded(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	h := srv.Handler()

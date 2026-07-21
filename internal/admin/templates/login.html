@@ -37,7 +37,7 @@
 (function () {
   var form = document.getElementById("login-form");
   var err = document.getElementById("login-error");
-  var btn = form.querySelector("button[type=submit]");
+  var btn = form.querySelector("[type=submit]");
   form.addEventListener("submit", function (ev) {
     ev.preventDefault();
     // One attempt in flight at a time: every POST consumes a
