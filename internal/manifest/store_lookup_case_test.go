@@ -395,3 +395,148 @@ func TestLookupTrack_unicodeFolding(t *testing.T) {
 		})
 	}
 }
+
+// TestLookupTrack_nfdStoredPathFoundByNfcLookup pins the M9 fix
+// (2026-07-21 review) at the same iOS↔bridge path-shape boundary as
+// the unicode-folding test above. The scanner stores the on-disk
+// path shape, which is NFD for files migrated from HFS+ or synced
+// from a Linux/NAS box onto a Mac, while iOS sends NFC + lowercase.
+// Pre-fix `unicode_lower` folded case but never composed, so the
+// stored NFD key and the iOS NFC key compared byte-wise UNEQUAL and
+// the lookup missed for every accented NFD track — upscale
+// eligibility failed and variant / waveform requests 404'd. Post-fix
+// both sides compose to NFC inside `unicode_lower` and the fold
+// matches.
+//
+// The NFD forms use explicit combining-mark escapes so the
+// decomposition survives any editor/tooling that NFC-normalises
+// source files.
+func TestLookupTrack_nfdStoredPathFoundByNfcLookup(t *testing.T) {
+	s, err := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer s.Close()
+
+	cases := []struct {
+		name      string
+		canonical string // NFD shape the bridge scanner records
+		ioshape   string // NFC + lowercased + leading-slash shape iOS sends
+	}{
+		{
+			"icelandic (HFS+ migration shape)",
+			"Sigur Ro\u0301s/A\u0301gætis byrjun/01 Svefn-g-englar.flac",
+			"/sigur rós/ágætis byrjun/01 svefn-g-englar.flac",
+		},
+		{
+			"german umlaut (NAS sync shape)",
+			"Ro\u0308yksopp/Melody A.M./01 Eple.flac",
+			"/röyksopp/melody a.m./01 eple.flac",
+		},
+		{
+			"french café",
+			"Cafe\u0301 Del Mar/Volumen Diez/01.flac",
+			"/café del mar/volumen diez/01.flac",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := s.UpsertTrack(context.Background(), &Track{
+				Path: tc.canonical, Size: 1, ModTime: time.Now(),
+				Artist: "Artist", Album: "Album",
+			}); err != nil {
+				t.Fatalf("UpsertTrack(%q): %v", tc.canonical, err)
+			}
+			tr, err := s.LookupTrack(context.Background(), tc.ioshape)
+			if err != nil {
+				t.Fatalf("LookupTrack(%q): %v", tc.ioshape, err)
+			}
+			if tr == nil {
+				t.Fatalf("LookupTrack(%q) returned nil — pre-M9 unicode_lower missed NFD-stored paths; NFC composition must match", tc.ioshape)
+			}
+			if tr.Path != tc.canonical {
+				t.Errorf("LookupTrack(%q).Path = %q, want canonical %q", tc.ioshape, tr.Path, tc.canonical)
+			}
+		})
+	}
+}
+
+// TestLookupVariantAndAnalysis_nfdStoredPathFoundByNfcLookup mirrors
+// TestLookupTrack_nfdStoredPathFoundByNfcLookup for the two sibling
+// lookups that share the M9 miss class: the v4
+// `idx_track_variants_source_path_unicode_lower` and v15
+// `idx_track_analysis_source_path_unicode_lower` indexes embed the
+// same `unicode_lower` expression and are rebuilt alongside the
+// tracks index in migration v26. One representative NFD pair covers
+// both; the path table lives in the LookupTrack test.
+func TestLookupVariantAndAnalysis_nfdStoredPathFoundByNfcLookup(t *testing.T) {
+	s, err := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer s.Close()
+
+	const canonical = "Sigur Ro\u0301s/A\u0301gætis byrjun/01 Svefn-g-englar.flac" // NFD
+	const ioshape = "/sigur rós/ágætis byrjun/01 svefn-g-englar.flac"              // NFC + lower + slash
+	const variantID = "v176400-24"
+
+	if err := s.UpsertTrack(context.Background(), &Track{
+		Path: canonical, Size: 1, ModTime: time.Now(),
+	}); err != nil {
+		t.Fatalf("UpsertTrack: %v", err)
+	}
+	if err := s.UpsertVariant(context.Background(), VariantRow{
+		SourcePath:    canonical,
+		VariantID:     variantID,
+		SidecarPath:   "/cache/variant.flac",
+		Format:        "flac",
+		SampleRate:    176_400,
+		BitsPerSample: 24,
+		SizeBytes:     1024,
+		SourceMTimeNS: 0,
+		SourceSize:    1,
+		SoxSettings:   "{}",
+		CreatedAt:     time.Now().Unix(),
+	}); err != nil {
+		t.Fatalf("UpsertVariant: %v", err)
+	}
+	if err := s.UpsertAnalysis(context.Background(), AnalysisRow{
+		SourcePath:    canonical,
+		WaveformPath:  "/cache/01.wave",
+		WaveformTag:   "0123456789abcdef",
+		WaveformSize:  10,
+		SourceMTimeNS: 1,
+		SourceSize:    1,
+		SchemaVersion: "peak-v1",
+		CreatedAt:     time.Now().Unix(),
+	}); err != nil {
+		t.Fatalf("UpsertAnalysis: %v", err)
+	}
+
+	t.Run("variant", func(t *testing.T) {
+		v, err := s.LookupVariant(context.Background(), ioshape, variantID)
+		if err != nil {
+			t.Fatalf("LookupVariant: %v", err)
+		}
+		if v == nil {
+			t.Fatalf("LookupVariant(%q, %q) = nil — NFD-stored source_path must resolve via NFC fold", ioshape, variantID)
+		}
+		if v.SourcePath != canonical {
+			t.Errorf("v.SourcePath = %q, want %q", v.SourcePath, canonical)
+		}
+	})
+
+	t.Run("analysis", func(t *testing.T) {
+		a, err := s.LookupAnalysis(context.Background(), ioshape)
+		if err != nil {
+			t.Fatalf("LookupAnalysis: %v", err)
+		}
+		if a == nil {
+			t.Fatalf("LookupAnalysis(%q) = nil — NFD-stored source_path must resolve via NFC fold", ioshape)
+		}
+		if a.SourcePath != canonical {
+			t.Errorf("a.SourcePath = %q, want %q", a.SourcePath, canonical)
+		}
+	})
+}

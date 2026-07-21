@@ -1213,6 +1213,43 @@ var migrations = []migration{
 			return backfillFormatColumns(db)
 		},
 	},
+	{
+		// v26: rebuild every functional index embedding unicode_lower.
+		// unicode_lower() now NFC-composes its output (see
+		// internal/manifest/sqlfunc.go; 2026-07-21 review, M9) so iOS's
+		// NFC-normalised lookup shape matches paths the scanner stored
+		// in NFD (files migrated from HFS+ or synced from Linux/NAS
+		// onto a Mac). Functional indexes persist the function's output
+		// at build time, so an index built by the pre-NFC function
+		// keeps NFD-keyed entries for those rows and the new function
+		// alone can't fix the lookup — the indexes must be rebuilt.
+		//
+		// All THREE indexes that embed unicode_lower are rebuilt: the
+		// two v4 ones the review called out (tracks.path,
+		// track_variants.source_path) plus the v15
+		// track_analysis.source_path index, which shares the miss
+		// class (LookupAnalysis on an accented NFD path).
+		//
+		// DROP-then-CREATE (same shape as v4) rather than REINDEX:
+		// both rebuild from current data, but the ladder's established
+		// idiom re-applies cleanly if a crash lands between statements.
+		// **Index-build cost**: same order as v4/v15 — a few hundred ms
+		// on a 50k-track library, paid once at first launch after
+		// upgrade.
+		version: 26,
+		name:    "rebuild unicode_lower indexes for NFC composition",
+		sql: `
+		DROP INDEX IF EXISTS idx_tracks_path_unicode_lower;
+		DROP INDEX IF EXISTS idx_track_variants_source_path_unicode_lower;
+		DROP INDEX IF EXISTS idx_track_analysis_source_path_unicode_lower;
+		CREATE INDEX IF NOT EXISTS idx_tracks_path_unicode_lower
+			ON tracks(unicode_lower(path));
+		CREATE INDEX IF NOT EXISTS idx_track_variants_source_path_unicode_lower
+			ON track_variants(unicode_lower(source_path), variant_id);
+		CREATE INDEX IF NOT EXISTS idx_track_analysis_source_path_unicode_lower
+			ON track_analysis(unicode_lower(source_path));
+		`,
+	},
 }
 
 // backfillFormatColumns derives the v25 format-fact columns from
