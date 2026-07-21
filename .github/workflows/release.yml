@@ -23,19 +23,27 @@ jobs:
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
           go-version-file: go.mod
+          check-latest: true
           cache: true
 
       # rcodesign is the pure-Rust Apple-codesign tool GoReleaser's
       # notarize feature shells out to. Installing it on the Linux runner
       # means the whole signing + notarization pipeline can run without a
       # macOS runner (macOS-latest minutes cost ~10x Ubuntu). Pinned to a
-      # known-good release; bump deliberately after reviewing changelog.
+      # known-good release; bump deliberately after reviewing changelog,
+      # and recompute SHA256 from the new release asset when bumping.
       - name: Install rcodesign
         run: |
           set -eu
           VER=0.29.0
+          # SHA-256 of the pinned tarball, computed from the release asset
+          # on 2026-07-21. Verified after download so a tampered/retagged
+          # upstream artifact fails the job instead of reaching the
+          # code-signing pipeline. (shasum ships with the runner's perl.)
+          SHA256=dbe85cedd8ee4217b64e9a0e4c2aef92ab8bcaaa41f20bde99781ff02e600002
           URL="https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F${VER}/apple-codesign-${VER}-x86_64-unknown-linux-musl.tar.gz"
           curl -sSL -o /tmp/rcodesign.tar.gz "$URL"
+          echo "${SHA256}  /tmp/rcodesign.tar.gz" | shasum -a 256 -c -
           tar -xzf /tmp/rcodesign.tar.gz -C /tmp
           sudo mv /tmp/apple-codesign-*/rcodesign /usr/local/bin/
           rcodesign --version

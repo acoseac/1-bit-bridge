@@ -32,7 +32,7 @@
 # golang image sets GOTOOLCHAIN=local, so a stale value fails the build
 # with "go.mod requires go >= X" instead of auto-downloading a toolchain.
 ARG GO_VERSION=1.26
-ARG ALPINE_VERSION=3.19
+ARG ALPINE_VERSION=3.22
 
 # --- builder ---
 # Pinned to the native build platform (BuildKit-provided $BUILDPLATFORM)

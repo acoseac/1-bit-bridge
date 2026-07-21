@@ -1,0 +1,17 @@
+# Dependabot update policy. The github-actions ecosystem is what consumes
+# the `# vX.Y.Z` version comments next to each commit-pinned action in
+# .github/workflows/*.yml — it proposes bumps as PRs against the pinned SHA.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly
