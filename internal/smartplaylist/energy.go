@@ -2,6 +2,7 @@ package smartplaylist
 
 import (
 	"hash/fnv"
+	"math"
 	"sort"
 )
 
@@ -95,6 +96,13 @@ func ModalRateHz(rates []int) int {
 // --- helpers ---
 
 func clamp01(v float64) float64 {
+	// NaN fails BOTH comparisons below and would pass straight through
+	// into the persisted Energy []float64, where json.Marshal rejects
+	// it and aborts an entire Smart Mix regeneration. Map it to the
+	// same midpoint an unknown-loudness track gets.
+	if math.IsNaN(v) {
+		return energyMidpoint
+	}
 	if v < 0 {
 		return 0
 	}

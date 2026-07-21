@@ -2,6 +2,8 @@ package manifest
 
 import (
 	"context"
+	"database/sql"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -531,5 +533,51 @@ func TestSplicedReplayGainNotPersistedOnRoundTrip(t *testing.T) {
 				t.Fatalf("A/1 re-splice = %v, want analysis -9.0", tracks2[i].ReplayGainTrackDB)
 			}
 		}
+	}
+}
+
+// TestSpliceAnalysisReplayGain_SkipsNonFinite is the defense-in-depth
+// twin of the extractor-side guard (2026-07-21 review Low):
+// track_analysis is writable by an external sqlite3 CLI, so the REAL
+// column is not trusted input — a hand-written NaN/±Inf must NOT reach
+// the wire, where json.Marshal rejects non-finite floats and would
+// crash /v1/manifest mid-stream at enc.Encode. The splice skips them;
+// the track simply surfaces with no loudness.
+func TestSpliceAnalysisReplayGain_SkipsNonFinite(t *testing.T) {
+	cases := []struct {
+		name string
+		rg   sql.NullFloat64
+		want *float64
+	}{
+		{"null column", sql.NullFloat64{}, nil},
+		{"finite", sql.NullFloat64{Float64: -9.5, Valid: true}, f64ptr(-9.5)},
+		{"nan", sql.NullFloat64{Float64: math.NaN(), Valid: true}, nil},
+		{"+inf", sql.NullFloat64{Float64: math.Inf(1), Valid: true}, nil},
+		{"-inf", sql.NullFloat64{Float64: math.Inf(-1), Valid: true}, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var tr Track
+			spliceAnalysisReplayGain(&tr, tc.rg)
+			switch {
+			case tc.want == nil && tr.ReplayGainTrackDB != nil:
+				t.Fatalf("ReplayGainTrackDB = %v, want nil (non-finite skipped)", *tr.ReplayGainTrackDB)
+			case tc.want != nil && tr.ReplayGainTrackDB == nil:
+				t.Fatalf("ReplayGainTrackDB = nil, want %v", *tc.want)
+			case tc.want != nil && *tr.ReplayGainTrackDB != *tc.want:
+				t.Fatalf("ReplayGainTrackDB = %v, want %v", *tr.ReplayGainTrackDB, *tc.want)
+			}
+			if tc.want == nil && tr.replayGainFromAnalysis {
+				t.Error("replayGainFromAnalysis set for a skipped value — marshalForStorage would scrub a real tag")
+			}
+		})
+	}
+
+	// Tag-present track under the guard: a non-finite analysis value
+	// must not touch the curated tag (tag-absent-only contract holds).
+	tag := &Track{ReplayGainTrackDB: f64ptr(-5.0)}
+	spliceAnalysisReplayGain(tag, sql.NullFloat64{Float64: math.Inf(1), Valid: true})
+	if tag.ReplayGainTrackDB == nil || *tag.ReplayGainTrackDB != -5.0 {
+		t.Fatalf("curated tag = %v, want -5.0 (untouched)", tag.ReplayGainTrackDB)
 	}
 }

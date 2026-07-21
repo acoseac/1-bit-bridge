@@ -908,6 +908,56 @@ func TestScannerSkipsUnchangedFiles(t *testing.T) {
 	}
 }
 
+// TestScannerReextractsSameSizeOlderMtime pins the skip-gate fix
+// (2026-07-21 review Low): the early-skip used to fire whenever the
+// stored mtime was >= the file's, so a same-size replacement carrying
+// an OLDER mtime (cp -p restore, backup rollback) was never
+// re-extracted and kept serving stale tags. The gate now skips only on
+// exact mtime equality — a mismatch in EITHER direction re-extracts.
+func TestScannerReextractsSameSizeOlderMtime(t *testing.T) {
+	root := t.TempDir()
+	p := filepath.Join(root, "track.flac")
+	if err := os.WriteFile(p, []byte("not-a-real-flac"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	sc := NewScanner([]string{root}, s, "")
+	if _, err := sc.Scan(context.Background()); err != nil {
+		t.Fatalf("initial Scan: %v", err)
+	}
+
+	// Same-size replacement (15 bytes → 15 bytes) with an OLDER mtime.
+	older := time.Now().Add(-time.Hour).Truncate(time.Second)
+	if err := os.WriteFile(p, []byte("NOT-A-REAL-FLAC"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(p, older, older); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := sc.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("rescan: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("rescan touched %d tracks, want 1 (older-mtime replacement re-extracted)", n)
+	}
+	got, err := s.GetTrack(context.Background(), "track.flac")
+	if err != nil {
+		t.Fatalf("GetTrack: %v", err)
+	}
+	if got == nil {
+		t.Fatal("track row missing after rescan")
+	}
+	if !got.ModTime.Equal(older) {
+		t.Errorf("stored ModTime = %v, want re-extracted older mtime %v (skip gate kept the stale row)", got.ModTime, older)
+	}
+}
+
 // TestScannerWorkerPoolCommitsAllTracks confirms the new worker-pool +
 // batched-writer pipeline persists every walked file. Synthesises a
 // flat directory of N audio-extension files (Extract fails on each but

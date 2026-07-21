@@ -1,6 +1,7 @@
 package smartplaylist
 
 import (
+	"encoding/json"
 	"hash/fnv"
 	"math"
 	"testing"
@@ -36,19 +37,44 @@ func TestLoudnessToEnergy_LinearMap(t *testing.T) {
 		db   float64
 		want float64
 	}{
-		{0, 1.0},     // ceiling
-		{-24, 0.0},   // floor
-		{-12, 0.5},   // midpoint of the window
-		{-6, 0.75},   // 3/4
-		{-18, 0.25},  // 1/4
-		{6, 1.0},     // above ceiling → clamp
-		{-30, 0.0},   // below floor → clamp
-		{-1000, 0.0}, // pathological → clamp
+		{0, 1.0},            // ceiling
+		{-24, 0.0},          // floor
+		{-12, 0.5},          // midpoint of the window
+		{-6, 0.75},          // 3/4
+		{-18, 0.25},         // 1/4
+		{6, 1.0},            // above ceiling → clamp
+		{-30, 0.0},          // below floor → clamp
+		{-1000, 0.0},        // pathological → clamp
+		{math.Inf(1), 1.0},  // +Inf → clamp
+		{math.Inf(-1), 0.0}, // -Inf → clamp
+		{math.NaN(), 0.5},   // NaN → midpoint (see TestClamp01_NaN)
 	}
 	for _, c := range cases {
 		if got := LoudnessToEnergy(c.db); math.Abs(got-c.want) > 1e-9 {
 			t.Errorf("LoudnessToEnergy(%.1f) = %.4f want %.4f", c.db, got, c.want)
 		}
+	}
+}
+
+// TestClamp01_NaN pins the latent twin of the parseReplayGain batch
+// poison (2026-07-21 review): NaN fails BOTH clamp comparisons and
+// used to pass straight through into the persisted Energy []float64,
+// where json.Marshal rejects it — aborting an entire Smart Mix
+// regeneration. NaN now maps to the same midpoint an unknown-loudness
+// track gets.
+func TestClamp01_NaN(t *testing.T) {
+	if got := clamp01(math.NaN()); got != energyMidpoint {
+		t.Errorf("clamp01(NaN) = %v, want energyMidpoint %v", got, energyMidpoint)
+	}
+	nan := math.NaN()
+	env := EnergyEnvelope([]*float64{&nan, fptr(-12), fptr(-6)}, 1)
+	for i, v := range env {
+		if math.IsNaN(v) {
+			t.Fatalf("env[%d] = NaN — would abort Smart Mix regeneration at json.Marshal", i)
+		}
+	}
+	if _, err := json.Marshal(env); err != nil {
+		t.Fatalf("json.Marshal(envelope built from NaN loudness): %v", err)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path"
 	"path/filepath"
@@ -2384,6 +2385,14 @@ const replayGainSQL = `(SELECT replaygain_track_db
 func spliceAnalysisReplayGain(t *Track, rg sql.NullFloat64) {
 	if t.ReplayGainTrackDB == nil && rg.Valid {
 		v := rg.Float64
+		// track_analysis is reachable by an external sqlite3 CLI, so
+		// the REAL column is not trusted input: a hand-written NaN/±Inf
+		// would crash /v1/manifest mid-stream at enc.Encode
+		// (json.Marshal rejects non-finite floats). Skip it — the track
+		// simply surfaces with no loudness.
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return
+		}
 		t.ReplayGainTrackDB = &v
 		// Mark provenance so marshalForStorage scrubs this (analysis-
 		// derived) value on any write-back, never freezing it into

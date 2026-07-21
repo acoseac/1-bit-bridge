@@ -1074,6 +1074,16 @@ func TestParseReplayGain(t *testing.T) {
 		{"abc", nil},
 		{"dB", nil},
 		{" dB", nil},
+		// Real ReplayGain scanners emit non-finite values for
+		// digital-silence tracks; strconv.ParseFloat accepts them, but a
+		// NaN/±Inf gain would fail json.Marshal at batch-write time and
+		// poison the whole scan batch (2026-07-21 review H3).
+		{"nan", nil},
+		{"NaN dB", nil},
+		{"inf", nil},
+		{"+Inf dB", nil},
+		{"-inf", nil},
+		{"infinity db", nil},
 	}
 	for _, tc := range cases {
 		t.Run(strconv.Quote(tc.in), func(t *testing.T) {
