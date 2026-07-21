@@ -42,7 +42,11 @@ jobs:
           # code-signing pipeline. (shasum ships with the runner's perl.)
           SHA256=dbe85cedd8ee4217b64e9a0e4c2aef92ab8bcaaa41f20bde99781ff02e600002
           URL="https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F${VER}/apple-codesign-${VER}-x86_64-unknown-linux-musl.tar.gz"
-          curl -sSL -o /tmp/rcodesign.tar.gz "$URL"
+          # -f: HTTP 4xx/5xx exits non-zero (set -e kills the job) instead
+          # of saving an error page as the tarball; bounded retries plus
+          # connect/transfer timeouts so a stalled upstream can't hang
+          # the release — plain curl has neither bound.
+          curl -fsSL --retry 3 --connect-timeout 15 --max-time 300 -o /tmp/rcodesign.tar.gz "$URL"
           echo "${SHA256}  /tmp/rcodesign.tar.gz" | shasum -a 256 -c -
           tar -xzf /tmp/rcodesign.tar.gz -C /tmp
           sudo mv /tmp/apple-codesign-*/rcodesign /usr/local/bin/
