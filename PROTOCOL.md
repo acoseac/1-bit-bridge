@@ -374,7 +374,7 @@ event: upscale.complete
 data: {"path":"Music/Diana Krall/Live in Paris/01.flac","variantId":"upscaled-v1-176400-24","sampleRate":176400,"bitsPerSample":24,"completedAt":"2026-05-15T11:40:12Z"}
 
 event: pairing.abc123-def456
-data: {"state":"approved","verificationCode":"412 593"}
+data: {"status":"approved","ttlSecondsRemaining":0,"bridgeStartedAt":1735689600123}
 
 event: heartbeat
 data: {}
@@ -386,7 +386,7 @@ data: {"missed":3}
 **Topics**:
 - `upscale.stats` — fires whenever the bridge's upscale state changes (job queued, completed, failed). Payload matches `/v1/upscale/stats`.
 - `upscale.complete` (additive, since v1.3) — fires once per successful variant generation, immediately after the bridge has `UpsertVariant`-committed the row. Payload carries the library-relative source `path`, the resulting `variantId`, the variant's `sampleRate` + `bitsPerSample`, and a `completedAt` UTC timestamp. iOS uses this to reconcile in-flight wand state within ~1 s of the variant landing on disk instead of waiting for the next manifest poll. Failure paths still fire `upscale.stats` (the `failed` counter bumps); `upscale.complete` is success-only by design — `upscale.failed` is a deliberate follow-up.
-- `pairing.<requestID>` — fires on `Approve` or `Decline` of the named request. Payload matches `/v1/pairing/<requestID>` for the relevant state.
+- `pairing.<requestID>` — fires on `Approve` or `Decline` of the named request. Payload matches `/v1/pairing/<requestID>` for the relevant state **with the secret fields stripped**: `token`, `tokenId`, and `verificationCode` never appear on this shared bearer-authed bus — any paired device can subscribe to `?topics=pairing`, so the minted token is delivered exclusively via the pollSecret-gated `/v1/pairing/{requestId}` poll and its SSE sibling `/v1/pairing/{requestId}/events`. Clients that need the token (the pairing device itself) must use those; bus subscribers only learn that a transition happened.
 - `heartbeat` — every 15s; payload `{}`. iOS uses missing heartbeats as a "connection dead" signal that triggers reconnect with backoff. Bridge-internal — iOS parsers swallow this at the transport layer.
 - `dropped` — synthetic notice fired when the server's per-subscriber buffer evicted events under back-pressure (slow client, network blip). Payload `{"missed":N}`. iOS treats this as "I missed state — refetch via the polling endpoint to reconcile."
 

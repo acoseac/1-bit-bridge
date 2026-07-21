@@ -240,7 +240,19 @@ func NewMediaServerDiscoveryClient(cfg DiscoveryConfig, cache *ServerCache) (*Me
 	}
 	if cfg.Dispatcher == nil {
 		cfg.Dispatcher = &discovery.HTTPClientDispatcher{
-			Client: &http.Client{Timeout: cfg.DetailFetchTimeout},
+			Client: &http.Client{
+				Timeout: cfg.DetailFetchTimeout,
+				// Relay 3xx verbatim instead of following it. The fetch
+				// URL comes from an SSDP-advertised Location header (a
+				// LAN device, possibly rogue or spoofed), so
+				// auto-following a redirect to loopback or a link-local
+				// metadata address would turn the bridge into an SSRF
+				// probe against its own no-auth admin API. Mirrors
+				// internal/upnpproxy's CheckRedirect guard.
+				CheckRedirect: func(*http.Request, []*http.Request) error {
+					return http.ErrUseLastResponse
+				},
+			},
 		}
 	}
 	nowFunc := cfg.NowFunc

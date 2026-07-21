@@ -257,3 +257,62 @@ func TestParseTopicsParam(t *testing.T) {
 		}
 	}
 }
+
+// TestRedactPairingSecrets pins the H2 redaction contract on the
+// shared-bus write path: pairing-prefixed envelopes lose `token`,
+// `tokenId` and `verificationCode` (and only those); every other
+// topic passes through byte-identical; an undecodable payload fails
+// closed.
+func TestRedactPairingSecrets(t *testing.T) {
+	cases := []struct {
+		name string
+		env  eventEnvelope
+		// wantData is the exact expected Data after redaction. For
+		// JSON-object cases the helper re-marshals, so keys are
+		// sorted (encoding/json map contract) — expectations are
+		// written in sorted-key form.
+		wantData string
+	}{
+		{
+			name: "non-pairing topic passes through untouched",
+			env: eventEnvelope{
+				Topic: "upscale.stats",
+				Data:  []byte(`{"token":"kept-by-design","queued":7}`),
+			},
+			wantData: `{"token":"kept-by-design","queued":7}`,
+		},
+		{
+			name: "pairing topic loses all three secrets",
+			env: eventEnvelope{
+				Topic: "pairing.abc123",
+				Data:  []byte(`{"status":"approved","ttlSecondsRemaining":0,"bridgeStartedAt":1735689600123,"verificationCode":"412 593","token":"secret-bearer","tokenId":"a1b2c3d4e5f6"}`),
+			},
+			wantData: `{"bridgeStartedAt":1735689600123,"status":"approved","ttlSecondsRemaining":0}`,
+		},
+		{
+			name: "pairing topic without secrets keeps every field",
+			env: eventEnvelope{
+				Topic: "pairing.abc123",
+				Data:  []byte(`{"status":"declined","ttlSecondsRemaining":0,"bridgeStartedAt":1735689600123}`),
+			},
+			wantData: `{"bridgeStartedAt":1735689600123,"status":"declined","ttlSecondsRemaining":0}`,
+		},
+		{
+			name: "undecodable pairing payload fails closed",
+			env: eventEnvelope{
+				Topic: "pairing.abc123",
+				Data:  []byte(`not json`),
+			},
+			wantData: `{}`,
+		},
+	}
+	for _, tc := range cases {
+		got := redactPairingSecrets(tc.env)
+		if got.Topic != tc.env.Topic {
+			t.Errorf("%s: topic changed to %q", tc.name, got.Topic)
+		}
+		if string(got.Data) != tc.wantData {
+			t.Errorf("%s: data = %s, want %s", tc.name, got.Data, tc.wantData)
+		}
+	}
+}

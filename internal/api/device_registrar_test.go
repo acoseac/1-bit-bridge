@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
 )
@@ -235,5 +236,73 @@ func TestTouchDeviceClearsInflightAfterUpsertPanic(t *testing.T) {
 	mu.Unlock()
 	if got != 2 {
 		t.Fatalf("after success want debounce (invocations still 2), got %d", got)
+	}
+}
+
+// TestReapDeviceSeen pins the bounded-memory contract of the
+// deviceSeen reaper (2026-07-21 review, Low — entries were written
+// but never deleted): entries at/past deviceRegistrarTTL are swept,
+// fresh ones survive. The boundary case matches touchDevice's
+// strict-< freshness check, so reaping never changes the upsert
+// cadence — a reaped device simply re-upserts on its next request,
+// exactly what a TTL-expired entry would do.
+func TestReapDeviceSeen(t *testing.T) {
+	fr := &fakeRegistrar{}
+	cfg := &config.Config{LibraryRoots: []string{t.TempDir()}, ListenAddress: ":7788", LibraryName: "T"}
+	s := New(cfg, nil, nil, "fp").WithDeviceRegistrar(fr)
+
+	now := time.Now()
+	s.deviceSeenMu.Lock()
+	s.deviceSeen["aa"] = deviceSeenEntry{tokenID: "tok-a", at: now.Add(-deviceRegistrarTTL - time.Second)} // stale
+	s.deviceSeen["bb"] = deviceSeenEntry{tokenID: "tok-a", at: now.Add(-deviceRegistrarTTL)}               // boundary — stale per the strict-< check
+	s.deviceSeen["cc"] = deviceSeenEntry{tokenID: "tok-a", at: now.Add(-deviceRegistrarTTL + time.Second)} // fresh
+	dropped := s.reapDeviceSeen(now)
+	s.deviceSeenMu.Unlock()
+
+	if dropped != 2 {
+		t.Errorf("reapDeviceSeen dropped %d entries, want 2 (stale + boundary)", dropped)
+	}
+	s.deviceSeenMu.Lock()
+	_, aaGone := s.deviceSeen["aa"]
+	_, bbGone := s.deviceSeen["bb"]
+	_, ccKept := s.deviceSeen["cc"]
+	s.deviceSeenMu.Unlock()
+	if aaGone || bbGone {
+		t.Errorf("stale entries survived (aa=%v bb=%v)", aaGone, bbGone)
+	}
+	if !ccKept {
+		t.Error("fresh entry was reaped")
+	}
+
+	// Behaviour-preserving: the reaped device's next request re-upserts
+	// immediately (same path a TTL-expired entry takes).
+	s.touchDevice(context.Background(), "aa", "tok-a")
+	if got := fr.count(); got != 1 {
+		t.Fatalf("reaped device re-upsert: want 1 call, got %d", got)
+	}
+}
+
+// TestStartDeviceSeenReaperLifecycle pins the lifecycle contract:
+// start+stop exits cleanly with the registrar wired, and an unwired
+// Server returns a no-op stopFn that is safe to call (mirrors
+// StartManifestRateLimitReaper's nil path).
+func TestStartDeviceSeenReaperLifecycle(t *testing.T) {
+	cfg := &config.Config{LibraryRoots: []string{t.TempDir()}, ListenAddress: ":7788", LibraryName: "T"}
+
+	// Unwired: no registrar → no goroutine, no-op stop.
+	unwired := New(cfg, nil, nil, "fp")
+	unwired.StartDeviceSeenReaper()()
+
+	// Wired: start then stop must return promptly (a wedged reaper
+	// goroutine would hang the suite on -race via the leaked-goroutine
+	// detectors in sibling tests).
+	wired := New(cfg, nil, nil, "fp").WithDeviceRegistrar(&fakeRegistrar{})
+	stop := wired.StartDeviceSeenReaper()
+	done := make(chan struct{})
+	go func() { stop(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reaper stopFn did not return within 2s")
 	}
 }

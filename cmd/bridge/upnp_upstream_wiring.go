@@ -102,7 +102,7 @@ func startUPnPUpstreamIfEnabled(
 	// dispatcher (matching timeouts means a stuck server fails the same
 	// way at both layers).
 	cdsClient := upnp.NewContentDirectoryClient(&discovery.HTTPClientDispatcher{
-		Client: &http.Client{Timeout: 10 * time.Second},
+		Client: upnpUpstreamSOAPHTTPClient(10 * time.Second),
 	})
 	ingester, err := upnpingest.NewIngester(
 		cfg.UPnPUpstream, cdsClient,
@@ -142,6 +142,24 @@ func startUPnPUpstreamIfEnabled(
 		slog.Int("servers_configured", len(cfg.UPnPUpstream.Servers)),
 		slog.Duration("scanInterval", scanEvery))
 	return life
+}
+
+// upnpUpstreamSOAPHTTPClient builds the HTTP client used for
+// ContentDirectory SOAP calls to upstream MediaServers. The control
+// URL is advertiser-supplied (SSDP description.xml on a LAN device,
+// possibly rogue or spoofed), so redirects are relayed verbatim
+// rather than followed — auto-following a 3xx to loopback or a
+// link-local metadata address would turn the bridge into an SSRF
+// probe against its own no-auth admin API. Mirrors
+// internal/upnpproxy's CheckRedirect guard and the discovery
+// dispatchers in internal/{upnp,dlna}/discovery.
+func upnpUpstreamSOAPHTTPClient(timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 }
 
 // Stop tears down the ingest loop + all discovery clients. Idempotent.

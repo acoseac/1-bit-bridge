@@ -24,6 +24,15 @@ func (s *Server) WithAtlasHarvest(sink AtlasHarvestCredentialSink) *Server {
 
 const atlasHarvestCredMaxBody = 8 << 10 // tokens + a URL are tiny
 
+// atlasHarvestMaxExpiresInSeconds bounds the client-supplied credential
+// lifetime to ~10 years. The value is multiplied by time.Second below,
+// and time.Duration is an int64 of nanoseconds — an unbounded client
+// int overflows that past ~292 years and would persist a nonsensical
+// (possibly negative-wrapped) ExpiresAt. Values above the ceiling AND
+// negative values (logically invalid, previously falling through to
+// "no expiry") are rejected with 400 (2026-07-21 review, Low).
+const atlasHarvestMaxExpiresInSeconds = 10 * 365 * 24 * 3600
+
 type atlasHarvestCredentialRequest struct {
 	Token            string `json:"token"`
 	AtlasBaseURL     string `json:"atlasBaseUrl"`
@@ -67,6 +76,10 @@ func (s *Server) atlasHarvestCredential(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	canonicalBase := u.Scheme + "://" + u.Host
+	if req.ExpiresInSeconds < 0 || req.ExpiresInSeconds > atlasHarvestMaxExpiresInSeconds {
+		writeError(w, http.StatusBadRequest, "bad_request", "expiresInSeconds must be non-negative and at most the maximum (10 years)")
+		return
+	}
 	var expiresAt time.Time
 	if req.ExpiresInSeconds > 0 {
 		expiresAt = time.Now().Add(time.Duration(req.ExpiresInSeconds) * time.Second)
