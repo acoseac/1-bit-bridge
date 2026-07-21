@@ -45,8 +45,9 @@ jobs:
           # -f: HTTP 4xx/5xx exits non-zero (set -e kills the job) instead
           # of saving an error page as the tarball; bounded retries plus
           # connect/transfer timeouts so a stalled upstream can't hang
-          # the release — plain curl has neither bound.
-          curl -fsSL --retry 3 --connect-timeout 15 --max-time 300 -o /tmp/rcodesign.tar.gz "$URL"
+          # the release — plain curl has neither bound. --proto '=https'
+          # refuses any redirect to a non-HTTPS URL (SonarCloud S6506).
+          curl -fsSL --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 300 -o /tmp/rcodesign.tar.gz "$URL"
           echo "${SHA256}  /tmp/rcodesign.tar.gz" | shasum -a 256 -c -
           tar -xzf /tmp/rcodesign.tar.gz -C /tmp
           sudo mv /tmp/apple-codesign-*/rcodesign /usr/local/bin/
