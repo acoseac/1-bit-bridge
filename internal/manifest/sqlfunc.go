@@ -3,9 +3,11 @@ package manifest
 import (
 	"database/sql/driver"
 	"fmt"
+	"unicode/utf8"
 
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
+	"golang.org/x/text/unicode/norm"
 	sqlite "modernc.org/sqlite"
 )
 
@@ -29,6 +31,19 @@ import (
 // Lithuanian decompositions) would diverge from iOS and re-introduce
 // the same miss-class this function exists to fix.
 //
+// The folded string is NFC-composed before returning (2026-07-21
+// review, M9). `cases.Lower` folds case only — it never composes —
+// while iOS's `share.normalize(path:)` emits NFC + lowercase and the
+// scanner stores the on-disk form, which is NFD for files migrated
+// from HFS+ or synced from Linux/NAS onto a Mac. The two forms
+// compared byte-wise UNEQUAL, so every accented NFD path missed the
+// LookupTrack / LookupVariant / LookupAnalysis fallback. Composing
+// here covers both sides of the comparison — the indexed column
+// expression AND the query parameter both flow through
+// `unicode_lower(...)`. Migration v26 rebuilds the three functional
+// indexes embedding this function because its output changes for
+// NFD input.
+//
 // The Caser is constructed PER CALL, not cached at package init.
 // `cases.Lower()` returns a stateful Caser that the docs explicitly
 // warn must not be shared across goroutines (only `cases.Fold()`
@@ -50,14 +65,14 @@ func unicodeLowerScalar(_ *sqlite.FunctionContext, args []driver.Value) (driver.
 		// SQLite NULL → NULL, matching LOWER()'s pass-through.
 		return nil, nil
 	case string:
-		return caser.String(v), nil
+		return nfcCompose(caser.String(v)), nil
 	case []byte:
 		// LOWER() accepts text that arrived as a BLOB and returns
 		// it lowered; mirror that for compat. The folded form is
 		// returned as a string (driver.Value supports both, and
 		// string is the canonical representation for the indexed
 		// expression `unicode_lower(path)` on a TEXT column).
-		return caser.String(string(v)), nil
+		return nfcCompose(caser.String(string(v))), nil
 	default:
 		// Non-text input → nil, matching SQLite LOWER()'s
 		// behaviour on numeric / blob inputs that aren't text-
@@ -66,6 +81,19 @@ func unicodeLowerScalar(_ *sqlite.FunctionContext, args []driver.Value) (driver.
 		// query-time runtime fault.
 		return nil, nil
 	}
+}
+
+// nfcCompose NFC-composes a case-folded lookup key. Ill-formed UTF-8
+// falls back to the uncomposed fold: `norm.NFC.String` never fails
+// (it passes ill-formed input through unchanged), but the explicit
+// guard keeps that edge deterministic instead of depending on norm's
+// pass-through internals. Manifest paths are always valid UTF-8 —
+// they originate from the FS scan — so the guard is defensive.
+func nfcCompose(s string) string {
+	if !utf8.ValidString(s) {
+		return s
+	}
+	return norm.NFC.String(s)
 }
 
 // init registers `unicode_lower(text)` against the modernc.org/sqlite

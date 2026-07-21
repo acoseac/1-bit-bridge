@@ -36,12 +36,7 @@ func TestLookupTrack_caseInsensitiveAndLeadingSlash(t *testing.T) {
 	defer s.Close()
 
 	const canonical = "Abdullah Ibrahim/The Balance/09 - Devotion.flac"
-	if err := s.UpsertTrack(context.Background(), &Track{
-		Path: canonical, Size: 1, ModTime: time.Now(),
-		Artist: "Abdullah Ibrahim", Album: "The Balance",
-	}); err != nil {
-		t.Fatalf("UpsertTrack: %v", err)
-	}
+	seedTrack(t, s, canonical)
 
 	cases := []struct {
 		name string
@@ -59,16 +54,7 @@ func TestLookupTrack_caseInsensitiveAndLeadingSlash(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tr, err := s.LookupTrack(context.Background(), tc.path)
-			if err != nil {
-				t.Fatalf("LookupTrack(%q): %v", tc.path, err)
-			}
-			if tr == nil {
-				t.Fatalf("LookupTrack(%q) = nil; expected the track to be found", tc.path)
-			}
-			if tr.Path != canonical {
-				t.Errorf("LookupTrack(%q).Path = %q, want canonical %q", tc.path, tr.Path, canonical)
-			}
+			assertLookupTrackCanonical(t, s, tc.path, canonical)
 		})
 	}
 }
@@ -204,26 +190,8 @@ func TestLookupVariant_caseInsensitiveAndLeadingSlash(t *testing.T) {
 
 	const canonical = "Abdullah Ibrahim/The Balance/09 - Devotion.flac"
 	const variantID = "v176400-24"
-	if err := s.UpsertTrack(context.Background(), &Track{
-		Path: canonical, Size: 1, ModTime: time.Now(),
-	}); err != nil {
-		t.Fatalf("UpsertTrack: %v", err)
-	}
-	if err := s.UpsertVariant(context.Background(), VariantRow{
-		SourcePath:    canonical,
-		VariantID:     variantID,
-		SidecarPath:   "/cache/variant.flac",
-		Format:        "flac",
-		SampleRate:    176_400,
-		BitsPerSample: 24,
-		SizeBytes:     1024,
-		SourceMTimeNS: 0,
-		SourceSize:    1,
-		SoxSettings:   "{}",
-		CreatedAt:     time.Now().Unix(),
-	}); err != nil {
-		t.Fatalf("UpsertVariant: %v", err)
-	}
+	seedTrack(t, s, canonical)
+	seedVariant(t, s, canonical, variantID)
 
 	cases := []struct {
 		name string
@@ -304,12 +272,7 @@ func TestLookupTrack_redundantSeparators_endToEnd(t *testing.T) {
 	defer s.Close()
 
 	const canonical = "Artist/Album/01.flac"
-	if err := s.UpsertTrack(context.Background(), &Track{
-		Path: canonical, Size: 1, ModTime: time.Now(),
-		Artist: "Artist", Album: "Album",
-	}); err != nil {
-		t.Fatalf("UpsertTrack: %v", err)
-	}
+	seedTrack(t, s, canonical)
 
 	cases := []string{
 		"Artist//Album/01.flac",
@@ -319,16 +282,7 @@ func TestLookupTrack_redundantSeparators_endToEnd(t *testing.T) {
 	}
 	for _, p := range cases {
 		t.Run(p, func(t *testing.T) {
-			tr, err := s.LookupTrack(context.Background(), p)
-			if err != nil {
-				t.Fatalf("LookupTrack(%q): %v", p, err)
-			}
-			if tr == nil {
-				t.Fatalf("LookupTrack(%q) = nil; redundant-separator path should canonicalize and hit", p)
-			}
-			if tr.Path != canonical {
-				t.Errorf("LookupTrack(%q).Path = %q, want %q", p, tr.Path, canonical)
-			}
+			assertLookupTrackCanonical(t, s, p, canonical)
 		})
 	}
 }
@@ -346,17 +300,7 @@ func TestLookupTrack_redundantSeparators_endToEnd(t *testing.T) {
 // Three regions cover the headline use-cases for non-English libraries:
 // Latin Extended (Icelandic), Slavic (Polish), and German sharp-s.
 func TestLookupTrack_unicodeFolding(t *testing.T) {
-	s, err := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
-	if err != nil {
-		t.Fatalf("OpenStore: %v", err)
-	}
-	defer s.Close()
-
-	cases := []struct {
-		name      string
-		canonical string // shape the bridge scanner records
-		ioshape   string // shape iOS sends after NFC + lowercased + leading-slash
-	}{
+	runLookupShapeCases(t, []lookupShapeCase{
 		{
 			"sigur ros (Icelandic / Latin Extended)",
 			"Sigur Rós/Ágætis byrjun/01 Svefn-g-englar.flac",
@@ -372,26 +316,183 @@ func TestLookupTrack_unicodeFolding(t *testing.T) {
 			"Straße/Album/01.flac",
 			"/straße/album/01.flac",
 		},
+	})
+}
+
+// TestLookupTrack_nfdStoredPathFoundByNfcLookup pins the M9 fix
+// (2026-07-21 review) at the same iOS↔bridge path-shape boundary as
+// the unicode-folding test above. The scanner stores the on-disk
+// path shape, which is NFD for files migrated from HFS+ or synced
+// from a Linux/NAS box onto a Mac, while iOS sends NFC + lowercase.
+// Pre-fix `unicode_lower` folded case but never composed, so the
+// stored NFD key and the iOS NFC key compared byte-wise UNEQUAL and
+// the lookup missed for every accented NFD track — upscale
+// eligibility failed and variant / waveform requests 404'd. Post-fix
+// both sides compose to NFC inside `unicode_lower` and the fold
+// matches.
+//
+// The NFD forms use explicit combining-mark escapes so the
+// decomposition survives any editor/tooling that NFC-normalises
+// source files.
+func TestLookupTrack_nfdStoredPathFoundByNfcLookup(t *testing.T) {
+	runLookupShapeCases(t, []lookupShapeCase{
+		{
+			"icelandic (HFS+ migration shape)",
+			"Sigur Ro\u0301s/A\u0301gætis byrjun/01 Svefn-g-englar.flac",
+			"/sigur rós/ágætis byrjun/01 svefn-g-englar.flac",
+		},
+		{
+			"german umlaut (NAS sync shape)",
+			"Ro\u0308yksopp/Melody A.M./01 Eple.flac",
+			"/röyksopp/melody a.m./01 eple.flac",
+		},
+		{
+			"french café",
+			"Cafe\u0301 Del Mar/Volumen Diez/01.flac",
+			"/café del mar/volumen diez/01.flac",
+		},
+	})
+}
+
+// TestLookupVariantAndAnalysis_nfdStoredPathFoundByNfcLookup mirrors
+// TestLookupTrack_nfdStoredPathFoundByNfcLookup for the two sibling
+// lookups that share the M9 miss class: the v4
+// `idx_track_variants_source_path_unicode_lower` and v15
+// `idx_track_analysis_source_path_unicode_lower` indexes embed the
+// same `unicode_lower` expression and are rebuilt alongside the
+// tracks index in migration v26. One representative NFD pair covers
+// both; the path table lives in the LookupTrack test.
+func TestLookupVariantAndAnalysis_nfdStoredPathFoundByNfcLookup(t *testing.T) {
+	s, err := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
 	}
+	defer s.Close()
+
+	const canonical = "Sigur Ro\u0301s/A\u0301gætis byrjun/01 Svefn-g-englar.flac" // NFD
+	const ioshape = "/sigur rós/ágætis byrjun/01 svefn-g-englar.flac"              // NFC + lower + slash
+	const variantID = "v176400-24"
+
+	seedTrack(t, s, canonical)
+	seedVariant(t, s, canonical, variantID)
+	if err := s.UpsertAnalysis(context.Background(), AnalysisRow{
+		SourcePath:    canonical,
+		WaveformPath:  "/cache/01.wave",
+		WaveformTag:   "0123456789abcdef",
+		WaveformSize:  10,
+		SourceMTimeNS: 1,
+		SourceSize:    1,
+		SchemaVersion: "peak-v1",
+		CreatedAt:     time.Now().Unix(),
+	}); err != nil {
+		t.Fatalf("UpsertAnalysis: %v", err)
+	}
+
+	t.Run("variant", func(t *testing.T) {
+		v, err := s.LookupVariant(context.Background(), ioshape, variantID)
+		if err != nil {
+			t.Fatalf("LookupVariant: %v", err)
+		}
+		if v == nil {
+			t.Fatalf("LookupVariant(%q, %q) = nil — NFD-stored source_path must resolve via NFC fold", ioshape, variantID)
+		}
+		if v.SourcePath != canonical {
+			t.Errorf("v.SourcePath = %q, want %q", v.SourcePath, canonical)
+		}
+	})
+
+	t.Run("analysis", func(t *testing.T) {
+		a, err := s.LookupAnalysis(context.Background(), ioshape)
+		if err != nil {
+			t.Fatalf("LookupAnalysis: %v", err)
+		}
+		if a == nil {
+			t.Fatalf("LookupAnalysis(%q) = nil — NFD-stored source_path must resolve via NFC fold", ioshape)
+		}
+		if a.SourcePath != canonical {
+			t.Errorf("a.SourcePath = %q, want %q", a.SourcePath, canonical)
+		}
+	})
+}
+
+// seedTrack upserts one track row under the canonical (scanner-
+// stored) path shape and fails the test on error. Shared by the
+// lookup-shape tests so each table entry stays data-only; the
+// Artist/Album tags are filler — every assertion keys on Path.
+func seedTrack(t *testing.T, s *Store, canonical string) {
+	t.Helper()
+	if err := s.UpsertTrack(context.Background(), &Track{
+		Path: canonical, Size: 1, ModTime: time.Now(),
+		Artist: "Artist", Album: "Album",
+	}); err != nil {
+		t.Fatalf("UpsertTrack(%q): %v", canonical, err)
+	}
+}
+
+// lookupShapeCase is one row of the iOS↔bridge path-shape contract:
+// canonical is the scanner-stored form, ioshape the lowercased,
+// optional-leading-slash form iOS sends after share.normalize.
+type lookupShapeCase struct {
+	name      string
+	canonical string
+	ioshape   string
+}
+
+// runLookupShapeCases drives the shared table loop for the
+// LookupTrack shape tests: seed each canonical row, then assert the
+// iOS-shaped lookup resolves to it.
+func runLookupShapeCases(t *testing.T, cases []lookupShapeCase) {
+	t.Helper()
+	s, err := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer s.Close()
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := s.UpsertTrack(context.Background(), &Track{
-				Path: tc.canonical, Size: 1, ModTime: time.Now(),
-				Artist: "Artist", Album: "Album",
-			}); err != nil {
-				t.Fatalf("UpsertTrack(%q): %v", tc.canonical, err)
-			}
-			tr, err := s.LookupTrack(context.Background(), tc.ioshape)
-			if err != nil {
-				t.Fatalf("LookupTrack(%q): %v", tc.ioshape, err)
-			}
-			if tr == nil {
-				t.Fatalf("LookupTrack(%q) returned nil — pre-v4 ASCII-only LOWER would fail here; v4 unicode_lower must match", tc.ioshape)
-			}
-			if tr.Path != tc.canonical {
-				t.Errorf("LookupTrack(%q).Path = %q, want canonical %q", tc.ioshape, tr.Path, tc.canonical)
-			}
+			seedTrack(t, s, tc.canonical)
+			assertLookupTrackCanonical(t, s, tc.ioshape, tc.canonical)
 		})
+	}
+}
+
+// assertLookupTrackCanonical asserts LookupTrack resolves the
+// iOS-shaped path (lowercased, optional leading slash) to the row
+// stored under canonical.
+func assertLookupTrackCanonical(t *testing.T, s *Store, ioshape, canonical string) {
+	t.Helper()
+	tr, err := s.LookupTrack(context.Background(), ioshape)
+	if err != nil {
+		t.Fatalf("LookupTrack(%q): %v", ioshape, err)
+	}
+	if tr == nil {
+		t.Fatalf("LookupTrack(%q) returned nil — the fold must match the stored row", ioshape)
+	}
+	if tr.Path != canonical {
+		t.Errorf("LookupTrack(%q).Path = %q, want canonical %q", ioshape, tr.Path, canonical)
+	}
+}
+
+// seedVariant upserts one variant row for sourcePath so the
+// LookupVariant shape tests stay table-only. The sidecar fields are
+// opaque to the lookup contract — only SourcePath/VariantID are
+// matched — so one shared fixture keeps them consistent.
+func seedVariant(t *testing.T, s *Store, sourcePath, variantID string) {
+	t.Helper()
+	if err := s.UpsertVariant(context.Background(), VariantRow{
+		SourcePath:    sourcePath,
+		VariantID:     variantID,
+		SidecarPath:   "/cache/variant.flac",
+		Format:        "flac",
+		SampleRate:    176_400,
+		BitsPerSample: 24,
+		SizeBytes:     1024,
+		SourceMTimeNS: 0,
+		SourceSize:    1,
+		SoxSettings:   "{}",
+		CreatedAt:     time.Now().Unix(),
+	}); err != nil {
+		t.Fatalf("UpsertVariant: %v", err)
 	}
 }
