@@ -65,7 +65,7 @@ func dirIsEmpty(dir string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	if _, err := f.ReadDir(1); err != nil {
 		if errors.Is(err, io.EOF) {
 			return true, nil
