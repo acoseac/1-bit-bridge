@@ -2300,7 +2300,8 @@ func (s *Server) apiUpdatesCheck(w http.ResponseWriter, r *http.Request) {
 // Returns:
 //   - 200 with the post-install Status on success
 //   - 400 when no update is available
-//   - 409 when downloads are inflight (use ?force=1 to override)
+//   - 409 when downloads are inflight (use ?force=1 to override) or
+//     another install is already in progress (retry once it finishes)
 //   - 501 on Windows (Phase B is darwin/linux; Windows is a follow-up)
 //   - 403 when the binary path isn't writable (system install needs sudo)
 //   - 502 on download / verify / swap failures
@@ -2362,6 +2363,8 @@ func classifyUpdateError(err error) (status int, short string) {
 		return http.StatusBadRequest, "no-update"
 	case errors.Is(err, ErrUpdateActiveSessions):
 		return http.StatusConflict, "active-sessions"
+	case errors.Is(err, ErrUpdateInstallInFlight):
+		return http.StatusConflict, "install-in-flight"
 	case errors.Is(err, ErrUpdateNotSupported):
 		return http.StatusNotImplemented, "platform-unsupported"
 	case errors.Is(err, ErrUpdatePathNotWritable):

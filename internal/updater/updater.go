@@ -34,6 +34,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/mod/semver"
@@ -197,6 +198,16 @@ type Updater struct {
 
 	mu     sync.RWMutex
 	status Status
+
+	// installInFlight is the try-lock serializing Install across every
+	// in-process caller (the auto-installer poll and the admin POST
+	// share one Updater). Held for the WHOLE attempt: a second caller
+	// fails fast with ErrInstallInFlight instead of racing the first
+	// on the .bak rename target and update-state.json. The `bridge
+	// update` CLI is a separate process and can't share this lock —
+	// the per-attempt scratch dir is what keeps its cleanup from
+	// deleting an in-flight install's files.
+	installInFlight atomic.Bool
 }
 
 // New builds an Updater. The poller is not started — call Run on it
@@ -346,6 +357,16 @@ func (u *Updater) maybeAutoInstall(ctx context.Context) {
 		} else {
 			logger.Error("auto-install failed", "err", err)
 		}
+		return
+	}
+	// Re-check the sessions gate AFTER the install: the download phase
+	// can run for many minutes and a stream may have started in the
+	// meantime (Install itself only gates at entry, and the auto-
+	// installer's opts carry Force=false). Restarting now would kill
+	// it — defer to the next poll cycle, which re-attempts the
+	// (idempotent) install and re-checks.
+	if u.autoInstallOpts.Sessions != nil && u.autoInstallOpts.Sessions.Inflight() > 0 {
+		logger.Info("auto-install restart deferred", "reason", "active downloads", "inflight", u.autoInstallOpts.Sessions.Inflight())
 		return
 	}
 	logger.Info("auto-install complete; restarting to load new binary")

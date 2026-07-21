@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -653,5 +654,103 @@ func Test_preflightWritable_SucceedsAfterTransientRemoveFailure(t *testing.T) {
 	}
 	if calls < 2 {
 		t.Errorf("expected a retry after the first failure, got %d call(s)", calls)
+	}
+}
+
+// TestInstallConcurrentCallsSerialized pins the install-in-flight
+// try-lock: while one Install holds the Updater, a second caller must
+// fail fast with ErrInstallInFlight rather than race the first on the
+// scratch dir, the .bak rename target, and update-state.json (one
+// installer's deferred cleanScratch could otherwise delete the other's
+// verified binary mid-swap). Once the first completes, the lock is
+// released and a fresh attempt succeeds.
+func TestInstallConcurrentCallsSerialized(t *testing.T) {
+	fix := newInstallFixture(t, "0.2.0")
+
+	dir := t.TempDir()
+	livePath := filepath.Join(dir, "bridge")
+	if err := os.WriteFile(livePath, []byte("bridge-binary-0.1.0"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	upd := New(Options{
+		RepoOverride: "fake/repo",
+		Client:       NewClient("fake/repo", time.Second).WithBaseURL(fix.server.URL),
+	})
+	upd.mu.Lock()
+	upd.status.CurrentVersion = "0.1.0"
+	upd.status.LatestVersion = fix.latestVersion
+	upd.status.UpdateAvailable = true
+	upd.status.LastCheck = time.Now().UTC()
+	upd.mu.Unlock()
+
+	// The blocking verifier parks the first install mid-flight (lock
+	// held) until the test releases it.
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	blockingVerifier := func(context.Context, string) error {
+		once.Do(func() { close(started) })
+		<-release
+		return nil
+	}
+	opts := InstallOptions{
+		DataDir:    dir,
+		BinaryPath: livePath,
+		Force:      true,
+		Verifier:   blockingVerifier,
+	}
+
+	firstErr := make(chan error, 1)
+	go func() {
+		_, err := upd.Install(context.Background(), opts)
+		firstErr <- err
+	}()
+	<-started // first install now holds the lock, parked in verify
+
+	_, err := upd.Install(context.Background(), opts)
+	if !errors.Is(err, ErrInstallInFlight) {
+		t.Errorf("concurrent Install: err = %v, want ErrInstallInFlight", err)
+	}
+	close(release)
+	if err := <-firstErr; err != nil {
+		t.Fatalf("first Install: %v", err)
+	}
+
+	// Lock released: a follow-up attempt proceeds.
+	if _, err := upd.Install(context.Background(), InstallOptions{
+		DataDir:    dir,
+		BinaryPath: livePath,
+		Force:      true,
+		Verifier:   noopVerifier,
+	}); err != nil {
+		t.Fatalf("Install after the first completed: %v (lock not released?)", err)
+	}
+}
+
+// TestInstallScratchIsPerAttempt pins the scratch-dir shape: every
+// attempt works inside its own MkdirTemp subdirectory under
+// <DataDir>/updates/ and cleanScratch removes only that directory —
+// the shared root must never carry an attempt's leftover files, so a
+// stray cleanup from a concurrent caller (incl. the CLI's separate
+// process) can never delete an in-flight attempt's verified binary.
+func TestInstallScratchIsPerAttempt(t *testing.T) {
+	fix := newInstallFixture(t, "0.2.0")
+	livePath, _, err := fix.install(t, "0.1.0")
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	updatesRoot := filepath.Join(filepath.Dir(livePath), "updates")
+	entries, err := os.ReadDir(updatesRoot)
+	if err != nil {
+		t.Fatalf("read updates root: %v", err)
+	}
+	if len(entries) != 0 {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("updates root holds leftover attempt files %v — per-attempt scratch not cleaned", names)
 	}
 }

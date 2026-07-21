@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"sync"
 )
 
 // expectedTeamID is the Apple Developer Team ID that signs official
@@ -22,6 +23,22 @@ import (
 // than from the new binary itself — the latter would be circular
 // (the binary we don't yet trust telling us what Team to expect).
 var appleTeamIDOverride = "" // override via ldflags at link time
+
+// unpinnedTeamIDWarnOnce gates the unpinned-Team-ID warning to one
+// emission per process — verifyBinary runs on every install attempt
+// and the operator only needs the heads-up once. Reset by tests.
+var unpinnedTeamIDWarnOnce sync.Once
+
+// warnIfTeamIDUnpinned logs a loud warning that this build carries no
+// APPLE_TEAM_ID pin, so self-update verification accepts ANY Apple-
+// notarized signature. Official builds pin the Team ID via the
+// goreleaser ldflags hook; a fork that forgot to set it would
+// otherwise silently downgrade its trust posture with no trace.
+func warnIfTeamIDUnpinned() {
+	unpinnedTeamIDWarnOnce.Do(func() {
+		logger.Warn("APPLE_TEAM_ID not pinned at build time — self-update will accept ANY Apple-notarized signature; ship release builds with the ldflags Team ID override (see .goreleaser.yaml)")
+	})
+}
 
 // verifyBinary checks that newBinary is a valid Apple-signed +
 // notarized executable, and (if appleTeamIDOverride is set) that its
@@ -67,7 +84,10 @@ func verifyBinary(ctx context.Context, newBinary string) error {
 		// above is the only authority we have. That's still a
 		// strong guarantee against a tampered binary downloaded
 		// over a hijacked GitHub mirror, just not against a
-		// "wrong team signed it" scenario. Document and proceed.
+		// "wrong team signed it" scenario. Warn loudly (once per
+		// process) so a misconfigured fork's silent downgrade is
+		// visible in the log, and proceed.
+		warnIfTeamIDUnpinned()
 		return nil
 	}
 
