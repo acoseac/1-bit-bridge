@@ -361,3 +361,41 @@ func TestStopWaitsForInFlightFetch(t *testing.T) {
 		t.Errorf("cache has %d entries after Stop; want 0 (no post-Clear Upsert)", n)
 	}
 }
+
+// TestDefaultDetailFetchClientRefusesRedirects pins the blind-SSRF
+// guard on the built-in detail-fetch client: the description URL comes
+// from an SSDP-advertised Location header (a LAN device, possibly
+// rogue or spoofed), so a 3xx must be relayed verbatim — never
+// followed toward loopback or link-local targets. Mirrors
+// internal/upnpproxy's CheckRedirect guard.
+func TestDefaultDetailFetchClientRefusesRedirects(t *testing.T) {
+	followed := false
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		followed = true
+	}))
+	defer target.Close()
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer redirector.Close()
+
+	c, err := NewMediaServerDiscoveryClient(DiscoveryConfig{Interface: &net.Interface{}}, NewServerCache())
+	if err != nil {
+		t.Fatalf("construct: %v", err)
+	}
+	disp, ok := c.dispatcher.(*discovery.HTTPClientDispatcher)
+	if !ok {
+		t.Fatalf("default dispatcher = %T, want *discovery.HTTPClientDispatcher", c.dispatcher)
+	}
+	resp, err := disp.Client.Get(redirector.URL)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusFound {
+		t.Errorf("status = %d, want 302 relayed verbatim", resp.StatusCode)
+	}
+	if followed {
+		t.Error("redirect target was hit — default detail-fetch client followed a 3xx")
+	}
+}

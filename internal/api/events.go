@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -22,6 +23,17 @@ import (
 // Topic filtering: `?topics=upscale,pairing` registers an allowlist
 // (prefix match — "pairing" matches every "pairing.<id>" event). An
 // absent or empty topics param subscribes to all topics.
+//
+// Pairing-secret redaction: `pairing.<id>` payloads CAN carry the
+// minted bearer token / token ID / verification code (the same broker
+// fan-out feeds the pollSecret-gated /v1/pairing/{id}/events stream,
+// which is the sanctioned delivery path for those secrets). This
+// endpoint is reachable by ANY bearer holder via ?topics=pairing, so
+// pairing-prefixed envelopes are stripped of `token`, `tokenId` and
+// `verificationCode` before hitting the wire here — see
+// redactPairingSecrets. Without it, one leaked device token would
+// harvest every future device's credentials off the bus (2026-07-21
+// review, H2).
 //
 // Last-Event-ID replay: the standard `Last-Event-ID` header lets a
 // reconnecting client request events newer than the last ID it saw.
@@ -92,7 +104,7 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 
 	// Replay any events the subscriber missed since lastEventID.
 	for _, env := range replay {
-		if err := writeEvent(w, env); err != nil {
+		if err := writeEvent(w, redactPairingSecrets(env)); err != nil {
 			return
 		}
 	}
@@ -124,7 +136,7 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
-			if err := writeEvent(w, env); err != nil {
+			if err := writeEvent(w, redactPairingSecrets(env)); err != nil {
 				return
 			}
 			if err := rc.Flush(); err != nil {
@@ -169,6 +181,43 @@ func parseTopicsParam(raw string) ([]string, error) {
 		}
 	}
 	return out, nil
+}
+
+// redactPairingSecrets strips the pairing-flow secrets (`token`,
+// `tokenId`, `verificationCode`) from a `pairing.<id>` envelope before
+// it is written to the shared bearer-authed /v1/events fan-out. The
+// pollSecret-gated /v1/pairing/{id} poll and its SSE sibling
+// /v1/pairing/{id}/events remain the ONLY paths that deliver the
+// minted token — any bearer holder can subscribe to ?topics=pairing
+// here, so the raw token must never cross this fan-out (2026-07-21
+// review, H2: one leaked device token would otherwise harvest the
+// credentials of every device approved later).
+//
+// Non-pairing topics pass through untouched (the hot upscale.* path
+// pays nothing). Pairing events are rare — Approve / Decline /
+// expiry transitions only — so the unmarshal/re-marshal stays off any
+// hot path. A payload that doesn't decode as a JSON object fails
+// CLOSED ({}): it can't be inspected for secrets, so it doesn't cross
+// the bus in its original form.
+func redactPairingSecrets(env eventEnvelope) eventEnvelope {
+	if !strings.HasPrefix(env.Topic, "pairing.") {
+		return env
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(env.Data, &fields); err != nil {
+		env.Data = []byte("{}")
+		return env
+	}
+	delete(fields, "token")
+	delete(fields, "tokenId")
+	delete(fields, "verificationCode")
+	data, err := json.Marshal(fields)
+	if err != nil {
+		env.Data = []byte("{}")
+		return env
+	}
+	env.Data = data
+	return env
 }
 
 // writeEvent serialises a single event envelope to the SSE wire. Each

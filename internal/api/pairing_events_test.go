@@ -374,6 +374,118 @@ func TestPairingEventsPushesApprovalWithToken(t *testing.T) {
 	t.Errorf("approval push missed (sawApproved=%v sawToken=%v)", sawApproved, sawToken)
 }
 
+// TestPairingApprovalSharedBusRedactsSecrets — the 2026-07-21 review
+// H2 regression pin. The SAME approval transition is observed on both
+// SSE surfaces:
+//
+//   - the shared bearer-authed /v1/events bus (subscribable by ANY
+//     paired device via ?topics=pairing) MUST carry the state
+//     transition but MUST NOT carry `token` / `tokenId` /
+//     `verificationCode` — otherwise one leaked device token harvests
+//     every future device's credentials;
+//   - the pollSecret-gated /v1/pairing/{id}/events channel MUST still
+//     deliver the minted token (that gate is the sanctioned
+//     token-delivery path).
+func TestPairingApprovalSharedBusRedactsSecrets(t *testing.T) {
+	hs, authStore, pairingStore, stop := pairingEventsTestSetup(t)
+	defer stop()
+	id, raw := createPendingRequest(t, hs, "shared-bus-redact")
+
+	// Shared-bus subscriber — an arbitrary bearer holder, NOT the
+	// pairing device (it never sees the pollSecret).
+	busToken, _, err := authStore.Mint("bus-subscriber")
+	if err != nil {
+		t.Fatalf("mint bus bearer: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), pairingEventsRequestTimeout)
+	t.Cleanup(cancel)
+	busReq, _ := http.NewRequestWithContext(ctx, "GET", hs.URL+"/v1/events?topics=pairing", nil)
+	busReq.Header.Set("Authorization", "Bearer "+busToken)
+	busResp, err := hs.Client().Do(busReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer busResp.Body.Close()
+	if busResp.StatusCode != http.StatusOK {
+		t.Fatalf("bus subscribe: status = %d, want 200", busResp.StatusCode)
+	}
+
+	// Dedicated pollSecret-gated channel for the pairing device itself.
+	dedResp := connectPairingEvents(t, hs, id, raw)
+	defer dedResp.Body.Close()
+	// Drain the initial pending event (blank-line terminated) so the
+	// assertions below only see the approval transition.
+	dedScanner := bufio.NewScanner(dedResp.Body)
+	drainDeadline := time.Now().Add(2 * time.Second)
+	for dedScanner.Scan() && time.Now().Before(drainDeadline) {
+		if dedScanner.Text() == "" {
+			break
+		}
+	}
+
+	// Trigger Approve — fires OnStateChange → broker.Publish → both
+	// subscribers receive the same underlying envelope.
+	if _, err := pairingStore.Approve(id, "AB:CD:EF:01:02:03:FF",
+		func(name string) (string, string, error) {
+			raw, tok, err := authStore.Mint(name)
+			return raw, tok.ID, err
+		}); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+
+	// Shared bus: the approved transition MUST arrive, stripped of all
+	// three secret fields.
+	busScanner := bufio.NewScanner(busResp.Body)
+	deadline := time.Now().Add(3 * time.Second)
+	var sawApproved, sawSecret bool
+	for busScanner.Scan() && time.Now().Before(deadline) {
+		line := busScanner.Text()
+		if strings.Contains(line, `"status":"approved"`) {
+			sawApproved = true
+		}
+		if strings.Contains(line, `"token"`) || strings.Contains(line, `"tokenId"`) ||
+			strings.Contains(line, `"verificationCode"`) {
+			sawSecret = true
+		}
+		if sawApproved {
+			break
+		}
+	}
+	if err := busScanner.Err(); err != nil {
+		t.Fatalf("read bus stream: %v", err)
+	}
+	if !sawApproved {
+		t.Error("shared bus subscriber missed the approved transition")
+	}
+	if sawSecret {
+		t.Error("shared bus carried token/tokenId/verificationCode — H2 regression")
+	}
+
+	// Dedicated channel: the SAME transition MUST still carry the
+	// minted token (the pollSecret gate is what authorises it).
+	deadline = time.Now().Add(3 * time.Second)
+	var dedApproved, dedToken bool
+	for dedScanner.Scan() && time.Now().Before(deadline) {
+		line := dedScanner.Text()
+		if strings.Contains(line, `"status":"approved"`) {
+			dedApproved = true
+		}
+		if strings.Contains(line, `"token":"`) {
+			dedToken = true
+		}
+		if dedApproved && dedToken {
+			break
+		}
+	}
+	if err := dedScanner.Err(); err != nil {
+		t.Fatalf("read dedicated stream: %v", err)
+	}
+	if !dedApproved || !dedToken {
+		t.Errorf("dedicated channel lost the token delivery (approved=%v token=%v)",
+			dedApproved, dedToken)
+	}
+}
+
 // TestPairingEventsResponseIsNotGzipped — same tripwire as
 // TestEventsResponseIsNotGzipped on the /v1/events handler. Defends
 // against a future global gzip middleware that would buffer the SSE

@@ -2277,6 +2277,15 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	stopManifestRL := apiSrv.StartManifestRateLimitReaper()
 	defer stopManifestRL()
 
+	// deviceSeen debounce-map reaper. The map is keyed on the
+	// client-supplied X-Device-Token, so a token-rotating authed
+	// client would grow it unboundedly without a sweep. Entries
+	// at/past deviceRegistrarTTL are dead weight (touchDevice
+	// re-upserts past the TTL anyway), so reaping changes only
+	// memory, never the registration cadence.
+	stopDeviceSeen := apiSrv.StartDeviceSeenReaper()
+	defer stopDeviceSeen()
+
 	// Start the event broker that backs GET /v1/events. iOS uses
 	// it to receive push notifications for upscale completions and
 	// pairing approvals (in lieu of polling). When publishers

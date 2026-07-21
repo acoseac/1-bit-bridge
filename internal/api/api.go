@@ -455,6 +455,13 @@ type deviceInflightKey struct {
 // writes immediately regardless of the TTL.
 const deviceRegistrarTTL = 5 * time.Minute
 
+// deviceSeenReapInterval is the sweep cadence for the deviceSeen
+// debounce map (see StartDeviceSeenReaper). Entries become dead weight
+// at deviceRegistrarTTL (the touchDevice `fresh` check is strict <),
+// so sweeping once per TTL bounds the map at ~2× the live-entry count
+// without adding any per-request cost.
+const deviceSeenReapInterval = deviceRegistrarTTL
+
 // maxDeviceTokenLen caps the accepted X-Device-Token length. iOS emits a
 // 32-byte hex token (64 chars); anything longer is rejected as garbage so
 // a malicious client can't seed oversized rows.
@@ -764,6 +771,61 @@ func (s *Server) StartManifestRateLimitReaper() (stopFn func()) {
 	stop := make(chan struct{})
 	s.manifestRateLimiter.Start(stop)
 	return func() { close(stop) }
+}
+
+// StartDeviceSeenReaper drops stale deviceSeen debounce entries on a
+// fixed tick. The map is keyed by the client-supplied X-Device-Token
+// header and entries are never deleted on the request path, so an
+// authed client rotating device tokens would grow it without bound
+// for the process lifetime (2026-07-21 review, Low). Reaping at
+// deviceRegistrarTTL is behaviour-preserving: an entry at/past the
+// TTL already fails the `fresh` check in touchDevice, so deleting it
+// changes only memory footprint, never the upsert cadence.
+// deviceInflight needs no sweep — its keys are released by defer on
+// every touchDevice return path (pinned by
+// TestTouchDeviceClearsInflightAfterUpsertPanic).
+//
+// Lifecycle mirrors StartManifestRateLimitReaper: call once from
+// cmd/bridge, defer the returned stopFn. Test harnesses can skip the
+// call — the reaper is purely a memory bound.
+func (s *Server) StartDeviceSeenReaper() (stopFn func()) {
+	if s.deviceSeen == nil {
+		// Registrar not wired (WithDeviceRegistrar never called) —
+		// no-op stopFn, same shape as StartManifestRateLimitReaper's
+		// nil-limiter path so callers can `defer` unconditionally.
+		return func() {}
+	}
+	stop := make(chan struct{})
+	go func() {
+		t := time.NewTicker(deviceSeenReapInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case now := <-t.C:
+				s.deviceSeenMu.Lock()
+				s.reapDeviceSeen(now)
+				s.deviceSeenMu.Unlock()
+			}
+		}
+	}()
+	return func() { close(stop) }
+}
+
+// reapDeviceSeen deletes debounce entries at/past deviceRegistrarTTL
+// (the boundary matches touchDevice's strict-< freshness check).
+// Caller MUST hold s.deviceSeenMu. Returns the drop count, mirroring
+// manifestRateLimiter.reapIdle's shape.
+func (s *Server) reapDeviceSeen(now time.Time) int {
+	dropped := 0
+	for k, e := range s.deviceSeen {
+		if now.Sub(e.at) >= deviceRegistrarTTL {
+			delete(s.deviceSeen, k)
+			dropped++
+		}
+	}
+	return dropped
 }
 
 // WithPairing attaches the in-memory pairing.Store that backs the
