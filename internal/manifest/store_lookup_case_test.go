@@ -300,17 +300,7 @@ func TestLookupTrack_redundantSeparators_endToEnd(t *testing.T) {
 // Three regions cover the headline use-cases for non-English libraries:
 // Latin Extended (Icelandic), Slavic (Polish), and German sharp-s.
 func TestLookupTrack_unicodeFolding(t *testing.T) {
-	s, err := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
-	if err != nil {
-		t.Fatalf("OpenStore: %v", err)
-	}
-	defer s.Close()
-
-	cases := []struct {
-		name      string
-		canonical string // shape the bridge scanner records
-		ioshape   string // shape iOS sends after NFC + lowercased + leading-slash
-	}{
+	runLookupShapeCases(t, []lookupShapeCase{
 		{
 			"sigur ros (Icelandic / Latin Extended)",
 			"Sigur Rós/Ágætis byrjun/01 Svefn-g-englar.flac",
@@ -326,14 +316,7 @@ func TestLookupTrack_unicodeFolding(t *testing.T) {
 			"Straße/Album/01.flac",
 			"/straße/album/01.flac",
 		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			seedTrack(t, s, tc.canonical)
-			assertLookupTrackCanonical(t, s, tc.ioshape, tc.canonical)
-		})
-	}
+	})
 }
 
 // TestLookupTrack_nfdStoredPathFoundByNfcLookup pins the M9 fix
@@ -352,17 +335,7 @@ func TestLookupTrack_unicodeFolding(t *testing.T) {
 // decomposition survives any editor/tooling that NFC-normalises
 // source files.
 func TestLookupTrack_nfdStoredPathFoundByNfcLookup(t *testing.T) {
-	s, err := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
-	if err != nil {
-		t.Fatalf("OpenStore: %v", err)
-	}
-	defer s.Close()
-
-	cases := []struct {
-		name      string
-		canonical string // NFD shape the bridge scanner records
-		ioshape   string // NFC + lowercased + leading-slash shape iOS sends
-	}{
+	runLookupShapeCases(t, []lookupShapeCase{
 		{
 			"icelandic (HFS+ migration shape)",
 			"Sigur Ro\u0301s/A\u0301gætis byrjun/01 Svefn-g-englar.flac",
@@ -378,14 +351,7 @@ func TestLookupTrack_nfdStoredPathFoundByNfcLookup(t *testing.T) {
 			"Cafe\u0301 Del Mar/Volumen Diez/01.flac",
 			"/café del mar/volumen diez/01.flac",
 		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			seedTrack(t, s, tc.canonical)
-			assertLookupTrackCanonical(t, s, tc.ioshape, tc.canonical)
-		})
-	}
+	})
 }
 
 // TestLookupVariantAndAnalysis_nfdStoredPathFoundByNfcLookup mirrors
@@ -460,6 +426,34 @@ func seedTrack(t *testing.T, s *Store, canonical string) {
 		Artist: "Artist", Album: "Album",
 	}); err != nil {
 		t.Fatalf("UpsertTrack(%q): %v", canonical, err)
+	}
+}
+
+// lookupShapeCase is one row of the iOS↔bridge path-shape contract:
+// canonical is the scanner-stored form, ioshape the lowercased,
+// optional-leading-slash form iOS sends after share.normalize.
+type lookupShapeCase struct {
+	name      string
+	canonical string
+	ioshape   string
+}
+
+// runLookupShapeCases drives the shared table loop for the
+// LookupTrack shape tests: seed each canonical row, then assert the
+// iOS-shaped lookup resolves to it.
+func runLookupShapeCases(t *testing.T, cases []lookupShapeCase) {
+	t.Helper()
+	s, err := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer s.Close()
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			seedTrack(t, s, tc.canonical)
+			assertLookupTrackCanonical(t, s, tc.ioshape, tc.canonical)
+		})
 	}
 }
 
