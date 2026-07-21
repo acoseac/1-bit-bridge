@@ -2,6 +2,8 @@ module github.com/acoseac/1-bit-bridge
 
 go 1.26.1
 
+toolchain go1.26.5
+
 require (
 	github.com/dhowden/tag v0.0.0-20240417053706-3d75831295e8
 	github.com/fsnotify/fsnotify v1.10.0
