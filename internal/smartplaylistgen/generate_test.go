@@ -44,6 +44,59 @@ func analysis(t *testing.T, s *manifest.Store, path string, keyRoot int, mode st
 	}
 }
 
+// seedDailyPlays inserts one listening session per day at UTC hour 8, d days
+// before `now` for each d in daysAgo, every session playing each path in
+// order (5-minute spacing, 200 s per play) on the given interface.
+func seedDailyPlays(t *testing.T, s *manifest.Store, now time.Time, iface string, daysAgo []int, paths ...string) {
+	t.Helper()
+	var hist []manifest.PlaybackHistoryRow
+	for _, d := range daysAgo {
+		base := time.Date(now.Year(), now.Month(), now.Day()-d, 8, 0, 0, 0, time.UTC)
+		for i, p := range paths {
+			hist = append(hist, manifest.PlaybackHistoryRow{
+				DeviceToken: "d", Path: p,
+				StartedAt:    base.Add(time.Duration(i*5) * time.Minute).UnixNano(),
+				DurationUsed: 200, IfaceType: iface,
+			})
+		}
+	}
+	if err := s.InsertHistoryBatch(context.Background(), hist); err != nil {
+		t.Fatalf("InsertHistoryBatch: %v", err)
+	}
+}
+
+// regenTestOptions returns DefaultOptions with the listening-family minimums
+// lowered so a handful of seeded plays populates them (the production floors
+// — MinHeavyRotation 10, MinSessions 20, … — would hide every family in a
+// 3-track fixture). Analysis-gated + new-family floors stay at production
+// values; tests override those explicitly when they exercise them.
+func regenTestOptions(nowNS int64, analysisOn bool) Options {
+	opts := DefaultOptions(nowNS, analysisOn)
+	opts.Engine.MaxItems = 10
+	opts.Engine.MinHeavyRotation = 2
+	opts.Engine.MinRecentlyPlayed = 2
+	opts.Engine.MinForgotten = 2
+	opts.Engine.MinAutoMixPool = 3
+	opts.Engine.MinTimeOfDayPlays = 2
+	opts.Engine.MinDailyFamiliar = 2
+	opts.Engine.MinSessions = 2
+	return opts
+}
+
+// loadKinds returns the number of cached families and the set of their kinds.
+func loadKinds(t *testing.T, s *manifest.Store) (int, map[string]bool) {
+	t.Helper()
+	rows, err := s.LoadSmartPlaylists(context.Background())
+	if err != nil {
+		t.Fatalf("LoadSmartPlaylists: %v", err)
+	}
+	kinds := map[string]bool{}
+	for _, r := range rows {
+		kinds[r.Kind] = true
+	}
+	return len(rows), kinds
+}
+
 // TestRegenerate_PipelineEndToEnd seeds a store via the public API, runs the
 // full regeneration, and verifies the cache contents + blob shapes.
 func TestRegenerate_PipelineEndToEnd(t *testing.T) {
@@ -66,20 +119,7 @@ func TestRegenerate_PipelineEndToEnd(t *testing.T) {
 	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 	nowNS := now.UnixNano()
 	// 3 listening sessions (one per day) at UTC hour 8, each playing a,b,c.
-	var hist []manifest.PlaybackHistoryRow
-	for _, day := range []int{29, 30, 31} {
-		base := time.Date(2026, 5, day, 8, 0, 0, 0, time.UTC)
-		for i, p := range []string{"/a.flac", "/b.flac", "/c.flac"} {
-			hist = append(hist, manifest.PlaybackHistoryRow{
-				DeviceToken: "d", Path: p,
-				StartedAt:    base.Add(time.Duration(i*5) * time.Minute).UnixNano(),
-				DurationUsed: 200, IfaceType: "CarPlay",
-			})
-		}
-	}
-	if err := s.InsertHistoryBatch(ctx, hist); err != nil {
-		t.Fatalf("InsertHistoryBatch: %v", err)
-	}
+	seedDailyPlays(t, s, now, "CarPlay", []int{3, 2, 1}, "/a.flac", "/b.flac", "/c.flac")
 
 	opts := DefaultOptions(nowNS, true)
 	opts.ForgottenMinPlays = 2
@@ -276,52 +316,19 @@ func TestRegenerate_AnalysisDisabledSkipsMoodBands(t *testing.T) {
 	nowNS := now.UnixNano()
 	// A few recent plays per track so the listening families populate in
 	// both runs.
-	var hist []manifest.PlaybackHistoryRow
-	for _, day := range []int{29, 30, 31} {
-		base := time.Date(2026, 5, day, 8, 0, 0, 0, time.UTC)
-		for i, p := range []string{"/q1.flac", "/q2.flac", "/l1.flac", "/l2.flac"} {
-			hist = append(hist, manifest.PlaybackHistoryRow{
-				DeviceToken: "d", Path: p,
-				StartedAt:    base.Add(time.Duration(i*5) * time.Minute).UnixNano(),
-				DurationUsed: 200,
-			})
-		}
-	}
-	if err := s.InsertHistoryBatch(ctx, hist); err != nil {
-		t.Fatalf("InsertHistoryBatch: %v", err)
-	}
+	seedDailyPlays(t, s, now, "", []int{3, 2, 1}, "/q1.flac", "/q2.flac", "/l1.flac", "/l2.flac")
 
-	engine := func(analysisOn bool) smartplaylist.Options {
-		// Derive from DefaultOptions so every family minimum stays
-		// production-sane (a zero minimum would let an empty pool emit an
-		// empty family); override only what the fixture needs.
-		o := smartplaylist.DefaultOptions(analysisOn)
-		o.MaxItems = 10
-		o.MinHeavyRotation = 2
-		o.MinRecentlyPlayed = 2
-		o.MinForgotten = 2
-		o.MinAutoMixPool = 3
-		o.MinTimeOfDayPlays = 2
-		o.MinDailyFamiliar = 2
-		o.MinSessions = 2
-		o.MinMoodBand = 2
-		return o
+	regenOpts := func(analysisOn bool) Options {
+		opts := regenTestOptions(nowNS, analysisOn)
+		opts.Engine.MinMoodBand = 2
+		return opts
 	}
 
 	// Control: analysis ON — both mood bands populate from the seeded rows.
-	opts := DefaultOptions(nowNS, true)
-	opts.Engine = engine(true)
-	if _, err := Regenerate(ctx, s, opts); err != nil {
+	if _, err := Regenerate(ctx, s, regenOpts(true)); err != nil {
 		t.Fatalf("Regenerate (analysis on): %v", err)
 	}
-	rows, err := s.LoadSmartPlaylists(ctx)
-	if err != nil {
-		t.Fatalf("LoadSmartPlaylists: %v", err)
-	}
-	kinds := map[string]bool{}
-	for _, r := range rows {
-		kinds[r.Kind] = true
-	}
+	_, kinds := loadKinds(t, s)
 	for _, k := range []string{"windDown", "liftOff"} {
 		if !kinds[k] {
 			t.Fatalf("control run: %s missing with analysis ON; got %v", k, kinds)
@@ -330,22 +337,13 @@ func TestRegenerate_AnalysisDisabledSkipsMoodBands(t *testing.T) {
 
 	// Gated: analysis OFF — mood bands + Auto Mix must stay hidden while
 	// the listening families keep populating.
-	optsOff := DefaultOptions(nowNS, false)
-	optsOff.Engine = engine(false)
-	n, err := Regenerate(ctx, s, optsOff)
+	n, err := Regenerate(ctx, s, regenOpts(false))
 	if err != nil {
 		t.Fatalf("Regenerate (analysis off): %v", err)
 	}
-	rows, err = s.LoadSmartPlaylists(ctx)
-	if err != nil {
-		t.Fatalf("LoadSmartPlaylists (off): %v", err)
-	}
-	if len(rows) != n {
-		t.Fatalf("LoadSmartPlaylists returned %d, Regenerate wrote %d", len(rows), n)
-	}
-	kinds = map[string]bool{}
-	for _, r := range rows {
-		kinds[r.Kind] = true
+	cached, kinds := loadKinds(t, s)
+	if cached != n {
+		t.Fatalf("LoadSmartPlaylists returned %d, Regenerate wrote %d", cached, n)
 	}
 	for _, k := range []string{"windDown", "liftOff", "autoMix"} {
 		if kinds[k] {
@@ -372,30 +370,8 @@ func TestRegenerate_StoreFailureLeavesPriorCacheIntact(t *testing.T) {
 		track(t, s, p, "Jazz")
 	}
 	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	nowNS := now.UnixNano()
-	var hist []manifest.PlaybackHistoryRow
-	for _, day := range []int{29, 30, 31} {
-		base := time.Date(2026, 5, day, 8, 0, 0, 0, time.UTC)
-		for i, p := range []string{"/a.flac", "/b.flac", "/c.flac"} {
-			hist = append(hist, manifest.PlaybackHistoryRow{
-				DeviceToken: "d", Path: p,
-				StartedAt:    base.Add(time.Duration(i*5) * time.Minute).UnixNano(),
-				DurationUsed: 200,
-			})
-		}
-	}
-	if err := s.InsertHistoryBatch(ctx, hist); err != nil {
-		t.Fatalf("InsertHistoryBatch: %v", err)
-	}
-	opts := DefaultOptions(nowNS, false)
-	opts.Engine = smartplaylist.DefaultOptions(false)
-	opts.Engine.MaxItems = 10
-	opts.Engine.MinHeavyRotation = 2
-	opts.Engine.MinRecentlyPlayed = 2
-	opts.Engine.MinForgotten = 2
-	opts.Engine.MinTimeOfDayPlays = 2
-	opts.Engine.MinDailyFamiliar = 2
-	opts.Engine.MinSessions = 2
+	seedDailyPlays(t, s, now, "", []int{3, 2, 1}, "/a.flac", "/b.flac", "/c.flac")
+	opts := regenTestOptions(now.UnixNano(), false)
 	n1, err := Regenerate(ctx, s, opts)
 	if err != nil || n1 == 0 {
 		t.Fatalf("seed Regenerate: n=%d err=%v", n1, err)
@@ -452,33 +428,15 @@ func TestRegenerate_HeavyRotationFloorDegrades(t *testing.T) {
 	}
 	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 	nowNS := now.UnixNano()
-	var hist []manifest.PlaybackHistoryRow
-	for i, p := range []string{"/a.flac", "/b.flac", "/c.flac"} {
-		hist = append(hist, manifest.PlaybackHistoryRow{
-			DeviceToken: "d", Path: p,
-			StartedAt:    now.Add(-24*time.Hour + time.Duration(i)*time.Hour).UnixNano(),
-			DurationUsed: 200,
-		})
-	}
-	if err := s.InsertHistoryBatch(ctx, hist); err != nil {
-		t.Fatalf("InsertHistoryBatch: %v", err)
-	}
+	seedDailyPlays(t, s, now, "", []int{1}, "/a.flac", "/b.flac", "/c.flac")
 
+	// Production engine defaults with ONLY the heavy-rotation minimum
+	// lowered: every other family's production floor (MinRecentlyPlayed 5,
+	// MinSessions 20, MinDriveMix 10, …) is out of reach of a 3-track
+	// single-play fixture, so heavyRotation is the only populated family
+	// and the count pin isolates the degraded-floor path.
 	opts := DefaultOptions(nowNS, false) // HeavyRotationMinPlays: 3
-	// High minimums for every other family so heavyRotation is the ONLY
-	// populated one — the count pin isolates the degraded-floor path.
-	opts.Engine = smartplaylist.DefaultOptions(false)
-	opts.Engine.MaxItems = 10
 	opts.Engine.MinHeavyRotation = 2
-	opts.Engine.MinRecentlyPlayed = 100
-	opts.Engine.MinForgotten = 100
-	opts.Engine.MinAutoMixPool = 100
-	opts.Engine.MinTimeOfDayPlays = 100
-	opts.Engine.MinDailyFamiliar = 100
-	opts.Engine.MinSessions = 100
-	opts.Engine.MinDriveMix = 100
-	opts.Engine.MinArtistDeepCuts = 100
-	opts.Engine.OnRepeatEnterFloor = 100
 
 	n, err := Regenerate(ctx, s, opts)
 	if err != nil {

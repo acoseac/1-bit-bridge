@@ -30,8 +30,8 @@ request instead of walking an SMB tree.
 
 ## Build and test commands
 
-Requires the Go toolchain matching `go.mod` (`go 1.26.1`; README's "1.25+" is
-stale — trust `go.mod`).
+Requires the Go toolchain matching `go.mod` — trust `go.mod` (README tracks
+it).
 
 | Command | What it does |
 |---|---|
