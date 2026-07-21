@@ -49,6 +49,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
+	"github.com/acoseac/1-bit-bridge/internal/integrity"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
 )
@@ -672,9 +673,15 @@ func runGCForwardSweep(ctx context.Context, stdout, stderr io.Writer, outputDir 
 // gcCheckOutputDirBeforeReverseSweep enforces the "don't mass-delete
 // rows on a disappeared transcoded root" guard documented in PR #207.
 // Returns 0 on healthy state (proceed) or a non-zero exit code on
-// missing / unreadable root with extant rows. Split from runGC so the
-// cognitive-complexity refactor reads as a flat sequence of guards
-// rather than an inline switch.
+// missing / empty / unreadable root with extant rows. Split from
+// runGC so the cognitive-complexity refactor reads as a flat
+// sequence of guards rather than an inline switch.
+//
+// The exists-but-empty case (2026-07-21 review M15, prior audit B4's
+// unfixed half) shares VariantWatcher's probe: a cleanly-unmounted
+// mountpoint reverts to an EMPTY local dir, so an outputDir that
+// stats fine but holds zero entries is the same mass-delete hazard
+// as a missing one — every per-row sidecar stat would ENOENT.
 func gcCheckOutputDirBeforeReverseSweep(stderr io.Writer, outputDir string, rowCount int) int {
 	if rowCount == 0 {
 		// LEGITIMATELY-empty case (no upscales ever generated on
@@ -684,25 +691,11 @@ func gcCheckOutputDirBeforeReverseSweep(stderr io.Writer, outputDir string, rowC
 		// something to lose.
 		return 0
 	}
-	_, statErr := os.Stat(outputDir)
-	switch {
-	case statErr == nil:
-		return 0 // Healthy state — proceed to the per-row loop.
-	case errors.Is(statErr, os.ErrNotExist):
-		fmt.Fprintf(stderr, "GC reverse sweep: transcoded directory %q is missing but %d variant row(s) exist; refusing to delete rows en masse (likely a disconnected mount or filesystem issue — restore access and re-run).\n", outputDir, rowCount)
-		return 1
-	default:
-		// Any other stat failure (permission denied, I/O
-		// error, stale NFS handle, etc.) means the per-row
-		// `os.Stat(SidecarPath)` below would almost certainly
-		// fail the same way for every row — accumulating N
-		// per-row "stat failure" log lines and burning the
-		// operator's terminal output without making progress.
-		// Bail upfront with a single distinct message.
-		// CodeRabbit on PR #207 round 3.
-		fmt.Fprintf(stderr, "GC reverse sweep: cannot stat transcoded directory %q (%v); refusing to proceed with %d variant row(s) at risk.\n", outputDir, statErr, rowCount)
+	if reason := integrity.VariantsDirSweepBlockReason(outputDir); reason != "" {
+		fmt.Fprintf(stderr, "GC reverse sweep: %s (%q) but %d variant row(s) exist; refusing to delete rows en masse (likely a disconnected mount or filesystem issue — restore access and re-run).\n", reason, outputDir, rowCount)
 		return 1
 	}
+	return 0
 }
 
 // runGCReverseSweep is the per-row sweep: every track_variants row

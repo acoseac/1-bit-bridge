@@ -2431,6 +2431,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// builds the typed api.UpscaleDeletedEvent so the SSE wire
 		// shape stays in lockstep with the operator-driven delete
 		// handler. Skipped silently when the interval is ≤ 0.
+		// The effective variants dir is passed so the watcher can
+		// refuse a sweep when the whole directory reads missing /
+		// empty with rows in the catalog (cleanly-unmounted
+		// variants volume) instead of mass-deleting every row.
 		sweepInterval := cfg.VariantSweepInterval()
 		if sweepInterval > 0 {
 			variantWatcher := integrity.NewVariantWatcher(
@@ -2443,6 +2447,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 						DeletedAt:  time.Now(),
 					})
 				},
+				cfg.Upscale.EffectiveVariantsDir(cfg.DataDir),
 				sweepInterval,
 			)
 			stopVariantWatcher := variantWatcher.Start(scanCtx)
