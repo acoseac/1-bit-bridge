@@ -4,7 +4,7 @@
   <h1>Playlists &amp; history</h1>
   <p class="lede">
     Per-device playlist backups and listening telemetry the bridge has stored.
-    Owner-visible only — this never leaves the loopback admin console.
+    {{if not .IsPublic}}Owner-visible only — this never leaves the loopback admin console.{{end}}
   </p>
 
   <div class="panel">

@@ -58,6 +58,12 @@
             role="status" aria-live="polite" aria-atomic="true">0</span>
       <span class="pairing-badge-label">pending</span>
     </a>
+    {{- /* Public-mode sign-out (M10). Loopback installs have no session
+        to end — the console is deliberately unauthenticated there — so
+        the button renders only when IsPublic. app.js initLogout posts
+        /logout (invalidates the session server-side + clears the
+        cookie), then bounces to /login. */ -}}
+    {{if .IsPublic}}<button id="logout-btn" class="logout-btn" type="button">Sign out</button>{{end}}
   </div>
 </header>
 <main>

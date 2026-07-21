@@ -225,6 +225,82 @@ func TestRateLimiterSweepRemovesStale(t *testing.T) {
 	}
 }
 
+func TestNormalizeClientIP(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		// IPv6 collapses to the /64 prefix address.
+		{"2001:db8:abcd:1::1", "2001:db8:abcd:1::"},
+		{"2001:db8:abcd:1:ffff:ffff:ffff:ffff", "2001:db8:abcd:1::"},
+		{"2001:DB8:ABCD:1::1", "2001:db8:abcd:1::"}, // case-normalized too
+		// IPv4 (and its 4-in-6 mapped form) keys on the full address.
+		{"1.2.3.4", "1.2.3.4"},
+		{"::ffff:1.2.3.4", "::ffff:1.2.3.4"},
+		// Link-local zone stripped so one client keys consistently.
+		{"fe80::1%eth0", "fe80::"},
+		// Unparseable / empty input passes through verbatim.
+		{"not-an-ip", "not-an-ip"},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := normalizeClientIP(tc.in); got != tc.want {
+			t.Errorf("normalizeClientIP(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestRateLimiterIPv6Slash64SharesBucket(t *testing.T) {
+	// 2026-07-21 review M2: an attacker with an advertised /64 (the
+	// SLAAC norm) rotating interface IDs MUST NOT get a fresh
+	// 5-attempt bucket per address — the whole /64 shares one.
+	rl := NewRateLimiter()
+	defer rl.Stop()
+
+	const a = "2001:db8:abcd:1::1"
+	const b = "2001:db8:abcd:1:ffff:ffff:ffff:ffff"
+	for i := 0; i < RateLimitMaxAttempts; i++ {
+		rl.RecordFailure(a, "admin")
+	}
+	if rl.Allow(b, "admin") {
+		t.Error("sibling address in the same /64 must share the exhausted bucket")
+	}
+	// A different /64 is an independent bucket.
+	if !rl.Allow("2001:db8:abcd:2::1", "admin") {
+		t.Error("different /64 must get an independent bucket")
+	}
+	// IPv4 behavior unchanged: different IPv4 addresses stay independent.
+	for i := 0; i < RateLimitMaxAttempts; i++ {
+		rl.RecordFailure("203.0.113.1", "admin")
+	}
+	if !rl.Allow("203.0.113.2", "admin") {
+		t.Error("different IPv4 address must get an independent bucket")
+	}
+}
+
+func TestRateLimiterAllowAndReserveIPv6Rotation(t *testing.T) {
+	// The exact M2 attack shape against the login handler's entry
+	// point: reservations spread across DIFFERENT addresses in one
+	// /64 exhaust the shared bucket; RecordSuccess from any sibling
+	// address clears it.
+	rl := NewRateLimiter()
+	defer rl.Stop()
+
+	for i := 0; i < RateLimitMaxAttempts; i++ {
+		ip := fmt.Sprintf("2001:db8:abcd:1::%d", i)
+		if !rl.AllowAndReserve(ip, "admin") {
+			t.Fatalf("attempt %d in a fresh /64 bucket should be admitted", i)
+		}
+	}
+	if rl.AllowAndReserve("2001:db8:abcd:1::9999", "admin") {
+		t.Error("rotation within one /64 must exhaust the shared bucket")
+	}
+	rl.RecordSuccess("2001:db8:abcd:1::dead:beef", "admin")
+	if !rl.AllowAndReserve("2001:db8:abcd:1::1", "admin") {
+		t.Error("RecordSuccess from a same-/64 sibling must clear the shared bucket")
+	}
+}
+
 func TestRedirectIsSafeRelativePath(t *testing.T) {
 	cases := []struct {
 		in   string

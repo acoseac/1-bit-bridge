@@ -1048,6 +1048,85 @@ func TestUPnPPage_LoopbackModeShowsActionPanels(t *testing.T) {
 	}
 }
 
+// TestRenderPage_PublicModeSecurityChrome pins the public-mode
+// hardening from the 2026-07-21 review (M10 + M11 + the data.html
+// copy Low) on pages rendered through renderPage:
+//
+//   - M11: every authenticated admin page sends
+//     `Content-Security-Policy: frame-ancestors 'self'` (+ legacy
+//     X-Frame-Options: SAMEORIGIN) — previously only /login sent XFO,
+//     leaving destructive buttons (revoke, delete-all-variants,
+//     restart) frameable by a same-site sibling origin.
+//   - M10: the header chrome renders a sign-out button wired to
+//     POST /logout (previously the route existed with zero UI).
+//   - data.html: the "never leaves the loopback admin console" copy
+//     is false in public mode and MUST be suppressed.
+//
+// Like the UPnP public-mode test above, handlers are invoked DIRECTLY
+// (bypassing the auth middleware) — the renderPage flow is the
+// contract under test.
+func TestRenderPage_PublicModeSecurityChrome(t *testing.T) {
+	srv, cfg, _ := newTestServer(t)
+	cfg.Deployment.Mode = "public"
+	cfg.Deployment.AdminTLSTerminatedByProxy = true
+	cfg.Autocert.Domain = "bridge.example.com"
+	srv.deps.CfgHolder.Store(cfg)
+
+	rw := httptest.NewRecorder()
+	srv.pageUPnP(rw, httptest.NewRequest("GET", "/upnp", nil))
+	if rw.Code != 200 {
+		t.Fatalf("status = %d; want 200", rw.Code)
+	}
+	if got, want := rw.Header().Get("Content-Security-Policy"), "frame-ancestors 'self'"; got != want {
+		t.Errorf("Content-Security-Policy = %q, want %q", got, want)
+	}
+	if got := rw.Header().Get("X-Frame-Options"); got != "SAMEORIGIN" {
+		t.Errorf("X-Frame-Options = %q, want SAMEORIGIN", got)
+	}
+	if !strings.Contains(rw.Body.String(), `id="logout-btn"`) {
+		t.Error("public-mode layout MUST render the sign-out button")
+	}
+
+	rw2 := httptest.NewRecorder()
+	srv.pageData(rw2, httptest.NewRequest("GET", "/data", nil))
+	if rw2.Code != 200 {
+		t.Fatalf("/data status = %d; want 200", rw2.Code)
+	}
+	if strings.Contains(rw2.Body.String(), "never leaves the loopback admin console") {
+		t.Error("public-mode /data MUST NOT claim the console never leaves loopback")
+	}
+}
+
+// TestRenderPage_LoopbackModeSecurityChromeUnchanged is the loopback-side
+// regression guard: the default deployment sends neither the
+// frame-ancestors headers (a full CSP is documented future work) nor
+// the sign-out button (no session to end), and keeps the owner-visible
+// copy on /data. Without this, a flipped IsPublic gate would pass the
+// public-mode test alone.
+func TestRenderPage_LoopbackModeSecurityChromeUnchanged(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	rw := httptest.NewRecorder()
+	srv.pageUPnP(rw, httptest.NewRequest("GET", "/upnp", nil))
+	if rw.Code != 200 {
+		t.Fatalf("status = %d; want 200", rw.Code)
+	}
+	if got := rw.Header().Get("Content-Security-Policy"); got != "" {
+		t.Errorf("loopback mode MUST NOT send Content-Security-Policy, got %q", got)
+	}
+	if got := rw.Header().Get("X-Frame-Options"); got != "" {
+		t.Errorf("loopback mode MUST NOT send X-Frame-Options, got %q", got)
+	}
+	if strings.Contains(rw.Body.String(), `id="logout-btn"`) {
+		t.Error("loopback mode MUST NOT render the sign-out button (no session to end)")
+	}
+
+	rw2 := httptest.NewRecorder()
+	srv.pageData(rw2, httptest.NewRequest("GET", "/data", nil))
+	if !strings.Contains(rw2.Body.String(), "never leaves the loopback admin console") {
+		t.Error("loopback-mode /data should keep the owner-visible copy")
+	}
+}
+
 func TestStaticAssetsEmbedded(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	h := srv.Handler()

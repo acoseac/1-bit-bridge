@@ -47,8 +47,10 @@ func (s *Server) pageLogin(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "same-origin")
-	// X-Frame-Options on the login page only — prevents the login
-	// form from being framed by another origin (clickjacking).
+	// X-Frame-Options: DENY on the login page — prevents the login
+	// form from being framed by ANY origin, including same-origin
+	// (authenticated pages get the weaker SAMEORIGIN + frame-ancestors
+	// 'self' from renderPage in public mode).
 	w.Header().Set("X-Frame-Options", "DENY")
 	if err := s.loginTmpl.ExecuteTemplate(w, "login", envelope); err != nil {
 		logger.Error("render login", "err", err)
