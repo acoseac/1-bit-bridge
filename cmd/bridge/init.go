@@ -15,7 +15,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/mattn/go-isatty"
+	"golang.org/x/term"
 
 	"net"
 
@@ -722,7 +722,7 @@ func stdinIsTerminal(in *bufio.Reader) bool {
 	if in == nil {
 		return false
 	}
-	return isatty.IsTerminal(os.Stdin.Fd())
+	return term.IsTerminal(int(os.Stdin.Fd()))
 }
 
 // splitFingerprint splits a TLS fingerprint string into two halves
