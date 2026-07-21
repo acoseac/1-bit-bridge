@@ -3,6 +3,7 @@ package admin
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +12,35 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
 )
+
+// patchSettingsExpect issues a JSON PATCH to /api/settings and asserts the
+// expected status. On a 200 it returns the decoded response; otherwise a
+// nil response plus the raw error body (for content assertions).
+func patchSettingsExpect(t *testing.T, ts *httptest.Server, jsonBody string, wantStatus int) (*settingsPatchResponse, []byte) {
+	t.Helper()
+	req, _ := http.NewRequest("PATCH", ts.URL+"/api/settings", bytes.NewBufferString(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != wantStatus {
+		t.Fatalf("PATCH %s: status %d, want %d; body: %s", jsonBody, resp.StatusCode, wantStatus, data)
+	}
+	if wantStatus != http.StatusOK {
+		return nil, data
+	}
+	var patchResp settingsPatchResponse
+	if err := json.Unmarshal(data, &patchResp); err != nil {
+		t.Fatal(err)
+	}
+	return &patchResp, data
+}
 
 // TestSettingsGetReturnsTailscaleModeAndMDNS pins the new fields
 // on the GET shape so the Settings page can render the
@@ -54,21 +84,7 @@ func TestSettingsPatchTailscaleToDisabledFiresHotReload(t *testing.T) {
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
-	body := bytes.NewBufferString(`{"tailscaleMode":"disabled"}`)
-	req, _ := http.NewRequest("PATCH", ts.URL+"/api/settings", body)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status %d, want 200", resp.StatusCode)
-	}
-	var patchResp settingsPatchResponse
-	if err := json.NewDecoder(resp.Body).Decode(&patchResp); err != nil {
-		t.Fatal(err)
-	}
+	patchResp, _ := patchSettingsExpect(t, ts, `{"tailscaleMode":"disabled"}`, http.StatusOK)
 	if patchResp.RestartRequired {
 		t.Error("any→disabled should NOT mark RestartRequired (hot-reload via TailscaleDisable)")
 	}
@@ -92,21 +108,7 @@ func TestSettingsPatchTailscaleDisabledToCLISetsRestartRequired(t *testing.T) {
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
-	body := bytes.NewBufferString(`{"tailscaleMode":"cli"}`)
-	req, _ := http.NewRequest("PATCH", ts.URL+"/api/settings", body)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status %d, want 200", resp.StatusCode)
-	}
-	var patchResp settingsPatchResponse
-	if err := json.NewDecoder(resp.Body).Decode(&patchResp); err != nil {
-		t.Fatal(err)
-	}
+	patchResp, _ := patchSettingsExpect(t, ts, `{"tailscaleMode":"cli"}`, http.StatusOK)
 	if !patchResp.RestartRequired {
 		t.Error("disabled→cli must mark RestartRequired")
 	}
@@ -126,17 +128,7 @@ func TestSettingsPatchTailscaleSameValueDoesNotFire(t *testing.T) {
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
-	body := bytes.NewBufferString(`{"tailscaleMode":"disabled"}`)
-	req, _ := http.NewRequest("PATCH", ts.URL+"/api/settings", body)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status %d, want 200", resp.StatusCode)
-	}
+	patchSettingsExpect(t, ts, `{"tailscaleMode":"disabled"}`, http.StatusOK)
 	if called.Load() != 0 {
 		t.Errorf("idempotent disabled→disabled fired TailscaleDisable %d times; want 0", called.Load())
 	}
@@ -158,21 +150,7 @@ func TestSettingsPatchMDNSDisableFiresHotReload(t *testing.T) {
 	defer ts.Close()
 
 	// Loopback default is mdnsEnabled=true; PATCH to false.
-	body := bytes.NewBufferString(`{"mdnsEnabled":false}`)
-	req, _ := http.NewRequest("PATCH", ts.URL+"/api/settings", body)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status %d, want 200", resp.StatusCode)
-	}
-	var patchResp settingsPatchResponse
-	if err := json.NewDecoder(resp.Body).Decode(&patchResp); err != nil {
-		t.Fatal(err)
-	}
+	patchResp, _ := patchSettingsExpect(t, ts, `{"mdnsEnabled":false}`, http.StatusOK)
 	if patchResp.RestartRequired {
 		t.Error("mDNS toggle must NOT mark RestartRequired (hot-reloadable)")
 	}
@@ -245,21 +223,7 @@ func TestSettingsPatchTailscaleTsnetToDisabledRequiresRestart(t *testing.T) {
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
-	body := bytes.NewBufferString(`{"tailscaleMode":"disabled"}`)
-	req, _ := http.NewRequest("PATCH", ts.URL+"/api/settings", body)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status %d, want 200", resp.StatusCode)
-	}
-	var patchResp settingsPatchResponse
-	if err := json.NewDecoder(resp.Body).Decode(&patchResp); err != nil {
-		t.Fatal(err)
-	}
+	patchResp, _ := patchSettingsExpect(t, ts, `{"tailscaleMode":"disabled"}`, http.StatusOK)
 	if !patchResp.RestartRequired {
 		t.Error("tsnet→disabled must mark RestartRequired (tsnet.Server can't be torn down mid-process)")
 	}
@@ -278,17 +242,7 @@ func TestSettingsPatchTailscaleEmptyStringRejected(t *testing.T) {
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
-	body := bytes.NewBufferString(`{"tailscaleMode":""}`)
-	req, _ := http.NewRequest("PATCH", ts.URL+"/api/settings", body)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("empty tailscaleMode: status %d, want 400", resp.StatusCode)
-	}
+	patchSettingsExpect(t, ts, `{"tailscaleMode":""}`, http.StatusBadRequest)
 }
 
 // TestSettingsPatchTailscaleInvalidModeRejected: garbage in the
@@ -301,21 +255,9 @@ func TestSettingsPatchTailscaleInvalidModeRejected(t *testing.T) {
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
-	body := bytes.NewBufferString(`{"tailscaleMode":"garbage"}`)
-	req, _ := http.NewRequest("PATCH", ts.URL+"/api/settings", body)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("status %d, want 400 for invalid mode", resp.StatusCode)
-	}
-	respBody := make([]byte, 1024)
-	n, _ := resp.Body.Read(respBody)
-	if !strings.Contains(string(respBody[:n]), "tailscale.mode") {
-		t.Errorf("error body %q should mention tailscale.mode", respBody[:n])
+	_, data := patchSettingsExpect(t, ts, `{"tailscaleMode":"garbage"}`, http.StatusBadRequest)
+	if !strings.Contains(string(data), "tailscale.mode") {
+		t.Errorf("error body %q should mention tailscale.mode", data)
 	}
 	if calls.Load() != 0 {
 		t.Errorf("TailscaleDisable fired %d times despite invalid mode", calls.Load())
