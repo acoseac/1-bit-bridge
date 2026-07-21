@@ -425,3 +425,137 @@ func TestRunGCRefusesWhenOutputDirMissingButRowsExist(t *testing.T) {
 		t.Errorf("expected stderr to explain the refusal: %s", se)
 	}
 }
+
+// TestGCCheckOutputDirBeforeReverseSweep pins the guard matrix
+// directly (2026-07-21 review M15): with rows in the catalog, a
+// missing OR exists-but-empty outputDir refuses (exit 1) — the
+// cleanly-unmounted-mountpoint signature — while a non-empty dir
+// proceeds, and zero rows proceed regardless of dir state.
+func TestGCCheckOutputDirBeforeReverseSweep(t *testing.T) {
+	cases := []struct {
+		name string
+		// setup returns the outputDir to probe.
+		setup   func(t *testing.T) string
+		rows    int
+		wantRC  int
+		wantMsg string // stderr substring expected when refusing; "" otherwise
+	}{
+		{
+			name: "missing dir with rows refuses",
+			setup: func(t *testing.T) string {
+				return filepath.Join(t.TempDir(), "unmounted-mountpoint")
+			},
+			rows:    2,
+			wantRC:  1,
+			wantMsg: "refusing to delete rows",
+		},
+		{
+			name: "empty dir with rows refuses",
+			setup: func(t *testing.T) string {
+				return t.TempDir() // exists, holds nothing — unmounted mountpoint
+			},
+			rows:    2,
+			wantRC:  1,
+			wantMsg: "refusing to delete rows",
+		},
+		{
+			name: "non-empty dir with rows proceeds",
+			setup: func(t *testing.T) string {
+				dir := t.TempDir()
+				if err := os.WriteFile(filepath.Join(dir, "sidecar.flac"), []byte("x"), 0o644); err != nil {
+					t.Fatalf("WriteFile: %v", err)
+				}
+				return dir
+			},
+			rows:    2,
+			wantRC:  0,
+			wantMsg: "",
+		},
+		{
+			name: "zero rows proceeds regardless of missing dir",
+			setup: func(t *testing.T) string {
+				return filepath.Join(t.TempDir(), "never-created")
+			},
+			rows:    0,
+			wantRC:  0,
+			wantMsg: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			rc := gcCheckOutputDirBeforeReverseSweep(&stderr, tc.setup(t), tc.rows)
+			if rc != tc.wantRC {
+				t.Fatalf("gcCheckOutputDirBeforeReverseSweep rc = %d, want %d (stderr=%s)", rc, tc.wantRC, stderr.String())
+			}
+			if tc.wantMsg != "" && !strings.Contains(stderr.String(), tc.wantMsg) {
+				t.Errorf("stderr %q does not contain %q", stderr.String(), tc.wantMsg)
+			}
+			if tc.wantMsg == "" && stderr.Len() != 0 {
+				t.Errorf("expected no stderr output on proceed, got %q", stderr.String())
+			}
+		})
+	}
+}
+
+// TestRunGCRefusesWhenOutputDirEmptyButRowsExist is the
+// exists-but-empty twin of
+// TestRunGCRefusesWhenOutputDirMissingButRowsExist (2026-07-21
+// review M15 — prior audit B4's unfixed half): on Linux a
+// cleanly-unmounted variants volume leaves its mountpoint in
+// place as an EMPTY local dir, which the pre-fix guard waved
+// through because os.Stat succeeded. The reverse sweep would
+// then ENOENT every sidecar and mass-delete the catalog.
+func TestRunGCRefusesWhenOutputDirEmptyButRowsExist(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "bridge.db")
+	store, err := manifest.OpenStore(storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	// Seed one variant row whose sidecar_path lives under a
+	// transcoded directory that exists but is EMPTY.
+	src := "Artist/Album/01 - protected.flac"
+	if err := store.UpsertTrack(context.Background(), &manifest.Track{
+		Path: src, Size: 100, ModTime: time.Now().Add(-time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	emptyDir := filepath.Join(dir, "transcoded-empty")
+	if err := os.Mkdir(emptyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertVariant(context.Background(), manifest.VariantRow{
+		SourcePath: src, VariantID: "upscaled-v2-176400-24",
+		SidecarPath: filepath.Join(emptyDir, "abc-upscaled-v2-176400-24.flac"),
+		Format:      "flac",
+		SampleRate:  176400, BitsPerSample: 24, SizeBytes: 10,
+		SourceMTimeNS: 1, SourceSize: 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	rc := runGC(context.Background(), &stdout, &stderr, store, emptyDir)
+	if rc == 0 {
+		t.Fatalf("expected runGC to fail when outputDir is empty but rows exist; stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+
+	// Critical assertion: the row MUST still be in the DB. The
+	// guard's whole purpose is to prevent a mass-delete on
+	// environmental failure.
+	all, err := store.AllVariants(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 || all[0].SourcePath != src {
+		t.Errorf("expected the variant row to survive the refused gc; got %d rows: %+v", len(all), all)
+	}
+
+	se := stderr.String()
+	if !strings.Contains(se, "refusing to delete rows") {
+		t.Errorf("expected stderr to explain the refusal: %s", se)
+	}
+}

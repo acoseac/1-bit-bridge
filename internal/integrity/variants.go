@@ -48,10 +48,11 @@ var logger = logging.Component("integrity")
 // deleted variant files while the bridge was down" case
 // without waiting for the first interval to elapse.
 type VariantWatcher struct {
-	lister   VariantLister
-	deleter  VariantDeleter
-	publish  PublishFunc
-	interval time.Duration
+	lister      VariantLister
+	deleter     VariantDeleter
+	publish     PublishFunc
+	variantsDir string
+	interval    time.Duration
 
 	// onTickComplete fires after every full sweep completes;
 	// the test harness wires this to drive deterministic sync
@@ -119,12 +120,23 @@ type VariantSnapshot struct {
 // NewVariantWatcher constructs a watcher. interval ≤ 0 disables
 // the watcher entirely — Start returns a no-op stopFn. Used by
 // operators on minimal deploys who only run `--gc` manually.
-func NewVariantWatcher(lister VariantLister, deleter VariantDeleter, publish PublishFunc, interval time.Duration) *VariantWatcher {
+//
+// `variantsDir` is the effective variants output directory
+// (`cfg.Upscale.EffectiveVariantsDir`) the sidecar paths live
+// under. Before every sweep the watcher probes it via
+// VariantsDirSweepBlockReason and skips the whole tick when the
+// directory is missing or empty while rows exist — the signature
+// of a cleanly-unmounted variants volume, where every per-row
+// stat would report ENOENT and an unguarded sweep would
+// mass-delete the catalog (2026-07-21 review H4). An empty
+// variantsDir disables the guard (legacy unconditional sweep).
+func NewVariantWatcher(lister VariantLister, deleter VariantDeleter, publish PublishFunc, variantsDir string, interval time.Duration) *VariantWatcher {
 	return &VariantWatcher{
-		lister:   lister,
-		deleter:  deleter,
-		publish:  publish,
-		interval: interval,
+		lister:      lister,
+		deleter:     deleter,
+		publish:     publish,
+		variantsDir: variantsDir,
+		interval:    interval,
 	}
 }
 
@@ -210,6 +222,9 @@ func (w *VariantWatcher) run(ctx context.Context, done chan struct{}) {
 // delete-failed row counts 0). Logs WARN on per-row stat /
 // delete failures; logs ERROR only on the outer AllVariants
 // query failure (the only path where we can't even start).
+// Skips wholesale (WARN, 0 deletions) when the variants dir
+// probe reports missing/empty with rows in the catalog — see
+// NewVariantWatcher and VariantsDirSweepBlockReason.
 func (w *VariantWatcher) tick(ctx context.Context) int {
 	rows, err := w.lister.AllVariants()
 	if err != nil {
@@ -220,6 +235,24 @@ func (w *VariantWatcher) tick(ctx context.Context) int {
 	}
 	if len(rows) == 0 {
 		return 0
+	}
+	// Mount-loss guard: rows exist but the whole variants dir is
+	// missing or empty → the volume is almost certainly unmounted
+	// (a clean unmount reverts the mountpoint to an empty local
+	// dir), NOT a library whose every sidecar was individually
+	// deleted. Skip the sweep rather than mass-deleting the
+	// catalog on per-row ENOENTs. Probed per tick so a later
+	// unmount is caught even after healthy ticks. Shares the
+	// helper with `bridge upscale --gc`'s reverse-sweep guard.
+	if w.variantsDir != "" {
+		if reason := VariantsDirSweepBlockReason(w.variantsDir); reason != "" {
+			logger.Warn("integrity variant sweep: skipping sweep, variants dir unhealthy with rows in catalog",
+				slog.String("variants_dir", w.variantsDir),
+				slog.String("reason", reason),
+				slog.Int("rows", len(rows)),
+			)
+			return 0
+		}
 	}
 	// `paths` is the deduplicated set of affected source paths;
 	// `variantIDs` is the (potentially repeating) set of deleted
