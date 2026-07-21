@@ -2207,6 +2207,42 @@ func (s *Store) GetTrack(ctx context.Context, path string) (*Track, error) {
 	return &t, nil
 }
 
+// GetTrackStat is the light skip-gate twin of GetTrack: it returns only
+// the scalars the scanner's unchanged-file fast path compares — size,
+// mtime (nanoseconds since epoch, straight from the mtime_ns column),
+// and artworkMBID — without fetching and unmarshalling the multi-KB
+// tags_json blob. At the hourly full-library rescan that saves ~400 MB
+// of BLOB reads + ~100k JSON parses on a 100k-track library, purely to
+// answer "did size/mtime change".
+//
+// Consistency with GetTrack's ModTime: the mtime_ns column and the
+// blob's `mtime` field are bound from the same t.ModTime in the same
+// upsert statement (UpsertTrack / UpsertTrackBatch), and no later
+// writer touches either, so mtimeNS always carries the blob's instant.
+// UnixNano is a deterministic function of the instant, so
+// `mtimeNS == fileInfo.ModTime().UnixNano()` IS the
+// `storedModTime.Equal(fileModTime)` check — including the absurd
+// out-of-int64-range case, where both sides wrap identically.
+//
+// artworkMBID comes back "" when the key is absent (json_extract NULL)
+// — the scanner only needs it for the `local-` prefix check.
+//
+// ok is false (with err == nil) when no row exists at path — the same
+// (nil, nil) convention as GetTrack.
+func (s *Store) GetTrackStat(ctx context.Context, path string) (size, mtimeNS int64, artworkMBID string, ok bool, err error) {
+	var mbid sql.NullString
+	err = s.db.QueryRowContext(ctx,
+		`SELECT size, mtime_ns, json_extract(tags_json, '$.artworkMBID') FROM tracks WHERE path = ?`,
+		path).Scan(&size, &mtimeNS, &mbid)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, 0, "", false, nil
+	}
+	if err != nil {
+		return 0, 0, "", false, err
+	}
+	return size, mtimeNS, mbid.String, true, nil
+}
+
 // LookupTrack fetches a single track by an iOS-shaped path —
 // lowercase + leading slash from `share.normalize(path:)` — and
 // resolves it against the manifest's case-preserved canonical
@@ -2353,35 +2389,86 @@ const variantsAggSQL = `
 	 FROM track_variants v
 	 WHERE v.source_path = tracks.path) AS variants_json`
 
-// waveformTagSQL is the correlated-subquery suffix that splices the
-// offline-analysis waveform content tag onto each row. Returns the
-// `track_analysis.waveform_tag` for the track, or NULL when no
-// analysis row exists (or the tag is empty). Spliced onto
-// Track.WaveformTag at read time — column-derived, never persisted in
-// tags_json (same discipline as Enriched / Variants). One indexed
-// point-lookup on the track_analysis PRIMARY KEY per row; the
-// NULLIF keeps a defensively-empty tag from surfacing as a present
-// field on the wire. Appended after variantsAggSQL in the manifest
-// read paths.
-const waveformTagSQL = `(SELECT NULLIF(waveform_tag, '')
-	 FROM track_analysis WHERE source_path = tracks.path) AS waveform_tag`
+// analysisSpliceSQL is the correlated-subquery suffix that splices ALL
+// offline-analysis fields onto each row as ONE json_object — a single
+// indexed PK point-lookup on track_analysis per row, vs the three
+// separate scalar probes (waveform tag / ReplayGain / key+tempo) the
+// pre-merge shape paid, each its own B-tree seek per manifest row
+// (2026-07-21 review Low). NULL when no analysis row exists; a present
+// row keeps every key, SQL NULLs surfacing as JSON null. Column-derived,
+// never persisted in tags_json (same discipline as Enriched / Variants).
+// Decoded + spliced by spliceAnalysis; appended after variantsAggSQL in
+// the manifest read paths. The NULLIF keeps a defensively-empty waveform
+// tag from surfacing as a present field on the wire.
+const analysisSpliceSQL = `(SELECT json_object(
+		 'waveformTag',       NULLIF(waveform_tag, ''),
+		 'replayGainTrackDB', replaygain_track_db,
+		 'root',              key_root,
+		 'mode',              key_mode,
+		 'bpm',               bpm)
+	 FROM track_analysis WHERE source_path = tracks.path) AS analysis_json`
 
-// replayGainSQL is the correlated-subquery suffix that splices the
-// offline-analysis ReplayGain track gain (dB) onto each row, or NULL when
-// no analysis row exists / loudness wasn't computed. The splice is
-// tag-absent-ONLY: each read site fills Track.ReplayGainTrackDB from this
-// column only when the value decoded from tags_json is nil, so a curated
-// ReplayGain tag always wins. One more indexed PK point-lookup on
-// track_analysis per row, alongside waveformTagSQL.
-const replayGainSQL = `(SELECT replaygain_track_db
-	 FROM track_analysis WHERE source_path = tracks.path) AS analysis_replaygain_track_db`
+// analysisSpliceJSON is the decode target for analysisSpliceSQL's
+// json_object. Pointer fields keep the column's NULL/absent
+// distinction. ReplayGainTrackDB rides as json.RawMessage because
+// SQLite renders a ±Inf REAL as `9.0e+999` inside json_object output
+// (verified against the bundled modernc.org/sqlite): track_analysis is
+// reachable by an external sqlite3 CLI, so the REAL column is not
+// trusted input, and decoding straight into *float64 would fail the
+// WHOLE object's unmarshal — taking the waveform + key/tempo splices
+// down with one hand-written Inf. Parsed separately by
+// analysisReplayGainValue, which routes it through the same non-finite
+// skip guard the direct REAL-column scan used.
+type analysisSpliceJSON struct {
+	WaveformTag       *string         `json:"waveformTag"`
+	ReplayGainTrackDB json.RawMessage `json:"replayGainTrackDB"`
+	analysisKeyTempo
+}
+
+// spliceAnalysis decodes the analysisSpliceSQL json_object ONCE and
+// applies every offline-analysis splice to the row: WaveformTag,
+// ReplayGainTrackDB (tag-absent-only, via spliceAnalysisReplayGain),
+// and the key/tempo estimate (via spliceAnalysisKeyTempo). Malformed
+// JSON is ignored (the track stays playable without the analysis
+// fields). The three manifest read paths share it so the splice
+// contracts live in one place.
+func spliceAnalysis(t *Track, raw sql.NullString) {
+	if !raw.Valid || raw.String == "" {
+		return
+	}
+	var a analysisSpliceJSON
+	if err := json.Unmarshal([]byte(raw.String), &a); err != nil {
+		return
+	}
+	if a.WaveformTag != nil {
+		t.WaveformTag = *a.WaveformTag
+	}
+	spliceAnalysisReplayGain(t, analysisReplayGainValue(a.ReplayGainTrackDB))
+	spliceAnalysisKeyTempo(t, a.analysisKeyTempo)
+}
+
+// analysisReplayGainValue converts the merged probe's raw
+// replayGainTrackDB into the NullFloat64 spliceAnalysisReplayGain
+// expects. Absent / `null` / malformed → invalid (skip). A
+// range-overflow parse (SQLite's 9.0e+999 rendering of a ±Inf REAL)
+// still yields Valid=true carrying ±Inf, so the non-finite guard skips
+// it — the same outcome the direct REAL-column scan produced.
+func analysisReplayGainValue(raw json.RawMessage) sql.NullFloat64 {
+	if len(raw) == 0 || string(raw) == "null" {
+		return sql.NullFloat64{}
+	}
+	v, err := strconv.ParseFloat(string(raw), 64)
+	if err != nil && !errors.Is(err, strconv.ErrRange) {
+		return sql.NullFloat64{}
+	}
+	return sql.NullFloat64{Float64: v, Valid: true}
+}
 
 // spliceAnalysisReplayGain fills Track.ReplayGainTrackDB from the
-// offline-analysis value (scanned via replayGainSQL) ONLY when the track
-// carries no ReplayGain from its own tags — curated tags always win.
-// A no-op when the analysis value is NULL or a tag value is already
-// present. The three manifest read paths share it so the tag-absent-only
-// contract lives in one place.
+// offline-analysis value (decoded from analysisSpliceSQL) ONLY when the
+// track carries no ReplayGain from its own tags — curated tags always
+// win. A no-op when the analysis value is NULL or a tag value is
+// already present.
 func spliceAnalysisReplayGain(t *Track, rg sql.NullFloat64) {
 	if t.ReplayGainTrackDB == nil && rg.Valid {
 		v := rg.Float64
@@ -2401,15 +2488,8 @@ func spliceAnalysisReplayGain(t *Track, rg sql.NullFloat64) {
 	}
 }
 
-// keyTempoSQL splices the estimated key + tempo onto each row as ONE
-// json_object (vs three scalar subqueries — same single indexed PK
-// lookup on track_analysis the waveform/replaygain splices use). NULL
-// when no analysis row exists; `{"root":null,...}` when the row exists
-// but the estimate is absent. Decoded + spliced by spliceAnalysisKeyTempo.
-const keyTempoSQL = `(SELECT json_object('root', key_root, 'mode', key_mode, 'bpm', bpm)
-	 FROM track_analysis WHERE source_path = tracks.path) AS analysis_keytempo`
-
-// analysisKeyTempo is the decode target for keyTempoSQL's json_object.
+// analysisKeyTempo is the decode target for the key/tempo third of
+// analysisSpliceSQL's json_object (embedded in analysisSpliceJSON).
 type analysisKeyTempo struct {
 	Root *int    `json:"root"`
 	Mode *string `json:"mode"`
@@ -2418,19 +2498,11 @@ type analysisKeyTempo struct {
 
 // spliceAnalysisKeyTempo fills Track.KeyRoot/KeyMode (always — no tag
 // source today) and Track.BPM (tag-absent-only — a curated TBPM/BPM tag
-// always wins) from the analysis json_object. Malformed JSON is ignored
-// (the track stays playable without the estimate). Like ReplayGain, the
+// always wins) from the decoded analysis object. Like ReplayGain, the
 // BPM splice marks provenance so marshalForStorage scrubs only the
 // analysis-derived value on write-back; KeyRoot/KeyMode have no tag
 // source, so marshalForStorage zeroes them unconditionally.
-func spliceAnalysisKeyTempo(t *Track, raw sql.NullString) {
-	if !raw.Valid || raw.String == "" {
-		return
-	}
-	var kt analysisKeyTempo
-	if err := json.Unmarshal([]byte(raw.String), &kt); err != nil {
-		return
-	}
+func spliceAnalysisKeyTempo(t *Track, kt analysisKeyTempo) {
 	if kt.Root != nil {
 		r := *kt.Root
 		t.KeyRoot = &r
@@ -2552,7 +2624,7 @@ func formatSampleRateLabel(hz float64) string {
 // require re-marshalling every track on each `MarkEnriched` write
 // just to flip a bool, which is what the column is for.
 func (s *Store) ListTracks(ctx context.Context, since *time.Time) ([]Track, error) {
-	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + keyTempoSQL + `, artwork_version, booklet_tag FROM tracks`
+	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + analysisSpliceSQL + `, artwork_version, booklet_tag FROM tracks`
 	args := []any{}
 	if since != nil {
 		q += ` WHERE indexed_at > ?`
@@ -2569,12 +2641,10 @@ func (s *Store) ListTracks(ctx context.Context, since *time.Time) ([]Track, erro
 		var raw []byte
 		var enrichedAt int64
 		var variantsRaw []byte
-		var wfTag sql.NullString
-		var rg sql.NullFloat64
-		var ktRaw sql.NullString
+		var analysisRaw sql.NullString
 		var artVer sql.NullString
 		var bkTag sql.NullString
-		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw, &artVer, &bkTag); err != nil {
+		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw, &analysisRaw, &artVer, &bkTag); err != nil {
 			return nil, err
 		}
 		var t Track
@@ -2583,11 +2653,9 @@ func (s *Store) ListTracks(ctx context.Context, since *time.Time) ([]Track, erro
 		}
 		scanTrackVariants(&t, variantsRaw)
 		t.Enriched = boolPtr(enrichedAt != 0)
-		t.WaveformTag = wfTag.String
 		t.ArtworkVersion = artVer.String
 		t.BookletTag = bkTag.String
-		spliceAnalysisReplayGain(&t, rg)
-		spliceAnalysisKeyTempo(&t, ktRaw)
+		spliceAnalysis(&t, analysisRaw)
 		out = append(out, t)
 	}
 	return out, rows.Err()
@@ -2616,7 +2684,7 @@ func (s *Store) StreamTracks(ctx context.Context, sp *time.Time, fn func(*Track)
 		// production crash deep in the streaming-manifest path.
 		return errors.New("StreamTracks: nil callback")
 	}
-	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + keyTempoSQL + `, artwork_version, booklet_tag FROM tracks`
+	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + analysisSpliceSQL + `, artwork_version, booklet_tag FROM tracks`
 	args := []any{}
 	if sp != nil {
 		q += ` WHERE indexed_at > ?`
@@ -2646,12 +2714,10 @@ func (s *Store) StreamTracks(ctx context.Context, sp *time.Time, fn func(*Track)
 		var raw []byte
 		var enrichedAt int64
 		var variantsRaw []byte
-		var wfTag sql.NullString
-		var rg sql.NullFloat64
-		var ktRaw sql.NullString
+		var analysisRaw sql.NullString
 		var artVer sql.NullString
 		var bkTag sql.NullString
-		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw, &artVer, &bkTag); err != nil {
+		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw, &analysisRaw, &artVer, &bkTag); err != nil {
 			return err
 		}
 		t = Track{}
@@ -2660,11 +2726,9 @@ func (s *Store) StreamTracks(ctx context.Context, sp *time.Time, fn func(*Track)
 		}
 		t.Enriched = boolPtr(enrichedAt != 0)
 		scanTrackVariants(&t, variantsRaw)
-		t.WaveformTag = wfTag.String
 		t.ArtworkVersion = artVer.String
 		t.BookletTag = bkTag.String
-		spliceAnalysisReplayGain(&t, rg)
-		spliceAnalysisKeyTempo(&t, ktRaw)
+		spliceAnalysis(&t, analysisRaw)
 		if err := fn(&t); err != nil {
 			return err
 		}
@@ -2693,7 +2757,7 @@ func (s *Store) ListTracksPage(ctx context.Context, afterPath string, limit int)
 		limit = 1000
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT tags_json, enriched_at, `+variantsAggSQL+`, `+waveformTagSQL+`, `+replayGainSQL+`, `+keyTempoSQL+`, artwork_version, booklet_tag FROM tracks
+		SELECT tags_json, enriched_at, `+variantsAggSQL+`, `+analysisSpliceSQL+`, artwork_version, booklet_tag FROM tracks
 		WHERE path > ?
 		ORDER BY path ASC
 		LIMIT ?
@@ -2711,12 +2775,10 @@ func (s *Store) ListTracksPage(ctx context.Context, afterPath string, limit int)
 		var raw []byte
 		var enrichedAt int64
 		var variantsRaw []byte
-		var wfTag sql.NullString
-		var rg sql.NullFloat64
-		var ktRaw sql.NullString
+		var analysisRaw sql.NullString
 		var artVer sql.NullString
 		var bkTag sql.NullString
-		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw, &artVer, &bkTag); err != nil {
+		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw, &analysisRaw, &artVer, &bkTag); err != nil {
 			return nil, err
 		}
 		var t Track
@@ -2725,11 +2787,9 @@ func (s *Store) ListTracksPage(ctx context.Context, afterPath string, limit int)
 		}
 		scanTrackVariants(&t, variantsRaw)
 		t.Enriched = boolPtr(enrichedAt != 0)
-		t.WaveformTag = wfTag.String
 		t.ArtworkVersion = artVer.String
 		t.BookletTag = bkTag.String
-		spliceAnalysisReplayGain(&t, rg)
-		spliceAnalysisKeyTempo(&t, ktRaw)
+		spliceAnalysis(&t, analysisRaw)
 		out = append(out, t)
 	}
 	return out, rows.Err()

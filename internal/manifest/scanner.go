@@ -887,13 +887,16 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 			// Early-skip on unchanged-since-last-scan: matches the legacy
 			// walker. Concurrent reads from N workers against the same
 			// SQLite handle are fine (modernc.org/sqlite WAL mode allows
-			// concurrent readers).
+			// concurrent readers). GetTrackStat reads the size/mtime_ns
+			// columns + one json_extract — NOT the full tags_json blob
+			// GetTrack would fetch and unmarshal per file per scan.
 			//
-			// The mtime comparison is Equal, NOT "stored >= file": a
-			// same-size replacement carrying an OLDER mtime (cp -p
-			// restore, backup rollback) is a changed file and must be
-			// re-extracted — the pre-fix `!Before` gate skipped it
-			// forever, serving stale tags.
+			// The mtime comparison is instant-EQUALITY, NOT "stored >=
+			// file": a same-size replacement carrying an OLDER mtime
+			// (cp -p restore, backup rollback) is a changed file and
+			// must be re-extracted — the pre-fix `!Before` gate skipped
+			// it forever, serving stale tags. Comparing UnixNano ints is
+			// the same equality check (see GetTrackStat's docblock).
 			//
 			// Recovery exception (PR #98 follow-up): if the existing row
 			// carries a `local-<hash>` ArtworkMBID but the matching cache
@@ -907,9 +910,16 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 			// the recovery cost is one os.Stat per `local-` track per
 			// scan, scoped narrowly to the one case the cache might
 			// genuinely need rebuilding.
-			existing, _ := s.store.GetTrack(ctx, pi.rel)
-			if existing != nil && existing.Size == pi.info.Size() && existing.ModTime.Equal(pi.info.ModTime()) {
-				if !s.needsLocalArtworkRecovery(existing) {
+			size, mtimeNS, artworkMBID, ok, statErr := s.store.GetTrackStat(ctx, pi.rel)
+			if statErr != nil {
+				// Pre-fix this error was silently swallowed (`existing, _`).
+				// A failed stat falls through to re-extract — exactly
+				// like a missing row, just slower for that one file.
+				scanLogger.Debug("skip-gate stat failed; re-extracting",
+					"path", pi.rel, "err", statErr)
+			}
+			if ok && size == pi.info.Size() && mtimeNS == pi.info.ModTime().UnixNano() {
+				if !s.needsLocalArtworkRecovery(artworkMBID) {
 					// Even on the early-skip path we MUST reset the
 					// missing_count for this row, otherwise a flap-
 					// then-restore on a mtime-equal file (the exact
@@ -973,14 +983,14 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 // not on the whole library — for a typical install this is 0% of
 // rows on first scan and at most a fraction once local-artwork
 // extraction has run.
-func (s *Scanner) needsLocalArtworkRecovery(t *Track) bool {
+func (s *Scanner) needsLocalArtworkRecovery(artworkMBID string) bool {
 	if s.artDir == "" {
 		return false
 	}
-	if !strings.HasPrefix(t.ArtworkMBID, "local-") {
+	if !strings.HasPrefix(artworkMBID, "local-") {
 		return false
 	}
-	cachePath := filepath.Join(s.artDir, t.ArtworkMBID+"-500.jpg")
+	cachePath := filepath.Join(s.artDir, artworkMBID+"-500.jpg")
 	_, err := os.Stat(cachePath)
 	if err == nil {
 		return false
