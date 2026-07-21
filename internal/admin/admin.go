@@ -674,6 +674,7 @@ type UpdateProvider interface {
 var (
 	ErrUpdateNoUpdate        = errors.New("no update available")
 	ErrUpdateActiveSessions  = errors.New("active downloads in flight")
+	ErrUpdateInstallInFlight = errors.New("an install is already in progress")
 	ErrUpdateNotSupported    = errors.New("self-install not supported on this platform")
 	ErrUpdatePathNotWritable = errors.New("binary path not writable")
 )

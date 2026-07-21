@@ -1229,6 +1229,8 @@ func mapUpdaterError(err error) error {
 		return fmt.Errorf(errWrapDetailFormat, admin.ErrUpdateNoUpdate, err.Error())
 	case errors.Is(err, updater.ErrActiveSessions):
 		return fmt.Errorf(errWrapDetailFormat, admin.ErrUpdateActiveSessions, err.Error())
+	case errors.Is(err, updater.ErrInstallInFlight):
+		return fmt.Errorf(errWrapDetailFormat, admin.ErrUpdateInstallInFlight, err.Error())
 	case errors.Is(err, updater.ErrInstallNotSupported):
 		return fmt.Errorf(errWrapDetailFormat, admin.ErrUpdateNotSupported, err.Error())
 	case errors.Is(err, updater.ErrPathNotWritable):

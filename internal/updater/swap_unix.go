@@ -31,8 +31,9 @@ var (
 // doesn't end up with an inconsistent on-disk state (rename done in
 // dentry but not in journal).
 //
-// Cross-device caveat: the new binary is extracted into <DataDir>/updates/,
-// which is NOT guaranteed to share a filesystem with the install path — a
+// Cross-device caveat: the new binary is extracted into a per-attempt
+// scratch dir under DataDir, which is NOT guaranteed to share a
+// filesystem with the install path — a
 // common production layout puts dataDir under /home or /var and the binary
 // under /usr (e.g. bridge.ars.md installs to /usr/local/bin/bridge). When
 // they differ, os.Rename(newBinary, dst) fails with EXDEV. placeNewBinary
@@ -127,8 +128,9 @@ func swapBinaryViaRename(dst, newBinary, bak string) error {
 
 // placeNewBinary installs newBinary at dst. It first tries an atomic
 // os.Rename (no extra copy) and falls back to copyAndRename ONLY on EXDEV
-// — the cross-filesystem case where <DataDir>/updates/ and the install
-// path live on different mounts (e.g. /var vs /usr on Linux). Both paths
+// — the cross-filesystem case where the scratch dir under DataDir and
+// the install path live on different mounts (e.g. /var vs /usr on
+// Linux). Both paths
 // leave the OLD binary reachable via bak (the caller's rollback contract);
 // copyAndRename's own rename happens WITHIN dst's directory, so it's atomic
 // on that filesystem and dst is never absent. Any non-EXDEV rename error
@@ -145,7 +147,7 @@ func placeNewBinary(newBinary, dst string) error {
 // it, sets the executable bit, then atomically renames it over dst (a
 // same-filesystem rename, so never EXDEV and never leaves dst absent).
 // Used only as placeNewBinary's cross-device fallback. On success src is
-// removed (it's the now-consumed <DataDir>/updates/ copy). The tmp file is
+// removed (it's the now-consumed scratch-dir copy). The tmp file is
 // cleaned up on any failure via the deferred Remove (LIFO after Close, so
 // Close runs first — Windows-safe ordering isn't needed here but mirrors
 // the atomic-write idiom used elsewhere in the tree).

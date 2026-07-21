@@ -6,6 +6,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -202,5 +204,76 @@ func TestNewClampsCheckIntervalAcceptsZero(t *testing.T) {
 	u2 := New(Options{CheckInterval: time.Second})
 	if u2.interval != minCheckInterval {
 		t.Errorf("interval clamp: got %v, want %v", u2.interval, minCheckInterval)
+	}
+}
+
+// TestMaybeAutoInstallDefersRestartWhenSessionStartsMidInstall pins
+// the post-install sessions re-check: the entry gate runs BEFORE the
+// (potentially 15-minute) download phase, so a stream that starts
+// mid-install must defer the restart to the next poll cycle rather
+// than being killed by it. The install itself still completes — only
+// the restart waits; once the stream drains, the next cycle restarts.
+func TestMaybeAutoInstallDefersRestartWhenSessionStartsMidInstall(t *testing.T) {
+	fix := newInstallFixture(t, "0.2.0")
+
+	dir := t.TempDir()
+	livePath := filepath.Join(dir, "bridge")
+	if err := os.WriteFile(livePath, []byte("bridge-binary-0.1.0"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	tracker := NewTracker()
+	restartCalls := &atomic.Int32{}
+	// Simulate a download that begins mid-install (here: at verify
+	// time) — exactly the window the entry gate can't see.
+	var beginOnce atomic.Bool
+	upd := New(Options{
+		RepoOverride: "fake/repo",
+		Client:       NewClient("fake/repo", time.Second).WithBaseURL(fix.server.URL),
+		AutoInstall:  true,
+		AutoInstallOpts: &InstallOptions{
+			DataDir:    dir,
+			BinaryPath: livePath,
+			Sessions:   tracker,
+			Force:      false,
+			Verifier: func(context.Context, string) error {
+				if beginOnce.CompareAndSwap(false, true) {
+					tracker.Begin()
+				}
+				return nil
+			},
+		},
+		AutoInstallRestart: func() { restartCalls.Add(1) },
+	})
+	upd.mu.Lock()
+	upd.status.CurrentVersion = "0.1.0"
+	upd.status.LatestVersion = fix.latestVersion
+	upd.status.UpdateAvailable = true
+	upd.mu.Unlock()
+
+	upd.maybeAutoInstall(context.Background())
+	if got := restartCalls.Load(); got != 0 {
+		t.Fatalf("restart fired %d time(s) with a session that began mid-install; want deferred", got)
+	}
+	// The install itself still completed on disk — only the restart
+	// is deferred.
+	got, err := os.ReadFile(livePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "bridge-binary-0.2.0" {
+		t.Errorf("mid-install session should not block the swap: live = %q, want bridge-binary-0.2.0", string(got))
+	}
+
+	// Stream drained: the next poll cycle takes the pending-restart
+	// fast path — it restarts WITHOUT re-running the install (no
+	// second ~30 MiB archive download).
+	tracker.End()
+	upd.maybeAutoInstall(context.Background())
+	if got := restartCalls.Load(); got != 1 {
+		t.Errorf("restart fired %d time(s) after the session drained; want 1", got)
+	}
+	if got := fix.archiveFetches.Load(); got != 1 {
+		t.Errorf("archive fetched %d time(s) across the deferred-restart cycles; want 1 (no re-download)", got)
 	}
 }

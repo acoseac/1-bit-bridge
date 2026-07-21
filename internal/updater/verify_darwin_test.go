@@ -3,7 +3,11 @@
 package updater
 
 import (
+	"bytes"
 	"errors"
+	"log/slog"
+	"strings"
+	"sync"
 	"testing"
 )
 
@@ -38,5 +42,31 @@ func TestNotarizationFlagUnsupported_PinsClassification(t *testing.T) {
 		if got := notarizationFlagUnsupported(c.err); got != c.want {
 			t.Errorf("%s: got %v, want %v (err=%v)", c.name, got, c.want, c.err)
 		}
+	}
+}
+
+// TestWarnIfTeamIDUnpinned_LogsOncePerProcess pins the loud-warning
+// gate for the unpinned-Team-ID path: a build without the ldflags
+// APPLE_TEAM_ID override accepts any Apple-notarized signature, so
+// the downgrade must be visible in the log — exactly once per
+// process, not on every install attempt.
+func TestWarnIfTeamIDUnpinned_LogsOncePerProcess(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	unpinnedTeamIDWarnOnce = sync.Once{}
+	t.Cleanup(func() { unpinnedTeamIDWarnOnce = sync.Once{} })
+
+	warnIfTeamIDUnpinned()
+	warnIfTeamIDUnpinned() // gated by the once — no second emission
+
+	out := buf.String()
+	if !strings.Contains(out, "APPLE_TEAM_ID not pinned") {
+		t.Fatalf("unpinned Team ID produced no warning; got log %q", out)
+	}
+	if n := strings.Count(out, "APPLE_TEAM_ID not pinned"); n != 1 {
+		t.Errorf("warning emitted %d times, want exactly 1 (once-per-process gate)", n)
 	}
 }

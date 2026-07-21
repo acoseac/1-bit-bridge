@@ -18,6 +18,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -39,6 +41,7 @@ type installFixture struct {
 	releaseJSON    []byte
 	archiveBytes   []byte
 	checksumsBytes []byte
+	archiveFetches atomic.Int32
 }
 
 func newInstallFixture(t *testing.T, latestVersion string) *installFixture {
@@ -88,6 +91,7 @@ func newInstallFixture(t *testing.T, latestVersion string) *installFixture {
 		w.Write(fix.releaseJSON)
 	})
 	mux.HandleFunc("/asset/"+archiveName, func(w http.ResponseWriter, r *http.Request) {
+		fix.archiveFetches.Add(1)
 		w.Write(archiveBytes)
 	})
 	mux.HandleFunc("/asset/checksums.txt", func(w http.ResponseWriter, r *http.Request) {
@@ -653,5 +657,161 @@ func Test_preflightWritable_SucceedsAfterTransientRemoveFailure(t *testing.T) {
 	}
 	if calls < 2 {
 		t.Errorf("expected a retry after the first failure, got %d call(s)", calls)
+	}
+}
+
+// parkedInstall is an Install parked mid-flight holding the
+// installInFlight try-lock, arranged so concurrency tests can
+// exercise a second caller against the held lock.
+type parkedInstall struct {
+	livePath string
+	upd      *Updater
+	release  func()       // lets the parked install run to completion
+	waitErr  func() error // blocks until the install goroutine returns
+}
+
+// parkInstallMidVerify builds the whole arrange half (fake release
+// server, temp data dir with a live binary at oldVersion, updater
+// seeded "newVersion is available") and starts an Install whose
+// blocking verifier parks it — lock held — until release is called.
+func parkInstallMidVerify(t *testing.T, oldVersion, newVersion string) *parkedInstall {
+	t.Helper()
+	fix := newInstallFixture(t, newVersion)
+
+	dir := t.TempDir()
+	livePath := filepath.Join(dir, "bridge")
+	if err := os.WriteFile(livePath, []byte("bridge-binary-"+oldVersion), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	upd := New(Options{
+		RepoOverride: "fake/repo",
+		Client:       NewClient("fake/repo", time.Second).WithBaseURL(fix.server.URL),
+	})
+	upd.mu.Lock()
+	upd.status.CurrentVersion = oldVersion
+	upd.status.LatestVersion = fix.latestVersion
+	upd.status.UpdateAvailable = true
+	upd.status.LastCheck = time.Now().UTC()
+	upd.mu.Unlock()
+
+	// The blocking verifier parks the install mid-flight (lock held)
+	// until the test releases it.
+	started := make(chan struct{})
+	released := make(chan struct{})
+	var once sync.Once
+	blockingVerifier := func(context.Context, string) error {
+		once.Do(func() { close(started) })
+		<-released
+		return nil
+	}
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := upd.Install(context.Background(), InstallOptions{
+			DataDir:    dir,
+			BinaryPath: livePath,
+			Force:      true,
+			Verifier:   blockingVerifier,
+		})
+		errCh <- err
+	}()
+	<-started // install now holds the lock, parked in verify
+
+	return &parkedInstall{
+		livePath: livePath,
+		upd:      upd,
+		release:  func() { close(released) },
+		waitErr:  func() error { return <-errCh },
+	}
+}
+
+// TestInstallConcurrentCallsSerialized pins the install-in-flight
+// try-lock: while one Install holds the Updater, a second caller must
+// fail fast with ErrInstallInFlight rather than race the first on the
+// scratch dir, the .bak rename target, and update-state.json (one
+// installer's deferred cleanScratch could otherwise delete the other's
+// verified binary mid-swap). Once the first completes, the lock is
+// released and a fresh attempt succeeds.
+func TestInstallConcurrentCallsSerialized(t *testing.T) {
+	parked := parkInstallMidVerify(t, "0.1.0", "0.2.0")
+	retryOpts := InstallOptions{
+		DataDir:    filepath.Dir(parked.livePath),
+		BinaryPath: parked.livePath,
+		Force:      true,
+		Verifier:   noopVerifier,
+	}
+
+	if _, err := parked.upd.Install(context.Background(), retryOpts); !errors.Is(err, ErrInstallInFlight) {
+		t.Errorf("concurrent Install: err = %v, want ErrInstallInFlight", err)
+	}
+	parked.release()
+	if err := parked.waitErr(); err != nil {
+		t.Fatalf("first Install: %v", err)
+	}
+
+	// Lock released: a follow-up attempt proceeds.
+	if _, err := parked.upd.Install(context.Background(), retryOpts); err != nil {
+		t.Fatalf("Install after the first completed: %v (lock not released?)", err)
+	}
+}
+
+// TestInstallScratchIsPerAttempt pins the scratch-dir shape: every
+// attempt works inside its own MkdirTemp directory directly under
+// DataDir (no persistent shared parent) and cleanScratch removes it —
+// DataDir must never carry an attempt's leftover "install-*" files, so
+// a stray cleanup from a concurrent caller (incl. the CLI's separate
+// process) can never delete an in-flight attempt's verified binary.
+func TestInstallScratchIsPerAttempt(t *testing.T) {
+	fix := newInstallFixture(t, "0.2.0")
+	livePath, _, err := fix.install(t, "0.1.0")
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	dataDir := filepath.Dir(livePath)
+	entries, err := os.ReadDir(dataDir)
+	if err != nil {
+		t.Fatalf("read data dir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "install-") {
+			t.Errorf("data dir holds leftover attempt dir %q — per-attempt scratch not cleaned", e.Name())
+		}
+	}
+}
+
+// TestInstallConcurrentRollbackSerialized pins the same try-lock on
+// the rollback path: while an Install holds the Updater, an operator
+// Rollback (the admin "Roll back" button) must fail fast with
+// ErrInstallInFlight rather than race the install on the .bak rename
+// target and update-state.json. Once the install completes, the lock
+// is released and the rollback proceeds.
+func TestInstallConcurrentRollbackSerialized(t *testing.T) {
+	parked := parkInstallMidVerify(t, "0.1.0", "0.2.0")
+	rollbackOpts := InstallOptions{
+		DataDir:    filepath.Dir(parked.livePath),
+		BinaryPath: parked.livePath,
+		Force:      true,
+	}
+
+	if err := parked.upd.Rollback(rollbackOpts); !errors.Is(err, ErrInstallInFlight) {
+		t.Errorf("Rollback during Install: err = %v, want ErrInstallInFlight", err)
+	}
+	parked.release()
+	if err := parked.waitErr(); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	// Lock released: the rollback proceeds (the just-completed install
+	// left a .bak) and restores the previous binary.
+	if err := parked.upd.Rollback(rollbackOpts); err != nil {
+		t.Fatalf("Rollback after Install completed: %v (lock not released?)", err)
+	}
+	got, err := os.ReadFile(parked.livePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "bridge-binary-0.1.0" {
+		t.Errorf("post-rollback live = %q, want bridge-binary-0.1.0", string(got))
 	}
 }

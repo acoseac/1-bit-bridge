@@ -31,8 +31,9 @@ const verifyTimeout = 2 * time.Minute
 // InstallOptions configures one Install attempt.
 type InstallOptions struct {
 	// DataDir is the bridge's working data directory; the install
-	// path uses <DataDir>/updates/ as its scratch area and writes
-	// update-state.json here for boot-time rollback bookkeeping.
+	// path creates a per-attempt scratch dir directly under it
+	// (os.MkdirTemp "install-*") and writes update-state.json here
+	// for boot-time rollback bookkeeping.
 	DataDir string
 
 	// BinaryPath is the absolute path of the running bridge binary
@@ -82,6 +83,9 @@ type InstallOptions struct {
 //     the check is symmetric defence).
 //   - ErrActiveSessions when Force is false and Sessions.Inflight()
 //     is nonzero.
+//   - ErrInstallInFlight when another Install on this Updater is
+//     already running (e.g. the admin POST racing the auto-installer
+//     poll). Callers retry later; the admin API maps this to 409.
 //   - ErrCompatGateRefused when the candidate's MinClientVersion floor
 //     would orphan a still-paired older iOS client and OverrideCompatGate
 //     is false.
@@ -112,6 +116,17 @@ func (u *Updater) Install(ctx context.Context, opts InstallOptions) (Status, err
 	if !status.UpdateAvailable || status.LatestVersion == "" {
 		return status, ErrNoUpdate
 	}
+	// Serialize the WHOLE attempt: concurrent in-process callers (the
+	// auto-installer poll and the admin POST share this Updater) used
+	// to race on the scratch dir, the .bak rename target, and
+	// update-state.json — one installer's deferred cleanScratch could
+	// delete the other's verified binary mid-swap. Fail fast rather
+	// than queue: every caller already has a retry path (next poll
+	// cycle, or the operator re-clicking).
+	if !u.installInFlight.CompareAndSwap(false, true) {
+		return status, ErrInstallInFlight
+	}
+	defer u.installInFlight.Store(false)
 	if !opts.Force && opts.Sessions != nil && opts.Sessions.Inflight() > 0 {
 		return status, fmt.Errorf("%w: %d inflight download(s)",
 			ErrActiveSessions, opts.Sessions.Inflight())
@@ -185,11 +200,23 @@ func (u *Updater) Install(ctx context.Context, opts InstallOptions) (Status, err
 		}
 	}
 
-	// Scratch dir under dataDir keeps temp files inside the
+	// Scratch dir directly under dataDir keeps temp files inside the
 	// bridge's writable area (avoids /tmp permissions surprises on
-	// macOS) and makes cleanup obvious.
-	scratch := filepath.Join(opts.DataDir, "updates")
-	if err := os.MkdirAll(scratch, 0o700); err != nil {
+	// macOS) and makes cleanup obvious. Each attempt gets its own
+	// MkdirTemp directory — deliberately NO persistent shared parent
+	// (the earlier <DataDir>/updates/ root): unique names mean a
+	// root-run CLI's leftovers (root-owned, 0o700) never block later
+	// attempts by the unprivileged service user, and no cleanup —
+	// including one from a concurrent caller in ANOTHER process (the
+	// CLI can't share the in-process try-lock) — can delete this
+	// attempt's files mid-swap. DataDir itself is MkdirAll'd first to
+	// preserve the old implicit create-if-missing behaviour; its
+	// ownership is already correct for the running user.
+	if err := os.MkdirAll(opts.DataDir, 0o700); err != nil {
+		return status, fmt.Errorf("create scratch: %w", err)
+	}
+	scratch, err := os.MkdirTemp(opts.DataDir, "install-")
+	if err != nil {
 		return status, fmt.Errorf("create scratch: %w", err)
 	}
 	defer cleanScratch(scratch)
@@ -267,11 +294,12 @@ func (u *Updater) Install(ctx context.Context, opts InstallOptions) (Status, err
 }
 
 // Sentinel errors so callers can distinguish "client-fixable"
-// (no-update / active-sessions / unsupported-platform) from
-// "something went wrong".
+// (no-update / active-sessions / install-in-flight /
+// unsupported-platform) from "something went wrong".
 var (
 	ErrNoUpdate            = errors.New("no update available")
 	ErrActiveSessions      = errors.New("active downloads — refuse to restart")
+	ErrInstallInFlight     = errors.New("an install is already in progress")
 	ErrPathNotWritable     = errors.New("binary path not writable by this user (try sudo bridge update)")
 	ErrInstallNotSupported = errors.New("self-install not yet supported on this platform; download manually and replace the binary (see PROTOCOL.md → Updates)")
 	ErrCompatGateRefused   = errors.New("install would orphan a paired iOS client below the candidate's MinClientVersion floor")
@@ -281,11 +309,23 @@ var (
 // admin "Roll back" button when the operator notices the new
 // version is broken AFTER a successful install (the boot-time
 // rollback only fires on truly unbootable builds).
+//
+// Errors: ErrInstallInFlight when an Install (or another Rollback)
+// is already running on this Updater, ErrActiveSessions when Force
+// is false and Sessions.Inflight() is nonzero.
 func (u *Updater) Rollback(opts InstallOptions) error {
 	// Phase B-Windows (PR #48) implements the rollback rename
 	// alongside darwin/linux — no platform guard needed here. The
 	// Windows-side `RollbackBinary` handles the SCM-stop dance
 	// transparently.
+	//
+	// Serialise against Install with the same try-lock: rollback
+	// renames .bak over the live binary and clears update-state.json
+	// — the exact swap targets an in-flight install is mutating.
+	if !u.installInFlight.CompareAndSwap(false, true) {
+		return ErrInstallInFlight
+	}
+	defer u.installInFlight.Store(false)
 	if !opts.Force && opts.Sessions != nil && opts.Sessions.Inflight() > 0 {
 		return fmt.Errorf("%w: %d inflight download(s)",
 			ErrActiveSessions, opts.Sessions.Inflight())
@@ -340,8 +380,10 @@ func preflightWritable(binaryPath string) error {
 	return fmt.Errorf("%w (path=%s, cannot delete scratch file: %v)", ErrPathNotWritable, dir, rmErr)
 }
 
-// cleanScratch wipes the updates/ scratch dir between attempts so
-// disk doesn't accumulate failed-download leftovers.
+// cleanScratch wipes one attempt's scratch dir so disk doesn't
+// accumulate failed-download leftovers. Each attempt removes only its
+// own MkdirTemp directory so a concurrent attempt's files survive a
+// stray cleanup.
 func cleanScratch(scratch string) {
 	_ = os.RemoveAll(scratch)
 }
