@@ -60,7 +60,7 @@ it).
 
 ## Repository layout
 
-```
+```text
 cmd/bridge/    CLI entry point (package main) + wiring
 internal/      38 packages, one concern each (map below; incl. dlna/discovery)
 config/        bridge.yaml.example — annotated sample config

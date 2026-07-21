@@ -365,6 +365,9 @@ func TestRegenerate_StoreFailureLeavesPriorCacheIntact(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
+	// Safety net for the Fatalf paths before the intentional Close below;
+	// a second Close on an already-closed store just returns an error.
+	t.Cleanup(func() { _ = s.Close() })
 
 	for _, p := range []string{"/a.flac", "/b.flac", "/c.flac"} {
 		track(t, s, p, "Jazz")
