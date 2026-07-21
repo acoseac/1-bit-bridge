@@ -1115,6 +1115,15 @@ func parseReplayGain(s string) *float64 {
 	if err != nil {
 		return nil
 	}
+	// strconv.ParseFloat accepts "nan"/"inf" — real ReplayGain
+	// scanners emit those for digital-silence tracks. A non-finite
+	// gain would survive marshalForStorage (tag-derived values are
+	// never scrubbed) and fail json.Marshal at batch-write time,
+	// poisoning the whole 500-track scan batch on EVERY rescan.
+	// Mirror of the parseAIFFExtended guard.
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return nil
+	}
 	return &v
 }
 

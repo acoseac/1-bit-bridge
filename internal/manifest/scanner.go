@@ -18,6 +18,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
+
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 )
 
@@ -463,12 +466,23 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 		}
 	}
 	missingTracks := make([]string, 0)
+	renamed := make([]string, 0)
 	spared := 0
+	renames := caseOnlyRenames(beforeSet, seen)
 	for p := range beforeSet {
 		if _, ok := seen[p]; ok {
 			continue
 		}
 		if _, routed := routedSet[p]; routed {
+			continue
+		}
+		if _, ok := renames[p]; ok {
+			// Case-only rename on a case-insensitive FS — the
+			// new-case row was already upserted this pass, so reap
+			// the stale old-case row NOW (below) rather than let it
+			// shadow the new row in /v1/manifest for up to
+			// `threshold` scans.
+			renamed = append(renamed, p)
 			continue
 		}
 		if isUnderErroredSubtree(p, errorSubtrees) {
@@ -480,6 +494,13 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	deletedTracks, err := s.store.IncrementMissingTracksAndDeleteAtThreshold(ctx, missingTracks, threshold)
 	if err != nil {
 		scanLogger.Error("missing-count tracks pass", "err", err, "missing", len(missingTracks))
+	}
+	if len(renamed) > 0 {
+		if err := s.store.DeleteTracksBatch(ctx, renamed); err != nil {
+			scanLogger.Error("case-only rename reap", "err", err, "renamed", len(renamed))
+		} else {
+			scanLogger.Info("reaped stale rows from case-only rename", "renamed", len(renamed))
+		}
 	}
 	if spared > 0 {
 		scanLogger.Warn("spared tracks from deletion pass (parent walk error)",
@@ -868,6 +889,12 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 			// SQLite handle are fine (modernc.org/sqlite WAL mode allows
 			// concurrent readers).
 			//
+			// The mtime comparison is Equal, NOT "stored >= file": a
+			// same-size replacement carrying an OLDER mtime (cp -p
+			// restore, backup rollback) is a changed file and must be
+			// re-extracted — the pre-fix `!Before` gate skipped it
+			// forever, serving stale tags.
+			//
 			// Recovery exception (PR #98 follow-up): if the existing row
 			// carries a `local-<hash>` ArtworkMBID but the matching cache
 			// file is missing on disk (operator wiped <dataDir>/artwork
@@ -881,7 +908,7 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 			// scan, scoped narrowly to the one case the cache might
 			// genuinely need rebuilding.
 			existing, _ := s.store.GetTrack(ctx, pi.rel)
-			if existing != nil && existing.Size == pi.info.Size() && !existing.ModTime.Before(pi.info.ModTime()) {
+			if existing != nil && existing.Size == pi.info.Size() && existing.ModTime.Equal(pi.info.ModTime()) {
 				if !s.needsLocalArtworkRecovery(existing) {
 					// Even on the early-skip path we MUST reset the
 					// missing_count for this row, otherwise a flap-
@@ -1279,9 +1306,17 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	// full-scan path — see Scan's docblock for the rationale.
 	threshold := s.effectiveDeleteThreshold()
 	missingTracks := make([]string, 0)
+	renamed := make([]string, 0)
 	sparedTracks := 0
+	renames := caseOnlyRenames(beforeTrackSet, seen)
 	for p := range beforeTrackSet {
 		if _, ok := seen[p]; ok {
+			continue
+		}
+		if _, ok := renames[p]; ok {
+			// Case-only rename — same immediate-reap rationale as
+			// the full-scan deletion pass above.
+			renamed = append(renamed, p)
 			continue
 		}
 		if isUnderErroredSubtree(p, errorSubtrees) {
@@ -1293,6 +1328,13 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	deletedTracks, derr := s.store.IncrementMissingTracksAndDeleteAtThreshold(ctx, missingTracks, threshold)
 	if derr != nil {
 		scanLogger.Error("subtree missing-count tracks pass", "err", derr, "missing", len(missingTracks))
+	}
+	if len(renamed) > 0 {
+		if err := s.store.DeleteTracksBatch(ctx, renamed); err != nil {
+			scanLogger.Error("subtree case-only rename reap", "err", err, "renamed", len(renamed))
+		} else {
+			scanLogger.Info("reaped stale rows from case-only rename", "renamed", len(renamed))
+		}
 	}
 	missingFolders := make([]string, 0)
 	sparedFolders := 0
@@ -1583,6 +1625,42 @@ func isUnderErroredSubtree(path string, errorSubtrees map[string]struct{}) bool 
 		}
 	}
 	return false
+}
+
+// caseOnlyRenames returns the subset of `before` paths that are absent
+// from `seen` EXACTLY but present after Unicode case-folding — the
+// signature of a case-only rename (Album→album) on a case-insensitive
+// filesystem. The walker records the on-disk (new) case, so the fresh
+// row is upserted under the new spelling this same pass; the stale
+// old-case row must be reaped NOW — left to the missing_count
+// threshold it would shadow the new row in /v1/manifest for up to
+// `threshold` scans, with both rows serving the same physical file.
+//
+// The fold is cases.Lower(language.Und), the same byte-for-byte fold
+// the store's unicode_lower() SQL function applies (sqlfunc.go). A
+// stored path that fold-matches a seen entry refers to a file the
+// walker DID enumerate this pass, so reaping it can't confuse a
+// transient partial enumeration with a rename — the threshold's
+// silent-enumeration protection stays intact for genuinely-unseen
+// paths. GetTrack stays exact-key (pinned by
+// store_lookup_case_test.go); the fold applies ONLY to this
+// deletion-pass filter.
+func caseOnlyRenames(before, seen map[string]struct{}) map[string]struct{} {
+	fold := cases.Lower(language.Und)
+	seenFolded := make(map[string]struct{}, len(seen))
+	for p := range seen {
+		seenFolded[fold.String(p)] = struct{}{}
+	}
+	renames := make(map[string]struct{})
+	for p := range before {
+		if _, ok := seen[p]; ok {
+			continue
+		}
+		if _, ok := seenFolded[fold.String(p)]; ok {
+			renames[p] = struct{}{}
+		}
+	}
+	return renames
 }
 
 // relPath converts an absolute on-disk path to the library-relative,
