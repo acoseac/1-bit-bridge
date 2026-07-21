@@ -44,6 +44,59 @@ func analysis(t *testing.T, s *manifest.Store, path string, keyRoot int, mode st
 	}
 }
 
+// seedDailyPlays inserts one listening session per day at UTC hour 8, d days
+// before `now` for each d in daysAgo, every session playing each path in
+// order (5-minute spacing, 200 s per play) on the given interface.
+func seedDailyPlays(t *testing.T, s *manifest.Store, now time.Time, iface string, daysAgo []int, paths ...string) {
+	t.Helper()
+	var hist []manifest.PlaybackHistoryRow
+	for _, d := range daysAgo {
+		base := time.Date(now.Year(), now.Month(), now.Day()-d, 8, 0, 0, 0, time.UTC)
+		for i, p := range paths {
+			hist = append(hist, manifest.PlaybackHistoryRow{
+				DeviceToken: "d", Path: p,
+				StartedAt:    base.Add(time.Duration(i*5) * time.Minute).UnixNano(),
+				DurationUsed: 200, IfaceType: iface,
+			})
+		}
+	}
+	if err := s.InsertHistoryBatch(context.Background(), hist); err != nil {
+		t.Fatalf("InsertHistoryBatch: %v", err)
+	}
+}
+
+// regenTestOptions returns DefaultOptions with the listening-family minimums
+// lowered so a handful of seeded plays populates them (the production floors
+// — MinHeavyRotation 10, MinSessions 20, … — would hide every family in a
+// 3-track fixture). Analysis-gated + new-family floors stay at production
+// values; tests override those explicitly when they exercise them.
+func regenTestOptions(nowNS int64, analysisOn bool) Options {
+	opts := DefaultOptions(nowNS, analysisOn)
+	opts.Engine.MaxItems = 10
+	opts.Engine.MinHeavyRotation = 2
+	opts.Engine.MinRecentlyPlayed = 2
+	opts.Engine.MinForgotten = 2
+	opts.Engine.MinAutoMixPool = 3
+	opts.Engine.MinTimeOfDayPlays = 2
+	opts.Engine.MinDailyFamiliar = 2
+	opts.Engine.MinSessions = 2
+	return opts
+}
+
+// loadKinds returns the number of cached families and the set of their kinds.
+func loadKinds(t *testing.T, s *manifest.Store) (int, map[string]bool) {
+	t.Helper()
+	rows, err := s.LoadSmartPlaylists(context.Background())
+	if err != nil {
+		t.Fatalf("LoadSmartPlaylists: %v", err)
+	}
+	kinds := map[string]bool{}
+	for _, r := range rows {
+		kinds[r.Kind] = true
+	}
+	return len(rows), kinds
+}
+
 // TestRegenerate_PipelineEndToEnd seeds a store via the public API, runs the
 // full regeneration, and verifies the cache contents + blob shapes.
 func TestRegenerate_PipelineEndToEnd(t *testing.T) {
@@ -66,20 +119,7 @@ func TestRegenerate_PipelineEndToEnd(t *testing.T) {
 	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 	nowNS := now.UnixNano()
 	// 3 listening sessions (one per day) at UTC hour 8, each playing a,b,c.
-	var hist []manifest.PlaybackHistoryRow
-	for _, day := range []int{29, 30, 31} {
-		base := time.Date(2026, 5, day, 8, 0, 0, 0, time.UTC)
-		for i, p := range []string{"/a.flac", "/b.flac", "/c.flac"} {
-			hist = append(hist, manifest.PlaybackHistoryRow{
-				DeviceToken: "d", Path: p,
-				StartedAt:    base.Add(time.Duration(i*5) * time.Minute).UnixNano(),
-				DurationUsed: 200, IfaceType: "CarPlay",
-			})
-		}
-	}
-	if err := s.InsertHistoryBatch(ctx, hist); err != nil {
-		t.Fatalf("InsertHistoryBatch: %v", err)
-	}
+	seedDailyPlays(t, s, now, "CarPlay", []int{3, 2, 1}, "/a.flac", "/b.flac", "/c.flac")
 
 	opts := DefaultOptions(nowNS, true)
 	opts.ForgottenMinPlays = 2
@@ -201,4 +241,222 @@ func keysOf(m map[string]manifest.StoredSmartPlaylist) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// analysisRG is analysis() plus an explicit ReplayGain value, for the
+// mood-band pools that filter on loudness.
+func analysisRG(t *testing.T, s *manifest.Store, path string, bpm int, rgDB float64) {
+	t.Helper()
+	if err := s.UpsertAnalysis(context.Background(), manifest.AnalysisRow{
+		SourcePath: path, CreatedAt: 1, SourceMTimeNS: 1, SourceSize: 1,
+		KeyRoot: ip(0), KeyMode: "major", BPM: ip(bpm),
+		ReplayGainTrackDB: fp(rgDB),
+	}); err != nil {
+		t.Fatalf("UpsertAnalysis(%s): %v", path, err)
+	}
+}
+
+// TestRegenerate_EmptyLibraryClearsCache covers the no-eligible-tracks
+// gating path: every candidate query returns empty, no family builder
+// populates, and Regenerate commits an EMPTY snapshot (n == 0) — a stale
+// cache row must be cleared, never left behind for iOS to render.
+func TestRegenerate_EmptyLibraryClearsCache(t *testing.T) {
+	s := openGenStore(t)
+	ctx := context.Background()
+
+	// Seed a stale cache row directly so the test proves the empty
+	// snapshot replaces (clears) rather than skips the write.
+	stale := []manifest.StoredSmartPlaylist{{
+		Slug: "heavy-rotation", Kind: "heavyRotation", Title: "Heavy Rotation",
+		RefreshedAt: 1, ItemsJSON: []byte(`[]`),
+	}}
+	if err := s.ReplaceSmartPlaylists(ctx, stale); err != nil {
+		t.Fatalf("seed stale cache: %v", err)
+	}
+
+	n, err := Regenerate(ctx, s, DefaultOptions(time.Now().UnixNano(), true))
+	if err != nil {
+		t.Fatalf("Regenerate on empty library: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("Regenerate wrote %d families on an empty library, want 0", n)
+	}
+	rows, err := s.LoadSmartPlaylists(ctx)
+	if err != nil {
+		t.Fatalf("LoadSmartPlaylists: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("stale cache rows survived empty regen: %+v", rows)
+	}
+}
+
+// TestRegenerate_AnalysisDisabledSkipsMoodBands pins the AnalysisEnabled
+// gate in assembleInputs: with analysis off the mood-band / analyzed-pool
+// queries must not run, so the analysis-gated families (Wind Down, Lift
+// Off, Auto Mix) stay hidden EVEN THOUGH qualifying track_analysis rows
+// exist — while the listening families keep populating.
+func TestRegenerate_AnalysisDisabledSkipsMoodBands(t *testing.T) {
+	s := openGenStore(t)
+	ctx := context.Background()
+
+	// Two quiet/slow + two loud/fast tracks — with analysis ON both mood
+	// bands qualify (MinMoodBand 2); the OFF run must hide them.
+	for _, p := range []string{"/q1.flac", "/q2.flac"} {
+		track(t, s, p, "Ambient")
+	}
+	for _, p := range []string{"/l1.flac", "/l2.flac"} {
+		track(t, s, p, "Techno")
+	}
+	analysisRG(t, s, "/q1.flac", 80, -5.0)
+	analysisRG(t, s, "/q2.flac", 82, -4.5)
+	analysisRG(t, s, "/l1.flac", 130, -10.0)
+	analysisRG(t, s, "/l2.flac", 128, -9.0)
+
+	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	nowNS := now.UnixNano()
+	// A few recent plays per track so the listening families populate in
+	// both runs.
+	seedDailyPlays(t, s, now, "", []int{3, 2, 1}, "/q1.flac", "/q2.flac", "/l1.flac", "/l2.flac")
+
+	regenOpts := func(analysisOn bool) Options {
+		opts := regenTestOptions(nowNS, analysisOn)
+		opts.Engine.MinMoodBand = 2
+		return opts
+	}
+
+	// Control: analysis ON — both mood bands populate from the seeded rows.
+	if _, err := Regenerate(ctx, s, regenOpts(true)); err != nil {
+		t.Fatalf("Regenerate (analysis on): %v", err)
+	}
+	_, kinds := loadKinds(t, s)
+	for _, k := range []string{"windDown", "liftOff"} {
+		if !kinds[k] {
+			t.Fatalf("control run: %s missing with analysis ON; got %v", k, kinds)
+		}
+	}
+
+	// Gated: analysis OFF — mood bands + Auto Mix must stay hidden while
+	// the listening families keep populating.
+	n, err := Regenerate(ctx, s, regenOpts(false))
+	if err != nil {
+		t.Fatalf("Regenerate (analysis off): %v", err)
+	}
+	cached, kinds := loadKinds(t, s)
+	if cached != n {
+		t.Fatalf("LoadSmartPlaylists returned %d, Regenerate wrote %d", cached, n)
+	}
+	for _, k := range []string{"windDown", "liftOff", "autoMix"} {
+		if kinds[k] {
+			t.Errorf("%s present with analysis OFF; the AnalysisEnabled gate leaked the pool", k)
+		}
+	}
+	if !kinds["heavyRotation"] {
+		t.Errorf("heavyRotation missing with analysis OFF; listening families must keep populating; got %v", kinds)
+	}
+}
+
+// TestRegenerate_StoreFailureLeavesPriorCacheIntact covers the error path:
+// a failing store surfaces the error (n == 0) BEFORE any cache write, so
+// the last good snapshot survives — never a partial or empty commit.
+func TestRegenerate_StoreFailureLeavesPriorCacheIntact(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "bridge.db")
+	s, err := manifest.OpenStore(dbPath)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	// Safety net for the Fatalf paths before the intentional Close below;
+	// a second Close on an already-closed store just returns an error.
+	t.Cleanup(func() { _ = s.Close() })
+
+	for _, p := range []string{"/a.flac", "/b.flac", "/c.flac"} {
+		track(t, s, p, "Jazz")
+	}
+	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	seedDailyPlays(t, s, now, "", []int{3, 2, 1}, "/a.flac", "/b.flac", "/c.flac")
+	opts := regenTestOptions(now.UnixNano(), false)
+	n1, err := Regenerate(ctx, s, opts)
+	if err != nil || n1 == 0 {
+		t.Fatalf("seed Regenerate: n=%d err=%v", n1, err)
+	}
+	before, err := s.LoadSmartPlaylists(ctx)
+	if err != nil {
+		t.Fatalf("LoadSmartPlaylists: %v", err)
+	}
+
+	// Kill the store underneath the regenerator: every query fails.
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	n, err := Regenerate(ctx, s, opts)
+	if err == nil {
+		t.Fatal("Regenerate against a closed store: got nil error, want failure")
+	}
+	if n != 0 {
+		t.Errorf("failed Regenerate reported %d written families, want 0", n)
+	}
+
+	// The pre-failure snapshot must be intact on reopen.
+	s2, err := manifest.OpenStore(dbPath)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = s2.Close() })
+	after, err := s2.LoadSmartPlaylists(ctx)
+	if err != nil {
+		t.Fatalf("LoadSmartPlaylists after reopen: %v", err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("cache rows changed across failed regen: before %d after %d", len(before), len(after))
+	}
+	for i := range before {
+		if after[i].Slug != before[i].Slug || after[i].RefreshedAt != before[i].RefreshedAt {
+			t.Errorf("row %d changed across failed regen: %+v -> %+v", i, before[i], after[i])
+		}
+	}
+}
+
+// TestRegenerate_HeavyRotationFloorDegrades pins the floor-degradation
+// loop in assembleInputs: when no track reaches the configured play-count
+// floor (3), the query must retry at 2 then 1 so a quiet week still
+// populates Heavy Rotation instead of hiding the family.
+func TestRegenerate_HeavyRotationFloorDegrades(t *testing.T) {
+	s := openGenStore(t)
+	ctx := context.Background()
+
+	// One play per track — below the default floor of 3, so only the
+	// degrade-to-1 retry can find them.
+	for _, p := range []string{"/a.flac", "/b.flac", "/c.flac"} {
+		track(t, s, p, "Jazz")
+	}
+	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	nowNS := now.UnixNano()
+	seedDailyPlays(t, s, now, "", []int{1}, "/a.flac", "/b.flac", "/c.flac")
+
+	// Production engine defaults with ONLY the heavy-rotation minimum
+	// lowered: every other family's production floor (MinRecentlyPlayed 5,
+	// MinSessions 20, MinDriveMix 10, …) is out of reach of a 3-track
+	// single-play fixture, so heavyRotation is the only populated family
+	// and the count pin isolates the degraded-floor path.
+	opts := DefaultOptions(nowNS, false) // HeavyRotationMinPlays: 3
+	opts.Engine.MinHeavyRotation = 2
+
+	n, err := Regenerate(ctx, s, opts)
+	if err != nil {
+		t.Fatalf("Regenerate: %v", err)
+	}
+	rows, err := s.LoadSmartPlaylists(ctx)
+	if err != nil {
+		t.Fatalf("LoadSmartPlaylists: %v", err)
+	}
+	if n != 1 || len(rows) != 1 || rows[0].Kind != "heavyRotation" {
+		t.Fatalf("n=%d rows=%+v — want exactly one heavyRotation family (floor degraded 3→1)", n, rows)
+	}
+	var items []manifest.SmartPlaylistItem
+	if err := json.Unmarshal(rows[0].ItemsJSON, &items); err != nil {
+		t.Fatalf("heavyRotation blob decode: %v", err)
+	}
+	if len(items) != 3 {
+		t.Errorf("heavyRotation items = %d, want 3 (single plays surfaced by floor 1)", len(items))
+	}
 }

@@ -1260,8 +1260,3 @@ func isTerminalStatus(s string) bool {
 	}
 	return false
 }
-
-// silence unused-context noise; `context.Context` is on Submit's
-// signature for forward-compat (the future per-batch cancel-via-
-// context surface) even though current Submit doesn't consult it.
-var _ = context.TODO

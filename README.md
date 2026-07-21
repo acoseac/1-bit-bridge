@@ -72,7 +72,7 @@ Before (or any time after) running `bridge init`, `bridge doctor` prints a punch
 
 ## Build from source
 
-Requires Go 1.25+.
+Requires Go 1.26+.
 
 ```sh
 make build          # builds ./bin/bridge for the host OS

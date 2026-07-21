@@ -32,8 +32,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/mattn/go-isatty"
 	"github.com/quic-go/quic-go/http3"
+	"golang.org/x/term"
 
 	"github.com/acoseac/1-bit-bridge/internal/admin"
 	"github.com/acoseac/1-bit-bridge/internal/adminauth"
@@ -1380,7 +1380,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		// per-action signal scopes inside dispatch — see the comment
 		// on menuLoop. The serve subcommand path keeps using ctx as
 		// before.
-		if isatty.IsTerminal(os.Stdin.Fd()) && isatty.IsTerminal(os.Stdout.Fd()) {
+		if term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())) {
 			return menuLoop(context.Background(), bufio.NewReader(os.Stdin), stdout, stderr)
 		}
 		usage(stderr)

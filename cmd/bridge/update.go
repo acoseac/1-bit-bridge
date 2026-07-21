@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/mattn/go-isatty"
+	"golang.org/x/term"
 
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
@@ -253,5 +253,5 @@ func isStdinTTY(stdin io.Reader) bool {
 	if !ok {
 		return false
 	}
-	return isatty.IsTerminal(f.Fd())
+	return term.IsTerminal(int(f.Fd()))
 }

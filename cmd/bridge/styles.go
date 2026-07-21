@@ -1,6 +1,6 @@
 // Helpers for the cinematic 8-bit-style boxes / colors / shell-aware
 // handoff prints used by `bridge init` (and, in PR 3, by the no-args
-// menu launcher). Pure stdlib + go-isatty for TTY detection — no other
+// menu launcher). Pure stdlib + x/term for TTY detection — no other
 // runtime UI deps. All helpers are safe to call when stdout is a pipe
 // or `NO_COLOR` is set; output degrades to plain ASCII automatically.
 package main
@@ -14,7 +14,7 @@ import (
 	"sync"
 	"unicode/utf8"
 
-	"github.com/mattn/go-isatty"
+	"golang.org/x/term"
 )
 
 // frameWidth is the total column count for every styled frame the
@@ -94,7 +94,7 @@ func colorEnabled() bool {
 		// branch the boolean per-stream without threading the
 		// writer through every call site — conservative AND keeps
 		// the API tiny.
-		if !isatty.IsTerminal(os.Stdout.Fd()) || !isatty.IsTerminal(os.Stderr.Fd()) {
+		if !term.IsTerminal(int(os.Stdout.Fd())) || !term.IsTerminal(int(os.Stderr.Fd())) {
 			colorState.on = false
 			return
 		}
