@@ -6,8 +6,17 @@ institutional-knowledge companion (per-release design invariants, PR-by-PR
 "things that have bitten before" history) — consult it before touching
 concurrency, the wire protocol, or any subsystem flagged below.
 
-**Agent-doc maintenance: update this file (`AGENTS.md`) only; never edit
-`CLAUDE.md`.** Treat `CLAUDE.md` as read-only reference material.
+**Agent-doc maintenance.** `CLAUDE.md` is the authority, and it is a living
+document: new invariants — the "things that have bitten before" entries a
+fix produces — go THERE, committed direct to `main` as that file's own
+convention prescribes. This file is the onboarding layer: project shape,
+build commands, module map. Keep it current when those change, and don't
+duplicate invariant history into it.
+
+(An earlier revision of this line said to treat `CLAUDE.md` as read-only and
+never edit it. That contradicted `CLAUDE.md`'s own "CLAUDE.md updates direct
+to main" rule and would have stranded every future invariant in the wrong
+file; the two docs would have drifted apart within weeks.)
 
 ## Project overview
 

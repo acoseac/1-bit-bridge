@@ -383,12 +383,24 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 			// input channel — the tag-side scrub above does not cover it.
 			// A rejected value is treated as "no match", which is the same
 			// state a genuine miss produces (2026-07-20 review, F30).
+			// Rejections are logged, matching resolveReleaseGroupMBID's
+			// existing warning. Silence here made the two paths asymmetric
+			// and, given the stated threat model (operator-configurable
+			// endpoint), removed the only signal that an upstream is
+			// serving garbage — the track would just look like an ordinary
+			// no-match. Bounded + raw-valued per the CWE-117 note above.
 			if res != nil {
 				if isValidMBID(res.MBID) {
 					resolution.ReleaseMBID = res.MBID
+				} else if res.MBID != "" {
+					logger.Warn("ignoring non-UUID release MBID from search",
+						"artist", t.Artist, "album", t.Album, "value", truncateForLog(res.MBID))
 				}
 				if isValidMBID(res.ReleaseGroupMBID) {
 					resolution.ReleaseGroupMBID = res.ReleaseGroupMBID
+				} else if res.ReleaseGroupMBID != "" {
+					logger.Warn("ignoring non-UUID release-group MBID from search",
+						"artist", t.Artist, "album", t.Album, "value", truncateForLog(res.ReleaseGroupMBID))
 				}
 			}
 			albumMBID = resolution.ReleaseMBID

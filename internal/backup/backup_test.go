@@ -516,6 +516,16 @@ func TestReapOrphansRemovesStaleManifestlessDirsSparesFreshAndValid(t *testing.T
 // fail the rmdir, leaving a dir that now really has no manifest — so the next
 // prune reaps it outright and a good backup dies over two cycles.
 func TestReapOrphansSparesUnreadableManifest(t *testing.T) {
+	// Windows has no POSIX mode bits: os.Chmod(…, 0o000) only flips the
+	// read-only attribute, so readManifest still SUCCEEDS and the
+	// present-but-unreadable state this test needs can't be staged. (The
+	// test compiles fine there — os.Geteuid is defined on Windows and
+	// returns -1 — it just fails on the final "error must surface"
+	// assertion.) A Windows equivalent would need a DACL denying FILE_-
+	// READ_DATA via an API this package doesn't import.
+	if runtime.GOOS == "windows" {
+		t.Skip("windows: chmod 0000 doesn't make a file unreadable, so this fixture can't be staged")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("running as root: mode 0000 is still readable, so the unreadable-manifest case can't be staged")
 	}
