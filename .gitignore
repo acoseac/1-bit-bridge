@@ -42,3 +42,10 @@
 # Operator-local host coordinates (see ops/README.md) — never commit real
 # WAN/LAN IPs, SSH targets, or key paths to this public repo.
 ops/*.local.md
+
+# Codebase audits. These enumerate weaknesses with file:line and fix sketches —
+# an exploit index against every bridge whose operator hasn't upgraded yet.
+# Moving them out of docs/ (PR #541) only stopped GitHub *Pages* from serving
+# them; the repo is public, so tracked files stayed readable at
+# raw.githubusercontent.com. Keep them local — see ops/README.md.
+ops/*audit*.md
