@@ -34,6 +34,14 @@ const reachabilityTTL = 5 * time.Second
 // not per concurrent caller.
 const reachabilityProbeTimeout = 2 * time.Second
 
+// statFunc is the os.Stat seam. Production code MUST NOT reassign it;
+// only tests override it (and restore via t.Cleanup) so they can
+// simulate a hard-mount NFS stat that never returns — the one failure
+// mode the in-flight guard exists for, and one there is no portable
+// way to stage with a real filesystem. Same convention as
+// atomicwrite.renameFunc and tailscale.commandContext.
+var statFunc = os.Stat
+
 // reachabilityStatus is the cached per-root probe result.
 //
 // Reason is a STABLE machine-readable code, not free text. iOS maps the
@@ -75,14 +83,34 @@ type reachabilityStatus struct {
 // per-root staleness windows still go through their own probe (no
 // cross-root serialisation), but per-root concurrent callers all
 // wait on the first one's result.
+// **Hung-mount goroutine guard**: singleflight bounds *concurrent*
+// callers, but it does NOT bound goroutines across successive stale
+// windows. On a hard-mount NFS (or an SMB share whose server vanished)
+// `os.Stat` can block indefinitely — well past the 2 s budget. The
+// flight then completes via the timeout branch and retires, while its
+// stat goroutine stays parked in the kernel forever. Five seconds
+// later the TTL lapses, the next /v1/health poll starts a fresh
+// flight, and parks another one. At iOS's poll cadence that's on the
+// order of 17k leaked goroutines a day — ~130 MB of stacks — on
+// exactly the mount failure this cache exists to survive.
+//
+// `inflight` tracks roots whose stat goroutine has not yet returned.
+// While one is parked we refuse to launch another and serve the
+// offline verdict directly. It is self-healing: whenever the kernel
+// finally releases the stat, the goroutine clears its own entry and
+// the next lapsed-TTL probe re-tests the mount for real.
 type reachabilityCache struct {
-	mu      sync.Mutex
-	entries map[string]reachabilityStatus
-	group   singleflight.Group
+	mu       sync.Mutex
+	entries  map[string]reachabilityStatus
+	inflight map[string]bool
+	group    singleflight.Group
 }
 
 func newReachabilityCache() *reachabilityCache {
-	return &reachabilityCache{entries: make(map[string]reachabilityStatus)}
+	return &reachabilityCache{
+		entries:  make(map[string]reachabilityStatus),
+		inflight: make(map[string]bool),
+	}
 }
 
 // probe returns the cached reachability for absRoot, refreshing on cache
@@ -135,13 +163,34 @@ func (c *reachabilityCache) probeLocked(ctx context.Context, absRoot string) rea
 	probeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), reachabilityProbeTimeout)
 	defer cancel()
 
+	// Refuse to stack a second stat on a root whose previous one is
+	// still parked in the kernel (see the `inflight` note on the struct).
+	// Serving a freshly-stamped offline verdict — rather than the stale
+	// entry as-is — is what makes the TTL actually suppress the next
+	// poll; returning the old timestamp would re-enter this path on
+	// every request.
+	c.mu.Lock()
+	if c.inflight[absRoot] {
+		status := reachabilityStatus{Reachable: false, Reason: "offline", checkedAt: time.Now()}
+		c.entries[absRoot] = status
+		c.mu.Unlock()
+		return status
+	}
+	c.inflight[absRoot] = true
+	c.mu.Unlock()
+
 	type probeResult struct {
 		info os.FileInfo
 		err  error
 	}
+	// Buffered so the goroutine can always publish and exit, even when
+	// the timeout branch already abandoned this channel.
 	resultCh := make(chan probeResult, 1)
 	go func() {
-		info, err := os.Stat(absRoot)
+		info, err := statFunc(absRoot)
+		c.mu.Lock()
+		delete(c.inflight, absRoot)
+		c.mu.Unlock()
 		resultCh <- probeResult{info: info, err: err}
 	}()
 

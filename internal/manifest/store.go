@@ -2191,6 +2191,60 @@ func buildPathInQuery(prefix string, paths []string) (string, []any) {
 // at the cost of a slower index scan, which is fine for the
 // once-per-request /v1/upscale eligibility gate but wrong for the
 // scanner's hot inner loop. (Qodo on PR #126.)
+// TrackStat is the narrow projection the scanner's unchanged-file
+// skip gate needs: the two scalars it compares against the walked
+// `os.FileInfo`, plus the one tag it inspects for local-artwork cache
+// recovery. Deliberately NOT a wire type — it never leaves the
+// manifest package, and it carries no `json:` tags (see CLAUDE.md →
+// "Wire-type discipline": the SQLite row structs must not gain them).
+type TrackStat struct {
+	Size        int64
+	MTimeNS     int64
+	ArtworkMBID string
+}
+
+// GetTrackStat is the skip-gate twin of GetTrack: same exact-key
+// PRIMARY KEY lookup and the same (nil, nil) miss contract, but it
+// projects three scalars instead of hauling the whole `tags_json`
+// BLOB into Go and unmarshalling a ~40-field Track out of it.
+//
+// The gate runs once per file per scan (default every 6 h, and on
+// every watcher-triggered subtree scan), so at 100k tracks the old
+// shape read hundreds of MB of BLOB and ran 100k full JSON parses
+// purely to compare a size and an mtime.
+//
+// **`size` and `mtime_ns` are safe to read as columns here even
+// though `Track.ModTime` also lives inside `tags_json`.** Both
+// UpsertTrack and UpsertTrackBatch bind them from the same `*Track`
+// they marshal (`t.Size`, `t.ModTime.UnixNano()`), so the column and
+// the JSON are written atomically from one source. The other
+// `tags_json` writers (MarkEnriched, applyReconciledTracks, the
+// artwork-version / booklet-tag stampers) round-trip a Track that
+// already carries the original ModTime, so they can't drift either.
+// Verified empirically against a live 15,373-row hybrid library
+// (filesystem + UPnP-routed): zero disagreement on size, and zero on
+// mtime to nanosecond precision.
+//
+// Comparing `MTimeNS` against `info.ModTime().UnixNano()` is exactly
+// the instant-equality `time.Time.Equal` gave us — which matters
+// because UPnP-routed rows serialise their mtime with a `+HH:MM`
+// offset while scanner rows use `Z`, and both forms must compare
+// equal on the same instant.
+func (s *Store) GetTrackStat(ctx context.Context, path string) (*TrackStat, error) {
+	var st TrackStat
+	err := s.db.QueryRowContext(ctx, `
+		SELECT size, mtime_ns, COALESCE(json_extract(tags_json, '$.artworkMBID'), '')
+		FROM tracks WHERE path = ?`, path).
+		Scan(&st.Size, &st.MTimeNS, &st.ArtworkMBID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &st, nil
+}
+
 func (s *Store) GetTrack(ctx context.Context, path string) (*Track, error) {
 	var raw []byte
 	err := s.db.QueryRowContext(ctx, `SELECT tags_json FROM tracks WHERE path = ?`, path).Scan(&raw)

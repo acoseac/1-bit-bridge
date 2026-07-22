@@ -752,7 +752,7 @@ func TestScanner_NoRecoveryForUUIDArtworkMBID(t *testing.T) {
 	// directly that a UUID-prefixed track does NOT trigger
 	// recovery, regardless of the cache file's presence.
 	stored, _ := store.GetTrack(context.Background(), "track.mp3")
-	if scanner.needsLocalArtworkRecovery(stored) {
+	if scanner.needsLocalArtworkRecovery(stored.ArtworkMBID) {
 		t.Errorf("UUID-form ArtworkMBID must not trigger recovery (got true)")
 	}
 

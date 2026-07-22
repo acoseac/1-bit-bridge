@@ -916,9 +916,19 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 			// the recovery cost is one os.Stat per `local-` track per
 			// scan, scoped narrowly to the one case the cache might
 			// genuinely need rebuilding.
-			existing, _ := s.store.GetTrack(ctx, pi.rel)
-			if existing != nil && existing.Size == pi.info.Size() && existing.ModTime.Equal(pi.info.ModTime()) {
-				if !s.needsLocalArtworkRecovery(existing) {
+			existing, statErr := s.store.GetTrackStat(ctx, pi.rel)
+			if statErr != nil {
+				// Not fatal: a failed lookup only means we can't prove
+				// the row is unchanged, so we fall through and
+				// re-extract. Logged because silently losing the skip
+				// gate turns every scan into a full re-extract of the
+				// entire library — an expensive thing to have happen
+				// quietly. (Previously this error was discarded.)
+				scanLogger.Warn("skip-gate lookup", "path", pi.rel, "err", statErr)
+			}
+			if existing != nil && existing.Size == pi.info.Size() &&
+				existing.MTimeNS == pi.info.ModTime().UnixNano() {
+				if !s.needsLocalArtworkRecovery(existing.ArtworkMBID) {
 					// Even on the early-skip path we MUST reset the
 					// missing_count for this row, otherwise a flap-
 					// then-restore on a mtime-equal file (the exact
@@ -971,8 +981,11 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 
 // needsLocalArtworkRecovery reports whether an unchanged-eligible
 // track must still be re-extracted because its locally-curated
-// artwork cache file went missing. Returns true only when the row
-// carries a `local-<hash>` ArtworkMBID AND the matching
+// artwork cache file went missing. Takes the bare ArtworkMBID rather
+// than a *Track: that is the only field it ever read, and the skip
+// gate now projects it via GetTrackStat instead of unmarshalling a
+// whole Track. Returns true only when the value
+// carries a `local-<hash>` prefix AND the matching
 // `<artDir>/<mbid>-500.jpg` is absent. Pure UUID-bearing or empty-
 // MBID rows always return false — those don't have a scanner-side
 // cache to rebuild. Empty `s.artDir` also returns false (no local-
@@ -982,14 +995,14 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 // not on the whole library — for a typical install this is 0% of
 // rows on first scan and at most a fraction once local-artwork
 // extraction has run.
-func (s *Scanner) needsLocalArtworkRecovery(t *Track) bool {
+func (s *Scanner) needsLocalArtworkRecovery(artworkMBID string) bool {
 	if s.artDir == "" {
 		return false
 	}
-	if !strings.HasPrefix(t.ArtworkMBID, "local-") {
+	if !strings.HasPrefix(artworkMBID, "local-") {
 		return false
 	}
-	cachePath := filepath.Join(s.artDir, t.ArtworkMBID+"-500.jpg")
+	cachePath := filepath.Join(s.artDir, artworkMBID+"-500.jpg")
 	_, err := os.Stat(cachePath)
 	if err == nil {
 		return false
