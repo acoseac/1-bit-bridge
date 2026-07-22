@@ -40,6 +40,16 @@ permissions:
   contents: read
   packages: write
 
+# Serialize every publish. :MINOR and :latest float, so two overlapping
+# runs (a tag push racing a dispatch, or two tags pushed together) would
+# leave them pointing at whichever finished last rather than at the newer
+# version. cancel-in-progress stays FALSE deliberately: cancelling a run
+# mid-push can leave a partially-uploaded multi-arch manifest in the
+# registry, which is worse than waiting.
+concurrency:
+  group: docker-publish
+  cancel-in-progress: false
+
 env:
   IMAGE: ghcr.io/acoseac/1-bit-bridge
 
@@ -61,9 +71,36 @@ jobs:
           # A dispatch carries an operator-supplied string that may not be
           # a release at all, so it must opt in.
           MOVE_FLOATING: ${{ github.event_name == 'push' || inputs.moving_tags }}
+          # Passed as an env var, NOT interpolated into the script below.
+          # Actions expands ${{ }} textually BEFORE bash sees the line, so a
+          # tag or dispatch input containing shell syntax would execute here
+          # — in a job holding `packages: write` and a registry login.
+          # Through env it arrives as inert data.
+          RAW_REF: ${{ inputs.tag || github.ref_name }}
         run: |
           set -eu
-          RAW="${{ inputs.tag || github.ref_name }}"
+          RAW="$RAW_REF"
+          # Validate before the value reaches an image tag or GITHUB_OUTPUT.
+          # Docker's tag grammar is [a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}; a
+          # newline additionally lets the value forge extra GITHUB_OUTPUT
+          # keys, so it must be rejected too.
+          #
+          # `case` globs match the WHOLE string, which is why the charset
+          # test is one here rather than a grep -E: grep anchors ^…$ per
+          # LINE, so a multi-line value whose first line looks valid passes
+          # it. (Confirmed against a literal "v1.0.0\nversion=pwned".)
+          case "$RAW" in
+            v[0-9]*|[0-9]*) ;;
+            *) echo "::error::refusing tag '$RAW' — expected a version like v1.2.3" >&2; exit 1 ;;
+          esac
+          case "$RAW" in
+            *[!A-Za-z0-9._-]*)
+              echo "::error::refusing tag '$RAW' — not a valid docker tag" >&2; exit 1 ;;
+          esac
+          if [ "${#RAW}" -gt 128 ]; then
+            echo "::error::refusing tag '$RAW' — exceeds the 128-char docker tag limit" >&2
+            exit 1
+          fi
           VER="${RAW#v}"            # strip a leading v  ->  0.1.7
           MINOR="${VER%.*}"         # 0.1.7  ->  0.1
           # :VER is immutable and always published. :MINOR and :latest
