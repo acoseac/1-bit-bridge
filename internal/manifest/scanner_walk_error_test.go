@@ -254,6 +254,71 @@ func TestIsUnderErroredSubtree(t *testing.T) {
 	}
 }
 
+// The helpers below factor the fixture shape the walk-error tests share:
+// stage dirs with a track each, open a store + scanner over a root, scan,
+// assert what got indexed, and break one subtree's walk. Kept small and
+// explicit rather than one do-everything harness — each test still reads
+// as its own scenario.
+
+// seedTrackDirs creates each dir and drops a stub track into it. The body
+// isn't valid FLAC on purpose: these tests exercise the walk and the
+// deletion pass, not tag extraction.
+func seedTrackDirs(t *testing.T, dirs ...string) {
+	t.Helper()
+	for _, dir := range dirs {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "song.flac"), []byte("not-a-real-flac"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// newScanFixture opens a temp-dir-backed store and a scanner rooted at
+// root, registering the store's Close.
+func newScanFixture(t *testing.T, root string) (*Store, *Scanner) {
+	t.Helper()
+	s, err := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	return s, NewScanner([]string{root}, s, "")
+}
+
+// scanOnce runs a full scan, failing the test on error. label names the
+// pass so a failure says which one broke.
+func scanOnce(t *testing.T, sc *Scanner, label string) {
+	t.Helper()
+	if _, err := sc.Scan(context.Background()); err != nil {
+		t.Fatalf("%s: %v", label, err)
+	}
+}
+
+// mustIndexed asserts every path is present in the manifest. Fatal, not
+// Error: a fixture that didn't index is not a meaningful base state for
+// the assertions that follow.
+func mustIndexed(t *testing.T, s *Store, paths ...string) {
+	t.Helper()
+	for _, p := range paths {
+		if got, _ := s.GetTrack(context.Background(), p); got == nil {
+			t.Fatalf("scan didn't index %q", p)
+		}
+	}
+}
+
+// breakWalk simulates a transient I/O error on dir (NAS drop, permission
+// flap, antivirus lock) by removing its permissions for the pass, and
+// restores them on cleanup so t.TempDir can tear the tree down.
+func breakWalk(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.Chmod(dir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+}
+
 // caseSensitiveFS reports whether dir lives on a case-sensitive
 // filesystem. macOS APFS/HFS+ default to case-INsensitive and Windows
 // always is, so a case-twin fixture can only be staged on Linux (and
@@ -305,42 +370,18 @@ func TestScannerSparesCaseTwinUnderWalkErrorSubtree(t *testing.T) {
 	// track — so the two relative paths case-fold to the same key.
 	upper := filepath.Join(root, "Twin")
 	lower := filepath.Join(root, "twin")
-	for _, sub := range []string{upper, lower} {
-		if err := os.MkdirAll(sub, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(sub, "song.flac"), []byte("not-a-real-flac"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
+	seedTrackDirs(t, upper, lower)
 
-	s, err := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-	sc := NewScanner([]string{root}, s, "")
-
-	if _, err := sc.Scan(context.Background()); err != nil {
-		t.Fatalf("first scan: %v", err)
-	}
-	for _, p := range []string{"Twin/song.flac", "twin/song.flac"} {
-		if got, _ := s.GetTrack(context.Background(), p); got == nil {
-			t.Fatalf("first scan didn't index %q", p)
-		}
-	}
+	s, sc := newScanFixture(t, root)
+	scanOnce(t, sc, "first scan")
+	mustIndexed(t, s, "Twin/song.flac", "twin/song.flac")
 
 	// Transient I/O error on ONE twin. Its track drops out of `seen`
 	// while the other twin's track — which folds to the same key —
 	// stays in it.
-	if err := os.Chmod(upper, 0o000); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(upper, 0o755) })
+	breakWalk(t, upper)
 
-	if _, err := sc.Scan(context.Background()); err != nil {
-		t.Fatalf("second scan: %v", err)
-	}
+	scanOnce(t, sc, "second scan")
 	if got, _ := s.GetTrack(context.Background(), "Twin/song.flac"); got == nil {
 		t.Error("Twin/song.flac was reaped as a case-only rename despite its subtree hitting a walk error — " +
 			"the rename branch must not run ahead of isUnderErroredSubtree")
