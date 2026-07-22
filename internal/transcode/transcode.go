@@ -33,6 +33,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -942,3 +943,78 @@ func (j *JobSpec) FreshnessFromFile() error {
 // Centralised here so test stubs can override (today: a const,
 // good enough).
 func CreatedAtNow() int64 { return time.Now().UnixNano() }
+
+// soxFormatsForExt maps a source extension to the tokens sox prints in its
+// AUDIO FILE FORMATS block that would decode it — ANY match means readable.
+//
+// A list rather than one token because a format's handler name and its
+// extension are not reliably the same word, and builds differ: WAV shows up
+// as "wav" and sometimes "wavpcm", and the AIFF family's three extensions
+// are covered by overlapping tokens.
+//
+// The MP4 entries are the point of the whole guard, and are why this must
+// be a MAP MISS that fails open rather than an absent key. `.m4a` IS a
+// shape the upstream gate forwards (ALAC is lossless, so nothing above
+// excludes it), so leaving it unmapped would fail open and allow exactly
+// the case this refuses — which is what the first draft did, and what
+// TestSoxInfoCanDecode caught. Listing candidate tokens instead means
+// every stock build refuses it (none carry them), while a build that grows
+// MP4 support is allowed automatically with no code change here.
+//
+// Only shapes the pipeline can actually be handed are listed: lossy
+// sources (manifest.IsLossyCodec) and DSD are already excluded upstream.
+var soxFormatsForExt = map[string][]string{
+	".flac": {"flac"},
+	".wav":  {"wav", "wavpcm"},
+	".aif":  {"aif", "aiff"},
+	".aiff": {"aiff", "aif"},
+	".aifc": {"aifc", "aiff"},
+	".m4a":  {"mp4", "m4a"},
+	".mp4":  {"mp4"},
+	".m4b":  {"mp4", "m4a"},
+	".m4p":  {"mp4", "m4a"},
+}
+
+// CanDecode reports whether this sox build can read the given source file.
+//
+// It exists because the eligibility gate and the decoder disagreed. ALAC
+// clears every check upstream — manifest.IsLossyCodec doesn't list it (it
+// is lossless), canSetBitsPerSample allowlists it, and OptimizeEligible
+// names "ALAC" outright — so an .m4a reached sox, which has no MP4
+// demuxer in any stock build. The job then failed after being advertised
+// to the client as eligible: on iOS the wand renders enabled, the user
+// taps it, and the work fails downstream.
+//
+// That path only became reachable when PR #440 started extracting PCM
+// geometry for M4A. Before it, SampleRate was nil and the gate refused
+// early — which is the honest answer this restores.
+//
+// Fail-OPEN in two cases, both deliberate:
+//
+//   - !FormatsKnown — an unparseable `sox --help` must never disable a
+//     working install. Same posture as ProbeSox's HasFLAC contract.
+//   - an extension absent from soxFormatsForExt — the map covers what the
+//     upstream gate lets through; anything else is a shape this guard was
+//     not written to judge, and refusing it here would silently narrow
+//     the pipeline as a side effect of an unrelated change. (MP4
+//     extensions are therefore listed rather than omitted — see the map.)
+//
+// The check is against the LIVE build's format list, so it also covers
+// the minimal-install case ProbeSox's HasFLAC field handles globally: an
+// apt sox without libsox-fmt-all can't read FLAC either, and this refuses
+// those per-source instead of only at feature-gate time.
+func (i SoxInfo) CanDecode(sourcePath string) bool {
+	if !i.FormatsKnown {
+		return true
+	}
+	candidates, mapped := soxFormatsForExt[strings.ToLower(filepath.Ext(sourcePath))]
+	if !mapped {
+		return true
+	}
+	for _, want := range candidates {
+		if slices.Contains(i.Formats, want) {
+			return true
+		}
+	}
+	return false
+}
