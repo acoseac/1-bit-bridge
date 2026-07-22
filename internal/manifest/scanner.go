@@ -476,6 +476,19 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 		if _, routed := routedSet[p]; routed {
 			continue
 		}
+		// Walk-error sparing comes FIRST — before any branch that can
+		// delete. "We could not see this path" must dominate "this path
+		// looks like a rename": on a case-sensitive FS `Album/` and
+		// `album/` are distinct real directories, so a transient walk
+		// error on one leaves its rows absent from `seen` while the
+		// other's rows fold-match them. Reaping on that match would
+		// delete live rows outright, bypassing BOTH this guard and the
+		// missing_count debounce below (PR #74's invariant, re-broken by
+		// the #549 case-rename pass and fixed here).
+		if isUnderErroredSubtree(p, errorSubtrees) {
+			spared++
+			continue
+		}
 		if _, ok := renames[p]; ok {
 			// Case-only rename on a case-insensitive FS — the
 			// new-case row was already upserted this pass, so reap
@@ -483,10 +496,6 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 			// shadow the new row in /v1/manifest for up to
 			// `threshold` scans.
 			renamed = append(renamed, p)
-			continue
-		}
-		if isUnderErroredSubtree(p, errorSubtrees) {
-			spared++
 			continue
 		}
 		missingTracks = append(missingTracks, p)
@@ -1313,14 +1322,16 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 		if _, ok := seen[p]; ok {
 			continue
 		}
+		// Walk-error sparing before the rename reap — see the full-scan
+		// deletion pass above for why the order is load-bearing.
+		if isUnderErroredSubtree(p, errorSubtrees) {
+			sparedTracks++
+			continue
+		}
 		if _, ok := renames[p]; ok {
 			// Case-only rename — same immediate-reap rationale as
 			// the full-scan deletion pass above.
 			renamed = append(renamed, p)
-			continue
-		}
-		if isUnderErroredSubtree(p, errorSubtrees) {
-			sparedTracks++
 			continue
 		}
 		missingTracks = append(missingTracks, p)

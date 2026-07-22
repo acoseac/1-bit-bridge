@@ -1034,7 +1034,27 @@ func flacPictureBlocksSane(rs io.ReadSeeker) bool {
 			return true
 		}
 		if block.Type == meta.TypePicture {
-			if !flacPictureBodySane(rs, block.Length) {
+			// Note the body's start BEFORE validating so we can seek to
+			// the next block header instead of reading our way there.
+			// meta.New consumed only the 4-byte header and wraps rs in a
+			// plain io.LimitReader (no buffering — meta.go's Block.lr), so
+			// the file offset here IS the body start and an external Seek
+			// stays consistent with the walk.
+			pos, err := rs.Seek(0, io.SeekCurrent)
+			if err != nil {
+				return true // fail-open, per the docblock
+			}
+			sane := flacPictureBodySane(rs, block.Length)
+			// Skip the payload rather than draining it. Draining sent the
+			// whole 5–25 MiB cover over the wire, and the caller then
+			// Seek(0)s and hands the same file to dhowden which reads it
+			// again — reintroducing exactly the per-track double read the
+			// single-open FLAC path exists to eliminate (see the call
+			// site's docblock).
+			if _, err := rs.Seek(pos+block.Length, io.SeekStart); err != nil {
+				return true
+			}
+			if !sane {
 				return false
 			}
 		} else if err := block.Skip(); err != nil {
@@ -1046,14 +1066,19 @@ func flacPictureBlocksSane(rs io.ReadSeeker) bool {
 	}
 }
 
-// flacPictureBodySane consumes one PICTURE block body, validating each
-// declared length against the bytes remaining in the block. Returns false
-// only on a positive inconsistency; a read error returns true (fail-open,
-// per flacPictureBlocksSane's contract). Always drains to the next block
-// header so the caller's walk stays aligned.
+// flacPictureBodySane reads one PICTURE block's fixed header fields,
+// validating each declared length against the bytes remaining in the
+// block. Returns false only on a positive inconsistency; a read error
+// returns true (fail-open, per flacPictureBlocksSane's contract).
+//
+// It reads ONLY as far as the dataLen field and leaves the reader
+// wherever it stops — it deliberately does NOT drain to the next block
+// header. Draining transferred the entire cover-art payload for a
+// verdict that needs ~30 bytes of header, and the file is read again by
+// dhowden immediately afterwards. Re-aligning the walk is the caller's
+// job, via a Seek it can do in O(1).
 func flacPictureBodySane(r io.Reader, blockLen int64) (sane bool) {
 	lr := &io.LimitedReader{R: r, N: blockLen}
-	defer func() { _, _ = io.Copy(io.Discard, lr) }()
 
 	readBE := func() (uint32, bool) {
 		var b [4]byte

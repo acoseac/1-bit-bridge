@@ -253,3 +253,90 @@ func TestIsUnderErroredSubtree(t *testing.T) {
 		})
 	}
 }
+
+// caseSensitiveFS reports whether dir lives on a case-sensitive
+// filesystem. macOS APFS/HFS+ default to case-INsensitive and Windows
+// always is, so a case-twin fixture can only be staged on Linux (and
+// on a case-sensitive macOS volume).
+func caseSensitiveFS(t *testing.T, dir string) bool {
+	t.Helper()
+	probe := filepath.Join(dir, "CaseProbe")
+	if err := os.Mkdir(probe, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(probe) }()
+	_, err := os.Stat(filepath.Join(dir, "caseprobe"))
+	return os.IsNotExist(err)
+}
+
+// TestScannerSparesCaseTwinUnderWalkErrorSubtree pins the ORDER of the
+// two guards in the deletion pass: walk-error sparing must be evaluated
+// BEFORE the case-only-rename reap added by PR #549.
+//
+// On a case-sensitive filesystem `Twin/` and `twin/` are two distinct
+// real directories. When one of them hits a transient walk error its
+// tracks are absent from `seen`, while the surviving twin's tracks
+// case-fold-match them — so `caseOnlyRenames` classifies the errored
+// rows as "the old case of a rename" and the pass deleted them
+// IMMEDIATELY, bypassing both `isUnderErroredSubtree` and the
+// `missing_count >= threshold` debounce. The files were still on disk;
+// the rows were gone until a clean rescan.
+//
+// That is the PR #74 invariant ("a transient WalkDir error must never
+// delete a row") re-broken through a new branch, in the code path
+// CLAUDE.md flags as the most likely cause of a "bridge lost my
+// library" report. This test fails against the pre-fix ordering.
+func TestScannerSparesCaseTwinUnderWalkErrorSubtree(t *testing.T) {
+	root := t.TempDir()
+	if !caseSensitiveFS(t, root) {
+		t.Skip("case-insensitive filesystem: case-twin directories can't be staged (the bug is unreachable here)")
+	}
+
+	// Two directories differing ONLY in case, each with a same-named
+	// track — so the two relative paths case-fold to the same key.
+	upper := filepath.Join(root, "Twin")
+	lower := filepath.Join(root, "twin")
+	for _, sub := range []string{upper, lower} {
+		if err := os.MkdirAll(sub, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(sub, "song.flac"), []byte("not-a-real-flac"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	s, err := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	sc := NewScanner([]string{root}, s, "")
+
+	if _, err := sc.Scan(context.Background()); err != nil {
+		t.Fatalf("first scan: %v", err)
+	}
+	for _, p := range []string{"Twin/song.flac", "twin/song.flac"} {
+		if got, _ := s.GetTrack(context.Background(), p); got == nil {
+			t.Fatalf("first scan didn't index %q", p)
+		}
+	}
+
+	// Transient I/O error on ONE twin. Its track drops out of `seen`
+	// while the other twin's track — which folds to the same key —
+	// stays in it.
+	if err := os.Chmod(upper, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(upper, 0o755) })
+
+	if _, err := sc.Scan(context.Background()); err != nil {
+		t.Fatalf("second scan: %v", err)
+	}
+	if got, _ := s.GetTrack(context.Background(), "Twin/song.flac"); got == nil {
+		t.Error("Twin/song.flac was reaped as a case-only rename despite its subtree hitting a walk error — " +
+			"the rename branch must not run ahead of isUnderErroredSubtree")
+	}
+	if got, _ := s.GetTrack(context.Background(), "twin/song.flac"); got == nil {
+		t.Error("twin/song.flac was wiped (it walked cleanly and must survive)")
+	}
+}
