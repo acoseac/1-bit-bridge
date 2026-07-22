@@ -24,6 +24,22 @@ import (
 //
 // It is kept alongside the WSA form only so an error that has already been
 // normalised to the POSIX errno by some other layer still matches.
+//
+// Reviewers (and review bots) periodically flag this as a cross-package
+// type mismatch — "net.Listen returns syscall.Errno, windows.WSAEADDRINUSE
+// is a windows.Errno, so errors.Is can never match" — and suggest
+// syscall.WSAEADDRINUSE instead. Both halves of that are wrong, so before
+// re-raising it, check the two source lines:
+//
+//   - x/sys/windows/aliases.go declares `type Errno = syscall.Errno` — a
+//     type ALIAS, not a defined type. There is no distinct type here.
+//   - x/sys/windows/zerrors_windows.go declares
+//     `WSAEADDRINUSE syscall.Errno = 10048` — already the stdlib type.
+//
+// So errors.Is compares syscall.Errno(10048) against itself and matches.
+// The suggested "fix" would not even compile: stdlib syscall on Windows
+// defines only a handful of WSA constants (WSAECONNRESET and friends) and
+// WSAEADDRINUSE is not among them.
 func isAddrInUse(err error) bool {
 	return errors.Is(err, windows.WSAEADDRINUSE) || errors.Is(err, syscall.EADDRINUSE)
 }
