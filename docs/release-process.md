@@ -7,7 +7,7 @@ after-the-tag steps.
 ## Documentation refresh on each release
 
 > **User-facing docs moved (2026-06-09).** The overview / setup / features / troubleshooting /
-> privacy pages now live in the **`acoseac/1bitapp`** repo (local `~/Desktop/1bitapp`) and are
+> privacy pages now live in the **`acoseac/1bitapp`** repo (local `~/dev/1bitapp`) and are
 > published at **`1-bit.app/bridge/*`**. Update them THERE, following that repo's `CLAUDE.md` →
 > "Adding a release". The `docs/*.html` files in *this* repo are now **redirect stubs** pointing at
 > 1-bit.app — do not edit them. The only per-release doc touch in this repo is the `README.md`
