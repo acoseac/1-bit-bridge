@@ -472,6 +472,28 @@ type upscaleEnqueuerAdapter struct {
 	// (POST /api/upscale/variants-dir) until restart — new sidecars
 	// kept landing on, and disk checks kept grading, the old path.
 	outputDir func() string
+	// soxInfo returns the cached ProbeSox snapshot, so the eligibility
+	// gate can refuse a source THIS sox build cannot decode instead of
+	// advertising it and failing the job later. Read through the same
+	// 30 s-TTL cache the admin tile uses, so the two surfaces agree and
+	// an enqueue costs no extra fork-exec. Nil-safe: an unwired closure
+	// (direct-construction tests) skips the check, matching its
+	// documented fail-open posture.
+	soxInfo func() (transcode.SoxInfo, error)
+}
+
+// soxCanDecode reports whether the installed sox can read absPath. Fails
+// OPEN on a nil closure or a probe error — the probe is an optimisation
+// for honest refusals, never a new way for enqueue to break.
+func (a *upscaleEnqueuerAdapter) soxCanDecode(absPath string) bool {
+	if a.soxInfo == nil {
+		return true
+	}
+	info, err := a.soxInfo()
+	if err != nil {
+		return true
+	}
+	return info.CanDecode(absPath)
 }
 
 // resolveAndLookupTrack is the shared scaffolding for `EnqueueOne`
@@ -504,6 +526,19 @@ func (a *upscaleEnqueuerAdapter) resolveAndLookupTrack(libraryRelativePath strin
 		return "", nil, api.ErrUpscaleIneligible
 	}
 	if track.IsDSD != nil && *track.IsDSD {
+		return "", nil, api.ErrUpscaleIneligible
+	}
+	// Refuse what this sox build cannot decode. Sits with the DSD filter
+	// because it answers the same question — "can the pipeline actually
+	// process this?" — and both callers must get the same answer.
+	//
+	// The case that motivated it is ALAC: lossless, so IsLossyCodec
+	// doesn't exclude it; OptimizeEligible names "ALAC" outright; and
+	// since PR #440 populated PCM geometry for M4A it has non-nil
+	// SampleRate/BitsPerSample too. So it cleared every gate and reached
+	// a sox with no MP4 demuxer — the client had already been told the
+	// track was eligible (wand enabled on iOS) before the job failed.
+	if !a.soxCanDecode(abs) {
 		return "", nil, api.ErrUpscaleIneligible
 	}
 	return abs, track, nil
@@ -2404,6 +2439,14 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		}()
 	}
 
+	// One TTL-cached sox probe shared by every consumer: the admin's
+	// availability + FLAC closures (so the Settings page does at most one
+	// fork-exec per 30 s window regardless of tile count) AND the upscale
+	// enqueuer's per-source decodability check. Declared here rather than
+	// beside the admin wiring below because the enqueuer is constructed
+	// first; one instance keeps all three reading the same snapshot.
+	soxCache := &soxToolchainCache{}
+
 	var upscalePool *transcode.Pool
 	var upscaleCoordinator *transcode.Coordinator
 	if upscaleActive {
@@ -2425,6 +2468,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			abs, _, err := apiSrv.Resolver().ResolveChecked(libraryRel)
 			return abs, err
 		}
+
 		upscaleCoordinator, err = transcode.NewCoordinator(upscalePool, manifestStore, cfg.DataDir, nil, batchResolver)
 		if err != nil {
 			fmt.Fprintf(stderr, "upscale coordinator: %v\n", err)
@@ -2464,6 +2508,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			resolver:  apiSrv.Resolver(),
 			cfg:       cfg,
 			outputDir: liveVariantsDir,
+			soxInfo:   soxCache.snapshot,
 		})
 		apiSrv.WithBatchCoordinator(&upscaleBatchCoordinatorAdapter{
 			coord:     upscaleCoordinator,
@@ -2852,11 +2897,6 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			tailscaleAuto.Disable()
 		}
 	}
-
-	// One TTL-cached sox probe shared by the admin's availability +
-	// FLAC closures so the Settings page does at most one fork-exec of
-	// sox per 30 s window regardless of how many tiles read it.
-	soxCache := &soxToolchainCache{}
 
 	adminSrv, err := admin.New(admin.Deps{
 		CfgHolder:   cfgHolder,
