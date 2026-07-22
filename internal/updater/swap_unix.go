@@ -5,7 +5,6 @@ package updater
 import (
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -174,48 +173,7 @@ func placeNewBinary(newBinary, dst string) error {
 // Close runs first — Windows-safe ordering isn't needed here but mirrors
 // the atomic-write idiom used elsewhere in the tree).
 func copyAndRename(src, dst string) error {
-	tmp, err := os.CreateTemp(filepath.Dir(dst), ".bridge-swap-*")
-	if err != nil {
-		return fmt.Errorf("create temp in dst dir: %w", err)
-	}
-	tmpName := tmp.Name()
-	defer func() {
-		if tmpName != "" {
-			_ = os.Remove(tmpName)
-		}
-	}()
-	defer func() { _ = tmp.Close() }()
-
-	in, err := os.Open(src)
-	if err != nil {
-		return fmt.Errorf("open source binary: %w", err)
-	}
-	defer in.Close()
-
-	if _, err := io.Copy(tmp, in); err != nil {
-		return fmt.Errorf("copy binary across devices: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		return fmt.Errorf("sync copied binary: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close copied binary: %w", err)
-	}
-	// CreateTemp makes the file 0o600; the installed binary must be
-	// executable, matching the extractor's O_CREATE 0o755.
-	if err := os.Chmod(tmpName, 0o755); err != nil {
-		return fmt.Errorf("chmod copied binary: %w", err)
-	}
-	// Atomic within dst's filesystem — this is the whole point of copying
-	// into dst's directory first. Plain os.Rename (NOT renameFunc): the
-	// test seam forces EXDEV on the cross-device newBinary→dst rename, but
-	// this same-dir rename must run for real.
-	if err := os.Rename(tmpName, dst); err != nil {
-		return fmt.Errorf("rename copied binary into place: %w", err)
-	}
-	tmpName = "" // committed; don't remove
-	_ = os.Remove(src)
-	return nil
+	return copyIntoDirAndRename(src, dst, 0o755)
 }
 
 // fsyncDir fsyncs a directory so a rename inside it is durable. A crash

@@ -5,9 +5,7 @@ package updater
 import (
 	"errors"
 	"fmt"
-	"io"
 	"os"
-	"path/filepath"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -170,41 +168,8 @@ func placeNewBinaryWindows(newBinary, dst string) error {
 // fsync (FlushFileBuffers rejects directory handles on Windows — see the
 // note in swapBinary).
 func copyAcrossVolumesWindows(src, dst string) error {
-	tmp, err := os.CreateTemp(filepath.Dir(dst), ".bridge-swap-*")
-	if err != nil {
-		return fmt.Errorf("create temp in dst dir: %w", err)
-	}
-	tmpName := tmp.Name()
-	// LIFO: Close (registered second) runs BEFORE Remove, because Windows
-	// refuses to unlink a file that still has an open handle.
-	defer func() {
-		if tmpName != "" {
-			_ = os.Remove(tmpName)
-		}
-	}()
-	defer func() { _ = tmp.Close() }()
-
-	in, err := os.Open(src)
-	if err != nil {
-		return fmt.Errorf("open source binary: %w", err)
-	}
-	defer in.Close()
-
-	if _, err := io.Copy(tmp, in); err != nil {
-		return fmt.Errorf("copy binary across volumes: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		return fmt.Errorf("sync copied binary: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close copied binary: %w", err)
-	}
-	if err := os.Rename(tmpName, dst); err != nil {
-		return fmt.Errorf("rename copied binary over %s: %w", dst, err)
-	}
-	tmpName = "" // committed — suppress the deferred Remove
-	_ = os.Remove(src)
-	return nil
+	// mode 0: NTFS has no executable bit to set.
+	return copyIntoDirAndRename(src, dst, 0)
 }
 
 // stopServiceIfRunning attempts to stop the bridge SCM service so
