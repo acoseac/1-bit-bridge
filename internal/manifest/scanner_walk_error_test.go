@@ -291,6 +291,15 @@ func TestScannerSparesCaseTwinUnderWalkErrorSubtree(t *testing.T) {
 	if !caseSensitiveFS(t, root) {
 		t.Skip("case-insensitive filesystem: case-twin directories can't be staged (the bug is unreachable here)")
 	}
+	// root bypasses DAC checks, so chmod 0000 wouldn't stop the walk: both
+	// twins would land in `seen`, the deletion pass would never consider
+	// either, and the test would PASS without exercising the guard at all.
+	// A vacuous pass on a regression test is worse than a skip — and
+	// root-in-container is a normal CI shape. Matches the same guard on
+	// backup's TestReapOrphansSparesUnreadableManifest.
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: chmod 0000 doesn't block the walk, so the transient error can't be simulated")
+	}
 
 	// Two directories differing ONLY in case, each with a same-named
 	// track — so the two relative paths case-fold to the same key.
