@@ -3,6 +3,7 @@ package manifest
 import (
 	"bytes"
 	"encoding/binary"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -229,4 +230,83 @@ func TestExtractHostilePictureFLACStillIndexes(t *testing.T) {
 	// Must return without killing the process. An error is acceptable (the
 	// file is genuinely corrupt); a dead process is not.
 	_ = ExtractWithContext(file, &tr, nil)
+}
+
+// countingReadSeeker wraps a ReadSeeker and tallies bytes actually read,
+// so a test can distinguish "seeked past the payload" from "read it".
+type countingReadSeeker struct {
+	rs   io.ReadSeeker
+	read int64
+}
+
+func (c *countingReadSeeker) Read(p []byte) (int, error) {
+	n, err := c.rs.Read(p)
+	c.read += int64(n)
+	return n, err
+}
+
+func (c *countingReadSeeker) Seek(off int64, whence int) (int64, error) {
+	return c.rs.Seek(off, whence)
+}
+
+// TestFLACPictureBlocksSaneDoesNotReadThePayload pins that the preflight
+// walk SEEKS past a validated PICTURE payload instead of draining it.
+//
+// flacPictureBodySane needs ~30 bytes of fixed header fields to judge the
+// geometry, but the original implementation deferred an
+// io.Copy(io.Discard, lr) that pulled the whole block body through — for a
+// real cover that is 5–25 MiB over the wire. The caller then Seek(0)s and
+// hands the same file to dhowden, which reads the payload AGAIN: exactly
+// the per-track double read the single-open FLAC path was built to
+// eliminate (extractors.go's `.flac` branch). On a NAS-mounted library
+// that halved scanner throughput.
+//
+// A 4 MiB payload is far above any plausible header-read, so the bound
+// here fails loudly if a drain ever comes back.
+func TestFLACPictureBlocksSaneDoesNotReadThePayload(t *testing.T) {
+	payload := bytes.Repeat([]byte{0xAB}, 4<<20)
+	body := flacPictureBody("image/jpeg", "cover", uint32(len(payload)), payload)
+	var f bytes.Buffer
+	f.WriteString("fLaC")
+	f.Write(flacBlockHeader(true, 6 /* PICTURE */, uint32(len(body))))
+	f.Write(body)
+
+	c := &countingReadSeeker{rs: bytes.NewReader(f.Bytes())}
+	if !flacPictureBlocksSane(c) {
+		t.Fatal("well-formed picture block rejected")
+	}
+	// magic + block header + the picture header fields — comfortably
+	// under 1 KiB. The payload itself must never be transferred.
+	const budget = 1 << 10
+	if c.read > budget {
+		t.Errorf("preflight read %d bytes for a %d-byte payload (budget %d) — "+
+			"the PICTURE body is being drained instead of seeked past, "+
+			"reintroducing the per-track double read",
+			c.read, len(payload), budget)
+	}
+}
+
+// TestFLACPictureBlocksSaneLeavesWalkAlignedAfterPicture pins the other
+// half of the seek contract: skipping the payload must land the reader
+// exactly on the NEXT block header, or every block after a picture is
+// misparsed and the walk bails fail-open (silently disabling the guard).
+func TestFLACPictureBlocksSaneLeavesWalkAlignedAfterPicture(t *testing.T) {
+	payload := bytes.Repeat([]byte{0xAB}, 4096)
+	pic := flacPictureBody("image/jpeg", "cover", uint32(len(payload)), payload)
+
+	var f bytes.Buffer
+	f.WriteString("fLaC")
+	// PICTURE first (not last), then a second PICTURE that is positively
+	// inconsistent. The walk can only reach the bad block if it re-aligned
+	// correctly after the good one — so `false` here proves alignment.
+	f.Write(flacBlockHeader(false, 6, uint32(len(pic))))
+	f.Write(pic)
+	bad := flacPictureBody("image/jpeg", "", 0xFFFFFFFF, []byte{0xFF, 0xD8, 0xFF})
+	f.Write(flacBlockHeader(true, 6, uint32(len(bad))))
+	f.Write(bad)
+
+	if flacPictureBlocksSane(bytes.NewReader(f.Bytes())) {
+		t.Fatal("walk did not reach the second (oversized) PICTURE block — " +
+			"the reader is misaligned after skipping the first payload")
+	}
 }
