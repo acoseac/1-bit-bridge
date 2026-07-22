@@ -72,6 +72,18 @@ func TestValidateUpdaterAssetURL(t *testing.T) {
 		{"embedded-allowlist host", "https://github.com.attacker.example/payload", true},
 		{"userinfo spoof", "https://github.com@attacker.example/payload", true},
 		{"empty", "", true},
+
+		// Backslash-in-authority parser differential (CWE-436): a client or
+		// proxy following WHATWG URL rules would read
+		// `attacker.example\.github.com` as host `attacker.example` with
+		// path `/.github.com/...`, while a naive suffix check sees a
+		// `.github.com` host and allows it. Go's net/url refuses the
+		// backslash outright ("invalid character \"\\\\\" in host name"), so
+		// ValidateUpdaterAssetURL rejects at the parse step and no explicit
+		// backslash guard is needed — this case exists to keep that true if
+		// a future Go release ever relaxes host parsing.
+		{"backslash authority bypass", `https://attacker.example\.github.com/payload`, true},
+		{"backslash authority bypass, usercontent", `https://attacker.example\.githubusercontent.com/p`, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
