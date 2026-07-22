@@ -70,6 +70,13 @@ func releaseMetaFor(ctx context.Context, hc *http.Client, rel *Release) (Release
 }
 
 func fetchReleaseMeta(ctx context.Context, hc *http.Client, url string) (ReleaseMeta, error) {
+	// API-derived URL — same pre-request policy check as the archive and
+	// checksums fetches (CheckRedirect only sees 3xx hops). This one
+	// carries the MinClientVersion compat floor, so a spoofed response
+	// could wave an install past a gate meant to protect paired clients.
+	if err := validateAssetURL(url); err != nil {
+		return ReleaseMeta{}, err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return ReleaseMeta{}, fmt.Errorf("build request: %w", err)

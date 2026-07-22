@@ -215,7 +215,12 @@ func (u *Updater) Install(ctx context.Context, opts InstallOptions) (Status, err
 	if err := os.MkdirAll(opts.DataDir, 0o700); err != nil {
 		return status, fmt.Errorf("create scratch: %w", err)
 	}
-	scratch, err := os.MkdirTemp(opts.DataDir, "install-")
+	// Opportunistic sweep of dirs abandoned by a killed attempt — see
+	// ReapScratchDirs. Runs here rather than at startup so it also
+	// covers the long-lived-process case, and costs one ReadDir per
+	// install.
+	ReapScratchDirs(opts.DataDir, time.Now())
+	scratch, err := os.MkdirTemp(opts.DataDir, scratchDirPrefix)
 	if err != nil {
 		return status, fmt.Errorf("create scratch: %w", err)
 	}
@@ -386,6 +391,70 @@ func preflightWritable(binaryPath string) error {
 // stray cleanup.
 func cleanScratch(scratch string) {
 	_ = os.RemoveAll(scratch)
+}
+
+// scratchDirPrefix is the MkdirTemp prefix for a per-attempt scratch
+// dir. Shared by the creator and the reaper so the two can't drift.
+const scratchDirPrefix = "install-"
+
+// scratchReapAge is how long an `install-*` dir must have gone
+// untouched before ReapScratchDirs treats it as abandoned. Generous:
+// it must exceed the longest plausible live install (downloadTimeout is
+// 15 min for the archive alone, plus verify and swap), because the
+// window is the ONLY thing separating an abandoned dir from one another
+// process is actively filling — the in-process try-lock can't see the
+// `bridge update` CLI.
+const scratchReapAge = 2 * time.Hour
+
+// ReapScratchDirs removes abandoned per-attempt scratch directories
+// from dataDir and returns how many it deleted.
+//
+// The per-attempt `install-<random>` layout gave each caller isolation
+// from every other caller's cleanup, but it also gave up the
+// self-healing the old shared `<DataDir>/updates/` dir had: that one was
+// RemoveAll'd wholesale at the end of every attempt, so a previous run's
+// leftovers went with it. Now nothing removes a dir whose deferred
+// cleanScratch never ran — a kill, an OOM, or a power loss mid-install
+// strands the downloaded archive plus the extracted binary (tens of MiB)
+// directly in DataDir, permanently, next to the DB and the certs.
+//
+// Only mtime-quiet dirs are touched, so an install running right now in
+// another process is never disturbed. Fail-open throughout: an
+// unreadable dataDir or an undeletable entry is skipped, because
+// reclaiming disk must never be able to fail an update.
+func ReapScratchDirs(dataDir string, now time.Time) int {
+	if dataDir == "" {
+		// Never enumerate the process working directory — os.ReadDir("")
+		// would, and this function deletes what it finds.
+		return 0
+	}
+	entries, err := os.ReadDir(dataDir)
+	if err != nil {
+		return 0
+	}
+	reaped := 0
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), scratchDirPrefix) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if now.Sub(info.ModTime()) < scratchReapAge {
+			continue // possibly a live attempt in another process
+		}
+		if err := os.RemoveAll(filepath.Join(dataDir, e.Name())); err != nil {
+			logger.Warn("could not reap abandoned install scratch dir",
+				"dir", e.Name(), "err", err)
+			continue
+		}
+		reaped++
+	}
+	if reaped > 0 {
+		logger.Info("reaped abandoned install scratch dirs", "count", reaped)
+	}
+	return reaped
 }
 
 // sanitizeAssetName reduces a GitHub release asset name to a single safe path

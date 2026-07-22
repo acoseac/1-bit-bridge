@@ -101,6 +101,19 @@ func downloadVerified(ctx context.Context, hc *http.Client,
 	archiveURL, archiveName, checksumsURL string,
 	dst string,
 ) (string, error) {
+	// Both URLs come from the GitHub API JSON, so validate them against
+	// the https + allowlist policy before either is requested — the
+	// client's CheckRedirect guard only fires on a 3xx and would never
+	// see a directly-hostile URL. Checked up front (not per-fetch) so a
+	// bad archive URL can't be discovered only after the checksum
+	// round trip.
+	if err := validateAssetURL(archiveURL); err != nil {
+		return "", err
+	}
+	if err := validateAssetURL(checksumsURL); err != nil {
+		return "", err
+	}
+
 	// Fetch checksums.txt first so we know the expected hash before
 	// committing disk to the archive download.
 	expected, err := fetchChecksum(ctx, hc, checksumsURL, archiveName)

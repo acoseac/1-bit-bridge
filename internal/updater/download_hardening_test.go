@@ -34,6 +34,7 @@ func TestDownloadVerified_RejectsOversizeArchive(t *testing.T) {
 		_, _ = io.WriteString(w, body)
 	}))
 	defer srv.Close()
+	allowTestAssetHost(t, srv.URL)
 
 	dst := filepath.Join(t.TempDir(), "archive.tar.gz")
 	_, err := downloadVerified(context.Background(), srv.Client(),

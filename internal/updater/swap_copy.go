@@ -49,6 +49,12 @@ func copyIntoDirAndRename(src, dst string, mode os.FileMode) error {
 	if _, err := io.Copy(tmp, in); err != nil {
 		return fmt.Errorf("copy binary across devices: %w", err)
 	}
+	// Close the source now, not at return: os.Remove(src) below runs
+	// while the deferred Close would still be pending, and Windows
+	// refuses to unlink a file that still has an open handle. Same LIFO
+	// reasoning as the tmp defers above. The defer stays as the
+	// error-path fallback; this second Close is a harmless no-op for it.
+	_ = in.Close()
 	if err := tmp.Sync(); err != nil {
 		return fmt.Errorf("sync copied binary: %w", err)
 	}

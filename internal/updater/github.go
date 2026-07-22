@@ -103,6 +103,49 @@ func installUpdaterRedirectGuard(hc *http.Client) {
 	}
 }
 
+// ValidateUpdaterAssetURL applies the redirect guard's policy — https
+// scheme, allowlisted host — to a URL BEFORE it is requested.
+//
+// installUpdaterRedirectGuard alone was not enough: net/http calls
+// CheckRedirect only when it is about to follow a 3xx, never for the
+// initial request. Every asset URL the updater fetches comes out of the
+// GitHub API JSON, so a fully-controlled API response could name
+// http://attacker/payload directly and be fetched unchecked — the guard's
+// own docblock names exactly that threat and then only covered the
+// redirect leg. This is the one code path that downloads and then
+// EXECUTES a binary, and verify_other.go is a no-op on Linux/Windows, so
+// the transport is the whole defence there.
+//
+// Applied to the archive, the checksums file, and release-meta.json. The
+// API endpoint itself is built from Client.baseURL (not attacker-derived)
+// and is deliberately exempt.
+func ValidateUpdaterAssetURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("updater: unparseable asset URL %q: %w", raw, err)
+	}
+	if u.Scheme != "https" {
+		return fmt.Errorf("updater: refusing non-https asset URL with scheme %q", u.Scheme)
+	}
+	if !updaterHostAllowed(u.Hostname()) {
+		return fmt.Errorf("updater: refusing asset URL on non-allowlisted host %q", u.Hostname())
+	}
+	return nil
+}
+
+// validateAssetURL is the seam the fetch paths actually call. It is
+// ValidateUpdaterAssetURL in production and never reassigned there —
+// same convention as renameFunc / commandContext elsewhere in the repo.
+//
+// It exists because the install-flow tests drive a plain-http
+// httptest.Server: before this check the redirect guard never saw those
+// URLs (it only fires on a 3xx), so they were reachable for free. Tests
+// swap in a validator scoped to their own fixture host via
+// allowTestAssetHost, so they still reject every OTHER host rather than
+// disabling the policy wholesale; ValidateUpdaterAssetURL itself is
+// covered directly by TestValidateUpdaterAssetURL.
+var validateAssetURL = ValidateUpdaterAssetURL
+
 // updaterHostAllowed reports whether host is an allowlisted update host.
 // Exact match or a true dot-boundary suffix — never a bare HasSuffix on
 // the raw name, which "notgithub.com" would satisfy.

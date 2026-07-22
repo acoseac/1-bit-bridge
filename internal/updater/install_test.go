@@ -100,6 +100,7 @@ func newInstallFixture(t *testing.T, latestVersion string) *installFixture {
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	fix.server = srv
+	allowTestAssetHost(t, srv.URL)
 
 	rel := Release{
 		TagName: "v" + latestVersion,
@@ -303,6 +304,7 @@ func TestInstallRejectsCorruptArchive(t *testing.T) {
 	})
 	tampered := httptest.NewServer(mux)
 	defer tampered.Close()
+	allowTestAssetHost(t, tampered.URL)
 
 	dir := t.TempDir()
 	livePath := filepath.Join(dir, "bridge")
