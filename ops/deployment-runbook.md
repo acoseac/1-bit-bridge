@@ -50,9 +50,9 @@ All scoped to the exe path, NOT port-wide. Old rules at the legacy exe paths (`C
 **Endpoints advertised in `/v1/health`** (six total, in registration order):
 - `https://<HOMEPC-LAN-IP>:7788` — LAN (Ethernet)
 - `https://home-pc.local:7788` — mDNS
-- `https://home-pc.sable-eagle.ts.net:7788` — **Tailscale magic-DNS** (Let's Encrypt cert via the SNI cert switcher + `*.ts.net` pinning bypass in `PinningDelegate.shouldSkipPinning`; this is the working remote-access path from iOS over cellular)
-- `https://100.91.73.88:7788` — Tailscale IPv4 (iOS skips per `isTailscaleCGNATURL` filter — expected, magic-DNS replaces it)
-- `https://[fd7a:115c:a1e0::6e39:4958]:7788` — Tailscale IPv6
+- `https://<HOMEPC-MAGICDNS>:7788` — **Tailscale magic-DNS** (Let's Encrypt cert via the SNI cert switcher + `*.ts.net` pinning bypass in `PinningDelegate.shouldSkipPinning`; this is the working remote-access path from iOS over cellular)
+- `https://<HOMEPC-TAILSCALE-V4>:7788` — Tailscale IPv4 (CGNAT `100.64/10`; iOS skips per `isTailscaleCGNATURL` filter — expected, magic-DNS replaces it)
+- `https://[<HOMEPC-TAILSCALE-V6>]:7788` — Tailscale IPv6 (ULA `fd7a:115c:a1e0::/48`)
 - `https://<WAN-IP>:7788` — **WAN custom endpoint** (router port-forward 7788 → <HOMEPC-LAN-IP>:7788). Configured via `customEndpoints:` top-level YAML field. Public IP is RIPE-allocated (NOT CGNAT), so iOS will probe it normally.
 
 **Cert SAN gotcha (re-discovered 2026-05-19):** `bridge init` mints the TLS cert against the **config at that moment**. If you edit `customEndpoints:` in `bridge.yaml` AFTER `init`, the cert's SAN list is stale and the first `serve` logs `WARN cert SANs are stale — missing_ips=[...]`. Run `bridge cert rotate --config ...\bridge.yaml --yes` after any customEndpoints edit. The fresh-install script flow gets this right because it rotates after the YAML edit; manual edits in the field need the same follow-up.

@@ -38,7 +38,7 @@ func TestGetTailscaleDNSName_HappyPath(t *testing.T) {
 			TailscaleIPs []string `json:"TailscaleIPs"`
 		}{
 			DNSName:      "home-pc.tailfoo.ts.net.",
-			TailscaleIPs: []string{"100.91.73.88", "fd7a:115c:a1e0:abcd:1::1"},
+			TailscaleIPs: []string{"100.64.0.5", "fd7a:115c:a1e0:abcd:1::1"},
 		},
 	}, nil)
 	if got := GetTailscaleDNSName(); got != "home-pc.tailfoo.ts.net" {
@@ -86,14 +86,14 @@ func TestGetTailscaleIPs_HappyPath(t *testing.T) {
 			DNSName      string   `json:"DNSName"`
 			TailscaleIPs []string `json:"TailscaleIPs"`
 		}{
-			TailscaleIPs: []string{"100.91.73.88", "fd7a:115c:a1e0:abcd:1::1"},
+			TailscaleIPs: []string{"100.64.0.5", "fd7a:115c:a1e0:abcd:1::1"},
 		},
 	}, nil)
 	got := GetTailscaleIPs()
 	if len(got) != 2 {
 		t.Fatalf("len = %d, want 2: %v", len(got), got)
 	}
-	if !got[0].Equal(net.ParseIP("100.91.73.88")) {
+	if !got[0].Equal(net.ParseIP("100.64.0.5")) {
 		t.Errorf("got[0] = %v", got[0])
 	}
 	if !got[1].Equal(net.ParseIP("fd7a:115c:a1e0:abcd:1::1")) {
@@ -109,7 +109,7 @@ func TestGetTailscaleIPs_DropsMalformed(t *testing.T) {
 			DNSName      string   `json:"DNSName"`
 			TailscaleIPs []string `json:"TailscaleIPs"`
 		}{
-			TailscaleIPs: []string{"not-an-ip", "100.91.73.88", ""},
+			TailscaleIPs: []string{"not-an-ip", "100.64.0.5", ""},
 		},
 	}, nil)
 	got := GetTailscaleIPs()
