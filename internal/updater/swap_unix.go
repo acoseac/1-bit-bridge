@@ -5,7 +5,7 @@ package updater
 import (
 	"errors"
 	"fmt"
-	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -69,13 +69,29 @@ var (
 func swapBinary(dst, newBinary, backupExt string) error {
 	bak := dst + backupExt
 
-	// os.Link refuses to create bak if it already exists (EEXIST), so
-	// clear any stale .bak from a previous cycle first. A missing .bak
-	// is the normal case, not an error.
-	if err := os.Remove(bak); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove stale backup %s: %w", bak, err)
+	// os.Link refuses to create bak if it already exists (EEXIST), so a
+	// stale .bak from a previous cycle has to go — but ONLY once we know
+	// that is actually why the link failed.
+	//
+	// Pre-fix this was an unconditional os.Remove(bak) BEFORE the link.
+	// The shape it replaced opened with os.Rename(dst, bak) — an atomic
+	// overwrite that left the previous .bak intact on failure — and the
+	// remove-first version gave that up. If linkFunc then failed
+	// (link-less FS, fs.protected_hardlinks) AND swapBinaryViaRename's
+	// first rename also failed, the install aborted with the operator's
+	// rollback target already destroyed, and RollbackBinary hard-fails on
+	// a missing bak. Narrow (both must fail in a directory
+	// preflightWritable just certified) but strictly worse than what it
+	// replaced. So: try the link first, and clear a stale bak only when
+	// EEXIST says that is the obstacle (R5).
+	linkErr := linkFunc(dst, bak)
+	if linkErr != nil && errors.Is(linkErr, fs.ErrExist) {
+		if rmErr := os.Remove(bak); rmErr != nil && !os.IsNotExist(rmErr) {
+			return fmt.Errorf("remove stale backup %s: %w", bak, rmErr)
+		}
+		linkErr = linkFunc(dst, bak)
 	}
-	if err := linkFunc(dst, bak); err != nil {
+	if linkErr != nil {
 		// Link-less / cross-device filesystem — fall back to the
 		// two-rename swap (which overwrites any bak itself).
 		return swapBinaryViaRename(dst, newBinary, bak)
@@ -107,9 +123,14 @@ func swapBinary(dst, newBinary, backupExt string) error {
 // that support it. bak is dst+backupExt and has already been cleared by
 // the caller.
 func swapBinaryViaRename(dst, newBinary, bak string) error {
-	// Move dst → dst.bak. os.Rename overwrites on POSIX so a residual
-	// .bak (there shouldn't be one — the caller removed it) is fine.
-	if err := os.Rename(dst, bak); err != nil {
+	// Move dst → dst.bak. os.Rename overwrites on POSIX, so an existing
+	// .bak from a previous cycle is consumed here — unavoidable on this
+	// path, since bak IS the vacate target the two-rename swap needs.
+	// Routed through renameFunc (not bare os.Rename) so tests can drive
+	// the "this rename fails" branch; that is the case where the caller's
+	// deferred-clear fix actually pays off, because a pre-existing .bak
+	// survives untouched (R5).
+	if err := renameFunc(dst, bak); err != nil {
 		return fmt.Errorf("rename %s -> %s: %w", dst, bak, err)
 	}
 	// Move new binary into place (EXDEV → copy into dst's dir; see
@@ -152,48 +173,7 @@ func placeNewBinary(newBinary, dst string) error {
 // Close runs first — Windows-safe ordering isn't needed here but mirrors
 // the atomic-write idiom used elsewhere in the tree).
 func copyAndRename(src, dst string) error {
-	tmp, err := os.CreateTemp(filepath.Dir(dst), ".bridge-swap-*")
-	if err != nil {
-		return fmt.Errorf("create temp in dst dir: %w", err)
-	}
-	tmpName := tmp.Name()
-	defer func() {
-		if tmpName != "" {
-			_ = os.Remove(tmpName)
-		}
-	}()
-	defer func() { _ = tmp.Close() }()
-
-	in, err := os.Open(src)
-	if err != nil {
-		return fmt.Errorf("open source binary: %w", err)
-	}
-	defer in.Close()
-
-	if _, err := io.Copy(tmp, in); err != nil {
-		return fmt.Errorf("copy binary across devices: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		return fmt.Errorf("sync copied binary: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close copied binary: %w", err)
-	}
-	// CreateTemp makes the file 0o600; the installed binary must be
-	// executable, matching the extractor's O_CREATE 0o755.
-	if err := os.Chmod(tmpName, 0o755); err != nil {
-		return fmt.Errorf("chmod copied binary: %w", err)
-	}
-	// Atomic within dst's filesystem — this is the whole point of copying
-	// into dst's directory first. Plain os.Rename (NOT renameFunc): the
-	// test seam forces EXDEV on the cross-device newBinary→dst rename, but
-	// this same-dir rename must run for real.
-	if err := os.Rename(tmpName, dst); err != nil {
-		return fmt.Errorf("rename copied binary into place: %w", err)
-	}
-	tmpName = "" // committed; don't remove
-	_ = os.Remove(src)
-	return nil
+	return copyIntoDirAndRename(src, dst, 0o755)
 }
 
 // fsyncDir fsyncs a directory so a rename inside it is durable. A crash
