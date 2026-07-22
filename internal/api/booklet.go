@@ -43,6 +43,19 @@ func BookletPath(dir, mbid string) string {
 	return filepath.Join(dir, mbid+".pdf")
 }
 
+// IsValidBookletMBID reports whether mbid is a strict MusicBrainz UUID,
+// using the same anchored pattern the GET handler enforces. Exported so the
+// WRITE side (cmd/bridge's disk adapter) can enforce the same rule.
+//
+// Load-bearing because `mbid` is the LEADING component of BookletPath's
+// filepath.Join, and the writer's atomicwrite.WriteBytes does
+// os.MkdirAll(filepath.Dir(path)) — so a traversing value would CREATE its
+// own parent directories rather than failing. The read handler validated;
+// the write path did not, and both this file's docblock and the adapter's
+// asserted a validation that was never implemented anywhere in the harvest
+// chain (2026-07-20 review, F29).
+func IsValidBookletMBID(mbid string) bool { return mbidPattern.MatchString(mbid) }
+
 // booklet handles GET /v1/booklet/{mbid}.
 //
 // 200 → application/pdf via http.ServeContent (Range supported — PDFKit

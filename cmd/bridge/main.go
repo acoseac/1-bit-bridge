@@ -210,12 +210,29 @@ func (b bookletSinkAdapter) DeleteBookletsNotIn(ctx context.Context, universe []
 
 // bookletDiskStore persists fetched booklet PDFs under <dataDir>/booklets/
 // via the atomicwrite helpers. Paths come from api.BookletPath so the
-// writer and the /v1/booklet server can never disagree about layout; the
-// MBIDs are strict UUIDs by the time they reach here (validated at the
-// check-response boundary and the API handler).
+// writer and the /v1/booklet server can never disagree about layout.
+//
+// Both methods validate the MBID themselves. The previous docblock claimed
+// the values were "strict UUIDs by the time they reach here (validated at
+// the check-response boundary and the API handler)" — that was FALSE for
+// this path: the GET handler validates, but nothing in the harvest chain
+// did (grepping mbidPattern/isValidMBID across internal/atlasharvest and
+// internal/manifest/booklets.go returned nothing), and
+// DistinctAlbumReleaseMBIDs filtered only on NULL/empty/`local-%`. Since
+// `mbid` is the LEADING component of the join and atomicwrite.WriteBytes
+// runs os.MkdirAll on the parent, a traversing tag value would create its
+// own parent directories rather than failing (2026-07-20 review, F29).
 type bookletDiskStore struct{ dir string }
 
+// errInvalidBookletMBID is returned rather than silently skipping so a
+// malformed value surfaces in the harvest logs instead of looking like a
+// booklet that simply never arrived.
+var errInvalidBookletMBID = errors.New("booklet: mbid is not a MusicBrainz UUID")
+
 func (b bookletDiskStore) WriteBooklet(mbid string, r io.Reader) error {
+	if !api.IsValidBookletMBID(mbid) {
+		return errInvalidBookletMBID
+	}
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return err
@@ -224,6 +241,9 @@ func (b bookletDiskStore) WriteBooklet(mbid string, r io.Reader) error {
 }
 
 func (b bookletDiskStore) RemoveBooklet(mbid string) error {
+	if !api.IsValidBookletMBID(mbid) {
+		return errInvalidBookletMBID
+	}
 	err := os.Remove(api.BookletPath(b.dir, mbid))
 	if err != nil && !os.IsNotExist(err) {
 		return err
