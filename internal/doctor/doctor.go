@@ -18,7 +18,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
@@ -235,13 +234,24 @@ func checkPort(name string, port int, ownPIDFile string) Check {
 		_ = lis.Close()
 		return ok(name, fmt.Sprintf("free (:%d)", port))
 	}
-	// Only EADDRINUSE means the port is genuinely occupied. Other bind
-	// failures — EACCES (a privileged port <1024 without elevation),
-	// EADDRNOTAVAIL, a transient network error — are environment/privilege
-	// problems, NOT a port conflict. Reporting them as the hard "another
-	// process owns this port" Fail would be wrong and would block
-	// `bridge init`; degrade to a Warn that names the real cause instead.
-	if !errors.Is(err, syscall.EADDRINUSE) {
+	// Only "address already in use" means the port is genuinely occupied.
+	// Other bind failures — EACCES (a privileged port <1024 without
+	// elevation), EADDRNOTAVAIL, a transient network error — are
+	// environment/privilege problems, NOT a port conflict. Reporting them as
+	// the hard "another process owns this port" Fail would be wrong and would
+	// block `bridge init`; degrade to a Warn that names the real cause.
+	//
+	// isAddrInUse is platform-split rather than a bare
+	// errors.Is(err, syscall.EADDRINUSE): on Windows that constant is an
+	// INVENTED value (syscall.APPLICATION_ERROR + iota, per
+	// zerrors_windows.go's "Invented values to support what package os and
+	// others expects"), while a real bind conflict is WSAEADDRINUSE (10048),
+	// which stdlib syscall doesn't even define and nothing translates. The
+	// bare form is therefore always false on Windows — which silently
+	// degraded every real conflict to a Warn (letting `bridge init` proceed
+	// into a serve that can't bind) AND made the native GetExtendedTcpTable
+	// owner attribution below unreachable there.
+	if !isAddrInUse(err) {
 		return warn(name, fmt.Sprintf(":%d not bindable", port),
 			"couldn't bind to probe this port ("+err.Error()+"); "+
 				"ports below 1024 need elevation, or the configured address may be invalid — check bridge.yaml")

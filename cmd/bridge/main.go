@@ -1956,7 +1956,19 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	backupSources := buildBackupSources(cfg, *configPath)
 	if hrs := cfg.Backup.EffectiveIntervalHours(); hrs > 0 {
 		backupInterval := time.Duration(hrs) * time.Hour
-		go runBackupTicker(scanCtx, backupSources, cfg.Backup.EffectiveKeep(), backupInterval, stdout, stderr)
+		// Joined on bgWriters like every other background worker. It is not
+		// a manifest-store writer — `vacuumInto` opens its own mode=ro
+		// connection, so it never races Store.Close() — but leaving it
+		// fire-and-forget still let Snapshot/Prune/ReapOrphans run past
+		// runServe's return, which is what the documented shutdown contract
+		// forbids and what produced an intermittent
+		// `TempDir RemoveAll: directory not empty` under data/backups/ in
+		// TestServeStartsAndServesHealth.
+		bgWriters.Add(1)
+		go func() {
+			defer bgWriters.Done()
+			runBackupTicker(scanCtx, backupSources, cfg.Backup.EffectiveKeep(), backupInterval, stdout, stderr)
+		}()
 	}
 
 	// Sessions tracker counts inflight /v1/read + /v1/download

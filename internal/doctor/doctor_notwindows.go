@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 // isPIDListeningOnPort reports whether targetPID is among the processes
@@ -74,6 +75,15 @@ func resolveLsof() string {
 		}
 	}
 	return ""
+}
+
+// isAddrInUse reports whether a listen error is "address already in use".
+// On POSIX the stdlib errno is authoritative; the Windows twin additionally
+// matches WSAEADDRINUSE, which is what the OS actually returns there. Split
+// by build tag rather than checking both constants in one place so neither
+// platform carries a matcher that can never fire on it.
+func isAddrInUse(err error) bool {
+	return errors.Is(err, syscall.EADDRINUSE)
 }
 
 // portProbeAvailable reports whether isPIDListeningOnPort can identify the

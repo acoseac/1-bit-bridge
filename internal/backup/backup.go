@@ -364,9 +364,24 @@ func ReapOrphans(backupsRoot string, grace time.Duration) (int, error) {
 			continue
 		}
 		dir := filepath.Join(backupsRoot, e.Name())
-		// A readable manifest means the snapshot completed — never reap
-		// it here; Prune's keep-policy owns valid snapshots.
-		if _, err := readManifest(filepath.Join(dir, ManifestFile)); err == nil {
+		// Reap only when the manifest is genuinely ABSENT — that is what
+		// marks a snapshot whose writer died mid-run. Any OTHER read error
+		// (EACCES, EIO, Windows ERROR_SHARING_VIOLATION while Defender or
+		// the Search Indexer holds the file) means we simply couldn't tell,
+		// and the pre-fix `err == nil` gate treated that as "crash orphan"
+		// and os.RemoveAll'd a COMPLETE backup — silently, since Prune
+		// discards the count and this package has no logger.
+		//
+		// That AV-holds-a-handle window is not hypothetical here; it is the
+		// same one renameWithRetry exists for. RemoveAll would unlink the
+		// manifest (AV handles usually carry FILE_SHARE_DELETE) then fail
+		// the rmdir, leaving a dir that now genuinely has no manifest — so
+		// the NEXT prune reaps it outright. A good backup died over two
+		// cycles. Surface the error instead and keep the directory.
+		if _, err := readManifest(filepath.Join(dir, ManifestFile)); !errors.Is(err, os.ErrNotExist) {
+			if err != nil {
+				errs = append(errs, fmt.Errorf("read manifest %s: %w", dir, err))
+			}
 			continue
 		}
 		info, err := e.Info()
