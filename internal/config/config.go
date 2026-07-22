@@ -2237,9 +2237,9 @@ func IsInQuietHours(startMin, endMin, now int) bool {
 // validatePort rejects a present-but-invalid port component (as returned by
 // net.SplitHostPort). net.SplitHostPort happily returns a nil error for
 // ":99999" / ":abc" / "host:abc" — shapes net.Listen then rejects at bind
-// time — so this closes that gap. An EMPTY port is left to the caller's own
-// shape checks (some callers accept the ":"-only / host-only forms and
-// default the port downstream), so it returns nil for "".
+// time — so this closes that gap. An EMPTY port is ALSO rejected (see the
+// in-body note): a bare ":" or "host:" is almost always a typo, and no
+// shipped default, env example, Dockerfile, or docs recipe produces one.
 //
 // The accepted range is 0-65535, NOT 1-65535: port 0 is the codebase's
 // documented "OS picks an ephemeral port" mode (see the port-zero handling

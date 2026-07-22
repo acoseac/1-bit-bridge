@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"errors"
 	"net"
 	"os"
 	"os/exec"
@@ -149,6 +150,41 @@ func TestPortCheck_NonAddrInUseErrorWarns(t *testing.T) {
 }
 
 // TestPortCheck_AddrInUseStillReachesOwnerProbe pins the other side of the
+// TestIsAddrInUseMatchesRealBindConflict is the platform-anchored regression
+// test for the dead-gate bug: it derives the error from the OS by actually
+// double-binding a port, instead of asserting against a constant.
+//
+// That distinction is the whole point. The sibling test below injects
+// `syscall.EADDRINUSE`, which on Windows is an INVENTED value
+// (APPLICATION_ERROR + iota) that a real bind conflict never carries — so it
+// passes there whether or not the classifier is correct. This one cannot:
+// pre-fix, `errors.Is(err, syscall.EADDRINUSE)` was always false on Windows,
+// so a genuine conflict fell through to the not-bindable Warn and the native
+// owner-attribution probe became unreachable. Runs on every platform with no
+// skip, so CI covers unix and `GOOS=windows go test` covers the rest.
+func TestIsAddrInUseMatchesRealBindConflict(t *testing.T) {
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lis.Close()
+
+	conflict, err := net.Listen("tcp", lis.Addr().String())
+	if err == nil {
+		conflict.Close()
+		t.Fatal("second bind on an occupied port unexpectedly succeeded")
+	}
+	if !isAddrInUse(err) {
+		t.Fatalf("isAddrInUse(%#v) = false for a REAL bind conflict on %s; "+
+			"a genuine port conflict must classify as in-use", err, runtime.GOOS)
+	}
+	// And it must not over-match: an unrelated error is not a port conflict,
+	// or every EACCES on a privileged port would become a hard Fail.
+	if isAddrInUse(errors.New("some unrelated failure")) {
+		t.Error("isAddrInUse matched an unrelated error")
+	}
+}
+
 // B51 branch: an EADDRINUSE bind error is still classified as "port in use"
 // and routed through the owner-probe path — with the probe forced available
 // and no OwnPIDFile, that stays the pre-existing Fail (not the new

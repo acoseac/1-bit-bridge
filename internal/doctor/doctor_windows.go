@@ -3,12 +3,30 @@
 package doctor
 
 import (
+	"errors"
 	"fmt"
 	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
+
+// isAddrInUse reports whether a listen error is "address already in use".
+//
+// The WSAEADDRINUSE arm is LOAD-BEARING and must not be "simplified" away to
+// the POSIX form. On Windows `syscall.EADDRINUSE` is an INVENTED constant —
+// zerrors_windows.go defines APPLICATION_ERROR = 1<<29 and derives EADDRINUSE
+// from it (0x20000002) under the comment "Invented values to support what
+// package os and others expects". The OS returns WSAEADDRINUSE (10048), which
+// stdlib `syscall` does not define at all (it lives only in x/sys/windows),
+// and neither Errno.Is nor anything in net/ bridges the two. So a bare
+// errors.Is(err, syscall.EADDRINUSE) is ALWAYS false here.
+//
+// It is kept alongside the WSA form only so an error that has already been
+// normalised to the POSIX errno by some other layer still matches.
+func isAddrInUse(err error) bool {
+	return errors.Is(err, windows.WSAEADDRINUSE) || errors.Is(err, syscall.EADDRINUSE)
+}
 
 // portProbeAvailable is always true on Windows — the native
 // GetExtendedTcpTable probe needs no external binary (unlike lsof on

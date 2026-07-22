@@ -505,6 +505,54 @@ func TestReapOrphansRemovesStaleManifestlessDirsSparesFreshAndValid(t *testing.T
 	}
 }
 
+// TestReapOrphansSparesUnreadableManifest pins that ReapOrphans reaps only on
+// a genuinely ABSENT manifest, never on one it merely failed to read.
+//
+// The pre-fix gate was `if _, err := readManifest(...); err == nil { continue }`
+// — so ANY read error (EACCES, EIO, or a Windows ERROR_SHARING_VIOLATION while
+// Defender/Search-Indexer holds the file) classified a COMPLETE snapshot as a
+// crash orphan and os.RemoveAll'd it. Silently: Prune discards the count and
+// this package has no logger. RemoveAll would unlink the manifest and then
+// fail the rmdir, leaving a dir that now really has no manifest — so the next
+// prune reaps it outright and a good backup dies over two cycles.
+func TestReapOrphansSparesUnreadableManifest(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: mode 0000 is still readable, so the unreadable-manifest case can't be staged")
+	}
+	root := t.TempDir()
+	grace := time.Hour
+
+	dir := filepath.Join(root, "2026-01-04T00-00-00Z")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeSnapshotManifest(t, dir, backup.ManifestDBFileName)
+	manifestPath := filepath.Join(dir, backup.ManifestFile)
+	// Make it present-but-unreadable, and age it well past the grace so
+	// nothing but the manifest check can be sparing it.
+	if err := os.Chmod(manifestPath, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(manifestPath, 0o600) })
+	ts := time.Now().Add(-3 * grace)
+	if err := os.Chtimes(dir, ts, ts); err != nil {
+		t.Fatal(err)
+	}
+
+	reaped, err := backup.ReapOrphans(root, grace)
+	if reaped != 0 {
+		t.Errorf("reaped = %d, want 0 — an unreadable manifest is not a crash orphan", reaped)
+	}
+	if !pathExists(t, dir) {
+		t.Fatal("snapshot with a present-but-unreadable manifest was deleted")
+	}
+	// The failure must be reported, not swallowed — silence is how the
+	// pre-fix deletion went unnoticed.
+	if err == nil {
+		t.Error("ReapOrphans returned nil error; the unreadable manifest should surface")
+	}
+}
+
 // Prune wires ReapOrphans, so a crash-orphaned dir is reclaimed on the
 // next snapshot's prune even when the keep-policy would otherwise never
 // see it. Runs regardless of the keep value.
