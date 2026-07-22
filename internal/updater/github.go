@@ -46,12 +46,74 @@ func NewClient(repo string, timeout time.Duration) *Client {
 	if timeout <= 0 {
 		timeout = 10 * time.Second
 	}
-	return &Client{
+	c := &Client{
 		repo:     repo,
 		baseURL:  "https://api.github.com",
 		http:     &http.Client{Timeout: timeout},
 		download: &http.Client{},
 	}
+	installUpdaterRedirectGuard(c.http)
+	installUpdaterRedirectGuard(c.download)
+	return c
+}
+
+// updaterAllowedRedirectHosts is the suffix allowlist for update traffic:
+// the GitHub API plus the CDN it hands assets off to. Matched as an exact
+// host or a true dot-suffix, so "evil-github.com" cannot pass as
+// "github.com".
+var updaterAllowedRedirectHosts = []string{
+	"github.com",
+	"githubusercontent.com",
+}
+
+// installUpdaterRedirectGuard re-validates every redirect hop's scheme and
+// host. Neither updater client set CheckRedirect, while asset URLs come
+// from the API JSON — so a fully-controlled API response could steer the
+// download (AND the checksum operand it is compared against) to an
+// arbitrary host, including plaintext http://. This is the one code path
+// that downloads and then EXECUTES a binary, and on Linux/Windows there is
+// no signature verification behind it (verify_other.go is a no-op), so the
+// transport carries more weight here than anywhere else in the tree.
+//
+// Mirrors internal/enrich/deezer.go's installRedirectGuard: a non-nil
+// return aborts the redirect AND surfaces the error, so there is no silent
+// follow-through (F31).
+//
+// Test servers are unaffected: httptest URLs are reached directly, and
+// this only fires on an actual 3xx hop.
+func installUpdaterRedirectGuard(hc *http.Client) {
+	if hc == nil {
+		return
+	}
+	prev := hc.CheckRedirect
+	hc.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return errors.New("updater: stopped after 10 redirects")
+		}
+		if req.URL.Scheme != "https" {
+			return fmt.Errorf("updater: refusing non-https redirect to %q", req.URL.Scheme+"://"+req.URL.Host)
+		}
+		if !updaterHostAllowed(req.URL.Hostname()) {
+			return fmt.Errorf("updater: refusing redirect to non-allowlisted host %q", req.URL.Hostname())
+		}
+		if prev != nil {
+			return prev(req, via)
+		}
+		return nil
+	}
+}
+
+// updaterHostAllowed reports whether host is an allowlisted update host.
+// Exact match or a true dot-boundary suffix — never a bare HasSuffix on
+// the raw name, which "notgithub.com" would satisfy.
+func updaterHostAllowed(host string) bool {
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	for _, allowed := range updaterAllowedRedirectHosts {
+		if host == allowed || strings.HasSuffix(host, "."+allowed) {
+			return true
+		}
+	}
+	return false
 }
 
 // downloadClient returns the timeout-free client for asset fetches,

@@ -1979,6 +1979,22 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		fmt.Fprintf(stderr, "updater: os.Executable failed (install path may not work): %v\n", exeErr)
 		binaryPath = os.Args[0]
 	}
+	// Resolve symlinks so a symlinked install swaps the REAL binary, not
+	// the link — matching what update.go, init.go and menu.go already do
+	// at their own os.Executable() sites (update.go's comment: "Mirrors
+	// the binary resolution in init.go's service install"). runServe was
+	// the one that didn't, and this value feeds maybeRollbackOnBoot,
+	// updateInfoAdapter.binaryPath and AutoInstallOpts.BinaryPath.
+	//
+	// On darwin os.Executable returns the INVOCATION path unresolved, so
+	// an admin-console install via /usr/local/bin/bridge -> /opt/.../bridge
+	// replaced the symlink with a regular file: the real binary stayed at
+	// the old version, launchd kept running it, and `bridge version` on
+	// PATH reported the new one. Best-effort — a resolve failure keeps the
+	// unresolved path rather than blocking boot (F0c).
+	if resolved, lerr := filepath.EvalSymlinks(binaryPath); lerr == nil {
+		binaryPath = resolved
+	}
 
 	// Boot-time rollback housekeeping: read update-state.json and
 	// either confirm the install succeeded (mark installed, retain

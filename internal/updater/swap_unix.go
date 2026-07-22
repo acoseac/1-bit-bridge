@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -69,13 +70,29 @@ var (
 func swapBinary(dst, newBinary, backupExt string) error {
 	bak := dst + backupExt
 
-	// os.Link refuses to create bak if it already exists (EEXIST), so
-	// clear any stale .bak from a previous cycle first. A missing .bak
-	// is the normal case, not an error.
-	if err := os.Remove(bak); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove stale backup %s: %w", bak, err)
+	// os.Link refuses to create bak if it already exists (EEXIST), so a
+	// stale .bak from a previous cycle has to go — but ONLY once we know
+	// that is actually why the link failed.
+	//
+	// Pre-fix this was an unconditional os.Remove(bak) BEFORE the link.
+	// The shape it replaced opened with os.Rename(dst, bak) — an atomic
+	// overwrite that left the previous .bak intact on failure — and the
+	// remove-first version gave that up. If linkFunc then failed
+	// (link-less FS, fs.protected_hardlinks) AND swapBinaryViaRename's
+	// first rename also failed, the install aborted with the operator's
+	// rollback target already destroyed, and RollbackBinary hard-fails on
+	// a missing bak. Narrow (both must fail in a directory
+	// preflightWritable just certified) but strictly worse than what it
+	// replaced. So: try the link first, and clear a stale bak only when
+	// EEXIST says that is the obstacle (R5).
+	linkErr := linkFunc(dst, bak)
+	if linkErr != nil && errors.Is(linkErr, fs.ErrExist) {
+		if rmErr := os.Remove(bak); rmErr != nil && !os.IsNotExist(rmErr) {
+			return fmt.Errorf("remove stale backup %s: %w", bak, rmErr)
+		}
+		linkErr = linkFunc(dst, bak)
 	}
-	if err := linkFunc(dst, bak); err != nil {
+	if linkErr != nil {
 		// Link-less / cross-device filesystem — fall back to the
 		// two-rename swap (which overwrites any bak itself).
 		return swapBinaryViaRename(dst, newBinary, bak)
@@ -107,9 +124,14 @@ func swapBinary(dst, newBinary, backupExt string) error {
 // that support it. bak is dst+backupExt and has already been cleared by
 // the caller.
 func swapBinaryViaRename(dst, newBinary, bak string) error {
-	// Move dst → dst.bak. os.Rename overwrites on POSIX so a residual
-	// .bak (there shouldn't be one — the caller removed it) is fine.
-	if err := os.Rename(dst, bak); err != nil {
+	// Move dst → dst.bak. os.Rename overwrites on POSIX, so an existing
+	// .bak from a previous cycle is consumed here — unavoidable on this
+	// path, since bak IS the vacate target the two-rename swap needs.
+	// Routed through renameFunc (not bare os.Rename) so tests can drive
+	// the "this rename fails" branch; that is the case where the caller's
+	// deferred-clear fix actually pays off, because a pre-existing .bak
+	// survives untouched (R5).
+	if err := renameFunc(dst, bak); err != nil {
 		return fmt.Errorf("rename %s -> %s: %w", dst, bak, err)
 	}
 	// Move new binary into place (EXDEV → copy into dst's dir; see
