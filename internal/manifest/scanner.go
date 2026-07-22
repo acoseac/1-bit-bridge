@@ -917,13 +917,19 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 			// scan, scoped narrowly to the one case the cache might
 			// genuinely need rebuilding.
 			existing, statErr := s.store.GetTrackStat(ctx, pi.rel)
-			if statErr != nil {
+			if statErr != nil && ctx.Err() == nil {
 				// Not fatal: a failed lookup only means we can't prove
 				// the row is unchanged, so we fall through and
 				// re-extract. Logged because silently losing the skip
 				// gate turns every scan into a full re-extract of the
 				// entire library — an expensive thing to have happen
 				// quietly. (Previously this error was discarded.)
+				//
+				// Gated on ctx.Err() so a shutdown or scan timeout
+				// doesn't emit one line per in-flight file across every
+				// worker — that burst is normal cancellation, not a
+				// lookup fault. Same posture as the enricher's
+				// quiet-on-ctx-cancel logging.
 				scanLogger.Warn("skip-gate lookup", "path", pi.rel, "err", statErr)
 			}
 			if existing != nil && existing.Size == pi.info.Size() &&
