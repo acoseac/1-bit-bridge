@@ -24,12 +24,25 @@ import (
 // enumeration walks the table) — slow-cadence callers only (the 6h
 // booklet check), never a request hot path. Un-mutexed read.
 func (s *Store) DistinctAlbumReleaseMBIDs(ctx context.Context) ([]string, error) {
+	// The GLOB pins the 8-4-4-4-12 UUID shape at the source, so a hostile or
+	// merely malformed `musicbrainz_albumid` file tag can never reach the
+	// booklet cache filename (where the MBID is the LEADING path component
+	// and the writer MkdirAll's its parent). SQLite GLOB is case-sensitive
+	// and has no character-class negation worth relying on, so this bounds
+	// the SHAPE and length; the writer re-validates with the anchored regex
+	// as the authoritative check (defense in depth — this filter also keeps
+	// junk out of the Atlas check payload). 2026-07-20 review, F29.
+	const uuidGlob = `[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]-` +
+		`[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]-[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]-` +
+		`[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]-` +
+		`[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]`
 	return collectStringColumn(s.db.QueryContext(ctx, `
 		SELECT DISTINCT json_extract(tags_json, '$.musicBrainzAlbumID')
 		  FROM tracks
 		 WHERE json_extract(tags_json, '$.musicBrainzAlbumID') IS NOT NULL
 		   AND json_extract(tags_json, '$.musicBrainzAlbumID') != ''
 		   AND json_extract(tags_json, '$.musicBrainzAlbumID') NOT LIKE 'local-%'
+		   AND json_extract(tags_json, '$.musicBrainzAlbumID') GLOB '`+uuidGlob+`'
 	`))
 }
 

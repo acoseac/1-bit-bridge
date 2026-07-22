@@ -272,13 +272,14 @@ func (e *Enricher) Run(ctx context.Context) {
 func (e *Enricher) Done() int64 { return e.done.Load() }
 
 func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
-	// Skip tracks that have no artist+album info to search by. Mark them
-	// done anyway so we don't poll them forever.
-	if t.Artist == "" || t.Album == "" {
-		e.markSkipped(ctx, t, "no artist/album to search by")
-		return
-	}
-
+	// NOTE the ordering: the MBID scrub below runs BEFORE the
+	// no-artist/album early return. It used to run after, so a file with a
+	// crafted `musicbrainz_albumid` AND a blank artist or album tag was
+	// markSkipped (which persists tags_json) with the hostile value intact
+	// — and that persisted value is exactly what the booklet-cache writer
+	// later consumed. Scrubbing first means every row that reaches storage
+	// has been through the same validation (2026-07-20 review, F30).
+	//
 	// Defense-in-depth: reject a non-UUID embedded album MBID before it can
 	// reach ArtworkCachePath / the CAA+Atlas URL builders. A crafted tag like
 	// "../../evil" would otherwise escape cacheDir when writeArtworkAtomicStream
@@ -295,6 +296,14 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 		// twice. (Gemini #491)
 		logger.Warn("ignoring non-UUID embedded album MBID", "path", t.Path, "value", truncateForLog(t.MusicBrainzAlbumID))
 		t.MusicBrainzAlbumID = ""
+	}
+
+	// Skip tracks that have no artist+album info to search by. Mark them
+	// done anyway so we don't poll them forever. Runs AFTER the scrub above
+	// so the persisted row can't retain an unvalidated MBID.
+	if t.Artist == "" || t.Album == "" {
+		e.markSkipped(ctx, t, "no artist/album to search by")
+		return
 	}
 
 	// If the file already carried an MBID, we don't need to search — just
@@ -367,9 +376,20 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 				return
 			}
 			resolution := albumResolution{}
+			// Validate the SEARCH RESULT, not just the embedded tag. Both
+			// feed ArtworkCachePath / the CAA+Atlas URL builders, and the
+			// MB base URL is operator-configurable (musicbrainz / atlas /
+			// custom), so a hostile or misconfigured endpoint is a real
+			// input channel — the tag-side scrub above does not cover it.
+			// A rejected value is treated as "no match", which is the same
+			// state a genuine miss produces (2026-07-20 review, F30).
 			if res != nil {
-				resolution.ReleaseMBID = res.MBID
-				resolution.ReleaseGroupMBID = res.ReleaseGroupMBID
+				if isValidMBID(res.MBID) {
+					resolution.ReleaseMBID = res.MBID
+				}
+				if isValidMBID(res.ReleaseGroupMBID) {
+					resolution.ReleaseGroupMBID = res.ReleaseGroupMBID
+				}
 			}
 			albumMBID = resolution.ReleaseMBID
 			rgMBID = resolution.ReleaseGroupMBID
@@ -498,7 +518,10 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) error {
 		// — the exact stale behaviour PR #13's review flagged. Transient
 		// errors are already handled by the early-return above (no cache
 		// write), so this branch is strictly about positive hits.
-		if res != nil && res.MBID != "" {
+		// isValidMBID, not just != "": res.MBID lands in ArtistImagePath's
+		// filepath.Join as the leading component. Same rationale as the
+		// release-side validation above (F30).
+		if res != nil && isValidMBID(res.MBID) {
 			artistMBID = res.MBID
 			e.artistCache.Set(key, artistMBID)
 		}
@@ -919,6 +942,19 @@ func (e *Enricher) resolveReleaseGroupMBID(ctx context.Context, releaseMBID, hin
 			e.releaseGroupCache.Set(releaseMBID, "")
 		}
 		return "", err
+	}
+	// Validate before caching: this value is interpolated into the CAA
+	// release-group URL, so an upstream returning a path-bearing id would
+	// steer the fetch. Same rationale as the release/artist search results
+	// (F30); an invalid value is cached as "" (a definitive miss) so sibling
+	// tracks don't re-query the same bad answer.
+	if !isValidMBID(rg) {
+		if rg != "" {
+			logger.Warn("ignoring non-UUID release-group MBID from upstream",
+				"releaseMBID", releaseMBID, "value", truncateForLog(rg))
+		}
+		e.releaseGroupCache.Set(releaseMBID, "")
+		return "", nil
 	}
 	e.releaseGroupCache.Set(releaseMBID, rg)
 	return rg, nil

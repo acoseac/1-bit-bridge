@@ -401,16 +401,16 @@ func TestCAAReleaseGroupFallbackSalvagesArtwork(t *testing.T) {
 	wantBytes := []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x52, 0x47} // JPEG-like with RG marker
 
 	mbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, `{"releases":[{"id":"rel-mbid","score":100,"title":"Album","artist-credit":[{"name":"Artist"}],"release-group":{"id":"rg-mbid","title":"Album","primary-type":"Album"}}]}`)
+		io.WriteString(w, `{"releases":[{"id":"11111111-1111-4111-8111-111111111111","score":100,"title":"Album","artist-credit":[{"name":"Artist"}],"release-group":{"id":"22222222-2222-4222-8222-222222222222","title":"Album","primary-type":"Album"}}]}`)
 	}))
 	defer mbSrv.Close()
 
 	caaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case strings.HasPrefix(r.URL.Path, "/release-group/rg-mbid/"):
+		case strings.HasPrefix(r.URL.Path, "/release-group/22222222-2222-4222-8222-222222222222/"):
 			w.Header().Set("Content-Type", "image/jpeg")
 			w.Write(wantBytes)
-		case strings.HasPrefix(r.URL.Path, "/release/rel-mbid/"):
+		case strings.HasPrefix(r.URL.Path, "/release/11111111-1111-4111-8111-111111111111/"):
 			http.NotFound(w, r) // release has no CAA cover
 		default:
 			http.NotFound(w, r)
@@ -442,7 +442,7 @@ func TestCAAReleaseGroupFallbackSalvagesArtwork(t *testing.T) {
 
 	// The release-MBID-keyed path must contain the bytes the
 	// release-group endpoint served (transparent to iOS).
-	got, err := os.ReadFile(ArtworkCachePath(filepath.Join(dir, "artwork"), "rel-mbid", 500))
+	got, err := os.ReadFile(ArtworkCachePath(filepath.Join(dir, "artwork"), "11111111-1111-4111-8111-111111111111", 500))
 	if err != nil {
 		t.Fatalf("release-keyed artwork missing: %v", err)
 	}

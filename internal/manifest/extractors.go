@@ -386,8 +386,32 @@ func extractByFormat(absPath string, t *Track, ec *ExtractContext) error {
 		if _, err := f.Seek(0, io.SeekStart); err != nil {
 			return err
 		}
-		if err := extractViaDhowdenFromReader(f, absPath, t, ec); err != nil {
-			return err
+		// Pre-flight the PICTURE blocks before handing the file to
+		// dhowden/tag. Its readPictureBlock does `make([]byte, dataLen)`
+		// from a raw 4-byte file field BEFORE the io.ReadFull that would
+		// fail (dhowden's own guarded readBytes — 10 MiB cap with an
+		// io.CopyN fallback — is used everywhere else; this is the one
+		// site that bypasses it). A crafted PICTURE block therefore
+		// requests up to 4 GiB, and `maxArtworkBytes` is checked as
+		// `len(pic.Data) > max` — AFTER the allocation, so it is a policy
+		// filter, not a bound. Same fatal shape as the VORBIS_COMMENT
+		// bomb: the runtime throws rather than panicking, so recover()
+		// cannot catch it.
+		//
+		// Bounding the reader can't help (the allocation precedes the
+		// read, and an io.SectionReader tight enough to matter would
+		// break trailing-tag formats), so the fix is to not make the call
+		// on a file whose picture geometry is already inconsistent.
+		if !flacPictureBlocksSane(f) {
+			scanLogger.Warn("flac picture block declares a length beyond its metadata block; skipping tag read",
+				"path", absPath)
+		} else {
+			if _, err := f.Seek(0, io.SeekStart); err != nil {
+				return err
+			}
+			if err := extractViaDhowdenFromReader(f, absPath, t, ec); err != nil {
+				return err
+			}
 		}
 		// dhowden/tag's Vorbis reader collapses multi-value tags into a
 		// single value (last-wins map insert) — a FLAC tagged with
@@ -894,15 +918,32 @@ func applyFLACMultiValueArtists(r io.ReadSeeker, t *Track) {
 			return
 		}
 		if block.Type == meta.TypeVorbisComment {
-			if err := block.Parse(); err != nil {
-				return
-			}
-			vc, ok := block.Body.(*meta.VorbisComment)
-			if !ok {
+			// NOT block.Parse(): mewkiz's parseVorbisComment allocates
+			// directly from two unvalidated little-endian uint32s read out
+			// of the file — `readString`'s `make([]byte, n)` for the vendor
+			// string and `make([][2]string, x)` for the tag count — BOTH
+			// before the io.ReadFull that would fail. `block.lr` is an
+			// io.LimitReader, which bounds READS, not allocations, and the
+			// 24-bit block length does not constrain the inner u32s. A
+			// 12-byte crafted file therefore requests ~137 GiB (the tag
+			// slice is `[2]string` = 32 B/elem). That is below Go's
+			// maxAlloc, so `makeslice` does NOT panic — the runtime throws
+			// "out of memory", which does not unwind defers, so the
+			// scanner's per-iteration recover() cannot catch it. The
+			// process dies, the startup scan re-runs on the next boot and
+			// re-encounters the file before it is ever indexed: a
+			// crash-loop with no log line naming the culprit.
+			//
+			// Upstream never does this to itself — flac.go uses
+			// block.Skip() at all three of its own call sites; Parse() is
+			// documented as "additional granularity" with validation left
+			// to the caller. So this is ours to bound.
+			tags, perr := parseVorbisCommentBounded(r, block.Length)
+			if perr != nil {
 				return
 			}
 			var artists, albumArtists []string
-			for _, tg := range vc.Tags {
+			for _, tg := range tags {
 				switch strings.ToLower(tg[0]) {
 				case "artist":
 					if v := strings.TrimSpace(tg[1]); v != "" {
@@ -954,6 +995,224 @@ func applyFLACMultiValueArtists(r io.ReadSeeker, t *Track) {
 			return
 		}
 	}
+}
+
+// flacPictureBlocksSane walks the FLAC metadata blocks and reports whether
+// every PICTURE block's declared internal lengths fit inside the block that
+// contains them. It exists to keep a corrupt or hostile file away from
+// dhowden/tag's unbounded `make([]byte, dataLen)` (see the call site).
+//
+// Fail-OPEN by design: a file we cannot walk at all (no fLaC magic, a
+// truncated header, an I/O error) returns true, because those inputs never
+// reach the picture path in the first place and the existing extractor
+// chain already degrades gracefully on them. We only return false when a
+// PICTURE block is positively self-inconsistent — the one shape that turns
+// into an unrecoverable allocation.
+//
+// The FLAC PICTURE body is: type(4) mimeLen(4) mime desc Len(4) desc
+// width(4) height(4) depth(4) colors(4) dataLen(4) data. Every length is
+// big-endian here (unlike the little-endian VORBIS_COMMENT vectors).
+//
+// Leaves the reader wherever it stops; callers MUST Seek before reuse.
+func flacPictureBlocksSane(rs io.ReadSeeker) bool {
+	if _, err := rs.Seek(0, io.SeekStart); err != nil {
+		return true
+	}
+	if err := skipID3v2(rs); err != nil {
+		return true
+	}
+	var magic [4]byte
+	if _, err := io.ReadFull(rs, magic[:]); err != nil {
+		return true
+	}
+	if string(magic[:]) != "fLaC" {
+		return true
+	}
+	for {
+		block, err := meta.New(rs)
+		if err != nil {
+			return true
+		}
+		if block.Type == meta.TypePicture {
+			if !flacPictureBodySane(rs, block.Length) {
+				return false
+			}
+		} else if err := block.Skip(); err != nil {
+			return true
+		}
+		if block.IsLast {
+			return true
+		}
+	}
+}
+
+// flacPictureBodySane consumes one PICTURE block body, validating each
+// declared length against the bytes remaining in the block. Returns false
+// only on a positive inconsistency; a read error returns true (fail-open,
+// per flacPictureBlocksSane's contract). Always drains to the next block
+// header so the caller's walk stays aligned.
+func flacPictureBodySane(r io.Reader, blockLen int64) (sane bool) {
+	lr := &io.LimitedReader{R: r, N: blockLen}
+	defer func() { _, _ = io.Copy(io.Discard, lr) }()
+
+	readBE := func() (uint32, bool) {
+		var b [4]byte
+		if _, err := io.ReadFull(lr, b[:]); err != nil {
+			return 0, false
+		}
+		return binary.BigEndian.Uint32(b[:]), true
+	}
+	// picture type
+	if _, ok := readBE(); !ok {
+		return true
+	}
+	// MIME string
+	mimeLen, ok := readBE()
+	if !ok {
+		return true
+	}
+	if int64(mimeLen) > lr.N {
+		return false
+	}
+	if _, err := io.CopyN(io.Discard, lr, int64(mimeLen)); err != nil {
+		return true
+	}
+	// description string
+	descLen, ok := readBE()
+	if !ok {
+		return true
+	}
+	if int64(descLen) > lr.N {
+		return false
+	}
+	if _, err := io.CopyN(io.Discard, lr, int64(descLen)); err != nil {
+		return true
+	}
+	// width, height, depth, colors
+	for i := 0; i < 4; i++ {
+		if _, ok := readBE(); !ok {
+			return true
+		}
+	}
+	// The payload itself — the field dhowden allocates from unvalidated.
+	dataLen, ok := readBE()
+	if !ok {
+		return true
+	}
+	return int64(dataLen) <= lr.N
+}
+
+// errVorbisCommentOverrun reports a VORBIS_COMMENT body whose declared
+// internal lengths do not fit the metadata block that contains them —
+// i.e. a corrupt or hostile file. Callers treat it as "no multi-value
+// artists here" and fall through to the dhowden-populated values.
+var errVorbisCommentOverrun = errors.New("vorbis comment: declared length exceeds block")
+
+// maxVorbisCommentTags bounds the tag slice independently of the block
+// length. Each tag costs at least 4 bytes of block (its own length
+// prefix), so the block length already caps the count at ~4M for a
+// maximal 16 MiB block — still 128 MiB of [2]string headers. Real files
+// carry tens of tags; 64k is far past any legitimate tagger and keeps the
+// worst case at ~2 MB of slice headers.
+const maxVorbisCommentTags = 64 << 10
+
+// parseVorbisCommentBounded reads a VORBIS_COMMENT block body from r and
+// returns its `KEY=value` pairs, validating EVERY declared length against
+// the bytes actually remaining in the block before allocating anything.
+//
+// This is the bounded replacement for mewkiz's Block.Parse (see the call
+// site for why that one is unsafe). Two properties matter:
+//
+//   - Nothing is allocated on an unvalidated length. Each string length is
+//     checked against the LimitedReader's remaining N first, so the peak
+//     allocation is one tag, not the whole block — and never more than the
+//     block's own 24-bit-bounded size.
+//   - r is left positioned at the next block header on EVERY return path,
+//     including the error paths, by draining the remainder. The caller's
+//     loop depends on that; a short read would desync it into parsing
+//     audio frames as metadata.
+//
+// Reading the body straight from r (rather than the block's unexported
+// limited reader) is correct because the metadata block header is exactly
+// 32 bits — a whole number of bytes — so mewkiz's bit reader holds no
+// buffered partial byte when parseHeader returns.
+func parseVorbisCommentBounded(r io.Reader, blockLen int64) ([][2]string, error) {
+	lr := &io.LimitedReader{R: r, N: blockLen}
+	// Always leave r at the next block header, even on a malformed body.
+	defer func() { _, _ = io.Copy(io.Discard, lr) }()
+
+	if blockLen < 0 {
+		return nil, errVorbisCommentOverrun
+	}
+
+	// 32 bits: vendor length, then the vendor string (which we discard —
+	// only the tags matter here).
+	vendorLen, err := readUint32LE(lr)
+	if err != nil {
+		return nil, err
+	}
+	if int64(vendorLen) > lr.N {
+		return nil, errVorbisCommentOverrun
+	}
+	if _, err := io.CopyN(io.Discard, lr, int64(vendorLen)); err != nil {
+		return nil, err
+	}
+
+	// 32 bits: tag count.
+	count, err := readUint32LE(lr)
+	if err != nil {
+		return nil, err
+	}
+	// Each tag needs at least its own 4-byte length prefix, so a count
+	// claiming more than remaining/4 is structurally impossible. This is
+	// the check that turns the 137 GiB request into an early error.
+	if int64(count) > lr.N/4 {
+		return nil, errVorbisCommentOverrun
+	}
+	if count > maxVorbisCommentTags {
+		return nil, errVorbisCommentOverrun
+	}
+
+	// Capacity hint only — the real bound is the per-iteration validation
+	// below, so a lying count can't pre-allocate a large slice.
+	hint := int(count)
+	if hint > 64 {
+		hint = 64
+	}
+	tags := make([][2]string, 0, hint)
+	for i := uint32(0); i < count; i++ {
+		vecLen, err := readUint32LE(lr)
+		if err != nil {
+			return nil, err
+		}
+		if int64(vecLen) > lr.N {
+			return nil, errVorbisCommentOverrun
+		}
+		buf := make([]byte, vecLen)
+		if _, err := io.ReadFull(lr, buf); err != nil {
+			return nil, err
+		}
+		// Vorbis comments are `KEY=value`; a vector without '=' is
+		// malformed per spec — skip it rather than failing the block, so
+		// one bad entry doesn't cost the file its other tags.
+		k, v, ok := strings.Cut(string(buf), "=")
+		if !ok {
+			continue
+		}
+		tags = append(tags, [2]string{k, v})
+	}
+	return tags, nil
+}
+
+// readUint32LE reads a little-endian uint32. Vorbis comment length
+// prefixes are little-endian regardless of the enclosing FLAC container's
+// big-endian block header.
+func readUint32LE(r io.Reader) (uint32, error) {
+	var b [4]byte
+	if _, err := io.ReadFull(r, b[:]); err != nil {
+		return 0, err
+	}
+	return binary.LittleEndian.Uint32(b[:]), nil
 }
 
 // stringOf looks up keys in a raw tag map. Caller-provided keys
