@@ -30,6 +30,11 @@ on:
         description: "Git ref to build from (branch / tag / SHA). Defaults to the version tag; set to a branch (e.g. main) to build current packaging for a frozen release tag whose own Dockerfile predates it."
         required: false
         type: string
+      moving_tags:
+        description: "Also publish :<MINOR> and :latest. Leave OFF to smoke-test the workflow without repointing the tags a bare `docker pull` resolves to; turn ON when republishing a real release."
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -51,16 +56,38 @@ jobs:
 
       - name: Resolve version + image tags
         id: meta
+        env:
+          # A tag push IS a release, so it always moves the floating tags.
+          # A dispatch carries an operator-supplied string that may not be
+          # a release at all, so it must opt in.
+          MOVE_FLOATING: ${{ github.event_name == 'push' || inputs.moving_tags }}
         run: |
           set -eu
           RAW="${{ inputs.tag || github.ref_name }}"
           VER="${RAW#v}"            # strip a leading v  ->  0.1.7
           MINOR="${VER%.*}"         # 0.1.7  ->  0.1
+          # :VER is immutable and always published. :MINOR and :latest
+          # FLOAT — they repoint at whatever built last — so a dispatch
+          # only moves them when the operator asks.
+          #
+          # Every path used to publish all three unconditionally, which
+          # made the workflow impossible to exercise safely: dispatching a
+          # throwaway tag to smoke-test it (say v0.1.7-test) silently
+          # repointed :0.1 and :latest on a PUBLIC package at that build,
+          # and :latest is what a bare `docker pull` resolves to. The
+          # republish-a-frozen-tag recovery in CLAUDE.md (tag=<ver> +
+          # ref=main) genuinely does want them moved — hence an opt-in
+          # rather than a blanket event gate.
+          if [ "$MOVE_FLOATING" = "true" ]; then
+            TAGS="${IMAGE}:${VER},${IMAGE}:${MINOR},${IMAGE}:latest"
+          else
+            TAGS="${IMAGE}:${VER}"
+          fi
           {
             echo "version=$VER"
-            echo "tags=${IMAGE}:${VER},${IMAGE}:${MINOR},${IMAGE}:latest"
+            echo "tags=$TAGS"
           } >> "$GITHUB_OUTPUT"
-          echo "Building $RAW -> ${IMAGE}:{${VER},${MINOR},latest}"
+          echo "Building $RAW (moving tags: $MOVE_FLOATING) -> $TAGS"
 
       # QEMU is still needed for the small per-arch runtime stage (apk add
       # + adduser); the Go build itself cross-compiles natively on the
