@@ -34,7 +34,7 @@ func seedPrefixFixture(t *testing.T) *Store {
 	return s
 }
 
-// TestPrefixQueriesTolerateTrailingSlash pins both halves of a bug class
+// These two pin both halves of a bug class
 // the codebase already fixed once, in RollupByPrefix, and then repeated
 // in two siblings.
 //
@@ -49,42 +49,43 @@ func seedPrefixFixture(t *testing.T) *Store {
 // "nothing to do" for a folder full of work. Reachable in production:
 // admin/handlers_library_inspector.go forwards req.Path verbatim,
 // unlike api/upscale_batch.go which runs path.Clean first.
-func TestPrefixQueriesTolerateTrailingSlash(t *testing.T) {
+func TestEligibleRollupByPrefixToleratesTrailingSlash(t *testing.T) {
 	s := seedPrefixFixture(t)
 	ctx := context.Background()
 
-	t.Run("EligibleRollupByPrefix", func(t *testing.T) {
-		bare, err := s.EligibleRollupByPrefix(ctx, "Album", 96000, 24)
-		if err != nil {
-			t.Fatalf("bare prefix: %v", err)
-		}
-		slashed, err := s.EligibleRollupByPrefix(ctx, "Album/", 96000, 24)
-		if err != nil {
-			t.Fatalf("trailing-slash prefix: %v", err)
-		}
-		if bare.Upscale == 0 && bare.Optimize == 0 {
-			t.Fatal("fixture seeded nothing eligible — test can't detect the bug")
-		}
-		if slashed != bare {
-			t.Errorf("trailing slash changed the result: bare=%+v slashed=%+v", bare, slashed)
-		}
-	})
+	bare, err := s.EligibleRollupByPrefix(ctx, "Album", 96000, 24)
+	if err != nil {
+		t.Fatalf("bare prefix: %v", err)
+	}
+	if bare.Upscale == 0 && bare.Optimize == 0 {
+		t.Fatal("fixture seeded nothing eligible — test can't detect the bug")
+	}
+	slashed, err := s.EligibleRollupByPrefix(ctx, "Album/", 96000, 24)
+	if err != nil {
+		t.Fatalf("trailing-slash prefix: %v", err)
+	}
+	if slashed != bare {
+		t.Errorf("trailing slash changed the result: bare=%+v slashed=%+v", bare, slashed)
+	}
+}
 
-	t.Run("ListTrackProjectionsUnderPrefix", func(t *testing.T) {
-		bare, err := s.ListTrackProjectionsUnderPrefix(ctx, "Album", VariantKindPrefixUpscaled)
-		if err != nil {
-			t.Fatalf("bare prefix: %v", err)
-		}
-		slashed, err := s.ListTrackProjectionsUnderPrefix(ctx, "Album/", VariantKindPrefixUpscaled)
-		if err != nil {
-			t.Fatalf("trailing-slash prefix: %v", err)
-		}
-		if len(bare) != 2 {
-			t.Fatalf("bare prefix found %d projections, want 2 (fixture broken)", len(bare))
-		}
-		if len(slashed) != len(bare) {
-			t.Errorf("trailing slash found %d projections, bare found %d — "+
-				"the pre-flight would silently report nothing to do", len(slashed), len(bare))
-		}
-	})
+func TestListTrackProjectionsUnderPrefixToleratesTrailingSlash(t *testing.T) {
+	s := seedPrefixFixture(t)
+	ctx := context.Background()
+
+	bare, err := s.ListTrackProjectionsUnderPrefix(ctx, "Album", VariantKindPrefixUpscaled)
+	if err != nil {
+		t.Fatalf("bare prefix: %v", err)
+	}
+	if len(bare) != 2 {
+		t.Fatalf("bare prefix found %d projections, want 2 (fixture broken)", len(bare))
+	}
+	slashed, err := s.ListTrackProjectionsUnderPrefix(ctx, "Album/", VariantKindPrefixUpscaled)
+	if err != nil {
+		t.Fatalf("trailing-slash prefix: %v", err)
+	}
+	if len(slashed) != len(bare) {
+		t.Errorf("trailing slash found %d projections, bare found %d — "+
+			"the pre-flight would silently report nothing to do", len(slashed), len(bare))
+	}
 }

@@ -14,7 +14,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -594,17 +593,11 @@ func actOpenAdmin(_ context.Context, _ *bufio.Reader, stdout, _ io.Writer, s men
 		}
 	}
 	fmt.Fprintf(stdout, "  Admin console: %s\n", url)
-	switch runtime.GOOS {
-	case "darwin":
-		_ = exec.Command("open", url).Start()
-	case "linux":
-		_ = exec.Command("xdg-open", url).Start()
-	case "windows":
-		// The empty string is the window-TITLE argument. Without it
-		// cmd.exe's `start` treats a quoted first argument as the title
-		// and opens nothing — matching openInBrowser in init.go, which
-		// already passes it.
-		_ = exec.Command("cmd", "/c", "start", "", url).Start()
-	}
+	// Delegate rather than re-implementing the per-OS switch. This copy had
+	// drifted: it invoked `cmd /c start <url>` WITHOUT the empty
+	// window-title argument, so on Windows `start` treated the quoted URL
+	// as the title and opened nothing. openInBrowser has always passed it.
+	// One implementation means the next platform quirk gets fixed once.
+	openInBrowser(url)
 	return -1
 }
