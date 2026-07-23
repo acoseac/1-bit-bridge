@@ -191,9 +191,9 @@ func (s *Store) EligibleRollupByPrefix(ctx context.Context, prefix string, targe
 		    THEN 1 ELSE 0 END), 0)
 		FROM tracks t`
 	args := []any{targetRate, targetBits, targetRate, targetBits}
-	if base := strings.TrimSuffix(prefix, "/"); base != "" {
+	if base := strings.TrimRight(prefix, "/"); base != "" {
 		// The range appends its own '/', so a caller-supplied trailing
-		// slash would build `path >= 'Album//'` — and since the byte
+		// slash (or several) would build `path >= 'Album//'` — and since the byte
 		// after "Album/" in a real row ('T' = 0x54) is above '0' (0x30),
 		// the upper bound `< 'Album/0'` excludes EVERY row. The result is
 		// a silently-empty count, not an error: the Inspector renders

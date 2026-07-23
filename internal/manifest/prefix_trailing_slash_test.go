@@ -60,12 +60,15 @@ func TestEligibleRollupByPrefixToleratesTrailingSlash(t *testing.T) {
 	if bare.Upscale == 0 && bare.Optimize == 0 {
 		t.Fatal("fixture seeded nothing eligible — test can't detect the bug")
 	}
-	slashed, err := s.EligibleRollupByPrefix(ctx, "Album/", 96000, 24)
-	if err != nil {
-		t.Fatalf("trailing-slash prefix: %v", err)
-	}
-	if slashed != bare {
-		t.Errorf("trailing slash changed the result: bare=%+v slashed=%+v", bare, slashed)
+	for _, prefix := range []string{"Album/", "Album//", "Album///"} {
+		slashed, err := s.EligibleRollupByPrefix(ctx, prefix, 96000, 24)
+		if err != nil {
+			t.Fatalf("prefix %q: %v", prefix, err)
+		}
+		if slashed != bare {
+			t.Errorf("prefix %q changed the result: bare=%+v slashed=%+v",
+				prefix, bare, slashed)
+		}
 	}
 }
 
@@ -80,12 +83,18 @@ func TestListTrackProjectionsUnderPrefixToleratesTrailingSlash(t *testing.T) {
 	if len(bare) != 2 {
 		t.Fatalf("bare prefix found %d projections, want 2 (fixture broken)", len(bare))
 	}
-	slashed, err := s.ListTrackProjectionsUnderPrefix(ctx, "Album/", VariantKindPrefixUpscaled)
-	if err != nil {
-		t.Fatalf("trailing-slash prefix: %v", err)
-	}
-	if len(slashed) != len(bare) {
-		t.Errorf("trailing slash found %d projections, bare found %d — "+
-			"the pre-flight would silently report nothing to do", len(slashed), len(bare))
+	// One slash AND several: TrimSuffix would strip only the last, leaving
+	// "Album/" and rebuilding the identical broken pattern, so the helpers
+	// use TrimRight.
+	for _, prefix := range []string{"Album/", "Album//", "Album///"} {
+		slashed, err := s.ListTrackProjectionsUnderPrefix(ctx, prefix, VariantKindPrefixUpscaled)
+		if err != nil {
+			t.Fatalf("prefix %q: %v", prefix, err)
+		}
+		if len(slashed) != len(bare) {
+			t.Errorf("prefix %q found %d projections, bare found %d — "+
+				"the pre-flight would silently report nothing to do",
+				prefix, len(slashed), len(bare))
+		}
 	}
 }

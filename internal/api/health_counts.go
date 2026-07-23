@@ -88,23 +88,32 @@ func (c *healthCountsCache) counts(ctx context.Context, p healthCountsProvider) 
 		tracks := p.TracksIndexed(fetchCtx)
 		pending := p.PendingDeletions(fetchCtx)
 
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		// Serve stale rather than publishing a fabricated zero. Both
-		// providers return 0 on a failed/cancelled query, so a fetchCtx
-		// deadline (SQLite write-lock contention, a wedged handle) would
-		// otherwise overwrite a good snapshot with "0 tracks indexed" and
-		// keep serving that from /v1/health for the whole TTL window —
-		// which reads to a client exactly like an emptied library.
-		// publicServersCache.servers already takes this posture; this is
-		// the sibling that didn't.
-		if fetchCtx.Err() != nil && c.hasSnap {
-			return c.snap, nil
-		}
 		snap := healthCountsSnapshot{
 			tracksIndexed:    tracks,
 			pendingDeletions: pending,
 			fetchedAt:        time.Now(),
+		}
+
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		// Never CACHE a timed-out fetch. Both providers return 0 on a
+		// failed query, so a fetchCtx deadline (SQLite write-lock
+		// contention, a wedged handle) would otherwise publish
+		// "0 tracks indexed" — which reads to a client exactly like an
+		// emptied library — and the TTL would keep serving it for the
+		// whole window. publicServersCache.servers already takes this
+		// posture; this is the sibling that didn't.
+		//
+		// Two sub-cases, and the cold one matters: with a good snapshot
+		// we serve it stale; with NO snapshot yet (first call, database
+		// already busy) we return the zeros uncached, so the very next
+		// request retries instead of being answered from a cached
+		// failure.
+		if fetchCtx.Err() != nil {
+			if c.hasSnap {
+				return c.snap, nil
+			}
+			return snap, nil
 		}
 		c.snap = snap
 		c.hasSnap = true
