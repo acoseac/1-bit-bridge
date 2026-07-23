@@ -85,15 +85,29 @@ func (c *healthCountsCache) counts(ctx context.Context, p healthCountsProvider) 
 		// rest. The two COUNTs are bounded by their own timeout instead.
 		fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), healthCountsFetchTimeout)
 		defer cancel()
+		tracks := p.TracksIndexed(fetchCtx)
+		pending := p.PendingDeletions(fetchCtx)
+
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		// Serve stale rather than publishing a fabricated zero. Both
+		// providers return 0 on a failed/cancelled query, so a fetchCtx
+		// deadline (SQLite write-lock contention, a wedged handle) would
+		// otherwise overwrite a good snapshot with "0 tracks indexed" and
+		// keep serving that from /v1/health for the whole TTL window —
+		// which reads to a client exactly like an emptied library.
+		// publicServersCache.servers already takes this posture; this is
+		// the sibling that didn't.
+		if fetchCtx.Err() != nil && c.hasSnap {
+			return c.snap, nil
+		}
 		snap := healthCountsSnapshot{
-			tracksIndexed:    p.TracksIndexed(fetchCtx),
-			pendingDeletions: p.PendingDeletions(fetchCtx),
+			tracksIndexed:    tracks,
+			pendingDeletions: pending,
 			fetchedAt:        time.Now(),
 		}
-		c.mu.Lock()
 		c.snap = snap
 		c.hasSnap = true
-		c.mu.Unlock()
 		return snap, nil
 	})
 	snap := v.(healthCountsSnapshot)

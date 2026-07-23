@@ -5244,11 +5244,18 @@ type TrackProjection struct {
 // surface a separate "X unknown-format tracks" counter if needed.
 func (s *Store) ListTrackProjectionsUnderPrefix(ctx context.Context, prefix, variantPrefix string) ([]TrackProjection, error) {
 	var pattern string
-	if prefix == "" {
+	// TrimSuffix first: the pattern appends its own '/', so a
+	// caller-supplied trailing slash builds `LIKE 'Album//%'`, which
+	// matches nothing and silently reports ZERO candidate tracks — the
+	// batch pre-flight then shows "nothing to do" for a folder full of
+	// work. Not hypothetical: the admin Library Inspector's submit path
+	// (`handlers_library_inspector.go`) forwards `req.Path` verbatim,
+	// unlike `api/upscale_batch.go` which runs it through path.Clean.
+	// Same class as the RollupByPrefix guard.
+	if base := strings.TrimSuffix(prefix, "/"); base == "" {
 		pattern = `%`
 	} else {
-		escaped := likeEscape(prefix)
-		pattern = escaped + `/%`
+		pattern = likeEscape(base) + `/%`
 	}
 	// **Parameter binding order is load-bearing**: the new `?` for
 	// `variantPrefix` lives inside the SELECT-block EXISTS subquery,

@@ -26,6 +26,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
@@ -73,7 +74,14 @@ func (s *Server) apiLibrarySearch(w http.ResponseWriter, r *http.Request) {
 	// Trim THEN min-2 check. Pure-whitespace input would otherwise
 	// hit the FTS5 sanitiser and surface as a no-result 200 — same
 	// outcome but pointlessly burns a SQL probe.
-	if len(raw) < 2 {
+	//
+	// Count RUNES, not bytes: the limit exists to keep one-character
+	// queries off the FTS index, and len() would let a single CJK or
+	// accented character (2-4 bytes in UTF-8) straight through while
+	// rejecting a genuine 1-char ASCII query. Byte length also makes the
+	// user-facing "at least 2 characters" message untrue for those
+	// alphabets.
+	if utf8.RuneCountInString(raw) < 2 {
 		writeError(w, http.StatusBadRequest, "query-too-short",
 			"query must be at least 2 characters")
 		return

@@ -280,7 +280,15 @@ func frame(title string, lines []string) string {
 	for _, ln := range lines {
 		body := ln
 		if runeWidth(body) > inner-2 {
-			body = truncateMid(body, inner-2)
+			// stripANSI BEFORE truncating, matching box() above.
+			// truncateMid slices []rune at arbitrary indices, so cutting a
+			// string that still carries SGR escapes can sever one
+			// mid-sequence and leak the remainder as literal bytes —
+			// corrupting every subsequent line the terminal draws.
+			// runeWidth already measures ANSI-stripped width, so an
+			// over-wide line here is over-wide in VISIBLE columns and the
+			// escapes are pure overhead in the truncated form anyway.
+			body = truncateMid(stripANSI(body), inner-2)
 		}
 		pad := inner - 2 - runeWidth(body)
 		b.WriteString(paint(cBrightCyan, r.v))

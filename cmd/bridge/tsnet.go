@@ -549,5 +549,13 @@ func isAdminAlive(cfg *config.Config) bool {
 		return false
 	}
 	resp.Body.Close()
-	return resp.StatusCode == http.StatusOK
+	// ANY HTTP response means something is listening and serving on the
+	// admin port — which is the only question this guard asks. Requiring
+	// 200 specifically broke public mode, where an unauthenticated
+	// /api/stats correctly answers 401 (or 302 to the login page): the
+	// probe read that as "not running" and `bridge tsnet logout` then
+	// wiped tsnet state out from under a LIVE server. Failing safe here
+	// means treating a reachable port as alive; `--force` remains the
+	// operator's override.
+	return true
 }

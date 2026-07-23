@@ -600,7 +600,11 @@ func actOpenAdmin(_ context.Context, _ *bufio.Reader, stdout, _ io.Writer, s men
 	case "linux":
 		_ = exec.Command("xdg-open", url).Start()
 	case "windows":
-		_ = exec.Command("cmd", "/c", "start", url).Start()
+		// The empty string is the window-TITLE argument. Without it
+		// cmd.exe's `start` treats a quoted first argument as the title
+		// and opens nothing — matching openInBrowser in init.go, which
+		// already passes it.
+		_ = exec.Command("cmd", "/c", "start", "", url).Start()
 	}
 	return -1
 }

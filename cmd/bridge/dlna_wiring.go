@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -252,7 +253,12 @@ func gatherAdvertiseEndpoints(bindWildcard bool, port int, log *slog.Logger) []d
 //     resort; errors only when even that has no usable IPv4.
 func deriveServerURL(rawHost string, bindWildcard bool, port int, endpoints []dlna.AdvertiseEndpoint, iface *net.Interface) (string, error) {
 	if !bindWildcard {
-		return fmt.Sprintf("http://%s:%d", rawHost, port), nil
+		// JoinHostPort brackets an IPv6 literal. Plain Sprintf yields
+		// "http://2001:db8::1:7790", which is not a parseable URL — a
+		// renderer can't tell the port from the address — so an
+		// IPv6-bound DLNA server advertised a location nothing could
+		// fetch.
+		return "http://" + net.JoinHostPort(rawHost, strconv.Itoa(port)), nil
 	}
 	if len(endpoints) > 0 {
 		return endpoints[0].ServerURL, nil

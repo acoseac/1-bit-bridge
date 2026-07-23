@@ -45,6 +45,13 @@ func statusCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	if addr == "" {
 		addr = config.DefaultAdminAddress
 	}
+	// Map a wildcard bind (":7789" / "0.0.0.0:7789", the public-mode
+	// shape) onto a dialable loopback address. Dialing 0.0.0.0 fails with
+	// WSAEADDRNOTAVAIL on Windows, so `bridge status` reported "not
+	// running" against a perfectly healthy bridge. tryLibraryViaAdmin,
+	// isAdminAlive and waitForListen all already do this; status was the
+	// one probe that didn't.
+	addr = probeLoopbackAddr(addr)
 
 	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
