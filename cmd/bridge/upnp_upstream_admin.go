@@ -72,9 +72,18 @@ func (st *upnpAdminState) record(res upnpingest.IngestResult) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	for _, pr := range res.PerServer {
-		// Key the latest result by the *configured* UDN when present;
-		// fall back to ServerUDN (which may be a hashed manual key).
-		st.lastByUDN[pr.ServerUDN] = pr
+		// Key by the CONFIGURED server's stable key — the same value
+		// ConfiguredServers looks up with (upnpingest.StableServerKey).
+		// Keying by ServerUDN missed for every manually-configured server
+		// (StableKey is "manual:<hash>", ServerUDN is the discovered
+		// device UDN) and for any server whose device reports its UDN in
+		// different case than the config (StableKey lowercases; ServerUDN
+		// is raw), so last-walk telemetry never rendered for those.
+		key := pr.StableKey
+		if key == "" {
+			key = pr.ServerUDN // pre-StableKey results / hand-built test fixtures
+		}
+		st.lastByUDN[key] = pr
 	}
 }
 

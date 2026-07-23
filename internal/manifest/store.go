@@ -3130,7 +3130,11 @@ func (s *Store) CountTracksUnderRoot(ctx context.Context, rootBase string, multi
 // needs no LIKE-wildcard escaping, so a root named "foo_bar" is matched
 // literally without an ESCAPE clause.
 func (s *Store) CountTracksByPrefix(ctx context.Context, prefix string) (int, error) {
-	base := strings.TrimSuffix(prefix, "/")
+	// TrimRight, not TrimSuffix: a caller passing "Album//" would keep one
+	// slash and rebuild the same broken pattern. All four prefix helpers
+	// (here, RollupByPrefix, EligibleRollupByPrefix,
+	// ListTrackProjectionsUnderPrefix) use this form — keep them in step.
+	base := strings.TrimRight(prefix, "/")
 	var n int
 	err := s.db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM tracks WHERE path >= ? || '/' AND path < ? || '0'`,
@@ -4938,7 +4942,11 @@ func (s *Store) RollupByPrefix(ctx context.Context, prefix string) (FolderRollup
 	// range appends its own '/', so a caller passing "Album/" would otherwise
 	// build `path >= 'Album//'` and match NOTHING — a silently-empty rollup
 	// rather than an error (Gemini HIGH, post-merge review of #532).
-	base := strings.TrimSuffix(prefix, "/")
+	// TrimRight, not TrimSuffix: a caller passing "Album//" would keep one
+	// slash and rebuild the same broken pattern. All four prefix helpers
+	// (here, RollupByPrefix, EligibleRollupByPrefix,
+	// ListTrackProjectionsUnderPrefix) use this form — keep them in step.
+	base := strings.TrimRight(prefix, "/")
 	var out FolderRollup
 	if err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*), COALESCE(SUM(size), 0)
@@ -5244,11 +5252,18 @@ type TrackProjection struct {
 // surface a separate "X unknown-format tracks" counter if needed.
 func (s *Store) ListTrackProjectionsUnderPrefix(ctx context.Context, prefix, variantPrefix string) ([]TrackProjection, error) {
 	var pattern string
-	if prefix == "" {
+	// TrimSuffix first: the pattern appends its own '/', so a
+	// caller-supplied trailing slash builds `LIKE 'Album//%'`, which
+	// matches nothing and silently reports ZERO candidate tracks — the
+	// batch pre-flight then shows "nothing to do" for a folder full of
+	// work. Not hypothetical: the admin Library Inspector's submit path
+	// (`handlers_library_inspector.go`) forwards `req.Path` verbatim,
+	// unlike `api/upscale_batch.go` which runs it through path.Clean.
+	// Same class as the RollupByPrefix guard.
+	if base := strings.TrimRight(prefix, "/"); base == "" {
 		pattern = `%`
 	} else {
-		escaped := likeEscape(prefix)
-		pattern = escaped + `/%`
+		pattern = likeEscape(base) + `/%`
 	}
 	// **Parameter binding order is load-bearing**: the new `?` for
 	// `variantPrefix` lives inside the SELECT-block EXISTS subquery,

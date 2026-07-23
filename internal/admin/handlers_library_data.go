@@ -435,9 +435,24 @@ func csvSafe(s string) string {
 	if s == "" {
 		return s
 	}
+	// Guard 1 (original): a LEADING control character is escaped whatever
+	// follows it — that's the line-injection defence, independent of
+	// formulas, and TestCSVSafe pins it.
 	switch s[0] {
 	case '=', '+', '-', '@', '\t', '\r', '\n':
 		return "'" + s
+	}
+	// Guard 2: a formula trigger hiding behind leading whitespace. Excel
+	// and LibreOffice trim a cell before deciding whether it's a formula,
+	// so "  =1+1" executes exactly like "=1+1" — but guard 1 sees ' ' and
+	// passes it through. Track titles and artist names come from file
+	// tags, so this is the realistic injection vector for a shared or
+	// downloaded library.
+	if trimmed := strings.TrimLeft(s, " \t\r\n\v\f"); trimmed != "" {
+		switch trimmed[0] {
+		case '=', '+', '-', '@':
+			return "'" + s
+		}
 	}
 	return s
 }

@@ -253,7 +253,11 @@ func pairURLHost(rawURL string) string {
 // dot-less and would otherwise become `::1.local`. The bracket-strip
 // mirrors loopbackHostname's IPv6 handling.
 func ensureMDNSHost(host string) string {
-	if host == "localhost" || strings.Contains(host, ".") || net.ParseIP(strings.Trim(host, "[]")) != nil {
+	// EqualFold: hostnames are case-insensitive, so an operator-entered
+	// "LOCALHOST" or "LocalHost" must take the same carve-out as
+	// "localhost" — otherwise it becomes "LOCALHOST.local", which doesn't
+	// resolve, and the pairing URL silently points nowhere.
+	if strings.EqualFold(host, "localhost") || strings.Contains(host, ".") || net.ParseIP(strings.Trim(host, "[]")) != nil {
 		return host
 	}
 	return host + ".local"

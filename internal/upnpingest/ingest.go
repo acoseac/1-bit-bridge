@@ -59,7 +59,17 @@ type IngestResult struct {
 
 // ServerIngestResult is the per-server outcome.
 type ServerIngestResult struct {
-	Name            string // operator-visible label from config
+	Name string // operator-visible label from config
+	// StableKey is StableServerKey(srv) for the CONFIGURED server this
+	// result belongs to — the same key the admin surface looks results up
+	// by. It must not be confused with ServerUDN: for a manually
+	// configured server (no `udn:`, only `manualDescriptionUrl:`)
+	// StableKey is "manual:<sha256(url)>" while ServerUDN is whatever UDN
+	// the device reported at walk time, and for a UDN-configured server
+	// StableKey is LOWERCASED while ServerUDN is raw. Keying telemetry by
+	// ServerUDN therefore missed the lookup in both cases and the admin
+	// console silently showed no last-walk info.
+	StableKey       string
 	ServerUDN       string // resolved at run time (empty when unresolved)
 	Skipped         bool   // true when GetSystemUpdateID matched + within backstop window
 	SkipReason      string // human-readable hint when Skipped is true
@@ -178,7 +188,7 @@ func (i *Ingester) Run(ctx context.Context, opts Options) (IngestResult, error) 
 	i.reapOrphanServers(ctx, &out)
 	for idx := range i.cfg.Servers {
 		srv := i.cfg.Servers[idx]
-		res := ServerIngestResult{Name: srv.Name}
+		res := ServerIngestResult{Name: srv.Name, StableKey: StableServerKey(srv)}
 		i.ingestOne(ctx, srv, opts.ForceWalk, backstop, opts.MaxItems, now, &res)
 		out.PerServer = append(out.PerServer, res)
 	}

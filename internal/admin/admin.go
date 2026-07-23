@@ -1385,7 +1385,13 @@ func (s *Server) originMatchesPublicMode(originHost, originPort string, cfg *con
 // browser that resolved http://localhost:7789 doesn't get rejected
 // against an AdminAddress of 127.0.0.1:7789.
 func loopbackHostname(h string) bool {
-	h = strings.ToLower(h)
+	// Trim the FQDN root dot as well as case-folding: "localhost." is a
+	// fully-qualified spelling of localhost that browsers accept and send
+	// verbatim in an Origin header, so without this an operator reaching
+	// the console at http://localhost.:7789 fails Origin validation.
+	// originMatchesPublicMode already normalises the trailing dot; this is
+	// the loopback-side twin.
+	h = strings.TrimSuffix(strings.ToLower(h), ".")
 	if h == "localhost" {
 		return true
 	}

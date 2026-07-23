@@ -27,6 +27,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // optimizeEligibleSQL mirrors transcode.OptimizeEligible exactly:
@@ -190,10 +191,18 @@ func (s *Store) EligibleRollupByPrefix(ctx context.Context, prefix string, targe
 		    THEN 1 ELSE 0 END), 0)
 		FROM tracks t`
 	args := []any{targetRate, targetBits, targetRate, targetBits}
-	if prefix != "" {
+	if base := strings.TrimRight(prefix, "/"); base != "" {
+		// The range appends its own '/', so a caller-supplied trailing
+		// slash (or several) would build `path >= 'Album//'` — and since the byte
+		// after "Album/" in a real row ('T' = 0x54) is above '0' (0x30),
+		// the upper bound `< 'Album/0'` excludes EVERY row. The result is
+		// a silently-empty count, not an error: the Inspector renders
+		// "0 eligible" for a folder full of work. Same guard, same
+		// reasoning, as RollupByPrefix in store.go — these two must stay
+		// in lockstep.
 		q += `
 		WHERE t.path >= ? || '/' AND t.path < ? || '0'`
-		args = append(args, prefix, prefix)
+		args = append(args, base, base)
 	}
 	var ec EligibleCounts
 	if err := s.db.QueryRowContext(ctx, q, args...).Scan(&ec.Upscale, &ec.Optimize); err != nil {

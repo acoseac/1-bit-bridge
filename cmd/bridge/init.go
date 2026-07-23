@@ -920,7 +920,12 @@ func expandHome(p string) string {
 	if p == "~" {
 		return home
 	}
-	if strings.HasPrefix(p, "~/") {
+	// Accept the native Windows separator too. An operator typing
+	// `~\Music` at the init prompt would otherwise fall through
+	// unexpanded, and the subsequent filepath.Abs treats "~" as a
+	// literal directory name relative to the CWD — producing a library
+	// root like C:\Users\me\~\Music that silently doesn't exist.
+	if strings.HasPrefix(p, "~/") || strings.HasPrefix(p, `~\`) {
 		return filepath.Join(home, p[2:])
 	}
 	return p

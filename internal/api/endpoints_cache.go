@@ -74,6 +74,18 @@ func (c *endpointsCache) effectiveTTL() time.Duration {
 // the window — treat it as READ-ONLY. Every current consumer assigns it
 // straight into a response DTO for marshalling, which never mutates.
 func (c *endpointsCache) endpoints(compute func() []string) []string {
+	// Nil-receiver guard, matching reachabilityCache.probe /
+	// healthCountsCache.counts / publicServersCache.servers. A &Server{...}
+	// built without New() (test harnesses, and any future constructor that
+	// forgets this field) leaves the cache nil, and /v1/health would panic
+	// on c.mu.Lock() instead of simply computing uncached. This was the one
+	// cache of the four missing it.
+	if c == nil {
+		if compute == nil {
+			return nil
+		}
+		return compute()
+	}
 	c.mu.Lock()
 	if c.hasSnap && time.Since(c.fetched) < c.effectiveTTL() {
 		eps := c.eps

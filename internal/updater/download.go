@@ -192,8 +192,14 @@ func fetchChecksum(ctx context.Context, hc *http.Client, url, archiveName string
 		// strings.Fields handles any whitespace). Match by
 		// basename so a checksums file using "./<name>" or
 		// "binaries/<name>" prefixes still works.
-		name := fields[1]
-		if path.Base(name) == archiveName {
+		// `sha256sum -b` writes binary-mode lines as "<hash> *<name>";
+		// the '*' is a mode marker, not part of the filename, and
+		// path.Base keeps it. goreleaser doesn't emit that form, but a
+		// hand-rolled or mirrored checksums.txt can, and the failure is
+		// an opaque "no checksum entry for <archive>" that blocks the
+		// update entirely.
+		name := strings.TrimPrefix(path.Base(fields[1]), "*")
+		if name == archiveName {
 			return strings.ToLower(fields[0]), nil
 		}
 	}
@@ -293,6 +299,15 @@ func isBinaryEntry(entry, binaryName string) bool {
 	if strings.Contains(entry, "..") {
 		return false
 	}
+	// Normalise separators before path.Base. The `path` package only
+	// knows '/', so a zip entry written with Windows separators
+	// ("bridge_windows_amd64\bridge.exe") returns the whole string from
+	// path.Base and never matches. The ZIP spec mandates '/', and
+	// goreleaser complies — so our own archives are unaffected — but a
+	// non-conforming producer would otherwise fail the update with
+	// "bridge.exe not found". The '..' reject above still runs on the
+	// RAW entry, so this can't be used to smuggle traversal.
+	entry = strings.ReplaceAll(entry, `\`, "/")
 	return path.Base(entry) == binaryName
 }
 

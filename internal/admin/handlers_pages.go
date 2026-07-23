@@ -420,6 +420,14 @@ func timeAgo(t time.Time) string {
 		return "never"
 	}
 	d := time.Since(t).Round(time.Second)
+	// A future timestamp (clock skew between the bridge and whatever
+	// stamped the row, NTP stepping, or sub-second rounding on a
+	// just-written value) makes d negative — and every negative duration
+	// satisfies `d < time.Minute`, so the dashboard would render "-5s
+	// ago". Collapse the whole negative range to "just now".
+	if d < 0 {
+		return "just now"
+	}
 	if d < time.Minute {
 		return itoa(int64(d.Seconds())) + "s ago"
 	}
