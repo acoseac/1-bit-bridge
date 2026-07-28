@@ -1351,6 +1351,12 @@ func stringOf(raw map[string]any, keys ...string) (string, bool) {
 	return "", false
 }
 
+// mp4CopyrightAtomPrefix is the single 0xA9 lead byte dhowden uses for MP4
+// ilst © atoms (`\xa9day` / `\xa9ART` / `\xa9wrt`). It is invalid UTF-8 on its
+// own — see normaliseRawTagKey for why it must be canonicalized to UTF-8 ©
+// before strings.ToLower.
+const mp4CopyrightAtomPrefix = "\xa9"
+
 // normaliseRawTagKey lowercases and replaces spaces with underscores
 // so the search keys passed to stringOf can match both Vorbis-style
 // (`MUSICBRAINZ_ALBUMID`) and ID3v2-TXXX-style (`MusicBrainz Album Id`)
@@ -1371,7 +1377,7 @@ func stringOf(raw map[string]any, keys ...string) (string, bool) {
 // behavior-preserving for every ASCII key (ID3/Vorbis frame IDs + MP4
 // non-© atoms `trkn`/`disk`/`aART`/… don't start with 0xA9).
 func normaliseRawTagKey(k string) string {
-	if strings.HasPrefix(k, "\xa9") {
+	if strings.HasPrefix(k, mp4CopyrightAtomPrefix) {
 		k = "©" + k[1:]
 	}
 	return strings.ReplaceAll(strings.ToLower(k), " ", "_")
