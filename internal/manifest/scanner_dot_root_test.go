@@ -7,6 +7,29 @@ import (
 	"testing"
 )
 
+// newScanStore opens a throwaway manifest store for a scanner test.
+func newScanStore(t *testing.T) *Store {
+	t.Helper()
+	store, err := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	return store
+}
+
+// scanRootOnce runs one full scan over `root` and returns the store
+// plus the indexed-track count.
+func scanRootOnce(t *testing.T, root string) (*Store, int) {
+	t.Helper()
+	store := newScanStore(t)
+	n, err := NewScanner([]string{root}, store, "").Scan(context.Background())
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	return store, n
+}
+
 // A library root whose OWN basename starts with a dot must still be
 // scanned. `filepath.WalkDir` invokes the walk callback for the root
 // itself, so an unguarded `shouldSkipDir(d.Name())` returned SkipDir on
@@ -30,17 +53,7 @@ func TestScannerIndexesDotNamedLibraryRoot(t *testing.T) {
 	writeMinimalAudio(t, filepath.Join(album, "01.flac"))
 	writeMinimalAudio(t, filepath.Join(root, "loose.flac"))
 
-	store, err := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-
-	sc := NewScanner([]string{root}, store, "")
-	n, err := sc.Scan(context.Background())
-	if err != nil {
-		t.Fatalf("scan: %v", err)
-	}
+	store, n := scanRootOnce(t, root)
 	if n != 2 {
 		t.Fatalf("indexed %d tracks, want 2 — a dot-named root must not skip its own walk", n)
 	}
@@ -67,17 +80,7 @@ func TestScannerStillSkipsDotDirsBelowTheRoot(t *testing.T) {
 	writeMinimalAudio(t, filepath.Join(trash, "deleted.flac"))
 	writeMinimalAudio(t, filepath.Join(root, "kept.flac"))
 
-	store, err := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-
-	sc := NewScanner([]string{root}, store, "")
-	n, err := sc.Scan(context.Background())
-	if err != nil {
-		t.Fatalf("scan: %v", err)
-	}
+	store, n := scanRootOnce(t, root)
 	if n != 1 {
 		t.Fatalf("indexed %d tracks, want 1 — dot-dirs BELOW the root must stay pruned", n)
 	}
@@ -98,12 +101,7 @@ func TestScanSubtreeIndexesDotNamedRoot(t *testing.T) {
 	}
 	writeMinimalAudio(t, filepath.Join(root, "dropped.flac"))
 
-	store, err := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-
+	store := newScanStore(t)
 	sc := NewScanner([]string{root}, store, "")
 	if _, err := sc.ScanSubtree(context.Background(), root); err != nil {
 		t.Fatalf("ScanSubtree: %v", err)
