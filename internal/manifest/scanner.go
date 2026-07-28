@@ -457,14 +457,7 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	// ingest's last_seen_at reconcile. A fetch failure degrades to an
 	// empty set — the store-side NOT-IN guard on the threshold DELETE
 	// is the backstop that keeps routed rows undeletable regardless.
-	routedSet := make(map[string]struct{})
-	if routed, err := s.store.UPnPRoutedSourcePaths(ctx); err != nil {
-		scanLogger.Warn("routed-paths fetch for missing pass failed", "err", err)
-	} else {
-		for _, p := range routed {
-			routedSet[p] = struct{}{}
-		}
-	}
+	routedSet := s.routedPathSet(ctx)
 	missingTracks := make([]string, 0)
 	renamed := make([]string, 0)
 	spared := 0
@@ -1261,7 +1254,11 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 			return ctx.Err()
 		}
 		if d.IsDir() {
-			if shouldSkipDir(d.Name()) {
+			// `abs != absDir` exempts the walk entry — same contract as
+			// walkRoot's: the skip heuristic prunes DISCOVERED
+			// descendants, never the explicitly-targeted directory.
+			// Reachable when a configured root is itself dot-named.
+			if abs != absDir && shouldSkipDir(d.Name()) {
 				return filepath.SkipDir
 			}
 			info, err := d.Info()
@@ -1343,12 +1340,24 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	// /B/bar's scan. Same missing_count threshold model as the
 	// full-scan path — see Scan's docblock for the rationale.
 	threshold := s.effectiveDeleteThreshold()
+	// Same UPnP-routed exclusion the full-scan pass runs. Reachable
+	// here: a single-root watcher event at the library root yields
+	// relScope "." which short-circuits TrackPathsUnder to the WHOLE
+	// library, so every routed row lands in beforeTrackSet. The
+	// store-side NOT-IN guard stops the reap today, but the counter
+	// still climbs — and a row that later leaves upnp_track_routing
+	// (server retired / re-UDN'd) is then already far past threshold
+	// and gets reaped on its next pass.
+	routedSet := s.routedPathSet(ctx)
 	missingTracks := make([]string, 0)
 	renamed := make([]string, 0)
 	sparedTracks := 0
 	renames := caseOnlyRenames(beforeTrackSet, seen)
 	for p := range beforeTrackSet {
 		if _, ok := seen[p]; ok {
+			continue
+		}
+		if _, routed := routedSet[p]; routed {
 			continue
 		}
 		// Walk-error sparing before the rename reap — see the full-scan
@@ -1470,7 +1479,26 @@ func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, see
 			// Check skip *before* upserting — otherwise .Trash,
 			// .Spotlight-V100, $RECYCLE.BIN, etc. land in the folders
 			// table and the iOS client sees them in the manifest.
-			if shouldSkipDir(d.Name()) {
+			//
+			// `abs != root` exempts the WALK ROOT itself: the skip
+			// heuristic applies to DISCOVERED DESCENDANTS, never to a
+			// path the operator explicitly configured. Without it, a
+			// root whose own basename starts with a dot
+			// (`/mnt/storage/.music`) makes WalkDir's very first
+			// callback return SkipDir, which terminates the walk and
+			// returns nil — 0 files indexed, no error, and on a fresh
+			// install not even the `observed == 0` sentinel fires.
+			//
+			// String identity is the right test, not a relative-path
+			// compare: WalkDir invokes the callback for the root with
+			// the `root` string VERBATIM (no Clean, no Abs — see
+			// path/filepath.WalkDir), and only descendants go through
+			// Join. So this holds for a relative root, a trailing
+			// slash, or an uncleaned symlink alike. A `rel != "."`
+			// form would be WRONG: relPath returns `<rootBase>/.` for
+			// the root in multi-root mode, so the guard would never
+			// fire there.
+			if abs != root && shouldSkipDir(d.Name()) {
 				return filepath.SkipDir
 			}
 			// Record folder mtimes for the manifest / future skip logic.
@@ -1761,6 +1789,39 @@ func fillFromPath(t *Track, rel string, multiRoot bool) {
 	if len(parts) >= 3 && t.Artist == "" {
 		t.Artist = parts[len(parts)-3]
 	}
+}
+
+// routedPathSet returns the set of track paths owned by a UPnP
+// upstream, for the missing-tracks passes to skip.
+//
+// Routed rows live in `tracks` but never appear in a disk walk, so
+// without this every scan counts the whole upstream catalog (15k rows
+// for a Chord 2Go) as "missing" and drives its missing_count up
+// forever. Their lifecycle belongs EXCLUSIVELY to the ingest's
+// last_seen_at reconcile (PR #370).
+//
+// A fetch failure degrades to an empty set — the store-side
+// `NOT IN (SELECT source_path FROM upnp_track_routing)` guard on the
+// threshold DELETE is the backstop that keeps routed rows undeletable
+// regardless. Both the full `Scan` and `ScanSubtree` missing passes
+// call this; keep them in step.
+func (s *Scanner) routedPathSet(ctx context.Context) map[string]struct{} {
+	routedSet := make(map[string]struct{})
+	routed, err := s.store.UPnPRoutedSourcePaths(ctx)
+	if err != nil {
+		// A cancelled ctx here is an ordinary shutdown, not a fault —
+		// logging it produces a burst of alarming warnings every time
+		// the operator stops the bridge mid-scan. The caller's own
+		// ctx checks abort the pass regardless.
+		if ctx.Err() == nil {
+			scanLogger.Warn("routed-paths fetch for missing pass failed", "err", err)
+		}
+		return routedSet
+	}
+	for _, p := range routed {
+		routedSet[p] = struct{}{}
+	}
+	return routedSet
 }
 
 // shouldSkipDir returns true for directories we never want to traverse.

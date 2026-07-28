@@ -3686,6 +3686,12 @@ func scanCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	// no-op for the CLI scan path.
 	artworkDir := filepath.Join(cfg.DataDir, "artwork")
 	scanner := manifest.NewScanner(cfg.LibraryRoots, store, artworkDir)
+	// Same missing_count grace period `bridge serve` wires. Without
+	// this the CLI scan falls back to effectiveDeleteThreshold's
+	// unwired default of 1 — immediate delete — so a single flaky
+	// enumeration under a manual `bridge scan` reaps rows that the
+	// documented 3-scan grace period exists to spare.
+	scanner.SetDeleteThreshold(cfg.Scanner.DeleteAfterMissingScans)
 
 	fmt.Fprintf(stdout, "Scanning %v ...\n", cfg.LibraryRoots)
 	start := time.Now()

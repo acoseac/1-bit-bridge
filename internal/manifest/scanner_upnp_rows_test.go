@@ -119,3 +119,46 @@ func TestIncrementMissingTracks_ThresholdDeleteSparesRoutedRows(t *testing.T) {
 		t.Fatalf("filesystem row must still be reaped at threshold: %v / %v", gone, err)
 	}
 }
+
+// ScanSubtree carries the same UPnP-routed exclusion as the full scan.
+// Reachable in single-root mode: a watcher event for a file dropped
+// directly at the library root gives relScope "." which short-circuits
+// TrackPathsUnder to the WHOLE library, so every routed row lands in
+// beforeTrackSet and gets counted "missing" on every subtree scan.
+//
+// The store-side NOT-IN guard stops the reap today, so the visible
+// damage is a counter that only climbs — but a row that later leaves
+// upnp_track_routing (upstream retired, or re-UDN'd after a firmware
+// update) is then already far past threshold and gets reaped on its
+// very next pass, with no grace period at all.
+func TestScanSubtree_MissingPass_SparesUPnPRoutedRows(t *testing.T) {
+	dir := t.TempDir()
+	writeMinimalAudio(t, filepath.Join(dir, "keep.flac"))
+
+	store, err := OpenStore(filepath.Join(dir, "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	const routedPath = "2go/Music/Artist/Album/01 - Track.flac"
+	seedRoutedTrack(t, store, routedPath)
+
+	s := NewScanner([]string{dir}, store, "")
+	s.SetDeleteThreshold(3)
+
+	// Subtree-scan the root itself — the relScope "." shape the
+	// watcher produces for a root-level drop.
+	for i := 1; i <= 4; i++ {
+		if _, err := s.ScanSubtree(context.Background(), dir); err != nil {
+			t.Fatalf("subtree scan %d: %v", i, err)
+		}
+	}
+
+	if got := missingCountHelper(t, store, routedPath); got != 0 {
+		t.Fatalf("routed missing_count = %d, want 0 (subtree scans must not touch it)", got)
+	}
+	if got := countTracksHelper(t, store); got != 2 {
+		t.Fatalf("tracks = %d, want 2 (routed row must survive every subtree scan)", got)
+	}
+}

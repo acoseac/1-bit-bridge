@@ -8,6 +8,46 @@ import (
 	"time"
 )
 
+// newWatcherFixture stands up a library directory, a store, and a
+// Watcher over it. Extracted because four tests in this file (plus the
+// dot-named-root case) were carrying byte-identical setup.
+//
+// `libName` is the library root's BASENAME — the dot-named-root test
+// needs to control it, since that is precisely what it exercises.
+func newWatcherFixture(t *testing.T, libName string, debounce time.Duration) (libDir string, store *Store, w *Watcher) {
+	t.Helper()
+	dir := t.TempDir()
+	libDir = filepath.Join(dir, libName)
+	if err := os.MkdirAll(libDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store, err := OpenStore(filepath.Join(dir, "bridge.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	w, err = NewWatcher(NewScanner([]string{libDir}, store, ""), debounce)
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	return libDir, store, w
+}
+
+// waitForTrack polls until a track appears in the manifest, or fails
+// with `msg` at the deadline.
+func waitForTrack(t *testing.T, store *Store, msg string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		got, _ := store.ListTracks(context.Background(), nil)
+		if len(got) > 0 {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal(msg)
+}
+
 // TestWatcherDebounce drops a file into a watched directory and
 // asserts ScanSubtree fires within `debounce + slack` and the
 // new track lands in the manifest. End-to-end check of the watch
@@ -17,22 +57,7 @@ import (
 // generous deadline (3 s) so the test stays fast on a busy CI
 // machine without flaking on debounce timing.
 func TestWatcherDebounce(t *testing.T) {
-	dir := t.TempDir()
-	libDir := filepath.Join(dir, "Music")
-	if err := os.MkdirAll(libDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	store, err := OpenStore(filepath.Join(dir, "bridge.db"))
-	if err != nil {
-		t.Fatalf("OpenStore: %v", err)
-	}
-	defer store.Close()
-
-	scanner := NewScanner([]string{libDir}, store, "")
-	w, err := NewWatcher(scanner, 50*time.Millisecond)
-	if err != nil {
-		t.Fatalf("NewWatcher: %v", err)
-	}
+	libDir, store, w := newWatcherFixture(t, "Music", 50*time.Millisecond)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() { _ = w.Run(ctx) }()
@@ -50,15 +75,7 @@ func TestWatcherDebounce(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		got, _ := store.ListTracks(context.Background(), nil)
-		if len(got) > 0 {
-			return // success
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	t.Errorf("expected at least one track in manifest within deadline; got 0")
+	waitForTrack(t, store, "expected at least one track in manifest within deadline; got 0")
 }
 
 // TestWatcherShutdownDrainsInflightScan is the B8 regression guard: Run's
@@ -70,22 +87,7 @@ func TestWatcherDebounce(t *testing.T) {
 // store close); the fix makes Run block on the in-flight scan — this test
 // pins that the block terminates (no deadlock) and the scan's write landed.
 func TestWatcherShutdownDrainsInflightScan(t *testing.T) {
-	dir := t.TempDir()
-	libDir := filepath.Join(dir, "Music")
-	if err := os.MkdirAll(libDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	store, err := OpenStore(filepath.Join(dir, "bridge.db"))
-	if err != nil {
-		t.Fatalf("OpenStore: %v", err)
-	}
-	defer store.Close()
-
-	scanner := NewScanner([]string{libDir}, store, "")
-	w, err := NewWatcher(scanner, 20*time.Millisecond)
-	if err != nil {
-		t.Fatalf("NewWatcher: %v", err)
-	}
+	libDir, store, w := newWatcherFixture(t, "Music", 20*time.Millisecond)
 	ctx, cancel := context.WithCancel(context.Background())
 	runDone := make(chan struct{})
 	go func() { _ = w.Run(ctx); close(runDone) }()
@@ -114,22 +116,7 @@ func TestWatcherShutdownDrainsInflightScan(t *testing.T) {
 // a scan. The scanner skips them anyway, but we'd rather not
 // spend a debounce window on them.
 func TestWatcherIgnoresDotfiles(t *testing.T) {
-	dir := t.TempDir()
-	libDir := filepath.Join(dir, "Music")
-	if err := os.MkdirAll(libDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	store, err := OpenStore(filepath.Join(dir, "bridge.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-
-	scanner := NewScanner([]string{libDir}, store, "")
-	w, err := NewWatcher(scanner, 50*time.Millisecond)
-	if err != nil {
-		t.Fatal(err)
-	}
+	libDir, store, w := newWatcherFixture(t, "Music", 50*time.Millisecond)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() { _ = w.Run(ctx) }()
@@ -302,4 +289,35 @@ func TestWatcherStaleTimerDoesNotEvictFreshEntry(t *testing.T) {
 	if got != ps2 {
 		t.Fatalf("fresh entry evicted by the stale timer callback (got %p, want ps2 %p); identity guard failed", got, ps2)
 	}
+}
+
+// addTree must register watches for a library root whose OWN basename
+// starts with a dot.
+//
+// filepath.WalkDir calls the callback for the root itself, so an
+// unguarded shouldSkipDir(d.Name()) returned SkipDir on entry and the
+// whole root got ZERO watches. Worse, addTree then returns nil, so the
+// caller's "initial watch add failed (partial coverage)" warning never
+// fired either — the library silently lost instant-update coverage with
+// no operator signal at all.
+//
+// End-to-end rather than a unit test on addTree: what matters is that a
+// file dropped into the root actually reaches the manifest.
+func TestWatcherWatchesDotNamedLibraryRoot(t *testing.T) {
+	libDir, store, w := newWatcherFixture(t, ".music", 50*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = w.Run(ctx) }()
+
+	// fsnotify's Add() is synchronous on every supported platform, so
+	// this is generous headroom for the initial addTree pass.
+	time.Sleep(100 * time.Millisecond)
+
+	if err := os.WriteFile(filepath.Join(libDir, "dropped.flac"),
+		[]byte("not a real flac"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	waitForTrack(t, store, "no watch registered for a dot-named library root: "+
+		"the dropped file never reached the manifest")
 }

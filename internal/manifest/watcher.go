@@ -148,6 +148,10 @@ func (wt *Watcher) Run(ctx context.Context) error {
 // once per directory — the operator gets one clear signal that
 // the kernel limit needs raising.
 //
+// The dot-directory skip applies to DISCOVERED DESCENDANTS only,
+// never to `root` itself — an operator who configures
+// `/mnt/storage/.music` as a library root means it.
+//
 // **Root-level walk failure surfaces** (CodeRabbit Major post-merge
 // on PR #83): a permission/missing/IO error AT the root path
 // itself produces an err callback with `path == root`. Pre-fix,
@@ -176,13 +180,26 @@ func (wt *Watcher) addTree(root string) error {
 		if !d.IsDir() {
 			return nil
 		}
-		if shouldSkipDir(d.Name()) {
+		// `path != root` exempts the walk root itself — the same
+		// carve-out the error branch above already makes, one branch
+		// over. Without it a configured root whose basename starts
+		// with a dot (`/mnt/storage/.music`) registers ZERO watches
+		// and addTree returns nil, so the caller's "initial watch add
+		// failed (partial coverage)" warning never fires either: the
+		// library silently loses instant-update coverage with no
+		// operator signal at all. WalkDir hands the callback the
+		// `root` string verbatim, so string identity is exact.
+		if path != root && shouldSkipDir(d.Name()) {
 			return filepath.SkipDir
 		}
 		if limitHit {
-			// Already reported once per root — keep walking but
-			// don't add more watches we know would fail.
-			return nil
+			// Every subsequent Add would fail the same way, so there
+			// is nothing left to do — SkipAll stops the walk instead
+			// of stat-ing the rest of the tree for no benefit.
+			// (SkipDir would be wrong: it only prunes descendants and
+			// the walk would continue through every sibling.) The
+			// periodic full scan covers the gap.
+			return filepath.SkipAll
 		}
 		if addErr := wt.w.Add(path); addErr != nil {
 			switch {
