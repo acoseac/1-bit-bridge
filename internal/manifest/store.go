@@ -4245,34 +4245,64 @@ func (s *Store) UpdateUpscaleBatchProgress(ctx context.Context, row UpscaleBatch
 	// completed/failed/cancelled/interrupted (see isTerminalStatus in batch.go);
 	// 'interrupted' is stamped by boot recovery, so a straggler callback after a
 	// crash/restart must not revive it either (Gemini PR #515 round 2).
+	// `total_files` is written here as well as at INSERT, because the
+	// coordinator SHRINKS it after the row exists: dropDedupedPath
+	// decrements per candidate deduped against an in-flight job, and a
+	// queue-full break sets it to the real enqueued count. Pre-fix no
+	// UPDATE in the codebase touched the column at all, so every one of
+	// those adjustments lived only in `liveBatches` and the persisted
+	// row kept its pre-dedup total FOREVER — it never self-heals,
+	// because the job-completion callbacks persist through this same
+	// statement and the batch is dropped from liveBatches once
+	// terminal. SSE (in-memory) rendered 7/7 while the admin Jobs page
+	// and GET /v1/upscale/batches (both DB-backed) rendered 7/10.
+	//
+	// CASE WHEN, not a bare assignment: TotalFiles is monotonically
+	// NON-INCREASING after INSERT (the only writers are the decrement
+	// and the truncation set), so this makes a stale snapshot landing
+	// out of order unable to regress the column. Same strict-monotonic
+	// shape as the indexed_at writes in UpsertTrack / UpsertVariant.
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE upscale_batches
 		   SET status         = ?,
+		       total_files    = CASE WHEN total_files > ? THEN ? ELSE total_files END,
 		       processed_files = ?,
 		       failed_files    = ?,
 		       error          = ?,
 		       updated_at     = ?
 		 WHERE id = ?
 		   AND status NOT IN ('completed', 'failed', 'cancelled', 'interrupted')
-	`, row.Status, row.ProcessedFiles, row.FailedFiles, row.Error, row.UpdatedAt, row.ID[:])
+	`, row.Status, row.TotalFiles, row.TotalFiles,
+		row.ProcessedFiles, row.FailedFiles, row.Error, row.UpdatedAt, row.ID[:])
 	return err
 }
 
 // UpdateUpscaleBatchStatus is the narrow flavour of
-// UpdateUpscaleBatchProgress for the cases that only flip status +
-// error + updated_at without touching counters. Used by
+// UpdateUpscaleBatchProgress for the cases that flip status + error +
+// updated_at without touching the processed/failed counters. Used by
 // `Coordinator.Cancel`, `transitionStatus`, and pending→running
 // promotion at Submit.
+//
+// It DOES carry total_files, under the same monotonic guard as the
+// progress form. The fully-deduped batch reaches its terminal status
+// through here and nowhere else, so without this a re-submit that
+// overlaps an in-flight batch entirely would persist `0/N` — the
+// coordinator correctly shrinks the live row to 0, and the DB kept the
+// original candidate count. Every caller routes through
+// `transitionStatus`, which always builds its row copy from the live
+// `liveBatches` entry, so the value is authoritative at each site.
 func (s *Store) UpdateUpscaleBatchStatus(ctx context.Context, row UpscaleBatchRow) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE upscale_batches
-		   SET status     = ?,
-		       error      = ?,
-		       updated_at = ?
+		   SET status      = ?,
+		       total_files = CASE WHEN total_files > ? THEN ? ELSE total_files END,
+		       error       = ?,
+		       updated_at  = ?
 		 WHERE id = ?
-	`, row.Status, row.Error, row.UpdatedAt, row.ID[:])
+	`, row.Status, row.TotalFiles, row.TotalFiles,
+		row.Error, row.UpdatedAt, row.ID[:])
 	return err
 }
 
