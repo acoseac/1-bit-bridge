@@ -1251,6 +1251,36 @@ var migrations = []migration{
 			ON track_analysis(unicode_lower(source_path));
 		`,
 	},
+	{
+		// v27: per-track extractor-version stamp for self-healing tag
+		// re-extraction. `extractor_version` records the
+		// manifest.ExtractorVersion that produced the row's tags; the
+		// scan-skip gate (scanner.go) re-extracts any row whose stamp is
+		// < the current constant, so a tag-extraction fix (e.g. the MP4 ©
+		// atom canonicalization that recovers M4A year / composer /
+		// multi-value artist) self-applies on the next scan with no
+		// explicit backfill. NOT NULL DEFAULT 0 is a constant-time ADD
+		// COLUMN; every existing row reads 0, which is < ExtractorVersion
+		// (>= 1), so the first post-upgrade scan re-extracts the whole
+		// library once, then size+mtime skips resume. Mirrors the
+		// analyze.WaveformSchemaVersion stamp idiom.
+		version: 27,
+		name:    "tracks extractor_version stamp",
+		sql:     `-- column added idempotently in post(); see v27 docblock`,
+		post: func(db *sql.DB) error {
+			exists, err := atlasColumnExists(db, "tracks", "extractor_version")
+			if err != nil {
+				return fmt.Errorf("inspect tracks.extractor_version: %w", err)
+			}
+			if exists {
+				return nil
+			}
+			if _, err := db.Exec("ALTER TABLE tracks ADD COLUMN extractor_version INTEGER NOT NULL DEFAULT 0"); err != nil {
+				return fmt.Errorf("add tracks.extractor_version: %w", err)
+			}
+			return nil
+		},
+	},
 }
 
 // backfillFormatColumns derives the v25 format-fact columns from
@@ -1807,8 +1837,9 @@ func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
 	rate, bits, isDSD, codec := formatColumnBinds(t)
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO tracks(path, size, mtime_ns, tags_json, indexed_at,
-		                   sample_rate, bits_per_sample, is_dsd, codec)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                   sample_rate, bits_per_sample, is_dsd, codec,
+		                   extractor_version)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(path) DO UPDATE SET
 			size          = excluded.size,
 			mtime_ns      = excluded.mtime_ns,
@@ -1843,9 +1874,14 @@ func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
 			sample_rate     = excluded.sample_rate,
 			bits_per_sample = excluded.bits_per_sample,
 			is_dsd          = excluded.is_dsd,
-			codec           = excluded.codec
+			codec           = excluded.codec,
+			-- extractor_version stamped on every upsert (constant per build).
+			-- The excluded.extractor_version assignment is MANDATORY: without
+			-- it a re-extracted (conflict) row keeps its stale stamp and would
+			-- re-extract on every subsequent scan.
+			extractor_version = excluded.extractor_version
 	`, t.Path, t.Size, t.ModTime.UnixNano(), raw, s.now().UnixNano(),
-		rate, bits, isDSD, codec)
+		rate, bits, isDSD, codec, ExtractorVersion)
 	return err
 }
 
@@ -1923,8 +1959,9 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 	// per batch on Pi-class hardware and break the deterministic test seam.
 	stmt, err := tx.PrepareContext(ctx, `
 		INSERT INTO tracks(path, size, mtime_ns, tags_json, indexed_at,
-		                   sample_rate, bits_per_sample, is_dsd, codec)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                   sample_rate, bits_per_sample, is_dsd, codec,
+		                   extractor_version)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(path) DO UPDATE SET
 			size          = excluded.size,
 			mtime_ns      = excluded.mtime_ns,
@@ -1950,7 +1987,12 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 			sample_rate     = excluded.sample_rate,
 			bits_per_sample = excluded.bits_per_sample,
 			is_dsd          = excluded.is_dsd,
-			codec           = excluded.codec
+			codec           = excluded.codec,
+			-- extractor_version stamped on every upsert (constant per build).
+			-- The excluded.extractor_version assignment is MANDATORY: without
+			-- it a re-extracted (conflict) row keeps its stale stamp and would
+			-- re-extract on every subsequent scan.
+			extractor_version = excluded.extractor_version
 	`)
 	if err != nil {
 		return err
@@ -1959,7 +2001,7 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 	now := s.now().UnixNano()
 	for _, r := range rows {
 		if _, err := stmt.ExecContext(ctx, r.path, r.size, r.mtime, r.tagsRaw, now,
-			r.rate, r.bits, r.isDSD, r.codec); err != nil {
+			r.rate, r.bits, r.isDSD, r.codec, ExtractorVersion); err != nil {
 			return err
 		}
 	}
@@ -2201,6 +2243,12 @@ type TrackStat struct {
 	Size        int64
 	MTimeNS     int64
 	ArtworkMBID string
+	// ExtractorVersion is the `extractor_version` column — the
+	// manifest.ExtractorVersion that produced the row's tags. The
+	// scan-skip gate re-extracts any row whose stamp is < the current
+	// constant. NOT NULL DEFAULT 0, so it scans into a plain int (a
+	// pre-stamp row reads 0).
+	ExtractorVersion int
 }
 
 // GetTrackStat is the skip-gate twin of GetTrack: same exact-key
@@ -2233,9 +2281,10 @@ type TrackStat struct {
 func (s *Store) GetTrackStat(ctx context.Context, path string) (*TrackStat, error) {
 	var st TrackStat
 	err := s.db.QueryRowContext(ctx, `
-		SELECT size, mtime_ns, COALESCE(json_extract(tags_json, '$.artworkMBID'), '')
+		SELECT size, mtime_ns, COALESCE(json_extract(tags_json, '$.artworkMBID'), ''),
+		       extractor_version
 		FROM tracks WHERE path = ?`, path).
-		Scan(&st.Size, &st.MTimeNS, &st.ArtworkMBID)
+		Scan(&st.Size, &st.MTimeNS, &st.ArtworkMBID, &st.ExtractorVersion)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

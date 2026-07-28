@@ -34,7 +34,7 @@ func TestApplyMultiValueArtistsFromRaw_StringWithNullSeparator(t *testing.T) {
 // []string.
 func TestApplyMultiValueArtistsFromRaw_SliceVariant(t *testing.T) {
 	raw := map[string]any{
-		"©art": []string{"Mozart", "Salieri", ""}, // trailing empty should drop
+		"\xa9art": []string{"Mozart", "Salieri", ""}, // REAL dhowden single-byte atom; trailing empty should drop
 	}
 	values := extractMultiValueTagFromRaw(raw, "tpe1", "©art", "artist")
 	if len(values) != 2 {
@@ -58,8 +58,8 @@ func TestApplyMultiValueArtistsFromRaw_SliceVariant(t *testing.T) {
 func TestExtractMultiValueTagFromRaw_LongestWinsAcrossAliases(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		raw := map[string]any{
-			"tpe1": "Just One",                // single-value string (no NULL)
-			"©art": []string{"Real", "Multi"}, // genuine multi-value
+			"tpe1":    "Just One",                // single-value string (no NULL)
+			"\xa9art": []string{"Real", "Multi"}, // genuine multi-value (REAL dhowden single-byte atom)
 		}
 		got := extractMultiValueTagFromRaw(raw, "tpe1", "©art")
 		if len(got) != 2 {
@@ -83,8 +83,8 @@ func TestExtractMultiValueTagFromRaw_LongestWinsAcrossAliases(t *testing.T) {
 func TestExtractMultiValueTagFromRaw_EqualLengthTieBreakIsDeterministic(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		raw := map[string]any{
-			"tpe1": []string{"Beta", "Two"},  // length 2
-			"©art": []string{"Alpha", "One"}, // length 2, lexically smaller
+			"tpe1":    []string{"Beta", "Two"},  // length 2
+			"\xa9art": []string{"Alpha", "One"}, // length 2, lexically smaller (REAL dhowden single-byte atom)
 		}
 		got := extractMultiValueTagFromRaw(raw, "tpe1", "©art")
 		if len(got) != 2 {
