@@ -43,13 +43,21 @@ func (s *Store) StreamTrackMetaRefsUnderPrefix(ctx context.Context, prefix strin
 		       COALESCE(t.artwork_version, '')
 		  FROM tracks t`
 	var args []any
-	if prefix != "" {
-		// likeEscape escapes %, _, AND the escape char itself, so a
-		// folder literally named `Rock \ Metal` can't produce a broken
-		// escape sequence (store.go:likeEscape).
+	// subtreeLikePattern trims a caller-supplied trailing slash before
+	// appending its own, and treats a trims-to-empty prefix as
+	// whole-library. likeEscape (inside it) escapes %, _, AND the escape
+	// char itself, so a folder literally named `Rock \ Metal` can't
+	// produce a broken escape sequence.
+	//
+	// Every production caller here already normalises via
+	// normaliseBrowsePath, so the trim is defence in depth — but these
+	// four helpers were the ones missed when the same guard was added
+	// to the store.go prefix family, and the sibling that lacked it is
+	// exactly how the class recurs.
+	if pattern, scoped := subtreeLikePattern(prefix); scoped {
 		q += `
 		 WHERE t.path LIKE ? ESCAPE '\'`
-		args = append(args, likeEscape(prefix)+"/%")
+		args = append(args, pattern)
 	}
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -126,7 +134,11 @@ func (s *Store) BookletStatesIn(ctx context.Context, mbids []string) (map[string
 // POST /api/library/enrichment/retry. Empty prefix delegates to the
 // library-wide ResetEnrichedMisses. Holds s.mu (writer contract).
 func (s *Store) ResetEnrichedMissesUnderPrefix(ctx context.Context, prefix string) (int64, error) {
-	if prefix == "" {
+	// Unscoped ("" / "/" / "//") delegates to the library-wide reset —
+	// decided AFTER the trim, so a slash-only prefix can't fall through
+	// to a `LIKE '/%'` that silently resets nothing.
+	pattern, scoped := subtreeLikePattern(prefix)
+	if !scoped {
 		return s.ResetEnrichedMisses(ctx)
 	}
 	s.mu.Lock()
@@ -137,7 +149,7 @@ func (s *Store) ResetEnrichedMissesUnderPrefix(ctx context.Context, prefix strin
 		   AND path LIKE ? ESCAPE '\'
 		   AND (COALESCE(json_extract(tags_json, '$.artworkMBID'), '') = ''
 		     OR COALESCE(json_extract(tags_json, '$.artistMBID'), '') = '')
-	`, likeEscape(prefix)+"/%")
+	`, pattern)
 	if err != nil {
 		return 0, err
 	}
@@ -147,7 +159,8 @@ func (s *Store) ResetEnrichedMissesUnderPrefix(ctx context.Context, prefix strin
 // DistinctArtistMBIDsUnderPrefix is the folder-scoped variant of
 // DistinctArtistMBIDs. Read-only; no s.mu.
 func (s *Store) DistinctArtistMBIDsUnderPrefix(ctx context.Context, prefix string) ([]string, error) {
-	if prefix == "" {
+	pattern, scoped := subtreeLikePattern(prefix)
+	if !scoped {
 		return s.DistinctArtistMBIDs(ctx)
 	}
 	return collectStringColumn(s.db.QueryContext(ctx, `
@@ -156,7 +169,7 @@ func (s *Store) DistinctArtistMBIDsUnderPrefix(ctx context.Context, prefix strin
 		 WHERE path LIKE ? ESCAPE '\'
 		   AND json_extract(tags_json, '$.artistMBID') IS NOT NULL
 		   AND json_extract(tags_json, '$.artistMBID') != ''
-	`, likeEscape(prefix)+"/%"))
+	`, pattern))
 }
 
 // DistinctReleaseMBIDsUnderPrefix enumerates the distinct release
@@ -168,7 +181,11 @@ func (s *Store) DistinctArtistMBIDsUnderPrefix(ctx context.Context, prefix strin
 func (s *Store) DistinctReleaseMBIDsUnderPrefix(ctx context.Context, prefix string) ([]string, error) {
 	// Two static query texts (no fragment concatenation — keeps the
 	// scoped form a fully-constant statement with bound params only).
-	if prefix == "" {
+	// Which one runs is decided AFTER the trim, so "/" and "//" take
+	// the whole-library branch rather than a `LIKE '/%'` that matches
+	// nothing.
+	pattern, scoped := subtreeLikePattern(prefix)
+	if !scoped {
 		return collectStringColumn(s.db.QueryContext(ctx, `
 			SELECT DISTINCT json_extract(tags_json, '$.artworkMBID') AS mbid
 			  FROM tracks
@@ -183,7 +200,6 @@ func (s *Store) DistinctReleaseMBIDsUnderPrefix(ctx context.Context, prefix stri
 			   AND json_extract(tags_json, '$.musicBrainzAlbumID') NOT LIKE 'local-%'
 		`))
 	}
-	pattern := likeEscape(prefix) + "/%"
 	return collectStringColumn(s.db.QueryContext(ctx, `
 		SELECT DISTINCT json_extract(tags_json, '$.artworkMBID') AS mbid
 		  FROM tracks

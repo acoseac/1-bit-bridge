@@ -50,9 +50,15 @@ func (s *stubVariantDeleter) ListVariantsByPathPrefix(ctx context.Context, prefi
 	if s.listErr != nil {
 		return nil, s.listErr
 	}
+	// Mirror the STORE's scoping, which appends its own separator so a
+	// folder prefix matches descendants only. The stub previously used
+	// a bare `HasPrefix(r.SourcePath, prefix)` — the same over-matching
+	// shape the real query had, so it could never catch the divergence
+	// where `?prefix=Album` also reaped `Album 2/`.
 	out := []VariantSummary{}
+	scope := strings.TrimRight(prefix, "/")
 	for _, r := range s.all {
-		if strings.HasPrefix(r.SourcePath, prefix) {
+		if scope == "" || strings.HasPrefix(r.SourcePath, scope+"/") {
 			out = append(out, r)
 		}
 	}
