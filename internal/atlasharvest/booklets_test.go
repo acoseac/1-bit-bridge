@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -26,6 +27,13 @@ type fakeBookletSink struct {
 	unavail   []string
 	gcSeen    []string // universes DeleteBookletsNotIn saw
 	gcOrphans []string // what it returns
+
+	// calls records the ORDER of the availability / tag writes so the
+	// "stamp the tag before marking available" contract can be
+	// asserted; failTagStamp injects a stamp failure to prove the
+	// release is left un-marked (and so stays in the check queue).
+	calls        []string
+	failTagStamp bool
 }
 
 func newFakeBookletSink() *fakeBookletSink {
@@ -47,6 +55,7 @@ func (f *fakeBookletSink) BookletsToCheck(_ context.Context, candidates []string
 }
 func (f *fakeBookletSink) UpsertBookletAvailability(_ context.Context, mbid string, available bool, etag string, _ int64) error {
 	if available {
+		f.calls = append(f.calls, "available:"+mbid)
 		f.available[mbid] = etag
 	} else {
 		f.missed[mbid]++
@@ -54,6 +63,10 @@ func (f *fakeBookletSink) UpsertBookletAvailability(_ context.Context, mbid stri
 	return nil
 }
 func (f *fakeBookletSink) SetBookletTagAndBumpIndex(_ context.Context, mbid, tag string) (int64, error) {
+	f.calls = append(f.calls, "tag:"+mbid)
+	if f.failTagStamp {
+		return 0, errors.New("injected tag-stamp failure")
+	}
 	f.tags[mbid] = tag
 	return 1, nil
 }
@@ -392,5 +405,70 @@ func TestNudgeBookletFetchPrioritizes(t *testing.T) {
 
 	if len(served) < 2 || served[0] != relTapped {
 		t.Errorf("serve order = %v, want the nudged MBID first", served)
+	}
+}
+
+// bookletCheckOnlyServer answers the check endpoint with a single
+// available release and nothing else — enough to drive one tick
+// through the hit branch.
+func bookletCheckOnlyServer(t *testing.T, mbid, etag string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if quietResults(w, r) {
+			return
+		}
+		if r.URL.Path == "/v1/atlas/harvest/booklets/check" {
+			_ = json.NewEncoder(w).Encode(bookletsCheckResponse{Booklets: []bookletsCheckItem{
+				{MBID: mbid, Etag: etag, Bytes: 1024},
+			}})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// The wire tag must be stamped BEFORE the release is marked available.
+//
+// BookletsToCheck only re-queues rows with available = 0, so
+// availability is the latch that removes a release from the check
+// rotation. Marking it first meant a failing tag stamp left the row
+// available = 1 with NO tag — permanently outside the queue, with the
+// booklet invisible to iOS and no recovery short of a manual DB edit.
+func TestBookletCheck_StampsTagBeforeMarkingAvailable(t *testing.T) {
+	const rel = "11111111-1111-4111-8111-111111111111"
+	srv := bookletCheckOnlyServer(t, rel, "etag-1")
+
+	sink := newFakeBookletSink()
+	sink.universe = []string{rel}
+	c := bookletTestClient(t, srv.URL, sink, newFakeBookletFiles())
+
+	c.tick(context.Background())
+
+	want := []string{"tag:" + rel, "available:" + rel}
+	if len(sink.calls) != 2 || sink.calls[0] != want[0] || sink.calls[1] != want[1] {
+		t.Fatalf("write order = %v, want %v — availability is the latch that "+
+			"removes a release from the check queue, so it must be written LAST",
+			sink.calls, want)
+	}
+}
+
+// A failing tag stamp must leave the release un-marked, so the next
+// cycle re-queues it rather than stranding it outside the rotation.
+func TestBookletCheck_TagStampFailureLeavesReleaseUnavailable(t *testing.T) {
+	const rel = "22222222-2222-4222-8222-222222222222"
+	srv := bookletCheckOnlyServer(t, rel, "etag-1")
+
+	sink := newFakeBookletSink()
+	sink.universe = []string{rel}
+	sink.failTagStamp = true
+	c := bookletTestClient(t, srv.URL, sink, newFakeBookletFiles())
+
+	c.tick(context.Background())
+
+	if _, marked := sink.available[rel]; marked {
+		t.Fatal("release was marked available even though the tag stamp failed: " +
+			"BookletsToCheck will never re-queue it, so the booklet is stranded")
 	}
 }

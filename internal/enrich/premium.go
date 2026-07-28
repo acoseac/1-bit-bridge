@@ -87,6 +87,16 @@ func (f *atlasPremiumFetcher) TryCache(ctx context.Context, path, mbid string, s
 		if resp.StatusCode >= 500 {
 			logger.Warn("atlas premium cover fetch", "mbid", mbid, "size", size, "status", resp.StatusCode)
 		}
+		// Drain before Close so the connection returns to the idle
+		// pool — net/http only reuses an HTTP/1.1 conn whose body was
+		// read to EOF. This file was the only one in the package not
+		// calling the shared helper, and it matters MORE here than
+		// elsewhere: NewAtlasPremiumFetcher builds a bare http.Client
+		// on http.DefaultTransport rather than the package's tuned
+		// sharedHTTPTransport, so MaxIdleConnsPerHost is 2 and the
+		// churn costs a fresh TLS handshake per miss. Error bodies are
+		// small, well inside drainBody's 64 KiB cap.
+		drainBody(resp.Body)
 		return false
 	}
 	if err := writeArtworkAtomicStream(path, resp.Body, MaxCoverArtBytes); err != nil {
@@ -154,6 +164,8 @@ func (f *atlasPremiumFetcher) RefetchPremium(ctx context.Context, path, mbid str
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		f.clearOnAuthReject(resp.StatusCode)
+		// Same connection-reuse rationale as TryCache's non-200 branch.
+		drainBody(resp.Body)
 		switch {
 		case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
 			// Token rejected (now cleared) — surface as ErrNoCredential so the
@@ -169,6 +181,13 @@ func (f *atlasPremiumFetcher) RefetchPremium(ctx context.Context, path, mbid str
 		// Atlas hasn't reverse-resolved a premium cover yet (still CAA) — leave
 		// the existing cache. This IS a genuine "not ready" miss (it counts
 		// toward the attempt cap), distinct from the transient errors above.
+		//
+		// Deliberately NOT drained: unlike the non-200 branches above,
+		// the body here is a full cover image (up to MaxCoverArtBytes),
+		// so drainBody's 64 KiB cap wouldn't reach EOF and the
+		// connection is unreusable either way. Reading megabytes of
+		// JPEG we're about to discard just to maybe salvage a socket is
+		// the worse trade.
 		return false, nil
 	}
 	if err := writeArtworkAtomicStream(path, resp.Body, MaxCoverArtBytes); err != nil {

@@ -56,7 +56,20 @@ func ExtractClientIP(r *http.Request, trustForwardedHeaders bool) string {
 				return ip
 			}
 		}
-		if ip := rightmostValidForwardedFor(r.Header.Get("X-Forwarded-For")); ip != "" {
+		// Values, not Get: repeated field lines are stored as separate
+		// slice entries and Get returns only index 0, so a proxy that
+		// APPENDS a header line rather than comma-appending to the
+		// existing one would leave the rightmost-valid walk looking at
+		// nothing but the client-supplied first line.
+		//
+		// Caddy and nginx — the two proxies this file documents — both
+		// collapse into a single line, so this is hardening rather than
+		// a live hole. HAProxy's `option forwardfor` adds a line, which
+		// is the shape that would bite. rightmostValidForwardedFor
+		// TrimSpaces each element before net.ParseIP, so joining with a
+		// bare comma is safe.
+		if ip := rightmostValidForwardedFor(
+			strings.Join(r.Header.Values("X-Forwarded-For"), ",")); ip != "" {
 			return ip
 		}
 	}
