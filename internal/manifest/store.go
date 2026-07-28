@@ -3180,10 +3180,28 @@ func (s *Store) CountTracksUnderRoot(ctx context.Context, rootBase string, multi
 // literally without an ESCAPE clause.
 func (s *Store) CountTracksByPrefix(ctx context.Context, prefix string) (int, error) {
 	// TrimRight, not TrimSuffix: a caller passing "Album//" would keep one
-	// slash and rebuild the same broken pattern. All four prefix helpers
-	// (here, RollupByPrefix, EligibleRollupByPrefix,
-	// ListTrackProjectionsUnderPrefix) use this form — keep them in step.
+	// slash and rebuild the same broken pattern.
+	//
+	// DECIDE AFTER THE TRIM. All four prefix helpers (here,
+	// RollupByPrefix, EligibleRollupByPrefix,
+	// ListTrackProjectionsUnderPrefix) treat a prefix that is EMPTY
+	// ONCE TRIMMED as whole-library — keep them in step. Deciding
+	// before the trim splits the family: "//" then means "everything"
+	// to two of them and "nothing" to the other two, and the admin
+	// Inspector renders a rollup and a projection from the same input
+	// side by side.
+	//
+	// Without the branch, base "" builds `path >= '/' AND path < '0'`,
+	// which matches nothing (library-relative paths never start with
+	// '/'). No caller passes "" today; the reachable degenerate is a
+	// multi-root `/` root, where filepath.Base gives "/" — and there
+	// the whole-table count is the FAIL-SAFE answer, because this
+	// feeds the scanner's FUSE drop-mode guard and a 0 silently
+	// bypasses it (see CountTracksUnderRoot's docblock).
 	base := strings.TrimRight(prefix, "/")
+	if base == "" {
+		return s.CountTracks(ctx)
+	}
 	var n int
 	err := s.db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM tracks WHERE path >= ? || '/' AND path < ? || '0'`,
@@ -3524,6 +3542,32 @@ func likeEscape(s string) string {
 		out = append(out, s[i])
 	}
 	return string(out)
+}
+
+// subtreeLikePattern builds the escaped LIKE pattern that matches every
+// path strictly BELOW `prefix`, and reports whether the query should be
+// scoped at all.
+//
+// It exists so the decide-after-trim rule is applied structurally
+// rather than restated at each call site. Two failure modes it closes,
+// both of which have shipped here before:
+//
+//   - The pattern appends its own '/', so a caller's trailing slash
+//     builds `LIKE 'Album//%'` and matches NOTHING — a silently-empty
+//     result, not an error. TrimRight (not TrimSuffix) so "Album//"
+//     doesn't keep one slash and rebuild the same broken pattern.
+//   - A prefix that is empty ONCE TRIMMED means whole-library. Deciding
+//     before the trim makes "//" mean "everything" to some helpers and
+//     "nothing" to others.
+//
+// scoped=false means "no WHERE clause" — the caller must NOT bind the
+// returned pattern in that case.
+func subtreeLikePattern(prefix string) (pattern string, scoped bool) {
+	base := strings.TrimRight(prefix, "/")
+	if base == "" {
+		return "", false
+	}
+	return likeEscape(base) + `/%`, true
 }
 
 // TrackPaths returns every known track path (sorted). Used by the scanner's
@@ -4952,7 +4996,16 @@ func (s *Store) RollupByPrefix(ctx context.Context, prefix string) (FolderRollup
 	// so on a 50k+ track library the unconstrained-LIKE form is a
 	// needless O(N) scan. Run the aggregates with no WHERE clause
 	// instead — SQLite can satisfy the COUNT/SUM directly.
-	if prefix == "" {
+	//
+	// Gated on the TRIMMED prefix, not the raw one: "/" and "//" are
+	// whole-library here exactly as they are in
+	// ListTrackProjectionsUnderPrefix / EligibleRollupByPrefix. Testing
+	// the raw string sent them down the range branch with base "",
+	// building `path >= '/' AND path < '0'` — a match on nothing, while
+	// the projection helper called the same input the whole library.
+	// The Inspector renders both from one submit, so the two disagreed
+	// on screen.
+	if strings.TrimRight(prefix, "/") == "" {
 		// One round-trip: two scalar subqueries cover `tracks`, and the
 		// conditional aggregation scans `track_variants` exactly once
 		// instead of twice (Gemini on PR #340).
@@ -4992,9 +5045,14 @@ func (s *Store) RollupByPrefix(ctx context.Context, prefix string) (FolderRollup
 	// build `path >= 'Album//'` and match NOTHING — a silently-empty rollup
 	// rather than an error (Gemini HIGH, post-merge review of #532).
 	// TrimRight, not TrimSuffix: a caller passing "Album//" would keep one
-	// slash and rebuild the same broken pattern. All four prefix helpers
-	// (here, RollupByPrefix, EligibleRollupByPrefix,
-	// ListTrackProjectionsUnderPrefix) use this form — keep them in step.
+	// slash and rebuild the same broken pattern.
+	//
+	// All four prefix helpers (here, CountTracksByPrefix,
+	// EligibleRollupByPrefix, ListTrackProjectionsUnderPrefix) share the
+	// trim AND the decide-after-trim empty-base rule — keep them in
+	// step. They do NOT all share a query form: this one, its two
+	// byte-range siblings, and ListTrackProjectionsUnderPrefix (which
+	// uses an escaped LIKE) differ deliberately.
 	base := strings.TrimRight(prefix, "/")
 	var out FolderRollup
 	if err := s.db.QueryRowContext(ctx, `
@@ -5300,19 +5358,13 @@ type TrackProjection struct {
 // naturally contribute nothing to the projection. The admin can
 // surface a separate "X unknown-format tracks" counter if needed.
 func (s *Store) ListTrackProjectionsUnderPrefix(ctx context.Context, prefix, variantPrefix string) ([]TrackProjection, error) {
-	var pattern string
-	// TrimSuffix first: the pattern appends its own '/', so a
-	// caller-supplied trailing slash builds `LIKE 'Album//%'`, which
-	// matches nothing and silently reports ZERO candidate tracks — the
-	// batch pre-flight then shows "nothing to do" for a folder full of
-	// work. Not hypothetical: the admin Library Inspector's submit path
-	// (`handlers_library_inspector.go`) forwards `req.Path` verbatim,
-	// unlike `api/upscale_batch.go` which runs it through path.Clean.
-	// Same class as the RollupByPrefix guard.
-	if base := strings.TrimRight(prefix, "/"); base == "" {
+	// See subtreeLikePattern for why the trim and the decide-after-trim
+	// rule are load-bearing. Whole-library is a legal scope here, so an
+	// unscoped call falls back to the match-everything pattern rather
+	// than dropping the WHERE clause.
+	pattern, scoped := subtreeLikePattern(prefix)
+	if !scoped {
 		pattern = `%`
-	} else {
-		pattern = likeEscape(base) + `/%`
 	}
 	// **Parameter binding order is load-bearing**: the new `?` for
 	// `variantPrefix` lives inside the SELECT-block EXISTS subquery,
@@ -5697,7 +5749,25 @@ func (s *Store) AllVariants(ctx context.Context) ([]VariantRow, error) {
 // handler so a partial result never silently leaks. Hits the v4
 // `idx_track_variants_source_path_unicode_lower` index.
 func (s *Store) ListVariantsByPathPrefix(ctx context.Context, prefix string) ([]VariantRow, error) {
-	pattern := likeEscape(prefix) + "%"
+	// The helper appends its OWN separator, so a caller supplies the
+	// folder name alone. Pre-fix this built a bare `prefix%`, which
+	// over-matched every sibling sharing the name as a prefix:
+	// `?prefix=Album` also reaped variants under `Album 2/`,
+	// `Albums/`, `Album Live/`. Silent, and the files are gone.
+	//
+	// The API layer could not work around it either — validateRelativePath
+	// rejects any prefix carrying a trailing slash (`cleaned != p`), so
+	// there was no input that produced a correctly-scoped delete. Fixing
+	// the query rather than loosening the validator keeps the primitive
+	// safe for every future caller and leaves the 400 correct as-is.
+	//
+	// Same decide-after-trim rule as the four tracks-side prefix
+	// helpers; empty stays "every row" for the delete-all path (the
+	// handler gates that behind ?confirm=true).
+	pattern, scoped := subtreeLikePattern(prefix)
+	if !scoped {
+		pattern = `%`
+	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT source_path, variant_id, sidecar_path, format,
 		       sample_rate, bits_per_sample, size_bytes,
