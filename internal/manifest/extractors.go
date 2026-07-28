@@ -142,6 +142,20 @@ var Ext = map[string]bool{
 // Equivalent to ExtractWithContext(absPath, t, nil) — preserved for
 // callers (existing tests, anyone with a one-shot tag read) that don't
 // run the local-artwork extraction pipeline.
+// ExtractorVersion stamps every scanned track row (the `extractor_version`
+// column). Bump it whenever tag-extraction LOGIC changes so the scan-skip
+// gate (scanner.go) re-extracts any row whose stored stamp is < this value —
+// a self-healing metadata migration with no explicit DB rewrite, mirroring
+// analyze.WaveformSchemaVersion. MUST stay >= 1: a row's column default is 0,
+// and the gate skips when `stored >= ExtractorVersion`, so at 0 the check
+// would be `0 >= 0` (true) and nothing would ever re-extract.
+//
+// Bumped to 1 with the MP4 © atom canonicalization in normaliseRawTagKey
+// (year / composer / multi-value artist were silently dropped for M4A). The
+// first scan after this ships re-extracts every existing row once (all
+// formats), then size+mtime skips resume.
+const ExtractorVersion = 1
+
 func Extract(absPath string, t *Track) error {
 	return ExtractWithContext(absPath, t, nil)
 }
@@ -1343,7 +1357,23 @@ func stringOf(raw map[string]any, keys ...string) (string, bool) {
 // shapes uniformly. The replacement is space → underscore only —
 // other punctuation (slash, colon, etc.) stays intact since dhowden's
 // raw map keys preserve them on the surfaces we care about.
+//
+// MP4 © atoms need a canonicalization pass FIRST. dhowden stores them
+// with a single 0xA9 lead byte (`\xa9day`, `\xa9ART`, `\xa9wrt`, …),
+// which is invalid UTF-8; the strings.ToLower below would rewrite that
+// byte to utf8.RuneError (0xEF 0xBF 0xBD), so the source-literal
+// aliases (`"©day"` etc., which are UTF-8 0xC2 0xA9) could never match
+// — silently dropping year / composer / multi-value artist for M4A.
+// Canonicalize a leading 0xA9 to UTF-8 © BEFORE ToLower so the
+// normalized key becomes `"©day"`/`"©art"`/`"©wrt"` and matches those
+// aliases. Prefix-anchored (MP4 © atoms are always byte 0) so a 0xA9
+// continuation byte inside a multibyte key is left untouched, and
+// behavior-preserving for every ASCII key (ID3/Vorbis frame IDs + MP4
+// non-© atoms `trkn`/`disk`/`aART`/… don't start with 0xA9).
 func normaliseRawTagKey(k string) string {
+	if strings.HasPrefix(k, "\xa9") {
+		k = "©" + k[1:]
+	}
 	return strings.ReplaceAll(strings.ToLower(k), " ", "_")
 }
 

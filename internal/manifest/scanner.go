@@ -932,8 +932,18 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 				// quiet-on-ctx-cancel logging.
 				scanLogger.Warn("skip-gate lookup", "path", pi.rel, "err", statErr)
 			}
+			// The `extractor_version` clause is on the OUTER guard (not the
+			// inner block) on purpose: a row whose stamp is < the current
+			// ExtractorVersion must fall through to the full extract path
+			// below, exactly like a size/mtime change — placing it inside
+			// the `!needsLocalArtworkRecovery` block would take the light
+			// ResetTrackMissingCount+return and NEVER re-extract. This is the
+			// self-healing metadata-migration trigger (e.g. the MP4 © atom
+			// fix that recovers M4A year/composer): the first scan after an
+			// ExtractorVersion bump re-extracts every stale row once.
 			if existing != nil && existing.Size == pi.info.Size() &&
-				existing.MTimeNS == pi.info.ModTime().UnixNano() {
+				existing.MTimeNS == pi.info.ModTime().UnixNano() &&
+				existing.ExtractorVersion >= ExtractorVersion {
 				if !s.needsLocalArtworkRecovery(existing.ArtworkMBID) {
 					// Even on the early-skip path we MUST reset the
 					// missing_count for this row, otherwise a flap-
