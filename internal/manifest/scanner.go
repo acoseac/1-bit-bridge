@@ -1809,7 +1809,13 @@ func (s *Scanner) routedPathSet(ctx context.Context) map[string]struct{} {
 	routedSet := make(map[string]struct{})
 	routed, err := s.store.UPnPRoutedSourcePaths(ctx)
 	if err != nil {
-		scanLogger.Warn("routed-paths fetch for missing pass failed", "err", err)
+		// A cancelled ctx here is an ordinary shutdown, not a fault —
+		// logging it produces a burst of alarming warnings every time
+		// the operator stops the bridge mid-scan. The caller's own
+		// ctx checks abort the pass regardless.
+		if ctx.Err() == nil {
+			scanLogger.Warn("routed-paths fetch for missing pass failed", "err", err)
+		}
 		return routedSet
 	}
 	for _, p := range routed {

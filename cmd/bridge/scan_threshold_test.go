@@ -43,9 +43,15 @@ func TestScanCmdHonoursConfiguredDeleteThreshold(t *testing.T) {
 		[]byte("not a real flac"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// A NON-DEFAULT threshold on purpose. With the default of 3 this
+	// test would still pass against a scanner that hardcoded 3 rather
+	// than reading the config, which is not the contract — the contract
+	// is that `bridge scan` honours whatever the operator configured.
+	const threshold = 4
 	cfgPath := filepath.Join(dir, "bridge.yaml")
 	body := "libraryRoots:\n  - " + lib + "\ndataDir: " +
-		filepath.Join(dir, "data") + "\nadminAddress: 127.0.0.1:0\n"
+		filepath.Join(dir, "data") + "\nadminAddress: 127.0.0.1:0\n" +
+		"scanner:\n  deleteAfterMissingScans: 4\n"
 	if err := os.WriteFile(cfgPath, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -59,24 +65,42 @@ func TestScanCmdHonoursConfiguredDeleteThreshold(t *testing.T) {
 		}
 	}
 
+	trackRow := func() *manifest.Track {
+		t.Helper()
+		store, err := manifest.OpenStore(filepath.Join(dir, "data", "bridge.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.Close()
+		got, err := store.GetTrack(context.Background(), "song.flac")
+		if err != nil {
+			t.Fatalf("GetTrack: %v", err)
+		}
+		return got
+	}
+
 	runScan() // indexes the track
 	if err := os.Remove(track); err != nil {
 		t.Fatal(err)
 	}
-	runScan() // missing_count 1
-	runScan() // missing_count 2 — still below the default threshold of 3
 
-	store, err := manifest.OpenStore(filepath.Join(dir, "data", "bridge.db"))
-	if err != nil {
-		t.Fatal(err)
+	// Below the boundary: the row must survive every scan up to
+	// threshold-1. Pre-fix the CLI ran at the unwired fallback of 1 and
+	// reaped it on the very first pass.
+	for i := 1; i < threshold; i++ {
+		runScan()
+		if trackRow() == nil {
+			t.Fatalf("`bridge scan` reaped the row after %d missing scan(s), "+
+				"below the configured threshold of %d: the CLI is not honouring "+
+				"scanner.deleteAfterMissingScans", i, threshold)
+		}
 	}
-	defer store.Close()
-	got, err := store.GetTrack(context.Background(), "song.flac")
-	if err != nil {
-		t.Fatalf("GetTrack: %v", err)
-	}
-	if got == nil {
-		t.Fatal("`bridge scan` reaped the row before the configured " +
-			"missing-scan threshold: SetDeleteThreshold is not wired")
+
+	// AT the boundary it must actually delete — otherwise a scanner
+	// that simply never reaps would satisfy the assertions above.
+	runScan()
+	if trackRow() != nil {
+		t.Fatalf("row survived %d missing scans; it must be reaped once the "+
+			"configured threshold of %d is reached", threshold, threshold)
 	}
 }
