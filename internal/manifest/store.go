@@ -4294,6 +4294,20 @@ func (s *Store) UpdateUpscaleBatchProgress(ctx context.Context, row UpscaleBatch
 func (s *Store) UpdateUpscaleBatchStatus(ctx context.Context, row UpscaleBatchRow) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Same terminal guard the progress form carries. transitionStatus
+	// builds its row copy under Coordinator.mu but persists OUTSIDE it,
+	// so two concurrent transitions (Submit's pending→running promotion
+	// racing a Cancel) can land in the opposite order and let the
+	// non-terminal write clobber the terminal one. Nothing corrects it
+	// afterwards: the terminal transition removed the batch from
+	// liveBatches, so no later callback revisits the row and it sits
+	// `running` forever.
+	//
+	// Boot recovery's 'interrupted' stamp is a separate statement
+	// (RecoverInterruptedBatches) and is unaffected. Blocking a
+	// terminal→terminal write costs nothing either: transitionStatus
+	// early-returns once the batch has left liveBatches, so the only
+	// writes this rejects are the stale racing ones.
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE upscale_batches
 		   SET status      = ?,
@@ -4301,6 +4315,7 @@ func (s *Store) UpdateUpscaleBatchStatus(ctx context.Context, row UpscaleBatchRo
 		       error       = ?,
 		       updated_at  = ?
 		 WHERE id = ?
+		   AND status NOT IN ('completed', 'failed', 'cancelled', 'interrupted')
 	`, row.Status, row.TotalFiles, row.TotalFiles,
 		row.Error, row.UpdatedAt, row.ID[:])
 	return err

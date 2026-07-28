@@ -181,3 +181,45 @@ func TestUpdateUpscaleBatchProgress_TotalFilesIsMonotonic(t *testing.T) {
 		t.Fatalf("stale snapshot raised total_files back to %d, want 6", got)
 	}
 }
+
+// A terminal status must not be clobbered by a later non-terminal
+// write.
+//
+// transitionStatus builds its row copy under Coordinator.mu but
+// persists OUTSIDE it, so a pending→running promotion racing a Cancel
+// can land in the opposite order. Without a guard the `running` write
+// wins, and nothing corrects it — the terminal transition already
+// removed the batch from liveBatches, so no later callback revisits the
+// row and it sits `running` forever.
+func TestUpdateUpscaleBatchStatus_DoesNotResurrectTerminal(t *testing.T) {
+	s := openTempStoreForBatch(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+
+	id := uuid.New()
+	row := manifest.UpscaleBatchRow{
+		ID: id, Path: "Album", TargetRate: 192000, TargetBits: 24,
+		Status: "running", TotalFiles: 4, CreatedAt: 1, UpdatedAt: 1,
+	}
+	if err := s.InsertUpscaleBatch(ctx, row); err != nil {
+		t.Fatalf("InsertUpscaleBatch: %v", err)
+	}
+
+	row.Status = "cancelled"
+	row.UpdatedAt = 2
+	if err := s.UpdateUpscaleBatchStatus(ctx, row); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+
+	// The stale in-flight promotion, landing after the cancel.
+	row.Status = "running"
+	row.UpdatedAt = 3
+	if err := s.UpdateUpscaleBatchStatus(ctx, row); err != nil {
+		t.Fatalf("stale promotion: %v", err)
+	}
+
+	if got := batchStatus(t, s, id); got != "cancelled" {
+		t.Fatalf("status = %q, want cancelled — a stale non-terminal write "+
+			"resurrected a terminal batch that nothing will ever finish", got)
+	}
+}
