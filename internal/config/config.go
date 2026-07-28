@@ -1639,6 +1639,15 @@ func (c *Config) resolvePaths(baseDir string) {
 	// from a different shell, and (b) forces LE to re-issue
 	// against rate-limit quota (CodeRabbit Major on PR #293).
 	c.Autocert.CacheDir = resolvePath(baseDir, c.Autocert.CacheDir)
+	// Variants dir was the one on-disk path field left uncanonicalised,
+	// so a trailing separator survived into JobSpec.OutputDir. Sidecar
+	// paths are built with filepath.Join (which Cleans), so the
+	// stderr-redaction pass then searched for `<dir>//` and matched
+	// nothing — leaking the absolute host path into the persisted job
+	// error and the SSE payload. Cleaning here fixes it at the source;
+	// redactSoxErr also trims defensively, since the admin hot-patch
+	// route can set this field without going through Load().
+	c.Upscale.VariantsDir = resolvePath(baseDir, c.Upscale.VariantsDir)
 }
 
 // resolvePath canonicalises a single config path against baseDir: an empty
