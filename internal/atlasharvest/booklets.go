@@ -145,11 +145,27 @@ func (c *Client) checkBookletChunk(ctx context.Context, st State, chunk []string
 			}
 			continue
 		}
-		if err := c.Booklets.UpsertBookletAvailability(ctx, mbid, true, b.Etag, b.Bytes); err != nil {
-			return fmt.Errorf("record booklet %s: %w", mbid, err)
-		}
+		// ORDER IS LOAD-BEARING: stamp the wire tag BEFORE marking the
+		// release available.
+		//
+		// BookletsToCheck only re-queues rows with available = 0, so
+		// availability is the latch that takes a release out of the
+		// check rotation. Marking it first meant a failing tag stamp
+		// left the row available = 1 with NO tag — permanently outside
+		// the queue, so the booklet stayed invisible to iOS with no
+		// recovery short of editing the DB by hand.
+		//
+		// Stamping first makes both failure modes self-heal: a failed
+		// stamp returns before availability is touched, and a failed
+		// availability upsert leaves the (already-correct) tag with
+		// available still 0. Either way the release is re-queued next
+		// cycle and the surviving half of the write is idempotent —
+		// SetBookletTagAndBumpIndex no-ops when the tag is unchanged.
 		if _, err := c.Booklets.SetBookletTagAndBumpIndex(ctx, mbid, b.Etag); err != nil {
 			return fmt.Errorf("stamp booklet tag %s: %w", mbid, err)
+		}
+		if err := c.Booklets.UpsertBookletAvailability(ctx, mbid, true, b.Etag, b.Bytes); err != nil {
+			return fmt.Errorf("record booklet %s: %w", mbid, err)
 		}
 	}
 	return nil

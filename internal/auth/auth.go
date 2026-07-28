@@ -27,9 +27,9 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 )
 
@@ -490,15 +490,21 @@ func (s *Store) RecordClientVersion(id, ver string) {
 		return
 	}
 	if len(ver) > maxClientVersionLen {
-		ver = ver[:maxClientVersionLen]
 		// Byte-slicing can land in the middle of a multi-byte UTF-8
 		// rune. Trim back to the last valid boundary so we never
 		// persist a half-rune to tokens.json — encoding/json would
 		// substitute a replacement character on the next read but
-		// the on-disk shape is still malformed (PR #N).
-		for !utf8.ValidString(ver) && len(ver) > 0 {
-			ver = ver[:len(ver)-1]
-		}
+		// the on-disk shape is still malformed.
+		//
+		// TrimPartialTrailingRune drops at most UTFMax-1 trailing bytes
+		// and is O(1). The older `for !utf8.ValidString(ver)` loop
+		// rescanned the whole string per iteration AND, on an input
+		// with INTERIOR invalid UTF-8, walked back past the bad byte
+		// discarding everything after it. That shape is only safe for
+		// inputs guaranteed valid except at the cut — which a header
+		// value is, so this was never a live bug here; it's one less
+		// copy of a pattern the codebase has deprecated.
+		ver = fsutil.TrimPartialTrailingRune(ver[:maxClientVersionLen])
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

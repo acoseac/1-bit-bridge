@@ -127,6 +127,12 @@ func decodeCoverBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
 // uploadCover is the shared upload path for both scopes: validate + resize +
 // atomic-write the JPEG, then upsert the (scope,key)→hash mapping.
 func (s *Server) uploadCover(w http.ResponseWriter, r *http.Request, scope, key string) {
+	// The key feeds BOTH the on-disk filename (sha256 of scope+key,
+	// byte-exact) and the playlist_covers row, so the write side has to
+	// normalise in lockstep with the read side in
+	// internal/api/playlist_covers.go — normalising only one orphans
+	// files.
+	key = strings.ToLower(strings.TrimSpace(key))
 	if key == "" {
 		writeError(w, http.StatusBadRequest, "bad_request", "missing key")
 		return
@@ -175,6 +181,12 @@ func (s *Server) uploadCover(w http.ResponseWriter, r *http.Request, scope, key 
 
 // deleteCover removes a cover mapping + its on-disk JPEG.
 func (s *Server) deleteCover(w http.ResponseWriter, r *http.Request, scope, key string) {
+	// The key feeds BOTH the on-disk filename (sha256 of scope+key,
+	// byte-exact) and the playlist_covers row, so the write side has to
+	// normalise in lockstep with the read side in
+	// internal/api/playlist_covers.go — normalising only one orphans
+	// files.
+	key = strings.ToLower(strings.TrimSpace(key))
 	if key == "" {
 		writeError(w, http.StatusBadRequest, "bad_request", "missing key")
 		return

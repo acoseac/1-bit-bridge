@@ -51,12 +51,23 @@ import (
 // only documents single-proxy reverse-proxy deployments.
 func ExtractClientIP(r *http.Request, trustForwardedHeaders bool) string {
 	if trustForwardedHeaders {
-		if ip := strings.TrimSpace(r.Header.Get("X-Real-IP")); ip != "" {
-			if net.ParseIP(ip) != nil {
-				return ip
-			}
+		if ip := canonicalIP(r.Header.Get("X-Real-IP")); ip != "" {
+			return ip
 		}
-		if ip := rightmostValidForwardedFor(r.Header.Get("X-Forwarded-For")); ip != "" {
+		// Values, not Get: repeated field lines are stored as separate
+		// slice entries and Get returns only index 0, so a proxy that
+		// APPENDS a header line rather than comma-appending to the
+		// existing one would leave the rightmost-valid walk looking at
+		// nothing but the client-supplied first line.
+		//
+		// Caddy and nginx — the two proxies this file documents — both
+		// collapse into a single line, so this is hardening rather than
+		// a live hole. HAProxy's `option forwardfor` adds a line, which
+		// is the shape that would bite. rightmostValidForwardedFor
+		// TrimSpaces each element before net.ParseIP, so joining with a
+		// bare comma is safe.
+		if ip := rightmostValidForwardedFor(
+			strings.Join(r.Header.Values("X-Forwarded-For"), ",")); ip != "" {
 			return ip
 		}
 	}
@@ -72,9 +83,32 @@ func ExtractClientIP(r *http.Request, trustForwardedHeaders bool) string {
 	return host
 }
 
-// rightmostValidForwardedFor returns the right-most non-empty,
-// net.ParseIP-valid element of an X-Forwarded-For header value.
-// Empty string if none found.
+// canonicalIP parses s as an IP and returns its CANONICAL text form,
+// or "" when it isn't one.
+//
+// Returning ParseIP's re-serialisation rather than the caller's
+// substring does two things:
+//
+//   - Stabilises the rate-limit bucket key. `192.0.2.1` and
+//     `::ffff:192.0.2.1` are the same host but distinct map keys, so
+//     varying the spelling handed a caller a fresh bucket and diluted
+//     the limiter. Canonicalising collapses them.
+//   - Makes the "this function only ever returns a bare IP literal"
+//     guarantee structural instead of a property you have to re-derive
+//     from the validation above each return. A parsed-and-reformatted
+//     IP cannot carry a newline, so nothing downstream (audit log
+//     lines, bucket keys) can be injected through it.
+func canonicalIP(s string) string {
+	ip := net.ParseIP(strings.TrimSpace(s))
+	if ip == nil {
+		return ""
+	}
+	return ip.String()
+}
+
+// rightmostValidForwardedFor returns the right-most parseable element
+// of an X-Forwarded-For header value, in canonical form. Empty string
+// if none found.
 //
 // Right-most is the spoof-resistant choice — see ExtractClientIP's
 // docstring for the threat model. An attacker who can append to
@@ -87,12 +121,8 @@ func rightmostValidForwardedFor(raw string) string {
 	}
 	parts := strings.Split(raw, ",")
 	for i := len(parts) - 1; i >= 0; i-- {
-		candidate := strings.TrimSpace(parts[i])
-		if candidate == "" {
-			continue
-		}
-		if net.ParseIP(candidate) != nil {
-			return candidate
+		if ip := canonicalIP(parts[i]); ip != "" {
+			return ip
 		}
 	}
 	return ""
