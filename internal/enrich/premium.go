@@ -182,12 +182,23 @@ func (f *atlasPremiumFetcher) RefetchPremium(ctx context.Context, path, mbid str
 		// the existing cache. This IS a genuine "not ready" miss (it counts
 		// toward the attempt cap), distinct from the transient errors above.
 		//
-		// Deliberately NOT drained: unlike the non-200 branches above,
-		// the body here is a full cover image (up to MaxCoverArtBytes),
-		// so drainBody's 64 KiB cap wouldn't reach EOF and the
-		// connection is unreusable either way. Reading megabytes of
-		// JPEG we're about to discard just to maybe salvage a socket is
-		// the worse trade.
+		// Drain ONLY when the declared length fits drainBody's 64 KiB
+		// cap. Unlike the non-200 branches above, the body here is a
+		// full cover image — and the size decides the trade:
+		//
+		//   - Under the cap (a 500px CAA JPEG often is), the drain
+		//     reaches EOF and salvages the connection. Worth it: a
+		//     fresh TLS handshake costs more than the transfer, and
+		//     this fetcher runs on http.DefaultTransport with
+		//     MaxIdleConnsPerHost = 2.
+		//   - Over it, the drain CANNOT reach EOF, so it would burn
+		//     64 KiB of transfer and still lose the connection.
+		//
+		// Unknown length (chunked, ContentLength < 0) takes the
+		// conservative branch and skips the drain.
+		if resp.ContentLength >= 0 && resp.ContentLength <= maxDrainBytes {
+			drainBody(resp.Body)
+		}
 		return false, nil
 	}
 	if err := writeArtworkAtomicStream(path, resp.Body, MaxCoverArtBytes); err != nil {
