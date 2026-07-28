@@ -522,6 +522,27 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) error {
 			if IsTransient(err) {
 				return err
 			}
+			// Persistent failure (4xx / decode): cache the empty
+			// resolution so sibling tracks by the same artist don't
+			// re-hammer the upstream with the same guaranteed-fail
+			// query. Mirrors the album path's `albumCache.Set(key,
+			// albumResolution{})` on its persistent branch — the artist
+			// path was the one that never got it.
+			//
+			// The asymmetry was measurable: an Atlas-backed bridge
+			// re-enriching a 19k-track library logged 106 identical
+			// HTTP 400s for a single 2-character artist name (one per
+			// track, ~2.5 min of enricher time at the 1.1s pacer) while
+			// the album path, for the same class of rejection, logged 7.
+			//
+			// This is NOT the "no match" case the comment below refuses
+			// to cache: a persistent error means the upstream declined
+			// to evaluate the query at all, and the same input will be
+			// declined identically for the life of the process. An
+			// upstream fixed mid-session needs a restart (or the
+			// operator's "Retry missing") to be picked up — the same
+			// contract the album path already accepts.
+			e.artistCache.Set(key, "")
 			return nil
 		}
 		// Only positively cache non-empty MBIDs. Storing the empty string
@@ -529,7 +550,9 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) error {
 		// sibling-track retries after metadata changes or upstream mismatches
 		// — the exact stale behaviour PR #13's review flagged. Transient
 		// errors are already handled by the early-return above (no cache
-		// write), so this branch is strictly about positive hits.
+		// write), so this branch is strictly about positive hits. The
+		// persistent-error branch above DOES cache "" — a rejected query is
+		// not a no-match.
 		// isValidMBID, not just != "": res.MBID lands in ArtistImagePath's
 		// filepath.Join as the leading component. Same rationale as the
 		// release-side validation above (F30).
