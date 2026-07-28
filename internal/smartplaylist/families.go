@@ -327,7 +327,12 @@ func discoveryScore(f TrackFeature, domGenre string, medBPM float64) float64 {
 		score += 100 // genre mismatch penalised, but not excluded
 	}
 	if medBPM > 0 {
-		if f.BPM != nil {
+		// `*f.BPM > 0` matches medianBPM's own filter: a non-positive
+		// BPM is an extraction artefact, not a real tempo. Without the
+		// bound, a stored 0 scored |0 − median| — the FULL median as a
+		// penalty, worse than the honest "unknown" charge below, purely
+		// because the analyser wrote a placeholder instead of nothing.
+		if f.BPM != nil && *f.BPM > 0 {
 			score += math.Abs(float64(*f.BPM) - medBPM)
 		} else {
 			score += medBPM * unknownBPMPenaltyFraction

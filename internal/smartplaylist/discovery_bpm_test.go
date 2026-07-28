@@ -82,3 +82,22 @@ func TestDiscoveryScore_NoMedianMeansNoBPMTerm(t *testing.T) {
 			withBPM, withoutBPM)
 	}
 }
+
+// A stored non-positive BPM is an extraction artefact, not a tempo. It
+// must score as UNKNOWN, matching medianBPM's own `*f.BPM > 0` filter —
+// otherwise |0 − median| charges the full median, a HARSHER penalty
+// than the honest "unknown" one, purely because the analyser wrote a
+// placeholder instead of nothing.
+func TestDiscoveryScore_ZeroBPMScoresAsUnknown(t *testing.T) {
+	const medBPM = 120.0
+
+	zero := discoveryScore(
+		TrackFeature{Path: "/zero.flac", Genre: "Jazz", BPM: bpmPtr(0)}, "Jazz", medBPM)
+	unknown := discoveryScore(
+		TrackFeature{Path: "/nil.flac", Genre: "Jazz"}, "Jazz", medBPM)
+
+	if zero != unknown {
+		t.Fatalf("BPM=0 scored %.1f but a nil BPM scored %.1f; a placeholder "+
+			"zero must not be penalised harder than no data at all", zero, unknown)
+	}
+}
