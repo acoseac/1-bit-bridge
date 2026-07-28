@@ -1275,9 +1275,25 @@ func redactSoxErr(s string, spec JobSpec) string {
 	// Pass 2: scrub OutputDir prefix from sidecar paths. We strip
 	// the directory prefix only — the sidecar basename is opaque
 	// hash + variant ID, no operator-identifying information.
-	if spec.OutputDir != "" {
-		s = strings.ReplaceAll(s, spec.OutputDir+"/", "")
-		s = strings.ReplaceAll(s, spec.OutputDir+`\`, "")
+	//
+	// TrimRight first: sox's real path comes from SidecarPath(), which
+	// builds with filepath.Join and therefore Cleans, so an OutputDir
+	// configured WITH a trailing separator (`/mnt/ssd/variants/`) built
+	// the search string `/mnt/ssd/variants//` and matched nothing —
+	// leaking the absolute host path into upscale_batches.error (which
+	// the admin Jobs page renders) and the SSE payload. Reachable
+	// through both config routes: resolvePaths doesn't Clean
+	// Upscale.VariantsDir, and the admin hot-patch only checks
+	// TrimSpace + IsAbs, which a trailing slash passes.
+	//
+	// BOTH separator forms stay. Do not "simplify" this by running the
+	// stderr string through filepath.ToSlash: sox stderr is arbitrary
+	// subprocess output, so rewriting every backslash would corrupt
+	// legitimate content AND break Pass 1's SourceAbsPath match on
+	// Windows, where that path is backslashed.
+	if outDir := strings.TrimRight(spec.OutputDir, `/\`); outDir != "" {
+		s = strings.ReplaceAll(s, outDir+"/", "")
+		s = strings.ReplaceAll(s, outDir+`\`, "")
 	}
 	// Pass 3: drop leading prefixes the sox runner / exec wrapper
 	// adds.
