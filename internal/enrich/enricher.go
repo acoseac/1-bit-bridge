@@ -99,11 +99,17 @@ type Enricher struct {
 	// expects a single-partition layout.
 	CacheDir string
 
-	// MBMinInterval is the minimum gap between MusicBrainz requests. MB's
-	// anonymous rate limit is 1/s; 1.1s gives us headroom.
+	// MBMinInterval is the minimum gap between MusicBrainz requests.
+	// DERIVED from the MusicBrainzClient's base URL at construction, not a
+	// fixed value: PublicMBMinInterval (1.1s, headroom over MB's anonymous
+	// 1/s limit) against musicbrainz.org, SelfHostedMinInterval (150ms)
+	// against an operator's own mirror. See pacing.go.
 	MBMinInterval time.Duration
 	// CAAMinInterval is the minimum gap between Cover Art Archive
-	// requests. CAA is more forgiving but we stay polite.
+	// requests. Derived the same way from the CoverArtClient's base:
+	// PublicCAAMinInterval (500ms — CAA is more forgiving than MB but we
+	// stay polite) against coverartarchive.org, SelfHostedMinInterval
+	// against a mirror.
 	CAAMinInterval time.Duration
 	// ITunesMinInterval is the minimum gap between iTunes Search API
 	// requests. Apple's unwritten convention is ~20 req/min; 3s sits

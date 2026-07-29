@@ -9,6 +9,11 @@
 // at 500ms for politeness. Both services require a User-Agent identifying
 // the app + a contact URL.
 //
+// Those intervals apply to the PUBLIC services. Both clients accept an
+// operator-supplied base URL, and when one points at a self-hosted mirror
+// the pacing drops to SelfHostedMinInterval — the politeness contract is
+// with two specific hosts, not with the code path. See pacing.go.
+//
 // License: MusicBrainz data is CC0 (public domain). Cover Art Archive
 // images are predominantly CC-BY or CC0; attribution may be required
 // depending on the specific image — the iOS app carries the link back to
