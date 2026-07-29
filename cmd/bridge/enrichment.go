@@ -33,6 +33,12 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
+// adminScheme is the transport for the loopback admin API. Always plain
+// HTTP: the admin console is loopback-only by design (config's
+// validateLoopbackAddress plus the loopbackOnly middleware), so there is
+// no TLS to negotiate and no remote hop to protect.
+const adminScheme = "http://"
+
 // enrichmentRetryWaitBudget bounds how long `retry` will sit on the
 // server's 60s rate guard before giving up. Slightly over the guard so a
 // single back-to-back invocation always succeeds rather than racing it.
@@ -141,11 +147,12 @@ func missesViaAdmin(ctx context.Context, cfg *config.Config, scope string) (*mis
 	if !adminIsAlive(ctx, addr) {
 		return nil, false, nil
 	}
-	// Ask for the server's full cap; the CLI does its own --limit
-	// trimming at print time.
-	endpoint := fmt.Sprintf("http://%s/api/enrichment/misses?limit=200", addr)
+	// No `limit` — omitting it makes the server apply its own cap, which
+	// is what we want and which cannot drift the way a hardcoded copy of
+	// that cap would. The CLI does its own --limit trimming at print time.
+	endpoint := adminScheme + addr + "/api/enrichment/misses"
 	if scope != "" {
-		endpoint += "&path=" + url.QueryEscape(scope)
+		endpoint += "?path=" + url.QueryEscape(scope)
 	}
 	reqCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
@@ -223,41 +230,72 @@ func missesViaStore(ctx context.Context, cfg *config.Config, scope string) (*mis
 	return rep, nil
 }
 
+// missFacetOrder is the display order. Stable so two runs of the CLI are
+// diffable.
+var missFacetOrder = []string{
+	manifest.MissFacetArtwork, manifest.MissFacetArtist, manifest.MissFacetRelease,
+}
+
+// selectedFacets narrows the display order to the requested facet, or
+// returns all of them when none was requested.
+func selectedFacets(facet string) []string {
+	if facet == "" {
+		return missFacetOrder
+	}
+	for _, f := range missFacetOrder {
+		if f == facet {
+			return []string{f}
+		}
+	}
+	return nil
+}
+
 func printMissReport(w io.Writer, rep *missReport, facet string, limit int) {
 	scope := rep.Path
 	if scope == "" {
 		scope = "(whole library)"
 	}
+	facets := selectedFacets(facet)
+
 	fmt.Fprintf(w, "Enrichment misses — %s\n", scope)
 	fmt.Fprintf(w, "  source   %s\n", rep.Source)
 	fmt.Fprintf(w, "  scanned  %d tracks\n", rep.Scanned)
 	fmt.Fprintf(w, "  missing  %d tracks short of at least one field\n\n", rep.Missing)
+	for _, f := range facets {
+		fmt.Fprintf(w, "  %-8s %d\n", f, rep.Facets[f])
+	}
 
-	for _, f := range []string{manifest.MissFacetArtwork, manifest.MissFacetArtist, manifest.MissFacetRelease} {
-		if facet != "" && f != facet {
-			continue
-		}
-		n := rep.Facets[f]
-		fmt.Fprintf(w, "  %-8s %d\n", f, n)
+	printSkipReasons(w, rep.SkipReasons)
+	if limit > 0 {
+		printMissSamples(w, rep, facets, limit)
 	}
-	if len(rep.SkipReasons) > 0 {
-		fmt.Fprintln(w, "\n  why the enricher stopped short (since process start):")
-		keys := make([]string, 0, len(rep.SkipReasons))
-		for k := range rep.SkipReasons {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			fmt.Fprintf(w, "    %-16s %d\n", k, rep.SkipReasons[k])
-		}
+	// Say plainly when the SERVER capped the sample — a truncated list
+	// that looks complete is how a partial view gets mistaken for the
+	// whole picture.
+	if len(rep.Truncated) > 0 {
+		fmt.Fprintf(w, "\n  note: the running bridge capped the sample for %s.\n",
+			strings.Join(rep.Truncated, ", "))
+		fmt.Fprintln(w, "        stop the bridge and re-run for the full list.")
 	}
-	if limit == 0 {
+}
+
+func printSkipReasons(w io.Writer, reasons map[string]int64) {
+	if len(reasons) == 0 {
 		return
 	}
-	for _, f := range []string{manifest.MissFacetArtwork, manifest.MissFacetArtist, manifest.MissFacetRelease} {
-		if facet != "" && f != facet {
-			continue
-		}
+	fmt.Fprintln(w, "\n  why the enricher stopped short (since process start):")
+	keys := make([]string, 0, len(reasons))
+	for k := range reasons {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		fmt.Fprintf(w, "    %-16s %d\n", k, reasons[k])
+	}
+}
+
+func printMissSamples(w io.Writer, rep *missReport, facets []string, limit int) {
+	for _, f := range facets {
 		paths := rep.Sample[f]
 		if len(paths) == 0 {
 			continue
@@ -270,14 +308,6 @@ func printMissReport(w io.Writer, rep *missReport, facet string, limit int) {
 		for _, p := range shown {
 			fmt.Fprintf(w, "    %s\n", p)
 		}
-	}
-	// Say plainly when the SERVER capped the sample — a truncated list
-	// that looks complete is how a partial view gets mistaken for the
-	// whole picture.
-	if len(rep.Truncated) > 0 {
-		fmt.Fprintf(w, "\n  note: the running bridge capped the sample for %s.\n",
-			strings.Join(rep.Truncated, ", "))
-		fmt.Fprintln(w, "        stop the bridge and re-run for the full list.")
 	}
 }
 
@@ -330,10 +360,10 @@ func enrichmentRetryCmd(ctx context.Context, args []string, stdout, stderr io.Wr
 }
 
 func retryViaAdmin(ctx context.Context, addr, scope string, stdout, stderr io.Writer) int {
-	endpoint := "http://" + addr + "/api/enrichment/retry"
+	endpoint := adminScheme + addr + "/api/enrichment/retry"
 	body := "{}"
 	if scope != "" {
-		endpoint = "http://" + addr + "/api/library/enrichment/retry"
+		endpoint = adminScheme + addr + "/api/library/enrichment/retry"
 		raw, err := json.Marshal(map[string]string{"path": scope})
 		if err != nil {
 			fmt.Fprintf(stderr, "enrichment retry: encode: %v\n", err)
@@ -379,7 +409,16 @@ func retryViaAdmin(ctx context.Context, addr, scope string, stdout, stderr io.Wr
 			ResetTracks        int64 `json:"resetTracks"`
 			HarvestResubmitted bool  `json:"harvestResubmitted"`
 		}
-		_ = json.Unmarshal([]byte(payload), &ack)
+		if err := json.Unmarshal([]byte(payload), &ack); err != nil {
+			// The server ACCEPTED the retry — only its ack is unreadable. So
+			// warn and still exit 0: reporting failure here would make a
+			// script re-run a retry that already happened, and the re-run
+			// would then hit the 60s guard. Suppress the count rather than
+			// print a bogus "0 tracks".
+			fmt.Fprintf(stderr, "enrichment retry: accepted (HTTP %d) but the ack was unreadable: %v\n",
+				status, err)
+			return 0
+		}
 		fmt.Fprintf(stdout, "enrichment retry: re-queued %d tracks via the running bridge.\n", ack.ResetTracks)
 		if ack.HarvestResubmitted {
 			fmt.Fprintln(stdout, "  artist bios / album descriptions re-submitted to Atlas.")
@@ -405,7 +444,13 @@ func postAdminJSON(ctx context.Context, url, body string) (int, string, error) {
 		return 0, "", fmt.Errorf("admin request: %w", err)
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		// Return the status and whatever was read alongside the error, so
+		// the caller can still distinguish a 429 it should wait out from a
+		// genuine failure even when the body was truncated mid-read.
+		return resp.StatusCode, string(raw), fmt.Errorf("read admin response: %w", err)
+	}
 	return resp.StatusCode, string(raw), nil
 }
 
@@ -444,7 +489,7 @@ func adminAddrOf(cfg *config.Config) string {
 func adminIsAlive(ctx context.Context, addr string) bool {
 	probeCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
 	defer cancel()
-	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, "http://"+addr+"/api/stats", nil)
+	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, adminScheme+addr+"/api/stats", nil)
 	if err != nil {
 		return false
 	}
