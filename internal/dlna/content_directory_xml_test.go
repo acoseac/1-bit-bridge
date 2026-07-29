@@ -1,6 +1,7 @@
 package dlna
 
 import (
+	"math"
 	"strings"
 	"testing"
 )
@@ -682,6 +683,25 @@ func Test_formatDLNADuration(t *testing.T) {
 		{3600.0, "1:00:00.000"},
 		{3661.5, "1:01:01.500"},
 		{36015.123, "10:00:15.123"}, // 10-hour-class duration
+
+		// Products that land just BELOW the integer in float64. int64()
+		// truncates toward zero, so these were each one millisecond low
+		// before formatDLNADuration switched to math.Round. 0.76% of
+		// millisecond-granular durations in the 60-400s range are affected.
+		//
+		// Note 210.799 above is NOT one of them: 210.799*1000 is exactly
+		// 210799.0. Every value in the pre-existing table happened to be
+		// exactly representable, which is why none of them caught this.
+		{1.001, "0:00:01.001"}, // 1000.9999999999999
+		{1.003, "0:00:01.003"}, // 1002.9999999999999
+		{1.015, "0:00:01.015"}, // 1014.9999999999999
+
+		// Non-finite inputs: every comparison against NaN is false, so these
+		// slip past `seconds <= 0`, and int64() of either is undefined —
+		// MinInt64 on amd64, emitting "-2562047788:00:00.-808".
+		{math.NaN(), "0:00:00.000"},
+		{math.Inf(1), "0:00:00.000"},
+		{math.Inf(-1), "0:00:00.000"},
 	}
 	for _, tc := range cases {
 		got := formatDLNADuration(tc.seconds)
