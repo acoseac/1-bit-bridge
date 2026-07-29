@@ -201,6 +201,14 @@ type Deps struct {
 	// `harvestResubmitted: false` on the retry response.
 	HarvestForceSubmit func() bool
 
+	// EnrichSkipReasons returns the enricher's process-lifetime tally of
+	// why it stopped short, keyed by bounded reason (no_search_terms /
+	// no_mb_match / mb_error). Wired to enrich.Enricher.SkipReasons in
+	// cmd/bridge/main.go — same decoupling as ArtistImageMBIDs, so admin
+	// still never imports internal/enrich. Nil-safe: absent → the
+	// skipReasons field is omitted from the misses response.
+	EnrichSkipReasons func() map[string]int64
+
 	// ArtworkPath / ArtistImagePath / BookletPath resolve cache-file
 	// paths for the inspector's loopback byte-serving routes
 	// (/api/library/artwork|artist-image|booklet). Closures over
@@ -809,6 +817,11 @@ type Server struct {
 	// normalised path and swept together by libMetaInvalidateUnder.
 	libMetaRefs   libMetaCache[libraryMetaRefsResponse]
 	libMetaDetail libMetaCache[libraryMetaDetailResponse]
+	// libMetaMisses backs GET /api/enrichment/misses. Keyed by bare
+	// normalised path only — `facet` and `limit` narrow the cached
+	// snapshot in the handler rather than joining the key, so switching
+	// facets in the UI can't re-walk the library once per facet.
+	libMetaMisses libMetaCache[enrichmentMissesResponse]
 
 	// library-meta retry guard: POST /api/library/enrichment/retry is
 	// per-PATH rate-limited (60s per normalized folder) so an operator
@@ -914,6 +927,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/stats", s.apiStats)
 	mux.HandleFunc("GET /api/sources", s.apiSources)
 	mux.HandleFunc("GET /api/enrichment", s.apiEnrichment)
+	mux.HandleFunc("GET /api/enrichment/misses", s.apiEnrichmentMisses)
 	mux.HandleFunc("POST /api/enrichment/retry", s.apiEnrichmentRetry)
 	mux.HandleFunc("GET /api/endpoints", s.apiEndpoints)
 	mux.HandleFunc("GET /api/events", s.apiEvents)

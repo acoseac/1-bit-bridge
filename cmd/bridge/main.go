@@ -1460,6 +1460,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return variantsCmd(ctx, args[1:], stdout, stderr)
 	case "artwork":
 		return artworkCmd(ctx, args[1:], stdout, stderr)
+	case "enrichment":
+		return enrichmentCmd(ctx, args[1:], stdout, stderr)
 	case "doctor":
 		return doctorCmd(args[1:], stdout, stderr)
 	case "update":
@@ -1532,6 +1534,11 @@ Subcommands:
            CarPlay / cellular streaming with zero fidelity loss vs. what the head unit
            accepts.
   artwork  Maintain on-disk artwork cache: bridge artwork --gc removes orphans.
+  enrichment
+           Inspect and re-queue metadata gaps: bridge enrichment misses lists tracks
+           short of a cover / artist MBID / release MBID and which of the three each
+           lacks; bridge enrichment retry re-queues them (the "Retry missing" button,
+           scripted).
   doctor   Preflight: check ports, directories, service manager before init.
   update   Check for / install a new bridge release from GitHub.
   backup   Snapshot bridge state into <dataDir>/backups/<timestamp>/.
@@ -2944,6 +2951,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		ArtistImageMBIDs: func() (map[string]struct{}, error) {
 			return enrich.CachedArtistImageMBIDs(artworkDir)
 		},
+		// Why the enricher stopped short, by bounded reason. In-memory and
+		// process-lifetime — it answers "is this library unmatchable, or is
+		// the matcher broken?", which the aggregate miss count cannot.
+		EnrichSkipReasons: enricher.SkipReasons,
 		// "Retry missing" harvest nudge: zeroing the last-submit stamp makes
 		// the harvest client's next tick re-submit the full library (Atlas
 		// re-attempts unresolved bios/descriptions; submit is idempotent).

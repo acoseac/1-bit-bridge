@@ -1157,6 +1157,10 @@ func (s *Server) apiEnrichmentRetry(w http.ResponseWriter, r *http.Request) {
 	s.enrichmentMu.Lock()
 	s.enrichmentAt = time.Time{}
 	s.enrichmentMu.Unlock()
+	// Same for the library-wide misses snapshot: the retry is about to
+	// re-populate the very fields it enumerates, so a stale entry would
+	// keep listing tracks that are already back in the queue.
+	s.libMetaInvalidateUnder("")
 	logger.Info("enrichment retry triggered", "resetTracks", reset, "harvestResubmitted", resubmitted)
 	// Hand the card its new numbers with the ack. The enrichment SSE event
 	// rides the 30s slow ticker, so without this the panel shows the pre-retry
