@@ -62,6 +62,55 @@ func TestRetryViaAdminWaitsOutTheRateLimitAndSaysSo(t *testing.T) {
 	}
 }
 
+// TestRetryViaAdminWaitsOutARateLimitWithAnUnreadableBody pins the
+// ordering between the status check and the body-read error.
+//
+// postAdminJSON reports a truncated body as an error while still
+// returning the status. Retrying a rate limit needs only the status — so
+// checking err first makes a 429 whose body failed to read skip the wait
+// and report failure. That is a regression the round-1 fix to
+// postAdminJSON introduced, and this is the test that would have caught
+// it.
+func TestRetryViaAdminWaitsOutARateLimitWithAnUnreadableBody(t *testing.T) {
+	shortenRetryPoll(t)
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) == 1 {
+			// Promise more bytes than we send, then hang up: the client's
+			// ReadAll fails with an unexpected EOF while the status is 429.
+			w.Header().Set("Content-Length", "4096")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"code":"rate_li`))
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			if hj, ok := w.(http.Hijacker); ok {
+				conn, _, err := hj.Hijack()
+				if err == nil {
+					_ = conn.Close()
+				}
+			}
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"resetTracks":42}`))
+	}))
+	defer srv.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := retryViaAdmin(context.Background(), strings.TrimPrefix(srv.URL, "http://"), "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 — a 429 with an unreadable body must still be "+
+			"waited out (stderr: %s)", code, stderr.String())
+	}
+	if calls.Load() != 2 {
+		t.Errorf("server saw %d calls, want 2 — the rate limit was not retried", calls.Load())
+	}
+	if !strings.Contains(stdout.String(), "42") {
+		t.Errorf("did not report the count after the retry succeeded:\n%s", stdout.String())
+	}
+}
+
 // TestRetryViaAdminReportsServerErrors — a 5xx must not be mistaken for
 // a rate limit and silently retried until the budget expires.
 func TestRetryViaAdminReportsServerErrors(t *testing.T) {

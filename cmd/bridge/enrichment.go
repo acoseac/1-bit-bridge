@@ -376,7 +376,13 @@ func retryViaAdmin(ctx context.Context, addr, scope string, stdout, stderr io.Wr
 	announced := false
 	for {
 		status, payload, err := postAdminJSON(ctx, endpoint, body)
-		if err != nil {
+		// 429 is evaluated BEFORE err on purpose. postAdminJSON reports a
+		// body-read failure as an error while still returning the status,
+		// and retrying a rate limit needs the status only — the body is
+		// noise. Checking err first would make a truncated 429 response
+		// skip the wait and report failure, which is the behaviour the
+		// round-1 fix to postAdminJSON accidentally introduced.
+		if status != http.StatusTooManyRequests && err != nil {
 			fmt.Fprintf(stderr, "enrichment retry: %v\n", err)
 			return 1
 		}
