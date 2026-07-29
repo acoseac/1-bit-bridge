@@ -5,7 +5,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -61,7 +60,9 @@ func (m *mbFallbackServer) handler() http.HandlerFunc {
 			io.WriteString(w, `{"artists":[]}`)
 			return
 		}
-		q, _ := url.QueryUnescape(r.URL.Query().Get("query"))
+		// Query().Get already percent-decodes; unescaping again would
+		// mangle a literal % in an album title.
+		q := r.URL.Query().Get("query")
 		m.mu.Lock()
 		m.queries = append(m.queries, q)
 		m.mu.Unlock()
@@ -83,90 +84,85 @@ func (m *mbFallbackServer) asked() []string {
 
 // TestSearchReleaseWithFallbacks covers the two retries and, as importantly,
 // that they do NOT run when they shouldn't.
+//
+// Every case asserts the exact QUERY COUNT as well as the outcome, so a change
+// that fires redundant upstream calls fails here too — not just one that breaks
+// resolution.
 func TestSearchReleaseWithFallbacks(t *testing.T) {
 	ctx := context.Background()
 
-	run := func(t *testing.T, trk manifest.Track, srv *mbFallbackServer) (*SearchResult, []string) {
-		t.Helper()
-		s := httptest.NewServer(srv.handler())
-		defer s.Close()
-		e := NewEnricher(nil, NewMusicBrainzClient(s.URL, "t", nil), nil, nil, t.TempDir())
-		e.MBMinInterval = 0 // no need to pace a local test server
-		res, err := e.searchReleaseWithFallbacks(ctx, &trk)
-		if err != nil {
-			t.Fatalf("searchReleaseWithFallbacks: %v", err)
-		}
-		return res, srv.asked()
+	cases := []struct {
+		name         string
+		track        manifest.Track
+		mbArtist     string // the one (artist, album) pair the stub will match
+		mbAlbum      string
+		wantResolved bool
+		wantQueries  int
+	}{
+		{
+			name:     "primary hit asks exactly once",
+			track:    manifest.Track{Path: "a.flac", Artist: "Metallica", Album: "Load", AlbumArtist: "Metallica"},
+			mbArtist: "Metallica", mbAlbum: "Load",
+			wantResolved: true, wantQueries: 1,
+		},
+		{
+			// The junk per-track artist is real: this is how a production file
+			// was tagged, and it is why the album never resolved.
+			name: "falls back to albumArtist",
+			track: manifest.Track{Path: "a.flac", Artist: "[ME] Load [145412591] [1996]",
+				Album: "Load", AlbumArtist: "Metallica"},
+			mbArtist: "Metallica", mbAlbum: "Load",
+			wantResolved: true, wantQueries: 2,
+		},
+		{
+			name: "falls back to a stripped edition suffix",
+			track: manifest.Track{Path: "a.flac", Artist: "The Rolling Stones",
+				Album: "Goats Head Soup (2020 Deluxe)", AlbumArtist: "The Rolling Stones"},
+			mbArtist: "The Rolling Stones", mbAlbum: "Goats Head Soup",
+			wantResolved: true, wantQueries: 2,
+		},
+		{
+			// Compilation shape: credited to Various Artists AND carrying an
+			// edition suffix. 7 of 180 sampled albums needed exactly this.
+			name: "combines both when neither alone is enough",
+			track: manifest.Track{Path: "a.flac", Artist: "Bon Jovi",
+				Album: "Acoustic Music (Deluxe Edition)", AlbumArtist: "Various Artists"},
+			mbArtist: "Various Artists", mbAlbum: "Acoustic Music",
+			wantResolved: true, wantQueries: 4,
+		},
+		{
+			// albumArtist differs only in case and there is no suffix to strip,
+			// so there is nothing new to ask.
+			name: "no redundant query when albumArtist equals artist",
+			track: manifest.Track{Path: "a.flac", Artist: "Miles Davis",
+				Album: "Kind of Blue", AlbumArtist: "miles davis"},
+			mbArtist: "nobody", mbAlbum: "nothing",
+			wantResolved: false, wantQueries: 1,
+		},
 	}
 
-	t.Run("primary hit asks exactly once", func(t *testing.T) {
-		srv := &mbFallbackServer{wantArtist: "Metallica", wantAlbum: "Load"}
-		res, asked := run(t, manifest.Track{
-			Path: "a.flac", Artist: "Metallica", Album: "Load", AlbumArtist: "Metallica",
-		}, srv)
-		if res == nil {
-			t.Fatal("no result")
-		}
-		if len(asked) != 1 {
-			t.Errorf("issued %d queries, want 1 — fallbacks must not run after a hit: %v", len(asked), asked)
-		}
-	})
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := &mbFallbackServer{wantArtist: tc.mbArtist, wantAlbum: tc.mbAlbum}
+			s := httptest.NewServer(srv.handler())
+			defer s.Close()
+			e := NewEnricher(nil, NewMusicBrainzClient(s.URL, "t", nil), nil, nil, t.TempDir())
+			e.MBMinInterval = 0 // no need to pace a local test server
 
-	t.Run("falls back to albumArtist", func(t *testing.T) {
-		// The junk per-track artist is real: this is how a production file was
-		// tagged, and it is why the album never resolved.
-		srv := &mbFallbackServer{wantArtist: "Metallica", wantAlbum: "Load"}
-		res, asked := run(t, manifest.Track{
-			Path: "a.flac", Artist: "[ME] Load [145412591] [1996]", Album: "Load", AlbumArtist: "Metallica",
-		}, srv)
-		if res == nil {
-			t.Fatalf("albumArtist retry did not resolve; queries were %v", asked)
-		}
-		if len(asked) != 2 {
-			t.Errorf("issued %d queries, want 2 (primary then albumArtist): %v", len(asked), asked)
-		}
-	})
-
-	t.Run("falls back to a stripped edition suffix", func(t *testing.T) {
-		srv := &mbFallbackServer{wantArtist: "The Rolling Stones", wantAlbum: "Goats Head Soup"}
-		res, asked := run(t, manifest.Track{
-			Path: "a.flac", Artist: "The Rolling Stones", Album: "Goats Head Soup (2020 Deluxe)",
-			AlbumArtist: "The Rolling Stones",
-		}, srv)
-		if res == nil {
-			t.Fatalf("suffix retry did not resolve; queries were %v", asked)
-		}
-		if len(asked) != 2 {
-			t.Errorf("issued %d queries, want 2 (primary then stripped): %v", len(asked), asked)
-		}
-	})
-
-	t.Run("combines both when neither alone is enough", func(t *testing.T) {
-		// Compilation shape: release credited to Various Artists AND carrying
-		// an edition suffix. 7 of 180 sampled albums needed exactly this.
-		srv := &mbFallbackServer{wantArtist: "Various Artists", wantAlbum: "Acoustic Music"}
-		res, asked := run(t, manifest.Track{
-			Path: "a.flac", Artist: "Bon Jovi", Album: "Acoustic Music (Deluxe Edition)",
-			AlbumArtist: "Various Artists",
-		}, srv)
-		if res == nil {
-			t.Fatalf("combined retry did not resolve; queries were %v", asked)
-		}
-		if len(asked) != 4 {
-			t.Errorf("issued %d queries, want 4: %v", len(asked), asked)
-		}
-	})
-
-	t.Run("no redundant query when albumArtist equals artist", func(t *testing.T) {
-		srv := &mbFallbackServer{wantArtist: "nobody", wantAlbum: "nothing"}
-		_, asked := run(t, manifest.Track{
-			Path: "a.flac", Artist: "Miles Davis", Album: "Kind of Blue", AlbumArtist: "miles davis",
-		}, srv)
-		if len(asked) != 1 {
-			t.Errorf("issued %d queries, want 1 — albumArtist differs only in case, and there is "+
-				"no suffix to strip: %v", len(asked), asked)
-		}
-	})
+			trk := tc.track
+			res, err := e.searchReleaseWithFallbacks(ctx, &trk)
+			if err != nil {
+				t.Fatalf("searchReleaseWithFallbacks: %v", err)
+			}
+			asked := srv.asked()
+			if (res != nil) != tc.wantResolved {
+				t.Errorf("resolved = %v, want %v; queries were %v", res != nil, tc.wantResolved, asked)
+			}
+			if len(asked) != tc.wantQueries {
+				t.Errorf("issued %d queries, want %d: %v", len(asked), tc.wantQueries, asked)
+			}
+		})
+	}
 
 	t.Run("an error stops the chain instead of being masked", func(t *testing.T) {
 		// Error semantics are the contract: a fallback runs only after a clean

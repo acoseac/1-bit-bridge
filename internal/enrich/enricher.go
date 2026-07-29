@@ -1255,16 +1255,22 @@ func stripAlbumEditionSuffix(album string) string {
 // immediately, exactly as the single-attempt version did, so the caller's
 // transient-retry and negative-cache contracts still hold.
 func (e *Enricher) searchReleaseWithFallbacks(ctx context.Context, t *manifest.Track) (*SearchResult, error) {
-	type attempt struct{ artist, album string }
-	attempts := []attempt{{t.Artist, t.Album}}
-
+	// Trim once up front so the comparisons below and the queries themselves
+	// see the same strings (SearchRelease trims too, but then the dedup check
+	// and the request would be reasoning about different values).
+	artist := strings.TrimSpace(t.Artist)
+	album := strings.TrimSpace(t.Album)
 	albumArtist := strings.TrimSpace(t.AlbumArtist)
-	useAlbumArtist := albumArtist != "" && !strings.EqualFold(albumArtist, strings.TrimSpace(t.Artist))
+
+	type attempt struct{ artist, album string }
+	attempts := []attempt{{artist, album}}
+
+	useAlbumArtist := albumArtist != "" && !strings.EqualFold(albumArtist, artist)
 	if useAlbumArtist {
-		attempts = append(attempts, attempt{albumArtist, t.Album})
+		attempts = append(attempts, attempt{albumArtist, album})
 	}
-	if stripped := stripAlbumEditionSuffix(t.Album); stripped != "" {
-		attempts = append(attempts, attempt{t.Artist, stripped})
+	if stripped := stripAlbumEditionSuffix(album); stripped != "" {
+		attempts = append(attempts, attempt{artist, stripped})
 		if useAlbumArtist {
 			attempts = append(attempts, attempt{albumArtist, stripped})
 		}
