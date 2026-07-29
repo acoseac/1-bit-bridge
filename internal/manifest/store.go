@@ -1649,10 +1649,13 @@ func (s *Store) MarkEnriched(ctx context.Context, t *Track) error {
 // re-crawl is never triggered: on that same library this selects 46% of rows,
 // and the enricher's album/artist LRU caches collapse them to a few hundred
 // distinct upstream queries.
-// The two statements below are CONSTANT expressions — Go folds `const a = b + c`
-// at compile time — so each Exec still receives a plain string literal. Building
-// them with a runtime `+` would work identically but reads as a dynamically
-// assembled query to both a reviewer and SonarCloud's go:S2077.
+// It is spelled out VERBATIM inside each statement below rather than
+// concatenated into them. A `const stmt = "…" + predicate` form is folded at
+// compile time and is exactly as safe, but it still reads as an assembled query
+// — to a reviewer and to SonarCloud's go:S2077 alike — and the whole statement
+// is easier to read in one piece anyway. TestEnrichmentMissPredicateIsShared
+// asserts both statements embed this text byte-for-byte, so the copies cannot
+// drift; that test is the thing keeping them honest, not the concatenation.
 const enrichmentMissPredicateSQL = `(COALESCE(json_extract(tags_json, '$.artworkMBID'), '') = ''
 		     OR COALESCE(json_extract(tags_json, '$.artistMBID'), '') = ''
 		     OR COALESCE(json_extract(tags_json, '$.musicBrainzAlbumID'), '') = '')`
@@ -1661,7 +1664,9 @@ const enrichmentMissPredicateSQL = `(COALESCE(json_extract(tags_json, '$.artwork
 const resetEnrichedMissesSQL = `
 		UPDATE tracks SET enriched_at = 0
 		 WHERE enriched_at > 0
-		   AND ` + enrichmentMissPredicateSQL
+		   AND (COALESCE(json_extract(tags_json, '$.artworkMBID'), '') = ''
+		     OR COALESCE(json_extract(tags_json, '$.artistMBID'), '') = ''
+		     OR COALESCE(json_extract(tags_json, '$.musicBrainzAlbumID'), '') = '')`
 
 // resetEnrichedMissesUnderPrefixSQL is its folder-scoped twin. Takes the
 // subtree LIKE pattern as its only bind parameter.
@@ -1669,7 +1674,9 @@ const resetEnrichedMissesUnderPrefixSQL = `
 		UPDATE tracks SET enriched_at = 0
 		 WHERE enriched_at > 0
 		   AND path LIKE ? ESCAPE '\'
-		   AND ` + enrichmentMissPredicateSQL
+		   AND (COALESCE(json_extract(tags_json, '$.artworkMBID'), '') = ''
+		     OR COALESCE(json_extract(tags_json, '$.artistMBID'), '') = ''
+		     OR COALESCE(json_extract(tags_json, '$.musicBrainzAlbumID'), '') = '')`
 
 // ResetEnrichedMisses re-queues every track the enricher finished WITHOUT a
 // full result — enriched (enriched_at > 0) but still missing its release

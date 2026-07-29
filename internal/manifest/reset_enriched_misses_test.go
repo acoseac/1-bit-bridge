@@ -3,9 +3,31 @@ package manifest
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+// TestEnrichmentMissPredicateIsShared is what keeps the library-wide and
+// folder-scoped "Retry missing" statements in step.
+//
+// The predicate is written out verbatim in both rather than concatenated in
+// (see enrichmentMissPredicateSQL), so nothing at the language level stops the
+// two from drifting — this test does. Drift is not hypothetical: the sibling
+// Atlas search plans drifted exactly this way and cost a measured 18 points of
+// album recall before anyone noticed.
+func TestEnrichmentMissPredicateIsShared(t *testing.T) {
+	for name, stmt := range map[string]string{
+		"resetEnrichedMissesSQL":            resetEnrichedMissesSQL,
+		"resetEnrichedMissesUnderPrefixSQL": resetEnrichedMissesUnderPrefixSQL,
+	} {
+		if !strings.Contains(stmt, enrichmentMissPredicateSQL) {
+			t.Errorf("%s no longer embeds enrichmentMissPredicateSQL verbatim — the two retry\n"+
+				"statements have drifted. Statement:\n%s\n\nwant it to contain:\n%s",
+				name, stmt, enrichmentMissPredicateSQL)
+		}
+	}
+}
 
 // TestResetEnrichedMissesCoversAlbumMBID pins the third arm of the "Retry
 // missing" predicate.
