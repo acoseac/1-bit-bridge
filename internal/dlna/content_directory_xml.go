@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"path/filepath"
 	"strings"
 )
@@ -500,7 +501,11 @@ func formatDLNADuration(seconds float64) string {
 	if seconds <= 0 {
 		return "0:00:00.000"
 	}
-	totalMillis := int64(seconds * 1000)
+	// Round rather than truncate: int64() drops the fraction, and the
+	// float64 product lands just below the integer often enough to matter
+	// (1.001 * 1000 == 1000.9999999999999 -> "0:00:01.000"). ~0.76% of
+	// millisecond-granular durations were one millisecond low.
+	totalMillis := int64(math.Round(seconds * 1000))
 	hours := totalMillis / (3600 * 1000)
 	totalMillis -= hours * 3600 * 1000
 	minutes := totalMillis / (60 * 1000)
