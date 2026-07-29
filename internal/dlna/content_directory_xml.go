@@ -498,7 +498,16 @@ func WrapDIDLLite(elements ...string) string {
 // uses this format consistently across `<res duration="...">` and SOAP
 // transport-state position fields.
 func formatDLNADuration(seconds float64) string {
-	if seconds <= 0 {
+	// NaN and +Inf both slip past `seconds <= 0` (every comparison against NaN
+	// is false), and int64() of either is undefined — on amd64 it lands on
+	// MinInt64 and emits a duration like "-2562047788:00:00.-808".
+	//
+	// Not reachable from any current producer: the FLAC and DSF extractors
+	// guard their divisions with `sampleRate > 0 && totalSamples > 0`, and the
+	// UPnP ingest filters on `parseDurationSeconds(...) > 0` (also false for
+	// NaN). This is a formatter for third-party-influenced data, so it should
+	// not depend on every upstream continuing to be careful.
+	if math.IsNaN(seconds) || math.IsInf(seconds, 0) || seconds <= 0 {
 		return "0:00:00.000"
 	}
 	// Round rather than truncate: int64() drops the fraction, and the
