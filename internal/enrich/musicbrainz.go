@@ -607,18 +607,34 @@ func pickBestArtist(candidates []artistCandidate, artist string) *artistCandidat
 			return &candidates[i]
 		}
 	}
+	// Fold each candidate ONCE, lazily — A1 is the common case and must
+	// not pay for this. A3's form is derived from A2's rather than
+	// re-folded: foldNameNoArticle(x) is stripLeadingArticle(foldName(x))
+	// by construction, because the article strip is the last stage of the
+	// pipeline.
+	folds := make([]string, len(candidates))
+	for i := range candidates {
+		folds[i] = foldName(candidates[i].Name)
+	}
 	// A2 — folded exact, any score.
 	artistFold := foldName(artist)
-	for i := range candidates {
-		if foldName(candidates[i].Name) == artistFold {
+	for i := range folds {
+		if folds[i] == artistFold {
 			return &candidates[i]
 		}
 	}
 	// A3 — folded exact ignoring a leading article, any score.
+	//
+	// Kept as its OWN pass rather than merged into A2. The passes are
+	// ordered strictest-first and that order is the safety mechanism: it
+	// guarantees the loosest rule can only ever apply to candidates every
+	// stricter rule rejected. Collapsing them into one loop with two
+	// "best so far" pointers would preserve the behaviour but hide the
+	// property, and this is the function where the property matters.
 	artistNoArt := foldNameNoArticle(artist)
 	if artistNoArt != "" {
-		for i := range candidates {
-			if foldNameNoArticle(candidates[i].Name) == artistNoArt {
+		for i := range folds {
+			if stripLeadingArticle(folds[i]) == artistNoArt {
 				return &candidates[i]
 			}
 		}

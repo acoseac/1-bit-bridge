@@ -261,6 +261,33 @@ func TestFoldNameStripsArticlesOnlySafely(t *testing.T) {
 	}
 }
 
+// TestFoldNameNoArticleIsStripOverFoldName pins the identity
+// pickBestArtist's A3 pass relies on.
+//
+// A3 derives its comparison form as stripLeadingArticle(foldName(x))
+// instead of calling foldNameNoArticle(x), so each candidate is folded
+// once rather than twice. That is only valid while the article strip is
+// the LAST stage of the pipeline. Move it earlier — before the
+// punctuation pass, say — and the two stop agreeing, silently, for any
+// name whose article is separated by something the punctuation stage
+// rewrites.
+func TestFoldNameNoArticleIsStripOverFoldName(t *testing.T) {
+	for _, in := range []string{
+		"The Carpenters", "Carpenters", "The The", "The Band", "An Emotional Fish",
+		"The  Beatles", "The-Beatles", "A Tribe Called Quest", "Zdob și Zdub",
+		"The Rolling Stones", "THE WHO", "the doors", "A", "The", "",
+		"The R&B Collective", "The 5th Dimension",
+	} {
+		want := foldNameNoArticle(in)
+		got := stripLeadingArticle(foldName(in))
+		if got != want {
+			t.Errorf("identity broken for %q: stripLeadingArticle(foldName(x)) = %q, "+
+				"foldNameNoArticle(x) = %q — pickBestArtist's A3 pass derives one "+
+				"from the other and now compares the wrong thing", in, got, want)
+		}
+	}
+}
+
 // TestFoldForMatchIsNotTheArtistImageCacheKey is a tripwire, not a
 // behaviour test.
 //

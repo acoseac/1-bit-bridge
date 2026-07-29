@@ -44,6 +44,7 @@ package enrich
 import (
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"golang.org/x/text/cases"
 	"golang.org/x/text/unicode/norm"
@@ -235,11 +236,14 @@ func foldedTokenContains(a, b string) bool {
 		return true
 	}
 	// Short titles demand exact equality — see shortTitleExactRunes.
+	// utf8.RuneCountInString rather than len([]rune(s)): this is the
+	// candidate-comparison hot path and the conversion would allocate a
+	// rune slice per call just to read its length.
 	shorter, longer := a, b
-	if len([]rune(longer)) < len([]rune(shorter)) {
+	if utf8.RuneCountInString(longer) < utf8.RuneCountInString(shorter) {
 		shorter, longer = longer, shorter
 	}
-	if len([]rune(shorter)) <= shortTitleExactRunes {
+	if utf8.RuneCountInString(shorter) <= shortTitleExactRunes {
 		return false // equality was already checked above
 	}
 	return tokenAlignedContains(longer, shorter)
