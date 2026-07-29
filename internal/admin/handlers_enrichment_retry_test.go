@@ -65,6 +65,16 @@ func TestAPIEnrichmentRetry(t *testing.T) {
 	harvestNudged := false
 	srv.deps.HarvestForceSubmit = func() bool { harvestNudged = true; return true }
 
+	// Warm the breakdown cache BEFORE retrying. Without this the cache is
+	// empty, so the handler recomputes regardless and the assertions below
+	// would pass even with the invalidation removed — the stale-snapshot path
+	// is the entire reason that invalidation exists, so it has to be the path
+	// under test.
+	warm := srv.getEnrichmentSnapshot()
+	if warm.Pending != 0 {
+		t.Fatalf("pre-retry pending = %d, want 0 (both seeded rows are enriched)", warm.Pending)
+	}
+
 	var resp enrichmentRetryResponse
 	code := doJSON(t, srv.Handler(), "POST", "/api/enrichment/retry", nil, &resp)
 	if code != 200 {
@@ -75,6 +85,22 @@ func TestAPIEnrichmentRetry(t *testing.T) {
 	}
 	if !resp.HarvestResubmitted || !harvestNudged {
 		t.Errorf("harvest nudge = (resp=%v, called=%v), want both true", resp.HarvestResubmitted, harvestNudged)
+	}
+
+	// The ack carries the POST-reset snapshot so the card can repaint in one
+	// trip. The enrichment SSE event rides the 30s slow ticker, so without this
+	// the panel shows "0 tracks in the queue · all caught up" for up to half a
+	// minute after a click that just queued work — which reads as the button
+	// having done nothing.
+	if resp.Enrichment == nil {
+		t.Fatal("response carried no enrichment snapshot; the card cannot repaint until the next 30s tick")
+	}
+	if resp.Enrichment.Pending != 1 {
+		t.Errorf("snapshot pending = %d, want 1 — it must reflect the row the retry just re-queued, "+
+			"not the pre-reset cache", resp.Enrichment.Pending)
+	}
+	if resp.Enrichment.Missing != 0 {
+		t.Errorf("snapshot missing = %d, want 0 (the gap row moved to pending)", resp.Enrichment.Missing)
 	}
 
 	// Immediate second click → refused by the rate guard.

@@ -1050,9 +1050,17 @@ const enrichRetryMinInterval = 60 * time.Second
 // enrichmentRetryResponse reports what the retry actually did: how many
 // tracks were re-queued for the enricher, and whether the Atlas harvest
 // client was nudged into a full re-submit (false when harvest isn't wired).
+//
+// Enrichment carries the post-retry snapshot so the card can repaint in one
+// trip, the same way apiUpdatesCheck returns the post-check status. Without it
+// the panel keeps rendering the pre-retry numbers until the next SSE slow tick
+// — the enrichment event rides the 30s ticker — and "0 tracks in the queue ·
+// all caught up" sitting under a button you just pressed reads as the button
+// having done nothing.
 type enrichmentRetryResponse struct {
-	ResetTracks        int64 `json:"resetTracks"`
-	HarvestResubmitted bool  `json:"harvestResubmitted"`
+	ResetTracks        int64               `json:"resetTracks"`
+	HarvestResubmitted bool                `json:"harvestResubmitted"`
+	Enrichment         *enrichmentResponse `json:"enrichment,omitempty"`
 }
 
 // apiEnrichmentRetry handles POST /api/enrichment/retry — the dashboard's
@@ -1100,15 +1108,21 @@ func (s *Server) apiEnrichmentRetry(w http.ResponseWriter, r *http.Request) {
 	if s.deps.HarvestForceSubmit != nil {
 		resubmitted = s.deps.HarvestForceSubmit()
 	}
-	// Invalidate the breakdown cache so the pending-count jump lands on the
-	// next SSE tick instead of after the 15s TTL.
+	// Invalidate the breakdown cache so the recompute below — and the next SSE
+	// tick — both see the post-reset counts rather than the 15s-TTL snapshot
+	// taken before the rows moved.
 	s.enrichmentMu.Lock()
 	s.enrichmentAt = time.Time{}
 	s.enrichmentMu.Unlock()
 	logger.Info("enrichment retry triggered", "resetTracks", reset, "harvestResubmitted", resubmitted)
+	// Recompute immediately and hand the card its new numbers with the ack.
+	// The enrichment SSE event rides the 30s slow ticker, so without this the
+	// panel shows the pre-retry counts for up to half a minute after the click.
+	fresh := s.getEnrichmentSnapshot()
 	writeJSON(w, http.StatusOK, enrichmentRetryResponse{
 		ResetTracks:        reset,
 		HarvestResubmitted: resubmitted,
+		Enrichment:         &fresh,
 	})
 }
 

@@ -118,6 +118,11 @@ function initDashboard() {
         const r = await API.post("/api/enrichment/retry");
         enrichRetryBtn.textContent =
           r && r.resetTracks > 0 ? `Re-queued ${r.resetTracks}` : "Re-checked";
+        // Repaint from the snapshot the handler computed post-reset. The
+        // enrichment SSE event rides the 30s slow ticker, so without this the
+        // panel keeps showing "0 tracks in the queue · all caught up" for up
+        // to half a minute after a click that just queued thousands.
+        if (r && r.enrichment) applyEnrichment(r.enrichment);
       } catch (err) {
         enrichRetryBtn.textContent = idleText;
         alert("Retry failed: " + err.message);
