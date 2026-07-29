@@ -73,10 +73,15 @@ func TestEnrichmentBreakdown(t *testing.T) {
 		t.Fatalf("UpsertTrack pending: %v", err)
 	}
 
-	// matched: enriched AND carries an artwork MBID (a real cover was cached).
+	// matched: enriched AND nothing left to fill. All THREE MBIDs — artwork
+	// alone is no longer "complete", because the card's missing count is now
+	// defined as exactly the set "Retry missing" re-queues (see
+	// enrichmentMissPredicateSQL).
 	matched := &Track{
 		Path: "Music/M/matched.flac", Size: 1, ModTime: time.Unix(1, 0),
-		ArtworkMBID: "12aae8a7-e814-4c46-94d7-5c9e053bda5b",
+		ArtworkMBID:        "12aae8a7-e814-4c46-94d7-5c9e053bda5b",
+		ArtistMBID:         "22222222-2222-4222-8222-222222222222",
+		MusicBrainzAlbumID: "33333333-3333-4333-8333-333333333333",
 	}
 	if err := s.UpsertTrack(ctx, matched); err != nil {
 		t.Fatalf("UpsertTrack matched: %v", err)
@@ -85,7 +90,7 @@ func TestEnrichmentBreakdown(t *testing.T) {
 		t.Fatalf("MarkEnriched matched: %v", err)
 	}
 
-	// missing: enriched but no artwork MBID — the coverage-gap state.
+	// missing: enriched but still short a facet — the coverage-gap state.
 	missing := &Track{Path: "Music/G/missing.flac", Size: 1, ModTime: time.Unix(1, 0)}
 	if err := s.UpsertTrack(ctx, missing); err != nil {
 		t.Fatalf("UpsertTrack missing: %v", err)
