@@ -27,8 +27,13 @@ import (
 )
 
 const (
-	// maxReleaseAttempts bounds the album ladder (6 rungs today).
-	maxReleaseAttempts = 6
+	// maxReleaseAttempts bounds the album ladder. 8 rather than the 6
+	// shapes listed in buildReleaseLadder: a title carrying BOTH a
+	// bracketed and an unbracketed qualifier, on an album with a distinct
+	// albumArtist, generates 7. The cap exists to stop a future generator
+	// multiplying the fan-out, not to trim today's shapes — if it starts
+	// truncating real rungs it has stopped doing its job.
+	maxReleaseAttempts = 8
 	// maxArtistAttempts bounds the artist ladder (5 rungs today).
 	maxArtistAttempts = 5
 )
@@ -83,31 +88,42 @@ func stripUnbracketedEditionSuffix(album string) string {
 // found by folding candidate token runs rather than by folding once and
 // slicing. Longest matching prefix wins.
 //
-// Returns "" when nothing matches or when stripping would empty the
+// Returns ("", "") when nothing matches or when stripping would empty the
 // title (a self-titled album — "Weezer" by Weezer — must be left alone).
-func stripArtistPrefix(album string, artists []string) string {
+//
+// The second return is WHICH of the supplied artists the prefix matched,
+// and it is load-bearing rather than informational. pickBestRelease
+// validates a candidate's artist credit against the artist that was
+// QUERIED. On a split-credit album — track artist "John Lennon",
+// albumArtist "The Beatles", album "The Beatles 1962 – 1966" — the prefix
+// is found via the albumArtist, so querying the stripped title with the
+// TRACK artist fails the credit check and the rung is wasted. The caller
+// must query with the artist whose name was actually stripped.
+func stripArtistPrefix(album string, artists []string) (rest, matched string) {
 	raw := strings.TrimSpace(album)
 	tokens := strings.Fields(raw)
 	if len(tokens) < 2 {
-		return ""
+		return "", ""
 	}
-	var artistFolds []string
+	// Fold each candidate artist both plainly and article-stripped, so a
+	// tag reading "Carpenters Singles 1969-1981" is caught for the artist
+	// "The Carpenters". Keep the ORIGINAL string alongside each fold —
+	// that is what the caller queries with.
+	type artistFold struct{ fold, original string }
+	var folds []artistFold
 	for _, a := range artists {
 		if a = strings.TrimSpace(a); a == "" {
 			continue
 		}
 		if f := foldName(a); f != "" {
-			artistFolds = append(artistFolds, f)
+			folds = append(folds, artistFold{f, a})
 		}
-		// Also accept the article-stripped form, so a tag reading
-		// "Carpenters Singles 1969-1981" is caught for artist
-		// "The Carpenters".
 		if f := foldNameNoArticle(a); f != "" {
-			artistFolds = append(artistFolds, f)
+			folds = append(folds, artistFold{f, a})
 		}
 	}
-	if len(artistFolds) == 0 {
-		return ""
+	if len(folds) == 0 {
+		return "", ""
 	}
 	// Longest prefix first: an artist whose name is itself several tokens
 	// must win over a shorter accidental match.
@@ -116,18 +132,18 @@ func stripArtistPrefix(album string, artists []string) string {
 		if prefixFold == "" {
 			continue
 		}
-		for _, af := range artistFolds {
-			if prefixFold != af {
+		for _, af := range folds {
+			if prefixFold != af.fold {
 				continue
 			}
-			rest := strings.Join(tokens[k:], " ")
-			if foldTitle(rest) == "" {
-				return ""
+			out := strings.Join(tokens[k:], " ")
+			if foldTitle(out) == "" {
+				return "", ""
 			}
-			return rest
+			return out, af.original
 		}
 	}
-	return ""
+	return "", ""
 }
 
 // --- artist name shapes ---
@@ -135,28 +151,42 @@ func stripArtistPrefix(album string, artists []string) string {
 // headCreditSeparators split a multi-credit artist tag down to its first
 // credit: "Ennio Morricone; Solisti e Orchestre" -> "Ennio Morricone".
 //
-// ═══ THE SET IS DELIBERATELY NARROW. DO NOT ADD '&' OR A BARE ','. ═══
+// ═══ THE SET IS DELIBERATELY NARROW. ═══
 //
-// Measured: splitting "Peter, Paul & Mary" on '&' yields "Peter, Paul",
-// which matches an UNRELATED MusicBrainz artist named "Peter Paul" at
-// score 100 — 186 tracks would take a wrong MBID.
+// The rule: a separator qualifies ONLY if it is an unambiguous credit
+// delimiter. An English word that can appear INSIDE a name does not
+// qualify, however often it also separates credits.
 //
-// And it is worse than a coincidence: foldName erases commas, so
-// foldName("Peter, Paul") == foldName("Peter Paul") by construction. The
-// acceptance layer therefore CANNOT catch this — it would happily accept
-// the wrong artist as a folded-exact match. The only defence is never
-// generating the query.
+// Banned, with the reason each one is dangerous:
 //
-// '&' is legitimately INSIDE artist names: Simon & Garfunkel, Alison
-// Krauss & Union Station, Earth, Wind & Fire, Peter, Paul & Mary. So is a
-// bare comma: Crosby, Stills & Nash.
+//   - '&'  — "Peter, Paul & Mary" splits to "Peter, Paul", which matches
+//     an UNRELATED MusicBrainz artist named "Peter Paul" at score 100.
+//     186 tracks would take a wrong MBID. Also inside Simon & Garfunkel,
+//     Alison Krauss & Union Station, Earth, Wind & Fire.
+//   - bare ',' — same collision by a different route (Crosby, Stills &
+//     Nash).
+//   - " with " — inside Sleeping with Sirens, Running with Scissors,
+//     Girls with Guitars. Splitting yields "Sleeping" / "Running" /
+//     "Girls", every one of which is a plausible real artist name.
+//   - " vs " / " vs. " — same hazard, lower frequency.
+//
+// What makes these unrecoverable rather than merely risky: pickBestArtist
+// validates a candidate against the QUERY THAT WAS SENT, not against the
+// original tag. So once a bad rung is generated, an exact match for the
+// truncated name is accepted as correct. And foldName erases commas, so
+// foldName("Peter, Paul") == foldName("Peter Paul") by construction — the
+// acceptance layer cannot catch that one even in principle. Never
+// generating the query is the only defence.
+//
+// Dropping " with " and " vs " costs nothing measured: every artist
+// recovery observed on the production library came through ';' or a role
+// truncation.
 //
 // The slash form is whitespace-delimited on purpose so "AC/DC" survives.
 var headCreditSeparators = []string{
 	";",
 	" / ",
 	" feat. ", " feat ", " ft. ", " ft ", " featuring ",
-	" with ", " vs. ", " vs ",
 }
 
 // splitHeadCredit returns the first credit in a multi-credit tag, or ""
@@ -281,8 +311,16 @@ func buildReleaseLadder(artist, albumArtist, album string) []releaseAttempt {
 	}
 	if s := stripUnbracketedEditionSuffix(album); s != "" {
 		add(artist, s)
+		if useAlbumArtist {
+			add(albumArtist, s)
+		}
 	}
-	if s := stripArtistPrefix(album, []string{artist, albumArtist}); s != "" {
+	// Query the stripped title with the artist whose name was actually
+	// stripped off it — see stripArtistPrefix. Also try the track artist
+	// when it differs, for the ordinary case where the album is credited
+	// to the track artist but the tag repeats it in the title.
+	if s, matched := stripArtistPrefix(album, []string{artist, albumArtist}); s != "" {
+		add(matched, s)
 		add(artist, s)
 	}
 	return out

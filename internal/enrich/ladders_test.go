@@ -44,27 +44,62 @@ func TestStripArtistPrefix(t *testing.T) {
 		name, album string
 		artists     []string
 		want        string
+		wantMatched string
 	}{
-		{"beatles", "The Beatles 1962 – 1966", []string{"The Beatles"}, "1962 – 1966"},
-		{"bon jovi", "Bon Jovi Greatest Hits", []string{"Bon Jovi"}, "Greatest Hits"},
-		{"case differs", "CAROLE KING Music", []string{"Carole King"}, "Music"},
-		{"via albumArtist", "Queen Greatest Hits", []string{"", "Queen"}, "Greatest Hits"},
-		{"article on artist", "Carpenters Singles 1969-1981", []string{"The Carpenters"}, "Singles 1969-1981"},
+		{"beatles", "The Beatles 1962 – 1966", []string{"The Beatles"}, "1962 – 1966", "The Beatles"},
+		{"bon jovi", "Bon Jovi Greatest Hits", []string{"Bon Jovi"}, "Greatest Hits", "Bon Jovi"},
+		{"case differs", "CAROLE KING Music", []string{"Carole King"}, "Music", "Carole King"},
+		{"via albumArtist", "Queen Greatest Hits", []string{"", "Queen"}, "Greatest Hits", "Queen"},
+		{"article on artist", "Carpenters Singles 1969-1981", []string{"The Carpenters"}, "Singles 1969-1981", "The Carpenters"},
+		// The split-credit case: the prefix belongs to the albumArtist, so
+		// that is who the caller must query with — querying "John Lennon"
+		// for a Beatles release fails pickBestRelease's credit check.
+		{"split credit", "The Beatles 1962 – 1966", []string{"John Lennon", "The Beatles"}, "1962 – 1966", "The Beatles"},
 		// Self-titled: stripping would empty the title.
-		{"self titled", "Weezer", []string{"Weezer"}, ""},
-		{"exactly the artist", "Bon Jovi", []string{"Bon Jovi"}, ""},
+		{"self titled", "Weezer", []string{"Weezer"}, "", ""},
+		{"exactly the artist", "Bon Jovi", []string{"Bon Jovi"}, "", ""},
 		// No prefix relation at all.
-		{"unrelated", "Dark Side of the Moon", []string{"Pink Floyd"}, ""},
-		{"no artists", "Some Album", nil, ""},
-		{"empty album", "", []string{"Someone"}, ""},
+		{"unrelated", "Dark Side of the Moon", []string{"Pink Floyd"}, "", ""},
+		{"no artists", "Some Album", nil, "", ""},
+		{"empty album", "", []string{"Someone"}, "", ""},
 		// Longest prefix wins: don't stop at "Peter".
-		{"longest wins", "Peter Gabriel So", []string{"Peter Gabriel"}, "So"},
+		{"longest wins", "Peter Gabriel So", []string{"Peter Gabriel"}, "So", "Peter Gabriel"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := stripArtistPrefix(tc.album, tc.artists); got != tc.want {
+			got, matched := stripArtistPrefix(tc.album, tc.artists)
+			if got != tc.want {
 				t.Errorf("stripArtistPrefix(%q, %v) = %q, want %q", tc.album, tc.artists, got, tc.want)
 			}
+			if matched != tc.wantMatched {
+				t.Errorf("stripArtistPrefix(%q, %v) matched %q, want %q — the caller "+
+					"queries with this, and the wrong one fails the credit check",
+					tc.album, tc.artists, matched, tc.wantMatched)
+			}
 		})
+	}
+}
+
+// TestBuildReleaseLadderQueriesTheStrippedArtist pins the split-credit
+// case end-to-end: track artist "John Lennon", albumArtist "The Beatles",
+// album "The Beatles 1962 – 1966". The prefix is found via the
+// albumArtist, so a rung querying "1962 – 1966" must carry "The Beatles"
+// — with "John Lennon" it would fail pickBestRelease's artist gate and
+// the rung would be a wasted request.
+func TestBuildReleaseLadderQueriesTheStrippedArtist(t *testing.T) {
+	got := buildReleaseLadder("John Lennon", "The Beatles", "The Beatles 1962 – 1966")
+	if !ladderHas(got, "The Beatles", "1962 – 1966") {
+		t.Fatalf("ladder must query the stripped title with the artist it was "+
+			"stripped from: %v", got)
+	}
+}
+
+// TestBuildReleaseLadderTriesAlbumArtistOnTheUnbracketedRung — a
+// compilation whose title carries an unbracketed edition suffix needs the
+// albumArtist for the same reason the bracketed rung always has.
+func TestBuildReleaseLadderTriesAlbumArtistOnTheUnbracketedRung(t *testing.T) {
+	got := buildReleaseLadder("Bon Jovi", "Various Artists", "All Time Rock Ballads Deluxe Edition")
+	if !ladderHas(got, "Various Artists", "All Time Rock Ballads") {
+		t.Fatalf("unbracketed rung must also try the albumArtist: %v", got)
 	}
 }
 
@@ -86,10 +121,24 @@ func TestSplitHeadCreditNeverSplitsOnAmpersandOrBareComma(t *testing.T) {
 		"Emerson, Lake & Palmer",
 		"Jamie MacDougall & Haydn Eisenstadt Trio",
 		"Hall & Oates",
+		// English words that appear INSIDE band names. Splitting these
+		// yields "Sleeping" / "Running" / "Girls" / "Us", every one of
+		// which is a plausible real artist on MusicBrainz — and
+		// pickBestArtist validates against the QUERY that was sent, not
+		// the original tag, so an exact match for the truncated name is
+		// accepted as correct.
+		"Sleeping with Sirens",
+		"Running with Scissors",
+		"Girls with Guitars",
+		"Dancing with Wolves",
+		"Us vs Them",
+		"Spy vs. Spy",
 	} {
 		if got := splitHeadCredit(name); got != "" {
-			t.Errorf("splitHeadCredit(%q) = %q — '&' and bare commas must NEVER be "+
-				"split points; this is the 186-track wrong-MBID case", name, got)
+			t.Errorf("splitHeadCredit(%q) = %q — a separator must be an UNAMBIGUOUS "+
+				"credit delimiter. '&', bare commas, ' with ' and ' vs ' all appear "+
+				"inside real artist names; this is the 186-track wrong-MBID class",
+				name, got)
 		}
 	}
 }
@@ -103,7 +152,12 @@ func TestSplitHeadCredit(t *testing.T) {
 		{"Someone feat. Another", "Someone"},
 		{"Someone ft. Another", "Someone"},
 		{"Someone featuring Another", "Someone"},
-		{"Beyoncé vs. Someone", "Beyoncé"},
+		// ' vs ' and ' with ' are NOT separators — they appear inside real
+		// band names, and the cost of getting that wrong is a confidently
+		// wrong MBID. A genuine "A vs B" collaboration simply falls back
+		// to the other rungs.
+		{"Beyoncé vs. Someone", ""},
+		{"Someone with Another", ""},
 		// AC/DC must survive — the slash rung is whitespace-delimited.
 		{"AC/DC", ""},
 		{"AC/DC; Someone", "AC/DC"},
