@@ -78,6 +78,18 @@ func NewMusicBrainzClient(base, userAgent string, httpClient *http.Client) *Musi
 // operator's own mirror. See pacing.go.
 func (c *MusicBrainzClient) MinInterval() time.Duration { return c.minInterval }
 
+// Candidate-window sizes. Named so the docstrings can't go stale against
+// them the way "MB returns up to 25 candidates" did while the code asked
+// for 10.
+const (
+	// releaseSearchLimit is unchanged behaviour — the release path still
+	// applies the >=80 floor first, so a wider window buys little.
+	releaseSearchLimit = 10
+	// artistSearchLimit is how many artist candidates to request. See the
+	// note at the query site for why 5 was too few.
+	artistSearchLimit = 25
+)
+
 // SearchResult is the trimmed-down result of a release or artist search.
 type SearchResult struct {
 	MBID  string
@@ -93,12 +105,13 @@ type SearchResult struct {
 }
 
 // SearchRelease queries MusicBrainz for the best release matching
-// (artist, album). Returns ("", nil) if no plausible match exists.
+// (artist, album). Returns (nil, nil) if no plausible match exists.
 // Matching strategy:
 //  1. Pass the query to MB's Lucene-style release search.
-//  2. MB returns up to 25 scored candidates.
-//  3. We pick the top candidate whose score >= 80 and whose title +
-//     artist-credit substring-match the inputs (case-insensitive).
+//  2. MB returns up to releaseSearchLimit scored candidates.
+//  3. pickBestRelease selects among them — score floor, then folded
+//     token containment on title and artist credit. See its docblock for
+//     the ordered rules.
 func (c *MusicBrainzClient) SearchRelease(ctx context.Context, artist, album string) (*SearchResult, error) {
 	artist = strings.TrimSpace(artist)
 	album = strings.TrimSpace(album)
@@ -107,7 +120,7 @@ func (c *MusicBrainzClient) SearchRelease(ctx context.Context, artist, album str
 	}
 
 	q := fmt.Sprintf(`release:"%s" AND artist:"%s"`, escapeLucene(album), escapeLucene(artist))
-	u := fmt.Sprintf("%s/release/?query=%s&fmt=json&limit=10", c.base, url.QueryEscape(q))
+	u := fmt.Sprintf("%s/release/?query=%s&fmt=json&limit=%d", c.base, url.QueryEscape(q), releaseSearchLimit)
 
 	var body releaseSearchResponse
 	if err := c.get(ctx, u, &body); err != nil {
@@ -156,7 +169,11 @@ func (c *MusicBrainzClient) SearchArtist(ctx context.Context, artist string) (*S
 		return nil, nil
 	}
 	q := fmt.Sprintf(`artist:"%s"`, escapeLucene(artist))
-	u := fmt.Sprintf("%s/artist/?query=%s&fmt=json&limit=5", c.base, url.QueryEscape(q))
+	// limit=25, raised from 5. With the score floor gone from pickBestArtist's
+	// equality passes, the candidate WINDOW became the binding constraint: a
+	// correct low-scoring match (Zdob și Zdub at 57) can sit below several
+	// higher-scoring wrong ones and fall outside a 5-row window entirely.
+	u := fmt.Sprintf("%s/artist/?query=%s&fmt=json&limit=%d", c.base, url.QueryEscape(q), artistSearchLimit)
 
 	var body artistSearchResponse
 	if err := c.get(ctx, u, &body); err != nil {
@@ -470,38 +487,79 @@ type artistCandidate struct {
 
 // --- matching ---
 
+// pickBestRelease selects the best release candidate, in order:
+//
+//	R1  score >= 80                       (UNCHANGED — the bound everything else leans on)
+//	R2  folded token containment of the release title OR its release-group title
+//	R3  folded token containment of any artist credit
+//	R4  score + 10 raw-exact title + 10 raw-exact head credit
+//	                + 5 folded-exact title  (only if the raw +10 did not fire)
+//	                + 5 folded-exact credit (only if the raw +10 did not fire)
+//	R5  first candidate to reach the top score wins (strict `>`)
+//
+// R2's release-group arm is free recall the bridge was leaving on the
+// table: Atlas's trigram plan MATCHES on release_group.name but RETURNS
+// release.name as `title`, and Atlas's own analysis records the two
+// differing for 4.4% of releases. Rejecting on a title the upstream never
+// claimed to match is simply a bug. `ReleaseGroup.Title` was already
+// decoded and never read.
+//
+// The +5 folded-exact bonuses CAN reorder two candidates that already
+// passed every gate and sit within 10 raw points. The control experiment
+// is the evidence that this is safe (220 albums that resolve today:
+// 96.8% identical release, 0.5% a sibling pressing of the same
+// release-group, 0% a different release-group) — not a claim of
+// impossibility.
 func pickBestRelease(candidates []releaseCandidate, album, artist string) *releaseCandidate {
-	// Hoist the query-side lowercasing out of the candidate loop — album
-	// and artist are fixed across every candidate.
-	albumLower := strings.ToLower(album)
-	artistLower := strings.ToLower(artist)
+	// Hoist the query-side folding out of the candidate loop — album and
+	// artist are fixed across every candidate.
+	albumFold := foldTitle(album)
+	artistFold := foldName(artist)
 	var best *releaseCandidate
 	bestScore := 0
 	for i := range candidates {
 		c := &candidates[i]
-		// Matches the >=80 contract in the SearchRelease docstring.
+		// R1. Matches the >=80 contract in the SearchRelease docstring.
 		// Lower scores tend to be artist-collision false positives
 		// (e.g. a Dire Straits album mis-attributed to a tribute band).
+		// DELIBERATELY UNCHANGED by the folding work.
 		if c.Score < 80 {
 			continue
 		}
-		if !caseInsensitiveContains(c.Title, albumLower) {
+		// R2. Title, folded. Try the release title, then the
+		// release-group title the upstream actually matched on.
+		titleOK := foldedTokenContains(foldTitle(c.Title), albumFold)
+		if !titleOK && c.ReleaseGroup != nil {
+			titleOK = foldedTokenContains(foldTitle(c.ReleaseGroup.Title), albumFold)
+		}
+		if !titleOK {
 			continue
 		}
-		if !anyArtistMatchesLower(c.ArtistCredit, artistLower) {
+		// R3.
+		if !anyArtistCreditMatches(c.ArtistCredit, artistFold) {
 			continue
 		}
-		// Weight: MB score + exact-match bonuses.
+		// R4. Weight: MB score + exact-match bonuses. The raw +10s are
+		// unchanged; the folded +5s only fire where the raw one did not,
+		// so a byte-exact match always outranks a folded-equal one.
 		s := c.Score
-		if strings.EqualFold(c.Title, album) {
+		switch {
+		case strings.EqualFold(c.Title, album):
 			s += 10
+		case foldTitle(c.Title) == albumFold:
+			s += 5
 		}
-		if len(c.ArtistCredit) > 0 && strings.EqualFold(c.ArtistCredit[0].Name, artist) {
-			s += 10
+		if len(c.ArtistCredit) > 0 {
+			switch {
+			case strings.EqualFold(c.ArtistCredit[0].Name, artist):
+				s += 10
+			case foldName(c.ArtistCredit[0].Name) == artistFold:
+				s += 5
+			}
 		}
-		// Linear max-scan: keep the FIRST candidate that reaches the top
-		// score (strict `>` preserves the stable "first of equal score
-		// wins" tie-break the previous sort.SliceStable produced).
+		// R5. Linear max-scan: keep the FIRST candidate that reaches the
+		// top score (strict `>` preserves the stable "first of equal
+		// score wins" tie-break the previous sort.SliceStable produced).
 		if best == nil || s > bestScore {
 			best = c
 			bestScore = s
@@ -510,49 +568,90 @@ func pickBestRelease(candidates []releaseCandidate, album, artist string) *relea
 	return best
 }
 
+// pickBestArtist selects the best artist candidate, in order:
+//
+//	A1  raw case-insensitive name equality, ANY score
+//	A2  folded name equality, ANY score
+//	A3  folded name equality after stripping a leading article, ANY score
+//	A4  top candidate with score >= 90 (UNCHANGED fuzzy fallback)
+//
+// The score floor is deliberately GONE from A1–A3, and that is the fix.
+// It used to run BEFORE the name was ever compared, so MusicBrainz's
+// right answer was discarded unread. Measured against the production
+// library:
+//
+//	Peter, Paul & Mary  -> Peter, Paul and Mary   score 78   186 tracks
+//	The Carpenters      -> Carpenters             score 73    81 tracks
+//	Oscar Peterson Trio -> The Oscar Peterson Trio score 86   68 tracks
+//	Zdob si Zdub        -> Zdob și Zdub           score 57    66 tracks
+//	Yael Naim           -> Yael Naïm              score 53    25 tracks
+//
+// Dropping the floor is not a relaxation — equality after folding is a
+// STRICTLY STRONGER predicate than a fuzzy score. A score-53 candidate
+// whose folded name is byte-identical is a better answer than a score-89
+// candidate whose name merely resembles the query. `Zdob și Zdub` scores
+// 57 only because ș (U+0219) and s share no trigrams; pg_trgm is
+// penalising a byte difference on a linguistically perfect match.
+//
+// 187 of 300 unresolved artists (1,335 tracks) were recovered by A1–A3,
+// and ZERO came from A4 — which is why A4 is left exactly as it was.
+//
+// Pass ORDER is the safety mechanism: raw beats folded, and non-article
+// beats article-stripped, so the loosest rule can only ever apply to
+// candidates the stricter ones all rejected.
 func pickBestArtist(candidates []artistCandidate, artist string) *artistCandidate {
+	// A1 — raw exact, any score. Reproduces every answer the pre-fold
+	// code produced, byte for byte.
 	for i := range candidates {
-		c := &candidates[i]
-		if c.Score < 80 {
-			continue
-		}
-		if strings.EqualFold(c.Name, artist) {
-			return c
+		if strings.EqualFold(candidates[i].Name, artist) {
+			return &candidates[i]
 		}
 	}
-	// No exact-name match — fall back to the top result if its score is
-	// high enough for a fuzzy match.
+	// Fold each candidate ONCE, lazily — A1 is the common case and must
+	// not pay for this. A3's form is derived from A2's rather than
+	// re-folded: foldNameNoArticle(x) is stripLeadingArticle(foldName(x))
+	// by construction, because the article strip is the last stage of the
+	// pipeline.
+	folds := make([]string, len(candidates))
+	for i := range candidates {
+		folds[i] = foldName(candidates[i].Name)
+	}
+	// A2 — folded exact, any score.
+	artistFold := foldName(artist)
+	for i := range folds {
+		if folds[i] == artistFold {
+			return &candidates[i]
+		}
+	}
+	// A3 — folded exact ignoring a leading article, any score.
+	//
+	// Kept as its OWN pass rather than merged into A2. The passes are
+	// ordered strictest-first and that order is the safety mechanism: it
+	// guarantees the loosest rule can only ever apply to candidates every
+	// stricter rule rejected. Collapsing them into one loop with two
+	// "best so far" pointers would preserve the behaviour but hide the
+	// property, and this is the function where the property matters.
+	artistNoArt := foldNameNoArticle(artist)
+	if artistNoArt != "" {
+		for i := range folds {
+			if stripLeadingArticle(folds[i]) == artistNoArt {
+				return &candidates[i]
+			}
+		}
+	}
+	// A4 — no name match at all; fall back to the top result if its score
+	// is high enough for a fuzzy match. UNCHANGED.
 	if len(candidates) > 0 && candidates[0].Score >= 90 {
 		return &candidates[0]
 	}
 	return nil
 }
 
-// caseInsensitiveContains reports whether a and bLower overlap as
-// case-insensitive substrings (either direction). bLower MUST already be
-// lowercased by the caller (hoisted out of the candidate loop); only a —
-// which varies per candidate — is lowered here.
-func caseInsensitiveContains(a, bLower string) bool {
-	if a == "" || bLower == "" {
-		// Neither side may be empty: strings.Contains with an empty needle is
-		// trivially true, which would over-match. In practice bLower is the
-		// always-non-empty album query, but guard both sides for future callers.
-		return false
-	}
-	if strings.EqualFold(a, bLower) {
-		return true // exact (case-insensitive) match — skip the ToLower alloc
-	}
-	la := strings.ToLower(a)
-	return strings.Contains(la, bLower) || strings.Contains(bLower, la)
-}
-
-// anyArtistMatchesLower reports whether any credit name overlaps
-// artistLower (already lowercased by the caller) as a case-insensitive
-// substring, either direction.
-func anyArtistMatchesLower(credits []artistCredit, artistLower string) bool {
+// anyArtistCreditMatches reports whether any credit name overlaps the
+// already-folded artist query on token boundaries, symmetrically.
+func anyArtistCreditMatches(credits []artistCredit, artistFold string) bool {
 	for _, c := range credits {
-		lc := strings.ToLower(c.Name)
-		if strings.Contains(lc, artistLower) || strings.Contains(artistLower, lc) {
+		if foldedTokenContains(foldName(c.Name), artistFold) {
 			return true
 		}
 	}
