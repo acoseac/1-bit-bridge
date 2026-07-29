@@ -94,16 +94,16 @@
            facet actually has gaps; server rate-guards repeat clicks (429). */}}
       <button type="button" id="enrich-retry" class="btn" hidden>Retry missing</button>
     </div>
-    <p class="hint">Metadata &amp; artwork fill in after a scan, paced to respect the enrichment source. <em>Matched</em> tracks have a cover cached; <em>missing</em> are enriched but no cover was found anywhere — a coverage gap.</p>
+    <p class="hint">Metadata &amp; artwork fill in after a scan, paced to respect the enrichment source. <em>Matched</em> tracks came back with everything the enricher looks for — cover, artist and release IDs; <em>missing</em> are enriched but still short at least one of those. Missing is exactly what <em>Retry missing</em> re-queues.</p>
     <dl class="composition">
       <dt id="enrich-source-dt" hidden>Source</dt>
       <dd id="enrich-source" hidden></dd>
       <dt>Pending</dt>
       <dd><span id="enrich-pending">0</span> tracks in the queue · <span id="enrich-eta" class="hint"></span></dd>
       <dt>Matched</dt>
-      <dd><span id="enrich-matched">0</span> tracks have a cover</dd>
+      <dd><span id="enrich-matched">0</span> tracks fully resolved</dd>
       <dt>Missing</dt>
-      <dd><span id="enrich-missing">0</span> tracks enriched without a cover</dd>
+      <dd><span id="enrich-missing">0</span> tracks missing cover, artist or release ID</dd>
       {{/* Coverage rows (have · missing per facet) — hidden until the SSE
            frame carries the corresponding field; bios/descriptions appear
            only on Atlas-wired bridges, artist images whenever the artwork
@@ -124,8 +124,8 @@
          composition dist-bar styles. Hidden until at least one track is
          enriched (matched + missing > 0). */}}
     <div class="dist-section" id="enrich-coverage-section" hidden>
-      <div class="dist-title">Artwork coverage</div>
-      <div class="dist-bar" id="enrich-coverage-bar" role="img" aria-label="Artwork coverage: matched vs missing"></div>
+      <div class="dist-title">Metadata coverage</div>
+      <div class="dist-bar" id="enrich-coverage-bar" role="img" aria-label="Metadata coverage: fully resolved vs missing at least one field"></div>
       <div class="dist-legend" id="enrich-coverage-legend"></div>
     </div>
   </div>
