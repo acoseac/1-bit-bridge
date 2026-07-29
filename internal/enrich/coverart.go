@@ -23,6 +23,10 @@ type CoverArtClient struct {
 	base      string
 	userAgent string
 	http      *http.Client
+
+	// minInterval is the politeness pacing the ENRICHER must apply before
+	// each call, derived from base at construction — see pacing.go.
+	minInterval time.Duration
 }
 
 // NewCoverArtClient constructs a client.
@@ -36,8 +40,18 @@ func NewCoverArtClient(base, userAgent string, httpClient *http.Client) *CoverAr
 		// sharedHTTPTransport tunes the pool size — see transport.go.
 		httpClient = &http.Client{Timeout: 30 * time.Second, Transport: sharedHTTPTransport}
 	}
-	return &CoverArtClient{base: base, userAgent: userAgent, http: httpClient}
+	return &CoverArtClient{
+		base:        base,
+		userAgent:   userAgent,
+		http:        httpClient,
+		minInterval: minIntervalForBase(base, PublicCAAMinInterval, publicCAAHosts),
+	}
 }
+
+// MinInterval is the pacing the caller should sleep between requests:
+// PublicCAAMinInterval against coverartarchive.org, SelfHostedMinInterval
+// against an operator's own mirror. See pacing.go.
+func (c *CoverArtClient) MinInterval() time.Duration { return c.minInterval }
 
 // MaxCoverArtBytes caps individual cover-art body reads. 20 MB is
 // generous — the largest 1200×1200 JPEG observed in the wild is

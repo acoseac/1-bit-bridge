@@ -9,6 +9,11 @@
 // at 500ms for politeness. Both services require a User-Agent identifying
 // the app + a contact URL.
 //
+// Those intervals apply to the PUBLIC services. Both clients accept an
+// operator-supplied base URL, and when one points at a self-hosted mirror
+// the pacing drops to SelfHostedMinInterval — the politeness contract is
+// with two specific hosts, not with the code path. See pacing.go.
+//
 // License: MusicBrainz data is CC0 (public domain). Cover Art Archive
 // images are predominantly CC-BY or CC0; attribution may be required
 // depending on the specific image — the iOS app carries the link back to
@@ -41,6 +46,12 @@ type MusicBrainzClient struct {
 	base      string
 	userAgent string
 	http      *http.Client
+
+	// minInterval is the politeness pacing the ENRICHER must apply before
+	// each call, derived from base at construction. It lives here rather
+	// than on the Enricher so it can never drift out of sync with the host
+	// it protects — see pacing.go.
+	minInterval time.Duration
 }
 
 // NewMusicBrainzClient constructs a client. userAgent MUST be set to
@@ -54,8 +65,18 @@ func NewMusicBrainzClient(base, userAgent string, httpClient *http.Client) *Musi
 		// API hosts — see transport.go for the rationale.
 		httpClient = &http.Client{Timeout: 10 * time.Second, Transport: sharedHTTPTransport}
 	}
-	return &MusicBrainzClient{base: base, userAgent: userAgent, http: httpClient}
+	return &MusicBrainzClient{
+		base:        base,
+		userAgent:   userAgent,
+		http:        httpClient,
+		minInterval: minIntervalForBase(base, PublicMBMinInterval, publicMBHosts),
+	}
 }
+
+// MinInterval is the pacing the caller should sleep between requests:
+// PublicMBMinInterval against musicbrainz.org, SelfHostedMinInterval against an
+// operator's own mirror. See pacing.go.
+func (c *MusicBrainzClient) MinInterval() time.Duration { return c.minInterval }
 
 // SearchResult is the trimmed-down result of a release or artist search.
 type SearchResult struct {
