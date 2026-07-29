@@ -83,39 +83,45 @@ func TestResetEnrichedMissesCoversAlbumMBID(t *testing.T) {
 
 	// Capture indexed_at so we can assert the reset does not bump it.
 	before := map[string]int64{}
+	wantN := int64(0)
 	for _, r := range rows {
 		before[r.path] = indexedAtFor(t, store, r.path)
+		if r.want {
+			wantN++
+		}
 	}
 
 	n, err := store.ResetEnrichedMisses(ctx)
 	if err != nil {
 		t.Fatalf("ResetEnrichedMisses: %v", err)
 	}
-
-	wantN := int64(0)
-	for _, r := range rows {
-		if r.want {
-			wantN++
-		}
-	}
 	if n != wantN {
 		t.Errorf("ResetEnrichedMisses re-queued %d rows, want %d", n, wantN)
 	}
 
 	for _, r := range rows {
-		got := enrichedAtFor(t, store, r.path)
-		if r.want && got != 0 {
-			t.Errorf("%s: enriched_at = %d, want 0 (should have been re-queued)", r.path, got)
-		}
-		if !r.want && got == 0 {
-			t.Errorf("%s: enriched_at = 0, want it left alone (nothing was missing)", r.path)
-		}
-		// indexed_at must not move — nothing about the row's content changed
-		// yet; MarkEnriched bumps it when the retry actually lands new data.
-		if after := indexedAtFor(t, store, r.path); after != before[r.path] {
-			t.Errorf("%s: indexed_at moved %d -> %d; the reset must not bump it (iOS delta churn)",
-				r.path, before[r.path], after)
-		}
+		t.Run(r.path, func(t *testing.T) {
+			assertRequeued(t, store, r.path, r.want)
+			// indexed_at must not move — nothing about the row's content
+			// changed yet; MarkEnriched bumps it when the retry lands data.
+			if after := indexedAtFor(t, store, r.path); after != before[r.path] {
+				t.Errorf("indexed_at moved %d -> %d; the reset must not bump it (iOS delta churn)",
+					before[r.path], after)
+			}
+		})
+	}
+}
+
+// assertRequeued checks whether ResetEnrichedMisses re-queued path, against
+// whether it should have.
+func assertRequeued(t *testing.T, s *Store, path string, want bool) {
+	t.Helper()
+	got := enrichedAtFor(t, s, path)
+	switch {
+	case want && got != 0:
+		t.Errorf("enriched_at = %d, want 0 (should have been re-queued)", got)
+	case !want && got == 0:
+		t.Errorf("enriched_at = 0, want it left alone (nothing was missing)")
 	}
 }
 

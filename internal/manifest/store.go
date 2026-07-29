@@ -1649,9 +1649,27 @@ func (s *Store) MarkEnriched(ctx context.Context, t *Track) error {
 // re-crawl is never triggered: on that same library this selects 46% of rows,
 // and the enricher's album/artist LRU caches collapse them to a few hundred
 // distinct upstream queries.
+// The two statements below are CONSTANT expressions — Go folds `const a = b + c`
+// at compile time — so each Exec still receives a plain string literal. Building
+// them with a runtime `+` would work identically but reads as a dynamically
+// assembled query to both a reviewer and SonarCloud's go:S2077.
 const enrichmentMissPredicateSQL = `(COALESCE(json_extract(tags_json, '$.artworkMBID'), '') = ''
 		     OR COALESCE(json_extract(tags_json, '$.artistMBID'), '') = ''
 		     OR COALESCE(json_extract(tags_json, '$.musicBrainzAlbumID'), '') = '')`
+
+// resetEnrichedMissesSQL is the library-wide "Retry missing" statement.
+const resetEnrichedMissesSQL = `
+		UPDATE tracks SET enriched_at = 0
+		 WHERE enriched_at > 0
+		   AND ` + enrichmentMissPredicateSQL
+
+// resetEnrichedMissesUnderPrefixSQL is its folder-scoped twin. Takes the
+// subtree LIKE pattern as its only bind parameter.
+const resetEnrichedMissesUnderPrefixSQL = `
+		UPDATE tracks SET enriched_at = 0
+		 WHERE enriched_at > 0
+		   AND path LIKE ? ESCAPE '\'
+		   AND ` + enrichmentMissPredicateSQL
 
 // ResetEnrichedMisses re-queues every track the enricher finished WITHOUT a
 // full result — enriched (enriched_at > 0) but still missing its release
@@ -1672,10 +1690,7 @@ const enrichmentMissPredicateSQL = `(COALESCE(json_extract(tags_json, '$.artwork
 func (s *Store) ResetEnrichedMisses(ctx context.Context) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	res, err := s.db.ExecContext(ctx, `
-		UPDATE tracks SET enriched_at = 0
-		 WHERE enriched_at > 0
-		   AND `+enrichmentMissPredicateSQL)
+	res, err := s.db.ExecContext(ctx, resetEnrichedMissesSQL)
 	if err != nil {
 		return 0, err
 	}
