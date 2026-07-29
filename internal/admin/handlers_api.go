@@ -857,7 +857,51 @@ const enrichmentDBTimeout = 60 * time.Second
 // marshalled bytes only change when data changes — SSE diff-suppression
 // stays stable.
 func (s *Server) getEnrichmentSnapshot() enrichmentResponse {
-	snap := s.getEnrichmentBreakdownPart()
+	return s.decorateEnrichment(s.getEnrichmentBreakdownPart())
+}
+
+// freshEnrichmentSnapshot reads the breakdown DIRECTLY, bypassing both the TTL
+// cache and the singleflight group.
+//
+// Used only by the retry ack, which must reflect the reset it just performed.
+// Invalidating the cache is not sufficient on its own: if an SSE tick had
+// already entered the singleflight before the reset landed, a cached-path read
+// would JOIN that in-flight call and be handed its pre-reset numbers — the very
+// staleness the ack exists to avoid. `Forget` would not close it either, since
+// the older flight still writes the cache when it finishes.
+//
+// Going direct is affordable precisely here: the retry is rate-guarded to once
+// per enrichRetryMinInterval, so this cannot become a scan storm the way an
+// uncached SSE path would. The caller still invalidates the cache so the next
+// tick recomputes rather than serving the pre-reset entry.
+//
+// It deliberately does NOT write the cache. A concurrent stale flight may still
+// store its result afterwards, which would silently undo the write; leaving the
+// cache alone means the worst case is one stale entry that expires in
+// enrichmentCacheTTL — comfortably before the 30s tick that would read it.
+func (s *Server) freshEnrichmentSnapshot(ctx context.Context) enrichmentResponse {
+	if s.deps.Manifest == nil {
+		return enrichmentResponse{}
+	}
+	pending, matched, missing, last, err := s.deps.Manifest.EnrichmentBreakdown(ctx)
+	if err != nil {
+		// Fall back to the cached path rather than handing the card zeroes.
+		logger.Warn("enrichment: fresh breakdown", "err", err)
+		return s.getEnrichmentSnapshot()
+	}
+	return s.decorateEnrichment(enrichmentResponse{
+		Pending:            pending,
+		Matched:            matched,
+		Missing:            missing,
+		LastEnrichedAt:     last,
+		EtaSecondsEstimate: int64(math.Round((float64(pending) / avgTracksPerAlbum) * enrichPaceSeconds)),
+	})
+}
+
+// decorateEnrichment fills the config-derived source label and the Atlas meta
+// facets onto a breakdown. The meta facets keep their own 60s cache — the retry
+// does not move them the way it moves pending/matched/missing.
+func (s *Server) decorateEnrichment(snap enrichmentResponse) enrichmentResponse {
 	if cfg := s.deps.CfgHolder.Load(); cfg != nil {
 		snap.Source, _ = deriveEnrichSource(cfg.Enrich.MusicBrainzBaseURL, cfg.Enrich.CoverArtBaseURL)
 	}
@@ -1050,9 +1094,17 @@ const enrichRetryMinInterval = 60 * time.Second
 // enrichmentRetryResponse reports what the retry actually did: how many
 // tracks were re-queued for the enricher, and whether the Atlas harvest
 // client was nudged into a full re-submit (false when harvest isn't wired).
+//
+// Enrichment carries the post-retry snapshot so the card can repaint in one
+// trip, the same way apiUpdatesCheck returns the post-check status. Without it
+// the panel keeps rendering the pre-retry numbers until the next SSE slow tick
+// — the enrichment event rides the 30s ticker — and "0 tracks in the queue ·
+// all caught up" sitting under a button you just pressed reads as the button
+// having done nothing.
 type enrichmentRetryResponse struct {
-	ResetTracks        int64 `json:"resetTracks"`
-	HarvestResubmitted bool  `json:"harvestResubmitted"`
+	ResetTracks        int64               `json:"resetTracks"`
+	HarvestResubmitted bool                `json:"harvestResubmitted"`
+	Enrichment         *enrichmentResponse `json:"enrichment,omitempty"`
 }
 
 // apiEnrichmentRetry handles POST /api/enrichment/retry — the dashboard's
@@ -1100,15 +1152,22 @@ func (s *Server) apiEnrichmentRetry(w http.ResponseWriter, r *http.Request) {
 	if s.deps.HarvestForceSubmit != nil {
 		resubmitted = s.deps.HarvestForceSubmit()
 	}
-	// Invalidate the breakdown cache so the pending-count jump lands on the
-	// next SSE tick instead of after the 15s TTL.
+	// Invalidate the breakdown cache so the next SSE tick recomputes rather
+	// than serving the 15s-TTL entry taken before the rows moved.
 	s.enrichmentMu.Lock()
 	s.enrichmentAt = time.Time{}
 	s.enrichmentMu.Unlock()
 	logger.Info("enrichment retry triggered", "resetTracks", reset, "harvestResubmitted", resubmitted)
+	// Hand the card its new numbers with the ack. The enrichment SSE event
+	// rides the 30s slow ticker, so without this the panel shows the pre-retry
+	// counts for up to half a minute after the click. Read direct rather than
+	// through the cache — see freshEnrichmentSnapshot for why invalidation
+	// alone would not be enough.
+	fresh := s.freshEnrichmentSnapshot(ctx)
 	writeJSON(w, http.StatusOK, enrichmentRetryResponse{
 		ResetTracks:        reset,
 		HarvestResubmitted: resubmitted,
+		Enrichment:         &fresh,
 	})
 }
 
