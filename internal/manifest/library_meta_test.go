@@ -129,9 +129,12 @@ func TestResetEnrichedMissesUnderPrefix(t *testing.T) {
 	s := openTempStore(t)
 	t.Cleanup(func() { _ = s.Close() })
 
-	seedMetaTrack(t, s, "ArtistX/Album1/01.flac", "", "", "")       // incomplete, in prefix
-	seedMetaTrack(t, s, "ArtistX/Album1/02.flac", uuidA, uuidB, "") // complete, in prefix
-	seedMetaTrack(t, s, "ArtistY/Album2/01.flac", "", "", "")       // incomplete, OUT of prefix
+	seedMetaTrack(t, s, "ArtistX/Album1/01.flac", "", "", "") // incomplete, in prefix
+	// Complete means all THREE MBIDs — the predicate gained a release-MBID arm
+	// (see enrichmentMissPredicateSQL), so a row with artwork + artist but no
+	// release MBID is genuinely still missing something.
+	seedMetaTrack(t, s, "ArtistX/Album1/02.flac", uuidA, uuidB, uuidC) // complete, in prefix
+	seedMetaTrack(t, s, "ArtistY/Album2/01.flac", "", "", "")          // incomplete, OUT of prefix
 	if _, err := s.db.Exec(`UPDATE tracks SET enriched_at = 5`); err != nil {
 		t.Fatal(err)
 	}

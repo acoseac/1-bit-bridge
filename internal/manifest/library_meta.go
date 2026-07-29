@@ -147,9 +147,7 @@ func (s *Store) ResetEnrichedMissesUnderPrefix(ctx context.Context, prefix strin
 		UPDATE tracks SET enriched_at = 0
 		 WHERE enriched_at > 0
 		   AND path LIKE ? ESCAPE '\'
-		   AND (COALESCE(json_extract(tags_json, '$.artworkMBID'), '') = ''
-		     OR COALESCE(json_extract(tags_json, '$.artistMBID'), '') = '')
-	`, pattern)
+		   AND `+enrichmentMissPredicateSQL, pattern)
 	if err != nil {
 		return 0, err
 	}

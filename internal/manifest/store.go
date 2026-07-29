@@ -1624,16 +1624,45 @@ func (s *Store) MarkEnriched(ctx context.Context, t *Track) error {
 	return err
 }
 
+// enrichmentMissPredicateSQL is the "this row is missing something the enricher
+// was supposed to fill" test, shared by ResetEnrichedMisses and its
+// folder-scoped twin ResetEnrichedMissesUnderPrefix so the two cannot drift.
+//
+// COALESCE-to-” folds JSON-null/absent and explicit-empty into one predicate —
+// Track MBID fields are omitempty so absent is the normal shape, but the
+// Distinct*MBIDs enumerators guard != ” for the same defensive reason
+// (CodeRabbit + Gemini on PR #495).
+//
+// The musicBrainzAlbumID arm is NOT redundant with artworkMBID. artworkMBID
+// also carries the scanner's `local-<sha256>` sentinel for embedded APIC /
+// folder.jpg art, so a track whose album never resolved on MusicBrainz but
+// which HAS local cover art reads as "not missing" on the artwork arm while
+// still having no release MBID at all — and therefore no Atlas description,
+// label, genres, booklet or premium cover, all of which key on it.
+//
+// Measured on the production bridge when the arm was added (2026-07-29): 8,945
+// of 19,482 tracks had no album MBID, and 6,801 of those — every one via a
+// local- sentinel — were invisible to the two-arm predicate. The operator
+// pressed "Retry missing" and 76% of the affected rows silently stayed put.
+//
+// Still scoped to rows that actually miss data, so a full-library MB/CAA
+// re-crawl is never triggered: on that same library this selects 46% of rows,
+// and the enricher's album/artist LRU caches collapse them to a few hundred
+// distinct upstream queries.
+const enrichmentMissPredicateSQL = `(COALESCE(json_extract(tags_json, '$.artworkMBID'), '') = ''
+		     OR COALESCE(json_extract(tags_json, '$.artistMBID'), '') = ''
+		     OR COALESCE(json_extract(tags_json, '$.musicBrainzAlbumID'), '') = '')`
+
 // ResetEnrichedMisses re-queues every track the enricher finished WITHOUT a
 // full result — enriched (enriched_at > 0) but still missing its release
-// artwork MBID or its artist MBID — by resetting enriched_at to 0 so the
-// worker's `WHERE enriched_at = 0` query picks it up again. This is the
-// operator-triggered "Retry missing" reset behind POST /api/enrichment/retry:
-// the third sanctioned enriched_at writer alongside the upsert reset and
-// MarkEnriched (see CLAUDE.md "enriched_at monotonicity"). It is semantically
-// the documented manual `UPDATE tracks SET enriched_at = 0` recipe, scoped to
-// the rows that actually miss data so a full-library MB/CAA re-crawl is never
-// triggered.
+// artwork MBID, its artist MBID, or its release MBID — by resetting
+// enriched_at to 0 so the worker's `WHERE enriched_at = 0` query picks it up
+// again. This is the operator-triggered "Retry missing" reset behind
+// POST /api/enrichment/retry: the third sanctioned enriched_at writer alongside
+// the upsert reset and MarkEnriched (see CLAUDE.md "enriched_at monotonicity").
+// It is semantically the documented manual `UPDATE tracks SET enriched_at = 0`
+// recipe, scoped to the rows that actually miss data (see
+// enrichmentMissPredicateSQL).
 //
 // indexed_at is deliberately NOT bumped — nothing about the row's content
 // changed yet; MarkEnriched bumps it when the retry actually lands new data.
@@ -1643,16 +1672,10 @@ func (s *Store) MarkEnriched(ctx context.Context, t *Track) error {
 func (s *Store) ResetEnrichedMisses(ctx context.Context) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// COALESCE-to-'' folds JSON-null/absent and explicit-empty into one
-	// "missing" predicate — Track MBID fields are omitempty so absent is the
-	// normal shape, but the Distinct*MBIDs enumerators guard != '' for the
-	// same defensive reason (CodeRabbit + Gemini on PR #495).
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE tracks SET enriched_at = 0
 		 WHERE enriched_at > 0
-		   AND (COALESCE(json_extract(tags_json, '$.artworkMBID'), '') = ''
-		     OR COALESCE(json_extract(tags_json, '$.artistMBID'), '') = '')
-	`)
+		   AND `+enrichmentMissPredicateSQL)
 	if err != nil {
 		return 0, err
 	}

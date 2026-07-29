@@ -46,10 +46,14 @@ func TestAPIEnrichmentRetry(t *testing.T) {
 		artMBID = "11111111-1111-4111-8111-111111111111"
 		relMBID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 	)
+	// "Complete" means all THREE MBIDs — the store's miss predicate gained a
+	// release-MBID arm (manifest.enrichmentMissPredicateSQL), so artwork +
+	// artist alone still leaves the row missing the release that the Atlas
+	// description / booklet / premium cover key on.
 	complete := &manifest.Track{Path: "A/complete.flac", Size: 1, ModTime: time.Unix(1, 0),
-		ArtworkMBID: relMBID, ArtistMBID: artMBID}
+		ArtworkMBID: relMBID, ArtistMBID: artMBID, MusicBrainzAlbumID: relMBID}
 	gap := &manifest.Track{Path: "B/gap.flac", Size: 1, ModTime: time.Unix(1, 0),
-		ArtistMBID: artMBID}
+		ArtistMBID: artMBID, MusicBrainzAlbumID: relMBID}
 	for _, tr := range []*manifest.Track{complete, gap} {
 		if err := srv.deps.Manifest.UpsertTrack(ctx, tr); err != nil {
 			t.Fatal(err)
