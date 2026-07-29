@@ -29,6 +29,47 @@ type TrackMetaRef struct {
 	ArtworkVersion string
 }
 
+// Enrichment miss facets. These name the three arms of
+// enrichmentMissPredicateSQL (store.go) so an operator can ask WHICH
+// field a track is short of, not merely that it is short of something.
+const (
+	MissFacetArtwork = "artwork"
+	MissFacetArtist  = "artist"
+	MissFacetRelease = "release"
+)
+
+// MissFacets reports which enrichment facets this row is missing, in a
+// stable order. An empty result means the row is fully matched.
+//
+// LOCKSTEP MIRROR of enrichmentMissPredicateSQL (store.go): three arms,
+// each "field is empty", OR'd together. The SQL already COALESCEs each
+// column to ” in StreamTrackMetaRefsUnderPrefix, so an empty string here
+// means exactly what `COALESCE(...) = ”` means there.
+//
+// Keeping these in step is load-bearing: the dashboard's "missing" count,
+// the "Retry missing" button, and this enumeration must all describe the
+// same set of rows, or the operator is once again reading a number that
+// doesn't mean what the button does (the bug #596 fixed). Pinned by
+// TestMissFacetsMirrorsTheMissPredicate.
+func (r TrackMetaRef) MissFacets() []string {
+	var out []string
+	if r.ArtworkMBID == "" {
+		out = append(out, MissFacetArtwork)
+	}
+	if r.ArtistMBID == "" {
+		out = append(out, MissFacetArtist)
+	}
+	if r.ReleaseMBID == "" {
+		out = append(out, MissFacetRelease)
+	}
+	return out
+}
+
+// IsMiss reports whether the row would be re-queued by "Retry missing".
+func (r TrackMetaRef) IsMiss() bool {
+	return r.ArtworkMBID == "" || r.ArtistMBID == "" || r.ReleaseMBID == ""
+}
+
 // StreamTrackMetaRefsUnderPrefix walks every track under `prefix`
 // ("" = whole library) and yields the MBID projection per row. The
 // callback MUST NOT retain the value past its invocation (the

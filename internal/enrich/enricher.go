@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
@@ -160,6 +161,14 @@ type Enricher struct {
 	// progress counters exposed via ScanState.
 	done    atomic.Int64
 	skipped atomic.Int64
+
+	// skipReasons counts markSkipped calls per bounded reason key. The
+	// keys are the skipReason* constants ONLY — never a formatted error
+	// string, which would make the map unbounded in cardinality (a
+	// per-host MB error message would mint a fresh key each time). The
+	// variable detail rides the log line instead.
+	skipReasonsMu sync.Mutex
+	skipReasons   map[string]int64
 
 	// caaFallbackHits counts how often the release-group fallback salvaged
 	// an artwork fetch that the release-level lookup missed. Exposed as a
@@ -338,7 +347,7 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 	// done anyway so we don't poll them forever. Runs AFTER the scrub above
 	// so the persisted row can't retain an unvalidated MBID.
 	if t.Artist == "" || t.Album == "" {
-		e.markSkipped(ctx, t, "no artist/album to search by")
+		e.markSkipped(ctx, t, skipReasonNoSearchTerms, "no artist/album to search by")
 		return
 	}
 
@@ -405,7 +414,7 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 				// schema drift, decode error). The cache is
 				// process-local; restart clears it.
 				e.albumCache.Set(key, albumResolution{})
-				e.markSkipped(ctx, t, fmt.Sprintf("MB error: %v", err))
+				e.markSkipped(ctx, t, skipReasonMBError, err.Error())
 				return
 			}
 			resolution := albumResolution{}
@@ -473,7 +482,7 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 		if err := e.resolveArtist(ctx, t); err != nil {
 			return
 		}
-		e.markSkipped(ctx, t, "no MB match")
+		e.markSkipped(ctx, t, skipReasonNoMBMatch, "no acceptable release candidate")
 		return
 	}
 
@@ -819,14 +828,58 @@ func linkOrCopy(src, dst string) error {
 	return writeArtworkAtomic(dst, data)
 }
 
+// Skip reasons. BOUNDED SET — these are the only values that may reach
+// markSkipped's `reason` argument or the skipReasons map. A formatted
+// error string must never be used as a key (see the skipReasons field).
+const (
+	// skipReasonNoSearchTerms — the track has no artist or no album tag,
+	// so there is nothing to search MusicBrainz by. Only a tag fix or
+	// acoustic fingerprinting can recover these.
+	skipReasonNoSearchTerms = "no_search_terms"
+	// skipReasonNoMBMatch — the query ladder ran clean and MusicBrainz
+	// returned nothing acceptable. This is the bucket that shrinks when
+	// matching or query shapes improve.
+	skipReasonNoMBMatch = "no_mb_match"
+	// skipReasonMBError — a PERSISTENT MusicBrainz error (4xx, decode).
+	// Transient errors return without stamping and never land here.
+	skipReasonMBError = "mb_error"
+)
+
 // markSkipped stamps enriched_at so the worker doesn't retry the same
 // unsearchable track forever.
-func (e *Enricher) markSkipped(ctx context.Context, t *manifest.Track, reason string) {
-	_ = reason // kept for future logging/observability
+//
+// `reason` must be one of the skipReason* constants — it keys the
+// bounded skipReasons map. `detail` carries the variable part (an error
+// string, the query that came back empty) and rides the log line only.
+func (e *Enricher) markSkipped(ctx context.Context, t *manifest.Track, reason, detail string) {
 	if err := e.store.MarkEnriched(ctx, t); err != nil {
 		logger.Error("mark skipped", "path", t.Path, "err", err)
 	}
 	e.skipped.Add(1)
+	e.skipReasonsMu.Lock()
+	if e.skipReasons == nil {
+		e.skipReasons = make(map[string]int64, 4)
+	}
+	e.skipReasons[reason]++
+	e.skipReasonsMu.Unlock()
+	// Info, not Warn: on a library with genuinely untagged files this is
+	// the expected steady state, and a Warn-level line per track would
+	// train operators to ignore the log.
+	logger.Info("enrichment skipped", "path", t.Path, "reason", reason,
+		"detail", detail, "artist", t.Artist, "album", t.Album)
+}
+
+// SkipReasons returns a copy of the per-reason skip counts accumulated
+// since process start (not persisted). Keys are the skipReason*
+// constants.
+func (e *Enricher) SkipReasons() map[string]int64 {
+	e.skipReasonsMu.Lock()
+	defer e.skipReasonsMu.Unlock()
+	out := make(map[string]int64, len(e.skipReasons))
+	for k, v := range e.skipReasons {
+		out[k] = v
+	}
+	return out
 }
 
 // ensureArtworkCached fetches (mbid, size) cover bytes from CAA and
