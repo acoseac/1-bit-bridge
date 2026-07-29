@@ -547,14 +547,10 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) error {
 		artistMBID = cached
 	} else {
 		metrics.RecordMBCache("artist", false)
-		if !sleepCtx(ctx, e.MBMinInterval) {
-			// ctx cancelled during pacing — sleepCtx returns false only
-			// when ctx.Err() != nil, so propagate it: enrichOne then skips
-			// MarkEnriched on shutdown instead of stamping the track +
-			// logging a spurious "context canceled". Mirrors the album path.
-			return ctx.Err()
-		}
-		res, err := e.mb.SearchArtist(ctx, t.Artist)
+		// Pacing now lives inside searchArtistWithFallbacks, which paces
+		// EVERY rung — the politeness contract is per-request, and a
+		// ladder that paced only its first rung would burst.
+		res, err := e.searchArtistWithFallbacks(ctx, t)
 		if err != nil {
 			// Don't cache transient errors session-wide — a network
 			// blip would otherwise block sibling-track retries until
@@ -611,6 +607,15 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) error {
 		// write), so this branch is strictly about positive hits. The
 		// persistent-error branch above DOES cache "" — a rejected query is
 		// not a no-match.
+		//
+		// The artist LADDER does not change this. It was tempting to start
+		// caching no-matches once a miss could cost several rungs instead
+		// of one, but measured on the 300 unresolved artists of the
+		// production library the ladder generates 1 rung for 79 of them and
+		// 2 for 214 — a 1.47x request multiplier on a cold pass, shrinking
+		// as artists resolve and get positively cached. That is not worth
+		// trading away a documented invariant. See buildArtistLadder.
+		//
 		// isValidMBID, not just != "": res.MBID lands in ArtistImagePath's
 		// filepath.Join as the leading component. Same rationale as the
 		// release-side validation above (F30).
@@ -1308,26 +1313,9 @@ func stripAlbumEditionSuffix(album string) string {
 // immediately, exactly as the single-attempt version did, so the caller's
 // transient-retry and negative-cache contracts still hold.
 func (e *Enricher) searchReleaseWithFallbacks(ctx context.Context, t *manifest.Track) (*SearchResult, error) {
-	// Trim once up front so the comparisons below and the queries themselves
-	// see the same strings (SearchRelease trims too, but then the dedup check
-	// and the request would be reasoning about different values).
-	artist := strings.TrimSpace(t.Artist)
-	album := strings.TrimSpace(t.Album)
-	albumArtist := strings.TrimSpace(t.AlbumArtist)
-
-	type attempt struct{ artist, album string }
-	attempts := []attempt{{artist, album}}
-
-	useAlbumArtist := albumArtist != "" && !strings.EqualFold(albumArtist, artist)
-	if useAlbumArtist {
-		attempts = append(attempts, attempt{albumArtist, album})
-	}
-	if stripped := stripAlbumEditionSuffix(album); stripped != "" {
-		attempts = append(attempts, attempt{artist, stripped})
-		if useAlbumArtist {
-			attempts = append(attempts, attempt{albumArtist, stripped})
-		}
-	}
+	// Shapes, order, dedup and cap all live in buildReleaseLadder — see
+	// its docblock for why the order is strictly additive.
+	attempts := buildReleaseLadder(t.Artist, t.AlbumArtist, t.Album)
 
 	for i, a := range attempts {
 		// Pace every attempt, not just the first — these are real upstream
