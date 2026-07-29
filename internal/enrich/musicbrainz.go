@@ -41,6 +41,12 @@ type MusicBrainzClient struct {
 	base      string
 	userAgent string
 	http      *http.Client
+
+	// minInterval is the politeness pacing the ENRICHER must apply before
+	// each call, derived from base at construction. It lives here rather
+	// than on the Enricher so it can never drift out of sync with the host
+	// it protects — see pacing.go.
+	minInterval time.Duration
 }
 
 // NewMusicBrainzClient constructs a client. userAgent MUST be set to
@@ -54,8 +60,18 @@ func NewMusicBrainzClient(base, userAgent string, httpClient *http.Client) *Musi
 		// API hosts — see transport.go for the rationale.
 		httpClient = &http.Client{Timeout: 10 * time.Second, Transport: sharedHTTPTransport}
 	}
-	return &MusicBrainzClient{base: base, userAgent: userAgent, http: httpClient}
+	return &MusicBrainzClient{
+		base:        base,
+		userAgent:   userAgent,
+		http:        httpClient,
+		minInterval: minIntervalForBase(base, PublicMBMinInterval, publicMBHosts),
+	}
 }
+
+// MinInterval is the pacing the caller should sleep between requests:
+// PublicMBMinInterval against musicbrainz.org, SelfHostedMinInterval against an
+// operator's own mirror. See pacing.go.
+func (c *MusicBrainzClient) MinInterval() time.Duration { return c.minInterval }
 
 // SearchResult is the trimmed-down result of a release or artist search.
 type SearchResult struct {

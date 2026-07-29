@@ -193,14 +193,26 @@ const (
 // Deezer can be nil — artist-image lookup is simply skipped in that
 // case.
 func NewEnricher(store *manifest.Store, mb *MusicBrainzClient, caa *CoverArtClient, deezer *DeezerClient, cacheDir string) *Enricher {
+	// The MB/CAA pacing comes FROM the clients, so it tracks the host each is
+	// actually pointed at (see pacing.go). A nil client keeps the public
+	// interval — it is only reachable from tests, and the safe direction for a
+	// missing client is the slow one. iTunes and Deezer are always the public
+	// third-party services, so their intervals stay fixed here.
+	mbInterval, caaInterval := PublicMBMinInterval, PublicCAAMinInterval
+	if mb != nil {
+		mbInterval = mb.MinInterval()
+	}
+	if caa != nil {
+		caaInterval = caa.MinInterval()
+	}
 	e := &Enricher{
 		store:             store,
 		mb:                mb,
 		caa:               caa,
 		deezer:            deezer,
 		CacheDir:          cacheDir,
-		MBMinInterval:     1100 * time.Millisecond,
-		CAAMinInterval:    500 * time.Millisecond,
+		MBMinInterval:     mbInterval,
+		CAAMinInterval:    caaInterval,
 		ITunesMinInterval: 3 * time.Second,
 		DeezerMinInterval: 120 * time.Millisecond,
 		BatchLimit:        100,
@@ -264,8 +276,26 @@ func (e *Enricher) Run(ctx context.Context) {
 			}
 			e.enrichOne(ctx, &batch[i])
 		}
+		// Unconditional breather between batches.
+		//
+		// The MB/CAA pacers are NOT a substitute: they only sleep when a
+		// network call is actually made, so a batch whose rows all resolve
+		// from the LRU caches (or bail on an early check) completes in
+		// milliseconds and immediately re-queries UnenrichedTracks. At the
+		// old fixed 1.1s MB pace that was invisible; against a self-hosted
+		// mirror at SelfHostedMinInterval it is not, and a batch that keeps
+		// failing WITHOUT stamping enriched_at (the transient-error path)
+		// would spin the DB as fast as the loop can turn.
+		if !sleepCtx(ctx, interBatchPause) {
+			return
+		}
 	}
 }
+
+// interBatchPause is the floor on how often Run may re-poll the store. Small
+// enough to be invisible against real enrichment work, large enough that a
+// zero-progress batch cannot hot-spin.
+const interBatchPause = 50 * time.Millisecond
 
 // Done returns the number of tracks processed by this Enricher so far
 // (the count resets when the process restarts; it's not persisted).
@@ -424,6 +454,22 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 	// doesn't loop on it. Without this relaxation, the local-artwork
 	// feature would silently fail to fix the very case it targets.
 	if albumMBID == "" && !strings.HasPrefix(t.ArtworkMBID, "local-") {
+		// Resolve the ARTIST before giving up on the album. The two halves are
+		// independent — the artist search is a different, much more reliable
+		// query (30-190ms and a far smaller candidate space than the release
+		// search) — and this branch is not rare: a release-search miss used to
+		// cost the track its artist MBID and artist image too, purely as
+		// collateral. On the production library that was roughly half the
+		// tracks losing an artist portrait for a reason unrelated to the artist.
+		//
+		// Same error contract as the success path below: a TRANSIENT MB failure
+		// returns non-nil, and we return WITHOUT stamping so the worker retries
+		// this track on the next batch. Persistent misses return nil and fall
+		// through to markSkipped, which persists whatever resolveArtist did
+		// manage to set.
+		if err := e.resolveArtist(ctx, t); err != nil {
+			return
+		}
 		e.markSkipped(ctx, t, "no MB match")
 		return
 	}
