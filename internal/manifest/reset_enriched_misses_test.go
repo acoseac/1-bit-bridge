@@ -20,14 +20,26 @@ func TestEnrichmentMissPredicateIsShared(t *testing.T) {
 	for name, stmt := range map[string]string{
 		"resetEnrichedMissesSQL":            resetEnrichedMissesSQL,
 		"resetEnrichedMissesUnderPrefixSQL": resetEnrichedMissesUnderPrefixSQL,
+		// The dashboard card counts `matched` as the NEGATION of this
+		// predicate, so it has to embed the same text — otherwise the number
+		// the operator reads stops describing what the button does.
+		"enrichmentBreakdownSQL": enrichmentBreakdownSQL,
 	} {
-		if !strings.Contains(stmt, enrichmentMissPredicateSQL) {
-			t.Errorf("%s no longer embeds enrichmentMissPredicateSQL verbatim — the two retry\n"+
-				"statements have drifted. Statement:\n%s\n\nwant it to contain:\n%s",
+		// Whitespace-normalised: the three statements nest the predicate at
+		// different depths, and forcing identical indentation on all of them
+		// would couple the guard to layout rather than to meaning. Any
+		// SEMANTIC edit — a dropped arm, a renamed tag path — still fails.
+		if !strings.Contains(squashSpace(stmt), squashSpace(enrichmentMissPredicateSQL)) {
+			t.Errorf("%s no longer embeds the shared miss-predicate — the retry statements\n"+
+				"and the dashboard breakdown have drifted apart.\nStatement:\n%s\n\nwant it to contain:\n%s",
 				name, stmt, enrichmentMissPredicateSQL)
 		}
 	}
 }
+
+// squashSpace collapses every run of whitespace to a single space so SQL
+// fragments compare on content rather than indentation.
+func squashSpace(s string) string { return strings.Join(strings.Fields(s), " ") }
 
 // TestResetEnrichedMissesCoversAlbumMBID pins the third arm of the "Retry
 // missing" predicate.
@@ -163,4 +175,76 @@ func indexedAtFor(t *testing.T, s *Store, path string) int64 {
 		t.Fatalf("read indexed_at(%s): %v", path, err)
 	}
 	return v
+}
+
+// TestEnrichmentBreakdownMissingEqualsRetryScope is the behavioural half of the
+// card↔button contract: whatever the dashboard reports as "missing" must be
+// exactly the row count "Retry missing" re-queues.
+//
+// They used to disagree badly. `matched` counted any non-NULL `$.artworkMBID`,
+// so a `local-<sha256>` sentinel from embedded art counted as complete even
+// with no release MBID at all — on the production library the card read 553
+// missing while the retry re-queued 10,194.
+func TestEnrichmentBreakdownMissingEqualsRetryScope(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer store.Close()
+
+	const (
+		art    = "11111111-1111-4111-8111-111111111111"
+		artist = "22222222-2222-4222-8222-222222222222"
+		rel    = "33333333-3333-4333-8333-333333333333"
+		local  = "local-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	)
+	seed := []struct {
+		path string
+		trk  Track
+		done bool
+	}{
+		{"complete.flac", Track{ArtworkMBID: art, ArtistMBID: artist, MusicBrainzAlbumID: rel}, true},
+		// The blind spot: complete-looking on the old artwork-only test.
+		{"local-no-release.flac", Track{ArtworkMBID: local, ArtistMBID: artist}, true},
+		{"no-artist.flac", Track{ArtworkMBID: art, MusicBrainzAlbumID: rel}, true},
+		{"no-artwork.flac", Track{ArtistMBID: artist, MusicBrainzAlbumID: rel}, true},
+		{"never-enriched.flac", Track{}, false}, // pending, not missing
+	}
+	for _, s := range seed {
+		tr := s.trk
+		tr.Path, tr.Size, tr.ModTime = s.path, 1, time.Now()
+		if err := store.UpsertTrack(ctx, &tr); err != nil {
+			t.Fatalf("UpsertTrack(%s): %v", s.path, err)
+		}
+		if s.done {
+			if err := store.MarkEnriched(ctx, &tr); err != nil {
+				t.Fatalf("MarkEnriched(%s): %v", s.path, err)
+			}
+		}
+	}
+
+	pending, matched, missing, _, err := store.EnrichmentBreakdown(ctx)
+	if err != nil {
+		t.Fatalf("EnrichmentBreakdown: %v", err)
+	}
+	if pending != 1 {
+		t.Errorf("pending = %d, want 1", pending)
+	}
+	if matched != 1 {
+		t.Errorf("matched = %d, want 1 (only the all-three-MBID row is complete)", matched)
+	}
+	if missing != 3 {
+		t.Errorf("missing = %d, want 3 (local-no-release + no-artist + no-artwork)", missing)
+	}
+
+	// The equality that matters: the reset re-queues precisely `missing` rows.
+	requeued, err := store.ResetEnrichedMisses(ctx)
+	if err != nil {
+		t.Fatalf("ResetEnrichedMisses: %v", err)
+	}
+	if int(requeued) != missing {
+		t.Errorf("card says %d missing but the retry re-queued %d — the dashboard number "+
+			"no longer predicts what the button does", missing, requeued)
+	}
 }

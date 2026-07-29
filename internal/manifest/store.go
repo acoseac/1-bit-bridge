@@ -1678,6 +1678,20 @@ const resetEnrichedMissesUnderPrefixSQL = `
 		     OR COALESCE(json_extract(tags_json, '$.artistMBID'), '') = ''
 		     OR COALESCE(json_extract(tags_json, '$.musicBrainzAlbumID'), '') = '')`
 
+// enrichmentBreakdownSQL backs the dashboard's enrichment card. `matched` is
+// the NEGATION of the same miss-predicate the two statements above use, so the
+// card's "missing" count is exactly what the "Retry missing" button re-queues —
+// see EnrichmentBreakdown for why that equality is load-bearing.
+const enrichmentBreakdownSQL = `
+		SELECT
+			(SELECT COUNT(*) FROM tracks WHERE enriched_at = 0),
+			(SELECT COUNT(*) FROM tracks WHERE enriched_at > 0
+				AND NOT (COALESCE(json_extract(tags_json, '$.artworkMBID'), '') = ''
+				      OR COALESCE(json_extract(tags_json, '$.artistMBID'), '') = ''
+				      OR COALESCE(json_extract(tags_json, '$.musicBrainzAlbumID'), '') = '')),
+			(SELECT COUNT(*) FROM tracks),
+			(SELECT MAX(enriched_at) FROM tracks)`
+
 // ResetEnrichedMisses re-queues every track the enricher finished WITHOUT a
 // full result — enriched (enriched_at > 0) but still missing its release
 // artwork MBID, its artist MBID, or its release MBID — by resetting
@@ -3129,31 +3143,43 @@ func (s *Store) EnrichmentCounts(ctx context.Context) (enriched int, lastEnriche
 // spot coverage gaps:
 //
 //   - pending: never been through the enricher (`enriched_at = 0`).
-//   - matched: enriched AND an artwork MBID landed — a cover is cached.
-//   - missing: enriched but no cover found anywhere (MB/CAA/CAA-rg/iTunes all
-//     missed, or no MB match at all). This is the coverage-gap signal.
+//   - matched: enriched AND nothing left to fill — artwork, artist and release
+//     MBIDs all landed.
+//   - missing: enriched but still short at least one of those. This is the
+//     coverage-gap signal, and it is EXACTLY the set the "Retry missing" button
+//     re-queues.
 //
-// No new column: the split is derived from the existing `enriched_at` column +
-// the `$.artworkMBID` tag, so it stays exactly consistent with what `enrichOne`
-// writes — a track is MarkEnriched even when artwork misses, and `t.ArtworkMBID`
-// is set only when bytes reach disk, so an enriched row with a NULL
-// `$.artworkMBID` is precisely a gap. A `local-<sha256>` sentinel is a non-NULL
-// value, so a locally-curated cover counts as matched (correct). Because
-// `Track.ArtworkMBID` is `omitempty`, an empty value is absent from `tags_json`,
-// so IS NULL / IS NOT NULL is the exact test (and matches the functional index
-// expression `json_extract(tags_json,'$.artworkMBID')`).
+// That last equality is the point of sharing enrichmentMissPredicateSQL here.
+// `matched` used to be "non-NULL `$.artworkMBID`" alone, which made the card
+// disagree with its own button in both directions: a `local-<sha256>` sentinel
+// (embedded APIC / folder.jpg art) counted as matched even with no release MBID
+// at all, and a row with a cover but no artist MBID counted as matched too.
+// Measured on the production bridge when this was corrected (2026-07-29): the
+// card read 553 missing while the retry re-queued 10,194 — an operator watching
+// the number had no way to predict what the button would do. Same class of bug
+// as the predicate gap the button itself had (PR #595), one layer up in the
+// display.
 //
-// Four index-friendly subqueries in one statement (one consistent read, no
-// divergence window between separate COUNTs): `pending` and `total` are COUNTs
-// against `idx_tracks_enriched` / the table; `matched` counts non-NULL
-// `$.artworkMBID`, which the functional index `idx_tracks_artwork_mbid` answers
-// WITHOUT parsing every `tags_json` BLOB; and `missing` is DERIVED as
+// No new column: the split still derives from `enriched_at` + the tags, so it
+// stays exactly consistent with what `enrichOne` writes — a track is
+// MarkEnriched even when a facet misses. COALESCE-to-” is what makes the test
+// exact: `Track`'s MBID fields are `omitempty`, so absent is the normal shape
+// for a gap, but an explicitly-empty value must read the same way.
+//
+// Four subqueries in one statement (one consistent read, no divergence window
+// between separate COUNTs): `pending` and `total` are COUNTs against
+// `idx_tracks_enriched` / the table, and `missing` is DERIVED as
 // `total - pending - matched` (every track is pending XOR enriched, and enriched
-// splits matched/missing), so it costs no second json_extract pass. This is the
-// EnrichmentCounts subquery shape (same `> 0` sargeability note applies); the
-// admin caller still TTL-caches + single-flights it. Read-only, no `s.mu` (WAL
-// concurrent-reader), so a slow read can't stall a writer. (Gemini review on
-// PR #490.)
+// splits matched/missing) so it costs no second json_extract pass.
+//
+// `matched` no longer rides the `idx_tracks_artwork_mbid` functional index —
+// a three-field predicate can't — so it parses `tags_json` per row. Measured on
+// the 19,482-track production library: 34ms -> 64ms for the whole statement.
+// That is affordable because the admin caller TTL-caches (enrichmentCacheTTL)
+// and single-flights it; if this ever needs to run un-cached, count `missing`
+// against a purpose-built index rather than reverting to a predicate that
+// disagrees with the retry. Read-only, no `s.mu` (WAL concurrent-reader), so a
+// slow read can't stall a writer. (Gemini review on PR #490.)
 //
 // `lastEnrichedAt` mirrors EnrichmentCounts exactly: MAX(enriched_at) is a valid
 // `0` (NOT SQL NULL) on a fresh all-unenriched library, so the `!= 0` guard maps
@@ -3161,14 +3187,7 @@ func (s *Store) EnrichmentCounts(ctx context.Context) (enriched int, lastEnriche
 func (s *Store) EnrichmentBreakdown(ctx context.Context) (pending, matched, missing int, lastEnrichedAt *time.Time, err error) {
 	var lastNs sql.NullInt64
 	var total int
-	err = s.db.QueryRowContext(ctx, `
-		SELECT
-			(SELECT COUNT(*) FROM tracks WHERE enriched_at = 0),
-			(SELECT COUNT(*) FROM tracks WHERE enriched_at > 0
-				AND json_extract(tags_json, '$.artworkMBID') IS NOT NULL),
-			(SELECT COUNT(*) FROM tracks),
-			(SELECT MAX(enriched_at) FROM tracks)
-	`).Scan(&pending, &matched, &total, &lastNs)
+	err = s.db.QueryRowContext(ctx, enrichmentBreakdownSQL).Scan(&pending, &matched, &total, &lastNs)
 	if err != nil {
 		return 0, 0, 0, nil, err
 	}
