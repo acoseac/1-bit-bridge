@@ -393,10 +393,11 @@ func buildReleaseLadder(artist, albumArtist, album string) []releaseAttempt {
 		// so "CD 01" could never have accepted a wrong release. What it could
 		// do is spin. A 5xx is transient, so the track retries on every batch
 		// without ever being able to succeed.
-		if isUnsearchableArtistTag(ar) {
+		foldedAr := foldName(ar)
+		if isUnsearchableArtistFolded(foldedAr) {
 			return
 		}
-		key := foldName(ar) + "\x00" + foldTitle(al)
+		key := foldedAr + "\x00" + foldTitle(al)
 		if _, dup := seen[key]; dup {
 			return
 		}
@@ -476,10 +477,10 @@ func buildArtistLadder(artist, albumArtist string) []string {
 		// buildArtistLadder's own test names the case: artist "CD 01",
 		// albumArtist "Abdullah Ibrahim". It kept passing because it drives
 		// this function directly; production never got here.
-		if isUnsearchableArtistTag(s) {
+		key := foldName(s)
+		if isUnsearchableArtistFolded(key) {
 			return
 		}
-		key := foldName(s)
 		if key == "" {
 			return
 		}

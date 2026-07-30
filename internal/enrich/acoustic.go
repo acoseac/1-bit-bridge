@@ -175,7 +175,18 @@ func isJunkArtistTag(artist string) bool {
 // consults this too: a false positive costs the track its album match as well
 // as its artist. Do not widen this set.
 func isUnsearchableArtistTag(artist string) bool {
-	folded := foldName(artist)
+	return isUnsearchableArtistFolded(foldName(artist))
+}
+
+// isUnsearchableArtistFolded is isUnsearchableArtistTag over an ALREADY-FOLDED
+// tag, for the ladder builders — both of them fold the same string again a
+// line later to build their dedup key, and foldForMatch is not free (NFKD, a
+// rune pass, a case-fold and a re-join).
+//
+// Same convention as isDiscOrTrackLabel above, and the same hazard: passing a
+// raw tag here compares it against folded constants and silently answers
+// false. Call isUnsearchableArtistTag unless the fold is already in hand.
+func isUnsearchableArtistFolded(folded string) bool {
 	if folded == "" {
 		return false // may be a real name that folds away; let it search
 	}
