@@ -611,6 +611,113 @@ Diagnosed live against `bridge.ars.md` (`enrich.musicbrainzBaseURL: https://atla
 - **Atlas side (`1-bit-atlas` PR #132) — `releaseTrigramSQL`'s fence MUST stay artist-aware.** The trigram plan is what every 3+ char album title takes, so it is what this enricher actually hits, and it had none of the protections its short-term siblings got in atlas#131: an artist-blind `ORDER BY rg_sim DESC LIMIT 200` fence (hundreds of groups tie at 1.0 for a generic title, so the wanted one often never entered the CTE), a `LEAST(…, 100)` clamp that annihilated the +10 artist bonus for exact-title matches (Jesse Cook's *Vertigo* ranked **91st**; the bridge asks for `limit=10`), and no deterministic tiebreak (*Greatest Hits* / Fleetwood Mac was absent at `limit=10` but rank 1 at `limit=25`). `artist_exact` leads `rg_exact` there **deliberately** — `rg_exact` is a raw `lower()` equality while pg_trgm strips punctuation, so a U+2019-vs-ASCII apostrophe scores similarity 1.0 but `rg_exact` false; 77,887 release groups carry a curly apostrophe. **This is the cross-repo half of the same bug — if album recall regresses, check that SQL before suspecting the bridge.**
 - ~~**Residual, deliberately deferred**: Atlas matches only `release_group.name` while MusicBrainz matches `release.name`… `release_name_trgm` is valid but never queried.~~ **BOTH HALVES OF THIS ARE NOW STALE (corrected 2026-07-30) — don't act on it.** Atlas side: atlas#133 added `releaseNameTrigramSQL`, which DOES query `release_name_trgm` as a gated fallback (fires only when `artistFilter != ""` and no candidate is both artist-exact and ≥80), and atlas#134 changed the scoring to `GREATEST(rg_name_sim, similarity(r.name, $1))`. Bridge side: `pickBestRelease` now accepts on the release-group title as a second arm (PR #601), which is the other half — Atlas returns `release.name` as `title` while having matched on `rg.name`, and the bridge was rejecting candidates on a title its upstream never claimed to match. The Halcyon-class case is addressed from both ends; re-measure before assuming it isn't.
 
+### Acoustic fingerprinting fallback (PRs #604 / #605 / #607 / #608, 2026-07-30)
+
+The floor the folding work left behind — tracks whose tags no text match can fix
+(album "CD 01", albumArtist "An Unknown Artist") — is reached by identifying the
+recording from the AUDIO. `fpcalc` (Chromaprint) fingerprints, AcoustID
+identifies, and the EXISTING text acceptance decides. Off by default; needs both
+fpcalc and a free AcoustID application key, and degrades to off with a stderr
+line if either is missing (`bridge doctor` → `fingerprint-toolchain`).
+
+**WRITE-TARGET DISCIPLINE — the load-bearing rule.** A fingerprint identifies
+AUDIO. AcoustID maps audio to a RECORDING. It does NOT identify a release, and
+cannot: one recording sits under many release groups *precisely because those
+releases contain the same audio*. So `acoustid.Decision` has **nowhere to put a
+release or artwork MBID**, and `TestDecisionCannotCarryAReleaseMBID` asserts its
+exact field set — adding a field fails that test deliberately. An album MBID is
+still reached, but only by running the existing ladder with the recovered artist
+NAME and letting `pickBestRelease` decide unchanged. **Never write
+`MusicBrainzAlbumID` or `ArtworkMBID` straight from a fingerprint.** This is what
+bounds a wrong answer to a wrong portrait and bio rather than a wrong album
+identity, cover, booklet and folder grouping.
+
+**`sources` is PER RECORDING, not per result** — verified against a live
+response, whose result objects carry only `{id, score, recordings}`. Reading it
+off the result yields 0 for every track and the reliability clause then refuses
+the ENTIRE library. No fixture can catch this (a hand-written one reproduces
+whatever shape its author believed); only a live call settles it. It is also
+strictly more useful per-recording: it discriminates *within* a cluster, so a
+lone mis-tagged submission is dropped while its well-attested sibling survives.
+
+**Ambiguity means the tied clusters would yield a DIFFERENT ANSWER, not that two
+clusters exist.** AcoustID carries unmerged duplicate clusters, so most near-ties
+are one answer stored twice (ABBA 0.978 vs ABBA 0.974). The original margin
+clause rejected 16 of 60 sampled tracks while preventing nothing — of those 16,
+14 agreed on artist and the other 2 were already refused by the duration and
+consensus clauses; cross-cluster disagreement occurred **zero** times. Every
+competing cluster is still put through the SAME duration and sources filtering
+before its opinion counts, disagreement still refuses, and **a tie still costs
+the recording MBID and the album cue** (which cluster to draw those from is
+undetermined). That suppression is what makes accepting a tie conservative.
+Don't drop it.
+
+**The entropy floor is measured, not assumed.** Distinct base64 characters in the
+compressed fingerprint separate degenerate audio from real by ~5x with nothing in
+between — 45s silence 13, pure tone 13, a stationary 4-note chord 14, 35s melody
+64, pink noise 63 — stable across durations, so the threshold is 32. It uses ONE
+fpcalc spawn: `-raw` and the compressed form are mutually exclusive output modes
+and AcoustID needs the compressed one, so the obvious sub-fingerprint metric
+would mean decoding every file twice. **A rich but STATIONARY chord is as
+degenerate as silence** (Chromaprint keys on spectral change over time), so a
+hand-made "music-like" fixture is not evidence here.
+
+**Truncation is caught by the EXIT STATUS, not the duration comparison.** fpcalc
+exits non-zero on a truncated stream while still emitting a usable fingerprint,
+and for FLAC it reports the STREAMINFO duration — so a truncated FLAC still
+claims its full length and a duration comparison sees nothing wrong. The
+decode-agreement clause is a backstop, documented as such.
+
+**The local-artist veto lives in `internal/enrich`, not `internal/acoustid`.**
+It needs the match-folding vocabulary, and `internal/enrich` consumes the
+acoustid package, so importing it back would be a cycle. It is the ONLY check in
+the whole path using information the fingerprint pipeline did not produce —
+everything inside the gate is AcoustID grading its own homework — and it only
+ever SUBTRACTS. The junk-tag list that disables it is **closed, tiny and
+fold-exact**: an over-eager classifier removes the last witness on exactly the
+tracks where a wrong answer is hardest to notice. Two subtleties worth keeping:
+`!!!` is a real band that folds to nothing and therefore cannot be a witness in
+either direction (correct, not a misclassification — the consequence is a higher
+sources bar); and **an all-digits ALBUM title is NOT junk though an all-digits
+artist is** ("1", "4", "21", "1989", "90125"), because misclassifying an artist
+only removes a witness while misclassifying an album SUBSTITUTES the
+fingerprint's title for the operator's own.
+
+**The sweeper is a separate goroutine, never a step inside `enrichOne`.** The
+enricher is rate-limited, not CPU-bound, and has no filesystem dependency —
+`os.Stat` takes no context, so a hung (not dropped) network mount would block the
+single goroutine driving all enrichment. Its worker join is **bounded**
+(`sweeperDrainGrace`): `exec.CommandContext` sends SIGKILL on ctx expiry, but a
+process in a FUSE syscall sits in uninterruptible sleep and will not take it, so
+an unbounded `wg.Wait()` would turn a wedged mount into a hung shutdown. **Every
+`ResolveChecked` error is treated identically** — ENOENT and ENOTCONN alike;
+distinguishing them is the seed of a "mark permanently unfingerprintable" bug
+during a mount outage (the PR #74 class). Nothing is persisted on failure, so an
+unreadable file costs exactly today's behaviour.
+
+**`Store.ResetEnrichedByPaths` is a NEW sanctioned `enriched_at` writer** —
+narrowest of them, taking an explicit path set rather than a predicate. **Do NOT
+have the sweeper call `ResetEnrichedMisses` instead**: that selects ~46% of the
+library and `MarkEnriched` strictly advances `indexed_at`, so every sweep would
+push a ~9,000-track delta to every paired device — the PR #369 wipe-loop class on
+a timer. **Cache writes must complete BEFORE the re-queue**, or a row can be
+picked up on `enriched_at=0` before its verdict exists and be re-skipped.
+
+**`tracks.acoustid_match` (migration v28) is column-only** and must never gain a
+`json:` tag or be spliced onto wire output — same rule as the v25 format-fact
+columns, and what keeps this whole feature off the protocol (no `ProtocolVersion`
+bump, no PROTOCOL.md change, no iOS mirror). It exists because a fingerprint
+match carries a residual error rate text matching does not: without provenance an
+MBID written from audio is indistinguishable from one written from tags forever,
+so there is no way to audit or selectively undo the feature.
+
+**Measured on home-pc** (18,429 tracks, 60 sampled from the 7,375
+release-missing FLACs): 50 accepted (83.3%), ~155ms decode and ~75ms lookup per
+track on local disk. FLAC-only in practice, because the gate needs a
+container-derived duration and `Track.Duration` is set only by `extractFLAC` and
+`extractDSF` (DSD excluded separately) — extending the other extractors widens it
+automatically. `bridge fingerprint <file>` is the diagnostic; it writes nothing.
+
 ### Enrichment matching — fold before comparing; relax the query, not the acceptance (PRs #600 / #601 / #602, 2026-07-30)
 
 Follow-on to the pacing/recall work above. After #593/#595/#599 the dashboard still read **5,435 of 19,482 tracks** short of a cover, artist MBID or release MBID, and the working assumption was that the library had simply reached the limits of text matching. It had not: MusicBrainz was returning the right answer and the bridge was discarding it in two comparison functions.

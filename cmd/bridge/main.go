@@ -35,6 +35,7 @@ import (
 	"github.com/quic-go/quic-go/http3"
 	"golang.org/x/term"
 
+	"github.com/acoseac/1-bit-bridge/internal/acoustid"
 	"github.com/acoseac/1-bit-bridge/internal/admin"
 	"github.com/acoseac/1-bit-bridge/internal/adminauth"
 	"github.com/acoseac/1-bit-bridge/internal/advertise"
@@ -1997,6 +1998,22 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		premiumCovers = enrich.NewAtlasPremiumFetcher(harvestState, userAgent, nil)
 		enricher.WithPremiumCovers(premiumCovers)
 	}
+	// Acoustic fingerprinting: the cache is constructed here and attached
+	// BEFORE the enricher goroutine starts, so there is no field-write/read
+	// race — the same reasoning as the premium-cover wiring above. It is
+	// populated later by the sweeper, which needs apiSrv's hot-reloading
+	// resolver and therefore cannot be built until further down.
+	//
+	// Gated on the config flag AND both prerequisites: a `true` config with
+	// fpcalc or the API key missing degrades to feature-off here, so the
+	// bridge still boots. fingerprintCache stays nil in that case, and a nil
+	// AcousticLookup means the fallback is simply never consulted.
+	var fingerprintCache *acoustid.Cache
+	acoustIDKey := cfg.Fingerprint.ResolvedAPIKey()
+	if cfg.Fingerprint.Enabled && fingerprintFeatureReady(ctx, acoustIDKey != "", stderr) {
+		fingerprintCache = acoustid.NewCache(fingerprintCacheCap)
+		enricher.WithAcousticFallback(acousticLookupAdapter{cache: fingerprintCache})
+	}
 	bgWriters.Add(1)
 	go func() {
 		defer bgWriters.Done()
@@ -2438,6 +2455,28 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			defer bgWriters.Done()
 			runAnalysisSweeper(scanCtx, manifestStore, apiSrv.Resolver(),
 				analyze.WaveformDirFor(cfg.DataDir), analysisPool, cfg.ScanInterval())
+		}()
+	}
+
+	// Fingerprint sweeper. Wired HERE rather than beside the enricher because
+	// it needs apiSrv's hot-reloading resolver: a snapshot taken at enricher
+	// construction would keep routing against the old roots after an admin
+	// add/remove. Joined to bgWriters so a live fpcalc child cannot outlive
+	// runServe.
+	if fingerprintCache != nil {
+		sweeper := &fingerprintSweeper{
+			store:     manifestStore,
+			resolver:  apiSrv.Resolver(),
+			client:    acoustid.NewClient("", acoustIDKey, userAgent, nil),
+			cache:     fingerprintCache,
+			workers:   cfg.Fingerprint.EffectiveWorkers(),
+			maxPerRun: cfg.Fingerprint.EffectiveMaxPerRun(),
+			length:    cfg.Fingerprint.EffectiveLength(),
+		}
+		bgWriters.Add(1)
+		go func() {
+			defer bgWriters.Done()
+			runFingerprintSweeper(scanCtx, sweeper, cfg.Fingerprint.EffectiveSweepInterval())
 		}()
 	}
 
