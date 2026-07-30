@@ -2,9 +2,6 @@ package enrich
 
 import (
 	"context"
-	"net/http"
-	"net/http/httptest"
-	"sync/atomic"
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/lrucache"
@@ -467,19 +464,7 @@ func TestArtistTagPredicatesDiffer(t *testing.T) {
 // error returns without stamping, so a futile query retries on every batch and
 // never reaches the fingerprint fallback.
 func TestResolveArtistSkipsTheRequestForUnsearchableTags(t *testing.T) {
-	var calls atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"artists":[]}`))
-	}))
-	defer srv.Close()
-
-	e := &Enricher{
-		mb:            NewMusicBrainzClient(srv.URL, "test", nil),
-		MBMinInterval: 0,
-		artistCache:   newArtistCacheForTest(),
-	}
+	e, calls := newCountingArtistEnricher(t)
 
 	tr := &manifest.Track{Path: "CD 01/Album/01.flac", Artist: "CD 01", Album: "Some Album"}
 	if err := e.resolveArtist(context.Background(), tr); err != nil {
